@@ -565,7 +565,7 @@ impl Executor {
                         if let Ok(_) = sub_result {
                             // 서브쿼리를 직접 테이블에서 실행
                             if let Statement::Select { table, columns, condition: sub_cond,
-                                join, order_by, group_by, having, limit } = *sub_stmt.clone() {
+                                join: _, order_by: _, group_by: _, having: _, limit: _ } = *sub_stmt.clone() {
                                 let rows = match self.tables.get(&table) {
                                     Some(r) => r.clone(),
                                     None => return false,

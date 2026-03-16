@@ -12,9 +12,12 @@
   "app": {
     "windows": [
       {
-        "title": "rustdb-ui",
-        "width": 800,
-        "height": 600
+        "title": "RustDB",
+        "width": 1200,
+        "height": 900,
+        "minWidth": 900,
+        "minHeight": 600,
+        "center": true
       }
     ],
     "security": {

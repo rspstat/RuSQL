@@ -1,6 +1,6 @@
  // src/transaction/txn_manager.rs
 
-use std::collections::HashMap;
+// use std::collections::HashMap;
 use crate::transaction::wal::{Wal, LogRecord};
 use crate::engine::executor::Row;
 
