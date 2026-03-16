@@ -1,0 +1,8 @@
+[workspace]
+members = [
+    "rustdb-core",
+    "rustdb-server",
+    "rustdb-cli",
+    "rustdb-ui/src-tauri",
+]
+resolver = "2"

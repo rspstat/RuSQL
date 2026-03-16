@@ -1,0 +1,14 @@
+# Rust
+target/
+Cargo.lock
+
+# Node
+node_modules/
+dist/
+
+# Tauri
+rustdb-ui/src-tauri/target/
+
+# DB 데이터
+data/
+*.log
