@@ -1,6 +1,6 @@
 ## MCP 기반 커스텀 RDBMS
 
-- Rust로 직접 구현한 관계형 데이터베이스 엔진 + AI MCP 자연어 쿼리 지원
+- Rust로 구현한 데이터베이스 엔진 + RDBMS + AI MCP 
 
 <br/>
 
