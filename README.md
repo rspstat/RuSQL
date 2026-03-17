@@ -1,6 +1,6 @@
 ## MCP 기반 커스텀 RDBMS
 
-- Rust로 직접 구현한 관계형 데이터베이스 엔진 + AI MCP 자연어 쿼리 지원
+- Rust로 구현한 데이터베이스 엔진 + RDBMS + AI MCP 
 
 <br/>
 
@@ -27,6 +27,8 @@
 - [x] CREATE TABLE
 - [x] DROP TABLE
 - [x] ALTER TABLE (ADD / DROP / RENAME COLUMN)
+- [x] CREATE INDEX / DROP INDEX
+- [x] CREATE VIEW / DROP VIEW
 
 ### DML
 - [x] INSERT
@@ -39,6 +41,7 @@
 - [x] INNER JOIN
 - [x] ORDER BY (ASC / DESC)
 - [x] GROUP BY
+- [x] HAVING
 - [x] LIMIT
 - [x] 집계 함수 (COUNT, SUM, AVG, MIN, MAX)
 - [x] 서브쿼리 (WHERE col IN (SELECT ...))
@@ -56,6 +59,13 @@
 - [x] 세미콜론(;) 구분 멀티 쿼리 입력
 - [x] REPL 터미널 인터페이스
 
+### UI (rustdb-ui)
+- [x] Tauri + React 데스크탑 앱
+- [x] Monaco Editor (SQL 문법 강조)
+- [x] 사이드바 테이블 / 컬럼 목록
+- [x] 멀티 쿼리 결과 표시
+- [x] 쿼리 자동 저장
+
 <br/>
 
 ## 진행 예정
@@ -64,11 +74,6 @@
 - [ ] TCP 서버 (포트 7878)
 - [ ] 멀티 클라이언트 동시 접속 (스레드 per 클라이언트)
 - [ ] 클라이언트 CLI (`rustdb-client`)
-
-### TUI / 출력
-- [ ] 컬럼 색상 강조 (헤더 / 데이터 구분)
-- [ ] 접속 정보 출력 (서버 주소, DB명, 접속 시간)
-- [ ] 쿼리 실행 시간 표시
 
 ### MCP 연동
 - [ ] Claude API 클라이언트 (`mcp/client.rs`)
@@ -84,14 +89,14 @@
 
 ## 실행 방법
 ```bash
-# REPL 모드 (현재)
-cargo run
+# REPL 모드
+cargo run -p rustdb-cli
 
-# 서버 모드 (예정)
-cargo run --bin rustdb-server
+# 서버 모드
+cargo run -p rustdb-server
 
-# 클라이언트 모드 (예정)
-cargo run --bin rustdb-client
+# UI 모드
+cd rustdb-ui && npm run tauri dev
 ```
 
 <br/>
@@ -105,6 +110,8 @@ SELECT COUNT(*), AVG(age) FROM users;
 SELECT * FROM users WHERE id IN (SELECT id FROM users WHERE age > 30);
 BEGIN; UPDATE users SET age = 26 WHERE id = 1; COMMIT;
 ALTER TABLE users ADD COLUMN email TEXT;
+CREATE INDEX idx_age ON users (age);
+CREATE VIEW adult_users AS SELECT * FROM users WHERE age >= 18;
 ```
 
 <br/>
@@ -117,15 +124,26 @@ ALTER TABLE users ADD COLUMN email TEXT;
 | 인덱스 | B+Tree (직접 구현) |
 | 트랜잭션 | WAL + Undo Log |
 | 저장 | JSON (→ 바이너리 예정) |
+| UI | Tauri + React + Monaco Editor |
 | AI 연동 | Claude MCP API (예정) |
 
 <br/>
 
-## Format (1.1 ver.)
+## 프로젝트 구조
+```
+code/
+├── rustdb-core/     DB 엔진 라이브러리
+├── rustdb-server/   TCP 서버
+├── rustdb-cli/      터미널 REPL
+└── rustdb-ui/       Tauri + React UI
+```
 
+<br/>
+
+## Format (1.2 ver.)
 ```
 ┌─────────────────────────────────┐
-│         rustdb-mcp              │
+│         rustdb-core             │
 │                                 │
 │  Lexer → Parser → AST           │
 │              ↓                  │
@@ -136,22 +154,30 @@ ALTER TABLE users ADD COLUMN email TEXT;
 │    │ UPDATE / DELETE │          │
 │    │ JOIN / WHERE    │          │
 │    │ ORDER BY / LIMIT│          │
-│    │ GROUP BY        │          │
+│    │ GROUP BY / HAVING│         │
 │    │ COUNT/SUM/AVG.. │          │
 │    │ ALTER TABLE     │          │
-│    │ 서브쿼리 (IN)   │           │
+│    │ INDEX / VIEW    │          │
+│    │ 서브쿼리 (IN)   │          │
 │    │ COMMIT/ROLLBACK │          │
 │    └─────────────────┘          │
 │          ↓                      │
 │    B+Tree 인덱스                 │
 │    WAL 로그                      │
 │    JSON 디스크 저장              │
-│                                 |
+│                                 │
 └─────────────────────────────────┘
+        ↓              ↓
+  rustdb-cli      rustdb-server
+  (터미널 REPL)   (TCP 서버)
+        ↓
+  rustdb-ui
+  (Tauri + React)
 ```
 
 <br/>
 
 ## B+ Tree에 관하여
 [B+ Tree 구조 이해](https://chanho0912.tistory.com/109)
+
 [B+ Tree 이해 - velog](https://velog.io/@emplam27/%EC%9E%90%EB%A3%8C%EA%B5%AC%EC%A1%B0-%EA%B7%B8%EB%A6%BC%EC%9C%BC%EB%A1%9C-%EC%95%8C%EC%95%84%EB%B3%B4%EB%8A%94-B-Plus-Tree)
