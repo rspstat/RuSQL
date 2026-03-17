@@ -68,6 +68,12 @@ pub enum Token {
     Having,
     In,
     Not,
+
+    Index,
+    Unique,
+
+    View,
+    As,
 }
 
 pub struct Lexer {
@@ -162,6 +168,10 @@ impl Lexer {
             "HAVING" => Token::Having,
             "IN"     => Token::In,
             "NOT"    => Token::Not,
+            "INDEX"  => Token::Index,
+            "UNIQUE" => Token::Unique,
+            "VIEW" => Token::View,
+            "AS"   => Token::As,
             _         => Token::Ident(s),
         }
     }

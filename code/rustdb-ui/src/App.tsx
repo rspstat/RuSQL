@@ -1,6 +1,7 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import Editor from "@monaco-editor/react";
+import type * as Monaco from "monaco-editor";
 import "./App.css";
 
 interface QueryResult {
@@ -11,31 +12,74 @@ interface QueryResult {
   success: boolean;
 }
 
+interface MultiQueryResult {
+  results: QueryResult[];
+  total_elapsed: number;
+}
+
 function App() {
-  const [query, setQuery] = useState("SELECT * FROM users;");
-  const [result, setResult] = useState<QueryResult | null>(null);
+  const [query, setQuery] = useState(() => {
+    return localStorage.getItem("rustdb_query") ?? "SELECT * FROM users;";
+  });
+  const [results, setResults] = useState<QueryResult[]>([]);
   const [tables, setTables] = useState<string[]>([]);
+  const [expandedTable, setExpandedTable] = useState<string | null>(null);
+  const [tableColumns, setTableColumns] = useState<Record<string, string[]>>({});
+  const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number } | null>(null);
+  const [isRunning, setIsRunning] = useState(false);
+  const editorRef = useRef<Monaco.editor.IStandaloneCodeEditor | null>(null);
 
   useEffect(() => {
     invoke<string[]>("get_tables").then(setTables);
   }, []);
 
+  useEffect(() => {
+    const handleClick = () => setCtxMenu(null);
+    window.addEventListener("click", handleClick);
+    return () => window.removeEventListener("click", handleClick);
+  }, []);
+
   const runQuery = async () => {
-    if (!query.trim()) return;
+    const selectedText = editorRef.current?.getSelection()
+      ? editorRef.current?.getModel()?.getValueInRange(editorRef.current.getSelection()!)
+      : null;
+    const queryToRun = (selectedText?.trim() ? selectedText : query).trim();
+
+    if (!queryToRun) return;
+    setResults([]);
+    setIsRunning(true);
+
     try {
-      const res = await invoke<QueryResult>("execute_query", { query });
-      setResult(res);
-      // 테이블 목록 갱신
+      const res = await invoke<MultiQueryResult>("execute_query", {
+        query: queryToRun,
+        ts: Date.now(),
+      });
+      setResults(res.results);
       const tableList = await invoke<string[]>("get_tables");
       setTables(tableList);
     } catch (e) {
-      setResult({
+      setResults([{
         columns: [],
         rows: [],
         message: String(e),
         elapsed: 0,
         success: false,
-      });
+      }]);
+    } finally {
+      setIsRunning(false);
+    }
+  };
+
+  const toggleTable = async (t: string) => {
+    if (expandedTable === t) {
+      setExpandedTable(null);
+    } else {
+      setExpandedTable(t);
+      if (!tableColumns[t]) {
+        const cols = await invoke<string[]>("get_columns", { table: t });
+        setTableColumns((prev) => ({ ...prev, [t]: cols }));
+      }
+      setQuery(`SELECT * FROM ${t};`);
     }
   };
 
@@ -49,9 +93,26 @@ function App() {
           <div className="sidebar-empty">No tables yet</div>
         ) : (
           tables.map((t) => (
-            <div key={t} className="sidebar-item"
-              onClick={() => setQuery(`SELECT * FROM ${t};`)}>
-              ▸ {t}
+            <div key={t}>
+              <div
+                className={`sidebar-item ${expandedTable === t ? "active" : ""}`}
+                onClick={() => toggleTable(t)}
+              >
+                <span className="sidebar-arrow">
+                  {expandedTable === t ? "▼" : "▶"}
+                </span>
+                {t}
+              </div>
+              {expandedTable === t && tableColumns[t] && (
+                <div className="sidebar-columns">
+                  {tableColumns[t].map((col) => (
+                    <div key={col} className="sidebar-column">
+                      <span className="col-icon">⬡</span>
+                      <span>{col}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
           ))
         )}
@@ -64,21 +125,25 @@ function App() {
 
       {/* 메인 */}
       <div className="main">
-        {/* 탭 바 */}
         <div className="tab-bar">
           <div className="tab active">query.sql</div>
           <div className="tab-actions">
-            <button className="run-btn" onClick={runQuery}>▶ Run</button>
+            <button className="run-btn" onClick={runQuery} disabled={isRunning}>
+              {isRunning ? "⏳" : "▶ Run"}
+            </button>
           </div>
         </div>
 
-        {/* Monaco 에디터 */}
         <div className="editor-container">
           <Editor
             height="100%"
             defaultLanguage="sql"
             value={query}
-            onChange={(val) => setQuery(val ?? "")}
+            onChange={(val) => {
+              const v = val ?? "";
+              setQuery(v);
+              localStorage.setItem("rustdb_query", v);
+            }}
             theme="vs-dark"
             options={{
               fontSize: 14,
@@ -87,13 +152,11 @@ function App() {
               scrollBeyondLastLine: false,
               lineNumbers: "on",
               renderLineHighlight: "all",
-              cursorStyle: "line",
               automaticLayout: true,
               padding: { top: 12 },
-              suggest: { showKeywords: true },
             }}
             onMount={(editor, monaco) => {
-              // Ctrl+Enter로 실행
+              editorRef.current = editor;
               editor.addCommand(
                 monaco.KeyMod.CtrlCmd | monaco.KeyCode.Enter,
                 () => runQuery()
@@ -102,52 +165,93 @@ function App() {
           />
         </div>
 
-        {/* 구분선 */}
         <div className="divider" />
 
-        {/* 결과 패널 */}
         <div className="result-panel">
           <div className="result-tab-bar">
             <div className="result-tab active">Results</div>
-            {result && (
-              <div className="result-status">
-                {result.success
-                  ? result.columns.length > 0
-                    ? `✓ ${result.rows.length} row(s) · ${result.elapsed.toFixed(3)}s`
-                    : `✓ ${result.message} · ${result.elapsed.toFixed(3)}s`
-                  : `✗ Error`}
+            {results.length > 0 && (
+              <div className={`result-status ${results.every(r => r.success) ? "ok" : "err"}`}>
+                {results.every(r => r.success) ? `✓ ${results.length} query(s)` : `✗ Error`}
               </div>
             )}
           </div>
 
-          <div className="result-content">
-            {result === null ? (
+          <div
+            className="result-content"
+            onContextMenu={(e) => {
+              e.preventDefault();
+              setCtxMenu({ x: e.clientX, y: e.clientY });
+            }}
+            onClick={(e) => {
+              if (ctxMenu) {
+                e.stopPropagation();
+                setCtxMenu(null);
+              }
+            }}
+          >
+            {results.length === 0 ? (
               <div className="result-empty">
-                Ctrl+Enter 또는 ▶ Run 버튼으로 쿼리를 실행하세요
+                Ctrl+Enter 또는 ▶ Run 으로 쿼리를 실행하세요
               </div>
-            ) : !result.success ? (
-              <div className="result-error">❌ {result.message}</div>
-            ) : result.columns.length === 0 ? (
-              <div className="result-msg">✅ {result.message}</div>
             ) : (
-              <table className="result-table">
-                <thead>
-                  <tr>
-                    {result.columns.map((col) => (
-                      <th key={col}>{col}</th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody>
-                  {result.rows.map((row, i) => (
-                    <tr key={i}>
-                      {row.map((cell, j) => (
-                        <td key={j}>{cell}</td>
-                      ))}
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+              results.map((result, idx) => (
+                <div key={idx} className="result-block">
+                  {!result.success ? (
+                    <div className="result-error">❌ {result.message}</div>
+                  ) : result.columns.length === 0 ? (
+                    <div className="result-msg">✅ {result.message} · {result.elapsed.toFixed(3)}s</div>
+                  ) : (
+                    <>
+                      <div className="result-info">
+                        {result.rows.length} row(s) · {result.elapsed.toFixed(3)}s
+                      </div>
+                      <table className="result-table">
+                        <thead>
+                          <tr>
+                            {result.columns.map((col) => (
+                              <th key={col}>{col}</th>
+                            ))}
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {result.rows.map((row, i) => (
+                            <tr key={i}>
+                              {row.map((cell, j) => (
+                                <td key={j}>{cell}</td>
+                              ))}
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </>
+                  )}
+                </div>
+              ))
+            )}
+
+            {/* 컨텍스트 메뉴 */}
+            {ctxMenu && (
+              <div
+                className="ctx-menu"
+                style={{ top: ctxMenu.y, left: ctxMenu.x }}
+              >
+                <div onClick={() => {
+                  const text = results.map(r =>
+                    r.columns.length > 0
+                      ? [r.columns.join('\t'), ...r.rows.map(row => row.join('\t'))].join('\n')
+                      : r.message
+                  ).join('\n\n');
+                  navigator.clipboard.writeText(text);
+                  setCtxMenu(null);
+                }}>
+                  📋 Copy All Results
+                </div>
+                <div className="ctx-divider" />
+                <div onClick={() => { setResults([]); setCtxMenu(null); }}>
+                  🗑 Clear Results
+                </div>
+              </div>
             )}
           </div>
         </div>

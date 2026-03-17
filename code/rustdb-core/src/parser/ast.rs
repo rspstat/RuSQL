@@ -103,4 +103,19 @@ pub enum Statement {
         table: String,
         action: AlterAction,
     },
+    CreateIndex {
+    index_name: String,
+    table: String,
+    column: String,
+    },
+    DropIndex {
+        index_name: String,
+    },
+    CreateView {
+    name: String,
+    query: Box<Statement>,
+    },
+    DropView {
+        name: String,
+    },
 }

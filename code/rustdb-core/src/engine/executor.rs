@@ -13,6 +13,8 @@ pub struct Executor {
     pub catalog: Catalog,
     pub tables: HashMap<String, Vec<Row>>,
     pub indexes: HashMap<String, BPlusTree>,
+    pub index_meta: HashMap<String, (String, String)>,
+    pub views: HashMap<String, Statement>,
     pub txn: TransactionManager,
     disk: DiskManager,
 }
@@ -47,7 +49,7 @@ impl Executor {
             }
         }
 
-        Executor { catalog, tables, indexes, txn: TransactionManager::new(), disk }
+        Executor { catalog, tables, indexes, index_meta: HashMap::new(), views: HashMap::new(), txn: TransactionManager::new(), disk }
     }
 
     pub fn execute(&mut self, stmt: Statement) -> Result<String, String> {
@@ -66,6 +68,14 @@ impl Executor {
             }
             Statement::Delete { table, condition }   => self.exec_delete(table, condition),
             Statement::AlterTable { table, action }  => self.exec_alter(table, action),
+            Statement::CreateIndex { index_name, table, column } => {
+                self.exec_create_index(index_name, table, column)
+            }
+            Statement::DropIndex { index_name } => {
+                self.exec_drop_index(index_name)
+            }
+            Statement::CreateView { name, query } => self.exec_create_view(name, *query),
+            Statement::DropView { name } => self.exec_drop_view(name),
         }
     }
 
@@ -173,6 +183,14 @@ impl Executor {
         having: Option<Condition>,
         limit: Option<usize>,
     ) -> Result<String, String> {
+
+        // 뷰 처리
+        if let Some(view_stmt) = self.views.get(&table).cloned() {
+            if let Statement::Select { table: vt, columns: vc, condition: vcond,
+                join: vj, order_by: vo, group_by: vg, having: vh, limit: vl } = view_stmt {
+                return self.exec_select(vt, vc, vcond, vj, vo, vg, vh, vl);
+            }
+        }
 
         // B+Tree 인덱스 검색 (첫 번째 컬럼 = 조건, JOIN/집계 없을 때만)
         let has_agg = columns.iter().any(|c| matches!(c, SelectColumn::Agg { .. }));
@@ -594,6 +612,57 @@ impl Executor {
                     }
                 }
             }
+        }
+    }
+
+    fn exec_create_index(&mut self, index_name: String, table: String, column: String) -> Result<String, String> {
+        if !self.tables.contains_key(&table) {
+            return Err(format!("Table '{}' not found", table));
+        }
+
+        // 해당 컬럼으로 B+Tree 인덱스 구성
+        let mut tree = BPlusTree::new();
+        if let Some(rows) = self.tables.get(&table) {
+            for row in rows {
+                if let Some(val) = row.get(&column) {
+                    let json = serde_json::to_string(row).unwrap();
+                    tree.insert(val.clone(), json);
+                }
+            }
+        }
+
+        let key = format!("{}_{}", table, index_name);
+        self.indexes.insert(key.clone(), tree);
+        self.index_meta.insert(index_name.clone(), (table.clone(), column.clone()));
+
+        Ok(format!("Index '{}' created on '{}'.'{}'.", index_name, table, column))
+    }
+
+    fn exec_drop_index(&mut self, index_name: String) -> Result<String, String> {
+        if let Some((table, _)) = self.index_meta.remove(&index_name) {
+            let key = format!("{}_{}", table, index_name);
+            self.indexes.remove(&key);
+            Ok(format!("Index '{}' dropped.", index_name))
+        } else {
+            Err(format!("Index '{}' not found", index_name))
+        }
+    }
+
+    fn exec_create_view(&mut self, name: String, query: Statement) -> Result<String, String> {
+        if let Statement::Select { ref table, .. } = query {
+            if !self.tables.contains_key(table) {
+                return Err(format!("Table '{}' not found", table));
+            }
+        }
+        self.views.insert(name.clone(), query);
+        Ok(format!("View '{}' created.", name))
+    }
+
+    fn exec_drop_view(&mut self, name: String) -> Result<String, String> {
+        if self.views.remove(&name).is_some() {
+            Ok(format!("View '{}' dropped.", name))
+        } else {
+            Err(format!("View '{}' not found", name))
         }
     }
 }

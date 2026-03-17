@@ -40,8 +40,33 @@ impl Parser {
             Some(Token::Insert) => self.parse_insert(),
             Some(Token::Update) => self.parse_update(),
             Some(Token::Delete) => self.parse_delete(),
-            Some(Token::Create) => self.parse_create(),
-            Some(Token::Drop)   => self.parse_drop(),
+            // 기존 parse_create 대신 아래로 교체
+            Some(Token::Create) => {
+                match self.peek() {
+                    Some(Token::Index) => {
+                        self.advance();
+                        self.parse_create_index()
+                    }
+                    Some(Token::View) => {
+                        self.advance();
+                        self.parse_create_view()
+                    }
+                    _ => self.parse_create(),
+                }
+            }
+            Some(Token::Drop) => {
+                match self.peek() {
+                    Some(Token::Index) => {
+                        self.advance();
+                        self.parse_drop_index()
+                    }
+                    Some(Token::View) => {
+                        self.advance();
+                        self.parse_drop_view()
+                    }
+                    _ => self.parse_drop(),
+                }
+            }
             Some(Token::Ident(s)) if s == "BEGIN"    => Ok(Statement::Begin),
             Some(Token::Ident(s)) if s == "COMMIT"   => Ok(Statement::Commit),
             Some(Token::Ident(s)) if s == "ROLLBACK" => Ok(Statement::Rollback),
@@ -413,5 +438,51 @@ impl Parser {
             }
             other => Err(format!("Expected ADD, DROP, or RENAME, got {:?}", other)),
         }
+    }
+
+    fn parse_create_index(&mut self) -> Result<Statement, String> {
+        let index_name = self.expect_ident()?;
+        match self.advance() {
+            Some(Token::On) => {}
+            other => return Err(format!("Expected ON, got {:?}", other)),
+        }
+        let table = self.expect_ident()?;
+        match self.advance() {
+            Some(Token::LParen) => {}
+            other => return Err(format!("Expected '(', got {:?}", other)),
+        }
+        let column = self.expect_ident()?;
+        match self.advance() {
+            Some(Token::RParen) => {}
+            other => return Err(format!("Expected ')', got {:?}", other)),
+        }
+        Ok(Statement::CreateIndex { index_name, table, column })
+    }
+
+    fn parse_drop_index(&mut self) -> Result<Statement, String> {
+        let index_name = self.expect_ident()?;
+        Ok(Statement::DropIndex { index_name })
+    }
+
+    fn parse_create_view(&mut self) -> Result<Statement, String> {
+        let name = self.expect_ident()?;
+        match self.advance() {
+            Some(Token::As) => {}
+            other => return Err(format!("Expected AS, got {:?}", other)),
+        }
+        match self.advance() {
+            Some(Token::Select) => {}
+            other => return Err(format!("Expected SELECT, got {:?}", other)),
+        }
+        let query = self.parse_select()?;
+        Ok(Statement::CreateView {
+            name,
+            query: Box::new(query),
+        })
+    }
+
+    fn parse_drop_view(&mut self) -> Result<Statement, String> {
+        let name = self.expect_ident()?;
+        Ok(Statement::DropView { name })
     }
 }
