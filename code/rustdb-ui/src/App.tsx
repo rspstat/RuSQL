@@ -29,6 +29,9 @@ function App() {
   const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number } | null>(null);
   const [isRunning, setIsRunning] = useState(false);
   const editorRef = useRef<Monaco.editor.IStandaloneCodeEditor | null>(null);
+  const dividerRef = useRef<HTMLDivElement>(null);
+  const [resultHeight, setResultHeight] = useState(260);
+  const isDragging = useRef(false);
 
   useEffect(() => {
     invoke<string[]>("get_tables").then(setTables);
@@ -38,6 +41,30 @@ function App() {
     const handleClick = () => setCtxMenu(null);
     window.addEventListener("click", handleClick);
     return () => window.removeEventListener("click", handleClick);
+  }, []);
+
+  useEffect(() => {
+    const handleMouseMove = (e: MouseEvent) => {
+      if (!isDragging.current) return;
+      const appEl = document.querySelector('.main') as HTMLElement;
+      if (!appEl) return;
+      const rect = appEl.getBoundingClientRect();
+      const newHeight = rect.bottom - e.clientY;
+      setResultHeight(Math.max(100, Math.min(newHeight, rect.height - 100)));
+    };
+
+    const handleMouseUp = () => {
+      isDragging.current = false;
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+    };
+
+    window.addEventListener('mousemove', handleMouseMove);
+    window.addEventListener('mouseup', handleMouseUp);
+    return () => {
+      window.removeEventListener('mousemove', handleMouseMove);
+      window.removeEventListener('mouseup', handleMouseUp);
+    };
   }, []);
 
   const runQuery = async () => {
@@ -101,6 +128,11 @@ function App() {
             <path d="M12 2C8.13 2 5 3.34 5 5v14c0 1.66 3.13 3 7 3s7-1.34 7-3V5c0-1.66-3.13-3-7-3zm0 2c3.31 0 5 1.12 5 1.5S15.31 7 12 7 7 5.88 7 5.5 8.69 4 12 4zm5 14.5c0 .38-1.69 1.5-5 1.5s-5-1.12-5-1.5V16.73c1.34.84 3.04 1.27 5 1.27s3.66-.43 5-1.27v1.77zm0-4c0 .38-1.69 1.5-5 1.5s-5-1.12-5-1.5V12.73c1.34.84 3.04 1.27 5 1.27s3.66-.43 5-1.27v1.77zm0-4c0 .38-1.69 1.5-5 1.5s-5-1.12-5-1.5V8.73c1.34.84 3.04 1.27 5 1.27s3.66-.43 5-1.27V10.5z"/>
           </svg>
         </div>
+        <div className="activity-icon" title="GUI Table View">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor">
+            <path d="M3 3h18v18H3V3zm16 16V5H5v14h14zM7 7h2v2H7V7zm0 4h2v2H7v-2zm0 4h2v2H7v-2zm4-8h6v2h-6V7zm0 4h6v2h-6v-2zm0 4h6v2h-6v-2z"/>
+          </svg>
+        </div>
         <div className="activity-bar-bottom">
           <div className="activity-icon" title="Settings">
             <svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor">
@@ -153,7 +185,7 @@ function App() {
             INFO
           </div>
           <div className="sidebar-info-item">
-            <span className="col-icon">◉</span> v0.1.0
+            <span className="col-icon">◉</span> v2.1.3
           </div>
           <div className="sidebar-info-item">
             <span className="col-icon">◉</span> B+Tree · WAL
@@ -219,10 +251,18 @@ function App() {
           />
         </div>
 
-        <div className="divider" />
+        <div
+          className="divider"
+          ref={dividerRef}
+          onMouseDown={() => {
+            isDragging.current = true;
+            document.body.style.cursor = 'row-resize';
+            document.body.style.userSelect = 'none';
+          }}
+        />
 
         {/* 결과 패널 */}
-        <div className="result-panel">
+        <div className="result-panel" style={{ height: `${resultHeight}px` }}>
           <div className="result-tab-bar">
             <div className="result-tab active">RESULTS</div>
             <div className="result-tab">MESSAGES</div>
@@ -285,9 +325,9 @@ function App() {
                   ).join('\n\n');
                   navigator.clipboard.writeText(text);
                   setCtxMenu(null);
-                }}>📋 Copy All Results</div>
+                }}>Copy All Results</div>
                 <div className="ctx-divider" />
-                <div onClick={() => { setResults([]); setCtxMenu(null); }}>🗑 Clear Results</div>
+                <div onClick={() => { setResults([]); setCtxMenu(null); }}>Clear Results</div>
               </div>
             )}
           </div>
@@ -300,7 +340,7 @@ function App() {
             <span className="status-item">✓ 0 △ 0</span>
           </div>
           <div className="status-right">
-            <span className="status-item">RustDB v0.1.0</span>
+            <span className="status-item">RustDB v2.1.3</span>
             <span className="status-item">UTF-8</span>
             <span className="status-item">SQL</span>
             <span className="status-item">B+Tree · WAL</span>

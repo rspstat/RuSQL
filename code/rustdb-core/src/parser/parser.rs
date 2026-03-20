@@ -486,10 +486,34 @@ impl Parser {
                             Some(Token::RParen) => {}
                             other => return Err(format!("Expected ')', got {:?}", other)),
                         }
+
+                        // ON DELETE 옵션 파싱
+                        let on_delete = if self.peek() == Some(&Token::On) {
+                            self.advance();
+                            match self.advance() {
+                                Some(Token::Delete) => {}
+                                other => return Err(format!("Expected DELETE, got {:?}", other)),
+                            }
+                            match self.advance() {
+                                Some(Token::Cascade)  => FkAction::Cascade,
+                                Some(Token::Restrict) => FkAction::Restrict,
+                                Some(Token::Set) => {
+                                    match self.advance() {
+                                        Some(Token::Null) => FkAction::SetNull,
+                                        other => return Err(format!("Expected NULL, got {:?}", other)),
+                                    }
+                                }
+                                other => return Err(format!("Expected CASCADE/RESTRICT/SET, got {:?}", other)),
+                            }
+                        } else {
+                            FkAction::Restrict // 기본값
+                        };
+
                         foreign_key = Some(ForeignKey {
                             column: col_name.clone(),
                             ref_table,
                             ref_column,
+                            on_delete,
                         });
                     }
                     _ => break,

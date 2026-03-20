@@ -2,10 +2,18 @@ use crate::parser::ast::DataType;
 use std::collections::HashMap;
 
 #[derive(Debug, Clone)]
+pub enum FkAction {
+    Restrict,
+    Cascade,
+    SetNull,
+}
+
+#[derive(Debug, Clone)]
 pub struct ForeignKey {
     pub column: String,
     pub ref_table: String,
     pub ref_column: String,
+    pub on_delete: FkAction,
 }
 
 #[derive(Debug, Clone)]

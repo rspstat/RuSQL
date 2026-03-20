@@ -106,6 +106,11 @@ impl Executor {
                 column: fk.column,
                 ref_table: fk.ref_table,
                 ref_column: fk.ref_column,
+                on_delete: match fk.on_delete {
+                    crate::parser::ast::FkAction::Restrict => crate::catalog::schema::FkAction::Restrict,
+                    crate::parser::ast::FkAction::Cascade  => crate::catalog::schema::FkAction::Cascade,
+                    crate::parser::ast::FkAction::SetNull  => crate::catalog::schema::FkAction::SetNull,
+                },
             }),
         }).collect();
         self.catalog.create_table(name.clone(), schema_cols)?;
@@ -559,7 +564,6 @@ impl Executor {
     }
 
     fn exec_delete(&mut self, table: String, condition: Option<Condition>) -> Result<String, String> {
-        // 다른 테이블에서 이 테이블을 참조하는지 확인
         let rows_to_delete: Vec<Row> = self.tables.get(&table)
             .ok_or(format!("Table '{}' not found", table))?
             .iter()
@@ -567,22 +571,56 @@ impl Executor {
             .cloned()
             .collect();
 
-        // FK 참조 검사
+        // FK 처리 (CASCADE / RESTRICT / SET NULL)
+        let other_tables: Vec<(String, Vec<crate::catalog::schema::ColumnDef>)> =
+            self.catalog.tables.iter()
+                .filter(|(name, _)| *name != &table)
+                .map(|(name, schema)| (name.clone(), schema.columns.clone()))
+                .collect();
+
         for del_row in &rows_to_delete {
-            for (other_table, other_schema) in &self.catalog.tables.clone() {
-                for col in &other_schema.columns {
+            for (other_table, cols) in &other_tables {
+                for col in cols {
                     if let Some(fk) = &col.foreign_key {
                         if fk.ref_table == table {
-                            let del_val = del_row.get(&fk.ref_column).cloned().unwrap_or_default();
-                            if let Some(other_rows) = self.tables.get(other_table) {
-                                let referenced = other_rows.iter().any(|r| {
-                                    r.get(&col.name).map(|v| v == &del_val).unwrap_or(false)
-                                });
-                                if referenced {
-                                    return Err(format!(
-                                        "Foreign key violation: row in '{}' is referenced by '{}'.'{}'",
-                                        table, other_table, col.name
-                                    ));
+                            let del_val = del_row.get(&fk.ref_column)
+                                .cloned().unwrap_or_default();
+
+                            match fk.on_delete {
+                                crate::catalog::schema::FkAction::Restrict => {
+                                    if let Some(other_rows) = self.tables.get(other_table) {
+                                        let referenced = other_rows.iter().any(|r| {
+                                            r.get(&col.name).map(|v| v == &del_val).unwrap_or(false)
+                                        });
+                                        if referenced {
+                                            return Err(format!(
+                                                "Foreign key violation: row in '{}' is referenced by '{}'.'{}'",
+                                                table, other_table, col.name
+                                            ));
+                                        }
+                                    }
+                                }
+                                crate::catalog::schema::FkAction::Cascade => {
+                                    // 연쇄 삭제
+                                    if let Some(other_rows) = self.tables.get_mut(other_table) {
+                                        other_rows.retain(|r| {
+                                            r.get(&col.name).map(|v| v != &del_val).unwrap_or(true)
+                                        });
+                                    }
+                                    let rows_clone = self.tables.get(other_table).unwrap().clone();
+                                    self.disk.save_table(other_table, &rows_clone);
+                                }
+                                crate::catalog::schema::FkAction::SetNull => {
+                                    // NULL로 설정
+                                    if let Some(other_rows) = self.tables.get_mut(other_table) {
+                                        for row in other_rows.iter_mut() {
+                                            if row.get(&col.name).map(|v| v == &del_val).unwrap_or(false) {
+                                                row.insert(col.name.clone(), String::new());
+                                            }
+                                        }
+                                    }
+                                    let rows_clone = self.tables.get(other_table).unwrap().clone();
+                                    self.disk.save_table(other_table, &rows_clone);
                                 }
                             }
                         }
@@ -591,6 +629,7 @@ impl Executor {
             }
         }
 
+        // 실제 삭제
         let rows = self.tables.get_mut(&table).unwrap();
         let before = rows.len();
         rows.retain(|r| !Self::matches_condition(r, &condition));

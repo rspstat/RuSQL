@@ -19,7 +19,7 @@ fn print_color(text: &str, color: Color) {
 fn print_banner() {
     print_color("+-------------------------------------------------+\n", Color::DarkCyan);
     print_color("|", Color::DarkCyan);
-    print_color("         RustDB  v0.1.0  Custom RDBMS           ", Color::Cyan);
+    print_color("         RustDB  v2.1.3  Custom RDBMS           ", Color::Cyan);
     print_color("|\n", Color::DarkCyan);
     print_color("+-------------------------------------------------+\n", Color::DarkCyan);
     print_color("| Engine  : B+Tree + WAL + Undo Log               |\n", Color::DarkGrey);

@@ -28,6 +28,9 @@ pub enum Token {
     Ident(String),
     StringLit(String),
     NumberLit(String),
+
+    // FK 제약조건
+    Cascade, Restrict,
 }
 
 pub struct Lexer {
@@ -139,6 +142,8 @@ impl Lexer {
             "REFERENCES" => Token::References,
             "FOREIGN"    => Token::Foreign,
             "CONSTRAINT" => Token::Constraint,
+            "CASCADE"  => Token::Cascade,
+            "RESTRICT" => Token::Restrict,
             _           => Token::Ident(s),
         }
     }

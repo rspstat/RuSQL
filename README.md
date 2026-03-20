@@ -54,7 +54,9 @@
 - [x] NOT NULL
 - [x] UNIQUE
 - [x] AUTO INCREMENT
-- [x] FOREIGN KEY (삽입 / 삭제 시 참조 검사)
+- [x] FOREIGN KEY RESTRICT (삭제 거부)
+- [x] FOREIGN KEY CASCADE (연쇄 삭제)
+- [x] FOREIGN KEY SET NULL (NULL 변경)
 
 ### 트랜잭션
 - [x] WAL (Write-Ahead Logging)
@@ -75,10 +77,15 @@
 - [x] 사이드바 테이블 / 컬럼 목록
 - [x] 멀티 쿼리 결과 표시
 - [x] 쿼리 자동 저장
+- [x] 결과창 크기 조절 (드래그)
 
 <br/>
 
 ## 진행 예정
+
+### 엔진 고도화
+- [ ] Buffer Pool (LRU 캐시)
+- [ ] WAL 바이너리 redo log
 
 ### 네트워크
 - [ ] TCP 서버 (포트 7878)
@@ -89,10 +96,6 @@
 - [ ] Claude API 클라이언트 (`mcp/client.rs`)
 - [ ] 자연어 → SQL 변환 (`\ai` 명령어)
 - [ ] 변환된 SQL 확인 후 실행
-
-### 저장소 고도화 (선택)
-- [ ] Buffer Pool (LRU 캐시)
-- [ ] 체크포인트 (WAL 압축)
 
 <br/>
 
@@ -113,7 +116,7 @@ cd rustdb-ui && npm run tauri dev
 ## 지원 SQL 문법 예시
 ```sql
 CREATE TABLE users (id INT PRIMARY KEY AUTO INCREMENT, name TEXT NOT NULL, age INT);
-CREATE TABLE orders (id INT AUTO INCREMENT, user_id INT REFERENCES users(id), amount INT);
+CREATE TABLE orders (id INT AUTO INCREMENT, user_id INT REFERENCES users(id) ON DELETE CASCADE, amount INT);
 INSERT INTO users VALUES (, Alice, 25);
 SELECT * FROM users WHERE age BETWEEN 20 AND 30;
 SELECT * FROM users WHERE name LIKE 'A%';
@@ -137,6 +140,7 @@ TRUNCATE TABLE users;
 | 항목 | 내용 |
 |------|------|
 | 언어 | Rust |
+| 버전 | v2.1.3 |
 | 인덱스 | B+Tree (직접 구현) |
 | 트랜잭션 | WAL + Undo Log |
 | 저장 | 바이너리 .rdb 포맷 |
@@ -180,6 +184,7 @@ code/
 │    │ COMMIT/ROLLBACK │          │
 │    │ PK/FK/NN/UNIQUE │          │
 │    │ AUTO INCREMENT  │          │
+│    │ FK CASCADE/NULL │          │
 │    └─────────────────┘          │
 │          ↓                      │
 │    B+Tree 인덱스                 │

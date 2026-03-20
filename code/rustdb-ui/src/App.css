@@ -478,6 +478,8 @@ body {
   font-size: 13px;
   color: #cccccc;
   cursor: pointer;
+  line-height: 1.4;
+  white-space: nowrap;
 }
 
 .ctx-menu div:hover {
@@ -490,6 +492,8 @@ body {
   margin: 4px 0;
   padding: 0 !important;
   cursor: default !important;
+  font-size: 0 !important;
+  line-height: 0 !important;
 }
 
 .ctx-divider:hover {

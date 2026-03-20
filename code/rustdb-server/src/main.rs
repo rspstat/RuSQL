@@ -13,7 +13,7 @@ fn handle_client(stream: TcpStream, executor: Arc<Mutex<Executor>>) {
     let mut writer = stream.try_clone().unwrap();
     let reader = BufReader::new(stream);
 
-    writer.write_all(b"RustDB v0.1.0\n").unwrap();
+    writer.write_all(b"RustDB v2.1.3\n").unwrap();
     writer.write_all(b"Ready.\n").unwrap();
     writer.flush().unwrap();
 

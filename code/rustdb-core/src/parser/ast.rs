@@ -7,10 +7,18 @@ pub enum DataType {
 }
 
 #[derive(Debug, PartialEq, Clone)]
+pub enum FkAction {
+    Restrict,   // 기본값 - 삭제 거부
+    Cascade,    // 연쇄 삭제
+    SetNull,    // NULL로 설정
+}
+
+#[derive(Debug, PartialEq, Clone)]
 pub struct ForeignKey {
     pub column: String,
     pub ref_table: String,
     pub ref_column: String,
+    pub on_delete: FkAction,
 }
 
 #[derive(Debug, PartialEq, Clone)]
