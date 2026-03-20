@@ -1,79 +1,148 @@
-// src/storage/disk.rs
-
 use std::collections::HashMap;
-use std::fs;
+use std::fs::{self, File, OpenOptions};
+use std::io::{Read, Write};
 use std::path::Path;
+use crate::engine::executor::Row;
+use crate::storage::page::PageHeader;
 
-pub type Row = HashMap<String, String>;
-
-pub struct DiskManager;
+pub struct DiskManager {
+    data_dir: String,
+}
 
 impl DiskManager {
     pub fn new() -> Self {
-        DiskManager
+        let data_dir = "data".to_string();
+        fs::create_dir_all(&data_dir).unwrap();
+        DiskManager { data_dir }
     }
 
-    // 데이터 폴더 없으면 생성
-    fn ensure_dir() {
-        if !Path::new("data").exists() {
-            fs::create_dir("data").unwrap();
-        }
-    }
-
-    fn table_path(table: &str) -> String {
-        format!("data/{}.json", table)
-    }
-
-    // 테이블 전체 행 저장
-    pub fn save_table(&self, table: &str, rows: &Vec<Row>) {
-        Self::ensure_dir();
-        let path = Self::table_path(table);
-        let json = serde_json::to_string_pretty(rows).unwrap();
+    // 스키마는 그대로 JSON 유지 (스키마는 작아서 바이너리 불필요)
+    pub fn save_schema(&self, table: &str, columns: &[String]) {
+        let path = format!("{}/{}.schema.json", self.data_dir, table);
+        let json = serde_json::to_string(columns).unwrap();
         fs::write(path, json).unwrap();
     }
 
-    // 테이블 전체 행 불러오기
-    pub fn load_table(&self, table: &str) -> Vec<Row> {
-        let path = Self::table_path(table);
-        if !Path::new(&path).exists() {
-            return Vec::new();
-        }
-        let json = fs::read_to_string(path).unwrap();
-        serde_json::from_str(&json).unwrap_or_default()
-    }
-
-    // 스키마 저장 (컬럼 이름 목록)
-    pub fn save_schema(&self, table: &str, columns: &Vec<String>) {
-        Self::ensure_dir();
-        let path = format!("data/{}.schema.json", table);
-        let json = serde_json::to_string_pretty(columns).unwrap();
-        fs::write(path, json).unwrap();
-    }
-
-    // 스키마 불러오기
     pub fn load_schema(&self, table: &str) -> Option<Vec<String>> {
-        let path = format!("data/{}.schema.json", table);
-        if !Path::new(&path).exists() {
-            return None;
-        }
-        let json = fs::read_to_string(path).unwrap();
+        let path = format!("{}/{}.schema.json", self.data_dir, table);
+        let json = fs::read_to_string(path).ok()?;
         serde_json::from_str(&json).ok()
     }
 
-    // 테이블 삭제
-    pub fn delete_table(&self, table: &str) {
-        let _ = fs::remove_file(Self::table_path(table));
-        let _ = fs::remove_file(format!("data/{}.schema.json", table));
+    // 데이터는 바이너리 .rdb 포맷
+    pub fn save_table(&self, table: &str, rows: &[Row]) {
+        let path = format!("{}/{}.rdb", self.data_dir, table);
+        let mut file = OpenOptions::new()
+            .write(true).create(true).truncate(true)
+            .open(&path).unwrap();
+
+        // 헤더 작성
+        let mut header = PageHeader::new();
+        header.row_count = rows.len() as u32;
+
+        // 각 행을 직렬화
+        let mut row_data: Vec<Vec<u8>> = Vec::new();
+        for row in rows {
+            let json = serde_json::to_string(row).unwrap();
+            let bytes = json.as_bytes();
+            let mut entry = Vec::new();
+            // 행 크기(4 bytes) + 데이터
+            entry.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+            entry.extend_from_slice(bytes);
+            row_data.push(entry);
+        }
+
+        // 전체 데이터 크기 계산해서 페이지 수 결정
+        let total_data: usize = row_data.iter().map(|r| r.len()).sum();
+        let page_size = crate::storage::page::PAGE_SIZE;
+        header.page_count = ((total_data + page_size - 1) / page_size).max(1) as u32;
+
+        // 헤더 쓰기
+        file.write_all(&header.to_bytes()).unwrap();
+
+        // 데이터 쓰기
+        for entry in &row_data {
+            file.write_all(entry).unwrap();
+        }
+
+        // 마지막 페이지 패딩
+        let data_written: usize = row_data.iter().map(|r| r.len()).sum();
+        let remainder = data_written % page_size;
+        if remainder != 0 {
+            let padding = vec![0u8; page_size - remainder];
+            file.write_all(&padding).unwrap();
+        }
+
+        file.flush().unwrap();
     }
 
-    // 저장된 모든 테이블 이름 목록
+    pub fn load_table(&self, table: &str) -> Vec<Row> {
+        // .rdb 파일 먼저 시도
+        let rdb_path = format!("{}/{}.rdb", self.data_dir, table);
+        if Path::new(&rdb_path).exists() {
+            return self.load_rdb(&rdb_path);
+        }
+
+        // 구버전 .json 파일 폴백
+        let json_path = format!("{}/{}.json", self.data_dir, table);
+        if Path::new(&json_path).exists() {
+            let json = fs::read_to_string(&json_path).unwrap_or_default();
+            return serde_json::from_str(&json).unwrap_or_default();
+        }
+
+        Vec::new()
+    }
+
+    fn load_rdb(&self, path: &str) -> Vec<Row> {
+        let mut file = match File::open(path) {
+            Ok(f) => f,
+            Err(_) => return Vec::new(),
+        };
+
+        let mut buf = Vec::new();
+        file.read_to_end(&mut buf).unwrap();
+
+        if buf.len() < 32 { return Vec::new(); }
+
+        let header = match PageHeader::from_bytes(&buf[..32]) {
+            Some(h) => h,
+            None => return Vec::new(),
+        };
+
+        let mut rows = Vec::new();
+        let mut pos = 32usize;
+
+        for _ in 0..header.row_count {
+            if pos + 4 > buf.len() { break; }
+            let len = u32::from_le_bytes(buf[pos..pos+4].try_into().unwrap()) as usize;
+            pos += 4;
+            if pos + len > buf.len() { break; }
+            let json = std::str::from_utf8(&buf[pos..pos+len]).unwrap_or("{}");
+            if let Ok(row) = serde_json::from_str::<Row>(json) {
+                rows.push(row);
+            }
+            pos += len;
+        }
+
+        rows
+    }
+
+    pub fn delete_table(&self, table: &str) {
+        let _ = fs::remove_file(format!("{}/{}.rdb", self.data_dir, table));
+        let _ = fs::remove_file(format!("{}/{}.json", self.data_dir, table));
+        let _ = fs::remove_file(format!("{}/{}.schema.json", self.data_dir, table));
+    }
+
     pub fn list_tables(&self) -> Vec<String> {
-        Self::ensure_dir();
-        fs::read_dir("data").unwrap()
-            .filter_map(|e| e.ok())
-            .map(|e| e.file_name().to_string_lossy().to_string())
-            .filter(|name| name.ends_with(".schema.json"))
-            .map(|name| name.replace(".schema.json", ""))
-            .collect()
+        let mut tables = Vec::new();
+        if let Ok(entries) = fs::read_dir(&self.data_dir) {
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                if name.ends_with(".schema.json") {
+                    tables.push(name.replace(".schema.json", ""));
+                }
+            }
+        }
+        tables
     }
 }

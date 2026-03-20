@@ -1,5 +1,3 @@
-// src/parser/ast.rs
-
 #[derive(Debug, PartialEq, Clone)]
 pub enum DataType {
     Int,
@@ -9,9 +7,21 @@ pub enum DataType {
 }
 
 #[derive(Debug, PartialEq, Clone)]
+pub struct ForeignKey {
+    pub column: String,
+    pub ref_table: String,
+    pub ref_column: String,
+}
+
+#[derive(Debug, PartialEq, Clone)]
 pub struct ColumnDef {
     pub name: String,
     pub data_type: DataType,
+    pub primary_key: bool,
+    pub not_null: bool,
+    pub unique: bool,
+    pub auto_increment: bool,
+    pub foreign_key: Option<ForeignKey>,
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -25,17 +35,26 @@ pub struct Join {
     pub table: String,
     pub left_col: String,
     pub right_col: String,
+    pub join_type: JoinType,
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub enum JoinType {
+    Inner,
+    Left,
+    Right,
 }
 
 #[derive(Debug, PartialEq, Clone)]
 pub enum Operator {
-    Eq, Ne, Gt, Lt, Gte, Lte, In,
+    Eq, Ne, Gt, Lt, Gte, Lte, In, Like, Between,
 }
 
 #[derive(Debug, PartialEq, Clone)]
 pub enum ConditionValue {
     Literal(String),
     Subquery(Box<Statement>),
+    Between(String, String),  // BETWEEN a AND b
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -43,6 +62,8 @@ pub struct Condition {
     pub column: String,
     pub operator: Operator,
     pub value: ConditionValue,
+    pub and: Option<Box<Condition>>,  // AND 연결
+    pub or: Option<Box<Condition>>,   // OR 연결
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -76,6 +97,9 @@ pub enum Statement {
     DropTable {
         name: String,
     },
+    TruncateTable {
+        name: String,
+    },
     Insert {
         table: String,
         values: Vec<String>,
@@ -104,18 +128,22 @@ pub enum Statement {
         action: AlterAction,
     },
     CreateIndex {
-    index_name: String,
-    table: String,
-    column: String,
+        index_name: String,
+        table: String,
+        column: String,
     },
     DropIndex {
         index_name: String,
     },
     CreateView {
-    name: String,
-    query: Box<Statement>,
+        name: String,
+        query: Box<Statement>,
     },
     DropView {
         name: String,
+    },
+    ShowTables,
+    Describe {
+        table: String,
     },
 }

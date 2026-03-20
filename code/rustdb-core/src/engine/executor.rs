@@ -31,6 +31,11 @@ impl Executor {
                 let schema_cols = columns.iter().map(|c| SchemaCol {
                     name: c.clone(),
                     data_type: crate::parser::ast::DataType::Text,
+                    primary_key: false,
+                    not_null: false,
+                    unique: false,
+                    auto_increment: false,
+                    foreign_key: None,
                 }).collect();
                 let _ = catalog.create_table(table_name.clone(), schema_cols);
                 let rows = disk.load_table(&table_name);
@@ -49,7 +54,15 @@ impl Executor {
             }
         }
 
-        Executor { catalog, tables, indexes, index_meta: HashMap::new(), views: HashMap::new(), txn: TransactionManager::new(), disk }
+        Executor {
+            catalog,
+            tables,
+            indexes,
+            index_meta: HashMap::new(),
+            views: HashMap::new(),
+            txn: TransactionManager::new(),
+            disk,
+        }
     }
 
     pub fn execute(&mut self, stmt: Statement) -> Result<String, String> {
@@ -59,6 +72,7 @@ impl Executor {
             Statement::Rollback => self.exec_rollback(),
             Statement::CreateTable { name, columns } => self.exec_create(name, columns),
             Statement::DropTable { name }            => self.exec_drop(name),
+            Statement::TruncateTable { name }        => self.exec_truncate(name),
             Statement::Insert { table, values }      => self.exec_insert(table, values),
             Statement::Select { table, columns, condition, join, order_by, group_by, having, limit } => {
                 self.exec_select(table, columns, condition, join, order_by, group_by, having, limit)
@@ -71,11 +85,11 @@ impl Executor {
             Statement::CreateIndex { index_name, table, column } => {
                 self.exec_create_index(index_name, table, column)
             }
-            Statement::DropIndex { index_name } => {
-                self.exec_drop_index(index_name)
-            }
+            Statement::DropIndex { index_name } => self.exec_drop_index(index_name),
             Statement::CreateView { name, query } => self.exec_create_view(name, *query),
             Statement::DropView { name } => self.exec_drop_view(name),
+            Statement::ShowTables => self.exec_show_tables(),
+            Statement::Describe { table } => self.exec_describe(table),
         }
     }
 
@@ -84,6 +98,15 @@ impl Executor {
         let schema_cols = columns.into_iter().map(|c| SchemaCol {
             name: c.name,
             data_type: c.data_type,
+            primary_key: c.primary_key,
+            not_null: c.not_null,
+            unique: c.unique,
+            auto_increment: c.auto_increment,
+            foreign_key: c.foreign_key.map(|fk| crate::catalog::schema::ForeignKey {
+                column: fk.column,
+                ref_table: fk.ref_table,
+                ref_column: fk.ref_column,
+            }),
         }).collect();
         self.catalog.create_table(name.clone(), schema_cols)?;
         self.tables.insert(name.clone(), Vec::new());
@@ -100,9 +123,22 @@ impl Executor {
         Ok(format!("Table '{}' dropped.", name))
     }
 
+    fn exec_truncate(&mut self, name: String) -> Result<String, String> {
+        self.tables.get_mut(&name)
+            .ok_or(format!("Table '{}' not found", name))?
+            .clear();
+        if let Some(index) = self.indexes.get_mut(&name) {
+            *index = BPlusTree::new();
+        }
+        self.disk.save_table(&name, &[]);
+        Ok(format!("Table '{}' truncated.", name))
+    }
+
     fn exec_insert(&mut self, table: String, values: Vec<String>) -> Result<String, String> {
+        // schema를 클론해서 borrow 충돌 방지
         let schema = self.catalog.get_table(&table)
-            .ok_or(format!("Table '{}' not found", table))?;
+            .ok_or(format!("Table '{}' not found", table))?
+            .clone();
 
         if values.len() != schema.columns.len() {
             return Err(format!(
@@ -112,12 +148,71 @@ impl Executor {
         }
 
         let col_names: Vec<String> = schema.columns.iter().map(|c| c.name.clone()).collect();
+        let constraints: Vec<(bool, bool, bool, bool)> = schema.columns.iter()
+            .map(|c| (c.primary_key, c.not_null, c.unique, c.auto_increment))
+            .collect();
+
+        let mut final_values = values.clone();
+
+        // AUTO INCREMENT 처리
+        for (i, (_, _, _, auto_inc)) in constraints.iter().enumerate() {
+            if *auto_inc && final_values[i].is_empty() {
+                let schema_mut = self.catalog.get_table_mut(&table).unwrap();
+                let counter = schema_mut.auto_increment_counters
+                    .entry(col_names[i].clone()).or_insert(0);
+                *counter += 1;
+                final_values[i] = counter.to_string();
+            }
+        }
+
+        // NOT NULL 검사
+        for (i, (_, not_null, _, _)) in constraints.iter().enumerate() {
+            if *not_null && final_values[i].is_empty() {
+                return Err(format!("Column '{}' cannot be NULL", col_names[i]));
+            }
+        }
+
+        // UNIQUE / PRIMARY KEY 중복 검사
+        if let Some(rows) = self.tables.get(&table) {
+            for (i, (pk, _, unique, _)) in constraints.iter().enumerate() {
+                if *pk || *unique {
+                    let val = &final_values[i];
+                    for existing in rows {
+                        if existing.get(&col_names[i]) == Some(val) {
+                            return Err(format!(
+                                "Duplicate value '{}' for column '{}'", val, col_names[i]
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+
         let mut row = Row::new();
-        for (col, val) in col_names.iter().zip(values.iter()) {
+        for (col, val) in col_names.iter().zip(final_values.iter()) {
             row.insert(col.clone(), val.clone());
         }
 
-        let key = values[0].clone();
+        // FOREIGN KEY 검사
+        for col in &schema.columns {
+            if let Some(fk) = &col.foreign_key {
+                let val = row.get(&col.name).cloned().unwrap_or_default();
+                if val.is_empty() { continue; }
+                let ref_rows = self.tables.get(&fk.ref_table)
+                    .ok_or(format!("Referenced table '{}' not found", fk.ref_table))?;
+                let exists = ref_rows.iter().any(|r| {
+                    r.get(&fk.ref_column).map(|v| v == &val).unwrap_or(false)
+                });
+                if !exists {
+                    return Err(format!(
+                        "Foreign key violation: '{}' not found in '{}'.'{}'",
+                        val, fk.ref_table, fk.ref_column
+                    ));
+                }
+            }
+        }
+
+        let key = final_values[0].clone();
         let val_json = serde_json::to_string(&row).unwrap();
 
         self.txn.log_insert(&table, &key, &val_json);
@@ -140,33 +235,61 @@ impl Executor {
     fn matches_condition(row: &Row, condition: &Option<Condition>) -> bool {
         match condition {
             None => true,
-            Some(cond) => {
-                let val = match row.get(&cond.column) {
-                    Some(v) => v.clone(),
-                    None => return false,
-                };
-                let cmp_num = |a: &str, b: &str| -> Option<std::cmp::Ordering> {
-                    let a: f64 = a.parse().ok()?;
-                    let b: f64 = b.parse().ok()?;
-                    a.partial_cmp(&b)
-                };
-                match &cond.value {
-                    ConditionValue::Subquery(_) => false, // 서브쿼리는 exec_select에서 처리
-                    ConditionValue::Literal(lit) => {
-                        match &cond.operator {
-                            Operator::Eq  => &val == lit,
-                            Operator::Ne  => &val != lit,
-                            Operator::In  => false, // IN은 exec_select에서 처리
-                            Operator::Gt  => cmp_num(&val, lit)
-                                .map(|o| o == std::cmp::Ordering::Greater).unwrap_or(false),
-                            Operator::Lt  => cmp_num(&val, lit)
-                                .map(|o| o == std::cmp::Ordering::Less).unwrap_or(false),
-                            Operator::Gte => cmp_num(&val, lit)
-                                .map(|o| o != std::cmp::Ordering::Less).unwrap_or(false),
-                            Operator::Lte => cmp_num(&val, lit)
-                                .map(|o| o != std::cmp::Ordering::Greater).unwrap_or(false),
-                        }
+            Some(cond) => Self::eval_condition(row, cond),
+        }
+    }
+
+    fn eval_condition(row: &Row, cond: &Condition) -> bool {
+        let base = Self::eval_single(row, cond);
+        if let Some(and_cond) = &cond.and {
+            base && Self::eval_condition(row, and_cond)
+        } else if let Some(or_cond) = &cond.or {
+            base || Self::eval_condition(row, or_cond)
+        } else {
+            base
+        }
+    }
+
+    fn eval_single(row: &Row, cond: &Condition) -> bool {
+        let val = match row.get(&cond.column) {
+            Some(v) => v.clone(),
+            None => return false,
+        };
+
+        let cmp_num = |a: &str, b: &str| -> Option<std::cmp::Ordering> {
+            let a: f64 = a.parse().ok()?;
+            let b: f64 = b.parse().ok()?;
+            a.partial_cmp(&b)
+        };
+
+        match &cond.value {
+            ConditionValue::Subquery(_) => false,
+            ConditionValue::Between(start, end) => {
+                match (cmp_num(&val, start), cmp_num(&val, end)) {
+                    (Some(s), Some(e)) =>
+                        s != std::cmp::Ordering::Less && e != std::cmp::Ordering::Greater,
+                    _ => val >= *start && val <= *end,
+                }
+            }
+            ConditionValue::Literal(lit) => {
+                match &cond.operator {
+                    Operator::Eq  => &val == lit,
+                    Operator::Ne  => &val != lit,
+                    Operator::In  => false,
+                    Operator::Like => {
+                        let val_chars: Vec<char> = val.chars().collect();
+                        let pat_chars: Vec<char> = lit.chars().collect();
+                        like_match(&val_chars, &pat_chars)
                     }
+                    Operator::Between => false,
+                    Operator::Gt  => cmp_num(&val, lit)
+                        .map(|o| o == std::cmp::Ordering::Greater).unwrap_or(false),
+                    Operator::Lt  => cmp_num(&val, lit)
+                        .map(|o| o == std::cmp::Ordering::Less).unwrap_or(false),
+                    Operator::Gte => cmp_num(&val, lit)
+                        .map(|o| o != std::cmp::Ordering::Less).unwrap_or(false),
+                    Operator::Lte => cmp_num(&val, lit)
+                        .map(|o| o != std::cmp::Ordering::Greater).unwrap_or(false),
                 }
             }
         }
@@ -192,7 +315,7 @@ impl Executor {
             }
         }
 
-        // B+Tree 인덱스 검색 (첫 번째 컬럼 = 조건, JOIN/집계 없을 때만)
+        // B+Tree 인덱스 검색
         let has_agg = columns.iter().any(|c| matches!(c, SelectColumn::Agg { .. }));
         if join.is_none() && !has_agg {
             if let Some(cond) = &condition {
@@ -265,7 +388,7 @@ impl Executor {
                 seen.insert(key)
             });
         }
-        
+
         // HAVING
         if let Some(ref hav) = having {
             result.retain(|row| Self::matches_condition(row, &Some(hav.clone())));
@@ -306,7 +429,6 @@ impl Executor {
                         AggFunc::Max   => format!("MAX({})", col_name),
                     };
 
-                    // 정수면 정수로 출력
                     let val_str = if agg_val.fract() == 0.0 {
                         format!("{}", agg_val as i64)
                     } else {
@@ -437,8 +559,39 @@ impl Executor {
     }
 
     fn exec_delete(&mut self, table: String, condition: Option<Condition>) -> Result<String, String> {
-        let rows = self.tables.get_mut(&table)
-            .ok_or(format!("Table '{}' not found", table))?;
+        // 다른 테이블에서 이 테이블을 참조하는지 확인
+        let rows_to_delete: Vec<Row> = self.tables.get(&table)
+            .ok_or(format!("Table '{}' not found", table))?
+            .iter()
+            .filter(|r| Self::matches_condition(r, &condition))
+            .cloned()
+            .collect();
+
+        // FK 참조 검사
+        for del_row in &rows_to_delete {
+            for (other_table, other_schema) in &self.catalog.tables.clone() {
+                for col in &other_schema.columns {
+                    if let Some(fk) = &col.foreign_key {
+                        if fk.ref_table == table {
+                            let del_val = del_row.get(&fk.ref_column).cloned().unwrap_or_default();
+                            if let Some(other_rows) = self.tables.get(other_table) {
+                                let referenced = other_rows.iter().any(|r| {
+                                    r.get(&col.name).map(|v| v == &del_val).unwrap_or(false)
+                                });
+                                if referenced {
+                                    return Err(format!(
+                                        "Foreign key violation: row in '{}' is referenced by '{}'.'{}'",
+                                        table, other_table, col.name
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        let rows = self.tables.get_mut(&table).unwrap();
         let before = rows.len();
         rows.retain(|r| !Self::matches_condition(r, &condition));
         let deleted = before - rows.len();
@@ -513,9 +666,14 @@ impl Executor {
                 let schema = self.catalog.tables.get_mut(&table)
                     .ok_or(format!("Table '{}' not found", table))?;
                 schema.columns.push(SchemaCol {
-                    name: col.name.clone(),
-                    data_type: col.data_type,
-                });
+                name: col.name.clone(),
+                data_type: col.data_type,
+                primary_key: false,
+                not_null: false,
+                unique: false,
+                auto_increment: false,
+                foreign_key: None,
+            });
                 if let Some(rows) = self.tables.get_mut(&table) {
                     for row in rows.iter_mut() {
                         row.insert(col.name.clone(), String::new());
@@ -527,7 +685,6 @@ impl Executor {
                 self.disk.save_table(&table, self.tables.get(&table).unwrap());
                 Ok(format!("Column '{}' added to '{}'.", col.name, table))
             }
-
             AlterAction::DropColumn(col_name) => {
                 let schema = self.catalog.tables.get_mut(&table)
                     .ok_or(format!("Table '{}' not found", table))?;
@@ -543,7 +700,6 @@ impl Executor {
                 self.disk.save_table(&table, self.tables.get(&table).unwrap());
                 Ok(format!("Column '{}' dropped from '{}'.", col_name, table))
             }
-
             AlterAction::RenameColumn { from, to } => {
                 let schema = self.catalog.tables.get_mut(&table)
                     .ok_or(format!("Table '{}' not found", table))?;
@@ -570,57 +726,116 @@ impl Executor {
         match condition {
             None => true,
             Some(cond) => {
-                match &cond.value.clone() {
-                    ConditionValue::Literal(_) => Self::matches_condition(row, condition),
-                    ConditionValue::Subquery(sub_stmt) => {
-                        // 서브쿼리 실행해서 결과 값 목록 추출
-                        let sub_result = self.execute(*sub_stmt.clone());
-                        let val = match row.get(&cond.column) {
-                            Some(v) => v.clone(),
-                            None => return false,
-                        };
-                        // 서브쿼리 결과에서 첫 번째 컬럼 값들을 추출
-                        if let Ok(_) = sub_result {
-                            // 서브쿼리를 직접 테이블에서 실행
-                            if let Statement::Select { table, columns, condition: sub_cond,
-                                join: _, order_by: _, group_by: _, having: _, limit: _ } = *sub_stmt.clone() {
-                                let rows = match self.tables.get(&table) {
-                                    Some(r) => r.clone(),
-                                    None => return false,
-                                };
-                                let sub_vals: Vec<String> = rows.into_iter()
-                                    .filter(|r| Self::matches_condition(r, &sub_cond))
-                                    .filter_map(|r| {
-                                        match columns.first() {
-                                            Some(SelectColumn::Column(col)) => r.get(col).cloned(),
-                                            Some(SelectColumn::All) => r.values().next().cloned(),
-                                            _ => None,
+                // AND/OR 체인 처리
+                let base = self.eval_condition_with_subquery(row, cond);
+                base
+            }
+        }
+    }
+
+        fn eval_condition_with_subquery(&mut self, row: &Row, cond: &Condition) -> bool {
+            let base = self.eval_single_with_subquery(row, cond);
+            if let Some(and_cond) = &cond.and.clone() {
+                base && self.eval_condition_with_subquery(row, &and_cond)
+            } else if let Some(or_cond) = &cond.or.clone() {
+                base || self.eval_condition_with_subquery(row, &or_cond)
+            } else {
+                base
+            }
+        }
+
+        fn eval_single_with_subquery(&mut self, row: &Row, cond: &Condition) -> bool {
+        match &cond.value.clone() {
+            ConditionValue::Literal(_) | ConditionValue::Between(_, _) => {
+                Self::eval_single(row, cond)
+            }
+            ConditionValue::Subquery(sub_stmt) => {
+                let val = match row.get(&cond.column) {
+                    Some(v) => v.clone(),
+                    None => return false,
+                };
+
+                if let Statement::Select {
+                    table, columns, condition: sub_cond,
+                    join, order_by, group_by, having, limit
+                } = *sub_stmt.clone() {
+                    let result = self.exec_select(
+                        table, columns.clone(), sub_cond,
+                        join, order_by, group_by, having, limit
+                    );
+
+                    match result {
+                        Ok(output) => {
+                            let sub_vals = self.extract_values_from_output(&output);
+                            match cond.operator {
+                                Operator::In  => sub_vals.contains(&val),
+                                Operator::Eq  => sub_vals.first()
+                                    .map(|v| v == &val).unwrap_or(false),
+                                // 숫자 비교 연산자 추가
+                                Operator::Gt | Operator::Lt |
+                                Operator::Gte | Operator::Lte => {
+                                    if let Some(sub_val) = sub_vals.first() {
+                                        let a: f64 = val.parse().unwrap_or(0.0);
+                                        let b: f64 = sub_val.parse().unwrap_or(0.0);
+                                        match cond.operator {
+                                            Operator::Gt  => a > b,
+                                            Operator::Lt  => a < b,
+                                            Operator::Gte => a >= b,
+                                            Operator::Lte => a <= b,
+                                            _ => false,
                                         }
-                                    })
-                                    .collect();
-                                match cond.operator {
-                                    Operator::In => sub_vals.contains(&val),
-                                    Operator::Eq => sub_vals.first().map(|v| v == &val).unwrap_or(false),
-                                    _ => false,
+                                    } else {
+                                        false
+                                    }
                                 }
-                            } else {
-                                false
+                                _ => false,
                             }
-                        } else {
-                            false
                         }
+                        Err(_) => false,
+                    }
+                } else {
+                    false
+                }
+            }
+        }
+    }
+
+    fn extract_values_from_output(&self, output: &str) -> Vec<String> {
+        // 테이블 출력에서 첫 번째 컬럼 값들 추출
+        // +----+-------+
+        // | id | name  |
+        // +----+-------+
+        // | 1  | Alice |
+        let mut vals = Vec::new();
+        let mut header_passed = false;
+        let mut separator_count = 0;
+
+        for line in output.lines() {
+            if line.starts_with('+') {
+                separator_count += 1;
+                if separator_count == 2 { header_passed = true; }
+                continue;
+            }
+            if line.starts_with('|') && header_passed {
+                // 첫 번째 셀 값 추출
+                let first_val = line.split('|')
+                    .filter(|s| !s.is_empty())
+                    .next()
+                    .map(|s| s.trim().to_string());
+                if let Some(v) = first_val {
+                    if !v.is_empty() {
+                        vals.push(v);
                     }
                 }
             }
         }
+        vals
     }
 
     fn exec_create_index(&mut self, index_name: String, table: String, column: String) -> Result<String, String> {
         if !self.tables.contains_key(&table) {
             return Err(format!("Table '{}' not found", table));
         }
-
-        // 해당 컬럼으로 B+Tree 인덱스 구성
         let mut tree = BPlusTree::new();
         if let Some(rows) = self.tables.get(&table) {
             for row in rows {
@@ -630,11 +845,9 @@ impl Executor {
                 }
             }
         }
-
         let key = format!("{}_{}", table, index_name);
         self.indexes.insert(key.clone(), tree);
         self.index_meta.insert(index_name.clone(), (table.clone(), column.clone()));
-
         Ok(format!("Index '{}' created on '{}'.'{}'.", index_name, table, column))
     }
 
@@ -664,5 +877,63 @@ impl Executor {
         } else {
             Err(format!("View '{}' not found", name))
         }
+    }
+
+    fn exec_show_tables(&self) -> Result<String, String> {
+        let tables: Vec<String> = self.catalog.tables.keys().cloned().collect();
+        if tables.is_empty() {
+            return Ok("No tables found.".to_string());
+        }
+        let mut output = String::new();
+        let max_len = tables.iter().map(|t| t.len()).max().unwrap_or(5).max(5);
+        let sep = format!("+{}+", "-".repeat(max_len + 2));
+        output.push_str(&format!("{}\n", sep));
+        output.push_str(&format!("| {:width$} |\n", "Tables", width = max_len));
+        output.push_str(&format!("{}\n", sep));
+        for t in &tables {
+            output.push_str(&format!("| {:width$} |\n", t, width = max_len));
+        }
+        output.push_str(&sep);
+        Ok(output)
+    }
+
+    fn exec_describe(&self, table: String) -> Result<String, String> {
+        let schema = self.catalog.get_table(&table)
+            .ok_or(format!("Table '{}' not found", table))?;
+        let mut output = String::new();
+        let sep = "+------------------+---------+-----+-----+----------------+";
+        output.push_str(&format!("{}\n", sep));
+        output.push_str("| Field            | Type    | PK  | NN  | Auto Increment |\n");
+        output.push_str(&format!("{}\n", sep));
+        for col in &schema.columns {
+            let type_str = match col.data_type {
+                crate::parser::ast::DataType::Int     => "INT",
+                crate::parser::ast::DataType::Text    => "TEXT",
+                crate::parser::ast::DataType::Float   => "FLOAT",
+                crate::parser::ast::DataType::Boolean => "BOOLEAN",
+            };
+            output.push_str(&format!(
+                "| {:16} | {:7} | {:3} | {:3} | {:14} |\n",
+                col.name, type_str,
+                if col.primary_key { "YES" } else { "NO" },
+                if col.not_null { "YES" } else { "NO" },
+                if col.auto_increment { "YES" } else { "NO" },
+            ));
+        }
+        output.push_str(sep);
+        Ok(output)
+    }
+}
+
+fn like_match(val: &[char], pat: &[char]) -> bool {
+    match (val, pat) {
+        (_, []) => val.is_empty(),
+        ([], ['%', rest @ ..]) => like_match(&[], rest),
+        ([], _) => false,
+        ([_, v_rest @ ..], ['%', p_rest @ ..]) =>
+            like_match(v_rest, pat) || like_match(val, p_rest),
+        ([_, v_rest @ ..], ['_', p_rest @ ..]) => like_match(v_rest, p_rest),
+        ([v, v_rest @ ..], [p, p_rest @ ..]) =>
+            v == p && like_match(v_rest, p_rest),
     }
 }

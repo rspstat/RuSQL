@@ -71,6 +71,9 @@ impl Parser {
             Some(Token::Ident(s)) if s == "COMMIT"   => Ok(Statement::Commit),
             Some(Token::Ident(s)) if s == "ROLLBACK" => Ok(Statement::Rollback),
             Some(Token::Alter) => self.parse_alter(),
+            Some(Token::Show)     => self.parse_show(),
+            Some(Token::Describe) => self.parse_describe(),
+            Some(Token::Truncate) => self.parse_truncate(),
             other => Err(format!("Unknown statement: {:?}", other)),
         }
     }
@@ -78,27 +81,68 @@ impl Parser {
     fn parse_condition(&mut self) -> Result<Condition, String> {
         let column = self.expect_ident()?;
 
-        // IN (subquery) 처리
+        // IN 처리
         if self.peek() == Some(&Token::In) {
             self.advance();
             match self.advance() {
                 Some(Token::LParen) => {}
                 other => return Err(format!("Expected '(', got {:?}", other)),
             }
-            // 서브쿼리 파싱
             let sub_stmt = match self.advance() {
                 Some(Token::Select) => self.parse_select()?,
-                other => return Err(format!("Expected SELECT in subquery, got {:?}", other)),
+                other => return Err(format!("Expected SELECT, got {:?}", other)),
             };
             match self.advance() {
                 Some(Token::RParen) => {}
                 other => return Err(format!("Expected ')', got {:?}", other)),
             }
-            return Ok(Condition {
-                column,
-                operator: Operator::In,
+            let cond = Condition {
+                column, operator: Operator::In,
                 value: ConditionValue::Subquery(Box::new(sub_stmt)),
-            });
+                and: None, or: None,
+            };
+            return self.parse_condition_chain(cond);
+        }
+
+        // BETWEEN 처리
+        if self.peek() == Some(&Token::Between) {
+            self.advance();
+            let start = match self.advance() {
+                Some(Token::NumberLit(n)) => n.clone(),
+                Some(Token::Ident(s))     => s.clone(),
+                other => return Err(format!("Expected value, got {:?}", other)),
+            };
+            match self.advance() {
+                Some(Token::And) => {}
+                other => return Err(format!("Expected AND, got {:?}", other)),
+            }
+            let end = match self.advance() {
+                Some(Token::NumberLit(n)) => n.clone(),
+                Some(Token::Ident(s))     => s.clone(),
+                other => return Err(format!("Expected value, got {:?}", other)),
+            };
+            let cond = Condition {
+                column, operator: Operator::Between,
+                value: ConditionValue::Between(start, end),
+                and: None, or: None,
+            };
+            return self.parse_condition_chain(cond);
+        }
+
+        // LIKE 처리
+        if self.peek() == Some(&Token::Like) {
+            self.advance();
+            let pattern = match self.advance() {
+                Some(Token::StringLit(s)) => s.clone(),
+                Some(Token::Ident(s))     => s.clone(),
+                other => return Err(format!("Expected pattern, got {:?}", other)),
+            };
+            let cond = Condition {
+                column, operator: Operator::Like,
+                value: ConditionValue::Literal(pattern),
+                and: None, or: None,
+            };
+            return self.parse_condition_chain(cond);
         }
 
         let operator = match self.advance() {
@@ -111,14 +155,48 @@ impl Parser {
             other => return Err(format!("Expected operator, got {:?}", other)),
         };
 
-        let value = match self.advance() {
-            Some(Token::Ident(s))     => ConditionValue::Literal(s.clone()),
-            Some(Token::NumberLit(n)) => ConditionValue::Literal(n.clone()),
-            Some(Token::StringLit(s)) => ConditionValue::Literal(s.clone()),
-            other => return Err(format!("Expected value, got {:?}", other)),
+        let value = match self.peek() {
+            Some(Token::LParen) => {
+                // (SELECT ...) 형태의 서브쿼리
+                self.advance(); // ( 소비
+                match self.advance() {
+                    Some(Token::Select) => {}
+                    other => return Err(format!("Expected SELECT in subquery, got {:?}", other)),
+                }
+                let sub_stmt = self.parse_select()?;
+                match self.advance() {
+                    Some(Token::RParen) => {}
+                    other => return Err(format!("Expected ')', got {:?}", other)),
+                }
+                ConditionValue::Subquery(Box::new(sub_stmt))
+            }
+            _ => match self.advance() {
+                Some(Token::Ident(s))     => ConditionValue::Literal(s.clone()),
+                Some(Token::NumberLit(n)) => ConditionValue::Literal(n.clone()),
+                Some(Token::StringLit(s)) => ConditionValue::Literal(s.clone()),
+                other => return Err(format!("Expected value, got {:?}", other)),
+            }
         };
 
-        Ok(Condition { column, operator, value })
+        let cond = Condition { column, operator, value, and: None, or: None };
+        self.parse_condition_chain(cond)
+    }
+
+    fn parse_condition_chain(&mut self, mut cond: Condition) -> Result<Condition, String> {
+        match self.peek() {
+            Some(Token::And) => {
+                self.advance();
+                let next = self.parse_condition()?;
+                cond.and = Some(Box::new(next));
+            }
+            Some(Token::Or) => {
+                self.advance();
+                let next = self.parse_condition()?;
+                cond.or = Some(Box::new(next));
+            }
+            _ => {}
+        }
+        Ok(cond)
     }
 
     fn parse_select(&mut self) -> Result<Statement, String> {
@@ -181,7 +259,7 @@ impl Parser {
                 other => return Err(format!("Expected =, got {:?}", other)),
             }
             let right_col = self.expect_ident()?;
-            Some(Join { table: join_table, left_col, right_col })
+            Some(Join { table: join_table, left_col, right_col, join_type: JoinType::Inner })
         } else {
             None
         };
@@ -269,11 +347,15 @@ impl Parser {
 
         let mut values = Vec::new();
         loop {
-            let val = match self.advance() {
-                Some(Token::StringLit(s)) => s.clone(),
-                Some(Token::NumberLit(n)) => n.clone(),
-                Some(Token::Ident(s))     => s.clone(),
-                other => return Err(format!("Expected value, got {:?}", other)),
+            // 빈 값 처리 (AUTO INCREMENT용)
+            let val = match self.peek() {
+                Some(Token::Comma) | Some(Token::RParen) => String::new(),
+                _ => match self.advance() {
+                    Some(Token::StringLit(s)) => s.clone(),
+                    Some(Token::NumberLit(n)) => n.clone(),
+                    Some(Token::Ident(s))     => s.clone(),
+                    other => return Err(format!("Expected value, got {:?}", other)),
+                }
             };
             values.push(val);
             match self.peek() {
@@ -338,7 +420,6 @@ impl Parser {
     }
 
     fn parse_create(&mut self) -> Result<Statement, String> {
-        // CREATE TABLE name (col1 TYPE, col2 TYPE, ...)
         match self.advance() {
             Some(Token::Table) => {}
             other => return Err(format!("Expected TABLE, got {:?}", other)),
@@ -359,7 +440,72 @@ impl Parser {
                 Some(Token::Boolean) => DataType::Boolean,
                 other => return Err(format!("Expected data type, got {:?}", other)),
             };
-            columns.push(ColumnDef { name: col_name, data_type });
+
+            let mut primary_key = false;
+            let mut not_null = false;
+            let mut unique = false;
+            let mut auto_increment = false;
+            let mut foreign_key: Option<ForeignKey> = None;
+
+            loop {
+                match self.peek() {
+                    Some(Token::Primary) => {
+                        self.advance();
+                        match self.advance() {
+                            Some(Token::Key) => { primary_key = true; not_null = true; }
+                            other => return Err(format!("Expected KEY, got {:?}", other)),
+                        }
+                    }
+                    Some(Token::Not) => {
+                        self.advance();
+                        match self.advance() {
+                            Some(Token::Null) => { not_null = true; }
+                            other => return Err(format!("Expected NULL, got {:?}", other)),
+                        }
+                    }
+                    Some(Token::Unique) => {
+                        self.advance();
+                        unique = true;
+                    }
+                    Some(Token::Auto) => {
+                        self.advance();
+                        match self.advance() {
+                            Some(Token::Increment) => { auto_increment = true; }
+                            other => return Err(format!("Expected INCREMENT, got {:?}", other)),
+                        }
+                    }
+                    Some(Token::References) => {
+                        self.advance();
+                        let ref_table = self.expect_ident()?;
+                        match self.advance() {
+                            Some(Token::LParen) => {}
+                            other => return Err(format!("Expected '(', got {:?}", other)),
+                        }
+                        let ref_column = self.expect_ident()?;
+                        match self.advance() {
+                            Some(Token::RParen) => {}
+                            other => return Err(format!("Expected ')', got {:?}", other)),
+                        }
+                        foreign_key = Some(ForeignKey {
+                            column: col_name.clone(),
+                            ref_table,
+                            ref_column,
+                        });
+                    }
+                    _ => break,
+                }
+            }
+
+            columns.push(ColumnDef {
+                name: col_name,
+                data_type,
+                primary_key,
+                not_null,
+                unique,
+                auto_increment,
+                foreign_key,
+            });
+
             match self.peek() {
                 Some(Token::Comma)  => { self.advance(); }
                 Some(Token::RParen) => { self.advance(); break; }
@@ -406,7 +552,15 @@ impl Parser {
                 };
                 Ok(Statement::AlterTable {
                     table,
-                    action: AlterAction::AddColumn(ColumnDef { name: col_name, data_type }),
+                    action: AlterAction::AddColumn(ColumnDef {
+                    name: col_name,
+                    data_type,
+                    primary_key: false,
+                    not_null: false,
+                    unique: false,
+                    auto_increment: false,
+                    foreign_key: None,
+                }),
                 })
             }
             Some(Token::Drop) => {
@@ -484,5 +638,26 @@ impl Parser {
     fn parse_drop_view(&mut self) -> Result<Statement, String> {
         let name = self.expect_ident()?;
         Ok(Statement::DropView { name })
+    }
+
+    fn parse_show(&mut self) -> Result<Statement, String> {
+        match self.advance() {
+            Some(Token::Tables) => Ok(Statement::ShowTables),
+            other => Err(format!("Expected TABLES, got {:?}", other)),
+        }
+    }
+
+    fn parse_describe(&mut self) -> Result<Statement, String> {
+        let table = self.expect_ident()?;
+        Ok(Statement::Describe { table })
+    }
+
+    fn parse_truncate(&mut self) -> Result<Statement, String> {
+        match self.advance() {
+            Some(Token::Table) => {}
+            other => return Err(format!("Expected TABLE, got {:?}", other)),
+        }
+        let name = self.expect_ident()?;
+        Ok(Statement::TruncateTable { name })
     }
 }
