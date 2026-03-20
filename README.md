@@ -8,8 +8,8 @@
 
 | 분류 | 내용 |
 |------|------|
-| DB 엔진 | B+Tree, Buffer Pool, WAL, 트랜잭션 직접 구현 |
-| SQL 지원 | DDL / DML / JOIN / 트랜잭션 |
+| DB 엔진 | B+Tree, WAL, 트랜잭션 직접 구현 |
+| SQL 지원 | DDL / DML / JOIN / 제약조건 / 트랜잭션 |
 | MCP | 자연어 입력 → SQL 자동 생성 → 실행 |
 | DBMS | TCP 서버, 다중 클라이언트 동시 접속 |
 | 언어 | Rust |
@@ -24,8 +24,7 @@
 - [x] Executor (쿼리 실행 엔진)
 
 ### DDL
-- [x] CREATE TABLE
-- [x] DROP TABLE
+- [x] CREATE TABLE / DROP TABLE / TRUNCATE TABLE
 - [x] ALTER TABLE (ADD / DROP / RENAME COLUMN)
 - [x] CREATE INDEX / DROP INDEX
 - [x] CREATE VIEW / DROP VIEW
@@ -38,6 +37,8 @@
 
 ### 쿼리 기능
 - [x] WHERE (=, !=, >, <, >=, <=)
+- [x] AND / OR 복합 조건
+- [x] BETWEEN / LIKE
 - [x] INNER JOIN
 - [x] ORDER BY (ASC / DESC)
 - [x] GROUP BY
@@ -45,6 +46,15 @@
 - [x] LIMIT
 - [x] 집계 함수 (COUNT, SUM, AVG, MIN, MAX)
 - [x] 서브쿼리 (WHERE col IN (SELECT ...))
+- [x] 중첩 서브쿼리 (WHERE col > (SELECT AVG(...)))
+- [x] SHOW TABLES / DESCRIBE
+
+### 제약 조건
+- [x] PRIMARY KEY
+- [x] NOT NULL
+- [x] UNIQUE
+- [x] AUTO INCREMENT
+- [x] FOREIGN KEY (삽입 / 삭제 시 참조 검사)
 
 ### 트랜잭션
 - [x] WAL (Write-Ahead Logging)
@@ -53,7 +63,7 @@
 
 ### 인덱스 & 저장
 - [x] B+Tree 인덱스
-- [x] JSON 기반 디스크 영속성
+- [x] 바이너리 디스크 저장 (.rdb 포맷)
 
 ### 편의 기능
 - [x] 세미콜론(;) 구분 멀티 쿼리 입력
@@ -81,7 +91,6 @@
 - [ ] 변환된 SQL 확인 후 실행
 
 ### 저장소 고도화 (선택)
-- [ ] 바이너리 페이지 저장 (.rdb 포맷)
 - [ ] Buffer Pool (LRU 캐시)
 - [ ] 체크포인트 (WAL 압축)
 
@@ -103,15 +112,22 @@ cd rustdb-ui && npm run tauri dev
 
 ## 지원 SQL 문법 예시
 ```sql
-CREATE TABLE users (id INT, name TEXT, age INT);
-INSERT INTO users VALUES (1, Alice, 25);
-SELECT * FROM users WHERE age > 20 ORDER BY age DESC LIMIT 3;
+CREATE TABLE users (id INT PRIMARY KEY AUTO INCREMENT, name TEXT NOT NULL, age INT);
+CREATE TABLE orders (id INT AUTO INCREMENT, user_id INT REFERENCES users(id), amount INT);
+INSERT INTO users VALUES (, Alice, 25);
+SELECT * FROM users WHERE age BETWEEN 20 AND 30;
+SELECT * FROM users WHERE name LIKE 'A%';
+SELECT * FROM users WHERE age > 20 AND age < 35;
 SELECT COUNT(*), AVG(age) FROM users;
 SELECT * FROM users WHERE id IN (SELECT id FROM users WHERE age > 30);
+SELECT * FROM users WHERE id IN (SELECT user_id FROM orders WHERE amount > (SELECT AVG(amount) FROM orders));
 BEGIN; UPDATE users SET age = 26 WHERE id = 1; COMMIT;
 ALTER TABLE users ADD COLUMN email TEXT;
 CREATE INDEX idx_age ON users (age);
 CREATE VIEW adult_users AS SELECT * FROM users WHERE age >= 18;
+SHOW TABLES;
+DESCRIBE users;
+TRUNCATE TABLE users;
 ```
 
 <br/>
@@ -123,7 +139,7 @@ CREATE VIEW adult_users AS SELECT * FROM users WHERE age >= 18;
 | 언어 | Rust |
 | 인덱스 | B+Tree (직접 구현) |
 | 트랜잭션 | WAL + Undo Log |
-| 저장 | JSON (→ 바이너리 예정) |
+| 저장 | 바이너리 .rdb 포맷 |
 | UI | Tauri + React + Monaco Editor |
 | AI 연동 | Claude MCP API (예정) |
 
@@ -140,7 +156,7 @@ code/
 
 <br/>
 
-## Format (1.2 ver.)
+## Format (1.3 ver.)
 ```
 ┌─────────────────────────────────┐
 │         rustdb-core             │
@@ -153,18 +169,22 @@ code/
 │    │ INSERT / SELECT │          │
 │    │ UPDATE / DELETE │          │
 │    │ JOIN / WHERE    │          │
+│    │ AND / OR / LIKE │          │
+│    │ BETWEEN / IN    │          │
 │    │ ORDER BY / LIMIT│          │
 │    │ GROUP BY / HAVING│         │
 │    │ COUNT/SUM/AVG.. │          │
 │    │ ALTER TABLE     │          │
 │    │ INDEX / VIEW    │          │
-│    │ 서브쿼리 (IN)   │          │
+│    │ 중첩 서브쿼리   │          │
 │    │ COMMIT/ROLLBACK │          │
+│    │ PK/FK/NN/UNIQUE │          │
+│    │ AUTO INCREMENT  │          │
 │    └─────────────────┘          │
 │          ↓                      │
 │    B+Tree 인덱스                 │
 │    WAL 로그                      │
-│    JSON 디스크 저장              │
+│    바이너리 .rdb 저장            │
 │                                 │
 └─────────────────────────────────┘
         ↓              ↓
