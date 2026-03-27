@@ -8,9 +8,9 @@
 
 | 분류 | 내용 |
 |------|------|
-| DB 엔진 | B+Tree, WAL, 트랜잭션 직접 구현 |
+| DB 엔진 | B+Tree, WAL, Buffer Pool, 트랜잭션 직접 구현 |
 | SQL 지원 | DDL / DML / JOIN / 제약조건 / 트랜잭션 |
-| MCP | 자연어 입력 → SQL 자동 생성 → 실행 |
+| MCP | 자연어 입력 → SQL 자동 생성 → 실행 (AI API 연동) |
 | DBMS | TCP 서버, 다중 클라이언트 동시 접속 |
 | 언어 | Rust |
 
@@ -59,13 +59,19 @@
 - [x] FOREIGN KEY SET NULL (NULL 변경)
 
 ### 트랜잭션
-- [x] WAL (Write-Ahead Logging)
+- [x] WAL (Write-Ahead Logging) - 바이너리 redo log
 - [x] BEGIN / COMMIT / ROLLBACK
 - [x] Undo Log 기반 롤백
+- [x] COMMIT 후 WAL 자동 정리 (체크포인트)
 
 ### 인덱스 & 저장
 - [x] B+Tree 인덱스
 - [x] 바이너리 디스크 저장 (.rdb 포맷)
+- [x] Buffer Pool (LRU 캐시, 64페이지)
+
+### 모니터링
+- [x] SHOW BUFFER POOL (캐시 히트율, 사용량)
+- [x] SHOW WAL (로그 레코드, 파일 크기)
 
 ### 편의 기능
 - [x] 세미콜론(;) 구분 멀티 쿼리 입력
@@ -84,8 +90,12 @@
 ## 진행 예정
 
 ### 엔진 고도화
-- [ ] Buffer Pool (LRU 캐시)
-- [ ] WAL 바이너리 redo log
+- [ ] 클러스터드 인덱스
+- [ ] 복합 인덱스
+- [ ] MVCC
+- [ ] 트랜잭션 격리 수준 (4단계)
+- [ ] Row-level locking (동시성)
+- [ ] 체크포인트
 
 ### 네트워크
 - [ ] TCP 서버 (포트 7878)
@@ -93,7 +103,7 @@
 - [ ] 클라이언트 CLI (`rustdb-client`)
 
 ### MCP 연동
-- [ ] Claude API 클라이언트 (`mcp/client.rs`)
+- [ ] AI API 클라이언트 (`mcp/client.rs`)
 - [ ] 자연어 → SQL 변환 (`\ai` 명령어)
 - [ ] 변환된 SQL 확인 후 실행
 
@@ -131,6 +141,8 @@ CREATE VIEW adult_users AS SELECT * FROM users WHERE age >= 18;
 SHOW TABLES;
 DESCRIBE users;
 TRUNCATE TABLE users;
+SHOW BUFFER POOL;
+SHOW WAL;
 ```
 
 <br/>
@@ -142,10 +154,11 @@ TRUNCATE TABLE users;
 | 언어 | Rust |
 | 버전 | v2.1.3 |
 | 인덱스 | B+Tree (직접 구현) |
-| 트랜잭션 | WAL + Undo Log |
+| 트랜잭션 | WAL (바이너리 redo log) + Undo Log |
+| 캐시 | Buffer Pool (LRU, 64페이지) |
 | 저장 | 바이너리 .rdb 포맷 |
 | UI | Tauri + React + Monaco Editor |
-| AI 연동 | Claude MCP API (예정) |
+| AI 연동 | MCP AI API (예정) |
 
 <br/>
 
@@ -188,7 +201,8 @@ code/
 │    └─────────────────┘          │
 │          ↓                      │
 │    B+Tree 인덱스                 │
-│    WAL 로그                      │
+│    WAL 바이너리 redo log         │
+│    Buffer Pool (LRU 64p)        │
 │    바이너리 .rdb 저장            │
 │                                 │
 └─────────────────────────────────┘

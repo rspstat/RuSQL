@@ -666,8 +666,15 @@ impl Parser {
 
     fn parse_show(&mut self) -> Result<Statement, String> {
         match self.advance() {
-            Some(Token::Tables) => Ok(Statement::ShowTables),
-            other => Err(format!("Expected TABLES, got {:?}", other)),
+            Some(Token::Tables)  => Ok(Statement::ShowTables),
+            Some(Token::Ident(s)) if s == "BUFFER" => {
+                match self.advance() {
+                    Some(Token::Ident(s)) if s == "POOL" => Ok(Statement::ShowBufferPool),
+                    other => Err(format!("Expected POOL, got {:?}", other)),
+                }
+            }
+            Some(Token::Ident(s)) if s == "WAL" => Ok(Statement::ShowWal),
+            other => Err(format!("Expected TABLES or BUFFER, got {:?}", other)),
         }
     }
 

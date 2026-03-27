@@ -1,112 +1,123 @@
- // src/transaction/txn_manager.rs
-
-// use std::collections::HashMap;
-use crate::transaction::wal::{Wal, LogRecord};
+use crate::transaction::wal::{WalManager, WalRecord, WalOp};
 use crate::engine::executor::Row;
 
 #[derive(Debug, Clone)]
-pub enum UndoOp {
-    Insert { table: String, key: String },
-    Update { table: String, key: String, old_value: Row },
-    Delete { table: String, key: String, old_value: Row },
+pub struct UndoEntry {
+    pub operation: String,
+    pub table: String,
+    pub key: String,
+    pub old_data: Option<String>,
 }
 
 pub struct TransactionManager {
-    pub next_txn_id: u64,
-    pub active_txn: Option<u64>,
-    pub undo_log: Vec<UndoOp>,
-    pub wal: Wal,
+    active: bool,
+    txn_id: u64,
+    undo_log: Vec<UndoEntry>,
+    wal: WalManager,
 }
 
 impl TransactionManager {
     pub fn new() -> Self {
         TransactionManager {
-            next_txn_id: 1,
-            active_txn: None,
+            active: false,
+            txn_id: 0,
             undo_log: Vec::new(),
-            wal: Wal::new("data/wal.log"),
+            wal: WalManager::new(),
         }
     }
 
     pub fn begin(&mut self) -> Result<u64, String> {
-        if self.active_txn.is_some() {
+        if self.active {
             return Err("Transaction already active. COMMIT or ROLLBACK first.".to_string());
         }
-        let txn_id = self.next_txn_id;
-        self.next_txn_id += 1;
-        self.active_txn = Some(txn_id);
+        self.txn_id += 1;
+        self.active = true;
         self.undo_log.clear();
-        self.wal.log(LogRecord::Begin(txn_id));
-        Ok(txn_id)
+        Ok(self.txn_id)
     }
 
     pub fn commit(&mut self) -> Result<(), String> {
-        let txn_id = self.active_txn
-            .ok_or("No active transaction.".to_string())?;
-        self.wal.log(LogRecord::Commit(txn_id));
-        self.active_txn = None;
+        if !self.active {
+            return Err("No active transaction.".to_string());
+        }
+        self.wal.log_commit();
+        self.wal.log_checkpoint();
+        self.wal.clear();
         self.undo_log.clear();
+        self.active = false;
         Ok(())
     }
 
-    pub fn abort(&mut self) -> Result<Vec<UndoOp>, String> {
-        let txn_id = self.active_txn
-            .ok_or("No active transaction.".to_string())?;
-        self.wal.log(LogRecord::Abort(txn_id));
-        self.active_txn = None;
-        let ops = self.undo_log.drain(..).rev().collect();
-        Ok(ops)
+    pub fn rollback(&mut self) -> Vec<UndoEntry> {
+        self.wal.log_rollback();
+        self.wal.clear();
+        let entries = self.undo_log.drain(..).rev().collect();
+        self.active = false;
+        entries
     }
 
-    pub fn log_insert(&mut self, table: &str, key: &str, value: &str) {
-        if let Some(txn_id) = self.active_txn {
-            self.wal.log(LogRecord::Insert {
-                txn_id,
+    pub fn abort(&mut self) -> Result<Vec<UndoEntry>, String> {
+        if !self.active {
+            return Err("No active transaction.".to_string());
+        }
+        self.wal.log_rollback();
+        self.wal.clear();
+        let entries = self.undo_log.drain(..).rev().collect();
+        self.active = false;
+        Ok(entries)
+    }
+
+    pub fn log_insert(&mut self, table: &str, key: &str, data: &str) {
+        if self.active {
+            // 트랜잭션 중 → WAL 기록 + Undo Log 추가
+            self.wal.log_insert(table, key, data);
+            self.undo_log.push(UndoEntry {
+                operation: "INSERT".to_string(),
                 table: table.to_string(),
                 key: key.to_string(),
-                value: value.to_string(),
+                old_data: None,
             });
-            self.undo_log.push(UndoOp::Insert {
+        }
+        // 트랜잭션 없으면 WAL 기록 안 함 (즉시 flush는 executor에서 처리)
+    }
+
+    pub fn log_update(&mut self, table: &str, key: &str, old_data: &str, new_data: &str) {
+        if self.active {
+            self.wal.log_update(table, key, new_data);
+            self.undo_log.push(UndoEntry {
+                operation: "UPDATE".to_string(),
                 table: table.to_string(),
                 key: key.to_string(),
+                old_data: Some(old_data.to_string()),
             });
         }
     }
 
-    pub fn log_update(&mut self, table: &str, key: &str, old_value: Row, new_value: &str) {
-        if let Some(txn_id) = self.active_txn {
-            self.wal.log(LogRecord::Update {
-                txn_id,
+    pub fn log_delete(&mut self, table: &str, key: &str, old_data: &str) {
+        if self.active {
+            self.wal.log_delete(table, key);
+            self.undo_log.push(UndoEntry {
+                operation: "DELETE".to_string(),
                 table: table.to_string(),
                 key: key.to_string(),
-                old_value: serde_json::to_string(&old_value).unwrap(),
-                new_value: new_value.to_string(),
-            });
-            self.undo_log.push(UndoOp::Update {
-                table: table.to_string(),
-                key: key.to_string(),
-                old_value,
-            });
-        }
-    }
-
-    pub fn log_delete(&mut self, table: &str, key: &str, old_value: Row) {
-        if let Some(txn_id) = self.active_txn {
-            self.wal.log(LogRecord::Delete {
-                txn_id,
-                table: table.to_string(),
-                key: key.to_string(),
-                old_value: serde_json::to_string(&old_value).unwrap(),
-            });
-            self.undo_log.push(UndoOp::Delete {
-                table: table.to_string(),
-                key: key.to_string(),
-                old_value,
+                old_data: Some(old_data.to_string()),
             });
         }
     }
 
     pub fn is_active(&self) -> bool {
-        self.active_txn.is_some()
+        self.active
+    }
+
+    pub fn txn_id(&self) -> u64 {
+        self.txn_id
+    }
+
+    pub fn wal_records(&self) -> Vec<WalRecord> {
+        self.wal.read_all()
+    }
+
+    pub fn wal_size(&self) -> u64 {
+        self.wal.file_size()
     }
 }

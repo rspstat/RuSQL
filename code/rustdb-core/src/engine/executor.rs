@@ -1,11 +1,12 @@
 // src/engine/executor.rs
 
 use std::collections::HashMap;
-use crate::transaction::txn_manager::{TransactionManager, UndoOp};
+use crate::transaction::txn_manager::{TransactionManager, UndoEntry};
 use crate::parser::ast::*;
 use crate::catalog::schema::{Catalog, ColumnDef as SchemaCol};
 use crate::storage::disk::DiskManager;
 use crate::storage::btree::BPlusTree;
+use crate::storage::buffer_pool::BufferPool;
 
 pub type Row = HashMap<String, String>;
 
@@ -16,6 +17,7 @@ pub struct Executor {
     pub index_meta: HashMap<String, (String, String)>,
     pub views: HashMap<String, Statement>,
     pub txn: TransactionManager,
+    pub buffer_pool: BufferPool,  // ← 추가
     disk: DiskManager,
 }
 
@@ -61,6 +63,7 @@ impl Executor {
             index_meta: HashMap::new(),
             views: HashMap::new(),
             txn: TransactionManager::new(),
+            buffer_pool: BufferPool::new(),  // ← 추가
             disk,
         }
     }
@@ -90,6 +93,8 @@ impl Executor {
             Statement::DropView { name } => self.exec_drop_view(name),
             Statement::ShowTables => self.exec_show_tables(),
             Statement::Describe { table } => self.exec_describe(table),
+            Statement::ShowBufferPool => self.exec_show_buffer_pool(),
+            Statement::ShowWal => self.exec_show_wal(),
         }
     }
 
@@ -135,6 +140,8 @@ impl Executor {
         if let Some(index) = self.indexes.get_mut(&name) {
             *index = BPlusTree::new();
         }
+        // Buffer Pool 무효화 추가
+        self.buffer_pool.invalidate(&name);
         self.disk.save_table(&name, &[]);
         Ok(format!("Table '{}' truncated.", name))
     }
@@ -231,7 +238,9 @@ impl Executor {
             .push(row);
 
         if !self.txn.is_active() {
-            self.disk.save_table(&table, self.tables.get(&table).unwrap());
+            let rows = self.tables.get(&table).unwrap().clone();
+            self.buffer_pool.write_page(&table, rows);
+            self.buffer_pool.flush_page(&table, &self.disk);
         }
 
         Ok("1 row inserted.".to_string())
@@ -344,8 +353,10 @@ impl Executor {
             }
         }
 
-        let rows = self.tables.get(&table)
-            .ok_or(format!("Table '{}' not found", table))?.clone();
+        if !self.tables.contains_key(&table) {
+            return Err(format!("Table '{}' not found", table));
+        }
+        let rows = self.buffer_pool.get_page(&table, &self.disk);
 
         let result: Vec<Row> = if let Some(ref j) = join {
             let right_rows = self.tables.get(&j.table)
@@ -559,7 +570,9 @@ impl Executor {
             }
         }
 
-        self.disk.save_table(&table, self.tables.get(&table).unwrap());
+        let rows = self.tables.get(&table).unwrap().clone();
+        self.buffer_pool.write_page(&table, rows);
+        self.buffer_pool.flush_page(&table, &self.disk);
         Ok(format!("{} row(s) updated.", count))
     }
 
@@ -601,17 +614,16 @@ impl Executor {
                                     }
                                 }
                                 crate::catalog::schema::FkAction::Cascade => {
-                                    // 연쇄 삭제
                                     if let Some(other_rows) = self.tables.get_mut(other_table) {
                                         other_rows.retain(|r| {
                                             r.get(&col.name).map(|v| v != &del_val).unwrap_or(true)
                                         });
                                     }
                                     let rows_clone = self.tables.get(other_table).unwrap().clone();
-                                    self.disk.save_table(other_table, &rows_clone);
+                                    self.buffer_pool.write_page(other_table, rows_clone.clone());
+                                    self.buffer_pool.flush_page(other_table, &self.disk);
                                 }
                                 crate::catalog::schema::FkAction::SetNull => {
-                                    // NULL로 설정
                                     if let Some(other_rows) = self.tables.get_mut(other_table) {
                                         for row in other_rows.iter_mut() {
                                             if row.get(&col.name).map(|v| v == &del_val).unwrap_or(false) {
@@ -620,7 +632,8 @@ impl Executor {
                                         }
                                     }
                                     let rows_clone = self.tables.get(other_table).unwrap().clone();
-                                    self.disk.save_table(other_table, &rows_clone);
+                                    self.buffer_pool.write_page(other_table, rows_clone.clone());
+                                    self.buffer_pool.flush_page(other_table, &self.disk);
                                 }
                             }
                         }
@@ -660,15 +673,15 @@ impl Executor {
     }
 
     fn exec_rollback(&mut self) -> Result<String, String> {
-        let undo_ops = self.txn.abort()?;
-        for op in undo_ops {
-            match op {
-                UndoOp::Insert { table, key } => {
-                    if let Some(rows) = self.tables.get_mut(&table) {
-                        rows.retain(|r| r.get("id").map(|v| v != &key).unwrap_or(true));
+        let undo_entries = self.txn.abort()?;
+        for entry in undo_entries {
+            match entry.operation.as_str() {
+                "INSERT" => {
+                    if let Some(rows) = self.tables.get_mut(&entry.table) {
+                        rows.retain(|r| r.get("id").map(|v| v != &entry.key).unwrap_or(true));
                     }
-                    let rows_clone = self.tables.get(&table).unwrap().clone();
-                    if let Some(index) = self.indexes.get_mut(&table) {
+                    let rows_clone = self.tables.get(&entry.table).unwrap().clone();
+                    if let Some(index) = self.indexes.get_mut(&entry.table) {
                         *index = BPlusTree::new();
                         for row in &rows_clone {
                             let k = row.values().next().cloned().unwrap_or_default();
@@ -676,24 +689,33 @@ impl Executor {
                             index.insert(k, val_json);
                         }
                     }
-                    self.disk.save_table(&table, self.tables.get(&table).unwrap());
+                    self.disk.save_table(&entry.table, self.tables.get(&entry.table).unwrap());
                 }
-                UndoOp::Update { table, key: _, old_value } => {
-                    if let Some(rows) = self.tables.get_mut(&table) {
-                        for row in rows.iter_mut() {
-                            if row.get("id") == old_value.get("id") {
-                                *row = old_value.clone();
+                "UPDATE" => {
+                    if let Some(old_json) = &entry.old_data {
+                        if let Ok(old_row) = serde_json::from_str::<Row>(old_json) {
+                            if let Some(rows) = self.tables.get_mut(&entry.table) {
+                                for row in rows.iter_mut() {
+                                    if row.get("id") == old_row.get("id") {
+                                        *row = old_row.clone();
+                                    }
+                                }
                             }
+                            self.disk.save_table(&entry.table, self.tables.get(&entry.table).unwrap());
                         }
                     }
-                    self.disk.save_table(&table, self.tables.get(&table).unwrap());
                 }
-                UndoOp::Delete { table, key: _, old_value } => {
-                    if let Some(rows) = self.tables.get_mut(&table) {
-                        rows.push(old_value);
+                "DELETE" => {
+                    if let Some(old_json) = &entry.old_data {
+                        if let Ok(old_row) = serde_json::from_str::<Row>(old_json) {
+                            if let Some(rows) = self.tables.get_mut(&entry.table) {
+                                rows.push(old_row);
+                            }
+                            self.disk.save_table(&entry.table, self.tables.get(&entry.table).unwrap());
+                        }
                     }
-                    self.disk.save_table(&table, self.tables.get(&table).unwrap());
                 }
+                _ => {}
             }
         }
         Ok("Transaction rolled back.".to_string())
@@ -961,6 +983,41 @@ impl Executor {
         }
         output.push_str(sep);
         Ok(output)
+    }
+
+    fn exec_show_buffer_pool(&self) -> Result<String, String> {
+        let mut output = String::new();
+        let sep = "+----------------------+---------+";
+        output.push_str(&format!("{}\n", sep));
+        output.push_str("| 항목                 | 값      |\n");
+        output.push_str(&format!("{}\n", sep));
+        output.push_str(&format!("| 캐시 사용량          | {:7} |\n", self.buffer_pool.usage()));
+        output.push_str(&format!("| 최대 용량            | {:7} |\n", 64));
+        output.push_str(&format!("| 캐시 히트            | {:7} |\n", self.buffer_pool.hit_count));
+        output.push_str(&format!("| 캐시 미스            | {:7} |\n", self.buffer_pool.miss_count));
+        output.push_str(&format!("| 적중률               | {:6.1}% |\n", self.buffer_pool.hit_rate()));
+        output.push_str(sep);
+        Ok(output)
+    }
+
+    fn exec_show_wal(&self) -> Result<String, String> {
+        let records = self.txn.wal_records();
+        let size = self.txn.wal_size();
+        let mut out = String::new();
+        let sep = "+------------+----------+----------+";
+        out.push_str(&format!("WAL 파일 크기: {} bytes\n", size));
+        out.push_str(&format!("{}\n", sep));
+        out.push_str("| op         | table    | key      |\n");
+        out.push_str(&format!("{}\n", sep));
+        for r in &records {
+            out.push_str(&format!("| {:<10} | {:<8} | {:<8} |\n",
+                format!("{:?}", r.op),
+                &r.table_name[..r.table_name.len().min(8)],
+                &r.key[..r.key.len().min(8)],
+            ));
+        }
+        out.push_str(sep);
+        Ok(out)
     }
 }
 

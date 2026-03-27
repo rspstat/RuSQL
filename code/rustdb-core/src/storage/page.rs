@@ -1,4 +1,4 @@
-pub const PAGE_SIZE: usize = 4096;
+pub const PAGE_SIZE: usize = 16384;
 pub const MAGIC: u32 = 0x52444200; // "RDB\0"
 pub const VERSION: u16 = 1;
 

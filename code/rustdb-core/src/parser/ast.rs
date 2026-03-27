@@ -154,4 +154,6 @@ pub enum Statement {
     Describe {
         table: String,
     },
+    ShowBufferPool,
+    ShowWal,
 }
