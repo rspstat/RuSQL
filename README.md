@@ -10,7 +10,7 @@
 |------|------|
 | DB 엔진 | B+Tree, WAL, Buffer Pool, 트랜잭션 직접 구현 |
 | SQL 지원 | DDL / DML / JOIN / 제약조건 / 트랜잭션 |
-| MCP | 자연어 입력 → SQL 자동 생성 → 실행 (AI API 연동) |
+| MCP | 자연어 입력 → SQL 자동 생성 → 실행 |
 | DBMS | TCP 서버, 다중 클라이언트 동시 접속 |
 | 언어 | Rust |
 
@@ -62,11 +62,11 @@
 - [x] WAL (Write-Ahead Logging) - 바이너리 redo log
 - [x] BEGIN / COMMIT / ROLLBACK
 - [x] Undo Log 기반 롤백
-- [x] COMMIT 후 WAL 자동 정리 (체크포인트)
+- [x] 트랜잭션 내부 작업만 WAL 기록
 
 ### 인덱스 & 저장
 - [x] B+Tree 인덱스
-- [x] 바이너리 디스크 저장 (.rdb 포맷)
+- [x] 바이너리 디스크 저장 (.rdb 포맷, 16KB 페이지)
 - [x] Buffer Pool (LRU 캐시, 64페이지)
 
 ### 모니터링
@@ -89,6 +89,12 @@
 
 ## 진행 예정
 
+### 엔진 보완
+- [ ] TRUNCATE 후 AUTO INCREMENT 리셋
+- [ ] UPDATE WAL 로깅 누락 수정
+- [ ] NULL 타입 표준화 (현재 빈 문자열로 처리 중)
+- [ ] WAL 기반 장애 복구 (Crash Recovery)
+
 ### 엔진 고도화
 - [ ] 클러스터드 인덱스
 - [ ] 복합 인덱스
@@ -106,6 +112,15 @@
 - [ ] AI API 클라이언트 (`mcp/client.rs`)
 - [ ] 자연어 → SQL 변환 (`\ai` 명령어)
 - [ ] 변환된 SQL 확인 후 실행
+
+### UI
+- [ ] VIEW / INDEX 사이드바 표시
+- [ ] 쿼리 히스토리
+- [ ] 결과 CSV 내보내기
+- [ ] 다크 / 라이트 테마 전환
+
+### 저장소
+- [ ] 데이터 압축 (.rdb 파일)
 
 <br/>
 
@@ -155,7 +170,7 @@ SHOW WAL;
 | 버전 | v2.1.3 |
 | 인덱스 | B+Tree (직접 구현) |
 | 트랜잭션 | WAL (바이너리 redo log) + Undo Log |
-| 캐시 | Buffer Pool (LRU, 64페이지) |
+| 캐시 | Buffer Pool (LRU, 64페이지, 16KB) |
 | 저장 | 바이너리 .rdb 포맷 |
 | UI | Tauri + React + Monaco Editor |
 | AI 연동 | MCP AI API (예정) |
@@ -202,7 +217,7 @@ code/
 │          ↓                      │
 │    B+Tree 인덱스                 │
 │    WAL 바이너리 redo log         │
-│    Buffer Pool (LRU 64p)        │
+│    Buffer Pool (LRU 64p 16KB)   │
 │    바이너리 .rdb 저장            │
 │                                 │
 └─────────────────────────────────┘
