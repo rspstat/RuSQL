@@ -8,7 +8,7 @@
 
 | 분류 | 내용 |
 |------|------|
-| DB 엔진 | B+Tree, WAL, Buffer Pool, 트랜잭션 직접 구현 |
+| DB 엔진 | B+Tree, WAL, Buffer Pool, 트랜잭션 |
 | SQL 지원 | DDL / DML / JOIN / 제약조건 / 트랜잭션 |
 | MCP | 자연어 입력 → SQL 자동 생성 → 실행 |
 | DBMS | TCP 서버, 다중 클라이언트 동시 접속 |
@@ -48,6 +48,7 @@
 - [x] 서브쿼리 (WHERE col IN (SELECT ...))
 - [x] 중첩 서브쿼리 (WHERE col > (SELECT AVG(...)))
 - [x] SHOW TABLES / DESCRIBE
+- [x] WHERE IS NULL / IS NOT NULL
 
 ### 제약 조건
 - [x] PRIMARY KEY
@@ -63,11 +64,13 @@
 - [x] BEGIN / COMMIT / ROLLBACK
 - [x] Undo Log 기반 롤백
 - [x] 트랜잭션 내부 작업만 WAL 기록
+- [x] WAL 기반 Crash Recovery (재시작 시 자동 복구)  ← 추가
 
 ### 인덱스 & 저장
 - [x] B+Tree 인덱스
 - [x] 바이너리 디스크 저장 (.rdb 포맷, 16KB 페이지)
 - [x] Buffer Pool (LRU 캐시, 64페이지)
+- [x] TRUNCATE 후 AUTO INCREMENT 리셋  ← 추가
 
 ### 모니터링
 - [x] SHOW BUFFER POOL (캐시 히트율, 사용량)
@@ -88,12 +91,6 @@
 <br/>
 
 ## 진행 예정
-
-### 엔진 보완
-- [ ] TRUNCATE 후 AUTO INCREMENT 리셋
-- [ ] UPDATE WAL 로깅 누락 수정
-- [ ] NULL 타입 표준화 (현재 빈 문자열로 처리 중)
-- [ ] WAL 기반 장애 복구 (Crash Recovery)
 
 ### 엔진 고도화
 - [ ] 클러스터드 인덱스
@@ -168,7 +165,7 @@ SHOW WAL;
 |------|------|
 | 언어 | Rust |
 | 버전 | v2.1.3 |
-| 인덱스 | B+Tree (직접 구현) |
+| 인덱스 | B+Tree |
 | 트랜잭션 | WAL (바이너리 redo log) + Undo Log |
 | 캐시 | Buffer Pool (LRU, 64페이지, 16KB) |
 | 저장 | 바이너리 .rdb 포맷 |

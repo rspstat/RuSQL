@@ -55,7 +55,10 @@ pub enum JoinType {
 
 #[derive(Debug, PartialEq, Clone)]
 pub enum Operator {
-    Eq, Ne, Gt, Lt, Gte, Lte, In, Like, Between,
+    Eq, Ne, Gt, Lt, Gte, Lte,
+    In, Like, Between,
+    IsNull,    // ← 추가
+    IsNotNull, // ← 추가
 }
 
 #[derive(Debug, PartialEq, Clone)]

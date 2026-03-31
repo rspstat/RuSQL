@@ -31,6 +31,9 @@ pub enum Token {
 
     // FK 제약조건
     Cascade, Restrict,
+
+    // NOT NULL
+    Is,
 }
 
 pub struct Lexer {
@@ -144,6 +147,7 @@ impl Lexer {
             "CONSTRAINT" => Token::Constraint,
             "CASCADE"  => Token::Cascade,
             "RESTRICT" => Token::Restrict,
+            "IS" => Token::Is,
             _           => Token::Ident(s),
         }
     }

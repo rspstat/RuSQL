@@ -1,5 +1,5 @@
-use crate::transaction::wal::{WalManager, WalRecord, WalOp};
-use crate::engine::executor::Row;
+use crate::transaction::wal::{WalManager, WalRecord};
+// use crate::engine::executor::Row;
 
 #[derive(Debug, Clone)]
 pub struct UndoEntry {
@@ -119,5 +119,9 @@ impl TransactionManager {
 
     pub fn wal_size(&self) -> u64 {
         self.wal.file_size()
+    }
+
+    pub fn wal_clear(&self) {
+        self.wal.clear();
     }
 }

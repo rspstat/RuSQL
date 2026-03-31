@@ -1,7 +1,7 @@
 // src/engine/executor.rs
 
 use std::collections::HashMap;
-use crate::transaction::txn_manager::{TransactionManager, UndoEntry};
+use crate::transaction::txn_manager::TransactionManager;
 use crate::parser::ast::*;
 use crate::catalog::schema::{Catalog, ColumnDef as SchemaCol};
 use crate::storage::disk::DiskManager;
@@ -9,6 +9,7 @@ use crate::storage::btree::BPlusTree;
 use crate::storage::buffer_pool::BufferPool;
 
 pub type Row = HashMap<String, String>;
+pub const NULL_VALUE: &str = "NULL";
 
 pub struct Executor {
     pub catalog: Catalog,
@@ -56,16 +57,20 @@ impl Executor {
             }
         }
 
-        Executor {
+        let mut executor = Executor {
             catalog,
             tables,
             indexes,
             index_meta: HashMap::new(),
             views: HashMap::new(),
             txn: TransactionManager::new(),
-            buffer_pool: BufferPool::new(),  // ← 추가
+            buffer_pool: BufferPool::new(),
             disk,
-        }
+        };
+
+        // WAL Crash Recovery
+        executor.recover_from_wal();
+        executor
     }
 
     pub fn execute(&mut self, stmt: Statement) -> Result<String, String> {
@@ -140,7 +145,10 @@ impl Executor {
         if let Some(index) = self.indexes.get_mut(&name) {
             *index = BPlusTree::new();
         }
-        // Buffer Pool 무효화 추가
+        // AUTO INCREMENT 카운터 리셋
+        if let Some(schema) = self.catalog.get_table_mut(&name) {
+            schema.auto_increment_counters.clear();
+        }
         self.buffer_pool.invalidate(&name);
         self.disk.save_table(&name, &[]);
         Ok(format!("Table '{}' truncated.", name))
@@ -179,7 +187,7 @@ impl Executor {
 
         // NOT NULL 검사
         for (i, (_, not_null, _, _)) in constraints.iter().enumerate() {
-            if *not_null && final_values[i].is_empty() {
+            if *not_null && (final_values[i].is_empty() || final_values[i] == NULL_VALUE) {
                 return Err(format!("Column '{}' cannot be NULL", col_names[i]));
             }
         }
@@ -202,14 +210,15 @@ impl Executor {
 
         let mut row = Row::new();
         for (col, val) in col_names.iter().zip(final_values.iter()) {
-            row.insert(col.clone(), val.clone());
+            let stored_val = if val.is_empty() { NULL_VALUE.to_string() } else { val.clone() };
+            row.insert(col.clone(), stored_val);
         }
 
         // FOREIGN KEY 검사
         for col in &schema.columns {
             if let Some(fk) = &col.foreign_key {
                 let val = row.get(&col.name).cloned().unwrap_or_default();
-                if val.is_empty() { continue; }
+                if val.is_empty() || val == NULL_VALUE { continue; }
                 let ref_rows = self.tables.get(&fk.ref_table)
                     .ok_or(format!("Referenced table '{}' not found", fk.ref_table))?;
                 let exists = ref_rows.iter().any(|r| {
@@ -288,6 +297,8 @@ impl Executor {
             ConditionValue::Literal(lit) => {
                 match &cond.operator {
                     Operator::Eq  => &val == lit,
+                    Operator::IsNull    => val == NULL_VALUE || val.is_empty(),
+                    Operator::IsNotNull => val != NULL_VALUE && !val.is_empty(),
                     Operator::Ne  => &val != lit,
                     Operator::In  => false,
                     Operator::Like => {
@@ -533,7 +544,8 @@ impl Executor {
             let line = col_names.iter().zip(col_widths.iter())
                 .map(|(col, w)| {
                     let val = row.get(col).cloned().unwrap_or_default();
-                    format!(" {:width$} ", val, width = w)
+                    let display = if val == NULL_VALUE { "NULL".to_string() } else { val };
+                    format!(" {:width$} ", display, width = w)
                 }).collect::<Vec<_>>().join("|");
             output.push_str(&format!("|{}|\n", line));
         }
@@ -548,25 +560,45 @@ impl Executor {
         assignments: Vec<(String, String)>,
         condition: Option<Condition>,
     ) -> Result<String, String> {
+        // PK 컬럼명 먼저 추출 (borrow 분리)
+        let pk_col = self.catalog.get_table(&table)
+            .ok_or(format!("Table '{}' not found", table))?
+            .columns.iter()
+            .find(|c| c.primary_key)
+            .map(|c| c.name.clone())
+            .unwrap_or_else(|| "id".to_string());
+
         let rows = self.tables.get_mut(&table)
             .ok_or(format!("Table '{}' not found", table))?;
+
         let mut count = 0;
+        let mut undo_entries: Vec<(String, String, String)> = Vec::new();
+
         for row in rows.iter_mut() {
             if Self::matches_condition(row, &condition) {
+                let key = row.get(&pk_col).cloned().unwrap_or_default();
+                let old_json = serde_json::to_string(row).unwrap();
                 for (col, val) in &assignments {
                     row.insert(col.clone(), val.clone());
                 }
+                let new_json = serde_json::to_string(row).unwrap();
+                undo_entries.push((key, old_json, new_json));
                 count += 1;
             }
+        }
+
+        // WAL 로깅 (트랜잭션 활성 시만)
+        for (key, old_json, new_json) in &undo_entries {
+            self.txn.log_update(&table, key, old_json, new_json);
         }
 
         let rows_clone = self.tables.get(&table).unwrap().clone();
         if let Some(index) = self.indexes.get_mut(&table) {
             *index = BPlusTree::new();
             for row in &rows_clone {
-                let key = row.values().next().cloned().unwrap_or_default();
+                let k = row.get(&pk_col).cloned().unwrap_or_default();
                 let val_json = serde_json::to_string(row).unwrap();
-                index.insert(key, val_json);
+                index.insert(k, val_json);
             }
         }
 
@@ -694,14 +726,22 @@ impl Executor {
                 "UPDATE" => {
                     if let Some(old_json) = &entry.old_data {
                         if let Ok(old_row) = serde_json::from_str::<Row>(old_json) {
+                            // PK 컬럼명 추출
+                            let pk_col = self.catalog.get_table(&entry.table)
+                                .and_then(|s| s.columns.iter().find(|c| c.primary_key).map(|c| c.name.clone()))
+                                .unwrap_or_else(|| "id".to_string());
+
                             if let Some(rows) = self.tables.get_mut(&entry.table) {
                                 for row in rows.iter_mut() {
-                                    if row.get("id") == old_row.get("id") {
+                                    if row.get(&pk_col).map(|v| v == &entry.key).unwrap_or(false) {
                                         *row = old_row.clone();
+                                        break;
                                     }
                                 }
                             }
-                            self.disk.save_table(&entry.table, self.tables.get(&entry.table).unwrap());
+                            let rows_clone = self.tables.get(&entry.table).unwrap().clone();
+                            self.buffer_pool.write_page(&entry.table, rows_clone.clone());
+                            self.buffer_pool.flush_page(&entry.table, &self.disk);
                         }
                     }
                 }
@@ -1018,6 +1058,86 @@ impl Executor {
         }
         out.push_str(sep);
         Ok(out)
+    }
+
+    fn recover_from_wal(&mut self) {
+        let records = self.txn.wal_records();
+        if records.is_empty() { return; }
+
+        // COMMIT 레코드가 있는지 확인
+        let has_commit = records.iter().any(|r| {
+            matches!(r.op, crate::transaction::wal::WalOp::Commit)
+        });
+
+        if !has_commit {
+            // 미완료 트랜잭션 → WAL 삭제 (rollback 처리)
+            self.txn.wal_clear();
+            eprintln!("[Recovery] 미완료 트랜잭션 감지 → WAL 삭제");
+            return;
+        }
+
+        // COMMIT된 트랜잭션 replay
+        eprintln!("[Recovery] WAL replay 시작 ({} 레코드)", records.len());
+        for record in &records {
+            match record.op {
+                crate::transaction::wal::WalOp::Insert => {
+                    if let Ok(row) = serde_json::from_str::<Row>(&record.data) {
+                        let table = &record.table_name;
+                        if let Some(rows) = self.tables.get_mut(table) {
+                            // 이미 존재하면 스킵
+                            let pk_col = self.catalog.get_table(table)
+                                .and_then(|s| s.columns.iter().find(|c| c.primary_key).map(|c| c.name.clone()))
+                                .unwrap_or_else(|| "id".to_string());
+                            let key = row.get(&pk_col).cloned().unwrap_or_default();
+                            let exists = rows.iter().any(|r| r.get(&pk_col).map(|v| v == &key).unwrap_or(false));
+                            if !exists {
+                                rows.push(row.clone());
+                                let val_json = serde_json::to_string(&row).unwrap();
+                                if let Some(index) = self.indexes.get_mut(table) {
+                                    index.insert(key, val_json);
+                                }
+                                self.disk.save_table(table, self.tables.get(table).unwrap());
+                                eprintln!("[Recovery] INSERT replay: {}", table);
+                            }
+                        }
+                    }
+                }
+                crate::transaction::wal::WalOp::Update => {
+                    if let Ok(new_row) = serde_json::from_str::<Row>(&record.data) {
+                        let table = &record.table_name;
+                        let pk_col = self.catalog.get_table(table)
+                            .and_then(|s| s.columns.iter().find(|c| c.primary_key).map(|c| c.name.clone()))
+                            .unwrap_or_else(|| "id".to_string());
+                        if let Some(rows) = self.tables.get_mut(table) {
+                            for row in rows.iter_mut() {
+                                if row.get(&pk_col) == new_row.get(&pk_col) {
+                                    *row = new_row.clone();
+                                    break;
+                                }
+                            }
+                        }
+                        self.disk.save_table(table, self.tables.get(table).unwrap());
+                        eprintln!("[Recovery] UPDATE replay: {}", table);
+                    }
+                }
+                crate::transaction::wal::WalOp::Delete => {
+                    let table = &record.table_name;
+                    let pk_col = self.catalog.get_table(table)
+                        .and_then(|s| s.columns.iter().find(|c| c.primary_key).map(|c| c.name.clone()))
+                        .unwrap_or_else(|| "id".to_string());
+                    if let Some(rows) = self.tables.get_mut(table) {
+                        rows.retain(|r| r.get(&pk_col).map(|v| v != &record.key).unwrap_or(true));
+                    }
+                    self.disk.save_table(table, self.tables.get(table).unwrap());
+                    eprintln!("[Recovery] DELETE replay: {}", table);
+                }
+                _ => {}
+            }
+        }
+
+        // Replay 완료 후 WAL 삭제
+        self.txn.wal_clear();
+        eprintln!("[Recovery] WAL replay 완료 → WAL 삭제");
     }
 }
 

@@ -146,6 +146,39 @@ impl Parser {
         }
 
         let operator = match self.advance() {
+            // IS NULL / IS NOT NULL
+            Some(Token::Is) => {
+                match self.peek() {
+                    Some(Token::Not) => {
+                        self.advance();
+                        match self.advance() {
+                            Some(Token::Null) => {
+                                let cond = Condition {
+                                    column,
+                                    operator: Operator::IsNotNull,
+                                    value: ConditionValue::Literal(String::new()),
+                                    and: None,
+                                    or: None,
+                                };
+                                return self.parse_condition_chain(cond);
+                            }
+                            other => return Err(format!("Expected NULL, got {:?}", other)),
+                        }
+                    }
+                    Some(Token::Null) => {
+                        self.advance();
+                        let cond = Condition {
+                            column,
+                            operator: Operator::IsNull,
+                            value: ConditionValue::Literal(String::new()),
+                            and: None,
+                            or: None,
+                        };
+                        return self.parse_condition_chain(cond);
+                    }
+                    other => return Err(format!("Expected NULL or NOT, got {:?}", other)),
+                }
+            }
             Some(Token::Eq)  => Operator::Eq,
             Some(Token::Ne)  => Operator::Ne,
             Some(Token::Gt)  => Operator::Gt,

@@ -1,5 +1,5 @@
 use std::fs::{File, OpenOptions};
-use std::io::{Write, Read, BufWriter, Seek, SeekFrom};
+use std::io::{Write, Read};
 use std::path::Path;
 
 pub const WAL_PATH: &str = "rustdb.wal";
