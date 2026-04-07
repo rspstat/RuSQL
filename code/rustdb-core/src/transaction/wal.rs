@@ -4,6 +4,9 @@ use std::path::Path;
 
 pub const WAL_PATH: &str = "rustdb.wal";
 
+/// WAL 자동 체크포인트 임계값 (512KB)
+pub const AUTO_CHECKPOINT_BYTES: u64 = 512 * 1024;
+
 /// WAL 레코드 op 코드
 #[repr(u8)]
 #[derive(Debug, Clone, PartialEq)]
@@ -182,5 +185,37 @@ impl WalManager {
     /// WAL 파일 크기 (bytes)
     pub fn file_size(&self) -> u64 {
         std::fs::metadata(&self.path).map(|m| m.len()).unwrap_or(0)
+    }
+
+    /// 마지막 CHECKPOINT 이후 레코드만 남기고 WAL을 재작성한다.
+    /// CHECKPOINT 레코드 자체는 포함시킨다 (복구 시작점 표시).
+    pub fn truncate_to_last_checkpoint(&self) {
+        let records = self.read_all();
+        if records.is_empty() { return; }
+
+        // 마지막 CHECKPOINT 위치 찾기
+        let last_cp = records.iter().rposition(|r| r.op == WalOp::Checkpoint);
+        let Some(cp_idx) = last_cp else { return };
+
+        // CHECKPOINT 이전 레코드는 이미 디스크에 반영됐으므로 제거
+        let remaining = &records[cp_idx..];
+
+        // CHECKPOINT 레코드 하나만 남은 경우 WAL 전체 초기화
+        if remaining.len() <= 1 {
+            self.clear();
+            return;
+        }
+
+        // 나머지 레코드로 WAL 재작성
+        let mut buf = Vec::new();
+        for r in remaining {
+            buf.extend_from_slice(&Self::encode(r));
+        }
+        std::fs::write(&self.path, buf).ok();
+    }
+
+    /// WAL 자동 체크포인트가 필요한지 확인 (임계값 초과 여부)
+    pub fn needs_auto_checkpoint(&self) -> bool {
+        self.file_size() >= AUTO_CHECKPOINT_BYTES
     }
 }

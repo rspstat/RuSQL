@@ -1,9 +1,9 @@
-// use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::Path;
 use crate::engine::executor::Row;
 use crate::storage::page::PageHeader;
+use crate::catalog::schema::TableSchema;
 
 pub struct DiskManager {
     data_dir: String,
@@ -16,17 +16,51 @@ impl DiskManager {
         DiskManager { data_dir }
     }
 
-    // 스키마는 그대로 JSON 유지 (스키마는 작아서 바이너리 불필요)
-    pub fn save_schema(&self, table: &str, columns: &[String]) {
+    /// 전체 TableSchema를 JSON으로 저장 (PK, auto_increment, 타입 등 포함)
+    pub fn save_schema(&self, table: &str, schema: &TableSchema) {
         let path = format!("{}/{}.schema.json", self.data_dir, table);
-        let json = serde_json::to_string(columns).unwrap();
+        let json = serde_json::to_string_pretty(schema).unwrap();
         fs::write(path, json).unwrap();
     }
 
-    pub fn load_schema(&self, table: &str) -> Option<Vec<String>> {
+    /// 저장된 TableSchema 로드. 구버전(컬럼명만 있는) 파일도 호환
+    pub fn load_schema(&self, table: &str) -> Option<TableSchema> {
         let path = format!("{}/{}.schema.json", self.data_dir, table);
-        let json = fs::read_to_string(path).ok()?;
-        serde_json::from_str(&json).ok()
+        let json = fs::read_to_string(&path).ok()?;
+
+        // 신버전: TableSchema JSON
+        if let Ok(schema) = serde_json::from_str::<TableSchema>(&json) {
+            return Some(schema);
+        }
+
+        // 구버전 폴백: 컬럼명 배열 ["col1", "col2", ...]
+        if let Ok(col_names) = serde_json::from_str::<Vec<String>>(&json) {
+            use crate::parser::ast::DataType;
+            use crate::catalog::schema::ColumnDef;
+            let columns = col_names.iter().map(|c| ColumnDef {
+                name: c.clone(),
+                data_type: DataType::Text,
+                primary_key: false,
+                not_null: false,
+                unique: false,
+                auto_increment: false,
+                foreign_key: None,
+            }).collect();
+            return Some(TableSchema {
+                name: table.to_string(),
+                columns,
+                auto_increment_counters: std::collections::HashMap::new(),
+            });
+        }
+
+        None
+    }
+
+    /// 구버전 호환: 컬럼명만 저장 (내부용)
+    pub fn save_schema_columns(&self, table: &str, columns: &[String]) {
+        let path = format!("{}/{}.schema.json", self.data_dir, table);
+        let json = serde_json::to_string(columns).unwrap();
+        fs::write(path, json).unwrap();
     }
 
     // 데이터는 바이너리 .rdb 포맷

@@ -73,7 +73,10 @@ impl Parser {
             Some(Token::Alter) => self.parse_alter(),
             Some(Token::Show)     => self.parse_show(),
             Some(Token::Describe) => self.parse_describe(),
-            Some(Token::Truncate) => self.parse_truncate(),
+            Some(Token::Truncate)    => self.parse_truncate(),
+            Some(Token::Checkpoint)  => Ok(Statement::Checkpoint),
+            Some(Token::Set)         => self.parse_set(),
+            Some(Token::Vacuum)      => self.parse_vacuum(),
             other => Err(format!("Unknown statement: {:?}", other)),
         }
     }
@@ -359,7 +362,18 @@ impl Parser {
             None
         };
 
-        Ok(Statement::Select { table, columns, condition, join, order_by, group_by, having, limit })
+        // FOR UPDATE
+        let for_update = if self.peek() == Some(&Token::For) {
+            self.advance();
+            match self.advance() {
+                Some(Token::Update) => true,
+                other => return Err(format!("Expected UPDATE after FOR, got {:?}", other)),
+            }
+        } else {
+            false
+        };
+
+        Ok(Statement::Select { table, columns, condition, join, order_by, group_by, having, limit, for_update })
     }
 
     fn parse_insert(&mut self) -> Result<Statement, String> {
@@ -662,12 +676,17 @@ impl Parser {
             Some(Token::LParen) => {}
             other => return Err(format!("Expected '(', got {:?}", other)),
         }
-        let column = self.expect_ident()?;
+        // 컬럼 목록 파싱 (단일 또는 복합)
+        let mut columns = vec![self.expect_ident()?];
+        while self.peek() == Some(&Token::Comma) {
+            self.advance();
+            columns.push(self.expect_ident()?);
+        }
         match self.advance() {
             Some(Token::RParen) => {}
             other => return Err(format!("Expected ')', got {:?}", other)),
         }
-        Ok(Statement::CreateIndex { index_name, table, column })
+        Ok(Statement::CreateIndex { index_name, table, columns })
     }
 
     fn parse_drop_index(&mut self) -> Result<Statement, String> {
@@ -707,7 +726,45 @@ impl Parser {
                 }
             }
             Some(Token::Ident(s)) if s == "WAL" => Ok(Statement::ShowWal),
-            other => Err(format!("Expected TABLES or BUFFER, got {:?}", other)),
+            Some(Token::Isolation) => {
+                match self.advance() {
+                    Some(Token::Level) => Ok(Statement::ShowIsolationLevel),
+                    other => Err(format!("Expected LEVEL, got {:?}", other)),
+                }
+            }
+            Some(Token::Locks) => Ok(Statement::ShowLocks),
+            other => Err(format!("Expected TABLES, BUFFER, WAL, ISOLATION, or LOCKS, got {:?}", other)),
+        }
+    }
+
+    fn parse_set(&mut self) -> Result<Statement, String> {
+        match self.advance() {
+            Some(Token::Isolation) => {
+                match self.advance() {
+                    Some(Token::Level) => {}
+                    other => return Err(format!("Expected LEVEL, got {:?}", other)),
+                }
+                let level = match self.advance() {
+                    // READ UNCOMMITTED / READ COMMITTED
+                    Some(Token::Ident(s)) if s.to_uppercase() == "READ" => {
+                        match self.advance() {
+                            Some(Token::Uncommitted) => IsolationLevel::ReadUncommitted,
+                            Some(Token::Committed)   => IsolationLevel::ReadCommitted,
+                            other => return Err(format!("Expected UNCOMMITTED or COMMITTED after READ, got {:?}", other)),
+                        }
+                    }
+                    // REPEATABLE READ
+                    Some(Token::Repeatable) => {
+                        self.advance(); // consume trailing "READ"
+                        IsolationLevel::RepeatableRead
+                    }
+                    // SERIALIZABLE
+                    Some(Token::Serializable) => IsolationLevel::Serializable,
+                    other => return Err(format!("Expected isolation level name, got {:?}", other)),
+                };
+                Ok(Statement::SetIsolationLevel(level))
+            }
+            other => Err(format!("Expected ISOLATION, got {:?}", other)),
         }
     }
 
@@ -723,5 +780,21 @@ impl Parser {
         }
         let name = self.expect_ident()?;
         Ok(Statement::TruncateTable { name })
+    }
+
+    fn parse_vacuum(&mut self) -> Result<Statement, String> {
+        // VACUUM           — 모든 테이블 정리
+        // VACUUM table     — 특정 테이블만 정리
+        let table = match self.peek() {
+            Some(Token::Ident(_)) => {
+                if let Some(Token::Ident(s)) = self.advance() {
+                    Some(s.clone())
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        };
+        Ok(Statement::Vacuum { table })
     }
 }

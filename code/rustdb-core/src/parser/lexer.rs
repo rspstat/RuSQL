@@ -34,6 +34,24 @@ pub enum Token {
 
     // NOT NULL
     Is,
+
+    // 체크포인트
+    Checkpoint,
+
+    // 격리 수준
+    Isolation,
+    Level,
+    Uncommitted,
+    Committed,
+    Repeatable,
+    Serializable,
+
+    // MVCC
+    Vacuum,
+
+    // Row-level locking
+    For,
+    Locks,
 }
 
 pub struct Lexer {
@@ -147,8 +165,18 @@ impl Lexer {
             "CONSTRAINT" => Token::Constraint,
             "CASCADE"  => Token::Cascade,
             "RESTRICT" => Token::Restrict,
-            "IS" => Token::Is,
-            _           => Token::Ident(s),
+            "IS"           => Token::Is,
+            "CHECKPOINT"   => Token::Checkpoint,
+            "ISOLATION"    => Token::Isolation,
+            "LEVEL"        => Token::Level,
+            "UNCOMMITTED"  => Token::Uncommitted,
+            "COMMITTED"    => Token::Committed,
+            "REPEATABLE"   => Token::Repeatable,
+            "SERIALIZABLE" => Token::Serializable,
+            "VACUUM"       => Token::Vacuum,
+            "FOR"          => Token::For,
+            "LOCKS"        => Token::Locks,
+            _              => Token::Ident(s),
         }
     }
 

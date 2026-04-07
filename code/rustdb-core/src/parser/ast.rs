@@ -1,4 +1,14 @@
 #[derive(Debug, PartialEq, Clone)]
+pub enum IsolationLevel {
+    ReadUncommitted,  // 더티 읽기 허용
+    ReadCommitted,    // 커밋된 데이터만 읽기
+    RepeatableRead,   // 트랜잭션 시작 시 스냅샷 고정
+    Serializable,     // RepeatableRead + 팬텀 읽기 방지 검증
+}
+
+use serde::{Serialize, Deserialize};
+
+#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub enum DataType {
     Int,
     Text,
@@ -124,6 +134,7 @@ pub enum Statement {
         group_by: Option<Vec<String>>,
         having: Option<Condition>,
         limit: Option<usize>,
+        for_update: bool,  // SELECT ... FOR UPDATE (행 잠금)
     },
     Update {
         table: String,
@@ -141,7 +152,7 @@ pub enum Statement {
     CreateIndex {
         index_name: String,
         table: String,
-        column: String,
+        columns: Vec<String>,
     },
     DropIndex {
         index_name: String,
@@ -159,4 +170,12 @@ pub enum Statement {
     },
     ShowBufferPool,
     ShowWal,
+    Checkpoint,
+    SetIsolationLevel(IsolationLevel),
+    ShowIsolationLevel,
+    /// VACUUM [table] — 논리 삭제된 행을 물리적으로 제거
+    Vacuum {
+        table: Option<String>,
+    },
+    ShowLocks,
 }

@@ -1,14 +1,15 @@
 use crate::parser::ast::DataType;
 use std::collections::HashMap;
+use serde::{Serialize, Deserialize};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum FkAction {
     Restrict,
     Cascade,
     SetNull,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ForeignKey {
     pub column: String,
     pub ref_table: String,
@@ -16,7 +17,7 @@ pub struct ForeignKey {
     pub on_delete: FkAction,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ColumnDef {
     pub name: String,
     pub data_type: DataType,
@@ -27,7 +28,7 @@ pub struct ColumnDef {
     pub foreign_key: Option<ForeignKey>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TableSchema {
     pub name: String,
     pub columns: Vec<ColumnDef>,
