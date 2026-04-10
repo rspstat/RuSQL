@@ -100,14 +100,25 @@
 - [x] SHOW ISOLATION LEVEL
 - [x] SHOW LOCKS
 
+### SQL 문법
+- [x] DROP TABLE IF EXISTS
+- [x] table.column dot notation (SELECT / JOIN ON / GROUP BY / ORDER BY)
+- [x] 주석 지원 (-- 한 줄 / # MySQL 스타일 / /* */ 블록)
+- [x] 주석 내 세미콜론 안전 처리 (쿼리 분리 오작동 없음)
+
 ### 편의 기능
 - [x] 세미콜론(;) 구분 멀티 쿼리 입력
 - [x] REPL 터미널 인터페이스
 
 ### UI (rustdb-ui)
 - [x] Tauri + React 데스크탑 앱
-- [x] Monaco Editor (SQL 문법 강조)
+- [x] Monaco Editor (SQL 문법 강조, 주석 회색)
 - [x] 사이드바 테이블 / 컬럼 목록
+- [x] 사이드바 VIEW / INDEX 섹션 (접기/펼치기, 개수 뱃지)
+- [x] 사이드바 너비 조절 (드래그)
+- [x] 테이블 우클릭 컨텍스트 메뉴 (MySQL 스타일)
+- [x] GUI 테이블 브라우저 뷰 (데이터 그리드 + 필터)
+- [x] TCP 서버 관리 뷰 (시작 / 중지 / 로그)
 - [x] 멀티 쿼리 결과 표시
 - [x] 쿼리 자동 저장
 - [x] 결과창 크기 조절 (드래그)
@@ -117,8 +128,8 @@
 ## 진행 예정
 
 ### 네트워크
-- [ ] TCP 서버 (포트 7878)
-- [ ] 멀티 클라이언트 동시 접속 (스레드 per 클라이언트)
+- [x] TCP 서버 (포트 7878)
+- [x] 멀티 클라이언트 동시 접속 (스레드 per 클라이언트)
 - [ ] 클라이언트 CLI (`rustdb-client`)
 
 ### MCP 연동
@@ -127,7 +138,12 @@
 - [ ] 변환된 SQL 확인 후 실행
 
 ### UI
-- [ ] VIEW / INDEX 사이드바 표시
+- [x] TCP 서버 관리 UI (시작 / 중지 / 포트 설정 / 접속 가이드 / 활동 로그)
+- [x] GUI 테이블 브라우저 (테이블 선택 → 데이터 그리드, 필터링, 행 번호)
+- [x] 테이블 우클릭 컨텍스트 메뉴 (SELECT / DESCRIBE / DROP / TRUNCATE / 복사)
+- [x] SQL 주석 강조 (회색, -- / # / /* */ 세 가지 형식)
+- [x] VIEW / INDEX 사이드바 표시 (섹션 접기/펼치기, 개수 뱃지)
+- [x] 사이드바 너비 드래그 조절
 - [ ] 쿼리 히스토리
 - [ ] 결과 CSV 내보내기
 - [ ] 다크 / 라이트 테마 전환
@@ -153,16 +169,28 @@ cd rustdb-ui && npm run tauri dev
 
 ## 지원 SQL 문법 예시
 ```sql
+-- 주석 (세 가지 형식 모두 지원)
+-- 한 줄 주석
+# MySQL 스타일 주석
+/* 블록 주석 */
+
 -- 테이블 생성 / 데이터 조작
-CREATE TABLE users (id INT PRIMARY KEY AUTO INCREMENT, name TEXT NOT NULL, age INT);
-CREATE TABLE orders (id INT AUTO INCREMENT, user_id INT REFERENCES users(id) ON DELETE CASCADE, amount INT);
-INSERT INTO users VALUES (, Alice, 25);
+DROP TABLE IF EXISTS users;
+CREATE TABLE users (id INT PRIMARY KEY AUTO INCREMENT, name TEXT NOT NULL, age INT, city TEXT);
+CREATE TABLE orders (id INT AUTO INCREMENT, user_id INT REFERENCES users(id) ON DELETE CASCADE, amount INT, status TEXT);
+INSERT INTO users VALUES (, 'Alice', 30, 'Seoul');
 SELECT * FROM users WHERE age BETWEEN 20 AND 30;
 SELECT * FROM users WHERE name LIKE 'A%';
-SELECT COUNT(*), AVG(age) FROM users;
-SELECT * FROM users WHERE id IN (SELECT id FROM users WHERE age > 30);
-BEGIN; UPDATE users SET age = 26 WHERE id = 1; COMMIT;
+SELECT COUNT(*), AVG(age), SUM(age), MIN(age), MAX(age) FROM users;
+SELECT * FROM users WHERE id IN (SELECT user_id FROM orders WHERE status = 'paid');
+SELECT * FROM users WHERE age > (SELECT AVG(age) FROM users);
+BEGIN; UPDATE users SET age = 31 WHERE id = 1; COMMIT;
 ALTER TABLE users ADD COLUMN email TEXT;
+
+-- GROUP BY / HAVING (dot notation 지원)
+SELECT city, COUNT(*) FROM users GROUP BY city;
+SELECT city, COUNT(*) FROM users GROUP BY city HAVING COUNT(*) > 1;
+SELECT users.name, SUM(orders.amount) FROM users JOIN orders ON users.id = orders.user_id GROUP BY users.name;
 
 -- 인덱스 / 뷰
 CREATE INDEX idx_age ON users (age);
@@ -205,6 +233,7 @@ CHECKPOINT;
 | 캐시 | Buffer Pool (LRU, 64페이지, 16KB) |
 | 저장 | 바이너리 .rdb 포맷 |
 | UI | Tauri + React + Monaco Editor |
+| TCP 서버 | 멀티 클라이언트, 포트 7878, 라인 프로토콜 |
 | AI 연동 | MCP AI API (예정) |
 
 <br/>

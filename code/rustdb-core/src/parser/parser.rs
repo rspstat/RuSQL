@@ -34,6 +34,17 @@ impl Parser {
         }
     }
 
+    // table.column 형태를 허용하며, 테이블 접두사는 무시하고 컬럼명만 반환
+    fn expect_col_ref(&mut self) -> Result<String, String> {
+        let first = self.expect_ident()?;
+        if self.peek() == Some(&Token::Dot) {
+            self.advance(); // consume '.'
+            self.expect_ident() // column name (drop table prefix)
+        } else {
+            Ok(first)
+        }
+    }
+
     pub fn parse(&mut self) -> Result<Statement, String> {
         match self.advance() {
             Some(Token::Select) => self.parse_select(),
@@ -82,7 +93,35 @@ impl Parser {
     }
 
     fn parse_condition(&mut self) -> Result<Condition, String> {
-        let column = self.expect_ident()?;
+        // HAVING 절에서 COUNT(*) > 1 같은 집계 함수 조건 처리
+        let column = match self.peek() {
+            Some(Token::Count) | Some(Token::Sum) | Some(Token::Avg) |
+            Some(Token::Min)   | Some(Token::Max) => {
+                let label = match self.advance() {
+                    Some(Token::Count) => "COUNT",
+                    Some(Token::Sum)   => "SUM",
+                    Some(Token::Avg)   => "AVG",
+                    Some(Token::Min)   => "MIN",
+                    Some(Token::Max)   => "MAX",
+                    _ => unreachable!(),
+                };
+                match self.advance() {
+                    Some(Token::LParen) => {}
+                    other => return Err(format!("Expected '(' after aggregate, got {:?}", other)),
+                }
+                let inner = match self.advance() {
+                    Some(Token::Asterisk) => "*".to_string(),
+                    Some(Token::Ident(s)) => s.clone(),
+                    other => return Err(format!("Expected column in aggregate, got {:?}", other)),
+                };
+                match self.advance() {
+                    Some(Token::RParen) => {}
+                    other => return Err(format!("Expected ')' after aggregate, got {:?}", other)),
+                }
+                format!("{}({})", label, inner)
+            }
+            _ => self.expect_ident()?,
+        };
 
         // IN 처리
         if self.peek() == Some(&Token::In) {
@@ -256,7 +295,16 @@ impl Parser {
                         }
                         let col = match self.advance() {
                             Some(Token::Asterisk)  => "*".to_string(),
-                            Some(Token::Ident(s))  => s.clone(),
+                            Some(Token::Ident(s))  => {
+                                let first = s.clone();
+                                // SUM(table.column) 형태 처리
+                                if self.peek() == Some(&Token::Dot) {
+                                    self.advance(); // '.' 소비
+                                    self.expect_ident()? // 컬럼명만 사용
+                                } else {
+                                    first
+                                }
+                            }
                             other => return Err(format!("Expected column, got {:?}", other)),
                         };
                         match self.advance() {
@@ -265,7 +313,7 @@ impl Parser {
                         }
                         SelectColumn::Agg { func, col }
                     }
-                    _ => SelectColumn::Column(self.expect_ident()?),
+                    _ => SelectColumn::Column(self.expect_col_ref()?),
                 };
                 columns.push(col);
                 if self.peek() == Some(&Token::Comma) {
@@ -289,12 +337,12 @@ impl Parser {
                 Some(Token::On) => {}
                 other => return Err(format!("Expected ON, got {:?}", other)),
             }
-            let left_col  = self.expect_ident()?;
+            let left_col  = self.expect_col_ref()?;
             match self.advance() {
                 Some(Token::Eq) => {}
                 other => return Err(format!("Expected =, got {:?}", other)),
             }
-            let right_col = self.expect_ident()?;
+            let right_col = self.expect_col_ref()?;
             Some(Join { table: join_table, left_col, right_col, join_type: JoinType::Inner })
         } else {
             None
@@ -315,10 +363,10 @@ impl Parser {
                 Some(Token::By) => {}
                 other => return Err(format!("Expected BY, got {:?}", other)),
             }
-            let mut cols = vec![self.expect_ident()?];
+            let mut cols = vec![self.expect_col_ref()?];
             while self.peek() == Some(&Token::Comma) {
                 self.advance();
-                cols.push(self.expect_ident()?);
+                cols.push(self.expect_col_ref()?);
             }
             Some(cols)
         } else {
@@ -340,7 +388,7 @@ impl Parser {
                 Some(Token::By) => {}
                 other => return Err(format!("Expected BY, got {:?}", other)),
             }
-            let col = self.expect_ident()?;
+            let col = self.expect_col_ref()?;
             let ascending = match self.peek() {
                 Some(Token::Desc) => { self.advance(); false }
                 Some(Token::Asc)  => { self.advance(); true  }
@@ -588,13 +636,24 @@ impl Parser {
     }
 
     fn parse_drop(&mut self) -> Result<Statement, String> {
-        // DROP TABLE name
+        // DROP TABLE [IF EXISTS] name
         match self.advance() {
             Some(Token::Table) => {}
             other => return Err(format!("Expected TABLE, got {:?}", other)),
         }
+        // IF EXISTS 처리 (IF, EXISTS 는 Ident로 들어옴)
+        let if_exists = if matches!(self.peek(), Some(Token::Ident(s)) if s.eq_ignore_ascii_case("IF")) {
+            self.advance(); // IF
+            match self.advance() {
+                Some(Token::Ident(s)) if s.eq_ignore_ascii_case("EXISTS") => {}
+                other => return Err(format!("Expected EXISTS after IF, got {:?}", other)),
+            }
+            true
+        } else {
+            false
+        };
         let name = self.expect_ident()?;
-        Ok(Statement::DropTable { name })
+        Ok(Statement::DropTable { name, if_exists })
     }
 
     fn parse_alter(&mut self) -> Result<Statement, String> {

@@ -86,7 +86,7 @@ impl Executor {
             Statement::Commit   => self.exec_commit(),
             Statement::Rollback => self.exec_rollback(),
             Statement::CreateTable { name, columns } => self.exec_create(name, columns),
-            Statement::DropTable { name }            => self.exec_drop(name),
+            Statement::DropTable { name, if_exists }  => self.exec_drop(name, if_exists),
             Statement::TruncateTable { name }        => self.exec_truncate(name),
             Statement::Insert { table, values }      => self.exec_insert(table, values),
             Statement::Select { table, columns, condition, join, order_by, group_by, having, limit, for_update } => {
@@ -149,7 +149,10 @@ impl Executor {
         Ok(format!("Table '{}' created.", name))
     }
 
-    fn exec_drop(&mut self, name: String) -> Result<String, String> {
+    fn exec_drop(&mut self, name: String, if_exists: bool) -> Result<String, String> {
+        if if_exists && !self.tables.contains_key(&name) {
+            return Ok(format!("Table '{}' does not exist, skipped.", name));
+        }
         self.catalog.drop_table(&name)?;
         self.tables.remove(&name);
         self.indexes.remove(&name);
@@ -508,18 +511,60 @@ impl Executor {
             });
         }
 
-        // GROUP BY
+        // GROUP BY + 집계 (통합)
         if let Some(ref group_cols) = group_by {
-            let mut seen = std::collections::HashSet::new();
-            result.retain(|row| {
+            // 삽입 순서 유지: order 벡터 + HashMap
+            let mut group_order: Vec<Vec<String>> = Vec::new();
+            let mut group_data: std::collections::HashMap<Vec<String>, Vec<Row>> =
+                std::collections::HashMap::new();
+            for row in &result {
                 let key: Vec<String> = group_cols.iter()
                     .map(|c| row.get(c).cloned().unwrap_or_default())
                     .collect();
-                seen.insert(key)
-            });
+                if !group_data.contains_key(&key) { group_order.push(key.clone()); }
+                group_data.entry(key).or_default().push(row.clone());
+            }
+
+            let mut group_rows: Vec<Row> = group_order.iter().map(|key| {
+                let grp = &group_data[key];
+                let mut out = Row::new();
+                for (col, val) in group_cols.iter().zip(key.iter()) {
+                    out.insert(col.clone(), val.clone());
+                }
+                for col in &columns {
+                    if let SelectColumn::Agg { func, col: col_name } = col {
+                        let vals: Vec<f64> = grp.iter()
+                            .filter_map(|r| {
+                                if col_name == "*" { Some(1.0) }
+                                else { r.get(col_name)?.parse::<f64>().ok() }
+                            })
+                            .collect();
+                        let agg_val = match func {
+                            AggFunc::Count => grp.len() as f64,
+                            AggFunc::Sum   => vals.iter().sum(),
+                            AggFunc::Avg   => if vals.is_empty() { 0.0 } else {
+                                vals.iter().sum::<f64>() / vals.len() as f64 },
+                            AggFunc::Min   => vals.iter().cloned().fold(f64::INFINITY, f64::min),
+                            AggFunc::Max   => vals.iter().cloned().fold(f64::NEG_INFINITY, f64::max),
+                        };
+                        let label = Self::agg_label(func, col_name);
+                        let v = if agg_val.fract() == 0.0 { format!("{}", agg_val as i64) }
+                                else { format!("{:.2}", agg_val) };
+                        out.insert(label, v);
+                    }
+                }
+                out
+            }).collect();
+
+            // HAVING 필터 (집계된 컬럼 기준)
+            if let Some(ref hav) = having {
+                group_rows.retain(|row| Self::matches_condition(row, &Some(hav.clone())));
+            }
+            if let Some(n) = limit { group_rows.truncate(n); }
+            return self.format_result(group_rows, columns, table, join);
         }
 
-        // HAVING
+        // HAVING (GROUP BY 없는 경우)
         if let Some(ref hav) = having {
             result.retain(|row| Self::matches_condition(row, &Some(hav.clone())));
         }
@@ -529,7 +574,7 @@ impl Executor {
             result.truncate(n);
         }
 
-        // 집계 함수 처리
+        // 집계 함수 처리 (GROUP BY 없음)
         if has_agg {
             let mut agg_results: Vec<(String, String)> = Vec::new();
             for col in &columns {
@@ -621,6 +666,16 @@ impl Executor {
         self.format_result(result, columns, table, join)
     }
 
+    fn agg_label(func: &AggFunc, col: &str) -> String {
+        match func {
+            AggFunc::Count => format!("COUNT({})", col),
+            AggFunc::Sum   => format!("SUM({})", col),
+            AggFunc::Avg   => format!("AVG({})", col),
+            AggFunc::Min   => format!("MIN({})", col),
+            AggFunc::Max   => format!("MAX({})", col),
+        }
+    }
+
     fn format_result(
         &self,
         result: Vec<Row>,
@@ -646,7 +701,8 @@ impl Executor {
         } else {
             columns.iter().filter_map(|c| match c {
                 SelectColumn::Column(name) => Some(name.clone()),
-                _ => None,
+                SelectColumn::Agg { func, col } => Some(Self::agg_label(func, col)),
+                SelectColumn::All => None,
             }).collect()
         };
 
@@ -800,13 +856,22 @@ impl Executor {
                                     }
                                 }
                                 crate::catalog::schema::FkAction::Cascade => {
-                                    // MVCC: CASCADE도 논리 삭제
-                                    let txn_id = self.txn.current_txn_id().to_string();
-                                    if let Some(other_rows) = self.tables.get_mut(other_table) {
-                                        for row in other_rows.iter_mut() {
-                                            if Self::is_visible(row) && row.get(&col.name).map(|v| v == &del_val).unwrap_or(false) {
-                                                row.insert("_xmax".to_string(), txn_id.clone());
+                                    if self.txn.is_active() {
+                                        // 트랜잭션 안: MVCC 논리 삭제
+                                        let txn_id = self.txn.current_txn_id().to_string();
+                                        if let Some(other_rows) = self.tables.get_mut(other_table) {
+                                            for row in other_rows.iter_mut() {
+                                                if Self::is_visible(row) && row.get(&col.name).map(|v| v == &del_val).unwrap_or(false) {
+                                                    row.insert("_xmax".to_string(), txn_id.clone());
+                                                }
                                             }
+                                        }
+                                    } else {
+                                        // 트랜잭션 밖: 물리 삭제
+                                        if let Some(other_rows) = self.tables.get_mut(other_table) {
+                                            other_rows.retain(|r| {
+                                                !(Self::is_visible(r) && r.get(&col.name).map(|v| v == &del_val).unwrap_or(false))
+                                            });
                                         }
                                     }
                                     let rows_clone = self.tables.get(other_table).unwrap().clone();
@@ -1008,7 +1073,7 @@ impl Executor {
                     if let Some(rows) = self.tables.get_mut(&entry.table) {
                         rows.retain(|r| r.get("id").map(|v| v != &entry.key).unwrap_or(true));
                     }
-                    let rows_clone = self.tables.get(&entry.table).unwrap().clone();
+                    let rows_clone = self.tables.get(&entry.table).cloned().unwrap_or_default();
                     if let Some(index) = self.indexes.get_mut(&entry.table) {
                         *index = BPlusTree::new();
                         for row in &rows_clone {
@@ -1017,7 +1082,8 @@ impl Executor {
                             index.insert(k, val_json);
                         }
                     }
-                    self.disk.save_table(&entry.table, self.tables.get(&entry.table).unwrap());
+                    self.buffer_pool.write_page(&entry.table, rows_clone.clone());
+                    self.buffer_pool.flush_page(&entry.table, &self.disk);
                 }
                 "UPDATE" => {
                     if let Some(old_json) = &entry.old_data {

@@ -188,6 +188,51 @@ impl Lexer {
                 None => break,
                 Some(ch) => {
                     let tok = match ch {
+                        // ── 주석 처리 ──────────────────────────────
+                        '-' => {
+                            self.advance();
+                            if self.peek() == Some('-') {
+                                // -- 한 줄 주석: 줄 끝까지 건너뜀
+                                while let Some(c) = self.peek() {
+                                    self.advance();
+                                    if c == '\n' { break; }
+                                }
+                                continue;
+                            } else {
+                                // 단독 '-' 는 무시
+                                continue;
+                            }
+                        }
+                        '#' => {
+                            // # 한 줄 주석: 줄 끝까지 건너뜀
+                            while let Some(c) = self.peek() {
+                                self.advance();
+                                if c == '\n' { break; }
+                            }
+                            continue;
+                        }
+                        '/' => {
+                            self.advance();
+                            if self.peek() == Some('*') {
+                                // /* */ 블록 주석: */ 가 나올 때까지 건너뜀
+                                self.advance(); // consume '*'
+                                loop {
+                                    match self.advance() {
+                                        None => break,
+                                        Some('*') if self.peek() == Some('/') => {
+                                            self.advance(); // consume '/'
+                                            break;
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                                continue;
+                            } else {
+                                // 단독 '/' 는 무시
+                                continue;
+                            }
+                        }
+                        // ── 기존 토큰 ──────────────────────────────
                         '*' => { self.advance(); Token::Asterisk }
                         ',' => { self.advance(); Token::Comma }
                         ';' => { self.advance(); Token::Semicolon }
