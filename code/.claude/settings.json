@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(taskkill /F /IM rustdb-cli.exe)",
+      "Bash(taskkill //F //IM rustdb-cli.exe)",
+      "Read(//c/Users/win11/AppData/Local/Temp/claude/c--Users-win11-Desktop-projects-dbe-code/529d2b2f-6bda-4b1b-97ae-3e7043d00e01/tasks/**)",
+      "Bash(grep -v \"^--$\")"
+    ],
+    "additionalDirectories": [
+      "c:\\Users\\win11\\.claude\\projects\\c--Users-win11-Desktop-projects-dbe\\memory"
+    ]
+  }
+}

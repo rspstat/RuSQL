@@ -39,8 +39,11 @@ function App() {
   const [tables, setTables] = useState<string[]>([]);
   const [views, setViews] = useState<string[]>([]);
   const [indexes, setIndexes] = useState<IndexInfo[]>([]);
-  const [expandedTable, setExpandedTable] = useState<string | null>(null);
+  const [expandedTables, setExpandedTables] = useState<Set<string>>(new Set());
   const [tableColumns, setTableColumns] = useState<Record<string, string[]>>({});
+  const [expandedViews, setExpandedViews] = useState<Set<string>>(new Set());
+  const [viewColumns, setViewColumns] = useState<Record<string, string[]>>({});
+  const [expandedIndexes, setExpandedIndexes] = useState<Set<string>>(new Set());
   const [tablesOpen, setTablesOpen] = useState(true);
   const [viewsOpen, setViewsOpen] = useState(true);
   const [indexesOpen, setIndexesOpen] = useState(true);
@@ -158,13 +161,37 @@ function App() {
   };
 
   const toggleTable = async (t: string) => {
-    if (expandedTable === t) { setExpandedTable(null); return; }
-    setExpandedTable(t);
+    if (expandedTables.has(t)) {
+      setExpandedTables(prev => { const s = new Set(prev); s.delete(t); return s; });
+      return;
+    }
+    setExpandedTables(prev => new Set(prev).add(t));
     if (!tableColumns[t]) {
       const cols = await invoke<string[]>("get_columns", { table: t });
       setTableColumns(p => ({ ...p, [t]: cols }));
     }
     setQuery(`SELECT * FROM ${t};`);
+  };
+
+  const toggleView = async (v: string) => {
+    if (expandedViews.has(v)) {
+      setExpandedViews(prev => { const s = new Set(prev); s.delete(v); return s; });
+      return;
+    }
+    setExpandedViews(prev => new Set(prev).add(v));
+    if (!viewColumns[v]) {
+      const cols = await invoke<string[]>("get_columns", { table: v });
+      setViewColumns(p => ({ ...p, [v]: cols }));
+    }
+    setQuery(`SELECT * FROM ${v};`);
+  };
+
+  const toggleIndex = (name: string) => {
+    setExpandedIndexes(prev => {
+      const s = new Set(prev);
+      s.has(name) ? s.delete(name) : s.add(name);
+      return s;
+    });
   };
 
   // ─── 테이블 우클릭 메뉴 핸들러 ────────────────────────────────
@@ -178,7 +205,7 @@ function App() {
       const res = await invoke<MultiQueryResult>("execute_query", { query: q, ts: Date.now() });
       setResults(res.results);
       await refreshSidebar();
-      if (dropTable && expandedTable === dropTable) setExpandedTable(null);
+      if (dropTable) setExpandedTables(prev => { const s = new Set(prev); s.delete(dropTable); return s; });
     } catch (e) {
       setResults([{ columns: [], rows: [], message: String(e), elapsed: 0, success: false }]);
     } finally {
@@ -307,7 +334,7 @@ function App() {
               ) : tables.map(t => (
                 <div key={t}>
                   <div
-                    className={`sidebar-item ${expandedTable === t ? "active" : ""}`}
+                    className={`sidebar-item ${expandedTables.has(t) ? "active" : ""}`}
                     onClick={() => toggleTable(t)}
                     onContextMenu={e => {
                       e.preventDefault();
@@ -315,11 +342,11 @@ function App() {
                       setTableCtxMenu({ x: e.clientX, y: e.clientY, table: t });
                     }}
                   >
-                    <span className="sidebar-arrow">{expandedTable === t ? "▼" : "▶"}</span>
+                    <span className="sidebar-arrow">{expandedTables.has(t) ? "▼" : "▶"}</span>
                     <span className="sidebar-table-icon">⊞</span>
                     <span className="sidebar-name">{t}</span>
                   </div>
-                  {expandedTable === t && tableColumns[t] && (
+                  {expandedTables.has(t) && tableColumns[t] && (
                     <div className="sidebar-columns">
                       {tableColumns[t].map(col => (
                         <div key={col} className="sidebar-column">
@@ -343,14 +370,28 @@ function App() {
               {viewsOpen && (views.length === 0 ? (
                 <div className="sidebar-empty">No views yet</div>
               ) : views.map(v => (
-                <div
-                  key={v}
-                  className="sidebar-item"
-                  onClick={() => { setQuery(`SELECT * FROM ${v};`); }}
-                >
-                  <span className="sidebar-arrow">▶</span>
-                  <span className="sidebar-view-icon">◈</span>
-                  <span className="sidebar-name">{v}</span>
+                <div key={v}>
+                  <div
+                    className={`sidebar-item ${expandedViews.has(v) ? "active" : ""}`}
+                    onClick={() => toggleView(v)}
+                  >
+                    <span className="sidebar-arrow">{expandedViews.has(v) ? "▼" : "▶"}</span>
+                    <span className="sidebar-view-icon">◈</span>
+                    <span className="sidebar-name">{v}</span>
+                  </div>
+                  {expandedViews.has(v) && (
+                    <div className="sidebar-columns">
+                      {viewColumns[v] && viewColumns[v].length > 0
+                        ? viewColumns[v].map(col => (
+                            <div key={col} className="sidebar-column">
+                              <span className="col-icon">◉</span>
+                              <span>{col}</span>
+                            </div>
+                          ))
+                        : <div className="sidebar-column" style={{ color: "var(--text-muted)" }}>no column info</div>
+                      }
+                    </div>
+                  )}
                 </div>
               )))}
             </div>
@@ -365,13 +406,29 @@ function App() {
               {indexesOpen && (indexes.length === 0 ? (
                 <div className="sidebar-empty">No indexes yet</div>
               ) : indexes.map(idx => (
-                <div key={idx.name} className="sidebar-item sidebar-index-item"
-                  title={`${idx.kind === "composite" ? "Composite · " : ""}${idx.table} (${idx.columns.join(", ")})`}
-                >
-                  <span className="sidebar-arrow" style={{ visibility: "hidden" }}>▶</span>
-                  <span className="sidebar-index-icon">{idx.kind === "composite" ? "⋈" : "⌗"}</span>
-                  <span className="sidebar-name">{idx.name}</span>
-                  <span className="sidebar-index-table">{idx.table}</span>
+                <div key={idx.name}>
+                  <div
+                    className={`sidebar-item sidebar-index-item ${expandedIndexes.has(idx.name) ? "active" : ""}`}
+                    onClick={() => toggleIndex(idx.name)}
+                  >
+                    <span className="sidebar-arrow">{expandedIndexes.has(idx.name) ? "▼" : "▶"}</span>
+                    <span className="sidebar-index-icon">{idx.kind === "composite" ? "⋈" : "⌗"}</span>
+                    <span className="sidebar-name">{idx.name}</span>
+                    <span className="sidebar-index-table">{idx.table}</span>
+                  </div>
+                  {expandedIndexes.has(idx.name) && (
+                    <div className="sidebar-columns">
+                      <div className="sidebar-column" style={{ color: "var(--text-muted)", fontSize: "0.75rem" }}>
+                        {idx.kind === "composite" ? "composite" : "single"}
+                      </div>
+                      {idx.columns.map(col => (
+                        <div key={col} className="sidebar-column">
+                          <span className="col-icon">◉</span>
+                          <span>{col}</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
                 </div>
               )))}
             </div>

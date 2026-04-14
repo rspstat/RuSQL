@@ -43,13 +43,18 @@ impl DiskManager {
                 primary_key: false,
                 not_null: false,
                 unique: false,
+                unique_constraint_name: None,
                 auto_increment: false,
+                default: None,
                 foreign_key: None,
+                check_expr: None,
             }).collect();
             return Some(TableSchema {
                 name: table.to_string(),
                 columns,
                 auto_increment_counters: std::collections::HashMap::new(),
+                primary_key_columns: Vec::new(),
+                check_constraints: Vec::new(),
             });
         }
 

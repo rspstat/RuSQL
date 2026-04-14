@@ -1,4 +1,6 @@
- // src/storage/btree.rs
+// src/storage/btree.rs
+
+use std::cmp::Ordering;
 
 const ORDER: usize = 4; // 노드당 최대 키 수
 
@@ -18,7 +20,8 @@ pub struct InternalNode {
 pub struct LeafNode {
     pub keys: Vec<String>,
     pub values: Vec<String>, // JSON 직렬화된 Row
-    pub next: Option<Box<LeafNode>>, // 리프 연결 리스트
+    // next 포인터는 분할 시 유지되지 않으므로 제거됨.
+    // 범위 스캔은 트리 순회(collect_all_kv)로 수행한다.
 }
 
 #[derive(Debug)]
@@ -26,12 +29,21 @@ pub struct BPlusTree {
     root: Option<Box<Node>>,
 }
 
+/// 수치 인식 키 비교: 두 키가 모두 숫자로 파싱되면 f64 비교, 아니면 문자열 비교
+/// 예) "10" > "9"  (숫자), "abc" > "aaa" (문자열)
+fn cmp_keys(a: &str, b: &str) -> Ordering {
+    match (a.parse::<f64>(), b.parse::<f64>()) {
+        (Ok(af), Ok(bf)) => af.partial_cmp(&bf).unwrap_or(Ordering::Equal),
+        _ => a.cmp(b),
+    }
+}
+
 impl BPlusTree {
     pub fn new() -> Self {
         BPlusTree { root: None }
     }
 
-    // 검색
+    // ── 포인트 검색 ────────────────────────────────────────────────────────
     pub fn search(&self, key: &str) -> Option<String> {
         match &self.root {
             None => None,
@@ -43,27 +55,26 @@ impl BPlusTree {
         match node {
             Node::Leaf(leaf) => {
                 for (i, k) in leaf.keys.iter().enumerate() {
-                    if k == key {
+                    if cmp_keys(k, key) == Ordering::Equal {
                         return Some(leaf.values[i].clone());
                     }
                 }
                 None
             }
             Node::Internal(internal) => {
-                let idx = internal.keys.partition_point(|k| k.as_str() <= key);
+                let idx = internal.keys.partition_point(|k| cmp_keys(k.as_str(), key) != Ordering::Greater);
                 let idx = idx.min(internal.children.len() - 1);
                 Self::search_node(&internal.children[idx], key)
             }
         }
     }
 
-    // 삽입
+    // ── 삽입 ────────────────────────────────────────────────────────────────
     pub fn insert(&mut self, key: String, value: String) {
         if self.root.is_none() {
             self.root = Some(Box::new(Node::Leaf(LeafNode {
                 keys: vec![key],
                 values: vec![value],
-                next: None,
             })));
             return;
         }
@@ -89,12 +100,16 @@ impl BPlusTree {
     ) -> (Box<Node>, Option<(String, Box<Node>)>) {
         match *node {
             Node::Leaf(mut leaf) => {
-                let pos = leaf.keys.partition_point(|k| k.as_str() < key.as_str());
+                let pos = leaf.keys.partition_point(|k| cmp_keys(k.as_str(), key.as_str()) == Ordering::Less);
+                // 이미 존재하는 키면 값 업데이트
+                if pos < leaf.keys.len() && cmp_keys(&leaf.keys[pos], &key) == Ordering::Equal {
+                    leaf.values[pos] = value;
+                    return (Box::new(Node::Leaf(leaf)), None);
+                }
                 leaf.keys.insert(pos, key);
                 leaf.values.insert(pos, value);
 
                 if leaf.keys.len() >= ORDER {
-                    // 분할
                     let mid = leaf.keys.len() / 2;
                     let right_keys = leaf.keys.split_off(mid);
                     let right_values = leaf.values.split_off(mid);
@@ -103,7 +118,6 @@ impl BPlusTree {
                     let right = Box::new(Node::Leaf(LeafNode {
                         keys: right_keys,
                         values: right_values,
-                        next: leaf.next.take(),
                     }));
 
                     (Box::new(Node::Leaf(leaf)), Some((mid_key, right)))
@@ -113,7 +127,7 @@ impl BPlusTree {
             }
 
             Node::Internal(mut internal) => {
-                let idx = internal.keys.partition_point(|k| k.as_str() <= key.as_str());
+                let idx = internal.keys.partition_point(|k| cmp_keys(k.as_str(), key.as_str()) != Ordering::Greater);
                 let idx = idx.min(internal.children.len() - 1);
 
                 let child = internal.children.remove(idx);
@@ -121,12 +135,11 @@ impl BPlusTree {
                 internal.children.insert(idx, new_child);
 
                 if let Some((split_key, right_child)) = split {
-                    let pos = internal.keys.partition_point(|k| k.as_str() < split_key.as_str());
+                    let pos = internal.keys.partition_point(|k| cmp_keys(k.as_str(), split_key.as_str()) == Ordering::Less);
                     internal.keys.insert(pos, split_key);
                     internal.children.insert(pos + 1, right_child);
 
                     if internal.keys.len() >= ORDER {
-                        // 내부 노드 분할
                         let mid = internal.keys.len() / 2;
                         let up_key = internal.keys[mid].clone();
                         let right_keys = internal.keys.split_off(mid + 1);
@@ -149,7 +162,7 @@ impl BPlusTree {
         }
     }
 
-    // 범위 검색 (트리 전체 재귀 순회, 범위 밖 서브트리는 조기 종료)
+    // ── 범위 검색 [start, end] ─────────────────────────────────────────────
     pub fn range_search(&self, start: &str, end: &str) -> Vec<String> {
         let mut result = Vec::new();
         if let Some(root) = &self.root {
@@ -162,24 +175,19 @@ impl BPlusTree {
         match node {
             Node::Leaf(leaf) => {
                 for (i, k) in leaf.keys.iter().enumerate() {
-                    let ks = k.as_str();
-                    if ks > end { break; }          // 정렬되어 있으므로 조기 종료
-                    if ks >= start {
+                    let vs_end = cmp_keys(k, end);
+                    if vs_end == Ordering::Greater { break; }
+                    if cmp_keys(k, start) != Ordering::Less {
                         result.push(leaf.values[i].clone());
                     }
                 }
             }
             Node::Internal(internal) => {
                 for (i, child) in internal.children.iter().enumerate() {
-                    // 이 자식 서브트리의 최대 키 범위 추정
-                    // keys[i] 는 children[i+1]의 최솟값 구분자
-                    // children[i] 는 keys[i-1] 이상 keys[i] 미만의 키를 가짐
-                    if i < internal.keys.len() && internal.keys[i].as_str() < start {
-                        // 이 자식의 모든 키 < keys[i] < start → 스킵
+                    if i < internal.keys.len() && cmp_keys(&internal.keys[i], start) == Ordering::Less {
                         continue;
                     }
-                    if i > 0 && internal.keys[i - 1].as_str() > end {
-                        // 이 자식의 모든 키 >= keys[i-1] > end → 이후도 전부 범위 초과
+                    if i > 0 && cmp_keys(&internal.keys[i - 1], end) == Ordering::Greater {
                         break;
                     }
                     Self::range_collect(child, start, end, result);
@@ -188,7 +196,30 @@ impl BPlusTree {
         }
     }
 
-    // 전체 키 목록
+    // ── 개방 범위 스캔: pk >= start ────────────────────────────────────────
+    /// start 이상의 모든 (key, value) 반환. inclusive=false 이면 start 제외.
+    /// 내부적으로 정렬된 트리 순회 후 필터링한다.
+    pub fn scan_from(&self, start: &str, inclusive: bool) -> Vec<(String, String)> {
+        self.collect_all_kv().into_iter()
+            .filter(|(k, _)| {
+                let ord = cmp_keys(k, start);
+                if inclusive { ord != Ordering::Less } else { ord == Ordering::Greater }
+            })
+            .collect()
+    }
+
+    // ── 개방 범위 스캔: pk <= end ──────────────────────────────────────────
+    /// end 이하의 모든 (key, value) 반환. inclusive=false 이면 end 제외.
+    pub fn scan_to(&self, end: &str, inclusive: bool) -> Vec<(String, String)> {
+        self.collect_all_kv().into_iter()
+            .filter(|(k, _)| {
+                let ord = cmp_keys(k, end);
+                if inclusive { ord != Ordering::Greater } else { ord == Ordering::Less }
+            })
+            .collect()
+    }
+
+    // ── 전체 값 / (키, 값) ───────────────────────────────────────────────
     pub fn all_values(&self) -> Vec<String> {
         let mut result = Vec::new();
         if let Some(root) = &self.root {
@@ -206,5 +237,103 @@ impl BPlusTree {
                 }
             }
         }
+    }
+
+    /// 정렬된 순서로 모든 (key, value) 반환
+    pub fn collect_all_kv(&self) -> Vec<(String, String)> {
+        let mut result = Vec::new();
+        if let Some(root) = &self.root {
+            Self::collect_kv_node(root, &mut result);
+        }
+        result
+    }
+
+    fn collect_kv_node(node: &Node, result: &mut Vec<(String, String)>) {
+        match node {
+            Node::Leaf(leaf) => {
+                for (i, k) in leaf.keys.iter().enumerate() {
+                    result.push((k.clone(), leaf.values[i].clone()));
+                }
+            }
+            Node::Internal(internal) => {
+                for child in &internal.children {
+                    Self::collect_kv_node(child, result);
+                }
+            }
+        }
+    }
+
+    // ── 통계 ────────────────────────────────────────────────────────────
+    /// 트리에 저장된 키(행) 수
+    pub fn len(&self) -> usize {
+        self.all_values().len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.root.is_none()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_numeric_cmp() {
+        assert_eq!(cmp_keys("10", "9"), Ordering::Greater);
+        assert_eq!(cmp_keys("2", "10"), Ordering::Less);
+        assert_eq!(cmp_keys("5", "5"), Ordering::Equal);
+        assert_eq!(cmp_keys("abc", "abd"), Ordering::Less);
+    }
+
+    #[test]
+    fn test_insert_search() {
+        let mut tree = BPlusTree::new();
+        for i in [1, 10, 5, 3, 7, 2, 8, 4, 6, 9] {
+            tree.insert(i.to_string(), format!("v{}", i));
+        }
+        assert_eq!(tree.search("10"), Some("v10".to_string()));
+        assert_eq!(tree.search("1"), Some("v1".to_string()));
+        assert_eq!(tree.search("11"), None);
+    }
+
+    #[test]
+    fn test_range_search() {
+        let mut tree = BPlusTree::new();
+        for i in 1..=10 {
+            tree.insert(i.to_string(), format!("v{}", i));
+        }
+        let r = tree.range_search("3", "7");
+        assert_eq!(r.len(), 5); // 3,4,5,6,7
+    }
+
+    #[test]
+    fn test_scan_from() {
+        let mut tree = BPlusTree::new();
+        for i in 1..=10 {
+            tree.insert(i.to_string(), format!("v{}", i));
+        }
+        let r = tree.scan_from("8", true);
+        let keys: Vec<&str> = r.iter().map(|(k, _)| k.as_str()).collect();
+        assert_eq!(keys, vec!["8", "9", "10"]);
+
+        let r2 = tree.scan_from("8", false);
+        let keys2: Vec<&str> = r2.iter().map(|(k, _)| k.as_str()).collect();
+        assert_eq!(keys2, vec!["9", "10"]);
+    }
+
+    #[test]
+    fn test_scan_to() {
+        let mut tree = BPlusTree::new();
+        for i in 1..=10 {
+            tree.insert(i.to_string(), format!("v{}", i));
+        }
+        let r = tree.scan_to("3", true);
+        let keys: Vec<&str> = r.iter().map(|(k, _)| k.as_str()).collect();
+        assert_eq!(keys, vec!["1", "2", "3"]);
+
+        let r2 = tree.scan_to("3", false);
+        let keys2: Vec<&str> = r2.iter().map(|(k, _)| k.as_str()).collect();
+        assert_eq!(keys2, vec!["1", "2"]);
     }
 }

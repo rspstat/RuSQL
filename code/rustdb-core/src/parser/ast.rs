@@ -14,6 +14,11 @@ pub enum DataType {
     Text,
     Float,
     Boolean,
+    Varchar(u32),        // VARCHAR(n)
+    Date,                // DATE — "YYYY-MM-DD"
+    Decimal(u8, u8),     // DECIMAL(precision, scale)
+    #[serde(other)]
+    Unknown,             // 구버전 스키마 호환용
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -29,6 +34,7 @@ pub struct ForeignKey {
     pub ref_table: String,
     pub ref_column: String,
     pub on_delete: FkAction,
+    pub on_update: FkAction,  // ON UPDATE CASCADE / RESTRICT / SET NULL
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -38,8 +44,11 @@ pub struct ColumnDef {
     pub primary_key: bool,
     pub not_null: bool,
     pub unique: bool,
+    pub unique_constraint_name: Option<String>,  // CONSTRAINT name UNIQUE
     pub auto_increment: bool,
+    pub default: Option<String>,                 // DEFAULT value
     pub foreign_key: Option<ForeignKey>,
+    pub check_expr: Option<String>,              // CHECK (expr) — raw SQL string
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -66,9 +75,10 @@ pub enum JoinType {
 #[derive(Debug, PartialEq, Clone)]
 pub enum Operator {
     Eq, Ne, Gt, Lt, Gte, Lte,
-    In, Like, Between,
-    IsNull,    // ← 추가
-    IsNotNull, // ← 추가
+    In, NotIn,           // IN / NOT IN (서브쿼리)
+    Like, Between,
+    IsNull, IsNotNull,
+    Exists, NotExists,   // EXISTS / NOT EXISTS (서브쿼리)
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -96,7 +106,11 @@ pub enum AggFunc {
 pub enum SelectColumn {
     All,
     Column(String),
+    ColumnAlias(String, String),               // col AS alias
     Agg { func: AggFunc, col: String },
+    AggAlias { func: AggFunc, col: String, alias: String },
+    /// 스칼라 함수: SELECT UPPER(name), NOW() AS ts, ...
+    Func { name: String, args: Vec<String>, alias: Option<String> },
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -104,6 +118,7 @@ pub enum AlterAction {
     AddColumn(ColumnDef),
     DropColumn(String),
     RenameColumn { from: String, to: String },
+    ModifyColumn(ColumnDef),  // ALTER TABLE t MODIFY COLUMN col TYPE [constraints]
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -114,6 +129,11 @@ pub enum Statement {
     CreateTable {
         name: String,
         columns: Vec<ColumnDef>,
+        if_not_exists: bool,
+        /// 테이블 레벨 복합 PK: PRIMARY KEY (col1, col2)
+        primary_key_columns: Vec<String>,
+        /// 테이블 레벨 CHECK 제약 목록: (name?, expr_string)
+        check_constraints: Vec<(Option<String>, String)>,
     },
     DropTable {
         name: String,
@@ -124,18 +144,24 @@ pub enum Statement {
     },
     Insert {
         table: String,
-        values: Vec<String>,
+        /// 컬럼 지정 삽입: INSERT INTO t (col1, col2) VALUES (...)
+        columns: Option<Vec<String>>,
+        /// 멀티 row: VALUES (...), (...)
+        values: Vec<Vec<String>>,
     },
     Select {
         table: String,
+        /// FROM (SELECT ...) AS alias — Some일 때 table은 빈 문자열
+        subquery: Option<(Box<Statement>, String)>,
         columns: Vec<SelectColumn>,
+        distinct: bool,
         condition: Option<Condition>,
-        join: Option<Join>,
-        order_by: Option<OrderBy>,
+        joins: Vec<Join>,
+        order_by: Vec<OrderBy>,
         group_by: Option<Vec<String>>,
         having: Option<Condition>,
         limit: Option<usize>,
-        for_update: bool,  // SELECT ... FOR UPDATE (행 잠금)
+        for_update: bool,
     },
     Update {
         table: String,
@@ -179,4 +205,12 @@ pub enum Statement {
         table: Option<String>,
     },
     ShowLocks,
+    /// SAVEPOINT name
+    Savepoint { name: String },
+    /// RELEASE SAVEPOINT name
+    ReleaseSavepoint { name: String },
+    /// ROLLBACK TO SAVEPOINT name
+    RollbackTo { name: String },
+    /// EXPLAIN <SELECT>
+    Explain(Box<Statement>),
 }

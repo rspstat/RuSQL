@@ -73,7 +73,8 @@ fn main() {
         io::stdout().flush().unwrap();
 
         let mut input = String::new();
-        stdin.lock().read_line(&mut input).unwrap();
+        let n = stdin.lock().read_line(&mut input).unwrap();
+        if n == 0 { break; } // EOF
         let input = input.trim();
 
         if input.is_empty() { continue; }
@@ -104,6 +105,7 @@ fn main() {
                     }
                     Err(e) => print_color(&format!("ERROR: {}\n", e), Color::Red),
                 },
+                Err(e) if e.contains("Unknown statement: None") => {} // 빈 쿼리 (주석만)
                 Err(e) => print_color(&format!("PARSE ERROR: {}\n", e), Color::Red),
             }
         }

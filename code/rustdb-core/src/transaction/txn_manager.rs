@@ -21,6 +21,8 @@ pub struct TransactionManager {
     pub isolation_level: IsolationLevel,
     /// REPEATABLE READ / SERIALIZABLE: BEGIN 시점의 테이블 스냅샷
     snapshot: Option<HashMap<String, Vec<Row>>>,
+    /// SAVEPOINT 스택: (이름, undo_log 길이)
+    savepoints: Vec<(String, usize)>,
 }
 
 impl TransactionManager {
@@ -32,6 +34,7 @@ impl TransactionManager {
             wal: WalManager::new(),
             isolation_level: IsolationLevel::ReadCommitted,
             snapshot: None,
+            savepoints: Vec::new(),
         }
     }
 
@@ -127,6 +130,7 @@ impl TransactionManager {
         self.wal.clear();
         self.undo_log.clear();
         self.snapshot = None;
+        self.savepoints.clear();
         self.active = false;
         Ok(())
     }
@@ -136,6 +140,7 @@ impl TransactionManager {
         self.wal.clear();
         let entries = self.undo_log.drain(..).rev().collect();
         self.snapshot = None;
+        self.savepoints.clear();
         self.active = false;
         entries
     }
@@ -148,8 +153,47 @@ impl TransactionManager {
         self.wal.clear();
         let entries = self.undo_log.drain(..).rev().collect();
         self.snapshot = None;
+        self.savepoints.clear();
         self.active = false;
         Ok(entries)
+    }
+
+    /// SAVEPOINT name — 현재 undo_log 길이를 저장
+    pub fn create_savepoint(&mut self, name: &str) -> Result<(), String> {
+        if !self.active {
+            return Err("No active transaction. Use BEGIN first.".to_string());
+        }
+        // 동일 이름이 있으면 덮어씀 (MySQL 동작과 동일)
+        self.savepoints.retain(|(n, _)| n != name);
+        self.savepoints.push((name.to_string(), self.undo_log.len()));
+        Ok(())
+    }
+
+    /// ROLLBACK TO name — savepoint 이후의 undo 엔트리 반환 (역순)
+    pub fn rollback_to_savepoint(&mut self, name: &str) -> Result<Vec<UndoEntry>, String> {
+        if !self.active {
+            return Err("No active transaction.".to_string());
+        }
+        let pos = self.savepoints.iter().rposition(|(n, _)| n == name)
+            .ok_or(format!("Savepoint '{}' not found", name))?;
+        let (_, undo_len) = self.savepoints[pos].clone();
+        // savepoint 이후에 기록된 undo 엔트리를 역순으로 꺼냄
+        let entries: Vec<UndoEntry> = self.undo_log[undo_len..].iter().cloned().rev().collect();
+        self.undo_log.truncate(undo_len);
+        // savepoint 이후의 savepoint들 제거 (중첩 savepoint 처리)
+        self.savepoints.truncate(pos + 1);
+        Ok(entries)
+    }
+
+    /// RELEASE SAVEPOINT name — savepoint 삭제
+    pub fn release_savepoint(&mut self, name: &str) -> Result<(), String> {
+        if !self.active {
+            return Err("No active transaction.".to_string());
+        }
+        let pos = self.savepoints.iter().rposition(|(n, _)| n == name)
+            .ok_or(format!("Savepoint '{}' not found", name))?;
+        self.savepoints.remove(pos);
+        Ok(())
     }
 
     pub fn log_insert(&mut self, table: &str, key: &str, data: &str) {

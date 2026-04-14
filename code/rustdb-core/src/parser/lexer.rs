@@ -52,6 +52,40 @@ pub enum Token {
     // Row-level locking
     For,
     Locks,
+
+    // DISTINCT
+    Distinct,
+
+    // DEFAULT 값
+    Default,
+
+    // ALTER TABLE MODIFY
+    Modify,
+
+    // EXISTS / NOT EXISTS
+    Exists,
+
+    // SAVEPOINT
+    Savepoint,
+    Release,
+
+    // EXPLAIN
+    Explain,
+
+    // 새 데이터 타입
+    Varchar,
+    Date,
+    Decimal,
+
+    // CHECK 제약
+    Check,
+
+    // 스칼라 함수 (SELECT / WHERE 용)
+    Upper, Lower, Length, Trim, Concat, Substr, Substring,
+    Now, Curdate, DateFormat, Coalesce, Ifnull, Replace,
+
+    // INTERVAL (DATE_ADD / DATE_SUB)
+    Interval,
 }
 
 pub struct Lexer {
@@ -176,6 +210,31 @@ impl Lexer {
             "VACUUM"       => Token::Vacuum,
             "FOR"          => Token::For,
             "LOCKS"        => Token::Locks,
+            "DISTINCT"     => Token::Distinct,
+            "DEFAULT"      => Token::Default,
+            "MODIFY"       => Token::Modify,
+            "EXISTS"       => Token::Exists,
+            "SAVEPOINT"    => Token::Savepoint,
+            "RELEASE"      => Token::Release,
+            "EXPLAIN"      => Token::Explain,
+            "VARCHAR"      => Token::Varchar,
+            "DATE"         => Token::Date,
+            "DECIMAL"      => Token::Decimal,
+            "CHECK"        => Token::Check,
+            "UPPER"        => Token::Upper,
+            "LOWER"        => Token::Lower,
+            "LENGTH"       => Token::Length,
+            "TRIM"         => Token::Trim,
+            "CONCAT"       => Token::Concat,
+            "SUBSTR"       => Token::Substr,
+            "SUBSTRING"    => Token::Substring,
+            "NOW"          => Token::Now,
+            "CURDATE"      => Token::Curdate,
+            "DATE_FORMAT"  => Token::DateFormat,
+            "COALESCE"     => Token::Coalesce,
+            "IFNULL"       => Token::Ifnull,
+            "REPLACE"      => Token::Replace,
+            "INTERVAL"     => Token::Interval,
             _              => Token::Ident(s),
         }
     }
@@ -198,6 +257,13 @@ impl Lexer {
                                     if c == '\n' { break; }
                                 }
                                 continue;
+                            } else if self.peek().map(|c| c.is_ascii_digit()).unwrap_or(false) {
+                                // 음수 리터럴: -숫자
+                                let mut s = "-".to_string();
+                                while let Some(ch) = self.peek() {
+                                    if ch.is_ascii_digit() || ch == '.' { s.push(ch); self.advance(); } else { break; }
+                                }
+                                Token::NumberLit(s)
                             } else {
                                 // 단독 '-' 는 무시
                                 continue;
