@@ -630,12 +630,15 @@ impl Executor {
             );
         }
 
-        // 뷰 처리
-        if let Some(view_stmt) = self.views.get(&table).cloned() {
-            if let Statement::Select { subquery: vsub, distinct: vd, table: vt, columns: vc, condition: vcond,
-                joins: vj, order_by: vo, group_by: vg, having: vh, limit: vl, .. } = view_stmt {
-                return self.exec_select(vt, vsub, vd, vc, vcond, vj, vo, vg, vh, vl, false);
-            }
+        // 뷰 처리: 뷰를 FROM 서브쿼리처럼 실행하고 외부 쿼리 조건을 적용
+        if let Some(view_stmt) = self.views.remove(&table) {
+            let result = self.exec_select_with_subquery(
+                view_stmt.clone(),
+                table.clone(),
+                distinct, columns, condition, joins, order_by, group_by, having, limit, for_update,
+            );
+            self.views.insert(table, view_stmt);
+            return result;
         }
 
         // B+Tree 인덱스 검색 (FOR UPDATE / JOIN 있으면 풀 스캔 경로 사용)
@@ -2466,15 +2469,29 @@ impl Executor {
                     _ => format!("FULL SCAN  [no index for {:?}, cost≈O({})]", cond.operator, row_count),
                 }
             } else {
-                // 복합 인덱스 확인
-                let eq_map = collect_eq_conditions(cond);
-                let comp_idx = self.composite_indexes.iter()
-                    .find(|(_, ci)| ci.table == table && ci.matches_conditions(&eq_map))
+                // 단일 컬럼 인덱스 확인
+                let single_idx = self.index_meta.iter()
+                    .find(|(_, (t, c))| t == &table && c == &cond.column)
                     .map(|(k, _)| k.clone());
-                if let Some(idx_name) = comp_idx {
-                    format!("COMPOSITE INDEX SCAN ({})  [cost≈O(1)]", idx_name)
+                if let Some(idx_name) = single_idx {
+                    match &cond.operator {
+                        Operator::Eq => format!("INDEX SCAN ({} on '{}')  [B+Tree point, cost≈O(log {})]", idx_name, cond.column, row_count),
+                        Operator::Between | Operator::Gt | Operator::Gte | Operator::Lt | Operator::Lte => {
+                            format!("INDEX RANGE SCAN ({} on '{}')  [B+Tree range, cost≈O(log {}+k)]", idx_name, cond.column, row_count)
+                        }
+                        _ => format!("INDEX SCAN ({} on '{}')  [filtered, cost≈O(log {})]", idx_name, cond.column, row_count),
+                    }
                 } else {
-                    format!("FULL SCAN  [no index on '{}', cost≈O({})]", cond.column, row_count)
+                    // 복합 인덱스 확인
+                    let eq_map = collect_eq_conditions(cond);
+                    let comp_idx = self.composite_indexes.iter()
+                        .find(|(_, ci)| ci.table == table && ci.matches_conditions(&eq_map))
+                        .map(|(k, _)| k.clone());
+                    if let Some(idx_name) = comp_idx {
+                        format!("COMPOSITE INDEX SCAN ({})  [cost≈O(1)]", idx_name)
+                    } else {
+                        format!("FULL SCAN  [no index on '{}', cost≈O({})]", cond.column, row_count)
+                    }
                 }
             }
         } else {
