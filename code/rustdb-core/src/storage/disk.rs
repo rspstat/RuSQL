@@ -1,9 +1,20 @@
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::Path;
+use std::collections::HashMap;
+use serde::{Serialize, Deserialize};
 use crate::engine::executor::Row;
 use crate::storage::page::PageHeader;
 use crate::catalog::schema::TableSchema;
+use crate::parser::ast::Statement;
+
+/// 인덱스 메타데이터 — 재시작 시 인덱스 재빌드에 사용
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IndexMeta {
+    pub name: String,
+    pub table: String,
+    pub columns: Vec<String>,
+}
 
 pub struct DiskManager {
     data_dir: String,
@@ -183,5 +194,43 @@ impl DiskManager {
             }
         }
         tables
+    }
+
+    // ── 뷰 영속화 ─────────────────────────────────────────────────────────
+
+    /// 모든 뷰 정의를 data/views.json에 저장
+    pub fn save_views(&self, views: &HashMap<String, Statement>) {
+        let path = format!("{}/views.json", self.data_dir);
+        let json = serde_json::to_string_pretty(views).unwrap_or_default();
+        let _ = fs::write(path, json);
+    }
+
+    /// data/views.json에서 뷰 정의 로드
+    pub fn load_views(&self) -> HashMap<String, Statement> {
+        let path = format!("{}/views.json", self.data_dir);
+        let json = match fs::read_to_string(&path) {
+            Ok(s) => s,
+            Err(_) => return HashMap::new(),
+        };
+        serde_json::from_str(&json).unwrap_or_default()
+    }
+
+    // ── 인덱스 메타데이터 영속화 ──────────────────────────────────────────
+
+    /// 모든 인덱스 메타데이터를 data/indexes.json에 저장
+    pub fn save_index_meta(&self, meta_list: &[IndexMeta]) {
+        let path = format!("{}/indexes.json", self.data_dir);
+        let json = serde_json::to_string_pretty(meta_list).unwrap_or_default();
+        let _ = fs::write(path, json);
+    }
+
+    /// data/indexes.json에서 인덱스 메타데이터 로드
+    pub fn load_index_meta(&self) -> Vec<IndexMeta> {
+        let path = format!("{}/indexes.json", self.data_dir);
+        let json = match fs::read_to_string(&path) {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        };
+        serde_json::from_str(&json).unwrap_or_default()
     }
 }

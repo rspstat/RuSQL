@@ -1,4 +1,4 @@
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub enum IsolationLevel {
     ReadUncommitted,  // 더티 읽기 허용
     ReadCommitted,    // 커밋된 데이터만 읽기
@@ -16,19 +16,21 @@ pub enum DataType {
     Boolean,
     Varchar(u32),        // VARCHAR(n)
     Date,                // DATE — "YYYY-MM-DD"
+    DateTime,            // DATETIME — "YYYY-MM-DD HH:MM:SS"
+    Timestamp,           // TIMESTAMP — "YYYY-MM-DD HH:MM:SS" (UTC 기준)
     Decimal(u8, u8),     // DECIMAL(precision, scale)
     #[serde(other)]
     Unknown,             // 구버전 스키마 호환용
 }
 
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub enum FkAction {
     Restrict,   // 기본값 - 삭제 거부
     Cascade,    // 연쇄 삭제
     SetNull,    // NULL로 설정
 }
 
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub struct ForeignKey {
     pub column: String,
     pub ref_table: String,
@@ -37,7 +39,7 @@ pub struct ForeignKey {
     pub on_update: FkAction,  // ON UPDATE CASCADE / RESTRICT / SET NULL
 }
 
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub struct ColumnDef {
     pub name: String,
     pub data_type: DataType,
@@ -51,13 +53,13 @@ pub struct ColumnDef {
     pub check_expr: Option<String>,              // CHECK (expr) — raw SQL string
 }
 
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub struct OrderBy {
     pub column: String,
     pub ascending: bool,
 }
 
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub struct Join {
     pub table: String,
     pub left_col: String,
@@ -65,14 +67,14 @@ pub struct Join {
     pub join_type: JoinType,
 }
 
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub enum JoinType {
     Inner,
     Left,
     Right,
 }
 
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub enum Operator {
     Eq, Ne, Gt, Lt, Gte, Lte,
     In, NotIn,           // IN / NOT IN (서브쿼리)
@@ -81,14 +83,14 @@ pub enum Operator {
     Exists, NotExists,   // EXISTS / NOT EXISTS (서브쿼리)
 }
 
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub enum ConditionValue {
     Literal(String),
     Subquery(Box<Statement>),
     Between(String, String),  // BETWEEN a AND b
 }
 
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub struct Condition {
     pub column: String,
     pub operator: Operator,
@@ -97,12 +99,12 @@ pub struct Condition {
     pub or: Option<Box<Condition>>,   // OR 연결
 }
 
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub enum AggFunc {
     Count, Sum, Avg, Min, Max,
 }
 
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub enum SelectColumn {
     All,
     Column(String),
@@ -113,7 +115,7 @@ pub enum SelectColumn {
     Func { name: String, args: Vec<String>, alias: Option<String> },
 }
 
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub enum AlterAction {
     AddColumn(ColumnDef),
     DropColumn(String),
@@ -121,7 +123,7 @@ pub enum AlterAction {
     ModifyColumn(ColumnDef),  // ALTER TABLE t MODIFY COLUMN col TYPE [constraints]
 }
 
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub enum Statement {
     Begin,
     Commit,

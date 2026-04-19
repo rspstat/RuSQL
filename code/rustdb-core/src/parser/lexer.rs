@@ -75,6 +75,8 @@ pub enum Token {
     // 새 데이터 타입
     Varchar,
     Date,
+    Datetime,
+    Timestamp,
     Decimal,
 
     // CHECK 제약
@@ -83,6 +85,9 @@ pub enum Token {
     // 스칼라 함수 (SELECT / WHERE 용)
     Upper, Lower, Length, Trim, Concat, Substr, Substring,
     Now, Curdate, DateFormat, Coalesce, Ifnull, Replace,
+
+    // 수학 함수
+    Round, Abs, Ceil, Floor, Mod,
 
     // INTERVAL (DATE_ADD / DATE_SUB)
     Interval,
@@ -219,6 +224,8 @@ impl Lexer {
             "EXPLAIN"      => Token::Explain,
             "VARCHAR"      => Token::Varchar,
             "DATE"         => Token::Date,
+            "DATETIME"     => Token::Datetime,
+            "TIMESTAMP"    => Token::Timestamp,
             "DECIMAL"      => Token::Decimal,
             "CHECK"        => Token::Check,
             "UPPER"        => Token::Upper,
@@ -234,6 +241,11 @@ impl Lexer {
             "COALESCE"     => Token::Coalesce,
             "IFNULL"       => Token::Ifnull,
             "REPLACE"      => Token::Replace,
+            "ROUND"        => Token::Round,
+            "ABS"          => Token::Abs,
+            "CEIL"         => Token::Ceil,
+            "FLOOR"        => Token::Floor,
+            "MOD"          => Token::Mod,
             "INTERVAL"     => Token::Interval,
             _              => Token::Ident(s),
         }

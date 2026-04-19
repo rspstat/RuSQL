@@ -523,7 +523,9 @@ impl Parser {
                 Some(Token::Trim)  | Some(Token::Concat) | Some(Token::Substr) |
                 Some(Token::Substring) | Some(Token::Now) | Some(Token::Curdate) |
                 Some(Token::DateFormat) | Some(Token::Coalesce) | Some(Token::Ifnull) |
-                Some(Token::Replace) => {
+                Some(Token::Replace) |
+                Some(Token::Round) | Some(Token::Abs) | Some(Token::Ceil) |
+                Some(Token::Floor) | Some(Token::Mod) => {
                     let fname = match self.advance() {
                         Some(Token::Upper)      => "UPPER",
                         Some(Token::Lower)      => "LOWER",
@@ -538,6 +540,11 @@ impl Parser {
                         Some(Token::Coalesce)   => "COALESCE",
                         Some(Token::Ifnull)     => "IFNULL",
                         Some(Token::Replace)    => "REPLACE",
+                        Some(Token::Round)      => "ROUND",
+                        Some(Token::Abs)        => "ABS",
+                        Some(Token::Ceil)       => "CEIL",
+                        Some(Token::Floor)      => "FLOOR",
+                        Some(Token::Mod)        => "MOD",
                         _ => unreachable!(),
                     }.to_string();
                     let args = self.parse_func_args()?;
@@ -980,7 +987,9 @@ impl Parser {
                 }
                 Ok(DataType::Varchar(n))
             }
-            Some(Token::Date) => Ok(DataType::Date),
+            Some(Token::Date)      => Ok(DataType::Date),
+            Some(Token::Datetime)  => Ok(DataType::DateTime),
+            Some(Token::Timestamp) => Ok(DataType::Timestamp),
             Some(Token::Decimal) => {
                 match self.advance() {
                     Some(Token::LParen) => {}

@@ -5,7 +5,7 @@ use chrono;
 use crate::transaction::txn_manager::TransactionManager;
 use crate::parser::ast::*;
 use crate::catalog::schema::{Catalog, ColumnDef as SchemaCol};
-use crate::storage::disk::DiskManager;
+use crate::storage::disk::{DiskManager, IndexMeta};
 use crate::storage::btree::BPlusTree;
 use crate::storage::buffer_pool::BufferPool;
 use crate::storage::composite_index::CompositeIndex;
@@ -69,13 +69,45 @@ impl Executor {
             }
         }
 
+        // 저장된 뷰 로드
+        let views = disk.load_views();
+
+        // 저장된 인덱스 메타 로드 후 재빌드
+        let index_meta_list = disk.load_index_meta();
+        let mut index_meta: HashMap<String, (String, String)> = HashMap::new();
+        let mut composite_indexes: HashMap<String, CompositeIndex> = HashMap::new();
+
+        for meta in &index_meta_list {
+            if meta.columns.len() == 1 {
+                let column = &meta.columns[0];
+                let mut tree = BPlusTree::new();
+                if let Some(rows) = tables.get(&meta.table) {
+                    for row in rows {
+                        if let Some(val) = row.get(column) {
+                            let json = serde_json::to_string(row).unwrap();
+                            tree.insert(val.clone(), json);
+                        }
+                    }
+                }
+                let key = format!("{}_{}", meta.table, meta.name);
+                indexes.insert(key, tree);
+                index_meta.insert(meta.name.clone(), (meta.table.clone(), column.clone()));
+            } else {
+                let mut comp = CompositeIndex::new(meta.table.clone(), meta.columns.clone());
+                if let Some(rows) = tables.get(&meta.table) {
+                    comp.rebuild(rows);
+                }
+                composite_indexes.insert(meta.name.clone(), comp);
+            }
+        }
+
         let mut executor = Executor {
             catalog,
             tables,
             indexes,
-            index_meta: HashMap::new(),
-            composite_indexes: HashMap::new(),
-            views: HashMap::new(),
+            index_meta,
+            composite_indexes,
+            views,
             txn: TransactionManager::new(),
             buffer_pool: BufferPool::new(),
             disk,
@@ -289,9 +321,17 @@ impl Executor {
                     if let Some(ref def) = col.default {
                         final_values[i] = if def == crate::parser::parser::NULL_DEFAULT {
                             NULL_VALUE.to_string()
+                        } else if def.to_uppercase() == "NOW()" || def.to_uppercase() == "CURRENT_TIMESTAMP" {
+                            // DATETIME/TIMESTAMP DEFAULT NOW()
+                            chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string()
                         } else {
                             def.clone()
                         };
+                    } else {
+                        // TIMESTAMP 컬럼에 값 없으면 현재 시각 자동 삽입
+                        if matches!(col.data_type, DataType::Timestamp) {
+                            final_values[i] = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
+                        }
                     }
                 }
             }
@@ -1134,7 +1174,7 @@ impl Executor {
 
     /// 스칼라 함수 평가: row에서 인수를 해석해 결과 문자열 반환
     fn apply_scalar_func(func_name: &str, args: &[String], row: &Row) -> String {
-        /// 인수를 row 컬럼값 또는 리터럴로 해석
+        // 인수를 row 컬럼값 또는 리터럴로 해석
         let resolve = |arg: &str, row: &Row| -> String {
             if arg.starts_with('\'') && arg.ends_with('\'') {
                 arg[1..arg.len()-1].to_string()
@@ -1216,6 +1256,36 @@ impl Executor {
                 let from = args.get(1).map(|a| resolve(a, row)).unwrap_or_default();
                 let to   = args.get(2).map(|a| resolve(a, row)).unwrap_or_default();
                 v.replace(&from, &to)
+            }
+            "ROUND" => {
+                let v: f64 = args.first().map(|a| resolve(a, row)).unwrap_or_default()
+                    .parse().unwrap_or(0.0);
+                let decimals: i32 = args.get(1).map(|a| resolve(a, row))
+                    .unwrap_or_default().parse().unwrap_or(0);
+                let factor = 10f64.powi(decimals);
+                format!("{}", (v * factor).round() / factor)
+            }
+            "ABS" => {
+                let v: f64 = args.first().map(|a| resolve(a, row)).unwrap_or_default()
+                    .parse().unwrap_or(0.0);
+                format!("{}", v.abs())
+            }
+            "CEIL" => {
+                let v: f64 = args.first().map(|a| resolve(a, row)).unwrap_or_default()
+                    .parse().unwrap_or(0.0);
+                format!("{}", v.ceil())
+            }
+            "FLOOR" => {
+                let v: f64 = args.first().map(|a| resolve(a, row)).unwrap_or_default()
+                    .parse().unwrap_or(0.0);
+                format!("{}", v.floor())
+            }
+            "MOD" => {
+                let a: f64 = args.first().map(|a| resolve(a, row)).unwrap_or_default()
+                    .parse().unwrap_or(0.0);
+                let b: f64 = args.get(1).map(|a| resolve(a, row)).unwrap_or_default()
+                    .parse().unwrap_or(1.0);
+                if b == 0.0 { "NULL".to_string() } else { format!("{}", a % b) }
             }
             _ => format!("{}()", func_name),
         }
@@ -2014,7 +2084,8 @@ impl Executor {
                                 DataType::Int   => val.parse::<i64>().is_ok(),
                                 DataType::Float => val.parse::<f64>().is_ok(),
                                 DataType::Boolean => matches!(val.to_lowercase().as_str(), "true" | "false" | "1" | "0"),
-                                DataType::Text | DataType::Varchar(_) | DataType::Date => true,
+                                DataType::Text | DataType::Varchar(_) | DataType::Date
+                                | DataType::DateTime | DataType::Timestamp => true,
                                 DataType::Decimal(_, _) => val.parse::<f64>().is_ok(),
                                 DataType::Unknown => true,
                             };
@@ -2205,6 +2276,7 @@ impl Executor {
             let key = format!("{}_{}", table, index_name);
             self.indexes.insert(key, tree);
             self.index_meta.insert(index_name.clone(), (table.clone(), column.clone()));
+            self.persist_index_meta();
             Ok(format!("Index '{}' created on '{}'.'{}'.", index_name, table, column))
         } else {
             // 복합 컬럼 → CompositeIndex
@@ -2213,6 +2285,7 @@ impl Executor {
                 comp.rebuild(rows);
             }
             self.composite_indexes.insert(index_name.clone(), comp);
+            self.persist_index_meta();
             Ok(format!("Composite index '{}' created on '{}' ({}).", index_name, table, columns.join(", ")))
         }
     }
@@ -2221,8 +2294,10 @@ impl Executor {
         if let Some((table, _)) = self.index_meta.remove(&index_name) {
             let key = format!("{}_{}", table, index_name);
             self.indexes.remove(&key);
+            self.persist_index_meta();
             Ok(format!("Index '{}' dropped.", index_name))
         } else if self.composite_indexes.remove(&index_name).is_some() {
+            self.persist_index_meta();
             Ok(format!("Composite index '{}' dropped.", index_name))
         } else {
             Ok(format!("Index '{}' does not exist, skipped.", index_name))
@@ -2236,15 +2311,37 @@ impl Executor {
             }
         }
         self.views.insert(name.clone(), query);
+        self.disk.save_views(&self.views);
         Ok(format!("View '{}' created.", name))
     }
 
     fn exec_drop_view(&mut self, name: String) -> Result<String, String> {
         if self.views.remove(&name).is_some() {
+            self.disk.save_views(&self.views);
             Ok(format!("View '{}' dropped.", name))
         } else {
             Ok(format!("View '{}' does not exist, skipped.", name))
         }
+    }
+
+    /// 현재 index_meta + composite_indexes를 disk에 저장
+    fn persist_index_meta(&self) {
+        let mut meta_list: Vec<IndexMeta> = Vec::new();
+        for (name, (table, col)) in &self.index_meta {
+            meta_list.push(IndexMeta {
+                name: name.clone(),
+                table: table.clone(),
+                columns: vec![col.clone()],
+            });
+        }
+        for (name, comp) in &self.composite_indexes {
+            meta_list.push(IndexMeta {
+                name: name.clone(),
+                table: comp.table.clone(),
+                columns: comp.columns.clone(),
+            });
+        }
+        self.disk.save_index_meta(&meta_list);
     }
 
     fn exec_show_tables(&self) -> Result<String, String> {
@@ -2279,7 +2376,9 @@ impl Executor {
                 crate::parser::ast::DataType::Text    => "TEXT".to_string(),
                 crate::parser::ast::DataType::Float   => "FLOAT".to_string(),
                 crate::parser::ast::DataType::Boolean => "BOOLEAN".to_string(),
-                crate::parser::ast::DataType::Date    => "DATE".to_string(),
+                crate::parser::ast::DataType::Date      => "DATE".to_string(),
+                crate::parser::ast::DataType::DateTime  => "DATETIME".to_string(),
+                crate::parser::ast::DataType::Timestamp => "TIMESTAMP".to_string(),
                 crate::parser::ast::DataType::Varchar(n) => format!("VARCHAR({})", n),
                 crate::parser::ast::DataType::Decimal(p, s) => format!("DECIMAL({},{})", p, s),
                 crate::parser::ast::DataType::Unknown => "UNKNOWN".to_string(),
