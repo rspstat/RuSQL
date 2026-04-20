@@ -157,8 +157,8 @@
 - [x] 멀티 클라이언트 동시 접속 (스레드 per 클라이언트)
 - [ ] 클라이언트 CLI (`rustdb-client`)
 
-### MCP 연동
-- [ ] AI API 클라이언트 (`mcp/client.rs`)
+### MCP 연동 (`rustdb-mcp`)
+- [ ] AI API 클라이언트
 - [ ] 자연어 → SQL 변환 (`\ai` 명령어)
 - [ ] 변환된 SQL 확인 후 실행
 
@@ -364,7 +364,8 @@ code/
 ├── rustdb-core/     DB 엔진 라이브러리
 ├── rustdb-server/   TCP 서버
 ├── rustdb-cli/      터미널 REPL
-└── rustdb-ui/       Tauri + React UI
+├── rustdb-ui/       Tauri + React UI
+└── rustdb-mcp/      MCP 자연어 쿼리 (개발 예정)
 ```
 
 <br/>
@@ -410,8 +411,8 @@ code/
   rustdb-cli      rustdb-server
   (터미널 REPL)   (TCP 서버)
         ↓
-  rustdb-ui
-  (Tauri + React)
+  rustdb-ui        rustdb-mcp
+  (Tauri + React)  (MCP, 개발 예정)
 ```
 
 <br/>
