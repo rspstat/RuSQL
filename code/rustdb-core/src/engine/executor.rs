@@ -1432,20 +1432,22 @@ impl Executor {
             if matching_pks.contains(&row.get(&pk_col).cloned().unwrap_or_default()) {
                 let key = row.get(&pk_col).cloned().unwrap_or_default();
 
-                // 잠금 충돌 / 데드락 체크
-                match self.lock_mgr.acquire(&table, &key, cur_txn) {
-                    LockResult::Granted => {}
-                    LockResult::Conflict { holder } => {
-                        return Err(format!(
-                            "Row '{}' in '{}' is locked by transaction {}. Cannot UPDATE.",
-                            key, table, holder
-                        ));
-                    }
-                    LockResult::Deadlock { holder } => {
-                        return Err(format!(
-                            "Deadlock detected: transaction {} waits for transaction {} (UPDATE '{}'. Transaction {} aborted.",
-                            cur_txn, holder, table, cur_txn
-                        ));
+                // 잠금 충돌 / 데드락 체크 (활성 트랜잭션 안에서만)
+                if cur_txn != 0 {
+                    match self.lock_mgr.acquire(&table, &key, cur_txn) {
+                        LockResult::Granted => {}
+                        LockResult::Conflict { holder } => {
+                            return Err(format!(
+                                "Row '{}' in '{}' is locked by transaction {}. Cannot UPDATE.",
+                                key, table, holder
+                            ));
+                        }
+                        LockResult::Deadlock { holder } => {
+                            return Err(format!(
+                                "Deadlock detected: transaction {} waits for transaction {} (UPDATE '{}'. Transaction {} aborted.",
+                                cur_txn, holder, table, cur_txn
+                            ));
+                        }
                     }
                 }
 
