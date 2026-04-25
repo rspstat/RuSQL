@@ -1,0 +1,157 @@
+<mxGraphModel dx="1422" dy="762" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="0" pageScale="1" pageWidth="1800" pageHeight="1100" math="0" shadow="0">
+  <root>
+    <mxCell id="0" />
+    <mxCell id="1" parent="0" />
+
+    <!-- 제목 -->
+    <mxCell id="title" value="UC-002: 쿼리 실행 시퀀스" style="text;html=1;strokeColor=none;fillColor=none;align=center;fontSize=16;fontStyle=1;" vertex="1" parent="1">
+      <mxGeometry x="400" y="10" width="800" height="30" as="geometry" />
+    </mxCell>
+
+    <!-- ══════════════ 생명선 헤더 ══════════════ -->
+    <mxCell id="h_user" value="User" style="shape=mxgraph.uml.actor;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#000000;fontSize=14;fontStyle=1;" vertex="1" parent="1">
+      <mxGeometry x="55" y="40" width="60" height="90" as="geometry" />
+    </mxCell>
+    <mxCell id="h_ui" value="rustdb-ui" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#000000;fontSize=13;fontStyle=1;" vertex="1" parent="1">
+      <mxGeometry x="210" y="55" width="130" height="50" as="geometry" />
+    </mxCell>
+    <mxCell id="h_lex" value="Lexer" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#000000;fontSize=13;fontStyle=1;" vertex="1" parent="1">
+      <mxGeometry x="415" y="55" width="110" height="50" as="geometry" />
+    </mxCell>
+    <mxCell id="h_par" value="Parser" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#000000;fontSize=13;fontStyle=1;" vertex="1" parent="1">
+      <mxGeometry x="590" y="55" width="110" height="50" as="geometry" />
+    </mxCell>
+    <mxCell id="h_exe" value="Executor" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#000000;fontSize=13;fontStyle=1;" vertex="1" parent="1">
+      <mxGeometry x="770" y="55" width="110" height="50" as="geometry" />
+    </mxCell>
+    <mxCell id="h_lock" value="LockManager" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#000000;fontSize=13;fontStyle=1;" vertex="1" parent="1">
+      <mxGeometry x="950" y="55" width="120" height="50" as="geometry" />
+    </mxCell>
+    <mxCell id="h_buf" value="BufferPool" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#000000;fontSize=13;fontStyle=1;" vertex="1" parent="1">
+      <mxGeometry x="1140" y="55" width="120" height="50" as="geometry" />
+    </mxCell>
+    <mxCell id="h_disk" value="DiskManager" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#000000;fontSize=13;fontStyle=1;" vertex="1" parent="1">
+      <mxGeometry x="1330" y="55" width="120" height="50" as="geometry" />
+    </mxCell>
+
+    <!-- ══════════════ 생명선 (수직선) ══════════════ -->
+    <mxCell id="l_user" value="" style="endArrow=none;dashed=1;strokeColor=#000000;" edge="1" parent="1">
+      <mxGeometry relative="1" as="geometry"><mxPoint x="85" y="130" as="sourcePoint"/><mxPoint x="85" y="1060" as="targetPoint"/></mxGeometry>
+    </mxCell>
+    <mxCell id="l_ui" value="" style="endArrow=none;dashed=1;strokeColor=#000000;" edge="1" parent="1">
+      <mxGeometry relative="1" as="geometry"><mxPoint x="275" y="105" as="sourcePoint"/><mxPoint x="275" y="1060" as="targetPoint"/></mxGeometry>
+    </mxCell>
+    <mxCell id="l_lex" value="" style="endArrow=none;dashed=1;strokeColor=#000000;" edge="1" parent="1">
+      <mxGeometry relative="1" as="geometry"><mxPoint x="470" y="105" as="sourcePoint"/><mxPoint x="470" y="1060" as="targetPoint"/></mxGeometry>
+    </mxCell>
+    <mxCell id="l_par" value="" style="endArrow=none;dashed=1;strokeColor=#000000;" edge="1" parent="1">
+      <mxGeometry relative="1" as="geometry"><mxPoint x="645" y="105" as="sourcePoint"/><mxPoint x="645" y="1060" as="targetPoint"/></mxGeometry>
+    </mxCell>
+    <mxCell id="l_exe" value="" style="endArrow=none;dashed=1;strokeColor=#000000;" edge="1" parent="1">
+      <mxGeometry relative="1" as="geometry"><mxPoint x="825" y="105" as="sourcePoint"/><mxPoint x="825" y="1060" as="targetPoint"/></mxGeometry>
+    </mxCell>
+    <mxCell id="l_lock" value="" style="endArrow=none;dashed=1;strokeColor=#000000;" edge="1" parent="1">
+      <mxGeometry relative="1" as="geometry"><mxPoint x="1010" y="105" as="sourcePoint"/><mxPoint x="1010" y="1060" as="targetPoint"/></mxGeometry>
+    </mxCell>
+    <mxCell id="l_buf" value="" style="endArrow=none;dashed=1;strokeColor=#000000;" edge="1" parent="1">
+      <mxGeometry relative="1" as="geometry"><mxPoint x="1200" y="105" as="sourcePoint"/><mxPoint x="1200" y="1060" as="targetPoint"/></mxGeometry>
+    </mxCell>
+    <mxCell id="l_disk" value="" style="endArrow=none;dashed=1;strokeColor=#000000;" edge="1" parent="1">
+      <mxGeometry relative="1" as="geometry"><mxPoint x="1390" y="105" as="sourcePoint"/><mxPoint x="1390" y="1060" as="targetPoint"/></mxGeometry>
+    </mxCell>
+
+    <!-- ══════════════ 활성 박스 ══════════════ -->
+    <mxCell id="act_user" value="" style="fillColor=#ffffff;strokeColor=#000000;" vertex="1" parent="1">
+      <mxGeometry x="80" y="160" width="10" height="850" as="geometry" />
+    </mxCell>
+    <mxCell id="act_ui" value="" style="fillColor=#ffffff;strokeColor=#000000;" vertex="1" parent="1">
+      <mxGeometry x="270" y="200" width="10" height="820" as="geometry" />
+    </mxCell>
+    <mxCell id="act_lex" value="" style="fillColor=#ffffff;strokeColor=#000000;" vertex="1" parent="1">
+      <mxGeometry x="465" y="280" width="10" height="60" as="geometry" />
+    </mxCell>
+    <mxCell id="act_par" value="" style="fillColor=#ffffff;strokeColor=#000000;" vertex="1" parent="1">
+      <mxGeometry x="640" y="360" width="10" height="60" as="geometry" />
+    </mxCell>
+    <mxCell id="act_exe" value="" style="fillColor=#ffffff;strokeColor=#000000;" vertex="1" parent="1">
+      <mxGeometry x="820" y="440" width="10" height="560" as="geometry" />
+    </mxCell>
+    <mxCell id="act_lock" value="" style="fillColor=#ffffff;strokeColor=#000000;" vertex="1" parent="1">
+      <mxGeometry x="1005" y="600" width="10" height="60" as="geometry" />
+    </mxCell>
+    <mxCell id="act_buf" value="" style="fillColor=#ffffff;strokeColor=#000000;" vertex="1" parent="1">
+      <mxGeometry x="1195" y="680" width="10" height="120" as="geometry" />
+    </mxCell>
+    <mxCell id="act_disk" value="" style="fillColor=#ffffff;strokeColor=#000000;" vertex="1" parent="1">
+      <mxGeometry x="1385" y="720" width="10" height="60" as="geometry" />
+    </mxCell>
+
+    <!-- ══════════════ 메시지 화살표 ══════════════ -->
+    <mxCell id="m1" value="1. Ctrl+Enter 입력" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;fontSize=12;strokeColor=#000000;" edge="1" parent="1">
+      <mxGeometry relative="1" as="geometry"><mxPoint x="90" y="170" as="sourcePoint"/><mxPoint x="270" y="170" as="targetPoint"/></mxGeometry>
+    </mxCell>
+    <mxCell id="m2" value="2. invoke(&quot;execute_query&quot;, sql)" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;fontSize=12;strokeColor=#000000;" edge="1" parent="1">
+      <mxGeometry relative="1" as="geometry"><mxPoint x="280" y="210" as="sourcePoint"/><mxPoint x="465" y="210" as="targetPoint"/></mxGeometry>
+    </mxCell>
+    <mxCell id="m3" value="3. tokenize(sql)" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;fontSize=12;strokeColor=#000000;" edge="1" parent="1">
+      <mxGeometry relative="1" as="geometry"><mxPoint x="280" y="290" as="sourcePoint"/><mxPoint x="465" y="290" as="targetPoint"/></mxGeometry>
+    </mxCell>
+    <mxCell id="m3r" value="Vec&lt;Token&gt;" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=open;endFill=0;dashed=1;fontSize=12;strokeColor=#000000;" edge="1" parent="1">
+      <mxGeometry relative="1" as="geometry"><mxPoint x="465" y="330" as="sourcePoint"/><mxPoint x="280" y="330" as="targetPoint"/></mxGeometry>
+    </mxCell>
+    <mxCell id="m4" value="4. parse(tokens)" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;fontSize=12;strokeColor=#000000;" edge="1" parent="1">
+      <mxGeometry relative="1" as="geometry"><mxPoint x="280" y="370" as="sourcePoint"/><mxPoint x="640" y="370" as="targetPoint"/></mxGeometry>
+    </mxCell>
+    <mxCell id="m4r" value="Statement (AST)" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=open;endFill=0;dashed=1;fontSize=12;strokeColor=#000000;" edge="1" parent="1">
+      <mxGeometry relative="1" as="geometry"><mxPoint x="640" y="410" as="sourcePoint"/><mxPoint x="280" y="410" as="targetPoint"/></mxGeometry>
+    </mxCell>
+    <mxCell id="m5" value="5. execute(stmt)" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;fontSize=12;strokeColor=#000000;" edge="1" parent="1">
+      <mxGeometry relative="1" as="geometry"><mxPoint x="280" y="450" as="sourcePoint"/><mxPoint x="820" y="450" as="targetPoint"/></mxGeometry>
+    </mxCell>
+    <mxCell id="m6" value="6. txn.get_snapshot_table()  [격리 수준 rows 선택]" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;fontSize=12;strokeColor=#000000;align=left;" edge="1" parent="1">
+      <mxGeometry relative="1" as="geometry"><mxPoint x="830" y="520" as="sourcePoint"/><mxPoint x="900" y="520" as="targetPoint"/><Array as="points"><mxPoint x="900" y="540"/></Array></mxGeometry>
+    </mxCell>
+    <mxCell id="m6r" value="" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=open;endFill=0;dashed=1;fontSize=12;strokeColor=#000000;" edge="1" parent="1">
+      <mxGeometry relative="1" as="geometry"><mxPoint x="900" y="560" as="sourcePoint"/><mxPoint x="830" y="560" as="targetPoint"/></mxGeometry>
+    </mxCell>
+    <mxCell id="m7" value="7. lock_mgr.acquire(table, pk, txn_id)  [FOR UPDATE]" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;fontSize=12;strokeColor=#000000;" edge="1" parent="1">
+      <mxGeometry relative="1" as="geometry"><mxPoint x="830" y="610" as="sourcePoint"/><mxPoint x="1005" y="610" as="targetPoint"/></mxGeometry>
+    </mxCell>
+    <mxCell id="m7r" value="LockResult" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=open;endFill=0;dashed=1;fontSize=12;strokeColor=#000000;" edge="1" parent="1">
+      <mxGeometry relative="1" as="geometry"><mxPoint x="1005" y="650" as="sourcePoint"/><mxPoint x="830" y="650" as="targetPoint"/></mxGeometry>
+    </mxCell>
+    <mxCell id="m8" value="8. buffer_pool.get_page(table, disk)" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;fontSize=12;strokeColor=#000000;" edge="1" parent="1">
+      <mxGeometry relative="1" as="geometry"><mxPoint x="830" y="690" as="sourcePoint"/><mxPoint x="1195" y="690" as="targetPoint"/></mxGeometry>
+    </mxCell>
+    <mxCell id="m9" value="9. disk.load_table(table)  [캐시 미스 시]" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;dashed=1;fontSize=12;strokeColor=#000000;" edge="1" parent="1">
+      <mxGeometry relative="1" as="geometry"><mxPoint x="1205" y="730" as="sourcePoint"/><mxPoint x="1385" y="730" as="targetPoint"/></mxGeometry>
+    </mxCell>
+    <mxCell id="m9r" value="Vec&lt;Row&gt;" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=open;endFill=0;dashed=1;fontSize=12;strokeColor=#000000;" edge="1" parent="1">
+      <mxGeometry relative="1" as="geometry"><mxPoint x="1385" y="770" as="sourcePoint"/><mxPoint x="1205" y="770" as="targetPoint"/></mxGeometry>
+    </mxCell>
+    <mxCell id="m8r" value="Vec&lt;Row&gt;" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=open;endFill=0;dashed=1;fontSize=12;strokeColor=#000000;" edge="1" parent="1">
+      <mxGeometry relative="1" as="geometry"><mxPoint x="1195" y="800" as="sourcePoint"/><mxPoint x="830" y="800" as="targetPoint"/></mxGeometry>
+    </mxCell>
+    <mxCell id="m10" value="10. eval_condition_with_subquery()  [WHERE 필터링]" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;fontSize=12;strokeColor=#000000;align=left;" edge="1" parent="1">
+      <mxGeometry relative="1" as="geometry"><mxPoint x="830" y="840" as="sourcePoint"/><mxPoint x="900" y="840" as="targetPoint"/><Array as="points"><mxPoint x="900" y="860"/></Array></mxGeometry>
+    </mxCell>
+    <mxCell id="m10r" value="" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=open;endFill=0;dashed=1;fontSize=12;strokeColor=#000000;" edge="1" parent="1">
+      <mxGeometry relative="1" as="geometry"><mxPoint x="900" y="880" as="sourcePoint"/><mxPoint x="830" y="880" as="targetPoint"/></mxGeometry>
+    </mxCell>
+    <mxCell id="m11" value="11. Result&lt;String, String&gt;" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=open;endFill=0;dashed=1;fontSize=12;strokeColor=#000000;" edge="1" parent="1">
+      <mxGeometry relative="1" as="geometry"><mxPoint x="820" y="930" as="sourcePoint"/><mxPoint x="280" y="930" as="targetPoint"/></mxGeometry>
+    </mxCell>
+    <mxCell id="m12" value="12. 결과 테이블 렌더링" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=open;endFill=0;dashed=1;fontSize=12;strokeColor=#000000;" edge="1" parent="1">
+      <mxGeometry relative="1" as="geometry"><mxPoint x="270" y="980" as="sourcePoint"/><mxPoint x="90" y="980" as="targetPoint"/></mxGeometry>
+    </mxCell>
+
+    <!-- ══════════════ opt 프레임 ══════════════ -->
+    <mxCell id="opt_lock" value="opt  [FOR UPDATE]" style="swimlane;startSize=20;fillColor=none;strokeColor=#000000;fontStyle=2;fontSize=12;align=left;spacingLeft=5;" vertex="1" parent="1">
+      <mxGeometry x="805" y="590" width="330" height="90" as="geometry" />
+    </mxCell>
+    <mxCell id="opt_disk" value="opt  [캐시 미스]" style="swimlane;startSize=20;fillColor=none;strokeColor=#000000;fontStyle=2;fontSize=12;align=left;spacingLeft=5;" vertex="1" parent="1">
+      <mxGeometry x="1175" y="710" width="240" height="90" as="geometry" />
+    </mxCell>
+
+  </root>
+</mxGraphModel>
