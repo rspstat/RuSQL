@@ -1,0 +1,305 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mxfile host="app.diagrams.net">
+  <diagram name="페이지-1" id="40RNE2m1tlNJGwnzNX24">
+    <mxGraphModel dx="2033" dy="1571" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="827" pageHeight="1169" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="JgZdRlXLGaeMcWZxnsZW-1" parent="1" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;fontSize=18;fontStyle=1;" value="&lt;font face=&quot;Helvetica&quot; style=&quot;line-height: 130%; font-size: 20px;&quot;&gt;RustDB — Class Diagram&lt;/font&gt;" vertex="1">
+          <mxGeometry height="40" width="400" x="640" y="10" as="geometry" />
+        </mxCell>
+        <mxCell id="JgZdRlXLGaeMcWZxnsZW-2" parent="1" style="swimlane;startSize=30;fillColor=#f5f5f5;strokeColor=#555555;fontColor=#333333;fontStyle=1;fontSize=12;" value="[ parser ]" vertex="1">
+          <mxGeometry height="745" width="840" x="10" y="60" as="geometry" />
+        </mxCell>
+        <mxCell id="JgZdRlXLGaeMcWZxnsZW-3" parent="JgZdRlXLGaeMcWZxnsZW-2" style="swimlane;fontStyle=1;startSize=23;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=11;" value="Lexer" vertex="1">
+          <mxGeometry height="115" width="205" x="10" y="40" as="geometry" />
+        </mxCell>
+        <mxCell id="JgZdRlXLGaeMcWZxnsZW-4" parent="JgZdRlXLGaeMcWZxnsZW-3" style="text;strokeColor=none;fillColor=none;align=left;verticalAlign=top;spacingLeft=6;overflow=hidden;fontSize=10;" value="- input: Vec&lt;char&gt;&#xa;- pos: usize" vertex="1">
+          <mxGeometry height="38" width="205" y="23" as="geometry" />
+        </mxCell>
+        <mxCell id="JgZdRlXLGaeMcWZxnsZW-5" parent="JgZdRlXLGaeMcWZxnsZW-3" style="line;strokeColor=#6c8ebf;fillColor=none;" value="" vertex="1">
+          <mxGeometry height="8" width="205" y="61" as="geometry" />
+        </mxCell>
+        <mxCell id="JgZdRlXLGaeMcWZxnsZW-6" parent="JgZdRlXLGaeMcWZxnsZW-3" style="text;strokeColor=none;fillColor=none;align=left;verticalAlign=top;spacingLeft=6;overflow=hidden;fontSize=10;" value="+ tokenize() → Vec&lt;Token&gt;&#xa;+ read_ident() → Token&#xa;+ read_number() → Token" vertex="1">
+          <mxGeometry height="46" width="205" y="69" as="geometry" />
+        </mxCell>
+        <mxCell id="JgZdRlXLGaeMcWZxnsZW-7" parent="JgZdRlXLGaeMcWZxnsZW-2" style="swimlane;fontStyle=3;startSize=23;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=11;" value="«enum» Token" vertex="1">
+          <mxGeometry height="175" width="235" x="225" y="40" as="geometry" />
+        </mxCell>
+        <mxCell id="JgZdRlXLGaeMcWZxnsZW-8" parent="JgZdRlXLGaeMcWZxnsZW-7" style="text;strokeColor=none;fillColor=none;align=left;verticalAlign=top;spacingLeft=6;overflow=hidden;fontSize=9;" value="Select, Insert, Update, Delete&#xa;Create, Drop, Where, From&#xa;Table, Int, Text, Is, Not, Null&#xa;Primary, Key, Unique, Auto&#xa;Increment, References, Cascade&#xa;Ident(String), NumberLit(String)&#xa;StringLit(String)&#xa;Eq, Ne, Gt, Lt, Gte, Lte&#xa;LParen, RParen, Comma, Semi …" vertex="1">
+          <mxGeometry height="152" width="235" y="23" as="geometry" />
+        </mxCell>
+        <mxCell id="JgZdRlXLGaeMcWZxnsZW-9" parent="JgZdRlXLGaeMcWZxnsZW-2" style="swimlane;fontStyle=1;startSize=23;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=11;" value="Parser" vertex="1">
+          <mxGeometry height="220" width="360" x="470" y="40" as="geometry" />
+        </mxCell>
+        <mxCell id="JgZdRlXLGaeMcWZxnsZW-10" parent="JgZdRlXLGaeMcWZxnsZW-9" style="text;strokeColor=none;fillColor=none;align=left;verticalAlign=top;spacingLeft=6;overflow=hidden;fontSize=10;" value="- tokens: Vec&lt;Token&gt;&#xa;- pos: usize" vertex="1">
+          <mxGeometry height="38" width="360" y="23" as="geometry" />
+        </mxCell>
+        <mxCell id="JgZdRlXLGaeMcWZxnsZW-11" parent="JgZdRlXLGaeMcWZxnsZW-9" style="line;strokeColor=#6c8ebf;fillColor=none;" value="" vertex="1">
+          <mxGeometry height="8" width="360" y="61" as="geometry" />
+        </mxCell>
+        <mxCell id="JgZdRlXLGaeMcWZxnsZW-12" parent="JgZdRlXLGaeMcWZxnsZW-9" style="text;strokeColor=none;fillColor=none;align=left;verticalAlign=top;spacingLeft=6;overflow=hidden;fontSize=10;" value="+ new(input: &amp;str) → Parser&#xa;+ parse() → Result&lt;Statement, String&gt;&#xa;+ parse_select() / parse_insert()&#xa;+ parse_create() / parse_condition()&#xa;+ parse_show()&#xa;+ peek() → Option&lt;&amp;Token&gt;&#xa;+ advance() → Option&lt;Token&gt;&#xa;+ expect_ident() → Result&lt;String&gt;" vertex="1">
+          <mxGeometry height="151" width="360" y="69" as="geometry" />
+        </mxCell>
+        <mxCell id="JgZdRlXLGaeMcWZxnsZW-13" parent="JgZdRlXLGaeMcWZxnsZW-2" style="swimlane;fontStyle=3;startSize=23;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=11;" value="«enum» Statement" vertex="1">
+          <mxGeometry height="295" width="380" x="10" y="220" as="geometry" />
+        </mxCell>
+        <mxCell id="JgZdRlXLGaeMcWZxnsZW-14" parent="JgZdRlXLGaeMcWZxnsZW-13" style="text;strokeColor=none;fillColor=none;align=left;verticalAlign=top;spacingLeft=6;overflow=hidden;fontSize=9;" value="Select { table, columns, distinct, condition,&#xa;  joins, order_by, group_by, having,&#xa;  limit, for_update, subquery }&#xa;Insert { table, columns, values }&#xa;Update { table, assignments, condition }&#xa;Delete { table, condition }&#xa;CreateTable { name, columns, if_not_exists,&#xa;  primary_key_columns, check_constraints }&#xa;AlterTable { table, action: AlterAction }&#xa;CreateIndex { index_name, table, columns }&#xa;Begin / Commit / Rollback&#xa;Savepoint / ReleaseSavepoint / RollbackTo&#xa;SetIsolationLevel(IsolationLevel)&#xa;ShowLocks / Checkpoint&#xa;Vacuum { table } / Explain(Box&lt;Statement&gt;)" vertex="1">
+          <mxGeometry height="272" width="380" y="23" as="geometry" />
+        </mxCell>
+        <mxCell id="JgZdRlXLGaeMcWZxnsZW-15" parent="JgZdRlXLGaeMcWZxnsZW-2" style="swimlane;fontStyle=1;startSize=23;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=11;" value="Condition" vertex="1">
+          <mxGeometry height="145" width="250" x="400" y="275" as="geometry" />
+        </mxCell>
+        <mxCell id="JgZdRlXLGaeMcWZxnsZW-16" parent="JgZdRlXLGaeMcWZxnsZW-15" style="text;strokeColor=none;fillColor=none;align=left;verticalAlign=top;spacingLeft=6;overflow=hidden;fontSize=10;" value="+ column: String&#xa;+ operator: Operator&#xa;+ value: ConditionValue&#xa;+ and: Option&lt;Box&lt;Condition&gt;&gt;&#xa;+ or: Option&lt;Box&lt;Condition&gt;&gt;" vertex="1">
+          <mxGeometry height="122" width="250" y="23" as="geometry" />
+        </mxCell>
+        <mxCell id="JgZdRlXLGaeMcWZxnsZW-17" parent="JgZdRlXLGaeMcWZxnsZW-2" style="swimlane;fontStyle=3;startSize=23;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=11;" value="«enum» IsolationLevel" vertex="1">
+          <mxGeometry height="115" width="170" x="660" y="275" as="geometry" />
+        </mxCell>
+        <mxCell id="JgZdRlXLGaeMcWZxnsZW-18" parent="JgZdRlXLGaeMcWZxnsZW-17" style="text;strokeColor=none;fillColor=none;align=left;verticalAlign=top;spacingLeft=6;overflow=hidden;fontSize=10;" value="ReadUncommitted&#xa;ReadCommitted&#xa;RepeatableRead&#xa;Serializable" vertex="1">
+          <mxGeometry height="92" width="170" y="23" as="geometry" />
+        </mxCell>
+        <mxCell id="JgZdRlXLGaeMcWZxnsZW-19" parent="JgZdRlXLGaeMcWZxnsZW-2" style="swimlane;fontStyle=1;startSize=23;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=11;" value="ColumnDef" vertex="1">
+          <mxGeometry height="200" width="295" x="10" y="530" as="geometry" />
+        </mxCell>
+        <mxCell id="JgZdRlXLGaeMcWZxnsZW-20" parent="JgZdRlXLGaeMcWZxnsZW-19" style="text;strokeColor=none;fillColor=none;align=left;verticalAlign=top;spacingLeft=6;overflow=hidden;fontSize=9;" value="+ name: String&#xa;+ data_type: DataType&#xa;+ primary_key: bool&#xa;+ not_null: bool&#xa;+ unique: bool&#xa;+ unique_constraint_name: Option&lt;String&gt;&#xa;+ auto_increment: bool&#xa;+ default: Option&lt;String&gt;&#xa;+ check_expr: Option&lt;String&gt;&#xa;+ foreign_key: Option&lt;ForeignKey&gt;" vertex="1">
+          <mxGeometry height="177" width="295" y="23" as="geometry" />
+        </mxCell>
+        <mxCell id="JgZdRlXLGaeMcWZxnsZW-21" parent="JgZdRlXLGaeMcWZxnsZW-2" style="swimlane;fontStyle=1;startSize=23;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=11;" value="ForeignKey" vertex="1">
+          <mxGeometry height="130" width="245" x="315" y="530" as="geometry" />
+        </mxCell>
+        <mxCell id="JgZdRlXLGaeMcWZxnsZW-22" parent="JgZdRlXLGaeMcWZxnsZW-21" style="text;strokeColor=none;fillColor=none;align=left;verticalAlign=top;spacingLeft=6;overflow=hidden;fontSize=10;" value="+ column: String&#xa;+ ref_table: String&#xa;+ ref_column: String&#xa;+ on_delete: FkAction&#xa;+ on_update: FkAction" vertex="1">
+          <mxGeometry height="107" width="245" y="23" as="geometry" />
+        </mxCell>
+        <mxCell id="JgZdRlXLGaeMcWZxnsZW-23" parent="JgZdRlXLGaeMcWZxnsZW-2" style="swimlane;fontStyle=3;startSize=23;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=11;" value="«enum» DataType" vertex="1">
+          <mxGeometry height="200" width="260" x="570" y="530" as="geometry" />
+        </mxCell>
+        <mxCell id="JgZdRlXLGaeMcWZxnsZW-24" parent="JgZdRlXLGaeMcWZxnsZW-23" style="text;strokeColor=none;fillColor=none;align=left;verticalAlign=top;spacingLeft=6;overflow=hidden;fontSize=10;" value="Int&#xa;Text&#xa;Float&#xa;Boolean&#xa;Varchar(u32)&#xa;Date&#xa;DateTime&#xa;Timestamp&#xa;Decimal(u8, u8)&#xa;Unknown" vertex="1">
+          <mxGeometry height="177" width="260" y="23" as="geometry" />
+        </mxCell>
+        <mxCell id="JgZdRlXLGaeMcWZxnsZW-25" edge="1" parent="JgZdRlXLGaeMcWZxnsZW-2" source="JgZdRlXLGaeMcWZxnsZW-3" style="edgeStyle=orthogonalEdgeStyle;fontSize=9;" target="JgZdRlXLGaeMcWZxnsZW-7" value="produces">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="JgZdRlXLGaeMcWZxnsZW-26" edge="1" parent="JgZdRlXLGaeMcWZxnsZW-2" source="JgZdRlXLGaeMcWZxnsZW-9" style="edgeStyle=orthogonalEdgeStyle;fontSize=9;dashed=1;endArrow=open;" target="JgZdRlXLGaeMcWZxnsZW-3" value="uses">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="JgZdRlXLGaeMcWZxnsZW-27" edge="1" parent="JgZdRlXLGaeMcWZxnsZW-2" source="JgZdRlXLGaeMcWZxnsZW-9" style="edgeStyle=orthogonalEdgeStyle;fontSize=9;exitX=0;exitY=1;exitDx=0;exitDy=0;entryX=1;entryY=0;entryDx=0;entryDy=0;" target="JgZdRlXLGaeMcWZxnsZW-13" value="produces">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="JgZdRlXLGaeMcWZxnsZW-28" edge="1" parent="JgZdRlXLGaeMcWZxnsZW-2" source="JgZdRlXLGaeMcWZxnsZW-19" style="edgeStyle=orthogonalEdgeStyle;fontSize=9;endArrow=open;" target="JgZdRlXLGaeMcWZxnsZW-21" value="0..1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="JgZdRlXLGaeMcWZxnsZW-29" edge="1" parent="JgZdRlXLGaeMcWZxnsZW-2" source="JgZdRlXLGaeMcWZxnsZW-19" style="edgeStyle=orthogonalEdgeStyle;fontSize=9;endArrow=open;" target="JgZdRlXLGaeMcWZxnsZW-23" value="">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="JgZdRlXLGaeMcWZxnsZW-30" parent="1" style="swimlane;startSize=30;fillColor=#f5f5f5;strokeColor=#555555;fontColor=#333333;fontStyle=1;fontSize=12;" value="[ engine ]" vertex="1">
+          <mxGeometry height="520" width="570" x="870" y="60" as="geometry" />
+        </mxCell>
+        <mxCell id="JgZdRlXLGaeMcWZxnsZW-31" parent="JgZdRlXLGaeMcWZxnsZW-30" style="swimlane;fontStyle=1;startSize=23;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=11;" value="Executor" vertex="1">
+          <mxGeometry height="465" width="385" x="10" y="40" as="geometry" />
+        </mxCell>
+        <mxCell id="JgZdRlXLGaeMcWZxnsZW-32" parent="JgZdRlXLGaeMcWZxnsZW-31" style="text;strokeColor=none;fillColor=none;align=left;verticalAlign=top;spacingLeft=6;overflow=hidden;fontSize=10;fontStyle=2;" value="~ NULL_VALUE: &amp;str = &quot;NULL&quot;" vertex="1">
+          <mxGeometry height="22" width="385" y="23" as="geometry" />
+        </mxCell>
+        <mxCell id="JgZdRlXLGaeMcWZxnsZW-33" parent="JgZdRlXLGaeMcWZxnsZW-31" style="text;strokeColor=none;fillColor=none;align=left;verticalAlign=top;spacingLeft=6;overflow=hidden;fontSize=10;" value="+ catalog: Catalog&#xa;+ tables: HashMap&lt;String, Vec&lt;Row&gt;&gt;&#xa;+ indexes: HashMap&lt;String, BPlusTree&gt;&#xa;+ index_meta: HashMap&lt;String, (String, String)&gt;&#xa;+ composite_indexes: HashMap&lt;String, CompositeIndex&gt;&#xa;+ views: HashMap&lt;String, Statement&gt;&#xa;+ txn: TransactionManager&#xa;+ buffer_pool: BufferPool&#xa;- disk: DiskManager&#xa;- lock_mgr: LockManager" vertex="1">
+          <mxGeometry height="157" width="385" y="45" as="geometry" />
+        </mxCell>
+        <mxCell id="JgZdRlXLGaeMcWZxnsZW-34" parent="JgZdRlXLGaeMcWZxnsZW-31" style="line;strokeColor=#82b366;fillColor=none;" value="" vertex="1">
+          <mxGeometry height="8" width="385" y="202" as="geometry" />
+        </mxCell>
+        <mxCell id="JgZdRlXLGaeMcWZxnsZW-35" parent="JgZdRlXLGaeMcWZxnsZW-31" style="text;strokeColor=none;fillColor=none;align=left;verticalAlign=top;spacingLeft=6;overflow=hidden;fontSize=10;" value="+ new() → Executor&#xa;+ execute(stmt: Statement) → Result&lt;String&gt;&#xa;+ exec_select / insert / update / delete / truncate&#xa;+ exec_begin / commit / rollback&#xa;+ exec_savepoint / release_savepoint / rollback_to&#xa;+ exec_vacuum / exec_explain / exec_show_locks&#xa;+ exec_show_buffer_pool / exec_show_wal&#xa;+ new() : disk.load_views() +&#xa;         disk.load_index_meta() + 인덱스 재빌드&#xa;+ recover_from_wal()" vertex="1">
+          <mxGeometry height="155" width="385" y="210" as="geometry" />
+        </mxCell>
+        <mxCell id="JgZdRlXLGaeMcWZxnsZW-36" parent="JgZdRlXLGaeMcWZxnsZW-30" style="swimlane;fontStyle=1;startSize=23;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=11;" value="LockManager" vertex="1">
+          <mxGeometry height="310" width="155" x="405" y="40" as="geometry" />
+        </mxCell>
+        <mxCell id="JgZdRlXLGaeMcWZxnsZW-37" parent="JgZdRlXLGaeMcWZxnsZW-36" style="text;strokeColor=none;fillColor=none;align=left;verticalAlign=top;spacingLeft=6;overflow=hidden;fontSize=9;" value="- row_locks:&#xa;  HashMap&lt;(String,&#xa;  String), u64&gt;&#xa;- wait_for:&#xa;  HashMap&lt;u64, u64&gt;&#xa;- deadlock_history:&#xa;  Vec&lt;(u64, u64)&gt;" vertex="1">
+          <mxGeometry height="120" width="155" y="23" as="geometry" />
+        </mxCell>
+        <mxCell id="JgZdRlXLGaeMcWZxnsZW-38" parent="JgZdRlXLGaeMcWZxnsZW-36" style="line;strokeColor=#82b366;fillColor=none;" value="" vertex="1">
+          <mxGeometry height="8" width="155" y="143" as="geometry" />
+        </mxCell>
+        <mxCell id="JgZdRlXLGaeMcWZxnsZW-39" parent="JgZdRlXLGaeMcWZxnsZW-36" style="text;strokeColor=none;fillColor=none;align=left;verticalAlign=top;spacingLeft=6;overflow=hidden;fontSize=9;" value="+ acquire(table,&#xa;  pk, txn_id)&#xa;  → LockResult&#xa;+ release(txn_id)&#xa;+ creates_cycle(&#xa;  from, to) → bool" vertex="1">
+          <mxGeometry height="159" width="155" y="151" as="geometry" />
+        </mxCell>
+        <mxCell id="JgZdRlXLGaeMcWZxnsZW-40" parent="JgZdRlXLGaeMcWZxnsZW-30" style="swimlane;fontStyle=3;startSize=23;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=11;" value="«enum» LockResult" vertex="1">
+          <mxGeometry height="105" width="155" x="405" y="360" as="geometry" />
+        </mxCell>
+        <mxCell id="JgZdRlXLGaeMcWZxnsZW-41" parent="JgZdRlXLGaeMcWZxnsZW-40" style="text;strokeColor=none;fillColor=none;align=left;verticalAlign=top;spacingLeft=6;overflow=hidden;fontSize=10;" value="Granted&#xa;Conflict { holder }&#xa;Deadlock { holder }" vertex="1">
+          <mxGeometry height="82" width="155" y="23" as="geometry" />
+        </mxCell>
+        <mxCell id="JgZdRlXLGaeMcWZxnsZW-42" edge="1" parent="JgZdRlXLGaeMcWZxnsZW-30" source="JgZdRlXLGaeMcWZxnsZW-31" style="edgeStyle=orthogonalEdgeStyle;fontSize=9;endArrow=diamond;endFill=1;" target="JgZdRlXLGaeMcWZxnsZW-36" value="lock_mgr">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="JgZdRlXLGaeMcWZxnsZW-43" edge="1" parent="JgZdRlXLGaeMcWZxnsZW-30" source="JgZdRlXLGaeMcWZxnsZW-36" style="edgeStyle=orthogonalEdgeStyle;fontSize=9;dashed=1;endArrow=open;" target="JgZdRlXLGaeMcWZxnsZW-40" value="returns">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="JgZdRlXLGaeMcWZxnsZW-44" parent="1" style="swimlane;startSize=30;fillColor=#f5f5f5;strokeColor=#555555;fontColor=#333333;fontStyle=1;fontSize=12;" value="[ catalog ]" vertex="1">
+          <mxGeometry height="520" width="270" x="1460" y="60" as="geometry" />
+        </mxCell>
+        <mxCell id="JgZdRlXLGaeMcWZxnsZW-45" parent="JgZdRlXLGaeMcWZxnsZW-44" style="swimlane;fontStyle=1;startSize=23;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=11;" value="Catalog" vertex="1">
+          <mxGeometry height="130" width="220" x="20" y="40" as="geometry" />
+        </mxCell>
+        <mxCell id="JgZdRlXLGaeMcWZxnsZW-46" parent="JgZdRlXLGaeMcWZxnsZW-45" style="text;strokeColor=none;fillColor=none;align=left;verticalAlign=top;spacingLeft=6;overflow=hidden;fontSize=10;" value="+ tables: HashMap&lt;String, TableSchema&gt;" vertex="1">
+          <mxGeometry height="32" width="220" y="23" as="geometry" />
+        </mxCell>
+        <mxCell id="JgZdRlXLGaeMcWZxnsZW-47" parent="JgZdRlXLGaeMcWZxnsZW-45" style="line;strokeColor=#d6b656;fillColor=none;" value="" vertex="1">
+          <mxGeometry height="8" width="220" y="55" as="geometry" />
+        </mxCell>
+        <mxCell id="JgZdRlXLGaeMcWZxnsZW-48" parent="JgZdRlXLGaeMcWZxnsZW-45" style="text;strokeColor=none;fillColor=none;align=left;verticalAlign=top;spacingLeft=6;overflow=hidden;fontSize=10;" value="+ create_table(name, cols)&#xa;+ drop_table(name)&#xa;+ get_table(name)&#xa;+ get_table_mut(name)" vertex="1">
+          <mxGeometry height="67" width="220" y="63" as="geometry" />
+        </mxCell>
+        <mxCell id="JgZdRlXLGaeMcWZxnsZW-49" parent="JgZdRlXLGaeMcWZxnsZW-44" style="swimlane;fontStyle=1;startSize=23;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=11;" value="TableSchema" vertex="1">
+          <mxGeometry height="135" width="220" x="20" y="220" as="geometry" />
+        </mxCell>
+        <mxCell id="JgZdRlXLGaeMcWZxnsZW-50" parent="JgZdRlXLGaeMcWZxnsZW-49" style="text;strokeColor=none;fillColor=none;align=left;verticalAlign=top;spacingLeft=6;overflow=hidden;fontSize=10;" value="+ name: String&#xa;+ columns: Vec&lt;ColumnDef&gt;&#xa;+ auto_increment_counters:&#xa;  HashMap&lt;String, u64&gt;" vertex="1">
+          <mxGeometry height="112" width="220" y="23" as="geometry" />
+        </mxCell>
+        <mxCell id="JgZdRlXLGaeMcWZxnsZW-51" edge="1" parent="JgZdRlXLGaeMcWZxnsZW-44" source="JgZdRlXLGaeMcWZxnsZW-45" style="edgeStyle=orthogonalEdgeStyle;fontSize=9;endArrow=open;" target="JgZdRlXLGaeMcWZxnsZW-49" value="1..*">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="JgZdRlXLGaeMcWZxnsZW-52" parent="1" style="swimlane;startSize=30;fillColor=#f5f5f5;strokeColor=#555555;fontColor=#333333;fontStyle=1;fontSize=12;" value="[ storage ]" vertex="1">
+          <mxGeometry height="400" width="1010" x="10" y="840" as="geometry" />
+        </mxCell>
+        <mxCell id="JgZdRlXLGaeMcWZxnsZW-53" parent="JgZdRlXLGaeMcWZxnsZW-52" style="swimlane;fontStyle=1;startSize=23;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=11;" value="DiskManager" vertex="1">
+          <mxGeometry height="330" width="265" x="10" y="40" as="geometry" />
+        </mxCell>
+        <mxCell id="JgZdRlXLGaeMcWZxnsZW-54" parent="JgZdRlXLGaeMcWZxnsZW-53" style="text;strokeColor=none;fillColor=none;align=left;verticalAlign=top;spacingLeft=6;overflow=hidden;fontSize=10;" value="- data_dir: String" vertex="1">
+          <mxGeometry height="28" width="265" y="23" as="geometry" />
+        </mxCell>
+        <mxCell id="JgZdRlXLGaeMcWZxnsZW-55" parent="JgZdRlXLGaeMcWZxnsZW-53" style="line;strokeColor=#d79b00;fillColor=none;" value="" vertex="1">
+          <mxGeometry height="8" width="265" y="51" as="geometry" />
+        </mxCell>
+        <mxCell id="JgZdRlXLGaeMcWZxnsZW-56" parent="JgZdRlXLGaeMcWZxnsZW-53" style="text;strokeColor=none;fillColor=none;align=left;verticalAlign=top;spacingLeft=6;overflow=hidden;fontSize=9;" value="+ new() → DiskManager&#xa;+ save_table(table, rows)&#xa;+ load_table(table) → Vec&lt;Row&gt;&#xa;+ save_schema(table, schema)&#xa;+ load_schema(table) → Option&lt;TableSchema&gt;&#xa;+ save_schema_columns(table, cols)&#xa;+ delete_table(table)&#xa;+ list_tables() → Vec&lt;String&gt;&#xa;+ save_views(views)&#xa;+ load_views()&#xa;  → HashMap&lt;String, Statement&gt;&#xa;+ save_index_meta(meta_list)&#xa;+ load_index_meta() → Vec&lt;IndexMeta&gt;" vertex="1">
+          <mxGeometry height="271" width="265" y="59" as="geometry" />
+        </mxCell>
+        <mxCell id="JgZdRlXLGaeMcWZxnsZW-57" parent="JgZdRlXLGaeMcWZxnsZW-52" style="swimlane;fontStyle=1;startSize=23;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=11;" value="IndexMeta" vertex="1">
+          <mxGeometry height="105" width="230" x="285" y="40" as="geometry" />
+        </mxCell>
+        <mxCell id="JgZdRlXLGaeMcWZxnsZW-58" parent="JgZdRlXLGaeMcWZxnsZW-57" style="text;strokeColor=none;fillColor=none;align=left;verticalAlign=top;spacingLeft=6;overflow=hidden;fontSize=10;" value="+ name: String&#xa;+ table: String&#xa;+ columns: Vec&lt;String&gt;" vertex="1">
+          <mxGeometry height="82" width="230" y="23" as="geometry" />
+        </mxCell>
+        <mxCell id="JgZdRlXLGaeMcWZxnsZW-59" parent="JgZdRlXLGaeMcWZxnsZW-52" style="swimlane;fontStyle=1;startSize=23;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=11;" value="BPlusTree" vertex="1">
+          <mxGeometry height="210" width="230" x="285" y="155" as="geometry" />
+        </mxCell>
+        <mxCell id="JgZdRlXLGaeMcWZxnsZW-60" parent="JgZdRlXLGaeMcWZxnsZW-59" style="text;strokeColor=none;fillColor=none;align=left;verticalAlign=top;spacingLeft=6;overflow=hidden;fontSize=10;" value="- root: Option&lt;Box&lt;Node&gt;&gt;&#xa;~ ORDER: usize = 4" vertex="1">
+          <mxGeometry height="40" width="230" y="23" as="geometry" />
+        </mxCell>
+        <mxCell id="JgZdRlXLGaeMcWZxnsZW-61" parent="JgZdRlXLGaeMcWZxnsZW-59" style="line;strokeColor=#d79b00;fillColor=none;" value="" vertex="1">
+          <mxGeometry height="8" width="230" y="63" as="geometry" />
+        </mxCell>
+        <mxCell id="JgZdRlXLGaeMcWZxnsZW-62" parent="JgZdRlXLGaeMcWZxnsZW-59" style="text;strokeColor=none;fillColor=none;align=left;verticalAlign=top;spacingLeft=6;overflow=hidden;fontSize=10;" value="+ new() → BPlusTree&#xa;+ insert(key: String, value: String)&#xa;+ search(key: &amp;str) → Option&lt;String&gt;&#xa;+ delete(key: &amp;str)&#xa;+ collect_all_kv()&#xa;  → Vec&lt;(String, String)&gt;" vertex="1">
+          <mxGeometry height="139" width="230" y="71" as="geometry" />
+        </mxCell>
+        <mxCell id="JgZdRlXLGaeMcWZxnsZW-63" parent="JgZdRlXLGaeMcWZxnsZW-52" style="swimlane;fontStyle=1;startSize=23;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=11;" value="CompositeIndex" vertex="1">
+          <mxGeometry height="110" width="235" x="525" y="40" as="geometry" />
+        </mxCell>
+        <mxCell id="JgZdRlXLGaeMcWZxnsZW-64" parent="JgZdRlXLGaeMcWZxnsZW-63" style="text;strokeColor=none;fillColor=none;align=left;verticalAlign=top;spacingLeft=6;overflow=hidden;fontSize=10;" value="+ insert(keys, value)&#xa;+ search(keys) → Option&lt;String&gt;&#xa;+ delete(keys)" vertex="1">
+          <mxGeometry height="87" width="235" y="23" as="geometry" />
+        </mxCell>
+        <mxCell id="JgZdRlXLGaeMcWZxnsZW-65" parent="JgZdRlXLGaeMcWZxnsZW-52" style="swimlane;fontStyle=1;startSize=23;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=11;" value="BufferPool" vertex="1">
+          <mxGeometry height="205" width="255" x="525" y="160" as="geometry" />
+        </mxCell>
+        <mxCell id="JgZdRlXLGaeMcWZxnsZW-66" parent="JgZdRlXLGaeMcWZxnsZW-65" style="text;strokeColor=none;fillColor=none;align=left;verticalAlign=top;spacingLeft=6;overflow=hidden;fontSize=10;" value="- cache: HashMap&lt;String, Page&gt;&#xa;- lru_queue: VecDeque&lt;String&gt;&#xa;~ BUFFER_POOL_SIZE: usize = 64&#xa;+ hit_count: u64&#xa;+ miss_count: u64" vertex="1">
+          <mxGeometry height="83" width="255" y="23" as="geometry" />
+        </mxCell>
+        <mxCell id="JgZdRlXLGaeMcWZxnsZW-67" parent="JgZdRlXLGaeMcWZxnsZW-65" style="line;strokeColor=#d79b00;fillColor=none;" value="" vertex="1">
+          <mxGeometry height="8" width="255" y="106" as="geometry" />
+        </mxCell>
+        <mxCell id="JgZdRlXLGaeMcWZxnsZW-68" parent="JgZdRlXLGaeMcWZxnsZW-65" style="text;strokeColor=none;fillColor=none;align=left;verticalAlign=top;spacingLeft=6;overflow=hidden;fontSize=10;" value="+ get_page(table, disk) → Vec&lt;Row&gt;&#xa;+ write_page(table, rows)&#xa;+ flush_page(table, disk)&#xa;+ flush_all(disk)&#xa;+ invalidate(table)&#xa;+ hit_rate() → f64" vertex="1">
+          <mxGeometry height="91" width="255" y="114" as="geometry" />
+        </mxCell>
+        <mxCell id="JgZdRlXLGaeMcWZxnsZW-69" parent="JgZdRlXLGaeMcWZxnsZW-52" style="swimlane;fontStyle=1;startSize=23;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=11;" value="Page" vertex="1">
+          <mxGeometry height="130" width="200" x="800" y="40" as="geometry" />
+        </mxCell>
+        <mxCell id="JgZdRlXLGaeMcWZxnsZW-70" parent="JgZdRlXLGaeMcWZxnsZW-69" style="text;strokeColor=none;fillColor=none;align=left;verticalAlign=top;spacingLeft=6;overflow=hidden;fontSize=9;" value="+ table_name: String&#xa;+ rows: Vec&lt;Row&gt;&#xa;+ is_dirty: bool&#xa;~ PAGE_SIZE: usize = 16384&#xa;~ MAGIC: u32 = 0x52444200" vertex="1">
+          <mxGeometry height="107" width="330" y="23" as="geometry" />
+        </mxCell>
+        <mxCell id="JgZdRlXLGaeMcWZxnsZW-71" edge="1" parent="JgZdRlXLGaeMcWZxnsZW-52" source="JgZdRlXLGaeMcWZxnsZW-53" style="edgeStyle=orthogonalEdgeStyle;fontSize=9;dashed=1;endArrow=open;" target="JgZdRlXLGaeMcWZxnsZW-57" value="saves / loads">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="JgZdRlXLGaeMcWZxnsZW-72" edge="1" parent="JgZdRlXLGaeMcWZxnsZW-52" source="JgZdRlXLGaeMcWZxnsZW-65" style="edgeStyle=orthogonalEdgeStyle;fontSize=9;endArrow=diamond;endFill=1;" target="JgZdRlXLGaeMcWZxnsZW-69" value="cache">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="JgZdRlXLGaeMcWZxnsZW-73" parent="1" style="swimlane;startSize=30;fillColor=#f5f5f5;strokeColor=#555555;fontColor=#333333;fontStyle=1;fontSize=12;" value="[ transaction ]" vertex="1">
+          <mxGeometry height="630" width="700" x="1030" y="610" as="geometry" />
+        </mxCell>
+        <mxCell id="JgZdRlXLGaeMcWZxnsZW-74" parent="JgZdRlXLGaeMcWZxnsZW-73" style="swimlane;fontStyle=1;startSize=23;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=11;" value="TransactionManager" vertex="1">
+          <mxGeometry height="360" width="260" x="10" y="40" as="geometry" />
+        </mxCell>
+        <mxCell id="JgZdRlXLGaeMcWZxnsZW-75" parent="JgZdRlXLGaeMcWZxnsZW-74" style="text;strokeColor=none;fillColor=none;align=left;verticalAlign=top;spacingLeft=6;overflow=hidden;fontSize=10;" value="- active: bool&#xa;- txn_id: u64&#xa;- undo_log: Vec&lt;UndoEntry&gt;&#xa;- wal: WalManager&#xa;+ isolation_level: IsolationLevel&#xa;- snapshot: Option&lt;HashMap&lt;String, Vec&lt;Row&gt;&gt;&gt;&#xa;- savepoints: Vec&lt;(String, usize)&gt;" vertex="1">
+          <mxGeometry height="117" width="330" y="23" as="geometry" />
+        </mxCell>
+        <mxCell id="JgZdRlXLGaeMcWZxnsZW-76" parent="JgZdRlXLGaeMcWZxnsZW-74" style="line;strokeColor=#9673a6;fillColor=none;" value="" vertex="1">
+          <mxGeometry height="8" width="260" y="140" as="geometry" />
+        </mxCell>
+        <mxCell id="JgZdRlXLGaeMcWZxnsZW-77" parent="JgZdRlXLGaeMcWZxnsZW-74" style="text;strokeColor=none;fillColor=none;align=left;verticalAlign=top;spacingLeft=6;overflow=hidden;fontSize=10;" value="+ begin_with_snapshot(tables)&#xa;+ commit() → Result&lt;&gt;&#xa;+ abort() → Result&lt;Vec&lt;UndoEntry&gt;&gt;&#xa;+ get_snapshot_table(table)&#xa;+ validate_serializable(live_tables)&#xa;+ log_insert / log_update / log_delete&#xa;+ is_active() → bool&#xa;+ wal_records() → Vec&lt;WalRecord&gt;&#xa;+ wal_size() → u64&#xa;+ wal_clear()" vertex="1">
+          <mxGeometry height="212" width="330" y="148" as="geometry" />
+        </mxCell>
+        <mxCell id="JgZdRlXLGaeMcWZxnsZW-78" parent="JgZdRlXLGaeMcWZxnsZW-73" style="swimlane;fontStyle=1;startSize=23;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=11;" value="UndoEntry" vertex="1">
+          <mxGeometry height="120" width="260" x="10" y="410" as="geometry" />
+        </mxCell>
+        <mxCell id="JgZdRlXLGaeMcWZxnsZW-79" parent="JgZdRlXLGaeMcWZxnsZW-78" style="text;strokeColor=none;fillColor=none;align=left;verticalAlign=top;spacingLeft=6;overflow=hidden;fontSize=10;" value="+ operation: String&#xa;+ table: String&#xa;+ key: String&#xa;+ old_data: Option&lt;String&gt;" vertex="1">
+          <mxGeometry height="97" width="330" y="23" as="geometry" />
+        </mxCell>
+        <mxCell id="JgZdRlXLGaeMcWZxnsZW-80" parent="JgZdRlXLGaeMcWZxnsZW-73" style="swimlane;fontStyle=1;startSize=23;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=11;" value="WalManager" vertex="1">
+          <mxGeometry height="325" width="270" x="300" y="40" as="geometry" />
+        </mxCell>
+        <mxCell id="JgZdRlXLGaeMcWZxnsZW-81" parent="JgZdRlXLGaeMcWZxnsZW-80" style="text;strokeColor=none;fillColor=none;align=left;verticalAlign=top;spacingLeft=6;overflow=hidden;fontSize=9;" value="- path: String&#xa;~ WAL_PATH: &amp;str = &quot;rustdb.wal&quot;&#xa;~ AUTO_CHECKPOINT: u64 = 524288" vertex="1">
+          <mxGeometry height="52" width="270" y="23" as="geometry" />
+        </mxCell>
+        <mxCell id="JgZdRlXLGaeMcWZxnsZW-82" parent="JgZdRlXLGaeMcWZxnsZW-80" style="line;strokeColor=#9673a6;fillColor=none;" value="" vertex="1">
+          <mxGeometry height="8" width="270" y="75" as="geometry" />
+        </mxCell>
+        <mxCell id="JgZdRlXLGaeMcWZxnsZW-83" parent="JgZdRlXLGaeMcWZxnsZW-80" style="text;strokeColor=none;fillColor=none;align=left;verticalAlign=top;spacingLeft=6;overflow=hidden;fontSize=10;" value="+ log_insert(table, key, data)&#xa;+ log_update(table, key, data)&#xa;+ log_delete(table, key)&#xa;+ log_commit()&#xa;+ log_rollback()&#xa;+ log_checkpoint()&#xa;+ read_all() → Vec&lt;WalRecord&gt;&#xa;+ clear()&#xa;+ file_size() → u64&#xa;+ should_checkpoint() → bool" vertex="1">
+          <mxGeometry height="242" width="270" y="83" as="geometry" />
+        </mxCell>
+        <mxCell id="JgZdRlXLGaeMcWZxnsZW-84" parent="JgZdRlXLGaeMcWZxnsZW-73" style="swimlane;fontStyle=1;startSize=23;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=11;" value="WalRecord" vertex="1">
+          <mxGeometry height="120" width="180" x="300" y="385" as="geometry" />
+        </mxCell>
+        <mxCell id="JgZdRlXLGaeMcWZxnsZW-85" parent="JgZdRlXLGaeMcWZxnsZW-84" style="text;strokeColor=none;fillColor=none;align=left;verticalAlign=top;spacingLeft=6;overflow=hidden;fontSize=10;" value="+ op: WalOp&#xa;+ table_name: String&#xa;+ key: String&#xa;+ data: String" vertex="1">
+          <mxGeometry height="97" width="180" y="23" as="geometry" />
+        </mxCell>
+        <mxCell id="JgZdRlXLGaeMcWZxnsZW-86" parent="JgZdRlXLGaeMcWZxnsZW-73" style="swimlane;fontStyle=3;startSize=23;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=11;" value="«enum» WalOp" vertex="1">
+          <mxGeometry height="185" width="180" x="510" y="385" as="geometry" />
+        </mxCell>
+        <mxCell id="JgZdRlXLGaeMcWZxnsZW-87" parent="JgZdRlXLGaeMcWZxnsZW-86" style="text;strokeColor=none;fillColor=none;align=left;verticalAlign=top;spacingLeft=6;overflow=hidden;fontSize=10;" value="Insert    = 0x01&#xa;Update    = 0x02&#xa;Delete    = 0x03&#xa;Commit    = 0xFF&#xa;Rollback  = 0xFE&#xa;Checkpoint= 0xFD" vertex="1">
+          <mxGeometry height="162" width="180" y="23" as="geometry" />
+        </mxCell>
+        <mxCell id="JgZdRlXLGaeMcWZxnsZW-88" edge="1" parent="JgZdRlXLGaeMcWZxnsZW-73" source="JgZdRlXLGaeMcWZxnsZW-74" style="edgeStyle=orthogonalEdgeStyle;fontSize=9;endArrow=diamond;endFill=1;" target="JgZdRlXLGaeMcWZxnsZW-80" value="wal">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="JgZdRlXLGaeMcWZxnsZW-89" edge="1" parent="JgZdRlXLGaeMcWZxnsZW-73" source="JgZdRlXLGaeMcWZxnsZW-74" style="edgeStyle=orthogonalEdgeStyle;fontSize=9;endArrow=diamond;endFill=1;" target="JgZdRlXLGaeMcWZxnsZW-78" value="undo_log">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="JgZdRlXLGaeMcWZxnsZW-90" edge="1" parent="JgZdRlXLGaeMcWZxnsZW-73" source="JgZdRlXLGaeMcWZxnsZW-80" style="edgeStyle=orthogonalEdgeStyle;fontSize=9;endArrow=diamond;endFill=0;" target="JgZdRlXLGaeMcWZxnsZW-84" value="records">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="JgZdRlXLGaeMcWZxnsZW-91" edge="1" parent="JgZdRlXLGaeMcWZxnsZW-73" source="JgZdRlXLGaeMcWZxnsZW-84" style="edgeStyle=orthogonalEdgeStyle;fontSize=9;endArrow=open;" target="JgZdRlXLGaeMcWZxnsZW-86" value="">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="JgZdRlXLGaeMcWZxnsZW-92" edge="1" parent="1" source="JgZdRlXLGaeMcWZxnsZW-31" style="edgeStyle=orthogonalEdgeStyle;fontSize=9;endArrow=diamond;endFill=1;" target="JgZdRlXLGaeMcWZxnsZW-74" value="txn">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="JgZdRlXLGaeMcWZxnsZW-93" edge="1" parent="1" source="JgZdRlXLGaeMcWZxnsZW-31" style="edgeStyle=orthogonalEdgeStyle;fontSize=9;endArrow=diamond;endFill=1;" target="JgZdRlXLGaeMcWZxnsZW-45" value="catalog">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="JgZdRlXLGaeMcWZxnsZW-94" edge="1" parent="1" source="JgZdRlXLGaeMcWZxnsZW-31" style="edgeStyle=orthogonalEdgeStyle;fontSize=9;endArrow=diamond;endFill=1;" target="JgZdRlXLGaeMcWZxnsZW-65" value="buffer_pool">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="JgZdRlXLGaeMcWZxnsZW-95" edge="1" parent="1" source="JgZdRlXLGaeMcWZxnsZW-31" style="edgeStyle=orthogonalEdgeStyle;fontSize=9;endArrow=diamond;endFill=1;" target="JgZdRlXLGaeMcWZxnsZW-53" value="disk">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="JgZdRlXLGaeMcWZxnsZW-96" edge="1" parent="1" source="JgZdRlXLGaeMcWZxnsZW-31" style="edgeStyle=orthogonalEdgeStyle;fontSize=9;endArrow=diamond;endFill=0;" target="JgZdRlXLGaeMcWZxnsZW-59" value="indexes">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="JgZdRlXLGaeMcWZxnsZW-97" edge="1" parent="1" source="JgZdRlXLGaeMcWZxnsZW-31" style="edgeStyle=orthogonalEdgeStyle;fontSize=9;dashed=1;endArrow=open;" target="JgZdRlXLGaeMcWZxnsZW-13" value="executes">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="JgZdRlXLGaeMcWZxnsZW-98" edge="1" parent="1" source="JgZdRlXLGaeMcWZxnsZW-49" style="edgeStyle=orthogonalEdgeStyle;fontSize=9;dashed=1;endArrow=open;" target="JgZdRlXLGaeMcWZxnsZW-19" value="columns">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>
