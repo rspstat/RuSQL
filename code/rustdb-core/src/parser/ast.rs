@@ -1,12 +1,24 @@
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub enum IsolationLevel {
-    ReadUncommitted,  // 더티 읽기 허용
-    ReadCommitted,    // 커밋된 데이터만 읽기
-    RepeatableRead,   // 트랜잭션 시작 시 스냅샷 고정
-    Serializable,     // RepeatableRead + 팬텀 읽기 방지 검증
+    ReadUncommitted,
+    ReadCommitted,
+    RepeatableRead,
+    Serializable,
 }
 
 use serde::{Serialize, Deserialize};
+
+/// Arithmetic expression tree (for SELECT columns and WHERE left-hand side)
+#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
+pub enum ArithExpr {
+    Col(String),
+    Num(String),
+    Str(String),
+    Add(Box<ArithExpr>, Box<ArithExpr>),
+    Sub(Box<ArithExpr>, Box<ArithExpr>),
+    Mul(Box<ArithExpr>, Box<ArithExpr>),
+    Div(Box<ArithExpr>, Box<ArithExpr>),
+}
 
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub enum DataType {
@@ -14,20 +26,20 @@ pub enum DataType {
     Text,
     Float,
     Boolean,
-    Varchar(u32),        // VARCHAR(n)
-    Date,                // DATE — "YYYY-MM-DD"
-    DateTime,            // DATETIME — "YYYY-MM-DD HH:MM:SS"
-    Timestamp,           // TIMESTAMP — "YYYY-MM-DD HH:MM:SS" (UTC 기준)
-    Decimal(u8, u8),     // DECIMAL(precision, scale)
+    Varchar(u32),
+    Date,
+    DateTime,
+    Timestamp,
+    Decimal(u8, u8),
     #[serde(other)]
-    Unknown,             // 구버전 스키마 호환용
+    Unknown,
 }
 
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub enum FkAction {
-    Restrict,   // 기본값 - 삭제 거부
-    Cascade,    // 연쇄 삭제
-    SetNull,    // NULL로 설정
+    Restrict,
+    Cascade,
+    SetNull,
 }
 
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
@@ -36,7 +48,7 @@ pub struct ForeignKey {
     pub ref_table: String,
     pub ref_column: String,
     pub on_delete: FkAction,
-    pub on_update: FkAction,  // ON UPDATE CASCADE / RESTRICT / SET NULL
+    pub on_update: FkAction,
 }
 
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
@@ -46,11 +58,11 @@ pub struct ColumnDef {
     pub primary_key: bool,
     pub not_null: bool,
     pub unique: bool,
-    pub unique_constraint_name: Option<String>,  // CONSTRAINT name UNIQUE
+    pub unique_constraint_name: Option<String>,
     pub auto_increment: bool,
-    pub default: Option<String>,                 // DEFAULT value
+    pub default: Option<String>,
     pub foreign_key: Option<ForeignKey>,
-    pub check_expr: Option<String>,              // CHECK (expr) — raw SQL string
+    pub check_expr: Option<String>,
 }
 
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
@@ -62,8 +74,7 @@ pub struct OrderBy {
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub struct Join {
     pub table: String,
-    pub left_col: String,
-    pub right_col: String,
+    pub on_expr: CondExpr,   // full ON condition (merged row is evaluated)
     pub join_type: JoinType,
 }
 
@@ -77,26 +88,35 @@ pub enum JoinType {
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub enum Operator {
     Eq, Ne, Gt, Lt, Gte, Lte,
-    In, NotIn,           // IN / NOT IN (서브쿼리)
+    In, NotIn,
     Like, Between,
     IsNull, IsNotNull,
-    Exists, NotExists,   // EXISTS / NOT EXISTS (서브쿼리)
+    Exists, NotExists,
 }
 
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub enum ConditionValue {
     Literal(String),
     Subquery(Box<Statement>),
-    Between(String, String),  // BETWEEN a AND b
+    Between(String, String),
+    LiteralList(Vec<String>),
 }
 
+/// Leaf predicate (single comparison)
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub struct Condition {
-    pub column: String,
+    pub left: ArithExpr,
     pub operator: Operator,
     pub value: ConditionValue,
-    pub and: Option<Box<Condition>>,  // AND 연결
-    pub or: Option<Box<Condition>>,   // OR 연결
+}
+
+/// Boolean expression tree with proper AND > OR precedence
+#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
+pub enum CondExpr {
+    And(Box<CondExpr>, Box<CondExpr>),
+    Or(Box<CondExpr>, Box<CondExpr>),
+    Not(Box<CondExpr>),
+    Leaf(Condition),
 }
 
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
@@ -104,15 +124,27 @@ pub enum AggFunc {
     Count, Sum, Avg, Min, Max,
 }
 
+/// CASE WHEN branch: (condition_expression, then_value)
+#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
+pub struct CaseWhenBranch {
+    pub condition: CondExpr,
+    pub result: String,
+}
+
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub enum SelectColumn {
     All,
     Column(String),
-    ColumnAlias(String, String),               // col AS alias
+    ColumnAlias(String, String),
     Agg { func: AggFunc, col: String },
     AggAlias { func: AggFunc, col: String, alias: String },
-    /// 스칼라 함수: SELECT UPPER(name), NOW() AS ts, ...
     Func { name: String, args: Vec<String>, alias: Option<String> },
+    Expr { expr: ArithExpr, alias: Option<String> },
+    CaseWhen {
+        branches: Vec<CaseWhenBranch>,
+        else_val: Option<String>,
+        alias: Option<String>,
+    },
 }
 
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
@@ -120,7 +152,7 @@ pub enum AlterAction {
     AddColumn(ColumnDef),
     DropColumn(String),
     RenameColumn { from: String, to: String },
-    ModifyColumn(ColumnDef),  // ALTER TABLE t MODIFY COLUMN col TYPE [constraints]
+    ModifyColumn(ColumnDef),
 }
 
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
@@ -132,9 +164,7 @@ pub enum Statement {
         name: String,
         columns: Vec<ColumnDef>,
         if_not_exists: bool,
-        /// 테이블 레벨 복합 PK: PRIMARY KEY (col1, col2)
         primary_key_columns: Vec<String>,
-        /// 테이블 레벨 CHECK 제약 목록: (name?, expr_string)
         check_constraints: Vec<(Option<String>, String)>,
     },
     DropTable {
@@ -146,33 +176,36 @@ pub enum Statement {
     },
     Insert {
         table: String,
-        /// 컬럼 지정 삽입: INSERT INTO t (col1, col2) VALUES (...)
         columns: Option<Vec<String>>,
-        /// 멀티 row: VALUES (...), (...)
         values: Vec<Vec<String>>,
+    },
+    InsertSelect {
+        table: String,
+        columns: Option<Vec<String>>,
+        query: Box<Statement>,
     },
     Select {
         table: String,
-        /// FROM (SELECT ...) AS alias — Some일 때 table은 빈 문자열
         subquery: Option<(Box<Statement>, String)>,
         columns: Vec<SelectColumn>,
         distinct: bool,
-        condition: Option<Condition>,
+        condition: Option<CondExpr>,
         joins: Vec<Join>,
         order_by: Vec<OrderBy>,
         group_by: Option<Vec<String>>,
-        having: Option<Condition>,
+        having: Option<CondExpr>,
         limit: Option<usize>,
+        offset: Option<usize>,
         for_update: bool,
     },
     Update {
         table: String,
-        assignments: Vec<(String, String)>,
-        condition: Option<Condition>,
+        assignments: Vec<(String, ArithExpr)>,
+        condition: Option<CondExpr>,
     },
     Delete {
         table: String,
-        condition: Option<Condition>,
+        condition: Option<CondExpr>,
     },
     AlterTable {
         table: String,
@@ -202,17 +235,24 @@ pub enum Statement {
     Checkpoint,
     SetIsolationLevel(IsolationLevel),
     ShowIsolationLevel,
-    /// VACUUM [table] — 논리 삭제된 행을 물리적으로 제거
     Vacuum {
         table: Option<String>,
     },
     ShowLocks,
-    /// SAVEPOINT name
     Savepoint { name: String },
-    /// RELEASE SAVEPOINT name
     ReleaseSavepoint { name: String },
-    /// ROLLBACK TO SAVEPOINT name
     RollbackTo { name: String },
-    /// EXPLAIN <SELECT>
     Explain(Box<Statement>),
+    With {
+        ctes: Vec<(String, Box<Statement>)>,
+        query: Box<Statement>,
+    },
+    Union {
+        left: Box<Statement>,
+        right: Box<Statement>,
+        all: bool,
+        order_by: Vec<OrderBy>,
+        limit: Option<usize>,
+        offset: Option<usize>,
+    },
 }

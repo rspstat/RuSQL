@@ -91,6 +91,32 @@ pub enum Token {
 
     // INTERVAL (DATE_ADD / DATE_SUB)
     Interval,
+
+    // CASE WHEN
+    Case,
+    When,
+    Then,
+    Else,
+    End,
+
+    // UNION / UNION ALL
+    Union,
+    All,
+
+    // IF()
+    If,
+
+    // 산술 연산자
+    Plus,
+    Minus,
+    Slash,
+
+    // OFFSET
+    Offset,
+
+    // CTE
+    With,
+    Recursive,
 }
 
 pub struct Lexer {
@@ -247,6 +273,17 @@ impl Lexer {
             "FLOOR"        => Token::Floor,
             "MOD"          => Token::Mod,
             "INTERVAL"     => Token::Interval,
+            "CASE"         => Token::Case,
+            "WHEN"         => Token::When,
+            "THEN"         => Token::Then,
+            "ELSE"         => Token::Else,
+            "END"          => Token::End,
+            "UNION"        => Token::Union,
+            "ALL"          => Token::All,
+            "IF"           => Token::If,
+            "OFFSET"       => Token::Offset,
+            "WITH"         => Token::With,
+            "RECURSIVE"    => Token::Recursive,
             _              => Token::Ident(s),
         }
     }
@@ -277,10 +314,10 @@ impl Lexer {
                                 }
                                 Token::NumberLit(s)
                             } else {
-                                // 단독 '-' 는 무시
-                                continue;
+                                Token::Minus
                             }
                         }
+                        '+' => { self.advance(); Token::Plus }
                         '#' => {
                             // # 한 줄 주석: 줄 끝까지 건너뜀
                             while let Some(c) = self.peek() {
@@ -306,8 +343,7 @@ impl Lexer {
                                 }
                                 continue;
                             } else {
-                                // 단독 '/' 는 무시
-                                continue;
+                                Token::Slash
                             }
                         }
                         // ── 기존 토큰 ──────────────────────────────

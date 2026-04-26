@@ -16,6 +16,18 @@ fn expand_alias_str(s: &str, map: &HashMap<String, String>) -> String {
     s.to_string()
 }
 
+fn expand_arith(expr: ArithExpr, map: &HashMap<String, String>) -> ArithExpr {
+    match expr {
+        ArithExpr::Col(name) => ArithExpr::Col(expand_alias_str(&name, map)),
+        ArithExpr::Num(n)    => ArithExpr::Num(n),
+        ArithExpr::Str(s)    => ArithExpr::Str(s),
+        ArithExpr::Add(l, r) => ArithExpr::Add(Box::new(expand_arith(*l, map)), Box::new(expand_arith(*r, map))),
+        ArithExpr::Sub(l, r) => ArithExpr::Sub(Box::new(expand_arith(*l, map)), Box::new(expand_arith(*r, map))),
+        ArithExpr::Mul(l, r) => ArithExpr::Mul(Box::new(expand_arith(*l, map)), Box::new(expand_arith(*r, map))),
+        ArithExpr::Div(l, r) => ArithExpr::Div(Box::new(expand_arith(*l, map)), Box::new(expand_arith(*r, map))),
+    }
+}
+
 fn expand_select_column(col: SelectColumn, map: &HashMap<String, String>) -> SelectColumn {
     match col {
         SelectColumn::Column(name) =>
@@ -28,13 +40,24 @@ fn expand_select_column(col: SelectColumn, map: &HashMap<String, String>) -> Sel
                 args: args.iter().map(|a| expand_alias_str(a, map)).collect(),
                 alias,
             },
+        SelectColumn::Expr { expr, alias } =>
+            SelectColumn::Expr { expr: expand_arith(expr, map), alias },
+        SelectColumn::CaseWhen { branches, else_val, alias } =>
+            SelectColumn::CaseWhen {
+                branches: branches.into_iter().map(|b| CaseWhenBranch {
+                    condition: expand_condexpr(b.condition, map),
+                    result: b.result,
+                }).collect(),
+                else_val,
+                alias,
+            },
         other => other,
     }
 }
 
-fn expand_condition(cond: Condition, map: &HashMap<String, String>) -> Condition {
+fn expand_leaf(cond: Condition, map: &HashMap<String, String>) -> Condition {
     Condition {
-        column: expand_alias_str(&cond.column, map),
+        left: expand_arith(cond.left, map),
         operator: cond.operator,
         value: match cond.value {
             ConditionValue::Literal(s) =>
@@ -43,8 +66,19 @@ fn expand_condition(cond: Condition, map: &HashMap<String, String>) -> Condition
                 ConditionValue::Between(expand_alias_str(&a, map), expand_alias_str(&b, map)),
             other => other,
         },
-        and: cond.and.map(|c| Box::new(expand_condition(*c, map))),
-        or:  cond.or .map(|c| Box::new(expand_condition(*c, map))),
+    }
+}
+
+fn expand_condexpr(expr: CondExpr, map: &HashMap<String, String>) -> CondExpr {
+    match expr {
+        CondExpr::And(l, r) =>
+            CondExpr::And(Box::new(expand_condexpr(*l, map)), Box::new(expand_condexpr(*r, map))),
+        CondExpr::Or(l, r) =>
+            CondExpr::Or(Box::new(expand_condexpr(*l, map)), Box::new(expand_condexpr(*r, map))),
+        CondExpr::Not(inner) =>
+            CondExpr::Not(Box::new(expand_condexpr(*inner, map))),
+        CondExpr::Leaf(cond) =>
+            CondExpr::Leaf(expand_leaf(cond, map)),
     }
 }
 
@@ -186,42 +220,334 @@ impl Parser {
             Some(Token::Checkpoint)  => Ok(Statement::Checkpoint),
             Some(Token::Set)         => self.parse_set(),
             Some(Token::Vacuum)      => self.parse_vacuum(),
+            Some(Token::With)        => self.parse_with(),
             other => Err(format!("Unknown statement: {:?}", other)),
         }
     }
 
-    fn parse_condition(&mut self) -> Result<Condition, String> {
-        // EXISTS (SELECT ...) — 컬럼 없이 시작
+    fn parse_with(&mut self) -> Result<Statement, String> {
+        // WITH [RECURSIVE] cte_name AS (query) [, cte_name AS (query)] ... SELECT ...
+        if self.peek() == Some(&Token::Recursive) { self.advance(); } // RECURSIVE keyword ignored (non-recursive only)
+
+        let mut ctes: Vec<(String, Box<Statement>)> = Vec::new();
+        loop {
+            let name = self.expect_ident()?;
+            match self.advance() {
+                Some(Token::As) => {}
+                other => return Err(format!("Expected AS in CTE, got {:?}", other)),
+            }
+            match self.advance() {
+                Some(Token::LParen) => {}
+                other => return Err(format!("Expected '(' in CTE, got {:?}", other)),
+            }
+            match self.advance() {
+                Some(Token::Select) => {}
+                other => return Err(format!("Expected SELECT in CTE body, got {:?}", other)),
+            }
+            let body = self.parse_select()?;
+            match self.advance() {
+                Some(Token::RParen) => {}
+                other => return Err(format!("Expected ')' after CTE body, got {:?}", other)),
+            }
+            ctes.push((name, Box::new(body)));
+            if self.peek() == Some(&Token::Comma) {
+                self.advance();
+            } else {
+                break;
+            }
+        }
+
+        // Main query (any DML: SELECT, INSERT ... SELECT, etc.)
+        let query = self.parse()?;
+        Ok(Statement::With { ctes, query: Box::new(query) })
+    }
+
+    /// Top-level condition expression parser (entry point for WHERE/HAVING/ON)
+    fn parse_condexpr(&mut self) -> Result<CondExpr, String> {
+        self.parse_or_expr()
+    }
+
+    /// OR has lower precedence than AND
+    fn parse_or_expr(&mut self) -> Result<CondExpr, String> {
+        let mut left = self.parse_and_expr()?;
+        while self.peek() == Some(&Token::Or) {
+            self.advance();
+            let right = self.parse_and_expr()?;
+            left = CondExpr::Or(Box::new(left), Box::new(right));
+        }
+        Ok(left)
+    }
+
+    /// AND has higher precedence than OR
+    fn parse_and_expr(&mut self) -> Result<CondExpr, String> {
+        let mut left = self.parse_not_expr()?;
+        while self.peek() == Some(&Token::And) {
+            self.advance();
+            let right = self.parse_not_expr()?;
+            left = CondExpr::And(Box::new(left), Box::new(right));
+        }
+        Ok(left)
+    }
+
+    /// NOT has higher precedence than AND
+    fn parse_not_expr(&mut self) -> Result<CondExpr, String> {
+        if self.peek() == Some(&Token::Not) {
+            // NOT IN and NOT EXISTS are handled inside parse_single_pred
+            let next = self.tokens.get(self.pos + 1);
+            let is_not_in_or_exists = next == Some(&Token::In) || next == Some(&Token::Exists);
+            if !is_not_in_or_exists {
+                self.advance(); // consume NOT
+                let inner = self.parse_not_expr()?;
+                return Ok(CondExpr::Not(Box::new(inner)));
+            }
+        }
+        self.parse_primary_cond()
+    }
+
+    /// Handles parenthesized sub-expressions or single predicates
+    fn parse_primary_cond(&mut self) -> Result<CondExpr, String> {
+        if self.peek() == Some(&Token::LParen) {
+            // Could be (SELECT ...) for EXISTS, or grouped condition (a AND b)
+            // Peek further: if next-next is SELECT it's a subquery value, handled in parse_single_pred
+            // Otherwise it's a grouped condition
+            let is_subquery = self.tokens.get(self.pos + 1) == Some(&Token::Select);
+            if !is_subquery {
+                self.advance(); // consume '('
+                let inner = self.parse_or_expr()?;
+                match self.advance() {
+                    Some(Token::RParen) => {}
+                    other => return Err(format!("Expected ')', got {:?}", other)),
+                }
+                return Ok(inner);
+            }
+        }
+        let cond = self.parse_single_pred()?;
+        Ok(CondExpr::Leaf(cond))
+    }
+
+    /// Parses a single predicate (leaf node): col OP val, IS NULL, BETWEEN, LIKE, IN, EXISTS, etc.
+    fn parse_single_pred(&mut self) -> Result<Condition, String> {
+        // EXISTS (SELECT ...)
         if self.peek() == Some(&Token::Exists) {
             self.advance();
             let sub = self.parse_exists_subquery()?;
-            let cond = Condition {
-                column: String::new(), operator: Operator::Exists,
+            return Ok(Condition {
+                left: ArithExpr::Col(String::new()), operator: Operator::Exists,
                 value: ConditionValue::Subquery(Box::new(sub)),
-                and: None, or: None,
-            };
-            return self.parse_condition_chain(cond);
+            });
         }
 
-        // NOT EXISTS (SELECT ...) — NOT 토큰 다음 EXISTS
-        if self.peek() == Some(&Token::Not) {
-            // 한 칸 앞을 확인: NOT EXISTS 인 경우만 여기서 처리
-            if self.tokens.get(self.pos + 1) == Some(&Token::Exists) {
-                self.advance(); // NOT
-                self.advance(); // EXISTS
-                let sub = self.parse_exists_subquery()?;
-                let cond = Condition {
-                    column: String::new(), operator: Operator::NotExists,
-                    value: ConditionValue::Subquery(Box::new(sub)),
-                    and: None, or: None,
-                };
-                return self.parse_condition_chain(cond);
+        // NOT EXISTS (SELECT ...)
+        if self.peek() == Some(&Token::Not) && self.tokens.get(self.pos + 1) == Some(&Token::Exists) {
+            self.advance(); // NOT
+            self.advance(); // EXISTS
+            let sub = self.parse_exists_subquery()?;
+            return Ok(Condition {
+                left: ArithExpr::Col(String::new()), operator: Operator::NotExists,
+                value: ConditionValue::Subquery(Box::new(sub)),
+            });
+        }
+
+        // Left side: arithmetic expression (handles columns, aggregates, arithmetic)
+        let left = self.parse_arith_expr()?;
+
+        // IN (subquery or literal list)
+        if self.peek() == Some(&Token::In) {
+            self.advance();
+            match self.advance() {
+                Some(Token::LParen) => {}
+                other => return Err(format!("Expected '(' after IN, got {:?}", other)),
             }
-            // 아닌 경우 (NOT NULL 등)는 아래 컬럼 파싱으로 진행
+            if self.peek() == Some(&Token::Select) {
+                let sub_stmt = match self.advance() {
+                    Some(Token::Select) => self.parse_select()?,
+                    _ => unreachable!(),
+                };
+                match self.advance() {
+                    Some(Token::RParen) => {}
+                    other => return Err(format!("Expected ')', got {:?}", other)),
+                }
+                return Ok(Condition { left, operator: Operator::In, value: ConditionValue::Subquery(Box::new(sub_stmt)) });
+            } else {
+                let mut values = Vec::new();
+                loop {
+                    let val = match self.advance() {
+                        Some(Token::StringLit(s)) => s.clone(),
+                        Some(Token::NumberLit(n)) => n.clone(),
+                        Some(Token::Ident(s))     => s.clone(),
+                        Some(Token::Null)          => "NULL".to_string(),
+                        other => return Err(format!("Expected value in IN list, got {:?}", other)),
+                    };
+                    values.push(val);
+                    match self.peek() {
+                        Some(Token::Comma)  => { self.advance(); }
+                        Some(Token::RParen) => break,
+                        other => return Err(format!("Expected ',' or ')' in IN list, got {:?}", other)),
+                    }
+                }
+                self.advance(); // consume ')'
+                return Ok(Condition { left, operator: Operator::In, value: ConditionValue::LiteralList(values) });
+            }
         }
 
-        // HAVING 절에서 COUNT(*) > 1 같은 집계 함수 조건 처리
-        let column = match self.peek() {
+        // NOT IN (subquery or literal list)
+        if self.peek() == Some(&Token::Not) && self.tokens.get(self.pos + 1) == Some(&Token::In) {
+            self.advance(); // NOT
+            self.advance(); // IN
+            match self.advance() {
+                Some(Token::LParen) => {}
+                other => return Err(format!("Expected '(' after NOT IN, got {:?}", other)),
+            }
+            if self.peek() == Some(&Token::Select) {
+                let sub_stmt = match self.advance() {
+                    Some(Token::Select) => self.parse_select()?,
+                    _ => unreachable!(),
+                };
+                match self.advance() {
+                    Some(Token::RParen) => {}
+                    other => return Err(format!("Expected ')', got {:?}", other)),
+                }
+                return Ok(Condition { left, operator: Operator::NotIn, value: ConditionValue::Subquery(Box::new(sub_stmt)) });
+            } else {
+                let mut values = Vec::new();
+                loop {
+                    let val = match self.advance() {
+                        Some(Token::StringLit(s)) => s.clone(),
+                        Some(Token::NumberLit(n)) => n.clone(),
+                        Some(Token::Ident(s))     => s.clone(),
+                        Some(Token::Null)          => "NULL".to_string(),
+                        other => return Err(format!("Expected value in NOT IN list, got {:?}", other)),
+                    };
+                    values.push(val);
+                    match self.peek() {
+                        Some(Token::Comma)  => { self.advance(); }
+                        Some(Token::RParen) => break,
+                        other => return Err(format!("Expected ',' or ')' in NOT IN list, got {:?}", other)),
+                    }
+                }
+                self.advance(); // consume ')'
+                return Ok(Condition { left, operator: Operator::NotIn, value: ConditionValue::LiteralList(values) });
+            }
+        }
+
+        // BETWEEN val AND val
+        if self.peek() == Some(&Token::Between) {
+            self.advance();
+            let start = match self.advance() {
+                Some(Token::NumberLit(n)) => n.clone(),
+                Some(Token::StringLit(s)) => s.clone(),
+                Some(Token::Ident(s))     => s.clone(),
+                other => return Err(format!("Expected value after BETWEEN, got {:?}", other)),
+            };
+            match self.advance() {
+                Some(Token::And) => {}
+                other => return Err(format!("Expected AND in BETWEEN, got {:?}", other)),
+            }
+            let end = match self.advance() {
+                Some(Token::NumberLit(n)) => n.clone(),
+                Some(Token::StringLit(s)) => s.clone(),
+                Some(Token::Ident(s))     => s.clone(),
+                other => return Err(format!("Expected value after BETWEEN ... AND, got {:?}", other)),
+            };
+            return Ok(Condition { left, operator: Operator::Between, value: ConditionValue::Between(start, end) });
+        }
+
+        // LIKE pattern
+        if self.peek() == Some(&Token::Like) {
+            self.advance();
+            let pattern = match self.advance() {
+                Some(Token::StringLit(s)) => s.clone(),
+                Some(Token::Ident(s))     => s.clone(),
+                other => return Err(format!("Expected pattern after LIKE, got {:?}", other)),
+            };
+            return Ok(Condition { left, operator: Operator::Like, value: ConditionValue::Literal(pattern) });
+        }
+
+        // IS NULL / IS NOT NULL
+        if self.peek() == Some(&Token::Is) {
+            self.advance();
+            return match self.peek() {
+                Some(Token::Not) => {
+                    self.advance();
+                    match self.advance() {
+                        Some(Token::Null) => Ok(Condition { left, operator: Operator::IsNotNull, value: ConditionValue::Literal(String::new()) }),
+                        other => Err(format!("Expected NULL after IS NOT, got {:?}", other)),
+                    }
+                }
+                Some(Token::Null) => {
+                    self.advance();
+                    Ok(Condition { left, operator: Operator::IsNull, value: ConditionValue::Literal(String::new()) })
+                }
+                other => Err(format!("Expected NULL or NOT after IS, got {:?}", other)),
+            };
+        }
+
+        let operator = match self.advance() {
+            Some(Token::Eq)  => Operator::Eq,
+            Some(Token::Ne)  => Operator::Ne,
+            Some(Token::Gt)  => Operator::Gt,
+            Some(Token::Lt)  => Operator::Lt,
+            Some(Token::Gte) => Operator::Gte,
+            Some(Token::Lte) => Operator::Lte,
+            other => return Err(format!("Expected comparison operator, got {:?}", other)),
+        };
+
+        let value = match self.peek() {
+            Some(Token::LParen) => {
+                self.advance();
+                match self.advance() {
+                    Some(Token::Select) => {}
+                    other => return Err(format!("Expected SELECT in subquery, got {:?}", other)),
+                }
+                let sub_stmt = self.parse_select()?;
+                match self.advance() {
+                    Some(Token::RParen) => {}
+                    other => return Err(format!("Expected ')' after subquery, got {:?}", other)),
+                }
+                ConditionValue::Subquery(Box::new(sub_stmt))
+            }
+            _ => match self.advance() {
+                Some(Token::Ident(s)) => {
+                    let s = s.clone();
+                    if self.peek() == Some(&Token::Dot) {
+                        self.advance();
+                        let col = self.expect_ident()?;
+                        ConditionValue::Literal(format!("{}.{}", s, col))
+                    } else {
+                        ConditionValue::Literal(s)
+                    }
+                }
+                Some(Token::NumberLit(n)) => ConditionValue::Literal(n.clone()),
+                Some(Token::StringLit(s)) => ConditionValue::Literal(s.clone()),
+                Some(Token::Null)         => ConditionValue::Literal("__NULL__".to_string()),
+                other => return Err(format!("Expected value, got {:?}", other)),
+            }
+        };
+
+        Ok(Condition { left, operator, value })
+    }
+
+    /// EXISTS / NOT EXISTS 뒤의 (SELECT ...) 파싱
+    fn parse_exists_subquery(&mut self) -> Result<Statement, String> {
+        match self.advance() {
+            Some(Token::LParen) => {}
+            other => return Err(format!("Expected '(' after EXISTS, got {:?}", other)),
+        }
+        let sub = match self.advance() {
+            Some(Token::Select) => self.parse_select()?,
+            other => return Err(format!("Expected SELECT inside EXISTS, got {:?}", other)),
+        };
+        match self.advance() {
+            Some(Token::RParen) => {}
+            other => return Err(format!("Expected ')' after EXISTS subquery, got {:?}", other)),
+        }
+        Ok(sub)
+    }
+
+    /// Arithmetic factor: number | string | column | agg_func | '(' expr ')'
+    fn parse_arith_factor(&mut self) -> Result<ArithExpr, String> {
+        match self.peek() {
+            // Aggregate functions → stored as Col("COUNT(*)")
             Some(Token::Count) | Some(Token::Sum) | Some(Token::Avg) |
             Some(Token::Min)   | Some(Token::Max) => {
                 let label = match self.advance() {
@@ -245,214 +571,126 @@ impl Parser {
                     Some(Token::RParen) => {}
                     other => return Err(format!("Expected ')' after aggregate, got {:?}", other)),
                 }
-                format!("{}({})", label, inner)
+                Ok(ArithExpr::Col(format!("{}({})", label, inner)))
             }
-            _ => self.expect_col_ref()?,
-        };
-
-        // IN 처리
-        if self.peek() == Some(&Token::In) {
-            self.advance();
-            match self.advance() {
-                Some(Token::LParen) => {}
-                other => return Err(format!("Expected '(', got {:?}", other)),
+            Some(Token::NumberLit(_)) => {
+                let n = match self.advance() { Some(Token::NumberLit(n)) => n.clone(), _ => unreachable!() };
+                Ok(ArithExpr::Num(n))
             }
-            let sub_stmt = match self.advance() {
-                Some(Token::Select) => self.parse_select()?,
-                other => return Err(format!("Expected SELECT, got {:?}", other)),
-            };
-            match self.advance() {
-                Some(Token::RParen) => {}
-                other => return Err(format!("Expected ')', got {:?}", other)),
+            Some(Token::StringLit(_)) => {
+                let s = match self.advance() { Some(Token::StringLit(s)) => s.clone(), _ => unreachable!() };
+                Ok(ArithExpr::Str(s))
             }
-            let cond = Condition {
-                column, operator: Operator::In,
-                value: ConditionValue::Subquery(Box::new(sub_stmt)),
-                and: None, or: None,
-            };
-            return self.parse_condition_chain(cond);
-        }
-
-        // NOT IN (SELECT ...) 처리
-        if self.peek() == Some(&Token::Not) {
-            if self.tokens.get(self.pos + 1) == Some(&Token::In) {
-                self.advance(); // NOT
-                self.advance(); // IN
-                match self.advance() {
-                    Some(Token::LParen) => {}
-                    other => return Err(format!("Expected '(' after NOT IN, got {:?}", other)),
-                }
-                let sub_stmt = match self.advance() {
-                    Some(Token::Select) => self.parse_select()?,
-                    other => return Err(format!("Expected SELECT in NOT IN subquery, got {:?}", other)),
-                };
-                match self.advance() {
-                    Some(Token::RParen) => {}
-                    other => return Err(format!("Expected ')' after NOT IN subquery, got {:?}", other)),
-                }
-                let cond = Condition {
-                    column, operator: Operator::NotIn,
-                    value: ConditionValue::Subquery(Box::new(sub_stmt)),
-                    and: None, or: None,
-                };
-                return self.parse_condition_chain(cond);
+            Some(Token::Null) => {
+                self.advance();
+                Ok(ArithExpr::Str("NULL".to_string()))
             }
-        }
-
-        // BETWEEN 처리
-        if self.peek() == Some(&Token::Between) {
-            self.advance();
-            let start = match self.advance() {
-                Some(Token::NumberLit(n)) => n.clone(),
-                Some(Token::Ident(s))     => s.clone(),
-                other => return Err(format!("Expected value, got {:?}", other)),
-            };
-            match self.advance() {
-                Some(Token::And) => {}
-                other => return Err(format!("Expected AND, got {:?}", other)),
-            }
-            let end = match self.advance() {
-                Some(Token::NumberLit(n)) => n.clone(),
-                Some(Token::Ident(s))     => s.clone(),
-                other => return Err(format!("Expected value, got {:?}", other)),
-            };
-            let cond = Condition {
-                column, operator: Operator::Between,
-                value: ConditionValue::Between(start, end),
-                and: None, or: None,
-            };
-            return self.parse_condition_chain(cond);
-        }
-
-        // LIKE 처리
-        if self.peek() == Some(&Token::Like) {
-            self.advance();
-            let pattern = match self.advance() {
-                Some(Token::StringLit(s)) => s.clone(),
-                Some(Token::Ident(s))     => s.clone(),
-                other => return Err(format!("Expected pattern, got {:?}", other)),
-            };
-            let cond = Condition {
-                column, operator: Operator::Like,
-                value: ConditionValue::Literal(pattern),
-                and: None, or: None,
-            };
-            return self.parse_condition_chain(cond);
-        }
-
-        let operator = match self.advance() {
-            // IS NULL / IS NOT NULL
-            Some(Token::Is) => {
-                match self.peek() {
-                    Some(Token::Not) => {
-                        self.advance();
-                        match self.advance() {
-                            Some(Token::Null) => {
-                                let cond = Condition {
-                                    column,
-                                    operator: Operator::IsNotNull,
-                                    value: ConditionValue::Literal(String::new()),
-                                    and: None,
-                                    or: None,
-                                };
-                                return self.parse_condition_chain(cond);
-                            }
-                            other => return Err(format!("Expected NULL, got {:?}", other)),
-                        }
-                    }
-                    Some(Token::Null) => {
-                        self.advance();
-                        let cond = Condition {
-                            column,
-                            operator: Operator::IsNull,
-                            value: ConditionValue::Literal(String::new()),
-                            and: None,
-                            or: None,
-                        };
-                        return self.parse_condition_chain(cond);
-                    }
-                    other => return Err(format!("Expected NULL or NOT, got {:?}", other)),
-                }
-            }
-            Some(Token::Eq)  => Operator::Eq,
-            Some(Token::Ne)  => Operator::Ne,
-            Some(Token::Gt)  => Operator::Gt,
-            Some(Token::Lt)  => Operator::Lt,
-            Some(Token::Gte) => Operator::Gte,
-            Some(Token::Lte) => Operator::Lte,
-            other => return Err(format!("Expected operator, got {:?}", other)),
-        };
-
-        let value = match self.peek() {
             Some(Token::LParen) => {
-                // (SELECT ...) 형태의 서브쿼리
-                self.advance(); // ( 소비
-                match self.advance() {
-                    Some(Token::Select) => {}
-                    other => return Err(format!("Expected SELECT in subquery, got {:?}", other)),
-                }
-                let sub_stmt = self.parse_select()?;
+                self.advance();
+                let inner = self.parse_arith_expr()?;
                 match self.advance() {
                     Some(Token::RParen) => {}
-                    other => return Err(format!("Expected ')', got {:?}", other)),
+                    other => return Err(format!("Expected ')' in expression, got {:?}", other)),
                 }
-                ConditionValue::Subquery(Box::new(sub_stmt))
+                Ok(inner)
             }
-            _ => match self.advance() {
-                Some(Token::Ident(s)) => {
-                    let s = s.clone();
-                    // table.col 형태 지원 (상관 서브쿼리용)
-                    if self.peek() == Some(&Token::Dot) {
-                        self.advance(); // '.' 소비
-                        let col = self.expect_ident()?;
-                        ConditionValue::Literal(format!("{}.{}", s, col))
-                    } else {
-                        ConditionValue::Literal(s)
+            Some(Token::Ident(_)) => {
+                let s = self.expect_col_ref()?;
+                Ok(ArithExpr::Col(s))
+            }
+            other => Err(format!("Expected expression term, got {:?}", other)),
+        }
+    }
+
+    /// Arithmetic term: factor ('*' | '/' factor)*
+    fn parse_arith_term(&mut self) -> Result<ArithExpr, String> {
+        let mut left = self.parse_arith_factor()?;
+        loop {
+            match self.peek() {
+                Some(Token::Asterisk) => {
+                    self.advance();
+                    let right = self.parse_arith_factor()?;
+                    left = ArithExpr::Mul(Box::new(left), Box::new(right));
+                }
+                Some(Token::Slash) => {
+                    self.advance();
+                    let right = self.parse_arith_factor()?;
+                    left = ArithExpr::Div(Box::new(left), Box::new(right));
+                }
+                _ => break,
+            }
+        }
+        Ok(left)
+    }
+
+    /// Arithmetic expression: term (('+' | '-') term)*
+    fn parse_arith_expr(&mut self) -> Result<ArithExpr, String> {
+        let mut left = self.parse_arith_term()?;
+        loop {
+            match self.peek() {
+                Some(Token::Plus) => {
+                    self.advance();
+                    let right = self.parse_arith_term()?;
+                    left = ArithExpr::Add(Box::new(left), Box::new(right));
+                }
+                Some(Token::Minus) => {
+                    self.advance();
+                    let right = self.parse_arith_term()?;
+                    left = ArithExpr::Sub(Box::new(left), Box::new(right));
+                }
+                _ => break,
+            }
+        }
+        Ok(left)
+    }
+
+    /// CASE WHEN cond THEN val ... [ELSE val] END
+    fn parse_case_when(&mut self) -> Result<SelectColumn, String> {
+        let mut branches = Vec::new();
+        loop {
+            match self.peek() {
+                Some(Token::When) => {
+                    self.advance(); // WHEN
+                    let cond = self.parse_condexpr()?;
+                    match self.advance() {
+                        Some(Token::Then) => {}
+                        other => return Err(format!("Expected THEN, got {:?}", other)),
                     }
+                    let result = match self.advance() {
+                        Some(Token::StringLit(s)) => s.clone(),
+                        Some(Token::NumberLit(n)) => n.clone(),
+                        Some(Token::Null)         => "NULL".to_string(),
+                        Some(Token::Ident(s))     => s.clone(),
+                        other => return Err(format!("Expected THEN value, got {:?}", other)),
+                    };
+                    branches.push(CaseWhenBranch { condition: cond, result });
                 }
-                Some(Token::NumberLit(n)) => ConditionValue::Literal(n.clone()),
-                Some(Token::StringLit(s)) => ConditionValue::Literal(s.clone()),
-                Some(Token::Null)         => ConditionValue::Literal("__NULL__".to_string()),
-                other => return Err(format!("Expected value, got {:?}", other)),
+                _ => break,
             }
-        };
-
-        let cond = Condition { column, operator, value, and: None, or: None };
-        self.parse_condition_chain(cond)
-    }
-
-    /// EXISTS / NOT EXISTS 뒤의 (SELECT ...) 파싱
-    fn parse_exists_subquery(&mut self) -> Result<Statement, String> {
-        match self.advance() {
-            Some(Token::LParen) => {}
-            other => return Err(format!("Expected '(' after EXISTS, got {:?}", other)),
         }
-        let sub = match self.advance() {
-            Some(Token::Select) => self.parse_select()?,
-            other => return Err(format!("Expected SELECT inside EXISTS, got {:?}", other)),
+        let else_val = if self.peek() == Some(&Token::Else) {
+            self.advance();
+            Some(match self.advance() {
+                Some(Token::StringLit(s)) => s.clone(),
+                Some(Token::NumberLit(n)) => n.clone(),
+                Some(Token::Null)         => "NULL".to_string(),
+                Some(Token::Ident(s))     => s.clone(),
+                other => return Err(format!("Expected ELSE value, got {:?}", other)),
+            })
+        } else {
+            None
         };
         match self.advance() {
-            Some(Token::RParen) => {}
-            other => return Err(format!("Expected ')' after EXISTS subquery, got {:?}", other)),
+            Some(Token::End) => {}
+            other => return Err(format!("Expected END after CASE, got {:?}", other)),
         }
-        Ok(sub)
-    }
-
-    fn parse_condition_chain(&mut self, mut cond: Condition) -> Result<Condition, String> {
-        match self.peek() {
-            Some(Token::And) => {
-                self.advance();
-                let next = self.parse_condition()?;
-                cond.and = Some(Box::new(next));
-            }
-            Some(Token::Or) => {
-                self.advance();
-                let next = self.parse_condition()?;
-                cond.or = Some(Box::new(next));
-            }
-            _ => {}
-        }
-        Ok(cond)
+        let alias = if self.peek() == Some(&Token::As) {
+            self.advance();
+            Some(self.expect_alias_ident()?)
+        } else {
+            None
+        };
+        Ok(SelectColumn::CaseWhen { branches, else_val, alias })
     }
 
     fn parse_select(&mut self) -> Result<Statement, String> {
@@ -509,14 +747,54 @@ impl Parser {
                         SelectColumn::Agg { func, col: agg_col }
                     }
                 }
-                // SELECT 1, SELECT 'literal' — EXISTS 서브쿼리 등에서 사용
-                Some(Token::NumberLit(_)) | Some(Token::StringLit(_)) => {
-                    let val = match self.advance() {
-                        Some(Token::NumberLit(n)) => n.clone(),
+                // CASE WHEN ... THEN ... [ELSE ...] END
+                Some(Token::Case) => {
+                    self.advance(); // consume CASE
+                    self.parse_case_when()?
+                }
+                // IF(cond, true_val, false_val) — parsed as CaseWhen to support any condition
+                Some(Token::If) => {
+                    self.advance(); // consume IF
+                    match self.advance() {
+                        Some(Token::LParen) => {}
+                        other => return Err(format!("Expected '(' after IF, got {:?}", other)),
+                    }
+                    let cond = self.parse_condexpr()?;
+                    match self.advance() {
+                        Some(Token::Comma) => {}
+                        other => return Err(format!("Expected ',' in IF(), got {:?}", other)),
+                    }
+                    let true_val = match self.advance() {
                         Some(Token::StringLit(s)) => s.clone(),
-                        _ => unreachable!(),
+                        Some(Token::NumberLit(n)) => n.clone(),
+                        Some(Token::Null)         => "NULL".to_string(),
+                        Some(Token::Ident(s))     => s.clone(),
+                        other => return Err(format!("Expected true value in IF(), got {:?}", other)),
                     };
-                    SelectColumn::Column(val)
+                    match self.advance() {
+                        Some(Token::Comma) => {}
+                        other => return Err(format!("Expected ',' in IF(), got {:?}", other)),
+                    }
+                    let false_val = match self.advance() {
+                        Some(Token::StringLit(s)) => s.clone(),
+                        Some(Token::NumberLit(n)) => n.clone(),
+                        Some(Token::Null)         => "NULL".to_string(),
+                        Some(Token::Ident(s))     => s.clone(),
+                        other => return Err(format!("Expected false value in IF(), got {:?}", other)),
+                    };
+                    match self.advance() {
+                        Some(Token::RParen) => {}
+                        other => return Err(format!("Expected ')' after IF(), got {:?}", other)),
+                    }
+                    let alias = if self.peek() == Some(&Token::As) {
+                        self.advance();
+                        Some(self.expect_alias_ident()?)
+                    } else { None };
+                    SelectColumn::CaseWhen {
+                        branches: vec![CaseWhenBranch { condition: cond, result: true_val }],
+                        else_val: Some(false_val),
+                        alias,
+                    }
                 }
                 // 스칼라 함수: UPPER(col), NOW(), CONCAT(a, b), ...
                 Some(Token::Upper) | Some(Token::Lower) | Some(Token::Length) |
@@ -555,13 +833,22 @@ impl Parser {
                     SelectColumn::Func { name: fname, args, alias }
                 }
                 _ => {
-                    let name = self.expect_col_ref()?;
-                    if self.peek() == Some(&Token::As) {
+                    let expr = self.parse_arith_expr()?;
+                    let alias = if self.peek() == Some(&Token::As) {
                         self.advance();
-                        let alias = self.expect_alias_ident()?;
-                        SelectColumn::ColumnAlias(name, alias)
+                        Some(self.expect_alias_ident()?)
                     } else {
-                        SelectColumn::Column(name)
+                        None
+                    };
+                    match expr {
+                        ArithExpr::Col(name) => {
+                            if let Some(a) = alias {
+                                SelectColumn::ColumnAlias(name, a)
+                            } else {
+                                SelectColumn::Column(name)
+                            }
+                        }
+                        other => SelectColumn::Expr { expr: other, alias },
                     }
                 }
             };
@@ -641,19 +928,14 @@ impl Parser {
                 Some(Token::On) => {}
                 other => return Err(format!("Expected ON, got {:?}", other)),
             }
-            let left_col  = self.expect_col_ref()?;
-            match self.advance() {
-                Some(Token::Eq) => {}
-                other => return Err(format!("Expected =, got {:?}", other)),
-            }
-            let right_col = self.expect_col_ref()?;
-            joins.push(Join { table: join_table, left_col, right_col, join_type });
+            let on_expr = self.parse_condexpr()?;
+            joins.push(Join { table: join_table, on_expr, join_type });
         }
 
         // WHERE
         let condition = if self.peek() == Some(&Token::Where) {
             self.advance();
-            Some(self.parse_condition()?)
+            Some(self.parse_condexpr()?)
         } else {
             None
         };
@@ -678,7 +960,7 @@ impl Parser {
         // HAVING
         let having = if self.peek() == Some(&Token::Having) {
             self.advance();
-            Some(self.parse_condition()?)
+            Some(self.parse_condexpr()?)
         } else {
             None
         };
@@ -710,15 +992,25 @@ impl Parser {
             Vec::new()
         };
 
-        // LIMIT
-        let limit = if self.peek() == Some(&Token::Limit) {
+        // LIMIT [OFFSET]
+        let (limit, offset) = if self.peek() == Some(&Token::Limit) {
             self.advance();
-            match self.advance() {
+            let lim = match self.advance() {
                 Some(Token::NumberLit(n)) => Some(n.parse::<usize>().unwrap_or(0)),
-                other => return Err(format!("Expected number, got {:?}", other)),
-            }
+                other => return Err(format!("Expected number after LIMIT, got {:?}", other)),
+            };
+            let off = if self.peek() == Some(&Token::Offset) {
+                self.advance();
+                match self.advance() {
+                    Some(Token::NumberLit(n)) => Some(n.parse::<usize>().unwrap_or(0)),
+                    other => return Err(format!("Expected number after OFFSET, got {:?}", other)),
+                }
+            } else {
+                None
+            };
+            (lim, off)
         } else {
-            None
+            (None, None)
         };
 
         // FOR UPDATE
@@ -738,11 +1030,10 @@ impl Parser {
             .collect();
         let joins: Vec<Join> = joins.into_iter().map(|j| Join {
             table: j.table,
-            left_col:  expand_alias_str(&j.left_col, &alias_map),
-            right_col: expand_alias_str(&j.right_col, &alias_map),
+            on_expr: expand_condexpr(j.on_expr, &alias_map),
             join_type: j.join_type,
         }).collect();
-        let condition = condition.map(|c| expand_condition(c, &alias_map));
+        let condition = condition.map(|c| expand_condexpr(c, &alias_map));
         let order_by: Vec<OrderBy> = order_by.into_iter().map(|o| OrderBy {
             column: expand_alias_str(&o.column, &alias_map),
             ascending: o.ascending,
@@ -750,9 +1041,51 @@ impl Parser {
         let group_by = group_by.map(|cols| cols.into_iter()
             .map(|c| expand_alias_str(&c, &alias_map))
             .collect::<Vec<_>>());
-        let having = having.map(|c| expand_condition(c, &alias_map));
+        let having = having.map(|c| expand_condexpr(c, &alias_map));
 
-        Ok(Statement::Select { table, subquery, distinct, columns, condition, joins, order_by, group_by, having, limit, for_update })
+        let select_stmt = Statement::Select { table, subquery, distinct, columns, condition, joins, order_by, group_by, having, limit, offset, for_update };
+
+        // UNION / UNION ALL
+        if self.peek() == Some(&Token::Union) {
+            self.advance(); // UNION
+            let all = if self.peek() == Some(&Token::All) {
+                self.advance();
+                true
+            } else {
+                false
+            };
+            // skip optional SELECT keyword
+            match self.advance() {
+                Some(Token::Select) => {}
+                other => return Err(format!("Expected SELECT after UNION, got {:?}", other)),
+            }
+            let right = self.parse_select()?;
+
+            // Lift ORDER BY / LIMIT / OFFSET from the right SELECT to the Union level
+            let (right_clean, union_order_by, union_limit, union_offset) = match right {
+                Statement::Select { table, subquery, columns, distinct, condition, joins,
+                                    order_by, group_by, having, limit, offset, for_update } => {
+                    let clean = Statement::Select {
+                        table, subquery, columns, distinct, condition, joins,
+                        order_by: vec![], group_by, having,
+                        limit: None, offset: None, for_update,
+                    };
+                    (clean, order_by, limit, offset)
+                }
+                other => (other, vec![], None, None),
+            };
+
+            return Ok(Statement::Union {
+                left: Box::new(select_stmt),
+                right: Box::new(right_clean),
+                all,
+                order_by: union_order_by,
+                limit: union_limit,
+                offset: union_offset,
+            });
+        }
+
+        Ok(select_stmt)
     }
 
     fn parse_insert(&mut self) -> Result<Statement, String> {
@@ -780,9 +1113,16 @@ impl Parser {
             None
         };
 
+        // INSERT INTO table [(cols)] SELECT ...
+        if self.peek() == Some(&Token::Select) {
+            self.advance(); // consume SELECT
+            let query = self.parse_select()?;
+            return Ok(Statement::InsertSelect { table, columns, query: Box::new(query) });
+        }
+
         match self.advance() {
             Some(Token::Values) => {}
-            other => return Err(format!("Expected VALUES, got {:?}", other)),
+            other => return Err(format!("Expected VALUES or SELECT, got {:?}", other)),
         }
 
         // 하나 이상의 값 그룹: VALUES (...), (...)
@@ -839,19 +1179,14 @@ impl Parser {
                 Some(Token::Eq) => {}
                 other => return Err(format!("Expected =, got {:?}", other)),
             }
-            let val = match self.advance() {
-                Some(Token::StringLit(s)) => s.clone(),
-                Some(Token::NumberLit(n)) => n.clone(),
-                Some(Token::Ident(s))     => s.clone(),
-                other => return Err(format!("Expected value, got {:?}", other)),
-            };
-            assignments.push((col, val));
+            let expr = self.parse_arith_expr()?;
+            assignments.push((col, expr));
             if self.peek() == Some(&Token::Comma) { self.advance(); } else { break; }
         }
 
         let condition = if self.peek() == Some(&Token::Where) {
             self.advance();
-            Some(self.parse_condition()?)
+            Some(self.parse_condexpr()?)
         } else {
             None
         };
@@ -868,7 +1203,7 @@ impl Parser {
         let table = self.expect_ident()?;
         let condition = if self.peek() == Some(&Token::Where) {
             self.advance();
-            Some(self.parse_condition()?)
+            Some(self.parse_condexpr()?)
         } else {
             None
         };
@@ -1131,8 +1466,8 @@ impl Parser {
             other => return Err(format!("Expected TABLE, got {:?}", other)),
         }
 
-        // IF NOT EXISTS (IF, EXISTS 는 Ident로 들어옴)
-        let if_not_exists = if matches!(self.peek(), Some(Token::Ident(s)) if s.eq_ignore_ascii_case("IF")) {
+        // IF NOT EXISTS
+        let if_not_exists = if self.peek() == Some(&Token::If) {
             self.advance(); // IF
             match self.advance() {
                 Some(Token::Not) => {}
@@ -1335,8 +1670,8 @@ impl Parser {
             Some(Token::Table) => {}
             other => return Err(format!("Expected TABLE, got {:?}", other)),
         }
-        // IF EXISTS 처리 (IF, EXISTS 는 Ident로 들어옴)
-        let if_exists = if matches!(self.peek(), Some(Token::Ident(s)) if s.eq_ignore_ascii_case("IF")) {
+        // IF EXISTS 처리
+        let if_exists = if self.peek() == Some(&Token::If) {
             self.advance(); // IF
             match self.advance() {
                 Some(Token::Exists) => {}
@@ -1476,7 +1811,7 @@ impl Parser {
 
     fn parse_drop_index(&mut self) -> Result<Statement, String> {
         // IF EXISTS 처리
-        if matches!(self.peek(), Some(Token::Ident(s)) if s.eq_ignore_ascii_case("IF")) {
+        if self.peek() == Some(&Token::If) {
             self.advance(); // IF
             match self.advance() {
                 Some(Token::Exists) => {}
@@ -1506,7 +1841,7 @@ impl Parser {
 
     fn parse_drop_view(&mut self) -> Result<Statement, String> {
         // IF EXISTS 처리
-        if matches!(self.peek(), Some(Token::Ident(s)) if s.eq_ignore_ascii_case("IF")) {
+        if self.peek() == Some(&Token::If) {
             self.advance(); // IF
             match self.advance() {
                 Some(Token::Exists) => {}

@@ -61,53 +61,64 @@ fn colorize_table(output: &str) {
     stdout.execute(ResetColor).unwrap();
 }
 
+fn run_query(executor: &mut Executor, query: &str) {
+    let start = Instant::now();
+    let mut p = Parser::new(query);
+    match p.parse() {
+        Ok(stmt) => match executor.execute(stmt) {
+            Ok(result) => {
+                let elapsed = start.elapsed();
+                colorize_table(&result);
+                print_color(
+                    &format!("({:.3} sec)\n", elapsed.as_secs_f64()),
+                    Color::DarkGrey,
+                );
+            }
+            Err(e) => print_color(&format!("ERROR: {}\n", e), Color::Red),
+        },
+        Err(e) if e.contains("Unknown statement: None") => {}
+        Err(e) => print_color(&format!("PARSE ERROR: {}\n", e), Color::Red),
+    }
+}
+
 fn main() {
     let stdin = io::stdin();
     let mut executor = Executor::new();
 
     print_banner();
 
-    loop {
-        print_color("rustdb", Color::Cyan);
-        print_color("> ", Color::White);
-        io::stdout().flush().unwrap();
+    // Buffer to accumulate multi-line statements
+    let mut buf = String::new();
 
-        let mut input = String::new();
-        let n = stdin.lock().read_line(&mut input).unwrap();
-        if n == 0 { break; } // EOF
-        let input = input.trim();
+    for line in stdin.lock().lines() {
+        let line = match line { Ok(l) => l, Err(_) => break };
+        let trimmed = line.trim();
 
-        if input.is_empty() { continue; }
+        // Skip pure comment lines and empty lines
+        if trimmed.is_empty() || trimmed.starts_with("--") {
+            continue;
+        }
 
-        if input == "exit" || input == "quit" {
+        if trimmed == "exit" || trimmed == "quit" {
             print_color("\nBye!\n", Color::Cyan);
             break;
         }
 
-        let queries: Vec<&str> = input
-            .split(';')
-            .map(|q| q.trim())
-            .filter(|q| !q.is_empty())
-            .collect();
+        buf.push(' ');
+        buf.push_str(trimmed);
 
-        for query in queries {
-            let start = Instant::now();
-            let mut p = Parser::new(query);
-            match p.parse() {
-                Ok(stmt) => match executor.execute(stmt) {
-                    Ok(result) => {
-                        let elapsed = start.elapsed();
-                        colorize_table(&result);
-                        print_color(
-                            &format!("({:.3} sec)\n", elapsed.as_secs_f64()),
-                            Color::DarkGrey,
-                        );
-                    }
-                    Err(e) => print_color(&format!("ERROR: {}\n", e), Color::Red),
-                },
-                Err(e) if e.contains("Unknown statement: None") => {} // 빈 쿼리 (주석만)
-                Err(e) => print_color(&format!("PARSE ERROR: {}\n", e), Color::Red),
-            }
+        // Process complete statements (split on ';')
+        while let Some(pos) = buf.find(';') {
+            let stmt_str = buf[..pos].trim().to_string();
+            buf = buf[pos + 1..].to_string();
+
+            if stmt_str.is_empty() { continue; }
+
+            print_color("rustdb", Color::Cyan);
+            print_color("> ", Color::White);
+            io::stdout().flush().unwrap();
+
+            run_query(&mut executor, &stmt_str);
         }
     }
 }

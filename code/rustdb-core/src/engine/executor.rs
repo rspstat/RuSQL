@@ -130,8 +130,9 @@ impl Executor {
             Statement::DropTable { name, if_exists }  => self.exec_drop(name, if_exists),
             Statement::TruncateTable { name }        => self.exec_truncate(name),
             Statement::Insert { table, columns, values } => self.exec_insert(table, columns, values),
-            Statement::Select { table, subquery, distinct, columns, condition, joins, order_by, group_by, having, limit, for_update } => {
-                self.exec_select(table, subquery, distinct, columns, condition, joins, order_by, group_by, having, limit, for_update)
+            Statement::InsertSelect { table, columns, query } => self.exec_insert_select(table, columns, *query),
+            Statement::Select { table, subquery, distinct, columns, condition, joins, order_by, group_by, having, limit, offset, for_update } => {
+                self.exec_select(table, subquery, distinct, columns, condition, joins, order_by, group_by, having, limit, offset, for_update)
             }
             Statement::Update { table, assignments, condition } => {
                 self.exec_update(table, assignments, condition)
@@ -157,7 +158,104 @@ impl Executor {
             Statement::ReleaseSavepoint { name } => self.exec_release_savepoint(name),
             Statement::RollbackTo { name }      => self.exec_rollback_to(name),
             Statement::Explain(inner)           => self.exec_explain(*inner),
+            Statement::Union { left, right, all, order_by, limit, offset } => self.exec_union(*left, *right, all, order_by, limit, offset),
+            Statement::With { ctes, query }     => self.exec_with(ctes, *query),
         }
+    }
+
+    fn exec_union(
+        &mut self,
+        left: Statement,
+        right: Statement,
+        all: bool,
+        order_by: Vec<OrderBy>,
+        limit: Option<usize>,
+        offset: Option<usize>,
+    ) -> Result<String, String> {
+        let left_out  = self.execute(left)?;
+        let right_out = self.execute(right)?;
+
+        let (left_cols,  mut left_rows)  = Self::parse_table_output(&left_out);
+        let (right_cols, right_rows) = Self::parse_table_output(&right_out);
+
+        if left_cols.is_empty() && right_cols.is_empty() {
+            return Ok("0 rows returned.".to_string());
+        }
+
+        // Merge rows
+        left_rows.extend(right_rows);
+        let mut result = left_rows;
+
+        // UNION (not ALL): deduplicate
+        if !all {
+            let mut seen: Vec<Vec<String>> = Vec::new();
+            result.retain(|row| {
+                let key: Vec<String> = left_cols.iter()
+                    .map(|c| row.get(c).cloned().unwrap_or_default())
+                    .collect();
+                if seen.contains(&key) { false } else { seen.push(key); true }
+            });
+        }
+
+        // Apply ORDER BY
+        for ob in order_by.iter().rev() {
+            let col = ob.column.clone();
+            let asc = ob.ascending;
+            result.sort_by(|a, b| {
+                let va = a.get(&col).map(|s| s.as_str()).unwrap_or("");
+                let vb = b.get(&col).map(|s| s.as_str()).unwrap_or("");
+                let cmp = match (va.parse::<f64>(), vb.parse::<f64>()) {
+                    (Ok(fa), Ok(fb)) => fa.partial_cmp(&fb).unwrap_or(std::cmp::Ordering::Equal),
+                    _ => va.cmp(vb),
+                };
+                if asc { cmp } else { cmp.reverse() }
+            });
+        }
+
+        // Apply OFFSET then LIMIT
+        if let Some(n) = offset {
+            let skip = n.min(result.len());
+            result.drain(..skip);
+        }
+        if let Some(n) = limit {
+            result.truncate(n);
+        }
+
+        if result.is_empty() {
+            return Ok("0 rows returned.".to_string());
+        }
+
+        // Format using left query's column order
+        let cols = if left_cols.is_empty() { right_cols } else { left_cols };
+        let col_widths: Vec<usize> = cols.iter().map(|h| {
+            let max_val = result.iter()
+                .map(|row| row.get(h).map(|v| v.len()).unwrap_or(0))
+                .max().unwrap_or(0);
+            h.len().max(max_val)
+        }).collect();
+
+        let mut out = String::new();
+        let sep = col_widths.iter().map(|w| "-".repeat(w + 2)).collect::<Vec<_>>().join("+");
+        let sep = format!("+{}+", sep);
+
+        out.push_str(&sep); out.push('\n');
+        let hdr = cols.iter().zip(col_widths.iter())
+            .map(|(h, w)| format!(" {:width$} ", h, width = w))
+            .collect::<Vec<_>>().join("|");
+        out.push_str(&format!("|{}|\n", hdr));
+        out.push_str(&sep); out.push('\n');
+        for row in &result {
+            let line = cols.iter().zip(col_widths.iter())
+                .map(|(c, w)| {
+                    let v = row.get(c).map(|s| if s == NULL_VALUE { "NULL".to_string() } else { s.clone() }).unwrap_or_default();
+                    format!(" {:width$} ", v, width = w)
+                })
+                .collect::<Vec<_>>().join("|");
+            out.push_str(&format!("|{}|\n", line));
+        }
+        out.push_str(&sep);
+        out.push_str(&format!("\n{} row(s) returned.", result.len()));
+        Ok(out)
     }
 
     /// MVCC 가시성 판정: _xmax == "0" 또는 없으면 visible
@@ -171,6 +269,55 @@ impl Executor {
         row.get(col).or_else(|| {
             col.rfind('.').and_then(|i| row.get(&col[i + 1..]))
         })
+    }
+
+    fn eval_arith(row: &Row, expr: &ArithExpr) -> String {
+        match expr {
+            ArithExpr::Col(name) => Self::get_col(row, name).cloned().unwrap_or_else(|| NULL_VALUE.to_string()),
+            ArithExpr::Num(n) => n.clone(),
+            ArithExpr::Str(s) => s.clone(),
+            ArithExpr::Add(l, r) => {
+                let lv = Self::eval_arith(row, l);
+                let rv = Self::eval_arith(row, r);
+                match (lv.parse::<f64>(), rv.parse::<f64>()) {
+                    (Ok(a), Ok(b)) => Self::format_arith_result(a + b),
+                    _ => format!("{}{}", lv, rv),
+                }
+            }
+            ArithExpr::Sub(l, r) => {
+                let lv = Self::eval_arith(row, l);
+                let rv = Self::eval_arith(row, r);
+                match (lv.parse::<f64>(), rv.parse::<f64>()) {
+                    (Ok(a), Ok(b)) => Self::format_arith_result(a - b),
+                    _ => "0".to_string(),
+                }
+            }
+            ArithExpr::Mul(l, r) => {
+                let lv = Self::eval_arith(row, l);
+                let rv = Self::eval_arith(row, r);
+                match (lv.parse::<f64>(), rv.parse::<f64>()) {
+                    (Ok(a), Ok(b)) => Self::format_arith_result(a * b),
+                    _ => "0".to_string(),
+                }
+            }
+            ArithExpr::Div(l, r) => {
+                let lv = Self::eval_arith(row, l);
+                let rv = Self::eval_arith(row, r);
+                match (lv.parse::<f64>(), rv.parse::<f64>()) {
+                    (Ok(a), Ok(b)) if b != 0.0 => Self::format_arith_result(a / b),
+                    _ => "0".to_string(),
+                }
+            }
+        }
+    }
+
+    fn format_arith_result(f: f64) -> String {
+        if f.fract().abs() < 1e-9 && f.abs() < 1e15 {
+            format!("{}", f as i64)
+        } else {
+            let s = format!("{:.6}", f);
+            s.trim_end_matches('0').trim_end_matches('.').to_string()
+        }
     }
 
     fn exec_create(
@@ -247,6 +394,78 @@ impl Executor {
         self.buffer_pool.invalidate(&name);
         self.disk.save_table(&name, &[]);
         Ok(format!("Table '{}' truncated.", name))
+    }
+
+    fn exec_with(
+        &mut self,
+        ctes: Vec<(String, Box<Statement>)>,
+        query: Statement,
+    ) -> Result<String, String> {
+        // Materialise each CTE as a temporary in-memory table, then run the main query.
+        let mut cte_names: Vec<String> = Vec::new();
+
+        for (name, body) in ctes {
+            // Conflict guard
+            if self.tables.contains_key(&name) || self.views.contains_key(&name) {
+                return Err(format!("CTE name '{}' conflicts with an existing table or view", name));
+            }
+
+            // Execute the CTE body and parse the result into virtual rows
+            let output = self.execute(*body)?;
+            let (col_names, rows) = Self::parse_table_output(&output);
+
+            // Build a minimal schema for the virtual table
+            let schema_cols: Vec<crate::catalog::schema::ColumnDef> = col_names.iter().map(|c| {
+                crate::catalog::schema::ColumnDef {
+                    name: c.clone(),
+                    data_type: crate::parser::ast::DataType::Text,
+                    primary_key: false,
+                    not_null: false,
+                    unique: false,
+                    unique_constraint_name: None,
+                    auto_increment: false,
+                    default: None,
+                    foreign_key: None,
+                    check_expr: None,
+                }
+            }).collect();
+
+            let _ = self.catalog.create_table(name.clone(), schema_cols);
+            self.tables.insert(name.clone(), rows.clone());
+            self.buffer_pool.write_page(&name, rows);
+            self.indexes.insert(name.clone(), crate::storage::btree::BPlusTree::new());
+            cte_names.push(name);
+        }
+
+        let result = self.execute(query);
+
+        // Tear down temporary CTE tables
+        for name in &cte_names {
+            self.tables.remove(name);
+            self.indexes.remove(name);
+            self.buffer_pool.invalidate(name);
+            let _ = self.catalog.drop_table(name);
+        }
+
+        result
+    }
+
+    fn exec_insert_select(
+        &mut self,
+        table: String,
+        columns: Option<Vec<String>>,
+        query: Statement,
+    ) -> Result<String, String> {
+        let output = self.execute(query)?;
+        let (col_names, rows) = Self::parse_table_output(&output);
+        if rows.is_empty() {
+            return Ok("0 row(s) inserted.".to_string());
+        }
+        let all_values: Vec<Vec<String>> = rows.iter()
+            .map(|row| col_names.iter().map(|c| row.get(c).cloned().unwrap_or_default()).collect())
+            .collect();
+        let insert_cols = columns.or(Some(col_names));
+        self.exec_insert(table, insert_cols, all_values)
     }
 
     fn exec_insert(
@@ -538,62 +757,66 @@ impl Executor {
 
     /// CHECK 제약 표현식 평가: "col > 0", "col IS NOT NULL", "col >= 1 AND col <= 100" 형식
     fn eval_check_expr(expr: &str, row: &Row) -> bool {
-        // 표현식을 파서로 조건 파싱 후 평가
         use crate::parser::parser::Parser;
-        // SELECT 1 WHERE <expr> 형태로 래핑
         let sql = format!("SELECT 1 FROM __check__ WHERE {}", expr);
         match Parser::new(&sql).parse() {
-            Ok(crate::parser::ast::Statement::Select { condition: Some(cond), .. }) => {
-                Self::eval_condition(row, &cond)
+            Ok(crate::parser::ast::Statement::Select { condition: Some(expr), .. }) => {
+                Self::eval_condexpr(row, &expr)
             }
-            _ => true, // 파싱 실패 시 통과 (안전 방향)
+            _ => true,
         }
     }
 
-    /// 상관 서브쿼리: 조건 트리에서 "table.col" 리터럴을 외부 row 값으로 치환
-    fn substitute_correlated_values(cond: &Condition, outer_row: &Row) -> Condition {
-        let new_value = match &cond.value {
-            ConditionValue::Literal(s) if s.contains('.') => {
-                if let Some(v) = Self::get_col(outer_row, s) {
-                    ConditionValue::Literal(v.clone())
-                } else {
-                    cond.value.clone()
-                }
+    /// Substitute "table.col" literals in a CondExpr with actual outer row values (correlated subqueries)
+    fn substitute_correlated_condexpr(expr: &CondExpr, outer_row: &Row) -> CondExpr {
+        match expr {
+            CondExpr::And(l, r) => CondExpr::And(
+                Box::new(Self::substitute_correlated_condexpr(l, outer_row)),
+                Box::new(Self::substitute_correlated_condexpr(r, outer_row)),
+            ),
+            CondExpr::Or(l, r) => CondExpr::Or(
+                Box::new(Self::substitute_correlated_condexpr(l, outer_row)),
+                Box::new(Self::substitute_correlated_condexpr(r, outer_row)),
+            ),
+            CondExpr::Not(inner) => CondExpr::Not(Box::new(Self::substitute_correlated_condexpr(inner, outer_row))),
+            CondExpr::Leaf(cond) => {
+                let new_value = match &cond.value {
+                    ConditionValue::Literal(s) if s.contains('.') => {
+                        if let Some(v) = Self::get_col(outer_row, s) {
+                            ConditionValue::Literal(v.clone())
+                        } else {
+                            cond.value.clone()
+                        }
+                    }
+                    other => other.clone(),
+                };
+                CondExpr::Leaf(Condition {
+                    left: cond.left.clone(),
+                    operator: cond.operator.clone(),
+                    value: new_value,
+                })
             }
-            other => other.clone(),
-        };
-        Condition {
-            column: cond.column.clone(),
-            operator: cond.operator.clone(),
-            value: new_value,
-            and: cond.and.as_ref().map(|c| Box::new(Self::substitute_correlated_values(c, outer_row))),
-            or:  cond.or .as_ref().map(|c| Box::new(Self::substitute_correlated_values(c, outer_row))),
         }
     }
 
-    fn matches_condition(row: &Row, condition: &Option<Condition>) -> bool {
+    fn matches_condexpr(row: &Row, condition: &Option<CondExpr>) -> bool {
         match condition {
             None => true,
-            Some(cond) => Self::eval_condition(row, cond),
+            Some(expr) => Self::eval_condexpr(row, expr),
         }
     }
 
-    fn eval_condition(row: &Row, cond: &Condition) -> bool {
-        let base = Self::eval_single(row, cond);
-        if let Some(and_cond) = &cond.and {
-            base && Self::eval_condition(row, and_cond)
-        } else if let Some(or_cond) = &cond.or {
-            base || Self::eval_condition(row, or_cond)
-        } else {
-            base
+    fn eval_condexpr(row: &Row, expr: &CondExpr) -> bool {
+        match expr {
+            CondExpr::And(l, r)  => Self::eval_condexpr(row, l) && Self::eval_condexpr(row, r),
+            CondExpr::Or(l, r)   => Self::eval_condexpr(row, l) || Self::eval_condexpr(row, r),
+            CondExpr::Not(inner) => !Self::eval_condexpr(row, inner),
+            CondExpr::Leaf(cond) => Self::eval_single(row, cond),
         }
     }
 
     fn eval_single(row: &Row, cond: &Condition) -> bool {
-        let val = match Self::get_col(row, &cond.column) {
-            Some(v) => v.clone(),
-            None => return false,
-        };
+        let val = Self::eval_arith(row, &cond.left);
 
         let cmp_num = |a: &str, b: &str| -> Option<std::cmp::Ordering> {
             let a: f64 = a.parse().ok()?;
@@ -604,43 +827,77 @@ impl Executor {
         match &cond.value {
             ConditionValue::Subquery(_) => false,
             ConditionValue::Between(start, end) => {
+                // NULL in BETWEEN = false
+                if val == NULL_VALUE { return false; }
                 match (cmp_num(&val, start), cmp_num(&val, end)) {
                     (Some(s), Some(e)) =>
                         s != std::cmp::Ordering::Less && e != std::cmp::Ordering::Greater,
                     _ => val >= *start && val <= *end,
                 }
             }
-            ConditionValue::Literal(lit) => {
+            ConditionValue::LiteralList(list) => {
+                if val == NULL_VALUE { return false; }
                 match &cond.operator {
-                    Operator::Eq  => {
-                        // 숫자로 파싱 가능하면 수치 비교 ("800.00" == "800" → true)
-                        match (val.parse::<f64>(), lit.parse::<f64>()) {
+                    Operator::In => list.iter().any(|item| {
+                        match (val.parse::<f64>(), item.parse::<f64>()) {
                             (Ok(a), Ok(b)) => a == b,
-                            _ => &val == lit,
+                            _ => val == *item,
                         }
-                    }
+                    }),
+                    Operator::NotIn => list.iter().all(|item| {
+                        match (val.parse::<f64>(), item.parse::<f64>()) {
+                            (Ok(a), Ok(b)) => a != b,
+                            _ => val != *item,
+                        }
+                    }),
+                    _ => false,
+                }
+            }
+            ConditionValue::Literal(lit) => {
+                // Resolve qualified column references (table.col) against the row.
+                // Number literals like "3.14" start with a digit and are excluded.
+                let resolved;
+                let effective_lit: &str = if lit.contains('.')
+                    && lit.chars().next().map(|c| c.is_alphabetic() || c == '_').unwrap_or(false)
+                {
+                    if let Some(v) = Self::get_col(row, lit) {
+                        resolved = v.clone();
+                        &resolved
+                    } else { lit }
+                } else { lit };
+
+                match &cond.operator {
                     Operator::IsNull    => val == NULL_VALUE || val.is_empty(),
                     Operator::IsNotNull => val != NULL_VALUE && !val.is_empty(),
+                    // NULL semantics: NULL compared with any non-IS operator = false
+                    _ if val == NULL_VALUE => false,
+                    _ if effective_lit == "__NULL__" => false,
+                    Operator::Eq  => {
+                        match (val.parse::<f64>(), effective_lit.parse::<f64>()) {
+                            (Ok(a), Ok(b)) => a == b,
+                            _ => val.as_str() == effective_lit,
+                        }
+                    }
                     Operator::Ne  => {
-                        match (val.parse::<f64>(), lit.parse::<f64>()) {
+                        match (val.parse::<f64>(), effective_lit.parse::<f64>()) {
                             (Ok(a), Ok(b)) => a != b,
-                            _ => &val != lit,
+                            _ => val.as_str() != effective_lit,
                         }
                     }
                     Operator::In | Operator::NotIn | Operator::Exists | Operator::NotExists => false,
                     Operator::Like => {
                         let val_chars: Vec<char> = val.chars().collect();
-                        let pat_chars: Vec<char> = lit.chars().collect();
+                        let pat_chars: Vec<char> = effective_lit.chars().collect();
                         like_match(&val_chars, &pat_chars)
                     }
                     Operator::Between => false,
-                    Operator::Gt  => cmp_num(&val, lit)
+                    Operator::Gt  => cmp_num(&val, effective_lit)
                         .map(|o| o == std::cmp::Ordering::Greater).unwrap_or(false),
-                    Operator::Lt  => cmp_num(&val, lit)
+                    Operator::Lt  => cmp_num(&val, effective_lit)
                         .map(|o| o == std::cmp::Ordering::Less).unwrap_or(false),
-                    Operator::Gte => cmp_num(&val, lit)
+                    Operator::Gte => cmp_num(&val, effective_lit)
                         .map(|o| o != std::cmp::Ordering::Less).unwrap_or(false),
-                    Operator::Lte => cmp_num(&val, lit)
+                    Operator::Lte => cmp_num(&val, effective_lit)
                         .map(|o| o != std::cmp::Ordering::Greater).unwrap_or(false),
                 }
             }
@@ -653,12 +910,13 @@ impl Executor {
         subquery: Option<(Box<Statement>, String)>,
         distinct: bool,
         columns: Vec<SelectColumn>,
-        condition: Option<Condition>,
+        condition: Option<CondExpr>,
         joins: Vec<Join>,
         order_by: Vec<OrderBy>,
         group_by: Option<Vec<String>>,
-        having: Option<Condition>,
+        having: Option<CondExpr>,
         limit: Option<usize>,
+        offset: Option<usize>,
         for_update: bool,
     ) -> Result<String, String> {
 
@@ -666,7 +924,7 @@ impl Executor {
         if let Some((inner_stmt, alias)) = subquery {
             return self.exec_select_with_subquery(
                 *inner_stmt, alias, distinct, columns, condition, joins,
-                order_by, group_by, having, limit, for_update,
+                order_by, group_by, having, limit, offset, for_update,
             );
         }
 
@@ -675,7 +933,7 @@ impl Executor {
             let result = self.exec_select_with_subquery(
                 view_stmt.clone(),
                 table.clone(),
-                distinct, columns, condition, joins, order_by, group_by, having, limit, for_update,
+                distinct, columns, condition, joins, order_by, group_by, having, limit, offset, for_update,
             );
             self.views.insert(table, view_stmt);
             return result;
@@ -684,12 +942,14 @@ impl Executor {
         // B+Tree 인덱스 검색 (FOR UPDATE / JOIN 있으면 풀 스캔 경로 사용)
         let has_agg = columns.iter().any(|c| matches!(c, SelectColumn::Agg { .. } | SelectColumn::AggAlias { .. }));
         if joins.is_empty() && !has_agg && !for_update {
-            if let Some(cond) = &condition {
+            if let Some(expr) = &condition {
+                // Only apply index optimization for single-leaf conditions (no AND/OR)
+                if let CondExpr::Leaf(cond) = expr {
                 let pk_col_opt = self.catalog.get_table(&table)
                     .and_then(|s| s.columns.iter().find(|c| c.primary_key).map(|c| c.name.clone()));
 
-                let is_pk_cond = pk_col_opt.as_deref() == Some(cond.column.as_str())
-                    && cond.and.is_none() && cond.or.is_none();
+                let cond_col_name = if let ArithExpr::Col(name) = &cond.left { name.as_str() } else { "" };
+                let is_pk_cond = !cond_col_name.is_empty() && pk_col_opt.as_deref() == Some(cond_col_name);
 
                 if is_pk_cond {
                     // ── PK = val → B+Tree 포인트 검색 ─────────────────────
@@ -754,9 +1014,10 @@ impl Executor {
                         }
                     }
                 }
+                } // end CondExpr::Leaf
 
                 // ── 복합 인덱스 검색: WHERE col1 = v1 AND col2 = v2 ───────
-                let eq_map = collect_eq_conditions(cond);
+                let eq_map = collect_eq_conditions_expr(expr);
                 if !eq_map.is_empty() {
                     let matching_idx = self.composite_indexes.iter()
                         .find(|(_, ci)| ci.table == table && ci.matches_conditions(&eq_map))
@@ -827,9 +1088,9 @@ impl Executor {
                     JoinType::Inner => {
                         for left in &current {
                             for right in &right_rows {
-                                if Self::get_col(left, &j.left_col) == Self::get_col(right, &j.right_col) {
-                                    let mut merged = left.clone();
-                                    merge_right(&mut merged, right, &j.table);
+                                let mut merged = left.clone();
+                                merge_right(&mut merged, right, &j.table);
+                                if Self::eval_condexpr(&merged, &j.on_expr) {
                                     joined.push(merged);
                                 }
                             }
@@ -839,9 +1100,9 @@ impl Executor {
                         for left in &current {
                             let mut matched = false;
                             for right in &right_rows {
-                                if Self::get_col(left, &j.left_col) == Self::get_col(right, &j.right_col) {
-                                    let mut merged = left.clone();
-                                    merge_right(&mut merged, right, &j.table);
+                                let mut merged = left.clone();
+                                merge_right(&mut merged, right, &j.table);
+                                if Self::eval_condexpr(&merged, &j.on_expr) {
                                     joined.push(merged);
                                     matched = true;
                                 }
@@ -860,9 +1121,9 @@ impl Executor {
                         for right in &right_rows {
                             let mut matched = false;
                             for left in &current {
-                                if Self::get_col(left, &j.left_col) == Self::get_col(right, &j.right_col) {
-                                    let mut merged = left.clone();
-                                    merge_right(&mut merged, right, &j.table);
+                                let mut merged = left.clone();
+                                merge_right(&mut merged, right, &j.table);
+                                if Self::eval_condexpr(&merged, &j.on_expr) {
                                     joined.push(merged);
                                     matched = true;
                                 }
@@ -945,8 +1206,11 @@ impl Executor {
                         AggFunc::Min   => vals.iter().cloned().fold(f64::INFINITY, f64::min),
                         AggFunc::Max   => vals.iter().cloned().fold(f64::NEG_INFINITY, f64::max),
                     };
-                    let v = if agg_val.fract() == 0.0 { format!("{}", agg_val as i64) }
-                            else { format!("{:.2}", agg_val) };
+                    let v = match func {
+                        AggFunc::Avg => format!("{:.4}", agg_val),
+                        _ => if agg_val.fract() == 0.0 { format!("{}", agg_val as i64) }
+                             else { format!("{:.2}", agg_val) },
+                    };
                     out.insert(label, v);
                 }
                 out
@@ -954,21 +1218,21 @@ impl Executor {
 
             // HAVING 필터 (집계된 컬럼 기준)
             if let Some(ref hav) = having {
-                group_rows.retain(|row| Self::matches_condition(row, &Some(hav.clone())));
+                group_rows.retain(|row| Self::matches_condexpr(row, &Some(hav.clone())));
             }
+            if let Some(n) = offset { let skip = n.min(group_rows.len()); group_rows.drain(..skip); }
             if let Some(n) = limit { group_rows.truncate(n); }
             return self.format_result(group_rows, columns, table, joins.clone());
         }
 
         // HAVING (GROUP BY 없는 경우)
         if let Some(ref hav) = having {
-            result.retain(|row| Self::matches_condition(row, &Some(hav.clone())));
+            result.retain(|row| Self::matches_condexpr(row, &Some(hav.clone())));
         }
 
-        // LIMIT
-        if let Some(n) = limit {
-            result.truncate(n);
-        }
+        // OFFSET then LIMIT
+        if let Some(n) = offset { let skip = n.min(result.len()); result.drain(..skip); }
+        if let Some(n) = limit { result.truncate(n); }
 
         // DISTINCT: 선택된 컬럼 기준 중복 제거
         if distinct {
@@ -982,6 +1246,20 @@ impl Executor {
                         row.get(col).cloned().unwrap_or_default(),
                     SelectColumn::Func { name, args, .. } =>
                         Self::apply_scalar_func(name, args, row),
+                    SelectColumn::CaseWhen { branches, else_val, .. } => {
+                        let resolve = |s: &str| -> String {
+                            Self::get_col(row, s).cloned().unwrap_or_else(|| s.to_string())
+                        };
+                        let mut v = else_val.as_deref().map(&resolve).unwrap_or_default();
+                        for b in branches {
+                            if Self::eval_condexpr(row, &b.condition) {
+                                v = resolve(&b.result);
+                                break;
+                            }
+                        }
+                        v
+                    }
+                    SelectColumn::Expr { expr, .. } => Self::eval_arith(row, expr),
                 }).collect();
                 if seen.contains(&key) { false } else { seen.push(key); true }
             });
@@ -1082,12 +1360,13 @@ impl Executor {
         alias: String,
         distinct: bool,
         columns: Vec<SelectColumn>,
-        condition: Option<Condition>,
+        condition: Option<CondExpr>,
         joins: Vec<Join>,
         order_by: Vec<OrderBy>,
         group_by: Option<Vec<String>>,
-        having: Option<Condition>,
+        having: Option<CondExpr>,
         limit: Option<usize>,
+        offset: Option<usize>,
         for_update: bool,
     ) -> Result<String, String> {
         if self.tables.contains_key(&alias) || self.views.contains_key(&alias) {
@@ -1120,7 +1399,7 @@ impl Executor {
 
         let result = self.exec_select(
             alias.clone(), None, distinct, columns, condition,
-            joins, order_by, group_by, having, limit, for_update,
+            joins, order_by, group_by, having, limit, offset, for_update,
         );
 
         self.tables.remove(&alias);
@@ -1287,6 +1566,18 @@ impl Executor {
                     .parse().unwrap_or(1.0);
                 if b == 0.0 { "NULL".to_string() } else { format!("{}", a % b) }
             }
+            // IF(condition_col, true_val, false_val)
+            // condition_col is evaluated: non-empty and non-zero = true
+            "IF" => {
+                let cond_val = args.first().map(|a| resolve(a, row)).unwrap_or_default();
+                let true_val  = args.get(1).map(|a| resolve(a, row)).unwrap_or_default();
+                let false_val = args.get(2).map(|a| resolve(a, row)).unwrap_or_default();
+                let is_true = !cond_val.is_empty()
+                    && cond_val != "0"
+                    && cond_val != "false"
+                    && cond_val != NULL_VALUE;
+                if is_true { true_val } else { false_val }
+            }
             _ => format!("{}()", func_name),
         }
     }
@@ -1316,6 +1607,8 @@ impl Executor {
         enum ColSource {
             Key(String),
             Func { name: String, args: Vec<String> },
+            CaseWhen { branches: Vec<CaseWhenBranch>, else_val: Option<String> },
+            Expr(ArithExpr),
         }
         let col_defs: Vec<(String, ColSource)> = if columns.iter().any(|c| c == &SelectColumn::All) {
             let mut pairs: Vec<(String, ColSource)> = self.catalog.get_table(&table)
@@ -1349,6 +1642,17 @@ impl Executor {
                     let header = alias.clone().unwrap_or_else(|| format!("{}()", name));
                     Some((header, ColSource::Func { name: name.clone(), args: args.clone() }))
                 }
+                SelectColumn::CaseWhen { branches, else_val, alias } => {
+                    let header = alias.clone().unwrap_or_else(|| "CASE".to_string());
+                    Some((header, ColSource::CaseWhen {
+                        branches: branches.clone(),
+                        else_val: else_val.clone(),
+                    }))
+                }
+                SelectColumn::Expr { expr, alias } => {
+                    let header = alias.clone().unwrap_or_else(|| arith_to_str(expr));
+                    Some((header, ColSource::Expr(expr.clone())))
+                }
                 SelectColumn::All => None,
             }).collect()
         };
@@ -1359,6 +1663,22 @@ impl Executor {
                 let raw = match src {
                     ColSource::Key(key) => Self::get_col(row, key).cloned().unwrap_or_default(),
                     ColSource::Func { name, args } => Self::apply_scalar_func(name, args, row),
+                    ColSource::Expr(expr) => Self::eval_arith(row, expr),
+                    ColSource::CaseWhen { branches, else_val } => {
+                        let resolve = |s: &str| -> String {
+                            Self::get_col(row, s).cloned().unwrap_or_else(|| s.to_string())
+                        };
+                        let mut result_val = else_val.as_deref()
+                            .map(&resolve)
+                            .unwrap_or_else(|| NULL_VALUE.to_string());
+                        for branch in branches {
+                            if Self::eval_condexpr(row, &branch.condition) {
+                                result_val = resolve(&branch.result);
+                                break;
+                            }
+                        }
+                        result_val
+                    }
                 };
                 if raw == NULL_VALUE { "NULL".to_string() } else { raw }
             }).collect()
@@ -1398,8 +1718,8 @@ impl Executor {
     fn exec_update(
         &mut self,
         table: String,
-        assignments: Vec<(String, String)>,
-        condition: Option<Condition>,
+        assignments: Vec<(String, ArithExpr)>,
+        condition: Option<CondExpr>,
     ) -> Result<String, String> {
         // PK 컬럼명 먼저 추출 (borrow 분리)
         let pk_col = self.catalog.get_table(&table)
@@ -1452,8 +1772,12 @@ impl Executor {
                 }
 
                 let old_json = serde_json::to_string(row).unwrap();
-                for (col, val) in &assignments {
-                    row.insert(col.clone(), val.clone());
+                // Evaluate all RHS before writing any LHS (preserves self-referential semantics)
+                let new_vals: Vec<(String, String)> = assignments.iter()
+                    .map(|(col, expr)| (col.clone(), Self::eval_arith(row, expr)))
+                    .collect();
+                for (col, val) in new_vals {
+                    row.insert(col, val);
                 }
                 // CHECK 제약 검사 (수정 후 row 기준)
                 if let Some(schema) = self.catalog.get_table(&table) {
@@ -1521,7 +1845,7 @@ impl Executor {
                 let old_val = old_row.get(assign_col).cloned().unwrap_or_default();
                 let new_val = assignments.iter()
                     .find(|(c, _)| c == assign_col)
-                    .map(|(_, v)| v.clone())
+                    .map(|(_, expr)| Self::eval_arith(&old_row, expr))
                     .unwrap_or_default();
                 if old_val == new_val { continue; }
 
@@ -1582,7 +1906,7 @@ impl Executor {
         Ok(format!("{} row(s) updated.", count))
     }
 
-    fn exec_delete(&mut self, table: String, condition: Option<Condition>) -> Result<String, String> {
+    fn exec_delete(&mut self, table: String, condition: Option<CondExpr>) -> Result<String, String> {
         // 서브쿼리 조건 지원: 먼저 매칭 행을 수집 (borrow 분리)
         let candidates: Vec<Row> = self.tables.get(&table)
             .ok_or(format!("Table '{}' not found", table))?
@@ -1676,7 +2000,7 @@ impl Executor {
             let txn_id_str = txn_id.to_string();
             let rows = self.tables.get_mut(&table).unwrap();
             for row in rows.iter_mut() {
-                if Self::is_visible(row) && Self::matches_condition(row, &condition) {
+                if Self::is_visible(row) && Self::matches_condexpr(row, &condition) {
                     let key = row.get(&pk_col).cloned().unwrap_or_default();
 
                     // 잠금 충돌 / 데드락 체크
@@ -1706,7 +2030,7 @@ impl Executor {
             // ── 트랜잭션 밖: 물리 삭제 ──
             let rows = self.tables.get_mut(&table).unwrap();
             let before = rows.len();
-            rows.retain(|r| !(Self::is_visible(r) && Self::matches_condition(r, &condition)));
+            rows.retain(|r| !(Self::is_visible(r) && Self::matches_condexpr(r, &condition)));
             deleted = before - rows.len();
         }
 
@@ -2118,45 +2442,39 @@ impl Executor {
         }
     }
 
-    fn matches_condition_with_subquery(&mut self, row: &Row, condition: &Option<Condition>) -> bool {
+    fn matches_condition_with_subquery(&mut self, row: &Row, condition: &Option<CondExpr>) -> bool {
         match condition {
             None => true,
-            Some(cond) => {
-                // AND/OR 체인 처리
-                let base = self.eval_condition_with_subquery(row, cond);
-                base
-            }
+            Some(expr) => self.eval_condexpr_with_subquery(row, expr),
         }
     }
 
-        fn eval_condition_with_subquery(&mut self, row: &Row, cond: &Condition) -> bool {
-            let base = self.eval_single_with_subquery(row, cond);
-            if let Some(and_cond) = &cond.and.clone() {
-                base && self.eval_condition_with_subquery(row, &and_cond)
-            } else if let Some(or_cond) = &cond.or.clone() {
-                base || self.eval_condition_with_subquery(row, &or_cond)
-            } else {
-                base
-            }
+    fn eval_condexpr_with_subquery(&mut self, row: &Row, expr: &CondExpr) -> bool {
+        match expr {
+            CondExpr::And(l, r) =>
+                self.eval_condexpr_with_subquery(row, l) && self.eval_condexpr_with_subquery(row, r),
+            CondExpr::Or(l, r) =>
+                self.eval_condexpr_with_subquery(row, l) || self.eval_condexpr_with_subquery(row, r),
+            CondExpr::Not(inner) => !self.eval_condexpr_with_subquery(row, inner),
+            CondExpr::Leaf(cond) => self.eval_single_with_subquery(row, cond),
         }
+    }
 
-        fn eval_single_with_subquery(&mut self, row: &Row, cond: &Condition) -> bool {
+    fn eval_single_with_subquery(&mut self, row: &Row, cond: &Condition) -> bool {
         match &cond.value.clone() {
-            ConditionValue::Literal(_) | ConditionValue::Between(_, _) => {
+            ConditionValue::Literal(_) | ConditionValue::Between(_, _) | ConditionValue::LiteralList(_) => {
                 Self::eval_single(row, cond)
             }
             ConditionValue::Subquery(sub_stmt) => {
-                // EXISTS / NOT EXISTS: column 없이 서브쿼리 실행 후 행 수 확인
                 if matches!(cond.operator, Operator::Exists | Operator::NotExists) {
                     if let Statement::Select {
                         table, subquery, distinct, columns, condition: sub_cond,
-                        joins, order_by, group_by, having, limit, ..
+                        joins, order_by, group_by, having, limit, offset, ..
                     } = *sub_stmt.clone() {
-                        // 상관 서브쿼리: 외부 row 값으로 "table.col" 리터럴 치환
-                        let sub_cond = sub_cond.map(|c| Self::substitute_correlated_values(&c, row));
+                        let sub_cond = sub_cond.map(|c| Self::substitute_correlated_condexpr(&c, row));
                         let result = self.exec_select(
                             table, subquery, distinct, columns, sub_cond,
-                            joins, order_by, group_by, having, limit, false
+                            joins, order_by, group_by, having, limit, offset, false
                         );
                         let has_rows = match result {
                             Ok(ref output) => !output.contains("0 rows returned"),
@@ -2171,20 +2489,17 @@ impl Executor {
                     return false;
                 }
 
-                let val = match Self::get_col(row, &cond.column) {
-                    Some(v) => v.clone(),
-                    None => return false,
-                };
+                let val = Self::eval_arith(row, &cond.left);
+                if val == NULL_VALUE { return false; }
 
                 if let Statement::Select {
                     table, subquery, distinct, columns, condition: sub_cond,
-                    joins, order_by, group_by, having, limit, ..
+                    joins, order_by, group_by, having, limit, offset, ..
                 } = *sub_stmt.clone() {
                     let result = self.exec_select(
                         table, subquery, distinct, columns.clone(), sub_cond,
-                        joins, order_by, group_by, having, limit, false
+                        joins, order_by, group_by, having, limit, offset, false
                     );
-
                     match result {
                         Ok(output) => {
                             let sub_vals = self.extract_values_from_output(&output);
@@ -2210,18 +2525,14 @@ impl Executor {
                                             Operator::Lte => a <= b,
                                             _ => false,
                                         }
-                                    } else {
-                                        false
-                                    }
+                                    } else { false }
                                 }
                                 _ => false,
                             }
                         }
                         Err(_) => false,
                     }
-                } else {
-                    false
-                }
+                } else { false }
             }
         }
     }
@@ -2531,69 +2842,75 @@ impl Executor {
         // 접근 경로 결정
         let access_path = if !joins.is_empty() {
             format!("FULL SCAN + JOIN ({})", joins.iter().map(|j| j.table.as_str()).collect::<Vec<_>>().join(", "))
-        } else if let Some(cond) = &condition {
-            let is_pk = pk_col.as_deref() == Some(cond.column.as_str())
-                && cond.and.is_none() && cond.or.is_none();
+        } else if let Some(expr) = &condition {
+            // Extract first leaf for index analysis
+            let leaf = condexpr_first_leaf(expr);
+            if let Some(cond) = leaf {
+                let cond_col = if let ArithExpr::Col(name) = &cond.left { name.as_str() } else { "" };
+                let is_pk = !cond_col.is_empty()
+                    && pk_col.as_deref() == Some(cond_col)
+                    && matches!(expr, CondExpr::Leaf(_));
 
-            if is_pk {
-                match &cond.operator {
-                    Operator::Eq => {
-                        if let ConditionValue::Literal(v) = &cond.value {
-                            format!("INDEX SCAN (pk={})  [B+Tree point lookup, cost≈O(log {})]", v, row_count)
-                        } else { "INDEX SCAN (pk=subquery)".to_string() }
-                    }
-                    Operator::Between => {
-                        if let ConditionValue::Between(a, b) = &cond.value {
-                            format!("INDEX RANGE SCAN (pk BETWEEN {} AND {})  [B+Tree range, cost≈O(log {}+k)]", a, b, row_count)
-                        } else { "INDEX RANGE SCAN".to_string() }
-                    }
-                    Operator::Gt => {
-                        if let ConditionValue::Literal(v) = &cond.value {
-                            format!("INDEX RANGE SCAN (pk > {})  [B+Tree scan_from, cost≈O(log {}+k)]", v, row_count)
-                        } else { "INDEX RANGE SCAN".to_string() }
-                    }
-                    Operator::Gte => {
-                        if let ConditionValue::Literal(v) = &cond.value {
-                            format!("INDEX RANGE SCAN (pk >= {})  [B+Tree scan_from, cost≈O(log {}+k)]", v, row_count)
-                        } else { "INDEX RANGE SCAN".to_string() }
-                    }
-                    Operator::Lt => {
-                        if let ConditionValue::Literal(v) = &cond.value {
-                            format!("INDEX RANGE SCAN (pk < {})  [B+Tree scan_to, cost≈O(log {}+k)]", v, row_count)
-                        } else { "INDEX RANGE SCAN".to_string() }
-                    }
-                    Operator::Lte => {
-                        if let ConditionValue::Literal(v) = &cond.value {
-                            format!("INDEX RANGE SCAN (pk <= {})  [B+Tree scan_to, cost≈O(log {}+k)]", v, row_count)
-                        } else { "INDEX RANGE SCAN".to_string() }
-                    }
-                    _ => format!("FULL SCAN  [no index for {:?}, cost≈O({})]", cond.operator, row_count),
-                }
-            } else {
-                // 단일 컬럼 인덱스 확인
-                let single_idx = self.index_meta.iter()
-                    .find(|(_, (t, c))| t == &table && c == &cond.column)
-                    .map(|(k, _)| k.clone());
-                if let Some(idx_name) = single_idx {
+                if is_pk {
                     match &cond.operator {
-                        Operator::Eq => format!("INDEX SCAN ({} on '{}')  [B+Tree point, cost≈O(log {})]", idx_name, cond.column, row_count),
-                        Operator::Between | Operator::Gt | Operator::Gte | Operator::Lt | Operator::Lte => {
-                            format!("INDEX RANGE SCAN ({} on '{}')  [B+Tree range, cost≈O(log {}+k)]", idx_name, cond.column, row_count)
+                        Operator::Eq => {
+                            if let ConditionValue::Literal(v) = &cond.value {
+                                format!("INDEX SCAN (pk={})  [B+Tree point lookup, cost≈O(log {})]", v, row_count)
+                            } else { "INDEX SCAN (pk=subquery)".to_string() }
                         }
-                        _ => format!("INDEX SCAN ({} on '{}')  [filtered, cost≈O(log {})]", idx_name, cond.column, row_count),
+                        Operator::Between => {
+                            if let ConditionValue::Between(a, b) = &cond.value {
+                                format!("INDEX RANGE SCAN (pk BETWEEN {} AND {})  [B+Tree range, cost≈O(log {}+k)]", a, b, row_count)
+                            } else { "INDEX RANGE SCAN".to_string() }
+                        }
+                        Operator::Gt => {
+                            if let ConditionValue::Literal(v) = &cond.value {
+                                format!("INDEX RANGE SCAN (pk > {})  [B+Tree scan_from, cost≈O(log {}+k)]", v, row_count)
+                            } else { "INDEX RANGE SCAN".to_string() }
+                        }
+                        Operator::Gte => {
+                            if let ConditionValue::Literal(v) = &cond.value {
+                                format!("INDEX RANGE SCAN (pk >= {})  [B+Tree scan_from, cost≈O(log {}+k)]", v, row_count)
+                            } else { "INDEX RANGE SCAN".to_string() }
+                        }
+                        Operator::Lt => {
+                            if let ConditionValue::Literal(v) = &cond.value {
+                                format!("INDEX RANGE SCAN (pk < {})  [B+Tree scan_to, cost≈O(log {}+k)]", v, row_count)
+                            } else { "INDEX RANGE SCAN".to_string() }
+                        }
+                        Operator::Lte => {
+                            if let ConditionValue::Literal(v) = &cond.value {
+                                format!("INDEX RANGE SCAN (pk <= {})  [B+Tree scan_to, cost≈O(log {}+k)]", v, row_count)
+                            } else { "INDEX RANGE SCAN".to_string() }
+                        }
+                        _ => format!("FULL SCAN  [no index for {:?}, cost≈O({})]", cond.operator, row_count),
                     }
                 } else {
-                    // 복합 인덱스 확인
-                    let eq_map = collect_eq_conditions(cond);
-                    let comp_idx = self.composite_indexes.iter()
-                        .find(|(_, ci)| ci.table == table && ci.matches_conditions(&eq_map))
+                    let single_idx = self.index_meta.iter()
+                        .find(|(_, (t, c))| t == &table && c == cond_col)
                         .map(|(k, _)| k.clone());
-                    if let Some(idx_name) = comp_idx {
-                        format!("COMPOSITE INDEX SCAN ({})  [cost≈O(1)]", idx_name)
+                    if let Some(idx_name) = single_idx {
+                        match &cond.operator {
+                            Operator::Eq => format!("INDEX SCAN ({} on '{}')  [B+Tree point, cost≈O(log {})]", idx_name, cond_col, row_count),
+                            Operator::Between | Operator::Gt | Operator::Gte | Operator::Lt | Operator::Lte => {
+                                format!("INDEX RANGE SCAN ({} on '{}')  [B+Tree range, cost≈O(log {}+k)]", idx_name, cond_col, row_count)
+                            }
+                            _ => format!("INDEX SCAN ({} on '{}')  [filtered, cost≈O(log {})]", idx_name, cond_col, row_count),
+                        }
                     } else {
-                        format!("FULL SCAN  [no index on '{}', cost≈O({})]", cond.column, row_count)
+                        let eq_map = collect_eq_conditions_expr(expr);
+                        let comp_idx = self.composite_indexes.iter()
+                            .find(|(_, ci)| ci.table == table && ci.matches_conditions(&eq_map))
+                            .map(|(k, _)| k.clone());
+                        if let Some(idx_name) = comp_idx {
+                            format!("COMPOSITE INDEX SCAN ({})  [cost≈O(1)]", idx_name)
+                        } else {
+                            format!("FULL SCAN  [no index on '{}', cost≈O({})]", cond_col, row_count)
+                        }
                     }
                 }
+            } else {
+                format!("FULL SCAN  [complex WHERE, cost≈O({})]", row_count)
             }
         } else {
             format!("FULL SCAN  [no WHERE clause, cost≈O({})]", row_count)
@@ -2801,20 +3118,48 @@ impl Executor {
     }
 }
 
-/// WHERE 조건 체인에서 `col = literal` 조건들을 수집
-fn collect_eq_conditions(cond: &Condition) -> HashMap<String, String> {
+/// CondExpr 트리에서 AND-연결된 `col = literal` 조건들을 수집 (복합 인덱스용)
+fn collect_eq_conditions_expr(expr: &CondExpr) -> HashMap<String, String> {
     let mut map = HashMap::new();
-    let mut cur = Some(cond);
-    while let Some(c) = cur {
-        if c.operator == Operator::Eq {
-            if let ConditionValue::Literal(lit) = &c.value {
-                map.insert(c.column.clone(), lit.clone());
+    collect_eq_recursive(expr, &mut map);
+    map
+}
+
+fn collect_eq_recursive(expr: &CondExpr, map: &mut HashMap<String, String>) {
+    match expr {
+        CondExpr::And(l, r) => {
+            collect_eq_recursive(l, map);
+            collect_eq_recursive(r, map);
+        }
+        CondExpr::Or(_, _) | CondExpr::Not(_) => {} // OR/NOT breaks composite index optimization
+        CondExpr::Leaf(c) if c.operator == Operator::Eq => {
+            if let (ArithExpr::Col(name), ConditionValue::Literal(lit)) = (&c.left, &c.value) {
+                map.insert(name.clone(), lit.clone());
             }
         }
-        // AND 체인만 따라감 (OR는 복합 인덱스 적용 불가)
-        cur = c.and.as_deref();
+        CondExpr::Leaf(_) => {}
     }
-    map
+}
+
+/// Returns the first leaf Condition in a CondExpr (for index analysis)
+fn condexpr_first_leaf(expr: &CondExpr) -> Option<&Condition> {
+    match expr {
+        CondExpr::Leaf(c) => Some(c),
+        CondExpr::And(l, _) | CondExpr::Or(l, _) => condexpr_first_leaf(l),
+        CondExpr::Not(inner) => condexpr_first_leaf(inner),
+    }
+}
+
+fn arith_to_str(expr: &ArithExpr) -> String {
+    match expr {
+        ArithExpr::Col(name) => name.clone(),
+        ArithExpr::Num(n) => n.clone(),
+        ArithExpr::Str(s) => format!("'{}'", s),
+        ArithExpr::Add(l, r) => format!("{}+{}", arith_to_str(l), arith_to_str(r)),
+        ArithExpr::Sub(l, r) => format!("{}-{}", arith_to_str(l), arith_to_str(r)),
+        ArithExpr::Mul(l, r) => format!("{}*{}", arith_to_str(l), arith_to_str(r)),
+        ArithExpr::Div(l, r) => format!("{}/{}", arith_to_str(l), arith_to_str(r)),
+    }
 }
 
 fn like_match(val: &[char], pat: &[char]) -> bool {
