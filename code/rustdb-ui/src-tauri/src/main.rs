@@ -70,7 +70,7 @@ fn handle_client(stream: TcpStream, db: Arc<Mutex<Executor>>, log: Arc<Mutex<Vec
     };
     let reader = BufReader::new(stream);
 
-    let _ = writeln!(writer, "RustDB Server v2.1.3 — Ready");
+    let _ = writeln!(writer, "RustDB Server v2.2.0 — Ready");
     let _ = writeln!(writer, "---END---");
 
     for line in reader.lines() {

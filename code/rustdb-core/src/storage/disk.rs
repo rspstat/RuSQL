@@ -4,7 +4,7 @@ use std::path::Path;
 use std::collections::HashMap;
 use serde::{Serialize, Deserialize};
 use crate::engine::executor::Row;
-use crate::storage::page::PageHeader;
+use crate::storage::page::{PageHeader, FLAG_COMPRESSED};
 use crate::catalog::schema::TableSchema;
 use crate::parser::ast::Statement;
 
@@ -79,50 +79,33 @@ impl DiskManager {
         fs::write(path, json).unwrap();
     }
 
-    // 데이터는 바이너리 .rdb 포맷
+    // 데이터는 LZ4-compressed 바이너리 .rdb 포맷
     pub fn save_table(&self, table: &str, rows: &[Row]) {
         let path = format!("{}/{}.rdb", self.data_dir, table);
         let mut file = OpenOptions::new()
             .write(true).create(true).truncate(true)
             .open(&path).unwrap();
 
-        // 헤더 작성
-        let mut header = PageHeader::new();
-        header.row_count = rows.len() as u32;
-
-        // 각 행을 직렬화
-        let mut row_data: Vec<Vec<u8>> = Vec::new();
+        // 모든 행을 평탄한 바이트 스트림으로 직렬화
+        let mut raw: Vec<u8> = Vec::new();
         for row in rows {
             let json = serde_json::to_string(row).unwrap();
             let bytes = json.as_bytes();
-            let mut entry = Vec::new();
-            // 행 크기(4 bytes) + 데이터
-            entry.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
-            entry.extend_from_slice(bytes);
-            row_data.push(entry);
+            raw.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+            raw.extend_from_slice(bytes);
         }
 
-        // 전체 데이터 크기 계산해서 페이지 수 결정
-        let total_data: usize = row_data.iter().map(|r| r.len()).sum();
+        // LZ4 압축 (원본 크기를 앞 4바이트에 저장)
+        let compressed = lz4_flex::compress_prepend_size(&raw);
+
         let page_size = crate::storage::page::PAGE_SIZE;
-        header.page_count = ((total_data + page_size - 1) / page_size).max(1) as u32;
+        let mut header = PageHeader::new();
+        header.row_count  = rows.len() as u32;
+        header.flags      = FLAG_COMPRESSED;
+        header.page_count = ((compressed.len() + page_size - 1) / page_size).max(1) as u32;
 
-        // 헤더 쓰기
         file.write_all(&header.to_bytes()).unwrap();
-
-        // 데이터 쓰기
-        for entry in &row_data {
-            file.write_all(entry).unwrap();
-        }
-
-        // 마지막 페이지 패딩
-        let data_written: usize = row_data.iter().map(|r| r.len()).sum();
-        let remainder = data_written % page_size;
-        if remainder != 0 {
-            let padding = vec![0u8; page_size - remainder];
-            file.write_all(&padding).unwrap();
-        }
-
+        file.write_all(&compressed).unwrap();
         file.flush().unwrap();
     }
 
@@ -159,15 +142,25 @@ impl DiskManager {
             None => return Vec::new(),
         };
 
+        // 압축 해제 (FLAG_COMPRESSED가 설정된 경우)
+        let raw: Vec<u8> = if header.is_compressed() {
+            match lz4_flex::decompress_size_prepended(&buf[32..]) {
+                Ok(d) => d,
+                Err(_) => return Vec::new(),
+            }
+        } else {
+            buf[32..].to_vec()
+        };
+
         let mut rows = Vec::new();
-        let mut pos = 32usize;
+        let mut pos = 0usize;
 
         for _ in 0..header.row_count {
-            if pos + 4 > buf.len() { break; }
-            let len = u32::from_le_bytes(buf[pos..pos+4].try_into().unwrap()) as usize;
+            if pos + 4 > raw.len() { break; }
+            let len = u32::from_le_bytes(raw[pos..pos+4].try_into().unwrap()) as usize;
             pos += 4;
-            if pos + len > buf.len() { break; }
-            let json = std::str::from_utf8(&buf[pos..pos+len]).unwrap_or("{}");
+            if pos + len > raw.len() { break; }
+            let json = std::str::from_utf8(&raw[pos..pos+len]).unwrap_or("{}");
             if let Ok(row) = serde_json::from_str::<Row>(json) {
                 rows.push(row);
             }

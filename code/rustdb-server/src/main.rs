@@ -78,7 +78,7 @@ fn split_queries_smart(input: &str) -> Vec<String> {
 fn handle_builtin(cmd: &str, client_count: usize, uptime: &Instant) -> Option<String> {
     match cmd.to_lowercase().trim() {
         "\\help" | "help" => Some(format!(
-            "RustDB Server v2.1.3\n\
+            "RustDB Server v2.2.0\n\
              Commands:\n\
                \\help           — 이 도움말\n\
                \\status         — 서버 상태\n\
@@ -130,7 +130,7 @@ fn handle_client(
 
     // 환영 메시지
     let _ = writeln!(writer, "+-----------------------------------------+");
-    let _ = writeln!(writer, "|   RustDB Server v2.1.3                  |");
+    let _ = writeln!(writer, "|   RustDB Server v2.2.0                  |");
     let _ = writeln!(writer, "|   Connected: {}{}|",
         peer, " ".repeat(23usize.saturating_sub(peer.len())));
     let _ = writeln!(writer, "+-----------------------------------------+");
@@ -249,7 +249,7 @@ fn main() {
     }
 
     println!("+-----------------------------------------+");
-    println!("|   RustDB Server v2.1.3                  |");
+    println!("|   RustDB Server v2.2.0                  |");
     println!("|   Listening on {:<24}|", addr);
     println!("|   Press Ctrl+C to stop                  |");
     println!("+-----------------------------------------+");

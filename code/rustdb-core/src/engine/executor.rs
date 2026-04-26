@@ -10,6 +10,7 @@ use crate::storage::btree::BPlusTree;
 use crate::storage::buffer_pool::BufferPool;
 use crate::storage::composite_index::CompositeIndex;
 use crate::engine::lock_manager::{LockManager, LockResult};
+use crate::engine::planner::{Planner, AccessPath, JoinAlgo};
 
 pub type Row = HashMap<String, String>;
 pub const NULL_VALUE: &str = "NULL";
@@ -939,99 +940,95 @@ impl Executor {
             return result;
         }
 
-        // B+Tree 인덱스 검색 (FOR UPDATE / JOIN 있으면 풀 스캔 경로 사용)
+        // ── Planner: 인덱스 / 조인 알고리즘 결정 ──────────────────────────
         let has_agg = columns.iter().any(|c| matches!(c, SelectColumn::Agg { .. } | SelectColumn::AggAlias { .. }));
+        let planner = Planner::new(&self.tables, &self.indexes, &self.index_meta, &self.composite_indexes, &self.catalog);
+        let plan = planner.plan(&table, &condition, &joins);
+
+        // 인덱스 경로 실행 (집계 / FOR UPDATE / JOIN 없을 때만)
         if joins.is_empty() && !has_agg && !for_update {
-            if let Some(expr) = &condition {
-                // Only apply index optimization for single-leaf conditions (no AND/OR)
-                if let CondExpr::Leaf(cond) = expr {
-                let pk_col_opt = self.catalog.get_table(&table)
-                    .and_then(|s| s.columns.iter().find(|c| c.primary_key).map(|c| c.name.clone()));
-
-                let cond_col_name = if let ArithExpr::Col(name) = &cond.left { name.as_str() } else { "" };
-                let is_pk_cond = !cond_col_name.is_empty() && pk_col_opt.as_deref() == Some(cond_col_name);
-
-                if is_pk_cond {
-                    // ── PK = val → B+Tree 포인트 검색 ─────────────────────
-                    if cond.operator == Operator::Eq {
-                        if let ConditionValue::Literal(lit) = &cond.value {
-                            if let Some(index) = self.indexes.get(&table) {
-                                if let Some(val_json) = index.search(lit) {
-                                    let row: Row = serde_json::from_str(&val_json).unwrap();
-                                    if Self::is_visible(&row) {
-                                        return self.format_result(vec![row], columns, table, vec![]);
-                                    } else {
-                                        return Ok("0 rows returned.".to_string());
-                                    }
-                                } else {
-                                    return Ok("0 rows returned.".to_string());
-                                }
-                            }
-                        }
-                    }
-
-                    // ── PK BETWEEN a AND b → B+Tree 범위 스캔 ─────────────
-                    if cond.operator == Operator::Between {
-                        if let ConditionValue::Between(start, end) = &cond.value {
-                            if let Some(index) = self.indexes.get(&table) {
-                                let json_vals = index.range_search(start, end);
-                                let rows: Vec<Row> = json_vals.iter()
-                                    .filter_map(|j| serde_json::from_str(j).ok())
-                                    .filter(|r| Self::is_visible(r))
-                                    .collect();
-                                return self.format_result(rows, columns, table, vec![]);
-                            }
-                        }
-                    }
-
-                    // ── PK > val / PK >= val → scan_from ──────────────────
-                    if matches!(cond.operator, Operator::Gt | Operator::Gte) {
-                        if let ConditionValue::Literal(lit) = &cond.value {
-                            let inclusive = cond.operator == Operator::Gte;
-                            if let Some(index) = self.indexes.get(&table) {
-                                let pairs = index.scan_from(lit, inclusive);
-                                let rows: Vec<Row> = pairs.iter()
-                                    .filter_map(|(_, j)| serde_json::from_str(j).ok())
-                                    .filter(|r| Self::is_visible(r))
-                                    .collect();
-                                return self.format_result(rows, columns, table, vec![]);
-                            }
-                        }
-                    }
-
-                    // ── PK < val / PK <= val → scan_to ────────────────────
-                    if matches!(cond.operator, Operator::Lt | Operator::Lte) {
-                        if let ConditionValue::Literal(lit) = &cond.value {
-                            let inclusive = cond.operator == Operator::Lte;
-                            if let Some(index) = self.indexes.get(&table) {
-                                let pairs = index.scan_to(lit, inclusive);
-                                let rows: Vec<Row> = pairs.iter()
-                                    .filter_map(|(_, j)| serde_json::from_str(j).ok())
-                                    .filter(|r| Self::is_visible(r))
-                                    .collect();
-                                return self.format_result(rows, columns, table, vec![]);
-                            }
-                        }
-                    }
-                }
-                } // end CondExpr::Leaf
-
-                // ── 복합 인덱스 검색: WHERE col1 = v1 AND col2 = v2 ───────
-                let eq_map = collect_eq_conditions_expr(expr);
-                if !eq_map.is_empty() {
-                    let matching_idx = self.composite_indexes.iter()
-                        .find(|(_, ci)| ci.table == table && ci.matches_conditions(&eq_map))
-                        .map(|(k, _)| k.clone());
-                    if let Some(idx_key) = matching_idx {
-                        let result = self.composite_indexes[&idx_key].search_from_eq_map(&eq_map);
-                        if let Some(val_json) = result {
-                            if let Ok(row) = serde_json::from_str::<Row>(&val_json) {
+            match &plan.base.access {
+                // ── PK 포인트 ──────────────────────────────────────────────
+                AccessPath::PkPoint { key } => {
+                    if let Some(index) = self.indexes.get(&table) {
+                        if let Some(val_json) = index.search(key) {
+                            let row: Row = serde_json::from_str(&val_json).unwrap_or_default();
+                            if Self::is_visible(&row) {
                                 return self.format_result(vec![row], columns, table, vec![]);
                             }
                         }
                         return Ok("0 rows returned.".to_string());
                     }
                 }
+                // ── PK BETWEEN ────────────────────────────────────────────
+                AccessPath::PkBetween { start, end } => {
+                    if let Some(index) = self.indexes.get(&table) {
+                        let rows: Vec<Row> = index.range_search(start, end).iter()
+                            .filter_map(|j| serde_json::from_str(j).ok())
+                            .filter(|r| Self::is_visible(r)).collect();
+                        return self.format_result(rows, columns, table, vec![]);
+                    }
+                }
+                // ── PK 범위 스캔 ──────────────────────────────────────────
+                AccessPath::PkRange { op, key } => {
+                    if let Some(index) = self.indexes.get(&table) {
+                        let inclusive = op.inclusive();
+                        let rows: Vec<Row> = if op.is_lower_bound() {
+                            index.scan_from(key, inclusive).iter()
+                                .filter_map(|(_, j)| serde_json::from_str(j).ok())
+                                .filter(|r| Self::is_visible(r)).collect()
+                        } else {
+                            index.scan_to(key, inclusive).iter()
+                                .filter_map(|(_, j)| serde_json::from_str(j).ok())
+                                .filter(|r| Self::is_visible(r)).collect()
+                        };
+                        return self.format_result(rows, columns, table, vec![]);
+                    }
+                }
+                // ── 보조 인덱스 포인트 (중복 키 배열) ────────────────────
+                AccessPath::SecondaryPoint { index_key, key, .. } => {
+                    if let Some(index) = self.indexes.get(index_key) {
+                        if let Some(json) = index.search(key) {
+                            let rows: Vec<Row> = serde_json::from_str::<Vec<Row>>(&json)
+                                .unwrap_or_default()
+                                .into_iter()
+                                .filter(|r| Self::is_visible(r))
+                                .filter(|r| self.matches_condition_with_subquery(r, &condition))
+                                .collect();
+                            return self.format_result(rows, columns, table, vec![]);
+                        }
+                        return Ok("0 rows returned.".to_string());
+                    }
+                }
+                // ── 보조 인덱스 범위 스캔 ────────────────────────────────
+                AccessPath::SecondaryRange { index_key, op, key, .. } => {
+                    if let Some(index) = self.indexes.get(index_key) {
+                        let inclusive = op.inclusive();
+                        let pairs = if op.is_lower_bound() {
+                            index.scan_from(key, inclusive)
+                        } else {
+                            index.scan_to(key, inclusive)
+                        };
+                        let rows: Vec<Row> = pairs.iter()
+                            .filter_map(|(_, j)| serde_json::from_str::<Vec<Row>>(j).ok())
+                            .flatten()
+                            .filter(|r| Self::is_visible(r))
+                            .filter(|r| self.matches_condition_with_subquery(r, &condition))
+                            .collect();
+                        return self.format_result(rows, columns, table, vec![]);
+                    }
+                }
+                // ── 복합 인덱스 ──────────────────────────────────────────
+                AccessPath::CompositeIndex { index_name } => {
+                    let eq_map = collect_eq_conditions_expr(&condition.clone().unwrap());
+                    if let Some(val_json) = self.composite_indexes[index_name].search_from_eq_map(&eq_map) {
+                        if let Ok(row) = serde_json::from_str::<Row>(&val_json) {
+                            return self.format_result(vec![row], columns, table, vec![]);
+                        }
+                    }
+                    return Ok("0 rows returned.".to_string());
+                }
+                AccessPath::SeqScan => {} // fall through
             }
         }
 
@@ -1048,14 +1045,14 @@ impl Executor {
         // MVCC: 논리 삭제된 행(_xmax != "0") 제외
         let rows: Vec<Row> = rows.into_iter().filter(|r| Self::is_visible(r)).collect();
 
-        // JOIN 처리 (다중 JOIN 순차 적용)
+        // ── JOIN 처리 (플래너가 선택한 알고리즘 사용) ──────────────────────
         let result: Vec<Row> = if joins.is_empty() {
             rows.into_iter()
                 .filter(|r| self.matches_condition_with_subquery(r, &condition))
                 .collect()
         } else {
             let mut current = rows;
-            for j in &joins {
+            for (ji, j) in joins.iter().enumerate() {
                 let right_rows_raw = if let Some(snap) = self.txn.get_snapshot_table(&j.table) {
                     snap.clone()
                 } else {
@@ -1064,10 +1061,6 @@ impl Executor {
                 };
                 let right_rows: Vec<Row> = right_rows_raw.into_iter().filter(|r| Self::is_visible(r)).collect();
 
-                let mut joined = Vec::new();
-                // right 테이블 row를 merged row에 합칠 때:
-                // 1) "table.col" 형식의 prefixed 키로 저장 (충돌 없음)
-                // 2) bare 키는 left 테이블 값이 없을 때만 추가 (left 우선)
                 let merge_right = |merged: &mut Row, right: &Row, tbl: &str| {
                     for (k, v) in right.iter() {
                         merged.insert(format!("{}.{}", tbl, k), v.clone());
@@ -1084,61 +1077,142 @@ impl Executor {
                     .map(|s| s.columns.iter().map(|c| c.name.clone()).collect())
                     .unwrap_or_default();
 
-                match j.join_type {
-                    JoinType::Inner => {
-                        for left in &current {
-                            for right in &right_rows {
-                                let mut merged = left.clone();
-                                merge_right(&mut merged, right, &j.table);
-                                if Self::eval_condexpr(&merged, &j.on_expr) {
-                                    joined.push(merged);
-                                }
-                            }
-                        }
-                    }
-                    JoinType::Left => {
-                        for left in &current {
-                            let mut matched = false;
-                            for right in &right_rows {
-                                let mut merged = left.clone();
-                                merge_right(&mut merged, right, &j.table);
-                                if Self::eval_condexpr(&merged, &j.on_expr) {
-                                    joined.push(merged);
-                                    matched = true;
-                                }
-                            }
-                            if !matched {
-                                let mut merged = left.clone();
-                                null_right(&mut merged, &right_schema_cols, &j.table);
-                                joined.push(merged);
-                            }
-                        }
-                    }
-                    JoinType::Right => {
-                        let left_cols: Vec<String> = current.first()
-                            .map(|r| r.keys().filter(|k| !k.starts_with('_') && !k.contains('.')).cloned().collect())
-                            .unwrap_or_default();
+                // 플래너가 선택한 알고리즘 가져오기
+                let algo = plan.joins.get(ji).map(|jp| &jp.algo);
+
+                let joined = match algo {
+                    Some(JoinAlgo::Hash { probe_col, build_col }) => {
+                        // ── Hash Join ─────────────────────────────────────
+                        // Build phase: right 테이블을 build_col 기준으로 해시화
+                        let mut hash: HashMap<String, Vec<Row>> = HashMap::new();
+                        let bc = build_col.clone();
+                        let tbl = j.table.clone();
                         for right in &right_rows {
-                            let mut matched = false;
-                            for left in &current {
-                                let mut merged = left.clone();
-                                merge_right(&mut merged, right, &j.table);
-                                if Self::eval_condexpr(&merged, &j.on_expr) {
-                                    joined.push(merged);
-                                    matched = true;
+                            let key = right.get(&bc)
+                                .or_else(|| right.get(&format!("{}.{}", tbl, bc)))
+                                .cloned().unwrap_or_default();
+                            hash.entry(key).or_default().push(right.clone());
+                        }
+                        // Probe phase: left 테이블로 해시 테이블 조회
+                        let pc = probe_col.clone();
+                        let mut out = Vec::new();
+                        match j.join_type {
+                            JoinType::Inner => {
+                                for left in &current {
+                                    let probe_key = left.get(&pc)
+                                        .or_else(|| left.iter().find(|(k, _)| k.ends_with(&format!(".{}", pc))).map(|(_, v)| v))
+                                        .cloned().unwrap_or_default();
+                                    if let Some(matches) = hash.get(&probe_key) {
+                                        for right in matches {
+                                            let mut merged = left.clone();
+                                            merge_right(&mut merged, right, &j.table);
+                                            out.push(merged);
+                                        }
+                                    }
                                 }
                             }
-                            if !matched {
-                                let mut merged = Row::new();
-                                for col in &left_cols {
-                                    merged.insert(col.clone(), NULL_VALUE.to_string());
+                            JoinType::Left => {
+                                for left in &current {
+                                    let probe_key = left.get(&pc)
+                                        .or_else(|| left.iter().find(|(k, _)| k.ends_with(&format!(".{}", pc))).map(|(_, v)| v))
+                                        .cloned().unwrap_or_default();
+                                    if let Some(matches) = hash.get(&probe_key) {
+                                        for right in matches {
+                                            let mut merged = left.clone();
+                                            merge_right(&mut merged, right, &j.table);
+                                            out.push(merged);
+                                        }
+                                    } else {
+                                        let mut merged = left.clone();
+                                        null_right(&mut merged, &right_schema_cols, &j.table);
+                                        out.push(merged);
+                                    }
                                 }
-                                merge_right(&mut merged, right, &j.table);
-                                joined.push(merged);
+                            }
+                            JoinType::Right => {
+                                // Right join: build from left, probe with right
+                                let mut left_hash: HashMap<String, Vec<Row>> = HashMap::new();
+                                for left in &current {
+                                    let key = left.get(&pc).cloned().unwrap_or_default();
+                                    left_hash.entry(key).or_default().push(left.clone());
+                                }
+                                let left_cols: Vec<String> = current.first()
+                                    .map(|r| r.keys().filter(|k| !k.starts_with('_') && !k.contains('.')).cloned().collect())
+                                    .unwrap_or_default();
+                                for right in &right_rows {
+                                    let key = right.get(&bc).cloned().unwrap_or_default();
+                                    if let Some(lefts) = left_hash.get(&key) {
+                                        for left in lefts {
+                                            let mut merged = left.clone();
+                                            merge_right(&mut merged, right, &j.table);
+                                            out.push(merged);
+                                        }
+                                    } else {
+                                        let mut merged = Row::new();
+                                        for col in &left_cols { merged.insert(col.clone(), NULL_VALUE.to_string()); }
+                                        merge_right(&mut merged, right, &j.table);
+                                        out.push(merged);
+                                    }
+                                }
                             }
                         }
+                        out
                     }
-                }
+                    _ => {
+                        // ── Nested Loop Join (default) ───────────────────
+                        let mut out = Vec::new();
+                        match j.join_type {
+                            JoinType::Inner => {
+                                for left in &current {
+                                    for right in &right_rows {
+                                        let mut merged = left.clone();
+                                        merge_right(&mut merged, right, &j.table);
+                                        if Self::eval_condexpr(&merged, &j.on_expr) { out.push(merged); }
+                                    }
+                                }
+                            }
+                            JoinType::Left => {
+                                for left in &current {
+                                    let mut matched = false;
+                                    for right in &right_rows {
+                                        let mut merged = left.clone();
+                                        merge_right(&mut merged, right, &j.table);
+                                        if Self::eval_condexpr(&merged, &j.on_expr) {
+                                            out.push(merged); matched = true;
+                                        }
+                                    }
+                                    if !matched {
+                                        let mut merged = left.clone();
+                                        null_right(&mut merged, &right_schema_cols, &j.table);
+                                        out.push(merged);
+                                    }
+                                }
+                            }
+                            JoinType::Right => {
+                                let left_cols: Vec<String> = current.first()
+                                    .map(|r| r.keys().filter(|k| !k.starts_with('_') && !k.contains('.')).cloned().collect())
+                                    .unwrap_or_default();
+                                for right in &right_rows {
+                                    let mut matched = false;
+                                    for left in &current {
+                                        let mut merged = left.clone();
+                                        merge_right(&mut merged, right, &j.table);
+                                        if Self::eval_condexpr(&merged, &j.on_expr) {
+                                            out.push(merged); matched = true;
+                                        }
+                                    }
+                                    if !matched {
+                                        let mut merged = Row::new();
+                                        for col in &left_cols { merged.insert(col.clone(), NULL_VALUE.to_string()); }
+                                        merge_right(&mut merged, right, &j.table);
+                                        out.push(merged);
+                                    }
+                                }
+                            }
+                        }
+                        out
+                    }
+                };
                 current = joined;
             }
             current.into_iter()
@@ -2575,16 +2649,19 @@ impl Executor {
         }
 
         if columns.len() == 1 {
-            // 단일 컬럼 → 기존 BPlusTree 인덱스
+            // 단일 컬럼 → BPlusTree (key → JSON array of rows, supports duplicates)
             let column = &columns[0];
-            let mut tree = BPlusTree::new();
+            let mut bucket: HashMap<String, Vec<Row>> = HashMap::new();
             if let Some(rows) = self.tables.get(&table) {
                 for row in rows {
                     if let Some(val) = row.get(column) {
-                        let json = serde_json::to_string(row).unwrap();
-                        tree.insert(val.clone(), json);
+                        bucket.entry(val.clone()).or_default().push(row.clone());
                     }
                 }
+            }
+            let mut tree = BPlusTree::new();
+            for (key, rows) in bucket {
+                tree.insert(key, serde_json::to_string(&rows).unwrap());
             }
             let key = format!("{}_{}", table, index_name);
             self.indexes.insert(key, tree);
@@ -2823,121 +2900,15 @@ impl Executor {
         let (table, condition, joins) = match &stmt {
             Statement::Select { table, condition, joins, subquery, .. } => {
                 if subquery.is_some() {
-                    return Ok("EXPLAIN: Subquery-based SELECT → Strategy: SUBQUERY SCAN".to_string());
+                    return Ok("EXPLAIN: Subquery-based SELECT → SUBQUERY SCAN".to_string());
                 }
                 (table.clone(), condition.clone(), joins.clone())
             }
-            other => return Ok(format!("EXPLAIN: {:?} → no index optimization available", other)),
+            other => return Ok(format!("EXPLAIN: {:?} → not a SELECT", other)),
         };
-
-        // 테이블 통계
-        let row_count = self.tables.get(&table).map(|r| r.len()).unwrap_or(0);
-        let visible_count = self.tables.get(&table)
-            .map(|rows| rows.iter().filter(|r| Self::is_visible(r)).count())
-            .unwrap_or(0);
-
-        let pk_col = self.catalog.get_table(&table)
-            .and_then(|s| s.columns.iter().find(|c| c.primary_key).map(|c| c.name.clone()));
-
-        // 접근 경로 결정
-        let access_path = if !joins.is_empty() {
-            format!("FULL SCAN + JOIN ({})", joins.iter().map(|j| j.table.as_str()).collect::<Vec<_>>().join(", "))
-        } else if let Some(expr) = &condition {
-            // Extract first leaf for index analysis
-            let leaf = condexpr_first_leaf(expr);
-            if let Some(cond) = leaf {
-                let cond_col = if let ArithExpr::Col(name) = &cond.left { name.as_str() } else { "" };
-                let is_pk = !cond_col.is_empty()
-                    && pk_col.as_deref() == Some(cond_col)
-                    && matches!(expr, CondExpr::Leaf(_));
-
-                if is_pk {
-                    match &cond.operator {
-                        Operator::Eq => {
-                            if let ConditionValue::Literal(v) = &cond.value {
-                                format!("INDEX SCAN (pk={})  [B+Tree point lookup, cost≈O(log {})]", v, row_count)
-                            } else { "INDEX SCAN (pk=subquery)".to_string() }
-                        }
-                        Operator::Between => {
-                            if let ConditionValue::Between(a, b) = &cond.value {
-                                format!("INDEX RANGE SCAN (pk BETWEEN {} AND {})  [B+Tree range, cost≈O(log {}+k)]", a, b, row_count)
-                            } else { "INDEX RANGE SCAN".to_string() }
-                        }
-                        Operator::Gt => {
-                            if let ConditionValue::Literal(v) = &cond.value {
-                                format!("INDEX RANGE SCAN (pk > {})  [B+Tree scan_from, cost≈O(log {}+k)]", v, row_count)
-                            } else { "INDEX RANGE SCAN".to_string() }
-                        }
-                        Operator::Gte => {
-                            if let ConditionValue::Literal(v) = &cond.value {
-                                format!("INDEX RANGE SCAN (pk >= {})  [B+Tree scan_from, cost≈O(log {}+k)]", v, row_count)
-                            } else { "INDEX RANGE SCAN".to_string() }
-                        }
-                        Operator::Lt => {
-                            if let ConditionValue::Literal(v) = &cond.value {
-                                format!("INDEX RANGE SCAN (pk < {})  [B+Tree scan_to, cost≈O(log {}+k)]", v, row_count)
-                            } else { "INDEX RANGE SCAN".to_string() }
-                        }
-                        Operator::Lte => {
-                            if let ConditionValue::Literal(v) = &cond.value {
-                                format!("INDEX RANGE SCAN (pk <= {})  [B+Tree scan_to, cost≈O(log {}+k)]", v, row_count)
-                            } else { "INDEX RANGE SCAN".to_string() }
-                        }
-                        _ => format!("FULL SCAN  [no index for {:?}, cost≈O({})]", cond.operator, row_count),
-                    }
-                } else {
-                    let single_idx = self.index_meta.iter()
-                        .find(|(_, (t, c))| t == &table && c == cond_col)
-                        .map(|(k, _)| k.clone());
-                    if let Some(idx_name) = single_idx {
-                        match &cond.operator {
-                            Operator::Eq => format!("INDEX SCAN ({} on '{}')  [B+Tree point, cost≈O(log {})]", idx_name, cond_col, row_count),
-                            Operator::Between | Operator::Gt | Operator::Gte | Operator::Lt | Operator::Lte => {
-                                format!("INDEX RANGE SCAN ({} on '{}')  [B+Tree range, cost≈O(log {}+k)]", idx_name, cond_col, row_count)
-                            }
-                            _ => format!("INDEX SCAN ({} on '{}')  [filtered, cost≈O(log {})]", idx_name, cond_col, row_count),
-                        }
-                    } else {
-                        let eq_map = collect_eq_conditions_expr(expr);
-                        let comp_idx = self.composite_indexes.iter()
-                            .find(|(_, ci)| ci.table == table && ci.matches_conditions(&eq_map))
-                            .map(|(k, _)| k.clone());
-                        if let Some(idx_name) = comp_idx {
-                            format!("COMPOSITE INDEX SCAN ({})  [cost≈O(1)]", idx_name)
-                        } else {
-                            format!("FULL SCAN  [no index on '{}', cost≈O({})]", cond_col, row_count)
-                        }
-                    }
-                }
-            } else {
-                format!("FULL SCAN  [complex WHERE, cost≈O({})]", row_count)
-            }
-        } else {
-            format!("FULL SCAN  [no WHERE clause, cost≈O({})]", row_count)
-        };
-
-        let mut out = String::new();
-        out.push_str("+--------------------------------------------------+\n");
-        out.push_str("|                  QUERY PLAN                      |\n");
-        out.push_str("+--------------------------------------------------+\n");
-        out.push_str(&format!("| Table       : {:<35}|\n", table));
-        out.push_str(&format!("| Total rows  : {:<35}|\n", row_count));
-        out.push_str(&format!("| Visible rows: {:<35}|\n", visible_count));
-        if let Some(pk) = &pk_col {
-            out.push_str(&format!("| PK column   : {:<35}|\n", pk));
-        }
-        out.push_str("|                                                  |\n");
-        // access_path가 길면 줄바꿈
-        for (i, chunk) in access_path.as_bytes().chunks(48).enumerate() {
-            let s = std::str::from_utf8(chunk).unwrap_or("?");
-            if i == 0 {
-                out.push_str(&format!("| Access path : {:<35}|\n", s));
-            } else {
-                out.push_str(&format!("|               {:<35}|\n", s));
-            }
-        }
-        out.push_str("+--------------------------------------------------+");
-        Ok(out)
+        let planner = Planner::new(&self.tables, &self.indexes, &self.index_meta, &self.composite_indexes, &self.catalog);
+        let plan = planner.plan(&table, &condition, &joins);
+        Ok(planner.explain(&plan))
     }
 
     /// SHOW LOCKS: 보유 잠금 + wait-for 그래프 + 데드락 이력 출력
