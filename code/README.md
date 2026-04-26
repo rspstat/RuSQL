@@ -9,7 +9,7 @@
 | 분류 | 내용 |
 |------|------|
 | DB 엔진 | B+Tree, WAL, Buffer Pool, MVCC, 트랜잭션 |
-| SQL 지원 | DDL / DML / JOIN / 서브쿼리 / 제약조건 / 트랜잭션 |
+| SQL 지원 | DDL / DML / JOIN / 서브쿼리 / CTE / UNION / 제약조건 / 트랜잭션 |
 | MCP | 자연어 입력 → SQL 자동 생성 → 실행 |
 | DBMS | TCP 서버, 다중 클라이언트 동시 접속 |
 | 언어 | Rust |
@@ -33,34 +33,41 @@
 
 ### DML
 - [x] INSERT (전체 컬럼 / 컬럼 지정 / 멀티 row)
+- [x] INSERT ... SELECT (SELECT 결과를 다른 테이블에 삽입)
 - [x] SELECT
-- [x] UPDATE
+- [x] UPDATE (상수 / 산술 표현식 / 자기 참조 — `salary = salary * 1.1`)
 - [x] DELETE (MVCC 논리 삭제 / 물리 삭제)
 
 ### 쿼리 기능
 - [x] WHERE (=, !=, >, <, >=, <=)
-- [x] AND / OR 복합 조건
+- [x] AND / OR / NOT 복합 조건 — `NOT (price > 100 OR active = 0)`
+- [x] IN (리터럴 목록) — `WHERE id IN (1, 2, 3)`
+- [x] NOT IN (리터럴 목록) — `WHERE id NOT IN (2, 4)`
+- [x] IN / NOT IN (서브쿼리) — `WHERE dept_id IN (SELECT id FROM dept)`
 - [x] BETWEEN / LIKE (%, _ 와일드카드)
 - [x] IS NULL / IS NOT NULL
 - [x] INNER JOIN / LEFT JOIN / RIGHT JOIN
-- [x] 테이블 별칭 (alias) — `FROM employees e JOIN departments d ON e.dept_id = d.id`
+- [x] 테이블 별칭 (alias) — `FROM emp e JOIN dept d ON e.dept_id = d.id`
 - [x] ORDER BY (ASC / DESC, 다중 컬럼)
+- [x] LIMIT / OFFSET — `LIMIT 10 OFFSET 20`
 - [x] GROUP BY / HAVING
-- [x] LIMIT
 - [x] DISTINCT
+- [x] 산술 표현식 — SELECT / WHERE / UPDATE SET에서 `price * qty`, `salary + 100`
 - [x] 집계 함수 (COUNT, SUM, AVG, MIN, MAX)
+- [x] CASE WHEN ... THEN ... ELSE ... END
 - [x] 스칼라 함수 — UPPER / LOWER / LENGTH / TRIM / CONCAT / SUBSTR / REPLACE
 - [x] 수학 함수 — ROUND / ABS / CEIL / FLOOR / MOD
 - [x] 날짜 함수 — NOW / CURDATE / DATE_FORMAT
 - [x] NULL 처리 함수 — COALESCE / IFNULL
-- [x] 서브쿼리 — WHERE col IN / NOT IN (SELECT ...)
 - [x] 서브쿼리 — WHERE col = / > / < (SELECT ...)
 - [x] 상관 서브쿼리 — WHERE EXISTS (SELECT 1 FROM ... WHERE outer.col = inner.col)
 - [x] FROM 절 서브쿼리 — FROM (SELECT ...) AS alias
-- [x] SHOW TABLES / DESCRIBE
+- [x] UNION / UNION ALL (ORDER BY / LIMIT / OFFSET 포함)
+- [x] CTE (WITH ... AS) — 단순 / 다중 / INSERT 메인 쿼리 지원
 - [x] SELECT ... FOR UPDATE (행 잠금)
 - [x] table.column dot notation (SELECT / JOIN ON / GROUP BY / ORDER BY)
 - [x] EXPLAIN (실행 계획 조회)
+- [x] SHOW TABLES / DESCRIBE
 
 ### 데이터 타입
 - [x] INT
@@ -188,137 +195,159 @@ cd rustdb-ui && npm run tauri dev
 
 ## 테스트 쿼리
 ```sql
--- SETUP
-DROP TABLE IF EXISTS orders;
-DROP TABLE IF EXISTS items;
+-- ── SETUP ──────────────────────────────────────────────────────────────
 DROP TABLE IF EXISTS emp;
 DROP TABLE IF EXISTS dept;
-DROP VIEW IF EXISTS v_active;
+DROP VIEW  IF EXISTS v_hi;
 DROP INDEX IF EXISTS idx_dept;
 
--- DDL
+-- ── CREATE ─────────────────────────────────────────────────────────────
 CREATE TABLE dept (
-    id     INT          PRIMARY KEY AUTO INCREMENT,
-    name   VARCHAR(50)  NOT NULL UNIQUE,
-    budget DECIMAL(10,2) DEFAULT 0.00
+    id     INT PRIMARY KEY AUTO INCREMENT,
+    name   VARCHAR(30) NOT NULL UNIQUE,
+    budget INT DEFAULT 0
 );
-
 CREATE TABLE emp (
-    id         INT          PRIMARY KEY AUTO INCREMENT,
-    name       VARCHAR(50)  NOT NULL,
-    dept_id    INT,
-    salary     DECIMAL(10,2) CHECK (salary > 0),
-    hire_date  DATE,
-    active     BOOLEAN      DEFAULT true,
-    updated_at TIMESTAMP,
+    id      INT PRIMARY KEY AUTO INCREMENT,
+    name    VARCHAR(30) NOT NULL,
+    dept_id INT,
+    salary  INT CHECK (salary > 0),
+    score   INT,
+    active  INT DEFAULT 1,
     FOREIGN KEY (dept_id) REFERENCES dept(id) ON DELETE SET NULL ON UPDATE CASCADE
 );
 
-CREATE TABLE orders (
-    id     INT          PRIMARY KEY AUTO INCREMENT,
-    emp_id INT,
-    total  DECIMAL(10,2),
-    FOREIGN KEY (emp_id) REFERENCES emp(id) ON DELETE RESTRICT
-);
+-- ── INSERT ─────────────────────────────────────────────────────────────
+INSERT INTO dept (name, budget) VALUES ('Eng', 500), ('Mkt', 200), ('HR', 100);
+INSERT INTO emp (name, dept_id, salary, score, active) VALUES
+    ('Alice', 1, 9500, 90, 1), ('Bob', 1, 8500, 75, 1),
+    ('Carol', 2, 7200, 88, 0), ('Dave', 2, 6800, 60, 1), ('Eve', 3, 6000, 95, 1);
 
-CREATE TABLE items (
-    order_id INT,
-    product  VARCHAR(50),
-    qty      INT,
-    PRIMARY KEY (order_id, product)
-);
-
--- INSERT
-INSERT INTO dept (name, budget) VALUES ('Engineering', 500000.00), ('HR', 100000.00);
-INSERT INTO emp (name, dept_id, salary, hire_date, active) VALUES ('Alice', 1, 95000.00, '2020-03-15', true), ('Bob', 1, 85000.00, '2021-06-01', true), ('Carol', 2, 68000.00, '2022-01-10', false);
-INSERT INTO orders (emp_id, total) VALUES (1, 1200.00), (2, 350.00);
-INSERT INTO items VALUES (1, 'Laptop', 1), (1, 'Mouse', 2), (2, 'Keyboard', 1);
-
--- SELECT / WHERE / ORDER BY / LIMIT / DISTINCT
-SELECT * FROM dept;
-SELECT id, name, salary FROM emp WHERE salary > 70000 ORDER BY salary DESC LIMIT 2;
+-- ── SELECT / ORDER BY / LIMIT / OFFSET / DISTINCT ─────────────────────
+SELECT id, name, salary FROM emp WHERE salary > 7000 ORDER BY salary DESC LIMIT 3;
+SELECT id, name FROM emp ORDER BY id LIMIT 2 OFFSET 2;
 SELECT DISTINCT dept_id FROM emp ORDER BY dept_id;
-SELECT id, name FROM emp WHERE salary BETWEEN 60000 AND 90000;
-SELECT id, name FROM emp WHERE name LIKE 'A%';
-SELECT id, name FROM emp WHERE hire_date IS NOT NULL;
+
+-- ── ARITHMETIC in SELECT / WHERE ───────────────────────────────────────
+SELECT id, name, salary * 2 AS doubled, salary + score AS combined FROM emp ORDER BY id;
+SELECT name FROM emp WHERE salary * 2 > 16000;
+
+-- ── IN / NOT IN / NOT / BETWEEN / LIKE ────────────────────────────────
+SELECT name FROM emp WHERE id IN (1, 3, 5);
+SELECT name FROM emp WHERE id NOT IN (2, 4);
+SELECT name FROM emp WHERE NOT (active = 1);
+SELECT name FROM emp WHERE salary BETWEEN 7000 AND 9000;
+SELECT name FROM emp WHERE name LIKE 'A%' OR name LIKE 'E%';
+
+-- ── IS NULL / IS NOT NULL ──────────────────────────────────────────────
+INSERT INTO emp (name, salary, score) VALUES ('Frank', 5500, 72);
 SELECT id, name FROM emp WHERE dept_id IS NULL;
+SELECT id, name FROM emp WHERE dept_id IS NOT NULL ORDER BY id;
 
--- AGGREGATE + GROUP BY + HAVING
-SELECT COUNT(*) AS total, AVG(salary) AS avg_sal, MAX(salary) AS max_sal FROM emp;
-SELECT dept_id, COUNT(*) AS cnt FROM emp GROUP BY dept_id HAVING cnt > 1;
+-- ── AGGREGATE / GROUP BY / HAVING ──────────────────────────────────────
+SELECT COUNT(*) AS total, AVG(salary) AS avg_sal, MAX(score) AS top, MIN(score) AS bot, SUM(salary) AS payroll FROM emp;
+SELECT dept_id, COUNT(*) AS cnt, SUM(salary) AS pay FROM emp WHERE dept_id IS NOT NULL GROUP BY dept_id HAVING cnt > 1;
 
--- JOIN (table alias)
-SELECT e.id, e.name, d.name AS dept FROM emp e JOIN dept d ON e.dept_id = d.id;
-SELECT e.id, e.name, d.name AS dept FROM emp e LEFT JOIN dept d ON e.dept_id = d.id;
+-- ── JOIN ───────────────────────────────────────────────────────────────
+SELECT e.name, d.name AS dept, e.salary FROM emp e JOIN dept d ON e.dept_id = d.id;
+SELECT e.name, d.name AS dept FROM emp e LEFT JOIN dept d ON e.dept_id = d.id;
 
--- SUBQUERY
-SELECT id, name FROM emp WHERE dept_id IN (SELECT id FROM dept WHERE budget > 300000);
-SELECT id, name FROM emp WHERE salary > (SELECT AVG(salary) FROM emp);
-SELECT id, name FROM dept WHERE EXISTS (SELECT 1 FROM emp WHERE dept_id = dept.id AND salary > 90000);
-SELECT dept_id, avg_sal FROM (SELECT dept_id, AVG(salary) AS avg_sal FROM emp GROUP BY dept_id) AS s WHERE avg_sal > 80000;
+-- ── SUBQUERY ───────────────────────────────────────────────────────────
+SELECT name FROM emp WHERE dept_id IN (SELECT id FROM dept WHERE budget > 300);
+SELECT name FROM emp WHERE salary > (SELECT AVG(salary) FROM emp);
+SELECT name FROM dept WHERE EXISTS (SELECT 1 FROM emp WHERE dept_id = dept.id AND salary > 9000);
+SELECT dept_id, avg_s FROM (SELECT dept_id, AVG(salary) AS avg_s FROM emp GROUP BY dept_id) AS s WHERE avg_s > 7000;
 
--- SCALAR FUNCTIONS
-SELECT UPPER(name) AS up, LOWER(name) AS lo, LENGTH(name) AS len, CONCAT(name, '@corp') AS email FROM emp LIMIT 1;
-SELECT ROUND(salary, -3) AS rounded, ABS(salary) AS abs_sal, FLOOR(salary) AS fl, CEIL(salary) AS cl FROM emp LIMIT 1;
-SELECT SUBSTR(name, 1, 3) AS nick, REPLACE(name, 'Alice', 'Alicia') AS renamed, TRIM(name) AS trimmed FROM emp LIMIT 1;
-SELECT COALESCE(dept_id, 0) AS dept, IFNULL(dept_id, 0) AS dept2 FROM emp LIMIT 1;
-SELECT DATE_FORMAT(hire_date, '%Y/%m/%d') AS fmt, CURDATE() AS today, NOW() AS ts FROM emp LIMIT 1;
+-- ── UNION / UNION ALL ──────────────────────────────────────────────────
+SELECT dept_id FROM emp WHERE salary > 7000 AND dept_id IS NOT NULL
+UNION
+SELECT dept_id FROM emp WHERE score  > 85  AND dept_id IS NOT NULL;
 
--- COMPOSITE PK
-SELECT * FROM items;
-SELECT order_id, SUM(qty) AS total_qty FROM items GROUP BY order_id;
+SELECT name, score FROM emp WHERE score >= 88
+UNION ALL
+SELECT name, score FROM emp WHERE score <  65
+ORDER BY score DESC;
 
--- CONSTRAINT VIOLATION (expected ERROR)
-INSERT INTO emp (name, dept_id, salary) VALUES ('Bad', 1, -500.00);
-INSERT INTO orders (emp_id, total) VALUES (999, 100.00);
+-- ── SCALAR FUNCTIONS ───────────────────────────────────────────────────
+SELECT UPPER(name) AS up, LENGTH(name) AS len, CONCAT(name, '@co') AS email FROM emp LIMIT 3;
+SELECT COALESCE(dept_id, 0) AS dept, IFNULL(dept_id, 0) AS dept2 FROM emp WHERE dept_id IS NULL;
 
--- MULTI-COLUMN UPDATE + FK ON UPDATE CASCADE
-UPDATE dept SET name = 'Engineering Team', budget = 600000.00 WHERE id = 1;
-SELECT id, name, dept_id FROM emp WHERE dept_id = 1;
+-- ── CASE WHEN ──────────────────────────────────────────────────────────
+SELECT name, CASE WHEN salary > 8000 THEN 'High' WHEN salary > 6000 THEN 'Mid' ELSE 'Low' END AS band FROM emp ORDER BY id;
 
--- DELETE + FK RESTRICT
-DELETE FROM orders WHERE id = 1;
-SELECT * FROM orders;
+-- ── UPDATE (constant + arithmetic) ─────────────────────────────────────
+UPDATE emp SET salary = 10000 WHERE id = 1;
+UPDATE emp SET salary = salary * 2, score = score + 5 WHERE id = 2;
+SELECT id, name, salary, score FROM emp WHERE id IN (1, 2);
 
--- INDEX + EXPLAIN
+-- ── DELETE + FK SET NULL ────────────────────────────────────────────────
+DELETE FROM dept WHERE id = 3;
+SELECT id, name, dept_id FROM emp WHERE name = 'Eve';
+
+-- ── CONSTRAINT ERROR (expected ERROR) ──────────────────────────────────
+INSERT INTO emp (name, salary) VALUES ('Bad', -1);
+
+-- ── INSERT ... SELECT ──────────────────────────────────────────────────
+CREATE TABLE archive (id INT PRIMARY KEY, name VARCHAR(30), salary INT);
+INSERT INTO archive SELECT id, name, salary FROM emp WHERE salary >= 10000;
+SELECT * FROM archive ORDER BY salary DESC;
+
+-- ── CTE ────────────────────────────────────────────────────────────────
+WITH hi AS (SELECT name, score FROM emp WHERE score >= 88)
+SELECT name, score FROM hi ORDER BY score DESC;
+
+WITH hi AS (SELECT name, score FROM emp WHERE score >= 88),
+     lo AS (SELECT name, score FROM emp WHERE score <  65)
+SELECT name, score FROM hi UNION ALL SELECT name, score FROM lo ORDER BY score DESC;
+
+WITH mid AS (
+    SELECT id, name, salary FROM emp WHERE salary BETWEEN 6000 AND 9999
+    AND id NOT IN (SELECT id FROM archive)
+)
+INSERT INTO archive SELECT id, name, salary FROM mid;
+SELECT * FROM archive ORDER BY salary DESC;
+
+TRUNCATE TABLE archive;
+DROP TABLE archive;
+
+-- ── VIEW ───────────────────────────────────────────────────────────────
+CREATE VIEW v_hi AS SELECT id, name, salary FROM emp WHERE salary > 8000;
+SELECT * FROM v_hi ORDER BY salary DESC;
+DROP VIEW IF EXISTS v_hi;
+
+-- ── INDEX + EXPLAIN ────────────────────────────────────────────────────
 CREATE INDEX idx_dept ON emp (dept_id);
 EXPLAIN SELECT * FROM emp WHERE dept_id = 1;
-EXPLAIN SELECT * FROM emp WHERE id BETWEEN 1 AND 3;
-EXPLAIN SELECT * FROM emp WHERE salary > 70000;
+EXPLAIN SELECT * FROM emp WHERE salary > 7000;
 
--- VIEW (영속화: 재시작 후에도 유지됨)
-CREATE VIEW v_active AS SELECT id, name, salary FROM emp WHERE active = true;
-SELECT * FROM v_active;
-
--- ALTER TABLE
-ALTER TABLE emp ADD COLUMN notes TEXT;
-ALTER TABLE emp MODIFY COLUMN notes TEXT NOT NULL;
-ALTER TABLE emp RENAME COLUMN notes TO memo;
-DESCRIBE emp;
+-- ── ALTER TABLE ────────────────────────────────────────────────────────
+ALTER TABLE emp ADD COLUMN note TEXT;
+ALTER TABLE emp MODIFY COLUMN note VARCHAR(100);
+ALTER TABLE emp RENAME COLUMN note TO memo;
 ALTER TABLE emp DROP COLUMN memo;
+DESCRIBE emp;
 
--- TRANSACTION + SAVEPOINT
+-- ── TRANSACTION (savepoint) ────────────────────────────────────────────
 BEGIN;
-INSERT INTO dept (name, budget) VALUES ('Temp', 0.00);
+INSERT INTO dept (name, budget) VALUES ('Temp', 0);
 SAVEPOINT sp1;
-INSERT INTO dept (name, budget) VALUES ('Ghost', 0.00);
+UPDATE dept SET budget = 999 WHERE name = 'Temp';
 ROLLBACK TO SAVEPOINT sp1;
 COMMIT;
-SELECT id, name FROM dept;
+SELECT name, budget FROM dept WHERE name = 'Temp';
 
--- TRANSACTION ROLLBACK
+-- ── TRANSACTION ROLLBACK ───────────────────────────────────────────────
 BEGIN;
-UPDATE emp SET salary = 999999.00 WHERE id = 2;
-SELECT id, name, salary FROM emp WHERE id = 2;
+UPDATE emp SET salary = 1 WHERE id = 1;
 ROLLBACK;
-SELECT id, name, salary FROM emp WHERE id = 2;
+SELECT id, salary FROM emp WHERE id = 1;
 
--- ISOLATION LEVEL
+-- ── ISOLATION LEVEL ────────────────────────────────────────────────────
 SET ISOLATION LEVEL SERIALIZABLE;
 SHOW ISOLATION LEVEL;
 SET ISOLATION LEVEL READ COMMITTED;
 
--- SHOW / MONITOR
+-- ── SHOW / ADMIN ───────────────────────────────────────────────────────
 SHOW TABLES;
 DESCRIBE emp;
 SHOW BUFFER POOL;
@@ -327,14 +356,10 @@ SHOW LOCKS;
 CHECKPOINT;
 VACUUM;
 
--- TRUNCATE + DROP
-TRUNCATE TABLE items;
-DROP TABLE items;
-DROP TABLE orders;
+-- ── CLEANUP ────────────────────────────────────────────────────────────
+DROP INDEX IF EXISTS idx_dept;
 DROP TABLE emp;
 DROP TABLE dept;
-DROP VIEW IF EXISTS v_active;
-DROP INDEX IF EXISTS idx_dept;
 SHOW TABLES;
 ```
 
@@ -381,13 +406,20 @@ code/
 │  ┌───────────────────────────────┐       │
 │  │ DDL: CREATE/DROP/ALTER/TRUNC  │       │
 │  │ DML: INSERT/SELECT/UPDATE/DEL │       │
+│  │ INSERT ... SELECT             │       │
 │  │ JOIN (INNER/LEFT/RIGHT)       │       │
 │  │ 테이블 별칭 (alias)           │       │
 │  │ WHERE / SUBQUERY / EXISTS     │       │
+│  │ IN (리터럴/서브쿼리) / NOT IN │       │
+│  │ NOT 조건 / 산술 표현식        │       │
 │  │ FROM 서브쿼리                 │       │
+│  │ UNION / UNION ALL             │       │
+│  │ CTE (WITH ... AS)             │       │
 │  │ ORDER BY / GROUP BY / HAVING  │       │
+│  │ LIMIT / OFFSET                │       │
+│  │ CASE WHEN / DISTINCT          │       │
 │  │ 스칼라 / 날짜 / NULL 함수     │       │
-│  │ 집계함수 / DISTINCT / LIMIT   │       │
+│  │ 집계함수 (COUNT/SUM/AVG/...)  │       │
 │  │ INDEX (단일/복합/클러스터드)  │       │
 │  │ EXPLAIN (실행 계획)           │       │
 │  │ VIEW / 제약조건 (PK/FK/CHECK) │       │
