@@ -1,0 +1,138 @@
+<mxGraphModel dx="1422" dy="762" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="0" pageScale="1" pageWidth="1300" pageHeight="1000" math="0" shadow="0">
+  <root>
+    <mxCell id="0" />
+    <mxCell id="1" parent="0" />
+
+    <!-- 제목 -->
+    <mxCell id="title" value="UC-060: 서버 생성 시퀀스" style="text;html=1;strokeColor=none;fillColor=none;align=center;fontSize=16;fontStyle=1;" vertex="1" parent="1">
+      <mxGeometry x="250" y="10" width="620" height="30" as="geometry" />
+    </mxCell>
+
+    <!-- ══════════════ 생명선 헤더 (간격 217px 통일) ══════════════
+         Admin:          center x=132
+         rustdb-server:  center x=349
+         Client:         center x=566
+         Thread:         center x=783
+         Executor:       center x=1000
+    ══════════════════════════════════════════════════════════════ -->
+    <mxCell id="h_admin" value="Admin" style="shape=mxgraph.uml.actor;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#000000;fontSize=14;fontStyle=1;" vertex="1" parent="1">
+      <mxGeometry x="102" y="45" width="60" height="90" as="geometry" />
+    </mxCell>
+    <mxCell id="h_server" value="rustdb-server" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#000000;fontSize=13;fontStyle=1;" vertex="1" parent="1">
+      <mxGeometry x="274" y="60" width="150" height="50" as="geometry" />
+    </mxCell>
+    <mxCell id="h_client" value="Client" style="shape=mxgraph.uml.actor;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#000000;fontSize=14;fontStyle=1;" vertex="1" parent="1">
+      <mxGeometry x="536" y="45" width="60" height="90" as="geometry" />
+    </mxCell>
+    <mxCell id="h_thread" value="Thread" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#000000;fontSize=13;fontStyle=1;" vertex="1" parent="1">
+      <mxGeometry x="723" y="60" width="120" height="50" as="geometry" />
+    </mxCell>
+    <mxCell id="h_exec" value="Executor" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#000000;fontSize=13;fontStyle=1;" vertex="1" parent="1">
+      <mxGeometry x="940" y="60" width="120" height="50" as="geometry" />
+    </mxCell>
+
+    <!-- ══════════════ 생명선 수직선 ══════════════ -->
+    <mxCell id="l_admin" value="" style="endArrow=none;dashed=1;strokeColor=#000000;" edge="1" parent="1">
+      <mxGeometry relative="1" as="geometry"><mxPoint x="132" y="135" as="sourcePoint"/><mxPoint x="132" y="920" as="targetPoint"/></mxGeometry>
+    </mxCell>
+    <mxCell id="l_server" value="" style="endArrow=none;dashed=1;strokeColor=#000000;" edge="1" parent="1">
+      <mxGeometry relative="1" as="geometry"><mxPoint x="349" y="110" as="sourcePoint"/><mxPoint x="349" y="920" as="targetPoint"/></mxGeometry>
+    </mxCell>
+    <mxCell id="l_client" value="" style="endArrow=none;dashed=1;strokeColor=#000000;" edge="1" parent="1">
+      <mxGeometry relative="1" as="geometry"><mxPoint x="566" y="135" as="sourcePoint"/><mxPoint x="566" y="920" as="targetPoint"/></mxGeometry>
+    </mxCell>
+    <mxCell id="l_thread" value="" style="endArrow=none;dashed=1;strokeColor=#000000;" edge="1" parent="1">
+      <mxGeometry relative="1" as="geometry"><mxPoint x="783" y="110" as="sourcePoint"/><mxPoint x="783" y="920" as="targetPoint"/></mxGeometry>
+    </mxCell>
+    <mxCell id="l_exec" value="" style="endArrow=none;dashed=1;strokeColor=#000000;" edge="1" parent="1">
+      <mxGeometry relative="1" as="geometry"><mxPoint x="1000" y="110" as="sourcePoint"/><mxPoint x="1000" y="920" as="targetPoint"/></mxGeometry>
+    </mxCell>
+
+    <!-- ══════════════ 활성 박스 ══════════════ -->
+    <mxCell id="act_admin" value="" style="fillColor=#ffffff;strokeColor=#000000;" vertex="1" parent="1">
+      <mxGeometry x="127" y="160" width="10" height="720" as="geometry" />
+    </mxCell>
+    <mxCell id="act_server" value="" style="fillColor=#ffffff;strokeColor=#000000;" vertex="1" parent="1">
+      <mxGeometry x="344" y="200" width="10" height="700" as="geometry" />
+    </mxCell>
+    <mxCell id="act_client" value="" style="fillColor=#ffffff;strokeColor=#000000;" vertex="1" parent="1">
+      <mxGeometry x="561" y="560" width="10" height="80" as="geometry" />
+    </mxCell>
+    <mxCell id="act_thread" value="" style="fillColor=#ffffff;strokeColor=#000000;" vertex="1" parent="1">
+      <mxGeometry x="778" y="660" width="10" height="200" as="geometry" />
+    </mxCell>
+    <mxCell id="act_exec" value="" style="fillColor=#ffffff;strokeColor=#000000;" vertex="1" parent="1">
+      <mxGeometry x="995" y="720" width="10" height="80" as="geometry" />
+    </mxCell>
+
+    <!-- ══════════════ 메시지 ══════════════ -->
+
+    <!-- 1. Admin → rustdb-server -->
+    <mxCell id="m1" value="1. rustdb-server 실행" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;fontSize=12;strokeColor=#000000;" edge="1" parent="1">
+      <mxGeometry relative="1" as="geometry"><mxPoint x="137" y="170" as="sourcePoint"/><mxPoint x="344" y="170" as="targetPoint"/></mxGeometry>
+    </mxCell>
+
+    <!-- 2. rustdb-server self: TcpListener::bind -->
+    <mxCell id="m2" value="2. TcpListener::bind(&quot;127.0.0.1:7878&quot;)" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;fontSize=12;strokeColor=#000000;" edge="1" parent="1">
+      <mxGeometry relative="1" as="geometry"><mxPoint x="354" y="230" as="sourcePoint"/><mxPoint x="415" y="230" as="targetPoint"/><Array as="points"><mxPoint x="415" y="250"/></Array></mxGeometry>
+    </mxCell>
+    <mxCell id="m2r" value="" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=open;endFill=0;dashed=1;fontSize=12;strokeColor=#000000;" edge="1" parent="1">
+      <mxGeometry relative="1" as="geometry"><mxPoint x="415" y="270" as="sourcePoint"/><mxPoint x="354" y="270" as="targetPoint"/></mxGeometry>
+    </mxCell>
+
+    <!-- 3. rustdb-server self: AtomicBool -->
+    <mxCell id="m3" value="3. AtomicBool running=true / ctrlc 핸들러 등록" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;fontSize=12;strokeColor=#000000;" edge="1" parent="1">
+      <mxGeometry relative="1" as="geometry"><mxPoint x="354" y="310" as="sourcePoint"/><mxPoint x="415" y="310" as="targetPoint"/><Array as="points"><mxPoint x="415" y="330"/></Array></mxGeometry>
+    </mxCell>
+    <mxCell id="m3r" value="" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=open;endFill=0;dashed=1;fontSize=12;strokeColor=#000000;" edge="1" parent="1">
+      <mxGeometry relative="1" as="geometry"><mxPoint x="415" y="350" as="sourcePoint"/><mxPoint x="354" y="350" as="targetPoint"/></mxGeometry>
+    </mxCell>
+
+    <!-- 4. rustdb-server self: accept() 루프 -->
+    <mxCell id="m4" value="4. accept() 루프 (50ms 폴링)  [클라이언트 접속 대기]" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;fontSize=12;strokeColor=#000000;" edge="1" parent="1">
+      <mxGeometry relative="1" as="geometry"><mxPoint x="354" y="390" as="sourcePoint"/><mxPoint x="415" y="390" as="targetPoint"/><Array as="points"><mxPoint x="415" y="410"/></Array></mxGeometry>
+    </mxCell>
+    <mxCell id="m4r" value="" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=open;endFill=0;dashed=1;fontSize=12;strokeColor=#000000;" edge="1" parent="1">
+      <mxGeometry relative="1" as="geometry"><mxPoint x="415" y="430" as="sourcePoint"/><mxPoint x="354" y="430" as="targetPoint"/></mxGeometry>
+    </mxCell>
+
+    <!-- loop 프레임 -->
+    <mxCell id="loop_accept" value="loop  [running == true]" style="swimlane;startSize=20;fillColor=none;strokeColor=#000000;fontStyle=2;fontSize=12;align=left;spacingLeft=5;" vertex="1" parent="1">
+      <mxGeometry x="329" y="455" width="780" height="430" as="geometry" />
+    </mxCell>
+
+    <!-- 5. Client → rustdb-server -->
+    <mxCell id="m5" value="5. TCP 연결 요청" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;fontSize=12;strokeColor=#000000;" edge="1" parent="1">
+      <mxGeometry relative="1" as="geometry"><mxPoint x="566" y="490" as="sourcePoint"/><mxPoint x="354" y="490" as="targetPoint"/></mxGeometry>
+    </mxCell>
+
+    <!-- 6. rustdb-server → Thread -->
+    <mxCell id="m6" value="6. thread::spawn()" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;fontSize=12;strokeColor=#000000;" edge="1" parent="1">
+      <mxGeometry relative="1" as="geometry"><mxPoint x="354" y="540" as="sourcePoint"/><mxPoint x="778" y="540" as="targetPoint"/></mxGeometry>
+    </mxCell>
+
+    <!-- 7. Thread self: 잠금 -->
+    <mxCell id="m7" value="7. Arc&lt;Mutex&lt;Executor&gt;&gt; 잠금" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;fontSize=12;strokeColor=#000000;" edge="1" parent="1">
+      <mxGeometry relative="1" as="geometry"><mxPoint x="788" y="600" as="sourcePoint"/><mxPoint x="840" y="600" as="targetPoint"/><Array as="points"><mxPoint x="840" y="620"/></Array></mxGeometry>
+    </mxCell>
+    <mxCell id="m7r" value="" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=open;endFill=0;dashed=1;fontSize=12;strokeColor=#000000;" edge="1" parent="1">
+      <mxGeometry relative="1" as="geometry"><mxPoint x="840" y="640" as="sourcePoint"/><mxPoint x="788" y="640" as="targetPoint"/></mxGeometry>
+    </mxCell>
+
+    <!-- 8. Thread → Executor -->
+    <mxCell id="m8" value="8. execute(sql)" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;fontSize=12;strokeColor=#000000;" edge="1" parent="1">
+      <mxGeometry relative="1" as="geometry"><mxPoint x="788" y="680" as="sourcePoint"/><mxPoint x="995" y="680" as="targetPoint"/></mxGeometry>
+    </mxCell>
+
+    <!-- 9. Executor → Thread -->
+    <mxCell id="m9" value="9. Result&lt;String&gt;" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=open;endFill=0;dashed=1;fontSize=12;strokeColor=#000000;" edge="1" parent="1">
+      <mxGeometry relative="1" as="geometry"><mxPoint x="995" y="750" as="sourcePoint"/><mxPoint x="788" y="750" as="targetPoint"/></mxGeometry>
+    </mxCell>
+
+    <!-- 10. Thread → Client -->
+    <mxCell id="m10" value="10. 결과 + &quot;---END---\n&quot; 전송" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=open;endFill=0;dashed=1;fontSize=12;strokeColor=#000000;" edge="1" parent="1">
+      <mxGeometry relative="1" as="geometry"><mxPoint x="778" y="820" as="sourcePoint"/><mxPoint x="566" y="820" as="targetPoint"/></mxGeometry>
+    </mxCell>
+
+  </root>
+</mxGraphModel>
