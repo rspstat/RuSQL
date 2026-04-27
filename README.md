@@ -4,6 +4,12 @@
 
 <br/>
 
+## 사진
+
+<img src="docs/picture/main2.png">
+
+<br/>
+
 ## 핵심 기능
 
 | 분류 | 내용 |
