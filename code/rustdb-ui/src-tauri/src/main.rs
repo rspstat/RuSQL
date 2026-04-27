@@ -206,15 +206,92 @@ fn parse_output(output: &str, elapsed: f64) -> QueryResult {
 }
 
 #[tauri::command]
+fn get_databases(state: State<AppState>) -> Vec<String> {
+    let exec = state.db.lock().unwrap();
+    let mut dbs: Vec<String> = exec.databases.iter().cloned().collect();
+    dbs.sort();
+    dbs
+}
+
+#[tauri::command]
+fn get_current_db(state: State<AppState>) -> String {
+    state.db.lock().unwrap().current_db.clone()
+}
+
+#[tauri::command]
+fn get_tables_for_db(db: String, state: State<AppState>) -> Vec<String> {
+    let exec = state.db.lock().unwrap();
+    let prefix = format!("{}.", db.to_lowercase());
+    let mut tables: Vec<String> = exec.catalog.tables.keys()
+        .filter(|k| k.starts_with(&prefix))
+        .map(|k| k[prefix.len()..].to_string())
+        .collect();
+    tables.sort();
+    tables
+}
+
+#[tauri::command]
+fn get_views_for_db(db: String, state: State<AppState>) -> Vec<String> {
+    let exec = state.db.lock().unwrap();
+    let prefix = format!("{}.", db.to_lowercase());
+    let mut views: Vec<String> = exec.views.keys()
+        .filter(|k| k.starts_with(&prefix))
+        .map(|k| k[prefix.len()..].to_string())
+        .collect();
+    views.sort();
+    views
+}
+
+#[tauri::command]
+fn get_indexes_for_db(db: String, state: State<AppState>) -> Vec<IndexInfo> {
+    let exec = state.db.lock().unwrap();
+    let prefix = format!("{}.", db.to_lowercase());
+    let mut result = Vec::new();
+    for (name, (table, column)) in &exec.index_meta {
+        if table.starts_with(&prefix) {
+            result.push(IndexInfo {
+                name: name.clone(),
+                table: table[prefix.len()..].to_string(),
+                columns: vec![column.clone()],
+                kind: "single".to_string(),
+            });
+        }
+    }
+    for (name, ci) in &exec.composite_indexes {
+        if ci.table.starts_with(&prefix) {
+            result.push(IndexInfo {
+                name: name.clone(),
+                table: ci.table[prefix.len()..].to_string(),
+                columns: ci.columns.clone(),
+                kind: "composite".to_string(),
+            });
+        }
+    }
+    result.sort_by(|a, b| a.name.cmp(&b.name));
+    result
+}
+
+#[tauri::command]
 fn get_tables(state: State<AppState>) -> Vec<String> {
     let exec = state.db.lock().unwrap();
-    exec.catalog.tables.keys().cloned().collect()
+    let prefix = format!("{}.", exec.current_db);
+    let mut tables: Vec<String> = exec.catalog.tables.keys()
+        .filter(|k| k.starts_with(&prefix))
+        .map(|k| k[prefix.len()..].to_string())
+        .collect();
+    tables.sort();
+    tables
 }
 
 #[tauri::command]
 fn get_columns(table: String, state: State<AppState>) -> Vec<String> {
     let exec = state.db.lock().unwrap();
-    exec.catalog.get_table(&table)
+    let qualified = if table.contains('.') {
+        table.clone()
+    } else {
+        format!("{}.{}", exec.current_db, table)
+    };
+    exec.catalog.get_table(&qualified)
         .map(|s| s.columns.iter().map(|c| c.name.clone()).collect())
         .unwrap_or_default()
 }
@@ -230,31 +307,42 @@ struct IndexInfo {
 #[tauri::command]
 fn get_views(state: State<AppState>) -> Vec<String> {
     let exec = state.db.lock().unwrap();
-    exec.views.keys().cloned().collect()
+    let prefix = format!("{}.", exec.current_db);
+    let mut views: Vec<String> = exec.views.keys()
+        .filter(|k| k.starts_with(&prefix))
+        .map(|k| k[prefix.len()..].to_string())
+        .collect();
+    views.sort();
+    views
 }
 
 #[tauri::command]
 fn get_indexes(state: State<AppState>) -> Vec<IndexInfo> {
     let exec = state.db.lock().unwrap();
+    let prefix = format!("{}.", exec.current_db);
     let mut result = Vec::new();
 
     // 단일 컬럼 인덱스
     for (name, (table, column)) in &exec.index_meta {
-        result.push(IndexInfo {
-            name:    name.clone(),
-            table:   table.clone(),
-            columns: vec![column.clone()],
-            kind:    "single".to_string(),
-        });
+        if table.starts_with(&prefix) {
+            result.push(IndexInfo {
+                name:    name.clone(),
+                table:   table[prefix.len()..].to_string(),
+                columns: vec![column.clone()],
+                kind:    "single".to_string(),
+            });
+        }
     }
     // 복합 인덱스
     for (name, ci) in &exec.composite_indexes {
-        result.push(IndexInfo {
-            name:    name.clone(),
-            table:   ci.table.clone(),
-            columns: ci.columns.clone(),
-            kind:    "composite".to_string(),
-        });
+        if ci.table.starts_with(&prefix) {
+            result.push(IndexInfo {
+                name:    name.clone(),
+                table:   ci.table[prefix.len()..].to_string(),
+                columns: ci.columns.clone(),
+                kind:    "composite".to_string(),
+            });
+        }
     }
     result.sort_by(|a, b| a.name.cmp(&b.name));
     result
@@ -353,10 +441,15 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             execute_query,
+            get_databases,
+            get_current_db,
             get_tables,
             get_columns,
             get_views,
             get_indexes,
+            get_tables_for_db,
+            get_views_for_db,
+            get_indexes_for_db,
             start_server,
             stop_server,
             get_server_status,

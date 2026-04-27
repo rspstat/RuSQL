@@ -179,7 +179,7 @@ impl<'a> Planner<'a> {
 
     fn plan_join(&self, base: &TablePlan, join: &Join) -> JoinPlan {
         let right_size = self.table_size(&join.table);
-        let algo = self.choose_join_algo(base.est_rows, right_size, &join.on_expr);
+        let algo = self.choose_join_algo(base.est_rows, right_size, &join.on_expr, &base.table, &join.table);
         let est_cost = match &algo {
             JoinAlgo::NestedLoop => (base.est_rows * right_size.max(1)) as f64,
             JoinAlgo::Hash { .. } => (base.est_rows + right_size) as f64 * 1.5,
@@ -193,9 +193,21 @@ impl<'a> Planner<'a> {
         }
     }
 
-    fn choose_join_algo(&self, left_size: usize, right_size: usize, on_expr: &CondExpr) -> JoinAlgo {
+    fn choose_join_algo(&self, left_size: usize, right_size: usize, on_expr: &CondExpr, _left_table: &str, right_table: &str) -> JoinAlgo {
         if left_size > 4 || right_size > 4 {
-            if let Some((probe_col, build_col)) = extract_equi_join_cols(on_expr) {
+            if let Some((col_a, col_b)) = extract_equi_join_cols(on_expr) {
+                // Determine which column belongs to which table.
+                // ON conditions may be written as either left.col = right.col or right.col = left.col.
+                // col_a comes from the LHS of the ON condition, col_b from the RHS.
+                // probe_col must exist in the left (probe) table; build_col must exist in the right (build) table.
+                let right_has_col_a = self.catalog.get_table(right_table)
+                    .map(|s| s.columns.iter().any(|c| c.name == col_a))
+                    .unwrap_or(false);
+                let (probe_col, build_col) = if right_has_col_a {
+                    (col_b, col_a) // condition written as right_col = left_col → swap
+                } else {
+                    (col_a, col_b) // condition written as left_col = right_col → normal
+                };
                 return JoinAlgo::Hash { probe_col, build_col };
             }
         }

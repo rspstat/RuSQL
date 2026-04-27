@@ -29,13 +29,33 @@ interface IndexInfo {
   columns: string[];
   kind: "single" | "composite";
 }
-type ActiveView = "editor" | "gui" | "server";
+type ActiveView = "editor" | "gui" | "server" | "ai";
+
+// ─── 탭 타입 ──────────────────────────────────────────────────
+interface Tab { id: string; name: string; content: string; }
+
+function loadTabs(): Tab[] {
+  try {
+    const saved = localStorage.getItem("rustdb_tabs");
+    if (saved) return JSON.parse(saved);
+  } catch {}
+  return [{ id: "1", name: "query.sql", content: localStorage.getItem("rustdb_query") ?? "SHOW TABLES;" }];
+}
+function loadActiveTabId(): string {
+  return localStorage.getItem("rustdb_active_tab") ?? "1";
+}
 
 // ─── 메인 컴포넌트 ────────────────────────────────────────────
 function App() {
-  // 에디터 상태
-  const [query, setQuery] = useState(() => localStorage.getItem("rustdb_query") ?? "SHOW TABLES;");
+  // 탭 상태
+  const [tabs, setTabs] = useState<Tab[]>(loadTabs);
+  const [activeTabId, setActiveTabId] = useState<string>(loadActiveTabId);
+  const activeTab = tabs.find(t => t.id === activeTabId) ?? tabs[0];
+  const queryRef = useRef<string>(activeTab?.content ?? "");
+  // setValue() 호출 중 onChange가 잘못된 탭에 내용을 저장하지 못하도록 막는 플래그
+  const isSwitchingTab = useRef(false);
   const [results, setResults] = useState<QueryResult[]>([]);
+  const [databases, setDatabases] = useState<string[]>(["rustdb"]);
   const [tables, setTables] = useState<string[]>([]);
   const [views, setViews] = useState<string[]>([]);
   const [indexes, setIndexes] = useState<IndexInfo[]>([]);
@@ -44,9 +64,14 @@ function App() {
   const [expandedViews, setExpandedViews] = useState<Set<string>>(new Set());
   const [viewColumns, setViewColumns] = useState<Record<string, string[]>>({});
   const [expandedIndexes, setExpandedIndexes] = useState<Set<string>>(new Set());
-  const [tablesOpen, setTablesOpen] = useState(true);
-  const [viewsOpen, setViewsOpen] = useState(true);
-  const [indexesOpen, setIndexesOpen] = useState(true);
+  const [currentDb, setCurrentDb] = useState<string>("rustdb");
+  const [expandedDbs, setExpandedDbs] = useState<Set<string>>(new Set(["rustdb"]));
+  // DB별 Tables/Views/Indexes 데이터
+  interface DbData { tables: string[]; views: string[]; indexes: IndexInfo[]; }
+  const [dbData, setDbData] = useState<Record<string, DbData>>({});
+  const [tablesOpen, setTablesOpen] = useState<Record<string, boolean>>({});
+  const [viewsOpen, setViewsOpen] = useState<Record<string, boolean>>({});
+  const [indexesOpen, setIndexesOpen] = useState<Record<string, boolean>>({});
   const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number } | null>(null);
   const [tableCtxMenu, setTableCtxMenu] = useState<{ x: number; y: number; table: string } | null>(null);
   const [isRunning, setIsRunning] = useState(false);
@@ -73,8 +98,35 @@ function App() {
   const [serverMsg, setServerMsg] = useState("");
   const logEndRef = useRef<HTMLDivElement>(null);
 
+  // ─── DB 하나의 데이터 로드 ────────────────────────────────────
+  const loadDbData = async (db: string) => {
+    const [tbls, vws, idxs] = await Promise.all([
+      invoke<string[]>("get_tables_for_db", { db }),
+      invoke<string[]>("get_views_for_db", { db }),
+      invoke<IndexInfo[]>("get_indexes_for_db", { db }),
+    ]);
+    setDbData(prev => ({ ...prev, [db]: { tables: tbls, views: vws, indexes: idxs } }));
+  };
+
   // ─── 사이드바 데이터 갱신 ────────────────────────────────────
   const refreshSidebar = async () => {
+    const [dbs, cdb] = await Promise.all([
+      invoke<string[]>("get_databases"),
+      invoke<string>("get_current_db"),
+    ]);
+    setDatabases(dbs);
+    setCurrentDb(cdb);
+    setExpandedDbs(prev => {
+      const next = new Set(prev);
+      next.add(cdb);
+      // 삭제된 DB는 제거
+      for (const d of next) { if (!dbs.includes(d)) next.delete(d); }
+      return next;
+    });
+    // 현재 펼쳐진 모든 DB 데이터 갱신
+    const expanded = new Set([cdb, ...Array.from(expandedDbs)]);
+    await Promise.all(Array.from(expanded).filter(d => dbs.includes(d)).map(loadDbData));
+    // 현재 DB 기준 tables/views/indexes 도 갱신 (GUI 브라우저 등에 사용)
     const [tbls, vws, idxs] = await Promise.all([
       invoke<string[]>("get_tables"),
       invoke<string[]>("get_views"),
@@ -145,7 +197,7 @@ function App() {
     const sel = editorRef.current?.getSelection()
       ? editorRef.current?.getModel()?.getValueInRange(editorRef.current.getSelection()!)
       : null;
-    const q = (sel?.trim() ? sel : query).trim();
+    const q = (sel?.trim() ? sel : (editorRef.current?.getValue() ?? queryRef.current)).trim();
     if (!q) return;
     setResults([]);
     setIsRunning(true);
@@ -160,6 +212,73 @@ function App() {
     }
   };
 
+  // 에디터 내용 프로그래밍 방식으로 변경 (ref + Monaco model 동시 업데이트)
+  const setEditorQuery = (q: string) => {
+    queryRef.current = q;
+    saveTabs(tabs.map(t => t.id === activeTabId ? { ...t, content: q } : t));
+    editorRef.current?.setValue(q);
+  };
+
+  // 탭 저장 헬퍼
+  const saveTabs = (next: Tab[]) => {
+    setTabs(next);
+    localStorage.setItem("rustdb_tabs", JSON.stringify(next));
+  };
+
+  // 현재 에디터 내용을 탭에 저장한 후 탭 전환
+  const switchTab = (id: string) => {
+    if (id === activeTabId) return;
+    const currentContent = editorRef.current?.getValue() ?? queryRef.current;
+    const updated = tabs.map(t => t.id === activeTabId ? { ...t, content: currentContent } : t);
+    saveTabs(updated);
+    setActiveTabId(id);
+    localStorage.setItem("rustdb_active_tab", id);
+    const target = updated.find(t => t.id === id);
+    if (target) {
+      queryRef.current = target.content;
+      isSwitchingTab.current = true;
+      editorRef.current?.setValue(target.content);
+      isSwitchingTab.current = false;
+    }
+  };
+
+  // 새 탭 추가
+  const addTab = () => {
+    const currentContent = editorRef.current?.getValue() ?? queryRef.current;
+    const updated = tabs.map(t => t.id === activeTabId ? { ...t, content: currentContent } : t);
+    const newId = Date.now().toString();
+    // 기존 탭 이름에서 최대 번호를 구해 중복 방지
+    const maxNum = tabs.reduce((max, t) => {
+      const m = t.name.match(/^query(\d+)\.sql$/);
+      return m ? Math.max(max, parseInt(m[1], 10)) : max;
+    }, 0);
+    const newTab: Tab = { id: newId, name: `query${maxNum + 1}.sql`, content: "" };
+    const next = [...updated, newTab];
+    saveTabs(next);
+    setActiveTabId(newId);
+    localStorage.setItem("rustdb_active_tab", newId);
+    queryRef.current = "";
+    isSwitchingTab.current = true;
+    editorRef.current?.setValue("");
+    isSwitchingTab.current = false;
+  };
+
+  // 탭 닫기
+  const closeTab = (id: string, e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (tabs.length === 1) return; // 마지막 탭은 닫지 않음
+    const idx = tabs.findIndex(t => t.id === id);
+    const next = tabs.filter(t => t.id !== id);
+    saveTabs(next);
+    if (activeTabId === id) {
+      const newActive = next[Math.min(idx, next.length - 1)];
+      setActiveTabId(newActive.id);
+      localStorage.setItem("rustdb_active_tab", newActive.id);
+      queryRef.current = newActive.content;
+      editorRef.current?.setValue(newActive.content);
+    }
+  };
+
   const toggleTable = async (t: string) => {
     if (expandedTables.has(t)) {
       setExpandedTables(prev => { const s = new Set(prev); s.delete(t); return s; });
@@ -170,7 +289,7 @@ function App() {
       const cols = await invoke<string[]>("get_columns", { table: t });
       setTableColumns(p => ({ ...p, [t]: cols }));
     }
-    setQuery(`SELECT * FROM ${t};`);
+    setEditorQuery(`SELECT * FROM ${t};`);
   };
 
   const toggleView = async (v: string) => {
@@ -183,7 +302,7 @@ function App() {
       const cols = await invoke<string[]>("get_columns", { table: v });
       setViewColumns(p => ({ ...p, [v]: cols }));
     }
-    setQuery(`SELECT * FROM ${v};`);
+    setEditorQuery(`SELECT * FROM ${v};`);
   };
 
   const toggleIndex = (name: string) => {
@@ -197,7 +316,7 @@ function App() {
   // ─── 테이블 우클릭 메뉴 핸들러 ────────────────────────────────
   const runCtxQuery = async (q: string, dropTable?: string) => {
     setTableCtxMenu(null);
-    setQuery(q);
+    setEditorQuery(q);
     setResults([]);
     setIsRunning(true);
     setActiveView("editor");
@@ -307,6 +426,19 @@ function App() {
           )}
         </div>
 
+        {/* AI Assistant */}
+        <div
+          className={`activity-icon ${activeView === "ai" ? "active" : ""}`}
+          title="AI Assistant"
+          onClick={() => setActiveView("ai")}
+        >
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor">
+            <path d="M12 2l1.5 4.5L18 8l-4.5 1.5L12 14l-1.5-4.5L6 8l4.5-1.5L12 2z"/>
+            <path d="M19 14l.75 2.25L22 17l-2.25.75L19 20l-.75-2.25L16 17l2.25-.75L19 14z"/>
+            <path d="M5 17l.5 1.5L7 19l-1.5.5L5 21l-.5-1.5L3 19l1.5-.5L5 17z"/>
+          </svg>
+        </div>
+
         <div className="activity-bar-bottom">
           <div className="activity-icon" title="Settings">
             <svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor">
@@ -320,117 +452,172 @@ function App() {
       {activeView === "editor" && (
         <>
           <div className="sidebar" style={{ width: `${sidebarWidth}px` }}>
-            <div className="sidebar-title">EXPLORER</div>
+            <div className="sidebar-title">SCHEMAS</div>
 
-            {/* ── TABLES ── */}
-            <div className="sidebar-group">
-              <div className="sidebar-group-header" onClick={() => setTablesOpen(o => !o)}>
-                <span className="sidebar-group-arrow">{tablesOpen ? "▼" : "▶"}</span>
-                TABLES
-                <span className="sidebar-badge">{tables.length}</span>
-              </div>
-              {tablesOpen && (tables.length === 0 ? (
-                <div className="sidebar-empty">No tables yet</div>
-              ) : tables.map(t => (
-                <div key={t}>
-                  <div
-                    className={`sidebar-item ${expandedTables.has(t) ? "active" : ""}`}
-                    onClick={() => toggleTable(t)}
-                    onContextMenu={e => {
-                      e.preventDefault();
-                      e.stopPropagation();
-                      setTableCtxMenu({ x: e.clientX, y: e.clientY, table: t });
-                    }}
-                  >
-                    <span className="sidebar-arrow">{expandedTables.has(t) ? "▼" : "▶"}</span>
-                    <span className="sidebar-table-icon">⊞</span>
-                    <span className="sidebar-name">{t}</span>
-                  </div>
-                  {expandedTables.has(t) && tableColumns[t] && (
-                    <div className="sidebar-columns">
-                      {tableColumns[t].map(col => (
-                        <div key={col} className="sidebar-column">
-                          <span className="col-icon">≡</span>
-                          <span>{col}</span>
-                        </div>
-                      ))}
+            {/* ── DATABASE NODES (MySQL Workbench style) ── */}
+            <div className="sidebar-db-node">
+              {databases.length === 0 ? (
+                <div className="sidebar-empty" style={{ padding: "8px 12px" }}>No databases</div>
+              ) : databases.map(dbName => {
+                const isActive = dbName === currentDb;
+                const isOpen = expandedDbs.has(dbName);
+                const data = dbData[dbName] ?? { tables: [], views: [], indexes: [] };
+                const tOpen = tablesOpen[dbName] ?? true;
+                const vOpen = viewsOpen[dbName] ?? true;
+                const iOpen = indexesOpen[dbName] ?? true;
+
+                const toggleDb = async () => {
+                  const willOpen = !isOpen;
+                  setExpandedDbs(prev => {
+                    const s = new Set(prev);
+                    willOpen ? s.add(dbName) : s.delete(dbName);
+                    return s;
+                  });
+                  if (willOpen) await loadDbData(dbName);
+                };
+
+                const switchDb = async (e: React.MouseEvent) => {
+                  e.stopPropagation();
+                  if (isActive) return;
+                  await invoke<MultiQueryResult>("execute_query", { query: `USE ${dbName};`, ts: Date.now() });
+                  await refreshSidebar();
+                };
+
+                return (
+                  <div key={dbName}>
+                    <div
+                      className={`sidebar-db-header${isActive ? " sidebar-db-active" : ""}`}
+                      onClick={toggleDb}
+                      onDoubleClick={switchDb}
+                      title={isActive ? "현재 데이터베이스" : "더블클릭으로 전환"}
+                    >
+                      <span className="sidebar-group-arrow">{isOpen ? "▼" : "▶"}</span>
+                      <span className="sidebar-db-icon">🗄</span>
+                      <span className="sidebar-db-name">{dbName}{isActive ? " ◀" : ""}</span>
                     </div>
-                  )}
-                </div>
-              )))}
-            </div>
 
-            {/* ── VIEWS ── */}
-            <div className="sidebar-group">
-              <div className="sidebar-group-header" onClick={() => setViewsOpen(o => !o)}>
-                <span className="sidebar-group-arrow">{viewsOpen ? "▼" : "▶"}</span>
-                VIEWS
-                <span className="sidebar-badge">{views.length}</span>
-              </div>
-              {viewsOpen && (views.length === 0 ? (
-                <div className="sidebar-empty">No views yet</div>
-              ) : views.map(v => (
-                <div key={v}>
-                  <div
-                    className={`sidebar-item ${expandedViews.has(v) ? "active" : ""}`}
-                    onClick={() => toggleView(v)}
-                  >
-                    <span className="sidebar-arrow">{expandedViews.has(v) ? "▼" : "▶"}</span>
-                    <span className="sidebar-view-icon">◈</span>
-                    <span className="sidebar-name">{v}</span>
-                  </div>
-                  {expandedViews.has(v) && (
-                    <div className="sidebar-columns">
-                      {viewColumns[v] && viewColumns[v].length > 0
-                        ? viewColumns[v].map(col => (
-                            <div key={col} className="sidebar-column">
-                              <span className="col-icon">◉</span>
-                              <span>{col}</span>
+                    {isOpen && (
+                      <div className="sidebar-db-children">
+
+                        {/* ── TABLES ── */}
+                        <div className="sidebar-group sidebar-group-nested">
+                          <div className="sidebar-group-header sidebar-section-header" onClick={() => setTablesOpen(p => ({ ...p, [dbName]: !tOpen }))}>
+                            <span className="sidebar-group-arrow">{tOpen ? "▼" : "▶"}</span>
+                            <span className="sidebar-section-icon">⊞</span>
+                            Tables
+                            <span className="sidebar-badge">{data.tables.length}</span>
+                          </div>
+                          {tOpen && (data.tables.length === 0 ? (
+                            <div className="sidebar-empty sidebar-empty-nested">No tables yet</div>
+                          ) : data.tables.map(t => (
+                            <div key={t}>
+                              <div
+                                className={`sidebar-item sidebar-item-nested ${expandedTables.has(t) ? "active" : ""}`}
+                                onClick={() => toggleTable(t)}
+                                onContextMenu={e => {
+                                  e.preventDefault();
+                                  e.stopPropagation();
+                                  setTableCtxMenu({ x: e.clientX, y: e.clientY, table: t });
+                                }}
+                              >
+                                <span className="sidebar-arrow">{expandedTables.has(t) ? "▼" : "▶"}</span>
+                                <span className="sidebar-table-icon">⊞</span>
+                                <span className="sidebar-name">{t}</span>
+                              </div>
+                              {expandedTables.has(t) && tableColumns[t] && (
+                                <div className="sidebar-columns sidebar-columns-nested">
+                                  {tableColumns[t].map(col => (
+                                    <div key={col} className="sidebar-column sidebar-column-nested">
+                                      <span className="col-icon">≡</span>
+                                      <span>{col}</span>
+                                    </div>
+                                  ))}
+                                </div>
+                              )}
                             </div>
-                          ))
-                        : <div className="sidebar-column" style={{ color: "var(--text-muted)" }}>no column info</div>
-                      }
-                    </div>
-                  )}
-                </div>
-              )))}
-            </div>
-
-            {/* ── INDEXES ── */}
-            <div className="sidebar-group">
-              <div className="sidebar-group-header" onClick={() => setIndexesOpen(o => !o)}>
-                <span className="sidebar-group-arrow">{indexesOpen ? "▼" : "▶"}</span>
-                INDEXES
-                <span className="sidebar-badge">{indexes.length}</span>
-              </div>
-              {indexesOpen && (indexes.length === 0 ? (
-                <div className="sidebar-empty">No indexes yet</div>
-              ) : indexes.map(idx => (
-                <div key={idx.name}>
-                  <div
-                    className={`sidebar-item sidebar-index-item ${expandedIndexes.has(idx.name) ? "active" : ""}`}
-                    onClick={() => toggleIndex(idx.name)}
-                  >
-                    <span className="sidebar-arrow">{expandedIndexes.has(idx.name) ? "▼" : "▶"}</span>
-                    <span className="sidebar-index-icon">{idx.kind === "composite" ? "⋈" : "⌗"}</span>
-                    <span className="sidebar-name">{idx.name}</span>
-                    <span className="sidebar-index-table">{idx.table}</span>
-                  </div>
-                  {expandedIndexes.has(idx.name) && (
-                    <div className="sidebar-columns">
-                      <div className="sidebar-column" style={{ color: "var(--text-muted)", fontSize: "0.75rem" }}>
-                        {idx.kind === "composite" ? "composite" : "single"}
-                      </div>
-                      {idx.columns.map(col => (
-                        <div key={col} className="sidebar-column">
-                          <span className="col-icon">◉</span>
-                          <span>{col}</span>
+                          )))}
                         </div>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              )))}
+
+                        {/* ── VIEWS ── */}
+                        <div className="sidebar-group sidebar-group-nested">
+                          <div className="sidebar-group-header sidebar-section-header" onClick={() => setViewsOpen(p => ({ ...p, [dbName]: !vOpen }))}>
+                            <span className="sidebar-group-arrow">{vOpen ? "▼" : "▶"}</span>
+                            <span className="sidebar-section-icon">◈</span>
+                            Views
+                            <span className="sidebar-badge">{data.views.length}</span>
+                          </div>
+                          {vOpen && (data.views.length === 0 ? (
+                            <div className="sidebar-empty sidebar-empty-nested">No views yet</div>
+                          ) : data.views.map(v => (
+                            <div key={v}>
+                              <div
+                                className={`sidebar-item sidebar-item-nested ${expandedViews.has(v) ? "active" : ""}`}
+                                onClick={() => toggleView(v)}
+                              >
+                                <span className="sidebar-arrow">{expandedViews.has(v) ? "▼" : "▶"}</span>
+                                <span className="sidebar-view-icon">◈</span>
+                                <span className="sidebar-name">{v}</span>
+                              </div>
+                              {expandedViews.has(v) && (
+                                <div className="sidebar-columns sidebar-columns-nested">
+                                  {viewColumns[v] && viewColumns[v].length > 0
+                                    ? viewColumns[v].map(col => (
+                                        <div key={col} className="sidebar-column sidebar-column-nested">
+                                          <span className="col-icon">◉</span>
+                                          <span>{col}</span>
+                                        </div>
+                                      ))
+                                    : <div className="sidebar-column sidebar-column-nested" style={{ color: "var(--text-muted)" }}>no column info</div>
+                                  }
+                                </div>
+                              )}
+                            </div>
+                          )))}
+                        </div>
+
+                        {/* ── INDEXES ── */}
+                        <div className="sidebar-group sidebar-group-nested">
+                          <div className="sidebar-group-header sidebar-section-header" onClick={() => setIndexesOpen(p => ({ ...p, [dbName]: !iOpen }))}>
+                            <span className="sidebar-group-arrow">{iOpen ? "▼" : "▶"}</span>
+                            <span className="sidebar-section-icon">⌗</span>
+                            Indexes
+                            <span className="sidebar-badge">{data.indexes.length}</span>
+                          </div>
+                          {iOpen && (data.indexes.length === 0 ? (
+                            <div className="sidebar-empty sidebar-empty-nested">No indexes yet</div>
+                          ) : data.indexes.map(idx => (
+                            <div key={idx.name}>
+                              <div
+                                className={`sidebar-item sidebar-item-nested sidebar-index-item ${expandedIndexes.has(idx.name) ? "active" : ""}`}
+                                onClick={() => toggleIndex(idx.name)}
+                              >
+                                <span className="sidebar-arrow">{expandedIndexes.has(idx.name) ? "▼" : "▶"}</span>
+                                <span className="sidebar-index-icon">{idx.kind === "composite" ? "⋈" : "⌗"}</span>
+                                <span className="sidebar-name">{idx.name}</span>
+                                <span className="sidebar-index-table">{idx.table}</span>
+                              </div>
+                              {expandedIndexes.has(idx.name) && (
+                                <div className="sidebar-columns sidebar-columns-nested">
+                                  <div className="sidebar-column sidebar-column-nested" style={{ color: "var(--text-muted)", fontSize: "0.75rem" }}>
+                                    {idx.kind === "composite" ? "composite" : "single"}
+                                  </div>
+                                  {idx.columns.map(col => (
+                                    <div key={col} className="sidebar-column sidebar-column-nested">
+                                      <span className="col-icon">◉</span>
+                                      <span>{col}</span>
+                                    </div>
+                                  ))}
+                                </div>
+                              )}
+                            </div>
+                          )))}
+                        </div>
+
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
             </div>
 
             <div className="sidebar-bottom">
@@ -438,7 +625,7 @@ function App() {
                 <span className="sidebar-group-arrow">▼</span>
                 INFO
               </div>
-              <div className="sidebar-info-item"><span className="col-icon">◉</span> v2.1.3</div>
+              <div className="sidebar-info-item"><span className="col-icon">◉</span> v2.2.0</div>
               <div className="sidebar-info-item"><span className="col-icon">◉</span> B+Tree · WAL · MVCC</div>
               <div className="sidebar-info-item">
                 <span className="col-icon" style={{ color: serverStatus.running ? "#4ec9b0" : "#858585" }}>◉</span>
@@ -485,10 +672,25 @@ function App() {
 
           <div className="main">
             <div className="tab-bar">
-              <div className="tab active">
-                <span className="tab-icon">⊞</span>
-                query.sql
-                <span className="tab-close">×</span>
+              <div className="tab-list">
+                {tabs.map(tab => (
+                  <div
+                    key={tab.id}
+                    className={`tab ${tab.id === activeTabId ? "active" : ""}`}
+                    onClick={() => switchTab(tab.id)}
+                  >
+                    <span className="tab-icon">⊞</span>
+                    {tab.name}
+                    <span
+                      className="tab-close"
+                      onClick={e => closeTab(tab.id, e)}
+                      title="Close tab"
+                    >×</span>
+                  </div>
+                ))}
+                <div className="tab-add-wrap">
+                  <button className="tab-add-btn" onClick={addTab} title="New query tab">+</button>
+                </div>
               </div>
               <div className="tab-bar-right">
                 <button className="run-btn" onClick={runQuery} disabled={isRunning}>
@@ -498,22 +700,26 @@ function App() {
             </div>
 
             <div className="breadcrumb">
-              <span>rustdb</span>
+              <span>{currentDb}</span>
               <span className="breadcrumb-sep">›</span>
               <span>query</span>
               <span className="breadcrumb-sep">›</span>
-              <span className="breadcrumb-active">query.sql</span>
+              <span className="breadcrumb-active">{activeTab?.name ?? "query.sql"}</span>
             </div>
 
             <div className="editor-container">
               <Editor
                 height="100%"
                 defaultLanguage="sql"
-                value={query}
+                defaultValue={queryRef.current}
                 onChange={val => {
-                  const v = val ?? "";
-                  setQuery(v);
-                  localStorage.setItem("rustdb_query", v);
+                  if (isSwitchingTab.current) return;
+                  queryRef.current = val ?? "";
+                  setTabs(prev => {
+                    const next = prev.map(t => t.id === activeTabId ? { ...t, content: queryRef.current } : t);
+                    localStorage.setItem("rustdb_tabs", JSON.stringify(next));
+                    return next;
+                  });
                 }}
                 theme="rustdb-dark"
                 options={{
@@ -685,7 +891,7 @@ function App() {
                 </span>
               </div>
               <div className="status-right">
-                <span className="status-item">RustDB v2.1.3</span>
+                <span className="status-item">RustDB v2.2.0</span>
                 <span className="status-item">UTF-8</span>
                 <span className="status-item">SQL</span>
                 <span className="status-item">B+Tree · WAL · MVCC</span>
@@ -693,6 +899,42 @@ function App() {
             </div>
           </div>
         </>
+      )}
+
+      {/* ── AI Assistant 뷰 ───────────────────────────────────── */}
+      {activeView === "ai" && (
+        <div className="ai-view">
+          <div className="ai-header">
+            <div className="ai-header-left">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor" style={{ opacity: 0.8 }}>
+                <path d="M12 2l1.5 4.5L18 8l-4.5 1.5L12 14l-1.5-4.5L6 8l4.5-1.5L12 2z"/>
+                <path d="M19 14l.75 2.25L22 17l-2.25.75L19 20l-.75-2.25L16 17l2.25-.75L19 14z"/>
+                <path d="M5 17l.5 1.5L7 19l-1.5.5L5 21l-.5-1.5L3 19l1.5-.5L5 17z"/>
+              </svg>
+              <span className="ai-header-title">AI Assistant</span>
+            </div>
+          </div>
+          <div className="ai-body">
+            <div className="ai-empty">
+              <svg width="48" height="48" viewBox="0 0 24 24" fill="currentColor" style={{ opacity: 0.2 }}>
+                <path d="M12 2l1.5 4.5L18 8l-4.5 1.5L12 14l-1.5-4.5L6 8l4.5-1.5L12 2z"/>
+                <path d="M19 14l.75 2.25L22 17l-2.25.75L19 20l-.75-2.25L16 17l2.25-.75L19 14z"/>
+                <path d="M5 17l.5 1.5L7 19l-1.5.5L5 21l-.5-1.5L3 19l1.5-.5L5 17z"/>
+              </svg>
+              <div className="ai-empty-title">AI Assistant</div>
+              <div className="ai-empty-sub">Coming soon</div>
+            </div>
+          </div>
+          <div className="status-bar">
+            <div className="status-left">
+              <span className="status-item">⎇ main</span>
+            </div>
+            <div className="status-right">
+              <span className="status-item">RustDB v2.2.0</span>
+              <span className="status-item">AI Assistant</span>
+            </div>
+          </div>
+        </div>
       )}
 
       {/* ── GUI 테이블 브라우저 뷰 ─────────────────────────────── */}
@@ -783,7 +1025,7 @@ function App() {
               {guiTable && <span className="status-item" style={{ color: "#4ec9b0" }}>⊞ {guiTable}</span>}
             </div>
             <div className="status-right">
-              <span className="status-item">RustDB v2.1.3</span>
+              <span className="status-item">RustDB v2.2.0</span>
               <span className="status-item">Table Browser</span>
             </div>
           </div>
@@ -933,7 +1175,7 @@ function App() {
               </span>
             </div>
             <div className="status-right">
-              <span className="status-item">RustDB v2.1.3</span>
+              <span className="status-item">RustDB v2.2.0</span>
               <span className="status-item">Server Manager</span>
             </div>
           </div>

@@ -31,6 +31,11 @@ pub enum DataType {
     DateTime,
     Timestamp,
     Decimal(u8, u8),
+    Double,
+    Time,
+    Year,
+    Enum(Vec<String>),
+    Set(Vec<String>),
     #[serde(other)]
     Unknown,
 }
@@ -153,6 +158,7 @@ pub enum AlterAction {
     DropColumn(String),
     RenameColumn { from: String, to: String },
     ModifyColumn(ColumnDef),
+    RenameTable { to: String },
 }
 
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
@@ -239,6 +245,7 @@ pub enum Statement {
         table: Option<String>,
     },
     ShowLocks,
+    Use { database: String },
     Savepoint { name: String },
     ReleaseSavepoint { name: String },
     RollbackTo { name: String },
@@ -254,5 +261,25 @@ pub enum Statement {
         order_by: Vec<OrderBy>,
         limit: Option<usize>,
         offset: Option<usize>,
+    },
+    CreateDatabase {
+        name: String,
+        if_not_exists: bool,
+    },
+    DropDatabase {
+        name: String,
+        if_exists: bool,
+    },
+    MultiUpdate {
+        tables: Vec<String>,
+        joins: Vec<Join>,
+        assignments: Vec<(String, ArithExpr)>,
+        condition: Option<CondExpr>,
+    },
+    MultiDelete {
+        delete_tables: Vec<String>,
+        from_table: String,
+        joins: Vec<Join>,
+        condition: Option<CondExpr>,
     },
 }

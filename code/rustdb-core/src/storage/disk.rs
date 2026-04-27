@@ -27,16 +27,66 @@ impl DiskManager {
         DiskManager { data_dir }
     }
 
+    /// "db.table" → ("db", "table").  No dot → ("rustdb", key)
+    fn parse_key<'a>(key: &'a str) -> (&'a str, &'a str) {
+        if let Some(pos) = key.find('.') {
+            (&key[..pos], &key[pos+1..])
+        } else {
+            ("rustdb", key)
+        }
+    }
+
+    fn table_dir(&self, db: &str) -> String {
+        format!("{}/{}", self.data_dir, db)
+    }
+
+    fn ensure_db_dir(&self, db: &str) {
+        fs::create_dir_all(self.table_dir(db)).ok();
+    }
+
+    /// 데이터베이스 디렉토리 생성
+    pub fn create_db_dir(&self, db: &str) {
+        fs::create_dir_all(self.table_dir(db)).ok();
+    }
+
+    /// 데이터베이스 디렉토리 삭제 (DB 전체 삭제)
+    pub fn drop_db_dir(&self, db: &str) {
+        let _ = fs::remove_dir_all(self.table_dir(db));
+    }
+
+    /// data/ 하위 서브디렉토리 목록 = 데이터베이스 목록
+    pub fn list_databases(&self) -> Vec<String> {
+        let mut dbs = Vec::new();
+        if let Ok(entries) = fs::read_dir(&self.data_dir) {
+            for entry in entries.flatten() {
+                if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                    dbs.push(entry.file_name().to_string_lossy().to_string());
+                }
+            }
+        }
+        dbs
+    }
+
     /// 전체 TableSchema를 JSON으로 저장 (PK, auto_increment, 타입 등 포함)
+    /// table 인자는 "db.table" 또는 "table" (rustdb 기본)
     pub fn save_schema(&self, table: &str, schema: &TableSchema) {
-        let path = format!("{}/{}.schema.json", self.data_dir, table);
+        let (db, tbl) = Self::parse_key(table);
+        self.ensure_db_dir(db);
+        let path = format!("{}/{}.schema.json", self.table_dir(db), tbl);
         let json = serde_json::to_string_pretty(schema).unwrap();
         fs::write(path, json).unwrap();
     }
 
-    /// 저장된 TableSchema 로드. 구버전(컬럼명만 있는) 파일도 호환
+    /// 저장된 TableSchema 로드
     pub fn load_schema(&self, table: &str) -> Option<TableSchema> {
-        let path = format!("{}/{}.schema.json", self.data_dir, table);
+        let (db, tbl) = Self::parse_key(table);
+        // 신규 경로: data/db/table.schema.json
+        let path = format!("{}/{}.schema.json", self.table_dir(db), tbl);
+        // 구버전 flat 경로: data/table.schema.json (rustdb 테이블만)
+        let flat_path = format!("{}/{}.schema.json", self.data_dir, tbl);
+        let path = if Path::new(&path).exists() { path }
+                   else if db == "rustdb" && Path::new(&flat_path).exists() { flat_path }
+                   else { return None; };
         let json = fs::read_to_string(&path).ok()?;
 
         // 신버전: TableSchema JSON
@@ -74,14 +124,18 @@ impl DiskManager {
 
     /// 구버전 호환: 컬럼명만 저장 (내부용)
     pub fn save_schema_columns(&self, table: &str, columns: &[String]) {
-        let path = format!("{}/{}.schema.json", self.data_dir, table);
+        let (db, tbl) = Self::parse_key(table);
+        self.ensure_db_dir(db);
+        let path = format!("{}/{}.schema.json", self.table_dir(db), tbl);
         let json = serde_json::to_string(columns).unwrap();
         fs::write(path, json).unwrap();
     }
 
     // 데이터는 LZ4-compressed 바이너리 .rdb 포맷
     pub fn save_table(&self, table: &str, rows: &[Row]) {
-        let path = format!("{}/{}.rdb", self.data_dir, table);
+        let (db, tbl) = Self::parse_key(table);
+        self.ensure_db_dir(db);
+        let path = format!("{}/{}.rdb", self.table_dir(db), tbl);
         let mut file = OpenOptions::new()
             .write(true).create(true).truncate(true)
             .open(&path).unwrap();
@@ -110,19 +164,24 @@ impl DiskManager {
     }
 
     pub fn load_table(&self, table: &str) -> Vec<Row> {
-        // .rdb 파일 먼저 시도
-        let rdb_path = format!("{}/{}.rdb", self.data_dir, table);
+        let (db, tbl) = Self::parse_key(table);
+        // 신규 경로: data/db/table.rdb
+        let rdb_path = format!("{}/{}.rdb", self.table_dir(db), tbl);
         if Path::new(&rdb_path).exists() {
             return self.load_rdb(&rdb_path);
         }
-
-        // 구버전 .json 파일 폴백
-        let json_path = format!("{}/{}.json", self.data_dir, table);
-        if Path::new(&json_path).exists() {
-            let json = fs::read_to_string(&json_path).unwrap_or_default();
-            return serde_json::from_str(&json).unwrap_or_default();
+        // 구버전 flat 경로 (rustdb만)
+        if db == "rustdb" {
+            let flat_rdb = format!("{}/{}.rdb", self.data_dir, tbl);
+            if Path::new(&flat_rdb).exists() {
+                return self.load_rdb(&flat_rdb);
+            }
+            let flat_json = format!("{}/{}.json", self.data_dir, tbl);
+            if Path::new(&flat_json).exists() {
+                let json = fs::read_to_string(&flat_json).unwrap_or_default();
+                return serde_json::from_str(&json).unwrap_or_default();
+            }
         }
-
         Vec::new()
     }
 
@@ -171,59 +230,89 @@ impl DiskManager {
     }
 
     pub fn delete_table(&self, table: &str) {
-        let _ = fs::remove_file(format!("{}/{}.rdb", self.data_dir, table));
-        let _ = fs::remove_file(format!("{}/{}.json", self.data_dir, table));
-        let _ = fs::remove_file(format!("{}/{}.schema.json", self.data_dir, table));
+        let (db, tbl) = Self::parse_key(table);
+        let dir = self.table_dir(db);
+        let _ = fs::remove_file(format!("{}/{}.rdb", dir, tbl));
+        let _ = fs::remove_file(format!("{}/{}.json", dir, tbl));
+        let _ = fs::remove_file(format!("{}/{}.schema.json", dir, tbl));
+        // 구버전 flat 파일도 정리
+        if db == "rustdb" {
+            let _ = fs::remove_file(format!("{}/{}.rdb", self.data_dir, tbl));
+            let _ = fs::remove_file(format!("{}/{}.json", self.data_dir, tbl));
+            let _ = fs::remove_file(format!("{}/{}.schema.json", self.data_dir, tbl));
+        }
     }
 
+    /// 모든 DB의 모든 테이블을 "db.table" 형식으로 반환.
+    /// 구버전 flat 파일은 "rustdb.table" 형식으로 반환 (마이그레이션 지원).
     pub fn list_tables(&self) -> Vec<String> {
         let mut tables = Vec::new();
         if let Ok(entries) = fs::read_dir(&self.data_dir) {
             for entry in entries.flatten() {
+                let ftype = entry.file_type().unwrap_or_else(|_| return entry.file_type().unwrap());
                 let name = entry.file_name().to_string_lossy().to_string();
-                if name.ends_with(".schema.json") {
-                    tables.push(name.replace(".schema.json", ""));
+                if ftype.is_dir() {
+                    // data/db/ 서브디렉토리: db 안의 테이블 스캔
+                    let db = &name;
+                    if let Ok(sub) = fs::read_dir(entry.path()) {
+                        for sub_entry in sub.flatten() {
+                            let fname = sub_entry.file_name().to_string_lossy().to_string();
+                            if fname.ends_with(".schema.json") {
+                                let tbl = fname.replace(".schema.json", "");
+                                tables.push(format!("{}.{}", db, tbl));
+                            }
+                        }
+                    }
+                } else if name.ends_with(".schema.json") {
+                    // 구버전 flat 파일 → "rustdb.table"
+                    let tbl = name.replace(".schema.json", "");
+                    let qualified = format!("rustdb.{}", tbl);
+                    if !tables.contains(&qualified) {
+                        tables.push(qualified);
+                    }
                 }
             }
         }
         tables
     }
 
-    // ── 뷰 영속화 ─────────────────────────────────────────────────────────
+    // ── 뷰 영속화 (db별) ──────────────────────────────────────────────────
 
-    /// 모든 뷰 정의를 data/views.json에 저장
-    pub fn save_views(&self, views: &HashMap<String, Statement>) {
-        let path = format!("{}/views.json", self.data_dir);
+    pub fn save_views(&self, db: &str, views: &HashMap<String, Statement>) {
+        self.ensure_db_dir(db);
+        let path = format!("{}/views.json", self.table_dir(db));
         let json = serde_json::to_string_pretty(views).unwrap_or_default();
         let _ = fs::write(path, json);
     }
 
-    /// data/views.json에서 뷰 정의 로드
-    pub fn load_views(&self) -> HashMap<String, Statement> {
-        let path = format!("{}/views.json", self.data_dir);
-        let json = match fs::read_to_string(&path) {
-            Ok(s) => s,
-            Err(_) => return HashMap::new(),
-        };
+    pub fn load_views(&self, db: &str) -> HashMap<String, Statement> {
+        // 신규 경로
+        let path = format!("{}/views.json", self.table_dir(db));
+        // 구버전 flat 경로 (rustdb만)
+        let flat = format!("{}/views.json", self.data_dir);
+        let path = if Path::new(&path).exists() { path }
+                   else if db == "rustdb" && Path::new(&flat).exists() { flat }
+                   else { return HashMap::new(); };
+        let json = fs::read_to_string(&path).unwrap_or_default();
         serde_json::from_str(&json).unwrap_or_default()
     }
 
-    // ── 인덱스 메타데이터 영속화 ──────────────────────────────────────────
+    // ── 인덱스 메타데이터 영속화 (db별) ──────────────────────────────────
 
-    /// 모든 인덱스 메타데이터를 data/indexes.json에 저장
-    pub fn save_index_meta(&self, meta_list: &[IndexMeta]) {
-        let path = format!("{}/indexes.json", self.data_dir);
+    pub fn save_index_meta(&self, db: &str, meta_list: &[IndexMeta]) {
+        self.ensure_db_dir(db);
+        let path = format!("{}/indexes.json", self.table_dir(db));
         let json = serde_json::to_string_pretty(meta_list).unwrap_or_default();
         let _ = fs::write(path, json);
     }
 
-    /// data/indexes.json에서 인덱스 메타데이터 로드
-    pub fn load_index_meta(&self) -> Vec<IndexMeta> {
-        let path = format!("{}/indexes.json", self.data_dir);
-        let json = match fs::read_to_string(&path) {
-            Ok(s) => s,
-            Err(_) => return Vec::new(),
-        };
+    pub fn load_index_meta(&self, db: &str) -> Vec<IndexMeta> {
+        let path = format!("{}/indexes.json", self.table_dir(db));
+        let flat = format!("{}/indexes.json", self.data_dir);
+        let path = if Path::new(&path).exists() { path }
+                   else if db == "rustdb" && Path::new(&flat).exists() { flat }
+                   else { return Vec::new(); };
+        let json = fs::read_to_string(&path).unwrap_or_default();
         serde_json::from_str(&json).unwrap_or_default()
     }
 }

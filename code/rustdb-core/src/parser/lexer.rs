@@ -78,6 +78,16 @@ pub enum Token {
     Datetime,
     Timestamp,
     Decimal,
+    Double,
+    Time,
+    Year,
+    Enum,
+
+    // DATABASE
+    Database,
+
+    // INNER JOIN
+    Inner,
 
     // CHECK 제약
     Check,
@@ -117,6 +127,9 @@ pub enum Token {
     // CTE
     With,
     Recursive,
+
+    // USE DATABASE
+    Use,
 }
 
 pub struct Lexer {
@@ -253,6 +266,13 @@ impl Lexer {
             "DATETIME"     => Token::Datetime,
             "TIMESTAMP"    => Token::Timestamp,
             "DECIMAL"      => Token::Decimal,
+            "DOUBLE"       => Token::Double,
+            "TIME"         => Token::Time,
+            "YEAR"         => Token::Year,
+            "ENUM"         => Token::Enum,
+            "DATABASE"     => Token::Database,
+            "INNER"        => Token::Inner,
+            "SCHEMA"       => Token::Database,
             "CHECK"        => Token::Check,
             "UPPER"        => Token::Upper,
             "LOWER"        => Token::Lower,
@@ -284,6 +304,7 @@ impl Lexer {
             "OFFSET"       => Token::Offset,
             "WITH"         => Token::With,
             "RECURSIVE"    => Token::Recursive,
+            "USE"          => Token::Use,
             _              => Token::Ident(s),
         }
     }

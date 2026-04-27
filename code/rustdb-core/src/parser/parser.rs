@@ -171,6 +171,10 @@ impl Parser {
                         self.advance();
                         self.parse_create_view()
                     }
+                    Some(Token::Database) => {
+                        self.advance();
+                        self.parse_create_database()
+                    }
                     _ => self.parse_create(),
                 }
             }
@@ -183,6 +187,10 @@ impl Parser {
                     Some(Token::View) => {
                         self.advance();
                         self.parse_drop_view()
+                    }
+                    Some(Token::Database) => {
+                        self.advance();
+                        self.parse_drop_database()
                     }
                     _ => self.parse_drop(),
                 }
@@ -221,8 +229,16 @@ impl Parser {
             Some(Token::Set)         => self.parse_set(),
             Some(Token::Vacuum)      => self.parse_vacuum(),
             Some(Token::With)        => self.parse_with(),
+            Some(Token::Use)         => self.parse_use(),
             other => Err(format!("Unknown statement: {:?}", other)),
         }
+    }
+
+    fn parse_use(&mut self) -> Result<Statement, String> {
+        // USE [DATABASE] name
+        if self.peek() == Some(&Token::Database) { self.advance(); }
+        let database = self.expect_ident()?;
+        Ok(Statement::Use { database })
     }
 
     fn parse_with(&mut self) -> Result<Statement, String> {
@@ -1165,8 +1181,74 @@ impl Parser {
     }
 
     fn parse_update(&mut self) -> Result<Statement, String> {
-        // UPDATE table SET col = val WHERE ...
-        let table = self.expect_ident()?;
+        // UPDATE [t1 [alias1]] [, t2 [alias2]] | [JOIN t2 ON ...] SET col = val [WHERE ...]
+        let first_table = self.expect_ident()?;
+        let mut alias_map: HashMap<String, String> = HashMap::new();
+
+        // 선택적 첫 번째 테이블 별칭
+        if matches!(self.peek(), Some(Token::Ident(_))) {
+            let a = self.expect_ident()?;
+            alias_map.insert(a, first_table.clone());
+        }
+
+        let mut tables = vec![first_table.clone()];
+        let mut joins: Vec<Join> = Vec::new();
+
+        // 쉼표로 구분된 멀티 테이블: UPDATE t1, t2 SET ...
+        while self.peek() == Some(&Token::Comma) {
+            self.advance();
+            let t = self.expect_ident()?;
+            if matches!(self.peek(), Some(Token::Ident(_))) {
+                let a = self.expect_ident()?;
+                alias_map.insert(a, t.clone());
+            }
+            tables.push(t);
+        }
+
+        // JOIN 절: UPDATE t1 JOIN t2 ON ...
+        loop {
+            let join_type = match self.peek() {
+                Some(Token::Join)  => { self.advance(); JoinType::Inner }
+                Some(Token::Inner) => {
+                    self.advance();
+                    match self.advance() {
+                        Some(Token::Join) => {}
+                        other => return Err(format!("Expected JOIN after INNER, got {:?}", other)),
+                    }
+                    JoinType::Inner
+                }
+                Some(Token::Left)  => {
+                    self.advance();
+                    if self.peek() == Some(&Token::Ident("OUTER".to_string())) { self.advance(); }
+                    match self.advance() {
+                        Some(Token::Join) => {}
+                        other => return Err(format!("Expected JOIN after LEFT, got {:?}", other)),
+                    }
+                    JoinType::Left
+                }
+                Some(Token::Right) => {
+                    self.advance();
+                    match self.advance() {
+                        Some(Token::Join) => {}
+                        other => return Err(format!("Expected JOIN after RIGHT, got {:?}", other)),
+                    }
+                    JoinType::Right
+                }
+                _ => break,
+            };
+            let join_table = self.expect_ident()?;
+            if matches!(self.peek(), Some(Token::Ident(_))) {
+                let a = self.expect_ident()?;
+                alias_map.insert(a, join_table.clone());
+            }
+            match self.advance() {
+                Some(Token::On) => {}
+                other => return Err(format!("Expected ON, got {:?}", other)),
+            }
+            let on_expr = expand_condexpr(self.parse_condexpr()?, &alias_map);
+            joins.push(Join { table: join_table, on_expr, join_type });
+        }
+
         match self.advance() {
             Some(Token::Set) => {}
             other => return Err(format!("Expected SET, got {:?}", other)),
@@ -1174,7 +1256,9 @@ impl Parser {
 
         let mut assignments = Vec::new();
         loop {
-            let col = self.expect_ident()?;
+            // col 또는 table.col
+            let col = self.expect_col_ref()?;
+            let col = expand_alias_str(&col, &alias_map);
             match self.advance() {
                 Some(Token::Eq) => {}
                 other => return Err(format!("Expected =, got {:?}", other)),
@@ -1186,28 +1270,109 @@ impl Parser {
 
         let condition = if self.peek() == Some(&Token::Where) {
             self.advance();
-            Some(self.parse_condexpr()?)
+            Some(expand_condexpr(self.parse_condexpr()?, &alias_map))
         } else {
             None
         };
 
-        Ok(Statement::Update { table, assignments, condition })
+        if tables.len() > 1 || !joins.is_empty() {
+            Ok(Statement::MultiUpdate { tables, joins, assignments, condition })
+        } else {
+            Ok(Statement::Update { table: first_table, assignments, condition })
+        }
     }
 
     fn parse_delete(&mut self) -> Result<Statement, String> {
-        // DELETE FROM table WHERE ...
-        match self.advance() {
-            Some(Token::From) => {}
-            other => return Err(format!("Expected FROM, got {:?}", other)),
+        // DELETE [t1 [, t2]] FROM table [JOIN ...] WHERE ...
+        // or DELETE FROM table WHERE ...
+
+        // FROM이 아닌 식별자가 오면 → 삭제 대상 테이블 목록
+        let delete_tables: Option<Vec<String>> = if self.peek() != Some(&Token::From) {
+            let mut tbls = vec![self.expect_ident()?];
+            while self.peek() == Some(&Token::Comma) {
+                self.advance();
+                tbls.push(self.expect_ident()?);
+            }
+            match self.advance() {
+                Some(Token::From) => {}
+                other => return Err(format!("Expected FROM, got {:?}", other)),
+            }
+            Some(tbls)
+        } else {
+            self.advance(); // FROM
+            None
+        };
+
+        let from_table = self.expect_ident()?;
+        let mut alias_map: HashMap<String, String> = HashMap::new();
+        if matches!(self.peek(), Some(Token::Ident(_))) {
+            let a = self.expect_ident()?;
+            alias_map.insert(a, from_table.clone());
         }
-        let table = self.expect_ident()?;
+
+        // JOIN 절 파싱
+        let mut joins: Vec<Join> = Vec::new();
+        loop {
+            let join_type = match self.peek() {
+                Some(Token::Join)  => { self.advance(); JoinType::Inner }
+                Some(Token::Inner) => {
+                    self.advance();
+                    match self.advance() {
+                        Some(Token::Join) => {}
+                        other => return Err(format!("Expected JOIN after INNER, got {:?}", other)),
+                    }
+                    JoinType::Inner
+                }
+                Some(Token::Left)  => {
+                    self.advance();
+                    match self.advance() {
+                        Some(Token::Join) => {}
+                        other => return Err(format!("Expected JOIN after LEFT, got {:?}", other)),
+                    }
+                    JoinType::Left
+                }
+                Some(Token::Right) => {
+                    self.advance();
+                    match self.advance() {
+                        Some(Token::Join) => {}
+                        other => return Err(format!("Expected JOIN after RIGHT, got {:?}", other)),
+                    }
+                    JoinType::Right
+                }
+                _ => break,
+            };
+            let join_table = self.expect_ident()?;
+            if matches!(self.peek(), Some(Token::Ident(_))) {
+                let a = self.expect_ident()?;
+                alias_map.insert(a, join_table.clone());
+            }
+            match self.advance() {
+                Some(Token::On) => {}
+                other => return Err(format!("Expected ON, got {:?}", other)),
+            }
+            let on_expr = expand_condexpr(self.parse_condexpr()?, &alias_map);
+            joins.push(Join { table: join_table, on_expr, join_type });
+        }
+
         let condition = if self.peek() == Some(&Token::Where) {
             self.advance();
-            Some(self.parse_condexpr()?)
+            Some(expand_condexpr(self.parse_condexpr()?, &alias_map))
         } else {
             None
         };
-        Ok(Statement::Delete { table, condition })
+
+        if let Some(del_tbls) = delete_tables {
+            Ok(Statement::MultiDelete { delete_tables: del_tbls, from_table, joins, condition })
+        } else if !joins.is_empty() {
+            Ok(Statement::MultiDelete {
+                delete_tables: vec![from_table.clone()],
+                from_table,
+                joins,
+                condition,
+            })
+        } else {
+            Ok(Statement::Delete { table: from_table, condition })
+        }
     }
 
     /// 함수 호출 인수 파싱: (arg1, arg2, ...) → Vec<String>
@@ -1300,13 +1465,65 @@ impl Parser {
         Ok(parts.join(" "))
     }
 
-    /// 데이터 타입 파싱: INT, TEXT, FLOAT, BOOLEAN, VARCHAR(n), DATE, DECIMAL(p,s)
+    /// 데이터 타입 파싱: INT, TEXT, FLOAT, BOOLEAN, VARCHAR(n), DATE, DECIMAL(p,s), DOUBLE, TIME, YEAR, ENUM, SET
     fn parse_data_type(&mut self) -> Result<DataType, String> {
         match self.advance() {
             Some(Token::Int)     => Ok(DataType::Int),
             Some(Token::Text)    => Ok(DataType::Text),
             Some(Token::Float)   => Ok(DataType::Float),
             Some(Token::Boolean) => Ok(DataType::Boolean),
+            Some(Token::Double)  => {
+                // DOUBLE or DOUBLE(p,s) — 선택적 정밀도 무시
+                if self.peek() == Some(&Token::LParen) {
+                    self.advance();
+                    while self.peek() != Some(&Token::RParen) { self.advance(); }
+                    self.advance();
+                }
+                Ok(DataType::Double)
+            }
+            Some(Token::Time)    => Ok(DataType::Time),
+            Some(Token::Year)    => Ok(DataType::Year),
+            Some(Token::Enum) => {
+                match self.advance() {
+                    Some(Token::LParen) => {}
+                    other => return Err(format!("Expected '(' after ENUM, got {:?}", other)),
+                }
+                let mut values = Vec::new();
+                loop {
+                    match self.advance() {
+                        Some(Token::StringLit(s)) => values.push(s.clone()),
+                        Some(Token::RParen) => break,
+                        other => return Err(format!("Expected string value in ENUM, got {:?}", other)),
+                    }
+                    match self.peek() {
+                        Some(Token::Comma)  => { self.advance(); }
+                        Some(Token::RParen) => { self.advance(); break; }
+                        _ => break,
+                    }
+                }
+                Ok(DataType::Enum(values))
+            }
+            Some(Token::Set) => {
+                // SET('val1','val2',...) — 데이터 타입으로서의 SET
+                match self.advance() {
+                    Some(Token::LParen) => {}
+                    other => return Err(format!("Expected '(' after SET type, got {:?}", other)),
+                }
+                let mut values = Vec::new();
+                loop {
+                    match self.advance() {
+                        Some(Token::StringLit(s)) => values.push(s.clone()),
+                        Some(Token::RParen) => break,
+                        other => return Err(format!("Expected string value in SET, got {:?}", other)),
+                    }
+                    match self.peek() {
+                        Some(Token::Comma)  => { self.advance(); }
+                        Some(Token::RParen) => { self.advance(); break; }
+                        _ => break,
+                    }
+                }
+                Ok(DataType::Set(values))
+            }
             Some(Token::Varchar) => {
                 match self.advance() {
                     Some(Token::LParen) => {}
@@ -1731,20 +1948,32 @@ impl Parser {
                 })
             }
             Some(Token::Rename) => {
-                match self.advance() {
-                    Some(Token::Column) => {}
-                    other => return Err(format!("Expected COLUMN, got {:?}", other)),
+                match self.peek() {
+                    Some(Token::Column) => {
+                        self.advance(); // COLUMN
+                        let from = self.expect_ident()?;
+                        match self.advance() {
+                            Some(Token::To) => {}
+                            other => return Err(format!("Expected TO, got {:?}", other)),
+                        }
+                        let to = self.expect_ident()?;
+                        Ok(Statement::AlterTable {
+                            table,
+                            action: AlterAction::RenameColumn { from, to },
+                        })
+                    }
+                    Some(Token::To) => {
+                        self.advance(); // TO
+                        let to = self.expect_ident()?;
+                        Ok(Statement::AlterTable { table, action: AlterAction::RenameTable { to } })
+                    }
+                    Some(Token::Ident(_)) => {
+                        // RENAME new_name (TO 생략)
+                        let to = self.expect_ident()?;
+                        Ok(Statement::AlterTable { table, action: AlterAction::RenameTable { to } })
+                    }
+                    other => Err(format!("Expected COLUMN, TO, or table name after RENAME, got {:?}", other)),
                 }
-                let from = self.expect_ident()?;
-                match self.advance() {
-                    Some(Token::To) => {}
-                    other => return Err(format!("Expected TO, got {:?}", other)),
-                }
-                let to = self.expect_ident()?;
-                Ok(Statement::AlterTable {
-                    table,
-                    action: AlterAction::RenameColumn { from, to },
-                })
             }
             Some(Token::Modify) => {
                 // MODIFY [COLUMN] col TYPE [constraints]
@@ -1850,6 +2079,40 @@ impl Parser {
         }
         let name = self.expect_ident()?;
         Ok(Statement::DropView { name })
+    }
+
+    fn parse_create_database(&mut self) -> Result<Statement, String> {
+        let if_not_exists = if self.peek() == Some(&Token::If) {
+            self.advance();
+            match self.advance() {
+                Some(Token::Not) => {}
+                other => return Err(format!("Expected NOT after IF, got {:?}", other)),
+            }
+            match self.advance() {
+                Some(Token::Exists) => {}
+                other => return Err(format!("Expected EXISTS, got {:?}", other)),
+            }
+            true
+        } else {
+            false
+        };
+        let name = self.expect_ident()?;
+        Ok(Statement::CreateDatabase { name, if_not_exists })
+    }
+
+    fn parse_drop_database(&mut self) -> Result<Statement, String> {
+        let if_exists = if self.peek() == Some(&Token::If) {
+            self.advance();
+            match self.advance() {
+                Some(Token::Exists) => {}
+                other => return Err(format!("Expected EXISTS after IF, got {:?}", other)),
+            }
+            true
+        } else {
+            false
+        };
+        let name = self.expect_ident()?;
+        Ok(Statement::DropDatabase { name, if_exists })
     }
 
     fn parse_show(&mut self) -> Result<Statement, String> {

@@ -1,6 +1,6 @@
 // src/engine/executor.rs
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use chrono;
 use crate::transaction::txn_manager::TransactionManager;
 use crate::parser::ast::*;
@@ -28,34 +28,71 @@ pub struct Executor {
     disk: DiskManager,
     /// Row-level lock + wait-for graph (데드락 감지 포함)
     lock_mgr: LockManager,
+    /// Known database names (default: {"rustdb"})
+    pub databases: HashSet<String>,
+    /// Currently selected database
+    pub current_db: String,
 }
 
 impl Executor {
+    /// "db.table" → ("db", "table")
+    fn split_key(key: &str) -> (&str, &str) {
+        if let Some(pos) = key.find('.') { (&key[..pos], &key[pos+1..]) }
+        else { ("rustdb", key) }
+    }
+
+    /// Build a qualified key: if name has no dot, prefix with current_db
+    fn qualify_name(&self, name: String) -> String {
+        if name.contains('.') { name } else { format!("{}.{}", self.current_db, name) }
+    }
+
+    /// Strip current_db prefix for display
+    fn display_name<'a>(&self, key: &'a str) -> &'a str {
+        let prefix = format!("{}.", self.current_db);
+        key.strip_prefix(prefix.as_str()).unwrap_or(key)
+    }
+
     pub fn new() -> Self {
         let disk = DiskManager::new();
         let mut catalog = Catalog::new();
         let mut tables = HashMap::new();
         let mut indexes = HashMap::new();
 
-        for table_name in disk.list_tables() {
-            if let Some(schema) = disk.load_schema(&table_name) {
+        // Collect databases from disk directories (no hardcoded default)
+        let mut databases: HashSet<String> = HashSet::new();
+        for db in disk.list_databases() {
+            databases.insert(db.to_lowercase());
+        }
+
+        // Load all tables from all databases (qualified keys: "db.table")
+        for qualified_key in disk.list_tables() {
+            if let Some(mut schema) = disk.load_schema(&qualified_key) {
+                let (db, _tbl) = Self::split_key(&qualified_key);
+                databases.insert(db.to_lowercase());
+
+                // Qualify FK ref_table fields (migration from unqualified old data)
+                for col in schema.columns.iter_mut() {
+                    if let Some(ref mut fk) = col.foreign_key {
+                        if !fk.ref_table.contains('.') {
+                            fk.ref_table = format!("{}.{}", db, fk.ref_table);
+                        }
+                    }
+                }
+
                 let first_col = schema.columns.first().map(|c| c.name.clone());
                 let auto_inc_counters = schema.auto_increment_counters.clone();
 
                 let _ = catalog.create_table_full(
-                    table_name.clone(),
+                    qualified_key.clone(),
                     schema.columns.clone(),
                     schema.primary_key_columns.clone(),
                     schema.check_constraints.clone(),
                 );
-
-                // auto_increment 카운터 복원
-                if let Some(ts) = catalog.get_table_mut(&table_name) {
+                if let Some(ts) = catalog.get_table_mut(&qualified_key) {
                     ts.auto_increment_counters = auto_inc_counters;
                 }
 
-                let rows = disk.load_table(&table_name);
-
+                let rows = disk.load_table(&qualified_key);
                 let mut tree = BPlusTree::new();
                 for row in &rows {
                     if let Some(ref col) = first_col {
@@ -65,40 +102,54 @@ impl Executor {
                         }
                     }
                 }
-                indexes.insert(table_name.clone(), tree);
-                tables.insert(table_name, rows);
+                indexes.insert(qualified_key.clone(), tree);
+                tables.insert(qualified_key, rows);
             }
         }
 
-        // 저장된 뷰 로드
-        let views = disk.load_views();
+        // 모든 DB의 뷰 로드 (qualified view names: "db.view")
+        let mut views: HashMap<String, Statement> = HashMap::new();
+        for db in &databases {
+            let db_views = disk.load_views(db);
+            for (k, v) in db_views {
+                let qualified_k = if k.contains('.') { k } else { format!("{}.{}", db, k) };
+                views.insert(qualified_k, v);
+            }
+        }
 
-        // 저장된 인덱스 메타 로드 후 재빌드
-        let index_meta_list = disk.load_index_meta();
+        // 모든 DB의 인덱스 메타 로드
         let mut index_meta: HashMap<String, (String, String)> = HashMap::new();
         let mut composite_indexes: HashMap<String, CompositeIndex> = HashMap::new();
-
-        for meta in &index_meta_list {
-            if meta.columns.len() == 1 {
-                let column = &meta.columns[0];
-                let mut tree = BPlusTree::new();
-                if let Some(rows) = tables.get(&meta.table) {
-                    for row in rows {
-                        if let Some(val) = row.get(column) {
-                            let json = serde_json::to_string(row).unwrap();
-                            tree.insert(val.clone(), json);
+        for db in &databases {
+            let meta_list = disk.load_index_meta(db);
+            for meta in &meta_list {
+                // Qualify table name in index meta
+                let q_table = if meta.table.contains('.') {
+                    meta.table.clone()
+                } else {
+                    format!("{}.{}", db, meta.table)
+                };
+                if meta.columns.len() == 1 {
+                    let column = &meta.columns[0];
+                    let mut tree = BPlusTree::new();
+                    if let Some(rows) = tables.get(&q_table) {
+                        for row in rows {
+                            if let Some(val) = row.get(column) {
+                                let json = serde_json::to_string(row).unwrap();
+                                tree.insert(val.clone(), json);
+                            }
                         }
                     }
+                    let key = format!("{}_{}", q_table, meta.name);
+                    indexes.insert(key, tree);
+                    index_meta.insert(meta.name.clone(), (q_table, column.clone()));
+                } else {
+                    let mut comp = CompositeIndex::new(q_table.clone(), meta.columns.clone());
+                    if let Some(rows) = tables.get(&q_table) {
+                        comp.rebuild(rows);
+                    }
+                    composite_indexes.insert(meta.name.clone(), comp);
                 }
-                let key = format!("{}_{}", meta.table, meta.name);
-                indexes.insert(key, tree);
-                index_meta.insert(meta.name.clone(), (meta.table.clone(), column.clone()));
-            } else {
-                let mut comp = CompositeIndex::new(meta.table.clone(), meta.columns.clone());
-                if let Some(rows) = tables.get(&meta.table) {
-                    comp.rebuild(rows);
-                }
-                composite_indexes.insert(meta.name.clone(), comp);
             }
         }
 
@@ -113,6 +164,8 @@ impl Executor {
             buffer_pool: BufferPool::new(),
             disk,
             lock_mgr: LockManager::new(),
+            current_db: databases.iter().min().cloned().unwrap_or_else(|| "rustdb".to_string()),
+            databases,
         };
 
         // WAL Crash Recovery
@@ -121,6 +174,19 @@ impl Executor {
     }
 
     pub fn execute(&mut self, stmt: Statement) -> Result<String, String> {
+        // USE은 qualification 전에 처리
+        if let Statement::Use { database } = stmt {
+            return self.exec_use(database);
+        }
+        // CreateDatabase/DropDatabase도 qualification 불필요
+        if let Statement::CreateDatabase { name, if_not_exists } = stmt {
+            return self.exec_create_database(name, if_not_exists);
+        }
+        if let Statement::DropDatabase { name, if_exists } = stmt {
+            return self.exec_drop_database(name, if_exists);
+        }
+        // 모든 다른 statement: 테이블명을 "{current_db}.{table}" 형식으로 qualify
+        let stmt = self.qualify_stmt(stmt);
         match stmt {
             Statement::Begin    => self.exec_begin(),
             Statement::Commit   => self.exec_commit(),
@@ -161,6 +227,15 @@ impl Executor {
             Statement::Explain(inner)           => self.exec_explain(*inner),
             Statement::Union { left, right, all, order_by, limit, offset } => self.exec_union(*left, *right, all, order_by, limit, offset),
             Statement::With { ctes, query }     => self.exec_with(ctes, *query),
+            Statement::CreateDatabase { name, if_not_exists } => self.exec_create_database(name, if_not_exists),
+            Statement::DropDatabase { name, if_exists }       => self.exec_drop_database(name, if_exists),
+            Statement::MultiUpdate { tables, joins, assignments, condition } => {
+                self.exec_multi_update(tables, joins, assignments, condition)
+            }
+            Statement::MultiDelete { delete_tables, from_table, joins, condition } => {
+                self.exec_multi_delete(delete_tables, from_table, joins, condition)
+            }
+            Statement::Use { database } => self.exec_use(database),
         }
     }
 
@@ -267,9 +342,25 @@ impl Executor {
     /// "table.col" 또는 "col" 형식으로 row에서 값 조회.
     /// 전체 키가 없으면 테이블 prefix를 제거한 bare 컬럼명으로 fallback.
     fn get_col<'a>(row: &'a Row, col: &str) -> Option<&'a String> {
-        row.get(col).or_else(|| {
-            col.rfind('.').and_then(|i| row.get(&col[i + 1..]))
-        })
+        // 1. Exact match
+        if let Some(v) = row.get(col) { return Some(v); }
+
+        if let Some(dot) = col.rfind('.') {
+            let table_part = &col[..dot];   // e.g. "dept" or "rustdb.dept"
+            let col_part   = &col[dot + 1..]; // e.g. "name"
+
+            // 2. Look for any key ending with ".{table}.{col}" — handles qualified keys
+            //    e.g. "rustdb.dept.name" when caller asks for "dept.name"
+            let suffix = format!(".{}.{}", table_part, col_part);
+            if let Some((_, v)) = row.iter().find(|(k, _)| k.ends_with(suffix.as_str())) {
+                return Some(v);
+            }
+
+            // 3. Bare column name — only for unambiguous single-table lookups
+            row.get(col_part)
+        } else {
+            None
+        }
     }
 
     fn eval_arith(row: &Row, expr: &ArithExpr) -> String {
@@ -377,6 +468,7 @@ impl Executor {
         self.catalog.drop_table(&name)?;
         self.tables.remove(&name);
         self.indexes.remove(&name);
+        self.buffer_pool.invalidate(&name);
         self.disk.delete_table(&name);
         Ok(format!("Table '{}' dropped.", name))
     }
@@ -1893,6 +1985,9 @@ impl Executor {
             }
         }
 
+        // 단일 컬럼 보조 인덱스 재빌드
+        self.rebuild_secondary_indexes(&table, &rows_clone);
+
         // 복합 인덱스 재빌드
         let comp_keys: Vec<String> = self.composite_indexes.iter()
             .filter(|(_, ci)| ci.table == table)
@@ -2487,6 +2582,8 @@ impl Executor {
                                 DataType::Text | DataType::Varchar(_) | DataType::Date
                                 | DataType::DateTime | DataType::Timestamp => true,
                                 DataType::Decimal(_, _) => val.parse::<f64>().is_ok(),
+                                DataType::Double => val.parse::<f64>().is_ok(),
+                                DataType::Time | DataType::Year | DataType::Enum(_) | DataType::Set(_) => true,
                                 DataType::Unknown => true,
                             };
                             if !ok {
@@ -2513,7 +2610,504 @@ impl Executor {
                 self.disk.save_schema(&table, full_schema);
                 Ok(format!("Column '{}' in '{}' modified.", col.name, table))
             }
+            AlterAction::RenameTable { to } => {
+                if !self.catalog.tables.contains_key(&table) {
+                    return Err(format!("Table '{}' not found", table));
+                }
+                if self.catalog.tables.contains_key(&to) {
+                    return Err(format!("Table '{}' already exists", to));
+                }
+                // Catalog rename
+                let schema = self.catalog.tables.remove(&table).unwrap();
+                self.catalog.tables.insert(to.clone(), schema);
+
+                // In-memory data rename
+                if let Some(rows) = self.tables.remove(&table) {
+                    self.tables.insert(to.clone(), rows);
+                }
+
+                // B+Tree index rename
+                if let Some(tree) = self.indexes.remove(&table) {
+                    self.indexes.insert(to.clone(), tree);
+                }
+
+                // Secondary index meta rename
+                for (_, (ref mut tbl, _)) in self.index_meta.iter_mut() {
+                    if *tbl == table { *tbl = to.clone(); }
+                }
+                let sec_keys: Vec<String> = self.indexes.keys()
+                    .filter(|k| k.starts_with(&format!("{}_", table)))
+                    .cloned().collect();
+                for old_key in sec_keys {
+                    let suffix = &old_key[table.len()..];
+                    let new_key = format!("{}{}", to, suffix);
+                    if let Some(tree) = self.indexes.remove(&old_key) {
+                        self.indexes.insert(new_key, tree);
+                    }
+                }
+
+                // Composite index rename
+                for (_, ci) in self.composite_indexes.iter_mut() {
+                    if ci.table == table { ci.table = to.clone(); }
+                }
+
+                // Disk: save under new name, delete old files
+                let full_schema = self.catalog.get_table(&to).unwrap();
+                self.disk.save_schema(&to, full_schema);
+                if let Some(rows) = self.tables.get(&to) {
+                    self.disk.save_table(&to, rows);
+                }
+                self.disk.delete_table(&table);
+
+                Ok(format!("Table '{}' renamed to '{}'.", table, to))
+            }
         }
+    }
+
+    fn exec_create_database(&mut self, name: String, if_not_exists: bool) -> Result<String, String> {
+        let key = name.to_lowercase();
+        if self.databases.contains(&key) {
+            if if_not_exists {
+                return Ok(format!("Database '{}' already exists (skipped).", name));
+            }
+            return Err(format!("Database '{}' already exists.", name));
+        }
+        self.disk.create_db_dir(&key);
+        self.databases.insert(key.clone());
+        Ok(format!("Database '{}' created.", key))
+    }
+
+    fn exec_drop_database(&mut self, name: String, if_exists: bool) -> Result<String, String> {
+        let key = name.to_lowercase();
+        if !self.databases.contains(&key) {
+            if if_exists {
+                return Ok(format!("Database '{}' does not exist (skipped).", name));
+            }
+            return Err(format!("Database '{}' does not exist.", name));
+        }
+        // 해당 DB의 테이블들만 삭제
+        let prefix = format!("{}.", key);
+        let table_keys: Vec<String> = self.tables.keys()
+            .filter(|k| k.starts_with(&prefix))
+            .cloned().collect();
+        for t in table_keys {
+            self.catalog.tables.remove(&t);
+            self.tables.remove(&t);
+            self.indexes.remove(&t);
+            self.buffer_pool.invalidate(&t);
+            self.disk.delete_table(&t);
+        }
+        // 해당 DB의 secondary 인덱스 삭제
+        let sec_keys: Vec<String> = self.indexes.keys()
+            .filter(|k| k.starts_with(&prefix))
+            .cloned().collect();
+        for k in &sec_keys {
+            self.buffer_pool.invalidate(k);
+            self.indexes.remove(k);
+        }
+        self.index_meta.retain(|_, (tbl, _)| !tbl.starts_with(&prefix));
+        self.composite_indexes.retain(|_, ci| !ci.table.starts_with(&prefix));
+
+        // 해당 DB의 뷰 삭제
+        self.views.retain(|k, _| !k.starts_with(&prefix));
+
+        // DB 디렉토리 삭제
+        self.disk.drop_db_dir(&key);
+        self.databases.remove(&key);
+
+        // 현재 DB가 삭제된 경우 다른 DB로 전환
+        if self.current_db == key {
+            if let Some(remaining) = self.databases.iter().next().cloned() {
+                self.current_db = remaining;
+            } else {
+                self.current_db = String::new();
+            }
+        }
+
+        Ok(format!("Database '{}' dropped.", key))
+    }
+
+    fn exec_multi_update(
+        &mut self,
+        tables: Vec<String>,
+        joins: Vec<Join>,
+        assignments: Vec<(String, ArithExpr)>,
+        condition: Option<CondExpr>,
+    ) -> Result<String, String> {
+        // Build joined rows from the first table + any explicit JOINs
+        let first_table = tables.first()
+            .ok_or("No tables specified for multi-table UPDATE")?
+            .clone();
+
+        let base_rows: Vec<Row> = self.tables.get(&first_table)
+            .ok_or(format!("Table '{}' not found", first_table))?
+            .iter()
+            .filter(|r| Self::is_visible(r))
+            .map(|r| {
+                let mut prefixed = Row::new();
+                for (k, v) in r.iter() {
+                    prefixed.insert(format!("{}.{}", first_table, k), v.clone());
+                    prefixed.entry(k.clone()).or_insert_with(|| v.clone());
+                }
+                prefixed
+            })
+            .collect();
+
+        // Apply additional tables as cross-joins (comma-list style)
+        let mut current = base_rows;
+        for extra_tbl in tables.iter().skip(1) {
+            let right_rows: Vec<Row> = self.tables.get(extra_tbl)
+                .ok_or(format!("Table '{}' not found", extra_tbl))?
+                .iter()
+                .filter(|r| Self::is_visible(r))
+                .cloned()
+                .collect();
+            let tbl = extra_tbl.clone();
+            let mut out = Vec::new();
+            for left in &current {
+                for right in &right_rows {
+                    let mut merged = left.clone();
+                    for (k, v) in right.iter() {
+                        merged.insert(format!("{}.{}", tbl, k), v.clone());
+                        merged.entry(k.clone()).or_insert_with(|| v.clone());
+                    }
+                    out.push(merged);
+                }
+            }
+            current = out;
+        }
+
+        // Apply explicit JOINs
+        for j in &joins {
+            let right_rows: Vec<Row> = self.tables.get(&j.table)
+                .ok_or(format!("Table '{}' not found", j.table))?
+                .iter()
+                .filter(|r| Self::is_visible(r))
+                .cloned()
+                .collect();
+            let tbl = j.table.clone();
+            let mut out = Vec::new();
+            match j.join_type {
+                JoinType::Inner => {
+                    for left in &current {
+                        for right in &right_rows {
+                            let mut merged = left.clone();
+                            for (k, v) in right.iter() {
+                                merged.insert(format!("{}.{}", tbl, k), v.clone());
+                                merged.entry(k.clone()).or_insert_with(|| v.clone());
+                            }
+                            if Self::eval_condexpr(&merged, &j.on_expr) { out.push(merged); }
+                        }
+                    }
+                }
+                JoinType::Left => {
+                    let right_schema_cols: Vec<String> = self.catalog.get_table(&j.table)
+                        .map(|s| s.columns.iter().map(|c| c.name.clone()).collect())
+                        .unwrap_or_default();
+                    for left in &current {
+                        let mut matched = false;
+                        for right in &right_rows {
+                            let mut merged = left.clone();
+                            for (k, v) in right.iter() {
+                                merged.insert(format!("{}.{}", tbl, k), v.clone());
+                                merged.entry(k.clone()).or_insert_with(|| v.clone());
+                            }
+                            if Self::eval_condexpr(&merged, &j.on_expr) { out.push(merged); matched = true; }
+                        }
+                        if !matched {
+                            let mut merged = left.clone();
+                            for col in &right_schema_cols {
+                                merged.insert(format!("{}.{}", tbl, col), NULL_VALUE.to_string());
+                            }
+                            out.push(merged);
+                        }
+                    }
+                }
+                JoinType::Right => {
+                    let left_cols: Vec<String> = current.first()
+                        .map(|r| r.keys().filter(|k| !k.starts_with('_') && !k.contains('.')).cloned().collect())
+                        .unwrap_or_default();
+                    for right in &right_rows {
+                        let mut matched = false;
+                        for left in &current {
+                            let mut merged = left.clone();
+                            for (k, v) in right.iter() {
+                                merged.insert(format!("{}.{}", tbl, k), v.clone());
+                                merged.entry(k.clone()).or_insert_with(|| v.clone());
+                            }
+                            if Self::eval_condexpr(&merged, &j.on_expr) { out.push(merged.clone()); matched = true; }
+                        }
+                        if !matched {
+                            let mut merged = Row::new();
+                            for col in &left_cols { merged.insert(col.clone(), NULL_VALUE.to_string()); }
+                            for (k, v) in right.iter() {
+                                merged.insert(format!("{}.{}", tbl, k), v.clone());
+                                merged.entry(k.clone()).or_insert_with(|| v.clone());
+                            }
+                            out.push(merged);
+                        }
+                    }
+                }
+            }
+            current = out;
+        }
+
+        // Apply WHERE filter
+        let matched: Vec<Row> = current.into_iter()
+            .filter(|r| self.matches_condition_with_subquery(r, &condition))
+            .collect();
+
+        // Determine which tables are actually targeted by assignments
+        let mut target_tables: Vec<String> = tables.clone();
+        for j in &joins { target_tables.push(j.table.clone()); }
+
+        // Resolve a bare/alias table name to the qualified name in target_tables
+        let resolve_tbl = |name: &str| -> String {
+            let suffix = format!(".{}", name);
+            target_tables.iter()
+                .find(|t| t.as_str() == name || t.ends_with(&suffix))
+                .cloned()
+                .unwrap_or_else(|| name.to_string())
+        };
+
+        // Build per-table, per-PK assignment map: table → { pk_val → { col → val } }
+        // Use a HashSet to avoid applying the same (pk, col) update more than once
+        // (a row may appear in multiple cross-join pairs, but its own values are evaluated correctly)
+        let mut total_count = 0usize;
+
+        // Collect unique target tables from assignments
+        let mut assignment_tables: Vec<String> = Vec::new();
+        for (col_expr, _) in &assignments {
+            let tbl = if let Some(dot) = col_expr.find('.') {
+                resolve_tbl(&col_expr[..dot])
+            } else {
+                first_table.clone()
+            };
+            if !assignment_tables.contains(&tbl) { assignment_tables.push(tbl); }
+        }
+
+        for tgt in &assignment_tables {
+            let pk_col = self.catalog.get_table(tgt)
+                .ok_or(format!("Table '{}' not found", tgt))?
+                .columns.iter()
+                .find(|c| c.primary_key)
+                .map(|c| c.name.clone())
+                .unwrap_or_else(|| "id".to_string());
+
+            let pk_prefix = format!("{}.", tgt);
+
+            // Build { pk → { col → val } } from matched rows — each pk deduplicated
+            let mut pk_updates: HashMap<String, HashMap<String, String>> = HashMap::new();
+            for merged_row in &matched {
+                let pk_val = merged_row.get(&format!("{}{}", pk_prefix, pk_col))
+                    .or_else(|| merged_row.get(&pk_col))
+                    .cloned()
+                    .unwrap_or_default();
+                if pk_val.is_empty() { continue; }
+                let entry = pk_updates.entry(pk_val).or_default();
+                for (col_expr, rhs_expr) in &assignments {
+                    let (tbl_name, bare_col) = if let Some(dot) = col_expr.find('.') {
+                        (resolve_tbl(&col_expr[..dot]), col_expr[dot+1..].to_string())
+                    } else {
+                        (first_table.clone(), col_expr.clone())
+                    };
+                    if &tbl_name != tgt { continue; }
+                    let new_val = Self::eval_arith(merged_row, rhs_expr);
+                    entry.insert(bare_col, new_val);
+                }
+            }
+
+            let rows = self.tables.get_mut(tgt)
+                .ok_or(format!("Table '{}' not found", tgt))?;
+
+            for row in rows.iter_mut() {
+                let row_pk = row.get(&pk_col).cloned().unwrap_or_default();
+                if let Some(col_vals) = pk_updates.get(&row_pk) {
+                    for (col, val) in col_vals {
+                        row.insert(col.clone(), val.clone());
+                    }
+                    total_count += 1;
+                }
+            }
+
+            let rows_clone = self.tables.get(tgt).unwrap().clone();
+            if let Some(index) = self.indexes.get_mut(tgt) {
+                *index = BPlusTree::new();
+                for row in &rows_clone {
+                    let k = row.get(&pk_col).cloned().unwrap_or_default();
+                    let val_json = serde_json::to_string(row).unwrap();
+                    index.insert(k, val_json);
+                }
+            }
+            self.rebuild_secondary_indexes(tgt, &rows_clone);
+            let comp_keys: Vec<String> = self.composite_indexes.iter()
+                .filter(|(_, ci)| ci.table == *tgt)
+                .map(|(k, _)| k.clone())
+                .collect();
+            for k in comp_keys {
+                if let Some(ci) = self.composite_indexes.get_mut(&k) {
+                    ci.rebuild(&rows_clone);
+                }
+            }
+            self.buffer_pool.write_page(tgt, rows_clone);
+            self.buffer_pool.flush_page(tgt, &self.disk);
+        }
+
+        self.maybe_auto_checkpoint();
+        Ok(format!("{} row(s) updated.", total_count))
+    }
+
+    fn exec_multi_delete(
+        &mut self,
+        delete_tables: Vec<String>,
+        from_table: String,
+        joins: Vec<Join>,
+        condition: Option<CondExpr>,
+    ) -> Result<String, String> {
+        // Build joined rows starting from from_table
+        let base_rows: Vec<Row> = self.tables.get(&from_table)
+            .ok_or(format!("Table '{}' not found", from_table))?
+            .iter()
+            .filter(|r| Self::is_visible(r))
+            .map(|r| {
+                let mut prefixed = Row::new();
+                for (k, v) in r.iter() {
+                    prefixed.insert(format!("{}.{}", from_table, k), v.clone());
+                    prefixed.entry(k.clone()).or_insert_with(|| v.clone());
+                }
+                prefixed
+            })
+            .collect();
+
+        let mut current = base_rows;
+        for j in &joins {
+            let right_rows: Vec<Row> = self.tables.get(&j.table)
+                .ok_or(format!("Table '{}' not found", j.table))?
+                .iter()
+                .filter(|r| Self::is_visible(r))
+                .cloned()
+                .collect();
+            let tbl = j.table.clone();
+            let mut out = Vec::new();
+            match j.join_type {
+                JoinType::Inner => {
+                    for left in &current {
+                        for right in &right_rows {
+                            let mut merged = left.clone();
+                            for (k, v) in right.iter() {
+                                merged.insert(format!("{}.{}", tbl, k), v.clone());
+                                merged.entry(k.clone()).or_insert_with(|| v.clone());
+                            }
+                            if Self::eval_condexpr(&merged, &j.on_expr) { out.push(merged); }
+                        }
+                    }
+                }
+                JoinType::Left => {
+                    let right_schema_cols: Vec<String> = self.catalog.get_table(&j.table)
+                        .map(|s| s.columns.iter().map(|c| c.name.clone()).collect())
+                        .unwrap_or_default();
+                    for left in &current {
+                        let mut matched = false;
+                        for right in &right_rows {
+                            let mut merged = left.clone();
+                            for (k, v) in right.iter() {
+                                merged.insert(format!("{}.{}", tbl, k), v.clone());
+                                merged.entry(k.clone()).or_insert_with(|| v.clone());
+                            }
+                            if Self::eval_condexpr(&merged, &j.on_expr) { out.push(merged); matched = true; }
+                        }
+                        if !matched {
+                            let mut merged = left.clone();
+                            for col in &right_schema_cols {
+                                merged.insert(format!("{}.{}", tbl, col), NULL_VALUE.to_string());
+                            }
+                            out.push(merged);
+                        }
+                    }
+                }
+                JoinType::Right => {
+                    let left_cols: Vec<String> = current.first()
+                        .map(|r| r.keys().filter(|k| !k.starts_with('_') && !k.contains('.')).cloned().collect())
+                        .unwrap_or_default();
+                    for right in &right_rows {
+                        let mut matched = false;
+                        for left in &current {
+                            let mut merged = left.clone();
+                            for (k, v) in right.iter() {
+                                merged.insert(format!("{}.{}", tbl, k), v.clone());
+                                merged.entry(k.clone()).or_insert_with(|| v.clone());
+                            }
+                            if Self::eval_condexpr(&merged, &j.on_expr) { out.push(merged); matched = true; }
+                        }
+                        if !matched {
+                            let mut merged = Row::new();
+                            for col in &left_cols { merged.insert(col.clone(), NULL_VALUE.to_string()); }
+                            for (k, v) in right.iter() {
+                                merged.insert(format!("{}.{}", tbl, k), v.clone());
+                                merged.entry(k.clone()).or_insert_with(|| v.clone());
+                            }
+                            out.push(merged);
+                        }
+                    }
+                }
+            }
+            current = out;
+        }
+
+        // Apply WHERE
+        let matched: Vec<Row> = current.into_iter()
+            .filter(|r| self.matches_condition_with_subquery(r, &condition))
+            .collect();
+
+        let mut total_count = 0usize;
+
+        for tgt in &delete_tables {
+            let pk_col = self.catalog.get_table(tgt)
+                .ok_or(format!("Table '{}' not found", tgt))?
+                .columns.iter()
+                .find(|c| c.primary_key)
+                .map(|c| c.name.clone())
+                .unwrap_or_else(|| "id".to_string());
+
+            let pk_prefix = format!("{}.", tgt);
+            let target_pks: std::collections::HashSet<String> = matched.iter()
+                .filter_map(|r| r.get(&format!("{}{}", pk_prefix, pk_col))
+                    .or_else(|| r.get(&pk_col)))
+                .cloned()
+                .collect();
+
+            let rows = self.tables.get_mut(tgt)
+                .ok_or(format!("Table '{}' not found", tgt))?;
+
+            let before = rows.iter().filter(|r| Self::is_visible(r)).count();
+            rows.retain(|r| !Self::is_visible(r) || !target_pks.contains(r.get(&pk_col).unwrap_or(&String::new())));
+            let after = rows.iter().filter(|r| Self::is_visible(r)).count();
+            total_count += before - after;
+
+            let rows_clone = self.tables.get(tgt).unwrap().clone();
+            if let Some(index) = self.indexes.get_mut(tgt) {
+                *index = BPlusTree::new();
+                for row in &rows_clone {
+                    let k = row.get(&pk_col).cloned().unwrap_or_default();
+                    let val_json = serde_json::to_string(row).unwrap();
+                    index.insert(k, val_json);
+                }
+            }
+            let comp_keys: Vec<String> = self.composite_indexes.iter()
+                .filter(|(_, ci)| ci.table == *tgt)
+                .map(|(k, _)| k.clone())
+                .collect();
+            for k in comp_keys {
+                if let Some(ci) = self.composite_indexes.get_mut(&k) {
+                    ci.rebuild(&rows_clone);
+                }
+            }
+            self.buffer_pool.write_page(tgt, rows_clone);
+            self.buffer_pool.flush_page(tgt, &self.disk);
+        }
+
+        self.maybe_auto_checkpoint();
+        Ok(format!("{} row(s) deleted.", total_count))
     }
 
     fn matches_condition_with_subquery(&mut self, row: &Row, condition: &Option<CondExpr>) -> bool {
@@ -2701,20 +3295,51 @@ impl Executor {
             }
         }
         self.views.insert(name.clone(), query);
-        self.disk.save_views(&self.views);
+        self.persist_views_for_db(&self.current_db.clone());
         Ok(format!("View '{}' created.", name))
     }
 
     fn exec_drop_view(&mut self, name: String) -> Result<String, String> {
         if self.views.remove(&name).is_some() {
-            self.disk.save_views(&self.views);
+            self.persist_views_for_db(&self.current_db.clone());
             Ok(format!("View '{}' dropped.", name))
         } else {
             Ok(format!("View '{}' does not exist, skipped.", name))
         }
     }
 
+    fn persist_views_for_db(&self, db: &str) {
+        let prefix = format!("{}.", db);
+        let db_views: HashMap<String, Statement> = self.views.iter()
+            .filter(|(k, _)| k.starts_with(&prefix))
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        self.disk.save_views(db, &db_views);
+    }
+
     /// 현재 index_meta + composite_indexes를 disk에 저장
+    /// 단일 컬럼 보조 인덱스를 rows 기준으로 재빌드한다 (UPDATE 후 stale 방지)
+    fn rebuild_secondary_indexes(&mut self, table: &str, rows: &[Row]) {
+        let sec: Vec<(String, String)> = self.index_meta.iter()
+            .filter(|(_, (tbl, _))| tbl == table)
+            .map(|(name, (_, col))| (name.clone(), col.clone()))
+            .collect();
+        for (idx_name, col) in sec {
+            let mut bucket: HashMap<String, Vec<Row>> = HashMap::new();
+            for row in rows {
+                if let Some(val) = row.get(&col) {
+                    bucket.entry(val.clone()).or_default().push(row.clone());
+                }
+            }
+            let mut tree = BPlusTree::new();
+            for (key, bucket_rows) in bucket {
+                tree.insert(key, serde_json::to_string(&bucket_rows).unwrap());
+            }
+            let key = format!("{}_{}", table, idx_name);
+            self.indexes.insert(key, tree);
+        }
+    }
+
     fn persist_index_meta(&self) {
         let mut meta_list: Vec<IndexMeta> = Vec::new();
         for (name, (table, col)) in &self.index_meta {
@@ -2731,14 +3356,178 @@ impl Executor {
                 columns: comp.columns.clone(),
             });
         }
-        self.disk.save_index_meta(&meta_list);
+        // save_index_meta per-db
+        let mut per_db: HashMap<String, Vec<IndexMeta>> = HashMap::new();
+        for m in &meta_list {
+            let (db, _) = Self::split_key(&m.table);
+            per_db.entry(db.to_string()).or_default().push(m.clone());
+        }
+        for (db, mlist) in &per_db {
+            self.disk.save_index_meta(db, mlist);
+        }
+        if per_db.is_empty() {
+            self.disk.save_index_meta(&self.current_db, &[]);
+        }
+    }
+
+    fn exec_use(&mut self, database: String) -> Result<String, String> {
+        let key = database.to_lowercase();
+        if !self.databases.contains(&key) {
+            return Err(format!("Unknown database '{}'.", database));
+        }
+        self.current_db = key.clone();
+        Ok(format!("Database changed to '{}'.", key))
+    }
+
+    /// Qualify all table references in a statement with the current database.
+    fn qualify_stmt(&self, stmt: Statement) -> Statement {
+        match stmt {
+            Statement::Select { table, subquery, columns, distinct, condition, joins, order_by, group_by, having, limit, offset, for_update } =>
+                Statement::Select {
+                    table: self.qualify_name(table),
+                    subquery: subquery.map(|(q, alias)| (Box::new(self.qualify_stmt(*q)), alias)),
+                    columns,
+                    distinct,
+                    condition: condition.map(|c| self.qualify_condexpr(c)),
+                    joins: joins.into_iter().map(|j| Join {
+                        table: self.qualify_name(j.table),
+                        on_expr: self.qualify_condexpr(j.on_expr),
+                        join_type: j.join_type,
+                    }).collect(),
+                    order_by, group_by,
+                    having: having.map(|h| self.qualify_condexpr(h)),
+                    limit, offset, for_update,
+                },
+            Statement::Insert { table, columns, values } =>
+                Statement::Insert { table: self.qualify_name(table), columns, values },
+            Statement::InsertSelect { table, columns, query } =>
+                Statement::InsertSelect {
+                    table: self.qualify_name(table),
+                    columns,
+                    query: Box::new(self.qualify_stmt(*query)),
+                },
+            Statement::Update { table, assignments, condition } =>
+                Statement::Update {
+                    table: self.qualify_name(table),
+                    assignments,
+                    condition: condition.map(|c| self.qualify_condexpr(c)),
+                },
+            Statement::Delete { table, condition } =>
+                Statement::Delete {
+                    table: self.qualify_name(table),
+                    condition: condition.map(|c| self.qualify_condexpr(c)),
+                },
+            Statement::CreateTable { name, columns, if_not_exists, primary_key_columns, check_constraints } => {
+                let columns = columns.into_iter().map(|mut col| {
+                    if let Some(ref mut fk) = col.foreign_key {
+                        fk.ref_table = self.qualify_name(fk.ref_table.clone());
+                    }
+                    col
+                }).collect();
+                Statement::CreateTable { name: self.qualify_name(name), columns, if_not_exists, primary_key_columns, check_constraints }
+            },
+            Statement::DropTable { name, if_exists } =>
+                Statement::DropTable { name: self.qualify_name(name), if_exists },
+            Statement::TruncateTable { name } =>
+                Statement::TruncateTable { name: self.qualify_name(name) },
+            Statement::AlterTable { table, action } => {
+                let action = match action {
+                    AlterAction::RenameTable { to } =>
+                        AlterAction::RenameTable { to: self.qualify_name(to) },
+                    other => other,
+                };
+                Statement::AlterTable { table: self.qualify_name(table), action }
+            }
+            Statement::CreateIndex { index_name, table, columns } =>
+                Statement::CreateIndex { index_name, table: self.qualify_name(table), columns },
+            Statement::DropIndex { index_name } =>
+                Statement::DropIndex { index_name },
+            Statement::CreateView { name, query } =>
+                Statement::CreateView {
+                    name: self.qualify_name(name),
+                    query: Box::new(self.qualify_stmt(*query)),
+                },
+            Statement::DropView { name } =>
+                Statement::DropView { name: self.qualify_name(name) },
+            Statement::Describe { table } =>
+                Statement::Describe { table: self.qualify_name(table) },
+            Statement::Vacuum { table } =>
+                Statement::Vacuum { table: table.map(|t| self.qualify_name(t)) },
+            Statement::Union { left, right, all, order_by, limit, offset } =>
+                Statement::Union {
+                    left:  Box::new(self.qualify_stmt(*left)),
+                    right: Box::new(self.qualify_stmt(*right)),
+                    all, order_by, limit, offset,
+                },
+            Statement::With { ctes, query } =>
+                Statement::With {
+                    ctes: ctes.into_iter().map(|(n, q)| (
+                        self.qualify_name(n),
+                        Box::new(self.qualify_stmt(*q))
+                    )).collect(),
+                    query: Box::new(self.qualify_stmt(*query)),
+                },
+            Statement::Explain(inner) =>
+                Statement::Explain(Box::new(self.qualify_stmt(*inner))),
+            Statement::MultiUpdate { tables, joins, assignments, condition } =>
+                Statement::MultiUpdate {
+                    tables: tables.into_iter().map(|t| self.qualify_name(t)).collect(),
+                    joins: joins.into_iter().map(|j| Join {
+                        table: self.qualify_name(j.table),
+                        on_expr: self.qualify_condexpr(j.on_expr),
+                        join_type: j.join_type,
+                    }).collect(),
+                    assignments,
+                    condition: condition.map(|c| self.qualify_condexpr(c)),
+                },
+            Statement::MultiDelete { delete_tables, from_table, joins, condition } =>
+                Statement::MultiDelete {
+                    delete_tables: delete_tables.into_iter().map(|t| self.qualify_name(t)).collect(),
+                    from_table: self.qualify_name(from_table),
+                    joins: joins.into_iter().map(|j| Join {
+                        table: self.qualify_name(j.table),
+                        on_expr: self.qualify_condexpr(j.on_expr),
+                        join_type: j.join_type,
+                    }).collect(),
+                    condition: condition.map(|c| self.qualify_condexpr(c)),
+                },
+            // 나머지는 그대로
+            other => other,
+        }
+    }
+
+    fn qualify_condexpr(&self, expr: CondExpr) -> CondExpr {
+        match expr {
+            CondExpr::And(l, r) => CondExpr::And(
+                Box::new(self.qualify_condexpr(*l)),
+                Box::new(self.qualify_condexpr(*r)),
+            ),
+            CondExpr::Or(l, r) => CondExpr::Or(
+                Box::new(self.qualify_condexpr(*l)),
+                Box::new(self.qualify_condexpr(*r)),
+            ),
+            CondExpr::Not(inner) => CondExpr::Not(Box::new(self.qualify_condexpr(*inner))),
+            CondExpr::Leaf(cond) => CondExpr::Leaf(match cond.value {
+                ConditionValue::Subquery(q) => Condition {
+                    value: ConditionValue::Subquery(Box::new(self.qualify_stmt(*q))),
+                    ..cond
+                },
+                _ => cond,
+            }),
+        }
     }
 
     fn exec_show_tables(&self) -> Result<String, String> {
-        let tables: Vec<String> = self.catalog.tables.keys().cloned().collect();
+        // 현재 DB의 테이블만 표시, 접두사 제거
+        let prefix = format!("{}.", self.current_db);
+        let mut tables: Vec<String> = self.catalog.tables.keys()
+            .filter(|k| k.starts_with(&prefix))
+            .map(|k| k[prefix.len()..].to_string())
+            .collect();
         if tables.is_empty() {
-            return Ok("No tables found.".to_string());
+            return Ok(format!("No tables found in database '{}'.", self.current_db));
         }
+        tables.sort();
         let mut output = String::new();
         let max_len = tables.iter().map(|t| t.len()).max().unwrap_or(5).max(5);
         let sep = format!("+{}+", "-".repeat(max_len + 2));
@@ -2771,6 +3560,11 @@ impl Executor {
                 crate::parser::ast::DataType::Timestamp => "TIMESTAMP".to_string(),
                 crate::parser::ast::DataType::Varchar(n) => format!("VARCHAR({})", n),
                 crate::parser::ast::DataType::Decimal(p, s) => format!("DECIMAL({},{})", p, s),
+                crate::parser::ast::DataType::Double => "DOUBLE".to_string(),
+                crate::parser::ast::DataType::Time => "TIME".to_string(),
+                crate::parser::ast::DataType::Year => "YEAR".to_string(),
+                crate::parser::ast::DataType::Enum(vals) => format!("ENUM({})", vals.iter().map(|v| format!("'{}'", v)).collect::<Vec<_>>().join(",")),
+                crate::parser::ast::DataType::Set(vals) => format!("SET({})", vals.iter().map(|v| format!("'{}'", v)).collect::<Vec<_>>().join(",")),
                 crate::parser::ast::DataType::Unknown => "UNKNOWN".to_string(),
             };
             let def_str = match &col.default {
