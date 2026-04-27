@@ -57,8 +57,8 @@ function App() {
   const [results, setResults] = useState<QueryResult[]>([]);
   const [databases, setDatabases] = useState<string[]>(["rustdb"]);
   const [tables, setTables] = useState<string[]>([]);
-  const [views, setViews] = useState<string[]>([]);
-  const [indexes, setIndexes] = useState<IndexInfo[]>([]);
+  const [_views, setViews] = useState<string[]>([]);
+  const [_indexes, setIndexes] = useState<IndexInfo[]>([]);
   const [expandedTables, setExpandedTables] = useState<Set<string>>(new Set());
   const [tableColumns, setTableColumns] = useState<Record<string, string[]>>({});
   const [expandedViews, setExpandedViews] = useState<Set<string>>(new Set());
@@ -74,6 +74,9 @@ function App() {
   const [indexesOpen, setIndexesOpen] = useState<Record<string, boolean>>({});
   const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number } | null>(null);
   const [tableCtxMenu, setTableCtxMenu] = useState<{ x: number; y: number; table: string } | null>(null);
+  const [dbCtxMenu, setDbCtxMenu] = useState<{ x: number; y: number; db: string } | null>(null);
+  const [editingTabId, setEditingTabId] = useState<string | null>(null);
+  const [editingTabName, setEditingTabName] = useState("");
   const [isRunning, setIsRunning] = useState(false);
   const editorRef = useRef<Monaco.editor.IStandaloneCodeEditor | null>(null);
   const [resultHeight, setResultHeight] = useState(260);
@@ -142,7 +145,7 @@ function App() {
 
   // ─── 컨텍스트 메뉴 닫기 ──────────────────────────────────────
   useEffect(() => {
-    const h = () => { setCtxMenu(null); setTableCtxMenu(null); };
+    const h = () => { setCtxMenu(null); setTableCtxMenu(null); setDbCtxMenu(null); };
     window.addEventListener("click", h);
     return () => window.removeEventListener("click", h);
   }, []);
@@ -212,11 +215,20 @@ function App() {
     }
   };
 
-  // 에디터 내용 프로그래밍 방식으로 변경 (ref + Monaco model 동시 업데이트)
+  // 에디터 내용 프로그래밍 방식으로 변경 — executeEdits로 undo 히스토리 보존
   const setEditorQuery = (q: string) => {
     queryRef.current = q;
     saveTabs(tabs.map(t => t.id === activeTabId ? { ...t, content: q } : t));
-    editorRef.current?.setValue(q);
+    if (editorRef.current) {
+      const model = editorRef.current.getModel();
+      if (model) {
+        editorRef.current.pushUndoStop();
+        editorRef.current.executeEdits("sidebar", [{ range: model.getFullModelRange(), text: q }]);
+        editorRef.current.pushUndoStop();
+      } else {
+        editorRef.current.setValue(q);
+      }
+    }
   };
 
   // 탭 저장 헬퍼
@@ -325,6 +337,33 @@ function App() {
       setResults(res.results);
       await refreshSidebar();
       if (dropTable) setExpandedTables(prev => { const s = new Set(prev); s.delete(dropTable); return s; });
+    } catch (e) {
+      setResults([{ columns: [], rows: [], message: String(e), elapsed: 0, success: false }]);
+    } finally {
+      setIsRunning(false);
+    }
+  };
+
+  // ─── 탭 이름 편집 ─────────────────────────────────────────────
+  const commitTabRename = () => {
+    if (!editingTabId) return;
+    const trimmed = editingTabName.trim();
+    const name = trimmed || (tabs.find(t => t.id === editingTabId)?.name ?? "query.sql");
+    saveTabs(tabs.map(t => t.id === editingTabId ? { ...t, name } : t));
+    setEditingTabId(null);
+  };
+
+  // ─── DB 우클릭 메뉴 핸들러 ────────────────────────────────────
+  const runDbCtxQuery = async (q: string) => {
+    setDbCtxMenu(null);
+    setEditorQuery(q);
+    setResults([]);
+    setIsRunning(true);
+    setActiveView("editor");
+    try {
+      const res = await invoke<MultiQueryResult>("execute_query", { query: q, ts: Date.now() });
+      setResults(res.results);
+      await refreshSidebar();
     } catch (e) {
       setResults([{ columns: [], rows: [], message: String(e), elapsed: 0, success: false }]);
     } finally {
@@ -489,6 +528,11 @@ function App() {
                       className={`sidebar-db-header${isActive ? " sidebar-db-active" : ""}`}
                       onClick={toggleDb}
                       onDoubleClick={switchDb}
+                      onContextMenu={e => {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        setDbCtxMenu({ x: e.clientX, y: e.clientY, db: dbName });
+                      }}
                       title={isActive ? "현재 데이터베이스" : "더블클릭으로 전환"}
                     >
                       <span className="sidebar-group-arrow">{isOpen ? "▼" : "▶"}</span>
@@ -644,6 +688,39 @@ function App() {
             }}
           />
 
+          {/* DB 우클릭 컨텍스트 메뉴 */}
+          {dbCtxMenu && (
+            <div
+              className="ctx-menu table-ctx-menu"
+              style={{ top: dbCtxMenu.y, left: dbCtxMenu.x }}
+              onClick={e => e.stopPropagation()}
+            >
+              <div className="ctx-menu-header">{dbCtxMenu.db}</div>
+              <div className="ctx-divider" />
+              <div onClick={async () => {
+                setDbCtxMenu(null);
+                await invoke<MultiQueryResult>("execute_query", { query: `USE ${dbCtxMenu.db};`, ts: Date.now() });
+                await refreshSidebar();
+              }}>Set as Default Schema</div>
+              <div className="ctx-divider" />
+              <div onClick={() => {
+                setDbCtxMenu(null);
+                setEditorQuery(
+                  `CREATE TABLE ${dbCtxMenu.db}.table_name (\n  id INT PRIMARY KEY AUTO INCREMENT,\n  name VARCHAR(50) NOT NULL\n);`
+                );
+              }}>Create Table...</div>
+              <div className="ctx-divider" />
+              <div onClick={() => {
+                navigator.clipboard.writeText(dbCtxMenu.db);
+                setDbCtxMenu(null);
+              }}>Copy Schema Name</div>
+              <div className="ctx-divider" />
+              <div className="ctx-item-danger" onClick={() => runDbCtxQuery(`DROP DATABASE ${dbCtxMenu.db};`)}>
+                Drop Schema...
+              </div>
+            </div>
+          )}
+
           {/* 테이블 우클릭 컨텍스트 메뉴 */}
           {tableCtxMenu && (
             <div
@@ -678,9 +755,29 @@ function App() {
                     key={tab.id}
                     className={`tab ${tab.id === activeTabId ? "active" : ""}`}
                     onClick={() => switchTab(tab.id)}
+                    onDoubleClick={e => {
+                      e.stopPropagation();
+                      setEditingTabId(tab.id);
+                      setEditingTabName(tab.name);
+                    }}
                   >
                     <span className="tab-icon">⊞</span>
-                    {tab.name}
+                    {editingTabId === tab.id ? (
+                      <input
+                        className="tab-name-input"
+                        value={editingTabName}
+                        autoFocus
+                        onChange={e => setEditingTabName(e.target.value)}
+                        onBlur={commitTabRename}
+                        onKeyDown={e => {
+                          if (e.key === "Enter") { e.preventDefault(); commitTabRename(); }
+                          if (e.key === "Escape") { e.preventDefault(); setEditingTabId(null); }
+                        }}
+                        onClick={e => e.stopPropagation()}
+                      />
+                    ) : (
+                      tab.name
+                    )}
                     <span
                       className="tab-close"
                       onClick={e => closeTab(tab.id, e)}

@@ -6,7 +6,8 @@
       "Bash(grep -v \"^$\")",
       "Bash(findstr /i \"file\\\\|arg\\\\|stdin\")",
       "Bash(Get-Content rustdb-cli/src/main.rs)",
-      "Bash(Select-String -Pattern \"file|arg|stdin\")"
+      "Bash(Select-String -Pattern \"file|arg|stdin\")",
+      "Bash(npm run *)"
     ]
   }
 }

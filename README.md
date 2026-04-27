@@ -633,7 +633,7 @@ code/
 
 ## 사진
 
-<img src="docs/picture/main2.png">
+<img src="assets/pic/main2.png">
 
 <br/>
 

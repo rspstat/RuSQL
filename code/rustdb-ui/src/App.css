@@ -384,6 +384,18 @@ body {
   margin-left: 4px;
 }
 
+.tab-name-input {
+  background: #3c3c3c;
+  border: 1px solid #4ec9b0;
+  color: #ffffff;
+  font-size: 13px;
+  font-family: inherit;
+  padding: 1px 4px;
+  outline: none;
+  border-radius: 2px;
+  width: 100px;
+}
+
 .tab-close:hover {
   color: #cccccc;
 }
