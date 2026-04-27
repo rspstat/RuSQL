@@ -4,12 +4,6 @@
 
 <br/>
 
-## 사진
-
-<img src="docs/picture/main2.png">
-
-<br/>
-
 ## 핵심 기능
 
 | 분류 | 내용 |
@@ -634,6 +628,12 @@ code/
   rustdb-ui        rustdb-mcp
   (Tauri + React)  (MCP, 개발 예정)
 ```
+
+<br/>
+
+## 사진
+
+<img src="docs/picture/main2.png">
 
 <br/>
 
