@@ -183,7 +183,7 @@ ORDER BY amount DESC;
 -- SCALAR FUNCTIONS / CASE WHEN
 SELECT UPPER(name) AS up, LENGTH(name) AS len, CONCAT(name, '@company.com') AS email FROM employees WHERE active = 1 LIMIT 4;
 SELECT COALESCE(dept, 'N/A') AS dept FROM employees WHERE dept IS NULL;
-SELECT name, amount,
+SELECT employee_id, amount,
     CASE WHEN amount >= 10000000 THEN 'Executive'
          WHEN amount >= 7000000 THEN 'Senior'
          WHEN amount >= 5000000 THEN 'Mid'

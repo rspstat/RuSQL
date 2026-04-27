@@ -1037,8 +1037,9 @@ impl Executor {
         let planner = Planner::new(&self.tables, &self.indexes, &self.index_meta, &self.composite_indexes, &self.catalog);
         let plan = planner.plan(&table, &condition, &joins);
 
-        // 인덱스 경로 실행 (집계 / FOR UPDATE / JOIN 없을 때만)
-        if joins.is_empty() && !has_agg && !for_update {
+        // 인덱스 경로 실행 (집계 / FOR UPDATE / JOIN / LIMIT / ORDER BY 없을 때만)
+        if joins.is_empty() && !has_agg && !for_update
+            && limit.is_none() && offset.is_none() && order_by.is_empty() && !distinct {
             match &plan.base.access {
                 // ── PK 포인트 ──────────────────────────────────────────────
                 AccessPath::PkPoint { key } => {

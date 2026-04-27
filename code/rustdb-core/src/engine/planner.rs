@@ -195,20 +195,26 @@ impl<'a> Planner<'a> {
 
     fn choose_join_algo(&self, left_size: usize, right_size: usize, on_expr: &CondExpr, _left_table: &str, right_table: &str) -> JoinAlgo {
         if left_size > 4 || right_size > 4 {
-            if let Some((col_a, col_b)) = extract_equi_join_cols(on_expr) {
-                // Determine which column belongs to which table.
-                // ON conditions may be written as either left.col = right.col or right.col = left.col.
-                // col_a comes from the LHS of the ON condition, col_b from the RHS.
-                // probe_col must exist in the left (probe) table; build_col must exist in the right (build) table.
-                let right_has_col_a = self.catalog.get_table(right_table)
-                    .map(|s| s.columns.iter().any(|c| c.name == col_a))
-                    .unwrap_or(false);
-                let (probe_col, build_col) = if right_has_col_a {
-                    (col_b, col_a) // condition written as right_col = left_col → swap
-                } else {
-                    (col_a, col_b) // condition written as left_col = right_col → normal
-                };
-                return JoinAlgo::Hash { probe_col, build_col };
+            if let CondExpr::Leaf(cond) = on_expr {
+                if cond.operator == Operator::Eq {
+                    if let (ArithExpr::Col(lc), ConditionValue::Literal(rv)) = (&cond.left, &cond.value) {
+                        let lhs_col = lc.split('.').last().unwrap_or(lc).to_string();
+                        let rhs_col = rv.split('.').last().unwrap_or(rv).to_string();
+                        // Use the table prefix in the ON condition to determine direction.
+                        // After alias expansion, ON conditions look like "employees.id = salaries.employee_id".
+                        let lhs_tbl = lc.split('.').next().unwrap_or("").to_lowercase();
+                        let rhs_tbl = rv.split('.').next().unwrap_or("").to_lowercase();
+                        let right_bare = right_table.split('.').last().unwrap_or(right_table).to_lowercase();
+                        let (probe_col, build_col) = if rhs_tbl == right_bare {
+                            (lhs_col, rhs_col) // normal: ON left_tbl.col = right_tbl.col
+                        } else if lhs_tbl == right_bare {
+                            (rhs_col, lhs_col) // reversed: ON right_tbl.col = left_tbl.col
+                        } else {
+                            return JoinAlgo::NestedLoop; // ambiguous, fall back
+                        };
+                        return JoinAlgo::Hash { probe_col, build_col };
+                    }
+                }
             }
         }
         JoinAlgo::NestedLoop
