@@ -7,6 +7,7 @@ pub enum FkAction {
     Restrict,
     Cascade,
     SetNull,
+    SetDefault,
 }
 
 impl Default for FkAction {

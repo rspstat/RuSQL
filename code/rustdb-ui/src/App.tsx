@@ -6,6 +6,13 @@ import type * as Monaco from "monaco-editor";
 import "./App.css";
 
 // ─── 타입 ─────────────────────────────────────────────────────
+interface HistoryEntry {
+  id: string;
+  sql: string;
+  ts: number;
+  success: boolean;
+  elapsed: number;
+}
 interface QueryResult {
   columns: string[];
   rows: string[][];
@@ -29,10 +36,23 @@ interface IndexInfo {
   columns: string[];
   kind: "single" | "composite";
 }
+interface ColumnDetail {
+  name: string;
+  data_type: string;
+  is_pk: boolean;
+  is_not_null: boolean;
+  is_unique: boolean;
+  is_auto_inc: boolean;
+  default_val: string | null;
+  fk_ref: string | null;
+}
 type ActiveView = "editor" | "gui" | "server" | "ai";
+const PAGE_SIZE = 100;
 
 // ─── 탭 타입 ──────────────────────────────────────────────────
 interface Tab { id: string; name: string; content: string; }
+
+const MAX_HISTORY = 200;
 
 function loadTabs(): Tab[] {
   try {
@@ -43,6 +63,16 @@ function loadTabs(): Tab[] {
 }
 function loadActiveTabId(): string {
   return localStorage.getItem("rustdb_active_tab") ?? "1";
+}
+function loadHistory(): HistoryEntry[] {
+  try {
+    const saved = localStorage.getItem("rustdb_history");
+    if (saved) return JSON.parse(saved);
+  } catch {}
+  return [];
+}
+function saveHistory(h: HistoryEntry[]) {
+  localStorage.setItem("rustdb_history", JSON.stringify(h.slice(0, MAX_HISTORY)));
 }
 
 // ─── 메인 컴포넌트 ────────────────────────────────────────────
@@ -60,7 +90,7 @@ function App() {
   const [_views, setViews] = useState<string[]>([]);
   const [_indexes, setIndexes] = useState<IndexInfo[]>([]);
   const [expandedTables, setExpandedTables] = useState<Set<string>>(new Set());
-  const [tableColumns, setTableColumns] = useState<Record<string, string[]>>({});
+  const [tableColumns, setTableColumns] = useState<Record<string, ColumnDetail[]>>({});
   const [expandedViews, setExpandedViews] = useState<Set<string>>(new Set());
   const [viewColumns, setViewColumns] = useState<Record<string, string[]>>({});
   const [expandedIndexes, setExpandedIndexes] = useState<Set<string>>(new Set());
@@ -78,6 +108,9 @@ function App() {
   const [editingTabId, setEditingTabId] = useState<string | null>(null);
   const [editingTabName, setEditingTabName] = useState("");
   const [isRunning, setIsRunning] = useState(false);
+  const [resultPages, setResultPages] = useState<Record<number, number>>({});
+  const [queryHistory, setQueryHistory] = useState<HistoryEntry[]>(loadHistory);
+  const [resultTab, setResultTab] = useState<"results" | "history">("results");
   const editorRef = useRef<Monaco.editor.IStandaloneCodeEditor | null>(null);
   const [resultHeight, setResultHeight] = useState(260);
   const [sidebarWidth, setSidebarWidth] = useState(240);
@@ -203,13 +236,40 @@ function App() {
     const q = (sel?.trim() ? sel : (editorRef.current?.getValue() ?? queryRef.current)).trim();
     if (!q) return;
     setResults([]);
+    setResultPages({});
+    setResultTab("results");
     setIsRunning(true);
+    const startTs = Date.now();
     try {
-      const res = await invoke<MultiQueryResult>("execute_query", { query: q, ts: Date.now() });
+      const res = await invoke<MultiQueryResult>("execute_query", { query: q, ts: startTs });
       setResults(res.results);
+      const entry: HistoryEntry = {
+        id: startTs.toString(),
+        sql: q,
+        ts: startTs,
+        success: res.results.every(r => r.success),
+        elapsed: res.total_elapsed,
+      };
+      setQueryHistory(prev => {
+        const next = [entry, ...prev].slice(0, MAX_HISTORY);
+        saveHistory(next);
+        return next;
+      });
       await refreshSidebar();
     } catch (e) {
       setResults([{ columns: [], rows: [], message: String(e), elapsed: 0, success: false }]);
+      const entry: HistoryEntry = {
+        id: startTs.toString(),
+        sql: q,
+        ts: startTs,
+        success: false,
+        elapsed: (Date.now() - startTs) / 1000,
+      };
+      setQueryHistory(prev => {
+        const next = [entry, ...prev].slice(0, MAX_HISTORY);
+        saveHistory(next);
+        return next;
+      });
     } finally {
       setIsRunning(false);
     }
@@ -298,7 +358,7 @@ function App() {
     }
     setExpandedTables(prev => new Set(prev).add(t));
     if (!tableColumns[t]) {
-      const cols = await invoke<string[]>("get_columns", { table: t });
+      const cols = await invoke<ColumnDetail[]>("get_columns_detail", { table: t });
       setTableColumns(p => ({ ...p, [t]: cols }));
     }
     setEditorQuery(`SELECT * FROM ${t};`);
@@ -571,9 +631,22 @@ function App() {
                               {expandedTables.has(t) && tableColumns[t] && (
                                 <div className="sidebar-columns sidebar-columns-nested">
                                   {tableColumns[t].map(col => (
-                                    <div key={col} className="sidebar-column sidebar-column-nested">
-                                      <span className="col-icon">≡</span>
-                                      <span>{col}</span>
+                                    <div key={col.name} className="sidebar-column sidebar-column-nested" title={[
+                                      col.data_type,
+                                      col.is_pk ? "PRIMARY KEY" : "",
+                                      col.is_not_null ? "NOT NULL" : "",
+                                      col.is_unique && !col.is_pk ? "UNIQUE" : "",
+                                      col.is_auto_inc ? "AUTO INCREMENT" : "",
+                                      col.default_val ? `DEFAULT ${col.default_val}` : "",
+                                      col.fk_ref ? `FK → ${col.fk_ref}` : "",
+                                    ].filter(Boolean).join(" | ")}>
+                                      <span className="col-icon" style={{ color: col.is_pk ? "#f0c040" : col.fk_ref ? "#9cdcfe" : "var(--text-muted)" }}>
+                                        {col.is_pk ? "🔑" : col.fk_ref ? "🔗" : "≡"}
+                                      </span>
+                                      <span className="col-name">{col.name}</span>
+                                      <span className="col-type">{col.data_type}</span>
+                                      {col.is_not_null && <span className="col-badge col-badge-nn">NN</span>}
+                                      {col.is_unique && !col.is_pk && <span className="col-badge col-badge-uq">UQ</span>}
                                     </div>
                                   ))}
                                 </div>
@@ -916,15 +989,62 @@ function App() {
 
             <div className="result-panel" style={{ height: `${resultHeight}px` }}>
               <div className="result-tab-bar">
-                <div className="result-tab active">RESULTS</div>
-                <div className="result-tab">MESSAGES</div>
-                {results.length > 0 && (
+                <div
+                  className={`result-tab ${resultTab === "results" ? "active" : ""}`}
+                  onClick={() => setResultTab("results")}
+                >RESULTS</div>
+                <div
+                  className={`result-tab ${resultTab === "history" ? "active" : ""}`}
+                  onClick={() => setResultTab("history")}
+                >HISTORY {queryHistory.length > 0 && <span className="history-count">{queryHistory.length}</span>}</div>
+                {resultTab === "results" && results.length > 0 && (
                   <div className={`result-status ${results.every(r => r.success) ? "ok" : "err"}`}>
                     {results.every(r => r.success) ? `✓ ${results.length} query(s)` : "✗ Error"}
                   </div>
                 )}
               </div>
 
+              {resultTab === "history" ? (
+                <div className="result-content">
+                  {queryHistory.length === 0 ? (
+                    <div className="result-empty">실행 기록이 없습니다</div>
+                  ) : (
+                    <>
+                      <div className="history-toolbar">
+                        <span className="history-toolbar-info">{queryHistory.length}개 기록</span>
+                        <button className="history-clear-btn" onClick={() => {
+                          setQueryHistory([]);
+                          saveHistory([]);
+                        }}>전체 삭제</button>
+                      </div>
+                      {queryHistory.map(h => {
+                        const d = new Date(h.ts);
+                        const time = d.toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+                        const date = d.toLocaleDateString("ko-KR", { month: "2-digit", day: "2-digit" });
+                        const firstLine = h.sql.split("\n")[0].trim();
+                        const preview = firstLine.length > 80 ? firstLine.slice(0, 80) + "…" : firstLine;
+                        return (
+                          <div
+                            key={h.id}
+                            className="history-item"
+                            onClick={() => setEditorQuery(h.sql)}
+                            title="클릭하면 에디터에 불러옵니다"
+                          >
+                            <div className="history-item-header">
+                              <span className={`history-icon ${h.success ? "ok" : "err"}`}>
+                                {h.success ? "✓" : "✗"}
+                              </span>
+                              <span className="history-time">{date} {time}</span>
+                              <span className="history-elapsed">{h.elapsed.toFixed(3)}s</span>
+                            </div>
+                            <div className="history-sql">{preview}</div>
+                          </div>
+                        );
+                      })}
+                    </>
+                  )}
+                </div>
+              ) : (
               <div
                 className="result-content"
                 onContextMenu={e => { e.preventDefault(); setCtxMenu({ x: e.clientX, y: e.clientY }); }}
@@ -938,17 +1058,35 @@ function App() {
                       <div className="result-error">❌ {r.message}</div>
                     ) : r.columns.length === 0 ? (
                       <div className="result-msg">✅ {r.message} · {r.elapsed.toFixed(3)}s</div>
-                    ) : (
-                      <>
-                        <div className="result-info">{r.rows.length} row(s) · {r.elapsed.toFixed(3)}s</div>
-                        <table className="result-table">
-                          <thead><tr>{r.columns.map(c => <th key={c}>{c}</th>)}</tr></thead>
-                          <tbody>{r.rows.map((row, ri) => (
-                            <tr key={ri}>{row.map((cell, ci) => <td key={ci}>{cell}</td>)}</tr>
-                          ))}</tbody>
-                        </table>
-                      </>
-                    )}
+                    ) : (() => {
+                        const page = resultPages[i] ?? 0;
+                        const total = r.rows.length;
+                        const pageCount = Math.ceil(total / PAGE_SIZE);
+                        const pageRows = r.rows.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
+                        return (
+                          <>
+                            <div className="result-info">
+                              {total} row(s) · {r.elapsed.toFixed(3)}s
+                              {pageCount > 1 && (
+                                <span className="result-page-info">
+                                  &nbsp;· 표시: {page * PAGE_SIZE + 1}–{Math.min((page + 1) * PAGE_SIZE, total)} / {total}
+                                  <button className="page-btn" disabled={page === 0}
+                                    onClick={() => setResultPages(p => ({ ...p, [i]: page - 1 }))}>‹</button>
+                                  <span className="page-indicator">{page + 1} / {pageCount}</span>
+                                  <button className="page-btn" disabled={page >= pageCount - 1}
+                                    onClick={() => setResultPages(p => ({ ...p, [i]: page + 1 }))}>›</button>
+                                </span>
+                              )}
+                            </div>
+                            <table className="result-table">
+                              <thead><tr>{r.columns.map(c => <th key={c}>{c}</th>)}</tr></thead>
+                              <tbody>{pageRows.map((row, ri) => (
+                                <tr key={ri}>{row.map((cell, ci) => <td key={ci}>{cell}</td>)}</tr>
+                              ))}</tbody>
+                            </table>
+                          </>
+                        );
+                      })()}
                   </div>
                 ))}
                 {ctxMenu && (
@@ -968,6 +1106,7 @@ function App() {
                   </div>
                 )}
               </div>
+              )}
             </div>
 
             <div className="status-bar">

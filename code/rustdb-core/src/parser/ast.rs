@@ -18,6 +18,7 @@ pub enum ArithExpr {
     Sub(Box<ArithExpr>, Box<ArithExpr>),
     Mul(Box<ArithExpr>, Box<ArithExpr>),
     Div(Box<ArithExpr>, Box<ArithExpr>),
+    Func(String, Vec<ArithExpr>),
 }
 
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
@@ -45,6 +46,7 @@ pub enum FkAction {
     Restrict,
     Cascade,
     SetNull,
+    SetDefault,
 }
 
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
@@ -127,6 +129,14 @@ pub enum CondExpr {
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub enum AggFunc {
     Count, Sum, Avg, Min, Max,
+    GroupConcat { separator: String },
+}
+
+#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
+pub enum InsertConflict {
+    Abort,
+    Ignore,
+    Update(Vec<(String, ArithExpr)>),
 }
 
 /// CASE WHEN branch: (condition_expression, then_value)
@@ -184,11 +194,13 @@ pub enum Statement {
         table: String,
         columns: Option<Vec<String>>,
         values: Vec<Vec<String>>,
+        on_conflict: InsertConflict,
     },
     InsertSelect {
         table: String,
         columns: Option<Vec<String>>,
         query: Box<Statement>,
+        on_conflict: InsertConflict,
     },
     Select {
         table: String,
@@ -253,6 +265,7 @@ pub enum Statement {
     With {
         ctes: Vec<(String, Box<Statement>)>,
         query: Box<Statement>,
+        recursive: bool,
     },
     Union {
         left: Box<Statement>,
@@ -282,4 +295,35 @@ pub enum Statement {
         joins: Vec<Join>,
         condition: Option<CondExpr>,
     },
+    CreateUser {
+        user: String,
+        host: String,
+        password: Option<String>,
+        if_not_exists: bool,
+    },
+    DropUser {
+        user: String,
+        host: String,
+        if_exists: bool,
+    },
+    Grant {
+        privileges: Vec<String>,
+        object_type: String,
+        object: String,
+        user: String,
+        host: String,
+        with_grant_option: bool,
+    },
+    Revoke {
+        privileges: Vec<String>,
+        object_type: String,
+        object: String,
+        user: String,
+        host: String,
+    },
+    ShowGrants {
+        user: Option<String>,
+        host: Option<String>,
+    },
+    ShowDatabases,
 }

@@ -25,6 +25,7 @@ fn expand_arith(expr: ArithExpr, map: &HashMap<String, String>) -> ArithExpr {
         ArithExpr::Sub(l, r) => ArithExpr::Sub(Box::new(expand_arith(*l, map)), Box::new(expand_arith(*r, map))),
         ArithExpr::Mul(l, r) => ArithExpr::Mul(Box::new(expand_arith(*l, map)), Box::new(expand_arith(*r, map))),
         ArithExpr::Div(l, r) => ArithExpr::Div(Box::new(expand_arith(*l, map)), Box::new(expand_arith(*r, map))),
+        ArithExpr::Func(name, args) => ArithExpr::Func(name, args.into_iter().map(|a| expand_arith(a, map)).collect()),
     }
 }
 
@@ -175,6 +176,10 @@ impl Parser {
                         self.advance();
                         self.parse_create_database()
                     }
+                    Some(Token::User) => {
+                        self.advance();
+                        self.parse_create_user()
+                    }
                     _ => self.parse_create(),
                 }
             }
@@ -192,9 +197,15 @@ impl Parser {
                         self.advance();
                         self.parse_drop_database()
                     }
+                    Some(Token::User) => {
+                        self.advance();
+                        self.parse_drop_user()
+                    }
                     _ => self.parse_drop(),
                 }
             }
+            Some(Token::Grant)  => self.parse_grant(),
+            Some(Token::Revoke) => self.parse_revoke(),
             Some(Token::Ident(s)) if s == "BEGIN"    => Ok(Statement::Begin),
             Some(Token::Ident(s)) if s == "COMMIT"   => Ok(Statement::Commit),
             Some(Token::Ident(s)) if s == "ROLLBACK" => {
@@ -243,7 +254,12 @@ impl Parser {
 
     fn parse_with(&mut self) -> Result<Statement, String> {
         // WITH [RECURSIVE] cte_name AS (query) [, cte_name AS (query)] ... SELECT ...
-        if self.peek() == Some(&Token::Recursive) { self.advance(); } // RECURSIVE keyword ignored (non-recursive only)
+        let recursive = if self.peek() == Some(&Token::Recursive) {
+            self.advance();
+            true
+        } else {
+            false
+        };
 
         let mut ctes: Vec<(String, Box<Statement>)> = Vec::new();
         loop {
@@ -260,7 +276,27 @@ impl Parser {
                 Some(Token::Select) => {}
                 other => return Err(format!("Expected SELECT in CTE body, got {:?}", other)),
             }
-            let body = self.parse_select()?;
+            let base = self.parse_select()?;
+            // 재귀 CTE: body 내 UNION [ALL] 처리
+            let body = if self.peek() == Some(&Token::Union) {
+                self.advance(); // consume UNION
+                let all = if self.peek() == Some(&Token::All) { self.advance(); true } else { false };
+                match self.advance() {
+                    Some(Token::Select) => {}
+                    other => return Err(format!("Expected SELECT after UNION in CTE, got {:?}", other)),
+                }
+                let recursive_part = self.parse_select()?;
+                Statement::Union {
+                    left: Box::new(base),
+                    right: Box::new(recursive_part),
+                    all,
+                    order_by: vec![],
+                    limit: None,
+                    offset: None,
+                }
+            } else {
+                base
+            };
             match self.advance() {
                 Some(Token::RParen) => {}
                 other => return Err(format!("Expected ')' after CTE body, got {:?}", other)),
@@ -275,7 +311,7 @@ impl Parser {
 
         // Main query (any DML: SELECT, INSERT ... SELECT, etc.)
         let query = self.parse()?;
-        Ok(Statement::With { ctes, query: Box::new(query) })
+        Ok(Statement::With { ctes, query: Box::new(query), recursive })
     }
 
     /// Top-level condition expression parser (entry point for WHERE/HAVING/ON)
@@ -610,6 +646,59 @@ impl Parser {
                 }
                 Ok(inner)
             }
+            // Scalar functions usable in arithmetic / UPDATE SET context
+            Some(Token::Concat) | Some(Token::Upper) | Some(Token::Lower) |
+            Some(Token::Length) | Some(Token::Trim)  | Some(Token::Substr) |
+            Some(Token::Substring) | Some(Token::Replace) |
+            Some(Token::Round)  | Some(Token::Abs)   | Some(Token::Ceil) |
+            Some(Token::Floor)  | Some(Token::Mod)   |
+            Some(Token::Coalesce) | Some(Token::Ifnull) | Some(Token::Nullif) |
+            Some(Token::Lpad)   | Some(Token::Rpad)  | Some(Token::If) |
+            Some(Token::DateAdd) | Some(Token::DateDiff) => {
+                let fname = match self.advance() {
+                    Some(Token::Concat)    => "CONCAT",
+                    Some(Token::Upper)     => "UPPER",
+                    Some(Token::Lower)     => "LOWER",
+                    Some(Token::Length)    => "LENGTH",
+                    Some(Token::Trim)      => "TRIM",
+                    Some(Token::Substr) | Some(Token::Substring) => "SUBSTR",
+                    Some(Token::Replace)   => "REPLACE",
+                    Some(Token::Round)     => "ROUND",
+                    Some(Token::Abs)       => "ABS",
+                    Some(Token::Ceil)      => "CEIL",
+                    Some(Token::Floor)     => "FLOOR",
+                    Some(Token::Mod)       => "MOD",
+                    Some(Token::Coalesce)  => "COALESCE",
+                    Some(Token::Ifnull)    => "IFNULL",
+                    Some(Token::Nullif)    => "NULLIF",
+                    Some(Token::Lpad)      => "LPAD",
+                    Some(Token::Rpad)      => "RPAD",
+                    Some(Token::If)        => "IF",
+                    Some(Token::DateAdd)   => "DATE_ADD",
+                    Some(Token::DateDiff)  => "DATEDIFF",
+                    _ => unreachable!(),
+                };
+                match self.advance() {
+                    Some(Token::LParen) => {}
+                    other => return Err(format!("Expected '(' after {}, got {:?}", fname, other)),
+                }
+                let mut args = Vec::new();
+                while self.peek() != Some(&Token::RParen) {
+                    if !args.is_empty() {
+                        match self.advance() {
+                            Some(Token::Comma) => {}
+                            other => return Err(format!("Expected ',' in {} args, got {:?}", fname, other)),
+                        }
+                    }
+                    if self.peek() == Some(&Token::RParen) { break; }
+                    args.push(self.parse_arith_expr()?);
+                }
+                match self.advance() {
+                    Some(Token::RParen) => {}
+                    other => return Err(format!("Expected ')' after {} args, got {:?}", fname, other)),
+                }
+                Ok(ArithExpr::Func(fname.to_string(), args))
+            }
             Some(Token::Ident(_)) => {
                 let s = self.expect_col_ref()?;
                 Ok(ArithExpr::Col(s))
@@ -640,7 +729,7 @@ impl Parser {
     }
 
     /// Arithmetic expression: term (('+' | '-') term)*
-    fn parse_arith_expr(&mut self) -> Result<ArithExpr, String> {
+    pub(crate) fn parse_arith_expr(&mut self) -> Result<ArithExpr, String> {
         let mut left = self.parse_arith_term()?;
         loop {
             match self.peek() {
@@ -661,6 +750,21 @@ impl Parser {
     }
 
     /// CASE WHEN cond THEN val ... [ELSE val] END
+    pub(crate) fn arith_to_string(expr: &ArithExpr) -> String {
+        match expr {
+            ArithExpr::Col(s) | ArithExpr::Num(s) => s.clone(),
+            ArithExpr::Str(s) => format!("'{}'", s),
+            ArithExpr::Add(l, r) => format!("{} + {}", Self::arith_to_string(l), Self::arith_to_string(r)),
+            ArithExpr::Sub(l, r) => format!("{} - {}", Self::arith_to_string(l), Self::arith_to_string(r)),
+            ArithExpr::Mul(l, r) => format!("{} * {}", Self::arith_to_string(l), Self::arith_to_string(r)),
+            ArithExpr::Div(l, r) => format!("{} / {}", Self::arith_to_string(l), Self::arith_to_string(r)),
+            ArithExpr::Func(name, args) => {
+                let arg_strs: Vec<String> = args.iter().map(|a| Self::arith_to_string(a)).collect();
+                format!("{}({})", name, arg_strs.join(", "))
+            }
+        }
+    }
+
     fn parse_case_when(&mut self) -> Result<SelectColumn, String> {
         let mut branches = Vec::new();
         loop {
@@ -763,6 +867,46 @@ impl Parser {
                         SelectColumn::Agg { func, col: agg_col }
                     }
                 }
+                // GROUP_CONCAT(col [SEPARATOR 'sep'])
+                Some(Token::GroupConcat) => {
+                    self.advance();
+                    match self.advance() {
+                        Some(Token::LParen) => {}
+                        other => return Err(format!("Expected '(' after GROUP_CONCAT, got {:?}", other)),
+                    }
+                    let agg_col = match self.advance() {
+                        Some(Token::Ident(s)) => {
+                            let first = s.clone();
+                            if self.peek() == Some(&Token::Dot) {
+                                self.advance();
+                                self.expect_ident()?
+                            } else { first }
+                        }
+                        other => return Err(format!("Expected column in GROUP_CONCAT, got {:?}", other)),
+                    };
+                    // Optional SEPARATOR 'sep'
+                    let separator = if self.peek() == Some(&Token::Separator) {
+                        self.advance();
+                        match self.advance() {
+                            Some(Token::StringLit(s)) => s.clone(),
+                            other => return Err(format!("Expected string after SEPARATOR, got {:?}", other)),
+                        }
+                    } else {
+                        ",".to_string()
+                    };
+                    match self.advance() {
+                        Some(Token::RParen) => {}
+                        other => return Err(format!("Expected ')' after GROUP_CONCAT, got {:?}", other)),
+                    }
+                    let func = AggFunc::GroupConcat { separator };
+                    if self.peek() == Some(&Token::As) {
+                        self.advance();
+                        let alias = self.expect_alias_ident()?;
+                        SelectColumn::AggAlias { func, col: agg_col, alias }
+                    } else {
+                        SelectColumn::Agg { func, col: agg_col }
+                    }
+                }
                 // CASE WHEN ... THEN ... [ELSE ...] END
                 Some(Token::Case) => {
                     self.advance(); // consume CASE
@@ -812,6 +956,26 @@ impl Parser {
                         alias,
                     }
                 }
+                // CAST(expr AS type) — 특수 문법
+                Some(Token::Cast) => {
+                    self.advance();
+                    let args = self.parse_cast_args()?;
+                    let alias = if self.peek() == Some(&Token::As) {
+                        self.advance();
+                        Some(self.expect_alias_ident()?)
+                    } else { None };
+                    SelectColumn::Func { name: "CAST".to_string(), args, alias }
+                }
+                // DATE_ADD(date, INTERVAL n unit) — 특수 문법
+                Some(Token::DateAdd) => {
+                    self.advance();
+                    let args = self.parse_date_add_args()?;
+                    let alias = if self.peek() == Some(&Token::As) {
+                        self.advance();
+                        Some(self.expect_alias_ident()?)
+                    } else { None };
+                    SelectColumn::Func { name: "DATE_ADD".to_string(), args, alias }
+                }
                 // 스칼라 함수: UPPER(col), NOW(), CONCAT(a, b), ...
                 Some(Token::Upper) | Some(Token::Lower) | Some(Token::Length) |
                 Some(Token::Trim)  | Some(Token::Concat) | Some(Token::Substr) |
@@ -819,7 +983,9 @@ impl Parser {
                 Some(Token::DateFormat) | Some(Token::Coalesce) | Some(Token::Ifnull) |
                 Some(Token::Replace) |
                 Some(Token::Round) | Some(Token::Abs) | Some(Token::Ceil) |
-                Some(Token::Floor) | Some(Token::Mod) => {
+                Some(Token::Floor) | Some(Token::Mod) |
+                Some(Token::Nullif) | Some(Token::Lpad) | Some(Token::Rpad) |
+                Some(Token::DateDiff) => {
                     let fname = match self.advance() {
                         Some(Token::Upper)      => "UPPER",
                         Some(Token::Lower)      => "LOWER",
@@ -839,6 +1005,10 @@ impl Parser {
                         Some(Token::Ceil)       => "CEIL",
                         Some(Token::Floor)      => "FLOOR",
                         Some(Token::Mod)        => "MOD",
+                        Some(Token::Nullif)     => "NULLIF",
+                        Some(Token::Lpad)       => "LPAD",
+                        Some(Token::Rpad)       => "RPAD",
+                        Some(Token::DateDiff)   => "DATEDIFF",
                         _ => unreachable!(),
                     }.to_string();
                     let args = self.parse_func_args()?;
@@ -876,10 +1046,24 @@ impl Parser {
             }
         }
 
-        match self.advance() {
-            Some(Token::From) => {}
-            other => return Err(format!("Expected FROM, got {:?}", other)),
+        // FROM is optional: scalar SELECT (no FROM) is supported
+        if self.peek() != Some(&Token::From) {
+            return Ok(Statement::Select {
+                table: "_dual_".to_string(),
+                subquery: None,
+                columns,
+                distinct,
+                condition: None,
+                joins: vec![],
+                order_by: vec![],
+                group_by: None,
+                having: None,
+                limit: None,
+                offset: None,
+                for_update: false,
+            });
         }
+        self.advance(); // consume FROM
 
         // FROM (SELECT ...) AS alias  OR  FROM table_name [alias]
         let mut alias_map: HashMap<String, String> = HashMap::new();
@@ -1105,7 +1289,13 @@ impl Parser {
     }
 
     fn parse_insert(&mut self) -> Result<Statement, String> {
-        // INSERT INTO table [(col1, col2, ...)] VALUES (v1, v2, ...) [, (v3, v4, ...) ...]
+        // INSERT [IGNORE] INTO table [(col1, col2, ...)] VALUES (...) [ON DUPLICATE KEY UPDATE ...]
+        let ignore = if self.peek() == Some(&Token::Ignore) {
+            self.advance();
+            true
+        } else {
+            false
+        };
         match self.advance() {
             Some(Token::Into) => {}
             other => return Err(format!("Expected INTO, got {:?}", other)),
@@ -1133,7 +1323,8 @@ impl Parser {
         if self.peek() == Some(&Token::Select) {
             self.advance(); // consume SELECT
             let query = self.parse_select()?;
-            return Ok(Statement::InsertSelect { table, columns, query: Box::new(query) });
+            let on_conflict = if ignore { InsertConflict::Ignore } else { InsertConflict::Abort };
+            return Ok(Statement::InsertSelect { table, columns, query: Box::new(query), on_conflict });
         }
 
         match self.advance() {
@@ -1177,7 +1368,44 @@ impl Parser {
             }
         }
 
-        Ok(Statement::Insert { table, columns, values: all_values })
+        // ON DUPLICATE KEY UPDATE col=val, ...
+        let on_conflict = if self.peek() == Some(&Token::On) {
+            self.advance(); // ON
+            match self.advance() {
+                Some(Token::Duplicate) => {}
+                other => return Err(format!("Expected DUPLICATE, got {:?}", other)),
+            }
+            match self.advance() {
+                Some(Token::Key) => {}
+                other => return Err(format!("Expected KEY, got {:?}", other)),
+            }
+            match self.advance() {
+                Some(Token::Update) => {}
+                other => return Err(format!("Expected UPDATE, got {:?}", other)),
+            }
+            let mut assignments = Vec::new();
+            loop {
+                let col = self.expect_ident()?;
+                match self.advance() {
+                    Some(Token::Eq) => {}
+                    other => return Err(format!("Expected '=' in ON DUPLICATE KEY UPDATE, got {:?}", other)),
+                }
+                let expr = self.parse_arith_expr()?;
+                assignments.push((col, expr));
+                if self.peek() == Some(&Token::Comma) {
+                    self.advance();
+                } else {
+                    break;
+                }
+            }
+            InsertConflict::Update(assignments)
+        } else if ignore {
+            InsertConflict::Ignore
+        } else {
+            InsertConflict::Abort
+        };
+
+        Ok(Statement::Insert { table, columns, values: all_values, on_conflict })
     }
 
     fn parse_update(&mut self) -> Result<Statement, String> {
@@ -1390,34 +1618,120 @@ impl Parser {
                     other => return Err(format!("Expected ',' in function args, got {:?}", other)),
                 }
             }
-            let arg = match self.peek() {
-                Some(Token::RParen) => break,
-                _ => match self.advance() {
-                    Some(Token::StringLit(s)) => format!("'{}'", s),
-                    Some(Token::NumberLit(n)) => n.clone(),
-                    Some(Token::Asterisk)     => "*".to_string(),
-                    Some(Token::Null)         => "NULL".to_string(),
-                    Some(Token::Ident(s))     => {
-                        let s = s.clone();
-                        // table.col 형태 처리
-                        if self.peek() == Some(&Token::Dot) {
-                            self.advance();
-                            let col = self.expect_ident()?;
-                            format!("{}.{}", s, col)
-                        } else {
-                            s
-                        }
-                    }
-                    other => return Err(format!("Expected function argument, got {:?}", other)),
-                }
-            };
-            args.push(arg);
+            if self.peek() == Some(&Token::RParen) { break; }
+            // Parse each arg as a full arithmetic expression to support ROUND(salary / 1000000, 2)
+            let expr = self.parse_arith_expr()?;
+            args.push(Self::arith_to_string(&expr));
         }
         match self.advance() {
             Some(Token::RParen) => {}
             other => return Err(format!("Expected ')' after function args, got {:?}", other)),
         }
         Ok(args)
+    }
+
+    /// CAST(expr AS type) → ["expr", "TYPE"]
+    fn parse_cast_args(&mut self) -> Result<Vec<String>, String> {
+        match self.advance() {
+            Some(Token::LParen) => {}
+            other => return Err(format!("Expected '(' after CAST, got {:?}", other)),
+        }
+        // expr: identifier or literal
+        let expr = match self.advance() {
+            Some(Token::StringLit(s)) => format!("'{}'", s),
+            Some(Token::NumberLit(n)) => n.clone(),
+            Some(Token::Null)         => "NULL".to_string(),
+            Some(Token::Ident(s))     => {
+                let s = s.clone();
+                if self.peek() == Some(&Token::Dot) {
+                    self.advance();
+                    let col = self.expect_ident()?;
+                    format!("{}.{}", s, col)
+                } else { s }
+            }
+            other => return Err(format!("Expected expression in CAST, got {:?}", other)),
+        };
+        match self.advance() {
+            Some(Token::As) => {}
+            other => return Err(format!("Expected AS in CAST, got {:?}", other)),
+        }
+        // type: ident (INT, VARCHAR, DATE, etc.)
+        let type_str = match self.advance() {
+            Some(Token::Ident(s)) => s.clone().to_uppercase(),
+            Some(Token::Int)      => "INT".to_string(),
+            Some(Token::Float)    => "FLOAT".to_string(),
+            Some(Token::Double)   => "DOUBLE".to_string(),
+            Some(Token::Text)     => "TEXT".to_string(),
+            Some(Token::Varchar)  => "VARCHAR".to_string(),
+            Some(Token::Date)     => "DATE".to_string(),
+            Some(Token::Datetime) => "DATETIME".to_string(),
+            Some(Token::Decimal)  => "DECIMAL".to_string(),
+            Some(Token::Boolean)  => "BOOLEAN".to_string(),
+            other => return Err(format!("Expected type in CAST, got {:?}", other)),
+        };
+        // optional (n) for VARCHAR(n)
+        if self.peek() == Some(&Token::LParen) {
+            self.advance();
+            while self.peek() != Some(&Token::RParen) && self.peek().is_some() {
+                self.advance();
+            }
+            self.advance(); // consume ')'
+        }
+        match self.advance() {
+            Some(Token::RParen) => {}
+            other => return Err(format!("Expected ')' after CAST, got {:?}", other)),
+        }
+        Ok(vec![expr, type_str])
+    }
+
+    /// DATE_ADD(date, INTERVAL n unit) → ["date_expr", "n", "UNIT"]
+    fn parse_date_add_args(&mut self) -> Result<Vec<String>, String> {
+        match self.advance() {
+            Some(Token::LParen) => {}
+            other => return Err(format!("Expected '(' after DATE_ADD, got {:?}", other)),
+        }
+        let date_expr = match self.advance() {
+            Some(Token::StringLit(s)) => format!("'{}'", s),
+            Some(Token::Ident(s))     => {
+                let s = s.clone();
+                if self.peek() == Some(&Token::Dot) {
+                    self.advance();
+                    let col = self.expect_ident()?;
+                    format!("{}.{}", s, col)
+                } else { s }
+            }
+            other => return Err(format!("Expected date expr in DATE_ADD, got {:?}", other)),
+        };
+        match self.advance() {
+            Some(Token::Comma) => {}
+            other => return Err(format!("Expected ',' in DATE_ADD, got {:?}", other)),
+        }
+        match self.advance() {
+            Some(Token::Interval) => {}
+            other => return Err(format!("Expected INTERVAL in DATE_ADD, got {:?}", other)),
+        }
+        let amount = match self.advance() {
+            Some(Token::NumberLit(n)) => n.clone(),
+            Some(Token::Minus) => {
+                let n = match self.advance() {
+                    Some(Token::NumberLit(n)) => n.clone(),
+                    other => return Err(format!("Expected number after - in INTERVAL, got {:?}", other)),
+                };
+                format!("-{}", n)
+            }
+            other => return Err(format!("Expected number in INTERVAL, got {:?}", other)),
+        };
+        // unit: DAY/MONTH/YEAR/HOUR/MINUTE/SECOND — 대부분 Ident로 파싱됨, Year은 별도 토큰
+        let unit = match self.advance() {
+            Some(Token::Ident(s)) => s.clone().to_uppercase(),
+            Some(Token::Year)     => "YEAR".to_string(),
+            other => return Err(format!("Expected INTERVAL unit in DATE_ADD, got {:?}", other)),
+        };
+        match self.advance() {
+            Some(Token::RParen) => {}
+            other => return Err(format!("Expected ')' after DATE_ADD, got {:?}", other)),
+        }
+        Ok(vec![date_expr, amount, unit])
     }
 
     /// 괄호 안의 원시 SQL 표현식을 문자열로 캡처 (CHECK 제약 저장용)
@@ -1647,10 +1961,16 @@ impl Parser {
                             match p.advance() {
                                 Some(Token::Cascade)  => Ok(FkAction::Cascade),
                                 Some(Token::Restrict) => Ok(FkAction::Restrict),
+                                Some(Token::Ident(s)) if s.to_uppercase() == "NO" => {
+                                    // NO ACTION = RESTRICT
+                                    p.advance(); // ACTION
+                                    Ok(FkAction::Restrict)
+                                }
                                 Some(Token::Set) => {
                                     match p.advance() {
                                         Some(Token::Null) => Ok(FkAction::SetNull),
-                                        other => Err(format!("Expected NULL, got {:?}", other)),
+                                        Some(Token::Default) => Ok(FkAction::SetDefault),
+                                        other => Err(format!("Expected NULL or DEFAULT after SET, got {:?}", other)),
                                     }
                                 }
                                 other => Err(format!("Expected CASCADE/RESTRICT/SET, got {:?}", other)),
@@ -1810,10 +2130,15 @@ impl Parser {
                         match p.advance() {
                             Some(Token::Cascade)  => Ok(FkAction::Cascade),
                             Some(Token::Restrict) => Ok(FkAction::Restrict),
+                            Some(Token::Ident(s)) if s.to_uppercase() == "NO" => {
+                                p.advance(); // ACTION
+                                Ok(FkAction::Restrict)
+                            }
                             Some(Token::Set) => {
                                 match p.advance() {
                                     Some(Token::Null) => Ok(FkAction::SetNull),
-                                    other => Err(format!("Expected NULL, got {:?}", other)),
+                                    Some(Token::Default) => Ok(FkAction::SetDefault),
+                                    other => Err(format!("Expected NULL or DEFAULT after SET, got {:?}", other)),
                                 }
                             }
                             other => Err(format!("Expected CASCADE/RESTRICT/SET, got {:?}", other)),
@@ -2132,7 +2457,19 @@ impl Parser {
                 }
             }
             Some(Token::Locks) => Ok(Statement::ShowLocks),
-            other => Err(format!("Expected TABLES, BUFFER, WAL, ISOLATION, or LOCKS, got {:?}", other)),
+            Some(Token::Databases) => Ok(Statement::ShowDatabases),
+            Some(Token::Grants) => {
+                // SHOW GRANTS [FOR 'user'@'host']
+                let (user, host) = if self.peek() == Some(&Token::For) {
+                    self.advance(); // FOR
+                    let (u, h) = self.parse_user_spec()?;
+                    (Some(u), Some(h))
+                } else {
+                    (None, None)
+                };
+                Ok(Statement::ShowGrants { user, host })
+            }
+            other => Err(format!("Expected TABLES, BUFFER, WAL, ISOLATION, LOCKS, DATABASES, or GRANTS, got {:?}", other)),
         }
     }
 
@@ -2195,5 +2532,182 @@ impl Parser {
             _ => None,
         };
         Ok(Statement::Vacuum { table })
+    }
+
+    // ── 사용자 스펙 파싱: 'user'@'host' 또는 user@host 또는 user ──────────
+    fn parse_user_spec(&mut self) -> Result<(String, String), String> {
+        let user = match self.advance() {
+            Some(Token::StringLit(s)) => s.clone(),
+            Some(Token::Ident(s))     => s.clone(),
+            other => return Err(format!("Expected username, got {:?}", other)),
+        };
+        let host = if self.peek() == Some(&Token::At) {
+            self.advance(); // @
+            match self.advance() {
+                Some(Token::StringLit(s)) => s.clone(),
+                Some(Token::Ident(s))     => s.clone(),
+                Some(Token::NumberLit(s)) => s.clone(),
+                Some(Token::Mod)          => "mod".to_string(),
+                other => return Err(format!("Expected hostname after @, got {:?}", other)),
+            }
+        } else {
+            "%".to_string()
+        };
+        Ok((user, host))
+    }
+
+    // CREATE USER ['user'@'host'] [IDENTIFIED BY 'password']
+    fn parse_create_user(&mut self) -> Result<Statement, String> {
+        let if_not_exists = if self.peek() == Some(&Token::If) {
+            self.advance(); // IF
+            match self.advance() { Some(Token::Not) => {} other => return Err(format!("Expected NOT, got {:?}", other)) }
+            match self.advance() { Some(Token::Exists) => {} other => return Err(format!("Expected EXISTS, got {:?}", other)) }
+            true
+        } else { false };
+        let (user, host) = self.parse_user_spec()?;
+        let password = if self.peek() == Some(&Token::Identified) {
+            self.advance(); // IDENTIFIED
+            match self.advance() { Some(Token::By) | Some(Token::Ident(_)) => {} other => return Err(format!("Expected BY, got {:?}", other)) }
+            match self.advance() {
+                Some(Token::StringLit(s)) => Some(s.clone()),
+                other => return Err(format!("Expected password string, got {:?}", other)),
+            }
+        } else { None };
+        Ok(Statement::CreateUser { user, host, password, if_not_exists })
+    }
+
+    // DROP USER [IF EXISTS] 'user'@'host'
+    fn parse_drop_user(&mut self) -> Result<Statement, String> {
+        let if_exists = if self.peek() == Some(&Token::If) {
+            self.advance();
+            match self.advance() { Some(Token::Exists) => {} other => return Err(format!("Expected EXISTS, got {:?}", other)) }
+            true
+        } else { false };
+        let (user, host) = self.parse_user_spec()?;
+        Ok(Statement::DropUser { user, host, if_exists })
+    }
+
+    // GRANT priv [, priv ...] ON [TABLE|DATABASE|*] object TO 'user'@'host' [WITH GRANT OPTION]
+    fn parse_grant(&mut self) -> Result<Statement, String> {
+        let mut privileges: Vec<String> = Vec::new();
+        loop {
+            let priv_name = match self.advance() {
+                Some(Token::Privileges) => "ALL PRIVILEGES".to_string(),
+                Some(Token::All) => {
+                    if self.peek() == Some(&Token::Privileges) { self.advance(); }
+                    "ALL PRIVILEGES".to_string()
+                }
+                Some(Token::Ident(s)) if s.to_uppercase() == "ALL" => {
+                    if self.peek() == Some(&Token::Privileges) { self.advance(); }
+                    "ALL PRIVILEGES".to_string()
+                }
+                Some(Token::Select)  => "SELECT".to_string(),
+                Some(Token::Insert)  => "INSERT".to_string(),
+                Some(Token::Update)  => "UPDATE".to_string(),
+                Some(Token::Delete)  => "DELETE".to_string(),
+                Some(Token::Create)  => "CREATE".to_string(),
+                Some(Token::Drop)    => "DROP".to_string(),
+                Some(Token::Alter)   => "ALTER".to_string(),
+                Some(Token::Index)   => "INDEX".to_string(),
+                Some(Token::Grant)   => "GRANT OPTION".to_string(),
+                Some(Token::Ident(s)) => s.to_uppercase().clone(),
+                other => return Err(format!("Expected privilege name, got {:?}", other)),
+            };
+            privileges.push(priv_name);
+            if self.peek() == Some(&Token::Comma) { self.advance(); } else { break; }
+        }
+        match self.advance() {
+            Some(Token::On) => {}
+            other => return Err(format!("Expected ON, got {:?}", other)),
+        }
+        // optional object type keyword
+        let object_type = match self.peek() {
+            Some(Token::Table)     => { self.advance(); "TABLE".to_string() }
+            Some(Token::Database)  => { self.advance(); "DATABASE".to_string() }
+            Some(Token::Databases) => { self.advance(); "DATABASES".to_string() }
+            _ => "TABLE".to_string(),
+        };
+        // object: *.* or db.* or tablename or *
+        let object = self.parse_grant_object()?;
+        match self.advance() {
+            Some(Token::To) => {}
+            other => return Err(format!("Expected TO, got {:?}", other)),
+        }
+        let (user, host) = self.parse_user_spec()?;
+        let with_grant_option = if self.peek() == Some(&Token::With) {
+            self.advance(); // WITH
+            if self.peek() == Some(&Token::Grant) { self.advance(); } // GRANT
+            if self.peek() == Some(&Token::OptionKw) { self.advance(); } // OPTION
+            true
+        } else { false };
+        Ok(Statement::Grant { privileges, object_type, object, user, host, with_grant_option })
+    }
+
+    fn parse_grant_object(&mut self) -> Result<String, String> {
+        let first = match self.advance() {
+            Some(Token::Asterisk) => "*".to_string(),
+            Some(Token::Ident(s)) => s.clone(),
+            Some(Token::StringLit(s)) => s.clone(),
+            other => return Err(format!("Expected grant object, got {:?}", other)),
+        };
+        if self.peek() == Some(&Token::Dot) {
+            self.advance(); // '.'
+            let second = match self.advance() {
+                Some(Token::Asterisk) => "*".to_string(),
+                Some(Token::Ident(s)) => s.clone(),
+                other => return Err(format!("Expected identifier or * after dot, got {:?}", other)),
+            };
+            Ok(format!("{}.{}", first, second))
+        } else {
+            Ok(first)
+        }
+    }
+
+    // REVOKE priv [, priv ...] ON object FROM 'user'@'host'
+    fn parse_revoke(&mut self) -> Result<Statement, String> {
+        let mut privileges: Vec<String> = Vec::new();
+        loop {
+            let priv_name = match self.advance() {
+                Some(Token::Privileges) => "ALL PRIVILEGES".to_string(),
+                Some(Token::All) => {
+                    if self.peek() == Some(&Token::Privileges) { self.advance(); }
+                    "ALL PRIVILEGES".to_string()
+                }
+                Some(Token::Ident(s)) if s.to_uppercase() == "ALL" => {
+                    if self.peek() == Some(&Token::Privileges) { self.advance(); }
+                    "ALL PRIVILEGES".to_string()
+                }
+                Some(Token::Select)  => "SELECT".to_string(),
+                Some(Token::Insert)  => "INSERT".to_string(),
+                Some(Token::Update)  => "UPDATE".to_string(),
+                Some(Token::Delete)  => "DELETE".to_string(),
+                Some(Token::Create)  => "CREATE".to_string(),
+                Some(Token::Drop)    => "DROP".to_string(),
+                Some(Token::Alter)   => "ALTER".to_string(),
+                Some(Token::Index)   => "INDEX".to_string(),
+                Some(Token::Grant)   => "GRANT OPTION".to_string(),
+                Some(Token::Ident(s)) => s.to_uppercase().clone(),
+                other => return Err(format!("Expected privilege name, got {:?}", other)),
+            };
+            privileges.push(priv_name);
+            if self.peek() == Some(&Token::Comma) { self.advance(); } else { break; }
+        }
+        match self.advance() {
+            Some(Token::On) => {}
+            other => return Err(format!("Expected ON, got {:?}", other)),
+        }
+        let object_type = match self.peek() {
+            Some(Token::Table)     => { self.advance(); "TABLE".to_string() }
+            Some(Token::Database)  => { self.advance(); "DATABASE".to_string() }
+            Some(Token::Databases) => { self.advance(); "DATABASES".to_string() }
+            _ => "TABLE".to_string(),
+        };
+        let object = self.parse_grant_object()?;
+        match self.advance() {
+            Some(Token::From) => {}
+            other => return Err(format!("Expected FROM, got {:?}", other)),
+        }
+        let (user, host) = self.parse_user_spec()?;
+        Ok(Statement::Revoke { privileges, object_type, object, user, host })
     }
 }

@@ -2,6 +2,7 @@
 
 use std::collections::{HashMap, HashSet};
 use chrono;
+use serde::{Serialize, Deserialize};
 use crate::transaction::txn_manager::TransactionManager;
 use crate::parser::ast::*;
 use crate::catalog::schema::{Catalog, ColumnDef as SchemaCol};
@@ -11,6 +12,23 @@ use crate::storage::buffer_pool::BufferPool;
 use crate::storage::composite_index::CompositeIndex;
 use crate::engine::lock_manager::{LockManager, LockResult};
 use crate::engine::planner::{Planner, AccessPath, JoinAlgo};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UserRecord {
+    pub user: String,
+    pub host: String,
+    pub password_hash: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GrantRecord {
+    pub user: String,
+    pub host: String,
+    pub object_type: String,
+    pub object: String,
+    pub privileges: Vec<String>,
+    pub with_grant_option: bool,
+}
 
 pub type Row = HashMap<String, String>;
 pub const NULL_VALUE: &str = "NULL";
@@ -32,6 +50,10 @@ pub struct Executor {
     pub databases: HashSet<String>,
     /// Currently selected database
     pub current_db: String,
+    /// User accounts
+    pub users: Vec<UserRecord>,
+    /// Granted privileges
+    pub grants: Vec<GrantRecord>,
 }
 
 impl Executor {
@@ -153,6 +175,9 @@ impl Executor {
             }
         }
 
+        let users: Vec<UserRecord> = disk.load_users();
+        let grants: Vec<GrantRecord> = disk.load_grants();
+
         let mut executor = Executor {
             catalog,
             tables,
@@ -166,6 +191,8 @@ impl Executor {
             lock_mgr: LockManager::new(),
             current_db: databases.iter().min().cloned().unwrap_or_else(|| "rustdb".to_string()),
             databases,
+            users,
+            grants,
         };
 
         // WAL Crash Recovery
@@ -185,6 +212,25 @@ impl Executor {
         if let Statement::DropDatabase { name, if_exists } = stmt {
             return self.exec_drop_database(name, if_exists);
         }
+        // 사용자 관리 / 권한 — qualification 불필요
+        if let Statement::CreateUser { user, host, password, if_not_exists } = stmt {
+            return self.exec_create_user(user, host, password, if_not_exists);
+        }
+        if let Statement::DropUser { user, host, if_exists } = stmt {
+            return self.exec_drop_user(user, host, if_exists);
+        }
+        if let Statement::Grant { privileges, object_type, object, user, host, with_grant_option } = stmt {
+            return self.exec_grant(privileges, object_type, object, user, host, with_grant_option);
+        }
+        if let Statement::Revoke { privileges, object_type, object, user, host } = stmt {
+            return self.exec_revoke(privileges, object_type, object, user, host);
+        }
+        if let Statement::ShowGrants { user, host } = stmt {
+            return self.exec_show_grants(user, host);
+        }
+        if let Statement::ShowDatabases = stmt {
+            return self.exec_show_databases();
+        }
         // 모든 다른 statement: 테이블명을 "{current_db}.{table}" 형식으로 qualify
         let stmt = self.qualify_stmt(stmt);
         match stmt {
@@ -196,8 +242,8 @@ impl Executor {
             }
             Statement::DropTable { name, if_exists }  => self.exec_drop(name, if_exists),
             Statement::TruncateTable { name }        => self.exec_truncate(name),
-            Statement::Insert { table, columns, values } => self.exec_insert(table, columns, values),
-            Statement::InsertSelect { table, columns, query } => self.exec_insert_select(table, columns, *query),
+            Statement::Insert { table, columns, values, on_conflict } => self.exec_insert(table, columns, values, on_conflict),
+            Statement::InsertSelect { table, columns, query, on_conflict } => self.exec_insert_select(table, columns, *query, on_conflict),
             Statement::Select { table, subquery, distinct, columns, condition, joins, order_by, group_by, having, limit, offset, for_update } => {
                 self.exec_select(table, subquery, distinct, columns, condition, joins, order_by, group_by, having, limit, offset, for_update)
             }
@@ -226,7 +272,7 @@ impl Executor {
             Statement::RollbackTo { name }      => self.exec_rollback_to(name),
             Statement::Explain(inner)           => self.exec_explain(*inner),
             Statement::Union { left, right, all, order_by, limit, offset } => self.exec_union(*left, *right, all, order_by, limit, offset),
-            Statement::With { ctes, query }     => self.exec_with(ctes, *query),
+            Statement::With { ctes, query, recursive } => self.exec_with(ctes, *query, recursive),
             Statement::CreateDatabase { name, if_not_exists } => self.exec_create_database(name, if_not_exists),
             Statement::DropDatabase { name, if_exists }       => self.exec_drop_database(name, if_exists),
             Statement::MultiUpdate { tables, joins, assignments, condition } => {
@@ -236,6 +282,12 @@ impl Executor {
                 self.exec_multi_delete(delete_tables, from_table, joins, condition)
             }
             Statement::Use { database } => self.exec_use(database),
+            // These are handled in early-return blocks above; unreachable after qualify_stmt
+            Statement::CreateUser { .. } | Statement::DropUser { .. }
+            | Statement::Grant { .. } | Statement::Revoke { .. }
+            | Statement::ShowGrants { .. } | Statement::ShowDatabases => {
+                Err("Internal error: user-management statement reached qualify pass".to_string())
+            }
         }
     }
 
@@ -400,6 +452,18 @@ impl Executor {
                     _ => "0".to_string(),
                 }
             }
+            ArithExpr::Func(name, args) => {
+                let str_args: Vec<String> = args.iter().map(|a| match a {
+                    ArithExpr::Col(c) => c.clone(),
+                    ArithExpr::Str(s) => format!("'{}'", s),
+                    ArithExpr::Num(n) => n.clone(),
+                    other => {
+                        let v = Self::eval_arith(row, other);
+                        format!("'{}'", v)
+                    }
+                }).collect();
+                Self::apply_scalar_func(name, &str_args, row)
+            }
         }
     }
 
@@ -438,14 +502,16 @@ impl Executor {
                 ref_table: fk.ref_table,
                 ref_column: fk.ref_column,
                 on_delete: match fk.on_delete {
-                    crate::parser::ast::FkAction::Restrict => crate::catalog::schema::FkAction::Restrict,
-                    crate::parser::ast::FkAction::Cascade  => crate::catalog::schema::FkAction::Cascade,
-                    crate::parser::ast::FkAction::SetNull  => crate::catalog::schema::FkAction::SetNull,
+                    crate::parser::ast::FkAction::Restrict   => crate::catalog::schema::FkAction::Restrict,
+                    crate::parser::ast::FkAction::Cascade    => crate::catalog::schema::FkAction::Cascade,
+                    crate::parser::ast::FkAction::SetNull    => crate::catalog::schema::FkAction::SetNull,
+                    crate::parser::ast::FkAction::SetDefault => crate::catalog::schema::FkAction::SetDefault,
                 },
                 on_update: match fk.on_update {
-                    crate::parser::ast::FkAction::Restrict => crate::catalog::schema::FkAction::Restrict,
-                    crate::parser::ast::FkAction::Cascade  => crate::catalog::schema::FkAction::Cascade,
-                    crate::parser::ast::FkAction::SetNull  => crate::catalog::schema::FkAction::SetNull,
+                    crate::parser::ast::FkAction::Restrict   => crate::catalog::schema::FkAction::Restrict,
+                    crate::parser::ast::FkAction::Cascade    => crate::catalog::schema::FkAction::Cascade,
+                    crate::parser::ast::FkAction::SetNull    => crate::catalog::schema::FkAction::SetNull,
+                    crate::parser::ast::FkAction::SetDefault => crate::catalog::schema::FkAction::SetDefault,
                 },
             }),
             check_expr: c.check_expr,
@@ -493,6 +559,7 @@ impl Executor {
         &mut self,
         ctes: Vec<(String, Box<Statement>)>,
         query: Statement,
+        recursive: bool,
     ) -> Result<String, String> {
         // Materialise each CTE as a temporary in-memory table, then run the main query.
         let mut cte_names: Vec<String> = Vec::new();
@@ -503,9 +570,70 @@ impl Executor {
                 return Err(format!("CTE name '{}' conflicts with an existing table or view", name));
             }
 
-            // Execute the CTE body and parse the result into virtual rows
-            let output = self.execute(*body)?;
-            let (col_names, rows) = Self::parse_table_output(&output);
+            // 재귀 CTE: RECURSIVE 키워드 + Union 구조일 때 base + 반복 실행
+            let (col_names, rows) = if recursive && matches!(*body, Statement::Union { .. }) {
+                let Statement::Union { left, right, .. } = *body else { unreachable!() };
+
+                // 1단계: base case 실행
+                let base_out = self.execute(*left)?;
+                let (cols, mut accumulated) = Self::parse_table_output(&base_out);
+
+                // CTE 테이블 초기화 (재귀 쿼리가 자신을 참조할 수 있도록)
+                let schema_cols: Vec<crate::catalog::schema::ColumnDef> = cols.iter().map(|c| {
+                    crate::catalog::schema::ColumnDef {
+                        name: c.clone(),
+                        data_type: crate::parser::ast::DataType::Text,
+                        primary_key: false, not_null: false, unique: false,
+                        unique_constraint_name: None, auto_increment: false,
+                        default: None, foreign_key: None, check_expr: None,
+                    }
+                }).collect();
+                let _ = self.catalog.create_table(name.clone(), schema_cols);
+                self.tables.insert(name.clone(), accumulated.clone());
+                self.buffer_pool.write_page(&name, accumulated.clone());
+                self.indexes.insert(name.clone(), crate::storage::btree::BPlusTree::new());
+
+                // 2단계: 재귀 반복 (새 행이 없을 때까지, 최대 1000회)
+                for _ in 0..1000 {
+                    let rec_out = self.execute(*right.clone())?;
+                    let (rec_cols, new_rows) = Self::parse_table_output(&rec_out);
+                    // CTE 컬럼명은 base case 기준 (positional 매핑)
+                    let fresh: Vec<Row> = new_rows.into_iter()
+                        .map(|rec_row| {
+                            let mut mapped = Row::new();
+                            for (i, base_col) in cols.iter().enumerate() {
+                                let val = rec_cols.get(i)
+                                    .and_then(|rc| rec_row.get(rc))
+                                    .cloned()
+                                    .unwrap_or_default();
+                                mapped.insert(base_col.clone(), val);
+                            }
+                            mapped.insert("_xmin".to_string(), "1".to_string());
+                            mapped.insert("_xmax".to_string(), "0".to_string());
+                            mapped
+                        })
+                        .filter(|r| !accumulated.contains(r))
+                        .collect();
+                    if fresh.is_empty() { break; }
+                    accumulated.extend(fresh);
+                    self.tables.insert(name.clone(), accumulated.clone());
+                    self.buffer_pool.write_page(&name, accumulated.clone());
+                }
+
+                cte_names.push(name.clone());
+                let result = self.execute(query);
+                for n in &cte_names {
+                    self.tables.remove(n);
+                    self.indexes.remove(n);
+                    self.buffer_pool.invalidate(n);
+                    let _ = self.catalog.drop_table(n);
+                }
+                return result;
+            } else {
+                // 일반 CTE (비재귀) — CTE body 실행 후 가상 테이블로 적재
+                let output = self.execute(*body)?;
+                Self::parse_table_output(&output)
+            };
 
             // Build a minimal schema for the virtual table
             let schema_cols: Vec<crate::catalog::schema::ColumnDef> = col_names.iter().map(|c| {
@@ -548,6 +676,7 @@ impl Executor {
         table: String,
         columns: Option<Vec<String>>,
         query: Statement,
+        on_conflict: InsertConflict,
     ) -> Result<String, String> {
         let output = self.execute(query)?;
         let (col_names, rows) = Self::parse_table_output(&output);
@@ -558,7 +687,7 @@ impl Executor {
             .map(|row| col_names.iter().map(|c| row.get(c).cloned().unwrap_or_default()).collect())
             .collect();
         let insert_cols = columns.or(Some(col_names));
-        self.exec_insert(table, insert_cols, all_values)
+        self.exec_insert(table, insert_cols, all_values, on_conflict)
     }
 
     fn exec_insert(
@@ -566,6 +695,7 @@ impl Executor {
         table: String,
         col_list: Option<Vec<String>>,
         all_values: Vec<Vec<String>>,
+        on_conflict: InsertConflict,
     ) -> Result<String, String> {
         // 스키마 클론 (borrow 충돌 방지)
         let schema = self.catalog.get_table(&table)
@@ -595,6 +725,8 @@ impl Executor {
         let mut seen_composite_pk: Vec<Vec<String>> = Vec::new();    // 복합 PK 튜플용
 
         let mut prepared: Vec<Row> = Vec::new();
+        // ON DUPLICATE KEY UPDATE: (conflicting_pk_val, assignments)
+        let mut pending_updates: Vec<(String, Vec<(String, ArithExpr)>)> = Vec::new();
 
         for values in all_values {
             // 컬럼 목록 → 스키마 순서대로 값 매핑
@@ -672,7 +804,6 @@ impl Executor {
 
                 if let Some(rows) = self.tables.get(&table) {
                     if is_composite_pk {
-                        // 복합 PK: (col1_val, col2_val, ...) 튜플이 중복인지 체크
                         let new_pk_tuple: Vec<String> = pk_cols.iter()
                             .map(|pk| {
                                 col_names.iter().position(|c| c == pk)
@@ -685,25 +816,46 @@ impl Executor {
                                 .map(|pk| existing.get(*pk).cloned().unwrap_or_default())
                                 .collect();
                             if existing_tuple == new_pk_tuple {
-                                return Err(format!(
-                                    "Duplicate composite primary key ({:?})", new_pk_tuple
-                                ));
-                            }
-                        }
-                    } else {
-                        // 단일 PK / UNIQUE 컬럼 중복 체크
-                        for (i, (pk, _, unique, _)) in constraints.iter().enumerate() {
-                            if *pk || *unique {
-                                let val = &final_values[i];
-                                for existing in rows.iter().filter(|r| Self::is_visible(r)) {
-                                    if existing.get(&col_names[i]) == Some(val) {
-                                        return Err(format!(
-                                            "Duplicate value '{}' for column '{}'", val, col_names[i]
-                                        ));
+                                match &on_conflict {
+                                    InsertConflict::Abort => return Err(format!(
+                                        "Duplicate composite primary key ({:?})", new_pk_tuple
+                                    )),
+                                    InsertConflict::Ignore => { continue; }
+                                    InsertConflict::Update(assignments) => {
+                                        let pk_val = existing.get(&col_names[0]).cloned().unwrap_or_default();
+                                        pending_updates.push((pk_val, assignments.clone()));
+                                        continue;
                                     }
                                 }
                             }
                         }
+                    } else {
+                        let mut dup_found = false;
+                        'outer: for (i, (pk, _, unique, _)) in constraints.iter().enumerate() {
+                            if *pk || *unique {
+                                let val = &final_values[i];
+                                for existing in rows.iter().filter(|r| Self::is_visible(r)) {
+                                    if existing.get(&col_names[i]) == Some(val) {
+                                        match &on_conflict {
+                                            InsertConflict::Abort => return Err(format!(
+                                                "Duplicate value '{}' for column '{}'", val, col_names[i]
+                                            )),
+                                            InsertConflict::Ignore => {
+                                                dup_found = true;
+                                                break 'outer;
+                                            }
+                                            InsertConflict::Update(assignments) => {
+                                                let pk_val = existing.get(&col_names[0]).cloned().unwrap_or_default();
+                                                pending_updates.push((pk_val, assignments.clone()));
+                                                dup_found = true;
+                                                break 'outer;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        if dup_found { continue; }
                     }
                 }
             }
@@ -793,6 +945,38 @@ impl Executor {
             }
 
             prepared.push(row);
+        }
+
+        // ── ON DUPLICATE KEY UPDATE: 충돌 행 업데이트 ──────────────────────
+        let had_updates = !pending_updates.is_empty();
+        for (pk_val, assignments) in pending_updates {
+            if let Some(rows) = self.tables.get_mut(&table) {
+                for row in rows.iter_mut() {
+                    if row.get(&col_names[0]) == Some(&pk_val) && Self::is_visible(row) {
+                        for (col, expr) in &assignments {
+                            let val = Self::eval_arith(row, expr);
+                            row.insert(col.clone(), val);
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+        // 인덱스가 self.tables와 동기화되도록 재빌드 (PK 포인트 룩업이 인덱스를 사용하므로)
+        if had_updates {
+            let pk_col_name = schema.columns.iter()
+                .find(|c| c.primary_key)
+                .map(|c| c.name.clone())
+                .unwrap_or_else(|| col_names[0].clone());
+            let rows_snap = self.tables.get(&table).cloned().unwrap_or_default();
+            if let Some(index) = self.indexes.get_mut(&table) {
+                *index = BPlusTree::new();
+                for row in &rows_snap {
+                    let k = row.get(&pk_col_name).cloned().unwrap_or_default();
+                    let v = serde_json::to_string(row).unwrap();
+                    index.insert(k, v);
+                }
+            }
         }
 
         // ── 2단계: 검증 통과 — 모든 행 삽입 ─────────────────────────────
@@ -1019,6 +1203,48 @@ impl Executor {
                 *inner_stmt, alias, distinct, columns, condition, joins,
                 order_by, group_by, having, limit, offset, for_update,
             );
+        }
+
+        // FROM 없는 스칼라 SELECT: 빈 행 하나로 표현식만 계산
+        if table == "_dual_" || table.ends_with("._dual_") {
+            let _empty_row = Row::new();
+            // 컬럼 헤더 및 값 계산
+            let col_defs: Vec<(String, SelectColumn)> = columns.iter().map(|col| {
+                let header = match col {
+                    SelectColumn::ColumnAlias(_, alias) => alias.clone(),
+                    SelectColumn::Func { name, args: _, alias } => alias.clone().unwrap_or_else(|| name.clone()),
+                    SelectColumn::Expr { expr, alias } => alias.clone().unwrap_or_else(|| arith_to_str(expr)),
+                    SelectColumn::Agg { func, col } => format!("{:?}({})", func, col),
+                    SelectColumn::AggAlias { alias, .. } => alias.clone(),
+                    SelectColumn::Column(c) => c.clone(),
+                    SelectColumn::All => "*".to_string(),
+                    SelectColumn::CaseWhen { alias, .. } => alias.clone().unwrap_or_else(|| "case".to_string()),
+                };
+                (header, col.clone())
+            }).collect();
+            let widths: Vec<usize> = col_defs.iter().map(|(h, col)| {
+                let val = match col {
+                    SelectColumn::Func { name, args, .. } => Self::apply_scalar_func(name, args, &Row::new()),
+                    SelectColumn::Expr { expr, .. } => Self::eval_arith(&Row::new(), expr),
+                    SelectColumn::Column(c) => c.clone(),
+                    SelectColumn::ColumnAlias(c, _) => c.clone(),
+                    _ => String::new(),
+                };
+                h.len().max(val.len())
+            }).collect();
+            let sep: String = widths.iter().map(|w| "+".to_string() + &"-".repeat(w + 2)).collect::<String>() + "+";
+            let hdr: String = col_defs.iter().zip(widths.iter()).map(|((h, _), w)| format!("| {:width$} ", h, width = w)).collect::<String>() + "|";
+            let row_str: String = col_defs.iter().zip(widths.iter()).map(|((_, col), w)| {
+                let val = match col {
+                    SelectColumn::Func { name, args, .. } => Self::apply_scalar_func(name, args, &Row::new()),
+                    SelectColumn::Expr { expr, .. } => Self::eval_arith(&Row::new(), expr),
+                    SelectColumn::Column(c) => c.clone(),
+                    SelectColumn::ColumnAlias(c, _) => c.clone(),
+                    _ => String::new(),
+                };
+                format!("| {:width$} ", val, width = w)
+            }).collect::<String>() + "|";
+            return Ok(format!("{}\n{}\n{}\n{}\n{}\n1 row(s) returned.", sep, hdr, sep, row_str, sep));
         }
 
         // 뷰 처리: 뷰를 FROM 서브쿼리처럼 실행하고 외부 쿼리 조건을 적용
@@ -1359,6 +1585,17 @@ impl Executor {
                             (func, cn.as_str(), alias.clone()),
                         _ => continue,
                     };
+                    // GROUP_CONCAT: 문자열 수집 후 join
+                    if let AggFunc::GroupConcat { separator } = func {
+                        let strs: Vec<String> = grp.iter()
+                            .filter_map(|r| {
+                                let v = r.get(col_name)?;
+                                if v == NULL_VALUE { None } else { Some(v.clone()) }
+                            })
+                            .collect();
+                        out.insert(label, strs.join(separator));
+                        continue;
+                    }
                     let vals: Vec<f64> = grp.iter()
                         .filter_map(|r| {
                             if col_name == "*" { Some(1.0) }
@@ -1372,6 +1609,7 @@ impl Executor {
                             vals.iter().sum::<f64>() / vals.len() as f64 },
                         AggFunc::Min   => vals.iter().cloned().fold(f64::INFINITY, f64::min),
                         AggFunc::Max   => vals.iter().cloned().fold(f64::NEG_INFINITY, f64::max),
+                        AggFunc::GroupConcat { .. } => unreachable!(),
                     };
                     let v = match func {
                         AggFunc::Avg => format!("{:.4}", agg_val),
@@ -1379,6 +1617,14 @@ impl Executor {
                              else { format!("{:.2}", agg_val) },
                     };
                     out.insert(label, v);
+                }
+                // HAVING 절에서 참조되는 집계 함수 중 SELECT에 없는 것을 보충
+                if let Some(ref hav) = having {
+                    for agg_key in Self::extract_agg_refs_from_cond(hav) {
+                        if !out.contains_key(&agg_key) {
+                            out.insert(agg_key.clone(), Self::compute_agg_from_key(&agg_key, grp));
+                        }
+                    }
                 }
                 out
             }).collect();
@@ -1443,10 +1689,21 @@ impl Executor {
                         (func, cn, alias.clone()),
                     _ => continue,
                 };
+                // GROUP_CONCAT (전역)
+                if let AggFunc::GroupConcat { separator } = func {
+                    let strs: Vec<String> = result.iter()
+                        .filter_map(|r| {
+                            let v = r.get(col_name.as_str())?;
+                            if v == NULL_VALUE { None } else { Some(v.clone()) }
+                        })
+                        .collect();
+                    agg_results.push((label, strs.join(separator)));
+                    continue;
+                }
                 let vals: Vec<f64> = result.iter()
                     .filter_map(|r| {
                         if col_name == "*" { Some(1.0) }
-                        else { r.get(col_name)?.parse::<f64>().ok() }
+                        else { r.get(col_name.as_str())?.parse::<f64>().ok() }
                     })
                     .collect();
                 let agg_val = match func {
@@ -1457,6 +1714,7 @@ impl Executor {
                     },
                     AggFunc::Min   => vals.iter().cloned().fold(f64::INFINITY, f64::min),
                     AggFunc::Max   => vals.iter().cloned().fold(f64::NEG_INFINITY, f64::max),
+                    AggFunc::GroupConcat { .. } => unreachable!(),
                 };
                 let val_str = if agg_val.fract() == 0.0 {
                     format!("{}", agg_val as i64)
@@ -1620,20 +1878,26 @@ impl Executor {
 
     /// 스칼라 함수 평가: row에서 인수를 해석해 결과 문자열 반환
     fn apply_scalar_func(func_name: &str, args: &[String], row: &Row) -> String {
-        // 인수를 row 컬럼값 또는 리터럴로 해석
+        // 인수를 row 컬럼값, 리터럴, 또는 산술식으로 해석
         let resolve = |arg: &str, row: &Row| -> String {
             if arg.starts_with('\'') && arg.ends_with('\'') {
-                arg[1..arg.len()-1].to_string()
-            } else if let Some(v) = row.get(arg) {
-                v.clone()
-            } else {
-                // table.col 형태
-                if let Some(idx) = arg.rfind('.') {
-                    row.get(&arg[idx+1..]).cloned().unwrap_or_else(|| arg.to_string())
-                } else {
-                    arg.to_string()
+                return arg[1..arg.len()-1].to_string();
+            }
+            if let Some(v) = Self::get_col(row, arg) {
+                return v.clone();
+            }
+            // table.col 형태
+            if let Some(idx) = arg.rfind('.') {
+                if let Some(v) = row.get(&arg[idx+1..]) {
+                    return v.clone();
                 }
             }
+            // 산술 표현식 폴백 (e.g. "salary / 1000000")
+            let mut p = crate::parser::parser::Parser::new(arg);
+            if let Ok(expr) = p.parse_arith_expr() {
+                return Self::eval_arith(row, &expr);
+            }
+            arg.to_string()
         };
 
         match func_name {
@@ -1745,6 +2009,82 @@ impl Executor {
                     && cond_val != NULL_VALUE;
                 if is_true { true_val } else { false_val }
             }
+            "NULLIF" => {
+                let a = args.first().map(|a| resolve(a, row)).unwrap_or_default();
+                let b = args.get(1).map(|a| resolve(a, row)).unwrap_or_default();
+                if a == b { NULL_VALUE.to_string() } else { a }
+            }
+            "LPAD" => {
+                let s   = args.first().map(|a| resolve(a, row)).unwrap_or_default();
+                let len: usize = args.get(1).and_then(|a| resolve(a, row).parse().ok()).unwrap_or(0);
+                let pad = args.get(2).map(|a| resolve(a, row)).unwrap_or_else(|| " ".to_string());
+                if s.len() >= len { s[..len].to_string() }
+                else {
+                    let pad_needed = len - s.len();
+                    let full_pad = pad.repeat((pad_needed / pad.len()) + 1);
+                    format!("{}{}", &full_pad[..pad_needed], s)
+                }
+            }
+            "RPAD" => {
+                let s   = args.first().map(|a| resolve(a, row)).unwrap_or_default();
+                let len: usize = args.get(1).and_then(|a| resolve(a, row).parse().ok()).unwrap_or(0);
+                let pad = args.get(2).map(|a| resolve(a, row)).unwrap_or_else(|| " ".to_string());
+                if s.len() >= len { s[..len].to_string() }
+                else {
+                    let pad_needed = len - s.len();
+                    let full_pad = pad.repeat((pad_needed / pad.len()) + 1);
+                    format!("{}{}", s, &full_pad[..pad_needed])
+                }
+            }
+            "CAST" => {
+                let val      = args.first().map(|a| resolve(a, row)).unwrap_or_default();
+                let type_str = args.get(1).map(|s| s.as_str()).unwrap_or("TEXT");
+                match type_str {
+                    "INT" | "INTEGER" => val.parse::<i64>().map(|n| n.to_string()).unwrap_or_else(|_| "0".to_string()),
+                    "FLOAT" | "DOUBLE" | "DECIMAL" => val.parse::<f64>().map(|n| format!("{}", n)).unwrap_or_else(|_| "0".to_string()),
+                    "BOOLEAN" => {
+                        let b = !val.is_empty() && val != "0" && val != "false" && val.to_lowercase() != "false";
+                        if b { "1".to_string() } else { "0".to_string() }
+                    }
+                    _ => val,
+                }
+            }
+            "DATEDIFF" => {
+                let d1 = args.first().map(|a| resolve(a, row)).unwrap_or_default();
+                let d2 = args.get(1).map(|a| resolve(a, row)).unwrap_or_default();
+                fn parse_date(s: &str) -> Option<chrono::NaiveDate> {
+                    chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d").ok()
+                }
+                match (parse_date(&d1), parse_date(&d2)) {
+                    (Some(a), Some(b)) => (a - b).num_days().to_string(),
+                    _ => NULL_VALUE.to_string(),
+                }
+            }
+            "DATE_ADD" => {
+                let date_str = args.first().map(|a| resolve(a, row)).unwrap_or_default();
+                let amount: i64 = args.get(1).and_then(|a| resolve(a, row).parse().ok()).unwrap_or(0);
+                let unit = args.get(2).map(|s| s.as_str()).unwrap_or("DAY");
+                use chrono::{NaiveDate, Datelike};
+                if let Ok(d) = NaiveDate::parse_from_str(&date_str, "%Y-%m-%d") {
+                    let result = match unit {
+                        "DAY"    => d + chrono::Duration::days(amount),
+                        "MONTH"  => {
+                            let months = d.month() as i64 + amount;
+                            let year   = d.year() + ((months - 1) / 12) as i32;
+                            let month  = ((months - 1).rem_euclid(12) + 1) as u32;
+                            NaiveDate::from_ymd_opt(year, month, d.day()).unwrap_or(d)
+                        }
+                        "YEAR"   => {
+                            NaiveDate::from_ymd_opt(d.year() + amount as i32, d.month(), d.day()).unwrap_or(d)
+                        }
+                        "HOUR" | "MINUTE" | "SECOND" => d, // DATE만 반환, 시간 무시
+                        _ => d,
+                    };
+                    result.format("%Y-%m-%d").to_string()
+                } else {
+                    NULL_VALUE.to_string()
+                }
+            }
             _ => format!("{}()", func_name),
         }
     }
@@ -1756,7 +2096,73 @@ impl Executor {
             AggFunc::Avg   => format!("AVG({})", col),
             AggFunc::Min   => format!("MIN({})", col),
             AggFunc::Max   => format!("MAX({})", col),
+            AggFunc::GroupConcat { .. } => format!("GROUP_CONCAT({})", col),
         }
+    }
+
+    // HAVING 절의 CondExpr에서 집계 함수 참조 문자열 수집
+    fn extract_agg_refs_from_cond(expr: &CondExpr) -> Vec<String> {
+        let mut refs = Vec::new();
+        Self::collect_agg_refs_cond(expr, &mut refs);
+        refs
+    }
+
+    fn collect_agg_refs_cond(expr: &CondExpr, out: &mut Vec<String>) {
+        match expr {
+            CondExpr::And(l, r) | CondExpr::Or(l, r) => {
+                Self::collect_agg_refs_cond(l, out);
+                Self::collect_agg_refs_cond(r, out);
+            }
+            CondExpr::Not(inner) => Self::collect_agg_refs_cond(inner, out),
+            CondExpr::Leaf(cond) => Self::collect_agg_refs_arith(&cond.left, out),
+        }
+    }
+
+    fn collect_agg_refs_arith(expr: &ArithExpr, out: &mut Vec<String>) {
+        match expr {
+            ArithExpr::Col(s) => {
+                let u = s.to_uppercase();
+                if (u.starts_with("COUNT(") || u.starts_with("SUM(") || u.starts_with("AVG(")
+                    || u.starts_with("MIN(") || u.starts_with("MAX("))
+                    && !out.contains(s)
+                {
+                    out.push(s.clone());
+                }
+            }
+            ArithExpr::Add(l, r) | ArithExpr::Sub(l, r)
+            | ArithExpr::Mul(l, r) | ArithExpr::Div(l, r) => {
+                Self::collect_agg_refs_arith(l, out);
+                Self::collect_agg_refs_arith(r, out);
+            }
+            _ => {}
+        }
+    }
+
+    // "COUNT(*)", "SUM(col)" 등의 키 문자열로 그룹 집계값 계산
+    fn compute_agg_from_key(key: &str, grp: &[Row]) -> String {
+        let ku = key.to_uppercase();
+        if ku.starts_with("COUNT(") {
+            return format!("{}", grp.len());
+        }
+        let inner = match (key.find('('), key.rfind(')')) {
+            (Some(s), Some(e)) => &key[s + 1..e],
+            _ => return "0".to_string(),
+        };
+        let vals: Vec<f64> = grp.iter()
+            .filter_map(|r| r.get(inner)?.parse::<f64>().ok())
+            .collect();
+        let v = if ku.starts_with("SUM(") {
+            vals.iter().sum::<f64>()
+        } else if ku.starts_with("AVG(") {
+            if vals.is_empty() { 0.0 } else { vals.iter().sum::<f64>() / vals.len() as f64 }
+        } else if ku.starts_with("MIN(") {
+            vals.iter().cloned().fold(f64::INFINITY, f64::min)
+        } else if ku.starts_with("MAX(") {
+            vals.iter().cloned().fold(f64::NEG_INFINITY, f64::max)
+        } else {
+            0.0
+        };
+        if v.fract() == 0.0 { format!("{}", v as i64) } else { format!("{:.4}", v) }
     }
 
     fn format_result(
@@ -2061,6 +2467,22 @@ impl Executor {
                                         self.buffer_pool.write_page(other_table, rows_clone2.clone());
                                         self.buffer_pool.flush_page(other_table, &self.disk);
                                     }
+                                    crate::catalog::schema::FkAction::SetDefault => {
+                                        let default_val = self.catalog.get_table(other_table)
+                                            .and_then(|s| s.columns.iter().find(|c| c.name == col.name))
+                                            .and_then(|c| c.default.clone())
+                                            .unwrap_or_else(|| NULL_VALUE.to_string());
+                                        if let Some(other_rows) = self.tables.get_mut(other_table) {
+                                            for row in other_rows.iter_mut() {
+                                                if Self::is_visible(row) && row.get(&col.name).map(|v| v == &old_val).unwrap_or(false) {
+                                                    row.insert(col.name.clone(), default_val.clone());
+                                                }
+                                            }
+                                        }
+                                        let rows_clone2 = self.tables.get(other_table).unwrap().clone();
+                                        self.buffer_pool.write_page(other_table, rows_clone2.clone());
+                                        self.buffer_pool.flush_page(other_table, &self.disk);
+                                    }
                                 }
                             }
                         }
@@ -2145,6 +2567,22 @@ impl Executor {
                                         for row in other_rows.iter_mut() {
                                             if Self::is_visible(row) && row.get(&col.name).map(|v| v == &del_val).unwrap_or(false) {
                                                 row.insert(col.name.clone(), NULL_VALUE.to_string());
+                                            }
+                                        }
+                                    }
+                                    let rows_clone = self.tables.get(other_table).unwrap().clone();
+                                    self.buffer_pool.write_page(other_table, rows_clone.clone());
+                                    self.buffer_pool.flush_page(other_table, &self.disk);
+                                }
+                                crate::catalog::schema::FkAction::SetDefault => {
+                                    let default_val = self.catalog.get_table(other_table)
+                                        .and_then(|s| s.columns.iter().find(|c| c.name == col.name))
+                                        .and_then(|c| c.default.clone())
+                                        .unwrap_or_else(|| NULL_VALUE.to_string());
+                                    if let Some(other_rows) = self.tables.get_mut(other_table) {
+                                        for row in other_rows.iter_mut() {
+                                            if Self::is_visible(row) && row.get(&col.name).map(|v| v == &del_val).unwrap_or(false) {
+                                                row.insert(col.name.clone(), default_val.clone());
                                             }
                                         }
                                     }
@@ -3399,13 +3837,14 @@ impl Executor {
                     having: having.map(|h| self.qualify_condexpr(h)),
                     limit, offset, for_update,
                 },
-            Statement::Insert { table, columns, values } =>
-                Statement::Insert { table: self.qualify_name(table), columns, values },
-            Statement::InsertSelect { table, columns, query } =>
+            Statement::Insert { table, columns, values, on_conflict } =>
+                Statement::Insert { table: self.qualify_name(table), columns, values, on_conflict },
+            Statement::InsertSelect { table, columns, query, on_conflict } =>
                 Statement::InsertSelect {
                     table: self.qualify_name(table),
                     columns,
                     query: Box::new(self.qualify_stmt(*query)),
+                    on_conflict,
                 },
             Statement::Update { table, assignments, condition } =>
                 Statement::Update {
@@ -3460,13 +3899,14 @@ impl Executor {
                     right: Box::new(self.qualify_stmt(*right)),
                     all, order_by, limit, offset,
                 },
-            Statement::With { ctes, query } =>
+            Statement::With { ctes, query, recursive } =>
                 Statement::With {
                     ctes: ctes.into_iter().map(|(n, q)| (
                         self.qualify_name(n),
                         Box::new(self.qualify_stmt(*q))
                     )).collect(),
                     query: Box::new(self.qualify_stmt(*query)),
+                    recursive,
                 },
             Statement::Explain(inner) =>
                 Statement::Explain(Box::new(self.qualify_stmt(*inner))),
@@ -3882,6 +4322,166 @@ impl Executor {
         self.txn.wal_clear();
         eprintln!("[Recovery] WAL replay 완료 → WAL 삭제");
     }
+
+    // ── 사용자 관리 ──────────────────────────────────────────────────────────
+
+    fn exec_create_user(
+        &mut self,
+        user: String,
+        host: String,
+        password: Option<String>,
+        if_not_exists: bool,
+    ) -> Result<String, String> {
+        let exists = self.users.iter().any(|u| u.user == user && u.host == host);
+        if exists {
+            if if_not_exists {
+                return Ok(format!("User '{}@{}' already exists (IF NOT EXISTS — skipped).", user, host));
+            }
+            return Err(format!("User '{}@{}' already exists.", user, host));
+        }
+        self.users.push(UserRecord {
+            user: user.clone(),
+            host: host.clone(),
+            password_hash: password,
+        });
+        self.disk.save_users(&self.users);
+        Ok(format!("User '{}@{}' created.", user, host))
+    }
+
+    fn exec_drop_user(
+        &mut self,
+        user: String,
+        host: String,
+        if_exists: bool,
+    ) -> Result<String, String> {
+        let before = self.users.len();
+        self.users.retain(|u| !(u.user == user && u.host == host));
+        if self.users.len() == before {
+            if if_exists {
+                return Ok(format!("User '{}@{}' does not exist (IF EXISTS — skipped).", user, host));
+            }
+            return Err(format!("User '{}@{}' does not exist.", user, host));
+        }
+        // Also remove their grants
+        self.grants.retain(|g| !(g.user == user && g.host == host));
+        self.disk.save_users(&self.users);
+        self.disk.save_grants(&self.grants);
+        Ok(format!("User '{}@{}' dropped.", user, host))
+    }
+
+    fn exec_grant(
+        &mut self,
+        privileges: Vec<String>,
+        object_type: String,
+        object: String,
+        user: String,
+        host: String,
+        with_grant_option: bool,
+    ) -> Result<String, String> {
+        // Find existing grant record for this user/object
+        if let Some(existing) = self.grants.iter_mut().find(|g| {
+            g.user == user && g.host == host && g.object == object && g.object_type == object_type
+        }) {
+            for priv_name in &privileges {
+                if !existing.privileges.contains(priv_name) {
+                    existing.privileges.push(priv_name.clone());
+                }
+            }
+            if with_grant_option {
+                existing.with_grant_option = true;
+            }
+        } else {
+            self.grants.push(GrantRecord {
+                user: user.clone(),
+                host: host.clone(),
+                object_type,
+                object: object.clone(),
+                privileges: privileges.clone(),
+                with_grant_option,
+            });
+        }
+        self.disk.save_grants(&self.grants);
+        Ok(format!("Granted {} on {} to '{}@{}'.", privileges.join(", "), object, user, host))
+    }
+
+    fn exec_revoke(
+        &mut self,
+        privileges: Vec<String>,
+        object_type: String,
+        object: String,
+        user: String,
+        host: String,
+    ) -> Result<String, String> {
+        let mut changed = false;
+        for g in self.grants.iter_mut() {
+            if g.user == user && g.host == host && g.object == object && g.object_type == object_type {
+                let before = g.privileges.len();
+                if privileges.contains(&"ALL PRIVILEGES".to_string()) {
+                    g.privileges.clear();
+                } else {
+                    g.privileges.retain(|p| !privileges.contains(p));
+                }
+                if g.privileges.len() != before { changed = true; }
+            }
+        }
+        // Remove empty grant records
+        self.grants.retain(|g| !g.privileges.is_empty());
+        self.disk.save_grants(&self.grants);
+        if changed {
+            Ok(format!("Revoked {} on {} from '{}@{}'.", privileges.join(", "), object, user, host))
+        } else {
+            Ok(format!("No matching grants found for '{}@{}'.", user, host))
+        }
+    }
+
+    fn exec_show_grants(&self, user: Option<String>, host: Option<String>) -> Result<String, String> {
+        let filter_user = user.as_deref().unwrap_or("");
+        let filter_host = host.as_deref().unwrap_or("");
+        let show_all = user.is_none();
+
+        let mut lines: Vec<String> = Vec::new();
+        for g in &self.grants {
+            if show_all || (g.user == filter_user && g.host == filter_host) {
+                let priv_str = g.privileges.join(", ");
+                let grant_opt = if g.with_grant_option { " WITH GRANT OPTION" } else { "" };
+                lines.push(format!(
+                    "GRANT {} ON {} TO '{}'@'{}'{};",
+                    priv_str, g.object, g.user, g.host, grant_opt
+                ));
+            }
+        }
+
+        if lines.is_empty() {
+            return Ok("No grants found.".to_string());
+        }
+
+        let max_len = lines.iter().map(|l| l.len()).max().unwrap_or(0);
+        let sep = format!("+{}+", "-".repeat(max_len + 2));
+        let header = format!("| {:<width$} |", "Grants", width = max_len);
+        let mut out = format!("{}\n{}\n{}\n", sep, header, sep);
+        for line in &lines {
+            out.push_str(&format!("| {:<width$} |\n", line, width = max_len));
+        }
+        out.push_str(&sep);
+        Ok(out)
+    }
+
+    fn exec_show_databases(&self) -> Result<String, String> {
+        let mut dbs: Vec<String> = self.databases.iter().cloned().collect();
+        dbs.sort();
+        if dbs.is_empty() {
+            return Ok("No databases.".to_string());
+        }
+        let max_len = dbs.iter().map(|d| d.len()).max().unwrap_or(8).max(8);
+        let sep = format!("+{}+", "-".repeat(max_len + 2));
+        let header = format!("| {:<width$} |", "Database", width = max_len);
+        let mut out = format!("{}\n{}\n{}\n", sep, header, sep);
+        for db in &dbs {
+            out.push_str(&format!("| {:<width$} |\n", db, width = max_len));
+        }
+        out.push_str(&sep);
+        Ok(out)
+    }
 }
 
 /// CondExpr 트리에서 AND-연결된 `col = literal` 조건들을 수집 (복합 인덱스용)
@@ -3925,6 +4525,10 @@ fn arith_to_str(expr: &ArithExpr) -> String {
         ArithExpr::Sub(l, r) => format!("{}-{}", arith_to_str(l), arith_to_str(r)),
         ArithExpr::Mul(l, r) => format!("{}*{}", arith_to_str(l), arith_to_str(r)),
         ArithExpr::Div(l, r) => format!("{}/{}", arith_to_str(l), arith_to_str(r)),
+        ArithExpr::Func(name, args) => {
+            let a: Vec<String> = args.iter().map(arith_to_str).collect();
+            format!("{}({})", name, a.join(","))
+        }
     }
 }
 

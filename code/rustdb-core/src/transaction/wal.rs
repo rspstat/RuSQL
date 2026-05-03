@@ -93,15 +93,22 @@ impl WalManager {
         Some(s)
     }
 
-    /// WAL에 레코드 기록
-    pub fn append(&self, record: WalRecord) {
+    /// 인코딩된 바이트를 WAL 파일에 기록. sync=true 이면 커널 버퍼 → 디스크 fsync.
+    fn write_encoded(&self, encoded: &[u8], sync: bool) {
         let mut file = OpenOptions::new()
             .create(true)
             .append(true)
             .open(&self.path)
             .expect("WAL 파일 열기 실패");
-        let encoded = Self::encode(&record);
-        file.write_all(&encoded).expect("WAL 기록 실패");
+        file.write_all(encoded).expect("WAL 기록 실패");
+        if sync {
+            file.sync_all().expect("WAL fsync 실패");
+        }
+    }
+
+    /// WAL에 레코드 기록 (fsync 없음 — 데이터 변경 레코드용)
+    pub fn append(&self, record: WalRecord) {
+        self.write_encoded(&Self::encode(&record), false);
     }
 
     pub fn log_insert(&self, table: &str, key: &str, data: &str) {
@@ -131,13 +138,15 @@ impl WalManager {
         });
     }
 
+    /// COMMIT — fsync로 커밋 레코드를 디스크에 영속화 (innodb_flush_log_at_trx_commit=1 동등)
     pub fn log_commit(&self) {
-        self.append(WalRecord {
+        let record = WalRecord {
             op: WalOp::Commit,
             table_name: String::new(),
             key: String::new(),
             data: String::new(),
-        });
+        };
+        self.write_encoded(&Self::encode(&record), true);
     }
 
     pub fn log_rollback(&self) {
@@ -149,13 +158,15 @@ impl WalManager {
         });
     }
 
+    /// CHECKPOINT — 버퍼풀 플러시 완료 표시를 디스크에 영속화
     pub fn log_checkpoint(&self) {
-        self.append(WalRecord {
+        let record = WalRecord {
             op: WalOp::Checkpoint,
             table_name: String::new(),
             key: String::new(),
             data: String::new(),
-        });
+        };
+        self.write_encoded(&Self::encode(&record), true);
     }
 
     /// WAL 전체 읽기 (복구용)

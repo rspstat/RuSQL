@@ -51,7 +51,9 @@
 | CREATE DATABASE | ✅ (IF NOT EXISTS 포함) | ✅ |
 | DROP DATABASE | ✅ (IF EXISTS 포함) | ✅ |
 | USE [DATABASE] | ✅ | ✅ |
-| CREATE USER / GRANT / REVOKE | ❌ | ✅ |
+| CREATE USER / DROP USER (IF NOT EXISTS / IF EXISTS) | ✅ | ✅ |
+| GRANT / REVOKE (ALL PRIVILEGES, WITH GRANT OPTION) | ✅ | ✅ |
+| SHOW GRANTS [FOR user] / SHOW DATABASES | ✅ | ✅ |
 | 저장 프로시저 / 함수 | ❌ | ✅ |
 | 트리거 (TRIGGER) | ❌ | ✅ |
 | 이벤트 스케줄러 | ❌ | ✅ |
@@ -69,8 +71,8 @@
 | INSERT (단일/멀티 행) | ✅ | ✅ |
 | INSERT (컬럼 지정) | ✅ | ✅ |
 | INSERT ... SELECT | ✅ | ✅ |
-| INSERT IGNORE | ❌ | ✅ |
-| INSERT ... ON DUPLICATE KEY UPDATE | ❌ | ✅ |
+| INSERT IGNORE | ✅ (중복 행 조용히 무시) | ✅ |
+| INSERT ... ON DUPLICATE KEY UPDATE | ✅ (다중 컬럼 대입 지원) | ✅ |
 | REPLACE INTO | ❌ | ✅ |
 | SELECT | ✅ | ✅ |
 | UPDATE | ✅ (산술식, 자기 참조) | ✅ |
@@ -105,7 +107,7 @@
 | DISTINCT | ✅ | ✅ |
 | 산술 표현식 (SELECT/WHERE/UPDATE) | ✅ | ✅ |
 | 집계 함수 (COUNT/SUM/AVG/MIN/MAX) | ✅ | ✅ |
-| GROUP_CONCAT | ❌ | ✅ |
+| GROUP_CONCAT | ✅ (SEPARATOR 옵션 포함) | ✅ |
 | CASE WHEN | ✅ | ✅ |
 | 윈도우 함수 (ROW_NUMBER, RANK 등) | ❌ | ✅ (8.0+) |
 | 스칼라 서브쿼리 | ✅ | ✅ |
@@ -114,7 +116,8 @@
 | FROM 절 서브쿼리 | ✅ | ✅ |
 | UNION / UNION ALL | ✅ | ✅ |
 | CTE (WITH ... AS) | ✅ (단순/다중/INSERT) | ✅ (8.0+) |
-| 재귀 CTE | ❌ | ✅ (8.0+) |
+| 재귀 CTE | ✅ (WITH RECURSIVE, base+반복, 최대 1000회) | ✅ (8.0+) |
+| FROM 없는 스칼라 SELECT | ✅ (`SELECT 1+1`, `SELECT CAST(...)` 등) | ✅ |
 | SELECT ... FOR UPDATE | ✅ | ✅ |
 | EXPLAIN | ✅ (비용 기반 실행 계획, Join 알고리즘 포함) | ✅ (EXPLAIN/EXPLAIN ANALYZE) |
 | table.column dot notation | ✅ | ✅ |
@@ -127,11 +130,12 @@
 
 | 함수 범주 | RustDB | MySQL |
 |-----------|--------|-------|
-| 문자열 | UPPER, LOWER, LENGTH, TRIM, CONCAT, SUBSTR, REPLACE | 위 포함 + LPAD, RPAD, INSTR, LOCATE, LEFT, RIGHT, REPEAT, REVERSE, FORMAT 등 |
+| 문자열 | UPPER, LOWER, LENGTH, TRIM, CONCAT, SUBSTR, REPLACE, **LPAD, RPAD** | 위 포함 + INSTR, LOCATE, LEFT, RIGHT, REPEAT, REVERSE, FORMAT 등 |
 | 수학 | ROUND, ABS, CEIL, FLOOR, MOD | 위 포함 + POWER, SQRT, LOG, EXP, RAND 등 |
-| 날짜 | NOW, CURDATE, DATE_FORMAT | 위 포함 + DATEDIFF, DATE_ADD, DATE_SUB, YEAR, MONTH, DAY, HOUR, MINUTE, SECOND, TIMESTAMPDIFF 등 |
-| NULL 처리 | COALESCE, IFNULL | 위 포함 + NULLIF, IF, ISNULL |
-| 기타 | - | CAST, CONVERT, UUID, MD5, SHA1/SHA2, COMPRESS 등 |
+| 날짜 | NOW, CURDATE, DATE_FORMAT, **DATEDIFF, DATE_ADD** (DAY/MONTH/YEAR/HOUR/MINUTE/SECOND) | 위 포함 + DATE_SUB, YEAR, MONTH, DAY, HOUR, MINUTE, SECOND, TIMESTAMPDIFF 등 |
+| NULL 처리 | COALESCE, IFNULL, **NULLIF** | 위 포함 + IF, ISNULL |
+| 타입 변환 | **CAST** (INT, FLOAT, TEXT, DATE) | CAST, CONVERT |
+| 기타 | IF, CASE WHEN | UUID, MD5, SHA1/SHA2, COMPRESS 등 |
 
 ---
 
@@ -149,8 +153,10 @@
 | FOREIGN KEY RESTRICT | ✅ | ✅ |
 | FOREIGN KEY CASCADE | ✅ | ✅ |
 | FOREIGN KEY SET NULL | ✅ | ✅ |
-| FOREIGN KEY SET DEFAULT | ❌ | ✅ |
+| FOREIGN KEY SET DEFAULT | ✅ | ✅ |
 | ON UPDATE CASCADE | ✅ | ✅ |
+| ON UPDATE SET NULL / SET DEFAULT | ✅ | ✅ |
+| NO ACTION (RESTRICT 동등) | ✅ | ✅ |
 
 ---
 
@@ -170,7 +176,7 @@
 | Checkpoint | ✅ 수동(`CHECKPOINT`) + 자동(512KB) | ✅ 자동 (fuzzy checkpoint) |
 | MVCC | ✅ (`_xmin`/`_xmax` 컬럼 방식) | ✅ (언두 버전 체인 방식) |
 | VACUUM | ✅ 수동 (`VACUUM`) | ❌ (purge thread 자동 처리) |
-| Durability 보장 단위 | 세션 단위 WAL (fsync 없음) | 트랜잭션 단위 fsync (`innodb_flush_log_at_trx_commit`) |
+| Durability 보장 단위 | 트랜잭션 단위 fsync (`log_commit` + `sync_all`) | 트랜잭션 단위 fsync (`innodb_flush_log_at_trx_commit`) |
 | 바이너리 로그 (Binlog) | ❌ | ✅ (복제/PITR용) |
 | PITR (Point-in-Time Recovery) | ❌ | ✅ |
 
@@ -252,6 +258,7 @@
 | `SHOW ISOLATION LEVEL` | ✅ | `SELECT @@transaction_isolation` |
 | `CHECKPOINT` | ✅ 수동 | 자동 (명시적 없음) |
 | `VACUUM` | ✅ 수동 dead row 제거 | 자동 purge thread (OPTIMIZE TABLE으로 유사) |
+| `SHOW DATABASES` | ✅ | ✅ |
 | `SHOW VARIABLES` | ❌ | ✅ |
 | `SHOW STATUS` | ❌ | ✅ |
 | `SHOW PROCESSLIST` | ❌ | ✅ |
@@ -267,10 +274,10 @@
 |------|--------|-------|
 | TCP 서버 | ✅ 포트 7878, 멀티스레드 | ✅ 포트 3306 |
 | 프로토콜 | 자체 라인 텍스트 프로토콜 | MySQL Wire Protocol (바이너리) |
-| 사용자 인증 | ❌ | ✅ (플러그인 인증, caching_sha2_password 등) |
+| 사용자 계정 관리 (CREATE/DROP USER) | ✅ (JSON 영속화) | ✅ (플러그인 인증, caching_sha2_password 등) |
+| 권한 관리 (GRANT/REVOKE/SHOW GRANTS) | ✅ (JSON 영속화) | ✅ |
 | SSL/TLS | ❌ | ✅ |
 | Unix Socket | ❌ | ✅ |
-| 권한 관리 (GRANT/REVOKE) | ❌ | ✅ |
 | 복제 (Replication) | ❌ | ✅ (비동기/반동기/그룹 복제) |
 | 클러스터링 | ❌ | ✅ (InnoDB Cluster, NDB Cluster) |
 | 연결 풀링 | ❌ | ✅ (서버사이드 connection pool) |
@@ -285,6 +292,7 @@
 | `AUTO INCREMENT` | 두 단어 (공백) | `AUTO_INCREMENT` (언더스코어) |
 | 세미콜론 멀티 쿼리 | ✅ | ✅ |
 | 주석 내 세미콜론 안전 처리 | ✅ | ✅ |
+| 세미콜론 뒤 인라인 주석 잔류 처리 | ✅ (`SELECT 1; -- 0` 패턴에서 `-- 0` 잔류가 다음 문장을 오파싱하던 CLI 버그 수정) | ✅ (미해당 — 서버 프로세스가 처리) |
 | `USE DATABASE name` | ✅ (DATABASE 키워드 선택적) | ✅ (`USE name` 형식) |
 | `DROP INDEX IF EXISTS` | ✅ | ✅ |
 | `DROP VIEW IF EXISTS` | ✅ | ✅ |
@@ -295,22 +303,34 @@
 
 | 항목 | 상태 | 비고 |
 |------|------|------|
-| 재귀 CTE (`WITH RECURSIVE`) | ❌ 미구현 | AST·파서 확장 필요 |
+| 재귀 CTE (`WITH RECURSIVE`) | ✅ 구현 완료 | base case + 반복 실행, positional 컬럼 매핑 |
+| INSERT IGNORE / ON DUPLICATE KEY UPDATE | ✅ 구현 완료 | 인덱스 동기화 포함 |
+| GROUP_CONCAT (SEPARATOR 포함) | ✅ 구현 완료 | GROUP BY·비집계 양쪽 지원 |
+| NULLIF, LPAD, RPAD, CAST, DATEDIFF, DATE_ADD | ✅ 구현 완료 | 스칼라 함수 추가 |
+| FROM 없는 스칼라 SELECT | ✅ 구현 완료 | `_dual_` 가상 테이블 방식 |
+| FOREIGN KEY SET DEFAULT (ON DELETE / ON UPDATE) | ✅ 구현 완료 | FK 컬럼을 DEFAULT 값으로 자동 변경, NO ACTION 별칭 포함 |
+| CREATE USER / DROP USER | ✅ 구현 완료 | IF NOT EXISTS / IF EXISTS, IDENTIFIED BY, JSON 영속화 |
+| GRANT / REVOKE / SHOW GRANTS | ✅ 구현 완료 | ALL PRIVILEGES, WITH GRANT OPTION, 객체별 누적·제거, JSON 영속화 |
+| SHOW DATABASES | ✅ 구현 완료 | 디스크 기반 DB 목록 출력 |
+| 전체 통합 테스트 (`test_full.sql`) | ✅ 완료 | 4 DB · 34 섹션 · **260여 쿼리 · 의도된 오류 1개** (UNIQUE 위반 검증). ROUND(expr/expr, n) · UPDATE SET CONCAT 직접 검증 포함 |
+| CLI 인라인 주석 잔류 버그 (`; -- 0` 오염) | ✅ 수정 | `SELECT 1; -- 0` 이후 `buf`에 `-- 0` 잔류 → 다음 문장이 주석으로 오파싱·묵시 스킵. `rustdb-cli/main.rs` 1줄 수정으로 해결 |
+| HAVING 절 미참조 집계 함수 누락 | ✅ 수정 | `HAVING COUNT(*) >= n`에서 COUNT(*)가 SELECT에 없으면 그룹 행에 해당 키 없음 → 0건 반환. executor.rs에 HAVING CondExpr 스캔 후 누락 집계 보완 로직 추가 |
+| `ROUND(expr / expr, n)` — 함수 인자 내 산술식 | ✅ 수정 | ArithExpr::Func AST 노드 + parse_func_args ArithExpr 기반 재작성으로 `ROUND(salary / 1000000, 2)` 등 정상 지원 |
+| `UPDATE t SET col = CONCAT(...)` — UPDATE SET ScalarFunc | ✅ 수정 | eval_arith Func 분기 개선 (Col → 이름 전달, Str → 따옴표, 복합식 → 선평가 후 따옴표). `CONCAT(name, '-', dept)` 정상 반환 |
 | 윈도우 함수 (ROW_NUMBER, RANK, LAG 등) | ❌ 미구현 | 실행기 대규모 확장 필요 |
-| INSERT IGNORE / ON DUPLICATE KEY | ❌ 미구현 | — |
 | 저장 프로시저 / 트리거 | ❌ 미구현 | — |
-| 사용자 인증 / 권한 관리 | ❌ 미구현 | — |
 | 복제 / 클러스터링 | ❌ 미구현 | — |
 | Sort-Merge Join | ❌ 미구현 | planner.rs 확장 필요 |
 | 커버링 인덱스 (Index-only scan) | ❌ 미구현 | — |
 | GAP Lock / Next-key Lock | ❌ 미구현 | Serializable 정확도 개선 필요 |
 | Undo Log 영속화 | ❌ 미구현 | crash 시 미완료 트랜잭션 잔존 가능 |
-| WAL group commit / fsync | ❌ 미구현 | 내구성 개선 필요 |
+| WAL fsync per-commit | ✅ 구현 완료 | COMMIT · CHECKPOINT 레코드에 `sync_all()` 추가 |
+| WAL group commit | ❌ 미구현 | 고성능 환경에서 TPS 향상 필요 시 |
 | B+Tree 리프 연결 리스트 | ❌ 미구현 | 범위 스캔 최적화 |
 | 히스토그램 통계 (ANALYZE TABLE) | ❌ 미구현 | 옵티마이저 정확도 개선 |
 | Prepared Statements | ❌ 미구현 | — |
 | `rustdb-mcp` (자연어 → SQL) | 🔧 폴더만 생성 | AI MCP 연동 미개발 |
-| 쿼리 히스토리 (UI) | 🔧 예정 | — |
+| 쿼리 히스토리 (UI) | ✅ 구현 완료 | 결과 패널 HISTORY 탭. localStorage 최대 200개, 클릭 시 에디터 불러오기, 전체 삭제 버튼 |
 | CSV 내보내기 (UI) | 🔧 예정 | — |
 
 ---
@@ -319,7 +339,7 @@
 
 | 우선순위 | 항목 | 분류 | 설명 | 관련 파일 | 난이도 |
 |----------|------|------|------|-----------|--------|
-| 🔴 높음 | WAL fsync per-commit | 내구성 | WAL은 `write()`만 하고 `fsync()` 없음. 전원 장애 시 최후 commit 유실 가능. `innodb_flush_log_at_trx_commit=1` 동등 구현 | `wal.rs` | ★★ |
+| ✅ 완료 | WAL fsync per-commit | 내구성 | COMMIT / CHECKPOINT 레코드 기록 시 `sync_all()` 호출 추가. 전원 장애 시 커밋된 트랜잭션 유실 방지. `innodb_flush_log_at_trx_commit=1` 동등. 데이터 변경 레코드(Insert/Update/Delete)는 fsync 생략(커밋 시 보장되므로) | `wal.rs` | ★★ |
 | 🔴 높음 | Undo Log 영속화 | 내구성 | 현재 인메모리 undo log는 crash 시 소실됨. 디스크 기반으로 영속화하면 재시작 후 미완료 트랜잭션 롤백 가능 | `txn_manager.rs`, `disk.rs` | ★★★ |
 | 🔴 높음 | GAP Lock / Next-key Lock | 동시성 | Serializable 격리에서 팬텀을 행 수 비교로 근사 감지 중. 범위 기반 갭 잠금으로 정확한 팬텀 방지 | `lock_manager.rs` | ★★★★ |
 | 🔴 높음 | MVCC 버전 체인 | 동시성 | `_xmin`/`_xmax` 컬럼 방식은 단일 세션 중심. 언두 버전 체인으로 개선하면 다중 세션 읽기 일관성 향상 | `executor.rs`, `txn_manager.rs` | ★★★★ |
@@ -331,10 +351,24 @@
 | 🟡 중간 | 커버링 인덱스 (Index-only scan) | 옵티마이저 | SELECT 컬럼이 인덱스에 포함된 경우 테이블 로드 없이 인덱스만으로 결과 반환. Buffer Pool 부하 감소 | `planner.rs`, `executor.rs` | ★★★ |
 | 🟡 중간 | Sort-Merge Join | 옵티마이저 | JOIN 키 기준 정렬된 두 테이블을 O(N+M)으로 병합. 현재 Hash Join / Nested Loop만 지원 | `planner.rs`, `executor.rs` | ★★★ |
 | 🟡 중간 | 증분 VACUUM | 유지보수 | 현재 전체 테이블 스캔 방식. dead row 비율 기준 증분 제거로 온라인 부하 감소 | `executor.rs` | ★★ |
-| 🟢 낮음 | 재귀 CTE (`WITH RECURSIVE`) | SQL 기능 | 계층형 데이터(조직도, BOM) 쿼리에 필요. AST에 `Recursive` 플래그 추가 + 실행기 반복 실행 지원 | `ast.rs`, `parser.rs`, `executor.rs` | ★★★★ |
+| ✅ 완료 | 재귀 CTE (`WITH RECURSIVE`) | SQL 기능 | base case + UNION ALL 반복 실행. positional 컬럼 매핑으로 depth 등 계산 컬럼 정상 전파 | `ast.rs`, `parser.rs`, `executor.rs` | ★★★★ |
+| ✅ 완료 | INSERT IGNORE / ON DUPLICATE KEY UPDATE | SQL 기능 | UNIQUE 위반 시 무시 또는 UPDATE로 전환. 인덱스(B+Tree) 동기화까지 완전 구현 | `executor.rs` | ★★ |
+| ✅ 완료 | GROUP_CONCAT / NULLIF / LPAD / RPAD / CAST / DATEDIFF / DATE_ADD | SQL 기능 | 스칼라·집계 함수 확장. FROM 없는 스칼라 SELECT(_dual_) 포함 | `executor.rs`, `parser.rs`, `lexer.rs` | ★★ |
+| ✅ 완료 | FOREIGN KEY SET DEFAULT / NO ACTION | 제약 조건 | ON DELETE / ON UPDATE SET DEFAULT. DEFAULT 컬럼값 조회 후 적용. NO ACTION = RESTRICT 별칭 | `ast.rs`, `schema.rs`, `parser.rs`, `executor.rs` | ★★ |
+| ✅ 완료 | CREATE USER / DROP USER / GRANT / REVOKE / SHOW GRANTS / SHOW DATABASES | 사용자 관리 | IF NOT EXISTS / IF EXISTS / WITH GRANT OPTION / 객체별 권한 누적·제거. `_users.json`, `_grants.json` 영속화 | `lexer.rs`, `ast.rs`, `parser.rs`, `executor.rs`, `disk.rs` | ★★ |
+| ✅ 완료 | 전체 통합 테스트 (`test_full.sql`) | 테스트 | 4 DB · 34 섹션 · **260여 쿼리 · 의도된 오류 1개** (UNIQUE 위반 검증). ROUND(expr/expr, n) · UPDATE SET CONCAT 직접 검증 (우회 없음) | `test/test_full.sql` | ★ |
+| ✅ 완료 | CLI 인라인 주석 잔류 버그 수정 | CLI | `SELECT 1; -- 0` 패턴에서 `;` 이후 `-- 0`이 `buf`에 잔류해 다음 문장을 주석으로 오파싱·묵시 스킵. 12개 문장 영향(SET ISOLATION LEVEL, CREATE DATABASE testdb 등). `main.rs` 1줄 추가 수정 | `rustdb-cli/src/main.rs` | ★ |
+| ✅ 완료 | HAVING 절 미참조 집계 함수 누락 수정 | 실행기 | `HAVING COUNT(*) >= n`에서 COUNT(*)가 SELECT 목록에 없으면 그룹 행에 해당 키 없음 → 조건 항상 false → 0건 반환. HAVING CondExpr를 스캔해 누락 집계를 보완하는 helper 4개 추가 | `executor.rs` | ★★ |
+| ✅ 완료 | 함수 인자 내 ArithExpr 확장 | 파서 | `ROUND(salary / 1000000, 2)` — parse_func_args를 ArithExpr 기반으로 재작성. ArithExpr::Func AST 노드 추가 + expand_arith/eval_arith Func 분기 구현 | `ast.rs`, `parser.rs`, `executor.rs` | ★★ |
+| ✅ 완료 | UPDATE SET에서 ScalarFunc 허용 | 파서 | `UPDATE t SET col = CONCAT(name, '-', dept)` — ArithExpr::Func를 UPDATE 우변에서도 평가. eval_arith Func 분기에서 Col은 이름 그대로 전달(resolve가 조회), Str은 따옴표, Num은 그대로, 복합식은 선평가 후 따옴표 처리 | `executor.rs` | ★★ |
+| ✅ 완료 | 쿼리 히스토리 (UI) | UI | 결과 패널 HISTORY 탭. localStorage 최대 200개. ✓/✗ 아이콘·시각·소요시간 표시. 클릭 → 에디터 불러오기. 전체 삭제 버튼 | `App.tsx`, `App.css` | ★ |
+| ✅ 완료 | 사이드바 컬럼 상세 (UI) | UI | 타입 배지, PK🔑/FK🔗 아이콘, NN/UQ 뱃지. `get_columns_detail` Tauri 커맨드로 ColumnDef 전체 정보 반환 | `main.rs`, `App.tsx` | ★★ |
+| ✅ 완료 | 결과 페이지네이션 (UI) | UI | PAGE_SIZE=100. 100행 초과 시 ‹/› 버튼 + 페이지 표시. 쿼리 실행마다 페이지 리셋 | `App.tsx`, `App.css` | ★ |
+| 🟡 중간 | CSV 내보내기 (UI) | UI | 결과 테이블을 CSV 파일로 저장. Tauri `save_dialog` + `write_file` 연동 필요 | `App.tsx`, `main.rs` | ★★ |
+| 🟡 중간 | 탭 분리 에디터 상태 유지 (UI) | UI | 탭 전환 시 결과·커서 위치 보존. 현재는 탭 전환 시 결과 패널 초기화됨 | `App.tsx` | ★★ |
+| 🟢 낮음 | 다크/라이트 테마 토글 (UI) | UI | CSS 변수 기반 테마 전환. 현재 하드코딩된 dark 전용 | `App.css` | ★ |
 | 🟢 낮음 | 윈도우 함수 | SQL 기능 | `ROW_NUMBER()`, `RANK()`, `LAG()`, `SUM() OVER (PARTITION BY ...)` 등. SelectColumn AST + 파티션/프레임 실행 엔진 구현 | `ast.rs`, `parser.rs`, `executor.rs` | ★★★★★ |
 | 🟢 낮음 | Prepared Statements | SQL 기능 | `PREPARE / EXECUTE / USING` 형식. 반복 실행 쿼리의 파싱 오버헤드 제거 | `parser.rs`, `executor.rs` | ★★★ |
-| 🟢 낮음 | INSERT IGNORE / ON DUPLICATE KEY | SQL 기능 | UNIQUE 위반 시 무시하거나 UPDATE로 전환. 배치 upsert 패턴에 활용 | `executor.rs` | ★★ |
 | 🟢 낮음 | INFORMATION_SCHEMA | SQL 기능 | `information_schema.tables / columns / indexes` 시스템 뷰. 클라이언트 툴 연동에 필요 | `executor.rs`, `catalog/` | ★★★ |
 | 🟢 낮음 | 병렬 쿼리 실행 | 성능 | Rayon으로 SeqScan을 멀티스레드 분할 처리. 대규모 집계 속도 향상 | `executor.rs` | ★★★★ |
 | 🟢 낮음 | 연결 풀링 (TCP 서버) | 네트워크 | 현재 클라이언트별 스레드 생성. 연결 풀로 스레드 오버헤드 감소 | `rustdb-server/` | ★★ |

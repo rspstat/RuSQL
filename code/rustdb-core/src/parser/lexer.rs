@@ -116,6 +116,18 @@ pub enum Token {
     // IF()
     If,
 
+    // 새 함수/키워드
+    GroupConcat,
+    Ignore,
+    Duplicate,
+    Nullif,
+    Lpad,
+    Rpad,
+    Cast,
+    DateAdd,
+    DateDiff,
+    Separator,
+
     // 산술 연산자
     Plus,
     Minus,
@@ -130,6 +142,18 @@ pub enum Token {
 
     // USE DATABASE
     Use,
+
+    // CREATE USER / GRANT / REVOKE
+    User,
+    Identified,
+    Grant,
+    Revoke,
+    Privileges,
+    Grants,
+    OptionKw,
+    At,
+    Password,
+    Databases,
 }
 
 pub struct Lexer {
@@ -301,10 +325,29 @@ impl Lexer {
             "UNION"        => Token::Union,
             "ALL"          => Token::All,
             "IF"           => Token::If,
+            "GROUP_CONCAT" => Token::GroupConcat,
+            "IGNORE"       => Token::Ignore,
+            "DUPLICATE"    => Token::Duplicate,
+            "NULLIF"       => Token::Nullif,
+            "LPAD"         => Token::Lpad,
+            "RPAD"         => Token::Rpad,
+            "CAST"         => Token::Cast,
+            "DATE_ADD"     => Token::DateAdd,
+            "DATEDIFF"     => Token::DateDiff,
+            "SEPARATOR"    => Token::Separator,
             "OFFSET"       => Token::Offset,
             "WITH"         => Token::With,
             "RECURSIVE"    => Token::Recursive,
             "USE"          => Token::Use,
+            "USER"         => Token::User,
+            "IDENTIFIED"   => Token::Identified,
+            "GRANT"        => Token::Grant,
+            "REVOKE"       => Token::Revoke,
+            "PRIVILEGES"   => Token::Privileges,
+            "GRANTS"       => Token::Grants,
+            "OPTION"       => Token::OptionKw,
+            "PASSWORD"     => Token::Password,
+            "DATABASES"    => Token::Databases,
             _              => Token::Ident(s),
         }
     }
@@ -339,6 +382,7 @@ impl Lexer {
                             }
                         }
                         '+' => { self.advance(); Token::Plus }
+                        '@' => { self.advance(); Token::At }
                         '#' => {
                             // # 한 줄 주석: 줄 끝까지 건너뜀
                             while let Some(c) = self.peek() {

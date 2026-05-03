@@ -33,6 +33,7 @@
 - [x] DROP DATABASE / DROP DATABASE IF EXISTS
 - [x] USE {database} / USE DATABASE {database}
 - [x] SHOW TABLES (현재 DB 기준)
+- [x] SHOW DATABASES
 - [x] 테이블 이름 자동 한정 (`{current_db}.{table}` 내부 처리)
 - [x] 데이터베이스 간 완전한 데이터 격리
 - [x] Buffer Pool 무효화 (DROP 후 재생성 시 잔존 데이터 없음)
@@ -50,8 +51,10 @@
 ### DML
 - [x] INSERT (전체 컬럼 / 컬럼 지정 / 멀티 row)
 - [x] INSERT ... SELECT (SELECT 결과를 다른 테이블에 삽입)
+- [x] INSERT IGNORE (UNIQUE 위반 행 조용히 무시)
+- [x] INSERT ... ON DUPLICATE KEY UPDATE (중복 키 시 UPDATE로 전환, 다중 컬럼 대입 지원)
 - [x] SELECT
-- [x] UPDATE (상수 / 산술 표현식 / 자기 참조 — `salary = salary * 1.1`)
+- [x] UPDATE (상수 / 산술 표현식 / 스칼라 함수 / 자기 참조 — `salary = salary * 1.1`, `name = CONCAT(name, '_v2')`)
 - [x] UPDATE 다중 테이블 — `UPDATE t1, t2 SET t1.col = ..., t2.col = ... WHERE ...`
 - [x] DELETE (MVCC 논리 삭제 / 물리 삭제)
 - [x] DELETE 다중 테이블 — `DELETE t1, t2 FROM t1 JOIN t2 ON ... WHERE ...`
@@ -72,17 +75,22 @@
 - [x] GROUP BY / HAVING
 - [x] DISTINCT
 - [x] 산술 표현식 — SELECT / WHERE / UPDATE SET에서 `price * qty`, `salary + 100`
-- [x] 집계 함수 (COUNT, SUM, AVG, MIN, MAX)
+- [x] 집계 함수 — COUNT / SUM / AVG / MIN / MAX
+- [x] GROUP_CONCAT (SEPARATOR 옵션, GROUP BY 및 비집계 양쪽 지원)
 - [x] CASE WHEN ... THEN ... ELSE ... END
-- [x] 스칼라 함수 — UPPER / LOWER / LENGTH / TRIM / CONCAT / SUBSTR / REPLACE
-- [x] 수학 함수 — ROUND / ABS / CEIL / FLOOR / MOD
-- [x] 날짜 함수 — NOW / CURDATE / DATE_FORMAT
-- [x] NULL 처리 함수 — COALESCE / IFNULL
+- [x] 스칼라 함수 — UPPER / LOWER / LENGTH / TRIM / CONCAT / SUBSTR / REPLACE / LPAD / RPAD
+- [x] 수학 함수 — ROUND / ABS / CEIL / FLOOR / MOD (함수 인자 내 산술식 지원: `ROUND(salary / 1000000, 2)`)
+- [x] 날짜 함수 — NOW / CURDATE / DATE_FORMAT / DATEDIFF / DATE_ADD (DAY/MONTH/YEAR/HOUR/MINUTE/SECOND)
+- [x] NULL 처리 함수 — COALESCE / IFNULL / NULLIF
+- [x] 타입 변환 — CAST(expr AS INT/FLOAT/TEXT/DATE)
+- [x] 조건 함수 — IF(cond, true_val, false_val)
+- [x] FROM 없는 스칼라 SELECT — `SELECT 1+1`, `SELECT NOW()` (`_dual_` 가상 테이블 방식)
 - [x] 서브쿼리 — WHERE col = / > / < (SELECT ...)
 - [x] 상관 서브쿼리 — WHERE EXISTS (SELECT 1 FROM ... WHERE outer.col = inner.col)
 - [x] FROM 절 서브쿼리 — FROM (SELECT ...) AS alias
 - [x] UNION / UNION ALL (ORDER BY / LIMIT / OFFSET 포함)
 - [x] CTE (WITH ... AS) — 단순 / 다중 / INSERT 메인 쿼리 지원
+- [x] 재귀 CTE (WITH RECURSIVE) — base case + UNION ALL 반복, positional 컬럼 매핑
 - [x] SELECT ... FOR UPDATE (행 잠금)
 - [x] table.column dot notation (SELECT / JOIN ON / GROUP BY / ORDER BY)
 - [x] EXPLAIN (비용 기반 실행 계획 조회)
@@ -113,15 +121,19 @@
 - [x] FOREIGN KEY RESTRICT (삭제 거부)
 - [x] FOREIGN KEY CASCADE (연쇄 삭제)
 - [x] FOREIGN KEY SET NULL (NULL 변경)
+- [x] FOREIGN KEY SET DEFAULT (DEFAULT 값으로 변경)
 - [x] ON UPDATE CASCADE
+- [x] ON UPDATE SET NULL / SET DEFAULT
+- [x] NO ACTION (RESTRICT 동등)
 
 ### 트랜잭션
 - [x] WAL (Write-Ahead Logging) — 바이너리 redo log
+- [x] WAL fsync per-commit — COMMIT 레코드 기록 시 `sync_all()` 호출 (`innodb_flush_log_at_trx_commit=1` 동등, 전원 장애 시 커밋 유실 방지)
 - [x] BEGIN / COMMIT / ROLLBACK
 - [x] SAVEPOINT / ROLLBACK TO SAVEPOINT
 - [x] Undo Log 기반 롤백 (B+Tree 인덱스 재빌드 포함)
 - [x] WAL 기반 Crash Recovery (재시작 시 자동 복구)
-- [x] Checkpoint (WAL 자동 트런케이션, 512KB 임계값)
+- [x] Checkpoint (WAL 자동 트런케이션, 512KB 임계값, fsync 보장)
 - [x] 트랜잭션 격리 수준 4단계
   - READ UNCOMMITTED / READ COMMITTED
   - REPEATABLE READ (BEGIN 시점 스냅샷 고정)
@@ -155,11 +167,20 @@
 - [x] COMMIT / ROLLBACK 시 잠금 자동 해제
 - [x] SHOW LOCKS (활성 잠금 목록 조회)
 
+### 사용자 관리 / 권한
+- [x] CREATE USER [IF NOT EXISTS] `'user'@'host'` [IDENTIFIED BY 'password']
+- [x] DROP USER [IF EXISTS] `'user'@'host'`
+- [x] GRANT privilege [, ...] ON object TO `'user'@'host'` [WITH GRANT OPTION]
+- [x] REVOKE privilege [, ...] ON object FROM `'user'@'host'`
+- [x] SHOW GRANTS [FOR `'user'@'host'`]
+- [x] 사용자·권한 영속화 (`_users.json`, `_grants.json`)
+
 ### 모니터링
 - [x] SHOW BUFFER POOL (캐시 히트율, 사용량)
 - [x] SHOW WAL (로그 레코드, 파일 크기)
 - [x] SHOW ISOLATION LEVEL
 - [x] SHOW LOCKS
+- [x] SHOW DATABASES
 - [x] CHECKPOINT (수동 체크포인트)
 - [x] VACUUM (dead row 물리 제거)
 
@@ -167,6 +188,9 @@
 - [x] 주석 지원 (-- 한 줄 / # MySQL 스타일 / /* */ 블록)
 - [x] 주석 내 세미콜론 안전 처리 (쿼리 분리 오작동 없음)
 - [x] 세미콜론(;) 구분 멀티 쿼리 입력
+- [x] 세미콜론 뒤 인라인 주석 잔류 처리 (`SELECT 1; -- 0` 패턴에서 `-- 0` 잔류가 다음 쿼리를 주석으로 오파싱하던 버그 수정)
+- [x] 함수 인자 내 산술식 지원 — `ROUND(salary / 1000000, 2)` 등 ArithExpr::Func AST + parse_func_args 재작성으로 지원
+- [x] UPDATE SET 스칼라 함수 — `UPDATE t SET col = CONCAT(name, '-', dept)` eval_arith Func 분기 개선으로 지원
 
 ### UI (rustdb-ui)
 - [x] Tauri + React 데스크탑 앱
@@ -176,6 +200,7 @@
 - [x] 사이드바 다중 데이터베이스 독립 펼치기 (여러 DB 동시 확장 가능)
 - [x] 사이드바 더블클릭으로 활성 데이터베이스 전환 (`USE dbname`)
 - [x] 사이드바 테이블 / 컬럼 목록 (여러 테이블 동시 펼치기)
+- [x] 사이드바 컬럼 상세 — 타입 배지, PK🔑 / FK🔗 아이콘, NOT NULL / UNIQUE 뱃지 (`get_columns_detail` Tauri 커맨드)
 - [x] 사이드바 VIEW / INDEX 개별 항목 펼치기 (여러 항목 동시 펼치기)
 - [x] 사이드바 섹션 접기/펼치기, 개수 뱃지
 - [x] 사이드바 너비 조절 (드래그)
@@ -184,6 +209,8 @@
 - [x] TCP 서버 관리 뷰 (시작 / 중지 / 로그)
 - [x] AI Assistant 뷰 (사이드바 4번째 아이콘, 준비 중)
 - [x] 멀티 쿼리 결과 표시
+- [x] 결과 페이지네이션 — PAGE_SIZE=100, 초과 시 ‹/› 버튼 + 페이지 표시
+- [x] 쿼리 히스토리 — 결과 패널 HISTORY 탭, localStorage 최대 200개, 클릭 시 에디터 불러오기
 - [x] 쿼리 자동 저장 (탭별)
 - [x] 결과창 크기 조절 (드래그)
 - [x] 전체 스크롤바 스타일 통일 (Monaco 에디터 스크롤바 기준)
@@ -191,6 +218,16 @@
 <br/>
 
 ## 진행 예정
+
+### 엔진 개선 (우선순위 순)
+- [ ] Undo Log 영속화 — crash 시 미완료 트랜잭션 복구 (현재 인메모리)
+- [ ] GAP Lock / Next-key Lock — Serializable 팬텀 방지 정확도 개선
+- [ ] MVCC 버전 체인 — `_xmin/_xmax` 컬럼 방식 → 언두 버전 체인
+- [ ] 진정한 다중 세션 동시성 — 세션별 독립 Executor + 공유 BufferPool
+- [ ] 커버링 인덱스 (Index-only scan)
+- [ ] Sort-Merge Join
+- [ ] B+Tree 리프 연결 리스트 (범위 스캔 O(k))
+- [ ] WAL Group Commit (TPS 향상)
 
 ### 네트워크
 - [x] TCP 서버 (포트 7878)
@@ -204,9 +241,10 @@
 - [ ] 변환된 SQL 확인 후 실행
 
 ### UI
-- [ ] 쿼리 히스토리
+- [x] 쿼리 히스토리
 - [ ] 결과 CSV 내보내기
 - [ ] 다크 / 라이트 테마 전환
+- [ ] 탭별 결과 보존 (탭 전환 시 결과 패널 유지)
 
 <br/>
 
@@ -226,7 +264,21 @@ cd rustdb-ui && npm run tauri dev
 
 ## 테스트 쿼리
 
-3개 데이터베이스 (shopdb · hrdb · logdb), DB별 테이블·뷰·인덱스 2~3개로 전체 기능을 검증합니다.
+`test/test_full.sql` — 4개 데이터베이스, 34개 섹션, **260여 개 쿼리, 의도된 오류 1개** (UNIQUE 위반 검증)로 전체 기능을 검증합니다.
+
+| DB | 테이블 | 주요 검증 항목 |
+|----|--------|----------------|
+| hrdb | departments · employees · salaries | SELECT / JOIN / 서브쿼리 / CTE / 집계 / CASE WHEN / VIEW / ALTER TABLE / FK CASCADE / 트랜잭션 / EXPLAIN |
+| shopdb | categories · products · orders | INSERT IGNORE / ON DUPLICATE KEY UPDATE / FK ON UPDATE CASCADE / 다중 테이블 DELETE |
+| logdb | servers · events · metrics | DOUBLE / TIME 타입 / FK CASCADE DELETE / VIEW / GROUP BY |
+| testdb | dept · emp · org_tree · staff … | GROUP_CONCAT / FK SET DEFAULT / 재귀 CTE / ROUND(expr/expr, n) / UPDATE SET CONCAT / 사용자 관리 (CREATE USER · GRANT · REVOKE · SHOW GRANTS · DROP USER) |
+
+```bash
+# 전체 기능 테스트
+cargo run -p rustdb-cli < test/test_full.sql
+```
+
+빠른 확인용 예시 (3개 DB):
 
 ```sql
 -- SETUP
@@ -554,8 +606,9 @@ DROP DATABASE logdb;
 | 격리 수준 | READ UNCOMMITTED ~ SERIALIZABLE (4단계) |
 | 동시성 | Row-level Locking (SELECT FOR UPDATE) |
 | 캐시 | Buffer Pool (LRU, 64페이지, 16KB) |
-| 저장 | 바이너리 .rdb + LZ4 압축 + indexes.json + views.json |
-| 다중 DB | CREATE / DROP / USE DATABASE, 테이블 자동 한정, 격리 |
+| 저장 | 바이너리 .rdb + LZ4 압축 + indexes.json + views.json + _users.json + _grants.json |
+| 다중 DB | CREATE / DROP / USE / SHOW DATABASES, 테이블 자동 한정, 격리 |
+| 사용자 관리 | CREATE/DROP USER, GRANT/REVOKE, SHOW GRANTS, 영속화 |
 | UI | Tauri + React + Monaco Editor (멀티 탭) |
 | TCP 서버 | 멀티 클라이언트, 포트 7878, 라인 프로토콜 |
 | AI 연동 | MCP AI API (예정) |
@@ -605,6 +658,9 @@ code/
 │  │ INDEX (단일/복합/클러스터드)  │       │
 │  │ EXPLAIN (비용 기반 실행 계획) │       │
 │  │ VIEW / 제약조건 (PK/FK/CHECK) │       │
+│  │ FK SET DEFAULT / NO ACTION    │       │
+│  │ CREATE/DROP USER              │       │
+│  │ GRANT / REVOKE / SHOW GRANTS  │       │
 │  │ BEGIN / COMMIT / ROLLBACK     │       │
 │  │ SAVEPOINT / ROLLBACK TO sp    │       │
 │  │ 격리 수준 4단계               │       │
@@ -619,6 +675,7 @@ code/
 │  MVCC (_xmin / _xmax 버전 스탬프)        │
 │  바이너리 .rdb + LZ4 압축 저장           │
 │  인덱스/뷰 영속화 (indexes/views.json)   │
+│  사용자/권한 영속화 (_users/_grants.json)│
 │                                          │
 └──────────────────────────────────────────┘
         ↓              ↓

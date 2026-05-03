@@ -111,6 +111,8 @@ fn main() {
         while let Some(pos) = buf.find(';') {
             let stmt_str = buf[..pos].trim().to_string();
             buf = buf[pos + 1..].to_string();
+            // Discard inline comment residue (e.g. "  -- 0" left after the semicolon)
+            if buf.trim_start().starts_with("--") { buf.clear(); }
 
             if stmt_str.is_empty() { continue; }
 

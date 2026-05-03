@@ -304,6 +304,57 @@ struct IndexInfo {
     kind:    String, // "single" | "composite"
 }
 
+#[derive(serde::Serialize)]
+struct ColumnDetail {
+    name:        String,
+    data_type:   String,
+    is_pk:       bool,
+    is_not_null: bool,
+    is_unique:   bool,
+    is_auto_inc: bool,
+    default_val: Option<String>,
+    fk_ref:      Option<String>, // "table(col)"
+}
+
+#[tauri::command]
+fn get_columns_detail(table: String, state: State<AppState>) -> Vec<ColumnDetail> {
+    let exec = state.db.lock().unwrap();
+    let qualified = if table.contains('.') {
+        table.clone()
+    } else {
+        format!("{}.{}", exec.current_db, table)
+    };
+    exec.catalog.get_table(&qualified)
+        .map(|s| s.columns.iter().map(|c| {
+            let type_str = format!("{:?}", c.data_type)
+                .replace("Varchar(", "VARCHAR(")
+                .replace("Decimal(", "DECIMAL(")
+                .replace("Enum(", "ENUM(")
+                .replace("Boolean", "BOOL")
+                .replace("DateTime", "DATETIME")
+                .replace("Timestamp", "TIMESTAMP")
+                .replace("Double", "DOUBLE")
+                .replace("Float", "FLOAT")
+                .replace("Text", "TEXT")
+                .replace("Date", "DATE")
+                .replace("Time", "TIME")
+                .replace("Year", "YEAR")
+                .replace("Int", "INT");
+            ColumnDetail {
+                name:        c.name.clone(),
+                data_type:   type_str,
+                is_pk:       c.primary_key,
+                is_not_null: c.not_null,
+                is_unique:   c.unique,
+                is_auto_inc: c.auto_increment,
+                default_val: c.default.clone(),
+                fk_ref:      c.foreign_key.as_ref().map(|fk|
+                    format!("{}({})", fk.ref_table, fk.ref_column)),
+            }
+        }).collect())
+        .unwrap_or_default()
+}
+
 #[tauri::command]
 fn get_views(state: State<AppState>) -> Vec<String> {
     let exec = state.db.lock().unwrap();
@@ -445,6 +496,7 @@ fn main() {
             get_current_db,
             get_tables,
             get_columns,
+            get_columns_detail,
             get_views,
             get_indexes,
             get_tables_for_db,

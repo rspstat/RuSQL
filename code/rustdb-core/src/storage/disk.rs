@@ -315,4 +315,32 @@ impl DiskManager {
         let json = fs::read_to_string(&path).unwrap_or_default();
         serde_json::from_str(&json).unwrap_or_default()
     }
+
+    // ── 사용자/권한 영속화 (전역: data/_users.json, data/_grants.json) ────
+
+    pub fn save_users<T: Serialize>(&self, users: &T) {
+        let path = format!("{}/_users.json", self.data_dir);
+        let json = serde_json::to_string_pretty(users).unwrap_or_default();
+        let _ = fs::write(path, json);
+    }
+
+    pub fn load_users<T: for<'de> serde::Deserialize<'de> + Default>(&self) -> T {
+        let path = format!("{}/_users.json", self.data_dir);
+        if !Path::new(&path).exists() { return T::default(); }
+        let json = fs::read_to_string(&path).unwrap_or_default();
+        serde_json::from_str(&json).unwrap_or_default()
+    }
+
+    pub fn save_grants<T: Serialize>(&self, grants: &T) {
+        let path = format!("{}/_grants.json", self.data_dir);
+        let json = serde_json::to_string_pretty(grants).unwrap_or_default();
+        let _ = fs::write(path, json);
+    }
+
+    pub fn load_grants<T: for<'de> serde::Deserialize<'de> + Default>(&self) -> T {
+        let path = format!("{}/_grants.json", self.data_dir);
+        if !Path::new(&path).exists() { return T::default(); }
+        let json = fs::read_to_string(&path).unwrap_or_default();
+        serde_json::from_str(&json).unwrap_or_default()
+    }
 }
