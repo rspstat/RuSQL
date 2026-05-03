@@ -59,6 +59,14 @@
 - [x] DELETE (MVCC 논리 삭제 / 물리 삭제)
 - [x] DELETE 다중 테이블 — `DELETE t1, t2 FROM t1 JOIN t2 ON ... WHERE ...`
 
+### DCL
+- [x] CREATE USER [IF NOT EXISTS] `'user'@'host'` [IDENTIFIED BY 'password']
+- [x] DROP USER [IF EXISTS] `'user'@'host'`
+- [x] GRANT privilege [, ...] ON object TO `'user'@'host'` [WITH GRANT OPTION]
+- [x] REVOKE privilege [, ...] ON object FROM `'user'@'host'`
+- [x] SHOW GRANTS [FOR `'user'@'host'`]
+- [x] 사용자·권한 영속화 (`_users.json`, `_grants.json`)
+
 ### 쿼리 기능
 - [x] WHERE (=, !=, >, <, >=, <=)
 - [x] AND / OR / NOT 복합 조건 — `NOT (price > 100 OR active = 0)`
@@ -166,14 +174,6 @@
 - [x] UPDATE / DELETE 시 잠금 충돌 감지
 - [x] COMMIT / ROLLBACK 시 잠금 자동 해제
 - [x] SHOW LOCKS (활성 잠금 목록 조회)
-
-### 사용자 관리 / 권한
-- [x] CREATE USER [IF NOT EXISTS] `'user'@'host'` [IDENTIFIED BY 'password']
-- [x] DROP USER [IF EXISTS] `'user'@'host'`
-- [x] GRANT privilege [, ...] ON object TO `'user'@'host'` [WITH GRANT OPTION]
-- [x] REVOKE privilege [, ...] ON object FROM `'user'@'host'`
-- [x] SHOW GRANTS [FOR `'user'@'host'`]
-- [x] 사용자·권한 영속화 (`_users.json`, `_grants.json`)
 
 ### 모니터링
 - [x] SHOW BUFFER POOL (캐시 히트율, 사용량)
