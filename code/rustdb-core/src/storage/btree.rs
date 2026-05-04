@@ -2,7 +2,7 @@
 
 use std::cmp::Ordering;
 
-const ORDER: usize = 4; // 노드당 최대 키 수
+const ORDER: usize = 16; // 노드당 최대 키 수
 
 #[derive(Debug, Clone)]
 pub enum Node {
@@ -20,8 +20,7 @@ pub struct InternalNode {
 pub struct LeafNode {
     pub keys: Vec<String>,
     pub values: Vec<String>, // JSON 직렬화된 Row
-    // next 포인터는 분할 시 유지되지 않으므로 제거됨.
-    // 범위 스캔은 트리 순회(collect_all_kv)로 수행한다.
+    // 범위 스캔은 scan_from_node / scan_to_node 가지치기로 O(log N + k) 수행.
 }
 
 #[derive(Debug)]
@@ -175,8 +174,7 @@ impl BPlusTree {
         match node {
             Node::Leaf(leaf) => {
                 for (i, k) in leaf.keys.iter().enumerate() {
-                    let vs_end = cmp_keys(k, end);
-                    if vs_end == Ordering::Greater { break; }
+                    if cmp_keys(k, end) == Ordering::Greater { break; }
                     if cmp_keys(k, start) != Ordering::Less {
                         result.push(leaf.values[i].clone());
                     }
@@ -184,9 +182,13 @@ impl BPlusTree {
             }
             Node::Internal(internal) => {
                 for (i, child) in internal.children.iter().enumerate() {
-                    if i < internal.keys.len() && cmp_keys(&internal.keys[i], start) == Ordering::Less {
+                    // keys[i]는 children[i+1]의 최솟값 = children[i]의 상한(배타적).
+                    // keys[i] <= start 이면 children[i]의 모든 키 < start → 스킵.
+                    if i < internal.keys.len() && cmp_keys(&internal.keys[i], start) != Ordering::Greater {
                         continue;
                     }
+                    // keys[i-1]은 children[i]의 최솟값.
+                    // keys[i-1] > end 이면 children[i]의 모든 키 > end → 중단.
                     if i > 0 && cmp_keys(&internal.keys[i - 1], end) == Ordering::Greater {
                         break;
                     }
@@ -196,27 +198,81 @@ impl BPlusTree {
         }
     }
 
-    // ── 개방 범위 스캔: pk >= start ────────────────────────────────────────
-    /// start 이상의 모든 (key, value) 반환. inclusive=false 이면 start 제외.
-    /// 내부적으로 정렬된 트리 순회 후 필터링한다.
+    // ── 개방 범위 스캔: pk >= start (또는 pk > start) ──────────────────────
+    /// O(log N + k) — 내부 노드 가지치기로 불필요한 서브트리를 방문하지 않는다.
     pub fn scan_from(&self, start: &str, inclusive: bool) -> Vec<(String, String)> {
-        self.collect_all_kv().into_iter()
-            .filter(|(k, _)| {
-                let ord = cmp_keys(k, start);
-                if inclusive { ord != Ordering::Less } else { ord == Ordering::Greater }
-            })
-            .collect()
+        let mut result = Vec::new();
+        if let Some(root) = &self.root {
+            Self::scan_from_node(root, start, inclusive, &mut result);
+        }
+        result
     }
 
-    // ── 개방 범위 스캔: pk <= end ──────────────────────────────────────────
-    /// end 이하의 모든 (key, value) 반환. inclusive=false 이면 end 제외.
+    fn scan_from_node(node: &Node, start: &str, inclusive: bool, result: &mut Vec<(String, String)>) {
+        match node {
+            Node::Leaf(leaf) => {
+                for (i, k) in leaf.keys.iter().enumerate() {
+                    let ord = cmp_keys(k, start);
+                    let include = if inclusive { ord != Ordering::Less } else { ord == Ordering::Greater };
+                    if include {
+                        result.push((k.clone(), leaf.values[i].clone()));
+                    }
+                }
+            }
+            Node::Internal(internal) => {
+                for (i, child) in internal.children.iter().enumerate() {
+                    // keys[i]는 children[i+1]의 최솟값 = children[i]의 배타적 상한.
+                    // keys[i] <= start 이면 children[i]의 모든 키가 start 미만 → 스킵.
+                    if i < internal.keys.len()
+                        && cmp_keys(&internal.keys[i], start) != Ordering::Greater
+                    {
+                        continue;
+                    }
+                    Self::scan_from_node(child, start, inclusive, result);
+                }
+            }
+        }
+    }
+
+    // ── 개방 범위 스캔: pk <= end (또는 pk < end) ──────────────────────────
+    /// O(log N + k) — 내부 노드 가지치기로 불필요한 서브트리를 방문하지 않는다.
     pub fn scan_to(&self, end: &str, inclusive: bool) -> Vec<(String, String)> {
-        self.collect_all_kv().into_iter()
-            .filter(|(k, _)| {
-                let ord = cmp_keys(k, end);
-                if inclusive { ord != Ordering::Greater } else { ord == Ordering::Less }
-            })
-            .collect()
+        let mut result = Vec::new();
+        if let Some(root) = &self.root {
+            Self::scan_to_node(root, end, inclusive, &mut result);
+        }
+        result
+    }
+
+    fn scan_to_node(node: &Node, end: &str, inclusive: bool, result: &mut Vec<(String, String)>) {
+        match node {
+            Node::Leaf(leaf) => {
+                for (i, k) in leaf.keys.iter().enumerate() {
+                    let ord = cmp_keys(k, end);
+                    if ord == Ordering::Greater { break; }
+                    if inclusive || ord == Ordering::Less {
+                        result.push((k.clone(), leaf.values[i].clone()));
+                    }
+                }
+            }
+            Node::Internal(internal) => {
+                for (i, child) in internal.children.iter().enumerate() {
+                    // keys[i-1]은 children[i]의 최솟값.
+                    // inclusive: keys[i-1] > end 이면 children[i]의 모든 키 > end → 중단.
+                    // exclusive: keys[i-1] >= end 이면 children[i]의 모든 키 >= end → 중단.
+                    if i > 0 {
+                        let ord = cmp_keys(&internal.keys[i - 1], end);
+                        let stop = if inclusive {
+                            ord == Ordering::Greater
+                        } else {
+                            ord != Ordering::Less
+                        };
+                        if stop { break; }
+                    }
+                    Self::scan_to_node(child, end, inclusive, result);
+                }
+            }
+        }
     }
 
     // ── 전체 값 / (키, 값) ───────────────────────────────────────────────

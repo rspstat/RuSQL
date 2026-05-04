@@ -40,18 +40,20 @@ pub enum AccessPath {
 #[derive(Debug, Clone)]
 pub enum JoinAlgo {
     NestedLoop,
-    Hash { probe_col: String, build_col: String },
+    Hash      { probe_col: String, build_col: String },
+    SortMerge { probe_col: String, build_col: String },
 }
 
 // ── Plan nodes ────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
 pub struct TablePlan {
-    pub table:    String,
-    pub access:   AccessPath,
-    pub filter:   Option<CondExpr>,
-    pub est_rows: usize,
-    pub est_cost: f64,
+    pub table:       String,
+    pub access:      AccessPath,
+    pub filter:      Option<CondExpr>,
+    pub est_rows:    usize,
+    pub est_cost:    f64,
+    pub is_covering: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -103,6 +105,31 @@ impl<'a> Planner<'a> {
         SelectPlan { base, joins: join_plans }
     }
 
+    pub fn plan_covering(
+        &self,
+        table: &str,
+        condition: &Option<CondExpr>,
+        joins: &[Join],
+        columns: &[SelectColumn],
+    ) -> SelectPlan {
+        let mut plan = self.plan(table, condition, joins);
+        plan.base.is_covering = Self::is_covering_access(&plan.base.access, columns);
+        plan
+    }
+
+    fn is_covering_access(access: &AccessPath, columns: &[SelectColumn]) -> bool {
+        let index_col = match access {
+            AccessPath::SecondaryPoint { col, .. } => col.as_str(),
+            AccessPath::SecondaryRange { col, .. } => col.as_str(),
+            _ => return false,
+        };
+        !columns.is_empty() && columns.iter().all(|c| match c {
+            SelectColumn::Column(s) => s == index_col,
+            SelectColumn::ColumnAlias(s, _) => s == index_col,
+            _ => false,
+        })
+    }
+
     // ── Table scan ────────────────────────────────────────────────────────
 
     fn plan_table(&self, table: &str, condition: &Option<CondExpr>) -> TablePlan {
@@ -111,7 +138,7 @@ impl<'a> Planner<'a> {
         let access   = self.choose_access(table, condition, pk.as_deref());
         let est_rows = self.estimate_rows(total, &access);
         let est_cost = self.estimate_cost(total, &access);
-        TablePlan { table: table.to_string(), access, filter: condition.clone(), est_rows, est_cost }
+        TablePlan { table: table.to_string(), access, filter: condition.clone(), est_rows, est_cost, is_covering: false }
     }
 
     pub fn choose_access(&self, table: &str, condition: &Option<CondExpr>, pk: Option<&str>) -> AccessPath {
@@ -181,8 +208,13 @@ impl<'a> Planner<'a> {
         let right_size = self.table_size(&join.table);
         let algo = self.choose_join_algo(base.est_rows, right_size, &join.on_expr, &base.table, &join.table);
         let est_cost = match &algo {
-            JoinAlgo::NestedLoop => (base.est_rows * right_size.max(1)) as f64,
-            JoinAlgo::Hash { .. } => (base.est_rows + right_size) as f64 * 1.5,
+            JoinAlgo::NestedLoop      => (base.est_rows * right_size.max(1)) as f64,
+            JoinAlgo::Hash { .. }     => (base.est_rows + right_size) as f64 * 1.5,
+            // Sort-Merge: O((N+M)log(N+M)) sort + O(N+M) merge
+            JoinAlgo::SortMerge { .. } => {
+                let n = (base.est_rows + right_size) as f64;
+                n * n.log2().max(1.0) + n
+            }
         };
         let est_rows = (base.est_rows + right_size) / 2;
         JoinPlan {
@@ -200,18 +232,20 @@ impl<'a> Planner<'a> {
                     if let (ArithExpr::Col(lc), ConditionValue::Literal(rv)) = (&cond.left, &cond.value) {
                         let lhs_col = lc.split('.').last().unwrap_or(lc).to_string();
                         let rhs_col = rv.split('.').last().unwrap_or(rv).to_string();
-                        // Use the table prefix in the ON condition to determine direction.
-                        // After alias expansion, ON conditions look like "employees.id = salaries.employee_id".
                         let lhs_tbl = lc.split('.').next().unwrap_or("").to_lowercase();
                         let rhs_tbl = rv.split('.').next().unwrap_or("").to_lowercase();
                         let right_bare = right_table.split('.').last().unwrap_or(right_table).to_lowercase();
                         let (probe_col, build_col) = if rhs_tbl == right_bare {
-                            (lhs_col, rhs_col) // normal: ON left_tbl.col = right_tbl.col
+                            (lhs_col, rhs_col)
                         } else if lhs_tbl == right_bare {
-                            (rhs_col, lhs_col) // reversed: ON right_tbl.col = left_tbl.col
+                            (rhs_col, lhs_col)
                         } else {
-                            return JoinAlgo::NestedLoop; // ambiguous, fall back
+                            return JoinAlgo::NestedLoop;
                         };
+                        // 양쪽 모두 대형 테이블이면 Sort-Merge Join, 한쪽만 크면 Hash Join.
+                        if left_size > 4 && right_size > 4 {
+                            return JoinAlgo::SortMerge { probe_col, build_col };
+                        }
                         return JoinAlgo::Hash { probe_col, build_col };
                     }
                 }
@@ -276,7 +310,12 @@ impl<'a> Planner<'a> {
         if !pk.is_empty() { out.push_str(&fmt_row("PK", &pk)); }
         out.push_str(&fmt_row("Est. cost",    &format!("{:.1}", plan.total_cost())));
         out.push_str("|                                                  |\n");
-        out.push_str(&fmt_row("Access", &self.describe_access(&plan.base.access)));
+        let access_label = if plan.base.is_covering {
+            format!("{} (Covering)", self.describe_access(&plan.base.access))
+        } else {
+            self.describe_access(&plan.base.access)
+        };
+        out.push_str(&fmt_row("Access", &access_label));
         for jp in &plan.joins {
             out.push_str(&fmt_row("Join", &self.describe_join(jp)));
         }
@@ -300,7 +339,9 @@ impl<'a> Planner<'a> {
         let algo = match &jp.algo {
             JoinAlgo::NestedLoop => "Nested Loop".to_string(),
             JoinAlgo::Hash { probe_col, build_col } =>
-                format!("Hash Join  probe={} build={}", probe_col, build_col),
+                format!("Hash Join       probe={} build={}", probe_col, build_col),
+            JoinAlgo::SortMerge { probe_col, build_col } =>
+                format!("Sort-Merge Join probe={} build={}", probe_col, build_col),
         };
         format!("{} → {}  cost≈{:.0}", algo, jp.right_table, jp.est_cost)
     }

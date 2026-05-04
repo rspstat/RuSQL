@@ -1261,7 +1261,7 @@ impl Executor {
         // ── Planner: 인덱스 / 조인 알고리즘 결정 ──────────────────────────
         let has_agg = columns.iter().any(|c| matches!(c, SelectColumn::Agg { .. } | SelectColumn::AggAlias { .. }));
         let planner = Planner::new(&self.tables, &self.indexes, &self.index_meta, &self.composite_indexes, &self.catalog);
-        let plan = planner.plan(&table, &condition, &joins);
+        let plan = planner.plan_covering(&table, &condition, &joins, &columns);
 
         // 인덱스 경로 실행 (집계 / FOR UPDATE / JOIN / LIMIT / ORDER BY 없을 때만)
         if joins.is_empty() && !has_agg && !for_update
@@ -1305,9 +1305,22 @@ impl Executor {
                     }
                 }
                 // ── 보조 인덱스 포인트 (중복 키 배열) ────────────────────
-                AccessPath::SecondaryPoint { index_key, key, .. } => {
+                AccessPath::SecondaryPoint { index_key, col, key, .. } => {
                     if let Some(index) = self.indexes.get(index_key) {
                         if let Some(json) = index.search(key) {
+                            if plan.base.is_covering {
+                                // 커버링 인덱스: 전체 Row 역직렬화 없이 JSON 배열 길이만 집계
+                                let arr: Vec<serde_json::Value> = serde_json::from_str(&json).unwrap_or_default();
+                                let count = arr.iter()
+                                    .filter(|v| v.get("_xmax").and_then(|x| x.as_str()).map(|x| x == "0").unwrap_or(true))
+                                    .count();
+                                let synthetic: Vec<Row> = (0..count).map(|_| {
+                                    let mut r = Row::new();
+                                    r.insert(col.clone(), key.clone());
+                                    r
+                                }).collect();
+                                return self.format_result(synthetic, columns, table, vec![]);
+                            }
                             let rows: Vec<Row> = serde_json::from_str::<Vec<Row>>(&json)
                                 .unwrap_or_default()
                                 .into_iter()
@@ -1320,7 +1333,7 @@ impl Executor {
                     }
                 }
                 // ── 보조 인덱스 범위 스캔 ────────────────────────────────
-                AccessPath::SecondaryRange { index_key, op, key, .. } => {
+                AccessPath::SecondaryRange { index_key, col, op, key, .. } => {
                     if let Some(index) = self.indexes.get(index_key) {
                         let inclusive = op.inclusive();
                         let pairs = if op.is_lower_bound() {
@@ -1328,6 +1341,26 @@ impl Executor {
                         } else {
                             index.scan_to(key, inclusive)
                         };
+                        if plan.base.is_covering {
+                            // 커버링 인덱스: 각 키의 JSON 배열 길이만 집계
+                            let col_name = col.clone();
+                            let synthetic: Vec<Row> = pairs.iter()
+                                .flat_map(|(k, json)| {
+                                    let arr: Vec<serde_json::Value> = serde_json::from_str(json).unwrap_or_default();
+                                    let count = arr.iter()
+                                        .filter(|v| v.get("_xmax").and_then(|x| x.as_str()).map(|x| x == "0").unwrap_or(true))
+                                        .count();
+                                    let col_name = col_name.clone();
+                                    let k = k.clone();
+                                    (0..count).map(move |_| {
+                                        let mut r = Row::new();
+                                        r.insert(col_name.clone(), k.clone());
+                                        r
+                                    }).collect::<Vec<_>>()
+                                })
+                                .collect();
+                            return self.format_result(synthetic, columns, table, vec![]);
+                        }
                         let rows: Vec<Row> = pairs.iter()
                             .filter_map(|(_, j)| serde_json::from_str::<Vec<Row>>(j).ok())
                             .flatten()
@@ -1400,6 +1433,139 @@ impl Executor {
                 let algo = plan.joins.get(ji).map(|jp| &jp.algo);
 
                 let joined = match algo {
+                    Some(JoinAlgo::SortMerge { probe_col, build_col }) => {
+                        // ── Sort-Merge Join ───────────────────────────────
+                        // 양쪽 모두 조인 키 기준으로 정렬 후 투 포인터 병합.
+                        // 시간 복잡도: O((N+M)log(N+M)) sort + O(N+M) merge.
+                        let pc = probe_col.clone();
+                        let bc = build_col.clone();
+                        let tbl = j.table.clone();
+
+                        let sort_cmp = |a: &str, b: &str| -> std::cmp::Ordering {
+                            match (a.parse::<f64>(), b.parse::<f64>()) {
+                                (Ok(af), Ok(bf)) => af.partial_cmp(&bf).unwrap_or(std::cmp::Ordering::Equal),
+                                _ => a.cmp(b),
+                            }
+                        };
+                        let key_left = |row: &Row| -> String {
+                            row.get(&pc)
+                                .or_else(|| row.iter().find(|(k, _)| k.ends_with(&format!(".{}", pc))).map(|(_, v)| v))
+                                .cloned()
+                                .unwrap_or_default()
+                        };
+                        let key_right = |row: &Row| -> String {
+                            row.get(&bc)
+                                .or_else(|| row.get(&format!("{}.{}", tbl, bc)))
+                                .cloned()
+                                .unwrap_or_default()
+                        };
+
+                        let mut ls: Vec<Row> = current.clone();
+                        ls.sort_by(|a, b| sort_cmp(&key_left(a), &key_left(b)));
+                        let mut rs: Vec<Row> = right_rows.clone();
+                        rs.sort_by(|a, b| sort_cmp(&key_right(a), &key_right(b)));
+
+                        let mut out = Vec::new();
+                        match j.join_type {
+                            JoinType::Inner => {
+                                let mut li = 0usize;
+                                let mut ri = 0usize;
+                                while li < ls.len() && ri < rs.len() {
+                                    let lk = key_left(&ls[li]);
+                                    let rk = key_right(&rs[ri]);
+                                    match sort_cmp(&lk, &rk) {
+                                        std::cmp::Ordering::Less    => { li += 1; }
+                                        std::cmp::Ordering::Greater => { ri += 1; }
+                                        std::cmp::Ordering::Equal   => {
+                                            // 동일 키 그룹 수집
+                                            let li0 = li;
+                                            while li < ls.len() && key_left(&ls[li]) == lk { li += 1; }
+                                            let ri0 = ri;
+                                            while ri < rs.len() && key_right(&rs[ri]) == lk { ri += 1; }
+                                            // 교차 곱
+                                            for l in &ls[li0..li] {
+                                                for r in &rs[ri0..ri] {
+                                                    let mut merged = l.clone();
+                                                    merge_right(&mut merged, r, &tbl);
+                                                    out.push(merged);
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            JoinType::Left => {
+                                let mut ri = 0usize;
+                                let mut li = 0usize;
+                                while li < ls.len() {
+                                    let lk = key_left(&ls[li]);
+                                    // ri를 lk 이상의 첫 위치로 전진
+                                    while ri < rs.len() && sort_cmp(&key_right(&rs[ri]), &lk) == std::cmp::Ordering::Less {
+                                        ri += 1;
+                                    }
+                                    // 왼쪽 키 그룹 [li0, li)
+                                    let li0 = li;
+                                    while li < ls.len() && key_left(&ls[li]) == lk { li += 1; }
+                                    // 오른쪽 매칭 그룹 [ri0, ri_end)
+                                    let ri0 = ri;
+                                    let mut ri_end = ri;
+                                    while ri_end < rs.len() && key_right(&rs[ri_end]) == lk { ri_end += 1; }
+                                    if ri_end > ri0 {
+                                        for l in &ls[li0..li] {
+                                            for r in &rs[ri0..ri_end] {
+                                                let mut merged = l.clone();
+                                                merge_right(&mut merged, r, &tbl);
+                                                out.push(merged);
+                                            }
+                                        }
+                                    } else {
+                                        for l in &ls[li0..li] {
+                                            let mut merged = l.clone();
+                                            null_right(&mut merged, &right_schema_cols, &tbl);
+                                            out.push(merged);
+                                        }
+                                    }
+                                    ri = ri_end;
+                                }
+                            }
+                            JoinType::Right => {
+                                let left_cols: Vec<String> = current.first()
+                                    .map(|r| r.keys().filter(|k| !k.starts_with('_') && !k.contains('.')).cloned().collect())
+                                    .unwrap_or_default();
+                                let mut li = 0usize;
+                                let mut ri = 0usize;
+                                while ri < rs.len() {
+                                    let rk = key_right(&rs[ri]);
+                                    while li < ls.len() && sort_cmp(&key_left(&ls[li]), &rk) == std::cmp::Ordering::Less {
+                                        li += 1;
+                                    }
+                                    let ri0 = ri;
+                                    while ri < rs.len() && key_right(&rs[ri]) == rk { ri += 1; }
+                                    let li0 = li;
+                                    let mut li_end = li;
+                                    while li_end < ls.len() && key_left(&ls[li_end]) == rk { li_end += 1; }
+                                    if li_end > li0 {
+                                        for l in &ls[li0..li_end] {
+                                            for r in &rs[ri0..ri] {
+                                                let mut merged = l.clone();
+                                                merge_right(&mut merged, r, &tbl);
+                                                out.push(merged);
+                                            }
+                                        }
+                                    } else {
+                                        for r in &rs[ri0..ri] {
+                                            let mut merged = Row::new();
+                                            for col in &left_cols { merged.insert(col.clone(), NULL_VALUE.to_string()); }
+                                            merge_right(&mut merged, r, &tbl);
+                                            out.push(merged);
+                                        }
+                                    }
+                                    li = li0; // 같은 왼쪽 그룹이 다음 오른쪽 키에도 매칭될 수 있으므로 유지
+                                }
+                            }
+                        }
+                        out
+                    }
                     Some(JoinAlgo::Hash { probe_col, build_col }) => {
                         // ── Hash Join ─────────────────────────────────────
                         // Build phase: right 테이블을 build_col 기준으로 해시화
@@ -4132,17 +4298,17 @@ impl Executor {
 
     /// EXPLAIN <SELECT> — 쿼리 실행 계획 출력 (실제 실행 안 함)
     fn exec_explain(&self, stmt: Statement) -> Result<String, String> {
-        let (table, condition, joins) = match &stmt {
-            Statement::Select { table, condition, joins, subquery, .. } => {
+        let (table, condition, joins, columns) = match &stmt {
+            Statement::Select { table, condition, joins, subquery, columns, .. } => {
                 if subquery.is_some() {
                     return Ok("EXPLAIN: Subquery-based SELECT → SUBQUERY SCAN".to_string());
                 }
-                (table.clone(), condition.clone(), joins.clone())
+                (table.clone(), condition.clone(), joins.clone(), columns.clone())
             }
             other => return Ok(format!("EXPLAIN: {:?} → not a SELECT", other)),
         };
         let planner = Planner::new(&self.tables, &self.indexes, &self.index_meta, &self.composite_indexes, &self.catalog);
-        let plan = planner.plan(&table, &condition, &joins);
+        let plan = planner.plan_covering(&table, &condition, &joins, &columns);
         Ok(planner.explain(&plan))
     }
 

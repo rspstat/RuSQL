@@ -212,12 +212,12 @@
 
 | 항목 | RustDB | MySQL (InnoDB) |
 |------|--------|----------------|
-| B+Tree 인덱스 | ✅ ORDER=4 (인메모리 노드, 소형) | ✅ 16KB 페이지 기반 (디스크, ORDER≈수백) |
-| B+Tree 리프 연결 리스트 | ❌ (범위 스캔은 트리 순회 `collect_all_kv`) | ✅ (리프 간 이중 연결 리스트) |
+| B+Tree 인덱스 | ✅ ORDER=16 (인메모리 노드, 소형) | ✅ 16KB 페이지 기반 (디스크, ORDER≈수백) |
+| B+Tree 리프 연결 리스트 | ✅ 트리 가지치기 방식 (scan_from_node / scan_to_node, O(log N + k)) | ✅ (리프 간 이중 연결 리스트) |
 | 클러스터드 인덱스 | ✅ (PK 기준 정렬) | ✅ (InnoDB 기본) |
 | 보조 인덱스 | ✅ 중복 키 배열 저장, 자동 재빌드 | ✅ |
 | 복합 인덱스 | ✅ (null-byte 키 결합) | ✅ |
-| 커버링 인덱스 (Index-only scan) | ❌ | ✅ |
+| 커버링 인덱스 (Index-only scan) | ✅ (SELECT 컬럼 ⊆ 인덱스 컬럼 시 자동 감지, JSON 역직렬화 생략) | ✅ |
 | 해시 인덱스 | ❌ | ✅ (Memory 엔진) |
 | 어댑티브 해시 인덱스 | ❌ | ✅ (InnoDB 자동) |
 | FULLTEXT 인덱스 | ❌ | ✅ |
@@ -235,9 +235,9 @@
 | 항목 | RustDB | MySQL |
 |------|--------|-------|
 | 방식 | 비용 기반 (Cost-Based) | 비용 기반 (Cost-Based) |
-| 접근 경로 수 | 5가지 (SeqScan / PkPoint / PkRange / SecondaryIndex / CompositeIndex) | 다수 (+ 인덱스 머지, 루스 인덱스 스캔 등) |
-| Join 알고리즘 선택 | ✅ Hash Join (행 수 > 4) vs Nested Loop / ON 조건 방향 무관 | ✅ Hash Join (8.0+), BNL, BKA, NLJ |
-| Sort-Merge Join | ❌ | ✅ (정렬된 데이터셋 활용) |
+| 접근 경로 수 | 7가지 (SeqScan / PkPoint / PkBetween / PkRange / SecondaryPoint / SecondaryRange / CompositeIndex) | 다수 (+ 인덱스 머지, 루스 인덱스 스캔 등) |
+| Join 알고리즘 선택 | ✅ Sort-Merge Join (양쪽 모두 > 4행) / Hash Join (한쪽 > 4행) / Nested Loop | ✅ Hash Join (8.0+), BNL, BKA, NLJ |
+| Sort-Merge Join | ✅ (양쪽 모두 > 4행인 Equi-Join에서 자동 선택, O((N+M)logN) sort + O(N+M) merge) | ✅ (정렬된 데이터셋 활용) |
 | 통계 정보 | 인메모리 행 수 기반 (log₂N 추정, 단순) | 히스토그램, 인덱스 통계, ANALYZE TABLE |
 | EXPLAIN 출력 | ✅ 텍스트 박스 (비용·접근경로·Join 알고리즘) | ✅ 트리형/JSON/ANALYZE 포맷 |
 | 쿼리 힌트 | ❌ | ✅ (`USE INDEX`, `STRAIGHT_JOIN` 등) |
@@ -320,13 +320,13 @@
 | 윈도우 함수 (ROW_NUMBER, RANK, LAG 등) | ❌ 미구현 | 실행기 대규모 확장 필요 |
 | 저장 프로시저 / 트리거 | ❌ 미구현 | — |
 | 복제 / 클러스터링 | ❌ 미구현 | — |
-| Sort-Merge Join | ❌ 미구현 | planner.rs 확장 필요 |
-| 커버링 인덱스 (Index-only scan) | ❌ 미구현 | — |
+| Sort-Merge Join | ✅ 구현 완료 | 양쪽 > 4행 Equi-Join에서 자동 선택. 투 포인터 키 그룹 병합으로 Inner/Left/Right 지원 |
+| 커버링 인덱스 (Index-only scan) | ✅ 구현 완료 | SELECT 컬럼이 인덱스 컬럼과 일치할 때 자동 감지. JSON 역직렬화 생략, JSON 배열 길이로 행 수 집계. EXPLAIN에 "(Covering)" 표시 |
 | GAP Lock / Next-key Lock | ❌ 미구현 | Serializable 정확도 개선 필요 |
 | Undo Log 영속화 | ❌ 미구현 | crash 시 미완료 트랜잭션 잔존 가능 |
 | WAL fsync per-commit | ✅ 구현 완료 | COMMIT · CHECKPOINT 레코드에 `sync_all()` 추가 |
 | WAL group commit | ❌ 미구현 | 고성능 환경에서 TPS 향상 필요 시 |
-| B+Tree 리프 연결 리스트 | ❌ 미구현 | 범위 스캔 최적화 |
+| B+Tree 리프 연결 리스트 | ✅ 구현 완료 | `scan_from_node` / `scan_to_node` 트리 가지치기로 재구현. O(log N + k) 달성 |
 | 히스토그램 통계 (ANALYZE TABLE) | ❌ 미구현 | 옵티마이저 정확도 개선 |
 | Prepared Statements | ❌ 미구현 | — |
 | `rustdb-mcp` (자연어 → SQL) | 🔧 폴더만 생성 | AI MCP 연동 미개발 |
@@ -344,12 +344,12 @@
 | 🔴 높음 | GAP Lock / Next-key Lock | 동시성 | Serializable 격리에서 팬텀을 행 수 비교로 근사 감지 중. 범위 기반 갭 잠금으로 정확한 팬텀 방지 | `lock_manager.rs` | ★★★★ |
 | 🔴 높음 | MVCC 버전 체인 | 동시성 | `_xmin`/`_xmax` 컬럼 방식은 단일 세션 중심. 언두 버전 체인으로 개선하면 다중 세션 읽기 일관성 향상 | `executor.rs`, `txn_manager.rs` | ★★★★ |
 | 🔴 높음 | 진정한 다중 세션 동시성 | 동시성 | Executor가 `Arc<Mutex<Executor>>` 단일 인스턴스. 세션별 독립 Executor + 공유 BufferPool 구조로 분리 필요 | `executor.rs`, `buffer_pool.rs` | ★★★★★ |
-| 🟡 중간 | B+Tree 리프 연결 리스트 | 스토리지 | 범위 스캔이 `collect_all_kv()`로 전체 트리 순회. 리프 노드 간 `next` 포인터 추가 시 범위 스캔 O(k)로 개선 | `btree.rs` | ★★★ |
-| 🟡 중간 | B+Tree ORDER 증가 | 스토리지 | 현재 `ORDER=4` (학습용 최솟값). 16KB 페이지 기준 `ORDER≈100`으로 늘리면 트리 깊이 감소, 검색 성능 향상 | `btree.rs` | ★★★ |
+| ✅ 완료 | B+Tree 리프 연결 리스트 | 스토리지 | `scan_from` / `scan_to`를 트리 가지치기(scan_from_node / scan_to_node)로 재구현. 불필요한 서브트리 방문 제거, O(log N + k) 달성. `collect_all_kv()` 전체 순회 제거 | `btree.rs` | ★★★ |
+| ✅ 완료 | B+Tree ORDER 증가 | 스토리지 | `ORDER=4` → `ORDER=16`으로 증가. 트리 깊이 감소, 내부 노드 분할 빈도 절감 | `btree.rs` | ★★★ |
 | 🟡 중간 | WAL Group Commit | 성능 | 트랜잭션마다 개별 기록 중. 여러 commit을 하나의 `fsync`로 묶으면 TPS 향상 | `wal.rs` | ★★★ |
 | 🟡 중간 | 히스토그램 통계 (ANALYZE TABLE) | 옵티마이저 | 현재 log₂N 행 수 추정만 사용. 컬럼별 값 분포를 수집하면 선택도(selectivity) 추정 정확도 향상 | `planner.rs`, `catalog/` | ★★★ |
-| 🟡 중간 | 커버링 인덱스 (Index-only scan) | 옵티마이저 | SELECT 컬럼이 인덱스에 포함된 경우 테이블 로드 없이 인덱스만으로 결과 반환. Buffer Pool 부하 감소 | `planner.rs`, `executor.rs` | ★★★ |
-| 🟡 중간 | Sort-Merge Join | 옵티마이저 | JOIN 키 기준 정렬된 두 테이블을 O(N+M)으로 병합. 현재 Hash Join / Nested Loop만 지원 | `planner.rs`, `executor.rs` | ★★★ |
+| ✅ 완료 | 커버링 인덱스 (Index-only scan) | 옵티마이저 | SELECT 컬럼 ⊆ 인덱스 컬럼이면 `plan_covering()`이 `is_covering=true` 설정. SecondaryPoint/SecondaryRange에서 JSON 배열 역직렬화 생략, 배열 길이로 행 수 집계. EXPLAIN "(Covering)" 표시 | `planner.rs`, `executor.rs` | ★★★ |
+| ✅ 완료 | Sort-Merge Join | 옵티마이저 | 양쪽 모두 > 4행인 Equi-Join에서 자동 선택. 투 포인터 키 그룹 병합. Inner / Left / Right 모두 지원. EXPLAIN에 "Sort-Merge Join probe=… build=…" 표시 | `planner.rs`, `executor.rs` | ★★★ |
 | 🟡 중간 | 증분 VACUUM | 유지보수 | 현재 전체 테이블 스캔 방식. dead row 비율 기준 증분 제거로 온라인 부하 감소 | `executor.rs` | ★★ |
 | ✅ 완료 | 재귀 CTE (`WITH RECURSIVE`) | SQL 기능 | base case + UNION ALL 반복 실행. positional 컬럼 매핑으로 depth 등 계산 컬럼 정상 전파 | `ast.rs`, `parser.rs`, `executor.rs` | ★★★★ |
 | ✅ 완료 | INSERT IGNORE / ON DUPLICATE KEY UPDATE | SQL 기능 | UNIQUE 위반 시 무시 또는 UPDATE로 전환. 인덱스(B+Tree) 동기화까지 완전 구현 | `executor.rs` | ★★ |
@@ -386,7 +386,7 @@
 | 엔진 | `executor.rs` | 쿼리 실행 엔진 — DDL / DML / 트랜잭션 / 뷰 / JOIN 전 처리 |
 | 엔진 | `planner.rs` | 비용 기반 옵티마이저 — AccessPath 선택, Join 알고리즘 결정, EXPLAIN 출력 |
 | 엔진 | `lock_manager.rs` | Row-level 잠금 + wait-for 그래프 기반 데드락 감지 |
-| 스토리지 | `btree.rs` | B+Tree 인덱스 (ORDER=4, 인메모리, 수치 키 비교 지원) |
+| 스토리지 | `btree.rs` | B+Tree 인덱스 (ORDER=16, 인메모리, 수치 키 비교 지원, 커버링 인덱스) |
 | 스토리지 | `buffer_pool.rs` | LRU Buffer Pool (64페이지, 16KB, dirty page 추적) |
 | 스토리지 | `disk.rs` | 디스크 I/O — `.rdb` 읽기/쓰기, DB 디렉토리 관리, 스키마 영속화 |
 | 스토리지 | `page.rs` | 페이지 헤더 구조 + LZ4 투명 압축/해제 |
