@@ -23,9 +23,9 @@
 - [x] SQL Parser (AST 기반, 재귀 하강)
 - [x] Executor (쿼리 실행 엔진)
 - [x] 비용 기반 쿼리 옵티마이저 (Cost-Based Query Planner)
-  - AccessPath 선택 (SeqScan / PkPoint / PkRange / SecondaryIndex / CompositeIndex)
+  - AccessPath 선택 (SeqScan / PkPoint / PkBetween / PkRange / SecondaryPoint / SecondaryRange / CompositeIndex)
   - 행 수 / 비용 추정 (log₂N 기반)
-  - Join 알고리즘 자동 선택 (Hash Join vs Nested Loop)
+  - Join 알고리즘 자동 선택 (Sort-Merge Join / Hash Join / Nested Loop)
   - EXPLAIN 실행 계획 출력 (비용 · 접근 경로 · Join 알고리즘)
 
 ### 다중 데이터베이스
@@ -76,7 +76,8 @@
 - [x] BETWEEN / LIKE (%, _ 와일드카드)
 - [x] IS NULL / IS NOT NULL
 - [x] INNER JOIN / LEFT JOIN / RIGHT JOIN
-- [x] Hash Join (대용량 Equi-Join O(N+M)) / Nested Loop Join (소규모·비등가) — ON 조건 방향 무관 (left.col = right.col / right.col = left.col 모두 지원)
+- [x] Sort-Merge Join (양쪽 > 4행 Equi-Join, O((N+M)logN) sort + O(N+M) merge, 투 포인터 키 그룹 병합)
+- [x] Hash Join (한쪽 > 4행 Equi-Join, O(N+M)) / Nested Loop Join (소규모·비등가) — ON 조건 방향 무관 (left.col = right.col / right.col = left.col 모두 지원)
 - [x] 테이블 별칭 (alias) — `FROM emp e JOIN dept d ON e.dept_id = d.id`
 - [x] ORDER BY (ASC / DESC, 다중 컬럼)
 - [x] LIMIT / OFFSET — `LIMIT 10 OFFSET 20`
@@ -153,6 +154,7 @@
 - [x] 클러스터드 인덱스 (PK 기준 물리적 정렬 유지)
 - [x] 보조 인덱스 중복 키 지원 (배열 저장, 동일 컬럼 값 다중 행)
 - [x] 보조 인덱스 자동 재빌드 (UPDATE / 다중 테이블 UPDATE 후 stale 방지)
+- [x] 커버링 인덱스 (SELECT 컬럼 ⊆ 인덱스 컬럼 시 Index-only scan 자동 활성화)
 - [x] 수치 인식 키 비교 (`"10" > "9"` 정상 처리)
 - [x] 바이너리 디스크 저장 (.rdb 포맷, 16KB 페이지)
 - [x] LZ4 데이터 압축 (.rdb 파일 투명 압축/해제, 하위 호환성 유지)
@@ -224,9 +226,10 @@
 - [ ] GAP Lock / Next-key Lock — Serializable 팬텀 방지 정확도 개선
 - [ ] MVCC 버전 체인 — `_xmin/_xmax` 컬럼 방식 → 언두 버전 체인
 - [ ] 진정한 다중 세션 동시성 — 세션별 독립 Executor + 공유 BufferPool
-- [ ] 커버링 인덱스 (Index-only scan)
-- [ ] Sort-Merge Join
-- [ ] B+Tree 리프 연결 리스트 (범위 스캔 O(k))
+- [x] 커버링 인덱스 (Index-only scan) — SELECT 컬럼 ⊆ 인덱스 컬럼 시 JSON 역직렬화 생략, EXPLAIN "(Covering)" 표시
+- [x] B+Tree ORDER 증가 (4 → 16) — 트리 깊이 감소, 노드 분할 빈도 절감
+- [x] Sort-Merge Join
+- [x] B+Tree 범위 스캔 최적화 (scan_from_node / scan_to_node 가지치기, O(log N + k))
 - [ ] WAL Group Commit (TPS 향상)
 
 ### 네트워크
@@ -601,7 +604,7 @@ DROP DATABASE logdb;
 | 버전 | v2.2.0 |
 | 인덱스 | B+Tree (단일 / 복합 / 클러스터드) |
 | 옵티마이저 | 비용 기반 플래너 (AccessPath · Join 알고리즘 자동 선택) |
-| Join | Hash Join (O(N+M)) / Nested Loop Join |
+| Join | Sort-Merge Join (O((N+M)logN)) / Hash Join (O(N+M)) / Nested Loop Join |
 | 트랜잭션 | WAL (바이너리 redo log) + Undo Log + MVCC |
 | 격리 수준 | READ UNCOMMITTED ~ SERIALIZABLE (4단계) |
 | 동시성 | Row-level Locking (SELECT FOR UPDATE) |
