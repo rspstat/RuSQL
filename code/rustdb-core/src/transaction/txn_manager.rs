@@ -1,8 +1,13 @@
 use std::collections::HashMap;
+use std::fs::{self, File, OpenOptions};
+use std::io::{Write, Read};
+use std::path::Path;
 use crate::transaction::wal::{WalManager, WalRecord};
 use crate::parser::ast::IsolationLevel;
 
 pub type Row = HashMap<String, String>;
+
+const UNDO_LOG_PATH: &str = "data/_undo.log";
 
 #[derive(Debug, Clone)]
 pub struct UndoEntry {
@@ -12,11 +17,127 @@ pub struct UndoEntry {
     pub old_data: Option<String>,
 }
 
+/// 미완료 트랜잭션의 Undo Log를 디스크에 영속화하는 관리자.
+/// 크래시 발생 시 재시작 후 미완료 트랜잭션을 롤백하는 데 사용된다.
+struct UndoLogFile {
+    path: String,
+}
+
+impl UndoLogFile {
+    fn new() -> Self {
+        UndoLogFile { path: UNDO_LOG_PATH.to_string() }
+    }
+
+    /// UndoEntry를 바이너리로 인코딩
+    /// [ op(1) | table_len(4) | table | key_len(4) | key | has_data(1) | [data_len(4) | data] ]
+    fn encode(entry: &UndoEntry) -> Vec<u8> {
+        let op: u8 = match entry.operation.as_str() {
+            "INSERT" => 0x01,
+            "UPDATE" => 0x02,
+            "DELETE" => 0x03,
+            _        => 0x00,
+        };
+        let table_b = entry.table.as_bytes();
+        let key_b   = entry.key.as_bytes();
+        let mut buf = Vec::new();
+        buf.push(op);
+        buf.extend_from_slice(&(table_b.len() as u32).to_le_bytes());
+        buf.extend_from_slice(table_b);
+        buf.extend_from_slice(&(key_b.len() as u32).to_le_bytes());
+        buf.extend_from_slice(key_b);
+        if let Some(ref data) = entry.old_data {
+            buf.push(1u8);
+            let data_b = data.as_bytes();
+            buf.extend_from_slice(&(data_b.len() as u32).to_le_bytes());
+            buf.extend_from_slice(data_b);
+        } else {
+            buf.push(0u8);
+        }
+        buf
+    }
+
+    fn read_string(buf: &[u8], pos: &mut usize) -> Option<String> {
+        if *pos + 4 > buf.len() { return None; }
+        let len = u32::from_le_bytes(buf[*pos..*pos+4].try_into().ok()?) as usize;
+        *pos += 4;
+        if *pos + len > buf.len() { return None; }
+        let s = String::from_utf8(buf[*pos..*pos+len].to_vec()).ok()?;
+        *pos += len;
+        Some(s)
+    }
+
+    fn decode(buf: &[u8], pos: &mut usize) -> Option<UndoEntry> {
+        if *pos >= buf.len() { return None; }
+        let op_byte = buf[*pos]; *pos += 1;
+        let operation = match op_byte {
+            0x01 => "INSERT",
+            0x02 => "UPDATE",
+            0x03 => "DELETE",
+            _    => return None,
+        }.to_string();
+        let table = Self::read_string(buf, pos)?;
+        let key   = Self::read_string(buf, pos)?;
+        if *pos >= buf.len() { return None; }
+        let has_data = buf[*pos]; *pos += 1;
+        let old_data = if has_data == 1 {
+            Some(Self::read_string(buf, pos)?)
+        } else {
+            None
+        };
+        Some(UndoEntry { operation, table, key, old_data })
+    }
+
+    fn append(&self, entry: &UndoEntry) {
+        let encoded = Self::encode(entry);
+        let mut file = OpenOptions::new()
+            .create(true).append(true)
+            .open(&self.path)
+            .expect("Undo log 파일 열기 실패");
+        file.write_all(&encoded).expect("Undo log 기록 실패");
+    }
+
+    fn read_all(&self) -> Vec<UndoEntry> {
+        if !Path::new(&self.path).exists() { return vec![]; }
+        let mut file = match File::open(&self.path) {
+            Ok(f)  => f,
+            Err(_) => return vec![],
+        };
+        let mut buf = Vec::new();
+        let _ = file.read_to_end(&mut buf);
+        let mut entries = Vec::new();
+        let mut pos = 0;
+        while let Some(e) = Self::decode(&buf, &mut pos) {
+            entries.push(e);
+        }
+        entries
+    }
+
+    fn rewrite(&self, entries: &[UndoEntry]) {
+        if Path::new(&self.path).exists() {
+            fs::remove_file(&self.path).ok();
+        }
+        for e in entries {
+            self.append(e);
+        }
+    }
+
+    fn clear(&self) {
+        if Path::new(&self.path).exists() {
+            fs::remove_file(&self.path).ok();
+        }
+    }
+
+    fn exists(&self) -> bool {
+        Path::new(&self.path).exists()
+    }
+}
+
 pub struct TransactionManager {
     active: bool,
     txn_id: u64,
     undo_log: Vec<UndoEntry>,
     wal: WalManager,
+    undo_log_file: UndoLogFile,
     /// 현재 세션의 격리 수준 (BEGIN 전에 설정)
     pub isolation_level: IsolationLevel,
     /// REPEATABLE READ / SERIALIZABLE: BEGIN 시점의 테이블 스냅샷
@@ -32,6 +153,7 @@ impl TransactionManager {
             txn_id: 0,
             undo_log: Vec::new(),
             wal: WalManager::new(),
+            undo_log_file: UndoLogFile::new(),
             isolation_level: IsolationLevel::ReadCommitted,
             snapshot: None,
             savepoints: Vec::new(),
@@ -129,6 +251,7 @@ impl TransactionManager {
         self.wal.log_checkpoint();
         self.wal.clear();
         self.undo_log.clear();
+        self.undo_log_file.clear();
         self.snapshot = None;
         self.savepoints.clear();
         self.active = false;
@@ -139,6 +262,7 @@ impl TransactionManager {
         self.wal.log_rollback();
         self.wal.clear();
         let entries = self.undo_log.drain(..).rev().collect();
+        self.undo_log_file.clear();
         self.snapshot = None;
         self.savepoints.clear();
         self.active = false;
@@ -152,6 +276,7 @@ impl TransactionManager {
         self.wal.log_rollback();
         self.wal.clear();
         let entries = self.undo_log.drain(..).rev().collect();
+        self.undo_log_file.clear();
         self.snapshot = None;
         self.savepoints.clear();
         self.active = false;
@@ -182,6 +307,8 @@ impl TransactionManager {
         self.undo_log.truncate(undo_len);
         // savepoint 이후의 savepoint들 제거 (중첩 savepoint 처리)
         self.savepoints.truncate(pos + 1);
+        // undo log 파일도 savepoint 이전 상태로 재기록
+        self.undo_log_file.rewrite(&self.undo_log);
         Ok(entries)
     }
 
@@ -198,14 +325,16 @@ impl TransactionManager {
 
     pub fn log_insert(&mut self, table: &str, key: &str, data: &str) {
         if self.active {
-            // 트랜잭션 중 → WAL 기록 + Undo Log 추가
+            // 트랜잭션 중 → WAL 기록 + Undo Log 추가 (메모리 + 디스크)
             self.wal.log_insert(table, key, data);
-            self.undo_log.push(UndoEntry {
+            let entry = UndoEntry {
                 operation: "INSERT".to_string(),
                 table: table.to_string(),
                 key: key.to_string(),
                 old_data: None,
-            });
+            };
+            self.undo_log_file.append(&entry);
+            self.undo_log.push(entry);
         }
         // 트랜잭션 없으면 WAL 기록 안 함 (즉시 flush는 executor에서 처리)
     }
@@ -213,24 +342,28 @@ impl TransactionManager {
     pub fn log_update(&mut self, table: &str, key: &str, old_data: &str, new_data: &str) {
         if self.active {
             self.wal.log_update(table, key, new_data);
-            self.undo_log.push(UndoEntry {
+            let entry = UndoEntry {
                 operation: "UPDATE".to_string(),
                 table: table.to_string(),
                 key: key.to_string(),
                 old_data: Some(old_data.to_string()),
-            });
+            };
+            self.undo_log_file.append(&entry);
+            self.undo_log.push(entry);
         }
     }
 
     pub fn log_delete(&mut self, table: &str, key: &str, old_data: &str) {
         if self.active {
             self.wal.log_delete(table, key);
-            self.undo_log.push(UndoEntry {
+            let entry = UndoEntry {
                 operation: "DELETE".to_string(),
                 table: table.to_string(),
                 key: key.to_string(),
                 old_data: Some(old_data.to_string()),
-            });
+            };
+            self.undo_log_file.append(&entry);
+            self.undo_log.push(entry);
         }
     }
 
@@ -265,5 +398,22 @@ impl TransactionManager {
     /// WAL 크기가 자동 체크포인트 임계값을 초과했는지 확인
     pub fn needs_auto_checkpoint(&self) -> bool {
         self.wal.needs_auto_checkpoint()
+    }
+
+    // ── Undo Log 파일 접근자 (크래시 복구용) ────────────────────────────────
+
+    /// 디스크의 Undo Log 파일에 엔트리가 존재하는지 확인
+    pub fn has_undo_log_file(&self) -> bool {
+        self.undo_log_file.exists()
+    }
+
+    /// 디스크의 Undo Log 파일에서 모든 엔트리를 읽어 반환
+    pub fn read_undo_log_file(&self) -> Vec<UndoEntry> {
+        self.undo_log_file.read_all()
+    }
+
+    /// 디스크의 Undo Log 파일을 삭제
+    pub fn clear_undo_log_file(&self) {
+        self.undo_log_file.clear();
     }
 }

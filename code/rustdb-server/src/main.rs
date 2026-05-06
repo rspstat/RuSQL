@@ -1,12 +1,12 @@
 use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, RwLock};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::thread;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use rustdb_core::parser::parser::Parser;
-use rustdb_core::engine::executor::Executor;
+use rustdb_core::engine::executor::{Executor, SharedDatabase};
 
 // ─── 타임스탬프 ──────────────────────────────────────────────
 fn timestamp() -> String {
@@ -105,9 +105,11 @@ fn handle_builtin(cmd: &str, client_count: usize, uptime: &Instant) -> Option<St
 }
 
 // ─── 클라이언트 핸들러 ───────────────────────────────────────
+// 각 클라이언트는 독립적인 Executor(트랜잭션·current_db)를 가지며,
+// SharedDatabase(테이블·카탈로그·인덱스 등)는 Arc<RwLock>으로 공유한다.
 fn handle_client(
     stream: TcpStream,
-    db: Arc<Mutex<Executor>>,
+    shared: Arc<RwLock<SharedDatabase>>,
     client_count: Arc<AtomicUsize>,
     server_start: Arc<Instant>,
 ) {
@@ -138,6 +140,9 @@ fn handle_client(
     let _ = writeln!(writer, "\\help for commands, exit to quit.");
     let _ = writeln!(writer, "---END---");
     let _ = writer.flush();
+
+    // 세션 전용 Executor: 트랜잭션 상태와 current_db는 이 스레드에만 존재
+    let mut exec = Executor::new_session(Arc::clone(&shared));
 
     // 멀티라인 쿼리 버퍼
     let mut buf = String::new();
@@ -183,7 +188,7 @@ fn handle_client(
             continue;
         }
 
-        let mut exec = db.lock().unwrap();
+        // 세션 전용 exec 를 직접 사용 — 전역 락 없이 동시 실행 가능
         for q in &queries {
             let preview = if q.len() > 60 { format!("{}...", &q[..60]) } else { q.clone() };
             log(&format!("[{}] Query: {}", peer, preview));
@@ -234,10 +239,12 @@ fn main() {
     // non-blocking: Ctrl+C 감지용
     listener.set_nonblocking(true).ok();
 
-    let db            = Arc::new(Mutex::new(Executor::new()));
-    let client_count  = Arc::new(AtomicUsize::new(0));
-    let running       = Arc::new(AtomicBool::new(true));
-    let server_start  = Arc::new(Instant::now());
+    // WAL 복구 포함 초기화 후 공유 상태만 추출.
+    // 이후 모든 세션은 new_session(shared)으로 생성된다.
+    let shared       = Executor::new().get_shared();
+    let client_count = Arc::new(AtomicUsize::new(0));
+    let running      = Arc::new(AtomicBool::new(true));
+    let server_start = Arc::new(Instant::now());
 
     // Ctrl+C 핸들러
     {
@@ -259,10 +266,10 @@ fn main() {
         match listener.accept() {
             Ok((stream, _)) => {
                 stream.set_nonblocking(false).ok();
-                let db2    = db.clone();
-                let cc     = client_count.clone();
-                let start  = server_start.clone();
-                thread::spawn(move || handle_client(stream, db2, cc, start));
+                let sh2   = Arc::clone(&shared);
+                let cc    = client_count.clone();
+                let start = server_start.clone();
+                thread::spawn(move || handle_client(stream, sh2, cc, start));
             }
             Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                 thread::sleep(std::time::Duration::from_millis(50));

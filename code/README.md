@@ -267,331 +267,269 @@ cd rustdb-ui && npm run tauri dev
 
 ## 테스트 쿼리
 
-`test/test_full.sql` — 4개 데이터베이스, 34개 섹션, **260여 개 쿼리, 의도된 오류 1개** (UNIQUE 위반 검증)로 전체 기능을 검증합니다.
-
-| DB | 테이블 | 주요 검증 항목 |
-|----|--------|----------------|
-| hrdb | departments · employees · salaries | SELECT / JOIN / 서브쿼리 / CTE / 집계 / CASE WHEN / VIEW / ALTER TABLE / FK CASCADE / 트랜잭션 / EXPLAIN |
-| shopdb | categories · products · orders | INSERT IGNORE / ON DUPLICATE KEY UPDATE / FK ON UPDATE CASCADE / 다중 테이블 DELETE |
-| logdb | servers · events · metrics | DOUBLE / TIME 타입 / FK CASCADE DELETE / VIEW / GROUP BY |
-| testdb | dept · emp · org_tree · staff … | GROUP_CONCAT / FK SET DEFAULT / 재귀 CTE / ROUND(expr/expr, n) / UPDATE SET CONCAT / 사용자 관리 (CREATE USER · GRANT · REVOKE · SHOW GRANTS · DROP USER) |
+`test/test_full.sql` — **단일 DB(`db1`), 전 기능 커버, 의도된 오류 3개** (ENUM/SET 유효성 위반)
 
 ```bash
-# 전체 기능 테스트
 cargo run -p rustdb-cli < test/test_full.sql
 ```
 
-빠른 확인용 예시 (3개 DB):
-
 ```sql
--- SETUP
-DROP DATABASE IF EXISTS shopdb;
-DROP DATABASE IF EXISTS hrdb;
-DROP DATABASE IF EXISTS logdb;
+-- RustDB 통합 테스트 (전 기능)
 
--- DATABASE 1: shopdb (전자상거래)
-CREATE DATABASE shopdb;
-USE shopdb;
+-- setup
+DROP USER IF EXISTS 'usr'@'%';
+DROP DATABASE IF EXISTS db1;
+SHOW DATABASES;
 
--- Tables: 3개
-CREATE TABLE categories (
-    id INT PRIMARY KEY AUTO INCREMENT,
-    name VARCHAR(50) NOT NULL UNIQUE,
-    discount_rate INT DEFAULT 0
+CREATE DATABASE db1;
+USE db1;
+
+-- DDL: tables
+CREATE TABLE dept (
+    id     INT PRIMARY KEY AUTO INCREMENT,
+    name   VARCHAR(30) NOT NULL UNIQUE,
+    budget INT DEFAULT 0
 );
-CREATE TABLE products (
-    id INT PRIMARY KEY AUTO INCREMENT, name VARCHAR(100) NOT NULL,
-    category_id INT, price INT CHECK (price > 0), stock INT DEFAULT 0,
-    FOREIGN KEY (category_id) REFERENCES categories(id) ON DELETE SET NULL ON UPDATE CASCADE
+CREATE TABLE emp (
+    id      INT PRIMARY KEY AUTO INCREMENT,
+    name    VARCHAR(30) NOT NULL,
+    dept_id INT,
+    salary  INT CHECK (salary > 0),
+    hdate   DATE,
+    status  ENUM('active','inactive') DEFAULT 'active',
+    FOREIGN KEY (dept_id) REFERENCES dept(id) ON DELETE SET NULL
 );
-CREATE TABLE orders (
-    id INT PRIMARY KEY AUTO INCREMENT, product_id INT,
-    quantity INT CHECK (quantity > 0), total INT,
-    status ENUM('pending','shipped','done') DEFAULT 'pending',
-    FOREIGN KEY (product_id) REFERENCES products(id) ON DELETE SET NULL
+CREATE TABLE sal (
+    id     INT PRIMARY KEY AUTO INCREMENT,
+    eid    INT,
+    amount INT CHECK (amount > 0),
+    grade  ENUM('S1','S2','S3','S4','S5'),
+    FOREIGN KEY (eid) REFERENCES emp(id) ON DELETE CASCADE
+);
+CREATE TABLE org (
+    id   INT PRIMARY KEY AUTO INCREMENT,
+    name VARCHAR(30),
+    pid  INT
+);
+CREATE TABLE tags (
+    id      INT PRIMARY KEY AUTO INCREMENT,
+    val     ENUM('a','b','c'),
+    set_col SET('X','Y','Z')
 );
 
-INSERT INTO categories (name, discount_rate) VALUES ('Electronics', 10), ('Clothing', 20), ('Food', 5);
-INSERT INTO products (name, category_id, price, stock) VALUES
-    ('Laptop', 1, 1200000, 15), ('Phone', 1, 800000, 30),
-    ('T-Shirt', 2, 25000, 100), ('Jeans', 2, 60000, 50),
-    ('Coffee', 3, 15000, 200), ('Bread', 3, 3500, 80);
-INSERT INTO orders (product_id, quantity, total, status) VALUES
-    (1, 2, 2400000, 'done'), (2, 5, 4000000, 'shipped'),
-    (3, 10, 250000, 'done'), (4, 3, 180000, 'pending'),
-    (1, 1, 1200000, 'done'), (5, 20, 300000, 'shipped');
-
--- Indexes: 3개
-CREATE INDEX idx_products_category ON products (category_id);
-CREATE INDEX idx_orders_product ON orders (product_id);
-CREATE INDEX idx_products_price ON products (price);
-
--- Views: 2개
-CREATE VIEW v_top_products AS
-    SELECT p.id, p.name, p.price, c.name AS category
-    FROM products p JOIN categories c ON p.category_id = c.id WHERE p.price > 50000;
-CREATE VIEW v_order_summary AS
-    SELECT o.id, p.name AS product, o.quantity, o.total, o.status
-    FROM orders o JOIN products p ON o.product_id = p.id;
+-- DDL: index + view
+CREATE INDEX idx_dept ON emp (dept_id);
+CREATE INDEX idx_ds   ON emp (dept_id, salary);
+CREATE VIEW v_active AS SELECT id, name, dept_id FROM emp WHERE status = 'active';
 
 SHOW TABLES;
+DESCRIBE emp;
 
--- DATABASE 2: hrdb (인사관리)
-CREATE DATABASE hrdb;
-USE hrdb;
+-- DML: insert
+INSERT INTO dept (name, budget) VALUES ('Eng',1000),('Mkt',800),('Fin',1200);
+INSERT INTO emp (name, dept_id, salary, hdate, status) VALUES
+    ('Alice', 1, 900, '2020-01-15', 'active'),
+    ('Bob',   1, 800, '2021-06-01', 'active'),
+    ('Carol', 2, 700, '2019-11-20', 'inactive'),
+    ('Dave',  2, 600, '2022-03-10', 'active'),
+    ('Eve',   3, 1200,'2015-05-01', 'active'),
+    ('Frank', NULL, 500,'2023-07-01','active');
+INSERT INTO sal (eid, amount, grade) VALUES
+    (1,900,'S4'),(2,800,'S3'),(3,700,'S3'),(4,600,'S2'),(5,1200,'S5'),(6,500,'S1');
+INSERT INTO org (name, pid) VALUES
+    ('CEO',NULL),('CTO',1),('CFO',1),('Lead',2),('Alice',4),('Bob',4);
+INSERT INTO tags (val, set_col) VALUES ('a','X,Y'),('b','Z');
 
--- Tables: 2개
-CREATE TABLE employees (
-    id INT PRIMARY KEY AUTO INCREMENT, name VARCHAR(50) NOT NULL,
-    dept VARCHAR(30), position VARCHAR(30), hire_year YEAR, active INT DEFAULT 1
-);
-CREATE TABLE salaries (
-    id INT PRIMARY KEY AUTO INCREMENT, employee_id INT,
-    amount INT CHECK (amount > 0), grade ENUM('S1','S2','S3','S4','S5'),
-    FOREIGN KEY (employee_id) REFERENCES employees(id) ON DELETE CASCADE
-);
+-- select: WHERE / ORDER BY / LIMIT / OFFSET / DISTINCT
+SELECT id, name, salary FROM emp WHERE salary >= 700 AND status = 'active' ORDER BY salary DESC;
+SELECT name FROM emp ORDER BY id LIMIT 3 OFFSET 2;
+SELECT DISTINCT status FROM emp ORDER BY status;
+SELECT name FROM emp WHERE dept_id IN (1,2) AND salary BETWEEN 600 AND 900;
+SELECT name FROM emp WHERE dept_id NOT IN (3) AND salary > 700;
+SELECT name FROM emp WHERE name LIKE 'A%' OR name LIKE 'E%';
+SELECT name FROM emp WHERE dept_id IS NULL;
+SELECT name FROM emp WHERE dept_id IS NOT NULL ORDER BY id;
 
-INSERT INTO employees (name, dept, position, hire_year, active) VALUES
-    ('Alice', 'Engineering', 'Lead Engineer', 2019, 1),
-    ('Bob', 'Engineering', 'Senior Engineer', 2020, 1),
-    ('Carol', 'Marketing', 'Marketing Manager', 2018, 1),
-    ('Dave', 'Marketing', 'Marketing Analyst', 2021, 1),
-    ('Eve', 'HR', 'HR Manager', 2017, 1),
-    ('Frank', 'HR', 'HR Specialist', 2022, 0),
-    ('Grace', 'Finance', 'CFO', 2015, 1),
-    ('Henry', NULL, 'Consultant', 2023, 1);
-INSERT INTO salaries (employee_id, amount, grade) VALUES
-    (1, 9500000, 'S4'), (2, 8500000, 'S3'), (3, 7200000, 'S3'), (4, 5800000, 'S2'),
-    (5, 6500000, 'S2'), (6, 4500000, 'S1'), (7, 12000000, 'S5'), (8, 5000000, 'S1');
+-- aggregates
+SELECT COUNT(*), SUM(amount), AVG(amount), MAX(amount), MIN(amount) FROM sal;
+SELECT grade, COUNT(*) AS n, AVG(amount) AS avg_sal FROM sal GROUP BY grade HAVING n >= 1 ORDER BY avg_sal DESC;
+SELECT dept_id, GROUP_CONCAT(name SEPARATOR ', ') AS members FROM emp GROUP BY dept_id ORDER BY dept_id;
 
--- Indexes: 3개
-CREATE INDEX idx_emp_dept ON employees (dept);
-CREATE INDEX idx_emp_active ON employees (active);
-CREATE INDEX idx_sal_employee ON salaries (employee_id);
+-- joins
+SELECT e.name, d.name AS dept, s.amount, s.grade
+    FROM emp e JOIN dept d ON e.dept_id = d.id JOIN sal s ON e.id = s.eid ORDER BY s.amount DESC;
+SELECT e.name, d.name AS dept FROM emp e LEFT JOIN dept d ON e.dept_id = d.id ORDER BY e.id;
 
--- Views: 3개
-CREATE VIEW v_active_employees AS
-    SELECT id, name, dept, position FROM employees WHERE active = 1;
-CREATE VIEW v_high_earners AS
-    SELECT employee_id, amount, grade FROM salaries WHERE amount > 7000000;
-CREATE VIEW v_emp_detail AS
-    SELECT e.id, e.name, e.position, e.dept, s.amount, s.grade
-    FROM employees e LEFT JOIN salaries s ON e.id = s.employee_id;
+-- subqueries
+SELECT name FROM emp WHERE id IN (SELECT eid FROM sal WHERE amount > 800);
+SELECT eid, amount FROM sal WHERE amount > (SELECT AVG(amount) FROM sal);
+SELECT name FROM emp WHERE EXISTS (SELECT 1 FROM sal WHERE eid = emp.id AND amount > 1000);
+SELECT grade, avg_a FROM (SELECT grade, AVG(amount) AS avg_a FROM sal GROUP BY grade) AS g WHERE avg_a > 700;
 
-SHOW TABLES;
+-- union
+SELECT name FROM emp WHERE dept_id = 1
+UNION
+SELECT name FROM emp WHERE dept_id = 3;
+SELECT eid, amount FROM sal WHERE grade = 'S5'
+UNION ALL
+SELECT eid, amount FROM sal WHERE grade = 'S1' ORDER BY amount DESC;
 
--- DATABASE 3: logdb (시스템 로그)
-CREATE DATABASE logdb;
-USE logdb;
+-- scalar functions: string
+SELECT UPPER(name), LOWER(name), LENGTH(name), CONCAT(name,'@co'), TRIM('  hi  '),
+       SUBSTR(name,1,2), REPLACE(name,'Alice','Alex'), LPAD(id,4,'0'), RPAD(name,10,'.')
+FROM emp LIMIT 3;
 
--- Tables: 3개
-CREATE TABLE servers (
-    id INT PRIMARY KEY AUTO INCREMENT, hostname VARCHAR(50) NOT NULL UNIQUE,
-    region VARCHAR(20), cpu_cores INT DEFAULT 4
-);
-CREATE TABLE events (
-    id INT PRIMARY KEY AUTO INCREMENT, server_id INT,
-    severity ENUM('INFO','WARN','ERROR'), message VARCHAR(200), response_ms INT,
-    FOREIGN KEY (server_id) REFERENCES servers(id) ON DELETE CASCADE
-);
-CREATE TABLE metrics (
-    id INT PRIMARY KEY AUTO INCREMENT, server_id INT,
-    cpu_pct DOUBLE, mem_pct DOUBLE, checkin TIME,
-    FOREIGN KEY (server_id) REFERENCES servers(id) ON DELETE CASCADE
-);
+-- scalar functions: math
+SELECT salary/100 AS base, ROUND(salary/100,1), ABS(-999), CEIL(3.1), FLOOR(3.9), MOD(salary,7)
+FROM emp WHERE id <= 3;
 
-INSERT INTO servers (hostname, region, cpu_cores) VALUES
-    ('web-01', 'ap-seoul', 8), ('web-02', 'ap-seoul', 8),
-    ('db-01', 'ap-busan', 16), ('cache-01', 'ap-seoul', 4);
-INSERT INTO events (server_id, severity, message, response_ms) VALUES
-    (1, 'INFO', 'Request processed', 45), (1, 'WARN', 'Memory usage high', 120),
-    (2, 'INFO', 'Request processed', 38), (3, 'ERROR', 'Disk I/O timeout', 5000),
-    (3, 'WARN', 'CPU spike detected', 200), (3, 'ERROR', 'Connection pool exhausted', 3000),
-    (4, 'INFO', 'Cache hit', 5), (4, 'WARN', 'Cache eviction', 80);
-INSERT INTO metrics (server_id, cpu_pct, mem_pct, checkin) VALUES
-    (1, 45.5, 62.3, '09:00:00'), (1, 78.2, 71.0, '10:00:00'),
-    (2, 32.1, 55.8, '09:00:00'), (3, 95.7, 88.4, '09:00:00'),
-    (3, 91.2, 90.1, '10:00:00'), (4, 12.5, 40.0, '09:00:00');
+-- scalar functions: date
+SELECT name, hdate, DATEDIFF('2026-05-01', hdate) AS days,
+       DATE_ADD(hdate, INTERVAL 1 YEAR) AS nxt,
+       DATE_FORMAT(hdate, '%Y-%m') AS ym
+FROM emp WHERE status = 'active' ORDER BY hdate LIMIT 3;
 
--- Indexes: 3개
-CREATE INDEX idx_events_server ON events (server_id);
-CREATE INDEX idx_events_severity ON events (severity);
-CREATE INDEX idx_metrics_server ON metrics (server_id);
+-- null / cast / scalars
+SELECT COALESCE(dept_id,-1) FROM emp WHERE dept_id IS NULL;
+SELECT IFNULL(dept_id,0), NULLIF(dept_id,3) FROM emp ORDER BY id LIMIT 4;
+SELECT CAST('2026' AS INT), CAST('3.14' AS FLOAT);
+SELECT 1+1, 10*3;
 
--- Views: 2개
-CREATE VIEW v_error_events AS
-    SELECT server_id, message, response_ms FROM events WHERE severity = 'ERROR';
-CREATE VIEW v_server_load AS
-    SELECT server_id, AVG(cpu_pct) AS avg_cpu, MAX(cpu_pct) AS peak_cpu, AVG(mem_pct) AS avg_mem
-    FROM metrics GROUP BY server_id;
-
-SHOW TABLES;
-
--- SELECT / ORDER BY / LIMIT / OFFSET / DISTINCT / ARITHMETIC
-USE hrdb;
-SELECT id, name, position FROM employees WHERE active = 1 ORDER BY id;
-SELECT id, name FROM employees ORDER BY id LIMIT 3 OFFSET 2;
-SELECT DISTINCT dept FROM employees ORDER BY dept;
-SELECT employee_id, amount, amount * 1.1 AS raise_10pct FROM salaries WHERE amount > 8000000;
-
--- IN / NOT IN / NOT / BETWEEN / LIKE / IS NULL
-SELECT name FROM employees WHERE dept IN ('Engineering', 'Marketing');
-SELECT name FROM employees WHERE dept NOT IN ('HR', 'Finance');
-SELECT name FROM employees WHERE NOT (active = 1);
-SELECT employee_id, amount FROM salaries WHERE amount BETWEEN 6000000 AND 9000000;
-SELECT name FROM employees WHERE name LIKE 'A%' OR name LIKE 'G%';
-SELECT name FROM employees WHERE dept IS NULL;
-SELECT name FROM employees WHERE dept IS NOT NULL AND active = 1 ORDER BY id;
-
--- AGGREGATE / GROUP BY / HAVING
-SELECT COUNT(*) AS total, AVG(amount) AS avg_sal, MAX(amount) AS max_sal, MIN(amount) AS min_sal, SUM(amount) AS payroll FROM salaries;
-SELECT grade, COUNT(*) AS cnt, AVG(amount) AS avg_sal FROM salaries GROUP BY grade HAVING cnt >= 2 ORDER BY avg_sal DESC;
-
--- JOIN (INNER / LEFT)
-SELECT e.name, e.dept, s.amount, s.grade
-    FROM employees e JOIN salaries s ON e.id = s.employee_id
-    ORDER BY s.amount DESC;
-SELECT e.name, e.dept FROM employees e LEFT JOIN salaries s ON e.id = s.employee_id ORDER BY e.id;
-
--- SUBQUERY (IN / scalar / EXISTS / derived)
-SELECT name FROM employees WHERE id IN (SELECT employee_id FROM salaries WHERE amount > 8000000);
-SELECT employee_id, amount FROM salaries WHERE amount > (SELECT AVG(amount) FROM salaries);
-SELECT name FROM employees WHERE EXISTS (SELECT 1 FROM salaries WHERE employee_id = employees.id AND amount > 9000000);
-SELECT grade, avg_amt FROM (SELECT grade, AVG(amount) AS avg_amt FROM salaries GROUP BY grade) AS gs WHERE avg_amt > 6000000;
-
--- UNION / UNION ALL
-SELECT name FROM employees WHERE dept = 'Engineering'
-UNION SELECT name FROM employees WHERE dept = 'Finance';
-SELECT employee_id, amount FROM salaries WHERE grade = 'S5'
-UNION ALL SELECT employee_id, amount FROM salaries WHERE grade = 'S1'
-ORDER BY amount DESC;
-
--- SCALAR FUNCTIONS / CASE WHEN
-SELECT UPPER(name) AS up, LENGTH(name) AS len, CONCAT(name, '@company.com') AS email FROM employees WHERE active = 1 LIMIT 4;
-SELECT COALESCE(dept, 'N/A') AS dept FROM employees WHERE dept IS NULL;
-SELECT employee_id, amount,
-    CASE WHEN amount >= 10000000 THEN 'Executive'
-         WHEN amount >= 7000000 THEN 'Senior'
-         WHEN amount >= 5000000 THEN 'Mid'
-         ELSE 'Junior' END AS pay_level
-    FROM salaries ORDER BY amount DESC;
+-- CASE / IF
+SELECT eid, amount,
+    CASE WHEN amount >= 1000 THEN 'Exec' WHEN amount >= 800 THEN 'Senior' ELSE 'Junior' END AS lvl
+FROM sal ORDER BY amount DESC;
+SELECT name, salary, IF(salary > 800, 'High', 'Normal') AS tier FROM emp ORDER BY salary DESC;
 
 -- CTE
-WITH high_sal AS (SELECT employee_id, amount, grade FROM salaries WHERE amount > 7000000)
-SELECT * FROM high_sal ORDER BY amount DESC;
+WITH top AS (SELECT eid, amount FROM sal WHERE amount > 800)
+SELECT e.name, t.amount FROM top t JOIN emp e ON e.id = t.eid ORDER BY t.amount DESC;
 
--- VIEW 조회
-SELECT * FROM v_active_employees ORDER BY id;
-SELECT * FROM v_high_earners ORDER BY amount DESC;
-SELECT * FROM v_emp_detail ORDER BY amount DESC;
+-- WITH RECURSIVE
+WITH RECURSIVE h AS (
+    SELECT id, name, pid, 0 AS depth FROM org WHERE pid IS NULL
+    UNION ALL
+    SELECT o.id, o.name, o.pid, h.depth + 1 FROM org o JOIN h ON o.pid = h.id
+)
+SELECT id, name, depth FROM h ORDER BY depth, id;
 
--- EXPLAIN (인덱스 활용 확인)
-EXPLAIN SELECT * FROM employees WHERE dept = 'Engineering';
-EXPLAIN SELECT * FROM salaries WHERE employee_id = 1;
-EXPLAIN SELECT * FROM employees WHERE active = 1;
+-- INSERT .. SELECT / TRUNCATE
+CREATE TABLE bak (id INT PRIMARY KEY, eid INT, amount INT);
+INSERT INTO bak SELECT id, eid, amount FROM sal WHERE amount > 800;
+SELECT * FROM bak ORDER BY amount DESC;
+TRUNCATE TABLE bak;
+DROP TABLE bak;
 
 -- ALTER TABLE
-ALTER TABLE employees ADD COLUMN email VARCHAR(100);
-ALTER TABLE employees MODIFY COLUMN email VARCHAR(150);
-ALTER TABLE employees RENAME COLUMN email TO contact;
-ALTER TABLE employees DROP COLUMN contact;
-DESCRIBE employees;
+ALTER TABLE emp ADD COLUMN email VARCHAR(50);
+ALTER TABLE emp MODIFY COLUMN email VARCHAR(100);
+UPDATE emp SET email = CONCAT(name, '@co.com') WHERE status = 'active';
+SELECT id, name, email FROM emp WHERE status = 'active' LIMIT 3;
+ALTER TABLE emp RENAME COLUMN email TO contact;
+ALTER TABLE emp DROP COLUMN contact;
 
--- UPDATE / DELETE + FK CASCADE
-UPDATE employees SET position = 'Principal Engineer' WHERE id = 1;
-UPDATE salaries SET amount = amount * 1.05 WHERE grade = 'S3';
-DELETE FROM employees WHERE id = 6;
-SELECT e.name, s.amount FROM employees e JOIN salaries s ON e.id = s.employee_id ORDER BY e.id;
+-- UPDATE arithmetic
+UPDATE sal SET amount = amount * 2 WHERE grade = 'S1';
+SELECT eid, amount FROM sal WHERE grade = 'S1';
+UPDATE sal SET amount = amount / 2 WHERE grade = 'S1';
 
--- CONSTRAINT ERROR (expected ERROR)
-INSERT INTO salaries (employee_id, amount, grade) VALUES (1, -500, 'S1');
+-- FK CASCADE DELETE
+DELETE FROM emp WHERE id = 6;
+SELECT * FROM sal WHERE eid = 6; -- 0 rows (CASCADE)
 
--- INSERT ... SELECT / TRUNCATE
-CREATE TABLE sal_archive (id INT PRIMARY KEY, employee_id INT, amount INT);
-INSERT INTO sal_archive SELECT id, employee_id, amount FROM salaries WHERE amount > 8000000;
-SELECT * FROM sal_archive ORDER BY amount DESC;
-TRUNCATE TABLE sal_archive;
-DROP TABLE sal_archive;
+-- INSERT IGNORE / ON DUPLICATE KEY UPDATE
+INSERT IGNORE INTO dept (name) VALUES ('Eng');
+INSERT IGNORE INTO dept (name) VALUES ('Legal'),('Eng');
+SELECT * FROM dept ORDER BY id;
+INSERT INTO emp (id, name, dept_id, salary) VALUES (1,'Alice',1,9999)
+    ON DUPLICATE KEY UPDATE salary = 9999;
+SELECT id, name, salary FROM emp WHERE id = 1;
+
+-- multi-table DELETE
+DELETE sal, emp FROM sal JOIN emp ON sal.eid = emp.id WHERE emp.status = 'inactive';
+SELECT * FROM emp ORDER BY id;
+SELECT * FROM sal ORDER BY id;
+
+-- multi-table UPDATE
+UPDATE emp e, dept d SET e.salary = e.salary + 100, d.budget = d.budget + 1000
+    WHERE e.dept_id = d.id AND d.id = 1;
+SELECT id, name, salary FROM emp WHERE dept_id = 1 ORDER BY id;
+UPDATE emp SET salary = salary - 100 WHERE dept_id = 1;
+UPDATE dept SET budget = budget - 1000 WHERE id = 1;
+
+-- ENUM / SET validation
+INSERT INTO tags (val, set_col) VALUES ('a','X');     -- ok
+INSERT INTO tags (val) VALUES ('bad');                -- ERROR: invalid ENUM
+INSERT INTO tags (val, set_col) VALUES ('b','X,Q');  -- ERROR: invalid SET
+UPDATE tags SET val = 'b' WHERE id = 1;              -- ok
+UPDATE tags SET val = 'zzz' WHERE id = 1;            -- ERROR: invalid ENUM
+SELECT * FROM tags ORDER BY id;
+
+-- SELECT FOR UPDATE / SHOW LOCKS
+SHOW LOCKS;
+BEGIN;
+SELECT id, name, salary FROM emp WHERE id = 1 FOR UPDATE;
+SHOW LOCKS;
+UPDATE emp SET salary = salary + 1 WHERE id = 1;
+COMMIT;
+SHOW LOCKS;
+
+-- EXPLAIN (covering index / PkPoint)
+EXPLAIN SELECT dept_id, salary FROM emp WHERE dept_id = 1;
+EXPLAIN SELECT * FROM emp WHERE dept_id = 1;
+EXPLAIN SELECT * FROM emp WHERE id = 1;
+
+-- VIEW
+SELECT * FROM v_active ORDER BY id;
 
 -- TRANSACTION + SAVEPOINT
 BEGIN;
-INSERT INTO employees (name, dept, position, hire_year) VALUES ('Ivan', 'Research', 'Researcher', 2024);
+INSERT INTO emp (name, dept_id, salary) VALUES ('Tmp', 1, 300);
 SAVEPOINT sp1;
-UPDATE employees SET position = 'Senior Researcher' WHERE name = 'Ivan';
+UPDATE emp SET salary = 999 WHERE name = 'Tmp';
 ROLLBACK TO SAVEPOINT sp1;
 COMMIT;
-SELECT name, position FROM employees WHERE name = 'Ivan';
-
+SELECT name, salary FROM emp WHERE name = 'Tmp';
 BEGIN;
-UPDATE salaries SET amount = 1 WHERE id = 1;
+UPDATE sal SET amount = 1 WHERE id = 1;
 ROLLBACK;
-SELECT amount FROM salaries WHERE id = 1;
+SELECT amount FROM sal WHERE id = 1;
 
 -- ISOLATION LEVEL
 SET ISOLATION LEVEL SERIALIZABLE;
 SHOW ISOLATION LEVEL;
 SET ISOLATION LEVEL READ COMMITTED;
+SHOW ISOLATION LEVEL;
 
--- logdb: 특수 타입 / 뷰 조회
-USE logdb;
-SELECT s.hostname, e.severity, e.message, e.response_ms
-    FROM events e JOIN servers s ON e.server_id = s.id
-    WHERE e.severity IN ('ERROR', 'WARN') ORDER BY e.response_ms DESC;
-SELECT * FROM metrics WHERE cpu_pct > 50.0 ORDER BY cpu_pct DESC;
-SELECT * FROM v_error_events;
-SELECT * FROM v_server_load ORDER BY avg_cpu DESC;
-DESCRIBE metrics;
-
--- shopdb: 뷰 / 인덱스 확인
-USE shopdb;
-SELECT * FROM v_top_products ORDER BY price DESC;
-SELECT * FROM v_order_summary WHERE status != 'pending' ORDER BY total DESC;
-EXPLAIN SELECT * FROM products WHERE category_id = 1;
-EXPLAIN SELECT * FROM orders WHERE product_id = 1;
-
--- ADMIN
-USE hrdb;
-SHOW TABLES;
+-- CHECKPOINT / VACUUM / SHOW
+CHECKPOINT;
+VACUUM;
 SHOW BUFFER POOL;
 SHOW WAL;
 SHOW LOCKS;
-CHECKPOINT;
-VACUUM;
+SHOW DATABASES;
 
--- CLEANUP
-USE shopdb;
-DROP INDEX IF EXISTS idx_products_category;
-DROP INDEX IF EXISTS idx_orders_product;
-DROP INDEX IF EXISTS idx_products_price;
-DROP VIEW IF EXISTS v_top_products;
-DROP VIEW IF EXISTS v_order_summary;
-DROP TABLE IF EXISTS orders;
-DROP TABLE IF EXISTS products;
-DROP TABLE IF EXISTS categories;
+-- user management
+CREATE USER 'usr'@'%' IDENTIFIED BY 'pw';
+CREATE USER IF NOT EXISTS 'usr'@'%';
+GRANT SELECT, INSERT ON db1.emp TO 'usr'@'%';
+SHOW GRANTS FOR 'usr'@'%';
+REVOKE INSERT ON db1.emp FROM 'usr'@'%';
+SHOW GRANTS FOR 'usr'@'%';
+DROP USER 'usr'@'%';
+DROP USER IF EXISTS 'nobody'@'%';
 
-USE hrdb;
-DROP INDEX IF EXISTS idx_emp_dept;
-DROP INDEX IF EXISTS idx_emp_active;
-DROP INDEX IF EXISTS idx_sal_employee;
-DROP VIEW IF EXISTS v_active_employees;
-DROP VIEW IF EXISTS v_high_earners;
-DROP VIEW IF EXISTS v_emp_detail;
-DROP TABLE IF EXISTS salaries;
-DROP TABLE IF EXISTS employees;
-
-USE logdb;
-DROP INDEX IF EXISTS idx_events_server;
-DROP INDEX IF EXISTS idx_events_severity;
-DROP INDEX IF EXISTS idx_metrics_server;
-DROP VIEW IF EXISTS v_error_events;
-DROP VIEW IF EXISTS v_server_load;
-DROP TABLE IF EXISTS metrics;
-DROP TABLE IF EXISTS events;
-DROP TABLE IF EXISTS servers;
-
-DROP DATABASE shopdb;
-DROP DATABASE hrdb;
-DROP DATABASE logdb;
+-- cleanup
+DROP VIEW  IF EXISTS v_active;
+DROP INDEX IF EXISTS idx_dept;
+DROP INDEX IF EXISTS idx_ds;
+DROP TABLE IF EXISTS tags;
+DROP TABLE IF EXISTS org;
+DROP TABLE IF EXISTS sal;
+DROP TABLE IF EXISTS emp;
+DROP TABLE IF EXISTS dept;
+DROP DATABASE db1;
+SHOW DATABASES;
 ```
 
 <br/>

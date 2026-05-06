@@ -145,13 +145,32 @@ impl Parser {
 
     // table.column 형태를 허용하며, 테이블 접두사는 무시하고 컬럼명만 반환
     fn expect_col_ref(&mut self) -> Result<String, String> {
-        let first = self.expect_ident()?;
+        let first = self.expect_any_ident()?;
         if self.peek() == Some(&Token::Dot) {
             self.advance(); // consume '.'
             let col = self.expect_ident()?;
             Ok(format!("{}.{}", first, col)) // table.column 전체 보존
         } else {
             Ok(first)
+        }
+    }
+
+    /// 식별자 또는 alias로 쓰이는 키워드 모두 허용 (ORDER BY / GROUP BY 컬럼명 파싱용)
+    fn expect_any_ident(&mut self) -> Result<String, String> {
+        match self.advance() {
+            Some(Token::Ident(s))  => Ok(s.clone()),
+            Some(Token::Count)     => Ok("count".to_string()),
+            Some(Token::Sum)       => Ok("sum".to_string()),
+            Some(Token::Avg)       => Ok("avg".to_string()),
+            Some(Token::Min)       => Ok("min".to_string()),
+            Some(Token::Max)       => Ok("max".to_string()),
+            Some(Token::Now)       => Ok("now".to_string()),
+            Some(Token::Date)      => Ok("date".to_string()),
+            Some(Token::Key)       => Ok("key".to_string()),
+            Some(Token::Set)       => Ok("set".to_string()),
+            Some(Token::Index)     => Ok("index".to_string()),
+            Some(Token::View)      => Ok("view".to_string()),
+            other => Err(format!("Expected identifier, got {:?}", other)),
         }
     }
 

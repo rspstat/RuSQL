@@ -1,6 +1,7 @@
-// src/engine/executor.rs
+﻿// src/engine/executor.rs
 
 use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, RwLock};
 use chrono;
 use serde::{Serialize, Deserialize};
 use crate::transaction::txn_manager::TransactionManager;
@@ -33,27 +34,25 @@ pub struct GrantRecord {
 pub type Row = HashMap<String, String>;
 pub const NULL_VALUE: &str = "NULL";
 
-pub struct Executor {
+pub struct SharedDatabase {
     pub catalog: Catalog,
     pub tables: HashMap<String, Vec<Row>>,
     pub indexes: HashMap<String, BPlusTree>,
     pub index_meta: HashMap<String, (String, String)>,
-    /// 복합 인덱스: index_name → CompositeIndex
     pub composite_indexes: HashMap<String, CompositeIndex>,
     pub views: HashMap<String, Statement>,
-    pub txn: TransactionManager,
     pub buffer_pool: BufferPool,
-    disk: DiskManager,
-    /// Row-level lock + wait-for graph (데드락 감지 포함)
-    lock_mgr: LockManager,
-    /// Known database names (default: {"rustdb"})
+    pub disk: DiskManager,
+    pub lock_mgr: LockManager,
     pub databases: HashSet<String>,
-    /// Currently selected database
-    pub current_db: String,
-    /// User accounts
     pub users: Vec<UserRecord>,
-    /// Granted privileges
     pub grants: Vec<GrantRecord>,
+}
+
+pub struct Executor {
+    pub shared: Arc<RwLock<SharedDatabase>>,
+    pub txn: TransactionManager,
+    pub current_db: String,
 }
 
 impl Executor {
@@ -178,21 +177,24 @@ impl Executor {
         let users: Vec<UserRecord> = disk.load_users();
         let grants: Vec<GrantRecord> = disk.load_grants();
 
+        let current_db = databases.iter().min().cloned().unwrap_or_else(|| "rustdb".to_string());
         let mut executor = Executor {
-            catalog,
-            tables,
-            indexes,
-            index_meta,
-            composite_indexes,
-            views,
+            shared: Arc::new(RwLock::new(SharedDatabase {
+                catalog,
+                tables,
+                indexes,
+                index_meta,
+                composite_indexes,
+                views,
+                buffer_pool: BufferPool::new(),
+                disk,
+                lock_mgr: LockManager::new(),
+                databases,
+                users,
+                grants,
+            })),
             txn: TransactionManager::new(),
-            buffer_pool: BufferPool::new(),
-            disk,
-            lock_mgr: LockManager::new(),
-            current_db: databases.iter().min().cloned().unwrap_or_else(|| "rustdb".to_string()),
-            databases,
-            users,
-            grants,
+            current_db,
         };
 
         // WAL Crash Recovery
@@ -200,88 +202,110 @@ impl Executor {
         executor
     }
 
+    pub fn new_session(shared: Arc<RwLock<SharedDatabase>>) -> Self {
+        let current_db = {
+            let s = shared.read().unwrap();
+            s.databases.iter().min().cloned().unwrap_or_else(|| "rustdb".to_string())
+        };
+        Executor {
+            shared,
+            txn: TransactionManager::new(),
+            current_db,
+        }
+    }
+
+    pub fn get_shared(&self) -> Arc<RwLock<SharedDatabase>> {
+        Arc::clone(&self.shared)
+    }
+
     pub fn execute(&mut self, stmt: Statement) -> Result<String, String> {
+        let arc = Arc::clone(&self.shared);
+        let mut s = arc.write().unwrap();
+        self.execute_with_s(&mut s, stmt)
+    }
+
+    fn execute_with_s(&mut self, s: &mut SharedDatabase, stmt: Statement) -> Result<String, String> {
         // USE은 qualification 전에 처리
         if let Statement::Use { database } = stmt {
-            return self.exec_use(database);
+            return self.exec_use(s, database);
         }
         // CreateDatabase/DropDatabase도 qualification 불필요
         if let Statement::CreateDatabase { name, if_not_exists } = stmt {
-            return self.exec_create_database(name, if_not_exists);
+            return self.exec_create_database(s, name, if_not_exists);
         }
         if let Statement::DropDatabase { name, if_exists } = stmt {
-            return self.exec_drop_database(name, if_exists);
+            return self.exec_drop_database(s, name, if_exists);
         }
         // 사용자 관리 / 권한 — qualification 불필요
         if let Statement::CreateUser { user, host, password, if_not_exists } = stmt {
-            return self.exec_create_user(user, host, password, if_not_exists);
+            return self.exec_create_user(s, user, host, password, if_not_exists);
         }
         if let Statement::DropUser { user, host, if_exists } = stmt {
-            return self.exec_drop_user(user, host, if_exists);
+            return self.exec_drop_user(s, user, host, if_exists);
         }
         if let Statement::Grant { privileges, object_type, object, user, host, with_grant_option } = stmt {
-            return self.exec_grant(privileges, object_type, object, user, host, with_grant_option);
+            return self.exec_grant(s, privileges, object_type, object, user, host, with_grant_option);
         }
         if let Statement::Revoke { privileges, object_type, object, user, host } = stmt {
-            return self.exec_revoke(privileges, object_type, object, user, host);
+            return self.exec_revoke(s, privileges, object_type, object, user, host);
         }
         if let Statement::ShowGrants { user, host } = stmt {
-            return self.exec_show_grants(user, host);
+            return self.exec_show_grants(s, user, host);
         }
         if let Statement::ShowDatabases = stmt {
-            return self.exec_show_databases();
+            return self.exec_show_databases(s);
         }
         // 모든 다른 statement: 테이블명을 "{current_db}.{table}" 형식으로 qualify
-        let stmt = self.qualify_stmt(stmt);
+        let stmt = self.qualify_stmt(s, stmt);
         match stmt {
-            Statement::Begin    => self.exec_begin(),
-            Statement::Commit   => self.exec_commit(),
-            Statement::Rollback => self.exec_rollback(),
+            Statement::Begin    => self.exec_begin(s),
+            Statement::Commit   => self.exec_commit(s),
+            Statement::Rollback => self.exec_rollback(s),
             Statement::CreateTable { name, columns, if_not_exists, primary_key_columns, check_constraints } => {
-                self.exec_create(name, columns, if_not_exists, primary_key_columns, check_constraints)
+                self.exec_create(s, name, columns, if_not_exists, primary_key_columns, check_constraints)
             }
-            Statement::DropTable { name, if_exists }  => self.exec_drop(name, if_exists),
-            Statement::TruncateTable { name }        => self.exec_truncate(name),
-            Statement::Insert { table, columns, values, on_conflict } => self.exec_insert(table, columns, values, on_conflict),
-            Statement::InsertSelect { table, columns, query, on_conflict } => self.exec_insert_select(table, columns, *query, on_conflict),
+            Statement::DropTable { name, if_exists }  => self.exec_drop(s, name, if_exists),
+            Statement::TruncateTable { name }        => self.exec_truncate(s, name),
+            Statement::Insert { table, columns, values, on_conflict } => self.exec_insert(s, table, columns, values, on_conflict),
+            Statement::InsertSelect { table, columns, query, on_conflict } => self.exec_insert_select(s, table, columns, *query, on_conflict),
             Statement::Select { table, subquery, distinct, columns, condition, joins, order_by, group_by, having, limit, offset, for_update } => {
-                self.exec_select(table, subquery, distinct, columns, condition, joins, order_by, group_by, having, limit, offset, for_update)
+                self.exec_select(s, table, subquery, distinct, columns, condition, joins, order_by, group_by, having, limit, offset, for_update)
             }
             Statement::Update { table, assignments, condition } => {
-                self.exec_update(table, assignments, condition)
+                self.exec_update(s, table, assignments, condition)
             }
-            Statement::Delete { table, condition }   => self.exec_delete(table, condition),
-            Statement::AlterTable { table, action }  => self.exec_alter(table, action),
+            Statement::Delete { table, condition }   => self.exec_delete(s, table, condition),
+            Statement::AlterTable { table, action }  => self.exec_alter(s, table, action),
             Statement::CreateIndex { index_name, table, columns } => {
-                self.exec_create_index(index_name, table, columns)
+                self.exec_create_index(s, index_name, table, columns)
             }
-            Statement::DropIndex { index_name } => self.exec_drop_index(index_name),
-            Statement::CreateView { name, query } => self.exec_create_view(name, *query),
-            Statement::DropView { name } => self.exec_drop_view(name),
-            Statement::ShowTables => self.exec_show_tables(),
-            Statement::Describe { table } => self.exec_describe(table),
-            Statement::ShowBufferPool => self.exec_show_buffer_pool(),
+            Statement::DropIndex { index_name } => self.exec_drop_index(s, index_name),
+            Statement::CreateView { name, query } => self.exec_create_view(s, name, *query),
+            Statement::DropView { name } => self.exec_drop_view(s, name),
+            Statement::ShowTables => self.exec_show_tables(s),
+            Statement::Describe { table } => self.exec_describe(s, table),
+            Statement::ShowBufferPool => self.exec_show_buffer_pool(s),
             Statement::ShowWal        => self.exec_show_wal(),
-            Statement::Checkpoint     => self.exec_checkpoint(),
+            Statement::Checkpoint     => self.exec_checkpoint(s),
             Statement::SetIsolationLevel(level) => self.exec_set_isolation_level(level),
             Statement::ShowIsolationLevel       => self.exec_show_isolation_level(),
-            Statement::Vacuum { table }         => self.exec_vacuum(table),
-            Statement::ShowLocks                => self.exec_show_locks(),
+            Statement::Vacuum { table }         => self.exec_vacuum(s, table),
+            Statement::ShowLocks                => self.exec_show_locks(s),
             Statement::Savepoint { name }       => self.exec_savepoint(name),
             Statement::ReleaseSavepoint { name } => self.exec_release_savepoint(name),
-            Statement::RollbackTo { name }      => self.exec_rollback_to(name),
-            Statement::Explain(inner)           => self.exec_explain(*inner),
-            Statement::Union { left, right, all, order_by, limit, offset } => self.exec_union(*left, *right, all, order_by, limit, offset),
-            Statement::With { ctes, query, recursive } => self.exec_with(ctes, *query, recursive),
-            Statement::CreateDatabase { name, if_not_exists } => self.exec_create_database(name, if_not_exists),
-            Statement::DropDatabase { name, if_exists }       => self.exec_drop_database(name, if_exists),
+            Statement::RollbackTo { name }      => self.exec_rollback_to(s, name),
+            Statement::Explain(inner)           => self.exec_explain(s, *inner),
+            Statement::Union { left, right, all, order_by, limit, offset } => self.exec_union(s, *left, *right, all, order_by, limit, offset),
+            Statement::With { ctes, query, recursive } => self.exec_with(s, ctes, *query, recursive),
+            Statement::CreateDatabase { name, if_not_exists } => self.exec_create_database(s, name, if_not_exists),
+            Statement::DropDatabase { name, if_exists }       => self.exec_drop_database(s, name, if_exists),
             Statement::MultiUpdate { tables, joins, assignments, condition } => {
-                self.exec_multi_update(tables, joins, assignments, condition)
+                self.exec_multi_update(s, tables, joins, assignments, condition)
             }
             Statement::MultiDelete { delete_tables, from_table, joins, condition } => {
-                self.exec_multi_delete(delete_tables, from_table, joins, condition)
+                self.exec_multi_delete(s, delete_tables, from_table, joins, condition)
             }
-            Statement::Use { database } => self.exec_use(database),
+            Statement::Use { database } => self.exec_use(s, database),
             // These are handled in early-return blocks above; unreachable after qualify_stmt
             Statement::CreateUser { .. } | Statement::DropUser { .. }
             | Statement::Grant { .. } | Statement::Revoke { .. }
@@ -293,6 +317,7 @@ impl Executor {
 
     fn exec_union(
         &mut self,
+        s: &mut SharedDatabase,
         left: Statement,
         right: Statement,
         all: bool,
@@ -300,8 +325,8 @@ impl Executor {
         limit: Option<usize>,
         offset: Option<usize>,
     ) -> Result<String, String> {
-        let left_out  = self.execute(left)?;
-        let right_out = self.execute(right)?;
+        let left_out  = self.execute_with_s(s, left)?;
+        let right_out = self.execute_with_s(s, right)?;
 
         let (left_cols,  mut left_rows)  = Self::parse_table_output(&left_out);
         let (right_cols, right_rows) = Self::parse_table_output(&right_out);
@@ -478,6 +503,7 @@ impl Executor {
 
     fn exec_create(
         &mut self,
+        s: &mut SharedDatabase,
         name: String,
         columns: Vec<ColumnDef>,
         if_not_exists: bool,
@@ -485,7 +511,7 @@ impl Executor {
         check_constraints: Vec<(Option<String>, String)>,
     ) -> Result<String, String> {
         // IF NOT EXISTS: 이미 존재하면 조용히 넘어감
-        if if_not_exists && self.tables.contains_key(&name) {
+        if if_not_exists && s.tables.contains_key(&name) {
             return Ok(format!("Table '{}' already exists, skipped.", name));
         }
         let schema_cols: Vec<SchemaCol> = columns.into_iter().map(|c| SchemaCol {
@@ -519,44 +545,45 @@ impl Executor {
         let schema_checks: Vec<crate::catalog::schema::CheckConstraint> = check_constraints.into_iter()
             .map(|(name, expr)| crate::catalog::schema::CheckConstraint { name, expression: expr })
             .collect();
-        self.catalog.create_table_full(name.clone(), schema_cols, primary_key_columns, schema_checks)?;
-        self.tables.insert(name.clone(), Vec::new());
-        self.indexes.insert(name.clone(), BPlusTree::new());
-        let full_schema = self.catalog.get_table(&name).unwrap();
-        self.disk.save_schema(&name, full_schema);
+        s.catalog.create_table_full(name.clone(), schema_cols, primary_key_columns, schema_checks)?;
+        s.tables.insert(name.clone(), Vec::new());
+        s.indexes.insert(name.clone(), BPlusTree::new());
+        let full_schema = s.catalog.get_table(&name).unwrap();
+        s.disk.save_schema(&name, full_schema);
         Ok(format!("Table '{}' created.", name))
     }
 
-    fn exec_drop(&mut self, name: String, if_exists: bool) -> Result<String, String> {
-        if if_exists && !self.tables.contains_key(&name) {
+    fn exec_drop(&mut self, s: &mut SharedDatabase, name: String, if_exists: bool) -> Result<String, String> {
+        if if_exists && !s.tables.contains_key(&name) {
             return Ok(format!("Table '{}' does not exist, skipped.", name));
         }
-        self.catalog.drop_table(&name)?;
-        self.tables.remove(&name);
-        self.indexes.remove(&name);
-        self.buffer_pool.invalidate(&name);
-        self.disk.delete_table(&name);
+        s.catalog.drop_table(&name)?;
+        s.tables.remove(&name);
+        s.indexes.remove(&name);
+        s.buffer_pool.invalidate(&name);
+        s.disk.delete_table(&name);
         Ok(format!("Table '{}' dropped.", name))
     }
 
-    fn exec_truncate(&mut self, name: String) -> Result<String, String> {
-        self.tables.get_mut(&name)
+    fn exec_truncate(&mut self, s: &mut SharedDatabase, name: String) -> Result<String, String> {
+        s.tables.get_mut(&name)
             .ok_or(format!("Table '{}' not found", name))?
             .clear();
-        if let Some(index) = self.indexes.get_mut(&name) {
+        if let Some(index) = s.indexes.get_mut(&name) {
             *index = BPlusTree::new();
         }
         // AUTO INCREMENT 카운터 리셋
-        if let Some(schema) = self.catalog.get_table_mut(&name) {
+        if let Some(schema) = s.catalog.get_table_mut(&name) {
             schema.auto_increment_counters.clear();
         }
-        self.buffer_pool.invalidate(&name);
-        self.disk.save_table(&name, &[]);
+        s.buffer_pool.invalidate(&name);
+        s.disk.save_table(&name, &[]);
         Ok(format!("Table '{}' truncated.", name))
     }
 
     fn exec_with(
         &mut self,
+        s: &mut SharedDatabase,
         ctes: Vec<(String, Box<Statement>)>,
         query: Statement,
         recursive: bool,
@@ -566,7 +593,7 @@ impl Executor {
 
         for (name, body) in ctes {
             // Conflict guard
-            if self.tables.contains_key(&name) || self.views.contains_key(&name) {
+            if s.tables.contains_key(&name) || s.views.contains_key(&name) {
                 return Err(format!("CTE name '{}' conflicts with an existing table or view", name));
             }
 
@@ -575,7 +602,7 @@ impl Executor {
                 let Statement::Union { left, right, .. } = *body else { unreachable!() };
 
                 // 1단계: base case 실행
-                let base_out = self.execute(*left)?;
+                let base_out = self.execute_with_s(s, *left)?;
                 let (cols, mut accumulated) = Self::parse_table_output(&base_out);
 
                 // CTE 테이블 초기화 (재귀 쿼리가 자신을 참조할 수 있도록)
@@ -588,14 +615,14 @@ impl Executor {
                         default: None, foreign_key: None, check_expr: None,
                     }
                 }).collect();
-                let _ = self.catalog.create_table(name.clone(), schema_cols);
-                self.tables.insert(name.clone(), accumulated.clone());
-                self.buffer_pool.write_page(&name, accumulated.clone());
-                self.indexes.insert(name.clone(), crate::storage::btree::BPlusTree::new());
+                let _ = s.catalog.create_table(name.clone(), schema_cols);
+                s.tables.insert(name.clone(), accumulated.clone());
+                s.buffer_pool.write_page(&name, accumulated.clone());
+                s.indexes.insert(name.clone(), crate::storage::btree::BPlusTree::new());
 
                 // 2단계: 재귀 반복 (새 행이 없을 때까지, 최대 1000회)
                 for _ in 0..1000 {
-                    let rec_out = self.execute(*right.clone())?;
+                    let rec_out = self.execute_with_s(s, *right.clone())?;
                     let (rec_cols, new_rows) = Self::parse_table_output(&rec_out);
                     // CTE 컬럼명은 base case 기준 (positional 매핑)
                     let fresh: Vec<Row> = new_rows.into_iter()
@@ -616,22 +643,22 @@ impl Executor {
                         .collect();
                     if fresh.is_empty() { break; }
                     accumulated.extend(fresh);
-                    self.tables.insert(name.clone(), accumulated.clone());
-                    self.buffer_pool.write_page(&name, accumulated.clone());
+                    s.tables.insert(name.clone(), accumulated.clone());
+                    s.buffer_pool.write_page(&name, accumulated.clone());
                 }
 
                 cte_names.push(name.clone());
-                let result = self.execute(query);
+                let result = self.execute_with_s(s, query);
                 for n in &cte_names {
-                    self.tables.remove(n);
-                    self.indexes.remove(n);
-                    self.buffer_pool.invalidate(n);
-                    let _ = self.catalog.drop_table(n);
+                    s.tables.remove(n);
+                    s.indexes.remove(n);
+                    s.buffer_pool.invalidate(n);
+                    let _ = s.catalog.drop_table(n);
                 }
                 return result;
             } else {
                 // 일반 CTE (비재귀) — CTE body 실행 후 가상 테이블로 적재
-                let output = self.execute(*body)?;
+                let output = self.execute_with_s(s, *body)?;
                 Self::parse_table_output(&output)
             };
 
@@ -651,21 +678,21 @@ impl Executor {
                 }
             }).collect();
 
-            let _ = self.catalog.create_table(name.clone(), schema_cols);
-            self.tables.insert(name.clone(), rows.clone());
-            self.buffer_pool.write_page(&name, rows);
-            self.indexes.insert(name.clone(), crate::storage::btree::BPlusTree::new());
+            let _ = s.catalog.create_table(name.clone(), schema_cols);
+            s.tables.insert(name.clone(), rows.clone());
+            s.buffer_pool.write_page(&name, rows);
+            s.indexes.insert(name.clone(), crate::storage::btree::BPlusTree::new());
             cte_names.push(name);
         }
 
-        let result = self.execute(query);
+        let result = self.execute_with_s(s, query);
 
         // Tear down temporary CTE tables
         for name in &cte_names {
-            self.tables.remove(name);
-            self.indexes.remove(name);
-            self.buffer_pool.invalidate(name);
-            let _ = self.catalog.drop_table(name);
+            s.tables.remove(name);
+            s.indexes.remove(name);
+            s.buffer_pool.invalidate(name);
+            let _ = s.catalog.drop_table(name);
         }
 
         result
@@ -673,12 +700,13 @@ impl Executor {
 
     fn exec_insert_select(
         &mut self,
+        s: &mut SharedDatabase,
         table: String,
         columns: Option<Vec<String>>,
         query: Statement,
         on_conflict: InsertConflict,
     ) -> Result<String, String> {
-        let output = self.execute(query)?;
+        let output = self.execute_with_s(s, query)?;
         let (col_names, rows) = Self::parse_table_output(&output);
         if rows.is_empty() {
             return Ok("0 row(s) inserted.".to_string());
@@ -687,18 +715,19 @@ impl Executor {
             .map(|row| col_names.iter().map(|c| row.get(c).cloned().unwrap_or_default()).collect())
             .collect();
         let insert_cols = columns.or(Some(col_names));
-        self.exec_insert(table, insert_cols, all_values, on_conflict)
+        self.exec_insert(s, table, insert_cols, all_values, on_conflict)
     }
 
     fn exec_insert(
         &mut self,
+        s: &mut SharedDatabase,
         table: String,
         col_list: Option<Vec<String>>,
         all_values: Vec<Vec<String>>,
         on_conflict: InsertConflict,
     ) -> Result<String, String> {
         // 스키마 클론 (borrow 충돌 방지)
-        let schema = self.catalog.get_table(&table)
+        let schema = s.catalog.get_table(&table)
             .ok_or(format!("Table '{}' not found", table))?
             .clone();
 
@@ -796,13 +825,43 @@ impl Executor {
                 }
             }
 
+            // ENUM / SET 값 유효성 검사
+            for (i, col) in schema.columns.iter().enumerate() {
+                let val = &final_values[i];
+                if val.is_empty() || val == NULL_VALUE { continue; }
+                match &col.data_type {
+                    DataType::Enum(allowed) => {
+                        if !allowed.iter().any(|a| a == val) {
+                            return Err(format!(
+                                "Invalid ENUM value '{}' for column '{}'. Allowed: {}",
+                                val, col.name,
+                                allowed.iter().map(|s| format!("'{}'", s)).collect::<Vec<_>>().join(", ")
+                            ));
+                        }
+                    }
+                    DataType::Set(allowed) => {
+                        for part in val.split(',') {
+                            let part = part.trim();
+                            if !part.is_empty() && !allowed.iter().any(|a| a == part) {
+                                return Err(format!(
+                                    "Invalid SET value '{}' for column '{}'. Allowed: {}",
+                                    part, col.name,
+                                    allowed.iter().map(|s| format!("'{}'", s)).collect::<Vec<_>>().join(", ")
+                                ));
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+
             // UNIQUE / PRIMARY KEY 중복 검사 — 기존 행 대상
             {
                 // 복합 PK 컬럼 목록
                 let pk_cols: Vec<&str> = schema.primary_key_columns.iter().map(|s| s.as_str()).collect();
                 let is_composite_pk = pk_cols.len() > 1;
 
-                if let Some(rows) = self.tables.get(&table) {
+                if let Some(rows) = s.tables.get(&table) {
                     if is_composite_pk {
                         let new_pk_tuple: Vec<String> = pk_cols.iter()
                             .map(|pk| {
@@ -911,7 +970,7 @@ impl Executor {
                 if let Some(fk) = &col.foreign_key {
                     let val = row.get(&col.name).cloned().unwrap_or_default();
                     if val.is_empty() || val == NULL_VALUE { continue; }
-                    let ref_rows = self.tables.get(&fk.ref_table)
+                    let ref_rows = s.tables.get(&fk.ref_table)
                         .ok_or(format!("Referenced table '{}' not found", fk.ref_table))?;
                     let exists = ref_rows.iter().any(|r| {
                         r.get(&fk.ref_column).map(|v| v == &val).unwrap_or(false)
@@ -950,7 +1009,7 @@ impl Executor {
         // ── ON DUPLICATE KEY UPDATE: 충돌 행 업데이트 ──────────────────────
         let had_updates = !pending_updates.is_empty();
         for (pk_val, assignments) in pending_updates {
-            if let Some(rows) = self.tables.get_mut(&table) {
+            if let Some(rows) = s.tables.get_mut(&table) {
                 for row in rows.iter_mut() {
                     if row.get(&col_names[0]) == Some(&pk_val) && Self::is_visible(row) {
                         for (col, expr) in &assignments {
@@ -962,14 +1021,14 @@ impl Executor {
                 }
             }
         }
-        // 인덱스가 self.tables와 동기화되도록 재빌드 (PK 포인트 룩업이 인덱스를 사용하므로)
+        // 인덱스가 s.tables와 동기화되도록 재빌드 (PK 포인트 룩업이 인덱스를 사용하므로)
         if had_updates {
             let pk_col_name = schema.columns.iter()
                 .find(|c| c.primary_key)
                 .map(|c| c.name.clone())
                 .unwrap_or_else(|| col_names[0].clone());
-            let rows_snap = self.tables.get(&table).cloned().unwrap_or_default();
-            if let Some(index) = self.indexes.get_mut(&table) {
+            let rows_snap = s.tables.get(&table).cloned().unwrap_or_default();
+            if let Some(index) = s.indexes.get_mut(&table) {
                 *index = BPlusTree::new();
                 for row in &rows_snap {
                     let k = row.get(&pk_col_name).cloned().unwrap_or_default();
@@ -983,10 +1042,10 @@ impl Executor {
 
         // auto_increment 카운터를 schema에 반영 후 저장
         if local_counters != schema.auto_increment_counters {
-            let schema_mut = self.catalog.get_table_mut(&table).unwrap();
+            let schema_mut = s.catalog.get_table_mut(&table).unwrap();
             schema_mut.auto_increment_counters = local_counters;
-            let schema_saved = self.catalog.get_table(&table).unwrap();
-            self.disk.save_schema(&table, schema_saved);
+            let schema_saved = s.catalog.get_table(&table).unwrap();
+            s.disk.save_schema(&table, schema_saved);
         }
 
         let inserted = prepared.len();
@@ -997,38 +1056,39 @@ impl Executor {
 
             self.txn.log_insert(&table, &pk_val, &val_json);
 
-            if let Some(index) = self.indexes.get_mut(&table) {
+            if let Some(index) = s.indexes.get_mut(&table) {
                 index.insert(pk_val, val_json);
             }
 
             // 복합 인덱스 갱신
-            let comp_keys: Vec<String> = self.composite_indexes.iter()
+            let comp_keys: Vec<String> = s.composite_indexes.iter()
                 .filter(|(_, ci)| ci.table == table)
                 .map(|(k, _)| k.clone())
                 .collect();
             for k in comp_keys {
-                if let Some(ci) = self.composite_indexes.get_mut(&k) {
+                if let Some(ci) = s.composite_indexes.get_mut(&k) {
                     ci.insert_row(&row);
                 }
             }
 
-            self.tables.get_mut(&table)
+            s.tables.get_mut(&table)
                 .ok_or(format!("Table '{}' not found", table))?
                 .push(row);
         }
 
-        self.sort_by_pk(&table);
+        self.sort_by_pk(s, &table);
 
-        // 버퍼 풀 갱신
-        let rows = self.tables.get(&table).unwrap().clone();
-        self.buffer_pool.write_page(&table, rows);
+        let rows = s.tables.get(&table).unwrap().clone();
+        // 단일 컬럼 보조 인덱스 재빌드 (INSERT 후 stale 방지)
+        self.rebuild_secondary_indexes(s, &table, &rows);
+        s.buffer_pool.write_page(&table, rows);
 
         // 모든 row 삽입 후 flush
         if !self.txn.is_active() {
-            self.buffer_pool.flush_page(&table, &self.disk);
+            s.buffer_pool.flush_page(&table, &s.disk);
         }
 
-        self.maybe_auto_checkpoint();
+        self.maybe_auto_checkpoint(s);
         Ok(format!("{} row(s) inserted.", inserted))
     }
 
@@ -1183,6 +1243,7 @@ impl Executor {
 
     fn exec_select(
         &mut self,
+        s: &mut SharedDatabase,
         table: String,
         subquery: Option<(Box<Statement>, String)>,
         distinct: bool,
@@ -1200,7 +1261,7 @@ impl Executor {
         // FROM (SELECT ...) AS alias 처리
         if let Some((inner_stmt, alias)) = subquery {
             return self.exec_select_with_subquery(
-                *inner_stmt, alias, distinct, columns, condition, joins,
+                s, *inner_stmt, alias, distinct, columns, condition, joins,
                 order_by, group_by, having, limit, offset, for_update,
             );
         }
@@ -1248,19 +1309,19 @@ impl Executor {
         }
 
         // 뷰 처리: 뷰를 FROM 서브쿼리처럼 실행하고 외부 쿼리 조건을 적용
-        if let Some(view_stmt) = self.views.remove(&table) {
+        if let Some(view_stmt) = s.views.remove(&table) {
             let result = self.exec_select_with_subquery(
-                view_stmt.clone(),
+                s, view_stmt.clone(),
                 table.clone(),
                 distinct, columns, condition, joins, order_by, group_by, having, limit, offset, for_update,
             );
-            self.views.insert(table, view_stmt);
+            s.views.insert(table, view_stmt);
             return result;
         }
 
         // ── Planner: 인덱스 / 조인 알고리즘 결정 ──────────────────────────
         let has_agg = columns.iter().any(|c| matches!(c, SelectColumn::Agg { .. } | SelectColumn::AggAlias { .. }));
-        let planner = Planner::new(&self.tables, &self.indexes, &self.index_meta, &self.composite_indexes, &self.catalog);
+        let planner = Planner::new(&s.tables, &s.indexes, &s.index_meta, &s.composite_indexes, &s.catalog);
         let plan = planner.plan_covering(&table, &condition, &joins, &columns);
 
         // 인덱스 경로 실행 (집계 / FOR UPDATE / JOIN / LIMIT / ORDER BY 없을 때만)
@@ -1269,11 +1330,11 @@ impl Executor {
             match &plan.base.access {
                 // ── PK 포인트 ──────────────────────────────────────────────
                 AccessPath::PkPoint { key } => {
-                    if let Some(index) = self.indexes.get(&table) {
+                    if let Some(index) = s.indexes.get(&table) {
                         if let Some(val_json) = index.search(key) {
                             let row: Row = serde_json::from_str(&val_json).unwrap_or_default();
                             if Self::is_visible(&row) {
-                                return self.format_result(vec![row], columns, table, vec![]);
+                                return self.format_result(s, vec![row], columns, table, vec![]);
                             }
                         }
                         return Ok("0 rows returned.".to_string());
@@ -1281,16 +1342,16 @@ impl Executor {
                 }
                 // ── PK BETWEEN ────────────────────────────────────────────
                 AccessPath::PkBetween { start, end } => {
-                    if let Some(index) = self.indexes.get(&table) {
+                    if let Some(index) = s.indexes.get(&table) {
                         let rows: Vec<Row> = index.range_search(start, end).iter()
                             .filter_map(|j| serde_json::from_str(j).ok())
                             .filter(|r| Self::is_visible(r)).collect();
-                        return self.format_result(rows, columns, table, vec![]);
+                        return self.format_result(s, rows, columns, table, vec![]);
                     }
                 }
                 // ── PK 범위 스캔 ──────────────────────────────────────────
                 AccessPath::PkRange { op, key } => {
-                    if let Some(index) = self.indexes.get(&table) {
+                    if let Some(index) = s.indexes.get(&table) {
                         let inclusive = op.inclusive();
                         let rows: Vec<Row> = if op.is_lower_bound() {
                             index.scan_from(key, inclusive).iter()
@@ -1301,12 +1362,12 @@ impl Executor {
                                 .filter_map(|(_, j)| serde_json::from_str(j).ok())
                                 .filter(|r| Self::is_visible(r)).collect()
                         };
-                        return self.format_result(rows, columns, table, vec![]);
+                        return self.format_result(s, rows, columns, table, vec![]);
                     }
                 }
                 // ── 보조 인덱스 포인트 (중복 키 배열) ────────────────────
                 AccessPath::SecondaryPoint { index_key, col, key, .. } => {
-                    if let Some(index) = self.indexes.get(index_key) {
+                    if let Some(index) = s.indexes.get(index_key) {
                         if let Some(json) = index.search(key) {
                             if plan.base.is_covering {
                                 // 커버링 인덱스: 전체 Row 역직렬화 없이 JSON 배열 길이만 집계
@@ -1319,22 +1380,22 @@ impl Executor {
                                     r.insert(col.clone(), key.clone());
                                     r
                                 }).collect();
-                                return self.format_result(synthetic, columns, table, vec![]);
+                                return self.format_result(s, synthetic, columns, table, vec![]);
                             }
                             let rows: Vec<Row> = serde_json::from_str::<Vec<Row>>(&json)
                                 .unwrap_or_default()
                                 .into_iter()
                                 .filter(|r| Self::is_visible(r))
-                                .filter(|r| self.matches_condition_with_subquery(r, &condition))
+                                .filter(|r| self.matches_condition_with_subquery(s, r, &condition))
                                 .collect();
-                            return self.format_result(rows, columns, table, vec![]);
+                            return self.format_result(s, rows, columns, table, vec![]);
                         }
                         return Ok("0 rows returned.".to_string());
                     }
                 }
                 // ── 보조 인덱스 범위 스캔 ────────────────────────────────
                 AccessPath::SecondaryRange { index_key, col, op, key, .. } => {
-                    if let Some(index) = self.indexes.get(index_key) {
+                    if let Some(index) = s.indexes.get(index_key) {
                         let inclusive = op.inclusive();
                         let pairs = if op.is_lower_bound() {
                             index.scan_from(key, inclusive)
@@ -1359,23 +1420,23 @@ impl Executor {
                                     }).collect::<Vec<_>>()
                                 })
                                 .collect();
-                            return self.format_result(synthetic, columns, table, vec![]);
+                            return self.format_result(s, synthetic, columns, table, vec![]);
                         }
                         let rows: Vec<Row> = pairs.iter()
                             .filter_map(|(_, j)| serde_json::from_str::<Vec<Row>>(j).ok())
                             .flatten()
                             .filter(|r| Self::is_visible(r))
-                            .filter(|r| self.matches_condition_with_subquery(r, &condition))
+                            .filter(|r| self.matches_condition_with_subquery(s, r, &condition))
                             .collect();
-                        return self.format_result(rows, columns, table, vec![]);
+                        return self.format_result(s, rows, columns, table, vec![]);
                     }
                 }
                 // ── 복합 인덱스 ──────────────────────────────────────────
                 AccessPath::CompositeIndex { index_name } => {
                     let eq_map = collect_eq_conditions_expr(&condition.clone().unwrap());
-                    if let Some(val_json) = self.composite_indexes[index_name].search_from_eq_map(&eq_map) {
+                    if let Some(val_json) = s.composite_indexes[index_name].search_from_eq_map(&eq_map) {
                         if let Ok(row) = serde_json::from_str::<Row>(&val_json) {
-                            return self.format_result(vec![row], columns, table, vec![]);
+                            return self.format_result(s, vec![row], columns, table, vec![]);
                         }
                     }
                     return Ok("0 rows returned.".to_string());
@@ -1384,7 +1445,7 @@ impl Executor {
             }
         }
 
-        if !self.tables.contains_key(&table) {
+        if !s.tables.contains_key(&table) {
             return Err(format!("Table '{}' not found", table));
         }
 
@@ -1392,7 +1453,7 @@ impl Executor {
         let rows: Vec<Row> = if let Some(snap_rows) = self.txn.get_snapshot_table(&table) {
             snap_rows.clone()
         } else {
-            self.buffer_pool.get_page(&table, &self.disk)
+            s.buffer_pool.get_page(&table, &s.disk)
         };
         // MVCC: 논리 삭제된 행(_xmax != "0") 제외
         let rows: Vec<Row> = rows.into_iter().filter(|r| Self::is_visible(r)).collect();
@@ -1400,7 +1461,7 @@ impl Executor {
         // ── JOIN 처리 (플래너가 선택한 알고리즘 사용) ──────────────────────
         let result: Vec<Row> = if joins.is_empty() {
             rows.into_iter()
-                .filter(|r| self.matches_condition_with_subquery(r, &condition))
+                .filter(|r| self.matches_condition_with_subquery(s, r, &condition))
                 .collect()
         } else {
             let mut current = rows;
@@ -1408,7 +1469,7 @@ impl Executor {
                 let right_rows_raw = if let Some(snap) = self.txn.get_snapshot_table(&j.table) {
                     snap.clone()
                 } else {
-                    self.tables.get(&j.table)
+                    s.tables.get(&j.table)
                         .ok_or(format!("Table '{}' not found", j.table))?.clone()
                 };
                 let right_rows: Vec<Row> = right_rows_raw.into_iter().filter(|r| Self::is_visible(r)).collect();
@@ -1425,7 +1486,7 @@ impl Executor {
                         merged.entry(col.clone()).or_insert_with(|| NULL_VALUE.to_string());
                     }
                 };
-                let right_schema_cols: Vec<String> = self.catalog.get_table(&j.table)
+                let right_schema_cols: Vec<String> = s.catalog.get_table(&j.table)
                     .map(|s| s.columns.iter().map(|c| c.name.clone()).collect())
                     .unwrap_or_default();
 
@@ -1701,7 +1762,7 @@ impl Executor {
                 current = joined;
             }
             current.into_iter()
-                .filter(|r| self.matches_condition_with_subquery(r, &condition))
+                .filter(|r| self.matches_condition_with_subquery(s, r, &condition))
                 .collect()
         };
 
@@ -1799,9 +1860,25 @@ impl Executor {
             if let Some(ref hav) = having {
                 group_rows.retain(|row| Self::matches_condexpr(row, &Some(hav.clone())));
             }
+            // ORDER BY on aggregated results (handles aggregate aliases like avg_sal)
+            if !order_by.is_empty() {
+                group_rows.sort_by(|a, b| {
+                    for ord in &order_by {
+                        let av = Self::get_col(a, &ord.column).cloned().unwrap_or_default();
+                        let bv = Self::get_col(b, &ord.column).cloned().unwrap_or_default();
+                        let cmp = match (av.parse::<f64>(), bv.parse::<f64>()) {
+                            (Ok(af), Ok(bf)) => af.partial_cmp(&bf).unwrap_or(std::cmp::Ordering::Equal),
+                            _ => av.cmp(&bv),
+                        };
+                        let cmp = if ord.ascending { cmp } else { cmp.reverse() };
+                        if cmp != std::cmp::Ordering::Equal { return cmp; }
+                    }
+                    std::cmp::Ordering::Equal
+                });
+            }
             if let Some(n) = offset { let skip = n.min(group_rows.len()); group_rows.drain(..skip); }
             if let Some(n) = limit { group_rows.truncate(n); }
-            return self.format_result(group_rows, columns, table, joins.clone());
+            return self.format_result(s, group_rows, columns, table, joins.clone());
         }
 
         // HAVING (GROUP BY 없는 경우)
@@ -1918,12 +1995,12 @@ impl Executor {
                 return Err("SELECT FOR UPDATE requires an active transaction (BEGIN first).".to_string());
             }
             let txn_id = self.txn.current_txn_id();
-            let pk_col = self.catalog.get_table(&table)
+            let pk_col = s.catalog.get_table(&table)
                 .and_then(|s| s.columns.iter().find(|c| c.primary_key).map(|c| c.name.clone()))
                 .unwrap_or_else(|| "id".to_string());
             for row in &result {
                 let pk_val = row.get(&pk_col).cloned().unwrap_or_default();
-                match self.lock_mgr.acquire(&table, &pk_val, txn_id) {
+                match s.lock_mgr.acquire(&table, &pk_val, txn_id) {
                     LockResult::Granted => {}
                     LockResult::Conflict { holder } => {
                         return Err(format!(
@@ -1941,12 +2018,13 @@ impl Executor {
             }
         }
 
-        self.format_result(result, columns, table, joins)
+        self.format_result(s, result, columns, table, joins)
     }
 
     // ─── FROM 서브쿼리 실행 ──────────────────────────────────────
     fn exec_select_with_subquery(
         &mut self,
+        s: &mut SharedDatabase,
         inner_stmt: Statement,
         alias: String,
         distinct: bool,
@@ -1960,18 +2038,18 @@ impl Executor {
         offset: Option<usize>,
         for_update: bool,
     ) -> Result<String, String> {
-        if self.tables.contains_key(&alias) || self.views.contains_key(&alias) {
+        if s.tables.contains_key(&alias) || s.views.contains_key(&alias) {
             return Err(format!("Alias '{}' conflicts with an existing table or view", alias));
         }
 
-        let inner_output = self.execute(inner_stmt)?;
+        let inner_output = self.execute_with_s(s, inner_stmt)?;
         let (col_names, virtual_rows) = Self::parse_table_output(&inner_output);
         if col_names.is_empty() {
             return Ok("0 rows returned.".to_string());
         }
 
-        self.tables.insert(alias.clone(), virtual_rows.clone());
-        self.buffer_pool.write_page(&alias, virtual_rows);
+        s.tables.insert(alias.clone(), virtual_rows.clone());
+        s.buffer_pool.write_page(&alias, virtual_rows);
         let schema_cols: Vec<crate::catalog::schema::ColumnDef> = col_names.iter()
             .map(|name| crate::catalog::schema::ColumnDef {
                 name: name.clone(),
@@ -1986,16 +2064,16 @@ impl Executor {
                 check_expr: None,
             })
             .collect();
-        let _ = self.catalog.create_table(alias.clone(), schema_cols);
+        let _ = s.catalog.create_table(alias.clone(), schema_cols);
 
         let result = self.exec_select(
-            alias.clone(), None, distinct, columns, condition,
+            s, alias.clone(), None, distinct, columns, condition,
             joins, order_by, group_by, having, limit, offset, for_update,
         );
 
-        self.tables.remove(&alias);
-        self.buffer_pool.invalidate(&alias);
-        let _ = self.catalog.drop_table(&alias);
+        s.tables.remove(&alias);
+        s.buffer_pool.invalidate(&alias);
+        let _ = s.catalog.drop_table(&alias);
 
         result
     }
@@ -2333,6 +2411,7 @@ impl Executor {
 
     fn format_result(
         &self,
+        s: &SharedDatabase,
         result: Vec<Row>,
         columns: Vec<SelectColumn>,
         table: String,
@@ -2350,11 +2429,11 @@ impl Executor {
             Expr(ArithExpr),
         }
         let col_defs: Vec<(String, ColSource)> = if columns.iter().any(|c| c == &SelectColumn::All) {
-            let mut pairs: Vec<(String, ColSource)> = self.catalog.get_table(&table)
+            let mut pairs: Vec<(String, ColSource)> = s.catalog.get_table(&table)
                 .map(|s| s.columns.iter().map(|c| (c.name.clone(), ColSource::Key(c.name.clone()))).collect())
                 .unwrap_or_default();
             for j in &joins {
-                if let Some(schema) = self.catalog.get_table(&j.table) {
+                if let Some(schema) = s.catalog.get_table(&j.table) {
                     for c in &schema.columns {
                         pairs.push((c.name.clone(), ColSource::Key(c.name.clone())));
                     }
@@ -2456,12 +2535,13 @@ impl Executor {
 
     fn exec_update(
         &mut self,
+        s: &mut SharedDatabase,
         table: String,
         assignments: Vec<(String, ArithExpr)>,
         condition: Option<CondExpr>,
     ) -> Result<String, String> {
         // PK 컬럼명 먼저 추출 (borrow 분리)
-        let pk_col = self.catalog.get_table(&table)
+        let pk_col = s.catalog.get_table(&table)
             .ok_or(format!("Table '{}' not found", table))?
             .columns.iter()
             .find(|c| c.primary_key)
@@ -2469,18 +2549,18 @@ impl Executor {
             .unwrap_or_else(|| "id".to_string());
 
         // 서브쿼리 조건 지원: 먼저 매칭되는 PK 목록을 수집 (borrow 분리)
-        let candidate_rows: Vec<Row> = self.tables.get(&table)
+        let candidate_rows: Vec<Row> = s.tables.get(&table)
             .ok_or(format!("Table '{}' not found", table))?
             .iter()
             .filter(|r| Self::is_visible(r))
             .cloned()
             .collect();
         let matching_pks: Vec<String> = candidate_rows.iter()
-            .filter(|r| self.matches_condition_with_subquery(r, &condition))
+            .filter(|r| self.matches_condition_with_subquery(s, r, &condition))
             .map(|r| r.get(&pk_col).cloned().unwrap_or_default())
             .collect();
 
-        let rows = self.tables.get_mut(&table)
+        let rows = s.tables.get_mut(&table)
             .ok_or(format!("Table '{}' not found", table))?;
 
         let mut count = 0;
@@ -2493,7 +2573,7 @@ impl Executor {
 
                 // 잠금 충돌 / 데드락 체크 (활성 트랜잭션 안에서만)
                 if cur_txn != 0 {
-                    match self.lock_mgr.acquire(&table, &key, cur_txn) {
+                    match s.lock_mgr.acquire(&table, &key, cur_txn) {
                         LockResult::Granted => {}
                         LockResult::Conflict { holder } => {
                             return Err(format!(
@@ -2515,11 +2595,45 @@ impl Executor {
                 let new_vals: Vec<(String, String)> = assignments.iter()
                     .map(|(col, expr)| (col.clone(), Self::eval_arith(row, expr)))
                     .collect();
+
+                // ENUM / SET 값 유효성 검사 (row 반영 전)
+                if let Some(schema) = s.catalog.get_table(&table) {
+                    for (col_name, val) in &new_vals {
+                        if val.is_empty() || val.as_str() == NULL_VALUE { continue; }
+                        if let Some(col) = schema.columns.iter().find(|c| &c.name == col_name) {
+                            match &col.data_type {
+                                DataType::Enum(allowed) => {
+                                    if !allowed.iter().any(|a| a == val) {
+                                        return Err(format!(
+                                            "Invalid ENUM value '{}' for column '{}'. Allowed: {}",
+                                            val, col.name,
+                                            allowed.iter().map(|s| format!("'{}'", s)).collect::<Vec<_>>().join(", ")
+                                        ));
+                                    }
+                                }
+                                DataType::Set(allowed) => {
+                                    for part in val.split(',') {
+                                        let part = part.trim();
+                                        if !part.is_empty() && !allowed.iter().any(|a| a == part) {
+                                            return Err(format!(
+                                                "Invalid SET value '{}' for column '{}'. Allowed: {}",
+                                                part, col.name,
+                                                allowed.iter().map(|s| format!("'{}'", s)).collect::<Vec<_>>().join(", ")
+                                            ));
+                                        }
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+
                 for (col, val) in new_vals {
                     row.insert(col, val);
                 }
                 // CHECK 제약 검사 (수정 후 row 기준)
-                if let Some(schema) = self.catalog.get_table(&table) {
+                if let Some(schema) = s.catalog.get_table(&table) {
                     for col in &schema.columns {
                         if let Some(ref expr) = col.check_expr {
                             if !Self::eval_check_expr(expr, row) {
@@ -2548,8 +2662,8 @@ impl Executor {
             self.txn.log_update(&table, key, old_json, new_json);
         }
 
-        let rows_clone = self.tables.get(&table).unwrap().clone();
-        if let Some(index) = self.indexes.get_mut(&table) {
+        let rows_clone = s.tables.get(&table).unwrap().clone();
+        if let Some(index) = s.indexes.get_mut(&table) {
             *index = BPlusTree::new();
             for row in &rows_clone {
                 let k = row.get(&pk_col).cloned().unwrap_or_default();
@@ -2559,15 +2673,15 @@ impl Executor {
         }
 
         // 단일 컬럼 보조 인덱스 재빌드
-        self.rebuild_secondary_indexes(&table, &rows_clone);
+        self.rebuild_secondary_indexes(s, &table, &rows_clone);
 
         // 복합 인덱스 재빌드
-        let comp_keys: Vec<String> = self.composite_indexes.iter()
+        let comp_keys: Vec<String> = s.composite_indexes.iter()
             .filter(|(_, ci)| ci.table == table)
             .map(|(k, _)| k.clone())
             .collect();
         for k in comp_keys {
-            if let Some(ci) = self.composite_indexes.get_mut(&k) {
+            if let Some(ci) = s.composite_indexes.get_mut(&k) {
                 ci.rebuild(&rows_clone);
             }
         }
@@ -2575,7 +2689,7 @@ impl Executor {
         // ON UPDATE FK 처리: assignments에 변경된 컬럼이 다른 테이블에서 FK로 참조되는지 확인
         let changed_cols: Vec<String> = assignments.iter().map(|(c, _)| c.clone()).collect();
         let other_tables: Vec<(String, Vec<crate::catalog::schema::ColumnDef>)> =
-            self.catalog.tables.iter()
+            s.catalog.tables.iter()
                 .filter(|(name, _)| *name != &table)
                 .map(|(name, schema)| (name.clone(), schema.columns.clone()))
                 .collect();
@@ -2597,7 +2711,7 @@ impl Executor {
                             if fk.ref_table == table && fk.ref_column == *assign_col {
                                 match fk.on_update {
                                     crate::catalog::schema::FkAction::Restrict => {
-                                        if let Some(other_rows) = self.tables.get(other_table) {
+                                        if let Some(other_rows) = s.tables.get(other_table) {
                                             let referenced = other_rows.iter()
                                                 .filter(|r| Self::is_visible(r))
                                                 .any(|r| r.get(&col.name).map(|v| v == &old_val).unwrap_or(false));
@@ -2610,44 +2724,44 @@ impl Executor {
                                         }
                                     }
                                     crate::catalog::schema::FkAction::Cascade => {
-                                        if let Some(other_rows) = self.tables.get_mut(other_table) {
+                                        if let Some(other_rows) = s.tables.get_mut(other_table) {
                                             for row in other_rows.iter_mut() {
                                                 if Self::is_visible(row) && row.get(&col.name).map(|v| v == &old_val).unwrap_or(false) {
                                                     row.insert(col.name.clone(), new_val.clone());
                                                 }
                                             }
                                         }
-                                        let rows_clone2 = self.tables.get(other_table).unwrap().clone();
-                                        self.buffer_pool.write_page(other_table, rows_clone2.clone());
-                                        self.buffer_pool.flush_page(other_table, &self.disk);
+                                        let rows_clone2 = s.tables.get(other_table).unwrap().clone();
+                                        s.buffer_pool.write_page(other_table, rows_clone2.clone());
+                                        s.buffer_pool.flush_page(other_table, &s.disk);
                                     }
                                     crate::catalog::schema::FkAction::SetNull => {
-                                        if let Some(other_rows) = self.tables.get_mut(other_table) {
+                                        if let Some(other_rows) = s.tables.get_mut(other_table) {
                                             for row in other_rows.iter_mut() {
                                                 if Self::is_visible(row) && row.get(&col.name).map(|v| v == &old_val).unwrap_or(false) {
                                                     row.insert(col.name.clone(), NULL_VALUE.to_string());
                                                 }
                                             }
                                         }
-                                        let rows_clone2 = self.tables.get(other_table).unwrap().clone();
-                                        self.buffer_pool.write_page(other_table, rows_clone2.clone());
-                                        self.buffer_pool.flush_page(other_table, &self.disk);
+                                        let rows_clone2 = s.tables.get(other_table).unwrap().clone();
+                                        s.buffer_pool.write_page(other_table, rows_clone2.clone());
+                                        s.buffer_pool.flush_page(other_table, &s.disk);
                                     }
                                     crate::catalog::schema::FkAction::SetDefault => {
-                                        let default_val = self.catalog.get_table(other_table)
+                                        let default_val = s.catalog.get_table(other_table)
                                             .and_then(|s| s.columns.iter().find(|c| c.name == col.name))
                                             .and_then(|c| c.default.clone())
                                             .unwrap_or_else(|| NULL_VALUE.to_string());
-                                        if let Some(other_rows) = self.tables.get_mut(other_table) {
+                                        if let Some(other_rows) = s.tables.get_mut(other_table) {
                                             for row in other_rows.iter_mut() {
                                                 if Self::is_visible(row) && row.get(&col.name).map(|v| v == &old_val).unwrap_or(false) {
                                                     row.insert(col.name.clone(), default_val.clone());
                                                 }
                                             }
                                         }
-                                        let rows_clone2 = self.tables.get(other_table).unwrap().clone();
-                                        self.buffer_pool.write_page(other_table, rows_clone2.clone());
-                                        self.buffer_pool.flush_page(other_table, &self.disk);
+                                        let rows_clone2 = s.tables.get(other_table).unwrap().clone();
+                                        s.buffer_pool.write_page(other_table, rows_clone2.clone());
+                                        s.buffer_pool.flush_page(other_table, &s.disk);
                                     }
                                 }
                             }
@@ -2657,28 +2771,28 @@ impl Executor {
             }
         }
 
-        let rows = self.tables.get(&table).unwrap().clone();
-        self.buffer_pool.write_page(&table, rows);
-        self.buffer_pool.flush_page(&table, &self.disk);
-        self.maybe_auto_checkpoint();
+        let rows = s.tables.get(&table).unwrap().clone();
+        s.buffer_pool.write_page(&table, rows);
+        s.buffer_pool.flush_page(&table, &s.disk);
+        self.maybe_auto_checkpoint(s);
         Ok(format!("{} row(s) updated.", count))
     }
 
-    fn exec_delete(&mut self, table: String, condition: Option<CondExpr>) -> Result<String, String> {
+    fn exec_delete(&mut self, s: &mut SharedDatabase, table: String, condition: Option<CondExpr>) -> Result<String, String> {
         // 서브쿼리 조건 지원: 먼저 매칭 행을 수집 (borrow 분리)
-        let candidates: Vec<Row> = self.tables.get(&table)
+        let candidates: Vec<Row> = s.tables.get(&table)
             .ok_or(format!("Table '{}' not found", table))?
             .iter()
             .filter(|r| Self::is_visible(r))
             .cloned()
             .collect();
         let rows_to_delete: Vec<Row> = candidates.into_iter()
-            .filter(|r| self.matches_condition_with_subquery(r, &condition))
+            .filter(|r| self.matches_condition_with_subquery(s, r, &condition))
             .collect();
 
         // FK 처리 (CASCADE / RESTRICT / SET NULL)
         let other_tables: Vec<(String, Vec<crate::catalog::schema::ColumnDef>)> =
-            self.catalog.tables.iter()
+            s.catalog.tables.iter()
                 .filter(|(name, _)| *name != &table)
                 .map(|(name, schema)| (name.clone(), schema.columns.clone()))
                 .collect();
@@ -2693,7 +2807,7 @@ impl Executor {
 
                             match fk.on_delete {
                                 crate::catalog::schema::FkAction::Restrict => {
-                                    if let Some(other_rows) = self.tables.get(other_table) {
+                                    if let Some(other_rows) = s.tables.get(other_table) {
                                         let referenced = other_rows.iter()
                                             .filter(|r| Self::is_visible(r))
                                             .any(|r| r.get(&col.name).map(|v| v == &del_val).unwrap_or(false));
@@ -2709,7 +2823,7 @@ impl Executor {
                                     if self.txn.is_active() {
                                         // 트랜잭션 안: MVCC 논리 삭제
                                         let txn_id = self.txn.current_txn_id().to_string();
-                                        if let Some(other_rows) = self.tables.get_mut(other_table) {
+                                        if let Some(other_rows) = s.tables.get_mut(other_table) {
                                             for row in other_rows.iter_mut() {
                                                 if Self::is_visible(row) && row.get(&col.name).map(|v| v == &del_val).unwrap_or(false) {
                                                     row.insert("_xmax".to_string(), txn_id.clone());
@@ -2718,43 +2832,43 @@ impl Executor {
                                         }
                                     } else {
                                         // 트랜잭션 밖: 물리 삭제
-                                        if let Some(other_rows) = self.tables.get_mut(other_table) {
+                                        if let Some(other_rows) = s.tables.get_mut(other_table) {
                                             other_rows.retain(|r| {
                                                 !(Self::is_visible(r) && r.get(&col.name).map(|v| v == &del_val).unwrap_or(false))
                                             });
                                         }
                                     }
-                                    let rows_clone = self.tables.get(other_table).unwrap().clone();
-                                    self.buffer_pool.write_page(other_table, rows_clone.clone());
-                                    self.buffer_pool.flush_page(other_table, &self.disk);
+                                    let rows_clone = s.tables.get(other_table).unwrap().clone();
+                                    s.buffer_pool.write_page(other_table, rows_clone.clone());
+                                    s.buffer_pool.flush_page(other_table, &s.disk);
                                 }
                                 crate::catalog::schema::FkAction::SetNull => {
-                                    if let Some(other_rows) = self.tables.get_mut(other_table) {
+                                    if let Some(other_rows) = s.tables.get_mut(other_table) {
                                         for row in other_rows.iter_mut() {
                                             if Self::is_visible(row) && row.get(&col.name).map(|v| v == &del_val).unwrap_or(false) {
                                                 row.insert(col.name.clone(), NULL_VALUE.to_string());
                                             }
                                         }
                                     }
-                                    let rows_clone = self.tables.get(other_table).unwrap().clone();
-                                    self.buffer_pool.write_page(other_table, rows_clone.clone());
-                                    self.buffer_pool.flush_page(other_table, &self.disk);
+                                    let rows_clone = s.tables.get(other_table).unwrap().clone();
+                                    s.buffer_pool.write_page(other_table, rows_clone.clone());
+                                    s.buffer_pool.flush_page(other_table, &s.disk);
                                 }
                                 crate::catalog::schema::FkAction::SetDefault => {
-                                    let default_val = self.catalog.get_table(other_table)
+                                    let default_val = s.catalog.get_table(other_table)
                                         .and_then(|s| s.columns.iter().find(|c| c.name == col.name))
                                         .and_then(|c| c.default.clone())
                                         .unwrap_or_else(|| NULL_VALUE.to_string());
-                                    if let Some(other_rows) = self.tables.get_mut(other_table) {
+                                    if let Some(other_rows) = s.tables.get_mut(other_table) {
                                         for row in other_rows.iter_mut() {
                                             if Self::is_visible(row) && row.get(&col.name).map(|v| v == &del_val).unwrap_or(false) {
                                                 row.insert(col.name.clone(), default_val.clone());
                                             }
                                         }
                                     }
-                                    let rows_clone = self.tables.get(other_table).unwrap().clone();
-                                    self.buffer_pool.write_page(other_table, rows_clone.clone());
-                                    self.buffer_pool.flush_page(other_table, &self.disk);
+                                    let rows_clone = s.tables.get(other_table).unwrap().clone();
+                                    s.buffer_pool.write_page(other_table, rows_clone.clone());
+                                    s.buffer_pool.flush_page(other_table, &s.disk);
                                 }
                             }
                         }
@@ -2763,7 +2877,7 @@ impl Executor {
             }
         }
 
-        let pk_col = self.catalog.get_table(&table)
+        let pk_col = s.catalog.get_table(&table)
             .and_then(|s| s.columns.iter().find(|c| c.primary_key).map(|c| c.name.clone()))
             .unwrap_or_else(|| "id".to_string());
         let mut deleted = 0usize;
@@ -2772,13 +2886,13 @@ impl Executor {
             // ── 트랜잭션 안: MVCC 논리 삭제 (_xmax = txn_id) ──
             let txn_id = self.txn.current_txn_id();
             let txn_id_str = txn_id.to_string();
-            let rows = self.tables.get_mut(&table).unwrap();
+            let rows = s.tables.get_mut(&table).unwrap();
             for row in rows.iter_mut() {
                 if Self::is_visible(row) && Self::matches_condexpr(row, &condition) {
                     let key = row.get(&pk_col).cloned().unwrap_or_default();
 
                     // 잠금 충돌 / 데드락 체크
-                    match self.lock_mgr.acquire(&table, &key, txn_id) {
+                    match s.lock_mgr.acquire(&table, &key, txn_id) {
                         LockResult::Granted => {}
                         LockResult::Conflict { holder } => {
                             return Err(format!(
@@ -2802,17 +2916,17 @@ impl Executor {
             }
         } else {
             // ── 트랜잭션 밖: 물리 삭제 ──
-            let rows = self.tables.get_mut(&table).unwrap();
+            let rows = s.tables.get_mut(&table).unwrap();
             let before = rows.len();
             rows.retain(|r| !(Self::is_visible(r) && Self::matches_condexpr(r, &condition)));
             deleted = before - rows.len();
         }
 
-        let rows_clone = self.tables.get(&table).unwrap().clone();
+        let rows_clone = s.tables.get(&table).unwrap().clone();
 
         if !self.txn.is_active() {
             // 물리 삭제 후: 인덱스 재빌드 + 버퍼 풀 즉시 flush
-            if let Some(index) = self.indexes.get_mut(&table) {
+            if let Some(index) = s.indexes.get_mut(&table) {
                 *index = BPlusTree::new();
                 for row in &rows_clone {
                     let key = row.values().next().cloned().unwrap_or_default();
@@ -2820,76 +2934,76 @@ impl Executor {
                     index.insert(key, val_json);
                 }
             }
-            let comp_keys: Vec<String> = self.composite_indexes.iter()
+            let comp_keys: Vec<String> = s.composite_indexes.iter()
                 .filter(|(_, ci)| ci.table == table)
                 .map(|(k, _)| k.clone())
                 .collect();
             for k in comp_keys {
-                if let Some(ci) = self.composite_indexes.get_mut(&k) {
+                if let Some(ci) = s.composite_indexes.get_mut(&k) {
                     ci.rebuild(&rows_clone);
                 }
             }
-            self.buffer_pool.write_page(&table, rows_clone.clone());
-            self.buffer_pool.flush_page(&table, &self.disk);
+            s.buffer_pool.write_page(&table, rows_clone.clone());
+            s.buffer_pool.flush_page(&table, &s.disk);
         } else {
             // 논리 삭제 후: 버퍼 풀 갱신 (SELECT가 최신 _xmax 반영)
-            self.buffer_pool.write_page(&table, rows_clone);
+            s.buffer_pool.write_page(&table, rows_clone);
         }
 
-        self.maybe_auto_checkpoint();
+        self.maybe_auto_checkpoint(s);
         Ok(format!("{} row(s) deleted.", deleted))
     }
 
-    fn exec_begin(&mut self) -> Result<String, String> {
-        let txn_id = self.txn.begin_with_snapshot(&self.tables)?;
+    fn exec_begin(&mut self, s: &SharedDatabase) -> Result<String, String> {
+        let txn_id = self.txn.begin_with_snapshot(&s.tables)?;
         let level = format!("{:?}", self.txn.isolation_level);
         Ok(format!("Transaction {} started. (isolation: {})", txn_id, level))
     }
 
-    fn exec_commit(&mut self) -> Result<String, String> {
+    fn exec_commit(&mut self, s: &mut SharedDatabase) -> Result<String, String> {
         // SERIALIZABLE: 커밋 전 팬텀 읽기 검증
-        if let Err(e) = self.txn.validate_serializable(&self.tables) {
+        if let Err(e) = self.txn.validate_serializable(&s.tables) {
             // 검증 실패 → 자동 롤백 후 오류 반환
-            self.apply_rollback();
+            self.apply_rollback(s);
             return Err(format!("{} (auto-rolled back)", e));
         }
 
         // 트랜잭션 중 수정된 테이블을 버퍼 풀 + 디스크에 반영
         let dirty = self.txn.dirty_tables();
         for table in &dirty {
-            if let Some(rows) = self.tables.get(table) {
+            if let Some(rows) = s.tables.get(table) {
                 let rows_clone = rows.clone();
-                self.buffer_pool.write_page(table, rows_clone);
-                self.buffer_pool.flush_page(table, &self.disk);
+                s.buffer_pool.write_page(table, rows_clone);
+                s.buffer_pool.flush_page(table, &s.disk);
             }
         }
 
         let txn_id = self.txn.current_txn_id();
         self.txn.commit()?;
         // 이 트랜잭션이 보유한 모든 잠금 해제
-        self.lock_mgr.release(txn_id);
+        s.lock_mgr.release(txn_id);
         Ok("Transaction committed.".to_string())
     }
 
     /// 롤백 공통 헬퍼: exec_rollback과 SERIALIZABLE 자동 롤백에서 공유
-    fn apply_rollback(&mut self) {
+    fn apply_rollback(&mut self, s: &mut SharedDatabase) {
         let txn_id = self.txn.current_txn_id();
         let undo_entries = match self.txn.abort() {
             Ok(entries) => entries,
             Err(_) => return,
         };
-        self.lock_mgr.release(txn_id);
+        s.lock_mgr.release(txn_id);
         for entry in undo_entries {
             match entry.operation.as_str() {
                 "INSERT" => {
-                    let pk_col = self.catalog.get_table(&entry.table)
+                    let pk_col = s.catalog.get_table(&entry.table)
                         .and_then(|s| s.columns.iter().find(|c| c.primary_key).map(|c| c.name.clone()))
                         .unwrap_or_else(|| "id".to_string());
-                    if let Some(rows) = self.tables.get_mut(&entry.table) {
+                    if let Some(rows) = s.tables.get_mut(&entry.table) {
                         rows.retain(|r| r.get(&pk_col).map(|v| v != &entry.key).unwrap_or(true));
                     }
-                    let rows_clone = self.tables.get(&entry.table).cloned().unwrap_or_default();
-                    if let Some(index) = self.indexes.get_mut(&entry.table) {
+                    let rows_clone = s.tables.get(&entry.table).cloned().unwrap_or_default();
+                    if let Some(index) = s.indexes.get_mut(&entry.table) {
                         *index = BPlusTree::new();
                         for row in &rows_clone {
                             let k = row.get(&pk_col).cloned().unwrap_or_default();
@@ -2897,15 +3011,15 @@ impl Executor {
                             index.insert(k, val_json);
                         }
                     }
-                    self.disk.save_table(&entry.table, &rows_clone);
+                    s.disk.save_table(&entry.table, &rows_clone);
                 }
                 "UPDATE" => {
                     if let Some(old_json) = &entry.old_data {
                         if let Ok(old_row) = serde_json::from_str::<Row>(old_json) {
-                            let pk_col = self.catalog.get_table(&entry.table)
+                            let pk_col = s.catalog.get_table(&entry.table)
                                 .and_then(|s| s.columns.iter().find(|c| c.primary_key).map(|c| c.name.clone()))
                                 .unwrap_or_else(|| "id".to_string());
-                            if let Some(rows) = self.tables.get_mut(&entry.table) {
+                            if let Some(rows) = s.tables.get_mut(&entry.table) {
                                 for row in rows.iter_mut() {
                                     if row.get(&pk_col).map(|v| v == &entry.key).unwrap_or(false) {
                                         *row = old_row.clone();
@@ -2913,47 +3027,47 @@ impl Executor {
                                     }
                                 }
                             }
-                            let rows_clone = self.tables.get(&entry.table).cloned().unwrap_or_default();
-                            self.disk.save_table(&entry.table, &rows_clone);
+                            let rows_clone = s.tables.get(&entry.table).cloned().unwrap_or_default();
+                            s.disk.save_table(&entry.table, &rows_clone);
                         }
                     }
                 }
                 "DELETE" => {
                     // MVCC: 논리 삭제 취소 → _xmax = "0" 복원
-                    let pk_col = self.catalog.get_table(&entry.table)
+                    let pk_col = s.catalog.get_table(&entry.table)
                         .and_then(|s| s.columns.iter().find(|c| c.primary_key).map(|c| c.name.clone()))
                         .unwrap_or_else(|| "id".to_string());
-                    if let Some(rows) = self.tables.get_mut(&entry.table) {
+                    if let Some(rows) = s.tables.get_mut(&entry.table) {
                         for row in rows.iter_mut() {
                             if row.get(&pk_col).map(|v| v == &entry.key).unwrap_or(false) {
                                 row.insert("_xmax".to_string(), "0".to_string());
                             }
                         }
                     }
-                    let rows_clone = self.tables.get(&entry.table).cloned().unwrap_or_default();
-                    self.disk.save_table(&entry.table, &rows_clone);
+                    let rows_clone = s.tables.get(&entry.table).cloned().unwrap_or_default();
+                    s.disk.save_table(&entry.table, &rows_clone);
                 }
                 _ => {}
             }
         }
     }
 
-    fn exec_rollback(&mut self) -> Result<String, String> {
+    fn exec_rollback(&mut self, s: &mut SharedDatabase) -> Result<String, String> {
         let txn_id = self.txn.current_txn_id();
         let undo_entries = self.txn.abort()?;
         // 잠금 해제
-        self.lock_mgr.release(txn_id);
+        s.lock_mgr.release(txn_id);
         for entry in undo_entries {
             match entry.operation.as_str() {
                 "INSERT" => {
-                    let pk_col = self.catalog.get_table(&entry.table)
+                    let pk_col = s.catalog.get_table(&entry.table)
                         .and_then(|s| s.columns.iter().find(|c| c.primary_key).map(|c| c.name.clone()))
                         .unwrap_or_else(|| "id".to_string());
-                    if let Some(rows) = self.tables.get_mut(&entry.table) {
+                    if let Some(rows) = s.tables.get_mut(&entry.table) {
                         rows.retain(|r| r.get(&pk_col).map(|v| v != &entry.key).unwrap_or(true));
                     }
-                    let rows_clone = self.tables.get(&entry.table).cloned().unwrap_or_default();
-                    if let Some(index) = self.indexes.get_mut(&entry.table) {
+                    let rows_clone = s.tables.get(&entry.table).cloned().unwrap_or_default();
+                    if let Some(index) = s.indexes.get_mut(&entry.table) {
                         *index = BPlusTree::new();
                         for row in &rows_clone {
                             let k = row.get(&pk_col).cloned().unwrap_or_default();
@@ -2961,18 +3075,18 @@ impl Executor {
                             index.insert(k, val_json);
                         }
                     }
-                    self.buffer_pool.write_page(&entry.table, rows_clone.clone());
-                    self.buffer_pool.flush_page(&entry.table, &self.disk);
+                    s.buffer_pool.write_page(&entry.table, rows_clone.clone());
+                    s.buffer_pool.flush_page(&entry.table, &s.disk);
                 }
                 "UPDATE" => {
                     if let Some(old_json) = &entry.old_data {
                         if let Ok(old_row) = serde_json::from_str::<Row>(old_json) {
                             // PK 컬럼명 추출
-                            let pk_col = self.catalog.get_table(&entry.table)
+                            let pk_col = s.catalog.get_table(&entry.table)
                                 .and_then(|s| s.columns.iter().find(|c| c.primary_key).map(|c| c.name.clone()))
                                 .unwrap_or_else(|| "id".to_string());
 
-                            if let Some(rows) = self.tables.get_mut(&entry.table) {
+                            if let Some(rows) = s.tables.get_mut(&entry.table) {
                                 for row in rows.iter_mut() {
                                     if row.get(&pk_col).map(|v| v == &entry.key).unwrap_or(false) {
                                         *row = old_row.clone();
@@ -2980,9 +3094,9 @@ impl Executor {
                                     }
                                 }
                             }
-                            let rows_clone = self.tables.get(&entry.table).unwrap().clone();
+                            let rows_clone = s.tables.get(&entry.table).unwrap().clone();
                             // B+Tree 인덱스 재빌드 (rollback 후 stale 데이터 방지)
-                            if let Some(index) = self.indexes.get_mut(&entry.table) {
+                            if let Some(index) = s.indexes.get_mut(&entry.table) {
                                 *index = BPlusTree::new();
                                 for row in &rows_clone {
                                     let k = row.get(&pk_col).cloned().unwrap_or_default();
@@ -2990,26 +3104,26 @@ impl Executor {
                                     index.insert(k, v);
                                 }
                             }
-                            self.buffer_pool.write_page(&entry.table, rows_clone.clone());
-                            self.buffer_pool.flush_page(&entry.table, &self.disk);
+                            s.buffer_pool.write_page(&entry.table, rows_clone.clone());
+                            s.buffer_pool.flush_page(&entry.table, &s.disk);
                         }
                     }
                 }
                 "DELETE" => {
                     // MVCC: 논리 삭제 취소 → _xmax = "0" 복원
-                    let pk_col = self.catalog.get_table(&entry.table)
+                    let pk_col = s.catalog.get_table(&entry.table)
                         .and_then(|s| s.columns.iter().find(|c| c.primary_key).map(|c| c.name.clone()))
                         .unwrap_or_else(|| "id".to_string());
-                    if let Some(rows) = self.tables.get_mut(&entry.table) {
+                    if let Some(rows) = s.tables.get_mut(&entry.table) {
                         for row in rows.iter_mut() {
                             if row.get(&pk_col).map(|v| v == &entry.key).unwrap_or(false) {
                                 row.insert("_xmax".to_string(), "0".to_string());
                             }
                         }
                     }
-                    let rows_clone = self.tables.get(&entry.table).cloned().unwrap_or_default();
+                    let rows_clone = s.tables.get(&entry.table).cloned().unwrap_or_default();
                     // B+Tree 인덱스 재빌드
-                    if let Some(index) = self.indexes.get_mut(&entry.table) {
+                    if let Some(index) = s.indexes.get_mut(&entry.table) {
                         *index = BPlusTree::new();
                         for row in &rows_clone {
                             if Self::is_visible(row) {
@@ -3019,8 +3133,8 @@ impl Executor {
                             }
                         }
                     }
-                    self.buffer_pool.write_page(&entry.table, rows_clone.clone());
-                    self.buffer_pool.flush_page(&entry.table, &self.disk);
+                    s.buffer_pool.write_page(&entry.table, rows_clone.clone());
+                    s.buffer_pool.flush_page(&entry.table, &s.disk);
                 }
                 _ => {}
             }
@@ -3038,19 +3152,19 @@ impl Executor {
         Ok(format!("Savepoint '{}' released.", name))
     }
 
-    fn exec_rollback_to(&mut self, name: String) -> Result<String, String> {
+    fn exec_rollback_to(&mut self, s: &mut SharedDatabase, name: String) -> Result<String, String> {
         let undo_entries = self.txn.rollback_to_savepoint(&name)?;
         for entry in undo_entries {
             match entry.operation.as_str() {
                 "INSERT" => {
-                    let pk_col = self.catalog.get_table(&entry.table)
+                    let pk_col = s.catalog.get_table(&entry.table)
                         .and_then(|s| s.columns.iter().find(|c| c.primary_key).map(|c| c.name.clone()))
                         .unwrap_or_else(|| "id".to_string());
-                    if let Some(rows) = self.tables.get_mut(&entry.table) {
+                    if let Some(rows) = s.tables.get_mut(&entry.table) {
                         rows.retain(|r| r.get(&pk_col).map(|v| v != &entry.key).unwrap_or(true));
                     }
-                    let rows_clone = self.tables.get(&entry.table).cloned().unwrap_or_default();
-                    if let Some(index) = self.indexes.get_mut(&entry.table) {
+                    let rows_clone = s.tables.get(&entry.table).cloned().unwrap_or_default();
+                    if let Some(index) = s.indexes.get_mut(&entry.table) {
                         *index = BPlusTree::new();
                         for row in &rows_clone {
                             let k = row.get(&pk_col).cloned().unwrap_or_default();
@@ -3058,16 +3172,16 @@ impl Executor {
                             index.insert(k, val_json);
                         }
                     }
-                    self.buffer_pool.write_page(&entry.table, rows_clone.clone());
-                    self.buffer_pool.flush_page(&entry.table, &self.disk);
+                    s.buffer_pool.write_page(&entry.table, rows_clone.clone());
+                    s.buffer_pool.flush_page(&entry.table, &s.disk);
                 }
                 "UPDATE" => {
                     if let Some(old_json) = &entry.old_data {
                         if let Ok(old_row) = serde_json::from_str::<Row>(old_json) {
-                            let pk_col = self.catalog.get_table(&entry.table)
+                            let pk_col = s.catalog.get_table(&entry.table)
                                 .and_then(|s| s.columns.iter().find(|c| c.primary_key).map(|c| c.name.clone()))
                                 .unwrap_or_else(|| "id".to_string());
-                            if let Some(rows) = self.tables.get_mut(&entry.table) {
+                            if let Some(rows) = s.tables.get_mut(&entry.table) {
                                 for row in rows.iter_mut() {
                                     if row.get(&pk_col).map(|v| v == &entry.key).unwrap_or(false) {
                                         *row = old_row.clone();
@@ -3075,26 +3189,26 @@ impl Executor {
                                     }
                                 }
                             }
-                            let rows_clone = self.tables.get(&entry.table).unwrap().clone();
-                            self.buffer_pool.write_page(&entry.table, rows_clone.clone());
-                            self.buffer_pool.flush_page(&entry.table, &self.disk);
+                            let rows_clone = s.tables.get(&entry.table).unwrap().clone();
+                            s.buffer_pool.write_page(&entry.table, rows_clone.clone());
+                            s.buffer_pool.flush_page(&entry.table, &s.disk);
                         }
                     }
                 }
                 "DELETE" => {
-                    let pk_col = self.catalog.get_table(&entry.table)
+                    let pk_col = s.catalog.get_table(&entry.table)
                         .and_then(|s| s.columns.iter().find(|c| c.primary_key).map(|c| c.name.clone()))
                         .unwrap_or_else(|| "id".to_string());
-                    if let Some(rows) = self.tables.get_mut(&entry.table) {
+                    if let Some(rows) = s.tables.get_mut(&entry.table) {
                         for row in rows.iter_mut() {
                             if row.get(&pk_col).map(|v| v == &entry.key).unwrap_or(false) {
                                 row.insert("_xmax".to_string(), "0".to_string());
                             }
                         }
                     }
-                    let rows_clone = self.tables.get(&entry.table).cloned().unwrap_or_default();
-                    self.buffer_pool.write_page(&entry.table, rows_clone.clone());
-                    self.buffer_pool.flush_page(&entry.table, &self.disk);
+                    let rows_clone = s.tables.get(&entry.table).cloned().unwrap_or_default();
+                    s.buffer_pool.write_page(&entry.table, rows_clone.clone());
+                    s.buffer_pool.flush_page(&entry.table, &s.disk);
                 }
                 _ => {}
             }
@@ -3102,10 +3216,10 @@ impl Executor {
         Ok(format!("Rolled back to savepoint '{}'.", name))
     }
 
-    fn exec_alter(&mut self, table: String, action: AlterAction) -> Result<String, String> {
+    fn exec_alter(&mut self, s: &mut SharedDatabase, table: String, action: AlterAction) -> Result<String, String> {
         match action {
             AlterAction::AddColumn(col) => {
-                let schema = self.catalog.tables.get_mut(&table)
+                let schema = s.catalog.tables.get_mut(&table)
                     .ok_or(format!("Table '{}' not found", table))?;
                 schema.columns.push(SchemaCol {
                     name: col.name.clone(),
@@ -3125,58 +3239,58 @@ impl Executor {
                     Some(d) => d.clone(),
                     None    => NULL_VALUE.to_string(),
                 };
-                if let Some(rows) = self.tables.get_mut(&table) {
+                if let Some(rows) = s.tables.get_mut(&table) {
                     for row in rows.iter_mut() {
                         row.insert(col.name.clone(), fill_val.clone());
                     }
                 }
-                let full_schema = self.catalog.get_table(&table).unwrap();
-                self.disk.save_schema(&table, full_schema);
-                self.disk.save_table(&table, self.tables.get(&table).unwrap());
+                let full_schema = s.catalog.get_table(&table).unwrap();
+                s.disk.save_schema(&table, full_schema);
+                s.disk.save_table(&table, s.tables.get(&table).unwrap());
                 Ok(format!("Column '{}' added to '{}'.", col.name, table))
             }
             AlterAction::DropColumn(col_name) => {
-                let schema = self.catalog.tables.get_mut(&table)
+                let schema = s.catalog.tables.get_mut(&table)
                     .ok_or(format!("Table '{}' not found", table))?;
                 schema.columns.retain(|c| c.name != col_name);
-                if let Some(rows) = self.tables.get_mut(&table) {
+                if let Some(rows) = s.tables.get_mut(&table) {
                     for row in rows.iter_mut() {
                         row.remove(&col_name);
                     }
                 }
-                let full_schema = self.catalog.get_table(&table).unwrap();
-                self.disk.save_schema(&table, full_schema);
-                self.disk.save_table(&table, self.tables.get(&table).unwrap());
+                let full_schema = s.catalog.get_table(&table).unwrap();
+                s.disk.save_schema(&table, full_schema);
+                s.disk.save_table(&table, s.tables.get(&table).unwrap());
                 Ok(format!("Column '{}' dropped from '{}'.", col_name, table))
             }
             AlterAction::RenameColumn { from, to } => {
-                let schema = self.catalog.tables.get_mut(&table)
+                let schema = s.catalog.tables.get_mut(&table)
                     .ok_or(format!("Table '{}' not found", table))?;
                 for col in schema.columns.iter_mut() {
                     if col.name == from { col.name = to.clone(); }
                 }
-                if let Some(rows) = self.tables.get_mut(&table) {
+                if let Some(rows) = s.tables.get_mut(&table) {
                     for row in rows.iter_mut() {
                         if let Some(val) = row.remove(&from) {
                             row.insert(to.clone(), val);
                         }
                     }
                 }
-                let full_schema = self.catalog.get_table(&table).unwrap();
-                self.disk.save_schema(&table, full_schema);
-                self.disk.save_table(&table, self.tables.get(&table).unwrap());
+                let full_schema = s.catalog.get_table(&table).unwrap();
+                s.disk.save_schema(&table, full_schema);
+                s.disk.save_table(&table, s.tables.get(&table).unwrap());
                 Ok(format!("Column '{}' renamed to '{}' in '{}'.", from, to, table))
             }
             AlterAction::ModifyColumn(col) => {
                 // 컬럼 존재 확인
-                let exists = self.catalog.tables.get(&table)
+                let exists = s.catalog.tables.get(&table)
                     .ok_or(format!("Table '{}' not found", table))?
                     .columns.iter().any(|c| c.name == col.name);
                 if !exists {
                     return Err(format!("Column '{}' not found in '{}'", col.name, table));
                 }
                 // 기존 데이터 타입 변환 검증: 기존 행의 값이 새 타입으로 캐스팅 가능한지 확인
-                if let Some(rows) = self.tables.get(&table) {
+                if let Some(rows) = s.tables.get(&table) {
                     for row in rows.iter().filter(|r| Self::is_visible(r)) {
                         if let Some(val) = row.get(&col.name) {
                             if val == NULL_VALUE || val.is_empty() { continue; }
@@ -3188,7 +3302,12 @@ impl Executor {
                                 | DataType::DateTime | DataType::Timestamp => true,
                                 DataType::Decimal(_, _) => val.parse::<f64>().is_ok(),
                                 DataType::Double => val.parse::<f64>().is_ok(),
-                                DataType::Time | DataType::Year | DataType::Enum(_) | DataType::Set(_) => true,
+                                DataType::Time | DataType::Year => true,
+                                DataType::Enum(allowed) => allowed.iter().any(|a| a == val),
+                                DataType::Set(allowed) => val.split(',').all(|p| {
+                                    let p = p.trim();
+                                    p.is_empty() || allowed.iter().any(|a| a == p)
+                                }),
                                 DataType::Unknown => true,
                             };
                             if !ok {
@@ -3201,7 +3320,7 @@ impl Executor {
                     }
                 }
                 // 스키마 업데이트
-                let schema = self.catalog.tables.get_mut(&table).unwrap();
+                let schema = s.catalog.tables.get_mut(&table).unwrap();
                 if let Some(c) = schema.columns.iter_mut().find(|c| c.name == col.name) {
                     c.data_type = col.data_type;
                     c.not_null   = col.not_null;
@@ -3211,80 +3330,80 @@ impl Executor {
                     c.default    = col.default;
                     // primary_key는 MODIFY로 변경 불가 (무시)
                 }
-                let full_schema = self.catalog.get_table(&table).unwrap();
-                self.disk.save_schema(&table, full_schema);
+                let full_schema = s.catalog.get_table(&table).unwrap();
+                s.disk.save_schema(&table, full_schema);
                 Ok(format!("Column '{}' in '{}' modified.", col.name, table))
             }
             AlterAction::RenameTable { to } => {
-                if !self.catalog.tables.contains_key(&table) {
+                if !s.catalog.tables.contains_key(&table) {
                     return Err(format!("Table '{}' not found", table));
                 }
-                if self.catalog.tables.contains_key(&to) {
+                if s.catalog.tables.contains_key(&to) {
                     return Err(format!("Table '{}' already exists", to));
                 }
                 // Catalog rename
-                let schema = self.catalog.tables.remove(&table).unwrap();
-                self.catalog.tables.insert(to.clone(), schema);
+                let schema = s.catalog.tables.remove(&table).unwrap();
+                s.catalog.tables.insert(to.clone(), schema);
 
                 // In-memory data rename
-                if let Some(rows) = self.tables.remove(&table) {
-                    self.tables.insert(to.clone(), rows);
+                if let Some(rows) = s.tables.remove(&table) {
+                    s.tables.insert(to.clone(), rows);
                 }
 
                 // B+Tree index rename
-                if let Some(tree) = self.indexes.remove(&table) {
-                    self.indexes.insert(to.clone(), tree);
+                if let Some(tree) = s.indexes.remove(&table) {
+                    s.indexes.insert(to.clone(), tree);
                 }
 
                 // Secondary index meta rename
-                for (_, (ref mut tbl, _)) in self.index_meta.iter_mut() {
+                for (_, (ref mut tbl, _)) in s.index_meta.iter_mut() {
                     if *tbl == table { *tbl = to.clone(); }
                 }
-                let sec_keys: Vec<String> = self.indexes.keys()
+                let sec_keys: Vec<String> = s.indexes.keys()
                     .filter(|k| k.starts_with(&format!("{}_", table)))
                     .cloned().collect();
                 for old_key in sec_keys {
                     let suffix = &old_key[table.len()..];
                     let new_key = format!("{}{}", to, suffix);
-                    if let Some(tree) = self.indexes.remove(&old_key) {
-                        self.indexes.insert(new_key, tree);
+                    if let Some(tree) = s.indexes.remove(&old_key) {
+                        s.indexes.insert(new_key, tree);
                     }
                 }
 
                 // Composite index rename
-                for (_, ci) in self.composite_indexes.iter_mut() {
+                for (_, ci) in s.composite_indexes.iter_mut() {
                     if ci.table == table { ci.table = to.clone(); }
                 }
 
                 // Disk: save under new name, delete old files
-                let full_schema = self.catalog.get_table(&to).unwrap();
-                self.disk.save_schema(&to, full_schema);
-                if let Some(rows) = self.tables.get(&to) {
-                    self.disk.save_table(&to, rows);
+                let full_schema = s.catalog.get_table(&to).unwrap();
+                s.disk.save_schema(&to, full_schema);
+                if let Some(rows) = s.tables.get(&to) {
+                    s.disk.save_table(&to, rows);
                 }
-                self.disk.delete_table(&table);
+                s.disk.delete_table(&table);
 
                 Ok(format!("Table '{}' renamed to '{}'.", table, to))
             }
         }
     }
 
-    fn exec_create_database(&mut self, name: String, if_not_exists: bool) -> Result<String, String> {
+    fn exec_create_database(&mut self, s: &mut SharedDatabase, name: String, if_not_exists: bool) -> Result<String, String> {
         let key = name.to_lowercase();
-        if self.databases.contains(&key) {
+        if s.databases.contains(&key) {
             if if_not_exists {
                 return Ok(format!("Database '{}' already exists (skipped).", name));
             }
             return Err(format!("Database '{}' already exists.", name));
         }
-        self.disk.create_db_dir(&key);
-        self.databases.insert(key.clone());
+        s.disk.create_db_dir(&key);
+        s.databases.insert(key.clone());
         Ok(format!("Database '{}' created.", key))
     }
 
-    fn exec_drop_database(&mut self, name: String, if_exists: bool) -> Result<String, String> {
+    fn exec_drop_database(&mut self, s: &mut SharedDatabase, name: String, if_exists: bool) -> Result<String, String> {
         let key = name.to_lowercase();
-        if !self.databases.contains(&key) {
+        if !s.databases.contains(&key) {
             if if_exists {
                 return Ok(format!("Database '{}' does not exist (skipped).", name));
             }
@@ -3292,37 +3411,37 @@ impl Executor {
         }
         // 해당 DB의 테이블들만 삭제
         let prefix = format!("{}.", key);
-        let table_keys: Vec<String> = self.tables.keys()
+        let table_keys: Vec<String> = s.tables.keys()
             .filter(|k| k.starts_with(&prefix))
             .cloned().collect();
         for t in table_keys {
-            self.catalog.tables.remove(&t);
-            self.tables.remove(&t);
-            self.indexes.remove(&t);
-            self.buffer_pool.invalidate(&t);
-            self.disk.delete_table(&t);
+            s.catalog.tables.remove(&t);
+            s.tables.remove(&t);
+            s.indexes.remove(&t);
+            s.buffer_pool.invalidate(&t);
+            s.disk.delete_table(&t);
         }
         // 해당 DB의 secondary 인덱스 삭제
-        let sec_keys: Vec<String> = self.indexes.keys()
+        let sec_keys: Vec<String> = s.indexes.keys()
             .filter(|k| k.starts_with(&prefix))
             .cloned().collect();
         for k in &sec_keys {
-            self.buffer_pool.invalidate(k);
-            self.indexes.remove(k);
+            s.buffer_pool.invalidate(k);
+            s.indexes.remove(k);
         }
-        self.index_meta.retain(|_, (tbl, _)| !tbl.starts_with(&prefix));
-        self.composite_indexes.retain(|_, ci| !ci.table.starts_with(&prefix));
+        s.index_meta.retain(|_, (tbl, _)| !tbl.starts_with(&prefix));
+        s.composite_indexes.retain(|_, ci| !ci.table.starts_with(&prefix));
 
         // 해당 DB의 뷰 삭제
-        self.views.retain(|k, _| !k.starts_with(&prefix));
+        s.views.retain(|k, _| !k.starts_with(&prefix));
 
         // DB 디렉토리 삭제
-        self.disk.drop_db_dir(&key);
-        self.databases.remove(&key);
+        s.disk.drop_db_dir(&key);
+        s.databases.remove(&key);
 
         // 현재 DB가 삭제된 경우 다른 DB로 전환
         if self.current_db == key {
-            if let Some(remaining) = self.databases.iter().next().cloned() {
+            if let Some(remaining) = s.databases.iter().next().cloned() {
                 self.current_db = remaining;
             } else {
                 self.current_db = String::new();
@@ -3334,6 +3453,7 @@ impl Executor {
 
     fn exec_multi_update(
         &mut self,
+        s: &mut SharedDatabase,
         tables: Vec<String>,
         joins: Vec<Join>,
         assignments: Vec<(String, ArithExpr)>,
@@ -3344,7 +3464,7 @@ impl Executor {
             .ok_or("No tables specified for multi-table UPDATE")?
             .clone();
 
-        let base_rows: Vec<Row> = self.tables.get(&first_table)
+        let base_rows: Vec<Row> = s.tables.get(&first_table)
             .ok_or(format!("Table '{}' not found", first_table))?
             .iter()
             .filter(|r| Self::is_visible(r))
@@ -3361,7 +3481,7 @@ impl Executor {
         // Apply additional tables as cross-joins (comma-list style)
         let mut current = base_rows;
         for extra_tbl in tables.iter().skip(1) {
-            let right_rows: Vec<Row> = self.tables.get(extra_tbl)
+            let right_rows: Vec<Row> = s.tables.get(extra_tbl)
                 .ok_or(format!("Table '{}' not found", extra_tbl))?
                 .iter()
                 .filter(|r| Self::is_visible(r))
@@ -3384,7 +3504,7 @@ impl Executor {
 
         // Apply explicit JOINs
         for j in &joins {
-            let right_rows: Vec<Row> = self.tables.get(&j.table)
+            let right_rows: Vec<Row> = s.tables.get(&j.table)
                 .ok_or(format!("Table '{}' not found", j.table))?
                 .iter()
                 .filter(|r| Self::is_visible(r))
@@ -3406,7 +3526,7 @@ impl Executor {
                     }
                 }
                 JoinType::Left => {
-                    let right_schema_cols: Vec<String> = self.catalog.get_table(&j.table)
+                    let right_schema_cols: Vec<String> = s.catalog.get_table(&j.table)
                         .map(|s| s.columns.iter().map(|c| c.name.clone()).collect())
                         .unwrap_or_default();
                     for left in &current {
@@ -3459,7 +3579,7 @@ impl Executor {
 
         // Apply WHERE filter
         let matched: Vec<Row> = current.into_iter()
-            .filter(|r| self.matches_condition_with_subquery(r, &condition))
+            .filter(|r| self.matches_condition_with_subquery(s, r, &condition))
             .collect();
 
         // Determine which tables are actually targeted by assignments
@@ -3492,7 +3612,7 @@ impl Executor {
         }
 
         for tgt in &assignment_tables {
-            let pk_col = self.catalog.get_table(tgt)
+            let pk_col = s.catalog.get_table(tgt)
                 .ok_or(format!("Table '{}' not found", tgt))?
                 .columns.iter()
                 .find(|c| c.primary_key)
@@ -3522,7 +3642,7 @@ impl Executor {
                 }
             }
 
-            let rows = self.tables.get_mut(tgt)
+            let rows = s.tables.get_mut(tgt)
                 .ok_or(format!("Table '{}' not found", tgt))?;
 
             for row in rows.iter_mut() {
@@ -3535,8 +3655,8 @@ impl Executor {
                 }
             }
 
-            let rows_clone = self.tables.get(tgt).unwrap().clone();
-            if let Some(index) = self.indexes.get_mut(tgt) {
+            let rows_clone = s.tables.get(tgt).unwrap().clone();
+            if let Some(index) = s.indexes.get_mut(tgt) {
                 *index = BPlusTree::new();
                 for row in &rows_clone {
                     let k = row.get(&pk_col).cloned().unwrap_or_default();
@@ -3544,33 +3664,34 @@ impl Executor {
                     index.insert(k, val_json);
                 }
             }
-            self.rebuild_secondary_indexes(tgt, &rows_clone);
-            let comp_keys: Vec<String> = self.composite_indexes.iter()
+            self.rebuild_secondary_indexes(s, tgt, &rows_clone);
+            let comp_keys: Vec<String> = s.composite_indexes.iter()
                 .filter(|(_, ci)| ci.table == *tgt)
                 .map(|(k, _)| k.clone())
                 .collect();
             for k in comp_keys {
-                if let Some(ci) = self.composite_indexes.get_mut(&k) {
+                if let Some(ci) = s.composite_indexes.get_mut(&k) {
                     ci.rebuild(&rows_clone);
                 }
             }
-            self.buffer_pool.write_page(tgt, rows_clone);
-            self.buffer_pool.flush_page(tgt, &self.disk);
+            s.buffer_pool.write_page(tgt, rows_clone);
+            s.buffer_pool.flush_page(tgt, &s.disk);
         }
 
-        self.maybe_auto_checkpoint();
+        self.maybe_auto_checkpoint(s);
         Ok(format!("{} row(s) updated.", total_count))
     }
 
     fn exec_multi_delete(
         &mut self,
+        s: &mut SharedDatabase,
         delete_tables: Vec<String>,
         from_table: String,
         joins: Vec<Join>,
         condition: Option<CondExpr>,
     ) -> Result<String, String> {
         // Build joined rows starting from from_table
-        let base_rows: Vec<Row> = self.tables.get(&from_table)
+        let base_rows: Vec<Row> = s.tables.get(&from_table)
             .ok_or(format!("Table '{}' not found", from_table))?
             .iter()
             .filter(|r| Self::is_visible(r))
@@ -3586,7 +3707,7 @@ impl Executor {
 
         let mut current = base_rows;
         for j in &joins {
-            let right_rows: Vec<Row> = self.tables.get(&j.table)
+            let right_rows: Vec<Row> = s.tables.get(&j.table)
                 .ok_or(format!("Table '{}' not found", j.table))?
                 .iter()
                 .filter(|r| Self::is_visible(r))
@@ -3608,7 +3729,7 @@ impl Executor {
                     }
                 }
                 JoinType::Left => {
-                    let right_schema_cols: Vec<String> = self.catalog.get_table(&j.table)
+                    let right_schema_cols: Vec<String> = s.catalog.get_table(&j.table)
                         .map(|s| s.columns.iter().map(|c| c.name.clone()).collect())
                         .unwrap_or_default();
                     for left in &current {
@@ -3661,13 +3782,13 @@ impl Executor {
 
         // Apply WHERE
         let matched: Vec<Row> = current.into_iter()
-            .filter(|r| self.matches_condition_with_subquery(r, &condition))
+            .filter(|r| self.matches_condition_with_subquery(s, r, &condition))
             .collect();
 
         let mut total_count = 0usize;
 
         for tgt in &delete_tables {
-            let pk_col = self.catalog.get_table(tgt)
+            let pk_col = s.catalog.get_table(tgt)
                 .ok_or(format!("Table '{}' not found", tgt))?
                 .columns.iter()
                 .find(|c| c.primary_key)
@@ -3681,7 +3802,7 @@ impl Executor {
                 .cloned()
                 .collect();
 
-            let rows = self.tables.get_mut(tgt)
+            let rows = s.tables.get_mut(tgt)
                 .ok_or(format!("Table '{}' not found", tgt))?;
 
             let before = rows.iter().filter(|r| Self::is_visible(r)).count();
@@ -3689,8 +3810,8 @@ impl Executor {
             let after = rows.iter().filter(|r| Self::is_visible(r)).count();
             total_count += before - after;
 
-            let rows_clone = self.tables.get(tgt).unwrap().clone();
-            if let Some(index) = self.indexes.get_mut(tgt) {
+            let rows_clone = s.tables.get(tgt).unwrap().clone();
+            if let Some(index) = s.indexes.get_mut(tgt) {
                 *index = BPlusTree::new();
                 for row in &rows_clone {
                     let k = row.get(&pk_col).cloned().unwrap_or_default();
@@ -3698,42 +3819,42 @@ impl Executor {
                     index.insert(k, val_json);
                 }
             }
-            let comp_keys: Vec<String> = self.composite_indexes.iter()
+            let comp_keys: Vec<String> = s.composite_indexes.iter()
                 .filter(|(_, ci)| ci.table == *tgt)
                 .map(|(k, _)| k.clone())
                 .collect();
             for k in comp_keys {
-                if let Some(ci) = self.composite_indexes.get_mut(&k) {
+                if let Some(ci) = s.composite_indexes.get_mut(&k) {
                     ci.rebuild(&rows_clone);
                 }
             }
-            self.buffer_pool.write_page(tgt, rows_clone);
-            self.buffer_pool.flush_page(tgt, &self.disk);
+            s.buffer_pool.write_page(tgt, rows_clone);
+            s.buffer_pool.flush_page(tgt, &s.disk);
         }
 
-        self.maybe_auto_checkpoint();
+        self.maybe_auto_checkpoint(s);
         Ok(format!("{} row(s) deleted.", total_count))
     }
 
-    fn matches_condition_with_subquery(&mut self, row: &Row, condition: &Option<CondExpr>) -> bool {
+    fn matches_condition_with_subquery(&mut self, s: &mut SharedDatabase, row: &Row, condition: &Option<CondExpr>) -> bool {
         match condition {
             None => true,
-            Some(expr) => self.eval_condexpr_with_subquery(row, expr),
+            Some(expr) => self.eval_condexpr_with_subquery(s, row, expr),
         }
     }
 
-    fn eval_condexpr_with_subquery(&mut self, row: &Row, expr: &CondExpr) -> bool {
+    fn eval_condexpr_with_subquery(&mut self, s: &mut SharedDatabase, row: &Row, expr: &CondExpr) -> bool {
         match expr {
             CondExpr::And(l, r) =>
-                self.eval_condexpr_with_subquery(row, l) && self.eval_condexpr_with_subquery(row, r),
+                self.eval_condexpr_with_subquery(s, row, l) && self.eval_condexpr_with_subquery(s, row, r),
             CondExpr::Or(l, r) =>
-                self.eval_condexpr_with_subquery(row, l) || self.eval_condexpr_with_subquery(row, r),
-            CondExpr::Not(inner) => !self.eval_condexpr_with_subquery(row, inner),
-            CondExpr::Leaf(cond) => self.eval_single_with_subquery(row, cond),
+                self.eval_condexpr_with_subquery(s, row, l) || self.eval_condexpr_with_subquery(s, row, r),
+            CondExpr::Not(inner) => !self.eval_condexpr_with_subquery(s, row, inner),
+            CondExpr::Leaf(cond) => self.eval_single_with_subquery(s, row, cond),
         }
     }
 
-    fn eval_single_with_subquery(&mut self, row: &Row, cond: &Condition) -> bool {
+    fn eval_single_with_subquery(&mut self, s: &mut SharedDatabase, row: &Row, cond: &Condition) -> bool {
         match &cond.value.clone() {
             ConditionValue::Literal(_) | ConditionValue::Between(_, _) | ConditionValue::LiteralList(_) => {
                 Self::eval_single(row, cond)
@@ -3746,7 +3867,7 @@ impl Executor {
                     } = *sub_stmt.clone() {
                         let sub_cond = sub_cond.map(|c| Self::substitute_correlated_condexpr(&c, row));
                         let result = self.exec_select(
-                            table, subquery, distinct, columns, sub_cond,
+                            s, table, subquery, distinct, columns, sub_cond,
                             joins, order_by, group_by, having, limit, offset, false
                         );
                         let has_rows = match result {
@@ -3770,7 +3891,7 @@ impl Executor {
                     joins, order_by, group_by, having, limit, offset, ..
                 } = *sub_stmt.clone() {
                     let result = self.exec_select(
-                        table, subquery, distinct, columns.clone(), sub_cond,
+                        s, table, subquery, distinct, columns.clone(), sub_cond,
                         joins, order_by, group_by, having, limit, offset, false
                     );
                     match result {
@@ -3842,8 +3963,8 @@ impl Executor {
         vals
     }
 
-    fn exec_create_index(&mut self, index_name: String, table: String, columns: Vec<String>) -> Result<String, String> {
-        if !self.tables.contains_key(&table) {
+    fn exec_create_index(&mut self, s: &mut SharedDatabase, index_name: String, table: String, columns: Vec<String>) -> Result<String, String> {
+        if !s.tables.contains_key(&table) {
             return Err(format!("Table '{}' not found", table));
         }
 
@@ -3851,7 +3972,7 @@ impl Executor {
             // 단일 컬럼 → BPlusTree (key → JSON array of rows, supports duplicates)
             let column = &columns[0];
             let mut bucket: HashMap<String, Vec<Row>> = HashMap::new();
-            if let Some(rows) = self.tables.get(&table) {
+            if let Some(rows) = s.tables.get(&table) {
                 for row in rows {
                     if let Some(val) = row.get(column) {
                         bucket.entry(val.clone()).or_default().push(row.clone());
@@ -3863,69 +3984,69 @@ impl Executor {
                 tree.insert(key, serde_json::to_string(&rows).unwrap());
             }
             let key = format!("{}_{}", table, index_name);
-            self.indexes.insert(key, tree);
-            self.index_meta.insert(index_name.clone(), (table.clone(), column.clone()));
-            self.persist_index_meta();
+            s.indexes.insert(key, tree);
+            s.index_meta.insert(index_name.clone(), (table.clone(), column.clone()));
+            self.persist_index_meta(s);
             Ok(format!("Index '{}' created on '{}'.'{}'.", index_name, table, column))
         } else {
             // 복합 컬럼 → CompositeIndex
             let mut comp = CompositeIndex::new(table.clone(), columns.clone());
-            if let Some(rows) = self.tables.get(&table) {
+            if let Some(rows) = s.tables.get(&table) {
                 comp.rebuild(rows);
             }
-            self.composite_indexes.insert(index_name.clone(), comp);
-            self.persist_index_meta();
+            s.composite_indexes.insert(index_name.clone(), comp);
+            self.persist_index_meta(s);
             Ok(format!("Composite index '{}' created on '{}' ({}).", index_name, table, columns.join(", ")))
         }
     }
 
-    fn exec_drop_index(&mut self, index_name: String) -> Result<String, String> {
-        if let Some((table, _)) = self.index_meta.remove(&index_name) {
+    fn exec_drop_index(&mut self, s: &mut SharedDatabase, index_name: String) -> Result<String, String> {
+        if let Some((table, _)) = s.index_meta.remove(&index_name) {
             let key = format!("{}_{}", table, index_name);
-            self.indexes.remove(&key);
-            self.persist_index_meta();
+            s.indexes.remove(&key);
+            self.persist_index_meta(s);
             Ok(format!("Index '{}' dropped.", index_name))
-        } else if self.composite_indexes.remove(&index_name).is_some() {
-            self.persist_index_meta();
+        } else if s.composite_indexes.remove(&index_name).is_some() {
+            self.persist_index_meta(s);
             Ok(format!("Composite index '{}' dropped.", index_name))
         } else {
             Ok(format!("Index '{}' does not exist, skipped.", index_name))
         }
     }
 
-    fn exec_create_view(&mut self, name: String, query: Statement) -> Result<String, String> {
+    fn exec_create_view(&mut self, s: &mut SharedDatabase, name: String, query: Statement) -> Result<String, String> {
         if let Statement::Select { ref table, .. } = query {
-            if !self.tables.contains_key(table) {
+            if !s.tables.contains_key(table) {
                 return Err(format!("Table '{}' not found", table));
             }
         }
-        self.views.insert(name.clone(), query);
-        self.persist_views_for_db(&self.current_db.clone());
+        s.views.insert(name.clone(), query);
+        self.persist_views_for_db(s, &self.current_db.clone());
         Ok(format!("View '{}' created.", name))
     }
 
-    fn exec_drop_view(&mut self, name: String) -> Result<String, String> {
-        if self.views.remove(&name).is_some() {
-            self.persist_views_for_db(&self.current_db.clone());
+    fn exec_drop_view(&mut self, s: &mut SharedDatabase, name: String) -> Result<String, String> {
+        if s.views.remove(&name).is_some() {
+            self.persist_views_for_db(s, &self.current_db.clone());
             Ok(format!("View '{}' dropped.", name))
         } else {
             Ok(format!("View '{}' does not exist, skipped.", name))
         }
     }
 
-    fn persist_views_for_db(&self, db: &str) {
+    fn persist_views_for_db(&self, s: &SharedDatabase, db: &str) {
         let prefix = format!("{}.", db);
-        let db_views: HashMap<String, Statement> = self.views.iter()
-            .filter(|(k, _)| k.starts_with(&prefix))
+        let db_views: HashMap<String, Statement> = s.views.iter()
+            .filter(|(k, _v)| k.starts_with(&prefix))
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
-        self.disk.save_views(db, &db_views);
+        s.disk.save_views(db, &db_views);
     }
 
     /// 현재 index_meta + composite_indexes를 disk에 저장
     /// 단일 컬럼 보조 인덱스를 rows 기준으로 재빌드한다 (UPDATE 후 stale 방지)
-    fn rebuild_secondary_indexes(&mut self, table: &str, rows: &[Row]) {
-        let sec: Vec<(String, String)> = self.index_meta.iter()
+    fn rebuild_secondary_indexes(&mut self, s: &mut SharedDatabase, table: &str, rows: &[Row]) {
+        let sec: Vec<(String, String)> = s.index_meta.iter()
             .filter(|(_, (tbl, _))| tbl == table)
             .map(|(name, (_, col))| (name.clone(), col.clone()))
             .collect();
@@ -3941,20 +4062,20 @@ impl Executor {
                 tree.insert(key, serde_json::to_string(&bucket_rows).unwrap());
             }
             let key = format!("{}_{}", table, idx_name);
-            self.indexes.insert(key, tree);
+            s.indexes.insert(key, tree);
         }
     }
 
-    fn persist_index_meta(&self) {
+    fn persist_index_meta(&self, s: &SharedDatabase) {
         let mut meta_list: Vec<IndexMeta> = Vec::new();
-        for (name, (table, col)) in &self.index_meta {
+        for (name, (table, col)) in &s.index_meta {
             meta_list.push(IndexMeta {
                 name: name.clone(),
                 table: table.clone(),
                 columns: vec![col.clone()],
             });
         }
-        for (name, comp) in &self.composite_indexes {
+        for (name, comp) in &s.composite_indexes {
             meta_list.push(IndexMeta {
                 name: name.clone(),
                 table: comp.table.clone(),
@@ -3968,16 +4089,16 @@ impl Executor {
             per_db.entry(db.to_string()).or_default().push(m.clone());
         }
         for (db, mlist) in &per_db {
-            self.disk.save_index_meta(db, mlist);
+            s.disk.save_index_meta(db, mlist);
         }
         if per_db.is_empty() {
-            self.disk.save_index_meta(&self.current_db, &[]);
+            s.disk.save_index_meta(&self.current_db, &[]);
         }
     }
 
-    fn exec_use(&mut self, database: String) -> Result<String, String> {
+    fn exec_use(&mut self, s: &mut SharedDatabase, database: String) -> Result<String, String> {
         let key = database.to_lowercase();
-        if !self.databases.contains(&key) {
+        if !s.databases.contains(&key) {
             return Err(format!("Unknown database '{}'.", database));
         }
         self.current_db = key.clone();
@@ -3985,22 +4106,22 @@ impl Executor {
     }
 
     /// Qualify all table references in a statement with the current database.
-    fn qualify_stmt(&self, stmt: Statement) -> Statement {
+    fn qualify_stmt(&self, s: &SharedDatabase, stmt: Statement) -> Statement {
         match stmt {
             Statement::Select { table, subquery, columns, distinct, condition, joins, order_by, group_by, having, limit, offset, for_update } =>
                 Statement::Select {
                     table: self.qualify_name(table),
-                    subquery: subquery.map(|(q, alias)| (Box::new(self.qualify_stmt(*q)), alias)),
+                    subquery: subquery.map(|(q, alias)| (Box::new(self.qualify_stmt(s, *q)), alias)),
                     columns,
                     distinct,
-                    condition: condition.map(|c| self.qualify_condexpr(c)),
+                    condition: condition.map(|c| self.qualify_condexpr(s, c)),
                     joins: joins.into_iter().map(|j| Join {
                         table: self.qualify_name(j.table),
-                        on_expr: self.qualify_condexpr(j.on_expr),
+                        on_expr: self.qualify_condexpr(s, j.on_expr),
                         join_type: j.join_type,
                     }).collect(),
                     order_by, group_by,
-                    having: having.map(|h| self.qualify_condexpr(h)),
+                    having: having.map(|h| self.qualify_condexpr(s, h)),
                     limit, offset, for_update,
                 },
             Statement::Insert { table, columns, values, on_conflict } =>
@@ -4009,19 +4130,19 @@ impl Executor {
                 Statement::InsertSelect {
                     table: self.qualify_name(table),
                     columns,
-                    query: Box::new(self.qualify_stmt(*query)),
+                    query: Box::new(self.qualify_stmt(s, *query)),
                     on_conflict,
                 },
             Statement::Update { table, assignments, condition } =>
                 Statement::Update {
                     table: self.qualify_name(table),
                     assignments,
-                    condition: condition.map(|c| self.qualify_condexpr(c)),
+                    condition: condition.map(|c| self.qualify_condexpr(s, c)),
                 },
             Statement::Delete { table, condition } =>
                 Statement::Delete {
                     table: self.qualify_name(table),
-                    condition: condition.map(|c| self.qualify_condexpr(c)),
+                    condition: condition.map(|c| self.qualify_condexpr(s, c)),
                 },
             Statement::CreateTable { name, columns, if_not_exists, primary_key_columns, check_constraints } => {
                 let columns = columns.into_iter().map(|mut col| {
@@ -4051,7 +4172,7 @@ impl Executor {
             Statement::CreateView { name, query } =>
                 Statement::CreateView {
                     name: self.qualify_name(name),
-                    query: Box::new(self.qualify_stmt(*query)),
+                    query: Box::new(self.qualify_stmt(s, *query)),
                 },
             Statement::DropView { name } =>
                 Statement::DropView { name: self.qualify_name(name) },
@@ -4061,31 +4182,31 @@ impl Executor {
                 Statement::Vacuum { table: table.map(|t| self.qualify_name(t)) },
             Statement::Union { left, right, all, order_by, limit, offset } =>
                 Statement::Union {
-                    left:  Box::new(self.qualify_stmt(*left)),
-                    right: Box::new(self.qualify_stmt(*right)),
+                    left:  Box::new(self.qualify_stmt(s, *left)),
+                    right: Box::new(self.qualify_stmt(s, *right)),
                     all, order_by, limit, offset,
                 },
             Statement::With { ctes, query, recursive } =>
                 Statement::With {
                     ctes: ctes.into_iter().map(|(n, q)| (
                         self.qualify_name(n),
-                        Box::new(self.qualify_stmt(*q))
+                        Box::new(self.qualify_stmt(s, *q))
                     )).collect(),
-                    query: Box::new(self.qualify_stmt(*query)),
+                    query: Box::new(self.qualify_stmt(s, *query)),
                     recursive,
                 },
             Statement::Explain(inner) =>
-                Statement::Explain(Box::new(self.qualify_stmt(*inner))),
+                Statement::Explain(Box::new(self.qualify_stmt(s, *inner))),
             Statement::MultiUpdate { tables, joins, assignments, condition } =>
                 Statement::MultiUpdate {
                     tables: tables.into_iter().map(|t| self.qualify_name(t)).collect(),
                     joins: joins.into_iter().map(|j| Join {
                         table: self.qualify_name(j.table),
-                        on_expr: self.qualify_condexpr(j.on_expr),
+                        on_expr: self.qualify_condexpr(s, j.on_expr),
                         join_type: j.join_type,
                     }).collect(),
                     assignments,
-                    condition: condition.map(|c| self.qualify_condexpr(c)),
+                    condition: condition.map(|c| self.qualify_condexpr(s, c)),
                 },
             Statement::MultiDelete { delete_tables, from_table, joins, condition } =>
                 Statement::MultiDelete {
@@ -4093,30 +4214,30 @@ impl Executor {
                     from_table: self.qualify_name(from_table),
                     joins: joins.into_iter().map(|j| Join {
                         table: self.qualify_name(j.table),
-                        on_expr: self.qualify_condexpr(j.on_expr),
+                        on_expr: self.qualify_condexpr(s, j.on_expr),
                         join_type: j.join_type,
                     }).collect(),
-                    condition: condition.map(|c| self.qualify_condexpr(c)),
+                    condition: condition.map(|c| self.qualify_condexpr(s, c)),
                 },
             // 나머지는 그대로
             other => other,
         }
     }
 
-    fn qualify_condexpr(&self, expr: CondExpr) -> CondExpr {
+    fn qualify_condexpr(&self, s: &SharedDatabase, expr: CondExpr) -> CondExpr {
         match expr {
             CondExpr::And(l, r) => CondExpr::And(
-                Box::new(self.qualify_condexpr(*l)),
-                Box::new(self.qualify_condexpr(*r)),
+                Box::new(self.qualify_condexpr(s, *l)),
+                Box::new(self.qualify_condexpr(s, *r)),
             ),
             CondExpr::Or(l, r) => CondExpr::Or(
-                Box::new(self.qualify_condexpr(*l)),
-                Box::new(self.qualify_condexpr(*r)),
+                Box::new(self.qualify_condexpr(s, *l)),
+                Box::new(self.qualify_condexpr(s, *r)),
             ),
-            CondExpr::Not(inner) => CondExpr::Not(Box::new(self.qualify_condexpr(*inner))),
+            CondExpr::Not(inner) => CondExpr::Not(Box::new(self.qualify_condexpr(s, *inner))),
             CondExpr::Leaf(cond) => CondExpr::Leaf(match cond.value {
                 ConditionValue::Subquery(q) => Condition {
-                    value: ConditionValue::Subquery(Box::new(self.qualify_stmt(*q))),
+                    value: ConditionValue::Subquery(Box::new(self.qualify_stmt(s, *q))),
                     ..cond
                 },
                 _ => cond,
@@ -4124,10 +4245,10 @@ impl Executor {
         }
     }
 
-    fn exec_show_tables(&self) -> Result<String, String> {
+    fn exec_show_tables(&self, s: &SharedDatabase) -> Result<String, String> {
         // 현재 DB의 테이블만 표시, 접두사 제거
         let prefix = format!("{}.", self.current_db);
-        let mut tables: Vec<String> = self.catalog.tables.keys()
+        let mut tables: Vec<String> = s.catalog.tables.keys()
             .filter(|k| k.starts_with(&prefix))
             .map(|k| k[prefix.len()..].to_string())
             .collect();
@@ -4148,8 +4269,8 @@ impl Executor {
         Ok(output)
     }
 
-    fn exec_describe(&self, table: String) -> Result<String, String> {
-        let schema = self.catalog.get_table(&table)
+    fn exec_describe(&self, s: &SharedDatabase, table: String) -> Result<String, String> {
+        let schema = s.catalog.get_table(&table)
             .ok_or(format!("Table '{}' not found", table))?;
         let mut output = String::new();
         let sep = "+------------------+---------+-----+-----+----------------+-----------------+";
@@ -4192,17 +4313,17 @@ impl Executor {
         Ok(output)
     }
 
-    fn exec_show_buffer_pool(&self) -> Result<String, String> {
+    fn exec_show_buffer_pool(&self, s: &SharedDatabase) -> Result<String, String> {
         let mut output = String::new();
         let sep = "+----------------------+---------+";
         output.push_str(&format!("{}\n", sep));
         output.push_str("| 항목                 | 값      |\n");
         output.push_str(&format!("{}\n", sep));
-        output.push_str(&format!("| 캐시 사용량          | {:7} |\n", self.buffer_pool.usage()));
+        output.push_str(&format!("| 캐시 사용량          | {:7} |\n", s.buffer_pool.usage()));
         output.push_str(&format!("| 최대 용량            | {:7} |\n", 64));
-        output.push_str(&format!("| 캐시 히트            | {:7} |\n", self.buffer_pool.hit_count));
-        output.push_str(&format!("| 캐시 미스            | {:7} |\n", self.buffer_pool.miss_count));
-        output.push_str(&format!("| 적중률               | {:6.1}% |\n", self.buffer_pool.hit_rate()));
+        output.push_str(&format!("| 캐시 히트            | {:7} |\n", s.buffer_pool.hit_count));
+        output.push_str(&format!("| 캐시 미스            | {:7} |\n", s.buffer_pool.miss_count));
+        output.push_str(&format!("| 적중률               | {:6.1}% |\n", s.buffer_pool.hit_rate()));
         output.push_str(sep);
         Ok(output)
     }
@@ -4249,20 +4370,20 @@ impl Executor {
     }
 
     /// VACUUM [table]: 논리 삭제된 행(_xmax != "0")을 물리적으로 제거
-    fn exec_vacuum(&mut self, table: Option<String>) -> Result<String, String> {
+    fn exec_vacuum(&mut self, s: &mut SharedDatabase, table: Option<String>) -> Result<String, String> {
         let targets: Vec<String> = match table {
             Some(t) => {
-                if !self.tables.contains_key(&t) {
+                if !s.tables.contains_key(&t) {
                     return Err(format!("Table '{}' not found", t));
                 }
                 vec![t]
             }
-            None => self.tables.keys().cloned().collect(),
+            None => s.tables.keys().cloned().collect(),
         };
 
         let mut total_removed = 0usize;
         for t in &targets {
-            let rows = self.tables.get_mut(t).unwrap();
+            let rows = s.tables.get_mut(t).unwrap();
             let before = rows.len();
             rows.retain(|r| Self::is_visible(r));
             let removed = before - rows.len();
@@ -4270,8 +4391,8 @@ impl Executor {
 
             if removed > 0 {
                 // 인덱스 재빌드
-                let rows_clone = self.tables.get(t).unwrap().clone();
-                if let Some(index) = self.indexes.get_mut(t) {
+                let rows_clone = s.tables.get(t).unwrap().clone();
+                if let Some(index) = s.indexes.get_mut(t) {
                     *index = BPlusTree::new();
                     for row in &rows_clone {
                         let key = row.values().next().cloned().unwrap_or_default();
@@ -4279,17 +4400,17 @@ impl Executor {
                         index.insert(key, val_json);
                     }
                 }
-                let comp_keys: Vec<String> = self.composite_indexes.iter()
+                let comp_keys: Vec<String> = s.composite_indexes.iter()
                     .filter(|(_, ci)| ci.table == *t)
                     .map(|(k, _)| k.clone())
                     .collect();
                 for k in comp_keys {
-                    if let Some(ci) = self.composite_indexes.get_mut(&k) {
+                    if let Some(ci) = s.composite_indexes.get_mut(&k) {
                         ci.rebuild(&rows_clone);
                     }
                 }
-                self.buffer_pool.write_page(t, rows_clone.clone());
-                self.buffer_pool.flush_page(t, &self.disk);
+                s.buffer_pool.write_page(t, rows_clone.clone());
+                s.buffer_pool.flush_page(t, &s.disk);
             }
         }
 
@@ -4297,7 +4418,7 @@ impl Executor {
     }
 
     /// EXPLAIN <SELECT> — 쿼리 실행 계획 출력 (실제 실행 안 함)
-    fn exec_explain(&self, stmt: Statement) -> Result<String, String> {
+    fn exec_explain(&self, s: &SharedDatabase, stmt: Statement) -> Result<String, String> {
         let (table, condition, joins, columns) = match &stmt {
             Statement::Select { table, condition, joins, subquery, columns, .. } => {
                 if subquery.is_some() {
@@ -4307,17 +4428,17 @@ impl Executor {
             }
             other => return Ok(format!("EXPLAIN: {:?} → not a SELECT", other)),
         };
-        let planner = Planner::new(&self.tables, &self.indexes, &self.index_meta, &self.composite_indexes, &self.catalog);
+        let planner = Planner::new(&s.tables, &s.indexes, &s.index_meta, &s.composite_indexes, &s.catalog);
         let plan = planner.plan_covering(&table, &condition, &joins, &columns);
         Ok(planner.explain(&plan))
     }
 
     /// SHOW LOCKS: 보유 잠금 + wait-for 그래프 + 데드락 이력 출력
-    fn exec_show_locks(&self) -> Result<String, String> {
+    fn exec_show_locks(&self, s: &SharedDatabase) -> Result<String, String> {
         let mut output = String::new();
 
         // ── 1. 현재 보유 잠금 ──────────────────────────────────────────
-        let locks = self.lock_mgr.lock_rows();
+        let locks = s.lock_mgr.lock_rows();
         if locks.is_empty() {
             output.push_str("No active row locks.\n");
         } else {
@@ -4331,7 +4452,7 @@ impl Executor {
         }
 
         // ── 2. Wait-for 그래프 ────────────────────────────────────────
-        let wait_for = self.lock_mgr.wait_for_rows();
+        let wait_for = s.lock_mgr.wait_for_rows();
         if !wait_for.is_empty() {
             output.push_str("\nWait-for graph:\n");
             for (waiter, blocker) in &wait_for {
@@ -4340,7 +4461,7 @@ impl Executor {
         }
 
         // ── 3. 데드락 이력 ────────────────────────────────────────────
-        let history = self.lock_mgr.deadlock_history();
+        let history = s.lock_mgr.deadlock_history();
         if !history.is_empty() {
             output.push_str("\nDeadlock history (this session):\n");
             for (victim, blocker) in history {
@@ -4355,11 +4476,11 @@ impl Executor {
     }
 
     /// 테이블 행을 PK 기준으로 정렬 (클러스터드 인덱스: 물리적 저장 순서 = PK 순서)
-    fn sort_by_pk(&mut self, table: &str) {
-        let pk_col = self.catalog.get_table(table)
+    fn sort_by_pk(&mut self, s: &mut SharedDatabase, table: &str) {
+        let pk_col = s.catalog.get_table(table)
             .and_then(|s| s.columns.iter().find(|c| c.primary_key).map(|c| c.name.clone()));
         if let Some(pk) = pk_col {
-            if let Some(rows) = self.tables.get_mut(table) {
+            if let Some(rows) = s.tables.get_mut(table) {
                 rows.sort_by(|a, b| {
                     let ka = a.get(&pk).cloned().unwrap_or_default();
                     let kb = b.get(&pk).cloned().unwrap_or_default();
@@ -4376,9 +4497,9 @@ impl Executor {
     /// 1) 버퍼풀의 모든 dirty 페이지를 디스크에 flush
     /// 2) WAL에 CHECKPOINT 레코드 기록
     /// 3) 이전 커밋된 레코드를 WAL에서 정리
-    fn exec_checkpoint(&mut self) -> Result<String, String> {
-        let dirty_before = self.buffer_pool.usage();
-        self.buffer_pool.flush_all(&self.disk);
+    fn exec_checkpoint(&mut self, s: &mut SharedDatabase) -> Result<String, String> {
+        let dirty_before = s.buffer_pool.usage();
+        s.buffer_pool.flush_all(&s.disk);
         self.txn.do_checkpoint();
         Ok(format!(
             "Checkpoint completed. {} dirty page(s) flushed.",
@@ -4388,15 +4509,17 @@ impl Executor {
 
     /// 자동 체크포인트: WAL 크기가 임계값을 초과하면 체크포인트를 수행한다.
     /// 활성 트랜잭션 중에도 중간 체크포인트를 찍어 복구 범위를 줄인다.
-    fn maybe_auto_checkpoint(&mut self) {
+    fn maybe_auto_checkpoint(&mut self, s: &mut SharedDatabase) {
         if self.txn.needs_auto_checkpoint() {
-            self.buffer_pool.flush_all(&self.disk);
+            s.buffer_pool.flush_all(&s.disk);
             self.txn.do_checkpoint();
             eprintln!("[AutoCheckpoint] WAL 임계값 초과 → 체크포인트 실행");
         }
     }
 
     fn recover_from_wal(&mut self) {
+        let arc = Arc::clone(&self.shared);
+        let mut s = arc.write().unwrap();
         let records = self.txn.wal_records();
         if records.is_empty() { return; }
 
@@ -4419,9 +4542,67 @@ impl Executor {
         });
 
         if !has_commit {
-            // 미완료 트랜잭션 → WAL 삭제 (rollback 처리)
+            // 미완료 트랜잭션 → Undo Log로 디스크 상태 복원 후 WAL 삭제
+            if self.txn.has_undo_log_file() {
+                let undo_entries = self.txn.read_undo_log_file();
+                eprintln!("[Recovery] 미완료 트랜잭션 감지 → Undo Log {} 개 엔트리 적용", undo_entries.len());
+                // 역순으로 적용 (마지막 변경 → 첫 번째 변경 순서로 복원)
+                for entry in undo_entries.iter().rev() {
+                    match entry.operation.as_str() {
+                        "INSERT" => {
+                            // INSERT 취소: 삽입된 행 삭제
+                            let pk_col = s.catalog.get_table(&entry.table)
+                                .and_then(|s| s.columns.iter().find(|c| c.primary_key).map(|c| c.name.clone()))
+                                .unwrap_or_else(|| "id".to_string());
+                            if let Some(rows) = s.tables.get_mut(&entry.table) {
+                                rows.retain(|r| r.get(&pk_col).map(|v| v != &entry.key).unwrap_or(true));
+                                let snap = rows.clone();
+                                s.disk.save_table(&entry.table, &snap);
+                                eprintln!("[Recovery] UNDO INSERT: {} key={}", entry.table, entry.key);
+                            }
+                        }
+                        "UPDATE" => {
+                            // UPDATE 취소: 이전 데이터로 복원
+                            if let Some(old_json) = &entry.old_data {
+                                if let Ok(old_row) = serde_json::from_str::<Row>(old_json) {
+                                    let pk_col = s.catalog.get_table(&entry.table)
+                                        .and_then(|s| s.columns.iter().find(|c| c.primary_key).map(|c| c.name.clone()))
+                                        .unwrap_or_else(|| "id".to_string());
+                                    if let Some(rows) = s.tables.get_mut(&entry.table) {
+                                        for row in rows.iter_mut() {
+                                            if row.get(&pk_col) == Some(&entry.key) {
+                                                *row = old_row.clone();
+                                                break;
+                                            }
+                                        }
+                                        let snap = rows.clone();
+                                        s.disk.save_table(&entry.table, &snap);
+                                        eprintln!("[Recovery] UNDO UPDATE: {} key={}", entry.table, entry.key);
+                                    }
+                                }
+                            }
+                        }
+                        "DELETE" => {
+                            // DELETE 취소: 삭제된 행 재삽입
+                            if let Some(old_json) = &entry.old_data {
+                                if let Ok(old_row) = serde_json::from_str::<Row>(old_json) {
+                                    if let Some(rows) = s.tables.get_mut(&entry.table) {
+                                        rows.push(old_row);
+                                        let snap = rows.clone();
+                                        s.disk.save_table(&entry.table, &snap);
+                                        eprintln!("[Recovery] UNDO DELETE: {} key={}", entry.table, entry.key);
+                                    }
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                self.txn.clear_undo_log_file();
+            } else {
+                eprintln!("[Recovery] 미완료 트랜잭션 감지 (Undo Log 없음) → WAL 삭제");
+            }
             self.txn.wal_clear();
-            eprintln!("[Recovery] 미완료 트랜잭션 감지 → WAL 삭제");
             return;
         }
 
@@ -4432,20 +4613,20 @@ impl Executor {
                 crate::transaction::wal::WalOp::Insert => {
                     if let Ok(row) = serde_json::from_str::<Row>(&record.data) {
                         let table = &record.table_name;
-                        if let Some(rows) = self.tables.get_mut(table) {
-                            // 이미 존재하면 스킵
-                            let pk_col = self.catalog.get_table(table)
-                                .and_then(|s| s.columns.iter().find(|c| c.primary_key).map(|c| c.name.clone()))
-                                .unwrap_or_else(|| "id".to_string());
+                        // catalog 조회를 get_mut 이전에 수행해 borrow 충돌 방지
+                        let pk_col = s.catalog.get_table(table)
+                            .and_then(|sch| sch.columns.iter().find(|c| c.primary_key).map(|c| c.name.clone()))
+                            .unwrap_or_else(|| "id".to_string());
+                        if let Some(rows) = s.tables.get_mut(table) {
                             let key = row.get(&pk_col).cloned().unwrap_or_default();
                             let exists = rows.iter().any(|r| r.get(&pk_col).map(|v| v == &key).unwrap_or(false));
                             if !exists {
                                 rows.push(row.clone());
                                 let val_json = serde_json::to_string(&row).unwrap();
-                                if let Some(index) = self.indexes.get_mut(table) {
+                                if let Some(index) = s.indexes.get_mut(table) {
                                     index.insert(key, val_json);
                                 }
-                                self.disk.save_table(table, self.tables.get(table).unwrap());
+                                s.disk.save_table(table, s.tables.get(table).unwrap());
                                 eprintln!("[Recovery] INSERT replay: {}", table);
                             }
                         }
@@ -4454,10 +4635,10 @@ impl Executor {
                 crate::transaction::wal::WalOp::Update => {
                     if let Ok(new_row) = serde_json::from_str::<Row>(&record.data) {
                         let table = &record.table_name;
-                        let pk_col = self.catalog.get_table(table)
+                        let pk_col = s.catalog.get_table(table)
                             .and_then(|s| s.columns.iter().find(|c| c.primary_key).map(|c| c.name.clone()))
                             .unwrap_or_else(|| "id".to_string());
-                        if let Some(rows) = self.tables.get_mut(table) {
+                        if let Some(rows) = s.tables.get_mut(table) {
                             for row in rows.iter_mut() {
                                 if row.get(&pk_col) == new_row.get(&pk_col) {
                                     *row = new_row.clone();
@@ -4465,19 +4646,19 @@ impl Executor {
                                 }
                             }
                         }
-                        self.disk.save_table(table, self.tables.get(table).unwrap());
+                        s.disk.save_table(table, s.tables.get(table).unwrap());
                         eprintln!("[Recovery] UPDATE replay: {}", table);
                     }
                 }
                 crate::transaction::wal::WalOp::Delete => {
                     let table = &record.table_name;
-                    let pk_col = self.catalog.get_table(table)
+                    let pk_col = s.catalog.get_table(table)
                         .and_then(|s| s.columns.iter().find(|c| c.primary_key).map(|c| c.name.clone()))
                         .unwrap_or_else(|| "id".to_string());
-                    if let Some(rows) = self.tables.get_mut(table) {
+                    if let Some(rows) = s.tables.get_mut(table) {
                         rows.retain(|r| r.get(&pk_col).map(|v| v != &record.key).unwrap_or(true));
                     }
-                    self.disk.save_table(table, self.tables.get(table).unwrap());
+                    s.disk.save_table(table, s.tables.get(table).unwrap());
                     eprintln!("[Recovery] DELETE replay: {}", table);
                 }
                 _ => {}
@@ -4493,50 +4674,53 @@ impl Executor {
 
     fn exec_create_user(
         &mut self,
+        s: &mut SharedDatabase,
         user: String,
         host: String,
         password: Option<String>,
         if_not_exists: bool,
     ) -> Result<String, String> {
-        let exists = self.users.iter().any(|u| u.user == user && u.host == host);
+        let exists = s.users.iter().any(|u| u.user == user && u.host == host);
         if exists {
             if if_not_exists {
                 return Ok(format!("User '{}@{}' already exists (IF NOT EXISTS — skipped).", user, host));
             }
             return Err(format!("User '{}@{}' already exists.", user, host));
         }
-        self.users.push(UserRecord {
+        s.users.push(UserRecord {
             user: user.clone(),
             host: host.clone(),
             password_hash: password,
         });
-        self.disk.save_users(&self.users);
+        s.disk.save_users(&s.users);
         Ok(format!("User '{}@{}' created.", user, host))
     }
 
     fn exec_drop_user(
         &mut self,
+        s: &mut SharedDatabase,
         user: String,
         host: String,
         if_exists: bool,
     ) -> Result<String, String> {
-        let before = self.users.len();
-        self.users.retain(|u| !(u.user == user && u.host == host));
-        if self.users.len() == before {
+        let before = s.users.len();
+        s.users.retain(|u| !(u.user == user && u.host == host));
+        if s.users.len() == before {
             if if_exists {
                 return Ok(format!("User '{}@{}' does not exist (IF EXISTS — skipped).", user, host));
             }
             return Err(format!("User '{}@{}' does not exist.", user, host));
         }
         // Also remove their grants
-        self.grants.retain(|g| !(g.user == user && g.host == host));
-        self.disk.save_users(&self.users);
-        self.disk.save_grants(&self.grants);
+        s.grants.retain(|g| !(g.user == user && g.host == host));
+        s.disk.save_users(&s.users);
+        s.disk.save_grants(&s.grants);
         Ok(format!("User '{}@{}' dropped.", user, host))
     }
 
     fn exec_grant(
         &mut self,
+        s: &mut SharedDatabase,
         privileges: Vec<String>,
         object_type: String,
         object: String,
@@ -4545,7 +4729,7 @@ impl Executor {
         with_grant_option: bool,
     ) -> Result<String, String> {
         // Find existing grant record for this user/object
-        if let Some(existing) = self.grants.iter_mut().find(|g| {
+        if let Some(existing) = s.grants.iter_mut().find(|g| {
             g.user == user && g.host == host && g.object == object && g.object_type == object_type
         }) {
             for priv_name in &privileges {
@@ -4557,7 +4741,7 @@ impl Executor {
                 existing.with_grant_option = true;
             }
         } else {
-            self.grants.push(GrantRecord {
+            s.grants.push(GrantRecord {
                 user: user.clone(),
                 host: host.clone(),
                 object_type,
@@ -4566,12 +4750,13 @@ impl Executor {
                 with_grant_option,
             });
         }
-        self.disk.save_grants(&self.grants);
+        s.disk.save_grants(&s.grants);
         Ok(format!("Granted {} on {} to '{}@{}'.", privileges.join(", "), object, user, host))
     }
 
     fn exec_revoke(
         &mut self,
+        s: &mut SharedDatabase,
         privileges: Vec<String>,
         object_type: String,
         object: String,
@@ -4579,7 +4764,7 @@ impl Executor {
         host: String,
     ) -> Result<String, String> {
         let mut changed = false;
-        for g in self.grants.iter_mut() {
+        for g in s.grants.iter_mut() {
             if g.user == user && g.host == host && g.object == object && g.object_type == object_type {
                 let before = g.privileges.len();
                 if privileges.contains(&"ALL PRIVILEGES".to_string()) {
@@ -4591,8 +4776,8 @@ impl Executor {
             }
         }
         // Remove empty grant records
-        self.grants.retain(|g| !g.privileges.is_empty());
-        self.disk.save_grants(&self.grants);
+        s.grants.retain(|g| !g.privileges.is_empty());
+        s.disk.save_grants(&s.grants);
         if changed {
             Ok(format!("Revoked {} on {} from '{}@{}'.", privileges.join(", "), object, user, host))
         } else {
@@ -4600,13 +4785,13 @@ impl Executor {
         }
     }
 
-    fn exec_show_grants(&self, user: Option<String>, host: Option<String>) -> Result<String, String> {
+    fn exec_show_grants(&self, s: &SharedDatabase, user: Option<String>, host: Option<String>) -> Result<String, String> {
         let filter_user = user.as_deref().unwrap_or("");
         let filter_host = host.as_deref().unwrap_or("");
         let show_all = user.is_none();
 
         let mut lines: Vec<String> = Vec::new();
-        for g in &self.grants {
+        for g in &s.grants {
             if show_all || (g.user == filter_user && g.host == filter_host) {
                 let priv_str = g.privileges.join(", ");
                 let grant_opt = if g.with_grant_option { " WITH GRANT OPTION" } else { "" };
@@ -4632,8 +4817,8 @@ impl Executor {
         Ok(out)
     }
 
-    fn exec_show_databases(&self) -> Result<String, String> {
-        let mut dbs: Vec<String> = self.databases.iter().cloned().collect();
+    fn exec_show_databases(&self, s: &SharedDatabase) -> Result<String, String> {
+        let mut dbs: Vec<String> = s.databases.iter().cloned().collect();
         dbs.sort();
         if dbs.is_empty() {
             return Ok("No databases.".to_string());

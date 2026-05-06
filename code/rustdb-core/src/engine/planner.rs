@@ -113,20 +113,32 @@ impl<'a> Planner<'a> {
         columns: &[SelectColumn],
     ) -> SelectPlan {
         let mut plan = self.plan(table, condition, joins);
-        plan.base.is_covering = Self::is_covering_access(&plan.base.access, columns);
+        plan.base.is_covering = self.is_covering_access(&plan.base.access, columns, table);
         plan
     }
 
-    fn is_covering_access(access: &AccessPath, columns: &[SelectColumn]) -> bool {
+    fn is_covering_access(&self, access: &AccessPath, columns: &[SelectColumn], table: &str) -> bool {
         let index_col = match access {
             AccessPath::SecondaryPoint { col, .. } => col.as_str(),
             AccessPath::SecondaryRange { col, .. } => col.as_str(),
             _ => return false,
         };
-        !columns.is_empty() && columns.iter().all(|c| match c {
+        // Single-column covering: all selected columns are the indexed column
+        let simple = !columns.is_empty() && columns.iter().all(|c| match c {
             SelectColumn::Column(s) => s == index_col,
             SelectColumn::ColumnAlias(s, _) => s == index_col,
             _ => false,
+        });
+        if simple { return true; }
+        // Composite index covering: any composite index covers all selected columns
+        let selected: Vec<&str> = columns.iter().filter_map(|c| match c {
+            SelectColumn::Column(s) => Some(s.as_str()),
+            SelectColumn::ColumnAlias(s, _) => Some(s.as_str()),
+            _ => None,
+        }).collect();
+        if selected.is_empty() { return false; }
+        self.composite_indexes.values().any(|ci| {
+            ci.table == table && selected.iter().all(|sc| ci.columns.iter().any(|ic| ic == sc))
         })
     }
 

@@ -1,6 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::thread;
 use std::net::{TcpListener, TcpStream};
@@ -8,15 +8,16 @@ use std::io::{BufRead, BufReader, Write};
 use std::time::Instant;
 use tauri::State;
 use rustdb_core::parser::parser::Parser;
-use rustdb_core::engine::executor::Executor;
+use rustdb_core::engine::executor::{Executor, SharedDatabase};
 
 // ─── 상태 구조체 ──────────────────────────────────────────────
 struct AppState {
-    db:             Arc<Mutex<Executor>>,
-    srv_running:    Arc<AtomicBool>,
-    srv_clients:    Arc<AtomicUsize>,
-    srv_log:        Arc<Mutex<Vec<String>>>,
-    srv_port:       Arc<Mutex<u16>>,
+    db:          Arc<Mutex<Executor>>,        // UI 전용 세션 (트랜잭션·current_db)
+    shared:      Arc<RwLock<SharedDatabase>>, // TCP 클라이언트들과 공유되는 DB 상태
+    srv_running: Arc<AtomicBool>,
+    srv_clients: Arc<AtomicUsize>,
+    srv_log:     Arc<Mutex<Vec<String>>>,
+    srv_port:    Arc<Mutex<u16>>,
 }
 
 // ─── 직렬화 타입 ──────────────────────────────────────────────
@@ -50,7 +51,6 @@ fn add_log(log: &Arc<Mutex<Vec<String>>>, msg: &str) {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
-    // UTC 기준 시간 (로컬 타임존 오프셋 없음)
     let hh = (secs % 86400) / 3600;
     let mm = (secs % 3600) / 60;
     let ss = secs % 60;
@@ -63,7 +63,8 @@ fn add_log(log: &Arc<Mutex<Vec<String>>>, msg: &str) {
 }
 
 // ─── TCP 클라이언트 핸들러 ────────────────────────────────────
-fn handle_client(stream: TcpStream, db: Arc<Mutex<Executor>>, log: Arc<Mutex<Vec<String>>>) {
+// 각 TCP 클라이언트는 독립적인 Executor(트랜잭션·current_db)를 가진다.
+fn handle_client(stream: TcpStream, shared: Arc<RwLock<SharedDatabase>>, log: Arc<Mutex<Vec<String>>>) {
     let mut writer = match stream.try_clone() {
         Ok(s) => s,
         Err(_) => return,
@@ -72,6 +73,9 @@ fn handle_client(stream: TcpStream, db: Arc<Mutex<Executor>>, log: Arc<Mutex<Vec
 
     let _ = writeln!(writer, "RustDB Server v2.2.0 — Ready");
     let _ = writeln!(writer, "---END---");
+
+    // 세션 전용 Executor
+    let mut exec = Executor::new_session(Arc::clone(&shared));
 
     for line in reader.lines() {
         let query = match line {
@@ -83,13 +87,10 @@ fn handle_client(stream: TcpStream, db: Arc<Mutex<Executor>>, log: Arc<Mutex<Vec
         let preview = if query.len() > 60 { format!("{}...", &query[..60]) } else { query.clone() };
         add_log(&log, &format!("Query: {}", preview));
 
-        let output = {
-            let mut exec = db.lock().unwrap();
-            let mut parser = Parser::new(&query);
-            match parser.parse() {
-                Ok(stmt) => exec.execute(stmt).unwrap_or_else(|e| format!("Error: {}", e)),
-                Err(e)   => format!("Parse Error: {}", e),
-            }
+        let mut parser = Parser::new(&query);
+        let output = match parser.parse() {
+            Ok(stmt) => exec.execute(stmt).unwrap_or_else(|e| format!("Error: {}", e)),
+            Err(e)   => format!("Parse Error: {}", e),
         };
 
         let _ = writeln!(writer, "{}", output);
@@ -207,8 +208,8 @@ fn parse_output(output: &str, elapsed: f64) -> QueryResult {
 
 #[tauri::command]
 fn get_databases(state: State<AppState>) -> Vec<String> {
-    let exec = state.db.lock().unwrap();
-    let mut dbs: Vec<String> = exec.databases.iter().cloned().collect();
+    let s = state.shared.read().unwrap();
+    let mut dbs: Vec<String> = s.databases.iter().cloned().collect();
     dbs.sort();
     dbs
 }
@@ -220,9 +221,9 @@ fn get_current_db(state: State<AppState>) -> String {
 
 #[tauri::command]
 fn get_tables_for_db(db: String, state: State<AppState>) -> Vec<String> {
-    let exec = state.db.lock().unwrap();
+    let s = state.shared.read().unwrap();
     let prefix = format!("{}.", db.to_lowercase());
-    let mut tables: Vec<String> = exec.catalog.tables.keys()
+    let mut tables: Vec<String> = s.catalog.tables.keys()
         .filter(|k| k.starts_with(&prefix))
         .map(|k| k[prefix.len()..].to_string())
         .collect();
@@ -232,9 +233,9 @@ fn get_tables_for_db(db: String, state: State<AppState>) -> Vec<String> {
 
 #[tauri::command]
 fn get_views_for_db(db: String, state: State<AppState>) -> Vec<String> {
-    let exec = state.db.lock().unwrap();
+    let s = state.shared.read().unwrap();
     let prefix = format!("{}.", db.to_lowercase());
-    let mut views: Vec<String> = exec.views.keys()
+    let mut views: Vec<String> = s.views.keys()
         .filter(|k| k.starts_with(&prefix))
         .map(|k| k[prefix.len()..].to_string())
         .collect();
@@ -242,12 +243,20 @@ fn get_views_for_db(db: String, state: State<AppState>) -> Vec<String> {
     views
 }
 
+#[derive(serde::Serialize)]
+struct IndexInfo {
+    name:    String,
+    table:   String,
+    columns: Vec<String>,
+    kind:    String, // "single" | "composite"
+}
+
 #[tauri::command]
 fn get_indexes_for_db(db: String, state: State<AppState>) -> Vec<IndexInfo> {
-    let exec = state.db.lock().unwrap();
+    let s = state.shared.read().unwrap();
     let prefix = format!("{}.", db.to_lowercase());
     let mut result = Vec::new();
-    for (name, (table, column)) in &exec.index_meta {
+    for (name, (table, column)) in &s.index_meta {
         if table.starts_with(&prefix) {
             result.push(IndexInfo {
                 name: name.clone(),
@@ -257,7 +266,7 @@ fn get_indexes_for_db(db: String, state: State<AppState>) -> Vec<IndexInfo> {
             });
         }
     }
-    for (name, ci) in &exec.composite_indexes {
+    for (name, ci) in &s.composite_indexes {
         if ci.table.starts_with(&prefix) {
             result.push(IndexInfo {
                 name: name.clone(),
@@ -274,8 +283,9 @@ fn get_indexes_for_db(db: String, state: State<AppState>) -> Vec<IndexInfo> {
 #[tauri::command]
 fn get_tables(state: State<AppState>) -> Vec<String> {
     let exec = state.db.lock().unwrap();
+    let s = exec.shared.read().unwrap();
     let prefix = format!("{}.", exec.current_db);
-    let mut tables: Vec<String> = exec.catalog.tables.keys()
+    let mut tables: Vec<String> = s.catalog.tables.keys()
         .filter(|k| k.starts_with(&prefix))
         .map(|k| k[prefix.len()..].to_string())
         .collect();
@@ -286,22 +296,15 @@ fn get_tables(state: State<AppState>) -> Vec<String> {
 #[tauri::command]
 fn get_columns(table: String, state: State<AppState>) -> Vec<String> {
     let exec = state.db.lock().unwrap();
+    let s = exec.shared.read().unwrap();
     let qualified = if table.contains('.') {
         table.clone()
     } else {
         format!("{}.{}", exec.current_db, table)
     };
-    exec.catalog.get_table(&qualified)
-        .map(|s| s.columns.iter().map(|c| c.name.clone()).collect())
+    s.catalog.get_table(&qualified)
+        .map(|sch| sch.columns.iter().map(|c| c.name.clone()).collect())
         .unwrap_or_default()
-}
-
-#[derive(serde::Serialize)]
-struct IndexInfo {
-    name:    String,
-    table:   String,
-    columns: Vec<String>,
-    kind:    String, // "single" | "composite"
 }
 
 #[derive(serde::Serialize)]
@@ -319,13 +322,14 @@ struct ColumnDetail {
 #[tauri::command]
 fn get_columns_detail(table: String, state: State<AppState>) -> Vec<ColumnDetail> {
     let exec = state.db.lock().unwrap();
+    let s = exec.shared.read().unwrap();
     let qualified = if table.contains('.') {
         table.clone()
     } else {
         format!("{}.{}", exec.current_db, table)
     };
-    exec.catalog.get_table(&qualified)
-        .map(|s| s.columns.iter().map(|c| {
+    s.catalog.get_table(&qualified)
+        .map(|sch| sch.columns.iter().map(|c| {
             let type_str = format!("{:?}", c.data_type)
                 .replace("Varchar(", "VARCHAR(")
                 .replace("Decimal(", "DECIMAL(")
@@ -358,8 +362,9 @@ fn get_columns_detail(table: String, state: State<AppState>) -> Vec<ColumnDetail
 #[tauri::command]
 fn get_views(state: State<AppState>) -> Vec<String> {
     let exec = state.db.lock().unwrap();
+    let s = exec.shared.read().unwrap();
     let prefix = format!("{}.", exec.current_db);
-    let mut views: Vec<String> = exec.views.keys()
+    let mut views: Vec<String> = s.views.keys()
         .filter(|k| k.starts_with(&prefix))
         .map(|k| k[prefix.len()..].to_string())
         .collect();
@@ -370,11 +375,12 @@ fn get_views(state: State<AppState>) -> Vec<String> {
 #[tauri::command]
 fn get_indexes(state: State<AppState>) -> Vec<IndexInfo> {
     let exec = state.db.lock().unwrap();
+    let s = exec.shared.read().unwrap();
     let prefix = format!("{}.", exec.current_db);
     let mut result = Vec::new();
 
     // 단일 컬럼 인덱스
-    for (name, (table, column)) in &exec.index_meta {
+    for (name, (table, column)) in &s.index_meta {
         if table.starts_with(&prefix) {
             result.push(IndexInfo {
                 name:    name.clone(),
@@ -385,7 +391,7 @@ fn get_indexes(state: State<AppState>) -> Vec<IndexInfo> {
         }
     }
     // 복합 인덱스
-    for (name, ci) in &exec.composite_indexes {
+    for (name, ci) in &s.composite_indexes {
         if ci.table.starts_with(&prefix) {
             result.push(IndexInfo {
                 name:    name.clone(),
@@ -406,11 +412,12 @@ fn start_server(port: u16, state: State<AppState>) -> Result<String, String> {
         return Err("서버가 이미 실행 중입니다.".to_string());
     }
 
-    let running     = state.srv_running.clone();
-    let clients     = state.srv_clients.clone();
-    let log         = state.srv_log.clone();
-    let db          = state.db.clone();
-    let port_store  = state.srv_port.clone();
+    let running    = state.srv_running.clone();
+    let clients    = state.srv_clients.clone();
+    let log        = state.srv_log.clone();
+    // TCP 클라이언트들은 UI 세션과 동일한 SharedDatabase를 공유
+    let shared_db  = state.shared.clone();
+    let port_store = state.srv_port.clone();
 
     *port_store.lock().unwrap() = port;
     running.store(true, Ordering::SeqCst);
@@ -433,12 +440,12 @@ fn start_server(port: u16, state: State<AppState>) -> Result<String, String> {
                 Ok((stream, addr)) => {
                     clients.fetch_add(1, Ordering::SeqCst);
                     add_log(&log, &format!("클라이언트 접속: {}", addr));
-                    let db2  = db.clone();
+                    let sh2  = Arc::clone(&shared_db);
                     let cc   = clients.clone();
                     let log2 = log.clone();
                     let astr = addr.to_string();
                     thread::spawn(move || {
-                        handle_client(stream, db2, log2.clone());
+                        handle_client(stream, sh2, log2.clone());
                         cc.fetch_sub(1, Ordering::SeqCst);
                         add_log(&log2, &format!("클라이언트 종료: {}", astr));
                     });
@@ -481,10 +488,15 @@ fn clear_server_log(state: State<AppState>) {
 
 // ─── 엔트리포인트 ─────────────────────────────────────────────
 fn main() {
-    let db = Arc::new(Mutex::new(Executor::new()));
+    // WAL 복구 포함 초기화 → UI 세션 executor + 공유 DB 상태 분리
+    let exec   = Executor::new();
+    let shared = exec.get_shared();
+    let db     = Arc::new(Mutex::new(exec));
+
     tauri::Builder::default()
         .manage(AppState {
             db,
+            shared,
             srv_running: Arc::new(AtomicBool::new(false)),
             srv_clients: Arc::new(AtomicUsize::new(0)),
             srv_log:     Arc::new(Mutex::new(Vec::new())),

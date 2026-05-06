@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(Get-Content \"test/test_full.sql\")",
+      "Bash(Select-String -Pattern \"UNION|Error|error|0 rows|Covering|rows returned\")",
+      "Bash(Select-Object -First 50)",
+      "Bash(grep -v \"//\")",
+      "PowerShell($bin = Get-Item \"c:/Users/win11/Desktop/projects/dbe/code/target/debug/rustdb-ui.exe\" -ErrorAction SilentlyContinue; if \\($bin\\) { Write-Host \"UI binary: $\\($bin.LastWriteTime\\)\" } else { Write-Host \"UI binary not found\" }; $parser = Get-Item \"c:/Users/win11/Desktop/projects/dbe/code/rustdb-core/src/parser/parser.rs\"; Write-Host \"parser.rs: $\\($parser.LastWriteTime\\)\")"
+    ]
+  }
+}
