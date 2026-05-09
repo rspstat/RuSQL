@@ -46,8 +46,48 @@ interface ColumnDetail {
   default_val: string | null;
   fk_ref: string | null;
 }
-type ActiveView = "editor" | "gui" | "server" | "ai";
+type ActiveView = "editor" | "erd" | "server" | "ai";
 const PAGE_SIZE = 100;
+
+// ─── ERD 타입/상수 ────────────────────────────────────────────
+interface ErdPos { x: number; y: number; }
+const ERD_CARD_W = 220;
+const ERD_HEADER_H = 32;
+const ERD_COL_H = 24;
+
+// fk_ref 형식: "db1.dept(id)" 또는 "dept(id)" — 괄호가 우선
+function parseRef(ref: string): { table: string; col: string } | null {
+  const paren = ref.indexOf("(");
+  if (paren > 0) return { table: ref.slice(0, paren), col: ref.slice(paren + 1).replace(")", "") };
+  const dot = ref.lastIndexOf(".");
+  if (dot > 0) return { table: ref.slice(0, dot), col: ref.slice(dot + 1) };
+  return null;
+}
+// "db1.dept" → "dept" (DB 한정자 제거)
+function unqualify(name: string): string {
+  const dot = name.indexOf(".");
+  return dot >= 0 ? name.slice(dot + 1) : name;
+}
+
+// 직각 꺾임 경로: x1,y1 → midX 수평 → y2 수직 → x2 수평, 모서리 r=8 라운드
+function erdOrthPath(x1: number, y1: number, x2: number, y2: number): string {
+  const r = 8;
+  if (Math.abs(y1 - y2) < 1) return `M${x1} ${y1} H${x2}`;
+  const midX = (x1 + x2) / 2;
+  const sdx = Math.sign(midX - x1); // 수평 진행 방향 (+1 오른쪽, -1 왼쪽)
+  const sdy = Math.sign(y2 - y1);   // 수직 진행 방향 (+1 아래, -1 위)
+  const r1 = Math.min(r, Math.abs(midX - x1), Math.abs(y2 - y1) / 2);
+  const r2 = Math.min(r, Math.abs(x2 - midX), Math.abs(y2 - y1) / 2);
+  if (r1 < 1 || r2 < 1) return `M${x1} ${y1} H${midX} V${y2} H${x2}`;
+  return [
+    `M${x1} ${y1}`,
+    `H${midX - sdx * r1}`,
+    `Q${midX} ${y1} ${midX} ${y1 + sdy * r1}`,
+    `V${y2 - sdy * r2}`,
+    `Q${midX} ${y2} ${midX + sdx * r2} ${y2}`,
+    `H${x2}`,
+  ].join(" ");
+}
 
 // ─── 탭 타입 ──────────────────────────────────────────────────
 interface Tab { id: string; name: string; content: string; }
@@ -84,11 +124,10 @@ function App() {
   const queryRef = useRef<string>(activeTab?.content ?? "");
   // setValue() 호출 중 onChange가 잘못된 탭에 내용을 저장하지 못하도록 막는 플래그
   const isSwitchingTab = useRef(false);
-  const [results, setResults] = useState<QueryResult[]>([]);
+  const [tabResults, setTabResults] = useState<Record<string, QueryResult[]>>({});
+  const [tabResultPages, setTabResultPages] = useState<Record<string, Record<number, number>>>({});
+  const [tabColWidths, setTabColWidths] = useState<Record<string, Record<number, number[]>>>({});
   const [databases, setDatabases] = useState<string[]>(["rustdb"]);
-  const [tables, setTables] = useState<string[]>([]);
-  const [_views, setViews] = useState<string[]>([]);
-  const [_indexes, setIndexes] = useState<IndexInfo[]>([]);
   const [expandedTables, setExpandedTables] = useState<Set<string>>(new Set());
   const [tableColumns, setTableColumns] = useState<Record<string, ColumnDetail[]>>({});
   const [expandedViews, setExpandedViews] = useState<Set<string>>(new Set());
@@ -108,23 +147,34 @@ function App() {
   const [editingTabId, setEditingTabId] = useState<string | null>(null);
   const [editingTabName, setEditingTabName] = useState("");
   const [isRunning, setIsRunning] = useState(false);
-  const [resultPages, setResultPages] = useState<Record<number, number>>({});
   const [queryHistory, setQueryHistory] = useState<HistoryEntry[]>(loadHistory);
   const [resultTab, setResultTab] = useState<"results" | "history">("results");
   const editorRef = useRef<Monaco.editor.IStandaloneCodeEditor | null>(null);
+  const schemaRef = useRef<{ tables: string[]; columns: Record<string, string[]> }>({ tables: [], columns: {} });
   const [resultHeight, setResultHeight] = useState(260);
   const [sidebarWidth, setSidebarWidth] = useState(240);
   const isDragging = useRef(false);
   const isSidebarDragging = useRef(false);
 
+  // ERD 상태
+  const [erdColumns, setErdColumns] = useState<Record<string, ColumnDetail[]>>({});
+  const [erdPositions, setErdPositions] = useState<Record<string, ErdPos>>({});
+  const [erdLoading, setErdLoading] = useState(false);
+  const [erdPan, setErdPan] = useState<ErdPos>({ x: 40, y: 40 });
+  const [erdZoom, setErdZoom] = useState(1);
+  const erdCanvasRef = useRef<HTMLDivElement>(null);
+  const erdCardDragRef = useRef<{ table: string; startMX: number; startMY: number; startCX: number; startCY: number; zoom: number } | null>(null);
+  const erdCanvasDragRef = useRef<{ startMX: number; startMY: number; startPX: number; startPY: number } | null>(null);
+  const erdCardWasDragged = useRef(false);
+  const [erdSelectedTable, setErdSelectedTable] = useState<string>("");
+  const [erdTableData, setErdTableData] = useState<QueryResult | null>(null);
+  const [erdTableLoading, setErdTableLoading] = useState(false);
+  const [erdFilter, setErdFilter] = useState("");
+  const [erdDataHeight, setErdDataHeight] = useState(0);
+  const erdDataDragging = useRef(false);
+
   // 뷰 전환
   const [activeView, setActiveView] = useState<ActiveView>("editor");
-
-  // GUI 브라우저 상태
-  const [guiTable, setGuiTable] = useState<string>("");
-  const [guiResult, setGuiResult] = useState<QueryResult | null>(null);
-  const [guiLoading, setGuiLoading] = useState(false);
-  const [guiFilter, setGuiFilter] = useState("");
 
   // 서버 상태
   const [serverStatus, setServerStatus] = useState<ServerStatus>({
@@ -132,6 +182,11 @@ function App() {
   });
   const [portInput, setPortInput] = useState("7878");
   const [serverMsg, setServerMsg] = useState("");
+  const [srvConnName, setSrvConnName] = useState("RustDB Local");
+  const [srvUser, setSrvUser] = useState("root");
+  const [srvPass, setSrvPass] = useState("root");
+  const [srvTab, setSrvTab] = useState<"main" | "guide">("main");
+  const [srvPassVisible, setSrvPassVisible] = useState(false);
   const logEndRef = useRef<HTMLDivElement>(null);
 
   // ─── DB 하나의 데이터 로드 ────────────────────────────────────
@@ -162,19 +217,24 @@ function App() {
     // 현재 펼쳐진 모든 DB 데이터 갱신
     const expanded = new Set([cdb, ...Array.from(expandedDbs)]);
     await Promise.all(Array.from(expanded).filter(d => dbs.includes(d)).map(loadDbData));
-    // 현재 DB 기준 tables/views/indexes 도 갱신 (GUI 브라우저 등에 사용)
-    const [tbls, vws, idxs] = await Promise.all([
-      invoke<string[]>("get_tables"),
-      invoke<string[]>("get_views"),
-      invoke<IndexInfo[]>("get_indexes"),
-    ]);
-    setTables(tbls);
-    setViews(vws);
-    setIndexes(idxs);
   };
 
   // ─── 초기 로드 ──────────────────────────────────────────────
   useEffect(() => { refreshSidebar(); }, []);
+
+  // 탭별 결과 파생값
+  const results = tabResults[activeTabId] ?? [];
+  const resultPages = tabResultPages[activeTabId] ?? {};
+  const colWidths = tabColWidths[activeTabId] ?? {};
+
+  // schemaRef 업데이트 (Monaco 자동완성용)
+  useEffect(() => {
+    const tables: string[] = [];
+    const columns: Record<string, string[]> = {};
+    for (const data of Object.values(dbData)) tables.push(...data.tables);
+    for (const [t, cols] of Object.entries(tableColumns)) columns[t] = cols.map(c => c.name);
+    schemaRef.current = { tables, columns };
+  }, [dbData, tableColumns]);
 
   // ─── 컨텍스트 메뉴 닫기 ──────────────────────────────────────
   useEffect(() => {
@@ -211,6 +271,77 @@ function App() {
     return () => { window.removeEventListener("mousemove", onMove); window.removeEventListener("mouseup", onUp); };
   }, []);
 
+  // ─── ERD 테이블 데이터 로드 ─────────────────────────────────
+  const loadErdTableData = async (tbl: string) => {
+    setErdTableLoading(true);
+    setErdFilter("");
+    try {
+      const res = await invoke<MultiQueryResult>("execute_query", { query: `SELECT * FROM ${tbl};`, ts: Date.now() });
+      setErdTableData(res.results[0] ?? null);
+    } catch {
+      setErdTableData({ columns: [], rows: [], message: "Error loading table", elapsed: 0, success: false });
+    } finally {
+      setErdTableLoading(false);
+    }
+  };
+
+  const handleErdCardClick = (tbl: string) => {
+    if (erdSelectedTable === tbl) {
+      setErdSelectedTable("");
+      setErdTableData(null);
+      setErdDataHeight(0);
+    } else {
+      setErdSelectedTable(tbl);
+      loadErdTableData(tbl);
+      if (erdDataHeight === 0) setErdDataHeight(220);
+    }
+  };
+
+  // ─── ERD 데이터 로드 (뷰 전환 / DB 변경 시) ────────────────
+  useEffect(() => {
+    if (activeView === "erd") loadErd();
+  }, [activeView, currentDb]);
+
+  // ─── ERD 드래그 핸들러 ───────────────────────────────────────
+  useEffect(() => {
+    const onMove = (e: MouseEvent) => {
+      const cd = erdCardDragRef.current;
+      if (cd) {
+        if (!erdCardWasDragged.current) {
+          const dist = Math.hypot(e.clientX - cd.startMX, e.clientY - cd.startMY);
+          if (dist > 4) erdCardWasDragged.current = true;
+        }
+        if (erdCardWasDragged.current) {
+          const dx = (e.clientX - cd.startMX) / cd.zoom;
+          const dy = (e.clientY - cd.startMY) / cd.zoom;
+          setErdPositions(p => ({ ...p, [cd.table]: { x: cd.startCX + dx, y: cd.startCY + dy } }));
+        }
+      }
+      const pd = erdCanvasDragRef.current;
+      if (pd) {
+        setErdPan({ x: pd.startPX + e.clientX - pd.startMX, y: pd.startPY + e.clientY - pd.startMY });
+      }
+      if (erdDataDragging.current) {
+        const view = document.querySelector(".erd-view") as HTMLElement;
+        if (view) {
+          const rect = view.getBoundingClientRect();
+          const newH = Math.max(80, Math.min(rect.bottom - e.clientY - 22, rect.height - 150));
+          setErdDataHeight(newH);
+        }
+      }
+    };
+    const onUp = () => {
+      erdCardDragRef.current = null;
+      erdCanvasDragRef.current = null;
+      erdDataDragging.current = false;
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+    };
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+    return () => { window.removeEventListener("mousemove", onMove); window.removeEventListener("mouseup", onUp); };
+  }, []);
+
   // ─── 서버 상태 폴링 (서버 뷰 활성 시) ──────────────────────
   useEffect(() => {
     if (activeView !== "server") return;
@@ -235,14 +366,15 @@ function App() {
       : null;
     const q = (sel?.trim() ? sel : (editorRef.current?.getValue() ?? queryRef.current)).trim();
     if (!q) return;
-    setResults([]);
-    setResultPages({});
+    setTabResults(p => ({ ...p, [activeTabId]: [] }));
+    setTabResultPages(p => ({ ...p, [activeTabId]: {} }));
+    setTabColWidths(p => ({ ...p, [activeTabId]: {} }));
     setResultTab("results");
     setIsRunning(true);
     const startTs = Date.now();
     try {
       const res = await invoke<MultiQueryResult>("execute_query", { query: q, ts: startTs });
-      setResults(res.results);
+      setTabResults(p => ({ ...p, [activeTabId]: res.results }));
       const entry: HistoryEntry = {
         id: startTs.toString(),
         sql: q,
@@ -257,7 +389,7 @@ function App() {
       });
       await refreshSidebar();
     } catch (e) {
-      setResults([{ columns: [], rows: [], message: String(e), elapsed: 0, success: false }]);
+      setTabResults(p => ({ ...p, [activeTabId]: [{ columns: [], rows: [], message: String(e), elapsed: 0, success: false }] }));
       const entry: HistoryEntry = {
         id: startTs.toString(),
         sql: q,
@@ -389,16 +521,18 @@ function App() {
   const runCtxQuery = async (q: string, dropTable?: string) => {
     setTableCtxMenu(null);
     setEditorQuery(q);
-    setResults([]);
+    setTabResults(p => ({ ...p, [activeTabId]: [] }));
+    setTabResultPages(p => ({ ...p, [activeTabId]: {} }));
+    setTabColWidths(p => ({ ...p, [activeTabId]: {} }));
     setIsRunning(true);
     setActiveView("editor");
     try {
       const res = await invoke<MultiQueryResult>("execute_query", { query: q, ts: Date.now() });
-      setResults(res.results);
+      setTabResults(p => ({ ...p, [activeTabId]: res.results }));
       await refreshSidebar();
       if (dropTable) setExpandedTables(prev => { const s = new Set(prev); s.delete(dropTable); return s; });
     } catch (e) {
-      setResults([{ columns: [], rows: [], message: String(e), elapsed: 0, success: false }]);
+      setTabResults(p => ({ ...p, [activeTabId]: [{ columns: [], rows: [], message: String(e), elapsed: 0, success: false }] }));
     } finally {
       setIsRunning(false);
     }
@@ -417,15 +551,17 @@ function App() {
   const runDbCtxQuery = async (q: string) => {
     setDbCtxMenu(null);
     setEditorQuery(q);
-    setResults([]);
+    setTabResults(p => ({ ...p, [activeTabId]: [] }));
+    setTabResultPages(p => ({ ...p, [activeTabId]: {} }));
+    setTabColWidths(p => ({ ...p, [activeTabId]: {} }));
     setIsRunning(true);
     setActiveView("editor");
     try {
       const res = await invoke<MultiQueryResult>("execute_query", { query: q, ts: Date.now() });
-      setResults(res.results);
+      setTabResults(p => ({ ...p, [activeTabId]: res.results }));
       await refreshSidebar();
     } catch (e) {
-      setResults([{ columns: [], rows: [], message: String(e), elapsed: 0, success: false }]);
+      setTabResults(p => ({ ...p, [activeTabId]: [{ columns: [], rows: [], message: String(e), elapsed: 0, success: false }] }));
     } finally {
       setIsRunning(false);
     }
@@ -436,24 +572,33 @@ function App() {
     setTableCtxMenu(null);
   };
 
-  // ─── GUI 브라우저 ───────────────────────────────────────────
-  const loadGuiTable = async (t: string) => {
-    if (!t) { setGuiResult(null); return; }
-    setGuiLoading(true);
-    setGuiFilter("");
+  // ─── ERD 로드 ────────────────────────────────────────────────
+  const loadErd = async () => {
+    setErdLoading(true);
     try {
-      const res = await invoke<MultiQueryResult>("execute_query", { query: `SELECT * FROM ${t};`, ts: Date.now() });
-      setGuiResult(res.results[0] ?? null);
-    } catch {
-      setGuiResult({ columns: [], rows: [], message: "Error loading table", elapsed: 0, success: false });
+      const tblList = await invoke<string[]>("get_tables");
+      if (tblList.length === 0) { setErdColumns({}); setErdPositions({}); return; }
+      const entries = await Promise.all(
+        tblList.map(async t => {
+          const cols = await invoke<ColumnDetail[]>("get_columns_detail", { table: t });
+          return [t, cols] as [string, ColumnDetail[]];
+        })
+      );
+      setErdColumns(Object.fromEntries(entries));
+      const gridCols = Math.max(1, Math.ceil(Math.sqrt(tblList.length)));
+      setErdPositions(prev => {
+        const next: Record<string, ErdPos> = {};
+        tblList.forEach((t, i) => {
+          next[t] = prev[t] ?? {
+            x: (i % gridCols) * (ERD_CARD_W + 60) + 40,
+            y: Math.floor(i / gridCols) * 260 + 40,
+          };
+        });
+        return next;
+      });
     } finally {
-      setGuiLoading(false);
+      setErdLoading(false);
     }
-  };
-
-  const handleGuiTableChange = (t: string) => {
-    setGuiTable(t);
-    loadGuiTable(t);
   };
 
   // ─── 서버 제어 ──────────────────────────────────────────────
@@ -494,14 +639,18 @@ function App() {
           </svg>
         </div>
 
-        {/* GUI Browser */}
+        {/* ERD Editor */}
         <div
-          className={`activity-icon ${activeView === "gui" ? "active" : ""}`}
-          title="Table Browser"
-          onClick={() => setActiveView("gui")}
+          className={`activity-icon ${activeView === "erd" ? "active" : ""}`}
+          title="ERD Editor"
+          onClick={() => setActiveView("erd")}
         >
-          <svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor">
-            <path d="M3 3h18v2H3V3zm0 4h18v2H3V7zm0 4h18v2H3v-2zm0 4h18v2H3v-2zm0 4h18v2H3v-2z"/>
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+            <rect x="1" y="2" width="9" height="6" rx="1.5"/>
+            <rect x="1" y="16" width="9" height="6" rx="1.5"/>
+            <rect x="14" y="9" width="9" height="6" rx="1.5"/>
+            <path d="M10 5H12V12H14"/>
+            <path d="M10 19H12V12"/>
           </svg>
         </div>
 
@@ -970,6 +1119,53 @@ function App() {
                       ],
                     },
                   } as Parameters<typeof monaco.languages.setMonarchTokensProvider>[1]);
+
+                  // SQL 자동완성
+                  monaco.languages.registerCompletionItemProvider("sql", {
+                    triggerCharacters: [" ", ".", "\n"],
+                    provideCompletionItems: (model: Monaco.editor.ITextModel, position: Monaco.Position) => {
+                      const word = model.getWordUntilPosition(position);
+                      const range = {
+                        startLineNumber: position.lineNumber,
+                        endLineNumber: position.lineNumber,
+                        startColumn: word.startColumn,
+                        endColumn: word.endColumn,
+                      };
+                      const { tables, columns } = schemaRef.current;
+                      const suggestions: Monaco.languages.CompletionItem[] = [];
+                      const kws = [
+                        "SELECT","FROM","WHERE","INSERT","INTO","VALUES","UPDATE","SET",
+                        "DELETE","CREATE","TABLE","DROP","ALTER","ADD","COLUMN","RENAME","TO",
+                        "JOIN","LEFT","RIGHT","INNER","ON","AND","OR","NOT",
+                        "ORDER","GROUP","BY","ASC","DESC","LIMIT","OFFSET","HAVING","IN",
+                        "BETWEEN","LIKE","AS","DISTINCT","UNION","ALL",
+                        "COUNT","SUM","AVG","MIN","MAX","GROUP_CONCAT",
+                        "INDEX","UNIQUE","VIEW","PRIMARY","KEY","FOREIGN","REFERENCES",
+                        "CASCADE","RESTRICT","NULL","AUTO","INCREMENT",
+                        "SHOW","TABLES","DESCRIBE","TRUNCATE","IS","IS NULL","IS NOT NULL",
+                        "BEGIN","COMMIT","ROLLBACK","SAVEPOINT",
+                        "CHECKPOINT","ISOLATION","LEVEL","VACUUM","EXPLAIN","USE","DATABASE",
+                        "IF","EXISTS","CASE","WHEN","THEN","ELSE","END","WITH","RECURSIVE",
+                        "COALESCE","IFNULL","NULLIF","CAST",
+                        "UPPER","LOWER","LENGTH","CONCAT","TRIM","SUBSTR","REPLACE","LPAD","RPAD",
+                        "ROUND","ABS","CEIL","FLOOR","MOD",
+                        "NOW","DATEDIFF","DATE_ADD","DATE_FORMAT","CURDATE",
+                        "INT","TEXT","FLOAT","BOOLEAN","VARCHAR","DATETIME","DATE","ENUM",
+                      ];
+                      for (const kw of kws) {
+                        suggestions.push({ label: kw, kind: monaco.languages.CompletionItemKind.Keyword, insertText: kw, range });
+                      }
+                      for (const t of tables) {
+                        suggestions.push({ label: t, kind: monaco.languages.CompletionItemKind.Class, insertText: t, range, detail: "table" });
+                      }
+                      for (const [tbl, cols] of Object.entries(columns)) {
+                        for (const col of cols) {
+                          suggestions.push({ label: col, kind: monaco.languages.CompletionItemKind.Field, insertText: col, range, detail: tbl });
+                        }
+                      }
+                      return { suggestions };
+                    },
+                  });
                 }}
                 onMount={(editor, monaco) => {
                   editorRef.current = editor;
@@ -1071,17 +1267,49 @@ function App() {
                                 <span className="result-page-info">
                                   &nbsp;· 표시: {page * PAGE_SIZE + 1}–{Math.min((page + 1) * PAGE_SIZE, total)} / {total}
                                   <button className="page-btn" disabled={page === 0}
-                                    onClick={() => setResultPages(p => ({ ...p, [i]: page - 1 }))}>‹</button>
+                                    onClick={() => setTabResultPages(p => ({ ...p, [activeTabId]: { ...(p[activeTabId] ?? {}), [i]: page - 1 } }))}>‹</button>
                                   <span className="page-indicator">{page + 1} / {pageCount}</span>
                                   <button className="page-btn" disabled={page >= pageCount - 1}
-                                    onClick={() => setResultPages(p => ({ ...p, [i]: page + 1 }))}>›</button>
+                                    onClick={() => setTabResultPages(p => ({ ...p, [activeTabId]: { ...(p[activeTabId] ?? {}), [i]: page + 1 } }))}>›</button>
                                 </span>
                               )}
                             </div>
-                            <table className="result-table">
-                              <thead><tr>{r.columns.map(c => <th key={c}>{c}</th>)}</tr></thead>
+                            <table className="result-table" style={{ tableLayout: colWidths[i] ? 'fixed' : undefined }}>
+                              <thead><tr>{r.columns.map((c, ci) => (
+                                <th key={c} style={{ width: colWidths[i]?.[ci], position: 'relative', userSelect: 'none' }}>
+                                  {c}
+                                  <div
+                                    style={{ position: 'absolute', right: 0, top: 0, bottom: 0, width: 4, cursor: 'col-resize' }}
+                                    onMouseDown={e => {
+                                      e.preventDefault();
+                                      const thEl = e.currentTarget.parentElement as HTMLTableCellElement;
+                                      const startX = e.clientX;
+                                      const startW = thEl.getBoundingClientRect().width;
+                                      const initWidths = Array.from(thEl.parentElement!.querySelectorAll<HTMLTableCellElement>('th'))
+                                        .map(th => th.getBoundingClientRect().width);
+                                      const onMove = (mv: MouseEvent) => {
+                                        setTabColWidths(prev => {
+                                          const tab = { ...(prev[activeTabId] ?? {}) };
+                                          const arr = [...(tab[i] ?? initWidths)];
+                                          arr[ci] = Math.max(40, startW + mv.clientX - startX);
+                                          tab[i] = arr;
+                                          return { ...prev, [activeTabId]: tab };
+                                        });
+                                      };
+                                      const onUp = () => {
+                                        window.removeEventListener('mousemove', onMove);
+                                        window.removeEventListener('mouseup', onUp);
+                                      };
+                                      window.addEventListener('mousemove', onMove);
+                                      window.addEventListener('mouseup', onUp);
+                                    }}
+                                  />
+                                </th>
+                              ))}</tr></thead>
                               <tbody>{pageRows.map((row, ri) => (
-                                <tr key={ri}>{row.map((cell, ci) => <td key={ci}>{cell}</td>)}</tr>
+                                <tr key={ri}>{row.map((cell, ci) => (
+                                  <td key={ci} style={colWidths[i] ? { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } : undefined}>{cell}</td>
+                                ))}</tr>
                               ))}</tbody>
                             </table>
                           </>
@@ -1102,7 +1330,7 @@ function App() {
                       setCtxMenu(null);
                     }}>Copy All Results</div>
                     <div className="ctx-divider" />
-                    <div onClick={() => { setResults([]); setCtxMenu(null); }}>Clear Results</div>
+                    <div onClick={() => { setTabResults(p => ({ ...p, [activeTabId]: [] })); setCtxMenu(null); }}>Clear Results</div>
                   </div>
                 )}
               </div>
@@ -1135,6 +1363,249 @@ function App() {
             </div>
           </div>
         </>
+      )}
+
+      {/* ── ERD Editor 뷰 ────────────────────────────────────── */}
+      {activeView === "erd" && (
+        <div className="erd-view">
+          <div className="erd-header">
+            <div className="erd-header-left">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" style={{ opacity: 0.7 }}>
+                <rect x="1" y="2" width="9" height="6" rx="1.5"/>
+                <rect x="1" y="16" width="9" height="6" rx="1.5"/>
+                <rect x="14" y="9" width="9" height="6" rx="1.5"/>
+                <path d="M10 5H12V12H14"/>
+                <path d="M10 19H12V12"/>
+              </svg>
+              <span className="erd-header-title">ERD — {currentDb}</span>
+              <span className="erd-table-count">{Object.keys(erdColumns).length} tables</span>
+            </div>
+            <div className="erd-header-right">
+              <button className="erd-tool-btn" onClick={() => { setErdPan({ x: 40, y: 40 }); setErdZoom(1); }} title="Reset view">⊡ Reset</button>
+              <button className="erd-tool-btn" onClick={loadErd} title="Refresh">↻ Refresh</button>
+              <span className="erd-zoom-label">{Math.round(erdZoom * 100)}%</span>
+            </div>
+          </div>
+
+          <div
+            className="erd-canvas"
+            ref={erdCanvasRef}
+            onMouseDown={e => {
+              if ((e.target as HTMLElement).closest(".erd-card")) return;
+              erdCanvasDragRef.current = { startMX: e.clientX, startMY: e.clientY, startPX: erdPan.x, startPY: erdPan.y };
+              document.body.style.cursor = "grabbing";
+              document.body.style.userSelect = "none";
+            }}
+            onWheel={e => {
+              e.preventDefault();
+              const factor = e.deltaY < 0 ? 1.1 : 0.9;
+              setErdZoom(z => Math.max(0.2, Math.min(2.5, z * factor)));
+            }}
+          >
+            {erdLoading ? (
+              <div className="erd-loading">Loading ERD...</div>
+            ) : Object.keys(erdColumns).length === 0 ? (
+              <div className="erd-empty">
+                <div className="erd-empty-icon">⬡</div>
+                <div className="erd-empty-text">No tables in <b>{currentDb}</b></div>
+                <div className="erd-empty-sub">테이블 생성 후 ↻ Refresh를 눌러주세요</div>
+              </div>
+            ) : (
+              <div
+                className="erd-transform"
+                style={{ transform: `translate(${erdPan.x}px, ${erdPan.y}px) scale(${erdZoom})`, transformOrigin: "0 0" }}
+              >
+                {/* FK 관계선 SVG */}
+                <svg style={{ position: "absolute", top: 0, left: 0, width: 1, height: 1, overflow: "visible", pointerEvents: "none", zIndex: 0 }}>
+                  <defs>
+                    <marker id="erd-arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+                      <path d="M0,1 L0,7 L7,4 z" fill="#6a9fd8" opacity="0.85"/>
+                    </marker>
+                  </defs>
+                  {Object.entries(erdColumns).flatMap(([tableName, cols]) =>
+                    cols.map((col, colIdx) => {
+                      if (!col.fk_ref) return null;
+                      const parsed = parseRef(col.fk_ref);
+                      if (!parsed) return null;
+                      const refTable = unqualify(parsed.table);
+                      const srcPos = erdPositions[tableName];
+                      const tgtPos = erdPositions[refTable];
+                      const tgtCols = erdColumns[refTable];
+                      if (!srcPos || !tgtPos || !tgtCols) return null;
+                      const tgtColIdx = tgtCols.findIndex(c => c.name === parsed.col);
+                      const srcY = srcPos.y + ERD_HEADER_H + colIdx * ERD_COL_H + ERD_COL_H / 2;
+                      const tgtY = tgtPos.y + ERD_HEADER_H + (tgtColIdx >= 0 ? tgtColIdx * ERD_COL_H : 0) + ERD_COL_H / 2;
+                      const srcRight = srcPos.x + ERD_CARD_W;
+                      const tgtRight = tgtPos.x + ERD_CARD_W;
+                      let pathD: string;
+                      if (srcRight + 10 <= tgtPos.x) {
+                        // 소스가 타깃 왼쪽: 오른쪽 → 왼쪽
+                        pathD = erdOrthPath(srcRight, srcY, tgtPos.x, tgtY);
+                      } else if (tgtRight + 10 <= srcPos.x) {
+                        // 소스가 타깃 오른쪽: 왼쪽 → 오른쪽
+                        pathD = erdOrthPath(srcPos.x, srcY, tgtRight, tgtY);
+                      } else {
+                        // 수평 겹침: 오른쪽 바깥으로 우회
+                        const detourX = Math.max(srcRight, tgtRight) + 44;
+                        const sdy = Math.sign(tgtY - srcY);
+                        const r = Math.min(8, Math.abs(tgtY - srcY) / 2);
+                        if (r < 1) {
+                          pathD = `M${srcRight} ${srcY} H${detourX} V${tgtY} H${tgtRight}`;
+                        } else {
+                          pathD = [
+                            `M${srcRight} ${srcY}`,
+                            `H${detourX - r}`,
+                            `Q${detourX} ${srcY} ${detourX} ${srcY + sdy * r}`,
+                            `V${tgtY - sdy * r}`,
+                            `Q${detourX} ${tgtY} ${detourX - r} ${tgtY}`,
+                            `H${tgtRight}`,
+                          ].join(" ");
+                        }
+                      }
+                      return (
+                        <path
+                          key={`${tableName}.${col.name}`}
+                          d={pathD}
+                          fill="none"
+                          stroke="#6a9fd8"
+                          strokeWidth="1.5"
+                          opacity="0.7"
+                          markerEnd="url(#erd-arrow)"
+                        />
+                      );
+                    })
+                  )}
+                </svg>
+
+                {/* 테이블 카드 */}
+                {Object.entries(erdColumns).map(([tableName, cols]) => {
+                  const pos = erdPositions[tableName];
+                  if (!pos) return null;
+                  return (
+                    <div
+                      key={tableName}
+                      className={`erd-card${erdSelectedTable === tableName ? " erd-card-selected" : ""}`}
+                      style={{ position: "absolute", left: pos.x, top: pos.y, width: ERD_CARD_W, zIndex: 1 }}
+                      onClick={() => { if (!erdCardWasDragged.current) handleErdCardClick(tableName); }}
+                    >
+                      <div
+                        className="erd-card-header"
+                        onMouseDown={e => {
+                          e.stopPropagation();
+                          e.preventDefault();
+                          erdCardWasDragged.current = false;
+                          erdCardDragRef.current = {
+                            table: tableName,
+                            startMX: e.clientX,
+                            startMY: e.clientY,
+                            startCX: pos.x,
+                            startCY: pos.y,
+                            zoom: erdZoom,
+                          };
+                          document.body.style.userSelect = "none";
+                        }}
+                      >
+                        <span className="erd-card-icon">⊞</span>
+                        <span className="erd-card-name">{tableName}</span>
+                      </div>
+                      {cols.map(col => (
+                        <div
+                          key={col.name}
+                          className={`erd-col-row${col.is_pk ? " erd-pk" : col.fk_ref ? " erd-fk" : ""}`}
+                        >
+                          <span className="erd-col-icon">{col.is_pk ? "🔑" : col.fk_ref ? "🔗" : "·"}</span>
+                          <span className="erd-col-name">{col.name}</span>
+                          <span className="erd-col-type">{col.data_type.split("(")[0]}</span>
+                          {col.is_not_null && <span className="erd-badge-nn">NN</span>}
+                          {col.is_unique && !col.is_pk && <span className="erd-badge-uq">UQ</span>}
+                        </div>
+                      ))}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+
+          {/* 데이터 패널 */}
+          {erdSelectedTable && (
+            <>
+              <div
+                className="divider"
+                onMouseDown={() => {
+                  erdDataDragging.current = true;
+                  document.body.style.cursor = "row-resize";
+                  document.body.style.userSelect = "none";
+                }}
+              />
+              <div className="erd-data-panel" style={{ height: erdDataHeight }}>
+                <div className="erd-data-header">
+                  <span className="erd-data-table-name">⊞ {erdSelectedTable}</span>
+                  <input
+                    className="erd-data-filter"
+                    placeholder="Filter rows..."
+                    value={erdFilter}
+                    onChange={e => setErdFilter(e.target.value)}
+                  />
+                  <button className="erd-tool-btn" onClick={() => loadErdTableData(erdSelectedTable)} title="Refresh">↻</button>
+                  <button className="erd-tool-btn" onClick={() => { setErdSelectedTable(""); setErdTableData(null); setErdDataHeight(0); }} title="Close">✕</button>
+                </div>
+                <div className="erd-data-body">
+                  {erdTableLoading ? (
+                    <div className="erd-data-empty">Loading...</div>
+                  ) : !erdTableData || !erdTableData.success ? (
+                    <div className="erd-data-error">{erdTableData?.message ?? "Unknown error"}</div>
+                  ) : erdTableData.columns.length === 0 ? (
+                    <div className="erd-data-empty">{erdTableData.message || "No rows"}</div>
+                  ) : (() => {
+                    const low = erdFilter.toLowerCase();
+                    const filtered = erdFilter
+                      ? erdTableData.rows.filter(r => r.some(c => c.toLowerCase().includes(low)))
+                      : erdTableData.rows;
+                    return (
+                      <>
+                        <div className="erd-data-meta">
+                          {filtered.length}{erdFilter ? ` / ${erdTableData.rows.length}` : ""} row(s) · {erdTableData.columns.length} col(s) · {erdTableData.elapsed.toFixed(3)}s
+                        </div>
+                        <table className="erd-data-table">
+                          <thead><tr>
+                            <th className="erd-data-rownum">#</th>
+                            {erdTableData.columns.map(c => <th key={c}>{c}</th>)}
+                          </tr></thead>
+                          <tbody>
+                            {filtered.map((row, ri) => (
+                              <tr key={ri}>
+                                <td className="erd-data-rownum">{ri + 1}</td>
+                                {row.map((cell, ci) => (
+                                  <td key={ci}>{cell || <span className="erd-data-null">NULL</span>}</td>
+                                ))}
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </>
+                    );
+                  })()}
+                </div>
+              </div>
+            </>
+          )}
+
+          <div className="status-bar">
+            <div className="status-left">
+              <span className="status-item">⎇ main</span>
+              <span className="status-item" style={{ color: "#9cdcfe" }}>⬡ {currentDb}</span>
+              {erdSelectedTable && <span className="status-item" style={{ color: "#4ec9b0" }}>⊞ {erdSelectedTable}</span>}
+              <span className="status-item" style={{ color: "#555" }}>
+                {Object.keys(erdColumns).length} tables · {Object.values(erdColumns).flat().filter(c => c.fk_ref).length} relations
+              </span>
+            </div>
+            <div className="status-right">
+              <span className="status-item">RustDB v2.2.0</span>
+              <span className="status-item">ERD Editor</span>
+            </div>
+          </div>
+        </div>
       )}
 
       {/* ── AI Assistant 뷰 ───────────────────────────────────── */}
@@ -1173,212 +1644,219 @@ function App() {
         </div>
       )}
 
-      {/* ── GUI 테이블 브라우저 뷰 ─────────────────────────────── */}
-      {activeView === "gui" && (
-        <div className="gui-view">
-          <div className="gui-header">
-            <div className="gui-header-left">
-              <span className="gui-header-icon">⊞</span>
-              <span className="gui-header-title">Table Browser</span>
-            </div>
-            <div className="gui-header-controls">
-              <select
-                className="gui-select"
-                value={guiTable}
-                onChange={e => handleGuiTableChange(e.target.value)}
-              >
-                <option value="">— Select a table —</option>
-                {tables.map(t => <option key={t} value={t}>{t}</option>)}
-              </select>
-              {guiTable && (
-                <button className="gui-refresh-btn" onClick={() => loadGuiTable(guiTable)} title="Refresh">
-                  ↻
-                </button>
-              )}
-              {guiResult && guiResult.columns.length > 0 && (
-                <input
-                  className="gui-filter-input"
-                  placeholder="Filter rows..."
-                  value={guiFilter}
-                  onChange={e => setGuiFilter(e.target.value)}
-                />
-              )}
-            </div>
-          </div>
-
-          <div className="gui-body">
-            {!guiTable ? (
-              <div className="gui-empty">
-                <div className="gui-empty-icon">⊞</div>
-                <div className="gui-empty-text">테이블을 선택하면 데이터를 조회합니다</div>
-              </div>
-            ) : guiLoading ? (
-              <div className="gui-empty">
-                <div className="gui-empty-text">Loading...</div>
-              </div>
-            ) : !guiResult || !guiResult.success ? (
-              <div className="gui-error">{guiResult?.message ?? "Unknown error"}</div>
-            ) : guiResult.columns.length === 0 ? (
-              <div className="gui-empty">
-                <div className="gui-empty-text">{guiResult.message || "No rows"}</div>
-              </div>
-            ) : (() => {
-              const filterLower = guiFilter.toLowerCase();
-              const filtered = guiFilter
-                ? guiResult.rows.filter(row => row.some(cell => cell.toLowerCase().includes(filterLower)))
-                : guiResult.rows;
-              return (
-                <div className="gui-table-wrap">
-                  <div className="gui-table-meta">
-                    {filtered.length} / {guiResult.rows.length} row(s) · {guiResult.columns.length} col(s) · {guiResult.elapsed.toFixed(3)}s
-                  </div>
-                  <table className="gui-table">
-                    <thead>
-                      <tr>
-                        <th className="gui-row-num">#</th>
-                        {guiResult.columns.map(c => <th key={c}>{c}</th>)}
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {filtered.map((row, ri) => (
-                        <tr key={ri}>
-                          <td className="gui-row-num">{ri + 1}</td>
-                          {row.map((cell, ci) => (
-                            <td key={ci} className={cell === "NULL" || cell === "" ? "gui-null" : ""}>{cell || <span className="gui-null-label">NULL</span>}</td>
-                          ))}
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              );
-            })()}
-          </div>
-
-          <div className="status-bar">
-            <div className="status-left">
-              <span className="status-item">⎇ main</span>
-              {guiTable && <span className="status-item" style={{ color: "#4ec9b0" }}>⊞ {guiTable}</span>}
-            </div>
-            <div className="status-right">
-              <span className="status-item">RustDB v2.2.0</span>
-              <span className="status-item">Table Browser</span>
-            </div>
-          </div>
-        </div>
-      )}
-
       {/* ── 서버 관리 뷰 ───────────────────────────────────────── */}
       {activeView === "server" && (
         <div className="server-view">
-          {/* 헤더 */}
-          <div className="srv-header">
-            <div className="srv-header-left">
-              <span className="srv-header-icon">⚡</span>
-              <span className="srv-header-title">Server Manager</span>
-            </div>
-            <span className="srv-header-sub">RustDB TCP Server · 127.0.0.1</span>
-          </div>
+          <div className="srv-scroll-area">
+            {/* ── 연결 구성 패널 ── */}
+            <div className="srv-conn-panel">
 
-          {/* 카드 영역 */}
-          <div className="srv-cards">
-            {/* 상태 카드 */}
-            <div className="srv-card">
-              <div className="srv-card-title">STATUS</div>
-              <div className="srv-status-row">
-                <span className={`srv-dot ${serverStatus.running ? "running" : "stopped"}`} />
-                <span className={`srv-status-text ${serverStatus.running ? "running" : "stopped"}`}>
-                  {serverStatus.running ? "RUNNING" : "STOPPED"}
-                </span>
+              {/* 아이콘 + 제목 */}
+              <div className="srv-conn-header">
+                <svg className="srv-db-icon" viewBox="0 0 48 48" fill="none" xmlns="http://www.w3.org/2000/svg">
+                  {/* 섀시 외곽 */}
+                  <rect x="2" y="3" width="44" height="42" rx="2.5" fill="#1e1e1e" stroke="#484848" strokeWidth="1.5"/>
+                  {/* 서버 유닛 1 */}
+                  <rect x="5" y="6" width="38" height="13" rx="1.5" fill="#2b2b2b" stroke="#3e3e3e" strokeWidth="0.8"/>
+                  <rect x="8"  y="9.5"  width="18" height="1.5" rx="0.6" fill="#1a1a1a"/>
+                  <rect x="8"  y="12.5" width="18" height="1.5" rx="0.6" fill="#1a1a1a"/>
+                  <circle cx="30" cy="10.5" r="1.6" fill="#4ec9b0"/>
+                  <circle cx="34" cy="10.5" r="1.6" fill="#4ec9b0" opacity="0.3"/>
+                  <circle cx="38.5" cy="10.5" r="1.6" fill="#1a6ca8"/>
+                  <rect x="29" y="14.5" width="12" height="2.5" rx="0.8" fill="#161616" stroke="#333" strokeWidth="0.5"/>
+                  {/* 서버 유닛 2 */}
+                  <rect x="5" y="21" width="38" height="13" rx="1.5" fill="#2b2b2b" stroke="#3e3e3e" strokeWidth="0.8"/>
+                  <rect x="8"  y="24.5" width="18" height="1.5" rx="0.6" fill="#1a1a1a"/>
+                  <rect x="8"  y="27.5" width="18" height="1.5" rx="0.6" fill="#1a1a1a"/>
+                  <circle cx="30" cy="25.5" r="1.6" fill="#444"/>
+                  <circle cx="34" cy="25.5" r="1.6" fill="#444"/>
+                  <circle cx="38.5" cy="25.5" r="1.6" fill="#1a6ca8" opacity="0.55"/>
+                  <rect x="29" y="29.5" width="12" height="2.5" rx="0.8" fill="#161616" stroke="#333" strokeWidth="0.5"/>
+                  {/* 하단 패널 */}
+                  <rect x="5" y="36" width="38" height="7" rx="1.5" fill="#232323" stroke="#3a3a3a" strokeWidth="0.6"/>
+                  {/* 전원 버튼 */}
+                  <circle cx="11" cy="39.5" r="2.6" fill="#2e2e2e" stroke="#505050" strokeWidth="1"/>
+                  <circle cx="11" cy="39.5" r="1.1" fill="#4ec9b0"/>
+                  {/* USB 포트들 */}
+                  <rect x="17" y="38" width="4.5" height="3" rx="0.6" fill="#161616" stroke="#383838" strokeWidth="0.5"/>
+                  <rect x="23" y="38" width="4.5" height="3" rx="0.6" fill="#161616" stroke="#383838" strokeWidth="0.5"/>
+                  {/* 라벨 슬롯 */}
+                  <rect x="29" y="38" width="11" height="3" rx="0.5" fill="#1a1a1a" stroke="#333" strokeWidth="0.4"/>
+                </svg>
+                <div>
+                  <div className="srv-conn-title">서버에 연결</div>
+                  <div className="srv-conn-sub">RustDB TCP Server</div>
+                </div>
               </div>
-              <div className="srv-meta-list">
-                <div className="srv-meta-row">
-                  <span className="srv-meta-label">Host</span>
-                  <span className="srv-meta-value">127.0.0.1</span>
-                </div>
-                <div className="srv-meta-row">
-                  <span className="srv-meta-label">Port</span>
-                  <span className="srv-meta-value">{serverStatus.port}</span>
-                </div>
-                <div className="srv-meta-row">
-                  <span className="srv-meta-label">Connections</span>
-                  <span className="srv-meta-value srv-clients">{serverStatus.client_count}</span>
-                </div>
-                <div className="srv-meta-row">
-                  <span className="srv-meta-label">Protocol</span>
-                  <span className="srv-meta-value">TCP / Line</span>
-                </div>
-              </div>
-            </div>
 
-            {/* 설정 카드 */}
-            <div className="srv-card">
-              <div className="srv-card-title">CONFIGURATION</div>
-              <div className="srv-field">
-                <label className="srv-label">Host</label>
-                <input className="srv-input" value="127.0.0.1" disabled />
+              {/* 이름 + 그룹 행 */}
+              <div className="srv-name-row">
+                <div className="srv-name-field">
+                  <label className="srv-name-label">이름</label>
+                  <input
+                    className="srv-name-input"
+                    value={srvConnName}
+                    onChange={e => setSrvConnName(e.target.value)}
+                    placeholder="연결 이름"
+                  />
+                </div>
+                <div className="srv-name-field" style={{ maxWidth: 180 }}>
+                  <label className="srv-name-label">그룹</label>
+                  <input className="srv-name-input" defaultValue="기본값" disabled />
+                </div>
               </div>
-              <div className="srv-field">
-                <label className="srv-label">Port</label>
-                <input
-                  className="srv-input"
-                  value={portInput}
-                  onChange={e => setPortInput(e.target.value)}
-                  disabled={serverStatus.running}
-                  placeholder="7878"
-                  type="number"
-                  min={1024}
-                  max={65535}
-                />
-              </div>
-              <div className="srv-btn-row">
+
+              {/* 탭 바 */}
+              <div className="srv-tab-bar">
                 <button
-                  className="srv-btn start"
-                  onClick={handleStartServer}
-                  disabled={serverStatus.running}
+                  className={`srv-tab ${srvTab === "main" ? "active" : ""}`}
+                  onClick={() => setSrvTab("main")}
                 >
-                  ▶ Start Server
+                  <span className="srv-tab-icon">⚙</span> 메인
                 </button>
                 <button
-                  className="srv-btn stop"
-                  onClick={handleStopServer}
-                  disabled={!serverStatus.running}
+                  className={`srv-tab ${srvTab === "guide" ? "active" : ""}`}
+                  onClick={() => setSrvTab("guide")}
                 >
-                  ■ Stop Server
+                  <span className="srv-tab-icon">☰</span> CLI 가이드
                 </button>
               </div>
-              {serverMsg && (
-                <div className="srv-feedback">{serverMsg}</div>
+
+              {/* ── 메인 탭 ── */}
+              {srvTab === "main" && (
+                <div className="srv-form-body">
+                  {/* 호스트 / 포트 */}
+                  <div className="srv-form-row">
+                    <div className="srv-form-col">
+                      <label className="srv-form-label"><span className="srv-req">*</span> 호스트</label>
+                      <input className="srv-form-input" value="127.0.0.1" disabled />
+                    </div>
+                    <div className="srv-form-col" style={{ maxWidth: 160 }}>
+                      <label className="srv-form-label"><span className="srv-req">*</span> 포트</label>
+                      <div className="srv-port-wrap">
+                        <button
+                          className="srv-port-btn"
+                          onClick={() => setPortInput(p => String(Math.max(1024, parseInt(p || "7878") - 1)))}
+                          disabled={serverStatus.running}
+                        >−</button>
+                        <input
+                          className="srv-form-input srv-port-num"
+                          value={portInput}
+                          onChange={e => setPortInput(e.target.value)}
+                          disabled={serverStatus.running}
+                        />
+                        <button
+                          className="srv-port-btn"
+                          onClick={() => setPortInput(p => String(Math.min(65535, parseInt(p || "7878") + 1)))}
+                          disabled={serverStatus.running}
+                        >+</button>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* 사용자 / 비밀번호 */}
+                  <div className="srv-form-row">
+                    <div className="srv-form-col">
+                      <label className="srv-form-label"><span className="srv-req">*</span> 사용자 이름</label>
+                      <input
+                        className="srv-form-input"
+                        value={srvUser}
+                        onChange={e => setSrvUser(e.target.value)}
+                        placeholder="root"
+                      />
+                    </div>
+                    <div className="srv-form-col">
+                      <label className="srv-form-label"><span className="srv-req">*</span> 비밀번호</label>
+                      <div className="srv-pass-wrap">
+                        <input
+                          className="srv-form-input"
+                          type={srvPassVisible ? "text" : "password"}
+                          value={srvPass}
+                          onChange={e => setSrvPass(e.target.value)}
+                          placeholder="비밀번호"
+                        />
+                        <button
+                          className="srv-pass-toggle"
+                          onClick={() => setSrvPassVisible(v => !v)}
+                          title={srvPassVisible ? "숨기기" : "표시"}
+                        >{srvPassVisible ? "🙈" : "👁"}</button>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* 인증 방식 */}
+                  <div className="srv-form-row">
+                    <div className="srv-form-col srv-full-col">
+                      <label className="srv-form-label">인증 방식</label>
+                      <div className="srv-auth-badge">RustDB AUTH Protocol v1 · 평문 (내부 네트워크 전용)</div>
+                    </div>
+                  </div>
+
+                  <div className="srv-divider" />
+
+                  {/* 상태 표시 */}
+                  <div className="srv-status-strip">
+                    <span className={`srv-dot ${serverStatus.running ? "running" : "stopped"}`} />
+                    <span className={`srv-strip-text ${serverStatus.running ? "running" : "stopped"}`}>
+                      {serverStatus.running
+                        ? `RUNNING · 127.0.0.1:${serverStatus.port} · ${serverStatus.client_count} 클라이언트`
+                        : "STOPPED"}
+                    </span>
+                  </div>
+
+                  {serverMsg && <div className="srv-feedback">{serverMsg}</div>}
+
+                  {/* 버튼 행 */}
+                  <div className="srv-action-row">
+                    <button
+                      className="srv-action-btn primary"
+                      onClick={handleStartServer}
+                      disabled={serverStatus.running}
+                    >▶ 서버 시작</button>
+                    <button
+                      className="srv-action-btn danger"
+                      onClick={handleStopServer}
+                      disabled={!serverStatus.running}
+                    >■ 중지</button>
+                    <div style={{ flex: 1 }} />
+                    <button
+                      className="srv-action-btn save"
+                      onClick={() => setServerMsg("설정이 저장되었습니다.")}
+                    >저장</button>
+                  </div>
+                </div>
+              )}
+
+              {/* ── CLI 가이드 탭 ── */}
+              {srvTab === "guide" && (
+                <div className="srv-form-body">
+                  <div className="srv-guide-title">rustdb-client로 접속</div>
+                  <code className="srv-guide-code">
+                    {`cargo run -p rustdb-client -- -u ${srvUser} -p *** -h 127.0.0.1 -P ${portInput}`}
+                  </code>
+
+                  <div className="srv-guide-title" style={{ marginTop: 20 }}>인증 프로토콜 흐름</div>
+                  <div className="srv-guide-flow">
+                    <div className="srv-flow-row"><span className="srv-flow-arrow">→</span><code>AUTH {srvUser} &lt;password&gt;</code></div>
+                    <div className="srv-flow-row"><span className="srv-flow-arrow">←</span><code>OK authenticated as '{srvUser}'</code></div>
+                    <div className="srv-flow-row"><span className="srv-flow-arrow">→</span><code>SELECT * FROM t;</code></div>
+                    <div className="srv-flow-row"><span className="srv-flow-arrow">←</span><code>OK{"\\n"}&lt;결과&gt;{"\\n"}(0.001 sec){"\\n"}---END---</code></div>
+                  </div>
+
+                  <div className="srv-guide-title" style={{ marginTop: 20 }}>Netcat / PowerShell</div>
+                  <code className="srv-guide-code">nc 127.0.0.1 {portInput}</code>
+                  <code className="srv-guide-code" style={{ marginTop: 8 }}>
+                    {`$c = New-Object Net.Sockets.TcpClient('127.0.0.1',${portInput})`}
+                  </code>
+                </div>
               )}
             </div>
-
-            {/* 연결 방법 카드 */}
-            <div className="srv-card">
-              <div className="srv-card-title">CONNECTION GUIDE</div>
-              <div className="srv-guide-section">
-                <div className="srv-guide-label">Netcat (Linux/Mac)</div>
-                <code className="srv-code">nc 127.0.0.1 {serverStatus.port}</code>
-              </div>
-              <div className="srv-guide-section">
-                <div className="srv-guide-label">PowerShell</div>
-                <code className="srv-code">
-                  {"$c = New-Object Net.Sockets.TcpClient('127.0.0.1',"}
-                  {serverStatus.port}{")"}
-                </code>
-              </div>
-              <div className="srv-guide-section">
-                <div className="srv-guide-label">Protocol</div>
-                <div className="srv-guide-text">
-                  쿼리를 한 줄씩 전송 → 결과 수신 후 <code className="srv-code-inline">---END---</code> 확인
-                </div>
-              </div>
-            </div>
           </div>
 
-          {/* 로그 패널 */}
+          {/* ── 로그 패널 ── */}
           <div className="srv-log-panel">
             <div className="srv-log-header">
-              <span className="srv-card-title">ACTIVITY LOG</span>
+              <span className="srv-log-title">ACTIVITY LOG</span>
               <div className="srv-log-actions">
                 <span className="srv-log-count">{serverStatus.log.length} entries</span>
                 <button className="srv-log-clear" onClick={handleClearLog}>Clear</button>

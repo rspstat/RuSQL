@@ -71,30 +71,84 @@ fn handle_client(stream: TcpStream, shared: Arc<RwLock<SharedDatabase>>, log: Ar
     };
     let reader = BufReader::new(stream);
 
-    let _ = writeln!(writer, "RustDB Server v2.2.0 — Ready");
+    // 1. 배너
+    let _ = writeln!(writer, "+-----------------------------------------+");
+    let _ = writeln!(writer, "|   RustDB Server v2.2.0                  |");
+    let _ = writeln!(writer, "+-----------------------------------------+");
     let _ = writeln!(writer, "---END---");
+    let _ = writer.flush();
 
-    // 세션 전용 Executor
-    let mut exec = Executor::new_session(Arc::clone(&shared));
+    // 2. AUTH 핸드셰이크
+    let mut lines_iter = reader.lines();
+    let auth_line = match lines_iter.next() {
+        Some(Ok(l)) => l,
+        _ => return,
+    };
+    let parts: Vec<&str> = auth_line.splitn(3, ' ').collect();
+    let cmd       = parts.first().copied().unwrap_or("");
+    let auth_user = parts.get(1).copied().unwrap_or("").trim();
+    let auth_pass = parts.get(2).copied().unwrap_or("").trim();
 
-    for line in reader.lines() {
-        let query = match line {
-            Ok(q) => q.trim().to_string(),
-            Err(_) => break,
-        };
-        if query.is_empty() { continue; }
-
-        let preview = if query.len() > 60 { format!("{}...", &query[..60]) } else { query.clone() };
-        add_log(&log, &format!("Query: {}", preview));
-
-        let mut parser = Parser::new(&query);
-        let output = match parser.parse() {
-            Ok(stmt) => exec.execute(stmt).unwrap_or_else(|e| format!("Error: {}", e)),
-            Err(e)   => format!("Parse Error: {}", e),
-        };
-
-        let _ = writeln!(writer, "{}", output);
+    if !cmd.eq_ignore_ascii_case("auth") || auth_user.is_empty() {
+        let _ = writeln!(writer, "ERR expected: AUTH <user> <password>");
         let _ = writeln!(writer, "---END---");
+        return;
+    }
+
+    let ok = shared.read().unwrap().validate_credentials(auth_user, auth_pass);
+    if !ok {
+        add_log(&log, &format!("AUTH failed: '{}'", auth_user));
+        let _ = writeln!(writer, "ERR Access denied for user '{}'", auth_user);
+        let _ = writeln!(writer, "---END---");
+        let _ = writer.flush();
+        return;
+    }
+
+    add_log(&log, &format!("Authenticated: '{}'", auth_user));
+    let _ = writeln!(writer, "OK authenticated as '{}'", auth_user);
+    let _ = writeln!(writer, "---END---");
+    let _ = writer.flush();
+
+    // 3. 쿼리 세션
+    let mut exec = Executor::new_session(Arc::clone(&shared));
+    let mut buf  = String::new();
+
+    for line in lines_iter {
+        let input = match line { Ok(l) => l, Err(_) => break };
+        let trimmed = input.trim();
+
+        if trimmed.eq_ignore_ascii_case("exit") || trimmed.eq_ignore_ascii_case("quit") {
+            let _ = writeln!(writer, "Bye!");
+            let _ = writeln!(writer, "---END---");
+            break;
+        }
+
+        buf.push_str(&input);
+        buf.push('\n');
+        if !buf.contains(';') { continue; }
+
+        let queries = split_queries_smart(&buf);
+        buf.clear();
+
+        for q in &queries {
+            let preview = if q.len() > 60 { format!("{}...", &q[..60]) } else { q.clone() };
+            add_log(&log, &format!("[{}] {}", auth_user, preview));
+
+            let t0 = std::time::Instant::now();
+            let mut parser = Parser::new(q.as_str());
+            let (status, output) = match parser.parse() {
+                Ok(stmt) => match exec.execute(stmt) {
+                    Ok(r)  => ("OK",  r),
+                    Err(e) => ("ERR", e),
+                },
+                Err(e) => ("ERR", format!("Parse Error: {}", e)),
+            };
+            let _ = writeln!(writer, "{}", status);
+            let _ = writeln!(writer, "{}", output);
+            let _ = writeln!(writer, "({:.3} sec)", t0.elapsed().as_secs_f64());
+            let _ = writeln!(writer, "---END---");
+            let _ = writer.flush();
+        }
     }
 }
 
@@ -491,6 +545,8 @@ fn main() {
     // WAL 복구 포함 초기화 → UI 세션 executor + 공유 DB 상태 분리
     let exec   = Executor::new();
     let shared = exec.get_shared();
+    // users가 없으면 root/root 자동 생성
+    shared.write().unwrap().ensure_default_user();
     let db     = Arc::new(Mutex::new(exec));
 
     tauri::Builder::default()

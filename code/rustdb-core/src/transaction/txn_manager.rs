@@ -258,6 +258,27 @@ impl TransactionManager {
         Ok(())
     }
 
+    /// Group Commit Phase 1: COMMIT 레코드를 WAL에 기록 (fsync 없음).
+    /// 호출 후 GroupCommitCoordinator::sync_commit()으로 fsync를 완료해야 한다.
+    pub fn commit_write_record(&mut self) -> Result<(), String> {
+        if !self.active {
+            return Err("No active transaction.".to_string());
+        }
+        self.wal.log_commit_no_sync();
+        Ok(())
+    }
+
+    /// Group Commit Phase 3: fsync 완료 후 상태 정리.
+    /// WAL 파일 삭제, undo log 클리어, 트랜잭션 비활성화.
+    pub fn commit_finalize(&mut self) {
+        self.wal.clear();
+        self.undo_log.clear();
+        self.undo_log_file.clear();
+        self.snapshot = None;
+        self.savepoints.clear();
+        self.active = false;
+    }
+
     pub fn rollback(&mut self) -> Vec<UndoEntry> {
         self.wal.log_rollback();
         self.wal.clear();

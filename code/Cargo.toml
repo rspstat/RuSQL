@@ -3,6 +3,7 @@ members = [
     "rustdb-core",
     "rustdb-server",
     "rustdb-cli",
+    "rustdb-client",
     "rustdb-ui/src-tauri",
 ]
 resolver = "2"

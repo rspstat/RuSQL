@@ -137,6 +137,7 @@
 
 ### 트랜잭션
 - [x] WAL (Write-Ahead Logging) — 바이너리 redo log
+- [x] WAL Group Commit — 여러 세션의 COMMIT을 단일 fsync로 묶어 TPS 향상, SharedDatabase 락 해제 후 fsync
 - [x] WAL fsync per-commit — COMMIT 레코드 기록 시 `sync_all()` 호출 (`innodb_flush_log_at_trx_commit=1` 동등, 전원 장애 시 커밋 유실 방지)
 - [x] BEGIN / COMMIT / ROLLBACK
 - [x] SAVEPOINT / ROLLBACK TO SAVEPOINT
@@ -209,8 +210,8 @@
 - [x] 사이드바 섹션 접기/펼치기, 개수 뱃지
 - [x] 사이드바 너비 조절 (드래그)
 - [x] 테이블 우클릭 컨텍스트 메뉴 (MySQL 스타일)
-- [x] GUI 테이블 브라우저 뷰 (데이터 그리드 + 필터)
-- [x] TCP 서버 관리 뷰 (시작 / 중지 / 로그)
+- [x] ERD Editor 뷰 — 테이블 카드 + FK 관계선(직각 꺾임, 라운드 코너), 카드 드래그 / 캔버스 팬 / 휠 줌, 카드 클릭 시 하단 데이터 패널 (데이터 그리드 + 필터)
+- [x] TCP 서버 관리 뷰 — DBeaver 스타일 연결 구성 폼 (호스트·포트 ±·사용자·비밀번호 토글), 메인/CLI 가이드 탭, 서버 랙 SVG 아이콘, 활동 로그
 - [x] AI Assistant 뷰 (사이드바 4번째 아이콘, 준비 중)
 - [x] 멀티 쿼리 결과 표시
 - [x] 결과 페이지네이션 — PAGE_SIZE=100, 초과 시 ‹/› 버튼 + 페이지 표시
@@ -218,6 +219,9 @@
 - [x] 쿼리 자동 저장 (탭별)
 - [x] 결과창 크기 조절 (드래그)
 - [x] 전체 스크롤바 스타일 통일 (Monaco 에디터 스크롤바 기준)
+- [x] 탭별 결과 보존 (탭 전환 시 결과 패널 유지, tabResults Record로 탭별 독립 관리)
+- [x] Monaco SQL 자동완성 — 테이블명·컬럼명·SQL 키워드 약 60개, schemaRef로 실시간 스키마 반영
+- [x] 결과 테이블 컬럼 너비 조절 — th 드래그 resize handle, 첫 드래그 시 DOM 실측값 기반 초기화, table-layout: fixed 전환
 
 <br/>
 
@@ -232,13 +236,14 @@
 - [x] B+Tree ORDER 증가 (4 → 16) — 트리 깊이 감소, 노드 분할 빈도 절감
 - [x] Sort-Merge Join
 - [x] B+Tree 범위 스캔 최적화 (scan_from_node / scan_to_node 가지치기, O(log N + k))
-- [ ] WAL Group Commit (TPS 향상)
+- [x] WAL Group Commit (TPS 향상) — 여러 세션의 COMMIT을 단일 fsync로 묶음, SharedDatabase 락 해제 후 fsync 수행
 
 ### 네트워크
 - [x] TCP 서버 (포트 7878)
 - [x] 멀티 클라이언트 동시 접속 (스레드 per 클라이언트)
 - [x] 진정한 다중 세션 동시성 — `SharedDatabase`를 `Arc<RwLock<SharedDatabase>>`로 추출, 각 TCP 클라이언트는 `Executor::new_session(shared)`으로 독립 Executor(트랜잭션·`current_db`) 보유, 전역 `Mutex` 없이 병렬 쿼리 실행
-- [ ] 클라이언트 CLI (`rustdb-client`)
+- [x] TCP AUTH 인증 — 연결 시 `AUTH user pass` 핸드셰이크, users 없으면 `root`/`root` 자동 생성 (`rustdb-server` + Tauri 내장 서버 동일 프로토콜)
+- [x] 클라이언트 CLI (`rustdb-client`) — AUTH 핸드셰이크, 멀티라인 SQL, ANSI 색상 출력
 
 ### MCP 연동 (`rustdb-mcp`)
 - [x] AI Assistant 뷰 (UI 레이아웃 완성)
@@ -250,7 +255,7 @@
 - [x] 쿼리 히스토리
 - [ ] 결과 CSV 내보내기
 - [ ] 다크 / 라이트 테마 전환
-- [ ] 탭별 결과 보존 (탭 전환 시 결과 패널 유지)
+- [x] 탭별 결과 보존 (탭 전환 시 결과 패널 유지)
 
 <br/>
 
@@ -259,8 +264,11 @@
 # REPL 모드
 cargo run -p rustdb-cli
 
-# 서버 모드
+# 서버 모드 (TCP, 포트 7878)
 cargo run -p rustdb-server
+
+# 클라이언트 CLI (서버 실행 후)
+cargo run -p rustdb-client -- -u root -p root -h 127.0.0.1 -P 7878
 
 # UI 모드
 cd rustdb-ui && npm run tauri dev

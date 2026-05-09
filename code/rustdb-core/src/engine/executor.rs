@@ -5,6 +5,7 @@ use std::sync::{Arc, RwLock};
 use chrono;
 use serde::{Serialize, Deserialize};
 use crate::transaction::txn_manager::TransactionManager;
+use crate::transaction::group_commit::GroupCommitCoordinator;
 use crate::parser::ast::*;
 use crate::catalog::schema::{Catalog, ColumnDef as SchemaCol};
 use crate::storage::disk::{DiskManager, IndexMeta};
@@ -47,6 +48,37 @@ pub struct SharedDatabase {
     pub databases: HashSet<String>,
     pub users: Vec<UserRecord>,
     pub grants: Vec<GrantRecord>,
+    pub group_commit_coord: Arc<GroupCommitCoordinator>,
+}
+
+impl SharedDatabase {
+    /// TCP 인증: users가 비어있으면 open 모드(항상 통과).
+    /// password_hash가 None인 사용자는 빈 비밀번호로 접속 가능.
+    pub fn validate_credentials(&self, user: &str, password: &str) -> bool {
+        if self.users.is_empty() { return true; }
+        self.users.iter().any(|u| {
+            u.user == user
+                && match &u.password_hash {
+                    None       => password.is_empty(),
+                    Some(hash) => hash == password,
+                }
+        })
+    }
+
+    /// users가 비어있으면 root/root 계정을 자동 생성하고 true 반환.
+    pub fn ensure_default_user(&mut self) -> bool {
+        if self.users.is_empty() {
+            self.users.push(UserRecord {
+                user: "root".into(),
+                host: "%".into(),
+                password_hash: Some("root".into()),
+            });
+            self.disk.save_users(&self.users);
+            true
+        } else {
+            false
+        }
+    }
 }
 
 pub struct Executor {
@@ -192,6 +224,7 @@ impl Executor {
                 databases,
                 users,
                 grants,
+                group_commit_coord: Arc::new(GroupCommitCoordinator::new()),
             })),
             txn: TransactionManager::new(),
             current_db,
@@ -219,9 +252,58 @@ impl Executor {
     }
 
     pub fn execute(&mut self, stmt: Statement) -> Result<String, String> {
+        // COMMIT은 두 단계로 분리: Phase1(락 보유 중) → fsync(락 해제 후) → finalize
+        if let Statement::Commit = stmt {
+            return self.execute_commit_grouped();
+        }
         let arc = Arc::clone(&self.shared);
         let mut s = arc.write().unwrap();
         self.execute_with_s(&mut s, stmt)
+    }
+
+    /// Group Commit 경로:
+    /// 1) SharedDatabase 락 보유 중: 검증 + dirty page 플러시 + COMMIT 레코드 기록(fsync 없음)
+    /// 2) 락 해제 후: GroupCommitCoordinator로 단일 fsync (여러 세션이 공유)
+    /// 3) WAL 및 트랜잭션 상태 정리
+    fn execute_commit_grouped(&mut self) -> Result<String, String> {
+        // Phase 1 — SharedDatabase 락 보유
+        let coord = {
+            let arc = Arc::clone(&self.shared);
+            let mut s = arc.write().unwrap();
+            self.exec_commit_phase1(&mut s)?;
+            Arc::clone(&s.group_commit_coord)
+        }; // SharedDatabase 락 해제
+
+        // Phase 2 — 락 없이 Group fsync
+        coord.sync_commit();
+
+        // Phase 3 — WAL 파일 삭제 + 트랜잭션 상태 초기화
+        self.txn.commit_finalize();
+
+        Ok("Transaction committed.".to_string())
+    }
+
+    /// COMMIT Phase 1: SERIALIZABLE 검증, dirty page 플러시, COMMIT 레코드 기록 (fsync 없음).
+    fn exec_commit_phase1(&mut self, s: &mut SharedDatabase) -> Result<(), String> {
+        if let Err(e) = self.txn.validate_serializable(&s.tables) {
+            self.apply_rollback(s);
+            return Err(format!("{} (auto-rolled back)", e));
+        }
+
+        let dirty = self.txn.dirty_tables();
+        for table in &dirty {
+            if let Some(rows) = s.tables.get(table) {
+                let rows_clone = rows.clone();
+                s.buffer_pool.write_page(table, rows_clone);
+                s.buffer_pool.flush_page(table, &s.disk);
+            }
+        }
+
+        let txn_id = self.txn.current_txn_id();
+        self.txn.commit_write_record()?;
+        s.lock_mgr.release(txn_id);
+
+        Ok(())
     }
 
     fn execute_with_s(&mut self, s: &mut SharedDatabase, stmt: Statement) -> Result<String, String> {

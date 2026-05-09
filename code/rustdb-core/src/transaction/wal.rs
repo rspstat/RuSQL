@@ -149,6 +149,18 @@ impl WalManager {
         self.write_encoded(&Self::encode(&record), true);
     }
 
+    /// COMMIT 레코드를 기록하되 fsync하지 않음 (Group Commit용).
+    /// 호출자가 이후 GroupCommitCoordinator::sync_commit()으로 fsync를 보장해야 한다.
+    pub fn log_commit_no_sync(&self) {
+        let record = WalRecord {
+            op: WalOp::Commit,
+            table_name: String::new(),
+            key: String::new(),
+            data: String::new(),
+        };
+        self.write_encoded(&Self::encode(&record), false);
+    }
+
     pub fn log_rollback(&self) {
         self.append(WalRecord {
             op: WalOp::Rollback,

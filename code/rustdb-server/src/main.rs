@@ -14,10 +14,7 @@ fn timestamp() -> String {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
-    let hh = (secs % 86400) / 3600;
-    let mm = (secs % 3600) / 60;
-    let ss = secs % 60;
-    format!("{:02}:{:02}:{:02}", hh, mm, ss)
+    format!("{:02}:{:02}:{:02}", (secs % 86400) / 3600, (secs % 3600) / 60, secs % 60)
 }
 
 fn log(msg: &str) {
@@ -25,7 +22,6 @@ fn log(msg: &str) {
 }
 
 // ─── 주석 인식 쿼리 분리 ────────────────────────────────────
-// `;` 기준 분리, --, #, /* */ 주석 및 '' 문자열 안의 `;` 무시
 fn split_queries_smart(input: &str) -> Vec<String> {
     let chars: Vec<char> = input.chars().collect();
     let len = chars.len();
@@ -77,7 +73,7 @@ fn split_queries_smart(input: &str) -> Vec<String> {
 // ─── 내장 명령 처리 ─────────────────────────────────────────
 fn handle_builtin(cmd: &str, client_count: usize, uptime: &Instant) -> Option<String> {
     match cmd.to_lowercase().trim() {
-        "\\help" | "help" => Some(format!(
+        "\\help" | "help" => Some(
             "RustDB Server v2.2.0\n\
              Commands:\n\
                \\help           — 이 도움말\n\
@@ -86,83 +82,108 @@ fn handle_builtin(cmd: &str, client_count: usize, uptime: &Instant) -> Option<St
              SQL:\n\
                SHOW TABLES;    — 테이블 목록\n\
                DESCRIBE <t>;   — 테이블 구조\n\
-               SHOW BUFFER POOL; SHOW WAL; SHOW LOCKS;"
-        )),
+               SHOW BUFFER POOL; SHOW WAL; SHOW LOCKS;".to_string()
+        ),
         "\\status" => {
             let elapsed = uptime.elapsed().as_secs();
             Some(format!(
-                "Status: RUNNING\n\
-                 Uptime: {}h {}m {}s\n\
-                 Connections: {}",
-                elapsed / 3600,
-                (elapsed % 3600) / 60,
-                elapsed % 60,
-                client_count,
+                "Status: RUNNING\nUptime: {}h {}m {}s\nConnections: {}",
+                elapsed / 3600, (elapsed % 3600) / 60, elapsed % 60, client_count,
             ))
         }
         _ => None,
     }
 }
 
+// ─── 응답 전송 헬퍼 ─────────────────────────────────────────
+fn send(w: &mut TcpStream, status: &str, body: &str, elapsed: f64) {
+    let _ = writeln!(w, "{}", status);
+    let _ = writeln!(w, "{}", body);
+    let _ = writeln!(w, "({:.3} sec)", elapsed);
+    let _ = writeln!(w, "---END---");
+    let _ = w.flush();
+}
+
 // ─── 클라이언트 핸들러 ───────────────────────────────────────
-// 각 클라이언트는 독립적인 Executor(트랜잭션·current_db)를 가지며,
-// SharedDatabase(테이블·카탈로그·인덱스 등)는 Arc<RwLock>으로 공유한다.
 fn handle_client(
     stream: TcpStream,
     shared: Arc<RwLock<SharedDatabase>>,
     client_count: Arc<AtomicUsize>,
     server_start: Arc<Instant>,
 ) {
-    let peer = match stream.peer_addr() {
-        Ok(a) => a.to_string(),
-        Err(_) => "unknown".to_string(),
-    };
-
+    let peer = stream.peer_addr().map(|a| a.to_string()).unwrap_or_else(|_| "unknown".into());
     let count = client_count.fetch_add(1, Ordering::SeqCst) + 1;
     log(&format!("Client connected: {} (total: {})", peer, count));
 
     let mut writer = match stream.try_clone() {
         Ok(s) => s,
-        Err(_) => {
-            client_count.fetch_sub(1, Ordering::SeqCst);
-            return;
-        }
+        Err(_) => { client_count.fetch_sub(1, Ordering::SeqCst); return; }
     };
     let reader = BufReader::new(stream);
 
-    // 환영 메시지
+    // ── 1. 배너 전송 ──
     let _ = writeln!(writer, "+-----------------------------------------+");
     let _ = writeln!(writer, "|   RustDB Server v2.2.0                  |");
     let _ = writeln!(writer, "|   Connected: {}{}|",
         peer, " ".repeat(23usize.saturating_sub(peer.len())));
     let _ = writeln!(writer, "+-----------------------------------------+");
-    let _ = writeln!(writer, "Type SQL queries ending with ';'");
-    let _ = writeln!(writer, "\\help for commands, exit to quit.");
     let _ = writeln!(writer, "---END---");
     let _ = writer.flush();
 
-    // 세션 전용 Executor: 트랜잭션 상태와 current_db는 이 스레드에만 존재
+    // ── 2. AUTH 핸드셰이크 ──
+    let mut lines_iter = reader.lines();
+
+    let auth_line = match lines_iter.next() {
+        Some(Ok(l)) => l,
+        _ => {
+            client_count.fetch_sub(1, Ordering::SeqCst);
+            return;
+        }
+    };
+
+    // "AUTH username password" 파싱 (password는 공백 포함 가능)
+    let parts: Vec<&str> = auth_line.splitn(3, ' ').collect();
+    let cmd       = parts.first().copied().unwrap_or("");
+    let auth_user = parts.get(1).copied().unwrap_or("").trim();
+    let auth_pass = parts.get(2).copied().unwrap_or("").trim();
+
+    if !cmd.eq_ignore_ascii_case("auth") || auth_user.is_empty() {
+        let _ = writeln!(writer, "ERR expected: AUTH <user> <password>");
+        let _ = writeln!(writer, "---END---");
+        let _ = writer.flush();
+        client_count.fetch_sub(1, Ordering::SeqCst);
+        return;
+    }
+
+    let ok = shared.read().unwrap().validate_credentials(auth_user, auth_pass);
+    if !ok {
+        log(&format!("[{}] AUTH failed: '{}'", peer, auth_user));
+        let _ = writeln!(writer, "ERR Access denied for user '{}'", auth_user);
+        let _ = writeln!(writer, "---END---");
+        let _ = writer.flush();
+        client_count.fetch_sub(1, Ordering::SeqCst);
+        return;
+    }
+
+    log(&format!("[{}] Authenticated as '{}'", peer, auth_user));
+    let _ = writeln!(writer, "OK authenticated as '{}'", auth_user);
+    let _ = writeln!(writer, "---END---");
+    let _ = writer.flush();
+
+    // ── 3. 쿼리 세션 ──
     let mut exec = Executor::new_session(Arc::clone(&shared));
+    let mut buf  = String::new();
 
-    // 멀티라인 쿼리 버퍼
-    let mut buf = String::new();
-
-    for line in reader.lines() {
-        let input = match line {
-            Ok(l) => l,
-            Err(_) => break,
-        };
-
+    for line in lines_iter {
+        let input = match line { Ok(l) => l, Err(_) => break };
         let trimmed = input.trim();
 
-        // exit / quit
         if trimmed.eq_ignore_ascii_case("exit") || trimmed.eq_ignore_ascii_case("quit") {
             let _ = writeln!(writer, "Bye!");
             let _ = writeln!(writer, "---END---");
             break;
         }
 
-        // 내장 명령 (세미콜론 없이 바로 실행)
         if trimmed.starts_with('\\') || trimmed.eq_ignore_ascii_case("help") {
             let cnt = client_count.load(Ordering::SeqCst);
             if let Some(resp) = handle_builtin(trimmed, cnt, &server_start) {
@@ -176,7 +197,6 @@ fn handle_client(
         buf.push_str(&input);
         buf.push('\n');
 
-        // 세미콜론이 있으면 실행
         if !buf.contains(';') { continue; }
 
         let queries = split_queries_smart(&buf);
@@ -188,12 +208,11 @@ fn handle_client(
             continue;
         }
 
-        // 세션 전용 exec 를 직접 사용 — 전역 락 없이 동시 실행 가능
         for q in &queries {
             let preview = if q.len() > 60 { format!("{}...", &q[..60]) } else { q.clone() };
-            log(&format!("[{}] Query: {}", peer, preview));
+            log(&format!("[{}@{}] {}", auth_user, peer, preview));
 
-            let q_start = Instant::now();
+            let t0 = Instant::now();
             let mut p = Parser::new(q.as_str());
             let (status, output) = match p.parse() {
                 Ok(stmt) => match exec.execute(stmt) {
@@ -202,13 +221,7 @@ fn handle_client(
                 },
                 Err(e) => ("ERR", format!("Parse Error: {}", e)),
             };
-            let elapsed = q_start.elapsed().as_secs_f64();
-
-            let _ = writeln!(writer, "{}", status);
-            let _ = writeln!(writer, "{}", output);
-            let _ = writeln!(writer, "({:.3} sec)", elapsed);
-            let _ = writeln!(writer, "---END---");
-            let _ = writer.flush();
+            send(&mut writer, status, &output, t0.elapsed().as_secs_f64());
         }
     }
 
@@ -218,7 +231,6 @@ fn handle_client(
 
 // ─── 메인 ────────────────────────────────────────────────────
 fn main() {
-    // 포트 인수 파싱 (--port 1234 또는 1234)
     let args: Vec<String> = std::env::args().collect();
     let port: u16 = args.windows(2)
         .find(|w| w[0] == "--port")
@@ -227,26 +239,24 @@ fn main() {
         .unwrap_or(7878);
 
     let addr = format!("127.0.0.1:{}", port);
-
     let listener = match TcpListener::bind(&addr) {
         Ok(l) => l,
-        Err(e) => {
-            eprintln!("Failed to bind {}: {}", addr, e);
-            std::process::exit(1);
-        }
+        Err(e) => { eprintln!("Failed to bind {}: {}", addr, e); std::process::exit(1); }
     };
-
-    // non-blocking: Ctrl+C 감지용
     listener.set_nonblocking(true).ok();
 
-    // WAL 복구 포함 초기화 후 공유 상태만 추출.
-    // 이후 모든 세션은 new_session(shared)으로 생성된다.
-    let shared       = Executor::new().get_shared();
+    // WAL 복구 포함 초기화 후 공유 상태 추출
+    let shared = Executor::new().get_shared();
+
+    // users가 없으면 root/root 자동 생성
+    if shared.write().unwrap().ensure_default_user() {
+        log("No users found. Created default user 'root'@'%' with password 'root'.");
+    }
+
     let client_count = Arc::new(AtomicUsize::new(0));
     let running      = Arc::new(AtomicBool::new(true));
     let server_start = Arc::new(Instant::now());
 
-    // Ctrl+C 핸들러
     {
         let running = running.clone();
         ctrlc::set_handler(move || {
@@ -274,15 +284,9 @@ fn main() {
             Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                 thread::sleep(std::time::Duration::from_millis(50));
             }
-            Err(e) => {
-                eprintln!("Accept error: {}", e);
-                break;
-            }
+            Err(e) => { eprintln!("Accept error: {}", e); break; }
         }
     }
 
-    log(&format!(
-        "Server stopped. Total uptime: {}s",
-        server_start.elapsed().as_secs()
-    ));
+    log(&format!("Server stopped. Total uptime: {}s", server_start.elapsed().as_secs()));
 }
