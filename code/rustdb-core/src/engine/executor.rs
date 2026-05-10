@@ -35,6 +35,20 @@ pub struct GrantRecord {
 pub type Row = HashMap<String, String>;
 pub const NULL_VALUE: &str = "NULL";
 
+#[derive(Debug, Clone, Default)]
+pub struct ColumnStats {
+    pub distinct_count: usize,
+    pub null_count: usize,
+    pub min_val: Option<String>,
+    pub max_val: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct TableStats {
+    pub total_rows: usize,
+    pub columns: HashMap<String, ColumnStats>,
+}
+
 pub struct SharedDatabase {
     pub catalog: Catalog,
     pub tables: HashMap<String, Vec<Row>>,
@@ -49,6 +63,7 @@ pub struct SharedDatabase {
     pub users: Vec<UserRecord>,
     pub grants: Vec<GrantRecord>,
     pub group_commit_coord: Arc<GroupCommitCoordinator>,
+    pub table_stats: HashMap<String, TableStats>,
 }
 
 impl SharedDatabase {
@@ -225,6 +240,7 @@ impl Executor {
                 users,
                 grants,
                 group_commit_coord: Arc::new(GroupCommitCoordinator::new()),
+                table_stats: HashMap::new(),
             })),
             txn: TransactionManager::new(),
             current_db,
@@ -372,11 +388,13 @@ impl Executor {
             Statement::SetIsolationLevel(level) => self.exec_set_isolation_level(level),
             Statement::ShowIsolationLevel       => self.exec_show_isolation_level(),
             Statement::Vacuum { table }         => self.exec_vacuum(s, table),
+            Statement::AnalyzeTable { table }   => self.exec_analyze_table(s, table),
             Statement::ShowLocks                => self.exec_show_locks(s),
             Statement::Savepoint { name }       => self.exec_savepoint(name),
             Statement::ReleaseSavepoint { name } => self.exec_release_savepoint(name),
             Statement::RollbackTo { name }      => self.exec_rollback_to(s, name),
             Statement::Explain(inner)           => self.exec_explain(s, *inner),
+            Statement::ExplainAnalyze(inner)    => self.exec_explain_analyze(s, *inner),
             Statement::Union { left, right, all, order_by, limit, offset } => self.exec_union(s, *left, *right, all, order_by, limit, offset),
             Statement::With { ctes, query, recursive } => self.exec_with(s, ctes, *query, recursive),
             Statement::CreateDatabase { name, if_not_exists } => self.exec_create_database(s, name, if_not_exists),
@@ -518,7 +536,13 @@ impl Executor {
             // 3. Bare column name — only for unambiguous single-table lookups
             row.get(col_part)
         } else {
-            None
+            // 4. Bare column name without dot: search row keys for unambiguous suffix ".{col}"
+            let suffix = format!(".{}", col);
+            let mut it = row.iter().filter(|(k, _)| k.ends_with(suffix.as_str()));
+            match (it.next(), it.next()) {
+                (Some((_, v)), None) => Some(v), // unambiguous
+                _ => None,
+            }
         }
     }
 
@@ -1273,12 +1297,14 @@ impl Executor {
                 }
             }
             ConditionValue::Literal(lit) => {
-                // Resolve qualified column references (table.col) against the row.
-                // Number literals like "3.14" start with a digit and are excluded.
+                // Resolve column references against the row.
+                // Qualified (table.col) or bare identifiers starting with alpha/_ that are
+                // not parseable as numbers are tried as column lookups first.
                 let resolved;
-                let effective_lit: &str = if lit.contains('.')
-                    && lit.chars().next().map(|c| c.is_alphabetic() || c == '_').unwrap_or(false)
-                {
+                let is_ident_like = lit.chars().next()
+                    .map(|c| c.is_alphabetic() || c == '_').unwrap_or(false)
+                    && lit.parse::<f64>().is_err();
+                let effective_lit: &str = if is_ident_like {
                     if let Some(v) = Self::get_col(row, lit) {
                         resolved = v.clone();
                         &resolved
@@ -1362,6 +1388,17 @@ impl Executor {
                     SelectColumn::Column(c) => c.clone(),
                     SelectColumn::All => "*".to_string(),
                     SelectColumn::CaseWhen { alias, .. } => alias.clone().unwrap_or_else(|| "case".to_string()),
+                    SelectColumn::WinFunc { alias, func, .. } => alias.clone().unwrap_or_else(|| match func {
+                        WindowFunc::RowNumber  => "row_number".to_string(),
+                        WindowFunc::Rank       => "rank".to_string(),
+                        WindowFunc::DenseRank  => "dense_rank".to_string(),
+                        WindowFunc::Lag        => "lag".to_string(),
+                        WindowFunc::Lead       => "lead".to_string(),
+                        WindowFunc::FirstValue => "first_value".to_string(),
+                        WindowFunc::LastValue  => "last_value".to_string(),
+                        WindowFunc::NthValue   => "nth_value".to_string(),
+                    }),
+                    SelectColumn::Subquery { alias, .. } => alias.clone().unwrap_or_else(|| "(subquery)".to_string()),
                 };
                 (header, col.clone())
             }).collect();
@@ -1401,13 +1438,17 @@ impl Executor {
             return result;
         }
 
+        // ── JOIN 순서 최적화 (greedy, INNER-only) ─────────────────────────
+        let joins = Self::reorder_joins_greedy(&table, joins, &s.tables);
+
         // ── Planner: 인덱스 / 조인 알고리즘 결정 ──────────────────────────
         let has_agg = columns.iter().any(|c| matches!(c, SelectColumn::Agg { .. } | SelectColumn::AggAlias { .. }));
-        let planner = Planner::new(&s.tables, &s.indexes, &s.index_meta, &s.composite_indexes, &s.catalog);
+        let has_win = columns.iter().any(|c| matches!(c, SelectColumn::WinFunc { .. }));
+        let planner = Planner::new(&s.tables, &s.indexes, &s.index_meta, &s.composite_indexes, &s.catalog, &s.table_stats);
         let plan = planner.plan_covering(&table, &condition, &joins, &columns);
 
         // 인덱스 경로 실행 (집계 / FOR UPDATE / JOIN / LIMIT / ORDER BY 없을 때만)
-        if joins.is_empty() && !has_agg && !for_update
+        if joins.is_empty() && !has_agg && !has_win && !for_update
             && limit.is_none() && offset.is_none() && order_by.is_empty() && !distinct {
             match &plan.base.access {
                 // ── PK 포인트 ──────────────────────────────────────────────
@@ -1572,8 +1613,12 @@ impl Executor {
                     .map(|s| s.columns.iter().map(|c| c.name.clone()).collect())
                     .unwrap_or_default();
 
-                // 플래너가 선택한 알고리즘 가져오기
-                let algo = plan.joins.get(ji).map(|jp| &jp.algo);
+                // Cross/Natural joins always use nested loop (no hash/sort-merge)
+                let algo = if matches!(j.join_type, JoinType::Cross | JoinType::Natural) {
+                    None
+                } else {
+                    plan.joins.get(ji).map(|jp| &jp.algo)
+                };
 
                 let joined = match algo {
                     Some(JoinAlgo::SortMerge { probe_col, build_col }) => {
@@ -1706,6 +1751,7 @@ impl Executor {
                                     li = li0; // 같은 왼쪽 그룹이 다음 오른쪽 키에도 매칭될 수 있으므로 유지
                                 }
                             }
+                            _ => unreachable!("Cross/Natural joins do not use Sort-Merge"),
                         }
                         out
                     }
@@ -1783,6 +1829,7 @@ impl Executor {
                                     }
                                 }
                             }
+                            _ => unreachable!("Cross/Natural joins do not use Hash Join"),
                         }
                         out
                     }
@@ -1837,6 +1884,37 @@ impl Executor {
                                     }
                                 }
                             }
+                            JoinType::Cross => {
+                                // Cartesian product — no condition
+                                for left in &current {
+                                    for right in &right_rows {
+                                        let mut merged = left.clone();
+                                        merge_right(&mut merged, right, &j.table);
+                                        out.push(merged);
+                                    }
+                                }
+                            }
+                            JoinType::Natural => {
+                                // Equi-join on all columns with identical names in both tables
+                                let common_cols: Vec<String> = right_schema_cols.iter()
+                                    .filter(|rc| current.first()
+                                        .map(|lr| lr.contains_key(*rc) || lr.keys().any(|k| k == *rc))
+                                        .unwrap_or(false))
+                                    .cloned()
+                                    .collect();
+                                for left in &current {
+                                    for right in &right_rows {
+                                        let mut merged = left.clone();
+                                        merge_right(&mut merged, right, &j.table);
+                                        let matches = common_cols.iter().all(|col| {
+                                            let lv = left.get(col).map(String::as_str).unwrap_or("");
+                                            let rv = right.get(col).map(String::as_str).unwrap_or("");
+                                            lv == rv
+                                        });
+                                        if matches { out.push(merged); }
+                                    }
+                                }
+                            }
                         }
                         out
                     }
@@ -1848,8 +1926,13 @@ impl Executor {
                 .collect()
         };
 
-        // ORDER BY
+        // WINDOW FUNCTIONS (WHERE 필터 후, ORDER BY 전)
         let mut result = result;
+        if has_win {
+            result = Self::compute_window_functions(result, &columns);
+        }
+
+        // ORDER BY
         if !order_by.is_empty() {
             result.sort_by(|a, b| {
                 for ord in &order_by {
@@ -1998,6 +2081,20 @@ impl Executor {
                         v
                     }
                     SelectColumn::Expr { expr, .. } => Self::eval_arith(row, expr),
+                    SelectColumn::WinFunc { alias, func, .. } => {
+                        let key = alias.clone().unwrap_or_else(|| match func {
+                            WindowFunc::RowNumber  => "row_number".to_string(),
+                            WindowFunc::Rank       => "rank".to_string(),
+                            WindowFunc::DenseRank  => "dense_rank".to_string(),
+                            WindowFunc::Lag        => "lag".to_string(),
+                            WindowFunc::Lead       => "lead".to_string(),
+                            WindowFunc::FirstValue => "first_value".to_string(),
+                            WindowFunc::LastValue  => "last_value".to_string(),
+                            WindowFunc::NthValue   => "nth_value".to_string(),
+                        });
+                        row.get(&key).cloned().unwrap_or_default()
+                    }
+                    SelectColumn::Subquery { .. } => String::new(),
                 }).collect();
                 if seen.contains(&key) { false } else { seen.push(key); true }
             });
@@ -2492,15 +2589,49 @@ impl Executor {
     }
 
     fn format_result(
-        &self,
-        s: &SharedDatabase,
-        result: Vec<Row>,
+        &mut self,
+        s: &mut SharedDatabase,
+        mut result: Vec<Row>,
         columns: Vec<SelectColumn>,
         table: String,
         joins: Vec<Join>,
     ) -> Result<String, String> {
         if result.is_empty() {
             return Ok("0 rows returned.".to_string());
+        }
+
+        // Pre-compute scalar subqueries and inject as __sq_N__ keys into each row
+        {
+            let mut sq_idx = 0usize;
+            let sq_queries: Vec<(usize, Statement)> = columns.iter().filter_map(|c| {
+                if let SelectColumn::Subquery { query, .. } = c {
+                    let idx = sq_idx;
+                    sq_idx += 1;
+                    Some((idx, *query.clone()))
+                } else { None }
+            }).collect();
+            for row in result.iter_mut() {
+                for (idx, query) in &sq_queries {
+                    let val = if let Statement::Select {
+                        table: st, subquery, distinct, columns: sub_cols,
+                        condition: sub_cond, joins: sub_joins, order_by,
+                        group_by, having, limit, offset, ..
+                    } = query.clone() {
+                        let sub_cond = sub_cond.map(|c| Self::substitute_correlated_condexpr(&c, row));
+                        match self.exec_select(
+                            s, st, subquery, distinct, sub_cols, sub_cond,
+                            sub_joins, order_by, group_by, having, limit, offset, false
+                        ) {
+                            Ok(output) => {
+                                let vals = self.extract_values_from_output(&output);
+                                vals.into_iter().next().unwrap_or_else(|| NULL_VALUE.to_string())
+                            }
+                            Err(_) => NULL_VALUE.to_string(),
+                        }
+                    } else { NULL_VALUE.to_string() };
+                    row.insert(format!("__sq_{}__", idx), val);
+                }
+            }
         }
 
         // 열 정의: (헤더명, 값 추출 방법 — Key 또는 Func 평가)
@@ -2523,7 +2654,9 @@ impl Executor {
             }
             pairs
         } else {
-            columns.iter().filter_map(|c| match c {
+            let mut sq_idx_col = 0usize;
+            columns.iter().filter_map(|c| {
+                match c {
                 SelectColumn::Column(name) => {
                     // 헤더는 bare 컬럼명 (table.col → col)
                     let header = name.rfind('.').map(|i| name[i+1..].to_string()).unwrap_or_else(|| name.clone());
@@ -2553,7 +2686,27 @@ impl Executor {
                     let header = alias.clone().unwrap_or_else(|| arith_to_str(expr));
                     Some((header, ColSource::Expr(expr.clone())))
                 }
+                SelectColumn::WinFunc { func, alias, .. } => {
+                    let header = alias.clone().unwrap_or_else(|| match func {
+                        WindowFunc::RowNumber  => "row_number".to_string(),
+                        WindowFunc::Rank       => "rank".to_string(),
+                        WindowFunc::DenseRank  => "dense_rank".to_string(),
+                        WindowFunc::Lag        => "lag".to_string(),
+                        WindowFunc::Lead       => "lead".to_string(),
+                        WindowFunc::FirstValue => "first_value".to_string(),
+                        WindowFunc::LastValue  => "last_value".to_string(),
+                        WindowFunc::NthValue   => "nth_value".to_string(),
+                    });
+                    Some((header.clone(), ColSource::Key(header)))
+                }
+                SelectColumn::Subquery { alias, .. } => {
+                    let key = format!("__sq_{}__", sq_idx_col);
+                    sq_idx_col += 1;
+                    let header = alias.clone().unwrap_or_else(|| "(subquery)".to_string());
+                    Some((header, ColSource::Key(key)))
+                }
                 SelectColumn::All => None,
+                }
             }).collect()
         };
 
@@ -2613,6 +2766,168 @@ impl Executor {
         output.push_str(&separator);
         output.push_str(&format!("\n{} row(s) returned.", result.len()));
         Ok(output)
+    }
+
+    /// 윈도우 함수 계산: 각 WinFunc SelectColumn에 대해 결과값을 행에 삽입한다.
+    fn compute_window_functions(mut rows: Vec<Row>, columns: &[SelectColumn]) -> Vec<Row> {
+        for col in columns {
+            let (func, wf_col, wf_offset, partition_by, win_order_by, alias) = match col {
+                SelectColumn::WinFunc { func, col, offset, partition_by, order_by, alias } =>
+                    (func, col, *offset, partition_by, order_by, alias),
+                _ => continue,
+            };
+            let label = alias.clone().unwrap_or_else(|| match func {
+                WindowFunc::RowNumber  => "row_number".to_string(),
+                WindowFunc::Rank       => "rank".to_string(),
+                WindowFunc::DenseRank  => "dense_rank".to_string(),
+                WindowFunc::Lag        => "lag".to_string(),
+                WindowFunc::Lead       => "lead".to_string(),
+                WindowFunc::FirstValue => "first_value".to_string(),
+                WindowFunc::LastValue  => "last_value".to_string(),
+                WindowFunc::NthValue   => "nth_value".to_string(),
+            });
+
+            let n = rows.len();
+            let mut values: Vec<String> = vec![String::new(); n];
+
+            // 파티션 그룹핑 (삽입 순서 유지)
+            let mut partition_order: Vec<Vec<String>> = Vec::new();
+            let mut partition_map: std::collections::HashMap<Vec<String>, Vec<usize>> =
+                std::collections::HashMap::new();
+            for (i, row) in rows.iter().enumerate() {
+                let pk: Vec<String> = partition_by.iter()
+                    .map(|c| Self::get_col(row, c).cloned().unwrap_or_default())
+                    .collect();
+                if !partition_map.contains_key(&pk) { partition_order.push(pk.clone()); }
+                partition_map.entry(pk).or_default().push(i);
+            }
+
+            for pk in &partition_order {
+                let part_indices = &partition_map[pk];
+
+                // 윈도우 ORDER BY 기준 정렬
+                let mut sorted: Vec<usize> = part_indices.clone();
+                if !win_order_by.is_empty() {
+                    sorted.sort_by(|&a, &b| {
+                        for ord in win_order_by {
+                            let av = Self::get_col(&rows[a], &ord.column).cloned().unwrap_or_default();
+                            let bv = Self::get_col(&rows[b], &ord.column).cloned().unwrap_or_default();
+                            let cmp = match (av.parse::<f64>(), bv.parse::<f64>()) {
+                                (Ok(af), Ok(bf)) => af.partial_cmp(&bf).unwrap_or(std::cmp::Ordering::Equal),
+                                _ => av.cmp(&bv),
+                            };
+                            let cmp = if ord.ascending { cmp } else { cmp.reverse() };
+                            if cmp != std::cmp::Ordering::Equal { return cmp; }
+                        }
+                        std::cmp::Ordering::Equal
+                    });
+                }
+
+                match func {
+                    WindowFunc::RowNumber => {
+                        for (pos, &row_idx) in sorted.iter().enumerate() {
+                            values[row_idx] = (pos + 1).to_string();
+                        }
+                    }
+                    WindowFunc::Rank => {
+                        let mut rank = 1usize;
+                        let mut i = 0;
+                        while i < sorted.len() {
+                            let mut j = i;
+                            while j + 1 < sorted.len()
+                                && Self::win_order_eq(&rows[sorted[i]], &rows[sorted[j + 1]], win_order_by)
+                            {
+                                j += 1;
+                            }
+                            for k in i..=j { values[sorted[k]] = rank.to_string(); }
+                            rank += j - i + 1;
+                            i = j + 1;
+                        }
+                    }
+                    WindowFunc::DenseRank => {
+                        let mut rank = 1usize;
+                        let mut i = 0;
+                        while i < sorted.len() {
+                            let mut j = i;
+                            while j + 1 < sorted.len()
+                                && Self::win_order_eq(&rows[sorted[i]], &rows[sorted[j + 1]], win_order_by)
+                            {
+                                j += 1;
+                            }
+                            for k in i..=j { values[sorted[k]] = rank.to_string(); }
+                            rank += 1;
+                            i = j + 1;
+                        }
+                    }
+                    WindowFunc::Lag => {
+                        let col_name = wf_col.as_deref().unwrap_or("");
+                        let off = wf_offset.unsigned_abs() as usize;
+                        for (pos, &row_idx) in sorted.iter().enumerate() {
+                            values[row_idx] = if pos >= off {
+                                Self::get_col(&rows[sorted[pos - off]], col_name)
+                                    .cloned().unwrap_or_else(|| "NULL".to_string())
+                            } else {
+                                "NULL".to_string()
+                            };
+                        }
+                    }
+                    WindowFunc::Lead => {
+                        let col_name = wf_col.as_deref().unwrap_or("");
+                        let off = wf_offset.unsigned_abs() as usize;
+                        for (pos, &row_idx) in sorted.iter().enumerate() {
+                            values[row_idx] = if pos + off < sorted.len() {
+                                Self::get_col(&rows[sorted[pos + off]], col_name)
+                                    .cloned().unwrap_or_else(|| "NULL".to_string())
+                            } else {
+                                "NULL".to_string()
+                            };
+                        }
+                    }
+                    WindowFunc::FirstValue => {
+                        let col_name = wf_col.as_deref().unwrap_or("");
+                        let first_val = sorted.first()
+                            .and_then(|&i| Self::get_col(&rows[i], col_name).cloned())
+                            .unwrap_or_else(|| "NULL".to_string());
+                        for &row_idx in &sorted {
+                            values[row_idx] = first_val.clone();
+                        }
+                    }
+                    WindowFunc::LastValue => {
+                        let col_name = wf_col.as_deref().unwrap_or("");
+                        let last_val = sorted.last()
+                            .and_then(|&i| Self::get_col(&rows[i], col_name).cloned())
+                            .unwrap_or_else(|| "NULL".to_string());
+                        for &row_idx in &sorted {
+                            values[row_idx] = last_val.clone();
+                        }
+                    }
+                    WindowFunc::NthValue => {
+                        let col_name = wf_col.as_deref().unwrap_or("");
+                        let n = (wf_offset.max(1) as usize) - 1; // 1-indexed → 0-indexed
+                        let nth_val = sorted.get(n)
+                            .and_then(|&i| Self::get_col(&rows[i], col_name).cloned())
+                            .unwrap_or_else(|| "NULL".to_string());
+                        for &row_idx in &sorted {
+                            values[row_idx] = nth_val.clone();
+                        }
+                    }
+                }
+            }
+
+            for (i, row) in rows.iter_mut().enumerate() {
+                row.insert(label.clone(), values[i].clone());
+            }
+        }
+        rows
+    }
+
+    /// 윈도우 ORDER BY 기준으로 두 행이 동일한 순서값인지 확인 (RANK/DENSE_RANK 동점 판별)
+    fn win_order_eq(a: &Row, b: &Row, order_by: &[OrderBy]) -> bool {
+        order_by.iter().all(|ord| {
+            let av = Self::get_col(a, &ord.column).cloned().unwrap_or_default();
+            let bv = Self::get_col(b, &ord.column).cloned().unwrap_or_default();
+            av == bv
+        })
     }
 
     fn exec_update(
@@ -3655,6 +3970,18 @@ impl Executor {
                         }
                     }
                 }
+                JoinType::Cross | JoinType::Natural => {
+                    for left in &current {
+                        for right in &right_rows {
+                            let mut merged = left.clone();
+                            for (k, v) in right.iter() {
+                                merged.insert(format!("{}.{}", tbl, k), v.clone());
+                                merged.entry(k.clone()).or_insert_with(|| v.clone());
+                            }
+                            if Self::eval_condexpr(&merged, &j.on_expr) { out.push(merged); }
+                        }
+                    }
+                }
             }
             current = out;
         }
@@ -3855,6 +4182,18 @@ impl Executor {
                                 merged.entry(k.clone()).or_insert_with(|| v.clone());
                             }
                             out.push(merged);
+                        }
+                    }
+                }
+                JoinType::Cross | JoinType::Natural => {
+                    for left in &current {
+                        for right in &right_rows {
+                            let mut merged = left.clone();
+                            for (k, v) in right.iter() {
+                                merged.insert(format!("{}.{}", tbl, k), v.clone());
+                                merged.entry(k.clone()).or_insert_with(|| v.clone());
+                            }
+                            if Self::eval_condexpr(&merged, &j.on_expr) { out.push(merged); }
                         }
                     }
                 }
@@ -4194,7 +4533,13 @@ impl Executor {
                 Statement::Select {
                     table: self.qualify_name(table),
                     subquery: subquery.map(|(q, alias)| (Box::new(self.qualify_stmt(s, *q)), alias)),
-                    columns,
+                    columns: columns.into_iter().map(|c| match c {
+                        SelectColumn::Subquery { query, alias } => SelectColumn::Subquery {
+                            query: Box::new(self.qualify_stmt(s, *query)),
+                            alias,
+                        },
+                        other => other,
+                    }).collect(),
                     distinct,
                     condition: condition.map(|c| self.qualify_condexpr(s, c)),
                     joins: joins.into_iter().map(|j| Join {
@@ -4262,6 +4607,8 @@ impl Executor {
                 Statement::Describe { table: self.qualify_name(table) },
             Statement::Vacuum { table } =>
                 Statement::Vacuum { table: table.map(|t| self.qualify_name(t)) },
+            Statement::AnalyzeTable { table } =>
+                Statement::AnalyzeTable { table: self.qualify_name(table) },
             Statement::Union { left, right, all, order_by, limit, offset } =>
                 Statement::Union {
                     left:  Box::new(self.qualify_stmt(s, *left)),
@@ -4279,6 +4626,8 @@ impl Executor {
                 },
             Statement::Explain(inner) =>
                 Statement::Explain(Box::new(self.qualify_stmt(s, *inner))),
+            Statement::ExplainAnalyze(inner) =>
+                Statement::ExplainAnalyze(Box::new(self.qualify_stmt(s, *inner))),
             Statement::MultiUpdate { tables, joins, assignments, condition } =>
                 Statement::MultiUpdate {
                     tables: tables.into_iter().map(|t| self.qualify_name(t)).collect(),
@@ -4499,6 +4848,173 @@ impl Executor {
         Ok(format!("VACUUM complete. {} dead row(s) removed.", total_removed))
     }
 
+    /// Extract table prefixes from dotted column references in a condition tree.
+    fn collect_table_refs_from_expr(expr: &CondExpr, refs: &mut HashSet<String>) {
+        match expr {
+            CondExpr::And(l, r) | CondExpr::Or(l, r) => {
+                Self::collect_table_refs_from_expr(l, refs);
+                Self::collect_table_refs_from_expr(r, refs);
+            }
+            CondExpr::Not(inner) => Self::collect_table_refs_from_expr(inner, refs),
+            CondExpr::Leaf(cond) => {
+                if let ArithExpr::Col(c) = &cond.left {
+                    if let Some(pos) = c.rfind('.') {
+                        refs.insert(c[..pos].to_string());
+                    }
+                }
+                if let ConditionValue::Literal(v) = &cond.value {
+                    if let Some(pos) = v.rfind('.') {
+                        let prefix = &v[..pos];
+                        if prefix.chars().next().map(|c| c.is_alphabetic() || c == '_').unwrap_or(false) {
+                            refs.insert(prefix.to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Greedy JOIN reorder: smallest table first, dependency-aware, INNER joins only.
+    /// If any non-INNER join is present, returns original order unchanged.
+    fn reorder_joins_greedy(base_table: &str, joins: Vec<Join>, tables: &HashMap<String, Vec<Row>>) -> Vec<Join> {
+        if joins.len() <= 1 { return joins; }
+        if joins.iter().any(|j| !matches!(j.join_type, JoinType::Inner | JoinType::Natural)) { return joins; }
+
+        let mut available: HashSet<String> = HashSet::new();
+        available.insert(base_table.to_string());
+        if let Some(pos) = base_table.rfind('.') {
+            available.insert(base_table[pos + 1..].to_string());
+        }
+
+        let mut remaining = joins;
+        let mut reordered = Vec::new();
+
+        while !remaining.is_empty() {
+            let candidates: Vec<usize> = remaining.iter().enumerate()
+                .filter_map(|(i, j)| {
+                    let mut refs = HashSet::new();
+                    Self::collect_table_refs_from_expr(&j.on_expr, &mut refs);
+                    let join_bare = j.table.split('.').last().unwrap_or(&j.table);
+                    let ok = refs.iter().all(|r| {
+                        let r_bare = r.split('.').last().unwrap_or(r);
+                        available.contains(r) || available.contains(r_bare)
+                            || r == &j.table || r_bare == join_bare
+                    });
+                    if ok { Some(i) } else { None }
+                })
+                .collect();
+
+            let best_idx = if candidates.is_empty() {
+                0
+            } else {
+                *candidates.iter().min_by_key(|&&i| {
+                    tables.get(&remaining[i].table).map(|r| r.len()).unwrap_or(usize::MAX)
+                }).unwrap_or(&candidates[0])
+            };
+
+            let j = remaining.remove(best_idx);
+            available.insert(j.table.clone());
+            if let Some(pos) = j.table.rfind('.') {
+                available.insert(j.table[pos + 1..].to_string());
+            }
+            reordered.push(j);
+        }
+        reordered
+    }
+
+    /// ANALYZE TABLE t — 컬럼별 통계 수집 후 TableStats 저장
+    fn exec_analyze_table(&self, s: &mut SharedDatabase, table: String) -> Result<String, String> {
+        let rows = s.tables.get(&table)
+            .ok_or_else(|| format!("Table '{}' not found", self.display_name(&table)))?
+            .iter()
+            .filter(|r| Self::is_visible(r))
+            .cloned()
+            .collect::<Vec<_>>();
+
+        let total = rows.len();
+        let mut distinct: HashMap<String, std::collections::HashSet<String>> = HashMap::new();
+        let mut null_cnt: HashMap<String, usize> = HashMap::new();
+        let mut min_map: HashMap<String, String> = HashMap::new();
+        let mut max_map: HashMap<String, String> = HashMap::new();
+
+        for row in &rows {
+            for (key, val) in row.iter() {
+                if key.starts_with('_') { continue; } // skip _xmin/_xmax
+                let col = key.rsplit('.').next().unwrap_or(key).to_string();
+                if val == NULL_VALUE || val.is_empty() {
+                    *null_cnt.entry(col).or_insert(0) += 1;
+                } else {
+                    distinct.entry(col.clone()).or_default().insert(val.clone());
+                    // numeric-aware min/max
+                    let new_lt = match (min_map.get(&col), val.parse::<f64>()) {
+                        (None, _) => true,
+                        (Some(cur), Ok(v)) => cur.parse::<f64>().map_or(true, |c| v < c),
+                        (Some(cur), Err(_)) => val.as_str() < cur.as_str(),
+                    };
+                    if new_lt { min_map.insert(col.clone(), val.clone()); }
+                    let new_gt = match (max_map.get(&col), val.parse::<f64>()) {
+                        (None, _) => true,
+                        (Some(cur), Ok(v)) => cur.parse::<f64>().map_or(true, |c| v > c),
+                        (Some(cur), Err(_)) => val.as_str() > cur.as_str(),
+                    };
+                    if new_gt { max_map.insert(col.clone(), val.clone()); }
+                }
+            }
+        }
+
+        let mut col_stats: HashMap<String, ColumnStats> = HashMap::new();
+        for (col, set) in &distinct {
+            col_stats.insert(col.clone(), ColumnStats {
+                distinct_count: set.len(),
+                null_count: *null_cnt.get(col).unwrap_or(&0),
+                min_val: min_map.get(col).cloned(),
+                max_val: max_map.get(col).cloned(),
+            });
+        }
+        // columns that are all-NULL have no distinct entry
+        for (col, cnt) in &null_cnt {
+            col_stats.entry(col.clone()).or_insert_with(|| ColumnStats {
+                distinct_count: 0,
+                null_count: *cnt,
+                min_val: None,
+                max_val: None,
+            });
+        }
+
+        let table_display = self.display_name(&table).to_string();
+        s.table_stats.insert(table.clone(), TableStats { total_rows: total, columns: col_stats.clone() });
+
+        // Build output table
+        let schema = s.catalog.get_table(&table);
+        let col_order: Vec<String> = schema
+            .map(|sc| sc.columns.iter().map(|c| c.name.clone()).collect())
+            .unwrap_or_else(|| { let mut v: Vec<String> = col_stats.keys().cloned().collect(); v.sort(); v });
+
+        let width = 50usize;
+        let bar = format!("+{}+", "-".repeat(width));
+        let header = format!("| {:<width$}|", format!("ANALYZE: {} ({} rows)", table_display, total), width = width - 1);
+        let col_header = format!("| {:<12} | {:>8} | {:>8} | {:<10} | {:<10} |",
+            "column", "distinct", "nulls", "min", "max");
+        let col_bar = "+".to_string() + &"-".repeat(14) + "+" + &"-".repeat(10) + "+" + &"-".repeat(10) + "+" + &"-".repeat(12) + "+" + &"-".repeat(12) + "+";
+
+        let mut lines = vec![bar.clone(), header, bar.clone(), col_header, col_bar.clone()];
+        for col in &col_order {
+            if let Some(cs) = col_stats.get(col) {
+                let min_s = cs.min_val.as_deref().unwrap_or("NULL");
+                let max_s = cs.max_val.as_deref().unwrap_or("NULL");
+                lines.push(format!("| {:<12} | {:>8} | {:>8} | {:<10} | {:<10} |",
+                    if col.len() > 12 { &col[..12] } else { col },
+                    cs.distinct_count,
+                    cs.null_count,
+                    if min_s.len() > 10 { &min_s[..10] } else { min_s },
+                    if max_s.len() > 10 { &max_s[..10] } else { max_s },
+                ));
+            }
+        }
+        lines.push(col_bar);
+        Ok(lines.join("\n"))
+    }
+
     /// EXPLAIN <SELECT> — 쿼리 실행 계획 출력 (실제 실행 안 함)
     fn exec_explain(&self, s: &SharedDatabase, stmt: Statement) -> Result<String, String> {
         let (table, condition, joins, columns) = match &stmt {
@@ -4510,9 +5026,60 @@ impl Executor {
             }
             other => return Ok(format!("EXPLAIN: {:?} → not a SELECT", other)),
         };
-        let planner = Planner::new(&s.tables, &s.indexes, &s.index_meta, &s.composite_indexes, &s.catalog);
+        let planner = Planner::new(&s.tables, &s.indexes, &s.index_meta, &s.composite_indexes, &s.catalog, &s.table_stats);
         let plan = planner.plan_covering(&table, &condition, &joins, &columns);
         Ok(planner.explain(&plan))
+    }
+
+    /// EXPLAIN ANALYZE <SELECT> — 실행 계획 + 실제 실행 결과(행 수·소요 시간) 출력
+    fn exec_explain_analyze(&mut self, s: &mut SharedDatabase, stmt: Statement) -> Result<String, String> {
+        // 실행 계획 문자열 생성 (실행 전, 헤더만 교체)
+        let plan_body = match &stmt {
+            Statement::Select { table, condition, joins, subquery, columns, .. } => {
+                if subquery.is_some() {
+                    "| Access: SUBQUERY SCAN                            |\n".to_string()
+                } else {
+                    let planner = Planner::new(&s.tables, &s.indexes, &s.index_meta, &s.composite_indexes, &s.catalog, &s.table_stats);
+                    let plan = planner.plan_covering(table, condition, joins, columns);
+                    // explain()에서 헤더·구분선을 제외한 중간 행만 추출
+                    planner.explain(&plan)
+                        .lines()
+                        .skip(3)  // +---+ | QUERY PLAN | +---+
+                        .take_while(|l| !l.starts_with('+'))
+                        .map(|l| format!("{}\n", l))
+                        .collect()
+                }
+            }
+            _ => String::new(),
+        };
+
+        // 실제 실행 + 시간 측정
+        let start = std::time::Instant::now();
+        let result = self.execute_with_s(s, stmt)?;
+        let elapsed = start.elapsed();
+
+        // 실제 반환 행 수 추출
+        let actual_rows = result.lines()
+            .find(|l| l.contains("row(s) returned"))
+            .and_then(|l| l.trim().split_whitespace().next())
+            .and_then(|n| n.parse::<usize>().ok())
+            .unwrap_or(0);
+
+        let sep = "+--------------------------------------------------+";
+        let fmt_row = |label: &str, val: &str| -> String {
+            format!("| {:<48} |\n", format!("{}: {}", label, val))
+        };
+
+        let mut out = String::new();
+        out.push_str(sep); out.push('\n');
+        out.push_str("|              QUERY PLAN (ANALYZE)                |\n");
+        out.push_str(sep); out.push('\n');
+        out.push_str(&plan_body);
+        out.push_str("|                                                  |\n");
+        out.push_str(&fmt_row("Actual rows", &actual_rows.to_string()));
+        out.push_str(&fmt_row("Actual time", &format!("{:.3} sec", elapsed.as_secs_f64())));
+        out.push_str(sep);
+        Ok(out)
     }
 
     /// SHOW LOCKS: 보유 잠금 + wait-for 그래프 + 데드락 이력 출력

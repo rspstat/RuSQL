@@ -247,9 +247,23 @@ impl Parser {
                 let name = self.expect_ident()?;
                 Ok(Statement::ReleaseSavepoint { name })
             }
+            Some(Token::Analyze) => {
+                match self.advance() {
+                    Some(Token::Table) => {}
+                    other => return Err(format!("Expected TABLE after ANALYZE, got {:?}", other)),
+                }
+                let table = self.expect_ident()?;
+                Ok(Statement::AnalyzeTable { table })
+            }
             Some(Token::Explain) => {
-                let inner = self.parse()?;
-                Ok(Statement::Explain(Box::new(inner)))
+                if self.peek() == Some(&Token::Analyze) {
+                    self.advance();
+                    let inner = self.parse()?;
+                    Ok(Statement::ExplainAnalyze(Box::new(inner)))
+                } else {
+                    let inner = self.parse()?;
+                    Ok(Statement::Explain(Box::new(inner)))
+                }
             }
             Some(Token::Alter) => self.parse_alter(),
             Some(Token::Show)     => self.parse_show(),
@@ -995,6 +1009,116 @@ impl Parser {
                     } else { None };
                     SelectColumn::Func { name: "DATE_ADD".to_string(), args, alias }
                 }
+                // 윈도우 함수: ROW_NUMBER/RANK/DENSE_RANK/LAG/LEAD/FIRST_VALUE/LAST_VALUE/NTH_VALUE
+                Some(Token::RowNumber) | Some(Token::Rank) | Some(Token::DenseRank) |
+                Some(Token::Lag) | Some(Token::Lead) |
+                Some(Token::FirstValue) | Some(Token::LastValue) | Some(Token::NthValue) => {
+                    let func = match self.advance() {
+                        Some(Token::RowNumber)  => WindowFunc::RowNumber,
+                        Some(Token::Rank)       => WindowFunc::Rank,
+                        Some(Token::DenseRank)  => WindowFunc::DenseRank,
+                        Some(Token::Lag)        => WindowFunc::Lag,
+                        Some(Token::Lead)       => WindowFunc::Lead,
+                        Some(Token::FirstValue) => WindowFunc::FirstValue,
+                        Some(Token::LastValue)  => WindowFunc::LastValue,
+                        Some(Token::NthValue)   => WindowFunc::NthValue,
+                        _ => unreachable!(),
+                    };
+                    match self.advance() {
+                        Some(Token::LParen) => {}
+                        other => return Err(format!("Expected '(' after window function, got {:?}", other)),
+                    }
+                    let (wf_col, wf_offset) = match func {
+                        WindowFunc::Lag | WindowFunc::Lead => {
+                            let col = self.expect_col_ref()?;
+                            let off = if self.peek() == Some(&Token::Comma) {
+                                self.advance();
+                                match self.advance() {
+                                    Some(Token::NumberLit(n)) => n.parse::<i64>().unwrap_or(1),
+                                    other => return Err(format!("Expected offset number in LAG/LEAD, got {:?}", other)),
+                                }
+                            } else { 1 };
+                            (Some(col), off)
+                        }
+                        WindowFunc::FirstValue | WindowFunc::LastValue => {
+                            let col = self.expect_col_ref()?;
+                            (Some(col), 0i64)
+                        }
+                        WindowFunc::NthValue => {
+                            let col = self.expect_col_ref()?;
+                            match self.advance() {
+                                Some(Token::Comma) => {}
+                                other => return Err(format!("Expected ',' in NTH_VALUE, got {:?}", other)),
+                            }
+                            let n = match self.advance() {
+                                Some(Token::NumberLit(n)) => n.parse::<i64>().unwrap_or(1),
+                                other => return Err(format!("Expected N in NTH_VALUE, got {:?}", other)),
+                            };
+                            (Some(col), n)
+                        }
+                        _ => (None, 0i64),
+                    };
+                    match self.advance() {
+                        Some(Token::RParen) => {}
+                        other => return Err(format!("Expected ')' after window function args, got {:?}", other)),
+                    }
+                    match self.advance() {
+                        Some(Token::Over) => {}
+                        other => return Err(format!("Expected OVER, got {:?}", other)),
+                    }
+                    match self.advance() {
+                        Some(Token::LParen) => {}
+                        other => return Err(format!("Expected '(' after OVER, got {:?}", other)),
+                    }
+                    let partition_by = if self.peek() == Some(&Token::Partition) {
+                        self.advance();
+                        match self.advance() {
+                            Some(Token::By) => {}
+                            other => return Err(format!("Expected BY after PARTITION, got {:?}", other)),
+                        }
+                        let mut cols = vec![self.expect_col_ref()?];
+                        while self.peek() == Some(&Token::Comma) {
+                            self.advance();
+                            cols.push(self.expect_col_ref()?);
+                        }
+                        cols
+                    } else { vec![] };
+                    let win_order_by = if self.peek() == Some(&Token::Order) {
+                        self.advance();
+                        match self.advance() {
+                            Some(Token::By) => {}
+                            other => return Err(format!("Expected BY after ORDER, got {:?}", other)),
+                        }
+                        let mut keys = Vec::new();
+                        loop {
+                            let col = self.expect_col_ref()?;
+                            let ascending = match self.peek() {
+                                Some(Token::Desc) => { self.advance(); false }
+                                Some(Token::Asc)  => { self.advance(); true }
+                                _ => true,
+                            };
+                            keys.push(OrderBy { column: col, ascending });
+                            if self.peek() == Some(&Token::Comma) { self.advance(); } else { break; }
+                        }
+                        keys
+                    } else { vec![] };
+                    match self.advance() {
+                        Some(Token::RParen) => {}
+                        other => return Err(format!("Expected ')' after OVER clause, got {:?}", other)),
+                    }
+                    let alias = if self.peek() == Some(&Token::As) {
+                        self.advance();
+                        Some(self.expect_alias_ident()?)
+                    } else { None };
+                    SelectColumn::WinFunc {
+                        func,
+                        col: wf_col,
+                        offset: wf_offset,
+                        partition_by,
+                        order_by: win_order_by,
+                        alias,
+                    }
+                }
                 // 스칼라 함수: UPPER(col), NOW(), CONCAT(a, b), ...
                 Some(Token::Upper) | Some(Token::Lower) | Some(Token::Length) |
                 Some(Token::Trim)  | Some(Token::Concat) | Some(Token::Substr) |
@@ -1036,6 +1160,21 @@ impl Parser {
                         Some(self.expect_alias_ident()?)
                     } else { None };
                     SelectColumn::Func { name: fname, args, alias }
+                }
+                // 스칼라 서브쿼리: (SELECT ...) [AS alias]
+                Some(Token::LParen) if self.tokens.get(self.pos + 1) == Some(&Token::Select) => {
+                    self.advance(); // consume (
+                    self.advance(); // consume SELECT
+                    let inner = self.parse_select()?;
+                    match self.advance() {
+                        Some(Token::RParen) => {}
+                        other => return Err(format!("Expected ')' after scalar subquery, got {:?}", other)),
+                    }
+                    let alias = if self.peek() == Some(&Token::As) {
+                        self.advance();
+                        Some(self.expect_alias_ident()?)
+                    } else { None };
+                    SelectColumn::Subquery { query: Box::new(inner), alias }
                 }
                 _ => {
                     let expr = self.parse_arith_expr()?;
@@ -1098,10 +1237,8 @@ impl Parser {
                 Some(Token::RParen) => {}
                 other => return Err(format!("Expected ')' after subquery, got {:?}", other)),
             }
-            match self.advance() {
-                Some(Token::As) => {}
-                other => return Err(format!("Expected AS after subquery, got {:?}", other)),
-            }
+            // AS alias — AS는 선택적
+            if self.peek() == Some(&Token::As) { self.advance(); }
             let alias = self.expect_ident()?;
             (String::new(), Some((Box::new(inner), alias)))
         } else {
@@ -1114,13 +1251,22 @@ impl Parser {
             (t, None)
         };
 
-        // JOIN / LEFT JOIN / RIGHT JOIN (다중 반복)
+        // JOIN / LEFT JOIN / RIGHT JOIN / CROSS JOIN / NATURAL JOIN (다중 반복)
         let mut joins = Vec::new();
         loop {
             let join_type = match self.peek() {
                 Some(Token::Join)  => { self.advance(); JoinType::Inner }
+                Some(Token::Inner) => {
+                    self.advance();
+                    match self.advance() {
+                        Some(Token::Join) => {}
+                        other => return Err(format!("Expected JOIN after INNER, got {:?}", other)),
+                    }
+                    JoinType::Inner
+                }
                 Some(Token::Left)  => {
                     self.advance();
+                    if self.peek() == Some(&Token::Outer) { self.advance(); }
                     match self.advance() {
                         Some(Token::Join) => {}
                         other => return Err(format!("Expected JOIN after LEFT, got {:?}", other)),
@@ -1129,11 +1275,28 @@ impl Parser {
                 }
                 Some(Token::Right) => {
                     self.advance();
+                    if self.peek() == Some(&Token::Outer) { self.advance(); }
                     match self.advance() {
                         Some(Token::Join) => {}
                         other => return Err(format!("Expected JOIN after RIGHT, got {:?}", other)),
                     }
                     JoinType::Right
+                }
+                Some(Token::Cross) => {
+                    self.advance();
+                    match self.advance() {
+                        Some(Token::Join) => {}
+                        other => return Err(format!("Expected JOIN after CROSS, got {:?}", other)),
+                    }
+                    JoinType::Cross
+                }
+                Some(Token::Natural) => {
+                    self.advance();
+                    match self.advance() {
+                        Some(Token::Join) => {}
+                        other => return Err(format!("Expected JOIN after NATURAL, got {:?}", other)),
+                    }
+                    JoinType::Natural
                 }
                 _ => break,
             };
@@ -1143,11 +1306,20 @@ impl Parser {
                 let a = self.expect_ident()?;
                 alias_map.insert(a, join_table.clone());
             }
-            match self.advance() {
-                Some(Token::On) => {}
-                other => return Err(format!("Expected ON, got {:?}", other)),
-            }
-            let on_expr = self.parse_condexpr()?;
+            let on_expr = if matches!(join_type, JoinType::Cross | JoinType::Natural) {
+                // No ON clause — dummy always-true condition
+                CondExpr::Leaf(Condition {
+                    left: ArithExpr::Num("1".to_string()),
+                    operator: Operator::Eq,
+                    value: ConditionValue::Literal("1".to_string()),
+                })
+            } else {
+                match self.advance() {
+                    Some(Token::On) => {}
+                    other => return Err(format!("Expected ON, got {:?}", other)),
+                }
+                self.parse_condexpr()?
+            };
             joins.push(Join { table: join_table, on_expr, join_type });
         }
 

@@ -1,5 +1,282 @@
 # DIFF — 변경 이력
 
+## 2026-05-10 (6)
+
+### 신규 기능
+
+#### CROSS JOIN / NATURAL JOIN
+
+**파일**: `parser/lexer.rs`, `parser/ast.rs`, `parser/parser.rs`, `engine/executor.rs`
+
+**문법**:
+```sql
+SELECT ... FROM t1 CROSS JOIN t2
+SELECT ... FROM t1 NATURAL JOIN t2
+-- LEFT OUTER JOIN / INNER JOIN 도 추가 지원
+SELECT ... FROM t1 LEFT OUTER JOIN t2 ON ...
+SELECT ... FROM t1 INNER JOIN t2 ON ...
+```
+
+**구현**:
+- Lexer: `Token::Cross`, `Token::Natural`, `Token::Outer` 추가
+- AST: `JoinType::Cross`, `JoinType::Natural` 추가
+- Parser: JOIN 루프에 `CROSS JOIN`(ON 절 없음), `NATURAL JOIN`(ON 절 없음), `INNER JOIN`, `LEFT OUTER JOIN`, `RIGHT OUTER JOIN` 케이스 추가. Cross/Natural은 dummy `1=1` CondExpr 사용
+- Executor (SELECT Nested Loop):
+  - `JoinType::Cross`: 순수 카르테시안 곱 (조건 없이 모든 조합)
+  - `JoinType::Natural`: 공통 컬럼명으로 자동 equi-join (right_schema_cols ∩ left row keys)
+  - Cross/Natural 은 Sort-Merge / Hash Join 경로 우회(항상 Nested Loop)
+  - MultiUpdate / MultiDelete JOIN 루프에도 Cross/Natural 케이스 추가
+- `reorder_joins_greedy`: Natural JOIN도 Inner처럼 reorder 허용
+
+**테스트**:
+- `test/test_full.sql` 전체 통과. CROSS JOIN(dept × emp, LIMIT 9), NATURAL JOIN(emp NATURAL JOIN sal on id) 정상 결과 확인.
+
+---
+
+## 2026-05-10 (5)
+
+### 신규 기능
+
+#### SELECT 스칼라 서브쿼리 (Scalar Subquery in Column List)
+
+**파일**: `parser/ast.rs`, `parser/parser.rs`, `engine/executor.rs`
+
+**문법**: `SELECT col1, (SELECT scalar FROM t2 WHERE ...) AS alias FROM t1`
+
+**지원**: 비상관(uncorrelated) 및 상관(correlated) 스칼라 서브쿼리 모두 지원.
+
+```sql
+-- 비상관: 전체 최대 salary
+SELECT name, salary, (SELECT MAX(salary) FROM emp) AS max_sal FROM emp;
+
+-- 상관: 해당 직원의 sal.amount
+SELECT e.name, (SELECT s.amount FROM sal s WHERE s.eid = e.id) AS my_sal FROM emp e;
+```
+
+**구현**:
+- AST: `SelectColumn::Subquery { query: Box<Statement>, alias: Option<String> }` 추가
+- Parser: `parse_select()` 컬럼 루프에서 `LParen + Select` 패턴 감지 → `SelectColumn::Subquery` 파싱
+- Executor `format_result()`: `&mut self, s: &mut SharedDatabase`로 시그니처 변경; 각 행에 대해 서브쿼리를 실행(상관 조건 치환 포함), 결과를 `__sq_N__` 키로 주입 후 `ColSource::Key` 방식으로 출력
+- `qualify_stmt()`: `SelectColumn::Subquery`의 내부 쿼리도 자동 qualify
+
+#### JOIN 순서 최적화 (Greedy Join Reorder)
+
+**파일**: `engine/executor.rs`
+
+**동작**: INNER JOIN만 있는 쿼리에서 ON 조건 의존성을 분석, 가장 작은 테이블을 우선 조인하는 그리디 순서 결정.
+
+**구현**:
+- `collect_table_refs_from_expr()`: ON 조건 트리에서 dotted 컬럼 참조의 테이블 prefix 추출
+- `reorder_joins_greedy()`: dependency-aware 그리디 알고리즘 — LEFT/RIGHT JOIN 혼재 시 원본 순서 유지
+- `exec_select()` Planner 호출 전에 `reorder_joins_greedy()` 적용
+
+**효과**: 작은 테이블 먼저 조인 → 중간 결과 크기 감소 → 전체 비용 절감. SQL 작성 순서와 무관하게 최적 순서 적용.
+
+### 테스트
+
+`test/test_full.sql` 전체 통과. 비정상 오류 0건, 의도된 오류 3건 (ENUM/SET 유효성 위반) 정상 반환 확인.
+
+---
+
+## 2026-05-10 (4)
+
+### 신규 기능
+
+#### ANALYZE TABLE
+
+**파일**: `parser/lexer.rs`(기존 Analyze 토큰), `parser/ast.rs`, `parser/parser.rs`, `engine/executor.rs`, `engine/planner.rs`
+
+**문법**: `ANALYZE TABLE tablename`
+
+**동작**: 테이블 전체 스캔 후 컬럼별 통계 수집 및 출력.
+
+```
++--------------------------------------------------+
+| ANALYZE: emp (6 rows)                            |
++--------------------------------------------------+
+| column       | distinct |    nulls | min        | max        |
++--------------+----------+----------+------------+------------+
+| id           |        6 |        0 | 1          | 6          |
+| dept_id      |        3 |        0 | 1          | 3          |
+| salary       |        5 |        0 | 6000       | 12000      |
+| status       |        2 |        0 | active     | inactive   |
++--------------+----------+----------+------------+------------+
+```
+
+**구현**:
+- AST: `Statement::AnalyzeTable { table }` 추가
+- Parser: `ANALYZE TABLE t` 파싱
+- Executor: `exec_analyze_table()` — 가시 행만 스캔, 컬럼별 distinct set·null count·min/max(수치 비교) 수집 → `SharedDatabase.table_stats` 저장
+- Planner: `table_stats: &HashMap<String, TableStats>` 필드 추가; `estimate_rows()` — `SecondaryPoint`에서 `total / distinct_count` 사용 (통계 없으면 기존 `/10` fallback)
+
+**효과**: 인덱스 컬럼 cardinality가 높을수록 SecondaryPoint 행 수 추정이 정확해져 JOIN 비용 계산 개선.
+
+---
+
+## 2026-05-10 (3)
+
+### 신규 기능
+
+#### 윈도우 함수 확장 — FIRST_VALUE / LAST_VALUE / NTH_VALUE
+
+**파일**: `parser/lexer.rs`, `parser/ast.rs`, `parser/parser.rs`, `engine/executor.rs`
+
+**지원 문법**:
+```sql
+FIRST_VALUE(col) OVER ([PARTITION BY col, ...] [ORDER BY col [ASC|DESC], ...])
+LAST_VALUE(col)  OVER ([PARTITION BY col, ...] [ORDER BY col [ASC|DESC], ...])
+NTH_VALUE(col, n) OVER ([PARTITION BY col, ...] [ORDER BY col [ASC|DESC], ...])
+```
+
+**구현 내용**:
+
+1. **Lexer** — 3개 토큰 추가: `FirstValue`, `LastValue`, `NthValue`
+2. **AST** — `WindowFunc` 열거형에 `FirstValue`, `LastValue`, `NthValue` 추가
+3. **Parser** — `FIRST_VALUE(col)`, `LAST_VALUE(col)`, `NTH_VALUE(col, n)` OVER 절 파싱
+4. **Executor** — `compute_window_functions()` 내 3개 함수 계산 추가:
+   - `FirstValue`: 파티션 내 ORDER BY 기준 첫 번째 행의 컬럼 값 (모든 행에 동일)
+   - `LastValue`: 파티션 내 ORDER BY 기준 마지막 행의 컬럼 값 (모든 행에 동일)
+   - `NthValue(n)`: 파티션 내 n번째 행의 컬럼 값, 1-indexed (없으면 NULL)
+
+---
+
+### 버그픽스
+
+#### WHERE col1 = col2 (컬럼 대 컬럼 비교) executor.rs
+
+**증상**: `WHERE score = s2` 형식에서 bare identifier `s2`가 리터럴 문자열 "s2"로 처리되어 0 rows 반환.
+
+**원인**: `ConditionValue::Literal` 처리 시 점(`.`)을 포함한 한정 컬럼 참조(`table.col`)만 컬럼 조회를 시도하고, bare identifier는 리터럴로 그대로 사용.
+
+**수정** (executor.rs line ~1280):
+```rust
+// 이전: 점 포함 경우만 컬럼 참조 시도
+let is_ident_like = lit.contains('.') && ...;
+
+// 수정: alpha/_ 시작 + 숫자 파싱 불가한 모든 identifier를 컬럼 참조 먼저 시도
+let is_ident_like = lit.chars().next()
+    .map(|c| c.is_alphabetic() || c == '_').unwrap_or(false)
+    && lit.parse::<f64>().is_err();
+```
+
+**결과**: `WHERE a = b`, `WHERE score = s2` 등 컬럼 대 컬럼 비교가 정상 동작.
+
+---
+
+## 2026-05-10 (2)
+
+### 신규 기능
+
+#### EXPLAIN ANALYZE
+
+**파일**: `parser/lexer.rs`, `parser/ast.rs`, `parser/parser.rs`, `engine/executor.rs`
+
+**문법**: `EXPLAIN ANALYZE SELECT ...`
+
+**동작**: 기존 EXPLAIN(예상 비용·접근 경로)에 실제 실행 후 **Actual rows**와 **Actual time**을 추가 출력.
+
+```
++--------------------------------------------------+
+|              QUERY PLAN (ANALYZE)                |
++--------------------------------------------------+
+| Table: staff                                     |
+| Rows (total): 6                                  |
+| Rows (visible): 6                                |
+| Est. cost: 6.0                                   |
+| Access: Seq Scan                                 |
+|                                                  |
+| Actual rows: 3                                   |
+| Actual time: 0.000 sec                           |
++--------------------------------------------------+
+```
+
+**구현**:
+- Lexer: `Analyze` 토큰 추가
+- AST: `Statement::ExplainAnalyze(Box<Statement>)` 추가
+- Parser: `EXPLAIN ANALYZE` → `ExplainAnalyze`, `EXPLAIN` → `Explain` (기존)
+- Executor: `exec_explain_analyze()` — plan 생성 후 `execute_with_s()` 실행, `std::time::Instant`로 경과 시간 측정, 출력에 Actual 섹션 합성
+
+---
+
+#### 버그픽스: FROM 서브쿼리 별칭 AS 선택적 허용 (parser.rs)
+
+**증상**: `FROM (SELECT ...) sub` 형식에서 `PARSE ERROR: Expected AS after subquery` 발생.
+
+**원인**: 파서가 서브쿼리 뒤 별칭에 `AS` 키워드를 필수로 요구.
+
+**수정**: `if self.peek() == Some(&Token::As) { self.advance(); }` — AS를 선택적으로 처리.
+
+**결과**: `FROM (...) sub`와 `FROM (...) AS sub` 모두 허용.
+
+---
+
+#### 서브쿼리 + 윈도우 함수 Top-N 패턴
+
+AS 버그픽스로 아래 패턴이 정상 동작:
+
+```sql
+-- 파티션별 1위만 추출
+SELECT * FROM (
+  SELECT name, dept, salary,
+    ROW_NUMBER() OVER (PARTITION BY dept ORDER BY salary DESC) AS rn
+  FROM staff
+) sub WHERE rn = 1;
+
+-- 파티션별 상위 2명 (동점 포함)
+SELECT * FROM (
+  SELECT name, dept, salary,
+    RANK() OVER (PARTITION BY dept ORDER BY salary DESC) AS rnk
+  FROM staff
+) sub WHERE rnk <= 2;
+```
+
+---
+
+## 2026-05-10
+
+### 신규 기능
+
+#### 윈도우 함수 (ROW_NUMBER / RANK / DENSE_RANK / LAG / LEAD)
+
+**파일**: `parser/lexer.rs`, `parser/ast.rs`, `parser/parser.rs`, `engine/executor.rs`
+
+**지원 문법**:
+```sql
+ROW_NUMBER() OVER ([PARTITION BY col, ...] [ORDER BY col [ASC|DESC], ...])
+RANK()       OVER ([PARTITION BY col, ...] [ORDER BY col [ASC|DESC], ...])
+DENSE_RANK() OVER ([PARTITION BY col, ...] [ORDER BY col [ASC|DESC], ...])
+LAG(col [, offset])  OVER ([PARTITION BY col, ...] [ORDER BY col [ASC|DESC], ...])
+LEAD(col [, offset]) OVER ([PARTITION BY col, ...] [ORDER BY col [ASC|DESC], ...])
+```
+
+**구현 내용**:
+
+1. **Lexer** — 7개 토큰 추가: `RowNumber`, `Rank`, `DenseRank`, `Lag`, `Lead`, `Over`, `Partition`
+
+2. **AST** — `WindowFunc` 열거형 + `SelectColumn::WinFunc` 변수 추가:
+   ```rust
+   pub enum WindowFunc { RowNumber, Rank, DenseRank, Lag, Lead }
+   SelectColumn::WinFunc { func, col, offset, partition_by, order_by, alias }
+   ```
+
+3. **Parser** — `parse_select()` 내 `OVER (PARTITION BY ... ORDER BY ...)` 절 파싱 추가
+
+4. **Executor**:
+   - WHERE 필터 후, 전역 ORDER BY 전에 `compute_window_functions()` 호출
+   - 인덱스 조기 리턴 경로에 `has_win` 가드 추가
+   - `compute_window_functions()`: 파티션 그룹핑 → 윈도우 ORDER BY 정렬 → 함수별 값 계산 → 행에 삽입
+   - `win_order_eq()`: RANK/DENSE_RANK 동점 판별 헬퍼
+   - `format_result()` + DISTINCT 매칭에 `WinFunc` 분기 추가
+
+**동작 확인**:
+- `ROW_NUMBER()`: 동점이라도 고유한 순번 (1, 2, 3, ...)
+- `RANK()`: 동점 행 동일 순위, 다음 순위는 동점 개수만큼 건너뜀 (1, 1, 3)
+- `DENSE_RANK()`: 동점 행 동일 순위, 갭 없음 (1, 1, 2)
+- `LAG(col, n)`: n행 이전 값 (경계 = NULL)
+- `LEAD(col, n)`: n행 이후 값 (경계 = NULL)
+
+---
+
 ## 2026-05-07
 
 ### 버그 수정

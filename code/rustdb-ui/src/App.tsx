@@ -236,9 +236,12 @@ function App() {
     schemaRef.current = { tables, columns };
   }, [dbData, tableColumns]);
 
-  // ─── 컨텍스트 메뉴 닫기 ──────────────────────────────────────
+  // ─── 메뉴바 상태 ────────────────────────────────────────────
+  const [openMenu, setOpenMenu] = useState<string | null>(null);
+
+  // ─── 컨텍스트 메뉴 + 메뉴바 닫기 ────────────────────────────
   useEffect(() => {
-    const h = () => { setCtxMenu(null); setTableCtxMenu(null); setDbCtxMenu(null); };
+    const h = () => { setCtxMenu(null); setTableCtxMenu(null); setDbCtxMenu(null); setOpenMenu(null); };
     window.addEventListener("click", h);
     return () => window.removeEventListener("click", h);
   }, []);
@@ -623,8 +626,105 @@ function App() {
   };
 
   // ─── 렌더 ───────────────────────────────────────────────────
+  // ─── 메뉴 항목 정의 ─────────────────────────────────────────
+  const menus: { label: string; items: { label: string; shortcut?: string; divider?: boolean; action?: () => void }[] }[] = [
+    {
+      label: "파일",
+      items: [
+        { label: "새 쿼리", shortcut: "Ctrl+N", action: () => { addTab(); setActiveView("editor"); } },
+        { label: "", divider: true },
+        { label: "저장", shortcut: "Ctrl+S", action: () => {
+          const content = queryRef.current;
+          const blob = new Blob([content], { type: "text/plain" });
+          const a = document.createElement("a");
+          a.href = URL.createObjectURL(blob);
+          a.download = (tabs.find(t => t.id === activeTabId)?.name ?? "query") + (tabs.find(t => t.id === activeTabId)?.name?.endsWith(".sql") ? "" : ".sql");
+          a.click();
+        }},
+        { label: "", divider: true },
+        { label: "종료", shortcut: "Alt+F4", action: () => window.close() },
+      ],
+    },
+    {
+      label: "편집",
+      items: [
+        { label: "실행 취소", shortcut: "Ctrl+Z", action: () => editorRef.current?.trigger("menu", "undo", null) },
+        { label: "다시 실행", shortcut: "Ctrl+Y", action: () => editorRef.current?.trigger("menu", "redo", null) },
+        { label: "", divider: true },
+        { label: "잘라내기", shortcut: "Ctrl+X", action: () => editorRef.current?.trigger("menu", "editor.action.clipboardCutAction", null) },
+        { label: "복사", shortcut: "Ctrl+C", action: () => editorRef.current?.trigger("menu", "editor.action.clipboardCopyAction", null) },
+        { label: "붙여넣기", shortcut: "Ctrl+V", action: () => editorRef.current?.trigger("menu", "editor.action.clipboardPasteAction", null) },
+        { label: "", divider: true },
+        { label: "모두 선택", shortcut: "Ctrl+A", action: () => editorRef.current?.trigger("menu", "editor.action.selectAll", null) },
+        { label: "찾기", shortcut: "Ctrl+F", action: () => editorRef.current?.trigger("menu", "actions.find", null) },
+      ],
+    },
+    {
+      label: "보기",
+      items: [
+        { label: "SQL 에디터", shortcut: "Ctrl+1", action: () => setActiveView("editor") },
+        { label: "ERD 편집기", shortcut: "Ctrl+2", action: () => setActiveView("erd") },
+        { label: "서버 관리자", shortcut: "Ctrl+3", action: () => setActiveView("server") },
+        { label: "AI 어시스턴트", shortcut: "Ctrl+4", action: () => setActiveView("ai") },
+        { label: "", divider: true },
+        { label: "사이드바 토글", shortcut: "Ctrl+B", action: () => setSidebarWidth(w => w > 0 ? 0 : 240) },
+      ],
+    },
+    {
+      label: "실행",
+      items: [
+        { label: "쿼리 실행", shortcut: "F5", action: () => { setActiveView("editor"); runQuery(); } },
+        { label: "", divider: true },
+        { label: "새 쿼리 탭", shortcut: "Ctrl+N", action: () => { addTab(); setActiveView("editor"); } },
+      ],
+    },
+    {
+      label: "터미널",
+      items: [
+        { label: "새 터미널", shortcut: "Ctrl+`", action: () => setActiveView("server") },
+        { label: "", divider: true },
+        { label: "서버 시작", action: () => setActiveView("server") },
+      ],
+    },
+  ];
+
   return (
     <div className="app">
+
+      {/* ── 메뉴바 ───────────────────────────────────────────────── */}
+      <div className="menu-bar" onClick={e => e.stopPropagation()}>
+        {menus.map(menu => (
+          <div
+            key={menu.label}
+            className={`menu-item ${openMenu === menu.label ? "open" : ""}`}
+            onClick={() => setOpenMenu(prev => prev === menu.label ? null : menu.label)}
+            onMouseEnter={() => { if (openMenu !== null) setOpenMenu(menu.label); }}
+          >
+            <span>{menu.label}</span>
+            {openMenu === menu.label && (
+              <div className="menu-dropdown">
+                {menu.items.map((item, i) =>
+                  item.divider ? (
+                    <div key={i} className="menu-divider" />
+                  ) : (
+                    <div
+                      key={i}
+                      className="menu-dropdown-item"
+                      onClick={() => { setOpenMenu(null); item.action?.(); }}
+                    >
+                      <span>{item.label}</span>
+                      {item.shortcut && <span className="menu-shortcut">{item.shortcut}</span>}
+                    </div>
+                  )
+                )}
+              </div>
+            )}
+          </div>
+        ))}
+      </div>
+
+      {/* ── 본문 (액티비티 바 + 콘텐츠) ─────────────────────────── */}
+      <div className="app-body">
 
       {/* 액티비티 바 */}
       <div className="activity-bar">
@@ -1263,6 +1363,24 @@ function App() {
                           <>
                             <div className="result-info">
                               {total} row(s) · {r.elapsed.toFixed(3)}s
+                              <button
+                                className="csv-btn"
+                                title="CSV로 내보내기"
+                                onClick={() => {
+                                  const escape = (v: string) =>
+                                    /[",\n\r]/.test(v) ? `"${v.replace(/"/g, '""')}"` : v;
+                                  const lines = [
+                                    r.columns.map(escape).join(","),
+                                    ...r.rows.map(row => row.map(escape).join(",")),
+                                  ].join("\r\n");
+                                  const blob = new Blob(["﻿" + lines], { type: "text/csv;charset=utf-8" });
+                                  const a = document.createElement("a");
+                                  a.href = URL.createObjectURL(blob);
+                                  a.download = `result_${i + 1}.csv`;
+                                  a.click();
+                                  URL.revokeObjectURL(a.href);
+                                }}
+                              >⬇ CSV</button>
                               {pageCount > 1 && (
                                 <span className="result-page-info">
                                   &nbsp;· 표시: {page * PAGE_SIZE + 1}–{Math.min((page + 1) * PAGE_SIZE, total)} / {total}
@@ -1895,6 +2013,8 @@ function App() {
           </div>
         </div>
       )}
+
+      </div> {/* app-body */}
     </div>
   );
 }

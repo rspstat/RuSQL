@@ -5,7 +5,7 @@ pub enum Token {
     // 키워드
     Select, From, Where, Insert, Into, Values,
     Update, Set, Delete, Create, Table, Drop,
-    Join, Left, Right, On, And, Or, Not,
+    Join, Left, Right, Cross, Natural, Outer, On, And, Or, Not,
     Alter, Add, Column, Rename, To,
     Order, Group, By, Asc, Desc, Limit,
     Count, Sum, Avg, Min, Max,
@@ -154,6 +154,21 @@ pub enum Token {
     At,
     Password,
     Databases,
+
+    // EXPLAIN ANALYZE
+    Analyze,
+
+    // 윈도우 함수
+    RowNumber,
+    Rank,
+    DenseRank,
+    Lag,
+    Lead,
+    Over,
+    Partition,
+    FirstValue,
+    LastValue,
+    NthValue,
 }
 
 pub struct Lexer {
@@ -221,6 +236,9 @@ impl Lexer {
             "JOIN"      => Token::Join,
             "LEFT"      => Token::Left,
             "RIGHT"     => Token::Right,
+            "CROSS"     => Token::Cross,
+            "NATURAL"   => Token::Natural,
+            "OUTER"     => Token::Outer,
             "ON"        => Token::On,
             "AND"       => Token::And,
             "OR"        => Token::Or,
@@ -348,6 +366,17 @@ impl Lexer {
             "OPTION"       => Token::OptionKw,
             "PASSWORD"     => Token::Password,
             "DATABASES"    => Token::Databases,
+            "ANALYZE"      => Token::Analyze,
+            "ROW_NUMBER"   => Token::RowNumber,
+            "FIRST_VALUE"  => Token::FirstValue,
+            "LAST_VALUE"   => Token::LastValue,
+            "NTH_VALUE"    => Token::NthValue,
+            "RANK"         => Token::Rank,
+            "DENSE_RANK"   => Token::DenseRank,
+            "LAG"          => Token::Lag,
+            "LEAD"         => Token::Lead,
+            "OVER"         => Token::Over,
+            "PARTITION"    => Token::Partition,
             _              => Token::Ident(s),
         }
     }

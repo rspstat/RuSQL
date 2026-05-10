@@ -76,6 +76,9 @@
 - [x] BETWEEN / LIKE (%, _ 와일드카드)
 - [x] IS NULL / IS NOT NULL
 - [x] INNER JOIN / LEFT JOIN / RIGHT JOIN
+- [x] CROSS JOIN (카르테시안 곱, ON 절 없음)
+- [x] NATURAL JOIN (공통 컬럼명 자동 equi-join, ON 절 없음)
+- [x] LEFT OUTER JOIN / RIGHT OUTER JOIN / INNER JOIN 키워드 별칭 지원
 - [x] Sort-Merge Join (양쪽 > 4행 Equi-Join, O((N+M)logN) sort + O(N+M) merge, 투 포인터 키 그룹 병합)
 - [x] Hash Join (한쪽 > 4행 Equi-Join, O(N+M)) / Nested Loop Join (소규모·비등가) — ON 조건 방향 무관 (left.col = right.col / right.col = left.col 모두 지원)
 - [x] 테이블 별칭 (alias) — `FROM emp e JOIN dept d ON e.dept_id = d.id`
@@ -86,6 +89,7 @@
 - [x] 산술 표현식 — SELECT / WHERE / UPDATE SET에서 `price * qty`, `salary + 100`
 - [x] 집계 함수 — COUNT / SUM / AVG / MIN / MAX
 - [x] GROUP_CONCAT (SEPARATOR 옵션, GROUP BY 및 비집계 양쪽 지원)
+- [x] 윈도우 함수 — ROW_NUMBER / RANK / DENSE_RANK / LAG / LEAD / FIRST_VALUE / LAST_VALUE / NTH_VALUE (OVER PARTITION BY + ORDER BY)
 - [x] CASE WHEN ... THEN ... ELSE ... END
 - [x] 스칼라 함수 — UPPER / LOWER / LENGTH / TRIM / CONCAT / SUBSTR / REPLACE / LPAD / RPAD
 - [x] 수학 함수 — ROUND / ABS / CEIL / FLOOR / MOD (함수 인자 내 산술식 지원: `ROUND(salary / 1000000, 2)`)
@@ -97,12 +101,15 @@
 - [x] 서브쿼리 — WHERE col = / > / < (SELECT ...)
 - [x] 상관 서브쿼리 — WHERE EXISTS (SELECT 1 FROM ... WHERE outer.col = inner.col)
 - [x] FROM 절 서브쿼리 — FROM (SELECT ...) AS alias
+- [x] SELECT 스칼라 서브쿼리 — `SELECT (SELECT MAX(col) FROM t2) AS alias FROM t1` (비상관·상관 모두 지원)
+- [x] JOIN 순서 최적화 — INNER JOIN 그리디 재정렬 (작은 테이블 우선, ON 조건 의존성 자동 분석)
 - [x] UNION / UNION ALL (ORDER BY / LIMIT / OFFSET 포함)
 - [x] CTE (WITH ... AS) — 단순 / 다중 / INSERT 메인 쿼리 지원
 - [x] 재귀 CTE (WITH RECURSIVE) — base case + UNION ALL 반복, positional 컬럼 매핑
 - [x] SELECT ... FOR UPDATE (행 잠금)
 - [x] table.column dot notation (SELECT / JOIN ON / GROUP BY / ORDER BY)
 - [x] EXPLAIN (비용 기반 실행 계획 조회)
+- [x] EXPLAIN ANALYZE (실제 실행 후 Actual rows / Actual time 출력)
 - [x] SHOW TABLES / DESCRIBE
 
 ### 데이터 타입
@@ -228,15 +235,23 @@
 ## 진행 예정
 
 ### 엔진 개선 (우선순위 순)
+- [ ] **GAP Lock / Next-key Lock** — SERIALIZABLE 격리 수준에서 팬텀 읽기 방지 완성. 현재는 범위 조건 팬텀을 감지하면 트랜잭션을 롤백하는 방식이나, 실제 GAP Lock으로 교체하면 불필요한 롤백 없이 직렬성 보장 가능
+- [x] **ANALYZE TABLE** — 컬럼별 distinct count·null count·min·max 수집 → SecondaryPoint 행 수 추정에 실제 cardinality 반영
+- [x] **SELECT 스칼라 서브쿼리** — 컬럼 목록에서 `(SELECT scalar FROM ...)` 비상관/상관 스칼라 서브쿼리 지원
+- [x] **JOIN 순서 최적화** — INNER JOIN 그리디 재정렬 (가장 작은 테이블 우선, ON 조건 의존성 분석)
+- [ ] **Stored Procedure** — `CREATE PROCEDURE` / `CALL` — 서버사이드 로직, 반복 쿼리 캡슐화
+- [ ] **Trigger** — `CREATE TRIGGER BEFORE/AFTER INSERT/UPDATE/DELETE` — 데이터 무결성 자동화
+
+### 완료된 엔진 기능
 - [x] Undo Log 영속화 — 크래시 후 재시작 시 미완료 트랜잭션 자동 롤백 (`data/_undo.log` 바이너리 영속화)
-- [ ] GAP Lock / Next-key Lock — Serializable 팬텀 방지 정확도 개선
-- [ ] MVCC 버전 체인 — `_xmin/_xmax` 컬럼 방식 → 언두 버전 체인
 - [x] 진정한 다중 세션 동시성 — 세션별 독립 Executor + 공유 SharedDatabase (Arc<RwLock<SharedDatabase>> 분리)
 - [x] 커버링 인덱스 (Index-only scan) — SELECT 컬럼 ⊆ 인덱스 컬럼 시 JSON 역직렬화 생략, EXPLAIN "(Covering)" 표시
 - [x] B+Tree ORDER 증가 (4 → 16) — 트리 깊이 감소, 노드 분할 빈도 절감
 - [x] Sort-Merge Join
 - [x] B+Tree 범위 스캔 최적화 (scan_from_node / scan_to_node 가지치기, O(log N + k))
 - [x] WAL Group Commit (TPS 향상) — 여러 세션의 COMMIT을 단일 fsync로 묶음, SharedDatabase 락 해제 후 fsync 수행
+- [x] 윈도우 함수 — ROW_NUMBER / RANK / DENSE_RANK / LAG / LEAD / FIRST_VALUE / LAST_VALUE / NTH_VALUE (OVER PARTITION BY + ORDER BY)
+- [x] EXPLAIN ANALYZE — 실제 실행 후 Actual rows / Actual time 출력
 
 ### 네트워크
 - [x] TCP 서버 (포트 7878)
@@ -324,8 +339,8 @@ CREATE TABLE org (
     pid  INT
 );
 CREATE TABLE tags (
-    id      INT PRIMARY KEY AUTO INCREMENT,
-    val     ENUM('a','b','c'),
+    id  INT PRIMARY KEY AUTO INCREMENT,
+    val ENUM('a','b','c'),
     set_col SET('X','Y','Z')
 );
 
@@ -394,17 +409,19 @@ FROM emp LIMIT 3;
 -- scalar functions: math
 SELECT salary/100 AS base, ROUND(salary/100,1), ABS(-999), CEIL(3.1), FLOOR(3.9), MOD(salary,7)
 FROM emp WHERE id <= 3;
+SELECT ROUND(9500000/1000000, 1), ABS(-3.7), CEIL(2.1), FLOOR(2.9);
 
 -- scalar functions: date
 SELECT name, hdate, DATEDIFF('2026-05-01', hdate) AS days,
        DATE_ADD(hdate, INTERVAL 1 YEAR) AS nxt,
+       DATE_ADD(hdate, INTERVAL 6 MONTH) AS six_mo,
        DATE_FORMAT(hdate, '%Y-%m') AS ym
 FROM emp WHERE status = 'active' ORDER BY hdate LIMIT 3;
 
--- null / cast / scalars
+-- null / cast / scalars without FROM
 SELECT COALESCE(dept_id,-1) FROM emp WHERE dept_id IS NULL;
 SELECT IFNULL(dept_id,0), NULLIF(dept_id,3) FROM emp ORDER BY id LIMIT 4;
-SELECT CAST('2026' AS INT), CAST('3.14' AS FLOAT);
+SELECT CAST('2026' AS INT), CAST('3.14' AS FLOAT), CAST(hdate AS TEXT) FROM emp LIMIT 2;
 SELECT 1+1, 10*3;
 
 -- CASE / IF
@@ -440,7 +457,7 @@ SELECT id, name, email FROM emp WHERE status = 'active' LIMIT 3;
 ALTER TABLE emp RENAME COLUMN email TO contact;
 ALTER TABLE emp DROP COLUMN contact;
 
--- UPDATE arithmetic
+-- UPDATE arithmetic / scalar fn
 UPDATE sal SET amount = amount * 2 WHERE grade = 'S1';
 SELECT eid, amount FROM sal WHERE grade = 'S1';
 UPDATE sal SET amount = amount / 2 WHERE grade = 'S1';
@@ -466,15 +483,16 @@ SELECT * FROM sal ORDER BY id;
 UPDATE emp e, dept d SET e.salary = e.salary + 100, d.budget = d.budget + 1000
     WHERE e.dept_id = d.id AND d.id = 1;
 SELECT id, name, salary FROM emp WHERE dept_id = 1 ORDER BY id;
+SELECT id, name, budget FROM dept WHERE id = 1;
 UPDATE emp SET salary = salary - 100 WHERE dept_id = 1;
 UPDATE dept SET budget = budget - 1000 WHERE id = 1;
 
 -- ENUM / SET validation
-INSERT INTO tags (val, set_col) VALUES ('a','X');     -- ok
-INSERT INTO tags (val) VALUES ('bad');                -- ERROR: invalid ENUM
-INSERT INTO tags (val, set_col) VALUES ('b','X,Q');  -- ERROR: invalid SET
-UPDATE tags SET val = 'b' WHERE id = 1;              -- ok
-UPDATE tags SET val = 'zzz' WHERE id = 1;            -- ERROR: invalid ENUM
+INSERT INTO tags (val, set_col) VALUES ('a','X');       -- ok
+INSERT INTO tags (val) VALUES ('bad');                   -- ERROR: invalid ENUM
+INSERT INTO tags (val, set_col) VALUES ('b','X,Q');     -- ERROR: invalid SET
+UPDATE tags SET val = 'b' WHERE id = 1;                 -- ok
+UPDATE tags SET val = 'zzz' WHERE id = 1;               -- ERROR: invalid ENUM
 SELECT * FROM tags ORDER BY id;
 
 -- SELECT FOR UPDATE / SHOW LOCKS
@@ -485,11 +503,12 @@ SHOW LOCKS;
 UPDATE emp SET salary = salary + 1 WHERE id = 1;
 COMMIT;
 SHOW LOCKS;
+SELECT id, name, salary FROM emp WHERE id = 1;
 
 -- EXPLAIN (covering index / PkPoint)
-EXPLAIN SELECT dept_id, salary FROM emp WHERE dept_id = 1;
-EXPLAIN SELECT * FROM emp WHERE dept_id = 1;
-EXPLAIN SELECT * FROM emp WHERE id = 1;
+EXPLAIN SELECT dept_id, salary FROM emp WHERE dept_id = 1;  -- Covering
+EXPLAIN SELECT * FROM emp WHERE dept_id = 1;                -- non-Covering
+EXPLAIN SELECT * FROM emp WHERE id = 1;                     -- PkPoint
 
 -- VIEW
 SELECT * FROM v_active ORDER BY id;
@@ -530,6 +549,84 @@ REVOKE INSERT ON db1.emp FROM 'usr'@'%';
 SHOW GRANTS FOR 'usr'@'%';
 DROP USER 'usr'@'%';
 DROP USER IF EXISTS 'nobody'@'%';
+
+-- 윈도우 함수
+SELECT id, name, salary,
+    ROW_NUMBER() OVER (ORDER BY salary DESC) AS rn
+FROM emp WHERE dept_id IS NOT NULL ORDER BY rn;
+
+SELECT name, dept_id, salary,
+    RANK()       OVER (PARTITION BY dept_id ORDER BY salary DESC) AS rnk,
+    DENSE_RANK() OVER (PARTITION BY dept_id ORDER BY salary DESC) AS drnk
+FROM emp WHERE dept_id IS NOT NULL ORDER BY dept_id, salary DESC;
+
+SELECT name, dept_id, salary,
+    LAG(salary, 1)  OVER (PARTITION BY dept_id ORDER BY salary) AS prev_sal,
+    LEAD(salary, 1) OVER (PARTITION BY dept_id ORDER BY salary) AS next_sal
+FROM emp WHERE dept_id IS NOT NULL ORDER BY dept_id, salary;
+
+SELECT name, dept_id, salary,
+    FIRST_VALUE(salary) OVER (PARTITION BY dept_id ORDER BY salary DESC) AS top_sal,
+    LAST_VALUE(salary)  OVER (PARTITION BY dept_id ORDER BY salary DESC) AS bot_sal
+FROM emp WHERE dept_id IS NOT NULL ORDER BY dept_id, salary DESC;
+
+SELECT name, dept_id, salary,
+    NTH_VALUE(salary, 2) OVER (PARTITION BY dept_id ORDER BY salary DESC) AS second_sal
+FROM emp WHERE dept_id IS NOT NULL ORDER BY dept_id, salary DESC;
+
+-- Top-N 패턴: 부서별 salary 1위
+SELECT name, dept_id, salary FROM (
+    SELECT name, dept_id, salary,
+        ROW_NUMBER() OVER (PARTITION BY dept_id ORDER BY salary DESC) AS rn
+    FROM emp WHERE dept_id IS NOT NULL
+) sub WHERE rn = 1 ORDER BY dept_id;
+
+-- FROM 서브쿼리 AS 키워드 생략
+SELECT grade, avg_a FROM (
+    SELECT grade, AVG(amount) AS avg_a FROM sal GROUP BY grade
+) g WHERE avg_a >= 700 ORDER BY grade;
+
+-- ANALYZE TABLE
+ANALYZE TABLE emp;
+ANALYZE TABLE sal;
+EXPLAIN SELECT * FROM emp WHERE dept_id = 1;
+
+-- EXPLAIN ANALYZE
+EXPLAIN ANALYZE SELECT * FROM emp WHERE dept_id = 1;
+EXPLAIN ANALYZE SELECT id, name, salary FROM emp WHERE id = 2;
+
+-- WHERE col = col (컬럼 대 컬럼 비교)
+SELECT id, name, dept_id FROM emp WHERE id = dept_id;
+
+-- SELECT 스칼라 서브쿼리
+SELECT name, salary, (SELECT MAX(salary) FROM emp) AS max_sal FROM emp ORDER BY salary DESC LIMIT 3;
+
+SELECT e.name, e.salary,
+    (SELECT s.amount FROM sal s WHERE s.eid = e.id) AS my_sal
+FROM emp e WHERE dept_id IS NOT NULL ORDER BY e.id LIMIT 4;
+
+SELECT e.name, e.dept_id,
+    (SELECT d.budget FROM dept d WHERE d.id = e.dept_id) AS dept_budget
+FROM emp e WHERE dept_id IS NOT NULL ORDER BY e.id LIMIT 3;
+
+-- JOIN 순서 최적화 (greedy reorder)
+SELECT e.name, d.name AS dept, s.amount
+FROM emp e JOIN sal s ON s.eid = e.id JOIN dept d ON d.id = e.dept_id
+ORDER BY e.id LIMIT 4;
+
+SELECT e.name, d.name AS dept, s.amount
+FROM emp e JOIN dept d ON d.id = e.dept_id JOIN sal s ON s.eid = e.id
+ORDER BY e.id LIMIT 4;
+
+-- CROSS JOIN: dept × emp 카르테시안 곱
+SELECT d.name AS dept_name, e.name AS emp_name
+FROM dept d CROSS JOIN emp e
+ORDER BY d.name, e.name LIMIT 9;
+
+-- NATURAL JOIN: 공통 컬럼 'id' 로 emp NATURAL JOIN sal
+SELECT e.name, s.amount
+FROM emp e NATURAL JOIN sal s
+ORDER BY e.name LIMIT 4;
 
 -- cleanup
 DROP VIEW  IF EXISTS v_active;

@@ -90,6 +90,8 @@ pub enum JoinType {
     Inner,
     Left,
     Right,
+    Cross,
+    Natural,
 }
 
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
@@ -133,6 +135,18 @@ pub enum AggFunc {
 }
 
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
+pub enum WindowFunc {
+    RowNumber,
+    Rank,
+    DenseRank,
+    Lag,
+    Lead,
+    FirstValue,
+    LastValue,
+    NthValue,
+}
+
+#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub enum InsertConflict {
     Abort,
     Ignore,
@@ -158,6 +172,18 @@ pub enum SelectColumn {
     CaseWhen {
         branches: Vec<CaseWhenBranch>,
         else_val: Option<String>,
+        alias: Option<String>,
+    },
+    WinFunc {
+        func: WindowFunc,
+        col: Option<String>,
+        offset: i64,
+        partition_by: Vec<String>,
+        order_by: Vec<OrderBy>,
+        alias: Option<String>,
+    },
+    Subquery {
+        query: Box<Statement>,
         alias: Option<String>,
     },
 }
@@ -262,6 +288,10 @@ pub enum Statement {
     ReleaseSavepoint { name: String },
     RollbackTo { name: String },
     Explain(Box<Statement>),
+    ExplainAnalyze(Box<Statement>),
+    AnalyzeTable {
+        table: String,
+    },
     With {
         ctes: Vec<(String, Box<Statement>)>,
         query: Box<Statement>,

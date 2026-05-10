@@ -247,7 +247,101 @@ SHOW GRANTS FOR 'usr'@'%';
 DROP USER 'usr'@'%';
 DROP USER IF EXISTS 'nobody'@'%';
 
--- cleanup
+-- ── 윈도우 함수 ────────────────────────────────────────────────────────────
+-- ROW_NUMBER: salary 내림차순 전체 순위
+SELECT id, name, salary,
+    ROW_NUMBER() OVER (ORDER BY salary DESC) AS rn
+FROM emp WHERE dept_id IS NOT NULL ORDER BY rn;
+
+-- RANK / DENSE_RANK: 부서별 순위 (동점 행 처리)
+SELECT name, dept_id, salary,
+    RANK()       OVER (PARTITION BY dept_id ORDER BY salary DESC) AS rnk,
+    DENSE_RANK() OVER (PARTITION BY dept_id ORDER BY salary DESC) AS drnk
+FROM emp WHERE dept_id IS NOT NULL ORDER BY dept_id, salary DESC;
+
+-- LAG / LEAD: 부서별 이전·다음 salary
+SELECT name, dept_id, salary,
+    LAG(salary, 1)  OVER (PARTITION BY dept_id ORDER BY salary) AS prev_sal,
+    LEAD(salary, 1) OVER (PARTITION BY dept_id ORDER BY salary) AS next_sal
+FROM emp WHERE dept_id IS NOT NULL ORDER BY dept_id, salary;
+
+-- FIRST_VALUE / LAST_VALUE: 부서별 최고·최저 salary (파티션 내 모든 행 동일 값)
+SELECT name, dept_id, salary,
+    FIRST_VALUE(salary) OVER (PARTITION BY dept_id ORDER BY salary DESC) AS top_sal,
+    LAST_VALUE(salary)  OVER (PARTITION BY dept_id ORDER BY salary DESC) AS bot_sal
+FROM emp WHERE dept_id IS NOT NULL ORDER BY dept_id, salary DESC;
+
+-- NTH_VALUE: 부서별 2번째 salary
+SELECT name, dept_id, salary,
+    NTH_VALUE(salary, 2) OVER (PARTITION BY dept_id ORDER BY salary DESC) AS second_sal
+FROM emp WHERE dept_id IS NOT NULL ORDER BY dept_id, salary DESC;
+
+-- Top-N 패턴: 부서별 salary 1위 (FROM 서브쿼리 + ROW_NUMBER)
+SELECT name, dept_id, salary FROM (
+    SELECT name, dept_id, salary,
+        ROW_NUMBER() OVER (PARTITION BY dept_id ORDER BY salary DESC) AS rn
+    FROM emp WHERE dept_id IS NOT NULL
+) sub WHERE rn = 1 ORDER BY dept_id;
+
+-- FROM 서브쿼리 AS 키워드 생략 (AS 없이 별칭만)
+SELECT grade, avg_a FROM (
+    SELECT grade, AVG(amount) AS avg_a FROM sal GROUP BY grade
+) g WHERE avg_a >= 700 ORDER BY grade;
+
+-- ── ANALYZE TABLE ───────────────────────────────────────────────────────────
+-- 컬럼별 cardinality / null 수 / min / max 수집
+ANALYZE TABLE emp;
+ANALYZE TABLE sal;
+-- EXPLAIN 전: 통계 반영된 비용 추정 확인
+EXPLAIN SELECT * FROM emp WHERE dept_id = 1;
+
+-- ── EXPLAIN ANALYZE ─────────────────────────────────────────────────────────
+EXPLAIN ANALYZE SELECT * FROM emp WHERE dept_id = 1;
+EXPLAIN ANALYZE SELECT id, name, salary FROM emp WHERE id = 2;
+
+-- ── WHERE col = col (bare identifier 컬럼 참조) ─────────────────────────────
+-- id = 1, dept_id = 1 인 행 (Alice) 이 일치
+SELECT id, name, dept_id FROM emp WHERE id = dept_id;
+
+-- ── SELECT 스칼라 서브쿼리 ────────────────────────────────────────────────────
+-- 비상관 스칼라 서브쿼리: 전체 최대 salary
+SELECT name, salary, (SELECT MAX(salary) FROM emp) AS max_sal FROM emp ORDER BY salary DESC LIMIT 3;
+
+-- 상관 스칼라 서브쿼리: 해당 직원의 sal.amount
+SELECT e.name, e.salary,
+    (SELECT s.amount FROM sal s WHERE s.eid = e.id) AS my_sal
+FROM emp e WHERE dept_id IS NOT NULL ORDER BY e.id LIMIT 4;
+
+-- 비상관: 부서 예산
+SELECT e.name, e.dept_id,
+    (SELECT d.budget FROM dept d WHERE d.id = e.dept_id) AS dept_budget
+FROM emp e WHERE dept_id IS NOT NULL ORDER BY e.id LIMIT 3;
+
+-- ── JOIN 순서 최적화 (greedy reorder) ─────────────────────────────────────────
+-- dept(3행) < emp(N행) → dept를 먼저 조인하는 게 유리
+-- 아래 두 쿼리는 동일 결과여야 함
+SELECT e.name, d.name AS dept, s.amount
+FROM emp e JOIN sal s ON s.eid = e.id JOIN dept d ON d.id = e.dept_id
+ORDER BY e.id LIMIT 4;
+
+SELECT e.name, d.name AS dept, s.amount
+FROM emp e JOIN dept d ON d.id = e.dept_id JOIN sal s ON s.eid = e.id
+ORDER BY e.id LIMIT 4;
+
+-- ── CROSS JOIN ───────────────────────────────────────────────────────────────
+-- dept(3행) x emp(N행) 카르테시안 곱 → 행 수 = 3 * emp_count
+SELECT d.name AS dept_name, e.name AS emp_name
+FROM dept d CROSS JOIN emp e
+ORDER BY d.name, e.name LIMIT 9;
+
+-- ── NATURAL JOIN ─────────────────────────────────────────────────────────────
+-- emp(id,name,...) NATURAL JOIN sal(id,eid,amount,...) → 공통 컬럼 'id' 로 equi-join
+-- sal.id = emp.id 가 일치하는 행만 반환
+SELECT e.name, s.amount
+FROM emp e NATURAL JOIN sal s
+ORDER BY e.name LIMIT 4;
+
+-- ── cleanup ──────────────────────────────────────────────────────────────────
 DROP VIEW  IF EXISTS v_active;
 DROP INDEX IF EXISTS idx_dept;
 DROP INDEX IF EXISTS idx_ds;
