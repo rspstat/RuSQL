@@ -22,9 +22,12 @@ pub struct DiskManager {
 
 impl DiskManager {
     pub fn new() -> Self {
-        let data_dir = "data".to_string();
-        fs::create_dir_all(&data_dir).unwrap();
-        DiskManager { data_dir }
+        Self::new_with_dir("data")
+    }
+
+    pub fn new_with_dir(dir: &str) -> Self {
+        fs::create_dir_all(dir).unwrap();
+        DiskManager { data_dir: dir.to_string() }
     }
 
     /// "db.table" → ("db", "table").  No dot → ("rustdb", key)

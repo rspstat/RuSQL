@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex, RwLock};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::thread;
@@ -10,14 +11,18 @@ use tauri::State;
 use rustdb_core::parser::parser::Parser;
 use rustdb_core::engine::executor::{Executor, SharedDatabase};
 
+// ─── 연결별 서버 상태 ─────────────────────────────────────────
+struct ServerEntry {
+    running: Arc<AtomicBool>,
+    clients: Arc<AtomicUsize>,
+    log:     Arc<Mutex<Vec<String>>>,
+    port:    Arc<Mutex<u16>>,
+}
+
 // ─── 상태 구조체 ──────────────────────────────────────────────
 struct AppState {
-    db:          Arc<Mutex<Executor>>,        // UI 전용 세션 (트랜잭션·current_db)
-    shared:      Arc<RwLock<SharedDatabase>>, // TCP 클라이언트들과 공유되는 DB 상태
-    srv_running: Arc<AtomicBool>,
-    srv_clients: Arc<AtomicUsize>,
-    srv_log:     Arc<Mutex<Vec<String>>>,
-    srv_port:    Arc<Mutex<u16>>,
+    db:      Arc<Mutex<Executor>>,              // 현재 UI 세션 (연결마다 교체됨)
+    servers: Mutex<HashMap<String, ServerEntry>>, // conn_id → 서버 상태
 }
 
 // ─── 직렬화 타입 ──────────────────────────────────────────────
@@ -262,7 +267,8 @@ fn parse_output(output: &str, elapsed: f64) -> QueryResult {
 
 #[tauri::command]
 fn get_databases(state: State<AppState>) -> Vec<String> {
-    let s = state.shared.read().unwrap();
+    let exec = state.db.lock().unwrap();
+    let s = exec.shared.read().unwrap();
     let mut dbs: Vec<String> = s.databases.iter().cloned().collect();
     dbs.sort();
     dbs
@@ -275,7 +281,8 @@ fn get_current_db(state: State<AppState>) -> String {
 
 #[tauri::command]
 fn get_tables_for_db(db: String, state: State<AppState>) -> Vec<String> {
-    let s = state.shared.read().unwrap();
+    let exec = state.db.lock().unwrap();
+    let s = exec.shared.read().unwrap();
     let prefix = format!("{}.", db.to_lowercase());
     let mut tables: Vec<String> = s.catalog.tables.keys()
         .filter(|k| k.starts_with(&prefix))
@@ -287,7 +294,8 @@ fn get_tables_for_db(db: String, state: State<AppState>) -> Vec<String> {
 
 #[tauri::command]
 fn get_views_for_db(db: String, state: State<AppState>) -> Vec<String> {
-    let s = state.shared.read().unwrap();
+    let exec = state.db.lock().unwrap();
+    let s = exec.shared.read().unwrap();
     let prefix = format!("{}.", db.to_lowercase());
     let mut views: Vec<String> = s.views.keys()
         .filter(|k| k.starts_with(&prefix))
@@ -307,7 +315,8 @@ struct IndexInfo {
 
 #[tauri::command]
 fn get_indexes_for_db(db: String, state: State<AppState>) -> Vec<IndexInfo> {
-    let s = state.shared.read().unwrap();
+    let exec = state.db.lock().unwrap();
+    let s = exec.shared.read().unwrap();
     let prefix = format!("{}.", db.to_lowercase());
     let mut result = Vec::new();
     for (name, (table, column)) in &s.index_meta {
@@ -461,20 +470,30 @@ fn get_indexes(state: State<AppState>) -> Vec<IndexInfo> {
 
 // ─── Tauri 커맨드: 서버 관리 ─────────────────────────────────
 #[tauri::command]
-fn start_server(port: u16, state: State<AppState>) -> Result<String, String> {
-    if state.srv_running.load(Ordering::SeqCst) {
-        return Err("서버가 이미 실행 중입니다.".to_string());
+fn start_server(conn_id: String, port: u16, state: State<AppState>) -> Result<String, String> {
+    {
+        let servers = state.servers.lock().unwrap();
+        if let Some(e) = servers.get(&conn_id) {
+            if e.running.load(Ordering::SeqCst) {
+                return Err("서버가 이미 실행 중입니다.".to_string());
+            }
+        }
     }
 
-    let running    = state.srv_running.clone();
-    let clients    = state.srv_clients.clone();
-    let log        = state.srv_log.clone();
-    // TCP 클라이언트들은 UI 세션과 동일한 SharedDatabase를 공유
-    let shared_db  = state.shared.clone();
-    let port_store = state.srv_port.clone();
+    // 현재 연결의 SharedDatabase를 캡처 (연결 전환 후에도 이 서버는 이 DB를 계속 사용)
+    let shared_db = state.db.lock().unwrap().get_shared();
 
-    *port_store.lock().unwrap() = port;
-    running.store(true, Ordering::SeqCst);
+    let running = Arc::new(AtomicBool::new(true));
+    let clients = Arc::new(AtomicUsize::new(0));
+    let log     = Arc::new(Mutex::new(Vec::new()));
+    let port_store = Arc::new(Mutex::new(port));
+
+    state.servers.lock().unwrap().insert(conn_id, ServerEntry {
+        running: running.clone(),
+        clients: clients.clone(),
+        log:     log.clone(),
+        port:    port_store,
+    });
 
     thread::spawn(move || {
         let addr = format!("127.0.0.1:{}", port);
@@ -517,46 +536,72 @@ fn start_server(port: u16, state: State<AppState>) -> Result<String, String> {
 }
 
 #[tauri::command]
-fn stop_server(state: State<AppState>) -> Result<String, String> {
-    if !state.srv_running.load(Ordering::SeqCst) {
-        return Err("실행 중인 서버가 없습니다.".to_string());
-    }
-    state.srv_running.store(false, Ordering::SeqCst);
-    Ok("서버를 중지합니다...".to_string())
-}
-
-#[tauri::command]
-fn get_server_status(state: State<AppState>) -> ServerStatus {
-    ServerStatus {
-        running:      state.srv_running.load(Ordering::SeqCst),
-        port:         *state.srv_port.lock().unwrap(),
-        client_count: state.srv_clients.load(Ordering::SeqCst),
-        log:          state.srv_log.lock().unwrap().clone(),
+fn delete_conn_data(data_dir: String) -> bool {
+    if data_dir.is_empty() { return false; }
+    match std::fs::remove_dir_all(&data_dir) {
+        Ok(_)  => true,
+        Err(_) => false, // 디렉토리가 없으면 무시
     }
 }
 
 #[tauri::command]
-fn clear_server_log(state: State<AppState>) {
-    state.srv_log.lock().unwrap().clear();
+fn authenticate(user: String, password: String, data_dir: String, state: State<AppState>) -> bool {
+    // 해당 data_dir의 Executor를 로드 (WAL 복구 포함)
+    let new_exec = rustdb_core::engine::executor::Executor::new_with_dir(&data_dir);
+    // 사용자 없으면 root/root 자동 생성
+    new_exec.shared.write().unwrap().ensure_default_user();
+    // 자격증명 검증
+    let ok = new_exec.shared.read().unwrap().validate_credentials(&user, &password);
+    if ok {
+        // UI 세션 executor 교체
+        *state.db.lock().unwrap() = new_exec;
+    }
+    ok
+}
+
+#[tauri::command]
+fn stop_server(conn_id: String, state: State<AppState>) -> Result<String, String> {
+    let servers = state.servers.lock().unwrap();
+    match servers.get(&conn_id) {
+        Some(e) if e.running.load(Ordering::SeqCst) => {
+            e.running.store(false, Ordering::SeqCst);
+            Ok("서버를 중지합니다...".to_string())
+        }
+        _ => Err("실행 중인 서버가 없습니다.".to_string()),
+    }
+}
+
+#[tauri::command]
+fn get_server_status(conn_id: String, state: State<AppState>) -> ServerStatus {
+    let servers = state.servers.lock().unwrap();
+    match servers.get(&conn_id) {
+        Some(e) => ServerStatus {
+            running:      e.running.load(Ordering::SeqCst),
+            port:         *e.port.lock().unwrap(),
+            client_count: e.clients.load(Ordering::SeqCst),
+            log:          e.log.lock().unwrap().clone(),
+        },
+        None => ServerStatus { running: false, port: 7878, client_count: 0, log: vec![] },
+    }
+}
+
+#[tauri::command]
+fn clear_server_log(conn_id: String, state: State<AppState>) {
+    if let Some(e) = state.servers.lock().unwrap().get(&conn_id) {
+        e.log.lock().unwrap().clear();
+    }
 }
 
 // ─── 엔트리포인트 ─────────────────────────────────────────────
 fn main() {
-    // WAL 복구 포함 초기화 → UI 세션 executor + 공유 DB 상태 분리
-    let exec   = Executor::new();
-    let shared = exec.get_shared();
-    // users가 없으면 root/root 자동 생성
-    shared.write().unwrap().ensure_default_user();
-    let db     = Arc::new(Mutex::new(exec));
+    let exec = Executor::new();
+    exec.shared.write().unwrap().ensure_default_user();
+    let db = Arc::new(Mutex::new(exec));
 
     tauri::Builder::default()
         .manage(AppState {
             db,
-            shared,
-            srv_running: Arc::new(AtomicBool::new(false)),
-            srv_clients: Arc::new(AtomicUsize::new(0)),
-            srv_log:     Arc::new(Mutex::new(Vec::new())),
-            srv_port:    Arc::new(Mutex::new(7878)),
+            servers: Mutex::new(HashMap::new()),
         })
         .invoke_handler(tauri::generate_handler![
             execute_query,
@@ -570,6 +615,8 @@ fn main() {
             get_tables_for_db,
             get_views_for_db,
             get_indexes_for_db,
+            authenticate,
+            delete_conn_data,
             start_server,
             stop_server,
             get_server_status,

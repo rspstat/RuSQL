@@ -37,6 +37,7 @@ pub enum DataType {
     Year,
     Enum(Vec<String>),
     Set(Vec<String>),
+    Blob,
     #[serde(other)]
     Unknown,
 }
@@ -92,6 +93,7 @@ pub enum JoinType {
     Right,
     Cross,
     Natural,
+    FullOuter,
 }
 
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
@@ -130,7 +132,9 @@ pub enum CondExpr {
 
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub enum AggFunc {
-    Count, Sum, Avg, Min, Max,
+    Count,
+    CountDistinct,
+    Sum, Avg, Min, Max,
     GroupConcat { separator: String },
 }
 
@@ -195,6 +199,19 @@ pub enum AlterAction {
     RenameColumn { from: String, to: String },
     ModifyColumn(ColumnDef),
     RenameTable { to: String },
+    // 제약조건 추가/삭제
+    AddForeignKey {
+        name: Option<String>,
+        column: String,
+        ref_table: String,
+        ref_column: String,
+        on_delete: FkAction,
+        on_update: FkAction,
+    },
+    DropForeignKey(String),
+    AddUniqueConstraint { name: Option<String>, column: String },
+    AddCheckConstraint { name: Option<String>, expr: String },
+    DropConstraint(String),
 }
 
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
@@ -221,12 +238,14 @@ pub enum Statement {
         columns: Option<Vec<String>>,
         values: Vec<Vec<String>>,
         on_conflict: InsertConflict,
+        returning: Option<Vec<SelectColumn>>,
     },
     InsertSelect {
         table: String,
         columns: Option<Vec<String>>,
         query: Box<Statement>,
         on_conflict: InsertConflict,
+        returning: Option<Vec<SelectColumn>>,
     },
     Select {
         table: String,
@@ -246,10 +265,12 @@ pub enum Statement {
         table: String,
         assignments: Vec<(String, ArithExpr)>,
         condition: Option<CondExpr>,
+        returning: Option<Vec<SelectColumn>>,
     },
     Delete {
         table: String,
         condition: Option<CondExpr>,
+        returning: Option<Vec<SelectColumn>>,
     },
     AlterTable {
         table: String,
@@ -298,6 +319,22 @@ pub enum Statement {
         recursive: bool,
     },
     Union {
+        left: Box<Statement>,
+        right: Box<Statement>,
+        all: bool,
+        order_by: Vec<OrderBy>,
+        limit: Option<usize>,
+        offset: Option<usize>,
+    },
+    Intersect {
+        left: Box<Statement>,
+        right: Box<Statement>,
+        all: bool,
+        order_by: Vec<OrderBy>,
+        limit: Option<usize>,
+        offset: Option<usize>,
+    },
+    Except {
         left: Box<Statement>,
         right: Box<Statement>,
         all: bool,
@@ -356,4 +393,7 @@ pub enum Statement {
         host: Option<String>,
     },
     ShowDatabases,
+    ShowCreateTable {
+        table: String,
+    },
 }

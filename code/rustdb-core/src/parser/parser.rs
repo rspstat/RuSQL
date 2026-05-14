@@ -862,7 +862,7 @@ impl Parser {
                 Some(Token::Asterisk) => { self.advance(); SelectColumn::All }
                 Some(Token::Count) | Some(Token::Sum) | Some(Token::Avg) |
                 Some(Token::Min)   | Some(Token::Max) => {
-                    let func = match self.advance() {
+                    let mut func = match self.advance() {
                         Some(Token::Count) => AggFunc::Count,
                         Some(Token::Sum)   => AggFunc::Sum,
                         Some(Token::Avg)   => AggFunc::Avg,
@@ -873,6 +873,10 @@ impl Parser {
                     match self.advance() {
                         Some(Token::LParen) => {}
                         other => return Err(format!("Expected '(', got {:?}", other)),
+                    }
+                    if matches!(func, AggFunc::Count) && self.peek() == Some(&Token::Distinct) {
+                        self.advance();
+                        func = AggFunc::CountDistinct;
                     }
                     let agg_col = match self.advance() {
                         Some(Token::Asterisk)  => "*".to_string(),
@@ -1298,6 +1302,15 @@ impl Parser {
                     }
                     JoinType::Natural
                 }
+                Some(Token::Full) => {
+                    self.advance();
+                    if self.peek() == Some(&Token::Outer) { self.advance(); }
+                    match self.advance() {
+                        Some(Token::Join) => {}
+                        other => return Err(format!("Expected JOIN after FULL, got {:?}", other)),
+                    }
+                    JoinType::FullOuter
+                }
                 _ => break,
             };
             let join_table = self.expect_ident()?;
@@ -1436,24 +1449,21 @@ impl Parser {
 
         let select_stmt = Statement::Select { table, subquery, distinct, columns, condition, joins, order_by, group_by, having, limit, offset, for_update };
 
-        // UNION / UNION ALL
-        if self.peek() == Some(&Token::Union) {
-            self.advance(); // UNION
-            let all = if self.peek() == Some(&Token::All) {
-                self.advance();
-                true
-            } else {
-                false
-            };
-            // skip optional SELECT keyword
+        // UNION / INTERSECT / EXCEPT [ALL]
+        let set_op = match self.peek() {
+            Some(Token::Union)     => { self.advance(); 1 }
+            Some(Token::Intersect) => { self.advance(); 2 }
+            Some(Token::Except)    => { self.advance(); 3 }
+            _ => 0,
+        };
+        if set_op > 0 {
+            let all = if self.peek() == Some(&Token::All) { self.advance(); true } else { false };
             match self.advance() {
                 Some(Token::Select) => {}
-                other => return Err(format!("Expected SELECT after UNION, got {:?}", other)),
+                other => return Err(format!("Expected SELECT after set operator, got {:?}", other)),
             }
             let right = self.parse_select()?;
-
-            // Lift ORDER BY / LIMIT / OFFSET from the right SELECT to the Union level
-            let (right_clean, union_order_by, union_limit, union_offset) = match right {
+            let (right_clean, op_order_by, op_limit, op_offset) = match right {
                 Statement::Select { table, subquery, columns, distinct, condition, joins,
                                     order_by, group_by, having, limit, offset, for_update } => {
                     let clean = Statement::Select {
@@ -1465,14 +1475,19 @@ impl Parser {
                 }
                 other => (other, vec![], None, None),
             };
-
-            return Ok(Statement::Union {
-                left: Box::new(select_stmt),
-                right: Box::new(right_clean),
-                all,
-                order_by: union_order_by,
-                limit: union_limit,
-                offset: union_offset,
+            return Ok(match set_op {
+                1 => Statement::Union {
+                    left: Box::new(select_stmt), right: Box::new(right_clean),
+                    all, order_by: op_order_by, limit: op_limit, offset: op_offset,
+                },
+                2 => Statement::Intersect {
+                    left: Box::new(select_stmt), right: Box::new(right_clean),
+                    all, order_by: op_order_by, limit: op_limit, offset: op_offset,
+                },
+                _ => Statement::Except {
+                    left: Box::new(select_stmt), right: Box::new(right_clean),
+                    all, order_by: op_order_by, limit: op_limit, offset: op_offset,
+                },
             });
         }
 
@@ -1515,7 +1530,8 @@ impl Parser {
             self.advance(); // consume SELECT
             let query = self.parse_select()?;
             let on_conflict = if ignore { InsertConflict::Ignore } else { InsertConflict::Abort };
-            return Ok(Statement::InsertSelect { table, columns, query: Box::new(query), on_conflict });
+            let returning = self.parse_returning()?;
+            return Ok(Statement::InsertSelect { table, columns, query: Box::new(query), on_conflict, returning });
         }
 
         match self.advance() {
@@ -1596,7 +1612,8 @@ impl Parser {
             InsertConflict::Abort
         };
 
-        Ok(Statement::Insert { table, columns, values: all_values, on_conflict })
+        let returning = self.parse_returning()?;
+        Ok(Statement::Insert { table, columns, values: all_values, on_conflict, returning })
     }
 
     fn parse_update(&mut self) -> Result<Statement, String> {
@@ -1694,10 +1711,11 @@ impl Parser {
             None
         };
 
+        let returning = self.parse_returning()?;
         if tables.len() > 1 || !joins.is_empty() {
             Ok(Statement::MultiUpdate { tables, joins, assignments, condition })
         } else {
-            Ok(Statement::Update { table: first_table, assignments, condition })
+            Ok(Statement::Update { table: first_table, assignments, condition, returning })
         }
     }
 
@@ -1780,6 +1798,7 @@ impl Parser {
             None
         };
 
+        let returning = self.parse_returning()?;
         if let Some(del_tbls) = delete_tables {
             Ok(Statement::MultiDelete { delete_tables: del_tbls, from_table, joins, condition })
         } else if !joins.is_empty() {
@@ -1790,7 +1809,7 @@ impl Parser {
                 condition,
             })
         } else {
-            Ok(Statement::Delete { table: from_table, condition })
+            Ok(Statement::Delete { table: from_table, condition, returning })
         }
     }
 
@@ -1988,6 +2007,7 @@ impl Parser {
             }
             Some(Token::Time)    => Ok(DataType::Time),
             Some(Token::Year)    => Ok(DataType::Year),
+            Some(Token::Blob)    => Ok(DataType::Blob),
             Some(Token::Enum) => {
                 match self.advance() {
                     Some(Token::LParen) => {}
@@ -2430,38 +2450,158 @@ impl Parser {
 
         match self.advance() {
             Some(Token::Add) => {
-                match self.advance() {
-                    Some(Token::Column) => {}
-                    other => return Err(format!("Expected COLUMN, got {:?}", other)),
+                match self.peek() {
+                    Some(Token::Constraint) | Some(Token::Foreign) | Some(Token::Unique) | Some(Token::Check) => {
+                        let constraint_name = if self.peek() == Some(&Token::Constraint) {
+                            self.advance();
+                            if matches!(self.peek(), Some(Token::Ident(_))) {
+                                Some(self.expect_ident()?)
+                            } else { None }
+                        } else { None };
+                        match self.advance() {
+                            Some(Token::Foreign) => {
+                                match self.advance() {
+                                    Some(Token::Key) => {}
+                                    other => return Err(format!("Expected KEY after FOREIGN, got {:?}", other)),
+                                }
+                                match self.advance() {
+                                    Some(Token::LParen) => {}
+                                    other => return Err(format!("Expected '(' after FOREIGN KEY, got {:?}", other)),
+                                }
+                                let column = self.expect_ident()?;
+                                match self.advance() {
+                                    Some(Token::RParen) => {}
+                                    other => return Err(format!("Expected ')', got {:?}", other)),
+                                }
+                                match self.advance() {
+                                    Some(Token::References) => {}
+                                    other => return Err(format!("Expected REFERENCES, got {:?}", other)),
+                                }
+                                let ref_table = self.expect_ident()?;
+                                match self.advance() {
+                                    Some(Token::LParen) => {}
+                                    other => return Err(format!("Expected '(' after ref table, got {:?}", other)),
+                                }
+                                let ref_column = self.expect_ident()?;
+                                match self.advance() {
+                                    Some(Token::RParen) => {}
+                                    other => return Err(format!("Expected ')' after ref column, got {:?}", other)),
+                                }
+                                let mut on_delete = FkAction::Restrict;
+                                let mut on_update = FkAction::Restrict;
+                                while self.peek() == Some(&Token::On) {
+                                    self.advance();
+                                    let parse_fk_action = |p: &mut Parser| -> Result<FkAction, String> {
+                                        match p.advance() {
+                                            Some(Token::Cascade)  => Ok(FkAction::Cascade),
+                                            Some(Token::Restrict) => Ok(FkAction::Restrict),
+                                            Some(Token::Ident(s)) if s.to_uppercase() == "NO" => { p.advance(); Ok(FkAction::Restrict) }
+                                            Some(Token::Set) => match p.advance() {
+                                                Some(Token::Null)    => Ok(FkAction::SetNull),
+                                                Some(Token::Default) => Ok(FkAction::SetDefault),
+                                                other => Err(format!("Expected NULL or DEFAULT, got {:?}", other)),
+                                            },
+                                            other => Err(format!("Expected FK action, got {:?}", other)),
+                                        }
+                                    };
+                                    match self.advance() {
+                                        Some(Token::Delete) => { on_delete = parse_fk_action(self)?; }
+                                        Some(Token::Update) => { on_update = parse_fk_action(self)?; }
+                                        other => return Err(format!("Expected DELETE or UPDATE after ON, got {:?}", other)),
+                                    }
+                                }
+                                Ok(Statement::AlterTable { table, action: AlterAction::AddForeignKey { name: constraint_name, column, ref_table, ref_column, on_delete, on_update } })
+                            }
+                            Some(Token::Unique) => {
+                                match self.advance() {
+                                    Some(Token::LParen) => {}
+                                    other => return Err(format!("Expected '(' after UNIQUE, got {:?}", other)),
+                                }
+                                let column = self.expect_ident()?;
+                                match self.advance() {
+                                    Some(Token::RParen) => {}
+                                    other => return Err(format!("Expected ')' after column, got {:?}", other)),
+                                }
+                                Ok(Statement::AlterTable { table, action: AlterAction::AddUniqueConstraint { name: constraint_name, column } })
+                            }
+                            Some(Token::Check) => {
+                                match self.advance() {
+                                    Some(Token::LParen) => {}
+                                    other => return Err(format!("Expected '(' after CHECK, got {:?}", other)),
+                                }
+                                let mut depth = 1usize;
+                                let mut expr = String::new();
+                                while let Some(tok) = self.advance() {
+                                    match tok {
+                                        Token::LParen => { depth += 1; expr.push('('); }
+                                        Token::RParen => {
+                                            depth -= 1;
+                                            if depth == 0 { break; }
+                                            expr.push(')');
+                                        }
+                                        Token::Ident(s) => { if !expr.is_empty() { expr.push(' '); } expr.push_str(s); }
+                                        Token::NumberLit(s) => { if !expr.is_empty() { expr.push(' '); } expr.push_str(s); }
+                                        Token::StringLit(s) => { if !expr.is_empty() { expr.push(' '); } expr.push('\''); expr.push_str(s); expr.push('\''); }
+                                        Token::Gt  => { if !expr.is_empty() { expr.push(' '); } expr.push('>'); }
+                                        Token::Lt  => { if !expr.is_empty() { expr.push(' '); } expr.push('<'); }
+                                        Token::Gte => { if !expr.is_empty() { expr.push(' '); } expr.push_str(">="); }
+                                        Token::Lte => { if !expr.is_empty() { expr.push(' '); } expr.push_str("<="); }
+                                        Token::Eq  => { if !expr.is_empty() { expr.push(' '); } expr.push('='); }
+                                        Token::Ne  => { if !expr.is_empty() { expr.push(' '); } expr.push_str("!="); }
+                                        Token::And => { if !expr.is_empty() { expr.push(' '); } expr.push_str("AND"); }
+                                        Token::Or  => { if !expr.is_empty() { expr.push(' '); } expr.push_str("OR"); }
+                                        _ => {}
+                                    }
+                                }
+                                Ok(Statement::AlterTable { table, action: AlterAction::AddCheckConstraint { name: constraint_name, expr } })
+                            }
+                            other => Err(format!("Expected FOREIGN, UNIQUE, or CHECK after CONSTRAINT, got {:?}", other)),
+                        }
+                    }
+                    _ => {
+                        if self.peek() == Some(&Token::Column) { self.advance(); }
+                        let col_name = self.expect_ident()?;
+                        let data_type = self.parse_data_type()?;
+                        Ok(Statement::AlterTable {
+                            table,
+                            action: AlterAction::AddColumn(ColumnDef {
+                                name: col_name,
+                                data_type,
+                                primary_key: false,
+                                not_null: false,
+                                unique: false,
+                                unique_constraint_name: None,
+                                auto_increment: false,
+                                default: None,
+                                foreign_key: None,
+                                check_expr: None,
+                            }),
+                        })
+                    }
                 }
-                let col_name = self.expect_ident()?;
-                let data_type = self.parse_data_type()?;
-                Ok(Statement::AlterTable {
-                    table,
-                    action: AlterAction::AddColumn(ColumnDef {
-                        name: col_name,
-                        data_type,
-                        primary_key: false,
-                        not_null: false,
-                        unique: false,
-                        unique_constraint_name: None,
-                        auto_increment: false,
-                        default: None,
-                        foreign_key: None,
-                        check_expr: None,
-                    }),
-                })
             }
             Some(Token::Drop) => {
-                match self.advance() {
-                    Some(Token::Column) => {}
-                    other => return Err(format!("Expected COLUMN, got {:?}", other)),
+                match self.peek() {
+                    Some(Token::Constraint) => {
+                        self.advance();
+                        let name = self.expect_ident()?;
+                        Ok(Statement::AlterTable { table, action: AlterAction::DropConstraint(name) })
+                    }
+                    Some(Token::Foreign) => {
+                        self.advance(); // FOREIGN
+                        match self.advance() {
+                            Some(Token::Key) => {}
+                            other => return Err(format!("Expected KEY after FOREIGN, got {:?}", other)),
+                        }
+                        let name = self.expect_ident()?;
+                        Ok(Statement::AlterTable { table, action: AlterAction::DropForeignKey(name) })
+                    }
+                    _ => {
+                        if self.peek() == Some(&Token::Column) { self.advance(); }
+                        let col_name = self.expect_ident()?;
+                        Ok(Statement::AlterTable { table, action: AlterAction::DropColumn(col_name) })
+                    }
                 }
-                let col_name = self.expect_ident()?;
-                Ok(Statement::AlterTable {
-                    table,
-                    action: AlterAction::DropColumn(col_name),
-                })
             }
             Some(Token::Rename) => {
                 match self.peek() {
@@ -2660,7 +2800,16 @@ impl Parser {
                 };
                 Ok(Statement::ShowGrants { user, host })
             }
-            other => Err(format!("Expected TABLES, BUFFER, WAL, ISOLATION, LOCKS, DATABASES, or GRANTS, got {:?}", other)),
+            Some(Token::Create) => {
+                // SHOW CREATE TABLE <name>
+                match self.advance() {
+                    Some(Token::Table) => {}
+                    other => return Err(format!("Expected TABLE after SHOW CREATE, got {:?}", other)),
+                }
+                let table = self.expect_ident()?;
+                Ok(Statement::ShowCreateTable { table })
+            }
+            other => Err(format!("Expected TABLES, BUFFER, WAL, ISOLATION, LOCKS, DATABASES, GRANTS, or CREATE, got {:?}", other)),
         }
     }
 
@@ -2900,5 +3049,30 @@ impl Parser {
         }
         let (user, host) = self.parse_user_spec()?;
         Ok(Statement::Revoke { privileges, object_type, object, user, host })
+    }
+
+    fn parse_returning(&mut self) -> Result<Option<Vec<SelectColumn>>, String> {
+        if self.peek() != Some(&Token::Returning) {
+            return Ok(None);
+        }
+        self.advance(); // consume RETURNING
+        let mut cols = Vec::new();
+        loop {
+            if self.peek() == Some(&Token::Asterisk) {
+                self.advance();
+                cols.push(SelectColumn::All);
+            } else {
+                let name = self.expect_ident()?;
+                if self.peek() == Some(&Token::As) {
+                    self.advance();
+                    let alias = self.expect_alias_ident()?;
+                    cols.push(SelectColumn::ColumnAlias(name, alias));
+                } else {
+                    cols.push(SelectColumn::Column(name));
+                }
+            }
+            if self.peek() == Some(&Token::Comma) { self.advance(); } else { break; }
+        }
+        Ok(Some(cols))
     }
 }

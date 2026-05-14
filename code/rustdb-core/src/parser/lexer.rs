@@ -81,6 +81,7 @@ pub enum Token {
     Double,
     Time,
     Year,
+    Blob,
     Enum,
 
     // DATABASE
@@ -109,8 +110,10 @@ pub enum Token {
     Else,
     End,
 
-    // UNION / UNION ALL
+    // UNION / INTERSECT / EXCEPT
     Union,
+    Intersect,
+    Except,
     All,
 
     // IF()
@@ -169,6 +172,12 @@ pub enum Token {
     FirstValue,
     LastValue,
     NthValue,
+
+    // FULL OUTER JOIN
+    Full,
+
+    // RETURNING
+    Returning,
 }
 
 pub struct Lexer {
@@ -212,6 +221,19 @@ impl Lexer {
         while let Some(ch) = self.peek() {
             if ch.is_ascii_digit() || ch == '.' { s.push(ch); self.advance(); } else { break; }
         }
+        // 0x... hex literal → StringLit(hex_digits)
+        if s == "0" {
+            if let Some(x) = self.peek() {
+                if x == 'x' || x == 'X' {
+                    self.advance();
+                    let mut hex = String::new();
+                    while let Some(ch) = self.peek() {
+                        if ch.is_ascii_hexdigit() { hex.push(ch); self.advance(); } else { break; }
+                    }
+                    return Token::StringLit(hex);
+                }
+            }
+        }
         Token::NumberLit(s)
     }
 
@@ -239,6 +261,8 @@ impl Lexer {
             "CROSS"     => Token::Cross,
             "NATURAL"   => Token::Natural,
             "OUTER"     => Token::Outer,
+            "FULL"      => Token::Full,
+            "RETURNING" => Token::Returning,
             "ON"        => Token::On,
             "AND"       => Token::And,
             "OR"        => Token::Or,
@@ -311,6 +335,7 @@ impl Lexer {
             "DOUBLE"       => Token::Double,
             "TIME"         => Token::Time,
             "YEAR"         => Token::Year,
+            "BLOB"         => Token::Blob,
             "ENUM"         => Token::Enum,
             "DATABASE"     => Token::Database,
             "INNER"        => Token::Inner,
@@ -341,6 +366,8 @@ impl Lexer {
             "ELSE"         => Token::Else,
             "END"          => Token::End,
             "UNION"        => Token::Union,
+            "INTERSECT"    => Token::Intersect,
+            "EXCEPT"       => Token::Except,
             "ALL"          => Token::All,
             "IF"           => Token::If,
             "GROUP_CONCAT" => Token::GroupConcat,

@@ -44,19 +44,25 @@
 - [x] TRUNCATE TABLE
 - [x] ALTER TABLE (ADD / MODIFY / DROP / RENAME COLUMN)
 - [x] ALTER TABLE RENAME TO (테이블 이름 변경)
+- [x] ALTER TABLE ADD CONSTRAINT (FOREIGN KEY / UNIQUE / CHECK)
+- [x] ALTER TABLE DROP CONSTRAINT / DROP FOREIGN KEY
 - [x] CREATE INDEX / DROP INDEX (단일 / 복합)
 - [x] CREATE VIEW / DROP VIEW
 - [x] DESCRIBE (테이블 스키마 조회)
+- [x] SHOW CREATE TABLE (스키마 기반 DDL 역생성)
 
 ### DML
 - [x] INSERT (전체 컬럼 / 컬럼 지정 / 멀티 row)
 - [x] INSERT ... SELECT (SELECT 결과를 다른 테이블에 삽입)
 - [x] INSERT IGNORE (UNIQUE 위반 행 조용히 무시)
 - [x] INSERT ... ON DUPLICATE KEY UPDATE (중복 키 시 UPDATE로 전환, 다중 컬럼 대입 지원)
+- [x] INSERT ... RETURNING col1, col2 — 삽입된 행 즉시 반환
 - [x] SELECT
 - [x] UPDATE (상수 / 산술 표현식 / 스칼라 함수 / 자기 참조 — `salary = salary * 1.1`, `name = CONCAT(name, '_v2')`)
+- [x] UPDATE ... RETURNING — 수정된 행 반환
 - [x] UPDATE 다중 테이블 — `UPDATE t1, t2 SET t1.col = ..., t2.col = ... WHERE ...`
 - [x] DELETE (MVCC 논리 삭제 / 물리 삭제)
+- [x] DELETE ... RETURNING — 삭제된 행 반환
 - [x] DELETE 다중 테이블 — `DELETE t1, t2 FROM t1 JOIN t2 ON ... WHERE ...`
 
 ### DCL
@@ -66,6 +72,7 @@
 - [x] REVOKE privilege [, ...] ON object FROM `'user'@'host'`
 - [x] SHOW GRANTS [FOR `'user'@'host'`]
 - [x] 사용자·권한 영속화 (`_users.json`, `_grants.json`)
+- [x] 비밀번호 SHA-256 해시 저장 (레거시 평문 자동 마이그레이션)
 
 ### 쿼리 기능
 - [x] WHERE (=, !=, >, <, >=, <=)
@@ -76,6 +83,7 @@
 - [x] BETWEEN / LIKE (%, _ 와일드카드)
 - [x] IS NULL / IS NOT NULL
 - [x] INNER JOIN / LEFT JOIN / RIGHT JOIN
+- [x] FULL OUTER JOIN (양쪽 NULL 패딩, 매칭 안 된 우측 행 자동 추가)
 - [x] CROSS JOIN (카르테시안 곱, ON 절 없음)
 - [x] NATURAL JOIN (공통 컬럼명 자동 equi-join, ON 절 없음)
 - [x] LEFT OUTER JOIN / RIGHT OUTER JOIN / INNER JOIN 키워드 별칭 지원
@@ -87,7 +95,7 @@
 - [x] GROUP BY / HAVING
 - [x] DISTINCT
 - [x] 산술 표현식 — SELECT / WHERE / UPDATE SET에서 `price * qty`, `salary + 100`
-- [x] 집계 함수 — COUNT / SUM / AVG / MIN / MAX
+- [x] 집계 함수 — COUNT / COUNT(DISTINCT col) / SUM / AVG / MIN / MAX
 - [x] GROUP_CONCAT (SEPARATOR 옵션, GROUP BY 및 비집계 양쪽 지원)
 - [x] 윈도우 함수 — ROW_NUMBER / RANK / DENSE_RANK / LAG / LEAD / FIRST_VALUE / LAST_VALUE / NTH_VALUE (OVER PARTITION BY + ORDER BY)
 - [x] CASE WHEN ... THEN ... ELSE ... END
@@ -99,11 +107,13 @@
 - [x] 조건 함수 — IF(cond, true_val, false_val)
 - [x] FROM 없는 스칼라 SELECT — `SELECT 1+1`, `SELECT NOW()` (`_dual_` 가상 테이블 방식)
 - [x] 서브쿼리 — WHERE col = / > / < (SELECT ...)
-- [x] 상관 서브쿼리 — WHERE EXISTS (SELECT 1 FROM ... WHERE outer.col = inner.col)
+- [x] 상관 서브쿼리 — WHERE EXISTS / IN / NOT IN (SELECT ... WHERE outer.col = inner.col) 완전 지원
 - [x] FROM 절 서브쿼리 — FROM (SELECT ...) AS alias
 - [x] SELECT 스칼라 서브쿼리 — `SELECT (SELECT MAX(col) FROM t2) AS alias FROM t1` (비상관·상관 모두 지원)
 - [x] JOIN 순서 최적화 — INNER JOIN 그리디 재정렬 (작은 테이블 우선, ON 조건 의존성 자동 분석)
 - [x] UNION / UNION ALL (ORDER BY / LIMIT / OFFSET 포함)
+- [x] INTERSECT / INTERSECT ALL — 교집합
+- [x] EXCEPT / EXCEPT ALL — 차집합
 - [x] CTE (WITH ... AS) — 단순 / 다중 / INSERT 메인 쿼리 지원
 - [x] 재귀 CTE (WITH RECURSIVE) — base case + UNION ALL 반복, positional 컬럼 매핑
 - [x] SELECT ... FOR UPDATE (행 잠금)
@@ -126,6 +136,7 @@
 - [x] BOOLEAN — true / false
 - [x] ENUM('val1','val2',...) — 열거형 (INSERT/UPDATE 시 허용값 검사, 허용 목록 외 값 오류 반환)
 - [x] SET('a','b',...) — 집합형 (콤마 구분 복수 값, 각 요소 유효성 검사)
+- [x] BLOB — 이진 데이터 타입 (hex 문자열로 저장, `0x...` 리터럴 파싱 지원)
 
 ### 제약 조건
 - [x] PRIMARY KEY (단일 / 복합)
@@ -147,7 +158,7 @@
 - [x] WAL Group Commit — 여러 세션의 COMMIT을 단일 fsync로 묶어 TPS 향상, SharedDatabase 락 해제 후 fsync
 - [x] WAL fsync per-commit — COMMIT 레코드 기록 시 `sync_all()` 호출 (`innodb_flush_log_at_trx_commit=1` 동등, 전원 장애 시 커밋 유실 방지)
 - [x] BEGIN / COMMIT / ROLLBACK
-- [x] SAVEPOINT / ROLLBACK TO SAVEPOINT
+- [x] SAVEPOINT / ROLLBACK TO SAVEPOINT (session_tables 기반 undo 적용 — Deferred Write와 완전 통합)
 - [x] Undo Log 기반 롤백 (B+Tree 인덱스 재빌드 포함)
 - [x] Undo Log 영속화 (`data/_undo.log`) — 트랜잭션 중 변경마다 Undo Entry를 디스크에 즉시 기록, COMMIT/ROLLBACK 시 삭제, 크래시 후 재시작 시 미완료 트랜잭션 자동 롤백
 - [x] WAL 기반 Crash Recovery (재시작 시 자동 복구)
@@ -156,6 +167,7 @@
   - READ UNCOMMITTED / READ COMMITTED
   - REPEATABLE READ (BEGIN 시점 스냅샷 고정)
   - SERIALIZABLE (팬텀 읽기 감지 + 자동 롤백)
+- [x] Deferred Write (ACID Isolation 완전 충족) — DML은 session_tables(세션 로컬 버퍼)에만 기록, COMMIT 시 s.tables·buffer_pool에 일괄 반영, ROLLBACK 시 버퍼 폐기. 미커밋 데이터가 다른 세션에 노출(Dirty Read)되지 않음
 
 ### 인덱스 & 저장
 - [x] B+Tree 인덱스 (단일 컬럼)

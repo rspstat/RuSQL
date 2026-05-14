@@ -2,6 +2,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
+use sha2::{Sha256, Digest};
 use chrono;
 use serde::{Serialize, Deserialize};
 use crate::transaction::txn_manager::TransactionManager;
@@ -66,16 +67,26 @@ pub struct SharedDatabase {
     pub table_stats: HashMap<String, TableStats>,
 }
 
+/// SHA-256 해시 (hex 문자열 반환)
+fn hash_password(password: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(password.as_bytes());
+    hasher.finalize().iter().map(|b| format!("{:02x}", b)).collect()
+}
+
 impl SharedDatabase {
     /// TCP 인증: users가 비어있으면 open 모드(항상 통과).
-    /// password_hash가 None인 사용자는 빈 비밀번호로 접속 가능.
+    /// 저장값이 SHA-256 hex(64자)이면 해시 비교, 아니면 레거시 평문 비교 후 자동 마이그레이션.
     pub fn validate_credentials(&self, user: &str, password: &str) -> bool {
         if self.users.is_empty() { return true; }
         self.users.iter().any(|u| {
             u.user == user
                 && match &u.password_hash {
                     None       => password.is_empty(),
-                    Some(hash) => hash == password,
+                    Some(hash) => {
+                        let hashed = hash_password(password);
+                        hash == &hashed || hash == password // 해시 또는 레거시 평문
+                    }
                 }
         })
     }
@@ -86,7 +97,7 @@ impl SharedDatabase {
             self.users.push(UserRecord {
                 user: "root".into(),
                 host: "%".into(),
-                password_hash: Some("root".into()),
+                password_hash: Some(hash_password("root")),
             });
             self.disk.save_users(&self.users);
             true
@@ -100,6 +111,9 @@ pub struct Executor {
     pub shared: Arc<RwLock<SharedDatabase>>,
     pub txn: TransactionManager,
     pub current_db: String,
+    /// 트랜잭션 중 DML 변경분을 보관하는 세션 로컬 테이블 버퍼.
+    /// COMMIT 시 s.tables에 적용되며, ROLLBACK 시 폐기된다.
+    pub session_tables: HashMap<String, Vec<Row>>,
 }
 
 impl Executor {
@@ -121,7 +135,11 @@ impl Executor {
     }
 
     pub fn new() -> Self {
-        let disk = DiskManager::new();
+        Self::new_with_dir("data")
+    }
+
+    pub fn new_with_dir(dir: &str) -> Self {
+        let disk = DiskManager::new_with_dir(dir);
         let mut catalog = Catalog::new();
         let mut tables = HashMap::new();
         let mut indexes = HashMap::new();
@@ -244,6 +262,7 @@ impl Executor {
             })),
             txn: TransactionManager::new(),
             current_db,
+            session_tables: HashMap::new(),
         };
 
         // WAL Crash Recovery
@@ -260,6 +279,7 @@ impl Executor {
             shared,
             txn: TransactionManager::new(),
             current_db,
+            session_tables: HashMap::new(),
         }
     }
 
@@ -364,15 +384,15 @@ impl Executor {
             }
             Statement::DropTable { name, if_exists }  => self.exec_drop(s, name, if_exists),
             Statement::TruncateTable { name }        => self.exec_truncate(s, name),
-            Statement::Insert { table, columns, values, on_conflict } => self.exec_insert(s, table, columns, values, on_conflict),
-            Statement::InsertSelect { table, columns, query, on_conflict } => self.exec_insert_select(s, table, columns, *query, on_conflict),
+            Statement::Insert { table, columns, values, on_conflict, returning } => self.exec_insert(s, table, columns, values, on_conflict, returning),
+            Statement::InsertSelect { table, columns, query, on_conflict, returning } => self.exec_insert_select(s, table, columns, *query, on_conflict, returning),
             Statement::Select { table, subquery, distinct, columns, condition, joins, order_by, group_by, having, limit, offset, for_update } => {
                 self.exec_select(s, table, subquery, distinct, columns, condition, joins, order_by, group_by, having, limit, offset, for_update)
             }
-            Statement::Update { table, assignments, condition } => {
-                self.exec_update(s, table, assignments, condition)
+            Statement::Update { table, assignments, condition, returning } => {
+                self.exec_update(s, table, assignments, condition, returning)
             }
-            Statement::Delete { table, condition }   => self.exec_delete(s, table, condition),
+            Statement::Delete { table, condition, returning } => self.exec_delete(s, table, condition, returning),
             Statement::AlterTable { table, action }  => self.exec_alter(s, table, action),
             Statement::CreateIndex { index_name, table, columns } => {
                 self.exec_create_index(s, index_name, table, columns)
@@ -396,6 +416,9 @@ impl Executor {
             Statement::Explain(inner)           => self.exec_explain(s, *inner),
             Statement::ExplainAnalyze(inner)    => self.exec_explain_analyze(s, *inner),
             Statement::Union { left, right, all, order_by, limit, offset } => self.exec_union(s, *left, *right, all, order_by, limit, offset),
+            Statement::Intersect { left, right, all, order_by, limit, offset } => self.exec_intersect(s, *left, *right, all, order_by, limit, offset),
+            Statement::Except { left, right, all, order_by, limit, offset } => self.exec_except(s, *left, *right, all, order_by, limit, offset),
+            Statement::ShowCreateTable { table } => self.exec_show_create_table(s, table),
             Statement::With { ctes, query, recursive } => self.exec_with(s, ctes, *query, recursive),
             Statement::CreateDatabase { name, if_not_exists } => self.exec_create_database(s, name, if_not_exists),
             Statement::DropDatabase { name, if_exists }       => self.exec_drop_database(s, name, if_exists),
@@ -509,6 +532,139 @@ impl Executor {
         out.push_str(&sep);
         out.push_str(&format!("\n{} row(s) returned.", result.len()));
         Ok(out)
+    }
+
+    fn exec_intersect(
+        &mut self,
+        s: &mut SharedDatabase,
+        left: Statement,
+        right: Statement,
+        all: bool,
+        order_by: Vec<OrderBy>,
+        limit: Option<usize>,
+        offset: Option<usize>,
+    ) -> Result<String, String> {
+        let left_out  = self.execute_with_s(s, left)?;
+        let right_out = self.execute_with_s(s, right)?;
+        let (left_cols, left_rows)   = Self::parse_table_output(&left_out);
+        let (right_cols, right_rows) = Self::parse_table_output(&right_out);
+        let cols = if left_cols.is_empty() { right_cols } else { left_cols };
+
+        let right_keys: Vec<Vec<String>> = right_rows.iter()
+            .map(|r| cols.iter().map(|c| r.get(c).cloned().unwrap_or_default()).collect())
+            .collect();
+
+        let mut result: Vec<Row> = Vec::new();
+        let mut matched_right: Vec<usize> = Vec::new(); // for INTERSECT ALL
+        for row in &left_rows {
+            let key: Vec<String> = cols.iter().map(|c| row.get(c).cloned().unwrap_or_default()).collect();
+            if all {
+                // INTERSECT ALL: match once per right occurrence
+                if let Some(pos) = right_keys.iter().enumerate()
+                    .find(|(i, k)| !matched_right.contains(i) && *k == &key)
+                    .map(|(i, _)| i)
+                {
+                    matched_right.push(pos);
+                    result.push(row.clone());
+                }
+            } else {
+                // INTERSECT: appear in both, deduplicate result
+                if right_keys.contains(&key) && !result.iter().any(|r| {
+                    cols.iter().map(|c| r.get(c).cloned().unwrap_or_default()).collect::<Vec<_>>() == key
+                }) {
+                    result.push(row.clone());
+                }
+            }
+        }
+        Self::apply_set_postprocess(&mut result, &cols, order_by, limit, offset);
+        Ok(Self::format_set_result(&cols, result))
+    }
+
+    fn exec_except(
+        &mut self,
+        s: &mut SharedDatabase,
+        left: Statement,
+        right: Statement,
+        all: bool,
+        order_by: Vec<OrderBy>,
+        limit: Option<usize>,
+        offset: Option<usize>,
+    ) -> Result<String, String> {
+        let left_out  = self.execute_with_s(s, left)?;
+        let right_out = self.execute_with_s(s, right)?;
+        let (left_cols, left_rows)   = Self::parse_table_output(&left_out);
+        let (right_cols, right_rows) = Self::parse_table_output(&right_out);
+        let cols = if left_cols.is_empty() { right_cols } else { left_cols };
+
+        let right_keys: Vec<Vec<String>> = right_rows.iter()
+            .map(|r| cols.iter().map(|c| r.get(c).cloned().unwrap_or_default()).collect())
+            .collect();
+
+        let mut right_counts: std::collections::HashMap<Vec<String>, usize> = std::collections::HashMap::new();
+        for k in &right_keys { *right_counts.entry(k.clone()).or_insert(0) += 1; }
+
+        let mut result: Vec<Row> = Vec::new();
+        for row in &left_rows {
+            let key: Vec<String> = cols.iter().map(|c| row.get(c).cloned().unwrap_or_default()).collect();
+            if all {
+                // EXCEPT ALL: subtract one right occurrence per left row
+                let cnt = right_counts.entry(key.clone()).or_insert(0);
+                if *cnt > 0 { *cnt -= 1; } else { result.push(row.clone()); }
+            } else {
+                // EXCEPT: rows in left not in right, deduplicated
+                if !right_keys.contains(&key) && !result.iter().any(|r| {
+                    cols.iter().map(|c| r.get(c).cloned().unwrap_or_default()).collect::<Vec<_>>() == key
+                }) {
+                    result.push(row.clone());
+                }
+            }
+        }
+        Self::apply_set_postprocess(&mut result, &cols, order_by, limit, offset);
+        Ok(Self::format_set_result(&cols, result))
+    }
+
+    fn apply_set_postprocess(result: &mut Vec<Row>, cols: &[String], order_by: Vec<OrderBy>, limit: Option<usize>, offset: Option<usize>) {
+        for ob in order_by.iter().rev() {
+            let col = ob.column.clone();
+            let asc = ob.ascending;
+            result.sort_by(|a, b| {
+                let va = a.get(&col).map(|s| s.as_str()).unwrap_or("");
+                let vb = b.get(&col).map(|s| s.as_str()).unwrap_or("");
+                let cmp = match (va.parse::<f64>(), vb.parse::<f64>()) {
+                    (Ok(fa), Ok(fb)) => fa.partial_cmp(&fb).unwrap_or(std::cmp::Ordering::Equal),
+                    _ => va.cmp(vb),
+                };
+                if asc { cmp } else { cmp.reverse() }
+            });
+        }
+        if let Some(n) = offset { let skip = n.min(result.len()); result.drain(..skip); }
+        if let Some(n) = limit  { result.truncate(n); }
+        let _ = cols; // suppress unused warning
+    }
+
+    fn format_set_result(cols: &[String], result: Vec<Row>) -> String {
+        if result.is_empty() { return "0 rows returned.".to_string(); }
+        let col_widths: Vec<usize> = cols.iter().map(|h| {
+            let max_val = result.iter().map(|row| row.get(h).map(|v| v.len()).unwrap_or(0)).max().unwrap_or(0);
+            h.len().max(max_val)
+        }).collect();
+        let mut out = String::new();
+        let sep = col_widths.iter().map(|w| "-".repeat(w + 2)).collect::<Vec<_>>().join("+");
+        let sep = format!("+{}+", sep);
+        out.push_str(&sep); out.push('\n');
+        let hdr = cols.iter().zip(col_widths.iter()).map(|(h, w)| format!(" {:width$} ", h, width = w)).collect::<Vec<_>>().join("|");
+        out.push_str(&format!("|{}|\n", hdr));
+        out.push_str(&sep); out.push('\n');
+        for row in &result {
+            let line = cols.iter().zip(col_widths.iter()).map(|(c, w)| {
+                let v = row.get(c).map(|s| if s == NULL_VALUE { "NULL".to_string() } else { s.clone() }).unwrap_or_default();
+                format!(" {:width$} ", v, width = w)
+            }).collect::<Vec<_>>().join("|");
+            out.push_str(&format!("|{}|\n", line));
+        }
+        out.push_str(&sep);
+        out.push_str(&format!("\n{} row(s) returned.", result.len()));
+        out
     }
 
     /// MVCC 가시성 판정: _xmax == "0" 또는 없으면 visible
@@ -811,6 +967,7 @@ impl Executor {
         columns: Option<Vec<String>>,
         query: Statement,
         on_conflict: InsertConflict,
+        returning: Option<Vec<SelectColumn>>,
     ) -> Result<String, String> {
         let output = self.execute_with_s(s, query)?;
         let (col_names, rows) = Self::parse_table_output(&output);
@@ -821,7 +978,7 @@ impl Executor {
             .map(|row| col_names.iter().map(|c| row.get(c).cloned().unwrap_or_default()).collect())
             .collect();
         let insert_cols = columns.or(Some(col_names));
-        self.exec_insert(s, table, insert_cols, all_values, on_conflict)
+        self.exec_insert(s, table, insert_cols, all_values, on_conflict, returning)
     }
 
     fn exec_insert(
@@ -831,6 +988,28 @@ impl Executor {
         col_list: Option<Vec<String>>,
         all_values: Vec<Vec<String>>,
         on_conflict: InsertConflict,
+        returning: Option<Vec<SelectColumn>>,
+    ) -> Result<String, String> {
+        let committed = if self.txn.is_active() {
+            Some(self.session_swap_in(s, &table))
+        } else {
+            None
+        };
+        let result = self.exec_insert_inner(s, table.clone(), col_list, all_values, on_conflict, returning);
+        if let Some(c) = committed {
+            self.session_swap_out(s, &table, c);
+        }
+        result
+    }
+
+    fn exec_insert_inner(
+        &mut self,
+        s: &mut SharedDatabase,
+        table: String,
+        col_list: Option<Vec<String>>,
+        all_values: Vec<Vec<String>>,
+        on_conflict: InsertConflict,
+        returning: Option<Vec<SelectColumn>>,
     ) -> Result<String, String> {
         // 스키마 클론 (borrow 충돌 방지)
         let schema = s.catalog.get_table(&table)
@@ -1155,6 +1334,7 @@ impl Executor {
         }
 
         let inserted = prepared.len();
+        let returning_rows: Vec<Row> = if returning.is_some() { prepared.clone() } else { vec![] };
 
         for row in prepared {
             let pk_val = row.get(&col_names[0]).cloned().unwrap_or_default();
@@ -1187,15 +1367,18 @@ impl Executor {
         let rows = s.tables.get(&table).unwrap().clone();
         // 단일 컬럼 보조 인덱스 재빌드 (INSERT 후 stale 방지)
         self.rebuild_secondary_indexes(s, &table, &rows);
-        s.buffer_pool.write_page(&table, rows);
-
-        // 모든 row 삽입 후 flush
+        // 트랜잭션 중에는 버퍼 풀 갱신 생략 (COMMIT 시 일괄 처리)
         if !self.txn.is_active() {
+            s.buffer_pool.write_page(&table, rows);
             s.buffer_pool.flush_page(&table, &s.disk);
         }
 
         self.maybe_auto_checkpoint(s);
-        Ok(format!("{} row(s) inserted.", inserted))
+        if let Some(ret_cols) = returning {
+            Ok(Self::format_returning_rows(&returning_rows, &ret_cols))
+        } else {
+            Ok(format!("{} row(s) inserted.", inserted))
+        }
     }
 
     /// CHECK 제약 표현식 평가: "col > 0", "col IS NOT NULL", "col >= 1 AND col <= 100" 형식
@@ -1572,8 +1755,10 @@ impl Executor {
             return Err(format!("Table '{}' not found", table));
         }
 
-        // REPEATABLE READ / SERIALIZABLE: 스냅샷에서 읽기
-        let rows: Vec<Row> = if let Some(snap_rows) = self.txn.get_snapshot_table(&table) {
+        // 읽기 우선순위: 세션 쓰기 버퍼 > REPEATABLE READ 스냅샷 > 커밋 데이터
+        let rows: Vec<Row> = if let Some(session_rows) = self.session_tables.get(&table) {
+            session_rows.clone()
+        } else if let Some(snap_rows) = self.txn.get_snapshot_table(&table) {
             snap_rows.clone()
         } else {
             s.buffer_pool.get_page(&table, &s.disk)
@@ -1589,7 +1774,9 @@ impl Executor {
         } else {
             let mut current = rows;
             for (ji, j) in joins.iter().enumerate() {
-                let right_rows_raw = if let Some(snap) = self.txn.get_snapshot_table(&j.table) {
+                let right_rows_raw = if let Some(session_rows) = self.session_tables.get(&j.table) {
+                    session_rows.clone()
+                } else if let Some(snap) = self.txn.get_snapshot_table(&j.table) {
                     snap.clone()
                 } else {
                     s.tables.get(&j.table)
@@ -1613,8 +1800,8 @@ impl Executor {
                     .map(|s| s.columns.iter().map(|c| c.name.clone()).collect())
                     .unwrap_or_default();
 
-                // Cross/Natural joins always use nested loop (no hash/sort-merge)
-                let algo = if matches!(j.join_type, JoinType::Cross | JoinType::Natural) {
+                // Cross/Natural/FullOuter joins always use nested loop (no hash/sort-merge)
+                let algo = if matches!(j.join_type, JoinType::Cross | JoinType::Natural | JoinType::FullOuter) {
                     None
                 } else {
                     plan.joins.get(ji).map(|jp| &jp.algo)
@@ -1915,6 +2102,38 @@ impl Executor {
                                     }
                                 }
                             }
+                            JoinType::FullOuter => {
+                                let left_cols: Vec<String> = current.first()
+                                    .map(|r| r.keys().filter(|k| !k.starts_with('_') && !k.contains('.')).cloned().collect())
+                                    .unwrap_or_default();
+                                let mut matched_right: HashSet<usize> = HashSet::new();
+                                for left in &current {
+                                    let mut any_match = false;
+                                    for (ri, right) in right_rows.iter().enumerate() {
+                                        let mut merged = left.clone();
+                                        merge_right(&mut merged, right, &j.table);
+                                        if Self::eval_condexpr(&merged, &j.on_expr) {
+                                            out.push(merged);
+                                            matched_right.insert(ri);
+                                            any_match = true;
+                                        }
+                                    }
+                                    if !any_match {
+                                        let mut merged = left.clone();
+                                        null_right(&mut merged, &right_schema_cols, &j.table);
+                                        out.push(merged);
+                                    }
+                                }
+                                for (ri, right) in right_rows.iter().enumerate() {
+                                    if !matched_right.contains(&ri) {
+                                        let mut merged: Row = left_cols.iter()
+                                            .map(|c| (c.clone(), NULL_VALUE.to_string()))
+                                            .collect();
+                                        merge_right(&mut merged, right, &j.table);
+                                        out.push(merged);
+                                    }
+                                }
+                            }
                         }
                         out
                     }
@@ -1996,6 +2215,12 @@ impl Executor {
                         .collect();
                     let agg_val = match func {
                         AggFunc::Count => grp.len() as f64,
+                        AggFunc::CountDistinct => {
+                            let distinct: HashSet<String> = grp.iter()
+                                .filter_map(|r| r.get(col_name).filter(|v| v.as_str() != NULL_VALUE).cloned())
+                                .collect();
+                            distinct.len() as f64
+                        }
                         AggFunc::Sum   => vals.iter().sum(),
                         AggFunc::Avg   => if vals.is_empty() { 0.0 } else {
                             vals.iter().sum::<f64>() / vals.len() as f64 },
@@ -2130,6 +2355,12 @@ impl Executor {
                     .collect();
                 let agg_val = match func {
                     AggFunc::Count => result.len() as f64,
+                    AggFunc::CountDistinct => {
+                        let distinct: HashSet<String> = result.iter()
+                            .filter_map(|r| r.get(col_name.as_str()).filter(|v| v.as_str() != NULL_VALUE).cloned())
+                            .collect();
+                        distinct.len() as f64
+                    }
                     AggFunc::Sum   => vals.iter().sum(),
                     AggFunc::Avg   => if vals.is_empty() { 0.0 } else {
                         vals.iter().sum::<f64>() / vals.len() as f64
@@ -2512,9 +2743,42 @@ impl Executor {
         }
     }
 
+    fn format_returning_rows(rows: &[Row], cols: &[SelectColumn]) -> String {
+        if rows.is_empty() { return "(0 rows)".to_string(); }
+        let headers: Vec<(String, String)> = if cols.iter().any(|c| matches!(c, SelectColumn::All)) {
+            rows[0].keys().filter(|k| !k.starts_with('_')).map(|k| (k.clone(), k.clone())).collect()
+        } else {
+            cols.iter().filter_map(|c| match c {
+                SelectColumn::Column(name)            => Some((name.clone(), name.clone())),
+                SelectColumn::ColumnAlias(name, alias) => Some((alias.clone(), name.clone())),
+                _ => None,
+            }).collect()
+        };
+        let data: Vec<Vec<String>> = rows.iter().map(|row| {
+            headers.iter().map(|(_, key)| row.get(key).cloned().unwrap_or_else(|| NULL_VALUE.to_string())).collect()
+        }).collect();
+        let widths: Vec<usize> = headers.iter().enumerate().map(|(i, (h, _))| {
+            let mv = data.iter().map(|r| r.get(i).map(|s| s.len()).unwrap_or(0)).max().unwrap_or(0);
+            h.len().max(mv)
+        }).collect();
+        let sep = format!("+{}+", widths.iter().map(|w| "-".repeat(w + 2)).collect::<Vec<_>>().join("+"));
+        let mut out = String::new();
+        out.push_str(&sep); out.push('\n');
+        let header_line = headers.iter().zip(&widths).map(|((h, _), w)| format!(" {:width$} ", h, width = w)).collect::<Vec<_>>().join("|");
+        out.push_str(&format!("|{}|\n", header_line));
+        out.push_str(&sep); out.push('\n');
+        for row_vals in &data {
+            let row_line = row_vals.iter().zip(&widths).map(|(v, w)| format!(" {:width$} ", v, width = w)).collect::<Vec<_>>().join("|");
+            out.push_str(&format!("|{}|\n", row_line));
+        }
+        out.push_str(&sep);
+        out
+    }
+
     fn agg_label(func: &AggFunc, col: &str) -> String {
         match func {
             AggFunc::Count => format!("COUNT({})", col),
+            AggFunc::CountDistinct => format!("COUNT(DISTINCT {})", col),
             AggFunc::Sum   => format!("SUM({})", col),
             AggFunc::Avg   => format!("AVG({})", col),
             AggFunc::Min   => format!("MIN({})", col),
@@ -2936,6 +3200,44 @@ impl Executor {
         table: String,
         assignments: Vec<(String, ArithExpr)>,
         condition: Option<CondExpr>,
+        returning: Option<Vec<SelectColumn>>,
+    ) -> Result<String, String> {
+        let committed_backups: Option<Vec<(String, Vec<Row>)>> = if self.txn.is_active() {
+            let main = self.session_swap_in(s, &table);
+            let mut backups = vec![(table.clone(), main)];
+            // FK CASCADE 대상 테이블도 세션 상태로 스왑
+            let fk_tables: Vec<String> = s.catalog.tables.iter()
+                .filter(|(tname, schema)| *tname != &table && schema.columns.iter().any(|c|
+                    c.foreign_key.as_ref().map(|fk|
+                        fk.ref_table == table &&
+                        !matches!(fk.on_update, crate::catalog::schema::FkAction::Restrict)
+                    ).unwrap_or(false)))
+                .map(|(tname, _)| tname.clone())
+                .collect();
+            for t in fk_tables {
+                let c = self.session_swap_in(s, &t);
+                backups.push((t, c));
+            }
+            Some(backups)
+        } else {
+            None
+        };
+        let result = self.exec_update_inner(s, table.clone(), assignments, condition, returning);
+        if let Some(backups) = committed_backups {
+            for (tname, committed) in backups {
+                self.session_swap_out(s, &tname, committed);
+            }
+        }
+        result
+    }
+
+    fn exec_update_inner(
+        &mut self,
+        s: &mut SharedDatabase,
+        table: String,
+        assignments: Vec<(String, ArithExpr)>,
+        condition: Option<CondExpr>,
+        returning: Option<Vec<SelectColumn>>,
     ) -> Result<String, String> {
         // PK 컬럼명 먼저 추출 (borrow 분리)
         let pk_col = s.catalog.get_table(&table)
@@ -3128,9 +3430,11 @@ impl Executor {
                                                 }
                                             }
                                         }
-                                        let rows_clone2 = s.tables.get(other_table).unwrap().clone();
-                                        s.buffer_pool.write_page(other_table, rows_clone2.clone());
-                                        s.buffer_pool.flush_page(other_table, &s.disk);
+                                        if !self.txn.is_active() {
+                                            let rows_clone2 = s.tables.get(other_table).unwrap().clone();
+                                            s.buffer_pool.write_page(other_table, rows_clone2);
+                                            s.buffer_pool.flush_page(other_table, &s.disk);
+                                        }
                                     }
                                     crate::catalog::schema::FkAction::SetNull => {
                                         if let Some(other_rows) = s.tables.get_mut(other_table) {
@@ -3140,9 +3444,11 @@ impl Executor {
                                                 }
                                             }
                                         }
-                                        let rows_clone2 = s.tables.get(other_table).unwrap().clone();
-                                        s.buffer_pool.write_page(other_table, rows_clone2.clone());
-                                        s.buffer_pool.flush_page(other_table, &s.disk);
+                                        if !self.txn.is_active() {
+                                            let rows_clone2 = s.tables.get(other_table).unwrap().clone();
+                                            s.buffer_pool.write_page(other_table, rows_clone2);
+                                            s.buffer_pool.flush_page(other_table, &s.disk);
+                                        }
                                     }
                                     crate::catalog::schema::FkAction::SetDefault => {
                                         let default_val = s.catalog.get_table(other_table)
@@ -3156,9 +3462,11 @@ impl Executor {
                                                 }
                                             }
                                         }
-                                        let rows_clone2 = s.tables.get(other_table).unwrap().clone();
-                                        s.buffer_pool.write_page(other_table, rows_clone2.clone());
-                                        s.buffer_pool.flush_page(other_table, &s.disk);
+                                        if !self.txn.is_active() {
+                                            let rows_clone2 = s.tables.get(other_table).unwrap().clone();
+                                            s.buffer_pool.write_page(other_table, rows_clone2);
+                                            s.buffer_pool.flush_page(other_table, &s.disk);
+                                        }
                                     }
                                 }
                             }
@@ -3168,14 +3476,52 @@ impl Executor {
             }
         }
 
-        let rows = s.tables.get(&table).unwrap().clone();
-        s.buffer_pool.write_page(&table, rows);
-        s.buffer_pool.flush_page(&table, &s.disk);
+        if !self.txn.is_active() {
+            let rows = s.tables.get(&table).unwrap().clone();
+            s.buffer_pool.write_page(&table, rows);
+            s.buffer_pool.flush_page(&table, &s.disk);
+        }
         self.maybe_auto_checkpoint(s);
-        Ok(format!("{} row(s) updated.", count))
+        if let Some(ret_cols) = returning {
+            let updated_rows: Vec<Row> = s.tables.get(&table).unwrap().iter()
+                .filter(|r| Self::is_visible(r) && matching_pks.contains(&r.get(&pk_col).cloned().unwrap_or_default()))
+                .cloned().collect();
+            Ok(Self::format_returning_rows(&updated_rows, &ret_cols))
+        } else {
+            Ok(format!("{} row(s) updated.", count))
+        }
     }
 
-    fn exec_delete(&mut self, s: &mut SharedDatabase, table: String, condition: Option<CondExpr>) -> Result<String, String> {
+    fn exec_delete(&mut self, s: &mut SharedDatabase, table: String, condition: Option<CondExpr>, returning: Option<Vec<SelectColumn>>) -> Result<String, String> {
+        let committed_backups: Option<Vec<(String, Vec<Row>)>> = if self.txn.is_active() {
+            let main = self.session_swap_in(s, &table);
+            let mut backups = vec![(table.clone(), main)];
+            let fk_tables: Vec<String> = s.catalog.tables.iter()
+                .filter(|(tname, schema)| *tname != &table && schema.columns.iter().any(|c|
+                    c.foreign_key.as_ref().map(|fk|
+                        fk.ref_table == table &&
+                        !matches!(fk.on_delete, crate::catalog::schema::FkAction::Restrict)
+                    ).unwrap_or(false)))
+                .map(|(tname, _)| tname.clone())
+                .collect();
+            for t in fk_tables {
+                let c = self.session_swap_in(s, &t);
+                backups.push((t, c));
+            }
+            Some(backups)
+        } else {
+            None
+        };
+        let result = self.exec_delete_inner(s, table.clone(), condition, returning);
+        if let Some(backups) = committed_backups {
+            for (tname, committed) in backups {
+                self.session_swap_out(s, &tname, committed);
+            }
+        }
+        result
+    }
+
+    fn exec_delete_inner(&mut self, s: &mut SharedDatabase, table: String, condition: Option<CondExpr>, returning: Option<Vec<SelectColumn>>) -> Result<String, String> {
         // 서브쿼리 조건 지원: 먼저 매칭 행을 수집 (borrow 분리)
         let candidates: Vec<Row> = s.tables.get(&table)
             .ok_or(format!("Table '{}' not found", table))?
@@ -3235,9 +3581,11 @@ impl Executor {
                                             });
                                         }
                                     }
-                                    let rows_clone = s.tables.get(other_table).unwrap().clone();
-                                    s.buffer_pool.write_page(other_table, rows_clone.clone());
-                                    s.buffer_pool.flush_page(other_table, &s.disk);
+                                    if !self.txn.is_active() {
+                                        let rows_clone = s.tables.get(other_table).unwrap().clone();
+                                        s.buffer_pool.write_page(other_table, rows_clone);
+                                        s.buffer_pool.flush_page(other_table, &s.disk);
+                                    }
                                 }
                                 crate::catalog::schema::FkAction::SetNull => {
                                     if let Some(other_rows) = s.tables.get_mut(other_table) {
@@ -3247,9 +3595,11 @@ impl Executor {
                                             }
                                         }
                                     }
-                                    let rows_clone = s.tables.get(other_table).unwrap().clone();
-                                    s.buffer_pool.write_page(other_table, rows_clone.clone());
-                                    s.buffer_pool.flush_page(other_table, &s.disk);
+                                    if !self.txn.is_active() {
+                                        let rows_clone = s.tables.get(other_table).unwrap().clone();
+                                        s.buffer_pool.write_page(other_table, rows_clone);
+                                        s.buffer_pool.flush_page(other_table, &s.disk);
+                                    }
                                 }
                                 crate::catalog::schema::FkAction::SetDefault => {
                                     let default_val = s.catalog.get_table(other_table)
@@ -3263,9 +3613,11 @@ impl Executor {
                                             }
                                         }
                                     }
-                                    let rows_clone = s.tables.get(other_table).unwrap().clone();
-                                    s.buffer_pool.write_page(other_table, rows_clone.clone());
-                                    s.buffer_pool.flush_page(other_table, &s.disk);
+                                    if !self.txn.is_active() {
+                                        let rows_clone = s.tables.get(other_table).unwrap().clone();
+                                        s.buffer_pool.write_page(other_table, rows_clone);
+                                        s.buffer_pool.flush_page(other_table, &s.disk);
+                                    }
                                 }
                             }
                         }
@@ -3342,16 +3694,35 @@ impl Executor {
             }
             s.buffer_pool.write_page(&table, rows_clone.clone());
             s.buffer_pool.flush_page(&table, &s.disk);
-        } else {
-            // 논리 삭제 후: 버퍼 풀 갱신 (SELECT가 최신 _xmax 반영)
-            s.buffer_pool.write_page(&table, rows_clone);
+        // 트랜잭션 중에는 버퍼 풀 갱신 생략 (COMMIT 시 일괄 처리)
         }
 
         self.maybe_auto_checkpoint(s);
-        Ok(format!("{} row(s) deleted.", deleted))
+        if let Some(ret_cols) = returning {
+            Ok(Self::format_returning_rows(&rows_to_delete, &ret_cols))
+        } else {
+            Ok(format!("{} row(s) deleted.", deleted))
+        }
+    }
+
+    /// 트랜잭션 시작 시 해당 테이블의 커밋 상태를 session_tables로 스왑.
+    /// 반환값: s.tables에서 꺼낸 커밋 상태 (나중에 swap_out에 전달).
+    fn session_swap_in(&mut self, s: &mut SharedDatabase, table: &str) -> Vec<Row> {
+        let committed = s.tables.get(table).cloned().unwrap_or_default();
+        let working = self.session_tables.remove(table).unwrap_or_else(|| committed.clone());
+        s.tables.insert(table.to_string(), working);
+        committed
+    }
+
+    /// DML 완료 후 수정된 세션 상태를 session_tables에 저장, s.tables를 커밋 상태로 복원.
+    fn session_swap_out(&mut self, s: &mut SharedDatabase, table: &str, committed: Vec<Row>) {
+        let modified = s.tables.remove(table).unwrap_or_default();
+        self.session_tables.insert(table.to_string(), modified);
+        s.tables.insert(table.to_string(), committed);
     }
 
     fn exec_begin(&mut self, s: &SharedDatabase) -> Result<String, String> {
+        self.session_tables.clear();
         let txn_id = self.txn.begin_with_snapshot(&s.tables)?;
         let level = format!("{:?}", self.txn.isolation_level);
         Ok(format!("Transaction {} started. (isolation: {})", txn_id, level))
@@ -3360,182 +3731,34 @@ impl Executor {
     fn exec_commit(&mut self, s: &mut SharedDatabase) -> Result<String, String> {
         // SERIALIZABLE: 커밋 전 팬텀 읽기 검증
         if let Err(e) = self.txn.validate_serializable(&s.tables) {
-            // 검증 실패 → 자동 롤백 후 오류 반환
             self.apply_rollback(s);
             return Err(format!("{} (auto-rolled back)", e));
         }
 
-        // 트랜잭션 중 수정된 테이블을 버퍼 풀 + 디스크에 반영
-        let dirty = self.txn.dirty_tables();
-        for table in &dirty {
-            if let Some(rows) = s.tables.get(table) {
-                let rows_clone = rows.clone();
-                s.buffer_pool.write_page(table, rows_clone);
-                s.buffer_pool.flush_page(table, &s.disk);
-            }
+        // session_tables → s.tables 적용 + 버퍼 풀 갱신 + 디스크 flush
+        let session_data: Vec<(String, Vec<Row>)> = self.session_tables.drain().collect();
+        for (table, rows) in session_data {
+            s.tables.insert(table.clone(), rows.clone());
+            s.buffer_pool.write_page(&table, rows);
+            s.buffer_pool.flush_page(&table, &s.disk);
         }
 
         let txn_id = self.txn.current_txn_id();
         self.txn.commit()?;
-        // 이 트랜잭션이 보유한 모든 잠금 해제
         s.lock_mgr.release(txn_id);
         Ok("Transaction committed.".to_string())
     }
 
-    /// 롤백 공통 헬퍼: exec_rollback과 SERIALIZABLE 자동 롤백에서 공유
+    /// 롤백 공통 헬퍼: session_tables를 폐기하는 것으로 충분 (s.tables는 커밋 상태 유지).
     fn apply_rollback(&mut self, s: &mut SharedDatabase) {
         let txn_id = self.txn.current_txn_id();
-        let undo_entries = match self.txn.abort() {
-            Ok(entries) => entries,
-            Err(_) => return,
-        };
+        let _ = self.txn.abort().ok();
         s.lock_mgr.release(txn_id);
-        for entry in undo_entries {
-            match entry.operation.as_str() {
-                "INSERT" => {
-                    let pk_col = s.catalog.get_table(&entry.table)
-                        .and_then(|s| s.columns.iter().find(|c| c.primary_key).map(|c| c.name.clone()))
-                        .unwrap_or_else(|| "id".to_string());
-                    if let Some(rows) = s.tables.get_mut(&entry.table) {
-                        rows.retain(|r| r.get(&pk_col).map(|v| v != &entry.key).unwrap_or(true));
-                    }
-                    let rows_clone = s.tables.get(&entry.table).cloned().unwrap_or_default();
-                    if let Some(index) = s.indexes.get_mut(&entry.table) {
-                        *index = BPlusTree::new();
-                        for row in &rows_clone {
-                            let k = row.get(&pk_col).cloned().unwrap_or_default();
-                            let val_json = serde_json::to_string(row).unwrap();
-                            index.insert(k, val_json);
-                        }
-                    }
-                    s.disk.save_table(&entry.table, &rows_clone);
-                }
-                "UPDATE" => {
-                    if let Some(old_json) = &entry.old_data {
-                        if let Ok(old_row) = serde_json::from_str::<Row>(old_json) {
-                            let pk_col = s.catalog.get_table(&entry.table)
-                                .and_then(|s| s.columns.iter().find(|c| c.primary_key).map(|c| c.name.clone()))
-                                .unwrap_or_else(|| "id".to_string());
-                            if let Some(rows) = s.tables.get_mut(&entry.table) {
-                                for row in rows.iter_mut() {
-                                    if row.get(&pk_col).map(|v| v == &entry.key).unwrap_or(false) {
-                                        *row = old_row.clone();
-                                        break;
-                                    }
-                                }
-                            }
-                            let rows_clone = s.tables.get(&entry.table).cloned().unwrap_or_default();
-                            s.disk.save_table(&entry.table, &rows_clone);
-                        }
-                    }
-                }
-                "DELETE" => {
-                    // MVCC: 논리 삭제 취소 → _xmax = "0" 복원
-                    let pk_col = s.catalog.get_table(&entry.table)
-                        .and_then(|s| s.columns.iter().find(|c| c.primary_key).map(|c| c.name.clone()))
-                        .unwrap_or_else(|| "id".to_string());
-                    if let Some(rows) = s.tables.get_mut(&entry.table) {
-                        for row in rows.iter_mut() {
-                            if row.get(&pk_col).map(|v| v == &entry.key).unwrap_or(false) {
-                                row.insert("_xmax".to_string(), "0".to_string());
-                            }
-                        }
-                    }
-                    let rows_clone = s.tables.get(&entry.table).cloned().unwrap_or_default();
-                    s.disk.save_table(&entry.table, &rows_clone);
-                }
-                _ => {}
-            }
-        }
+        self.session_tables.clear();
     }
 
     fn exec_rollback(&mut self, s: &mut SharedDatabase) -> Result<String, String> {
-        let txn_id = self.txn.current_txn_id();
-        let undo_entries = self.txn.abort()?;
-        // 잠금 해제
-        s.lock_mgr.release(txn_id);
-        for entry in undo_entries {
-            match entry.operation.as_str() {
-                "INSERT" => {
-                    let pk_col = s.catalog.get_table(&entry.table)
-                        .and_then(|s| s.columns.iter().find(|c| c.primary_key).map(|c| c.name.clone()))
-                        .unwrap_or_else(|| "id".to_string());
-                    if let Some(rows) = s.tables.get_mut(&entry.table) {
-                        rows.retain(|r| r.get(&pk_col).map(|v| v != &entry.key).unwrap_or(true));
-                    }
-                    let rows_clone = s.tables.get(&entry.table).cloned().unwrap_or_default();
-                    if let Some(index) = s.indexes.get_mut(&entry.table) {
-                        *index = BPlusTree::new();
-                        for row in &rows_clone {
-                            let k = row.get(&pk_col).cloned().unwrap_or_default();
-                            let val_json = serde_json::to_string(row).unwrap();
-                            index.insert(k, val_json);
-                        }
-                    }
-                    s.buffer_pool.write_page(&entry.table, rows_clone.clone());
-                    s.buffer_pool.flush_page(&entry.table, &s.disk);
-                }
-                "UPDATE" => {
-                    if let Some(old_json) = &entry.old_data {
-                        if let Ok(old_row) = serde_json::from_str::<Row>(old_json) {
-                            // PK 컬럼명 추출
-                            let pk_col = s.catalog.get_table(&entry.table)
-                                .and_then(|s| s.columns.iter().find(|c| c.primary_key).map(|c| c.name.clone()))
-                                .unwrap_or_else(|| "id".to_string());
-
-                            if let Some(rows) = s.tables.get_mut(&entry.table) {
-                                for row in rows.iter_mut() {
-                                    if row.get(&pk_col).map(|v| v == &entry.key).unwrap_or(false) {
-                                        *row = old_row.clone();
-                                        break;
-                                    }
-                                }
-                            }
-                            let rows_clone = s.tables.get(&entry.table).unwrap().clone();
-                            // B+Tree 인덱스 재빌드 (rollback 후 stale 데이터 방지)
-                            if let Some(index) = s.indexes.get_mut(&entry.table) {
-                                *index = BPlusTree::new();
-                                for row in &rows_clone {
-                                    let k = row.get(&pk_col).cloned().unwrap_or_default();
-                                    let v = serde_json::to_string(row).unwrap();
-                                    index.insert(k, v);
-                                }
-                            }
-                            s.buffer_pool.write_page(&entry.table, rows_clone.clone());
-                            s.buffer_pool.flush_page(&entry.table, &s.disk);
-                        }
-                    }
-                }
-                "DELETE" => {
-                    // MVCC: 논리 삭제 취소 → _xmax = "0" 복원
-                    let pk_col = s.catalog.get_table(&entry.table)
-                        .and_then(|s| s.columns.iter().find(|c| c.primary_key).map(|c| c.name.clone()))
-                        .unwrap_or_else(|| "id".to_string());
-                    if let Some(rows) = s.tables.get_mut(&entry.table) {
-                        for row in rows.iter_mut() {
-                            if row.get(&pk_col).map(|v| v == &entry.key).unwrap_or(false) {
-                                row.insert("_xmax".to_string(), "0".to_string());
-                            }
-                        }
-                    }
-                    let rows_clone = s.tables.get(&entry.table).cloned().unwrap_or_default();
-                    // B+Tree 인덱스 재빌드
-                    if let Some(index) = s.indexes.get_mut(&entry.table) {
-                        *index = BPlusTree::new();
-                        for row in &rows_clone {
-                            if Self::is_visible(row) {
-                                let k = row.get(&pk_col).cloned().unwrap_or_default();
-                                let v = serde_json::to_string(row).unwrap();
-                                index.insert(k, v);
-                            }
-                        }
-                    }
-                    s.buffer_pool.write_page(&entry.table, rows_clone.clone());
-                    s.buffer_pool.flush_page(&entry.table, &s.disk);
-                }
-                _ => {}
-            }
-        }
+        self.apply_rollback(s);
         Ok("Transaction rolled back.".to_string())
     }
 
@@ -3552,33 +3775,19 @@ impl Executor {
     fn exec_rollback_to(&mut self, s: &mut SharedDatabase, name: String) -> Result<String, String> {
         let undo_entries = self.txn.rollback_to_savepoint(&name)?;
         for entry in undo_entries {
+            let pk_col = s.catalog.get_table(&entry.table)
+                .and_then(|schema| schema.columns.iter().find(|c| c.primary_key).map(|c| c.name.clone()))
+                .unwrap_or_else(|| "id".to_string());
             match entry.operation.as_str() {
                 "INSERT" => {
-                    let pk_col = s.catalog.get_table(&entry.table)
-                        .and_then(|s| s.columns.iter().find(|c| c.primary_key).map(|c| c.name.clone()))
-                        .unwrap_or_else(|| "id".to_string());
-                    if let Some(rows) = s.tables.get_mut(&entry.table) {
+                    if let Some(rows) = self.session_tables.get_mut(&entry.table) {
                         rows.retain(|r| r.get(&pk_col).map(|v| v != &entry.key).unwrap_or(true));
                     }
-                    let rows_clone = s.tables.get(&entry.table).cloned().unwrap_or_default();
-                    if let Some(index) = s.indexes.get_mut(&entry.table) {
-                        *index = BPlusTree::new();
-                        for row in &rows_clone {
-                            let k = row.get(&pk_col).cloned().unwrap_or_default();
-                            let val_json = serde_json::to_string(row).unwrap();
-                            index.insert(k, val_json);
-                        }
-                    }
-                    s.buffer_pool.write_page(&entry.table, rows_clone.clone());
-                    s.buffer_pool.flush_page(&entry.table, &s.disk);
                 }
                 "UPDATE" => {
                     if let Some(old_json) = &entry.old_data {
                         if let Ok(old_row) = serde_json::from_str::<Row>(old_json) {
-                            let pk_col = s.catalog.get_table(&entry.table)
-                                .and_then(|s| s.columns.iter().find(|c| c.primary_key).map(|c| c.name.clone()))
-                                .unwrap_or_else(|| "id".to_string());
-                            if let Some(rows) = s.tables.get_mut(&entry.table) {
+                            if let Some(rows) = self.session_tables.get_mut(&entry.table) {
                                 for row in rows.iter_mut() {
                                     if row.get(&pk_col).map(|v| v == &entry.key).unwrap_or(false) {
                                         *row = old_row.clone();
@@ -3586,26 +3795,19 @@ impl Executor {
                                     }
                                 }
                             }
-                            let rows_clone = s.tables.get(&entry.table).unwrap().clone();
-                            s.buffer_pool.write_page(&entry.table, rows_clone.clone());
-                            s.buffer_pool.flush_page(&entry.table, &s.disk);
                         }
                     }
                 }
                 "DELETE" => {
-                    let pk_col = s.catalog.get_table(&entry.table)
-                        .and_then(|s| s.columns.iter().find(|c| c.primary_key).map(|c| c.name.clone()))
-                        .unwrap_or_else(|| "id".to_string());
-                    if let Some(rows) = s.tables.get_mut(&entry.table) {
+                    // exec_delete_inner은 트랜잭션 내에서 MVCC 논리 삭제(_xmax 세팅)를 하므로
+                    // 롤백은 session_tables 내 해당 행의 _xmax를 "0"으로 복원
+                    if let Some(rows) = self.session_tables.get_mut(&entry.table) {
                         for row in rows.iter_mut() {
                             if row.get(&pk_col).map(|v| v == &entry.key).unwrap_or(false) {
                                 row.insert("_xmax".to_string(), "0".to_string());
                             }
                         }
                     }
-                    let rows_clone = s.tables.get(&entry.table).cloned().unwrap_or_default();
-                    s.buffer_pool.write_page(&entry.table, rows_clone.clone());
-                    s.buffer_pool.flush_page(&entry.table, &s.disk);
                 }
                 _ => {}
             }
@@ -3699,7 +3901,7 @@ impl Executor {
                                 | DataType::DateTime | DataType::Timestamp => true,
                                 DataType::Decimal(_, _) => val.parse::<f64>().is_ok(),
                                 DataType::Double => val.parse::<f64>().is_ok(),
-                                DataType::Time | DataType::Year => true,
+                                DataType::Time | DataType::Year | DataType::Blob => true,
                                 DataType::Enum(allowed) => allowed.iter().any(|a| a == val),
                                 DataType::Set(allowed) => val.split(',').all(|p| {
                                     let p = p.trim();
@@ -3781,6 +3983,107 @@ impl Executor {
                 s.disk.delete_table(&table);
 
                 Ok(format!("Table '{}' renamed to '{}'.", table, to))
+            }
+            AlterAction::AddForeignKey { name, column, ref_table, ref_column, on_delete, on_update } => {
+                let schema = s.catalog.tables.get_mut(&table)
+                    .ok_or(format!("Table '{}' not found", table))?;
+                let col = schema.columns.iter_mut()
+                    .find(|c| c.name == column)
+                    .ok_or(format!("Column '{}' not found in '{}'", column, table))?;
+                col.foreign_key = Some(crate::catalog::schema::ForeignKey {
+                    column: column.clone(),
+                    ref_table: ref_table.clone(),
+                    ref_column: ref_column.clone(),
+                    on_delete: match on_delete {
+                        FkAction::Cascade   => crate::catalog::schema::FkAction::Cascade,
+                        FkAction::Restrict  => crate::catalog::schema::FkAction::Restrict,
+                        FkAction::SetNull   => crate::catalog::schema::FkAction::SetNull,
+                        FkAction::SetDefault => crate::catalog::schema::FkAction::SetDefault,
+                    },
+                    on_update: match on_update {
+                        FkAction::Cascade   => crate::catalog::schema::FkAction::Cascade,
+                        FkAction::Restrict  => crate::catalog::schema::FkAction::Restrict,
+                        FkAction::SetNull   => crate::catalog::schema::FkAction::SetNull,
+                        FkAction::SetDefault => crate::catalog::schema::FkAction::SetDefault,
+                    },
+                });
+                let full_schema = s.catalog.get_table(&table).unwrap();
+                s.disk.save_schema(&table, full_schema);
+                let constraint_label = name.unwrap_or_else(|| format!("fk_{}", column));
+                Ok(format!("Foreign key '{}' added to '{}'.", constraint_label, table))
+            }
+            AlterAction::DropForeignKey(fk_name) => {
+                let schema = s.catalog.tables.get_mut(&table)
+                    .ok_or(format!("Table '{}' not found", table))?;
+                let mut found = false;
+                for col in schema.columns.iter_mut() {
+                    if col.foreign_key.is_some() {
+                        let matches = col.foreign_key.as_ref().map(|fk| {
+                            fk.column == fk_name || format!("fk_{}", fk.column) == fk_name
+                        }).unwrap_or(false);
+                        if matches {
+                            col.foreign_key = None;
+                            found = true;
+                            break;
+                        }
+                    }
+                }
+                if !found {
+                    return Err(format!("Foreign key '{}' not found in '{}'", fk_name, table));
+                }
+                let full_schema = s.catalog.get_table(&table).unwrap();
+                s.disk.save_schema(&table, full_schema);
+                Ok(format!("Foreign key '{}' dropped from '{}'.", fk_name, table))
+            }
+            AlterAction::AddUniqueConstraint { name, column } => {
+                let schema = s.catalog.tables.get_mut(&table)
+                    .ok_or(format!("Table '{}' not found", table))?;
+                let col = schema.columns.iter_mut()
+                    .find(|c| c.name == column)
+                    .ok_or(format!("Column '{}' not found in '{}'", column, table))?;
+                col.unique = true;
+                col.unique_constraint_name = name.clone();
+                let full_schema = s.catalog.get_table(&table).unwrap();
+                s.disk.save_schema(&table, full_schema);
+                let constraint_label = name.unwrap_or_else(|| format!("uq_{}", column));
+                Ok(format!("Unique constraint '{}' added to '{}'.'{}'.", constraint_label, table, column))
+            }
+            AlterAction::AddCheckConstraint { name, expr } => {
+                let schema = s.catalog.tables.get_mut(&table)
+                    .ok_or(format!("Table '{}' not found", table))?;
+                schema.check_constraints.push(crate::catalog::schema::CheckConstraint {
+                    name: name.clone(),
+                    expression: expr.clone(),
+                });
+                let full_schema = s.catalog.get_table(&table).unwrap();
+                s.disk.save_schema(&table, full_schema);
+                let constraint_label = name.unwrap_or_else(|| expr.clone());
+                Ok(format!("Check constraint '{}' added to '{}'.", constraint_label, table))
+            }
+            AlterAction::DropConstraint(constraint_name) => {
+                let schema = s.catalog.tables.get_mut(&table)
+                    .ok_or(format!("Table '{}' not found", table))?;
+                let before = schema.check_constraints.len();
+                schema.check_constraints.retain(|c| {
+                    c.name.as_deref() != Some(&constraint_name) && c.expression != constraint_name
+                });
+                let removed_check = schema.check_constraints.len() < before;
+                if !removed_check {
+                    // Try unique constraint
+                    for col in schema.columns.iter_mut() {
+                        if col.unique_constraint_name.as_deref() == Some(&constraint_name) {
+                            col.unique = false;
+                            col.unique_constraint_name = None;
+                            let full_schema = s.catalog.get_table(&table).unwrap();
+                            s.disk.save_schema(&table, full_schema);
+                            return Ok(format!("Constraint '{}' dropped from '{}'.", constraint_name, table));
+                        }
+                    }
+                    return Err(format!("Constraint '{}' not found in '{}'", constraint_name, table));
+                }
+                let full_schema = s.catalog.get_table(&table).unwrap();
+                s.disk.save_schema(&table, full_schema);
+                Ok(format!("Constraint '{}' dropped from '{}'.", constraint_name, table))
             }
         }
     }
@@ -3970,7 +4273,7 @@ impl Executor {
                         }
                     }
                 }
-                JoinType::Cross | JoinType::Natural => {
+                JoinType::Cross | JoinType::Natural | JoinType::FullOuter => {
                     for left in &current {
                         for right in &right_rows {
                             let mut merged = left.clone();
@@ -4185,7 +4488,7 @@ impl Executor {
                         }
                     }
                 }
-                JoinType::Cross | JoinType::Natural => {
+                JoinType::Cross | JoinType::Natural | JoinType::FullOuter => {
                     for left in &current {
                         for right in &right_rows {
                             let mut merged = left.clone();
@@ -4311,6 +4614,7 @@ impl Executor {
                     table, subquery, distinct, columns, condition: sub_cond,
                     joins, order_by, group_by, having, limit, offset, ..
                 } = *sub_stmt.clone() {
+                    let sub_cond = sub_cond.map(|c| Self::substitute_correlated_condexpr(&c, row));
                     let result = self.exec_select(
                         s, table, subquery, distinct, columns.clone(), sub_cond,
                         joins, order_by, group_by, having, limit, offset, false
@@ -4551,25 +4855,28 @@ impl Executor {
                     having: having.map(|h| self.qualify_condexpr(s, h)),
                     limit, offset, for_update,
                 },
-            Statement::Insert { table, columns, values, on_conflict } =>
-                Statement::Insert { table: self.qualify_name(table), columns, values, on_conflict },
-            Statement::InsertSelect { table, columns, query, on_conflict } =>
+            Statement::Insert { table, columns, values, on_conflict, returning } =>
+                Statement::Insert { table: self.qualify_name(table), columns, values, on_conflict, returning },
+            Statement::InsertSelect { table, columns, query, on_conflict, returning } =>
                 Statement::InsertSelect {
                     table: self.qualify_name(table),
                     columns,
                     query: Box::new(self.qualify_stmt(s, *query)),
                     on_conflict,
+                    returning,
                 },
-            Statement::Update { table, assignments, condition } =>
+            Statement::Update { table, assignments, condition, returning } =>
                 Statement::Update {
                     table: self.qualify_name(table),
                     assignments,
                     condition: condition.map(|c| self.qualify_condexpr(s, c)),
+                    returning,
                 },
-            Statement::Delete { table, condition } =>
+            Statement::Delete { table, condition, returning } =>
                 Statement::Delete {
                     table: self.qualify_name(table),
                     condition: condition.map(|c| self.qualify_condexpr(s, c)),
+                    returning,
                 },
             Statement::CreateTable { name, columns, if_not_exists, primary_key_columns, check_constraints } => {
                 let columns = columns.into_iter().map(|mut col| {
@@ -4615,6 +4922,20 @@ impl Executor {
                     right: Box::new(self.qualify_stmt(s, *right)),
                     all, order_by, limit, offset,
                 },
+            Statement::Intersect { left, right, all, order_by, limit, offset } =>
+                Statement::Intersect {
+                    left:  Box::new(self.qualify_stmt(s, *left)),
+                    right: Box::new(self.qualify_stmt(s, *right)),
+                    all, order_by, limit, offset,
+                },
+            Statement::Except { left, right, all, order_by, limit, offset } =>
+                Statement::Except {
+                    left:  Box::new(self.qualify_stmt(s, *left)),
+                    right: Box::new(self.qualify_stmt(s, *right)),
+                    all, order_by, limit, offset,
+                },
+            Statement::ShowCreateTable { table } =>
+                Statement::ShowCreateTable { table: self.qualify_name(table) },
             Statement::With { ctes, query, recursive } =>
                 Statement::With {
                     ctes: ctes.into_iter().map(|(n, q)| (
@@ -4724,6 +5045,7 @@ impl Executor {
                 crate::parser::ast::DataType::Year => "YEAR".to_string(),
                 crate::parser::ast::DataType::Enum(vals) => format!("ENUM({})", vals.iter().map(|v| format!("'{}'", v)).collect::<Vec<_>>().join(",")),
                 crate::parser::ast::DataType::Set(vals) => format!("SET({})", vals.iter().map(|v| format!("'{}'", v)).collect::<Vec<_>>().join(",")),
+                crate::parser::ast::DataType::Blob => "BLOB".to_string(),
                 crate::parser::ast::DataType::Unknown => "UNKNOWN".to_string(),
             };
             let def_str = match &col.default {
@@ -4742,6 +5064,105 @@ impl Executor {
         }
         output.push_str(sep);
         Ok(output)
+    }
+
+    fn exec_show_create_table(&self, s: &SharedDatabase, table: String) -> Result<String, String> {
+        use crate::parser::ast::DataType;
+        use crate::catalog::schema::FkAction;
+
+        let schema = s.catalog.get_table(&table)
+            .ok_or(format!("Table '{}' not found", table))?;
+
+        let bare_name = table.split('.').last().unwrap_or(&table);
+
+        let type_str = |dt: &DataType| -> String {
+            match dt {
+                DataType::Int       => "INT".to_string(),
+                DataType::Text      => "TEXT".to_string(),
+                DataType::Float     => "FLOAT".to_string(),
+                DataType::Boolean   => "BOOLEAN".to_string(),
+                DataType::Date      => "DATE".to_string(),
+                DataType::DateTime  => "DATETIME".to_string(),
+                DataType::Timestamp => "TIMESTAMP".to_string(),
+                DataType::Varchar(n) => format!("VARCHAR({})", n),
+                DataType::Decimal(p, sc) => format!("DECIMAL({},{})", p, sc),
+                DataType::Double    => "DOUBLE".to_string(),
+                DataType::Time      => "TIME".to_string(),
+                DataType::Year      => "YEAR".to_string(),
+                DataType::Enum(vals) => format!("ENUM({})", vals.iter().map(|v| format!("'{}'", v)).collect::<Vec<_>>().join(", ")),
+                DataType::Set(vals)  => format!("SET({})", vals.iter().map(|v| format!("'{}'", v)).collect::<Vec<_>>().join(", ")),
+                DataType::Blob      => "BLOB".to_string(),
+                DataType::Unknown   => "UNKNOWN".to_string(),
+            }
+        };
+
+        let fk_action_str = |a: &FkAction| -> &str {
+            match a {
+                FkAction::Restrict   => "RESTRICT",
+                FkAction::Cascade    => "CASCADE",
+                FkAction::SetNull    => "SET NULL",
+                FkAction::SetDefault => "SET DEFAULT",
+            }
+        };
+
+        let mut lines: Vec<String> = Vec::new();
+        let composite_pk = &schema.primary_key_columns;
+
+        for col in &schema.columns {
+            let mut parts = vec![format!("`{}`", col.name), type_str(&col.data_type)];
+            if col.not_null || col.primary_key { parts.push("NOT NULL".to_string()); }
+            if col.auto_increment { parts.push("AUTO_INCREMENT".to_string()); }
+            if let Some(def) = &col.default {
+                if def != crate::parser::parser::NULL_DEFAULT {
+                    parts.push(format!("DEFAULT {}", def));
+                }
+            }
+            // Single-column PK inline (only when no composite PK)
+            if col.primary_key && composite_pk.is_empty() {
+                parts.push("PRIMARY KEY".to_string());
+            }
+            if col.unique && col.unique_constraint_name.is_none() {
+                parts.push("UNIQUE".to_string());
+            }
+            lines.push(format!("  {}", parts.join(" ")));
+        }
+
+        // Composite PRIMARY KEY
+        if !composite_pk.is_empty() {
+            let cols_str = composite_pk.iter().map(|c| format!("`{}`", c)).collect::<Vec<_>>().join(", ");
+            lines.push(format!("  PRIMARY KEY ({})", cols_str));
+        }
+
+        // UNIQUE constraints with names
+        for col in &schema.columns {
+            if let Some(ref uname) = col.unique_constraint_name {
+                lines.push(format!("  UNIQUE KEY `{}` (`{}`)", uname, col.name));
+            }
+        }
+
+        // FOREIGN KEY constraints
+        for col in &schema.columns {
+            if let Some(ref fk) = col.foreign_key {
+                let ref_bare = fk.ref_table.split('.').last().unwrap_or(&fk.ref_table);
+                lines.push(format!(
+                    "  FOREIGN KEY (`{}`) REFERENCES `{}`(`{}`) ON DELETE {} ON UPDATE {}",
+                    fk.column, ref_bare, fk.ref_column,
+                    fk_action_str(&fk.on_delete), fk_action_str(&fk.on_update)
+                ));
+            }
+        }
+
+        // CHECK constraints
+        for cc in &schema.check_constraints {
+            if let Some(ref name) = cc.name {
+                lines.push(format!("  CONSTRAINT `{}` CHECK ({})", name, cc.expression));
+            } else {
+                lines.push(format!("  CHECK ({})", cc.expression));
+            }
+        }
+
+        let ddl = format!("CREATE TABLE `{}` (\n{}\n);", bare_name, lines.join(",\n"));
+        Ok(format!("Table: {}\n{}", bare_name, ddl))
     }
 
     fn exec_show_buffer_pool(&self, s: &SharedDatabase) -> Result<String, String> {
@@ -5339,7 +5760,7 @@ impl Executor {
         s.users.push(UserRecord {
             user: user.clone(),
             host: host.clone(),
-            password_hash: password,
+            password_hash: password.map(|p| hash_password(&p)),
         });
         s.disk.save_users(&s.users);
         Ok(format!("User '{}@{}' created.", user, host))

@@ -94,32 +94,36 @@ interface Tab { id: string; name: string; content: string; }
 
 const MAX_HISTORY = 200;
 
-function loadTabs(): Tab[] {
+function loadTabs(connId: string): Tab[] {
   try {
-    const saved = localStorage.getItem("rustdb_tabs");
+    const saved = localStorage.getItem(`rustdb_tabs_${connId}`);
     if (saved) return JSON.parse(saved);
   } catch {}
-  return [{ id: "1", name: "query.sql", content: localStorage.getItem("rustdb_query") ?? "SHOW TABLES;" }];
+  return [{ id: "1", name: "query.sql", content: localStorage.getItem(`rustdb_query_${connId}`) ?? "SHOW TABLES;" }];
 }
-function loadActiveTabId(): string {
-  return localStorage.getItem("rustdb_active_tab") ?? "1";
+function loadActiveTabId(connId: string): string {
+  return localStorage.getItem(`rustdb_active_tab_${connId}`) ?? "1";
 }
-function loadHistory(): HistoryEntry[] {
+function loadHistory(connId: string): HistoryEntry[] {
   try {
-    const saved = localStorage.getItem("rustdb_history");
+    const saved = localStorage.getItem(`rustdb_history_${connId}`);
     if (saved) return JSON.parse(saved);
   } catch {}
   return [];
 }
-function saveHistory(h: HistoryEntry[]) {
-  localStorage.setItem("rustdb_history", JSON.stringify(h.slice(0, MAX_HISTORY)));
+function saveHistory(connId: string, h: HistoryEntry[]) {
+  localStorage.setItem(`rustdb_history_${connId}`, JSON.stringify(h.slice(0, MAX_HISTORY)));
 }
 
 // ─── 메인 컴포넌트 ────────────────────────────────────────────
 function App() {
-  // 탭 상태
-  const [tabs, setTabs] = useState<Tab[]>(loadTabs);
-  const [activeTabId, setActiveTabId] = useState<string>(loadActiveTabId);
+  // 현재 연결 ID (localStorage 키 네임스페이스용, ref는 클로저에서 안전하게 참조)
+  const connIdRef = useRef<string>("");
+  const [, setSessionConnId] = useState<string>("");
+
+  // 탭 상태 (로그인 전까지 기본값, doLogin 시 연결별 저장 데이터로 교체)
+  const [tabs, setTabs] = useState<Tab[]>([{ id: "1", name: "query.sql", content: "SHOW TABLES;" }]);
+  const [activeTabId, setActiveTabId] = useState<string>("1");
   const activeTab = tabs.find(t => t.id === activeTabId) ?? tabs[0];
   const queryRef = useRef<string>(activeTab?.content ?? "");
   // setValue() 호출 중 onChange가 잘못된 탭에 내용을 저장하지 못하도록 막는 플래그
@@ -147,7 +151,7 @@ function App() {
   const [editingTabId, setEditingTabId] = useState<string | null>(null);
   const [editingTabName, setEditingTabName] = useState("");
   const [isRunning, setIsRunning] = useState(false);
-  const [queryHistory, setQueryHistory] = useState<HistoryEntry[]>(loadHistory);
+  const [queryHistory, setQueryHistory] = useState<HistoryEntry[]>([]);
   const [resultTab, setResultTab] = useState<"results" | "history">("results");
   const editorRef = useRef<Monaco.editor.IStandaloneCodeEditor | null>(null);
   const schemaRef = useRef<{ tables: string[]; columns: Record<string, string[]> }>({ tables: [], columns: {} });
@@ -172,6 +176,121 @@ function App() {
   const [erdFilter, setErdFilter] = useState("");
   const [erdDataHeight, setErdDataHeight] = useState(0);
   const erdDataDragging = useRef(false);
+
+  // ─── 연결 관리 ───────────────────────────────────────────────
+  interface Connection {
+    id: string; name: string; host: string; port: number;
+    user: string; password: string; autoLogin: boolean; dataDir: string;
+  }
+  const loadConnections = (): Connection[] => {
+    try {
+      const s = localStorage.getItem("rustdb_connections");
+      if (s) {
+        const conns = JSON.parse(s) as Connection[];
+        return conns.map(c => ({
+          ...c,
+          password: c.password ?? "",
+          autoLogin: c.autoLogin ?? false,
+          dataDir: c.dataDir ?? (c.id === "1" ? "data" : `data_${c.id}`),
+        }));
+      }
+    } catch {}
+    return [{ id: "1", name: "RustDB Local", host: "localhost", port: 7878, user: "root", password: "root", autoLogin: false, dataDir: "data" }];
+  };
+  const [connections, setConnections] = useState<Connection[]>(loadConnections);
+  const saveConnections = (c: Connection[]) => { localStorage.setItem("rustdb_connections", JSON.stringify(c)); setConnections(c); };
+
+  // 홈 화면 상태
+  const [loggedIn, setLoggedIn] = useState(false);
+  const [sessionUser, setSessionUser] = useState("");
+
+  // 연결 다이얼로그 상태
+  const [connectingTo, setConnectingTo] = useState<Connection | null>(null);
+  const [dlgPass, setDlgPass] = useState("");
+  const [dlgPassVisible, setDlgPassVisible] = useState(false);
+  const [dlgError, setDlgError] = useState("");
+  const [dlgLoading, setDlgLoading] = useState(false);
+
+  // 새 연결 추가 폼 상태
+  const [showNewConn, setShowNewConn] = useState(false);
+  const [newName, setNewName] = useState("New Connection");
+  const [newHost, setNewHost] = useState("localhost");
+  const [newPort, setNewPort] = useState("7878");
+  const [newUser, setNewUser] = useState("root");
+  const [newPass, setNewPass] = useState("root");
+  const [newPassVisible, setNewPassVisible] = useState(false);
+  const [newAutoLogin, setNewAutoLogin] = useState(false);
+
+  // 연결 성공 시 해당 연결의 저장 데이터를 로드하고 메인 앱으로 전환
+  const doLogin = (conn: Connection) => {
+    const id = conn.id;
+    const newTabs = loadTabs(id);
+    const newActiveId = loadActiveTabId(id);
+    const newHistory = loadHistory(id);
+    const activeContent = (newTabs.find(t => t.id === newActiveId) ?? newTabs[0])?.content ?? "SHOW TABLES;";
+
+    connIdRef.current = id;
+    queryRef.current = activeContent;
+
+    setSessionConnId(id);
+    setSessionUser(conn.user);
+    setTabs(newTabs);
+    setActiveTabId(newActiveId);
+    setQueryHistory(newHistory);
+    setTabResults({});
+    setTabResultPages({});
+    setTabColWidths({});
+    // ERD UI 상태 초기화 (연결마다 독립)
+    setErdColumns({});
+    setErdPositions({});
+    setErdPan({ x: 40, y: 40 });
+    setErdZoom(1);
+    setErdFilter("");
+    setErdSelectedTable("");
+    setErdTableData(null);
+    // 서버 상태 초기화 (연결마다 독립)
+    setServerStatus({ running: false, port: conn.port, client_count: 0, log: [] });
+    setPortInput(conn.port.toString());
+    setSrvConnName(conn.name);
+    setServerMsg("");
+    setActiveView("editor");
+    setLoggedIn(true);
+    setConnectingTo(null);
+    setDlgPass("");
+  };
+
+  const handleAutoLogin = async (conn: Connection) => {
+    const ok = await invoke<boolean>("authenticate", { user: conn.user, password: conn.password, dataDir: conn.dataDir });
+    if (ok) doLogin(conn);
+  };
+
+  const handleConnect = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!connectingTo) return;
+    setDlgLoading(true);
+    setDlgError("");
+    const ok = await invoke<boolean>("authenticate", { user: connectingTo.user, password: dlgPass, dataDir: connectingTo.dataDir });
+    setDlgLoading(false);
+    if (ok) {
+      doLogin(connectingTo);
+    } else {
+      setDlgError(`Access denied for user '${connectingTo.user}' (using password: ${dlgPass ? "YES" : "NO"})`);
+    }
+  };
+
+  const handleAddConnection = () => {
+    const port = parseInt(newPort) || 7878;
+    const id = Date.now().toString();
+    const conn: Connection = {
+      id, name: newName, host: newHost, port,
+      user: newUser, password: newPass, autoLogin: newAutoLogin,
+      dataDir: `data_${id}`,
+    };
+    saveConnections([...connections, conn]);
+    setShowNewConn(false);
+    setNewName("New Connection"); setNewHost("localhost"); setNewPort("7878");
+    setNewUser("root"); setNewPass("root"); setNewAutoLogin(false); setNewPassVisible(false);
+  };
 
   // 뷰 전환
   const [activeView, setActiveView] = useState<ActiveView>("editor");
@@ -219,8 +338,8 @@ function App() {
     await Promise.all(Array.from(expanded).filter(d => dbs.includes(d)).map(loadDbData));
   };
 
-  // ─── 초기 로드 ──────────────────────────────────────────────
-  useEffect(() => { refreshSidebar(); }, []);
+  // ─── 초기 로드 (연결할 때마다 재실행) ──────────────────────
+  useEffect(() => { if (loggedIn) refreshSidebar(); }, [loggedIn]);
 
   // 탭별 결과 파생값
   const results = tabResults[activeTabId] ?? [];
@@ -349,7 +468,7 @@ function App() {
   useEffect(() => {
     if (activeView !== "server") return;
     const poll = async () => {
-      const s = await invoke<ServerStatus>("get_server_status");
+      const s = await invoke<ServerStatus>("get_server_status", { connId: connIdRef.current });
       setServerStatus(s);
     };
     poll();
@@ -387,7 +506,7 @@ function App() {
       };
       setQueryHistory(prev => {
         const next = [entry, ...prev].slice(0, MAX_HISTORY);
-        saveHistory(next);
+        saveHistory(connIdRef.current, next);
         return next;
       });
       await refreshSidebar();
@@ -402,7 +521,7 @@ function App() {
       };
       setQueryHistory(prev => {
         const next = [entry, ...prev].slice(0, MAX_HISTORY);
-        saveHistory(next);
+        saveHistory(connIdRef.current, next);
         return next;
       });
     } finally {
@@ -426,10 +545,10 @@ function App() {
     }
   };
 
-  // 탭 저장 헬퍼
+  // 탭 저장 헬퍼 (연결별 키)
   const saveTabs = (next: Tab[]) => {
     setTabs(next);
-    localStorage.setItem("rustdb_tabs", JSON.stringify(next));
+    localStorage.setItem(`rustdb_tabs_${connIdRef.current}`, JSON.stringify(next));
   };
 
   // 현재 에디터 내용을 탭에 저장한 후 탭 전환
@@ -439,7 +558,7 @@ function App() {
     const updated = tabs.map(t => t.id === activeTabId ? { ...t, content: currentContent } : t);
     saveTabs(updated);
     setActiveTabId(id);
-    localStorage.setItem("rustdb_active_tab", id);
+    localStorage.setItem(`rustdb_active_tab_${connIdRef.current}`, id);
     const target = updated.find(t => t.id === id);
     if (target) {
       queryRef.current = target.content;
@@ -463,7 +582,7 @@ function App() {
     const next = [...updated, newTab];
     saveTabs(next);
     setActiveTabId(newId);
-    localStorage.setItem("rustdb_active_tab", newId);
+    localStorage.setItem(`rustdb_active_tab_${connIdRef.current}`, newId);
     queryRef.current = "";
     isSwitchingTab.current = true;
     editorRef.current?.setValue("");
@@ -608,20 +727,20 @@ function App() {
   const handleStartServer = async () => {
     const port = parseInt(portInput) || 7878;
     try {
-      const msg = await invoke<string>("start_server", { port });
+      const msg = await invoke<string>("start_server", { connId: connIdRef.current, port });
       setServerMsg(msg);
     } catch (e) { setServerMsg(String(e)); }
   };
 
   const handleStopServer = async () => {
     try {
-      const msg = await invoke<string>("stop_server");
+      const msg = await invoke<string>("stop_server", { connId: connIdRef.current });
       setServerMsg(msg);
     } catch (e) { setServerMsg(String(e)); }
   };
 
   const handleClearLog = async () => {
-    await invoke("clear_server_log");
+    await invoke("clear_server_log", { connId: connIdRef.current });
     setServerStatus(s => ({ ...s, log: [] }));
   };
 
@@ -688,6 +807,276 @@ function App() {
     },
   ];
 
+  // ─── 로그인 화면 ────────────────────────────────────────────
+  if (!loggedIn) {
+    const homeMenuLabels = ["파일", "편집", "보기", "실행", "터미널"];
+    return (
+      <div className="home-bg">
+
+        {/* ── 메뉴바 (쿼리 편집기와 동일) ── */}
+        <div className="menu-bar" onClick={e => e.stopPropagation()}>
+          {homeMenuLabels.map(label => (
+            <div
+              key={label}
+              className={`menu-item ${openMenu === label ? "open" : ""}`}
+              onClick={() => setOpenMenu(prev => prev === label ? null : label)}
+              onMouseEnter={() => { if (openMenu !== null) setOpenMenu(label); }}
+            >
+              <span>{label}</span>
+              {openMenu === label && (
+                <div className="menu-dropdown">
+                  <div className="menu-dropdown-item" style={{ color: "#555", cursor: "default", fontSize: 11 }}>
+                    연결 후 사용 가능
+                  </div>
+                </div>
+              )}
+            </div>
+          ))}
+          <div className="menu-bar-right">
+            <span style={{ display: "flex", alignItems: "center", gap: 6, color: "#999", fontSize: 12 }}>
+              <svg width="13" height="16" viewBox="0 0 24 24" preserveAspectRatio="none" fill="none">
+                <ellipse cx="12" cy="5" rx="7" ry="3" stroke="#4ec9b0" strokeWidth="1.8" vectorEffect="non-scaling-stroke"/>
+                <path d="M5 5v6c0 1.66 3.13 3 7 3s7-1.34 7-3V5" stroke="#4ec9b0" strokeWidth="1.8" fill="none" vectorEffect="non-scaling-stroke"/>
+                <path d="M5 11v6c0 1.66 3.13 3 7 3s7-1.34 7-3v-6" stroke="#4ec9b0" strokeWidth="1.4" fill="none" vectorEffect="non-scaling-stroke"/>
+              </svg>
+              <span style={{ fontWeight: 600, color: "#ccc" }}>RustDB</span>
+              <span className="home-topbar-ver">v2.2.0</span>
+            </span>
+          </div>
+        </div>
+
+        {/* ── 레이아웃 (사이드바 + 메인) ── */}
+        <div className="home-layout" onClick={() => setOpenMenu(null)}>
+
+          {/* 사이드바 */}
+          <div className="home-sidebar">
+            <div className="home-sidebar-header">연결</div>
+            {connections.map(conn => (
+              <div
+                key={conn.id}
+                className="home-sidebar-item"
+                title={conn.name}
+                onClick={() => {
+                  if (conn.autoLogin && conn.password) { handleAutoLogin(conn); }
+                  else { setConnectingTo(conn); setDlgPass(conn.password ?? ""); setDlgError(""); }
+                }}
+              >
+                <svg width="13" height="16" viewBox="0 0 24 24" preserveAspectRatio="none" fill="none" style={{ flexShrink: 0 }}>
+                  <ellipse cx="12" cy="5" rx="7" ry="3" stroke="#4ec9b0" strokeWidth="1.6" vectorEffect="non-scaling-stroke"/>
+                  <path d="M5 5v6c0 1.66 3.13 3 7 3s7-1.34 7-3V5" stroke="#4ec9b0" strokeWidth="1.6" fill="none" vectorEffect="non-scaling-stroke"/>
+                  <path d="M5 11v6c0 1.66 3.13 3 7 3s7-1.34 7-3v-6" stroke="#4ec9b0" strokeWidth="1.2" fill="none" vectorEffect="non-scaling-stroke"/>
+                </svg>
+                <span className="home-sidebar-name">{conn.name}</span>
+                {conn.autoLogin && <span className="home-sidebar-badge">자동</span>}
+              </div>
+            ))}
+            <div className="home-sidebar-add" onClick={() => setShowNewConn(true)}>
+              <svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor"><path d="M19 13H13v6h-2v-6H5v-2h6V5h2v6h6v2z"/></svg>
+              새 연결
+            </div>
+          </div>
+
+          {/* 메인 콘텐츠 */}
+          <div className="home-main">
+
+            {/* 헤더 */}
+            <div className="home-header">
+              <div className="home-header-icon">
+                <svg width="48" height="58" viewBox="0 0 24 24" preserveAspectRatio="none" fill="none">
+                  <ellipse cx="12" cy="5" rx="9" ry="3.5" stroke="#4ec9b0" strokeWidth="1.5" vectorEffect="non-scaling-stroke"/>
+                  <path d="M3 5v6c0 1.93 4.03 3.5 9 3.5s9-1.57 9-3.5V5" stroke="#4ec9b0" strokeWidth="1.5" fill="none" vectorEffect="non-scaling-stroke"/>
+                  <path d="M3 11v6c0 1.93 4.03 3.5 9 3.5s9-1.57 9-3.5v-6" stroke="#4ec9b0" strokeWidth="1.5" fill="none" vectorEffect="non-scaling-stroke"/>
+                </svg>
+              </div>
+              <div>
+                <h1 className="home-title">RustDB Connections</h1>
+                <p className="home-desc">연결할 데이터베이스를 선택하거나 새 연결을 추가하세요.</p>
+              </div>
+            </div>
+
+            {/* 연결 목록 헤더 */}
+            <div className="home-section-bar">
+              <span className="home-section-label">저장된 연결</span>
+              <button className="home-add-btn" onClick={() => setShowNewConn(true)}>
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><path d="M19 13H13v6h-2v-6H5v-2h6V5h2v6h6v2z"/></svg>
+                새 연결
+              </button>
+            </div>
+
+            {/* 연결 카드 그리드 */}
+            <div className="home-conn-grid">
+              {connections.map(conn => (
+                <div
+                  key={conn.id}
+                  className="home-conn-card"
+                  onClick={() => {
+                    if (conn.autoLogin && conn.password) { handleAutoLogin(conn); }
+                    else { setConnectingTo(conn); setDlgPass(conn.password ?? ""); setDlgError(""); }
+                  }}
+                >
+                  <div className="home-conn-card-icon">
+                    <svg width="28" height="34" viewBox="0 0 24 24" preserveAspectRatio="none" fill="none">
+                      <ellipse cx="12" cy="5" rx="8" ry="3.5" stroke="#4ec9b0" strokeWidth="1.4" vectorEffect="non-scaling-stroke"/>
+                      <path d="M4 5v6c0 1.93 3.58 3.5 8 3.5s8-1.57 8-3.5V5" stroke="#4ec9b0" strokeWidth="1.4" fill="none" vectorEffect="non-scaling-stroke"/>
+                      <path d="M4 11v6c0 1.93 3.58 3.5 8 3.5s8-1.57 8-3.5v-6" stroke="#4ec9b0" strokeWidth="1.4" fill="none" vectorEffect="non-scaling-stroke"/>
+                    </svg>
+                  </div>
+                  <div className="home-conn-info">
+                    <div className="home-conn-name">{conn.name}</div>
+                    <div className="home-conn-meta">
+                      <span className="home-conn-chip">
+                        <svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor"><path d="M12 12c2.7 0 4.8-2.1 4.8-4.8S14.7 2.4 12 2.4 7.2 4.5 7.2 7.2 9.3 12 12 12zm0 2.4c-3.2 0-9.6 1.6-9.6 4.8v2.4h19.2v-2.4c0-3.2-6.4-4.8-9.6-4.8z"/></svg>
+                        {conn.user}
+                      </span>
+                      <span className="home-conn-chip" title={`데이터 디렉토리: ${conn.dataDir}`}>
+                        <svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor"><path d="M20 6h-8l-2-2H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2z"/></svg>
+                        {conn.dataDir}
+                      </span>
+                      {conn.autoLogin && <span className="home-conn-chip" style={{ color: "#4ec9b0" }}>자동 로그인</span>}
+                    </div>
+                  </div>
+                  <button
+                    className="home-conn-del"
+                    title="삭제"
+                    onClick={e => {
+                      e.stopPropagation();
+                      // localStorage 키 정리
+                      localStorage.removeItem(`rustdb_tabs_${conn.id}`);
+                      localStorage.removeItem(`rustdb_active_tab_${conn.id}`);
+                      localStorage.removeItem(`rustdb_history_${conn.id}`);
+                      localStorage.removeItem(`rustdb_query_${conn.id}`);
+                      // 디스크 데이터 디렉토리 삭제
+                      invoke("delete_conn_data", { dataDir: conn.dataDir });
+                      saveConnections(connections.filter(c => c.id !== conn.id));
+                    }}
+                  >✕</button>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+
+        {/* ── 연결 다이얼로그 ── */}
+        {connectingTo && (
+          <div className="dlg-overlay" onClick={() => setConnectingTo(null)}>
+            <div className="dlg-box" onClick={e => e.stopPropagation()}>
+              <div className="dlg-header">
+                <svg width="18" height="22" viewBox="0 0 24 24" preserveAspectRatio="none" fill="none">
+                  <ellipse cx="12" cy="5" rx="8" ry="3.5" stroke="#4ec9b0" strokeWidth="1.5" vectorEffect="non-scaling-stroke"/>
+                  <path d="M4 5v6c0 1.93 3.58 3.5 8 3.5s8-1.57 8-3.5V5" stroke="#4ec9b0" strokeWidth="1.5" fill="none" vectorEffect="non-scaling-stroke"/>
+                  <path d="M4 11v6c0 1.93 3.58 3.5 8 3.5s8-1.57 8-3.5v-6" stroke="#4ec9b0" strokeWidth="1.5" fill="none" vectorEffect="non-scaling-stroke"/>
+                </svg>
+                <div>
+                  <div className="dlg-title">{connectingTo.name}</div>
+                  <div className="dlg-subtitle">{connectingTo.host}:{connectingTo.port} · {connectingTo.user}</div>
+                </div>
+              </div>
+              <form onSubmit={handleConnect}>
+                <div className="dlg-fields">
+                  <div className="dlg-row">
+                    <label>Password</label>
+                    <div className="dlg-pass-wrap">
+                      <input
+                        type={dlgPassVisible ? "text" : "password"}
+                        value={dlgPass}
+                        onChange={e => setDlgPass(e.target.value)}
+                        className="dlg-input"
+                        placeholder="비밀번호 입력"
+                        autoFocus
+                      />
+                      <button type="button" className="dlg-eye" tabIndex={-1}
+                        onClick={() => setDlgPassVisible(v => !v)}>
+                        {dlgPassVisible ? "🙈" : "👁"}
+                      </button>
+                    </div>
+                  </div>
+                </div>
+                {dlgError && <div className="dlg-error">{dlgError}</div>}
+                <div className="dlg-actions">
+                  <button type="button" className="dlg-cancel" onClick={() => setConnectingTo(null)}>취소</button>
+                  <button type="submit" className="dlg-connect" disabled={dlgLoading}>
+                    {dlgLoading ? "연결 중..." : "연결"}
+                  </button>
+                </div>
+              </form>
+            </div>
+          </div>
+        )}
+
+        {/* ── 새 연결 추가 다이얼로그 ── */}
+        {showNewConn && (
+          <div className="dlg-overlay" onClick={() => setShowNewConn(false)}>
+            <div className="dlg-box dlg-box-wide" onClick={e => e.stopPropagation()}>
+              <div className="dlg-header">
+                <svg width="18" height="22" viewBox="0 0 24 24" preserveAspectRatio="none" fill="none">
+                  <ellipse cx="12" cy="5" rx="8" ry="3.5" stroke="#4ec9b0" strokeWidth="1.5" vectorEffect="non-scaling-stroke"/>
+                  <path d="M4 5v6c0 1.93 3.58 3.5 8 3.5s8-1.57 8-3.5V5" stroke="#4ec9b0" strokeWidth="1.5" fill="none" vectorEffect="non-scaling-stroke"/>
+                  <path d="M4 11v6c0 1.93 3.58 3.5 8 3.5s8-1.57 8-3.5v-6" stroke="#4ec9b0" strokeWidth="1.5" fill="none" vectorEffect="non-scaling-stroke"/>
+                </svg>
+                <div>
+                  <div className="dlg-title">새 연결 추가</div>
+                  <div className="dlg-subtitle">접속 정보를 입력하세요</div>
+                </div>
+              </div>
+              <div className="dlg-fields">
+                <div className="dlg-section-label">사용자 정보</div>
+                <div className="dlg-row">
+                  <label>연결 이름</label>
+                  <input type="text" value={newName} onChange={e => setNewName(e.target.value)} className="dlg-input" autoFocus/>
+                </div>
+                <div className="dlg-row">
+                  <label>사용자 이름</label>
+                  <input type="text" value={newUser} onChange={e => setNewUser(e.target.value)} className="dlg-input"/>
+                </div>
+                <div className="dlg-row">
+                  <label>비밀번호</label>
+                  <div className="dlg-pass-wrap">
+                    <input
+                      type={newPassVisible ? "text" : "password"}
+                      value={newPass}
+                      onChange={e => setNewPass(e.target.value)}
+                      className="dlg-input"
+                      placeholder="비밀번호"
+                    />
+                    <button type="button" className="dlg-eye" tabIndex={-1}
+                      onClick={() => setNewPassVisible(v => !v)}>
+                      {newPassVisible ? "🙈" : "👁"}
+                    </button>
+                  </div>
+                </div>
+                <div className="dlg-section-label" style={{ marginTop: 14 }}>세부 정보</div>
+                <div className="dlg-field-row">
+                  <div className="dlg-row" style={{ flex: 1 }}>
+                    <label>호스트 이름 / 주소</label>
+                    <input type="text" value={newHost} onChange={e => setNewHost(e.target.value)} className="dlg-input"/>
+                  </div>
+                  <div className="dlg-row" style={{ flex: "0 0 90px" }}>
+                    <label>포트</label>
+                    <input type="text" value={newPort} onChange={e => setNewPort(e.target.value)} className="dlg-input"/>
+                  </div>
+                </div>
+                <div className="dlg-row dlg-row-toggle">
+                  <label>자동 로그인</label>
+                  <button
+                    type="button"
+                    className={`dlg-toggle ${newAutoLogin ? "dlg-toggle-on" : ""}`}
+                    onClick={() => setNewAutoLogin(v => !v)}
+                  >
+                    <span className="dlg-toggle-knob"/>
+                  </button>
+                </div>
+              </div>
+              <div className="dlg-actions">
+                <button type="button" className="dlg-cancel" onClick={() => setShowNewConn(false)}>취소</button>
+                <button type="button" className="dlg-connect" onClick={handleAddConnection}>추가</button>
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+    );
+  }
+
   return (
     <div className="app">
 
@@ -721,6 +1110,29 @@ function App() {
             )}
           </div>
         ))}
+        {/* 우측 세션 정보 */}
+        <div className="menu-bar-right">
+          <span className="menu-session-user">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" style={{ marginRight: 4 }}>
+              <path d="M12 12c2.7 0 4.8-2.1 4.8-4.8S14.7 2.4 12 2.4 7.2 4.5 7.2 7.2 9.3 12 12 12zm0 2.4c-3.2 0-9.6 1.6-9.6 4.8v2.4h19.2v-2.4c0-3.2-6.4-4.8-9.6-4.8z"/>
+            </svg>
+            {sessionUser}
+          </span>
+          <button
+            className="menu-logout-btn"
+            onClick={() => {
+              connIdRef.current = "";
+              setSessionConnId("");
+              setSessionUser("");
+              setLoggedIn(false);
+              setTabs([{ id: "1", name: "query.sql", content: "SHOW TABLES;" }]);
+              setActiveTabId("1");
+              setQueryHistory([]);
+              setTabResults({});
+              setDlgPass(""); setDlgError("");
+            }}
+          >로그아웃</button>
+        </div>
       </div>
 
       {/* ── 본문 (액티비티 바 + 콘텐츠) ─────────────────────────── */}
@@ -1136,7 +1548,7 @@ function App() {
                   queryRef.current = val ?? "";
                   setTabs(prev => {
                     const next = prev.map(t => t.id === activeTabId ? { ...t, content: queryRef.current } : t);
-                    localStorage.setItem("rustdb_tabs", JSON.stringify(next));
+                    localStorage.setItem(`rustdb_tabs_${connIdRef.current}`, JSON.stringify(next));
                     return next;
                   });
                 }}
@@ -1310,7 +1722,7 @@ function App() {
                         <span className="history-toolbar-info">{queryHistory.length}개 기록</span>
                         <button className="history-clear-btn" onClick={() => {
                           setQueryHistory([]);
-                          saveHistory([]);
+                          saveHistory(connIdRef.current, []);
                         }}>전체 삭제</button>
                       </div>
                       {queryHistory.map(h => {
