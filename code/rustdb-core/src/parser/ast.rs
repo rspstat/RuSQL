@@ -19,11 +19,15 @@ pub enum ArithExpr {
     Mul(Box<ArithExpr>, Box<ArithExpr>),
     Div(Box<ArithExpr>, Box<ArithExpr>),
     Func(String, Vec<ArithExpr>),
+    Cmp(Box<ArithExpr>, String, Box<ArithExpr>),
 }
 
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub enum DataType {
     Int,
+    BigInt,
+    SmallInt,
+    TinyInt,
     Text,
     Float,
     Boolean,
@@ -38,6 +42,7 @@ pub enum DataType {
     Enum(Vec<String>),
     Set(Vec<String>),
     Blob,
+    Json,
     #[serde(other)]
     Unknown,
 }
@@ -103,6 +108,7 @@ pub enum Operator {
     Like, Between,
     IsNull, IsNotNull,
     Exists, NotExists,
+    Regexp,
 }
 
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
@@ -135,7 +141,30 @@ pub enum AggFunc {
     Count,
     CountDistinct,
     Sum, Avg, Min, Max,
+    SumDistinct,
+    AvgDistinct,
+    Stddev,
+    Variance,
     GroupConcat { separator: String },
+}
+
+#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
+pub enum FrameBound {
+    UnboundedPreceding,
+    Preceding(usize),
+    CurrentRow,
+    Following(usize),
+    UnboundedFollowing,
+}
+
+#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
+pub enum FrameUnit { Rows, Range }
+
+#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
+pub struct WindowFrame {
+    pub unit: FrameUnit,
+    pub start: FrameBound,
+    pub end: FrameBound,
 }
 
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
@@ -148,6 +177,15 @@ pub enum WindowFunc {
     FirstValue,
     LastValue,
     NthValue,
+    Ntile,
+    PercentRank,
+    CumeDist,
+    // 집계 윈도우 함수
+    Sum,
+    Avg,
+    Count,
+    Min,
+    Max,
 }
 
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
@@ -185,6 +223,7 @@ pub enum SelectColumn {
         partition_by: Vec<String>,
         order_by: Vec<OrderBy>,
         alias: Option<String>,
+        frame: Option<WindowFrame>,
     },
     Subquery {
         query: Box<Statement>,
@@ -260,6 +299,7 @@ pub enum Statement {
         limit: Option<usize>,
         offset: Option<usize>,
         for_update: bool,
+        for_share: bool,
     },
     Update {
         table: String,
@@ -396,4 +436,95 @@ pub enum Statement {
     ShowCreateTable {
         table: String,
     },
+    Merge {
+        target: String,
+        target_alias: Option<String>,
+        source: String,
+        source_alias: Option<String>,
+        on: CondExpr,
+        when_matched_update: Option<Vec<(String, ArithExpr)>>,
+        when_matched_delete: bool,
+        when_not_matched_columns: Option<Vec<String>>,
+        when_not_matched_values: Vec<String>,
+    },
+    CreateProcedure {
+        name: String,
+        params: Vec<(String, String, String)>,  // (IN/OUT/INOUT, name, type)
+        body: Vec<Statement>,
+    },
+    CallProcedure {
+        name: String,
+        args: Vec<String>,
+    },
+    CreateTrigger {
+        name: String,
+        timing: TriggerTiming,
+        event: TriggerEvent,
+        table: String,
+        body: Vec<Statement>,
+    },
+    DropTrigger {
+        name: String,
+        if_exists: bool,
+    },
+    DropProcedure {
+        name: String,
+        if_exists: bool,
+    },
+    Backup {
+        database: Option<String>,
+        output_file: Option<String>,
+    },
+    ShowProcessList,
+    CreateFunction {
+        name: String,
+        params: Vec<String>,
+        body: String,
+    },
+    DropFunction {
+        name: String,
+        if_exists: bool,
+    },
+    // 저장 프로시저 제어문
+    ProcDeclare {
+        name: String,
+        typ: String,
+        default: Option<String>,
+    },
+    ProcSet {
+        name: String,
+        expr: ArithExpr,
+    },
+    ProcIf {
+        condition: CondExpr,
+        then_body: Vec<Statement>,
+        elseif_branches: Vec<(CondExpr, Vec<Statement>)>,
+        else_body: Option<Vec<Statement>>,
+    },
+    ProcWhile {
+        label: Option<String>,
+        condition: CondExpr,
+        body: Vec<Statement>,
+    },
+    ProcLoop {
+        label: Option<String>,
+        body: Vec<Statement>,
+    },
+    ProcRepeat {
+        label: Option<String>,
+        body: Vec<Statement>,
+        until: CondExpr,
+    },
+    ProcLeave {
+        label: Option<String>,
+    },
+    ProcIterate {
+        label: Option<String>,
+    },
 }
+
+#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
+pub enum TriggerTiming { Before, After }
+
+#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
+pub enum TriggerEvent { Insert, Update, Delete }

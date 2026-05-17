@@ -128,6 +128,7 @@ pub enum Token {
     Rpad,
     Cast,
     DateAdd,
+    DateSub,
     DateDiff,
     Separator,
 
@@ -178,6 +179,71 @@ pub enum Token {
 
     // RETURNING
     Returning,
+
+    // 통계 집계 함수
+    Stddev,
+    Variance,
+
+    // 윈도우 함수 (추가)
+    Ntile,
+    PercentRank,
+    CumeDist,
+
+    // 정규식
+    Regexp,
+
+    // 윈도우 프레임
+    Rows,
+    Range,
+    Unbounded,
+    Preceding,
+    Following,
+    Current,
+
+    // MERGE INTO
+    Merge,
+    Using,
+    Matched,
+    Procedure,
+    Call,
+    Trigger,
+    Before,
+    After,
+    Each,
+    Row,
+    NewKw,
+    OldKw,
+    Body,
+    Signal,
+    Declare,
+    Handler,
+    Leave,
+    Iterate,
+    Loop,
+    Repeat,
+    Until,
+    While,
+    Do,
+    IfKw,
+    ElseIfKw,
+
+    // 정수 타입 확장
+    BigInt,
+    SmallInt,
+    TinyInt,
+
+    // JSON
+    Json,
+    JsonExtract,
+    JsonUnquote,
+    JsonValue,
+
+    // FOR SHARE
+    Share,
+
+    // JSON 연산자
+    Arrow,       // ->
+    LongArrow,   // ->>
 }
 
 pub struct Lexer {
@@ -378,6 +444,7 @@ impl Lexer {
             "RPAD"         => Token::Rpad,
             "CAST"         => Token::Cast,
             "DATE_ADD"     => Token::DateAdd,
+            "DATE_SUB"     => Token::DateSub,
             "DATEDIFF"     => Token::DateDiff,
             "SEPARATOR"    => Token::Separator,
             "OFFSET"       => Token::Offset,
@@ -394,7 +461,43 @@ impl Lexer {
             "PASSWORD"     => Token::Password,
             "DATABASES"    => Token::Databases,
             "ANALYZE"      => Token::Analyze,
+            "STDDEV" | "STD" | "STDDEV_POP" => Token::Stddev,
+            "VARIANCE" | "VAR_POP"          => Token::Variance,
+            "NTILE"        => Token::Ntile,
+            "PERCENT_RANK" => Token::PercentRank,
+            "CUME_DIST"    => Token::CumeDist,
             "ROW_NUMBER"   => Token::RowNumber,
+            "REGEXP" | "RLIKE" => Token::Regexp,
+            "MERGE"     => Token::Merge,
+            "USING"     => Token::Using,
+            "MATCHED"   => Token::Matched,
+            "PROCEDURE" => Token::Procedure,
+            "CALL"      => Token::Call,
+            "TRIGGER"   => Token::Trigger,
+            "BEFORE"    => Token::Before,
+            "AFTER"     => Token::After,
+            "EACH"      => Token::Each,
+            "ROW"       => Token::Row,
+            "NEW"       => Token::NewKw,
+            "OLD"       => Token::OldKw,
+            "BODY"      => Token::Body,
+            "SIGNAL"    => Token::Signal,
+            "DECLARE"   => Token::Declare,
+            "HANDLER"   => Token::Handler,
+            "LEAVE"     => Token::Leave,
+            "ITERATE"   => Token::Iterate,
+            "LOOP"      => Token::Loop,
+            "REPEAT"    => Token::Repeat,
+            "UNTIL"     => Token::Until,
+            "WHILE"     => Token::While,
+            "DO"        => Token::Do,
+            "ELSEIF"    => Token::ElseIfKw,
+            "ROWS"      => Token::Rows,
+            "RANGE"     => Token::Range,
+            "UNBOUNDED" => Token::Unbounded,
+            "PRECEDING" => Token::Preceding,
+            "FOLLOWING" => Token::Following,
+            "CURRENT"   => Token::Current,
             "FIRST_VALUE"  => Token::FirstValue,
             "LAST_VALUE"   => Token::LastValue,
             "NTH_VALUE"    => Token::NthValue,
@@ -404,6 +507,14 @@ impl Lexer {
             "LEAD"         => Token::Lead,
             "OVER"         => Token::Over,
             "PARTITION"    => Token::Partition,
+            "BIGINT"       => Token::BigInt,
+            "SMALLINT"     => Token::SmallInt,
+            "TINYINT"      => Token::TinyInt,
+            "JSON"         => Token::Json,
+            "JSON_EXTRACT" => Token::JsonExtract,
+            "JSON_UNQUOTE" => Token::JsonUnquote,
+            "JSON_VALUE"   => Token::JsonValue,
+            "SHARE"        => Token::Share,
             _              => Token::Ident(s),
         }
     }
@@ -426,6 +537,14 @@ impl Lexer {
                                     if c == '\n' { break; }
                                 }
                                 continue;
+                            } else if self.peek() == Some('>') {
+                                self.advance(); // consume '>'
+                                if self.peek() == Some('>') {
+                                    self.advance(); // consume second '>'
+                                    Token::LongArrow
+                                } else {
+                                    Token::Arrow
+                                }
                             } else if self.peek().map(|c| c.is_ascii_digit()).unwrap_or(false) {
                                 // 음수 리터럴: -숫자
                                 let mut s = "-".to_string();

@@ -1,3 +1,5 @@
+mod mysql;
+
 use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::{Arc, RwLock};
@@ -21,23 +23,32 @@ fn log(msg: &str) {
     println!("[{}] {}", timestamp(), msg);
 }
 
-// ─── 주석 인식 쿼리 분리 ────────────────────────────────────
+// ─── 주석·BEGIN..END 인식 쿼리 분리 ──────────────────────────
 fn split_queries_smart(input: &str) -> Vec<String> {
+    split_proc_aware(input)
+}
+
+/// BEGIN...END 블록 안의 ';'를 분리하지 않는 스마트 분리기
+fn split_proc_aware(input: &str) -> Vec<String> {
     let chars: Vec<char> = input.chars().collect();
     let len = chars.len();
     let mut queries: Vec<String> = Vec::new();
     let mut current = String::new();
+    let mut begin_depth: i32 = 0;
     let mut i = 0;
 
     while i < len {
+        // -- 한 줄 주석
         if chars[i] == '-' && i + 1 < len && chars[i + 1] == '-' {
             while i < len && chars[i] != '\n' { i += 1; }
             continue;
         }
+        // # 한 줄 주석
         if chars[i] == '#' {
             while i < len && chars[i] != '\n' { i += 1; }
             continue;
         }
+        // /* */ 블록 주석
         if chars[i] == '/' && i + 1 < len && chars[i + 1] == '*' {
             i += 2;
             while i + 1 < len {
@@ -46,6 +57,7 @@ fn split_queries_smart(input: &str) -> Vec<String> {
             }
             continue;
         }
+        // 문자열 리터럴
         if chars[i] == '\'' {
             current.push(chars[i]); i += 1;
             while i < len {
@@ -55,10 +67,40 @@ fn split_queries_smart(input: &str) -> Vec<String> {
             }
             continue;
         }
+        // 키워드 추출 (BEGIN / END depth 추적)
+        if chars[i].is_alphabetic() || chars[i] == '_' {
+            let start = i;
+            while i < len && (chars[i].is_alphanumeric() || chars[i] == '_') { i += 1; }
+            let word: String = chars[start..i].iter().collect();
+            match word.to_uppercase().as_str() {
+                "BEGIN" => { begin_depth += 1; }
+                "END" => {
+                    // END IF / END WHILE / END LOOP / END REPEAT / END CASE → 안쪽 블록 종료
+                    let mut j = i;
+                    while j < len && chars[j].is_whitespace() { j += 1; }
+                    let next_is_sub = if j < len && (chars[j].is_alphabetic() || chars[j] == '_') {
+                        let s2 = j;
+                        let mut k = j;
+                        while k < len && (chars[k].is_alphanumeric() || chars[k] == '_') { k += 1; }
+                        let nw: String = chars[s2..k].iter().collect();
+                        matches!(nw.to_uppercase().as_str(), "IF" | "WHILE" | "LOOP" | "REPEAT" | "CASE")
+                    } else { false };
+                    if !next_is_sub && begin_depth > 0 { begin_depth -= 1; }
+                }
+                _ => {}
+            }
+            current.push_str(&word);
+            continue;
+        }
+        // 세미콜론: BEGIN 블록 밖에서만 분리
         if chars[i] == ';' {
-            let t = current.trim().to_string();
-            if !t.is_empty() { queries.push(t); }
-            current.clear();
+            if begin_depth == 0 {
+                let t = current.trim().to_string();
+                if !t.is_empty() { queries.push(t); }
+                current.clear();
+            } else {
+                current.push(';');
+            }
             i += 1;
             continue;
         }
@@ -238,6 +280,16 @@ fn main() {
         .or_else(|| args.get(1).and_then(|a| a.parse().ok()))
         .unwrap_or(7878);
 
+    let no_mysql = args.iter().any(|a| a == "--no-mysql");
+    let mysql_port: u16 = args.windows(2)
+        .find(|w| w[0] == "--mysql-port")
+        .and_then(|w| w[1].parse().ok())
+        .unwrap_or(3306);
+    let buffer_pool_size: usize = args.windows(2)
+        .find(|w| w[0] == "--buffer-pool-size")
+        .and_then(|w| w[1].parse().ok())
+        .unwrap_or(64);
+
     let addr = format!("127.0.0.1:{}", port);
     let listener = match TcpListener::bind(&addr) {
         Ok(l) => l,
@@ -246,7 +298,7 @@ fn main() {
     listener.set_nonblocking(true).ok();
 
     // WAL 복구 포함 초기화 후 공유 상태 추출
-    let shared = Executor::new().get_shared();
+    let shared = Executor::new_with_buffer_pool_size(buffer_pool_size).get_shared();
 
     // users가 없으면 root/root 자동 생성
     if shared.write().unwrap().ensure_default_user() {
@@ -267,9 +319,18 @@ fn main() {
 
     println!("+-----------------------------------------+");
     println!("|   RustDB Server v2.2.0                  |");
-    println!("|   Listening on {:<24}|", addr);
+    println!("|   Native protocol on 127.0.0.1:{:<9}|", port);
+    if !no_mysql {
+        println!("|   MySQL protocol on 0.0.0.0:{:<12}|", mysql_port);
+    }
+    println!("|   Buffer pool size: {:<20}|", buffer_pool_size);
     println!("|   Press Ctrl+C to stop                  |");
     println!("+-----------------------------------------+");
+
+    if !no_mysql {
+        mysql::start_mysql_listener(mysql_port, Arc::clone(&shared));
+    }
+
     log("Server started.");
 
     while running.load(Ordering::SeqCst) {

@@ -26,6 +26,7 @@ fn expand_arith(expr: ArithExpr, map: &HashMap<String, String>) -> ArithExpr {
         ArithExpr::Mul(l, r) => ArithExpr::Mul(Box::new(expand_arith(*l, map)), Box::new(expand_arith(*r, map))),
         ArithExpr::Div(l, r) => ArithExpr::Div(Box::new(expand_arith(*l, map)), Box::new(expand_arith(*r, map))),
         ArithExpr::Func(name, args) => ArithExpr::Func(name, args.into_iter().map(|a| expand_arith(a, map)).collect()),
+        ArithExpr::Cmp(l, op, r) => ArithExpr::Cmp(Box::new(expand_arith(*l, map)), op, Box::new(expand_arith(*r, map))),
     }
 }
 
@@ -148,10 +149,31 @@ impl Parser {
         let first = self.expect_any_ident()?;
         if self.peek() == Some(&Token::Dot) {
             self.advance(); // consume '.'
-            let col = self.expect_ident()?;
+            let col = self.expect_any_name()?;
             Ok(format!("{}.{}", first, col)) // table.column 전체 보존
         } else {
             Ok(first)
+        }
+    }
+
+    /// Any token that can serve as an identifier in dotted names (schema.table, table.column).
+    /// Accepts Token::Ident plus keyword tokens that appear as table/column names.
+    fn expect_any_name(&mut self) -> Result<String, String> {
+        match self.advance() {
+            Some(Token::Ident(s))   => Ok(s.clone()),
+            Some(Token::Tables)     => Ok("tables".to_string()),
+            Some(Token::Column)     => Ok("column".to_string()),
+            Some(Token::Database)   => Ok("schema".to_string()),
+            Some(Token::Index)      => Ok("index".to_string()),
+            Some(Token::View)       => Ok("view".to_string()),
+            Some(Token::Key)        => Ok("key".to_string()),
+            Some(Token::Set)        => Ok("set".to_string()),
+            Some(Token::Count)      => Ok("count".to_string()),
+            Some(Token::Sum)        => Ok("sum".to_string()),
+            Some(Token::Avg)        => Ok("avg".to_string()),
+            Some(Token::Min)        => Ok("min".to_string()),
+            Some(Token::Max)        => Ok("max".to_string()),
+            other => Err(format!("Expected identifier, got {:?}", other)),
         }
     }
 
@@ -199,6 +221,18 @@ impl Parser {
                         self.advance();
                         self.parse_create_user()
                     }
+                    Some(Token::Procedure) => {
+                        self.advance();
+                        self.parse_create_procedure()
+                    }
+                    Some(Token::Trigger) => {
+                        self.advance();
+                        self.parse_create_trigger()
+                    }
+                    Some(Token::Ident(s)) if s.to_uppercase() == "FUNCTION" => {
+                        self.advance();
+                        self.parse_create_function()
+                    }
                     _ => self.parse_create(),
                 }
             }
@@ -219,6 +253,18 @@ impl Parser {
                     Some(Token::User) => {
                         self.advance();
                         self.parse_drop_user()
+                    }
+                    Some(Token::Trigger) => {
+                        self.advance();
+                        self.parse_drop_trigger()
+                    }
+                    Some(Token::Procedure) => {
+                        self.advance();
+                        self.parse_drop_procedure()
+                    }
+                    Some(Token::Ident(s)) if s.to_uppercase() == "FUNCTION" => {
+                        self.advance();
+                        self.parse_drop_function()
                     }
                     _ => self.parse_drop(),
                 }
@@ -274,6 +320,9 @@ impl Parser {
             Some(Token::Vacuum)      => self.parse_vacuum(),
             Some(Token::With)        => self.parse_with(),
             Some(Token::Use)         => self.parse_use(),
+            Some(Token::Merge)       => self.parse_merge(),
+            Some(Token::Call)        => self.parse_call(),
+            Some(Token::Ident(s)) if s.to_uppercase() == "BACKUP" => self.parse_backup(),
             other => Err(format!("Unknown statement: {:?}", other)),
         }
     }
@@ -548,6 +597,17 @@ impl Parser {
             return Ok(Condition { left, operator: Operator::Like, value: ConditionValue::Literal(pattern) });
         }
 
+        // REGEXP / RLIKE pattern
+        if self.peek() == Some(&Token::Regexp) {
+            self.advance();
+            let pattern = match self.advance() {
+                Some(Token::StringLit(s)) => s.clone(),
+                Some(Token::Ident(s))     => s.clone(),
+                other => return Err(format!("Expected pattern after REGEXP, got {:?}", other)),
+            };
+            return Ok(Condition { left, operator: Operator::Regexp, value: ConditionValue::Literal(pattern) });
+        }
+
         // IS NULL / IS NOT NULL
         if self.peek() == Some(&Token::Is) {
             self.advance();
@@ -687,7 +747,10 @@ impl Parser {
             Some(Token::Floor)  | Some(Token::Mod)   |
             Some(Token::Coalesce) | Some(Token::Ifnull) | Some(Token::Nullif) |
             Some(Token::Lpad)   | Some(Token::Rpad)  | Some(Token::If) |
-            Some(Token::DateAdd) | Some(Token::DateDiff) => {
+            Some(Token::DateAdd) | Some(Token::DateDiff) |
+            Some(Token::Left)   | Some(Token::Right)  |
+            Some(Token::Truncate) | Some(Token::Repeat) |
+            Some(Token::JsonExtract) | Some(Token::JsonUnquote) | Some(Token::JsonValue) => {
                 let fname = match self.advance() {
                     Some(Token::Concat)    => "CONCAT",
                     Some(Token::Upper)     => "UPPER",
@@ -709,6 +772,13 @@ impl Parser {
                     Some(Token::If)        => "IF",
                     Some(Token::DateAdd)   => "DATE_ADD",
                     Some(Token::DateDiff)  => "DATEDIFF",
+                    Some(Token::Left)      => "LEFT",
+                    Some(Token::Right)     => "RIGHT",
+                    Some(Token::Truncate)  => "TRUNCATE",
+                    Some(Token::Repeat)    => "REPEAT",
+                    Some(Token::JsonExtract) => "JSON_EXTRACT",
+                    Some(Token::JsonUnquote) => "JSON_UNQUOTE",
+                    Some(Token::JsonValue)   => "JSON_VALUE",
                     _ => unreachable!(),
                 };
                 match self.advance() {
@@ -733,8 +803,65 @@ impl Parser {
                 Ok(ArithExpr::Func(fname.to_string(), args))
             }
             Some(Token::Ident(_)) => {
-                let s = self.expect_col_ref()?;
-                Ok(ArithExpr::Col(s))
+                // Check for generic function call: IDENT(...)
+                if self.tokens.get(self.pos + 1) == Some(&Token::LParen) {
+                    let fname = match self.advance() { Some(Token::Ident(s)) => s.clone(), _ => unreachable!() };
+                    self.advance(); // consume (
+                    let mut args = Vec::new();
+                    while self.peek() != Some(&Token::RParen) && self.peek().is_some() {
+                        if !args.is_empty() {
+                            if self.peek() == Some(&Token::Comma) { self.advance(); } else { break; }
+                        }
+                        if self.peek() == Some(&Token::RParen) { break; }
+                        args.push(self.parse_arith_expr()?);
+                    }
+                    match self.advance() {
+                        Some(Token::RParen) => {}
+                        other => return Err(format!("Expected ')' after {} args, got {:?}", fname, other)),
+                    }
+                    Ok(ArithExpr::Func(fname.to_string(), args))
+                } else {
+                    let s = self.expect_col_ref()?;
+                    Ok(ArithExpr::Col(s))
+                }
+            }
+            // YEAR: function call if followed by '(', else unit string literal
+            Some(Token::Year) => {
+                if self.tokens.get(self.pos + 1) == Some(&Token::LParen) {
+                    self.advance(); // consume YEAR
+                    self.advance(); // consume (
+                    let mut args = Vec::new();
+                    while self.peek() != Some(&Token::RParen) && self.peek().is_some() {
+                        if !args.is_empty() {
+                            if self.peek() == Some(&Token::Comma) { self.advance(); } else { break; }
+                        }
+                        if self.peek() == Some(&Token::RParen) { break; }
+                        args.push(self.parse_arith_expr()?);
+                    }
+                    match self.advance() {
+                        Some(Token::RParen) => {}
+                        other => return Err(format!("Expected ')' after YEAR args, got {:?}", other)),
+                    }
+                    Ok(ArithExpr::Func("YEAR".to_string(), args))
+                } else {
+                    self.advance();
+                    Ok(ArithExpr::Str("YEAR".to_string()))
+                }
+            }
+            // DATE_SUB in expression context: parse INTERVAL-aware args
+            Some(Token::DateSub) => {
+                self.advance(); // consume DATE_SUB
+                let str_args = self.parse_date_add_args()?;
+                let arith_args: Vec<ArithExpr> = str_args.into_iter().map(|s| {
+                    if s.starts_with('\'') && s.ends_with('\'') {
+                        ArithExpr::Str(s[1..s.len()-1].to_string())
+                    } else if s.parse::<f64>().is_ok() {
+                        ArithExpr::Num(s)
+                    } else {
+                        ArithExpr::Col(s)
+                    }
+                }).collect();
+                Ok(ArithExpr::Func("DATE_SUB".to_string(), arith_args))
             }
             other => Err(format!("Expected expression term, got {:?}", other)),
         }
@@ -776,6 +903,25 @@ impl Parser {
                     let right = self.parse_arith_term()?;
                     left = ArithExpr::Sub(Box::new(left), Box::new(right));
                 }
+                // col->'$.key'  →  JSON_EXTRACT(col, '$.key')
+                Some(Token::Arrow) => {
+                    self.advance();
+                    let path = match self.advance() {
+                        Some(Token::StringLit(s)) => ArithExpr::Str(s.clone()),
+                        other => return Err(format!("Expected path string after ->, got {:?}", other)),
+                    };
+                    left = ArithExpr::Func("JSON_EXTRACT".to_string(), vec![left, path]);
+                }
+                // col->>'$.key'  →  JSON_UNQUOTE(JSON_EXTRACT(col, '$.key'))
+                Some(Token::LongArrow) => {
+                    self.advance();
+                    let path = match self.advance() {
+                        Some(Token::StringLit(s)) => ArithExpr::Str(s.clone()),
+                        other => return Err(format!("Expected path string after ->>, got {:?}", other)),
+                    };
+                    let extract = ArithExpr::Func("JSON_EXTRACT".to_string(), vec![left, path]);
+                    left = ArithExpr::Func("JSON_UNQUOTE".to_string(), vec![extract]);
+                }
                 _ => break,
             }
         }
@@ -795,7 +941,63 @@ impl Parser {
                 let arg_strs: Vec<String> = args.iter().map(|a| Self::arith_to_string(a)).collect();
                 format!("{}({})", name, arg_strs.join(", "))
             }
+            ArithExpr::Cmp(l, op, r) => format!("{} {} {}", Self::arith_to_string(l), op, Self::arith_to_string(r)),
         }
+    }
+
+    fn str_to_arith(s: &str) -> ArithExpr {
+        Parser::new(s).parse_arith_expr().unwrap_or_else(|_| ArithExpr::Col(s.to_string()))
+    }
+
+    fn parse_window_frame(&mut self) -> Result<Option<crate::parser::ast::WindowFrame>, String> {
+        use crate::parser::ast::{WindowFrame, FrameUnit, FrameBound};
+        let unit = match self.peek() {
+            Some(Token::Rows)  => { self.advance(); FrameUnit::Rows }
+            Some(Token::Range) => { self.advance(); FrameUnit::Range }
+            _ => return Ok(None),
+        };
+        match self.advance() {
+            Some(Token::Between) => {}
+            other => return Err(format!("Expected BETWEEN after ROWS/RANGE, got {:?}", other)),
+        }
+        let parse_bound = |p: &mut Parser| -> Result<FrameBound, String> {
+            match p.peek() {
+                Some(Token::Unbounded) => {
+                    p.advance();
+                    match p.advance() {
+                        Some(Token::Preceding) => Ok(FrameBound::UnboundedPreceding),
+                        Some(Token::Following) => Ok(FrameBound::UnboundedFollowing),
+                        other => Err(format!("Expected PRECEDING/FOLLOWING after UNBOUNDED, got {:?}", other)),
+                    }
+                }
+                Some(Token::Current) => {
+                    p.advance();
+                    match p.advance() {
+                        Some(Token::Row) => Ok(FrameBound::CurrentRow),
+                        Some(Token::Ident(s)) if s.to_uppercase() == "ROW" => Ok(FrameBound::CurrentRow),
+                        other => Err(format!("Expected ROW after CURRENT, got {:?}", other)),
+                    }
+                }
+                Some(Token::NumberLit(_)) => {
+                    let n: usize = if let Some(Token::NumberLit(s)) = p.advance() {
+                        s.parse().unwrap_or(0)
+                    } else { 0 };
+                    match p.advance() {
+                        Some(Token::Preceding) => Ok(FrameBound::Preceding(n)),
+                        Some(Token::Following) => Ok(FrameBound::Following(n)),
+                        other => Err(format!("Expected PRECEDING/FOLLOWING after N, got {:?}", other)),
+                    }
+                }
+                other => Err(format!("Expected frame bound, got {:?}", other)),
+            }
+        };
+        let start = parse_bound(self)?;
+        match self.advance() {
+            Some(Token::And) => {}
+            other => return Err(format!("Expected AND in frame, got {:?}", other)),
+        }
+        let end = parse_bound(self)?;
+        Ok(Some(WindowFrame { unit, start, end }))
     }
 
     fn parse_case_when(&mut self) -> Result<SelectColumn, String> {
@@ -861,22 +1063,30 @@ impl Parser {
             let col = match self.peek() {
                 Some(Token::Asterisk) => { self.advance(); SelectColumn::All }
                 Some(Token::Count) | Some(Token::Sum) | Some(Token::Avg) |
-                Some(Token::Min)   | Some(Token::Max) => {
+                Some(Token::Min)   | Some(Token::Max) |
+                Some(Token::Stddev) | Some(Token::Variance) => {
                     let mut func = match self.advance() {
-                        Some(Token::Count) => AggFunc::Count,
-                        Some(Token::Sum)   => AggFunc::Sum,
-                        Some(Token::Avg)   => AggFunc::Avg,
-                        Some(Token::Min)   => AggFunc::Min,
-                        Some(Token::Max)   => AggFunc::Max,
+                        Some(Token::Count)    => AggFunc::Count,
+                        Some(Token::Sum)      => AggFunc::Sum,
+                        Some(Token::Avg)      => AggFunc::Avg,
+                        Some(Token::Min)      => AggFunc::Min,
+                        Some(Token::Max)      => AggFunc::Max,
+                        Some(Token::Stddev)   => AggFunc::Stddev,
+                        Some(Token::Variance) => AggFunc::Variance,
                         _ => unreachable!(),
                     };
                     match self.advance() {
                         Some(Token::LParen) => {}
                         other => return Err(format!("Expected '(', got {:?}", other)),
                     }
-                    if matches!(func, AggFunc::Count) && self.peek() == Some(&Token::Distinct) {
+                    if self.peek() == Some(&Token::Distinct) {
                         self.advance();
-                        func = AggFunc::CountDistinct;
+                        func = match func {
+                            AggFunc::Count => AggFunc::CountDistinct,
+                            AggFunc::Sum   => AggFunc::SumDistinct,
+                            AggFunc::Avg   => AggFunc::AvgDistinct,
+                            other          => other,
+                        };
                     }
                     let agg_col = match self.advance() {
                         Some(Token::Asterisk)  => "*".to_string(),
@@ -895,13 +1105,80 @@ impl Parser {
                         Some(Token::RParen) => {}
                         other => return Err(format!("Expected ')', got {:?}", other)),
                     }
-                    // AS 별칭
-                    if self.peek() == Some(&Token::As) {
-                        self.advance();
-                        let alias = self.expect_alias_ident()?;
-                        SelectColumn::AggAlias { func, col: agg_col, alias }
+                    // 집계함수 + OVER → aggregate window function
+                    if self.peek() == Some(&Token::Over) {
+                        self.advance(); // consume OVER
+                        match self.advance() {
+                            Some(Token::LParen) => {}
+                            other => return Err(format!("Expected '(' after OVER, got {:?}", other)),
+                        }
+                        let partition_by = if self.peek() == Some(&Token::Partition) {
+                            self.advance();
+                            match self.advance() {
+                                Some(Token::By) => {}
+                                other => return Err(format!("Expected BY after PARTITION, got {:?}", other)),
+                            }
+                            let mut cols = vec![self.expect_col_ref()?];
+                            while self.peek() == Some(&Token::Comma) {
+                                self.advance();
+                                cols.push(self.expect_col_ref()?);
+                            }
+                            cols
+                        } else { vec![] };
+                        let win_order_by = if self.peek() == Some(&Token::Order) {
+                            self.advance();
+                            match self.advance() {
+                                Some(Token::By) => {}
+                                other => return Err(format!("Expected BY after ORDER, got {:?}", other)),
+                            }
+                            let mut keys = Vec::new();
+                            loop {
+                                let col = self.expect_col_ref()?;
+                                let ascending = match self.peek() {
+                                    Some(Token::Desc) => { self.advance(); false }
+                                    Some(Token::Asc)  => { self.advance(); true }
+                                    _ => true,
+                                };
+                                keys.push(OrderBy { column: col, ascending });
+                                if self.peek() == Some(&Token::Comma) { self.advance(); } else { break; }
+                            }
+                            keys
+                        } else { vec![] };
+                        let frame = self.parse_window_frame()?;
+                        match self.advance() {
+                            Some(Token::RParen) => {}
+                            other => return Err(format!("Expected ')' after OVER clause, got {:?}", other)),
+                        }
+                        let win_func = match func {
+                            AggFunc::Sum | AggFunc::SumDistinct => WindowFunc::Sum,
+                            AggFunc::Avg | AggFunc::AvgDistinct => WindowFunc::Avg,
+                            AggFunc::Count | AggFunc::CountDistinct => WindowFunc::Count,
+                            AggFunc::Min => WindowFunc::Min,
+                            AggFunc::Max => WindowFunc::Max,
+                            _ => WindowFunc::Sum,
+                        };
+                        let alias = if self.peek() == Some(&Token::As) {
+                            self.advance();
+                            Some(self.expect_alias_ident()?)
+                        } else { None };
+                        SelectColumn::WinFunc {
+                            func: win_func,
+                            col: Some(agg_col),
+                            offset: 0,
+                            partition_by,
+                            order_by: win_order_by,
+                            alias,
+                            frame,
+                        }
                     } else {
-                        SelectColumn::Agg { func, col: agg_col }
+                        // AS 별칭
+                        if self.peek() == Some(&Token::As) {
+                            self.advance();
+                            let alias = self.expect_alias_ident()?;
+                            SelectColumn::AggAlias { func, col: agg_col, alias }
+                        } else {
+                            SelectColumn::Agg { func, col: agg_col }
+                        }
                     }
                 }
                 // GROUP_CONCAT(col [SEPARATOR 'sep'])
@@ -1003,29 +1280,34 @@ impl Parser {
                     } else { None };
                     SelectColumn::Func { name: "CAST".to_string(), args, alias }
                 }
-                // DATE_ADD(date, INTERVAL n unit) — 특수 문법
-                Some(Token::DateAdd) => {
+                // DATE_ADD / DATE_SUB (date, INTERVAL n unit) — 특수 문법
+                Some(Token::DateAdd) | Some(Token::DateSub) => {
+                    let fname = if self.peek() == Some(&Token::DateAdd) { "DATE_ADD" } else { "DATE_SUB" };
                     self.advance();
                     let args = self.parse_date_add_args()?;
                     let alias = if self.peek() == Some(&Token::As) {
                         self.advance();
                         Some(self.expect_alias_ident()?)
                     } else { None };
-                    SelectColumn::Func { name: "DATE_ADD".to_string(), args, alias }
+                    SelectColumn::Func { name: fname.to_string(), args, alias }
                 }
-                // 윈도우 함수: ROW_NUMBER/RANK/DENSE_RANK/LAG/LEAD/FIRST_VALUE/LAST_VALUE/NTH_VALUE
+                // 윈도우 함수
                 Some(Token::RowNumber) | Some(Token::Rank) | Some(Token::DenseRank) |
                 Some(Token::Lag) | Some(Token::Lead) |
-                Some(Token::FirstValue) | Some(Token::LastValue) | Some(Token::NthValue) => {
+                Some(Token::FirstValue) | Some(Token::LastValue) | Some(Token::NthValue) |
+                Some(Token::Ntile) | Some(Token::PercentRank) | Some(Token::CumeDist) => {
                     let func = match self.advance() {
-                        Some(Token::RowNumber)  => WindowFunc::RowNumber,
-                        Some(Token::Rank)       => WindowFunc::Rank,
-                        Some(Token::DenseRank)  => WindowFunc::DenseRank,
-                        Some(Token::Lag)        => WindowFunc::Lag,
-                        Some(Token::Lead)       => WindowFunc::Lead,
-                        Some(Token::FirstValue) => WindowFunc::FirstValue,
-                        Some(Token::LastValue)  => WindowFunc::LastValue,
-                        Some(Token::NthValue)   => WindowFunc::NthValue,
+                        Some(Token::RowNumber)   => WindowFunc::RowNumber,
+                        Some(Token::Rank)        => WindowFunc::Rank,
+                        Some(Token::DenseRank)   => WindowFunc::DenseRank,
+                        Some(Token::Lag)         => WindowFunc::Lag,
+                        Some(Token::Lead)        => WindowFunc::Lead,
+                        Some(Token::FirstValue)  => WindowFunc::FirstValue,
+                        Some(Token::LastValue)   => WindowFunc::LastValue,
+                        Some(Token::NthValue)    => WindowFunc::NthValue,
+                        Some(Token::Ntile)       => WindowFunc::Ntile,
+                        Some(Token::PercentRank) => WindowFunc::PercentRank,
+                        Some(Token::CumeDist)    => WindowFunc::CumeDist,
                         _ => unreachable!(),
                     };
                     match self.advance() {
@@ -1059,6 +1341,13 @@ impl Parser {
                                 other => return Err(format!("Expected N in NTH_VALUE, got {:?}", other)),
                             };
                             (Some(col), n)
+                        }
+                        WindowFunc::Ntile => {
+                            let n = match self.advance() {
+                                Some(Token::NumberLit(n)) => n.parse::<i64>().unwrap_or(1),
+                                other => return Err(format!("Expected N in NTILE, got {:?}", other)),
+                            };
+                            (None, n)
                         }
                         _ => (None, 0i64),
                     };
@@ -1106,6 +1395,7 @@ impl Parser {
                         }
                         keys
                     } else { vec![] };
+                    let frame = self.parse_window_frame()?;
                     match self.advance() {
                         Some(Token::RParen) => {}
                         other => return Err(format!("Expected ')' after OVER clause, got {:?}", other)),
@@ -1121,6 +1411,7 @@ impl Parser {
                         partition_by,
                         order_by: win_order_by,
                         alias,
+                        frame,
                     }
                 }
                 // 스칼라 함수: UPPER(col), NOW(), CONCAT(a, b), ...
@@ -1159,11 +1450,31 @@ impl Parser {
                         _ => unreachable!(),
                     }.to_string();
                     let args = self.parse_func_args()?;
-                    let alias = if self.peek() == Some(&Token::As) {
-                        self.advance();
-                        Some(self.expect_alias_ident()?)
-                    } else { None };
-                    SelectColumn::Func { name: fname, args, alias }
+                    // detect comparison after scalar func: LENGTH(x) > 0 AS alias
+                    let cmp_op = match self.peek() {
+                        Some(Token::Gt)  => { self.advance(); Some(">") }
+                        Some(Token::Lt)  => { self.advance(); Some("<") }
+                        Some(Token::Gte) => { self.advance(); Some(">=") }
+                        Some(Token::Lte) => { self.advance(); Some("<=") }
+                        Some(Token::Eq)  => { self.advance(); Some("=") }
+                        Some(Token::Ne)  => { self.advance(); Some("!=") }
+                        _ => None,
+                    };
+                    if let Some(op) = cmp_op {
+                        let rhs = self.parse_arith_expr()?;
+                        let alias = if self.peek() == Some(&Token::As) {
+                            self.advance();
+                            Some(self.expect_alias_ident()?)
+                        } else { None };
+                        let lhs = ArithExpr::Func(fname, args.iter().map(|s| Self::str_to_arith(s)).collect());
+                        SelectColumn::Expr { expr: ArithExpr::Cmp(Box::new(lhs), op.to_string(), Box::new(rhs)), alias }
+                    } else {
+                        let alias = if self.peek() == Some(&Token::As) {
+                            self.advance();
+                            Some(self.expect_alias_ident()?)
+                        } else { None };
+                        SelectColumn::Func { name: fname, args, alias }
+                    }
                 }
                 // 스칼라 서브쿼리: (SELECT ...) [AS alias]
                 Some(Token::LParen) if self.tokens.get(self.pos + 1) == Some(&Token::Select) => {
@@ -1182,21 +1493,39 @@ impl Parser {
                 }
                 _ => {
                     let expr = self.parse_arith_expr()?;
-                    let alias = if self.peek() == Some(&Token::As) {
-                        self.advance();
-                        Some(self.expect_alias_ident()?)
-                    } else {
-                        None
+                    let cmp_op = match self.peek() {
+                        Some(Token::Gt)  => { self.advance(); Some(">") }
+                        Some(Token::Lt)  => { self.advance(); Some("<") }
+                        Some(Token::Gte) => { self.advance(); Some(">=") }
+                        Some(Token::Lte) => { self.advance(); Some("<=") }
+                        Some(Token::Eq)  => { self.advance(); Some("=") }
+                        Some(Token::Ne)  => { self.advance(); Some("!=") }
+                        _ => None,
                     };
-                    match expr {
-                        ArithExpr::Col(name) => {
-                            if let Some(a) = alias {
-                                SelectColumn::ColumnAlias(name, a)
-                            } else {
-                                SelectColumn::Column(name)
+                    if let Some(op) = cmp_op {
+                        let rhs = self.parse_arith_expr()?;
+                        let alias = if self.peek() == Some(&Token::As) {
+                            self.advance();
+                            Some(self.expect_alias_ident()?)
+                        } else { None };
+                        SelectColumn::Expr { expr: ArithExpr::Cmp(Box::new(expr), op.to_string(), Box::new(rhs)), alias }
+                    } else {
+                        let alias = if self.peek() == Some(&Token::As) {
+                            self.advance();
+                            Some(self.expect_alias_ident()?)
+                        } else {
+                            None
+                        };
+                        match expr {
+                            ArithExpr::Col(name) => {
+                                if let Some(a) = alias {
+                                    SelectColumn::ColumnAlias(name, a)
+                                } else {
+                                    SelectColumn::Column(name)
+                                }
                             }
+                            other => SelectColumn::Expr { expr: other, alias },
                         }
-                        other => SelectColumn::Expr { expr: other, alias },
                     }
                 }
             };
@@ -1223,6 +1552,7 @@ impl Parser {
                 limit: None,
                 offset: None,
                 for_update: false,
+                for_share: false,
             });
         }
         self.advance(); // consume FROM
@@ -1246,7 +1576,7 @@ impl Parser {
             let alias = self.expect_ident()?;
             (String::new(), Some((Box::new(inner), alias)))
         } else {
-            let t = self.expect_ident()?;
+            let t = self.expect_col_ref()?;
             // 선택적 테이블 별칭: FROM employees e
             if matches!(self.peek(), Some(Token::Ident(_))) {
                 let a = self.expect_ident()?;
@@ -1417,15 +1747,16 @@ impl Parser {
             (None, None)
         };
 
-        // FOR UPDATE
-        let for_update = if self.peek() == Some(&Token::For) {
+        // FOR UPDATE / FOR SHARE
+        let (for_update, for_share) = if self.peek() == Some(&Token::For) {
             self.advance();
             match self.advance() {
-                Some(Token::Update) => true,
-                other => return Err(format!("Expected UPDATE after FOR, got {:?}", other)),
+                Some(Token::Update) => (true, false),
+                Some(Token::Share)  => (false, true),
+                other => return Err(format!("Expected UPDATE or SHARE after FOR, got {:?}", other)),
             }
         } else {
-            false
+            (false, false)
         };
 
         // 별칭 확장 적용
@@ -1447,7 +1778,7 @@ impl Parser {
             .collect::<Vec<_>>());
         let having = having.map(|c| expand_condexpr(c, &alias_map));
 
-        let select_stmt = Statement::Select { table, subquery, distinct, columns, condition, joins, order_by, group_by, having, limit, offset, for_update };
+        let select_stmt = Statement::Select { table, subquery, distinct, columns, condition, joins, order_by, group_by, having, limit, offset, for_update, for_share };
 
         // UNION / INTERSECT / EXCEPT [ALL]
         let set_op = match self.peek() {
@@ -1465,11 +1796,11 @@ impl Parser {
             let right = self.parse_select()?;
             let (right_clean, op_order_by, op_limit, op_offset) = match right {
                 Statement::Select { table, subquery, columns, distinct, condition, joins,
-                                    order_by, group_by, having, limit, offset, for_update } => {
+                                    order_by, group_by, having, limit, offset, for_update, for_share } => {
                     let clean = Statement::Select {
                         table, subquery, columns, distinct, condition, joins,
                         order_by: vec![], group_by, having,
-                        limit: None, offset: None, for_update,
+                        limit: None, offset: None, for_update, for_share,
                     };
                     (clean, order_by, limit, offset)
                 }
@@ -1989,12 +2320,55 @@ impl Parser {
         Ok(parts.join(" "))
     }
 
-    /// 데이터 타입 파싱: INT, TEXT, FLOAT, BOOLEAN, VARCHAR(n), DATE, DECIMAL(p,s), DOUBLE, TIME, YEAR, ENUM, SET
+    /// 데이터 타입 파싱: INT, BIGINT, SMALLINT, TINYINT, TEXT, FLOAT, BOOLEAN, VARCHAR(n), DATE, DECIMAL(p,s), DOUBLE, TIME, YEAR, ENUM, SET, JSON
     fn parse_data_type(&mut self) -> Result<DataType, String> {
         match self.advance() {
-            Some(Token::Int)     => Ok(DataType::Int),
+            Some(Token::Int)     => {
+                // INT [(n)] [UNSIGNED] [ZEROFILL] — 선택적 크기·수정자 무시
+                if self.peek() == Some(&Token::LParen) {
+                    self.advance();
+                    while self.peek() != Some(&Token::RParen) { self.advance(); }
+                    self.advance();
+                }
+                if matches!(self.peek(), Some(Token::Ident(s)) if s.to_uppercase() == "UNSIGNED") { self.advance(); }
+                Ok(DataType::Int)
+            }
+            Some(Token::BigInt) => {
+                if self.peek() == Some(&Token::LParen) {
+                    self.advance();
+                    while self.peek() != Some(&Token::RParen) { self.advance(); }
+                    self.advance();
+                }
+                if matches!(self.peek(), Some(Token::Ident(s)) if s.to_uppercase() == "UNSIGNED") { self.advance(); }
+                Ok(DataType::BigInt)
+            }
+            Some(Token::SmallInt) => {
+                if self.peek() == Some(&Token::LParen) {
+                    self.advance();
+                    while self.peek() != Some(&Token::RParen) { self.advance(); }
+                    self.advance();
+                }
+                if matches!(self.peek(), Some(Token::Ident(s)) if s.to_uppercase() == "UNSIGNED") { self.advance(); }
+                Ok(DataType::SmallInt)
+            }
+            Some(Token::TinyInt) => {
+                if self.peek() == Some(&Token::LParen) {
+                    self.advance();
+                    while self.peek() != Some(&Token::RParen) { self.advance(); }
+                    self.advance();
+                }
+                if matches!(self.peek(), Some(Token::Ident(s)) if s.to_uppercase() == "UNSIGNED") { self.advance(); }
+                Ok(DataType::TinyInt)
+            }
             Some(Token::Text)    => Ok(DataType::Text),
-            Some(Token::Float)   => Ok(DataType::Float),
+            Some(Token::Float)   => {
+                if self.peek() == Some(&Token::LParen) {
+                    self.advance();
+                    while self.peek() != Some(&Token::RParen) { self.advance(); }
+                    self.advance();
+                }
+                Ok(DataType::Float)
+            }
             Some(Token::Boolean) => Ok(DataType::Boolean),
             Some(Token::Double)  => {
                 // DOUBLE or DOUBLE(p,s) — 선택적 정밀도 무시
@@ -2008,6 +2382,7 @@ impl Parser {
             Some(Token::Time)    => Ok(DataType::Time),
             Some(Token::Year)    => Ok(DataType::Year),
             Some(Token::Blob)    => Ok(DataType::Blob),
+            Some(Token::Json)    => Ok(DataType::Json),
             Some(Token::Enum) => {
                 match self.advance() {
                     Some(Token::LParen) => {}
@@ -2771,6 +3146,29 @@ impl Parser {
         Ok(Statement::DropDatabase { name, if_exists })
     }
 
+    fn parse_backup(&mut self) -> Result<Statement, String> {
+        // BACKUP [DATABASE db] [INTO 'file']
+        // BACKUP INTO 'file'
+        // BACKUP DATABASE db INTO 'file'
+        let mut database = None;
+        let mut output_file = None;
+
+        if let Some(Token::Database) = self.peek().cloned().as_ref() {
+            self.advance();
+            database = Some(self.expect_ident()?);
+        }
+        if let Some(Token::Ident(s)) = self.peek().cloned().as_ref() {
+            if s.to_uppercase() == "INTO" {
+                self.advance();
+                match self.advance() {
+                    Some(Token::StringLit(f)) => output_file = Some(f.clone()),
+                    other => return Err(format!("Expected filename string, got {:?}", other)),
+                }
+            }
+        }
+        Ok(Statement::Backup { database, output_file })
+    }
+
     fn parse_show(&mut self) -> Result<Statement, String> {
         match self.advance() {
             Some(Token::Tables)  => Ok(Statement::ShowTables),
@@ -2809,7 +3207,8 @@ impl Parser {
                 let table = self.expect_ident()?;
                 Ok(Statement::ShowCreateTable { table })
             }
-            other => Err(format!("Expected TABLES, BUFFER, WAL, ISOLATION, LOCKS, DATABASES, GRANTS, or CREATE, got {:?}", other)),
+            Some(Token::Ident(s)) if s.to_uppercase() == "PROCESSLIST" => Ok(Statement::ShowProcessList),
+            other => Err(format!("Expected TABLES, BUFFER, WAL, ISOLATION, LOCKS, DATABASES, GRANTS, CREATE, or PROCESSLIST, got {:?}", other)),
         }
     }
 
@@ -3074,5 +3473,647 @@ impl Parser {
             if self.peek() == Some(&Token::Comma) { self.advance(); } else { break; }
         }
         Ok(Some(cols))
+    }
+
+    // ── MERGE INTO ──────────────────────────────────────────────
+    fn parse_merge(&mut self) -> Result<Statement, String> {
+        // MERGE INTO target [AS alias] USING source [AS alias] ON cond
+        // WHEN MATCHED THEN UPDATE SET ...
+        // WHEN NOT MATCHED THEN INSERT (cols) VALUES (vals)
+        match self.advance() {
+            Some(Token::Into) => {}
+            other => return Err(format!("Expected INTO after MERGE, got {:?}", other)),
+        }
+        let target = self.expect_ident()?;
+        let target_alias = if self.peek() == Some(&Token::As) {
+            self.advance();
+            Some(self.expect_alias_ident()?)
+        } else if matches!(self.peek(), Some(Token::Ident(_))) {
+            Some(self.expect_ident()?)
+        } else { None };
+
+        match self.advance() {
+            Some(Token::Using) => {}
+            other => return Err(format!("Expected USING, got {:?}", other)),
+        }
+        let source = self.expect_ident()?;
+        let source_alias = if self.peek() == Some(&Token::As) {
+            self.advance();
+            Some(self.expect_alias_ident()?)
+        } else if matches!(self.peek(), Some(Token::Ident(_))) {
+            Some(self.expect_ident()?)
+        } else { None };
+
+        match self.advance() {
+            Some(Token::On) => {}
+            other => return Err(format!("Expected ON, got {:?}", other)),
+        }
+        let on = self.parse_condexpr()?;
+
+        let mut when_matched_update: Option<Vec<(String, ArithExpr)>> = None;
+        let mut when_matched_delete = false;
+        let mut when_not_matched_columns: Option<Vec<String>> = None;
+        let mut when_not_matched_values: Vec<String> = Vec::new();
+
+        // Parse WHEN clauses (any order, up to 2)
+        for _ in 0..4 {
+            if !matches!(self.peek(), Some(Token::When)) {
+                break;
+            }
+            self.advance(); // consume WHEN
+
+            let not_matched = if self.peek() == Some(&Token::Not) {
+                self.advance();
+                true
+            } else { false };
+
+            match self.advance() {
+                Some(Token::Matched) => {}
+                other => return Err(format!("Expected MATCHED, got {:?}", other)),
+            }
+            match self.advance() {
+                Some(Token::Then) => {}
+                other => return Err(format!("Expected THEN, got {:?}", other)),
+            }
+
+            if not_matched {
+                // WHEN NOT MATCHED THEN INSERT
+                match self.advance() {
+                    Some(Token::Insert) => {}
+                    other => return Err(format!("Expected INSERT after WHEN NOT MATCHED THEN, got {:?}", other)),
+                }
+                when_not_matched_columns = if self.peek() == Some(&Token::LParen) {
+                    self.advance();
+                    let mut cols = Vec::new();
+                    loop {
+                        cols.push(self.expect_ident()?);
+                        match self.peek() {
+                            Some(Token::Comma)  => { self.advance(); }
+                            Some(Token::RParen) => { self.advance(); break; }
+                            other => return Err(format!("Expected ',' or ')' in INSERT cols, got {:?}", other)),
+                        }
+                    }
+                    Some(cols)
+                } else { None };
+                match self.advance() {
+                    Some(Token::Values) => {}
+                    other => return Err(format!("Expected VALUES, got {:?}", other)),
+                }
+                match self.advance() {
+                    Some(Token::LParen) => {}
+                    other => return Err(format!("Expected '(' after VALUES, got {:?}", other)),
+                }
+                loop {
+                    let val = self.parse_single_value()?;
+                    when_not_matched_values.push(val);
+                    match self.peek() {
+                        Some(Token::Comma)  => { self.advance(); }
+                        Some(Token::RParen) => { self.advance(); break; }
+                        other => return Err(format!("Expected ',' or ')' in VALUES, got {:?}", other)),
+                    }
+                }
+            } else {
+                // WHEN MATCHED THEN UPDATE SET ... | DELETE
+                match self.peek() {
+                    Some(Token::Update) => {
+                        self.advance();
+                        match self.advance() {
+                            Some(Token::Set) => {}
+                            other => return Err(format!("Expected SET after UPDATE, got {:?}", other)),
+                        }
+                        let mut assignments = Vec::new();
+                        loop {
+                            let col = self.expect_col_ref()?;
+                            match self.advance() {
+                                Some(Token::Eq) => {}
+                                other => return Err(format!("Expected = in assignment, got {:?}", other)),
+                            }
+                            let expr = self.parse_arith_expr()?;
+                            assignments.push((col, expr));
+                            if self.peek() == Some(&Token::Comma) { self.advance(); } else { break; }
+                        }
+                        when_matched_update = Some(assignments);
+                    }
+                    Some(Token::Delete) => {
+                        self.advance();
+                        when_matched_delete = true;
+                    }
+                    other => return Err(format!("Expected UPDATE or DELETE after WHEN MATCHED THEN, got {:?}", other)),
+                }
+            }
+        }
+
+        Ok(Statement::Merge {
+            target, target_alias, source, source_alias, on,
+            when_matched_update, when_matched_delete,
+            when_not_matched_columns, when_not_matched_values,
+        })
+    }
+
+    fn parse_single_value(&mut self) -> Result<String, String> {
+        match self.advance() {
+            Some(Token::StringLit(s)) => Ok(format!("'{}'", s)),
+            Some(Token::NumberLit(n)) => Ok(n.clone()),
+            Some(Token::Null)         => Ok("NULL".to_string()),
+            Some(Token::Ident(s))     => {
+                // could be alias.col
+                let s = s.clone();
+                if self.peek() == Some(&Token::Dot) {
+                    self.advance();
+                    let col = self.expect_ident()?;
+                    Ok(format!("{}.{}", s, col))
+                } else {
+                    Ok(s)
+                }
+            }
+            other => Err(format!("Expected value, got {:?}", other)),
+        }
+    }
+
+    // ── CALL ────────────────────────────────────────────────────
+    fn parse_call(&mut self) -> Result<Statement, String> {
+        let name = self.expect_ident()?;
+        let mut args = Vec::new();
+        if self.peek() == Some(&Token::LParen) {
+            self.advance();
+            if self.peek() != Some(&Token::RParen) {
+                loop {
+                    args.push(self.parse_single_value()?);
+                    if self.peek() == Some(&Token::Comma) { self.advance(); } else { break; }
+                }
+            }
+            match self.advance() {
+                Some(Token::RParen) => {}
+                other => return Err(format!("Expected ')' after CALL args, got {:?}", other)),
+            }
+        }
+        Ok(Statement::CallProcedure { name, args })
+    }
+
+    // ── CREATE PROCEDURE ────────────────────────────────────────
+    fn parse_create_procedure(&mut self) -> Result<Statement, String> {
+        let name = self.expect_ident()?;
+        let mut params = Vec::new();
+        if self.peek() == Some(&Token::LParen) {
+            self.advance();
+            while self.peek() != Some(&Token::RParen) {
+                let dir = if matches!(self.peek(), Some(Token::In)) {
+                    self.advance();
+                    "IN".to_string()
+                } else if let Some(Token::Ident(s)) = self.peek() {
+                    let upper = s.to_uppercase();
+                    if upper == "OUT" || upper == "INOUT" {
+                        let result = upper.clone();
+                        self.advance();
+                        result
+                    } else {
+                        "IN".to_string()
+                    }
+                } else {
+                    "IN".to_string()
+                };
+                let pname = self.expect_ident()?;
+                let ptype = match self.advance() {
+                    Some(Token::Int)      => "INT".to_string(),
+                    Some(Token::Varchar)  => { if self.peek() == Some(&Token::LParen) { self.advance(); while self.peek() != Some(&Token::RParen) && self.peek().is_some() { self.advance(); } self.advance(); } "VARCHAR".to_string() }
+                    Some(Token::Text)     => "TEXT".to_string(),
+                    Some(Token::Float)    => "FLOAT".to_string(),
+                    Some(Token::Date)     => "DATE".to_string(),
+                    Some(Token::Datetime) => "DATETIME".to_string(),
+                    Some(Token::Boolean)  => "BOOLEAN".to_string(),
+                    Some(Token::Ident(s)) => s.clone(),
+                    other => return Err(format!("Expected type in procedure param, got {:?}", other)),
+                };
+                params.push((dir, pname, ptype));
+                if self.peek() == Some(&Token::Comma) { self.advance(); } else { break; }
+            }
+            match self.advance() {
+                Some(Token::RParen) => {}
+                other => return Err(format!("Expected ')' after params, got {:?}", other)),
+            }
+        }
+        let body = self.parse_proc_body()?;
+        Ok(Statement::CreateProcedure { name, params, body })
+    }
+
+    // ── CREATE FUNCTION ─────────────────────────────────────────
+    fn parse_create_function(&mut self) -> Result<Statement, String> {
+        // CREATE FUNCTION name(p1, p2, ...) RETURNS type RETURN <expr>
+        let name = self.expect_ident()?.to_lowercase();
+        let mut params = Vec::new();
+        if self.peek() == Some(&Token::LParen) {
+            self.advance();
+            while self.peek() != Some(&Token::RParen) && self.peek().is_some() {
+                params.push(self.expect_ident()?);
+                if self.peek() == Some(&Token::Comma) { self.advance(); } else { break; }
+            }
+            match self.advance() {
+                Some(Token::RParen) => {}
+                other => return Err(format!("Expected ')' after params, got {:?}", other)),
+            }
+        }
+        // skip optional RETURNS type (e.g. RETURNS VARCHAR(50))
+        if let Some(Token::Ident(s)) = self.peek().cloned().as_ref() {
+            if s.to_uppercase() == "RETURNS" {
+                self.advance(); // RETURNS
+                self.advance(); // type token (INT, VARCHAR, ...)
+                // consume optional (N) — e.g. VARCHAR(50)
+                if self.peek() == Some(&Token::LParen) {
+                    self.advance();
+                    while self.peek() != Some(&Token::RParen) && self.peek().is_some() {
+                        self.advance();
+                    }
+                    if self.peek() == Some(&Token::RParen) { self.advance(); }
+                }
+            }
+        }
+        // RETURN <expr> — parse as ArithExpr and serialize to JSON
+        if let Some(Token::Ident(s)) = self.peek().cloned().as_ref() {
+            if s.to_uppercase() == "RETURN" {
+                self.advance();
+            }
+        }
+        let expr = self.parse_arith_expr()?;
+        let body = serde_json::to_string(&expr).unwrap_or_default();
+        Ok(Statement::CreateFunction { name, params, body })
+    }
+
+    fn parse_drop_function(&mut self) -> Result<Statement, String> {
+        let if_exists = if self.peek() == Some(&Token::If) {
+            self.advance();
+            match self.advance() { Some(Token::Exists) => true, other => return Err(format!("Expected EXISTS, got {:?}", other)) }
+        } else { false };
+        let name = self.expect_ident()?.to_lowercase();
+        Ok(Statement::DropFunction { name, if_exists })
+    }
+
+    // ── CREATE TRIGGER ──────────────────────────────────────────
+    fn parse_create_trigger(&mut self) -> Result<Statement, String> {
+        let name = self.expect_ident()?;
+        let timing = match self.advance() {
+            Some(Token::Before) => TriggerTiming::Before,
+            Some(Token::After)  => TriggerTiming::After,
+            other => return Err(format!("Expected BEFORE/AFTER, got {:?}", other)),
+        };
+        let event = match self.advance() {
+            Some(Token::Insert) => TriggerEvent::Insert,
+            Some(Token::Update) => TriggerEvent::Update,
+            Some(Token::Delete) => TriggerEvent::Delete,
+            other => return Err(format!("Expected INSERT/UPDATE/DELETE, got {:?}", other)),
+        };
+        match self.advance() {
+            Some(Token::On) => {}
+            other => return Err(format!("Expected ON, got {:?}", other)),
+        }
+        let table = self.expect_ident()?;
+        // FOR EACH ROW
+        if matches!(self.peek(), Some(Token::For)) { self.advance(); }
+        if matches!(self.peek(), Some(Token::Each)) { self.advance(); }
+        if matches!(self.peek(), Some(Token::Row))  { self.advance(); }
+        let body = self.parse_proc_body()?;
+        Ok(Statement::CreateTrigger { name, timing, event, table, body })
+    }
+
+    /// Parse BEGIN ... END block or a single statement as a procedure/trigger body
+    fn parse_proc_body(&mut self) -> Result<Vec<Statement>, String> {
+        match self.peek() {
+            Some(Token::Ident(s)) if s.to_uppercase() == "BEGIN" => {
+                self.advance();
+                let stmts = self.parse_proc_stmts_until_end()?;
+                Ok(stmts)
+            }
+            _ => {
+                let s = self.parse_proc_stmt()?;
+                Ok(vec![s])
+            }
+        }
+    }
+
+    /// Parse statements until END (consumes END token)
+    fn parse_proc_stmts_until_end(&mut self) -> Result<Vec<Statement>, String> {
+        let mut stmts = Vec::new();
+        loop {
+            // skip bare semicolons
+            while self.peek() == Some(&Token::Semicolon) { self.advance(); }
+            match self.peek() {
+                Some(Token::End) => { self.advance(); break; }
+                None => break,
+                _ => {
+                    let s = self.parse_proc_stmt()?;
+                    stmts.push(s);
+                    if self.peek() == Some(&Token::Semicolon) { self.advance(); }
+                }
+            }
+        }
+        Ok(stmts)
+    }
+
+    /// Parse one statement inside a procedure/trigger body (handles control flow)
+    fn parse_proc_stmt(&mut self) -> Result<Statement, String> {
+        // check for label: `label_name:`
+        let label = self.try_parse_label();
+
+        match self.peek() {
+            Some(Token::Declare) => {
+                self.advance();
+                self.parse_proc_declare()
+            }
+            Some(Token::If) => {
+                self.advance();
+                self.parse_proc_if()
+            }
+            Some(Token::While) => {
+                self.advance();
+                self.parse_proc_while(label)
+            }
+            Some(Token::Loop) => {
+                self.advance();
+                self.parse_proc_loop(label)
+            }
+            Some(Token::Repeat) => {
+                self.advance();
+                self.parse_proc_repeat(label)
+            }
+            Some(Token::Leave) => {
+                self.advance();
+                let lbl = self.try_expect_ident();
+                Ok(Statement::ProcLeave { label: lbl })
+            }
+            Some(Token::Iterate) => {
+                self.advance();
+                let lbl = self.try_expect_ident();
+                Ok(Statement::ProcIterate { label: lbl })
+            }
+            Some(Token::Set) => {
+                self.advance();
+                // SET ISOLATION LEVEL → fall to regular parse_set
+                if matches!(self.peek(), Some(Token::Isolation)) {
+                    self.parse_set()
+                } else {
+                    self.parse_proc_set_var()
+                }
+            }
+            _ => self.parse(),
+        }
+    }
+
+    /// If next tokens are `Ident` followed by WHILE/LOOP/REPEAT, consume the ident as a label.
+    /// (Lexer skips ':', so `label: WHILE` appears as Ident WHILE in token stream.)
+    fn try_parse_label(&mut self) -> Option<String> {
+        if let Some(Token::Ident(_)) = self.tokens.get(self.pos) {
+            let next = self.tokens.get(self.pos + 1);
+            if matches!(next, Some(Token::While) | Some(Token::Loop) | Some(Token::Repeat)) {
+                if let Some(Token::Ident(s)) = self.advance() {
+                    return Some(s.to_string());
+                }
+            }
+        }
+        None
+    }
+
+    /// Returns Some(ident) if next token is an identifier, None otherwise (no consume on None)
+    fn try_expect_ident(&mut self) -> Option<String> {
+        if let Some(Token::Ident(_)) = self.peek() {
+            if let Some(Token::Ident(s)) = self.advance() {
+                return Some(s.to_string());
+            }
+        }
+        None
+    }
+
+    fn parse_proc_declare(&mut self) -> Result<Statement, String> {
+        let name = self.expect_ident()?;
+        // consume type (one or two tokens)
+        let typ = match self.advance() {
+            Some(Token::Int)      => "INT".to_string(),
+            Some(Token::BigInt)   => "BIGINT".to_string(),
+            Some(Token::TinyInt)  => "TINYINT".to_string(),
+            Some(Token::SmallInt) => "SMALLINT".to_string(),
+            Some(Token::Varchar)  => {
+                if self.peek() == Some(&Token::LParen) {
+                    self.advance();
+                    while self.peek() != Some(&Token::RParen) && self.peek().is_some() { self.advance(); }
+                    if self.peek() == Some(&Token::RParen) { self.advance(); }
+                }
+                "VARCHAR".to_string()
+            }
+            Some(Token::Text)     => "TEXT".to_string(),
+            Some(Token::Float)    => "FLOAT".to_string(),
+            Some(Token::Double)   => "DOUBLE".to_string(),
+            Some(Token::Decimal)  => {
+                if self.peek() == Some(&Token::LParen) {
+                    self.advance();
+                    while self.peek() != Some(&Token::RParen) && self.peek().is_some() { self.advance(); }
+                    if self.peek() == Some(&Token::RParen) { self.advance(); }
+                }
+                "DECIMAL".to_string()
+            }
+            Some(Token::Boolean)  => "BOOLEAN".to_string(),
+            Some(Token::Date)     => "DATE".to_string(),
+            Some(Token::Datetime) => "DATETIME".to_string(),
+            Some(Token::Ident(s)) => s.to_string(),
+            other => return Err(format!("Expected type in DECLARE, got {:?}", other)),
+        };
+        // optional DEFAULT value (stored without quotes so proc_vars holds raw value)
+        let default = if let Some(Token::Default) = self.peek() {
+            self.advance();
+            match self.advance() {
+                Some(Token::StringLit(s)) => Some(s.clone()),
+                Some(Token::NumberLit(n)) => Some(n.clone()),
+                Some(Token::Null)         => Some("NULL".to_string()),
+                Some(Token::Ident(s))     => Some(s.clone()),
+                other => return Err(format!("Expected default value in DECLARE, got {:?}", other)),
+            }
+        } else {
+            None
+        };
+        Ok(Statement::ProcDeclare { name, typ, default })
+    }
+
+    fn parse_proc_set_var(&mut self) -> Result<Statement, String> {
+        let name = self.expect_ident()?;
+        match self.advance() {
+            Some(Token::Eq) => {}
+            other => return Err(format!("Expected '=' in SET, got {:?}", other)),
+        }
+        let expr = self.parse_arith_expr()?;
+        Ok(Statement::ProcSet { name, expr })
+    }
+
+    fn parse_proc_if(&mut self) -> Result<Statement, String> {
+        // IF <cond> THEN <body> [ELSEIF <cond> THEN <body>]* [ELSE <body>] END IF
+        let condition = self.parse_condexpr()?;
+        match self.advance() {
+            Some(Token::Then) => {}
+            other => return Err(format!("Expected THEN after IF condition, got {:?}", other)),
+        }
+        let then_body = self.parse_proc_stmts_until_elseif_or_else_or_end()?;
+
+        let mut elseif_branches = Vec::new();
+        let mut else_body = None;
+
+        loop {
+            match self.peek() {
+                Some(Token::ElseIfKw) => {
+                    self.advance();
+                    let cond = self.parse_condexpr()?;
+                    match self.advance() {
+                        Some(Token::Then) => {}
+                        other => return Err(format!("Expected THEN after ELSEIF, got {:?}", other)),
+                    }
+                    let body = self.parse_proc_stmts_until_elseif_or_else_or_end()?;
+                    elseif_branches.push((cond, body));
+                }
+                Some(Token::Else) => {
+                    self.advance();
+                    // parse until END, then consume END IF
+                    let body = self.parse_proc_stmts_until_elseif_or_else_or_end()?;
+                    else_body = Some(body);
+                    // consume END IF
+                    if let Some(Token::End) = self.peek() { self.advance(); }
+                    if let Some(Token::If) = self.peek() { self.advance(); }
+                    break;
+                }
+                Some(Token::End) => {
+                    self.advance(); // consume END
+                    if let Some(Token::If) = self.peek() { self.advance(); }
+                    break;
+                }
+                _ => break,
+            }
+        }
+
+        Ok(Statement::ProcIf { condition, then_body, elseif_branches, else_body })
+    }
+
+    /// Parse statements until ELSEIF / ELSE / END (does NOT consume that token)
+    fn parse_proc_stmts_until_elseif_or_else_or_end(&mut self) -> Result<Vec<Statement>, String> {
+        let mut stmts = Vec::new();
+        loop {
+            while self.peek() == Some(&Token::Semicolon) { self.advance(); }
+            match self.peek() {
+                Some(Token::ElseIfKw) | Some(Token::Else) | Some(Token::End) | None => break,
+                _ => {
+                    let s = self.parse_proc_stmt()?;
+                    stmts.push(s);
+                    if self.peek() == Some(&Token::Semicolon) { self.advance(); }
+                }
+            }
+        }
+        Ok(stmts)
+    }
+
+    fn parse_proc_while(&mut self, label: Option<String>) -> Result<Statement, String> {
+        // WHILE <cond> DO <body> END WHILE
+        let condition = self.parse_condexpr()?;
+        match self.advance() {
+            Some(Token::Do) => {}
+            other => return Err(format!("Expected DO after WHILE condition, got {:?}", other)),
+        }
+        let body = self.parse_proc_stmts_until_end_while()?;
+        Ok(Statement::ProcWhile { label, condition, body })
+    }
+
+    /// Parse statements until END WHILE (consumes both tokens)
+    fn parse_proc_stmts_until_end_while(&mut self) -> Result<Vec<Statement>, String> {
+        let mut stmts = Vec::new();
+        loop {
+            while self.peek() == Some(&Token::Semicolon) { self.advance(); }
+            match self.peek() {
+                Some(Token::End) => {
+                    self.advance(); // consume END
+                    if let Some(Token::While) = self.peek() { self.advance(); } // consume optional WHILE
+                    break;
+                }
+                None => break,
+                _ => {
+                    let s = self.parse_proc_stmt()?;
+                    stmts.push(s);
+                    if self.peek() == Some(&Token::Semicolon) { self.advance(); }
+                }
+            }
+        }
+        Ok(stmts)
+    }
+
+    fn parse_proc_loop(&mut self, label: Option<String>) -> Result<Statement, String> {
+        // LOOP <body> END LOOP
+        let body = self.parse_proc_stmts_until_end_loop()?;
+        Ok(Statement::ProcLoop { label, body })
+    }
+
+    fn parse_proc_stmts_until_end_loop(&mut self) -> Result<Vec<Statement>, String> {
+        let mut stmts = Vec::new();
+        loop {
+            while self.peek() == Some(&Token::Semicolon) { self.advance(); }
+            match self.peek() {
+                Some(Token::End) => {
+                    self.advance();
+                    if let Some(Token::Loop) = self.peek() { self.advance(); }
+                    break;
+                }
+                None => break,
+                _ => {
+                    let s = self.parse_proc_stmt()?;
+                    stmts.push(s);
+                    if self.peek() == Some(&Token::Semicolon) { self.advance(); }
+                }
+            }
+        }
+        Ok(stmts)
+    }
+
+    fn parse_proc_repeat(&mut self, label: Option<String>) -> Result<Statement, String> {
+        // REPEAT <body> UNTIL <cond> END REPEAT
+        let body = self.parse_proc_stmts_until_until()?;
+        let until = self.parse_condexpr()?;
+        // END REPEAT
+        if let Some(Token::End) = self.peek() { self.advance(); }
+        if let Some(Token::Repeat) = self.peek() { self.advance(); }
+        Ok(Statement::ProcRepeat { label, body, until })
+    }
+
+    fn parse_proc_stmts_until_until(&mut self) -> Result<Vec<Statement>, String> {
+        let mut stmts = Vec::new();
+        loop {
+            while self.peek() == Some(&Token::Semicolon) { self.advance(); }
+            match self.peek() {
+                Some(Token::Until) => { self.advance(); break; }
+                None => break,
+                _ => {
+                    let s = self.parse_proc_stmt()?;
+                    stmts.push(s);
+                    if self.peek() == Some(&Token::Semicolon) { self.advance(); }
+                }
+            }
+        }
+        Ok(stmts)
+    }
+
+    // ── DROP TRIGGER / PROCEDURE ────────────────────────────────
+    fn parse_drop_trigger(&mut self) -> Result<Statement, String> {
+        let if_exists = if matches!(self.peek(), Some(Token::If)) {
+            self.advance();
+            match self.advance() {
+                Some(Token::Exists) => {}
+                other => return Err(format!("Expected EXISTS after IF, got {:?}", other)),
+            }
+            true
+        } else { false };
+        let name = self.expect_ident()?;
+        Ok(Statement::DropTrigger { name, if_exists })
+    }
+
+    fn parse_drop_procedure(&mut self) -> Result<Statement, String> {
+        let if_exists = if matches!(self.peek(), Some(Token::If)) {
+            self.advance();
+            match self.advance() {
+                Some(Token::Exists) => {}
+                other => return Err(format!("Expected EXISTS, got {:?}", other)),
+            }
+            true
+        } else { false };
+        let name = self.expect_ident()?;
+        Ok(Statement::DropProcedure { name, if_exists })
     }
 }

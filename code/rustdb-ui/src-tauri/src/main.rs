@@ -592,6 +592,96 @@ fn clear_server_log(conn_id: String, state: State<AppState>) {
     }
 }
 
+// ─── CSV 내보내기 ─────────────────────────────────────────────
+#[tauri::command]
+fn export_csv(query: String, file_path: String, state: State<AppState>) -> Result<String, String> {
+    let mut exec = state.db.lock().unwrap();
+    let result = {
+        let mut p = rustdb_core::parser::parser::Parser::new(&query);
+        match p.parse() {
+            Ok(stmt) => exec.execute(stmt),
+            Err(e) => return Err(format!("Parse Error: {}", e)),
+        }
+    }?;
+
+    let qr = parse_output(&result, 0.0);
+    if qr.columns.is_empty() {
+        return Err("Query returned no columns.".to_string());
+    }
+
+    let mut csv = String::new();
+    csv.push_str(&qr.columns.iter().map(|c| csv_escape(c)).collect::<Vec<_>>().join(","));
+    csv.push('\n');
+    for row in &qr.rows {
+        csv.push_str(&row.iter().map(|v| csv_escape(v)).collect::<Vec<_>>().join(","));
+        csv.push('\n');
+    }
+
+    std::fs::write(&file_path, &csv).map_err(|e| e.to_string())?;
+    Ok(format!("Exported {} rows to '{}'.", qr.rows.len(), file_path))
+}
+
+fn csv_escape(s: &str) -> String {
+    if s.contains(',') || s.contains('"') || s.contains('\n') {
+        format!("\"{}\"", s.replace('"', "\"\""))
+    } else {
+        s.to_string()
+    }
+}
+
+// ─── CSV 가져오기 ─────────────────────────────────────────────
+#[tauri::command]
+fn import_csv(table: String, file_path: String, state: State<AppState>) -> Result<String, String> {
+    let content = std::fs::read_to_string(&file_path).map_err(|e| e.to_string())?;
+    let mut lines = content.lines();
+
+    let header = match lines.next() {
+        Some(h) => h,
+        None => return Err("CSV file is empty.".to_string()),
+    };
+    let cols: Vec<&str> = header.split(',').map(|c| c.trim().trim_matches('"')).collect();
+    let col_list = cols.iter().map(|c| format!("`{}`", c)).collect::<Vec<_>>().join(", ");
+
+    let mut count = 0usize;
+    let mut errors = 0usize;
+    let mut exec = state.db.lock().unwrap();
+
+    for line in lines {
+        if line.trim().is_empty() { continue; }
+        let vals: Vec<String> = csv_parse_row(line);
+        let val_list = vals.iter().map(|v| format!("'{}'", v.replace('\'', "''"))).collect::<Vec<_>>().join(", ");
+        let sql = format!("INSERT INTO {} ({}) VALUES ({});", table, col_list, val_list);
+        let mut p = rustdb_core::parser::parser::Parser::new(&sql);
+        match p.parse().and_then(|stmt| exec.execute(stmt).map_err(|e| e)) {
+            Ok(_) => count += 1,
+            Err(_) => errors += 1,
+        }
+    }
+    Ok(format!("Imported {} rows ({} errors) from '{}'.", count, errors, file_path))
+}
+
+fn csv_parse_row(line: &str) -> Vec<String> {
+    let mut fields = Vec::new();
+    let mut current = String::new();
+    let mut in_quotes = false;
+    let chars: Vec<char> = line.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        match chars[i] {
+            '"' if !in_quotes => { in_quotes = true; }
+            '"' if in_quotes => {
+                if i + 1 < chars.len() && chars[i+1] == '"' { current.push('"'); i += 1; }
+                else { in_quotes = false; }
+            }
+            ',' if !in_quotes => { fields.push(current.clone()); current.clear(); }
+            c => current.push(c),
+        }
+        i += 1;
+    }
+    fields.push(current);
+    fields
+}
+
 // ─── 엔트리포인트 ─────────────────────────────────────────────
 fn main() {
     let exec = Executor::new();
@@ -621,6 +711,8 @@ fn main() {
             stop_server,
             get_server_status,
             clear_server_log,
+            export_csv,
+            import_csv,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -4,6 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 import Editor from "@monaco-editor/react";
 import type * as Monaco from "monaco-editor";
 import "./App.css";
+import { format as sqlFormat } from "sql-formatter";
 
 // ─── 타입 ─────────────────────────────────────────────────────
 interface HistoryEntry {
@@ -131,6 +132,12 @@ function App() {
   const [tabResults, setTabResults] = useState<Record<string, QueryResult[]>>({});
   const [tabResultPages, setTabResultPages] = useState<Record<string, Record<number, number>>>({});
   const [tabColWidths, setTabColWidths] = useState<Record<string, Record<number, number[]>>>({});
+  const [tabSortState, setTabSortState] = useState<Record<string, Record<number, { col: number; dir: 'asc' | 'desc' } | null>>>({});
+  const [tabResultSearch, setTabResultSearch] = useState<Record<string, string>>({});
+  const [sidebarSearch, setSidebarSearch] = useState("");
+  const [bookmarks, setBookmarks] = useState<{ id: string; name: string; sql: string }[]>(() => {
+    try { return JSON.parse(localStorage.getItem("rustdb_bookmarks") ?? "[]"); } catch { return []; }
+  });
   const [databases, setDatabases] = useState<string[]>(["rustdb"]);
   const [expandedTables, setExpandedTables] = useState<Set<string>>(new Set());
   const [tableColumns, setTableColumns] = useState<Record<string, ColumnDetail[]>>({});
@@ -259,6 +266,18 @@ function App() {
     setDlgPass("");
   };
 
+  const saveBookmarkList = (bks: { id: string; name: string; sql: string }[]) => {
+    localStorage.setItem("rustdb_bookmarks", JSON.stringify(bks));
+    setBookmarks(bks);
+  };
+  const addBookmark = () => {
+    const sql = queryRef.current.trim();
+    if (!sql) return;
+    const name = sql.split("\n")[0].trim().slice(0, 40) || "Bookmark";
+    saveBookmarkList([...bookmarks, { id: Date.now().toString(), name, sql }]);
+  };
+  const removeBookmark = (id: string) => saveBookmarkList(bookmarks.filter(b => b.id !== id));
+
   const handleAutoLogin = async (conn: Connection) => {
     const ok = await invoke<boolean>("authenticate", { user: conn.user, password: conn.password, dataDir: conn.dataDir });
     if (ok) doLogin(conn);
@@ -345,6 +364,8 @@ function App() {
   const results = tabResults[activeTabId] ?? [];
   const resultPages = tabResultPages[activeTabId] ?? {};
   const colWidths = tabColWidths[activeTabId] ?? {};
+  const sortState = tabSortState[activeTabId] ?? {};
+  const resultSearch = tabResultSearch[activeTabId] ?? "";
 
   // schemaRef 업데이트 (Monaco 자동완성용)
   useEffect(() => {
@@ -364,6 +385,17 @@ function App() {
     window.addEventListener("click", h);
     return () => window.removeEventListener("click", h);
   }, []);
+
+  // ─── 키보드 단축키 ──────────────────────────────────────────
+  useEffect(() => {
+    if (!loggedIn) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.ctrlKey && !e.shiftKey && e.key === "t") { e.preventDefault(); addTab(); }
+      if (e.ctrlKey && !e.shiftKey && e.key === "w") { e.preventDefault(); closeTab(activeTabId); }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [loggedIn, activeTabId, tabs]);
 
   // ─── 결과창 드래그 ──────────────────────────────────────────
   useEffect(() => {
@@ -491,6 +523,8 @@ function App() {
     setTabResults(p => ({ ...p, [activeTabId]: [] }));
     setTabResultPages(p => ({ ...p, [activeTabId]: {} }));
     setTabColWidths(p => ({ ...p, [activeTabId]: {} }));
+    setTabSortState(p => ({ ...p, [activeTabId]: {} }));
+    setTabResultSearch(p => ({ ...p, [activeTabId]: "" }));
     setResultTab("results");
     setIsRunning(true);
     const startTs = Date.now();
@@ -590,8 +624,8 @@ function App() {
   };
 
   // 탭 닫기
-  const closeTab = (id: string, e: React.MouseEvent) => {
-    e.stopPropagation();
+  const closeTab = (id: string, e?: React.MouseEvent) => {
+    e?.stopPropagation();
     if (tabs.length === 1) return; // 마지막 탭은 닫지 않음
     const idx = tabs.findIndex(t => t.id === id);
     const next = tabs.filter(t => t.id !== id);
@@ -750,7 +784,8 @@ function App() {
     {
       label: "파일",
       items: [
-        { label: "새 쿼리", shortcut: "Ctrl+N", action: () => { addTab(); setActiveView("editor"); } },
+        { label: "새 탭", shortcut: "Ctrl+T", action: () => { addTab(); setActiveView("editor"); } },
+        { label: "탭 닫기", shortcut: "Ctrl+W", action: () => closeTab(activeTabId) },
         { label: "", divider: true },
         { label: "저장", shortcut: "Ctrl+S", action: () => {
           const content = queryRef.current;
@@ -776,6 +811,14 @@ function App() {
         { label: "", divider: true },
         { label: "모두 선택", shortcut: "Ctrl+A", action: () => editorRef.current?.trigger("menu", "editor.action.selectAll", null) },
         { label: "찾기", shortcut: "Ctrl+F", action: () => editorRef.current?.trigger("menu", "actions.find", null) },
+        { label: "", divider: true },
+        { label: "SQL 포매터", shortcut: "Ctrl+Shift+F", action: () => {
+          try {
+            const fmt = sqlFormat(editorRef.current?.getValue() ?? "", { language: 'sql', tabWidth: 2, keywordCase: 'upper' });
+            editorRef.current?.setValue(fmt);
+          } catch {}
+        }},
+        { label: "북마크 추가", shortcut: "★", action: addBookmark },
       ],
     },
     {
@@ -794,7 +837,8 @@ function App() {
       items: [
         { label: "쿼리 실행", shortcut: "F5", action: () => { setActiveView("editor"); runQuery(); } },
         { label: "", divider: true },
-        { label: "새 쿼리 탭", shortcut: "Ctrl+N", action: () => { addTab(); setActiveView("editor"); } },
+        { label: "새 쿼리 탭", shortcut: "Ctrl+T", action: () => { addTab(); setActiveView("editor"); } },
+        { label: "탭 닫기", shortcut: "Ctrl+W", action: () => closeTab(activeTabId) },
       ],
     },
     {
@@ -1213,6 +1257,12 @@ function App() {
         <>
           <div className="sidebar" style={{ width: `${sidebarWidth}px` }}>
             <div className="sidebar-title">SCHEMAS</div>
+            <input
+              className="sidebar-search"
+              placeholder="테이블 검색..."
+              value={sidebarSearch}
+              onChange={e => setSidebarSearch(e.target.value)}
+            />
 
             {/* ── DATABASE NODES (MySQL Workbench style) ── */}
             <div className="sidebar-db-node">
@@ -1274,7 +1324,7 @@ function App() {
                           </div>
                           {tOpen && (data.tables.length === 0 ? (
                             <div className="sidebar-empty sidebar-empty-nested">No tables yet</div>
-                          ) : data.tables.map(t => (
+                          ) : data.tables.filter(t => !sidebarSearch || t.toLowerCase().includes(sidebarSearch.toLowerCase())).map(t => (
                             <div key={t}>
                               <div
                                 className={`sidebar-item sidebar-item-nested ${expandedTables.has(t) ? "active" : ""}`}
@@ -1398,6 +1448,22 @@ function App() {
               })}
             </div>
 
+            {bookmarks.length > 0 && (
+              <div className="sidebar-bookmarks">
+                <div className="sidebar-group-header">
+                  <span className="sidebar-group-arrow">▼</span>
+                  BOOKMARKS
+                </div>
+                {bookmarks.map(bk => (
+                  <div key={bk.id} className="sidebar-bookmark-item">
+                    <span className="sidebar-bookmark-star">★</span>
+                    <span className="sidebar-bookmark-name" onClick={() => setEditorQuery(bk.sql)} title={bk.sql}>{bk.name}</span>
+                    <span className="sidebar-bookmark-del" onClick={() => removeBookmark(bk.id)}>×</span>
+                  </div>
+                ))}
+              </div>
+            )}
+
             <div className="sidebar-bottom">
               <div className="sidebar-group-header">
                 <span className="sidebar-group-arrow">▼</span>
@@ -1467,6 +1533,7 @@ function App() {
               <div onClick={() => runCtxQuery(`SELECT * FROM ${tableCtxMenu.table};`)}>Select Rows</div>
               <div onClick={() => runCtxQuery(`SELECT * FROM ${tableCtxMenu.table} LIMIT 100;`)}>Select Rows (LIMIT 100)</div>
               <div onClick={() => runCtxQuery(`DESCRIBE ${tableCtxMenu.table};`)}>Describe Table</div>
+              <div onClick={() => runCtxQuery(`SHOW CREATE TABLE ${tableCtxMenu.table};`)}>Show Create Table</div>
               <div className="ctx-divider" />
               <div onClick={() => handleCopyTableName(tableCtxMenu.table)}>Copy Table Name</div>
               <div onClick={() => {
@@ -1524,6 +1591,7 @@ function App() {
                 </div>
               </div>
               <div className="tab-bar-right">
+                <button className="bookmark-btn" onClick={addBookmark} title="현재 쿼리 북마크 추가 (★)">★</button>
                 <button className="run-btn" onClick={runQuery} disabled={isRunning}>
                   {isRunning ? "⏳" : "▶ Run"}
                 </button>
@@ -1682,6 +1750,12 @@ function App() {
                 onMount={(editor, monaco) => {
                   editorRef.current = editor;
                   editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.Enter, runQuery);
+                  editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyMod.Shift | monaco.KeyCode.KeyF, () => {
+                    try {
+                      const fmt = sqlFormat(editor.getValue(), { language: 'sql', tabWidth: 2, keywordCase: 'upper' });
+                      editor.setValue(fmt);
+                    } catch {}
+                  });
                 }}
               />
             </div>
@@ -1758,23 +1832,85 @@ function App() {
                 onContextMenu={e => { e.preventDefault(); setCtxMenu({ x: e.clientX, y: e.clientY }); }}
                 onClick={e => { if (ctxMenu) { e.stopPropagation(); setCtxMenu(null); } }}
               >
+                {results.length > 0 && (
+                  <div className="result-search-bar">
+                    <input
+                      className="result-search-input"
+                      placeholder="결과 내 검색..."
+                      value={resultSearch}
+                      onChange={e => setTabResultSearch(p => ({ ...p, [activeTabId]: e.target.value }))}
+                    />
+                    {resultSearch && (
+                      <span className="result-search-clear" onClick={() => setTabResultSearch(p => ({ ...p, [activeTabId]: "" }))}>×</span>
+                    )}
+                  </div>
+                )}
                 {results.length === 0 ? (
                   <div className="result-empty">Ctrl+Enter 또는 ▶ Run 으로 쿼리를 실행하세요</div>
                 ) : results.map((r, i) => (
                   <div key={i} className="result-block">
                     {!r.success ? (
                       <div className="result-error">❌ {r.message}</div>
-                    ) : r.columns.length === 0 ? (
-                      <div className="result-msg">✅ {r.message} · {r.elapsed.toFixed(3)}s</div>
-                    ) : (() => {
+                    ) : r.columns.length === 0 ? (() => {
+                      // EXPLAIN 트리 시각화
+                      if (r.message.includes("QUERY PLAN")) {
+                        const planLines = r.message.split("\n")
+                          .filter(l => l.startsWith("|") && !l.includes("QUERY PLAN"))
+                          .map(l => l.replace(/^\|\s*/, "").replace(/\s*\|$/, "").trim())
+                          .filter(Boolean);
+                        return (
+                          <div className="explain-tree">
+                            <div className="explain-tree-header">
+                              <span className="explain-tree-icon">⟳</span> QUERY PLAN · {r.elapsed.toFixed(3)}s
+                            </div>
+                            {planLines.map((line, li) => {
+                              const [label, ...rest] = line.split(":");
+                              const value = rest.join(":").trim();
+                              return (
+                                <div key={li} className="explain-tree-row">
+                                  <span className="explain-tree-label">{label.trim()}</span>
+                                  {value && <span className="explain-tree-value">{value}</span>}
+                                </div>
+                              );
+                            })}
+                          </div>
+                        );
+                      }
+                      return <div className="result-msg">✅ {r.message} · {r.elapsed.toFixed(3)}s</div>;
+                    })() : (() => {
+                        const sortInfo = sortState[i] ?? null;
+                        const low = resultSearch.toLowerCase();
+                        let rows = resultSearch
+                          ? r.rows.filter(row => row.some(c => c.toLowerCase().includes(low)))
+                          : r.rows;
+                        if (sortInfo) {
+                          rows = [...rows].sort((a, b) => {
+                            const av = a[sortInfo.col] ?? "";
+                            const bv = b[sortInfo.col] ?? "";
+                            const an = parseFloat(av), bn = parseFloat(bv);
+                            const cmp = !isNaN(an) && !isNaN(bn) ? an - bn : av.localeCompare(bv);
+                            return sortInfo.dir === 'asc' ? cmp : -cmp;
+                          });
+                        }
                         const page = resultPages[i] ?? 0;
-                        const total = r.rows.length;
+                        const total = rows.length;
                         const pageCount = Math.ceil(total / PAGE_SIZE);
-                        const pageRows = r.rows.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
+                        const pageRows = rows.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
+                        const toggleSort = (ci: number) => {
+                          setTabSortState(prev => {
+                            const tab = { ...(prev[activeTabId] ?? {}) };
+                            const cur = tab[i];
+                            if (!cur || cur.col !== ci) tab[i] = { col: ci, dir: 'asc' };
+                            else if (cur.dir === 'asc') tab[i] = { col: ci, dir: 'desc' };
+                            else tab[i] = null;
+                            return { ...prev, [activeTabId]: tab };
+                          });
+                          setTabResultPages(p => ({ ...p, [activeTabId]: { ...(p[activeTabId] ?? {}), [i]: 0 } }));
+                        };
                         return (
                           <>
                             <div className="result-info">
-                              {total} row(s) · {r.elapsed.toFixed(3)}s
+                              {resultSearch ? `${total} / ${r.rows.length}` : total} row(s) · {r.elapsed.toFixed(3)}s
                               <button
                                 className="csv-btn"
                                 title="CSV로 내보내기"
@@ -1805,12 +1941,19 @@ function App() {
                               )}
                             </div>
                             <table className="result-table" style={{ tableLayout: colWidths[i] ? 'fixed' : undefined }}>
-                              <thead><tr>{r.columns.map((c, ci) => (
-                                <th key={c} style={{ width: colWidths[i]?.[ci], position: 'relative', userSelect: 'none' }}>
-                                  {c}
+                              <thead><tr>
+                                <th className="result-rownum">#</th>
+                                {r.columns.map((c, ci) => (
+                                <th key={c} style={{ width: colWidths[i]?.[ci], position: 'relative', userSelect: 'none', cursor: 'pointer' }}
+                                    onClick={() => toggleSort(ci)}>
+                                  <span className="result-th-label">{c}</span>
+                                  <span className="result-sort-icon">
+                                    {sortInfo?.col === ci ? (sortInfo.dir === 'asc' ? ' ▲' : ' ▼') : ' ⇅'}
+                                  </span>
                                   <div
                                     style={{ position: 'absolute', right: 0, top: 0, bottom: 0, width: 4, cursor: 'col-resize' }}
                                     onMouseDown={e => {
+                                      e.stopPropagation();
                                       e.preventDefault();
                                       const thEl = e.currentTarget.parentElement as HTMLTableCellElement;
                                       const startX = e.clientX;
@@ -1837,9 +1980,12 @@ function App() {
                                 </th>
                               ))}</tr></thead>
                               <tbody>{pageRows.map((row, ri) => (
-                                <tr key={ri}>{row.map((cell, ci) => (
-                                  <td key={ci} style={colWidths[i] ? { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } : undefined}>{cell}</td>
-                                ))}</tr>
+                                <tr key={ri}>
+                                  <td className="result-rownum">{page * PAGE_SIZE + ri + 1}</td>
+                                  {row.map((cell, ci) => (
+                                    <td key={ci} style={colWidths[i] ? { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } : undefined}>{cell}</td>
+                                  ))}
+                                </tr>
                               ))}</tbody>
                             </table>
                           </>
