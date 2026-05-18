@@ -46,7 +46,7 @@ cd rustdb-ui && npm run tauri dev
 
 ## 테스트 쿼리
 
-`test/test_full.sql` — **단일 DB(`db1`), 전 기능 커버, 의도된 오류 2개** (ENUM/SET 유효성 위반)
+`test/test_full.sql`
 
 ```bash
 # code/ 디렉터리에서 실행
