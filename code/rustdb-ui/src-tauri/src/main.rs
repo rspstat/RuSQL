@@ -158,13 +158,14 @@ fn handle_client(stream: TcpStream, shared: Arc<RwLock<SharedDatabase>>, log: Ar
 }
 
 // ─── 주석 인식 쿼리 분리 ─────────────────────────────────────
-// `;` 기준으로 분리하되, --, #, /* */ 주석과 '' 문자열 안의 `;` 는 무시.
-// 주석만 남은 조각(실제 토큰 없음)은 빈 문자열로 반환 → 이후 필터링.
+// BEGIN...END 블록 안의 `;` 는 분리하지 않음 (저장 프로시저/트리거 지원).
+// BEGIN; / BEGIN WORK; 는 트랜잭션 마커로 depth 증가 안 함.
 fn split_queries_smart(input: &str) -> Vec<String> {
     let chars: Vec<char> = input.chars().collect();
     let len = chars.len();
     let mut queries: Vec<String> = Vec::new();
     let mut current = String::new();
+    let mut begin_depth: i32 = 0;
     let mut i = 0;
 
     while i < len {
@@ -187,7 +188,7 @@ fn split_queries_smart(input: &str) -> Vec<String> {
             }
             continue;
         }
-        // 문자열 리터럴 (안의 ; 는 구분자가 아님)
+        // 문자열 리터럴
         if chars[i] == '\'' {
             current.push(chars[i]); i += 1;
             while i < len {
@@ -197,11 +198,53 @@ fn split_queries_smart(input: &str) -> Vec<String> {
             }
             continue;
         }
-        // 세미콜론 → 쿼리 분리
+        // 키워드 추출 (BEGIN / END depth 추적)
+        if chars[i].is_alphabetic() || chars[i] == '_' {
+            let start = i;
+            while i < len && (chars[i].is_alphanumeric() || chars[i] == '_') { i += 1; }
+            let word: String = chars[start..i].iter().collect();
+            match word.to_uppercase().as_str() {
+                "BEGIN" => {
+                    // BEGIN; or BEGIN WORK → 트랜잭션, depth 증가 안 함
+                    let mut j = i;
+                    while j < len && chars[j].is_whitespace() { j += 1; }
+                    let is_transaction = if j >= len || chars[j] == ';' {
+                        true
+                    } else if chars[j].is_alphabetic() {
+                        let s2 = j;
+                        let mut k = j;
+                        while k < len && (chars[k].is_alphanumeric() || chars[k] == '_') { k += 1; }
+                        let nw: String = chars[s2..k].iter().collect();
+                        nw.to_uppercase() == "WORK"
+                    } else { false };
+                    if !is_transaction { begin_depth += 1; }
+                }
+                "END" => {
+                    let mut j = i;
+                    while j < len && chars[j].is_whitespace() { j += 1; }
+                    let next_is_sub = if j < len && (chars[j].is_alphabetic() || chars[j] == '_') {
+                        let s2 = j;
+                        let mut k = j;
+                        while k < len && (chars[k].is_alphanumeric() || chars[k] == '_') { k += 1; }
+                        let nw: String = chars[s2..k].iter().collect();
+                        matches!(nw.to_uppercase().as_str(), "IF" | "WHILE" | "LOOP" | "REPEAT" | "CASE")
+                    } else { false };
+                    if !next_is_sub && begin_depth > 0 { begin_depth -= 1; }
+                }
+                _ => {}
+            }
+            current.push_str(&word);
+            continue;
+        }
+        // 세미콜론: BEGIN 블록 밖에서만 분리
         if chars[i] == ';' {
-            let t = current.trim().to_string();
-            if !t.is_empty() { queries.push(t); }
-            current.clear();
+            if begin_depth == 0 {
+                let t = current.trim().to_string();
+                if !t.is_empty() { queries.push(t); }
+                current.clear();
+            } else {
+                current.push(';');
+            }
             i += 1;
             continue;
         }
