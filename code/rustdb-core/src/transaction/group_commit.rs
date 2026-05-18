@@ -11,8 +11,9 @@ use crate::transaction::wal::WAL_PATH;
 ///
 /// 단일 세션 환경에서는 leader가 즉시 fsync하므로 기존 대비 오버헤드가 없다.
 pub struct GroupCommitCoordinator {
-    state: Mutex<GcState>,
-    cvar:  Condvar,
+    state:    Mutex<GcState>,
+    cvar:     Condvar,
+    wal_path: String,
 }
 
 struct GcState {
@@ -22,9 +23,14 @@ struct GcState {
 
 impl GroupCommitCoordinator {
     pub fn new() -> Self {
+        Self::new_with_wal_path(WAL_PATH.to_string())
+    }
+
+    pub fn new_with_wal_path(wal_path: String) -> Self {
         Self {
-            state: Mutex::new(GcState { flushing: false, generation: 0 }),
-            cvar:  Condvar::new(),
+            state:    Mutex::new(GcState { flushing: false, generation: 0 }),
+            cvar:     Condvar::new(),
+            wal_path,
         }
     }
 
@@ -48,8 +54,8 @@ impl GroupCommitCoordinator {
             std::thread::yield_now();
 
             // 단일 fsync — 이 시점까지 WAL 파일에 기록된 모든 COMMIT 레코드 영속화
-            if Path::new(WAL_PATH).exists() {
-                if let Ok(f) = OpenOptions::new().write(true).open(WAL_PATH) {
+            if Path::new(&self.wal_path).exists() {
+                if let Ok(f) = OpenOptions::new().write(true).open(&self.wal_path) {
                     let _ = f.sync_all();
                 }
             }

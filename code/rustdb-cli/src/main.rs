@@ -89,8 +89,20 @@ fn main() {
         .and_then(|w| w[1].parse().ok())
         .unwrap_or(64);
 
+    // --data-dir 미지정 시 실행 파일 위치 기준 ../../.. (code/) + data/ 사용
+    let data_dir = args.windows(2)
+        .find(|w| w[0] == "--data-dir")
+        .map(|w| w[1].clone())
+        .unwrap_or_else(|| {
+            std::env::current_exe()
+                .ok()
+                .and_then(|p| p.parent()?.parent()?.parent().map(|p| p.join("data")))
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_else(|| "data".to_string())
+        });
+
     let stdin = io::stdin();
-    let mut executor = Executor::new_with_buffer_pool_size(buffer_pool_size);
+    let mut executor = Executor::new_with_options(&data_dir, buffer_pool_size);
 
     print_banner();
 
@@ -149,7 +161,22 @@ fn find_stmt_end(s: &str) -> Option<usize> {
             while i < len && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') { i += 1; }
             let word = std::str::from_utf8(&bytes[start..i]).unwrap_or("").to_uppercase();
             match word.as_str() {
-                "BEGIN" => { begin_depth += 1; }
+                "BEGIN" => {
+                    // BEGIN; or BEGIN WORK; → transaction marker, NOT a compound block
+                    // Only increment depth if followed by non-';' non-"WORK" content
+                    let mut j = i;
+                    while j < len && bytes[j].is_ascii_whitespace() { j += 1; }
+                    let is_transaction = if j >= len || bytes[j] == b';' {
+                        true
+                    } else if bytes[j].is_ascii_alphabetic() {
+                        let s2 = j;
+                        let mut k = j;
+                        while k < len && (bytes[k].is_ascii_alphanumeric() || bytes[k] == b'_') { k += 1; }
+                        let nw = std::str::from_utf8(&bytes[s2..k]).unwrap_or("").to_uppercase();
+                        nw == "WORK"
+                    } else { false };
+                    if !is_transaction { begin_depth += 1; }
+                }
                 "END" => {
                     let mut j = i;
                     while j < len && bytes[j].is_ascii_whitespace() { j += 1; }

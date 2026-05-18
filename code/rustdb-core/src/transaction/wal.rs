@@ -51,6 +51,10 @@ impl WalManager {
         WalManager { path: WAL_PATH.to_string() }
     }
 
+    pub fn new_with_dir(dir: &str) -> Self {
+        WalManager { path: format!("{}/rustdb.wal", dir) }
+    }
+
     /// 레코드 바이너리 인코딩
     /// [ op(1) | table_len(4) | table(n) | key_len(4) | key(n) | data_len(4) | data(n) ]
     fn encode(record: &WalRecord) -> Vec<u8> {

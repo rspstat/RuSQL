@@ -244,6 +244,11 @@ pub enum Token {
     // JSON 연산자
     Arrow,       // ->
     LongArrow,   // ->>
+
+    // PREPARE / EXECUTE / DEALLOCATE
+    Prepare,
+    Execute,
+    Deallocate,
 }
 
 pub struct Lexer {
@@ -468,9 +473,12 @@ impl Lexer {
             "CUME_DIST"    => Token::CumeDist,
             "ROW_NUMBER"   => Token::RowNumber,
             "REGEXP" | "RLIKE" => Token::Regexp,
-            "MERGE"     => Token::Merge,
-            "USING"     => Token::Using,
-            "MATCHED"   => Token::Matched,
+            "MERGE"      => Token::Merge,
+            "USING"      => Token::Using,
+            "MATCHED"    => Token::Matched,
+            "PREPARE"    => Token::Prepare,
+            "EXECUTE"    => Token::Execute,
+            "DEALLOCATE" => Token::Deallocate,
             "PROCEDURE" => Token::Procedure,
             "CALL"      => Token::Call,
             "TRIGGER"   => Token::Trigger,

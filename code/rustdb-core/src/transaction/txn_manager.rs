@@ -28,6 +28,10 @@ impl UndoLogFile {
         UndoLogFile { path: UNDO_LOG_PATH.to_string() }
     }
 
+    fn new_with_dir(dir: &str) -> Self {
+        UndoLogFile { path: format!("{}/_undo.log", dir) }
+    }
+
     /// UndoEntry를 바이너리로 인코딩
     /// [ op(1) | table_len(4) | table | key_len(4) | key | has_data(1) | [data_len(4) | data] ]
     fn encode(entry: &UndoEntry) -> Vec<u8> {
@@ -154,6 +158,19 @@ impl TransactionManager {
             undo_log: Vec::new(),
             wal: WalManager::new(),
             undo_log_file: UndoLogFile::new(),
+            isolation_level: IsolationLevel::ReadCommitted,
+            snapshot: None,
+            savepoints: Vec::new(),
+        }
+    }
+
+    pub fn new_with_dir(dir: &str) -> Self {
+        TransactionManager {
+            active: false,
+            txn_id: 0,
+            undo_log: Vec::new(),
+            wal: WalManager::new_with_dir(dir),
+            undo_log_file: UndoLogFile::new_with_dir(dir),
             isolation_level: IsolationLevel::ReadCommitted,
             snapshot: None,
             savepoints: Vec::new(),

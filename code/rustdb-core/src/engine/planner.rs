@@ -334,15 +334,15 @@ impl<'a> Planner<'a> {
         let pk = self.pk_col(&plan.base.table).unwrap_or_default();
 
         let mut out = String::new();
-        out.push_str("+--------------------------------------------------+\n");
-        out.push_str("|                  QUERY PLAN                      |\n");
-        out.push_str("+--------------------------------------------------+\n");
-        out.push_str(&fmt_row("Table",        &plan.base.table));
-        out.push_str(&fmt_row("Rows (total)", &total.to_string()));
+        out.push_str("+--------------------------------------------------------------------------+\n");
+        out.push_str("|                            QUERY PLAN                                    |\n");
+        out.push_str("+--------------------------------------------------------------------------+\n");
+        out.push_str(&fmt_row("Table",          &plan.base.table));
+        out.push_str(&fmt_row("Rows (total)",   &total.to_string()));
         out.push_str(&fmt_row("Rows (visible)", &visible.to_string()));
         if !pk.is_empty() { out.push_str(&fmt_row("PK", &pk)); }
-        out.push_str(&fmt_row("Est. cost",    &format!("{:.1}", plan.total_cost())));
-        out.push_str("|                                                  |\n");
+        out.push_str(&fmt_row("Est. cost",      &format!("{:.1}", plan.total_cost())));
+        out.push_str("|                                                                          |\n");
         let access_label = if plan.base.is_covering {
             format!("{} (Covering)", self.describe_access(&plan.base.access))
         } else {
@@ -352,7 +352,7 @@ impl<'a> Planner<'a> {
         for jp in &plan.joins {
             out.push_str(&fmt_row("Join", &self.describe_join(jp)));
         }
-        out.push_str("+--------------------------------------------------+");
+        out.push_str("+--------------------------------------------------------------------------+");
         out
     }
 
@@ -383,13 +383,31 @@ impl<'a> Planner<'a> {
 // ── Formatting helper ─────────────────────────────────────────────────────
 
 fn fmt_row(label: &str, value: &str) -> String {
+    const W: usize = 72;
     let cell = format!("{}: {}", label, value);
     let mut out = String::new();
+    let mut remaining = cell.as_str();
     let mut first = true;
-    for chunk in cell.as_bytes().chunks(48) {
-        let s = std::str::from_utf8(chunk).unwrap_or("?");
-        if first { out.push_str(&format!("| {:<48} |\n", s)); first = false; }
-        else      { out.push_str(&format!("|   {:<46} |\n", s)); }
+    while !remaining.is_empty() {
+        let (chunk, rest) = if remaining.chars().count() <= W {
+            (remaining, "")
+        } else {
+            // split at last space within W chars, fall back to W if no space
+            let cut = remaining.char_indices()
+                .take_while(|(i, _)| *i <= W)
+                .filter(|(_, c)| *c == ' ')
+                .last()
+                .map(|(i, _)| i)
+                .unwrap_or_else(|| remaining.char_indices().nth(W).map(|(i, _)| i).unwrap_or(remaining.len()));
+            (&remaining[..cut], remaining[cut..].trim_start())
+        };
+        if first {
+            out.push_str(&format!("| {:<W$} |\n", chunk, W = W));
+            first = false;
+        } else {
+            out.push_str(&format!("|   {:<W$} |\n", chunk, W = W - 2));
+        }
+        remaining = rest;
     }
     out
 }

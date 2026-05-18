@@ -521,6 +521,21 @@ pub enum Statement {
     ProcIterate {
         label: Option<String>,
     },
+    PrepareStmt {
+        name: String,
+        query: String,
+    },
+    ExecuteStmt {
+        name: String,
+        using_vars: Vec<String>,
+    },
+    DeallocatePrepare {
+        name: String,
+    },
+    SetUserVar {
+        name: String,
+        expr: ArithExpr,
+    },
 }
 
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]

@@ -69,6 +69,7 @@ pub struct SharedDatabase {
     pub users: Vec<UserRecord>,
     pub grants: Vec<GrantRecord>,
     pub group_commit_coord: Arc<GroupCommitCoordinator>,
+    pub data_dir: String,
     pub table_stats: HashMap<String, TableStats>,
     pub procedures: HashMap<String, (Vec<(String, String, String)>, Vec<Statement>)>,
     /// key = trigger name, value = (table, timing, event, body)
@@ -135,6 +136,10 @@ pub struct Executor {
     pub session_tables: HashMap<String, Vec<Row>>,
     /// 저장 프로시저 로컬 변수 (DECLARE / SET)
     pub proc_vars: HashMap<String, String>,
+    /// 세션 사용자 변수 (@var)
+    pub user_vars: HashMap<String, String>,
+    /// PREPARE로 등록된 쿼리 문자열
+    pub prepared_stmts: HashMap<String, String>,
     /// LEAVE / ITERATE 제어 흐름 신호
     proc_signal: Option<ProcSignal>,
 }
@@ -300,17 +305,22 @@ impl Executor {
                 databases,
                 users,
                 grants,
-                group_commit_coord: Arc::new(GroupCommitCoordinator::new()),
+                group_commit_coord: Arc::new(GroupCommitCoordinator::new_with_wal_path(
+                    format!("{}/rustdb.wal", dir)
+                )),
+                data_dir: dir.to_string(),
                 table_stats: HashMap::new(),
                 procedures: HashMap::new(),
                 triggers: HashMap::new(),
                 dml_since_vacuum: 0,
                 user_functions: HashMap::new(),
             })),
-            txn: TransactionManager::new(),
+            txn: TransactionManager::new_with_dir(dir),
             current_db,
             session_tables: HashMap::new(),
             proc_vars: HashMap::new(),
+            user_vars: HashMap::new(),
+            prepared_stmts: HashMap::new(),
             proc_signal: None,
         };
 
@@ -320,16 +330,20 @@ impl Executor {
     }
 
     pub fn new_session(shared: Arc<RwLock<SharedDatabase>>) -> Self {
-        let current_db = {
+        let (current_db, data_dir) = {
             let s = shared.read().unwrap();
-            s.databases.iter().min().cloned().unwrap_or_else(|| "rustdb".to_string())
+            let db = s.databases.iter().min().cloned().unwrap_or_else(|| "rustdb".to_string());
+            let dir = s.data_dir.clone();
+            (db, dir)
         };
         Executor {
             shared,
-            txn: TransactionManager::new(),
+            txn: TransactionManager::new_with_dir(&data_dir),
             current_db,
             session_tables: HashMap::new(),
             proc_vars: HashMap::new(),
+            user_vars: HashMap::new(),
+            prepared_stmts: HashMap::new(),
             proc_signal: None,
         }
     }
@@ -536,6 +550,31 @@ impl Executor {
             }
             Statement::ProcIterate { label } => {
                 self.proc_signal = Some(ProcSignal::Iterate(label));
+                Ok(String::new())
+            }
+            Statement::PrepareStmt { name, query } => {
+                self.prepared_stmts.insert(name.to_uppercase(), query);
+                Ok("Query OK".to_string())
+            }
+            Statement::ExecuteStmt { name, using_vars } => {
+                self.exec_execute(s, &name.to_uppercase(), &using_vars)
+            }
+            Statement::DeallocatePrepare { name } => {
+                if self.prepared_stmts.remove(&name.to_uppercase()).is_some() {
+                    Ok("Query OK".to_string())
+                } else {
+                    Err(format!("Unknown prepared statement: {}", name))
+                }
+            }
+            Statement::SetUserVar { name, expr } => {
+                let val = {
+                    let mut vars = self.proc_vars.clone();
+                    for (k, v) in &self.user_vars {
+                        vars.insert(format!("@{}", k), v.clone());
+                    }
+                    Self::eval_arith(&vars, &expr)
+                };
+                self.user_vars.insert(name, val);
                 Ok(String::new())
             }
             // These are handled in early-return blocks above; unreachable after qualify_stmt
@@ -1800,8 +1839,11 @@ impl Executor {
                 };
                 (header, col.clone())
             }).collect();
-            // proc_vars가 있으면 프로시저 변수를 row로 사용
-            let eval_row = if self.proc_vars.is_empty() { Row::new() } else { self.proc_vars.clone() };
+            // proc_vars + user_vars(@key)를 row로 사용
+            let mut eval_row = self.proc_vars.clone();
+            for (k, v) in &self.user_vars {
+                eval_row.insert(format!("@{}", k), v.clone());
+            }
             let eval_col_val = |col: &SelectColumn| -> String {
                 match col {
                     SelectColumn::Func { name, args, .. } => Self::apply_scalar_func(name, args, &eval_row),
@@ -6286,8 +6328,7 @@ impl Executor {
 
         for qkey in &sorted_keys {
             let bare = qkey.split('.').last().unwrap_or(qkey);
-            if let Some(schema) = s.catalog.get_table(qkey) {
-                // We'll reuse exec_show_create_table logic inline
+            if s.catalog.get_table(qkey).is_some() {
                 let ddl = self.build_create_table_ddl(s, qkey);
                 out.push_str(&format!("DROP TABLE IF EXISTS `{}`;\n", bare));
                 out.push_str(&ddl);
@@ -6384,7 +6425,7 @@ impl Executor {
         }
     }
 
-    fn exec_show_processlist(&self, s: &SharedDatabase) -> Result<String, String> {
+    fn exec_show_processlist(&self, _s: &SharedDatabase) -> Result<String, String> {
         let sep = "+----+------+-----------+--------+-------+------+";
         let mut out = String::new();
         out.push_str(&format!("{}\n", sep));
@@ -6394,6 +6435,20 @@ impl Executor {
             1, "root", "localhost", &self.current_db, "Query", 0));
         out.push_str(sep);
         Ok(out)
+    }
+
+    fn exec_execute(&mut self, s: &mut SharedDatabase, name: &str, using_vars: &[String]) -> Result<String, String> {
+        let mut query = self.prepared_stmts.get(name)
+            .cloned()
+            .ok_or_else(|| format!("Unknown prepared statement: {}", name))?;
+        // Substitute '?' placeholders with user_var values positionally
+        for var in using_vars {
+            let val = self.user_vars.get(var.as_str()).cloned().unwrap_or_else(|| "NULL".to_string());
+            query = query.replacen('?', &val, 1);
+        }
+        let stmt = crate::parser::parser::Parser::new(&query).parse()
+            .map_err(|e| format!("EXECUTE parse error: {}", e))?;
+        self.execute_with_s(s, stmt)
     }
 
     fn exec_show_buffer_pool(&self, s: &SharedDatabase) -> Result<String, String> {
@@ -7835,7 +7890,7 @@ impl Executor {
         label: Option<String>,
         body: Vec<Statement>,
     ) -> Result<String, String> {
-        let mut last = String::new();
+        let mut last;
         loop {
             last = self.exec_proc_stmts(s, body.clone())?;
             match &self.proc_signal {
@@ -7860,7 +7915,7 @@ impl Executor {
         body: Vec<Statement>,
         until: CondExpr,
     ) -> Result<String, String> {
-        let mut last = String::new();
+        let mut last;
         loop {
             last = self.exec_proc_stmts(s, body.clone())?;
             match &self.proc_signal {

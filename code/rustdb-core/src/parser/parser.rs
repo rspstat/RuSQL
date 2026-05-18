@@ -322,6 +322,9 @@ impl Parser {
             Some(Token::Use)         => self.parse_use(),
             Some(Token::Merge)       => self.parse_merge(),
             Some(Token::Call)        => self.parse_call(),
+            Some(Token::Prepare)     => self.parse_prepare(),
+            Some(Token::Execute)     => self.parse_execute(),
+            Some(Token::Deallocate)  => self.parse_deallocate(),
             Some(Token::Ident(s)) if s.to_uppercase() == "BACKUP" => self.parse_backup(),
             other => Err(format!("Unknown statement: {:?}", other)),
         }
@@ -862,6 +865,11 @@ impl Parser {
                     }
                 }).collect();
                 Ok(ArithExpr::Func("DATE_SUB".to_string(), arith_args))
+            }
+            Some(Token::At) => {
+                self.advance();
+                let name = self.expect_ident()?;
+                Ok(ArithExpr::Col(format!("@{}", name)))
             }
             other => Err(format!("Expected expression term, got {:?}", other)),
         }
@@ -2583,6 +2591,72 @@ impl Parser {
         Ok(())
     }
 
+    /// FOREIGN KEY (col[, col2...]) REFERENCES ref_table(ref_col) [ON DELETE ...] [ON UPDATE ...]
+    /// 다중 컬럼의 경우 첫 번째 컬럼에만 FK 제약 적용 (단일 컬럼 ForeignKey 구조 유지)
+    fn parse_fk_table_level(&mut self, columns: &mut Vec<ColumnDef>) -> Result<(), String> {
+        match self.advance() {
+            Some(Token::LParen) => {}
+            other => return Err(format!("Expected '(' after FOREIGN KEY, got {:?}", other)),
+        }
+        let fk_col = self.expect_ident()?;
+        // 추가 컬럼은 파싱만 하고 무시
+        while self.peek() == Some(&Token::Comma) { self.advance(); self.expect_ident()?; }
+        match self.advance() {
+            Some(Token::RParen) => {}
+            other => return Err(format!("Expected ')' after FK columns, got {:?}", other)),
+        }
+        match self.advance() {
+            Some(Token::References) => {}
+            other => return Err(format!("Expected REFERENCES, got {:?}", other)),
+        }
+        let ref_table = self.expect_ident()?;
+        match self.advance() {
+            Some(Token::LParen) => {}
+            other => return Err(format!("Expected '(' after ref table, got {:?}", other)),
+        }
+        let ref_column = self.expect_ident()?;
+        while self.peek() == Some(&Token::Comma) { self.advance(); self.expect_ident()?; }
+        match self.advance() {
+            Some(Token::RParen) => {}
+            other => return Err(format!("Expected ')' after ref column, got {:?}", other)),
+        }
+        let mut on_delete = FkAction::Restrict;
+        let mut on_update = FkAction::Restrict;
+        while self.peek() == Some(&Token::On) {
+            self.advance();
+            let parse_fk_action = |p: &mut Parser| -> Result<FkAction, String> {
+                match p.advance() {
+                    Some(Token::Cascade)  => Ok(FkAction::Cascade),
+                    Some(Token::Restrict) => Ok(FkAction::Restrict),
+                    Some(Token::Ident(s)) if s.to_uppercase() == "NO" => { p.advance(); Ok(FkAction::Restrict) }
+                    Some(Token::Set) => match p.advance() {
+                        Some(Token::Null)    => Ok(FkAction::SetNull),
+                        Some(Token::Default) => Ok(FkAction::SetDefault),
+                        other => Err(format!("Expected NULL or DEFAULT after SET, got {:?}", other)),
+                    },
+                    other => Err(format!("Expected CASCADE/RESTRICT/SET, got {:?}", other)),
+                }
+            };
+            match self.advance() {
+                Some(Token::Delete) => { on_delete = parse_fk_action(self)?; }
+                Some(Token::Update) => { on_update = parse_fk_action(self)?; }
+                other => return Err(format!("Expected DELETE or UPDATE after ON, got {:?}", other)),
+            }
+        }
+        if let Some(c) = columns.iter_mut().find(|c| c.name == fk_col) {
+            c.foreign_key = Some(ForeignKey {
+                column: fk_col.clone(),
+                ref_table,
+                ref_column,
+                on_delete,
+                on_update,
+            });
+        } else {
+            return Err(format!("FOREIGN KEY: column '{}' not defined", fk_col));
+        }
+        Ok(())
+    }
+
     fn parse_create(&mut self) -> Result<Statement, String> {
         match self.advance() {
             Some(Token::Table) => {}
@@ -2655,6 +2729,8 @@ impl Parser {
                 match self.peek() {
                     Some(Token::Unique) => {
                         self.advance();
+                        // UNIQUE [KEY] (col)
+                        if self.peek() == Some(&Token::Key) { self.advance(); }
                         match self.advance() {
                             Some(Token::LParen) => {}
                             other => return Err(format!("Expected '(' after UNIQUE, got {:?}", other)),
@@ -2676,78 +2752,91 @@ impl Parser {
                         let expr = self.read_parenthesized_expr()?;
                         check_constraints.push((Some(constraint_name), expr));
                     }
-                    other => return Err(format!("Expected UNIQUE or CHECK after CONSTRAINT name, got {:?}", other)),
+                    Some(Token::Primary) => {
+                        // CONSTRAINT name PRIMARY KEY (col, ...)
+                        self.advance(); // PRIMARY
+                        match self.advance() {
+                            Some(Token::Key) => {}
+                            other => return Err(format!("Expected KEY after PRIMARY, got {:?}", other)),
+                        }
+                        match self.advance() {
+                            Some(Token::LParen) => {}
+                            other => return Err(format!("Expected '(' after PRIMARY KEY, got {:?}", other)),
+                        }
+                        let mut pk_cols = vec![self.expect_ident()?];
+                        while self.peek() == Some(&Token::Comma) {
+                            self.advance();
+                            pk_cols.push(self.expect_ident()?);
+                        }
+                        match self.advance() {
+                            Some(Token::RParen) => {}
+                            other => return Err(format!("Expected ')' after PK columns, got {:?}", other)),
+                        }
+                        for pk_col in &pk_cols {
+                            if let Some(c) = columns.iter_mut().find(|c| &c.name == pk_col) {
+                                c.primary_key = true;
+                                c.not_null = true;
+                            }
+                        }
+                        primary_key_columns = pk_cols;
+                    }
+                    Some(Token::Foreign) => {
+                        // CONSTRAINT name FOREIGN KEY (col) REFERENCES ...
+                        self.advance(); // FOREIGN
+                        match self.advance() {
+                            Some(Token::Key) => {}
+                            other => return Err(format!("Expected KEY, got {:?}", other)),
+                        }
+                        self.parse_fk_table_level(&mut columns)?;
+                    }
+                    other => return Err(format!("Expected PRIMARY KEY, UNIQUE, CHECK, or FOREIGN KEY after CONSTRAINT name, got {:?}", other)),
+                }
+            // UNIQUE KEY name (col) — MySQL 인라인 UNIQUE 인덱스
+            } else if self.peek() == Some(&Token::Unique) {
+                self.advance(); // UNIQUE
+                if self.peek() == Some(&Token::Key) { self.advance(); } // KEY optional
+                // 이름은 있을 수도 없을 수도 있음
+                let _idx_name = if matches!(self.peek(), Some(Token::Ident(_))) {
+                    Some(self.expect_ident()?)
+                } else { None };
+                match self.advance() {
+                    Some(Token::LParen) => {}
+                    other => return Err(format!("Expected '(' after UNIQUE KEY name, got {:?}", other)),
+                }
+                let col = self.expect_ident()?;
+                // 추가 컬럼은 무시 (단일 컬럼 UNIQUE만 제약에 반영)
+                while self.peek() == Some(&Token::Comma) { self.advance(); self.expect_ident()?; }
+                match self.advance() {
+                    Some(Token::RParen) => {}
+                    other => return Err(format!("Expected ')' after UNIQUE KEY columns, got {:?}", other)),
+                }
+                if let Some(c) = columns.iter_mut().find(|c| c.name == col) {
+                    c.unique = true;
+                }
+            // INDEX / KEY name (col) — MySQL 인라인 인덱스 (파싱만, CREATE INDEX로 처리하지 않음)
+            } else if matches!(self.peek(), Some(Token::Index) | Some(Token::Key)) {
+                self.advance(); // INDEX or KEY
+                // 인덱스 이름 (optional)
+                if matches!(self.peek(), Some(Token::Ident(_))) { self.expect_ident()?; }
+                match self.advance() {
+                    Some(Token::LParen) => {}
+                    other => return Err(format!("Expected '(' after INDEX/KEY name, got {:?}", other)),
+                }
+                // 컬럼 목록 소비
+                self.expect_ident()?;
+                while self.peek() == Some(&Token::Comma) { self.advance(); self.expect_ident()?; }
+                match self.advance() {
+                    Some(Token::RParen) => {}
+                    other => return Err(format!("Expected ')' after INDEX columns, got {:?}", other)),
                 }
             } else if self.peek() == Some(&Token::Foreign) {
-                // 테이블 레벨: FOREIGN KEY (col) REFERENCES ref_table(ref_col) [ON DELETE ...] [ON UPDATE ...]
+                // 테이블 레벨: FOREIGN KEY (col[, col2...]) REFERENCES ref_table(ref_col) [ON DELETE ...] [ON UPDATE ...]
                 self.advance(); // FOREIGN
                 match self.advance() {
                     Some(Token::Key) => {}
                     other => return Err(format!("Expected KEY after FOREIGN, got {:?}", other)),
                 }
-                match self.advance() {
-                    Some(Token::LParen) => {}
-                    other => return Err(format!("Expected '(' after FOREIGN KEY, got {:?}", other)),
-                }
-                let fk_col = self.expect_ident()?;
-                match self.advance() {
-                    Some(Token::RParen) => {}
-                    other => return Err(format!("Expected ')' after FK column, got {:?}", other)),
-                }
-                match self.advance() {
-                    Some(Token::References) => {}
-                    other => return Err(format!("Expected REFERENCES, got {:?}", other)),
-                }
-                let ref_table = self.expect_ident()?;
-                match self.advance() {
-                    Some(Token::LParen) => {}
-                    other => return Err(format!("Expected '(' after ref table, got {:?}", other)),
-                }
-                let ref_column = self.expect_ident()?;
-                match self.advance() {
-                    Some(Token::RParen) => {}
-                    other => return Err(format!("Expected ')' after ref column, got {:?}", other)),
-                }
-                let mut on_delete = FkAction::Restrict;
-                let mut on_update = FkAction::Restrict;
-                while self.peek() == Some(&Token::On) {
-                    self.advance(); // ON
-                    let parse_fk_action = |p: &mut Parser| -> Result<FkAction, String> {
-                        match p.advance() {
-                            Some(Token::Cascade)  => Ok(FkAction::Cascade),
-                            Some(Token::Restrict) => Ok(FkAction::Restrict),
-                            Some(Token::Ident(s)) if s.to_uppercase() == "NO" => {
-                                p.advance(); // ACTION
-                                Ok(FkAction::Restrict)
-                            }
-                            Some(Token::Set) => {
-                                match p.advance() {
-                                    Some(Token::Null) => Ok(FkAction::SetNull),
-                                    Some(Token::Default) => Ok(FkAction::SetDefault),
-                                    other => Err(format!("Expected NULL or DEFAULT after SET, got {:?}", other)),
-                                }
-                            }
-                            other => Err(format!("Expected CASCADE/RESTRICT/SET, got {:?}", other)),
-                        }
-                    };
-                    match self.advance() {
-                        Some(Token::Delete) => { on_delete = parse_fk_action(self)?; }
-                        Some(Token::Update) => { on_update = parse_fk_action(self)?; }
-                        other => return Err(format!("Expected DELETE or UPDATE after ON, got {:?}", other)),
-                    }
-                }
-                // 해당 컬럼에 FK 설정
-                if let Some(c) = columns.iter_mut().find(|c| c.name == fk_col) {
-                    c.foreign_key = Some(ForeignKey {
-                        column: fk_col.clone(),
-                        ref_table,
-                        ref_column,
-                        on_delete,
-                        on_update,
-                    });
-                } else {
-                    return Err(format!("FOREIGN KEY: column '{}' not defined", fk_col));
-                }
+                self.parse_fk_table_level(&mut columns)?;
             } else {
                 // 일반 컬럼 정의
                 let col_name = self.expect_ident()?;
@@ -3214,6 +3303,15 @@ impl Parser {
 
     fn parse_set(&mut self) -> Result<Statement, String> {
         match self.advance() {
+            Some(Token::At) => {
+                let name = self.expect_ident()?;
+                match self.advance() {
+                    Some(Token::Eq) => {}
+                    other => return Err(format!("Expected '=' after @{}, got {:?}", name, other)),
+                }
+                let expr = self.parse_arith_expr()?;
+                Ok(Statement::SetUserVar { name, expr })
+            }
             Some(Token::Isolation) => {
                 match self.advance() {
                     Some(Token::Level) => {}
@@ -3241,6 +3339,54 @@ impl Parser {
             }
             other => Err(format!("Expected ISOLATION, got {:?}", other)),
         }
+    }
+
+    fn parse_prepare(&mut self) -> Result<Statement, String> {
+        // PREPARE stmt_name FROM 'query'
+        let name = self.expect_ident()?;
+        match self.advance() {
+            Some(Token::From) | Some(Token::Ident(..)) => {}
+            other => return Err(format!("Expected FROM in PREPARE, got {:?}", other)),
+        }
+        let query = match self.advance() {
+            Some(Token::StringLit(s)) => s.clone(),
+            other => return Err(format!("Expected query string in PREPARE, got {:?}", other)),
+        };
+        Ok(Statement::PrepareStmt { name, query })
+    }
+
+    fn parse_execute(&mut self) -> Result<Statement, String> {
+        // EXECUTE stmt_name [USING @var1, @var2, ...]
+        let name = self.expect_ident()?;
+        let mut using_vars = Vec::new();
+        if self.peek() == Some(&Token::Using) {
+            self.advance();
+            loop {
+                match self.advance() {
+                    Some(Token::At) => {
+                        let var = self.expect_ident()?;
+                        using_vars.push(var);
+                    }
+                    other => return Err(format!("Expected @var in EXECUTE USING, got {:?}", other)),
+                }
+                if self.peek() == Some(&Token::Comma) {
+                    self.advance();
+                } else {
+                    break;
+                }
+            }
+        }
+        Ok(Statement::ExecuteStmt { name, using_vars })
+    }
+
+    fn parse_deallocate(&mut self) -> Result<Statement, String> {
+        // DEALLOCATE PREPARE stmt_name
+        match self.advance() {
+            Some(Token::Prepare) => {}
+            other => return Err(format!("Expected PREPARE after DEALLOCATE, got {:?}", other)),
+        }
+        let name = self.expect_ident()?;
+        Ok(Statement::DeallocatePrepare { name })
     }
 
     fn parse_describe(&mut self) -> Result<Statement, String> {
@@ -3846,8 +3992,8 @@ impl Parser {
             }
             Some(Token::Set) => {
                 self.advance();
-                // SET ISOLATION LEVEL → fall to regular parse_set
-                if matches!(self.peek(), Some(Token::Isolation)) {
+                // SET ISOLATION LEVEL or SET @var → fall to regular parse_set
+                if matches!(self.peek(), Some(Token::Isolation) | Some(Token::At)) {
                     self.parse_set()
                 } else {
                     self.parse_proc_set_var()
