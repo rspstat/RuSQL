@@ -265,3 +265,4 @@
 - [x] 쿼리 북마크 — ★ 버튼으로 현재 쿼리 저장, 사이드바 BOOKMARKS 패널, 클릭 시 에디터 로드, × 삭제, localStorage 영구 보존
 - [x] 사이드바 테이블 검색 — SCHEMAS 상단 검색 입력으로 테이블 이름 실시간 필터
 - [x] EXPLAIN 트리 시각화 — EXPLAIN / EXPLAIN ANALYZE 결과를 구조화된 카드(Access / Table / Condition 항목)로 렌더링
+- [x] BEGIN...END 블록 인식 쿼리 분리 — SQL 에디터에서 CREATE PROCEDURE / CREATE TRIGGER 등 BEGIN...END 포함 멀티 쿼리를 올바르게 분리·실행 (IF/ELSEIF/WHILE/LOOP/REPEAT/ITERATE 제어문 UI 검증 완료)

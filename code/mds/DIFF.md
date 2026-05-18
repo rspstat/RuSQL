@@ -275,7 +275,7 @@
 | CHECKPOINT | ✓ | ✓ | ✓ (ALTER SYSTEM CHECKPOINT) | ✓ |
 | VACUUM | ✓ (자동 Purge) | ✓ (AUTOVACUUM) | ✓ (자동 Undo 관리) | ✓ (수동 + DML 200회 AUTO) |
 | 백업 / 덤프 | mysqldump, XtraBackup | pg_dump, pg_basebackup | RMAN (Recovery Manager) | ✓ (BACKUP [DATABASE db] [INTO 'file']) |
-| 저장 프로시저 | ✓ | ✓ (PL/pgSQL 등) | ✓ (PL/SQL) | ✓ (CREATE/DROP PROCEDURE, CALL, IF/WHILE/LOOP/REPEAT) |
+| 저장 프로시저 | ✓ | ✓ (PL/pgSQL 등) | ✓ (PL/SQL) | ✓ (CREATE/DROP PROCEDURE, CALL, IF/WHILE/LOOP/REPEAT, UI 직접 실행) |
 | 트리거 | ✓ | ✓ | ✓ | ✓ (BEFORE/AFTER INSERT/UPDATE/DELETE) |
 | 이벤트 스케줄러 | ✓ | pg_cron 확장 | ✓ (DBMS_SCHEDULER) | ✗ |
 
@@ -299,7 +299,7 @@
 
 | 항목 | MySQL Workbench | pgAdmin / DBeaver | Oracle SQL Developer | RustDB UI |
 |------|-----------------|-------------------|----------------------|-----------|
-| 쿼리 에디터 | ✓ (구문 강조, 자동완성) | ✓ | ✓ | ✓ (Monaco, SQL 자동완성) |
+| 쿼리 에디터 | ✓ (구문 강조, 자동완성) | ✓ | ✓ | ✓ (Monaco, SQL 자동완성, BEGIN...END 블록 인식) |
 | ERD 다이어그램 | ✓ | ✓ | ✓ | ✓ (FK 관계선, 팬/줌, 카드 드래그) |
 | 결과 테이블 | ✓ (셀 편집 가능) | ✓ | ✓ (셀 편집 가능) | ✓ (컬럼 너비 조절, 100행 페이징, 헤더 정렬, 행 번호, 실시간 검색) |
 | 히스토리 | ✓ | ✓ | ✓ | ✓ (200개 보존, 연결별 분리) |
