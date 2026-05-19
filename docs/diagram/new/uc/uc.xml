@@ -1,0 +1,263 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mxfile host="app.diagrams.net">
+  <diagram name="Use-Case Diagram" id="UC_RustDB_v15">
+    <mxGraphModel dx="1526" dy="1454" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1654" pageHeight="1169" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="title" parent="1" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;fontSize=20;fontStyle=1;" value="&lt;font face=&quot;Helvetica&quot; style=&quot;line-height: 130%; font-size: 20px;&quot;&gt;RustDB — Use-Case Diagram&lt;/font&gt;" vertex="1">
+          <mxGeometry height="40" width="450" x="875.5" y="407" as="geometry" />
+        </mxCell>
+        <mxCell id="SYS" parent="1" style="swimlane;startSize=28;fillColor=#f9f9f9;strokeColor=#555555;fontStyle=1;fontSize=13;align=left;spacingLeft=8;swimlaneLine=1;" value="RustDB v2.2.0" vertex="1">
+          <mxGeometry height="900" width="1079" x="561" y="450" as="geometry" />
+        </mxCell>
+        <mxCell id="U01" parent="SYS" style="ellipse;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#000000;fontSize=10;" value="UC-001&#xa;SQL 쿼리 입력" vertex="1">
+          <mxGeometry height="55" width="175" x="30" y="70" as="geometry" />
+        </mxCell>
+        <mxCell id="U02" parent="SYS" style="ellipse;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#000000;fontSize=10;" value="UC-002&#xa;쿼리 실행 (F5)" vertex="1">
+          <mxGeometry height="55" width="175" x="30" y="150" as="geometry" />
+        </mxCell>
+        <mxCell id="U03" parent="SYS" style="ellipse;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#000000;fontSize=10;" value="UC-003&#xa;선택 영역 실행" vertex="1">
+          <mxGeometry height="55" width="175" x="30" y="230" as="geometry" />
+        </mxCell>
+        <mxCell id="U04" parent="SYS" style="ellipse;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#000000;fontSize=10;" value="UC-004&#xa;멀티 탭 관리" vertex="1">
+          <mxGeometry height="55" width="175" x="30" y="310" as="geometry" />
+        </mxCell>
+        <mxCell id="U05" parent="SYS" style="ellipse;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#000000;fontSize=10;" value="UC-050&#xa;앱 실행 / DB 서버 접속" vertex="1">
+          <mxGeometry height="55" width="175" x="30" y="490" as="geometry" />
+        </mxCell>
+        <mxCell id="U06" parent="SYS" style="ellipse;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#000000;fontSize=10;" value="UC-051&#xa;사이드바 DB 트리 조회" vertex="1">
+          <mxGeometry height="55" width="175" x="30" y="570" as="geometry" />
+        </mxCell>
+        <mxCell id="U07" parent="SYS" style="ellipse;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#000000;fontSize=10;" value="UC-052&#xa;ERD 뷰 조회" vertex="1">
+          <mxGeometry height="55" width="175" x="30" y="650" as="geometry" />
+        </mxCell>
+        <mxCell id="U08" parent="SYS" style="ellipse;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#000000;fontSize=10;" value="UC-053&#xa;쿼리 히스토리 조회" vertex="1">
+          <mxGeometry height="55" width="175" x="30" y="730" as="geometry" />
+        </mxCell>
+        <mxCell id="U09" parent="SYS" style="ellipse;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#000000;fontSize=10;" value="UC-054&#xa;결과 CSV 내보내기" vertex="1">
+          <mxGeometry height="55" width="175" x="30" y="810" as="geometry" />
+        </mxCell>
+        <mxCell id="U10" parent="SYS" style="ellipse;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#000000;fontSize=10;" value="UC-010&#xa;테이블 생성 (CREATE)" vertex="1">
+          <mxGeometry height="55" width="175" x="240" y="70" as="geometry" />
+        </mxCell>
+        <mxCell id="U11" parent="SYS" style="ellipse;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#000000;fontSize=10;" value="UC-011&#xa;테이블 삭제 (DROP)" vertex="1">
+          <mxGeometry height="55" width="175" x="240" y="150" as="geometry" />
+        </mxCell>
+        <mxCell id="U12" parent="SYS" style="ellipse;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#000000;fontSize=10;" value="UC-012&#xa;테이블 초기화 (TRUNCATE)" vertex="1">
+          <mxGeometry height="55" width="175" x="240" y="230" as="geometry" />
+        </mxCell>
+        <mxCell id="U13" parent="SYS" style="ellipse;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#000000;fontSize=10;" value="UC-013~015&#xa;컬럼 관리 (ALTER)" vertex="1">
+          <mxGeometry height="55" width="175" x="240" y="310" as="geometry" />
+        </mxCell>
+        <mxCell id="U14" parent="SYS" style="ellipse;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#000000;fontSize=10;" value="UC-016~017&#xa;인덱스 / VIEW 관리" vertex="1">
+          <mxGeometry height="55" width="175" x="240" y="390" as="geometry" />
+        </mxCell>
+        <mxCell id="U15" parent="SYS" style="ellipse;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#000000;fontSize=10;" value="UC-018&#xa;SHOW / DESCRIBE" vertex="1">
+          <mxGeometry height="55" width="175" x="240" y="470" as="geometry" />
+        </mxCell>
+        <mxCell id="U16" parent="SYS" style="ellipse;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#000000;fontSize=10;" value="UC-019&#xa;다중 DB 관리 (USE / CREATE DB)" vertex="1">
+          <mxGeometry height="55" width="175" x="240" y="550" as="geometry" />
+        </mxCell>
+        <mxCell id="U17" parent="SYS" style="ellipse;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#000000;fontSize=10;" value="UC-020&#xa;데이터 삽입 (INSERT)" vertex="1">
+          <mxGeometry height="55" width="175" x="450" y="70" as="geometry" />
+        </mxCell>
+        <mxCell id="U18" parent="SYS" style="ellipse;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#000000;fontSize=10;" value="UC-021&#xa;데이터 조회 (SELECT)" vertex="1">
+          <mxGeometry height="55" width="175" x="450" y="150" as="geometry" />
+        </mxCell>
+        <mxCell id="U19" parent="SYS" style="ellipse;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#000000;fontSize=10;" value="UC-022&#xa;데이터 수정 (UPDATE)" vertex="1">
+          <mxGeometry height="55" width="175" x="450" y="230" as="geometry" />
+        </mxCell>
+        <mxCell id="U20" parent="SYS" style="ellipse;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#000000;fontSize=10;" value="UC-023&#xa;데이터 삭제 (DELETE)" vertex="1">
+          <mxGeometry height="55" width="175" x="450" y="310" as="geometry" />
+        </mxCell>
+        <mxCell id="U21" parent="SYS" style="ellipse;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#000000;fontSize=10;" value="UC-024&#xa;JOIN / 서브쿼리" vertex="1">
+          <mxGeometry height="55" width="175" x="450" y="390" as="geometry" />
+        </mxCell>
+        <mxCell id="U22" parent="SYS" style="ellipse;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#000000;fontSize=10;" value="UC-025&#xa;CTE / 윈도우 함수" vertex="1">
+          <mxGeometry height="55" width="175" x="450" y="470" as="geometry" />
+        </mxCell>
+        <mxCell id="U23" parent="SYS" style="ellipse;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#000000;fontSize=10;" value="UC-026&#xa;UPSERT / MERGE" vertex="1">
+          <mxGeometry height="55" width="175" x="450" y="550" as="geometry" />
+        </mxCell>
+        <mxCell id="U24" parent="SYS" style="ellipse;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#000000;fontSize=10;" value="UC-030&#xa;BEGIN" vertex="1">
+          <mxGeometry height="55" width="175" x="660" y="70" as="geometry" />
+        </mxCell>
+        <mxCell id="U25" parent="SYS" style="ellipse;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#000000;fontSize=10;" value="UC-031&#xa;COMMIT" vertex="1">
+          <mxGeometry height="55" width="175" x="660" y="150" as="geometry" />
+        </mxCell>
+        <mxCell id="U26" parent="SYS" style="ellipse;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#000000;fontSize=10;" value="UC-032&#xa;ROLLBACK" vertex="1">
+          <mxGeometry height="55" width="175" x="660" y="230" as="geometry" />
+        </mxCell>
+        <mxCell id="U27" parent="SYS" style="ellipse;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#000000;fontSize=10;" value="UC-033~035&#xa;SAVEPOINT 관련" vertex="1">
+          <mxGeometry height="55" width="175" x="660" y="310" as="geometry" />
+        </mxCell>
+        <mxCell id="U28" parent="SYS" style="ellipse;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#000000;fontSize=10;" value="UC-036&#xa;격리 수준 설정" vertex="1">
+          <mxGeometry height="55" width="175" x="660" y="390" as="geometry" />
+        </mxCell>
+        <mxCell id="U29" parent="SYS" style="ellipse;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#000000;fontSize=10;" value="UC-037&#xa;Crash Recovery" vertex="1">
+          <mxGeometry height="55" width="175" x="660" y="470" as="geometry" />
+        </mxCell>
+        <mxCell id="U30" parent="SYS" style="ellipse;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#000000;fontSize=10;" value="UC-040&#xa;사용자 생성 / 삭제" vertex="1">
+          <mxGeometry height="55" width="175" x="870" y="70" as="geometry" />
+        </mxCell>
+        <mxCell id="U31" parent="SYS" style="ellipse;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#000000;fontSize=10;" value="UC-041&#xa;GRANT / REVOKE" vertex="1">
+          <mxGeometry height="55" width="175" x="870" y="150" as="geometry" />
+        </mxCell>
+        <mxCell id="U32" parent="SYS" style="ellipse;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#000000;fontSize=10;" value="UC-042&#xa;DB 생성 / 삭제" vertex="1">
+          <mxGeometry height="55" width="175" x="870" y="230" as="geometry" />
+        </mxCell>
+        <mxCell id="U33" parent="SYS" style="ellipse;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#000000;fontSize=10;" value="UC-043&#xa;백업 / 복원" vertex="1">
+          <mxGeometry height="55" width="175" x="870" y="310" as="geometry" />
+        </mxCell>
+        <mxCell id="U34" parent="SYS" style="ellipse;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#000000;fontSize=10;" value="UC-044&#xa;서버 시작 / 중지" vertex="1">
+          <mxGeometry height="55" width="175" x="870" y="390" as="geometry" />
+        </mxCell>
+        <mxCell id="U35" parent="SYS" style="ellipse;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#000000;fontSize=10;dashed=1;" value="UC-070&#xa;자연어 입력" vertex="1">
+          <mxGeometry height="55" width="175" x="660" y="630" as="geometry" />
+        </mxCell>
+        <mxCell id="U36" parent="SYS" style="ellipse;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#000000;fontSize=10;dashed=1;" value="UC-071&#xa;SQL 변환 (MCP)" vertex="1">
+          <mxGeometry height="55" width="175" x="660" y="720" as="geometry" />
+        </mxCell>
+        <mxCell id="U37" parent="SYS" style="ellipse;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#000000;fontSize=10;dashed=1;" value="UC-072&#xa;AI 쿼리 실행 및 결과 확인" vertex="1">
+          <mxGeometry height="55" width="175" x="660" y="810" as="geometry" />
+        </mxCell>
+        <mxCell id="A01" parent="1" style="shape=mxgraph.uml.actor;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#000000;fontSize=11;fontStyle=1;" value="개발자&#xa;Developer" vertex="1">
+          <mxGeometry height="90" width="60" x="390" y="662.5" as="geometry" />
+        </mxCell>
+        <mxCell id="A02" parent="1" style="shape=mxgraph.uml.actor;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#000000;fontSize=11;fontStyle=1;" value="일반 사용자&#xa;User" vertex="1">
+          <mxGeometry height="90" width="60" x="390" y="1062.5" as="geometry" />
+        </mxCell>
+        <mxCell id="A03" parent="1" style="shape=mxgraph.uml.actor;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#000000;fontSize=11;fontStyle=1;" value="시스템 관리자&#xa;Admin" vertex="1">
+          <mxGeometry height="90" width="60" x="1740" y="655" as="geometry" />
+        </mxCell>
+        <mxCell id="A04" parent="1" style="shape=mxgraph.uml.actor;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#000000;fontSize=11;fontStyle=1;" value="&lt;External&gt;&#xa;AI MCP API" vertex="1">
+          <mxGeometry height="90" width="60" x="1740" y="1062.5" as="geometry" />
+        </mxCell>
+        <mxCell id="E001" edge="1" parent="1" source="A01" style="edgeStyle=none;html=1;endArrow=none;" target="U01">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="E002" edge="1" parent="1" source="A01" style="edgeStyle=none;html=1;endArrow=none;" target="U02">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="E003" edge="1" parent="1" source="A01" style="edgeStyle=none;html=1;endArrow=none;" target="U03">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="E004" edge="1" parent="1" source="A01" style="edgeStyle=none;html=1;endArrow=none;" target="U04">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="E005" edge="1" parent="1" source="A01" style="edgeStyle=none;html=1;endArrow=none;" target="U05">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="E006" edge="1" parent="1" source="A01" style="edgeStyle=none;html=1;endArrow=none;" target="U06">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="E007" edge="1" parent="1" source="A01" style="edgeStyle=none;html=1;endArrow=none;" target="U07">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="E008" edge="1" parent="1" source="A01" style="edgeStyle=none;html=1;endArrow=none;" target="U08">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="E009" edge="1" parent="1" source="A01" style="edgeStyle=none;html=1;endArrow=none;" target="U09">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="E010" edge="1" parent="1" source="A01" style="edgeStyle=none;html=1;endArrow=none;" target="U10">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="E011" edge="1" parent="1" source="A01" style="edgeStyle=none;html=1;endArrow=none;" target="U11">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="E012" edge="1" parent="1" source="A01" style="edgeStyle=none;html=1;endArrow=none;" target="U12">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="E013" edge="1" parent="1" source="A01" style="edgeStyle=none;html=1;endArrow=none;" target="U13">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="E014" edge="1" parent="1" source="A01" style="edgeStyle=none;html=1;endArrow=none;" target="U14">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="E015" edge="1" parent="1" source="A01" style="edgeStyle=none;html=1;endArrow=none;" target="U15">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="E016" edge="1" parent="1" source="A01" style="edgeStyle=none;html=1;endArrow=none;" target="U16">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="E017" edge="1" parent="1" source="A01" style="edgeStyle=none;html=1;endArrow=none;" target="U17">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="E018" edge="1" parent="1" source="A01" style="edgeStyle=none;html=1;endArrow=none;" target="U18">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="E019" edge="1" parent="1" source="A01" style="edgeStyle=none;html=1;endArrow=none;" target="U19">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="E020" edge="1" parent="1" source="A01" style="edgeStyle=none;html=1;endArrow=none;" target="U20">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="E021" edge="1" parent="1" source="A01" style="edgeStyle=none;html=1;endArrow=none;" target="U21">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="E022" edge="1" parent="1" source="A01" style="edgeStyle=none;html=1;endArrow=none;" target="U22">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="E023" edge="1" parent="1" source="A01" style="edgeStyle=none;html=1;endArrow=none;" target="U23">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="E024" edge="1" parent="1" source="A01" style="edgeStyle=none;html=1;endArrow=none;" target="U24">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="E025" edge="1" parent="1" source="A01" style="edgeStyle=none;html=1;endArrow=none;" target="U25">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="E026" edge="1" parent="1" source="A01" style="edgeStyle=none;html=1;endArrow=none;" target="U26">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="E027" edge="1" parent="1" source="A01" style="edgeStyle=none;html=1;endArrow=none;" target="U27">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="E028" edge="1" parent="1" source="A01" style="edgeStyle=none;html=1;endArrow=none;" target="U28">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="E030" edge="1" parent="1" source="A02" style="edgeStyle=none;html=1;endArrow=none;dashed=1;" target="U35">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="E031" edge="1" parent="1" source="A02" style="edgeStyle=none;html=1;endArrow=none;dashed=1;" target="U36">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="E032" edge="1" parent="1" source="A02" style="edgeStyle=none;html=1;endArrow=none;dashed=1;" target="U37">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="E040" edge="1" parent="1" source="A03" style="edgeStyle=none;html=1;endArrow=none;" target="U30">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="E041" edge="1" parent="1" source="A03" style="edgeStyle=none;html=1;endArrow=none;" target="U31">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="E042" edge="1" parent="1" source="A03" style="edgeStyle=none;html=1;endArrow=none;" target="U32">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="E043" edge="1" parent="1" source="A03" style="edgeStyle=none;html=1;endArrow=none;" target="U33">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="E044" edge="1" parent="1" source="A03" style="edgeStyle=none;html=1;endArrow=none;" target="U34">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="E045" edge="1" parent="1" source="A03" style="edgeStyle=none;html=1;endArrow=none;" target="U29">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="E050" edge="1" parent="1" source="A04" style="edgeStyle=none;html=1;endArrow=open;dashed=1;fontSize=10;fontStyle=2;" target="U35" value="«include»">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="E051" edge="1" parent="1" source="A04" style="edgeStyle=none;html=1;endArrow=open;dashed=1;fontSize=10;fontStyle=2;" target="U36" value="«include»">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="E052" edge="1" parent="1" source="A04" style="edgeStyle=none;html=1;endArrow=open;dashed=1;fontSize=10;fontStyle=2;" target="U37" value="«include»">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="E053" edge="1" parent="1" source="U37" style="edgeStyle=none;html=1;endArrow=open;dashed=1;fontSize=10;fontStyle=2;" target="U02" value="«include»">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>
