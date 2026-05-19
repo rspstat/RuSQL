@@ -1,0 +1,382 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mxfile host="app.diagrams.net">
+  <diagram name="Class Diagram" id="CD_RustDB_v15">
+    <mxGraphModel dx="1698" dy="1616" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1654" pageHeight="1169" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="bJCErecHmzuW28eIUsMe-346" edge="1" parent="1" source="bJCErecHmzuW28eIUsMe-273" style="edgeStyle=orthogonalEdgeStyle;fontSize=9;endArrow=diamond;endFill=1;" target="bJCErecHmzuW28eIUsMe-298" value="disk">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="2596" y="1630" />
+              <mxPoint x="1659" y="1630" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="bJCErecHmzuW28eIUsMe-348" edge="1" parent="1" source="bJCErecHmzuW28eIUsMe-273" style="edgeStyle=orthogonalEdgeStyle;fontSize=9;endArrow=diamond;endFill=0;" target="bJCErecHmzuW28eIUsMe-304" value="indexes">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="2596" y="1630" />
+              <mxPoint x="1886" y="1630" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="bJCErecHmzuW28eIUsMe-347" edge="1" parent="1" source="bJCErecHmzuW28eIUsMe-273" style="edgeStyle=orthogonalEdgeStyle;fontSize=9;endArrow=diamond;endFill=1;" target="bJCErecHmzuW28eIUsMe-310" value="buffer_pool">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="2596" y="1630" />
+              <mxPoint x="2096" y="1630" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="bJCErecHmzuW28eIUsMe-234" parent="1" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;fontSize=18;fontStyle=1;" value="&lt;font face=&quot;Helvetica&quot; style=&quot;line-height:130%;font-size:20px;&quot;&gt;RustDB — Class Diagram&lt;/font&gt;" vertex="1">
+          <mxGeometry height="40" width="400" x="1970.0006252325152" y="1150.0037513950897" as="geometry" />
+        </mxCell>
+        <mxCell id="bJCErecHmzuW28eIUsMe-235" parent="1" style="swimlane;startSize=30;fillColor=#f5f5f5;strokeColor=#555555;fontColor=#333333;fontStyle=1;fontSize=12;" value="[ parser ]" vertex="1">
+          <mxGeometry height="690" width="682.52" x="1528.9243766276045" y="1200.52" as="geometry" />
+        </mxCell>
+        <mxCell id="bJCErecHmzuW28eIUsMe-236" parent="bJCErecHmzuW28eIUsMe-235" style="swimlane;fontStyle=1;startSize=23;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=11;" value="Lexer" vertex="1">
+          <mxGeometry height="115" width="150" x="26" y="40" as="geometry" />
+        </mxCell>
+        <mxCell id="bJCErecHmzuW28eIUsMe-237" parent="bJCErecHmzuW28eIUsMe-236" style="text;strokeColor=none;fillColor=none;align=left;verticalAlign=top;spacingLeft=6;overflow=hidden;fontSize=10;" value="- input: Vec&lt;char&gt;&#xa;- pos: usize" vertex="1">
+          <mxGeometry height="38" width="150" y="23" as="geometry" />
+        </mxCell>
+        <mxCell id="bJCErecHmzuW28eIUsMe-238" parent="bJCErecHmzuW28eIUsMe-236" style="line;strokeColor=#6c8ebf;fillColor=none;" value="" vertex="1">
+          <mxGeometry height="8" width="150" y="61" as="geometry" />
+        </mxCell>
+        <mxCell id="bJCErecHmzuW28eIUsMe-239" parent="bJCErecHmzuW28eIUsMe-236" style="text;strokeColor=none;fillColor=none;align=left;verticalAlign=top;spacingLeft=6;overflow=hidden;fontSize=10;" value="+ tokenize() → Vec&lt;Token&gt;&#xa;+ read_ident() → Token&#xa;+ read_number() → Token" vertex="1">
+          <mxGeometry height="46" width="150" y="69" as="geometry" />
+        </mxCell>
+        <mxCell id="bJCErecHmzuW28eIUsMe-240" parent="bJCErecHmzuW28eIUsMe-235" style="swimlane;fontStyle=3;startSize=23;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=11;" value="«enum» Token" vertex="1">
+          <mxGeometry height="178" width="200" x="196" y="40" as="geometry" />
+        </mxCell>
+        <mxCell id="bJCErecHmzuW28eIUsMe-241" parent="bJCErecHmzuW28eIUsMe-240" style="text;strokeColor=none;fillColor=none;align=left;verticalAlign=top;spacingLeft=6;overflow=hidden;fontSize=9;" value="Select, Insert, Update, Delete&#xa;Create, Drop, Alter, Truncate&#xa;Where, From, Join, On, As&#xa;Group, Order, Having, Limit&#xa;With, Recursive, Window, Over&#xa;Begin, Commit, Rollback&#xa;Grant, Revoke, User, Procedure&#xa;Ident(String), NumberLit(String)&#xa;StringLit(String), Eq, Ne, Gt, Lt&#xa;LParen, RParen, Comma, Semi …" vertex="1">
+          <mxGeometry height="155" width="200" y="23" as="geometry" />
+        </mxCell>
+        <mxCell id="bJCErecHmzuW28eIUsMe-242" parent="bJCErecHmzuW28eIUsMe-235" style="swimlane;fontStyle=1;startSize=23;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=11;" value="Parser" vertex="1">
+          <mxGeometry height="220" width="240" x="416" y="40" as="geometry" />
+        </mxCell>
+        <mxCell id="bJCErecHmzuW28eIUsMe-243" parent="bJCErecHmzuW28eIUsMe-242" style="text;strokeColor=none;fillColor=none;align=left;verticalAlign=top;spacingLeft=6;overflow=hidden;fontSize=10;" value="- tokens: Vec&lt;Token&gt;&#xa;- pos: usize" vertex="1">
+          <mxGeometry height="38" width="240" y="23" as="geometry" />
+        </mxCell>
+        <mxCell id="bJCErecHmzuW28eIUsMe-244" parent="bJCErecHmzuW28eIUsMe-242" style="line;strokeColor=#6c8ebf;fillColor=none;" value="" vertex="1">
+          <mxGeometry height="8" width="240" y="61" as="geometry" />
+        </mxCell>
+        <mxCell id="bJCErecHmzuW28eIUsMe-245" parent="bJCErecHmzuW28eIUsMe-242" style="text;strokeColor=none;fillColor=none;align=left;verticalAlign=top;spacingLeft=6;overflow=hidden;fontSize=10;" value="+ new(input: &amp;str) → Parser&#xa;+ parse() → Result&lt;Statement, String&gt;&#xa;+ parse_select() / parse_insert()&#xa;+ parse_update() / parse_delete()&#xa;+ parse_create() / parse_drop()&#xa;+ parse_alter() / parse_with_cte()&#xa;+ parse_window() / parse_condition()&#xa;+ parse_grant() / parse_revoke()&#xa;+ peek() → Option&lt;&amp;Token&gt;&#xa;+ advance() → Option&lt;Token&gt;&#xa;+ expect_ident() → Result&lt;String&gt;" vertex="1">
+          <mxGeometry height="151" width="240" y="69" as="geometry" />
+        </mxCell>
+        <mxCell id="bJCErecHmzuW28eIUsMe-246" parent="bJCErecHmzuW28eIUsMe-235" style="swimlane;fontStyle=3;startSize=23;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=11;" value="«enum» Statement" vertex="1">
+          <mxGeometry height="298" width="270" x="26" y="200" as="geometry" />
+        </mxCell>
+        <mxCell id="bJCErecHmzuW28eIUsMe-247" parent="bJCErecHmzuW28eIUsMe-246" style="text;strokeColor=none;fillColor=none;align=left;verticalAlign=top;spacingLeft=6;overflow=hidden;fontSize=9;" value="Select { table, columns, distinct, condition,&#xa;  joins, order_by, group_by, having,&#xa;  limit, for_update, subquery, with_cte,&#xa;  window_functions, union_type }&#xa;Insert { table, columns, values }&#xa;Update { table, assignments, condition }&#xa;Delete { table, condition }&#xa;CreateTable { name, columns, if_not_exists,&#xa;  primary_key_columns, check_constraints }&#xa;DropTable / AlterTable { action: AlterAction }&#xa;CreateIndex { index_name, table, columns }&#xa;DropIndex / CreateView / DropView&#xa;CreateUser / DropUser / Grant / Revoke&#xa;CreateProcedure / CreateFunction / CreateTrigger&#xa;Begin / Commit / Rollback&#xa;Savepoint / ReleaseSavepoint / RollbackTo&#xa;SetIsolationLevel(IsolationLevel)&#xa;ShowLocks / Checkpoint / Vacuum { table }&#xa;Explain(Box&lt;Statement&gt;) / Backup / Restore" vertex="1">
+          <mxGeometry height="275" width="270" y="23" as="geometry" />
+        </mxCell>
+        <mxCell id="bJCErecHmzuW28eIUsMe-248" parent="bJCErecHmzuW28eIUsMe-235" style="swimlane;fontStyle=1;startSize=23;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=11;" value="Condition" vertex="1">
+          <mxGeometry height="108" width="190" x="316" y="270" as="geometry" />
+        </mxCell>
+        <mxCell id="bJCErecHmzuW28eIUsMe-249" parent="bJCErecHmzuW28eIUsMe-248" style="text;strokeColor=none;fillColor=none;align=left;verticalAlign=top;spacingLeft=6;overflow=hidden;fontSize=10;" value="+ column: String&#xa;+ operator: Operator&#xa;+ value: ConditionValue&#xa;+ and: Option&lt;Box&lt;Condition&gt;&gt;&#xa;+ or: Option&lt;Box&lt;Condition&gt;&gt;" vertex="1">
+          <mxGeometry height="85" width="190" y="23" as="geometry" />
+        </mxCell>
+        <mxCell id="bJCErecHmzuW28eIUsMe-250" parent="bJCErecHmzuW28eIUsMe-235" style="swimlane;fontStyle=3;startSize=23;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=11;" value="«enum» IsolationLevel" vertex="1">
+          <mxGeometry height="93" width="130" x="526" y="270" as="geometry" />
+        </mxCell>
+        <mxCell id="bJCErecHmzuW28eIUsMe-251" parent="bJCErecHmzuW28eIUsMe-250" style="text;strokeColor=none;fillColor=none;align=left;verticalAlign=top;spacingLeft=6;overflow=hidden;fontSize=10;" value="ReadUncommitted&#xa;ReadCommitted&#xa;RepeatableRead&#xa;Serializable" vertex="1">
+          <mxGeometry height="70" width="130" y="23" as="geometry" />
+        </mxCell>
+        <mxCell id="bJCErecHmzuW28eIUsMe-252" parent="bJCErecHmzuW28eIUsMe-235" style="swimlane;fontStyle=1;startSize=23;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=11;" value="ColumnDef" vertex="1">
+          <mxGeometry height="183" width="230" x="26" y="490" as="geometry" />
+        </mxCell>
+        <mxCell id="bJCErecHmzuW28eIUsMe-253" parent="bJCErecHmzuW28eIUsMe-252" style="text;strokeColor=none;fillColor=none;align=left;verticalAlign=top;spacingLeft=6;overflow=hidden;fontSize=9;" value="+ name: String&#xa;+ data_type: DataType&#xa;+ primary_key: bool&#xa;+ not_null: bool&#xa;+ unique: bool&#xa;+ unique_constraint_name: Option&lt;String&gt;&#xa;+ auto_increment: bool&#xa;+ default: Option&lt;String&gt;&#xa;+ check_expr: Option&lt;String&gt;&#xa;+ foreign_key: Option&lt;ForeignKey&gt;" vertex="1">
+          <mxGeometry height="160" width="230" y="23" as="geometry" />
+        </mxCell>
+        <mxCell id="bJCErecHmzuW28eIUsMe-254" parent="bJCErecHmzuW28eIUsMe-235" style="swimlane;fontStyle=1;startSize=23;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=11;" value="ForeignKey" vertex="1">
+          <mxGeometry height="108" width="180" x="276" y="490" as="geometry" />
+        </mxCell>
+        <mxCell id="bJCErecHmzuW28eIUsMe-255" parent="bJCErecHmzuW28eIUsMe-254" style="text;strokeColor=none;fillColor=none;align=left;verticalAlign=top;spacingLeft=6;overflow=hidden;fontSize=10;" value="+ column: String&#xa;+ ref_table: String&#xa;+ ref_column: String&#xa;+ on_delete: FkAction&#xa;+ on_update: FkAction" vertex="1">
+          <mxGeometry height="85" width="180" y="23" as="geometry" />
+        </mxCell>
+        <mxCell id="bJCErecHmzuW28eIUsMe-256" parent="bJCErecHmzuW28eIUsMe-235" style="swimlane;fontStyle=3;startSize=23;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=11;" value="«enum» DataType" vertex="1">
+          <mxGeometry height="108" width="180" x="476" y="490" as="geometry" />
+        </mxCell>
+        <mxCell id="bJCErecHmzuW28eIUsMe-257" parent="bJCErecHmzuW28eIUsMe-256" style="text;strokeColor=none;fillColor=none;align=left;verticalAlign=top;spacingLeft=6;overflow=hidden;fontSize=10;" value="Int / Text / Float&#xa;Boolean / Varchar(u32)&#xa;Date / DateTime / Timestamp&#xa;Decimal(u8, u8) / Blob&#xa;Json / Unknown" vertex="1">
+          <mxGeometry height="85" width="180" y="23" as="geometry" />
+        </mxCell>
+        <mxCell id="bJCErecHmzuW28eIUsMe-258" edge="1" parent="bJCErecHmzuW28eIUsMe-235" source="bJCErecHmzuW28eIUsMe-236" style="edgeStyle=orthogonalEdgeStyle;fontSize=9;" target="bJCErecHmzuW28eIUsMe-240" value="produces">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="bJCErecHmzuW28eIUsMe-259" edge="1" parent="bJCErecHmzuW28eIUsMe-235" source="bJCErecHmzuW28eIUsMe-242" style="edgeStyle=orthogonalEdgeStyle;fontSize=9;dashed=1;endArrow=open;" target="bJCErecHmzuW28eIUsMe-236" value="uses">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="bJCErecHmzuW28eIUsMe-260" edge="1" parent="bJCErecHmzuW28eIUsMe-235" source="bJCErecHmzuW28eIUsMe-242" style="edgeStyle=orthogonalEdgeStyle;fontSize=9;" target="bJCErecHmzuW28eIUsMe-246" value="produces">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="bJCErecHmzuW28eIUsMe-261" edge="1" parent="bJCErecHmzuW28eIUsMe-235" source="bJCErecHmzuW28eIUsMe-252" style="edgeStyle=orthogonalEdgeStyle;fontSize=9;endArrow=open;" target="bJCErecHmzuW28eIUsMe-254" value="0..1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="bJCErecHmzuW28eIUsMe-262" edge="1" parent="bJCErecHmzuW28eIUsMe-235" source="bJCErecHmzuW28eIUsMe-252" style="edgeStyle=orthogonalEdgeStyle;fontSize=9;endArrow=open;" target="bJCErecHmzuW28eIUsMe-256" value="">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="bJCErecHmzuW28eIUsMe-263" parent="1" style="swimlane;startSize=30;fillColor=#f5f5f5;strokeColor=#555555;fontColor=#333333;fontStyle=1;fontSize=12;" value="[ engine ]" vertex="1">
+          <mxGeometry height="407.48" width="610" x="2231.4443766276045" y="1200.52" as="geometry" />
+        </mxCell>
+        <mxCell id="bJCErecHmzuW28eIUsMe-264" parent="bJCErecHmzuW28eIUsMe-263" style="swimlane;fontStyle=1;startSize=23;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=11;" value="Executor" vertex="1">
+          <mxGeometry height="340" width="230" x="20" y="40" as="geometry" />
+        </mxCell>
+        <mxCell id="bJCErecHmzuW28eIUsMe-265" parent="bJCErecHmzuW28eIUsMe-264" style="text;strokeColor=none;fillColor=none;align=left;verticalAlign=top;spacingLeft=6;overflow=hidden;fontSize=10;fontStyle=2;" value="~ NULL_VALUE: &amp;str = &quot;NULL&quot;" vertex="1">
+          <mxGeometry height="22" width="230" y="23" as="geometry" />
+        </mxCell>
+        <mxCell id="bJCErecHmzuW28eIUsMe-266" parent="bJCErecHmzuW28eIUsMe-264" style="text;strokeColor=none;fillColor=none;align=left;verticalAlign=top;spacingLeft=6;overflow=hidden;fontSize=10;" value="+ shared_db: Arc&lt;RwLock&lt;SharedDatabase&gt;&gt;&#xa;+ session_tables: HashMap&lt;String, Vec&lt;Row&gt;&gt;&#xa;+ lock_mgr: LockManager&#xa;+ planner: Planner" vertex="1">
+          <mxGeometry height="62" width="230" y="45" as="geometry" />
+        </mxCell>
+        <mxCell id="bJCErecHmzuW28eIUsMe-267" parent="bJCErecHmzuW28eIUsMe-264" style="line;strokeColor=#82b366;fillColor=none;" value="" vertex="1">
+          <mxGeometry height="8" width="230" y="107" as="geometry" />
+        </mxCell>
+        <mxCell id="bJCErecHmzuW28eIUsMe-268" parent="bJCErecHmzuW28eIUsMe-264" style="text;strokeColor=none;fillColor=none;align=left;verticalAlign=top;spacingLeft=6;overflow=hidden;fontSize=10;" value="+ new() → Executor&#xa;+ execute(stmt: Statement) → QueryResult&#xa;+ exec_select / insert / update / delete&#xa;+ exec_truncate / exec_merge / exec_upsert&#xa;+ exec_begin / commit / rollback&#xa;+ exec_savepoint / release_savepoint&#xa;+ exec_rollback_to_savepoint&#xa;+ exec_create_table / drop_table&#xa;+ exec_alter_table / exec_create_index&#xa;+ exec_create_view / exec_drop_view&#xa;+ exec_create_user / exec_drop_user&#xa;+ exec_grant / exec_revoke&#xa;+ exec_create_proc / exec_call_proc&#xa;+ exec_vacuum / exec_explain&#xa;+ exec_show_locks / exec_show_wal&#xa;+ exec_checkpoint / exec_backup&#xa;+ recover_from_wal()" vertex="1">
+          <mxGeometry height="225" width="230" y="115" as="geometry" />
+        </mxCell>
+        <mxCell id="bJCErecHmzuW28eIUsMe-269" parent="bJCErecHmzuW28eIUsMe-263" style="swimlane;fontStyle=1;startSize=23;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=11;" value="Planner" vertex="1">
+          <mxGeometry height="169" width="170" x="260" y="40" as="geometry" />
+        </mxCell>
+        <mxCell id="bJCErecHmzuW28eIUsMe-270" parent="bJCErecHmzuW28eIUsMe-269" style="text;strokeColor=none;fillColor=none;align=left;verticalAlign=top;spacingLeft=6;overflow=hidden;fontSize=10;" value="- catalog: &amp;Catalog&#xa;- table_stats: HashMap&lt;String, usize&gt;" vertex="1">
+          <mxGeometry height="38" width="170" y="23" as="geometry" />
+        </mxCell>
+        <mxCell id="bJCErecHmzuW28eIUsMe-271" parent="bJCErecHmzuW28eIUsMe-269" style="line;strokeColor=#82b366;fillColor=none;" value="" vertex="1">
+          <mxGeometry height="8" width="170" y="61" as="geometry" />
+        </mxCell>
+        <mxCell id="bJCErecHmzuW28eIUsMe-272" parent="bJCErecHmzuW28eIUsMe-269" style="text;strokeColor=none;fillColor=none;align=left;verticalAlign=top;spacingLeft=6;overflow=hidden;fontSize=10;" value="+ plan_select(stmt) → SelectPlan&#xa;+ best_access_path(table, cond)&#xa;  → AccessPath&#xa;+ choose_join_algo(l, r) → JoinAlgo&#xa;+ plan_inner_joins(joins, conds)&#xa;  → Vec&lt;JoinOrder&gt;&#xa;+ estimate_cost(path) → f64" vertex="1">
+          <mxGeometry height="100" width="170" y="69" as="geometry" />
+        </mxCell>
+        <mxCell id="bJCErecHmzuW28eIUsMe-273" parent="bJCErecHmzuW28eIUsMe-263" style="swimlane;fontStyle=1;startSize=23;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=11;" value="SharedDatabase" vertex="1">
+          <mxGeometry height="138" width="210" x="260" y="220" as="geometry" />
+        </mxCell>
+        <mxCell id="bJCErecHmzuW28eIUsMe-274" parent="bJCErecHmzuW28eIUsMe-273" style="text;strokeColor=none;fillColor=none;align=left;verticalAlign=top;spacingLeft=6;overflow=hidden;fontSize=10;" value="+ tables: HashMap&lt;String, Vec&lt;Row&gt;&gt;&#xa;+ catalog: Catalog&#xa;+ indexes: HashMap&lt;String, BPlusTree&gt;&#xa;+ composite_indexes:&#xa;  HashMap&lt;String, CompositeIndex&gt;&#xa;+ views: HashMap&lt;String, Statement&gt;&#xa;+ disk: DiskManager&#xa;+ buffer_pool: BufferPool" vertex="1">
+          <mxGeometry height="115" width="210" y="23" as="geometry" />
+        </mxCell>
+        <mxCell id="bJCErecHmzuW28eIUsMe-275" parent="bJCErecHmzuW28eIUsMe-263" style="swimlane;fontStyle=1;startSize=23;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=11;" value="LockManager" vertex="1">
+          <mxGeometry height="244" width="110" x="480" y="40" as="geometry" />
+        </mxCell>
+        <mxCell id="bJCErecHmzuW28eIUsMe-276" parent="bJCErecHmzuW28eIUsMe-275" style="text;strokeColor=none;fillColor=none;align=left;verticalAlign=top;spacingLeft=6;overflow=hidden;fontSize=9;" value="- row_locks:&#xa;  HashMap&lt;(String,&#xa;  String), LockEntry&gt;&#xa;- shared_locks:&#xa;  HashMap&lt;(String,&#xa;  String), Vec&lt;u64&gt;&gt;&#xa;- wait_for:&#xa;  HashMap&lt;u64, u64&gt;" vertex="1">
+          <mxGeometry height="113" width="110" y="23" as="geometry" />
+        </mxCell>
+        <mxCell id="bJCErecHmzuW28eIUsMe-277" parent="bJCErecHmzuW28eIUsMe-275" style="line;strokeColor=#82b366;fillColor=none;" value="" vertex="1">
+          <mxGeometry height="8" width="110" y="136" as="geometry" />
+        </mxCell>
+        <mxCell id="bJCErecHmzuW28eIUsMe-278" parent="bJCErecHmzuW28eIUsMe-275" style="text;strokeColor=none;fillColor=none;align=left;verticalAlign=top;spacingLeft=6;overflow=hidden;fontSize=9;" value="+ acquire(table,&#xa;  pk, txn_id)&#xa;  → LockResult&#xa;+ acquire_shared(&#xa;  table, pk, txn_id)&#xa;+ release_all(txn_id)&#xa;+ detect_deadlock()&#xa;  → Option&lt;u64&gt;" vertex="1">
+          <mxGeometry height="100" width="110" y="144" as="geometry" />
+        </mxCell>
+        <mxCell id="bJCErecHmzuW28eIUsMe-279" parent="bJCErecHmzuW28eIUsMe-263" style="swimlane;fontStyle=3;startSize=23;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=11;" value="«enum» LockResult" vertex="1">
+          <mxGeometry height="78" width="110" x="480" y="310" as="geometry" />
+        </mxCell>
+        <mxCell id="bJCErecHmzuW28eIUsMe-280" parent="bJCErecHmzuW28eIUsMe-279" style="text;strokeColor=none;fillColor=none;align=left;verticalAlign=top;spacingLeft=6;overflow=hidden;fontSize=10;" value="Granted&#xa;Conflict { holder }&#xa;Deadlock { holder }" vertex="1">
+          <mxGeometry height="55" width="110" y="23" as="geometry" />
+        </mxCell>
+        <mxCell id="bJCErecHmzuW28eIUsMe-281" edge="1" parent="bJCErecHmzuW28eIUsMe-263" source="bJCErecHmzuW28eIUsMe-264" style="edgeStyle=orthogonalEdgeStyle;fontSize=9;endArrow=diamond;endFill=1;" target="bJCErecHmzuW28eIUsMe-275" value="lock_mgr">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="bJCErecHmzuW28eIUsMe-282" edge="1" parent="bJCErecHmzuW28eIUsMe-263" source="bJCErecHmzuW28eIUsMe-264" style="edgeStyle=orthogonalEdgeStyle;fontSize=9;endArrow=diamond;endFill=1;" target="bJCErecHmzuW28eIUsMe-269" value="planner">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="bJCErecHmzuW28eIUsMe-283" edge="1" parent="bJCErecHmzuW28eIUsMe-263" source="bJCErecHmzuW28eIUsMe-275" style="edgeStyle=orthogonalEdgeStyle;fontSize=9;endArrow=open;" target="bJCErecHmzuW28eIUsMe-279" value="returns">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="bJCErecHmzuW28eIUsMe-284" parent="1" style="swimlane;startSize=30;fillColor=#f5f5f5;strokeColor=#555555;fontColor=#333333;fontStyle=1;fontSize=12;" value="[ catalog ]" vertex="1">
+          <mxGeometry height="230" width="300" x="2231.4443766276045" y="1648" as="geometry" />
+        </mxCell>
+        <mxCell id="bJCErecHmzuW28eIUsMe-285" parent="bJCErecHmzuW28eIUsMe-284" style="swimlane;fontStyle=1;startSize=23;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=11;" value="Catalog" vertex="1">
+          <mxGeometry height="180" width="130" x="10" y="40" as="geometry" />
+        </mxCell>
+        <mxCell id="bJCErecHmzuW28eIUsMe-286" parent="bJCErecHmzuW28eIUsMe-285" style="text;strokeColor=none;fillColor=none;align=left;verticalAlign=top;spacingLeft=6;overflow=hidden;fontSize=10;" value="+ tables:&#xa;  HashMap&lt;String,&#xa;  TableSchema&gt;" vertex="1">
+          <mxGeometry height="45" width="130" y="23" as="geometry" />
+        </mxCell>
+        <mxCell id="bJCErecHmzuW28eIUsMe-287" parent="bJCErecHmzuW28eIUsMe-285" style="line;strokeColor=#d6b656;fillColor=none;" value="" vertex="1">
+          <mxGeometry height="8" width="130" y="68" as="geometry" />
+        </mxCell>
+        <mxCell id="bJCErecHmzuW28eIUsMe-288" parent="bJCErecHmzuW28eIUsMe-285" style="text;strokeColor=none;fillColor=none;align=left;verticalAlign=top;spacingLeft=6;overflow=hidden;fontSize=9;" value="+ create_table(name, schema)&#xa;+ drop_table(name)&#xa;+ get_table(name)&#xa;  → Option&lt;&amp;TableSchema&gt;&#xa;+ rename_table(old, new)&#xa;+ list_tables()&#xa;  → Vec&lt;String&gt;" vertex="1">
+          <mxGeometry height="94" width="130" y="76" as="geometry" />
+        </mxCell>
+        <mxCell id="bJCErecHmzuW28eIUsMe-289" parent="bJCErecHmzuW28eIUsMe-284" style="swimlane;fontStyle=1;startSize=23;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=11;" value="TableSchema" vertex="1">
+          <mxGeometry height="138" width="150" x="140" y="40" as="geometry" />
+        </mxCell>
+        <mxCell id="bJCErecHmzuW28eIUsMe-290" parent="bJCErecHmzuW28eIUsMe-289" style="text;strokeColor=none;fillColor=none;align=left;verticalAlign=top;spacingLeft=6;overflow=hidden;fontSize=9;" value="+ name: String&#xa;+ columns: Vec&lt;ColumnDef&gt;&#xa;+ auto_increment_counters:&#xa;  HashMap&lt;String, u64&gt;&#xa;+ primary_key_columns:&#xa;  Vec&lt;String&gt;&#xa;+ check_constraints:&#xa;  Vec&lt;String&gt;" vertex="1">
+          <mxGeometry height="115" width="150" y="23" as="geometry" />
+        </mxCell>
+        <mxCell id="bJCErecHmzuW28eIUsMe-291" edge="1" parent="bJCErecHmzuW28eIUsMe-284" source="bJCErecHmzuW28eIUsMe-285" style="edgeStyle=orthogonalEdgeStyle;fontSize=9;endArrow=diamond;endFill=1;" target="bJCErecHmzuW28eIUsMe-289" value="tables">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="bJCErecHmzuW28eIUsMe-292" parent="1" style="swimlane;startSize=30;fillColor=#f5f5f5;strokeColor=#555555;fontColor=#333333;fontStyle=1;fontSize=12;" value="[ mcp ]  // Python" vertex="1">
+          <mxGeometry height="230" width="280" x="2561.4406252325152" y="1648.0037513950897" as="geometry" />
+        </mxCell>
+        <mxCell id="bJCErecHmzuW28eIUsMe-293" parent="bJCErecHmzuW28eIUsMe-292" style="swimlane;fontStyle=1;startSize=23;fillColor=#f8cecc;strokeColor=#b85450;fontSize=11;" value="McpServer" vertex="1">
+          <mxGeometry height="178" width="260" x="10" y="30" as="geometry" />
+        </mxCell>
+        <mxCell id="bJCErecHmzuW28eIUsMe-294" parent="bJCErecHmzuW28eIUsMe-293" style="text;strokeColor=none;fillColor=none;align=left;verticalAlign=top;spacingLeft=6;overflow=hidden;fontSize=10;" value="- anthropic_client: Anthropic&#xa;- db_conn: RustDBConnection&#xa;- schema_cache: dict[str, list[str]]&#xa;- model: str = &quot;claude-sonnet-4&quot;" vertex="1">
+          <mxGeometry height="62" width="260" y="23" as="geometry" />
+        </mxCell>
+        <mxCell id="bJCErecHmzuW28eIUsMe-295" parent="bJCErecHmzuW28eIUsMe-293" style="line;strokeColor=#b85450;fillColor=none;" value="" vertex="1">
+          <mxGeometry height="8" width="260" y="85" as="geometry" />
+        </mxCell>
+        <mxCell id="bJCErecHmzuW28eIUsMe-296" parent="bJCErecHmzuW28eIUsMe-293" style="text;strokeColor=none;fillColor=none;align=left;verticalAlign=top;spacingLeft=6;overflow=hidden;fontSize=10;" value="+ handle_request(text: str) → str&#xa;+ fetch_schema() → dict&#xa;+ inject_context(schema, q) → str&#xa;+ call_claude_api(prompt: str) → str&#xa;+ execute_sql(sql: str) → str" vertex="1">
+          <mxGeometry height="85" width="260" y="93" as="geometry" />
+        </mxCell>
+        <mxCell id="bJCErecHmzuW28eIUsMe-297" parent="1" style="swimlane;startSize=30;fillColor=#f5f5f5;strokeColor=#555555;fontColor=#333333;fontStyle=1;fontSize=12;" value="[ storage ]" vertex="1">
+          <mxGeometry height="437.48" width="682.52" x="1528.9243766276045" y="1910.52" as="geometry" />
+        </mxCell>
+        <mxCell id="bJCErecHmzuW28eIUsMe-298" parent="bJCErecHmzuW28eIUsMe-297" style="swimlane;fontStyle=1;startSize=23;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=11;" value="DiskManager" vertex="1">
+          <mxGeometry height="265" width="240" x="10" y="40" as="geometry" />
+        </mxCell>
+        <mxCell id="bJCErecHmzuW28eIUsMe-299" parent="bJCErecHmzuW28eIUsMe-298" style="text;strokeColor=none;fillColor=none;align=left;verticalAlign=top;spacingLeft=6;overflow=hidden;fontSize=10;" value="- base_dir: String&#xa;~ EXT: &amp;str = &quot;.rdb&quot;" vertex="1">
+          <mxGeometry height="38" width="260" y="23" as="geometry" />
+        </mxCell>
+        <mxCell id="bJCErecHmzuW28eIUsMe-300" parent="bJCErecHmzuW28eIUsMe-298" style="line;strokeColor=#d79b00;fillColor=none;" value="" vertex="1">
+          <mxGeometry height="8" width="260" y="61" as="geometry" />
+        </mxCell>
+        <mxCell id="bJCErecHmzuW28eIUsMe-301" parent="bJCErecHmzuW28eIUsMe-298" style="text;strokeColor=none;fillColor=none;align=left;verticalAlign=top;spacingLeft=6;overflow=hidden;fontSize=10;" value="+ new() → DiskManager&#xa;+ save_table(name, rows)&#xa;+ load_table(name) → Vec&lt;Row&gt;&#xa;+ save_schema(table, schema)&#xa;+ load_schema(table) → Option&lt;TableSchema&gt;&#xa;+ save_schema_columns(table, cols)&#xa;+ list_tables() → Vec&lt;String&gt;&#xa;+ delete_table(table)&#xa;+ save_views(views)&#xa;+ save_index_meta(meta_list)&#xa;+ load_index_meta() → Vec&lt;IndexMeta&gt;&#xa;+ lz4_compress(data) → Vec&lt;u8&gt;&#xa;+ lz4_decompress(data) → Vec&lt;u8&gt;" vertex="1">
+          <mxGeometry height="196" width="240" y="69" as="geometry" />
+        </mxCell>
+        <mxCell id="bJCErecHmzuW28eIUsMe-302" parent="bJCErecHmzuW28eIUsMe-297" style="swimlane;fontStyle=1;startSize=23;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=11;" value="IndexMeta" vertex="1">
+          <mxGeometry height="78" width="180" x="272.52" y="40" as="geometry" />
+        </mxCell>
+        <mxCell id="bJCErecHmzuW28eIUsMe-303" parent="bJCErecHmzuW28eIUsMe-302" style="text;strokeColor=none;fillColor=none;align=left;verticalAlign=top;spacingLeft=6;overflow=hidden;fontSize=10;" value="+ name: String&#xa;+ table: String&#xa;+ columns: Vec&lt;String&gt;" vertex="1">
+          <mxGeometry height="55" width="180" y="23" as="geometry" />
+        </mxCell>
+        <mxCell id="bJCErecHmzuW28eIUsMe-304" parent="bJCErecHmzuW28eIUsMe-297" style="swimlane;fontStyle=1;startSize=23;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=11;" value="BPlusTree" vertex="1">
+          <mxGeometry height="200" width="190" x="262.52" y="145" as="geometry" />
+        </mxCell>
+        <mxCell id="bJCErecHmzuW28eIUsMe-305" parent="bJCErecHmzuW28eIUsMe-304" style="text;strokeColor=none;fillColor=none;align=left;verticalAlign=top;spacingLeft=6;overflow=hidden;fontSize=10;" value="- root: Option&lt;Box&lt;Node&gt;&gt;&#xa;~ ORDER: usize = 16" vertex="1">
+          <mxGeometry height="38" width="190" y="23" as="geometry" />
+        </mxCell>
+        <mxCell id="bJCErecHmzuW28eIUsMe-306" parent="bJCErecHmzuW28eIUsMe-304" style="line;strokeColor=#d79b00;fillColor=none;" value="" vertex="1">
+          <mxGeometry height="8" width="190" y="61" as="geometry" />
+        </mxCell>
+        <mxCell id="bJCErecHmzuW28eIUsMe-307" parent="bJCErecHmzuW28eIUsMe-304" style="text;strokeColor=none;fillColor=none;align=left;verticalAlign=top;spacingLeft=6;overflow=hidden;fontSize=10;" value="+ new() → BPlusTree&#xa;+ insert(key: String, value: String)&#xa;+ search(key: &amp;str) → Option&lt;String&gt;&#xa;+ search_range(start, end)&#xa;  → Vec&lt;(String, String)&gt;&#xa;+ delete(key: &amp;str)&#xa;+ scan_from_node(node, end)&#xa;+ collect_all_kv()&#xa;  → Vec&lt;(String, String)&gt;" vertex="1">
+          <mxGeometry height="131" width="190" y="69" as="geometry" />
+        </mxCell>
+        <mxCell id="bJCErecHmzuW28eIUsMe-308" parent="bJCErecHmzuW28eIUsMe-297" style="swimlane;fontStyle=1;startSize=23;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=11;" value="CompositeIndex" vertex="1">
+          <mxGeometry height="93" width="200" x="467.52" y="40" as="geometry" />
+        </mxCell>
+        <mxCell id="bJCErecHmzuW28eIUsMe-309" parent="bJCErecHmzuW28eIUsMe-308" style="textstrokeColor=none;fillColor=none;align=left;verticalAlign=top;spacingLeft=6;overflow=hidden;fontSize=10;strokeColor=none;" value="+ insert(keys, value)&#xa;+ search(keys) → Option&lt;String&gt;&#xa;+ search_range(keys) → Vec&lt;String&gt;&#xa;+ delete(keys)" vertex="1">
+          <mxGeometry height="70" width="200" y="23" as="geometry" />
+        </mxCell>
+        <mxCell id="bJCErecHmzuW28eIUsMe-310" parent="bJCErecHmzuW28eIUsMe-297" style="swimlane;fontStyle=1;startSize=23;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=11;" value="BufferPool" vertex="1">
+          <mxGeometry height="215" width="200" x="467.52" y="145" as="geometry" />
+        </mxCell>
+        <mxCell id="bJCErecHmzuW28eIUsMe-311" parent="bJCErecHmzuW28eIUsMe-310" style="text;strokeColor=none;fillColor=none;align=left;verticalAlign=top;spacingLeft=6;overflow=hidden;fontSize=10;" value="- cache: VecDeque&lt;(String, u64, Vec&lt;Row&gt;)&gt;&#xa;- capacity: usize&#xa;~ BUFFER_POOL_SIZE: usize = 64&#xa;+ hit_count: u64&#xa;+ miss_count: u64" vertex="1">
+          <mxGeometry height="83" width="200" y="23" as="geometry" />
+        </mxCell>
+        <mxCell id="bJCErecHmzuW28eIUsMe-312" parent="bJCErecHmzuW28eIUsMe-310" style="line;strokeColor=#d79b00;fillColor=none;" value="" vertex="1">
+          <mxGeometry height="8" width="200" y="106" as="geometry" />
+        </mxCell>
+        <mxCell id="bJCErecHmzuW28eIUsMe-313" parent="bJCErecHmzuW28eIUsMe-310" style="text;strokeColor=none;fillColor=none;align=left;verticalAlign=top;spacingLeft=6;overflow=hidden;fontSize=10;" value="+ get(table, page_id) → Option&lt;Vec&lt;Row&gt;&gt;&#xa;+ put(table, page_id, rows)&#xa;+ evict_lru()&#xa;+ flush_all(disk)&#xa;+ invalidate(table)&#xa;+ hit_rate() → f64" vertex="1">
+          <mxGeometry height="101" width="200" y="114" as="geometry" />
+        </mxCell>
+        <mxCell id="bJCErecHmzuW28eIUsMe-314" parent="bJCErecHmzuW28eIUsMe-297" style="swimlane;fontStyle=1;startSize=23;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=11;" value="Page" vertex="1">
+          <mxGeometry height="108" width="140" x="10" y="317.48" as="geometry" />
+        </mxCell>
+        <mxCell id="bJCErecHmzuW28eIUsMe-315" parent="bJCErecHmzuW28eIUsMe-314" style="text;strokeColor=none;fillColor=none;align=left;verticalAlign=top;spacingLeft=6;overflow=hidden;fontSize=9;" value="+ table_name: String&#xa;+ rows: Vec&lt;Row&gt;&#xa;+ is_dirty: bool&#xa;~ PAGE_SIZE: usize = 16384&#xa;~ MAGIC: u32 = 0x52444200" vertex="1">
+          <mxGeometry height="85" width="140" y="23" as="geometry" />
+        </mxCell>
+        <mxCell id="bJCErecHmzuW28eIUsMe-316" edge="1" parent="bJCErecHmzuW28eIUsMe-297" source="bJCErecHmzuW28eIUsMe-298" style="edgeStyle=orthogonalEdgeStyle;fontSize=9;dashed=1;endArrow=open;" target="bJCErecHmzuW28eIUsMe-302" value="saves / loads">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="bJCErecHmzuW28eIUsMe-317" edge="1" parent="bJCErecHmzuW28eIUsMe-297" source="bJCErecHmzuW28eIUsMe-310" style="edgeStyle=orthogonalEdgeStyle;fontSize=9;endArrow=diamond;endFill=1;" target="bJCErecHmzuW28eIUsMe-314" value="cache">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="580" y="371" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="bJCErecHmzuW28eIUsMe-318" parent="1" style="swimlane;startSize=30;fillColor=#f5f5f5;strokeColor=#555555;fontColor=#333333;fontStyle=1;fontSize=12;" value="[ transaction ]" vertex="1">
+          <mxGeometry height="437.48" width="610" x="2231.4443766276045" y="1910.52" as="geometry" />
+        </mxCell>
+        <mxCell id="bJCErecHmzuW28eIUsMe-319" parent="bJCErecHmzuW28eIUsMe-318" style="swimlane;fontStyle=1;startSize=23;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=11;" value="TxnManager" vertex="1">
+          <mxGeometry height="266" width="190" x="10" y="40" as="geometry" />
+        </mxCell>
+        <mxCell id="bJCErecHmzuW28eIUsMe-320" parent="bJCErecHmzuW28eIUsMe-319" style="text;strokeColor=none;fillColor=none;align=left;verticalAlign=top;spacingLeft=6;overflow=hidden;fontSize=10;" value="- active: bool&#xa;- txn_id: u64&#xa;- undo_log: UndoLogFile&#xa;+ isolation_level: IsolationLevel&#xa;- savepoints: Vec&lt;(String, usize)&gt;" vertex="1">
+          <mxGeometry height="80" width="190" y="23" as="geometry" />
+        </mxCell>
+        <mxCell id="bJCErecHmzuW28eIUsMe-321" parent="bJCErecHmzuW28eIUsMe-319" style="line;strokeColor=#9673a6;fillColor=none;" value="" vertex="1">
+          <mxGeometry height="8" width="190" y="103" as="geometry" />
+        </mxCell>
+        <mxCell id="bJCErecHmzuW28eIUsMe-322" parent="bJCErecHmzuW28eIUsMe-319" style="text;strokeColor=none;fillColor=none;align=left;verticalAlign=top;spacingLeft=6;overflow=hidden;fontSize=10;" value="+ begin() → u64&#xa;+ commit() → Result&lt;&gt;&#xa;+ rollback() → Result&lt;&gt;&#xa;+ rollback_to_savepoint(name)&#xa;+ add_undo_entry(entry: UndoEntry)&#xa;+ is_active() → bool&#xa;+ current_txn_id() → u64&#xa;+ wal_records() → Vec&lt;WalRecord&gt;&#xa;+ wal_size() → u64&#xa;+ wal_clear()" vertex="1">
+          <mxGeometry height="155" width="190" y="111" as="geometry" />
+        </mxCell>
+        <mxCell id="bJCErecHmzuW28eIUsMe-323" parent="bJCErecHmzuW28eIUsMe-318" style="swimlane;fontStyle=1;startSize=23;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=11;" value="WalManager" vertex="1">
+          <mxGeometry height="208" width="210" x="220" y="40" as="geometry" />
+        </mxCell>
+        <mxCell id="bJCErecHmzuW28eIUsMe-324" parent="bJCErecHmzuW28eIUsMe-323" style="text;strokeColor=none;fillColor=none;align=left;verticalAlign=top;spacingLeft=6;overflow=hidden;fontSize=9;" value="- path: String&#xa;~ WAL_PATH: &amp;str = &quot;rustdb.wal&quot;&#xa;~ AUTO_CHECKPOINT: u64 = 524288" vertex="1">
+          <mxGeometry height="52" width="210" y="23" as="geometry" />
+        </mxCell>
+        <mxCell id="bJCErecHmzuW28eIUsMe-325" parent="bJCErecHmzuW28eIUsMe-323" style="line;strokeColor=#9673a6;fillColor=none;" value="" vertex="1">
+          <mxGeometry height="8" width="210" y="75" as="geometry" />
+        </mxCell>
+        <mxCell id="bJCErecHmzuW28eIUsMe-326" parent="bJCErecHmzuW28eIUsMe-323" style="text;strokeColor=none;fillColor=none;align=left;verticalAlign=top;spacingLeft=6;overflow=hidden;fontSize=10;" value="+ append(record: WalRecord)&#xa;+ replay(dir: &amp;str) → Vec&lt;UndoEntry&gt;&#xa;+ checkpoint()&#xa;+ auto_checkpoint_if_needed()&#xa;+ read_all() → Vec&lt;WalRecord&gt;&#xa;+ clear()&#xa;+ file_size() → u64&#xa;+ should_checkpoint() → bool" vertex="1">
+          <mxGeometry height="125" width="210" y="83" as="geometry" />
+        </mxCell>
+        <mxCell id="bJCErecHmzuW28eIUsMe-327" parent="bJCErecHmzuW28eIUsMe-318" style="swimlane;fontStyle=1;startSize=23;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=11;" value="GroupCommitCoordinator" vertex="1">
+          <mxGeometry height="153" width="150" x="450" y="40" as="geometry" />
+        </mxCell>
+        <mxCell id="bJCErecHmzuW28eIUsMe-328" parent="bJCErecHmzuW28eIUsMe-327" style="text;strokeColor=none;fillColor=none;align=left;verticalAlign=top;spacingLeft=6;overflow=hidden;fontSize=9;" value="- pending: Mutex&lt;Vec&lt;&#xa;  (u64, Vec&lt;WalRecord&gt;)&gt;&gt;&#xa;- batch_size: usize" vertex="1">
+          <mxGeometry height="52" width="150" y="23" as="geometry" />
+        </mxCell>
+        <mxCell id="bJCErecHmzuW28eIUsMe-329" parent="bJCErecHmzuW28eIUsMe-327" style="line;strokeColor=#9673a6;fillColor=none;" value="" vertex="1">
+          <mxGeometry height="8" width="150" y="75" as="geometry" />
+        </mxCell>
+        <mxCell id="bJCErecHmzuW28eIUsMe-330" parent="bJCErecHmzuW28eIUsMe-327" style="text;strokeColor=none;fillColor=none;align=left;verticalAlign=top;spacingLeft=6;overflow=hidden;fontSize=9;" value="+ submit(txn_id, records)&#xa;  → JoinHandle&lt;&gt;&#xa;+ flush_group(&#xa;  wal: &amp;WalManager)&#xa;  (단일 fsync)" vertex="1">
+          <mxGeometry height="70" width="150" y="83" as="geometry" />
+        </mxCell>
+        <mxCell id="bJCErecHmzuW28eIUsMe-331" parent="bJCErecHmzuW28eIUsMe-318" style="swimlane;fontStyle=1;startSize=23;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=11;" value="UndoEntry" vertex="1">
+          <mxGeometry height="93" width="190" x="10" y="320" as="geometry" />
+        </mxCell>
+        <mxCell id="bJCErecHmzuW28eIUsMe-332" parent="bJCErecHmzuW28eIUsMe-331" style="text;strokeColor=none;fillColor=none;align=left;verticalAlign=top;spacingLeft=6;overflow=hidden;fontSize=10;" value="+ operation: String&#xa;+ table: String&#xa;+ key: String&#xa;+ old_data: Option&lt;String&gt;" vertex="1">
+          <mxGeometry height="70" width="190" y="23" as="geometry" />
+        </mxCell>
+        <mxCell id="bJCErecHmzuW28eIUsMe-333" parent="bJCErecHmzuW28eIUsMe-318" style="swimlane;fontStyle=1;startSize=23;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=11;" value="WalRecord" vertex="1">
+          <mxGeometry height="93" width="170" x="220" y="320" as="geometry" />
+        </mxCell>
+        <mxCell id="bJCErecHmzuW28eIUsMe-334" parent="bJCErecHmzuW28eIUsMe-333" style="text;strokeColor=none;fillColor=none;align=left;verticalAlign=top;spacingLeft=6;overflow=hidden;fontSize=10;" value="+ op: WalOp&#xa;+ table_name: String&#xa;+ key: String&#xa;+ data: String" vertex="1">
+          <mxGeometry height="70" width="170" y="23" as="geometry" />
+        </mxCell>
+        <mxCell id="bJCErecHmzuW28eIUsMe-335" parent="bJCErecHmzuW28eIUsMe-318" style="swimlane;fontStyle=3;startSize=23;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=11;" value="«enum» WalOp" vertex="1">
+          <mxGeometry height="123" width="150" x="450" y="290" as="geometry" />
+        </mxCell>
+        <mxCell id="bJCErecHmzuW28eIUsMe-336" parent="bJCErecHmzuW28eIUsMe-335" style="text;strokeColor=none;fillColor=none;align=left;verticalAlign=top;spacingLeft=6;overflow=hidden;fontSize=10;" value="Insert    = 0x01&#xa;Update    = 0x02&#xa;Delete    = 0x03&#xa;Commit    = 0xFF&#xa;Rollback  = 0xFE&#xa;Checkpoint= 0xFD" vertex="1">
+          <mxGeometry height="100" width="150" y="23" as="geometry" />
+        </mxCell>
+        <mxCell id="bJCErecHmzuW28eIUsMe-337" edge="1" parent="bJCErecHmzuW28eIUsMe-318" source="bJCErecHmzuW28eIUsMe-319" style="edgeStyle=orthogonalEdgeStyle;fontSize=9;endArrow=diamond;endFill=1;" target="bJCErecHmzuW28eIUsMe-323" value="wal">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="bJCErecHmzuW28eIUsMe-338" edge="1" parent="bJCErecHmzuW28eIUsMe-318" source="bJCErecHmzuW28eIUsMe-319" style="edgeStyle=orthogonalEdgeStyle;fontSize=9;endArrow=diamond;endFill=1;" target="bJCErecHmzuW28eIUsMe-331" value="undo_log">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="bJCErecHmzuW28eIUsMe-339" edge="1" parent="bJCErecHmzuW28eIUsMe-318" source="bJCErecHmzuW28eIUsMe-323" style="edgeStyle=orthogonalEdgeStyle;fontSize=9;endArrow=diamond;endFill=0;" target="bJCErecHmzuW28eIUsMe-333" value="records">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="bJCErecHmzuW28eIUsMe-340" edge="1" parent="bJCErecHmzuW28eIUsMe-318" source="bJCErecHmzuW28eIUsMe-333" style="edgeStyle=orthogonalEdgeStyle;fontSize=9;endArrow=open;" target="bJCErecHmzuW28eIUsMe-335" value="">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="bJCErecHmzuW28eIUsMe-341" edge="1" parent="bJCErecHmzuW28eIUsMe-318" source="bJCErecHmzuW28eIUsMe-327" style="edgeStyle=orthogonalEdgeStyle;fontSize=9;dashed=1;endArrow=open;" target="bJCErecHmzuW28eIUsMe-323" value="flush">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="bJCErecHmzuW28eIUsMe-342" edge="1" parent="1" source="bJCErecHmzuW28eIUsMe-264" style="edgeStyle=orthogonalEdgeStyle;fontSize=9;endArrow=diamond;endFill=1;" target="bJCErecHmzuW28eIUsMe-273" value="shared_db">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="bJCErecHmzuW28eIUsMe-343" edge="1" parent="1" source="bJCErecHmzuW28eIUsMe-264" style="edgeStyle=orthogonalEdgeStyle;fontSize=9;endArrow=diamond;endFill=1;" target="bJCErecHmzuW28eIUsMe-319" value="txn">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="bJCErecHmzuW28eIUsMe-344" edge="1" parent="1" source="bJCErecHmzuW28eIUsMe-264" style="edgeStyle=orthogonalEdgeStyle;fontSize=9;dashed=1;endArrow=open;" target="bJCErecHmzuW28eIUsMe-246" value="executes">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="2366" y="1610" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="bJCErecHmzuW28eIUsMe-345" edge="1" parent="1" source="bJCErecHmzuW28eIUsMe-273" style="edgeStyle=orthogonalEdgeStyle;fontSize=9;endArrow=diamond;endFill=1;" target="bJCErecHmzuW28eIUsMe-285" value="catalog">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="bJCErecHmzuW28eIUsMe-349" edge="1" parent="1" source="bJCErecHmzuW28eIUsMe-289" style="edgeStyle=orthogonalEdgeStyle;fontSize=9;dashed=1;endArrow=open;" target="bJCErecHmzuW28eIUsMe-252" value="columns">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>
