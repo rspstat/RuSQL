@@ -134,6 +134,14 @@ function App() {
   const [tabColWidths, setTabColWidths] = useState<Record<string, Record<number, number[]>>>({});
   const [tabSortState, setTabSortState] = useState<Record<string, Record<number, { col: number; dir: 'asc' | 'desc' } | null>>>({});
   const [tabResultSearch, setTabResultSearch] = useState<Record<string, string>>({});
+  const [editingCell, setEditingCell] = useState<{
+    resultIdx: number; rowIdx: number; colIdx: number;
+    tableName: string; pkColName: string; pkValue: string;
+  } | null>(null);
+  const [editingValue, setEditingValue] = useState("");
+  const cellEditCommittedRef = useRef(false);
+  const [editTableModal, setEditTableModal] = useState<{ table: string; cols: ColumnDetail[] } | null>(null);
+  const [editTableNewCol, setEditTableNewCol] = useState({ name: "", type: "VARCHAR(50)", notNull: false, defaultVal: "" });
   const [sidebarSearch, setSidebarSearch] = useState("");
   const [bookmarks, setBookmarks] = useState<{ id: string; name: string; sql: string }[]>(() => {
     try { return JSON.parse(localStorage.getItem("rustdb_bookmarks") ?? "[]"); } catch { return []; }
@@ -155,13 +163,14 @@ function App() {
   const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number } | null>(null);
   const [tableCtxMenu, setTableCtxMenu] = useState<{ x: number; y: number; table: string } | null>(null);
   const [dbCtxMenu, setDbCtxMenu] = useState<{ x: number; y: number; db: string } | null>(null);
+  const [viewCtxMenu, setViewCtxMenu] = useState<{ x: number; y: number; view: string } | null>(null);
+  const [indexCtxMenu, setIndexCtxMenu] = useState<{ x: number; y: number; index: string; table: string; kind: "single" | "composite" } | null>(null);
   const [editingTabId, setEditingTabId] = useState<string | null>(null);
   const [editingTabName, setEditingTabName] = useState("");
   const [isRunning, setIsRunning] = useState(false);
   const [queryHistory, setQueryHistory] = useState<HistoryEntry[]>([]);
   const [resultTab, setResultTab] = useState<"results" | "history">("results");
   const editorRef = useRef<Monaco.editor.IStandaloneCodeEditor | null>(null);
-  const schemaRef = useRef<{ tables: string[]; columns: Record<string, string[]> }>({ tables: [], columns: {} });
   const [resultHeight, setResultHeight] = useState(260);
   const [sidebarWidth, setSidebarWidth] = useState(240);
   const isDragging = useRef(false);
@@ -367,21 +376,13 @@ function App() {
   const sortState = tabSortState[activeTabId] ?? {};
   const resultSearch = tabResultSearch[activeTabId] ?? "";
 
-  // schemaRef 업데이트 (Monaco 자동완성용)
-  useEffect(() => {
-    const tables: string[] = [];
-    const columns: Record<string, string[]> = {};
-    for (const data of Object.values(dbData)) tables.push(...data.tables);
-    for (const [t, cols] of Object.entries(tableColumns)) columns[t] = cols.map(c => c.name);
-    schemaRef.current = { tables, columns };
-  }, [dbData, tableColumns]);
 
   // ─── 메뉴바 상태 ────────────────────────────────────────────
   const [openMenu, setOpenMenu] = useState<string | null>(null);
 
   // ─── 컨텍스트 메뉴 + 메뉴바 닫기 ────────────────────────────
   useEffect(() => {
-    const h = () => { setCtxMenu(null); setTableCtxMenu(null); setDbCtxMenu(null); setOpenMenu(null); };
+    const h = () => { setCtxMenu(null); setTableCtxMenu(null); setDbCtxMenu(null); setViewCtxMenu(null); setIndexCtxMenu(null); setOpenMenu(null); };
     window.addEventListener("click", h);
     return () => window.removeEventListener("click", h);
   }, []);
@@ -424,6 +425,47 @@ function App() {
     window.addEventListener("mouseup", onUp);
     return () => { window.removeEventListener("mousemove", onMove); window.removeEventListener("mouseup", onUp); };
   }, []);
+
+  // ─── ERD 자동 레이아웃 ──────────────────────────────────────
+  const autoLayoutErd = () => {
+    const allTables = Object.keys(erdColumns);
+    if (allTables.length === 0) return;
+    // FK 의존성: tbl → tbl이 참조하는 테이블들
+    const deps: Record<string, Set<string>> = {};
+    for (const t of allTables) deps[t] = new Set();
+    for (const [tbl, cols] of Object.entries(erdColumns)) {
+      for (const col of cols) {
+        if (col.fk_ref) {
+          const parsed = parseRef(col.fk_ref);
+          if (parsed) { const ref = unqualify(parsed.table); if (allTables.includes(ref)) deps[tbl].add(ref); }
+        }
+      }
+    }
+    // 깊이 계산 (참조 대상 = 0, 참조하는 쪽 = +1)
+    const depth: Record<string, number> = {};
+    const computing = new Set<string>();
+    const getDepth = (t: string): number => {
+      if (depth[t] !== undefined) return depth[t];
+      if (computing.has(t)) { depth[t] = 0; return 0; }
+      computing.add(t);
+      depth[t] = deps[t].size === 0 ? 0 : Math.max(...Array.from(deps[t]).map(d => getDepth(d) + 1));
+      computing.delete(t);
+      return depth[t];
+    };
+    for (const t of allTables) getDepth(t);
+    // 깊이별 그룹화 후 배치
+    const byDepth: Record<number, string[]> = {};
+    for (const t of allTables) { const d = depth[t]; (byDepth[d] = byDepth[d] ?? []).push(t); }
+    const maxDepth = Math.max(...Object.keys(byDepth).map(Number));
+    const COL_W = 280, ROW_GAP = 30;
+    const cardH = (t: string) => ERD_HEADER_H + (erdColumns[t]?.length ?? 0) * ERD_COL_H + 8;
+    const positions: Record<string, ErdPos> = {};
+    for (let d = 0; d <= maxDepth; d++) {
+      let y = 40;
+      for (const t of byDepth[d] ?? []) { positions[t] = { x: 40 + d * COL_W, y }; y += cardH(t) + ROW_GAP; }
+    }
+    setErdPositions(positions);
+  };
 
   // ─── ERD 테이블 데이터 로드 ─────────────────────────────────
   const loadErdTableData = async (tbl: string) => {
@@ -726,6 +768,135 @@ function App() {
   const handleCopyTableName = (t: string) => {
     navigator.clipboard.writeText(t);
     setTableCtxMenu(null);
+  };
+
+  const runViewCtxQuery = async (q: string, dropView?: string) => {
+    setViewCtxMenu(null);
+    setEditorQuery(q);
+    setTabResults(p => ({ ...p, [activeTabId]: [] }));
+    setTabResultPages(p => ({ ...p, [activeTabId]: {} }));
+    setTabColWidths(p => ({ ...p, [activeTabId]: {} }));
+    setIsRunning(true);
+    setActiveView("editor");
+    try {
+      const res = await invoke<MultiQueryResult>("execute_query", { query: q, ts: Date.now() });
+      setTabResults(p => ({ ...p, [activeTabId]: res.results }));
+      await refreshSidebar();
+      if (dropView) setExpandedViews(prev => { const s = new Set(prev); s.delete(dropView); return s; });
+    } catch (e) {
+      setTabResults(p => ({ ...p, [activeTabId]: [{ columns: [], rows: [], message: String(e), elapsed: 0, success: false }] }));
+    } finally {
+      setIsRunning(false);
+    }
+  };
+
+  const runIndexCtxQuery = async (q: string, dropIndex?: string) => {
+    setIndexCtxMenu(null);
+    setEditorQuery(q);
+    setTabResults(p => ({ ...p, [activeTabId]: [] }));
+    setTabResultPages(p => ({ ...p, [activeTabId]: {} }));
+    setTabColWidths(p => ({ ...p, [activeTabId]: {} }));
+    setIsRunning(true);
+    setActiveView("editor");
+    try {
+      const res = await invoke<MultiQueryResult>("execute_query", { query: q, ts: Date.now() });
+      setTabResults(p => ({ ...p, [activeTabId]: res.results }));
+      await refreshSidebar();
+      if (dropIndex) setExpandedIndexes(prev => { const s = new Set(prev); s.delete(dropIndex); return s; });
+    } catch (e) {
+      setTabResults(p => ({ ...p, [activeTabId]: [{ columns: [], rows: [], message: String(e), elapsed: 0, success: false }] }));
+    } finally {
+      setIsRunning(false);
+    }
+  };
+
+  // ─── Edit Table 모달 ──────────────────────────────────────────
+  const openEditTableModal = async (table: string) => {
+    setTableCtxMenu(null);
+    let cols = tableColumns[table];
+    if (!cols) {
+      cols = await invoke<ColumnDetail[]>("get_columns_detail", { table });
+      setTableColumns(p => ({ ...p, [table]: cols }));
+    }
+    setEditTableModal({ table, cols });
+    setEditTableNewCol({ name: "", type: "VARCHAR(50)", notNull: false, defaultVal: "" });
+  };
+
+  const refreshEditTableModal = async (table: string) => {
+    const cols = await invoke<ColumnDetail[]>("get_columns_detail", { table });
+    setTableColumns(p => ({ ...p, [table]: cols }));
+    setEditTableModal({ table, cols });
+  };
+
+  const dropColumn = async (table: string, colName: string) => {
+    if (!window.confirm(`"${table}.${colName}" 컬럼을 삭제하시겠습니까?`)) return;
+    try {
+      await invoke<MultiQueryResult>("execute_query", { query: `ALTER TABLE ${table} DROP COLUMN ${colName};`, ts: Date.now() });
+      await refreshEditTableModal(table);
+      await refreshSidebar();
+    } catch (e) { window.alert(String(e)); }
+  };
+
+  const addColumn = async () => {
+    if (!editTableModal || !editTableNewCol.name.trim()) return;
+    const { table } = editTableModal;
+    let sql = `ALTER TABLE ${table} ADD COLUMN ${editTableNewCol.name.trim()} ${editTableNewCol.type}`;
+    if (editTableNewCol.notNull) sql += " NOT NULL";
+    if (editTableNewCol.defaultVal.trim()) sql += ` DEFAULT ${editTableNewCol.defaultVal.trim()}`;
+    sql += ";";
+    try {
+      await invoke<MultiQueryResult>("execute_query", { query: sql, ts: Date.now() });
+      setEditTableNewCol({ name: "", type: "VARCHAR(50)", notNull: false, defaultVal: "" });
+      await refreshEditTableModal(table);
+      await refreshSidebar();
+    } catch (e) { window.alert(String(e)); }
+  };
+
+  const extractTableName = (sql: string): string | null => {
+    if (/\bJOIN\b/i.test(sql)) return null;
+    const m = sql.match(/\bFROM\s+(\w+)\b/i);
+    return m ? m[1] : null;
+  };
+
+  const handleCellDoubleClick = async (
+    resultIdx: number, rowIdx: number, colIdx: number,
+    currentValue: string, row: string[], columns: string[]
+  ) => {
+    const sql = editorRef.current?.getValue() ?? queryRef.current;
+    const tableName = extractTableName(sql);
+    if (!tableName) return;
+
+    let cols = tableColumns[tableName];
+    if (!cols) {
+      cols = await invoke<ColumnDetail[]>("get_columns_detail", { table: tableName });
+      setTableColumns(p => ({ ...p, [tableName]: cols }));
+    }
+
+    const pkCol = cols.find(c => c.is_pk);
+    if (!pkCol) return;
+
+    const pkColIdx = columns.indexOf(pkCol.name);
+    if (pkColIdx === -1) return;
+
+    cellEditCommittedRef.current = false;
+    setEditingCell({ resultIdx, rowIdx, colIdx, tableName, pkColName: pkCol.name, pkValue: row[pkColIdx] });
+    setEditingValue(currentValue);
+  };
+
+  const commitCellEdit = async () => {
+    if (!editingCell || cellEditCommittedRef.current) return;
+    cellEditCommittedRef.current = true;
+    const { tableName, pkColName, pkValue, resultIdx, colIdx } = editingCell;
+    const colName = results[resultIdx].columns[colIdx];
+    const newVal = editingValue;
+    setEditingCell(null);
+    const isNum = newVal.trim() !== "" && !isNaN(Number(newVal));
+    const quoted = isNum ? newVal : `'${newVal.replace(/'/g, "''")}'`;
+    const q = `UPDATE ${tableName} SET ${colName} = ${quoted} WHERE ${pkColName} = ${pkValue};`;
+    try {
+      await invoke<MultiQueryResult>("execute_query", { query: q, ts: Date.now() });
+      await runQuery();
+    } catch {}
   };
 
   // ─── ERD 로드 ────────────────────────────────────────────────
@@ -1381,6 +1552,11 @@ function App() {
                               <div
                                 className={`sidebar-item sidebar-item-nested ${expandedViews.has(v) ? "active" : ""}`}
                                 onClick={() => toggleView(v)}
+                                onContextMenu={e => {
+                                  e.preventDefault();
+                                  e.stopPropagation();
+                                  setViewCtxMenu({ x: e.clientX, y: e.clientY, view: v });
+                                }}
                               >
                                 <span className="sidebar-arrow">{expandedViews.has(v) ? "▼" : "▶"}</span>
                                 <span className="sidebar-view-icon">◈</span>
@@ -1418,6 +1594,11 @@ function App() {
                               <div
                                 className={`sidebar-item sidebar-item-nested sidebar-index-item ${expandedIndexes.has(idx.name) ? "active" : ""}`}
                                 onClick={() => toggleIndex(idx.name)}
+                                onContextMenu={e => {
+                                  e.preventDefault();
+                                  e.stopPropagation();
+                                  setIndexCtxMenu({ x: e.clientX, y: e.clientY, index: idx.name, table: idx.table, kind: idx.kind });
+                                }}
                               >
                                 <span className="sidebar-arrow">{expandedIndexes.has(idx.name) ? "▼" : "▶"}</span>
                                 <span className="sidebar-index-icon">{idx.kind === "composite" ? "⋈" : "⌗"}</span>
@@ -1490,60 +1671,175 @@ function App() {
 
           {/* DB 우클릭 컨텍스트 메뉴 */}
           {dbCtxMenu && (
-            <div
-              className="ctx-menu table-ctx-menu"
-              style={{ top: dbCtxMenu.y, left: dbCtxMenu.x }}
-              onClick={e => e.stopPropagation()}
-            >
-              <div className="ctx-menu-header">{dbCtxMenu.db}</div>
-              <div className="ctx-divider" />
-              <div onClick={async () => {
-                setDbCtxMenu(null);
-                await invoke<MultiQueryResult>("execute_query", { query: `USE ${dbCtxMenu.db};`, ts: Date.now() });
-                await refreshSidebar();
-              }}>Set as Default Schema</div>
-              <div className="ctx-divider" />
-              <div onClick={() => {
-                setDbCtxMenu(null);
-                setEditorQuery(
-                  `CREATE TABLE ${dbCtxMenu.db}.table_name (\n  id INT PRIMARY KEY AUTO INCREMENT,\n  name VARCHAR(50) NOT NULL\n);`
-                );
-              }}>Create Table...</div>
-              <div className="ctx-divider" />
-              <div onClick={() => {
-                navigator.clipboard.writeText(dbCtxMenu.db);
-                setDbCtxMenu(null);
-              }}>Copy Schema Name</div>
-              <div className="ctx-divider" />
-              <div className="ctx-item-danger" onClick={() => runDbCtxQuery(`DROP DATABASE ${dbCtxMenu.db};`)}>
-                Drop Schema...
+            <>
+              <div style={{ position: "fixed", inset: 0, zIndex: 999 }} onClick={() => setDbCtxMenu(null)} />
+              <div
+                className="ctx-menu table-ctx-menu"
+                style={{ top: dbCtxMenu.y, left: dbCtxMenu.x, zIndex: 1000 }}
+              >
+                <div className="ctx-menu-header">{dbCtxMenu.db}</div>
+                <div className="ctx-divider" />
+                <div onClick={async () => {
+                  setDbCtxMenu(null);
+                  await invoke<MultiQueryResult>("execute_query", { query: `USE ${dbCtxMenu.db};`, ts: Date.now() });
+                  await refreshSidebar();
+                }}>Set as Default Schema</div>
+                <div className="ctx-divider" />
+                <div onClick={() => {
+                  setDbCtxMenu(null);
+                  setEditorQuery(
+                    `CREATE TABLE ${dbCtxMenu.db}.table_name (\n  id INT PRIMARY KEY AUTO INCREMENT,\n  name VARCHAR(50) NOT NULL\n);`
+                  );
+                }}>Create Table...</div>
+                <div className="ctx-divider" />
+                <div onClick={() => {
+                  navigator.clipboard.writeText(dbCtxMenu.db);
+                  setDbCtxMenu(null);
+                }}>Copy Schema Name</div>
+                <div className="ctx-divider" />
+                <div className="ctx-item-danger" onClick={() => runDbCtxQuery(`DROP DATABASE ${dbCtxMenu.db};`)}>
+                  Drop Schema...
+                </div>
               </div>
-            </div>
+            </>
           )}
 
           {/* 테이블 우클릭 컨텍스트 메뉴 */}
           {tableCtxMenu && (
-            <div
-              className="ctx-menu table-ctx-menu"
-              style={{ top: tableCtxMenu.y, left: tableCtxMenu.x }}
-              onClick={e => e.stopPropagation()}
-            >
-              <div className="ctx-menu-header">{tableCtxMenu.table}</div>
-              <div className="ctx-divider" />
-              <div onClick={() => runCtxQuery(`SELECT * FROM ${tableCtxMenu.table};`)}>Select Rows</div>
-              <div onClick={() => runCtxQuery(`SELECT * FROM ${tableCtxMenu.table} LIMIT 100;`)}>Select Rows (LIMIT 100)</div>
-              <div onClick={() => runCtxQuery(`DESCRIBE ${tableCtxMenu.table};`)}>Describe Table</div>
-              <div onClick={() => runCtxQuery(`SHOW CREATE TABLE ${tableCtxMenu.table};`)}>Show Create Table</div>
-              <div className="ctx-divider" />
-              <div onClick={() => handleCopyTableName(tableCtxMenu.table)}>Copy Table Name</div>
-              <div onClick={() => {
-                navigator.clipboard.writeText(`INSERT INTO ${tableCtxMenu.table} VALUES ();`);
-                setTableCtxMenu(null);
-              }}>Copy as INSERT</div>
-              <div className="ctx-divider" />
-              <div className="ctx-item-warn" onClick={() => runCtxQuery(`TRUNCATE TABLE ${tableCtxMenu.table};`)}>Truncate Table</div>
-              <div className="ctx-item-danger" onClick={() => runCtxQuery(`DROP TABLE ${tableCtxMenu.table};`, tableCtxMenu.table)}>
-                DROP Table
+            <>
+              <div style={{ position: "fixed", inset: 0, zIndex: 999 }} onClick={() => setTableCtxMenu(null)} />
+              <div
+                className="ctx-menu table-ctx-menu"
+                style={{ top: tableCtxMenu.y, left: tableCtxMenu.x, zIndex: 1000 }}
+              >
+                <div className="ctx-menu-header">{tableCtxMenu.table}</div>
+                <div className="ctx-divider" />
+                <div onClick={() => openEditTableModal(tableCtxMenu.table)}>Edit Table...</div>
+                <div className="ctx-divider" />
+                <div onClick={() => runCtxQuery(`SELECT * FROM ${tableCtxMenu.table};`)}>Select Rows</div>
+                <div onClick={() => runCtxQuery(`SELECT * FROM ${tableCtxMenu.table} LIMIT 100;`)}>Select Rows (LIMIT 100)</div>
+                <div onClick={() => runCtxQuery(`DESCRIBE ${tableCtxMenu.table};`)}>Describe Table</div>
+                <div onClick={() => runCtxQuery(`SHOW CREATE TABLE ${tableCtxMenu.table};`)}>Show Create Table</div>
+                <div className="ctx-divider" />
+                <div onClick={() => handleCopyTableName(tableCtxMenu.table)}>Copy Table Name</div>
+                <div onClick={() => {
+                  navigator.clipboard.writeText(`INSERT INTO ${tableCtxMenu.table} VALUES ();`);
+                  setTableCtxMenu(null);
+                }}>Copy as INSERT</div>
+                <div className="ctx-divider" />
+                <div className="ctx-item-warn" onClick={() => runCtxQuery(`TRUNCATE TABLE ${tableCtxMenu.table};`)}>Truncate Table</div>
+                <div className="ctx-item-danger" onClick={() => runCtxQuery(`DROP TABLE ${tableCtxMenu.table};`, tableCtxMenu.table)}>
+                  DROP Table
+                </div>
+              </div>
+            </>
+          )}
+
+          {/* 뷰 우클릭 컨텍스트 메뉴 */}
+          {viewCtxMenu && (
+            <>
+              <div style={{ position: "fixed", inset: 0, zIndex: 999 }} onClick={() => setViewCtxMenu(null)} />
+              <div
+                className="ctx-menu table-ctx-menu"
+                style={{ top: viewCtxMenu.y, left: viewCtxMenu.x, zIndex: 1000 }}
+              >
+                <div className="ctx-menu-header">{viewCtxMenu.view}</div>
+                <div className="ctx-divider" />
+                <div onClick={() => runViewCtxQuery(`SELECT * FROM ${viewCtxMenu.view};`)}>Select Rows</div>
+                <div onClick={() => runViewCtxQuery(`SELECT * FROM ${viewCtxMenu.view} LIMIT 100;`)}>Select Rows (LIMIT 100)</div>
+                <div onClick={() => runViewCtxQuery(`SHOW CREATE TABLE ${viewCtxMenu.view};`)}>Show Create View</div>
+                <div className="ctx-divider" />
+                <div onClick={() => { navigator.clipboard.writeText(viewCtxMenu.view); setViewCtxMenu(null); }}>Copy View Name</div>
+                <div className="ctx-divider" />
+                <div className="ctx-item-danger" onClick={() => runViewCtxQuery(`DROP VIEW ${viewCtxMenu.view};`, viewCtxMenu.view)}>
+                  Drop View
+                </div>
+              </div>
+            </>
+          )}
+
+          {/* 인덱스 우클릭 컨텍스트 메뉴 */}
+          {indexCtxMenu && (
+            <>
+              <div style={{ position: "fixed", inset: 0, zIndex: 999 }} onClick={() => setIndexCtxMenu(null)} />
+              <div
+                className="ctx-menu table-ctx-menu"
+                style={{ top: indexCtxMenu.y, left: indexCtxMenu.x, zIndex: 1000 }}
+              >
+                <div className="ctx-menu-header">{indexCtxMenu.index}</div>
+                <div className="ctx-divider" />
+                <div onClick={() => runIndexCtxQuery(`SHOW CREATE TABLE ${indexCtxMenu.table};`)}>Show Create Table</div>
+                <div className="ctx-divider" />
+                <div onClick={() => { navigator.clipboard.writeText(indexCtxMenu.index); setIndexCtxMenu(null); }}>Copy Index Name</div>
+                <div className="ctx-divider" />
+                <div className="ctx-item-danger" onClick={() => runIndexCtxQuery(`DROP INDEX ${indexCtxMenu.index} ON ${indexCtxMenu.table};`, indexCtxMenu.index)}>
+                  Drop Index
+                </div>
+              </div>
+            </>
+          )}
+
+          {/* Edit Table 모달 */}
+          {editTableModal && (
+            <div className="modal-overlay" onClick={() => setEditTableModal(null)}>
+              <div className="edit-table-modal" onClick={e => e.stopPropagation()}>
+                <div className="edit-table-header">
+                  <span>Edit Table: <strong>{editTableModal.table}</strong></span>
+                  <button className="edit-table-close" onClick={() => setEditTableModal(null)}>✕</button>
+                </div>
+                <div className="edit-table-body">
+                  <div className="edit-table-section">Columns</div>
+                  <table className="edit-table-cols">
+                    <thead><tr><th>Name</th><th>Type</th><th>Constraints</th><th></th></tr></thead>
+                    <tbody>
+                      {editTableModal.cols.map(col => (
+                        <tr key={col.name}>
+                          <td>{col.is_pk ? "🔑 " : ""}{col.name}</td>
+                          <td>{col.data_type}</td>
+                          <td className="edit-table-constraints">
+                            {[col.is_pk && "PK", col.is_not_null && "NOT NULL", col.is_unique && !col.is_pk && "UNIQUE", col.is_auto_inc && "AUTO_INC"].filter(Boolean).join(", ")}
+                          </td>
+                          <td>
+                            {!col.is_pk && (
+                              <button className="drop-col-btn" onClick={() => dropColumn(editTableModal.table, col.name)}>Drop</button>
+                            )}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                  <div className="edit-table-section" style={{ marginTop: 20 }}>Add Column</div>
+                  <div className="add-col-form">
+                    <input
+                      className="add-col-input"
+                      placeholder="Column name"
+                      value={editTableNewCol.name}
+                      onChange={e => setEditTableNewCol(p => ({ ...p, name: e.target.value }))}
+                      onKeyDown={e => { if (e.key === "Enter") addColumn(); }}
+                    />
+                    <select
+                      className="add-col-select"
+                      value={editTableNewCol.type}
+                      onChange={e => setEditTableNewCol(p => ({ ...p, type: e.target.value }))}
+                    >
+                      {["INT","BIGINT","VARCHAR(50)","VARCHAR(100)","VARCHAR(255)","TEXT","FLOAT","DOUBLE","DECIMAL(10,2)","BOOLEAN","DATE","DATETIME","TIMESTAMP"].map(t => (
+                        <option key={t} value={t}>{t}</option>
+                      ))}
+                    </select>
+                    <label className="add-col-check">
+                      <input type="checkbox" checked={editTableNewCol.notNull} onChange={e => setEditTableNewCol(p => ({ ...p, notNull: e.target.checked }))} />
+                      NOT NULL
+                    </label>
+                    <input
+                      className="add-col-input"
+                      placeholder="DEFAULT value (optional)"
+                      value={editTableNewCol.defaultVal}
+                      onChange={e => setEditTableNewCol(p => ({ ...p, defaultVal: e.target.value }))}
+                      onKeyDown={e => { if (e.key === "Enter") addColumn(); }}
+                    />
+                    <button className="add-col-btn" onClick={addColumn}>Add Column</button>
+                  </div>
+                </div>
               </div>
             </div>
           )}
@@ -1630,6 +1926,9 @@ function App() {
                   renderLineHighlight: "all",
                   automaticLayout: true,
                   padding: { top: 12 },
+                  quickSuggestions: false,
+                  suggestOnTriggerCharacters: false,
+                  wordBasedSuggestions: "off",
                 }}
                 beforeMount={monaco => {
                   // 커스텀 테마: vs-dark 기반, 주석만 회색으로
@@ -1700,52 +1999,6 @@ function App() {
                     },
                   } as Parameters<typeof monaco.languages.setMonarchTokensProvider>[1]);
 
-                  // SQL 자동완성
-                  monaco.languages.registerCompletionItemProvider("sql", {
-                    triggerCharacters: [" ", ".", "\n"],
-                    provideCompletionItems: (model: Monaco.editor.ITextModel, position: Monaco.Position) => {
-                      const word = model.getWordUntilPosition(position);
-                      const range = {
-                        startLineNumber: position.lineNumber,
-                        endLineNumber: position.lineNumber,
-                        startColumn: word.startColumn,
-                        endColumn: word.endColumn,
-                      };
-                      const { tables, columns } = schemaRef.current;
-                      const suggestions: Monaco.languages.CompletionItem[] = [];
-                      const kws = [
-                        "SELECT","FROM","WHERE","INSERT","INTO","VALUES","UPDATE","SET",
-                        "DELETE","CREATE","TABLE","DROP","ALTER","ADD","COLUMN","RENAME","TO",
-                        "JOIN","LEFT","RIGHT","INNER","ON","AND","OR","NOT",
-                        "ORDER","GROUP","BY","ASC","DESC","LIMIT","OFFSET","HAVING","IN",
-                        "BETWEEN","LIKE","AS","DISTINCT","UNION","ALL",
-                        "COUNT","SUM","AVG","MIN","MAX","GROUP_CONCAT",
-                        "INDEX","UNIQUE","VIEW","PRIMARY","KEY","FOREIGN","REFERENCES",
-                        "CASCADE","RESTRICT","NULL","AUTO","INCREMENT",
-                        "SHOW","TABLES","DESCRIBE","TRUNCATE","IS","IS NULL","IS NOT NULL",
-                        "BEGIN","COMMIT","ROLLBACK","SAVEPOINT",
-                        "CHECKPOINT","ISOLATION","LEVEL","VACUUM","EXPLAIN","USE","DATABASE",
-                        "IF","EXISTS","CASE","WHEN","THEN","ELSE","END","WITH","RECURSIVE",
-                        "COALESCE","IFNULL","NULLIF","CAST",
-                        "UPPER","LOWER","LENGTH","CONCAT","TRIM","SUBSTR","REPLACE","LPAD","RPAD",
-                        "ROUND","ABS","CEIL","FLOOR","MOD",
-                        "NOW","DATEDIFF","DATE_ADD","DATE_FORMAT","CURDATE",
-                        "INT","TEXT","FLOAT","BOOLEAN","VARCHAR","DATETIME","DATE","ENUM",
-                      ];
-                      for (const kw of kws) {
-                        suggestions.push({ label: kw, kind: monaco.languages.CompletionItemKind.Keyword, insertText: kw, range });
-                      }
-                      for (const t of tables) {
-                        suggestions.push({ label: t, kind: monaco.languages.CompletionItemKind.Class, insertText: t, range, detail: "table" });
-                      }
-                      for (const [tbl, cols] of Object.entries(columns)) {
-                        for (const col of cols) {
-                          suggestions.push({ label: col, kind: monaco.languages.CompletionItemKind.Field, insertText: col, range, detail: tbl });
-                        }
-                      }
-                      return { suggestions };
-                    },
-                  });
                 }}
                 onMount={(editor, monaco) => {
                   editorRef.current = editor;
@@ -1784,6 +2037,7 @@ function App() {
                     {results.every(r => r.success) ? `✓ ${results.length} query(s)` : "✗ Error"}
                   </div>
                 )}
+                {isRunning && <div className="query-progress-bar"><div className="query-progress-fill" /></div>}
               </div>
 
               {resultTab === "history" ? (
@@ -1846,7 +2100,7 @@ function App() {
                   </div>
                 )}
                 {results.length === 0 ? (
-                  <div className="result-empty">Ctrl+Enter 또는 ▶ Run 으로 쿼리를 실행하세요</div>
+                  <div className="result-empty">{isRunning ? "쿼리 실행 중..." : "Ctrl+Enter 또는 ▶ Run 으로 쿼리를 실행하세요"}</div>
                 ) : results.map((r, i) => (
                   <div key={i} className="result-block">
                     {!r.success ? (
@@ -1982,9 +2236,31 @@ function App() {
                               <tbody>{pageRows.map((row, ri) => (
                                 <tr key={ri}>
                                   <td className="result-rownum">{page * PAGE_SIZE + ri + 1}</td>
-                                  {row.map((cell, ci) => (
-                                    <td key={ci} style={colWidths[i] ? { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } : undefined}>{cell}</td>
-                                  ))}
+                                  {row.map((cell, ci) => {
+                                    const isEditing = editingCell?.resultIdx === i && editingCell.rowIdx === ri && editingCell.colIdx === ci;
+                                    return (
+                                      <td
+                                        key={ci}
+                                        style={colWidths[i] ? { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } : undefined}
+                                        onDoubleClick={() => handleCellDoubleClick(i, ri, ci, cell, row, r.columns)}
+                                      >
+                                        {isEditing ? (
+                                          <input
+                                            className="cell-edit-input"
+                                            value={editingValue}
+                                            autoFocus
+                                            onChange={e => setEditingValue(e.target.value)}
+                                            onBlur={commitCellEdit}
+                                            onKeyDown={e => {
+                                              if (e.key === "Enter") { e.preventDefault(); commitCellEdit(); }
+                                              if (e.key === "Escape") { e.preventDefault(); setEditingCell(null); }
+                                            }}
+                                            onClick={e => e.stopPropagation()}
+                                          />
+                                        ) : cell}
+                                      </td>
+                                    );
+                                  })}
                                 </tr>
                               ))}</tbody>
                             </table>
@@ -2057,6 +2333,7 @@ function App() {
               <span className="erd-table-count">{Object.keys(erdColumns).length} tables</span>
             </div>
             <div className="erd-header-right">
+              <button className="erd-tool-btn" onClick={autoLayoutErd} title="FK 기반 자동 배치">⊞ Auto Layout</button>
               <button className="erd-tool-btn" onClick={() => { setErdPan({ x: 40, y: 40 }); setErdZoom(1); }} title="Reset view">⊡ Reset</button>
               <button className="erd-tool-btn" onClick={loadErd} title="Refresh">↻ Refresh</button>
               <span className="erd-zoom-label">{Math.round(erdZoom * 100)}%</span>

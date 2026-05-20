@@ -1,0 +1,74 @@
+{
+  "name": "db1.sal",
+  "columns": [
+    {
+      "name": "id",
+      "data_type": "Int",
+      "primary_key": true,
+      "not_null": true,
+      "unique": false,
+      "unique_constraint_name": null,
+      "auto_increment": true,
+      "default": null,
+      "foreign_key": null,
+      "check_expr": null
+    },
+    {
+      "name": "eid",
+      "data_type": "Int",
+      "primary_key": false,
+      "not_null": false,
+      "unique": false,
+      "unique_constraint_name": null,
+      "auto_increment": false,
+      "default": null,
+      "foreign_key": {
+        "column": "eid",
+        "ref_table": "db1.emp",
+        "ref_column": "id",
+        "on_delete": "Cascade",
+        "on_update": "Restrict"
+      },
+      "check_expr": null
+    },
+    {
+      "name": "amount",
+      "data_type": "Int",
+      "primary_key": false,
+      "not_null": false,
+      "unique": false,
+      "unique_constraint_name": null,
+      "auto_increment": false,
+      "default": null,
+      "foreign_key": null,
+      "check_expr": "amount > 0"
+    },
+    {
+      "name": "grade",
+      "data_type": {
+        "Enum": [
+          "S1",
+          "S2",
+          "S3",
+          "S4",
+          "S5"
+        ]
+      },
+      "primary_key": false,
+      "not_null": false,
+      "unique": false,
+      "unique_constraint_name": null,
+      "auto_increment": false,
+      "default": null,
+      "foreign_key": null,
+      "check_expr": null
+    }
+  ],
+  "auto_increment_counters": {
+    "id": 6
+  },
+  "primary_key_columns": [
+    "id"
+  ],
+  "check_constraints": []
+}

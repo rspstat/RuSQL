@@ -266,3 +266,23 @@
 - [x] 사이드바 테이블 검색 — SCHEMAS 상단 검색 입력으로 테이블 이름 실시간 필터
 - [x] EXPLAIN 트리 시각화 — EXPLAIN / EXPLAIN ANALYZE 결과를 구조화된 카드(Access / Table / Condition 항목)로 렌더링
 - [x] BEGIN...END 블록 인식 쿼리 분리 — SQL 에디터에서 CREATE PROCEDURE / CREATE TRIGGER 등 BEGIN...END 포함 멀티 쿼리를 올바르게 분리·실행 (IF/ELSEIF/WHILE/LOOP/REPEAT/ITERATE 제어문 UI 검증 완료)
+- [x] 결과 셀 직접 편집 — 단일 테이블 SELECT 결과에서 셀 더블클릭 → 인풋 전환, Enter/blur 커밋 시 `UPDATE tableName SET col = val WHERE pk = pkVal` 자동 생성·실행 후 SELECT 재실행 (Escape = 취소, JOIN/PK 없는 경우 자동 비활성)
+
+### TCP 서버 / MySQL 프로토콜 (rustdb-server)
+- [x] 커스텀 텍스트 프로토콜 TCP 서버 — 포트 7878, `---END---` 구분자, 멀티 클라이언트 동시 접속, 세션별 독립 Executor
+- [x] MySQL wire protocol (포트 3306) — COM_QUERY / COM_PING / COM_INIT_DB / COM_STMT_PREPARE / COM_STMT_EXECUTE / COM_STMT_CLOSE / COM_STMT_RESET
+- [x] Prepared Statement — `?` 플레이스홀더 바인딩, 타입별 파라미터 디코딩 (TINY/SHORT/LONG/LONGLONG/FLOAT/DOUBLE/DATE/DATETIME/VAR_STRING)
+- [x] `SHOW FULL TABLES FROM db` — 엔진의 `SHOW TABLES` 실행 후 `Table_type` 컬럼(BASE TABLE/VIEW) 추가 → DBeaver 테이블 트리 정상 표시
+- [x] `SHOW FULL COLUMNS FROM table FROM db` — `DESCRIBE table` 실행 후 MySQL 전체 컬럼 구조(Collation/Privileges/Comment 포함)로 확장 → DBeaver 컬럼 패널 정상 표시
+- [x] `SHOW INDEX FROM table` / `SHOW INDEXES FROM` / `SHOW KEYS FROM` — 올바른 컬럼 구조(13개 컬럼)의 빈 결과 반환
+- [x] `SHOW TABLE STATUS FROM db` — MySQL TABLE STATUS 컬럼 구조(18개)의 빈 결과 반환
+- [x] `SHOW TRIGGERS FROM db` — 올바른 컬럼 구조의 빈 결과 반환
+- [x] `SHOW FUNCTION STATUS` / `SHOW PROCEDURE STATUS` — 올바른 컬럼 구조의 빈 결과 반환
+- [x] `SHOW EVENTS` — 올바른 컬럼 구조의 빈 결과 반환
+- [x] `SHOW COLLATION` — utf8 / utf8mb4 / latin1 실제 콜레이션 데이터 반환 (DBeaver 문자셋 초기화 정상 처리)
+- [x] `SHOW CHARACTER SET` / `SHOW CHARSET` — utf8 / utf8mb4 / latin1 실제 데이터 반환
+- [x] `SHOW ENGINES` — RustDB 엔진 정보 반환 (DBeaver 엔진 목록 초기화 정상 처리)
+- [x] `SHOW VARIABLES [LIKE 'pattern']` — 21개 주요 MySQL 시스템 변수 의미 있는 값 반환 (autocommit / character_set / collation / max_allowed_packet / tx_isolation 등), LIKE 패턴 필터링 지원
+- [x] `SELECT @@var1 AS a, @@var2 AS b, ...` — 다중 시스템 변수 SELECT를 컬럼별로 올바르게 파싱·반환 (DBeaver 접속 초기화 쿼리 정상 처리)
+- [x] `SELECT DATABASE()` / `SELECT SCHEMA()` / `SELECT USER()` — 각각 현재 DB / 현재 DB / 'root@localhost' 반환
+- [x] `SET ...` (charset / autocommit / session 변수 등) — 무조건 OK 반환

@@ -286,7 +286,7 @@
 | 항목 | MySQL | PostgreSQL | Oracle | RustDB |
 |------|-------|------------|--------|--------|
 | 공식 프로토콜 | MySQL Protocol (포트 3306) | PostgreSQL wire protocol (포트 5432) | Oracle SQL*Net / TNS (포트 1521) | 텍스트 기반 TCP (---END--- 구분자) |
-| MySQL wire protocol 호환 | ✓ | ✗ | ✗ | ✓ (포트 3306, mysql CLI / DBeaver 호환) |
+| MySQL wire protocol 호환 | ✓ | ✗ | ✗ | ✓ (포트 3306, mysql CLI / DBeaver 완전 연동 — SHOW VARIABLES/COLLATION/FULL TABLES/FULL COLUMNS 등 자동 쿼리 처리) |
 | 드라이버 호환 | JDBC, ODBC, Python, Go, Node.js | JDBC, ODBC, libpq, Python, Go, Node.js | JDBC (ojdbc), ODBC, OCI, Python (cx_Oracle) | rustdb-client CLI + MySQL 호환 클라이언트 |
 | 커넥션 풀 지원 | ✓ | ✓ | ✓ (DRCP) | ✗ |
 | Prepared Statements | ✓ | ✓ | ✓ | ✓ (PREPARE/EXECUTE/DEALLOCATE USING @var) |
@@ -299,9 +299,10 @@
 
 | 항목 | MySQL Workbench | pgAdmin / DBeaver | Oracle SQL Developer | RustDB UI |
 |------|-----------------|-------------------|----------------------|-----------|
-| 쿼리 에디터 | ✓ (구문 강조, 자동완성) | ✓ | ✓ | ✓ (Monaco, SQL 자동완성, BEGIN...END 블록 인식) |
-| ERD 다이어그램 | ✓ | ✓ | ✓ | ✓ (FK 관계선, 팬/줌, 카드 드래그) |
-| 결과 테이블 | ✓ (셀 편집 가능) | ✓ | ✓ (셀 편집 가능) | ✓ (컬럼 너비 조절, 100행 페이징, 헤더 정렬, 행 번호, 실시간 검색) |
+| 쿼리 에디터 | ✓ (구문 강조, 자동완성) | ✓ | ✓ | ✓ (Monaco 기반, SQL 구문 강조, BEGIN...END 블록 인식, Ctrl+Enter 실행, Ctrl+Shift+F 포맷) |
+| ERD 다이어그램 | ✓ | ✓ | ✓ | ✓ (FK 관계선, 팬/줌, 카드 드래그, FK 기반 Auto Layout) |
+| 사이드바 컨텍스트 메뉴 | ✓ (DB/테이블/뷰/인덱스 우클릭) | ✓ | ✓ | ✓ (DB/테이블/뷰/인덱스 우클릭, Edit Table 모달, Select/Describe/Drop 등) |
+| 결과 테이블 | ✓ (셀 편집 가능) | ✓ | ✓ (셀 편집 가능) | ✓ (컬럼 너비 조절, 100행 페이징, 헤더 정렬, 행 번호, 실시간 검색, 셀 편집) |
 | 히스토리 | ✓ | ✓ | ✓ | ✓ (200개 보존, 연결별 분리) |
 | 다중 탭 | ✓ | ✓ | ✓ | ✓ (탭별 결과·에디터 상태 유지) |
 | 연결 관리 | ✓ | ✓ | ✓ | ✓ (연결별 독립 데이터 디렉토리) |

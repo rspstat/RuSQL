@@ -391,71 +391,384 @@ fn send_resultset(s: &mut TcpStream, cols: Vec<String>, rows: Vec<Vec<String>>, 
     write_packet(s, seq, &eof_pkt())
 }
 
+// ── MySQL-specific compatibility helpers ───────────────────────
+
+/// Build a box-drawing table string (same format as the engine outputs).
+fn box_table(cols: &[&str], rows: &[Vec<String>]) -> String {
+    let mut widths: Vec<usize> = cols.iter().map(|c| c.len()).collect();
+    for row in rows {
+        for (i, cell) in row.iter().enumerate() {
+            if i < widths.len() { widths[i] = widths[i].max(cell.len()); }
+        }
+    }
+    let sep: String = widths.iter()
+        .map(|&w| format!("+{}", "-".repeat(w + 2)))
+        .collect::<String>() + "+";
+    let make_row = |cells: &[&str]| -> String {
+        let mut s = String::new();
+        for (i, &w) in widths.iter().enumerate() {
+            s += &format!("| {:<w$} ", cells.get(i).copied().unwrap_or(""), w = w);
+        }
+        s + "|"
+    };
+    let mut out = vec![sep.clone()];
+    out.push(make_row(cols));
+    out.push(sep.clone());
+    for row in rows {
+        let refs: Vec<&str> = row.iter().map(|s| s.as_str()).collect();
+        out.push(make_row(&refs));
+    }
+    out.push(sep);
+    out.push(format!("{} row(s) returned.", rows.len()));
+    out.join("\n")
+}
+
+/// Parse all @@[session.|global.]varname [AS alias] from a SELECT statement
+/// and return a result set with known MySQL variable values.
+fn handle_select_atvars(q: &str) -> String {
+    let known: &[(&str, &str)] = &[
+        ("auto_increment_increment", "1"),
+        ("autocommit", "ON"),
+        ("character_set_client", "utf8mb4"),
+        ("character_set_connection", "utf8mb4"),
+        ("character_set_results", "utf8mb4"),
+        ("character_set_server", "utf8mb4"),
+        ("collation_connection", "utf8mb4_general_ci"),
+        ("collation_server", "utf8mb4_general_ci"),
+        ("init_connect", ""),
+        ("interactive_timeout", "28800"),
+        ("license", "GPL"),
+        ("lower_case_table_names", "0"),
+        ("max_allowed_packet", "67108864"),
+        ("net_write_timeout", "60"),
+        ("query_cache_size", "0"),
+        ("query_cache_type", "OFF"),
+        ("sql_mode", ""),
+        ("system_time_zone", "UTC"),
+        ("time_zone", "SYSTEM"),
+        ("transaction_isolation", "READ-COMMITTED"),
+        ("tx_isolation", "READ-COMMITTED"),
+        ("version", "5.7.0-rustdb"),
+        ("version_comment", "RustDB"),
+        ("wait_timeout", "28800"),
+    ];
+    let mut cols: Vec<String> = Vec::new();
+    let mut vals: Vec<String> = Vec::new();
+    let bytes = q.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if i + 1 < bytes.len() && bytes[i] == b'@' && bytes[i + 1] == b'@' {
+            i += 2;
+            let chunk_up = q[i..].to_uppercase();
+            if chunk_up.starts_with("SESSION.") { i += 8; }
+            else if chunk_up.starts_with("GLOBAL.") { i += 7; }
+            let start = i;
+            while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') { i += 1; }
+            let var_name = q[start..i].to_lowercase();
+            while i < bytes.len() && bytes[i] == b' ' { i += 1; }
+            let alias = if q[i..].to_uppercase().starts_with("AS ") {
+                i += 3;
+                while i < bytes.len() && bytes[i] == b' ' { i += 1; }
+                let as0 = i;
+                while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') { i += 1; }
+                q[as0..i].to_string()
+            } else {
+                var_name.clone()
+            };
+            let value = known.iter().find(|(k, _)| *k == var_name.as_str())
+                .map(|(_, v)| v.to_string()).unwrap_or_default();
+            cols.push(alias);
+            vals.push(value);
+        } else { i += 1; }
+    }
+    if cols.is_empty() {
+        return box_table(&["result"], &[vec!["".to_string()]]);
+    }
+    let col_refs: Vec<&str> = cols.iter().map(|s| s.as_str()).collect();
+    box_table(&col_refs, &[vals])
+}
+
+/// Simple SHOW VARIABLES response with meaningful values.
+fn show_variables_result(up: &str) -> String {
+    let vars: &[(&str, &str)] = &[
+        ("autocommit", "ON"),
+        ("character_set_client", "utf8mb4"),
+        ("character_set_connection", "utf8mb4"),
+        ("character_set_results", "utf8mb4"),
+        ("character_set_server", "utf8mb4"),
+        ("collation_connection", "utf8mb4_general_ci"),
+        ("collation_server", "utf8mb4_general_ci"),
+        ("interactive_timeout", "28800"),
+        ("lower_case_table_names", "0"),
+        ("max_allowed_packet", "67108864"),
+        ("net_write_timeout", "60"),
+        ("query_cache_size", "0"),
+        ("query_cache_type", "OFF"),
+        ("sql_mode", ""),
+        ("system_time_zone", "UTC"),
+        ("time_zone", "SYSTEM"),
+        ("transaction_isolation", "READ-COMMITTED"),
+        ("tx_isolation", "READ-COMMITTED"),
+        ("version", "5.7.0-rustdb"),
+        ("version_comment", "RustDB"),
+        ("wait_timeout", "28800"),
+    ];
+    // Filter by LIKE pattern if present
+    let like_pat = if let Some(idx) = up.find(" LIKE ") {
+        let rest = &up[idx + 6..].trim_matches('\'');
+        let end = rest.find('\'').unwrap_or(rest.len());
+        Some(rest[..end].to_lowercase())
+    } else { None };
+    let rows: Vec<Vec<String>> = vars.iter()
+        .filter(|(k, _)| like_pat.as_ref().map_or(true, |pat| like_match(k, pat)))
+        .map(|(k, v)| vec![k.to_string(), v.to_string()])
+        .collect();
+    box_table(&["Variable_name", "Value"], &rows)
+}
+
+/// SQL LIKE pattern matching (% = any sequence, _ = one char).
+fn like_match(s: &str, pat: &str) -> bool {
+    fn inner(s: &[u8], p: &[u8]) -> bool {
+        match (s.is_empty(), p.is_empty()) {
+            (true, true) => return true,
+            (_, true) => return false,
+            _ => {}
+        }
+        if p[0] == b'%' { return inner(s, &p[1..]) || (!s.is_empty() && inner(&s[1..], p)); }
+        if s.is_empty() { return false; }
+        if p[0] == b'_' || p[0].to_ascii_lowercase() == s[0].to_ascii_lowercase() { return inner(&s[1..], &p[1..]); }
+        false
+    }
+    inner(s.as_bytes(), pat.as_bytes())
+}
+
+/// Extract first identifier after the first " FROM " in q.
+fn extract_first_from(q: &str) -> Option<String> {
+    let up = q.to_uppercase();
+    let idx = up.find(" FROM ")?;
+    let rest = q[idx + 6..].trim().trim_start_matches('`');
+    let end = rest.find(|c: char| !c.is_alphanumeric() && c != '_').unwrap_or(rest.len());
+    let s = &rest[..end];
+    if s.is_empty() || s.eq_ignore_ascii_case("WHERE") { None } else { Some(s.to_string()) }
+}
+
+/// Extract second identifier after the second " FROM " in q.
+fn extract_second_from(q: &str) -> Option<String> {
+    let up = q.to_uppercase();
+    let first = up.find(" FROM ")?;
+    let rest_up = &up[first + 6..];
+    let second = rest_up.find(" FROM ")?;
+    let pos = first + 6 + second + 6;
+    let rest = q[pos..].trim().trim_start_matches('`');
+    let end = rest.find(|c: char| !c.is_alphanumeric() && c != '_').unwrap_or(rest.len());
+    let s = &rest[..end];
+    if s.is_empty() { None } else { Some(s.to_string()) }
+}
+
+/// Execute a query directly through the parser+executor (no compat shims).
+fn exec_inner(exec: &mut Executor, q: &str) -> Result<String, String> {
+    let mut p = Parser::new(q.trim());
+    match p.parse() {
+        Ok(stmt) => exec.execute(stmt),
+        Err(e) => Err(format!("Parse Error: {}", e)),
+    }
+}
+
 // ── MySQL-specific compatibility shims ─────────────────────────
 
 /// Handle MySQL system queries our engine doesn't parse.
 /// Returns Some(output) to short-circuit the engine, or None to proceed normally.
-fn mysql_compat(q: &str) -> Option<Result<String, String>> {
-    let up = q.to_uppercase();
+fn mysql_compat(q: &str, exec: &mut Executor) -> Option<Result<String, String>> {
+    let up = q.trim().to_uppercase();
     let up = up.trim();
 
-    // SET statements (charset, autocommit, session variables)
-    if up.starts_with("SET ") {
-        return Some(Ok(String::new()));
-    }
+    // ─── SET (charset, autocommit, session vars) ───────────────
+    if up.starts_with("SET ") { return Some(Ok(String::new())); }
 
-    // SELECT @@variable or SELECT VERSION() / SELECT DATABASE()
-    if up.starts_with("SELECT @@VERSION")
-        || up == "SELECT VERSION()"
-        || up == "SELECT VERSION() AS VERSION"
+    // ─── SELECT VERSION() ──────────────────────────────────────
+    if up == "SELECT VERSION()" || up.starts_with("SELECT VERSION() ")
+        || up == "SELECT @@VERSION" || up.starts_with("SELECT @@VERSION ")
     {
-        let out = "+---------------+\n\
-                   | version       |\n\
-                   +---------------+\n\
-                   | 5.7.0-rustdb  |\n\
-                   +---------------+\n\
-                   1 row(s) returned.";
-        return Some(Ok(out.to_string()));
+        return Some(Ok(box_table(&["version"], &[vec!["5.7.0-rustdb".to_string()]])));
     }
 
-    if up.starts_with("SELECT @@") {
-        // Generic @@variable → return empty string value
-        let var = up.trim_start_matches("SELECT @@").trim();
-        let hdr = var.to_lowercase();
-        let out = format!(
-            "+{}+\n| {} |\n+{}+\n| {} |\n+{}+\n1 row(s) returned.",
-            "-".repeat(hdr.len() + 2),
-            hdr,
-            "-".repeat(hdr.len() + 2),
-            "",
-            "-".repeat(hdr.len() + 2)
-        );
-        return Some(Ok(out));
-    }
-
-    // SHOW VARIABLES / SHOW STATUS / SHOW SESSION STATUS
-    if up.starts_with("SHOW VARIABLES") || up.starts_with("SHOW SESSION STATUS")
-        || up.starts_with("SHOW GLOBAL STATUS") || up.starts_with("SHOW STATUS")
+    // ─── SELECT USER() / CURRENT_USER() ───────────────────────
+    if up == "SELECT USER()" || up == "SELECT CURRENT_USER()"
+        || up == "SELECT USER() AS USER" || up == "SELECT CURRENT_USER() AS USER"
     {
-        let out = "+------------------+-------+\n\
-                   | Variable_name    | Value |\n\
-                   +------------------+-------+\n\
-                   +------------------+-------+\n\
-                   0 row(s) returned.";
-        return Some(Ok(out.to_string()));
+        return Some(Ok(box_table(&["user()"], &[vec!["root@localhost".to_string()]])));
     }
 
-    // SHOW COLLATION, SHOW CHARSET, SHOW ENGINES
-    if up.starts_with("SHOW COLLATION") || up.starts_with("SHOW CHARSET")
-        || up.starts_with("SHOW CHARACTER SET") || up.starts_with("SHOW ENGINES")
-        || up.starts_with("SHOW PLUGINS") || up.starts_with("SHOW WARNINGS")
+    // ─── SELECT DATABASE() / SELECT SCHEMA() ──────────────────
+    if up == "SELECT DATABASE()" || up == "SELECT SCHEMA()"
+        || up == "SELECT DATABASE() AS DATABASE" || up == "SELECT SCHEMA() AS SCHEMA"
     {
-        let out = "+------+-------+\n\
-                   | name | value |\n\
-                   +------+-------+\n\
-                   +------+-------+\n\
-                   0 row(s) returned.";
-        return Some(Ok(out.to_string()));
+        // Try engine first (it knows current DB)
+        if let Ok(out) = exec_inner(exec, "SELECT DATABASE()") {
+            if !out.is_empty() { return Some(Ok(out)); }
+        }
+        return Some(Ok(box_table(&["DATABASE()"], &[vec!["".to_string()]])));
+    }
+
+    // ─── SELECT @@var(s) ───────────────────────────────────────
+    // Handle single and multi-variable SELECT @@ queries
+    if up.starts_with("SELECT @@") || (up.starts_with("SELECT") && up.contains("@@") && !up.contains(" FROM ")) {
+        return Some(Ok(handle_select_atvars(q)));
+    }
+
+    // ─── SHOW VARIABLES ───────────────────────────────────────
+    if up.starts_with("SHOW VARIABLES") || up.starts_with("SHOW SESSION VARIABLES")
+        || up.starts_with("SHOW GLOBAL VARIABLES")
+    {
+        return Some(Ok(show_variables_result(up)));
+    }
+
+    // ─── SHOW STATUS ──────────────────────────────────────────
+    if up.starts_with("SHOW STATUS") || up.starts_with("SHOW SESSION STATUS")
+        || up.starts_with("SHOW GLOBAL STATUS")
+    {
+        return Some(Ok(box_table(&["Variable_name", "Value"], &[])));
+    }
+
+    // ─── SHOW COLLATION ───────────────────────────────────────
+    if up.starts_with("SHOW COLLATION") {
+        let rows = vec![
+            vec!["utf8_general_ci","utf8","33","Yes","Yes","1"],
+            vec!["utf8mb4_general_ci","utf8mb4","45","Yes","Yes","1"],
+            vec!["utf8mb4_unicode_ci","utf8mb4","224","","Yes","8"],
+            vec!["latin1_swedish_ci","latin1","8","Yes","Yes","1"],
+        ];
+        let rows: Vec<Vec<String>> = rows.iter()
+            .map(|r| r.iter().map(|s| s.to_string()).collect())
+            .collect();
+        return Some(Ok(box_table(&["Collation","Charset","Id","Default","Compiled","Sortlen"], &rows)));
+    }
+
+    // ─── SHOW CHARACTER SET / CHARSET ─────────────────────────
+    if up.starts_with("SHOW CHARSET") || up.starts_with("SHOW CHARACTER SET") {
+        let rows = vec![
+            vec!["utf8".to_string(), "UTF-8 Unicode".to_string(), "utf8_general_ci".to_string(), "3".to_string()],
+            vec!["utf8mb4".to_string(), "UTF-8 Unicode".to_string(), "utf8mb4_general_ci".to_string(), "4".to_string()],
+            vec!["latin1".to_string(), "cp1252 West European".to_string(), "latin1_swedish_ci".to_string(), "1".to_string()],
+        ];
+        return Some(Ok(box_table(&["Charset","Description","Default collation","Maxlen"], &rows)));
+    }
+
+    // ─── SHOW ENGINES ─────────────────────────────────────────
+    if up.starts_with("SHOW ENGINES") {
+        let rows = vec![vec![
+            "RustDB".to_string(), "DEFAULT".to_string(),
+            "RustDB B+Tree Storage Engine".to_string(),
+            "YES".to_string(), "YES".to_string(), "YES".to_string(),
+        ]];
+        return Some(Ok(box_table(&["Engine","Support","Comment","Transactions","XA","Savepoints"], &rows)));
+    }
+
+    // ─── SHOW PLUGINS / WARNINGS / EVENTS ─────────────────────
+    if up.starts_with("SHOW PLUGINS") {
+        return Some(Ok(box_table(&["Name","Status","Type","Library","License"], &[])));
+    }
+    if up.starts_with("SHOW WARNINGS") {
+        return Some(Ok(box_table(&["Level","Code","Message"], &[])));
+    }
+    if up.starts_with("SHOW EVENTS") {
+        return Some(Ok(box_table(&["Db","Name","Definer","Time zone","Type","Execute at","Interval value","Interval field","Starts","Ends","Status","Originator"], &[])));
+    }
+
+    // ─── SHOW FUNCTION STATUS / PROCEDURE STATUS ───────────────
+    if up.starts_with("SHOW FUNCTION STATUS") || up.starts_with("SHOW PROCEDURE STATUS") {
+        return Some(Ok(box_table(&["Db","Name","Type","Definer","Modified","Created","Security_type","Comment","character_set_client","collation_connection","Database Collation"], &[])));
+    }
+
+    // ─── SHOW TABLE STATUS ────────────────────────────────────
+    if up.starts_with("SHOW TABLE STATUS") {
+        return Some(Ok(box_table(&["Name","Engine","Version","Row_format","Rows","Avg_row_length","Data_length","Max_data_length","Index_length","Data_free","Auto_increment","Create_time","Update_time","Check_time","Collation","Checksum","Create_options","Comment"], &[])));
+    }
+
+    // ─── SHOW TRIGGERS ────────────────────────────────────────
+    if up.starts_with("SHOW TRIGGERS") {
+        return Some(Ok(box_table(&["Trigger","Event","Table","Statement","Timing","Created","sql_mode","Definer","character_set_client","collation_connection","Database Collation"], &[])));
+    }
+
+    // ─── SHOW INDEX / INDEXES / KEYS FROM table ───────────────
+    if up.starts_with("SHOW INDEX FROM") || up.starts_with("SHOW INDEXES FROM")
+        || up.starts_with("SHOW KEYS FROM")
+    {
+        return Some(Ok(box_table(&["Table","Non_unique","Key_name","Seq_in_index","Column_name","Collation","Cardinality","Sub_part","Packed","Null","Index_type","Comment","Index_comment"], &[])));
+    }
+
+    // ─── SHOW FULL TABLES [FROM db] [WHERE table_type=...] ────
+    if up.starts_with("SHOW FULL TABLES") {
+        // Extract optional db name from "FROM db" portion
+        let db_opt = extract_first_from(q);
+        // Determine Table_type filter from WHERE clause
+        let type_filter: Option<&str> = if up.contains("'VIEW'") { Some("VIEW") }
+            else if up.contains("'BASE TABLE'") { Some("BASE TABLE") }
+            else { None };
+
+        // Execute SHOW TABLES [FROM db] through engine
+        let tbl_q = match &db_opt {
+            Some(db) => format!("SHOW TABLES FROM {}", db),
+            None => "SHOW TABLES".to_string(),
+        };
+        let (tbl_col, tbl_names) = exec_inner(exec, &tbl_q)
+            .ok()
+            .and_then(|out| parse_table(&out))
+            .map(|(cols, rows)| {
+                let col = cols.into_iter().next().unwrap_or_else(|| "Tables".to_string());
+                let names: Vec<String> = rows.into_iter()
+                    .filter_map(|r| r.into_iter().next())
+                    .collect();
+                (col, names)
+            })
+            .unwrap_or_else(|| ("Tables".to_string(), vec![]));
+
+        let full_col = format!("Tables_in_{}", db_opt.as_deref().unwrap_or(""));
+        let _ = tbl_col; // suppress warning
+
+        // All engine tables are BASE TABLE (views tracked separately via information_schema)
+        let rows: Vec<Vec<String>> = tbl_names.into_iter()
+            .filter(|_| type_filter.map_or(true, |f| f == "BASE TABLE"))
+            .map(|name| vec![name, "BASE TABLE".to_string()])
+            .collect();
+
+        return Some(Ok(box_table(&[&full_col, "Table_type"], &rows)));
+    }
+
+    // ─── SHOW FULL COLUMNS FROM table [FROM db] ───────────────
+    if up.starts_with("SHOW FULL COLUMNS") || up.starts_with("SHOW COLUMNS") {
+        let tbl_opt = extract_first_from(q);
+        let db_opt = extract_second_from(q);
+        let tbl = match tbl_opt {
+            Some(t) => t,
+            None => return Some(Ok(box_table(&["Field","Type","Collation","Null","Key","Default","Extra","Privileges","Comment"], &[]))),
+        };
+        let desc_q = match &db_opt {
+            Some(db) => format!("DESCRIBE {}.{}", db, tbl),
+            None => format!("DESCRIBE {}", tbl),
+        };
+        let (cols, rows) = exec_inner(exec, &desc_q)
+            .ok()
+            .and_then(|out| parse_table(&out))
+            .unwrap_or_else(|| (vec![], vec![]));
+
+        // DESCRIBE → Field, Type, Null, Key, Default, Extra
+        let get = |row: &Vec<String>, name: &str| -> String {
+            cols.iter().position(|c| c.eq_ignore_ascii_case(name))
+                .and_then(|i| row.get(i)).cloned().unwrap_or_default()
+        };
+        let new_rows: Vec<Vec<String>> = rows.iter().map(|row| vec![
+            get(row, "Field"),
+            get(row, "Type"),
+            "utf8mb4_general_ci".to_string(),
+            get(row, "Null"),
+            get(row, "Key"),
+            get(row, "Default"),
+            get(row, "Extra"),
+            "select,insert,update,references".to_string(),
+            "".to_string(),
+        ]).collect();
+        return Some(Ok(box_table(&["Field","Type","Collation","Null","Key","Default","Extra","Privileges","Comment"], &new_rows)));
     }
 
     None
@@ -467,7 +780,7 @@ fn exec_query(exec: &mut Executor, raw: &str) -> Result<String, String> {
     let q = raw.trim().trim_end_matches(';').trim();
     if q.is_empty() { return Ok(String::new()); }
 
-    if let Some(r) = mysql_compat(q) { return r; }
+    if let Some(r) = mysql_compat(q, exec) { return r; }
 
     let mut p = Parser::new(q);
     match p.parse() {

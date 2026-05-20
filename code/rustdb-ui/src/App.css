@@ -631,6 +631,7 @@ body {
   border-bottom: 1px solid #3c3c3c;
   height: 30px;
   flex-shrink: 0;
+  position: relative;
 }
 
 .result-tab {
@@ -2287,6 +2288,168 @@ th.result-rownum { background: #252526 !important; font-weight: 400 !important; 
   pointer-events: none;
 }
 .result-table th:hover .result-sort-icon { color: #9cdcfe; }
+
+/* ─── 쿼리 진행 바 ──────────────────────────────────────── */
+.query-progress-bar {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  height: 2px;
+  overflow: hidden;
+  z-index: 1;
+}
+.query-progress-fill {
+  height: 100%;
+  width: 40%;
+  background: #4ec9b0;
+  animation: progress-slide 1.2s ease-in-out infinite;
+}
+@keyframes progress-slide {
+  0%   { transform: translateX(-100%); }
+  100% { transform: translateX(350%); }
+}
+
+/* ─── Edit Table 모달 ────────────────────────────────────── */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 9000;
+}
+.edit-table-modal {
+  background: #252526;
+  border: 1px solid #454545;
+  border-radius: 6px;
+  min-width: 560px;
+  max-width: 720px;
+  max-height: 80vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.edit-table-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 16px;
+  border-bottom: 1px solid #3c3c3c;
+  font-size: 13px;
+  color: #cccccc;
+  flex-shrink: 0;
+}
+.edit-table-close {
+  background: none;
+  border: none;
+  color: #888;
+  cursor: pointer;
+  font-size: 14px;
+  padding: 2px 6px;
+}
+.edit-table-close:hover { color: #cccccc; }
+.edit-table-body {
+  padding: 16px;
+  overflow-y: auto;
+}
+.edit-table-section {
+  font-size: 11px;
+  color: #888;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-bottom: 8px;
+}
+.edit-table-cols {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+.edit-table-cols th {
+  text-align: left;
+  color: #888;
+  font-weight: normal;
+  font-size: 11px;
+  padding: 4px 8px;
+  border-bottom: 1px solid #3c3c3c;
+}
+.edit-table-cols td {
+  padding: 6px 8px;
+  color: #d4d4d4;
+  border-bottom: 1px solid #2a2a2a;
+}
+.edit-table-constraints { color: #888; font-size: 12px; }
+.drop-col-btn {
+  background: none;
+  border: 1px solid #6b3030;
+  color: #f48771;
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 3px;
+  cursor: pointer;
+}
+.drop-col-btn:hover { background: #3d1f1f; }
+.add-col-form {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+.add-col-input {
+  background: #1e1e1e;
+  border: 1px solid #454545;
+  color: #d4d4d4;
+  font-size: 13px;
+  padding: 5px 8px;
+  border-radius: 3px;
+  outline: none;
+  min-width: 130px;
+}
+.add-col-input:focus { border-color: #4ec9b0; }
+.add-col-select {
+  background: #1e1e1e;
+  border: 1px solid #454545;
+  color: #d4d4d4;
+  font-size: 13px;
+  padding: 5px 8px;
+  border-radius: 3px;
+  outline: none;
+  cursor: pointer;
+}
+.add-col-check {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  color: #cccccc;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.add-col-btn {
+  background: #0e639c;
+  border: none;
+  color: #fff;
+  font-size: 13px;
+  padding: 5px 14px;
+  border-radius: 3px;
+  cursor: pointer;
+}
+.add-col-btn:hover { background: #1177bb; }
+
+/* ─── 셀 편집 인풋 ───────────────────────────────────────── */
+.cell-edit-input {
+  width: 100%;
+  background: #1a1a2e;
+  border: 1px solid #4ec9b0;
+  color: #d4d4d4;
+  font-family: 'Consolas', monospace;
+  font-size: 13px;
+  padding: 0 4px;
+  margin: 0;
+  outline: none;
+  box-sizing: border-box;
+}
 
 /* ─── EXPLAIN 트리 ───────────────────────────────────────── */
 .explain-tree {
