@@ -1,3 +1,0 @@
-{
-  "db1.v_active": "SELECT id,name,dept_id FROM emp WHERE status = 'active'"
-}
