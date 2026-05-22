@@ -308,4 +308,4 @@
 | 연결 관리 | ✓ | ✓ | ✓ | ✓ (연결별 독립 데이터 디렉토리) |
 | 서버 모니터링 | ✓ | ✓ | ✓ (Performance Hub) | △ (TCP 서버 on/off·클라이언트 수·로그) |
 | 데이터 임포트/익스포트 | ✓ (CSV, SQL) | ✓ | ✓ (CSV, Excel, XML) | ✓ (CSV 익스포트·임포트) |
-| AI 연동 | △ (HeatWave AutoML) | ✗ | △ (Oracle AI) | 🔲 (MCP 기반 자연어 → SQL 개발 중) |
+| AI 연동 | △ (HeatWave AutoML) | ✗ | △ (Oracle AI) | ✓ (MCP 서버: 자연어→SQL, EXPLAIN 해석, 스키마 설계 — Claude API 연동) |

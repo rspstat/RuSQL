@@ -62,6 +62,7 @@ pub struct SharedDatabase {
     pub index_meta: HashMap<String, (String, String)>,
     pub composite_indexes: HashMap<String, CompositeIndex>,
     pub views: HashMap<String, Statement>,
+    pub view_raw_sql: HashMap<String, String>,
     pub buffer_pool: BufferPool,
     pub disk: DiskManager,
     pub lock_mgr: LockManager,
@@ -243,11 +244,17 @@ impl Executor {
 
         // 모든 DB의 뷰 로드 (qualified view names: "db.view")
         let mut views: HashMap<String, Statement> = HashMap::new();
+        let mut view_raw_sql: HashMap<String, String> = HashMap::new();
         for db in &databases {
             let db_views = disk.load_views(db);
             for (k, v) in db_views {
                 let qualified_k = if k.contains('.') { k } else { format!("{}.{}", db, k) };
                 views.insert(qualified_k, v);
+            }
+            let db_view_sql = disk.load_view_raw_sql(db);
+            for (k, v) in db_view_sql {
+                let qualified_k = if k.contains('.') { k } else { format!("{}.{}", db, k) };
+                view_raw_sql.insert(qualified_k, v);
             }
         }
 
@@ -299,6 +306,7 @@ impl Executor {
                 index_meta,
                 composite_indexes,
                 views,
+                view_raw_sql,
                 buffer_pool: BufferPool::with_capacity(buffer_pool_capacity),
                 disk,
                 lock_mgr: LockManager::new(),
@@ -470,7 +478,7 @@ impl Executor {
                 self.exec_create_index(s, index_name, table, columns)
             }
             Statement::DropIndex { index_name } => self.exec_drop_index(s, index_name),
-            Statement::CreateView { name, query } => self.exec_create_view(s, name, *query),
+            Statement::CreateView { name, query, raw_sql } => self.exec_create_view(s, name, *query, raw_sql),
             Statement::DropView { name } => self.exec_drop_view(s, name),
             Statement::ShowTables => self.exec_show_tables(s),
             Statement::Describe { table } => self.exec_describe(s, table),
@@ -491,6 +499,8 @@ impl Executor {
             Statement::Intersect { left, right, all, order_by, limit, offset } => self.exec_intersect(s, *left, *right, all, order_by, limit, offset),
             Statement::Except { left, right, all, order_by, limit, offset } => self.exec_except(s, *left, *right, all, order_by, limit, offset),
             Statement::ShowCreateTable { table } => self.exec_show_create_table(s, table),
+            Statement::ShowCreateView { view } => self.exec_show_create_view(s, view),
+            Statement::ShowIndex { table } => self.exec_show_index(s, table),
             Statement::With { ctes, query, recursive } => self.exec_with(s, ctes, *query, recursive),
             Statement::CreateDatabase { name, if_not_exists } => self.exec_create_database(s, name, if_not_exists),
             Statement::DropDatabase { name, if_exists }       => self.exec_drop_database(s, name, if_exists),
@@ -502,10 +512,10 @@ impl Executor {
             }
             Statement::Use { database } => self.exec_use(s, database),
             Statement::Merge { target, target_alias, source, source_alias, on,
-                               when_matched_update, when_matched_delete,
+                               when_matched_update, when_matched_delete, when_matched_delete_cond,
                                when_not_matched_columns, when_not_matched_values } => {
                 self.exec_merge(s, target, target_alias, source, source_alias, on,
-                                when_matched_update, when_matched_delete,
+                                when_matched_update, when_matched_delete, when_matched_delete_cond,
                                 when_not_matched_columns, when_not_matched_values)
             }
             Statement::CreateProcedure { name, params, body } => {
@@ -5849,19 +5859,23 @@ impl Executor {
         }
     }
 
-    fn exec_create_view(&mut self, s: &mut SharedDatabase, name: String, query: Statement) -> Result<String, String> {
+    fn exec_create_view(&mut self, s: &mut SharedDatabase, name: String, query: Statement, raw_sql: String) -> Result<String, String> {
         if let Statement::Select { ref table, .. } = query {
             if !s.tables.contains_key(table) {
                 return Err(format!("Table '{}' not found", table));
             }
         }
         s.views.insert(name.clone(), query);
+        if !raw_sql.is_empty() {
+            s.view_raw_sql.insert(name.clone(), raw_sql);
+        }
         self.persist_views_for_db(s, &self.current_db.clone());
         Ok(format!("View '{}' created.", name))
     }
 
     fn exec_drop_view(&mut self, s: &mut SharedDatabase, name: String) -> Result<String, String> {
         if s.views.remove(&name).is_some() {
+            s.view_raw_sql.remove(&name);
             self.persist_views_for_db(s, &self.current_db.clone());
             Ok(format!("View '{}' dropped.", name))
         } else {
@@ -5876,6 +5890,11 @@ impl Executor {
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
         s.disk.save_views(db, &db_views);
+        let db_view_sql: HashMap<String, String> = s.view_raw_sql.iter()
+            .filter(|(k, _v)| k.starts_with(&prefix))
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        s.disk.save_view_raw_sql(db, &db_view_sql);
     }
 
     /// 현재 index_meta + composite_indexes를 disk에 저장
@@ -6013,10 +6032,11 @@ impl Executor {
                 Statement::CreateIndex { index_name, table: self.qualify_name(table), columns },
             Statement::DropIndex { index_name } =>
                 Statement::DropIndex { index_name },
-            Statement::CreateView { name, query } =>
+            Statement::CreateView { name, query, raw_sql } =>
                 Statement::CreateView {
                     name: self.qualify_name(name),
                     query: Box::new(self.qualify_stmt(s, *query)),
+                    raw_sql,
                 },
             Statement::DropView { name } =>
                 Statement::DropView { name: self.qualify_name(name) },
@@ -6046,6 +6066,10 @@ impl Executor {
                 },
             Statement::ShowCreateTable { table } =>
                 Statement::ShowCreateTable { table: self.qualify_name(table) },
+            Statement::ShowCreateView { view } =>
+                Statement::ShowCreateView { view: self.qualify_name(view) },
+            Statement::ShowIndex { table } =>
+                Statement::ShowIndex { table: self.qualify_name(table) },
             Statement::With { ctes, query, recursive } =>
                 Statement::With {
                     ctes: ctes.into_iter().map(|(n, q)| (
@@ -6082,7 +6106,7 @@ impl Executor {
                     condition: condition.map(|c| self.qualify_condexpr(s, c)),
                 },
             Statement::Merge { target, target_alias, source, source_alias, on,
-                               when_matched_update, when_matched_delete,
+                               when_matched_update, when_matched_delete, when_matched_delete_cond,
                                when_not_matched_columns, when_not_matched_values } =>
                 Statement::Merge {
                     target: self.qualify_name(target),
@@ -6092,6 +6116,7 @@ impl Executor {
                     on,
                     when_matched_update,
                     when_matched_delete,
+                    when_matched_delete_cond,
                     when_not_matched_columns,
                     when_not_matched_values,
                 },
@@ -6254,7 +6279,11 @@ impl Executor {
             if col.auto_increment { parts.push("AUTO_INCREMENT".to_string()); }
             if let Some(def) = &col.default {
                 if def != crate::parser::parser::NULL_DEFAULT {
-                    parts.push(format!("DEFAULT {}", def));
+                    let needs_quotes = matches!(col.data_type,
+                        DataType::Enum(_) | DataType::Set(_) | DataType::Varchar(_) | DataType::Text)
+                        && !def.starts_with('\'') && !def.starts_with('"');
+                    let display = if needs_quotes { format!("'{}'", def) } else { def.clone() };
+                    parts.push(format!("DEFAULT {}", display));
                 }
             }
             // Single-column PK inline (only when no composite PK)
@@ -6303,6 +6332,53 @@ impl Executor {
 
         let ddl = format!("CREATE TABLE `{}` (\n{}\n);", bare_name, lines.join(",\n"));
         Ok(format!("Table: {}\n{}", bare_name, ddl))
+    }
+
+    fn exec_show_create_view(&self, s: &SharedDatabase, view: String) -> Result<String, String> {
+        let q_view = if view.contains('.') { view.clone() }
+                     else { format!("{}.{}", self.current_db, view) };
+        let bare = view.split('.').last().unwrap_or(&view);
+
+        if s.views.contains_key(&q_view) {
+            let select_sql = s.view_raw_sql.get(&q_view)
+                .cloned()
+                .unwrap_or_else(|| "<view definition not available>".to_string());
+            let ddl = format!("CREATE VIEW `{}` AS {}", bare, select_sql);
+            Ok(format!("View: {}\nCreate View: {}", bare, ddl))
+        } else {
+            Err(format!("View '{}' not found", bare))
+        }
+    }
+
+    fn exec_show_index(&self, s: &SharedDatabase, table: String) -> Result<String, String> {
+        let q_table = if table.contains('.') { table.clone() }
+                      else { format!("{}.{}", self.current_db, table) };
+        let bare = table.split('.').last().unwrap_or(&table);
+
+        if !s.catalog.tables.contains_key(&q_table) {
+            return Err(format!("Table '{}' not found", bare));
+        }
+
+        let mut rows: Vec<String> = Vec::new();
+        rows.push("Table\tKey_name\tColumn_name\tIndex_type".to_string());
+
+        for (idx_name, (t, col)) in &s.index_meta {
+            if *t == q_table {
+                rows.push(format!("{}\t{}\t{}\tBTREE", bare, idx_name, col));
+            }
+        }
+        for (idx_name, comp) in &s.composite_indexes {
+            if comp.table == q_table {
+                let cols = comp.columns.join(", ");
+                rows.push(format!("{}\t{}\t{}\tBTREE", bare, idx_name, cols));
+            }
+        }
+
+        if rows.len() == 1 {
+            Ok(format!("No indexes found on table '{}'", bare))
+        } else {
+            Ok(rows.join("\n"))
+        }
     }
 
     fn exec_backup(&self, s: &SharedDatabase, database: Option<String>, output_file: Option<String>) -> Result<String, String> {
@@ -6413,10 +6489,23 @@ impl Executor {
                 let pkc = schema.primary_key_columns.iter().map(|c| format!("`{}`", c)).collect::<Vec<_>>().join(", ");
                 lines.push(format!("  PRIMARY KEY ({})", pkc));
             }
+            let fk_action_str = |a: &crate::catalog::schema::FkAction| -> &'static str {
+                match a {
+                    crate::catalog::schema::FkAction::Restrict   => "RESTRICT",
+                    crate::catalog::schema::FkAction::Cascade    => "CASCADE",
+                    crate::catalog::schema::FkAction::SetNull    => "SET NULL",
+                    crate::catalog::schema::FkAction::SetDefault => "SET DEFAULT",
+                }
+            };
             for col in &schema.columns {
                 if let Some(ref fk) = col.foreign_key {
                     let ref_bare = fk.ref_table.split('.').last().unwrap_or(&fk.ref_table);
-                    lines.push(format!("  FOREIGN KEY (`{}`) REFERENCES `{}`(`{}`)", fk.column, ref_bare, fk.ref_column));
+                    lines.push(format!(
+                        "  FOREIGN KEY (`{}`) REFERENCES `{}`(`{}`) ON DELETE {} ON UPDATE {}",
+                        fk.column, ref_bare, fk.ref_column,
+                        fk_action_str(&fk.on_delete),
+                        fk_action_str(&fk.on_update),
+                    ));
                 }
             }
             format!("CREATE TABLE `{}` (\n{}\n);", bare, lines.join(",\n"))
@@ -7654,6 +7743,7 @@ impl Executor {
         on: CondExpr,
         when_matched_update: Option<Vec<(String, ArithExpr)>>,
         when_matched_delete: bool,
+        when_matched_delete_cond: Option<CondExpr>,
         when_not_matched_columns: Option<Vec<String>>,
         when_not_matched_values: Vec<String>,
     ) -> Result<String, String> {
@@ -7709,7 +7799,10 @@ impl Executor {
                 if Self::eval_condexpr(&merged, &on) {
                     let pk = tgt_row.get(&pk_col).cloned().unwrap_or_default();
                     found = true;
-                    if when_matched_delete {
+                    let delete_cond_ok = when_matched_delete_cond.as_ref()
+                        .map(|c| Self::eval_condexpr(&merged, c))
+                        .unwrap_or(true);
+                    if when_matched_delete && delete_cond_ok {
                         delete_pks.push(pk);
                     } else if let Some(ref assigns) = when_matched_update {
                         // Evaluate assignment RHS using the merged row now

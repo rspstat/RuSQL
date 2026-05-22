@@ -1,0 +1,50 @@
+{
+  "name": "db1.dept",
+  "columns": [
+    {
+      "name": "id",
+      "data_type": "Int",
+      "primary_key": true,
+      "not_null": true,
+      "unique": false,
+      "unique_constraint_name": null,
+      "auto_increment": true,
+      "default": null,
+      "foreign_key": null,
+      "check_expr": null
+    },
+    {
+      "name": "name",
+      "data_type": {
+        "Varchar": 30
+      },
+      "primary_key": false,
+      "not_null": true,
+      "unique": true,
+      "unique_constraint_name": null,
+      "auto_increment": false,
+      "default": null,
+      "foreign_key": null,
+      "check_expr": null
+    },
+    {
+      "name": "budget",
+      "data_type": "Int",
+      "primary_key": false,
+      "not_null": false,
+      "unique": false,
+      "unique_constraint_name": null,
+      "auto_increment": false,
+      "default": "0",
+      "foreign_key": null,
+      "check_expr": null
+    }
+  ],
+  "auto_increment_counters": {
+    "id": 8
+  },
+  "primary_key_columns": [
+    "id"
+  ],
+  "check_constraints": []
+}

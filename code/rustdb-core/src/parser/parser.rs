@@ -87,6 +87,93 @@ fn expand_condexpr(expr: CondExpr, map: &HashMap<String, String>) -> CondExpr {
 /// DEFAULT NULL 을 나타내는 내부 마커 (executor와 공유)
 pub const NULL_DEFAULT: &str = "__NULL_DEFAULT__";
 
+/// 토큰 슬라이스 → SQL 문자열 재구성 (SHOW CREATE VIEW용)
+fn tokens_to_sql(tokens: &[Token]) -> String {
+    use Token::*;
+    let mut out = String::new();
+    for (i, tok) in tokens.iter().enumerate() {
+        let s = match tok {
+            Select => "SELECT", From => "FROM", Where => "WHERE",
+            Insert => "INSERT", Into => "INTO", Values => "VALUES",
+            Update => "UPDATE", Set => "SET", Delete => "DELETE",
+            Create => "CREATE", Table => "TABLE", Drop => "DROP",
+            Join => "JOIN", Left => "LEFT", Right => "RIGHT", Cross => "CROSS",
+            Natural => "NATURAL", Outer => "OUTER", On => "ON",
+            And => "AND", Or => "OR", Not => "NOT",
+            Alter => "ALTER", Add => "ADD", Column => "COLUMN",
+            Rename => "RENAME", To => "TO",
+            Order => "ORDER", Group => "GROUP", By => "BY",
+            Asc => "ASC", Desc => "DESC", Limit => "LIMIT",
+            Count => "COUNT", Sum => "SUM", Avg => "AVG", Min => "MIN", Max => "MAX",
+            Having => "HAVING", In => "IN", Between => "BETWEEN", Like => "LIKE",
+            Index => "INDEX", Unique => "UNIQUE", View => "VIEW", As => "AS",
+            Primary => "PRIMARY", Key => "KEY", Null => "NULL",
+            Auto => "AUTO", Increment => "INCREMENT",
+            Show => "SHOW", Tables => "TABLES", Describe => "DESCRIBE", Truncate => "TRUNCATE",
+            References => "REFERENCES", Foreign => "FOREIGN", Constraint => "CONSTRAINT",
+            Int => "INT", Text => "TEXT", Float => "FLOAT", Boolean => "BOOLEAN",
+            Asterisk => "*", Comma => ",", Semicolon => ";",
+            LParen => "(", RParen => ")",
+            Dot => ".", Eq => "=", Ne => "<>", Gt => ">", Lt => "<",
+            Gte => ">=", Lte => "<=", Plus => "+", Minus => "-", Slash => "/",
+            Cascade => "CASCADE", Restrict => "RESTRICT", Is => "IS",
+            Isolation => "ISOLATION", Level => "LEVEL",
+            Uncommitted => "UNCOMMITTED", Committed => "COMMITTED",
+            Repeatable => "REPEATABLE", Serializable => "SERIALIZABLE",
+            For => "FOR", Locks => "LOCKS", Distinct => "DISTINCT",
+            Default => "DEFAULT", Exists => "EXISTS",
+            Varchar => "VARCHAR", Date => "DATE", Datetime => "DATETIME",
+            Timestamp => "TIMESTAMP", Decimal => "DECIMAL", Double => "DOUBLE",
+            Time => "TIME", Year => "YEAR", Blob => "BLOB", Enum => "ENUM",
+            Database => "DATABASE", Inner => "INNER", Check => "CHECK",
+            Upper => "UPPER", Lower => "LOWER", Length => "LENGTH",
+            Trim => "TRIM", Concat => "CONCAT", Substr => "SUBSTR",
+            Substring => "SUBSTRING", Now => "NOW", Curdate => "CURDATE",
+            DateFormat => "DATE_FORMAT", Coalesce => "COALESCE",
+            Ifnull => "IFNULL", Replace => "REPLACE",
+            Round => "ROUND", Abs => "ABS", Ceil => "CEIL", Floor => "FLOOR", Mod => "MOD",
+            Case => "CASE", When => "WHEN", Then => "THEN", Else => "ELSE", End => "END",
+            Union => "UNION", Intersect => "INTERSECT", Except => "EXCEPT", All => "ALL",
+            If => "IF", Offset => "OFFSET", With => "WITH", Recursive => "RECURSIVE",
+            Full => "FULL", Returning => "RETURNING", Ignore => "IGNORE",
+            Ident(s) => {
+                let needs_space = i > 0 && !matches!(&tokens[i-1], LParen | Dot | Comma);
+                if needs_space { out.push(' '); }
+                out.push_str(s);
+                continue;
+            }
+            StringLit(s) => {
+                let needs_space = i > 0 && !matches!(&tokens[i-1], LParen | Comma);
+                if needs_space { out.push(' '); }
+                out.push('\'');
+                out.push_str(&s.replace('\'', "\\'"));
+                out.push('\'');
+                continue;
+            }
+            NumberLit(s) => {
+                let needs_space = i > 0 && !matches!(&tokens[i-1], LParen | Comma | Dot);
+                if needs_space { out.push(' '); }
+                out.push_str(s);
+                continue;
+            }
+            _ => {
+                let needs_space = i > 0;
+                if needs_space { out.push(' '); }
+                out.push_str(&format!("{:?}", tok));
+                continue;
+            }
+        };
+        // 키워드/연산자 처리
+        let prev_no_space = i > 0 && matches!(&tokens[i-1], LParen | Dot);
+        let curr_no_space_before = matches!(tok, Comma | RParen | Dot | Semicolon | Asterisk);
+        if i > 0 && !prev_no_space && !curr_no_space_before {
+            out.push(' ');
+        }
+        out.push_str(s);
+    }
+    out.trim().to_string()
+}
+
 pub struct Parser {
     tokens: Vec<Token>,
     pos: usize,
@@ -3177,14 +3264,18 @@ impl Parser {
             Some(Token::As) => {}
             other => return Err(format!("Expected AS, got {:?}", other)),
         }
+        let pos_before_select = self.pos; // SELECT 토큰 위치
         match self.advance() {
             Some(Token::Select) => {}
             other => return Err(format!("Expected SELECT, got {:?}", other)),
         }
         let query = self.parse_select()?;
+        let pos_end = self.pos;
+        let raw_sql = tokens_to_sql(&self.tokens[pos_before_select..pos_end]);
         Ok(Statement::CreateView {
             name,
             query: Box::new(query),
+            raw_sql,
         })
     }
 
@@ -3288,16 +3379,31 @@ impl Parser {
                 Ok(Statement::ShowGrants { user, host })
             }
             Some(Token::Create) => {
-                // SHOW CREATE TABLE <name>
+                // SHOW CREATE TABLE <name>  |  SHOW CREATE VIEW <name>
                 match self.advance() {
-                    Some(Token::Table) => {}
-                    other => return Err(format!("Expected TABLE after SHOW CREATE, got {:?}", other)),
+                    Some(Token::Table) => {
+                        let table = self.expect_ident()?;
+                        Ok(Statement::ShowCreateTable { table })
+                    }
+                    Some(Token::View) => {
+                        let view = self.expect_ident()?;
+                        Ok(Statement::ShowCreateView { view })
+                    }
+                    other => Err(format!("Expected TABLE or VIEW after SHOW CREATE, got {:?}", other)),
+                }
+            }
+            Some(Token::Index) => {
+                // SHOW INDEX FROM <table>  |  SHOW INDEX IN <table>
+                match self.advance() {
+                    Some(Token::From) => {}
+                    Some(Token::Ident(s)) if s.to_uppercase() == "IN" => {}
+                    other => return Err(format!("Expected FROM after SHOW INDEX, got {:?}", other)),
                 }
                 let table = self.expect_ident()?;
-                Ok(Statement::ShowCreateTable { table })
+                Ok(Statement::ShowIndex { table })
             }
             Some(Token::Ident(s)) if s.to_uppercase() == "PROCESSLIST" => Ok(Statement::ShowProcessList),
-            other => Err(format!("Expected TABLES, BUFFER, WAL, ISOLATION, LOCKS, DATABASES, GRANTS, CREATE, or PROCESSLIST, got {:?}", other)),
+            other => Err(format!("Expected TABLES, BUFFER, WAL, ISOLATION, LOCKS, DATABASES, GRANTS, CREATE, INDEX, or PROCESSLIST, got {:?}", other)),
         }
     }
 
@@ -3658,6 +3764,7 @@ impl Parser {
 
         let mut when_matched_update: Option<Vec<(String, ArithExpr)>> = None;
         let mut when_matched_delete = false;
+        let mut when_matched_delete_cond: Option<crate::parser::ast::CondExpr> = None;
         let mut when_not_matched_columns: Option<Vec<String>> = None;
         let mut when_not_matched_values: Vec<String> = Vec::new();
 
@@ -3677,6 +3784,11 @@ impl Parser {
                 Some(Token::Matched) => {}
                 other => return Err(format!("Expected MATCHED, got {:?}", other)),
             }
+            // Optional: WHEN MATCHED AND <condition> THEN ...
+            let extra_cond = if !not_matched && self.peek() == Some(&Token::And) {
+                self.advance();
+                Some(self.parse_condexpr()?)
+            } else { None };
             match self.advance() {
                 Some(Token::Then) => {}
                 other => return Err(format!("Expected THEN, got {:?}", other)),
@@ -3743,6 +3855,7 @@ impl Parser {
                     Some(Token::Delete) => {
                         self.advance();
                         when_matched_delete = true;
+                        when_matched_delete_cond = extra_cond;
                     }
                     other => return Err(format!("Expected UPDATE or DELETE after WHEN MATCHED THEN, got {:?}", other)),
                 }
@@ -3751,7 +3864,7 @@ impl Parser {
 
         Ok(Statement::Merge {
             target, target_alias, source, source_alias, on,
-            when_matched_update, when_matched_delete,
+            when_matched_update, when_matched_delete, when_matched_delete_cond,
             when_not_matched_columns, when_not_matched_values,
         })
     }

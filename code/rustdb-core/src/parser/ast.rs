@@ -327,6 +327,8 @@ pub enum Statement {
     CreateView {
         name: String,
         query: Box<Statement>,
+        #[serde(default)]
+        raw_sql: String,
     },
     DropView {
         name: String,
@@ -436,6 +438,12 @@ pub enum Statement {
     ShowCreateTable {
         table: String,
     },
+    ShowCreateView {
+        view: String,
+    },
+    ShowIndex {
+        table: String,
+    },
     Merge {
         target: String,
         target_alias: Option<String>,
@@ -444,6 +452,7 @@ pub enum Statement {
         on: CondExpr,
         when_matched_update: Option<Vec<(String, ArithExpr)>>,
         when_matched_delete: bool,
+        when_matched_delete_cond: Option<CondExpr>,
         when_not_matched_columns: Option<Vec<String>>,
         when_not_matched_values: Vec<String>,
     },

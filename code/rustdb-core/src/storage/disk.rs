@@ -300,6 +300,22 @@ impl DiskManager {
         serde_json::from_str(&json).unwrap_or_default()
     }
 
+    // ── 뷰 원본 SQL 영속화 (db별) ────────────────────────────────────────
+
+    pub fn save_view_raw_sql(&self, db: &str, view_sql: &HashMap<String, String>) {
+        self.ensure_db_dir(db);
+        let path = format!("{}/view_sql.json", self.table_dir(db));
+        let json = serde_json::to_string_pretty(view_sql).unwrap_or_default();
+        let _ = fs::write(path, json);
+    }
+
+    pub fn load_view_raw_sql(&self, db: &str) -> HashMap<String, String> {
+        let path = format!("{}/view_sql.json", self.table_dir(db));
+        if !Path::new(&path).exists() { return HashMap::new(); }
+        let json = fs::read_to_string(&path).unwrap_or_default();
+        serde_json::from_str(&json).unwrap_or_default()
+    }
+
     // ── 인덱스 메타데이터 영속화 (db별) ──────────────────────────────────
 
     pub fn save_index_meta(&self, db: &str, meta_list: &[IndexMeta]) {

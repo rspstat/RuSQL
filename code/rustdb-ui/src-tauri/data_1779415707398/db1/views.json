@@ -1,0 +1,39 @@
+{
+  "db1.v_active": {
+    "Select": {
+      "table": "db1.emp",
+      "subquery": null,
+      "columns": [
+        {
+          "Column": "id"
+        },
+        {
+          "Column": "name"
+        },
+        {
+          "Column": "dept_id"
+        }
+      ],
+      "distinct": false,
+      "condition": {
+        "Leaf": {
+          "left": {
+            "Col": "status"
+          },
+          "operator": "Eq",
+          "value": {
+            "Literal": "active"
+          }
+        }
+      },
+      "joins": [],
+      "order_by": [],
+      "group_by": null,
+      "having": null,
+      "limit": null,
+      "offset": null,
+      "for_update": false,
+      "for_share": false
+    }
+  }
+}

@@ -1,0 +1,34 @@
+{
+  "name": "db1.jdata",
+  "columns": [
+    {
+      "name": "id",
+      "data_type": "Int",
+      "primary_key": true,
+      "not_null": true,
+      "unique": false,
+      "unique_constraint_name": null,
+      "auto_increment": true,
+      "default": null,
+      "foreign_key": null,
+      "check_expr": null
+    },
+    {
+      "name": "info",
+      "data_type": "Json",
+      "primary_key": false,
+      "not_null": false,
+      "unique": false,
+      "unique_constraint_name": null,
+      "auto_increment": false,
+      "default": null,
+      "foreign_key": null,
+      "check_expr": null
+    }
+  ],
+  "auto_increment_counters": {
+    "id": 2
+  },
+  "primary_key_columns": [],
+  "check_constraints": []
+}

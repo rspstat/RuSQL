@@ -33,6 +33,7 @@
 - [x] Updatable View — 단순 뷰(JOIN/DISTINCT/GROUP BY 없음)에 INSERT/UPDATE/DELETE 지원, 뷰 조건 자동 병합
 - [x] DESCRIBE (테이블 스키마 조회)
 - [x] SHOW CREATE TABLE (스키마 기반 DDL 역생성)
+- [x] BACKUP [DATABASE db] [INTO 'file'] — FK ON DELETE / ON UPDATE 액션 포함 완전한 DDL 덤프
 
 ### DML
 - [x] INSERT (전체 컬럼 / 컬럼 지정 / 멀티 row)
@@ -48,6 +49,7 @@
 - [x] DELETE ... RETURNING — 삭제된 행 반환
 - [x] DELETE 다중 테이블 — `DELETE t1, t2 FROM t1 JOIN t2 ON ... WHERE ...`
 - [x] MERGE INTO — `MERGE INTO target USING source ON ... WHEN MATCHED THEN UPDATE/DELETE WHEN NOT MATCHED THEN INSERT`
+- [x] MERGE 조건부 DELETE — `WHEN MATCHED AND condition THEN DELETE` (DELETE/UPDATE 분기 처리)
 
 ### 저장 프로시저 / 트리거 / 사용자 정의 함수
 - [x] CREATE PROCEDURE / DROP PROCEDURE — BEGIN...END 본문, IN/OUT/INOUT 파라미터
@@ -253,7 +255,6 @@
 - [x] 결과창 크기 조절 (드래그)
 - [x] 전체 스크롤바 스타일 통일 (Monaco 에디터 스크롤바 기준)
 - [x] 탭별 결과 보존 (탭 전환 시 결과 패널 유지, tabResults Record로 탭별 독립 관리)
-- [x] Monaco SQL 자동완성 — 테이블명·컬럼명·SQL 키워드 약 60개, schemaRef로 실시간 스키마 반영
 - [x] 결과 테이블 컬럼 너비 조절 — th 드래그 resize handle, 첫 드래그 시 DOM 실측값 기반 초기화, table-layout: fixed 전환
 - [x] CSV 익스포트 (Tauri `export_csv` 커맨드) — SELECT 결과를 CSV 파일로 저장
 - [x] CSV 임포트 (Tauri `import_csv` 커맨드) — CSV 파일을 지정 테이블에 INSERT 일괄 실행

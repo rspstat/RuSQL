@@ -179,6 +179,8 @@ function App() {
   // ERD 상태
   const [erdColumns, setErdColumns] = useState<Record<string, ColumnDetail[]>>({});
   const [erdPositions, setErdPositions] = useState<Record<string, ErdPos>>({});
+  const [isAutoLayout, setIsAutoLayout] = useState(false);
+  const erdOriginalPositions = useRef<Record<string, ErdPos>>({});
   const [erdLoading, setErdLoading] = useState(false);
   const [erdPan, setErdPan] = useState<ErdPos>({ x: 40, y: 40 });
   const [erdZoom, setErdZoom] = useState(1);
@@ -324,9 +326,19 @@ function App() {
   const [activeView, setActiveView] = useState<ActiveView>("editor");
 
   // 서버 상태
-  const [serverStatus, setServerStatus] = useState<ServerStatus>({
-    running: false, port: 7878, client_count: 0, log: [],
-  });
+  // ─── AI 어시스턴트 상태 ─────────────────────────────────────
+  const [aiApiKey, setAiApiKey] = useState<string>(() => localStorage.getItem("rustdb_ai_key") ?? "");
+  const [aiServerUrl] = useState("http://127.0.0.1:8765");
+  const [aiMode, setAiMode] = useState<"nl" | "explain" | "schema">("nl");
+  const [aiQuestion, setAiQuestion] = useState("");
+  const [aiResult, setAiResult] = useState<{ type: "sql" | "explain" | "schema"; content: string } | null>(null);
+  const [aiLoading, setAiLoading] = useState(false);
+  const [aiError, setAiError] = useState("");
+  const [aiServerOk, setAiServerOk] = useState<boolean | null>(null);
+  const [aiKeyVisible, setAiKeyVisible] = useState(false);
+
+  const serverStatus_init: ServerStatus = { running: false, port: 7878, client_count: 0, log: [] };
+  const [serverStatus, setServerStatus] = useState<ServerStatus>(serverStatus_init);
   const [portInput, setPortInput] = useState("7878");
   const [serverMsg, setServerMsg] = useState("");
   const [srvConnName, setSrvConnName] = useState("RustDB Local");
@@ -428,8 +440,14 @@ function App() {
 
   // ─── ERD 자동 레이아웃 ──────────────────────────────────────
   const autoLayoutErd = () => {
+    if (isAutoLayout) {
+      setErdPositions(erdOriginalPositions.current);
+      setIsAutoLayout(false);
+      return;
+    }
     const allTables = Object.keys(erdColumns);
     if (allTables.length === 0) return;
+    erdOriginalPositions.current = { ...erdPositions };
     // FK 의존성: tbl → tbl이 참조하는 테이블들
     const deps: Record<string, Set<string>> = {};
     for (const t of allTables) deps[t] = new Set();
@@ -465,6 +483,7 @@ function App() {
       for (const t of byDepth[d] ?? []) { positions[t] = { x: 40 + d * COL_W, y }; y += cardH(t) + ROW_GAP; }
     }
     setErdPositions(positions);
+    setIsAutoLayout(true);
   };
 
   // ─── ERD 테이블 데이터 로드 ─────────────────────────────────
@@ -902,6 +921,8 @@ function App() {
   // ─── ERD 로드 ────────────────────────────────────────────────
   const loadErd = async () => {
     setErdLoading(true);
+    setIsAutoLayout(false);
+    erdOriginalPositions.current = {};
     try {
       const tblList = await invoke<string[]>("get_tables");
       if (tblList.length === 0) { setErdColumns({}); setErdPositions({}); return; }
@@ -947,6 +968,123 @@ function App() {
   const handleClearLog = async () => {
     await invoke("clear_server_log", { connId: connIdRef.current });
     setServerStatus(s => ({ ...s, log: [] }));
+  };
+
+  // ─── AI 어시스턴트 함수 ─────────────────────────────────────
+  const saveAiKey = (key: string) => {
+    setAiApiKey(key);
+    localStorage.setItem("rustdb_ai_key", key);
+  };
+
+  const checkAiServer = async () => {
+    try {
+      const res = await fetch(`${aiServerUrl}/health`, { signal: AbortSignal.timeout(2000) });
+      setAiServerOk(res.ok);
+    } catch {
+      setAiServerOk(false);
+    }
+  };
+
+  const getSchemaText = async (): Promise<string> => {
+    const tables = dbData[currentDb]?.tables ?? [];
+    const parts: string[] = [];
+    for (const t of tables) {
+      let cols = tableColumns[t];
+      if (!cols) {
+        cols = await invoke<ColumnDetail[]>("get_columns_detail", { table: t });
+        setTableColumns(p => ({ ...p, [t]: cols }));
+      }
+      const colStrs = cols.map(c => {
+        const attrs: string[] = [c.data_type];
+        if (c.is_pk) attrs.push("PK");
+        if (c.is_not_null && !c.is_pk) attrs.push("NOT NULL");
+        if (c.is_unique && !c.is_pk) attrs.push("UNIQUE");
+        if (c.fk_ref) attrs.push(`FK→${c.fk_ref}`);
+        return `  ${c.name} ${attrs.join(" ")}`;
+      }).join(",\n");
+      parts.push(`TABLE ${t} (\n${colStrs}\n)`);
+    }
+    return parts.length > 0 ? parts.join("\n\n") : "(no tables)";
+  };
+
+  const generateSql = async () => {
+    if (!aiQuestion.trim()) { setAiError("질문을 입력하세요."); return; }
+    if (!aiApiKey.trim()) { setAiError("API 키를 입력하세요."); return; }
+    setAiLoading(true); setAiError(""); setAiResult(null);
+    try {
+      const schema = await getSchemaText();
+      const res = await fetch(`${aiServerUrl}/api/nl-to-sql`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ question: aiQuestion, schema, api_key: aiApiKey, current_db: currentDb }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail ?? "서버 오류");
+      setAiResult({ type: "sql", content: data.sql });
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e);
+      if (msg.includes("fetch") || msg.includes("Failed")) {
+        setAiError("MCP 서버에 연결할 수 없습니다. server.py가 실행 중인지 확인하세요.");
+      } else {
+        setAiError(msg);
+      }
+    } finally {
+      setAiLoading(false);
+    }
+  };
+
+  const explainCurrent = async () => {
+    if (!aiApiKey.trim()) { setAiError("API 키를 입력하세요."); return; }
+    const sql = (editorRef.current?.getValue() ?? queryRef.current).trim();
+    if (!sql) { setAiError("에디터에 쿼리를 입력하세요."); return; }
+    setAiLoading(true); setAiError(""); setAiResult(null);
+    try {
+      const explainRes = await invoke<MultiQueryResult>("execute_query", { query: `EXPLAIN ${sql}`, ts: Date.now() });
+      const r = explainRes.results[0];
+      const explainText = [r.columns.join("\t"), ...r.rows.map(row => row.join("\t"))].join("\n");
+      const res = await fetch(`${aiServerUrl}/api/explain`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sql, explain_result: explainText, api_key: aiApiKey }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail ?? "서버 오류");
+      setAiResult({ type: "explain", content: data.interpretation });
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e);
+      if (msg.includes("fetch") || msg.includes("Failed")) {
+        setAiError("MCP 서버에 연결할 수 없습니다. server.py가 실행 중인지 확인하세요.");
+      } else {
+        setAiError("오류: " + msg);
+      }
+    } finally {
+      setAiLoading(false);
+    }
+  };
+
+  const generateSchema = async () => {
+    if (!aiQuestion.trim()) { setAiError("시스템 요구사항을 입력하세요."); return; }
+    if (!aiApiKey.trim()) { setAiError("API 키를 입력하세요."); return; }
+    setAiLoading(true); setAiError(""); setAiResult(null);
+    try {
+      const res = await fetch(`${aiServerUrl}/api/schema-design`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ description: aiQuestion, api_key: aiApiKey }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail ?? "서버 오류");
+      setAiResult({ type: "schema", content: data.sql });
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e);
+      if (msg.includes("fetch") || msg.includes("Failed")) {
+        setAiError("MCP 서버에 연결할 수 없습니다. server.py가 실행 중인지 확인하세요.");
+      } else {
+        setAiError(msg);
+      }
+    } finally {
+      setAiLoading(false);
+    }
   };
 
   // ─── 렌더 ───────────────────────────────────────────────────
@@ -1747,7 +1885,7 @@ function App() {
                 <div className="ctx-divider" />
                 <div onClick={() => runViewCtxQuery(`SELECT * FROM ${viewCtxMenu.view};`)}>Select Rows</div>
                 <div onClick={() => runViewCtxQuery(`SELECT * FROM ${viewCtxMenu.view} LIMIT 100;`)}>Select Rows (LIMIT 100)</div>
-                <div onClick={() => runViewCtxQuery(`SHOW CREATE TABLE ${viewCtxMenu.view};`)}>Show Create View</div>
+                <div onClick={() => runViewCtxQuery(`SHOW CREATE VIEW ${viewCtxMenu.view};`)}>Show Create View</div>
                 <div className="ctx-divider" />
                 <div onClick={() => { navigator.clipboard.writeText(viewCtxMenu.view); setViewCtxMenu(null); }}>Copy View Name</div>
                 <div className="ctx-divider" />
@@ -1768,7 +1906,7 @@ function App() {
               >
                 <div className="ctx-menu-header">{indexCtxMenu.index}</div>
                 <div className="ctx-divider" />
-                <div onClick={() => runIndexCtxQuery(`SHOW CREATE TABLE ${indexCtxMenu.table};`)}>Show Create Table</div>
+                <div onClick={() => runIndexCtxQuery(`SHOW INDEX FROM ${indexCtxMenu.table};`)}>Show Index Info</div>
                 <div className="ctx-divider" />
                 <div onClick={() => { navigator.clipboard.writeText(indexCtxMenu.index); setIndexCtxMenu(null); }}>Copy Index Name</div>
                 <div className="ctx-divider" />
@@ -2333,7 +2471,9 @@ function App() {
               <span className="erd-table-count">{Object.keys(erdColumns).length} tables</span>
             </div>
             <div className="erd-header-right">
-              <button className="erd-tool-btn" onClick={autoLayoutErd} title="FK 기반 자동 배치">⊞ Auto Layout</button>
+              <button className="erd-tool-btn" onClick={autoLayoutErd} title={isAutoLayout ? "원래 위치로 복원" : "FK 기반 자동 배치"}>
+                {isAutoLayout ? "↩ Reset Layout" : "⊞ Auto Layout"}
+              </button>
               <button className="erd-tool-btn" onClick={() => { setErdPan({ x: 40, y: 40 }); setErdZoom(1); }} title="Reset view">⊡ Reset</button>
               <button className="erd-tool-btn" onClick={loadErd} title="Refresh">↻ Refresh</button>
               <span className="erd-zoom-label">{Math.round(erdZoom * 100)}%</span>
@@ -2564,6 +2704,7 @@ function App() {
       {/* ── AI Assistant 뷰 ───────────────────────────────────── */}
       {activeView === "ai" && (
         <div className="ai-view">
+          {/* 헤더 */}
           <div className="ai-header">
             <div className="ai-header-left">
               <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor" style={{ opacity: 0.8 }}>
@@ -2572,22 +2713,177 @@ function App() {
                 <path d="M5 17l.5 1.5L7 19l-1.5.5L5 21l-.5-1.5L3 19l1.5-.5L5 17z"/>
               </svg>
               <span className="ai-header-title">AI Assistant</span>
+              <span className="ai-header-model">claude-opus-4-7</span>
+            </div>
+            <div className="ai-header-right">
+              <button
+                className={`ai-server-check ${aiServerOk === true ? "ok" : aiServerOk === false ? "fail" : ""}`}
+                onClick={checkAiServer}
+                title="MCP 서버 연결 확인"
+              >
+                {aiServerOk === true ? "● 서버 연결됨" : aiServerOk === false ? "● 서버 오프라인" : "◌ 서버 확인"}
+              </button>
             </div>
           </div>
-          <div className="ai-body">
-            <div className="ai-empty">
-              <svg width="48" height="48" viewBox="0 0 24 24" fill="currentColor" style={{ opacity: 0.2 }}>
-                <path d="M12 2l1.5 4.5L18 8l-4.5 1.5L12 14l-1.5-4.5L6 8l4.5-1.5L12 2z"/>
-                <path d="M19 14l.75 2.25L22 17l-2.25.75L19 20l-.75-2.25L16 17l2.25-.75L19 14z"/>
-                <path d="M5 17l.5 1.5L7 19l-1.5.5L5 21l-.5-1.5L3 19l1.5-.5L5 17z"/>
-              </svg>
-              <div className="ai-empty-title">AI Assistant</div>
-              <div className="ai-empty-sub">Coming soon</div>
+
+          {/* 본문 */}
+          <div className="ai-body ai-body-scroll">
+            {/* API Key 설정 */}
+            <div className="ai-section">
+              <div className="ai-section-title">
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><path d="M12.65 10C11.83 7.67 9.61 6 7 6c-3.31 0-6 2.69-6 6s2.69 6 6 6c2.61 0 4.83-1.67 5.65-4H17v4h4v-4h2v-4H12.65zM7 14c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2z"/></svg>
+                Anthropic API Key
+              </div>
+              <div className="ai-key-row">
+                <input
+                  className="ai-key-input"
+                  type={aiKeyVisible ? "text" : "password"}
+                  placeholder="sk-ant-..."
+                  value={aiApiKey}
+                  onChange={e => saveAiKey(e.target.value)}
+                />
+                <button className="ai-key-eye" onClick={() => setAiKeyVisible(v => !v)} tabIndex={-1}>
+                  {aiKeyVisible ? "🙈" : "👁"}
+                </button>
+              </div>
+            </div>
+
+            {/* 모드 탭 */}
+            <div className="ai-mode-tabs">
+              <button className={`ai-mode-tab ${aiMode === "nl" ? "active" : ""}`} onClick={() => { setAiMode("nl"); setAiResult(null); setAiError(""); }}>
+                자연어 → SQL
+              </button>
+              <button className={`ai-mode-tab ${aiMode === "explain" ? "active" : ""}`} onClick={() => { setAiMode("explain"); setAiResult(null); setAiError(""); }}>
+                쿼리 해석
+              </button>
+              <button className={`ai-mode-tab ${aiMode === "schema" ? "active" : ""}`} onClick={() => { setAiMode("schema"); setAiResult(null); setAiError(""); }}>
+                스키마 설계
+              </button>
+            </div>
+
+            {/* 자연어 → SQL 모드 */}
+            {aiMode === "nl" && (
+              <div className="ai-section">
+                <div className="ai-section-title">
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><path d="M20 2H4c-1.1 0-2 .9-2 2v18l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2z"/></svg>
+                  자연어 질문
+                </div>
+                <div className="ai-desc">현재 DB(<strong>{currentDb}</strong>)의 스키마를 기반으로 SQL을 생성합니다.</div>
+                <textarea
+                  className="ai-textarea"
+                  rows={4}
+                  placeholder="예: 매출 상위 10개 상품을 보여줘"
+                  value={aiQuestion}
+                  onChange={e => setAiQuestion(e.target.value)}
+                  onKeyDown={e => { if (e.ctrlKey && e.key === "Enter") generateSql(); }}
+                />
+                <div className="ai-btn-row">
+                  <button className="ai-btn primary" onClick={generateSql} disabled={aiLoading}>
+                    {aiLoading ? "생성 중..." : "SQL 생성 (Ctrl+Enter)"}
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* 쿼리 해석 모드 */}
+            {aiMode === "explain" && (
+              <div className="ai-section">
+                <div className="ai-section-title">
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><path d="M9 21c0 .55.45 1 1 1h4c.55 0 1-.45 1-1v-1H9v1zm3-19C8.14 2 5 5.14 5 9c0 2.38 1.19 4.47 3 5.74V17c0 .55.45 1 1 1h6c.55 0 1-.45 1-1v-2.26c1.81-1.27 3-3.36 3-5.74 0-3.86-3.14-7-7-7z"/></svg>
+                  쿼리 실행 계획 분석
+                </div>
+                <div className="ai-desc">에디터의 현재 쿼리에 EXPLAIN을 실행하고 AI가 결과를 해석합니다.</div>
+                <div className="ai-current-query">
+                  <span className="ai-current-label">현재 쿼리:</span>
+                  <code className="ai-current-sql">{(editorRef.current?.getValue() ?? queryRef.current).trim().slice(0, 120) || "(에디터가 비어있음)"}</code>
+                </div>
+                <div className="ai-btn-row">
+                  <button className="ai-btn primary" onClick={explainCurrent} disabled={aiLoading}>
+                    {aiLoading ? "분석 중..." : "쿼리 분석"}
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* 스키마 설계 모드 */}
+            {aiMode === "schema" && (
+              <div className="ai-section">
+                <div className="ai-section-title">
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><path d="M20 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h15c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm-2 14H7v-2h11v2zm0-4H7v-2h11v2zm0-4H7V7h11v2z"/></svg>
+                  스키마 설계 추천
+                </div>
+                <div className="ai-desc">시스템 요구사항을 설명하면 테이블 구조와 CREATE TABLE SQL을 생성합니다.</div>
+                <textarea
+                  className="ai-textarea"
+                  rows={4}
+                  placeholder="예: 온라인 쇼핑몰 주문 관리 시스템을 만들고 싶어"
+                  value={aiQuestion}
+                  onChange={e => setAiQuestion(e.target.value)}
+                  onKeyDown={e => { if (e.ctrlKey && e.key === "Enter") generateSchema(); }}
+                />
+                <div className="ai-btn-row">
+                  <button className="ai-btn primary" onClick={generateSchema} disabled={aiLoading}>
+                    {aiLoading ? "생성 중..." : "스키마 생성 (Ctrl+Enter)"}
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* 오류 메시지 */}
+            {aiError && (
+              <div className="ai-error">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-2h2v2zm0-4h-2V7h2v6z"/></svg>
+                {aiError}
+              </div>
+            )}
+
+            {/* 결과 영역 */}
+            {aiResult && (
+              <div className="ai-section ai-result-section">
+                <div className="ai-section-title">
+                  {aiResult.type === "explain" ? "분석 결과" : "생성된 SQL"}
+                </div>
+                {aiResult.type === "explain" ? (
+                  <div className="ai-result-text">{aiResult.content}</div>
+                ) : (
+                  <pre className="ai-result-sql">{aiResult.content}</pre>
+                )}
+                {(aiResult.type === "sql" || aiResult.type === "schema") && (
+                  <div className="ai-btn-row">
+                    <button
+                      className="ai-btn success"
+                      onClick={() => { setEditorQuery(aiResult.content); setActiveView("editor"); }}
+                    >
+                      에디터에 삽입
+                    </button>
+                    <button
+                      className="ai-btn"
+                      onClick={() => navigator.clipboard.writeText(aiResult.content)}
+                    >
+                      클립보드 복사
+                    </button>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* MCP 서버 안내 */}
+            <div className="ai-section ai-guide-section">
+              <div className="ai-section-title">MCP 서버 시작 방법</div>
+              <code className="ai-guide-code">cd code/rustdb-mcp</code>
+              <code className="ai-guide-code">pip install -r requirements.txt</code>
+              <code className="ai-guide-code">python server.py</code>
+              <div className="ai-desc" style={{ marginTop: 8 }}>서버가 <strong>127.0.0.1:8765</strong>에서 실행됩니다.</div>
             </div>
           </div>
+
+          {/* 하단 상태바 */}
           <div className="status-bar">
             <div className="status-left">
               <span className="status-item">⎇ main</span>
+              <span className="status-item" style={{ color: aiServerOk === true ? "#4ec9b0" : "#858585" }}>
+                {aiServerOk === true ? "● MCP :8765" : "○ MCP 미연결"}
+              </span>
             </div>
             <div className="status-right">
               <span className="status-item">RustDB v2.2.0</span>
