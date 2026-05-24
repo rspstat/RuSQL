@@ -74,7 +74,10 @@
 | 14 | 패널 토글 버튼 (3종) | 탭바 우측 — 왼쪽 사이드바 토글, 하단 결과 패널 토글, 오른쪽 패널(비활성) | 소 | ✅ |
 | 15 | 분할 탭 왼쪽 바 이동·복원 | 오른쪽 분할 시 해당 탭을 왼쪽 탭바에서 제거(stash), 분할 닫으면 원래 위치로 복원 (`splitTabStash`) | 소 | ✅ |
 | 16 | 결과 컬럼 자동 너비 | Canvas `measureText` (Consolas + Malgun Gothic) 로 각 컬럼의 헤더/데이터 최대 px 측정 후 동적 배치, 한글·CJK 정확 측정 | 소 | ✅ |
-| 17 | 라이트 모드 | CSS 변수 기반 테마 시스템 구축, 다크/라이트 토글 버튼, Monaco Editor 테마 전환 (`vs-dark` ↔ `vs`), localStorage 저장 | 중 | 🔲 |
+| 17 | Ctrl+Enter stale closure 수정 | `runQueryRef`로 매 렌더링마다 최신 `runQuery` 유지 → 탭 전환 후에도 항상 현재 탭 기준 실행 | 소 | ✅ |
+| 18 | 저장 버튼 WebView2 호환 수정 | `a.click()` 전 `document.body.appendChild(a)` 추가 → Tauri WebView2 환경에서 파일 다운로드 정상 동작 | 소 | ✅ |
+| 19 | 쿼리 진행 바 표시 수정 | `.result-tab-bar`에 `position: relative` 추가(절대 위치 기준점 수정), 최소 400ms 표시 보장 | 소 | ✅ |
+| 20 | 라이트 모드 | CSS 변수 기반 테마 시스템 구축, 다크/라이트 토글 버튼, Monaco Editor 테마 전환 (`vs-dark` ↔ `vs`), localStorage 저장 | 중 | 🔲 |
 
 ---
 

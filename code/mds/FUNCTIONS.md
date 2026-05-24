@@ -239,7 +239,7 @@
 - [x] 탭 우클릭 컨텍스트 메뉴 (VSCode 스타일) — 닫기 / 다른 탭 닫기 / 오른쪽 탭 닫기 / 모두 닫기 / 이름 변경 / 고정·고정 해제 / 오른쪽으로 분할 / 왼쪽으로 분할 / 분할 및 이동; `source: "main" | "split"` 구분으로 분할 탭바에서도 동일 메뉴 제공
 - [x] 탭 고정 — `pinnedTabs: Set<string>`, 📌 아이콘 표시, 고정된 탭은 × 닫기 버튼 비활성화
 - [x] 분할 에디터 — 오른쪽으로 분할 / 왼쪽으로 분할 / 분할 및 이동 3종 동작, 드래그 가능한 구분선 (`splitLeftPct`), 독립 Monaco 인스턴스; 분할 시 탭이 왼쪽 탭바에서 사라지고 닫을 때 원래 위치에 복원 (`splitTabStash`)
-- [x] 에디터 툴바 (MySQL 스타일) — breadcrumb 아래 고정 행: SQL 파일 열기(폴더 아이콘) / SQL 파일 저장(플로피 아이콘) / 번개 실행 버튼 (Ctrl+Enter 연동)
+- [x] 에디터 툴바 (MySQL 스타일) — breadcrumb 아래 고정 행: SQL 파일 열기(폴더 아이콘) / SQL 파일 저장(플로피 아이콘, DOM append 방식으로 WebView2 다운로드 보장) / 번개 실행 버튼 (Ctrl+Enter 연동, `runQueryRef`로 stale closure 방지 — 탭 전환 후에도 항상 현재 활성 탭 기준 실행)
 - [x] 패널 토글 버튼 — 탭바 우측: 사이드바 토글 / 결과창 토글 (이전 높이 기억 후 복원) / 우측 패널(표시 전용); 활성 패널은 teal, 비활성은 회색
 - [x] 사이드바 DB 아이콘 — 원통형 SVG (`currentColor` 스트로크, 활성 DB 시 teal / 비활성 시 회색)
 - [x] 사이드바 — MySQL Workbench 스타일 (Database > Tables / Views / Indexes)
@@ -262,11 +262,12 @@
 - [x] 전체 스크롤바 스타일 통일 (Monaco 에디터 스크롤바 기준)
 - [x] 탭별 결과 보존 (탭 전환 시 결과 패널 유지, tabResults Record로 탭별 독립 관리)
 - [x] 결과 테이블 컬럼 너비 조절 — th 드래그 resize handle, table-layout: fixed 항상 적용
-- [x] 결과 테이블 컬럼 자동 너비 — Canvas `measureText`로 헤더·데이터 실제 픽셀 너비 측정 (한글/CJK 포함), 최대 200행 샘플링, 최소 60px / 최대 500px
+- [x] 결과 테이블 컬럼 자동 너비 — Canvas `measureText`로 헤더·데이터 실제 픽셀 너비 측정 (한글/CJK 포함), 최대 200행 샘플링, 최소 60px / 최대 500px; 헤더 측정 시 정렬 아이콘(` ⇅`) 포함, `white-space: nowrap` + `vertical-align: middle`로 줄바꿈·수직 밀림 방지
 - [x] CSV 익스포트 (Tauri `export_csv` 커맨드) — SELECT 결과를 CSV 파일로 저장
 - [x] CSV 임포트 (Tauri `import_csv` 커맨드) — CSV 파일을 지정 테이블에 INSERT 일괄 실행
 - [x] 결과 컬럼 헤더 클릭 정렬 — ▲ ASC / ▼ DESC / ⇅ 기본 토글, 수치·문자열 자동 감지, 정렬 후 페이징 재계산
-- [x] 결과 행 번호 — 결과 테이블 첫 열 `#` (1-based, 페이지 오프셋 반영)
+- [x] 결과 행 번호 — 결과 테이블 첫 열 `#` (1-based, 페이지 오프셋 반영, 고정 40px 너비, 왼쪽 정렬)
+- [x] 쿼리 실행 진행 바 — `isRunning` 시 탭바 하단에 teal 슬라이딩 바 표시, 최소 400ms 보장으로 빠른 쿼리도 시각적 피드백 제공
 - [x] 결과 내 실시간 검색 — 결과 패널 상단 검색 입력, 해당 키워드 포함 행 실시간 필터 (페이징 연동)
 - [x] 키보드 단축키 — Ctrl+T (새 탭), Ctrl+W (탭 닫기), Ctrl+Enter (쿼리 실행), Ctrl+Shift+F (SQL 포매터)
 - [x] SQL 포매터 — `sql-formatter` 패키지, Ctrl+Shift+F로 에디터 SQL 자동 들여쓰기 (UPPER case 키워드, 2-space indent)
