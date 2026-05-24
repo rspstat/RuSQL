@@ -48,6 +48,12 @@ interface ColumnDetail {
   fk_ref: string | null;
 }
 type ActiveView = "editor" | "erd" | "server" | "ai";
+interface ChatMessage {
+  id: string;
+  role: "user" | "assistant";
+  content: string;
+  toolCalls?: { name: string; args: string; result?: string }[];
+}
 const PAGE_SIZE = 100;
 
 // ─── ERD 타입/상수 ────────────────────────────────────────────
@@ -116,6 +122,18 @@ function saveHistory(connId: string, h: HistoryEntry[]) {
   localStorage.setItem(`rustdb_history_${connId}`, JSON.stringify(h.slice(0, MAX_HISTORY)));
 }
 
+// ─── 텍스트 너비 측정 (한글/CJK 포함, canvas 사용) ──────────
+let _measureCtx: CanvasRenderingContext2D | null = null;
+const measureTextPx = (text: string): number => {
+  if (!_measureCtx) {
+    const c = document.createElement('canvas');
+    _measureCtx = c.getContext('2d');
+    if (!_measureCtx) return text.length * 8;
+    _measureCtx.font = '13px Consolas, "Malgun Gothic", monospace';
+  }
+  return _measureCtx.measureText(text).width;
+};
+
 // ─── 메인 컴포넌트 ────────────────────────────────────────────
 function App() {
   // 현재 연결 ID (localStorage 키 네임스페이스용, ref는 클로저에서 안전하게 참조)
@@ -165,6 +183,16 @@ function App() {
   const [dbCtxMenu, setDbCtxMenu] = useState<{ x: number; y: number; db: string } | null>(null);
   const [viewCtxMenu, setViewCtxMenu] = useState<{ x: number; y: number; view: string } | null>(null);
   const [indexCtxMenu, setIndexCtxMenu] = useState<{ x: number; y: number; index: string; table: string; kind: "single" | "composite" } | null>(null);
+  const [tabCtxMenu, setTabCtxMenu] = useState<{ x: number; y: number; tabId: string; source: "main" | "split" } | null>(null);
+  const [pinnedTabs, setPinnedTabs] = useState<Set<string>>(new Set());
+  const [splitTabId, setSplitTabId] = useState<string | null>(null);
+  const [splitTabStash, setSplitTabStash] = useState<(Tab & { insertIdx: number }) | null>(null);
+  const [splitLeftPct, setSplitLeftPct] = useState(50);
+  const runQueryRef = useRef<() => Promise<void>>(async () => {});
+  const splitEditorRef = useRef<Monaco.editor.IStandaloneCodeEditor | null>(null);
+  const splitQueryRef = useRef<string>("");
+  const isSplitSwitching = useRef(false);
+  const isSplitDragging = useRef(false);
   const [editingTabId, setEditingTabId] = useState<string | null>(null);
   const [editingTabName, setEditingTabName] = useState("");
   const [isRunning, setIsRunning] = useState(false);
@@ -175,6 +203,7 @@ function App() {
   const [sidebarWidth, setSidebarWidth] = useState(240);
   const isDragging = useRef(false);
   const isSidebarDragging = useRef(false);
+  const lastResultHeightRef = useRef(260);
 
   // ERD 상태
   const [erdColumns, setErdColumns] = useState<Record<string, ColumnDetail[]>>({});
@@ -289,6 +318,32 @@ function App() {
   };
   const removeBookmark = (id: string) => saveBookmarkList(bookmarks.filter(b => b.id !== id));
 
+  const importSqlFile = () => {
+    const input = document.createElement("input");
+    input.type = "file";
+    input.accept = ".sql,.txt";
+    input.onchange = (e) => {
+      const file = (e.target as HTMLInputElement).files?.[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = ev => {
+        const content = ev.target?.result as string;
+        if (content) setEditorQuery(content);
+      };
+      reader.readAsText(file);
+    };
+    input.click();
+  };
+
+  const toggleResultPanel = () => {
+    if (resultHeight > 0) {
+      lastResultHeightRef.current = resultHeight;
+      setResultHeight(0);
+    } else {
+      setResultHeight(lastResultHeightRef.current);
+    }
+  };
+
   const handleAutoLogin = async (conn: Connection) => {
     const ok = await invoke<boolean>("authenticate", { user: conn.user, password: conn.password, dataDir: conn.dataDir });
     if (ok) doLogin(conn);
@@ -336,6 +391,13 @@ function App() {
   const [aiError, setAiError] = useState("");
   const [aiServerOk, setAiServerOk] = useState<boolean | null>(null);
   const [aiKeyVisible, setAiKeyVisible] = useState(false);
+
+  // ─── AI Agent 채팅 상태 ──────────────────────────────────────
+  const [aiChatOpen, setAiChatOpen] = useState(false);
+  const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
+  const [chatInput, setChatInput] = useState("");
+  const [chatLoading, setChatLoading] = useState(false);
+  const chatEndRef = useRef<HTMLDivElement>(null);
 
   const serverStatus_init: ServerStatus = { running: false, port: 7878, client_count: 0, log: [] };
   const [serverStatus, setServerStatus] = useState<ServerStatus>(serverStatus_init);
@@ -394,7 +456,7 @@ function App() {
 
   // ─── 컨텍스트 메뉴 + 메뉴바 닫기 ────────────────────────────
   useEffect(() => {
-    const h = () => { setCtxMenu(null); setTableCtxMenu(null); setDbCtxMenu(null); setViewCtxMenu(null); setIndexCtxMenu(null); setOpenMenu(null); };
+    const h = () => { setCtxMenu(null); setTableCtxMenu(null); setDbCtxMenu(null); setViewCtxMenu(null); setIndexCtxMenu(null); setTabCtxMenu(null); setOpenMenu(null); };
     window.addEventListener("click", h);
     return () => window.removeEventListener("click", h);
   }, []);
@@ -426,10 +488,18 @@ function App() {
         const newW = e.clientX - rect.left - 48; // 48 = activity bar width
         setSidebarWidth(Math.max(160, Math.min(newW, 480)));
       }
+      if (isSplitDragging.current) {
+        const el = document.querySelector(".editor-area") as HTMLElement;
+        if (!el) return;
+        const rect = el.getBoundingClientRect();
+        const pct = Math.max(20, Math.min(80, ((e.clientX - rect.left) / rect.width) * 100));
+        setSplitLeftPct(pct);
+      }
     };
     const onUp = () => {
       isDragging.current = false;
       isSidebarDragging.current = false;
+      isSplitDragging.current = false;
       document.body.style.cursor = "";
       document.body.style.userSelect = "";
     };
@@ -574,6 +644,11 @@ function App() {
     logEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [serverStatus.log]);
 
+  // ─── 채팅 자동 스크롤 ────────────────────────────────────
+  useEffect(() => {
+    chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [chatMessages, chatLoading]);
+
   // ─── 쿼리 실행 ──────────────────────────────────────────────
   const runQuery = async () => {
     const sel = editorRef.current?.getSelection()
@@ -620,9 +695,12 @@ function App() {
         return next;
       });
     } finally {
-      setIsRunning(false);
+      // 최소 400ms 표시 보장 (빠른 쿼리도 로딩 바가 보이도록)
+      setTimeout(() => setIsRunning(false), 400);
     }
   };
+  // addCommand가 첫 렌더링의 runQuery를 캡처하는 stale closure 방지
+  useEffect(() => { runQueryRef.current = runQuery; });
 
   // 에디터 내용 프로그래밍 방식으로 변경 — executeEdits로 undo 히스토리 보존
   const setEditorQuery = (q: string) => {
@@ -688,6 +766,8 @@ function App() {
   const closeTab = (id: string, e?: React.MouseEvent) => {
     e?.stopPropagation();
     if (tabs.length === 1) return; // 마지막 탭은 닫지 않음
+    if (pinnedTabs.has(id)) return; // 고정된 탭은 닫지 않음
+    if (id === splitTabId) setSplitTabId(null); // 분할 탭 닫힐 때 분할도 해제
     const idx = tabs.findIndex(t => t.id === id);
     const next = tabs.filter(t => t.id !== id);
     saveTabs(next);
@@ -698,6 +778,175 @@ function App() {
       queryRef.current = newActive.content;
       editorRef.current?.setValue(newActive.content);
     }
+  };
+
+  const closeOtherTabs = (id: string) => {
+    const currentContent = editorRef.current?.getValue() ?? queryRef.current;
+    const target = tabs.find(t => t.id === id);
+    if (!target) return;
+    const next = [{ ...target, content: id === activeTabId ? currentContent : target.content }];
+    saveTabs(next);
+    setActiveTabId(id);
+    localStorage.setItem(`rustdb_active_tab_${connIdRef.current}`, id);
+    queryRef.current = next[0].content;
+    isSwitchingTab.current = true;
+    editorRef.current?.setValue(next[0].content);
+    isSwitchingTab.current = false;
+    setPinnedTabs(prev => { const s = new Set<string>(); if (prev.has(id)) s.add(id); return s; });
+  };
+
+  const closeTabsToRight = (id: string) => {
+    const currentContent = editorRef.current?.getValue() ?? queryRef.current;
+    const updated = tabs.map(t => t.id === activeTabId ? { ...t, content: currentContent } : t);
+    const idx = updated.findIndex(t => t.id === id);
+    if (idx < 0) return;
+    const next = updated.slice(0, idx + 1);
+    saveTabs(next);
+    if (!next.find(t => t.id === activeTabId)) {
+      const last = next[next.length - 1];
+      setActiveTabId(last.id);
+      localStorage.setItem(`rustdb_active_tab_${connIdRef.current}`, last.id);
+      queryRef.current = last.content;
+      isSwitchingTab.current = true;
+      editorRef.current?.setValue(last.content);
+      isSwitchingTab.current = false;
+    }
+    setPinnedTabs(prev => { const s = new Set<string>(); next.forEach(t => { if (prev.has(t.id)) s.add(t.id); }); return s; });
+  };
+
+  const closeAllTabs = () => {
+    const newId = Date.now().toString();
+    const newTab: Tab = { id: newId, name: "query.sql", content: "" };
+    saveTabs([newTab]);
+    setActiveTabId(newId);
+    localStorage.setItem(`rustdb_active_tab_${connIdRef.current}`, newId);
+    queryRef.current = "";
+    isSwitchingTab.current = true;
+    editorRef.current?.setValue("");
+    isSwitchingTab.current = false;
+    setPinnedTabs(new Set());
+  };
+
+  const downloadTab = (id: string) => {
+    const currentContent = editorRef.current?.getValue() ?? queryRef.current;
+    const tab = tabs.find(t => t.id === id);
+    if (!tab) return;
+    const content = id === activeTabId ? currentContent : tab.content;
+    const blob = new Blob([content], { type: "text/plain;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = tab.name.endsWith(".sql") ? tab.name : `${tab.name}.sql`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  };
+
+  const togglePin = (id: string) => {
+    setPinnedTabs(prev => {
+      const s = new Set(prev);
+      if (s.has(id)) s.delete(id); else s.add(id);
+      return s;
+    });
+  };
+
+  const openSplitPaneWith = (targetId: string) => {
+    // 이미 분할 중이면 기존 stash를 tabs[]에 복원한 뒤 새 stash 생성
+    let baseTabs = tabs;
+    if (splitTabStash) {
+      const stashContent = splitEditorRef.current?.getValue() ?? splitQueryRef.current;
+      const insertIdx = Math.min(splitTabStash.insertIdx, tabs.length);
+      const restored = { id: splitTabStash.id, name: splitTabStash.name, content: stashContent };
+      baseTabs = [...tabs.slice(0, insertIdx), restored, ...tabs.slice(insertIdx)];
+      setSplitTabStash(null);
+    }
+
+    const idx = baseTabs.findIndex(t => t.id === targetId);
+    if (idx === -1) return;
+    const tab = baseTabs[idx];
+
+    splitQueryRef.current = tab.content;
+    setSplitTabId(targetId);
+    setSplitLeftPct(50);
+
+    // 탭을 왼쪽 바에서 제거하고 stash에 보관
+    const nextTabs = baseTabs.filter(t => t.id !== targetId);
+    setSplitTabStash({ ...tab, insertIdx: idx });
+    setTabs(nextTabs);
+    localStorage.setItem(`rustdb_tabs_${connIdRef.current}`, JSON.stringify(nextTabs));
+
+    // 분할된 탭이 활성 탭이었으면 인접 탭으로 전환
+    if (targetId === activeTabId && nextTabs.length > 0) {
+      const newActive = nextTabs[Math.min(idx, nextTabs.length - 1)];
+      setActiveTabId(newActive.id);
+      queryRef.current = newActive.content;
+      isSwitchingTab.current = true;
+      editorRef.current?.setValue(newActive.content);
+      isSwitchingTab.current = false;
+    }
+  };
+
+  // 오른쪽으로 분할: 우클릭한 탭이 오른쪽 분할창에 열림 (같은 탭도 허용)
+  const doSplitRight = (tabId: string) => {
+    openSplitPaneWith(tabId);
+  };
+
+  // 왼쪽으로 분할: 현재 활성 탭이 오른쪽, 우클릭한 탭이 왼쪽(메인)으로
+  const doSplitLeft = (tabId: string) => {
+    const prevActiveId = activeTabId;
+    openSplitPaneWith(prevActiveId); // 현재 활성 탭을 오른쪽 분할창으로
+    if (tabId !== prevActiveId) switchTab(tabId); // 클릭한 탭을 왼쪽(메인)으로
+  };
+
+  // 분할 및 이동: 우클릭한 탭을 오른쪽으로 이동, 왼쪽은 다른 탭으로 전환
+  const doSplitAndMove = (tabId: string) => {
+    openSplitPaneWith(tabId);
+    if (tabId === activeTabId) {
+      const other = tabs.find(t => t.id !== tabId);
+      if (other) switchTab(other.id);
+    }
+  };
+
+  const closeSplit = () => {
+    const content = splitEditorRef.current?.getValue() ?? splitQueryRef.current;
+    if (splitTabStash) {
+      const stash = splitTabStash;
+      const restored = { id: stash.id, name: stash.name, content };
+      setTabs(prev => {
+        const insertIdx = Math.min(stash.insertIdx, prev.length);
+        const next = [...prev.slice(0, insertIdx), restored, ...prev.slice(insertIdx)];
+        localStorage.setItem(`rustdb_tabs_${connIdRef.current}`, JSON.stringify(next));
+        return next;
+      });
+      setActiveTabId(stash.id);
+      queryRef.current = content;
+      isSwitchingTab.current = true;
+      editorRef.current?.setValue(content);
+      isSwitchingTab.current = false;
+      setSplitTabStash(null);
+    }
+    setSplitTabId(null);
+  };
+
+  const switchSplitTab = (id: string) => {
+    if (id === splitTabId) return;
+    const content = splitEditorRef.current?.getValue() ?? splitQueryRef.current;
+    if (splitTabStash?.id === splitTabId) {
+      setSplitTabStash(prev => prev ? { ...prev, content } : prev);
+    } else {
+      setTabs(prev => {
+        const next = prev.map(t => t.id === splitTabId ? { ...t, content } : t);
+        localStorage.setItem(`rustdb_tabs_${connIdRef.current}`, JSON.stringify(next));
+        return next;
+      });
+    }
+    const newContent = tabs.find(t => t.id === id)?.content ?? "";
+    splitQueryRef.current = newContent;
+    isSplitSwitching.current = true;
+    splitEditorRef.current?.setValue(newContent);
+    isSplitSwitching.current = false;
+    setSplitTabId(id);
   };
 
   const toggleTable = async (t: string) => {
@@ -1085,6 +1334,25 @@ function App() {
     } finally {
       setAiLoading(false);
     }
+  };
+
+  // ─── AI Agent 채팅 ───────────────────────────────────────────
+  const sendChat = async () => {
+    const text = chatInput.trim();
+    if (!text || chatLoading) return;
+    const userMsg: ChatMessage = { id: Date.now().toString(), role: "user", content: text };
+    setChatMessages(prev => [...prev, userMsg]);
+    setChatInput("");
+    setChatLoading(true);
+    // TODO: API 연동 (Anthropic tool_use)
+    setTimeout(() => {
+      setChatMessages(prev => [...prev, {
+        id: (Date.now() + 1).toString(),
+        role: "assistant",
+        content: "API 연동 준비 중입니다.\n\n현재 UI 구조만 완성된 상태이며, 곧 Claude API + tool_use 기반 에이전트가 연결됩니다.",
+      }]);
+      setChatLoading(false);
+    }, 600);
   };
 
   // ─── 렌더 ───────────────────────────────────────────────────
@@ -1616,7 +1884,11 @@ function App() {
                       title={isActive ? "현재 데이터베이스" : "더블클릭으로 전환"}
                     >
                       <span className="sidebar-group-arrow">{isOpen ? "▼" : "▶"}</span>
-                      <span className="sidebar-db-icon">🗄</span>
+                      <svg className="sidebar-db-icon" viewBox="0 0 24 24" width="13" height="16" preserveAspectRatio="none" fill="none">
+                        <ellipse cx="12" cy="5" rx="9" ry="3.5" stroke="currentColor" strokeWidth="1.5" vectorEffect="non-scaling-stroke"/>
+                        <path d="M3 5v6c0 1.93 4.03 3.5 9 3.5s9-1.57 9-3.5V5" stroke="currentColor" strokeWidth="1.5" fill="none" vectorEffect="non-scaling-stroke"/>
+                        <path d="M3 11v6c0 1.93 4.03 3.5 9 3.5s9-1.57 9-3.5v-6" stroke="currentColor" strokeWidth="1.5" fill="none" vectorEffect="non-scaling-stroke"/>
+                      </svg>
                       <span className="sidebar-db-name">{dbName}{isActive ? " ◀" : ""}</span>
                     </div>
 
@@ -1917,6 +2189,74 @@ function App() {
             </>
           )}
 
+          {/* 탭 컨텍스트 메뉴 */}
+          {tabCtxMenu && (() => {
+            const ctxTab = tabs.find(t => t.id === tabCtxMenu.tabId);
+            if (!ctxTab) return null;
+            const isPinned = pinnedTabs.has(tabCtxMenu.tabId);
+            const tabIdx = tabs.findIndex(t => t.id === tabCtxMenu.tabId);
+            const hasTabsToRight = tabIdx < tabs.length - 1;
+            const hasOtherTabs = tabs.length > 1;
+            const isFromSplit = tabCtxMenu.source === "split";
+            const close = () => setTabCtxMenu(null);
+            return (
+              <>
+                <div style={{ position: "fixed", inset: 0, zIndex: 999 }} onClick={close} />
+                <div className="ctx-menu tab-ctx-menu" style={{ top: tabCtxMenu.y, left: tabCtxMenu.x, zIndex: 1000 }}>
+                  <div className="ctx-menu-header">{ctxTab.name}</div>
+                  <div className="ctx-divider" />
+                  <div className="ctx-item-with-shortcut" onClick={() => {
+                    close();
+                    if (isFromSplit) closeSplit(); else closeTab(tabCtxMenu.tabId);
+                  }}>
+                    <span>닫기</span><span className="ctx-shortcut">Ctrl+W</span>
+                  </div>
+                  <div
+                    className={`ctx-item-with-shortcut${(!hasOtherTabs || isFromSplit) ? " ctx-item-disabled" : ""}`}
+                    onClick={() => { if (!hasOtherTabs || isFromSplit) return; close(); closeOtherTabs(tabCtxMenu.tabId); }}
+                  >
+                    <span>다른 탭 닫기</span>
+                  </div>
+                  <div
+                    className={`ctx-item-with-shortcut${(!hasTabsToRight || isFromSplit) ? " ctx-item-disabled" : ""}`}
+                    onClick={() => { if (!hasTabsToRight || isFromSplit) return; close(); closeTabsToRight(tabCtxMenu.tabId); }}
+                  >
+                    <span>오른쪽 탭 닫기</span>
+                  </div>
+                  <div
+                    className={`ctx-item-with-shortcut${(tabs.length <= 1 || isFromSplit) ? " ctx-item-disabled" : ""}`}
+                    onClick={() => { if (tabs.length <= 1 || isFromSplit) return; close(); closeAllTabs(); }}
+                  >
+                    <span>모두 닫기</span><span className="ctx-shortcut">Ctrl+K W</span>
+                  </div>
+                  <div className="ctx-divider" />
+                  <div className="ctx-item-with-shortcut" onClick={() => {
+                    close();
+                    setEditingTabId(tabCtxMenu.tabId);
+                    setEditingTabName(ctxTab.name);
+                    if (isFromSplit) { if (tabCtxMenu.tabId !== splitTabId) switchSplitTab(tabCtxMenu.tabId); }
+                    else { if (tabCtxMenu.tabId !== activeTabId) switchTab(tabCtxMenu.tabId); }
+                  }}>
+                    <span>이름 변경</span>
+                  </div>
+                  <div className="ctx-item-with-shortcut" onClick={() => { close(); togglePin(tabCtxMenu.tabId); }}>
+                    <span>{isPinned ? "고정 해제" : "고정"}</span><span className="ctx-shortcut">Ctrl+K ⇧Enter</span>
+                  </div>
+                  <div className="ctx-divider" />
+                  <div className="ctx-item-with-shortcut" onClick={() => { close(); doSplitRight(tabCtxMenu.tabId); }}>
+                    <span>오른쪽으로 분할</span><span className="ctx-shortcut">Ctrl+\</span>
+                  </div>
+                  <div className="ctx-item-with-shortcut" onClick={() => { close(); doSplitLeft(tabCtxMenu.tabId); }}>
+                    <span>왼쪽으로 분할</span>
+                  </div>
+                  <div className="ctx-item-with-shortcut" onClick={() => { close(); doSplitAndMove(tabCtxMenu.tabId); }}>
+                    <span>분할 및 이동</span>
+                  </div>
+                </div>
+              </>
+            );
+          })()}
+
           {/* Edit Table 모달 */}
           {editTableModal && (
             <div className="modal-overlay" onClick={() => setEditTableModal(null)}>
@@ -1983,19 +2323,26 @@ function App() {
           )}
 
           <div className="main">
-            <div className="tab-bar">
+            <div className="tabs-row">
+            <div className="tab-bar" style={splitTabId ? { width: `${splitLeftPct}%`, flex: 'none' } : {}}>
               <div className="tab-list">
                 {tabs.map(tab => (
                   <div
                     key={tab.id}
-                    className={`tab ${tab.id === activeTabId ? "active" : ""}`}
+                    className={`tab ${tab.id === activeTabId ? "active" : ""}${pinnedTabs.has(tab.id) ? " pinned" : ""}`}
                     onClick={() => switchTab(tab.id)}
                     onDoubleClick={e => {
                       e.stopPropagation();
                       setEditingTabId(tab.id);
                       setEditingTabName(tab.name);
                     }}
+                    onContextMenu={e => {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      setTabCtxMenu({ x: e.clientX, y: e.clientY, tabId: tab.id, source: "main" });
+                    }}
                   >
+                    {pinnedTabs.has(tab.id) && <span className="tab-pin-icon" title="고정됨">📌</span>}
                     <span className="tab-icon">⊞</span>
                     {editingTabId === tab.id ? (
                       <input
@@ -2013,23 +2360,88 @@ function App() {
                     ) : (
                       tab.name
                     )}
-                    <span
-                      className="tab-close"
-                      onClick={e => closeTab(tab.id, e)}
-                      title="Close tab"
-                    >×</span>
+                    {!pinnedTabs.has(tab.id) && (
+                      <span
+                        className="tab-close"
+                        onClick={e => closeTab(tab.id, e)}
+                        title="Close tab"
+                      >×</span>
+                    )}
                   </div>
                 ))}
                 <div className="tab-add-wrap">
                   <button className="tab-add-btn" onClick={addTab} title="New query tab">+</button>
                 </div>
               </div>
-              <div className="tab-bar-right">
-                <button className="bookmark-btn" onClick={addBookmark} title="현재 쿼리 북마크 추가 (★)">★</button>
-                <button className="run-btn" onClick={runQuery} disabled={isRunning}>
-                  {isRunning ? "⏳" : "▶ Run"}
+            </div>
+            {splitTabId && (() => {
+              const splitTab = splitTabStash?.id === splitTabId
+                ? splitTabStash
+                : tabs.find(t => t.id === splitTabId);
+              return splitTab ? (
+                <>
+                  <div className="tabs-split-gap" />
+                  <div className="split-tab-bar">
+                    <div className="split-tab-list">
+                      <div
+                        className="split-tab active"
+                        title={splitTab.name}
+                        onContextMenu={e => {
+                          e.preventDefault();
+                          e.stopPropagation();
+                          setTabCtxMenu({ x: e.clientX, y: e.clientY, tabId: splitTab.id, source: "split" });
+                        }}
+                      >
+                        <span className="tab-icon">⊞</span>
+                        {splitTab.name}
+                        <span className="tab-close" onClick={e => { e.stopPropagation(); closeSplit(); }} title="분할 닫기">×</span>
+                      </div>
+                    </div>
+                  </div>
+                </>
+              ) : null;
+            })()}
+            <div className="tab-bar-right">
+              <button
+                className={`ai-agent-btn${aiChatOpen ? " active" : ""}`}
+                onClick={() => setAiChatOpen(v => !v)}
+                title="AI Agent 열기/닫기"
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+                  <path d="M12 2l1.5 4.5L18 8l-4.5 1.5L12 14l-1.5-4.5L6 8l4.5-1.5L12 2z"/>
+                  <path d="M19 14l.75 2.25L22 17l-2.25.75L19 20l-.75-2.25L16 17l2.25-.75L19 14z"/>
+                </svg>
+              </button>
+              <button className="bookmark-btn" onClick={addBookmark} title="현재 쿼리 북마크 추가 (★)">★</button>
+              <div className="panel-toggle-group">
+                <button
+                  className={`panel-toggle-btn${sidebarWidth > 0 ? " active" : ""}`}
+                  onClick={() => setSidebarWidth(w => w > 0 ? 0 : 240)}
+                  title="사이드바 토글"
+                >
+                  <svg width="16" height="12" viewBox="0 0 16 12" fill="none">
+                    <rect x="0.5" y="0.5" width="15" height="11" rx="1.5" stroke="currentColor" strokeWidth="1"/>
+                    <rect x="0.5" y="0.5" width="5" height="11" rx="1.5" fill="currentColor"/>
+                  </svg>
+                </button>
+                <button
+                  className={`panel-toggle-btn${resultHeight > 0 ? " active" : ""}`}
+                  onClick={toggleResultPanel}
+                  title="결과창 토글"
+                >
+                  <svg width="16" height="12" viewBox="0 0 16 12" fill="none">
+                    <rect x="0.5" y="0.5" width="15" height="11" rx="1.5" stroke="currentColor" strokeWidth="1"/>
+                    <rect x="0.5" y="6.5" width="15" height="5" rx="0" fill="currentColor"/>
+                  </svg>
+                </button>
+                <button className="panel-toggle-btn" title="오른쪽 패널 (미지원)" style={{ opacity: 0.4 }}>
+                  <svg width="16" height="12" viewBox="0 0 16 12" fill="none">
+                    <rect x="0.5" y="0.5" width="15" height="11" rx="1.5" stroke="currentColor" strokeWidth="1"/>
+                    <rect x="10.5" y="0.5" width="5" height="11" rx="1.5" fill="currentColor"/>
+                  </svg>
                 </button>
               </div>
+            </div>
             </div>
 
             <div className="breadcrumb">
@@ -2040,7 +2452,40 @@ function App() {
               <span className="breadcrumb-active">{activeTab?.name ?? "query.sql"}</span>
             </div>
 
-            <div className="editor-container">
+            <div className="editor-toolbar">
+              <div className="editor-toolbar-group">
+                <button className="editor-toolbar-btn" onClick={importSqlFile} title="SQL 파일 열기">
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none">
+                    <path d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V7z" stroke="currentColor" strokeWidth="1.6"/>
+                    <line x1="12" y1="12" x2="12" y2="18" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
+                    <polyline points="9,15 12,18 15,15" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+                  </svg>
+                </button>
+                <button className="editor-toolbar-btn" onClick={() => activeTabId && downloadTab(activeTabId)} title="SQL 파일로 저장">
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none">
+                    <path d="M19 21H5a2 2 0 01-2-2V5a2 2 0 012-2h11l5 5v11a2 2 0 01-2 2z" stroke="currentColor" strokeWidth="1.6"/>
+                    <polyline points="17,21 17,13 7,13 7,21" stroke="currentColor" strokeWidth="1.4"/>
+                    <polyline points="7,3 7,8 15,8" stroke="currentColor" strokeWidth="1.4"/>
+                  </svg>
+                </button>
+              </div>
+              <div className="editor-toolbar-sep"/>
+              <div className="editor-toolbar-group">
+                <button className="editor-toolbar-btn editor-toolbar-run" onClick={runQuery} disabled={isRunning} title="실행 (Ctrl+Enter)">
+                  {isRunning
+                    ? <span style={{ fontSize: 13 }}>⏳</span>
+                    : <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+                        <polygon points="13,2 4,13 11,13 11,22 20,11 13,11"/>
+                      </svg>
+                  }
+                </button>
+              </div>
+            </div>
+
+            <div className="editor-and-chat">
+            <div className="editor-area">
+              <div className="editor-pane" style={splitTabId ? { width: `${splitLeftPct}%` } : {}}>
+              <div className="editor-container">
               <Editor
                 height="100%"
                 defaultLanguage="sql"
@@ -2140,7 +2585,7 @@ function App() {
                 }}
                 onMount={(editor, monaco) => {
                   editorRef.current = editor;
-                  editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.Enter, runQuery);
+                  editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.Enter, () => runQueryRef.current());
                   editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyMod.Shift | monaco.KeyCode.KeyF, () => {
                     try {
                       const fmt = sqlFormat(editor.getValue(), { language: 'sql', tabWidth: 2, keywordCase: 'upper' });
@@ -2149,6 +2594,164 @@ function App() {
                   });
                 }}
               />
+            </div>
+            </div>
+            {splitTabId && (() => {
+              const splitTab = splitTabStash?.id === splitTabId
+                ? splitTabStash
+                : tabs.find(t => t.id === splitTabId);
+              return splitTab ? (
+                <>
+                  <div
+                    className="split-divider"
+                    onMouseDown={() => {
+                      isSplitDragging.current = true;
+                      document.body.style.cursor = "col-resize";
+                      document.body.style.userSelect = "none";
+                    }}
+                  />
+                  <div className="editor-pane" style={{ width: `${100 - splitLeftPct}%` }}>
+                    <div className="editor-container">
+                      <Editor
+                        key={splitTabId}
+                        height="100%"
+                        defaultLanguage="sql"
+                        defaultValue={splitQueryRef.current}
+                        onChange={val => {
+                          if (isSplitSwitching.current) return;
+                          splitQueryRef.current = val ?? "";
+                          // stash된 탭이면 stash를 업데이트, 아니면 tabs[]를 업데이트
+                          if (splitTabStash?.id === splitTabId) {
+                            setSplitTabStash(prev => prev ? { ...prev, content: splitQueryRef.current } : prev);
+                          } else {
+                            setTabs(prev => {
+                              const next = prev.map(t => t.id === splitTabId ? { ...t, content: splitQueryRef.current } : t);
+                              localStorage.setItem(`rustdb_tabs_${connIdRef.current}`, JSON.stringify(next));
+                              return next;
+                            });
+                          }
+                        }}
+                        theme="rustdb-dark"
+                        options={{
+                          fontSize: 14,
+                          fontFamily: "Consolas, 'Courier New', monospace",
+                          minimap: { enabled: true },
+                          scrollBeyondLastLine: false,
+                          lineNumbers: "on",
+                          renderLineHighlight: "all",
+                          automaticLayout: true,
+                          padding: { top: 12 },
+                          quickSuggestions: false,
+                          suggestOnTriggerCharacters: false,
+                          wordBasedSuggestions: "off",
+                        }}
+                        onMount={(editor) => {
+                          splitEditorRef.current = editor;
+                        }}
+                      />
+                    </div>
+                  </div>
+                </>
+              ) : null;
+            })()}
+            </div>
+            {aiChatOpen && (
+              <div className="ai-chat-panel">
+                <div className="ai-chat-header">
+                  <div className="ai-chat-header-left">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" style={{ opacity: 0.85 }}>
+                      <path d="M12 2l1.5 4.5L18 8l-4.5 1.5L12 14l-1.5-4.5L6 8l4.5-1.5L12 2z"/>
+                      <path d="M19 14l.75 2.25L22 17l-2.25.75L19 20l-.75-2.25L16 17l2.25-.75L19 14z"/>
+                    </svg>
+                    <span className="ai-chat-title">AI Agent</span>
+                    <span className="ai-chat-badge">claude</span>
+                  </div>
+                  <div className="ai-chat-header-right">
+                    <button className="ai-chat-clear" onClick={() => setChatMessages([])} title="대화 초기화">
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/></svg>
+                    </button>
+                    <button className="ai-chat-close" onClick={() => setAiChatOpen(false)} title="닫기">×</button>
+                  </div>
+                </div>
+                <div className="ai-chat-messages">
+                  {chatMessages.length === 0 && (
+                    <div className="ai-chat-empty">
+                      <svg width="32" height="32" viewBox="0 0 24 24" fill="currentColor" style={{ opacity: 0.15 }}>
+                        <path d="M12 2l1.5 4.5L18 8l-4.5 1.5L12 14l-1.5-4.5L6 8l4.5-1.5L12 2z"/>
+                        <path d="M19 14l.75 2.25L22 17l-2.25.75L19 20l-.75-2.25L16 17l2.25-.75L19 14z"/>
+                        <path d="M5 17l.5 1.5L7 19l-1.5.5L5 21l-.5-1.5L3 19l1.5-.5L5 17z"/>
+                      </svg>
+                      <p className="ai-chat-empty-title">AI Agent</p>
+                      <p className="ai-chat-empty-sub">쿼리 작성, 실행, 서버 제어 등<br/>무엇이든 물어보세요.</p>
+                      <div className="ai-chat-suggestions">
+                        {["emp 테이블 전체 조회해줘", "salary 기준으로 상위 3명 뽑아줘", "서버 상태 알려줘"].map(s => (
+                          <button key={s} className="ai-chat-suggestion" onClick={() => setChatInput(s)}>{s}</button>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                  {chatMessages.map(msg => (
+                    <div key={msg.id} className={`ai-chat-msg ai-chat-msg-${msg.role}`}>
+                      {msg.role === "assistant" && (
+                        <div className="ai-chat-avatar">
+                          <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor">
+                            <path d="M12 2l1.5 4.5L18 8l-4.5 1.5L12 14l-1.5-4.5L6 8l4.5-1.5L12 2z"/>
+                          </svg>
+                        </div>
+                      )}
+                      <div className="ai-chat-bubble">
+                        {msg.toolCalls && msg.toolCalls.length > 0 && (
+                          <div className="ai-tool-calls">
+                            {msg.toolCalls.map((tc, i) => (
+                              <div key={i} className="ai-tool-call">
+                                <div className="ai-tool-call-header">
+                                  <svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor"><path d="M22.7 19l-9.1-9.1c.9-2.3.4-5-1.5-6.9-2-2-5-2.4-7.4-1.3L9 6 6 9 1.6 4.7C.4 7.1.9 10.1 2.9 12.1c1.9 1.9 4.6 2.4 6.9 1.5l9.1 9.1c.4.4 1 .4 1.4 0l2.3-2.3c.5-.4.5-1.1.1-1.4z"/></svg>
+                                  <span className="ai-tool-name">{tc.name}</span>
+                                </div>
+                                <pre className="ai-tool-args">{tc.args}</pre>
+                                {tc.result && <pre className="ai-tool-result">{tc.result}</pre>}
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                        <div className="ai-chat-text">{msg.content}</div>
+                      </div>
+                    </div>
+                  ))}
+                  {chatLoading && (
+                    <div className="ai-chat-msg ai-chat-msg-assistant">
+                      <div className="ai-chat-avatar">
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor">
+                          <path d="M12 2l1.5 4.5L18 8l-4.5 1.5L12 14l-1.5-4.5L6 8l4.5-1.5L12 2z"/>
+                        </svg>
+                      </div>
+                      <div className="ai-chat-bubble ai-chat-typing"><span/><span/><span/></div>
+                    </div>
+                  )}
+                  <div ref={chatEndRef} />
+                </div>
+                <div className="ai-chat-input-area">
+                  <textarea
+                    className="ai-chat-textarea"
+                    rows={3}
+                    placeholder="질문 또는 명령... (Ctrl+Enter로 전송)"
+                    value={chatInput}
+                    onChange={e => setChatInput(e.target.value)}
+                    onKeyDown={e => { if (e.ctrlKey && e.key === "Enter") { e.preventDefault(); sendChat(); } }}
+                  />
+                  <button
+                    className="ai-chat-send"
+                    onClick={sendChat}
+                    disabled={chatLoading || !chatInput.trim()}
+                    title="전송 (Ctrl+Enter)"
+                  >
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+                      <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/>
+                    </svg>
+                  </button>
+                </div>
+              </div>
+            )}
             </div>
 
             <div
@@ -2288,6 +2891,17 @@ function App() {
                         const total = rows.length;
                         const pageCount = Math.ceil(total / PAGE_SIZE);
                         const pageRows = rows.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
+                        // 컬럼별 자동 너비: canvas measureText로 실제 픽셀 너비 측정 (한글/CJK 지원)
+                        const CELL_PAD = 36; // 좌우 패딩 + 정렬 아이콘 여유
+                        const sampleRows = r.rows.slice(0, 200);
+                        const autoWidths = r.columns.map((col, ci) => {
+                          const maxDataPx = sampleRows.reduce(
+                            (max, row) => Math.max(max, measureTextPx(row[ci] ?? '')), 0
+                          );
+                          const w = Math.max(measureTextPx(col + ' ⇅'), maxDataPx);
+                          return Math.min(500, Math.max(60, Math.round(w + CELL_PAD)));
+                        });
+                        const effectiveWidths = colWidths[i] ?? autoWidths;
                         const toggleSort = (ci: number) => {
                           setTabSortState(prev => {
                             const tab = { ...(prev[activeTabId] ?? {}) };
@@ -2332,11 +2946,11 @@ function App() {
                                 </span>
                               )}
                             </div>
-                            <table className="result-table" style={{ tableLayout: colWidths[i] ? 'fixed' : undefined }}>
+                            <table className="result-table" style={{ tableLayout: 'fixed', width: 'auto' }}>
                               <thead><tr>
-                                <th className="result-rownum">#</th>
+                                <th className="result-rownum" style={{ width: 40 }}>#</th>
                                 {r.columns.map((c, ci) => (
-                                <th key={c} style={{ width: colWidths[i]?.[ci], position: 'relative', userSelect: 'none', cursor: 'pointer' }}
+                                <th key={c} style={{ width: effectiveWidths[ci], position: 'relative', userSelect: 'none', cursor: 'pointer' }}
                                     onClick={() => toggleSort(ci)}>
                                   <span className="result-th-label">{c}</span>
                                   <span className="result-sort-icon">
@@ -2350,8 +2964,9 @@ function App() {
                                       const thEl = e.currentTarget.parentElement as HTMLTableCellElement;
                                       const startX = e.clientX;
                                       const startW = thEl.getBoundingClientRect().width;
-                                      const initWidths = Array.from(thEl.parentElement!.querySelectorAll<HTMLTableCellElement>('th'))
-                                        .map(th => th.getBoundingClientRect().width);
+                                      // index 0은 # 열이므로 데이터 열은 index 1부터 시작 → ci+1
+                                      const allThs = Array.from(thEl.parentElement!.querySelectorAll<HTMLTableCellElement>('th'));
+                                      const initWidths = allThs.slice(1).map(th => th.getBoundingClientRect().width);
                                       const onMove = (mv: MouseEvent) => {
                                         setTabColWidths(prev => {
                                           const tab = { ...(prev[activeTabId] ?? {}) };
@@ -2452,6 +3067,7 @@ function App() {
               </div>
             </div>
           </div>
+
         </>
       )}
 

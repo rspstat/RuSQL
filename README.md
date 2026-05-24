@@ -454,9 +454,9 @@ SHOW DATABASES;
 | 저장 | 바이너리 .rdb + LZ4 압축 + indexes.json + views.json + _users.json + _grants.json |
 | 다중 DB | CREATE / DROP / USE / SHOW DATABASES, 테이블 자동 한정, 격리 |
 | 사용자 관리 | CREATE/DROP USER, GRANT/REVOKE, SHOW GRANTS, 영속화 |
-| UI | Tauri + React + Monaco Editor (멀티 탭) |
+| UI | Tauri + React + Monaco Editor (멀티 탭, 탭 우클릭 메뉴, 탭 고정, 분할 에디터, AI Agent 채팅 패널, MySQL 스타일 에디터 툴바, 패널 토글 버튼, Canvas 기반 결과 컬럼 자동 너비) |
 | TCP 서버 | 멀티 클라이언트, 포트 7878, 라인 프로토콜 |
-| AI 연동 | MCP AI API (예정) |
+| AI 연동 | MCP 서버 (Python) + Claude API — 자연어 → SQL 변환, EXPLAIN 해석, 스키마 컨텍스트 자동 주입 |
 
 <br/>
 
@@ -468,7 +468,7 @@ code/
 ├── rustdb-cli/      터미널 REPL (stdin 직접 실행)
 ├── rustdb-client/   TCP 클라이언트 CLI (-u/-p/-H/-P 옵션)
 ├── rustdb-ui/       Tauri + React UI
-└── rustdb-mcp/      MCP 자연어 쿼리 (개발 예정)
+└── rustdb-mcp/      MCP 서버 (Python) — 자연어 → SQL, EXPLAIN 해석
 ```
 
 <br/>
@@ -533,7 +533,7 @@ code/
                (TCP 클라이언트 CLI)
         ↓
   rustdb-ui        rustdb-mcp
-  (Tauri + React)  (MCP, 개발 예정)
+  (Tauri + React)  (MCP 서버, Python)
 ```
 
 <br/>

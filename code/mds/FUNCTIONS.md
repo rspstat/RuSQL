@@ -236,6 +236,12 @@
 - [x] Monaco Editor (SQL 문법 강조, 주석 회색)
 - [x] 다중 쿼리 탭 (탭 추가 / 전환 / 닫기, localStorage 자동 저장)
 - [x] 탭 이름 변경 — 탭 더블클릭 → 인라인 편집 → Enter/blur 커밋
+- [x] 탭 우클릭 컨텍스트 메뉴 (VSCode 스타일) — 닫기 / 다른 탭 닫기 / 오른쪽 탭 닫기 / 모두 닫기 / 이름 변경 / 고정·고정 해제 / 오른쪽으로 분할 / 왼쪽으로 분할 / 분할 및 이동; `source: "main" | "split"` 구분으로 분할 탭바에서도 동일 메뉴 제공
+- [x] 탭 고정 — `pinnedTabs: Set<string>`, 📌 아이콘 표시, 고정된 탭은 × 닫기 버튼 비활성화
+- [x] 분할 에디터 — 오른쪽으로 분할 / 왼쪽으로 분할 / 분할 및 이동 3종 동작, 드래그 가능한 구분선 (`splitLeftPct`), 독립 Monaco 인스턴스; 분할 시 탭이 왼쪽 탭바에서 사라지고 닫을 때 원래 위치에 복원 (`splitTabStash`)
+- [x] 에디터 툴바 (MySQL 스타일) — breadcrumb 아래 고정 행: SQL 파일 열기(폴더 아이콘) / SQL 파일 저장(플로피 아이콘) / 번개 실행 버튼 (Ctrl+Enter 연동)
+- [x] 패널 토글 버튼 — 탭바 우측: 사이드바 토글 / 결과창 토글 (이전 높이 기억 후 복원) / 우측 패널(표시 전용); 활성 패널은 teal, 비활성은 회색
+- [x] 사이드바 DB 아이콘 — 원통형 SVG (`currentColor` 스트로크, 활성 DB 시 teal / 비활성 시 회색)
 - [x] 사이드바 — MySQL Workbench 스타일 (Database > Tables / Views / Indexes)
 - [x] 사이드바 다중 데이터베이스 독립 펼치기 (여러 DB 동시 확장 가능)
 - [x] 사이드바 더블클릭으로 활성 데이터베이스 전환 (`USE dbname`)
@@ -247,7 +253,7 @@
 - [x] 테이블 우클릭 컨텍스트 메뉴 (MySQL 스타일) — Select Rows / Describe Table / Show Create Table / Copy Table Name / Copy as INSERT / Truncate / DROP
 - [x] ERD Editor 뷰 — 테이블 카드 + FK 관계선(직각 꺾임, 라운드 코너), 카드 드래그 / 캔버스 팬 / 휠 줌, 카드 클릭 시 하단 데이터 패널 (데이터 그리드 + 필터)
 - [x] TCP 서버 관리 뷰 — DBeaver 스타일 연결 구성 폼 (호스트·포트 ±·사용자·비밀번호 토글), 메인/CLI 가이드 탭, 서버 랙 SVG 아이콘, 활동 로그
-- [x] AI Assistant 뷰 (사이드바 4번째 아이콘, 준비 중)
+- [x] AI Agent 채팅 패널 — 사이드바 4번째 아이콘으로 토글, 에디터 오른쪽 사이드 (width:320px), 채팅 버블 UI, 타이핑 인디케이터, 자연어 입력 → MCP 서버 호출 → SQL 제안 → 에디터 삽입
 - [x] 멀티 쿼리 결과 표시
 - [x] 결과 페이지네이션 — PAGE_SIZE=100, 초과 시 ‹/› 버튼 + 페이지 표시
 - [x] 쿼리 히스토리 — 결과 패널 HISTORY 탭, localStorage 최대 200개, 클릭 시 에디터 불러오기
@@ -255,7 +261,8 @@
 - [x] 결과창 크기 조절 (드래그)
 - [x] 전체 스크롤바 스타일 통일 (Monaco 에디터 스크롤바 기준)
 - [x] 탭별 결과 보존 (탭 전환 시 결과 패널 유지, tabResults Record로 탭별 독립 관리)
-- [x] 결과 테이블 컬럼 너비 조절 — th 드래그 resize handle, 첫 드래그 시 DOM 실측값 기반 초기화, table-layout: fixed 전환
+- [x] 결과 테이블 컬럼 너비 조절 — th 드래그 resize handle, table-layout: fixed 항상 적용
+- [x] 결과 테이블 컬럼 자동 너비 — Canvas `measureText`로 헤더·데이터 실제 픽셀 너비 측정 (한글/CJK 포함), 최대 200행 샘플링, 최소 60px / 최대 500px
 - [x] CSV 익스포트 (Tauri `export_csv` 커맨드) — SELECT 결과를 CSV 파일로 저장
 - [x] CSV 임포트 (Tauri `import_csv` 커맨드) — CSV 파일을 지정 테이블에 INSERT 일괄 실행
 - [x] 결과 컬럼 헤더 클릭 정렬 — ▲ ASC / ▼ DESC / ⇅ 기본 토글, 수치·문자열 자동 감지, 정렬 후 페이징 재계산

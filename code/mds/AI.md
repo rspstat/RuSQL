@@ -110,9 +110,12 @@ def natural_to_sql(question: str, db: str) -> str:
 
 ## 4. UI 연동
 
-- 사이드바 4번째 아이콘 **AI Assistant 뷰** (이미 자리 확보됨)
-- 자연어 입력창 → MCP 서버 호출 → 생성된 SQL을 에디터에 삽입
-- "EXPLAIN 해석" 버튼 → 현재 에디터 쿼리를 AI에게 분석 요청
+- 사이드바 4번째 아이콘 **AI Agent 채팅 패널** (구현 완료)
+  - 에디터 오른쪽 사이드 패널 (width: 320px, border-left), 결과창 위 영역에만 배치
+  - 채팅 버블 UI (user / assistant 구분), 타이핑 인디케이터 (점 3개 애니메이션)
+  - 자연어 입력창 → MCP 서버 호출 → 생성된 SQL을 에디터에 삽입
+  - "EXPLAIN 해석" 버튼 → 현재 에디터 쿼리를 AI에게 분석 요청
+  - 제안 버튼 (예시 질문 칩) — 패널 열릴 때 표시
 
 ---
 
