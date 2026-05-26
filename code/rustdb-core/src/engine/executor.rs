@@ -38,6 +38,19 @@ pub struct GrantRecord {
     pub with_grant_option: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RoleRecord {
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RoleGrant {
+    pub role: String,
+    pub user: String,
+    pub host: String,
+    pub with_admin_option: bool,
+}
+
 pub type Row = HashMap<String, String>;
 pub const NULL_VALUE: &str = "NULL";
 
@@ -69,6 +82,9 @@ pub struct SharedDatabase {
     pub databases: HashSet<String>,
     pub users: Vec<UserRecord>,
     pub grants: Vec<GrantRecord>,
+    pub roles: Vec<RoleRecord>,
+    pub role_grants: Vec<RoleGrant>,
+    pub synonyms: HashMap<String, String>,
     pub group_commit_coord: Arc<GroupCommitCoordinator>,
     pub data_dir: String,
     pub table_stats: HashMap<String, TableStats>,
@@ -155,6 +171,12 @@ impl Executor {
     /// Build a qualified key: if name has no dot, prefix with current_db
     fn qualify_name(&self, name: String) -> String {
         if name.contains('.') { name } else { format!("{}.{}", self.current_db, name) }
+    }
+
+    /// Like qualify_name but also resolves synonyms first
+    fn qualify_name_with_synonyms(&self, s: &SharedDatabase, name: String) -> String {
+        let resolved = s.synonyms.get(&name).cloned().unwrap_or(name);
+        if resolved.contains('.') { resolved } else { format!("{}.{}", self.current_db, resolved) }
     }
 
     fn strip_db_prefix(name: &str) -> &str {
@@ -296,6 +318,9 @@ impl Executor {
 
         let users: Vec<UserRecord> = disk.load_users();
         let grants: Vec<GrantRecord> = disk.load_grants();
+        let roles: Vec<RoleRecord> = disk.load_roles();
+        let role_grants: Vec<RoleGrant> = disk.load_role_grants();
+        let synonyms: HashMap<String, String> = disk.load_synonyms();
 
         let current_db = databases.iter().min().cloned().unwrap_or_else(|| "rustdb".to_string());
         let mut executor = Executor {
@@ -313,6 +338,9 @@ impl Executor {
                 databases,
                 users,
                 grants,
+                roles,
+                role_grants,
+                synonyms,
                 group_commit_coord: Arc::new(GroupCommitCoordinator::new_with_wal_path(
                     format!("{}/rustdb.wal", dir)
                 )),
@@ -453,6 +481,32 @@ impl Executor {
         if let Statement::ShowDatabases = stmt {
             return self.exec_show_databases(s);
         }
+        // ROLE 관리
+        if let Statement::CreateRole { name } = stmt {
+            return self.exec_create_role(s, name);
+        }
+        if let Statement::DropRole { name, if_exists } = stmt {
+            return self.exec_drop_role(s, name, if_exists);
+        }
+        if let Statement::GrantRole { role, user, host, with_admin_option } = stmt {
+            return self.exec_grant_role(s, role, user, host, with_admin_option);
+        }
+        if let Statement::RevokeRole { role, user, host } = stmt {
+            return self.exec_revoke_role(s, role, user, host);
+        }
+        if let Statement::ShowRoles = stmt {
+            return self.exec_show_roles(s);
+        }
+        // SYNONYM 관리
+        if let Statement::CreateSynonym { name, target, or_replace } = stmt {
+            return self.exec_create_synonym(s, name, target, or_replace);
+        }
+        if let Statement::DropSynonym { name, if_exists } = stmt {
+            return self.exec_drop_synonym(s, name, if_exists);
+        }
+        if let Statement::ShowSynonyms = stmt {
+            return self.exec_show_synonyms(s);
+        }
         // 모든 다른 statement: 테이블명을 "{current_db}.{table}" 형식으로 qualify
         let stmt = self.qualify_stmt(s, stmt);
         match stmt {
@@ -590,8 +644,13 @@ impl Executor {
             // These are handled in early-return blocks above; unreachable after qualify_stmt
             Statement::CreateUser { .. } | Statement::DropUser { .. }
             | Statement::Grant { .. } | Statement::Revoke { .. }
-            | Statement::ShowGrants { .. } | Statement::ShowDatabases => {
-                Err("Internal error: user-management statement reached qualify pass".to_string())
+            | Statement::ShowGrants { .. } | Statement::ShowDatabases
+            | Statement::CreateRole { .. } | Statement::DropRole { .. }
+            | Statement::GrantRole { .. } | Statement::RevokeRole { .. }
+            | Statement::ShowRoles
+            | Statement::CreateSynonym { .. } | Statement::DropSynonym { .. }
+            | Statement::ShowSynonyms => {
+                Err("Internal error: management statement reached qualify pass".to_string())
             }
         }
     }
@@ -2295,6 +2354,25 @@ impl Executor {
                     _ => {
                         // ── Nested Loop Join (default) ───────────────────
                         let mut out = Vec::new();
+                        // JOIN ... USING(col, ...) — treat as inner equi-join on specified columns
+                        if !j.using_cols.is_empty() {
+                            let using_cols = j.using_cols.clone();
+                            for left in &current {
+                                for right in &right_rows {
+                                    let matches = using_cols.iter().all(|col| {
+                                        let lv = left.get(col).map(String::as_str).unwrap_or(NULL_VALUE);
+                                        let rv = right.get(col).map(String::as_str).unwrap_or(NULL_VALUE);
+                                        lv == rv && lv != NULL_VALUE
+                                    });
+                                    if matches {
+                                        let mut merged = left.clone();
+                                        merge_right(&mut merged, right, &j.table);
+                                        out.push(merged);
+                                    }
+                                }
+                            }
+                            out
+                        } else {
                         match j.join_type {
                             JoinType::Inner => {
                                 for left in &current {
@@ -2408,6 +2486,7 @@ impl Executor {
                             }
                         }
                         out
+                        } // end else (using_cols is empty)
                     }
                 };
                 current = joined;
@@ -5332,6 +5411,28 @@ impl Executor {
                 .collect();
             let tbl = j.table.clone();
             let mut out = Vec::new();
+            if !j.using_cols.is_empty() {
+                let using_cols = j.using_cols.clone();
+                for left in &current {
+                    for right in &right_rows {
+                        let matches = using_cols.iter().all(|col| {
+                            let lv = left.get(col).map(String::as_str).unwrap_or(NULL_VALUE);
+                            let rv = right.get(col).map(String::as_str).unwrap_or(NULL_VALUE);
+                            lv == rv && lv != NULL_VALUE
+                        });
+                        if matches {
+                            let mut merged = left.clone();
+                            for (k, v) in right.iter() {
+                                merged.insert(format!("{}.{}", tbl, k), v.clone());
+                                merged.entry(k.clone()).or_insert_with(|| v.clone());
+                            }
+                            out.push(merged);
+                        }
+                    }
+                }
+                current = out;
+                continue;
+            }
             match j.join_type {
                 JoinType::Inner => {
                     for left in &current {
@@ -5547,6 +5648,28 @@ impl Executor {
                 .collect();
             let tbl = j.table.clone();
             let mut out = Vec::new();
+            if !j.using_cols.is_empty() {
+                let using_cols = j.using_cols.clone();
+                for left in &current {
+                    for right in &right_rows {
+                        let matches = using_cols.iter().all(|col| {
+                            let lv = left.get(col).map(String::as_str).unwrap_or(NULL_VALUE);
+                            let rv = right.get(col).map(String::as_str).unwrap_or(NULL_VALUE);
+                            lv == rv && lv != NULL_VALUE
+                        });
+                        if matches {
+                            let mut merged = left.clone();
+                            for (k, v) in right.iter() {
+                                merged.insert(format!("{}.{}", tbl, k), v.clone());
+                                merged.entry(k.clone()).or_insert_with(|| v.clone());
+                            }
+                            out.push(merged);
+                        }
+                    }
+                }
+                current = out;
+                continue;
+            }
             match j.join_type {
                 JoinType::Inner => {
                     for left in &current {
@@ -5964,7 +6087,7 @@ impl Executor {
         match stmt {
             Statement::Select { table, subquery, columns, distinct, condition, joins, order_by, group_by, having, limit, offset, for_update, for_share } =>
                 Statement::Select {
-                    table: self.qualify_name(table),
+                    table: self.qualify_name_with_synonyms(s, table),
                     subquery: subquery.map(|(q, alias)| (Box::new(self.qualify_stmt(s, *q)), alias)),
                     columns: columns.into_iter().map(|c| match c {
                         SelectColumn::Subquery { query, alias } => SelectColumn::Subquery {
@@ -5976,19 +6099,20 @@ impl Executor {
                     distinct,
                     condition: condition.map(|c| self.qualify_condexpr(s, c)),
                     joins: joins.into_iter().map(|j| Join {
-                        table: self.qualify_name(j.table),
+                        table: self.qualify_name_with_synonyms(s, j.table),
                         on_expr: self.qualify_condexpr(s, j.on_expr),
                         join_type: j.join_type,
+                        using_cols: j.using_cols,
                     }).collect(),
                     order_by, group_by,
                     having: having.map(|h| self.qualify_condexpr(s, h)),
                     limit, offset, for_update, for_share,
                 },
             Statement::Insert { table, columns, values, on_conflict, returning } =>
-                Statement::Insert { table: self.qualify_name(table), columns, values, on_conflict, returning },
+                Statement::Insert { table: self.qualify_name_with_synonyms(s, table), columns, values, on_conflict, returning },
             Statement::InsertSelect { table, columns, query, on_conflict, returning } =>
                 Statement::InsertSelect {
-                    table: self.qualify_name(table),
+                    table: self.qualify_name_with_synonyms(s, table),
                     columns,
                     query: Box::new(self.qualify_stmt(s, *query)),
                     on_conflict,
@@ -5996,14 +6120,14 @@ impl Executor {
                 },
             Statement::Update { table, assignments, condition, returning } =>
                 Statement::Update {
-                    table: self.qualify_name(table),
+                    table: self.qualify_name_with_synonyms(s, table),
                     assignments,
                     condition: condition.map(|c| self.qualify_condexpr(s, c)),
                     returning,
                 },
             Statement::Delete { table, condition, returning } =>
                 Statement::Delete {
-                    table: self.qualify_name(table),
+                    table: self.qualify_name_with_synonyms(s, table),
                     condition: condition.map(|c| self.qualify_condexpr(s, c)),
                     returning,
                 },
@@ -6087,9 +6211,10 @@ impl Executor {
                 Statement::MultiUpdate {
                     tables: tables.into_iter().map(|t| self.qualify_name(t)).collect(),
                     joins: joins.into_iter().map(|j| Join {
-                        table: self.qualify_name(j.table),
+                        table: self.qualify_name_with_synonyms(s, j.table),
                         on_expr: self.qualify_condexpr(s, j.on_expr),
                         join_type: j.join_type,
+                        using_cols: j.using_cols,
                     }).collect(),
                     assignments,
                     condition: condition.map(|c| self.qualify_condexpr(s, c)),
@@ -6099,9 +6224,10 @@ impl Executor {
                     delete_tables: delete_tables.into_iter().map(|t| self.qualify_name(t)).collect(),
                     from_table: self.qualify_name(from_table),
                     joins: joins.into_iter().map(|j| Join {
-                        table: self.qualify_name(j.table),
+                        table: self.qualify_name_with_synonyms(s, j.table),
                         on_expr: self.qualify_condexpr(s, j.on_expr),
                         join_type: j.join_type,
+                        using_cols: j.using_cols,
                     }).collect(),
                     condition: condition.map(|c| self.qualify_condexpr(s, c)),
                 },
@@ -7308,6 +7434,101 @@ impl Executor {
         let mut out = format!("{}\n{}\n{}\n", sep, header, sep);
         for db in &dbs {
             out.push_str(&format!("| {:<width$} |\n", db, width = max_len));
+        }
+        out.push_str(&sep);
+        Ok(out)
+    }
+
+    // ── ROLE 관리 ──────────────────────────────────────────────────────────────
+
+    fn exec_create_role(&mut self, s: &mut SharedDatabase, name: String) -> Result<String, String> {
+        if s.roles.iter().any(|r| r.name == name) {
+            return Err(format!("Role '{}' already exists", name));
+        }
+        s.roles.push(RoleRecord { name });
+        s.disk.save_roles(&s.roles);
+        Ok("Query OK".to_string())
+    }
+
+    fn exec_drop_role(&mut self, s: &mut SharedDatabase, name: String, if_exists: bool) -> Result<String, String> {
+        let before = s.roles.len();
+        s.roles.retain(|r| r.name != name);
+        if s.roles.len() == before && !if_exists {
+            return Err(format!("Role '{}' does not exist", name));
+        }
+        s.role_grants.retain(|rg| rg.role != name);
+        s.disk.save_roles(&s.roles);
+        s.disk.save_role_grants(&s.role_grants);
+        Ok("Query OK".to_string())
+    }
+
+    fn exec_grant_role(&mut self, s: &mut SharedDatabase, role: String, user: String, host: String, with_admin_option: bool) -> Result<String, String> {
+        if !s.roles.iter().any(|r| r.name == role) {
+            return Err(format!("Role '{}' does not exist", role));
+        }
+        s.role_grants.retain(|rg| !(rg.role == role && rg.user == user && rg.host == host));
+        s.role_grants.push(RoleGrant { role, user, host, with_admin_option });
+        s.disk.save_role_grants(&s.role_grants);
+        Ok("Query OK".to_string())
+    }
+
+    fn exec_revoke_role(&mut self, s: &mut SharedDatabase, role: String, user: String, host: String) -> Result<String, String> {
+        let before = s.role_grants.len();
+        s.role_grants.retain(|rg| !(rg.role == role && rg.user == user && rg.host == host));
+        if s.role_grants.len() == before {
+            return Err(format!("Role '{}' not granted to '{}'@'{}'", role, user, host));
+        }
+        s.disk.save_role_grants(&s.role_grants);
+        Ok("Query OK".to_string())
+    }
+
+    fn exec_show_roles(&self, s: &SharedDatabase) -> Result<String, String> {
+        if s.roles.is_empty() {
+            return Ok("No roles defined.".to_string());
+        }
+        let max_len = s.roles.iter().map(|r| r.name.len()).max().unwrap_or(4).max(4);
+        let sep = format!("+{}+", "-".repeat(max_len + 2));
+        let header = format!("| {:<width$} |", "Role", width = max_len);
+        let mut out = format!("{}\n{}\n{}\n", sep, header, sep);
+        for r in &s.roles {
+            out.push_str(&format!("| {:<width$} |\n", r.name, width = max_len));
+        }
+        out.push_str(&sep);
+        Ok(out)
+    }
+
+    // ── SYNONYM 관리 ──────────────────────────────────────────────────────────
+
+    fn exec_create_synonym(&mut self, s: &mut SharedDatabase, name: String, target: String, or_replace: bool) -> Result<String, String> {
+        if s.synonyms.contains_key(&name) && !or_replace {
+            return Err(format!("Synonym '{}' already exists", name));
+        }
+        s.synonyms.insert(name, target);
+        s.disk.save_synonyms(&s.synonyms);
+        Ok("Query OK".to_string())
+    }
+
+    fn exec_drop_synonym(&mut self, s: &mut SharedDatabase, name: String, if_exists: bool) -> Result<String, String> {
+        if s.synonyms.remove(&name).is_none() && !if_exists {
+            return Err(format!("Synonym '{}' does not exist", name));
+        }
+        s.disk.save_synonyms(&s.synonyms);
+        Ok("Query OK".to_string())
+    }
+
+    fn exec_show_synonyms(&self, s: &SharedDatabase) -> Result<String, String> {
+        if s.synonyms.is_empty() {
+            return Ok("No synonyms defined.".to_string());
+        }
+        let max_name = s.synonyms.keys().map(|k| k.len()).max().unwrap_or(7).max(7);
+        let max_target = s.synonyms.values().map(|v| v.len()).max().unwrap_or(6).max(6);
+        let sep = format!("+{}+{}+", "-".repeat(max_name + 2), "-".repeat(max_target + 2));
+        let header = format!("| {:<w1$} | {:<w2$} |", "Synonym", "Target", w1 = max_name, w2 = max_target);
+        let mut out = format!("{}\n{}\n{}\n", sep, header, sep);
+        let mut pairs: Vec<(&String, &String)> = s.synonyms.iter().collect();
+        pairs.sort_by_key(|(k, _)| *k);
+        for (name, target) in pairs {
+            out.push_str(&format!("| {:<w1$} | {:<w2$} |\n", name, target, w1 = max_name, w2 = max_target));
         }
         out.push_str(&sep);
         Ok(out)

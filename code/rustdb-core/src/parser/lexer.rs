@@ -249,6 +249,17 @@ pub enum Token {
     Prepare,
     Execute,
     Deallocate,
+
+    // FETCH FIRST n ROWS ONLY
+    Fetch,
+    Next,
+    Only,
+
+    // ROLE
+    Role,
+
+    // SYNONYM
+    Synonym,
 }
 
 pub struct Lexer {
@@ -479,6 +490,11 @@ impl Lexer {
             "PREPARE"    => Token::Prepare,
             "EXECUTE"    => Token::Execute,
             "DEALLOCATE" => Token::Deallocate,
+            "FETCH"      => Token::Fetch,
+            "NEXT"       => Token::Next,
+            "ONLY"       => Token::Only,
+            "ROLE"       => Token::Role,
+            "SYNONYM"    => Token::Synonym,
             "PROCEDURE" => Token::Procedure,
             "CALL"      => Token::Call,
             "TRIGGER"   => Token::Trigger,

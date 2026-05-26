@@ -99,11 +99,13 @@
 | SELECT / WHERE / ORDER BY | ✓ | ✓ | ✓ | ✓ |
 | GROUP BY / HAVING | ✓ | ✓ | ✓ | ✓ |
 | LIMIT / OFFSET | ✓ | ✓ | △ (FETCH FIRST n ROWS ONLY) | ✓ |
+| FETCH FIRST n ROWS ONLY | ✗ | ✓ | ✓ (SQL:2003 표준) | ✓ (LIMIT 동의어) |
 | DISTINCT | ✓ | ✓ | ✓ | ✓ |
 | INNER / LEFT / RIGHT JOIN | ✓ | ✓ | ✓ | ✓ |
 | FULL OUTER JOIN | ✗ (UNION으로 에뮬레이션) | ✓ | ✓ | ✓ |
 | CROSS JOIN | ✓ | ✓ | ✓ | ✓ |
 | NATURAL JOIN | ✓ | ✓ | ✓ | ✓ |
+| JOIN ... USING | ✓ | ✓ | ✓ | ✓ |
 | SELF JOIN | ✓ | ✓ | ✓ | ✓ |
 | LATERAL JOIN | ✓ (8.0.14+) | ✓ | ✓ (CROSS APPLY / OUTER APPLY) | ✗ |
 | UNION / UNION ALL | ✓ | ✓ | ✓ | ✓ |
@@ -176,6 +178,7 @@
 | TRUNCATE | ✓ | ✓ | ✓ | ✓ |
 | CREATE / DROP INDEX | ✓ | ✓ | ✓ | ✓ |
 | CREATE / DROP VIEW | ✓ | ✓ | ✓ | ✓ |
+| CREATE SYNONYM | ✗ | ✗ | ✓ | ✓ (CREATE [OR REPLACE] SYNONYM / DROP SYNONYM / SHOW SYNONYMS) |
 | CREATE / DROP DATABASE | ✓ | ✓ | △ (스키마/유저 단위 관리) | ✓ |
 | CREATE SEQUENCE | ✗ | ✓ | ✓ | ✗ (AUTO_INCREMENT만) |
 | CREATE TYPE | ✗ | ✓ (도메인/열거형/복합) | ✓ (객체 타입, NESTED TABLE) | ✗ |
@@ -240,7 +243,7 @@
 |------|-------|------------|--------|--------|
 | 사용자 모델 | user@host | 역할 (Role) | 유저 = 스키마 | user@host |
 | GRANT / REVOKE | ✓ | ✓ | ✓ | ✓ |
-| 역할 (ROLE) | ✓ (8.0+) | ✓ | ✓ | ✗ |
+| 역할 (ROLE) | ✓ (8.0+) | ✓ | ✓ | ✓ (CREATE/DROP/GRANT/REVOKE/SHOW ROLES, WITH ADMIN OPTION) |
 | 열 레벨 권한 | ✓ | ✓ | ✓ | ✗ |
 | 행 레벨 보안 (RLS) | ✗ | ✓ | ✓ (VPD: Virtual Private Database) | ✗ |
 | 인증 방식 | Password, PAM, LDAP, Kerberos | Password, scram-sha-256, LDAP, GSSAPI | Password, Kerberos, LDAP, OS 인증 | Password (SHA-256 해시) |

@@ -30,6 +30,11 @@
 - [x] ALTER TABLE DROP CONSTRAINT / DROP FOREIGN KEY
 - [x] CREATE INDEX / DROP INDEX (단일 / 복합)
 - [x] CREATE VIEW / DROP VIEW
+- [x] CREATE SYNONYM name FOR target — 테이블 별명 생성 (SELECT/INSERT/UPDATE/DELETE에서 실제 테이블처럼 사용)
+- [x] CREATE OR REPLACE SYNONYM name FOR target — 기존 별명 덮어쓰기
+- [x] DROP SYNONYM [IF EXISTS] name — 별명 삭제
+- [x] SHOW SYNONYMS — 정의된 별명 목록 조회
+- [x] 별명 영속화 (`_synonyms.json`)
 - [x] Updatable View — 단순 뷰(JOIN/DISTINCT/GROUP BY 없음)에 INSERT/UPDATE/DELETE 지원, 뷰 조건 자동 병합
 - [x] DESCRIBE (테이블 스키마 조회)
 - [x] SHOW CREATE TABLE (스키마 기반 DDL 역생성)
@@ -66,6 +71,12 @@
 - [x] SHOW GRANTS [FOR `'user'@'host'`]
 - [x] 사용자·권한 영속화 (`_users.json`, `_grants.json`)
 - [x] 비밀번호 SHA-256 해시 저장 (레거시 평문 자동 마이그레이션)
+- [x] CREATE ROLE name — 역할 생성
+- [x] DROP ROLE [IF EXISTS] name — 역할 삭제 (연결된 부여 기록 자동 삭제)
+- [x] GRANT ROLE roleName TO `'user'@'host'` [WITH ADMIN OPTION] — 역할 부여
+- [x] REVOKE ROLE roleName FROM `'user'@'host'` — 역할 회수
+- [x] SHOW ROLES — 정의된 역할 목록 조회
+- [x] 역할 영속화 (`_roles.json`, `_role_grants.json`)
 
 ### 쿼리 기능
 - [x] WHERE (=, !=, >, <, >=, <=)
@@ -79,12 +90,14 @@
 - [x] FULL OUTER JOIN (양쪽 NULL 패딩, 매칭 안 된 우측 행 자동 추가)
 - [x] CROSS JOIN (카르테시안 곱, ON 절 없음)
 - [x] NATURAL JOIN (공통 컬럼명 자동 equi-join, ON 절 없음)
+- [x] JOIN ... USING (col, ...) — 지정 컬럼 기준 equi-join (`ON t1.col = t2.col` 단축 문법)
 - [x] LEFT OUTER JOIN / RIGHT OUTER JOIN / INNER JOIN 키워드 별칭 지원
 - [x] Sort-Merge Join (양쪽 > 4행 Equi-Join, O((N+M)logN) sort + O(N+M) merge, 투 포인터 키 그룹 병합)
 - [x] Hash Join (한쪽 > 4행 Equi-Join, O(N+M)) / Nested Loop Join (소규모·비등가) — ON 조건 방향 무관 (left.col = right.col / right.col = left.col 모두 지원)
 - [x] 테이블 별칭 (alias) — `FROM emp e JOIN dept d ON e.dept_id = d.id`
 - [x] ORDER BY (ASC / DESC, 다중 컬럼)
 - [x] LIMIT / OFFSET — `LIMIT 10 OFFSET 20`
+- [x] FETCH FIRST n ROWS ONLY / FETCH NEXT n ROWS ONLY — SQL 표준 페이징 문법, LIMIT의 동의어
 - [x] GROUP BY / HAVING
 - [x] DISTINCT
 - [x] 산술 표현식 — SELECT / WHERE / UPDATE SET에서 `price * qty`, `salary + 100`

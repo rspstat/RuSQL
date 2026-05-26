@@ -362,4 +362,43 @@ impl DiskManager {
         let json = fs::read_to_string(&path).unwrap_or_default();
         serde_json::from_str(&json).unwrap_or_default()
     }
+
+    pub fn save_roles<T: Serialize>(&self, roles: &T) {
+        let path = format!("{}/_roles.json", self.data_dir);
+        let json = serde_json::to_string_pretty(roles).unwrap_or_default();
+        let _ = fs::write(path, json);
+    }
+
+    pub fn load_roles<T: for<'de> serde::Deserialize<'de> + Default>(&self) -> T {
+        let path = format!("{}/_roles.json", self.data_dir);
+        if !Path::new(&path).exists() { return T::default(); }
+        let json = fs::read_to_string(&path).unwrap_or_default();
+        serde_json::from_str(&json).unwrap_or_default()
+    }
+
+    pub fn save_role_grants<T: Serialize>(&self, role_grants: &T) {
+        let path = format!("{}/_role_grants.json", self.data_dir);
+        let json = serde_json::to_string_pretty(role_grants).unwrap_or_default();
+        let _ = fs::write(path, json);
+    }
+
+    pub fn load_role_grants<T: for<'de> serde::Deserialize<'de> + Default>(&self) -> T {
+        let path = format!("{}/_role_grants.json", self.data_dir);
+        if !Path::new(&path).exists() { return T::default(); }
+        let json = fs::read_to_string(&path).unwrap_or_default();
+        serde_json::from_str(&json).unwrap_or_default()
+    }
+
+    pub fn save_synonyms<T: Serialize>(&self, synonyms: &T) {
+        let path = format!("{}/_synonyms.json", self.data_dir);
+        let json = serde_json::to_string_pretty(synonyms).unwrap_or_default();
+        let _ = fs::write(path, json);
+    }
+
+    pub fn load_synonyms<T: for<'de> serde::Deserialize<'de> + Default>(&self) -> T {
+        let path = format!("{}/_synonyms.json", self.data_dir);
+        if !Path::new(&path).exists() { return T::default(); }
+        let json = fs::read_to_string(&path).unwrap_or_default();
+        serde_json::from_str(&json).unwrap_or_default()
+    }
 }

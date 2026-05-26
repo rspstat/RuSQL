@@ -89,6 +89,7 @@ pub struct Join {
     pub table: String,
     pub on_expr: CondExpr,   // full ON condition (merged row is evaluated)
     pub join_type: JoinType,
+    pub using_cols: Vec<String>, // USING(col, ...) — empty if ON clause was used
 }
 
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
@@ -434,6 +435,37 @@ pub enum Statement {
         user: Option<String>,
         host: Option<String>,
     },
+    // ROLE
+    CreateRole {
+        name: String,
+    },
+    DropRole {
+        name: String,
+        if_exists: bool,
+    },
+    GrantRole {
+        role: String,
+        user: String,
+        host: String,
+        with_admin_option: bool,
+    },
+    RevokeRole {
+        role: String,
+        user: String,
+        host: String,
+    },
+    ShowRoles,
+    // SYNONYM
+    CreateSynonym {
+        name: String,
+        target: String,
+        or_replace: bool,
+    },
+    DropSynonym {
+        name: String,
+        if_exists: bool,
+    },
+    ShowSynonyms,
     ShowDatabases,
     ShowCreateTable {
         table: String,

@@ -364,6 +364,41 @@ SHOW DATABASES;
 -- BACKUP
 BACKUP DATABASE db1 INTO 'db1_backup.json';
 
+-- FETCH FIRST n ROWS ONLY (LIMIT 별칭)
+SELECT id, name FROM emp ORDER BY salary DESC FETCH FIRST 3 ROWS ONLY;
+SELECT id, name FROM emp ORDER BY salary ASC FETCH NEXT 2 ROWS ONLY;
+
+-- JOIN ... USING
+CREATE TABLE dept2 (id INT PRIMARY KEY AUTO INCREMENT, name VARCHAR(30) NOT NULL);
+INSERT INTO dept2 (name) VALUES ('Eng'),('Mkt'),('Fin');
+CREATE TABLE emp2 (id INT PRIMARY KEY AUTO INCREMENT, name VARCHAR(30), dept_id INT);
+INSERT INTO emp2 (name, dept_id) VALUES ('Alice',1),('Bob',2),('Carol',3);
+SELECT e.name, d.name AS dept FROM emp2 e JOIN dept2 d USING (id) ORDER BY e.id LIMIT 2;
+DROP TABLE emp2;
+DROP TABLE dept2;
+
+-- ROLE
+CREATE ROLE analyst;
+CREATE ROLE developer;
+SHOW ROLES;
+GRANT ROLE analyst TO 'usr'@'%';
+GRANT ROLE developer TO 'usr'@'%' WITH ADMIN OPTION;
+REVOKE ROLE analyst FROM 'usr'@'%';
+DROP ROLE analyst;
+DROP ROLE IF EXISTS developer;
+SHOW ROLES;
+
+-- SYNONYM
+CREATE USER IF NOT EXISTS 'usr'@'%' IDENTIFIED BY 'pw';
+CREATE SYNONYM emp_syn FOR emp;
+CREATE OR REPLACE SYNONYM emp_syn FOR emp;
+SHOW SYNONYMS;
+SELECT id, name FROM emp_syn ORDER BY id LIMIT 2;
+DROP SYNONYM emp_syn;
+DROP SYNONYM IF EXISTS emp_syn;
+SHOW SYNONYMS;
+DROP USER IF EXISTS 'usr'@'%';
+
 -- 정리
 DROP VIEW IF EXISTS v_active;
 DROP INDEX IF EXISTS idx_dept;

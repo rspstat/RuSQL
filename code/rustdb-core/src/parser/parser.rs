@@ -320,6 +320,42 @@ impl Parser {
                         self.advance();
                         self.parse_create_function()
                     }
+                    Some(Token::Role) => {
+                        self.advance();
+                        let name = self.expect_ident()?;
+                        Ok(Statement::CreateRole { name })
+                    }
+                    Some(Token::Synonym) => {
+                        self.advance();
+                        let name = self.expect_ident()?;
+                        // FOR target
+                        match self.advance() {
+                            Some(Token::For) => {}
+                            other => return Err(format!("Expected FOR after SYNONYM name, got {:?}", other)),
+                        }
+                        let target = self.expect_ident()?;
+                        Ok(Statement::CreateSynonym { name, target, or_replace: false })
+                    }
+                    Some(Token::Or) => {
+                        // CREATE OR REPLACE SYNONYM name FOR target
+                        self.advance(); // OR
+                        match self.advance() {
+                            Some(Token::Replace) => {}
+                            Some(Token::Ident(s)) if s.to_uppercase() == "REPLACE" => {}
+                            other => return Err(format!("Expected REPLACE, got {:?}", other)),
+                        }
+                        match self.advance() {
+                            Some(Token::Synonym) => {}
+                            other => return Err(format!("Expected SYNONYM after CREATE OR REPLACE, got {:?}", other)),
+                        }
+                        let name = self.expect_ident()?;
+                        match self.advance() {
+                            Some(Token::For) => {}
+                            other => return Err(format!("Expected FOR, got {:?}", other)),
+                        }
+                        let target = self.expect_ident()?;
+                        Ok(Statement::CreateSynonym { name, target, or_replace: true })
+                    }
                     _ => self.parse_create(),
                 }
             }
@@ -352,6 +388,26 @@ impl Parser {
                     Some(Token::Ident(s)) if s.to_uppercase() == "FUNCTION" => {
                         self.advance();
                         self.parse_drop_function()
+                    }
+                    Some(Token::Role) => {
+                        self.advance();
+                        let if_exists = if self.peek() == Some(&Token::If) {
+                            self.advance();
+                            match self.advance() { Some(Token::Exists) => {} other => return Err(format!("Expected EXISTS after IF, got {:?}", other)) }
+                            true
+                        } else { false };
+                        let name = self.expect_ident()?;
+                        Ok(Statement::DropRole { name, if_exists })
+                    }
+                    Some(Token::Synonym) => {
+                        self.advance();
+                        let if_exists = if self.peek() == Some(&Token::If) {
+                            self.advance();
+                            match self.advance() { Some(Token::Exists) => {} other => return Err(format!("Expected EXISTS after IF, got {:?}", other)) }
+                            true
+                        } else { false };
+                        let name = self.expect_ident()?;
+                        Ok(Statement::DropSynonym { name, if_exists })
                     }
                     _ => self.parse_drop(),
                 }
@@ -1744,21 +1800,38 @@ impl Parser {
                 let a = self.expect_ident()?;
                 alias_map.insert(a, join_table.clone());
             }
-            let on_expr = if matches!(join_type, JoinType::Cross | JoinType::Natural) {
-                // No ON clause — dummy always-true condition
-                CondExpr::Leaf(Condition {
-                    left: ArithExpr::Num("1".to_string()),
-                    operator: Operator::Eq,
-                    value: ConditionValue::Literal("1".to_string()),
-                })
+            let dummy_true = CondExpr::Leaf(Condition {
+                left: ArithExpr::Num("1".to_string()),
+                operator: Operator::Eq,
+                value: ConditionValue::Literal("1".to_string()),
+            });
+            let (on_expr, using_cols) = if matches!(join_type, JoinType::Cross | JoinType::Natural) {
+                (dummy_true, vec![])
+            } else if self.peek() == Some(&Token::Using) {
+                // USING (col1, col2, ...)
+                self.advance();
+                match self.advance() {
+                    Some(Token::LParen) => {}
+                    other => return Err(format!("Expected '(' after USING, got {:?}", other)),
+                }
+                let mut cols = Vec::new();
+                loop {
+                    cols.push(self.expect_ident()?);
+                    match self.peek() {
+                        Some(Token::Comma) => { self.advance(); }
+                        Some(Token::RParen) => { self.advance(); break; }
+                        other => return Err(format!("Expected ',' or ')' in USING, got {:?}", other)),
+                    }
+                }
+                (dummy_true, cols)
             } else {
                 match self.advance() {
                     Some(Token::On) => {}
-                    other => return Err(format!("Expected ON, got {:?}", other)),
+                    other => return Err(format!("Expected ON or USING, got {:?}", other)),
                 }
-                self.parse_condexpr()?
+                (self.parse_condexpr()?, vec![])
             };
-            joins.push(Join { table: join_table, on_expr, join_type });
+            joins.push(Join { table: join_table, on_expr, join_type, using_cols });
         }
 
         // WHERE
@@ -1821,7 +1894,7 @@ impl Parser {
             Vec::new()
         };
 
-        // LIMIT [OFFSET]
+        // LIMIT [OFFSET]  /  FETCH (FIRST|NEXT) n ROWS ONLY
         let (limit, offset) = if self.peek() == Some(&Token::Limit) {
             self.advance();
             let lim = match self.advance() {
@@ -1838,6 +1911,21 @@ impl Parser {
                 None
             };
             (lim, off)
+        } else if self.peek() == Some(&Token::Fetch) {
+            // FETCH (FIRST | NEXT) n ROWS ONLY
+            self.advance();
+            match self.peek() {
+                Some(Token::Next) | Some(Token::Ident(_)) => { self.advance(); } // FIRST or NEXT
+                _ => {}
+            }
+            let lim = match self.advance() {
+                Some(Token::NumberLit(n)) => Some(n.parse::<usize>().unwrap_or(0)),
+                other => return Err(format!("Expected number after FETCH FIRST/NEXT, got {:?}", other)),
+            };
+            // expect ROWS ONLY
+            if self.peek() == Some(&Token::Rows) { self.advance(); }
+            if self.peek() == Some(&Token::Only) { self.advance(); }
+            (lim, None)
         } else {
             (None, None)
         };
@@ -1862,6 +1950,7 @@ impl Parser {
             table: j.table,
             on_expr: expand_condexpr(j.on_expr, &alias_map),
             join_type: j.join_type,
+            using_cols: j.using_cols,
         }).collect();
         let condition = condition.map(|c| expand_condexpr(c, &alias_map));
         let order_by: Vec<OrderBy> = order_by.into_iter().map(|o| OrderBy {
@@ -2108,7 +2197,7 @@ impl Parser {
                 other => return Err(format!("Expected ON, got {:?}", other)),
             }
             let on_expr = expand_condexpr(self.parse_condexpr()?, &alias_map);
-            joins.push(Join { table: join_table, on_expr, join_type });
+            joins.push(Join { table: join_table, on_expr, join_type, using_cols: vec![] });
         }
 
         match self.advance() {
@@ -2214,7 +2303,7 @@ impl Parser {
                 other => return Err(format!("Expected ON, got {:?}", other)),
             }
             let on_expr = expand_condexpr(self.parse_condexpr()?, &alias_map);
-            joins.push(Join { table: join_table, on_expr, join_type });
+            joins.push(Join { table: join_table, on_expr, join_type, using_cols: vec![] });
         }
 
         let condition = if self.peek() == Some(&Token::Where) {
@@ -3403,6 +3492,16 @@ impl Parser {
                 Ok(Statement::ShowIndex { table })
             }
             Some(Token::Ident(s)) if s.to_uppercase() == "PROCESSLIST" => Ok(Statement::ShowProcessList),
+            Some(Token::Role) => {
+                // SHOW ROLE or SHOW ROLES
+                if let Some(Token::Ident(s)) = self.peek() {
+                    if s.to_uppercase() == "S" { self.advance(); }
+                }
+                Ok(Statement::ShowRoles)
+            }
+            Some(Token::Ident(s)) if s.to_uppercase() == "ROLES" => Ok(Statement::ShowRoles),
+            Some(Token::Synonym) => Ok(Statement::ShowSynonyms),
+            Some(Token::Ident(s)) if s.to_uppercase() == "SYNONYMS" => Ok(Statement::ShowSynonyms),
             other => Err(format!("Expected TABLES, BUFFER, WAL, ISOLATION, LOCKS, DATABASES, GRANTS, CREATE, INDEX, or PROCESSLIST, got {:?}", other)),
         }
     }
@@ -3580,6 +3679,27 @@ impl Parser {
 
     // GRANT priv [, priv ...] ON [TABLE|DATABASE|*] object TO 'user'@'host' [WITH GRANT OPTION]
     fn parse_grant(&mut self) -> Result<Statement, String> {
+        // GRANT ROLE roleName TO 'user'@'host' [WITH ADMIN OPTION]
+        if self.peek() == Some(&Token::Role) {
+            self.advance(); // ROLE
+            let role = self.expect_ident()?;
+            match self.advance() {
+                Some(Token::To) => {}
+                other => return Err(format!("Expected TO after GRANT ROLE name, got {:?}", other)),
+            }
+            let (user, host) = self.parse_user_spec()?;
+            let with_admin_option = if self.peek() == Some(&Token::With) {
+                self.advance(); // WITH
+                match self.advance() {
+                    Some(Token::Ident(s)) if s.to_uppercase() == "ADMIN" => {}
+                    other => return Err(format!("Expected ADMIN after WITH, got {:?}", other)),
+                }
+                if self.peek() == Some(&Token::OptionKw) { self.advance(); }
+                true
+            } else { false };
+            return Ok(Statement::GrantRole { role, user, host, with_admin_option });
+        }
+
         let mut privileges: Vec<String> = Vec::new();
         loop {
             let priv_name = match self.advance() {
@@ -3656,6 +3776,18 @@ impl Parser {
 
     // REVOKE priv [, priv ...] ON object FROM 'user'@'host'
     fn parse_revoke(&mut self) -> Result<Statement, String> {
+        // REVOKE ROLE roleName FROM 'user'@'host'
+        if self.peek() == Some(&Token::Role) {
+            self.advance(); // ROLE
+            let role = self.expect_ident()?;
+            match self.advance() {
+                Some(Token::From) => {}
+                other => return Err(format!("Expected FROM after REVOKE ROLE name, got {:?}", other)),
+            }
+            let (user, host) = self.parse_user_spec()?;
+            return Ok(Statement::RevokeRole { role, user, host });
+        }
+
         let mut privileges: Vec<String> = Vec::new();
         loop {
             let priv_name = match self.advance() {

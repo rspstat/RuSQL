@@ -420,6 +420,41 @@ SHOW DATABASES;
 -- BACKUP
 BACKUP DATABASE db1 INTO 'db1_backup.json';
 
+-- FETCH FIRST n ROWS ONLY (LIMIT 별칭)
+SELECT id, name FROM emp ORDER BY salary DESC FETCH FIRST 3 ROWS ONLY;
+SELECT id, name FROM emp ORDER BY salary ASC FETCH NEXT 2 ROWS ONLY;
+
+-- JOIN ... USING
+CREATE TABLE dept2 (id INT PRIMARY KEY AUTO INCREMENT, name VARCHAR(30) NOT NULL);
+INSERT INTO dept2 (name) VALUES ('Eng'),('Mkt'),('Fin');
+CREATE TABLE emp2 (id INT PRIMARY KEY AUTO INCREMENT, name VARCHAR(30), dept_id INT);
+INSERT INTO emp2 (name, dept_id) VALUES ('Alice',1),('Bob',2),('Carol',3);
+SELECT e.name, d.name AS dept FROM emp2 e JOIN dept2 d USING (id) ORDER BY e.id LIMIT 2;
+DROP TABLE emp2;
+DROP TABLE dept2;
+
+-- ROLE
+CREATE ROLE analyst;
+CREATE ROLE developer;
+SHOW ROLES;
+GRANT ROLE analyst TO 'usr'@'%';
+GRANT ROLE developer TO 'usr'@'%' WITH ADMIN OPTION;
+REVOKE ROLE analyst FROM 'usr'@'%';
+DROP ROLE analyst;
+DROP ROLE IF EXISTS developer;
+SHOW ROLES;
+
+-- SYNONYM
+CREATE USER IF NOT EXISTS 'usr'@'%' IDENTIFIED BY 'pw';
+CREATE SYNONYM emp_syn FOR emp;
+CREATE OR REPLACE SYNONYM emp_syn FOR emp;
+SHOW SYNONYMS;
+SELECT id, name FROM emp_syn ORDER BY id LIMIT 2;
+DROP SYNONYM emp_syn;
+DROP SYNONYM IF EXISTS emp_syn;
+SHOW SYNONYMS;
+DROP USER IF EXISTS 'usr'@'%';
+
 -- 정리
 DROP VIEW IF EXISTS v_active;
 DROP INDEX IF EXISTS idx_dept;
@@ -451,9 +486,9 @@ SHOW DATABASES;
 | 격리 수준 | READ UNCOMMITTED ~ SERIALIZABLE (4단계) |
 | 동시성 | Row-level Locking (SELECT FOR UPDATE / FOR SHARE, 공유·배타 잠금, 데드락 감지) |
 | 캐시 | Buffer Pool (LRU, 64페이지, 16KB) |
-| 저장 | 바이너리 .rdb + LZ4 압축 + indexes.json + views.json + _users.json + _grants.json |
+| 저장 | 바이너리 .rdb + LZ4 압축 + indexes.json + views.json + _users.json + _grants.json + _roles.json + _role_grants.json + _synonyms.json |
 | 다중 DB | CREATE / DROP / USE / SHOW DATABASES, 테이블 자동 한정, 격리 |
-| 사용자 관리 | CREATE/DROP USER, GRANT/REVOKE, SHOW GRANTS, 영속화 |
+| 사용자 관리 | CREATE/DROP USER, GRANT/REVOKE, SHOW GRANTS, ROLE 관리, SYNONYM, 영속화 |
 | UI | Tauri + React + Monaco Editor (멀티 탭, 탭 우클릭 메뉴, 탭 고정, 분할 에디터, AI Agent 채팅 패널, MySQL 스타일 에디터 툴바, 패널 토글 버튼, Canvas 기반 결과 컬럼 자동 너비) |
 | TCP 서버 | 멀티 클라이언트, 포트 7878, 라인 프로토콜 |
 | AI 연동 | MCP 서버 (Python) + Claude API — 자연어 → SQL 변환, EXPLAIN 해석, 스키마 컨텍스트 자동 주입 |
@@ -507,6 +542,10 @@ code/
 │  │ FK SET DEFAULT / NO ACTION    │       │
 │  │ CREATE/DROP USER              │       │
 │  │ GRANT / REVOKE / SHOW GRANTS  │       │
+│  │ CREATE/DROP ROLE, GRANT ROLE  │       │
+│  │ CREATE/DROP/SHOW SYNONYM      │       │
+│  │ FETCH FIRST n ROWS ONLY       │       │
+│  │ JOIN ... USING (col, ...)     │       │
 │  │ BEGIN / COMMIT / ROLLBACK     │       │
 │  │ SAVEPOINT / ROLLBACK TO sp    │       │
 │  │ 격리 수준 4단계               │       │
@@ -523,6 +562,8 @@ code/
 │  바이너리 .rdb + LZ4 압축 저장           │
 │  인덱스/뷰 영속화 (indexes/views.json)   │
 │  사용자/권한 영속화 (_users/_grants.json)│
+│  역할 영속화 (_roles/_role_grants.json)  │
+│  동의어 영속화 (_synonyms.json)          │
 │                                          │
 └──────────────────────────────────────────┘
         ↓              ↓
