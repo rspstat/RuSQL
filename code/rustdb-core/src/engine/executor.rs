@@ -6,6 +6,7 @@ use std::sync::{Arc, RwLock};
 
 thread_local! {
     static USER_FUNCTIONS: RefCell<HashMap<String, (Vec<String>, String)>> = RefCell::new(HashMap::new());
+    static CURRENT_DB_CTX: RefCell<String> = RefCell::new(String::new());
 }
 use sha2::{Sha256, Digest};
 use chrono;
@@ -450,6 +451,7 @@ impl Executor {
     fn execute_with_s(&mut self, s: &mut SharedDatabase, stmt: Statement) -> Result<String, String> {
         // Sync user functions into thread_local for eval_arith access
         USER_FUNCTIONS.with(|uf| *uf.borrow_mut() = s.user_functions.clone());
+        CURRENT_DB_CTX.with(|c| *c.borrow_mut() = self.current_db.clone());
 
         // USE은 qualification 전에 처리
         if let Statement::Use { database } = stmt {
@@ -3597,6 +3599,11 @@ impl Executor {
                     extracted
                 }
             }
+            "DATABASE" | "SCHEMA" => {
+                CURRENT_DB_CTX.with(|c| c.borrow().clone())
+            }
+            "VERSION" => "2.2.0".to_string(),
+            "CURRENT_USER" | "USER" | "SESSION_USER" | "SYSTEM_USER" => "root@localhost".to_string(),
             _ => format!("{}()", func_name),
         }
     }

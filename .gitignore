@@ -9,6 +9,11 @@ dist/
 # Tauri
 rustdb-ui/src-tauri/target/
 
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
 # DB 데이터
 data/
 *.log

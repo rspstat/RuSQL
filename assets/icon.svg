@@ -1,0 +1,81 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+  <defs>
+    <!-- Background gradient -->
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#182035"/>
+      <stop offset="100%" stop-color="#0b1220"/>
+    </linearGradient>
+
+    <!-- Disk body side gradients (left-right shading) -->
+    <linearGradient id="body1" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%"   stop-color="#2b9e88"/>
+      <stop offset="30%"  stop-color="#4ec9b0"/>
+      <stop offset="70%"  stop-color="#4ec9b0"/>
+      <stop offset="100%" stop-color="#2b9e88"/>
+    </linearGradient>
+    <linearGradient id="body2" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%"   stop-color="#23897a"/>
+      <stop offset="30%"  stop-color="#3db8a0"/>
+      <stop offset="70%"  stop-color="#3db8a0"/>
+      <stop offset="100%" stop-color="#23897a"/>
+    </linearGradient>
+    <linearGradient id="body3" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%"   stop-color="#1c7264"/>
+      <stop offset="30%"  stop-color="#32a88c"/>
+      <stop offset="70%"  stop-color="#32a88c"/>
+      <stop offset="100%" stop-color="#1c7264"/>
+    </linearGradient>
+
+    <!-- Top cap radial gradients (3D highlight) -->
+    <radialGradient id="top1" cx="40%" cy="35%" r="65%">
+      <stop offset="0%"   stop-color="#a0f5e6"/>
+      <stop offset="100%" stop-color="#4ec9b0"/>
+    </radialGradient>
+    <radialGradient id="top2" cx="40%" cy="35%" r="65%">
+      <stop offset="0%"   stop-color="#7ee8d4"/>
+      <stop offset="100%" stop-color="#3db8a0"/>
+    </radialGradient>
+    <radialGradient id="top3" cx="40%" cy="35%" r="65%">
+      <stop offset="0%"   stop-color="#66d8c6"/>
+      <stop offset="100%" stop-color="#2d9e8a"/>
+    </radialGradient>
+
+    <!-- Bottom cap gradients (darker for depth) -->
+    <linearGradient id="bot1" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%"   stop-color="#3dab96"/>
+      <stop offset="100%" stop-color="#175e4e"/>
+    </linearGradient>
+    <linearGradient id="bot2" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%"   stop-color="#31957e"/>
+      <stop offset="100%" stop-color="#124e40"/>
+    </linearGradient>
+    <linearGradient id="bot3" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%"   stop-color="#257e68"/>
+      <stop offset="100%" stop-color="#0d3f34"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Dark rounded square background -->
+  <rect width="1024" height="1024" rx="200" fill="url(#bg)"/>
+
+  <!-- Subtle glow behind the stack -->
+  <ellipse cx="512" cy="520" rx="240" ry="360" fill="rgba(78,201,176,0.07)"/>
+
+  <!-- ═══ Disk 3 (bottom, darkest) ═══ -->
+  <rect x="312" y="660" width="400" height="130" fill="url(#body3)"/>
+  <ellipse cx="512" cy="790" rx="200" ry="35" fill="url(#bot3)"/>
+  <ellipse cx="512" cy="660" rx="200" ry="35" fill="url(#top3)"/>
+
+  <!-- ═══ Disk 2 (middle) ═══ -->
+  <rect x="312" y="455" width="400" height="130" fill="url(#body2)"/>
+  <ellipse cx="512" cy="585" rx="200" ry="35" fill="url(#bot2)"/>
+  <ellipse cx="512" cy="455" rx="200" ry="35" fill="url(#top2)"/>
+
+  <!-- ═══ Disk 1 (top, brightest) ═══ -->
+  <rect x="312" y="250" width="400" height="130" fill="url(#body1)"/>
+  <ellipse cx="512" cy="380" rx="200" ry="35" fill="url(#bot1)"/>
+  <ellipse cx="512" cy="250" rx="200" ry="35" fill="url(#top1)"/>
+
+  <!-- Specular highlight on top disk cap -->
+  <ellipse cx="466" cy="238" rx="88" ry="24" fill="rgba(255,255,255,0.25)"/>
+</svg>

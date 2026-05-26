@@ -5,6 +5,8 @@ import Editor from "@monaco-editor/react";
 import type * as Monaco from "monaco-editor";
 import "./App.css";
 import { format as sqlFormat } from "sql-formatter";
+import { marked } from "marked";
+import DOMPurify from "dompurify";
 
 // ─── 타입 ─────────────────────────────────────────────────────
 interface HistoryEntry {
@@ -52,7 +54,9 @@ interface ChatMessage {
   id: string;
   role: "user" | "assistant";
   content: string;
+  sql?: string;
   toolCalls?: { name: string; args: string; result?: string }[];
+  file_edits?: { name: string; content: string }[];
 }
 const PAGE_SIZE = 100;
 
@@ -204,6 +208,8 @@ function App() {
   const isDragging = useRef(false);
   const isSidebarDragging = useRef(false);
   const lastResultHeightRef = useRef(260);
+  const [chatPanelWidth, setChatPanelWidth] = useState(320);
+  const [homeSidebarWidth, setHomeSidebarWidth] = useState(210);
 
   // ERD 상태
   const [erdColumns, setErdColumns] = useState<Record<string, ColumnDetail[]>>({});
@@ -394,10 +400,17 @@ function App() {
 
   // ─── AI Agent 채팅 상태 ──────────────────────────────────────
   const [aiChatOpen, setAiChatOpen] = useState(false);
-  const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
+  const [chatMessages, setChatMessages] = useState<ChatMessage[]>(() => {
+    try { return JSON.parse(localStorage.getItem("rustdb_chat_messages") ?? "[]"); }
+    catch { return []; }
+  });
   const [chatInput, setChatInput] = useState("");
   const [chatLoading, setChatLoading] = useState(false);
   const chatEndRef = useRef<HTMLDivElement>(null);
+  const chatTextareaRef = useRef<HTMLTextAreaElement>(null);
+  const [mentionOpen, setMentionOpen] = useState(false);
+  const [mentionQuery, setMentionQuery] = useState("");
+  const [appliedEdits, setAppliedEdits] = useState<Set<string>>(new Set());
 
   const serverStatus_init: ServerStatus = { running: false, port: 7878, client_count: 0, log: [] };
   const [serverStatus, setServerStatus] = useState<ServerStatus>(serverStatus_init);
@@ -644,9 +657,10 @@ function App() {
     logEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [serverStatus.log]);
 
-  // ─── 채팅 자동 스크롤 ────────────────────────────────────
+  // ─── 채팅 자동 스크롤 + 영속 저장 ───────────────────────
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
+    localStorage.setItem("rustdb_chat_messages", JSON.stringify(chatMessages));
   }, [chatMessages, chatLoading]);
 
   // ─── 쿼리 실행 ──────────────────────────────────────────────
@@ -722,6 +736,17 @@ function App() {
   const saveTabs = (next: Tab[]) => {
     setTabs(next);
     localStorage.setItem(`rustdb_tabs_${connIdRef.current}`, JSON.stringify(next));
+  };
+
+  const applyFileEdit = (tabName: string, content: string, editKey: string) => {
+    const target = tabs.find(t => t.name === tabName);
+    if (!target) return;
+    if (target.id === activeTabId) {
+      setEditorQuery(content);
+    } else {
+      saveTabs(tabs.map(t => t.id === target.id ? { ...t, content } : t));
+    }
+    setAppliedEdits(prev => new Set(prev).add(editKey));
   };
 
   // 현재 에디터 내용을 탭에 저장한 후 탭 전환
@@ -1340,19 +1365,59 @@ function App() {
   const sendChat = async () => {
     const text = chatInput.trim();
     if (!text || chatLoading) return;
+
+    if (!aiApiKey.trim()) {
+      setChatMessages(prev => [...prev, {
+        id: Date.now().toString(), role: "assistant",
+        content: "API 키가 설정되지 않았습니다.\n좌측 AI 탭(Ctrl+4)에서 Anthropic API 키를 입력해주세요.",
+      }]);
+      return;
+    }
+
     const userMsg: ChatMessage = { id: Date.now().toString(), role: "user", content: text };
     setChatMessages(prev => [...prev, userMsg]);
     setChatInput("");
     setChatLoading(true);
-    // TODO: API 연동 (Anthropic tool_use)
-    setTimeout(() => {
+
+    try {
+      const schema = await getSchemaText();
+      const history = [...chatMessages, userMsg].map(m => ({ role: m.role, content: m.content }));
+
+      // Always include active tab; additionally include @mentioned tabs
+      const currentTabContent = queryRef.current;
+      const currentTabName = activeTab?.name ?? "query.sql";
+      const mentionedTabs = tabs.filter(t => t.id !== activeTabId && text.includes("@" + t.name));
+      const open_files = [
+        { name: currentTabName, content: currentTabContent },
+        ...mentionedTabs.map(t => ({ name: t.name, content: t.content })),
+      ];
+
+      const res = await fetch(`${aiServerUrl}/api/chat`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ messages: history, schema, api_key: aiApiKey, current_db: currentDb, open_files }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail ?? "서버 오류");
       setChatMessages(prev => [...prev, {
         id: (Date.now() + 1).toString(),
         role: "assistant",
-        content: "API 연동 준비 중입니다.\n\n현재 UI 구조만 완성된 상태이며, 곧 Claude API + tool_use 기반 에이전트가 연결됩니다.",
+        content: data.content,
+        sql: data.sql ?? undefined,
+        file_edits: data.file_edits ?? undefined,
       }]);
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e);
+      setChatMessages(prev => [...prev, {
+        id: (Date.now() + 1).toString(),
+        role: "assistant",
+        content: msg.includes("fetch") || msg.includes("Failed")
+          ? "MCP 서버에 연결할 수 없습니다.\nserver.py가 실행 중인지 확인하세요."
+          : `오류: ${msg}`,
+      }]);
+    } finally {
       setChatLoading(false);
-    }, 600);
+    }
   };
 
   // ─── 렌더 ───────────────────────────────────────────────────
@@ -1470,7 +1535,7 @@ function App() {
         <div className="home-layout" onClick={() => setOpenMenu(null)}>
 
           {/* 사이드바 */}
-          <div className="home-sidebar">
+          <div className="home-sidebar" style={{ width: homeSidebarWidth }}>
             <div className="home-sidebar-header">연결</div>
             {connections.map(conn => (
               <div
@@ -1496,6 +1561,29 @@ function App() {
               새 연결
             </div>
           </div>
+
+          {/* 사이드바 리사이즈 핸들 */}
+          <div
+            className="home-sidebar-resize-handle"
+            onMouseDown={e => {
+              e.preventDefault();
+              const startX = e.clientX;
+              const startW = homeSidebarWidth;
+              document.body.style.cursor = "col-resize";
+              document.body.style.userSelect = "none";
+              const onMove = (me: MouseEvent) => {
+                setHomeSidebarWidth(Math.max(140, Math.min(400, startW + me.clientX - startX)));
+              };
+              const onUp = () => {
+                document.removeEventListener("mousemove", onMove);
+                document.removeEventListener("mouseup", onUp);
+                document.body.style.cursor = "";
+                document.body.style.userSelect = "";
+              };
+              document.addEventListener("mousemove", onMove);
+              document.addEventListener("mouseup", onUp);
+            }}
+          />
 
           {/* 메인 콘텐츠 */}
           <div className="home-main">
@@ -1536,7 +1624,7 @@ function App() {
                   }}
                 >
                   <div className="home-conn-card-icon">
-                    <svg width="28" height="34" viewBox="0 0 24 24" preserveAspectRatio="none" fill="none">
+                    <svg width="40" height="50" viewBox="0 0 24 24" preserveAspectRatio="none" fill="none">
                       <ellipse cx="12" cy="5" rx="8" ry="3.5" stroke="#4ec9b0" strokeWidth="1.4" vectorEffect="non-scaling-stroke"/>
                       <path d="M4 5v6c0 1.93 3.58 3.5 8 3.5s8-1.57 8-3.5V5" stroke="#4ec9b0" strokeWidth="1.4" fill="none" vectorEffect="non-scaling-stroke"/>
                       <path d="M4 11v6c0 1.93 3.58 3.5 8 3.5s8-1.57 8-3.5v-6" stroke="#4ec9b0" strokeWidth="1.4" fill="none" vectorEffect="non-scaling-stroke"/>
@@ -2656,7 +2744,29 @@ function App() {
             })()}
             </div>
             {aiChatOpen && (
-              <div className="ai-chat-panel">
+              <div className="ai-chat-panel" style={{ width: chatPanelWidth }}>
+                <div
+                  className="ai-chat-resize-handle"
+                  onMouseDown={e => {
+                    e.preventDefault();
+                    const startX = e.clientX;
+                    const startW = chatPanelWidth;
+                    document.body.style.cursor = "col-resize";
+                    document.body.style.userSelect = "none";
+                    const onMove = (me: MouseEvent) => {
+                      const dx = startX - me.clientX;
+                      setChatPanelWidth(Math.max(240, Math.min(640, startW + dx)));
+                    };
+                    const onUp = () => {
+                      document.removeEventListener("mousemove", onMove);
+                      document.removeEventListener("mouseup", onUp);
+                      document.body.style.cursor = "";
+                      document.body.style.userSelect = "";
+                    };
+                    document.addEventListener("mousemove", onMove);
+                    document.addEventListener("mouseup", onUp);
+                  }}
+                />
                 <div className="ai-chat-header">
                   <div className="ai-chat-header-left">
                     <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" style={{ opacity: 0.85 }}>
@@ -2664,7 +2774,6 @@ function App() {
                       <path d="M19 14l.75 2.25L22 17l-2.25.75L19 20l-.75-2.25L16 17l2.25-.75L19 14z"/>
                     </svg>
                     <span className="ai-chat-title">AI Agent</span>
-                    <span className="ai-chat-badge">claude</span>
                   </div>
                   <div className="ai-chat-header-right">
                     <button className="ai-chat-clear" onClick={() => setChatMessages([])} title="대화 초기화">
@@ -2692,13 +2801,6 @@ function App() {
                   )}
                   {chatMessages.map(msg => (
                     <div key={msg.id} className={`ai-chat-msg ai-chat-msg-${msg.role}`}>
-                      {msg.role === "assistant" && (
-                        <div className="ai-chat-avatar">
-                          <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor">
-                            <path d="M12 2l1.5 4.5L18 8l-4.5 1.5L12 14l-1.5-4.5L6 8l4.5-1.5L12 2z"/>
-                          </svg>
-                        </div>
-                      )}
                       <div className="ai-chat-bubble">
                         {msg.toolCalls && msg.toolCalls.length > 0 && (
                           <div className="ai-tool-calls">
@@ -2714,41 +2816,138 @@ function App() {
                             ))}
                           </div>
                         )}
-                        <div className="ai-chat-text">{msg.content}</div>
+                        {msg.content && (
+                          msg.role === "assistant"
+                            ? <div className="ai-chat-text ai-chat-markdown" dangerouslySetInnerHTML={{ __html: DOMPurify.sanitize(marked.parse(msg.content) as string) }} />
+                            : <div className="ai-chat-text">{msg.content}</div>
+                        )}
+                        {msg.sql && (
+                          <div className="ai-chat-sql-block">
+                            <pre className="ai-chat-sql-code">{msg.sql}</pre>
+                            <div className="ai-chat-sql-actions">
+                              <button
+                                className="ai-chat-sql-btn primary"
+                                onClick={() => { setEditorQuery(msg.sql!); setAiChatOpen(false); setActiveView("editor"); }}
+                              >에디터에 삽입</button>
+                              <button
+                                className="ai-chat-sql-btn"
+                                onClick={() => navigator.clipboard.writeText(msg.sql!)}
+                              >복사</button>
+                            </div>
+                          </div>
+                        )}
+                        {msg.file_edits && msg.file_edits.map((fe, i) => {
+                          const editKey = `${msg.id}-${i}`;
+                          const applied = appliedEdits.has(editKey);
+                          const tabExists = tabs.some(t => t.name === fe.name);
+                          return (
+                            <div key={editKey} className="ai-file-edit-block">
+                              <div className="ai-file-edit-header">
+                                <svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path d="M2 2h12v12H2V2zm1 1v10h10V3H3zm2 2h6v1H5V5zm0 2h6v1H5V7zm0 2h4v1H5V9z"/></svg>
+                                <span>{fe.name}</span>
+                                {applied && <span className="ai-file-edit-applied">✓ 적용됨</span>}
+                              </div>
+                              <pre className="ai-file-edit-preview">{fe.content}</pre>
+                              <div className="ai-file-edit-actions">
+                                <button
+                                  className="ai-chat-sql-btn primary"
+                                  onClick={() => applyFileEdit(fe.name, fe.content, editKey)}
+                                  disabled={applied || !tabExists}
+                                  title={!tabExists ? `열린 탭에 "${fe.name}" 없음` : ""}
+                                >
+                                  {applied ? "적용됨" : tabExists ? "파일에 적용" : "탭 없음"}
+                                </button>
+                                <button
+                                  className="ai-chat-sql-btn"
+                                  onClick={() => navigator.clipboard.writeText(fe.content)}
+                                >복사</button>
+                              </div>
+                            </div>
+                          );
+                        })}
                       </div>
                     </div>
                   ))}
                   {chatLoading && (
                     <div className="ai-chat-msg ai-chat-msg-assistant">
-                      <div className="ai-chat-avatar">
-                        <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor">
-                          <path d="M12 2l1.5 4.5L18 8l-4.5 1.5L12 14l-1.5-4.5L6 8l4.5-1.5L12 2z"/>
-                        </svg>
-                      </div>
                       <div className="ai-chat-bubble ai-chat-typing"><span/><span/><span/></div>
                     </div>
                   )}
                   <div ref={chatEndRef} />
                 </div>
                 <div className="ai-chat-input-area">
-                  <textarea
-                    className="ai-chat-textarea"
-                    rows={3}
-                    placeholder="질문 또는 명령... (Ctrl+Enter로 전송)"
-                    value={chatInput}
-                    onChange={e => setChatInput(e.target.value)}
-                    onKeyDown={e => { if (e.ctrlKey && e.key === "Enter") { e.preventDefault(); sendChat(); } }}
-                  />
-                  <button
-                    className="ai-chat-send"
-                    onClick={sendChat}
-                    disabled={chatLoading || !chatInput.trim()}
-                    title="전송 (Ctrl+Enter)"
-                  >
-                    <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
-                      <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/>
-                    </svg>
-                  </button>
+                  <div className="ai-chat-input-meta">
+                    <span className="ai-ctx-chip">
+                      <svg width="10" height="10" viewBox="0 0 16 16" fill="currentColor"><path d="M2 2h12v12H2V2zm1 1v10h10V3H3zm2 2h6v1H5V5zm0 2h6v1H5V7zm0 2h4v1H5V9z"/></svg>
+                      {activeTab?.name ?? "query.sql"}
+                    </span>
+                    {tabs
+                      .filter(t => {
+                        const activeTabName = activeTab?.name ?? "query.sql";
+                        return t.name !== activeTabName && chatInput.includes("@" + t.name);
+                      })
+                      .map(t => (
+                        <span key={t.id} className="ai-ctx-chip ai-ctx-chip-mention">@{t.name}</span>
+                      ))}
+                    <span className="ai-ctx-hint">@파일명으로 탭 참조</span>
+                  </div>
+                  <div className="ai-chat-input-row">
+                    {mentionOpen && tabs.some(t => t.name.toLowerCase().includes(mentionQuery.toLowerCase())) && (
+                      <div className="ai-mention-dropdown">
+                        {tabs
+                          .filter(t => t.name.toLowerCase().includes(mentionQuery.toLowerCase()))
+                          .map(t => (
+                            <div
+                              key={t.id}
+                              className="ai-mention-item"
+                              onMouseDown={e => {
+                                e.preventDefault();
+                                const pos = chatTextareaRef.current?.selectionStart ?? chatInput.length;
+                                const atIdx = chatInput.slice(0, pos).lastIndexOf("@");
+                                const before = chatInput.slice(0, atIdx) + "@" + t.name;
+                                const after = chatInput.slice(pos);
+                                setChatInput(before + after);
+                                setMentionOpen(false);
+                              }}
+                            >
+                              <svg width="10" height="10" viewBox="0 0 16 16" fill="currentColor"><path d="M2 2h12v12H2V2zm1 1v10h10V3H3zm2 2h6v1H5V5zm0 2h6v1H5V7zm0 2h4v1H5V9z"/></svg>
+                              {t.name}
+                            </div>
+                          ))}
+                      </div>
+                    )}
+                    <textarea
+                      ref={chatTextareaRef}
+                      className="ai-chat-textarea"
+                      rows={3}
+                      placeholder="질문 또는 명령... (Enter로 전송, @파일명으로 탭 참조)"
+                      value={chatInput}
+                      onChange={e => {
+                        const val = e.target.value;
+                        setChatInput(val);
+                        const pos = e.target.selectionStart ?? val.length;
+                        const before = val.slice(0, pos);
+                        const atMatch = before.match(/@([\w.-]*)$/);
+                        if (atMatch) { setMentionQuery(atMatch[1]); setMentionOpen(true); }
+                        else { setMentionOpen(false); }
+                      }}
+                      onKeyDown={e => {
+                        if (e.key === "Escape") { setMentionOpen(false); return; }
+                        if (e.key === "Enter" && !e.ctrlKey && !e.shiftKey) { e.preventDefault(); sendChat(); }
+                      }}
+                      onBlur={() => setTimeout(() => setMentionOpen(false), 150)}
+                    />
+                    <button
+                      className="ai-chat-send"
+                      onClick={sendChat}
+                      disabled={chatLoading || !chatInput.trim()}
+                      title="전송 (Ctrl+Enter)"
+                    >
+                      <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+                        <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/>
+                      </svg>
+                    </button>
+                  </div>
                 </div>
               </div>
             )}
@@ -3329,7 +3528,6 @@ function App() {
                 <path d="M5 17l.5 1.5L7 19l-1.5.5L5 21l-.5-1.5L3 19l1.5-.5L5 17z"/>
               </svg>
               <span className="ai-header-title">AI Assistant</span>
-              <span className="ai-header-model">claude-opus-4-7</span>
             </div>
             <div className="ai-header-right">
               <button
@@ -3348,13 +3546,13 @@ function App() {
             <div className="ai-section">
               <div className="ai-section-title">
                 <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><path d="M12.65 10C11.83 7.67 9.61 6 7 6c-3.31 0-6 2.69-6 6s2.69 6 6 6c2.61 0 4.83-1.67 5.65-4H17v4h4v-4h2v-4H12.65zM7 14c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2z"/></svg>
-                Anthropic API Key
+                Google Gemini API Key
               </div>
               <div className="ai-key-row">
                 <input
                   className="ai-key-input"
                   type={aiKeyVisible ? "text" : "password"}
-                  placeholder="sk-ant-..."
+                  placeholder="AIza..."
                   value={aiApiKey}
                   onChange={e => saveAiKey(e.target.value)}
                 />

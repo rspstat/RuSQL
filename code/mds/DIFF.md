@@ -311,4 +311,4 @@
 | 연결 관리 | ✓ | ✓ | ✓ | ✓ (연결별 독립 데이터 디렉토리) |
 | 서버 모니터링 | ✓ | ✓ | ✓ (Performance Hub) | △ (TCP 서버 on/off·클라이언트 수·로그) |
 | 데이터 임포트/익스포트 | ✓ (CSV, SQL) | ✓ | ✓ (CSV, Excel, XML) | ✓ (CSV 익스포트·임포트) |
-| AI 연동 | △ (HeatWave AutoML) | ✗ | △ (Oracle AI) | ✓ (MCP 서버: 자연어→SQL, EXPLAIN 해석, 스키마 설계 — Claude API 연동) |
+| AI 연동 | △ (HeatWave AutoML) | ✗ | △ (Oracle AI) | ✓ (MCP 서버 — Gemini 2.5 Flash: 자연어→SQL, EXPLAIN 해석, 스키마 설계, 멀티턴 채팅, 에디터 파일 컨텍스트 자동 주입, @파일명 멘션, AI 파일 편집 블록, Tauri 자동 시작) |

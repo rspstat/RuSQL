@@ -1574,7 +1574,7 @@ impl Parser {
                 Some(Token::Round) | Some(Token::Abs) | Some(Token::Ceil) |
                 Some(Token::Floor) | Some(Token::Mod) |
                 Some(Token::Nullif) | Some(Token::Lpad) | Some(Token::Rpad) |
-                Some(Token::DateDiff) => {
+                Some(Token::DateDiff) | Some(Token::Database) => {
                     let fname = match self.advance() {
                         Some(Token::Upper)      => "UPPER",
                         Some(Token::Lower)      => "LOWER",
@@ -1598,6 +1598,7 @@ impl Parser {
                         Some(Token::Lpad)       => "LPAD",
                         Some(Token::Rpad)       => "RPAD",
                         Some(Token::DateDiff)   => "DATEDIFF",
+                        Some(Token::Database)   => "DATABASE",
                         _ => unreachable!(),
                     }.to_string();
                     let args = self.parse_func_args()?;

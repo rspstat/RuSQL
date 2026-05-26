@@ -13,8 +13,8 @@
     "windows": [
       {
         "title": "RustDB",
-        "width": 1200,
-        "height": 900,
+        "width": 1320,
+        "height": 990,
         "minWidth": 900,
         "minHeight": 600,
         "center": true

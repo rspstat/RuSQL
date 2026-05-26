@@ -9,8 +9,8 @@
 
 | 우선순위 | 항목 | 상태 | 예상 소요 |
 |----------|------|------|-----------|
-| 🔴 1순위 | MCP 서버 구현 (Python) | 🔲 | 2~3일 |
-| 🔴 2순위 | UI ↔ MCP 서버 연동 | 🔲 | 1일 |
+| 🟢 완료 | MCP 서버 구현 (Python / Gemini 2.5 Flash) | ✅ | — |
+| 🟢 완료 | UI ↔ MCP 서버 연동 | ✅ | — |
 | 🟡 3순위 | 성능 벤치마크 측정·문서화 | 🔲 | 1일 |
 | 🟢 완료 | 엔진 (rustdb-core) | ✅ | — |
 | 🟢 완료 | UI (rustdb-ui) | ✅ | — |
@@ -18,76 +18,60 @@
 
 ---
 
-## 1. MCP 서버 구현 🔴 (미완료 — 최우선)
+## 1. MCP 서버 구현 ✅ 완료
 
-> 프로젝트 제목이 **"MCP 기반 커스텀 RDBMS"** — 이게 없으면 제목 자체가 성립 안 됨
+> 프로젝트 제목 **"MCP 기반 커스텀 RDBMS"** 의 핵심 차별점 — 구현 완료
 
-### 1-1. 서버 구조
+### 1-1. 서버 구조 (구현됨)
 
 ```
 rustdb-mcp/
-├── main.py          # FastAPI 서버 진입점
-├── llm.py           # Claude API 호출 (anthropic SDK)
-├── db.py            # RustDB 연결 (mysql-connector-python, 포트 3306)
-├── schema.py        # SHOW TABLES + DESCRIBE → 스키마 문자열 생성
-└── requirements.txt
+└── server.py        # FastAPI MCP 서버 (단일 파일)
+└── requirements.txt # google-genai, fastapi, uvicorn
 ```
 
 ### 1-2. 구현 태스크
 
 | # | 태스크 | 설명 | 상태 |
 |---|--------|------|------|
-| 1 | 프로젝트 세팅 | `pip install fastapi uvicorn anthropic mysql-connector-python`, requirements.txt | 🔲 |
-| 2 | RustDB 연결 (`db.py`) | `mysql.connector.connect(host, port=3306, user, password)`, 쿼리 실행 함수 | 🔲 |
-| 3 | 스키마 수집 (`schema.py`) | `SHOW TABLES` → 각 테이블 `DESCRIBE` → 하나의 문자열로 직렬화 | 🔲 |
-| 4 | Claude API 호출 (`llm.py`) | 스키마 + 자연어 → SQL 생성 프롬프트, `claude-opus-4-7` 모델 사용 | 🔲 |
-| 5 | `/ask` 엔드포인트 (`main.py`) | `POST /ask { question, db }` → SQL 생성 → RustDB 실행 → 결과 반환 | 🔲 |
-| 6 | `/generate` 엔드포인트 | `POST /generate { question, db }` → SQL만 반환 (에디터 삽입용) | 🔲 |
-| 7 | 오류 처리 | SQL 실행 실패 시 에러 메시지 + 재시도 프롬프트 | 🔲 |
+| 1 | 프로젝트 세팅 | `pip install fastapi uvicorn google-genai`, requirements.txt | ✅ |
+| 2 | 스키마 수집 | SHOW TABLES + DESCRIBE → 시스템 프롬프트 주입 | ✅ |
+| 3 | Gemini API 호출 | 스키마 + 자연어 → SQL 생성, `gemini-2.5-flash` 모델 | ✅ |
+| 4 | `/api/nl-to-sql` 엔드포인트 | 자연어 → SQL 변환 | ✅ |
+| 5 | `/api/explain` 엔드포인트 | EXPLAIN 결과 AI 해석 | ✅ |
+| 6 | `/api/schema-design` 엔드포인트 | 자연어 → CREATE TABLE SQL | ✅ |
+| 7 | `/api/chat` 엔드포인트 | 멀티턴 채팅 + 파일 컨텍스트 + 파일 편집 | ✅ |
+| 8 | 에디터 파일 컨텍스트 주입 | 현재 열린 SQL 파일 자동 포함, @파일명 멘션 | ✅ |
+| 9 | AI 파일 편집 블록 | `<<<FILE filename.sql\n...\nFILE>>>` 형식 파싱 및 적용 | ✅ |
 
-### 1-3. 핵심 프롬프트 설계
-
-```
-당신은 RustDB SQL 전문가입니다.
-아래 스키마를 참고하여 사용자 질문에 맞는 SQL을 작성하세요.
-SELECT만 반환하고, 마크다운 없이 SQL만 출력하세요.
-
-[스키마]
-{schema}
-
-[질문]
-{question}
-
-[SQL]
-```
-
-### 1-4. 데모 시나리오 (심사용)
+### 1-3. 데모 시나리오 (심사용)
 
 ```
 사용자: "부서별 평균 급여를 높은 순으로 보여줘"
          ↓
-schema.py: SHOW TABLES → DESCRIBE emp, dept, sal
+UI: 현재 DB 스키마 수집 (SHOW TABLES + DESCRIBE)
          ↓
-llm.py: Claude API → SELECT d.name, AVG(e.salary) ...
+POST /api/chat { messages, schema, open_files }
          ↓
-db.py: RustDB 실행 → 결과 rows
+Gemini 2.5 Flash → SELECT d.name, AVG(e.salary) ...
          ↓
-UI 결과창: 테이블 표시
+UI: SQL 제안 → 에디터 삽입 → 원클릭 실행
 ```
 
 ---
 
-## 2. UI ↔ MCP 서버 연동 🔴 (미완료)
-
-> AI 채팅 패널(UI)은 이미 완성 — MCP 서버 HTTP 호출만 연결하면 됨
+## 2. UI ↔ MCP 서버 연동 ✅ 완료
 
 | # | 태스크 | 설명 | 상태 |
 |---|--------|------|------|
-| 1 | Tauri `ask_ai` 커맨드 | `invoke("ask_ai", { question, db })` → `http://localhost:8000/ask` fetch | 🔲 |
-| 2 | Tauri `generate_sql` 커맨드 | `invoke("generate_sql", { question, db })` → SQL 문자열 반환 → 에디터 삽입 | 🔲 |
-| 3 | 채팅 패널 연결 | 기존 `sendChat()` 함수를 Tauri 커맨드로 교체 | 🔲 |
-| 4 | 현재 DB 자동 전달 | 채팅 시 `currentDb` 상태를 자동으로 MCP 서버에 전달 | 🔲 |
-| 5 | 에러 표시 | MCP 서버 미실행 시 "AI 서버를 먼저 실행하세요" 메시지 | 🔲 |
+| 1 | `sendChat()` 함수 | `fetch("http://127.0.0.1:8765/api/chat", ...)` 직접 호출 | ✅ |
+| 2 | 현재 DB 자동 전달 | `currentDb` 상태를 MCP 서버에 자동 전달 | ✅ |
+| 3 | 스키마 자동 수집 | `invoke("get_schema")` → 시스템 프롬프트 주입 | ✅ |
+| 4 | 파일 컨텍스트 전달 | 열린 SQL 탭 내용을 `open_files` 배열로 전달 | ✅ |
+| 5 | SQL 제안 삽입 | AI 응답 `sql` 필드 → 에디터 탭에 자동 삽입 | ✅ |
+| 6 | 파일 편집 적용 | AI 응답 `file_edits` → "파일에 적용" 버튼 → Monaco 에디터 교체 | ✅ |
+| 7 | Tauri 자동 시작 | 앱 실행 시 `python -m uvicorn server:app --port 8765` 자동 기동 | ✅ |
+| 8 | API 키 관리 | UI 설정 탭에서 Google Gemini API 키 입력 → localStorage 저장 | ✅ |
 
 ---
 
@@ -144,7 +128,7 @@ UI 결과창: 테이블 표시
 | Monaco 에디터 (다중 탭, 분할, 고정, 컨텍스트 메뉴) | ✅ |
 | MySQL 스타일 에디터 툴바 (파일 열기/저장/실행) | ✅ |
 | 결과 테이블 (Canvas 자동 너비, 정렬, 검색, 셀 편집, 진행 바) | ✅ |
-| AI Agent 채팅 패널 (UI 완성, 백엔드 연동 미완료) | ✅/🔲 |
+| AI Agent 채팅 패널 (Gemini 2.5 Flash, 파일 컨텍스트, @멘션, 파일 편집, 드래그 너비 조절) | ✅ |
 | ERD 다이어그램 (FK 관계선, Auto Layout, 드래그) | ✅ |
 | 사이드바 (DB/테이블/뷰/인덱스 컨텍스트 메뉴) | ✅ |
 | 쿼리 히스토리 / 북마크 | ✅ |

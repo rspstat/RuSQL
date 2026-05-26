@@ -10,7 +10,7 @@
 |------|------|
 | DB 엔진 | B+Tree, WAL, Buffer Pool, MVCC, 트랜잭션, 비용 기반 옵티마이저 |
 | SQL 지원 | DDL / DML / JOIN / 서브쿼리 / CTE / UNION / 제약조건 / 트랜잭션 |
-| MCP | 자연어 입력 → SQL 자동 생성 → 실행 |
+| MCP | 자연어 입력 → SQL 자동 생성 → 실행, EXPLAIN 해석, 스키마 설계, 멀티턴 채팅, 파일 컨텍스트 주입, AI 파일 편집 |
 | DBMS | TCP 서버, 다중 클라이언트 동시 접속, 세션별 독립 Executor + `Arc<RwLock<SharedDatabase>>` 공유 |
 | 언어 | Rust |
 
@@ -489,9 +489,9 @@ SHOW DATABASES;
 | 저장 | 바이너리 .rdb + LZ4 압축 + indexes.json + views.json + _users.json + _grants.json + _roles.json + _role_grants.json + _synonyms.json |
 | 다중 DB | CREATE / DROP / USE / SHOW DATABASES, 테이블 자동 한정, 격리 |
 | 사용자 관리 | CREATE/DROP USER, GRANT/REVOKE, SHOW GRANTS, ROLE 관리, SYNONYM, 영속화 |
-| UI | Tauri + React + Monaco Editor (멀티 탭, 탭 우클릭 메뉴, 탭 고정, 분할 에디터, AI Agent 채팅 패널, MySQL 스타일 에디터 툴바, 패널 토글 버튼, Canvas 기반 결과 컬럼 자동 너비) |
+| UI | Tauri + React + Monaco Editor (멀티 탭, 탭 우클릭 메뉴, 탭 고정, 분할 에디터, AI Agent 채팅 패널 [드래그 너비 조절·파일 컨텍스트·@멘션·파일 편집], MySQL 스타일 에디터 툴바, 패널 토글 버튼, Canvas 기반 결과 컬럼 자동 너비, 연결 사이드바 드래그 너비 조절) |
 | TCP 서버 | 멀티 클라이언트, 포트 7878, 라인 프로토콜 |
-| AI 연동 | MCP 서버 (Python) + Claude API — 자연어 → SQL 변환, EXPLAIN 해석, 스키마 컨텍스트 자동 주입 |
+| AI 연동 | MCP 서버 (Python / FastAPI) + Gemini 2.5 Flash — 자연어 → SQL 변환, EXPLAIN 해석, 스키마 설계, 멀티턴 채팅, 에디터 파일 컨텍스트 자동 주입, @파일명 멘션, AI 파일 편집 블록 (Monaco Undo 지원), Tauri 자동 시작 |
 
 <br/>
 

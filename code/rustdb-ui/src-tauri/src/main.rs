@@ -7,9 +7,29 @@ use std::thread;
 use std::net::{TcpListener, TcpStream};
 use std::io::{BufRead, BufReader, Write};
 use std::time::Instant;
-use tauri::State;
+use std::process::{Child, Command};
+use tauri::{Manager, State};
 use rustdb_core::parser::parser::Parser;
 use rustdb_core::engine::executor::{Executor, SharedDatabase};
+
+struct McpServer(Mutex<Option<Child>>);
+
+fn start_mcp_server() -> Option<Child> {
+    #[cfg(debug_assertions)]
+    let server_dir = {
+        let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        manifest.parent()?.parent()?.join("rustdb-mcp")
+    };
+    #[cfg(not(debug_assertions))]
+    let server_dir = std::env::current_exe().ok()?.parent()?.to_path_buf();
+
+    Command::new("python")
+        .args(["-m", "uvicorn", "server:app",
+               "--host", "127.0.0.1", "--port", "8765", "--log-level", "error"])
+        .current_dir(server_dir)
+        .spawn()
+        .ok()
+}
 
 // ─── 연결별 서버 상태 ─────────────────────────────────────────
 struct ServerEntry {
@@ -736,6 +756,11 @@ fn main() {
             db,
             servers: Mutex::new(HashMap::new()),
         })
+        .manage(McpServer(Mutex::new(None)))
+        .setup(|app| {
+            *app.state::<McpServer>().0.lock().unwrap() = start_mcp_server();
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             execute_query,
             get_databases,
@@ -757,6 +782,14 @@ fn main() {
             export_csv,
             import_csv,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app, event| {
+            if let tauri::RunEvent::Exit = event {
+                if let Some(mut child) = app.state::<McpServer>().0.lock().unwrap().take() {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                }
+            }
+        });
 }
