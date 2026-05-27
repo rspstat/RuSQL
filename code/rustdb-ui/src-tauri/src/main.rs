@@ -745,6 +745,21 @@ fn csv_parse_row(line: &str) -> Vec<String> {
     fields
 }
 
+#[tauri::command]
+fn open_terminal() {
+    let _ = std::process::Command::new("cmd")
+        .args(["/c", "start", "cmd"])
+        .current_dir(r"C:\Users\win11\Desktop\projects\dbe\code")
+        .spawn();
+}
+
+#[tauri::command]
+fn open_url(url: String) {
+    let _ = std::process::Command::new("cmd")
+        .args(["/c", "start", "", &url])
+        .spawn();
+}
+
 // ─── 엔트리포인트 ─────────────────────────────────────────────
 fn main() {
     let exec = Executor::new();
@@ -781,6 +796,8 @@ fn main() {
             clear_server_log,
             export_csv,
             import_csv,
+            open_terminal,
+            open_url,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

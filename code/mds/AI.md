@@ -1,7 +1,7 @@
 # RustDB AI 연동 (v2.2.0)
 
 > 프로젝트 제목 "MCP 기반 커스텀 RDBMS"의 핵심 차별점  
-> 모델: **Gemini 2.5 Flash** (google-genai) · 구현 언어: Python (FastAPI)  
+> 구현 언어: Python (FastAPI)  
 > 기준일: 2026-05-27
 
 ---
@@ -18,7 +18,7 @@
 
 | 항목 | 내용 |
 |------|------|
-| 모델 | Gemini 2.5 Flash (`gemini-2.5-flash`) |
+| 모델 | AI assistant |
 | SDK | `google-genai` Python 패키지 |
 | 이유 | 1M 토큰 컨텍스트 윈도우, 빠른 응답, 무료 티어 제공 |
 
@@ -191,7 +191,7 @@ if let tauri::RunEvent::Exit = event {
                           ↓
         POST /api/chat { messages, schema, open_files }
                           ↓
-               Gemini 2.5 Flash API
+               AI assistant API
                           ↓
          { content, sql?, file_edits? }
                     ↙         ↘

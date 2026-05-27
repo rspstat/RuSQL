@@ -9,7 +9,7 @@
 
 | 우선순위 | 항목 | 상태 | 예상 소요 |
 |----------|------|------|-----------|
-| 🟢 완료 | MCP 서버 구현 (Python / Gemini 2.5 Flash) | ✅ | — |
+| 🟢 완료 | MCP 서버 구현 (Python / AI assistant) | ✅ | — |
 | 🟢 완료 | UI ↔ MCP 서버 연동 | ✅ | — |
 | 🟡 3순위 | 성능 벤치마크 측정·문서화 | 🔲 | 1일 |
 | 🟢 완료 | 엔진 (rustdb-core) | ✅ | — |
@@ -53,7 +53,7 @@ UI: 현재 DB 스키마 수집 (SHOW TABLES + DESCRIBE)
          ↓
 POST /api/chat { messages, schema, open_files }
          ↓
-Gemini 2.5 Flash → SELECT d.name, AVG(e.salary) ...
+AI assistant → SELECT d.name, AVG(e.salary) ...
          ↓
 UI: SQL 제안 → 에디터 삽입 → 원클릭 실행
 ```
@@ -125,10 +125,11 @@ UI: SQL 제안 → 에디터 삽입 → 원클릭 실행
 
 | 항목 | 상태 |
 |------|------|
+| 홈 화면 (퀵 액션 버튼, RDBMS 소개, 연결 카드 그리드, 상태 표시줄, 액티비티 바) | ✅ |
 | Monaco 에디터 (다중 탭, 분할, 고정, 컨텍스트 메뉴) | ✅ |
 | MySQL 스타일 에디터 툴바 (파일 열기/저장/실행) | ✅ |
 | 결과 테이블 (Canvas 자동 너비, 정렬, 검색, 셀 편집, 진행 바) | ✅ |
-| AI Agent 채팅 패널 (Gemini 2.5 Flash, 파일 컨텍스트, @멘션, 파일 편집, 드래그 너비 조절) | ✅ |
+| AI Agent 채팅 패널 (AI assistant, 파일 컨텍스트, @멘션, 파일 편집, 드래그 너비 조절, 채팅 세션 기록) | ✅ |
 | ERD 다이어그램 (FK 관계선, Auto Layout, 드래그) | ✅ |
 | 사이드바 (DB/테이블/뷰/인덱스 컨텍스트 메뉴) | ✅ |
 | 쿼리 히스토리 / 북마크 | ✅ |

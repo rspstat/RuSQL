@@ -246,6 +246,7 @@
 
 ### UI (rustdb-ui)
 - [x] Tauri + React 데스크탑 앱
+- [x] 홈(연결) 화면 — 3티어 실린더 아이콘 헤더, 퀵 액션 버튼 3종 (새 연결·터미널 열기·GitHub 방문), RDBMS 영문 소개 텍스트 (4줄), 저장된 연결 카드 그리드, 하단 상태 표시줄 (브랜치·버전·기술 스택), 좌측 액티비티 바 (유저 아이콘·설정 버튼), Tauri `open_terminal` (기본 경로: dbe/code) · `open_url` 커맨드
 - [x] Monaco Editor (SQL 문법 강조, 주석 회색)
 - [x] 다중 쿼리 탭 (탭 추가 / 전환 / 닫기, localStorage 자동 저장)
 - [x] 탭 이름 변경 — 탭 더블클릭 → 인라인 편집 → Enter/blur 커밋
@@ -266,7 +267,7 @@
 - [x] 테이블 우클릭 컨텍스트 메뉴 (MySQL 스타일) — Select Rows / Describe Table / Show Create Table / Copy Table Name / Copy as INSERT / Truncate / DROP
 - [x] ERD Editor 뷰 — 테이블 카드 + FK 관계선(직각 꺾임, 라운드 코너), 카드 드래그 / 캔버스 팬 / 휠 줌, 카드 클릭 시 하단 데이터 패널 (데이터 그리드 + 필터)
 - [x] TCP 서버 관리 뷰 — DBeaver 스타일 연결 구성 폼 (호스트·포트 ±·사용자·비밀번호 토글), 메인/CLI 가이드 탭, 서버 랙 SVG 아이콘, 활동 로그, 연결 사이드바 너비 조절 (드래그, 140~400px)
-- [x] AI Agent 채팅 패널 — 사이드바 4번째 아이콘으로 토글, 에디터 오른쪽 사이드 (드래그 너비 조절 240~640px), 채팅 버블 UI (마크다운 렌더링 marked+DOMPurify, 타이핑 인디케이터), 대화 내역 localStorage 영구 보존, Enter 전송/Ctrl+Enter 줄바꿈, 자연어 입력 → Gemini 2.5 Flash (MCP 서버) → SQL 제안 → 에디터 삽입, 에디터 열린 파일 자동 컨텍스트 주입, @파일명 멘션(자동완성 드롭다운·칩 시각화), AI 파일 편집 블록(파일 수정·삽입·삭제, "파일에 적용" 버튼, Monaco executeEdits Undo 지원)
+- [x] AI Agent 채팅 패널 — 사이드바 4번째 아이콘으로 토글, 에디터 오른쪽 사이드 (드래그 너비 조절 240~640px), 채팅 버블 UI (마크다운 렌더링 marked+DOMPurify, 타이핑 인디케이터), 채팅 세션 기록 (시계 버튼 → 세션 목록 패널, 새 채팅 생성, 세션 이름 변경·삭제, localStorage 영구 보존), Enter 전송/Ctrl+Enter 줄바꿈, 자연어 입력 → AI assistant (MCP 서버) → SQL 제안 → 에디터 삽입, 에디터 열린 파일 자동 컨텍스트 주입, @파일명 멘션(자동완성 드롭다운·칩 시각화), AI 파일 편집 블록(파일 수정·삽입·삭제, "파일에 적용" 버튼, Monaco executeEdits Undo 지원)
 - [x] 멀티 쿼리 결과 표시
 - [x] 결과 페이지네이션 — PAGE_SIZE=100, 초과 시 ‹/› 버튼 + 페이지 표시
 - [x] 쿼리 히스토리 — 결과 패널 HISTORY 탭, localStorage 최대 200개, 클릭 시 에디터 불러오기

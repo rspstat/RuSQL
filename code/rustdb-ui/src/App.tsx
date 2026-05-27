@@ -56,7 +56,14 @@ interface ChatMessage {
   content: string;
   sql?: string;
   toolCalls?: { name: string; args: string; result?: string }[];
+
   file_edits?: { name: string; content: string }[];
+}
+interface ChatSession {
+  id: string;
+  name: string;
+  messages: ChatMessage[];
+  updatedAt: number;
 }
 const PAGE_SIZE = 100;
 
@@ -400,10 +407,38 @@ function App() {
 
   // ─── AI Agent 채팅 상태 ──────────────────────────────────────
   const [aiChatOpen, setAiChatOpen] = useState(false);
-  const [chatMessages, setChatMessages] = useState<ChatMessage[]>(() => {
-    try { return JSON.parse(localStorage.getItem("rustdb_chat_messages") ?? "[]"); }
-    catch { return []; }
+  const [chatSessions, setChatSessions] = useState<ChatSession[]>(() => {
+    try {
+      const saved = localStorage.getItem("rustdb_chat_sessions");
+      if (saved) { const s: ChatSession[] = JSON.parse(saved); if (s.length > 0) return s; }
+      const oldMsgs: ChatMessage[] = JSON.parse(localStorage.getItem("rustdb_chat_messages") ?? "[]");
+      return [{ id: Date.now().toString(), name: "New Chat", messages: oldMsgs, updatedAt: Date.now() }];
+    } catch { return [{ id: Date.now().toString(), name: "New Chat", messages: [], updatedAt: Date.now() }]; }
   });
+  const [activeChatId, setActiveChatId] = useState<string>(() => {
+    try {
+      const saved = localStorage.getItem("rustdb_chat_sessions");
+      if (saved) {
+        const s: ChatSession[] = JSON.parse(saved);
+        const last = localStorage.getItem("rustdb_active_chat");
+        return (last && s.find(x => x.id === last)) ? last : (s[0]?.id ?? "");
+      }
+    } catch {}
+    return "";
+  });
+  const activeChatIdRef = useRef(activeChatId);
+  const [chatHistoryOpen, setChatHistoryOpen] = useState(false);
+  const [editingSessionId, setEditingSessionId] = useState<string | null>(null);
+  const [editingSessionName, setEditingSessionName] = useState("");
+  const chatMessages = (chatSessions.find(s => s.id === activeChatId) ?? chatSessions[0])?.messages ?? [];
+  const setChatMessages = (updater: ChatMessage[] | ((prev: ChatMessage[]) => ChatMessage[])) => {
+    const cid = activeChatIdRef.current;
+    setChatSessions(prev => prev.map(s => {
+      if (s.id !== cid) return s;
+      const msgs = typeof updater === "function" ? updater(s.messages) : updater;
+      return { ...s, messages: msgs, updatedAt: Date.now() };
+    }));
+  };
   const [chatInput, setChatInput] = useState("");
   const [chatLoading, setChatLoading] = useState(false);
   const chatEndRef = useRef<HTMLDivElement>(null);
@@ -657,15 +692,53 @@ function App() {
     logEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [serverStatus.log]);
 
-  // ─── 채팅 자동 스크롤 + 영속 저장 ───────────────────────
+  // ─── 채팅 자동 스크롤 ────────────────────────────────────
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
-    localStorage.setItem("rustdb_chat_messages", JSON.stringify(chatMessages));
   }, [chatMessages, chatLoading]);
+  // ─── 세션 영속 저장 ──────────────────────────────────────
+  useEffect(() => {
+    activeChatIdRef.current = activeChatId;
+    localStorage.setItem("rustdb_chat_sessions", JSON.stringify(chatSessions));
+    localStorage.setItem("rustdb_active_chat", activeChatId);
+  }, [chatSessions, activeChatId]);
+
+  // ─── 채팅 세션 관리 ──────────────────────────────────────────
+  const addChatSession = () => {
+    const id = Date.now().toString();
+    setChatSessions(prev => [{ id, name: "New Chat", messages: [], updatedAt: Date.now() }, ...prev]);
+    setActiveChatId(id);
+    setChatHistoryOpen(false);
+  };
+  const deleteChatSession = (id: string) => {
+    setChatSessions(prev => {
+      const next = prev.filter(s => s.id !== id);
+      if (next.length === 0) {
+        const newId = (Date.now() + 1).toString();
+        setActiveChatId(newId);
+        return [{ id: newId, name: "New Chat", messages: [], updatedAt: Date.now() }];
+      }
+      if (id === activeChatId) setActiveChatId(next[0].id);
+      return next;
+    });
+  };
+  const commitSessionRename = () => {
+    if (!editingSessionId) return;
+    setChatSessions(prev => prev.map(s =>
+      s.id === editingSessionId ? { ...s, name: editingSessionName.trim() || s.name } : s
+    ));
+    setEditingSessionId(null);
+    setEditingSessionName("");
+  };
+  const getSessionDisplayName = (s: ChatSession) => {
+    if (s.name !== "New Chat") return s.name;
+    const first = s.messages.find(m => m.role === "user");
+    return first ? first.content.slice(0, 30) : "New Chat";
+  };
 
   // ─── 쿼리 실행 ──────────────────────────────────────────────
-  const runQuery = async () => {
-    const sel = editorRef.current?.getSelection()
+  const runQuery = async (forceAll = false) => {
+    const sel = !forceAll && editorRef.current?.getSelection()
       ? editorRef.current?.getModel()?.getValueInRange(editorRef.current.getSelection()!)
       : null;
     const q = (sel?.trim() ? sel : (editorRef.current?.getValue() ?? queryRef.current)).trim();
@@ -1369,7 +1442,7 @@ function App() {
     if (!aiApiKey.trim()) {
       setChatMessages(prev => [...prev, {
         id: Date.now().toString(), role: "assistant",
-        content: "API 키가 설정되지 않았습니다.\n좌측 AI 탭(Ctrl+4)에서 Anthropic API 키를 입력해주세요.",
+        content: "API 키가 설정되지 않았습니다.\n\nAI 탭에서 API 키를 입력해주세요.",
       }]);
       return;
     }
@@ -1534,7 +1607,25 @@ function App() {
         {/* ── 레이아웃 (사이드바 + 메인) ── */}
         <div className="home-layout" onClick={() => setOpenMenu(null)}>
 
+          {/* 왼쪽 액티비티 바 (유저 + 설정만) */}
+          <div className="activity-bar">
+            <div className="activity-bar-bottom">
+              <div className="activity-icon" title="Account">
+                <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor">
+                  <path d="M12 12c2.7 0 4.8-2.1 4.8-4.8S14.7 2.4 12 2.4 7.2 4.5 7.2 7.2 9.3 12 12 12zm0 2.4c-3.2 0-9.6 1.6-9.6 4.8v2.4h19.2v-2.4c0-3.2-6.4-4.8-9.6-4.8z"/>
+                </svg>
+              </div>
+              <div className="activity-icon" title="Settings">
+                <svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor">
+                  <path d="M19.43 12.98c.04-.32.07-.64.07-.98s-.03-.66-.07-.98l2.11-1.65c.19-.15.24-.42.12-.64l-2-3.46c-.12-.22-.39-.3-.61-.22l-2.49 1c-.52-.4-1.08-.73-1.69-.98l-.38-2.65C14.46 2.18 14.25 2 14 2h-4c-.25 0-.46.18-.49.42l-.38 2.65c-.61.25-1.17.59-1.69.98l-2.49-1c-.23-.09-.49 0-.61.22l-2 3.46c-.13.22-.07.49.12.64l2.11 1.65c-.04.32-.07.65-.07.98s.03.66.07.98l-2.11 1.65c-.19.15-.24.42-.12.64l2 3.46c.12.22.39.3.61.22l2.49-1c.52.4 1.08.73 1.69.98l.38 2.65c.03.24.24.42.49.42h4c.25 0 .46-.18.49-.42l.38-2.65c.61-.25 1.17-.59 1.69-.98l2.49 1c.23.09.49 0 .61-.22l2-3.46c.12-.22.07-.49-.12-.64l-2.11-1.65zM12 15.5c-1.93 0-3.5-1.57-3.5-3.5s1.57-3.5 3.5-3.5 3.5 1.57 3.5 3.5-1.57 3.5-3.5 3.5z"/>
+                </svg>
+              </div>
+            </div>
+          </div>
+
           {/* 사이드바 */}
+          <div className="home-right">
+          <div className="home-right-inner">
           <div className="home-sidebar" style={{ width: homeSidebarWidth }}>
             <div className="home-sidebar-header">연결</div>
             {connections.map(conn => (
@@ -1585,22 +1676,54 @@ function App() {
             }}
           />
 
-          {/* 메인 콘텐츠 */}
           <div className="home-main">
 
             {/* 헤더 */}
             <div className="home-header">
               <div className="home-header-icon">
-                <svg width="48" height="58" viewBox="0 0 24 24" preserveAspectRatio="none" fill="none">
-                  <ellipse cx="12" cy="5" rx="9" ry="3.5" stroke="#4ec9b0" strokeWidth="1.5" vectorEffect="non-scaling-stroke"/>
-                  <path d="M3 5v6c0 1.93 4.03 3.5 9 3.5s9-1.57 9-3.5V5" stroke="#4ec9b0" strokeWidth="1.5" fill="none" vectorEffect="non-scaling-stroke"/>
-                  <path d="M3 11v6c0 1.93 4.03 3.5 9 3.5s9-1.57 9-3.5v-6" stroke="#4ec9b0" strokeWidth="1.5" fill="none" vectorEffect="non-scaling-stroke"/>
+                <svg width="65" height="65" viewBox="0 0 24 24" preserveAspectRatio="none" fill="none">
+                  <ellipse cx="12" cy="3" rx="8" ry="2.5" stroke="#4ec9b0" strokeWidth="1.5" vectorEffect="non-scaling-stroke"/>
+                  <path d="M4 3v6c0 1.38 3.58 2.5 8 2.5s8-1.12 8-2.5v-6" stroke="#4ec9b0" strokeWidth="1.5" fill="none" vectorEffect="non-scaling-stroke"/>
+                  <path d="M4 9v6c0 1.38 3.58 2.5 8 2.5s8-1.12 8-2.5v-6" stroke="#4ec9b0" strokeWidth="1.5" fill="none" vectorEffect="non-scaling-stroke"/>
+                  <path d="M4 15v6c0 1.38 3.58 2.5 8 2.5s8-1.12 8-2.5v-6" stroke="#4ec9b0" strokeWidth="1.5" fill="none" vectorEffect="non-scaling-stroke"/>
                 </svg>
               </div>
               <div>
                 <h1 className="home-title">RustDB Connections</h1>
                 <p className="home-desc">연결할 데이터베이스를 선택하거나 새 연결을 추가하세요.</p>
               </div>
+            </div>
+
+            {/* 퀵 액션 */}
+            <div className="home-quick-actions">
+              <button className="home-quick-btn" onClick={() => setShowNewConn(true)}>
+                <svg width="52" height="52" viewBox="0 0 24 24" fill="currentColor">
+                  <path d="M19 13H13v6h-2v-6H5v-2h6V5h2v6h6v2z"/>
+                </svg>
+                새 연결
+              </button>
+              <button className="home-quick-btn" onClick={() => invoke("open_terminal")}>
+                <svg width="52" height="52" viewBox="0 0 24 24" fill="currentColor">
+                  <path d="M20 4H4C2.9 4 2 4.9 2 6V18C2 19.1 2.9 20 4 20H20C21.1 20 22 19.1 22 18V6C22 4.9 21.1 4 20 4ZM20 18H4V6H20V18ZM6 10L8.5 12.5L6 15L7.5 16.5L11.5 12.5L7.5 8.5L6 10ZM12 15H18V17H12V15Z"/>
+                </svg>
+                터미널 열기
+              </button>
+              <button className="home-quick-btn" onClick={() => invoke("open_url", { url: "https://github.com/rspstat/dbe" })}>
+                <svg width="52" height="52" viewBox="0 0 24 24" fill="currentColor">
+                  <path d="M12 2C6.477 2 2 6.477 2 12c0 4.42 2.865 8.166 6.839 9.489.5.092.682-.217.682-.482 0-.237-.009-.868-.013-1.703-2.782.604-3.369-1.342-3.369-1.342-.454-1.154-1.11-1.462-1.11-1.462-.908-.62.069-.608.069-.608 1.003.07 1.531 1.03 1.531 1.03.892 1.529 2.341 1.088 2.91.832.092-.647.35-1.088.636-1.338-2.22-.253-4.555-1.11-4.555-4.943 0-1.091.39-1.984 1.029-2.683-.103-.253-.446-1.27.098-2.647 0 0 .84-.269 2.75 1.025A9.578 9.578 0 0112 6.836a9.59 9.59 0 012.504.337c1.909-1.294 2.747-1.025 2.747-1.025.546 1.377.202 2.394.1 2.647.64.699 1.028 1.592 1.028 2.683 0 3.842-2.339 4.687-4.566 4.935.359.309.678.919.678 1.852 0 1.336-.012 2.415-.012 2.741 0 .267.18.577.688.479C19.138 20.162 22 16.418 22 12c0-5.523-4.477-10-10-10z"/>
+                </svg>
+                GitHub 방문
+              </button>
+            </div>
+
+            {/* RDBMS 설명 */}
+            <div className="home-rdbms-desc">
+              <p>
+                Welcome to our project! — a relational database management system built entirely from the ground up in Rust, designed for reliability.<br/>
+                Connect to a database and feel free to explore, query, update, and manage your data — there are no limits on how you interact with it.<br/>
+                Every part of the interface is crafted to be intuitive and approachable, so you can always stay focused on your data rather than the tool.<br/>
+                Whenever you need a hand, the built-in AI assistant is always there — ready to help you write queries, understand results, and go further.
+              </p>
             </div>
 
             {/* 연결 목록 헤더 */}
@@ -1624,10 +1747,11 @@ function App() {
                   }}
                 >
                   <div className="home-conn-card-icon">
-                    <svg width="40" height="50" viewBox="0 0 24 24" preserveAspectRatio="none" fill="none">
-                      <ellipse cx="12" cy="5" rx="8" ry="3.5" stroke="#4ec9b0" strokeWidth="1.4" vectorEffect="non-scaling-stroke"/>
-                      <path d="M4 5v6c0 1.93 3.58 3.5 8 3.5s8-1.57 8-3.5V5" stroke="#4ec9b0" strokeWidth="1.4" fill="none" vectorEffect="non-scaling-stroke"/>
-                      <path d="M4 11v6c0 1.93 3.58 3.5 8 3.5s8-1.57 8-3.5v-6" stroke="#4ec9b0" strokeWidth="1.4" fill="none" vectorEffect="non-scaling-stroke"/>
+                    <svg width="52" height="52" viewBox="0 0 24 24" preserveAspectRatio="none" fill="none">
+                      <ellipse cx="12" cy="3" rx="8" ry="2.5" stroke="#4ec9b0" strokeWidth="1.4" vectorEffect="non-scaling-stroke"/>
+                      <path d="M4 3v6c0 1.38 3.58 2.5 8 2.5s8-1.12 8-2.5v-6" stroke="#4ec9b0" strokeWidth="1.4" fill="none" vectorEffect="non-scaling-stroke"/>
+                      <path d="M4 9v6c0 1.38 3.58 2.5 8 2.5s8-1.12 8-2.5v-6" stroke="#4ec9b0" strokeWidth="1.4" fill="none" vectorEffect="non-scaling-stroke"/>
+                      <path d="M4 15v6c0 1.38 3.58 2.5 8 2.5s8-1.12 8-2.5v-6" stroke="#4ec9b0" strokeWidth="1.4" fill="none" vectorEffect="non-scaling-stroke"/>
                     </svg>
                   </div>
                   <div className="home-conn-info">
@@ -1662,8 +1786,25 @@ function App() {
                 </div>
               ))}
             </div>
+
+          </div>{/* home-main */}
+          </div>{/* home-right-inner */}
+
+          {/* ── 하단 상태바 ── */}
+          <div className="status-bar">
+            <div className="status-left">
+              <span className="status-item">⎇ main</span>
+              <span className="status-item" style={{ color: "#9cdcfe" }}>RustDB v2.2.0</span>
+            </div>
+            <div className="status-right">
+              <span className="status-item">MySQL 호환 RDBMS</span>
+              <span className="status-item">포트 7878 / 3306</span>
+              <span className="status-item">B+Tree · WAL · MVCC</span>
+            </div>
           </div>
-        </div>
+
+          </div>{/* home-right */}
+        </div>{/* home-layout */}
 
         {/* ── 연결 다이얼로그 ── */}
         {connectingTo && (
@@ -1909,6 +2050,11 @@ function App() {
         </div>
 
         <div className="activity-bar-bottom">
+          <div className="activity-icon" title="Account">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor">
+              <path d="M12 12c2.7 0 4.8-2.1 4.8-4.8S14.7 2.4 12 2.4 7.2 4.5 7.2 7.2 9.3 12 12 12zm0 2.4c-3.2 0-9.6 1.6-9.6 4.8v2.4h19.2v-2.4c0-3.2-6.4-4.8-9.6-4.8z"/>
+            </svg>
+          </div>
           <div className="activity-icon" title="Settings">
             <svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor">
               <path d="M19.43 12.98c.04-.32.07-.64.07-.98s-.03-.66-.07-.98l2.11-1.65c.19-.15.24-.42.12-.64l-2-3.46c-.12-.22-.39-.3-.61-.22l-2.49 1c-.52-.4-1.08-.73-1.69-.98l-.38-2.65C14.46 2.18 14.25 2 14 2h-4c-.25 0-.46.18-.49.42l-.38 2.65c-.61.25-1.17.59-1.69.98l-2.49-1c-.23-.09-.49 0-.61.22l-2 3.46c-.13.22-.07.49.12.64l2.11 1.65c-.04.32-.07.65-.07.98s.03.66.07.98l-2.11 1.65c-.19.15-.24.42-.12.64l2 3.46c.12.22.39.3.61.22l2.49-1c.52.4 1.08.73 1.69.98l.38 2.65c.03.24.24.42.49.42h4c.25 0 .46-.18.49-.42l.38-2.65c.61-.25 1.17-.59 1.69-.98l2.49 1c.23.09.49 0 .61-.22l2-3.46c.12-.22.07-.49-.12-.64l-2.11-1.65zM12 15.5c-1.93 0-3.5-1.57-3.5-3.5s1.57-3.5 3.5-3.5 3.5 1.57 3.5 3.5-1.57 3.5-3.5 3.5z"/>
@@ -2559,12 +2705,23 @@ function App() {
               </div>
               <div className="editor-toolbar-sep"/>
               <div className="editor-toolbar-group">
-                <button className="editor-toolbar-btn editor-toolbar-run" onClick={runQuery} disabled={isRunning} title="실행 (Ctrl+Enter)">
+                <button className="editor-toolbar-btn editor-toolbar-run" onClick={() => runQuery()} disabled={isRunning} title="실행 (Ctrl+Enter)">
                   {isRunning
                     ? <span style={{ fontSize: 13 }}>⏳</span>
                     : <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
                         <polygon points="13,2 4,13 11,13 11,22 20,11 13,11"/>
                       </svg>
+                  }
+                </button>
+                <button className="editor-toolbar-btn editor-toolbar-run" onClick={() => runQuery(true)} disabled={isRunning} title="전체 실행">
+                  {isRunning
+                    ? <span style={{ fontSize: 13 }}>⏳</span>
+                    : <span style={{ position: "relative", display: "inline-flex", width: 16, height: 16 }}>
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+                          <polygon points="13,2 4,13 11,13 11,22 20,11 13,11"/>
+                        </svg>
+                        <span style={{ position: "absolute", bottom: -2, right: -3, fontSize: 8, fontWeight: 700, lineHeight: 1 }}>A</span>
+                      </span>
                   }
                 </button>
               </div>
@@ -2602,28 +2759,41 @@ function App() {
                   wordBasedSuggestions: "off",
                 }}
                 beforeMount={monaco => {
-                  // 커스텀 테마: vs-dark 기반, 주석만 회색으로
                   monaco.editor.defineTheme("rustdb-dark", {
                     base: "vs-dark",
                     inherit: true,
                     rules: [
-                      { token: "comment",             foreground: "6a6a6a" },
-                      { token: "comment.line",        foreground: "6a6a6a" },
-                      { token: "comment.block",       foreground: "6a6a6a" },
-                      { token: "comment.line.sql",    foreground: "6a6a6a" },
-                      { token: "comment.block.sql",   foreground: "6a6a6a" },
+                      // 키워드 (DML/DDL/제어): 파란색
+                      { token: "keyword",              foreground: "569CD6", fontStyle: "bold" },
+                      // 데이터 타입: 청록색
+                      { token: "keyword.type",         foreground: "4EC9B0" },
+                      // 내장 함수: 노란색
+                      { token: "keyword.other",        foreground: "DCDCAA" },
+                      // 문자열: 주황색
+                      { token: "string",               foreground: "CE9178" },
+                      { token: "string.invalid",       foreground: "CE9178" },
+                      // 숫자: 연두색
+                      { token: "number",               foreground: "B5CEA8" },
+                      // 주석: 초록회색
+                      { token: "comment",              foreground: "6A6A6A" },
+                      { token: "comment.line",         foreground: "6A6A6A" },
+                      { token: "comment.block",        foreground: "6A6A6A" },
+                      // 연산자
+                      { token: "operator",             foreground: "D4D4D4" },
+                      // 구분자
+                      { token: "delimiter",            foreground: "D4D4D4" },
+                      { token: "delimiter.parenthesis",foreground: "D4D4D4" },
                     ],
                     colors: {
-                      "editor.background":            "#1e1e1e",
-                      "editor.foreground":            "#d4d4d4",
-                      "editorLineNumber.foreground":  "#858585",
+                      "editor.background":              "#1e1e1e",
+                      "editor.foreground":              "#D4D4D4",
+                      "editorLineNumber.foreground":    "#858585",
                       "editor.lineHighlightBackground": "#2a2d2e",
                     },
                   });
 
-                  // # 주석 지원: 기존 SQL 토크나이저 위에 # 규칙 추가
                   monaco.languages.setMonarchTokensProvider("sql", {
-                    defaultToken: "invalid",
+                    defaultToken: "",
                     tokenPostfix: ".sql",
                     ignoreCase: true,
                     brackets: [
@@ -2631,31 +2801,67 @@ function App() {
                       { open: "[", close: "]", token: "delimiter.square" },
                     ],
                     keywords: [
-                      "SELECT","FROM","WHERE","INSERT","INTO","VALUES","UPDATE","SET",
-                      "DELETE","CREATE","TABLE","DROP","ALTER","ADD","COLUMN","RENAME",
-                      "TO","JOIN","LEFT","RIGHT","INNER","ON","AND","OR","NOT",
-                      "ORDER","GROUP","BY","ASC","DESC","LIMIT","HAVING","IN",
-                      "BETWEEN","LIKE","AS","DISTINCT","UNION","ALL",
-                      "COUNT","SUM","AVG","MIN","MAX",
+                      "SELECT","FROM","WHERE","INSERT","INTO","VALUES","UPDATE","DELETE",
+                      "CREATE","TABLE","DROP","ALTER","ADD","COLUMN","RENAME","TO",
+                      "JOIN","LEFT","RIGHT","INNER","OUTER","CROSS","FULL","NATURAL","ON","USING",
+                      "AND","OR","NOT","IN","BETWEEN","LIKE","REGEXP","IS","NULL","EXISTS",
+                      "ORDER","GROUP","BY","ASC","DESC","LIMIT","OFFSET","HAVING","DISTINCT","ALL",
+                      "UNION","INTERSECT","EXCEPT","AS","WITH","RECURSIVE",
+                      "CASE","WHEN","THEN","ELSE","END",
                       "INDEX","UNIQUE","VIEW","PRIMARY","KEY","FOREIGN","REFERENCES",
-                      "CONSTRAINT","CASCADE","RESTRICT","NULL","NOT","AUTO","INCREMENT",
-                      "SHOW","TABLES","DESCRIBE","TRUNCATE","IS",
-                      "BEGIN","COMMIT","ROLLBACK","TRANSACTION",
-                      "CHECKPOINT","ISOLATION","LEVEL",
-                      "UNCOMMITTED","COMMITTED","REPEATABLE","SERIALIZABLE",
-                      "VACUUM","FOR","LOCKS","SET",
-                      "INT","TEXT","FLOAT","BOOLEAN","VARCHAR","DATETIME","DATE",
+                      "CONSTRAINT","CASCADE","RESTRICT","DEFAULT","CHECK","AUTO","INCREMENT",
+                      "SHOW","TABLES","DESCRIBE","TRUNCATE","EXPLAIN","ANALYZE",
+                      "BEGIN","COMMIT","ROLLBACK","TRANSACTION","SAVEPOINT","RELEASE",
+                      "ISOLATION","LEVEL","UNCOMMITTED","COMMITTED","REPEATABLE","SERIALIZABLE",
+                      "FOR","SHARE","LOCK","LOCKS","CHECKPOINT","VACUUM",
+                      "PROCEDURE","FUNCTION","TRIGGER","RETURNS","RETURN","CALL",
+                      "DECLARE","IF","THEN","ELSEIF","WHILE","DO","LOOP","LEAVE","ITERATE","REPEAT","UNTIL",
+                      "GRANT","REVOKE","USER","ROLE","IDENTIFIED","PRIVILEGES","DATABASE","USE","DATABASES",
+                      "BACKUP","MERGE","MATCHED","FETCH","NEXT","ROWS","ONLY",
+                      "PARTITION","OVER","WINDOW","RANGE","PRECEDING","FOLLOWING","UNBOUNDED","CURRENT","ROW",
+                      "PREPARE","EXECUTE","DEALLOCATE","OUTFILE","REPLACE","IGNORE",
+                      "SYNONYM","SET","AFTER","BEFORE","EACH","EACH",
+                    ],
+                    datatypes: [
+                      "INT","INTEGER","BIGINT","SMALLINT","TINYINT","MEDIUMINT",
+                      "FLOAT","DOUBLE","DECIMAL","NUMERIC","REAL",
+                      "CHAR","VARCHAR","TEXT","TINYTEXT","MEDIUMTEXT","LONGTEXT",
+                      "BINARY","VARBINARY","BLOB","TINYBLOB","MEDIUMBLOB","LONGBLOB",
+                      "DATE","DATETIME","TIMESTAMP","TIME","YEAR",
+                      "BOOLEAN","BOOL","BIT","JSON","ENUM","SET",
+                    ],
+                    builtins: [
+                      "COUNT","SUM","AVG","MIN","MAX","GROUP_CONCAT","STDDEV","VARIANCE",
+                      "ROW_NUMBER","RANK","DENSE_RANK","NTILE","LAG","LEAD",
+                      "FIRST_VALUE","LAST_VALUE","NTH_VALUE","PERCENT_RANK","CUME_DIST",
+                      "UPPER","LOWER","LENGTH","CONCAT","SUBSTR","SUBSTRING","REPLACE","TRIM",
+                      "LTRIM","RTRIM","LPAD","RPAD","CHAR_LENGTH","LEFT","RIGHT","REVERSE",
+                      "REPEAT","INSTR","ASCII","HEX","FORMAT","REGEXP_LIKE","REGEXP_REPLACE",
+                      "ROUND","ABS","CEIL","CEILING","FLOOR","MOD","SQRT","POW","POWER",
+                      "LOG","LOG2","LOG10","PI","SIGN","TRUNCATE","RAND","EXP",
+                      "NOW","CURDATE","CURTIME","YEAR","MONTH","DAY","DAYOFWEEK",
+                      "HOUR","MINUTE","SECOND","DATE_ADD","DATE_SUB","DATE_FORMAT",
+                      "DATEDIFF","TIMESTAMPDIFF","EXTRACT",
+                      "COALESCE","IFNULL","NULLIF","ISNULL","GREATEST","LEAST",
+                      "CAST","CONVERT","IF","MD5","UUID","LAST_INSERT_ID",
+                      "DATABASE","VERSION","USER","CURRENT_USER","SESSION_USER","SYSTEM_USER",
+                      "JSON_EXTRACT","JSON_VALUE","JSON_OBJECT","JSON_ARRAY",
                     ],
                     tokenizer: {
                       root: [
                         { include: "@comments" },
-                        [/[a-zA-Z_]\w*/, { cases: { "@keywords": "keyword", "@default": "identifier" } }],
+                        [/[a-zA-Z_]\w*/, { cases: {
+                          "@keywords":  "keyword",
+                          "@datatypes": "keyword.type",
+                          "@builtins":  "keyword.other",
+                          "@default":   "identifier",
+                        }}],
                         [/'([^'\\]|\\.)*'/, "string"],
-                        [/'([^'\\]|\\.)*$/,  "string.invalid"],
-                        [/\d+(\.\d+)?/,      "number"],
-                        [/[=!<>]+/,          "operator"],
-                        [/[(),;.]/,          "delimiter"],
-                        [/\s+/,              "white"],
+                        [/'([^'\\]|\\.)*$/, "string.invalid"],
+                        [/\d+(\.\d+)?/,     "number"],
+                        [/[=!<>]+/,         "operator"],
+                        [/[(),;.]/,         "delimiter"],
+                        [/\s+/,             "white"],
                       ],
                       comments: [
                         [/--.*$/,  "comment"],
@@ -2776,12 +2982,53 @@ function App() {
                     <span className="ai-chat-title">AI Agent</span>
                   </div>
                   <div className="ai-chat-header-right">
-                    <button className="ai-chat-clear" onClick={() => setChatMessages([])} title="대화 초기화">
-                      <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/></svg>
+                    <button className="ai-chat-clear" onClick={() => setChatHistoryOpen(v => !v)} title="채팅 기록">
+                      <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor">
+                        <path d="M13 3c-4.97 0-9 4.03-9 9H1l3.89 3.89.07.14L9 12H6c0-3.87 3.13-7 7-7s7 3.13 7 7-3.13 7-7 7c-1.93 0-3.68-.79-4.94-2.06l-1.42 1.42C8.27 19.99 10.51 21 13 21c4.97 0 9-4.03 9-9s-4.03-9-9-9zm-1 5v5l4.28 2.54.72-1.21-3.5-2.08V8H12z"/>
+                      </svg>
                     </button>
                     <button className="ai-chat-close" onClick={() => setAiChatOpen(false)} title="닫기">×</button>
                   </div>
                 </div>
+                {chatHistoryOpen && (
+                  <div className="ai-history-panel">
+                    <div className="ai-history-top">
+                      <span className="ai-history-label">채팅 기록</span>
+                      <button className="ai-history-new-btn" onClick={addChatSession} title="새 채팅">
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><path d="M19 13H13v6h-2v-6H5v-2h6V5h2v6h6v2z"/></svg>
+                        새 채팅
+                      </button>
+                    </div>
+                    <div className="ai-history-list">
+                      {chatSessions.map(s => (
+                        <div key={s.id} className={`ai-history-item${s.id === activeChatId ? " active" : ""}`}>
+                          {editingSessionId === s.id ? (
+                            <input
+                              className="ai-history-rename-input"
+                              value={editingSessionName}
+                              autoFocus
+                              onChange={e => setEditingSessionName(e.target.value)}
+                              onKeyDown={e => { if (e.key === "Enter") commitSessionRename(); if (e.key === "Escape") setEditingSessionId(null); }}
+                              onBlur={commitSessionRename}
+                            />
+                          ) : (
+                            <span className="ai-history-name" onClick={() => { setActiveChatId(s.id); setChatHistoryOpen(false); }}>
+                              {getSessionDisplayName(s)}
+                            </span>
+                          )}
+                          <div className="ai-history-actions">
+                            <button className="ai-history-btn" title="이름 변경" onClick={() => { setEditingSessionId(s.id); setEditingSessionName(getSessionDisplayName(s)); }}>
+                              <svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor"><path d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04a1 1 0 000-1.41l-2.34-2.34a1 1 0 00-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z"/></svg>
+                            </button>
+                            <button className="ai-history-btn" title="삭제" onClick={() => deleteChatSession(s.id)}>
+                              <svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor"><path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/></svg>
+                            </button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
                 <div className="ai-chat-messages">
                   {chatMessages.length === 0 && (
                     <div className="ai-chat-empty">
@@ -3546,13 +3793,13 @@ function App() {
             <div className="ai-section">
               <div className="ai-section-title">
                 <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><path d="M12.65 10C11.83 7.67 9.61 6 7 6c-3.31 0-6 2.69-6 6s2.69 6 6 6c2.61 0 4.83-1.67 5.65-4H17v4h4v-4h2v-4H12.65zM7 14c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2z"/></svg>
-                Google Gemini API Key
+                AI API Key
               </div>
               <div className="ai-key-row">
                 <input
                   className="ai-key-input"
                   type={aiKeyVisible ? "text" : "password"}
-                  placeholder="AIza..."
+                  placeholder="API 키 입력..."
                   value={aiApiKey}
                   onChange={e => saveAiKey(e.target.value)}
                 />
