@@ -8,7 +8,9 @@
   - AccessPath 선택 (SeqScan / PkPoint / PkBetween / PkRange / SecondaryPoint / SecondaryRange / CompositeIndex)
   - 행 수 / 비용 추정 (log₂N 기반)
   - Join 알고리즘 자동 선택 (Sort-Merge Join / Hash Join / Nested Loop)
+  - Join 순서 최적화 (System-R 스타일 비용 기반 동적계획법, 그리디 폴백)
   - EXPLAIN 실행 계획 출력 (비용 · 접근 경로 · Join 알고리즘)
+- [x] 병렬 쿼리 실행 (rayon) — SeqScan WHERE 필터 멀티스레드 처리, 청크 단위 워커 thread_local 전파로 사용자 정의 함수/DATABASE() 정확성 유지, 10k행 이상 자동 적용 (`RUSTDB_PARALLEL` 토글), 서브쿼리 포함 시 순차 폴백
 
 ### 다중 데이터베이스
 - [x] CREATE DATABASE / CREATE DATABASE IF NOT EXISTS
@@ -122,7 +124,7 @@
 - [x] 상관 서브쿼리 — WHERE EXISTS / IN / NOT IN (SELECT ... WHERE outer.col = inner.col) 완전 지원
 - [x] FROM 절 서브쿼리 — FROM (SELECT ...) AS alias
 - [x] SELECT 스칼라 서브쿼리 — `SELECT (SELECT MAX(col) FROM t2) AS alias FROM t1` (비상관·상관 모두 지원)
-- [x] JOIN 순서 최적화 — INNER JOIN 그리디 재정렬 (작은 테이블 우선, ON 조건 의존성 자동 분석)
+- [x] JOIN 순서 최적화 — 비용 기반 동적계획법 (System-R bitmask DP, 누적 카디널리티 반영; INNER/NATURAL 연속 구간 대상, 테이블 N>8 또는 OUTER 포함 시 그리디 재정렬로 폴백)
 - [x] UNION / UNION ALL (ORDER BY / LIMIT / OFFSET 포함)
 - [x] INTERSECT / INTERSECT ALL — 교집합
 - [x] EXCEPT / EXCEPT ALL — 차집합

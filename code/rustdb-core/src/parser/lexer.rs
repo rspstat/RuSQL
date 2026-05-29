@@ -569,8 +569,12 @@ impl Lexer {
                                 } else {
                                     Token::Arrow
                                 }
-                            } else if self.peek().map(|c| c.is_ascii_digit()).unwrap_or(false) {
-                                // 음수 리터럴: -숫자
+                            } else if self.peek().map(|c| c.is_ascii_digit()).unwrap_or(false)
+                                && !matches!(tokens.last(),
+                                    Some(Token::NumberLit(_)) | Some(Token::Ident(_))
+                                    | Some(Token::StringLit(_)) | Some(Token::RParen)) {
+                                // 음수 리터럴: -숫자 (단, 직전 토큰이 값/식별자/')'가 아닐 때만.
+                                // 값 뒤의 '-'(예: col-30, ) - 5)는 이항 뺄셈 연산자로 처리)
                                 let mut s = "-".to_string();
                                 while let Some(ch) = self.peek() {
                                     if ch.is_ascii_digit() || ch == '.' { s.push(ch); self.advance(); } else { break; }

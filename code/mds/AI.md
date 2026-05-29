@@ -71,7 +71,7 @@
 
 - 채팅 버블 UI (user / assistant 구분), 마크다운 렌더링 (marked + DOMPurify)
 - 타이핑 인디케이터 (점 3개 애니메이션)
-- 대화 내역 localStorage 영구 보존 (앱 재시작 후 유지)
+- **채팅 세션 기록** — 시계 버튼으로 세션 목록 패널 토글, 새 채팅 생성, 세션 이름 변경(연필 아이콘)·삭제(휴지통), localStorage 영구 보존 (Claude Code 스타일)
 - Enter 전송 / Ctrl+Enter 줄바꿈
 - 패널 너비 드래그 조절 (240px ~ 640px)
 
@@ -104,7 +104,18 @@ AI가 직접 에디터 탭의 SQL 파일을 수정·삽입·삭제할 수 있다
 
 ---
 
-## 3. MCP 서버 구조
+## 3. 추가 아이디어 🔲
+
+| # | 기능 | 설명 | 난이도 | 임팩트 |
+|---|------|------|--------|--------|
+| 1 | 에러 메시지 AI 해석 | 쿼리 실패 시 오류 메시지를 AI가 자동 해석·해결 방안 제시 ("이 오류는 ... 때문입니다. 해결하려면 ...") | 낮음 | 높음 |
+| 2 | 쿼리 최적화 제안 | 현재 에디터 SQL을 AI가 리뷰하고 인덱스 추가·쿼리 재작성 등 개선안 제시 | 낮음 | 높음 |
+| 3 | 데이터 분석 리포트 | SELECT 결과를 AI가 요약·패턴 분석·인사이트 한국어로 도출 | 낮음 | 중간 |
+| 4 | AI 자동완성 | 에디터에서 Tab으로 AI SQL 완성 (Monaco inlineCompletionsProvider) | 중간 | 중간 |
+
+---
+
+## 5. MCP 서버 구조
 
 ```
 rustdb-mcp/
@@ -155,7 +166,7 @@ response = chat_session.send_message(last_message)
 
 ---
 
-## 4. Tauri 자동 시작
+## 6. Tauri 자동 시작
 
 앱 실행 시 MCP 서버를 자동으로 시작하고, 앱 종료 시 프로세스를 정리한다.
 
@@ -180,7 +191,7 @@ if let tauri::RunEvent::Exit = event {
 
 ---
 
-## 5. UI 연동 구조
+## 7. UI 연동 구조
 
 ```
 에디터 (Monaco) ──→ 활성 탭 SQL + @멘션 탭 SQL
@@ -204,7 +215,7 @@ if let tauri::RunEvent::Exit = event {
 
 ---
 
-## 6. API 키 관리
+## 8. API 키 관리
 
 - UI 설정 탭에서 Google Gemini API 키 입력
 - `localStorage`에 저장 (앱 재시작 후 유지)
@@ -212,7 +223,7 @@ if let tauri::RunEvent::Exit = event {
 
 ---
 
-## 7. 환경 기록
+## 9. 환경 기록
 
 | 항목 | 내용 |
 |------|------|

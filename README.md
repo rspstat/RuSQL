@@ -371,9 +371,10 @@ BEGIN;
 SELECT id FROM emp WHERE id=1 FOR SHARE;
 COMMIT;
 
--- EXPLAIN / ANALYZE
+-- EXPLAIN / ANALYZE (단일 테이블 + 다중 조인 순서 DP)
 EXPLAIN SELECT * FROM emp WHERE dept_id=1;
 EXPLAIN SELECT * FROM emp WHERE id=1;
+EXPLAIN SELECT e.name, d.name, s.amount FROM emp e JOIN dept d ON e.dept_id=d.id JOIN sal s ON e.id=s.eid;
 ANALYZE TABLE emp;
 EXPLAIN ANALYZE SELECT * FROM emp WHERE dept_id=1;
 
@@ -455,18 +456,10 @@ DROP SYNONYM IF EXISTS emp_syn;
 SHOW SYNONYMS;
 DROP USER IF EXISTS 'usr'@'%';
 
--- 정리
+-- 정리 (DROP VIEW/INDEX/TABLE 대표 호출 + DROP DATABASE가 잔여 객체 일괄 제거)
 DROP VIEW IF EXISTS v_active;
 DROP INDEX IF EXISTS idx_dept;
-DROP INDEX IF EXISTS idx_ds;
 DROP TABLE IF EXISTS jdata;
-DROP TABLE IF EXISTS nums;
-DROP TABLE IF EXISTS audit_log;
-DROP TABLE IF EXISTS tags;
-DROP TABLE IF EXISTS org;
-DROP TABLE IF EXISTS sal;
-DROP TABLE IF EXISTS emp;
-DROP TABLE IF EXISTS dept;
 DROP DATABASE db1;
 SHOW DATABASES;
 ```
@@ -480,11 +473,11 @@ SHOW DATABASES;
 | 언어 | Rust |
 | 버전 | v2.2.0 |
 | 인덱스 | B+Tree (단일 / 복합 / 클러스터드) |
-| 옵티마이저 | 비용 기반 플래너 (AccessPath · Join 알고리즘 자동 선택) |
+| 옵티마이저 | 비용 기반 플래너 (AccessPath · Join 알고리즘 자동 선택 · Join 순서 동적계획법) |
 | Join | Sort-Merge Join (O((N+M)logN)) / Hash Join (O(N+M)) / Nested Loop Join |
 | 트랜잭션 | WAL (바이너리 redo log) + Undo Log (인메모리 + 디스크 영속화) + MVCC |
 | 격리 수준 | READ UNCOMMITTED ~ SERIALIZABLE (4단계) |
-| 동시성 | Row-level Locking (SELECT FOR UPDATE / FOR SHARE, 공유·배타 잠금, 데드락 감지) |
+| 동시성 | Row-level Locking (SELECT FOR UPDATE / FOR SHARE, 공유·배타 잠금, 데드락 감지) + 병렬 SeqScan WHERE 필터 (rayon, `RUSTDB_PARALLEL`) |
 | 캐시 | Buffer Pool (LRU, 64페이지, 16KB) |
 | 저장 | 바이너리 .rdb + LZ4 압축 + indexes.json + views.json + _users.json + _grants.json + _roles.json + _role_grants.json + _synonyms.json |
 | 다중 DB | CREATE / DROP / USE / SHOW DATABASES, 테이블 자동 한정, 격리 |

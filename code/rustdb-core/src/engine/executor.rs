@@ -21,6 +21,32 @@ use crate::storage::buffer_pool::BufferPool;
 use crate::storage::composite_index::CompositeIndex;
 use crate::engine::lock_manager::{LockManager, LockResult};
 use crate::engine::planner::{Planner, AccessPath, JoinAlgo};
+use rayon::prelude::*;
+
+/// 병렬 스캔을 적용하는 최소 행 수. 이보다 작으면 스레드 생성 오버헤드가 커서 순차 실행.
+const PARALLEL_MIN_ROWS: usize = 10_000;
+/// 병렬 청크 크기. 청크 단위로 워커 thread_local(USER_FUNCTIONS/CURRENT_DB_CTX)을 세팅한다.
+const PARALLEL_CHUNK: usize = 4_096;
+
+/// 병렬 쿼리 실행 on/off. 환경변수 RUSTDB_PARALLEL=0|off 이면 비활성(벤치마크 대조군용).
+fn parallel_enabled() -> bool {
+    std::env::var("RUSTDB_PARALLEL")
+        .map(|v| v != "0" && !v.eq_ignore_ascii_case("off"))
+        .unwrap_or(true)
+}
+
+/// WHERE 조건 트리에 서브쿼리가 포함됐는지 검사.
+/// 서브쿼리가 있으면 정적 matches_condexpr가 false로 처리하므로 병렬 경로에서 제외한다.
+fn cond_has_subquery(condition: &Option<CondExpr>) -> bool {
+    fn walk(e: &CondExpr) -> bool {
+        match e {
+            CondExpr::And(l, r) | CondExpr::Or(l, r) => walk(l) || walk(r),
+            CondExpr::Not(i) => walk(i),
+            CondExpr::Leaf(c) => matches!(c.value, ConditionValue::Subquery(_)),
+        }
+    }
+    condition.as_ref().map(walk).unwrap_or(false)
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UserRecord {
@@ -1954,8 +1980,8 @@ impl Executor {
             return result;
         }
 
-        // ── JOIN 순서 최적화 (greedy, INNER-only) ─────────────────────────
-        let joins = Self::reorder_joins_greedy(&table, joins, &s.tables);
+        // ── JOIN 순서 최적화 (cost-based DP, INNER-only; greedy 폴백) ──────
+        let joins = Self::reorder_joins_dp(&table, joins, &s.tables);
 
         // ── Planner: 인덱스 / 조인 알고리즘 결정 ──────────────────────────
         let has_agg = columns.iter().any(|c| matches!(c, SelectColumn::Agg { .. } | SelectColumn::AggAlias { .. }));
@@ -2101,9 +2127,26 @@ impl Executor {
 
         // ── JOIN 처리 (플래너가 선택한 알고리즘 사용) ──────────────────────
         let result: Vec<Row> = if joins.is_empty() {
-            rows.into_iter()
-                .filter(|r| self.matches_condition_with_subquery(s, r, &condition))
-                .collect()
+            if parallel_enabled() && rows.len() >= PARALLEL_MIN_ROWS && !cond_has_subquery(&condition) {
+                // 병렬 SeqScan 필터: 서브쿼리 없는 WHERE는 순수 정적 matches_condexpr로 평가 가능.
+                // par_chunks로 청크마다 워커 thread_local을 세팅해 사용자 정의 함수/DATABASE()도 정확히 평가.
+                let uf = s.user_functions.clone();
+                let cur_db = self.current_db.clone();
+                rows.par_chunks(PARALLEL_CHUNK)
+                    .flat_map_iter(|chunk| {
+                        USER_FUNCTIONS.with(|u| *u.borrow_mut() = uf.clone());
+                        CURRENT_DB_CTX.with(|c| *c.borrow_mut() = cur_db.clone());
+                        chunk.iter()
+                            .filter(|r| Self::matches_condexpr(r, &condition))
+                            .cloned()
+                            .collect::<Vec<_>>()
+                    })
+                    .collect()
+            } else {
+                rows.into_iter()
+                    .filter(|r| self.matches_condition_with_subquery(s, r, &condition))
+                    .collect()
+            }
         } else {
             let mut current = rows;
             for (ji, j) in joins.iter().enumerate() {
@@ -6805,6 +6848,86 @@ impl Executor {
 
     /// Greedy JOIN reorder: smallest table first, dependency-aware, INNER joins only.
     /// If any non-INNER join is present, returns original order unchanged.
+    /// JOIN 순서 비용 기반 동적계획법 (System-R 스타일).
+    /// 부분집합(bitmask) DP로 누적 결과 카디널리티를 반영해 최소 비용 순서를 찾는다.
+    /// greedy가 "다음 테이블 크기"만 보는 것과 달리, 누적 중간 결과 크기를 비용에 반영한다.
+    /// - INNER/NATURAL 연속 구간에만 적용 (OUTER 경계는 순서 고정).
+    /// - 조인 테이블 수 > 8 이면 2^N 폭발 방지를 위해 greedy로 폴백.
+    /// - ON 조건 의존성을 만족하는(조인 가능한) 전이만 후보로 둔다.
+    fn reorder_joins_dp(base_table: &str, joins: Vec<Join>, tables: &HashMap<String, Vec<Row>>) -> Vec<Join> {
+        let n = joins.len();
+        if n <= 1 { return joins; }
+        if joins.iter().any(|j| !matches!(j.join_type, JoinType::Inner | JoinType::Natural)) {
+            return joins;
+        }
+        if n > 8 {
+            return Self::reorder_joins_greedy(base_table, joins, tables);
+        }
+
+        let size_of = |t: &str| tables.get(t).map(|r| r.len()).unwrap_or(0).max(1);
+        let base_card = size_of(base_table);
+
+        // dp[mask] = (누적 비용, 결과 추정 카디널리티, 조인 순서)
+        let full = (1usize << n) - 1;
+        let mut dp: Vec<Option<(f64, usize, Vec<usize>)>> = vec![None; 1 << n];
+        dp[0] = Some((0.0, base_card, Vec::new()));
+
+        for mask in 0..(1usize << n) {
+            let (cur_cost, cur_card, order) = match dp[mask].clone() { Some(v) => v, None => continue };
+
+            // 현재까지 확보된 테이블 이름 집합 (풀 이름 / 베어 이름)
+            let mut available: HashSet<String> = HashSet::new();
+            available.insert(base_table.to_string());
+            if let Some(p) = base_table.rfind('.') { available.insert(base_table[p + 1..].to_string()); }
+            for &k in &order {
+                let t = &joins[k].table;
+                available.insert(t.clone());
+                if let Some(p) = t.rfind('.') { available.insert(t[p + 1..].to_string()); }
+            }
+
+            for j in 0..n {
+                if mask & (1 << j) != 0 { continue; }
+
+                // ON 조건 의존성: 참조 테이블이 모두 available 해야 조인 가능
+                let mut refs = HashSet::new();
+                Self::collect_table_refs_from_expr(&joins[j].on_expr, &mut refs);
+                let join_bare = joins[j].table.split('.').last().unwrap_or(&joins[j].table);
+                let joinable = refs.iter().all(|r| {
+                    let rb = r.split('.').last().unwrap_or(r);
+                    available.contains(r) || available.contains(rb)
+                        || r == &joins[j].table || rb == join_bare
+                });
+                if !joinable { continue; }
+
+                let rsize = size_of(&joins[j].table);
+                let is_equi = matches!(&joins[j].on_expr, CondExpr::Leaf(c) if c.operator == Operator::Eq);
+                // equi-join: hash 비용(left+right), PK-FK 가정으로 카디널리티 max.
+                // 비등가/cross: nested-loop 비용(left*right), 카디널리티 곱.
+                let (step_cost, new_card) = if is_equi {
+                    ((cur_card + rsize) as f64, cur_card.max(rsize))
+                } else {
+                    (cur_card.saturating_mul(rsize) as f64, cur_card.saturating_mul(rsize))
+                };
+                let new_cost = cur_cost + step_cost;
+                let nmask = mask | (1 << j);
+                let better = match &dp[nmask] { None => true, Some((c, _, _)) => new_cost < *c };
+                if better {
+                    let mut no = order.clone();
+                    no.push(j);
+                    dp[nmask] = Some((new_cost, new_card, no));
+                }
+            }
+        }
+
+        match dp[full].take() {
+            Some((_, _, order)) if order.len() == n => {
+                order.into_iter().map(|i| joins[i].clone()).collect()
+            }
+            // 의존성으로 전체를 못 채운 경우 (cross join 조합 등) greedy 폴백
+            _ => Self::reorder_joins_greedy(base_table, joins, tables),
+        }
+    }
+
     fn reorder_joins_greedy(base_table: &str, joins: Vec<Join>, tables: &HashMap<String, Vec<Row>>) -> Vec<Join> {
         if joins.len() <= 1 { return joins; }
         if joins.iter().any(|j| !matches!(j.join_type, JoinType::Inner | JoinType::Natural)) { return joins; }

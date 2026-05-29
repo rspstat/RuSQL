@@ -1,144 +1,58 @@
-# RustDB 개발 계획 (v2.2.0)
+# RustDB 향후 계획 (v2.2.0)
 
-> ✅ 완료 / 🔲 미완료 / 🚧 진행 중  
-> **심사 핵심 3가지: AI(MCP) · 엔진 · 성능 측정**
-
----
-
-## 우선순위 요약
-
-| 우선순위 | 항목 | 상태 | 예상 소요 |
-|----------|------|------|-----------|
-| 🟢 완료 | MCP 서버 구현 (Python / AI assistant) | ✅ | — |
-| 🟢 완료 | UI ↔ MCP 서버 연동 | ✅ | — |
-| 🟡 3순위 | 성능 벤치마크 측정·문서화 | 🔲 | 1일 |
-| 🟢 완료 | 엔진 (rustdb-core) | ✅ | — |
-| 🟢 완료 | UI (rustdb-ui) | ✅ | — |
-| 🟢 완료 | 서버 (rustdb-server) | ✅ | — |
+현재까지 JOIN 순서 DP · 병렬 WHERE 필터를 완료했고 MVCC는 보류 상태다.
+그 위에서 앞으로 할 일을 엔진 · 성능측정 · AI 세 측면으로 정리한다.
 
 ---
 
-## 1. MCP 서버 구현 ✅ 완료
+## 🔧 엔진 측면
 
-> 프로젝트 제목 **"MCP 기반 커스텀 RDBMS"** 의 핵심 차별점 — 구현 완료
+| 후보 | 난이도 | 효과 | 비고 |
+|---|---|---|---|
+| **진짜 MVCC (방안 B)** | 상 | PostgreSQL급 스냅샷 격리, 엔진 학술적 완성도 어필 | 보류했던 것. Deferred Write 제거 → 버전 체인. "진짜 다중버전" 달성, 단 대수술 |
+| **병렬 확장** | 중 | 대형 집계/조인 추가 가속, Rust 무공포 동시성 증명 | 현재 WHERE 필터만 병렬. 집계 map-reduce, Hash Join probe 병렬로 확대 |
+| **해시 인덱스** | 중 | 등호 검색 O(1), 인덱스 엔진 다양성 | B+Tree에 이은 2번째 인덱스 타입 |
+| **락 입도 완화** | 상 | 동시 쓰기 처리량 향상, 병렬·MVCC 이득 실현 | 전역 `RwLock`→테이블 단위 |
+| **쿼리 힌트 / SEQUENCE / 집계보강** | 하~중 | 기능 체크리스트 확장, 타 DB 호환성↑ | DIFF.md 잔여 ✗ 항목 |
 
-### 1-1. 서버 구조 (구현됨)
-
-```
-rustdb-mcp/
-└── server.py        # FastAPI MCP 서버 (단일 파일)
-└── requirements.txt # google-genai, fastapi, uvicorn
-```
-
-### 1-2. 구현 태스크
-
-| # | 태스크 | 설명 | 상태 |
-|---|--------|------|------|
-| 1 | 프로젝트 세팅 | `pip install fastapi uvicorn google-genai`, requirements.txt | ✅ |
-| 2 | 스키마 수집 | SHOW TABLES + DESCRIBE → 시스템 프롬프트 주입 | ✅ |
-| 3 | Gemini API 호출 | 스키마 + 자연어 → SQL 생성, `gemini-2.5-flash` 모델 | ✅ |
-| 4 | `/api/nl-to-sql` 엔드포인트 | 자연어 → SQL 변환 | ✅ |
-| 5 | `/api/explain` 엔드포인트 | EXPLAIN 결과 AI 해석 | ✅ |
-| 6 | `/api/schema-design` 엔드포인트 | 자연어 → CREATE TABLE SQL | ✅ |
-| 7 | `/api/chat` 엔드포인트 | 멀티턴 채팅 + 파일 컨텍스트 + 파일 편집 | ✅ |
-| 8 | 에디터 파일 컨텍스트 주입 | 현재 열린 SQL 파일 자동 포함, @파일명 멘션 | ✅ |
-| 9 | AI 파일 편집 블록 | `<<<FILE filename.sql\n...\nFILE>>>` 형식 파싱 및 적용 | ✅ |
-
-### 1-3. 데모 시나리오 (심사용)
-
-```
-사용자: "부서별 평균 급여를 높은 순으로 보여줘"
-         ↓
-UI: 현재 DB 스키마 수집 (SHOW TABLES + DESCRIBE)
-         ↓
-POST /api/chat { messages, schema, open_files }
-         ↓
-AI assistant → SELECT d.name, AVG(e.salary) ...
-         ↓
-UI: SQL 제안 → 에디터 삽입 → 원클릭 실행
-```
+→ 엔진은 이미 정공법 카드(DP·병렬)를 챙김. 추가한다면 ROI 1순위는 "병렬 확장"(인프라 있음, 수치 더 키움), 깊이를 원하면 진짜 MVCC.
 
 ---
 
-## 2. UI ↔ MCP 서버 연동 ✅ 완료
+## 📊 성능측정 측면 *(가장 시급)*
 
-| # | 태스크 | 설명 | 상태 |
-|---|--------|------|------|
-| 1 | `sendChat()` 함수 | `fetch("http://127.0.0.1:8765/api/chat", ...)` 직접 호출 | ✅ |
-| 2 | 현재 DB 자동 전달 | `currentDb` 상태를 MCP 서버에 자동 전달 | ✅ |
-| 3 | 스키마 자동 수집 | `invoke("get_schema")` → 시스템 프롬프트 주입 | ✅ |
-| 4 | 파일 컨텍스트 전달 | 열린 SQL 탭 내용을 `open_files` 배열로 전달 | ✅ |
-| 5 | SQL 제안 삽입 | AI 응답 `sql` 필드 → 에디터 탭에 자동 삽입 | ✅ |
-| 6 | 파일 편집 적용 | AI 응답 `file_edits` → "파일에 적용" 버튼 → Monaco 에디터 교체 | ✅ |
-| 7 | Tauri 자동 시작 | 앱 실행 시 `python -m uvicorn server:app --port 8765` 자동 기동 | ✅ |
-| 8 | API 키 관리 | UI 설정 탭에서 Google Gemini API 키 입력 → localStorage 저장 | ✅ |
+`PERFORMANCE.md`가 전부 TBD이고, 심사 3축 중 "성능 측정"이 비어 있다.
 
----
+| 할 일 | 내용 | 효과 |
+|---|---|---|
+| **`mds/benchmark/` 스크립트 작성** | `bench_insert.py` / `bench_select.py` / `bench_concurrent.py` (코드 패턴 정의됨) | 재현 가능한 측정 기반 마련 |
+| **RustDB vs MySQL 수치** | INSERT TPS, SELECT 인덱스 유무, 동시접속 — MySQL wire protocol로 동일 클라이언트 측정 | 경쟁 DB 대비 정량 비교 확보 |
+| **병렬 스케일링 그래프** | 병렬 SeqScan을 코어 수(1/2/4/8) 대비 측정 | "왜 Rust" 직접 증명 |
+| **matplotlib 그래프** | 측정 결과 시각화 | 발표 자료 임팩트 |
 
-## 3. 성능 벤치마크 🟡 (미완료)
-
-> "왜 Rust인가"의 근거 — 수치 없이는 주장만 있는 발표
-
-### 3-1. 측정 항목
-
-| # | 항목 | 방법 | 목표 |
-|---|------|------|------|
-| 1 | INSERT TPS | 1만 건 단건 INSERT, 소요 시간 측정 | RustDB vs MySQL 비교 |
-| 2 | SELECT TPS | 인덱스 있는 단건 SELECT 1만 회 | RustDB vs MySQL 비교 |
-| 3 | JOIN 쿼리 응답시간 | emp + dept + sal 3-테이블 JOIN | RustDB vs MySQL 비교 |
-| 4 | 대용량 스캔 | 10만 행 Full Scan SELECT | RustDB vs MySQL 비교 |
-
-### 3-2. 구현 태스크
-
-| # | 태스크 | 설명 | 상태 |
-|---|--------|------|------|
-| 1 | 벤치마크 스크립트 | `benchmark.py` — `mysql-connector-python`으로 RustDB/MySQL 각각 접속 | 🔲 |
-| 2 | 더미 데이터 생성 | `faker`로 10만 행 INSERT SQL 생성 | 🔲 |
-| 3 | TPS 계산 | `time.perf_counter()` 기반 정확한 측정, 3회 평균 | 🔲 |
-| 4 | 그래프 출력 | `matplotlib` 막대 그래프 — RustDB(teal) vs MySQL(orange) | 🔲 |
-| 5 | README 반영 | 측정 결과 수치·그래프를 README.md에 공개 | 🔲 |
+→ 1순위 추천. 엔진 작업(DP·병렬)을 방금 했으니 지금이 수치로 증명할 최적 타이밍.
 
 ---
 
-## 4. 엔진 (rustdb-core) ✅ 완료
+## 🤖 AI 측면
 
-> 추가 개발 불필요. 심사 대비 질문 방어 준비만 하면 됨.
+`AI.md`의 "추가 아이디어 🔲" 4가지가 미구현 (MCP 서버는 완성).
 
-| 항목 | 상태 |
-|------|------|
-| DDL / DML / JOIN / 서브쿼리 / CTE / 재귀 CTE | ✅ |
-| B+Tree 인덱스 (단일 / 복합 / 클러스터드) | ✅ |
-| 비용 기반 옵티마이저 + EXPLAIN | ✅ |
-| 트랜잭션 — BEGIN / COMMIT / ROLLBACK / SAVEPOINT | ✅ |
-| WAL + 크래시 복구 | ✅ |
-| MVCC + 격리 수준 4단계 | ✅ |
-| 저장 프로시저 / 트리거 / 사용자 정의 함수 | ✅ |
-| MySQL wire protocol 호환 (포트 3306) | ✅ |
-| INFORMATION_SCHEMA 가상 테이블 | ✅ |
-| 사용자 관리 / GRANT / REVOKE | ✅ |
+| 아이디어 | 난이도 | 임팩트 | 효과 |
+|---|---|---|---|
+| **에러 메시지 AI 해석** | 낮음 | 높음 | 쿼리 실패 시 원인·해결 자동 제시, 디버깅 시간 단축 |
+| **쿼리 최적화 제안** | 낮음 | 높음 | EXPLAIN 결합해 인덱스/재작성 추천, 성능 개선 자동 가이드 |
+| 데이터 분석 리포트 | 낮음 | 중간 | SELECT 결과 패턴·인사이트 자동 도출 |
+| AI 자동완성 (Tab) | 중간 | 중간 | 에디터 작성 속도 향상 |
+
+→ 난이도 낮고 임팩트 높은 "에러 메시지 AI 해석" + "쿼리 최적화 제안"부터. 기존 MCP 엔드포인트 패턴 재사용 가능.
 
 ---
 
-## 5. UI (rustdb-ui) ✅ 완료
+## 종합 권고 (우선순위)
 
-> 데모용으로 충분. 추가 개발 불필요.
+1. **성능측정 (`mds/benchmark`)** — 시급. 방금 한 엔진 작업을 수치로 증명, 심사 빈칸 채움. 병렬 스케일링 그래프는 특히 임팩트.
+2. **AI 추가기능 2개** (에러해석·쿼리최적화) — 저난이도·고임팩트, 심사 핵심축 강화.
+3. **엔진 병렬 확장** (집계·조인 probe) — 1번 벤치마크와 묶으면 시너지.
 
-| 항목 | 상태 |
-|------|------|
-| 홈 화면 (퀵 액션 버튼, RDBMS 소개, 연결 카드 그리드, 상태 표시줄, 액티비티 바) | ✅ |
-| Monaco 에디터 (다중 탭, 분할, 고정, 컨텍스트 메뉴) | ✅ |
-| MySQL 스타일 에디터 툴바 (파일 열기/저장/실행) | ✅ |
-| 결과 테이블 (Canvas 자동 너비, 정렬, 검색, 셀 편집, 진행 바) | ✅ |
-| AI Agent 채팅 패널 (AI assistant, 파일 컨텍스트, @멘션, 파일 편집, 드래그 너비 조절, 채팅 세션 기록) | ✅ |
-| ERD 다이어그램 (FK 관계선, Auto Layout, 드래그) | ✅ |
-| 사이드바 (DB/테이블/뷰/인덱스 컨텍스트 메뉴) | ✅ |
-| 쿼리 히스토리 / 북마크 | ✅ |
-
----
-
-## 6. 서버 (rustdb-server) ✅ 완료
-
-| 항목 | 상태 |
-|------|------|
-| TCP 서버 (포트 7878, 멀티 클라이언트) | ✅ |
-| MySQL wire protocol (포트 3306, DBeaver 완전 연동) | ✅ |
+추천 순서: **성능측정 → AI**. 엔진은 이미 발표용 카드가 충분하고, 지금 비어 있는 건 "수치"와 "AI 확장"이다.
