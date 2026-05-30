@@ -62,8 +62,11 @@
 - [x] CREATE PROCEDURE / DROP PROCEDURE — BEGIN...END 본문, IN/OUT/INOUT 파라미터
 - [x] CALL procedure_name(args) — 저장 프로시저 실행
 - [x] 저장 프로시저 제어문 — IF/ELSEIF/ELSE...END IF, WHILE...DO...END WHILE, LOOP/LEAVE...END LOOP, REPEAT...UNTIL...END REPEAT, DECLARE 변수, SET 변수 = 표현식
+- [x] 저장 프로시저 영속화 (`data/_procedures.json`) — 재시작 후에도 유지
 - [x] CREATE TRIGGER / DROP TRIGGER — BEFORE/AFTER INSERT/UPDATE/DELETE FOR EACH ROW
+- [x] 트리거 영속화 (`data/_triggers.json`) — 재시작 후에도 유지
 - [x] CREATE FUNCTION / DROP FUNCTION — `CREATE FUNCTION name(p1, p2) RETURNS type RETURN expr` 형식의 사용자 정의 스칼라 함수, SELECT/UPDATE에서 일반 함수처럼 호출 가능
+- [x] 사용자 정의 함수 영속화 (`data/_functions.json`) — 재시작 후에도 유지
 
 ### DCL
 - [x] CREATE USER [IF NOT EXISTS] `'user'@'host'` [IDENTIFIED BY 'password']

@@ -401,4 +401,43 @@ impl DiskManager {
         let json = fs::read_to_string(&path).unwrap_or_default();
         serde_json::from_str(&json).unwrap_or_default()
     }
+
+    pub fn save_procedures<T: Serialize>(&self, procedures: &T) {
+        let path = format!("{}/_procedures.json", self.data_dir);
+        let json = serde_json::to_string_pretty(procedures).unwrap_or_default();
+        let _ = fs::write(path, json);
+    }
+
+    pub fn load_procedures<T: for<'de> serde::Deserialize<'de> + Default>(&self) -> T {
+        let path = format!("{}/_procedures.json", self.data_dir);
+        if !Path::new(&path).exists() { return T::default(); }
+        let json = fs::read_to_string(&path).unwrap_or_default();
+        serde_json::from_str(&json).unwrap_or_default()
+    }
+
+    pub fn save_triggers<T: Serialize>(&self, triggers: &T) {
+        let path = format!("{}/_triggers.json", self.data_dir);
+        let json = serde_json::to_string_pretty(triggers).unwrap_or_default();
+        let _ = fs::write(path, json);
+    }
+
+    pub fn load_triggers<T: for<'de> serde::Deserialize<'de> + Default>(&self) -> T {
+        let path = format!("{}/_triggers.json", self.data_dir);
+        if !Path::new(&path).exists() { return T::default(); }
+        let json = fs::read_to_string(&path).unwrap_or_default();
+        serde_json::from_str(&json).unwrap_or_default()
+    }
+
+    pub fn save_functions<T: Serialize>(&self, functions: &T) {
+        let path = format!("{}/_functions.json", self.data_dir);
+        let json = serde_json::to_string_pretty(functions).unwrap_or_default();
+        let _ = fs::write(path, json);
+    }
+
+    pub fn load_functions<T: for<'de> serde::Deserialize<'de> + Default>(&self) -> T {
+        let path = format!("{}/_functions.json", self.data_dir);
+        if !Path::new(&path).exists() { return T::default(); }
+        let json = fs::read_to_string(&path).unwrap_or_default();
+        serde_json::from_str(&json).unwrap_or_default()
+    }
 }

@@ -108,8 +108,8 @@ AI가 직접 에디터 탭의 SQL 파일을 수정·삽입·삭제할 수 있다
 
 | # | 기능 | 설명 | 난이도 | 임팩트 |
 |---|------|------|--------|--------|
-| 1 | 에러 메시지 AI 해석 | 쿼리 실패 시 오류 메시지를 AI가 자동 해석·해결 방안 제시 ("이 오류는 ... 때문입니다. 해결하려면 ...") | 낮음 | 높음 |
-| 2 | 쿼리 최적화 제안 | 현재 에디터 SQL을 AI가 리뷰하고 인덱스 추가·쿼리 재작성 등 개선안 제시 | 낮음 | 높음 |
+| 1 | 에러 메시지 AI 해석 ✅ | **구현 완료** — 쿼리 실패 시 결과 패널의 "AI 해석" 버튼으로 오류 원인·해결 방안 제시 (`/api/explain-error`) | 낮음 | 높음 |
+| 2 | 쿼리 최적화 제안 ✅ | **구현 완료** — AI 패널 explain 모드의 "최적화 제안" 버튼으로 SQL+EXPLAIN 리뷰, 인덱스·재작성 개선안 제시 (`/api/optimize`) | 낮음 | 높음 |
 | 3 | 데이터 분석 리포트 | SELECT 결과를 AI가 요약·패턴 분석·인사이트 한국어로 도출 | 낮음 | 중간 |
 | 4 | AI 자동완성 | 에디터에서 Tab으로 AI SQL 완성 (Monaco inlineCompletionsProvider) | 중간 | 중간 |
 
@@ -130,6 +130,8 @@ rustdb-mcp/
 | `GET /health` | GET | 서버 상태 및 모델 확인 |
 | `POST /api/nl-to-sql` | POST | 자연어 → SQL 변환 |
 | `POST /api/explain` | POST | EXPLAIN 결과 AI 해석 |
+| `POST /api/explain-error` | POST | 쿼리 실패 시 오류 원인·해결 방안 해석 |
+| `POST /api/optimize` | POST | SQL + EXPLAIN을 리뷰해 인덱스·재작성 등 최적화 제안 |
 | `POST /api/schema-design` | POST | 자연어 → CREATE TABLE SQL |
 | `POST /api/chat` | POST | 멀티턴 채팅 (파일 컨텍스트 + 파일 편집 포함) |
 

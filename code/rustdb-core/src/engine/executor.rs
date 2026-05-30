@@ -348,6 +348,9 @@ impl Executor {
         let roles: Vec<RoleRecord> = disk.load_roles();
         let role_grants: Vec<RoleGrant> = disk.load_role_grants();
         let synonyms: HashMap<String, String> = disk.load_synonyms();
+        let procedures = disk.load_procedures();
+        let triggers   = disk.load_triggers();
+        let user_functions = disk.load_functions();
 
         let current_db = databases.iter().min().cloned().unwrap_or_else(|| "rustdb".to_string());
         let mut executor = Executor {
@@ -373,10 +376,10 @@ impl Executor {
                 )),
                 data_dir: dir.to_string(),
                 table_stats: HashMap::new(),
-                procedures: HashMap::new(),
-                triggers: HashMap::new(),
+                procedures,
+                triggers,
                 dml_since_vacuum: 0,
-                user_functions: HashMap::new(),
+                user_functions,
             })),
             txn: TransactionManager::new_with_dir(dir),
             current_db,
@@ -8267,6 +8270,7 @@ impl Executor {
         body: Vec<Statement>,
     ) -> Result<String, String> {
         s.procedures.insert(name.clone(), (params, body));
+        s.disk.save_procedures(&s.procedures);
         Ok(format!("Procedure '{}' created.", name))
     }
 
@@ -8413,6 +8417,7 @@ impl Executor {
         if s.procedures.remove(&name).is_none() && !if_exists {
             return Err(format!("Procedure '{}' does not exist", name));
         }
+        s.disk.save_procedures(&s.procedures);
         Ok(format!("Procedure '{}' dropped.", name))
     }
 
@@ -8425,6 +8430,7 @@ impl Executor {
         body: String,
     ) -> Result<String, String> {
         s.user_functions.insert(name.clone(), (params, body));
+        s.disk.save_functions(&s.user_functions);
         Ok(format!("Function '{}' created.", name))
     }
 
@@ -8437,6 +8443,7 @@ impl Executor {
         if s.user_functions.remove(&name).is_none() && !if_exists {
             return Err(format!("Function '{}' does not exist", name));
         }
+        s.disk.save_functions(&s.user_functions);
         Ok(format!("Function '{}' dropped.", name))
     }
 
@@ -8453,6 +8460,7 @@ impl Executor {
         let timing_str = match timing { TriggerTiming::Before => "BEFORE", TriggerTiming::After => "AFTER" };
         let event_str  = match event  { TriggerEvent::Insert  => "INSERT", TriggerEvent::Update => "UPDATE", TriggerEvent::Delete => "DELETE" };
         s.triggers.insert(name.clone(), (table, timing_str.to_string(), event_str.to_string(), body));
+        s.disk.save_triggers(&s.triggers);
         Ok(format!("Trigger '{}' created.", name))
     }
 
@@ -8465,6 +8473,7 @@ impl Executor {
         if s.triggers.remove(&name).is_none() && !if_exists {
             return Err(format!("Trigger '{}' does not exist", name));
         }
+        s.disk.save_triggers(&s.triggers);
         Ok(format!("Trigger '{}' dropped.", name))
     }
 

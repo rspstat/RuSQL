@@ -69,7 +69,7 @@ const PAGE_SIZE = 100;
 
 // ─── ERD 타입/상수 ────────────────────────────────────────────
 interface ErdPos { x: number; y: number; }
-const ERD_CARD_W = 220;
+const ERD_CARD_W = 360;
 const ERD_HEADER_H = 32;
 const ERD_COL_H = 24;
 
@@ -105,6 +105,62 @@ function erdOrthPath(x1: number, y1: number, x2: number, y2: number): string {
     `Q${midX} ${y2} ${midX + sdx * r2} ${y2}`,
     `H${x2}`,
   ].join(" ");
+}
+
+// ─── ERD 레이아웃 계산 (pure) ─────────────────────────────────
+function computeErdLayout(columns: Record<string, ColumnDetail[]>): Record<string, ErdPos> {
+  const allTables = Object.keys(columns);
+  if (allTables.length === 0) return {};
+  const deps: Record<string, Set<string>> = {};
+  for (const t of allTables) deps[t] = new Set();
+  for (const [tbl, cols] of Object.entries(columns)) {
+    for (const col of cols) {
+      if (col.fk_ref) {
+        const parsed = parseRef(col.fk_ref);
+        if (parsed) { const ref = unqualify(parsed.table); if (allTables.includes(ref)) deps[tbl].add(ref); }
+      }
+    }
+  }
+  const depth: Record<string, number> = {};
+  const computing = new Set<string>();
+  const getDepth = (t: string): number => {
+    if (depth[t] !== undefined) return depth[t];
+    if (computing.has(t)) { depth[t] = 0; return 0; }
+    computing.add(t);
+    depth[t] = deps[t].size === 0 ? 0 : Math.max(...Array.from(deps[t]).map(d => getDepth(d) + 1));
+    computing.delete(t);
+    return depth[t];
+  };
+  for (const t of allTables) getDepth(t);
+  const byDepth: Record<number, string[]> = {};
+  for (const t of allTables) { const d = depth[t]; (byDepth[d] = byDepth[d] ?? []).push(t); }
+  const maxDepth = Math.max(...Object.keys(byDepth).map(Number));
+  const cardH = (t: string) => ERD_HEADER_H + (columns[t]?.length ?? 0) * ERD_COL_H + 8;
+  const COL_W = 480, ROW_GAP = 56;
+  // 바리센터 정렬: 부모 노드 평균 위치 기준으로 자식 노드를 정렬해 교차선 최소화
+  const sortedByDepth: Record<number, string[]> = { 0: [...(byDepth[0] ?? [])] };
+  for (let d = 1; d <= maxDepth; d++) {
+    const tables = [...(byDepth[d] ?? [])];
+    const prevSorted = sortedByDepth[d - 1] ?? [];
+    const bc: Record<string, number> = {};
+    for (const t of tables) {
+      const parents = [...deps[t]].filter(p => prevSorted.includes(p));
+      bc[t] = parents.length === 0 ? prevSorted.length / 2 : parents.reduce((s, p) => s + prevSorted.indexOf(p), 0) / parents.length;
+    }
+    sortedByDepth[d] = tables.sort((a, b) => bc[a] - bc[b]);
+  }
+  // 열 높이 계산 후 수직 중앙 정렬
+  const colH = (d: number) => (sortedByDepth[d] ?? []).reduce((s, t) => s + cardH(t) + ROW_GAP, -ROW_GAP);
+  const maxColH = Math.max(0, ...Array.from({ length: maxDepth + 1 }, (_, d) => colH(d)));
+  const positions: Record<string, ErdPos> = {};
+  for (let d = 0; d <= maxDepth; d++) {
+    let y = 60 + Math.max(0, (maxColH - colH(d)) / 2);
+    for (const t of sortedByDepth[d] ?? []) {
+      positions[t] = { x: 60 + d * COL_W, y };
+      y += cardH(t) + ROW_GAP;
+    }
+  }
+  return positions;
 }
 
 // ─── 탭 타입 ──────────────────────────────────────────────────
@@ -230,12 +286,15 @@ function App() {
   const erdCardDragRef = useRef<{ table: string; startMX: number; startMY: number; startCX: number; startCY: number; zoom: number } | null>(null);
   const erdCanvasDragRef = useRef<{ startMX: number; startMY: number; startPX: number; startPY: number } | null>(null);
   const erdCardWasDragged = useRef(false);
+  const erdCanvasWasDragged = useRef(false);
   const [erdSelectedTable, setErdSelectedTable] = useState<string>("");
   const [erdTableData, setErdTableData] = useState<QueryResult | null>(null);
   const [erdTableLoading, setErdTableLoading] = useState(false);
   const [erdFilter, setErdFilter] = useState("");
   const [erdDataHeight, setErdDataHeight] = useState(0);
   const erdDataDragging = useRef(false);
+  const [erdHoveredTable, setErdHoveredTable] = useState<string | null>(null);
+  const [erdAnimating, setErdAnimating] = useState(false);
 
   // ─── 연결 관리 ───────────────────────────────────────────────
   interface Connection {
@@ -399,7 +458,9 @@ function App() {
   const [aiServerUrl] = useState("http://127.0.0.1:8765");
   const [aiMode, setAiMode] = useState<"nl" | "explain" | "schema">("nl");
   const [aiQuestion, setAiQuestion] = useState("");
-  const [aiResult, setAiResult] = useState<{ type: "sql" | "explain" | "schema"; content: string } | null>(null);
+  const [aiResult, setAiResult] = useState<{ type: "sql" | "explain" | "schema" | "optimize"; content: string } | null>(null);
+  // 결과 블록별 에러 AI 해석 상태 (key = 결과 인덱스)
+  const [errAi, setErrAi] = useState<Record<number, { loading: boolean; text: string }>>({});
   const [aiLoading, setAiLoading] = useState(false);
   const [aiError, setAiError] = useState("");
   const [aiServerOk, setAiServerOk] = useState<boolean | null>(null);
@@ -559,49 +620,18 @@ function App() {
   // ─── ERD 자동 레이아웃 ──────────────────────────────────────
   const autoLayoutErd = () => {
     if (isAutoLayout) {
+      setErdAnimating(true);
       setErdPositions(erdOriginalPositions.current);
       setIsAutoLayout(false);
+      setTimeout(() => setErdAnimating(false), 500);
       return;
     }
-    const allTables = Object.keys(erdColumns);
-    if (allTables.length === 0) return;
+    if (Object.keys(erdColumns).length === 0) return;
     erdOriginalPositions.current = { ...erdPositions };
-    // FK 의존성: tbl → tbl이 참조하는 테이블들
-    const deps: Record<string, Set<string>> = {};
-    for (const t of allTables) deps[t] = new Set();
-    for (const [tbl, cols] of Object.entries(erdColumns)) {
-      for (const col of cols) {
-        if (col.fk_ref) {
-          const parsed = parseRef(col.fk_ref);
-          if (parsed) { const ref = unqualify(parsed.table); if (allTables.includes(ref)) deps[tbl].add(ref); }
-        }
-      }
-    }
-    // 깊이 계산 (참조 대상 = 0, 참조하는 쪽 = +1)
-    const depth: Record<string, number> = {};
-    const computing = new Set<string>();
-    const getDepth = (t: string): number => {
-      if (depth[t] !== undefined) return depth[t];
-      if (computing.has(t)) { depth[t] = 0; return 0; }
-      computing.add(t);
-      depth[t] = deps[t].size === 0 ? 0 : Math.max(...Array.from(deps[t]).map(d => getDepth(d) + 1));
-      computing.delete(t);
-      return depth[t];
-    };
-    for (const t of allTables) getDepth(t);
-    // 깊이별 그룹화 후 배치
-    const byDepth: Record<number, string[]> = {};
-    for (const t of allTables) { const d = depth[t]; (byDepth[d] = byDepth[d] ?? []).push(t); }
-    const maxDepth = Math.max(...Object.keys(byDepth).map(Number));
-    const COL_W = 280, ROW_GAP = 30;
-    const cardH = (t: string) => ERD_HEADER_H + (erdColumns[t]?.length ?? 0) * ERD_COL_H + 8;
-    const positions: Record<string, ErdPos> = {};
-    for (let d = 0; d <= maxDepth; d++) {
-      let y = 40;
-      for (const t of byDepth[d] ?? []) { positions[t] = { x: 40 + d * COL_W, y }; y += cardH(t) + ROW_GAP; }
-    }
-    setErdPositions(positions);
+    setErdAnimating(true);
+    setErdPositions(computeErdLayout(erdColumns));
     setIsAutoLayout(true);
+    setTimeout(() => setErdAnimating(false), 500);
   };
 
   // ─── ERD 테이블 데이터 로드 ─────────────────────────────────
@@ -652,6 +682,7 @@ function App() {
       }
       const pd = erdCanvasDragRef.current;
       if (pd) {
+        erdCanvasWasDragged.current = true;
         setErdPan({ x: pd.startPX + e.clientX - pd.startMX, y: pd.startPY + e.clientY - pd.startMY });
       }
       if (erdDataDragging.current) {
@@ -748,6 +779,7 @@ function App() {
     setTabColWidths(p => ({ ...p, [activeTabId]: {} }));
     setTabSortState(p => ({ ...p, [activeTabId]: {} }));
     setTabResultSearch(p => ({ ...p, [activeTabId]: "" }));
+    setErrAi({});
     setResultTab("results");
     setIsRunning(true);
     const startTs = Date.now();
@@ -1279,17 +1311,19 @@ function App() {
           return [t, cols] as [string, ColumnDetail[]];
         })
       );
-      setErdColumns(Object.fromEntries(entries));
-      const gridCols = Math.max(1, Math.ceil(Math.sqrt(tblList.length)));
+      const cols = Object.fromEntries(entries);
+      setErdColumns(cols);
       setErdPositions(prev => {
-        const next: Record<string, ErdPos> = {};
-        tblList.forEach((t, i) => {
-          next[t] = prev[t] ?? {
-            x: (i % gridCols) * (ERD_CARD_W + 60) + 40,
-            y: Math.floor(i / gridCols) * 260 + 40,
-          };
-        });
-        return next;
+        const computed = computeErdLayout(cols);
+        const prevTables = new Set(Object.keys(prev));
+        const sameTables = tblList.every(t => prevTables.has(t)) && tblList.length === prevTables.size;
+        if (sameTables) {
+          // 같은 테이블이면 수동 위치 유지
+          const next: Record<string, ErdPos> = {};
+          for (const t of tblList) next[t] = prev[t] ?? computed[t] ?? { x: 60, y: 60 };
+          return next;
+        }
+        return computed;
       });
     } finally {
       setErdLoading(false);
@@ -1397,6 +1431,69 @@ function App() {
       const data = await res.json();
       if (!res.ok) throw new Error(data.detail ?? "서버 오류");
       setAiResult({ type: "explain", content: data.interpretation });
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e);
+      if (msg.includes("fetch") || msg.includes("Failed")) {
+        setAiError("MCP 서버에 연결할 수 없습니다. server.py가 실행 중인지 확인하세요.");
+      } else {
+        setAiError("오류: " + msg);
+      }
+    } finally {
+      setAiLoading(false);
+    }
+  };
+
+  // 쿼리 실패 시 에러 메시지를 AI에게 해석 요청 (결과 블록 인라인)
+  const explainError = async (idx: number, errorMsg: string) => {
+    if (!aiApiKey.trim()) {
+      setErrAi(p => ({ ...p, [idx]: { loading: false, text: "⚠️ AI 탭에서 Gemini API 키를 먼저 입력하세요." } }));
+      return;
+    }
+    setErrAi(p => ({ ...p, [idx]: { loading: true, text: "" } }));
+    try {
+      const sql = (editorRef.current?.getValue() ?? queryRef.current).trim();
+      const schema = await getSchemaText();
+      const res = await fetch(`${aiServerUrl}/api/explain-error`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sql, error: errorMsg, schema, api_key: aiApiKey }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail ?? "서버 오류");
+      setErrAi(p => ({ ...p, [idx]: { loading: false, text: data.interpretation } }));
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e);
+      setErrAi(p => ({ ...p, [idx]: {
+        loading: false,
+        text: msg.includes("fetch") || msg.includes("Failed")
+          ? "MCP 서버에 연결할 수 없습니다. server.py가 실행 중인지 확인하세요."
+          : "오류: " + msg,
+      } }));
+    }
+  };
+
+  // 현재 에디터 쿼리를 AI가 리뷰해 최적화(인덱스/재작성) 제안
+  const optimizeCurrent = async () => {
+    if (!aiApiKey.trim()) { setAiError("API 키를 입력하세요."); return; }
+    const sql = (editorRef.current?.getValue() ?? queryRef.current).trim();
+    if (!sql) { setAiError("에디터에 쿼리를 입력하세요."); return; }
+    setAiLoading(true); setAiError(""); setAiResult(null);
+    try {
+      let explainText = "";
+      try {
+        const er = await invoke<MultiQueryResult>("execute_query", { query: `EXPLAIN ${sql}`, ts: Date.now() });
+        const r = er.results[0];
+        if (r?.success) explainText = [r.columns.join("\t"), ...r.rows.map(row => row.join("\t"))].join("\n");
+      } catch { /* EXPLAIN 불가해도 최적화는 진행 */ }
+      const schema = await getSchemaText();
+      const res = await fetch(`${aiServerUrl}/api/optimize`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sql, explain_result: explainText, schema, api_key: aiApiKey }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail ?? "서버 오류");
+      setAiResult({ type: "optimize", content: data.suggestion });
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e);
       if (msg.includes("fetch") || msg.includes("Failed")) {
@@ -3291,7 +3388,21 @@ function App() {
                 ) : results.map((r, i) => (
                   <div key={i} className="result-block">
                     {!r.success ? (
-                      <div className="result-error">❌ {r.message}</div>
+                      <div className="result-error">
+                        <div>❌ {r.message}</div>
+                        <button
+                          onClick={() => explainError(i, r.message)}
+                          disabled={errAi[i]?.loading}
+                          style={{ marginTop: 6, padding: "3px 10px", fontSize: 12, cursor: errAi[i]?.loading ? "default" : "pointer", background: "#3a3d41", color: "#4ec9b0", border: "1px solid #4ec9b0", borderRadius: 4 }}
+                        >
+                          {errAi[i]?.loading ? "분석 중..." : "AI 해석"}
+                        </button>
+                        {errAi[i]?.text && (
+                          <div style={{ marginTop: 8, padding: "8px 12px", background: "#252526", border: "1px solid #3a3d41", borderRadius: 4, whiteSpace: "pre-wrap", fontSize: 13, lineHeight: 1.5, color: "#d4d4d4" }}>
+                            {errAi[i].text}
+                          </div>
+                        )}
+                      </div>
                     ) : r.columns.length === 0 ? (() => {
                       // EXPLAIN 트리 시각화
                       if (r.message.includes("QUERY PLAN")) {
@@ -3533,12 +3644,22 @@ function App() {
               <span className="erd-table-count">{Object.keys(erdColumns).length} tables</span>
             </div>
             <div className="erd-header-right">
+              <div className="erd-zoom-slider">
+                <input
+                  type="range"
+                  min={0}
+                  max={200}
+                  value={Math.round(erdZoom * 100)}
+                  onChange={e => setErdZoom(Number(e.target.value) / 100)}
+                  title="확대/축소 (0~200%)"
+                />
+                <span className="erd-zoom-label">{Math.round(erdZoom * 100)}%</span>
+              </div>
               <button className="erd-tool-btn" onClick={autoLayoutErd} title={isAutoLayout ? "원래 위치로 복원" : "FK 기반 자동 배치"}>
                 {isAutoLayout ? "↩ Reset Layout" : "⊞ Auto Layout"}
               </button>
               <button className="erd-tool-btn" onClick={() => { setErdPan({ x: 40, y: 40 }); setErdZoom(1); }} title="Reset view">⊡ Reset</button>
               <button className="erd-tool-btn" onClick={loadErd} title="Refresh">↻ Refresh</button>
-              <span className="erd-zoom-label">{Math.round(erdZoom * 100)}%</span>
             </div>
           </div>
 
@@ -3547,9 +3668,18 @@ function App() {
             ref={erdCanvasRef}
             onMouseDown={e => {
               if ((e.target as HTMLElement).closest(".erd-card")) return;
+              erdCanvasWasDragged.current = false;
               erdCanvasDragRef.current = { startMX: e.clientX, startMY: e.clientY, startPX: erdPan.x, startPY: erdPan.y };
               document.body.style.cursor = "grabbing";
               document.body.style.userSelect = "none";
+            }}
+            onClick={e => {
+              // 빈 캔버스를 클릭(드래그 아님)하면 선택 해제 + 데이터 패널 닫기
+              if (erdCanvasWasDragged.current) return;
+              if ((e.target as HTMLElement).closest(".erd-card")) return;
+              setErdSelectedTable("");
+              setErdTableData(null);
+              setErdDataHeight(0);
             }}
             onWheel={e => {
               e.preventDefault();
@@ -3573,8 +3703,21 @@ function App() {
                 {/* FK 관계선 SVG */}
                 <svg style={{ position: "absolute", top: 0, left: 0, width: 1, height: 1, overflow: "visible", pointerEvents: "none", zIndex: 0 }}>
                   <defs>
-                    <marker id="erd-arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
-                      <path d="M0,1 L0,7 L7,4 z" fill="#6a9fd8" opacity="0.85"/>
+                    <marker id="erd-one" markerWidth="14" markerHeight="18" refX="11" refY="9" orient="auto">
+                      <line x1="5" y1="3" x2="5" y2="15" stroke="#c0395a" strokeWidth="1.4"/>
+                      <line x1="9" y1="3" x2="9" y2="15" stroke="#c0395a" strokeWidth="1.4"/>
+                    </marker>
+                    <marker id="erd-many" markerWidth="24" markerHeight="18" refX="21" refY="9" orient="auto-start-reverse">
+                      <circle cx="4" cy="9" r="3" fill="none" stroke="#c0395a" strokeWidth="1.2"/>
+                      <path d="M8 9 L21 3 M8 9 L21 9 M8 9 L21 15" stroke="#c0395a" strokeWidth="1.2" fill="none"/>
+                    </marker>
+                    <marker id="erd-one-hi" markerWidth="14" markerHeight="18" refX="11" refY="9" orient="auto">
+                      <line x1="5" y1="3" x2="5" y2="15" stroke="#4ec9b0" strokeWidth="1.8"/>
+                      <line x1="9" y1="3" x2="9" y2="15" stroke="#4ec9b0" strokeWidth="1.8"/>
+                    </marker>
+                    <marker id="erd-many-hi" markerWidth="24" markerHeight="18" refX="21" refY="9" orient="auto-start-reverse">
+                      <circle cx="4" cy="9" r="3" fill="none" stroke="#4ec9b0" strokeWidth="1.5"/>
+                      <path d="M8 9 L21 3 M8 9 L21 9 M8 9 L21 15" stroke="#4ec9b0" strokeWidth="1.5" fill="none"/>
                     </marker>
                   </defs>
                   {Object.entries(erdColumns).flatMap(([tableName, cols]) =>
@@ -3592,41 +3735,62 @@ function App() {
                       const tgtY = tgtPos.y + ERD_HEADER_H + (tgtColIdx >= 0 ? tgtColIdx * ERD_COL_H : 0) + ERD_COL_H / 2;
                       const srcRight = srcPos.x + ERD_CARD_W;
                       const tgtRight = tgtPos.x + ERD_CARD_W;
-                      let pathD: string;
+                      const isHovered = erdHoveredTable !== null && (erdHoveredTable === tableName || erdHoveredTable === refTable);
+                      const isDimmed = erdHoveredTable !== null && !isHovered;
+                      let px1: number, py1: number, px2: number, py2: number, pathD: string;
                       if (srcRight + 10 <= tgtPos.x) {
-                        // 소스가 타깃 왼쪽: 오른쪽 → 왼쪽
-                        pathD = erdOrthPath(srcRight, srcY, tgtPos.x, tgtY);
+                        px1 = srcRight; py1 = srcY; px2 = tgtPos.x; py2 = tgtY;
+                        pathD = erdOrthPath(px1, py1, px2, py2);
                       } else if (tgtRight + 10 <= srcPos.x) {
-                        // 소스가 타깃 오른쪽: 왼쪽 → 오른쪽
-                        pathD = erdOrthPath(srcPos.x, srcY, tgtRight, tgtY);
+                        px1 = srcPos.x; py1 = srcY; px2 = tgtRight; py2 = tgtY;
+                        pathD = erdOrthPath(px1, py1, px2, py2);
                       } else {
-                        // 수평 겹침: 오른쪽 바깥으로 우회
-                        const detourX = Math.max(srcRight, tgtRight) + 44;
+                        // 수평 겹침: 짧은 쪽으로 우회
+                        const rightX = Math.max(srcRight, tgtRight) + 44 + colIdx * 14;
+                        const leftX  = Math.min(srcPos.x, tgtPos.x) - 44 - colIdx * 14;
+                        const useLeft = leftX > 0 && (rightX - leftX > leftX);
+                        const detourX = useLeft ? leftX : rightX;
+                        px1 = useLeft ? srcPos.x : srcRight; py1 = srcY;
+                        px2 = useLeft ? tgtPos.x : tgtRight; py2 = tgtY;
                         const sdy = Math.sign(tgtY - srcY);
                         const r = Math.min(8, Math.abs(tgtY - srcY) / 2);
                         if (r < 1) {
-                          pathD = `M${srcRight} ${srcY} H${detourX} V${tgtY} H${tgtRight}`;
+                          pathD = `M${px1} ${srcY} H${detourX} V${tgtY} H${px2}`;
                         } else {
+                          const sdx = useLeft ? 1 : -1;
                           pathD = [
-                            `M${srcRight} ${srcY}`,
-                            `H${detourX - r}`,
+                            `M${px1} ${srcY}`,
+                            `H${detourX + sdx * r}`,
                             `Q${detourX} ${srcY} ${detourX} ${srcY + sdy * r}`,
                             `V${tgtY - sdy * r}`,
-                            `Q${detourX} ${tgtY} ${detourX - r} ${tgtY}`,
-                            `H${tgtRight}`,
+                            `Q${detourX} ${tgtY} ${detourX + sdx * r} ${tgtY}`,
+                            `H${px2}`,
                           ].join(" ");
                         }
                       }
+                      const stroke = isHovered ? "#4ec9b0" : "#c0395a";
+                      const sw = isHovered ? 2.5 : 1.5;
+                      const opacity = isDimmed ? 0.15 : isHovered ? 1 : 0.75;
                       return (
-                        <path
-                          key={`${tableName}.${col.name}`}
-                          d={pathD}
-                          fill="none"
-                          stroke="#6a9fd8"
-                          strokeWidth="1.5"
-                          opacity="0.7"
-                          markerEnd="url(#erd-arrow)"
-                        />
+                        <g key={`${tableName}.${col.name}`}>
+                          <path
+                            d={pathD}
+                            fill="none"
+                            stroke={stroke}
+                            strokeWidth={sw}
+                            strokeDasharray="6 4"
+                            opacity={opacity}
+                            markerStart={isHovered ? "url(#erd-many-hi)" : "url(#erd-many)"}
+                            markerEnd={isHovered ? "url(#erd-one-hi)" : "url(#erd-one)"}
+                            className={isHovered ? "erd-edge-active" : isDimmed ? "erd-edge-dim" : "erd-edge"}
+                          />
+                          {isHovered && (
+                            <>
+                              <circle cx={px1} cy={py1} r="4" fill="#4ec9b0" opacity="0.9"/>
+                              <circle cx={px2} cy={py2} r="4" fill="#4ec9b0" opacity="0.9"/>
+                            </>
+                          )}
+                        </g>
                       );
                     })
                   )}
@@ -3636,12 +3800,19 @@ function App() {
                 {Object.entries(erdColumns).map(([tableName, cols]) => {
                   const pos = erdPositions[tableName];
                   if (!pos) return null;
+                  const maxNameW = Math.max(40, ...cols.map(c => measureTextPx(c.name))) + 10;
+                  const isLinked = erdHoveredTable !== null && erdHoveredTable !== tableName && (
+                    cols.some(c => c.fk_ref && unqualify(parseRef(c.fk_ref)?.table ?? "") === erdHoveredTable) ||
+                    Object.entries(erdColumns).some(([t, cs]) => t === erdHoveredTable && cs.some(c => c.fk_ref && unqualify(parseRef(c.fk_ref)?.table ?? "") === tableName))
+                  );
                   return (
                     <div
                       key={tableName}
-                      className={`erd-card${erdSelectedTable === tableName ? " erd-card-selected" : ""}`}
-                      style={{ position: "absolute", left: pos.x, top: pos.y, width: ERD_CARD_W, zIndex: 1 }}
+                      className={`erd-card${erdSelectedTable === tableName ? " erd-card-selected" : ""}${erdHoveredTable === tableName ? " erd-card-focused" : ""}${isLinked ? " erd-card-linked" : ""}${erdAnimating ? " erd-card-anim" : ""}`}
+                      style={{ position: "absolute", left: pos.x, top: pos.y, width: ERD_CARD_W, zIndex: erdHoveredTable === tableName ? 10 : 1 }}
                       onClick={() => { if (!erdCardWasDragged.current) handleErdCardClick(tableName); }}
+                      onMouseEnter={() => setErdHoveredTable(tableName)}
+                      onMouseLeave={() => setErdHoveredTable(null)}
                     >
                       <div
                         className="erd-card-header"
@@ -3660,19 +3831,26 @@ function App() {
                           document.body.style.userSelect = "none";
                         }}
                       >
-                        <span className="erd-card-icon">⊞</span>
                         <span className="erd-card-name">{tableName}</span>
+                        <span className="erd-card-comment">comment</span>
                       </div>
                       {cols.map(col => (
                         <div
                           key={col.name}
                           className={`erd-col-row${col.is_pk ? " erd-pk" : col.fk_ref ? " erd-fk" : ""}`}
                         >
-                          <span className="erd-col-icon">{col.is_pk ? "🔑" : col.fk_ref ? "🔗" : "·"}</span>
-                          <span className="erd-col-name">{col.name}</span>
-                          <span className="erd-col-type">{col.data_type.split("(")[0]}</span>
-                          {col.is_not_null && <span className="erd-badge-nn">NN</span>}
-                          {col.is_unique && !col.is_pk && <span className="erd-badge-uq">UQ</span>}
+                          <span className="erd-col-key">
+                            {(col.is_pk || col.fk_ref) && (
+                              <svg width="12" height="12" viewBox="0 0 24 24" fill={col.is_pk ? "#f0c040" : "#e0556b"}>
+                                <path d="M12.65 10A5.99 5.99 0 0 0 7 6c-3.31 0-6 2.69-6 6s2.69 6 6 6a5.99 5.99 0 0 0 5.65-4H17v4h4v-4h2v-4H12.65zM7 14c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2z"/>
+                              </svg>
+                            )}
+                          </span>
+                          <span className="erd-col-name" style={{ width: maxNameW }}>{col.name}</span>
+                          <span className="erd-col-type" title={col.data_type}>{col.data_type}</span>
+                          <span className={`erd-badge${col.is_not_null ? " on-nn" : ""}`}>{col.is_not_null ? "N-N" : "NULL"}</span>
+                          <span className={`erd-badge${col.is_unique ? " on-uq" : ""}`}>UQ</span>
+                          <span className={`erd-badge${col.is_auto_inc ? " on-ai" : ""}`}>AI</span>
                         </div>
                       ))}
                     </div>
@@ -3717,15 +3895,23 @@ function App() {
                     const filtered = erdFilter
                       ? erdTableData.rows.filter(r => r.some(c => c.toLowerCase().includes(low)))
                       : erdTableData.rows;
+                    // 컬럼 자동 너비 — 쿼리 결과 표와 동일 로직 (canvas measureText, 한글/CJK 지원)
+                    const CELL_PAD = 36;
+                    const sample = filtered.slice(0, 200);
+                    const widths = erdTableData.columns.map((col, ci) => {
+                      const maxData = sample.reduce((m, row) => Math.max(m, measureTextPx(row[ci] ?? "")), 0);
+                      const w = Math.max(measureTextPx(col), maxData);
+                      return Math.min(500, Math.max(60, Math.round(w + CELL_PAD)));
+                    });
                     return (
                       <>
                         <div className="erd-data-meta">
                           {filtered.length}{erdFilter ? ` / ${erdTableData.rows.length}` : ""} row(s) · {erdTableData.columns.length} col(s) · {erdTableData.elapsed.toFixed(3)}s
                         </div>
-                        <table className="erd-data-table">
+                        <table className="erd-data-table" style={{ tableLayout: "fixed", width: "auto" }}>
                           <thead><tr>
-                            <th className="erd-data-rownum">#</th>
-                            {erdTableData.columns.map(c => <th key={c}>{c}</th>)}
+                            <th className="erd-data-rownum" style={{ width: 40 }}>#</th>
+                            {erdTableData.columns.map((c, ci) => <th key={c} style={{ width: widths[ci] }}>{c}</th>)}
                           </tr></thead>
                           <tbody>
                             {filtered.map((row, ri) => (
@@ -3862,6 +4048,9 @@ function App() {
                   <button className="ai-btn primary" onClick={explainCurrent} disabled={aiLoading}>
                     {aiLoading ? "분석 중..." : "쿼리 분석"}
                   </button>
+                  <button className="ai-btn" onClick={optimizeCurrent} disabled={aiLoading}>
+                    {aiLoading ? "분석 중..." : "최적화 제안"}
+                  </button>
                 </div>
               </div>
             )}
@@ -3902,9 +4091,9 @@ function App() {
             {aiResult && (
               <div className="ai-section ai-result-section">
                 <div className="ai-section-title">
-                  {aiResult.type === "explain" ? "분석 결과" : "생성된 SQL"}
+                  {aiResult.type === "explain" ? "분석 결과" : aiResult.type === "optimize" ? "최적화 제안" : "생성된 SQL"}
                 </div>
-                {aiResult.type === "explain" ? (
+                {aiResult.type === "explain" || aiResult.type === "optimize" ? (
                   <div className="ai-result-text">{aiResult.content}</div>
                 ) : (
                   <pre className="ai-result-sql">{aiResult.content}</pre>

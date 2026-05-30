@@ -1,408 +1,569 @@
--- RustDB 통합 테스트 v2.2.0
+-- RustDB 통합 테스트 v2.2.0 (사내 HR·프로젝트 관리)
+-- 테이블: department (5행) / employee (15행, 주 테이블) / project (7행)
+-- FK: employee.department_id → department SET NULL
+--     project.department_id  → department RESTRICT
+--     project.lead_id        → employee   CASCADE
 
--- 초기화
-DROP USER IF EXISTS 'usr'@'%';
-DROP DATABASE IF EXISTS db1;
-CREATE DATABASE db1;
-USE db1;
+-- Init
+DROP USER IF EXISTS 'testuser'@'%';
+DROP DATABASE IF EXISTS company;
+CREATE DATABASE company;
+USE company;
 
--- DDL
-CREATE TABLE dept (
-    id     INT AUTO INCREMENT,
-    name   VARCHAR(30) NOT NULL,
-    budget INT DEFAULT 0,
-    CONSTRAINT pk_dept PRIMARY KEY (id),
-    UNIQUE KEY uk_name (name)
+-- DDL: Tables
+CREATE TABLE department (
+    id            INT            AUTO INCREMENT,
+    code          VARCHAR(10)    NOT NULL,
+    name          VARCHAR(100)   NOT NULL,
+    budget        DECIMAL(15,2)  DEFAULT 0.00 CHECK (budget >= 0),
+    annual_target BIGINT         DEFAULT 0,
+    headcount     SMALLINT       DEFAULT 0 CHECK (headcount >= 0),
+    floor_num     TINYINT        DEFAULT 1,
+    is_active     BOOLEAN        DEFAULT true,
+    established   DATE,
+    open_time     TIME,
+    fiscal_year   YEAR,
+    description   TEXT,
+    metadata      JSON,
+    dept_type     ENUM('engineering','sales','marketing','finance','hr','ops','legal'),
+    perks         SET('gym','cafe','parking','library','childcare'),
+    CONSTRAINT pk_dept       PRIMARY KEY (id),
+    UNIQUE KEY uq_dept_code (code),
+    UNIQUE KEY uq_dept_name (name)
 );
-CREATE TABLE emp (
-    id      INT AUTO INCREMENT,
-    name    VARCHAR(30) NOT NULL,
-    dept_id INT,
-    salary  INT CHECK (salary > 0),
-    hdate   DATE,
-    status  ENUM('active','inactive') DEFAULT 'active',
-    CONSTRAINT pk_emp PRIMARY KEY (id),
-    CONSTRAINT fk_emp FOREIGN KEY (dept_id) REFERENCES dept(id) ON DELETE SET NULL
-);
-CREATE TABLE sal (
-    id     INT AUTO INCREMENT,
-    eid    INT,
-    amount INT CHECK (amount > 0),
-    grade  ENUM('S1','S2','S3','S4','S5'),
-    CONSTRAINT pk_sal PRIMARY KEY (id),
-    CONSTRAINT fk_sal FOREIGN KEY (eid) REFERENCES emp(id) ON DELETE CASCADE,
-    INDEX idx_sal_grade (grade)
-);
-CREATE TABLE org (id INT PRIMARY KEY AUTO INCREMENT, name VARCHAR(30), pid INT);
-CREATE TABLE tags (id INT PRIMARY KEY AUTO INCREMENT, val ENUM('a','b','c'), set_col SET('X','Y','Z'));
-CREATE TABLE nums (id INT PRIMARY KEY AUTO INCREMENT, big_val BIGINT, small_val SMALLINT, tiny_val TINYINT);
-CREATE TABLE jdata (id INT PRIMARY KEY AUTO INCREMENT, info JSON);
-CREATE TABLE audit_log (id INT PRIMARY KEY AUTO INCREMENT, msg VARCHAR(100));
-CREATE INDEX idx_dept ON emp (dept_id);
-CREATE INDEX idx_ds ON emp (dept_id, salary);
-CREATE VIEW v_active AS SELECT id, name, dept_id FROM emp WHERE status = 'active';
 
--- DDL 확인
+CREATE TABLE employee (
+    id               INT            AUTO INCREMENT,
+    employee_code    BIGINT         NOT NULL,
+    first_name       VARCHAR(50)    NOT NULL,
+    last_name        VARCHAR(50)    NOT NULL,
+    email            VARCHAR(100)   NOT NULL,
+    birth_date       DATE,
+    hire_date        DATE           NOT NULL,
+    termination_date DATETIME,
+    created_at       TIMESTAMP,
+    salary           DECIMAL(12,2)  CHECK (salary > 0),
+    hourly_rate      FLOAT          DEFAULT 0.0,
+    performance      DOUBLE         DEFAULT 0.0 CHECK (performance BETWEEN 0.0 AND 10.0),
+    department_id    INT,
+    manager_id       INT,
+    job_title        VARCHAR(100),
+    emp_type         ENUM('full_time','part_time','contract','intern') DEFAULT 'full_time',
+    skills           SET('python','java','rust','sql','ml','devops','design'),
+    experience_years TINYINT        DEFAULT 0,
+    is_manager       BOOLEAN        DEFAULT false,
+    annual_leave     SMALLINT       DEFAULT 20,
+    resume_data      BLOB,
+    personal_data    JSON,
+    bio              TEXT,
+    CONSTRAINT pk_employee   PRIMARY KEY (id),
+    UNIQUE KEY uq_emp_code   (employee_code),
+    UNIQUE KEY uq_emp_email  (email),
+    CONSTRAINT fk_emp_dept   FOREIGN KEY (department_id) REFERENCES department(id) ON DELETE SET NULL ON UPDATE CASCADE
+);
+
+CREATE TABLE project (
+    id            INT            AUTO INCREMENT,
+    code          VARCHAR(20)    NOT NULL,
+    name          VARCHAR(200)   NOT NULL,
+    description   TEXT,
+    budget        DECIMAL(15,2)  DEFAULT 0.00 CHECK (budget >= 0),
+    alloc_hours   BIGINT         DEFAULT 0,
+    team_size     SMALLINT       DEFAULT 1,
+    priority      TINYINT        DEFAULT 3 CHECK (priority BETWEEN 1 AND 5),
+    start_date    DATE,
+    end_date      DATE,
+    deadline      DATETIME,
+    updated_at    TIMESTAMP,
+    revenue       FLOAT          DEFAULT 0.0,
+    completion    DOUBLE         DEFAULT 0.0 CHECK (completion BETWEEN 0.0 AND 100.0),
+    department_id INT            NOT NULL,
+    lead_id       INT,
+    status        ENUM('planning','active','on_hold','completed','cancelled') DEFAULT 'planning',
+    tech_stack    SET('frontend','backend','database','mobile','cloud','ai','security'),
+    is_public     BOOLEAN        DEFAULT false,
+    contract_data JSON,
+    CONSTRAINT pk_project    PRIMARY KEY (id),
+    UNIQUE KEY uq_proj_code  (code),
+    CONSTRAINT fk_proj_dept  FOREIGN KEY (department_id) REFERENCES department(id) ON DELETE RESTRICT ON UPDATE CASCADE,
+    CONSTRAINT fk_proj_lead  FOREIGN KEY (lead_id)       REFERENCES employee(id)  ON DELETE CASCADE  ON UPDATE CASCADE
+);
+
+-- DDL: Indexes
+CREATE INDEX idx_dept_type     ON department (dept_type);
+CREATE INDEX idx_dept_active   ON department (is_active);
+
+CREATE INDEX idx_emp_dept      ON employee (department_id);
+CREATE INDEX idx_emp_type      ON employee (emp_type);
+CREATE INDEX idx_emp_dept_sal  ON employee (department_id, salary);
+
+CREATE INDEX idx_proj_dept     ON project (department_id);
+CREATE INDEX idx_proj_status   ON project (status);
+CREATE INDEX idx_proj_dates    ON project (start_date, end_date);
+
+-- DDL: Views
+CREATE VIEW v_active_dept    AS SELECT id, code, name, budget, dept_type, headcount FROM department WHERE is_active = true;
+CREATE VIEW v_dept_finance   AS SELECT id, name, budget, annual_target, fiscal_year FROM department;
+
+CREATE VIEW v_active_emp     AS SELECT id, first_name, last_name, email, department_id, job_title FROM employee WHERE termination_date IS NULL;
+CREATE VIEW v_manager        AS SELECT id, first_name, last_name, department_id, salary, performance FROM employee WHERE is_manager = true;
+CREATE VIEW v_senior_emp     AS SELECT id, first_name, last_name, experience_years, salary, skills FROM employee WHERE experience_years >= 7;
+
+CREATE VIEW v_active_proj    AS SELECT id, code, name, status, priority, department_id FROM project WHERE status = 'active';
+CREATE VIEW v_high_priority  AS SELECT id, name, priority, budget, department_id FROM project WHERE priority <= 2;
+
+-- DDL: Verify
 SHOW TABLES;
-DESCRIBE emp;
-SHOW INDEX FROM emp;
-SHOW CREATE TABLE emp;
-SHOW CREATE VIEW v_active;
-CREATE DATABASE IF NOT EXISTS db1;
-CREATE TABLE IF NOT EXISTS dept (dummy INT);
+DESCRIBE employee;
+SHOW INDEX FROM project;
+SHOW CREATE TABLE employee;
+SHOW CREATE VIEW v_active_emp;
+CREATE DATABASE IF NOT EXISTS company;
+CREATE TABLE IF NOT EXISTS department (dummy INT);
 
 -- INSERT
-INSERT INTO dept (name, budget) VALUES ('Eng',1000),('Mkt',800),('Fin',1200);
-INSERT INTO emp (name, dept_id, salary, hdate, status) VALUES
-    ('Alice',1,900,'2020-01-15','active'),('Bob',1,800,'2021-06-01','active'),
-    ('Carol',2,700,'2019-11-20','inactive'),('Dave',2,600,'2022-03-10','active'),
-    ('Eve',3,1200,'2015-05-01','active'),('Frank',NULL,500,'2023-07-01','active');
-INSERT INTO sal (eid, amount, grade) VALUES (1,900,'S4'),(2,800,'S3'),(3,700,'S3'),(4,600,'S2'),(5,1200,'S5'),(6,500,'S1');
-INSERT INTO org (name, pid) VALUES ('CEO',NULL),('CTO',1),('CFO',1),('Lead',2),('Alice',4),('Bob',4);
-INSERT INTO tags (val, set_col) VALUES ('a','X,Y'),('b','Z');
-INSERT INTO nums (big_val, small_val, tiny_val) VALUES (9223372036854775807,32767,127);
-INSERT INTO jdata (info) VALUES ('{"name":"Alice","age":30,"score":95.5}'),('{"name":"Bob","age":25}');
+INSERT INTO department (code, name, budget, annual_target, headcount, floor_num, is_active, established, open_time, fiscal_year, description, metadata, dept_type, perks) VALUES
+    ('ENG','Engineering',      5000000.00,10000000,20,3,true, '2010-01-15','09:00:00',2024,'Core product development',  '{"building":"A","room":3}','engineering','gym,cafe,parking'),
+    ('MKT','Marketing',        1500000.00, 3000000, 8,2,true, '2012-06-01','08:30:00',2024,'Brand and growth',          '{"building":"B","room":2}','marketing',  'cafe,parking'),
+    ('FIN','Finance',          1200000.00, 2000000, 5,4,true, '2011-03-10','09:00:00',2024,'Financial planning',        '{"building":"A","room":4}','finance',    'cafe,library'),
+    ('HRS','Human Resources',   600000.00,  800000, 4,1,true, '2013-09-01','08:00:00',2024,'Talent management',         '{"building":"C","room":1}','hr',         'gym,cafe,childcare'),
+    ('OPS','Operations',       2000000.00, 4000000,12,2,false,'2014-11-15','07:00:00',2023,'Cloud infrastructure',      '{"building":"D","room":2}','ops',        'parking');
+
+INSERT INTO employee (employee_code,first_name,last_name,email,birth_date,hire_date,salary,hourly_rate,performance,department_id,manager_id,job_title,emp_type,skills,experience_years,is_manager,annual_leave,personal_data,bio) VALUES
+    (1001,'Alice', 'Johnson', 'alice.j@co.com',  '1990-05-15','2018-03-01',120000.00, 0.0,9.5,1,NULL,'Sr Engineer',  'full_time','python,rust,sql,devops', 8,true, 25,'{"emergency":"Bob"}',    'Systems programmer'),
+    (1002,'Bob',   'Smith',   'bob.s@co.com',    '1988-11-20','2016-07-15', 95000.00, 0.0,8.0,1,   1,'Backend Eng',  'full_time','java,sql,devops',        10,false,20,'{"emergency":"Alice"}', 'API specialist'),
+    (1003,'Carol', 'Williams','carol.w@co.com',  '1993-02-28','2020-01-10', 85000.00, 0.0,7.5,2,NULL,'Mkt Manager',  'full_time','design,python',           5,true, 20,'{"emergency":"Dave"}',  'Brand expert'),
+    (1004,'Dave',  'Brown',   'dave.b@co.com',   '1995-08-10','2021-06-01', 75000.00, 0.0,8.5,2,   3,'Content Spec', 'full_time','design',                  4,false,20,'{"emergency":"Carol"}','Strategist'),
+    (1005,'Eve',   'Davis',   'eve.d@co.com',    '1985-12-01','2012-04-20',140000.00, 0.0,9.8,3,NULL,'Finance Dir',  'full_time','sql,ml',                 14,true, 30,'{"emergency":"Frank"}','Risk expert'),
+    (1006,'Frank', 'Miller',  'frank.m@co.com',  '1992-07-25','2019-09-15', 78000.00, 0.0,7.0,3,   5,'Analyst',      'full_time','sql,python',              6,false,20,'{"emergency":"Eve"}',   'Quant analyst'),
+    (1007,'Grace', 'Wilson',  'grace.w@co.com',  '1997-04-12','2022-02-01', 65000.00,55.0,8.2,4,NULL,'HR Spec',      'full_time','design',                  3,false,20,'{"emergency":"Henry"}', 'Talent acq'),
+    (1008,'Henry', 'Moore',   'henry.m@co.com',  '1991-09-30','2017-11-01', 90000.00, 0.0,8.8,1,   1,'DevOps Eng',   'full_time','rust,devops,sql',         8,false,22,'{"emergency":"Grace"}', 'Infra specialist'),
+    (1009,'Iris',  'Taylor',  'iris.t@co.com',   '1999-01-05','2023-08-15', 55000.00,30.0,7.8,1,   1,'Jr Developer', 'part_time','python,sql',              2,false,15,'{"emergency":"Jack"}',  'Full-stack dev'),
+    (1010,'Jack',  'Anderson','jack.a@co.com',   '1994-06-18','2020-05-10', 70000.00, 0.0,6.5,NULL,NULL,'Consultant','contract', 'sql,ml',                  7,false,10,'{"emergency":"Iris"}',  'Data consultant'),
+    (1011,'Karen', 'Lee',     'karen.l@co.com',  '1989-03-22','2015-08-01',110000.00, 0.0,9.2,1,NULL,'Lead Eng',     'full_time','python,rust,devops',      11,true, 25,'{"emergency":"Liam"}',  'Platform lead'),
+    (1012,'Liam',  'Chen',    'liam.c@co.com',   '1996-11-14','2021-03-15', 80000.00, 0.0,7.9,2,   3,'Mkt Analyst',  'full_time','python,design',           4,false,20,'{"emergency":"Karen"}','Data marketer'),
+    (1013,'Mia',   'Garcia',  'mia.g@co.com',    '1998-07-30','2022-09-01', 72000.00, 0.0,8.1,3,   5,'Jr Analyst',   'full_time','sql',                     2,false,20,'{"emergency":"Noah"}',  'Financial data'),
+    (1014,'Noah',  'Kim',     'noah.k@co.com',   '1987-04-05','2013-06-20', 95000.00, 0.0,8.6,5,NULL,'Ops Manager',  'full_time','devops,sql',             12,true, 25,'{"emergency":"Olivia"}','Cloud ops'),
+    (1015,'Olivia','Park',    'olivia.p@co.com', '1993-12-18','2020-11-10', 62000.00, 0.0,7.3,4,NULL,'HR Analyst',   'full_time','design,python',           4,false,20,'{"emergency":"Grace"}', 'People analytics');
+
+INSERT INTO project (code,name,description,budget,alloc_hours,team_size,priority,start_date,end_date,deadline,revenue,completion,department_id,lead_id,status,tech_stack,is_public,contract_data) VALUES
+    ('PRJ-001','Core Platform Rewrite',   'Legacy to Rust',         2000000.00,5000,8,1,'2024-01-01','2024-12-31','2025-01-01 00:00:00',8000000.0, 45.0,1,1, 'active',   'backend,database,cloud',   false,'{"client":"internal","type":"capex"}'),
+    ('PRJ-002','AI Engine',               'ML recommendations',     1500000.00,3000,5,2,'2024-03-01','2024-09-30','2024-10-01 00:00:00',5000000.0, 70.0,1,11,'active',   'backend,ai,database',       false,'{"client":"internal","type":"opex"}'),
+    ('PRJ-003','Brand Refresh',           'Identity overhaul',       500000.00,1000,4,2,'2024-02-15','2024-06-30','2024-07-01 00:00:00',      0.0,100.0,2,3, 'completed','frontend,ai',               true, '{"client":"external","type":"marketing"}'),
+    ('PRJ-004','Finance Dashboard',       'Real-time reporting',     800000.00,2000,6,3,'2024-04-01',NULL,        '2024-11-01 00:00:00',2000000.0, 30.0,3,5, 'active',   'frontend,backend,database', false,'{"client":"internal","type":"capex"}'),
+    ('PRJ-005','HR Portal',               'Self-service system',     400000.00,1500,3,3,'2024-06-01',NULL,        '2025-03-01 00:00:00',      0.0, 10.0,4,7, 'planning', 'frontend,backend,database', false,'{"client":"internal","type":"opex"}'),
+    ('PRJ-006','Mobile App MVP',          'iOS and Android',        1200000.00,4000,7,1,'2023-09-01','2024-05-31','2024-06-01 00:00:00',3000000.0,100.0,1,8, 'completed','mobile,backend,cloud',      true, '{"client":"external","type":"revenue"}'),
+    ('PRJ-007','Cloud Infra',             'Multi-cloud setup',       900000.00,2500,5,2,'2024-05-01',NULL,        '2025-01-01 00:00:00',1000000.0, 25.0,5,14,'active',   'cloud,security,backend',    false,'{"client":"internal","type":"capex"}');
 
 -- SELECT
-SELECT id, name, salary FROM emp WHERE salary >= 700 AND status = 'active' ORDER BY salary DESC;
-SELECT name FROM emp ORDER BY id LIMIT 3 OFFSET 1;
-SELECT DISTINCT status FROM emp ORDER BY status;
-SELECT name FROM emp WHERE dept_id IN (1,2) AND salary BETWEEN 600 AND 900;
-SELECT name FROM emp WHERE name LIKE 'A%' OR dept_id IS NULL;
-SELECT name FROM emp WHERE name REGEXP '^[AB]';
-SELECT name, REGEXP_LIKE(name,'^A') AS sa, REGEXP_REPLACE(name,'a','@') AS rr FROM emp LIMIT 2;
+SELECT id, first_name, last_name, salary FROM employee WHERE salary >= 80000 AND emp_type = 'full_time' ORDER BY salary DESC;
+SELECT first_name, last_name FROM employee ORDER BY hire_date LIMIT 3 OFFSET 1;
+SELECT DISTINCT emp_type FROM employee ORDER BY emp_type;
+SELECT first_name FROM employee WHERE department_id IN (1,2) AND salary BETWEEN 70000 AND 130000;
+SELECT first_name, last_name FROM employee WHERE first_name LIKE 'A%' OR department_id IS NULL;
+SELECT first_name FROM employee WHERE first_name REGEXP '^[AEI]';
+SELECT first_name, REGEXP_LIKE(first_name,'^A') AS starts_a, REGEXP_REPLACE(email,'@co.com','') AS username FROM employee LIMIT 3;
+SELECT name, budget FROM department WHERE NOT (budget < 1000000);
+SELECT id, metadata->>'$.building' AS building, metadata->>'$.room' AS room FROM department ORDER BY id;
+SELECT id, personal_data->>'$.emergency' AS emergency FROM employee LIMIT 4;
+SELECT id, JSON_EXTRACT(contract_data,'$.type') AS contract_type, JSON_VALUE(contract_data,'$.client') AS client FROM project ORDER BY id LIMIT 4;
 
--- 집계
-SELECT COUNT(*), SUM(amount), AVG(amount), MAX(amount), MIN(amount) FROM sal;
-SELECT grade, COUNT(*) AS n, AVG(amount) AS avg_sal FROM sal GROUP BY grade HAVING n >= 1 ORDER BY avg_sal DESC;
-SELECT dept_id, GROUP_CONCAT(name SEPARATOR ', ') AS members FROM emp GROUP BY dept_id ORDER BY dept_id;
-SELECT COUNT(DISTINCT grade), SUM(DISTINCT amount), STDDEV(amount), VARIANCE(amount) FROM sal;
+-- Aggregate
+SELECT COUNT(*), SUM(salary), AVG(salary), MAX(salary), MIN(salary) FROM employee;
+SELECT department_id, COUNT(*) AS headcount, AVG(salary) AS avg_salary FROM employee GROUP BY department_id HAVING headcount >= 2 ORDER BY avg_salary DESC;
+SELECT emp_type, GROUP_CONCAT(first_name SEPARATOR ', ') AS names FROM employee GROUP BY emp_type ORDER BY emp_type;
+SELECT COUNT(DISTINCT department_id), SUM(DISTINCT budget), STDDEV(budget), VARIANCE(budget) FROM project;
+SELECT emp_type, COUNT(*) AS n, SUM(salary) AS total FROM employee GROUP BY emp_type ORDER BY total DESC;
 
 -- JOIN
-SELECT e.name, d.name AS dept, s.amount FROM emp e JOIN dept d ON e.dept_id=d.id JOIN sal s ON e.id=s.eid ORDER BY s.amount DESC;
-SELECT e.name, d.name FROM emp e LEFT JOIN dept d ON e.dept_id=d.id ORDER BY e.id;
-SELECT d.name, e.name FROM dept d RIGHT JOIN emp e ON d.id=e.dept_id ORDER BY e.id LIMIT 3;
-SELECT d.name, e.name FROM dept d FULL OUTER JOIN emp e ON d.id=e.dept_id ORDER BY e.id LIMIT 5;
-SELECT d.name, e.name FROM dept d CROSS JOIN emp e ORDER BY d.name LIMIT 6;
-SELECT e.name, s.amount FROM emp e NATURAL JOIN sal s ORDER BY e.name LIMIT 3;
+SELECT e.first_name, e.last_name, d.name AS dept_name, e.salary FROM employee e JOIN department d ON e.department_id = d.id ORDER BY e.salary DESC;
+SELECT e.first_name, d.name AS dept, p.name AS project, p.status FROM employee e JOIN project p ON e.id = p.lead_id JOIN department d ON e.department_id = d.id ORDER BY e.first_name;
+SELECT e.first_name, d.name AS dept_name FROM employee e LEFT JOIN department d ON e.department_id = d.id ORDER BY e.id;
+SELECT d.name AS dept_name, p.name AS proj_name FROM department d RIGHT JOIN project p ON d.id = p.department_id ORDER BY p.id LIMIT 5;
+SELECT d.name, p.name AS project FROM department d FULL OUTER JOIN project p ON d.id = p.department_id ORDER BY d.name LIMIT 8;
+SELECT d.name AS dept, e.first_name FROM department d CROSS JOIN employee e ORDER BY d.name, e.id LIMIT 6;
 
--- 서브쿼리
-SELECT name FROM emp WHERE id IN (SELECT eid FROM sal WHERE amount > 800);
-SELECT eid, amount FROM sal WHERE amount > (SELECT AVG(amount) FROM sal);
-SELECT name FROM emp WHERE EXISTS (SELECT 1 FROM sal WHERE eid=emp.id AND amount > 1000);
-SELECT grade, avg_a FROM (SELECT grade, AVG(amount) AS avg_a FROM sal GROUP BY grade) AS g WHERE avg_a > 700;
-SELECT name, (SELECT MAX(salary) FROM emp) AS max_sal FROM emp ORDER BY salary DESC LIMIT 2;
+-- Subquery
+SELECT first_name, salary FROM employee WHERE salary > (SELECT AVG(salary) FROM employee);
+SELECT first_name, last_name FROM employee WHERE id IN (SELECT lead_id FROM project WHERE budget > 1000000);
+SELECT first_name FROM employee WHERE EXISTS (SELECT 1 FROM project p WHERE p.lead_id = employee.id AND p.status = 'active');
+SELECT status, avg_completion FROM (SELECT status, AVG(completion) AS avg_completion FROM project GROUP BY status) AS sub WHERE avg_completion > 30;
+SELECT first_name, (SELECT MAX(salary) FROM employee) AS max_salary FROM employee ORDER BY salary DESC LIMIT 3;
+SELECT name FROM project WHERE department_id NOT IN (SELECT id FROM department WHERE is_active = false);
 
 -- UNION / INTERSECT / EXCEPT
-SELECT name FROM emp WHERE dept_id=1 UNION SELECT name FROM emp WHERE dept_id=3;
-SELECT eid FROM sal WHERE grade='S5' UNION ALL SELECT eid FROM sal WHERE grade='S1' ORDER BY eid;
-SELECT eid FROM sal WHERE amount > 700 INTERSECT SELECT eid FROM sal WHERE grade != 'S1';
-SELECT eid FROM sal EXCEPT SELECT eid FROM sal WHERE amount < 700;
+SELECT first_name AS label, 'employee' AS entity FROM employee WHERE department_id = 1
+UNION
+SELECT name, 'project' AS entity FROM project WHERE department_id = 1
+ORDER BY label;
+
+SELECT lead_id AS person_id FROM project WHERE status = 'active'
+UNION ALL
+SELECT lead_id FROM project WHERE completion >= 50
+ORDER BY person_id;
+
+SELECT lead_id FROM project WHERE budget >= 1000000
+INTERSECT
+SELECT lead_id FROM project WHERE status = 'active';
+
+SELECT id FROM employee
+EXCEPT
+SELECT lead_id FROM project WHERE lead_id IS NOT NULL;
 
 -- CTE
-WITH top AS (SELECT eid, amount FROM sal WHERE amount > 800)
-SELECT e.name, t.amount FROM top t JOIN emp e ON e.id=t.eid ORDER BY t.amount DESC;
-
--- 재귀 CTE
-WITH RECURSIVE h AS (
-    SELECT id, name, pid, 0 AS depth FROM org WHERE pid IS NULL
-    UNION ALL
-    SELECT o.id, o.name, o.pid, h.depth+1 FROM org o JOIN h ON o.pid=h.id
+WITH high_performer AS (
+    SELECT id, first_name, last_name, salary, department_id FROM employee WHERE performance >= 9.0
 )
-SELECT id, name, depth FROM h ORDER BY depth, id;
+SELECT hp.first_name, hp.salary, d.name AS department
+FROM high_performer hp JOIN department d ON hp.department_id = d.id ORDER BY hp.salary DESC;
 
--- 윈도우 함수
-SELECT name, salary,
-    ROW_NUMBER() OVER (ORDER BY salary DESC) AS rn,
-    RANK() OVER (PARTITION BY dept_id ORDER BY salary DESC) AS rnk,
-    DENSE_RANK() OVER (PARTITION BY dept_id ORDER BY salary DESC) AS drnk,
-    LAG(salary,1) OVER (PARTITION BY dept_id ORDER BY salary) AS prev,
-    LEAD(salary,1) OVER (PARTITION BY dept_id ORDER BY salary) AS nxt,
-    FIRST_VALUE(salary) OVER (PARTITION BY dept_id ORDER BY salary DESC) AS top_sal
-FROM emp WHERE dept_id IS NOT NULL ORDER BY dept_id, salary DESC;
-SELECT eid, amount,
-    SUM(amount) OVER (ORDER BY eid ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS running,
-    AVG(amount) OVER (ORDER BY eid ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING) AS moving,
-    NTH_VALUE(amount,2) OVER (ORDER BY eid ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS nth2,
-    NTILE(3) OVER (ORDER BY amount) AS bucket,
-    PERCENT_RANK() OVER (ORDER BY amount) AS pct_rank,
-    CUME_DIST() OVER (ORDER BY amount) AS cume_d
-FROM sal ORDER BY eid;
+WITH dept_stats AS (
+    SELECT department_id, COUNT(*) AS headcount, SUM(salary) AS total_salary FROM employee GROUP BY department_id
+),
+proj_count AS (
+    SELECT department_id, COUNT(*) AS num_projects FROM project GROUP BY department_id
+)
+SELECT d.name, ds.headcount, ds.total_salary, pc.num_projects
+FROM department d
+LEFT JOIN dept_stats ds ON d.id = ds.department_id
+LEFT JOIN proj_count pc ON d.id = pc.department_id
+ORDER BY d.id;
 
--- 스칼라 함수 (문자열)
-SELECT UPPER(name), LOWER(name), LENGTH(name), CONCAT(name,'@co'), SUBSTR(name,1,2),
-    REPLACE(name,'Alice','Alex'), LPAD(id,4,'0'), CHAR_LENGTH(name), LEFT(name,2),
-    REVERSE(name), REPEAT('ab',2), INSTR(name,'l'), ASCII('A'), HEX(255), FORMAT(1234.5,1) FROM emp LIMIT 2;
+WITH RECURSIVE mgmt_tree AS (
+    SELECT id, first_name, last_name, manager_id, 0 AS depth
+    FROM employee WHERE manager_id IS NULL
+    UNION ALL
+    SELECT e.id, e.first_name, e.last_name, e.manager_id, t.depth + 1
+    FROM employee e JOIN mgmt_tree t ON e.manager_id = t.id
+)
+SELECT id, first_name, last_name, depth FROM mgmt_tree ORDER BY depth, id;
 
--- 스칼라 함수 (수학)
-SELECT ROUND(3.567,1), ABS(-9), CEIL(3.1), FLOOR(3.9), MOD(7,3), SQRT(16), POW(2,8),
-    LOG2(8), LOG10(100), PI(), SIGN(-1), TRUNCATE(3.789,1), RAND() >= 0 AS rand_ok;
+-- Window Functions
+SELECT first_name, salary,
+    ROW_NUMBER()   OVER (ORDER BY salary DESC)                                    AS overall_rank,
+    RANK()         OVER (PARTITION BY department_id ORDER BY salary DESC)         AS dept_rank,
+    DENSE_RANK()   OVER (PARTITION BY department_id ORDER BY salary DESC)         AS dept_dense,
+    LAG(salary,1)  OVER (PARTITION BY department_id ORDER BY salary)              AS prev_salary,
+    LEAD(salary,1) OVER (PARTITION BY department_id ORDER BY salary)              AS next_salary,
+    FIRST_VALUE(salary) OVER (PARTITION BY department_id ORDER BY salary DESC)    AS top_in_dept
+FROM employee WHERE department_id IS NOT NULL ORDER BY department_id, salary DESC;
 
--- 스칼라 함수 (날짜)
-SELECT YEAR(hdate), MONTH(hdate), DAY(hdate), DAYOFWEEK(hdate),
-    DATEDIFF('2026-05-01',hdate) AS days, DATE_FORMAT(hdate,'%Y-%m') AS ym,
-    DATE_ADD(hdate, INTERVAL 30 DAY), TIMESTAMPDIFF(YEAR,hdate,'2026-05-01') AS yrs FROM emp LIMIT 2;
+SELECT id, salary,
+    SUM(salary)  OVER (ORDER BY id ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS running_total,
+    AVG(salary)  OVER (ORDER BY id ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING)         AS moving_avg,
+    NTH_VALUE(salary,2) OVER (ORDER BY id ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS second_val,
+    NTILE(3)     OVER (ORDER BY salary)   AS bucket,
+    PERCENT_RANK() OVER (ORDER BY salary) AS pct_rank,
+    CUME_DIST()  OVER (ORDER BY salary)   AS cume_d
+FROM employee ORDER BY id;
 
--- 스칼라 함수 (조건/기타)
-SELECT COALESCE(dept_id,-1), IFNULL(dept_id,-1), NULLIF(salary,900),
-    GREATEST(1,5,3), LEAST(1,5,3), CAST('42' AS INT),
-    IF(salary>800,'High','Normal'), CASE WHEN salary>=1000 THEN 'Exec' ELSE 'Other' END,
-    MD5('hello'), LENGTH(UUID()) > 0 AS uuid_ok FROM emp LIMIT 2;
+SELECT department_id,
+    SUM(budget)    OVER (PARTITION BY department_id) AS dept_budget_total,
+    COUNT(*)       OVER (PARTITION BY department_id) AS dept_proj_count,
+    MAX(completion) OVER (PARTITION BY department_id) AS max_completion
+FROM project ORDER BY department_id;
 
--- INSERT 변형
-INSERT IGNORE INTO dept (name) VALUES ('Eng');
-INSERT INTO emp (id,name,dept_id,salary) VALUES (1,'Alice',1,9999) ON DUPLICATE KEY UPDATE salary=9999;
-SELECT id, name, salary FROM emp WHERE id=1;
-UPDATE emp SET salary=salary-99 WHERE id=1;
-CREATE TABLE bak (id INT PRIMARY KEY, eid INT, amount INT);
-INSERT INTO bak SELECT id, eid, amount FROM sal WHERE amount > 800;
-SELECT * FROM bak ORDER BY amount DESC;
-TRUNCATE TABLE bak;
-DROP TABLE bak;
+-- Scalar Functions
+SELECT UPPER(first_name), LOWER(last_name), LENGTH(email), CONCAT(first_name,' ',last_name) AS full_name FROM employee LIMIT 3;
+SELECT SUBSTR(email,1,5) AS prefix, REPLACE(email,'@co.com','') AS username, LPAD(id,5,'0') AS padded FROM employee LIMIT 3;
+SELECT LEFT(first_name,3) AS pfx, REVERSE(last_name) AS rev, REPEAT('-',3) AS sep, INSTR(email,'@') AS at_pos, ASCII('A') AS ascii_a, HEX(255) AS hex_val, FORMAT(salary,0) AS fmt_sal FROM employee LIMIT 3;
+SELECT ROUND(3.14159,2), ABS(-9.99), CEIL(2.1), FLOOR(2.9), MOD(17,5), SQRT(144), POW(2,10), LOG2(1024), LOG10(1000), PI(), SIGN(-1), TRUNCATE(9.876,1), RAND() >= 0 AS rand_ok;
+SELECT YEAR(hire_date), MONTH(hire_date), DAY(hire_date), DAYOFWEEK(hire_date), DATEDIFF('2026-05-01',hire_date) AS days_employed, DATE_FORMAT(hire_date,'%Y-%m') AS hire_month, DATE_ADD(hire_date, INTERVAL 1 YEAR) AS anniversary, TIMESTAMPDIFF(YEAR,hire_date,'2026-05-01') AS years_employed FROM employee LIMIT 3;
+SELECT COALESCE(department_id,-1) AS dept_or_default, IFNULL(department_id,-1) AS dept_ifnull, NULLIF(emp_type,'contract') AS nullif_contract, GREATEST(1,5,3), LEAST(1,5,3), CAST(experience_years AS INT) AS exp_int, IF(salary>100000,'Senior','Standard') AS emp_level, CASE WHEN salary >= 120000 THEN 'Senior' WHEN salary >= 80000 THEN 'Mid' ELSE 'Junior' END AS grade, MD5(email), LENGTH(UUID()) > 0 AS uuid_ok FROM employee LIMIT 3;
+
+-- INSERT Variants
+INSERT IGNORE INTO department (code, name, budget, dept_type) VALUES ('ENG', 'Engineering Dup', 0, 'engineering');
+
+INSERT INTO employee (employee_code,first_name,last_name,email,hire_date,salary,department_id)
+    VALUES (1001,'Alice','Johnson','alice.j@co.com','2018-03-01',130000,1)
+    ON DUPLICATE KEY UPDATE salary=130000;
+SELECT id, first_name, salary FROM employee WHERE employee_code=1001;
+UPDATE employee SET salary=120000 WHERE employee_code=1001;
+
+CREATE TABLE project_backup (id INT PRIMARY KEY, code VARCHAR(20), name VARCHAR(200), budget DECIMAL(15,2));
+INSERT INTO project_backup SELECT id, code, name, budget FROM project WHERE status='completed';
+SELECT * FROM project_backup ORDER BY id;
+TRUNCATE TABLE project_backup;
+DROP TABLE project_backup;
 
 -- RETURNING
-INSERT INTO dept (name,budget) VALUES ('Tmp',1) RETURNING id, name;
-DELETE FROM dept WHERE name='Tmp' RETURNING id, name;
-UPDATE emp SET salary=salary+1 WHERE id=1 RETURNING id, salary;
-UPDATE emp SET salary=salary-1 WHERE id=1;
+INSERT INTO department (code,name,budget,dept_type) VALUES ('TMP','Temporary',0,'hr') RETURNING id, code, name;
+DELETE FROM department WHERE code='TMP' RETURNING id, name;
+UPDATE employee SET salary=salary+1000 WHERE id=1 RETURNING id, first_name, salary;
+UPDATE employee SET salary=salary-1000 WHERE id=1;
 
--- UPDATE/DELETE 다중 테이블
-UPDATE emp e, dept d SET e.salary=e.salary+100, d.budget=d.budget+1000 WHERE e.dept_id=d.id AND d.id=1;
-UPDATE emp SET salary=salary-100 WHERE dept_id=1;
-DELETE sal, emp FROM sal JOIN emp ON sal.eid=emp.id WHERE emp.status='inactive';
+-- Multi-table DML
+UPDATE employee e, department d SET e.salary=e.salary+500, d.headcount=d.headcount+1
+    WHERE e.department_id=d.id AND d.code='ENG';
+UPDATE employee SET salary=salary-500 WHERE department_id=1;
+DELETE project FROM project
+    JOIN department ON project.department_id=department.id
+    WHERE project.status='cancelled';
 
 -- ALTER TABLE
-ALTER TABLE emp ADD COLUMN email VARCHAR(50);
-UPDATE emp SET email=CONCAT(name,'@co.com') WHERE status='active';
-ALTER TABLE emp RENAME COLUMN email TO contact;
-ALTER TABLE emp DROP COLUMN contact;
-ALTER TABLE emp MODIFY COLUMN salary INT DEFAULT 0;
-ALTER TABLE audit_log ADD CONSTRAINT fk_al FOREIGN KEY (id) REFERENCES dept(id);
-ALTER TABLE audit_log ADD CONSTRAINT uq_al UNIQUE (msg);
-ALTER TABLE audit_log DROP CONSTRAINT uq_al;
-ALTER TABLE audit_log DROP FOREIGN KEY id;
+ALTER TABLE employee ADD COLUMN profile_url VARCHAR(200);
+UPDATE employee SET profile_url=CONCAT('linkedin.com/',LOWER(first_name)) WHERE id<=3;
+ALTER TABLE employee RENAME COLUMN profile_url TO linkedin_url;
+SELECT id, first_name, linkedin_url FROM employee WHERE linkedin_url IS NOT NULL ORDER BY id;
+ALTER TABLE employee DROP COLUMN linkedin_url;
+ALTER TABLE employee MODIFY COLUMN job_title VARCHAR(150) DEFAULT 'Staff';
+ALTER TABLE project ADD CONSTRAINT uq_proj_name UNIQUE (name);
+ALTER TABLE project DROP CONSTRAINT uq_proj_name;
+ALTER TABLE project ADD CONSTRAINT chk_team_size CHECK (team_size >= 1);
+ALTER TABLE project DROP CONSTRAINT chk_team_size;
 
--- ENUM/SET 제약 검증
-INSERT INTO tags (val, set_col) VALUES ('a','X');
-INSERT INTO tags (val) VALUES ('bad');              -- ERROR
-INSERT INTO tags (val, set_col) VALUES ('b','X,Q'); -- ERROR
-SELECT * FROM tags ORDER BY id;
+-- ENUM / SET validation
+INSERT INTO employee (employee_code,first_name,last_name,email,hire_date,salary,department_id,emp_type)
+    VALUES (9999,'Bad','Type','bad@co.com','2024-01-01',50000,1,'freelance');
+INSERT INTO department (code,name,budget,dept_type,perks)
+    VALUES ('BAD','Bad Dept',0,'engineering','sauna');
+SELECT code, dept_type, perks FROM department ORDER BY id LIMIT 3;
+
+-- FK behavior
+DELETE FROM department WHERE code='ENG';
+
+INSERT INTO department (code,name,budget,dept_type) VALUES ('DEL','ToDelete',1000.00,'hr');
+INSERT INTO employee (employee_code,first_name,last_name,email,hire_date,salary,department_id)
+    SELECT 8888,'Delete','Test','delete.test@co.com','2024-01-01',60000,id FROM department WHERE code='DEL';
+SELECT id, first_name, department_id FROM employee WHERE employee_code=8888;
+DELETE FROM department WHERE code='DEL';
+SELECT id, first_name, department_id FROM employee WHERE employee_code=8888;
+DELETE FROM employee WHERE employee_code=8888;
+
+INSERT INTO employee (employee_code,first_name,last_name,email,hire_date,salary,department_id)
+    VALUES (7777,'Cascade','Test','cascade.test@co.com','2024-01-01',60000,1);
+INSERT INTO project (code,name,budget,department_id,lead_id,status)
+    SELECT 'TMP-CAS','Cascade Test',0,1,id,'planning' FROM employee WHERE employee_code=7777;
+SELECT COUNT(*) AS proj_before FROM project WHERE code='TMP-CAS';
+DELETE FROM employee WHERE employee_code=7777;
+SELECT COUNT(*) AS proj_after FROM project WHERE code='TMP-CAS';
 
 -- MERGE
-CREATE TABLE dept_mrg (id INT PRIMARY KEY AUTO INCREMENT, name VARCHAR(30) NOT NULL UNIQUE, budget INT DEFAULT 0);
-INSERT INTO dept_mrg (name,budget) VALUES ('Eng',9999),('HR',500),('Mkt',0);
-MERGE INTO dept USING dept_mrg ON dept.name=dept_mrg.name
-    WHEN MATCHED AND dept_mrg.name='Mkt' THEN DELETE
-    WHEN MATCHED THEN UPDATE SET budget=dept_mrg.budget
-    WHEN NOT MATCHED THEN INSERT (name,budget) VALUES (dept_mrg.name, dept_mrg.budget);
-SELECT name, budget FROM dept ORDER BY id;
-DROP TABLE dept_mrg;
+INSERT INTO department (code,name,budget,dept_type) VALUES ('TMP','Temp Dept',0.00,'hr');
+CREATE TABLE dept_upd (code VARCHAR(10) PRIMARY KEY, name VARCHAR(100), budget DECIMAL(15,2), dept_type ENUM('engineering','sales','marketing','finance','hr','ops','legal'));
+INSERT INTO dept_upd VALUES
+    ('ENG','Engineering Pro',6000000.00,'engineering'),
+    ('TMP','Temp Closed',    0.00,'hr'),
+    ('NEW','New Division',   500000.00,'sales');
+MERGE INTO department USING dept_upd ON department.code=dept_upd.code
+    WHEN MATCHED AND dept_upd.budget=0.00 THEN DELETE
+    WHEN MATCHED THEN UPDATE SET budget=dept_upd.budget
+    WHEN NOT MATCHED THEN INSERT (code,name,budget) VALUES (dept_upd.code,dept_upd.name,dept_upd.budget);
+SELECT code, name, budget FROM department ORDER BY id;
+DROP TABLE dept_upd;
 
--- 저장 프로시저 (IF/ELSEIF)
-CREATE PROCEDURE p_if(IN n INT)
-BEGIN
-    DECLARE res VARCHAR(20) DEFAULT 'zero';
-    IF n > 0 THEN SET res = 'positive';
-    ELSEIF n < 0 THEN SET res = 'negative';
-    END IF;
-    SELECT res;
-END;
-CALL p_if(5);
-CALL p_if(-3);
-CALL p_if(0);
-DROP PROCEDURE p_if;
+-- Stored Procedures
+CREATE PROCEDURE classify_salary(IN p_salary INT) BEGIN DECLARE grade VARCHAR(20) DEFAULT 'standard'; IF p_salary >= 120000 THEN SET grade = 'senior'; ELSEIF p_salary >= 80000 THEN SET grade = 'mid'; END IF; SELECT grade AS salary_grade; END;
+CALL classify_salary(130000);
+CALL classify_salary(85000);
+CALL classify_salary(50000);
+DROP PROCEDURE classify_salary;
 
--- 저장 프로시저 (WHILE)
-CREATE PROCEDURE p_while()
-BEGIN
-    DECLARE i INT DEFAULT 1;
-    DECLARE s INT DEFAULT 0;
-    WHILE i <= 5 DO
-        SET s = s + i;
-        SET i = i + 1;
-    END WHILE;
-    SELECT s AS while_sum;
-END;
-CALL p_while();
-DROP PROCEDURE p_while;
+CREATE PROCEDURE sum_to_n(IN n INT) BEGIN DECLARE i INT DEFAULT 1; DECLARE total INT DEFAULT 0; WHILE i <= n DO SET total = total + i; SET i = i + 1; END WHILE; SELECT total AS result; END;
+CALL sum_to_n(10);
+DROP PROCEDURE sum_to_n;
 
--- 저장 프로시저 (LOOP/LEAVE/ITERATE)
-CREATE PROCEDURE p_loop()
-BEGIN
-    DECLARE i INT DEFAULT 0;
-    DECLARE s INT DEFAULT 0;
-    lp: LOOP
-        SET i = i + 1;
-        IF i > 5 THEN LEAVE lp; END IF;
-        IF MOD(i,2) = 0 THEN ITERATE lp; END IF;
-        SET s = s + i;
-    END LOOP;
-    SELECT s AS odd_sum;
-END;
-CALL p_loop();
-DROP PROCEDURE p_loop;
+CREATE PROCEDURE odd_sum(IN n INT) BEGIN DECLARE i INT DEFAULT 0; DECLARE total INT DEFAULT 0; calc: LOOP SET i = i + 1; IF i > n THEN LEAVE calc; END IF; IF MOD(i,2) = 0 THEN ITERATE calc; END IF; SET total = total + i; END LOOP; SELECT total AS odd_sum; END;
+CALL odd_sum(10);
+DROP PROCEDURE odd_sum;
 
--- 저장 프로시저 (REPEAT/UNTIL)
-CREATE PROCEDURE p_repeat()
-BEGIN
-    DECLARE n INT DEFAULT 0;
-    REPEAT
-        SET n = n + 1;
-    UNTIL n >= 5 END REPEAT;
-    SELECT n AS repeat_result;
-END;
-CALL p_repeat();
-DROP PROCEDURE p_repeat;
+CREATE PROCEDURE countdown(IN start_val INT) BEGIN DECLARE counter INT; SET counter = start_val; REPEAT SET counter = counter - 1; UNTIL counter <= 0 END REPEAT; SELECT counter AS final; END;
+CALL countdown(5);
+DROP PROCEDURE countdown;
+
+CREATE PROCEDURE double_val(IN x INT) BEGIN DECLARE result INT; SET result = x * 2; SELECT result AS doubled; END;
+CALL double_val(21);
+DROP PROCEDURE double_val;
 
 -- PREPARE / EXECUTE
-PREPARE sel FROM 'SELECT id, name, salary FROM emp WHERE id = ?';
-SET @id = 1;
-EXECUTE sel USING @id;
-SET @id = 2;
-EXECUTE sel USING @id;
-DEALLOCATE PREPARE sel;
-SET @x = 42;
-SELECT @x;
+PREPARE find_emp FROM 'SELECT id, first_name, salary FROM employee WHERE id = ?';
+SET @eid = 3;
+EXECUTE find_emp USING @eid;
+SET @eid = 5;
+EXECUTE find_emp USING @eid;
+DEALLOCATE PREPARE find_emp;
+SET @cutoff = 9.0;
+SELECT first_name, performance FROM employee WHERE performance >= 9.0 ORDER BY performance DESC;
 
--- 트리거 (INSERT / UPDATE / DELETE)
-CREATE TRIGGER trg_ins AFTER INSERT ON dept FOR EACH ROW INSERT INTO audit_log (msg) VALUES ('dept_inserted');
-INSERT INTO dept (name,budget) VALUES ('TrgTest',0);
-SELECT msg FROM audit_log ORDER BY id;
-DELETE FROM dept WHERE name='TrgTest';
-DROP TRIGGER IF EXISTS trg_ins;
+-- Triggers
+CREATE TRIGGER trg_after_insert_emp AFTER INSERT ON employee FOR EACH ROW
+    UPDATE department SET headcount = headcount + 1 WHERE id = 1;
+INSERT INTO employee (employee_code,first_name,last_name,email,hire_date,salary,department_id)
+    VALUES (6666,'Trigger','Test','trigger.test@co.com','2024-01-01',60000,2);
+SELECT headcount FROM department WHERE id=1;
+DELETE FROM employee WHERE employee_code=6666;
+DROP TRIGGER IF EXISTS trg_after_insert_emp;
 
-CREATE TRIGGER trg_upd BEFORE UPDATE ON dept FOR EACH ROW INSERT INTO audit_log (msg) VALUES ('dept_updating');
-UPDATE dept SET budget=budget WHERE name='Eng';
-SELECT msg FROM audit_log ORDER BY id DESC LIMIT 1;
-DROP TRIGGER IF EXISTS trg_upd;
+CREATE TRIGGER trg_before_update_proj BEFORE UPDATE ON project FOR EACH ROW
+    UPDATE department SET is_active=true WHERE id=1;
+UPDATE project SET budget=budget+1 WHERE code='PRJ-004';
+SELECT is_active FROM department WHERE id=1;
+UPDATE project SET budget=budget-1 WHERE code='PRJ-004';
+DROP TRIGGER IF EXISTS trg_before_update_proj;
 
-CREATE TRIGGER trg_del AFTER DELETE ON dept FOR EACH ROW INSERT INTO audit_log (msg) VALUES ('dept_deleted');
-INSERT INTO dept (name) VALUES ('TrgDel');
-DELETE FROM dept WHERE name='TrgDel';
-SELECT msg FROM audit_log ORDER BY id DESC LIMIT 1;
-DROP TRIGGER IF EXISTS trg_del;
+CREATE TRIGGER trg_after_delete_proj AFTER DELETE ON project FOR EACH ROW
+    UPDATE department SET headcount=headcount-1 WHERE id=1;
+DELETE FROM project WHERE code='PRJ-003';
+SELECT headcount FROM department WHERE id=1;
+DROP TRIGGER IF EXISTS trg_after_delete_proj;
+INSERT INTO project (code,name,budget,department_id,lead_id,status,tech_stack)
+    VALUES ('PRJ-003','Brand Refresh',500000.00,2,3,'completed','frontend,ai');
 
--- 트랜잭션 / SAVEPOINT
+-- Transactions
 BEGIN;
-INSERT INTO emp (name,dept_id,salary) VALUES ('Tmp',1,300);
-SAVEPOINT sp1;
-UPDATE emp SET salary=999 WHERE name='Tmp';
-ROLLBACK TO SAVEPOINT sp1;
+INSERT INTO employee (employee_code,first_name,last_name,email,hire_date,salary,department_id)
+    VALUES (5555,'Txn','Test','txn.test@co.com','2024-01-01',70000,1);
+SAVEPOINT sp_insert;
+UPDATE employee SET salary=999999 WHERE employee_code=5555;
+SELECT salary FROM employee WHERE employee_code=5555;
+ROLLBACK TO SAVEPOINT sp_insert;
+SELECT salary FROM employee WHERE employee_code=5555;
 COMMIT;
-SELECT name, salary FROM emp WHERE name='Tmp';
+SELECT employee_code, first_name, salary FROM employee WHERE employee_code=5555;
+DELETE FROM employee WHERE employee_code=5555;
+
 BEGIN;
-UPDATE sal SET amount=1 WHERE id=1;
+UPDATE department SET budget=0 WHERE code='ENG';
 ROLLBACK;
-SELECT amount FROM sal WHERE id=1;
+SELECT budget FROM department WHERE code='ENG';
+
 BEGIN;
-SAVEPOINT sp2;
-RELEASE SAVEPOINT sp2;
+SAVEPOINT sp_check;
+RELEASE SAVEPOINT sp_check;
 COMMIT;
 
--- 격리 수준
+-- Isolation Level
 SET ISOLATION LEVEL SERIALIZABLE;
 SHOW ISOLATION LEVEL;
 SET ISOLATION LEVEL REPEATABLE READ;
 SHOW ISOLATION LEVEL;
 SET ISOLATION LEVEL READ COMMITTED;
+SHOW ISOLATION LEVEL;
+SET ISOLATION LEVEL READ UNCOMMITTED;
+SET ISOLATION LEVEL READ COMMITTED;
 
--- SELECT FOR UPDATE / FOR SHARE
+-- Locking
 BEGIN;
-SELECT id, name FROM emp WHERE id=1 FOR UPDATE;
+SELECT id, first_name, salary FROM employee WHERE id=1 FOR UPDATE;
 SHOW LOCKS;
 COMMIT;
+
 BEGIN;
-SELECT id FROM emp WHERE id=1 FOR SHARE;
+SELECT id, name FROM department WHERE id=1 FOR SHARE;
+SELECT id, name FROM department WHERE id=2 FOR SHARE;
+SHOW LOCKS;
 COMMIT;
 
--- EXPLAIN / ANALYZE (단일 테이블 + 다중 조인 순서 DP)
-EXPLAIN SELECT * FROM emp WHERE dept_id=1;
-EXPLAIN SELECT * FROM emp WHERE id=1;
-EXPLAIN SELECT e.name, d.name, s.amount FROM emp e JOIN dept d ON e.dept_id=d.id JOIN sal s ON e.id=s.eid;
-ANALYZE TABLE emp;
-EXPLAIN ANALYZE SELECT * FROM emp WHERE dept_id=1;
+-- EXPLAIN / ANALYZE
+EXPLAIN SELECT * FROM employee WHERE id=1;
+EXPLAIN SELECT * FROM employee WHERE department_id=1;
+EXPLAIN SELECT e.first_name, d.name, p.name FROM employee e
+    JOIN department d ON e.department_id=d.id
+    JOIN project p ON d.id=p.department_id;
+ANALYZE TABLE department;
+ANALYZE TABLE employee;
+EXPLAIN ANALYZE SELECT * FROM employee WHERE department_id=1 AND salary >= 80000;
 
--- VIEW
-SELECT * FROM v_active ORDER BY id;
+-- Views: Usage
+SELECT * FROM v_active_dept ORDER BY id;
+SELECT * FROM v_manager ORDER BY salary DESC;
+SELECT * FROM v_active_proj ORDER BY priority;
+UPDATE v_active_emp SET job_title='Principal Engineer' WHERE id=1;
+SELECT id, first_name, job_title FROM employee WHERE id=1;
+UPDATE employee SET job_title='Sr Engineer' WHERE id=1;
 
--- CREATE FUNCTION
-CREATE FUNCTION triple(x) RETURNS INT RETURN x * 3;
-SELECT name, salary, triple(salary) AS tripled FROM emp LIMIT 3;
-DROP FUNCTION triple;
-CREATE FUNCTION greet(n) RETURNS VARCHAR(50) RETURN CONCAT('Hello, ', n);
-SELECT greet(name) AS greeting FROM emp LIMIT 2;
-DROP FUNCTION greet;
+-- UDF
+CREATE FUNCTION monthly_salary(annual_salary) RETURNS DECIMAL RETURN annual_salary / 12;
+SELECT first_name, salary, monthly_salary(salary) AS monthly FROM employee ORDER BY salary DESC LIMIT 4;
+DROP FUNCTION monthly_salary;
 
--- BIGINT / SMALLINT / TINYINT
-SELECT big_val, small_val, tiny_val FROM nums;
-DESCRIBE nums;
-
--- JSON
-SELECT id, info->>'$.name' AS jname, info->>'$.age' AS age FROM jdata ORDER BY id;
-SELECT id, JSON_EXTRACT(info,'$.score') AS score, JSON_VALUE(info,'$.name') AS nm FROM jdata ORDER BY id;
+CREATE FUNCTION perf_label(score) RETURNS TEXT RETURN CONCAT('score=', score);
+SELECT first_name, performance, perf_label(performance) AS label FROM employee ORDER BY performance DESC LIMIT 5;
+DROP FUNCTION perf_label;
 
 -- INFORMATION_SCHEMA
-SELECT table_name, table_rows FROM information_schema.tables WHERE table_schema='db1' ORDER BY table_name LIMIT 5;
-SELECT column_name, data_type FROM information_schema.columns WHERE table_name='emp' ORDER BY ordinal_position LIMIT 5;
+SELECT table_name, table_rows FROM information_schema.tables WHERE table_schema='company' ORDER BY table_name;
+SELECT column_name, data_type, is_nullable FROM information_schema.columns WHERE table_name='employee' ORDER BY ordinal_position LIMIT 8;
+SELECT constraint_name, table_name, constraint_type FROM information_schema.table_constraints WHERE table_schema='company' ORDER BY table_name, constraint_name LIMIT 10;
 
--- 사용자 관리
-CREATE USER 'usr'@'%' IDENTIFIED BY 'pw';
-GRANT SELECT, INSERT ON db1.emp TO 'usr'@'%';
-SHOW GRANTS FOR 'usr'@'%';
-REVOKE INSERT ON db1.emp FROM 'usr'@'%';
-DROP USER 'usr'@'%';
+-- FETCH FIRST
+SELECT id, first_name, salary FROM employee ORDER BY salary DESC FETCH FIRST 3 ROWS ONLY;
+SELECT id, first_name, salary FROM employee ORDER BY salary ASC FETCH NEXT 3 ROWS ONLY;
 
--- 모니터링
+-- JOIN USING
+CREATE TABLE tmp_dept (dept_id INT PRIMARY KEY, dept_name VARCHAR(50) NOT NULL);
+CREATE TABLE tmp_emp  (emp_name VARCHAR(50) NOT NULL, dept_id INT NOT NULL);
+INSERT INTO tmp_dept VALUES (1,'Engineering'),(2,'Marketing'),(3,'Finance');
+INSERT INTO tmp_emp  VALUES ('Alice',1),('Bob',2),('Carol',3),('Dave',1);
+SELECT dept_id, dept_name, emp_name FROM tmp_dept JOIN tmp_emp USING (dept_id) ORDER BY dept_id, emp_name;
+SELECT dept_name, emp_name FROM tmp_dept NATURAL JOIN tmp_emp ORDER BY dept_name;
+DROP TABLE tmp_emp;
+DROP TABLE tmp_dept;
+
+-- DCL: Users
+CREATE USER 'testuser'@'%' IDENTIFIED BY 'secure_pass_123';
+GRANT SELECT, INSERT, UPDATE ON company.employee TO 'testuser'@'%' WITH GRANT OPTION;
+GRANT SELECT ON company.department TO 'testuser'@'%';
+SHOW GRANTS FOR 'testuser'@'%';
+REVOKE UPDATE ON company.employee FROM 'testuser'@'%';
+SHOW GRANTS FOR 'testuser'@'%';
+
+-- Roles
+CREATE ROLE analyst;
+CREATE ROLE developer;
+CREATE ROLE administrator;
+SHOW ROLES;
+GRANT ROLE analyst TO 'testuser'@'%';
+GRANT ROLE developer TO 'testuser'@'%' WITH ADMIN OPTION;
+REVOKE ROLE analyst FROM 'testuser'@'%';
+DROP ROLE analyst;
+DROP ROLE IF EXISTS developer;
+DROP ROLE IF EXISTS administrator;
+SHOW ROLES;
+
+-- Synonyms
+CREATE SYNONYM emp_list FOR employee;
+CREATE OR REPLACE SYNONYM emp_list FOR employee;
+SHOW SYNONYMS;
+SELECT id, first_name, last_name FROM emp_list ORDER BY id LIMIT 3;
+CREATE SYNONYM proj_list FOR project;
+SELECT code, name, status FROM proj_list ORDER BY id LIMIT 3;
+DROP SYNONYM emp_list;
+DROP SYNONYM IF EXISTS proj_list;
+SHOW SYNONYMS;
+
+-- Monitoring
 CHECKPOINT;
 VACUUM;
-VACUUM emp;
+VACUUM employee;
 SHOW BUFFER POOL;
 SHOW WAL;
 SHOW LOCKS;
 SHOW PROCESSLIST;
 SHOW DATABASES;
 
--- BACKUP
-BACKUP DATABASE db1 INTO 'db1_backup.json';
+-- Backup
+BACKUP DATABASE company INTO 'company_backup.sql';
 
--- FETCH FIRST n ROWS ONLY (LIMIT 별칭)
-SELECT id, name FROM emp ORDER BY salary DESC FETCH FIRST 3 ROWS ONLY;
-SELECT id, name FROM emp ORDER BY salary ASC FETCH NEXT 2 ROWS ONLY;
-
--- JOIN ... USING
-CREATE TABLE dept2 (id INT PRIMARY KEY AUTO INCREMENT, name VARCHAR(30) NOT NULL);
-INSERT INTO dept2 (name) VALUES ('Eng'),('Mkt'),('Fin');
-CREATE TABLE emp2 (id INT PRIMARY KEY AUTO INCREMENT, name VARCHAR(30), dept_id INT);
-INSERT INTO emp2 (name, dept_id) VALUES ('Alice',1),('Bob',2),('Carol',3);
-SELECT e.name, d.name AS dept FROM emp2 e JOIN dept2 d USING (id) ORDER BY e.id LIMIT 2;
-DROP TABLE emp2;
-DROP TABLE dept2;
-
--- ROLE
-CREATE ROLE analyst;
-CREATE ROLE developer;
-SHOW ROLES;
-GRANT ROLE analyst TO 'usr'@'%';
-GRANT ROLE developer TO 'usr'@'%' WITH ADMIN OPTION;
-REVOKE ROLE analyst FROM 'usr'@'%';
-DROP ROLE analyst;
-DROP ROLE IF EXISTS developer;
-SHOW ROLES;
-
--- SYNONYM
-CREATE USER IF NOT EXISTS 'usr'@'%' IDENTIFIED BY 'pw';
-CREATE SYNONYM emp_syn FOR emp;
-CREATE OR REPLACE SYNONYM emp_syn FOR emp;
-SHOW SYNONYMS;
-SELECT id, name FROM emp_syn ORDER BY id LIMIT 2;
-DROP SYNONYM emp_syn;
-DROP SYNONYM IF EXISTS emp_syn;
-SHOW SYNONYMS;
-DROP USER IF EXISTS 'usr'@'%';
-
--- 정리 (DROP VIEW/INDEX/TABLE 대표 호출 + DROP DATABASE가 잔여 객체 일괄 제거)
-DROP VIEW IF EXISTS v_active;
-DROP INDEX IF EXISTS idx_dept;
-DROP TABLE IF EXISTS jdata;
-DROP DATABASE db1;
+-- Clean up
+DROP USER IF EXISTS 'testuser'@'%';
+DROP VIEW IF EXISTS v_active_dept;
+DROP VIEW IF EXISTS v_dept_finance;
+DROP VIEW IF EXISTS v_active_emp;
+DROP VIEW IF EXISTS v_manager;
+DROP VIEW IF EXISTS v_senior_emp;
+DROP VIEW IF EXISTS v_active_proj;
+DROP VIEW IF EXISTS v_high_priority;
+DROP INDEX IF EXISTS idx_dept_type;
+DROP INDEX IF EXISTS idx_dept_active;
+DROP INDEX IF EXISTS idx_emp_dept;
+DROP INDEX IF EXISTS idx_emp_type;
+DROP INDEX IF EXISTS idx_emp_dept_sal;
+DROP INDEX IF EXISTS idx_proj_dept;
+DROP INDEX IF EXISTS idx_proj_status;
+DROP INDEX IF EXISTS idx_proj_dates;
+DROP TABLE IF EXISTS project;
+DROP TABLE IF EXISTS employee;
+DROP TABLE IF EXISTS department;
+DROP DATABASE company;
 SHOW DATABASES;

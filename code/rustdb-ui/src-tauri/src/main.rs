@@ -87,6 +87,28 @@ fn add_log(log: &Arc<Mutex<Vec<String>>>, msg: &str) {
     }
 }
 
+// ─── 서버 활동 로그 영속화 경로 ───────────────────────────────
+// conn_id별 로그 파일 (실행 파일 옆 server_logs/{conn_id}.log).
+// 앱을 껐다 켜도 ACTIVITY LOG가 유지되도록 파일에 저장/로드한다.
+fn server_log_path(conn_id: &str) -> std::path::PathBuf {
+    let safe: String = conn_id.chars()
+        .map(|c| if c.is_alphanumeric() { c } else { '_' })
+        .collect();
+    let base = std::env::current_exe().ok()
+        .and_then(|p| p.parent().map(|p| p.to_path_buf()))
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    let dir = base.join("server_logs");
+    let _ = std::fs::create_dir_all(&dir);
+    dir.join(format!("{}.log", safe))
+}
+
+fn load_server_log(conn_id: &str) -> Vec<String> {
+    std::fs::read_to_string(server_log_path(conn_id))
+        .ok()
+        .map(|s| s.lines().map(String::from).collect())
+        .unwrap_or_default()
+}
+
 // ─── TCP 클라이언트 핸들러 ────────────────────────────────────
 // 각 TCP 클라이언트는 독립적인 Executor(트랜잭션·current_db)를 가진다.
 fn handle_client(stream: TcpStream, shared: Arc<RwLock<SharedDatabase>>, log: Arc<Mutex<Vec<String>>>) {
@@ -460,6 +482,7 @@ fn get_columns_detail(table: String, state: State<AppState>) -> Vec<ColumnDetail
                 .replace("Varchar(", "VARCHAR(")
                 .replace("Decimal(", "DECIMAL(")
                 .replace("Enum(", "ENUM(")
+                .replace("Set(", "SET(")
                 .replace("Boolean", "BOOL")
                 .replace("DateTime", "DATETIME")
                 .replace("Timestamp", "TIMESTAMP")
@@ -469,7 +492,11 @@ fn get_columns_detail(table: String, state: State<AppState>) -> Vec<ColumnDetail
                 .replace("Date", "DATE")
                 .replace("Time", "TIME")
                 .replace("Year", "YEAR")
-                .replace("Int", "INT");
+                .replace("Int", "INT")
+                // ENUM/SET 값 리스트를 SQL 표기로: ["a", "b", "c"] → 'a','b','c'
+                .replace("[\"", "'")
+                .replace("\", \"", "','")
+                .replace("\"]", "'");
             ColumnDetail {
                 name:        c.name.clone(),
                 data_type:   type_str,
@@ -548,7 +575,8 @@ fn start_server(conn_id: String, port: u16, state: State<AppState>) -> Result<St
 
     let running = Arc::new(AtomicBool::new(true));
     let clients = Arc::new(AtomicUsize::new(0));
-    let log     = Arc::new(Mutex::new(Vec::new()));
+    // 이전 세션 로그를 파일에서 복원해 이어서 기록한다.
+    let log     = Arc::new(Mutex::new(load_server_log(&conn_id)));
     let port_store = Arc::new(Mutex::new(port));
 
     state.servers.lock().unwrap().insert(conn_id, ServerEntry {
@@ -638,13 +666,19 @@ fn stop_server(conn_id: String, state: State<AppState>) -> Result<String, String
 fn get_server_status(conn_id: String, state: State<AppState>) -> ServerStatus {
     let servers = state.servers.lock().unwrap();
     match servers.get(&conn_id) {
-        Some(e) => ServerStatus {
-            running:      e.running.load(Ordering::SeqCst),
-            port:         *e.port.lock().unwrap(),
-            client_count: e.clients.load(Ordering::SeqCst),
-            log:          e.log.lock().unwrap().clone(),
-        },
-        None => ServerStatus { running: false, port: 7878, client_count: 0, log: vec![] },
+        Some(e) => {
+            let log = e.log.lock().unwrap().clone();
+            // 메모리 로그를 파일에 저장 (앱 종료 후에도 유지)
+            let _ = std::fs::write(server_log_path(&conn_id), log.join("\n"));
+            ServerStatus {
+                running:      e.running.load(Ordering::SeqCst),
+                port:         *e.port.lock().unwrap(),
+                client_count: e.clients.load(Ordering::SeqCst),
+                log,
+            }
+        }
+        // 서버 미실행 시에도 이전 세션 로그를 파일에서 읽어 표시
+        None => ServerStatus { running: false, port: 7878, client_count: 0, log: load_server_log(&conn_id) },
     }
 }
 
@@ -653,7 +687,10 @@ fn clear_server_log(conn_id: String, state: State<AppState>) {
     if let Some(e) = state.servers.lock().unwrap().get(&conn_id) {
         e.log.lock().unwrap().clear();
     }
+    // 영속화된 로그 파일도 삭제
+    let _ = std::fs::remove_file(server_log_path(&conn_id));
 }
+
 
 // ─── CSV 내보내기 ─────────────────────────────────────────────
 #[tauri::command]

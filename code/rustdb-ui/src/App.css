@@ -1317,46 +1317,69 @@ body {
 
 /* 테이블 카드 */
 .erd-card {
-  background: #252526;
-  border: 1px solid #3c3c3c;
-  border-radius: 5px;
-  box-shadow: 0 3px 10px rgba(0, 0, 0, 0.5);
+  background: #0d0d0d;
+  border: 1px solid #2a2d34;
+  border-radius: 6px;
+  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.7);
   overflow: hidden;
   user-select: none;
+  transition: box-shadow 0.2s, border-color 0.2s;
 }
 
 .erd-card:hover {
-  border-color: #555;
+  border-color: #4a4a4a;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.8);
+}
+
+.erd-card-focused {
+  border-color: #4ec9b0 !important;
+  box-shadow: 0 0 0 1.5px #4ec9b0, 0 6px 28px rgba(78, 201, 176, 0.2) !important;
+}
+
+.erd-card-linked {
+  border-color: rgba(78, 201, 176, 0.4) !important;
+  box-shadow: 0 0 0 1px rgba(78, 201, 176, 0.3), 0 4px 18px rgba(0,0,0,0.7) !important;
+}
+
+.erd-card-anim {
+  transition: left 0.45s cubic-bezier(0.4, 0, 0.2, 1),
+              top  0.45s cubic-bezier(0.4, 0, 0.2, 1),
+              box-shadow 0.2s, border-color 0.2s;
 }
 
 .erd-card-header {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
   padding: 0 10px;
   height: 32px;
-  background: #2d2d30;
-  border-bottom: 1px solid #3c3c3c;
+  background: linear-gradient(135deg, #141418 0%, #0d0d0d 100%);
+  border-bottom: 1px solid #2a2d34;
   cursor: grab;
+}
+
+.erd-card-focused .erd-card-header {
+  background: linear-gradient(135deg, #0e1f1d 0%, #0a1512 100%);
+  border-bottom-color: rgba(78, 201, 176, 0.3);
 }
 
 .erd-card-header:active {
   cursor: grabbing;
 }
 
-.erd-card-icon {
-  color: #4ec9b0;
-  font-size: 12px;
-  flex-shrink: 0;
-}
-
 .erd-card-name {
   font-size: 13px;
   font-weight: 600;
-  color: #e0e0e0;
+  color: #e8e8e8;
   white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  border-bottom: 2px solid #6a6a6a;
+  padding-bottom: 2px;
+}
+
+.erd-card-comment {
+  font-size: 12px;
+  color: #6a6a6a;
+  white-space: nowrap;
 }
 
 /* 컬럼 행 */
@@ -1367,7 +1390,7 @@ body {
   padding: 0 10px;
   height: 24px;
   font-size: 12px;
-  border-bottom: 1px solid #222;
+  border-bottom: 1px solid #1c1e24;
   white-space: nowrap;
 }
 
@@ -1383,60 +1406,87 @@ body {
   background: rgba(156, 220, 254, 0.04);
 }
 
-.erd-col-icon {
-  font-size: 10px;
-  width: 16px;
-  text-align: center;
+.erd-col-key {
+  width: 18px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   flex-shrink: 0;
-  color: #666;
 }
 
 .erd-col-name {
-  flex: 1;
+  flex: 0 0 auto;
   color: #c8c8c8;
   overflow: hidden;
   text-overflow: ellipsis;
+  white-space: nowrap;
   font-family: 'Consolas', monospace;
   font-size: 12px;
 }
 
 .erd-col-type {
-  font-size: 10px;
-  color: #569cd6;
-  flex-shrink: 0;
-  opacity: 0.75;
+  font-size: 11px;
+  color: #cccccc;
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: 'Consolas', monospace;
+  margin-right: 6px;
 }
 
-.erd-badge-nn {
+.erd-badge {
   font-size: 9px;
-  padding: 0 3px;
-  border-radius: 2px;
-  background: #3c3c00;
-  color: #e8c500;
+  width: 26px;
+  text-align: center;
+  color: #888;
   font-weight: 600;
-  line-height: 14px;
   flex-shrink: 0;
+  letter-spacing: 0.3px;
 }
 
-.erd-badge-uq {
-  font-size: 9px;
-  padding: 0 3px;
-  border-radius: 2px;
-  background: #003c3c;
-  color: #4ec9b0;
-  font-weight: 600;
-  line-height: 14px;
-  flex-shrink: 0;
+.erd-badge.on-nn { color: #cccccc; }
+.erd-badge.on-uq { color: #cccccc; }
+.erd-badge.on-ai { color: #cccccc; }
+
+/* 줌 슬라이더 */
+.erd-zoom-slider {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-right: 6px;
+}
+
+.erd-zoom-slider input[type="range"] {
+  width: 96px;
+  height: 4px;
+  accent-color: #4ec9b0;
+  cursor: pointer;
 }
 
 /* 선택된 카드 */
 .erd-card-selected {
-  border-color: #4ec9b0;
-  box-shadow: 0 0 0 1px #4ec9b0, 0 3px 12px rgba(78, 201, 176, 0.2);
+  border-color: #4a9eff;
+  box-shadow: 0 0 0 1px #4a9eff, 0 3px 14px rgba(74, 158, 255, 0.25);
 }
 
-.erd-card-selected .erd-card-header {
-  background: #253b35;
+/* FK 관계선 애니메이션 */
+@keyframes erd-dash-flow {
+  to { stroke-dashoffset: -20; }
+}
+
+.erd-edge {
+  animation: erd-dash-flow 2s linear infinite;
+}
+
+.erd-edge-active {
+  animation: erd-dash-flow 0.9s linear infinite;
+  filter: drop-shadow(0 0 3px rgba(78, 201, 176, 0.5));
+}
+
+.erd-edge-dim {
+  animation: none;
 }
 
 /* 데이터 패널 */
@@ -1525,7 +1575,7 @@ body {
 }
 
 .erd-data-table {
-  width: 100%;
+  align-self: flex-start;
   border-collapse: collapse;
   font-size: 13px;
   font-family: 'Consolas', monospace;
@@ -1542,6 +1592,8 @@ body {
   position: sticky;
   top: 0;
   white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .erd-data-table td {
@@ -1549,6 +1601,8 @@ body {
   border: 1px solid #2d2d2d;
   color: #d4d4d4;
   white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .erd-data-table tr:hover td { background: #2a2d2e; }

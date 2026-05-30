@@ -34,6 +34,20 @@ class ExplainRequest(BaseModel):
     api_key: str
 
 
+class ErrorExplainRequest(BaseModel):
+    sql: str
+    error: str
+    api_key: str
+    schema: str = ""
+
+
+class OptimizeRequest(BaseModel):
+    sql: str
+    api_key: str
+    explain_result: str = ""
+    schema: str = ""
+
+
 class SchemaDesignRequest(BaseModel):
     description: str
     api_key: str
@@ -126,6 +140,66 @@ EXPLAIN 결과:
         client = genai.Client(api_key=req.api_key)
         response = client.models.generate_content(model=MODEL, contents=prompt)
         return {"interpretation": response.text.strip()}
+    except Exception as e:
+        handle_error(e)
+
+
+@app.post("/api/explain-error")
+def explain_error(req: ErrorExplainRequest):
+    if not req.api_key.strip():
+        raise HTTPException(status_code=400, detail="API key is required")
+    if not req.error.strip():
+        raise HTTPException(status_code=400, detail="Error message is required")
+
+    schema_ctx = f"\n\n데이터베이스 스키마:\n{req.schema}" if req.schema.strip() else ""
+    prompt = f"""당신은 RustDB(MySQL 호환 SQL 엔진)의 데이터베이스 전문가입니다.
+사용자가 실행한 SQL이 실패했습니다. 오류의 원인을 분석하고 해결 방안을 제시하세요.
+
+실패한 SQL:
+{req.sql}
+
+오류 메시지:
+{req.error}{schema_ctx}
+
+다음을 한국어로 간결하게 답변하세요:
+1. 오류 원인 (왜 이 오류가 발생했는지)
+2. 해결 방안 (수정된 SQL 또는 구체적인 조치)
+
+최대 4-5문장으로 답변하고, 수정 SQL이 있으면 ```sql 코드 블록으로 포함하세요."""
+
+    try:
+        client = genai.Client(api_key=req.api_key)
+        response = client.models.generate_content(model=MODEL, contents=prompt)
+        return {"interpretation": response.text.strip()}
+    except Exception as e:
+        handle_error(e)
+
+
+@app.post("/api/optimize")
+def optimize(req: OptimizeRequest):
+    if not req.api_key.strip():
+        raise HTTPException(status_code=400, detail="API key is required")
+    if not req.sql.strip():
+        raise HTTPException(status_code=400, detail="SQL is required")
+
+    explain_ctx = f"\n\nEXPLAIN 실행 계획:\n{req.explain_result}" if req.explain_result.strip() else ""
+    schema_ctx = f"\n\n데이터베이스 스키마:\n{req.schema}" if req.schema.strip() else ""
+    prompt = f"""당신은 RustDB(MySQL 호환 SQL 엔진)의 쿼리 최적화 전문가입니다.
+다음 SQL을 리뷰하고 성능 개선안을 제시하세요.
+
+SQL:
+{req.sql}{explain_ctx}{schema_ctx}
+
+다음을 한국어로 간결하게 답변하세요:
+1. 현재 쿼리의 성능 평가 (Full Scan 여부, 비효율 지점)
+2. 구체적 개선안 — 인덱스 추가(CREATE INDEX SQL), 쿼리 재작성, 조인 순서 등
+
+개선용 SQL은 ```sql 코드 블록으로 포함하세요. 이미 최적이면 그렇다고 답하세요."""
+
+    try:
+        client = genai.Client(api_key=req.api_key)
+        response = client.models.generate_content(model=MODEL, contents=prompt)
+        return {"suggestion": response.text.strip()}
     except Exception as e:
         handle_error(e)
 

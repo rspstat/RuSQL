@@ -8,8 +8,8 @@
 
 | 분류 | 내용 |
 |------|------|
-| DB 엔진 | B+Tree, WAL, Buffer Pool, MVCC, 트랜잭션, 비용 기반 옵티마이저 |
-| SQL 지원 | DDL / DML / JOIN / 서브쿼리 / CTE / UNION / 제약조건 / 트랜잭션 |
+| DB 엔진 | B+Tree, WAL, Buffer Pool, MVCC, 트랜잭션, 비용 기반 옵티마이저, 저장 프로시저·트리거·UDF 영속화 |
+| SQL 지원 | DDL / DML / JOIN / 서브쿼리 / CTE / UNION / 제약조건 / 트랜잭션 / 저장 프로시저 / 트리거 / UDF |
 | MCP | 자연어 입력 → SQL 자동 생성 → 실행, EXPLAIN 해석, 스키마 설계, 멀티턴 채팅, 파일 컨텍스트 주입, AI 파일 편집 |
 | DBMS | TCP 서버, 다중 클라이언트 동시 접속, 세션별 독립 Executor + `Arc<RwLock<SharedDatabase>>` 공유 |
 | 언어 | Rust |
@@ -309,6 +309,15 @@ BEGIN
 END;
 CALL p_repeat();
 DROP PROCEDURE p_repeat;
+
+-- 영속화 검증: 재시작 후에도 프로시저·트리거·UDF가 살아있는지 확인하는 용도로
+-- CREATE 후 DROP 없이 이름만 확인 (실제 재시작 테스트는 CLI/서버 재구동 후 CALL로 확인)
+CREATE PROCEDURE p_persist(IN x INT)
+BEGIN
+    SELECT x * 2 AS doubled;
+END;
+CALL p_persist(7);
+DROP PROCEDURE p_persist;
 
 -- PREPARE / EXECUTE
 PREPARE sel FROM 'SELECT id, name, salary FROM emp WHERE id = ?';
