@@ -1952,12 +1952,12 @@ body {
 .srv-conn-header {
   display: flex;
   align-items: center;
-  gap: 16px;
+  gap: 12px;
   margin-bottom: 22px;
 }
 .srv-db-icon {
-  width: 52px;
-  height: 52px;
+  width: 56px;
+  height: 56px;
   flex-shrink: 0;
 }
 .srv-conn-title {

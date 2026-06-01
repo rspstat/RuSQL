@@ -482,17 +482,17 @@ SHOW DATABASES;
 | 언어 | Rust |
 | 버전 | v2.2.0 |
 | 인덱스 | B+Tree (단일 / 복합 / 클러스터드) |
-| 옵티마이저 | 비용 기반 플래너 (AccessPath · Join 알고리즘 자동 선택 · Join 순서 동적계획법) |
-| Join | Sort-Merge Join (O((N+M)logN)) / Hash Join (O(N+M)) / Nested Loop Join |
+| 옵티마이저 | 비용 기반 플래너 (AccessPath · Join 알고리즘 자동 선택 · System-R DP Join 순서 최적화 (N≤8), Greedy 폴백) |
+| Join | Sort-Merge Join (O((N+M)logN)) / Hash Join (O(N+M)) / Nested Loop Join (Cross/Natural/FullOuter 포함) — `engine/join.rs` 분리 구현 |
 | 트랜잭션 | WAL (바이너리 redo log) + Undo Log (인메모리 + 디스크 영속화) + MVCC |
 | 격리 수준 | READ UNCOMMITTED ~ SERIALIZABLE (4단계) |
 | 동시성 | Row-level Locking (SELECT FOR UPDATE / FOR SHARE, 공유·배타 잠금, 데드락 감지) + 병렬 SeqScan WHERE 필터 (rayon, `RUSTDB_PARALLEL`) |
 | 캐시 | Buffer Pool (LRU, 64페이지, 16KB) |
-| 저장 | 바이너리 .rdb + LZ4 압축 + indexes.json + views.json + _users.json + _grants.json + _roles.json + _role_grants.json + _synonyms.json |
+| 저장 | 바이너리 .rdb + LZ4 압축; 전역 파일은 `data/_system/` 서브폴더로 분리 (_users.json·_grants.json·_roles.json·_synonyms.json 등); 연결별 독립 디렉터리 (`data/local/`, `data/data_숫자/`) — UI·CLI·서버가 `code/data/` 공유 |
 | 다중 DB | CREATE / DROP / USE / SHOW DATABASES, 테이블 자동 한정, 격리 |
 | 사용자 관리 | CREATE/DROP USER, GRANT/REVOKE, SHOW GRANTS, ROLE 관리, SYNONYM, 영속화 |
 | UI | Tauri + React + Monaco Editor (홈 화면: 퀵 액션 버튼·RDBMS 소개·연결 카드 그리드·하단 상태 표시줄·액티비티 바, 멀티 탭, 탭 우클릭 메뉴, 탭 고정, 분할 에디터, AI Agent 채팅 패널 [드래그 너비 조절·파일 컨텍스트·@멘션·파일 편집·채팅 세션 기록], MySQL 스타일 에디터 툴바, 패널 토글 버튼, Canvas 기반 결과 컬럼 자동 너비, 연결 사이드바 드래그 너비 조절) |
-| TCP 서버 | 멀티 클라이언트, 포트 7878, 라인 프로토콜 |
+| TCP 서버 | Native 프로토콜 (127.0.0.1:7878, SHA-256 인증) + MySQL wire protocol (0.0.0.0:3306, `mysql_native_password` 챌린지-응답 인증, DBeaver·mysql CLI·mysql-connector-python 완전 호환) — `--mysql-port` / `--no-mysql` / `--buffer-pool-size` 옵션 |
 | AI 연동 | MCP 서버 (Python / FastAPI) + AI assistant — 자연어 → SQL 변환, EXPLAIN 해석, 스키마 설계, 멀티턴 채팅, 에디터 파일 컨텍스트 자동 주입, @파일명 멘션, AI 파일 편집 블록 (Monaco Undo 지원), Tauri 자동 시작 |
 
 <br/>
@@ -525,7 +525,7 @@ code/
 │  │ DDL: CREATE/DROP/ALTER/TRUNC  │       │
 │  │ DML: INSERT/SELECT/UPDATE/DEL │       │
 │  │ INSERT ... SELECT             │       │
-│  │ Hash Join / Nested Loop Join  │       │
+│  │ Hash/SortMerge/NestedLoop Join │       │
 │  │ 테이블 별칭 (alias)           │       │
 │  │ WHERE / SUBQUERY / EXISTS     │       │
 │  │ IN (리터럴/서브쿼리) / NOT IN │       │
@@ -570,10 +570,10 @@ code/
 └──────────────────────────────────────────┘
         ↓              ↓
   rustdb-cli      rustdb-server
-  (터미널 REPL)   (TCP 서버)
+  (터미널 REPL)   (Native :7878 + MySQL :3306)
                       ↓
                rustdb-client
-               (TCP 클라이언트 CLI)
+               (TCP 클라이언트 CLI, -u/-p/-h/-P)
         ↓
   rustdb-ui        rustdb-mcp
   (Tauri + React)  (MCP 서버, Python)
@@ -581,7 +581,9 @@ code/
 
 <br/>
 
-## B+ Tree
+## Link
 [B+ Tree 구조](https://chanho0912.tistory.com/109)
 
 [B+ Tree 이해](https://velog.io/@emplam27/%EC%9E%90%EB%A3%8C%EA%B5%AC%EC%A1%B0-%EA%B7%B8%EB%A6%BC%EC%9C%BC%EB%A1%9C-%EC%95%8C%EC%95%84%EB%B3%B4%EB%8A%94-B-Plus-Tree)
+
+[트랜잭션 이해](https://leeeeeyeon-dev.tistory.com/121)

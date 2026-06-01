@@ -27,7 +27,12 @@ impl DiskManager {
 
     pub fn new_with_dir(dir: &str) -> Self {
         fs::create_dir_all(dir).unwrap();
+        fs::create_dir_all(format!("{}/_system", dir)).unwrap();
         DiskManager { data_dir: dir.to_string() }
+    }
+
+    fn sys_dir(&self) -> String {
+        format!("{}/_system", self.data_dir)
     }
 
     /// "db.table" → ("db", "table").  No dot → ("rustdb", key)
@@ -63,7 +68,10 @@ impl DiskManager {
         if let Ok(entries) = fs::read_dir(&self.data_dir) {
             for entry in entries.flatten() {
                 if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
-                    dbs.push(entry.file_name().to_string_lossy().to_string());
+                    let name = entry.file_name().to_string_lossy().to_string();
+                    if name != "_system" {
+                        dbs.push(name);
+                    }
                 }
             }
         }
@@ -335,109 +343,52 @@ impl DiskManager {
         serde_json::from_str(&json).unwrap_or_default()
     }
 
-    // ── 사용자/권한 영속화 (전역: data/_users.json, data/_grants.json) ────
+    // ── 전역 파일 영속화 (_system/ 서브폴더) ─────────────────────────────
+    // 기존 루트 경로(data/_*.json) → _system/ 자동 마이그레이션
 
-    pub fn save_users<T: Serialize>(&self, users: &T) {
-        let path = format!("{}/_users.json", self.data_dir);
-        let json = serde_json::to_string_pretty(users).unwrap_or_default();
-        let _ = fs::write(path, json);
+    fn sys_path(&self, filename: &str) -> String {
+        format!("{}/{}", self.sys_dir(), filename)
     }
 
-    pub fn load_users<T: for<'de> serde::Deserialize<'de> + Default>(&self) -> T {
-        let path = format!("{}/_users.json", self.data_dir);
-        if !Path::new(&path).exists() { return T::default(); }
-        let json = fs::read_to_string(&path).unwrap_or_default();
+    fn load_sys_json<T: for<'de> serde::Deserialize<'de> + Default>(&self, filename: &str) -> T {
+        let new_path = self.sys_path(filename);
+        let old_path = format!("{}/{}", self.data_dir, filename);
+        // 구버전 루트 경로 파일 → _system/ 으로 마이그레이션
+        if !Path::new(&new_path).exists() && Path::new(&old_path).exists() {
+            let _ = fs::copy(&old_path, &new_path);
+            let _ = fs::remove_file(&old_path);
+        }
+        let json = fs::read_to_string(&new_path).unwrap_or_default();
         serde_json::from_str(&json).unwrap_or_default()
     }
 
-    pub fn save_grants<T: Serialize>(&self, grants: &T) {
-        let path = format!("{}/_grants.json", self.data_dir);
-        let json = serde_json::to_string_pretty(grants).unwrap_or_default();
+    fn save_sys_json<T: Serialize>(&self, filename: &str, value: &T) {
+        let path = self.sys_path(filename);
+        let json = serde_json::to_string_pretty(value).unwrap_or_default();
         let _ = fs::write(path, json);
     }
 
-    pub fn load_grants<T: for<'de> serde::Deserialize<'de> + Default>(&self) -> T {
-        let path = format!("{}/_grants.json", self.data_dir);
-        if !Path::new(&path).exists() { return T::default(); }
-        let json = fs::read_to_string(&path).unwrap_or_default();
-        serde_json::from_str(&json).unwrap_or_default()
-    }
+    pub fn save_users<T: Serialize>(&self, users: &T)       { self.save_sys_json("_users.json", users); }
+    pub fn load_users<T: for<'de> serde::Deserialize<'de> + Default>(&self) -> T { self.load_sys_json("_users.json") }
 
-    pub fn save_roles<T: Serialize>(&self, roles: &T) {
-        let path = format!("{}/_roles.json", self.data_dir);
-        let json = serde_json::to_string_pretty(roles).unwrap_or_default();
-        let _ = fs::write(path, json);
-    }
+    pub fn save_grants<T: Serialize>(&self, grants: &T)     { self.save_sys_json("_grants.json", grants); }
+    pub fn load_grants<T: for<'de> serde::Deserialize<'de> + Default>(&self) -> T { self.load_sys_json("_grants.json") }
 
-    pub fn load_roles<T: for<'de> serde::Deserialize<'de> + Default>(&self) -> T {
-        let path = format!("{}/_roles.json", self.data_dir);
-        if !Path::new(&path).exists() { return T::default(); }
-        let json = fs::read_to_string(&path).unwrap_or_default();
-        serde_json::from_str(&json).unwrap_or_default()
-    }
+    pub fn save_roles<T: Serialize>(&self, roles: &T)       { self.save_sys_json("_roles.json", roles); }
+    pub fn load_roles<T: for<'de> serde::Deserialize<'de> + Default>(&self) -> T { self.load_sys_json("_roles.json") }
 
-    pub fn save_role_grants<T: Serialize>(&self, role_grants: &T) {
-        let path = format!("{}/_role_grants.json", self.data_dir);
-        let json = serde_json::to_string_pretty(role_grants).unwrap_or_default();
-        let _ = fs::write(path, json);
-    }
+    pub fn save_role_grants<T: Serialize>(&self, rg: &T)    { self.save_sys_json("_role_grants.json", rg); }
+    pub fn load_role_grants<T: for<'de> serde::Deserialize<'de> + Default>(&self) -> T { self.load_sys_json("_role_grants.json") }
 
-    pub fn load_role_grants<T: for<'de> serde::Deserialize<'de> + Default>(&self) -> T {
-        let path = format!("{}/_role_grants.json", self.data_dir);
-        if !Path::new(&path).exists() { return T::default(); }
-        let json = fs::read_to_string(&path).unwrap_or_default();
-        serde_json::from_str(&json).unwrap_or_default()
-    }
+    pub fn save_synonyms<T: Serialize>(&self, synonyms: &T) { self.save_sys_json("_synonyms.json", synonyms); }
+    pub fn load_synonyms<T: for<'de> serde::Deserialize<'de> + Default>(&self) -> T { self.load_sys_json("_synonyms.json") }
 
-    pub fn save_synonyms<T: Serialize>(&self, synonyms: &T) {
-        let path = format!("{}/_synonyms.json", self.data_dir);
-        let json = serde_json::to_string_pretty(synonyms).unwrap_or_default();
-        let _ = fs::write(path, json);
-    }
+    pub fn save_procedures<T: Serialize>(&self, procs: &T)  { self.save_sys_json("_procedures.json", procs); }
+    pub fn load_procedures<T: for<'de> serde::Deserialize<'de> + Default>(&self) -> T { self.load_sys_json("_procedures.json") }
 
-    pub fn load_synonyms<T: for<'de> serde::Deserialize<'de> + Default>(&self) -> T {
-        let path = format!("{}/_synonyms.json", self.data_dir);
-        if !Path::new(&path).exists() { return T::default(); }
-        let json = fs::read_to_string(&path).unwrap_or_default();
-        serde_json::from_str(&json).unwrap_or_default()
-    }
+    pub fn save_triggers<T: Serialize>(&self, triggers: &T) { self.save_sys_json("_triggers.json", triggers); }
+    pub fn load_triggers<T: for<'de> serde::Deserialize<'de> + Default>(&self) -> T { self.load_sys_json("_triggers.json") }
 
-    pub fn save_procedures<T: Serialize>(&self, procedures: &T) {
-        let path = format!("{}/_procedures.json", self.data_dir);
-        let json = serde_json::to_string_pretty(procedures).unwrap_or_default();
-        let _ = fs::write(path, json);
-    }
-
-    pub fn load_procedures<T: for<'de> serde::Deserialize<'de> + Default>(&self) -> T {
-        let path = format!("{}/_procedures.json", self.data_dir);
-        if !Path::new(&path).exists() { return T::default(); }
-        let json = fs::read_to_string(&path).unwrap_or_default();
-        serde_json::from_str(&json).unwrap_or_default()
-    }
-
-    pub fn save_triggers<T: Serialize>(&self, triggers: &T) {
-        let path = format!("{}/_triggers.json", self.data_dir);
-        let json = serde_json::to_string_pretty(triggers).unwrap_or_default();
-        let _ = fs::write(path, json);
-    }
-
-    pub fn load_triggers<T: for<'de> serde::Deserialize<'de> + Default>(&self) -> T {
-        let path = format!("{}/_triggers.json", self.data_dir);
-        if !Path::new(&path).exists() { return T::default(); }
-        let json = fs::read_to_string(&path).unwrap_or_default();
-        serde_json::from_str(&json).unwrap_or_default()
-    }
-
-    pub fn save_functions<T: Serialize>(&self, functions: &T) {
-        let path = format!("{}/_functions.json", self.data_dir);
-        let json = serde_json::to_string_pretty(functions).unwrap_or_default();
-        let _ = fs::write(path, json);
-    }
-
-    pub fn load_functions<T: for<'de> serde::Deserialize<'de> + Default>(&self) -> T {
-        let path = format!("{}/_functions.json", self.data_dir);
-        if !Path::new(&path).exists() { return T::default(); }
-        let json = fs::read_to_string(&path).unwrap_or_default();
-        serde_json::from_str(&json).unwrap_or_default()
-    }
+    pub fn save_functions<T: Serialize>(&self, funcs: &T)   { self.save_sys_json("_functions.json", funcs); }
+    pub fn load_functions<T: for<'de> serde::Deserialize<'de> + Default>(&self) -> T { self.load_sys_json("_functions.json") }
 }

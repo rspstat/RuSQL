@@ -206,6 +206,8 @@ fn handle_client(
         client_count.fetch_sub(1, Ordering::SeqCst);
         return;
     }
+    // mysql_native_hash 없는 레거시 계정 자동 마이그레이션
+    shared.write().unwrap().migrate_mysql_hash(auth_user, auth_pass);
 
     log(&format!("[{}] Authenticated as '{}'", peer, auth_user));
     let _ = writeln!(writer, "OK authenticated as '{}'", auth_user);

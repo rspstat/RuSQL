@@ -1,5 +1,5 @@
 // MySQL wire protocol (text protocol, MySQL 4.1+)
-// Auth is not verified — connections are accepted in dev mode.
+#![allow(dead_code, unused_imports, unused_variables, unused_mut)]
 
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};

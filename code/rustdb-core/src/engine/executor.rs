@@ -11,6 +11,7 @@ thread_local! {
     static CURRENT_DB_CTX: RefCell<String> = RefCell::new(String::new());
 }
 use sha2::{Sha256, Digest};
+use sha1::Sha1;
 use chrono;
 use serde::{Serialize, Deserialize};
 use crate::transaction::txn_manager::TransactionManager;
@@ -56,6 +57,9 @@ pub struct UserRecord {
     pub user: String,
     pub host: String,
     pub password_hash: Option<String>,
+    /// mysql_native_password 검증용: SHA1(SHA1(password)) hex 문자열
+    #[serde(default)]
+    pub mysql_native_hash: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -143,11 +147,18 @@ pub struct SharedDatabase {
     pub next_session_id: Arc<AtomicUsize>,
 }
 
-/// SHA-256 해시 (hex 문자열 반환)
+/// SHA-256 해시 (hex 문자열 반환) — native TCP 인증용
 fn hash_password(password: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(password.as_bytes());
     hasher.finalize().iter().map(|b| format!("{:02x}", b)).collect()
+}
+
+/// SHA1(SHA1(password)) hex — mysql_native_password 인증용
+fn mysql_native_hash_compute(password: &str) -> String {
+    let sha1_pass = Sha1::digest(password.as_bytes());
+    let sha1_sha1 = Sha1::digest(&sha1_pass);
+    sha1_sha1.iter().map(|b| format!("{:02x}", b)).collect()
 }
 
 impl SharedDatabase {
@@ -167,6 +178,62 @@ impl SharedDatabase {
         })
     }
 
+    /// mysql_native_password 챌린지-응답 검증.
+    /// stored = SHA1(SHA1(password)), nonce = 서버가 보낸 20바이트 챌린지.
+    /// auth_response = SHA1(password) XOR SHA1(nonce || stored)
+    pub fn verify_mysql_native_password(&self, user: &str, nonce: &[u8; 20], auth_response: &[u8]) -> bool {
+        if self.users.is_empty() { return true; } // open mode
+
+        let record = self.users.iter().find(|u| {
+            u.user == user
+                && (u.host == "%" || u.host == "localhost"
+                    || u.host == "127.0.0.1" || u.host == "::1")
+        });
+        let record = match record { Some(r) => r, None => return false };
+
+        // 비밀번호 없는 계정 → 빈 응답만 허용
+        if record.mysql_native_hash.is_none() && record.password_hash.is_none() {
+            return auth_response.is_empty();
+        }
+
+        let hex = match &record.mysql_native_hash {
+            Some(h) => h,
+            None => return false, // SHA-256만 있는 레거시 계정은 MySQL 프로토콜로 인증 불가
+        };
+
+        // hex → 20바이트
+        let stored: Vec<u8> = (0..hex.len()).step_by(2)
+            .filter_map(|i| u8::from_str_radix(&hex[i..i+2], 16).ok())
+            .collect();
+        if stored.len() != 20 || auth_response.len() < 20 { return false; }
+
+        // xor_key = SHA1(nonce || stored)
+        let xor_key: Vec<u8> = {
+            let mut h = Sha1::new();
+            h.update(nonce.as_ref());
+            h.update(&stored);
+            h.finalize().to_vec()
+        };
+        // claimed_sha1 = auth_response XOR xor_key
+        let claimed: Vec<u8> = auth_response[..20].iter()
+            .zip(xor_key.iter())
+            .map(|(a, b)| a ^ b)
+            .collect();
+        // 검증: SHA1(claimed_sha1) == stored
+        let verified: Vec<u8> = Sha1::digest(&claimed).to_vec();
+        verified == stored
+    }
+
+    /// mysql_native_hash가 없는 사용자에게 평문 비밀번호로 채워준다 (레거시 마이그레이션).
+    pub fn migrate_mysql_hash(&mut self, user: &str, password: &str) {
+        let needs = self.users.iter().any(|u| u.user == user && u.mysql_native_hash.is_none());
+        if !needs { return; }
+        if let Some(rec) = self.users.iter_mut().find(|u| u.user == user) {
+            rec.mysql_native_hash = Some(mysql_native_hash_compute(password));
+        }
+        self.disk.save_users(&self.users);
+    }
+
     /// users가 비어있으면 root/root 계정을 자동 생성하고 true 반환.
     pub fn ensure_default_user(&mut self) -> bool {
         if self.users.is_empty() {
@@ -174,6 +241,7 @@ impl SharedDatabase {
                 user: "root".into(),
                 host: "%".into(),
                 password_hash: Some(hash_password("root")),
+                mysql_native_hash: Some(mysql_native_hash_compute("root")),
             });
             self.disk.save_users(&self.users);
             true
@@ -6937,10 +7005,12 @@ impl Executor {
             }
             return Err(format!("User '{}@{}' already exists.", user, host));
         }
+        let pw = password;
         s.users.push(UserRecord {
             user: user.clone(),
             host: host.clone(),
-            password_hash: password.map(|p| hash_password(&p)),
+            password_hash: pw.as_deref().map(hash_password),
+            mysql_native_hash: pw.as_deref().map(mysql_native_hash_compute),
         });
         s.disk.save_users(&s.users);
         Ok(format!("User '{}@{}' created.", user, host))

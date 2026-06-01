@@ -246,7 +246,7 @@
 | 역할 (ROLE) | ✓ (8.0+) | ✓ | ✓ | ✓ (CREATE/DROP/GRANT/REVOKE/SHOW ROLES, WITH ADMIN OPTION) |
 | 열 레벨 권한 | ✓ | ✓ | ✓ | ✗ |
 | 행 레벨 보안 (RLS) | ✗ | ✓ | ✓ (VPD: Virtual Private Database) | ✗ |
-| 인증 방식 | Password, PAM, LDAP, Kerberos | Password, scram-sha-256, LDAP, GSSAPI | Password, Kerberos, LDAP, OS 인증 | Password (SHA-256 해시) |
+| 인증 방식 | Password, PAM, LDAP, Kerberos | Password, scram-sha-256, LDAP, GSSAPI | Password, Kerberos, LDAP, OS 인증 | Native TCP: SHA-256 해시 비교 · MySQL 프로토콜: mysql_native_password (SHA1 챌린지-응답, SHA1(SHA1(pw)) 저장) |
 | TLS / SSL | ✓ | ✓ | ✓ | ✗ |
 | 감사 로그 | ✓ (엔터프라이즈) | ✓ (pg_audit 확장) | ✓ (Unified Auditing, 기본 내장) | ✗ |
 
@@ -288,9 +288,9 @@
 
 | 항목 | MySQL | PostgreSQL | Oracle | RustDB |
 |------|-------|------------|--------|--------|
-| 공식 프로토콜 | MySQL Protocol (포트 3306) | PostgreSQL wire protocol (포트 5432) | Oracle SQL*Net / TNS (포트 1521) | 텍스트 기반 TCP (---END--- 구분자) |
-| MySQL wire protocol 호환 | ✓ | ✗ | ✗ | ✓ (포트 3306, mysql CLI / DBeaver 완전 연동 — SHOW VARIABLES/COLLATION/FULL TABLES/FULL COLUMNS 등 자동 쿼리 처리) |
-| 드라이버 호환 | JDBC, ODBC, Python, Go, Node.js | JDBC, ODBC, libpq, Python, Go, Node.js | JDBC (ojdbc), ODBC, OCI, Python (cx_Oracle) | rustdb-client CLI + MySQL 호환 클라이언트 |
+| 공식 프로토콜 | MySQL Protocol (포트 3306) | PostgreSQL wire protocol (포트 5432) | Oracle SQL*Net / TNS (포트 1521) | 텍스트 기반 TCP (포트 7878, ---END--- 구분자) + MySQL wire protocol (포트 3306) |
+| MySQL wire protocol 호환 | ✓ | ✗ | ✗ | ✓ (포트 3306, mysql_native_password 인증 구현, mysql CLI / DBeaver / mysql-connector-python 완전 연동 — SHOW VARIABLES/COLLATION/FULL TABLES/FULL COLUMNS 등 자동 쿼리 처리) |
+| 드라이버 호환 | JDBC, ODBC, Python, Go, Node.js | JDBC, ODBC, libpq, Python, Go, Node.js | JDBC (ojdbc), ODBC, OCI, Python (cx_Oracle) | rustdb-client (전용 CLI, -u/-p/-h/-P 플래그) + MySQL 호환 클라이언트 |
 | 커넥션 풀 지원 | ✓ | ✓ | ✓ (DRCP) | ✗ |
 | Prepared Statements | ✓ | ✓ | ✓ | ✓ (PREPARE/EXECUTE/DEALLOCATE USING @var) |
 | 배치 실행 | ✓ | ✓ | ✓ | ✗ (멀티쿼리 ; 분리) |

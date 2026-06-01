@@ -298,7 +298,14 @@
 
 ### TCP 서버 / MySQL 프로토콜 (rustdb-server)
 - [x] 커스텀 텍스트 프로토콜 TCP 서버 — 포트 7878, `---END---` 구분자, 멀티 클라이언트 동시 접속, 세션별 독립 Executor
+- [x] AUTH 핸드셰이크 — `AUTH user password` 줄 기반 인증, SHA-256 해시 비교, 레거시 평문 자동 마이그레이션
+- [x] 기본 사용자 자동 생성 — users가 비어있으면 root/root 자동 생성 (`ensure_default_user`)
+- [x] SHOW PROCESSLIST — `ProcessInfo` 구조체 + `process_list: Arc<Mutex<...>>` 실제 활성 세션 추적 (세션 등록/갱신/해제)
 - [x] MySQL wire protocol (포트 3306) — COM_QUERY / COM_PING / COM_INIT_DB / COM_STMT_PREPARE / COM_STMT_EXECUTE / COM_STMT_CLOSE / COM_STMT_RESET
+- [x] **mysql_native_password 인증 구현** — 연결별 20바이트 nonce 생성, SHA1(password) XOR SHA1(nonce||SHA1(SHA1(pw))) 챌린지-응답 검증, UserRecord에 `mysql_native_hash`(SHA1(SHA1(pw))) 저장, 레거시 사용자(hash 없음) 자동 거부
+- [x] **레거시 사용자 자동 마이그레이션** — `migrate_mysql_hash()`: native/Tauri 로그인 성공 시 `mysql_native_hash` 없는 계정에 자동 채움 (평문 비밀번호 보유 시점 활용)
+- [x] MySQL 세션 process_list 등록 — MySQL 프로토콜 연결도 SHOW PROCESSLIST에 표시
+- [x] **parse_table 탭 구분 형식 지원** — SHOW DATABASES/TABLES, SELECT, DESCRIBE 등 탭 구분 출력을 MySQL result set으로 정상 변환 (기존 박스 형식도 유지)
 - [x] Prepared Statement — `?` 플레이스홀더 바인딩, 타입별 파라미터 디코딩 (TINY/SHORT/LONG/LONGLONG/FLOAT/DOUBLE/DATE/DATETIME/VAR_STRING)
 - [x] `SHOW FULL TABLES FROM db` — 엔진의 `SHOW TABLES` 실행 후 `Table_type` 컬럼(BASE TABLE/VIEW) 추가 → DBeaver 테이블 트리 정상 표시
 - [x] `SHOW FULL COLUMNS FROM table FROM db` — `DESCRIBE table` 실행 후 MySQL 전체 컬럼 구조(Collation/Privileges/Comment 포함)로 확장 → DBeaver 컬럼 패널 정상 표시
@@ -314,3 +321,25 @@
 - [x] `SELECT @@var1 AS a, @@var2 AS b, ...` — 다중 시스템 변수 SELECT를 컬럼별로 올바르게 파싱·반환 (DBeaver 접속 초기화 쿼리 정상 처리)
 - [x] `SELECT DATABASE()` / `SELECT SCHEMA()` / `SELECT USER()` — 각각 현재 DB / 현재 DB / 'root@localhost' 반환
 - [x] `SET ...` (charset / autocommit / session 변수 등) — 무조건 OK 반환
+
+### 전용 클라이언트 (rustdb-client)
+- [x] rustdb-server native 프로토콜 전용 TCP 클라이언트
+- [x] CLI 옵션: `-u user` / `-p password` / `-h host` / `-P port` (기본: root/root@127.0.0.1:7878)
+- [x] 멀티라인 SQL 입력 — 세미콜론(`;`)으로 실행 트리거, 주석/문자열 내 `;` 제외 계산
+- [x] ANSI 컬러 출력 (빨강: 에러, 초록: 성공, 청록: 프롬프트)
+- [x] `\status` — 서버 uptime · 연결 수 조회
+- [x] `\help` — 사용 가능한 명령 안내
+- [x] `exit` / `quit` — 서버에 정상 종료 알림 후 연결 해제
+
+### 스토리지 구조 (data/)
+- [x] **`_system/` 서브폴더** — 전역 파일(`_users.json`, `_grants.json`, `_roles.json`, `_role_grants.json`, `_synonyms.json`, `_procedures.json`, `_triggers.json`, `_functions.json`)을 루트 대신 `data/_system/`에 저장
+- [x] **레거시 자동 마이그레이션** — `load_sys_json()`: 구 루트 경로 파일이 있으면 `_system/`으로 자동 이동 후 삭제
+- [x] **SHOW DATABASES에서 `_system` 제외** — `list_databases()`에서 필터링
+- [x] **연결별 독립 데이터 디렉터리** — `code/data/local/` (기본 연결), `code/data/data_숫자/` (추가 연결) — UI·CLI·서버가 `code/data/`를 공유
+- [x] **Tauri `get_app_data_dir` 커맨드** — `CARGO_MANIFEST_DIR` 기반 `code/data/` 절대경로 반환
+- [x] **상대경로 자동 절대경로 변환** — 앱 시작 시 localStorage의 상대경로 연결을 절대경로로 마이그레이션 후 재저장
+
+### UI 추가 기능 (rustdb-ui)
+- [x] **Server Manager MySQL 포트 필드** — `+/-` 버튼 포함, 0 입력 시 MySQL 프로토콜 비활성, Tauri `start_server`에 `mysql_port` 파라미터 추가
+- [x] **Tauri UI MySQL 리스너** — UI에서 서버 Start 시 `mysql::start_mysql_listener(mysql_port, shared_db)` 호출로 MySQL 프로토콜 동시 기동
+- [x] **서버 연결 아이콘 교체** — Server Manager 헤더의 서버 랙 아이콘 → 주황색 원통형 DB 아이콘

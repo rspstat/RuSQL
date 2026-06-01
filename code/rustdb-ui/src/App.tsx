@@ -314,10 +314,31 @@ function App() {
         }));
       }
     } catch {}
-    return [{ id: "1", name: "RustDB Local", host: "localhost", port: 7878, user: "root", password: "root", autoLogin: false, dataDir: "data" }];
+    return [{ id: "1", name: "RustDB Local", host: "localhost", port: 7878, user: "root", password: "root", autoLogin: false, dataDir: "local" }];
   };
   const [connections, setConnections] = useState<Connection[]>(loadConnections);
   const saveConnections = (c: Connection[]) => { localStorage.setItem("rustdb_connections", JSON.stringify(c)); setConnections(c); };
+  const [appDataBase, setAppDataBase] = useState("");
+
+  // 앱 데이터 디렉터리 조회 및 기존 상대경로 연결 마이그레이션
+  useEffect(() => {
+    invoke<string>("get_app_data_dir").then(base => {
+      setAppDataBase(base);
+      setConnections(prev => {
+        const migrated = prev.map(c => {
+          // 이미 절대경로면 그대로
+          if (c.dataDir.includes("\\") || c.dataDir.includes("/") || c.dataDir.startsWith(".")) return c;
+          // 모든 상대경로 → code/data/{relative}
+          return { ...c, dataDir: `${base}\\${c.dataDir}` };
+        });
+        // 변경이 있으면 localStorage에도 저장
+        if (migrated.some((c, i) => c.dataDir !== prev[i].dataDir)) {
+          localStorage.setItem("rustdb_connections", JSON.stringify(migrated));
+        }
+        return migrated;
+      });
+    });
+  }, []);
 
   // 홈 화면 상태
   const [loggedIn, setLoggedIn] = useState(false);
@@ -441,7 +462,7 @@ function App() {
     const conn: Connection = {
       id, name: newName, host: newHost, port,
       user: newUser, password: newPass, autoLogin: newAutoLogin,
-      dataDir: `data_${id}`,
+      dataDir: appDataBase ? `${appDataBase}\\data_${id}` : `data\\data_${id}`,
     };
     saveConnections([...connections, conn]);
     setShowNewConn(false);
@@ -511,6 +532,7 @@ function App() {
   const serverStatus_init: ServerStatus = { running: false, port: 7878, client_count: 0, log: [] };
   const [serverStatus, setServerStatus] = useState<ServerStatus>(serverStatus_init);
   const [portInput, setPortInput] = useState("7878");
+  const [mysqlPortInput, setMysqlPortInput] = useState("13306");
   const [serverMsg, setServerMsg] = useState("");
   const [srvConnName, setSrvConnName] = useState("RustDB Local");
   const [srvUser, setSrvUser] = useState("root");
@@ -1333,8 +1355,9 @@ function App() {
   // ─── 서버 제어 ──────────────────────────────────────────────
   const handleStartServer = async () => {
     const port = parseInt(portInput) || 7878;
+    const mysqlPort = parseInt(mysqlPortInput) || 0;
     try {
-      const msg = await invoke<string>("start_server", { connId: connIdRef.current, port });
+      const msg = await invoke<string>("start_server", { connId: connIdRef.current, port, mysqlPort });
       setServerMsg(msg);
     } catch (e) { setServerMsg(String(e)); }
   };
@@ -1860,7 +1883,7 @@ function App() {
                       </span>
                       <span className="home-conn-chip" title={`데이터 디렉토리: ${conn.dataDir}`}>
                         <svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor"><path d="M20 6h-8l-2-2H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2z"/></svg>
-                        {conn.dataDir}
+                        {conn.dataDir.split(/[\\/]/).pop()}
                       </span>
                       {conn.autoLogin && <span className="home-conn-chip" style={{ color: "#4ec9b0" }}>자동 로그인</span>}
                     </div>
@@ -4152,35 +4175,11 @@ function App() {
 
               {/* 아이콘 + 제목 */}
               <div className="srv-conn-header">
-                <svg className="srv-db-icon" viewBox="0 0 48 48" fill="none" xmlns="http://www.w3.org/2000/svg">
-                  {/* 섀시 외곽 */}
-                  <rect x="2" y="3" width="44" height="42" rx="2.5" fill="#1e1e1e" stroke="#484848" strokeWidth="1.5"/>
-                  {/* 서버 유닛 1 */}
-                  <rect x="5" y="6" width="38" height="13" rx="1.5" fill="#2b2b2b" stroke="#3e3e3e" strokeWidth="0.8"/>
-                  <rect x="8"  y="9.5"  width="18" height="1.5" rx="0.6" fill="#1a1a1a"/>
-                  <rect x="8"  y="12.5" width="18" height="1.5" rx="0.6" fill="#1a1a1a"/>
-                  <circle cx="30" cy="10.5" r="1.6" fill="#4ec9b0"/>
-                  <circle cx="34" cy="10.5" r="1.6" fill="#4ec9b0" opacity="0.3"/>
-                  <circle cx="38.5" cy="10.5" r="1.6" fill="#1a6ca8"/>
-                  <rect x="29" y="14.5" width="12" height="2.5" rx="0.8" fill="#161616" stroke="#333" strokeWidth="0.5"/>
-                  {/* 서버 유닛 2 */}
-                  <rect x="5" y="21" width="38" height="13" rx="1.5" fill="#2b2b2b" stroke="#3e3e3e" strokeWidth="0.8"/>
-                  <rect x="8"  y="24.5" width="18" height="1.5" rx="0.6" fill="#1a1a1a"/>
-                  <rect x="8"  y="27.5" width="18" height="1.5" rx="0.6" fill="#1a1a1a"/>
-                  <circle cx="30" cy="25.5" r="1.6" fill="#444"/>
-                  <circle cx="34" cy="25.5" r="1.6" fill="#444"/>
-                  <circle cx="38.5" cy="25.5" r="1.6" fill="#1a6ca8" opacity="0.55"/>
-                  <rect x="29" y="29.5" width="12" height="2.5" rx="0.8" fill="#161616" stroke="#333" strokeWidth="0.5"/>
-                  {/* 하단 패널 */}
-                  <rect x="5" y="36" width="38" height="7" rx="1.5" fill="#232323" stroke="#3a3a3a" strokeWidth="0.6"/>
-                  {/* 전원 버튼 */}
-                  <circle cx="11" cy="39.5" r="2.6" fill="#2e2e2e" stroke="#505050" strokeWidth="1"/>
-                  <circle cx="11" cy="39.5" r="1.1" fill="#4ec9b0"/>
-                  {/* USB 포트들 */}
-                  <rect x="17" y="38" width="4.5" height="3" rx="0.6" fill="#161616" stroke="#383838" strokeWidth="0.5"/>
-                  <rect x="23" y="38" width="4.5" height="3" rx="0.6" fill="#161616" stroke="#383838" strokeWidth="0.5"/>
-                  {/* 라벨 슬롯 */}
-                  <rect x="29" y="38" width="11" height="3" rx="0.5" fill="#1a1a1a" stroke="#333" strokeWidth="0.4"/>
+                <svg className="srv-db-icon" width="65" height="65" viewBox="0 0 24 24" preserveAspectRatio="none" fill="none">
+                  <ellipse cx="12" cy="3" rx="8" ry="2.5" stroke="#e8a44a" strokeWidth="1.5" vectorEffect="non-scaling-stroke"/>
+                  <path d="M4 3v6c0 1.38 3.58 2.5 8 2.5s8-1.12 8-2.5v-6" stroke="#e8a44a" strokeWidth="1.5" fill="none" vectorEffect="non-scaling-stroke"/>
+                  <path d="M4 9v6c0 1.38 3.58 2.5 8 2.5s8-1.12 8-2.5v-6" stroke="#e8a44a" strokeWidth="1.5" fill="none" vectorEffect="non-scaling-stroke"/>
+                  <path d="M4 15v6c0 1.38 3.58 2.5 8 2.5s8-1.12 8-2.5v-6" stroke="#e8a44a" strokeWidth="1.5" fill="none" vectorEffect="non-scaling-stroke"/>
                 </svg>
                 <div>
                   <div className="srv-conn-title">서버에 연결</div>
@@ -4247,6 +4246,27 @@ function App() {
                         <button
                           className="srv-port-btn"
                           onClick={() => setPortInput(p => String(Math.min(65535, parseInt(p || "7878") + 1)))}
+                          disabled={serverStatus.running}
+                        >+</button>
+                      </div>
+                    </div>
+                    <div className="srv-form-col" style={{ maxWidth: 160 }}>
+                      <label className="srv-form-label">MySQL 포트 <span style={{ color: "var(--text-muted)", fontWeight: 400 }}>(0=비활성)</span></label>
+                      <div className="srv-port-wrap">
+                        <button
+                          className="srv-port-btn"
+                          onClick={() => setMysqlPortInput(p => String(Math.max(0, parseInt(p || "0") - 1)))}
+                          disabled={serverStatus.running}
+                        >−</button>
+                        <input
+                          className="srv-form-input srv-port-num"
+                          value={mysqlPortInput}
+                          onChange={e => setMysqlPortInput(e.target.value)}
+                          disabled={serverStatus.running}
+                        />
+                        <button
+                          className="srv-port-btn"
+                          onClick={() => setMysqlPortInput(p => String(Math.min(65535, parseInt(p || "0") + 1)))}
                           disabled={serverStatus.running}
                         >+</button>
                       </div>

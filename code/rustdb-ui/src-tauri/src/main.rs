@@ -1,5 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod mysql;
+
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, RwLock};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -560,7 +562,7 @@ fn get_indexes(state: State<AppState>) -> Vec<IndexInfo> {
 
 // ─── Tauri 커맨드: 서버 관리 ─────────────────────────────────
 #[tauri::command]
-fn start_server(conn_id: String, port: u16, state: State<AppState>) -> Result<String, String> {
+fn start_server(conn_id: String, port: u16, mysql_port: u16, state: State<AppState>) -> Result<String, String> {
     {
         let servers = state.servers.lock().unwrap();
         if let Some(e) = servers.get(&conn_id) {
@@ -572,11 +574,13 @@ fn start_server(conn_id: String, port: u16, state: State<AppState>) -> Result<St
 
     // 현재 연결의 SharedDatabase를 캡처 (연결 전환 후에도 이 서버는 이 DB를 계속 사용)
     let shared_db = state.db.lock().unwrap().get_shared();
+    let shared_db_mysql = Arc::clone(&shared_db); // MySQL 리스너용 사전 복제
 
     let running = Arc::new(AtomicBool::new(true));
     let clients = Arc::new(AtomicUsize::new(0));
     // 이전 세션 로그를 파일에서 복원해 이어서 기록한다.
     let log     = Arc::new(Mutex::new(load_server_log(&conn_id)));
+    let log_mysql = Arc::clone(&log); // MySQL 로그용 사전 복제
     let port_store = Arc::new(Mutex::new(port));
 
     state.servers.lock().unwrap().insert(conn_id, ServerEntry {
@@ -623,7 +627,22 @@ fn start_server(conn_id: String, port: u16, state: State<AppState>) -> Result<St
         add_log(&log, "서버가 중지되었습니다.");
     });
 
+    if mysql_port > 0 {
+        mysql::start_mysql_listener(mysql_port, shared_db_mysql);
+        add_log(&log_mysql, &format!("MySQL 프로토콜 시작: 0.0.0.0:{}", mysql_port));
+    }
+
     Ok(format!("포트 {}에서 서버를 시작합니다...", port))
+}
+
+#[tauri::command]
+fn get_app_data_dir(_app: tauri::AppHandle) -> String {
+    // code/ 폴더를 기준으로 사용 → UI와 CLI/서버가 같은 데이터 공유
+    let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    // CARGO_MANIFEST_DIR = .../code/rustdb-ui/src-tauri → 두 단계 상위 = code/
+    manifest.parent().and_then(|p| p.parent())
+        .map(|p| p.join("data").to_string_lossy().to_string())
+        .unwrap_or_else(|| "data".to_string())
 }
 
 #[tauri::command]
@@ -644,6 +663,8 @@ fn authenticate(user: String, password: String, data_dir: String, state: State<A
     // 자격증명 검증
     let ok = new_exec.shared.read().unwrap().validate_credentials(&user, &password);
     if ok {
+        // mysql_native_hash 없는 레거시 계정 자동 마이그레이션
+        new_exec.shared.write().unwrap().migrate_mysql_hash(&user, &password);
         // UI 세션 executor 교체
         *state.db.lock().unwrap() = new_exec;
     }
@@ -811,6 +832,10 @@ fn main() {
         .manage(McpServer(Mutex::new(None)))
         .setup(|app| {
             *app.state::<McpServer>().0.lock().unwrap() = start_mcp_server();
+            // 창 아이콘 설정
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.set_icon(tauri::include_image!("icons/icon.png"));
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -835,6 +860,7 @@ fn main() {
             import_csv,
             open_terminal,
             open_url,
+            get_app_data_dir,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
