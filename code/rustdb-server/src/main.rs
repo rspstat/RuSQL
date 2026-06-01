@@ -214,6 +214,7 @@ fn handle_client(
 
     // ── 3. 쿼리 세션 ──
     let mut exec = Executor::new_session(Arc::clone(&shared));
+    exec.register_process(auth_user, &peer);
     let mut buf  = String::new();
 
     for line in lines_iter {
@@ -254,6 +255,7 @@ fn handle_client(
             let preview = if q.len() > 60 { format!("{}...", &q[..60]) } else { q.clone() };
             log(&format!("[{}@{}] {}", auth_user, peer, preview));
 
+            exec.update_process_command("Query", q);
             let t0 = Instant::now();
             let mut p = Parser::new(q.as_str());
             let (status, output) = match p.parse() {
@@ -263,10 +265,12 @@ fn handle_client(
                 },
                 Err(e) => ("ERR", format!("Parse Error: {}", e)),
             };
+            exec.update_process_command("Sleep", "");
             send(&mut writer, status, &output, t0.elapsed().as_secs_f64());
         }
     }
 
+    exec.deregister_process();
     let remaining = client_count.fetch_sub(1, Ordering::SeqCst) - 1;
     log(&format!("Client disconnected: {} (remaining: {})", peer, remaining));
 }

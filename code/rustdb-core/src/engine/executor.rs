@@ -2,7 +2,9 @@
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Instant;
 
 thread_local! {
     static USER_FUNCTIONS: RefCell<HashMap<String, (Vec<String>, String)>> = RefCell::new(HashMap::new());
@@ -21,6 +23,7 @@ use crate::storage::buffer_pool::BufferPool;
 use crate::storage::composite_index::CompositeIndex;
 use crate::engine::lock_manager::{LockManager, LockResult};
 use crate::engine::planner::{Planner, AccessPath, JoinAlgo};
+use crate::engine::join as join_algo;
 use rayon::prelude::*;
 
 /// 병렬 스캔을 적용하는 최소 행 수. 이보다 작으면 스레드 생성 오버헤드가 커서 순차 실행.
@@ -95,6 +98,18 @@ pub struct TableStats {
     pub columns: HashMap<String, ColumnStats>,
 }
 
+#[derive(Debug, Clone)]
+pub struct ProcessInfo {
+    pub id: usize,
+    pub user: String,
+    pub host: String,
+    pub db: String,
+    pub command: String,
+    pub info: String,
+    pub connected_at: Instant,
+    pub state_since: Instant,
+}
+
 pub struct SharedDatabase {
     pub catalog: Catalog,
     pub tables: HashMap<String, Vec<Row>>,
@@ -122,6 +137,10 @@ pub struct SharedDatabase {
     pub dml_since_vacuum: usize,
     /// User-defined scalar functions: name → (params: Vec<name>, body_expr: String)
     pub user_functions: HashMap<String, (Vec<String>, String)>,
+    /// 활성 세션 목록 (SHOW PROCESS LIST용). 별도 Mutex로 보호.
+    pub process_list: Arc<Mutex<HashMap<usize, ProcessInfo>>>,
+    /// 세션 ID 발급용 카운터
+    pub next_session_id: Arc<AtomicUsize>,
 }
 
 /// SHA-256 해시 (hex 문자열 반환)
@@ -186,6 +205,8 @@ pub struct Executor {
     pub prepared_stmts: HashMap<String, String>,
     /// LEAVE / ITERATE 제어 흐름 신호
     proc_signal: Option<ProcSignal>,
+    /// SHOW PROCESS LIST에서 이 세션을 식별하는 ID
+    pub session_id: usize,
 }
 
 impl Executor {
@@ -380,6 +401,8 @@ impl Executor {
                 triggers,
                 dml_since_vacuum: 0,
                 user_functions,
+                process_list: Arc::new(Mutex::new(HashMap::new())),
+                next_session_id: Arc::new(AtomicUsize::new(1)),
             })),
             txn: TransactionManager::new_with_dir(dir),
             current_db,
@@ -388,6 +411,7 @@ impl Executor {
             user_vars: HashMap::new(),
             prepared_stmts: HashMap::new(),
             proc_signal: None,
+            session_id: 0,
         };
 
         // WAL Crash Recovery
@@ -396,11 +420,12 @@ impl Executor {
     }
 
     pub fn new_session(shared: Arc<RwLock<SharedDatabase>>) -> Self {
-        let (current_db, data_dir) = {
+        let (current_db, data_dir, session_id) = {
             let s = shared.read().unwrap();
             let db = s.databases.iter().min().cloned().unwrap_or_else(|| "rustdb".to_string());
             let dir = s.data_dir.clone();
-            (db, dir)
+            let id = s.next_session_id.fetch_add(1, Ordering::SeqCst);
+            (db, dir, id)
         };
         Executor {
             shared,
@@ -411,7 +436,42 @@ impl Executor {
             user_vars: HashMap::new(),
             prepared_stmts: HashMap::new(),
             proc_signal: None,
+            session_id,
         }
+    }
+
+    /// 세션을 process_list에 등록 (AUTH 성공 직후 서버에서 호출)
+    pub fn register_process(&self, user: &str, host: &str) {
+        let now = Instant::now();
+        let s = self.shared.read().unwrap();
+        s.process_list.lock().unwrap().insert(self.session_id, ProcessInfo {
+            id: self.session_id,
+            user: user.to_string(),
+            host: host.to_string(),
+            db: self.current_db.clone(),
+            command: "Sleep".to_string(),
+            info: String::new(),
+            connected_at: now,
+            state_since: now,
+        });
+    }
+
+    /// 현재 실행 중인 명령 상태를 갱신 (쿼리 시작/완료 시 서버에서 호출)
+    pub fn update_process_command(&self, command: &str, info: &str) {
+        let s = self.shared.read().unwrap();
+        let mut list = s.process_list.lock().unwrap();
+        if let Some(p) = list.get_mut(&self.session_id) {
+            p.command = command.to_string();
+            p.info = info.chars().take(100).collect();
+            p.state_since = Instant::now();
+            p.db = self.current_db.clone();
+        }
+    }
+
+    /// 세션 종료 시 process_list에서 제거
+    pub fn deregister_process(&self) {
+        let s = self.shared.read().unwrap();
+        s.process_list.lock().unwrap().remove(&self.session_id);
     }
 
     pub fn get_shared(&self) -> Arc<RwLock<SharedDatabase>> {
@@ -706,8 +766,20 @@ impl Executor {
             return Ok("0 rows returned.".to_string());
         }
 
-        // Merge rows
-        left_rows.extend(right_rows);
+        // right_rows의 컬럼을 left_cols 위치 순서로 재매핑해서 병합
+        let remapped_right: Vec<Row> = right_rows.into_iter()
+            .map(|rr| {
+                let mut new_row = Row::new();
+                for (i, lc) in left_cols.iter().enumerate() {
+                    let val = right_cols.get(i).and_then(|rc| rr.get(rc)).cloned().unwrap_or_default();
+                    new_row.insert(lc.clone(), val);
+                }
+                new_row.insert("_xmin".to_string(), "1".to_string());
+                new_row.insert("_xmax".to_string(), "0".to_string());
+                new_row
+            })
+            .collect();
+        left_rows.extend(remapped_right);
         let mut result = left_rows;
 
         // UNION (not ALL): deduplicate
@@ -796,10 +868,15 @@ impl Executor {
         let right_out = self.execute_with_s(s, right)?;
         let (left_cols, left_rows)   = Self::parse_table_output(&left_out);
         let (right_cols, right_rows) = Self::parse_table_output(&right_out);
-        let cols = if left_cols.is_empty() { right_cols } else { left_cols };
+        let cols = if left_cols.is_empty() { right_cols.clone() } else { left_cols };
 
+        // right_rows를 left(result) 컬럼 위치로 재매핑
         let right_keys: Vec<Vec<String>> = right_rows.iter()
-            .map(|r| cols.iter().map(|c| r.get(c).cloned().unwrap_or_default()).collect())
+            .map(|rr| cols.iter().enumerate()
+                .map(|(i, lc)| right_cols.get(i).and_then(|rc| rr.get(rc))
+                    .or_else(|| rr.get(lc))
+                    .cloned().unwrap_or_default())
+                .collect())
             .collect();
 
         let mut result: Vec<Row> = Vec::new();
@@ -842,10 +919,15 @@ impl Executor {
         let right_out = self.execute_with_s(s, right)?;
         let (left_cols, left_rows)   = Self::parse_table_output(&left_out);
         let (right_cols, right_rows) = Self::parse_table_output(&right_out);
-        let cols = if left_cols.is_empty() { right_cols } else { left_cols };
+        let cols = if left_cols.is_empty() { right_cols.clone() } else { left_cols };
 
+        // right_rows를 left(result) 컬럼 위치로 재매핑
         let right_keys: Vec<Vec<String>> = right_rows.iter()
-            .map(|r| cols.iter().map(|c| r.get(c).cloned().unwrap_or_default()).collect())
+            .map(|rr| cols.iter().enumerate()
+                .map(|(i, lc)| right_cols.get(i).and_then(|rc| rr.get(rc))
+                    .or_else(|| rr.get(lc))
+                    .cloned().unwrap_or_default())
+                .collect())
             .collect();
 
         let mut right_counts: std::collections::HashMap<Vec<String>, usize> = std::collections::HashMap::new();
@@ -952,7 +1034,11 @@ impl Executor {
 
     fn eval_arith(row: &Row, expr: &ArithExpr) -> String {
         match expr {
-            ArithExpr::Col(name) => Self::get_col(row, name).cloned().unwrap_or_else(|| NULL_VALUE.to_string()),
+            ArithExpr::Col(name) => match name.to_lowercase().as_str() {
+                "true"  => "true".to_string(),
+                "false" => "false".to_string(),
+                _ => Self::get_col(row, name).cloned().unwrap_or_else(|| NULL_VALUE.to_string()),
+            },
             ArithExpr::Num(n) => n.clone(),
             ArithExpr::Str(s) => s.clone(),
             ArithExpr::Add(l, r) => {
@@ -1984,7 +2070,7 @@ impl Executor {
         }
 
         // ── JOIN 순서 최적화 (cost-based DP, INNER-only; greedy 폴백) ──────
-        let joins = Self::reorder_joins_dp(&table, joins, &s.tables);
+        let joins = join_algo::reorder_joins_dp(&table, joins, &s.tables);
 
         // ── Planner: 인덱스 / 조인 알고리즘 결정 ──────────────────────────
         let has_agg = columns.iter().any(|c| matches!(c, SelectColumn::Agg { .. } | SelectColumn::AggAlias { .. }));
@@ -2163,18 +2249,6 @@ impl Executor {
                 };
                 let right_rows: Vec<Row> = right_rows_raw.into_iter().filter(|r| Self::is_visible(r)).collect();
 
-                let merge_right = |merged: &mut Row, right: &Row, tbl: &str| {
-                    for (k, v) in right.iter() {
-                        merged.insert(format!("{}.{}", tbl, k), v.clone());
-                        merged.entry(k.clone()).or_insert_with(|| v.clone());
-                    }
-                };
-                let null_right = |merged: &mut Row, right_cols: &[String], tbl: &str| {
-                    for col in right_cols {
-                        merged.insert(format!("{}.{}", tbl, col), NULL_VALUE.to_string());
-                        merged.entry(col.clone()).or_insert_with(|| NULL_VALUE.to_string());
-                    }
-                };
                 let right_schema_cols: Vec<String> = s.catalog.get_table(&j.table)
                     .map(|s| s.columns.iter().map(|c| c.name.clone()).collect())
                     .unwrap_or_default();
@@ -2187,354 +2261,13 @@ impl Executor {
                 };
 
                 let joined = match algo {
-                    Some(JoinAlgo::SortMerge { probe_col, build_col }) => {
-                        // ── Sort-Merge Join ───────────────────────────────
-                        // 양쪽 모두 조인 키 기준으로 정렬 후 투 포인터 병합.
-                        // 시간 복잡도: O((N+M)log(N+M)) sort + O(N+M) merge.
-                        let pc = probe_col.clone();
-                        let bc = build_col.clone();
-                        let tbl = j.table.clone();
-
-                        let sort_cmp = |a: &str, b: &str| -> std::cmp::Ordering {
-                            match (a.parse::<f64>(), b.parse::<f64>()) {
-                                (Ok(af), Ok(bf)) => af.partial_cmp(&bf).unwrap_or(std::cmp::Ordering::Equal),
-                                _ => a.cmp(b),
-                            }
-                        };
-                        let key_left = |row: &Row| -> String {
-                            row.get(&pc)
-                                .or_else(|| row.iter().find(|(k, _)| k.ends_with(&format!(".{}", pc))).map(|(_, v)| v))
-                                .cloned()
-                                .unwrap_or_default()
-                        };
-                        let key_right = |row: &Row| -> String {
-                            row.get(&bc)
-                                .or_else(|| row.get(&format!("{}.{}", tbl, bc)))
-                                .cloned()
-                                .unwrap_or_default()
-                        };
-
-                        let mut ls: Vec<Row> = current.clone();
-                        ls.sort_by(|a, b| sort_cmp(&key_left(a), &key_left(b)));
-                        let mut rs: Vec<Row> = right_rows.clone();
-                        rs.sort_by(|a, b| sort_cmp(&key_right(a), &key_right(b)));
-
-                        let mut out = Vec::new();
-                        match j.join_type {
-                            JoinType::Inner => {
-                                let mut li = 0usize;
-                                let mut ri = 0usize;
-                                while li < ls.len() && ri < rs.len() {
-                                    let lk = key_left(&ls[li]);
-                                    let rk = key_right(&rs[ri]);
-                                    match sort_cmp(&lk, &rk) {
-                                        std::cmp::Ordering::Less    => { li += 1; }
-                                        std::cmp::Ordering::Greater => { ri += 1; }
-                                        std::cmp::Ordering::Equal   => {
-                                            // 동일 키 그룹 수집
-                                            let li0 = li;
-                                            while li < ls.len() && key_left(&ls[li]) == lk { li += 1; }
-                                            let ri0 = ri;
-                                            while ri < rs.len() && key_right(&rs[ri]) == lk { ri += 1; }
-                                            // 교차 곱
-                                            for l in &ls[li0..li] {
-                                                for r in &rs[ri0..ri] {
-                                                    let mut merged = l.clone();
-                                                    merge_right(&mut merged, r, &tbl);
-                                                    out.push(merged);
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                            JoinType::Left => {
-                                let mut ri = 0usize;
-                                let mut li = 0usize;
-                                while li < ls.len() {
-                                    let lk = key_left(&ls[li]);
-                                    // ri를 lk 이상의 첫 위치로 전진
-                                    while ri < rs.len() && sort_cmp(&key_right(&rs[ri]), &lk) == std::cmp::Ordering::Less {
-                                        ri += 1;
-                                    }
-                                    // 왼쪽 키 그룹 [li0, li)
-                                    let li0 = li;
-                                    while li < ls.len() && key_left(&ls[li]) == lk { li += 1; }
-                                    // 오른쪽 매칭 그룹 [ri0, ri_end)
-                                    let ri0 = ri;
-                                    let mut ri_end = ri;
-                                    while ri_end < rs.len() && key_right(&rs[ri_end]) == lk { ri_end += 1; }
-                                    if ri_end > ri0 {
-                                        for l in &ls[li0..li] {
-                                            for r in &rs[ri0..ri_end] {
-                                                let mut merged = l.clone();
-                                                merge_right(&mut merged, r, &tbl);
-                                                out.push(merged);
-                                            }
-                                        }
-                                    } else {
-                                        for l in &ls[li0..li] {
-                                            let mut merged = l.clone();
-                                            null_right(&mut merged, &right_schema_cols, &tbl);
-                                            out.push(merged);
-                                        }
-                                    }
-                                    ri = ri_end;
-                                }
-                            }
-                            JoinType::Right => {
-                                let left_cols: Vec<String> = current.first()
-                                    .map(|r| r.keys().filter(|k| !k.starts_with('_') && !k.contains('.')).cloned().collect())
-                                    .unwrap_or_default();
-                                let mut li = 0usize;
-                                let mut ri = 0usize;
-                                while ri < rs.len() {
-                                    let rk = key_right(&rs[ri]);
-                                    while li < ls.len() && sort_cmp(&key_left(&ls[li]), &rk) == std::cmp::Ordering::Less {
-                                        li += 1;
-                                    }
-                                    let ri0 = ri;
-                                    while ri < rs.len() && key_right(&rs[ri]) == rk { ri += 1; }
-                                    let li0 = li;
-                                    let mut li_end = li;
-                                    while li_end < ls.len() && key_left(&ls[li_end]) == rk { li_end += 1; }
-                                    if li_end > li0 {
-                                        for l in &ls[li0..li_end] {
-                                            for r in &rs[ri0..ri] {
-                                                let mut merged = l.clone();
-                                                merge_right(&mut merged, r, &tbl);
-                                                out.push(merged);
-                                            }
-                                        }
-                                    } else {
-                                        for r in &rs[ri0..ri] {
-                                            let mut merged = Row::new();
-                                            for col in &left_cols { merged.insert(col.clone(), NULL_VALUE.to_string()); }
-                                            merge_right(&mut merged, r, &tbl);
-                                            out.push(merged);
-                                        }
-                                    }
-                                    li = li0; // 같은 왼쪽 그룹이 다음 오른쪽 키에도 매칭될 수 있으므로 유지
-                                }
-                            }
-                            _ => unreachable!("Cross/Natural joins do not use Sort-Merge"),
-                        }
-                        out
-                    }
-                    Some(JoinAlgo::Hash { probe_col, build_col }) => {
-                        // ── Hash Join ─────────────────────────────────────
-                        // Build phase: right 테이블을 build_col 기준으로 해시화
-                        let mut hash: HashMap<String, Vec<Row>> = HashMap::new();
-                        let bc = build_col.clone();
-                        let tbl = j.table.clone();
-                        for right in &right_rows {
-                            let key = right.get(&bc)
-                                .or_else(|| right.get(&format!("{}.{}", tbl, bc)))
-                                .cloned().unwrap_or_default();
-                            hash.entry(key).or_default().push(right.clone());
-                        }
-                        // Probe phase: left 테이블로 해시 테이블 조회
-                        let pc = probe_col.clone();
-                        let mut out = Vec::new();
-                        match j.join_type {
-                            JoinType::Inner => {
-                                for left in &current {
-                                    let probe_key = left.get(&pc)
-                                        .or_else(|| left.iter().find(|(k, _)| k.ends_with(&format!(".{}", pc))).map(|(_, v)| v))
-                                        .cloned().unwrap_or_default();
-                                    if let Some(matches) = hash.get(&probe_key) {
-                                        for right in matches {
-                                            let mut merged = left.clone();
-                                            merge_right(&mut merged, right, &j.table);
-                                            out.push(merged);
-                                        }
-                                    }
-                                }
-                            }
-                            JoinType::Left => {
-                                for left in &current {
-                                    let probe_key = left.get(&pc)
-                                        .or_else(|| left.iter().find(|(k, _)| k.ends_with(&format!(".{}", pc))).map(|(_, v)| v))
-                                        .cloned().unwrap_or_default();
-                                    if let Some(matches) = hash.get(&probe_key) {
-                                        for right in matches {
-                                            let mut merged = left.clone();
-                                            merge_right(&mut merged, right, &j.table);
-                                            out.push(merged);
-                                        }
-                                    } else {
-                                        let mut merged = left.clone();
-                                        null_right(&mut merged, &right_schema_cols, &j.table);
-                                        out.push(merged);
-                                    }
-                                }
-                            }
-                            JoinType::Right => {
-                                // Right join: build from left, probe with right
-                                let mut left_hash: HashMap<String, Vec<Row>> = HashMap::new();
-                                for left in &current {
-                                    let key = left.get(&pc).cloned().unwrap_or_default();
-                                    left_hash.entry(key).or_default().push(left.clone());
-                                }
-                                let left_cols: Vec<String> = current.first()
-                                    .map(|r| r.keys().filter(|k| !k.starts_with('_') && !k.contains('.')).cloned().collect())
-                                    .unwrap_or_default();
-                                for right in &right_rows {
-                                    let key = right.get(&bc).cloned().unwrap_or_default();
-                                    if let Some(lefts) = left_hash.get(&key) {
-                                        for left in lefts {
-                                            let mut merged = left.clone();
-                                            merge_right(&mut merged, right, &j.table);
-                                            out.push(merged);
-                                        }
-                                    } else {
-                                        let mut merged = Row::new();
-                                        for col in &left_cols { merged.insert(col.clone(), NULL_VALUE.to_string()); }
-                                        merge_right(&mut merged, right, &j.table);
-                                        out.push(merged);
-                                    }
-                                }
-                            }
-                            _ => unreachable!("Cross/Natural joins do not use Hash Join"),
-                        }
-                        out
-                    }
+                    Some(JoinAlgo::SortMerge { probe_col, build_col }) =>
+                        join_algo::sort_merge_join(&current, &right_rows, &j.join_type, &j.table, probe_col, build_col),
+                    Some(JoinAlgo::Hash { probe_col, build_col }) =>
+                        join_algo::hash_join(&current, &right_rows, &j.join_type, &j.table, probe_col, build_col, &right_schema_cols),
                     _ => {
-                        // ── Nested Loop Join (default) ───────────────────
-                        let mut out = Vec::new();
-                        // JOIN ... USING(col, ...) — treat as inner equi-join on specified columns
-                        if !j.using_cols.is_empty() {
-                            let using_cols = j.using_cols.clone();
-                            for left in &current {
-                                for right in &right_rows {
-                                    let matches = using_cols.iter().all(|col| {
-                                        let lv = left.get(col).map(String::as_str).unwrap_or(NULL_VALUE);
-                                        let rv = right.get(col).map(String::as_str).unwrap_or(NULL_VALUE);
-                                        lv == rv && lv != NULL_VALUE
-                                    });
-                                    if matches {
-                                        let mut merged = left.clone();
-                                        merge_right(&mut merged, right, &j.table);
-                                        out.push(merged);
-                                    }
-                                }
-                            }
-                            out
-                        } else {
-                        match j.join_type {
-                            JoinType::Inner => {
-                                for left in &current {
-                                    for right in &right_rows {
-                                        let mut merged = left.clone();
-                                        merge_right(&mut merged, right, &j.table);
-                                        if Self::eval_condexpr(&merged, &j.on_expr) { out.push(merged); }
-                                    }
-                                }
-                            }
-                            JoinType::Left => {
-                                for left in &current {
-                                    let mut matched = false;
-                                    for right in &right_rows {
-                                        let mut merged = left.clone();
-                                        merge_right(&mut merged, right, &j.table);
-                                        if Self::eval_condexpr(&merged, &j.on_expr) {
-                                            out.push(merged); matched = true;
-                                        }
-                                    }
-                                    if !matched {
-                                        let mut merged = left.clone();
-                                        null_right(&mut merged, &right_schema_cols, &j.table);
-                                        out.push(merged);
-                                    }
-                                }
-                            }
-                            JoinType::Right => {
-                                let left_cols: Vec<String> = current.first()
-                                    .map(|r| r.keys().filter(|k| !k.starts_with('_') && !k.contains('.')).cloned().collect())
-                                    .unwrap_or_default();
-                                for right in &right_rows {
-                                    let mut matched = false;
-                                    for left in &current {
-                                        let mut merged = left.clone();
-                                        merge_right(&mut merged, right, &j.table);
-                                        if Self::eval_condexpr(&merged, &j.on_expr) {
-                                            out.push(merged); matched = true;
-                                        }
-                                    }
-                                    if !matched {
-                                        let mut merged = Row::new();
-                                        for col in &left_cols { merged.insert(col.clone(), NULL_VALUE.to_string()); }
-                                        merge_right(&mut merged, right, &j.table);
-                                        out.push(merged);
-                                    }
-                                }
-                            }
-                            JoinType::Cross => {
-                                // Cartesian product — no condition
-                                for left in &current {
-                                    for right in &right_rows {
-                                        let mut merged = left.clone();
-                                        merge_right(&mut merged, right, &j.table);
-                                        out.push(merged);
-                                    }
-                                }
-                            }
-                            JoinType::Natural => {
-                                // Equi-join on all columns with identical names in both tables
-                                let common_cols: Vec<String> = right_schema_cols.iter()
-                                    .filter(|rc| current.first()
-                                        .map(|lr| lr.contains_key(*rc) || lr.keys().any(|k| k == *rc))
-                                        .unwrap_or(false))
-                                    .cloned()
-                                    .collect();
-                                for left in &current {
-                                    for right in &right_rows {
-                                        let mut merged = left.clone();
-                                        merge_right(&mut merged, right, &j.table);
-                                        let matches = common_cols.iter().all(|col| {
-                                            let lv = left.get(col).map(String::as_str).unwrap_or("");
-                                            let rv = right.get(col).map(String::as_str).unwrap_or("");
-                                            lv == rv
-                                        });
-                                        if matches { out.push(merged); }
-                                    }
-                                }
-                            }
-                            JoinType::FullOuter => {
-                                let left_cols: Vec<String> = current.first()
-                                    .map(|r| r.keys().filter(|k| !k.starts_with('_') && !k.contains('.')).cloned().collect())
-                                    .unwrap_or_default();
-                                let mut matched_right: HashSet<usize> = HashSet::new();
-                                for left in &current {
-                                    let mut any_match = false;
-                                    for (ri, right) in right_rows.iter().enumerate() {
-                                        let mut merged = left.clone();
-                                        merge_right(&mut merged, right, &j.table);
-                                        if Self::eval_condexpr(&merged, &j.on_expr) {
-                                            out.push(merged);
-                                            matched_right.insert(ri);
-                                            any_match = true;
-                                        }
-                                    }
-                                    if !any_match {
-                                        let mut merged = left.clone();
-                                        null_right(&mut merged, &right_schema_cols, &j.table);
-                                        out.push(merged);
-                                    }
-                                }
-                                for (ri, right) in right_rows.iter().enumerate() {
-                                    if !matched_right.contains(&ri) {
-                                        let mut merged: Row = left_cols.iter()
-                                            .map(|c| (c.clone(), NULL_VALUE.to_string()))
-                                            .collect();
-                                        merge_right(&mut merged, right, &j.table);
-                                        out.push(merged);
-                                    }
-                                }
-                            }
-                        }
-                        out
-                        } // end else (using_cols is empty)
+                        let on_expr = j.on_expr.clone();
+                        join_algo::nested_loop_join(&current, &right_rows, &j.join_type, &j.table, &j.using_cols, &right_schema_cols, move |merged| Self::eval_condexpr(merged, &on_expr))
                     }
                 };
                 current = joined;
@@ -4735,6 +4468,31 @@ impl Executor {
                 .map(|(name, schema)| (name.clone(), schema.columns.clone()))
                 .collect();
 
+        // Pass 1: RESTRICT 위반 먼저 검사 (수정 적용 전)
+        for del_row in &rows_to_delete {
+            for (other_table, cols) in &other_tables {
+                for col in cols {
+                    if let Some(fk) = &col.foreign_key {
+                        if fk.ref_table == table && matches!(fk.on_delete, crate::catalog::schema::FkAction::Restrict) {
+                            let del_val = del_row.get(&fk.ref_column).cloned().unwrap_or_default();
+                            if let Some(other_rows) = s.tables.get(other_table) {
+                                let referenced = other_rows.iter()
+                                    .filter(|r| Self::is_visible(r))
+                                    .any(|r| r.get(&col.name).map(|v| v == &del_val).unwrap_or(false));
+                                if referenced {
+                                    return Err(format!(
+                                        "Foreign key violation: row in '{}' is referenced by '{}'.'{}'",
+                                        table, other_table, col.name
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Pass 2: CASCADE / SET NULL / SET DEFAULT 적용
         for del_row in &rows_to_delete {
             for (other_table, cols) in &other_tables {
                 for col in cols {
@@ -4744,19 +4502,7 @@ impl Executor {
                                 .cloned().unwrap_or_default();
 
                             match fk.on_delete {
-                                crate::catalog::schema::FkAction::Restrict => {
-                                    if let Some(other_rows) = s.tables.get(other_table) {
-                                        let referenced = other_rows.iter()
-                                            .filter(|r| Self::is_visible(r))
-                                            .any(|r| r.get(&col.name).map(|v| v == &del_val).unwrap_or(false));
-                                        if referenced {
-                                            return Err(format!(
-                                                "Foreign key violation: row in '{}' is referenced by '{}'.'{}'",
-                                                table, other_table, col.name
-                                            ));
-                                        }
-                                    }
-                                }
+                                crate::catalog::schema::FkAction::Restrict => { /* already checked */ }
                                 crate::catalog::schema::FkAction::Cascade => {
                                     if self.txn.is_active() {
                                         // 트랜잭션 안: MVCC 논리 삭제
@@ -4873,7 +4619,7 @@ impl Executor {
             if let Some(index) = s.indexes.get_mut(&table) {
                 *index = BPlusTree::new();
                 for row in &rows_clone {
-                    let key = row.values().next().cloned().unwrap_or_default();
+                    let key = row.get(&pk_col).cloned().unwrap_or_default();
                     let val_json = serde_json::to_string(row).unwrap();
                     index.insert(key, val_json);
                 }
@@ -5457,110 +5203,17 @@ impl Executor {
         // Apply explicit JOINs
         for j in &joins {
             let right_rows: Vec<Row> = s.tables.get(&j.table)
-                .ok_or(format!("Table '{}' not found", j.table))?
-                .iter()
-                .filter(|r| Self::is_visible(r))
-                .cloned()
-                .collect();
-            let tbl = j.table.clone();
-            let mut out = Vec::new();
-            if !j.using_cols.is_empty() {
-                let using_cols = j.using_cols.clone();
-                for left in &current {
-                    for right in &right_rows {
-                        let matches = using_cols.iter().all(|col| {
-                            let lv = left.get(col).map(String::as_str).unwrap_or(NULL_VALUE);
-                            let rv = right.get(col).map(String::as_str).unwrap_or(NULL_VALUE);
-                            lv == rv && lv != NULL_VALUE
-                        });
-                        if matches {
-                            let mut merged = left.clone();
-                            for (k, v) in right.iter() {
-                                merged.insert(format!("{}.{}", tbl, k), v.clone());
-                                merged.entry(k.clone()).or_insert_with(|| v.clone());
-                            }
-                            out.push(merged);
-                        }
-                    }
-                }
-                current = out;
-                continue;
-            }
-            match j.join_type {
-                JoinType::Inner => {
-                    for left in &current {
-                        for right in &right_rows {
-                            let mut merged = left.clone();
-                            for (k, v) in right.iter() {
-                                merged.insert(format!("{}.{}", tbl, k), v.clone());
-                                merged.entry(k.clone()).or_insert_with(|| v.clone());
-                            }
-                            if Self::eval_condexpr(&merged, &j.on_expr) { out.push(merged); }
-                        }
-                    }
-                }
-                JoinType::Left => {
-                    let right_schema_cols: Vec<String> = s.catalog.get_table(&j.table)
-                        .map(|s| s.columns.iter().map(|c| c.name.clone()).collect())
-                        .unwrap_or_default();
-                    for left in &current {
-                        let mut matched = false;
-                        for right in &right_rows {
-                            let mut merged = left.clone();
-                            for (k, v) in right.iter() {
-                                merged.insert(format!("{}.{}", tbl, k), v.clone());
-                                merged.entry(k.clone()).or_insert_with(|| v.clone());
-                            }
-                            if Self::eval_condexpr(&merged, &j.on_expr) { out.push(merged); matched = true; }
-                        }
-                        if !matched {
-                            let mut merged = left.clone();
-                            for col in &right_schema_cols {
-                                merged.insert(format!("{}.{}", tbl, col), NULL_VALUE.to_string());
-                            }
-                            out.push(merged);
-                        }
-                    }
-                }
-                JoinType::Right => {
-                    let left_cols: Vec<String> = current.first()
-                        .map(|r| r.keys().filter(|k| !k.starts_with('_') && !k.contains('.')).cloned().collect())
-                        .unwrap_or_default();
-                    for right in &right_rows {
-                        let mut matched = false;
-                        for left in &current {
-                            let mut merged = left.clone();
-                            for (k, v) in right.iter() {
-                                merged.insert(format!("{}.{}", tbl, k), v.clone());
-                                merged.entry(k.clone()).or_insert_with(|| v.clone());
-                            }
-                            if Self::eval_condexpr(&merged, &j.on_expr) { out.push(merged.clone()); matched = true; }
-                        }
-                        if !matched {
-                            let mut merged = Row::new();
-                            for col in &left_cols { merged.insert(col.clone(), NULL_VALUE.to_string()); }
-                            for (k, v) in right.iter() {
-                                merged.insert(format!("{}.{}", tbl, k), v.clone());
-                                merged.entry(k.clone()).or_insert_with(|| v.clone());
-                            }
-                            out.push(merged);
-                        }
-                    }
-                }
-                JoinType::Cross | JoinType::Natural | JoinType::FullOuter => {
-                    for left in &current {
-                        for right in &right_rows {
-                            let mut merged = left.clone();
-                            for (k, v) in right.iter() {
-                                merged.insert(format!("{}.{}", tbl, k), v.clone());
-                                merged.entry(k.clone()).or_insert_with(|| v.clone());
-                            }
-                            if Self::eval_condexpr(&merged, &j.on_expr) { out.push(merged); }
-                        }
-                    }
-                }
-            }
-            current = out;
+                .ok_or(format!("Table '{}' not found", j.table))?.clone();
+            let right_rows: Vec<Row> = right_rows.into_iter().filter(|r| Self::is_visible(r)).collect();
+            let right_schema_cols: Vec<String> = s.catalog.get_table(&j.table)
+                .map(|s| s.columns.iter().map(|c| c.name.clone()).collect())
+                .unwrap_or_default();
+            let on_expr = j.on_expr.clone();
+            current = join_algo::nested_loop_join(
+                &current, &right_rows, &j.join_type, &j.table,
+                &j.using_cols, &right_schema_cols,
+                move |merged| Self::eval_condexpr(merged, &on_expr),
+            );
         }
 
         // Apply WHERE filter
@@ -6693,16 +6346,29 @@ impl Executor {
         }
     }
 
-    fn exec_show_processlist(&self, _s: &SharedDatabase) -> Result<String, String> {
-        let sep = "+----+------+-----------+--------+-------+------+";
-        let mut out = String::new();
-        out.push_str(&format!("{}\n", sep));
-        out.push_str("| Id | User | Host      | db     | State | Time |\n");
-        out.push_str(&format!("{}\n", sep));
-        out.push_str(&format!("| {:<2} | {:<4} | {:<9} | {:<6} | {:<5} | {:<4} |\n",
-            1, "root", "localhost", &self.current_db, "Query", 0));
-        out.push_str(sep);
-        Ok(out)
+    fn exec_show_processlist(&self, s: &SharedDatabase) -> Result<String, String> {
+        let list = s.process_list.lock().unwrap();
+        let now = Instant::now();
+        let sep = "+------+------------------+-----------------------+------------+---------+------+----------------------------------------------------------------------+";
+        let header = format!("| {:<4} | {:<16} | {:<21} | {:<10} | {:<7} | {:<4} | {:<68} |",
+            "Id", "User", "Host", "db", "Command", "Time", "Info");
+        let mut rows: Vec<String> = list.values()
+            .map(|p| format!(
+                "| {:<4} | {:<16} | {:<21} | {:<10} | {:<7} | {:<4} | {:<68} |",
+                p.id,
+                p.user,
+                p.host,
+                if p.db.is_empty() { "NULL".to_string() } else { p.db.clone() },
+                p.command,
+                now.duration_since(p.state_since).as_secs(),
+                if p.info.is_empty() { "NULL".to_string() } else { p.info.chars().take(68).collect::<String>() },
+            ))
+            .collect();
+        rows.sort();
+        let mut out = vec![sep.to_string(), header, sep.to_string()];
+        out.extend(rows);
+        out.push(sep.to_string());
+        Ok(out.join("\n"))
     }
 
     fn exec_execute(&mut self, s: &mut SharedDatabase, name: &str, using_vars: &[String]) -> Result<String, String> {
@@ -6821,160 +6487,6 @@ impl Executor {
         }
 
         Ok(format!("VACUUM complete. {} dead row(s) removed.", total_removed))
-    }
-
-    /// Extract table prefixes from dotted column references in a condition tree.
-    fn collect_table_refs_from_expr(expr: &CondExpr, refs: &mut HashSet<String>) {
-        match expr {
-            CondExpr::And(l, r) | CondExpr::Or(l, r) => {
-                Self::collect_table_refs_from_expr(l, refs);
-                Self::collect_table_refs_from_expr(r, refs);
-            }
-            CondExpr::Not(inner) => Self::collect_table_refs_from_expr(inner, refs),
-            CondExpr::Leaf(cond) => {
-                if let ArithExpr::Col(c) = &cond.left {
-                    if let Some(pos) = c.rfind('.') {
-                        refs.insert(c[..pos].to_string());
-                    }
-                }
-                if let ConditionValue::Literal(v) = &cond.value {
-                    if let Some(pos) = v.rfind('.') {
-                        let prefix = &v[..pos];
-                        if prefix.chars().next().map(|c| c.is_alphabetic() || c == '_').unwrap_or(false) {
-                            refs.insert(prefix.to_string());
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    /// Greedy JOIN reorder: smallest table first, dependency-aware, INNER joins only.
-    /// If any non-INNER join is present, returns original order unchanged.
-    /// JOIN 순서 비용 기반 동적계획법 (System-R 스타일).
-    /// 부분집합(bitmask) DP로 누적 결과 카디널리티를 반영해 최소 비용 순서를 찾는다.
-    /// greedy가 "다음 테이블 크기"만 보는 것과 달리, 누적 중간 결과 크기를 비용에 반영한다.
-    /// - INNER/NATURAL 연속 구간에만 적용 (OUTER 경계는 순서 고정).
-    /// - 조인 테이블 수 > 8 이면 2^N 폭발 방지를 위해 greedy로 폴백.
-    /// - ON 조건 의존성을 만족하는(조인 가능한) 전이만 후보로 둔다.
-    fn reorder_joins_dp(base_table: &str, joins: Vec<Join>, tables: &HashMap<String, Vec<Row>>) -> Vec<Join> {
-        let n = joins.len();
-        if n <= 1 { return joins; }
-        if joins.iter().any(|j| !matches!(j.join_type, JoinType::Inner | JoinType::Natural)) {
-            return joins;
-        }
-        if n > 8 {
-            return Self::reorder_joins_greedy(base_table, joins, tables);
-        }
-
-        let size_of = |t: &str| tables.get(t).map(|r| r.len()).unwrap_or(0).max(1);
-        let base_card = size_of(base_table);
-
-        // dp[mask] = (누적 비용, 결과 추정 카디널리티, 조인 순서)
-        let full = (1usize << n) - 1;
-        let mut dp: Vec<Option<(f64, usize, Vec<usize>)>> = vec![None; 1 << n];
-        dp[0] = Some((0.0, base_card, Vec::new()));
-
-        for mask in 0..(1usize << n) {
-            let (cur_cost, cur_card, order) = match dp[mask].clone() { Some(v) => v, None => continue };
-
-            // 현재까지 확보된 테이블 이름 집합 (풀 이름 / 베어 이름)
-            let mut available: HashSet<String> = HashSet::new();
-            available.insert(base_table.to_string());
-            if let Some(p) = base_table.rfind('.') { available.insert(base_table[p + 1..].to_string()); }
-            for &k in &order {
-                let t = &joins[k].table;
-                available.insert(t.clone());
-                if let Some(p) = t.rfind('.') { available.insert(t[p + 1..].to_string()); }
-            }
-
-            for j in 0..n {
-                if mask & (1 << j) != 0 { continue; }
-
-                // ON 조건 의존성: 참조 테이블이 모두 available 해야 조인 가능
-                let mut refs = HashSet::new();
-                Self::collect_table_refs_from_expr(&joins[j].on_expr, &mut refs);
-                let join_bare = joins[j].table.split('.').last().unwrap_or(&joins[j].table);
-                let joinable = refs.iter().all(|r| {
-                    let rb = r.split('.').last().unwrap_or(r);
-                    available.contains(r) || available.contains(rb)
-                        || r == &joins[j].table || rb == join_bare
-                });
-                if !joinable { continue; }
-
-                let rsize = size_of(&joins[j].table);
-                let is_equi = matches!(&joins[j].on_expr, CondExpr::Leaf(c) if c.operator == Operator::Eq);
-                // equi-join: hash 비용(left+right), PK-FK 가정으로 카디널리티 max.
-                // 비등가/cross: nested-loop 비용(left*right), 카디널리티 곱.
-                let (step_cost, new_card) = if is_equi {
-                    ((cur_card + rsize) as f64, cur_card.max(rsize))
-                } else {
-                    (cur_card.saturating_mul(rsize) as f64, cur_card.saturating_mul(rsize))
-                };
-                let new_cost = cur_cost + step_cost;
-                let nmask = mask | (1 << j);
-                let better = match &dp[nmask] { None => true, Some((c, _, _)) => new_cost < *c };
-                if better {
-                    let mut no = order.clone();
-                    no.push(j);
-                    dp[nmask] = Some((new_cost, new_card, no));
-                }
-            }
-        }
-
-        match dp[full].take() {
-            Some((_, _, order)) if order.len() == n => {
-                order.into_iter().map(|i| joins[i].clone()).collect()
-            }
-            // 의존성으로 전체를 못 채운 경우 (cross join 조합 등) greedy 폴백
-            _ => Self::reorder_joins_greedy(base_table, joins, tables),
-        }
-    }
-
-    fn reorder_joins_greedy(base_table: &str, joins: Vec<Join>, tables: &HashMap<String, Vec<Row>>) -> Vec<Join> {
-        if joins.len() <= 1 { return joins; }
-        if joins.iter().any(|j| !matches!(j.join_type, JoinType::Inner | JoinType::Natural)) { return joins; }
-
-        let mut available: HashSet<String> = HashSet::new();
-        available.insert(base_table.to_string());
-        if let Some(pos) = base_table.rfind('.') {
-            available.insert(base_table[pos + 1..].to_string());
-        }
-
-        let mut remaining = joins;
-        let mut reordered = Vec::new();
-
-        while !remaining.is_empty() {
-            let candidates: Vec<usize> = remaining.iter().enumerate()
-                .filter_map(|(i, j)| {
-                    let mut refs = HashSet::new();
-                    Self::collect_table_refs_from_expr(&j.on_expr, &mut refs);
-                    let join_bare = j.table.split('.').last().unwrap_or(&j.table);
-                    let ok = refs.iter().all(|r| {
-                        let r_bare = r.split('.').last().unwrap_or(r);
-                        available.contains(r) || available.contains(r_bare)
-                            || r == &j.table || r_bare == join_bare
-                    });
-                    if ok { Some(i) } else { None }
-                })
-                .collect();
-
-            let best_idx = if candidates.is_empty() {
-                0
-            } else {
-                *candidates.iter().min_by_key(|&&i| {
-                    tables.get(&remaining[i].table).map(|r| r.len()).unwrap_or(usize::MAX)
-                }).unwrap_or(&candidates[0])
-            };
-
-            let j = remaining.remove(best_idx);
-            available.insert(j.table.clone());
-            if let Some(pos) = j.table.rfind('.') {
-                available.insert(j.table[pos + 1..].to_string());
-            }
-            reordered.push(j);
-        }
-        reordered
     }
 
     /// ANALYZE TABLE t — 컬럼별 통계 수집 후 TableStats 저장
@@ -8187,6 +7699,16 @@ impl Executor {
                         raw.trim_matches('\'').to_string()
                     };
                     row.insert(col.clone(), value);
+                }
+                // 지정되지 않은 컬럼에 DEFAULT 값 적용
+                if let Some(schema) = s.catalog.get_table(&target) {
+                    for col_def in &schema.columns {
+                        if !row.contains_key(&col_def.name) && !col_def.auto_increment {
+                            if let Some(ref default) = col_def.default {
+                                row.insert(col_def.name.clone(), default.clone());
+                            }
+                        }
+                    }
                 }
                 insert_rows.push(row);
             }

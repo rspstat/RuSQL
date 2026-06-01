@@ -1,9 +1,3 @@
--- RustDB 통합 테스트 v2.2.0 (사내 HR·프로젝트 관리)
--- 테이블: department (5행) / employee (15행, 주 테이블) / project (7행)
--- FK: employee.department_id → department SET NULL
---     project.department_id  → department RESTRICT
---     project.lead_id        → employee   CASCADE
-
 -- Init
 DROP USER IF EXISTS 'testuser'@'%';
 DROP DATABASE IF EXISTS company;
