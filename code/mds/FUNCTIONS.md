@@ -197,6 +197,7 @@
 
 ### 인덱스 & 저장
 - [x] B+Tree 인덱스 (단일 컬럼, ORDER=16으로 트리 깊이 최소화)
+- [x] **Hash Index** — `CREATE INDEX name ON table (col) USING HASH` · 등호 조건 O(1) 검색 · 단일 컬럼 전용 · 비용 기반 플래너에서 등호 조건 시 B+Tree보다 우선 선택 · EXPLAIN에 `Hash Index Scan` 표시 · DML(INSERT/UPDATE/DELETE) 시 자동 재빌드 · 재시작 후 `indexes.json`에서 자동 복원 (`index_type: "hash"`)
 - [x] 복합 인덱스 (다중 컬럼, null-byte 키 결합)
 - [x] 클러스터드 인덱스 (PK 기준 물리적 정렬 유지)
 - [x] 보조 인덱스 중복 키 지원 (배열 저장, 동일 컬럼 값 다중 행)

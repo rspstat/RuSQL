@@ -1,4 +1,4 @@
-# RustDB 향후 계획 (v2.2.0)
+# RustDB 개발 계획 (v2.2.0 → 잔여 2주)
 
 ---
 
@@ -14,48 +14,59 @@
 | **MySQL result set 수정** | `parse_table` 탭 구분 형식 지원 — SHOW DATABASES/TABLES, SELECT 등이 MySQL 클라이언트에 정상 표시 |
 | **데이터 디렉터리 재구성** | `data/_system/` 전역 파일 분리, 레거시 자동 마이그레이션, 연결별 독립 폴더(`local/`, `data_숫자/`), UI·CLI 동일 경로 공유 |
 | **Tauri UI MySQL 포트 설정** | Server Manager에 MySQL 포트 입력 필드 추가 — UI에서 MySQL 프로토콜 포트 직접 설정 가능 |
+| **Server Manager UI 개편** | 탭 제거, 우측 슬라이드 패널(CLI 가이드 / MySQL 연결), 버퍼 풀 크기 설정, 병렬 쿼리 토글, 버튼 스타일 통일 |
 
 ---
 
 ## 🔧 엔진
 
-| 항목 | 난이도 | 효과 | 비고 |
-|---|:---:|---|---|
-| **병렬 실행 확장** | 중 | 대형 집계·조인 추가 가속 | 현재 WHERE 필터만 병렬(rayon) → 집계 map-reduce, Hash Join probe까지 확대 |
-| **Hash Index** | 중 | 등호 검색 O(1), 인덱스 다양성 | B+Tree에 이은 2번째 타입. 범위 검색 불가 트레이드오프 |
-| **MVCC 버전 체인** | 상 | 읽기·쓰기 잠금 충돌 제거, SSI 선행 조건 | 현재 `_xmin/_xmax` 컬럼 방식 → 별도 버전 레코드로 대수술 |
-| **SSI** | 상 | 잠금 없는 Serializable (PostgreSQL 방식) | MVCC 완료 후 착수. SIREAD lock + rw-conflict 그래프 + 사이클 감지 |
-| **GAP Lock / Next-key Lock** | 중 | Serializable 팬텀 리드 실제 방지 | 현재 행 수 비교로만 체크. `lock_manager.rs` 범위 락 추가 필요 |
+| 항목 | 난이도 | 예상 기간 | 효과 | 우선순위 |
+|---|:---:|:---:|---|:---:|
+| ~~**Hash Index**~~ | ✅ 완료 | — | `USING HASH` 구문, 등호 O(1), 플래너 우선 선택, EXPLAIN 표시 | ★★★ |
+| **병렬 실행 확장** | 중 | 4일 | 집계 map-reduce(SUM/COUNT/AVG chunk별 partial→merge) + Hash Join probe 병렬화 → 코어 수 비례 스케일 | ★★★ |
+| **히스토그램 통계** | 중 | 3일 | 컬럼 값 분포 기반 selectivity 추정 → 조인 순서·인덱스 선택 품질 향상, 잘못된 Full Scan 감소 | ★★★ |
+| **Buffer Pool 개선** | 중 | 3일 | LRU → Clock-Pro 교체 + SeqScan read-ahead + dirty page 배치 writeback → I/O bound 워크로드 개선 | ★★ |
+| **GAP Lock / Next-key Lock** | 중 | 3일 | Serializable 팬텀 리드 실제 방지, 현재 행 수 비교 방식 교체 | ★★ |
+| **MVCC 버전 체인** | 상 | 8일+ | 읽기·쓰기 잠금 충돌 제거 → 동시 접속 TPS 대폭 향상, SSI 선행 조건 | ★★ |
 
 ---
 
 ## 📊 성능 측정
 
-| 항목 | 내용 | 효과 |
-|---|---|---|
-| **벤치마크 스크립트** | `bench_insert.py` / `bench_select.py` / `bench_concurrent.py` | 재현 가능한 측정 기반 마련 |
-| **RustDB vs MySQL 수치** | INSERT TPS, SELECT 인덱스 유무, 동시 접속 부하 | 경쟁 DB 대비 정량 우위 확보 |
-| **병렬 스케일링 그래프** | SeqScan 병렬도를 코어 수(1/2/4/8) 대비 측정 | "왜 Rust" 직접 증명 |
-| **matplotlib 시각화** | 측정 결과를 차트로 렌더링 | 발표 자료 임팩트 |
+| 항목 | 난이도 | 예상 기간 | 효과 | 우선순위 |
+|---|:---:|:---:|---|:---:|
+| **벤치마크 스크립트 작성** | 하 | 2일 | INSERT TPS / SELECT / 동시 접속 — MySQL과 수치 비교 기반 마련 | ★★★ |
+| **RustDB vs MySQL 차트** | 하 | 1일 | matplotlib 시각화, 발표 자료 임팩트 | ★★★ |
+| **Hash Index 전후 비교** | 하 | 0.5일 | Hash Index 구현과 묶어 등호 검색 속도 개선 수치 증명 | ★★ |
+| **병렬 스케일링 그래프** | 하 | 0.5일 | 코어 수(1/2/4/8) 대비 처리량 — "왜 Rust" 직접 증명 | ★★ |
 
 ---
 
 ## 🤖 AI
 
-| 항목 | 난이도 | 효과 | 비고 |
-|---|:---:|---|---|
-| **데이터 분석 리포트** | 낮음 | SELECT 결과 패턴·인사이트 자동 도출 | `/api/report` 엔드포인트 추가, 결과창 "AI 분석" 버튼 |
-| **AI 자동완성 (Tab)** | 중간 | Monaco Editor 작성 속도 향상 | `inlineCompletionsProvider` + `/api/nl-to-sql` 연동 |
+| 항목 | 난이도 | 예상 기간 | 효과 | 우선순위 |
+|---|:---:|:---:|---|:---:|
+| **데이터 분석 리포트** | 하 | 1일 | SELECT 결과 → AI 요약·패턴·인사이트 자동 도출, `/api/report` 추가 | ★★★ |
+| **AI 자동완성 (Tab)** | 중 | 3일 | Monaco `inlineCompletionsProvider` + `/api/nl-to-sql` 연동 | ★★ |
 
 ---
 
-## 우선순위
+## 🛠 기타
 
-| 순위 | 항목 | 이유 |
-|:---:|---|---|
-| 1 | **성능 측정 스크립트** | 심사 3축 중 "성능" 빈칸. MySQL 프로토콜 인증이 완성됐으므로 `mysql-connector-python`으로 바로 측정 가능 |
-| 2 | **병렬 실행 확장** | 벤치마크와 묶으면 시너지. 집계·Hash Join probe 병렬화로 수치 개선 직결 |
-| 3 | **Hash Index** | 구현 패턴 명확. B+Tree 코드 옆에 추가, 등호 검색 TPS 개선 수치로 연결 |
-| 4 | **GAP Lock** | Serializable 정확성 향상. 중간 난이도, lock_manager.rs 범위 락 추가 |
-| 5 | **MVCC → SSI** | 장기 목표. 학술적 완성도, 동시성 심화 |
-| 6 | **AI 기능 추가** | 현재 6개 엔드포인트로 충분히 차별화됨. 후순위 |
+| 항목 | 난이도 | 예상 기간 | 효과 | 우선순위 |
+|---|:---:|:---:|---|:---:|
+| **벤치마크 자동 실행 UI** | 하 | 1일 | Server Manager에서 버튼 하나로 벤치마크 실행·결과 표시 | ★★ |
+| **EXPLAIN ANALYZE 실행 시간 정확도** | 하 | 0.5일 | 현재 실제 측정 중이나 정밀도 개선 | ★★ |
+| **INSERT … ON DUPLICATE KEY UPDATE 검증** | 하 | 0.5일 | AST 존재하나 executor 구현 완전성 확인·수정 | ★★ |
+| **SHOW PROCESSLIST 실시간 갱신 UI** | 하 | 1일 | Server Manager에 실시간 세션 모니터링 패널 | ★ |
+
+---
+
+## 📅 2주 추천 순서
+
+```
+1주차  벤치마크 스크립트 작성 → Hash Index 구현 → RustDB vs MySQL 차트
+2주차  병렬 실행 확장 → 데이터 분석 리포트 → GAP Lock
+```
+
+벤치마크를 먼저 잡는 이유: Hash Index·병렬 확장 구현 직후 수치로 바로 증명할 수 있어 시너지가 가장 크다.

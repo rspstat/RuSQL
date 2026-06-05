@@ -3332,7 +3332,15 @@ impl Parser {
             Some(Token::RParen) => {}
             other => return Err(format!("Expected ')', got {:?}", other)),
         }
-        Ok(Statement::CreateIndex { index_name, table, columns })
+        // USING HASH | USING BTREE (선택)
+        let using_hash = if self.peek() == Some(&Token::Using) {
+            self.advance(); // consume USING
+            match self.advance() {
+                Some(Token::Ident(t)) => t.to_uppercase() == "HASH",
+                _ => false,
+            }
+        } else { false };
+        Ok(Statement::CreateIndex { index_name, table, columns, using_hash })
     }
 
     fn parse_drop_index(&mut self) -> Result<Statement, String> {

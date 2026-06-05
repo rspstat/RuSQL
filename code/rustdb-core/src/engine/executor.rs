@@ -24,6 +24,7 @@ use crate::storage::buffer_pool::BufferPool;
 use crate::storage::composite_index::CompositeIndex;
 use crate::engine::lock_manager::{LockManager, LockResult};
 use crate::engine::planner::{Planner, AccessPath, JoinAlgo};
+use crate::storage::hash_index::HashIndex;
 use crate::engine::join as join_algo;
 use rayon::prelude::*;
 
@@ -120,6 +121,8 @@ pub struct SharedDatabase {
     pub indexes: HashMap<String, BPlusTree>,
     pub index_meta: HashMap<String, (String, String)>,
     pub composite_indexes: HashMap<String, CompositeIndex>,
+    pub hash_indexes: HashMap<String, HashIndex>,
+    pub hash_index_meta: HashMap<String, (String, String)>,
     pub views: HashMap<String, Statement>,
     pub view_raw_sql: HashMap<String, String>,
     pub buffer_pool: BufferPool,
@@ -399,16 +402,23 @@ impl Executor {
         // 모든 DB의 인덱스 메타 로드
         let mut index_meta: HashMap<String, (String, String)> = HashMap::new();
         let mut composite_indexes: HashMap<String, CompositeIndex> = HashMap::new();
+        let mut hash_indexes: HashMap<String, HashIndex> = HashMap::new();
+        let mut hash_index_meta: HashMap<String, (String, String)> = HashMap::new();
         for db in &databases {
             let meta_list = disk.load_index_meta(db);
             for meta in &meta_list {
-                // Qualify table name in index meta
                 let q_table = if meta.table.contains('.') {
                     meta.table.clone()
                 } else {
                     format!("{}.{}", db, meta.table)
                 };
-                if meta.columns.len() == 1 {
+                if meta.index_type == "hash" && meta.columns.len() == 1 {
+                    let column = &meta.columns[0];
+                    let mut hi = HashIndex::new(&q_table, column);
+                    if let Some(rows) = tables.get(&q_table) { hi.rebuild(rows); }
+                    hash_indexes.insert(format!("{}_{}", q_table, meta.name), hi);
+                    hash_index_meta.insert(meta.name.clone(), (q_table, column.clone()));
+                } else if meta.columns.len() == 1 {
                     let column = &meta.columns[0];
                     let mut tree = BPlusTree::new();
                     if let Some(rows) = tables.get(&q_table) {
@@ -424,9 +434,7 @@ impl Executor {
                     index_meta.insert(meta.name.clone(), (q_table, column.clone()));
                 } else {
                     let mut comp = CompositeIndex::new(q_table.clone(), meta.columns.clone());
-                    if let Some(rows) = tables.get(&q_table) {
-                        comp.rebuild(rows);
-                    }
+                    if let Some(rows) = tables.get(&q_table) { comp.rebuild(rows); }
                     composite_indexes.insert(meta.name.clone(), comp);
                 }
             }
@@ -449,6 +457,8 @@ impl Executor {
                 indexes,
                 index_meta,
                 composite_indexes,
+                hash_indexes,
+                hash_index_meta,
                 views,
                 view_raw_sql,
                 buffer_pool: BufferPool::with_capacity(buffer_pool_capacity),
@@ -687,8 +697,8 @@ impl Executor {
             }
             Statement::Delete { table, condition, returning } => self.exec_delete(s, table, condition, returning),
             Statement::AlterTable { table, action }  => self.exec_alter(s, table, action),
-            Statement::CreateIndex { index_name, table, columns } => {
-                self.exec_create_index(s, index_name, table, columns)
+            Statement::CreateIndex { index_name, table, columns, using_hash } => {
+                self.exec_create_index(s, index_name, table, columns, using_hash)
             }
             Statement::DropIndex { index_name } => self.exec_drop_index(s, index_name),
             Statement::CreateView { name, query, raw_sql } => self.exec_create_view(s, name, *query, raw_sql),
@@ -2143,7 +2153,7 @@ impl Executor {
         // ── Planner: 인덱스 / 조인 알고리즘 결정 ──────────────────────────
         let has_agg = columns.iter().any(|c| matches!(c, SelectColumn::Agg { .. } | SelectColumn::AggAlias { .. }));
         let has_win = columns.iter().any(|c| matches!(c, SelectColumn::WinFunc { .. }));
-        let planner = Planner::new(&s.tables, &s.indexes, &s.index_meta, &s.composite_indexes, &s.catalog, &s.table_stats);
+        let planner = Planner::new(&s.tables, &s.indexes, &s.index_meta, &s.composite_indexes, &s.hash_indexes, &s.hash_index_meta, &s.catalog, &s.table_stats);
         let plan = planner.plan_covering(&table, &condition, &joins, &columns);
 
         // 인덱스 경로 실행 (집계 / FOR UPDATE / JOIN / LIMIT / ORDER BY 없을 때만)
@@ -2184,6 +2194,19 @@ impl Executor {
                                 .filter_map(|(_, j)| serde_json::from_str(j).ok())
                                 .filter(|r| Self::is_visible(r)).collect()
                         };
+                        return self.format_result(s, rows, columns, table, vec![]);
+                    }
+                }
+                // ── Hash Index 포인트 (O(1) 등호 검색) ───────────────────
+                AccessPath::HashPoint { index_key, col: _, key } => {
+                    if let Some(hi) = s.hash_indexes.get(index_key) {
+                        let candidates: Vec<Row> = hi.get(&key).iter()
+                            .filter(|r| Self::is_visible(r))
+                            .cloned()
+                            .collect();
+                        let rows: Vec<Row> = candidates.into_iter()
+                            .filter(|r| self.matches_condition_with_subquery(s, r, &condition))
+                            .collect();
                         return self.format_result(s, rows, columns, table, vec![]);
                     }
                 }
@@ -5705,13 +5728,25 @@ impl Executor {
         vals
     }
 
-    fn exec_create_index(&mut self, s: &mut SharedDatabase, index_name: String, table: String, columns: Vec<String>) -> Result<String, String> {
+    fn exec_create_index(&mut self, s: &mut SharedDatabase, index_name: String, table: String, columns: Vec<String>, using_hash: bool) -> Result<String, String> {
         if !s.tables.contains_key(&table) {
             return Err(format!("Table '{}' not found", table));
         }
 
-        if columns.len() == 1 {
-            // 단일 컬럼 → BPlusTree (key → JSON array of rows, supports duplicates)
+        if using_hash {
+            // USING HASH: 단일 컬럼만 지원
+            if columns.len() != 1 {
+                return Err("Hash index supports only single-column indexes.".to_string());
+            }
+            let column = &columns[0];
+            let mut hi = HashIndex::new(&table, column);
+            if let Some(rows) = s.tables.get(&table) { hi.rebuild(rows); }
+            s.hash_indexes.insert(format!("{}_{}", table, index_name), hi);
+            s.hash_index_meta.insert(index_name.clone(), (table.clone(), column.clone()));
+            self.persist_index_meta(s);
+            Ok(format!("Hash index '{}' created on '{}'.'{}'.", index_name, table, column))
+        } else if columns.len() == 1 {
+            // 단일 컬럼 → BPlusTree
             let column = &columns[0];
             let mut bucket: HashMap<String, Vec<Row>> = HashMap::new();
             if let Some(rows) = s.tables.get(&table) {
@@ -5725,17 +5760,14 @@ impl Executor {
             for (key, rows) in bucket {
                 tree.insert(key, serde_json::to_string(&rows).unwrap());
             }
-            let key = format!("{}_{}", table, index_name);
-            s.indexes.insert(key, tree);
+            s.indexes.insert(format!("{}_{}", table, index_name), tree);
             s.index_meta.insert(index_name.clone(), (table.clone(), column.clone()));
             self.persist_index_meta(s);
             Ok(format!("Index '{}' created on '{}'.'{}'.", index_name, table, column))
         } else {
             // 복합 컬럼 → CompositeIndex
             let mut comp = CompositeIndex::new(table.clone(), columns.clone());
-            if let Some(rows) = s.tables.get(&table) {
-                comp.rebuild(rows);
-            }
+            if let Some(rows) = s.tables.get(&table) { comp.rebuild(rows); }
             s.composite_indexes.insert(index_name.clone(), comp);
             self.persist_index_meta(s);
             Ok(format!("Composite index '{}' created on '{}' ({}).", index_name, table, columns.join(", ")))
@@ -5744,10 +5776,13 @@ impl Executor {
 
     fn exec_drop_index(&mut self, s: &mut SharedDatabase, index_name: String) -> Result<String, String> {
         if let Some((table, _)) = s.index_meta.remove(&index_name) {
-            let key = format!("{}_{}", table, index_name);
-            s.indexes.remove(&key);
+            s.indexes.remove(&format!("{}_{}", table, index_name));
             self.persist_index_meta(s);
             Ok(format!("Index '{}' dropped.", index_name))
+        } else if let Some((table, _)) = s.hash_index_meta.remove(&index_name) {
+            s.hash_indexes.remove(&format!("{}_{}", table, index_name));
+            self.persist_index_meta(s);
+            Ok(format!("Hash index '{}' dropped.", index_name))
         } else if s.composite_indexes.remove(&index_name).is_some() {
             self.persist_index_meta(s);
             Ok(format!("Composite index '{}' dropped.", index_name))
@@ -5812,8 +5847,17 @@ impl Executor {
             for (key, bucket_rows) in bucket {
                 tree.insert(key, serde_json::to_string(&bucket_rows).unwrap());
             }
-            let key = format!("{}_{}", table, idx_name);
-            s.indexes.insert(key, tree);
+            s.indexes.insert(format!("{}_{}", table, idx_name), tree);
+        }
+        // Hash Index 재빌드
+        let hsec: Vec<(String, String)> = s.hash_index_meta.iter()
+            .filter(|(_, (tbl, _))| tbl == table)
+            .map(|(name, (_, col))| (name.clone(), col.clone()))
+            .collect();
+        for (idx_name, col) in hsec {
+            let mut hi = HashIndex::new(table, &col);
+            hi.rebuild(rows);
+            s.hash_indexes.insert(format!("{}_{}", table, idx_name), hi);
         }
     }
 
@@ -5824,6 +5868,15 @@ impl Executor {
                 name: name.clone(),
                 table: table.clone(),
                 columns: vec![col.clone()],
+                index_type: "btree".to_string(),
+            });
+        }
+        for (name, (table, col)) in &s.hash_index_meta {
+            meta_list.push(IndexMeta {
+                name: name.clone(),
+                table: table.clone(),
+                columns: vec![col.clone()],
+                index_type: "hash".to_string(),
             });
         }
         for (name, comp) in &s.composite_indexes {
@@ -5831,6 +5884,7 @@ impl Executor {
                 name: name.clone(),
                 table: comp.table.clone(),
                 columns: comp.columns.clone(),
+                index_type: "btree".to_string(),
             });
         }
         // save_index_meta per-db
@@ -5926,8 +5980,8 @@ impl Executor {
                 };
                 Statement::AlterTable { table: self.qualify_name(table), action }
             }
-            Statement::CreateIndex { index_name, table, columns } =>
-                Statement::CreateIndex { index_name, table: self.qualify_name(table), columns },
+            Statement::CreateIndex { index_name, table, columns, using_hash } =>
+                Statement::CreateIndex { index_name, table: self.qualify_name(table), columns, using_hash },
             Statement::DropIndex { index_name } =>
                 Statement::DropIndex { index_name },
             Statement::CreateView { name, query, raw_sql } =>
@@ -6661,7 +6715,7 @@ impl Executor {
             }
             other => return Ok(format!("EXPLAIN: {:?} → not a SELECT", other)),
         };
-        let planner = Planner::new(&s.tables, &s.indexes, &s.index_meta, &s.composite_indexes, &s.catalog, &s.table_stats);
+        let planner = Planner::new(&s.tables, &s.indexes, &s.index_meta, &s.composite_indexes, &s.hash_indexes, &s.hash_index_meta, &s.catalog, &s.table_stats);
         let plan = planner.plan_covering(&table, &condition, &joins, &columns);
         Ok(planner.explain(&plan))
     }
@@ -6674,7 +6728,7 @@ impl Executor {
                 if subquery.is_some() {
                     "| Access: SUBQUERY SCAN                            |\n".to_string()
                 } else {
-                    let planner = Planner::new(&s.tables, &s.indexes, &s.index_meta, &s.composite_indexes, &s.catalog, &s.table_stats);
+                    let planner = Planner::new(&s.tables, &s.indexes, &s.index_meta, &s.composite_indexes, &s.hash_indexes, &s.hash_index_meta, &s.catalog, &s.table_stats);
                     let plan = planner.plan_covering(table, condition, joins, columns);
                     // explain()에서 헤더·구분선을 제외한 중간 행만 추출
                     planner.explain(&plan)

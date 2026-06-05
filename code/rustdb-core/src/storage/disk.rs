@@ -8,12 +8,16 @@ use crate::storage::page::{PageHeader, FLAG_COMPRESSED};
 use crate::catalog::schema::TableSchema;
 use crate::parser::ast::Statement;
 
+fn default_index_type() -> String { "btree".to_string() }
+
 /// 인덱스 메타데이터 — 재시작 시 인덱스 재빌드에 사용
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IndexMeta {
     pub name: String,
     pub table: String,
     pub columns: Vec<String>,
+    #[serde(default = "default_index_type")]
+    pub index_type: String, // "btree" | "hash"
 }
 
 pub struct DiskManager {

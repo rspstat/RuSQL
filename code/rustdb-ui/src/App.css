@@ -182,13 +182,35 @@ body {
 }
 
 
+.sidebar-title-row {
+  display: flex;
+  align-items: center;
+  padding: 10px 8px 6px 12px;
+}
+
 .sidebar-title {
   font-size: 11px;
   font-weight: 700;
   color: #bbbbbb;
-  padding: 10px 12px 6px;
   letter-spacing: 1px;
   text-transform: uppercase;
+  flex: 1;
+}
+
+.sidebar-refresh-btn {
+  background: none;
+  border: none;
+  color: #666;
+  font-size: 15px;
+  cursor: pointer;
+  padding: 0 4px;
+  line-height: 1;
+  border-radius: 3px;
+  transition: color 0.15s;
+}
+.sidebar-refresh-btn:hover {
+  color: #4ec9b0;
+  background: #2a2d2e;
 }
 
 .sidebar-group {
@@ -394,6 +416,31 @@ body {
   color: #cccccc;
 }
 
+.sidebar-db-expand-btn {
+  background: none;
+  border: none;
+  color: transparent;
+  cursor: pointer;
+  padding: 1px 3px;
+  display: flex;
+  align-items: center;
+  margin-left: auto;
+  flex-shrink: 0;
+  border-radius: 3px;
+  line-height: 1;
+  transition: color 0.15s, background 0.15s;
+}
+.sidebar-db-header:hover .sidebar-db-expand-btn {
+  color: #666;
+}
+.sidebar-db-expand-btn:hover {
+  color: #4ec9b0 !important;
+  background: #383a3b;
+}
+.sidebar-db-expand-btn.active {
+  color: #4ec9b0 !important;
+}
+
 .sidebar-db-children {
   border-left: 1px solid #3c3c3c;
   margin-left: 16px;
@@ -431,6 +478,64 @@ body {
 
 .sidebar-empty-nested {
   padding-left: 32px;
+}
+
+/* ── DBeaver-style 테이블 하위 섹션 (Columns / Indexes / FK / Triggers) ── */
+.sidebar-item-expanded {
+  background: #2a2d2e;
+  color: #ffffff;
+}
+
+.sidebar-table-children {
+  border-left: 1px solid #3c3c3c;
+  margin-left: 32px;
+}
+
+.sidebar-subsec-header {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px 2px 4px;
+  font-size: 12px;
+  color: #aaaaaa;
+  cursor: pointer;
+  user-select: none;
+}
+.sidebar-subsec-header:hover {
+  background: #2a2d2e;
+  color: #cccccc;
+}
+
+.sidebar-subsec-icon {
+  font-size: 11px;
+  flex-shrink: 0;
+  width: 14px;
+  text-align: center;
+}
+
+.sidebar-subsec-list {
+  background: #1e1e1e;
+}
+
+.sidebar-subsec-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 8px 2px 20px;
+  font-size: 12px;
+  color: #888888;
+  cursor: default;
+}
+.sidebar-subsec-item:hover {
+  background: #2a2d2e;
+  color: #cccccc;
+}
+
+.sidebar-subsec-empty {
+  padding: 2px 8px 2px 20px;
+  font-size: 11px;
+  color: #444;
+  font-style: italic;
 }
 
 .sidebar-bottom {
@@ -1931,6 +2036,136 @@ body {
   min-width: 0;
 }
 
+/* 메인 영역: 좌측 + 슬라이드 패널 + 우측 버튼바 */
+.srv-main-area {
+  flex: 1;
+  display: flex;
+  flex-direction: row;
+  overflow: hidden;
+  min-height: 0;
+}
+
+/* 좌측 컬럼 */
+.srv-left-col {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  min-width: 0;
+}
+
+
+/* 슬라이드 패널 */
+.srv-slide-panel {
+  width: 360px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  border-left: 1px solid #3c3c3c;
+  background: #252526;
+  overflow: hidden;
+}
+.srv-slide-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 14px;
+  font-size: 12px;
+  font-weight: 600;
+  color: #cccccc;
+  border-bottom: 1px solid #3c3c3c;
+  flex-shrink: 0;
+  letter-spacing: 0.4px;
+}
+.srv-slide-close {
+  background: none;
+  border: none;
+  color: #666;
+  cursor: pointer;
+  font-size: 13px;
+  padding: 0 2px;
+  line-height: 1;
+}
+.srv-slide-close:hover { color: #ccc; }
+.srv-slide-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 14px;
+}
+.srv-slide-section {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.8px;
+  color: #888;
+  margin-bottom: 6px;
+}
+.srv-slide-code {
+  display: block;
+  background: #1e1e1e;
+  border: 1px solid #3c3c3c;
+  border-radius: 4px;
+  padding: 8px 10px;
+  font-family: Consolas, monospace;
+  font-size: 11px;
+  color: #9cdcfe;
+  white-space: pre;
+  overflow-x: auto;
+  line-height: 1.6;
+}
+.srv-slide-flow { display: flex; flex-direction: column; gap: 4px; }
+.srv-slide-flow-row { display: flex; align-items: flex-start; gap: 6px; font-family: Consolas, monospace; font-size: 11px; }
+.srv-slide-arrow { font-size: 11px; flex-shrink: 0; margin-top: 1px; }
+.srv-slide-arrow.out { color: #4ec9b0; }
+.srv-slide-arrow.in  { color: #ce9178; }
+.srv-slide-flow-row code { color: #d4d4d4; background: none; }
+.srv-slide-text {
+  font-size: 12px;
+  color: #aaa;
+  line-height: 1.7;
+}
+
+/* 우측 버튼바 */
+.srv-right-bar {
+  width: 52px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 20px 0;
+  gap: 12px;
+  border-left: 1px solid #3c3c3c;
+  background: #1e1e1e;
+}
+.srv-rbar-btn {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 5px;
+  width: 40px;
+  padding: 10px 0;
+  background: none;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  color: #666;
+  cursor: pointer;
+  font-size: 10px;
+  letter-spacing: 0.3px;
+  transition: transform 0.15s ease, color 0.15s ease, background 0.15s ease, border-color 0.15s ease;
+}
+.srv-rbar-btn:hover {
+  transform: scale(1.12);
+  color: #cccccc;
+  background: #2a2a2a;
+  border-color: #444;
+}
+.srv-rbar-btn.active {
+  color: #4ec9b0;
+  background: #1a2e2a;
+  border-color: #2a4a44;
+}
+.srv-rbar-btn.active:hover { transform: scale(1.08); }
+
 /* 스크롤 가능한 상단 영역 */
 .srv-scroll-area {
   flex-shrink: 0;
@@ -1943,7 +2178,7 @@ body {
 /* 연결 구성 패널 */
 .srv-conn-panel {
   width: 100%;
-  max-width: 660px;
+  max-width: 720px;
   padding: 0 28px;
   box-sizing: border-box;
 }
@@ -2036,8 +2271,7 @@ body {
 .srv-form-body {
   background: #252526;
   border: 1px solid #3c3c3c;
-  border-top: none;
-  border-radius: 0 0 6px 6px;
+  border-radius: 6px;
   padding: 22px 22px 18px;
 }
 
@@ -2132,6 +2366,72 @@ body {
 .srv-pass-toggle:hover { background: #383838; }
 
 /* 인증 방식 배지 */
+/* 버퍼 풀 + 병렬 + 터미널 한 줄 배치 */
+.srv-inline-row {
+  flex-wrap: nowrap !important;
+  align-items: flex-end;
+  gap: 24px;
+}
+.srv-inline-group {
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
+}
+.srv-inline-group:first-child {
+  width: 190px;
+}
+.srv-toggle-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 34px; /* srv-form-input와 높이 맞춤 */
+}
+.srv-toggle-btn {
+  position: relative;
+  width: 36px;
+  height: 20px;
+  border-radius: 10px;
+  border: none;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: background 0.2s;
+  padding: 0;
+}
+.srv-toggle-btn.on  { background: #4ec9b0; }
+.srv-toggle-btn.off { background: #444; }
+.srv-toggle-knob {
+  position: absolute;
+  top: 3px;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: #fff;
+  transition: left 0.2s;
+}
+.srv-toggle-btn.on  .srv-toggle-knob { left: 19px; }
+.srv-toggle-btn.off .srv-toggle-knob { left: 3px; }
+.srv-toggle-label {
+  font-size: 12px;
+  color: #888;
+}
+.srv-terminal-btn {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 7px 14px;
+  background: #2a2a2a;
+  border: 1px solid #3c3c3c;
+  border-radius: 4px;
+  color: #aaa;
+  font-size: 12px;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+.srv-terminal-btn:hover {
+  background: #333;
+  color: #ccc;
+  border-color: #555;
+}
 .srv-auth-badge {
   background: #1e1e1e;
   border: 1px solid #3c3c3c;
@@ -2196,31 +2496,31 @@ body {
   margin-top: 4px;
 }
 .srv-action-btn {
-  border: none;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  border: 1px solid #3c3c3c;
   border-radius: 4px;
-  font-size: 13px;
-  font-weight: 600;
-  padding: 8px 18px;
+  font-size: 12px;
+  font-weight: 500;
+  padding: 7px 14px;
   cursor: pointer;
-  transition: background 0.15s, opacity 0.15s;
+  background: #2a2a2a;
+  color: #aaa;
+  transition: background 0.15s, color 0.15s, border-color 0.15s, opacity 0.15s;
 }
-.srv-action-btn.primary {
-  background: #0e6eb8;
-  color: #fff;
+.srv-action-btn:hover:not(:disabled) {
+  background: #333;
+  color: #ccc;
+  border-color: #555;
 }
-.srv-action-btn.primary:hover:not(:disabled) { background: #1a85d1; }
-.srv-action-btn.danger {
-  background: #3c1c1c;
-  color: #e06060;
-  border: 1px solid #5a2a2a;
-}
-.srv-action-btn.danger:hover:not(:disabled) { background: #4a2020; }
-.srv-action-btn.save {
-  background: #1a85d1;
-  color: #fff;
-}
-.srv-action-btn.save:hover { background: #2196e3; }
-.srv-action-btn:disabled { opacity: 0.35; cursor: not-allowed; }
+.srv-action-btn.primary { color: #4ec9b0; border-color: #2a4a44; }
+.srv-action-btn.primary:hover:not(:disabled) { background: #1a2e2a; color: #5ddfc0; border-color: #3a6a60; }
+.srv-action-btn.danger  { color: #e06060; border-color: #5a2a2a; }
+.srv-action-btn.danger:hover:not(:disabled)  { background: #2a1a1a; color: #f07070; border-color: #7a3a3a; }
+.srv-action-btn.save    { color: #9cdcfe; border-color: #2a4060; }
+.srv-action-btn.save:hover:not(:disabled)    { background: #1a2a3a; color: #b0e8ff; border-color: #3a60a0; }
+.srv-action-btn:disabled { opacity: 0.3; cursor: not-allowed; }
 
 /* CLI 가이드 탭 */
 .srv-guide-title {
@@ -2271,7 +2571,7 @@ body {
   border: 1px solid #3c3c3c;
   border-radius: 6px 6px 0 0;
   overflow: hidden;
-  min-height: 0;
+  min-height: 80px;
 }
 .srv-log-header {
   display: flex;

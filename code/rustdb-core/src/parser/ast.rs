@@ -321,6 +321,7 @@ pub enum Statement {
         index_name: String,
         table: String,
         columns: Vec<String>,
+        using_hash: bool,
     },
     DropIndex {
         index_name: String,

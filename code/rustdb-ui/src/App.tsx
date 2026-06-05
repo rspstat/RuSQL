@@ -37,7 +37,13 @@ interface IndexInfo {
   name: string;
   table: string;
   columns: string[];
-  kind: "single" | "composite";
+  kind: "single" | "composite" | "hash";
+}
+interface TriggerInfo {
+  name: string;
+  table: string;
+  timing: string;
+  event: string;
 }
 interface ColumnDetail {
   name: string;
@@ -235,21 +241,25 @@ function App() {
   const [expandedTables, setExpandedTables] = useState<Set<string>>(new Set());
   const [tableColumns, setTableColumns] = useState<Record<string, ColumnDetail[]>>({});
   const [expandedViews, setExpandedViews] = useState<Set<string>>(new Set());
+  const [dbAllExpanded, setDbAllExpanded] = useState<Record<string, boolean>>({});
   const [viewColumns, setViewColumns] = useState<Record<string, string[]>>({});
-  const [expandedIndexes, setExpandedIndexes] = useState<Set<string>>(new Set());
+  // expandedIndexes: 인덱스 컨텍스트 메뉴용으로만 유지 (사이드바 트리는 table-level로 이동)
+  const [, setExpandedIndexes] = useState<Set<string>>(new Set());
   const [currentDb, setCurrentDb] = useState<string>("rustdb");
   const [expandedDbs, setExpandedDbs] = useState<Set<string>>(new Set(["rustdb"]));
-  // DB별 Tables/Views/Indexes 데이터
-  interface DbData { tables: string[]; views: string[]; indexes: IndexInfo[]; }
+  // DB별 Tables/Views/Indexes/Triggers 데이터
+  interface DbData { tables: string[]; views: string[]; indexes: IndexInfo[]; triggers: TriggerInfo[]; }
   const [dbData, setDbData] = useState<Record<string, DbData>>({});
   const [tablesOpen, setTablesOpen] = useState<Record<string, boolean>>({});
   const [viewsOpen, setViewsOpen] = useState<Record<string, boolean>>({});
-  const [indexesOpen, setIndexesOpen] = useState<Record<string, boolean>>({});
+  const [, ] = useState<Record<string, boolean>>({});
+  // 테이블 하위 섹션 열림 상태: key = "${table}::columns|indexes|fkeys|triggers"
+  const [expandedTableSections, setExpandedTableSections] = useState<Record<string, boolean>>({});
   const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number } | null>(null);
   const [tableCtxMenu, setTableCtxMenu] = useState<{ x: number; y: number; table: string } | null>(null);
   const [dbCtxMenu, setDbCtxMenu] = useState<{ x: number; y: number; db: string } | null>(null);
   const [viewCtxMenu, setViewCtxMenu] = useState<{ x: number; y: number; view: string } | null>(null);
-  const [indexCtxMenu, setIndexCtxMenu] = useState<{ x: number; y: number; index: string; table: string; kind: "single" | "composite" } | null>(null);
+  const [indexCtxMenu, setIndexCtxMenu] = useState<{ x: number; y: number; index: string; table: string; kind: "single" | "composite" | "hash" } | null>(null);
   const [tabCtxMenu, setTabCtxMenu] = useState<{ x: number; y: number; tabId: string; source: "main" | "split" } | null>(null);
   const [pinnedTabs, setPinnedTabs] = useState<Set<string>>(new Set());
   const [splitTabId, setSplitTabId] = useState<string | null>(null);
@@ -438,7 +448,7 @@ function App() {
   };
 
   const handleAutoLogin = async (conn: Connection) => {
-    const ok = await invoke<boolean>("authenticate", { user: conn.user, password: conn.password, dataDir: conn.dataDir });
+    const ok = await invoke<boolean>("authenticate", { user: conn.user, password: conn.password, dataDir: conn.dataDir, bufferPoolSize: parseInt(bufferPoolInput) || 64 });
     if (ok) doLogin(conn);
   };
 
@@ -447,7 +457,7 @@ function App() {
     if (!connectingTo) return;
     setDlgLoading(true);
     setDlgError("");
-    const ok = await invoke<boolean>("authenticate", { user: connectingTo.user, password: dlgPass, dataDir: connectingTo.dataDir });
+    const ok = await invoke<boolean>("authenticate", { user: connectingTo.user, password: dlgPass, dataDir: connectingTo.dataDir, bufferPoolSize: parseInt(bufferPoolInput) || 64 });
     setDlgLoading(false);
     if (ok) {
       doLogin(connectingTo);
@@ -533,22 +543,25 @@ function App() {
   const [serverStatus, setServerStatus] = useState<ServerStatus>(serverStatus_init);
   const [portInput, setPortInput] = useState("7878");
   const [mysqlPortInput, setMysqlPortInput] = useState("13306");
+  const [bufferPoolInput, setBufferPoolInput] = useState(() => localStorage.getItem("rustdb_bp_size") || "64");
+  const [parallelQuery, setParallelQuery] = useState(() => localStorage.getItem("rustdb_parallel") !== "0");
   const [serverMsg, setServerMsg] = useState("");
   const [srvConnName, setSrvConnName] = useState("RustDB Local");
   const [srvUser, setSrvUser] = useState("root");
   const [srvPass, setSrvPass] = useState("root");
-  const [srvTab, setSrvTab] = useState<"main" | "guide">("main");
+  const [srvRightPanel, setSrvRightPanel] = useState<"none" | "cli" | "mysql">("none");
   const [srvPassVisible, setSrvPassVisible] = useState(false);
   const logEndRef = useRef<HTMLDivElement>(null);
 
   // ─── DB 하나의 데이터 로드 ────────────────────────────────────
   const loadDbData = async (db: string) => {
-    const [tbls, vws, idxs] = await Promise.all([
+    const [tbls, vws, idxs, trgs] = await Promise.all([
       invoke<string[]>("get_tables_for_db", { db }),
       invoke<string[]>("get_views_for_db", { db }),
       invoke<IndexInfo[]>("get_indexes_for_db", { db }),
+      invoke<TriggerInfo[]>("get_triggers_for_db", { db }),
     ]);
-    setDbData(prev => ({ ...prev, [db]: { tables: tbls, views: vws, indexes: idxs } }));
+    setDbData(prev => ({ ...prev, [db]: { tables: tbls, views: vws, indexes: idxs, triggers: trgs } }));
   };
 
   // ─── 사이드바 데이터 갱신 ────────────────────────────────────
@@ -1111,7 +1124,6 @@ function App() {
       const cols = await invoke<ColumnDetail[]>("get_columns_detail", { table: t });
       setTableColumns(p => ({ ...p, [t]: cols }));
     }
-    setEditorQuery(`SELECT * FROM ${t};`);
   };
 
   const toggleView = async (v: string) => {
@@ -1127,13 +1139,80 @@ function App() {
     setEditorQuery(`SELECT * FROM ${v};`);
   };
 
-  const toggleIndex = (name: string) => {
-    setExpandedIndexes(prev => {
-      const s = new Set(prev);
-      s.has(name) ? s.delete(name) : s.add(name);
-      return s;
-    });
+  const toggleDbExpandAll = async (dbName: string, e: React.MouseEvent) => {
+    e.stopPropagation();
+    const isExpanded = dbAllExpanded[dbName] ?? false;
+
+    if (isExpanded) {
+      // 접기: Columns/Indexes/FK/Triggers 서브섹션만 닫기, 테이블 노드는 그대로
+      const data = dbData[dbName] ?? { tables: [], views: [], indexes: [], triggers: [] };
+      setExpandedTableSections(prev => {
+        const next = { ...prev };
+        for (const t of data.tables) {
+          delete next[`${t}::columns`];
+          delete next[`${t}::indexes`];
+          delete next[`${t}::fkeys`];
+          delete next[`${t}::triggers`];
+        }
+        return next;
+      });
+      setDbAllExpanded(p => ({ ...p, [dbName]: false }));
+    } else {
+      // DB 노드가 닫혀있으면 먼저 열기
+      setExpandedDbs(prev => new Set(prev).add(dbName));
+
+      // DB 데이터 로드 (없으면)
+      let data = dbData[dbName];
+      if (!data) {
+        const [tables, views, indexes, triggers] = await Promise.all([
+          invoke<string[]>("get_tables_for_db", { db: dbName }),
+          invoke<string[]>("get_views_for_db", { db: dbName }),
+          invoke<IndexInfo[]>("get_indexes_for_db", { db: dbName }),
+          invoke<TriggerInfo[]>("get_triggers_for_db", { db: dbName }),
+        ]);
+        data = { tables, views, indexes, triggers };
+        setDbData(prev => ({ ...prev, [dbName]: data! }));
+      }
+
+      if (data.tables.length > 0) setTablesOpen(p => ({ ...p, [dbName]: true }));
+      if (data.views.length > 0) setViewsOpen(p => ({ ...p, [dbName]: true }));
+
+      // 미로드 테이블 컬럼 일괄 로드
+      const allCols: Record<string, ColumnDetail[]> = { ...tableColumns };
+      await Promise.all(
+        data.tables
+          .filter(t => !allCols[t])
+          .map(async t => { allCols[t] = await invoke<ColumnDetail[]>("get_columns_detail", { table: t }); })
+      );
+      setTableColumns(prev => ({ ...prev, ...allCols }));
+
+      // 모든 테이블 펼치기
+      setExpandedTables(prev => {
+        const s = new Set(prev);
+        for (const t of data!.tables) s.add(t);
+        return s;
+      });
+
+      // 항목이 있는 서브섹션만 오픈
+      setExpandedTableSections(prev => {
+        const next = { ...prev };
+        for (const t of data!.tables) {
+          const cols = allCols[t] ?? [];
+          const tIdxs = data!.indexes.filter(i => i.table === t);
+          const tFkeys = cols.filter(c => c.fk_ref);
+          const tTrgs = data!.triggers.filter(tr => tr.table === t);
+          if (cols.length > 0) next[`${t}::columns`] = true;
+          if (tIdxs.length > 0) next[`${t}::indexes`] = true;
+          if (tFkeys.length > 0) next[`${t}::fkeys`] = true;
+          if (tTrgs.length > 0) next[`${t}::triggers`] = true;
+        }
+        return next;
+      });
+
+      setDbAllExpanded(p => ({ ...p, [dbName]: true }));
+    }
   };
+
 
   // ─── 테이블 우클릭 메뉴 핸들러 ────────────────────────────────
   const runCtxQuery = async (q: string, dropTable?: string) => {
@@ -2187,7 +2266,14 @@ function App() {
       {activeView === "editor" && (
         <>
           <div className="sidebar" style={{ width: `${sidebarWidth}px` }}>
-            <div className="sidebar-title">SCHEMAS</div>
+            <div className="sidebar-title-row">
+              <span className="sidebar-title">SCHEMAS</span>
+              <button
+                className="sidebar-refresh-btn"
+                onClick={refreshSidebar}
+                title="새로고침 (Refresh)"
+              >⟳</button>
+            </div>
             <input
               className="sidebar-search"
               placeholder="테이블 검색..."
@@ -2205,7 +2291,6 @@ function App() {
                 const data = dbData[dbName] ?? { tables: [], views: [], indexes: [] };
                 const tOpen = tablesOpen[dbName] ?? true;
                 const vOpen = viewsOpen[dbName] ?? true;
-                const iOpen = indexesOpen[dbName] ?? true;
 
                 const toggleDb = async () => {
                   const willOpen = !isOpen;
@@ -2244,6 +2329,23 @@ function App() {
                         <path d="M3 11v6c0 1.93 4.03 3.5 9 3.5s9-1.57 9-3.5v-6" stroke="currentColor" strokeWidth="1.5" fill="none" vectorEffect="non-scaling-stroke"/>
                       </svg>
                       <span className="sidebar-db-name">{dbName}{isActive ? " ◀" : ""}</span>
+                      <button
+                        className={`sidebar-db-expand-btn${dbAllExpanded[dbName] ? " active" : ""}`}
+                        onClick={e => toggleDbExpandAll(dbName, e)}
+                        title={dbAllExpanded[dbName] ? "모두 접기" : "모두 펼치기"}
+                      >
+                        {dbAllExpanded[dbName] ? (
+                          <svg viewBox="0 0 14 14" width="11" height="11" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+                            <polyline points="2,9 7,5 12,9"/>
+                            <polyline points="2,5 7,1 12,5"/>
+                          </svg>
+                        ) : (
+                          <svg viewBox="0 0 14 14" width="11" height="11" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+                            <polyline points="2,5 7,9 12,5"/>
+                            <polyline points="2,9 7,13 12,9"/>
+                          </svg>
+                        )}
+                      </button>
                     </div>
 
                     {isOpen && (
@@ -2259,10 +2361,20 @@ function App() {
                           </div>
                           {tOpen && (data.tables.length === 0 ? (
                             <div className="sidebar-empty sidebar-empty-nested">No tables yet</div>
-                          ) : data.tables.filter(t => !sidebarSearch || t.toLowerCase().includes(sidebarSearch.toLowerCase())).map(t => (
+                          ) : data.tables.filter(t => !sidebarSearch || t.toLowerCase().includes(sidebarSearch.toLowerCase())).map(t => {
+                            const tExpanded = expandedTables.has(t);
+                            const tCols     = tableColumns[t] ?? [];
+                            const tIdxs     = data.indexes.filter(i => i.table === t);
+                            const tFkeys    = tCols.filter(c => c.fk_ref);
+                            const tTrgs     = data.triggers.filter(tr => tr.table === t);
+                            const secOpen   = (sec: string) => expandedTableSections[`${t}::${sec}`] ?? false;
+                            const toggleSec = (sec: string) =>
+                              setExpandedTableSections(p => ({ ...p, [`${t}::${sec}`]: !p[`${t}::${sec}`] }));
+                            return (
                             <div key={t}>
+                              {/* 테이블 행 */}
                               <div
-                                className={`sidebar-item sidebar-item-nested ${expandedTables.has(t) ? "active" : ""}`}
+                                className={`sidebar-item sidebar-item-nested ${tExpanded ? "sidebar-item-expanded" : ""}`}
                                 onClick={() => toggleTable(t)}
                                 onContextMenu={e => {
                                   e.preventDefault();
@@ -2270,35 +2382,129 @@ function App() {
                                   setTableCtxMenu({ x: e.clientX, y: e.clientY, table: t });
                                 }}
                               >
-                                <span className="sidebar-arrow">{expandedTables.has(t) ? "▼" : "▶"}</span>
+                                <span className="sidebar-arrow">{tExpanded ? "▼" : "▶"}</span>
                                 <span className="sidebar-table-icon">⊞</span>
                                 <span className="sidebar-name">{t}</span>
                               </div>
-                              {expandedTables.has(t) && tableColumns[t] && (
-                                <div className="sidebar-columns sidebar-columns-nested">
-                                  {tableColumns[t].map(col => (
-                                    <div key={col.name} className="sidebar-column sidebar-column-nested" title={[
-                                      col.data_type,
-                                      col.is_pk ? "PRIMARY KEY" : "",
-                                      col.is_not_null ? "NOT NULL" : "",
-                                      col.is_unique && !col.is_pk ? "UNIQUE" : "",
-                                      col.is_auto_inc ? "AUTO INCREMENT" : "",
-                                      col.default_val ? `DEFAULT ${col.default_val}` : "",
-                                      col.fk_ref ? `FK → ${col.fk_ref}` : "",
-                                    ].filter(Boolean).join(" | ")}>
-                                      <span className="col-icon" style={{ color: col.is_pk ? "#f0c040" : col.fk_ref ? "#9cdcfe" : "var(--text-muted)" }}>
-                                        {col.is_pk ? "🔑" : col.fk_ref ? "🔗" : "≡"}
-                                      </span>
-                                      <span className="col-name">{col.name}</span>
-                                      <span className="col-type">{col.data_type}</span>
-                                      {col.is_not_null && <span className="col-badge col-badge-nn">NN</span>}
-                                      {col.is_unique && !col.is_pk && <span className="col-badge col-badge-uq">UQ</span>}
+
+                              {/* 하위 섹션: Columns / Indexes / Foreign Keys / Triggers */}
+                              {tExpanded && (
+                                <div className="sidebar-table-children">
+
+                                  {/* Columns */}
+                                  <div className="sidebar-subsec-header" onClick={() => toggleSec("columns")}>
+                                    <span className="sidebar-group-arrow">{secOpen("columns") ? "▼" : "▶"}</span>
+                                    <span className="sidebar-subsec-icon" style={{ color: "#9cdcfe" }}>≡</span>
+                                    Columns
+                                    <span className="sidebar-badge">{tCols.length}</span>
+                                  </div>
+                                  {secOpen("columns") && (
+                                    <div className="sidebar-subsec-list">
+                                      {tCols.length === 0
+                                        ? <div className="sidebar-subsec-empty">loading…</div>
+                                        : tCols.map(col => (
+                                          <div key={col.name} className="sidebar-subsec-item" title={[
+                                            col.data_type,
+                                            col.is_pk ? "PRIMARY KEY" : "",
+                                            col.is_not_null ? "NOT NULL" : "",
+                                            col.is_unique && !col.is_pk ? "UNIQUE" : "",
+                                            col.is_auto_inc ? "AUTO_INCREMENT" : "",
+                                            col.default_val ? `DEFAULT ${col.default_val}` : "",
+                                            col.fk_ref ? `FK → ${col.fk_ref}` : "",
+                                          ].filter(Boolean).join(" | ")}>
+                                            <span className="col-icon" style={{ color: col.is_pk ? "#f0c040" : col.fk_ref ? "#9cdcfe" : "#666" }}>
+                                              {col.is_pk ? "🔑" : col.fk_ref ? "🔗" : "≡"}
+                                            </span>
+                                            <span className="col-name">{col.name}</span>
+                                            <span className="col-type">{col.data_type}</span>
+                                            {col.is_not_null && <span className="col-badge col-badge-nn">NN</span>}
+                                            {col.is_unique && !col.is_pk && <span className="col-badge col-badge-uq">UQ</span>}
+                                          </div>
+                                        ))
+                                      }
                                     </div>
-                                  ))}
+                                  )}
+
+                                  {/* Indexes */}
+                                  <div className="sidebar-subsec-header" onClick={() => toggleSec("indexes")}>
+                                    <span className="sidebar-group-arrow">{secOpen("indexes") ? "▼" : "▶"}</span>
+                                    <span className="sidebar-subsec-icon" style={{ color: "#c586c0" }}>⌗</span>
+                                    Indexes
+                                    <span className="sidebar-badge">{tIdxs.length}</span>
+                                  </div>
+                                  {secOpen("indexes") && (
+                                    <div className="sidebar-subsec-list">
+                                      {tIdxs.length === 0
+                                        ? <div className="sidebar-subsec-empty">no indexes</div>
+                                        : tIdxs.map(idx => (
+                                          <div key={idx.name} className="sidebar-subsec-item"
+                                            title={`${idx.kind} · ${idx.columns.join(", ")}`}
+                                            onContextMenu={e => {
+                                              e.preventDefault();
+                                              e.stopPropagation();
+                                              setIndexCtxMenu({ x: e.clientX, y: e.clientY, index: idx.name, table: idx.table, kind: idx.kind });
+                                            }}
+                                          >
+                                            <span className="sidebar-subsec-icon" style={{ color: idx.kind === "hash" ? "#4ec9b0" : idx.kind === "composite" ? "#ddb05d" : "#c586c0" }}>
+                                              {idx.kind === "hash" ? "#" : idx.kind === "composite" ? "⋈" : "⌗"}
+                                            </span>
+                                            <span className="col-name">{idx.name}</span>
+                                            <span className="col-type" style={{ fontSize: "10px" }}>{idx.kind}</span>
+                                          </div>
+                                        ))
+                                      }
+                                    </div>
+                                  )}
+
+                                  {/* Foreign Keys */}
+                                  <div className="sidebar-subsec-header" onClick={() => toggleSec("fkeys")}>
+                                    <span className="sidebar-group-arrow">{secOpen("fkeys") ? "▼" : "▶"}</span>
+                                    <span className="sidebar-subsec-icon" style={{ color: "#9cdcfe" }}>🔗</span>
+                                    Foreign Keys
+                                    <span className="sidebar-badge">{tFkeys.length}</span>
+                                  </div>
+                                  {secOpen("fkeys") && (
+                                    <div className="sidebar-subsec-list">
+                                      {tFkeys.length === 0
+                                        ? <div className="sidebar-subsec-empty">no foreign keys</div>
+                                        : tFkeys.map(col => (
+                                          <div key={col.name} className="sidebar-subsec-item" title={`${col.name} → ${col.fk_ref}`}>
+                                            <span className="col-icon" style={{ color: "#9cdcfe" }}>🔗</span>
+                                            <span className="col-name">{col.name}</span>
+                                            <span className="col-type" style={{ fontSize: "10px", color: "#888" }}>→ {col.fk_ref}</span>
+                                          </div>
+                                        ))
+                                      }
+                                    </div>
+                                  )}
+
+                                  {/* Triggers */}
+                                  <div className="sidebar-subsec-header" onClick={() => toggleSec("triggers")}>
+                                    <span className="sidebar-group-arrow">{secOpen("triggers") ? "▼" : "▶"}</span>
+                                    <span className="sidebar-subsec-icon" style={{ color: "#f08080" }}>⚡</span>
+                                    Triggers
+                                    <span className="sidebar-badge">{tTrgs.length}</span>
+                                  </div>
+                                  {secOpen("triggers") && (
+                                    <div className="sidebar-subsec-list">
+                                      {tTrgs.length === 0
+                                        ? <div className="sidebar-subsec-empty">no triggers</div>
+                                        : tTrgs.map(trg => (
+                                          <div key={trg.name} className="sidebar-subsec-item" title={`${trg.timing} ${trg.event}`}>
+                                            <span className="sidebar-subsec-icon" style={{ color: "#f08080" }}>⚡</span>
+                                            <span className="col-name">{trg.name}</span>
+                                            <span className="col-type" style={{ fontSize: "10px" }}>{trg.timing} {trg.event}</span>
+                                          </div>
+                                        ))
+                                      }
+                                    </div>
+                                  )}
+
                                 </div>
                               )}
                             </div>
-                          )))}
+                            );
+                          }))}
                         </div>
 
                         {/* ── VIEWS ── */}
@@ -2337,49 +2543,6 @@ function App() {
                                       ))
                                     : <div className="sidebar-column sidebar-column-nested" style={{ color: "var(--text-muted)" }}>no column info</div>
                                   }
-                                </div>
-                              )}
-                            </div>
-                          )))}
-                        </div>
-
-                        {/* ── INDEXES ── */}
-                        <div className="sidebar-group sidebar-group-nested">
-                          <div className="sidebar-group-header sidebar-section-header" onClick={() => setIndexesOpen(p => ({ ...p, [dbName]: !iOpen }))}>
-                            <span className="sidebar-group-arrow">{iOpen ? "▼" : "▶"}</span>
-                            <span className="sidebar-section-icon">⌗</span>
-                            Indexes
-                            <span className="sidebar-badge">{data.indexes.length}</span>
-                          </div>
-                          {iOpen && (data.indexes.length === 0 ? (
-                            <div className="sidebar-empty sidebar-empty-nested">No indexes yet</div>
-                          ) : data.indexes.map(idx => (
-                            <div key={idx.name}>
-                              <div
-                                className={`sidebar-item sidebar-item-nested sidebar-index-item ${expandedIndexes.has(idx.name) ? "active" : ""}`}
-                                onClick={() => toggleIndex(idx.name)}
-                                onContextMenu={e => {
-                                  e.preventDefault();
-                                  e.stopPropagation();
-                                  setIndexCtxMenu({ x: e.clientX, y: e.clientY, index: idx.name, table: idx.table, kind: idx.kind });
-                                }}
-                              >
-                                <span className="sidebar-arrow">{expandedIndexes.has(idx.name) ? "▼" : "▶"}</span>
-                                <span className="sidebar-index-icon">{idx.kind === "composite" ? "⋈" : "⌗"}</span>
-                                <span className="sidebar-name">{idx.name}</span>
-                                <span className="sidebar-index-table">{idx.table}</span>
-                              </div>
-                              {expandedIndexes.has(idx.name) && (
-                                <div className="sidebar-columns sidebar-columns-nested">
-                                  <div className="sidebar-column sidebar-column-nested" style={{ color: "var(--text-muted)", fontSize: "0.75rem" }}>
-                                    {idx.kind === "composite" ? "composite" : "single"}
-                                  </div>
-                                  {idx.columns.map(col => (
-                                    <div key={col} className="sidebar-column sidebar-column-nested">
-                                      <span className="col-icon">◉</span>
-                                      <span>{col}</span>
-                                    </div>
-                                  ))}
                                 </div>
                               )}
                             </div>
@@ -4169,242 +4332,269 @@ function App() {
       {/* ── 서버 관리 뷰 ───────────────────────────────────────── */}
       {activeView === "server" && (
         <div className="server-view">
-          <div className="srv-scroll-area">
-            {/* ── 연결 구성 패널 ── */}
-            <div className="srv-conn-panel">
+          {/* ── 메인 영역 (좌측 콘텐츠 + 슬라이드 패널 + 우측 버튼바) ── */}
+          <div className="srv-main-area">
 
-              {/* 아이콘 + 제목 */}
-              <div className="srv-conn-header">
-                <svg className="srv-db-icon" width="65" height="65" viewBox="0 0 24 24" preserveAspectRatio="none" fill="none">
-                  <ellipse cx="12" cy="3" rx="8" ry="2.5" stroke="#e8a44a" strokeWidth="1.5" vectorEffect="non-scaling-stroke"/>
-                  <path d="M4 3v6c0 1.38 3.58 2.5 8 2.5s8-1.12 8-2.5v-6" stroke="#e8a44a" strokeWidth="1.5" fill="none" vectorEffect="non-scaling-stroke"/>
-                  <path d="M4 9v6c0 1.38 3.58 2.5 8 2.5s8-1.12 8-2.5v-6" stroke="#e8a44a" strokeWidth="1.5" fill="none" vectorEffect="non-scaling-stroke"/>
-                  <path d="M4 15v6c0 1.38 3.58 2.5 8 2.5s8-1.12 8-2.5v-6" stroke="#e8a44a" strokeWidth="1.5" fill="none" vectorEffect="non-scaling-stroke"/>
-                </svg>
-                <div>
-                  <div className="srv-conn-title">서버에 연결</div>
-                  <div className="srv-conn-sub">RustDB TCP Server</div>
-                </div>
-              </div>
+            {/* ── 좌측 컬럼 (연결 폼 + 로그) ── */}
+            <div className="srv-left-col">
+              <div className="srv-scroll-area">
+                <div className="srv-conn-panel">
 
-              {/* 이름 + 그룹 행 */}
-              <div className="srv-name-row">
-                <div className="srv-name-field">
-                  <label className="srv-name-label">이름</label>
-                  <input
-                    className="srv-name-input"
-                    value={srvConnName}
-                    onChange={e => setSrvConnName(e.target.value)}
-                    placeholder="연결 이름"
-                  />
-                </div>
-                <div className="srv-name-field" style={{ maxWidth: 180 }}>
-                  <label className="srv-name-label">그룹</label>
-                  <input className="srv-name-input" defaultValue="기본값" disabled />
-                </div>
-              </div>
-
-              {/* 탭 바 */}
-              <div className="srv-tab-bar">
-                <button
-                  className={`srv-tab ${srvTab === "main" ? "active" : ""}`}
-                  onClick={() => setSrvTab("main")}
-                >
-                  <span className="srv-tab-icon">⚙</span> 메인
-                </button>
-                <button
-                  className={`srv-tab ${srvTab === "guide" ? "active" : ""}`}
-                  onClick={() => setSrvTab("guide")}
-                >
-                  <span className="srv-tab-icon">☰</span> CLI 가이드
-                </button>
-              </div>
-
-              {/* ── 메인 탭 ── */}
-              {srvTab === "main" && (
-                <div className="srv-form-body">
-                  {/* 호스트 / 포트 */}
-                  <div className="srv-form-row">
-                    <div className="srv-form-col">
-                      <label className="srv-form-label"><span className="srv-req">*</span> 호스트</label>
-                      <input className="srv-form-input" value="127.0.0.1" disabled />
-                    </div>
-                    <div className="srv-form-col" style={{ maxWidth: 160 }}>
-                      <label className="srv-form-label"><span className="srv-req">*</span> 포트</label>
-                      <div className="srv-port-wrap">
-                        <button
-                          className="srv-port-btn"
-                          onClick={() => setPortInput(p => String(Math.max(1024, parseInt(p || "7878") - 1)))}
-                          disabled={serverStatus.running}
-                        >−</button>
-                        <input
-                          className="srv-form-input srv-port-num"
-                          value={portInput}
-                          onChange={e => setPortInput(e.target.value)}
-                          disabled={serverStatus.running}
-                        />
-                        <button
-                          className="srv-port-btn"
-                          onClick={() => setPortInput(p => String(Math.min(65535, parseInt(p || "7878") + 1)))}
-                          disabled={serverStatus.running}
-                        >+</button>
-                      </div>
-                    </div>
-                    <div className="srv-form-col" style={{ maxWidth: 160 }}>
-                      <label className="srv-form-label">MySQL 포트 <span style={{ color: "var(--text-muted)", fontWeight: 400 }}>(0=비활성)</span></label>
-                      <div className="srv-port-wrap">
-                        <button
-                          className="srv-port-btn"
-                          onClick={() => setMysqlPortInput(p => String(Math.max(0, parseInt(p || "0") - 1)))}
-                          disabled={serverStatus.running}
-                        >−</button>
-                        <input
-                          className="srv-form-input srv-port-num"
-                          value={mysqlPortInput}
-                          onChange={e => setMysqlPortInput(e.target.value)}
-                          disabled={serverStatus.running}
-                        />
-                        <button
-                          className="srv-port-btn"
-                          onClick={() => setMysqlPortInput(p => String(Math.min(65535, parseInt(p || "0") + 1)))}
-                          disabled={serverStatus.running}
-                        >+</button>
-                      </div>
+                  {/* 아이콘 + 제목 */}
+                  <div className="srv-conn-header">
+                    <svg className="srv-db-icon" width="65" height="65" viewBox="0 0 24 24" preserveAspectRatio="none" fill="none">
+                      <ellipse cx="12" cy="3" rx="8" ry="2.5" stroke="#e8a44a" strokeWidth="1.5" vectorEffect="non-scaling-stroke"/>
+                      <path d="M4 3v6c0 1.38 3.58 2.5 8 2.5s8-1.12 8-2.5v-6" stroke="#e8a44a" strokeWidth="1.5" fill="none" vectorEffect="non-scaling-stroke"/>
+                      <path d="M4 9v6c0 1.38 3.58 2.5 8 2.5s8-1.12 8-2.5v-6" stroke="#e8a44a" strokeWidth="1.5" fill="none" vectorEffect="non-scaling-stroke"/>
+                      <path d="M4 15v6c0 1.38 3.58 2.5 8 2.5s8-1.12 8-2.5v-6" stroke="#e8a44a" strokeWidth="1.5" fill="none" vectorEffect="non-scaling-stroke"/>
+                    </svg>
+                    <div>
+                      <div className="srv-conn-title">서버에 연결</div>
+                      <div className="srv-conn-sub">RustDB TCP Server</div>
                     </div>
                   </div>
 
-                  {/* 사용자 / 비밀번호 */}
-                  <div className="srv-form-row">
-                    <div className="srv-form-col">
-                      <label className="srv-form-label"><span className="srv-req">*</span> 사용자 이름</label>
+                  {/* 이름 + 그룹 행 */}
+                  <div className="srv-name-row">
+                    <div className="srv-name-field">
+                      <label className="srv-name-label">이름</label>
                       <input
-                        className="srv-form-input"
-                        value={srvUser}
-                        onChange={e => setSrvUser(e.target.value)}
-                        placeholder="root"
+                        className="srv-name-input"
+                        value={srvConnName}
+                        onChange={e => setSrvConnName(e.target.value)}
+                        placeholder="연결 이름"
                       />
                     </div>
-                    <div className="srv-form-col">
-                      <label className="srv-form-label"><span className="srv-req">*</span> 비밀번호</label>
-                      <div className="srv-pass-wrap">
-                        <input
-                          className="srv-form-input"
-                          type={srvPassVisible ? "text" : "password"}
-                          value={srvPass}
-                          onChange={e => setSrvPass(e.target.value)}
-                          placeholder="비밀번호"
-                        />
-                        <button
-                          className="srv-pass-toggle"
-                          onClick={() => setSrvPassVisible(v => !v)}
-                          title={srvPassVisible ? "숨기기" : "표시"}
-                        >{srvPassVisible ? "🙈" : "👁"}</button>
+                    <div className="srv-name-field" style={{ maxWidth: 180 }}>
+                      <label className="srv-name-label">그룹</label>
+                      <input className="srv-name-input" defaultValue="기본값" disabled />
+                    </div>
+                  </div>
+
+                  {/* 폼 본문 */}
+                  <div className="srv-form-body">
+                    {/* 호스트 / 포트 */}
+                    <div className="srv-form-row">
+                      <div className="srv-form-col">
+                        <label className="srv-form-label"><span className="srv-req">*</span> 호스트</label>
+                        <input className="srv-form-input" value="127.0.0.1" disabled />
+                      </div>
+                      <div className="srv-form-col" style={{ maxWidth: 160 }}>
+                        <label className="srv-form-label"><span className="srv-req">*</span> 포트</label>
+                        <div className="srv-port-wrap">
+                          <button className="srv-port-btn" onClick={() => setPortInput(p => String(Math.max(1024, parseInt(p || "7878") - 1)))} disabled={serverStatus.running}>−</button>
+                          <input className="srv-form-input srv-port-num" value={portInput} onChange={e => setPortInput(e.target.value)} disabled={serverStatus.running}/>
+                          <button className="srv-port-btn" onClick={() => setPortInput(p => String(Math.min(65535, parseInt(p || "7878") + 1)))} disabled={serverStatus.running}>+</button>
+                        </div>
+                      </div>
+                      <div className="srv-form-col" style={{ maxWidth: 160 }}>
+                        <label className="srv-form-label">MySQL 포트 <span style={{ color: "var(--text-muted)", fontWeight: 400 }}>(0=비활성)</span></label>
+                        <div className="srv-port-wrap">
+                          <button className="srv-port-btn" onClick={() => setMysqlPortInput(p => String(Math.max(0, parseInt(p || "0") - 1)))} disabled={serverStatus.running}>−</button>
+                          <input className="srv-form-input srv-port-num" value={mysqlPortInput} onChange={e => setMysqlPortInput(e.target.value)} disabled={serverStatus.running}/>
+                          <button className="srv-port-btn" onClick={() => setMysqlPortInput(p => String(Math.min(65535, parseInt(p || "0") + 1)))} disabled={serverStatus.running}>+</button>
+                        </div>
                       </div>
                     </div>
-                  </div>
 
-                  {/* 인증 방식 */}
-                  <div className="srv-form-row">
-                    <div className="srv-form-col srv-full-col">
-                      <label className="srv-form-label">인증 방식</label>
-                      <div className="srv-auth-badge">RustDB AUTH Protocol v1 · 평문 (내부 네트워크 전용)</div>
+                    {/* 사용자 / 비밀번호 */}
+                    <div className="srv-form-row">
+                      <div className="srv-form-col">
+                        <label className="srv-form-label"><span className="srv-req">*</span> 사용자 이름</label>
+                        <input className="srv-form-input" value={srvUser} onChange={e => setSrvUser(e.target.value)} placeholder="root"/>
+                      </div>
+                      <div className="srv-form-col">
+                        <label className="srv-form-label"><span className="srv-req">*</span> 비밀번호</label>
+                        <div className="srv-pass-wrap">
+                          <input className="srv-form-input" type={srvPassVisible ? "text" : "password"} value={srvPass} onChange={e => setSrvPass(e.target.value)} placeholder="비밀번호"/>
+                          <button className="srv-pass-toggle" onClick={() => setSrvPassVisible(v => !v)} title={srvPassVisible ? "숨기기" : "표시"}>{srvPassVisible ? "🙈" : "👁"}</button>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* 버퍼 풀 크기 + 병렬 쿼리 토글 + 터미널 버튼 */}
+                    <div className="srv-form-row srv-inline-row">
+                      <div className="srv-inline-group">
+                        <label className="srv-form-label">
+                          버퍼 풀 크기
+                          <span style={{ color: "var(--text-muted)", fontWeight: 400, marginLeft: 4 }}>페이지 (×16KB)</span>
+                        </label>
+                        <div className="srv-port-wrap">
+                          <button className="srv-port-btn" onClick={() => { const v = String(Math.max(8, (parseInt(bufferPoolInput)||64) - 8)); setBufferPoolInput(v); localStorage.setItem("rustdb_bp_size", v); }}>−</button>
+                          <input className="srv-form-input srv-port-num" value={bufferPoolInput} onChange={e => { setBufferPoolInput(e.target.value); localStorage.setItem("rustdb_bp_size", e.target.value); }}/>
+                          <button className="srv-port-btn" onClick={() => { const v = String(Math.min(4096, (parseInt(bufferPoolInput)||64) + 8)); setBufferPoolInput(v); localStorage.setItem("rustdb_bp_size", v); }}>+</button>
+                        </div>
+                      </div>
+                      <div className="srv-inline-group">
+                        <label className="srv-form-label">병렬 쿼리</label>
+                        <div className="srv-toggle-row">
+                          <button
+                            className={`srv-toggle-btn ${parallelQuery ? "on" : "off"}`}
+                            onClick={() => { const next = !parallelQuery; setParallelQuery(next); localStorage.setItem("rustdb_parallel", next ? "1" : "0"); invoke("set_parallel_query", { enabled: next }); }}
+                          >
+                            <span className="srv-toggle-knob" />
+                          </button>
+                          <span className="srv-toggle-label">
+                            {parallelQuery ? "ON — 10,000행+ SeqScan 자동 병렬 처리" : "OFF — 단일 스레드"}
+                          </span>
+                        </div>
+                      </div>
+                      <div className="srv-inline-group" style={{ marginLeft: "auto" }}>
+                        <label className="srv-form-label" style={{ opacity: 0 }}>.</label>
+                        <button className="srv-terminal-btn" onClick={() => invoke("open_terminal")} title="터미널 열기">
+                          <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+                            <path d="M20 4H4C2.9 4 2 4.9 2 6V18C2 19.1 2.9 20 4 20H20C21.1 20 22 19.1 22 18V6C22 4.9 21.1 4 20 4ZM20 18H4V6H20V18ZM6 10L8.5 12.5L6 15L7.5 16.5L11.5 12.5L7.5 8.5L6 10ZM12 15H18V17H12V15Z"/>
+                          </svg>
+                          터미널 열기
+                        </button>
+                      </div>
+                    </div>
+
+                    {/* 인증 방식 */}
+                    <div className="srv-form-row">
+                      <div className="srv-form-col srv-full-col">
+                        <label className="srv-form-label">인증 방식</label>
+                        <div className="srv-auth-badge">RustDB AUTH Protocol v1</div>
+                      </div>
+                    </div>
+
+                    <div className="srv-divider" />
+
+                    {/* 상태 */}
+                    <div className="srv-status-strip">
+                      <span className={`srv-dot ${serverStatus.running ? "running" : "stopped"}`} />
+                      <span className={`srv-strip-text ${serverStatus.running ? "running" : "stopped"}`}>
+                        {serverStatus.running ? `RUNNING · 127.0.0.1:${serverStatus.port} · ${serverStatus.client_count} 클라이언트` : "STOPPED"}
+                      </span>
+                    </div>
+
+                    {serverMsg && <div className="srv-feedback">{serverMsg}</div>}
+
+                    {/* 버튼 행 */}
+                    <div className="srv-action-row">
+                      <button className="srv-action-btn primary" onClick={handleStartServer} disabled={serverStatus.running}>
+                        <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><polygon points="5,3 19,12 5,21"/></svg>
+                        서버 시작
+                      </button>
+                      <button className="srv-action-btn danger" onClick={handleStopServer} disabled={!serverStatus.running}>
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><rect x="4" y="4" width="16" height="16" rx="1"/></svg>
+                        중지
+                      </button>
+                      <div style={{ flex: 1 }} />
+                      <button className="srv-action-btn save" onClick={() => setServerMsg("설정이 저장되었습니다.")}>
+                        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                          <path d="M19 21H5a2 2 0 01-2-2V5a2 2 0 012-2h11l5 5v11a2 2 0 01-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/>
+                        </svg>
+                        저장
+                      </button>
                     </div>
                   </div>
-
-                  <div className="srv-divider" />
-
-                  {/* 상태 표시 */}
-                  <div className="srv-status-strip">
-                    <span className={`srv-dot ${serverStatus.running ? "running" : "stopped"}`} />
-                    <span className={`srv-strip-text ${serverStatus.running ? "running" : "stopped"}`}>
-                      {serverStatus.running
-                        ? `RUNNING · 127.0.0.1:${serverStatus.port} · ${serverStatus.client_count} 클라이언트`
-                        : "STOPPED"}
-                    </span>
-                  </div>
-
-                  {serverMsg && <div className="srv-feedback">{serverMsg}</div>}
-
-                  {/* 버튼 행 */}
-                  <div className="srv-action-row">
-                    <button
-                      className="srv-action-btn primary"
-                      onClick={handleStartServer}
-                      disabled={serverStatus.running}
-                    >▶ 서버 시작</button>
-                    <button
-                      className="srv-action-btn danger"
-                      onClick={handleStopServer}
-                      disabled={!serverStatus.running}
-                    >■ 중지</button>
-                    <div style={{ flex: 1 }} />
-                    <button
-                      className="srv-action-btn save"
-                      onClick={() => setServerMsg("설정이 저장되었습니다.")}
-                    >저장</button>
-                  </div>
                 </div>
-              )}
-
-              {/* ── CLI 가이드 탭 ── */}
-              {srvTab === "guide" && (
-                <div className="srv-form-body">
-                  <div className="srv-guide-title">rustdb-client로 접속</div>
-                  <code className="srv-guide-code">
-                    {`cargo run -p rustdb-client -- -u ${srvUser} -p *** -h 127.0.0.1 -P ${portInput}`}
-                  </code>
-
-                  <div className="srv-guide-title" style={{ marginTop: 20 }}>인증 프로토콜 흐름</div>
-                  <div className="srv-guide-flow">
-                    <div className="srv-flow-row"><span className="srv-flow-arrow">→</span><code>AUTH {srvUser} &lt;password&gt;</code></div>
-                    <div className="srv-flow-row"><span className="srv-flow-arrow">←</span><code>OK authenticated as '{srvUser}'</code></div>
-                    <div className="srv-flow-row"><span className="srv-flow-arrow">→</span><code>SELECT * FROM t;</code></div>
-                    <div className="srv-flow-row"><span className="srv-flow-arrow">←</span><code>OK{"\\n"}&lt;결과&gt;{"\\n"}(0.001 sec){"\\n"}---END---</code></div>
-                  </div>
-
-                  <div className="srv-guide-title" style={{ marginTop: 20 }}>Netcat / PowerShell</div>
-                  <code className="srv-guide-code">nc 127.0.0.1 {portInput}</code>
-                  <code className="srv-guide-code" style={{ marginTop: 8 }}>
-                    {`$c = New-Object Net.Sockets.TcpClient('127.0.0.1',${portInput})`}
-                  </code>
-                </div>
-              )}
-            </div>
-          </div>
-
-          {/* ── 로그 패널 ── */}
-          <div className="srv-log-panel">
-            <div className="srv-log-header">
-              <span className="srv-log-title">ACTIVITY LOG</span>
-              <div className="srv-log-actions">
-                <span className="srv-log-count">{serverStatus.log.length} entries</span>
-                <button className="srv-log-clear" onClick={handleClearLog}>Clear</button>
               </div>
-            </div>
-            <div className="srv-log-body">
-              {serverStatus.log.length === 0 ? (
-                <div className="srv-log-empty">서버 활동 로그가 여기에 표시됩니다.</div>
-              ) : serverStatus.log.map((entry, i) => (
-                <div key={i} className="srv-log-entry">
-                  <span className="srv-log-time">{entry.slice(0, 10)}</span>
-                  <span className="srv-log-msg">{entry.slice(11)}</span>
+
+              {/* ── 로그 패널 ── */}
+              <div className="srv-log-panel">
+                <div className="srv-log-header">
+                  <span className="srv-log-title">ACTIVITY LOG</span>
+                  <div className="srv-log-actions">
+                    <span className="srv-log-count">{serverStatus.log.length} entries</span>
+                    <button className="srv-log-clear" onClick={handleClearLog}>Clear</button>
+                  </div>
                 </div>
-              ))}
-              <div ref={logEndRef} />
+                <div className="srv-log-body">
+                  {serverStatus.log.length === 0 ? (
+                    <div className="srv-log-empty">서버 활동 로그가 여기에 표시됩니다.</div>
+                  ) : serverStatus.log.map((entry, i) => (
+                    <div key={i} className="srv-log-entry">
+                      <span className="srv-log-time">{entry.slice(0, 10)}</span>
+                      <span className="srv-log-msg">{entry.slice(11)}</span>
+                    </div>
+                  ))}
+                  <div ref={logEndRef} />
+                </div>
+              </div>
+            </div>{/* /srv-left-col */}
+
+            {/* ── 슬라이드 패널 ── */}
+            {srvRightPanel !== "none" && (
+              <div className="srv-slide-panel">
+                <div className="srv-slide-header">
+                  {srvRightPanel === "cli" ? "CLI 가이드" : "MySQL 연결"}
+                  <button className="srv-slide-close" onClick={() => setSrvRightPanel("none")}>✕</button>
+                </div>
+                <div className="srv-slide-body">
+                  {srvRightPanel === "cli" && (<>
+                    <div className="srv-slide-section">rustdb-client</div>
+                    <code className="srv-slide-code">{`cargo run -p rustdb-client -- \\
+  -u ${srvUser} -p <password> \\
+  -h 127.0.0.1 -P ${portInput}`}</code>
+
+                    <div className="srv-slide-section" style={{ marginTop: 18 }}>인증 흐름 (RustDB AUTH Protocol v1)</div>
+                    <div className="srv-slide-flow">
+                      <div className="srv-slide-flow-row"><span className="srv-slide-arrow out">→</span><code>{`AUTH ${srvUser} <password>`}</code></div>
+                      <div className="srv-slide-flow-row"><span className="srv-slide-arrow in">←</span><code>{`OK authenticated as '${srvUser}'`}</code></div>
+                      <div className="srv-slide-flow-row"><span className="srv-slide-arrow out">→</span><code>SELECT * FROM t;</code></div>
+                      <div className="srv-slide-flow-row"><span className="srv-slide-arrow in">←</span><code>{"OK\n<결과>\n(0.001 sec)\n---END---"}</code></div>
+                      <div className="srv-slide-flow-row"><span className="srv-slide-arrow out">→</span><code>exit</code></div>
+                      <div className="srv-slide-flow-row"><span className="srv-slide-arrow in">←</span><code>Bye!</code></div>
+                    </div>
+
+                    <div className="srv-slide-section" style={{ marginTop: 18 }}>PowerShell 직접 접속</div>
+                    <code className="srv-slide-code">{`$c = New-Object Net.Sockets.TcpClient('127.0.0.1',${portInput})\n$s = $c.GetStream()\n$w = New-Object IO.StreamWriter($s)\n$w.WriteLine("AUTH ${srvUser} <password>")\n$w.Flush()`}</code>
+
+                    <div className="srv-slide-section" style={{ marginTop: 18 }}>netcat</div>
+                    <code className="srv-slide-code">{`nc 127.0.0.1 ${portInput}`}</code>
+                  </>)}
+
+                  {srvRightPanel === "mysql" && (<>
+                    <div className="srv-slide-section">mysql CLI</div>
+                    <code className="srv-slide-code">{`mysql -h 127.0.0.1 -P ${mysqlPortInput || 13306} \\\n  -u ${srvUser} -p<password> \\\n  --ssl-mode=DISABLED`}</code>
+
+                    <div className="srv-slide-section" style={{ marginTop: 18 }}>Python (mysql-connector)</div>
+                    <code className="srv-slide-code">{`import mysql.connector\nconn = mysql.connector.connect(\n  host="127.0.0.1",\n  port=${mysqlPortInput || 13306},\n  user="${srvUser}",\n  password="<password>"\n)\ncur = conn.cursor()\ncur.execute("SHOW DATABASES")\nfor row in cur: print(row)`}</code>
+
+                    <div className="srv-slide-section" style={{ marginTop: 18 }}>DBeaver</div>
+                    <div className="srv-slide-text">New Connection → MySQL<br/>Host: 127.0.0.1<br/>Port: {mysqlPortInput || 13306}<br/>User: {srvUser}<br/>SSL: 비활성화 (allowPublicKeyRetrieval=true)</div>
+
+                    <div className="srv-slide-section" style={{ marginTop: 18 }}>인증 방식</div>
+                    <div className="srv-slide-text">mysql_native_password<br/>SHA1(SHA1(pw)) 챌린지-응답<br/>포트 {mysqlPortInput || 13306}에서 수신</div>
+                  </>)}
+                </div>
+              </div>
+            )}
+
+            {/* ── 우측 버튼바 ── */}
+            <div className="srv-right-bar">
+              <button
+                className={`srv-rbar-btn ${srvRightPanel === "cli" ? "active" : ""}`}
+                onClick={() => setSrvRightPanel(p => p === "cli" ? "none" : "cli")}
+                title="CLI 가이드"
+              >
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+                  <polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/>
+                </svg>
+                <span>CLI</span>
+              </button>
+              <button
+                className={`srv-rbar-btn ${srvRightPanel === "mysql" ? "active" : ""}`}
+                onClick={() => setSrvRightPanel(p => p === "mysql" ? "none" : "mysql")}
+                title="MySQL 연결 방법"
+              >
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+                  <ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/><path d="M3 12c0 1.66 4 3 9 3s9-1.34 9-3"/>
+                </svg>
+                <span>MySQL</span>
+              </button>
             </div>
-          </div>
+
+          </div>{/* /srv-main-area */}
 
           {/* 하단 상태바 */}
           <div className="status-bar">
             <div className="status-left">
               <span className="status-item">⎇ main</span>
-              <span
-                className="status-item"
-                style={{ color: serverStatus.running ? "#4ec9b0" : "#858585" }}
-              >
-                {serverStatus.running
-                  ? `● TCP :${serverStatus.port} (${serverStatus.client_count} clients)`
-                  : "○ TCP Stopped"}
+              <span className="status-item" style={{ color: serverStatus.running ? "#4ec9b0" : "#858585" }}>
+                {serverStatus.running ? `● TCP :${serverStatus.port} (${serverStatus.client_count} clients)` : "○ TCP Stopped"}
               </span>
             </div>
             <div className="status-right">

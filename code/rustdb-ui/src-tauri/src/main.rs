@@ -397,7 +397,15 @@ struct IndexInfo {
     name:    String,
     table:   String,
     columns: Vec<String>,
-    kind:    String, // "single" | "composite"
+    kind:    String, // "single" | "composite" | "hash"
+}
+
+#[derive(serde::Serialize)]
+struct TriggerInfo {
+    name:   String,
+    table:  String,
+    timing: String,
+    event:  String,
 }
 
 #[tauri::command]
@@ -426,7 +434,35 @@ fn get_indexes_for_db(db: String, state: State<AppState>) -> Vec<IndexInfo> {
             });
         }
     }
-    result.sort_by(|a, b| a.name.cmp(&b.name));
+    for (name, (table, column)) in &s.hash_index_meta {
+        if table.starts_with(&prefix) {
+            result.push(IndexInfo {
+                name: name.clone(),
+                table: table[prefix.len()..].to_string(),
+                columns: vec![column.clone()],
+                kind: "hash".to_string(),
+            });
+        }
+    }
+    result.sort_by(|a, b| a.table.cmp(&b.table).then(a.name.cmp(&b.name)));
+    result
+}
+
+#[tauri::command]
+fn get_triggers_for_db(db: String, state: State<AppState>) -> Vec<TriggerInfo> {
+    let exec = state.db.lock().unwrap();
+    let s = exec.shared.read().unwrap();
+    let prefix = format!("{}.", db.to_lowercase());
+    let mut result: Vec<TriggerInfo> = s.triggers.iter()
+        .filter(|(_, (table, _, _, _))| table.starts_with(&prefix))
+        .map(|(name, (table, timing, event, _))| TriggerInfo {
+            name:   name.clone(),
+            table:  table[prefix.len()..].to_string(),
+            timing: timing.clone(),
+            event:  event.clone(),
+        })
+        .collect();
+    result.sort_by(|a, b| a.table.cmp(&b.table).then(a.name.cmp(&b.name)));
     result
 }
 
@@ -646,6 +682,11 @@ fn get_app_data_dir(_app: tauri::AppHandle) -> String {
 }
 
 #[tauri::command]
+fn set_parallel_query(enabled: bool) {
+    std::env::set_var("RUSTDB_PARALLEL", if enabled { "1" } else { "0" });
+}
+
+#[tauri::command]
 fn delete_conn_data(data_dir: String) -> bool {
     if data_dir.is_empty() { return false; }
     match std::fs::remove_dir_all(&data_dir) {
@@ -655,9 +696,10 @@ fn delete_conn_data(data_dir: String) -> bool {
 }
 
 #[tauri::command]
-fn authenticate(user: String, password: String, data_dir: String, state: State<AppState>) -> bool {
+fn authenticate(user: String, password: String, data_dir: String, buffer_pool_size: usize, state: State<AppState>) -> bool {
     // 해당 data_dir의 Executor를 로드 (WAL 복구 포함)
-    let new_exec = rustdb_core::engine::executor::Executor::new_with_dir(&data_dir);
+    let bp = if buffer_pool_size > 0 { buffer_pool_size } else { 64 };
+    let new_exec = rustdb_core::engine::executor::Executor::new_with_options(&data_dir, bp);
     // 사용자 없으면 root/root 자동 생성
     new_exec.shared.write().unwrap().ensure_default_user();
     // 자격증명 검증
@@ -850,6 +892,7 @@ fn main() {
             get_tables_for_db,
             get_views_for_db,
             get_indexes_for_db,
+            get_triggers_for_db,
             authenticate,
             delete_conn_data,
             start_server,
@@ -861,6 +904,7 @@ fn main() {
             open_terminal,
             open_url,
             get_app_data_dir,
+            set_parallel_query,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

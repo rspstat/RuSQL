@@ -5,6 +5,9 @@ CREATE DATABASE company;
 USE company;
 
 -- DDL: Tables
+-- department : INT, VARCHAR, DECIMAL, BIGINT, SMALLINT, TINYINT, BOOLEAN, DATE, TIME, YEAR, TEXT, JSON, ENUM, SET
+-- employee   : INT, BIGINT, VARCHAR, DATE, DATETIME, TIMESTAMP, DECIMAL, FLOAT, DOUBLE, BOOLEAN, TINYINT, SMALLINT, BLOB, JSON, TEXT, ENUM, SET
+-- project    : INT, VARCHAR, TEXT, DECIMAL, BIGINT, SMALLINT, TINYINT, DATE, DATETIME, TIMESTAMP, FLOAT, DOUBLE, BOOLEAN, JSON, ENUM, SET
 CREATE TABLE department (
     id            INT            AUTO INCREMENT,
     code          VARCHAR(10)    NOT NULL,
@@ -21,7 +24,7 @@ CREATE TABLE department (
     metadata      JSON,
     dept_type     ENUM('engineering','sales','marketing','finance','hr','ops','legal'),
     perks         SET('gym','cafe','parking','library','childcare'),
-    CONSTRAINT pk_dept       PRIMARY KEY (id),
+    CONSTRAINT pk_dept     PRIMARY KEY (id),
     UNIQUE KEY uq_dept_code (code),
     UNIQUE KEY uq_dept_name (name)
 );
@@ -50,10 +53,10 @@ CREATE TABLE employee (
     resume_data      BLOB,
     personal_data    JSON,
     bio              TEXT,
-    CONSTRAINT pk_employee   PRIMARY KEY (id),
-    UNIQUE KEY uq_emp_code   (employee_code),
-    UNIQUE KEY uq_emp_email  (email),
-    CONSTRAINT fk_emp_dept   FOREIGN KEY (department_id) REFERENCES department(id) ON DELETE SET NULL ON UPDATE CASCADE
+    CONSTRAINT pk_employee  PRIMARY KEY (id),
+    UNIQUE KEY uq_emp_code  (employee_code),
+    UNIQUE KEY uq_emp_email (email),
+    CONSTRAINT fk_emp_dept  FOREIGN KEY (department_id) REFERENCES department(id) ON DELETE SET NULL ON UPDATE CASCADE
 );
 
 CREATE TABLE project (
@@ -77,34 +80,34 @@ CREATE TABLE project (
     tech_stack    SET('frontend','backend','database','mobile','cloud','ai','security'),
     is_public     BOOLEAN        DEFAULT false,
     contract_data JSON,
-    CONSTRAINT pk_project    PRIMARY KEY (id),
-    UNIQUE KEY uq_proj_code  (code),
-    CONSTRAINT fk_proj_dept  FOREIGN KEY (department_id) REFERENCES department(id) ON DELETE RESTRICT ON UPDATE CASCADE,
-    CONSTRAINT fk_proj_lead  FOREIGN KEY (lead_id)       REFERENCES employee(id)  ON DELETE CASCADE  ON UPDATE CASCADE
+    CONSTRAINT pk_project   PRIMARY KEY (id),
+    UNIQUE KEY uq_proj_code (code),
+    CONSTRAINT fk_proj_dept FOREIGN KEY (department_id) REFERENCES department(id) ON DELETE RESTRICT ON UPDATE CASCADE,
+    CONSTRAINT fk_proj_lead FOREIGN KEY (lead_id)       REFERENCES employee(id)  ON DELETE CASCADE  ON UPDATE CASCADE
 );
 
--- DDL: Indexes
-CREATE INDEX idx_dept_type     ON department (dept_type);
-CREATE INDEX idx_dept_active   ON department (is_active);
+-- DDL: Indexes (B-tree)
+CREATE INDEX idx_dept_type    ON department (dept_type);
+CREATE INDEX idx_dept_active  ON department (is_active);
+CREATE INDEX idx_emp_dept     ON employee (department_id);
+CREATE INDEX idx_emp_type     ON employee (emp_type);
+CREATE INDEX idx_emp_dept_sal ON employee (department_id, salary);
+CREATE INDEX idx_proj_dept    ON project (department_id);
+CREATE INDEX idx_proj_status  ON project (status);
+CREATE INDEX idx_proj_dates   ON project (start_date, end_date);
 
-CREATE INDEX idx_emp_dept      ON employee (department_id);
-CREATE INDEX idx_emp_type      ON employee (emp_type);
-CREATE INDEX idx_emp_dept_sal  ON employee (department_id, salary);
-
-CREATE INDEX idx_proj_dept     ON project (department_id);
-CREATE INDEX idx_proj_status   ON project (status);
-CREATE INDEX idx_proj_dates    ON project (start_date, end_date);
+-- DDL: Indexes (Hash) — 등호 조건 O(1) 검색
+CREATE INDEX idx_emp_email  ON employee   (email) USING HASH;
+CREATE INDEX idx_dept_code  ON department (code)  USING HASH;
 
 -- DDL: Views
-CREATE VIEW v_active_dept    AS SELECT id, code, name, budget, dept_type, headcount FROM department WHERE is_active = true;
-CREATE VIEW v_dept_finance   AS SELECT id, name, budget, annual_target, fiscal_year FROM department;
-
-CREATE VIEW v_active_emp     AS SELECT id, first_name, last_name, email, department_id, job_title FROM employee WHERE termination_date IS NULL;
-CREATE VIEW v_manager        AS SELECT id, first_name, last_name, department_id, salary, performance FROM employee WHERE is_manager = true;
-CREATE VIEW v_senior_emp     AS SELECT id, first_name, last_name, experience_years, salary, skills FROM employee WHERE experience_years >= 7;
-
-CREATE VIEW v_active_proj    AS SELECT id, code, name, status, priority, department_id FROM project WHERE status = 'active';
-CREATE VIEW v_high_priority  AS SELECT id, name, priority, budget, department_id FROM project WHERE priority <= 2;
+CREATE VIEW v_active_dept  AS SELECT id, code, name, budget, dept_type, headcount FROM department WHERE is_active = true;
+CREATE VIEW v_dept_finance AS SELECT id, name, budget, annual_target, fiscal_year FROM department;
+CREATE VIEW v_active_emp   AS SELECT id, first_name, last_name, email, department_id, job_title FROM employee WHERE termination_date IS NULL;
+CREATE VIEW v_manager      AS SELECT id, first_name, last_name, department_id, salary, performance FROM employee WHERE is_manager = true;
+CREATE VIEW v_senior_emp   AS SELECT id, first_name, last_name, experience_years, salary, skills FROM employee WHERE experience_years >= 7;
+CREATE VIEW v_active_proj  AS SELECT id, code, name, status, priority, department_id FROM project WHERE status = 'active';
+CREATE VIEW v_high_priority AS SELECT id, name, priority, budget, department_id FROM project WHERE priority <= 2;
 
 -- DDL: Verify
 SHOW TABLES;
@@ -115,14 +118,15 @@ SHOW CREATE VIEW v_active_emp;
 CREATE DATABASE IF NOT EXISTS company;
 CREATE TABLE IF NOT EXISTS department (dummy INT);
 
--- INSERT
+-- INSERT: department (5 rows)
 INSERT INTO department (code, name, budget, annual_target, headcount, floor_num, is_active, established, open_time, fiscal_year, description, metadata, dept_type, perks) VALUES
-    ('ENG','Engineering',      5000000.00,10000000,20,3,true, '2010-01-15','09:00:00',2024,'Core product development',  '{"building":"A","room":3}','engineering','gym,cafe,parking'),
-    ('MKT','Marketing',        1500000.00, 3000000, 8,2,true, '2012-06-01','08:30:00',2024,'Brand and growth',          '{"building":"B","room":2}','marketing',  'cafe,parking'),
-    ('FIN','Finance',          1200000.00, 2000000, 5,4,true, '2011-03-10','09:00:00',2024,'Financial planning',        '{"building":"A","room":4}','finance',    'cafe,library'),
-    ('HRS','Human Resources',   600000.00,  800000, 4,1,true, '2013-09-01','08:00:00',2024,'Talent management',         '{"building":"C","room":1}','hr',         'gym,cafe,childcare'),
-    ('OPS','Operations',       2000000.00, 4000000,12,2,false,'2014-11-15','07:00:00',2023,'Cloud infrastructure',      '{"building":"D","room":2}','ops',        'parking');
+    ('ENG','Engineering',     5000000.00,10000000,20,3,true, '2010-01-15','09:00:00',2024,'Core product development','{"building":"A","room":3}','engineering','gym,cafe,parking'),
+    ('MKT','Marketing',       1500000.00, 3000000, 8,2,true, '2012-06-01','08:30:00',2024,'Brand and growth',       '{"building":"B","room":2}','marketing',  'cafe,parking'),
+    ('FIN','Finance',         1200000.00, 2000000, 5,4,true, '2011-03-10','09:00:00',2024,'Financial planning',     '{"building":"A","room":4}','finance',    'cafe,library'),
+    ('HRS','Human Resources',  600000.00,  800000, 4,1,true, '2013-09-01','08:00:00',2024,'Talent management',      '{"building":"C","room":1}','hr',         'gym,cafe,childcare'),
+    ('OPS','Operations',      2000000.00, 4000000,12,2,false,'2014-11-15','07:00:00',2023,'Cloud infrastructure',   '{"building":"D","room":2}','ops',        'parking');
 
+-- INSERT: employee (12 rows)
 INSERT INTO employee (employee_code,first_name,last_name,email,birth_date,hire_date,salary,hourly_rate,performance,department_id,manager_id,job_title,emp_type,skills,experience_years,is_manager,annual_leave,personal_data,bio) VALUES
     (1001,'Alice', 'Johnson', 'alice.j@co.com',  '1990-05-15','2018-03-01',120000.00, 0.0,9.5,1,NULL,'Sr Engineer',  'full_time','python,rust,sql,devops', 8,true, 25,'{"emergency":"Bob"}',    'Systems programmer'),
     (1002,'Bob',   'Smith',   'bob.s@co.com',    '1988-11-20','2016-07-15', 95000.00, 0.0,8.0,1,   1,'Backend Eng',  'full_time','java,sql,devops',        10,false,20,'{"emergency":"Alice"}', 'API specialist'),
@@ -135,19 +139,15 @@ INSERT INTO employee (employee_code,first_name,last_name,email,birth_date,hire_d
     (1009,'Iris',  'Taylor',  'iris.t@co.com',   '1999-01-05','2023-08-15', 55000.00,30.0,7.8,1,   1,'Jr Developer', 'part_time','python,sql',              2,false,15,'{"emergency":"Jack"}',  'Full-stack dev'),
     (1010,'Jack',  'Anderson','jack.a@co.com',   '1994-06-18','2020-05-10', 70000.00, 0.0,6.5,NULL,NULL,'Consultant','contract', 'sql,ml',                  7,false,10,'{"emergency":"Iris"}',  'Data consultant'),
     (1011,'Karen', 'Lee',     'karen.l@co.com',  '1989-03-22','2015-08-01',110000.00, 0.0,9.2,1,NULL,'Lead Eng',     'full_time','python,rust,devops',      11,true, 25,'{"emergency":"Liam"}',  'Platform lead'),
-    (1012,'Liam',  'Chen',    'liam.c@co.com',   '1996-11-14','2021-03-15', 80000.00, 0.0,7.9,2,   3,'Mkt Analyst',  'full_time','python,design',           4,false,20,'{"emergency":"Karen"}','Data marketer'),
-    (1013,'Mia',   'Garcia',  'mia.g@co.com',    '1998-07-30','2022-09-01', 72000.00, 0.0,8.1,3,   5,'Jr Analyst',   'full_time','sql',                     2,false,20,'{"emergency":"Noah"}',  'Financial data'),
-    (1014,'Noah',  'Kim',     'noah.k@co.com',   '1987-04-05','2013-06-20', 95000.00, 0.0,8.6,5,NULL,'Ops Manager',  'full_time','devops,sql',             12,true, 25,'{"emergency":"Olivia"}','Cloud ops'),
-    (1015,'Olivia','Park',    'olivia.p@co.com', '1993-12-18','2020-11-10', 62000.00, 0.0,7.3,4,NULL,'HR Analyst',   'full_time','design,python',           4,false,20,'{"emergency":"Grace"}', 'People analytics');
+    (1012,'Liam',  'Chen',    'liam.c@co.com',   '1996-11-14','2021-03-15', 80000.00, 0.0,7.9,2,   3,'Mkt Analyst',  'full_time','python,design',            4,false,20,'{"emergency":"Karen"}','Data marketer');
 
+-- INSERT: project (5 rows)
 INSERT INTO project (code,name,description,budget,alloc_hours,team_size,priority,start_date,end_date,deadline,revenue,completion,department_id,lead_id,status,tech_stack,is_public,contract_data) VALUES
-    ('PRJ-001','Core Platform Rewrite',   'Legacy to Rust',         2000000.00,5000,8,1,'2024-01-01','2024-12-31','2025-01-01 00:00:00',8000000.0, 45.0,1,1, 'active',   'backend,database,cloud',   false,'{"client":"internal","type":"capex"}'),
-    ('PRJ-002','AI Engine',               'ML recommendations',     1500000.00,3000,5,2,'2024-03-01','2024-09-30','2024-10-01 00:00:00',5000000.0, 70.0,1,11,'active',   'backend,ai,database',       false,'{"client":"internal","type":"opex"}'),
-    ('PRJ-003','Brand Refresh',           'Identity overhaul',       500000.00,1000,4,2,'2024-02-15','2024-06-30','2024-07-01 00:00:00',      0.0,100.0,2,3, 'completed','frontend,ai',               true, '{"client":"external","type":"marketing"}'),
-    ('PRJ-004','Finance Dashboard',       'Real-time reporting',     800000.00,2000,6,3,'2024-04-01',NULL,        '2024-11-01 00:00:00',2000000.0, 30.0,3,5, 'active',   'frontend,backend,database', false,'{"client":"internal","type":"capex"}'),
-    ('PRJ-005','HR Portal',               'Self-service system',     400000.00,1500,3,3,'2024-06-01',NULL,        '2025-03-01 00:00:00',      0.0, 10.0,4,7, 'planning', 'frontend,backend,database', false,'{"client":"internal","type":"opex"}'),
-    ('PRJ-006','Mobile App MVP',          'iOS and Android',        1200000.00,4000,7,1,'2023-09-01','2024-05-31','2024-06-01 00:00:00',3000000.0,100.0,1,8, 'completed','mobile,backend,cloud',      true, '{"client":"external","type":"revenue"}'),
-    ('PRJ-007','Cloud Infra',             'Multi-cloud setup',       900000.00,2500,5,2,'2024-05-01',NULL,        '2025-01-01 00:00:00',1000000.0, 25.0,5,14,'active',   'cloud,security,backend',    false,'{"client":"internal","type":"capex"}');
+    ('PRJ-001','Core Platform Rewrite','Legacy to Rust',      2000000.00,5000,8,1,'2024-01-01','2024-12-31','2025-01-01 00:00:00',8000000.0, 45.0,1,1, 'active',   'backend,database,cloud',   false,'{"client":"internal","type":"capex"}'),
+    ('PRJ-002','AI Engine',            'ML recommendations',  1500000.00,3000,5,2,'2024-03-01','2024-09-30','2024-10-01 00:00:00',5000000.0, 70.0,1,11,'active',   'backend,ai,database',       false,'{"client":"internal","type":"opex"}'),
+    ('PRJ-003','Brand Refresh',        'Identity overhaul',    500000.00,1000,4,2,'2024-02-15','2024-06-30','2024-07-01 00:00:00',      0.0,100.0,2,3, 'completed','frontend,ai',               true, '{"client":"external","type":"marketing"}'),
+    ('PRJ-004','Finance Dashboard',    'Real-time reporting',  800000.00,2000,6,3,'2024-04-01',NULL,        '2024-11-01 00:00:00',2000000.0, 30.0,3,5, 'active',   'frontend,backend,database', false,'{"client":"internal","type":"capex"}'),
+    ('PRJ-006','Mobile App MVP',       'iOS and Android',     1200000.00,4000,7,1,'2023-09-01','2024-05-31','2024-06-01 00:00:00',3000000.0,100.0,1,8, 'completed','mobile,backend,cloud',      true, '{"client":"external","type":"revenue"}');
 
 -- SELECT
 SELECT id, first_name, last_name, salary FROM employee WHERE salary >= 80000 AND emp_type = 'full_time' ORDER BY salary DESC;
@@ -173,7 +173,7 @@ SELECT emp_type, COUNT(*) AS n, SUM(salary) AS total FROM employee GROUP BY emp_
 SELECT e.first_name, e.last_name, d.name AS dept_name, e.salary FROM employee e JOIN department d ON e.department_id = d.id ORDER BY e.salary DESC;
 SELECT e.first_name, d.name AS dept, p.name AS project, p.status FROM employee e JOIN project p ON e.id = p.lead_id JOIN department d ON e.department_id = d.id ORDER BY e.first_name;
 SELECT e.first_name, d.name AS dept_name FROM employee e LEFT JOIN department d ON e.department_id = d.id ORDER BY e.id;
-SELECT d.name AS dept_name, p.name AS proj_name FROM department d RIGHT JOIN project p ON d.id = p.department_id ORDER BY p.id LIMIT 5;
+SELECT d.name AS dept_name, p.name AS proj_name FROM department d RIGHT JOIN project p ON d.id = p.department_id ORDER BY p.id;
 SELECT d.name, p.name AS project FROM department d FULL OUTER JOIN project p ON d.id = p.department_id ORDER BY d.name LIMIT 8;
 SELECT d.name AS dept, e.first_name FROM department d CROSS JOIN employee e ORDER BY d.name, e.id LIMIT 6;
 
@@ -234,26 +234,26 @@ SELECT id, first_name, last_name, depth FROM mgmt_tree ORDER BY depth, id;
 
 -- Window Functions
 SELECT first_name, salary,
-    ROW_NUMBER()   OVER (ORDER BY salary DESC)                                    AS overall_rank,
-    RANK()         OVER (PARTITION BY department_id ORDER BY salary DESC)         AS dept_rank,
-    DENSE_RANK()   OVER (PARTITION BY department_id ORDER BY salary DESC)         AS dept_dense,
-    LAG(salary,1)  OVER (PARTITION BY department_id ORDER BY salary)              AS prev_salary,
-    LEAD(salary,1) OVER (PARTITION BY department_id ORDER BY salary)              AS next_salary,
-    FIRST_VALUE(salary) OVER (PARTITION BY department_id ORDER BY salary DESC)    AS top_in_dept
+    ROW_NUMBER()   OVER (ORDER BY salary DESC)                                 AS overall_rank,
+    RANK()         OVER (PARTITION BY department_id ORDER BY salary DESC)      AS dept_rank,
+    DENSE_RANK()   OVER (PARTITION BY department_id ORDER BY salary DESC)      AS dept_dense,
+    LAG(salary,1)  OVER (PARTITION BY department_id ORDER BY salary)           AS prev_salary,
+    LEAD(salary,1) OVER (PARTITION BY department_id ORDER BY salary)           AS next_salary,
+    FIRST_VALUE(salary) OVER (PARTITION BY department_id ORDER BY salary DESC) AS top_in_dept
 FROM employee WHERE department_id IS NOT NULL ORDER BY department_id, salary DESC;
 
 SELECT id, salary,
-    SUM(salary)  OVER (ORDER BY id ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS running_total,
-    AVG(salary)  OVER (ORDER BY id ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING)         AS moving_avg,
+    SUM(salary)    OVER (ORDER BY id ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)     AS running_total,
+    AVG(salary)    OVER (ORDER BY id ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING)             AS moving_avg,
     NTH_VALUE(salary,2) OVER (ORDER BY id ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS second_val,
-    NTILE(3)     OVER (ORDER BY salary)   AS bucket,
-    PERCENT_RANK() OVER (ORDER BY salary) AS pct_rank,
-    CUME_DIST()  OVER (ORDER BY salary)   AS cume_d
+    NTILE(3)       OVER (ORDER BY salary)  AS bucket,
+    PERCENT_RANK() OVER (ORDER BY salary)  AS pct_rank,
+    CUME_DIST()    OVER (ORDER BY salary)  AS cume_d
 FROM employee ORDER BY id;
 
 SELECT department_id,
-    SUM(budget)    OVER (PARTITION BY department_id) AS dept_budget_total,
-    COUNT(*)       OVER (PARTITION BY department_id) AS dept_proj_count,
+    SUM(budget)     OVER (PARTITION BY department_id) AS dept_budget_total,
+    COUNT(*)        OVER (PARTITION BY department_id) AS dept_proj_count,
     MAX(completion) OVER (PARTITION BY department_id) AS max_completion
 FROM project ORDER BY department_id;
 
@@ -448,9 +448,14 @@ SELECT id, name FROM department WHERE id=2 FOR SHARE;
 SHOW LOCKS;
 COMMIT;
 
--- EXPLAIN / ANALYZE
+-- EXPLAIN / ANALYZE (B-tree + Hash Index)
 EXPLAIN SELECT * FROM employee WHERE id=1;
 EXPLAIN SELECT * FROM employee WHERE department_id=1;
+-- Hash Index Scan: 등호 조건에서 idx_emp_email / idx_dept_code 자동 선택
+EXPLAIN SELECT * FROM employee WHERE email = 'alice.j@co.com';
+SELECT id, first_name, email FROM employee WHERE email = 'alice.j@co.com';
+EXPLAIN SELECT id, name FROM department WHERE code = 'ENG';
+SELECT id, name FROM department WHERE code = 'ENG';
 EXPLAIN SELECT e.first_name, d.name, p.name FROM employee e
     JOIN department d ON e.department_id=d.id
     JOIN project p ON d.id=p.department_id;
@@ -484,7 +489,7 @@ SELECT constraint_name, table_name, constraint_type FROM information_schema.tabl
 SELECT id, first_name, salary FROM employee ORDER BY salary DESC FETCH FIRST 3 ROWS ONLY;
 SELECT id, first_name, salary FROM employee ORDER BY salary ASC FETCH NEXT 3 ROWS ONLY;
 
--- JOIN USING
+-- JOIN USING / NATURAL JOIN
 CREATE TABLE tmp_dept (dept_id INT PRIMARY KEY, dept_name VARCHAR(50) NOT NULL);
 CREATE TABLE tmp_emp  (emp_name VARCHAR(50) NOT NULL, dept_id INT NOT NULL);
 INSERT INTO tmp_dept VALUES (1,'Engineering'),(2,'Marketing'),(3,'Finance');
@@ -556,6 +561,8 @@ DROP INDEX IF EXISTS idx_emp_dept_sal;
 DROP INDEX IF EXISTS idx_proj_dept;
 DROP INDEX IF EXISTS idx_proj_status;
 DROP INDEX IF EXISTS idx_proj_dates;
+DROP INDEX IF EXISTS idx_emp_email;
+DROP INDEX IF EXISTS idx_dept_code;
 DROP TABLE IF EXISTS project;
 DROP TABLE IF EXISTS employee;
 DROP TABLE IF EXISTS department;

@@ -8,6 +8,7 @@ use crate::parser::ast::*;
 use crate::engine::executor::{Row, TableStats};
 use crate::catalog::schema::Catalog;
 use crate::storage::composite_index::CompositeIndex;
+use crate::storage::hash_index::HashIndex;
 
 // ── Range operator ────────────────────────────────────────────────────────
 
@@ -33,6 +34,7 @@ pub enum AccessPath {
     SecondaryPoint { index_key: String, col: String, key: String },
     SecondaryRange { index_key: String, col: String, op: RangeOp, key: String },
     CompositeIndex { index_name: String },
+    HashPoint { index_key: String, col: String, key: String },
 }
 
 // ── Join algorithm ────────────────────────────────────────────────────────
@@ -85,6 +87,8 @@ pub struct Planner<'a> {
     indexes:           &'a HashMap<String, crate::storage::btree::BPlusTree>,
     index_meta:        &'a HashMap<String, (String, String)>,
     composite_indexes: &'a HashMap<String, CompositeIndex>,
+    hash_indexes:      &'a HashMap<String, HashIndex>,
+    hash_index_meta:   &'a HashMap<String, (String, String)>,
     catalog:           &'a Catalog,
     table_stats:       &'a HashMap<String, TableStats>,
 }
@@ -95,10 +99,12 @@ impl<'a> Planner<'a> {
         indexes:           &'a HashMap<String, crate::storage::btree::BPlusTree>,
         index_meta:        &'a HashMap<String, (String, String)>,
         composite_indexes: &'a HashMap<String, CompositeIndex>,
+        hash_indexes:      &'a HashMap<String, HashIndex>,
+        hash_index_meta:   &'a HashMap<String, (String, String)>,
         catalog:           &'a Catalog,
         table_stats:       &'a HashMap<String, TableStats>,
     ) -> Self {
-        Self { tables, indexes, index_meta, composite_indexes, catalog, table_stats }
+        Self { tables, indexes, index_meta, composite_indexes, hash_indexes, hash_index_meta, catalog, table_stats }
     }
 
     pub fn plan(&self, table: &str, condition: &Option<CondExpr>, joins: &[Join]) -> SelectPlan {
@@ -162,10 +168,20 @@ impl<'a> Planner<'a> {
             if let ArithExpr::Col(col_full) = &cond.left {
                 let col = col_full.split('.').last().unwrap_or(col_full);
                 if pk == Some(col) {
-                    if let Some(path) = self.pk_access(cond) { return path; }
+                    if let Some(path) = self.pk_access(cond, table) { return path; }
+                }
+                // Hash Index: 등호 조건에서 B+Tree보다 우선
+                if cond.operator == Operator::Eq {
+                    if let ConditionValue::Literal(k) = &cond.value {
+                        if !self.is_col_ref_in_context(k, table) {
+                            if let Some(idx_key) = self.find_hash_index(table, col) {
+                                return AccessPath::HashPoint { index_key: idx_key, col: col.to_string(), key: k.clone() };
+                            }
+                        }
+                    }
                 }
                 if let Some(idx_key) = self.find_secondary_index(table, col) {
-                    if let Some(path) = self.secondary_access(idx_key, col, cond) { return path; }
+                    if let Some(path) = self.secondary_access(idx_key, col, cond, table) { return path; }
                 }
             }
         }
@@ -182,42 +198,57 @@ impl<'a> Planner<'a> {
         AccessPath::SeqScan
     }
 
-    fn pk_access(&self, cond: &Condition) -> Option<AccessPath> {
+    fn pk_access(&self, cond: &Condition, table: &str) -> Option<AccessPath> {
         Some(match (&cond.operator, &cond.value) {
-            (Operator::Eq,      ConditionValue::Literal(k)) if !Self::is_col_ref(k) => AccessPath::PkPoint { key: k.clone() },
+            (Operator::Eq,      ConditionValue::Literal(k)) if !self.is_col_ref_in_context(k, table) => AccessPath::PkPoint { key: k.clone() },
             (Operator::Between, ConditionValue::Between(a, b)) => AccessPath::PkBetween { start: a.clone(), end: b.clone() },
-            (Operator::Gt,      ConditionValue::Literal(k)) if !Self::is_col_ref(k) => AccessPath::PkRange { op: RangeOp::Gt,  key: k.clone() },
-            (Operator::Gte,     ConditionValue::Literal(k)) if !Self::is_col_ref(k) => AccessPath::PkRange { op: RangeOp::Gte, key: k.clone() },
-            (Operator::Lt,      ConditionValue::Literal(k)) if !Self::is_col_ref(k) => AccessPath::PkRange { op: RangeOp::Lt,  key: k.clone() },
-            (Operator::Lte,     ConditionValue::Literal(k)) if !Self::is_col_ref(k) => AccessPath::PkRange { op: RangeOp::Lte, key: k.clone() },
+            (Operator::Gt,      ConditionValue::Literal(k)) if !self.is_col_ref_in_context(k, table) => AccessPath::PkRange { op: RangeOp::Gt,  key: k.clone() },
+            (Operator::Gte,     ConditionValue::Literal(k)) if !self.is_col_ref_in_context(k, table) => AccessPath::PkRange { op: RangeOp::Gte, key: k.clone() },
+            (Operator::Lt,      ConditionValue::Literal(k)) if !self.is_col_ref_in_context(k, table) => AccessPath::PkRange { op: RangeOp::Lt,  key: k.clone() },
+            (Operator::Lte,     ConditionValue::Literal(k)) if !self.is_col_ref_in_context(k, table) => AccessPath::PkRange { op: RangeOp::Lte, key: k.clone() },
             _ => return None,
         })
     }
 
-    fn secondary_access(&self, index_key: String, col: &str, cond: &Condition) -> Option<AccessPath> {
+    fn secondary_access(&self, index_key: String, col: &str, cond: &Condition, table: &str) -> Option<AccessPath> {
         Some(match (&cond.operator, &cond.value) {
-            (Operator::Eq,  ConditionValue::Literal(k)) if !Self::is_col_ref(k) =>
+            (Operator::Eq,  ConditionValue::Literal(k)) if !self.is_col_ref_in_context(k, table) =>
                 AccessPath::SecondaryPoint { index_key, col: col.to_string(), key: k.clone() },
-            (Operator::Gt,  ConditionValue::Literal(k)) if !Self::is_col_ref(k) =>
+            (Operator::Gt,  ConditionValue::Literal(k)) if !self.is_col_ref_in_context(k, table) =>
                 AccessPath::SecondaryRange { index_key, col: col.to_string(), op: RangeOp::Gt,  key: k.clone() },
-            (Operator::Gte, ConditionValue::Literal(k)) if !Self::is_col_ref(k) =>
+            (Operator::Gte, ConditionValue::Literal(k)) if !self.is_col_ref_in_context(k, table) =>
                 AccessPath::SecondaryRange { index_key, col: col.to_string(), op: RangeOp::Gte, key: k.clone() },
-            (Operator::Lt,  ConditionValue::Literal(k)) if !Self::is_col_ref(k) =>
+            (Operator::Lt,  ConditionValue::Literal(k)) if !self.is_col_ref_in_context(k, table) =>
                 AccessPath::SecondaryRange { index_key, col: col.to_string(), op: RangeOp::Lt,  key: k.clone() },
-            (Operator::Lte, ConditionValue::Literal(k)) if !Self::is_col_ref(k) =>
+            (Operator::Lte, ConditionValue::Literal(k)) if !self.is_col_ref_in_context(k, table) =>
                 AccessPath::SecondaryRange { index_key, col: col.to_string(), op: RangeOp::Lte, key: k.clone() },
             _ => return None,
         })
     }
 
-    /// Returns true if `k` looks like a column reference (bare identifier, not a number literal).
-    fn is_col_ref(k: &str) -> bool {
-        k.chars().next().map(|c| c.is_alphabetic() || c == '_').unwrap_or(false)
+    /// Returns true if `k` is a column reference (not a literal value).
+    /// Dotted references (e.g. `t2.col`) are always column refs.
+    /// Bare alphabetic identifiers are checked against the table's catalog columns.
+    fn is_col_ref_in_context(&self, k: &str, table: &str) -> bool {
+        if k.contains('.') { return true; }
+        if k.chars().next().map(|c| c.is_alphabetic() || c == '_').unwrap_or(false)
             && k.parse::<f64>().is_err()
+        {
+            return self.catalog.get_table(table)
+                .map(|s| s.columns.iter().any(|c| c.name.eq_ignore_ascii_case(k)))
+                .unwrap_or(false);
+        }
+        false
     }
 
     fn find_secondary_index(&self, table: &str, col: &str) -> Option<String> {
         self.index_meta.iter()
+            .find(|(_, (t, c))| t == table && c == col)
+            .map(|(name, _)| format!("{}_{}", table, name))
+    }
+
+    fn find_hash_index(&self, table: &str, col: &str) -> Option<String> {
+        self.hash_index_meta.iter()
             .find(|(_, (t, c))| t == table && c == col)
             .map(|(name, _)| format!("{}_{}", table, name))
     }
@@ -288,7 +319,8 @@ impl<'a> Planner<'a> {
     pub fn estimate_rows(&self, total: usize, access: &AccessPath) -> usize {
         match access {
             AccessPath::SeqScan                                   => total,
-            AccessPath::PkPoint { .. } | AccessPath::CompositeIndex { .. } => 1,
+            AccessPath::PkPoint { .. } | AccessPath::CompositeIndex { .. }
+            | AccessPath::HashPoint { .. }                        => 1,
             AccessPath::PkBetween { .. } | AccessPath::PkRange { .. }
             | AccessPath::SecondaryRange { .. }                   => (total / 4).max(1),
             AccessPath::SecondaryPoint { index_key, col, .. } => {
@@ -319,6 +351,7 @@ impl<'a> Planner<'a> {
             AccessPath::SecondaryPoint { .. } => log_n * 2.0,
             AccessPath::SecondaryRange { .. } => log_n * 2.0 + n / 4.0,
             AccessPath::CompositeIndex { .. } => log_n,
+            AccessPath::HashPoint { .. }      => 1.0, // O(1)
         }
     }
 
@@ -365,6 +398,7 @@ impl<'a> Planner<'a> {
             AccessPath::SecondaryPoint { index_key, col, key }    => format!("Index Scan  {} ({} = {})", index_key, col, key),
             AccessPath::SecondaryRange { index_key, col, op, key }=> format!("Index Range  {} ({} {} {})", index_key, col, op.label(), key),
             AccessPath::CompositeIndex { index_name }             => format!("Composite Index  {}", index_name),
+            AccessPath::HashPoint { index_key, col, key }         => format!("Hash Index Scan  {} ({} = {})", index_key, col, key),
         }
     }
 
