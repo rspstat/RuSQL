@@ -18,7 +18,7 @@ pub struct BufferPool {
     /// LRU 순서 추적 (앞 = 최근, 뒤 = 오래됨)
     lru_queue: VecDeque<String>,
     /// 최대 캐시 크기
-    capacity: usize,
+    pub capacity: usize,
     /// 통계
     pub hit_count: u64,
     pub miss_count: u64,
@@ -57,7 +57,7 @@ impl BufferPool {
         // 캐시 미스 → 디스크에서 로드
         self.miss_count += 1;
         let rows = disk.load_table(table_name);
-        self.load_page(table_name.to_string(), rows.clone(), false);
+        self.load_page(table_name.to_string(), rows.clone(), false, Some(disk));
         rows
     }
 
@@ -69,7 +69,7 @@ impl BufferPool {
             page.rows = rows;
             page.is_dirty = true;
         } else {
-            self.load_page(table_name.to_string(), rows, true);
+            self.load_page(table_name.to_string(), rows, true, None);
         }
     }
 
@@ -116,11 +116,17 @@ impl BufferPool {
     }
 
     /// 캐시에 페이지 로드 (LRU 관리 포함)
-    fn load_page(&mut self, table_name: String, rows: Vec<Row>, is_dirty: bool) {
-        // 용량 초과 시 LRU 제거
+    /// disk가 Some이면 eviction 대상이 dirty일 때 디스크에 flush 후 제거한다.
+    fn load_page(&mut self, table_name: String, rows: Vec<Row>, is_dirty: bool, disk: Option<&DiskManager>) {
         while self.cache.len() >= self.capacity {
             if let Some(evict) = self.lru_queue.pop_back() {
-                // dirty 페이지는 제거 전 flush 필요 (여기선 단순히 제거)
+                if let Some(page) = self.cache.get(&evict) {
+                    if page.is_dirty {
+                        if let Some(d) = disk {
+                            d.save_table(&evict, &page.rows);
+                        }
+                    }
+                }
                 self.cache.remove(&evict);
             }
         }

@@ -24,8 +24,8 @@
 |---|:---:|:---:|---|:---:|
 | ~~**Hash Index**~~ | ✅ 완료 | — | `USING HASH` 구문, 등호 O(1), 플래너 우선 선택, EXPLAIN 표시 | ★★★ |
 | **병렬 실행 확장** | 중 | 4일 | 집계 map-reduce(SUM/COUNT/AVG chunk별 partial→merge) + Hash Join probe 병렬화 → 코어 수 비례 스케일 | ★★★ |
-| **히스토그램 통계** | 중 | 3일 | 컬럼 값 분포 기반 selectivity 추정 → 조인 순서·인덱스 선택 품질 향상, 잘못된 Full Scan 감소 | ★★★ |
-| **Buffer Pool 개선** | 중 | 3일 | LRU → Clock-Pro 교체 + SeqScan read-ahead + dirty page 배치 writeback → I/O bound 워크로드 개선 | ★★ |
+| ~~**히스토그램 통계**~~ | ✅ 완료 | — | equi-depth 10-bucket, ANALYZE TABLE 빌드, 플래너 selectivity 추정 적용 | ★★★ |
+| **Buffer Pool 개선** | 중 | 3일 | dirty 페이지 eviction 버그 수정 완료 / LRU → Clock-Pro 교체 + SeqScan read-ahead 미구현 | ★★ |
 | **GAP Lock / Next-key Lock** | 중 | 3일 | Serializable 팬텀 리드 실제 방지, 현재 행 수 비교 방식 교체 | ★★ |
 | **MVCC 버전 체인** | 상 | 8일+ | 읽기·쓰기 잠금 충돌 제거 → 동시 접속 TPS 대폭 향상, SSI 선행 조건 | ★★ |
 
@@ -33,12 +33,40 @@
 
 ## 📊 성능 측정
 
-| 항목 | 난이도 | 예상 기간 | 효과 | 우선순위 |
-|---|:---:|:---:|---|:---:|
-| **벤치마크 스크립트 작성** | 하 | 2일 | INSERT TPS / SELECT / 동시 접속 — MySQL과 수치 비교 기반 마련 | ★★★ |
-| **RustDB vs MySQL 차트** | 하 | 1일 | matplotlib 시각화, 발표 자료 임팩트 | ★★★ |
-| **Hash Index 전후 비교** | 하 | 0.5일 | Hash Index 구현과 묶어 등호 검색 속도 개선 수치 증명 | ★★ |
-| **병렬 스케일링 그래프** | 하 | 0.5일 | 코어 수(1/2/4/8) 대비 처리량 — "왜 Rust" 직접 증명 | ★★ |
+### 측정 항목
+
+| 항목 | 측정 방법 | 발표 포인트 | 우선순위 |
+|---|---|---|:---:|
+| **INSERT TPS** | 1만 행 bulk insert 소요 시간 | RustDB vs MySQL 수치 비교 | ★★★ |
+| **SELECT — 등호 (Hash/B-tree/SeqScan)** | 동일 쿼리, 인덱스 종류별 응답 시간 | Hash Index O(1) 효과 증명 | ★★★ |
+| **SELECT — 범위 (히스토그램 전/후)** | ANALYZE 전·후 EXPLAIN est_rows 비교 | 플래너 selectivity 개선 증명 | ★★★ |
+| **병렬 스케일링** | 코어 수(1/2/4) 대비 집계 처리량 | "왜 Rust" — 선형 스케일 증명 | ★★★ |
+| **동시 접속 TPS** | 다중 클라이언트 동시 쿼리 | 서버 처리량 한계 측정 | ★★ |
+
+### 기술 스택
+
+```
+rustdb-server (포트 7878)  ←──┐
+                               Python 벤치마크 스크립트 ──→ matplotlib 차트
+MySQL (포트 3306)          ←──┘
+```
+
+- **RustDB 접속**: `socket` TCP (AUTH + SQL 프로토콜)
+- **MySQL 접속**: `mysql-connector-python`
+- **시각화**: `matplotlib` bar chart / line chart
+
+### 진행 순서
+
+1. MySQL 설치 확인 (비교 대상)
+2. Python 벤치마크 스크립트 작성 (`code/bench/bench.py`)
+3. 측정 실행 → JSON 결과 저장
+4. 차트 생성 스크립트 작성 (`code/bench/chart.py`)
+5. 발표 자료용 PNG 출력
+
+| 스크립트 | 역할 | 난이도 | 예상 기간 |
+|---|---|:---:|:---:|
+| `bench.py` | 양쪽 TPS/latency 측정, JSON 저장 | 하 | 1일 |
+| `chart.py` | matplotlib 시각화, PNG 출력 | 하 | 0.5일 |
 
 ---
 

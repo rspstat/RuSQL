@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use rayon::prelude::*;
 use crate::parser::ast::{CondExpr, ArithExpr, ConditionValue, JoinType, Join, Operator};
 
 type Row = HashMap<String, String>;
@@ -155,41 +156,42 @@ pub fn hash_join(
         hash.entry(key).or_default().push(r.clone());
     }
 
-    let mut out = Vec::new();
+    // Probe phase: Inner/Left는 read-only 해시맵 조회로 각 행이 독립적 → par_iter 병렬화
+    let probe_suffix = format!(".{}", probe_col);
     match join_type {
         JoinType::Inner => {
-            for l in left {
+            left.par_iter().flat_map(|l| {
                 let pk = l.get(probe_col)
-                    .or_else(|| l.iter().find(|(k, _)| k.ends_with(&format!(".{}", probe_col))).map(|(_, v)| v))
+                    .or_else(|| l.iter().find(|(k, _)| k.ends_with(&probe_suffix)).map(|(_, v)| v))
                     .cloned()
                     .unwrap_or_default();
-                if let Some(matches) = hash.get(&pk) {
-                    for r in matches {
+                hash.get(&pk)
+                    .map(|matches| matches.iter().map(|r| {
                         let mut merged = l.clone();
                         merge_right(&mut merged, r, table);
-                        out.push(merged);
-                    }
-                }
-            }
+                        merged
+                    }).collect::<Vec<_>>())
+                    .unwrap_or_default()
+            }).collect()
         }
         JoinType::Left => {
-            for l in left {
+            left.par_iter().flat_map(|l| {
                 let pk = l.get(probe_col)
-                    .or_else(|| l.iter().find(|(k, _)| k.ends_with(&format!(".{}", probe_col))).map(|(_, v)| v))
+                    .or_else(|| l.iter().find(|(k, _)| k.ends_with(&probe_suffix)).map(|(_, v)| v))
                     .cloned()
                     .unwrap_or_default();
                 if let Some(matches) = hash.get(&pk) {
-                    for r in matches {
+                    matches.iter().map(|r| {
                         let mut merged = l.clone();
                         merge_right(&mut merged, r, table);
-                        out.push(merged);
-                    }
+                        merged
+                    }).collect::<Vec<_>>()
                 } else {
                     let mut merged = l.clone();
                     null_right(&mut merged, right_schema_cols, table);
-                    out.push(merged);
+                    vec![merged]
                 }
-            }
+            }).collect()
         }
         JoinType::Right => {
             let mut left_hash: HashMap<String, Vec<Row>> = HashMap::new();
@@ -200,6 +202,7 @@ pub fn hash_join(
             let left_cols: Vec<String> = left.first()
                 .map(|r| r.keys().filter(|k| !k.starts_with('_') && !k.contains('.')).cloned().collect())
                 .unwrap_or_default();
+            let mut out = Vec::new();
             for r in right {
                 let key = r.get(build_col).cloned().unwrap_or_default();
                 if let Some(lefts) = left_hash.get(&key) {
@@ -214,10 +217,10 @@ pub fn hash_join(
                     out.push(merged);
                 }
             }
+            out
         }
         _ => unreachable!("Cross/Natural joins do not use Hash Join"),
     }
-    out
 }
 
 /// Nested Loop Join (기본 알고리즘). Cross/Natural/FullOuter 및 비등가 조인 포함.

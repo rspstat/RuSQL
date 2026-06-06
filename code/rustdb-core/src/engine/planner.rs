@@ -156,7 +156,7 @@ impl<'a> Planner<'a> {
         let total    = self.table_size(table);
         let pk       = self.pk_col(table);
         let access   = self.choose_access(table, condition, pk.as_deref());
-        let est_rows = self.estimate_rows(total, &access);
+        let est_rows = self.estimate_rows(total, &access, table);
         let est_cost = self.estimate_cost(total, &access);
         TablePlan { table: table.to_string(), access, filter: condition.clone(), est_rows, est_cost, is_covering: false }
     }
@@ -316,28 +316,70 @@ impl<'a> Planner<'a> {
             .and_then(|s| s.columns.iter().find(|c| c.primary_key).map(|c| c.name.clone()))
     }
 
-    pub fn estimate_rows(&self, total: usize, access: &AccessPath) -> usize {
+    pub fn estimate_rows(&self, total: usize, access: &AccessPath, table: &str) -> usize {
         match access {
             AccessPath::SeqScan                                   => total,
             AccessPath::PkPoint { .. } | AccessPath::CompositeIndex { .. }
             | AccessPath::HashPoint { .. }                        => 1,
-            AccessPath::PkBetween { .. } | AccessPath::PkRange { .. }
-            | AccessPath::SecondaryRange { .. }                   => (total / 4).max(1),
+            AccessPath::PkRange { op, key } => {
+                let sel = self.pk_col(table)
+                    .map(|pk| self.histogram_sel_range(table, &pk, op, key))
+                    .unwrap_or(0.25);
+                ((total as f64 * sel) as usize).max(1)
+            }
+            AccessPath::PkBetween { start, end } => {
+                let sel = self.pk_col(table)
+                    .map(|pk| self.histogram_sel_between(table, &pk, start, end))
+                    .unwrap_or(0.25);
+                ((total as f64 * sel) as usize).max(1)
+            }
+            AccessPath::SecondaryRange { col, op, key, .. } => {
+                let sel = self.histogram_sel_range(table, col, op, key);
+                ((total as f64 * sel) as usize).max(1)
+            }
             AccessPath::SecondaryPoint { index_key, col, .. } => {
                 // Use real cardinality from ANALYZE TABLE stats when available.
                 // index_key is "{table}_{index_name}"; table is the prefix before "_idx_".
-                let table = index_key.split("_idx_").next()
+                let tbl = index_key.split("_idx_").next()
                     .unwrap_or(index_key.split('_').next().unwrap_or(""));
-                if let Some(ts) = self.table_stats.get(table) {
+                if let Some(ts) = self.table_stats.get(tbl) {
                     if let Some(cs) = ts.columns.get(col) {
                         if cs.distinct_count > 0 {
                             return (total / cs.distinct_count).max(1);
                         }
                     }
                 }
-                (total / 10).max(1) // fallback if no stats
+                (total / 10).max(1)
             }
         }
+    }
+
+    /// Selectivity estimate for a range condition using the equi-depth histogram.
+    /// Returns a fraction in [0.01, 1.0]. Falls back to 0.25 when no histogram exists.
+    fn histogram_sel_range(&self, table: &str, col: &str, op: &RangeOp, key: &str) -> f64 {
+        let hist = match self.table_stats.get(table).and_then(|ts| ts.columns.get(col)) {
+            Some(cs) if !cs.histogram.is_empty() => &cs.histogram,
+            _ => return 0.25,
+        };
+        let n = hist.len() as f64;
+        let key_f = key.parse::<f64>();
+        // Count buckets whose upper bound satisfies the comparison direction.
+        let gt_count = hist.iter().filter(|bound| match (&key_f, bound.parse::<f64>()) {
+            (Ok(kv), Ok(bv)) => bv > *kv,
+            _ => bound.as_str() > key,
+        }).count() as f64;
+        let lte_count = n - gt_count;
+        match op {
+            RangeOp::Gt | RangeOp::Gte => (gt_count / n).max(0.01),
+            RangeOp::Lt | RangeOp::Lte => (lte_count / n).max(0.01),
+        }
+    }
+
+    /// Selectivity for BETWEEN [lo, hi] = sel(<= hi) - sel(< lo).
+    fn histogram_sel_between(&self, table: &str, col: &str, lo: &str, hi: &str) -> f64 {
+        let sel_lte_hi = self.histogram_sel_range(table, col, &RangeOp::Lte, hi);
+        let sel_lt_lo  = self.histogram_sel_range(table, col, &RangeOp::Lt,  lo);
+        (sel_lte_hi - sel_lt_lo).max(0.01)
     }
 
     pub fn estimate_cost(&self, total: usize, access: &AccessPath) -> f64 {

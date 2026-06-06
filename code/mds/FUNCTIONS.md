@@ -238,7 +238,7 @@
 - [x] SHOW PROCESSLIST (현재 세션 정보 표시)
 - [x] CHECKPOINT (수동 체크포인트)
 - [x] VACUUM (dead row 물리 제거)
-- [x] ANALYZE TABLE (컬럼별 통계 수집 — distinct count / null count / min / max, 옵티마이저 선택도 추정에 반영)
+- [x] ANALYZE TABLE (컬럼별 통계 수집 — distinct count / null count / min / max / equi-depth 히스토그램 10-bucket, p25/p50/p75 표시, 플래너 PkRange·PkBetween·SecondaryRange selectivity 추정에 반영)
 - [x] BACKUP [DATABASE db] [INTO 'file'] — mysqldump 스타일 SQL 덤프 생성 (DROP TABLE IF EXISTS + CREATE TABLE + INSERT)
 
 ### SQL 문법

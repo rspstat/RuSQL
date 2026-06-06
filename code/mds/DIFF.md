@@ -226,7 +226,7 @@
 | 항목 | MySQL | PostgreSQL | Oracle | RustDB |
 |------|-------|------------|--------|--------|
 | 비용 기반 최적화 (CBO) | ✓ | ✓ | ✓ | ✓ |
-| 통계 기반 선택도 | ✓ (histogram) | ✓ (pg_statistic) | ✓ (DBMS_STATS) | ✓ (ANALYZE TABLE) |
+| 통계 기반 선택도 | ✓ (histogram) | ✓ (pg_statistic) | ✓ (DBMS_STATS) | ✓ (ANALYZE TABLE — equi-depth 히스토그램 10-bucket, PkRange·PkBetween·SecondaryRange selectivity 추정) |
 | 인덱스 자동 선택 | ✓ | ✓ | ✓ | ✓ |
 | JOIN 알고리즘 | NestedLoop, Hash, BNL | NestedLoop, Hash, MergeJoin | NestedLoop, Hash, SortMerge | NestedLoop, Hash, SortMerge |
 | JOIN 순서 최적화 | ✓ (동적 프로그래밍) | ✓ (Geqo + 동적 프로그래밍) | ✓ (동적 프로그래밍) | ✓ (System-R bitmask DP, INNER 한정 · 그리디 폴백) |

@@ -459,8 +459,30 @@ SELECT id, name FROM department WHERE code = 'ENG';
 EXPLAIN SELECT e.first_name, d.name, p.name FROM employee e
     JOIN department d ON e.department_id=d.id
     JOIN project p ON d.id=p.department_id;
+
+-- Histogram Statistics
+-- ANALYZE TABLE 실행: 컬럼별 distinct/null/min/max + p25/p50/p75 히스토그램 수집
 ANALYZE TABLE department;
 ANALYZE TABLE employee;
+ANALYZE TABLE project;
+
+-- 히스토그램 기반 selectivity 검증: salary 단일 인덱스 추가 후 범위 쿼리 EXPLAIN
+-- ANALYZE 전에는 est_rows = total/4(고정), ANALYZE 후에는 히스토그램 버킷 카운팅으로 추정
+CREATE INDEX idx_emp_salary ON employee (salary);
+
+-- SecondaryRange — salary 히스토그램으로 selectivity 추정
+EXPLAIN SELECT * FROM employee WHERE salary > 100000;
+EXPLAIN SELECT * FROM employee WHERE salary < 80000;
+EXPLAIN SELECT * FROM employee WHERE salary >= 80000;
+
+-- PkRange / PkBetween — PK(id) 히스토그램 사용
+EXPLAIN SELECT * FROM employee WHERE id > 8;
+EXPLAIN SELECT * FROM employee WHERE id BETWEEN 3 AND 9;
+
+-- SecondaryRange on department_id (idx_emp_dept)
+EXPLAIN SELECT * FROM employee WHERE department_id > 2;
+
+-- EXPLAIN ANALYZE: 실제 실행 시간 + 히스토그램 est_rows 비교
 EXPLAIN ANALYZE SELECT * FROM employee WHERE department_id=1 AND salary >= 80000;
 
 -- Views: Usage
@@ -561,6 +583,7 @@ DROP INDEX IF EXISTS idx_emp_dept_sal;
 DROP INDEX IF EXISTS idx_proj_dept;
 DROP INDEX IF EXISTS idx_proj_status;
 DROP INDEX IF EXISTS idx_proj_dates;
+DROP INDEX IF EXISTS idx_emp_salary;
 DROP INDEX IF EXISTS idx_emp_email;
 DROP INDEX IF EXISTS idx_dept_code;
 DROP TABLE IF EXISTS project;

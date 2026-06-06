@@ -95,7 +95,12 @@ pub struct ColumnStats {
     pub null_count: usize,
     pub min_val: Option<String>,
     pub max_val: Option<String>,
+    /// Equi-depth histogram: NUM_HISTOGRAM_BUCKETS upper-bound values (sorted).
+    /// Each bucket covers ~1/N of the rows so counting buckets gives selectivity.
+    pub histogram: Vec<String>,
 }
+
+const NUM_HISTOGRAM_BUCKETS: usize = 10;
 
 #[derive(Debug, Clone, Default)]
 pub struct TableStats {
@@ -2405,7 +2410,7 @@ impl Executor {
                 group_data.entry(key).or_default().push(row.clone());
             }
 
-            let mut group_rows: Vec<Row> = group_order.iter().map(|key| {
+            let mut group_rows: Vec<Row> = group_order.par_iter().map(|key| {
                 let grp = &group_data[key];
                 let mut out = Row::new();
                 for (col, val) in group_cols.iter().zip(key.iter()) {
@@ -2600,13 +2605,22 @@ impl Executor {
                     agg_results.push((label, strs.join(separator)));
                     continue;
                 }
-                let vals: Vec<f64> = result.iter()
-                    .filter_map(|r| {
-                        if col_name == "*" { Some(1.0) }
-                        else { r.get(col_name.as_str())?.parse::<f64>().ok() }
-                    })
-                    .collect();
                 let col_name_str = col_name.as_str();
+                let vals: Vec<f64> = if parallel_enabled() && result.len() >= PARALLEL_MIN_ROWS {
+                    result.par_iter()
+                        .filter_map(|r| {
+                            if col_name_str == "*" { Some(1.0) }
+                            else { r.get(col_name_str)?.parse::<f64>().ok() }
+                        })
+                        .collect()
+                } else {
+                    result.iter()
+                        .filter_map(|r| {
+                            if col_name_str == "*" { Some(1.0) }
+                            else { r.get(col_name_str)?.parse::<f64>().ok() }
+                        })
+                        .collect()
+                };
                 let distinct_vals_g = |rows: &[Row]| -> Vec<f64> {
                     let seen: HashSet<String> = rows.iter()
                         .filter_map(|r| r.get(col_name_str).filter(|v| v.as_str() != NULL_VALUE).cloned())
@@ -6514,7 +6528,7 @@ impl Executor {
         output.push_str("| 항목                 | 값      |\n");
         output.push_str(&format!("{}\n", sep));
         output.push_str(&format!("| 캐시 사용량          | {:7} |\n", s.buffer_pool.usage()));
-        output.push_str(&format!("| 최대 용량            | {:7} |\n", 64));
+        output.push_str(&format!("| 최대 용량            | {:7} |\n", s.buffer_pool.capacity));
         output.push_str(&format!("| 캐시 히트            | {:7} |\n", s.buffer_pool.hit_count));
         output.push_str(&format!("| 캐시 미스            | {:7} |\n", s.buffer_pool.miss_count));
         output.push_str(&format!("| 적중률               | {:6.1}% |\n", s.buffer_pool.hit_rate()));
@@ -6658,6 +6672,7 @@ impl Executor {
                 null_count: *null_cnt.get(col).unwrap_or(&0),
                 min_val: min_map.get(col).cloned(),
                 max_val: max_map.get(col).cloned(),
+                histogram: Vec::new(),
             });
         }
         // columns that are all-NULL have no distinct entry
@@ -6667,36 +6682,96 @@ impl Executor {
                 null_count: *cnt,
                 min_val: None,
                 max_val: None,
+                histogram: Vec::new(),
             });
+        }
+
+        // Second pass: collect all non-null values per column → build equi-depth histogram
+        let mut col_all_values: HashMap<String, Vec<String>> = HashMap::new();
+        for row in &rows {
+            for (key, val) in row.iter() {
+                if key.starts_with('_') { continue; }
+                let col = key.rsplit('.').next().unwrap_or(key).to_string();
+                if val != NULL_VALUE && !val.is_empty() {
+                    col_all_values.entry(col).or_default().push(val.clone());
+                }
+            }
+        }
+        for (col, mut vals) in col_all_values {
+            if vals.len() < 2 { continue; }
+            let is_numeric = vals.iter().take(20).all(|v| v.parse::<f64>().is_ok());
+            if is_numeric {
+                vals.sort_by(|a, b| {
+                    a.parse::<f64>().unwrap_or(0.0)
+                        .partial_cmp(&b.parse::<f64>().unwrap_or(0.0))
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
+            } else {
+                vals.sort();
+            }
+            let n_buckets = NUM_HISTOGRAM_BUCKETS.min(vals.len());
+            let bucket_size = vals.len() / n_buckets;
+            let mut boundaries: Vec<String> = (1..=n_buckets)
+                .map(|i| vals[(i * bucket_size - 1).min(vals.len() - 1)].clone())
+                .collect();
+            // Ensure last boundary is the actual max
+            if let Some(last) = boundaries.last_mut() {
+                *last = vals[vals.len() - 1].clone();
+            }
+            if let Some(cs) = col_stats.get_mut(&col) {
+                cs.histogram = boundaries;
+            }
         }
 
         let table_display = self.display_name(&table).to_string();
         s.table_stats.insert(table.clone(), TableStats { total_rows: total, columns: col_stats.clone() });
 
         // Build output table
+        // Columns: column | distinct | nulls | min | max | p25 | p50 | p75
         let schema = s.catalog.get_table(&table);
         let col_order: Vec<String> = schema
             .map(|sc| sc.columns.iter().map(|c| c.name.clone()).collect())
             .unwrap_or_else(|| { let mut v: Vec<String> = col_stats.keys().cloned().collect(); v.sort(); v });
 
-        let width = 50usize;
-        let bar = format!("+{}+", "-".repeat(width));
-        let header = format!("| {:<width$}|", format!("ANALYZE: {} ({} rows)", table_display, total), width = width - 1);
-        let col_header = format!("| {:<12} | {:>8} | {:>8} | {:<10} | {:<10} |",
-            "column", "distinct", "nulls", "min", "max");
-        let col_bar = "+".to_string() + &"-".repeat(14) + "+" + &"-".repeat(10) + "+" + &"-".repeat(10) + "+" + &"-".repeat(12) + "+" + &"-".repeat(12) + "+";
+        let col_bar = "+".to_string()
+            + &"-".repeat(14) + "+" + &"-".repeat(10) + "+" + &"-".repeat(10) + "+"
+            + &"-".repeat(12) + "+" + &"-".repeat(12) + "+"
+            + &"-".repeat(12) + "+" + &"-".repeat(12) + "+" + &"-".repeat(12) + "+";
+        // inner width = 103 - 2 = 101
+        let inner_width = col_bar.len() - 2;
+        let bar = format!("+{}+", "-".repeat(inner_width));
+        let header = format!("| {:<inner$}|",
+            format!("ANALYZE: {} ({} rows)", table_display, total),
+            inner = inner_width - 1);
+        let col_header = format!(
+            "| {:<12} | {:>8} | {:>8} | {:<10} | {:<10} | {:<10} | {:<10} | {:<10} |",
+            "column", "distinct", "nulls", "min", "max", "p25", "p50", "p75");
 
         let mut lines = vec![bar.clone(), header, bar.clone(), col_header, col_bar.clone()];
         for col in &col_order {
             if let Some(cs) = col_stats.get(col) {
                 let min_s = cs.min_val.as_deref().unwrap_or("NULL");
                 let max_s = cs.max_val.as_deref().unwrap_or("NULL");
-                lines.push(format!("| {:<12} | {:>8} | {:>8} | {:<10} | {:<10} |",
+                let min_t = if min_s.len() > 10 { &min_s[..10] } else { min_s };
+                let max_t = if max_s.len() > 10 { &max_s[..10] } else { max_s };
+                // histogram bucket at p25/p50/p75 percentile indices
+                let hist = &cs.histogram;
+                let p_bucket = |pct: usize| -> String {
+                    if hist.is_empty() { return "-".to_string(); }
+                    let idx = ((hist.len() * pct / 100).saturating_sub(1)).min(hist.len() - 1);
+                    let s = &hist[idx];
+                    if s.len() > 10 { s[..10].to_string() } else { s.clone() }
+                };
+                lines.push(format!(
+                    "| {:<12} | {:>8} | {:>8} | {:<10} | {:<10} | {:<10} | {:<10} | {:<10} |",
                     if col.len() > 12 { &col[..12] } else { col },
                     cs.distinct_count,
                     cs.null_count,
-                    if min_s.len() > 10 { &min_s[..10] } else { min_s },
-                    if max_s.len() > 10 { &max_s[..10] } else { max_s },
+                    min_t,
+                    max_t,
+                    p_bucket(25),
+                    p_bucket(50),
+                    p_bucket(75),
                 ));
             }
         }
