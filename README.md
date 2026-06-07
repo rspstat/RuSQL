@@ -8,10 +8,10 @@
 
 | 분류 | 내용 |
 |------|------|
-| DB 엔진 | B+Tree, WAL, Buffer Pool, MVCC, 트랜잭션, 비용 기반 옵티마이저, 저장 프로시저·트리거·UDF 영속화 |
+| DB 엔진 | B+Tree, WAL, Buffer Pool, MVCC, 트랜잭션, 비용 기반 옵티마이저, 히스토그램 통계, 병렬 쿼리 실행, 저장 프로시저·트리거·UDF 영속화 |
 | SQL 지원 | DDL / DML / JOIN / 서브쿼리 / CTE / UNION / 제약조건 / 트랜잭션 / 저장 프로시저 / 트리거 / UDF |
-| MCP | 자연어 입력 → SQL 자동 생성 → 실행, EXPLAIN 해석, 스키마 설계, 멀티턴 채팅, 파일 컨텍스트 주입, AI 파일 편집 |
-| DBMS | TCP 서버, 다중 클라이언트 동시 접속, 세션별 독립 Executor + `Arc<RwLock<SharedDatabase>>` 공유 |
+| MCP | 자연어 입력 → SQL 자동 생성 → 실행, EXPLAIN 해석, 에러 AI 해석, 쿼리 결과 데이터 분석 리포트, 스키마 설계, 멀티턴 채팅, 파일 컨텍스트 주입, AI 파일 편집 · True MCP (Claude Desktop, stdio JSON-RPC, 도구 4개) |
+| DBMS | TCP 서버, 다중 클라이언트 동시 접속, 접속 세션 실시간 모니터링, 세션별 독립 Executor + `Arc<RwLock<SharedDatabase>>` 공유 |
 | 언어 | Rust |
 
 <br/>
@@ -61,9 +61,6 @@ CREATE DATABASE company;
 USE company;
 
 -- DDL: Tables
--- department : INT, VARCHAR, DECIMAL, BIGINT, SMALLINT, TINYINT, BOOLEAN, DATE, TIME, YEAR, TEXT, JSON, ENUM, SET
--- employee   : INT, BIGINT, VARCHAR, DATE, DATETIME, TIMESTAMP, DECIMAL, FLOAT, DOUBLE, BOOLEAN, TINYINT, SMALLINT, BLOB, JSON, TEXT, ENUM, SET
--- project    : INT, VARCHAR, TEXT, DECIMAL, BIGINT, SMALLINT, TINYINT, DATE, DATETIME, TIMESTAMP, FLOAT, DOUBLE, BOOLEAN, JSON, ENUM, SET
 CREATE TABLE department (
     id            INT            AUTO INCREMENT,
     code          VARCHAR(10)    NOT NULL,
@@ -80,6 +77,9 @@ CREATE TABLE department (
     metadata      JSON,
     dept_type     ENUM('engineering','sales','marketing','finance','hr','ops','legal'),
     perks         SET('gym','cafe','parking','library','childcare'),
+    contact_email VARCHAR(100),
+    location      VARCHAR(100),
+    created_at    TIMESTAMP,
     CONSTRAINT pk_dept     PRIMARY KEY (id),
     UNIQUE KEY uq_dept_code (code),
     UNIQUE KEY uq_dept_name (name)
@@ -94,9 +94,7 @@ CREATE TABLE employee (
     birth_date       DATE,
     hire_date        DATE           NOT NULL,
     termination_date DATETIME,
-    created_at       TIMESTAMP,
     salary           DECIMAL(12,2)  CHECK (salary > 0),
-    hourly_rate      FLOAT          DEFAULT 0.0,
     performance      DOUBLE         DEFAULT 0.0 CHECK (performance BETWEEN 0.0 AND 10.0),
     department_id    INT,
     manager_id       INT,
@@ -106,7 +104,6 @@ CREATE TABLE employee (
     experience_years TINYINT        DEFAULT 0,
     is_manager       BOOLEAN        DEFAULT false,
     annual_leave     SMALLINT       DEFAULT 20,
-    resume_data      BLOB,
     personal_data    JSON,
     bio              TEXT,
     CONSTRAINT pk_employee  PRIMARY KEY (id),
@@ -121,7 +118,6 @@ CREATE TABLE project (
     name          VARCHAR(200)   NOT NULL,
     description   TEXT,
     budget        DECIMAL(15,2)  DEFAULT 0.00 CHECK (budget >= 0),
-    alloc_hours   BIGINT         DEFAULT 0,
     team_size     SMALLINT       DEFAULT 1,
     priority      TINYINT        DEFAULT 3 CHECK (priority BETWEEN 1 AND 5),
     start_date    DATE,
@@ -142,7 +138,7 @@ CREATE TABLE project (
     CONSTRAINT fk_proj_lead FOREIGN KEY (lead_id)       REFERENCES employee(id)  ON DELETE CASCADE  ON UPDATE CASCADE
 );
 
--- DDL: Indexes (B-tree)
+-- DDL: Index
 CREATE INDEX idx_dept_type    ON department (dept_type);
 CREATE INDEX idx_dept_active  ON department (is_active);
 CREATE INDEX idx_emp_dept     ON employee (department_id);
@@ -152,7 +148,7 @@ CREATE INDEX idx_proj_dept    ON project (department_id);
 CREATE INDEX idx_proj_status  ON project (status);
 CREATE INDEX idx_proj_dates   ON project (start_date, end_date);
 
--- DDL: Indexes (Hash) — 등호 조건 O(1) 검색
+-- DDL: Index (Hash)
 CREATE INDEX idx_emp_email  ON employee   (email) USING HASH;
 CREATE INDEX idx_dept_code  ON department (code)  USING HASH;
 
@@ -174,36 +170,36 @@ SHOW CREATE VIEW v_active_emp;
 CREATE DATABASE IF NOT EXISTS company;
 CREATE TABLE IF NOT EXISTS department (dummy INT);
 
--- INSERT: department (5 rows)
-INSERT INTO department (code, name, budget, annual_target, headcount, floor_num, is_active, established, open_time, fiscal_year, description, metadata, dept_type, perks) VALUES
-    ('ENG','Engineering',     5000000.00,10000000,20,3,true, '2010-01-15','09:00:00',2024,'Core product development','{"building":"A","room":3}','engineering','gym,cafe,parking'),
-    ('MKT','Marketing',       1500000.00, 3000000, 8,2,true, '2012-06-01','08:30:00',2024,'Brand and growth',       '{"building":"B","room":2}','marketing',  'cafe,parking'),
-    ('FIN','Finance',         1200000.00, 2000000, 5,4,true, '2011-03-10','09:00:00',2024,'Financial planning',     '{"building":"A","room":4}','finance',    'cafe,library'),
-    ('HRS','Human Resources',  600000.00,  800000, 4,1,true, '2013-09-01','08:00:00',2024,'Talent management',      '{"building":"C","room":1}','hr',         'gym,cafe,childcare'),
-    ('OPS','Operations',      2000000.00, 4000000,12,2,false,'2014-11-15','07:00:00',2023,'Cloud infrastructure',   '{"building":"D","room":2}','ops',        'parking');
+-- INSERT: department
+INSERT INTO department (code, name, budget, annual_target, headcount, floor_num, is_active, established, open_time, fiscal_year, description, metadata, dept_type, perks, contact_email, location, created_at) VALUES
+    ('ENG','Engineering',     5000000.00,10000000,20,3,true, '2010-01-15','09:00:00',2024,'Core product development','{"building":"A","room":3}','engineering','gym,cafe,parking',  'eng@co.com','Building A 3F','2010-01-15 09:00:00'),
+    ('MKT','Marketing',       1500000.00, 3000000, 8,2,true, '2012-06-01','08:30:00',2024,'Brand and growth',       '{"building":"B","room":2}','marketing',  'cafe,parking',       'mkt@co.com','Building B 2F','2012-06-01 08:30:00'),
+    ('FIN','Finance',         1200000.00, 2000000, 5,4,true, '2011-03-10','09:00:00',2024,'Financial planning',     '{"building":"A","room":4}','finance',    'cafe,library',       'fin@co.com','Building A 4F','2011-03-10 09:00:00'),
+    ('HRS','Human Resources',  600000.00,  800000, 4,1,true, '2013-09-01','08:00:00',2024,'Talent management',      '{"building":"C","room":1}','hr',         'gym,cafe,childcare', 'hr@co.com', 'Building C 1F','2013-09-01 08:00:00'),
+    ('OPS','Operations',      2000000.00, 4000000,12,2,false,'2014-11-15','07:00:00',2023,'Cloud infrastructure',   '{"building":"D","room":2}','ops',        'parking',            'ops@co.com','Building D 2F','2014-11-15 07:00:00');
 
--- INSERT: employee (12 rows)
-INSERT INTO employee (employee_code,first_name,last_name,email,birth_date,hire_date,salary,hourly_rate,performance,department_id,manager_id,job_title,emp_type,skills,experience_years,is_manager,annual_leave,personal_data,bio) VALUES
-    (1001,'Alice', 'Johnson', 'alice.j@co.com',  '1990-05-15','2018-03-01',120000.00, 0.0,9.5,1,NULL,'Sr Engineer',  'full_time','python,rust,sql,devops', 8,true, 25,'{"emergency":"Bob"}',    'Systems programmer'),
-    (1002,'Bob',   'Smith',   'bob.s@co.com',    '1988-11-20','2016-07-15', 95000.00, 0.0,8.0,1,   1,'Backend Eng',  'full_time','java,sql,devops',        10,false,20,'{"emergency":"Alice"}', 'API specialist'),
-    (1003,'Carol', 'Williams','carol.w@co.com',  '1993-02-28','2020-01-10', 85000.00, 0.0,7.5,2,NULL,'Mkt Manager',  'full_time','design,python',           5,true, 20,'{"emergency":"Dave"}',  'Brand expert'),
-    (1004,'Dave',  'Brown',   'dave.b@co.com',   '1995-08-10','2021-06-01', 75000.00, 0.0,8.5,2,   3,'Content Spec', 'full_time','design',                  4,false,20,'{"emergency":"Carol"}','Strategist'),
-    (1005,'Eve',   'Davis',   'eve.d@co.com',    '1985-12-01','2012-04-20',140000.00, 0.0,9.8,3,NULL,'Finance Dir',  'full_time','sql,ml',                 14,true, 30,'{"emergency":"Frank"}','Risk expert'),
-    (1006,'Frank', 'Miller',  'frank.m@co.com',  '1992-07-25','2019-09-15', 78000.00, 0.0,7.0,3,   5,'Analyst',      'full_time','sql,python',              6,false,20,'{"emergency":"Eve"}',   'Quant analyst'),
-    (1007,'Grace', 'Wilson',  'grace.w@co.com',  '1997-04-12','2022-02-01', 65000.00,55.0,8.2,4,NULL,'HR Spec',      'full_time','design',                  3,false,20,'{"emergency":"Henry"}', 'Talent acq'),
-    (1008,'Henry', 'Moore',   'henry.m@co.com',  '1991-09-30','2017-11-01', 90000.00, 0.0,8.8,1,   1,'DevOps Eng',   'full_time','rust,devops,sql',         8,false,22,'{"emergency":"Grace"}', 'Infra specialist'),
-    (1009,'Iris',  'Taylor',  'iris.t@co.com',   '1999-01-05','2023-08-15', 55000.00,30.0,7.8,1,   1,'Jr Developer', 'part_time','python,sql',              2,false,15,'{"emergency":"Jack"}',  'Full-stack dev'),
-    (1010,'Jack',  'Anderson','jack.a@co.com',   '1994-06-18','2020-05-10', 70000.00, 0.0,6.5,NULL,NULL,'Consultant','contract', 'sql,ml',                  7,false,10,'{"emergency":"Iris"}',  'Data consultant'),
-    (1011,'Karen', 'Lee',     'karen.l@co.com',  '1989-03-22','2015-08-01',110000.00, 0.0,9.2,1,NULL,'Lead Eng',     'full_time','python,rust,devops',      11,true, 25,'{"emergency":"Liam"}',  'Platform lead'),
-    (1012,'Liam',  'Chen',    'liam.c@co.com',   '1996-11-14','2021-03-15', 80000.00, 0.0,7.9,2,   3,'Mkt Analyst',  'full_time','python,design',            4,false,20,'{"emergency":"Karen"}','Data marketer');
+-- INSERT: employee
+INSERT INTO employee (employee_code,first_name,last_name,email,birth_date,hire_date,salary,performance,department_id,manager_id,job_title,emp_type,skills,experience_years,is_manager,annual_leave,personal_data,bio) VALUES
+    (1001,'Alice', 'Johnson', 'alice.j@co.com',  '1990-05-15','2018-03-01',120000.00,9.5,1,NULL,'Sr Engineer',  'full_time','python,rust,sql,devops', 8,true, 25,'{"emergency":"Bob"}',    'Systems programmer'),
+    (1002,'Bob',   'Smith',   'bob.s@co.com',    '1988-11-20','2016-07-15', 95000.00,8.0,1,   1,'Backend Eng',  'full_time','java,sql,devops',        10,false,20,'{"emergency":"Alice"}', 'API specialist'),
+    (1003,'Carol', 'Williams','carol.w@co.com',  '1993-02-28','2020-01-10', 85000.00,7.5,2,NULL,'Mkt Manager',  'full_time','design,python',           5,true, 20,'{"emergency":"Dave"}',  'Brand expert'),
+    (1004,'Dave',  'Brown',   'dave.b@co.com',   '1995-08-10','2021-06-01', 75000.00,8.5,2,   3,'Content Spec', 'full_time','design',                  4,false,20,'{"emergency":"Carol"}','Strategist'),
+    (1005,'Eve',   'Davis',   'eve.d@co.com',    '1985-12-01','2012-04-20',140000.00,9.8,3,NULL,'Finance Dir',  'full_time','sql,ml',                 14,true, 30,'{"emergency":"Frank"}','Risk expert'),
+    (1006,'Frank', 'Miller',  'frank.m@co.com',  '1992-07-25','2019-09-15', 78000.00,7.0,3,   5,'Analyst',      'full_time','sql,python',              6,false,20,'{"emergency":"Eve"}',   'Quant analyst'),
+    (1007,'Grace', 'Wilson',  'grace.w@co.com',  '1997-04-12','2022-02-01', 65000.00,8.2,4,NULL,'HR Spec',      'full_time','design',                  3,false,20,'{"emergency":"Henry"}', 'Talent acq'),
+    (1008,'Henry', 'Moore',   'henry.m@co.com',  '1991-09-30','2017-11-01', 90000.00,8.8,1,   1,'DevOps Eng',   'full_time','rust,devops,sql',         8,false,22,'{"emergency":"Grace"}', 'Infra specialist'),
+    (1009,'Iris',  'Taylor',  'iris.t@co.com',   '1999-01-05','2023-08-15', 55000.00,7.8,1,   1,'Jr Developer', 'part_time','python,sql',              2,false,15,'{"emergency":"Jack"}',  'Full-stack dev'),
+    (1010,'Jack',  'Anderson','jack.a@co.com',   '1994-06-18','2020-05-10', 70000.00,6.5,NULL,NULL,'Consultant','contract', 'sql,ml',                  7,false,10,'{"emergency":"Iris"}',  'Data consultant'),
+    (1011,'Karen', 'Lee',     'karen.l@co.com',  '1989-03-22','2015-08-01',110000.00,9.2,1,NULL,'Lead Eng',     'full_time','python,rust,devops',      11,true, 25,'{"emergency":"Liam"}',  'Platform lead'),
+    (1012,'Liam',  'Chen',    'liam.c@co.com',   '1996-11-14','2021-03-15', 80000.00,7.9,2,   3,'Mkt Analyst',  'full_time','python,design',            4,false,20,'{"emergency":"Karen"}','Data marketer');
 
--- INSERT: project (5 rows)
-INSERT INTO project (code,name,description,budget,alloc_hours,team_size,priority,start_date,end_date,deadline,revenue,completion,department_id,lead_id,status,tech_stack,is_public,contract_data) VALUES
-    ('PRJ-001','Core Platform Rewrite','Legacy to Rust',      2000000.00,5000,8,1,'2024-01-01','2024-12-31','2025-01-01 00:00:00',8000000.0, 45.0,1,1, 'active',   'backend,database,cloud',   false,'{"client":"internal","type":"capex"}'),
-    ('PRJ-002','AI Engine',            'ML recommendations',  1500000.00,3000,5,2,'2024-03-01','2024-09-30','2024-10-01 00:00:00',5000000.0, 70.0,1,11,'active',   'backend,ai,database',       false,'{"client":"internal","type":"opex"}'),
-    ('PRJ-003','Brand Refresh',        'Identity overhaul',    500000.00,1000,4,2,'2024-02-15','2024-06-30','2024-07-01 00:00:00',      0.0,100.0,2,3, 'completed','frontend,ai',               true, '{"client":"external","type":"marketing"}'),
-    ('PRJ-004','Finance Dashboard',    'Real-time reporting',  800000.00,2000,6,3,'2024-04-01',NULL,        '2024-11-01 00:00:00',2000000.0, 30.0,3,5, 'active',   'frontend,backend,database', false,'{"client":"internal","type":"capex"}'),
-    ('PRJ-006','Mobile App MVP',       'iOS and Android',     1200000.00,4000,7,1,'2023-09-01','2024-05-31','2024-06-01 00:00:00',3000000.0,100.0,1,8, 'completed','mobile,backend,cloud',      true, '{"client":"external","type":"revenue"}');
+-- INSERT: project
+INSERT INTO project (code,name,description,budget,team_size,priority,start_date,end_date,deadline,revenue,completion,department_id,lead_id,status,tech_stack,is_public,contract_data) VALUES
+    ('PRJ-001','Core Platform Rewrite','Legacy to Rust',      2000000.00,8,1,'2024-01-01','2024-12-31','2025-01-01 00:00:00',8000000.0, 45.0,1,1, 'active',   'backend,database,cloud',   false,'{"client":"internal","type":"capex"}'),
+    ('PRJ-002','AI Engine',            'ML recommendations',  1500000.00,5,2,'2024-03-01','2024-09-30','2024-10-01 00:00:00',5000000.0, 70.0,1,11,'active',   'backend,ai,database',       false,'{"client":"internal","type":"opex"}'),
+    ('PRJ-003','Brand Refresh',        'Identity overhaul',    500000.00,4,2,'2024-02-15','2024-06-30','2024-07-01 00:00:00',      0.0,100.0,2,3, 'completed','frontend,ai',               true, '{"client":"external","type":"marketing"}'),
+    ('PRJ-004','Finance Dashboard',    'Real-time reporting',  800000.00,6,3,'2024-04-01',NULL,        '2024-11-01 00:00:00',2000000.0, 30.0,3,5, 'active',   'frontend,backend,database', false,'{"client":"internal","type":"capex"}'),
+    ('PRJ-006','Mobile App MVP',       'iOS and Android',     1200000.00,7,1,'2023-09-01','2024-05-31','2024-06-01 00:00:00',3000000.0,100.0,1,8, 'completed','mobile,backend,cloud',      true, '{"client":"external","type":"revenue"}');
 
 -- SELECT
 SELECT id, first_name, last_name, salary FROM employee WHERE salary >= 80000 AND emp_type = 'full_time' ORDER BY salary DESC;
@@ -225,7 +221,7 @@ SELECT emp_type, GROUP_CONCAT(first_name SEPARATOR ', ') AS names FROM employee 
 SELECT COUNT(DISTINCT department_id), SUM(DISTINCT budget), STDDEV(budget), VARIANCE(budget) FROM project;
 SELECT emp_type, COUNT(*) AS n, SUM(salary) AS total FROM employee GROUP BY emp_type ORDER BY total DESC;
 
--- JOIN
+-- Join
 SELECT e.first_name, e.last_name, d.name AS dept_name, e.salary FROM employee e JOIN department d ON e.department_id = d.id ORDER BY e.salary DESC;
 SELECT e.first_name, d.name AS dept, p.name AS project, p.status FROM employee e JOIN project p ON e.id = p.lead_id JOIN department d ON e.department_id = d.id ORDER BY e.first_name;
 SELECT e.first_name, d.name AS dept_name FROM employee e LEFT JOIN department d ON e.department_id = d.id ORDER BY e.id;
@@ -241,7 +237,7 @@ SELECT status, avg_completion FROM (SELECT status, AVG(completion) AS avg_comple
 SELECT first_name, (SELECT MAX(salary) FROM employee) AS max_salary FROM employee ORDER BY salary DESC LIMIT 3;
 SELECT name FROM project WHERE department_id NOT IN (SELECT id FROM department WHERE is_active = false);
 
--- UNION / INTERSECT / EXCEPT
+-- Set Operations
 SELECT first_name AS label, 'employee' AS entity FROM employee WHERE department_id = 1
 UNION
 SELECT name, 'project' AS entity FROM project WHERE department_id = 1
@@ -321,7 +317,7 @@ SELECT ROUND(3.14159,2), ABS(-9.99), CEIL(2.1), FLOOR(2.9), MOD(17,5), SQRT(144)
 SELECT YEAR(hire_date), MONTH(hire_date), DAY(hire_date), DAYOFWEEK(hire_date), DATEDIFF('2026-05-01',hire_date) AS days_employed, DATE_FORMAT(hire_date,'%Y-%m') AS hire_month, DATE_ADD(hire_date, INTERVAL 1 YEAR) AS anniversary, TIMESTAMPDIFF(YEAR,hire_date,'2026-05-01') AS years_employed FROM employee LIMIT 3;
 SELECT COALESCE(department_id,-1) AS dept_or_default, IFNULL(department_id,-1) AS dept_ifnull, NULLIF(emp_type,'contract') AS nullif_contract, GREATEST(1,5,3), LEAST(1,5,3), CAST(experience_years AS INT) AS exp_int, IF(salary>100000,'Senior','Standard') AS emp_level, CASE WHEN salary >= 120000 THEN 'Senior' WHEN salary >= 80000 THEN 'Mid' ELSE 'Junior' END AS grade, MD5(email), LENGTH(UUID()) > 0 AS uuid_ok FROM employee LIMIT 3;
 
--- INSERT Variants
+-- Insert Variants
 INSERT IGNORE INTO department (code, name, budget, dept_type) VALUES ('ENG', 'Engineering Dup', 0, 'engineering');
 
 INSERT INTO employee (employee_code,first_name,last_name,email,hire_date,salary,department_id)
@@ -336,7 +332,7 @@ SELECT * FROM project_backup ORDER BY id;
 TRUNCATE TABLE project_backup;
 DROP TABLE project_backup;
 
--- RETURNING
+-- Returning
 INSERT INTO department (code,name,budget,dept_type) VALUES ('TMP','Temporary',0,'hr') RETURNING id, code, name;
 DELETE FROM department WHERE code='TMP' RETURNING id, name;
 UPDATE employee SET salary=salary+1000 WHERE id=1 RETURNING id, first_name, salary;
@@ -350,7 +346,7 @@ DELETE project FROM project
     JOIN department ON project.department_id=department.id
     WHERE project.status='cancelled';
 
--- ALTER TABLE
+-- Alter Table
 ALTER TABLE employee ADD COLUMN profile_url VARCHAR(200);
 UPDATE employee SET profile_url=CONCAT('linkedin.com/',LOWER(first_name)) WHERE id<=3;
 ALTER TABLE employee RENAME COLUMN profile_url TO linkedin_url;
@@ -362,14 +358,14 @@ ALTER TABLE project DROP CONSTRAINT uq_proj_name;
 ALTER TABLE project ADD CONSTRAINT chk_team_size CHECK (team_size >= 1);
 ALTER TABLE project DROP CONSTRAINT chk_team_size;
 
--- ENUM / SET validation
+-- ENUM / SET
 INSERT INTO employee (employee_code,first_name,last_name,email,hire_date,salary,department_id,emp_type)
     VALUES (9999,'Bad','Type','bad@co.com','2024-01-01',50000,1,'freelance');
 INSERT INTO department (code,name,budget,dept_type,perks)
     VALUES ('BAD','Bad Dept',0,'engineering','sauna');
 SELECT code, dept_type, perks FROM department ORDER BY id LIMIT 3;
 
--- FK behavior
+-- FK
 DELETE FROM department WHERE code='ENG';
 
 INSERT INTO department (code,name,budget,dept_type) VALUES ('DEL','ToDelete',1000.00,'hr');
@@ -388,7 +384,7 @@ SELECT COUNT(*) AS proj_before FROM project WHERE code='TMP-CAS';
 DELETE FROM employee WHERE employee_code=7777;
 SELECT COUNT(*) AS proj_after FROM project WHERE code='TMP-CAS';
 
--- MERGE
+-- Merge
 INSERT INTO department (code,name,budget,dept_type) VALUES ('TMP','Temp Dept',0.00,'hr');
 CREATE TABLE dept_upd (code VARCHAR(10) PRIMARY KEY, name VARCHAR(100), budget DECIMAL(15,2), dept_type ENUM('engineering','sales','marketing','finance','hr','ops','legal'));
 INSERT INTO dept_upd VALUES
@@ -425,7 +421,7 @@ CREATE PROCEDURE double_val(IN x INT) BEGIN DECLARE result INT; SET result = x *
 CALL double_val(21);
 DROP PROCEDURE double_val;
 
--- PREPARE / EXECUTE
+-- Prepared Statement
 PREPARE find_emp FROM 'SELECT id, first_name, salary FROM employee WHERE id = ?';
 SET @eid = 3;
 EXECUTE find_emp USING @eid;
@@ -504,10 +500,9 @@ SELECT id, name FROM department WHERE id=2 FOR SHARE;
 SHOW LOCKS;
 COMMIT;
 
--- EXPLAIN / ANALYZE (B-tree + Hash Index)
+-- EXPLAIN
 EXPLAIN SELECT * FROM employee WHERE id=1;
 EXPLAIN SELECT * FROM employee WHERE department_id=1;
--- Hash Index Scan: 등호 조건에서 idx_emp_email / idx_dept_code 자동 선택
 EXPLAIN SELECT * FROM employee WHERE email = 'alice.j@co.com';
 SELECT id, first_name, email FROM employee WHERE email = 'alice.j@co.com';
 EXPLAIN SELECT id, name FROM department WHERE code = 'ENG';
@@ -516,32 +511,20 @@ EXPLAIN SELECT e.first_name, d.name, p.name FROM employee e
     JOIN department d ON e.department_id=d.id
     JOIN project p ON d.id=p.department_id;
 
--- Histogram Statistics
--- ANALYZE TABLE 실행: 컬럼별 distinct/null/min/max + p25/p50/p75 히스토그램 수집
+-- Histogram
 ANALYZE TABLE department;
 ANALYZE TABLE employee;
 ANALYZE TABLE project;
-
--- 히스토그램 기반 selectivity 검증: salary 단일 인덱스 추가 후 범위 쿼리 EXPLAIN
--- ANALYZE 전에는 est_rows = total/4(고정), ANALYZE 후에는 히스토그램 버킷 카운팅으로 추정
 CREATE INDEX idx_emp_salary ON employee (salary);
-
--- SecondaryRange — salary 히스토그램으로 selectivity 추정
 EXPLAIN SELECT * FROM employee WHERE salary > 100000;
 EXPLAIN SELECT * FROM employee WHERE salary < 80000;
 EXPLAIN SELECT * FROM employee WHERE salary >= 80000;
-
--- PkRange / PkBetween — PK(id) 히스토그램 사용
 EXPLAIN SELECT * FROM employee WHERE id > 8;
 EXPLAIN SELECT * FROM employee WHERE id BETWEEN 3 AND 9;
-
--- SecondaryRange on department_id (idx_emp_dept)
 EXPLAIN SELECT * FROM employee WHERE department_id > 2;
-
--- EXPLAIN ANALYZE: 실제 실행 시간 + 히스토그램 est_rows 비교
 EXPLAIN ANALYZE SELECT * FROM employee WHERE department_id=1 AND salary >= 80000;
 
--- Views: Usage
+-- Views
 SELECT * FROM v_active_dept ORDER BY id;
 SELECT * FROM v_manager ORDER BY salary DESC;
 SELECT * FROM v_active_proj ORDER BY priority;
@@ -558,16 +541,16 @@ CREATE FUNCTION perf_label(score) RETURNS TEXT RETURN CONCAT('score=', score);
 SELECT first_name, performance, perf_label(performance) AS label FROM employee ORDER BY performance DESC LIMIT 5;
 DROP FUNCTION perf_label;
 
--- INFORMATION_SCHEMA
+-- Information Schema
 SELECT table_name, table_rows FROM information_schema.tables WHERE table_schema='company' ORDER BY table_name;
 SELECT column_name, data_type, is_nullable FROM information_schema.columns WHERE table_name='employee' ORDER BY ordinal_position LIMIT 8;
 SELECT constraint_name, table_name, constraint_type FROM information_schema.table_constraints WHERE table_schema='company' ORDER BY table_name, constraint_name LIMIT 10;
 
--- FETCH FIRST
+-- Fetch First
 SELECT id, first_name, salary FROM employee ORDER BY salary DESC FETCH FIRST 3 ROWS ONLY;
 SELECT id, first_name, salary FROM employee ORDER BY salary ASC FETCH NEXT 3 ROWS ONLY;
 
--- JOIN USING / NATURAL JOIN
+-- Join Using
 CREATE TABLE tmp_dept (dept_id INT PRIMARY KEY, dept_name VARCHAR(50) NOT NULL);
 CREATE TABLE tmp_emp  (emp_name VARCHAR(50) NOT NULL, dept_id INT NOT NULL);
 INSERT INTO tmp_dept VALUES (1,'Engineering'),(2,'Marketing'),(3,'Finance');
@@ -577,7 +560,7 @@ SELECT dept_name, emp_name FROM tmp_dept NATURAL JOIN tmp_emp ORDER BY dept_name
 DROP TABLE tmp_emp;
 DROP TABLE tmp_dept;
 
--- DCL: Users
+-- DCL
 CREATE USER 'testuser'@'%' IDENTIFIED BY 'secure_pass_123';
 GRANT SELECT, INSERT, UPDATE ON company.employee TO 'testuser'@'%' WITH GRANT OPTION;
 GRANT SELECT ON company.department TO 'testuser'@'%';
@@ -622,7 +605,7 @@ SHOW DATABASES;
 -- Backup
 BACKUP DATABASE company INTO 'company_backup.sql';
 
--- Clean up
+-- Cleanup
 DROP USER IF EXISTS 'testuser'@'%';
 DROP VIEW IF EXISTS v_active_dept;
 DROP VIEW IF EXISTS v_dept_finance;
@@ -658,7 +641,7 @@ SHOW DATABASES;
 | 언어 | Rust |
 | 버전 | v2.2.0 |
 | 인덱스 | B+Tree (단일 / 복합 / 클러스터드) |
-| 옵티마이저 | 비용 기반 플래너 (AccessPath · Join 알고리즘 자동 선택 · System-R DP Join 순서 최적화 (N≤8), Greedy 폴백) · Hash Index 등호 O(1) 우선 선택 |
+| 옵티마이저 | 비용 기반 플래너 (AccessPath · Join 알고리즘 자동 선택 · System-R DP Join 순서 최적화 (N≤8), Greedy 폴백) · Hash Index 등호 O(1) 우선 선택 · 히스토그램 selectivity 추정 (ANALYZE TABLE) |
 | Join | Sort-Merge Join (O((N+M)logN)) / Hash Join (O(N+M)) / Nested Loop Join (Cross/Natural/FullOuter 포함) — `engine/join.rs` 분리 구현 |
 | 인덱스 | B+Tree (단일/복합/클러스터드) · **Hash Index** (`USING HASH`, 등호 O(1), 단일 컬럼) |
 | 트랜잭션 | WAL (바이너리 redo log) + Undo Log (인메모리 + 디스크 영속화) + MVCC |
@@ -668,9 +651,9 @@ SHOW DATABASES;
 | 저장 | 바이너리 .rdb + LZ4 압축; 전역 파일은 `data/_system/` 서브폴더로 분리 (_users.json·_grants.json·_roles.json·_synonyms.json 등); 연결별 독립 디렉터리 (`data/local/`, `data/data_숫자/`) — UI·CLI·서버가 `code/data/` 공유 |
 | 다중 DB | CREATE / DROP / USE / SHOW DATABASES, 테이블 자동 한정, 격리 |
 | 사용자 관리 | CREATE/DROP USER, GRANT/REVOKE, SHOW GRANTS, ROLE 관리, SYNONYM, 영속화 |
-| UI | Tauri + React + Monaco Editor (홈 화면: 퀵 액션 버튼·RDBMS 소개·연결 카드 그리드·하단 상태 표시줄·액티비티 바, 멀티 탭, 탭 우클릭 메뉴, 탭 고정, 분할 에디터, AI Agent 채팅 패널 [드래그 너비 조절·파일 컨텍스트·@멘션·파일 편집·채팅 세션 기록], MySQL 스타일 에디터 툴바, 패널 토글 버튼, Canvas 기반 결과 컬럼 자동 너비, 연결 사이드바 드래그 너비 조절) |
+| UI | Tauri + React + Monaco Editor (홈 화면: 퀵 액션 버튼·RDBMS 소개·연결 카드 그리드·하단 상태 표시줄·액티비티 바, 멀티 탭, 탭 우클릭 메뉴, 탭 고정, 분할 에디터, AI Agent 채팅 패널 [드래그 너비 조절·파일 컨텍스트·@멘션·파일 편집·채팅 세션 기록], MySQL 스타일 에디터 툴바, 패널 토글 버튼, Canvas 기반 결과 컬럼 자동 너비, 연결 사이드바 드래그 너비 조절, 결과 패널 AI 분석 버튼, Server Manager — 벤치마크 결과 UI·접속 세션 실시간 모니터링, AI 탭 Gemini 서버·True MCP 분리 안내) |
 | TCP 서버 | Native 프로토콜 (127.0.0.1:7878, SHA-256 인증) + MySQL wire protocol (0.0.0.0:3306, `mysql_native_password` 챌린지-응답 인증, DBeaver·mysql CLI·mysql-connector-python 완전 호환) — `--mysql-port` / `--no-mysql` / `--buffer-pool-size` 옵션 |
-| AI 연동 | MCP 서버 (Python / FastAPI) + AI assistant — 자연어 → SQL 변환, EXPLAIN 해석, 스키마 설계, 멀티턴 채팅, 에디터 파일 컨텍스트 자동 주입, @파일명 멘션, AI 파일 편집 블록 (Monaco Undo 지원), Tauri 자동 시작 |
+| AI 연동 | **Gemini AI 서버** (Python / FastAPI / google-genai `gemini-2.5-flash`, port 8765) — 자연어 → SQL 변환, EXPLAIN 해석, 에러 AI 해석, 쿼리 결과 데이터 분석 리포트, 스키마 설계, 멀티턴 채팅, 에디터 파일 컨텍스트 자동 주입, @파일명 멘션, AI 파일 편집 블록, Tauri 자동 시작 · **True MCP** (Python / FastMCP, stdio JSON-RPC) — Claude Desktop이 `execute_sql` · `list_databases` · `list_tables` · `get_table_schema` 4개 도구로 RustDB에 직접 질의, API 키 불필요 |
 
 <br/>
 
@@ -682,7 +665,14 @@ code/
 ├── rustdb-cli/      터미널 REPL (stdin 직접 실행)
 ├── rustdb-client/   TCP 클라이언트 CLI (-u/-p/-H/-P 옵션)
 ├── rustdb-ui/       Tauri + React UI
-└── rustdb-mcp/      MCP 서버 (Python) — 자연어 → SQL, EXPLAIN 해석
+├── rustdb-mcp/      MCP 서버 (Python) — 자연어 → SQL, EXPLAIN 해석
+└── test/
+    ├── test_full.sql              전체 기능 검증 SQL (DDL/DML/트랜잭션/힌스토그램 등)
+    └── perf/
+        ├── bench.py               RustDB vs MySQL 성능 측정 (INSERT TPS / SELECT / 병렬 / 동시 접속)
+        ├── chart.py               측정 결과 → matplotlib PNG 차트 생성
+        ├── requirements.txt       Python 의존 패키지
+        └── README.txt             실행 가이드
 ```
 
 <br/>

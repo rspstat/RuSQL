@@ -27,11 +27,18 @@ interface MultiQueryResult {
   results: QueryResult[];
   total_elapsed: number;
 }
+interface SessionInfo {
+  addr: string;
+  user: string;
+  connected_at: number;
+  query_count: number;
+}
 interface ServerStatus {
   running: boolean;
   port: number;
   client_count: number;
   log: string[];
+  sessions: SessionInfo[];
 }
 interface IndexInfo {
   name: string;
@@ -399,7 +406,7 @@ function App() {
     setErdSelectedTable("");
     setErdTableData(null);
     // 서버 상태 초기화 (연결마다 독립)
-    setServerStatus({ running: false, port: conn.port, client_count: 0, log: [] });
+    setServerStatus({ running: false, port: conn.port, client_count: 0, log: [], sessions: [] });
     setPortInput(conn.port.toString());
     setSrvConnName(conn.name);
     setServerMsg("");
@@ -492,6 +499,7 @@ function App() {
   const [aiResult, setAiResult] = useState<{ type: "sql" | "explain" | "schema" | "optimize"; content: string } | null>(null);
   // 결과 블록별 에러 AI 해석 상태 (key = 결과 인덱스)
   const [errAi, setErrAi] = useState<Record<number, { loading: boolean; text: string }>>({});
+  const [reportAi, setReportAi] = useState<Record<number, { loading: boolean; text: string }>>({});
   const [aiLoading, setAiLoading] = useState(false);
   const [aiError, setAiError] = useState("");
   const [aiServerOk, setAiServerOk] = useState<boolean | null>(null);
@@ -539,7 +547,7 @@ function App() {
   const [mentionQuery, setMentionQuery] = useState("");
   const [appliedEdits, setAppliedEdits] = useState<Set<string>>(new Set());
 
-  const serverStatus_init: ServerStatus = { running: false, port: 7878, client_count: 0, log: [] };
+  const serverStatus_init: ServerStatus = { running: false, port: 7878, client_count: 0, log: [], sessions: [] };
   const [serverStatus, setServerStatus] = useState<ServerStatus>(serverStatus_init);
   const [portInput, setPortInput] = useState("7878");
   const [mysqlPortInput, setMysqlPortInput] = useState("13306");
@@ -549,7 +557,8 @@ function App() {
   const [srvConnName, setSrvConnName] = useState("RustDB Local");
   const [srvUser, setSrvUser] = useState("root");
   const [srvPass, setSrvPass] = useState("root");
-  const [srvRightPanel, setSrvRightPanel] = useState<"none" | "cli" | "mysql">("none");
+  const [srvRightPanel, setSrvRightPanel] = useState<"none" | "cli" | "mysql" | "bench" | "sessions">("none");
+  const [benchResult, setBenchResult] = useState<Record<string, unknown> | null>(null);
   const [srvPassVisible, setSrvPassVisible] = useState(false);
   const logEndRef = useRef<HTMLDivElement>(null);
 
@@ -1566,6 +1575,38 @@ function App() {
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e);
       setErrAi(p => ({ ...p, [idx]: {
+        loading: false,
+        text: msg.includes("fetch") || msg.includes("Failed")
+          ? "MCP 서버에 연결할 수 없습니다. server.py가 실행 중인지 확인하세요."
+          : "오류: " + msg,
+      } }));
+    }
+  };
+
+  const analyzeReport = async (idx: number, columns: string[], rows: string[][]) => {
+    if (!aiApiKey.trim()) {
+      setReportAi(p => ({ ...p, [idx]: { loading: false, text: "⚠️ AI 탭에서 Gemini API 키를 먼저 입력하세요." } }));
+      return;
+    }
+    setReportAi(p => ({ ...p, [idx]: { loading: true, text: "" } }));
+    try {
+      const sql = (editorRef.current?.getValue() ?? queryRef.current).trim();
+      const schema = await getSchemaText();
+      const header = columns.join(" | ");
+      const divider = columns.map(() => "---").join(" | ");
+      const dataRows = rows.slice(0, 100).map(r => r.join(" | "));
+      const result = [header, divider, ...dataRows].join("\n");
+      const res = await fetch(`${aiServerUrl}/api/report`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sql, result, schema, api_key: aiApiKey }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail ?? "서버 오류");
+      setReportAi(p => ({ ...p, [idx]: { loading: false, text: data.report } }));
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e);
+      setReportAi(p => ({ ...p, [idx]: {
         loading: false,
         text: msg.includes("fetch") || msg.includes("Failed")
           ? "MCP 서버에 연결할 수 없습니다. server.py가 실행 중인지 확인하세요."
@@ -3760,6 +3801,20 @@ function App() {
                                 </tr>
                               ))}</tbody>
                             </table>
+                            <div style={{ marginTop: 8 }}>
+                              <button
+                                onClick={() => analyzeReport(i, r.columns, r.rows)}
+                                disabled={reportAi[i]?.loading}
+                                style={{ padding: "3px 10px", fontSize: 12, cursor: reportAi[i]?.loading ? "default" : "pointer", background: "#3a3d41", color: "#4ec9b0", border: "1px solid #4ec9b0", borderRadius: 4 }}
+                              >
+                                {reportAi[i]?.loading ? "분석 중..." : "AI 분석"}
+                              </button>
+                              {reportAi[i]?.text && (
+                                <div style={{ marginTop: 8, padding: "8px 12px", background: "#252526", border: "1px solid #3a3d41", borderRadius: 4, whiteSpace: "pre-wrap", fontSize: 13, lineHeight: 1.6, color: "#d4d4d4" }}>
+                                  {reportAi[i].text}
+                                </div>
+                              )}
+                            </div>
                           </>
                         );
                       })()}
@@ -4161,6 +4216,7 @@ function App() {
 
           {/* 본문 */}
           <div className="ai-body ai-body-scroll">
+            <div className="ai-body-inner">
             {/* API Key 설정 */}
             <div className="ai-section">
               <div className="ai-section-title">
@@ -4303,14 +4359,35 @@ function App() {
               </div>
             )}
 
-            {/* MCP 서버 안내 */}
+            {/* AI 기능 서버 안내 */}
             <div className="ai-section ai-guide-section">
-              <div className="ai-section-title">MCP 서버 시작 방법</div>
-              <code className="ai-guide-code">cd code/rustdb-mcp</code>
-              <code className="ai-guide-code">pip install -r requirements.txt</code>
+              <div className="ai-section-title">
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><path d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58c.18-.14.23-.41.12-.61l-1.92-3.32c-.12-.22-.37-.29-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54c-.04-.24-.24-.41-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58c-.18.14-.23.41-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z"/></svg>
+                AI 기능 서버 (Gemini)
+              </div>
+              <div className="ai-desc">UI 패널의 자연어→SQL·쿼리 해석·스키마 설계를 제공합니다. Tauri가 자동 시작합니다.</div>
               <code className="ai-guide-code">python server.py</code>
-              <div className="ai-desc" style={{ marginTop: 8 }}>서버가 <strong>127.0.0.1:8765</strong>에서 실행됩니다.</div>
+              <div className="ai-desc" style={{ marginTop: 6 }}>포트: <strong>127.0.0.1:8765</strong></div>
             </div>
+
+            {/* True MCP 안내 */}
+            <div className="ai-section ai-guide-section">
+              <div className="ai-section-title">
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><path d="M17 7H7c-2.76 0-5 2.24-5 5s2.24 5 5 5h10c2.76 0 5-2.24 5-5s-2.24-5-5-5zM7 15c-1.66 0-3-1.34-3-3s1.34-3 3-3 3 1.34 3 3-1.34 3-3 3z"/></svg>
+                True MCP (Claude Desktop)
+              </div>
+              <div className="ai-desc">Claude Desktop이 MCP 클라이언트로 RustDB에 직접 질의합니다. API 키 불필요.</div>
+              <code className="ai-guide-code">python mcp_server.py</code>
+              <div className="ai-desc" style={{ marginTop: 6, marginBottom: 4 }}>Claude Desktop 설정 파일:</div>
+              <code className="ai-guide-code" style={{ fontSize: 10, wordBreak: "break-all" }}>Packages\Claude_...\LocalCache\Roaming\Claude\claude_desktop_config.json</code>
+              <div className="ai-desc" style={{ marginTop: 8, marginBottom: 6 }}>제공 도구 (4개):</div>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
+                {["execute_sql", "list_databases", "list_tables", "get_table_schema"].map(t => (
+                  <span key={t} style={{ fontSize: 11, background: "rgba(78,201,176,0.12)", color: "#4ec9b0", border: "1px solid rgba(78,201,176,0.25)", borderRadius: 3, padding: "2px 7px", fontFamily: "monospace" }}>{t}</span>
+                ))}
+              </div>
+            </div>
+            </div>{/* /ai-body-inner */}
           </div>
 
           {/* 하단 상태바 */}
@@ -4318,8 +4395,9 @@ function App() {
             <div className="status-left">
               <span className="status-item">⎇ main</span>
               <span className="status-item" style={{ color: aiServerOk === true ? "#4ec9b0" : "#858585" }}>
-                {aiServerOk === true ? "● MCP :8765" : "○ MCP 미연결"}
+                {aiServerOk === true ? "● Gemini :8765" : "○ Gemini 미연결"}
               </span>
+              <span className="status-item" style={{ color: "#4ec9b0" }}>● MCP (Claude)</span>
             </div>
             <div className="status-right">
               <span className="status-item">RustDB v2.2.0</span>
@@ -4519,7 +4597,7 @@ function App() {
             {srvRightPanel !== "none" && (
               <div className="srv-slide-panel">
                 <div className="srv-slide-header">
-                  {srvRightPanel === "cli" ? "CLI 가이드" : "MySQL 연결"}
+                  {srvRightPanel === "cli" ? "CLI 가이드" : srvRightPanel === "bench" ? "벤치마크" : srvRightPanel === "sessions" ? "접속 세션" : "MySQL 연결"}
                   <button className="srv-slide-close" onClick={() => setSrvRightPanel("none")}>✕</button>
                 </div>
                 <div className="srv-slide-body">
@@ -4544,6 +4622,118 @@ function App() {
 
                     <div className="srv-slide-section" style={{ marginTop: 18 }}>netcat</div>
                     <code className="srv-slide-code">{`nc 127.0.0.1 ${portInput}`}</code>
+                  </>)}
+
+                  {srvRightPanel === "sessions" && (() => {
+                    const now = Math.floor(Date.now() / 1000);
+                    const fmtDuration = (secs: number) => {
+                      if (secs < 60) return `${secs}s`;
+                      if (secs < 3600) return `${Math.floor(secs / 60)}m ${secs % 60}s`;
+                      return `${Math.floor(secs / 3600)}h ${Math.floor((secs % 3600) / 60)}m`;
+                    };
+                    return (
+                      <>
+                        <div className="srv-slide-section">접속 중인 세션</div>
+                        {serverStatus.sessions.length === 0 ? (
+                          <div className="srv-slide-text">현재 접속 중인 세션이 없습니다.</div>
+                        ) : serverStatus.sessions.map((s, i) => (
+                          <div key={i} style={{ marginBottom: 10, padding: "8px 10px", background: "#2d2d2d", borderRadius: 5, border: "1px solid #3a3d41" }}>
+                            <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 4 }}>
+                              <span style={{ width: 8, height: 8, borderRadius: "50%", background: "#4ec9b0", display: "inline-block", flexShrink: 0 }} />
+                              <span style={{ fontSize: 13, fontWeight: 600, color: "#d4d4d4" }}>{s.user}</span>
+                              <span style={{ marginLeft: "auto", fontSize: 11, color: "#858585" }}>{fmtDuration(now - s.connected_at)}</span>
+                            </div>
+                            <div style={{ fontSize: 11, color: "#858585", paddingLeft: 14 }}>{s.addr}</div>
+                            <div style={{ fontSize: 11, color: "#858585", paddingLeft: 14, marginTop: 2 }}>쿼리 {s.query_count}건</div>
+                          </div>
+                        ))}
+                        <div style={{ marginTop: 6, fontSize: 11, color: "#555", textAlign: "center" }}>1.5s 자동 갱신</div>
+                      </>
+                    );
+                  })()}
+
+                  {srvRightPanel === "bench" && (<>
+                    <div className="srv-slide-section">성능 벤치마크</div>
+                    <div className="srv-slide-text" style={{ marginBottom: 10 }}>
+                      RustDB vs MySQL — INSERT TPS, SELECT 등호·범위, 병렬 스케일링, 동시 접속 TPS 측정
+                    </div>
+                    <div style={{ display: "flex", gap: 8, marginBottom: 14 }}>
+                      <button
+                        className="srv-action-btn primary"
+                        style={{ fontSize: 12 }}
+                        onClick={async () => {
+                          try {
+                            const raw: string = await invoke("read_bench_result");
+                            if (raw) setBenchResult(JSON.parse(raw));
+                            else setBenchResult(null);
+                          } catch { setBenchResult(null); }
+                        }}
+                      >결과 불러오기</button>
+                      <button
+                        className="srv-action-btn save"
+                        style={{ fontSize: 12 }}
+                        onClick={() => invoke("open_bench_terminal")}
+                      >터미널 실행</button>
+                    </div>
+                    {benchResult ? (() => {
+                      const r = benchResult as Record<string, Record<string, unknown>>;
+                      const fmt = (v: unknown) => typeof v === "number" ? v.toLocaleString("ko-KR", { maximumFractionDigits: 1 }) : String(v);
+                      return (
+                        <div style={{ fontSize: 12, lineHeight: 1.7 }}>
+                          {r.insert_tps && (
+                            <div style={{ marginBottom: 10 }}>
+                              <div style={{ color: "#4ec9b0", fontWeight: 600, marginBottom: 4 }}>INSERT TPS</div>
+                              <div>RustDB: <strong>{fmt((r.insert_tps as Record<string,unknown>).rustdb)}</strong> TPS</div>
+                              <div>MySQL: <strong>{fmt((r.insert_tps as Record<string,unknown>).mysql)}</strong> TPS</div>
+                            </div>
+                          )}
+                          {r.select_eq && (
+                            <div style={{ marginBottom: 10 }}>
+                              <div style={{ color: "#4ec9b0", fontWeight: 600, marginBottom: 4 }}>SELECT 등호 (ms/query)</div>
+                              {(["seq","btree","hash"] as const).map(k => {
+                                const rd = (r.select_eq as Record<string,Record<string,unknown>>).rustdb;
+                                const md = (r.select_eq as Record<string,Record<string,unknown>>).mysql;
+                                return rd && md ? (
+                                  <div key={k}>{k}: RustDB <strong>{fmt(rd[k])}</strong> / MySQL <strong>{fmt(md[k])}</strong></div>
+                                ) : null;
+                              })}
+                            </div>
+                          )}
+                          {r.select_range && (
+                            <div style={{ marginBottom: 10 }}>
+                              <div style={{ color: "#4ec9b0", fontWeight: 600, marginBottom: 4 }}>SELECT 범위 (ms/query)</div>
+                              {(["no_index","index"] as const).map(k => {
+                                const rd = (r.select_range as Record<string,Record<string,unknown>>).rustdb;
+                                const md = (r.select_range as Record<string,Record<string,unknown>>).mysql;
+                                return rd && md ? (
+                                  <div key={k}>{k}: RustDB <strong>{fmt(rd[k])}</strong> / MySQL <strong>{fmt(md[k])}</strong></div>
+                                ) : null;
+                              })}
+                            </div>
+                          )}
+                          {r.parallel && (
+                            <div style={{ marginBottom: 10 }}>
+                              <div style={{ color: "#4ec9b0", fontWeight: 600, marginBottom: 4 }}>병렬 스케일링 (ms/query)</div>
+                              <div>OFF: <strong>{fmt((r.parallel as Record<string,unknown>).off)}</strong></div>
+                              <div>ON: <strong>{fmt((r.parallel as Record<string,unknown>).on)}</strong></div>
+                            </div>
+                          )}
+                          {r.concurrent && (
+                            <div>
+                              <div style={{ color: "#4ec9b0", fontWeight: 600, marginBottom: 4 }}>동시 접속 TPS</div>
+                              {(["1","4","8"] as const).map(n => {
+                                const entry = (r.concurrent as Record<string,Record<string,unknown>>)[n];
+                                return entry ? (
+                                  <div key={n}>{n}threads: RustDB <strong>{fmt(entry.rustdb)}</strong> / MySQL <strong>{fmt(entry.mysql)}</strong></div>
+                                ) : null;
+                              })}
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })() : (
+                      <div className="srv-slide-text">result.json이 없습니다. 터미널에서 bench.py를 먼저 실행하세요.</div>
+                    )}
                   </>)}
 
                   {srvRightPanel === "mysql" && (<>
@@ -4584,6 +4774,27 @@ function App() {
                   <ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/><path d="M3 12c0 1.66 4 3 9 3s9-1.34 9-3"/>
                 </svg>
                 <span>MySQL</span>
+              </button>
+              <button
+                className={`srv-rbar-btn ${srvRightPanel === "bench" ? "active" : ""}`}
+                onClick={() => setSrvRightPanel(p => p === "bench" ? "none" : "bench")}
+                title="벤치마크"
+              >
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+                  <line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/>
+                </svg>
+                <span>Bench</span>
+              </button>
+              <button
+                className={`srv-rbar-btn ${srvRightPanel === "sessions" ? "active" : ""}`}
+                onClick={() => setSrvRightPanel(p => p === "sessions" ? "none" : "sessions")}
+                title="접속 세션"
+              >
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+                  <circle cx="9" cy="7" r="4"/><path d="M3 21v-2a4 4 0 014-4h4a4 4 0 014 4v2"/>
+                  <circle cx="19" cy="7" r="2"/><path d="M23 21v-1a3 3 0 00-2-2.83"/>
+                </svg>
+                <span>Session</span>
               </button>
             </div>
 

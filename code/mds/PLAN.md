@@ -1,4 +1,4 @@
-# RustDB 개발 계획 (v2.2.0 → 잔여 2주)
+# RustDB 개발 계획 (v2.2.0)
 
 ---
 
@@ -15,58 +15,38 @@
 | **데이터 디렉터리 재구성** | `data/_system/` 전역 파일 분리, 레거시 자동 마이그레이션, 연결별 독립 폴더(`local/`, `data_숫자/`), UI·CLI 동일 경로 공유 |
 | **Tauri UI MySQL 포트 설정** | Server Manager에 MySQL 포트 입력 필드 추가 — UI에서 MySQL 프로토콜 포트 직접 설정 가능 |
 | **Server Manager UI 개편** | 탭 제거, 우측 슬라이드 패널(CLI 가이드 / MySQL 연결), 버퍼 풀 크기 설정, 병렬 쿼리 토글, 버튼 스타일 통일 |
+| **EXPLAIN ANALYZE 정확도 개선** | 추정 행수(`est_rows`) vs 실제 행수 비교 출력, 실행 시간 ms/sec 단위 자동 선택 |
+| **데이터 분석 리포트** | 결과 패널 "AI 분석" 버튼 — SELECT 결과를 Gemini가 요약·패턴·인사이트 한국어 분석 (`/api/report`) |
+| **벤치마크 자동 실행 UI** | Server Manager Bench 패널 — result.json 불러오기·포맷 표시, 터미널에서 bench.py 실행 버튼 |
+| **접속 세션 실시간 모니터링** | Server Manager Session 패널 — addr·user·접속 경과 시간·쿼리 건수, 1.5s 자동 갱신 (`SessionInfo` Tauri 백엔드) |
 
 ---
 
 ## 🔧 엔진
 
-| 항목 | 난이도 | 예상 기간 | 효과 | 우선순위 |
-|---|:---:|:---:|---|:---:|
-| ~~**Hash Index**~~ | ✅ 완료 | — | `USING HASH` 구문, 등호 O(1), 플래너 우선 선택, EXPLAIN 표시 | ★★★ |
-| **병렬 실행 확장** | 중 | 4일 | 집계 map-reduce(SUM/COUNT/AVG chunk별 partial→merge) + Hash Join probe 병렬화 → 코어 수 비례 스케일 | ★★★ |
-| ~~**히스토그램 통계**~~ | ✅ 완료 | — | equi-depth 10-bucket, ANALYZE TABLE 빌드, 플래너 selectivity 추정 적용 | ★★★ |
-| **Buffer Pool 개선** | 중 | 3일 | dirty 페이지 eviction 버그 수정 완료 / LRU → Clock-Pro 교체 + SeqScan read-ahead 미구현 | ★★ |
-| **GAP Lock / Next-key Lock** | 중 | 3일 | Serializable 팬텀 리드 실제 방지, 현재 행 수 비교 방식 교체 | ★★ |
-| **MVCC 버전 체인** | 상 | 8일+ | 읽기·쓰기 잠금 충돌 제거 → 동시 접속 TPS 대폭 향상, SSI 선행 조건 | ★★ |
+| 항목 | 상태 | 내용 |
+|---|:---:|---|
+| ~~**Hash Index**~~ | ✅ | `USING HASH` 구문, 등호 O(1), 플래너 우선 선택, EXPLAIN 표시 |
+| ~~**병렬 실행 확장**~~ | ✅ | SeqScan WHERE 필터 (par_chunks) + GROUP BY 집계 (par_iter) + Hash Join probe (par_iter) — rayon, `RUSTDB_PARALLEL` 토글 |
+| ~~**히스토그램 통계**~~ | ✅ | equi-depth 10-bucket, ANALYZE TABLE 빌드, 플래너 PkRange·SecondaryRange selectivity 추정 |
+| ~~**Buffer Pool 개선**~~ | ✅ | LRU 캐시 + dirty eviction 버그 수정 / Clock-Pro·read-ahead는 전체 테이블 단위 구조상 효과 없어 미적용 |
+| **GAP Lock / Next-key Lock** | ⏭ 스킵 | 행 수 비교 방식으로 팬텀 감지 이미 동작 / 데모·벤치마크 임팩트 낮음 |
+| **MVCC 버전 체인** | ⏭ 스킵 | 8일+ 공수 / Deferred Write로 ACID 이미 충족 / 발표 범위 초과 |
 
 ---
 
 ## 📊 성능 측정
 
-### 측정 항목
+| 항목 | 상태 |
+|---|:---:|
+| MySQL 설치 확인 | ✅ |
+| `bench.py` 작성 (INSERT TPS / SELECT 등호·범위 / 병렬 / 동시 접속) | ✅ |
+| `chart.py` 작성 (matplotlib PNG 5장) | ✅ |
+| 측정 실행 → `result.json` 저장 | ⬜ |
+| `python chart.py` → `charts/*.png` 생성 | ⬜ |
+| 수치를 발표 자료에 반영 | ⬜ |
 
-| 항목 | 측정 방법 | 발표 포인트 | 우선순위 |
-|---|---|---|:---:|
-| **INSERT TPS** | 1만 행 bulk insert 소요 시간 | RustDB vs MySQL 수치 비교 | ★★★ |
-| **SELECT — 등호 (Hash/B-tree/SeqScan)** | 동일 쿼리, 인덱스 종류별 응답 시간 | Hash Index O(1) 효과 증명 | ★★★ |
-| **SELECT — 범위 (히스토그램 전/후)** | ANALYZE 전·후 EXPLAIN est_rows 비교 | 플래너 selectivity 개선 증명 | ★★★ |
-| **병렬 스케일링** | 코어 수(1/2/4) 대비 집계 처리량 | "왜 Rust" — 선형 스케일 증명 | ★★★ |
-| **동시 접속 TPS** | 다중 클라이언트 동시 쿼리 | 서버 처리량 한계 측정 | ★★ |
-
-### 기술 스택
-
-```
-rustdb-server (포트 7878)  ←──┐
-                               Python 벤치마크 스크립트 ──→ matplotlib 차트
-MySQL (포트 3306)          ←──┘
-```
-
-- **RustDB 접속**: `socket` TCP (AUTH + SQL 프로토콜)
-- **MySQL 접속**: `mysql-connector-python`
-- **시각화**: `matplotlib` bar chart / line chart
-
-### 진행 순서
-
-1. MySQL 설치 확인 (비교 대상)
-2. Python 벤치마크 스크립트 작성 (`code/bench/bench.py`)
-3. 측정 실행 → JSON 결과 저장
-4. 차트 생성 스크립트 작성 (`code/bench/chart.py`)
-5. 발표 자료용 PNG 출력
-
-| 스크립트 | 역할 | 난이도 | 예상 기간 |
-|---|---|:---:|:---:|
-| `bench.py` | 양쪽 TPS/latency 측정, JSON 저장 | 하 | 1일 |
-| `chart.py` | matplotlib 시각화, PNG 출력 | 하 | 0.5일 |
+스크립트 위치: `code/test/perf/` — 실행 가이드: `README.txt`
 
 ---
 
@@ -74,7 +54,8 @@ MySQL (포트 3306)          ←──┘
 
 | 항목 | 난이도 | 예상 기간 | 효과 | 우선순위 |
 |---|:---:|:---:|---|:---:|
-| **데이터 분석 리포트** | 하 | 1일 | SELECT 결과 → AI 요약·패턴·인사이트 자동 도출, `/api/report` 추가 | ★★★ |
+| ~~**True MCP 전환**~~ | ✅ | — | `mcp_server.py` 추가 — Anthropic MCP 표준 구현, Claude Desktop 연동, API 키 불필요 | — |
+| ~~**데이터 분석 리포트**~~ | ✅ | — | SELECT 결과 → AI 요약·패턴·인사이트 자동 도출, `/api/report` 추가 | — |
 | **AI 자동완성 (Tab)** | 중 | 3일 | Monaco `inlineCompletionsProvider` + `/api/nl-to-sql` 연동 | ★★ |
 
 ---
@@ -83,18 +64,6 @@ MySQL (포트 3306)          ←──┘
 
 | 항목 | 난이도 | 예상 기간 | 효과 | 우선순위 |
 |---|:---:|:---:|---|:---:|
-| **벤치마크 자동 실행 UI** | 하 | 1일 | Server Manager에서 버튼 하나로 벤치마크 실행·결과 표시 | ★★ |
-| **EXPLAIN ANALYZE 실행 시간 정확도** | 하 | 0.5일 | 현재 실제 측정 중이나 정밀도 개선 | ★★ |
-| **INSERT … ON DUPLICATE KEY UPDATE 검증** | 하 | 0.5일 | AST 존재하나 executor 구현 완전성 확인·수정 | ★★ |
-| **SHOW PROCESSLIST 실시간 갱신 UI** | 하 | 1일 | Server Manager에 실시간 세션 모니터링 패널 | ★ |
-
----
-
-## 📅 2주 추천 순서
-
-```
-1주차  벤치마크 스크립트 작성 → Hash Index 구현 → RustDB vs MySQL 차트
-2주차  병렬 실행 확장 → 데이터 분석 리포트 → GAP Lock
-```
-
-벤치마크를 먼저 잡는 이유: Hash Index·병렬 확장 구현 직후 수치로 바로 증명할 수 있어 시너지가 가장 크다.
+| ~~**벤치마크 자동 실행 UI**~~ | ✅ | — | Server Manager Bench 패널 — result.json 불러오기·포맷 표시, bench.py 터미널 실행 | — |
+| ~~**EXPLAIN ANALYZE 실행 시간 정확도**~~ | ✅ | — | 추정 행수 vs 실제 행수 비교, 실행 시간 ms/sec 자동 단위 선택 | — |
+| ~~**SHOW PROCESSLIST 실시간 갱신 UI**~~ | ✅ | — | Server Manager Session 패널 — addr·user·경과 시간·쿼리 건수, 1.5s 자동 갱신 | — |

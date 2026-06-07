@@ -230,7 +230,7 @@
 | 인덱스 자동 선택 | ✓ | ✓ | ✓ | ✓ |
 | JOIN 알고리즘 | NestedLoop, Hash, BNL | NestedLoop, Hash, MergeJoin | NestedLoop, Hash, SortMerge | NestedLoop, Hash, SortMerge |
 | JOIN 순서 최적화 | ✓ (동적 프로그래밍) | ✓ (Geqo + 동적 프로그래밍) | ✓ (동적 프로그래밍) | ✓ (System-R bitmask DP, INNER 한정 · 그리디 폴백) |
-| 병렬 쿼리 | △ (일부) | ✓ | ✓ (Parallel Query) | △ (SeqScan WHERE 필터 rayon 병렬, 읽기 한정) |
+| 병렬 쿼리 | △ (일부) | ✓ | ✓ (Parallel Query) | △ (SeqScan WHERE 필터 + GROUP BY 집계 + Hash Join probe — rayon, `RUSTDB_PARALLEL` 토글) |
 | JIT 컴파일 | ✗ | ✓ (LLVM) | ✗ (Native Compilation은 별도 옵션) | ✗ |
 | EXPLAIN 출력 | ✓ | ✓ (VERBOSE, BUFFERS, FORMAT JSON) | ✓ (EXPLAIN PLAN + DBMS_XPLAN.DISPLAY) | ✓ (접근 경로·비용·실제 행 수, 74자 포맷) |
 | 쿼리 힌트 | ✓ (USE INDEX, STRAIGHT_JOIN) | ✓ (pg_hint_plan 확장) | ✓ (/*+ INDEX(t idx) */ 등 풍부한 힌트) | ✗ |
@@ -309,6 +309,6 @@
 | 히스토리 | ✓ | ✓ | ✓ | ✓ (200개 보존, 연결별 분리) |
 | 다중 탭 | ✓ | ✓ | ✓ | ✓ (탭별 결과·에디터 상태 유지, 우클릭 컨텍스트 메뉴 — 닫기/분할/고정/이름 변경, 탭 고정 📌, 분할 시 왼쪽 탭바에서 제거·닫으면 복원) |
 | 연결 관리 | ✓ | ✓ | ✓ | ✓ (연결별 독립 데이터 디렉토리) |
-| 서버 모니터링 | ✓ | ✓ | ✓ (Performance Hub) | △ (TCP 서버 on/off·클라이언트 수·로그) |
+| 서버 모니터링 | ✓ | ✓ | ✓ (Performance Hub) | ✓ (TCP 서버 on/off·클라이언트 수·로그, 접속 세션 실시간 모니터링 패널 — addr·user·경과 시간·쿼리 건수, 벤치마크 결과 UI 패널) |
 | 데이터 임포트/익스포트 | ✓ (CSV, SQL) | ✓ | ✓ (CSV, Excel, XML) | ✓ (CSV 익스포트·임포트) |
-| AI 연동 | △ (HeatWave AutoML) | ✗ | △ (Oracle AI) | ✓ (MCP 서버 — AI assistant: 자연어→SQL, EXPLAIN 해석, 스키마 설계, 멀티턴 채팅, 에디터 파일 컨텍스트 자동 주입, @파일명 멘션, AI 파일 편집 블록, 채팅 세션 기록, Tauri 자동 시작) |
+| AI 연동 | △ (HeatWave AutoML) | ✗ | △ (Oracle AI) | ✓ (Gemini AI 서버 — 자연어→SQL, EXPLAIN 해석, 에러 AI 해석, 스키마 설계, 쿼리 최적화 제안, 결과 데이터 분석 리포트, 멀티턴 채팅, 에디터 파일 컨텍스트·@파일명 멘션, AI 파일 편집, 채팅 세션 기록 / True MCP — mcp_server.py: Claude Desktop 연동, stdio JSON-RPC, 4개 도구, API 키 불필요) |

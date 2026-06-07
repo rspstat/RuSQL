@@ -1,8 +1,8 @@
 # RustDB AI 연동 (v2.2.0)
 
 > 프로젝트 제목 "MCP 기반 커스텀 RDBMS"의 핵심 차별점  
-> 구현 언어: Python (FastAPI)  
-> 기준일: 2026-05-27
+> 구현 언어: Python (FastAPI + MCP)  
+> 기준일: 2026-06-07
 
 ---
 
@@ -110,67 +110,109 @@ AI가 직접 에디터 탭의 SQL 파일을 수정·삽입·삭제할 수 있다
 |---|------|------|--------|--------|
 | 1 | 에러 메시지 AI 해석 ✅ | **구현 완료** — 쿼리 실패 시 결과 패널의 "AI 해석" 버튼으로 오류 원인·해결 방안 제시 (`/api/explain-error`) | 낮음 | 높음 |
 | 2 | 쿼리 최적화 제안 ✅ | **구현 완료** — AI 패널 explain 모드의 "최적화 제안" 버튼으로 SQL+EXPLAIN 리뷰, 인덱스·재작성 개선안 제시 (`/api/optimize`) | 낮음 | 높음 |
-| 3 | 데이터 분석 리포트 | SELECT 결과를 AI가 요약·패턴 분석·인사이트 한국어로 도출 | 낮음 | 중간 |
+| 3 | 데이터 분석 리포트 ✅ | **구현 완료** — 결과 패널 "AI 분석" 버튼으로 SELECT 결과를 AI가 요약·패턴·인사이트 한국어 분석 (`/api/report`) | 낮음 | 중간 |
 | 4 | AI 자동완성 | 에디터에서 Tab으로 AI SQL 완성 (Monaco inlineCompletionsProvider) | 중간 | 중간 |
 
 ---
 
-## 5. MCP 서버 구조
+## 5. 서버 구성
+
+`rustdb-mcp/` 아래 두 개의 Python 서버가 공존한다.
 
 ```
 rustdb-mcp/
-  server.py          # FastAPI MCP 서버 (단일 파일)
-  requirements.txt   # google-genai, fastapi, uvicorn
+  server.py                         # Gemini AI 기능 서버 (FastAPI, HTTP)
+  mcp_server.py                     # True MCP 서버 (stdio, Claude Desktop용)
+  requirements.txt                  # 공통 의존 패키지
+  claude_desktop_config_example.json
 ```
 
-### 엔드포인트
+---
 
-| 경로 | 메서드 | 설명 |
-|------|--------|------|
-| `GET /health` | GET | 서버 상태 및 모델 확인 |
-| `POST /api/nl-to-sql` | POST | 자연어 → SQL 변환 |
-| `POST /api/explain` | POST | EXPLAIN 결과 AI 해석 |
-| `POST /api/explain-error` | POST | 쿼리 실패 시 오류 원인·해결 방안 해석 |
-| `POST /api/optimize` | POST | SQL + EXPLAIN을 리뷰해 인덱스·재작성 등 최적화 제안 |
-| `POST /api/schema-design` | POST | 자연어 → CREATE TABLE SQL |
-| `POST /api/chat` | POST | 멀티턴 채팅 (파일 컨텍스트 + 파일 편집 포함) |
+### 5-1. AI 기능 서버 (`server.py`) — UI 연동
 
-### 핵심 파이프라인
+FastAPI HTTP 서버. Tauri 앱이 자동 시작하고 UI 패널이 호출한다.
+
+| 경로 | 설명 |
+|------|------|
+| `GET /health` | 서버 상태 확인 |
+| `POST /api/nl-to-sql` | 자연어 → SQL |
+| `POST /api/explain` | EXPLAIN 결과 해석 |
+| `POST /api/explain-error` | 오류 원인·해결 방안 |
+| `POST /api/optimize` | 쿼리 최적화 제안 |
+| `POST /api/report` | SELECT 결과 데이터 분석·인사이트 |
+| `POST /api/schema-design` | 자연어 → CREATE TABLE SQL |
+| `POST /api/chat` | 멀티턴 채팅 (파일 컨텍스트 + 파일 편집) |
+
+**핵심 파이프라인 (Gemini):**
 
 ```python
 from google import genai
-from google.genai import types
-
 MODEL = "gemini-2.5-flash"
 
-# 채팅 (멀티턴 + 파일 컨텍스트)
 client = genai.Client(api_key=api_key)
-chat_session = client.chats.create(
-    model=MODEL,
-    config=types.GenerateContentConfig(system_instruction=system),
-    history=history,
-)
+chat_session = client.chats.create(model=MODEL, config=..., history=history)
 response = chat_session.send_message(last_message)
 ```
 
-### 시스템 프롬프트 구조
+---
+
+### 5-2. True MCP 서버 (`mcp_server.py`) — Claude Desktop 연동
+
+**Anthropic MCP(Model Context Protocol)** 표준 구현.
+stdio JSON-RPC로 동작하며 AI API 키가 필요 없다.
+Claude Desktop이 이 서버를 클라이언트로 사용해 RustDB에 직접 질의한다.
+
+| Tool | 설명 |
+|------|------|
+| `execute_sql(sql, database)` | 임의 SQL 실행 |
+| `list_databases()` | SHOW DATABASES |
+| `list_tables(database)` | SHOW TABLES |
+| `get_table_schema(table, database)` | SHOW CREATE TABLE |
+
+**아키텍처:**
 
 ```
-[역할] RustDB AI 어시스턴트 (MySQL 호환 SQL 엔진)
-[컨텍스트] 현재 DB: {current_db}
-[스키마] {schema}
-[열린 파일들] --- filename.sql --- ... (open_files)
-[규칙]
-- 한국어 질문에는 한국어로 답변
-- SQL 생성 시 ```sql 블록 사용
-- 파일 수정 시 <<<FILE filename.sql ... FILE>>> 형식 사용
+Claude Desktop ──stdio/JSON-RPC──▶ mcp_server.py ──TCP──▶ RustDB :7878
+      ↑
+  Claude AI (클라이언트 측)
+  자연어 → SQL 변환, 분석 담당
 ```
+
+AI 추론은 Claude Desktop(클라이언트) 측에서 수행되므로 서버에 API 키 불필요.
+
+---
+
+### 5-3. Claude Desktop 연결 설정
+
+1. `%APPDATA%\Claude\claude_desktop_config.json` 편집
+
+```json
+{
+  "mcpServers": {
+    "rustdb": {
+      "command": "python",
+      "args": [
+        "-u",
+        "C:\\Users\\win11\\Desktop\\projects\\dbe\\code\\rustdb-mcp\\mcp_server.py"
+      ]
+    }
+  }
+}
+```
+
+2. RustDB 서버 실행 → Claude Desktop 재시작
+3. 채팅에서 `rustdb` 도구 사용 가능
+
+> 예시 대화:  
+> "employees 테이블에서 급여 상위 5명 조회해줘"  
+> → Claude가 `execute_sql` 호출 → RustDB 결과 반환 → 분석 응답
 
 ---
 
 ## 6. Tauri 자동 시작
 
-앱 실행 시 MCP 서버를 자동으로 시작하고, 앱 종료 시 프로세스를 정리한다.
+앱 실행 시 AI 기능 서버(`server.py`)를 자동으로 시작하고, 앱 종료 시 프로세스를 정리한다.
 
 ```rust
 // main.rs — setup hook
@@ -204,7 +246,7 @@ if let tauri::RunEvent::Exit = event {
                           ↓
         POST /api/chat { messages, schema, open_files }
                           ↓
-               AI assistant API
+               Gemini API (gemini-2.5-flash)
                           ↓
          { content, sql?, file_edits? }
                     ↙         ↘
@@ -222,6 +264,7 @@ if let tauri::RunEvent::Exit = event {
 - UI 설정 탭에서 Google Gemini API 키 입력
 - `localStorage`에 저장 (앱 재시작 후 유지)
 - 코드에 하드코딩 없음 — 키 노출 위험 없음
+- True MCP 서버(`mcp_server.py`)는 API 키 불필요
 
 ---
 
@@ -231,7 +274,9 @@ if let tauri::RunEvent::Exit = event {
 |------|------|
 | OS | Windows 11 Pro |
 | Python | 3.x |
-| AI 모델 | gemini-2.5-flash |
-| 컨텍스트 윈도우 | 1,000,000 토큰 |
-| MCP 서버 포트 | 8765 |
+| AI 모델 (UI) | gemini-2.5-flash |
+| AI 모델 (MCP) | Claude (Claude Desktop) |
+| Gemini 컨텍스트 윈도우 | 1,000,000 토큰 |
+| AI 기능 서버 포트 | 8765 |
+| MCP 서버 전송 | stdio (Claude Desktop) |
 | 자동 시작 | Tauri setup hook (python -m uvicorn) |

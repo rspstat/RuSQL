@@ -6797,24 +6797,25 @@ impl Executor {
 
     /// EXPLAIN ANALYZE <SELECT> — 실행 계획 + 실제 실행 결과(행 수·소요 시간) 출력
     fn exec_explain_analyze(&mut self, s: &mut SharedDatabase, stmt: Statement) -> Result<String, String> {
-        // 실행 계획 문자열 생성 (실행 전, 헤더만 교체)
-        let plan_body = match &stmt {
+        // 실행 계획 + 예측 행 수 추출
+        let (plan_body, est_rows) = match &stmt {
             Statement::Select { table, condition, joins, subquery, columns, .. } => {
                 if subquery.is_some() {
-                    "| Access: SUBQUERY SCAN                            |\n".to_string()
+                    ("| Access: SUBQUERY SCAN                            |\n".to_string(), 0usize)
                 } else {
                     let planner = Planner::new(&s.tables, &s.indexes, &s.index_meta, &s.composite_indexes, &s.hash_indexes, &s.hash_index_meta, &s.catalog, &s.table_stats);
                     let plan = planner.plan_covering(table, condition, joins, columns);
-                    // explain()에서 헤더·구분선을 제외한 중간 행만 추출
-                    planner.explain(&plan)
+                    let est = plan.base.est_rows;
+                    let body = planner.explain(&plan)
                         .lines()
                         .skip(3)  // +---+ | QUERY PLAN | +---+
                         .take_while(|l| !l.starts_with('+'))
                         .map(|l| format!("{}\n", l))
-                        .collect()
+                        .collect();
+                    (body, est)
                 }
             }
-            _ => String::new(),
+            _ => (String::new(), 0),
         };
 
         // 실제 실행 + 시간 측정
@@ -6822,12 +6823,31 @@ impl Executor {
         let result = self.execute_with_s(s, stmt)?;
         let elapsed = start.elapsed();
 
-        // 실제 반환 행 수 추출
+        // 실제 반환 행 수 추출 (footer 파싱 → 데이터 행 카운트 폴백)
         let actual_rows = result.lines()
             .find(|l| l.contains("row(s) returned"))
             .and_then(|l| l.trim().split_whitespace().next())
             .and_then(|n| n.parse::<usize>().ok())
-            .unwrap_or(0);
+            .unwrap_or_else(|| {
+                result.lines()
+                    .filter(|l| l.starts_with('|') && !l.contains("---") && l.trim() != "|")
+                    .count()
+                    .saturating_sub(1) // 헤더 행 제외
+            });
+
+        // 시간 단위: 1초 미만이면 ms
+        let time_str = if elapsed.as_millis() < 1000 {
+            format!("{:.3} ms", elapsed.as_secs_f64() * 1000.0)
+        } else {
+            format!("{:.3} sec", elapsed.as_secs_f64())
+        };
+
+        // 예측 vs 실제 rows
+        let rows_str = if est_rows > 0 {
+            format!("{} (est: {})", actual_rows, est_rows)
+        } else {
+            actual_rows.to_string()
+        };
 
         let sep = "+--------------------------------------------------+";
         let fmt_row = |label: &str, val: &str| -> String {
@@ -6840,8 +6860,8 @@ impl Executor {
         out.push_str(sep); out.push('\n');
         out.push_str(&plan_body);
         out.push_str("|                                                  |\n");
-        out.push_str(&fmt_row("Actual rows", &actual_rows.to_string()));
-        out.push_str(&fmt_row("Actual time", &format!("{:.3} sec", elapsed.as_secs_f64())));
+        out.push_str(&fmt_row("Actual rows", &rows_str));
+        out.push_str(&fmt_row("Actual time", &time_str));
         out.push_str(sep);
         Ok(out)
     }

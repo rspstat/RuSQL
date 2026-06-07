@@ -33,12 +33,22 @@ fn start_mcp_server() -> Option<Child> {
         .ok()
 }
 
+// ─── 세션 정보 ────────────────────────────────────────────────
+#[derive(serde::Serialize, Clone)]
+struct SessionInfo {
+    addr:         String,
+    user:         String,
+    connected_at: u64,
+    query_count:  usize,
+}
+
 // ─── 연결별 서버 상태 ─────────────────────────────────────────
 struct ServerEntry {
-    running: Arc<AtomicBool>,
-    clients: Arc<AtomicUsize>,
-    log:     Arc<Mutex<Vec<String>>>,
-    port:    Arc<Mutex<u16>>,
+    running:  Arc<AtomicBool>,
+    clients:  Arc<AtomicUsize>,
+    log:      Arc<Mutex<Vec<String>>>,
+    port:     Arc<Mutex<u16>>,
+    sessions: Arc<Mutex<Vec<SessionInfo>>>,
 }
 
 // ─── 상태 구조체 ──────────────────────────────────────────────
@@ -69,6 +79,7 @@ struct ServerStatus {
     port:         u16,
     client_count: usize,
     log:          Vec<String>,
+    sessions:     Vec<SessionInfo>,
 }
 
 // ─── 헬퍼: 로그 추가 ──────────────────────────────────────────
@@ -113,7 +124,9 @@ fn load_server_log(conn_id: &str) -> Vec<String> {
 
 // ─── TCP 클라이언트 핸들러 ────────────────────────────────────
 // 각 TCP 클라이언트는 독립적인 Executor(트랜잭션·current_db)를 가진다.
-fn handle_client(stream: TcpStream, shared: Arc<RwLock<SharedDatabase>>, log: Arc<Mutex<Vec<String>>>) {
+fn handle_client(stream: TcpStream, shared: Arc<RwLock<SharedDatabase>>, log: Arc<Mutex<Vec<String>>>, sessions: Arc<Mutex<Vec<SessionInfo>>>) {
+    let _ = stream.set_nonblocking(false); // listener is non-blocking; accepted streams must be reset to blocking
+    let addr_str = stream.peer_addr().map(|a| a.to_string()).unwrap_or_else(|_| "unknown".to_string());
     let mut writer = match stream.try_clone() {
         Ok(s) => s,
         Err(_) => return,
@@ -158,6 +171,18 @@ fn handle_client(stream: TcpStream, shared: Arc<RwLock<SharedDatabase>>, log: Ar
     let _ = writeln!(writer, "---END---");
     let _ = writer.flush();
 
+    // 세션 등록
+    {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+        sessions.lock().unwrap().push(SessionInfo {
+            addr: addr_str.clone(),
+            user: auth_user.to_string(),
+            connected_at: now,
+            query_count: 0,
+        });
+    }
+
     // 3. 쿼리 세션
     let mut exec = Executor::new_session(Arc::clone(&shared));
     let mut buf  = String::new();
@@ -197,8 +222,18 @@ fn handle_client(stream: TcpStream, shared: Arc<RwLock<SharedDatabase>>, log: Ar
             let _ = writeln!(writer, "({:.3} sec)", t0.elapsed().as_secs_f64());
             let _ = writeln!(writer, "---END---");
             let _ = writer.flush();
+
+            // 쿼리 카운트 갱신
+            if let Ok(mut s) = sessions.lock() {
+                if let Some(sess) = s.iter_mut().find(|s| s.addr == addr_str) {
+                    sess.query_count += 1;
+                }
+            }
         }
     }
+
+    // 세션 제거
+    sessions.lock().unwrap().retain(|s| s.addr != addr_str);
 }
 
 // ─── 주석 인식 쿼리 분리 ─────────────────────────────────────
@@ -612,18 +647,20 @@ fn start_server(conn_id: String, port: u16, mysql_port: u16, state: State<AppSta
     let shared_db = state.db.lock().unwrap().get_shared();
     let shared_db_mysql = Arc::clone(&shared_db); // MySQL 리스너용 사전 복제
 
-    let running = Arc::new(AtomicBool::new(true));
-    let clients = Arc::new(AtomicUsize::new(0));
+    let running  = Arc::new(AtomicBool::new(true));
+    let clients  = Arc::new(AtomicUsize::new(0));
+    let sessions = Arc::new(Mutex::new(Vec::<SessionInfo>::new()));
     // 이전 세션 로그를 파일에서 복원해 이어서 기록한다.
-    let log     = Arc::new(Mutex::new(load_server_log(&conn_id)));
+    let log      = Arc::new(Mutex::new(load_server_log(&conn_id)));
     let log_mysql = Arc::clone(&log); // MySQL 로그용 사전 복제
     let port_store = Arc::new(Mutex::new(port));
 
     state.servers.lock().unwrap().insert(conn_id, ServerEntry {
-        running: running.clone(),
-        clients: clients.clone(),
-        log:     log.clone(),
-        port:    port_store,
+        running:  running.clone(),
+        clients:  clients.clone(),
+        log:      log.clone(),
+        port:     port_store,
+        sessions: sessions.clone(),
     });
 
     thread::spawn(move || {
@@ -644,12 +681,13 @@ fn start_server(conn_id: String, port: u16, mysql_port: u16, state: State<AppSta
                 Ok((stream, addr)) => {
                     clients.fetch_add(1, Ordering::SeqCst);
                     add_log(&log, &format!("클라이언트 접속: {}", addr));
-                    let sh2  = Arc::clone(&shared_db);
-                    let cc   = clients.clone();
-                    let log2 = log.clone();
-                    let astr = addr.to_string();
+                    let sh2   = Arc::clone(&shared_db);
+                    let cc    = clients.clone();
+                    let log2  = log.clone();
+                    let sess2 = sessions.clone();
+                    let astr  = addr.to_string();
                     thread::spawn(move || {
-                        handle_client(stream, sh2, log2.clone());
+                        handle_client(stream, sh2, log2.clone(), sess2);
                         cc.fetch_sub(1, Ordering::SeqCst);
                         add_log(&log2, &format!("클라이언트 종료: {}", astr));
                     });
@@ -738,10 +776,11 @@ fn get_server_status(conn_id: String, state: State<AppState>) -> ServerStatus {
                 port:         *e.port.lock().unwrap(),
                 client_count: e.clients.load(Ordering::SeqCst),
                 log,
+                sessions:     e.sessions.lock().unwrap().clone(),
             }
         }
         // 서버 미실행 시에도 이전 세션 로그를 파일에서 읽어 표시
-        None => ServerStatus { running: false, port: 7878, client_count: 0, log: load_server_log(&conn_id) },
+        None => ServerStatus { running: false, port: 7878, client_count: 0, log: load_server_log(&conn_id), sessions: vec![] },
     }
 }
 
@@ -860,6 +899,25 @@ fn open_url(url: String) {
         .spawn();
 }
 
+fn bench_dir() -> std::path::PathBuf {
+    let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    manifest.parent().unwrap().parent().unwrap().join("test").join("perf")
+}
+
+#[tauri::command]
+fn read_bench_result() -> String {
+    std::fs::read_to_string(bench_dir().join("result.json")).unwrap_or_default()
+}
+
+#[tauri::command]
+fn open_bench_terminal() {
+    let dir = bench_dir();
+    let _ = std::process::Command::new("cmd")
+        .args(["/c", "start", "cmd", "/k", "python bench.py"])
+        .current_dir(dir)
+        .spawn();
+}
+
 // ─── 엔트리포인트 ─────────────────────────────────────────────
 fn main() {
     let exec = Executor::new();
@@ -905,6 +963,8 @@ fn main() {
             open_url,
             get_app_data_dir,
             set_parallel_query,
+            read_bench_result,
+            open_bench_terminal,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

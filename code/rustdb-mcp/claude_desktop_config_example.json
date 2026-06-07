@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "rustdb": {
+      "command": "python",
+      "args": [
+        "-u",
+        "C:\\Users\\win11\\Desktop\\projects\\dbe\\code\\rustdb-mcp\\mcp_server.py"
+      ]
+    }
+  }
+}

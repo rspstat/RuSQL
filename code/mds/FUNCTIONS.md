@@ -10,7 +10,7 @@
   - Join 알고리즘 자동 선택 (Sort-Merge Join / Hash Join / Nested Loop)
   - Join 순서 최적화 (System-R 스타일 비용 기반 동적계획법, 그리디 폴백)
   - EXPLAIN 실행 계획 출력 (비용 · 접근 경로 · Join 알고리즘)
-- [x] 병렬 쿼리 실행 (rayon) — SeqScan WHERE 필터 멀티스레드 처리, 청크 단위 워커 thread_local 전파로 사용자 정의 함수/DATABASE() 정확성 유지, 10k행 이상 자동 적용 (`RUSTDB_PARALLEL` 토글), 서브쿼리 포함 시 순차 폴백
+- [x] 병렬 쿼리 실행 (rayon) — SeqScan WHERE 필터 (par_chunks) + GROUP BY 집계 partial→merge + Hash Join probe (par_iter), 청크 단위 워커 thread_local 전파로 사용자 정의 함수/DATABASE() 정확성 유지, 10k행 이상 자동 적용 (`RUSTDB_PARALLEL` 토글), 서브쿼리 포함 시 순차 폴백
 
 ### 다중 데이터베이스
 - [x] CREATE DATABASE / CREATE DATABASE IF NOT EXISTS
@@ -344,3 +344,7 @@
 - [x] **Server Manager MySQL 포트 필드** — `+/-` 버튼 포함, 0 입력 시 MySQL 프로토콜 비활성, Tauri `start_server`에 `mysql_port` 파라미터 추가
 - [x] **Tauri UI MySQL 리스너** — UI에서 서버 Start 시 `mysql::start_mysql_listener(mysql_port, shared_db)` 호출로 MySQL 프로토콜 동시 기동
 - [x] **서버 연결 아이콘 교체** — Server Manager 헤더의 서버 랙 아이콘 → 주황색 원통형 DB 아이콘
+- [x] **결과 패널 AI 분석 버튼** — SELECT 결과 아래 "AI 분석" 버튼; 현재 SQL + 결과를 마크다운 테이블로 포맷해 `/api/report`(server.py Gemini)에 전송, 한국어 요약·패턴·인사이트 인라인 표시 (`analyzeReport` 함수, `reportAi` 상태)
+- [x] **Server Manager Bench 패널** — "Bench" 우측 버튼으로 슬라이드 패널 토글; "결과 불러오기" → `read_bench_result` Tauri 커맨드로 `code/test/perf/result.json` 파싱·포맷 표시, "터미널 실행" → `open_bench_terminal` 커맨드로 cmd 창에서 `python bench.py` 실행 (`bench_dir()` = CARGO_MANIFEST_DIR 기반)
+- [x] **Server Manager Session 패널** — "Session" 우측 버튼으로 슬라이드 패널 토글; `SessionInfo`(addr·user·connected_at·query_count) 목록을 기존 1.5s 상태 폴링에 내장해 별도 폴링 없이 실시간 갱신, 경과 시간 초/분 자동 단위 표시
+- [x] **AI 탭 가운데 정렬** — `.ai-body-scroll`에 `align-items: center` 적용, `<div className="ai-body-inner">` 래퍼(max-width 720px)로 서버 탭과 동일한 중앙 레이아웃 구현

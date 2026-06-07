@@ -305,6 +305,47 @@ Do NOT use a ```sql block when returning a file edit."""
         handle_error(e)
 
 
+class ReportRequest(BaseModel):
+    sql: str
+    result: str
+    api_key: str
+    current_db: str = "rustdb"
+    schema: str = ""
+
+
+@app.post("/api/report")
+def report(req: ReportRequest):
+    if not req.api_key.strip():
+        raise HTTPException(status_code=400, detail="API key is required")
+    if not req.result.strip():
+        raise HTTPException(status_code=400, detail="Result is required")
+
+    schema_ctx = f"\n\n데이터베이스 스키마:\n{req.schema}" if req.schema.strip() else ""
+    prompt = f"""당신은 데이터 분석가입니다. 아래 SQL 쿼리의 실행 결과를 분석해 한국어로 보고서를 작성하세요.
+
+현재 DB: {req.current_db}{schema_ctx}
+
+실행한 SQL:
+{req.sql}
+
+쿼리 결과:
+{req.result}
+
+다음 순서로 간결하게 분석하세요:
+1. **결과 요약**: 행 수, 주요 집계 수치(최대·최소·평균·합계 등 해당 시)
+2. **패턴·트렌드**: 눈에 띄는 패턴, 편중, 이상값
+3. **인사이트**: 비즈니스/운영상 의미 있는 발견 1-3가지
+
+총 5-8문장으로 작성하고 중요한 수치는 **굵게** 표시하세요."""
+
+    try:
+        client = genai.Client(api_key=req.api_key)
+        response = client.models.generate_content(model=MODEL, contents=prompt)
+        return {"report": response.text.strip()}
+    except Exception as e:
+        handle_error(e)
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="127.0.0.1", port=8765, log_level="info")
