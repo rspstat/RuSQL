@@ -33,6 +33,7 @@ pub enum AccessPath {
     PkRange   { op: RangeOp, key: String },
     SecondaryPoint { index_key: String, col: String, key: String },
     SecondaryRange { index_key: String, col: String, op: RangeOp, key: String },
+    SecondaryBetween { index_key: String, col: String, start: String, end: String },
     CompositeIndex { index_name: String },
     HashPoint { index_key: String, col: String, key: String },
 }
@@ -129,6 +130,7 @@ impl<'a> Planner<'a> {
         let index_col = match access {
             AccessPath::SecondaryPoint { col, .. } => col.as_str(),
             AccessPath::SecondaryRange { col, .. } => col.as_str(),
+            AccessPath::SecondaryBetween { col, .. } => col.as_str(),
             _ => return false,
         };
         // Single-column covering: all selected columns are the indexed column
@@ -214,6 +216,8 @@ impl<'a> Planner<'a> {
         Some(match (&cond.operator, &cond.value) {
             (Operator::Eq,  ConditionValue::Literal(k)) if !self.is_col_ref_in_context(k, table) =>
                 AccessPath::SecondaryPoint { index_key, col: col.to_string(), key: k.clone() },
+            (Operator::Between, ConditionValue::Between(a, b)) =>
+                AccessPath::SecondaryBetween { index_key, col: col.to_string(), start: a.clone(), end: b.clone() },
             (Operator::Gt,  ConditionValue::Literal(k)) if !self.is_col_ref_in_context(k, table) =>
                 AccessPath::SecondaryRange { index_key, col: col.to_string(), op: RangeOp::Gt,  key: k.clone() },
             (Operator::Gte, ConditionValue::Literal(k)) if !self.is_col_ref_in_context(k, table) =>
@@ -230,7 +234,17 @@ impl<'a> Planner<'a> {
     /// Dotted references (e.g. `t2.col`) are always column refs.
     /// Bare alphabetic identifiers are checked against the table's catalog columns.
     fn is_col_ref_in_context(&self, k: &str, table: &str) -> bool {
-        if k.contains('.') { return true; }
+        if k.contains('.') {
+            // Only treat as a column ref if both parts around the first dot are valid identifiers.
+            // This prevents email addresses like "alice.j@co.com" from being treated as col refs.
+            let parts: Vec<&str> = k.splitn(2, '.').collect();
+            let is_ident = |s: &str| {
+                !s.is_empty()
+                && s.chars().next().map(|c| c.is_alphabetic() || c == '_').unwrap_or(false)
+                && s.chars().all(|c| c.is_alphanumeric() || c == '_')
+            };
+            return parts.len() == 2 && is_ident(parts[0]) && is_ident(parts[1]);
+        }
         if k.chars().next().map(|c| c.is_alphabetic() || c == '_').unwrap_or(false)
             && k.parse::<f64>().is_err()
         {
@@ -337,6 +351,10 @@ impl<'a> Planner<'a> {
                 let sel = self.histogram_sel_range(table, col, op, key);
                 ((total as f64 * sel) as usize).max(1)
             }
+            AccessPath::SecondaryBetween { col, start, end, .. } => {
+                let sel = self.histogram_sel_between(table, col, start, end);
+                ((total as f64 * sel) as usize).max(1)
+            }
             AccessPath::SecondaryPoint { index_key, col, .. } => {
                 // Use real cardinality from ANALYZE TABLE stats when available.
                 // index_key is "{table}_{index_name}"; table is the prefix before "_idx_".
@@ -391,7 +409,7 @@ impl<'a> Planner<'a> {
             AccessPath::PkBetween { .. }
             | AccessPath::PkRange { .. }      => log_n + n / 4.0,
             AccessPath::SecondaryPoint { .. } => log_n * 2.0,
-            AccessPath::SecondaryRange { .. } => log_n * 2.0 + n / 4.0,
+            AccessPath::SecondaryRange { .. } | AccessPath::SecondaryBetween { .. } => log_n * 2.0 + n / 4.0,
             AccessPath::CompositeIndex { .. } => log_n,
             AccessPath::HashPoint { .. }      => 1.0, // O(1)
         }
@@ -439,6 +457,7 @@ impl<'a> Planner<'a> {
             AccessPath::PkRange { op, key }                       => format!("Index Range  PK {} {}", op.label(), key),
             AccessPath::SecondaryPoint { index_key, col, key }    => format!("Index Scan  {} ({} = {})", index_key, col, key),
             AccessPath::SecondaryRange { index_key, col, op, key }=> format!("Index Range  {} ({} {} {})", index_key, col, op.label(), key),
+            AccessPath::SecondaryBetween { index_key, col, start, end } => format!("Index Range  {} ({} BETWEEN {} AND {})", index_key, col, start, end),
             AccessPath::CompositeIndex { index_name }             => format!("Composite Index  {}", index_name),
             AccessPath::HashPoint { index_key, col, key }         => format!("Hash Index Scan  {} ({} = {})", index_key, col, key),
         }

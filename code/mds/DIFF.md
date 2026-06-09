@@ -86,6 +86,7 @@
 | 표현식 인덱스 | ✓ (함수 기반) | ✓ | ✓ (Function-Based Index) | ✗ |
 | 커버링 인덱스 | ✓ | ✓ | ✓ | ✓ (EXPLAIN에서 Covering 표시) |
 | 복합 인덱스 | ✓ | ✓ | ✓ | ✓ |
+| 보조 인덱스 증분 갱신 | ✓ (InnoDB 자동) | ✓ | ✓ | ✓ (INSERT/UPDATE/DELETE 시 `index_insert_row` / `index_remove_row`로 O(1) 갱신 — 전체 재빌드 없음) |
 | 내림차순 인덱스 | ✓ (8.0+) | ✓ | ✓ | ✗ |
 | BRIN (블록 범위 인덱스) | ✗ | ✓ | ✗ | ✗ |
 | GIN / GiST | ✗ | ✓ | ✗ | ✗ |
@@ -226,7 +227,7 @@
 | 항목 | MySQL | PostgreSQL | Oracle | RuSQL |
 |------|-------|------------|--------|--------|
 | 비용 기반 최적화 (CBO) | ✓ | ✓ | ✓ | ✓ |
-| 통계 기반 선택도 | ✓ (histogram) | ✓ (pg_statistic) | ✓ (DBMS_STATS) | ✓ (ANALYZE TABLE — equi-depth 히스토그램 10-bucket, PkRange·PkBetween·SecondaryRange selectivity 추정) |
+| 통계 기반 선택도 | ✓ (histogram) | ✓ (pg_statistic) | ✓ (DBMS_STATS) | ✓ (ANALYZE TABLE — equi-depth 히스토그램 10-bucket, PkRange·PkBetween·SecondaryRange·SecondaryBetween selectivity 추정) |
 | 인덱스 자동 선택 | ✓ | ✓ | ✓ | ✓ |
 | JOIN 알고리즘 | NestedLoop, Hash, BNL | NestedLoop, Hash, MergeJoin | NestedLoop, Hash, SortMerge | NestedLoop, Hash, SortMerge |
 | JOIN 순서 최적화 | ✓ (동적 프로그래밍) | ✓ (Geqo + 동적 프로그래밍) | ✓ (동적 프로그래밍) | ✓ (System-R bitmask DP, INNER 한정 · 그리디 폴백) |

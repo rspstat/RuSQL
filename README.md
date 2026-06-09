@@ -12,7 +12,7 @@ Custom RDBMS + AI MCP Project
 
 | 분류 | 내용 |
 |------|------|
-| DB 엔진 | B+Tree, WAL, Buffer Pool, MVCC, 트랜잭션, 비용 기반 옵티마이저, 히스토그램 통계, 자동 통계 수집 (DML), B+Tree 인덱스 디스크 영속화, 병렬 쿼리 실행, 저장 프로시저·트리거·UDF 영속화 |
+| DB 엔진 | B+Tree, WAL, Buffer Pool, MVCC, 트랜잭션, 비용 기반 옵티마이저, 히스토그램 통계, 자동 통계 수집 (DML), B+Tree 인덱스 디스크 영속화, 증분 보조 인덱스 갱신 (INSERT/UPDATE/DELETE 시 O(1)), 병렬 쿼리 실행, 저장 프로시저·트리거·UDF 영속화 |
 | SQL 지원 | DDL / DML / JOIN / 서브쿼리 / CTE / UNION / 제약조건 / 트랜잭션 / 저장 프로시저 / 트리거 / UDF |
 | MCP | 자연어 입력 → SQL 자동 생성 → 실행, EXPLAIN 해석, 에러 AI 해석, 쿼리 결과 데이터 분석 리포트, 스키마 설계, 멀티턴 채팅, 파일 컨텍스트 주입, AI 파일 편집 · True MCP (Claude Desktop, stdio JSON-RPC, 도구 4개) |
 | DBMS | TCP 서버, 다중 클라이언트 동시 접속, 접속 세션 실시간 모니터링, 세션별 독립 Executor + `Arc<RwLock<SharedDatabase>>` 공유 |
@@ -645,7 +645,7 @@ SHOW DATABASES;
 | 언어 | Rust |
 | 버전 | v2.2.0 |
 | 인덱스 | B+Tree (단일 / 복합 / 클러스터드) |
-| 옵티마이저 | 비용 기반 플래너 (AccessPath · Join 알고리즘 자동 선택 · System-R DP Join 순서 최적화 (N≤8), Greedy 폴백) · Hash Index 등호 O(1) 우선 선택 · 히스토그램 selectivity 추정 (ANALYZE TABLE) · INSERT/DELETE 시 `total_rows` 자동 갱신 |
+| 옵티마이저 | 비용 기반 플래너 (AccessPath: SeqScan / PkPoint / PkBetween / PkRange / SecondaryPoint / SecondaryRange / **SecondaryBetween** / CompositeIndex · Join 알고리즘 자동 선택 · System-R DP Join 순서 최적화 (N≤8), Greedy 폴백) · Hash Index 등호 O(1) 우선 선택 · 히스토그램 selectivity 추정 (ANALYZE TABLE) · INSERT/DELETE 시 `total_rows` 자동 갱신 |
 | Join | Sort-Merge Join (O((N+M)logN)) / Hash Join (O(N+M)) / Nested Loop Join (Cross/Natural/FullOuter 포함) — `engine/join.rs` 분리 구현 |
 | 인덱스 | B+Tree (단일/복합/클러스터드) · **Hash Index** (`USING HASH`, 등호 O(1), 단일 컬럼) |
 | 트랜잭션 | WAL (바이너리 redo log) + Undo Log (인메모리 + 디스크 영속화) + MVCC |
@@ -728,9 +728,11 @@ code/
 │  └───────────────────────────────┘       │
 │          ↓                               │
 │  B+Tree 인덱스 (단일/복합/클러스터드)    │
+│  증분 보조 인덱스 갱신 (O(1) per row)   │
 │  WAL 바이너리 redo log + Checkpoint      │
 │  Undo Log 디스크 영속화 (_undo.log)      │
-│  Buffer Pool (LRU 64p 16KB)              │
+│  Buffer Pool (LRU 64p 16KB, SELECT는     │
+│    s.tables 직접 읽기로 우회)            │
 │  MVCC (_xmin / _xmax 버전 스탬프)        │
 │  바이너리 .rdb + LZ4 압축 저장           │
 │  인덱스 메타 영속화 (indexes.json)        │

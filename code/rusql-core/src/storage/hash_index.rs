@@ -29,6 +29,23 @@ impl HashIndex {
         self.data.get(key).map(|v| v.as_slice()).unwrap_or(&[])
     }
 
+    /// 단일 행을 인덱스에 추가한다 (O(1)).
+    pub fn insert_row(&mut self, row: &Row) {
+        if let Some(val) = row.get(&self.column) {
+            self.data.entry(val.clone()).or_default().push(row.clone());
+        }
+    }
+
+    /// PK 값이 `pk_val`인 행을 `col_val` 버킷에서 제거한다 (O(bucket size)).
+    pub fn remove_row(&mut self, col_val: &str, pk_col: &str, pk_val: &str) {
+        if let Some(bucket) = self.data.get_mut(col_val) {
+            bucket.retain(|r| r.get(pk_col).map(|v| v != pk_val).unwrap_or(true));
+            if bucket.is_empty() {
+                self.data.remove(col_val);
+            }
+        }
+    }
+
     /// 전체 버킷 수 (고유 키 수)
     pub fn bucket_count(&self) -> usize { self.data.len() }
 

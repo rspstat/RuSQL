@@ -33,6 +33,7 @@ pub fn sort_merge_join(
     table: &str,
     probe_col: &str,
     build_col: &str,
+    right_schema_cols: &[String],
 ) -> Vec<Row> {
     let sort_cmp = |a: &str, b: &str| -> std::cmp::Ordering {
         match (a.parse::<f64>(), b.parse::<f64>()) {
@@ -102,7 +103,9 @@ pub fn sort_merge_join(
                     ri += 1;
                 }
                 if !matched {
-                    out.push(l.clone());
+                    let mut merged = l.clone();
+                    null_right(&mut merged, right_schema_cols, table);
+                    out.push(merged);
                 }
             }
         }

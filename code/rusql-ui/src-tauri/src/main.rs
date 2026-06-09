@@ -126,6 +126,7 @@ fn load_server_log(conn_id: &str) -> Vec<String> {
 // 각 TCP 클라이언트는 독립적인 Executor(트랜잭션·current_db)를 가진다.
 fn handle_client(stream: TcpStream, shared: Arc<RwLock<SharedDatabase>>, log: Arc<Mutex<Vec<String>>>, sessions: Arc<Mutex<Vec<SessionInfo>>>) {
     let _ = stream.set_nonblocking(false); // listener is non-blocking; accepted streams must be reset to blocking
+    let _ = stream.set_nodelay(true); // disable Nagle — prevents 200ms delay on Windows loopback
     let addr_str = stream.peer_addr().map(|a| a.to_string()).unwrap_or_else(|_| "unknown".to_string());
     let mut writer = match stream.try_clone() {
         Ok(s) => s,

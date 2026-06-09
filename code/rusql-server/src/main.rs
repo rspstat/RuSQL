@@ -343,6 +343,7 @@ fn main() {
         match listener.accept() {
             Ok((stream, _)) => {
                 stream.set_nonblocking(false).ok();
+                stream.set_nodelay(true).ok(); // disable Nagle — prevents 200ms delay on Windows loopback
                 let sh2   = Arc::clone(&shared);
                 let cc    = client_count.clone();
                 let start = server_start.clone();

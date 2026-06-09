@@ -8,6 +8,10 @@
 |---|---|
 | **JOIN 알고리즘 분리** | `engine/join.rs` 구현 완료 — Sort-Merge / Hash / Nested Loop + System-R DP 조인 순서 최적화 |
 | **SHOW PROCESSLIST 실제 구현** | `ProcessInfo` + `process_list: Arc<Mutex<...>>` 세션 추적, native/MySQL 양쪽 연결 모두 등록 |
+| **INSERT TPS 최적화 (13x: 5.6 → 75.3 TPS)** | `sort_by_pk` (O(n log n)) INSERT 경로에서 제거, `flush_page`·`save_btree_index` → auto_vacuum으로 이동, O(n) 중복 체크 → BTree/Hash O(log n) 조회, SELECT를 `s.tables` 직접 읽기로 전환 (buffer pool 우회) |
+| **증분 보조 인덱스 갱신** | `hash_index.rs`에 `insert_row` / `remove_row` 추가, executor.rs에 `index_insert_row` / `index_remove_row` 구현 — INSERT/UPDATE/DELETE 시 O(1) 개별 갱신, 전체 `rebuild_secondary_indexes` 호출 제거 |
+| **BETWEEN 범위 인덱스 (SecondaryBetween)** | 플래너에 `SecondaryBetween` AccessPath 추가, `secondary_access`에 Between 케이스, 실행기에 `range_search` 연동 — BETWEEN 쿼리 27.8ms → 3.7ms (7.5x) |
+| **TCP_NODELAY** | rusql-server·rusql-ui 양쪽에 `set_nodelay(true)` 추가 — Windows loopback Nagle + delayed ACK 200ms 지연 방지 |
 | **rusql-client** | 전용 TCP 클라이언트 크레이트 추가 (`-u/-p/-h/-P` 플래그, ANSI 컬러, 멀티라인 SQL) |
 | **MySQL wire protocol** | `mysql.rs` 신규 — COM_QUERY/PING/INIT_DB/STMT_PREPARE/EXECUTE/CLOSE, MySQL 호환 쿼리 처리 |
 | **MySQL 인증 구현** | `mysql_native_password` 챌린지-응답 검증 — 연결별 nonce, SHA1(SHA1(pw)) 저장, DBeaver/mysql-connector-python 인증 완전 작동 |

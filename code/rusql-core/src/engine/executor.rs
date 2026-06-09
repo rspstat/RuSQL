@@ -1691,25 +1691,47 @@ impl Executor {
                         }
                     } else {
                         let mut dup_found = false;
-                        'outer: for (i, (pk, _, unique, _)) in constraints.iter().enumerate() {
-                            if *pk || *unique {
+                        'outer: for (i, (is_pk, _, unique, _)) in constraints.iter().enumerate() {
+                            if *is_pk || *unique {
                                 let val = &final_values[i];
-                                for existing in rows.iter().filter(|r| Self::is_visible(r)) {
-                                    if existing.get(&col_names[i]) == Some(val) {
-                                        match &on_conflict {
-                                            InsertConflict::Abort => return Err(format!(
-                                                "Duplicate value '{}' for column '{}'", val, col_names[i]
-                                            )),
-                                            InsertConflict::Ignore => {
-                                                dup_found = true;
-                                                break 'outer;
-                                            }
-                                            InsertConflict::Update(assignments) => {
-                                                let pk_val = existing.get(&col_names[0]).cloned().unwrap_or_default();
-                                                pending_updates.push((pk_val, assignments.clone()));
-                                                dup_found = true;
-                                                break 'outer;
-                                            }
+                                // PK: BTree index O(log n) 조회
+                                // UNIQUE+hash index: O(1) 조회
+                                // UNIQUE 기타: fallback O(n) 스캔
+                                let existing: Option<Row> = if *is_pk {
+                                    s.indexes.get(&table)
+                                        .and_then(|idx| idx.search(val))
+                                        .filter(|j| !j.is_empty())
+                                        .and_then(|j| serde_json::from_str::<Row>(&j).ok())
+                                        .filter(|r| Self::is_visible(r))
+                                } else {
+                                    let hi_key = s.hash_index_meta.iter()
+                                        .find(|(_, (tbl, col))| tbl == &table && col == &col_names[i])
+                                        .map(|(name, _)| format!("{}_{}", table, name));
+                                    if let Some(key) = hi_key {
+                                        s.hash_indexes.get(&key)
+                                            .and_then(|hi| hi.get(val).first().cloned())
+                                            .filter(|r| Self::is_visible(r))
+                                    } else {
+                                        rows.iter()
+                                            .filter(|r| Self::is_visible(r))
+                                            .find(|r| r.get(&col_names[i]) == Some(val))
+                                            .cloned()
+                                    }
+                                };
+                                if let Some(existing_row) = existing {
+                                    match &on_conflict {
+                                        InsertConflict::Abort => return Err(format!(
+                                            "Duplicate value '{}' for column '{}'", val, col_names[i]
+                                        )),
+                                        InsertConflict::Ignore => {
+                                            dup_found = true;
+                                            break 'outer;
+                                        }
+                                        InsertConflict::Update(assignments) => {
+                                            let pk_val = existing_row.get(&col_names[0]).cloned().unwrap_or_default();
+                                            pending_updates.push((pk_val, assignments.clone()));
+                                            dup_found = true;
+                                            break 'outer;
                                         }
                                     }
                                 }
@@ -1873,35 +1895,18 @@ impl Executor {
                 }
             }
 
+            // 보조 인덱스 증분 갱신 (O(1) per row — 전체 재빌드 대체)
+            Self::index_insert_row(s, &table, &row);
+
             s.tables.get_mut(&table)
                 .ok_or(format!("Table '{}' not found", table))?
                 .push(row);
         }
 
-        self.sort_by_pk(s, &table);
-
-        let rows = s.tables.get(&table).unwrap().clone();
-        // 단일 컬럼 보조 인덱스 재빌드 (INSERT 후 stale 방지)
-        self.rebuild_secondary_indexes(s, &table, &rows);
         // 트랜잭션 중에는 버퍼 풀 갱신 생략 (COMMIT 시 일괄 처리)
         if !self.txn.is_active() {
-            s.buffer_pool.write_page(&table, rows);
-            s.buffer_pool.flush_page(&table, &s.disk);
+            // s.tables가 이미 최신 상태 — 불필요한 O(n) clone/write_page 제거
             Self::maybe_auto_vacuum(s);
-            // PK 인덱스 영속화
-            if let Some(idx) = s.indexes.get(&table) {
-                s.disk.save_btree_index(&table, idx);
-            }
-            // 보조 B+Tree 인덱스 영속화
-            let sec_keys: Vec<String> = s.index_meta.iter()
-                .filter(|(_, (tbl, _))| tbl == &table)
-                .map(|(name, _)| format!("{}_{}", table, name))
-                .collect();
-            for key in sec_keys {
-                if let Some(idx) = s.indexes.get(&key) {
-                    s.disk.save_btree_index(&key, idx);
-                }
-            }
         }
         Self::update_stat_rows(s, &table, inserted as i64);
 
@@ -2304,6 +2309,18 @@ impl Executor {
                         return self.format_result(s, rows, columns, table, vec![]);
                     }
                 }
+                // ── 보조 인덱스 BETWEEN ──────────────────────────────────
+                AccessPath::SecondaryBetween { index_key, col: _, start, end, .. } => {
+                    if let Some(index) = s.indexes.get(index_key) {
+                        let rows: Vec<Row> = index.range_search(start, end).iter()
+                            .filter_map(|j| serde_json::from_str::<Vec<Row>>(j).ok())
+                            .flatten()
+                            .filter(|r| Self::is_visible(r))
+                            .filter(|r| self.matches_condition_with_subquery(s, r, &condition))
+                            .collect();
+                        return self.format_result(s, rows, columns, table, vec![]);
+                    }
+                }
                 // ── 복합 인덱스 ──────────────────────────────────────────
                 AccessPath::CompositeIndex { index_name } => {
                     let eq_map = collect_eq_conditions_expr(&condition.clone().unwrap());
@@ -2322,11 +2339,13 @@ impl Executor {
             return Err(format!("Table '{}' not found", table));
         }
 
-        // 읽기 우선순위: 세션 쓰기 버퍼 > REPEATABLE READ 스냅샷 > 커밋 데이터
+        // 읽기 우선순위: 세션 쓰기 버퍼 > REPEATABLE READ 스냅샷 > s.tables(in-memory) > 디스크
         let rows: Vec<Row> = if let Some(session_rows) = self.session_tables.get(&table) {
             session_rows.clone()
         } else if let Some(snap_rows) = self.txn.get_snapshot_table(&table) {
             snap_rows.clone()
+        } else if let Some(mem_rows) = s.tables.get(&table) {
+            mem_rows.clone()
         } else {
             s.buffer_pool.get_page(&table, &s.disk)
         };
@@ -2381,7 +2400,7 @@ impl Executor {
 
                 let joined = match algo {
                     Some(JoinAlgo::SortMerge { probe_col, build_col }) =>
-                        join_algo::sort_merge_join(&current, &right_rows, &j.join_type, &j.table, probe_col, build_col),
+                        join_algo::sort_merge_join(&current, &right_rows, &j.join_type, &j.table, probe_col, build_col, &right_schema_cols),
                     Some(JoinAlgo::Hash { probe_col, build_col }) =>
                         join_algo::hash_join(&current, &right_rows, &j.join_type, &j.table, probe_col, build_col, &right_schema_cols),
                     _ => {
@@ -3386,7 +3405,9 @@ impl Executor {
                             }
                             "YEAR"   => {
                                 use chrono::Datelike;
-                                (dt2.year() - dt1.year()).to_string()
+                                let years = dt2.year() - dt1.year();
+                                let adj = if (dt2.month(), dt2.day()) < (dt1.month(), dt1.day()) { 1 } else { 0 };
+                                (years - adj).to_string()
                             }
                             _ => NULL_VALUE.to_string(),
                         }
@@ -4414,8 +4435,13 @@ impl Executor {
             }
         }
 
-        // 단일 컬럼 보조 인덱스 재빌드
-        self.rebuild_secondary_indexes(s, &table, &rows_clone);
+        // 단일 컬럼 보조 인덱스 증분 갱신
+        for (_, old_json, new_json) in &undo_entries {
+            let old_row: Row = serde_json::from_str(old_json).unwrap_or_default();
+            let new_row: Row = serde_json::from_str(new_json).unwrap_or_default();
+            Self::index_remove_row(s, &table, &old_row, &pk_col);
+            Self::index_insert_row(s, &table, &new_row);
+        }
 
         // 복합 인덱스 재빌드
         let comp_keys: Vec<String> = s.composite_indexes.iter()
@@ -4743,7 +4769,11 @@ impl Executor {
         let rows_clone = s.tables.get(&table).unwrap().clone();
 
         if !self.txn.is_active() {
-            // 물리 삭제 후: 인덱스 재빌드 + 버퍼 풀 즉시 flush
+            // 보조 인덱스 증분 삭제 (O(1) per row)
+            for del_row in &rows_to_delete {
+                Self::index_remove_row(s, &table, del_row, &pk_col);
+            }
+            // 물리 삭제 후: PK 인덱스 재빌드 + 버퍼 풀 즉시 flush
             if let Some(index) = s.indexes.get_mut(&table) {
                 *index = BPlusTree::new();
                 for row in &rows_clone {
@@ -4845,49 +4875,32 @@ impl Executor {
         // (트랜잭션 중 exec_update_inner/delete_inner가 s.indexes를 갱신하므로 ROLLBACK 시 필요)
         let dirty_tables: Vec<String> = self.session_tables.keys().cloned().collect();
         for table in &dirty_tables {
-            if let Some(rows) = s.tables.get(table) {
-                let rows_clone = rows.clone();
+            // 임시 레퍼런스 없이 소유 데이터로 가져와 rebuild_secondary_indexes에서 &mut s 사용 가능하도록 함
+            let rows_clone: Vec<Row> = s.tables.get(table).cloned().unwrap_or_default();
 
-                // PK 인덱스 복원
-                let pk_col = s.catalog.get_table(table)
-                    .and_then(|sc| sc.columns.iter().find(|c| c.primary_key).map(|c| c.name.clone()))
-                    .unwrap_or_else(|| "id".to_string());
-                if let Some(index) = s.indexes.get_mut(table) {
-                    *index = BPlusTree::new();
-                    for row in &rows_clone {
-                        let k = row.get(&pk_col).cloned().unwrap_or_default();
-                        index.insert(k, serde_json::to_string(row).unwrap());
-                    }
+            // PK 인덱스 복원
+            let pk_col = s.catalog.get_table(table)
+                .and_then(|sc| sc.columns.iter().find(|c| c.primary_key).map(|c| c.name.clone()))
+                .unwrap_or_else(|| "id".to_string());
+            if let Some(index) = s.indexes.get_mut(table) {
+                *index = BPlusTree::new();
+                for row in &rows_clone {
+                    let k = row.get(&pk_col).cloned().unwrap_or_default();
+                    index.insert(k, serde_json::to_string(row).unwrap());
                 }
+            }
 
-                // 보조 인덱스 복원
-                let sec: Vec<(String, String)> = s.index_meta.iter()
-                    .filter(|(_, (tbl, _))| tbl == table)
-                    .map(|(name, (_, col))| (name.clone(), col.clone()))
-                    .collect();
-                for (idx_name, col) in sec {
-                    let mut bucket: HashMap<String, Vec<Row>> = HashMap::new();
-                    for row in &rows_clone {
-                        if let Some(val) = row.get(&col) {
-                            bucket.entry(val.clone()).or_default().push(row.clone());
-                        }
-                    }
-                    let mut tree = BPlusTree::new();
-                    for (key, bucket_rows) in bucket {
-                        tree.insert(key, serde_json::to_string(&bucket_rows).unwrap());
-                    }
-                    s.indexes.insert(format!("{}_{}", table, idx_name), tree);
-                }
+            // 보조 인덱스 및 해시 인덱스 복원 (rebuild_secondary_indexes가 둘 다 처리)
+            self.rebuild_secondary_indexes(s, table, &rows_clone);
 
-                // 복합 인덱스 복원
-                let comp_keys: Vec<String> = s.composite_indexes.iter()
-                    .filter(|(_, ci)| &ci.table == table)
-                    .map(|(k, _)| k.clone())
-                    .collect();
-                for k in comp_keys {
-                    if let Some(ci) = s.composite_indexes.get_mut(&k) {
-                        ci.rebuild(&rows_clone);
-                    }
+            // 복합 인덱스 복원
+            let comp_keys: Vec<String> = s.composite_indexes.iter()
+                .filter(|(_, ci)| &ci.table == table)
+                .map(|(k, _)| k.clone())
+                .collect();
+            for k in comp_keys {
+                if let Some(ci) = s.composite_indexes.get_mut(&k) {
+                    ci.rebuild(&rows_clone);
                 }
             }
         }
@@ -5016,6 +5029,8 @@ impl Executor {
                 let full_schema = s.catalog.get_table(&table).unwrap();
                 s.disk.save_schema(&table, full_schema);
                 s.disk.save_table(&table, s.tables.get(&table).unwrap());
+                let updated_rows = s.tables.get(&table).unwrap().clone();
+                s.buffer_pool.write_page(&table, updated_rows);
                 Ok(format!("Column '{}' renamed to '{}' in '{}'.", from, to, table))
             }
             AlterAction::ModifyColumn(col) => {
@@ -5887,6 +5902,68 @@ impl Executor {
 
     /// 현재 index_meta + composite_indexes를 disk에 저장
     /// 단일 컬럼 보조 인덱스를 rows 기준으로 재빌드한다 (UPDATE 후 stale 방지)
+    /// 단일 행을 보조 BTree/Hash 인덱스에 증분 추가한다 (O(1)).
+    fn index_insert_row(s: &mut SharedDatabase, table: &str, row: &Row) {
+        let sec: Vec<(String, String)> = s.index_meta.iter()
+            .filter(|(_, (tbl, _))| tbl == table)
+            .map(|(name, (_, col))| (format!("{}_{}", table, name), col.clone()))
+            .collect();
+        for (key, col) in sec {
+            let col_val = match row.get(&col) { Some(v) => v.clone(), None => continue };
+            let mut bucket: Vec<Row> = s.indexes.get(&key)
+                .and_then(|t| t.search(&col_val))
+                .and_then(|j| serde_json::from_str::<Vec<Row>>(&j).ok())
+                .unwrap_or_default();
+            bucket.push(row.clone());
+            let json = serde_json::to_string(&bucket).unwrap();
+            if let Some(tree) = s.indexes.get_mut(&key) {
+                tree.insert(col_val, json);
+            }
+        }
+        let hsec: Vec<String> = s.hash_index_meta.iter()
+            .filter(|(_, (tbl, _))| tbl == table)
+            .map(|(name, _)| format!("{}_{}", table, name))
+            .collect();
+        for key in hsec {
+            if let Some(hi) = s.hash_indexes.get_mut(&key) {
+                hi.insert_row(row);
+            }
+        }
+    }
+
+    /// 단일 행을 보조 BTree/Hash 인덱스에서 증분 제거한다 (O(bucket size)).
+    fn index_remove_row(s: &mut SharedDatabase, table: &str, row: &Row, pk_col: &str) {
+        let pk_val = match row.get(pk_col) { Some(v) => v.clone(), None => return };
+        let sec: Vec<(String, String)> = s.index_meta.iter()
+            .filter(|(_, (tbl, _))| tbl == table)
+            .map(|(name, (_, col))| (format!("{}_{}", table, name), col.clone()))
+            .collect();
+        for (key, col) in sec {
+            let col_val = match row.get(&col) { Some(v) => v.clone(), None => continue };
+            let new_bucket: Vec<Row> = s.indexes.get(&key)
+                .and_then(|t| t.search(&col_val))
+                .and_then(|j| serde_json::from_str::<Vec<Row>>(&j).ok())
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|r| r.get(pk_col).map(|v| v != &pk_val).unwrap_or(true))
+                .collect();
+            let json = serde_json::to_string(&new_bucket).unwrap();
+            if let Some(tree) = s.indexes.get_mut(&key) {
+                tree.insert(col_val, json);
+            }
+        }
+        let hsec: Vec<(String, String)> = s.hash_index_meta.iter()
+            .filter(|(_, (tbl, _))| tbl == table)
+            .map(|(name, (_, col))| (format!("{}_{}", table, name), col.clone()))
+            .collect();
+        for (key, col) in hsec {
+            let col_val = match row.get(&col) { Some(v) => v.clone(), None => continue };
+            if let Some(hi) = s.hash_indexes.get_mut(&key) {
+                hi.remove_row(&col_val, pk_col, &pk_val);
+            }
+        }
+    }
+
     fn rebuild_secondary_indexes(&mut self, s: &mut SharedDatabase, table: &str, rows: &[Row]) {
         let sec: Vec<(String, String)> = s.index_meta.iter()
             .filter(|(_, (tbl, _))| tbl == table)
@@ -7026,6 +7103,14 @@ impl Executor {
                 }
                 s.buffer_pool.write_page(t, rows_clone.clone());
                 s.buffer_pool.flush_page(t, &s.disk);
+            }
+        }
+        // 주기적으로 모든 dirty 페이지 + 인덱스를 디스크에 flush (INSERT 경로 대신 여기서 일괄 처리)
+        s.buffer_pool.flush_all(&s.disk);
+        let all_idx_keys: Vec<String> = s.indexes.keys().cloned().collect();
+        for key in all_idx_keys {
+            if let Some(idx) = s.indexes.get(&key) {
+                s.disk.save_btree_index(&key, idx);
             }
         }
         if total_removed > 0 {
