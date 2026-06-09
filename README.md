@@ -1,4 +1,4 @@
-## MCP 기반 커스텀 RDBMS (v2.2.0)
+## MCP 기반 커스텀 RDBMS
 
 - Rust로 구현한 데이터베이스 엔진 + RDBMS + AI MCP 
 
