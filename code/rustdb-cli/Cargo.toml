@@ -1,8 +1,0 @@
-[package]
-name = "rustdb-cli"
-version = "2.2.0"
-edition = "2021"
-
-[dependencies]
-rustdb-core = { path = "../rustdb-core" }
-crossterm = "0.27"

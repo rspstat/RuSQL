@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "rusql": {
+      "command": "python",
+      "args": [
+        "-u",
+        "C:\\Users\\win11\\Desktop\\projects\\dbe\\code\\rusql-mcp\\mcp_server.py"
+      ]
+    }
+  }
+}

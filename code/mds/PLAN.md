@@ -1,4 +1,4 @@
-# RustDB 개발 계획 (v2.2.0)
+# RuSQL 개발 계획 (v2.2.0)
 
 ---
 
@@ -8,7 +8,7 @@
 |---|---|
 | **JOIN 알고리즘 분리** | `engine/join.rs` 구현 완료 — Sort-Merge / Hash / Nested Loop + System-R DP 조인 순서 최적화 |
 | **SHOW PROCESSLIST 실제 구현** | `ProcessInfo` + `process_list: Arc<Mutex<...>>` 세션 추적, native/MySQL 양쪽 연결 모두 등록 |
-| **rustdb-client** | 전용 TCP 클라이언트 크레이트 추가 (`-u/-p/-h/-P` 플래그, ANSI 컬러, 멀티라인 SQL) |
+| **rusql-client** | 전용 TCP 클라이언트 크레이트 추가 (`-u/-p/-h/-P` 플래그, ANSI 컬러, 멀티라인 SQL) |
 | **MySQL wire protocol** | `mysql.rs` 신규 — COM_QUERY/PING/INIT_DB/STMT_PREPARE/EXECUTE/CLOSE, MySQL 호환 쿼리 처리 |
 | **MySQL 인증 구현** | `mysql_native_password` 챌린지-응답 검증 — 연결별 nonce, SHA1(SHA1(pw)) 저장, DBeaver/mysql-connector-python 인증 완전 작동 |
 | **MySQL result set 수정** | `parse_table` 탭 구분 형식 지원 — SHOW DATABASES/TABLES, SELECT 등이 MySQL 클라이언트에 정상 표시 |

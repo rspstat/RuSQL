@@ -1,7 +1,7 @@
 {
   "permissions": {
     "allow": [
-      "PowerShell(cd \"c:\\\\Users\\\\win11\\\\Desktop\\\\projects\\\\dbe\\\\code\\\\test\"; Get-Content test_full.sql | ..\\\\target\\\\release\\\\rustdb-cli.exe 2>&1 | Where-Object { $_ -match \"ERROR|panic\" } | Select-Object -First 15)"
+      "PowerShell(cd \"c:\\\\Users\\\\win11\\\\Desktop\\\\projects\\\\dbe\\\\code\\\\test\"; Get-Content test_full.sql | ..\\\\target\\\\release\\\\rusql-cli.exe 2>&1 | Where-Object { $_ -match \"ERROR|panic\" } | Select-Object -First 15)"
     ]
   }
 }

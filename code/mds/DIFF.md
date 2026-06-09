@@ -1,13 +1,13 @@
-# RustDB vs MySQL vs PostgreSQL vs Oracle — 기능 비교
+# RuSQL vs MySQL vs PostgreSQL vs Oracle — 기능 비교
 
-> 기준: RustDB v2.2.0 / MySQL 8.0 / PostgreSQL 16 / Oracle 21c  
+> 기준: RuSQL v2.2.0 / MySQL 8.0 / PostgreSQL 16 / Oracle 21c  
 > ✓ 지원 · △ 부분 지원 · ✗ 미지원
 
 ---
 
 ## 1. 저장 엔진 / 스토리지
 
-| 항목 | MySQL (InnoDB) | PostgreSQL | Oracle | RustDB |
+| 항목 | MySQL (InnoDB) | PostgreSQL | Oracle | RuSQL |
 |------|---------------|------------|--------|--------|
 | 파일 포맷 | B+Tree 클러스터드 인덱스 (.ibd) | 힙 파일 (base/) | 데이터파일 (.dbf), 블록(기본 8KB) | JSON 행 + LZ4 압축 (.rdb) |
 | 페이지 크기 | 16 KB | 8 KB | 8 KB (설정 가능) | 16 KB |
@@ -21,7 +21,7 @@
 
 ## 2. 데이터 타입
 
-| 타입 | MySQL | PostgreSQL | Oracle | RustDB |
+| 타입 | MySQL | PostgreSQL | Oracle | RuSQL |
 |------|-------|------------|--------|--------|
 | 정수 | TINYINT·SMALLINT·INT·BIGINT·UNSIGNED | SMALLINT·INT·BIGINT | NUMBER(p) / INTEGER | INT·BIGINT·SMALLINT·TINYINT |
 | 실수 | FLOAT·DOUBLE·DECIMAL(p,s) | REAL·DOUBLE·NUMERIC(p,s) | NUMBER(p,s) / BINARY_FLOAT / BINARY_DOUBLE | FLOAT·DOUBLE·DECIMAL(p,s) |
@@ -43,7 +43,7 @@
 
 ## 3. 트랜잭션 / ACID
 
-| 항목 | MySQL | PostgreSQL | Oracle | RustDB |
+| 항목 | MySQL | PostgreSQL | Oracle | RuSQL |
 |------|-------|------------|--------|--------|
 | 원자성 (A) | ✓ | ✓ | ✓ | ✓ (Undo log + WAL) |
 | 일관성 (C) | ✓ | ✓ | ✓ | ✓ (PK/FK/UNIQUE/CHECK 검증) |
@@ -62,7 +62,7 @@
 
 ## 4. 잠금
 
-| 항목 | MySQL | PostgreSQL | Oracle | RustDB |
+| 항목 | MySQL | PostgreSQL | Oracle | RuSQL |
 |------|-------|------------|--------|--------|
 | 행 레벨 잠금 | ✓ | ✓ | ✓ | ✓ |
 | 테이블 잠금 | ✓ (LOCK TABLES) | ✓ (LOCK TABLE) | ✓ (LOCK TABLE) | ✗ |
@@ -75,7 +75,7 @@
 
 ## 5. 인덱스
 
-| 항목 | MySQL | PostgreSQL | Oracle | RustDB |
+| 항목 | MySQL | PostgreSQL | Oracle | RuSQL |
 |------|-------|------------|--------|--------|
 | B+Tree | ✓ | ✓ | ✓ | ✓ |
 | 비트맵 인덱스 | ✗ | ✗ | ✓ (저카디널리티 컬럼에 효율적) | ✗ |
@@ -94,7 +94,7 @@
 
 ## 6. 쿼리 기능
 
-| 항목 | MySQL | PostgreSQL | Oracle | RustDB |
+| 항목 | MySQL | PostgreSQL | Oracle | RuSQL |
 |------|-------|------------|--------|--------|
 | SELECT / WHERE / ORDER BY | ✓ | ✓ | ✓ | ✓ |
 | GROUP BY / HAVING | ✓ | ✓ | ✓ | ✓ |
@@ -123,7 +123,7 @@
 
 ## 7. 집계 함수
 
-| 함수 | MySQL | PostgreSQL | Oracle | RustDB |
+| 함수 | MySQL | PostgreSQL | Oracle | RuSQL |
 |------|-------|------------|--------|--------|
 | COUNT / SUM / AVG / MIN / MAX | ✓ | ✓ | ✓ | ✓ |
 | GROUP_CONCAT / STRING_AGG / LISTAGG | GROUP_CONCAT | STRING_AGG | LISTAGG | GROUP_CONCAT |
@@ -139,7 +139,7 @@
 
 ## 8. 윈도우 함수
 
-| 함수 | MySQL 8.0+ | PostgreSQL | Oracle | RustDB |
+| 함수 | MySQL 8.0+ | PostgreSQL | Oracle | RuSQL |
 |------|------------|------------|--------|--------|
 | ROW_NUMBER / RANK / DENSE_RANK | ✓ | ✓ | ✓ | ✓ |
 | LAG / LEAD | ✓ | ✓ | ✓ | ✓ |
@@ -156,7 +156,7 @@
 
 ## 9. 스칼라 함수
 
-| 범주 | MySQL | PostgreSQL | Oracle | RustDB |
+| 범주 | MySQL | PostgreSQL | Oracle | RuSQL |
 |------|-------|------------|--------|--------|
 | 문자열 | 50+ (CONCAT, SUBSTR, TRIM, REPLACE, LPAD, RPAD, REGEXP...) | 50+ | 50+ (SUBSTR, INSTR, LPAD, RPAD, REPLACE, INITCAP...) | UPPER, LOWER, LENGTH, TRIM, CONCAT, SUBSTR, REPLACE, LPAD, RPAD, CHAR_LENGTH, LEFT, RIGHT, REVERSE, REPEAT, INSTR, LOCATE, LTRIM, RTRIM, SPACE, ASCII, HEX, FORMAT |
 | 날짜/시간 | 40+ | 40+ | 40+ (ADD_MONTHS, TRUNC, MONTHS_BETWEEN, NEXT_DAY...) | NOW, CURDATE, DATE_FORMAT, DATE_ADD, DATE_SUB, DATEDIFF, YEAR, MONTH, DAY, DAYOFWEEK, DAYOFYEAR, WEEKDAY, LAST_DAY, TIMESTAMPDIFF, UNIX_TIMESTAMP, FROM_UNIXTIME |
@@ -171,7 +171,7 @@
 
 ## 10. DDL
 
-| 항목 | MySQL | PostgreSQL | Oracle | RustDB |
+| 항목 | MySQL | PostgreSQL | Oracle | RuSQL |
 |------|-------|------------|--------|--------|
 | CREATE / DROP TABLE | ✓ | ✓ | ✓ | ✓ |
 | ALTER TABLE (ADD/DROP/MODIFY/RENAME COLUMN) | ✓ | ✓ | ✓ | ✓ |
@@ -190,7 +190,7 @@
 
 ## 11. 제약조건
 
-| 항목 | MySQL | PostgreSQL | Oracle | RustDB |
+| 항목 | MySQL | PostgreSQL | Oracle | RuSQL |
 |------|-------|------------|--------|--------|
 | PRIMARY KEY | ✓ (단일/복합) | ✓ | ✓ | ✓ (단일/복합) |
 | FOREIGN KEY + ON DELETE/UPDATE | ✓ | ✓ | ✓ (ON DELETE만 지원) | ✓ |
@@ -205,7 +205,7 @@
 
 ## 12. DML
 
-| 항목 | MySQL | PostgreSQL | Oracle | RustDB |
+| 항목 | MySQL | PostgreSQL | Oracle | RuSQL |
 |------|-------|------------|--------|--------|
 | INSERT VALUES | ✓ | ✓ | ✓ | ✓ |
 | INSERT SELECT | ✓ | ✓ | ✓ | ✓ |
@@ -223,7 +223,7 @@
 
 ## 13. 쿼리 최적화 / 실행 계획
 
-| 항목 | MySQL | PostgreSQL | Oracle | RustDB |
+| 항목 | MySQL | PostgreSQL | Oracle | RuSQL |
 |------|-------|------------|--------|--------|
 | 비용 기반 최적화 (CBO) | ✓ | ✓ | ✓ | ✓ |
 | 통계 기반 선택도 | ✓ (histogram) | ✓ (pg_statistic) | ✓ (DBMS_STATS) | ✓ (ANALYZE TABLE — equi-depth 히스토그램 10-bucket, PkRange·PkBetween·SecondaryRange selectivity 추정) |
@@ -239,7 +239,7 @@
 
 ## 14. 보안 / 사용자 관리
 
-| 항목 | MySQL | PostgreSQL | Oracle | RustDB |
+| 항목 | MySQL | PostgreSQL | Oracle | RuSQL |
 |------|-------|------------|--------|--------|
 | 사용자 모델 | user@host | 역할 (Role) | 유저 = 스키마 | user@host |
 | GRANT / REVOKE | ✓ | ✓ | ✓ | ✓ |
@@ -254,7 +254,7 @@
 
 ## 15. 고가용성 / 분산
 
-| 항목 | MySQL | PostgreSQL | Oracle | RustDB |
+| 항목 | MySQL | PostgreSQL | Oracle | RuSQL |
 |------|-------|------------|--------|--------|
 | 복제 | 비동기·반동기·동기 | 스트리밍·논리 복제 | Data Guard (동기/비동기) | ✗ |
 | 자동 장애 복구 | InnoDB Cluster / MHA | Patroni / repmgr | Data Guard + Observer | ✗ |
@@ -267,7 +267,7 @@
 
 ## 16. 관리 / 운영
 
-| 항목 | MySQL | PostgreSQL | Oracle | RustDB |
+| 항목 | MySQL | PostgreSQL | Oracle | RuSQL |
 |------|-------|------------|--------|--------|
 | SHOW TABLES / DESCRIBE | ✓ | 유사 (\\d, information_schema) | 유사 (ALL_TABLES, DESC) | ✓ |
 | INFORMATION_SCHEMA | ✓ (전체) | ✓ (전체) | ✓ (ALL_*/DBA_*/USER_* 딕셔너리 뷰) | ✓ (10개 가상 뷰) |
@@ -286,11 +286,11 @@
 
 ## 17. 클라이언트 / 네트워크 프로토콜
 
-| 항목 | MySQL | PostgreSQL | Oracle | RustDB |
+| 항목 | MySQL | PostgreSQL | Oracle | RuSQL |
 |------|-------|------------|--------|--------|
 | 공식 프로토콜 | MySQL Protocol (포트 3306) | PostgreSQL wire protocol (포트 5432) | Oracle SQL*Net / TNS (포트 1521) | 텍스트 기반 TCP (포트 7878, ---END--- 구분자) + MySQL wire protocol (포트 3306) |
 | MySQL wire protocol 호환 | ✓ | ✗ | ✗ | ✓ (포트 3306, mysql_native_password 인증 구현, mysql CLI / DBeaver / mysql-connector-python 완전 연동 — SHOW VARIABLES/COLLATION/FULL TABLES/FULL COLUMNS 등 자동 쿼리 처리) |
-| 드라이버 호환 | JDBC, ODBC, Python, Go, Node.js | JDBC, ODBC, libpq, Python, Go, Node.js | JDBC (ojdbc), ODBC, OCI, Python (cx_Oracle) | rustdb-client (전용 CLI, -u/-p/-h/-P 플래그) + MySQL 호환 클라이언트 |
+| 드라이버 호환 | JDBC, ODBC, Python, Go, Node.js | JDBC, ODBC, libpq, Python, Go, Node.js | JDBC (ojdbc), ODBC, OCI, Python (cx_Oracle) | rusql-client (전용 CLI, -u/-p/-h/-P 플래그) + MySQL 호환 클라이언트 |
 | 커넥션 풀 지원 | ✓ | ✓ | ✓ (DRCP) | ✗ |
 | Prepared Statements | ✓ | ✓ | ✓ | ✓ (PREPARE/EXECUTE/DEALLOCATE USING @var) |
 | 배치 실행 | ✓ | ✓ | ✓ | ✗ (멀티쿼리 ; 분리) |
@@ -300,7 +300,7 @@
 
 ## 18. UI / 관리 도구
 
-| 항목 | MySQL Workbench | pgAdmin / DBeaver | Oracle SQL Developer | RustDB UI |
+| 항목 | MySQL Workbench | pgAdmin / DBeaver | Oracle SQL Developer | RuSQL UI |
 |------|-----------------|-------------------|----------------------|-----------|
 | 쿼리 에디터 | ✓ (구문 강조, 자동완성) | ✓ | ✓ | ✓ (Monaco 기반, SQL 구문 강조, BEGIN...END 블록 인식, Ctrl+Enter 실행, Ctrl+Shift+F 포맷, MySQL 스타일 툴바 — SQL 파일 열기/저장/번개 실행, 패널 토글 버튼, 분할 에디터 — 탭 왼쪽 바 이동·복원) |
 | ERD 다이어그램 | ✓ | ✓ | ✓ | ✓ (FK 관계선, 팬/줌, 카드 드래그, FK 기반 Auto Layout) |

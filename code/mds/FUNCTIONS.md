@@ -1,4 +1,4 @@
-# RustDB v2.2.0 — 완료된 기능
+# RuSQL v2.2.0 — 완료된 기능
 
 ### 엔진 코어
 - [x] Lexer / Tokenizer
@@ -250,7 +250,7 @@
 - [x] UPDATE SET 스칼라 함수 — `UPDATE t SET col = CONCAT(name, '-', dept)` eval_arith Func 분기 개선으로 지원
 - [x] SQL 키워드를 컬럼/별칭 이름으로 사용 — `ORDER BY avg DESC`, `GROUP BY count` 등 집계 함수명을 컬럼 참조 위치에서 식별자로 수락 (`expect_any_ident`)
 
-### UI (rustdb-ui)
+### UI (rusql-ui)
 - [x] Tauri + React 데스크탑 앱
 - [x] 홈(연결) 화면 — 3티어 실린더 아이콘 헤더, 퀵 액션 버튼 3종 (새 연결·터미널 열기·GitHub 방문), RDBMS 영문 소개 텍스트 (4줄), 저장된 연결 카드 그리드, 하단 상태 표시줄 (브랜치·버전·기술 스택), 좌측 액티비티 바 (유저 아이콘·설정 버튼), Tauri `open_terminal` (기본 경로: dbe/code) · `open_url` 커맨드
 - [x] Monaco Editor (SQL 문법 강조, 주석 회색)
@@ -297,7 +297,7 @@
 - [x] BEGIN...END 블록 인식 쿼리 분리 — SQL 에디터에서 CREATE PROCEDURE / CREATE TRIGGER 등 BEGIN...END 포함 멀티 쿼리를 올바르게 분리·실행 (IF/ELSEIF/WHILE/LOOP/REPEAT/ITERATE 제어문 UI 검증 완료)
 - [x] 결과 셀 직접 편집 — 단일 테이블 SELECT 결과에서 셀 더블클릭 → 인풋 전환, Enter/blur 커밋 시 `UPDATE tableName SET col = val WHERE pk = pkVal` 자동 생성·실행 후 SELECT 재실행 (Escape = 취소, JOIN/PK 없는 경우 자동 비활성)
 
-### TCP 서버 / MySQL 프로토콜 (rustdb-server)
+### TCP 서버 / MySQL 프로토콜 (rusql-server)
 - [x] 커스텀 텍스트 프로토콜 TCP 서버 — 포트 7878, `---END---` 구분자, 멀티 클라이언트 동시 접속, 세션별 독립 Executor
 - [x] AUTH 핸드셰이크 — `AUTH user password` 줄 기반 인증, SHA-256 해시 비교, 레거시 평문 자동 마이그레이션
 - [x] 기본 사용자 자동 생성 — users가 비어있으면 root/root 자동 생성 (`ensure_default_user`)
@@ -317,14 +317,14 @@
 - [x] `SHOW EVENTS` — 올바른 컬럼 구조의 빈 결과 반환
 - [x] `SHOW COLLATION` — utf8 / utf8mb4 / latin1 실제 콜레이션 데이터 반환 (DBeaver 문자셋 초기화 정상 처리)
 - [x] `SHOW CHARACTER SET` / `SHOW CHARSET` — utf8 / utf8mb4 / latin1 실제 데이터 반환
-- [x] `SHOW ENGINES` — RustDB 엔진 정보 반환 (DBeaver 엔진 목록 초기화 정상 처리)
+- [x] `SHOW ENGINES` — RuSQL 엔진 정보 반환 (DBeaver 엔진 목록 초기화 정상 처리)
 - [x] `SHOW VARIABLES [LIKE 'pattern']` — 21개 주요 MySQL 시스템 변수 의미 있는 값 반환 (autocommit / character_set / collation / max_allowed_packet / tx_isolation 등), LIKE 패턴 필터링 지원
 - [x] `SELECT @@var1 AS a, @@var2 AS b, ...` — 다중 시스템 변수 SELECT를 컬럼별로 올바르게 파싱·반환 (DBeaver 접속 초기화 쿼리 정상 처리)
 - [x] `SELECT DATABASE()` / `SELECT SCHEMA()` / `SELECT USER()` — 각각 현재 DB / 현재 DB / 'root@localhost' 반환
 - [x] `SET ...` (charset / autocommit / session 변수 등) — 무조건 OK 반환
 
-### 전용 클라이언트 (rustdb-client)
-- [x] rustdb-server native 프로토콜 전용 TCP 클라이언트
+### 전용 클라이언트 (rusql-client)
+- [x] rusql-server native 프로토콜 전용 TCP 클라이언트
 - [x] CLI 옵션: `-u user` / `-p password` / `-h host` / `-P port` (기본: root/root@127.0.0.1:7878)
 - [x] 멀티라인 SQL 입력 — 세미콜론(`;`)으로 실행 트리거, 주석/문자열 내 `;` 제외 계산
 - [x] ANSI 컬러 출력 (빨강: 에러, 초록: 성공, 청록: 프롬프트)
@@ -340,11 +340,11 @@
 - [x] **Tauri `get_app_data_dir` 커맨드** — `CARGO_MANIFEST_DIR` 기반 `code/data/` 절대경로 반환
 - [x] **상대경로 자동 절대경로 변환** — 앱 시작 시 localStorage의 상대경로 연결을 절대경로로 마이그레이션 후 재저장
 
-### UI 추가 기능 (rustdb-ui)
+### UI 추가 기능 (rusql-ui)
 - [x] **Server Manager MySQL 포트 필드** — `+/-` 버튼 포함, 0 입력 시 MySQL 프로토콜 비활성, Tauri `start_server`에 `mysql_port` 파라미터 추가
 - [x] **Tauri UI MySQL 리스너** — UI에서 서버 Start 시 `mysql::start_mysql_listener(mysql_port, shared_db)` 호출로 MySQL 프로토콜 동시 기동
 - [x] **서버 연결 아이콘 교체** — Server Manager 헤더의 서버 랙 아이콘 → 주황색 원통형 DB 아이콘
 - [x] **결과 패널 AI 분석 버튼** — SELECT 결과 아래 "AI 분석" 버튼; 현재 SQL + 결과를 마크다운 테이블로 포맷해 `/api/report`(server.py Gemini)에 전송, 한국어 요약·패턴·인사이트 인라인 표시 (`analyzeReport` 함수, `reportAi` 상태)
-- [x] **Server Manager Bench 패널** — "Bench" 우측 버튼으로 슬라이드 패널 토글; "결과 불러오기" → `read_bench_result` Tauri 커맨드로 `code/test/perf/result.json` 파싱·포맷 표시 (로딩 중 버튼 disabled + "불러오는 중..." 텍스트, 파일 없으면 주황색 안내), "터미널 실행" → `open_bench_terminal` 커맨드로 cmd 창에서 `pip install -q -r requirements.txt && python bench.py` 자동 실행 (`bench_dir()` = CARGO_MANIFEST_DIR 기반); `bench.py` 완료 후 RustDB·MySQL 양쪽 `bench_db` 자동 삭제
+- [x] **Server Manager Bench 패널** — "Bench" 우측 버튼으로 슬라이드 패널 토글; "결과 불러오기" → `read_bench_result` Tauri 커맨드로 `code/test/perf/result.json` 파싱·포맷 표시 (로딩 중 버튼 disabled + "불러오는 중..." 텍스트, 파일 없으면 주황색 안내), "터미널 실행" → `open_bench_terminal` 커맨드로 cmd 창에서 `pip install -q -r requirements.txt && python bench.py` 자동 실행 (`bench_dir()` = CARGO_MANIFEST_DIR 기반); `bench.py` 완료 후 RuSQL·MySQL 양쪽 `bench_db` 자동 삭제
 - [x] **Server Manager Session 패널** — "Session" 우측 버튼으로 슬라이드 패널 토글; `SessionInfo`(addr·user·connected_at·query_count) 목록을 기존 1.5s 상태 폴링에 내장해 별도 폴링 없이 실시간 갱신, 경과 시간 초/분 자동 단위 표시
 - [x] **AI 탭 가운데 정렬** — `.ai-body-scroll`에 `align-items: center` 적용, `<div className="ai-body-inner">` 래퍼(max-width 720px)로 서버 탭과 동일한 중앙 레이아웃 구현

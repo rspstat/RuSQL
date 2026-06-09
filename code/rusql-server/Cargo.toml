@@ -1,0 +1,8 @@
+[package]
+name = "rusql-server"
+version = "2.2.0"
+edition = "2021"
+
+[dependencies]
+rusql-core = { path = "../rusql-core" }
+ctrlc = "3"

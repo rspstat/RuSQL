@@ -5,7 +5,7 @@
       "Bash(cargo run *)",
       "Bash(grep -v \"^$\")",
       "Bash(findstr /i \"file\\\\|arg\\\\|stdin\")",
-      "Bash(Get-Content rustdb-cli/src/main.rs)",
+      "Bash(Get-Content rusql-cli/src/main.rs)",
       "Bash(Select-String -Pattern \"file|arg|stdin\")",
       "Bash(npm run *)",
       "Bash(npx tsc *)"

@@ -1,5 +1,5 @@
 ================================================================
-  RustDB v2.2.0 vs MySQL — 성능 벤치마크 가이드
+  RuSQL v2.2.0 vs MySQL — 성능 벤치마크 가이드
 ================================================================
 
 [ 폴더 구조 ]
@@ -57,19 +57,19 @@
 
   1. INSERT TPS
      - 1만 행 단건 INSERT (auto-commit)
-     - RustDB vs MySQL TPS 비교
+     - RuSQL vs MySQL TPS 비교
 
   2. SELECT 등호 latency (5,000 rows)
      - SeqScan  : 인덱스 없이 full scan
      - B-tree   : CREATE INDEX ... (일반 인덱스)
-     - Hash     : CREATE INDEX ... USING HASH (RustDB 전용, 등호 O(1))
+     - Hash     : CREATE INDEX ... USING HASH (RuSQL 전용, 등호 O(1))
      - MySQL Hash는 Memory 엔진 전용이므로 B-tree 값으로 표시됨
 
   3. SELECT 범위 latency (5,000 rows)
      - BETWEEN 조건, 인덱스 없음 vs B-tree 있음
-     - RustDB vs MySQL 비교
+     - RuSQL vs MySQL 비교
 
-  4. 병렬 스케일링 (RustDB only)
+  4. 병렬 스케일링 (RuSQL only)
      - RUSTDB_PARALLEL=0 (순차) vs RUSTDB_PARALLEL=1 (병렬)
      - GROUP BY 집계 (COUNT / SUM / AVG) 처리 시간 비교
      - speedup 배수 출력
@@ -77,22 +77,22 @@
   5. 동시 접속 SELECT TPS
      - 1 / 4 / 8 스레드 동시 접속
      - 스레드당 500 쿼리 (PK 등호 SELECT)
-     - RustDB vs MySQL 총 TPS 비교
+     - RuSQL vs MySQL 총 TPS 비교
 
 ----------------------------------------------------------------
 [ 출력 예시 ]
 
   ============================================================
-    RustDB v2.2.0 vs MySQL — Performance Benchmark
+    RuSQL v2.2.0 vs MySQL — Performance Benchmark
   ============================================================
 
   [1/5] INSERT TPS (10,000 rows, auto-commit) ...
-    INSERT TPS                               RustDB:    3,200.0 TPS   MySQL:    1,800.0 TPS
+    INSERT TPS                               RuSQL:    3,200.0 TPS   MySQL:    1,800.0 TPS
 
   [2/5] SELECT 등호 latency (5,000 rows) ...
-    SeqScan                                  RustDB:        2.5 ms/query   MySQL:        0.3 ms/query
-    B-tree Index                             RustDB:        0.8 ms/query   MySQL:        0.1 ms/query
-    Hash Index                               RustDB:        0.4 ms/query   MySQL:        0.1 ms/query
+    SeqScan                                  RuSQL:        2.5 ms/query   MySQL:        0.3 ms/query
+    B-tree Index                             RuSQL:        0.8 ms/query   MySQL:        0.1 ms/query
+    Hash Index                               RuSQL:        0.4 ms/query   MySQL:        0.1 ms/query
 
   ...
 
@@ -106,7 +106,7 @@
   CPU     :
   RAM     :
   Storage :                    (SSD / HDD)
-  RustDB  : v2.2.0
+  RuSQL  : v2.2.0
   MySQL   : 8.0.x
   Python  : 3.x
 
@@ -116,7 +116,7 @@
   - bench.py 실행 중 bench_db 데이터베이스를 생성/삭제합니다.
     기존에 bench_db 가 있다면 데이터가 초기화될 수 있습니다.
   - rustdb-server 가 실행 중이지 않으면 연결 오류가 발생합니다.
-  - 병렬 스케일링 측정은 RustDB 단독 측정이며 MySQL과 비교하지 않습니다.
+  - 병렬 스케일링 측정은 RuSQL 단독 측정이며 MySQL과 비교하지 않습니다.
   - 측정 환경 (CPU 코어 수, RAM, Storage 종류) 에 따라 수치가 달라집니다.
     result.json 에 측정값이 저장되므로 환경 정보를 별도 기록해두세요.
 

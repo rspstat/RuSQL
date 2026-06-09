@@ -1,5 +1,5 @@
 """
-RustDB vs MySQL 성능 벤치마크
+RuSQL vs MySQL 성능 벤치마크
 측정 항목:
   1. INSERT TPS          — 1만 행 단건 INSERT
   2. SELECT 등호         — Hash Index vs B-tree vs SeqScan
@@ -9,7 +9,7 @@ RustDB vs MySQL 성능 벤치마크
 
 사용법:
   pip install -r requirements.txt
-  python bench.py           # rustdb-server 가 7878 포트로 실행 중이어야 함
+  python bench.py           # rusql-server 가 7878 포트로 실행 중이어야 함
 """
 
 import socket
@@ -37,8 +37,8 @@ N_SELECT    = 1_000     # SELECT 반복 횟수
 N_PARALLEL  = 5_000     # 병렬 스케일링용 집계 행 수
 RESULT_FILE = "result.json"
 
-# ── RustDB 커넥터 ─────────────────────────────────────────────────────────────
-class RustDB:
+# ── RuSQL 커넥터 ──────────────────────────────────────────────────────────────
+class RuSQL:
     def __init__(self):
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.sock.connect((RUSTDB_HOST, RUSTDB_PORT))
@@ -87,14 +87,14 @@ def mysql_exec(conn, sql: str):
 def fmt(v):
     return f"{v:,.1f}"
 
-def print_row(label, rustdb_val, mysql_val, unit=""):
-    print(f"  {label:<40} RustDB: {fmt(rustdb_val):>10}{unit}   MySQL: {fmt(mysql_val):>10}{unit}")
+def print_row(label, rusql_val, mysql_val, unit=""):
+    print(f"  {label:<40} RuSQL: {fmt(rusql_val):>10}{unit}   MySQL: {fmt(mysql_val):>10}{unit}")
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 1. INSERT TPS
 # ─────────────────────────────────────────────────────────────────────────────
-def bench_insert_rustdb() -> float:
-    db = RustDB()
+def bench_insert_rusql() -> float:
+    db = RuSQL()
     db.execute("CREATE DATABASE IF NOT EXISTS bench_db")
     db.execute("USE bench_db")
     db.execute("DROP TABLE IF EXISTS bench_insert")
@@ -134,7 +134,7 @@ def bench_insert_mysql() -> float:
 # ─────────────────────────────────────────────────────────────────────────────
 # 2. SELECT 등호 — Hash Index vs B-tree vs SeqScan
 # ─────────────────────────────────────────────────────────────────────────────
-def setup_select_rustdb(db: RustDB, n: int):
+def setup_select_rusql(db: RuSQL, n: int):
     db.execute("CREATE DATABASE IF NOT EXISTS bench_db")
     db.execute("USE bench_db")
     db.execute("DROP TABLE IF EXISTS bench_select")
@@ -156,10 +156,10 @@ def setup_select_mysql(conn, n: int):
         cur.execute(f"INSERT INTO bench_select (code, val) VALUES {vals}")
     conn.commit()
 
-def bench_select_rustdb() -> dict:
-    db = RustDB()
+def bench_select_rusql() -> dict:
+    db = RuSQL()
     n = 5_000
-    setup_select_rustdb(db, n)
+    setup_select_rusql(db, n)
 
     # SeqScan (인덱스 없음)
     t0 = time.perf_counter()
@@ -217,10 +217,10 @@ def bench_select_mysql() -> dict:
 # ─────────────────────────────────────────────────────────────────────────────
 # 3. SELECT 범위 (Range Query latency)
 # ─────────────────────────────────────────────────────────────────────────────
-def bench_range_rustdb() -> dict:
-    db = RustDB()
+def bench_range_rusql() -> dict:
+    db = RuSQL()
     n = 5_000
-    setup_select_rustdb(db, n)
+    setup_select_rusql(db, n)
 
     # 인덱스 없음
     t0 = time.perf_counter()
@@ -265,13 +265,13 @@ def bench_range_mysql() -> dict:
     return {"no_index": no_idx_ms, "index": idx_ms}
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 4. 병렬 스케일링 (RustDB only — RUSTDB_PARALLEL 0 vs 1)
+# 4. 병렬 스케일링 (RuSQL only — RUSTDB_PARALLEL 0 vs 1)
 # ─────────────────────────────────────────────────────────────────────────────
-def bench_parallel_rustdb() -> dict:
+def bench_parallel_rusql() -> dict:
     results = {}
     for mode in ["0", "1"]:
         os.environ["RUSTDB_PARALLEL"] = mode
-        db = RustDB()
+        db = RuSQL()
         db.execute("CREATE DATABASE IF NOT EXISTS bench_db")
         db.execute("USE bench_db")
         db.execute("DROP TABLE IF EXISTS bench_parallel")
@@ -295,9 +295,9 @@ def bench_parallel_rustdb() -> dict:
 # ─────────────────────────────────────────────────────────────────────────────
 # 5. 동시 접속 SELECT TPS
 # ─────────────────────────────────────────────────────────────────────────────
-def _concurrent_rustdb_worker(n_queries: int, results: list, idx: int):
+def _concurrent_rusql_worker(n_queries: int, results: list, idx: int):
     try:
-        db = RustDB()
+        db = RuSQL()
         db.execute("USE bench_db")
         t0 = time.perf_counter()
         for i in range(n_queries):
@@ -322,7 +322,7 @@ def _concurrent_mysql_worker(n_queries: int, results: list, idx: int):
     except Exception as e:
         results[idx] = 0.0
 
-def setup_conc_rustdb(db: RustDB):
+def setup_conc_rusql(db: RuSQL):
     db.execute("CREATE DATABASE IF NOT EXISTS bench_db")
     db.execute("USE bench_db")
     db.execute("DROP TABLE IF EXISTS bench_conc")
@@ -341,9 +341,9 @@ def setup_conc_mysql(conn):
     conn.commit()
 
 def bench_concurrent(n_threads: int) -> dict:
-    # RustDB 준비
-    db = RustDB()
-    setup_conc_rustdb(db)
+    # RuSQL 준비
+    db = RuSQL()
+    setup_conc_rusql(db)
     db.close()
 
     # MySQL 준비
@@ -355,12 +355,12 @@ def bench_concurrent(n_threads: int) -> dict:
     r_results = [0.0] * n_threads
     m_results = [0.0] * n_threads
 
-    # RustDB
-    threads = [threading.Thread(target=_concurrent_rustdb_worker, args=(n_queries, r_results, i))
+    # RuSQL
+    threads = [threading.Thread(target=_concurrent_rusql_worker, args=(n_queries, r_results, i))
                for i in range(n_threads)]
     for t in threads: t.start()
     for t in threads: t.join()
-    rustdb_tps = sum(r_results)
+    rusql_tps = sum(r_results)
 
     # MySQL
     threads = [threading.Thread(target=_concurrent_mysql_worker, args=(n_queries, m_results, i))
@@ -370,7 +370,7 @@ def bench_concurrent(n_threads: int) -> dict:
     mysql_tps = sum(m_results)
 
     # cleanup
-    db = RustDB()
+    db = RuSQL()
     db.execute("USE bench_db")
     db.execute("DROP TABLE IF EXISTS bench_conc")
     db.close()
@@ -378,7 +378,7 @@ def bench_concurrent(n_threads: int) -> dict:
     mysql_exec(conn, "DROP TABLE IF EXISTS bench_conc")
     conn.close()
 
-    return {"rustdb": rustdb_tps, "mysql": mysql_tps}
+    return {"rusql": rusql_tps, "mysql": mysql_tps}
 
 # ─────────────────────────────────────────────────────────────────────────────
 # main
@@ -387,36 +387,36 @@ def main():
     result = {}
 
     print("=" * 60)
-    print("  RustDB v2.2.0 vs MySQL — Performance Benchmark")
+    print("  RuSQL v2.2.0 vs MySQL — Performance Benchmark")
     print("=" * 60)
 
     # 1. INSERT TPS
     print("\n[1/5] INSERT TPS (10,000 rows, auto-commit) ...")
-    r = bench_insert_rustdb()
+    r = bench_insert_rusql()
     m = bench_insert_mysql()
-    result["insert_tps"] = {"rustdb": r, "mysql": m}
+    result["insert_tps"] = {"rusql": r, "mysql": m}
     print_row("INSERT TPS", r, m, " TPS")
 
     # 2. SELECT 등호
     print("\n[2/5] SELECT 등호 latency (5,000 rows) ...")
-    r = bench_select_rustdb()
+    r = bench_select_rusql()
     m = bench_select_mysql()
-    result["select_eq"] = {"rustdb": r, "mysql": m}
+    result["select_eq"] = {"rusql": r, "mysql": m}
     print_row("  SeqScan", r["seq"], m["seq"], " ms/query")
     print_row("  B-tree Index", r["btree"], m["btree"], " ms/query")
     print_row("  Hash Index", r["hash"], m["hash"], " ms/query")
 
     # 3. 범위 쿼리
     print("\n[3/5] SELECT 범위 latency (5,000 rows, BETWEEN) ...")
-    r = bench_range_rustdb()
+    r = bench_range_rusql()
     m = bench_range_mysql()
-    result["select_range"] = {"rustdb": r, "mysql": m}
+    result["select_range"] = {"rusql": r, "mysql": m}
     print_row("  No Index", r["no_index"], m["no_index"], " ms/query")
     print_row("  B-tree Index", r["index"], m["index"], " ms/query")
 
     # 4. 병렬 스케일링
-    print("\n[4/5] 병렬 스케일링 — GROUP BY 집계 (RustDB only) ...")
-    p = bench_parallel_rustdb()
+    print("\n[4/5] 병렬 스케일링 — GROUP BY 집계 (RuSQL only) ...")
+    p = bench_parallel_rusql()
     result["parallel"] = p
     speedup = p["off"] / p["on"] if p["on"] > 0 else 0
     print(f"  PARALLEL OFF: {fmt(p['off'])} ms/query")
@@ -428,7 +428,7 @@ def main():
     for n in [1, 4, 8]:
         r = bench_concurrent(n)
         conc[str(n)] = r
-        print_row(f"  {n} threads", r["rustdb"], r["mysql"], " TPS")
+        print_row(f"  {n} threads", r["rusql"], r["mysql"], " TPS")
     result["concurrent"] = conc
 
     # JSON 저장
@@ -439,7 +439,7 @@ def main():
 
     # 벤치마크 DB 정리
     try:
-        db = RustDB()
+        db = RuSQL()
         db.execute("DROP DATABASE IF EXISTS bench_db")
         db.close()
     except Exception:

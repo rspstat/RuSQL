@@ -12,7 +12,7 @@ import os
 
 RESULT_FILE = "result.json"
 OUT_DIR = "charts"
-COLORS = {"rustdb": "#4ec9b0", "mysql": "#e06c75"}
+COLORS = {"rusql": "#4ec9b0", "mysql": "#e06c75"}
 
 os.makedirs(OUT_DIR, exist_ok=True)
 
@@ -22,10 +22,10 @@ def save(fig, name):
     plt.close(fig)
     print(f"  saved: {path}")
 
-def bar2(ax, labels, rustdb_vals, mysql_vals, ylabel, title):
+def bar2(ax, labels, rusql_vals, mysql_vals, ylabel, title):
     x = range(len(labels))
     w = 0.35
-    ax.bar([i - w/2 for i in x], rustdb_vals, w, label="RustDB v2.2.0", color=COLORS["rustdb"])
+    ax.bar([i - w/2 for i in x], rusql_vals, w, label="RuSQL v2.2.0", color=COLORS["rusql"])
     ax.bar([i + w/2 for i in x], mysql_vals,  w, label="MySQL 8.0",     color=COLORS["mysql"])
     ax.set_xticks(list(x))
     ax.set_xticklabels(labels)
@@ -44,7 +44,7 @@ def main():
     fig, ax = plt.subplots(figsize=(5, 4))
     bar2(ax,
          ["INSERT 10k rows"],
-         [d["insert_tps"]["rustdb"]],
+         [d["insert_tps"]["rusql"]],
          [d["insert_tps"]["mysql"]],
          "Transactions / sec",
          "INSERT TPS (auto-commit, 10,000 rows)")
@@ -53,7 +53,7 @@ def main():
     # ── 2. SELECT 등호 latency ───────────────────────────────────────────────
     fig, ax = plt.subplots(figsize=(6, 4))
     labels = ["SeqScan", "B-tree Index", "Hash Index"]
-    r = d["select_eq"]["rustdb"]
+    r = d["select_eq"]["rusql"]
     m = d["select_eq"]["mysql"]
     bar2(ax,
          labels,
@@ -65,7 +65,7 @@ def main():
 
     # ── 3. SELECT 범위 latency ───────────────────────────────────────────────
     fig, ax = plt.subplots(figsize=(5, 4))
-    r = d["select_range"]["rustdb"]
+    r = d["select_range"]["rusql"]
     m = d["select_range"]["mysql"]
     bar2(ax,
          ["No Index", "B-tree Index"],
@@ -80,21 +80,21 @@ def main():
     p = d["parallel"]
     labels = ["Parallel OFF", "Parallel ON"]
     vals = [p["off"], p["on"]]
-    bars = ax.bar(labels, vals, color=[COLORS["mysql"], COLORS["rustdb"]])
+    bars = ax.bar(labels, vals, color=[COLORS["mysql"], COLORS["rusql"]])
     for bar, val in zip(bars, vals):
         ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() * 1.01,
                 f"{val:.1f} ms", ha="center", va="bottom", fontsize=9)
     speedup = p["off"] / p["on"] if p["on"] > 0 else 0
     ax.set_ylabel("ms / query")
-    ax.set_title(f"RustDB 병렬 스케일링 — GROUP BY 집계\n(speedup: {speedup:.2f}x)")
+    ax.set_title(f"RuSQL 병렬 스케일링 — GROUP BY 집계\n(speedup: {speedup:.2f}x)")
     save(fig, "04_parallel.png")
 
     # ── 5. 동시 접속 TPS ─────────────────────────────────────────────────────
     fig, ax = plt.subplots(figsize=(6, 4))
     threads = sorted(d["concurrent"].keys(), key=int)
-    r_vals = [d["concurrent"][t]["rustdb"] for t in threads]
+    r_vals = [d["concurrent"][t]["rusql"] for t in threads]
     m_vals = [d["concurrent"][t]["mysql"]  for t in threads]
-    ax.plot(threads, r_vals, marker="o", color=COLORS["rustdb"], label="RustDB v2.2.0", linewidth=2)
+    ax.plot(threads, r_vals, marker="o", color=COLORS["rusql"], label="RuSQL v2.2.0", linewidth=2)
     ax.plot(threads, m_vals, marker="s", color=COLORS["mysql"],  label="MySQL 8.0",     linewidth=2)
     ax.set_xlabel("동시 접속 수 (threads)")
     ax.set_ylabel("Total TPS")

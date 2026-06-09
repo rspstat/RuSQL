@@ -1,0 +1,8 @@
+[package]
+name = "rusql-cli"
+version = "2.2.0"
+edition = "2021"
+
+[dependencies]
+rusql-core = { path = "../rusql-core" }
+crossterm = "0.27"

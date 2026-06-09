@@ -4,6 +4,8 @@
 
 <br/>
 
+<img src="assets/icon.png" width="300"/>
+
 ## 핵심 기능
 
 | 분류 | 내용 |
@@ -19,27 +21,27 @@
 ## 실행 방법
 ```bash
 # REPL 모드
-cargo run -p rustdb-cli
+cargo run -p rusql-cli
 
 # 서버 모드 (커스텀 프로토콜 7878 + MySQL 프로토콜 3306 동시 기동)
-cargo run -p rustdb-server
+cargo run -p rusql-server
 
 # MySQL wire protocol만 포트 변경 또는 비활성화
-cargo run -p rustdb-server -- --mysql-port 13306
-cargo run -p rustdb-server -- --no-mysql
+cargo run -p rusql-server -- --mysql-port 13306
+cargo run -p rusql-server -- --no-mysql
 
 # 버퍼 풀 크기 지정 (기본: 64 페이지)
-cargo run -p rustdb-server -- --buffer-pool-size 256
-cargo run -p rustdb-cli -- --buffer-pool-size 128
+cargo run -p rusql-server -- --buffer-pool-size 256
+cargo run -p rusql-cli -- --buffer-pool-size 128
 
 # 커스텀 클라이언트 CLI (서버 실행 후)
-cargo run -p rustdb-client -- -u root -p root -h 127.0.0.1 -P 7878
+cargo run -p rusql-client -- -u root -p root -h 127.0.0.1 -P 7878
 
 # MySQL 클라이언트로 직접 접속 (mysql CLI, DBeaver, JDBC 등)
 mysql -h 127.0.0.1 -P 3306 -u root --skip-auto-rehash
 
 # UI 모드
-cd rustdb-ui && npm run tauri dev
+cd rusql-ui && npm run tauri dev
 ```
 
 <br/>
@@ -50,7 +52,7 @@ cd rustdb-ui && npm run tauri dev
 
 ```bash
 # code/ 디렉터리에서 실행
-cargo run -p rustdb-cli < test/test_full.sql
+cargo run -p rusql-cli < test/test_full.sql
 ```
 
 ```sql
@@ -653,23 +655,23 @@ SHOW DATABASES;
 | 사용자 관리 | CREATE/DROP USER, GRANT/REVOKE, SHOW GRANTS, ROLE 관리, SYNONYM, 영속화 |
 | UI | Tauri + React + Monaco Editor (홈 화면: 퀵 액션 버튼·RDBMS 소개·연결 카드 그리드·하단 상태 표시줄·액티비티 바, 멀티 탭, 탭 우클릭 메뉴, 탭 고정, 분할 에디터, AI Agent 채팅 패널 [드래그 너비 조절·파일 컨텍스트·@멘션·파일 편집·채팅 세션 기록], MySQL 스타일 에디터 툴바, 패널 토글 버튼, Canvas 기반 결과 컬럼 자동 너비, 연결 사이드바 드래그 너비 조절, 결과 패널 AI 분석 버튼, Server Manager — 벤치마크 결과 UI·접속 세션 실시간 모니터링, AI 탭 Gemini 서버·True MCP 분리 안내) |
 | TCP 서버 | Native 프로토콜 (127.0.0.1:7878, SHA-256 인증) + MySQL wire protocol (0.0.0.0:3306, `mysql_native_password` 챌린지-응답 인증, DBeaver·mysql CLI·mysql-connector-python 완전 호환) — `--mysql-port` / `--no-mysql` / `--buffer-pool-size` 옵션 |
-| AI 연동 | **Gemini AI 서버** (Python / FastAPI / google-genai `gemini-2.5-flash`, port 8765) — 자연어 → SQL 변환, EXPLAIN 해석, 에러 AI 해석, 쿼리 결과 데이터 분석 리포트, 스키마 설계, 멀티턴 채팅, 에디터 파일 컨텍스트 자동 주입, @파일명 멘션, AI 파일 편집 블록, Tauri 자동 시작 · **True MCP** (Python / FastMCP, stdio JSON-RPC) — Claude Desktop이 `execute_sql` · `list_databases` · `list_tables` · `get_table_schema` 4개 도구로 RustDB에 직접 질의, API 키 불필요 |
+| AI 연동 | **Gemini AI 서버** (Python / FastAPI / google-genai `gemini-2.5-flash`, port 8765) — 자연어 → SQL 변환, EXPLAIN 해석, 에러 AI 해석, 쿼리 결과 데이터 분석 리포트, 스키마 설계, 멀티턴 채팅, 에디터 파일 컨텍스트 자동 주입, @파일명 멘션, AI 파일 편집 블록, Tauri 자동 시작 · **True MCP** (Python / FastMCP, stdio JSON-RPC) — Claude Desktop이 `execute_sql` · `list_databases` · `list_tables` · `get_table_schema` 4개 도구로 RuSQL에 직접 질의, API 키 불필요 |
 
 <br/>
 
 ## 프로젝트 구조
 ```
 code/
-├── rustdb-core/     DB 엔진 라이브러리
-├── rustdb-server/   TCP 서버
-├── rustdb-cli/      터미널 REPL (stdin 직접 실행)
-├── rustdb-client/   TCP 클라이언트 CLI (-u/-p/-H/-P 옵션)
-├── rustdb-ui/       Tauri + React UI
-├── rustdb-mcp/      MCP 서버 (Python) — 자연어 → SQL, EXPLAIN 해석
+├── rusql-core/     DB 엔진 라이브러리
+├── rusql-server/   TCP 서버
+├── rusql-cli/      터미널 REPL (stdin 직접 실행)
+├── rusql-client/   TCP 클라이언트 CLI (-u/-p/-H/-P 옵션)
+├── rusql-ui/       Tauri + React UI
+├── rusql-mcp/      MCP 서버 (Python) — 자연어 → SQL, EXPLAIN 해석
 └── test/
     ├── test_full.sql              전체 기능 검증 SQL (DDL/DML/트랜잭션/힌스토그램 등)
     └── perf/
-        ├── bench.py               RustDB vs MySQL 성능 측정 (INSERT TPS / SELECT / 병렬 / 동시 접속)
+        ├── bench.py               RuSQL vs MySQL 성능 측정 (INSERT TPS / SELECT / 병렬 / 동시 접속)
         ├── chart.py               측정 결과 → matplotlib PNG 차트 생성
         ├── requirements.txt       Python 의존 패키지
         └── README.txt             실행 가이드
@@ -680,7 +682,7 @@ code/
 ## 아키텍처
 ```
 ┌──────────────────────────────────────────┐
-│               rustdb-core                │
+│               rusql-core                 │
 │                                          │
 │  Lexer → Parser → AST                    │
 │              ↓                           │
@@ -736,13 +738,13 @@ code/
 │                                          │
 └──────────────────────────────────────────┘
         ↓              ↓
-  rustdb-cli      rustdb-server
+  rusql-cli       rusql-server
   (터미널 REPL)   (Native :7878 + MySQL :3306)
                       ↓
-               rustdb-client
+               rusql-client
                (TCP 클라이언트 CLI, -u/-p/-h/-P)
         ↓
-  rustdb-ui        rustdb-mcp
+  rusql-ui         rusql-mcp
   (Tauri + React)  (MCP 서버, Python)
 ```
 
