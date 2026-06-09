@@ -1,6 +1,6 @@
-## MCP 기반 커스텀 RDBMS
+## RuSQL
 
-Rust로 구현한 데이터베이스 엔진 + RDBMS + AI MCP 
+Custom RDBMS + AI MCP Project
 
 <br/>
 
@@ -15,7 +15,7 @@ Rust로 구현한 데이터베이스 엔진 + RDBMS + AI MCP
 
 <br/>
 
-## 핵심 기능
+## Core features
 
 | 분류 | 내용 |
 |------|------|
@@ -27,7 +27,7 @@ Rust로 구현한 데이터베이스 엔진 + RDBMS + AI MCP
 
 <br/>
 
-## 실행 방법
+## Execute
 ```bash
 # REPL 모드
 cargo run -p rusql-cli
@@ -55,7 +55,7 @@ cd rusql-ui && npm run tauri dev
 
 <br/>
 
-## 테스트 쿼리
+## Test query
 
 `test/test_full.sql`
 
@@ -645,7 +645,7 @@ SHOW DATABASES;
 
 <br/>
 
-## 기술 스택
+## Technology Stack
 
 | 항목 | 내용 |
 |------|------|
@@ -668,7 +668,7 @@ SHOW DATABASES;
 
 <br/>
 
-## 프로젝트 구조
+## Project structure
 ```
 code/
 ├── rusql-core/     DB 엔진 라이브러리
@@ -688,7 +688,7 @@ code/
 
 <br/>
 
-## 아키텍처
+## Architecture
 ```
 ┌──────────────────────────────────────────┐
 │               rusql-core                 │
