@@ -913,7 +913,7 @@ fn read_bench_result() -> String {
 fn open_bench_terminal() {
     let dir = bench_dir();
     let _ = std::process::Command::new("cmd")
-        .args(["/c", "start", "cmd", "/k", "python bench.py"])
+        .args(["/c", "start", "cmd", "/k", "pip install -q -r requirements.txt && python bench.py"])
         .current_dir(dir)
         .spawn();
 }

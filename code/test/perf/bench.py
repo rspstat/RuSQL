@@ -29,7 +29,7 @@ RUSTDB_PASS = "root"
 MYSQL_HOST  = "127.0.0.1"
 MYSQL_PORT  = 3306
 MYSQL_USER  = "root"
-MYSQL_PASS  = ""        # 필요 시 변경
+MYSQL_PASS  = "root"
 MYSQL_DB    = "bench_db"
 
 N_INSERT    = 10_000    # INSERT TPS 측정 행 수
@@ -47,8 +47,8 @@ class RustDB:
         self._send(f"AUTH {RUSTDB_USER} {RUSTDB_PASS}")
         self._read_until_end()                        # AUTH OK
 
-    def _send(self, sql: str):
-        self.sock.sendall((sql + "\n").encode())
+    def _send(self, data: str):
+        self.sock.sendall((data + "\n").encode())
 
     def _read_until_end(self) -> str:
         buf = ""
@@ -59,7 +59,8 @@ class RustDB:
                 return buf
 
     def execute(self, sql: str) -> str:
-        self._send(sql)
+        s = sql.rstrip().rstrip(';') + ";"
+        self._send(s)
         return self._read_until_end()
 
     def close(self):
@@ -435,6 +436,21 @@ def main():
         json.dump(result, f, indent=2, ensure_ascii=False)
     print(f"\n결과 저장: {RESULT_FILE}")
     print("차트 생성: python chart.py")
+
+    # 벤치마크 DB 정리
+    try:
+        db = RustDB()
+        db.execute("DROP DATABASE IF EXISTS bench_db")
+        db.close()
+    except Exception:
+        pass
+    try:
+        conn = mysql_connect()
+        mysql_exec(conn, "DROP DATABASE IF EXISTS bench_db")
+        conn.close()
+    except Exception:
+        pass
+    print("bench_db 정리 완료")
 
 if __name__ == "__main__":
     main()

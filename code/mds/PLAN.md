@@ -17,7 +17,7 @@
 | **Server Manager UI 개편** | 탭 제거, 우측 슬라이드 패널(CLI 가이드 / MySQL 연결), 버퍼 풀 크기 설정, 병렬 쿼리 토글, 버튼 스타일 통일 |
 | **EXPLAIN ANALYZE 정확도 개선** | 추정 행수(`est_rows`) vs 실제 행수 비교 출력, 실행 시간 ms/sec 단위 자동 선택 |
 | **데이터 분석 리포트** | 결과 패널 "AI 분석" 버튼 — SELECT 결과를 Gemini가 요약·패턴·인사이트 한국어 분석 (`/api/report`) |
-| **벤치마크 자동 실행 UI** | Server Manager Bench 패널 — result.json 불러오기·포맷 표시, 터미널에서 bench.py 실행 버튼 |
+| **벤치마크 자동 실행 UI** | Server Manager Bench 패널 — result.json 불러오기·포맷 표시(로딩 UX), 터미널 실행 시 pip 의존성 자동 설치 후 bench.py 실행, 완료 후 bench_db 자동 삭제 |
 | **접속 세션 실시간 모니터링** | Server Manager Session 패널 — addr·user·접속 경과 시간·쿼리 건수, 1.5s 자동 갱신 (`SessionInfo` Tauri 백엔드) |
 
 ---
@@ -64,6 +64,6 @@
 
 | 항목 | 난이도 | 예상 기간 | 효과 | 우선순위 |
 |---|:---:|:---:|---|:---:|
-| ~~**벤치마크 자동 실행 UI**~~ | ✅ | — | Server Manager Bench 패널 — result.json 불러오기·포맷 표시, bench.py 터미널 실행 | — |
+| ~~**벤치마크 자동 실행 UI**~~ | ✅ | — | Server Manager Bench 패널 — result.json 불러오기·포맷 표시(로딩 UX), 터미널 실행 시 pip 의존성 자동 설치 후 bench.py 실행, 완료 후 bench_db 자동 삭제 | — |
 | ~~**EXPLAIN ANALYZE 실행 시간 정확도**~~ | ✅ | — | 추정 행수 vs 실제 행수 비교, 실행 시간 ms/sec 자동 단위 선택 | — |
 | ~~**SHOW PROCESSLIST 실시간 갱신 UI**~~ | ✅ | — | Server Manager Session 패널 — addr·user·경과 시간·쿼리 건수, 1.5s 자동 갱신 | — |

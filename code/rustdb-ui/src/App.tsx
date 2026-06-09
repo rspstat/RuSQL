@@ -558,7 +558,8 @@ function App() {
   const [srvUser, setSrvUser] = useState("root");
   const [srvPass, setSrvPass] = useState("root");
   const [srvRightPanel, setSrvRightPanel] = useState<"none" | "cli" | "mysql" | "bench" | "sessions">("none");
-  const [benchResult, setBenchResult] = useState<Record<string, unknown> | null>(null);
+  const [benchResult, setBenchResult] = useState<Record<string, unknown> | null | undefined>(undefined);
+  const [benchLoading, setBenchLoading] = useState(false);
   const [srvPassVisible, setSrvPassVisible] = useState(false);
   const logEndRef = useRef<HTMLDivElement>(null);
 
@@ -4661,21 +4662,23 @@ function App() {
                       <button
                         className="srv-action-btn primary"
                         style={{ fontSize: 12 }}
+                        disabled={benchLoading}
                         onClick={async () => {
+                          setBenchLoading(true);
                           try {
                             const raw: string = await invoke("read_bench_result");
-                            if (raw) setBenchResult(JSON.parse(raw));
-                            else setBenchResult(null);
+                            setBenchResult(raw ? JSON.parse(raw) : null);
                           } catch { setBenchResult(null); }
+                          setBenchLoading(false);
                         }}
-                      >결과 불러오기</button>
+                      >{benchLoading ? "불러오는 중..." : "결과 불러오기"}</button>
                       <button
                         className="srv-action-btn save"
                         style={{ fontSize: 12 }}
                         onClick={() => invoke("open_bench_terminal")}
                       >터미널 실행</button>
                     </div>
-                    {benchResult ? (() => {
+                    {benchResult !== undefined && benchResult !== null ? (() => {
                       const r = benchResult as Record<string, Record<string, unknown>>;
                       const fmt = (v: unknown) => typeof v === "number" ? v.toLocaleString("ko-KR", { maximumFractionDigits: 1 }) : String(v);
                       return (
@@ -4731,9 +4734,9 @@ function App() {
                           )}
                         </div>
                       );
-                    })() : (
-                      <div className="srv-slide-text">result.json이 없습니다. 터미널에서 bench.py를 먼저 실행하세요.</div>
-                    )}
+                    })() : benchResult === null ? (
+                      <div className="srv-slide-text" style={{ color: "#f48771" }}>result.json 없음 — 터미널 실행으로 bench.py를 먼저 완료하세요.</div>
+                    ) : null}
                   </>)}
 
                   {srvRightPanel === "mysql" && (<>

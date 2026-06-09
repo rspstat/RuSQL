@@ -345,6 +345,6 @@
 - [x] **Tauri UI MySQL 리스너** — UI에서 서버 Start 시 `mysql::start_mysql_listener(mysql_port, shared_db)` 호출로 MySQL 프로토콜 동시 기동
 - [x] **서버 연결 아이콘 교체** — Server Manager 헤더의 서버 랙 아이콘 → 주황색 원통형 DB 아이콘
 - [x] **결과 패널 AI 분석 버튼** — SELECT 결과 아래 "AI 분석" 버튼; 현재 SQL + 결과를 마크다운 테이블로 포맷해 `/api/report`(server.py Gemini)에 전송, 한국어 요약·패턴·인사이트 인라인 표시 (`analyzeReport` 함수, `reportAi` 상태)
-- [x] **Server Manager Bench 패널** — "Bench" 우측 버튼으로 슬라이드 패널 토글; "결과 불러오기" → `read_bench_result` Tauri 커맨드로 `code/test/perf/result.json` 파싱·포맷 표시, "터미널 실행" → `open_bench_terminal` 커맨드로 cmd 창에서 `python bench.py` 실행 (`bench_dir()` = CARGO_MANIFEST_DIR 기반)
+- [x] **Server Manager Bench 패널** — "Bench" 우측 버튼으로 슬라이드 패널 토글; "결과 불러오기" → `read_bench_result` Tauri 커맨드로 `code/test/perf/result.json` 파싱·포맷 표시 (로딩 중 버튼 disabled + "불러오는 중..." 텍스트, 파일 없으면 주황색 안내), "터미널 실행" → `open_bench_terminal` 커맨드로 cmd 창에서 `pip install -q -r requirements.txt && python bench.py` 자동 실행 (`bench_dir()` = CARGO_MANIFEST_DIR 기반); `bench.py` 완료 후 RustDB·MySQL 양쪽 `bench_db` 자동 삭제
 - [x] **Server Manager Session 패널** — "Session" 우측 버튼으로 슬라이드 패널 토글; `SessionInfo`(addr·user·connected_at·query_count) 목록을 기존 1.5s 상태 폴링에 내장해 별도 폴링 없이 실시간 갱신, 경과 시간 초/분 자동 단위 표시
 - [x] **AI 탭 가운데 정렬** — `.ai-body-scroll`에 `align-items: center` 적용, `<div className="ai-body-inner">` 래퍼(max-width 720px)로 서버 탭과 동일한 중앙 레이아웃 구현
