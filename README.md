@@ -23,7 +23,7 @@ Rust로 구현한 데이터베이스 엔진 + RDBMS + AI MCP
 | SQL 지원 | DDL / DML / JOIN / 서브쿼리 / CTE / UNION / 제약조건 / 트랜잭션 / 저장 프로시저 / 트리거 / UDF |
 | MCP | 자연어 입력 → SQL 자동 생성 → 실행, EXPLAIN 해석, 에러 AI 해석, 쿼리 결과 데이터 분석 리포트, 스키마 설계, 멀티턴 채팅, 파일 컨텍스트 주입, AI 파일 편집 · True MCP (Claude Desktop, stdio JSON-RPC, 도구 4개) |
 | DBMS | TCP 서버, 다중 클라이언트 동시 접속, 접속 세션 실시간 모니터링, 세션별 독립 Executor + `Arc<RwLock<SharedDatabase>>` 공유 |
-| 언어 | Rust |
+| 언어 | Rust, Python |
 
 <br/>
 
