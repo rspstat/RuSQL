@@ -888,7 +888,7 @@ fn csv_parse_row(line: &str) -> Vec<String> {
 fn open_terminal() {
     let _ = std::process::Command::new("cmd")
         .args(["/c", "start", "cmd"])
-        .current_dir(r"C:\Users\win11\Desktop\projects\dbe\code")
+        .current_dir(r"C:\Users\win11\Desktop\projects\RuSQL\code")
         .spawn();
 }
 

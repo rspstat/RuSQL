@@ -374,15 +374,19 @@ impl Executor {
                 }
 
                 let rows = disk.load_table(&qualified_key);
-                let mut tree = BPlusTree::new();
-                for row in &rows {
-                    if let Some(ref col) = first_col {
-                        if let Some(key) = row.get(col) {
-                            let val_json = serde_json::to_string(row).unwrap();
-                            tree.insert(key.clone(), val_json);
+                // 영속화된 PK 인덱스 파일이 있으면 로드, 없으면 재빌드
+                let tree = disk.load_btree_index(&qualified_key).unwrap_or_else(|| {
+                    let mut t = BPlusTree::new();
+                    for row in &rows {
+                        if let Some(ref col) = first_col {
+                            if let Some(key) = row.get(col) {
+                                let val_json = serde_json::to_string(row).unwrap();
+                                t.insert(key.clone(), val_json);
+                            }
                         }
                     }
-                }
+                    t
+                });
                 indexes.insert(qualified_key.clone(), tree);
                 tables.insert(qualified_key, rows);
             }
@@ -425,16 +429,20 @@ impl Executor {
                     hash_index_meta.insert(meta.name.clone(), (q_table, column.clone()));
                 } else if meta.columns.len() == 1 {
                     let column = &meta.columns[0];
-                    let mut tree = BPlusTree::new();
-                    if let Some(rows) = tables.get(&q_table) {
-                        for row in rows {
-                            if let Some(val) = row.get(column) {
-                                let json = serde_json::to_string(row).unwrap();
-                                tree.insert(val.clone(), json);
+                    let key = format!("{}_{}", q_table, meta.name);
+                    // 영속화된 보조 인덱스 파일이 있으면 로드, 없으면 재빌드
+                    let tree = disk.load_btree_index(&key).unwrap_or_else(|| {
+                        let mut t = BPlusTree::new();
+                        if let Some(rows) = tables.get(&q_table) {
+                            for row in rows {
+                                if let Some(val) = row.get(column) {
+                                    let json = serde_json::to_string(row).unwrap();
+                                    t.insert(val.clone(), json);
+                                }
                             }
                         }
-                    }
-                    let key = format!("{}_{}", q_table, meta.name);
+                        t
+                    });
                     indexes.insert(key, tree);
                     index_meta.insert(meta.name.clone(), (q_table, column.clone()));
                 } else {
@@ -1880,7 +1888,22 @@ impl Executor {
             s.buffer_pool.write_page(&table, rows);
             s.buffer_pool.flush_page(&table, &s.disk);
             Self::maybe_auto_vacuum(s);
+            // PK 인덱스 영속화
+            if let Some(idx) = s.indexes.get(&table) {
+                s.disk.save_btree_index(&table, idx);
+            }
+            // 보조 B+Tree 인덱스 영속화
+            let sec_keys: Vec<String> = s.index_meta.iter()
+                .filter(|(_, (tbl, _))| tbl == &table)
+                .map(|(name, _)| format!("{}_{}", table, name))
+                .collect();
+            for key in sec_keys {
+                if let Some(idx) = s.indexes.get(&key) {
+                    s.disk.save_btree_index(&key, idx);
+                }
+            }
         }
+        Self::update_stat_rows(s, &table, inserted as i64);
 
         self.maybe_auto_checkpoint(s);
         if let Some(ret_cols) = returning {
@@ -4741,8 +4764,23 @@ impl Executor {
             s.buffer_pool.write_page(&table, rows_clone.clone());
             s.buffer_pool.flush_page(&table, &s.disk);
             Self::maybe_auto_vacuum(s);
+            // PK 인덱스 영속화
+            if let Some(idx) = s.indexes.get(&table) {
+                s.disk.save_btree_index(&table, idx);
+            }
+            // 보조 B+Tree 인덱스 영속화
+            let sec_keys: Vec<String> = s.index_meta.iter()
+                .filter(|(_, (tbl, _))| tbl == &table)
+                .map(|(name, _)| format!("{}_{}", table, name))
+                .collect();
+            for key in sec_keys {
+                if let Some(idx) = s.indexes.get(&key) {
+                    s.disk.save_btree_index(&key, idx);
+                }
+            }
         // 트랜잭션 중에는 버퍼 풀 갱신 생략 (COMMIT 시 일괄 처리)
         }
+        Self::update_stat_rows(s, &table, -(deleted as i64));
 
         self.maybe_auto_checkpoint(s);
         if let Some(ret_cols) = returning {
@@ -5774,7 +5812,9 @@ impl Executor {
             for (key, rows) in bucket {
                 tree.insert(key, serde_json::to_string(&rows).unwrap());
             }
-            s.indexes.insert(format!("{}_{}", table, index_name), tree);
+            let idx_key = format!("{}_{}", table, index_name);
+            s.disk.save_btree_index(&idx_key, &tree);
+            s.indexes.insert(idx_key, tree);
             s.index_meta.insert(index_name.clone(), (table.clone(), column.clone()));
             self.persist_index_meta(s);
             Ok(format!("Index '{}' created on '{}'.'{}'.", index_name, table, column))
@@ -5790,7 +5830,9 @@ impl Executor {
 
     fn exec_drop_index(&mut self, s: &mut SharedDatabase, index_name: String) -> Result<String, String> {
         if let Some((table, _)) = s.index_meta.remove(&index_name) {
-            s.indexes.remove(&format!("{}_{}", table, index_name));
+            let idx_key = format!("{}_{}", table, index_name);
+            s.indexes.remove(&idx_key);
+            s.disk.delete_btree_index(&idx_key);
             self.persist_index_meta(s);
             Ok(format!("Index '{}' dropped.", index_name))
         } else if let Some((table, _)) = s.hash_index_meta.remove(&index_name) {
@@ -6948,6 +6990,13 @@ impl Executor {
             self.txn.do_checkpoint();
             eprintln!("[AutoCheckpoint] WAL 임계값 초과 → 체크포인트 실행");
         }
+    }
+
+    /// DML 후 table_stats.total_rows 를 delta 만큼 증감한다.
+    /// 통계가 없으면 새로 생성한다.
+    fn update_stat_rows(s: &mut SharedDatabase, table: &str, delta: i64) {
+        let stats = s.table_stats.entry(table.to_string()).or_default();
+        stats.total_rows = (stats.total_rows as i64 + delta).max(0) as usize;
     }
 
     /// AUTO VACUUM: 커밋된 DML이 누적 임계값(200회)을 초과하면 전체 테이블의 dead row를 제거한다.

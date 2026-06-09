@@ -4,7 +4,7 @@
       "command": "python",
       "args": [
         "-u",
-        "C:\\Users\\win11\\Desktop\\projects\\dbe\\code\\rusql-mcp\\mcp_server.py"
+        "C:\\Users\\win11\\Desktop\\projects\\RuSQL\\code\\rusql-mcp\\mcp_server.py"
       ]
     }
   }

@@ -1,29 +1,30 @@
 // src/storage/btree.rs
 
 use std::cmp::Ordering;
+use serde::{Serialize, Deserialize};
 
 const ORDER: usize = 16; // 노드당 최대 키 수
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Node {
     Internal(InternalNode),
     Leaf(LeafNode),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InternalNode {
     pub keys: Vec<String>,
     pub children: Vec<Box<Node>>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LeafNode {
     pub keys: Vec<String>,
     pub values: Vec<String>, // JSON 직렬화된 Row
     // 범위 스캔은 scan_from_node / scan_to_node 가지치기로 O(log N + k) 수행.
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct BPlusTree {
     root: Option<Box<Node>>,
 }

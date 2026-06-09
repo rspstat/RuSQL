@@ -347,6 +347,32 @@ impl DiskManager {
         serde_json::from_str(&json).unwrap_or_default()
     }
 
+    // ── B+Tree 인덱스 영속화 ─────────────────────────────────────────────
+    // key 형식: "db.table" (PK 인덱스) 또는 "db.table_indexname" (보조 인덱스)
+    // 파일: data/{db}/{name}.idx
+
+    pub fn save_btree_index(&self, key: &str, tree: &crate::storage::btree::BPlusTree) {
+        let (db, name) = Self::parse_key(key);
+        self.ensure_db_dir(db);
+        let path = format!("{}/{}.idx", self.table_dir(db), name);
+        if let Ok(json) = serde_json::to_string(tree) {
+            let _ = fs::write(path, json);
+        }
+    }
+
+    pub fn load_btree_index(&self, key: &str) -> Option<crate::storage::btree::BPlusTree> {
+        let (db, name) = Self::parse_key(key);
+        let path = format!("{}/{}.idx", self.table_dir(db), name);
+        let json = fs::read_to_string(&path).ok()?;
+        serde_json::from_str(&json).ok()
+    }
+
+    pub fn delete_btree_index(&self, key: &str) {
+        let (db, name) = Self::parse_key(key);
+        let path = format!("{}/{}.idx", self.table_dir(db), name);
+        let _ = fs::remove_file(path);
+    }
+
     // ── 전역 파일 영속화 (_system/ 서브폴더) ─────────────────────────────
     // 기존 루트 경로(data/_*.json) → _system/ 자동 마이그레이션
 
