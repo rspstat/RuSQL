@@ -312,4 +312,4 @@
 | 연결 관리 | ✓ | ✓ | ✓ | ✓ (연결별 독립 데이터 디렉토리) |
 | 서버 모니터링 | ✓ | ✓ | ✓ (Performance Hub) | ✓ (TCP 서버 on/off·클라이언트 수·로그, 접속 세션 실시간 모니터링 패널 — addr·user·경과 시간·쿼리 건수, 벤치마크 결과 UI 패널) |
 | 데이터 임포트/익스포트 | ✓ (CSV, SQL) | ✓ | ✓ (CSV, Excel, XML) | ✓ (CSV 익스포트·임포트) |
-| AI 연동 | △ (HeatWave AutoML) | ✗ | △ (Oracle AI) | ✓ (Gemini AI 서버 — 자연어→SQL, EXPLAIN 해석, 에러 AI 해석, 스키마 설계, 쿼리 최적화 제안, 결과 데이터 분석 리포트, 멀티턴 채팅, 에디터 파일 컨텍스트·@파일명 멘션, AI 파일 편집, 채팅 세션 기록 / True MCP — mcp_server.py: Claude Desktop 연동, stdio JSON-RPC, 4개 도구, API 키 불필요) |
+| AI 연동 | △ (HeatWave AutoML) | ✗ | △ (Oracle AI) | ✓ (True MCP — mcp_server.py: Claude Desktop 연동, stdio JSON-RPC, 4개 도구 (execute_sql · list_databases · list_tables · get_table_schema), API 키 불필요, UI 자동 연결 버튼) |

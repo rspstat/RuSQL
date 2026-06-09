@@ -16,18 +16,40 @@ fn print_color(text: &str, color: Color) {
     stdout.flush().unwrap();
 }
 
+fn print_help() {
+    print_color("+-------------------------------------------------+\n", Color::DarkCyan);
+    print_color("|", Color::DarkCyan);
+    print_color("                    Commands                     ", Color::Cyan);
+    print_color("|\n", Color::DarkCyan);
+    print_color("+-------------------------------------------------+\n", Color::DarkCyan);
+    print_color("| exit / quit  — exit the CLI                     |\n", Color::DarkGrey);
+    print_color("| help         — show this guide                  |\n", Color::DarkGrey);
+    print_color("+-------------------------------------------------+\n", Color::DarkCyan);
+    print_color("|", Color::DarkCyan);
+    print_color("              Remote Access Guide                ", Color::Cyan);
+    print_color("|\n", Color::DarkCyan);
+    print_color("+-------------------------------------------------+\n", Color::DarkCyan);
+    print_color("| 1. Run the server on the host machine:          |\n", Color::DarkGrey);
+    print_color("|    cargo run -p rusql-server                    |\n", Color::White);
+    print_color("|                                                 |\n", Color::DarkGrey);
+    print_color("| 2. Connect from another computer:               |\n", Color::DarkGrey);
+    print_color("|    cargo run -p rusql-client --                 |\n", Color::White);
+    print_color("|      -u root -p <password>                      |\n", Color::White);
+    print_color("|      -h <server-ip> -P 7878                     |\n", Color::White);
+    print_color("+-------------------------------------------------+\n", Color::DarkCyan);
+    println!();
+}
+
 fn print_banner() {
     print_color("+-------------------------------------------------+\n", Color::DarkCyan);
     print_color("|", Color::DarkCyan);
-    print_color("         RuSQL   v2.2.0  Custom RDBMS", Color::Cyan);
+    print_color("              RuSQL -- Custom RDBMS              ", Color::Cyan);
     print_color("|\n", Color::DarkCyan);
     print_color("+-------------------------------------------------+\n", Color::DarkCyan);
-    print_color("| Engine  : B+Tree + WAL + Undo Log + Optimizer   |\n", Color::DarkGrey);
-    print_color("| Storage : Binary .rdb  LZ4 Compressed           |\n", Color::DarkGrey);
-    print_color("| Join    : Sort-Merge / Hash / Nested Loop        |\n", Color::DarkGrey);
+    print_color("| Welcome to RuSQL — a lightweight custom RDBMS.  |\n", Color::DarkGrey);
+    print_color("| Built from scratch, designed for simplicity.    |\n", Color::DarkGrey);
+    print_color("| Type SQL to begin.  Use 'help' for commands.    |\n", Color::DarkGrey);
     print_color("+-------------------------------------------------+\n", Color::DarkCyan);
-    println!();
-    print_color("Type SQL or 'help' for commands. 'exit' to quit.\n", Color::Grey);
     println!();
 }
 
@@ -113,6 +135,10 @@ fn main() {
         let trimmed = line.trim();
 
         if trimmed.is_empty() || trimmed.starts_with("--") { continue; }
+        if trimmed == "help" {
+            print_help();
+            continue;
+        }
         if trimmed == "exit" || trimmed == "quit" {
             print_color("\nBye!\n", Color::Cyan);
             break;

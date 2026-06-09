@@ -273,7 +273,7 @@
 - [x] 테이블 우클릭 컨텍스트 메뉴 (MySQL 스타일) — Select Rows / Describe Table / Show Create Table / Copy Table Name / Copy as INSERT / Truncate / DROP
 - [x] ERD Editor 뷰 — 테이블 카드 + FK 관계선(직각 꺾임, 라운드 코너), 카드 드래그 / 캔버스 팬 / 휠 줌, 카드 클릭 시 하단 데이터 패널 (데이터 그리드 + 필터)
 - [x] TCP 서버 관리 뷰 — DBeaver 스타일 연결 구성 폼 (호스트·포트 ±·사용자·비밀번호 토글), 메인/CLI 가이드 탭, 서버 랙 SVG 아이콘, 활동 로그, 연결 사이드바 너비 조절 (드래그, 140~400px)
-- [x] AI Agent 채팅 패널 — 사이드바 4번째 아이콘으로 토글, 에디터 오른쪽 사이드 (드래그 너비 조절 240~640px), 채팅 버블 UI (마크다운 렌더링 marked+DOMPurify, 타이핑 인디케이터), 채팅 세션 기록 (시계 버튼 → 세션 목록 패널, 새 채팅 생성, 세션 이름 변경·삭제, localStorage 영구 보존), Enter 전송/Ctrl+Enter 줄바꿈, 자연어 입력 → AI assistant (MCP 서버) → SQL 제안 → 에디터 삽입, 에디터 열린 파일 자동 컨텍스트 주입, @파일명 멘션(자동완성 드롭다운·칩 시각화), AI 파일 편집 블록(파일 수정·삽입·삭제, "파일에 적용" 버튼, Monaco executeEdits Undo 지원)
+
 - [x] 멀티 쿼리 결과 표시
 - [x] 결과 페이지네이션 — PAGE_SIZE=100, 초과 시 ‹/› 버튼 + 페이지 표시
 - [x] 쿼리 히스토리 — 결과 패널 HISTORY 탭, localStorage 최대 200개, 클릭 시 에디터 불러오기
@@ -344,7 +344,6 @@
 - [x] **Server Manager MySQL 포트 필드** — `+/-` 버튼 포함, 0 입력 시 MySQL 프로토콜 비활성, Tauri `start_server`에 `mysql_port` 파라미터 추가
 - [x] **Tauri UI MySQL 리스너** — UI에서 서버 Start 시 `mysql::start_mysql_listener(mysql_port, shared_db)` 호출로 MySQL 프로토콜 동시 기동
 - [x] **서버 연결 아이콘 교체** — Server Manager 헤더의 서버 랙 아이콘 → 주황색 원통형 DB 아이콘
-- [x] **결과 패널 AI 분석 버튼** — SELECT 결과 아래 "AI 분석" 버튼; 현재 SQL + 결과를 마크다운 테이블로 포맷해 `/api/report`(server.py Gemini)에 전송, 한국어 요약·패턴·인사이트 인라인 표시 (`analyzeReport` 함수, `reportAi` 상태)
 - [x] **Server Manager Bench 패널** — "Bench" 우측 버튼으로 슬라이드 패널 토글; "결과 불러오기" → `read_bench_result` Tauri 커맨드로 `code/test/perf/result.json` 파싱·포맷 표시 (로딩 중 버튼 disabled + "불러오는 중..." 텍스트, 파일 없으면 주황색 안내), "터미널 실행" → `open_bench_terminal` 커맨드로 cmd 창에서 `pip install -q -r requirements.txt && python bench.py` 자동 실행 (`bench_dir()` = CARGO_MANIFEST_DIR 기반); `bench.py` 완료 후 RuSQL·MySQL 양쪽 `bench_db` 자동 삭제
 - [x] **Server Manager Session 패널** — "Session" 우측 버튼으로 슬라이드 패널 토글; `SessionInfo`(addr·user·connected_at·query_count) 목록을 기존 1.5s 상태 폴링에 내장해 별도 폴링 없이 실시간 갱신, 경과 시간 초/분 자동 단위 표시
-- [x] **AI 탭 가운데 정렬** — `.ai-body-scroll`에 `align-items: center` 적용, `<div className="ai-body-inner">` 래퍼(max-width 720px)로 서버 탭과 동일한 중앙 레이아웃 구현
+- [x] **Server Manager AI MCP 패널** — "AI MCP" 우측 버튼으로 슬라이드 패널 토글; "Claude Desktop 자동 연결" 버튼 → `setup_mcp_config` Tauri 커맨드로 `%AppData%\Claude\` (일반 설치) + `LocalCache\Roaming\Claude\` (Windows Store) 두 경로에 BOM 없는 UTF-8로 `claude_desktop_config.json` 자동 생성·병합; `where python`으로 `mcp` 패키지 설치된 Python 자동 탐지

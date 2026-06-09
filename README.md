@@ -14,7 +14,7 @@ Custom RDBMS + AI MCP Project
 |------|------|
 | DB 엔진 | B+Tree, WAL, Buffer Pool, MVCC, 트랜잭션, 비용 기반 옵티마이저, 히스토그램 통계, 자동 통계 수집 (DML), B+Tree 인덱스 디스크 영속화, 증분 보조 인덱스 갱신 (INSERT/UPDATE/DELETE 시 O(1)), 병렬 쿼리 실행, 저장 프로시저·트리거·UDF 영속화 |
 | SQL 지원 | DDL / DML / JOIN / 서브쿼리 / CTE / UNION / 제약조건 / 트랜잭션 / 저장 프로시저 / 트리거 / UDF |
-| MCP | 자연어 입력 → SQL 자동 생성 → 실행, EXPLAIN 해석, 에러 AI 해석, 쿼리 결과 데이터 분석 리포트, 스키마 설계, 멀티턴 채팅, 파일 컨텍스트 주입, AI 파일 편집 · True MCP (Claude Desktop, stdio JSON-RPC, 도구 4개) |
+| MCP | True MCP (Claude Desktop, stdio JSON-RPC, 도구 4개 — execute_sql · list_databases · list_tables · get_table_schema, API 키 불필요, UI 자동 연결) |
 | DBMS | TCP 서버, 다중 클라이언트 동시 접속, 접속 세션 실시간 모니터링, 세션별 독립 Executor + `Arc<RwLock<SharedDatabase>>` 공유 |
 | 언어 | Rust, Python |
 
@@ -655,9 +655,9 @@ SHOW DATABASES;
 | 저장 | 바이너리 .rdb + LZ4 압축; 전역 파일은 `data/_system/` 서브폴더로 분리 (_users.json·_grants.json·_roles.json·_synonyms.json 등); 연결별 독립 디렉터리 (`data/local/`, `data/data_숫자/`) — UI·CLI·서버가 `code/data/` 공유; B+Tree 인덱스 `{table}.idx` / `{table}_{index}.idx` (INSERT·DELETE·CREATE INDEX 시 자동 저장, 시작 시 로드) |
 | 다중 DB | CREATE / DROP / USE / SHOW DATABASES, 테이블 자동 한정, 격리 |
 | 사용자 관리 | CREATE/DROP USER, GRANT/REVOKE, SHOW GRANTS, ROLE 관리, SYNONYM, 영속화 |
-| UI | Tauri + React + Monaco Editor (홈 화면: 퀵 액션 버튼·RDBMS 소개·연결 카드 그리드·하단 상태 표시줄·액티비티 바, 멀티 탭, 탭 우클릭 메뉴, 탭 고정, 분할 에디터, AI Agent 채팅 패널 [드래그 너비 조절·파일 컨텍스트·@멘션·파일 편집·채팅 세션 기록], MySQL 스타일 에디터 툴바, 패널 토글 버튼, Canvas 기반 결과 컬럼 자동 너비, 연결 사이드바 드래그 너비 조절, 결과 패널 AI 분석 버튼, Server Manager — 벤치마크 결과 UI·접속 세션 실시간 모니터링, AI 탭 Gemini 서버·True MCP 분리 안내) |
+| UI | Tauri + React + Monaco Editor (홈 화면: 퀵 액션 버튼·RDBMS 소개·연결 카드 그리드·하단 상태 표시줄·액티비티 바, 멀티 탭, 탭 우클릭 메뉴, 탭 고정, 분할 에디터, MySQL 스타일 에디터 툴바, 패널 토글 버튼, Canvas 기반 결과 컬럼 자동 너비, 연결 사이드바 드래그 너비 조절, Server Manager — 벤치마크 결과 UI·접속 세션 실시간 모니터링·AI MCP 자동 연결) |
 | TCP 서버 | Native 프로토콜 (127.0.0.1:7878, SHA-256 인증) + MySQL wire protocol (0.0.0.0:3306, `mysql_native_password` 챌린지-응답 인증, DBeaver·mysql CLI·mysql-connector-python 완전 호환) — `--mysql-port` / `--no-mysql` / `--buffer-pool-size` 옵션 |
-| AI 연동 | **Gemini AI 서버** (Python / FastAPI / google-genai `gemini-2.5-flash`, port 8765) — 자연어 → SQL 변환, EXPLAIN 해석, 에러 AI 해석, 쿼리 결과 데이터 분석 리포트, 스키마 설계, 멀티턴 채팅, 에디터 파일 컨텍스트 자동 주입, @파일명 멘션, AI 파일 편집 블록, Tauri 자동 시작 · **True MCP** (Python / FastMCP, stdio JSON-RPC) — Claude Desktop이 `execute_sql` · `list_databases` · `list_tables` · `get_table_schema` 4개 도구로 RuSQL에 직접 질의, API 키 불필요 |
+| AI 연동 | **True MCP** (Python / FastMCP, stdio JSON-RPC) — Claude Desktop이 `execute_sql` · `list_databases` · `list_tables` · `get_table_schema` 4개 도구로 RuSQL에 직접 질의, API 키 불필요, UI에서 Claude Desktop 자동 연결 (일반 설치 · Windows Store 버전 모두 지원) |
 
 <br/>
 
@@ -669,7 +669,7 @@ code/
 ├── rusql-cli/      터미널 REPL (stdin 직접 실행)
 ├── rusql-client/   TCP 클라이언트 CLI (-u/-p/-H/-P 옵션)
 ├── rusql-ui/       Tauri + React UI
-├── rusql-mcp/      MCP 서버 (Python) — 자연어 → SQL, EXPLAIN 해석
+├── rusql-mcp/      MCP 서버 (Python / FastMCP) — Claude Desktop stdio 연동, 4개 도구
 └── test/
     ├── test_full.sql              전체 기능 검증 SQL (DDL/DML/트랜잭션/힌스토그램 등)
     └── perf/

@@ -5,8 +5,7 @@ import Editor from "@monaco-editor/react";
 import type * as Monaco from "monaco-editor";
 import "./App.css";
 import { format as sqlFormat } from "sql-formatter";
-import { marked } from "marked";
-import DOMPurify from "dompurify";
+
 
 // ─── 타입 ─────────────────────────────────────────────────────
 interface HistoryEntry {
@@ -62,22 +61,7 @@ interface ColumnDetail {
   default_val: string | null;
   fk_ref: string | null;
 }
-type ActiveView = "editor" | "erd" | "server" | "ai";
-interface ChatMessage {
-  id: string;
-  role: "user" | "assistant";
-  content: string;
-  sql?: string;
-  toolCalls?: { name: string; args: string; result?: string }[];
-
-  file_edits?: { name: string; content: string }[];
-}
-interface ChatSession {
-  id: string;
-  name: string;
-  messages: ChatMessage[];
-  updatedAt: number;
-}
+type ActiveView = "editor" | "erd" | "server";
 const PAGE_SIZE = 100;
 
 // ─── ERD 타입/상수 ────────────────────────────────────────────
@@ -288,7 +272,6 @@ function App() {
   const isDragging = useRef(false);
   const isSidebarDragging = useRef(false);
   const lastResultHeightRef = useRef(260);
-  const [chatPanelWidth, setChatPanelWidth] = useState(320);
   const [homeSidebarWidth, setHomeSidebarWidth] = useState(210);
 
   // ERD 상태
@@ -338,6 +321,7 @@ function App() {
   const [appDataBase, setAppDataBase] = useState("");
 
   // 앱 데이터 디렉터리 조회 및 기존 상대경로 연결 마이그레이션
+
   useEffect(() => {
     invoke<string>("get_app_data_dir").then(base => {
       setAppDataBase(base);
@@ -491,61 +475,6 @@ function App() {
   const [activeView, setActiveView] = useState<ActiveView>("editor");
 
   // 서버 상태
-  // ─── AI 어시스턴트 상태 ─────────────────────────────────────
-  const [aiApiKey, setAiApiKey] = useState<string>(() => localStorage.getItem("rusql_ai_key") ?? "");
-  const [aiServerUrl] = useState("http://127.0.0.1:8765");
-  const [aiMode, setAiMode] = useState<"nl" | "explain" | "schema">("nl");
-  const [aiQuestion, setAiQuestion] = useState("");
-  const [aiResult, setAiResult] = useState<{ type: "sql" | "explain" | "schema" | "optimize"; content: string } | null>(null);
-  // 결과 블록별 에러 AI 해석 상태 (key = 결과 인덱스)
-  const [errAi, setErrAi] = useState<Record<number, { loading: boolean; text: string }>>({});
-  const [reportAi, setReportAi] = useState<Record<number, { loading: boolean; text: string }>>({});
-  const [aiLoading, setAiLoading] = useState(false);
-  const [aiError, setAiError] = useState("");
-  const [aiServerOk, setAiServerOk] = useState<boolean | null>(null);
-  const [aiKeyVisible, setAiKeyVisible] = useState(false);
-
-  // ─── AI Agent 채팅 상태 ──────────────────────────────────────
-  const [aiChatOpen, setAiChatOpen] = useState(false);
-  const [chatSessions, setChatSessions] = useState<ChatSession[]>(() => {
-    try {
-      const saved = localStorage.getItem("rusql_chat_sessions");
-      if (saved) { const s: ChatSession[] = JSON.parse(saved); if (s.length > 0) return s; }
-      const oldMsgs: ChatMessage[] = JSON.parse(localStorage.getItem("rusql_chat_messages") ?? "[]");
-      return [{ id: Date.now().toString(), name: "New Chat", messages: oldMsgs, updatedAt: Date.now() }];
-    } catch { return [{ id: Date.now().toString(), name: "New Chat", messages: [], updatedAt: Date.now() }]; }
-  });
-  const [activeChatId, setActiveChatId] = useState<string>(() => {
-    try {
-      const saved = localStorage.getItem("rusql_chat_sessions");
-      if (saved) {
-        const s: ChatSession[] = JSON.parse(saved);
-        const last = localStorage.getItem("rusql_active_chat");
-        return (last && s.find(x => x.id === last)) ? last : (s[0]?.id ?? "");
-      }
-    } catch {}
-    return "";
-  });
-  const activeChatIdRef = useRef(activeChatId);
-  const [chatHistoryOpen, setChatHistoryOpen] = useState(false);
-  const [editingSessionId, setEditingSessionId] = useState<string | null>(null);
-  const [editingSessionName, setEditingSessionName] = useState("");
-  const chatMessages = (chatSessions.find(s => s.id === activeChatId) ?? chatSessions[0])?.messages ?? [];
-  const setChatMessages = (updater: ChatMessage[] | ((prev: ChatMessage[]) => ChatMessage[])) => {
-    const cid = activeChatIdRef.current;
-    setChatSessions(prev => prev.map(s => {
-      if (s.id !== cid) return s;
-      const msgs = typeof updater === "function" ? updater(s.messages) : updater;
-      return { ...s, messages: msgs, updatedAt: Date.now() };
-    }));
-  };
-  const [chatInput, setChatInput] = useState("");
-  const [chatLoading, setChatLoading] = useState(false);
-  const chatEndRef = useRef<HTMLDivElement>(null);
-  const chatTextareaRef = useRef<HTMLTextAreaElement>(null);
-  const [mentionOpen, setMentionOpen] = useState(false);
-  const [mentionQuery, setMentionQuery] = useState("");
-  const [appliedEdits, setAppliedEdits] = useState<Set<string>>(new Set());
 
   const serverStatus_init: ServerStatus = { running: false, port: 7878, client_count: 0, log: [], sessions: [] };
   const [serverStatus, setServerStatus] = useState<ServerStatus>(serverStatus_init);
@@ -557,7 +486,8 @@ function App() {
   const [srvConnName, setSrvConnName] = useState("RuSQL Local");
   const [srvUser, setSrvUser] = useState("root");
   const [srvPass, setSrvPass] = useState("root");
-  const [srvRightPanel, setSrvRightPanel] = useState<"none" | "cli" | "mysql" | "bench" | "sessions">("none");
+  const [srvRightPanel, setSrvRightPanel] = useState<"none" | "cli" | "mysql" | "bench" | "sessions" | "mcp">("none");
+  const [mcpSetupMsg, setMcpSetupMsg] = useState<{ ok: boolean; text: string } | null>(null);
   const [benchResult, setBenchResult] = useState<Record<string, unknown> | null | undefined>(undefined);
   const [benchLoading, setBenchLoading] = useState(false);
   const [srvPassVisible, setSrvPassVisible] = useState(false);
@@ -768,49 +698,6 @@ function App() {
     logEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [serverStatus.log]);
 
-  // ─── 채팅 자동 스크롤 ────────────────────────────────────
-  useEffect(() => {
-    chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [chatMessages, chatLoading]);
-  // ─── 세션 영속 저장 ──────────────────────────────────────
-  useEffect(() => {
-    activeChatIdRef.current = activeChatId;
-    localStorage.setItem("rusql_chat_sessions", JSON.stringify(chatSessions));
-    localStorage.setItem("rusql_active_chat", activeChatId);
-  }, [chatSessions, activeChatId]);
-
-  // ─── 채팅 세션 관리 ──────────────────────────────────────────
-  const addChatSession = () => {
-    const id = Date.now().toString();
-    setChatSessions(prev => [{ id, name: "New Chat", messages: [], updatedAt: Date.now() }, ...prev]);
-    setActiveChatId(id);
-    setChatHistoryOpen(false);
-  };
-  const deleteChatSession = (id: string) => {
-    setChatSessions(prev => {
-      const next = prev.filter(s => s.id !== id);
-      if (next.length === 0) {
-        const newId = (Date.now() + 1).toString();
-        setActiveChatId(newId);
-        return [{ id: newId, name: "New Chat", messages: [], updatedAt: Date.now() }];
-      }
-      if (id === activeChatId) setActiveChatId(next[0].id);
-      return next;
-    });
-  };
-  const commitSessionRename = () => {
-    if (!editingSessionId) return;
-    setChatSessions(prev => prev.map(s =>
-      s.id === editingSessionId ? { ...s, name: editingSessionName.trim() || s.name } : s
-    ));
-    setEditingSessionId(null);
-    setEditingSessionName("");
-  };
-  const getSessionDisplayName = (s: ChatSession) => {
-    if (s.name !== "New Chat") return s.name;
-    const first = s.messages.find(m => m.role === "user");
-    return first ? first.content.slice(0, 30) : "New Chat";
-  };
 
   // ─── 쿼리 실행 ──────────────────────────────────────────────
   const runQuery = async (forceAll = false) => {
@@ -824,7 +711,6 @@ function App() {
     setTabColWidths(p => ({ ...p, [activeTabId]: {} }));
     setTabSortState(p => ({ ...p, [activeTabId]: {} }));
     setTabResultSearch(p => ({ ...p, [activeTabId]: "" }));
-    setErrAi({});
     setResultTab("results");
     setIsRunning(true);
     const startTs = Date.now();
@@ -888,16 +774,6 @@ function App() {
     localStorage.setItem(`rusql_tabs_${connIdRef.current}`, JSON.stringify(next));
   };
 
-  const applyFileEdit = (tabName: string, content: string, editKey: string) => {
-    const target = tabs.find(t => t.name === tabName);
-    if (!target) return;
-    if (target.id === activeTabId) {
-      setEditorQuery(content);
-    } else {
-      saveTabs(tabs.map(t => t.id === target.id ? { ...t, content } : t));
-    }
-    setAppliedEdits(prev => new Set(prev).add(editKey));
-  };
 
   // 현재 에디터 내용을 탭에 저장한 후 탭 전환
   const switchTab = (id: string) => {
@@ -1463,276 +1339,8 @@ function App() {
     setServerStatus(s => ({ ...s, log: [] }));
   };
 
-  // ─── AI 어시스턴트 함수 ─────────────────────────────────────
-  const saveAiKey = (key: string) => {
-    setAiApiKey(key);
-    localStorage.setItem("rusql_ai_key", key);
-  };
 
-  const checkAiServer = async () => {
-    try {
-      const res = await fetch(`${aiServerUrl}/health`, { signal: AbortSignal.timeout(2000) });
-      setAiServerOk(res.ok);
-    } catch {
-      setAiServerOk(false);
-    }
-  };
 
-  const getSchemaText = async (): Promise<string> => {
-    const tables = dbData[currentDb]?.tables ?? [];
-    const parts: string[] = [];
-    for (const t of tables) {
-      let cols = tableColumns[t];
-      if (!cols) {
-        cols = await invoke<ColumnDetail[]>("get_columns_detail", { table: t });
-        setTableColumns(p => ({ ...p, [t]: cols }));
-      }
-      const colStrs = cols.map(c => {
-        const attrs: string[] = [c.data_type];
-        if (c.is_pk) attrs.push("PK");
-        if (c.is_not_null && !c.is_pk) attrs.push("NOT NULL");
-        if (c.is_unique && !c.is_pk) attrs.push("UNIQUE");
-        if (c.fk_ref) attrs.push(`FK→${c.fk_ref}`);
-        return `  ${c.name} ${attrs.join(" ")}`;
-      }).join(",\n");
-      parts.push(`TABLE ${t} (\n${colStrs}\n)`);
-    }
-    return parts.length > 0 ? parts.join("\n\n") : "(no tables)";
-  };
-
-  const generateSql = async () => {
-    if (!aiQuestion.trim()) { setAiError("질문을 입력하세요."); return; }
-    if (!aiApiKey.trim()) { setAiError("API 키를 입력하세요."); return; }
-    setAiLoading(true); setAiError(""); setAiResult(null);
-    try {
-      const schema = await getSchemaText();
-      const res = await fetch(`${aiServerUrl}/api/nl-to-sql`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ question: aiQuestion, schema, api_key: aiApiKey, current_db: currentDb }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.detail ?? "서버 오류");
-      setAiResult({ type: "sql", content: data.sql });
-    } catch (e: unknown) {
-      const msg = e instanceof Error ? e.message : String(e);
-      if (msg.includes("fetch") || msg.includes("Failed")) {
-        setAiError("MCP 서버에 연결할 수 없습니다. server.py가 실행 중인지 확인하세요.");
-      } else {
-        setAiError(msg);
-      }
-    } finally {
-      setAiLoading(false);
-    }
-  };
-
-  const explainCurrent = async () => {
-    if (!aiApiKey.trim()) { setAiError("API 키를 입력하세요."); return; }
-    const sql = (editorRef.current?.getValue() ?? queryRef.current).trim();
-    if (!sql) { setAiError("에디터에 쿼리를 입력하세요."); return; }
-    setAiLoading(true); setAiError(""); setAiResult(null);
-    try {
-      const explainRes = await invoke<MultiQueryResult>("execute_query", { query: `EXPLAIN ${sql}`, ts: Date.now() });
-      const r = explainRes.results[0];
-      const explainText = [r.columns.join("\t"), ...r.rows.map(row => row.join("\t"))].join("\n");
-      const res = await fetch(`${aiServerUrl}/api/explain`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ sql, explain_result: explainText, api_key: aiApiKey }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.detail ?? "서버 오류");
-      setAiResult({ type: "explain", content: data.interpretation });
-    } catch (e: unknown) {
-      const msg = e instanceof Error ? e.message : String(e);
-      if (msg.includes("fetch") || msg.includes("Failed")) {
-        setAiError("MCP 서버에 연결할 수 없습니다. server.py가 실행 중인지 확인하세요.");
-      } else {
-        setAiError("오류: " + msg);
-      }
-    } finally {
-      setAiLoading(false);
-    }
-  };
-
-  // 쿼리 실패 시 에러 메시지를 AI에게 해석 요청 (결과 블록 인라인)
-  const explainError = async (idx: number, errorMsg: string) => {
-    if (!aiApiKey.trim()) {
-      setErrAi(p => ({ ...p, [idx]: { loading: false, text: "⚠️ AI 탭에서 Gemini API 키를 먼저 입력하세요." } }));
-      return;
-    }
-    setErrAi(p => ({ ...p, [idx]: { loading: true, text: "" } }));
-    try {
-      const sql = (editorRef.current?.getValue() ?? queryRef.current).trim();
-      const schema = await getSchemaText();
-      const res = await fetch(`${aiServerUrl}/api/explain-error`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ sql, error: errorMsg, schema, api_key: aiApiKey }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.detail ?? "서버 오류");
-      setErrAi(p => ({ ...p, [idx]: { loading: false, text: data.interpretation } }));
-    } catch (e: unknown) {
-      const msg = e instanceof Error ? e.message : String(e);
-      setErrAi(p => ({ ...p, [idx]: {
-        loading: false,
-        text: msg.includes("fetch") || msg.includes("Failed")
-          ? "MCP 서버에 연결할 수 없습니다. server.py가 실행 중인지 확인하세요."
-          : "오류: " + msg,
-      } }));
-    }
-  };
-
-  const analyzeReport = async (idx: number, columns: string[], rows: string[][]) => {
-    if (!aiApiKey.trim()) {
-      setReportAi(p => ({ ...p, [idx]: { loading: false, text: "⚠️ AI 탭에서 Gemini API 키를 먼저 입력하세요." } }));
-      return;
-    }
-    setReportAi(p => ({ ...p, [idx]: { loading: true, text: "" } }));
-    try {
-      const sql = (editorRef.current?.getValue() ?? queryRef.current).trim();
-      const schema = await getSchemaText();
-      const header = columns.join(" | ");
-      const divider = columns.map(() => "---").join(" | ");
-      const dataRows = rows.slice(0, 100).map(r => r.join(" | "));
-      const result = [header, divider, ...dataRows].join("\n");
-      const res = await fetch(`${aiServerUrl}/api/report`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ sql, result, schema, api_key: aiApiKey }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.detail ?? "서버 오류");
-      setReportAi(p => ({ ...p, [idx]: { loading: false, text: data.report } }));
-    } catch (e: unknown) {
-      const msg = e instanceof Error ? e.message : String(e);
-      setReportAi(p => ({ ...p, [idx]: {
-        loading: false,
-        text: msg.includes("fetch") || msg.includes("Failed")
-          ? "MCP 서버에 연결할 수 없습니다. server.py가 실행 중인지 확인하세요."
-          : "오류: " + msg,
-      } }));
-    }
-  };
-
-  // 현재 에디터 쿼리를 AI가 리뷰해 최적화(인덱스/재작성) 제안
-  const optimizeCurrent = async () => {
-    if (!aiApiKey.trim()) { setAiError("API 키를 입력하세요."); return; }
-    const sql = (editorRef.current?.getValue() ?? queryRef.current).trim();
-    if (!sql) { setAiError("에디터에 쿼리를 입력하세요."); return; }
-    setAiLoading(true); setAiError(""); setAiResult(null);
-    try {
-      let explainText = "";
-      try {
-        const er = await invoke<MultiQueryResult>("execute_query", { query: `EXPLAIN ${sql}`, ts: Date.now() });
-        const r = er.results[0];
-        if (r?.success) explainText = [r.columns.join("\t"), ...r.rows.map(row => row.join("\t"))].join("\n");
-      } catch { /* EXPLAIN 불가해도 최적화는 진행 */ }
-      const schema = await getSchemaText();
-      const res = await fetch(`${aiServerUrl}/api/optimize`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ sql, explain_result: explainText, schema, api_key: aiApiKey }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.detail ?? "서버 오류");
-      setAiResult({ type: "optimize", content: data.suggestion });
-    } catch (e: unknown) {
-      const msg = e instanceof Error ? e.message : String(e);
-      if (msg.includes("fetch") || msg.includes("Failed")) {
-        setAiError("MCP 서버에 연결할 수 없습니다. server.py가 실행 중인지 확인하세요.");
-      } else {
-        setAiError("오류: " + msg);
-      }
-    } finally {
-      setAiLoading(false);
-    }
-  };
-
-  const generateSchema = async () => {
-    if (!aiQuestion.trim()) { setAiError("시스템 요구사항을 입력하세요."); return; }
-    if (!aiApiKey.trim()) { setAiError("API 키를 입력하세요."); return; }
-    setAiLoading(true); setAiError(""); setAiResult(null);
-    try {
-      const res = await fetch(`${aiServerUrl}/api/schema-design`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ description: aiQuestion, api_key: aiApiKey }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.detail ?? "서버 오류");
-      setAiResult({ type: "schema", content: data.sql });
-    } catch (e: unknown) {
-      const msg = e instanceof Error ? e.message : String(e);
-      if (msg.includes("fetch") || msg.includes("Failed")) {
-        setAiError("MCP 서버에 연결할 수 없습니다. server.py가 실행 중인지 확인하세요.");
-      } else {
-        setAiError(msg);
-      }
-    } finally {
-      setAiLoading(false);
-    }
-  };
-
-  // ─── AI Agent 채팅 ───────────────────────────────────────────
-  const sendChat = async () => {
-    const text = chatInput.trim();
-    if (!text || chatLoading) return;
-
-    if (!aiApiKey.trim()) {
-      setChatMessages(prev => [...prev, {
-        id: Date.now().toString(), role: "assistant",
-        content: "API 키가 설정되지 않았습니다.\n\nAI 탭에서 API 키를 입력해주세요.",
-      }]);
-      return;
-    }
-
-    const userMsg: ChatMessage = { id: Date.now().toString(), role: "user", content: text };
-    setChatMessages(prev => [...prev, userMsg]);
-    setChatInput("");
-    setChatLoading(true);
-
-    try {
-      const schema = await getSchemaText();
-      const history = [...chatMessages, userMsg].map(m => ({ role: m.role, content: m.content }));
-
-      // Always include active tab; additionally include @mentioned tabs
-      const currentTabContent = queryRef.current;
-      const currentTabName = activeTab?.name ?? "query.sql";
-      const mentionedTabs = tabs.filter(t => t.id !== activeTabId && text.includes("@" + t.name));
-      const open_files = [
-        { name: currentTabName, content: currentTabContent },
-        ...mentionedTabs.map(t => ({ name: t.name, content: t.content })),
-      ];
-
-      const res = await fetch(`${aiServerUrl}/api/chat`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ messages: history, schema, api_key: aiApiKey, current_db: currentDb, open_files }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.detail ?? "서버 오류");
-      setChatMessages(prev => [...prev, {
-        id: (Date.now() + 1).toString(),
-        role: "assistant",
-        content: data.content,
-        sql: data.sql ?? undefined,
-        file_edits: data.file_edits ?? undefined,
-      }]);
-    } catch (e: unknown) {
-      const msg = e instanceof Error ? e.message : String(e);
-      setChatMessages(prev => [...prev, {
-        id: (Date.now() + 1).toString(),
-        role: "assistant",
-        content: msg.includes("fetch") || msg.includes("Failed")
-          ? "MCP 서버에 연결할 수 없습니다.\nserver.py가 실행 중인지 확인하세요."
-          : `오류: ${msg}`,
-      }]);
-    } finally {
-      setChatLoading(false);
-    }
-  };
 
   // ─── 렌더 ───────────────────────────────────────────────────
   // ─── 메뉴 항목 정의 ─────────────────────────────────────────
@@ -1783,7 +1391,6 @@ function App() {
         { label: "SQL 에디터", shortcut: "Ctrl+1", action: () => setActiveView("editor") },
         { label: "ERD 편집기", shortcut: "Ctrl+2", action: () => setActiveView("erd") },
         { label: "서버 관리자", shortcut: "Ctrl+3", action: () => setActiveView("server") },
-        { label: "AI 어시스턴트", shortcut: "Ctrl+4", action: () => setActiveView("ai") },
         { label: "", divider: true },
         { label: "사이드바 토글", shortcut: "Ctrl+B", action: () => setSidebarWidth(w => w > 0 ? 0 : 240) },
       ],
@@ -2268,18 +1875,6 @@ function App() {
           )}
         </div>
 
-        {/* AI Assistant */}
-        <div
-          className={`activity-icon ${activeView === "ai" ? "active" : ""}`}
-          title="AI Assistant"
-          onClick={() => setActiveView("ai")}
-        >
-          <svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor">
-            <path d="M12 2l1.5 4.5L18 8l-4.5 1.5L12 14l-1.5-4.5L6 8l4.5-1.5L12 2z"/>
-            <path d="M19 14l.75 2.25L22 17l-2.25.75L19 20l-.75-2.25L16 17l2.25-.75L19 14z"/>
-            <path d="M5 17l.5 1.5L7 19l-1.5.5L5 21l-.5-1.5L3 19l1.5-.5L5 17z"/>
-          </svg>
-        </div>
 
         <div className="activity-bar-bottom">
           <div className="activity-icon" title="Account">
@@ -2611,7 +2206,7 @@ function App() {
                 INFO
               </div>
               <div className="sidebar-info-item"><span className="col-icon">◉</span> v2.2.0</div>
-              <div className="sidebar-info-item"><span className="col-icon">◉</span> B+Tree · WAL · MVCC</div>
+              <div className="sidebar-info-item"><span className="col-icon">◉</span> Rust · Python</div>
               <div className="sidebar-info-item">
                 <span className="col-icon" style={{ color: serverStatus.running ? "#4ec9b0" : "#858585" }}>◉</span>
                 {serverStatus.running ? `TCP :${serverStatus.port} (${serverStatus.client_count})` : "TCP Stopped"}
@@ -2952,16 +2547,6 @@ function App() {
               ) : null;
             })()}
             <div className="tab-bar-right">
-              <button
-                className={`ai-agent-btn${aiChatOpen ? " active" : ""}`}
-                onClick={() => setAiChatOpen(v => !v)}
-                title="AI Agent 열기/닫기"
-              >
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
-                  <path d="M12 2l1.5 4.5L18 8l-4.5 1.5L12 14l-1.5-4.5L6 8l4.5-1.5L12 2z"/>
-                  <path d="M19 14l.75 2.25L22 17l-2.25.75L19 20l-.75-2.25L16 17l2.25-.75L19 14z"/>
-                </svg>
-              </button>
               <button className="bookmark-btn" onClick={addBookmark} title="현재 쿼리 북마크 추가 (★)">★</button>
               <div className="panel-toggle-group">
                 <button
@@ -3085,9 +2670,11 @@ function App() {
                       { token: "keyword.type",         foreground: "4EC9B0" },
                       // 내장 함수: 노란색
                       { token: "keyword.other",        foreground: "DCDCAA" },
-                      // 문자열: 주황색
-                      { token: "string",               foreground: "CE9178" },
-                      { token: "string.invalid",       foreground: "CE9178" },
+                      // 문자열: 핑크색
+                      { token: "string",               foreground: "F92672" },
+                      { token: "string.sql",           foreground: "F92672" },
+                      { token: "string.invalid",       foreground: "F92672" },
+                      { token: "string.invalid.sql",   foreground: "F92672" },
                       // 숫자: 연두색
                       { token: "number",               foreground: "B5CEA8" },
                       // 주석: 초록회색
@@ -3265,255 +2852,6 @@ function App() {
               ) : null;
             })()}
             </div>
-            {aiChatOpen && (
-              <div className="ai-chat-panel" style={{ width: chatPanelWidth }}>
-                <div
-                  className="ai-chat-resize-handle"
-                  onMouseDown={e => {
-                    e.preventDefault();
-                    const startX = e.clientX;
-                    const startW = chatPanelWidth;
-                    document.body.style.cursor = "col-resize";
-                    document.body.style.userSelect = "none";
-                    const onMove = (me: MouseEvent) => {
-                      const dx = startX - me.clientX;
-                      setChatPanelWidth(Math.max(240, Math.min(640, startW + dx)));
-                    };
-                    const onUp = () => {
-                      document.removeEventListener("mousemove", onMove);
-                      document.removeEventListener("mouseup", onUp);
-                      document.body.style.cursor = "";
-                      document.body.style.userSelect = "";
-                    };
-                    document.addEventListener("mousemove", onMove);
-                    document.addEventListener("mouseup", onUp);
-                  }}
-                />
-                <div className="ai-chat-header">
-                  <div className="ai-chat-header-left">
-                    <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" style={{ opacity: 0.85 }}>
-                      <path d="M12 2l1.5 4.5L18 8l-4.5 1.5L12 14l-1.5-4.5L6 8l4.5-1.5L12 2z"/>
-                      <path d="M19 14l.75 2.25L22 17l-2.25.75L19 20l-.75-2.25L16 17l2.25-.75L19 14z"/>
-                    </svg>
-                    <span className="ai-chat-title">AI Agent</span>
-                  </div>
-                  <div className="ai-chat-header-right">
-                    <button className="ai-chat-clear" onClick={() => setChatHistoryOpen(v => !v)} title="채팅 기록">
-                      <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor">
-                        <path d="M13 3c-4.97 0-9 4.03-9 9H1l3.89 3.89.07.14L9 12H6c0-3.87 3.13-7 7-7s7 3.13 7 7-3.13 7-7 7c-1.93 0-3.68-.79-4.94-2.06l-1.42 1.42C8.27 19.99 10.51 21 13 21c4.97 0 9-4.03 9-9s-4.03-9-9-9zm-1 5v5l4.28 2.54.72-1.21-3.5-2.08V8H12z"/>
-                      </svg>
-                    </button>
-                    <button className="ai-chat-close" onClick={() => setAiChatOpen(false)} title="닫기">×</button>
-                  </div>
-                </div>
-                {chatHistoryOpen && (
-                  <div className="ai-history-panel">
-                    <div className="ai-history-top">
-                      <span className="ai-history-label">채팅 기록</span>
-                      <button className="ai-history-new-btn" onClick={addChatSession} title="새 채팅">
-                        <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><path d="M19 13H13v6h-2v-6H5v-2h6V5h2v6h6v2z"/></svg>
-                        새 채팅
-                      </button>
-                    </div>
-                    <div className="ai-history-list">
-                      {chatSessions.map(s => (
-                        <div key={s.id} className={`ai-history-item${s.id === activeChatId ? " active" : ""}`}>
-                          {editingSessionId === s.id ? (
-                            <input
-                              className="ai-history-rename-input"
-                              value={editingSessionName}
-                              autoFocus
-                              onChange={e => setEditingSessionName(e.target.value)}
-                              onKeyDown={e => { if (e.key === "Enter") commitSessionRename(); if (e.key === "Escape") setEditingSessionId(null); }}
-                              onBlur={commitSessionRename}
-                            />
-                          ) : (
-                            <span className="ai-history-name" onClick={() => { setActiveChatId(s.id); setChatHistoryOpen(false); }}>
-                              {getSessionDisplayName(s)}
-                            </span>
-                          )}
-                          <div className="ai-history-actions">
-                            <button className="ai-history-btn" title="이름 변경" onClick={() => { setEditingSessionId(s.id); setEditingSessionName(getSessionDisplayName(s)); }}>
-                              <svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor"><path d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04a1 1 0 000-1.41l-2.34-2.34a1 1 0 00-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z"/></svg>
-                            </button>
-                            <button className="ai-history-btn" title="삭제" onClick={() => deleteChatSession(s.id)}>
-                              <svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor"><path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/></svg>
-                            </button>
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                )}
-                <div className="ai-chat-messages">
-                  {chatMessages.length === 0 && (
-                    <div className="ai-chat-empty">
-                      <svg width="32" height="32" viewBox="0 0 24 24" fill="currentColor" style={{ opacity: 0.15 }}>
-                        <path d="M12 2l1.5 4.5L18 8l-4.5 1.5L12 14l-1.5-4.5L6 8l4.5-1.5L12 2z"/>
-                        <path d="M19 14l.75 2.25L22 17l-2.25.75L19 20l-.75-2.25L16 17l2.25-.75L19 14z"/>
-                        <path d="M5 17l.5 1.5L7 19l-1.5.5L5 21l-.5-1.5L3 19l1.5-.5L5 17z"/>
-                      </svg>
-                      <p className="ai-chat-empty-title">AI Agent</p>
-                      <p className="ai-chat-empty-sub">쿼리 작성, 실행, 서버 제어 등<br/>무엇이든 물어보세요.</p>
-                      <div className="ai-chat-suggestions">
-                        {["emp 테이블 전체 조회해줘", "salary 기준으로 상위 3명 뽑아줘", "서버 상태 알려줘"].map(s => (
-                          <button key={s} className="ai-chat-suggestion" onClick={() => setChatInput(s)}>{s}</button>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-                  {chatMessages.map(msg => (
-                    <div key={msg.id} className={`ai-chat-msg ai-chat-msg-${msg.role}`}>
-                      <div className="ai-chat-bubble">
-                        {msg.toolCalls && msg.toolCalls.length > 0 && (
-                          <div className="ai-tool-calls">
-                            {msg.toolCalls.map((tc, i) => (
-                              <div key={i} className="ai-tool-call">
-                                <div className="ai-tool-call-header">
-                                  <svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor"><path d="M22.7 19l-9.1-9.1c.9-2.3.4-5-1.5-6.9-2-2-5-2.4-7.4-1.3L9 6 6 9 1.6 4.7C.4 7.1.9 10.1 2.9 12.1c1.9 1.9 4.6 2.4 6.9 1.5l9.1 9.1c.4.4 1 .4 1.4 0l2.3-2.3c.5-.4.5-1.1.1-1.4z"/></svg>
-                                  <span className="ai-tool-name">{tc.name}</span>
-                                </div>
-                                <pre className="ai-tool-args">{tc.args}</pre>
-                                {tc.result && <pre className="ai-tool-result">{tc.result}</pre>}
-                              </div>
-                            ))}
-                          </div>
-                        )}
-                        {msg.content && (
-                          msg.role === "assistant"
-                            ? <div className="ai-chat-text ai-chat-markdown" dangerouslySetInnerHTML={{ __html: DOMPurify.sanitize(marked.parse(msg.content) as string) }} />
-                            : <div className="ai-chat-text">{msg.content}</div>
-                        )}
-                        {msg.sql && (
-                          <div className="ai-chat-sql-block">
-                            <pre className="ai-chat-sql-code">{msg.sql}</pre>
-                            <div className="ai-chat-sql-actions">
-                              <button
-                                className="ai-chat-sql-btn primary"
-                                onClick={() => { setEditorQuery(msg.sql!); setAiChatOpen(false); setActiveView("editor"); }}
-                              >에디터에 삽입</button>
-                              <button
-                                className="ai-chat-sql-btn"
-                                onClick={() => navigator.clipboard.writeText(msg.sql!)}
-                              >복사</button>
-                            </div>
-                          </div>
-                        )}
-                        {msg.file_edits && msg.file_edits.map((fe, i) => {
-                          const editKey = `${msg.id}-${i}`;
-                          const applied = appliedEdits.has(editKey);
-                          const tabExists = tabs.some(t => t.name === fe.name);
-                          return (
-                            <div key={editKey} className="ai-file-edit-block">
-                              <div className="ai-file-edit-header">
-                                <svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path d="M2 2h12v12H2V2zm1 1v10h10V3H3zm2 2h6v1H5V5zm0 2h6v1H5V7zm0 2h4v1H5V9z"/></svg>
-                                <span>{fe.name}</span>
-                                {applied && <span className="ai-file-edit-applied">✓ 적용됨</span>}
-                              </div>
-                              <pre className="ai-file-edit-preview">{fe.content}</pre>
-                              <div className="ai-file-edit-actions">
-                                <button
-                                  className="ai-chat-sql-btn primary"
-                                  onClick={() => applyFileEdit(fe.name, fe.content, editKey)}
-                                  disabled={applied || !tabExists}
-                                  title={!tabExists ? `열린 탭에 "${fe.name}" 없음` : ""}
-                                >
-                                  {applied ? "적용됨" : tabExists ? "파일에 적용" : "탭 없음"}
-                                </button>
-                                <button
-                                  className="ai-chat-sql-btn"
-                                  onClick={() => navigator.clipboard.writeText(fe.content)}
-                                >복사</button>
-                              </div>
-                            </div>
-                          );
-                        })}
-                      </div>
-                    </div>
-                  ))}
-                  {chatLoading && (
-                    <div className="ai-chat-msg ai-chat-msg-assistant">
-                      <div className="ai-chat-bubble ai-chat-typing"><span/><span/><span/></div>
-                    </div>
-                  )}
-                  <div ref={chatEndRef} />
-                </div>
-                <div className="ai-chat-input-area">
-                  <div className="ai-chat-input-meta">
-                    <span className="ai-ctx-chip">
-                      <svg width="10" height="10" viewBox="0 0 16 16" fill="currentColor"><path d="M2 2h12v12H2V2zm1 1v10h10V3H3zm2 2h6v1H5V5zm0 2h6v1H5V7zm0 2h4v1H5V9z"/></svg>
-                      {activeTab?.name ?? "query.sql"}
-                    </span>
-                    {tabs
-                      .filter(t => {
-                        const activeTabName = activeTab?.name ?? "query.sql";
-                        return t.name !== activeTabName && chatInput.includes("@" + t.name);
-                      })
-                      .map(t => (
-                        <span key={t.id} className="ai-ctx-chip ai-ctx-chip-mention">@{t.name}</span>
-                      ))}
-                    <span className="ai-ctx-hint">@파일명으로 탭 참조</span>
-                  </div>
-                  <div className="ai-chat-input-row">
-                    {mentionOpen && tabs.some(t => t.name.toLowerCase().includes(mentionQuery.toLowerCase())) && (
-                      <div className="ai-mention-dropdown">
-                        {tabs
-                          .filter(t => t.name.toLowerCase().includes(mentionQuery.toLowerCase()))
-                          .map(t => (
-                            <div
-                              key={t.id}
-                              className="ai-mention-item"
-                              onMouseDown={e => {
-                                e.preventDefault();
-                                const pos = chatTextareaRef.current?.selectionStart ?? chatInput.length;
-                                const atIdx = chatInput.slice(0, pos).lastIndexOf("@");
-                                const before = chatInput.slice(0, atIdx) + "@" + t.name;
-                                const after = chatInput.slice(pos);
-                                setChatInput(before + after);
-                                setMentionOpen(false);
-                              }}
-                            >
-                              <svg width="10" height="10" viewBox="0 0 16 16" fill="currentColor"><path d="M2 2h12v12H2V2zm1 1v10h10V3H3zm2 2h6v1H5V5zm0 2h6v1H5V7zm0 2h4v1H5V9z"/></svg>
-                              {t.name}
-                            </div>
-                          ))}
-                      </div>
-                    )}
-                    <textarea
-                      ref={chatTextareaRef}
-                      className="ai-chat-textarea"
-                      rows={3}
-                      placeholder="질문 또는 명령... (Enter로 전송, @파일명으로 탭 참조)"
-                      value={chatInput}
-                      onChange={e => {
-                        const val = e.target.value;
-                        setChatInput(val);
-                        const pos = e.target.selectionStart ?? val.length;
-                        const before = val.slice(0, pos);
-                        const atMatch = before.match(/@([\w.-]*)$/);
-                        if (atMatch) { setMentionQuery(atMatch[1]); setMentionOpen(true); }
-                        else { setMentionOpen(false); }
-                      }}
-                      onKeyDown={e => {
-                        if (e.key === "Escape") { setMentionOpen(false); return; }
-                        if (e.key === "Enter" && !e.ctrlKey && !e.shiftKey) { e.preventDefault(); sendChat(); }
-                      }}
-                      onBlur={() => setTimeout(() => setMentionOpen(false), 150)}
-                    />
-                    <button
-                      className="ai-chat-send"
-                      onClick={sendChat}
-                      disabled={chatLoading || !chatInput.trim()}
-                      title="전송 (Ctrl+Enter)"
-                    >
-                      <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
-                        <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/>
-                      </svg>
-                    </button>
-                  </div>
-                </div>
-              </div>
-            )}
             </div>
 
             <div
@@ -3609,18 +2947,6 @@ function App() {
                     {!r.success ? (
                       <div className="result-error">
                         <div>❌ {r.message}</div>
-                        <button
-                          onClick={() => explainError(i, r.message)}
-                          disabled={errAi[i]?.loading}
-                          style={{ marginTop: 6, padding: "3px 10px", fontSize: 12, cursor: errAi[i]?.loading ? "default" : "pointer", background: "#3a3d41", color: "#4ec9b0", border: "1px solid #4ec9b0", borderRadius: 4 }}
-                        >
-                          {errAi[i]?.loading ? "분석 중..." : "AI 해석"}
-                        </button>
-                        {errAi[i]?.text && (
-                          <div style={{ marginTop: 8, padding: "8px 12px", background: "#252526", border: "1px solid #3a3d41", borderRadius: 4, whiteSpace: "pre-wrap", fontSize: 13, lineHeight: 1.5, color: "#d4d4d4" }}>
-                            {errAi[i].text}
-                          </div>
-                        )}
                       </div>
                     ) : r.columns.length === 0 ? (() => {
                       // EXPLAIN 트리 시각화
@@ -3711,11 +3037,6 @@ function App() {
                                   URL.revokeObjectURL(a.href);
                                 }}
                               >⬇ CSV</button>
-                              <button
-                                className="csv-btn"
-                                onClick={() => analyzeReport(i, r.columns, r.rows)}
-                                disabled={reportAi[i]?.loading}
-                              >{reportAi[i]?.loading ? "분석 중..." : "AI 분석"}</button>
                               {pageCount > 1 && (
                                 <span className="result-page-info">
                                   &nbsp;· 표시: {page * PAGE_SIZE + 1}–{Math.min((page + 1) * PAGE_SIZE, total)} / {total}
@@ -3798,11 +3119,6 @@ function App() {
                                 </tr>
                               ))}</tbody>
                             </table>
-                            {reportAi[i]?.text && (
-                              <div style={{ marginTop: 8, padding: "8px 12px", background: "#252526", border: "1px solid #3a3d41", borderRadius: 4, whiteSpace: "pre-wrap", fontSize: 13, lineHeight: 1.6, color: "#d4d4d4" }}>
-                                {reportAi[i].text}
-                              </div>
-                            )}
                           </>
                         );
                       })()}
@@ -4178,222 +3494,6 @@ function App() {
         </div>
       )}
 
-      {/* ── AI Assistant 뷰 ───────────────────────────────────── */}
-      {activeView === "ai" && (
-        <div className="ai-view">
-          {/* 헤더 */}
-          <div className="ai-header">
-            <div className="ai-header-left">
-              <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor" style={{ opacity: 0.8 }}>
-                <path d="M12 2l1.5 4.5L18 8l-4.5 1.5L12 14l-1.5-4.5L6 8l4.5-1.5L12 2z"/>
-                <path d="M19 14l.75 2.25L22 17l-2.25.75L19 20l-.75-2.25L16 17l2.25-.75L19 14z"/>
-                <path d="M5 17l.5 1.5L7 19l-1.5.5L5 21l-.5-1.5L3 19l1.5-.5L5 17z"/>
-              </svg>
-              <span className="ai-header-title">AI Assistant</span>
-            </div>
-            <div className="ai-header-right">
-              <button
-                className={`ai-server-check ${aiServerOk === true ? "ok" : aiServerOk === false ? "fail" : ""}`}
-                onClick={checkAiServer}
-                title="MCP 서버 연결 확인"
-              >
-                {aiServerOk === true ? "● 서버 연결됨" : aiServerOk === false ? "● 서버 오프라인" : "◌ 서버 확인"}
-              </button>
-            </div>
-          </div>
-
-          {/* 본문 */}
-          <div className="ai-body ai-body-scroll">
-            <div className="ai-body-inner">
-            {/* API Key 설정 */}
-            <div className="ai-section">
-              <div className="ai-section-title">
-                <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><path d="M12.65 10C11.83 7.67 9.61 6 7 6c-3.31 0-6 2.69-6 6s2.69 6 6 6c2.61 0 4.83-1.67 5.65-4H17v4h4v-4h2v-4H12.65zM7 14c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2z"/></svg>
-                AI API Key
-              </div>
-              <div className="ai-key-row">
-                <input
-                  className="ai-key-input"
-                  type={aiKeyVisible ? "text" : "password"}
-                  placeholder="API 키 입력..."
-                  value={aiApiKey}
-                  onChange={e => saveAiKey(e.target.value)}
-                />
-                <button className="ai-key-eye" onClick={() => setAiKeyVisible(v => !v)} tabIndex={-1}>
-                  {aiKeyVisible ? "🙈" : "👁"}
-                </button>
-              </div>
-            </div>
-
-            {/* 모드 탭 */}
-            <div className="ai-mode-tabs">
-              <button className={`ai-mode-tab ${aiMode === "nl" ? "active" : ""}`} onClick={() => { setAiMode("nl"); setAiResult(null); setAiError(""); }}>
-                자연어 → SQL
-              </button>
-              <button className={`ai-mode-tab ${aiMode === "explain" ? "active" : ""}`} onClick={() => { setAiMode("explain"); setAiResult(null); setAiError(""); }}>
-                쿼리 해석
-              </button>
-              <button className={`ai-mode-tab ${aiMode === "schema" ? "active" : ""}`} onClick={() => { setAiMode("schema"); setAiResult(null); setAiError(""); }}>
-                스키마 설계
-              </button>
-            </div>
-
-            {/* 자연어 → SQL 모드 */}
-            {aiMode === "nl" && (
-              <div className="ai-section">
-                <div className="ai-section-title">
-                  <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><path d="M20 2H4c-1.1 0-2 .9-2 2v18l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2z"/></svg>
-                  자연어 질문
-                </div>
-                <div className="ai-desc">현재 DB(<strong>{currentDb}</strong>)의 스키마를 기반으로 SQL을 생성합니다.</div>
-                <textarea
-                  className="ai-textarea"
-                  rows={4}
-                  placeholder="예: 매출 상위 10개 상품을 보여줘"
-                  value={aiQuestion}
-                  onChange={e => setAiQuestion(e.target.value)}
-                  onKeyDown={e => { if (e.ctrlKey && e.key === "Enter") generateSql(); }}
-                />
-                <div className="ai-btn-row">
-                  <button className="ai-btn primary" onClick={generateSql} disabled={aiLoading}>
-                    {aiLoading ? "생성 중..." : "SQL 생성 (Ctrl+Enter)"}
-                  </button>
-                </div>
-              </div>
-            )}
-
-            {/* 쿼리 해석 모드 */}
-            {aiMode === "explain" && (
-              <div className="ai-section">
-                <div className="ai-section-title">
-                  <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><path d="M9 21c0 .55.45 1 1 1h4c.55 0 1-.45 1-1v-1H9v1zm3-19C8.14 2 5 5.14 5 9c0 2.38 1.19 4.47 3 5.74V17c0 .55.45 1 1 1h6c.55 0 1-.45 1-1v-2.26c1.81-1.27 3-3.36 3-5.74 0-3.86-3.14-7-7-7z"/></svg>
-                  쿼리 실행 계획 분석
-                </div>
-                <div className="ai-desc">에디터의 현재 쿼리에 EXPLAIN을 실행하고 AI가 결과를 해석합니다.</div>
-                <div className="ai-current-query">
-                  <span className="ai-current-label">현재 쿼리:</span>
-                  <code className="ai-current-sql">{(editorRef.current?.getValue() ?? queryRef.current).trim().slice(0, 120) || "(에디터가 비어있음)"}</code>
-                </div>
-                <div className="ai-btn-row">
-                  <button className="ai-btn primary" onClick={explainCurrent} disabled={aiLoading}>
-                    {aiLoading ? "분석 중..." : "쿼리 분석"}
-                  </button>
-                  <button className="ai-btn" onClick={optimizeCurrent} disabled={aiLoading}>
-                    {aiLoading ? "분석 중..." : "최적화 제안"}
-                  </button>
-                </div>
-              </div>
-            )}
-
-            {/* 스키마 설계 모드 */}
-            {aiMode === "schema" && (
-              <div className="ai-section">
-                <div className="ai-section-title">
-                  <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><path d="M20 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h15c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm-2 14H7v-2h11v2zm0-4H7v-2h11v2zm0-4H7V7h11v2z"/></svg>
-                  스키마 설계 추천
-                </div>
-                <div className="ai-desc">시스템 요구사항을 설명하면 테이블 구조와 CREATE TABLE SQL을 생성합니다.</div>
-                <textarea
-                  className="ai-textarea"
-                  rows={4}
-                  placeholder="예: 온라인 쇼핑몰 주문 관리 시스템을 만들고 싶어"
-                  value={aiQuestion}
-                  onChange={e => setAiQuestion(e.target.value)}
-                  onKeyDown={e => { if (e.ctrlKey && e.key === "Enter") generateSchema(); }}
-                />
-                <div className="ai-btn-row">
-                  <button className="ai-btn primary" onClick={generateSchema} disabled={aiLoading}>
-                    {aiLoading ? "생성 중..." : "스키마 생성 (Ctrl+Enter)"}
-                  </button>
-                </div>
-              </div>
-            )}
-
-            {/* 오류 메시지 */}
-            {aiError && (
-              <div className="ai-error">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-2h2v2zm0-4h-2V7h2v6z"/></svg>
-                {aiError}
-              </div>
-            )}
-
-            {/* 결과 영역 */}
-            {aiResult && (
-              <div className="ai-section ai-result-section">
-                <div className="ai-section-title">
-                  {aiResult.type === "explain" ? "분석 결과" : aiResult.type === "optimize" ? "최적화 제안" : "생성된 SQL"}
-                </div>
-                {aiResult.type === "explain" || aiResult.type === "optimize" ? (
-                  <div className="ai-result-text">{aiResult.content}</div>
-                ) : (
-                  <pre className="ai-result-sql">{aiResult.content}</pre>
-                )}
-                {(aiResult.type === "sql" || aiResult.type === "schema") && (
-                  <div className="ai-btn-row">
-                    <button
-                      className="ai-btn success"
-                      onClick={() => { setEditorQuery(aiResult.content); setActiveView("editor"); }}
-                    >
-                      에디터에 삽입
-                    </button>
-                    <button
-                      className="ai-btn"
-                      onClick={() => navigator.clipboard.writeText(aiResult.content)}
-                    >
-                      클립보드 복사
-                    </button>
-                  </div>
-                )}
-              </div>
-            )}
-
-            {/* AI 기능 서버 안내 */}
-            <div className="ai-section ai-guide-section">
-              <div className="ai-section-title">
-                <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><path d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58c.18-.14.23-.41.12-.61l-1.92-3.32c-.12-.22-.37-.29-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54c-.04-.24-.24-.41-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58c-.18.14-.23.41-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z"/></svg>
-                AI 기능 서버 (Gemini)
-              </div>
-              <div className="ai-desc">UI 패널의 자연어→SQL·쿼리 해석·스키마 설계를 제공합니다. Tauri가 자동 시작합니다.</div>
-              <code className="ai-guide-code">python server.py</code>
-              <div className="ai-desc" style={{ marginTop: 6 }}>포트: <strong>127.0.0.1:8765</strong></div>
-            </div>
-
-            {/* True MCP 안내 */}
-            <div className="ai-section ai-guide-section">
-              <div className="ai-section-title">
-                <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><path d="M17 7H7c-2.76 0-5 2.24-5 5s2.24 5 5 5h10c2.76 0 5-2.24 5-5s-2.24-5-5-5zM7 15c-1.66 0-3-1.34-3-3s1.34-3 3-3 3 1.34 3 3-1.34 3-3 3z"/></svg>
-                True MCP (Claude Desktop)
-              </div>
-              <div className="ai-desc">Claude Desktop이 MCP 클라이언트로 RuSQL에 직접 질의합니다. API 키 불필요.</div>
-              <code className="ai-guide-code">python mcp_server.py</code>
-              <div className="ai-desc" style={{ marginTop: 6, marginBottom: 4 }}>Claude Desktop 설정 파일:</div>
-              <code className="ai-guide-code" style={{ fontSize: 10, wordBreak: "break-all" }}>Packages\Claude_...\LocalCache\Roaming\Claude\claude_desktop_config.json</code>
-              <div className="ai-desc" style={{ marginTop: 8, marginBottom: 6 }}>제공 도구 (4개):</div>
-              <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
-                {["execute_sql", "list_databases", "list_tables", "get_table_schema"].map(t => (
-                  <span key={t} style={{ fontSize: 11, background: "rgba(78,201,176,0.12)", color: "#4ec9b0", border: "1px solid rgba(78,201,176,0.25)", borderRadius: 3, padding: "2px 7px", fontFamily: "monospace" }}>{t}</span>
-                ))}
-              </div>
-            </div>
-            </div>{/* /ai-body-inner */}
-          </div>
-
-          {/* 하단 상태바 */}
-          <div className="status-bar">
-            <div className="status-left">
-              <span className="status-item">⎇ main</span>
-              <span className="status-item" style={{ color: aiServerOk === true ? "#4ec9b0" : "#858585" }}>
-                {aiServerOk === true ? "● Gemini :8765" : "○ Gemini 미연결"}
-              </span>
-              <span className="status-item" style={{ color: "#4ec9b0" }}>● MCP (Claude)</span>
-            </div>
-            <div className="status-right">
-              <span className="status-item">RuSQL v2.2.0</span>
-              <span className="status-item">AI Assistant</span>
-            </div>
-          </div>
-        </div>
-      )}
 
       {/* ── 서버 관리 뷰 ───────────────────────────────────────── */}
       {activeView === "server" && (
@@ -4539,13 +3639,14 @@ function App() {
 
                     {/* 버튼 행 */}
                     <div className="srv-action-row">
-                      <button className="srv-action-btn primary" onClick={handleStartServer} disabled={serverStatus.running}>
-                        <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><polygon points="5,3 19,12 5,21"/></svg>
-                        서버 시작
-                      </button>
-                      <button className="srv-action-btn danger" onClick={handleStopServer} disabled={!serverStatus.running}>
-                        <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><rect x="4" y="4" width="16" height="16" rx="1"/></svg>
-                        중지
+                      <button
+                        className={`srv-action-btn ${serverStatus.running ? "danger" : "primary"}`}
+                        onClick={serverStatus.running ? handleStopServer : handleStartServer}
+                      >
+                        {serverStatus.running
+                          ? <><svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><rect x="4" y="4" width="16" height="16" rx="1"/></svg>서버 중지</>
+                          : <><svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><polygon points="5,3 19,12 5,21"/></svg>서버 시작</>
+                        }
                       </button>
                       <div style={{ flex: 1 }} />
                       <button className="srv-action-btn save" onClick={() => setServerMsg("설정이 저장되었습니다.")}>
@@ -4586,17 +3687,24 @@ function App() {
             {srvRightPanel !== "none" && (
               <div className="srv-slide-panel">
                 <div className="srv-slide-header">
-                  {srvRightPanel === "cli" ? "CLI 가이드" : srvRightPanel === "bench" ? "벤치마크" : srvRightPanel === "sessions" ? "접속 세션" : "MySQL 연결"}
+                  {srvRightPanel === "cli" ? "CLI 가이드" : srvRightPanel === "bench" ? "벤치마크" : srvRightPanel === "sessions" ? "접속 세션" : srvRightPanel === "mcp" ? "MCP Agent" : "MySQL 연결"}
                   <button className="srv-slide-close" onClick={() => setSrvRightPanel("none")}>✕</button>
                 </div>
                 <div className="srv-slide-body">
                   {srvRightPanel === "cli" && (<>
-                    <div className="srv-slide-section">rusql-client</div>
+                    <div className="srv-slide-section" style={{ textTransform: 'none' }}>RuSQL-Client</div>
                     <code className="srv-slide-code">{`cargo run -p rusql-client -- \\
   -u ${srvUser} -p <password> \\
   -h 127.0.0.1 -P ${portInput}`}</code>
 
-                    <div className="srv-slide-section" style={{ marginTop: 18 }}>인증 흐름 (RuSQL AUTH Protocol v1)</div>
+                    <div className="srv-slide-section" style={{ marginTop: 18 }}>다른 컴퓨터에서 접속</div>
+                    <div className="srv-slide-flow">
+                      <div className="srv-slide-flow-row"><span className="srv-slide-arrow in">1.</span><code>서버 PC에서 rusql-server 실행</code></div>
+                      <div className="srv-slide-flow-row"><span className="srv-slide-arrow out">2.</span><code>접속 PC에서 서버 IP로 연결</code></div>
+                    </div>
+                    <code className="srv-slide-code" style={{ marginTop: 8 }}>{`cargo run -p rusql-client -- \\\n  -u ${srvUser} -p <password> \\\n  -h <server-ip> -P ${portInput}`}</code>
+
+                    <div className="srv-slide-section" style={{ marginTop: 18, textTransform: 'none' }}>인증 흐름 (RuSQL AUTH Protocol v1)</div>
                     <div className="srv-slide-flow">
                       <div className="srv-slide-flow-row"><span className="srv-slide-arrow out">→</span><code>{`AUTH ${srvUser} <password>`}</code></div>
                       <div className="srv-slide-flow-row"><span className="srv-slide-arrow in">←</span><code>{`OK authenticated as '${srvUser}'`}</code></div>
@@ -4644,7 +3752,7 @@ function App() {
                   {srvRightPanel === "bench" && (<>
                     <div className="srv-slide-section">성능 벤치마크</div>
                     <div className="srv-slide-text" style={{ marginBottom: 10 }}>
-                      RuSQL vs MySQL — INSERT TPS, SELECT 등호·범위, 병렬 스케일링, 동시 접속 TPS 측정
+                      RuSQL vs MySQL<br/>INSERT TPS, SELECT 등호·범위, 병렬 스케일링, 동시 접속 TPS 측정
                     </div>
                     <div style={{ display: "flex", gap: 8, marginBottom: 14 }}>
                       <button
@@ -4735,10 +3843,53 @@ function App() {
                     <code className="srv-slide-code">{`import mysql.connector\nconn = mysql.connector.connect(\n  host="127.0.0.1",\n  port=${mysqlPortInput || 13306},\n  user="${srvUser}",\n  password="<password>"\n)\ncur = conn.cursor()\ncur.execute("SHOW DATABASES")\nfor row in cur: print(row)`}</code>
 
                     <div className="srv-slide-section" style={{ marginTop: 18 }}>DBeaver</div>
-                    <div className="srv-slide-text">New Connection → MySQL<br/>Host: 127.0.0.1<br/>Port: {mysqlPortInput || 13306}<br/>User: {srvUser}<br/>SSL: 비활성화 (allowPublicKeyRetrieval=true)</div>
+                    <code className="srv-slide-code">{`New Connection → MySQL\nHost: 127.0.0.1\nPort: ${mysqlPortInput || 13306}\nUser: ${srvUser}\nSSL: 비활성화 (allowPublicKeyRetrieval=true)`}</code>
 
                     <div className="srv-slide-section" style={{ marginTop: 18 }}>인증 방식</div>
-                    <div className="srv-slide-text">mysql_native_password<br/>SHA1(SHA1(pw)) 챌린지-응답<br/>포트 {mysqlPortInput || 13306}에서 수신</div>
+                    <code className="srv-slide-code">{`mysql_native_password\nSHA1(SHA1(pw)) 챌린지-응답\n포트 ${mysqlPortInput || 13306}에서 수신`}</code>
+                  </>)}
+
+                  {srvRightPanel === "mcp" && (<>
+                    <div className="srv-slide-section">사용 방법</div>
+                    <div style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 6 }}>
+                      <div className="srv-slide-desc" style={{ margin: 0 }}>① RuSQL 서버 시작 (이 탭에서)</div>
+                      <div className="srv-slide-desc" style={{ margin: 0 }}>② 아래 버튼으로 Claude Desktop에 자동 등록</div>
+                      <div className="srv-slide-desc" style={{ margin: 0 }}>③ Claude Desktop 재시작 → 🔨 아이콘 확인</div>
+                    </div>
+
+                    <button
+                      className="srv-action-btn save"
+                      style={{ marginTop: 14, width: "100%" }}
+                      onClick={async () => {
+                        setMcpSetupMsg(null);
+                        try {
+                          const msg = await invoke<string>("setup_mcp_config");
+                          setMcpSetupMsg({ ok: true, text: msg });
+                        } catch (e) {
+                          setMcpSetupMsg({ ok: false, text: String(e) });
+                        }
+                      }}
+                    >
+                      Claude Desktop 자동 연결
+                    </button>
+                    {mcpSetupMsg && (
+                      <div style={{
+                        marginTop: 8, padding: "7px 10px", borderRadius: 4, fontSize: 11,
+                        background: mcpSetupMsg.ok ? "rgba(78,201,176,0.08)" : "rgba(244,135,113,0.08)",
+                        border: `1px solid ${mcpSetupMsg.ok ? "rgba(78,201,176,0.3)" : "rgba(244,135,113,0.3)"}`,
+                        color: mcpSetupMsg.ok ? "#4ec9b0" : "#f48771",
+                        whiteSpace: "pre-wrap", lineHeight: 1.6, wordBreak: "break-all",
+                      }}>
+                        {mcpSetupMsg.text}
+                      </div>
+                    )}
+
+                    <div className="srv-slide-section" style={{ marginTop: 18 }}>제공 도구</div>
+                    <div style={{ display: "flex", flexWrap: "wrap", gap: 4, marginTop: 6 }}>
+                      {["execute_sql", "list_databases", "list_tables", "get_table_schema"].map(t => (
+                        <span key={t} style={{ fontSize: 11, background: "rgba(78,201,176,0.12)", color: "#4ec9b0", border: "1px solid rgba(78,201,176,0.25)", borderRadius: 3, padding: "2px 7px", fontFamily: "monospace" }}>{t}</span>
+                      ))}
+                    </div>
                   </>)}
                 </div>
               </div>
@@ -4786,6 +3937,17 @@ function App() {
                   <circle cx="19" cy="7" r="2"/><path d="M23 21v-1a3 3 0 00-2-2.83"/>
                 </svg>
                 <span>Session</span>
+              </button>
+              <button
+                className={`srv-rbar-btn ${srvRightPanel === "mcp" ? "active" : ""}`}
+                onClick={() => setSrvRightPanel(p => p === "mcp" ? "none" : "mcp")}
+                title="MCP Agent"
+              >
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M12 2l1.5 4.5L18 8l-4.5 1.5L12 14l-1.5-4.5L6 8l4.5-1.5L12 2z"/>
+                  <path d="M19 14l.75 2.25L22 17l-2.25.75L19 20l-.75-2.25L16 17l2.25-.75L19 14z"/>
+                </svg>
+                <span>AI MCP</span>
               </button>
             </div>
 

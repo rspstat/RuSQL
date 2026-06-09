@@ -1531,7 +1531,7 @@ body {
 
 .erd-col-type {
   font-size: 11px;
-  color: #cccccc;
+  color: #4ec9b0;
   flex: 1 1 auto;
   min-width: 0;
   overflow: hidden;
@@ -1551,9 +1551,9 @@ body {
   letter-spacing: 0.3px;
 }
 
-.erd-badge.on-nn { color: #cccccc; }
-.erd-badge.on-uq { color: #cccccc; }
-.erd-badge.on-ai { color: #cccccc; }
+.erd-badge.on-nn { color: #e5c07b; }
+.erd-badge.on-uq { color: #e5c07b; }
+.erd-badge.on-ai { color: #e5c07b; }
 
 /* 줌 슬라이더 */
 .erd-zoom-slider {
@@ -1945,6 +1945,8 @@ body {
   color: #9cdcfe;
   font-family: monospace;
   word-break: break-all;
+  min-height: 60px;
+  display: block;
 }
 
 .ai-btn-row {
@@ -2105,6 +2107,12 @@ body {
   text-transform: uppercase;
   letter-spacing: 0.8px;
   color: #888;
+  margin-bottom: 6px;
+}
+.srv-slide-desc {
+  font-size: 12px;
+  color: #858585;
+  line-height: 1.5;
   margin-bottom: 6px;
 }
 .srv-slide-code {
@@ -2527,6 +2535,8 @@ body {
 .srv-action-btn.danger:hover:not(:disabled)  { background: #2a1a1a; color: #f07070; border-color: #7a3a3a; }
 .srv-action-btn.save    { color: #9cdcfe; border-color: #2a4060; }
 .srv-action-btn.save:hover:not(:disabled)    { background: #1a2a3a; color: #b0e8ff; border-color: #3a60a0; }
+.srv-action-btn.ai      { color: #9cdcfe; border-color: #2a4060; }
+.srv-action-btn.ai:hover:not(:disabled)      { background: #1a2a3a; color: #b0e8ff; border-color: #3a60a0; }
 .srv-action-btn:disabled { opacity: 0.3; cursor: not-allowed; }
 
 /* CLI 가이드 탭 */

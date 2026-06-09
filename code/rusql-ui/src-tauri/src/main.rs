@@ -9,29 +9,11 @@ use std::thread;
 use std::net::{TcpListener, TcpStream};
 use std::io::{BufRead, BufReader, Write};
 use std::time::Instant;
-use std::process::{Child, Command};
+
 use tauri::{Manager, State};
 use rusql_core::parser::parser::Parser;
 use rusql_core::engine::executor::{Executor, SharedDatabase};
 
-struct McpServer(Mutex<Option<Child>>);
-
-fn start_mcp_server() -> Option<Child> {
-    #[cfg(debug_assertions)]
-    let server_dir = {
-        let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        manifest.parent()?.parent()?.join("rusql-mcp")
-    };
-    #[cfg(not(debug_assertions))]
-    let server_dir = std::env::current_exe().ok()?.parent()?.to_path_buf();
-
-    Command::new("python")
-        .args(["-m", "uvicorn", "server:app",
-               "--host", "127.0.0.1", "--port", "8765", "--log-level", "error"])
-        .current_dir(server_dir)
-        .spawn()
-        .ok()
-}
 
 // ─── 세션 정보 ────────────────────────────────────────────────
 #[derive(serde::Serialize, Clone)]
@@ -885,6 +867,90 @@ fn csv_parse_row(line: &str) -> Vec<String> {
     fields
 }
 
+// ─── MCP 자동 설정 ───────────────────────────────────────────
+fn find_python_with_mcp() -> Result<String, String> {
+    let where_out = std::process::Command::new("where")
+        .arg("python")
+        .output()
+        .map_err(|_| "Python을 찾을 수 없습니다.".to_string())?;
+
+    let paths_str = String::from_utf8_lossy(&where_out.stdout);
+    for path in paths_str.lines() {
+        let path = path.trim();
+        if path.is_empty() { continue; }
+        if let Ok(test) = std::process::Command::new(path)
+            .args(["-c", "import mcp"])
+            .output()
+        {
+            if test.status.success() {
+                return Ok(path.to_string());
+            }
+        }
+    }
+    Err("mcp 패키지가 설치된 Python을 찾을 수 없습니다.\n설치 방법: pip install mcp".to_string())
+}
+
+fn write_mcp_into(config_path: &std::path::Path, entry: &serde_json::Value) -> Result<(), String> {
+    let mut config: serde_json::Value = if config_path.exists() {
+        let content = std::fs::read_to_string(config_path).map_err(|e| e.to_string())?;
+        serde_json::from_str(&content).unwrap_or(serde_json::json!({}))
+    } else {
+        serde_json::json!({})
+    };
+    if !config.get("mcpServers").map(|v| v.is_object()).unwrap_or(false) {
+        config["mcpServers"] = serde_json::json!({});
+    }
+    config["mcpServers"]["RuSQL"] = entry.clone();
+    // BOM 없는 UTF-8로 쓰기
+    let json_str = serde_json::to_string_pretty(&config).map_err(|e| e.to_string())?;
+    std::fs::write(config_path, json_str.as_bytes()).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn setup_mcp_config() -> Result<String, String> {
+    let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let mcp_server_path = manifest
+        .parent().ok_or("경로 오류")?
+        .parent().ok_or("경로 오류")?
+        .join("rusql-mcp")
+        .join("mcp_server.py");
+
+    if !mcp_server_path.exists() {
+        return Err(format!("mcp_server.py를 찾을 수 없습니다:\n{}", mcp_server_path.display()));
+    }
+
+    let python_path = find_python_with_mcp()?;
+    let mcp_entry = serde_json::json!({
+        "command": python_path,
+        "args": ["-u", mcp_server_path.to_string_lossy().as_ref()]
+    });
+
+    // 1. 일반 설치 버전 경로
+    let appdata = std::env::var("APPDATA")
+        .map_err(|_| "APPDATA 환경변수를 찾을 수 없습니다.".to_string())?;
+    let real_dir = std::path::Path::new(&appdata).join("Claude");
+    std::fs::create_dir_all(&real_dir).map_err(|e| e.to_string())?;
+    write_mcp_into(&real_dir.join("claude_desktop_config.json"), &mcp_entry)?;
+
+    // 2. Windows Store 버전 가상화 경로 (있으면 추가로 씀)
+    if let Ok(localappdata) = std::env::var("LOCALAPPDATA") {
+        let packages = std::path::Path::new(&localappdata).join("Packages");
+        if let Ok(entries) = std::fs::read_dir(&packages) {
+            for entry in entries.flatten() {
+                if entry.file_name().to_string_lossy().starts_with("Claude_") {
+                    let store_dir = entry.path()
+                        .join("LocalCache").join("Roaming").join("Claude");
+                    if store_dir.exists() {
+                        let _ = write_mcp_into(&store_dir.join("claude_desktop_config.json"), &mcp_entry);
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(format!("연결 완료! Claude Desktop을 재시작하세요.\n\nPython: {}", python_path))
+}
+
 #[tauri::command]
 fn open_terminal() {
     let _ = std::process::Command::new("cmd")
@@ -919,6 +985,7 @@ fn open_bench_terminal() {
         .spawn();
 }
 
+
 // ─── 엔트리포인트 ─────────────────────────────────────────────
 fn main() {
     let exec = Executor::new();
@@ -930,10 +997,7 @@ fn main() {
             db,
             servers: Mutex::new(HashMap::new()),
         })
-        .manage(McpServer(Mutex::new(None)))
         .setup(|app| {
-            *app.state::<McpServer>().0.lock().unwrap() = start_mcp_server();
-            // 창 아이콘 설정
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.set_icon(tauri::include_image!("icons/icon.png"));
             }
@@ -966,15 +1030,8 @@ fn main() {
             set_parallel_query,
             read_bench_result,
             open_bench_terminal,
+            setup_mcp_config,
         ])
-        .build(tauri::generate_context!())
-        .expect("error while building tauri application")
-        .run(|app, event| {
-            if let tauri::RunEvent::Exit = event {
-                if let Some(mut child) = app.state::<McpServer>().0.lock().unwrap().take() {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                }
-            }
-        });
+        .run(tauri::generate_context!())
+        .expect("error while running tauri application");
 }
