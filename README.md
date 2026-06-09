@@ -4,7 +4,9 @@
 
 <br/>
 
-<img src="assets/icon.png" width="300"/>
+<img src="assets/icon.png" width="200"/>
+
+<br/>
 
 ## 핵심 기능
 
