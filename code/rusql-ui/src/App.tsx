@@ -3752,7 +3752,7 @@ function App() {
                   {srvRightPanel === "bench" && (<>
                     <div className="srv-slide-section">성능 벤치마크</div>
                     <div className="srv-slide-text" style={{ marginBottom: 10 }}>
-                      RuSQL vs MySQL<br/>INSERT TPS, SELECT 등호·범위, 병렬 스케일링, 동시 접속 TPS 측정
+                      단순/Bulk 처리량 · 인덱스 가속 · 병렬 집계
                     </div>
                     <div style={{ display: "flex", gap: 8, marginBottom: 14 }}>
                       <button
@@ -3775,59 +3775,71 @@ function App() {
                       >터미널 실행</button>
                     </div>
                     {benchResult !== undefined && benchResult !== null ? (() => {
-                      const r = benchResult as Record<string, Record<string, unknown>>;
-                      const fmt = (v: unknown) => typeof v === "number" ? v.toLocaleString("ko-KR", { maximumFractionDigits: 1 }) : String(v);
+                      const r = benchResult as Record<string, unknown>;
+                      const fms  = (v: unknown) => typeof v === "number" ? v.toFixed(3) : "—";
+                      const fmx  = (v: unknown) => typeof v === "number" ? v.toFixed(1) : "—";
+                      const fmtps = (rows: number, secs: number) =>
+                        secs > 0 ? Math.round(rows / secs).toLocaleString("ko-KR") + " rows/s" : "—";
+                      const fmtime = (v: unknown) => typeof v === "number" ? v.toFixed(2) + "초" : "—";
+                      const greenBadge = (label: string) => (
+                        <span style={{ background: "#4ec9b0", color: "#1e1e1e", fontWeight: 700, padding: "1px 6px", borderRadius: 3, fontSize: 11, marginLeft: 6 }}>{label}</span>
+                      );
+                      const row = (label: string, val: string) => (
+                        <div key={label} style={{ display: "flex", justifyContent: "space-between", paddingLeft: 8 }}>
+                          <span style={{ color: "#9cdcfe" }}>{label}</span>
+                          <strong>{val}</strong>
+                        </div>
+                      );
+                      const sg = r.single as Record<string,number> | undefined;
+                      const bk = r.bulk   as Record<string,number> | undefined;
+                      const pl = r.point_lookup as Record<string,number> | undefined;
+                      const rq = r.range_query  as Record<string,number> | undefined;
+                      const tk = r.top_k        as Record<string,number> | undefined;
+                      const pa = r.parallel     as Record<string,number> | undefined;
                       return (
-                        <div style={{ fontSize: 12, lineHeight: 1.7 }}>
-                          {r.insert_tps && (
-                            <div style={{ marginBottom: 10 }}>
-                              <div style={{ color: "#4ec9b0", fontWeight: 600, marginBottom: 4 }}>INSERT TPS</div>
-                              <div>RuSQL: <strong>{fmt((r.insert_tps as Record<string,unknown>).rusql)}</strong> TPS</div>
-                              <div>MySQL: <strong>{fmt((r.insert_tps as Record<string,unknown>).mysql)}</strong> TPS</div>
+                        <div style={{ fontSize: 12, lineHeight: 1.8 }}>
+                          {sg && <div style={{ marginBottom: 10 }}>
+                            <div style={{ color: "#4ec9b0", fontWeight: 600, marginBottom: 4 }}>
+                              단순 처리 ({(sg.rows ?? 10000).toLocaleString()}건 · 단건 I/O)
                             </div>
-                          )}
-                          {r.select_eq && (
-                            <div style={{ marginBottom: 10 }}>
-                              <div style={{ color: "#4ec9b0", fontWeight: 600, marginBottom: 4 }}>SELECT 등호 (ms/query)</div>
-                              {(["seq","btree","hash"] as const).map(k => {
-                                const rd = (r.select_eq as Record<string,Record<string,unknown>>).rusql;
-                                const md = (r.select_eq as Record<string,Record<string,unknown>>).mysql;
-                                return rd && md ? (
-                                  <div key={k}>{k}: RuSQL <strong>{fmt(rd[k])}</strong> / MySQL <strong>{fmt(md[k])}</strong></div>
-                                ) : null;
-                              })}
-                            </div>
-                          )}
-                          {r.select_range && (
-                            <div style={{ marginBottom: 10 }}>
-                              <div style={{ color: "#4ec9b0", fontWeight: 600, marginBottom: 4 }}>SELECT 범위 (ms/query)</div>
-                              {(["no_index","index"] as const).map(k => {
-                                const rd = (r.select_range as Record<string,Record<string,unknown>>).rusql;
-                                const md = (r.select_range as Record<string,Record<string,unknown>>).mysql;
-                                return rd && md ? (
-                                  <div key={k}>{k}: RuSQL <strong>{fmt(rd[k])}</strong> / MySQL <strong>{fmt(md[k])}</strong></div>
-                                ) : null;
-                              })}
-                            </div>
-                          )}
-                          {r.parallel && (
-                            <div style={{ marginBottom: 10 }}>
-                              <div style={{ color: "#4ec9b0", fontWeight: 600, marginBottom: 4 }}>병렬 스케일링 (ms/query)</div>
-                              <div>OFF: <strong>{fmt((r.parallel as Record<string,unknown>).off)}</strong></div>
-                              <div>ON: <strong>{fmt((r.parallel as Record<string,unknown>).on)}</strong></div>
-                            </div>
-                          )}
-                          {r.concurrent && (
-                            <div>
-                              <div style={{ color: "#4ec9b0", fontWeight: 600, marginBottom: 4 }}>동시 접속 TPS</div>
-                              {(["1","4","8"] as const).map(n => {
-                                const entry = (r.concurrent as Record<string,Record<string,unknown>>)[n];
-                                return entry ? (
-                                  <div key={n}>{n}threads: RuSQL <strong>{fmt(entry.rusql)}</strong> / MySQL <strong>{fmt(entry.mysql)}</strong></div>
-                                ) : null;
-                              })}
-                            </div>
-                          )}
+                            {row("INSERT", `${fmtps(sg.rows, sg.insert_s)}  (${fmtime(sg.insert_s)})`)}
+                            {row("DELETE", `${fmtps(sg.rows, sg.delete_s)}  (${fmtime(sg.delete_s)})`)}
+                          </div>}
+                          {bk && (() => {
+                            const perRowSpeedup = sg && sg.insert_s > 0 && bk.insert_s > 0
+                              ? (sg.insert_s / sg.rows) / (bk.insert_s / bk.rows)
+                              : 0;
+                            return (
+                              <div style={{ marginBottom: 10 }}>
+                                <div style={{ color: "#4ec9b0", fontWeight: 600, marginBottom: 4 }}>
+                                  Bulk 처리 ({(bk.rows ?? 100000).toLocaleString()}건 · 500행 묶음)
+                                  {perRowSpeedup >= 10 && greenBadge(`단건 대비 ${Math.round(perRowSpeedup)}배 효율`)}
+                                </div>
+                                {row("INSERT", `${fmtps(bk.rows, bk.insert_s)}  (${fmtime(bk.insert_s)})`)}
+                                {row("DELETE", `${fmtps(bk.rows, bk.delete_s)}  (${fmtime(bk.delete_s)})`)}
+                              </div>
+                            );
+                          })()}
+                          {pl && <div style={{ marginBottom: 10 }}>
+                            <div style={{ color: "#4ec9b0", fontWeight: 600, marginBottom: 2 }}>포인트 조회 (등호){greenBadge(`${fmx(pl.speedup)}x 빠름`)}</div>
+                            {row("SeqScan", `${fms(pl.seq_ms)} ms/q`)}
+                            {row("BTree Index", `${fms(pl.idx_ms)} ms/q`)}
+                          </div>}
+                          {rq && <div style={{ marginBottom: 10 }}>
+                            <div style={{ color: "#4ec9b0", fontWeight: 600, marginBottom: 2 }}>범위 쿼리 (BETWEEN){greenBadge(`${fmx(rq.speedup)}x 빠름`)}</div>
+                            {row("No-Index", `${fms(rq.seq_ms)} ms/q`)}
+                            {row("BTree Index", `${fms(rq.idx_ms)} ms/q`)}
+                          </div>}
+                          {tk && <div style={{ marginBottom: 10 }}>
+                            <div style={{ color: "#4ec9b0", fontWeight: 600, marginBottom: 2 }}>Top-K (ORDER BY LIMIT){greenBadge(`${fmx(tk.speedup)}x 빠름`)}</div>
+                            {row("SeqScan+Sort", `${fms(tk.seq_ms)} ms/q`)}
+                            {row("Index Fast-Path", `${fms(tk.idx_ms)} ms/q`)}
+                          </div>}
+                          {pa && <div>
+                            <div style={{ color: "#4ec9b0", fontWeight: 600, marginBottom: 2 }}>병렬 집계 (GROUP BY)</div>
+                            {row("PARALLEL OFF", `${fmx(pa.off_ms)} ms/q`)}
+                            {row("PARALLEL ON",  `${fmx(pa.on_ms)} ms/q`)}
+                          </div>}
                         </div>
                       );
                     })() : benchResult === null ? (
@@ -3854,7 +3866,7 @@ function App() {
                     <div style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 6 }}>
                       <div className="srv-slide-desc" style={{ margin: 0 }}>① RuSQL 서버 시작 (이 탭에서)</div>
                       <div className="srv-slide-desc" style={{ margin: 0 }}>② 아래 버튼으로 Claude Desktop에 자동 등록</div>
-                      <div className="srv-slide-desc" style={{ margin: 0 }}>③ Claude Desktop 재시작 → 🔨 아이콘 확인</div>
+                      <div className="srv-slide-desc" style={{ margin: 0 }}>③ Claude Desktop 재시작</div>
                     </div>
 
                     <button
@@ -3886,7 +3898,7 @@ function App() {
 
                     <div className="srv-slide-section" style={{ marginTop: 18 }}>제공 도구</div>
                     <div style={{ display: "flex", flexWrap: "wrap", gap: 4, marginTop: 6 }}>
-                      {["execute_sql", "list_databases", "list_tables", "get_table_schema"].map(t => (
+                      {["execute_sql", "list_databases", "list_tables", "get_table_schema", "explain_query", "get_indexes", "sample_data"].map(t => (
                         <span key={t} style={{ fontSize: 11, background: "rgba(78,201,176,0.12)", color: "#4ec9b0", border: "1px solid rgba(78,201,176,0.25)", borderRadius: 3, padding: "2px 7px", fontFamily: "monospace" }}>{t}</span>
                       ))}
                     </div>

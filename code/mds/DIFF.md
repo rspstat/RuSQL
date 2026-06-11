@@ -215,7 +215,7 @@
 | REPLACE INTO | ✓ | ✗ | ✗ | ✗ |
 | UPDATE (단일 테이블) | ✓ | ✓ | ✓ | ✓ |
 | UPDATE (다중 테이블 JOIN) | ✓ | ✗ (FROM 절로 에뮬레이션) | ✗ (서브쿼리로 에뮬레이션) | ✓ (MULTI UPDATE) |
-| DELETE (단일 테이블) | ✓ | ✓ | ✓ | ✓ |
+| DELETE (단일 테이블) | ✓ | ✓ | ✓ | ✓ (PK 등호·BETWEEN 조건 시 `swap_remove` O(1) fast-path — FK 피참조 없는 테이블) |
 | DELETE (다중 테이블 JOIN) | ✓ | ✗ (USING으로 에뮬레이션) | ✗ | ✓ (MULTI DELETE) |
 | RETURNING 절 | ✗ | ✓ | ✓ (RETURNING INTO 변수) | ✓ (INSERT/UPDATE/DELETE) |
 | MERGE / UPSERT 표준 | ✓ (8.0.31+) | ✓ (15+) | ✓ (SQL:2003 MERGE 표준) | ✓ (MERGE INTO ... USING ... ON ...) |
@@ -227,11 +227,11 @@
 | 항목 | MySQL | PostgreSQL | Oracle | RuSQL |
 |------|-------|------------|--------|--------|
 | 비용 기반 최적화 (CBO) | ✓ | ✓ | ✓ | ✓ |
-| 통계 기반 선택도 | ✓ (histogram) | ✓ (pg_statistic) | ✓ (DBMS_STATS) | ✓ (ANALYZE TABLE — equi-depth 히스토그램 10-bucket, PkRange·PkBetween·SecondaryRange·SecondaryBetween selectivity 추정) |
+| 통계 기반 선택도 | ✓ (histogram) | ✓ (pg_statistic) | ✓ (DBMS_STATS) | ✓ (ANALYZE TABLE — equi-depth 히스토그램 10-bucket, PkRange·PkBetween·SecondaryRange·SecondaryBetween·CompositeIndexPrefix·SecondaryLikePrefix selectivity 추정) |
 | 인덱스 자동 선택 | ✓ | ✓ | ✓ | ✓ |
 | JOIN 알고리즘 | NestedLoop, Hash, BNL | NestedLoop, Hash, MergeJoin | NestedLoop, Hash, SortMerge | NestedLoop, Hash, SortMerge |
 | JOIN 순서 최적화 | ✓ (동적 프로그래밍) | ✓ (Geqo + 동적 프로그래밍) | ✓ (동적 프로그래밍) | ✓ (System-R bitmask DP, INNER 한정 · 그리디 폴백) |
-| 병렬 쿼리 | △ (일부) | ✓ | ✓ (Parallel Query) | △ (SeqScan WHERE 필터 + GROUP BY 집계 + Hash Join probe — rayon, `RUSTDB_PARALLEL` 토글) |
+| 병렬 쿼리 | △ (일부) | ✓ | ✓ (Parallel Query) | △ (SeqScan WHERE 필터 + GROUP BY par_chunks 청크 부분 집계→병합 + Hash Join probe — rayon, `RUSTDB_PARALLEL` 환경변수 / `SET @rusql_parallel = 1/0` 세션 변수, 10k행 이상 자동 적용) |
 | JIT 컴파일 | ✗ | ✓ (LLVM) | ✗ (Native Compilation은 별도 옵션) | ✗ |
 | EXPLAIN 출력 | ✓ | ✓ (VERBOSE, BUFFERS, FORMAT JSON) | ✓ (EXPLAIN PLAN + DBMS_XPLAN.DISPLAY) | ✓ (접근 경로·비용·실제 행 수, 74자 포맷) |
 | 쿼리 힌트 | ✓ (USE INDEX, STRAIGHT_JOIN) | ✓ (pg_hint_plan 확장) | ✓ (/*+ INDEX(t idx) */ 등 풍부한 힌트) | ✗ |
@@ -312,4 +312,4 @@
 | 연결 관리 | ✓ | ✓ | ✓ | ✓ (연결별 독립 데이터 디렉토리) |
 | 서버 모니터링 | ✓ | ✓ | ✓ (Performance Hub) | ✓ (TCP 서버 on/off·클라이언트 수·로그, 접속 세션 실시간 모니터링 패널 — addr·user·경과 시간·쿼리 건수, 벤치마크 결과 UI 패널) |
 | 데이터 임포트/익스포트 | ✓ (CSV, SQL) | ✓ | ✓ (CSV, Excel, XML) | ✓ (CSV 익스포트·임포트) |
-| AI 연동 | △ (HeatWave AutoML) | ✗ | △ (Oracle AI) | ✓ (True MCP — mcp_server.py: Claude Desktop 연동, stdio JSON-RPC, 4개 도구 (execute_sql · list_databases · list_tables · get_table_schema), API 키 불필요, UI 자동 연결 버튼) |
+| AI 연동 | △ (HeatWave AutoML) | ✗ | △ (Oracle AI) | ✓ (True MCP — mcp_server.py: Claude Desktop 연동, stdio JSON-RPC, 7개 도구 (execute_sql · list_databases · list_tables · get_table_schema · explain_query · get_indexes · sample_data), SELECT 결과 JSON 배열 구조화, API 키 불필요, UI 자동 연결 버튼) |

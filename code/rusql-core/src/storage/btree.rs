@@ -320,6 +320,83 @@ impl BPlusTree {
         }
     }
 
+    // ── 범위 내 키 목록 ────────────────────────────────────────────────
+    pub fn range_keys(&self, start: &str, end: &str) -> Vec<String> {
+        let mut result = Vec::new();
+        if let Some(root) = &self.root {
+            Self::range_collect_keys(root, start, end, &mut result);
+        }
+        result
+    }
+
+    fn range_collect_keys(node: &Node, start: &str, end: &str, result: &mut Vec<String>) {
+        match node {
+            Node::Leaf(leaf) => {
+                for k in &leaf.keys {
+                    if cmp_keys(k, end) == Ordering::Greater { break; }
+                    if cmp_keys(k, start) != Ordering::Less {
+                        result.push(k.clone());
+                    }
+                }
+            }
+            Node::Internal(internal) => {
+                for (i, child) in internal.children.iter().enumerate() {
+                    if i < internal.keys.len() && cmp_keys(&internal.keys[i], start) != Ordering::Greater {
+                        continue;
+                    }
+                    if i > 0 && cmp_keys(&internal.keys[i - 1], end) == Ordering::Greater {
+                        break;
+                    }
+                    Self::range_collect_keys(child, start, end, result);
+                }
+            }
+        }
+    }
+
+    // ── 삭제 ────────────────────────────────────────────────────────────
+    /// 키 삭제. 노드 언더플로우 리밸런싱은 생략 (검색 정확성은 유지됨).
+    pub fn remove(&mut self, key: &str) {
+        if self.root.is_none() { return; }
+        let root = self.root.take().unwrap();
+        self.root = Self::remove_node(root, key);
+    }
+
+    fn remove_node(node: Box<Node>, key: &str) -> Option<Box<Node>> {
+        match *node {
+            Node::Leaf(mut leaf) => {
+                if let Some(pos) = leaf.keys.iter().position(|k| cmp_keys(k, key) == Ordering::Equal) {
+                    leaf.keys.remove(pos);
+                    leaf.values.remove(pos);
+                }
+                if leaf.keys.is_empty() { None } else { Some(Box::new(Node::Leaf(leaf))) }
+            }
+            Node::Internal(mut internal) => {
+                let idx = internal.keys.partition_point(|k| cmp_keys(k.as_str(), key) != Ordering::Greater);
+                let idx = idx.min(internal.children.len() - 1);
+
+                let child = internal.children.remove(idx);
+                match Self::remove_node(child, key) {
+                    Some(updated) => {
+                        internal.children.insert(idx, updated);
+                        Some(Box::new(Node::Internal(internal)))
+                    }
+                    None => {
+                        // 자식 노드가 비었으면 separator key 제거
+                        let key_idx = if idx == 0 { 0 } else { idx - 1 };
+                        if key_idx < internal.keys.len() {
+                            internal.keys.remove(key_idx);
+                        }
+                        match internal.children.len() {
+                            0 => None,
+                            1 => Some(internal.children.remove(0)),
+                            _ => Some(Box::new(Node::Internal(internal))),
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     // ── 통계 ────────────────────────────────────────────────────────────
     /// 트리에 저장된 키(행) 수
     pub fn len(&self) -> usize {

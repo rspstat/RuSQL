@@ -65,6 +65,34 @@ impl CompositeIndex {
         self.search_exact(&values)
     }
 
+    /// 첫 K 컬럼이 eq_map과 일치할 때 prefix 키를 반환한다 (CompositeIndexPrefix 스캔용).
+    /// 모든 컬럼이 일치하면 None 반환 (search_from_eq_map으로 처리).
+    /// 첫 컬럼조차 없으면 None 반환.
+    pub fn prefix_key_from_eq_map(&self, eq_map: &HashMap<String, String>) -> Option<String> {
+        let mut parts: Vec<&str> = Vec::new();
+        for col in &self.columns {
+            if let Some(val) = eq_map.get(col) {
+                parts.push(val.as_str());
+            } else {
+                break;
+            }
+        }
+        if parts.is_empty() || parts.len() == self.columns.len() {
+            return None;
+        }
+        // "val1\x00" — \x00 뒤에 어떤 값이 오든 시작 접두사로 동작
+        Some(Self::make_key(&parts) + "\x00")
+    }
+
+    /// prefix로 시작하는 모든 행 JSON 값을 반환한다.
+    pub fn prefix_scan(&self, prefix: &str) -> Vec<String> {
+        self.tree.scan_from(prefix, true)
+            .into_iter()
+            .filter(|(k, _)| k.starts_with(prefix))
+            .map(|(_, v)| v)
+            .collect()
+    }
+
     /// 기존 rows로 인덱스 전체 재빌드
     pub fn rebuild(&mut self, rows: &[Row]) {
         self.tree = BPlusTree::new();

@@ -5,12 +5,12 @@
 - [x] SQL Parser (AST 기반, 재귀 하강)
 - [x] Executor (쿼리 실행 엔진)
 - [x] 비용 기반 쿼리 옵티마이저 (Cost-Based Query Planner)
-  - AccessPath 선택 (SeqScan / PkPoint / PkBetween / PkRange / SecondaryPoint / SecondaryRange / SecondaryBetween / CompositeIndex)
+  - AccessPath 선택 (SeqScan / PkPoint / PkBetween / PkRange / SecondaryPoint / SecondaryRange / SecondaryBetween / CompositeIndex / CompositeIndexPrefix / SecondaryLikePrefix)
   - 행 수 / 비용 추정 (log₂N 기반)
   - Join 알고리즘 자동 선택 (Sort-Merge Join / Hash Join / Nested Loop)
   - Join 순서 최적화 (System-R 스타일 비용 기반 동적계획법, 그리디 폴백)
   - EXPLAIN 실행 계획 출력 (비용 · 접근 경로 · Join 알고리즘)
-- [x] 병렬 쿼리 실행 (rayon) — SeqScan WHERE 필터 (par_chunks) + GROUP BY 집계 partial→merge + Hash Join probe (par_iter), 청크 단위 워커 thread_local 전파로 사용자 정의 함수/DATABASE() 정확성 유지, 10k행 이상 자동 적용 (`RUSTDB_PARALLEL` 토글), 서브쿼리 포함 시 순차 폴백
+- [x] 병렬 쿼리 실행 (rayon) — SeqScan WHERE 필터 (par_chunks, WHERE 조건 없는 풀스캔은 순차 유지) + GROUP BY 집계 (par_chunks 청크별 독립 partial HashMap 구축→순차 병합→par_iter 집계) + Hash Join probe (par_iter), 청크 단위 워커 thread_local 전파로 사용자 정의 함수/DATABASE() 정확성 유지, 10k행 이상 자동 적용 (`RUSTDB_PARALLEL` 환경변수 또는 `SET @rusql_parallel = 1/0` 세션 변수), 서브쿼리 포함 시 순차 폴백
 
 ### 다중 데이터베이스
 - [x] CREATE DATABASE / CREATE DATABASE IF NOT EXISTS
@@ -52,7 +52,7 @@
 - [x] UPDATE (상수 / 산술 표현식 / 스칼라 함수 / 자기 참조 — `salary = salary * 1.1`, `name = CONCAT(name, '_v2')`)
 - [x] UPDATE ... RETURNING — 수정된 행 반환
 - [x] UPDATE 다중 테이블 — `UPDATE t1, t2 SET t1.col = ..., t2.col = ... WHERE ...`
-- [x] DELETE (MVCC 논리 삭제 / 물리 삭제)
+- [x] DELETE (MVCC 논리 삭제 / 물리 삭제) — PK 등호 조건 시 `row_pk_pos` O(1) `swap_remove` fast-path, PK BETWEEN 조건 시 B+Tree `range_keys` 범위 수집 후 역순 일괄 삭제 (FK 피참조 테이블은 safe-path 폴백)
 - [x] DELETE ... RETURNING — 삭제된 행 반환
 - [x] DELETE 다중 테이블 — `DELETE t1, t2 FROM t1 JOIN t2 ON ... WHERE ...`
 - [x] MERGE INTO — `MERGE INTO target USING source ON ... WHEN MATCHED THEN UPDATE/DELETE WHEN NOT MATCHED THEN INSERT`
@@ -89,6 +89,7 @@
 - [x] IN (리터럴 목록) — `WHERE id IN (1, 2, 3)`
 - [x] NOT IN (리터럴 목록) — `WHERE id NOT IN (2, 4)`
 - [x] IN / NOT IN (서브쿼리) — `WHERE dept_id IN (SELECT id FROM dept)`
+- [x] 비상관 서브쿼리 머티리얼라이제이션 — IN/NOT IN 서브쿼리가 비상관(외부 참조 없음)일 경우 최초 1회만 실행 후 `HashSet`으로 캐싱, 이후 outer 행마다 O(1) 조회 (상관 서브쿼리는 캐싱 없이 기존 경로 유지)
 - [x] BETWEEN / LIKE (%, _ 와일드카드)
 - [x] IS NULL / IS NOT NULL
 - [x] INNER JOIN / LEFT JOIN / RIGHT JOIN
@@ -197,6 +198,7 @@
 
 ### 인덱스 & 저장
 - [x] B+Tree 인덱스 (단일 컬럼, ORDER=16으로 트리 깊이 최소화)
+- [x] `row_pk_pos` 위치 인덱스 — `HashMap<테이블명, HashMap<PK값, usize>>` 인메모리 위치 맵, INSERT/DELETE 시 증분 갱신, DELETE WHERE PK = ? 시 O(1) `swap_remove` fast-path 활성화 (FK 피참조 테이블은 safe-path 폴백)
 - [x] **Hash Index** — `CREATE INDEX name ON table (col) USING HASH` · 등호 조건 O(1) 검색 · 단일 컬럼 전용 · 비용 기반 플래너에서 등호 조건 시 B+Tree보다 우선 선택 · EXPLAIN에 `Hash Index Scan` 표시 · DML(INSERT/UPDATE/DELETE) 시 증분 갱신 (`insert_row` / `remove_row`) · 재시작 후 `indexes.json`에서 자동 복원 (`index_type: "hash"`)
 - [x] 복합 인덱스 (다중 컬럼, null-byte 키 결합)
 - [x] 클러스터드 인덱스 (PK 기준 물리적 정렬 유지)
@@ -204,6 +206,7 @@
 - [x] 보조 인덱스 증분 갱신 (INSERT/UPDATE/DELETE 시 `index_insert_row` / `index_remove_row`로 O(1) 개별 갱신 — 전체 재빌드 제거, stale 방지)
 - [x] 커버링 인덱스 (SELECT 컬럼 ⊆ 인덱스 컬럼 시 Index-only scan 자동 활성화)
 - [x] B+Tree 범위 스캔 최적화 (scan_from_node / scan_to_node 가지치기, O(log N + k))
+- [x] B+Tree `range_keys` — BETWEEN 조건 DELETE 시 가지치기로 대상 PK 키 목록 수집, 역순 `swap_remove`로 인덱스 깨짐 없이 O(k) 일괄 삭제
 - [x] 수치 인식 키 비교 (`"10" > "9"` 정상 처리)
 - [x] 바이너리 디스크 저장 (.rdb 포맷, 16KB 페이지)
 - [x] LZ4 데이터 압축 (.rdb 파일 투명 압축/해제, 하위 호환성 유지)

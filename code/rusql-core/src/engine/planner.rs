@@ -35,7 +35,11 @@ pub enum AccessPath {
     SecondaryRange { index_key: String, col: String, op: RangeOp, key: String },
     SecondaryBetween { index_key: String, col: String, start: String, end: String },
     CompositeIndex { index_name: String },
+    /// 복합 인덱스 프리픽스 스캔: 앞 K 컬럼이 등호, 나머지는 필터로 처리
+    CompositeIndexPrefix { index_name: String, prefix: String },
     HashPoint { index_key: String, col: String, key: String },
+    /// 보조 인덱스 LIKE 프리픽스 스캔: 'prefix%' 패턴
+    SecondaryLikePrefix { index_key: String, col: String, prefix: String },
 }
 
 // ── Join algorithm ────────────────────────────────────────────────────────
@@ -131,6 +135,7 @@ impl<'a> Planner<'a> {
             AccessPath::SecondaryPoint { col, .. } => col.as_str(),
             AccessPath::SecondaryRange { col, .. } => col.as_str(),
             AccessPath::SecondaryBetween { col, .. } => col.as_str(),
+            AccessPath::SecondaryLikePrefix { col, .. } => col.as_str(),
             _ => return false,
         };
         // Single-column covering: all selected columns are the indexed column
@@ -190,10 +195,18 @@ impl<'a> Planner<'a> {
 
         let eq_map = collect_eq_map(expr);
         if !eq_map.is_empty() {
+            // 모든 컬럼 등호: 정확한 포인트 조회
             if let Some((name, _)) = self.composite_indexes.iter()
                 .find(|(_, ci)| ci.table == table && ci.matches_conditions(&eq_map))
             {
                 return AccessPath::CompositeIndex { index_name: name.clone() };
+            }
+            // 앞 K 컬럼만 등호, 나머지는 범위/필터: 프리픽스 스캔
+            for (name, ci) in self.composite_indexes.iter() {
+                if ci.table != table { continue; }
+                if let Some(prefix) = ci.prefix_key_from_eq_map(&eq_map) {
+                    return AccessPath::CompositeIndexPrefix { index_name: name.clone(), prefix };
+                }
             }
         }
 
@@ -212,20 +225,27 @@ impl<'a> Planner<'a> {
         })
     }
 
-    fn secondary_access(&self, index_key: String, col: &str, cond: &Condition, table: &str) -> Option<AccessPath> {
+    fn secondary_access(&self, index_key: String, col: &str, cond: &Condition, _table: &str) -> Option<AccessPath> {
         Some(match (&cond.operator, &cond.value) {
-            (Operator::Eq,  ConditionValue::Literal(k)) if !self.is_col_ref_in_context(k, table) =>
+            (Operator::Eq,  ConditionValue::Literal(k)) if !self.is_col_ref_in_context(k, _table) =>
                 AccessPath::SecondaryPoint { index_key, col: col.to_string(), key: k.clone() },
             (Operator::Between, ConditionValue::Between(a, b)) =>
                 AccessPath::SecondaryBetween { index_key, col: col.to_string(), start: a.clone(), end: b.clone() },
-            (Operator::Gt,  ConditionValue::Literal(k)) if !self.is_col_ref_in_context(k, table) =>
+            (Operator::Gt,  ConditionValue::Literal(k)) if !self.is_col_ref_in_context(k, _table) =>
                 AccessPath::SecondaryRange { index_key, col: col.to_string(), op: RangeOp::Gt,  key: k.clone() },
-            (Operator::Gte, ConditionValue::Literal(k)) if !self.is_col_ref_in_context(k, table) =>
+            (Operator::Gte, ConditionValue::Literal(k)) if !self.is_col_ref_in_context(k, _table) =>
                 AccessPath::SecondaryRange { index_key, col: col.to_string(), op: RangeOp::Gte, key: k.clone() },
-            (Operator::Lt,  ConditionValue::Literal(k)) if !self.is_col_ref_in_context(k, table) =>
+            (Operator::Lt,  ConditionValue::Literal(k)) if !self.is_col_ref_in_context(k, _table) =>
                 AccessPath::SecondaryRange { index_key, col: col.to_string(), op: RangeOp::Lt,  key: k.clone() },
-            (Operator::Lte, ConditionValue::Literal(k)) if !self.is_col_ref_in_context(k, table) =>
+            (Operator::Lte, ConditionValue::Literal(k)) if !self.is_col_ref_in_context(k, _table) =>
                 AccessPath::SecondaryRange { index_key, col: col.to_string(), op: RangeOp::Lte, key: k.clone() },
+            // LIKE 'prefix%': 뒤에 % 하나만 있고 앞에 와일드카드 없는 패턴 → 프리픽스 스캔
+            (Operator::Like, ConditionValue::Literal(pat)) => {
+                if let Some(prefix) = like_prefix(pat) {
+                    return Some(AccessPath::SecondaryLikePrefix { index_key, col: col.to_string(), prefix });
+                }
+                return None;
+            }
             _ => return None,
         })
     }
@@ -355,6 +375,8 @@ impl<'a> Planner<'a> {
                 let sel = self.histogram_sel_between(table, col, start, end);
                 ((total as f64 * sel) as usize).max(1)
             }
+            AccessPath::SecondaryLikePrefix { .. } => (total / 10).max(1),
+            AccessPath::CompositeIndexPrefix { .. } => (total / 5).max(1),
             AccessPath::SecondaryPoint { index_key, col, .. } => {
                 // Use real cardinality from ANALYZE TABLE stats when available.
                 // index_key is "{table}_{index_name}"; table is the prefix before "_idx_".
@@ -409,7 +431,8 @@ impl<'a> Planner<'a> {
             AccessPath::PkBetween { .. }
             | AccessPath::PkRange { .. }      => log_n + n / 4.0,
             AccessPath::SecondaryPoint { .. } => log_n * 2.0,
-            AccessPath::SecondaryRange { .. } | AccessPath::SecondaryBetween { .. } => log_n * 2.0 + n / 4.0,
+            AccessPath::SecondaryRange { .. } | AccessPath::SecondaryBetween { .. }
+            | AccessPath::SecondaryLikePrefix { .. } | AccessPath::CompositeIndexPrefix { .. } => log_n * 2.0 + n / 4.0,
             AccessPath::CompositeIndex { .. } => log_n,
             AccessPath::HashPoint { .. }      => 1.0, // O(1)
         }
@@ -459,7 +482,9 @@ impl<'a> Planner<'a> {
             AccessPath::SecondaryRange { index_key, col, op, key }=> format!("Index Range  {} ({} {} {})", index_key, col, op.label(), key),
             AccessPath::SecondaryBetween { index_key, col, start, end } => format!("Index Range  {} ({} BETWEEN {} AND {})", index_key, col, start, end),
             AccessPath::CompositeIndex { index_name }             => format!("Composite Index  {}", index_name),
+            AccessPath::CompositeIndexPrefix { index_name, .. }   => format!("Composite Index Prefix  {}", index_name),
             AccessPath::HashPoint { index_key, col, key }         => format!("Hash Index Scan  {} ({} = {})", index_key, col, key),
+            AccessPath::SecondaryLikePrefix { index_key, col, prefix } => format!("Index Prefix Scan  {} ({} LIKE '{}%')", index_key, col, prefix),
         }
     }
 
@@ -526,6 +551,15 @@ pub fn collect_eq_map(expr: &CondExpr) -> HashMap<String, String> {
     let mut map = HashMap::new();
     collect_eq_recursive(expr, &mut map);
     map
+}
+
+/// 'prefix%' 패턴에서 prefix를 추출한다. 중간 와일드카드가 있으면 None.
+fn like_prefix(pat: &str) -> Option<String> {
+    let prefix = pat.strip_suffix('%')?;
+    if prefix.contains('%') || prefix.contains('_') || prefix.is_empty() {
+        return None;
+    }
+    Some(prefix.to_string())
 }
 
 fn collect_eq_recursive(expr: &CondExpr, map: &mut HashMap<String, String>) {

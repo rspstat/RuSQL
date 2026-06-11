@@ -153,6 +153,8 @@ pub struct SharedDatabase {
     pub process_list: Arc<Mutex<HashMap<usize, ProcessInfo>>>,
     /// 세션 ID 발급용 카운터
     pub next_session_id: Arc<AtomicUsize>,
+    /// PK 값 → Vec 위치 인덱스: 비트랜잭션 단건 DELETE O(1) 최적화
+    pub row_pk_pos: HashMap<String, HashMap<String, usize>>,
 }
 
 /// SHA-256 해시 (hex 문자열 반환) — native TCP 인증용
@@ -283,6 +285,8 @@ pub struct Executor {
     proc_signal: Option<ProcSignal>,
     /// SHOW PROCESS LIST에서 이 세션을 식별하는 ID
     pub session_id: usize,
+    /// 비상관 IN/NOT IN 서브쿼리 결과 캐시 (쿼리당 1회 실행 후 재사용)
+    subquery_cache: HashMap<String, HashSet<String>>,
 }
 
 impl Executor {
@@ -494,6 +498,7 @@ impl Executor {
                 user_functions,
                 process_list: Arc::new(Mutex::new(HashMap::new())),
                 next_session_id: Arc::new(AtomicUsize::new(1)),
+                row_pk_pos: HashMap::new(),
             })),
             txn: TransactionManager::new_with_dir(dir),
             current_db,
@@ -503,6 +508,7 @@ impl Executor {
             prepared_stmts: HashMap::new(),
             proc_signal: None,
             session_id: 0,
+            subquery_cache: HashMap::new(),
         };
 
         // WAL Crash Recovery
@@ -528,6 +534,7 @@ impl Executor {
             prepared_stmts: HashMap::new(),
             proc_signal: None,
             session_id,
+            subquery_cache: HashMap::new(),
         }
     }
 
@@ -570,6 +577,7 @@ impl Executor {
     }
 
     pub fn execute(&mut self, stmt: Statement) -> Result<String, String> {
+        self.subquery_cache.clear();
         // COMMIT은 두 단계로 분리: Phase1(락 보유 중) → fsync(락 해제 후) → finalize
         if let Statement::Commit = stmt {
             return self.execute_commit_grouped();
@@ -820,6 +828,10 @@ impl Executor {
                     }
                     Self::eval_arith(&vars, &expr)
                 };
+                // 서버 병렬 처리 토글 (벤치마크용): SET @rusql_parallel = 0/1
+                if name.eq_ignore_ascii_case("rusql_parallel") {
+                    std::env::set_var("RUSTDB_PARALLEL", &val);
+                }
                 self.user_vars.insert(name, val);
                 Ok(String::new())
             }
@@ -1314,6 +1326,7 @@ impl Executor {
         s.catalog.drop_table(&name)?;
         s.tables.remove(&name);
         s.indexes.remove(&name);
+        s.row_pk_pos.remove(&name);
         s.buffer_pool.invalidate(&name);
         s.disk.delete_table(&name);
         Ok(format!("Table '{}' dropped.", name))
@@ -1323,6 +1336,7 @@ impl Executor {
         s.tables.get_mut(&name)
             .ok_or(format!("Table '{}' not found", name))?
             .clear();
+        s.row_pk_pos.remove(&name);
         if let Some(index) = s.indexes.get_mut(&name) {
             *index = BPlusTree::new();
         }
@@ -1898,9 +1912,31 @@ impl Executor {
             // 보조 인덱스 증분 갱신 (O(1) per row — 전체 재빌드 대체)
             Self::index_insert_row(s, &table, &row);
 
-            s.tables.get_mut(&table)
-                .ok_or(format!("Table '{}' not found", table))?
-                .push(row);
+            {
+                // push 전에 pk_val 추출 (push 후 row가 move되므로)
+                let pk_val_for_idx = if !self.txn.is_active() {
+                    schema.columns.iter()
+                        .find(|c| c.primary_key)
+                        .and_then(|c| row.get(&c.name))
+                        .cloned()
+                } else {
+                    None
+                };
+                let rows = s.tables.get_mut(&table)
+                    .ok_or(format!("Table '{}' not found", table))?;
+                let pos = rows.len();
+                rows.push(row);  // move (clone 없음)
+                // PK 위치 인덱스 유지 (비트랜잭션 단건 DELETE O(1) 최적화)
+                if let Some(pk_v) = pk_val_for_idx {
+                    if let Some(pos_map) = s.row_pk_pos.get_mut(&table) {
+                        pos_map.insert(pk_v, pos);
+                    } else {
+                        let mut m = HashMap::new();
+                        m.insert(pk_v, pos);
+                        s.row_pk_pos.insert(table.clone(), m);
+                    }
+                }
+            }
         }
 
         // 트랜잭션 중에는 버퍼 풀 갱신 생략 (COMMIT 시 일괄 처리)
@@ -2331,7 +2367,90 @@ impl Executor {
                     }
                     return Ok("0 rows returned.".to_string());
                 }
+                // ── 복합 인덱스 프리픽스 스캔 (앞 K 컬럼 등호 + 나머지 범위) ─
+                AccessPath::CompositeIndexPrefix { index_name, prefix } => {
+                    if let Some(ci) = s.composite_indexes.get(index_name) {
+                        let rows: Vec<Row> = ci.prefix_scan(prefix)
+                            .into_iter()
+                            .filter_map(|j| serde_json::from_str::<Row>(&j).ok())
+                            .filter(|r| Self::is_visible(r))
+                            .filter(|r| self.matches_condition_with_subquery(s, r, &condition))
+                            .collect();
+                        return self.format_result(s, rows, columns, table, vec![]);
+                    }
+                }
+                // ── 보조 인덱스 LIKE 프리픽스 스캔 ──────────────────────
+                AccessPath::SecondaryLikePrefix { index_key, col: _, prefix } => {
+                    if let Some(index) = s.indexes.get(index_key) {
+                        let rows: Vec<Row> = index.scan_from(prefix, true)
+                            .into_iter()
+                            .take_while(|(k, _)| k.starts_with(prefix.as_str()))
+                            .flat_map(|(_, j)| serde_json::from_str::<Vec<Row>>(&j).unwrap_or_default())
+                            .filter(|r| Self::is_visible(r))
+                            .filter(|r| self.matches_condition_with_subquery(s, r, &condition))
+                            .collect();
+                        return self.format_result(s, rows, columns, table, vec![]);
+                    }
+                }
                 AccessPath::SeqScan => {} // fall through
+            }
+        }
+
+        // Top-K 인덱스 경로: ORDER BY 1컬럼 + LIMIT + OFFSET 없음 + 단순 SELECT
+        if joins.is_empty() && !has_agg && !has_win && !for_update && !for_share && !distinct
+            && offset.is_none() && order_by.len() == 1 && limit.is_some()
+        {
+            let lim = limit.unwrap();
+            let ob = &order_by[0];
+            match &plan.base.access {
+                // ── 보조 인덱스 범위 스캔 Top-K ─────────────────────────────
+                AccessPath::SecondaryRange { index_key, col, op, key, .. } if ob.column == *col => {
+                    if let Some(index) = s.indexes.get(index_key) {
+                        let inclusive = op.inclusive();
+                        let pairs = if op.is_lower_bound() {
+                            index.scan_from(key, inclusive)
+                        } else {
+                            index.scan_to(key, inclusive)
+                        };
+                        let mut rows: Vec<Row> = pairs.into_iter()
+                            .flat_map(|(_, j)| serde_json::from_str::<Vec<Row>>(&j).unwrap_or_default())
+                            .filter(|r| Self::is_visible(r))
+                            .filter(|r| self.matches_condition_with_subquery(s, r, &condition))
+                            .collect();
+                        if !ob.ascending { rows.reverse(); }
+                        rows.truncate(lim);
+                        return self.format_result(s, rows, columns, table, vec![]);
+                    }
+                }
+                // ── 보조 인덱스 BETWEEN Top-K ────────────────────────────────
+                AccessPath::SecondaryBetween { index_key, col, start, end, .. } if ob.column == *col => {
+                    if let Some(index) = s.indexes.get(index_key) {
+                        let mut rows: Vec<Row> = index.range_search(start, end).into_iter()
+                            .flat_map(|j| serde_json::from_str::<Vec<Row>>(&j).unwrap_or_default())
+                            .filter(|r| Self::is_visible(r))
+                            .filter(|r| self.matches_condition_with_subquery(s, r, &condition))
+                            .collect();
+                        if !ob.ascending { rows.reverse(); }
+                        rows.truncate(lim);
+                        return self.format_result(s, rows, columns, table, vec![]);
+                    }
+                }
+                // ── 보조 인덱스 LIKE 프리픽스 Top-K ─────────────────────────
+                AccessPath::SecondaryLikePrefix { index_key, col, prefix } if ob.column == *col => {
+                    if let Some(index) = s.indexes.get(index_key) {
+                        let mut rows: Vec<Row> = index.scan_from(prefix, true)
+                            .into_iter()
+                            .take_while(|(k, _)| k.starts_with(prefix.as_str()))
+                            .flat_map(|(_, j)| serde_json::from_str::<Vec<Row>>(&j).unwrap_or_default())
+                            .filter(|r| Self::is_visible(r))
+                            .filter(|r| self.matches_condition_with_subquery(s, r, &condition))
+                            .collect();
+                        if !ob.ascending { rows.reverse(); }
+                        rows.truncate(lim);
+                        return self.format_result(s, rows, columns, table, vec![]);
+                    }
+                }
+                _ => {}
             }
         }
 
@@ -2354,7 +2473,7 @@ impl Executor {
 
         // ── JOIN 처리 (플래너가 선택한 알고리즘 사용) ──────────────────────
         let result: Vec<Row> = if joins.is_empty() {
-            if parallel_enabled() && rows.len() >= PARALLEL_MIN_ROWS && !cond_has_subquery(&condition) {
+            if parallel_enabled() && rows.len() >= PARALLEL_MIN_ROWS && condition.is_some() && !cond_has_subquery(&condition) {
                 // 병렬 SeqScan 필터: 서브쿼리 없는 WHERE는 순수 정적 matches_condexpr로 평가 가능.
                 // par_chunks로 청크마다 워커 thread_local을 세팅해 사용자 정의 함수/DATABASE()도 정확히 평가.
                 let uf = s.user_functions.clone();
@@ -2440,19 +2559,51 @@ impl Executor {
 
         // GROUP BY + 집계 (통합)
         if let Some(ref group_cols) = group_by {
-            // 삽입 순서 유지: order 벡터 + HashMap
-            let mut group_order: Vec<Vec<String>> = Vec::new();
-            let mut group_data: std::collections::HashMap<Vec<String>, Vec<Row>> =
-                std::collections::HashMap::new();
-            for row in &result {
-                let key: Vec<String> = group_cols.iter()
-                    .map(|c| Self::get_col(row, c).cloned().unwrap_or_default())
-                    .collect();
-                if !group_data.contains_key(&key) { group_order.push(key.clone()); }
-                group_data.entry(key).or_default().push(row.clone());
-            }
+            // 병렬 ON + 충분한 행 → 청크별 독립 HashMap 병렬 구성 후 순차 merge
+            // (par_iter over groups는 그룹 수가 적어 오히려 느림 — 행 스캔 단계를 병렬화)
+            let (group_order, group_data): (Vec<Vec<String>>, std::collections::HashMap<Vec<String>, Vec<Row>>) =
+                if parallel_enabled() && result.len() >= PARALLEL_MIN_ROWS {
+                    let partial_maps: Vec<(Vec<Vec<String>>, std::collections::HashMap<Vec<String>, Vec<Row>>)> =
+                        result.par_chunks(PARALLEL_CHUNK).map(|chunk| {
+                            let mut order: Vec<Vec<String>> = Vec::new();
+                            let mut map: std::collections::HashMap<Vec<String>, Vec<Row>> =
+                                std::collections::HashMap::new();
+                            for row in chunk {
+                                let key: Vec<String> = group_cols.iter()
+                                    .map(|c| Self::get_col(row, c).cloned().unwrap_or_default())
+                                    .collect();
+                                if !map.contains_key(&key) { order.push(key.clone()); }
+                                map.entry(key).or_default().push(row.clone());
+                            }
+                            (order, map)
+                        }).collect();
+                    let mut group_order: Vec<Vec<String>> = Vec::new();
+                    let mut group_data: std::collections::HashMap<Vec<String>, Vec<Row>> =
+                        std::collections::HashMap::new();
+                    for (order, mut partial) in partial_maps {
+                        for key in order {
+                            let rows_for_key = partial.remove(&key).unwrap();
+                            if !group_data.contains_key(&key) { group_order.push(key.clone()); }
+                            group_data.entry(key).or_default().extend(rows_for_key);
+                        }
+                    }
+                    (group_order, group_data)
+                } else {
+                    let mut group_order: Vec<Vec<String>> = Vec::new();
+                    let mut group_data: std::collections::HashMap<Vec<String>, Vec<Row>> =
+                        std::collections::HashMap::new();
+                    for row in &result {
+                        let key: Vec<String> = group_cols.iter()
+                            .map(|c| Self::get_col(row, c).cloned().unwrap_or_default())
+                            .collect();
+                        if !group_data.contains_key(&key) { group_order.push(key.clone()); }
+                        group_data.entry(key).or_default().push(row.clone());
+                    }
+                    (group_order, group_data)
+                };
 
-            let mut group_rows: Vec<Row> = group_order.par_iter().map(|key| {
+            // 그룹별 집계 row 생성: parallel_enabled() 이면 par_iter, 아니면 iter
+            let make_group_row = |key: &Vec<String>| -> Row {
                 let grp = &group_data[key];
                 let mut out = Row::new();
                 for (col, val) in group_cols.iter().zip(key.iter()) {
@@ -2466,7 +2617,6 @@ impl Executor {
                             (func, cn.as_str(), alias.clone()),
                         _ => continue,
                     };
-                    // GROUP_CONCAT: 문자열 수집 후 join
                     if let AggFunc::GroupConcat { separator } = func {
                         let strs: Vec<String> = grp.iter()
                             .filter_map(|r| {
@@ -2527,7 +2677,6 @@ impl Executor {
                     };
                     out.insert(label, v);
                 }
-                // HAVING 절에서 참조되는 집계 함수 중 SELECT에 없는 것을 보충
                 if let Some(ref hav) = having {
                     for agg_key in Self::extract_agg_refs_from_cond(hav) {
                         if !out.contains_key(&agg_key) {
@@ -2536,7 +2685,12 @@ impl Executor {
                     }
                 }
                 out
-            }).collect();
+            };
+            let mut group_rows: Vec<Row> = if parallel_enabled() {
+                group_order.par_iter().map(make_group_row).collect()
+            } else {
+                group_order.iter().map(make_group_row).collect()
+            };
 
             // HAVING 필터 (집계된 컬럼 기준)
             if let Some(ref hav) = having {
@@ -4603,17 +4757,217 @@ impl Executor {
         result
     }
 
+    fn condition_has_subquery(condition: &Option<CondExpr>) -> bool {
+        fn check(expr: &CondExpr) -> bool {
+            match expr {
+                CondExpr::And(l, r) | CondExpr::Or(l, r) => check(l) || check(r),
+                CondExpr::Not(inner) => check(inner),
+                CondExpr::Leaf(cond) => matches!(cond.value, ConditionValue::Subquery(_)),
+            }
+        }
+        condition.as_ref().map(check).unwrap_or(false)
+    }
+
+    /// `WHERE pk_col = literal_value` 패턴이면 literal 반환, 아니면 None
+    fn extract_pk_eq_value(condition: &Option<CondExpr>, pk_col: &str) -> Option<String> {
+        if let Some(CondExpr::Leaf(cond)) = condition {
+            if cond.operator == Operator::Eq {
+                if let (ArithExpr::Col(col), ConditionValue::Literal(val)) = (&cond.left, &cond.value) {
+                    if col == pk_col {
+                        return Some(val.clone());
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// `WHERE pk_col BETWEEN lo AND hi` 패턴이면 (lo, hi) 반환, 아니면 None
+    fn extract_pk_between_value(condition: &Option<CondExpr>, pk_col: &str) -> Option<(String, String)> {
+        if let Some(CondExpr::Leaf(cond)) = condition {
+            if cond.operator == Operator::Between {
+                if let (ArithExpr::Col(col), ConditionValue::Between(lo, hi)) = (&cond.left, &cond.value) {
+                    if col == pk_col {
+                        return Some((lo.clone(), hi.clone()));
+                    }
+                }
+            }
+        }
+        None
+    }
+
     fn exec_delete_inner(&mut self, s: &mut SharedDatabase, table: String, condition: Option<CondExpr>, returning: Option<Vec<SelectColumn>>) -> Result<String, String> {
-        // 서브쿼리 조건 지원: 먼저 매칭 행을 수집 (borrow 분리)
-        let candidates: Vec<Row> = s.tables.get(&table)
-            .ok_or(format!("Table '{}' not found", table))?
-            .iter()
-            .filter(|r| Self::is_visible(r))
-            .cloned()
-            .collect();
-        let rows_to_delete: Vec<Row> = candidates.into_iter()
-            .filter(|r| self.matches_condition_with_subquery(s, r, &condition))
-            .collect();
+        // Fast path: FK 없음 + 서브쿼리 없음 + 비트랜잭션 → 단일 패스 retain+collect
+        let has_fk_ref = s.catalog.tables.values().any(|schema|
+            schema.columns.iter().any(|c|
+                c.foreign_key.as_ref().map(|fk| fk.ref_table == table).unwrap_or(false)
+            )
+        );
+        if !has_fk_ref && !Self::condition_has_subquery(&condition) && !self.txn.is_active() {
+            let pk_col = s.catalog.get_table(&table)
+                .and_then(|sc| sc.columns.iter().find(|c| c.primary_key).map(|c| c.name.clone()))
+                .unwrap_or_else(|| "id".to_string());
+            let mut rows_to_delete: Vec<Row> = Vec::new();
+
+            // PK 등호 조건이면 위치 인덱스로 O(1) swap_remove
+            let used_pos_idx = if let Some(pk_val) = Self::extract_pk_eq_value(&condition, &pk_col) {
+                let pos_opt = s.row_pk_pos.get(&table)
+                    .and_then(|m| m.get(&pk_val))
+                    .copied();
+                if let Some(pos) = pos_opt {
+                    let rows = s.tables.get(&table)
+                        .ok_or(format!("Table '{}' not found", table))?;
+                    // 위치 검증 (stale 방지)
+                    let valid = pos < rows.len()
+                        && rows[pos].get(&pk_col).map(|v| v == &pk_val).unwrap_or(false)
+                        && Self::is_visible(&rows[pos]);
+                    if valid {
+                        let rows = s.tables.get_mut(&table).unwrap();
+                        let del_row = rows.swap_remove(pos);
+                        // swap_remove: 마지막 행이 pos 위치로 이동 → 위치 인덱스 갱신
+                        if pos < rows.len() {
+                            let swapped_pk = rows[pos].get(&pk_col).cloned().unwrap_or_default();
+                            if let Some(m) = s.row_pk_pos.get_mut(&table) {
+                                m.insert(swapped_pk, pos);
+                                m.remove(&pk_val);
+                            }
+                        } else if let Some(m) = s.row_pk_pos.get_mut(&table) {
+                            m.remove(&pk_val);
+                        }
+                        rows_to_delete.push(del_row);
+                        true
+                    } else {
+                        // 위치 stale → 인덱스 무효화 후 일반 경로로
+                        s.row_pk_pos.remove(&table);
+                        false
+                    }
+                } else {
+                    false
+                }
+            } else {
+                false
+            };
+
+            let deleted;
+            if used_pos_idx {
+                deleted = rows_to_delete.len();
+            } else if let Some((lo, hi)) = Self::extract_pk_between_value(&condition, &pk_col) {
+                // BETWEEN pk 범위 삭제: B+Tree range_keys + 위치 인덱스 → 내림차순 swap_remove
+                let pks_to_delete: Vec<String> = s.indexes.get(&table)
+                    .map(|idx| idx.range_keys(&lo, &hi))
+                    .unwrap_or_default();
+
+                let pos_map_snapshot: Vec<(usize, String)> = {
+                    let pos_map = s.row_pk_pos.get(&table);
+                    pks_to_delete.iter()
+                        .filter_map(|pk| pos_map.and_then(|m| m.get(pk)).map(|&p| (p, pk.clone())))
+                        .collect()
+                };
+
+                // 모든 PK가 위치 인덱스에 있으면 swap_remove 최적화 경로
+                if pos_map_snapshot.len() == pks_to_delete.len() && !pks_to_delete.is_empty() {
+                    // 내림차순 정렬: 높은 위치부터 삭제해야 swap 충돌 없음
+                    let mut positions = pos_map_snapshot;
+                    positions.sort_by(|a, b| b.0.cmp(&a.0));
+
+                    let rows = s.tables.get_mut(&table)
+                        .ok_or(format!("Table '{}' not found", table))?;
+                    for (pos, pk_val) in &positions {
+                        let del_row = rows.swap_remove(*pos);
+                        if *pos < rows.len() {
+                            let swapped_pk = rows[*pos].get(&pk_col).cloned().unwrap_or_default();
+                            if let Some(m) = s.row_pk_pos.get_mut(&table) {
+                                m.insert(swapped_pk, *pos);
+                                m.remove(pk_val);
+                            }
+                        } else if let Some(m) = s.row_pk_pos.get_mut(&table) {
+                            m.remove(pk_val);
+                        }
+                        rows_to_delete.push(del_row);
+                    }
+                    deleted = rows_to_delete.len();
+                } else {
+                    // fallback: retain
+                    let rows = s.tables.get_mut(&table)
+                        .ok_or(format!("Table '{}' not found", table))?;
+                    let before = rows.len();
+                    rows.retain(|r| {
+                        if Self::is_visible(r) && Self::matches_condexpr(r, &condition) {
+                            rows_to_delete.push(r.clone());
+                            false
+                        } else { true }
+                    });
+                    deleted = before - rows.len();
+                    s.row_pk_pos.remove(&table);
+                }
+            } else {
+                // 일반 경로: 단일 패스 retain+collect
+                let rows = s.tables.get_mut(&table)
+                    .ok_or(format!("Table '{}' not found", table))?;
+                let before = rows.len();
+                rows.retain(|r| {
+                    if Self::is_visible(r) && Self::matches_condexpr(r, &condition) {
+                        rows_to_delete.push(r.clone());
+                        false
+                    } else {
+                        true
+                    }
+                });
+                deleted = before - rows.len();
+                // retain은 위치를 모두 바꾸므로 위치 인덱스 무효화
+                s.row_pk_pos.remove(&table);
+            }
+            for del_row in &rows_to_delete {
+                Self::index_remove_row(s, &table, del_row, &pk_col);
+            }
+            if let Some(index) = s.indexes.get_mut(&table) {
+                for del_row in &rows_to_delete {
+                    let key = del_row.get(&pk_col).cloned().unwrap_or_default();
+                    index.remove(&key);
+                }
+            }
+            let comp_keys: Vec<String> = s.composite_indexes.iter()
+                .filter(|(_, ci)| ci.table == table)
+                .map(|(k, _)| k.clone())
+                .collect();
+            if !comp_keys.is_empty() {
+                let rows_clone = s.tables.get(&table).unwrap().clone();
+                for k in comp_keys {
+                    if let Some(ci) = s.composite_indexes.get_mut(&k) {
+                        ci.rebuild(&rows_clone);
+                    }
+                }
+            }
+            Self::maybe_auto_vacuum(s);
+            Self::update_stat_rows(s, &table, -(deleted as i64));
+            self.maybe_auto_checkpoint(s);
+            return if let Some(ret_cols) = returning {
+                Ok(Self::format_returning_rows(&rows_to_delete, &ret_cols))
+            } else {
+                Ok(format!("{} row(s) deleted.", deleted))
+            };
+        }
+
+        // Slow path: FK / 서브쿼리 / 트랜잭션 처리
+        // 서브쿼리 없는 경우: 매칭 행만 클론 (전체 복사 불필요)
+        let rows_to_delete: Vec<Row> = if Self::condition_has_subquery(&condition) {
+            let candidates: Vec<Row> = s.tables.get(&table)
+                .ok_or(format!("Table '{}' not found", table))?
+                .iter()
+                .filter(|r| Self::is_visible(r))
+                .cloned()
+                .collect();
+            candidates.into_iter()
+                .filter(|r| self.matches_condition_with_subquery(s, r, &condition))
+                .collect()
+        } else {
+            s.tables.get(&table)
+                .ok_or(format!("Table '{}' not found", table))?
+                .iter()
+                .filter(|r| Self::is_visible(r) && Self::matches_condexpr(r, &condition))
+                .cloned()
+                .collect()
+        };
 
         // FK 처리 (CASCADE / RESTRICT / SET NULL)
         let other_tables: Vec<(String, Vec<crate::catalog::schema::ColumnDef>)> =
@@ -4766,49 +5120,34 @@ impl Executor {
             deleted = before - rows.len();
         }
 
-        let rows_clone = s.tables.get(&table).unwrap().clone();
-
         if !self.txn.is_active() {
             // 보조 인덱스 증분 삭제 (O(1) per row)
             for del_row in &rows_to_delete {
                 Self::index_remove_row(s, &table, del_row, &pk_col);
             }
-            // 물리 삭제 후: PK 인덱스 재빌드 + 버퍼 풀 즉시 flush
+            // PK 인덱스 증분 삭제 (O(log n) per row)
             if let Some(index) = s.indexes.get_mut(&table) {
-                *index = BPlusTree::new();
-                for row in &rows_clone {
-                    let key = row.get(&pk_col).cloned().unwrap_or_default();
-                    let val_json = serde_json::to_string(row).unwrap();
-                    index.insert(key, val_json);
+                for del_row in &rows_to_delete {
+                    let key = del_row.get(&pk_col).cloned().unwrap_or_default();
+                    index.remove(&key);
                 }
             }
+            // 컴포짓 인덱스 재빌드 (composite index가 있는 경우만)
             let comp_keys: Vec<String> = s.composite_indexes.iter()
                 .filter(|(_, ci)| ci.table == table)
                 .map(|(k, _)| k.clone())
                 .collect();
-            for k in comp_keys {
-                if let Some(ci) = s.composite_indexes.get_mut(&k) {
-                    ci.rebuild(&rows_clone);
+            if !comp_keys.is_empty() {
+                let rows_clone = s.tables.get(&table).unwrap().clone();
+                for k in comp_keys {
+                    if let Some(ci) = s.composite_indexes.get_mut(&k) {
+                        ci.rebuild(&rows_clone);
+                    }
                 }
             }
-            s.buffer_pool.write_page(&table, rows_clone.clone());
-            s.buffer_pool.flush_page(&table, &s.disk);
+            // INSERT와 동일하게 per-row 디스크 flush 없음 — checkpoint 시 일괄 영속화
             Self::maybe_auto_vacuum(s);
-            // PK 인덱스 영속화
-            if let Some(idx) = s.indexes.get(&table) {
-                s.disk.save_btree_index(&table, idx);
-            }
-            // 보조 B+Tree 인덱스 영속화
-            let sec_keys: Vec<String> = s.index_meta.iter()
-                .filter(|(_, (tbl, _))| tbl == &table)
-                .map(|(name, _)| format!("{}_{}", table, name))
-                .collect();
-            for key in sec_keys {
-                if let Some(idx) = s.indexes.get(&key) {
-                    s.disk.save_btree_index(&key, idx);
-                }
-            }
-        // 트랜잭션 중에는 버퍼 풀 갱신 생략 (COMMIT 시 일괄 처리)
+        // 트랜잭션 중에는 인덱스/버퍼 갱신 생략 (COMMIT 시 일괄 처리)
         }
         Self::update_stat_rows(s, &table, -(deleted as i64));
 
@@ -5685,6 +6024,30 @@ impl Executor {
         }
     }
 
+    /// 서브쿼리 조건에 외부 행 참조(상관 서브쿼리)가 있는지 검사.
+    /// 점 표기("table.col") 리터럴이 있으면 상관 서브쿼리로 간주.
+    fn has_outer_ref(expr: &CondExpr) -> bool {
+        match expr {
+            CondExpr::And(l, r) | CondExpr::Or(l, r) =>
+                Self::has_outer_ref(l) || Self::has_outer_ref(r),
+            CondExpr::Not(inner) => Self::has_outer_ref(inner),
+            CondExpr::Leaf(c) => {
+                if let ConditionValue::Literal(s) = &c.value {
+                    if s.contains('.') {
+                        let parts: Vec<&str> = s.splitn(2, '.').collect();
+                        let is_ident = |p: &str| {
+                            !p.is_empty()
+                            && p.chars().next().map(|c| c.is_alphabetic() || c == '_').unwrap_or(false)
+                            && p.chars().all(|c| c.is_alphanumeric() || c == '_')
+                        };
+                        return parts.len() == 2 && is_ident(parts[0]) && is_ident(parts[1]);
+                    }
+                }
+                false
+            }
+        }
+    }
+
     fn eval_single_with_subquery(&mut self, s: &mut SharedDatabase, row: &Row, cond: &Condition) -> bool {
         match &cond.value.clone() {
             ConditionValue::Literal(_) | ConditionValue::Between(_, _) | ConditionValue::LiteralList(_) => {
@@ -5717,6 +6080,47 @@ impl Executor {
                 let val = Self::eval_arith(row, &cond.left);
                 if val == NULL_VALUE { return false; }
 
+                // 비상관 IN/NOT IN 서브쿼리: 결과를 캐싱해 row당 재실행 방지
+                let cache_key = format!("{:?}", sub_stmt);
+                if matches!(cond.operator, Operator::In | Operator::NotIn) {
+                    if let Statement::Select {
+                        table, subquery, distinct, columns, condition: sub_cond,
+                        joins, order_by, group_by, having, limit, offset, ..
+                    } = *sub_stmt.clone() {
+                        let is_correlated = sub_cond.as_ref().map_or(false, |c| Self::has_outer_ref(c));
+                        if !is_correlated {
+                            // 캐시 히트: clone()으로 borrow 즉시 해제 후 exec_select 호출 가능
+                            let cached = self.subquery_cache.get(&cache_key).cloned();
+                            if let Some(cached_set) = cached {
+                                return match cond.operator {
+                                    Operator::In    => cached_set.contains(&val),
+                                    Operator::NotIn => !cached_set.contains(&val),
+                                    _ => unreachable!(),
+                                };
+                            }
+                            let result = self.exec_select(
+                                s, table, subquery, distinct, columns, sub_cond,
+                                joins, order_by, group_by, having, limit, offset, false, false
+                            );
+                            return match result {
+                                Ok(output) => {
+                                    let sub_vals: HashSet<String> =
+                                        self.extract_values_from_output(&output).into_iter().collect();
+                                    let hit = match cond.operator {
+                                        Operator::In    => sub_vals.contains(&val),
+                                        Operator::NotIn => !sub_vals.contains(&val),
+                                        _ => false,
+                                    };
+                                    self.subquery_cache.insert(cache_key, sub_vals);
+                                    hit
+                                }
+                                Err(_) => false,
+                            };
+                        }
+                    }
+                }
+
+                // 상관 서브쿼리 또는 Eq/Gt/Lt 비교 — 원래 경로
                 if let Statement::Select {
                     table, subquery, distinct, columns, condition: sub_cond,
                     joins, order_by, group_by, having, limit, offset, ..
@@ -6916,33 +7320,39 @@ impl Executor {
 
     /// EXPLAIN ANALYZE <SELECT> — 실행 계획 + 실제 실행 결과(행 수·소요 시간) 출력
     fn exec_explain_analyze(&mut self, s: &mut SharedDatabase, stmt: Statement) -> Result<String, String> {
-        // 실행 계획 + 예측 행 수 추출
-        let (plan_body, est_rows) = match &stmt {
+        const SEP: &str  = "+--------------------------------------------------------------------------+";
+        const W: usize   = 72;
+        let blank        = format!("| {:<W$} |", "", W = W);
+        let fmt_stat     = |text: &str| format!("| {:<W$} |\n", text, W = W);
+        let hdr          = format!("|{:^74}|", "QUERY PLAN (ANALYZE)");
+
+        // ── 실행 계획 + 예측 행 수 ───────────────────────────────────
+        let (plan_lines, est_rows): (Vec<String>, usize) = match &stmt {
             Statement::Select { table, condition, joins, subquery, columns, .. } => {
                 if subquery.is_some() {
-                    ("| Access: SUBQUERY SCAN                            |\n".to_string(), 0usize)
+                    (vec![fmt_stat("Access: SUBQUERY SCAN")], 0)
                 } else {
                     let planner = Planner::new(&s.tables, &s.indexes, &s.index_meta, &s.composite_indexes, &s.hash_indexes, &s.hash_index_meta, &s.catalog, &s.table_stats);
                     let plan = planner.plan_covering(table, condition, joins, columns);
                     let est = plan.base.est_rows;
-                    let body = planner.explain(&plan)
+                    let lines: Vec<String> = planner.explain(&plan)
                         .lines()
-                        .skip(3)  // +---+ | QUERY PLAN | +---+
-                        .take_while(|l| !l.starts_with('+'))
-                        .map(|l| format!("{}\n", l))
+                        .skip(3)                          // sep / header / sep
+                        .filter(|l| !l.starts_with('+')) // 마지막 sep 제외
+                        .map(|l| l.to_string())
                         .collect();
-                    (body, est)
+                    (lines, est)
                 }
             }
-            _ => (String::new(), 0),
+            _ => (vec![], 0),
         };
 
-        // 실제 실행 + 시간 측정
+        // ── 실제 실행 + 시간 측정 ────────────────────────────────────
         let start = std::time::Instant::now();
         let result = self.execute_with_s(s, stmt)?;
         let elapsed = start.elapsed();
 
-        // 실제 반환 행 수 추출 (footer 파싱 → 데이터 행 카운트 폴백)
+        // ── 실제 반환 행 수 파싱 ─────────────────────────────────────
         let actual_rows = result.lines()
             .find(|l| l.contains("row(s) returned"))
             .and_then(|l| l.trim().split_whitespace().next())
@@ -6951,37 +7361,42 @@ impl Executor {
                 result.lines()
                     .filter(|l| l.starts_with('|') && !l.contains("---") && l.trim() != "|")
                     .count()
-                    .saturating_sub(1) // 헤더 행 제외
+                    .saturating_sub(1)
             });
 
-        // 시간 단위: 1초 미만이면 ms
+        // ── 통계 포맷 ────────────────────────────────────────────────
         let time_str = if elapsed.as_millis() < 1000 {
             format!("{:.3} ms", elapsed.as_secs_f64() * 1000.0)
         } else {
             format!("{:.3} sec", elapsed.as_secs_f64())
         };
 
-        // 예측 vs 실제 rows
-        let rows_str = if est_rows > 0 {
-            format!("{} (est: {})", actual_rows, est_rows)
+        let accuracy_str = if est_rows == 0 {
+            "N/A".to_string()
         } else {
-            actual_rows.to_string()
+            let ratio = est_rows.min(actual_rows) as f64
+                / est_rows.max(actual_rows).max(1) as f64 * 100.0;
+            format!("{:.0}%", ratio)
         };
 
-        let sep = "+--------------------------------------------------+";
-        let fmt_row = |label: &str, val: &str| -> String {
-            format!("| {:<48} |\n", format!("{}: {}", label, val))
-        };
+        let rows_stat = format!(
+            "Estimated rows : {:<8} Actual rows : {:<8} Accuracy : {}",
+            est_rows, actual_rows, accuracy_str
+        );
+        let time_stat = format!("Execution time : {}", time_str);
 
+        // ── 출력 조립 ────────────────────────────────────────────────
         let mut out = String::new();
-        out.push_str(sep); out.push('\n');
-        out.push_str("|              QUERY PLAN (ANALYZE)                |\n");
-        out.push_str(sep); out.push('\n');
-        out.push_str(&plan_body);
-        out.push_str("|                                                  |\n");
-        out.push_str(&fmt_row("Actual rows", &rows_str));
-        out.push_str(&fmt_row("Actual time", &time_str));
-        out.push_str(sep);
+        out.push_str(SEP); out.push('\n');
+        out.push_str(&hdr); out.push('\n');
+        out.push_str(SEP); out.push('\n');
+        for line in &plan_lines {
+            out.push_str(line); out.push('\n');
+        }
+        out.push_str(&blank); out.push('\n');
+        out.push_str(&fmt_stat(&rows_stat));
+        out.push_str(&fmt_stat(&time_stat));
+        out.push_str(SEP);
         Ok(out)
     }
 
