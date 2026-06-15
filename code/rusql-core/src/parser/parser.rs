@@ -656,6 +656,10 @@ impl Parser {
                         Some(Token::NumberLit(n)) => n.clone(),
                         Some(Token::Ident(s))     => s.clone(),
                         Some(Token::Null)          => "NULL".to_string(),
+                        Some(Token::Minus) => match self.advance() {
+                            Some(Token::NumberLit(n)) => format!("-{}", n),
+                            other => return Err(format!("Expected number after '-' in IN list, got {:?}", other)),
+                        },
                         other => return Err(format!("Expected value in IN list, got {:?}", other)),
                     };
                     values.push(val);
@@ -696,6 +700,10 @@ impl Parser {
                         Some(Token::NumberLit(n)) => n.clone(),
                         Some(Token::Ident(s))     => s.clone(),
                         Some(Token::Null)          => "NULL".to_string(),
+                        Some(Token::Minus) => match self.advance() {
+                            Some(Token::NumberLit(n)) => format!("-{}", n),
+                            other => return Err(format!("Expected number after '-' in NOT IN list, got {:?}", other)),
+                        },
                         other => return Err(format!("Expected value in NOT IN list, got {:?}", other)),
                     };
                     values.push(val);
@@ -710,6 +718,49 @@ impl Parser {
             }
         }
 
+        // NOT BETWEEN val AND val
+        if self.peek() == Some(&Token::Not) && self.tokens.get(self.pos + 1) == Some(&Token::Between) {
+            self.advance(); // NOT
+            self.advance(); // BETWEEN
+            let start = match self.advance() {
+                Some(Token::NumberLit(n)) => n.clone(),
+                Some(Token::StringLit(s)) => s.clone(),
+                Some(Token::Ident(s))     => s.clone(),
+                Some(Token::Minus) => match self.advance() {
+                    Some(Token::NumberLit(n)) => format!("-{}", n),
+                    other => return Err(format!("Expected number after '-' in NOT BETWEEN, got {:?}", other)),
+                },
+                other => return Err(format!("Expected value after NOT BETWEEN, got {:?}", other)),
+            };
+            match self.advance() {
+                Some(Token::And) => {}
+                other => return Err(format!("Expected AND in NOT BETWEEN, got {:?}", other)),
+            }
+            let end = match self.advance() {
+                Some(Token::NumberLit(n)) => n.clone(),
+                Some(Token::StringLit(s)) => s.clone(),
+                Some(Token::Ident(s))     => s.clone(),
+                Some(Token::Minus) => match self.advance() {
+                    Some(Token::NumberLit(n)) => format!("-{}", n),
+                    other => return Err(format!("Expected number after '-' in NOT BETWEEN ... AND, got {:?}", other)),
+                },
+                other => return Err(format!("Expected value after NOT BETWEEN ... AND, got {:?}", other)),
+            };
+            return Ok(Condition { left, operator: Operator::NotBetween, value: ConditionValue::Between(start, end) });
+        }
+
+        // NOT LIKE pattern
+        if self.peek() == Some(&Token::Not) && self.tokens.get(self.pos + 1) == Some(&Token::Like) {
+            self.advance(); // NOT
+            self.advance(); // LIKE
+            let pattern = match self.advance() {
+                Some(Token::StringLit(s)) => s.clone(),
+                Some(Token::Ident(s))     => s.clone(),
+                other => return Err(format!("Expected pattern after NOT LIKE, got {:?}", other)),
+            };
+            return Ok(Condition { left, operator: Operator::NotLike, value: ConditionValue::Literal(pattern) });
+        }
+
         // BETWEEN val AND val
         if self.peek() == Some(&Token::Between) {
             self.advance();
@@ -717,6 +768,10 @@ impl Parser {
                 Some(Token::NumberLit(n)) => n.clone(),
                 Some(Token::StringLit(s)) => s.clone(),
                 Some(Token::Ident(s))     => s.clone(),
+                Some(Token::Minus) => match self.advance() {
+                    Some(Token::NumberLit(n)) => format!("-{}", n),
+                    other => return Err(format!("Expected number after '-' in BETWEEN, got {:?}", other)),
+                },
                 other => return Err(format!("Expected value after BETWEEN, got {:?}", other)),
             };
             match self.advance() {
@@ -727,6 +782,10 @@ impl Parser {
                 Some(Token::NumberLit(n)) => n.clone(),
                 Some(Token::StringLit(s)) => s.clone(),
                 Some(Token::Ident(s))     => s.clone(),
+                Some(Token::Minus) => match self.advance() {
+                    Some(Token::NumberLit(n)) => format!("-{}", n),
+                    other => return Err(format!("Expected number after '-' in BETWEEN ... AND, got {:?}", other)),
+                },
                 other => return Err(format!("Expected value after BETWEEN ... AND, got {:?}", other)),
             };
             return Ok(Condition { left, operator: Operator::Between, value: ConditionValue::Between(start, end) });
@@ -811,6 +870,24 @@ impl Parser {
                 Some(Token::NumberLit(n)) => ConditionValue::Literal(n.clone()),
                 Some(Token::StringLit(s)) => ConditionValue::Literal(s.clone()),
                 Some(Token::Null)         => ConditionValue::Literal("__NULL__".to_string()),
+                Some(Token::Minus) => match self.advance() {
+                    Some(Token::NumberLit(n)) => ConditionValue::Literal(format!("-{}", n)),
+                    other => return Err(format!("Expected number after '-', got {:?}", other)),
+                },
+                Some(Token::Curdate) => {
+                    if self.peek() == Some(&Token::LParen) {
+                        self.advance();
+                        if self.peek() == Some(&Token::RParen) { self.advance(); }
+                    }
+                    ConditionValue::Literal(chrono::Local::now().format("%Y-%m-%d").to_string())
+                }
+                Some(Token::Now) => {
+                    if self.peek() == Some(&Token::LParen) {
+                        self.advance();
+                        if self.peek() == Some(&Token::RParen) { self.advance(); }
+                    }
+                    ConditionValue::Literal(chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string())
+                }
                 other => return Err(format!("Expected value, got {:?}", other)),
             }
         };
@@ -868,6 +945,19 @@ impl Parser {
                 let n = match self.advance() { Some(Token::NumberLit(n)) => n.clone(), _ => unreachable!() };
                 Ok(ArithExpr::Num(n))
             }
+            Some(Token::Minus) => {
+                self.advance();
+                match self.peek() {
+                    Some(Token::NumberLit(_)) => {
+                        let n = match self.advance() { Some(Token::NumberLit(n)) => n.clone(), _ => unreachable!() };
+                        Ok(ArithExpr::Num(format!("-{}", n)))
+                    }
+                    _ => {
+                        let inner = self.parse_arith_factor()?;
+                        Ok(ArithExpr::Sub(Box::new(ArithExpr::Num("0".to_string())), Box::new(inner)))
+                    }
+                }
+            }
             Some(Token::StringLit(_)) => {
                 let s = match self.advance() { Some(Token::StringLit(s)) => s.clone(), _ => unreachable!() };
                 Ok(ArithExpr::Str(s))
@@ -896,6 +986,7 @@ impl Parser {
             Some(Token::DateAdd) | Some(Token::DateDiff) |
             Some(Token::Left)   | Some(Token::Right)  |
             Some(Token::Truncate) | Some(Token::Repeat) |
+            Some(Token::Now) | Some(Token::Curdate) |
             Some(Token::JsonExtract) | Some(Token::JsonUnquote) | Some(Token::JsonValue) => {
                 let fname = match self.advance() {
                     Some(Token::Concat)    => "CONCAT",
@@ -922,6 +1013,8 @@ impl Parser {
                     Some(Token::Right)     => "RIGHT",
                     Some(Token::Truncate)  => "TRUNCATE",
                     Some(Token::Repeat)    => "REPEAT",
+                    Some(Token::Now)       => "NOW",
+                    Some(Token::Curdate)   => "CURDATE",
                     Some(Token::JsonExtract) => "JSON_EXTRACT",
                     Some(Token::JsonUnquote) => "JSON_UNQUOTE",
                     Some(Token::JsonValue)   => "JSON_VALUE",
@@ -1151,12 +1244,12 @@ impl Parser {
         Ok(Some(WindowFrame { unit, start, end }))
     }
 
-    fn parse_case_when(&mut self) -> Result<SelectColumn, String> {
+    fn parse_case_when_inner(&mut self) -> Result<(Vec<CaseWhenBranch>, Option<String>), String> {
         let mut branches = Vec::new();
         loop {
             match self.peek() {
                 Some(Token::When) => {
-                    self.advance(); // WHEN
+                    self.advance();
                     let cond = self.parse_condexpr()?;
                     match self.advance() {
                         Some(Token::Then) => {}
@@ -1183,19 +1276,20 @@ impl Parser {
                 Some(Token::Ident(s))     => s.clone(),
                 other => return Err(format!("Expected ELSE value, got {:?}", other)),
             })
-        } else {
-            None
-        };
+        } else { None };
         match self.advance() {
             Some(Token::End) => {}
             other => return Err(format!("Expected END after CASE, got {:?}", other)),
         }
+        Ok((branches, else_val))
+    }
+
+    fn parse_case_when(&mut self) -> Result<SelectColumn, String> {
+        let (branches, else_val) = self.parse_case_when_inner()?;
         let alias = if self.peek() == Some(&Token::As) {
             self.advance();
             Some(self.expect_alias_ident()?)
-        } else {
-            None
-        };
+        } else { None };
         Ok(SelectColumn::CaseWhen { branches, else_val, alias })
     }
 
@@ -1239,22 +1333,70 @@ impl Parser {
                             other          => other,
                         };
                     }
-                    let agg_col = match self.advance() {
-                        Some(Token::Asterisk)  => "*".to_string(),
-                        Some(Token::Ident(s))  => {
-                            let first = s.clone();
-                            if self.peek() == Some(&Token::Dot) {
+                    let mut rparen_consumed = false;
+                    let agg_col = match self.peek().cloned() {
+                        Some(Token::Asterisk) => { self.advance(); "*".to_string() }
+                        Some(Token::Case) => {
+                            self.advance(); // consume CASE
+                            let (branches, else_val) = self.parse_case_when_inner()?;
+                            match self.advance() {
+                                Some(Token::RParen) => {}
+                                other => return Err(format!("Expected ')' after CASE WHEN in aggregate, got {:?}", other)),
+                            }
+                            rparen_consumed = true;
+                            func = match func {
+                                AggFunc::Count | AggFunc::CountDistinct =>
+                                    AggFunc::CountCase { branches, else_val },
+                                AggFunc::Sum | AggFunc::SumDistinct =>
+                                    AggFunc::SumCase { branches, else_val },
+                                other => other,
+                            };
+                            "__case__".to_string()
+                        }
+                        Some(Token::Ident(_)) => {
+                            let first = match self.advance() { Some(Token::Ident(s)) => s.clone(), _ => unreachable!() };
+                            let col_name = if self.peek() == Some(&Token::Dot) {
                                 self.advance();
                                 self.expect_ident()?
-                            } else {
-                                first
+                            } else { first };
+                            // SUM(col IS NULL) / SUM(col IS NOT NULL) → SumCase/CountCase
+                            if self.peek() == Some(&Token::Is) {
+                                self.advance(); // consume IS
+                                let negated = if self.peek() == Some(&Token::Not) { self.advance(); true } else { false };
+                                match self.advance() {
+                                    Some(Token::Null) => {}
+                                    other => return Err(format!("Expected NULL after IS [NOT], got {:?}", other)),
+                                }
+                                match self.advance() {
+                                    Some(Token::RParen) => {}
+                                    other => return Err(format!("Expected ')' after IS NULL expression, got {:?}", other)),
+                                }
+                                rparen_consumed = true;
+                                use crate::parser::ast::{Condition, ConditionValue, Operator};
+                                let op = if negated { Operator::IsNotNull } else { Operator::IsNull };
+                                let cond = CondExpr::Leaf(Condition {
+                                    left: ArithExpr::Col(col_name.clone()),
+                                    operator: op,
+                                    value: ConditionValue::Literal(String::new()),
+                                });
+                                let branches = vec![CaseWhenBranch { condition: cond, result: "1".to_string() }];
+                                func = match func {
+                                    AggFunc::Count | AggFunc::CountDistinct =>
+                                        AggFunc::CountCase { branches, else_val: Some("0".to_string()) },
+                                    AggFunc::Sum | AggFunc::SumDistinct =>
+                                        AggFunc::SumCase { branches, else_val: Some("0".to_string()) },
+                                    other => other,
+                                };
                             }
+                            col_name
                         }
                         other => return Err(format!("Expected column, got {:?}", other)),
                     };
-                    match self.advance() {
-                        Some(Token::RParen) => {}
-                        other => return Err(format!("Expected ')', got {:?}", other)),
+                    if !rparen_consumed {
+                        match self.advance() {
+                            Some(Token::RParen) => {}
+                            other => return Err(format!("Expected ')', got {:?}", other)),
+                        }
                     }
                     // 집계함수 + OVER → aggregate window function
                     if self.peek() == Some(&Token::Over) {
@@ -1321,6 +1463,31 @@ impl Parser {
                             alias,
                             frame,
                         }
+                    } else if matches!(self.peek(), Some(Token::Plus) | Some(Token::Minus) | Some(Token::Asterisk) | Some(Token::Slash)) {
+                        // COUNT(a) - COUNT(b) 등 집계 간 산술 연산
+                        let agg_str = match &func {
+                            AggFunc::Count         => format!("COUNT({})", agg_col),
+                            AggFunc::CountDistinct => format!("COUNT(DISTINCT {})", agg_col),
+                            AggFunc::Sum           => format!("SUM({})", agg_col),
+                            AggFunc::SumDistinct   => format!("SUM(DISTINCT {})", agg_col),
+                            AggFunc::Avg           => format!("AVG({})", agg_col),
+                            AggFunc::AvgDistinct   => format!("AVG(DISTINCT {})", agg_col),
+                            AggFunc::Min           => format!("MIN({})", agg_col),
+                            AggFunc::Max           => format!("MAX({})", agg_col),
+                            _                      => format!("AGG({})", agg_col),
+                        };
+                        let mut lhs = ArithExpr::Col(agg_str);
+                        loop {
+                            match self.peek() {
+                                Some(Token::Plus)     => { self.advance(); lhs = ArithExpr::Add(Box::new(lhs), Box::new(self.parse_arith_term()?)); }
+                                Some(Token::Minus)    => { self.advance(); lhs = ArithExpr::Sub(Box::new(lhs), Box::new(self.parse_arith_term()?)); }
+                                Some(Token::Asterisk) => { self.advance(); lhs = ArithExpr::Mul(Box::new(lhs), Box::new(self.parse_arith_term()?)); }
+                                Some(Token::Slash)    => { self.advance(); lhs = ArithExpr::Div(Box::new(lhs), Box::new(self.parse_arith_term()?)); }
+                                _ => break,
+                            }
+                        }
+                        let alias = if self.peek() == Some(&Token::As) { self.advance(); Some(self.expect_alias_ident()?) } else { None };
+                        SelectColumn::Expr { expr: lhs, alias }
                     } else {
                         // AS 별칭
                         if self.peek() == Some(&Token::As) {
@@ -2691,6 +2858,10 @@ impl Parser {
                 Some(Token::Unique) => {
                     self.advance();
                     *unique = true;
+                }
+                Some(Token::Ident(s)) if s.eq_ignore_ascii_case("AUTO_INCREMENT") => {
+                    self.advance();
+                    *auto_increment = true;
                 }
                 Some(Token::Auto) => {
                     self.advance();

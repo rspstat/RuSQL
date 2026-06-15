@@ -12,9 +12,9 @@ Custom RDBMS + AI MCP Project
 
 | 분류 | 내용 |
 |------|------|
-| DB 엔진 | B+Tree, WAL, Buffer Pool, MVCC, 트랜잭션, 비용 기반 옵티마이저, 히스토그램 통계, 자동 통계 수집 (DML), B+Tree 인덱스 디스크 영속화, 증분 보조 인덱스 갱신 (INSERT/UPDATE/DELETE 시 O(1)), DELETE PK fast-path (`row_pk_pos` O(1) swap_remove), 병렬 쿼리 실행 (SeqScan · GROUP BY par_chunks), 저장 프로시저·트리거·UDF 영속화 |
+| DB 엔진 | B+Tree, WAL, Buffer Pool, MVCC, 트랜잭션, 비용 기반 옵티마이저, 히스토그램 통계, 자동 통계 수집 (DML), B+Tree 인덱스 디스크 영속화, 증분 보조 인덱스 갱신 (INSERT/UPDATE/DELETE 시 O(1)), DELETE PK fast-path (`row_pk_pos` O(1) swap_remove), 병렬 쿼리 실행 (SeqScan · GROUP BY par_chunks · ORDER BY par_sort), 쿼리 결과 캐시 (LRU 512, DML 자동 무효화), 저장 프로시저·트리거·UDF 영속화 |
 | SQL 지원 | DDL / DML / JOIN / 서브쿼리 / CTE / UNION / 제약조건 / 트랜잭션 / 저장 프로시저 / 트리거 / UDF |
-| MCP | True MCP (Claude Desktop, stdio JSON-RPC, 도구 7개 — execute_sql · list_databases · list_tables · get_table_schema · explain_query · get_indexes · sample_data, SELECT 결과 JSON 배열 구조화, API 키 불필요, UI 자동 연결) |
+| MCP | AI MCP (Claude Desktop, stdio JSON-RPC, 도구 16개 — DB 7개 (execute_sql · list_databases · list_tables · get_table_schema · explain_query · get_indexes · sample_data) + UI 9개 (write_to_editor · open_new_tab · execute_in_editor · close_tab · get_tab_content · list_tabs · switch_to_tab · get_query_result · get_current_database), SELECT 결과 JSON 배열 구조화, alwaysAllow 자동 설정 (허용 팝업 없음), API 키 불필요, UI 자동 연결) |
 | DBMS | TCP 서버, 다중 클라이언트 동시 접속, 접속 세션 실시간 모니터링, 세션별 독립 Executor + `Arc<RwLock<SharedDatabase>>` 공유 |
 | 언어 | Rust, Python |
 
@@ -657,7 +657,7 @@ SHOW DATABASES;
 | 사용자 관리 | CREATE/DROP USER, GRANT/REVOKE, SHOW GRANTS, ROLE 관리, SYNONYM, 영속화 |
 | UI | Tauri + React + Monaco Editor (홈 화면: 퀵 액션 버튼·RDBMS 소개·연결 카드 그리드·하단 상태 표시줄·액티비티 바, 멀티 탭, 탭 우클릭 메뉴, 탭 고정, 분할 에디터, MySQL 스타일 에디터 툴바, 패널 토글 버튼, Canvas 기반 결과 컬럼 자동 너비, 연결 사이드바 드래그 너비 조절, Server Manager — 벤치마크 결과 UI·접속 세션 실시간 모니터링·AI MCP 자동 연결) |
 | TCP 서버 | Native 프로토콜 (127.0.0.1:7878, SHA-256 인증) + MySQL wire protocol (0.0.0.0:3306, `mysql_native_password` 챌린지-응답 인증, DBeaver·mysql CLI·mysql-connector-python 완전 호환) — `--mysql-port` / `--no-mysql` / `--buffer-pool-size` 옵션 |
-| AI 연동 | **True MCP** (Python / FastMCP, stdio JSON-RPC) — Claude Desktop이 `execute_sql` · `list_databases` · `list_tables` · `get_table_schema` · `explain_query` · `get_indexes` · `sample_data` 7개 도구로 RuSQL에 직접 질의, SELECT 결과 JSON 배열 구조화, API 키 불필요, UI에서 Claude Desktop 자동 연결 (일반 설치 · Windows Store 버전 모두 지원) |
+| AI 연동 | **AI MCP** (Python / FastMCP, stdio JSON-RPC) — Claude Desktop이 **16개 도구**로 RuSQL에 직접 질의 · 제어: DB 7개 (`execute_sql` · `list_databases` · `list_tables` · `get_table_schema` · `explain_query` · `get_indexes` · `sample_data`) + UI 9개 (`write_to_editor` · `open_new_tab` · `execute_in_editor` · `close_tab` · `get_tab_content` · `list_tabs` · `switch_to_tab` · `get_query_result` · `get_current_database`), SELECT 결과 JSON 배열 구조화, `alwaysAllow` 자동 설정 (허용 팝업 없음), API 키 불필요, UI에서 Claude Desktop 자동 연결 (일반 설치 · Windows Store 버전 모두 지원) |
 
 <br/>
 

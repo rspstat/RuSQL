@@ -7,7 +7,6 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::thread;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-use rusql_core::parser::parser::Parser;
 use rusql_core::engine::executor::{Executor, SharedDatabase};
 
 // ─── 타임스탬프 ──────────────────────────────────────────────
@@ -259,13 +258,9 @@ fn handle_client(
 
             exec.update_process_command("Query", q);
             let t0 = Instant::now();
-            let mut p = Parser::new(q.as_str());
-            let (status, output) = match p.parse() {
-                Ok(stmt) => match exec.execute(stmt) {
-                    Ok(r)  => ("OK",  r),
-                    Err(e) => ("ERR", e),
-                },
-                Err(e) => ("ERR", format!("Parse Error: {}", e)),
+            let (status, output) = match exec.execute_sql(q.as_str()) {
+                Ok(r)  => ("OK",  r),
+                Err(e) => ("ERR", e),
             };
             exec.update_process_command("Sleep", "");
             send(&mut writer, status, &output, t0.elapsed().as_secs_f64());

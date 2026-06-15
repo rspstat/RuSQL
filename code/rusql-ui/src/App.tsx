@@ -257,6 +257,8 @@ function App() {
   const [splitTabStash, setSplitTabStash] = useState<(Tab & { insertIdx: number }) | null>(null);
   const [splitLeftPct, setSplitLeftPct] = useState(50);
   const runQueryRef = useRef<() => Promise<void>>(async () => {});
+  const uiCmdHandlerRef = useRef<(action: string, data: string) => void>(() => {});
+  const syncTabTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const splitEditorRef = useRef<Monaco.editor.IStandaloneCodeEditor | null>(null);
   const splitQueryRef = useRef<string>("");
   const isSplitSwitching = useRef(false);
@@ -395,6 +397,8 @@ function App() {
     setSrvConnName(conn.name);
     setServerMsg("");
     setActiveView("editor");
+    invoke("sync_tab_list", { names: newTabs.map((t: Tab) => t.name) });
+    newTabs.forEach((t: Tab) => invoke("sync_tab_content", { name: t.name, content: t.content }));
     setLoggedIn(true);
     setConnectingTo(null);
     setDlgPass("");
@@ -729,6 +733,15 @@ function App() {
         saveHistory(connIdRef.current, next);
         return next;
       });
+      // MCP용 마지막 결과 + 현재 DB 동기화
+      const lastRes = res.results[res.results.length - 1];
+      if (lastRes) {
+        const tsv = lastRes.columns.length
+          ? [lastRes.columns.join("\t"), ...lastRes.rows.map(r => r.join("\t"))].join("\n")
+          : lastRes.message;
+        invoke("sync_query_result", { result: tsv });
+      }
+      invoke<string>("get_current_db").then(db => invoke("sync_current_db", { db }));
       await refreshSidebar();
     } catch (e) {
       setTabResults(p => ({ ...p, [activeTabId]: [{ columns: [], rows: [], message: String(e), elapsed: 0, success: false }] }));
@@ -751,6 +764,52 @@ function App() {
   };
   // addCommand가 첫 렌더링의 runQuery를 캡처하는 stale closure 방지
   useEffect(() => { runQueryRef.current = runQuery; });
+
+  // MCP UI 커맨드 핸들러 — 매 렌더마다 최신 state를 캡처
+  useEffect(() => {
+    uiCmdHandlerRef.current = (action: string, data: string) => {
+      if (action === "write_to_editor") {
+        setEditorQuery(data);
+      } else if (action === "new_tab") {
+        let tabName = "query.sql";
+        let content = data;
+        try { const p = JSON.parse(data); tabName = p.name || tabName; content = p.query || data; } catch {}
+        const currentContent = editorRef.current?.getValue() ?? queryRef.current;
+        const updated = tabs.map(t => t.id === activeTabId ? { ...t, content: currentContent } : t);
+        const newId = Date.now().toString();
+        const newTabObj: Tab = { id: newId, name: tabName, content };
+        const next = [...updated, newTabObj];
+        saveTabs(next);
+        setActiveTabId(newId);
+        localStorage.setItem(`rusql_active_tab_${connIdRef.current}`, newId);
+        queryRef.current = content;
+        isSwitchingTab.current = true;
+        editorRef.current?.setValue(content);
+        isSwitchingTab.current = false;
+      } else if (action === "execute_in_editor") {
+        setEditorQuery(data);
+        setTimeout(() => runQueryRef.current(), 200);
+      } else if (action === "close_tab") {
+        const target = tabs.find(t => t.name === data);
+        if (target) closeTab(target.id);
+      } else if (action === "switch_to_tab") {
+        const target = tabs.find(t => t.name === data);
+        if (target) switchTab(target.id);
+      }
+    };
+  });
+
+  // Tauri 이벤트 수신 — 로그인 후 한 번만 등록
+  useEffect(() => {
+    if (!loggedIn) return;
+    let unlisten: (() => void) | undefined;
+    import("@tauri-apps/api/event").then(({ listen }) => {
+      listen<{ action: string; data: string }>("ui-command", (e) => {
+        uiCmdHandlerRef.current(e.payload.action, e.payload.data);
+      }).then(fn => { unlisten = fn; });
+    });
+    return () => { unlisten?.(); };
+  }, [loggedIn]);
 
   // 에디터 내용 프로그래밍 방식으로 변경 — executeEdits로 undo 히스토리 보존
   const setEditorQuery = (q: string) => {
@@ -781,6 +840,9 @@ function App() {
     const currentContent = editorRef.current?.getValue() ?? queryRef.current;
     const updated = tabs.map(t => t.id === activeTabId ? { ...t, content: currentContent } : t);
     saveTabs(updated);
+    // 떠나는 탭 내용 즉시 sync
+    const leavingTab = updated.find(t => t.id === activeTabId);
+    if (leavingTab) invoke("sync_tab_content", { name: leavingTab.name, content: currentContent });
     setActiveTabId(id);
     localStorage.setItem(`rusql_active_tab_${connIdRef.current}`, id);
     const target = updated.find(t => t.id === id);
@@ -789,6 +851,7 @@ function App() {
       isSwitchingTab.current = true;
       editorRef.current?.setValue(target.content);
       isSwitchingTab.current = false;
+      invoke("sync_tab_content", { name: target.name, content: target.content });
     }
   };
 
@@ -805,6 +868,7 @@ function App() {
     const newTab: Tab = { id: newId, name: `query${maxNum + 1}.sql`, content: "" };
     const next = [...updated, newTab];
     saveTabs(next);
+    invoke("sync_tab_list", { names: next.map(t => t.name) });
     setActiveTabId(newId);
     localStorage.setItem(`rusql_active_tab_${connIdRef.current}`, newId);
     queryRef.current = "";
@@ -822,6 +886,7 @@ function App() {
     const idx = tabs.findIndex(t => t.id === id);
     const next = tabs.filter(t => t.id !== id);
     saveTabs(next);
+    invoke("sync_tab_list", { names: next.map(t => t.name) });
     if (activeTabId === id) {
       const newActive = next[Math.min(idx, next.length - 1)];
       setActiveTabId(newActive.id);
@@ -2644,6 +2709,10 @@ function App() {
                     localStorage.setItem(`rusql_tabs_${connIdRef.current}`, JSON.stringify(next));
                     return next;
                   });
+                  if (syncTabTimer.current) clearTimeout(syncTabTimer.current);
+                  syncTabTimer.current = setTimeout(() => {
+                    invoke("sync_tab_content", { name: activeTab?.name ?? "query.sql", content: val ?? "" });
+                  }, 400);
                 }}
                 theme="rusql-dark"
                 options={{
@@ -3752,9 +3821,9 @@ function App() {
                   {srvRightPanel === "bench" && (<>
                     <div className="srv-slide-section">성능 벤치마크</div>
                     <div className="srv-slide-text" style={{ marginBottom: 10 }}>
-                      단순/Bulk 처리량 · 인덱스 가속 · 병렬 집계
+                      쓰기 처리량 · B+Tree 인덱스 · 쿼리 캐시
                     </div>
-                    <div style={{ display: "flex", gap: 8, marginBottom: 14 }}>
+                    <div style={{ display: "flex", gap: 8, marginBottom: 14, flexWrap: "wrap" }}>
                       <button
                         className="srv-action-btn primary"
                         style={{ fontSize: 12 }}
@@ -3773,6 +3842,11 @@ function App() {
                         style={{ fontSize: 12 }}
                         onClick={() => invoke("open_bench_terminal")}
                       >터미널 실행</button>
+                      <button
+                        className="srv-action-btn"
+                        style={{ fontSize: 12 }}
+                        onClick={() => invoke("open_bench_graph")}
+                      >그래프 보기</button>
                     </div>
                     {benchResult !== undefined && benchResult !== null ? (() => {
                       const r = benchResult as Record<string, unknown>;
@@ -3793,9 +3867,7 @@ function App() {
                       const sg = r.single as Record<string,number> | undefined;
                       const bk = r.bulk   as Record<string,number> | undefined;
                       const pl = r.point_lookup as Record<string,number> | undefined;
-                      const rq = r.range_query  as Record<string,number> | undefined;
-                      const tk = r.top_k        as Record<string,number> | undefined;
-                      const pa = r.parallel     as Record<string,number> | undefined;
+                      const qc = r.query_cache  as Record<string,number> | undefined;
                       return (
                         <div style={{ fontSize: 12, lineHeight: 1.8 }}>
                           {sg && <div style={{ marginBottom: 10 }}>
@@ -3821,24 +3893,14 @@ function App() {
                             );
                           })()}
                           {pl && <div style={{ marginBottom: 10 }}>
-                            <div style={{ color: "#4ec9b0", fontWeight: 600, marginBottom: 2 }}>포인트 조회 (등호){greenBadge(`${fmx(pl.speedup)}x 빠름`)}</div>
+                            <div style={{ color: "#4ec9b0", fontWeight: 600, marginBottom: 2 }}>인덱스 성능 (B+Tree){greenBadge(`${fmx(pl.speedup)}x 빠름`)}</div>
                             {row("SeqScan", `${fms(pl.seq_ms)} ms/q`)}
                             {row("BTree Index", `${fms(pl.idx_ms)} ms/q`)}
                           </div>}
-                          {rq && <div style={{ marginBottom: 10 }}>
-                            <div style={{ color: "#4ec9b0", fontWeight: 600, marginBottom: 2 }}>범위 쿼리 (BETWEEN){greenBadge(`${fmx(rq.speedup)}x 빠름`)}</div>
-                            {row("No-Index", `${fms(rq.seq_ms)} ms/q`)}
-                            {row("BTree Index", `${fms(rq.idx_ms)} ms/q`)}
-                          </div>}
-                          {tk && <div style={{ marginBottom: 10 }}>
-                            <div style={{ color: "#4ec9b0", fontWeight: 600, marginBottom: 2 }}>Top-K (ORDER BY LIMIT){greenBadge(`${fmx(tk.speedup)}x 빠름`)}</div>
-                            {row("SeqScan+Sort", `${fms(tk.seq_ms)} ms/q`)}
-                            {row("Index Fast-Path", `${fms(tk.idx_ms)} ms/q`)}
-                          </div>}
-                          {pa && <div>
-                            <div style={{ color: "#4ec9b0", fontWeight: 600, marginBottom: 2 }}>병렬 집계 (GROUP BY)</div>
-                            {row("PARALLEL OFF", `${fmx(pa.off_ms)} ms/q`)}
-                            {row("PARALLEL ON",  `${fmx(pa.on_ms)} ms/q`)}
+                          {qc && <div style={{ marginBottom: 10 }}>
+                            <div style={{ color: "#4ec9b0", fontWeight: 600, marginBottom: 2 }}>쿼리 캐시 (LRU-512){qc.speedup >= 2 ? greenBadge(`${fmx(qc.speedup)}x 빠름`) : null}</div>
+                            {row("DB Scan",   `${fms(qc.scan_ms)} ms`)}
+                            {row("Cache Hit", `${fms(qc.hit_ms)} ms`)}
                           </div>}
                         </div>
                       );
@@ -3896,10 +3958,36 @@ function App() {
                       </div>
                     )}
 
-                    <div className="srv-slide-section" style={{ marginTop: 18 }}>제공 도구</div>
+                    <div className="srv-slide-section" style={{ marginTop: 18 }}>DB 도구</div>
                     <div style={{ display: "flex", flexWrap: "wrap", gap: 4, marginTop: 6 }}>
                       {["execute_sql", "list_databases", "list_tables", "get_table_schema", "explain_query", "get_indexes", "sample_data"].map(t => (
                         <span key={t} style={{ fontSize: 11, background: "rgba(78,201,176,0.12)", color: "#4ec9b0", border: "1px solid rgba(78,201,176,0.25)", borderRadius: 3, padding: "2px 7px", fontFamily: "monospace" }}>{t}</span>
+                      ))}
+                    </div>
+
+                    <div className="srv-slide-section" style={{ marginTop: 16 }}>UI 제어 도구</div>
+                    <div style={{ display: "flex", flexWrap: "wrap", gap: 4, marginTop: 6 }}>
+                      {["write_to_editor", "open_new_tab", "execute_in_editor", "close_tab", "get_tab_content", "list_tabs", "switch_to_tab", "get_query_result", "get_current_database"].map(t => (
+                        <span key={t} style={{ fontSize: 11, background: "rgba(139,92,246,0.12)", color: "#a78bfa", border: "1px solid rgba(139,92,246,0.3)", borderRadius: 3, padding: "2px 7px", fontFamily: "monospace" }}>{t}</span>
+                      ))}
+                    </div>
+                    <div style={{ display: "flex", flexDirection: "column", gap: 5, marginTop: 10 }}>
+                      {[
+                        { fn: "write_to_editor",     ex: '"users 테이블 전체 조회 쿼리 써줘"' },
+                        { fn: "open_new_tab",         ex: '"새 탭에 월별 집계 쿼리 작성해줘"' },
+                        { fn: "execute_in_editor",    ex: '"orders 테이블 건수 바로 실행해줘"' },
+                        { fn: "close_tab",            ex: '"query1.sql 탭 닫아줘"' },
+                        { fn: "get_tab_content",      ex: '"query.sql 탭 내용 읽어줘"' },
+                        { fn: "list_tabs",            ex: '"지금 열린 탭 목록 알려줘"' },
+                        { fn: "switch_to_tab",        ex: '"report.sql 탭으로 전환해줘"' },
+                        { fn: "get_query_result",     ex: '"방금 실행한 결과 분석해줘"' },
+                        { fn: "get_current_database", ex: '"현재 선택된 DB가 뭐야?"' },
+                      ].map(({ fn, ex }) => (
+                        <div key={fn} style={{ fontSize: 11, lineHeight: 1.6 }}>
+                          <span style={{ color: "#a78bfa", fontFamily: "monospace" }}>{fn}</span>
+                          <span style={{ color: "#6b7280" }}> — </span>
+                          <span style={{ color: "#9ca3af" }}>{ex}</span>
+                        </div>
                       ))}
                     </div>
                   </>)}

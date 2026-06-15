@@ -10,7 +10,8 @@
   - Join 알고리즘 자동 선택 (Sort-Merge Join / Hash Join / Nested Loop)
   - Join 순서 최적화 (System-R 스타일 비용 기반 동적계획법, 그리디 폴백)
   - EXPLAIN 실행 계획 출력 (비용 · 접근 경로 · Join 알고리즘)
-- [x] 병렬 쿼리 실행 (rayon) — SeqScan WHERE 필터 (par_chunks, WHERE 조건 없는 풀스캔은 순차 유지) + GROUP BY 집계 (par_chunks 청크별 독립 partial HashMap 구축→순차 병합→par_iter 집계) + Hash Join probe (par_iter), 청크 단위 워커 thread_local 전파로 사용자 정의 함수/DATABASE() 정확성 유지, 10k행 이상 자동 적용 (`RUSTDB_PARALLEL` 환경변수 또는 `SET @rusql_parallel = 1/0` 세션 변수), 서브쿼리 포함 시 순차 폴백
+- [x] 병렬 쿼리 실행 (rayon) — SeqScan WHERE 필터 (par_chunks, WHERE 조건 없는 풀스캔은 순차 유지) + GROUP BY 집계 (par_chunks 청크별 독립 partial HashMap 구축→순차 병합→par_iter 집계) + ORDER BY 정렬 (par_sort_unstable_by) + Hash Join probe (par_iter), 청크 단위 워커 thread_local 전파로 사용자 정의 함수/DATABASE() 정확성 유지, 10k행 이상 자동 적용 (`RUSTDB_PARALLEL` 환경변수 또는 `SET @rusql_parallel = 1/0` 세션 변수), 서브쿼리 포함 시 순차 폴백
+- [x] 쿼리 결과 캐시 — 트랜잭션 외부 단순 SELECT 결과를 LRU 캐시(최대 512개)에 저장, 동일 SQL 재실행 시 즉시 반환, DML(INSERT/UPDATE/DELETE/TRUNCATE/DROP) 발생 시 해당 테이블 참조 항목 즉시 무효화, COMMIT 시 변경된 테이블 자동 무효화, 서브쿼리 포함 SELECT는 캐싱 스킵 (stale 방지)
 
 ### 다중 데이터베이스
 - [x] CREATE DATABASE / CREATE DATABASE IF NOT EXISTS
@@ -90,7 +91,9 @@
 - [x] NOT IN (리터럴 목록) — `WHERE id NOT IN (2, 4)`
 - [x] IN / NOT IN (서브쿼리) — `WHERE dept_id IN (SELECT id FROM dept)`
 - [x] 비상관 서브쿼리 머티리얼라이제이션 — IN/NOT IN 서브쿼리가 비상관(외부 참조 없음)일 경우 최초 1회만 실행 후 `HashSet`으로 캐싱, 이후 outer 행마다 O(1) 조회 (상관 서브쿼리는 캐싱 없이 기존 경로 유지)
-- [x] BETWEEN / LIKE (%, _ 와일드카드)
+- [x] BETWEEN / NOT BETWEEN — `WHERE age BETWEEN 18 AND 65` / `WHERE age NOT BETWEEN 18 AND 65`
+- [x] LIKE / NOT LIKE (%, _ 와일드카드) — `WHERE name LIKE 'A%'` / `WHERE name NOT LIKE 'A%'`
+- [x] 음수 리터럴 — WHERE / BETWEEN / IN / 산술식에서 `-100`, `-3.14` 정상 파싱 (`WHERE balance < -1000`, `IN (-1, -2)`)
 - [x] IS NULL / IS NOT NULL
 - [x] INNER JOIN / LEFT JOIN / RIGHT JOIN
 - [x] FULL OUTER JOIN (양쪽 NULL 패딩, 매칭 안 된 우측 행 자동 추가)
@@ -118,7 +121,7 @@
 - [x] CASE WHEN ... THEN ... ELSE ... END
 - [x] 스칼라 함수 — UPPER / LOWER / LENGTH / TRIM / CONCAT / SUBSTR / REPLACE / LPAD / RPAD / CHAR_LENGTH / LEFT / RIGHT / REVERSE / REPEAT / INSTR / LOCATE / LTRIM / RTRIM / SPACE / ASCII / CHAR / HEX / UNHEX / FORMAT
 - [x] 수학 함수 — ROUND / ABS / CEIL / FLOOR / MOD / SQRT / POW(POWER) / LOG / LOG2 / LOG10 / EXP / SIN / COS / TAN / PI / SIGN / TRUNCATE / RAND
-- [x] 날짜 함수 — NOW / CURDATE / DATE_FORMAT / DATEDIFF / DATE_ADD / DATE_SUB / YEAR / MONTH / DAY / HOUR / MINUTE / SECOND / DAYOFWEEK / DAYOFYEAR / WEEKDAY / LAST_DAY / TIMESTAMPDIFF / CURTIME / CURRENT_TIMESTAMP / UNIX_TIMESTAMP / FROM_UNIXTIME
+- [x] 날짜 함수 — NOW / CURDATE / DATE_FORMAT / DATEDIFF / DATE_ADD / DATE_SUB / YEAR / MONTH / DAY / HOUR / MINUTE / SECOND / DAYOFWEEK / DAYOFYEAR / WEEKDAY / LAST_DAY / TIMESTAMPDIFF / CURTIME / CURRENT_TIMESTAMP / UNIX_TIMESTAMP / FROM_UNIXTIME; **CURDATE() / NOW() 는 SELECT 컬럼·UPDATE SET·WHERE 조건 우변에서 모두 사용 가능** (`WHERE due_date < CURDATE()`, `DATEDIFF(end_date, CURDATE())`)
 - [x] NULL 처리 함수 — COALESCE / IFNULL / NULLIF / ISNULL
 - [x] 타입 변환 — CAST(expr AS INT/FLOAT/TEXT/DATE) / CONVERT / BIT_LENGTH
 - [x] 조건 함수 — IF(cond, true_val, false_val) / GREATEST / LEAST
@@ -349,4 +352,5 @@
 - [x] **서버 연결 아이콘 교체** — Server Manager 헤더의 서버 랙 아이콘 → 주황색 원통형 DB 아이콘
 - [x] **Server Manager Bench 패널** — "Bench" 우측 버튼으로 슬라이드 패널 토글; "결과 불러오기" → `read_bench_result` Tauri 커맨드로 `code/test/perf/result.json` 파싱·포맷 표시 (로딩 중 버튼 disabled + "불러오는 중..." 텍스트, 파일 없으면 주황색 안내), "터미널 실행" → `open_bench_terminal` 커맨드로 cmd 창에서 `pip install -q -r requirements.txt && python bench.py` 자동 실행 (`bench_dir()` = CARGO_MANIFEST_DIR 기반); `bench.py` 완료 후 RuSQL·MySQL 양쪽 `bench_db` 자동 삭제
 - [x] **Server Manager Session 패널** — "Session" 우측 버튼으로 슬라이드 패널 토글; `SessionInfo`(addr·user·connected_at·query_count) 목록을 기존 1.5s 상태 폴링에 내장해 별도 폴링 없이 실시간 갱신, 경과 시간 초/분 자동 단위 표시
-- [x] **Server Manager AI MCP 패널** — "AI MCP" 우측 버튼으로 슬라이드 패널 토글; "Claude Desktop 자동 연결" 버튼 → `setup_mcp_config` Tauri 커맨드로 `%AppData%\Claude\` (일반 설치) + `LocalCache\Roaming\Claude\` (Windows Store) 두 경로에 BOM 없는 UTF-8로 `claude_desktop_config.json` 자동 생성·병합; `where python`으로 `mcp` 패키지 설치된 Python 자동 탐지
+- [x] **Server Manager AI MCP 패널** — "AI MCP" 우측 버튼으로 슬라이드 패널 토글; "Claude Desktop 자동 연결" 버튼 → `setup_mcp_config` Tauri 커맨드로 `%AppData%\Claude\` (일반 설치) + `LocalCache\Roaming\Claude\` (Windows Store) 두 경로에 BOM 없는 UTF-8로 `claude_desktop_config.json` 자동 생성·병합, **16개 도구** `alwaysAllow` 자동 등록 (허용 팝업 없음); `where python`으로 `mcp` 패키지 설치된 Python 자동 탐지
+- [x] **MCP UI 제어 도구 9개** — `write_to_editor` (에디터에 SQL 작성) · `open_new_tab` (새 탭 열기) · `execute_in_editor` (SQL 즉시 실행) · `close_tab` (탭 닫기) · `get_tab_content` (탭 내용 읽기) · `list_tabs` (열린 탭 목록) · `switch_to_tab` (탭 전환) · `get_query_result` (마지막 실행 결과) · `get_current_database` (현재 DB 조회); 로그인 시 탭 내용 자동 동기화 (`sync_tab_content`)

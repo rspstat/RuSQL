@@ -1,31 +1,41 @@
 {
   "single": {
     "rows": 10000,
-    "insert_s": 4.17,
-    "delete_s": 3.9
+    "insert_s": 10.37,
+    "delete_s": 9.42
   },
   "bulk": {
     "rows": 100000,
-    "insert_s": 3.79,
-    "delete_s": 0.64
+    "insert_s": 8.43,
+    "delete_s": 1.71
   },
   "point_lookup": {
-    "seq_ms": 17.135,
-    "idx_ms": 0.259,
-    "speedup": 66.0
+    "seq_ms": 37.373,
+    "idx_ms": 0.678,
+    "speedup": 55.1
   },
   "range_query": {
-    "seq_ms": 12.501,
-    "idx_ms": 1.481,
-    "speedup": 8.4
+    "seq_ms": 28.164,
+    "idx_ms": 3.783,
+    "speedup": 7.4
   },
   "top_k": {
-    "seq_ms": 12.847,
-    "idx_ms": 4.959,
-    "speedup": 2.6
+    "seq_ms": 28.474,
+    "idx_ms": 12.156,
+    "speedup": 2.3
+  },
+  "query_cache": {
+    "scan_ms": 33.099,
+    "hit_ms": 0.437,
+    "speedup": 75.7
   },
   "parallel": {
-    "off_ms": 323.8,
-    "on_ms": 198.0
+    "off_ms": 643.8,
+    "on_ms": 389.7
+  },
+  "order_by": {
+    "off_ms": 302.9,
+    "on_ms": 302.3,
+    "speedup": 1.0
   }
 }

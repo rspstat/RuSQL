@@ -10,8 +10,7 @@ use std::net::{TcpListener, TcpStream};
 use std::io::{BufRead, BufReader, Write};
 use std::time::Instant;
 
-use tauri::{Manager, State};
-use rusql_core::parser::parser::Parser;
+use tauri::{Emitter, Manager, State};
 use rusql_core::engine::executor::{Executor, SharedDatabase};
 
 
@@ -34,9 +33,17 @@ struct ServerEntry {
 }
 
 // ─── 상태 구조체 ──────────────────────────────────────────────
+struct UiStore {
+    tab_content: Arc<Mutex<HashMap<String, String>>>, // tab_name → editor content
+    tab_list:    Arc<Mutex<Vec<String>>>,             // ordered tab names
+    last_result: Arc<Mutex<String>>,                  // last query result (TSV)
+    current_db:  Arc<Mutex<String>>,                  // current database name
+}
+
 struct AppState {
-    db:      Arc<Mutex<Executor>>,              // 현재 UI 세션 (연결마다 교체됨)
-    servers: Mutex<HashMap<String, ServerEntry>>, // conn_id → 서버 상태
+    db:      Arc<Mutex<Executor>>,
+    servers: Mutex<HashMap<String, ServerEntry>>,
+    ui:      Arc<UiStore>,
 }
 
 // ─── 직렬화 타입 ──────────────────────────────────────────────
@@ -62,6 +69,12 @@ struct ServerStatus {
     client_count: usize,
     log:          Vec<String>,
     sessions:     Vec<SessionInfo>,
+}
+
+#[derive(serde::Serialize, Clone)]
+struct UiCommandPayload {
+    action: String,
+    data:   String,
 }
 
 // ─── 헬퍼: 로그 추가 ──────────────────────────────────────────
@@ -106,7 +119,7 @@ fn load_server_log(conn_id: &str) -> Vec<String> {
 
 // ─── TCP 클라이언트 핸들러 ────────────────────────────────────
 // 각 TCP 클라이언트는 독립적인 Executor(트랜잭션·current_db)를 가진다.
-fn handle_client(stream: TcpStream, shared: Arc<RwLock<SharedDatabase>>, log: Arc<Mutex<Vec<String>>>, sessions: Arc<Mutex<Vec<SessionInfo>>>) {
+fn handle_client(stream: TcpStream, shared: Arc<RwLock<SharedDatabase>>, log: Arc<Mutex<Vec<String>>>, sessions: Arc<Mutex<Vec<SessionInfo>>>, app_handle: tauri::AppHandle, ui: Arc<UiStore>) {
     let _ = stream.set_nonblocking(false); // listener is non-blocking; accepted streams must be reset to blocking
     let _ = stream.set_nodelay(true); // disable Nagle — prevents 200ms delay on Windows loopback
     let addr_str = stream.peer_addr().map(|a| a.to_string()).unwrap_or_else(|_| "unknown".to_string());
@@ -180,6 +193,61 @@ fn handle_client(stream: TcpStream, shared: Arc<RwLock<SharedDatabase>>, log: Ar
             break;
         }
 
+        // UI 제어 명령 — `;` 없이 즉시 처리, Tauri 이벤트로 프론트엔드에 전달
+        if trimmed.starts_with("UI:") {
+            let rest = trimmed[3..].trim();
+            let payload_opt = if rest.starts_with('{') {
+                // JSON 포맷: {"action": "...", "data": "..."}
+                serde_json::from_str::<serde_json::Value>(rest).ok().and_then(|v| {
+                    let action = v.get("action")?.as_str()?.to_string();
+                    let data   = v.get("data").and_then(|d| d.as_str()).unwrap_or("").to_string();
+                    Some(UiCommandPayload { action, data })
+                })
+            } else {
+                // 레거시 포맷: action:data
+                let colon = rest.find(':').unwrap_or(rest.len());
+                let action = rest[..colon].to_string();
+                let data   = if colon < rest.len() { rest[colon + 1..].to_string() } else { String::new() };
+                Some(UiCommandPayload { action, data })
+            };
+            if let Some(payload) = payload_opt {
+                match payload.action.as_str() {
+                    "get_tab_content" => {
+                        let content = ui.tab_content.lock().unwrap()
+                            .get(&payload.data).cloned().unwrap_or_default();
+                        let _ = writeln!(writer, "OK");
+                        let _ = writeln!(writer, "{}", content);
+                    }
+                    "list_tabs" => {
+                        let list = ui.tab_list.lock().unwrap().clone();
+                        let _ = writeln!(writer, "OK");
+                        let _ = writeln!(writer, "{}", list.join("\n"));
+                    }
+                    "get_query_result" => {
+                        let result = ui.last_result.lock().unwrap().clone();
+                        let _ = writeln!(writer, "OK");
+                        let _ = writeln!(writer, "{}", result);
+                    }
+                    "get_current_database" => {
+                        let db = ui.current_db.lock().unwrap().clone();
+                        let _ = writeln!(writer, "OK");
+                        let _ = writeln!(writer, "{}", db);
+                    }
+                    _ => {
+                        let _ = app_handle.emit("ui-command", payload);
+                        let _ = writeln!(writer, "OK");
+                        let _ = writeln!(writer, "ui-command dispatched");
+                    }
+                }
+            } else {
+                let _ = writeln!(writer, "ERR");
+                let _ = writeln!(writer, "invalid ui-command payload");
+            }
+            let _ = writeln!(writer, "---END---");
+            let _ = writer.flush();
+            continue;
+        }
+
         buf.push_str(&input);
         buf.push('\n');
         if !buf.contains(';') { continue; }
@@ -192,13 +260,9 @@ fn handle_client(stream: TcpStream, shared: Arc<RwLock<SharedDatabase>>, log: Ar
             add_log(&log, &format!("[{}] {}", auth_user, preview));
 
             let t0 = std::time::Instant::now();
-            let mut parser = Parser::new(q.as_str());
-            let (status, output) = match parser.parse() {
-                Ok(stmt) => match exec.execute(stmt) {
-                    Ok(r)  => ("OK",  r),
-                    Err(e) => ("ERR", e),
-                },
-                Err(e) => ("ERR", format!("Parse Error: {}", e)),
+            let (status, output) = match exec.execute_sql(q.as_str()) {
+                Ok(r)  => ("OK",  r),
+                Err(e) => ("ERR", e),
             };
             let _ = writeln!(writer, "{}", status);
             let _ = writeln!(writer, "{}", output);
@@ -329,19 +393,11 @@ fn execute_query(query: String, _ts: Option<u64>, state: State<AppState>) -> Mul
     let mut results = Vec::new();
     for q in &queries {
         let q_start = Instant::now();
-        let mut p = Parser::new(q.as_str());
-        let result = match p.parse() {
-            Ok(stmt) => match exec.execute(stmt) {
-                Ok(out) => parse_output(&out, q_start.elapsed().as_secs_f64()),
-                Err(e)  => QueryResult {
-                    columns: vec![], rows: vec![],
-                    message: e, elapsed: q_start.elapsed().as_secs_f64(), success: false,
-                },
-            },
-            Err(e) => QueryResult {
+        let result = match exec.execute_sql(q.as_str()) {
+            Ok(out) => parse_output(&out, q_start.elapsed().as_secs_f64()),
+            Err(e)  => QueryResult {
                 columns: vec![], rows: vec![],
-                message: format!("Parse Error: {}", e),
-                elapsed: q_start.elapsed().as_secs_f64(), success: false,
+                message: e, elapsed: q_start.elapsed().as_secs_f64(), success: false,
             },
         };
         results.push(result);
@@ -616,7 +672,7 @@ fn get_indexes(state: State<AppState>) -> Vec<IndexInfo> {
 
 // ─── Tauri 커맨드: 서버 관리 ─────────────────────────────────
 #[tauri::command]
-fn start_server(conn_id: String, port: u16, mysql_port: u16, state: State<AppState>) -> Result<String, String> {
+fn start_server(conn_id: String, port: u16, mysql_port: u16, state: State<AppState>, app: tauri::AppHandle) -> Result<String, String> {
     {
         let servers = state.servers.lock().unwrap();
         if let Some(e) = servers.get(&conn_id) {
@@ -646,6 +702,8 @@ fn start_server(conn_id: String, port: u16, mysql_port: u16, state: State<AppSta
         sessions: sessions.clone(),
     });
 
+    let app_for_thread = app.clone();
+    let ui_thread = Arc::clone(&state.ui);
     thread::spawn(move || {
         let addr = format!("127.0.0.1:{}", port);
         let listener = match TcpListener::bind(&addr) {
@@ -669,8 +727,10 @@ fn start_server(conn_id: String, port: u16, mysql_port: u16, state: State<AppSta
                     let log2  = log.clone();
                     let sess2 = sessions.clone();
                     let astr  = addr.to_string();
+                    let app2 = app_for_thread.clone();
+                    let ui2  = Arc::clone(&ui_thread);
                     thread::spawn(move || {
-                        handle_client(stream, sh2, log2.clone(), sess2);
+                        handle_client(stream, sh2, log2.clone(), sess2, app2, ui2);
                         cc.fetch_sub(1, Ordering::SeqCst);
                         add_log(&log2, &format!("클라이언트 종료: {}", astr));
                     });
@@ -922,7 +982,14 @@ fn setup_mcp_config() -> Result<String, String> {
     let python_path = find_python_with_mcp()?;
     let mcp_entry = serde_json::json!({
         "command": python_path,
-        "args": ["-u", mcp_server_path.to_string_lossy().as_ref()]
+        "args": ["-u", mcp_server_path.to_string_lossy().as_ref()],
+        "alwaysAllow": [
+            "execute_sql", "list_databases", "list_tables", "get_table_schema",
+            "explain_query", "get_indexes", "sample_data",
+            "write_to_editor", "open_new_tab", "execute_in_editor", "close_tab",
+            "get_tab_content", "list_tabs", "switch_to_tab",
+            "get_query_result", "get_current_database"
+        ]
     });
 
     // 1. 일반 설치 버전 경로
@@ -985,6 +1052,34 @@ fn open_bench_terminal() {
         .spawn();
 }
 
+#[tauri::command]
+fn sync_tab_content(name: String, content: String, state: State<AppState>) {
+    state.ui.tab_content.lock().unwrap().insert(name, content);
+}
+
+#[tauri::command]
+fn sync_tab_list(names: Vec<String>, state: State<AppState>) {
+    *state.ui.tab_list.lock().unwrap() = names;
+}
+
+#[tauri::command]
+fn sync_query_result(result: String, state: State<AppState>) {
+    *state.ui.last_result.lock().unwrap() = result;
+}
+
+#[tauri::command]
+fn sync_current_db(db: String, state: State<AppState>) {
+    *state.ui.current_db.lock().unwrap() = db;
+}
+
+#[tauri::command]
+fn open_bench_graph() {
+    let path = bench_dir().join("benchmark_result.png");
+    let _ = std::process::Command::new("cmd")
+        .args(["/c", "start", "", &path.to_string_lossy()])
+        .spawn();
+}
+
 
 // ─── 엔트리포인트 ─────────────────────────────────────────────
 fn main() {
@@ -996,6 +1091,12 @@ fn main() {
         .manage(AppState {
             db,
             servers: Mutex::new(HashMap::new()),
+            ui: Arc::new(UiStore {
+                tab_content: Arc::new(Mutex::new(HashMap::new())),
+                tab_list:    Arc::new(Mutex::new(Vec::new())),
+                last_result: Arc::new(Mutex::new(String::new())),
+                current_db:  Arc::new(Mutex::new(String::new())),
+            }),
         })
         .setup(|app| {
             if let Some(window) = app.get_webview_window("main") {
@@ -1030,6 +1131,11 @@ fn main() {
             set_parallel_query,
             read_bench_result,
             open_bench_terminal,
+            open_bench_graph,
+            sync_tab_content,
+            sync_tab_list,
+            sync_query_result,
+            sync_current_db,
             setup_mcp_config,
         ])
         .run(tauri::generate_context!())

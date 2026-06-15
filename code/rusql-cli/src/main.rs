@@ -5,7 +5,6 @@ use std::time::Instant;
 use crossterm::style::{Color, Print, ResetColor, SetForegroundColor};
 use crossterm::ExecutableCommand;
 
-use rusql_core::parser::parser::Parser;
 use rusql_core::engine::executor::Executor;
 
 fn print_color(text: &str, color: Color) {
@@ -85,21 +84,17 @@ fn colorize_table(output: &str) {
 
 fn run_query(executor: &mut Executor, query: &str) {
     let start = Instant::now();
-    let mut p = Parser::new(query);
-    match p.parse() {
-        Ok(stmt) => match executor.execute(stmt) {
-            Ok(result) => {
-                let elapsed = start.elapsed();
-                colorize_table(&result);
-                print_color(
-                    &format!("({:.3} sec)\n", elapsed.as_secs_f64()),
-                    Color::DarkGrey,
-                );
-            }
-            Err(e) => print_color(&format!("ERROR: {}\n", e), Color::Red),
-        },
+    match executor.execute_sql(query) {
+        Ok(result) => {
+            let elapsed = start.elapsed();
+            colorize_table(&result);
+            print_color(
+                &format!("({:.3} sec)\n", elapsed.as_secs_f64()),
+                Color::DarkGrey,
+            );
+        }
         Err(e) if e.contains("Unknown statement: None") => {}
-        Err(e) => print_color(&format!("PARSE ERROR: {}\n", e), Color::Red),
+        Err(e) => print_color(&format!("ERROR: {}\n", e), Color::Red),
     }
 }
 

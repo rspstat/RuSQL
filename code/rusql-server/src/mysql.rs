@@ -7,7 +7,6 @@ use std::sync::{Arc, RwLock};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 
-use rusql_core::parser::parser::Parser;
 use rusql_core::engine::executor::{Executor, SharedDatabase};
 
 // COM command bytes
@@ -624,11 +623,7 @@ fn extract_second_from(q: &str) -> Option<String> {
 
 /// Execute a query directly through the parser+executor (no compat shims).
 fn exec_inner(exec: &mut Executor, q: &str) -> Result<String, String> {
-    let mut p = Parser::new(q.trim());
-    match p.parse() {
-        Ok(stmt) => exec.execute(stmt),
-        Err(e) => Err(format!("Parse Error: {}", e)),
-    }
+    exec.execute_sql(q.trim())
 }
 
 // ── MySQL-specific compatibility shims ─────────────────────────
@@ -839,11 +834,7 @@ fn exec_query(exec: &mut Executor, raw: &str) -> Result<String, String> {
 
     if let Some(r) = mysql_compat(q, exec) { return r; }
 
-    let mut p = Parser::new(q);
-    match p.parse() {
-        Ok(stmt) => exec.execute(stmt),
-        Err(e) => Err(format!("Parse Error: {}", e)),
-    }
+    exec.execute_sql(q)
 }
 
 fn affected_rows(msg: &str) -> u64 {

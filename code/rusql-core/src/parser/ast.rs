@@ -106,7 +106,7 @@ pub enum JoinType {
 pub enum Operator {
     Eq, Ne, Gt, Lt, Gte, Lte,
     In, NotIn,
-    Like, Between,
+    Like, NotLike, Between, NotBetween,
     IsNull, IsNotNull,
     Exists, NotExists,
     Regexp,
@@ -147,6 +147,8 @@ pub enum AggFunc {
     Stddev,
     Variance,
     GroupConcat { separator: String },
+    CountCase { branches: Vec<CaseWhenBranch>, else_val: Option<String> },
+    SumCase   { branches: Vec<CaseWhenBranch>, else_val: Option<String> },
 }
 
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]

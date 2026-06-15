@@ -26,6 +26,8 @@ use crate::engine::lock_manager::{LockManager, LockResult};
 use crate::engine::planner::{Planner, AccessPath, JoinAlgo};
 use crate::storage::hash_index::HashIndex;
 use crate::engine::join as join_algo;
+use crate::engine::query_cache::QueryResultCache;
+use crate::parser::parser::Parser;
 use rayon::prelude::*;
 
 /// 병렬 스캔을 적용하는 최소 행 수. 이보다 작으면 스레드 생성 오버헤드가 커서 순차 실행.
@@ -155,6 +157,8 @@ pub struct SharedDatabase {
     pub next_session_id: Arc<AtomicUsize>,
     /// PK 값 → Vec 위치 인덱스: 비트랜잭션 단건 DELETE O(1) 최적화
     pub row_pk_pos: HashMap<String, HashMap<String, usize>>,
+    /// SELECT 결과 LRU 캐시 (트랜잭션 외부 쿼리 전용)
+    pub query_cache: QueryResultCache,
 }
 
 /// SHA-256 해시 (hex 문자열 반환) — native TCP 인증용
@@ -499,6 +503,7 @@ impl Executor {
                 process_list: Arc::new(Mutex::new(HashMap::new())),
                 next_session_id: Arc::new(AtomicUsize::new(1)),
                 row_pk_pos: HashMap::new(),
+                query_cache: QueryResultCache::new(),
             })),
             txn: TransactionManager::new_with_dir(dir),
             current_db,
@@ -587,6 +592,99 @@ impl Executor {
         self.execute_with_s(&mut s, stmt)
     }
 
+    /// SQL 문자열을 파싱하고 실행하는 공개 진입점.
+    /// - SELECT (트랜잭션 외부): query_cache 조회 → 미스 시 실행 후 저장
+    /// - DML/DDL: 실행 후 해당 테이블 캐시 무효화
+    pub fn execute_sql(&mut self, sql: &str) -> Result<String, String> {
+        let trimmed = sql.trim();
+
+        let looks_like_select = trimmed.len() >= 6
+            && trimmed[..6].eq_ignore_ascii_case("select");
+        let in_txn = self.txn.current_txn_id() != 0;
+
+        // 캐시 조회 (트랜잭션 밖 SELECT만)
+        if looks_like_select && !in_txn {
+            let cache_key = format!("{}::{}", self.current_db, trimmed);
+            let s = self.shared.read().unwrap();
+            if let Some(cached) = s.query_cache.get(&cache_key).cloned() {
+                return Ok(cached);
+            }
+        }
+
+        // 파싱
+        let stmt = Parser::new(trimmed).parse()?;
+
+        // DML 테이블 추출 (stmt 소비 전)
+        let dml_table: Option<String> = match &stmt {
+            Statement::Insert { table, .. }
+            | Statement::InsertSelect { table, .. }
+            | Statement::Update { table, .. }
+            | Statement::Delete { table, .. } => Some(Self::qualify_static(table, &self.current_db)),
+            Statement::TruncateTable { name } | Statement::DropTable { name, .. } => {
+                Some(Self::qualify_static(name, &self.current_db))
+            }
+            Statement::MultiUpdate { tables, .. } => {
+                tables.first().map(|t| Self::qualify_static(t, &self.current_db))
+            }
+            Statement::MultiDelete { delete_tables, .. } => {
+                delete_tables.first().map(|t| Self::qualify_static(t, &self.current_db))
+            }
+            Statement::Merge { target, .. } => Some(Self::qualify_static(target, &self.current_db)),
+            Statement::AlterTable { table, .. } => Some(Self::qualify_static(table, &self.current_db)),
+            _ => None,
+        };
+
+        // SELECT 캐시 테이블 목록 추출 (stmt 소비 전)
+        let cache_tables: Vec<String> = if looks_like_select && !in_txn {
+            Self::select_tables(&stmt, &self.current_db)
+        } else {
+            vec![]
+        };
+
+        // 서브쿼리 포함 SELECT는 캐싱 스킵 (stale 위험)
+        let has_subquery = looks_like_select && {
+            let lower = trimmed.to_ascii_lowercase();
+            lower.matches("select").count() > 1
+        };
+
+        // 실행
+        let result = self.execute(stmt);
+
+        // SELECT 결과 캐시 저장
+        if looks_like_select && !in_txn && !has_subquery {
+            if let Ok(ref res) = result {
+                let cache_key = format!("{}::{}", self.current_db, trimmed);
+                let mut s = self.shared.write().unwrap();
+                s.query_cache.put(cache_key, res.clone(), &cache_tables);
+            }
+        }
+
+        // DML 캐시 무효화
+        if let (Some(table), Ok(_)) = (dml_table, &result) {
+            let mut s = self.shared.write().unwrap();
+            s.query_cache.invalidate_table(&table);
+        }
+
+        result
+    }
+
+    fn qualify_static(name: &str, current_db: &str) -> String {
+        if name.contains('.') { name.to_string() } else { format!("{}.{}", current_db, name) }
+    }
+
+    fn select_tables(stmt: &Statement, current_db: &str) -> Vec<String> {
+        match stmt {
+            Statement::Select { table, joins, .. } => {
+                let mut tables = vec![Self::qualify_static(table, current_db)];
+                for join in joins {
+                    tables.push(Self::qualify_static(&join.table, current_db));
+                }
+                tables
+            }
+            _ => vec![],
+        }
+    }
+
     /// Group Commit 경로:
     /// 1) SharedDatabase 락 보유 중: 검증 + dirty page 플러시 + COMMIT 레코드 기록(fsync 없음)
     /// 2) 락 해제 후: GroupCommitCoordinator로 단일 fsync (여러 세션이 공유)
@@ -627,6 +725,7 @@ impl Executor {
             s.tables.insert(table.clone(), rows.clone());
             s.buffer_pool.write_page(&table, rows);
             s.buffer_pool.flush_page(&table, &s.disk);
+            s.query_cache.invalidate_table(&table);
         }
 
         let txn_id = self.txn.current_txn_id();
@@ -897,18 +996,25 @@ impl Executor {
         }
 
         // Apply ORDER BY
-        for ob in order_by.iter().rev() {
-            let col = ob.column.clone();
-            let asc = ob.ascending;
-            result.sort_by(|a, b| {
-                let va = a.get(&col).map(|s| s.as_str()).unwrap_or("");
-                let vb = b.get(&col).map(|s| s.as_str()).unwrap_or("");
-                let cmp = match (va.parse::<f64>(), vb.parse::<f64>()) {
-                    (Ok(fa), Ok(fb)) => fa.partial_cmp(&fb).unwrap_or(std::cmp::Ordering::Equal),
-                    _ => va.cmp(vb),
-                };
-                if asc { cmp } else { cmp.reverse() }
-            });
+        if !order_by.is_empty() {
+            let cmp_fn = |a: &Row, b: &Row| -> std::cmp::Ordering {
+                for ob in &order_by {
+                    let va = a.get(&ob.column).map(|s| s.as_str()).unwrap_or("");
+                    let vb = b.get(&ob.column).map(|s| s.as_str()).unwrap_or("");
+                    let cmp = match (va.parse::<f64>(), vb.parse::<f64>()) {
+                        (Ok(fa), Ok(fb)) => fa.partial_cmp(&fb).unwrap_or(std::cmp::Ordering::Equal),
+                        _ => va.cmp(vb),
+                    };
+                    let cmp = if ob.ascending { cmp } else { cmp.reverse() };
+                    if cmp != std::cmp::Ordering::Equal { return cmp; }
+                }
+                std::cmp::Ordering::Equal
+            };
+            if parallel_enabled() && result.len() >= PARALLEL_MIN_ROWS {
+                result.par_sort_unstable_by(cmp_fn);
+            } else {
+                result.sort_by(cmp_fn);
+            }
         }
 
         // Apply OFFSET then LIMIT
@@ -1057,22 +1163,29 @@ impl Executor {
     }
 
     fn apply_set_postprocess(result: &mut Vec<Row>, cols: &[String], order_by: Vec<OrderBy>, limit: Option<usize>, offset: Option<usize>) {
-        for ob in order_by.iter().rev() {
-            let col = ob.column.clone();
-            let asc = ob.ascending;
-            result.sort_by(|a, b| {
-                let va = a.get(&col).map(|s| s.as_str()).unwrap_or("");
-                let vb = b.get(&col).map(|s| s.as_str()).unwrap_or("");
-                let cmp = match (va.parse::<f64>(), vb.parse::<f64>()) {
-                    (Ok(fa), Ok(fb)) => fa.partial_cmp(&fb).unwrap_or(std::cmp::Ordering::Equal),
-                    _ => va.cmp(vb),
-                };
-                if asc { cmp } else { cmp.reverse() }
-            });
+        if !order_by.is_empty() {
+            let cmp_fn = |a: &Row, b: &Row| -> std::cmp::Ordering {
+                for ob in &order_by {
+                    let va = a.get(&ob.column).map(|s| s.as_str()).unwrap_or("");
+                    let vb = b.get(&ob.column).map(|s| s.as_str()).unwrap_or("");
+                    let cmp = match (va.parse::<f64>(), vb.parse::<f64>()) {
+                        (Ok(fa), Ok(fb)) => fa.partial_cmp(&fb).unwrap_or(std::cmp::Ordering::Equal),
+                        _ => va.cmp(vb),
+                    };
+                    let cmp = if ob.ascending { cmp } else { cmp.reverse() };
+                    if cmp != std::cmp::Ordering::Equal { return cmp; }
+                }
+                std::cmp::Ordering::Equal
+            };
+            if parallel_enabled() && result.len() >= PARALLEL_MIN_ROWS {
+                result.par_sort_unstable_by(cmp_fn);
+            } else {
+                result.sort_by(cmp_fn);
+            }
         }
         if let Some(n) = offset { let skip = n.min(result.len()); result.drain(..skip); }
         if let Some(n) = limit  { result.truncate(n); }
-        let _ = cols; // suppress unused warning
+        let _ = cols;
     }
 
     fn format_set_result(cols: &[String], result: Vec<Row>) -> String {
@@ -2026,13 +2139,14 @@ impl Executor {
         match &cond.value {
             ConditionValue::Subquery(_) => false,
             ConditionValue::Between(start, end) => {
-                // NULL in BETWEEN = false
+                // NULL in BETWEEN/NOT BETWEEN = false
                 if val == NULL_VALUE { return false; }
-                match (cmp_num(&val, start), cmp_num(&val, end)) {
+                let in_range = match (cmp_num(&val, start), cmp_num(&val, end)) {
                     (Some(s), Some(e)) =>
                         s != std::cmp::Ordering::Less && e != std::cmp::Ordering::Greater,
                     _ => val >= *start && val <= *end,
-                }
+                };
+                if cond.operator == Operator::NotBetween { !in_range } else { in_range }
             }
             ConditionValue::LiteralList(list) => {
                 if val == NULL_VALUE { return false; }
@@ -2091,20 +2205,29 @@ impl Executor {
                         let pat_chars: Vec<char> = effective_lit.chars().collect();
                         like_match(&val_chars, &pat_chars)
                     }
+                    Operator::NotLike => {
+                        let val_chars: Vec<char> = val.chars().collect();
+                        let pat_chars: Vec<char> = effective_lit.chars().collect();
+                        !like_match(&val_chars, &pat_chars)
+                    }
                     Operator::Regexp => {
                         regex::Regex::new(effective_lit)
                             .map(|re| re.is_match(&val))
                             .unwrap_or(false)
                     }
-                    Operator::Between => false,
+                    Operator::Between | Operator::NotBetween => false,
                     Operator::Gt  => cmp_num(&val, effective_lit)
-                        .map(|o| o == std::cmp::Ordering::Greater).unwrap_or(false),
+                        .map(|o| o == std::cmp::Ordering::Greater)
+                        .unwrap_or_else(|| val.as_str() >  effective_lit.as_ref()),
                     Operator::Lt  => cmp_num(&val, effective_lit)
-                        .map(|o| o == std::cmp::Ordering::Less).unwrap_or(false),
+                        .map(|o| o == std::cmp::Ordering::Less)
+                        .unwrap_or_else(|| val.as_str() <  effective_lit.as_ref()),
                     Operator::Gte => cmp_num(&val, effective_lit)
-                        .map(|o| o != std::cmp::Ordering::Less).unwrap_or(false),
+                        .map(|o| o != std::cmp::Ordering::Less)
+                        .unwrap_or_else(|| val.as_str() >= effective_lit.as_ref()),
                     Operator::Lte => cmp_num(&val, effective_lit)
-                        .map(|o| o != std::cmp::Ordering::Greater).unwrap_or(false),
+                        .map(|o| o != std::cmp::Ordering::Greater)
+                        .unwrap_or_else(|| val.as_str() <= effective_lit.as_ref()),
                 }
             }
         }
@@ -2542,7 +2665,7 @@ impl Executor {
 
         // ORDER BY
         if !order_by.is_empty() {
-            result.sort_by(|a, b| {
+            let cmp_fn = |a: &Row, b: &Row| -> std::cmp::Ordering {
                 for ord in &order_by {
                     let av = Self::get_col(a, &ord.column).cloned().unwrap_or_default();
                     let bv = Self::get_col(b, &ord.column).cloned().unwrap_or_default();
@@ -2554,7 +2677,12 @@ impl Executor {
                     if cmp != std::cmp::Ordering::Equal { return cmp; }
                 }
                 std::cmp::Ordering::Equal
-            });
+            };
+            if parallel_enabled() && result.len() >= PARALLEL_MIN_ROWS {
+                result.par_sort_unstable_by(cmp_fn);
+            } else {
+                result.sort_by(cmp_fn);
+            }
         }
 
         // GROUP BY + 집계 (통합)
@@ -2627,6 +2755,54 @@ impl Executor {
                         out.insert(label, strs.join(separator));
                         continue;
                     }
+                    // CASE WHEN 기반 집계 (COUNT(CASE WHEN ...) / SUM(col IS NULL) 등)
+                    if let AggFunc::CountCase { branches, else_val } = func {
+                        let count = grp.iter().filter(|row| {
+                            let resolve = |s: &str| Self::get_col(row, s).cloned().unwrap_or_else(|| s.to_string());
+                            let mut val = else_val.as_deref().map(&resolve).unwrap_or_else(|| NULL_VALUE.to_string());
+                            for b in branches { if Self::eval_condexpr(row, &b.condition) { val = resolve(&b.result); break; } }
+                            !val.is_empty() && val != NULL_VALUE && val != "0"
+                        }).count();
+                        out.insert(label, count.to_string());
+                        continue;
+                    }
+                    if let AggFunc::SumCase { branches, else_val } = func {
+                        let sum: f64 = grp.iter().filter_map(|row| {
+                            let resolve = |s: &str| Self::get_col(row, s).cloned().unwrap_or_else(|| s.to_string());
+                            let mut val = else_val.as_deref().map(&resolve).unwrap_or_else(|| NULL_VALUE.to_string());
+                            for b in branches { if Self::eval_condexpr(row, &b.condition) { val = resolve(&b.result); break; } }
+                            if val == NULL_VALUE || val.is_empty() { None } else { val.parse::<f64>().ok() }
+                        }).sum();
+                        out.insert(label, Self::format_arith_result(sum));
+                        continue;
+                    }
+                    // MIN/MAX: try numeric, fall back to string for DATE/TEXT
+                    if matches!(func, AggFunc::Min | AggFunc::Max) {
+                        let raw: Vec<String> = grp.iter()
+                            .filter_map(|r| r.get(col_name).filter(|v| v.as_str() != NULL_VALUE).cloned())
+                            .collect();
+                        let result = if raw.is_empty() {
+                            NULL_VALUE.to_string()
+                        } else {
+                            let nums: Vec<f64> = raw.iter().filter_map(|s| s.parse::<f64>().ok()).collect();
+                            if nums.len() == raw.len() {
+                                let v = match func {
+                                    AggFunc::Min => nums.iter().cloned().fold(f64::INFINITY, f64::min),
+                                    AggFunc::Max => nums.iter().cloned().fold(f64::NEG_INFINITY, f64::max),
+                                    _ => unreachable!(),
+                                };
+                                if v.fract() == 0.0 { format!("{}", v as i64) } else { format!("{:.4}", v) }
+                            } else {
+                                match func {
+                                    AggFunc::Min => raw.iter().min().cloned().unwrap_or_default(),
+                                    AggFunc::Max => raw.iter().max().cloned().unwrap_or_default(),
+                                    _ => unreachable!(),
+                                }
+                            }
+                        };
+                        out.insert(label, result);
+                        continue;
+                    }
                     let vals: Vec<f64> = grp.iter()
                         .filter_map(|r| {
                             if col_name == "*" { Some(1.0) }
@@ -2640,7 +2816,11 @@ impl Executor {
                         seen.iter().filter_map(|v| v.parse::<f64>().ok()).collect()
                     };
                     let agg_val = match func {
-                        AggFunc::Count => grp.len() as f64,
+                        AggFunc::Count => if col_name == "*" {
+                            grp.len() as f64
+                        } else {
+                            grp.iter().filter(|r| r.get(col_name).map(|v| v.as_str() != NULL_VALUE).unwrap_or(false)).count() as f64
+                        },
                         AggFunc::CountDistinct => {
                             let distinct: HashSet<String> = grp.iter()
                                 .filter_map(|r| r.get(col_name).filter(|v| v.as_str() != NULL_VALUE).cloned())
@@ -2668,6 +2848,7 @@ impl Executor {
                             }
                         }
                         AggFunc::GroupConcat { .. } => unreachable!(),
+                        AggFunc::CountCase { .. } | AggFunc::SumCase { .. } => unreachable!(),
                     };
                     let v = match func {
                         AggFunc::Avg | AggFunc::AvgDistinct |
@@ -2698,7 +2879,7 @@ impl Executor {
             }
             // ORDER BY on aggregated results (handles aggregate aliases like avg_sal)
             if !order_by.is_empty() {
-                group_rows.sort_by(|a, b| {
+                let cmp_fn = |a: &Row, b: &Row| -> std::cmp::Ordering {
                     for ord in &order_by {
                         let av = Self::get_col(a, &ord.column).cloned().unwrap_or_default();
                         let bv = Self::get_col(b, &ord.column).cloned().unwrap_or_default();
@@ -2710,7 +2891,12 @@ impl Executor {
                         if cmp != std::cmp::Ordering::Equal { return cmp; }
                     }
                     std::cmp::Ordering::Equal
-                });
+                };
+                if parallel_enabled() && group_rows.len() >= PARALLEL_MIN_ROWS {
+                    group_rows.par_sort_unstable_by(cmp_fn);
+                } else {
+                    group_rows.sort_by(cmp_fn);
+                }
             }
             if let Some(n) = offset { let skip = n.min(group_rows.len()); group_rows.drain(..skip); }
             if let Some(n) = limit { group_rows.truncate(n); }
@@ -2801,7 +2987,55 @@ impl Executor {
                     agg_results.push((label, strs.join(separator)));
                     continue;
                 }
+                // CountCase / SumCase (GROUP BY 없는 전체 집계)
+                if let AggFunc::CountCase { branches, else_val } = func {
+                    let count = result.iter().filter(|row| {
+                        let resolve = |s: &str| Self::get_col(row, s).cloned().unwrap_or_else(|| s.to_string());
+                        let mut val = else_val.as_deref().map(&resolve).unwrap_or_else(|| NULL_VALUE.to_string());
+                        for b in branches { if Self::eval_condexpr(row, &b.condition) { val = resolve(&b.result); break; } }
+                        !val.is_empty() && val != NULL_VALUE && val != "0"
+                    }).count();
+                    agg_results.push((label, count.to_string()));
+                    continue;
+                }
+                if let AggFunc::SumCase { branches, else_val } = func {
+                    let sum: f64 = result.iter().filter_map(|row| {
+                        let resolve = |s: &str| Self::get_col(row, s).cloned().unwrap_or_else(|| s.to_string());
+                        let mut val = else_val.as_deref().map(&resolve).unwrap_or_else(|| NULL_VALUE.to_string());
+                        for b in branches { if Self::eval_condexpr(row, &b.condition) { val = resolve(&b.result); break; } }
+                        if val == NULL_VALUE || val.is_empty() { None } else { val.parse::<f64>().ok() }
+                    }).sum();
+                    agg_results.push((label, Self::format_arith_result(sum)));
+                    continue;
+                }
                 let col_name_str = col_name.as_str();
+                // MIN/MAX: try numeric, fall back to string for DATE/TEXT
+                if matches!(func, AggFunc::Min | AggFunc::Max) {
+                    let raw: Vec<String> = result.iter()
+                        .filter_map(|r| r.get(col_name_str).filter(|v| v.as_str() != NULL_VALUE).cloned())
+                        .collect();
+                    let val_str = if raw.is_empty() {
+                        NULL_VALUE.to_string()
+                    } else {
+                        let nums: Vec<f64> = raw.iter().filter_map(|s| s.parse::<f64>().ok()).collect();
+                        if nums.len() == raw.len() {
+                            let v = match func {
+                                AggFunc::Min => nums.iter().cloned().fold(f64::INFINITY, f64::min),
+                                AggFunc::Max => nums.iter().cloned().fold(f64::NEG_INFINITY, f64::max),
+                                _ => unreachable!(),
+                            };
+                            if v.fract() == 0.0 { format!("{}", v as i64) } else { format!("{:.4}", v) }
+                        } else {
+                            match func {
+                                AggFunc::Min => raw.iter().min().cloned().unwrap_or_default(),
+                                AggFunc::Max => raw.iter().max().cloned().unwrap_or_default(),
+                                _ => unreachable!(),
+                            }
+                        }
+                    };
+                    agg_results.push((label, val_str));
+                    continue;
+                }
                 let vals: Vec<f64> = if parallel_enabled() && result.len() >= PARALLEL_MIN_ROWS {
                     result.par_iter()
                         .filter_map(|r| {
@@ -2824,7 +3058,11 @@ impl Executor {
                     seen.iter().filter_map(|v| v.parse::<f64>().ok()).collect()
                 };
                 let agg_val = match func {
-                    AggFunc::Count => result.len() as f64,
+                    AggFunc::Count => if col_name_str == "*" {
+                        result.len() as f64
+                    } else {
+                        result.iter().filter(|r| r.get(col_name_str).map(|v| v.as_str() != NULL_VALUE).unwrap_or(false)).count() as f64
+                    },
                     AggFunc::CountDistinct => {
                         let distinct: HashSet<String> = result.iter()
                             .filter_map(|r| r.get(col_name_str).filter(|v| v.as_str() != NULL_VALUE).cloned())
@@ -2852,6 +3090,7 @@ impl Executor {
                         }
                     }
                     AggFunc::GroupConcat { .. } => unreachable!(),
+                    AggFunc::CountCase { .. } | AggFunc::SumCase { .. } => unreachable!(),
                 };
                 let val_str = match func {
                     AggFunc::Avg | AggFunc::AvgDistinct |
@@ -3831,6 +4070,8 @@ impl Executor {
             AggFunc::Stddev       => format!("STDDEV({})", col),
             AggFunc::Variance     => format!("VARIANCE({})", col),
             AggFunc::GroupConcat { .. } => format!("GROUP_CONCAT({})", col),
+            AggFunc::CountCase { .. }   => "COUNT(CASE)".to_string(),
+            AggFunc::SumCase   { .. }   => "SUM(CASE)".to_string(),
         }
     }
 
@@ -5593,6 +5834,7 @@ impl Executor {
         }
         s.disk.create_db_dir(&key);
         s.databases.insert(key.clone());
+        self.current_db = key.clone();
         Ok(format!("Database '{}' created.", key))
     }
 

@@ -16,12 +16,13 @@ RUSTDB_PORT = 7878
 RUSTDB_USER = "root"
 RUSTDB_PASS = "root"
 
-N_SINGLE = 10_000
-N_BULK   = 100_000
-CHUNK    = 500
-N_SEL    = 5_000
-N_REPS   = 300
-N_PAR    = 50_000
+N_SINGLE  = 10_000
+N_BULK    = 100_000
+CHUNK     = 500
+N_SEL     = 5_000
+N_REPS    = 300
+N_PAR     = 50_000
+N_CACHE   = 300
 RESULT_FILE = "result.json"
 
 
@@ -209,13 +210,70 @@ def bench_parallel() -> dict:
             vals = ", ".join(f"({v}, {v % 10})" for v in range(s, min(s + chunk, N_PAR)))
             db.execute(f"INSERT INTO bench_parallel (val, grp) VALUES {vals}")
         t0 = time.perf_counter()
-        for _ in range(20):
-            db.execute("SELECT grp, COUNT(*), SUM(val), AVG(val) FROM bench_parallel GROUP BY grp")
+        for i in range(20):
+            db.execute(f"SELECT grp, COUNT(*), SUM(val), AVG(val) FROM bench_parallel GROUP BY grp LIMIT {1000 + i}")
         elapsed_ms = (time.perf_counter() - t0) / 20 * 1000
         db.execute("DROP TABLE IF EXISTS bench_parallel")
         db.close()
         results["off_ms" if mode == "0" else "on_ms"] = round(elapsed_ms, 1)
     return results
+
+
+# ── 병렬 ORDER BY ─────────────────────────────────────────────────────────────
+# 50k 행 테이블에 ORDER BY 2-key 정렬 (인덱스 없음 → 풀 스캔 + 정렬)
+# LIMIT 1000 으로 네트워크 전송량을 줄이되, 정렬 자체는 50k 행 전체 수행
+def bench_order_by(n=N_PAR) -> dict:
+    results = {}
+    for mode in ["0", "1"]:
+        db = RuSQL()
+        db.execute(f"SET @rusql_parallel = {mode}")
+        db.execute("CREATE DATABASE IF NOT EXISTS bench_db")
+        db.execute("USE bench_db")
+        db.execute("DROP TABLE IF EXISTS bench_order")
+        db.execute(
+            "CREATE TABLE bench_order (id INT AUTO INCREMENT, val INT, grp INT, "
+            "CONSTRAINT pk_bord PRIMARY KEY (id))"
+        )
+        chunk = 500
+        for s in range(0, n, chunk):
+            vals = ", ".join(f"({v}, {v % 100})" for v in range(s, min(s + chunk, n)))
+            db.execute(f"INSERT INTO bench_order (val, grp) VALUES {vals}")
+        t0 = time.perf_counter()
+        for i in range(20):
+            db.execute(
+                f"SELECT id, val, grp FROM bench_order "
+                f"ORDER BY val DESC, grp ASC LIMIT {1000 + i}"
+            )
+        elapsed_ms = (time.perf_counter() - t0) / 20 * 1000
+        db.execute("DROP TABLE IF EXISTS bench_order")
+        db.close()
+        results["off_ms" if mode == "0" else "on_ms"] = round(elapsed_ms, 1)
+    results["speedup"] = round(
+        results["off_ms"] / results["on_ms"] if results.get("on_ms") else 0, 2
+    )
+    return results
+
+
+# ── 쿼리 결과 캐시 ────────────────────────────────────────────────────────────
+# 집계 쿼리 (1행 응답) 사용 — 네트워크 전송 오버헤드 제거 후 서버 연산 시간만 측정
+# 캐시 히트 시 서버는 HashMap 룩업(~0.1ms)만 수행, 스캔(~30ms)과 차이가 명확
+def bench_query_cache(db) -> dict:
+    query = "SELECT COUNT(*) AS n, MAX(val) AS mx, MIN(val) AS mn FROM sel_noidx"
+
+    t0 = time.perf_counter()
+    db.execute(query)
+    scan_ms = (time.perf_counter() - t0) * 1000
+
+    t0 = time.perf_counter()
+    for _ in range(N_CACHE - 1):
+        db.execute(query)
+    hit_ms = (time.perf_counter() - t0) / (N_CACHE - 1) * 1000
+
+    return {
+        "scan_ms": round(scan_ms, 3),
+        "hit_ms":  round(hit_ms, 3),
+        "speedup": round(scan_ms / hit_ms if hit_ms else 0, 1),
+    }
 
 
 # ── main ──────────────────────────────────────────────────────────────────────
@@ -225,48 +283,60 @@ def main():
     print("  RuSQL 성능 벤치마크")
     print("=" * 60)
 
-    print(f"\n[1/6] 단순 INSERT/DELETE ({N_SINGLE:,}건 단건) ...")
+    print(f"\n[1/9] 단순 INSERT/DELETE ({N_SINGLE:,}건 단건) ...")
     result["single"] = bench_single()
     s = result["single"]
     print(f"  INSERT {N_SINGLE:,}건 : {s['insert_s']:.2f}초")
     print(f"  DELETE {N_SINGLE:,}건 : {s['delete_s']:.2f}초")
 
-    print(f"\n[2/6] Bulk INSERT/DELETE ({N_BULK:,}건 {CHUNK}행 묶음) ...")
+    print(f"\n[2/9] Bulk INSERT/DELETE ({N_BULK:,}건 {CHUNK}행 묶음) ...")
     result["bulk"] = bench_bulk()
     b = result["bulk"]
     print(f"  INSERT {N_BULK:,}건 : {b['insert_s']:.2f}초")
     print(f"  DELETE {N_BULK:,}건 : {b['delete_s']:.2f}초")
 
-    print(f"\n[3/6] SELECT 테이블 준비 ({N_SEL:,}행) ...")
+    print(f"\n[3/9] SELECT 테이블 준비 ({N_SEL:,}행) ...")
     db = RuSQL()
     setup_select_tables(db, N_SEL)
 
-    print("[4/6] 포인트 조회 — SeqScan vs BTree ...")
+    print("[4/9] 포인트 조회 — SeqScan vs BTree ...")
     result["point_lookup"] = bench_point_lookup(db, N_SEL)
     pl = result["point_lookup"]
     print(f"  SeqScan   : {pl['seq_ms']:.3f} ms/q")
     print(f"  BTree Idx : {pl['idx_ms']:.3f} ms/q  =>  {pl['speedup']:.1f}x")
 
-    print("[4/6] 범위 쿼리 — No-Index vs BTree ...")
+    print("[5/9] 범위 쿼리 — No-Index vs BTree ...")
     result["range_query"] = bench_range_query(db, N_SEL)
     rq = result["range_query"]
     print(f"  No-Index  : {rq['seq_ms']:.3f} ms/q")
     print(f"  BTree Idx : {rq['idx_ms']:.3f} ms/q  =>  {rq['speedup']:.1f}x")
 
-    print("[4/6] Top-K — SeqScan+Sort vs Index LIMIT ...")
+    print("[6/9] Top-K — SeqScan+Sort vs Index LIMIT ...")
     result["top_k"] = bench_top_k(db, N_SEL)
     tk = result["top_k"]
     print(f"  SeqScan+Sort  : {tk['seq_ms']:.3f} ms/q")
     print(f"  Index LIMIT N : {tk['idx_ms']:.3f} ms/q  =>  {tk['speedup']:.1f}x")
 
+    print(f"[7/9] 쿼리 캐시 — DB Scan vs Cache Hit ({N_CACHE}회) ...")
+    result["query_cache"] = bench_query_cache(db)
+    qc = result["query_cache"]
+    print(f"  DB Scan   : {qc['scan_ms']:.3f} ms")
+    print(f"  Cache Hit : {qc['hit_ms']:.3f} ms  =>  {qc['speedup']:.1f}x")
+
     db.execute("DROP DATABASE IF EXISTS bench_db")
     db.close()
 
-    print("[6/6] 병렬 집계 스케일링 ...")
+    print("[8/9] 병렬 집계 스케일링 — GROUP BY ...")
     result["parallel"] = bench_parallel()
     pa = result["parallel"]
     print(f"  PARALLEL OFF : {pa['off_ms']:.1f} ms/q")
     print(f"  PARALLEL ON  : {pa['on_ms']:.1f} ms/q")
+
+    print("[9/9] 병렬 정렬 — ORDER BY ...")
+    result["order_by"] = bench_order_by()
+    ob = result["order_by"]
+    print(f"  PARALLEL OFF : {ob['off_ms']:.1f} ms/q")
+    print(f"  PARALLEL ON  : {ob['on_ms']:.1f} ms/q  =>  {ob['speedup']:.2f}x")
 
     with open(RESULT_FILE, "w", encoding="utf-8") as f:
         json.dump(result, f, indent=2, ensure_ascii=False)

@@ -113,6 +113,8 @@
 | INTERSECT / EXCEPT | ✓ (8.0+) | ✓ | ✓ (MINUS) | ✓ |
 | 서브쿼리 (FROM / WHERE / SELECT) | ✓ | ✓ | ✓ | ✓ |
 | 상관 서브쿼리 | ✓ | ✓ | ✓ | ✓ |
+| NOT LIKE | ✓ | ✓ | ✓ | ✓ (`WHERE name NOT LIKE 'A%'`) |
+| BETWEEN / NOT BETWEEN | ✓ | ✓ | ✓ | ✓ (음수 리터럴 포함 — `NOT BETWEEN -5 AND 100`) |
 | EXISTS / NOT EXISTS | ✓ | ✓ | ✓ | ✓ |
 | IN (서브쿼리) | ✓ | ✓ | ✓ | ✓ |
 | CTE (WITH) | ✓ | ✓ | ✓ | ✓ |
@@ -160,7 +162,7 @@
 | 범주 | MySQL | PostgreSQL | Oracle | RuSQL |
 |------|-------|------------|--------|--------|
 | 문자열 | 50+ (CONCAT, SUBSTR, TRIM, REPLACE, LPAD, RPAD, REGEXP...) | 50+ | 50+ (SUBSTR, INSTR, LPAD, RPAD, REPLACE, INITCAP...) | UPPER, LOWER, LENGTH, TRIM, CONCAT, SUBSTR, REPLACE, LPAD, RPAD, CHAR_LENGTH, LEFT, RIGHT, REVERSE, REPEAT, INSTR, LOCATE, LTRIM, RTRIM, SPACE, ASCII, HEX, FORMAT |
-| 날짜/시간 | 40+ | 40+ | 40+ (ADD_MONTHS, TRUNC, MONTHS_BETWEEN, NEXT_DAY...) | NOW, CURDATE, DATE_FORMAT, DATE_ADD, DATE_SUB, DATEDIFF, YEAR, MONTH, DAY, DAYOFWEEK, DAYOFYEAR, WEEKDAY, LAST_DAY, TIMESTAMPDIFF, UNIX_TIMESTAMP, FROM_UNIXTIME |
+| 날짜/시간 | 40+ | 40+ | 40+ (ADD_MONTHS, TRUNC, MONTHS_BETWEEN, NEXT_DAY...) | NOW(), CURDATE() (SELECT·UPDATE SET·WHERE 우변에서 모두 사용 가능), DATE_FORMAT, DATE_ADD, DATE_SUB, DATEDIFF, YEAR, MONTH, DAY, DAYOFWEEK, DAYOFYEAR, WEEKDAY, LAST_DAY, TIMESTAMPDIFF, UNIX_TIMESTAMP, FROM_UNIXTIME; DATE 컬럼 부등호 (`<`, `>`, `<=`, `>=`) 비교 정상 동작 |
 | 수학 | 20+ | 20+ | 20+ | ROUND, ABS, CEIL, FLOOR, MOD, SQRT, POW, LOG, LOG2, LOG10, EXP, SIN, COS, TAN, PI, SIGN, TRUNCATE, RAND |
 | 조건부 | COALESCE, IFNULL, NULLIF, IF, CASE | COALESCE, NULLIF, CASE, GREATEST, LEAST | COALESCE, NVL, NVL2, DECODE, NULLIF, CASE | COALESCE, IFNULL, NULLIF, IF, CAST, GREATEST, LEAST |
 | 정규식 | REGEXP, REGEXP_REPLACE (8.0+) | REGEXP_MATCH, REGEXP_REPLACE | REGEXP_LIKE, REGEXP_REPLACE, REGEXP_SUBSTR | ✓ (REGEXP/RLIKE 연산자, REGEXP_LIKE/REGEXP_REPLACE/REGEXP_MATCH) |
@@ -312,4 +314,4 @@
 | 연결 관리 | ✓ | ✓ | ✓ | ✓ (연결별 독립 데이터 디렉토리) |
 | 서버 모니터링 | ✓ | ✓ | ✓ (Performance Hub) | ✓ (TCP 서버 on/off·클라이언트 수·로그, 접속 세션 실시간 모니터링 패널 — addr·user·경과 시간·쿼리 건수, 벤치마크 결과 UI 패널) |
 | 데이터 임포트/익스포트 | ✓ (CSV, SQL) | ✓ | ✓ (CSV, Excel, XML) | ✓ (CSV 익스포트·임포트) |
-| AI 연동 | △ (HeatWave AutoML) | ✗ | △ (Oracle AI) | ✓ (True MCP — mcp_server.py: Claude Desktop 연동, stdio JSON-RPC, 7개 도구 (execute_sql · list_databases · list_tables · get_table_schema · explain_query · get_indexes · sample_data), SELECT 결과 JSON 배열 구조화, API 키 불필요, UI 자동 연결 버튼) |
+| AI 연동 | △ (HeatWave AutoML) | ✗ | △ (Oracle AI) | ✓ (AI MCP — mcp_server.py: Claude Desktop 연동, stdio JSON-RPC, **16개 도구** — DB 7개 (execute_sql · list_databases · list_tables · get_table_schema · explain_query · get_indexes · sample_data) + UI 9개 (write_to_editor · open_new_tab · execute_in_editor · close_tab · get_tab_content · list_tabs · switch_to_tab · get_query_result · get_current_database), SELECT 결과 JSON 배열 구조화, alwaysAllow 자동 설정 (허용 팝업 없음), API 키 불필요, UI 자동 연결 버튼) |
