@@ -1,0 +1,793 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>RuSQL Architecture</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    font-family: 'Segoe UI', 'Apple SD Gothic Neo', sans-serif;
+    background: #f4f6f9;
+    color: #1a1d23;
+    padding: 40px 32px;
+    min-width: 1100px;
+  }
+
+  h1 {
+    font-size: 28px;
+    font-weight: 700;
+    letter-spacing: -0.5px;
+    color: #111827;
+    margin-bottom: 6px;
+  }
+  .subtitle {
+    font-size: 13px;
+    color: #6b7280;
+    margin-bottom: 36px;
+    letter-spacing: 0.3px;
+  }
+
+  /* ── 흐름 화살표 ── */
+  .flow-arrow {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    margin: 12px 0;
+    gap: 6px;
+    color: #9ca3af;
+    font-size: 13px;
+  }
+  .flow-arrow svg { flex-shrink: 0; }
+
+  /* ── 외곽 컨테이너 ── */
+  .outer-card {
+    background: #fff;
+    border: 1.5px solid #e5e7eb;
+    border-radius: 16px;
+    padding: 28px 28px 24px;
+    margin-bottom: 16px;
+    box-shadow: 0 1px 4px rgba(0,0,0,0.05);
+  }
+  .outer-card .card-title {
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 1.2px;
+    text-transform: uppercase;
+    color: #6b7280;
+    margin-bottom: 20px;
+  }
+
+  /* ── rusql-core 상단 파이프라인 ── */
+  .pipeline {
+    display: flex;
+    align-items: center;
+    gap: 0;
+    margin-bottom: 20px;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+  .pipe-node {
+    background: #f0f4ff;
+    border: 1.5px solid #c7d2fe;
+    border-radius: 10px;
+    padding: 10px 20px;
+    font-size: 14px;
+    font-weight: 600;
+    color: #3730a3;
+    white-space: nowrap;
+  }
+  .pipe-arrow {
+    font-size: 18px;
+    color: #a5b4fc;
+    margin: 0 4px;
+  }
+
+  /* ── Query Planner ── */
+  .planner-card {
+    background: #f0fdf4;
+    border: 1.5px solid #86efac;
+    border-radius: 12px;
+    padding: 16px 20px;
+    margin-bottom: 4px;
+    width: 100%;
+  }
+  .planner-card .planner-title {
+    font-size: 14px;
+    font-weight: 700;
+    color: #15803d;
+    margin-bottom: 8px;
+  }
+  .planner-tags {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+  .planner-tag {
+    background: #dcfce7;
+    border: 1px solid #86efac;
+    border-radius: 6px;
+    padding: 3px 10px;
+    font-size: 12px;
+    color: #166534;
+    font-weight: 500;
+  }
+
+  /* ── Executor 그리드 ── */
+  .executor-grid {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 14px;
+    margin-bottom: 14px;
+    align-items: stretch;
+  }
+  .executor-grid-bottom {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 14px;
+    margin-bottom: 14px;
+    align-items: stretch;
+  }
+  .executor-grid-last {
+    display: grid;
+    grid-template-columns: 1fr 2fr;
+    gap: 14px;
+    align-items: stretch;
+  }
+  .exec-card {
+    display: flex;
+    flex-direction: column;
+  }
+
+  .exec-card {
+    background: #fff;
+    border: 1.5px solid #e5e7eb;
+    border-radius: 12px;
+    padding: 16px 18px;
+  }
+  .exec-card-header {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 14px;
+  }
+  .exec-card-icon {
+    width: 32px;
+    height: 32px;
+    border-radius: 8px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+  }
+  .exec-card-title {
+    font-size: 15px;
+    font-weight: 700;
+    letter-spacing: 0.5px;
+    text-transform: uppercase;
+    padding: 5px 12px;
+    border-radius: 8px;
+    display: inline-block;
+    margin-bottom: 0;
+  }
+
+  .ddl  { border-top: 3px solid #6366f1; }
+  .ddl  .exec-card-title  { background: #eef2ff; color: #4338ca; }
+  .dml  { border-top: 3px solid #0ea5e9; }
+  .dml  .exec-card-title  { background: #e0f2fe; color: #0369a1; }
+  .dcl  { border-top: 3px solid #8b5cf6; }
+  .dcl  .exec-card-title  { background: #f3e8ff; color: #6d28d9; }
+  .tcl  { border-top: 3px solid #f59e0b; }
+  .tcl  .exec-card-title  { background: #fffbeb; color: #b45309; }
+  .join { border-top: 3px solid #10b981; }
+  .join .exec-card-title  { background: #d1fae5; color: #065f46; }
+  .mon  { border-top: 3px solid #64748b; }
+  .mon  .exec-card-title  { background: #f1f5f9; color: #334155; }
+  .agg  { border-top: 3px solid #ec4899; }
+  .agg  .exec-card-title  { background: #fdf2f8; color: #9d174d; }
+  .win  { border-top: 3px solid #f97316; }
+  .win  .exec-card-title  { background: #fff7ed; color: #c2410c; }
+  .proc { border-top: 3px solid #06b6d4; }
+  .proc .exec-card-title  { background: #ecfeff; color: #0e7490; }
+  .qry  { border-top: 3px solid #64748b; }
+  .qry  .exec-card-title  { background: #f8fafc; color: #475569; }
+  .adv  { border-top: 3px solid #3b82f6; }
+  .adv  .exec-card-title  { background: #eff6ff; color: #1d4ed8; }
+
+  .exec-list {
+    list-style: none;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  .exec-list li {
+    font-size: 12.5px;
+    color: #374151;
+    line-height: 1.5;
+    padding-left: 10px;
+    position: relative;
+  }
+  .exec-list li::before {
+    content: '';
+    position: absolute;
+    left: 0;
+    top: 8px;
+    width: 4px;
+    height: 4px;
+    border-radius: 50%;
+    background: #d1d5db;
+  }
+  .exec-list .sub {
+    font-size: 11.5px;
+    color: #6b7280;
+    padding-left: 18px;
+  }
+  .exec-list .sub::before { background: transparent; }
+
+  /* ── 엔진 고도화 섹션 ── */
+  .engine-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 16px;
+  }
+  .engine-card {
+    background: #fff;
+    border: 1.5px solid #e5e7eb;
+    border-radius: 14px;
+    padding: 20px 20px 18px;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.04);
+  }
+  .engine-card-header {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 14px;
+    padding-bottom: 12px;
+    border-bottom: 1px solid #f3f4f6;
+  }
+  .engine-icon {
+    width: 38px;
+    height: 38px;
+    border-radius: 10px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+  }
+  .engine-card-name {
+    font-size: 13px;
+    font-weight: 700;
+    color: #111827;
+  }
+  .engine-list {
+    list-style: none;
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+  }
+  .engine-list li {
+    font-size: 12px;
+    color: #374151;
+    line-height: 1.55;
+    padding-left: 12px;
+    position: relative;
+  }
+  .engine-list li::before {
+    content: '';
+    position: absolute;
+    left: 0;
+    top: 7px;
+    width: 4px;
+    height: 4px;
+    border-radius: 50%;
+    background: #9ca3af;
+  }
+  .engine-list .note {
+    font-size: 11px;
+    color: #9ca3af;
+    padding-left: 22px;
+  }
+  .engine-list .note::before { background: transparent; }
+
+  /* 실행 노드 */
+  .exec-end {
+    display: flex;
+    justify-content: center;
+    margin-top: 8px;
+  }
+  .exec-end-node {
+    background: #1e293b;
+    color: #f8fafc;
+    border-radius: 12px;
+    padding: 12px 48px;
+    font-size: 15px;
+    font-weight: 700;
+    letter-spacing: 1px;
+  }
+
+  /* section label */
+  .section-label {
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 1.2px;
+    text-transform: uppercase;
+    color: #9ca3af;
+    margin-bottom: 14px;
+  }
+</style>
+</head>
+<body>
+
+<h1>RuSQL Architecture</h1>
+<p class="subtitle">v2.2.0 · Rust · Custom RDBMS + AI MCP</p>
+
+<!-- ═══ rusql-core ═══ -->
+<div class="outer-card">
+  <div class="card-title">rusql-core</div>
+
+  <!-- 파이프라인 -->
+  <div class="pipeline">
+    <div class="pipe-node">Lexer</div>
+    <span class="pipe-arrow">→</span>
+    <div class="pipe-node">Parser</div>
+    <span class="pipe-arrow">→</span>
+    <div class="pipe-node">AST</div>
+    <span class="pipe-arrow">→</span>
+    <div class="pipe-node">Query Planner</div>
+    <span class="pipe-arrow">→</span>
+    <div class="pipe-node">Executor</div>
+  </div>
+
+  <!-- Query Planner 상세 -->
+  <div class="planner-card">
+    <div class="planner-title">Query Planner (비용 기반)</div>
+    <div class="planner-tags" style="margin-bottom:8px;">
+      <span class="planner-tag">AccessPath 자동 선택</span>
+      <span class="planner-tag">JoinAlgo 자동 선택</span>
+      <span class="planner-tag">Cost Estimation</span>
+      <span class="planner-tag">Top-K 조기 종료</span>
+    </div>
+    <div class="planner-tags">
+      <span class="planner-tag">Join Order DP (System-R, N≤8)</span>
+      <span class="planner-tag">히스토그램 selectivity</span>
+      <span class="planner-tag">비상관 서브쿼리 HashSet 머티리얼라이제이션</span>
+    </div>
+  </div>
+
+  <div class="flow-arrow" style="margin:10px 0 14px;">
+    <svg width="12" height="18" viewBox="0 0 12 18"><path d="M6 0v14M1 9l5 7 5-7" stroke="#d1d5db" stroke-width="1.8" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+  </div>
+
+  <!-- ── Executor ── -->
+  <div class="section-label">Executor</div>
+
+  <!-- 1행: DDL DML DCL TCL -->
+  <div class="executor-grid">
+    <div class="exec-card ddl">
+      <div class="exec-card-header">
+        <div class="exec-card-icon" style="background:#eef2ff;">
+          <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="#4338ca" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M9 21V9"/></svg>
+        </div>
+        <span class="exec-card-title">DDL</span>
+      </div>
+      <ul class="exec-list">
+        <li>CREATE / DROP / ALTER / TRUNCATE</li>
+        <li>USE {database}</li>
+        <li class="sub">대상: TABLE · DATABASE</li>
+        <li class="sub">INDEX (B+Tree / HASH)</li>
+        <li class="sub">VIEW · SYNONYM</li>
+        <li class="sub">PROCEDURE · TRIGGER · FUNCTION</li>
+        <li>ALTER 세부</li>
+        <li class="sub">ADD / DROP / MODIFY / RENAME COLUMN</li>
+        <li class="sub">RENAME TABLE</li>
+        <li class="sub">ADD / DROP CONSTRAINT (FK/UQ/CHECK)</li>
+        <li>PREPARE / EXECUTE / DEALLOCATE</li>
+        <li>SET @var = expr</li>
+      </ul>
+    </div>
+
+    <div class="exec-card dml">
+      <div class="exec-card-header">
+        <div class="exec-card-icon" style="background:#e0f2fe;">
+          <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="#0369a1" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
+        </div>
+        <span class="exec-card-title">DML</span>
+      </div>
+      <ul class="exec-list">
+        <li>INSERT</li>
+        <li class="sub">VALUES · SELECT · IGNORE</li>
+        <li class="sub">ON DUPLICATE KEY UPDATE</li>
+        <li class="sub">ON CONFLICT (ABORT/IGNORE/UPDATE)</li>
+        <li class="sub">RETURNING</li>
+        <li>UPDATE (단일 / 다중) · RETURNING</li>
+        <li>DELETE (단일 / 다중) · RETURNING</li>
+        <li>MERGE INTO</li>
+        <li class="sub">WHEN MATCHED UPDATE</li>
+        <li class="sub">WHEN MATCHED DELETE</li>
+        <li class="sub">WHEN NOT MATCHED INSERT</li>
+      </ul>
+    </div>
+
+    <div class="exec-card dcl">
+      <div class="exec-card-header">
+        <div class="exec-card-icon" style="background:#f3e8ff;">
+          <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="#6d28d9" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
+        </div>
+        <span class="exec-card-title">DCL</span>
+      </div>
+      <ul class="exec-list">
+        <li>CREATE / DROP USER</li>
+        <li>GRANT / REVOKE</li>
+        <li>SHOW GRANTS</li>
+        <li>CREATE / DROP ROLE</li>
+        <li>GRANT / REVOKE ROLE</li>
+        <li>SHOW ROLES</li>
+        <li>CREATE / DROP SYNONYM</li>
+        <li>SHOW SYNONYMS</li>
+      </ul>
+    </div>
+
+    <div class="exec-card tcl">
+      <div class="exec-card-header">
+        <div class="exec-card-icon" style="background:#fffbeb;">
+          <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="#b45309" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 .49-3.51"/></svg>
+        </div>
+        <span class="exec-card-title">TCL</span>
+      </div>
+      <ul class="exec-list">
+        <li>BEGIN / COMMIT / ROLLBACK</li>
+        <li>SAVEPOINT</li>
+        <li>ROLLBACK TO sp</li>
+        <li>RELEASE SAVEPOINT</li>
+        <li>SET ISOLATION LEVEL</li>
+        <li>SHOW ISOLATION LEVEL</li>
+      </ul>
+    </div>
+  </div>
+
+  <!-- 2행: Join 모니터링 집계 윈도우 -->
+  <div class="executor-grid" style="grid-template-columns: 1fr 1.4fr 1fr 1fr; margin-bottom:14px;">
+    <div class="exec-card join">
+      <div class="exec-card-header">
+        <div class="exec-card-icon" style="background:#d1fae5;">
+          <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="#065f46" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="12" r="5"/><circle cx="16" cy="12" r="5"/></svg>
+        </div>
+        <span class="exec-card-title">Join 연산</span>
+      </div>
+      <ul class="exec-list">
+        <li>INNER JOIN</li>
+        <li>LEFT / RIGHT JOIN</li>
+        <li>FULL OUTER JOIN</li>
+        <li>CROSS JOIN</li>
+        <li>NATURAL JOIN</li>
+        <li>SELF JOIN</li>
+        <li>JOIN ... USING</li>
+        <li>Hash Join</li>
+        <li>Sort-Merge Join</li>
+        <li>Nested Loop Join</li>
+      </ul>
+    </div>
+
+    <div class="exec-card mon">
+      <div class="exec-card-header">
+        <div class="exec-card-icon" style="background:#f1f5f9;">
+          <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="#334155" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/><polyline points="6 9 10 13 14 9 18 13"/></svg>
+        </div>
+        <span class="exec-card-title">모니터링</span>
+      </div>
+      <ul class="exec-list">
+        <li>SHOW TABLES / DESCRIBE</li>
+        <li>SHOW CREATE TABLE / VIEW</li>
+        <li>SHOW INDEX / DATABASES</li>
+        <li>SHOW PROCESSLIST</li>
+        <li>SHOW BUFFER POOL / WAL</li>
+        <li>SHOW LOCKS / GRANTS / ROLES</li>
+        <li>CHECKPOINT / VACUUM</li>
+        <li>ANALYZE TABLE</li>
+        <li>BACKUP DATABASE INTO 'file'</li>
+      </ul>
+    </div>
+
+    <div class="exec-card agg">
+      <div class="exec-card-header">
+        <div class="exec-card-icon" style="background:#fdf2f8;">
+          <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="#9d174d" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>
+        </div>
+        <span class="exec-card-title">집계 함수</span>
+      </div>
+      <ul class="exec-list">
+        <li>COUNT / COUNT(DISTINCT)</li>
+        <li>SUM / SUM(DISTINCT)</li>
+        <li>AVG / AVG(DISTINCT)</li>
+        <li>MIN / MAX</li>
+        <li>STDDEV / VARIANCE</li>
+        <li>GROUP_CONCAT(SEPARATOR)</li>
+      </ul>
+    </div>
+
+    <div class="exec-card win">
+      <div class="exec-card-header">
+        <div class="exec-card-icon" style="background:#fff7ed;">
+          <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="#c2410c" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="2" width="20" height="20" rx="2"/><path d="M7 2v20M17 2v20M2 12h20"/></svg>
+        </div>
+        <span class="exec-card-title">윈도우 함수</span>
+      </div>
+      <ul class="exec-list">
+        <li>ROW_NUMBER</li>
+        <li>RANK / DENSE_RANK</li>
+        <li>LAG / LEAD</li>
+        <li>FIRST / LAST VALUE</li>
+        <li>NTH_VALUE / NTILE</li>
+        <li>PERCENT_RANK / CUME_DIST</li>
+        <li>OVER (PARTITION BY / ORDER BY)</li>
+        <li>ROWS / RANGE BETWEEN</li>
+        <li>집계 윈도우 함수</li>
+      </ul>
+    </div>
+  </div>
+
+  <!-- 3행: 프로시저 제어문 + 쿼리 기능 + 고급 쿼리 -->
+  <div style="display:grid; grid-template-columns: 1fr 1fr 2fr; gap:14px; align-items:stretch;">
+    <div class="exec-card proc">
+      <div class="exec-card-header">
+        <div class="exec-card-icon" style="background:#ecfeff;">
+          <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="#0e7490" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
+        </div>
+        <span class="exec-card-title">프로시저 제어문</span>
+      </div>
+      <ul class="exec-list">
+        <li>DECLARE / SET</li>
+        <li>IF / ELSEIF / ELSE</li>
+        <li>WHILE / LOOP</li>
+        <li>REPEAT ... UNTIL</li>
+        <li>LEAVE / ITERATE</li>
+      </ul>
+    </div>
+    <div class="exec-card qry">
+      <div class="exec-card-header">
+        <div class="exec-card-icon" style="background:#f8fafc;">
+          <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="#475569" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+        </div>
+        <span class="exec-card-title">쿼리 기능</span>
+      </div>
+      <ul class="exec-list">
+        <li>SELECT / DISTINCT</li>
+        <li>WHERE 조건</li>
+        <li class="sub">= / != / > / < / >= / <=</li>
+        <li class="sub">AND / OR / NOT</li>
+        <li class="sub">IN / NOT IN</li>
+        <li class="sub">BETWEEN / NOT BETWEEN</li>
+        <li class="sub">LIKE / NOT LIKE</li>
+        <li class="sub">IS NULL / IS NOT NULL</li>
+        <li class="sub">EXISTS / NOT EXISTS</li>
+        <li class="sub">REGEXP / RLIKE</li>
+        <li>ORDER BY (ASC / DESC)</li>
+        <li>GROUP BY / HAVING</li>
+        <li>LIMIT / OFFSET</li>
+        <li>FETCH FIRST n ROWS ONLY</li>
+        <li>CASE WHEN ... THEN ... ELSE</li>
+      </ul>
+    </div>
+
+    <div class="exec-card adv">
+      <div class="exec-card-header">
+        <div class="exec-card-icon" style="background:#eff6ff;">
+          <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="#1d4ed8" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>
+        </div>
+        <span class="exec-card-title">고급 쿼리</span>
+      </div>
+      <ul class="exec-list">
+        <li>서브쿼리 (FROM절 / WHERE절 / SELECT 스칼라 / 상관)</li>
+        <li>CTE (WITH ... AS) / 재귀 CTE (WITH RECURSIVE)</li>
+        <li>UNION / UNION ALL / INTERSECT / EXCEPT</li>
+        <li>Updatable VIEW</li>
+        <li>INFORMATION_SCHEMA (가상 뷰 10개)</li>
+        <li>PREPARE / EXECUTE / DEALLOCATE</li>
+        <li>SET @var / 사용자 변수 참조</li>
+        <li>병렬 쿼리 (rayon, 10k행+ 자동 적용)</li>
+        <li>쿼리 결과 캐시 (LRU-512, DML 자동 무효화)</li>
+        <li>MVCC 가시성 필터 / SELECT FOR UPDATE / FOR SHARE</li>
+        <li>FK ON DELETE / ON UPDATE 액션 처리</li>
+        <li>PK / FK / UNIQUE / CHECK 제약 검증</li>
+        <li>산술 표현식 / 스칼라 함수 (문자열/날짜/수학/NULL)</li>
+        <li>EXPLAIN / EXPLAIN ANALYZE</li>
+      </ul>
+    </div>
+  </div>
+</div>
+
+<!-- ── 화살표 ── -->
+<div class="flow-arrow">
+  <svg width="12" height="22" viewBox="0 0 12 22"><path d="M6 0v17M1 12l5 8 5-8" stroke="#9ca3af" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+</div>
+
+<!-- ═══ 엔진 고도화 & 최적화 ═══ -->
+<div class="outer-card">
+  <div class="card-title">엔진 고도화 &amp; 최적화</div>
+  <div class="engine-grid">
+
+    <!-- 인덱스 -->
+    <div class="engine-card">
+      <div class="engine-card-header">
+        <div class="engine-icon" style="background:#eef2ff;">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#4f46e5" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14c0 1.66 4.03 3 9 3s9-1.34 9-3V5"/><path d="M3 12c0 1.66 4.03 3 9 3s9-1.34 9-3"/>
+          </svg>
+        </div>
+        <div class="engine-card-name">인덱스</div>
+      </div>
+      <ul class="engine-list">
+        <li>B+Tree (단일 / 복합 / 클러스터드, ORDER=16)</li>
+        <li>Hash Index (USING HASH, 등호 O(1))</li>
+        <li>커버링 인덱스 (Index-only scan)</li>
+        <li>보조 인덱스 중복 키 배열 저장</li>
+        <li>증분 보조 인덱스 갱신 O(1) per row</li>
+        <li class="note">전체 재빌드 없음, DML마다 즉시 반영</li>
+        <li>B+Tree 범위 스캔 가지치기</li>
+        <li class="note">scan_from / scan_to O(log N + k)</li>
+        <li>range_keys BETWEEN 삭제 최적화</li>
+        <li class="note">역순 swap_remove, 인덱스 깨짐 없음</li>
+        <li>row_pk_pos 위치 인덱스</li>
+        <li class="note">DELETE PK = ? → O(1) swap_remove fast-path</li>
+        <li>Top-K 인덱스 조기 종료</li>
+        <li class="note">ORDER BY + LIMIT 시 조건 충족 즉시 중단</li>
+        <li>수치 인식 키 비교 ("10" &gt; "9" 정상 처리)</li>
+      </ul>
+    </div>
+
+    <!-- 쿼리 실행 최적화 -->
+    <div class="engine-card">
+      <div class="engine-card-header">
+        <div class="engine-icon" style="background:#f0fdf4;">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#16a34a" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/>
+          </svg>
+        </div>
+        <div class="engine-card-name">쿼리 실행 최적화</div>
+      </div>
+      <ul class="engine-list">
+        <li>비용 기반 AccessPath 자동 선택</li>
+        <li class="note">Hash Index 등호 조건 우선 선택</li>
+        <li>Join 순서 최적화 (System-R bitmask DP)</li>
+        <li class="note">N≤8 DP, N&gt;8 / OUTER JOIN → 그리디 폴백</li>
+        <li>비상관 서브쿼리 HashSet 머티리얼라이제이션</li>
+        <li class="note">최초 1회 실행 후 O(1) 조회</li>
+        <li>히스토그램 selectivity 추정</li>
+        <li class="note">ANALYZE TABLE → equi-depth 10-bucket</li>
+        <li>병렬 쿼리 실행 (rayon)</li>
+        <li class="note">SeqScan WHERE 필터 par_chunks</li>
+        <li class="note">GROUP BY 부분 집계 par_chunks → 병합</li>
+        <li class="note">ORDER BY par_sort_unstable_by</li>
+        <li class="note">Hash Join probe par_iter</li>
+        <li class="note">10k행+ 자동 / SET @rusql_parallel 제어</li>
+        <li>쿼리 결과 캐시 (LRU-512)</li>
+        <li class="note">트랜잭션 외부 SELECT 전용</li>
+        <li class="note">DML 시 참조 테이블 즉시 무효화</li>
+        <li class="note">서브쿼리 포함 SELECT 캐싱 스킵</li>
+      </ul>
+    </div>
+
+    <!-- 트랜잭션 & 동시성 -->
+    <div class="engine-card">
+      <div class="engine-card-header">
+        <div class="engine-icon" style="background:#fffbeb;">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#d97706" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
+          </svg>
+        </div>
+        <div class="engine-card-name">트랜잭션 &amp; 동시성</div>
+      </div>
+      <ul class="engine-list">
+        <li>WAL 바이너리 redo log</li>
+        <li>WAL fsync per-commit</li>
+        <li class="note">innodb_flush_log_at_trx_commit=1 동등</li>
+        <li>WAL Group Commit (leader/follower)</li>
+        <li class="note">다중 세션 COMMIT → 단일 fsync 묶음</li>
+        <li>Undo Log 디스크 영속화 (_undo.log)</li>
+        <li>Crash Recovery (WAL Replay)</li>
+        <li>Checkpoint (자동 512KB / 수동)</li>
+        <li>MVCC (_xmin / _xmax 버전 스탬프)</li>
+        <li class="note">논리 삭제 → VACUUM → 물리 삭제</li>
+        <li>AUTO VACUUM (DML 200회 누적 임계값)</li>
+        <li>Row-level Locking (공유 / 배타)</li>
+        <li>데드락 감지 (DFS wait-for 그래프)</li>
+        <li>격리 수준 4단계 (RC ~ SERIALIZABLE)</li>
+        <li>Deferred Write</li>
+        <li class="note">DML → session_tables 버퍼, COMMIT 시 반영</li>
+        <li>SAVEPOINT 기반 세션 로컬 undo</li>
+        <li>세션별 독립 Executor</li>
+        <li class="note">Arc&lt;RwLock&lt;SharedDatabase&gt;&gt; 공유</li>
+      </ul>
+    </div>
+
+    <!-- Buffer Pool -->
+    <div class="engine-card">
+      <div class="engine-card-header">
+        <div class="engine-icon" style="background:#fdf2f8;">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#db2777" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/>
+          </svg>
+        </div>
+        <div class="engine-card-name">Buffer Pool</div>
+      </div>
+      <ul class="engine-list">
+        <li>LRU 교체 정책</li>
+        <li>기본 64p × 16KB</li>
+        <li>--buffer-pool-size N 옵션으로 조정</li>
+        <li>dirty 페이지 flush (eviction 시 자동)</li>
+        <li>캐시 히트율 추적 (SHOW BUFFER POOL)</li>
+        <li>SELECT는 s.tables 직접 읽기로 우회</li>
+        <li class="note">인메모리 조회 성능 우선</li>
+        <li>DROP/TRUNCATE 시 캐시 자동 무효화</li>
+      </ul>
+    </div>
+
+    <!-- 영속화 -->
+    <div class="engine-card">
+      <div class="engine-card-header">
+        <div class="engine-icon" style="background:#ecfeff;">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#0891b2" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/>
+          </svg>
+        </div>
+        <div class="engine-card-name">영속화</div>
+      </div>
+      <ul class="engine-list">
+        <li>바이너리 .rdb + LZ4 압축</li>
+        <li>B+Tree .idx 자동 저장 (DML/CREATE IDX)</li>
+        <li>인덱스 메타 (indexes.json)</li>
+        <li>스키마 (auto_increment 포함)</li>
+        <li>뷰 (views.json)</li>
+        <li>저장 프로시저 (_procedures.json)</li>
+        <li>트리거 (_triggers.json)</li>
+        <li>UDF (_functions.json)</li>
+        <li>사용자 / 권한 (_users / _grants.json)</li>
+        <li>역할 (_roles / _role_grants.json)</li>
+        <li>동의어 (_synonyms.json)</li>
+        <li>전역 파일 → data/_system/ 분리</li>
+        <li>구버전 루트 경로 → _system/ 자동 마이그레이션</li>
+        <li>연결별 독립 데이터 디렉터리</li>
+        <li>TRUNCATE 후 AUTO INCREMENT 리셋</li>
+      </ul>
+    </div>
+
+    <!-- 인증 & 보안 -->
+    <div class="engine-card">
+      <div class="engine-card-header">
+        <div class="engine-icon" style="background:#f0fdf4;">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#15803d" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>
+          </svg>
+        </div>
+        <div class="engine-card-name">인증 &amp; 보안</div>
+      </div>
+      <ul class="engine-list">
+        <li>Native TCP: SHA-256 해시 인증</li>
+        <li>MySQL 프로토콜: mysql_native_password</li>
+        <li class="note">SHA1(SHA1(pw)), 챌린지-응답 검증</li>
+        <li>레거시 평문 → SHA-256 자동 마이그레이션</li>
+        <li>mysql_native_hash 자동 채움</li>
+        <li class="note">로그인 성공 시 레거시 계정에 자동 적용</li>
+        <li>root/root 기본 계정 자동 생성</li>
+        <li class="note">users가 비어있으면 최초 실행 시 생성</li>
+        <li>MySQL wire protocol 완전 호환</li>
+        <li class="note">mysql CLI · DBeaver · mysql-connector-python</li>
+      </ul>
+    </div>
+
+  </div>
+</div>
+
+<!-- ── 화살표 ── -->
+<div class="flow-arrow">
+  <svg width="12" height="22" viewBox="0 0 12 22"><path d="M6 0v17M1 12l5 8 5-8" stroke="#9ca3af" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+</div>
+
+<!-- 실행 -->
+<div class="exec-end">
+  <div class="exec-end-node">실행</div>
+</div>
+
+</body>
+</html>

@@ -22,7 +22,7 @@ CHUNK     = 500
 N_SEL     = 5_000
 N_REPS    = 300
 N_PAR     = 50_000
-N_CACHE   = 300
+N_TXN     = 1_000
 RESULT_FILE = "result.json"
 
 
@@ -276,6 +276,44 @@ def bench_query_cache(db) -> dict:
     }
 
 
+# ── 트랜잭션 TPS ──────────────────────────────────────────────────────────────
+# AutoCommit(묵시적) vs BEGIN/COMMIT(명시적) INSERT 1,000건 비교
+def bench_transaction(n=N_TXN) -> dict:
+    db = RuSQL()
+    db.execute("CREATE DATABASE IF NOT EXISTS bench_db")
+    db.execute("USE bench_db")
+
+    db.execute("DROP TABLE IF EXISTS bench_txn")
+    db.execute(
+        "CREATE TABLE bench_txn (id INT, val INT, "
+        "CONSTRAINT pk_txn PRIMARY KEY (id))"
+    )
+    t0 = time.perf_counter()
+    for i in range(n):
+        db.execute(f"INSERT INTO bench_txn (id, val) VALUES ({i}, {i})")
+    auto_s = time.perf_counter() - t0
+
+    db.execute("DROP TABLE IF EXISTS bench_txn")
+    db.execute(
+        "CREATE TABLE bench_txn (id INT, val INT, "
+        "CONSTRAINT pk_txn PRIMARY KEY (id))"
+    )
+    t0 = time.perf_counter()
+    for i in range(n):
+        db.execute("BEGIN")
+        db.execute(f"INSERT INTO bench_txn (id, val) VALUES ({i}, {i})")
+        db.execute("COMMIT")
+    txn_s = time.perf_counter() - t0
+
+    db.execute("DROP TABLE IF EXISTS bench_txn")
+    db.close()
+    return {
+        "rows": n,
+        "auto_s": round(auto_s, 2),
+        "txn_s":  round(txn_s, 2),
+    }
+
+
 # ── main ──────────────────────────────────────────────────────────────────────
 def main():
     result = {}
@@ -317,14 +355,14 @@ def main():
     print(f"  SeqScan+Sort  : {tk['seq_ms']:.3f} ms/q")
     print(f"  Index LIMIT N : {tk['idx_ms']:.3f} ms/q  =>  {tk['speedup']:.1f}x")
 
-    print(f"[7/9] 쿼리 캐시 — DB Scan vs Cache Hit ({N_CACHE}회) ...")
-    result["query_cache"] = bench_query_cache(db)
-    qc = result["query_cache"]
-    print(f"  DB Scan   : {qc['scan_ms']:.3f} ms")
-    print(f"  Cache Hit : {qc['hit_ms']:.3f} ms  =>  {qc['speedup']:.1f}x")
-
     db.execute("DROP DATABASE IF EXISTS bench_db")
     db.close()
+
+    print(f"[7/9] 트랜잭션 TPS — AutoCommit vs BEGIN/COMMIT ({N_TXN:,}건) ...")
+    result["transaction"] = bench_transaction()
+    tx = result["transaction"]
+    print(f"  AutoCommit  : {round(tx['rows'] / tx['auto_s'])} TPS")
+    print(f"  BEGIN/COMMIT: {round(tx['rows'] / tx['txn_s'])} TPS")
 
     print("[8/9] 병렬 집계 스케일링 — GROUP BY ...")
     result["parallel"] = bench_parallel()

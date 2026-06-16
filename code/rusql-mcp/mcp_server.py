@@ -129,6 +129,10 @@ def execute_sql(sql: str, database: str = "") -> str:
     - Multi-table UPDATE / DELETE
     Always write SQL that avoids the above. Use only: INT, BIGINT, FLOAT, DOUBLE, VARCHAR(n), TEXT, DATE, DATETIME."""
     raw = _run(sql, database)
+    # DDL 실행 후 UI 사이드바 갱신
+    DDL_KEYWORDS = ("CREATE ", "DROP ", "ALTER ", "RENAME ", "USE ")
+    if any(sql.strip().upper().startswith(k) for k in DDL_KEYWORDS):
+        _run_ui("refresh_sidebar", "")
     # SELECT 계열 결과는 JSON 배열로 변환
     stripped = raw.strip()
     if "\t" in stripped and not stripped.startswith("ERR") and not stripped.startswith("OK"):

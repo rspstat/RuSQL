@@ -795,6 +795,8 @@ function App() {
       } else if (action === "switch_to_tab") {
         const target = tabs.find(t => t.name === data);
         if (target) switchTab(target.id);
+      } else if (action === "refresh_sidebar") {
+        refreshSidebar();
       }
     };
   });
@@ -3850,10 +3852,11 @@ function App() {
                     </div>
                     {benchResult !== undefined && benchResult !== null ? (() => {
                       const r = benchResult as Record<string, unknown>;
-                      const fms  = (v: unknown) => typeof v === "number" ? v.toFixed(3) : "—";
                       const fmx  = (v: unknown) => typeof v === "number" ? v.toFixed(1) : "—";
                       const fmtps = (rows: number, secs: number) =>
-                        secs > 0 ? Math.round(rows / secs).toLocaleString("ko-KR") + " rows/s" : "—";
+                        secs > 0 ? Math.round(rows / secs).toLocaleString("ko-KR") + " TPS" : "—";
+                      const fmtpsms = (ms: unknown) =>
+                        typeof ms === "number" && ms > 0 ? Math.round(1000 / ms).toLocaleString("ko-KR") + " TPS" : "—";
                       const fmtime = (v: unknown) => typeof v === "number" ? v.toFixed(2) + "초" : "—";
                       const greenBadge = (label: string) => (
                         <span style={{ background: "#4ec9b0", color: "#1e1e1e", fontWeight: 700, padding: "1px 6px", borderRadius: 3, fontSize: 11, marginLeft: 6 }}>{label}</span>
@@ -3867,7 +3870,7 @@ function App() {
                       const sg = r.single as Record<string,number> | undefined;
                       const bk = r.bulk   as Record<string,number> | undefined;
                       const pl = r.point_lookup as Record<string,number> | undefined;
-                      const qc = r.query_cache  as Record<string,number> | undefined;
+                      const txn = r.transaction as Record<string,number> | undefined;
                       return (
                         <div style={{ fontSize: 12, lineHeight: 1.8 }}>
                           {sg && <div style={{ marginBottom: 10 }}>
@@ -3894,14 +3897,24 @@ function App() {
                           })()}
                           {pl && <div style={{ marginBottom: 10 }}>
                             <div style={{ color: "#4ec9b0", fontWeight: 600, marginBottom: 2 }}>인덱스 성능 (B+Tree){greenBadge(`${fmx(pl.speedup)}x 빠름`)}</div>
-                            {row("SeqScan", `${fms(pl.seq_ms)} ms/q`)}
-                            {row("BTree Index", `${fms(pl.idx_ms)} ms/q`)}
+                            {row("SeqScan", fmtpsms(pl.seq_ms))}
+                            {row("BTree Index", fmtpsms(pl.idx_ms))}
                           </div>}
-                          {qc && <div style={{ marginBottom: 10 }}>
-                            <div style={{ color: "#4ec9b0", fontWeight: 600, marginBottom: 2 }}>쿼리 캐시 (LRU-512){qc.speedup >= 2 ? greenBadge(`${fmx(qc.speedup)}x 빠름`) : null}</div>
-                            {row("DB Scan",   `${fms(qc.scan_ms)} ms`)}
-                            {row("Cache Hit", `${fms(qc.hit_ms)} ms`)}
-                          </div>}
+                          {txn && (() => {
+                            const autoTps = txn.auto_s > 0 ? Math.round(txn.rows / txn.auto_s) : 0;
+                            const txnTps  = txn.txn_s  > 0 ? Math.round(txn.rows / txn.txn_s)  : 0;
+                            const speedup = autoTps > 0 && txnTps > 0 ? (autoTps / txnTps) : 0;
+                            return (
+                              <div style={{ marginBottom: 10 }}>
+                                <div style={{ color: "#4ec9b0", fontWeight: 600, marginBottom: 2 }}>
+                                  트랜잭션 처리 ({(txn.rows ?? 1000).toLocaleString()}건)
+                                  {speedup >= 1.5 ? greenBadge(`AutoCommit ${fmx(speedup)}x 빠름`) : null}
+                                </div>
+                                {row("AutoCommit",   autoTps.toLocaleString("ko-KR") + " TPS")}
+                                {row("BEGIN/COMMIT", txnTps.toLocaleString("ko-KR")  + " TPS")}
+                              </div>
+                            );
+                          })()}
                         </div>
                       );
                     })() : benchResult === null ? (

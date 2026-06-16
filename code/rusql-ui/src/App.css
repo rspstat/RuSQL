@@ -1531,7 +1531,7 @@ body {
 
 .erd-col-type {
   font-size: 11px;
-  color: #cccccc;
+  color: #4ec9b0;
   flex: 1 1 auto;
   min-width: 0;
   overflow: hidden;
@@ -1545,15 +1545,15 @@ body {
   font-size: 9px;
   width: 26px;
   text-align: center;
-  color: #888;
+  color: #555;
   font-weight: 600;
   flex-shrink: 0;
   letter-spacing: 0.3px;
 }
 
-.erd-badge.on-nn { color: #cccccc; }
-.erd-badge.on-uq { color: #cccccc; }
-.erd-badge.on-ai { color: #cccccc; }
+.erd-badge.on-nn { color: #e8b84b; }
+.erd-badge.on-uq { color: #e8b84b; }
+.erd-badge.on-ai { color: #e8b84b; }
 
 /* 줌 슬라이더 */
 .erd-zoom-slider {

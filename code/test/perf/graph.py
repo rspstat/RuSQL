@@ -17,19 +17,21 @@ with open(HERE / "result.json", encoding="utf-8") as f:
 s   = r["single"]
 b   = r["bulk"]
 pl  = r["point_lookup"]
-qc  = r["query_cache"]
+tx  = r["transaction"]
 
 ins_s = s["rows"]  / s["insert_s"]
 del_s = s["rows"]  / s["delete_s"]
 ins_b = b["rows"]  / b["insert_s"]
 del_b = b["rows"]  / b["delete_s"]
+auto_tps = tx["rows"] / tx["auto_s"]
+txn_tps  = tx["rows"] / tx["txn_s"]
 
 # ── 색상 ─────────────────────────────────────────────────────────────────
 INS   = "#3B82F6"   # blue
 DEL   = "#10B981"   # emerald
 SEQ   = "#94A3B8"   # slate
 IDX   = "#F97316"   # orange
-CACHE = "#06B6D4"   # cyan
+TXN   = "#F59E0B"   # amber
 BG    = "#FFFFFF"
 GRID  = "#E2E8F0"
 TEXT  = "#0F172A"
@@ -91,7 +93,7 @@ ax1.set_xticks([0, 1])
 ax1.set_xticklabels(["INSERT", "DELETE"])
 ax1.set_ylim(0, ymax1)
 ax1.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f"{x:,.0f}"))
-style(ax1, f"단건 쓰기  ({s['rows']:,} rows)", "rows / sec",
+style(ax1, f"단건 쓰기  ({s['rows']:,} rows)", "TPS",
       f"{s['rows']:,}건 · 단건 I/O")
 vbar_label(ax1, bi1[0], "{:,.0f}", ymax1, color=INS)
 vbar_label(ax1, bd1[0], "{:,.0f}", ymax1, color=DEL)
@@ -104,51 +106,47 @@ ax2.set_xticks([0, 1])
 ax2.set_xticklabels(["INSERT", "DELETE"])
 ax2.set_ylim(0, ymax2)
 ax2.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f"{x:,.0f}"))
-style(ax2, f"Bulk 쓰기  ({b['rows']:,} rows)", "rows / sec",
+style(ax2, f"Bulk 쓰기  ({b['rows']:,} rows)", "TPS",
       f"{b['rows']:,}건 · 500행 묶음")
 vbar_label(ax2, bi2[0], "{:,.0f}", ymax2, color=INS)
 vbar_label(ax2, bd2[0], "{:,.0f}", ymax2, color=DEL)
 
 # ── ③ 인덱스 성능 (포인트 조회) ───────────────────────────────────────────
-seq_v = pl["seq_ms"]
-idx_v = pl["idx_ms"]
-sp    = pl["speedup"]
+seq_tps = 1000 / pl["seq_ms"] if pl["seq_ms"] > 0 else 0
+idx_tps = 1000 / pl["idx_ms"] if pl["idx_ms"] > 0 else 0
+sp      = pl["speedup"]
 
-bs3 = ax3.bar(0, seq_v, W, color=SEQ, zorder=3)
-bi3 = ax3.bar(1, idx_v, W, color=IDX, zorder=3)
+bs3 = ax3.bar(0, seq_tps, W, color=SEQ, zorder=3)
+bi3 = ax3.bar(1, idx_tps, W, color=IDX, zorder=3)
 ax3.set_xticks([0, 1])
 ax3.set_xticklabels(["SeqScan", "B+Tree Index"])
-ymax3 = max(seq_v, idx_v) * 1.40
+ymax3 = max(seq_tps, idx_tps) * 1.40
 ax3.set_ylim(0, ymax3)
-style(ax3, "인덱스 성능  (ms / query  낮을수록 빠름)", "ms / query",
+ax3.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f"{x:,.0f}"))
+style(ax3, "인덱스 성능  (TPS  높을수록 빠름)", "TPS",
       "5,000행 · 포인트 조회 · 300회 평균")
-ax3.text(bs3[0].get_x() + bs3[0].get_width()/2, seq_v + ymax3*0.03,
-         f"{seq_v:.1f}", ha="center", va="bottom", fontsize=9, color=SUB)
-ax3.text(bi3[0].get_x() + bi3[0].get_width()/2, idx_v + ymax3*0.03,
-         f"{idx_v:.3f}", ha="center", va="bottom", fontsize=9, color="#C2410C")
+vbar_label(ax3, bs3[0], "{:,.0f}", ymax3, color=SUB)
+vbar_label(ax3, bi3[0], "{:,.0f}", ymax3, color="#C2410C")
 ax3.text(0.5, ymax3 * 0.55, f"{sp:.0f}×",
          ha="center", va="bottom", fontsize=16, fontweight="bold", color="#9A3412",
          transform=ax3.get_xaxis_transform())
 
-# ── ④ 쿼리 결과 캐시 ─────────────────────────────────────────────────────
-scan_v = qc["scan_ms"]
-hit_v  = qc["hit_ms"]
-sp_qc  = qc["speedup"]
+# ── ④ 트랜잭션 TPS ───────────────────────────────────────────────────────
+sp_tx = auto_tps / txn_tps if txn_tps > 0 else 0
 
-bp4 = ax4.bar(0, scan_v, W, color=SEQ,   zorder=3)
-bn4 = ax4.bar(1, hit_v,  W, color=CACHE, zorder=3)
+ba4 = ax4.bar(0, auto_tps, W, color=INS, zorder=3)
+bt4 = ax4.bar(1, txn_tps,  W, color=TXN, zorder=3)
 ax4.set_xticks([0, 1])
-ax4.set_xticklabels(["DB Scan\n(캐시 미스)", "Cache Hit\n(캐시 히트)"])
-ymax4 = max(scan_v, hit_v) * 1.35
+ax4.set_xticklabels(["AutoCommit\n(묵시적)", "BEGIN/COMMIT\n(명시적)"])
+ymax4 = max(auto_tps, txn_tps) * 1.40
 ax4.set_ylim(0, ymax4)
-style(ax4, "쿼리 캐시  (ms / query  낮을수록 빠름)", "ms / query",
-      f"LRU 512 · {sp_qc:.0f}× speedup")
-ax4.text(bp4[0].get_x() + bp4[0].get_width()/2, scan_v + ymax4*0.03,
-         f"{scan_v:.2f}", ha="center", va="bottom", fontsize=9, color=SUB)
-ax4.text(bn4[0].get_x() + bn4[0].get_width()/2, hit_v + ymax4*0.03,
-         f"{hit_v:.3f}", ha="center", va="bottom", fontsize=9, color="#0E7490")
-ax4.text(0.5, ymax4 * 0.55, f"{sp_qc:.0f}×",
-         ha="center", va="bottom", fontsize=16, fontweight="bold", color=CACHE,
+ax4.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f"{x:,.0f}"))
+style(ax4, "트랜잭션 TPS  (높을수록 빠름)", "TPS",
+      f"{tx['rows']:,}건 · AutoCommit {sp_tx:.0f}× 빠름")
+vbar_label(ax4, ba4[0], "{:,.0f}", ymax4, color=INS)
+vbar_label(ax4, bt4[0], "{:,.0f}", ymax4, color=TXN)
+ax4.text(0.5, ymax4 * 0.55, f"{sp_tx:.0f}×",
+         ha="center", va="bottom", fontsize=16, fontweight="bold", color=TXN,
          transform=ax4.get_xaxis_transform())
 
 # ── 저장 & 표시 ───────────────────────────────────────────────────────────

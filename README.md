@@ -673,7 +673,7 @@ code/
 └── test/
     ├── test_full.sql              전체 기능 검증 SQL (DDL/DML/트랜잭션/힌스토그램 등)
     └── perf/
-        ├── bench.py               RuSQL vs MySQL 성능 측정 (INSERT TPS / SELECT / 병렬 / 동시 접속)
+        ├── bench.py               RuSQL 성능 측정 (단건·Bulk INSERT/DELETE TPS, B+Tree 인덱스 TPS, 트랜잭션 TPS — AutoCommit vs BEGIN/COMMIT, 병렬 쿼리)
         ├── chart.py               측정 결과 → matplotlib PNG 차트 생성
         ├── graph.py               발표용 벤치마크 결과 시각화 (라이트 모드, result.json → PNG)
         ├── requirements.txt       Python 의존 패키지
@@ -763,3 +763,5 @@ code/
 [B+ Tree 이해](https://velog.io/@emplam27/%EC%9E%90%EB%A3%8C%EA%B5%AC%EC%A1%B0-%EA%B7%B8%EB%A6%BC%EC%9C%BC%EB%A1%9C-%EC%95%8C%EC%95%84%EB%B3%B4%EB%8A%94-B-Plus-Tree)
 
 [트랜잭션 이해](https://leeeeeyeon-dev.tistory.com/121)
+
+[Google-Drive](https://drive.google.com/drive/folders/1YjjnUqgKtRZxZl8olszRZZS2R4VP5Gcr?usp=sharing)
