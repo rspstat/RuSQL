@@ -758,10 +758,8 @@ code/
 <br/>
 
 ## Link
-[B+ Tree 구조](https://chanho0912.tistory.com/109)
+[B+ Tree Structure](https://chanho0912.tistory.com/109)
 
-[B+ Tree 이해](https://velog.io/@emplam27/%EC%9E%90%EB%A3%8C%EA%B5%AC%EC%A1%B0-%EA%B7%B8%EB%A6%BC%EC%9C%BC%EB%A1%9C-%EC%95%8C%EC%95%84%EB%B3%B4%EB%8A%94-B-Plus-Tree)
+[B+ Tree Study](https://velog.io/@emplam27/%EC%9E%90%EB%A3%8C%EA%B5%AC%EC%A1%B0-%EA%B7%B8%EB%A6%BC%EC%9C%BC%EB%A1%9C-%EC%95%8C%EC%95%84%EB%B3%B4%EB%8A%94-B-Plus-Tree)
 
-[트랜잭션 이해](https://leeeeeyeon-dev.tistory.com/121)
-
-[Google-Drive](https://drive.google.com/drive/folders/1YjjnUqgKtRZxZl8olszRZZS2R4VP5Gcr?usp=sharing)
+[Transaction Study](https://leeeeeyeon-dev.tistory.com/121)
