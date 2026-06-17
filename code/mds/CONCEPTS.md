@@ -189,3 +189,28 @@ Group Commit이 적용되면 여러 autocommit 쓰기를 묶어 한 번의 flush
 
 AutoCommit 대비 30배 차이는 비정상이 아니라 ACID 내구성(Durability) 보장의 비용이다.
 MySQL도 innodb_flush_log_at_trx_commit=1 기본 설정에서 동일한 범위(100~500 TPS)가 나온다.
+
+---
+
+쿼리 플래너
+
+AccessPath 자동 선택
+테이블 접근 방식(Full Scan, Index Scan 등)을 비용 추정으로 자동 선택
+
+Join Algo 자동 선택
+Nested Loop, Hash Join, Sort-Merge Join 등 비용이 낮은 알고리즘 결정
+
+Cost Estimation
+I/O, CPU, 메모리 비용을 통계 기반으로 수치화하여 실행 계획 간에 비교 사용
+
+Top-K 조기 종료
+Limit K 쿼리에서 상위 K개 확보시 조기 종료
+
+Join Order DP
+DP 알고리즘으로 최적 조인 순서 탐색
+
+히스토그램 선택성
+컬럼값 분포를 히스토그램에 저장하여 WHERE 조건의 선택도 정밀 추정
+
+비상관 서브쿼리 HashSet 구체화
+상관관계가 없는 서브쿼리는 캐싱으로 한 번만 구체화하여 반복실행 제거
