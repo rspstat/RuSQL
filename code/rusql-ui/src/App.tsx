@@ -1281,7 +1281,7 @@ function App() {
   };
 
   const dropColumn = async (table: string, colName: string) => {
-    if (!window.confirm(`"${table}.${colName}" 컬럼을 삭제하시겠습니까?`)) return;
+    if (!window.confirm(`Are you sure you want to delete the "${table}.${colName}" column?`)) return;
     try {
       await invoke<MultiQueryResult>("execute_query", { query: `ALTER TABLE ${table} DROP COLUMN ${colName};`, ts: Date.now() });
       await refreshEditTableModal(table);
@@ -1413,12 +1413,12 @@ function App() {
   // ─── 메뉴 항목 정의 ─────────────────────────────────────────
   const menus: { label: string; items: { label: string; shortcut?: string; divider?: boolean; action?: () => void }[] }[] = [
     {
-      label: "파일",
+      label: "File",
       items: [
-        { label: "새 탭", shortcut: "Ctrl+T", action: () => { addTab(); setActiveView("editor"); } },
-        { label: "탭 닫기", shortcut: "Ctrl+W", action: () => closeTab(activeTabId) },
+        { label: "New Tab", shortcut: "Ctrl+T", action: () => { addTab(); setActiveView("editor"); } },
+        { label: "Close Tab", shortcut: "Ctrl+W", action: () => closeTab(activeTabId) },
         { label: "", divider: true },
-        { label: "저장", shortcut: "Ctrl+S", action: () => {
+        { label: "Save", shortcut: "Ctrl+S", action: () => {
           const content = queryRef.current;
           const blob = new Blob([content], { type: "text/plain" });
           const a = document.createElement("a");
@@ -1427,63 +1427,63 @@ function App() {
           a.click();
         }},
         { label: "", divider: true },
-        { label: "종료", shortcut: "Alt+F4", action: () => window.close() },
+        { label: "Exit", shortcut: "Alt+F4", action: () => window.close() },
       ],
     },
     {
-      label: "편집",
+      label: "Edit",
       items: [
-        { label: "실행 취소", shortcut: "Ctrl+Z", action: () => editorRef.current?.trigger("menu", "undo", null) },
-        { label: "다시 실행", shortcut: "Ctrl+Y", action: () => editorRef.current?.trigger("menu", "redo", null) },
+        { label: "Undo", shortcut: "Ctrl+Z", action: () => editorRef.current?.trigger("menu", "undo", null) },
+        { label: "Redo", shortcut: "Ctrl+Y", action: () => editorRef.current?.trigger("menu", "redo", null) },
         { label: "", divider: true },
-        { label: "잘라내기", shortcut: "Ctrl+X", action: () => editorRef.current?.trigger("menu", "editor.action.clipboardCutAction", null) },
-        { label: "복사", shortcut: "Ctrl+C", action: () => editorRef.current?.trigger("menu", "editor.action.clipboardCopyAction", null) },
-        { label: "붙여넣기", shortcut: "Ctrl+V", action: () => editorRef.current?.trigger("menu", "editor.action.clipboardPasteAction", null) },
+        { label: "Cut", shortcut: "Ctrl+X", action: () => editorRef.current?.trigger("menu", "editor.action.clipboardCutAction", null) },
+        { label: "Copy", shortcut: "Ctrl+C", action: () => editorRef.current?.trigger("menu", "editor.action.clipboardCopyAction", null) },
+        { label: "Paste", shortcut: "Ctrl+V", action: () => editorRef.current?.trigger("menu", "editor.action.clipboardPasteAction", null) },
         { label: "", divider: true },
-        { label: "모두 선택", shortcut: "Ctrl+A", action: () => editorRef.current?.trigger("menu", "editor.action.selectAll", null) },
-        { label: "찾기", shortcut: "Ctrl+F", action: () => editorRef.current?.trigger("menu", "actions.find", null) },
+        { label: "Select All", shortcut: "Ctrl+A", action: () => editorRef.current?.trigger("menu", "editor.action.selectAll", null) },
+        { label: "Find", shortcut: "Ctrl+F", action: () => editorRef.current?.trigger("menu", "actions.find", null) },
         { label: "", divider: true },
-        { label: "SQL 포매터", shortcut: "Ctrl+Shift+F", action: () => {
+        { label: "SQL Formatter", shortcut: "Ctrl+Shift+F", action: () => {
           try {
             const fmt = sqlFormat(editorRef.current?.getValue() ?? "", { language: 'sql', tabWidth: 2, keywordCase: 'upper' });
             editorRef.current?.setValue(fmt);
           } catch {}
         }},
-        { label: "북마크 추가", shortcut: "★", action: addBookmark },
+        { label: "Add Bookmark", shortcut: "★", action: addBookmark },
       ],
     },
     {
-      label: "보기",
+      label: "View",
       items: [
-        { label: "SQL 에디터", shortcut: "Ctrl+1", action: () => setActiveView("editor") },
-        { label: "ERD 편집기", shortcut: "Ctrl+2", action: () => setActiveView("erd") },
-        { label: "서버 관리자", shortcut: "Ctrl+3", action: () => setActiveView("server") },
+        { label: "SQL Editor", shortcut: "Ctrl+1", action: () => setActiveView("editor") },
+        { label: "ERD Editor", shortcut: "Ctrl+2", action: () => setActiveView("erd") },
+        { label: "Server Manager", shortcut: "Ctrl+3", action: () => setActiveView("server") },
         { label: "", divider: true },
-        { label: "사이드바 토글", shortcut: "Ctrl+B", action: () => setSidebarWidth(w => w > 0 ? 0 : 240) },
+        { label: "Toggle Sidebar", shortcut: "Ctrl+B", action: () => setSidebarWidth(w => w > 0 ? 0 : 240) },
       ],
     },
     {
-      label: "실행",
+      label: "Run",
       items: [
-        { label: "쿼리 실행", shortcut: "F5", action: () => { setActiveView("editor"); runQuery(); } },
+        { label: "Run Query", shortcut: "F5", action: () => { setActiveView("editor"); runQuery(); } },
         { label: "", divider: true },
-        { label: "새 쿼리 탭", shortcut: "Ctrl+T", action: () => { addTab(); setActiveView("editor"); } },
-        { label: "탭 닫기", shortcut: "Ctrl+W", action: () => closeTab(activeTabId) },
+        { label: "New Query Tab", shortcut: "Ctrl+T", action: () => { addTab(); setActiveView("editor"); } },
+        { label: "Close Tab", shortcut: "Ctrl+W", action: () => closeTab(activeTabId) },
       ],
     },
     {
-      label: "터미널",
+      label: "Terminal",
       items: [
-        { label: "새 터미널", shortcut: "Ctrl+`", action: () => setActiveView("server") },
+        { label: "New Terminal", shortcut: "Ctrl+`", action: () => setActiveView("server") },
         { label: "", divider: true },
-        { label: "서버 시작", action: () => setActiveView("server") },
+        { label: "Start Server", action: () => setActiveView("server") },
       ],
     },
   ];
 
   // ─── 로그인 화면 ────────────────────────────────────────────
   if (!loggedIn) {
-    const homeMenuLabels = ["파일", "편집", "보기", "실행", "터미널"];
+    const homeMenuLabels = ["File", "Edit", "View", "Run", "Terminal"];
     return (
       <div className="home-bg">
 
@@ -1500,7 +1500,7 @@ function App() {
               {openMenu === label && (
                 <div className="menu-dropdown">
                   <div className="menu-dropdown-item" style={{ color: "#555", cursor: "default", fontSize: 11 }}>
-                    연결 후 사용 가능
+                    Available after connecting
                   </div>
                 </div>
               )}
@@ -1534,7 +1534,7 @@ function App() {
           <div className="home-right">
           <div className="home-right-inner">
           <div className="home-sidebar" style={{ width: homeSidebarWidth }}>
-            <div className="home-sidebar-header">연결</div>
+            <div className="home-sidebar-header">Connections</div>
             {connections.map(conn => (
               <div
                 key={conn.id}
@@ -1552,12 +1552,12 @@ function App() {
                   <path d="M5 11v6c0 1.66 3.13 3 7 3s7-1.34 7-3v-6" stroke="url(#dbGradSidebar)" strokeWidth="1.2" fill="none" vectorEffect="non-scaling-stroke"/>
                 </svg>
                 <span className="home-sidebar-name">{conn.name}</span>
-                {conn.autoLogin && <span className="home-sidebar-badge">자동</span>}
+                {conn.autoLogin && <span className="home-sidebar-badge">Auto</span>}
               </div>
             ))}
             <div className="home-sidebar-add" onClick={() => setShowNewConn(true)}>
               <svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor"><path d="M19 13H13v6h-2v-6H5v-2h6V5h2v6h6v2z"/></svg>
-              새 연결
+              New Connection
             </div>
           </div>
 
@@ -1593,7 +1593,7 @@ function App() {
               </div>
               <div>
                 <h1 className="home-title">RuSQL Connections</h1>
-                <p className="home-desc">연결할 데이터베이스를 선택하거나 새 연결을 추가하세요.</p>
+                <p className="home-desc">Select a database to connect or add a new connection.</p>
               </div>
             </div>
 
@@ -1613,28 +1613,28 @@ function App() {
                 <svg width="52" height="52" viewBox="0 0 24 24" fill="currentColor">
                   <path d="M19 13H13v6h-2v-6H5v-2h6V5h2v6h6v2z"/>
                 </svg>
-                새 연결
+                New Connection
               </button>
               <button className="home-quick-btn" onClick={() => invoke("open_terminal")}>
                 <svg width="52" height="52" viewBox="0 0 24 24" fill="currentColor">
                   <path d="M20 4H4C2.9 4 2 4.9 2 6V18C2 19.1 2.9 20 4 20H20C21.1 20 22 19.1 22 18V6C22 4.9 21.1 4 20 4ZM20 18H4V6H20V18ZM6 10L8.5 12.5L6 15L7.5 16.5L11.5 12.5L7.5 8.5L6 10ZM12 15H18V17H12V15Z"/>
                 </svg>
-                터미널 열기
+                Open Terminal
               </button>
               <button className="home-quick-btn" onClick={() => invoke("open_url", { url: "https://github.com/rspstat/RuSQL" })}>
                 <svg width="52" height="52" viewBox="0 0 24 24" fill="currentColor">
                   <path d="M12 2C6.477 2 2 6.477 2 12c0 4.42 2.865 8.166 6.839 9.489.5.092.682-.217.682-.482 0-.237-.009-.868-.013-1.703-2.782.604-3.369-1.342-3.369-1.342-.454-1.154-1.11-1.462-1.11-1.462-.908-.62.069-.608.069-.608 1.003.07 1.531 1.03 1.531 1.03.892 1.529 2.341 1.088 2.91.832.092-.647.35-1.088.636-1.338-2.22-.253-4.555-1.11-4.555-4.943 0-1.091.39-1.984 1.029-2.683-.103-.253-.446-1.27.098-2.647 0 0 .84-.269 2.75 1.025A9.578 9.578 0 0112 6.836a9.59 9.59 0 012.504.337c1.909-1.294 2.747-1.025 2.747-1.025.546 1.377.202 2.394.1 2.647.64.699 1.028 1.592 1.028 2.683 0 3.842-2.339 4.687-4.566 4.935.359.309.678.919.678 1.852 0 1.336-.012 2.415-.012 2.741 0 .267.18.577.688.479C19.138 20.162 22 16.418 22 12c0-5.523-4.477-10-10-10z"/>
                 </svg>
-                GitHub 방문
+                Visit GitHub
               </button>
             </div>
 
             {/* 연결 목록 헤더 */}
             <div className="home-section-bar">
-              <span className="home-section-label">저장된 연결</span>
+              <span className="home-section-label">Saved Connections</span>
               <button className="home-add-btn" onClick={() => setShowNewConn(true)}>
                 <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><path d="M19 13H13v6h-2v-6H5v-2h6V5h2v6h6v2z"/></svg>
-                새 연결
+                New Connection
               </button>
             </div>
 
@@ -1665,16 +1665,16 @@ function App() {
                         <svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor"><path d="M12 12c2.7 0 4.8-2.1 4.8-4.8S14.7 2.4 12 2.4 7.2 4.5 7.2 7.2 9.3 12 12 12zm0 2.4c-3.2 0-9.6 1.6-9.6 4.8v2.4h19.2v-2.4c0-3.2-6.4-4.8-9.6-4.8z"/></svg>
                         {conn.user}
                       </span>
-                      <span className="home-conn-chip" title={`데이터 디렉토리: ${conn.dataDir}`}>
+                      <span className="home-conn-chip" title={`Data directory: ${conn.dataDir}`}>
                         <svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor"><path d="M20 6h-8l-2-2H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2z"/></svg>
                         {conn.dataDir.split(/[\\/]/).pop()}
                       </span>
-                      {conn.autoLogin && <span className="home-conn-chip" style={{ color: "#4ec9b0" }}>자동 로그인</span>}
+                      {conn.autoLogin && <span className="home-conn-chip" style={{ color: "#4ec9b0" }}>Auto Login</span>}
                     </div>
                   </div>
                   <button
                     className="home-conn-del"
-                    title="삭제"
+                    title="Delete"
                     onClick={e => {
                       e.stopPropagation();
                       // localStorage 키 정리
@@ -1701,8 +1701,8 @@ function App() {
               <span className="status-item" style={{ color: "#9cdcfe" }}>RuSQL v2.2.0</span>
             </div>
             <div className="status-right">
-              <span className="status-item">MySQL 호환 RDBMS</span>
-              <span className="status-item">포트 7878 / 3306</span>
+              <span className="status-item">MySQL Compatible RDBMS</span>
+              <span className="status-item">Port 7878 / 3306</span>
               <span className="status-item">B+Tree · WAL · MVCC</span>
             </div>
           </div>
@@ -1736,7 +1736,7 @@ function App() {
                         value={dlgPass}
                         onChange={e => setDlgPass(e.target.value)}
                         className="dlg-input"
-                        placeholder="비밀번호 입력"
+                        placeholder="Enter password"
                         autoFocus
                       />
                       <button type="button" className="dlg-eye" tabIndex={-1}
@@ -1748,9 +1748,9 @@ function App() {
                 </div>
                 {dlgError && <div className="dlg-error">{dlgError}</div>}
                 <div className="dlg-actions">
-                  <button type="button" className="dlg-cancel" onClick={() => setConnectingTo(null)}>취소</button>
+                  <button type="button" className="dlg-cancel" onClick={() => setConnectingTo(null)}>Cancel</button>
                   <button type="submit" className="dlg-connect" disabled={dlgLoading}>
-                    {dlgLoading ? "연결 중..." : "연결"}
+                    {dlgLoading ? "Connecting..." : "Connect"}
                   </button>
                 </div>
               </form>
@@ -1770,29 +1770,29 @@ function App() {
                   <path d="M4 11v6c0 1.93 3.58 3.5 8 3.5s8-1.57 8-3.5v-6" stroke="url(#dbGradDlg2)" strokeWidth="1.5" fill="none" vectorEffect="non-scaling-stroke"/>
                 </svg>
                 <div>
-                  <div className="dlg-title">새 연결 추가</div>
-                  <div className="dlg-subtitle">접속 정보를 입력하세요</div>
+                  <div className="dlg-title">Add New Connection</div>
+                  <div className="dlg-subtitle">Enter connection details</div>
                 </div>
               </div>
               <div className="dlg-fields">
-                <div className="dlg-section-label">사용자 정보</div>
+                <div className="dlg-section-label">User Info</div>
                 <div className="dlg-row">
-                  <label>연결 이름</label>
+                  <label>Connection Name</label>
                   <input type="text" value={newName} onChange={e => setNewName(e.target.value)} className="dlg-input" autoFocus/>
                 </div>
                 <div className="dlg-row">
-                  <label>사용자 이름</label>
+                  <label>Username</label>
                   <input type="text" value={newUser} onChange={e => setNewUser(e.target.value)} className="dlg-input"/>
                 </div>
                 <div className="dlg-row">
-                  <label>비밀번호</label>
+                  <label>Password</label>
                   <div className="dlg-pass-wrap">
                     <input
                       type={newPassVisible ? "text" : "password"}
                       value={newPass}
                       onChange={e => setNewPass(e.target.value)}
                       className="dlg-input"
-                      placeholder="비밀번호"
+                      placeholder="Password"
                     />
                     <button type="button" className="dlg-eye" tabIndex={-1}
                       onClick={() => setNewPassVisible(v => !v)}>
@@ -1800,19 +1800,19 @@ function App() {
                     </button>
                   </div>
                 </div>
-                <div className="dlg-section-label" style={{ marginTop: 14 }}>세부 정보</div>
+                <div className="dlg-section-label" style={{ marginTop: 14 }}>Details</div>
                 <div className="dlg-field-row">
                   <div className="dlg-row" style={{ flex: 1 }}>
-                    <label>호스트 이름 / 주소</label>
+                    <label>Host / Address</label>
                     <input type="text" value={newHost} onChange={e => setNewHost(e.target.value)} className="dlg-input"/>
                   </div>
                   <div className="dlg-row" style={{ flex: "0 0 90px" }}>
-                    <label>포트</label>
+                    <label>Port</label>
                     <input type="text" value={newPort} onChange={e => setNewPort(e.target.value)} className="dlg-input"/>
                   </div>
                 </div>
                 <div className="dlg-row dlg-row-toggle">
-                  <label>자동 로그인</label>
+                  <label>Auto Login</label>
                   <button
                     type="button"
                     className={`dlg-toggle ${newAutoLogin ? "dlg-toggle-on" : ""}`}
@@ -1823,8 +1823,8 @@ function App() {
                 </div>
               </div>
               <div className="dlg-actions">
-                <button type="button" className="dlg-cancel" onClick={() => setShowNewConn(false)}>취소</button>
-                <button type="button" className="dlg-connect" onClick={handleAddConnection}>추가</button>
+                <button type="button" className="dlg-cancel" onClick={() => setShowNewConn(false)}>Cancel</button>
+                <button type="button" className="dlg-connect" onClick={handleAddConnection}>Add</button>
               </div>
             </div>
           </div>
@@ -1887,7 +1887,7 @@ function App() {
               setTabResults({});
               setDlgPass(""); setDlgError("");
             }}
-          >로그아웃</button>
+          >Logout</button>
         </div>
       </div>
 
@@ -1966,12 +1966,12 @@ function App() {
               <button
                 className="sidebar-refresh-btn"
                 onClick={refreshSidebar}
-                title="새로고침 (Refresh)"
+                title="Refresh"
               >⟳</button>
             </div>
             <input
               className="sidebar-search"
-              placeholder="테이블 검색..."
+              placeholder="Search tables..."
               value={sidebarSearch}
               onChange={e => setSidebarSearch(e.target.value)}
             />
@@ -2015,7 +2015,7 @@ function App() {
                         e.stopPropagation();
                         setDbCtxMenu({ x: e.clientX, y: e.clientY, db: dbName });
                       }}
-                      title={isActive ? "현재 데이터베이스" : "더블클릭으로 전환"}
+                      title={isActive ? "Current database" : "Double-click to switch"}
                     >
                       <span className="sidebar-group-arrow">{isOpen ? "▼" : "▶"}</span>
                       <svg className="sidebar-db-icon" viewBox="0 0 24 24" width="13" height="16" preserveAspectRatio="none" fill="none">
@@ -2027,7 +2027,7 @@ function App() {
                       <button
                         className={`sidebar-db-expand-btn${dbAllExpanded[dbName] ? " active" : ""}`}
                         onClick={e => toggleDbExpandAll(dbName, e)}
-                        title={dbAllExpanded[dbName] ? "모두 접기" : "모두 펼치기"}
+                        title={dbAllExpanded[dbName] ? "Collapse all" : "Expand all"}
                       >
                         {dbAllExpanded[dbName] ? (
                           <svg viewBox="0 0 14 14" width="11" height="11" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
@@ -2421,25 +2421,25 @@ function App() {
                     close();
                     if (isFromSplit) closeSplit(); else closeTab(tabCtxMenu.tabId);
                   }}>
-                    <span>닫기</span><span className="ctx-shortcut">Ctrl+W</span>
+                    <span>Close</span><span className="ctx-shortcut">Ctrl+W</span>
                   </div>
                   <div
                     className={`ctx-item-with-shortcut${(!hasOtherTabs || isFromSplit) ? " ctx-item-disabled" : ""}`}
                     onClick={() => { if (!hasOtherTabs || isFromSplit) return; close(); closeOtherTabs(tabCtxMenu.tabId); }}
                   >
-                    <span>다른 탭 닫기</span>
+                    <span>Close Other Tabs</span>
                   </div>
                   <div
                     className={`ctx-item-with-shortcut${(!hasTabsToRight || isFromSplit) ? " ctx-item-disabled" : ""}`}
                     onClick={() => { if (!hasTabsToRight || isFromSplit) return; close(); closeTabsToRight(tabCtxMenu.tabId); }}
                   >
-                    <span>오른쪽 탭 닫기</span>
+                    <span>Close Tabs to the Right</span>
                   </div>
                   <div
                     className={`ctx-item-with-shortcut${(tabs.length <= 1 || isFromSplit) ? " ctx-item-disabled" : ""}`}
                     onClick={() => { if (tabs.length <= 1 || isFromSplit) return; close(); closeAllTabs(); }}
                   >
-                    <span>모두 닫기</span><span className="ctx-shortcut">Ctrl+K W</span>
+                    <span>Close All</span><span className="ctx-shortcut">Ctrl+K W</span>
                   </div>
                   <div className="ctx-divider" />
                   <div className="ctx-item-with-shortcut" onClick={() => {
@@ -2449,20 +2449,20 @@ function App() {
                     if (isFromSplit) { if (tabCtxMenu.tabId !== splitTabId) switchSplitTab(tabCtxMenu.tabId); }
                     else { if (tabCtxMenu.tabId !== activeTabId) switchTab(tabCtxMenu.tabId); }
                   }}>
-                    <span>이름 변경</span>
+                    <span>Rename</span>
                   </div>
                   <div className="ctx-item-with-shortcut" onClick={() => { close(); togglePin(tabCtxMenu.tabId); }}>
-                    <span>{isPinned ? "고정 해제" : "고정"}</span><span className="ctx-shortcut">Ctrl+K ⇧Enter</span>
+                    <span>{isPinned ? "Unpin" : "Pin"}</span><span className="ctx-shortcut">Ctrl+K ⇧Enter</span>
                   </div>
                   <div className="ctx-divider" />
                   <div className="ctx-item-with-shortcut" onClick={() => { close(); doSplitRight(tabCtxMenu.tabId); }}>
-                    <span>오른쪽으로 분할</span><span className="ctx-shortcut">Ctrl+\</span>
+                    <span>Split Right</span><span className="ctx-shortcut">Ctrl+\</span>
                   </div>
                   <div className="ctx-item-with-shortcut" onClick={() => { close(); doSplitLeft(tabCtxMenu.tabId); }}>
-                    <span>왼쪽으로 분할</span>
+                    <span>Split Left</span>
                   </div>
                   <div className="ctx-item-with-shortcut" onClick={() => { close(); doSplitAndMove(tabCtxMenu.tabId); }}>
-                    <span>분할 및 이동</span>
+                    <span>Split and Move</span>
                   </div>
                 </div>
               </>
@@ -2554,7 +2554,7 @@ function App() {
                       setTabCtxMenu({ x: e.clientX, y: e.clientY, tabId: tab.id, source: "main" });
                     }}
                   >
-                    {pinnedTabs.has(tab.id) && <span className="tab-pin-icon" title="고정됨">📌</span>}
+                    {pinnedTabs.has(tab.id) && <span className="tab-pin-icon" title="Pinned">📌</span>}
                     <span className="tab-icon">⊞</span>
                     {editingTabId === tab.id ? (
                       <input
@@ -2606,7 +2606,7 @@ function App() {
                       >
                         <span className="tab-icon">⊞</span>
                         {splitTab.name}
-                        <span className="tab-close" onClick={e => { e.stopPropagation(); closeSplit(); }} title="분할 닫기">×</span>
+                        <span className="tab-close" onClick={e => { e.stopPropagation(); closeSplit(); }} title="Close Split">×</span>
                       </div>
                     </div>
                   </div>
@@ -2614,12 +2614,12 @@ function App() {
               ) : null;
             })()}
             <div className="tab-bar-right">
-              <button className="bookmark-btn" onClick={addBookmark} title="현재 쿼리 북마크 추가 (★)">★</button>
+              <button className="bookmark-btn" onClick={addBookmark} title="Add bookmark for current query (★)">★</button>
               <div className="panel-toggle-group">
                 <button
                   className={`panel-toggle-btn${sidebarWidth > 0 ? " active" : ""}`}
                   onClick={() => setSidebarWidth(w => w > 0 ? 0 : 240)}
-                  title="사이드바 토글"
+                  title="Toggle Sidebar"
                 >
                   <svg width="16" height="12" viewBox="0 0 16 12" fill="none">
                     <rect x="0.5" y="0.5" width="15" height="11" rx="1.5" stroke="currentColor" strokeWidth="1"/>
@@ -2629,14 +2629,14 @@ function App() {
                 <button
                   className={`panel-toggle-btn${resultHeight > 0 ? " active" : ""}`}
                   onClick={toggleResultPanel}
-                  title="결과창 토글"
+                  title="Toggle Result Panel"
                 >
                   <svg width="16" height="12" viewBox="0 0 16 12" fill="none">
                     <rect x="0.5" y="0.5" width="15" height="11" rx="1.5" stroke="currentColor" strokeWidth="1"/>
                     <rect x="0.5" y="6.5" width="15" height="5" rx="0" fill="currentColor"/>
                   </svg>
                 </button>
-                <button className="panel-toggle-btn" title="오른쪽 패널 (미지원)" style={{ opacity: 0.4 }}>
+                <button className="panel-toggle-btn" title="Right Panel (not supported)" style={{ opacity: 0.4 }}>
                   <svg width="16" height="12" viewBox="0 0 16 12" fill="none">
                     <rect x="0.5" y="0.5" width="15" height="11" rx="1.5" stroke="currentColor" strokeWidth="1"/>
                     <rect x="10.5" y="0.5" width="5" height="11" rx="1.5" fill="currentColor"/>
@@ -2656,14 +2656,14 @@ function App() {
 
             <div className="editor-toolbar">
               <div className="editor-toolbar-group">
-                <button className="editor-toolbar-btn" onClick={importSqlFile} title="SQL 파일 열기">
+                <button className="editor-toolbar-btn" onClick={importSqlFile} title="Open SQL file">
                   <svg width="16" height="16" viewBox="0 0 24 24" fill="none">
                     <path d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V7z" stroke="currentColor" strokeWidth="1.6"/>
                     <line x1="12" y1="12" x2="12" y2="18" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
                     <polyline points="9,15 12,18 15,15" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
                   </svg>
                 </button>
-                <button className="editor-toolbar-btn" onClick={() => activeTabId && downloadTab(activeTabId)} title="SQL 파일로 저장">
+                <button className="editor-toolbar-btn" onClick={() => activeTabId && downloadTab(activeTabId)} title="Save as SQL file">
                   <svg width="16" height="16" viewBox="0 0 24 24" fill="none">
                     <path d="M19 21H5a2 2 0 01-2-2V5a2 2 0 012-2h11l5 5v11a2 2 0 01-2 2z" stroke="currentColor" strokeWidth="1.6"/>
                     <polyline points="17,21 17,13 7,13 7,21" stroke="currentColor" strokeWidth="1.4"/>
@@ -2673,7 +2673,7 @@ function App() {
               </div>
               <div className="editor-toolbar-sep"/>
               <div className="editor-toolbar-group">
-                <button className="editor-toolbar-btn editor-toolbar-run" onClick={() => runQuery()} disabled={isRunning} title="실행 (Ctrl+Enter)">
+                <button className="editor-toolbar-btn editor-toolbar-run" onClick={() => runQuery()} disabled={isRunning} title="Run (Ctrl+Enter)">
                   {isRunning
                     ? <span style={{ fontSize: 13 }}>⏳</span>
                     : <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
@@ -2681,7 +2681,7 @@ function App() {
                       </svg>
                   }
                 </button>
-                <button className="editor-toolbar-btn editor-toolbar-run" onClick={() => runQuery(true)} disabled={isRunning} title="전체 실행">
+                <button className="editor-toolbar-btn editor-toolbar-run" onClick={() => runQuery(true)} disabled={isRunning} title="Run All">
                   {isRunning
                     ? <span style={{ fontSize: 13 }}>⏳</span>
                     : <span style={{ position: "relative", display: "inline-flex", width: 16, height: 16 }}>
@@ -2955,20 +2955,20 @@ function App() {
               {resultTab === "history" ? (
                 <div className="result-content">
                   {queryHistory.length === 0 ? (
-                    <div className="result-empty">실행 기록이 없습니다</div>
+                    <div className="result-empty">No execution history</div>
                   ) : (
                     <>
                       <div className="history-toolbar">
-                        <span className="history-toolbar-info">{queryHistory.length}개 기록</span>
+                        <span className="history-toolbar-info">{queryHistory.length} records</span>
                         <button className="history-clear-btn" onClick={() => {
                           setQueryHistory([]);
                           saveHistory(connIdRef.current, []);
-                        }}>전체 삭제</button>
+                        }}>Clear All</button>
                       </div>
                       {queryHistory.map(h => {
                         const d = new Date(h.ts);
-                        const time = d.toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
-                        const date = d.toLocaleDateString("ko-KR", { month: "2-digit", day: "2-digit" });
+                        const time = d.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+                        const date = d.toLocaleDateString("en-US", { month: "2-digit", day: "2-digit" });
                         const firstLine = h.sql.split("\n")[0].trim();
                         const preview = firstLine.length > 80 ? firstLine.slice(0, 80) + "…" : firstLine;
                         return (
@@ -2976,7 +2976,7 @@ function App() {
                             key={h.id}
                             className="history-item"
                             onClick={() => setEditorQuery(h.sql)}
-                            title="클릭하면 에디터에 불러옵니다"
+                            title="Click to load in editor"
                           >
                             <div className="history-item-header">
                               <span className={`history-icon ${h.success ? "ok" : "err"}`}>
@@ -3002,7 +3002,7 @@ function App() {
                   <div className="result-search-bar">
                     <input
                       className="result-search-input"
-                      placeholder="결과 내 검색..."
+                      placeholder="Search in results..."
                       value={resultSearch}
                       onChange={e => setTabResultSearch(p => ({ ...p, [activeTabId]: e.target.value }))}
                     />
@@ -3012,7 +3012,7 @@ function App() {
                   </div>
                 )}
                 {results.length === 0 ? (
-                  <div className="result-empty">{isRunning ? "쿼리 실행 중..." : "Ctrl+Enter 또는 ▶ Run 으로 쿼리를 실행하세요"}</div>
+                  <div className="result-empty">{isRunning ? "Running query..." : "Press Ctrl+Enter or ▶ Run to execute a query"}</div>
                 ) : results.map((r, i) => (
                   <div key={i} className="result-block">
                     {!r.success ? (
@@ -3092,7 +3092,7 @@ function App() {
                               {resultSearch ? `${total} / ${r.rows.length}` : total} row(s) · {r.elapsed.toFixed(3)}s
                               <button
                                 className="csv-btn"
-                                title="CSV로 내보내기"
+                                title="Export as CSV"
                                 onClick={() => {
                                   const escape = (v: string) =>
                                     /[",\n\r]/.test(v) ? `"${v.replace(/"/g, '""')}"` : v;
@@ -3110,7 +3110,7 @@ function App() {
                               >⬇ CSV</button>
                               {pageCount > 1 && (
                                 <span className="result-page-info">
-                                  &nbsp;· 표시: {page * PAGE_SIZE + 1}–{Math.min((page + 1) * PAGE_SIZE, total)} / {total}
+                                  &nbsp;· Showing: {page * PAGE_SIZE + 1}–{Math.min((page + 1) * PAGE_SIZE, total)} / {total}
                                   <button className="page-btn" disabled={page === 0}
                                     onClick={() => setTabResultPages(p => ({ ...p, [activeTabId]: { ...(p[activeTabId] ?? {}), [i]: page - 1 } }))}>‹</button>
                                   <span className="page-indicator">{page + 1} / {pageCount}</span>
@@ -3225,7 +3225,7 @@ function App() {
                     cursor: "pointer",
                   }}
                   onClick={() => setActiveView("server")}
-                  title="서버 관리자 열기"
+                  title="Open Server Manager"
                 >
                   {serverStatus.running
                     ? `● TCP :${serverStatus.port} (${serverStatus.client_count} clients)`
@@ -3267,11 +3267,11 @@ function App() {
                   max={200}
                   value={Math.round(erdZoom * 100)}
                   onChange={e => setErdZoom(Number(e.target.value) / 100)}
-                  title="확대/축소 (0~200%)"
+                  title="Zoom (0~200%)"
                 />
                 <span className="erd-zoom-label">{Math.round(erdZoom * 100)}%</span>
               </div>
-              <button className="erd-tool-btn" onClick={autoLayoutErd} title={isAutoLayout ? "원래 위치로 복원" : "FK 기반 자동 배치"}>
+              <button className="erd-tool-btn" onClick={autoLayoutErd} title={isAutoLayout ? "Restore original positions" : "Auto arrange by FK"}>
                 {isAutoLayout ? "↩ Reset Layout" : "⊞ Auto Layout"}
               </button>
               <button className="erd-tool-btn" onClick={() => { setErdPan({ x: 40, y: 40 }); setErdZoom(1); }} title="Reset view">⊡ Reset</button>
@@ -3309,7 +3309,7 @@ function App() {
               <div className="erd-empty">
                 <div className="erd-empty-icon">⬡</div>
                 <div className="erd-empty-text">No tables in <b>{currentDb}</b></div>
-                <div className="erd-empty-sub">테이블 생성 후 ↻ Refresh를 눌러주세요</div>
+                <div className="erd-empty-sub">Create a table and press ↻ Refresh</div>
               </div>
             ) : (
               <div
@@ -3587,7 +3587,7 @@ function App() {
                       <path d="M4 15v6c0 1.38 3.58 2.5 8 2.5s8-1.12 8-2.5v-6" stroke="url(#dbGradSrv)" strokeWidth="1.5" fill="none" vectorEffect="non-scaling-stroke"/>
                     </svg>
                     <div>
-                      <div className="srv-conn-title">서버에 연결</div>
+                      <div className="srv-conn-title">Connect to Server</div>
                       <div className="srv-conn-sub">RuSQL TCP Server</div>
                     </div>
                   </div>
@@ -3595,17 +3595,17 @@ function App() {
                   {/* 이름 + 그룹 행 */}
                   <div className="srv-name-row">
                     <div className="srv-name-field">
-                      <label className="srv-name-label">이름</label>
+                      <label className="srv-name-label">Name</label>
                       <input
                         className="srv-name-input"
                         value={srvConnName}
                         onChange={e => setSrvConnName(e.target.value)}
-                        placeholder="연결 이름"
+                        placeholder="Connection name"
                       />
                     </div>
                     <div className="srv-name-field" style={{ maxWidth: 180 }}>
-                      <label className="srv-name-label">그룹</label>
-                      <input className="srv-name-input" defaultValue="기본값" disabled />
+                      <label className="srv-name-label">Group</label>
+                      <input className="srv-name-input" defaultValue="Default" disabled />
                     </div>
                   </div>
 
@@ -3614,11 +3614,11 @@ function App() {
                     {/* 호스트 / 포트 */}
                     <div className="srv-form-row">
                       <div className="srv-form-col">
-                        <label className="srv-form-label"><span className="srv-req">*</span> 호스트</label>
+                        <label className="srv-form-label"><span className="srv-req">*</span> Host</label>
                         <input className="srv-form-input" value="127.0.0.1" disabled />
                       </div>
                       <div className="srv-form-col" style={{ maxWidth: 160 }}>
-                        <label className="srv-form-label"><span className="srv-req">*</span> 포트</label>
+                        <label className="srv-form-label"><span className="srv-req">*</span> Port</label>
                         <div className="srv-port-wrap">
                           <button className="srv-port-btn" onClick={() => setPortInput(p => String(Math.max(1024, parseInt(p || "7878") - 1)))} disabled={serverStatus.running}>−</button>
                           <input className="srv-form-input srv-port-num" value={portInput} onChange={e => setPortInput(e.target.value)} disabled={serverStatus.running}/>
@@ -3626,7 +3626,7 @@ function App() {
                         </div>
                       </div>
                       <div className="srv-form-col" style={{ maxWidth: 160 }}>
-                        <label className="srv-form-label">MySQL 포트 <span style={{ color: "var(--text-muted)", fontWeight: 400 }}>(0=비활성)</span></label>
+                        <label className="srv-form-label">MySQL Port <span style={{ color: "var(--text-muted)", fontWeight: 400 }}>(0=disabled)</span></label>
                         <div className="srv-port-wrap">
                           <button className="srv-port-btn" onClick={() => setMysqlPortInput(p => String(Math.max(0, parseInt(p || "0") - 1)))} disabled={serverStatus.running}>−</button>
                           <input className="srv-form-input srv-port-num" value={mysqlPortInput} onChange={e => setMysqlPortInput(e.target.value)} disabled={serverStatus.running}/>
@@ -3638,14 +3638,14 @@ function App() {
                     {/* 사용자 / 비밀번호 */}
                     <div className="srv-form-row">
                       <div className="srv-form-col">
-                        <label className="srv-form-label"><span className="srv-req">*</span> 사용자 이름</label>
+                        <label className="srv-form-label"><span className="srv-req">*</span> Username</label>
                         <input className="srv-form-input" value={srvUser} onChange={e => setSrvUser(e.target.value)} placeholder="root"/>
                       </div>
                       <div className="srv-form-col">
-                        <label className="srv-form-label"><span className="srv-req">*</span> 비밀번호</label>
+                        <label className="srv-form-label"><span className="srv-req">*</span> Password</label>
                         <div className="srv-pass-wrap">
-                          <input className="srv-form-input" type={srvPassVisible ? "text" : "password"} value={srvPass} onChange={e => setSrvPass(e.target.value)} placeholder="비밀번호"/>
-                          <button className="srv-pass-toggle" onClick={() => setSrvPassVisible(v => !v)} title={srvPassVisible ? "숨기기" : "표시"}>{srvPassVisible ? "🙈" : "👁"}</button>
+                          <input className="srv-form-input" type={srvPassVisible ? "text" : "password"} value={srvPass} onChange={e => setSrvPass(e.target.value)} placeholder="Password"/>
+                          <button className="srv-pass-toggle" onClick={() => setSrvPassVisible(v => !v)} title={srvPassVisible ? "Hide" : "Show"}>{srvPassVisible ? "🙈" : "👁"}</button>
                         </div>
                       </div>
                     </div>
@@ -3654,8 +3654,8 @@ function App() {
                     <div className="srv-form-row srv-inline-row">
                       <div className="srv-inline-group">
                         <label className="srv-form-label">
-                          버퍼 풀 크기
-                          <span style={{ color: "var(--text-muted)", fontWeight: 400, marginLeft: 4 }}>페이지 (×16KB)</span>
+                          Buffer Pool Size
+                          <span style={{ color: "var(--text-muted)", fontWeight: 400, marginLeft: 4 }}>pages (×16KB)</span>
                         </label>
                         <div className="srv-port-wrap">
                           <button className="srv-port-btn" onClick={() => { const v = String(Math.max(8, (parseInt(bufferPoolInput)||64) - 8)); setBufferPoolInput(v); localStorage.setItem("rusql_bp_size", v); }}>−</button>
@@ -3664,7 +3664,7 @@ function App() {
                         </div>
                       </div>
                       <div className="srv-inline-group">
-                        <label className="srv-form-label">병렬 쿼리</label>
+                        <label className="srv-form-label">Parallel Query</label>
                         <div className="srv-toggle-row">
                           <button
                             className={`srv-toggle-btn ${parallelQuery ? "on" : "off"}`}
@@ -3673,17 +3673,17 @@ function App() {
                             <span className="srv-toggle-knob" />
                           </button>
                           <span className="srv-toggle-label">
-                            {parallelQuery ? "ON — 10,000행+ SeqScan 자동 병렬 처리" : "OFF — 단일 스레드"}
+                            {parallelQuery ? "ON — auto parallel for 10,000+ row SeqScan" : "OFF — single thread"}
                           </span>
                         </div>
                       </div>
                       <div className="srv-inline-group" style={{ marginLeft: "auto" }}>
                         <label className="srv-form-label" style={{ opacity: 0 }}>.</label>
-                        <button className="srv-terminal-btn" onClick={() => invoke("open_terminal")} title="터미널 열기">
+                        <button className="srv-terminal-btn" onClick={() => invoke("open_terminal")} title="Open Terminal">
                           <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
                             <path d="M20 4H4C2.9 4 2 4.9 2 6V18C2 19.1 2.9 20 4 20H20C21.1 20 22 19.1 22 18V6C22 4.9 21.1 4 20 4ZM20 18H4V6H20V18ZM6 10L8.5 12.5L6 15L7.5 16.5L11.5 12.5L7.5 8.5L6 10ZM12 15H18V17H12V15Z"/>
                           </svg>
-                          터미널 열기
+                          Open Terminal
                         </button>
                       </div>
                     </div>
@@ -3691,7 +3691,7 @@ function App() {
                     {/* 인증 방식 */}
                     <div className="srv-form-row">
                       <div className="srv-form-col srv-full-col">
-                        <label className="srv-form-label">인증 방식</label>
+                        <label className="srv-form-label">Auth Method</label>
                         <div className="srv-auth-badge">RuSQL AUTH Protocol v1</div>
                       </div>
                     </div>
@@ -3702,7 +3702,7 @@ function App() {
                     <div className="srv-status-strip">
                       <span className={`srv-dot ${serverStatus.running ? "running" : "stopped"}`} />
                       <span className={`srv-strip-text ${serverStatus.running ? "running" : "stopped"}`}>
-                        {serverStatus.running ? `RUNNING · 127.0.0.1:${serverStatus.port} · ${serverStatus.client_count} 클라이언트` : "STOPPED"}
+                        {serverStatus.running ? `RUNNING · 127.0.0.1:${serverStatus.port} · ${serverStatus.client_count} client(s)` : "STOPPED"}
                       </span>
                     </div>
 
@@ -3715,16 +3715,16 @@ function App() {
                         onClick={serverStatus.running ? handleStopServer : handleStartServer}
                       >
                         {serverStatus.running
-                          ? <><svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><rect x="4" y="4" width="16" height="16" rx="1"/></svg>서버 중지</>
-                          : <><svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><polygon points="5,3 19,12 5,21"/></svg>서버 시작</>
+                          ? <><svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><rect x="4" y="4" width="16" height="16" rx="1"/></svg>Stop Server</>
+                          : <><svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><polygon points="5,3 19,12 5,21"/></svg>Start Server</>
                         }
                       </button>
                       <div style={{ flex: 1 }} />
-                      <button className="srv-action-btn save" onClick={() => setServerMsg("설정이 저장되었습니다.")}>
+                      <button className="srv-action-btn save" onClick={() => setServerMsg("Settings saved.")}>
                         <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                           <path d="M19 21H5a2 2 0 01-2-2V5a2 2 0 012-2h11l5 5v11a2 2 0 01-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/>
                         </svg>
-                        저장
+                        Save
                       </button>
                     </div>
                   </div>
@@ -3742,7 +3742,7 @@ function App() {
                 </div>
                 <div className="srv-log-body">
                   {serverStatus.log.length === 0 ? (
-                    <div className="srv-log-empty">서버 활동 로그가 여기에 표시됩니다.</div>
+                    <div className="srv-log-empty">Server activity log will be displayed here.</div>
                   ) : serverStatus.log.map((entry, i) => (
                     <div key={i} className="srv-log-entry">
                       <span className="srv-log-time">{entry.slice(0, 10)}</span>
@@ -3758,7 +3758,7 @@ function App() {
             {srvRightPanel !== "none" && (
               <div className="srv-slide-panel">
                 <div className="srv-slide-header">
-                  {srvRightPanel === "cli" ? "CLI 가이드" : srvRightPanel === "bench" ? "벤치마크" : srvRightPanel === "sessions" ? "접속 세션" : srvRightPanel === "mcp" ? "MCP Agent" : "MySQL 연결"}
+                  {srvRightPanel === "cli" ? "CLI Guide" : srvRightPanel === "bench" ? "Benchmark" : srvRightPanel === "sessions" ? "Sessions" : srvRightPanel === "mcp" ? "MCP Agent" : "MySQL Connection"}
                   <button className="srv-slide-close" onClick={() => setSrvRightPanel("none")}>✕</button>
                 </div>
                 <div className="srv-slide-body">
@@ -3768,24 +3768,24 @@ function App() {
   -u ${srvUser} -p <password> \\
   -h 127.0.0.1 -P ${portInput}`}</code>
 
-                    <div className="srv-slide-section" style={{ marginTop: 18 }}>다른 컴퓨터에서 접속</div>
+                    <div className="srv-slide-section" style={{ marginTop: 18 }}>Connect from another computer</div>
                     <div className="srv-slide-flow">
-                      <div className="srv-slide-flow-row"><span className="srv-slide-arrow in">1.</span><code>서버 PC에서 rusql-server 실행</code></div>
-                      <div className="srv-slide-flow-row"><span className="srv-slide-arrow out">2.</span><code>접속 PC에서 서버 IP로 연결</code></div>
+                      <div className="srv-slide-flow-row"><span className="srv-slide-arrow in">1.</span><code>Run rusql-server on the server PC</code></div>
+                      <div className="srv-slide-flow-row"><span className="srv-slide-arrow out">2.</span><code>Connect from another PC using the server IP</code></div>
                     </div>
                     <code className="srv-slide-code" style={{ marginTop: 8 }}>{`cargo run -p rusql-client -- \\\n  -u ${srvUser} -p <password> \\\n  -h <server-ip> -P ${portInput}`}</code>
 
-                    <div className="srv-slide-section" style={{ marginTop: 18, textTransform: 'none' }}>인증 흐름 (RuSQL AUTH Protocol v1)</div>
+                    <div className="srv-slide-section" style={{ marginTop: 18, textTransform: 'none' }}>Auth Flow (RuSQL AUTH Protocol v1)</div>
                     <div className="srv-slide-flow">
                       <div className="srv-slide-flow-row"><span className="srv-slide-arrow out">→</span><code>{`AUTH ${srvUser} <password>`}</code></div>
                       <div className="srv-slide-flow-row"><span className="srv-slide-arrow in">←</span><code>{`OK authenticated as '${srvUser}'`}</code></div>
                       <div className="srv-slide-flow-row"><span className="srv-slide-arrow out">→</span><code>SELECT * FROM t;</code></div>
-                      <div className="srv-slide-flow-row"><span className="srv-slide-arrow in">←</span><code>{"OK\n<결과>\n(0.001 sec)\n---END---"}</code></div>
+                      <div className="srv-slide-flow-row"><span className="srv-slide-arrow in">←</span><code>{"OK\n<result>\n(0.001 sec)\n---END---"}</code></div>
                       <div className="srv-slide-flow-row"><span className="srv-slide-arrow out">→</span><code>exit</code></div>
                       <div className="srv-slide-flow-row"><span className="srv-slide-arrow in">←</span><code>Bye!</code></div>
                     </div>
 
-                    <div className="srv-slide-section" style={{ marginTop: 18 }}>PowerShell 직접 접속</div>
+                    <div className="srv-slide-section" style={{ marginTop: 18 }}>Direct PowerShell Connection</div>
                     <code className="srv-slide-code">{`$c = New-Object Net.Sockets.TcpClient('127.0.0.1',${portInput})\n$s = $c.GetStream()\n$w = New-Object IO.StreamWriter($s)\n$w.WriteLine("AUTH ${srvUser} <password>")\n$w.Flush()`}</code>
 
                     <div className="srv-slide-section" style={{ marginTop: 18 }}>netcat</div>
@@ -3801,9 +3801,9 @@ function App() {
                     };
                     return (
                       <>
-                        <div className="srv-slide-section">접속 중인 세션</div>
+                        <div className="srv-slide-section">Active Sessions</div>
                         {serverStatus.sessions.length === 0 ? (
-                          <div className="srv-slide-text">현재 접속 중인 세션이 없습니다.</div>
+                          <div className="srv-slide-text">No active sessions.</div>
                         ) : serverStatus.sessions.map((s, i) => (
                           <div key={i} style={{ marginBottom: 10, padding: "8px 10px", background: "#2d2d2d", borderRadius: 5, border: "1px solid #3a3d41" }}>
                             <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 4 }}>
@@ -3812,18 +3812,18 @@ function App() {
                               <span style={{ marginLeft: "auto", fontSize: 11, color: "#858585" }}>{fmtDuration(now - s.connected_at)}</span>
                             </div>
                             <div style={{ fontSize: 11, color: "#858585", paddingLeft: 14 }}>{s.addr}</div>
-                            <div style={{ fontSize: 11, color: "#858585", paddingLeft: 14, marginTop: 2 }}>쿼리 {s.query_count}건</div>
+                            <div style={{ fontSize: 11, color: "#858585", paddingLeft: 14, marginTop: 2 }}>{s.query_count} queries</div>
                           </div>
                         ))}
-                        <div style={{ marginTop: 6, fontSize: 11, color: "#555", textAlign: "center" }}>1.5s 자동 갱신</div>
+                        <div style={{ marginTop: 6, fontSize: 11, color: "#555", textAlign: "center" }}>Auto-refresh every 1.5s</div>
                       </>
                     );
                   })()}
 
                   {srvRightPanel === "bench" && (<>
-                    <div className="srv-slide-section">성능 벤치마크</div>
+                    <div className="srv-slide-section">Performance Benchmark</div>
                     <div className="srv-slide-text" style={{ marginBottom: 10 }}>
-                      쓰기 처리량 · B+Tree 인덱스 · 쿼리 캐시
+                      Write throughput · B+Tree index · Query cache
                     </div>
                     <div style={{ display: "flex", gap: 8, marginBottom: 14, flexWrap: "wrap" }}>
                       <button
@@ -3838,26 +3838,26 @@ function App() {
                           } catch { setBenchResult(null); }
                           setBenchLoading(false);
                         }}
-                      >{benchLoading ? "불러오는 중..." : "결과 불러오기"}</button>
+                      >{benchLoading ? "Loading..." : "Load Results"}</button>
                       <button
                         className="srv-action-btn save"
                         style={{ fontSize: 12 }}
                         onClick={() => invoke("open_bench_terminal")}
-                      >터미널 실행</button>
+                      >Run in Terminal</button>
                       <button
                         className="srv-action-btn"
                         style={{ fontSize: 12 }}
                         onClick={() => invoke("open_bench_graph")}
-                      >그래프 보기</button>
+                      >View Graph</button>
                     </div>
                     {benchResult !== undefined && benchResult !== null ? (() => {
                       const r = benchResult as Record<string, unknown>;
                       const fmx  = (v: unknown) => typeof v === "number" ? v.toFixed(1) : "—";
                       const fmtps = (rows: number, secs: number) =>
-                        secs > 0 ? Math.round(rows / secs).toLocaleString("ko-KR") + " TPS" : "—";
+                        secs > 0 ? Math.round(rows / secs).toLocaleString() + " TPS" : "—";
                       const fmtpsms = (ms: unknown) =>
-                        typeof ms === "number" && ms > 0 ? Math.round(1000 / ms).toLocaleString("ko-KR") + " TPS" : "—";
-                      const fmtime = (v: unknown) => typeof v === "number" ? v.toFixed(2) + "초" : "—";
+                        typeof ms === "number" && ms > 0 ? Math.round(1000 / ms).toLocaleString() + " TPS" : "—";
+                      const fmtime = (v: unknown) => typeof v === "number" ? v.toFixed(2) + "s" : "—";
                       const greenBadge = (label: string) => (
                         <span style={{ background: "#4ec9b0", color: "#1e1e1e", fontWeight: 700, padding: "1px 6px", borderRadius: 3, fontSize: 11, marginLeft: 6 }}>{label}</span>
                       );
@@ -3875,7 +3875,7 @@ function App() {
                         <div style={{ fontSize: 12, lineHeight: 1.8 }}>
                           {sg && <div style={{ marginBottom: 10 }}>
                             <div style={{ color: "#4ec9b0", fontWeight: 600, marginBottom: 4 }}>
-                              단순 처리 ({(sg.rows ?? 10000).toLocaleString()}건 · 단건 I/O)
+                              Single-row ops ({(sg.rows ?? 10000).toLocaleString()} rows · per-row I/O)
                             </div>
                             {row("INSERT", `${fmtps(sg.rows, sg.insert_s)}  (${fmtime(sg.insert_s)})`)}
                             {row("DELETE", `${fmtps(sg.rows, sg.delete_s)}  (${fmtime(sg.delete_s)})`)}
@@ -3887,8 +3887,8 @@ function App() {
                             return (
                               <div style={{ marginBottom: 10 }}>
                                 <div style={{ color: "#4ec9b0", fontWeight: 600, marginBottom: 4 }}>
-                                  Bulk 처리 ({(bk.rows ?? 100000).toLocaleString()}건 · 500행 묶음)
-                                  {perRowSpeedup >= 10 && greenBadge(`단건 대비 ${Math.round(perRowSpeedup)}배 효율`)}
+                                  Bulk ops ({(bk.rows ?? 100000).toLocaleString()} rows · 500-row batch)
+                                  {perRowSpeedup >= 10 && greenBadge(`${Math.round(perRowSpeedup)}x vs single-row`)}
                                 </div>
                                 {row("INSERT", `${fmtps(bk.rows, bk.insert_s)}  (${fmtime(bk.insert_s)})`)}
                                 {row("DELETE", `${fmtps(bk.rows, bk.delete_s)}  (${fmtime(bk.delete_s)})`)}
@@ -3896,7 +3896,7 @@ function App() {
                             );
                           })()}
                           {pl && <div style={{ marginBottom: 10 }}>
-                            <div style={{ color: "#4ec9b0", fontWeight: 600, marginBottom: 2 }}>인덱스 성능 (B+Tree){greenBadge(`${fmx(pl.speedup)}x 빠름`)}</div>
+                            <div style={{ color: "#4ec9b0", fontWeight: 600, marginBottom: 2 }}>Index Performance (B+Tree){greenBadge(`${fmx(pl.speedup)}x faster`)}</div>
                             {row("SeqScan", fmtpsms(pl.seq_ms))}
                             {row("BTree Index", fmtpsms(pl.idx_ms))}
                           </div>}
@@ -3907,18 +3907,18 @@ function App() {
                             return (
                               <div style={{ marginBottom: 10 }}>
                                 <div style={{ color: "#4ec9b0", fontWeight: 600, marginBottom: 2 }}>
-                                  트랜잭션 처리 ({(txn.rows ?? 1000).toLocaleString()}건)
-                                  {speedup >= 1.5 ? greenBadge(`AutoCommit ${fmx(speedup)}x 빠름`) : null}
+                                  Transaction ops ({(txn.rows ?? 1000).toLocaleString()} rows)
+                                  {speedup >= 1.5 ? greenBadge(`AutoCommit ${fmx(speedup)}x faster`) : null}
                                 </div>
-                                {row("AutoCommit",   autoTps.toLocaleString("ko-KR") + " TPS")}
-                                {row("BEGIN/COMMIT", txnTps.toLocaleString("ko-KR")  + " TPS")}
+                                {row("AutoCommit",   autoTps.toLocaleString() + " TPS")}
+                                {row("BEGIN/COMMIT", txnTps.toLocaleString()  + " TPS")}
                               </div>
                             );
                           })()}
                         </div>
                       );
                     })() : benchResult === null ? (
-                      <div className="srv-slide-text" style={{ color: "#f48771" }}>result.json 없음 — 터미널 실행으로 bench.py를 먼저 완료하세요.</div>
+                      <div className="srv-slide-text" style={{ color: "#f48771" }}>result.json not found — run bench.py in terminal first.</div>
                     ) : null}
                   </>)}
 
@@ -3930,18 +3930,18 @@ function App() {
                     <code className="srv-slide-code">{`import mysql.connector\nconn = mysql.connector.connect(\n  host="127.0.0.1",\n  port=${mysqlPortInput || 13306},\n  user="${srvUser}",\n  password="<password>"\n)\ncur = conn.cursor()\ncur.execute("SHOW DATABASES")\nfor row in cur: print(row)`}</code>
 
                     <div className="srv-slide-section" style={{ marginTop: 18 }}>DBeaver</div>
-                    <code className="srv-slide-code">{`New Connection → MySQL\nHost: 127.0.0.1\nPort: ${mysqlPortInput || 13306}\nUser: ${srvUser}\nSSL: 비활성화 (allowPublicKeyRetrieval=true)`}</code>
+                    <code className="srv-slide-code">{`New Connection → MySQL\nHost: 127.0.0.1\nPort: ${mysqlPortInput || 13306}\nUser: ${srvUser}\nSSL: Disabled (allowPublicKeyRetrieval=true)`}</code>
 
-                    <div className="srv-slide-section" style={{ marginTop: 18 }}>인증 방식</div>
-                    <code className="srv-slide-code">{`mysql_native_password\nSHA1(SHA1(pw)) 챌린지-응답\n포트 ${mysqlPortInput || 13306}에서 수신`}</code>
+                    <div className="srv-slide-section" style={{ marginTop: 18 }}>Auth Method</div>
+                    <code className="srv-slide-code">{`mysql_native_password\nSHA1(SHA1(pw)) challenge-response\nListening on port ${mysqlPortInput || 13306}`}</code>
                   </>)}
 
                   {srvRightPanel === "mcp" && (<>
-                    <div className="srv-slide-section">사용 방법</div>
+                    <div className="srv-slide-section">How to Use</div>
                     <div style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 6 }}>
-                      <div className="srv-slide-desc" style={{ margin: 0 }}>① RuSQL 서버 시작 (이 탭에서)</div>
-                      <div className="srv-slide-desc" style={{ margin: 0 }}>② 아래 버튼으로 Claude Desktop에 자동 등록</div>
-                      <div className="srv-slide-desc" style={{ margin: 0 }}>③ Claude Desktop 재시작</div>
+                      <div className="srv-slide-desc" style={{ margin: 0 }}>① Start the RuSQL server (from this tab)</div>
+                      <div className="srv-slide-desc" style={{ margin: 0 }}>② Auto-register with Claude Desktop via the button below</div>
+                      <div className="srv-slide-desc" style={{ margin: 0 }}>③ Restart Claude Desktop</div>
                     </div>
 
                     <button
@@ -3957,7 +3957,7 @@ function App() {
                         }
                       }}
                     >
-                      Claude Desktop 자동 연결
+                      Auto-connect Claude Desktop
                     </button>
                     {mcpSetupMsg && (
                       <div style={{
@@ -3971,14 +3971,14 @@ function App() {
                       </div>
                     )}
 
-                    <div className="srv-slide-section" style={{ marginTop: 18 }}>DB 도구</div>
+                    <div className="srv-slide-section" style={{ marginTop: 18 }}>DB Tools</div>
                     <div style={{ display: "flex", flexWrap: "wrap", gap: 4, marginTop: 6 }}>
                       {["execute_sql", "list_databases", "list_tables", "get_table_schema", "explain_query", "get_indexes", "sample_data"].map(t => (
                         <span key={t} style={{ fontSize: 11, background: "rgba(78,201,176,0.12)", color: "#4ec9b0", border: "1px solid rgba(78,201,176,0.25)", borderRadius: 3, padding: "2px 7px", fontFamily: "monospace" }}>{t}</span>
                       ))}
                     </div>
 
-                    <div className="srv-slide-section" style={{ marginTop: 16 }}>UI 제어 도구</div>
+                    <div className="srv-slide-section" style={{ marginTop: 16 }}>UI Control Tools</div>
                     <div style={{ display: "flex", flexWrap: "wrap", gap: 4, marginTop: 6 }}>
                       {["write_to_editor", "open_new_tab", "execute_in_editor", "close_tab", "get_tab_content", "list_tabs", "switch_to_tab", "get_query_result", "get_current_database"].map(t => (
                         <span key={t} style={{ fontSize: 11, background: "rgba(139,92,246,0.12)", color: "#a78bfa", border: "1px solid rgba(139,92,246,0.3)", borderRadius: 3, padding: "2px 7px", fontFamily: "monospace" }}>{t}</span>
@@ -3986,15 +3986,15 @@ function App() {
                     </div>
                     <div style={{ display: "flex", flexDirection: "column", gap: 5, marginTop: 10 }}>
                       {[
-                        { fn: "write_to_editor",     ex: '"users 테이블 전체 조회 쿼리 써줘"' },
-                        { fn: "open_new_tab",         ex: '"새 탭에 월별 집계 쿼리 작성해줘"' },
-                        { fn: "execute_in_editor",    ex: '"orders 테이블 건수 바로 실행해줘"' },
-                        { fn: "close_tab",            ex: '"query1.sql 탭 닫아줘"' },
-                        { fn: "get_tab_content",      ex: '"query.sql 탭 내용 읽어줘"' },
-                        { fn: "list_tabs",            ex: '"지금 열린 탭 목록 알려줘"' },
-                        { fn: "switch_to_tab",        ex: '"report.sql 탭으로 전환해줘"' },
-                        { fn: "get_query_result",     ex: '"방금 실행한 결과 분석해줘"' },
-                        { fn: "get_current_database", ex: '"현재 선택된 DB가 뭐야?"' },
+                        { fn: "write_to_editor",     ex: '"Write a query to select all from users table"' },
+                        { fn: "open_new_tab",         ex: '"Write a monthly aggregate query in a new tab"' },
+                        { fn: "execute_in_editor",    ex: '"Execute row count for orders table"' },
+                        { fn: "close_tab",            ex: '"Close the query1.sql tab"' },
+                        { fn: "get_tab_content",      ex: '"Read the content of query.sql tab"' },
+                        { fn: "list_tabs",            ex: '"Show me the list of open tabs"' },
+                        { fn: "switch_to_tab",        ex: '"Switch to the report.sql tab"' },
+                        { fn: "get_query_result",     ex: '"Analyze the result from the last execution"' },
+                        { fn: "get_current_database", ex: '"What is the currently selected database?"' },
                       ].map(({ fn, ex }) => (
                         <div key={fn} style={{ fontSize: 11, lineHeight: 1.6 }}>
                           <span style={{ color: "#a78bfa", fontFamily: "monospace" }}>{fn}</span>
@@ -4013,7 +4013,7 @@ function App() {
               <button
                 className={`srv-rbar-btn ${srvRightPanel === "cli" ? "active" : ""}`}
                 onClick={() => setSrvRightPanel(p => p === "cli" ? "none" : "cli")}
-                title="CLI 가이드"
+                title="CLI Guide"
               >
                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
                   <polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/>
@@ -4023,7 +4023,7 @@ function App() {
               <button
                 className={`srv-rbar-btn ${srvRightPanel === "mysql" ? "active" : ""}`}
                 onClick={() => setSrvRightPanel(p => p === "mysql" ? "none" : "mysql")}
-                title="MySQL 연결 방법"
+                title="MySQL Connection"
               >
                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
                   <ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/><path d="M3 12c0 1.66 4 3 9 3s9-1.34 9-3"/>
@@ -4033,7 +4033,7 @@ function App() {
               <button
                 className={`srv-rbar-btn ${srvRightPanel === "bench" ? "active" : ""}`}
                 onClick={() => setSrvRightPanel(p => p === "bench" ? "none" : "bench")}
-                title="벤치마크"
+                title="Benchmark"
               >
                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
                   <line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/>
@@ -4043,7 +4043,7 @@ function App() {
               <button
                 className={`srv-rbar-btn ${srvRightPanel === "sessions" ? "active" : ""}`}
                 onClick={() => setSrvRightPanel(p => p === "sessions" ? "none" : "sessions")}
-                title="접속 세션"
+                title="Sessions"
               >
                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
                   <circle cx="9" cy="7" r="4"/><path d="M3 21v-2a4 4 0 014-4h4a4 4 0 014 4v2"/>

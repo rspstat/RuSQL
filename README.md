@@ -10,39 +10,39 @@ Custom RDBMS + AI MCP Project
 
 ## Core features
 
-| 분류 | 내용 |
+| Category | Content |
 |------|------|
-| DB 엔진 | B+Tree, WAL, Buffer Pool, MVCC, 트랜잭션, 비용 기반 옵티마이저, 히스토그램 통계, 자동 통계 수집 (DML), B+Tree 인덱스 디스크 영속화, 증분 보조 인덱스 갱신 (INSERT/UPDATE/DELETE 시 O(1)), DELETE PK fast-path (`row_pk_pos` O(1) swap_remove), 병렬 쿼리 실행 (SeqScan · GROUP BY par_chunks · ORDER BY par_sort), 쿼리 결과 캐시 (LRU 512, DML 자동 무효화), 저장 프로시저·트리거·UDF 영속화 |
-| SQL 지원 | DDL / DML / JOIN / 서브쿼리 / CTE / UNION / 제약조건 / 트랜잭션 / 저장 프로시저 / 트리거 / UDF |
-| MCP | AI MCP (Claude Desktop, stdio JSON-RPC, 도구 16개 — DB 7개 (execute_sql · list_databases · list_tables · get_table_schema · explain_query · get_indexes · sample_data) + UI 9개 (write_to_editor · open_new_tab · execute_in_editor · close_tab · get_tab_content · list_tabs · switch_to_tab · get_query_result · get_current_database), SELECT 결과 JSON 배열 구조화, alwaysAllow 자동 설정 (허용 팝업 없음), API 키 불필요, UI 자동 연결) |
-| DBMS | TCP 서버, 다중 클라이언트 동시 접속, 접속 세션 실시간 모니터링, 세션별 독립 Executor + `Arc<RwLock<SharedDatabase>>` 공유 |
-| 언어 | Rust, Python |
+| DB Engine | B+Tree, WAL, Buffer Pool, MVCC, transactions, cost-based optimizer, histogram statistics, auto statistics collection (DML), B+Tree index disk persistence, incremental secondary index updates (O(1) per INSERT/UPDATE/DELETE), DELETE PK fast-path (`row_pk_pos` O(1) swap_remove), parallel query execution (SeqScan · GROUP BY par_chunks · ORDER BY par_sort), query result cache (LRU 512, auto-invalidated on DML), stored procedures·triggers·UDF persistence |
+| SQL Support | DDL / DML / JOIN / subqueries / CTE / UNION / constraints / transactions / stored procedures / triggers / UDF |
+| MCP | AI MCP (Claude Desktop, stdio JSON-RPC, 16 tools — 7 DB tools (execute_sql · list_databases · list_tables · get_table_schema · explain_query · get_indexes · sample_data) + 9 UI tools (write_to_editor · open_new_tab · execute_in_editor · close_tab · get_tab_content · list_tabs · switch_to_tab · get_query_result · get_current_database), SELECT results as structured JSON array, alwaysAllow auto-configured (no permission popups), no API key required, auto-connect from UI) |
+| DBMS | TCP server, multiple simultaneous client connections, real-time session monitoring, per-session independent Executor + `Arc<RwLock<SharedDatabase>>` shared state |
+| Language | Rust, Python |
 
 <br/>
 
 ## Execute
 ```bash
-# REPL 모드
+# REPL mode
 cargo run -p rusql-cli
 
-# 서버 모드 (커스텀 프로토콜 7878 + MySQL 프로토콜 3306 동시 기동)
+# Server mode (custom protocol 7878 + MySQL protocol 3306, both listening)
 cargo run -p rusql-server
 
-# MySQL wire protocol만 포트 변경 또는 비활성화
+# Change or disable MySQL wire protocol port only
 cargo run -p rusql-server -- --mysql-port 13306
 cargo run -p rusql-server -- --no-mysql
 
-# 버퍼 풀 크기 지정 (기본: 64 페이지)
+# Specify buffer pool size (default: 64 pages)
 cargo run -p rusql-server -- --buffer-pool-size 256
 cargo run -p rusql-cli -- --buffer-pool-size 128
 
-# 커스텀 클라이언트 CLI (서버 실행 후)
+# Custom client CLI (after starting the server)
 cargo run -p rusql-client -- -u root -p root -h 127.0.0.1 -P 7878
 
-# MySQL 클라이언트로 직접 접속 (mysql CLI, DBeaver, JDBC 등)
+# Connect directly with MySQL client (mysql CLI, DBeaver, JDBC, etc.)
 mysql -h 127.0.0.1 -P 3306 -u root --skip-auto-rehash
 
-# UI 모드
+# UI mode
 cd rusql-ui && npm run tauri dev
 ```
 
@@ -53,7 +53,7 @@ cd rusql-ui && npm run tauri dev
 `test/test_full.sql`
 
 ```bash
-# code/ 디렉터리에서 실행
+# Run from the code/ directory
 cargo run -p rusql-cli < test/test_full.sql
 ```
 
@@ -640,44 +640,44 @@ SHOW DATABASES;
 
 ## Technology Stack
 
-| 항목 | 내용 |
+| Item | Content |
 |------|------|
-| 언어 | Rust |
-| 버전 | v2.2.0 |
-| 인덱스 | B+Tree (단일 / 복합 / 클러스터드) |
-| 옵티마이저 | 비용 기반 플래너 (AccessPath: SeqScan / PkPoint / PkBetween / PkRange / SecondaryPoint / SecondaryRange / **SecondaryBetween** / CompositeIndex / **CompositeIndexPrefix** / **SecondaryLikePrefix** · Join 알고리즘 자동 선택 · System-R DP Join 순서 최적화 (N≤8), Greedy 폴백) · Hash Index 등호 O(1) 우선 선택 · 비상관 IN/NOT IN 서브쿼리 머티리얼라이제이션 (HashSet 캐싱, O(1) 조회) · 히스토그램 selectivity 추정 (ANALYZE TABLE) · INSERT/DELETE 시 `total_rows` 자동 갱신 |
-| Join | Sort-Merge Join (O((N+M)logN)) / Hash Join (O(N+M)) / Nested Loop Join (Cross/Natural/FullOuter 포함) — `engine/join.rs` 분리 구현 |
-| 인덱스 | B+Tree (단일/복합/클러스터드) · **Hash Index** (`USING HASH`, 등호 O(1), 단일 컬럼) |
-| 트랜잭션 | WAL (바이너리 redo log) + Undo Log (인메모리 + 디스크 영속화) + MVCC |
-| 격리 수준 | READ UNCOMMITTED ~ SERIALIZABLE (4단계) |
-| 동시성 | Row-level Locking (SELECT FOR UPDATE / FOR SHARE, 공유·배타 잠금, 데드락 감지) + 병렬 SeqScan WHERE 필터 + GROUP BY par_chunks 청크 부분 집계 (rayon, `RUSTDB_PARALLEL` 환경변수 / `SET @rusql_parallel = 1/0` 세션 변수, 10k행 이상 자동 적용) |
-| 캐시 | Buffer Pool (LRU, 64페이지, 16KB) |
-| 저장 | 바이너리 .rdb + LZ4 압축; 전역 파일은 `data/_system/` 서브폴더로 분리 (_users.json·_grants.json·_roles.json·_synonyms.json 등); 연결별 독립 디렉터리 (`data/local/`, `data/data_숫자/`) — UI·CLI·서버가 `code/data/` 공유; B+Tree 인덱스 `{table}.idx` / `{table}_{index}.idx` (INSERT·DELETE·CREATE INDEX 시 자동 저장, 시작 시 로드) |
-| 다중 DB | CREATE / DROP / USE / SHOW DATABASES, 테이블 자동 한정, 격리 |
-| 사용자 관리 | CREATE/DROP USER, GRANT/REVOKE, SHOW GRANTS, ROLE 관리, SYNONYM, 영속화 |
-| UI | Tauri + React + Monaco Editor (홈 화면: 퀵 액션 버튼·RDBMS 소개·연결 카드 그리드·하단 상태 표시줄·액티비티 바, 멀티 탭, 탭 우클릭 메뉴, 탭 고정, 분할 에디터, MySQL 스타일 에디터 툴바, 패널 토글 버튼, Canvas 기반 결과 컬럼 자동 너비, 연결 사이드바 드래그 너비 조절, Server Manager — 벤치마크 결과 UI·접속 세션 실시간 모니터링·AI MCP 자동 연결) |
-| TCP 서버 | Native 프로토콜 (127.0.0.1:7878, SHA-256 인증) + MySQL wire protocol (0.0.0.0:3306, `mysql_native_password` 챌린지-응답 인증, DBeaver·mysql CLI·mysql-connector-python 완전 호환) — `--mysql-port` / `--no-mysql` / `--buffer-pool-size` 옵션 |
-| AI 연동 | **AI MCP** (Python / FastMCP, stdio JSON-RPC) — Claude Desktop이 **16개 도구**로 RuSQL에 직접 질의 · 제어: DB 7개 (`execute_sql` · `list_databases` · `list_tables` · `get_table_schema` · `explain_query` · `get_indexes` · `sample_data`) + UI 9개 (`write_to_editor` · `open_new_tab` · `execute_in_editor` · `close_tab` · `get_tab_content` · `list_tabs` · `switch_to_tab` · `get_query_result` · `get_current_database`), SELECT 결과 JSON 배열 구조화, `alwaysAllow` 자동 설정 (허용 팝업 없음), API 키 불필요, UI에서 Claude Desktop 자동 연결 (일반 설치 · Windows Store 버전 모두 지원) |
+| Language | Rust |
+| Version | v2.2.0 |
+| Index | B+Tree (single / composite / clustered) |
+| Optimizer | Cost-based planner (AccessPath: SeqScan / PkPoint / PkBetween / PkRange / SecondaryPoint / SecondaryRange / **SecondaryBetween** / CompositeIndex / **CompositeIndexPrefix** / **SecondaryLikePrefix** · auto join algorithm selection · System-R DP join order optimization (N≤8), Greedy fallback) · Hash Index equality O(1) preferred · uncorrelated IN/NOT IN subquery materialization (HashSet caching, O(1) lookup) · histogram selectivity estimation (ANALYZE TABLE) · `total_rows` auto-updated on INSERT/DELETE |
+| Join | Sort-Merge Join (O((N+M)logN)) / Hash Join (O(N+M)) / Nested Loop Join (including Cross/Natural/FullOuter) — implemented separately in `engine/join.rs` |
+| Index | B+Tree (single/composite/clustered) · **Hash Index** (`USING HASH`, equality O(1), single column) |
+| Transaction | WAL (binary redo log) + Undo Log (in-memory + disk persistence) + MVCC |
+| Isolation Level | READ UNCOMMITTED ~ SERIALIZABLE (4 levels) |
+| Concurrency | Row-level Locking (SELECT FOR UPDATE / FOR SHARE, shared·exclusive locks, deadlock detection) + parallel SeqScan WHERE filter + GROUP BY par_chunks partial aggregation (rayon, `RUSTDB_PARALLEL` env var / `SET @rusql_parallel = 1/0` session variable, auto-applied for 10k+ rows) |
+| Cache | Buffer Pool (LRU, 64 pages, 16KB) |
+| Storage | Binary .rdb + LZ4 compression; global files separated into `data/_system/` subfolder (_users.json·_grants.json·_roles.json·_synonyms.json, etc.); per-connection independent directories (`data/local/`, `data/data_N/`) — UI·CLI·server share `code/data/`; B+Tree index `{table}.idx` / `{table}_{index}.idx` (auto-saved on INSERT·DELETE·CREATE INDEX, loaded on startup) |
+| Multi-DB | CREATE / DROP / USE / SHOW DATABASES, auto table qualification, isolation |
+| User Management | CREATE/DROP USER, GRANT/REVOKE, SHOW GRANTS, ROLE management, SYNONYM, persistence |
+| UI | Tauri + React + Monaco Editor (home screen: quick action buttons·RDBMS intro·connection card grid·bottom status bar·activity bar, multi-tab, tab right-click menu, tab pinning, split editor, MySQL-style editor toolbar, panel toggle buttons, Canvas-based auto column width, connection sidebar drag-resize, Server Manager — benchmark result UI·real-time session monitoring·AI MCP auto-connect) |
+| TCP Server | Native protocol (127.0.0.1:7878, SHA-256 auth) + MySQL wire protocol (0.0.0.0:3306, `mysql_native_password` challenge-response auth, fully compatible with DBeaver·mysql CLI·mysql-connector-python) — `--mysql-port` / `--no-mysql` / `--buffer-pool-size` options |
+| AI Integration | **AI MCP** (Python / FastMCP, stdio JSON-RPC) — Claude Desktop queries and controls RuSQL directly via **16 tools**: 7 DB tools (`execute_sql` · `list_databases` · `list_tables` · `get_table_schema` · `explain_query` · `get_indexes` · `sample_data`) + 9 UI tools (`write_to_editor` · `open_new_tab` · `execute_in_editor` · `close_tab` · `get_tab_content` · `list_tabs` · `switch_to_tab` · `get_query_result` · `get_current_database`), SELECT results as structured JSON array, `alwaysAllow` auto-configured (no permission popups), no API key required, auto-connect Claude Desktop from UI (supports both standard install and Windows Store version) |
 
 <br/>
 
 ## Project structure
 ```
 code/
-├── rusql-core/     DB 엔진 라이브러리
-├── rusql-server/   TCP 서버
-├── rusql-cli/      터미널 REPL (stdin 직접 실행)
-├── rusql-client/   TCP 클라이언트 CLI (-u/-p/-H/-P 옵션)
+├── rusql-core/     DB engine library
+├── rusql-server/   TCP server
+├── rusql-cli/      terminal REPL (direct stdin execution)
+├── rusql-client/   TCP client CLI (-u/-p/-H/-P options)
 ├── rusql-ui/       Tauri + React UI
-├── rusql-mcp/      MCP 서버 (Python / FastMCP) — Claude Desktop stdio 연동, 7개 도구
+├── rusql-mcp/      MCP server (Python / FastMCP) — Claude Desktop stdio integration, 7 tools
 └── test/
-    ├── test_full.sql              전체 기능 검증 SQL (DDL/DML/트랜잭션/힌스토그램 등)
+    ├── test_full.sql              full feature verification SQL (DDL/DML/transactions/histograms, etc.)
     └── perf/
-        ├── bench.py               RuSQL 성능 측정 (단건·Bulk INSERT/DELETE TPS, B+Tree 인덱스 TPS, 트랜잭션 TPS — AutoCommit vs BEGIN/COMMIT, 병렬 쿼리)
-        ├── chart.py               측정 결과 → matplotlib PNG 차트 생성
-        ├── graph.py               발표용 벤치마크 결과 시각화 (라이트 모드, result.json → PNG)
-        ├── requirements.txt       Python 의존 패키지
-        └── README.txt             실행 가이드
+        ├── bench.py               RuSQL performance measurement (single-row·Bulk INSERT/DELETE TPS, B+Tree index TPS, transaction TPS — AutoCommit vs BEGIN/COMMIT, parallel query)
+        ├── chart.py               measurement results → matplotlib PNG chart generation
+        ├── graph.py               presentation benchmark result visualization (light mode, result.json → PNG)
+        ├── requirements.txt       Python dependency packages
+        └── README.txt             execution guide
 ```
 
 <br/>
@@ -689,7 +689,7 @@ code/
 │                                          │
 │  Lexer → Parser → AST                    │
 │              ↓                           │
-│        Query Planner (비용 기반)         │
+│        Query Planner (cost-based)         │
 │   AccessPath / JoinAlgo / Cost Est.      │
 │              ↓                           │
 │          Executor                        │
@@ -698,21 +698,21 @@ code/
 │  │ DML: INSERT/SELECT/UPDATE/DEL │       │
 │  │ INSERT ... SELECT             │       │
 │  │ Hash/SortMerge/NestedLoop Join │       │
-│  │ 테이블 별칭 (alias)           │       │
+│  │ Table aliases                 │       │
 │  │ WHERE / SUBQUERY / EXISTS     │       │
-│  │ IN (리터럴/서브쿼리) / NOT IN │       │
-│  │ NOT 조건 / 산술 표현식        │       │
-│  │ FROM 서브쿼리                 │       │
+│  │ IN (literal/subquery) / NOT IN│       │
+│  │ NOT conditions / arithmetic   │       │
+│  │ FROM subquery                 │       │
 │  │ UNION / UNION ALL             │       │
 │  │ CTE (WITH ... AS)             │       │
 │  │ ORDER BY / GROUP BY / HAVING  │       │
 │  │ LIMIT / OFFSET                │       │
 │  │ CASE WHEN / DISTINCT          │       │
-│  │ 스칼라 / 날짜 / NULL 함수     │       │
-│  │ 집계함수 (COUNT/SUM/AVG/...)  │       │
-│  │ INDEX (단일/복합/클러스터드)  │       │
-│  │ EXPLAIN (비용 기반 실행 계획) │       │
-│  │ VIEW / 제약조건 (PK/FK/CHECK) │       │
+│  │ Scalar / Date / NULL functions│       │
+│  │ Aggregate (COUNT/SUM/AVG/...) │       │
+│  │ INDEX (single/composite/clust)│       │
+│  │ EXPLAIN (cost-based plan)     │       │
+│  │ VIEW / Constraints (PK/FK/CK) │       │
 │  │ FK SET DEFAULT / NO ACTION    │       │
 │  │ CREATE/DROP USER              │       │
 │  │ GRANT / REVOKE / SHOW GRANTS  │       │
@@ -722,37 +722,37 @@ code/
 │  │ JOIN ... USING (col, ...)     │       │
 │  │ BEGIN / COMMIT / ROLLBACK     │       │
 │  │ SAVEPOINT / ROLLBACK TO sp    │       │
-│  │ 격리 수준 4단계               │       │
-│  │ MVCC (논리삭제 / VACUUM)      │       │
+│  │ 4-level isolation             │       │
+│  │ MVCC (logical delete/VACUUM)  │       │
 │  │ Row-level Locking (FOR UPDATE)│       │
 │  │ Checkpoint / WAL Recovery     │       │
 │  └───────────────────────────────┘       │
 │          ↓                               │
-│  B+Tree 인덱스 (단일/복합/클러스터드)    │
-│  증분 보조 인덱스 갱신 (O(1) per row)   │
-│  WAL 바이너리 redo log + Checkpoint      │
-│  Undo Log 디스크 영속화 (_undo.log)      │
-│  Buffer Pool (LRU 64p 16KB, SELECT는     │
-│    s.tables 직접 읽기로 우회)            │
-│  MVCC (_xmin / _xmax 버전 스탬프)        │
-│  바이너리 .rdb + LZ4 압축 저장           │
-│  인덱스 메타 영속화 (indexes.json)        │
-│  B+Tree .idx 자동 저장 (DML/CREATE IDX)  │
-│  뷰 영속화 (views.json)                  │
-│  사용자/권한 영속화 (_users/_grants.json)│
-│  역할 영속화 (_roles/_role_grants.json)  │
-│  동의어 영속화 (_synonyms.json)          │
+│  B+Tree index (single/composite/clustered)│
+│  Incremental secondary index (O(1)/row)   │
+│  WAL binary redo log + Checkpoint         │
+│  Undo Log disk persistence (_undo.log)    │
+│  Buffer Pool (LRU 64p 16KB, SELECT        │
+│    bypasses via direct s.tables read)     │
+│  MVCC (_xmin / _xmax version stamps)      │
+│  Binary .rdb + LZ4 compressed storage     │
+│  Index metadata persistence (indexes.json)│
+│  B+Tree .idx auto-saved (DML/CREATE IDX)  │
+│  View persistence (views.json)            │
+│  User/permission persistence (_users.json)│
+│  Role persistence (_roles/_role_grants)   │
+│  Synonym persistence (_synonyms.json)     │
 │                                          │
 └──────────────────────────────────────────┘
         ↓              ↓
   rusql-cli       rusql-server
-  (터미널 REPL)   (Native :7878 + MySQL :3306)
+  (terminal REPL) (Native :7878 + MySQL :3306)
                       ↓
                rusql-client
-               (TCP 클라이언트 CLI, -u/-p/-h/-P)
+               (TCP client CLI, -u/-p/-h/-P)
         ↓
   rusql-ui         rusql-mcp
-  (Tauri + React)  (MCP 서버, Python)
+  (Tauri + React)  (MCP server, Python)
 ```
 
 <br/>

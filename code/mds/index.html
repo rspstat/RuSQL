@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="ko">
+<html lang="en">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -29,7 +29,7 @@
     letter-spacing: 0.3px;
   }
 
-  /* ── 흐름 화살표 ── */
+  /* ── flow arrow ── */
   .flow-arrow {
     display: flex;
     align-items: center;
@@ -41,7 +41,7 @@
   }
   .flow-arrow svg { flex-shrink: 0; }
 
-  /* ── 외곽 컨테이너 ── */
+  /* ── outer container ── */
   .outer-card {
     background: #fff;
     border: 1.5px solid #e5e7eb;
@@ -59,7 +59,7 @@
     margin-bottom: 20px;
   }
 
-  /* ── rusql-core 상단 파이프라인 ── */
+  /* ── rusql-core top pipeline ── */
   .pipeline {
     display: flex;
     align-items: center;
@@ -114,7 +114,7 @@
     font-weight: 500;
   }
 
-  /* ── Executor 그리드 ── */
+  /* ── Executor grid ── */
   .executor-grid {
     display: grid;
     grid-template-columns: repeat(4, 1fr);
@@ -225,7 +225,7 @@
   }
   .exec-list .sub::before { background: transparent; }
 
-  /* ── 엔진 고도화 섹션 ── */
+  /* ── engine enhancements section ── */
   .engine-grid {
     display: grid;
     grid-template-columns: repeat(3, 1fr);
@@ -290,7 +290,7 @@
   }
   .engine-list .note::before { background: transparent; }
 
-  /* 실행 노드 */
+  /* execution node */
   .exec-end {
     display: flex;
     justify-content: center;
@@ -326,7 +326,7 @@
 <div class="outer-card">
   <div class="card-title">rusql-core</div>
 
-  <!-- 파이프라인 -->
+  <!-- pipeline -->
   <div class="pipeline">
     <div class="pipe-node">Lexer</div>
     <span class="pipe-arrow">→</span>
@@ -339,19 +339,19 @@
     <div class="pipe-node">Executor</div>
   </div>
 
-  <!-- Query Planner 상세 -->
+  <!-- Query Planner details -->
   <div class="planner-card">
-    <div class="planner-title">Query Planner (비용 기반)</div>
+    <div class="planner-title">Query Planner (cost-based)</div>
     <div class="planner-tags" style="margin-bottom:8px;">
-      <span class="planner-tag">AccessPath 자동 선택</span>
-      <span class="planner-tag">JoinAlgo 자동 선택</span>
+      <span class="planner-tag">AccessPath auto-selection</span>
+      <span class="planner-tag">JoinAlgo auto-selection</span>
       <span class="planner-tag">Cost Estimation</span>
-      <span class="planner-tag">Top-K 조기 종료</span>
+      <span class="planner-tag">Top-K early termination</span>
     </div>
     <div class="planner-tags">
       <span class="planner-tag">Join Order DP (System-R, N≤8)</span>
-      <span class="planner-tag">히스토그램 selectivity</span>
-      <span class="planner-tag">비상관 서브쿼리 HashSet 머티리얼라이제이션</span>
+      <span class="planner-tag">Histogram selectivity</span>
+      <span class="planner-tag">Uncorrelated subquery HashSet materialization</span>
     </div>
   </div>
 
@@ -362,7 +362,7 @@
   <!-- ── Executor ── -->
   <div class="section-label">Executor</div>
 
-  <!-- 1행: DDL DML DCL TCL -->
+  <!-- Row 1: DDL DML DCL TCL -->
   <div class="executor-grid">
     <div class="exec-card ddl">
       <div class="exec-card-header">
@@ -374,11 +374,11 @@
       <ul class="exec-list">
         <li>CREATE / DROP / ALTER / TRUNCATE</li>
         <li>USE {database}</li>
-        <li class="sub">대상: TABLE · DATABASE</li>
+        <li class="sub">Target: TABLE · DATABASE</li>
         <li class="sub">INDEX (B+Tree / HASH)</li>
         <li class="sub">VIEW · SYNONYM</li>
         <li class="sub">PROCEDURE · TRIGGER · FUNCTION</li>
-        <li>ALTER 세부</li>
+        <li>ALTER details</li>
         <li class="sub">ADD / DROP / MODIFY / RENAME COLUMN</li>
         <li class="sub">RENAME TABLE</li>
         <li class="sub">ADD / DROP CONSTRAINT (FK/UQ/CHECK)</li>
@@ -400,8 +400,8 @@
         <li class="sub">ON DUPLICATE KEY UPDATE</li>
         <li class="sub">ON CONFLICT (ABORT/IGNORE/UPDATE)</li>
         <li class="sub">RETURNING</li>
-        <li>UPDATE (단일 / 다중) · RETURNING</li>
-        <li>DELETE (단일 / 다중) · RETURNING</li>
+        <li>UPDATE (single / multi) · RETURNING</li>
+        <li>DELETE (single / multi) · RETURNING</li>
         <li>MERGE INTO</li>
         <li class="sub">WHEN MATCHED UPDATE</li>
         <li class="sub">WHEN MATCHED DELETE</li>
@@ -446,14 +446,14 @@
     </div>
   </div>
 
-  <!-- 2행: Join 모니터링 집계 윈도우 -->
+  <!-- Row 2: Join Monitoring Aggregate Window -->
   <div class="executor-grid" style="grid-template-columns: 1fr 1.4fr 1fr 1fr; margin-bottom:14px;">
     <div class="exec-card join">
       <div class="exec-card-header">
         <div class="exec-card-icon" style="background:#d1fae5;">
           <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="#065f46" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="12" r="5"/><circle cx="16" cy="12" r="5"/></svg>
         </div>
-        <span class="exec-card-title">Join 연산</span>
+        <span class="exec-card-title">Join Operations</span>
       </div>
       <ul class="exec-list">
         <li>INNER JOIN</li>
@@ -474,7 +474,7 @@
         <div class="exec-card-icon" style="background:#f1f5f9;">
           <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="#334155" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/><polyline points="6 9 10 13 14 9 18 13"/></svg>
         </div>
-        <span class="exec-card-title">모니터링</span>
+        <span class="exec-card-title">Monitoring</span>
       </div>
       <ul class="exec-list">
         <li>SHOW TABLES / DESCRIBE</li>
@@ -494,7 +494,7 @@
         <div class="exec-card-icon" style="background:#fdf2f8;">
           <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="#9d174d" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>
         </div>
-        <span class="exec-card-title">집계 함수</span>
+        <span class="exec-card-title">Aggregate Functions</span>
       </div>
       <ul class="exec-list">
         <li>COUNT / COUNT(DISTINCT)</li>
@@ -511,7 +511,7 @@
         <div class="exec-card-icon" style="background:#fff7ed;">
           <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="#c2410c" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="2" width="20" height="20" rx="2"/><path d="M7 2v20M17 2v20M2 12h20"/></svg>
         </div>
-        <span class="exec-card-title">윈도우 함수</span>
+        <span class="exec-card-title">Window Functions</span>
       </div>
       <ul class="exec-list">
         <li>ROW_NUMBER</li>
@@ -522,19 +522,19 @@
         <li>PERCENT_RANK / CUME_DIST</li>
         <li>OVER (PARTITION BY / ORDER BY)</li>
         <li>ROWS / RANGE BETWEEN</li>
-        <li>집계 윈도우 함수</li>
+        <li>Aggregate window functions</li>
       </ul>
     </div>
   </div>
 
-  <!-- 3행: 프로시저 제어문 + 쿼리 기능 + 고급 쿼리 -->
+  <!-- Row 3: Procedure Control Flow + Query Features + Advanced Query -->
   <div style="display:grid; grid-template-columns: 1fr 1fr 2fr; gap:14px; align-items:stretch;">
     <div class="exec-card proc">
       <div class="exec-card-header">
         <div class="exec-card-icon" style="background:#ecfeff;">
           <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="#0e7490" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
         </div>
-        <span class="exec-card-title">프로시저 제어문</span>
+        <span class="exec-card-title">Procedure Control Flow</span>
       </div>
       <ul class="exec-list">
         <li>DECLARE / SET</li>
@@ -549,11 +549,11 @@
         <div class="exec-card-icon" style="background:#f8fafc;">
           <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="#475569" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
         </div>
-        <span class="exec-card-title">쿼리 기능</span>
+        <span class="exec-card-title">Query Features</span>
       </div>
       <ul class="exec-list">
         <li>SELECT / DISTINCT</li>
-        <li>WHERE 조건</li>
+        <li>WHERE conditions</li>
         <li class="sub">= / != / > / < / >= / <=</li>
         <li class="sub">AND / OR / NOT</li>
         <li class="sub">IN / NOT IN</li>
@@ -575,39 +575,39 @@
         <div class="exec-card-icon" style="background:#eff6ff;">
           <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="#1d4ed8" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>
         </div>
-        <span class="exec-card-title">고급 쿼리</span>
+        <span class="exec-card-title">Advanced Query</span>
       </div>
       <ul class="exec-list">
-        <li>서브쿼리 (FROM절 / WHERE절 / SELECT 스칼라 / 상관)</li>
-        <li>CTE (WITH ... AS) / 재귀 CTE (WITH RECURSIVE)</li>
+        <li>Subqueries (FROM / WHERE / scalar SELECT / correlated)</li>
+        <li>CTE (WITH ... AS) / Recursive CTE (WITH RECURSIVE)</li>
         <li>UNION / UNION ALL / INTERSECT / EXCEPT</li>
         <li>Updatable VIEW</li>
-        <li>INFORMATION_SCHEMA (가상 뷰 10개)</li>
+        <li>INFORMATION_SCHEMA (10 virtual views)</li>
         <li>PREPARE / EXECUTE / DEALLOCATE</li>
-        <li>SET @var / 사용자 변수 참조</li>
-        <li>병렬 쿼리 (rayon, 10k행+ 자동 적용)</li>
-        <li>쿼리 결과 캐시 (LRU-512, DML 자동 무효화)</li>
-        <li>MVCC 가시성 필터 / SELECT FOR UPDATE / FOR SHARE</li>
-        <li>FK ON DELETE / ON UPDATE 액션 처리</li>
-        <li>PK / FK / UNIQUE / CHECK 제약 검증</li>
-        <li>산술 표현식 / 스칼라 함수 (문자열/날짜/수학/NULL)</li>
+        <li>SET @var / user variable reference</li>
+        <li>Parallel query (rayon, auto for 10k+ rows)</li>
+        <li>Query result cache (LRU-512, auto-invalidated on DML)</li>
+        <li>MVCC visibility filter / SELECT FOR UPDATE / FOR SHARE</li>
+        <li>FK ON DELETE / ON UPDATE action handling</li>
+        <li>PK / FK / UNIQUE / CHECK constraint validation</li>
+        <li>Arithmetic expressions / scalar functions (string/date/math/NULL)</li>
         <li>EXPLAIN / EXPLAIN ANALYZE</li>
       </ul>
     </div>
   </div>
 </div>
 
-<!-- ── 화살표 ── -->
+<!-- ── arrow ── -->
 <div class="flow-arrow">
   <svg width="12" height="22" viewBox="0 0 12 22"><path d="M6 0v17M1 12l5 8 5-8" stroke="#9ca3af" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
 </div>
 
-<!-- ═══ 엔진 고도화 & 최적화 ═══ -->
+<!-- ═══ Engine Enhancements & Optimization ═══ -->
 <div class="outer-card">
-  <div class="card-title">엔진 고도화 &amp; 최적화</div>
+  <div class="card-title">Engine Enhancements &amp; Optimization</div>
   <div class="engine-grid">
 
-    <!-- 인덱스 -->
+    <!-- Index -->
     <div class="engine-card">
       <div class="engine-card-header">
         <div class="engine-icon" style="background:#eef2ff;">
@@ -615,28 +615,28 @@
             <ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14c0 1.66 4.03 3 9 3s9-1.34 9-3V5"/><path d="M3 12c0 1.66 4.03 3 9 3s9-1.34 9-3"/>
           </svg>
         </div>
-        <div class="engine-card-name">인덱스</div>
+        <div class="engine-card-name">Index</div>
       </div>
       <ul class="engine-list">
-        <li>B+Tree (단일 / 복합 / 클러스터드, ORDER=16)</li>
-        <li>Hash Index (USING HASH, 등호 O(1))</li>
-        <li>커버링 인덱스 (Index-only scan)</li>
-        <li>보조 인덱스 중복 키 배열 저장</li>
-        <li>증분 보조 인덱스 갱신 O(1) per row</li>
-        <li class="note">전체 재빌드 없음, DML마다 즉시 반영</li>
-        <li>B+Tree 범위 스캔 가지치기</li>
+        <li>B+Tree (single / composite / clustered, ORDER=16)</li>
+        <li>Hash Index (USING HASH, equality O(1))</li>
+        <li>Covering index (Index-only scan)</li>
+        <li>Secondary index duplicate key array storage</li>
+        <li>Incremental secondary index update O(1) per row</li>
+        <li class="note">No full rebuild, immediately applied on each DML</li>
+        <li>B+Tree range scan pruning</li>
         <li class="note">scan_from / scan_to O(log N + k)</li>
-        <li>range_keys BETWEEN 삭제 최적화</li>
-        <li class="note">역순 swap_remove, 인덱스 깨짐 없음</li>
-        <li>row_pk_pos 위치 인덱스</li>
+        <li>range_keys BETWEEN delete optimization</li>
+        <li class="note">Reverse swap_remove, no index corruption</li>
+        <li>row_pk_pos position index</li>
         <li class="note">DELETE PK = ? → O(1) swap_remove fast-path</li>
-        <li>Top-K 인덱스 조기 종료</li>
-        <li class="note">ORDER BY + LIMIT 시 조건 충족 즉시 중단</li>
-        <li>수치 인식 키 비교 ("10" &gt; "9" 정상 처리)</li>
+        <li>Top-K index early termination</li>
+        <li class="note">Stops immediately when condition met with ORDER BY + LIMIT</li>
+        <li>Numeric-aware key comparison ("10" &gt; "9" works correctly)</li>
       </ul>
     </div>
 
-    <!-- 쿼리 실행 최적화 -->
+    <!-- Query Execution Optimization -->
     <div class="engine-card">
       <div class="engine-card-header">
         <div class="engine-icon" style="background:#f0fdf4;">
@@ -644,31 +644,31 @@
             <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/>
           </svg>
         </div>
-        <div class="engine-card-name">쿼리 실행 최적화</div>
+        <div class="engine-card-name">Query Execution Optimization</div>
       </div>
       <ul class="engine-list">
-        <li>비용 기반 AccessPath 자동 선택</li>
-        <li class="note">Hash Index 등호 조건 우선 선택</li>
-        <li>Join 순서 최적화 (System-R bitmask DP)</li>
-        <li class="note">N≤8 DP, N&gt;8 / OUTER JOIN → 그리디 폴백</li>
-        <li>비상관 서브쿼리 HashSet 머티리얼라이제이션</li>
-        <li class="note">최초 1회 실행 후 O(1) 조회</li>
-        <li>히스토그램 selectivity 추정</li>
+        <li>Cost-based AccessPath auto-selection</li>
+        <li class="note">Hash Index preferred for equality conditions</li>
+        <li>Join order optimization (System-R bitmask DP)</li>
+        <li class="note">N≤8 DP, N&gt;8 / OUTER JOIN → greedy fallback</li>
+        <li>Uncorrelated subquery HashSet materialization</li>
+        <li class="note">O(1) lookup after first execution</li>
+        <li>Histogram selectivity estimation</li>
         <li class="note">ANALYZE TABLE → equi-depth 10-bucket</li>
-        <li>병렬 쿼리 실행 (rayon)</li>
-        <li class="note">SeqScan WHERE 필터 par_chunks</li>
-        <li class="note">GROUP BY 부분 집계 par_chunks → 병합</li>
+        <li>Parallel query execution (rayon)</li>
+        <li class="note">SeqScan WHERE filter par_chunks</li>
+        <li class="note">GROUP BY partial aggregation par_chunks → merge</li>
         <li class="note">ORDER BY par_sort_unstable_by</li>
         <li class="note">Hash Join probe par_iter</li>
-        <li class="note">10k행+ 자동 / SET @rusql_parallel 제어</li>
-        <li>쿼리 결과 캐시 (LRU-512)</li>
-        <li class="note">트랜잭션 외부 SELECT 전용</li>
-        <li class="note">DML 시 참조 테이블 즉시 무효화</li>
-        <li class="note">서브쿼리 포함 SELECT 캐싱 스킵</li>
+        <li class="note">Auto for 10k+ rows / controlled by SET @rusql_parallel</li>
+        <li>Query result cache (LRU-512)</li>
+        <li class="note">For SELECT outside transactions only</li>
+        <li class="note">Immediately invalidated on DML for referenced tables</li>
+        <li class="note">SELECT with subquery skips caching</li>
       </ul>
     </div>
 
-    <!-- 트랜잭션 & 동시성 -->
+    <!-- Transaction & Concurrency -->
     <div class="engine-card">
       <div class="engine-card-header">
         <div class="engine-icon" style="background:#fffbeb;">
@@ -676,28 +676,28 @@
             <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
           </svg>
         </div>
-        <div class="engine-card-name">트랜잭션 &amp; 동시성</div>
+        <div class="engine-card-name">Transaction &amp; Concurrency</div>
       </div>
       <ul class="engine-list">
-        <li>WAL 바이너리 redo log</li>
+        <li>WAL binary redo log</li>
         <li>WAL fsync per-commit</li>
-        <li class="note">innodb_flush_log_at_trx_commit=1 동등</li>
+        <li class="note">equivalent to innodb_flush_log_at_trx_commit=1</li>
         <li>WAL Group Commit (leader/follower)</li>
-        <li class="note">다중 세션 COMMIT → 단일 fsync 묶음</li>
-        <li>Undo Log 디스크 영속화 (_undo.log)</li>
+        <li class="note">Multiple session COMMIT → single fsync batch</li>
+        <li>Undo Log disk persistence (_undo.log)</li>
         <li>Crash Recovery (WAL Replay)</li>
-        <li>Checkpoint (자동 512KB / 수동)</li>
-        <li>MVCC (_xmin / _xmax 버전 스탬프)</li>
-        <li class="note">논리 삭제 → VACUUM → 물리 삭제</li>
-        <li>AUTO VACUUM (DML 200회 누적 임계값)</li>
-        <li>Row-level Locking (공유 / 배타)</li>
-        <li>데드락 감지 (DFS wait-for 그래프)</li>
-        <li>격리 수준 4단계 (RC ~ SERIALIZABLE)</li>
+        <li>Checkpoint (auto 512KB / manual)</li>
+        <li>MVCC (_xmin / _xmax version stamps)</li>
+        <li class="note">Logical delete → VACUUM → physical delete</li>
+        <li>AUTO VACUUM (cumulative 200 DML operations threshold)</li>
+        <li>Row-level Locking (shared / exclusive)</li>
+        <li>Deadlock detection (DFS wait-for graph)</li>
+        <li>4-level isolation (RC ~ SERIALIZABLE)</li>
         <li>Deferred Write</li>
-        <li class="note">DML → session_tables 버퍼, COMMIT 시 반영</li>
-        <li>SAVEPOINT 기반 세션 로컬 undo</li>
-        <li>세션별 독립 Executor</li>
-        <li class="note">Arc&lt;RwLock&lt;SharedDatabase&gt;&gt; 공유</li>
+        <li class="note">DML → session_tables buffer, applied on COMMIT</li>
+        <li>SAVEPOINT-based session-local undo</li>
+        <li>Per-session independent Executor</li>
+        <li class="note">Arc&lt;RwLock&lt;SharedDatabase&gt;&gt; shared</li>
       </ul>
     </div>
 
@@ -712,18 +712,18 @@
         <div class="engine-card-name">Buffer Pool</div>
       </div>
       <ul class="engine-list">
-        <li>LRU 교체 정책</li>
-        <li>기본 64p × 16KB</li>
-        <li>--buffer-pool-size N 옵션으로 조정</li>
-        <li>dirty 페이지 flush (eviction 시 자동)</li>
-        <li>캐시 히트율 추적 (SHOW BUFFER POOL)</li>
-        <li>SELECT는 s.tables 직접 읽기로 우회</li>
-        <li class="note">인메모리 조회 성능 우선</li>
-        <li>DROP/TRUNCATE 시 캐시 자동 무효화</li>
+        <li>LRU eviction policy</li>
+        <li>Default 64p × 16KB</li>
+        <li>Adjustable via --buffer-pool-size N option</li>
+        <li>Dirty page flush (auto on eviction)</li>
+        <li>Cache hit rate tracking (SHOW BUFFER POOL)</li>
+        <li>SELECT bypasses via direct s.tables read</li>
+        <li class="note">Prioritizes in-memory lookup performance</li>
+        <li>Cache auto-invalidated on DROP/TRUNCATE</li>
       </ul>
     </div>
 
-    <!-- 영속화 -->
+    <!-- Persistence -->
     <div class="engine-card">
       <div class="engine-card-header">
         <div class="engine-icon" style="background:#ecfeff;">
@@ -731,28 +731,28 @@
             <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/>
           </svg>
         </div>
-        <div class="engine-card-name">영속화</div>
+        <div class="engine-card-name">Persistence</div>
       </div>
       <ul class="engine-list">
-        <li>바이너리 .rdb + LZ4 압축</li>
-        <li>B+Tree .idx 자동 저장 (DML/CREATE IDX)</li>
-        <li>인덱스 메타 (indexes.json)</li>
-        <li>스키마 (auto_increment 포함)</li>
-        <li>뷰 (views.json)</li>
-        <li>저장 프로시저 (_procedures.json)</li>
-        <li>트리거 (_triggers.json)</li>
+        <li>Binary .rdb + LZ4 compression</li>
+        <li>B+Tree .idx auto-saved (DML/CREATE IDX)</li>
+        <li>Index metadata (indexes.json)</li>
+        <li>Schema (including auto_increment)</li>
+        <li>Views (views.json)</li>
+        <li>Stored procedures (_procedures.json)</li>
+        <li>Triggers (_triggers.json)</li>
         <li>UDF (_functions.json)</li>
-        <li>사용자 / 권한 (_users / _grants.json)</li>
-        <li>역할 (_roles / _role_grants.json)</li>
-        <li>동의어 (_synonyms.json)</li>
-        <li>전역 파일 → data/_system/ 분리</li>
-        <li>구버전 루트 경로 → _system/ 자동 마이그레이션</li>
-        <li>연결별 독립 데이터 디렉터리</li>
-        <li>TRUNCATE 후 AUTO INCREMENT 리셋</li>
+        <li>Users / permissions (_users / _grants.json)</li>
+        <li>Roles (_roles / _role_grants.json)</li>
+        <li>Synonyms (_synonyms.json)</li>
+        <li>Global files separated into data/_system/</li>
+        <li>Old root paths → auto-migrated to _system/</li>
+        <li>Per-connection independent data directory</li>
+        <li>AUTO INCREMENT reset after TRUNCATE</li>
       </ul>
     </div>
 
-    <!-- 인증 & 보안 -->
+    <!-- Auth & Security -->
     <div class="engine-card">
       <div class="engine-card-header">
         <div class="engine-icon" style="background:#f0fdf4;">
@@ -760,18 +760,18 @@
             <rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>
           </svg>
         </div>
-        <div class="engine-card-name">인증 &amp; 보안</div>
+        <div class="engine-card-name">Auth &amp; Security</div>
       </div>
       <ul class="engine-list">
-        <li>Native TCP: SHA-256 해시 인증</li>
-        <li>MySQL 프로토콜: mysql_native_password</li>
-        <li class="note">SHA1(SHA1(pw)), 챌린지-응답 검증</li>
-        <li>레거시 평문 → SHA-256 자동 마이그레이션</li>
-        <li>mysql_native_hash 자동 채움</li>
-        <li class="note">로그인 성공 시 레거시 계정에 자동 적용</li>
-        <li>root/root 기본 계정 자동 생성</li>
-        <li class="note">users가 비어있으면 최초 실행 시 생성</li>
-        <li>MySQL wire protocol 완전 호환</li>
+        <li>Native TCP: SHA-256 hash auth</li>
+        <li>MySQL protocol: mysql_native_password</li>
+        <li class="note">SHA1(SHA1(pw)), challenge-response verification</li>
+        <li>Legacy plaintext → SHA-256 auto-migration</li>
+        <li>mysql_native_hash auto-fill</li>
+        <li class="note">Auto-applied to legacy accounts on successful login</li>
+        <li>root/root default account auto-created</li>
+        <li class="note">Created on first run if users list is empty</li>
+        <li>Full MySQL wire protocol compatibility</li>
         <li class="note">mysql CLI · DBeaver · mysql-connector-python</li>
       </ul>
     </div>
@@ -779,14 +779,14 @@
   </div>
 </div>
 
-<!-- ── 화살표 ── -->
+<!-- ── arrow ── -->
 <div class="flow-arrow">
   <svg width="12" height="22" viewBox="0 0 12 22"><path d="M6 0v17M1 12l5 8 5-8" stroke="#9ca3af" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
 </div>
 
-<!-- 실행 -->
+<!-- Execute -->
 <div class="exec-end">
-  <div class="exec-end-node">실행</div>
+  <div class="exec-end-node">Execute</div>
 </div>
 
 </body>
