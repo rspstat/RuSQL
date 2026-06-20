@@ -1,4 +1,4 @@
-## RuSQL
+﻿## RuSQL
 
 Custom RDBMS + AI MCP Project
 
@@ -207,11 +207,12 @@ INSERT INTO project (code,name,description,budget,team_size,priority,start_date,
 
 -- SELECT
 SELECT id, first_name, last_name, salary FROM employee WHERE salary >= 80000 AND emp_type = 'full_time' ORDER BY salary DESC;
-SELECT first_name, last_name FROM employee ORDER BY hire_date LIMIT 3 OFFSET 1;
+SELECT first_name, last_name FROM employee ORDER BY hire_date LIMIT 1, 3;
 SELECT DISTINCT emp_type FROM employee ORDER BY emp_type;
 SELECT first_name FROM employee WHERE department_id IN (1,2) AND salary BETWEEN 70000 AND 130000;
 SELECT first_name, last_name FROM employee WHERE first_name LIKE 'A%' OR department_id IS NULL;
 SELECT first_name FROM employee WHERE first_name REGEXP '^[AEI]';
+SELECT first_name FROM employee WHERE first_name NOT REGEXP '^[AEI]' ORDER BY first_name LIMIT 5;
 SELECT first_name, REGEXP_LIKE(first_name,'^A') AS starts_a, REGEXP_REPLACE(email,'@co.com','') AS username FROM employee LIMIT 3;
 SELECT name, budget FROM department WHERE NOT (budget < 1000000);
 SELECT id, metadata->>'$.building' AS building, metadata->>'$.room' AS room FROM department ORDER BY id;
@@ -224,6 +225,15 @@ SELECT department_id, COUNT(*) AS headcount, AVG(salary) AS avg_salary FROM empl
 SELECT emp_type, GROUP_CONCAT(first_name SEPARATOR ', ') AS names FROM employee GROUP BY emp_type ORDER BY emp_type;
 SELECT COUNT(DISTINCT department_id), SUM(DISTINCT budget), STDDEV(budget), VARIANCE(budget) FROM project;
 SELECT emp_type, COUNT(*) AS n, SUM(salary) AS total FROM employee GROUP BY emp_type ORDER BY total DESC;
+
+-- Parser Compatibility
+SELECT id, first_name, emp_type FROM employee WHERE emp_type <> 'contract' AND department_id <> 3 ORDER BY id LIMIT 4;
+SELECT first_name || ' ' || last_name AS full_name FROM employee ORDER BY id LIMIT 4;
+SELECT first_name, salary, salary % 10000 AS mod_val FROM employee ORDER BY id LIMIT 4;
+SELECT id, first_name, salary FROM employee ORDER BY salary DESC LIMIT 3, 3;
+SELECT first_name, is_manager FROM employee WHERE is_manager = TRUE ORDER BY id;
+SELECT first_name, is_manager FROM employee WHERE is_manager = FALSE AND department_id IS NOT NULL ORDER BY id LIMIT 4;
+SELECT `first_name`, `last_name`, `salary` FROM `employee` WHERE `department_id` = 1 ORDER BY `salary` DESC;
 
 -- Join
 SELECT e.first_name, e.last_name, d.name AS dept_name, e.salary FROM employee e JOIN department d ON e.department_id = d.id ORDER BY e.salary DESC;
@@ -320,6 +330,9 @@ SELECT LEFT(first_name,3) AS pfx, REVERSE(last_name) AS rev, REPEAT('-',3) AS se
 SELECT ROUND(3.14159,2), ABS(-9.99), CEIL(2.1), FLOOR(2.9), MOD(17,5), SQRT(144), POW(2,10), LOG2(1024), LOG10(1000), PI(), SIGN(-1), TRUNCATE(9.876,1), RAND() >= 0 AS rand_ok;
 SELECT YEAR(hire_date), MONTH(hire_date), DAY(hire_date), DAYOFWEEK(hire_date), DATEDIFF('2026-05-01',hire_date) AS days_employed, DATE_FORMAT(hire_date,'%Y-%m') AS hire_month, DATE_ADD(hire_date, INTERVAL 1 YEAR) AS anniversary, TIMESTAMPDIFF(YEAR,hire_date,'2026-05-01') AS years_employed FROM employee LIMIT 3;
 SELECT COALESCE(department_id,-1) AS dept_or_default, IFNULL(department_id,-1) AS dept_ifnull, NULLIF(emp_type,'contract') AS nullif_contract, GREATEST(1,5,3), LEAST(1,5,3), CAST(experience_years AS INT) AS exp_int, IF(salary>100000,'Senior','Standard') AS emp_level, CASE WHEN salary >= 120000 THEN 'Senior' WHEN salary >= 80000 THEN 'Mid' ELSE 'Junior' END AS grade, MD5(email), LENGTH(UUID()) > 0 AS uuid_ok FROM employee LIMIT 3;
+SELECT CONCAT_WS(' ', first_name, last_name) AS full_name, CONCAT_WS(', ', job_title, emp_type) AS role FROM employee LIMIT 4;
+SELECT CAST(salary AS SIGNED) AS sal_int, CAST(performance AS DECIMAL) AS perf_dec, CAST(hire_date AS DATE) AS hire_d, CAST(hire_date AS DATETIME) AS hire_dt FROM employee LIMIT 3;
+SELECT CONVERT(salary, CHAR) AS sal_str, CONVERT(experience_years, UNSIGNED) AS exp_uint, CAST('2024-06-01' AS DATE) AS parsed_date FROM employee LIMIT 3;
 
 -- Insert Variants
 INSERT IGNORE INTO department (code, name, budget, dept_type) VALUES ('ENG', 'Engineering Dup', 0, 'engineering');
@@ -606,8 +619,22 @@ SHOW LOCKS;
 SHOW PROCESSLIST;
 SHOW DATABASES;
 
--- Backup
+-- Type Aliases
+CREATE TABLE tmp_types (
+    a INTEGER NOT NULL,
+    b CHAR(20),
+    c NUMERIC(8,2),
+    d BOOL DEFAULT FALSE,
+    e DECIMAL DEFAULT 0
+);
+INSERT INTO tmp_types VALUES (1,'hello',3.14,TRUE,99.99);
+INSERT INTO tmp_types VALUES (2,'world',2.71,FALSE,0);
+SELECT a, b, c, d, e FROM tmp_types ORDER BY a;
+DROP TABLE tmp_types;
+
+-- Backup / Restore
 BACKUP DATABASE company INTO 'company_backup.sql';
+RESTORE FROM 'company_backup.sql';
 
 -- Cleanup
 DROP USER IF EXISTS 'testuser'@'%';

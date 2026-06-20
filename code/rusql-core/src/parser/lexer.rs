@@ -260,6 +260,12 @@ pub enum Token {
 
     // SYNONYM
     Synonym,
+
+    // Modulo operator
+    Percent,
+
+    // String concatenation (||)
+    PipePipe,
 }
 
 pub struct Lexer {
@@ -289,13 +295,51 @@ impl Lexer {
     }
 
     fn read_string(&mut self) -> Token {
-        self.advance();
+        self.advance(); // consume opening quote
         let mut s = String::new();
         while let Some(ch) = self.peek() {
-            if ch == '\'' { self.advance(); break; }
-            s.push(ch); self.advance();
+            if ch == '\'' {
+                self.advance();
+                // '' inside a string is an escaped single-quote
+                if self.peek() == Some('\'') {
+                    self.advance();
+                    s.push('\'');
+                } else {
+                    break;
+                }
+            } else if ch == '\\' {
+                self.advance();
+                match self.peek() {
+                    Some('\'') => { self.advance(); s.push('\''); }
+                    Some('\\') => { self.advance(); s.push('\\'); }
+                    Some('n')  => { self.advance(); s.push('\n'); }
+                    Some('r')  => { self.advance(); s.push('\r'); }
+                    Some('t')  => { self.advance(); s.push('\t'); }
+                    Some('0')  => { self.advance(); s.push('\0'); }
+                    Some(c)    => { self.advance(); s.push(c); }
+                    None       => break,
+                }
+            } else {
+                s.push(ch);
+                self.advance();
+            }
         }
         Token::StringLit(s)
+    }
+
+    fn read_quoted_ident(&mut self, closing: char) -> Token {
+        self.advance(); // consume opening quote
+        let mut s = String::new();
+        while let Some(ch) = self.peek() {
+            if ch == closing {
+                self.advance();
+                break;
+            }
+            s.push(ch);
+            self.advance();
+        }
+        // Always treat backtick/double-quote-quoted names as identifiers, never as keywords
+        Token::Ident(s)
     }
 
     fn read_number(&mut self) -> Token {
@@ -539,6 +583,27 @@ impl Lexer {
             "JSON_UNQUOTE" => Token::JsonUnquote,
             "JSON_VALUE"   => Token::JsonValue,
             "SHARE"        => Token::Share,
+            // Type aliases
+            "INTEGER"  => Token::Int,
+            "INT4"     => Token::Int,
+            "INT8"     => Token::BigInt,
+            "MEDIUMINT"| "INT2" | "INT3" => Token::Int,
+            "LONGTEXT" | "MEDIUMTEXT" | "TINYTEXT" | "CLOB" | "LONGBLOB" | "MEDIUMBLOB" | "TINYBLOB" => Token::Text,
+            "NVARCHAR" | "NCHAR" | "CHARACTER" | "CHAR" => Token::Varchar,
+            "NUMERIC"  => Token::Decimal,
+            "REAL"     => Token::Float,
+            "BOOL"     => Token::Boolean,
+            // Boolean literals → normalize to lowercase ident for consistent handling
+            "TRUE"     => Token::Ident("true".to_string()),
+            "FALSE"    => Token::Ident("false".to_string()),
+            "UNKNOWN"  => Token::Null,
+            // Additional aliases
+            "CURRENT_DATE"      => Token::Curdate,
+            "CURRENT_TIME"      => Token::Curdate,
+            "CURRENT_TIMESTAMP" => Token::Now,
+            "SYSDATE"           => Token::Now,
+            "LOCALTIME"         => Token::Now,
+            "LOCALTIMESTAMP"    => Token::Now,
             _              => Token::Ident(s),
         }
     }
@@ -630,6 +695,7 @@ impl Lexer {
                         '<' => {
                             self.advance();
                             if self.peek() == Some('=') { self.advance(); Token::Lte }
+                            else if self.peek() == Some('>') { self.advance(); Token::Ne }
                             else { Token::Lt }
                         }
                         '!' => {
@@ -637,6 +703,14 @@ impl Lexer {
                             if self.peek() == Some('=') { self.advance(); Token::Ne }
                             else { continue }
                         }
+                        '%' => { self.advance(); Token::Percent }
+                        '|' => {
+                            self.advance();
+                            if self.peek() == Some('|') { self.advance(); Token::PipePipe }
+                            else { continue }
+                        }
+                        '`' => self.read_quoted_ident('`'),
+                        '"' => self.read_quoted_ident('"'),
                         '\'' => self.read_string(),
                         c if c.is_ascii_digit() => self.read_number(),
                         c if c.is_alphabetic() || c == '_' => self.read_ident(),

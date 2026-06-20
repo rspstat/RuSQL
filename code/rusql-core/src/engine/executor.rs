@@ -149,6 +149,8 @@ pub struct SharedDatabase {
     pub triggers: HashMap<String, (String, String, String, Vec<Statement>)>,
     /// AUTO VACUUM: 커밋된 DML 누적 카운터 (임계값 초과 시 자동 VACUUM)
     pub dml_since_vacuum: usize,
+    /// AUTO ANALYZE: per-table DML count since last ANALYZE (histogram refresh)
+    pub dml_since_analyze: HashMap<String, usize>,
     /// User-defined scalar functions: name → (params: Vec<name>, body_expr: String)
     pub user_functions: HashMap<String, (Vec<String>, String)>,
     /// 활성 세션 목록 (SHOW PROCESS LIST용). 별도 Mutex로 보호.
@@ -499,6 +501,7 @@ impl Executor {
                 procedures,
                 triggers,
                 dml_since_vacuum: 0,
+                dml_since_analyze: HashMap::new(),
                 user_functions,
                 process_list: Arc::new(Mutex::new(HashMap::new())),
                 next_session_id: Arc::new(AtomicUsize::new(1)),
@@ -871,6 +874,7 @@ impl Executor {
             Statement::DropTrigger { name, if_exists } => self.exec_drop_trigger(s, name, if_exists),
             Statement::DropProcedure { name, if_exists } => self.exec_drop_procedure(s, name, if_exists),
             Statement::Backup { database, output_file } => self.exec_backup(s, database, output_file),
+            Statement::Restore { source_file, database } => self.exec_restore(s, source_file, database),
             Statement::ShowProcessList => self.exec_show_processlist(s),
             Statement::CreateFunction { name, params, body } => self.exec_create_function(s, name, params, body),
             Statement::DropFunction { name, if_exists } => self.exec_drop_function(s, name, if_exists),
@@ -2056,6 +2060,7 @@ impl Executor {
         if !self.txn.is_active() {
             // s.tables가 이미 최신 상태 — 불필요한 O(n) clone/write_page 제거
             Self::maybe_auto_vacuum(s);
+            self.maybe_auto_analyze(s, &table);
         }
         Self::update_stat_rows(s, &table, inserted as i64);
 
@@ -2214,6 +2219,11 @@ impl Executor {
                         regex::Regex::new(effective_lit)
                             .map(|re| re.is_match(&val))
                             .unwrap_or(false)
+                    }
+                    Operator::NotRegexp => {
+                        regex::Regex::new(effective_lit)
+                            .map(|re| !re.is_match(&val))
+                            .unwrap_or(true)
                     }
                     Operator::Between | Operator::NotBetween => false,
                     Operator::Gt  => cmp_num(&val, effective_lit)
@@ -2645,6 +2655,34 @@ impl Executor {
                         join_algo::sort_merge_join(&current, &right_rows, &j.join_type, &j.table, probe_col, build_col, &right_schema_cols),
                     Some(JoinAlgo::Hash { probe_col, build_col }) =>
                         join_algo::hash_join(&current, &right_rows, &j.join_type, &j.table, probe_col, build_col, &right_schema_cols),
+                    Some(JoinAlgo::IndexNL { probe_col, right_pk_col: _ }) => {
+                        // Index Nested Loop: probe right table's PK B+Tree per left row.
+                        // Only applies outside transactions (session_rows path already loaded above).
+                        if self.txn.is_active() {
+                            // Fallback to hash join inside transactions
+                            join_algo::hash_join(&current, &right_rows, &j.join_type, &j.table, probe_col, probe_col, &right_schema_cols)
+                        } else if let Some(right_index) = s.indexes.get(&j.table) {
+                            let mut out: Vec<Row> = Vec::with_capacity(current.len());
+                            for left_row in &current {
+                                let key = Self::get_col(left_row, probe_col)
+                                    .cloned()
+                                    .unwrap_or_default();
+                                if key.is_empty() || key == NULL_VALUE { continue; }
+                                if let Some(val_json) = right_index.search(&key) {
+                                    if let Ok(right_row) = serde_json::from_str::<Row>(&val_json) {
+                                        if Self::is_visible(&right_row) {
+                                            let mut merged = left_row.clone();
+                                            join_algo::merge_right(&mut merged, &right_row, &j.table);
+                                            out.push(merged);
+                                        }
+                                    }
+                                }
+                            }
+                            out
+                        } else {
+                            join_algo::hash_join(&current, &right_rows, &j.join_type, &j.table, probe_col, probe_col, &right_schema_cols)
+                        }
+                    }
                     _ => {
                         let on_expr = j.on_expr.clone();
                         join_algo::nested_loop_join(&current, &right_rows, &j.join_type, &j.table, &j.using_cols, &right_schema_cols, move |merged| Self::eval_condexpr(merged, &on_expr))
@@ -3348,7 +3386,22 @@ impl Executor {
                 v.trim().to_string()
             }
             "CONCAT" => {
-                args.iter().map(|a| resolve(a, row)).collect::<Vec<_>>().join("")
+                let parts: Vec<String> = args.iter().map(|a| resolve(a, row)).collect();
+                // MySQL CONCAT: if any arg is NULL, return NULL
+                if parts.iter().any(|p| p == NULL_VALUE) {
+                    NULL_VALUE.to_string()
+                } else {
+                    parts.join("")
+                }
+            }
+            "CONCAT_WS" => {
+                // CONCAT_WS(sep, val, ...) — skips NULLs, joins with separator
+                let sep = args.first().map(|a| resolve(a, row)).unwrap_or_default();
+                let parts: Vec<String> = args.iter().skip(1)
+                    .map(|a| resolve(a, row))
+                    .filter(|v| v != NULL_VALUE)
+                    .collect();
+                parts.join(&sep)
             }
             "SUBSTR" | "SUBSTRING" => {
                 let v = args.first().map(|a| resolve(a, row)).unwrap_or_default();
@@ -3466,17 +3519,41 @@ impl Executor {
                     format!("{}{}", s, &full_pad[..pad_needed])
                 }
             }
-            "CAST" => {
+            "CAST" | "CONVERT" => {
                 let val      = args.first().map(|a| resolve(a, row)).unwrap_or_default();
-                let type_str = args.get(1).map(|s| s.as_str()).unwrap_or("TEXT");
+                let raw_type = args.get(1).map(|s| s.as_str()).unwrap_or("TEXT");
+                let type_str = raw_type.trim_matches('\'');
                 match type_str {
-                    "INT" | "INTEGER" => val.parse::<i64>().map(|n| n.to_string()).unwrap_or_else(|_| "0".to_string()),
-                    "FLOAT" | "DOUBLE" | "DECIMAL" => val.parse::<f64>().map(|n| format!("{}", n)).unwrap_or_else(|_| "0".to_string()),
-                    "BOOLEAN" => {
-                        let b = !val.is_empty() && val != "0" && val != "false" && val.to_lowercase() != "false";
+                    "INT" | "INTEGER" | "SIGNED" | "TINYINT" | "SMALLINT" | "MEDIUMINT" =>
+                        val.parse::<i64>()
+                            .or_else(|_| val.parse::<f64>().map(|f| f as i64))
+                            .map(|n| n.to_string())
+                            .unwrap_or_else(|_| "0".to_string()),
+                    "UNSIGNED" | "BIGINT" =>
+                        val.parse::<u64>()
+                            .or_else(|_| val.parse::<f64>().map(|f| f as u64))
+                            .map(|n| n.to_string())
+                            .unwrap_or_else(|_| "0".to_string()),
+                    "FLOAT" | "DOUBLE" | "DECIMAL" | "NUMERIC" | "REAL" =>
+                        val.parse::<f64>().map(|n| format!("{}", n)).unwrap_or_else(|_| "0".to_string()),
+                    "BOOLEAN" | "BOOL" => {
+                        let b = !val.is_empty() && val != "0" && val.to_lowercase() != "false" && val != NULL_VALUE;
                         if b { "1".to_string() } else { "0".to_string() }
                     }
-                    _ => val,
+                    "DATE" => {
+                        chrono::NaiveDate::parse_from_str(&val, "%Y-%m-%d %H:%M:%S")
+                            .or_else(|_| chrono::NaiveDate::parse_from_str(&val, "%Y-%m-%d"))
+                            .map(|d| d.format("%Y-%m-%d").to_string())
+                            .unwrap_or(NULL_VALUE.to_string())
+                    }
+                    "DATETIME" | "TIMESTAMP" => {
+                        chrono::NaiveDateTime::parse_from_str(&val, "%Y-%m-%d %H:%M:%S")
+                            .or_else(|_| chrono::NaiveDate::parse_from_str(&val, "%Y-%m-%d")
+                                .map(|d| d.and_hms_opt(0,0,0).unwrap()))
+                            .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())
+                            .unwrap_or(NULL_VALUE.to_string())
+                    }
+                    _ => val, // CHAR, VARCHAR, TEXT, etc. — string passthrough
                 }
             }
             "DATEDIFF" => {
@@ -3868,16 +3945,6 @@ impl Executor {
                 let v = args.first().map(|a| resolve(a, row)).unwrap_or_default();
                 if v == NULL_VALUE || v.is_empty() { "1".to_string() } else { "0".to_string() }
             }
-            "CONVERT" => {
-                // CONVERT(val, type) — CAST의 별칭
-                let val      = args.first().map(|a| resolve(a, row)).unwrap_or_default();
-                let type_str = args.get(1).map(|s| s.as_str()).unwrap_or("TEXT");
-                match type_str {
-                    "INT" | "INTEGER" | "SIGNED" => val.parse::<i64>().map(|n| n.to_string()).unwrap_or_else(|_| "0".to_string()),
-                    "FLOAT" | "DOUBLE" | "DECIMAL" | "UNSIGNED" => val.parse::<f64>().map(|n| format!("{}", n)).unwrap_or_else(|_| "0".to_string()),
-                    _ => val,
-                }
-            }
             "BIT_LENGTH" => {
                 let v = args.first().map(|a| resolve(a, row)).unwrap_or_default();
                 (v.len() * 8).to_string()
@@ -4152,7 +4219,9 @@ impl Executor {
             return Ok("0 rows returned.".to_string());
         }
 
-        // Pre-compute scalar subqueries and inject as __sq_N__ keys into each row
+        // Pre-compute scalar subqueries and inject as __sq_N__ keys into each row.
+        // Uncorrelated subqueries (no outer row references) are executed once and cached.
+        // Correlated subqueries are substituted and executed per row.
         {
             let mut sq_idx = 0usize;
             let sq_queries: Vec<(usize, Statement)> = columns.iter().filter_map(|c| {
@@ -4162,8 +4231,40 @@ impl Executor {
                     Some((idx, *query.clone()))
                 } else { None }
             }).collect();
+
+            // Pre-execute uncorrelated subqueries once
+            let mut uncorr_cache: HashMap<usize, String> = HashMap::new();
+            for (idx, query) in &sq_queries {
+                let is_correlated = match query {
+                    Statement::Select { condition, .. } =>
+                        condition.as_ref().map_or(false, |c| Self::has_outer_ref(c)),
+                    _ => false,
+                };
+                if !is_correlated {
+                    if let Statement::Select {
+                        table: st, subquery, distinct, columns: sub_cols,
+                        condition: sub_cond, joins: sub_joins, order_by,
+                        group_by, having, limit, offset, ..
+                    } = query.clone() {
+                        let val = match self.exec_select(
+                            s, st, subquery, distinct, sub_cols, sub_cond,
+                            sub_joins, order_by, group_by, having, limit, offset, false, false
+                        ) {
+                            Ok(output) => self.extract_values_from_output(&output)
+                                .into_iter().next().unwrap_or_else(|| NULL_VALUE.to_string()),
+                            Err(_) => NULL_VALUE.to_string(),
+                        };
+                        uncorr_cache.insert(*idx, val);
+                    }
+                }
+            }
+
             for row in result.iter_mut() {
                 for (idx, query) in &sq_queries {
+                    if let Some(cached) = uncorr_cache.get(idx) {
+                        row.insert(format!("__sq_{}__", idx), cached.clone());
+                        continue;
+                    }
                     let val = if let Statement::Select {
                         table: st, subquery, distinct, columns: sub_cols,
                         condition: sub_cond, joins: sub_joins, order_by,
@@ -4945,6 +5046,7 @@ impl Executor {
             s.buffer_pool.write_page(&table, rows);
             s.buffer_pool.flush_page(&table, &s.disk);
             Self::maybe_auto_vacuum(s);
+            self.maybe_auto_analyze(s, &table);
         }
         self.maybe_auto_checkpoint(s);
         if let Some(ret_cols) = returning {
@@ -5180,6 +5282,7 @@ impl Executor {
                 }
             }
             Self::maybe_auto_vacuum(s);
+            self.maybe_auto_analyze(s, &table);
             Self::update_stat_rows(s, &table, -(deleted as i64));
             self.maybe_auto_checkpoint(s);
             return if let Some(ret_cols) = returning {
@@ -5388,6 +5491,7 @@ impl Executor {
             }
             // INSERT와 동일하게 per-row 디스크 flush 없음 — checkpoint 시 일괄 영속화
             Self::maybe_auto_vacuum(s);
+            self.maybe_auto_analyze(s, &table);
         // 트랜잭션 중에는 인덱스/버퍼 갱신 생략 (COMMIT 시 일괄 처리)
         }
         Self::update_stat_rows(s, &table, -(deleted as i64));
@@ -7175,6 +7279,47 @@ impl Executor {
         }
     }
 
+    fn exec_restore(&mut self, s: &mut SharedDatabase, source_file: String, database: Option<String>) -> Result<String, String> {
+        let sql_text = std::fs::read_to_string(&source_file)
+            .map_err(|e| format!("Cannot read restore file '{}': {}", source_file, e))?;
+
+        if let Some(db) = database {
+            self.current_db = db.to_lowercase();
+        }
+
+        let mut stmts_ok = 0usize;
+        let mut stmts_err = 0usize;
+
+        // Split on ';' boundaries, strip comments, skip empty
+        for raw in sql_text.split(';') {
+            let stmt = raw
+                .lines()
+                .filter(|l| !l.trim_start().starts_with("--"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            let trimmed = stmt.trim();
+            if trimmed.is_empty() { continue; }
+            match crate::parser::parser::Parser::new(trimmed).parse() {
+                Ok(parsed) => match self.execute_with_s(s, parsed) {
+                    Ok(_) => stmts_ok += 1,
+                    Err(e) => {
+                        eprintln!("[Restore] statement error: {}", e);
+                        stmts_err += 1;
+                    }
+                },
+                Err(e) => {
+                    eprintln!("[Restore] parse error: {}", e);
+                    stmts_err += 1;
+                }
+            }
+        }
+
+        Ok(format!(
+            "Restore from '{}' complete: {} statement(s) OK, {} error(s).",
+            source_file, stmts_ok, stmts_err
+        ))
+    }
+
     fn build_create_table_ddl(&self, s: &SharedDatabase, qkey: &str) -> String {
         let bare = qkey.split('.').last().unwrap_or(qkey);
         if let Some(schema) = s.catalog.get_table(qkey) {
@@ -7731,6 +7876,29 @@ impl Executor {
     fn update_stat_rows(s: &mut SharedDatabase, table: &str, delta: i64) {
         let stats = s.table_stats.entry(table.to_string()).or_default();
         stats.total_rows = (stats.total_rows as i64 + delta).max(0) as usize;
+    }
+
+    /// Auto-ANALYZE: track per-table DML modifications and re-run ANALYZE TABLE when
+    /// ≥20% of rows have changed (minimum threshold: 1000 modifications).
+    /// Keeps cost-based planner histograms fresh without manual intervention.
+    fn maybe_auto_analyze(&self, s: &mut SharedDatabase, table: &str) {
+        const AUTO_ANALYZE_MIN_MODS: usize = 1000;
+        const AUTO_ANALYZE_RATIO: f64 = 0.20;
+
+        let total = s.table_stats.get(table).map(|ts| ts.total_rows).unwrap_or(0);
+        let threshold = ((total as f64 * AUTO_ANALYZE_RATIO) as usize).max(AUTO_ANALYZE_MIN_MODS);
+
+        let current = {
+            let count = s.dml_since_analyze.entry(table.to_string()).or_insert(0);
+            *count += 1;
+            *count
+        };
+        if current < threshold {
+            return;
+        }
+        s.dml_since_analyze.insert(table.to_string(), 0);
+        let _ = self.exec_analyze_table(s, table.to_string());
+        eprintln!("[AutoAnalyze] {} — histogram refreshed", table);
     }
 
     /// AUTO VACUUM: 커밋된 DML이 누적 임계값(200회)을 초과하면 전체 테이블의 dead row를 제거한다.

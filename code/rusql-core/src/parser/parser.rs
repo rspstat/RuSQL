@@ -227,6 +227,23 @@ impl Parser {
             Some(Token::Group)     => Ok("group".to_string()),
             Some(Token::Index)     => Ok("index".to_string()),
             Some(Token::View)      => Ok("view".to_string()),
+            Some(Token::User)      => Ok("user".to_string()),
+            Some(Token::Role)      => Ok("role".to_string()),
+            Some(Token::Row)       => Ok("row".to_string()),
+            Some(Token::Left)      => Ok("left".to_string()),
+            Some(Token::Right)     => Ok("right".to_string()),
+            Some(Token::Time)      => Ok("time".to_string()),
+            Some(Token::Year)      => Ok("year".to_string()),
+            Some(Token::Rank)      => Ok("rank".to_string()),
+            Some(Token::Check)     => Ok("check".to_string()),
+            Some(Token::Replace)   => Ok("replace".to_string()),
+            Some(Token::Repeat)    => Ok("repeat".to_string()),
+            Some(Token::Truncate)  => Ok("truncate".to_string()),
+            Some(Token::Interval)  => Ok("interval".to_string()),
+            Some(Token::Database)  => Ok("database".to_string()),
+            Some(Token::Tables)    => Ok("tables".to_string()),
+            Some(Token::Column)    => Ok("column".to_string()),
+            Some(Token::Null)      => Ok("null".to_string()),
             other => Err(format!("Expected identifier (alias), got {:?}", other)),
         }
     }
@@ -260,6 +277,23 @@ impl Parser {
             Some(Token::Avg)        => Ok("avg".to_string()),
             Some(Token::Min)        => Ok("min".to_string()),
             Some(Token::Max)        => Ok("max".to_string()),
+            Some(Token::User)       => Ok("user".to_string()),
+            Some(Token::Role)       => Ok("role".to_string()),
+            Some(Token::Row)        => Ok("row".to_string()),
+            Some(Token::Order)      => Ok("order".to_string()),
+            Some(Token::Group)      => Ok("group".to_string()),
+            Some(Token::Left)       => Ok("left".to_string()),
+            Some(Token::Right)      => Ok("right".to_string()),
+            Some(Token::Date)       => Ok("date".to_string()),
+            Some(Token::Time)       => Ok("time".to_string()),
+            Some(Token::Year)       => Ok("year".to_string()),
+            Some(Token::Repeat)     => Ok("repeat".to_string()),
+            Some(Token::Replace)    => Ok("replace".to_string()),
+            Some(Token::Truncate)   => Ok("truncate".to_string()),
+            Some(Token::Now)        => Ok("now".to_string()),
+            Some(Token::Rank)       => Ok("rank".to_string()),
+            Some(Token::Check)      => Ok("check".to_string()),
+            Some(Token::Interval)   => Ok("interval".to_string()),
             other => Err(format!("Expected identifier, got {:?}", other)),
         }
     }
@@ -267,18 +301,36 @@ impl Parser {
     /// 식별자 또는 alias로 쓰이는 키워드 모두 허용 (ORDER BY / GROUP BY 컬럼명 파싱용)
     fn expect_any_ident(&mut self) -> Result<String, String> {
         match self.advance() {
-            Some(Token::Ident(s))  => Ok(s.clone()),
-            Some(Token::Count)     => Ok("count".to_string()),
-            Some(Token::Sum)       => Ok("sum".to_string()),
-            Some(Token::Avg)       => Ok("avg".to_string()),
-            Some(Token::Min)       => Ok("min".to_string()),
-            Some(Token::Max)       => Ok("max".to_string()),
-            Some(Token::Now)       => Ok("now".to_string()),
-            Some(Token::Date)      => Ok("date".to_string()),
-            Some(Token::Key)       => Ok("key".to_string()),
-            Some(Token::Set)       => Ok("set".to_string()),
-            Some(Token::Index)     => Ok("index".to_string()),
-            Some(Token::View)      => Ok("view".to_string()),
+            Some(Token::Ident(s))   => Ok(s.clone()),
+            Some(Token::Count)      => Ok("count".to_string()),
+            Some(Token::Sum)        => Ok("sum".to_string()),
+            Some(Token::Avg)        => Ok("avg".to_string()),
+            Some(Token::Min)        => Ok("min".to_string()),
+            Some(Token::Max)        => Ok("max".to_string()),
+            Some(Token::Now)        => Ok("now".to_string()),
+            Some(Token::Date)       => Ok("date".to_string()),
+            Some(Token::Key)        => Ok("key".to_string()),
+            Some(Token::Set)        => Ok("set".to_string()),
+            Some(Token::Index)      => Ok("index".to_string()),
+            Some(Token::View)       => Ok("view".to_string()),
+            Some(Token::User)       => Ok("user".to_string()),
+            Some(Token::Role)       => Ok("role".to_string()),
+            Some(Token::Row)        => Ok("row".to_string()),
+            Some(Token::Order)      => Ok("order".to_string()),
+            Some(Token::Group)      => Ok("group".to_string()),
+            Some(Token::Left)       => Ok("left".to_string()),
+            Some(Token::Right)      => Ok("right".to_string()),
+            Some(Token::Time)       => Ok("time".to_string()),
+            Some(Token::Year)       => Ok("year".to_string()),
+            Some(Token::Repeat)     => Ok("repeat".to_string()),
+            Some(Token::Replace)    => Ok("replace".to_string()),
+            Some(Token::Truncate)   => Ok("truncate".to_string()),
+            Some(Token::Rank)       => Ok("rank".to_string()),
+            Some(Token::Check)      => Ok("check".to_string()),
+            Some(Token::Interval)   => Ok("interval".to_string()),
+            Some(Token::Tables)     => Ok("tables".to_string()),
+            Some(Token::Column)     => Ok("column".to_string()),
+            Some(Token::Database)   => Ok("schema".to_string()),
             other => Err(format!("Expected identifier, got {:?}", other)),
         }
     }
@@ -469,6 +521,7 @@ impl Parser {
             Some(Token::Execute)     => self.parse_execute(),
             Some(Token::Deallocate)  => self.parse_deallocate(),
             Some(Token::Ident(s)) if s.to_uppercase() == "BACKUP" => self.parse_backup(),
+            Some(Token::Ident(s)) if s.to_uppercase() == "RESTORE" => self.parse_restore(),
             other => Err(format!("Unknown statement: {:?}", other)),
         }
     }
@@ -802,6 +855,18 @@ impl Parser {
             return Ok(Condition { left, operator: Operator::Like, value: ConditionValue::Literal(pattern) });
         }
 
+        // NOT REGEXP / NOT RLIKE pattern
+        if self.peek() == Some(&Token::Not) && self.tokens.get(self.pos + 1) == Some(&Token::Regexp) {
+            self.advance(); // NOT
+            self.advance(); // REGEXP
+            let pattern = match self.advance() {
+                Some(Token::StringLit(s)) => s.clone(),
+                Some(Token::Ident(s))     => s.clone(),
+                other => return Err(format!("Expected pattern after NOT REGEXP, got {:?}", other)),
+            };
+            return Ok(Condition { left, operator: Operator::NotRegexp, value: ConditionValue::Literal(pattern) });
+        }
+
         // REGEXP / RLIKE pattern
         if self.peek() == Some(&Token::Regexp) {
             self.advance();
@@ -861,7 +926,7 @@ impl Parser {
                     let s = s.clone();
                     if self.peek() == Some(&Token::Dot) {
                         self.advance();
-                        let col = self.expect_ident()?;
+                        let col = self.expect_any_name()?;
                         ConditionValue::Literal(format!("{}.{}", s, col))
                     } else {
                         ConditionValue::Literal(s)
@@ -888,7 +953,33 @@ impl Parser {
                     }
                     ConditionValue::Literal(chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string())
                 }
-                other => return Err(format!("Expected value, got {:?}", other)),
+                // Keywords used as column references on the RHS (e.g. WHERE t.id = u.user)
+                other => {
+                    let kw_name = match &other {
+                        Some(Token::User)     => Some("user"),
+                        Some(Token::Row)      => Some("row"),
+                        Some(Token::Order)    => Some("order"),
+                        Some(Token::Group)    => Some("group"),
+                        Some(Token::Key)      => Some("key"),
+                        Some(Token::Role)     => Some("role"),
+                        Some(Token::Check)    => Some("check"),
+                        Some(Token::Database) => Some("database"),
+                        Some(Token::Index)    => Some("index"),
+                        Some(Token::View)     => Some("view"),
+                        _ => None,
+                    };
+                    if let Some(name) = kw_name {
+                        if self.peek() == Some(&Token::Dot) {
+                            self.advance();
+                            let col = self.expect_any_name()?;
+                            ConditionValue::Literal(format!("{}.{}", name, col))
+                        } else {
+                            ConditionValue::Literal(name.to_string())
+                        }
+                    } else {
+                        return Err(format!("Expected value, got {:?}", other));
+                    }
+                }
             }
         };
 
@@ -1041,6 +1132,38 @@ impl Parser {
                 }
                 Ok(ArithExpr::Func(fname.to_string(), args))
             }
+            // CONVERT(expr, type) — MySQL type-conversion syntax, second arg is a type keyword
+            Some(Token::Ident(s)) if s.to_uppercase() == "CONVERT" => {
+                self.advance();
+                match self.advance() {
+                    Some(Token::LParen) => {}
+                    other => return Err(format!("Expected '(' after CONVERT, got {:?}", other)),
+                }
+                let val_expr = self.parse_arith_expr()?;
+                match self.advance() {
+                    Some(Token::Comma) => {}
+                    other => return Err(format!("Expected ',' in CONVERT, got {:?}", other)),
+                }
+                let type_str = match self.advance() {
+                    Some(Token::Ident(s)) => s.to_uppercase(),
+                    Some(Token::Int)      => "INT".to_string(),
+                    Some(Token::BigInt)   => "BIGINT".to_string(),
+                    Some(Token::Float)    => "FLOAT".to_string(),
+                    Some(Token::Double)   => "DOUBLE".to_string(),
+                    Some(Token::Text)     => "TEXT".to_string(),
+                    Some(Token::Varchar)  => "CHAR".to_string(),
+                    Some(Token::Date)     => "DATE".to_string(),
+                    Some(Token::Datetime) => "DATETIME".to_string(),
+                    Some(Token::Decimal)  => "DECIMAL".to_string(),
+                    Some(Token::Boolean)  => "BOOLEAN".to_string(),
+                    other => return Err(format!("Expected type in CONVERT, got {:?}", other)),
+                };
+                match self.advance() {
+                    Some(Token::RParen) => {}
+                    other => return Err(format!("Expected ')' after CONVERT, got {:?}", other)),
+                }
+                Ok(ArithExpr::Func("CONVERT".to_string(), vec![val_expr, ArithExpr::Str(type_str)]))
+            }
             Some(Token::Ident(_)) => {
                 // Check for generic function call: IDENT(...)
                 if self.tokens.get(self.pos + 1) == Some(&Token::LParen) {
@@ -1107,6 +1230,38 @@ impl Parser {
                 let name = self.expect_ident()?;
                 Ok(ArithExpr::Col(format!("@{}", name)))
             }
+            // Keywords commonly used as column/table names — treat as column reference
+            Some(Token::User)    | Some(Token::Row)      | Some(Token::Order)   |
+            Some(Token::Group)   | Some(Token::Key)      | Some(Token::Role)    |
+            Some(Token::Check)   | Some(Token::Rank)     | Some(Token::Interval)|
+            Some(Token::Database)| Some(Token::Index)    | Some(Token::View)    |
+            Some(Token::Column)  | Some(Token::Tables)   => {
+                let col_name = match self.advance() {
+                    Some(Token::User)     => "user",
+                    Some(Token::Row)      => "row",
+                    Some(Token::Order)    => "order",
+                    Some(Token::Group)    => "group",
+                    Some(Token::Key)      => "key",
+                    Some(Token::Role)     => "role",
+                    Some(Token::Check)    => "check",
+                    Some(Token::Rank)     => "rank",
+                    Some(Token::Interval) => "interval",
+                    Some(Token::Database) => "database",
+                    Some(Token::Index)    => "index",
+                    Some(Token::View)     => "view",
+                    Some(Token::Column)   => "column",
+                    Some(Token::Tables)   => "tables",
+                    _ => unreachable!(),
+                };
+                // Allow table.keyword_col dotted notation
+                if self.peek() == Some(&Token::Dot) {
+                    self.advance();
+                    let right = self.expect_any_name()?;
+                    Ok(ArithExpr::Col(format!("{}.{}", col_name, right)))
+                } else {
+                    Ok(ArithExpr::Col(col_name.to_string()))
+                }
+            }
             other => Err(format!("Expected expression term, got {:?}", other)),
         }
     }
@@ -1125,6 +1280,11 @@ impl Parser {
                     self.advance();
                     let right = self.parse_arith_factor()?;
                     left = ArithExpr::Div(Box::new(left), Box::new(right));
+                }
+                Some(Token::Percent) => {
+                    self.advance();
+                    let right = self.parse_arith_factor()?;
+                    left = ArithExpr::Func("MOD".to_string(), vec![left, right]);
                 }
                 _ => break,
             }
@@ -1146,6 +1306,12 @@ impl Parser {
                     self.advance();
                     let right = self.parse_arith_term()?;
                     left = ArithExpr::Sub(Box::new(left), Box::new(right));
+                }
+                // a || b  →  CONCAT(a, b)
+                Some(Token::PipePipe) => {
+                    self.advance();
+                    let right = self.parse_arith_term()?;
+                    left = ArithExpr::Func("CONCAT".to_string(), vec![left, right]);
                 }
                 // col->'$.key'  →  JSON_EXTRACT(col, '$.key')
                 Some(Token::Arrow) => {
@@ -2065,20 +2231,30 @@ impl Parser {
         // LIMIT [OFFSET]  /  FETCH (FIRST|NEXT) n ROWS ONLY
         let (limit, offset) = if self.peek() == Some(&Token::Limit) {
             self.advance();
-            let lim = match self.advance() {
-                Some(Token::NumberLit(n)) => Some(n.parse::<usize>().unwrap_or(0)),
+            let first = match self.advance() {
+                Some(Token::NumberLit(n)) => n.parse::<usize>().unwrap_or(0),
                 other => return Err(format!("Expected number after LIMIT, got {:?}", other)),
             };
-            let off = if self.peek() == Some(&Token::Offset) {
-                self.advance();
-                match self.advance() {
-                    Some(Token::NumberLit(n)) => Some(n.parse::<usize>().unwrap_or(0)),
-                    other => return Err(format!("Expected number after OFFSET, got {:?}", other)),
-                }
+            // MySQL LIMIT offset, count  vs  standard LIMIT count OFFSET offset
+            if self.peek() == Some(&Token::Comma) {
+                self.advance(); // consume ','
+                let count = match self.advance() {
+                    Some(Token::NumberLit(n)) => n.parse::<usize>().unwrap_or(0),
+                    other => return Err(format!("Expected count after LIMIT offset,, got {:?}", other)),
+                };
+                (Some(count), Some(first))
             } else {
-                None
-            };
-            (lim, off)
+                let off = if self.peek() == Some(&Token::Offset) {
+                    self.advance();
+                    match self.advance() {
+                        Some(Token::NumberLit(n)) => Some(n.parse::<usize>().unwrap_or(0)),
+                        other => return Err(format!("Expected number after OFFSET, got {:?}", other)),
+                    }
+                } else {
+                    None
+                };
+                (Some(first), off)
+            }
         } else if self.peek() == Some(&Token::Fetch) {
             // FETCH (FIRST | NEXT) n ROWS ONLY
             self.advance();
@@ -2548,20 +2724,27 @@ impl Parser {
             Some(Token::As) => {}
             other => return Err(format!("Expected AS in CAST, got {:?}", other)),
         }
-        // type: ident (INT, VARCHAR, DATE, etc.)
+        // type: ident (INT, VARCHAR, DATE, SIGNED, UNSIGNED, etc.)
         let type_str = match self.advance() {
             Some(Token::Ident(s)) => s.clone().to_uppercase(),
             Some(Token::Int)      => "INT".to_string(),
+            Some(Token::BigInt)   => "BIGINT".to_string(),
             Some(Token::Float)    => "FLOAT".to_string(),
             Some(Token::Double)   => "DOUBLE".to_string(),
             Some(Token::Text)     => "TEXT".to_string(),
-            Some(Token::Varchar)  => "VARCHAR".to_string(),
+            Some(Token::Varchar)  => "CHAR".to_string(),
             Some(Token::Date)     => "DATE".to_string(),
             Some(Token::Datetime) => "DATETIME".to_string(),
             Some(Token::Decimal)  => "DECIMAL".to_string(),
             Some(Token::Boolean)  => "BOOLEAN".to_string(),
             other => return Err(format!("Expected type in CAST, got {:?}", other)),
         };
+        // CAST(x AS SIGNED INT) / CAST(x AS UNSIGNED INT) — skip optional INT keyword
+        if type_str == "SIGNED" || type_str == "UNSIGNED" {
+            if matches!(self.peek(), Some(Token::Int) | Some(Token::BigInt)) {
+                self.advance();
+            }
+        }
         // optional (n) for VARCHAR(n)
         if self.peek() == Some(&Token::LParen) {
             self.advance();
@@ -2777,44 +2960,46 @@ impl Parser {
                 Ok(DataType::Set(values))
             }
             Some(Token::Varchar) => {
-                match self.advance() {
-                    Some(Token::LParen) => {}
-                    other => return Err(format!("Expected '(' after VARCHAR, got {:?}", other)),
-                }
-                let n = match self.advance() {
-                    Some(Token::NumberLit(n)) => n.parse::<u32>().unwrap_or(255),
-                    other => return Err(format!("Expected number in VARCHAR(n), got {:?}", other)),
+                // VARCHAR(n) / CHAR(n) / NVARCHAR(n) — size is optional, defaults to 255
+                let n = if self.peek() == Some(&Token::LParen) {
+                    self.advance(); // consume '('
+                    let size = match self.advance() {
+                        Some(Token::NumberLit(n)) => n.parse::<u32>().unwrap_or(255),
+                        _ => 255,
+                    };
+                    // consume until ')'
+                    while self.peek() != Some(&Token::RParen) && self.peek().is_some() { self.advance(); }
+                    if self.peek() == Some(&Token::RParen) { self.advance(); }
+                    size
+                } else {
+                    255
                 };
-                match self.advance() {
-                    Some(Token::RParen) => {}
-                    other => return Err(format!("Expected ')' after VARCHAR size, got {:?}", other)),
-                }
                 Ok(DataType::Varchar(n))
             }
             Some(Token::Date)      => Ok(DataType::Date),
             Some(Token::Datetime)  => Ok(DataType::DateTime),
             Some(Token::Timestamp) => Ok(DataType::Timestamp),
             Some(Token::Decimal) => {
-                match self.advance() {
-                    Some(Token::LParen) => {}
-                    other => return Err(format!("Expected '(' after DECIMAL, got {:?}", other)),
+                // DECIMAL / DECIMAL(p) / DECIMAL(p,s) — all optional
+                if self.peek() != Some(&Token::LParen) {
+                    return Ok(DataType::Decimal(10, 2));
                 }
+                self.advance(); // consume '('
                 let p = match self.advance() {
                     Some(Token::NumberLit(n)) => n.parse::<u8>().unwrap_or(10),
-                    other => return Err(format!("Expected precision in DECIMAL(p,s), got {:?}", other)),
+                    _ => return Ok(DataType::Decimal(10, 2)),
                 };
-                match self.advance() {
-                    Some(Token::Comma) => {}
-                    other => return Err(format!("Expected ',' in DECIMAL(p,s), got {:?}", other)),
-                }
-                let s = match self.advance() {
-                    Some(Token::NumberLit(n)) => n.parse::<u8>().unwrap_or(2),
-                    other => return Err(format!("Expected scale in DECIMAL(p,s), got {:?}", other)),
+                // optional scale
+                let s = if self.peek() == Some(&Token::Comma) {
+                    self.advance();
+                    match self.advance() {
+                        Some(Token::NumberLit(n)) => n.parse::<u8>().unwrap_or(2),
+                        _ => 2,
+                    }
+                } else {
+                    0
                 };
-                match self.advance() {
-                    Some(Token::RParen) => {}
-                    other => return Err(format!("Expected ')' after DECIMAL scale, got {:?}", other)),
-                }
+                if self.peek() == Some(&Token::RParen) { self.advance(); }
                 Ok(DataType::Decimal(p, s))
             }
             other => Err(format!("Expected data type, got {:?}", other)),
@@ -3606,16 +3791,43 @@ impl Parser {
             self.advance();
             database = Some(self.expect_ident()?);
         }
-        if let Some(Token::Ident(s)) = self.peek().cloned().as_ref() {
-            if s.to_uppercase() == "INTO" {
-                self.advance();
-                match self.advance() {
-                    Some(Token::StringLit(f)) => output_file = Some(f.clone()),
-                    other => return Err(format!("Expected filename string, got {:?}", other)),
-                }
+        let is_into = matches!(self.peek(), Some(Token::Into))
+            || matches!(self.peek(), Some(Token::Ident(s)) if s.to_uppercase() == "INTO");
+        if is_into {
+            self.advance();
+            match self.advance() {
+                Some(Token::StringLit(f)) => output_file = Some(f.clone()),
+                other => return Err(format!("Expected filename string, got {:?}", other)),
             }
         }
         Ok(Statement::Backup { database, output_file })
+    }
+
+    fn parse_restore(&mut self) -> Result<Statement, String> {
+        // RESTORE FROM 'file' [DATABASE db]
+        // RESTORE DATABASE db FROM 'file'
+        let mut database = None;
+        if let Some(Token::Database) = self.peek().cloned().as_ref() {
+            self.advance();
+            database = Some(self.expect_ident()?);
+        }
+        // expect FROM
+        match self.advance() {
+            Some(Token::From) => {}
+            Some(Token::Ident(s)) if s.to_uppercase() == "FROM" => {}
+            other => return Err(format!("Expected FROM in RESTORE, got {:?}", other)),
+        }
+        let source_file = match self.advance() {
+            Some(Token::StringLit(f)) => f.clone(),
+            other => return Err(format!("Expected filename string after FROM, got {:?}", other)),
+        };
+        if database.is_none() {
+            if let Some(Token::Database) = self.peek().cloned().as_ref() {
+                self.advance();
+                database = Some(self.expect_ident()?);
+            }
+        }
+        Ok(Statement::Restore { source_file, database })
     }
 
     fn parse_show(&mut self) -> Result<Statement, String> {

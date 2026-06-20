@@ -23,11 +23,11 @@
 
 | 타입 | MySQL | PostgreSQL | Oracle | RuSQL |
 |------|-------|------------|--------|--------|
-| 정수 | TINYINT·SMALLINT·INT·BIGINT·UNSIGNED | SMALLINT·INT·BIGINT | NUMBER(p) / INTEGER | INT·BIGINT·SMALLINT·TINYINT |
-| 실수 | FLOAT·DOUBLE·DECIMAL(p,s) | REAL·DOUBLE·NUMERIC(p,s) | NUMBER(p,s) / BINARY_FLOAT / BINARY_DOUBLE | FLOAT·DOUBLE·DECIMAL(p,s) |
-| 문자열 | CHAR·VARCHAR(n)·TEXT·LONGTEXT | CHAR·VARCHAR(n)·TEXT | CHAR·VARCHAR2(n)·NVARCHAR2·CLOB | VARCHAR(n)·TEXT |
+| 정수 | TINYINT·SMALLINT·INT·BIGINT·UNSIGNED | SMALLINT·INT·BIGINT | NUMBER(p) / INTEGER | INT (INTEGER/INT4/MEDIUMINT/INT2/INT3 별칭) · BIGINT (INT8) · SMALLINT · TINYINT |
+| 실수 | FLOAT·DOUBLE·DECIMAL(p,s) | REAL·DOUBLE·NUMERIC(p,s) | NUMBER(p,s) / BINARY_FLOAT / BINARY_DOUBLE | FLOAT (REAL 별칭) · DOUBLE · DECIMAL(p,s) (NUMERIC 별칭, 괄호 생략 → DECIMAL(10,2)) |
+| 문자열 | CHAR·VARCHAR(n)·TEXT·LONGTEXT | CHAR·VARCHAR(n)·TEXT | CHAR·VARCHAR2(n)·NVARCHAR2·CLOB | VARCHAR(n) (CHAR/NVARCHAR/NCHAR 별칭, 크기 생략 → 255) · TEXT (LONGTEXT/MEDIUMTEXT/TINYTEXT/CLOB 별칭) |
+| 논리 | TINYINT(1) / BOOL | BOOLEAN | ✗ (NUMBER(1) 관례) | BOOLEAN (BOOL 별칭; TRUE/FALSE 리터럴 지원) |
 | 이진 | BINARY·VARBINARY·BLOB·LONGBLOB | BYTEA | BLOB·RAW | BLOB (hex 문자열 저장, `0x...` 리터럴 지원) |
-| 논리 | TINYINT(1) / BOOL | BOOLEAN | ✗ (NUMBER(1) 관례) | BOOLEAN |
 | 날짜/시간 | DATE·TIME·DATETIME·TIMESTAMP·YEAR | DATE·TIME·TIMESTAMP·TIMESTAMPTZ·INTERVAL | DATE·TIMESTAMP·INTERVAL·TIMESTAMP WITH TIME ZONE | DATE·TIME·DATETIME·TIMESTAMP·YEAR |
 | 시간대 포함 | ✗ | TIMESTAMPTZ | TIMESTAMP WITH TIME ZONE | ✗ |
 | JSON | JSON (텍스트) | JSON·JSONB (바이너리 인덱스 가능) | JSON (21c+, 네이티브 바이너리 저장) | ✓ (`->` / `->>` 연산자, JSON_EXTRACT / JSON_UNQUOTE / JSON_VALUE) |
@@ -99,7 +99,7 @@
 |------|-------|------------|--------|--------|
 | SELECT / WHERE / ORDER BY | ✓ | ✓ | ✓ | ✓ |
 | GROUP BY / HAVING | ✓ | ✓ | ✓ | ✓ |
-| LIMIT / OFFSET | ✓ | ✓ | △ (FETCH FIRST n ROWS ONLY) | ✓ |
+| LIMIT / OFFSET | ✓ | ✓ | △ (FETCH FIRST n ROWS ONLY) | ✓ (`LIMIT 10 OFFSET 20` 표준 + `LIMIT 20, 10` MySQL 단축 문법) |
 | FETCH FIRST n ROWS ONLY | ✗ | ✓ | ✓ (SQL:2003 표준) | ✓ (LIMIT 동의어) |
 | DISTINCT | ✓ | ✓ | ✓ | ✓ |
 | INNER / LEFT / RIGHT JOIN | ✓ | ✓ | ✓ | ✓ |
@@ -113,7 +113,12 @@
 | INTERSECT / EXCEPT | ✓ (8.0+) | ✓ | ✓ (MINUS) | ✓ |
 | 서브쿼리 (FROM / WHERE / SELECT) | ✓ | ✓ | ✓ | ✓ |
 | 상관 서브쿼리 | ✓ | ✓ | ✓ | ✓ |
+| `<>` 연산자 (표준 not-equal) | ✓ | ✓ | ✓ | ✓ (`WHERE col <> 0`, `!=` 동의어) |
 | NOT LIKE | ✓ | ✓ | ✓ | ✓ (`WHERE name NOT LIKE 'A%'`) |
+| NOT REGEXP | ✓ | ✓ | ✓ | ✓ (`WHERE col NOT REGEXP '^[0-9]'`) |
+| TRUE / FALSE 리터럴 | ✓ | ✓ | ✗ (1/0 관례) | ✓ (`WHERE is_active = TRUE`) |
+| 백틱 식별자 | ✓ | ✗ | ✗ | ✓ (`` `order` ``, `` `user` `` 등 예약어를 컬럼명으로 사용) |
+| 큰따옴표 식별자 | △ (ANSI_QUOTES 설정 필요) | ✓ | ✓ | ✓ (`"column_name"`) |
 | BETWEEN / NOT BETWEEN | ✓ | ✓ | ✓ | ✓ (음수 리터럴 포함 — `NOT BETWEEN -5 AND 100`) |
 | EXISTS / NOT EXISTS | ✓ | ✓ | ✓ | ✓ |
 | IN (서브쿼리) | ✓ | ✓ | ✓ | ✓ |
@@ -161,12 +166,12 @@
 
 | 범주 | MySQL | PostgreSQL | Oracle | RuSQL |
 |------|-------|------------|--------|--------|
-| 문자열 | 50+ (CONCAT, SUBSTR, TRIM, REPLACE, LPAD, RPAD, REGEXP...) | 50+ | 50+ (SUBSTR, INSTR, LPAD, RPAD, REPLACE, INITCAP...) | UPPER, LOWER, LENGTH, TRIM, CONCAT, SUBSTR, REPLACE, LPAD, RPAD, CHAR_LENGTH, LEFT, RIGHT, REVERSE, REPEAT, INSTR, LOCATE, LTRIM, RTRIM, SPACE, ASCII, HEX, FORMAT |
+| 문자열 | 50+ (CONCAT, SUBSTR, TRIM, REPLACE, LPAD, RPAD, REGEXP...) | 50+ | 50+ (SUBSTR, INSTR, LPAD, RPAD, REPLACE, INITCAP...) | UPPER, LOWER, LENGTH, TRIM, CONCAT, **CONCAT_WS**, SUBSTR, REPLACE, LPAD, RPAD, CHAR_LENGTH, LEFT, RIGHT, REVERSE, REPEAT, INSTR, LOCATE, LTRIM, RTRIM, SPACE, ASCII, HEX, FORMAT; `\|\|` 연결 연산자 |
 | 날짜/시간 | 40+ | 40+ | 40+ (ADD_MONTHS, TRUNC, MONTHS_BETWEEN, NEXT_DAY...) | NOW(), CURDATE() (SELECT·UPDATE SET·WHERE 우변에서 모두 사용 가능), DATE_FORMAT, DATE_ADD, DATE_SUB, DATEDIFF, YEAR, MONTH, DAY, DAYOFWEEK, DAYOFYEAR, WEEKDAY, LAST_DAY, TIMESTAMPDIFF, UNIX_TIMESTAMP, FROM_UNIXTIME; DATE 컬럼 부등호 (`<`, `>`, `<=`, `>=`) 비교 정상 동작 |
-| 수학 | 20+ | 20+ | 20+ | ROUND, ABS, CEIL, FLOOR, MOD, SQRT, POW, LOG, LOG2, LOG10, EXP, SIN, COS, TAN, PI, SIGN, TRUNCATE, RAND |
+| 수학 | 20+ | 20+ | 20+ | ROUND, ABS, CEIL, FLOOR, MOD, `%` 연산자, SQRT, POW, LOG, LOG2, LOG10, EXP, SIN, COS, TAN, PI, SIGN, TRUNCATE, RAND |
 | 조건부 | COALESCE, IFNULL, NULLIF, IF, CASE | COALESCE, NULLIF, CASE, GREATEST, LEAST | COALESCE, NVL, NVL2, DECODE, NULLIF, CASE | COALESCE, IFNULL, NULLIF, IF, CAST, GREATEST, LEAST |
-| 정규식 | REGEXP, REGEXP_REPLACE (8.0+) | REGEXP_MATCH, REGEXP_REPLACE | REGEXP_LIKE, REGEXP_REPLACE, REGEXP_SUBSTR | ✓ (REGEXP/RLIKE 연산자, REGEXP_LIKE/REGEXP_REPLACE/REGEXP_MATCH) |
-| 타입 변환 | CAST, CONVERT | CAST, :: 연산자 | CAST, TO_CHAR, TO_NUMBER, TO_DATE | CAST, CONVERT |
+| 정규식 | REGEXP, NOT REGEXP, REGEXP_REPLACE (8.0+) | REGEXP_MATCH, REGEXP_REPLACE | REGEXP_LIKE, REGEXP_REPLACE, REGEXP_SUBSTR | ✓ (REGEXP/RLIKE/NOT REGEXP 연산자, REGEXP_LIKE/REGEXP_REPLACE/REGEXP_MATCH) |
+| 타입 변환 | CAST, CONVERT | CAST, :: 연산자 | CAST, TO_CHAR, TO_NUMBER, TO_DATE | CAST(INT/BIGINT/SIGNED/UNSIGNED/FLOAT/DECIMAL/BOOLEAN/DATE/DATETIME/CHAR), CONVERT(val, type) |
 | 기타 | UUID, MD5 | UUID, MD5 | SYS_GUID (UUID 유사), DBMS_CRYPTO (해시) | UUID, MD5 |
 | 사용자 정의 함수 | ✓ (CREATE FUNCTION) | ✓ (PL/pgSQL, PL/Python 등) | ✓ (PL/SQL FUNCTION) | ✓ (CREATE FUNCTION name(params) RETURNS type RETURN expr) |
 
@@ -229,9 +234,9 @@
 | 항목 | MySQL | PostgreSQL | Oracle | RuSQL |
 |------|-------|------------|--------|--------|
 | 비용 기반 최적화 (CBO) | ✓ | ✓ | ✓ | ✓ |
-| 통계 기반 선택도 | ✓ (histogram) | ✓ (pg_statistic) | ✓ (DBMS_STATS) | ✓ (ANALYZE TABLE — equi-depth 히스토그램 10-bucket, PkRange·PkBetween·SecondaryRange·SecondaryBetween·CompositeIndexPrefix·SecondaryLikePrefix selectivity 추정) |
+| 통계 기반 선택도 | ✓ (histogram) | ✓ (pg_statistic) | ✓ (DBMS_STATS) | ✓ (ANALYZE TABLE — equi-depth 히스토그램 10-bucket; Auto-ANALYZE: DML 누적 20% 이상 변경 시 자동 재수집) |
 | 인덱스 자동 선택 | ✓ | ✓ | ✓ | ✓ |
-| JOIN 알고리즘 | NestedLoop, Hash, BNL | NestedLoop, Hash, MergeJoin | NestedLoop, Hash, SortMerge | NestedLoop, Hash, SortMerge |
+| JOIN 알고리즘 | NestedLoop, Hash, BNL | NestedLoop, Hash, MergeJoin | NestedLoop, Hash, SortMerge | NestedLoop, IndexNestedLoop(INLJ), Hash, SortMerge |
 | JOIN 순서 최적화 | ✓ (동적 프로그래밍) | ✓ (Geqo + 동적 프로그래밍) | ✓ (동적 프로그래밍) | ✓ (System-R bitmask DP, INNER 한정 · 그리디 폴백) |
 | 병렬 쿼리 | △ (일부) | ✓ | ✓ (Parallel Query) | △ (SeqScan WHERE 필터 + GROUP BY par_chunks 청크 부분 집계→병합 + Hash Join probe — rayon, `RUSTDB_PARALLEL` 환경변수 / `SET @rusql_parallel = 1/0` 세션 변수, 10k행 이상 자동 적용) |
 | JIT 컴파일 | ✗ | ✓ (LLVM) | ✗ (Native Compilation은 별도 옵션) | ✗ |
@@ -280,7 +285,7 @@
 | SHOW LOCKS | ✓ | pg_locks | V$LOCK | ✓ |
 | CHECKPOINT | ✓ | ✓ | ✓ (ALTER SYSTEM CHECKPOINT) | ✓ |
 | VACUUM | ✓ (자동 Purge) | ✓ (AUTOVACUUM) | ✓ (자동 Undo 관리) | ✓ (수동 + DML 200회 AUTO) |
-| 백업 / 덤프 | mysqldump, XtraBackup | pg_dump, pg_basebackup | RMAN (Recovery Manager) | ✓ (BACKUP [DATABASE db] [INTO 'file']) |
+| 백업 / 덤프 | mysqldump, XtraBackup | pg_dump, pg_basebackup | RMAN (Recovery Manager) | ✓ (BACKUP [DATABASE db] [INTO 'file'] / RESTORE [DATABASE db] FROM 'file') |
 | 저장 프로시저 | ✓ | ✓ (PL/pgSQL 등) | ✓ (PL/SQL) | ✓ (CREATE/DROP PROCEDURE, CALL, IF/WHILE/LOOP/REPEAT, UI 직접 실행) |
 | 트리거 | ✓ | ✓ | ✓ | ✓ (BEFORE/AFTER INSERT/UPDATE/DELETE) |
 | 이벤트 스케줄러 | ✓ | pg_cron 확장 | ✓ (DBMS_SCHEDULER) | ✗ |

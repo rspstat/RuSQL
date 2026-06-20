@@ -55,19 +55,20 @@
 │  ──────────────────     ──────────────────────────────────────────────────────────              │
 │  SELECT / DISTINCT      서브쿼리 (FROM절 / WHERE절 / SELECT 스칼라 / 상관)                      │
 │  WHERE                  CTE (WITH ... AS) / 재귀 CTE (WITH RECURSIVE)                           │
-│    비교 (=/!=/>/</>=/<= )  UNION / UNION ALL / INTERSECT / EXCEPT                              │
+│    =/!=/<>/>/</>=/<= )  UNION / UNION ALL / INTERSECT / EXCEPT                                  │
 │    AND / OR / NOT       Updatable VIEW                                                          │
 │    IN / NOT IN          INFORMATION_SCHEMA (가상 뷰 10개)                                       │
 │    BETWEEN / NOT BETWEEN  PREPARE / EXECUTE / DEALLOCATE                                        │
 │    LIKE / NOT LIKE      SET @var / 사용자 변수                                                  │
 │    IS NULL / IS NOT NULL  병렬 쿼리 (rayon, 10k행+ 자동 적용)                                   │
 │    EXISTS / NOT EXISTS  쿼리 결과 캐시 (LRU-512, DML 자동 무효화)                               │
-│    REGEXP / RLIKE       MVCC 가시성 필터 / SELECT FOR UPDATE / FOR SHARE                        │
-│  ORDER BY (ASC / DESC)  FK ON DELETE / ON UPDATE 액션 처리                                      │
-│  GROUP BY / HAVING      PK / FK / UNIQUE / CHECK 제약 검증                                      │
-│  LIMIT / OFFSET         산술 표현식 / 스칼라 함수 (문자열/날짜/수학/NULL)                       │
+│    REGEXP / NOT REGEXP  MVCC 가시성 필터 / SELECT FOR UPDATE / FOR SHARE                        │
+│    TRUE / FALSE 리터럴  FK ON DELETE / ON UPDATE 액션 처리                                      │
+│  ORDER BY (ASC / DESC)  PK / FK / UNIQUE / CHECK 제약 검증                                      │
+│  GROUP BY / HAVING      산술 표현식 / `%` 모듈로 / `\|\|` 연결                                  │
+│  LIMIT n / LIMIT m,n    스칼라 함수 (문자열/날짜/수학/NULL)                                     │
 │  FETCH FIRST n ROWS ONLY  EXPLAIN / EXPLAIN ANALYZE                                             │
-│  CASE WHEN                                                                                      │
+│  CASE WHEN              BACKUP DATABASE / RESTORE FROM                                           │
 │                                                                                                  │
 └──────────────────────────────────────────────────────────────────────────────────────────────────┘
                                 │

@@ -109,7 +109,7 @@ pub enum Operator {
     Like, NotLike, Between, NotBetween,
     IsNull, IsNotNull,
     Exists, NotExists,
-    Regexp,
+    Regexp, NotRegexp,
 }
 
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
@@ -518,6 +518,10 @@ pub enum Statement {
     Backup {
         database: Option<String>,
         output_file: Option<String>,
+    },
+    Restore {
+        source_file: String,
+        database: Option<String>,
     },
     ShowProcessList,
     CreateFunction {

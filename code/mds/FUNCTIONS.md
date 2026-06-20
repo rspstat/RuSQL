@@ -85,7 +85,7 @@
 - [x] 역할 영속화 (`_roles.json`, `_role_grants.json`)
 
 ### 쿼리 기능
-- [x] WHERE (=, !=, >, <, >=, <=)
+- [x] WHERE (=, `!=`, `<>`, >, <, >=, <=) — `<>` 는 SQL 표준 not-equal 연산자 (ISO SQL:2003), `!=` 와 동일
 - [x] AND / OR / NOT 복합 조건 — `NOT (price > 100 OR active = 0)`
 - [x] IN (리터럴 목록) — `WHERE id IN (1, 2, 3)`
 - [x] NOT IN (리터럴 목록) — `WHERE id NOT IN (2, 4)`
@@ -93,8 +93,10 @@
 - [x] 비상관 서브쿼리 머티리얼라이제이션 — IN/NOT IN 서브쿼리가 비상관(외부 참조 없음)일 경우 최초 1회만 실행 후 `HashSet`으로 캐싱, 이후 outer 행마다 O(1) 조회 (상관 서브쿼리는 캐싱 없이 기존 경로 유지)
 - [x] BETWEEN / NOT BETWEEN — `WHERE age BETWEEN 18 AND 65` / `WHERE age NOT BETWEEN 18 AND 65`
 - [x] LIKE / NOT LIKE (%, _ 와일드카드) — `WHERE name LIKE 'A%'` / `WHERE name NOT LIKE 'A%'`
+- [x] REGEXP / RLIKE / **NOT REGEXP** — `WHERE col REGEXP '^A'` / `WHERE col NOT REGEXP '^[0-9]'`
 - [x] 음수 리터럴 — WHERE / BETWEEN / IN / 산술식에서 `-100`, `-3.14` 정상 파싱 (`WHERE balance < -1000`, `IN (-1, -2)`)
 - [x] IS NULL / IS NOT NULL
+- [x] TRUE / FALSE 리터럴 — `WHERE is_active = TRUE`, `WHERE is_manager = FALSE` (대소문자 무관)
 - [x] INNER JOIN / LEFT JOIN / RIGHT JOIN
 - [x] FULL OUTER JOIN (양쪽 NULL 패딩, 매칭 안 된 우측 행 자동 추가)
 - [x] CROSS JOIN (카르테시안 곱, ON 절 없음)
@@ -105,11 +107,11 @@
 - [x] Hash Join (한쪽 > 4행 Equi-Join, O(N+M)) / Nested Loop Join (소규모·비등가) — ON 조건 방향 무관 (left.col = right.col / right.col = left.col 모두 지원)
 - [x] 테이블 별칭 (alias) — `FROM emp e JOIN dept d ON e.dept_id = d.id`
 - [x] ORDER BY (ASC / DESC, 다중 컬럼)
-- [x] LIMIT / OFFSET — `LIMIT 10 OFFSET 20`
+- [x] LIMIT / OFFSET — `LIMIT 10 OFFSET 20` (표준) / `LIMIT 20, 10` (MySQL 단축 문법: offset, count)
 - [x] FETCH FIRST n ROWS ONLY / FETCH NEXT n ROWS ONLY — SQL 표준 페이징 문법, LIMIT의 동의어
 - [x] GROUP BY / HAVING
 - [x] DISTINCT
-- [x] 산술 표현식 — SELECT / WHERE / UPDATE SET에서 `price * qty`, `salary + 100`
+- [x] 산술 표현식 — SELECT / WHERE / UPDATE SET에서 `price * qty`, `salary + 100`, `salary % 12` (모듈로), `a || b` (문자열 연결 — CONCAT 동의어)
 - [x] 비교 표현식 — SELECT 컬럼에서 `expr > val AS alias` 형태 지원 (`LENGTH(UUID()) > 0 AS uuid_ok`, `RAND() >= 0` 등)
 - [x] 집계 함수 — COUNT / SUM / AVG / MIN / MAX / STDDEV / VARIANCE (모집단 기준)
 - [x] DISTINCT 집계 — COUNT(DISTINCT) / SUM(DISTINCT) / AVG(DISTINCT)
@@ -119,11 +121,11 @@
 - [x] 집계 윈도우 함수 — SUM / AVG / COUNT / MIN / MAX OVER (PARTITION BY … ORDER BY … ROWS/RANGE …)
 - [x] 정규식 — REGEXP / RLIKE 연산자 (WHERE 조건), REGEXP_LIKE / REGEXP_REPLACE / REGEXP_MATCH 스칼라 함수
 - [x] CASE WHEN ... THEN ... ELSE ... END
-- [x] 스칼라 함수 — UPPER / LOWER / LENGTH / TRIM / CONCAT / SUBSTR / REPLACE / LPAD / RPAD / CHAR_LENGTH / LEFT / RIGHT / REVERSE / REPEAT / INSTR / LOCATE / LTRIM / RTRIM / SPACE / ASCII / CHAR / HEX / UNHEX / FORMAT
-- [x] 수학 함수 — ROUND / ABS / CEIL / FLOOR / MOD / SQRT / POW(POWER) / LOG / LOG2 / LOG10 / EXP / SIN / COS / TAN / PI / SIGN / TRUNCATE / RAND
-- [x] 날짜 함수 — NOW / CURDATE / DATE_FORMAT / DATEDIFF / DATE_ADD / DATE_SUB / YEAR / MONTH / DAY / HOUR / MINUTE / SECOND / DAYOFWEEK / DAYOFYEAR / WEEKDAY / LAST_DAY / TIMESTAMPDIFF / CURTIME / CURRENT_TIMESTAMP / UNIX_TIMESTAMP / FROM_UNIXTIME; **CURDATE() / NOW() 는 SELECT 컬럼·UPDATE SET·WHERE 조건 우변에서 모두 사용 가능** (`WHERE due_date < CURDATE()`, `DATEDIFF(end_date, CURDATE())`)
+- [x] 스칼라 함수 — UPPER / LOWER / LENGTH / TRIM / CONCAT / **CONCAT_WS**(sep, v, ...) / SUBSTR / REPLACE / LPAD / RPAD / CHAR_LENGTH / LEFT / RIGHT / REVERSE / REPEAT / INSTR / LOCATE / LTRIM / RTRIM / SPACE / ASCII / CHAR / HEX / UNHEX / FORMAT
+- [x] 수학 함수 — ROUND / ABS / CEIL / FLOOR / MOD / `%` 연산자 / SQRT / POW(POWER) / LOG / LOG2 / LOG10 / EXP / SIN / COS / TAN / PI / SIGN / TRUNCATE / RAND
+- [x] 날짜 함수 — NOW / CURDATE / DATE_FORMAT / DATEDIFF / DATE_ADD / DATE_SUB / YEAR / MONTH / DAY / HOUR / MINUTE / SECOND / DAYOFWEEK / DAYOFYEAR / WEEKDAY / LAST_DAY / TIMESTAMPDIFF / CURTIME / CURRENT_TIMESTAMP / CURRENT_DATE / CURRENT_TIMESTAMP / SYSDATE / LOCALTIME / UNIX_TIMESTAMP / FROM_UNIXTIME; **CURDATE() / NOW() 는 SELECT 컬럼·UPDATE SET·WHERE 조건 우변에서 모두 사용 가능** (`WHERE due_date < CURDATE()`, `DATEDIFF(end_date, CURDATE())`)
 - [x] NULL 처리 함수 — COALESCE / IFNULL / NULLIF / ISNULL
-- [x] 타입 변환 — CAST(expr AS INT/FLOAT/TEXT/DATE) / CONVERT / BIT_LENGTH
+- [x] 타입 변환 — `CAST(expr AS INT/BIGINT/SIGNED/UNSIGNED/FLOAT/DOUBLE/DECIMAL/BOOLEAN/DATE/DATETIME/CHAR/TEXT)` / `CONVERT(val, type)` — SIGNED/UNSIGNED 뒤 선택적 INT 키워드 허용 (`CAST(x AS SIGNED INT)`) / BIT_LENGTH
 - [x] 조건 함수 — IF(cond, true_val, false_val) / GREATEST / LEAST
 - [x] 기타 함수 — MD5 / UUID / DATABASE / VERSION / CURRENT_USER (SCHEMA / USER / SESSION_USER / SYSTEM_USER 별칭 포함)
 - [x] FROM 없는 스칼라 SELECT — `SELECT 1+1`, `SELECT NOW()` (`_dual_` 가상 테이블 방식)
@@ -148,14 +150,15 @@
 - [x] INFORMATION_SCHEMA 가상 테이블 — `SELECT * FROM information_schema.tables` 등 10개 가상 뷰 (schemata / tables / columns / key_column_usage / table_constraints / statistics / views / character_sets / collations / engines)
 
 ### 데이터 타입
-- [x] INT
-- [x] BIGINT — 64비트 정수 (최대 9223372036854775807)
+- [x] INT — `INTEGER` / `INT4` 키워드 별칭 허용
+- [x] BIGINT — 64비트 정수 (최대 9223372036854775807); `INT8` 별칭 허용
 - [x] SMALLINT — 소형 정수 (최대 32767)
-- [x] TINYINT — 초소형 정수 (최대 127)
-- [x] VARCHAR(n) — 최대 길이 제한
-- [x] DOUBLE / FLOAT
-- [x] DECIMAL(p, s) — 정밀도 / 소수 자리수
-- [x] TEXT
+- [x] TINYINT — 초소형 정수 (최대 127); `MEDIUMINT` / `INT2` / `INT3` → INT로 처리
+- [x] VARCHAR(n) — 최대 길이 제한; `CHAR(n)` / `NVARCHAR(n)` / `NCHAR(n)` 별칭 허용; 크기 생략 시 255 기본값
+- [x] DOUBLE / FLOAT — `REAL` 별칭 허용
+- [x] DECIMAL(p, s) — 정밀도 / 소수 자리수; `NUMERIC` 별칭; 괄호 생략 시 `DECIMAL(10,2)` 기본값; `DECIMAL(p)` 단일 인자 허용
+- [x] BOOLEAN — `BOOL` 별칭 허용; TRUE / FALSE 리터럴 정규화 (소문자 변환)
+- [x] TEXT — `LONGTEXT` / `MEDIUMTEXT` / `TINYTEXT` / `CLOB` 별칭 허용
 - [x] DATE — 'YYYY-MM-DD' 형식
 - [x] DATETIME — 'YYYY-MM-DD HH:MM:SS' 형식
 - [x] TIMESTAMP — 'YYYY-MM-DD HH:MM:SS' (값 없으면 현재 시각 자동 삽입)
@@ -246,15 +249,26 @@
 - [x] VACUUM (dead row 물리 제거)
 - [x] ANALYZE TABLE (컬럼별 통계 수집 — distinct count / null count / min / max / equi-depth 히스토그램 10-bucket, p25/p50/p75 표시, 플래너 PkRange·PkBetween·SecondaryRange selectivity 추정에 반영)
 - [x] BACKUP [DATABASE db] [INTO 'file'] — mysqldump 스타일 SQL 덤프 생성 (DROP TABLE IF EXISTS + CREATE TABLE + INSERT)
+- [x] RESTORE [DATABASE db] FROM 'file' — SQL 덤프 파일 복원 (세미콜론 분리 후 순차 실행, 오류 건너뜀)
+- [x] Auto-ANALYZE — INSERT/UPDATE/DELETE 누적 20% 이상 변경 시 자동 히스토그램 재수집 (플래너 통계 자동 최신화)
 
-### SQL 문법
+### SQL 문법 / 파서 호환성
 - [x] 주석 지원 (-- 한 줄 / # MySQL 스타일 / /* */ 블록)
 - [x] 주석 내 세미콜론 안전 처리 (쿼리 분리 오작동 없음)
 - [x] 세미콜론(;) 구분 멀티 쿼리 입력
 - [x] 세미콜론 뒤 인라인 주석 잔류 처리 (`SELECT 1; -- 0` 패턴에서 `-- 0` 잔류가 다음 쿼리를 주석으로 오파싱하던 버그 수정)
 - [x] 함수 인자 내 산술식 지원 — `ROUND(salary / 1000000, 2)` 등 ArithExpr::Func AST + parse_func_args 재작성으로 지원
 - [x] UPDATE SET 스칼라 함수 — `UPDATE t SET col = CONCAT(name, '-', dept)` eval_arith Func 분기 개선으로 지원
-- [x] SQL 키워드를 컬럼/별칭 이름으로 사용 — `ORDER BY avg DESC`, `GROUP BY count` 등 집계 함수명을 컬럼 참조 위치에서 식별자로 수락 (`expect_any_ident`)
+- [x] SQL 키워드를 컬럼/별칭 이름으로 사용 — `ORDER BY avg DESC`, `GROUP BY count`, `SELECT user, order FROM ...` 등 예약어를 식별자 위치에서 수락 (`expect_any_ident` / `expect_any_name` / `expect_alias_ident` 확장)
+- [x] **백틱 식별자** — `` `table_name` ``, `` `order` ``, `` `user` `` 등 MySQL 스타일 백틱 인용 식별자 (키워드 충돌 방지, 항상 Ident 반환)
+- [x] **큰따옴표 식별자** — `"column_name"` ANSI SQL 스타일 큰따옴표 식별자 지원
+- [x] **`<>` 연산자** — SQL 표준 not-equal (`!=` 동의어); `WHERE col <> 0`
+- [x] **`||` 연산자** — 문자열 연결; `first_name || ' ' || last_name` → CONCAT으로 처리
+- [x] **`%` 연산자** — 모듈로; `salary % 12000 AS monthly` → MOD(salary, 12000)으로 처리
+- [x] **문자열 이스케이프** — `\'` `\\` `\n` `\r` `\t` `\0` 처리; `''` 내부 따옴표 (`'it''s'` → `it's`)
+- [x] **LIMIT offset, count** — MySQL 단축 문법 `LIMIT 20, 10` (20행 건너뛰고 10행 반환); 표준 `LIMIT 10 OFFSET 20`과 동일
+- [x] **NOT REGEXP** — `WHERE col NOT REGEXP '^[0-9]'` 패턴 지원
+- [x] **CURRENT_DATE / CURRENT_TIMESTAMP / SYSDATE** — 날짜·시간 함수 키워드 별칭 (CURDATE / NOW 로 정규화)
 
 ### UI (rusql-ui)
 - [x] Tauri + React 데스크탑 앱

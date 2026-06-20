@@ -49,6 +49,9 @@ pub enum JoinAlgo {
     NestedLoop,
     Hash      { probe_col: String, build_col: String },
     SortMerge { probe_col: String, build_col: String },
+    /// Index Nested Loop: for each left row, probe right table's PK B+Tree in O(log n).
+    /// Avoids loading all right rows into memory. Ideal for FK→PK joins.
+    IndexNL   { probe_col: String, right_pk_col: String },
 }
 
 // ── Plan nodes ────────────────────────────────────────────────────────────
@@ -300,14 +303,60 @@ impl<'a> Planner<'a> {
                 let n = (base.est_rows + right_size) as f64;
                 n * n.log2().max(1.0) + n
             }
+            // IndexNL: O(N * log M) — N left rows × log M right index probe
+            JoinAlgo::IndexNL { .. } => {
+                let log_m = (right_size as f64).log2().max(1.0);
+                base.est_rows as f64 * log_m
+            }
         };
-        let est_rows = (base.est_rows + right_size) / 2;
+        let est_rows = self.estimate_join_output(base, right_size, &join.on_expr, &join.table);
         JoinPlan {
             right_table: join.table.clone(),
             on_expr:     join.on_expr.clone(),
             join_type:   join.join_type.clone(),
             algo, est_rows, est_cost,
         }
+    }
+
+    /// Estimate join output rows using column NDV from ANALYZE stats when available.
+    /// Equi-join with stats:    left * right / max(NDV_left, NDV_right)
+    /// Equi-join without stats: min(left, right)  (conservative, beats the old average)
+    /// Non-equi / complex:      min(left, right)
+    fn estimate_join_output(&self, base: &TablePlan, right_size: usize, on_expr: &CondExpr, right_table: &str) -> usize {
+        let left_rows = base.est_rows;
+        if left_rows == 0 || right_size == 0 {
+            return 0;
+        }
+        if let CondExpr::Leaf(cond) = on_expr {
+            if cond.operator == Operator::Eq {
+                if let (ArithExpr::Col(lc), ConditionValue::Literal(rv)) = (&cond.left, &cond.value) {
+                    let lhs_col = lc.split('.').last().unwrap_or(lc);
+                    let rhs_col = rv.split('.').last().unwrap_or(rv);
+                    let right_bare = right_table.split('.').last().unwrap_or(right_table).to_lowercase();
+                    let rv_tbl = rv.split('.').next().unwrap_or("").to_lowercase();
+                    let (left_col, right_col) = if rv_tbl == right_bare {
+                        (lhs_col, rhs_col)
+                    } else {
+                        (rhs_col, lhs_col)
+                    };
+                    let l_ndv = self.table_stats.get(&base.table)
+                        .and_then(|ts| ts.columns.get(left_col))
+                        .map(|cs| cs.distinct_count)
+                        .filter(|&n| n > 0);
+                    let r_ndv = self.table_stats.get(right_table)
+                        .and_then(|ts| ts.columns.get(right_col))
+                        .map(|cs| cs.distinct_count)
+                        .filter(|&n| n > 0);
+                    let ndv = match (l_ndv, r_ndv) {
+                        (Some(l), Some(r)) => l.max(r),
+                        (Some(n), None) | (None, Some(n)) => n,
+                        (None, None) => return left_rows.min(right_size).max(1),
+                    };
+                    return ((left_rows as f64 * right_size as f64 / ndv as f64).ceil() as usize).max(1);
+                }
+            }
+        }
+        left_rows.min(right_size).max(1)
     }
 
     fn choose_join_algo(&self, left_size: usize, right_size: usize, on_expr: &CondExpr, _left_table: &str, right_table: &str) -> JoinAlgo {
@@ -327,6 +376,14 @@ impl<'a> Planner<'a> {
                         } else {
                             return JoinAlgo::NestedLoop;
                         };
+
+                        // IndexNL: build_col is the PK of the right table → O(log n) probe per left row
+                        if let Some(pk) = self.pk_col(right_table) {
+                            if pk == build_col && right_size > left_size {
+                                return JoinAlgo::IndexNL { probe_col, right_pk_col: build_col };
+                            }
+                        }
+
                         // 양쪽 모두 대형 테이블이면 Sort-Merge Join, 한쪽만 크면 Hash Join.
                         if left_size > 4 && right_size > 4 {
                             return JoinAlgo::SortMerge { probe_col, build_col };
@@ -495,6 +552,8 @@ impl<'a> Planner<'a> {
                 format!("Hash Join       probe={} build={}", probe_col, build_col),
             JoinAlgo::SortMerge { probe_col, build_col } =>
                 format!("Sort-Merge Join probe={} build={}", probe_col, build_col),
+            JoinAlgo::IndexNL { probe_col, right_pk_col } =>
+                format!("Index NL Join   probe={} pk={}", probe_col, right_pk_col),
         };
         format!("{} → {}  cost≈{:.0}", algo, jp.right_table, jp.est_cost)
     }
