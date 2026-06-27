@@ -5,8 +5,8 @@
 │                               │                                    │
 │                               ▼                                    │
 │               Query Planner (비용 기반)                            │
-│          AccessPath / JoinAlgo / Cost Est. / Top-K                 │
-│          Join Order DP / 히스토그램 selectivity                     │
+│          AccessPath / JoinAlgo(비용 기반) / Cost Est. / Top-K      │
+│          Join Order DP / 히스토그램 selectivity / IndexIntersection │
 │                               │                                    │
 └───────────────────────────────┼────────────────────────────────────┘
                                 │
@@ -101,28 +101,35 @@
 │  ────────────────────────────────────────      영속화                                           │
 │  비용 기반 AccessPath 자동 선택                  ──────────────────────────────────────────────  │
 │    Hash Index 등호 조건 우선 선택                바이너리 .rdb + LZ4 압축                        │
-│  Join 순서 최적화                                B+Tree .idx 자동 저장                           │
-│    System-R bitmask DP (N≤8)                    인덱스 메타 (indexes.json)                      │
-│    그리디 폴백 (N>8 / OUTER JOIN 포함)           스키마 (auto_increment 포함)                    │
-│  비상관 서브쿼리 HashSet 머티리얼라이제이션       뷰 (views.json)                                │
-│    (최초 1회 실행 후 O(1) 조회)                  저장 프로시저 (_procedures.json)               │
-│  히스토그램 selectivity 추정                     트리거 (_triggers.json)                        │
-│    ANALYZE TABLE → equi-depth 10-bucket          UDF (_functions.json)                          │
-│  병렬 쿼리 실행 (rayon)                          사용자 / 권한 (_users / _grants.json)           │
-│    SeqScan WHERE 필터 par_chunks                 역할 (_roles / _role_grants.json)              │
-│    GROUP BY 부분 집계 par_chunks → 병합           동의어 (_synonyms.json)                        │
-│    ORDER BY par_sort_unstable_by                 전역 파일 → data/_system/ 분리                 │
-│    Hash Join probe par_iter                      구버전 루트 경로 → _system/ 자동 마이그레이션  │
-│    10k행+ 자동 적용 / SET @rusql_parallel 제어                                                  │
-│  쿼리 결과 캐시 (LRU-512)                        인증 & 보안                                    │
-│    트랜잭션 외부 SELECT 전용                      ──────────────────────────────────────────────  │
-│    DML 시 참조 테이블 항목 즉시 무효화            Native TCP: SHA-256 해시 인증                   │
-│    COMMIT 시 변경 테이블 자동 무효화              MySQL 프로토콜: mysql_native_password           │
-│    서브쿼리 포함 SELECT 캐싱 스킵                   (SHA1(SHA1(pw)), 챌린지-응답)                │
-│  Buffer Pool (LRU)                               레거시 평문 → SHA-256 자동 마이그레이션         │
-│    기본 64p × 16KB / --buffer-pool-size 조정     mysql_native_hash 자동 채움                   │
-│    dirty 페이지 flush / 캐시 히트율 추적          root/root 기본 계정 자동 생성                  │
+│    Index Intersection (AND 다중 인덱스            B+Tree .idx 자동 저장                           │
+│      PK HashSet 교집합, ∩ EXPLAIN 표시)          인덱스 메타 (indexes.json)                      │
+│  Join 순서 최적화                                스키마 (auto_increment 포함)                    │
+│    System-R bitmask DP (N≤8)                    뷰 (views.json)                                │
+│    그리디 폴백 (N>8 / OUTER JOIN 포함)           저장 프로시저 (_procedures.json)               │
+│  Join 알고리즘 비용 기반 선택                    트리거 (_triggers.json)                        │
+│    NL vs Hash 비용 비교 (HASH_FACTOR=3)           UDF (_functions.json)                          │
+│  비상관 서브쿼리 HashSet 머티리얼라이제이션       사용자 / 권한 (_users / _grants.json)           │
+│    (최초 1회 실행 후 O(1) 조회)                  역할 (_roles / _role_grants.json)              │
+│  히스토그램 selectivity 추정                     동의어 (_synonyms.json)                        │
+│    ANALYZE TABLE → equi-depth 10-bucket          전역 파일 → data/_system/ 분리                 │
+│    Auto-ANALYZE: 크기 단계별 임계값              구버전 루트 경로 → _system/ 자동 마이그레이션  │
+│  병렬 쿼리 실행 (rayon)                                                                          │
+│    SeqScan WHERE 필터 par_chunks                 인증 & 보안                                    │
+│    GROUP BY 부분 집계 par_chunks → 병합           ──────────────────────────────────────────────  │
+│    ORDER BY par_sort_unstable_by                 Native TCP: SHA-256 해시 인증                   │
+│    Hash Join probe par_iter                      MySQL 프로토콜: mysql_native_password           │
+│    적응형 임계값 (10k/thread_count, 최소 1k)       (SHA1(SHA1(pw)), 챌린지-응답)                │
+│    SET @rusql_parallel / RUSTDB_PARALLEL 제어    레거시 평문 → SHA-256 자동 마이그레이션         │
+│  쿼리 결과 캐시 (LRU-512, O(k) 무효화)           mysql_native_hash 자동 채움                   │
+│    트랜잭션 외부 SELECT 전용                      root/root 기본 계정 자동 생성                  │
+│    DML 시 참조 테이블 항목 즉시 무효화                                                           │
+│    COMMIT 시 변경 테이블 자동 무효화                                                             │
+│    서브쿼리 포함 SELECT 캐싱 스킵                                                                │
+│  Buffer Pool (LRU, O(1) 히트)                                                                   │
+│    기본 64p × 16KB / --buffer-pool-size 조정                                                    │
+│    dirty 페이지 flush / 캐시 히트율 추적                                                        │
 │    SELECT는 s.tables 직접 읽기로 우회                                                           │
+│  Lock 타임아웃 (SET @lock_wait_timeout, ms)                                                     │
 │  TRUNCATE 후 AUTO INCREMENT 리셋                                                                 │
 │                                                                                                  │
 └──────────────────────────────────────────────────────────────────────────────────────────────────┘

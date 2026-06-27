@@ -30,10 +30,19 @@ use crate::engine::query_cache::QueryResultCache;
 use crate::parser::parser::Parser;
 use rayon::prelude::*;
 
-/// 병렬 스캔을 적용하는 최소 행 수. 이보다 작으면 스레드 생성 오버헤드가 커서 순차 실행.
-const PARALLEL_MIN_ROWS: usize = 10_000;
 /// 병렬 청크 크기. 청크 단위로 워커 thread_local(USER_FUNCTIONS/CURRENT_DB_CTX)을 세팅한다.
 const PARALLEL_CHUNK: usize = 4_096;
+
+/// 병렬 스캔 최소 행 수: CPU 코어 수에 반비례 조정.
+/// 8코어 → 1,250행부터 병렬, 단일 코어 → 10,000행부터.
+/// 환경변수 RUSTDB_parallel_min_rows()로 오버라이드 가능.
+fn parallel_min_rows() -> usize {
+    if let Ok(v) = std::env::var("RUSTDB_parallel_min_rows()") {
+        if let Ok(n) = v.parse::<usize>() { return n.max(1); }
+    }
+    let cpus = rayon::current_num_threads().max(1);
+    (10_000 / cpus).max(1_000)
+}
 
 /// 병렬 쿼리 실행 on/off. 환경변수 RUSTDB_PARALLEL=0|off 이면 비활성(벤치마크 대조군용).
 fn parallel_enabled() -> bool {
@@ -293,6 +302,9 @@ pub struct Executor {
     pub session_id: usize,
     /// 비상관 IN/NOT IN 서브쿼리 결과 캐시 (쿼리당 1회 실행 후 재사용)
     subquery_cache: HashMap<String, HashSet<String>>,
+    /// 행 잠금 대기 타임아웃 (밀리초). 초과 시 "Lock wait timeout exceeded" 반환.
+    /// SET @lock_wait_timeout = N; 으로 세션별 조정 가능. 기본값: 50,000ms (MySQL 동일).
+    pub lock_wait_timeout_ms: u64,
 }
 
 impl Executor {
@@ -355,13 +367,21 @@ impl Executor {
             databases.insert(db.to_lowercase());
         }
 
-        // Load all tables from all databases (qualified keys: "db.table")
+        // ── Phase 1: 스키마 로드 및 행 데이터 로드 (순차) ────────────────────
+        // catalog 변경이 필요하므로 순차 처리 후, 인덱스 빌드만 병렬화.
+        struct TableEntry {
+            key: String,
+            rows: Vec<Row>,
+            first_col: Option<String>,
+            needs_rebuild: bool, // 영속화 인덱스 없으면 재빌드 필요
+        }
+        let mut table_entries: Vec<TableEntry> = Vec::new();
+
         for qualified_key in disk.list_tables() {
             if let Some(mut schema) = disk.load_schema(&qualified_key) {
                 let (db, _tbl) = Self::split_key(&qualified_key);
                 databases.insert(db.to_lowercase());
 
-                // Qualify FK ref_table fields (migration from unqualified old data)
                 for col in schema.columns.iter_mut() {
                     if let Some(ref mut fk) = col.foreign_key {
                         if !fk.ref_table.contains('.') {
@@ -384,21 +404,40 @@ impl Executor {
                 }
 
                 let rows = disk.load_table(&qualified_key);
-                // 영속화된 PK 인덱스 파일이 있으면 로드, 없으면 재빌드
-                let tree = disk.load_btree_index(&qualified_key).unwrap_or_else(|| {
+                let loaded_index = disk.load_btree_index(&qualified_key);
+                let needs_rebuild = loaded_index.is_none();
+                if let Some(tree) = loaded_index {
+                    indexes.insert(qualified_key.clone(), tree);
+                }
+                table_entries.push(TableEntry { key: qualified_key.clone(), rows, first_col, needs_rebuild });
+                tables.insert(qualified_key, table_entries.last().unwrap().rows.clone());
+            }
+        }
+
+        // ── Phase 2: PK 인덱스 재빌드 병렬화 ────────────────────────────────
+        // 영속화 인덱스가 없는 테이블만 rayon으로 병렬 빌드.
+        let rebuild_needed: Vec<&TableEntry> = table_entries.iter()
+            .filter(|e| e.needs_rebuild)
+            .collect();
+
+        if !rebuild_needed.is_empty() {
+            let built: Vec<(String, BPlusTree)> = rebuild_needed
+                .into_par_iter()
+                .map(|entry| {
                     let mut t = BPlusTree::new();
-                    for row in &rows {
-                        if let Some(ref col) = first_col {
+                    if let Some(ref col) = entry.first_col {
+                        for row in &entry.rows {
                             if let Some(key) = row.get(col) {
                                 let val_json = serde_json::to_string(row).unwrap();
                                 t.insert(key.clone(), val_json);
                             }
                         }
                     }
-                    t
-                });
-                indexes.insert(qualified_key.clone(), tree);
-                tables.insert(qualified_key, rows);
+                    (entry.key.clone(), t)
+                })
+                .collect();
+            for (key, tree) in built {
+                indexes.insert(key, tree);
             }
         }
 
@@ -423,6 +462,17 @@ impl Executor {
         let mut composite_indexes: HashMap<String, CompositeIndex> = HashMap::new();
         let mut hash_indexes: HashMap<String, HashIndex> = HashMap::new();
         let mut hash_index_meta: HashMap<String, (String, String)> = HashMap::new();
+
+        // 보조 인덱스 재빌드 작업 수집: (index_key, q_table, column, rows_snapshot)
+        struct SecIdxWork {
+            index_key: String,
+            meta_name: String,
+            q_table: String,
+            column: String,
+            rows: Vec<Row>,
+        }
+        let mut sec_rebuild_work: Vec<SecIdxWork> = Vec::new();
+
         for db in &databases {
             let meta_list = disk.load_index_meta(db);
             for meta in &meta_list {
@@ -440,26 +490,53 @@ impl Executor {
                 } else if meta.columns.len() == 1 {
                     let column = &meta.columns[0];
                     let key = format!("{}_{}", q_table, meta.name);
-                    // 영속화된 보조 인덱스 파일이 있으면 로드, 없으면 재빌드
-                    let tree = disk.load_btree_index(&key).unwrap_or_else(|| {
-                        let mut t = BPlusTree::new();
-                        if let Some(rows) = tables.get(&q_table) {
-                            for row in rows {
-                                if let Some(val) = row.get(column) {
-                                    let json = serde_json::to_string(row).unwrap();
-                                    t.insert(val.clone(), json);
-                                }
-                            }
-                        }
-                        t
-                    });
-                    indexes.insert(key, tree);
+                    if let Some(tree) = disk.load_btree_index(&key) {
+                        // 영속화 인덱스 즉시 로드
+                        indexes.insert(key, tree);
+                    } else {
+                        // 재빌드 필요 — 병렬 처리용으로 수집
+                        let rows = tables.get(&q_table).cloned().unwrap_or_default();
+                        sec_rebuild_work.push(SecIdxWork {
+                            index_key: key,
+                            meta_name: meta.name.clone(),
+                            q_table: q_table.clone(),
+                            column: column.clone(),
+                            rows,
+                        });
+                        continue;
+                    }
                     index_meta.insert(meta.name.clone(), (q_table, column.clone()));
                 } else {
                     let mut comp = CompositeIndex::new(q_table.clone(), meta.columns.clone());
                     if let Some(rows) = tables.get(&q_table) { comp.rebuild(rows); }
                     composite_indexes.insert(meta.name.clone(), comp);
                 }
+            }
+        }
+
+        // ── Phase 3: 보조 인덱스 재빌드 병렬화 ──────────────────────────────
+        if !sec_rebuild_work.is_empty() {
+            // (index_key, meta_name, q_table, column, BPlusTree) 튜플로 병렬 빌드
+            let built: Vec<(String, String, String, String, BPlusTree)> = sec_rebuild_work
+                .into_par_iter()
+                .map(|work| {
+                    // rebuild_secondary_indexes와 동일 형식: 컬럼값 → Vec<Row> JSON 배열
+                    let mut bucket: HashMap<String, Vec<Row>> = HashMap::new();
+                    for row in &work.rows {
+                        if let Some(val) = row.get(&work.column) {
+                            bucket.entry(val.clone()).or_default().push(row.clone());
+                        }
+                    }
+                    let mut t = BPlusTree::new();
+                    for (key, bucket_rows) in bucket {
+                        t.insert(key, serde_json::to_string(&bucket_rows).unwrap());
+                    }
+                    (work.index_key, work.meta_name, work.q_table, work.column, t)
+                })
+                .collect();
+            for (idx_key, meta_name, q_table, column, tree) in built {
+                indexes.insert(idx_key, tree);
+                index_meta.insert(meta_name, (q_table, column));
             }
         }
 
@@ -517,6 +594,7 @@ impl Executor {
             proc_signal: None,
             session_id: 0,
             subquery_cache: HashMap::new(),
+            lock_wait_timeout_ms: 50_000,
         };
 
         // WAL Crash Recovery
@@ -543,6 +621,7 @@ impl Executor {
             proc_signal: None,
             session_id,
             subquery_cache: HashMap::new(),
+            lock_wait_timeout_ms: 50_000,
         }
     }
 
@@ -935,6 +1014,12 @@ impl Executor {
                 if name.eq_ignore_ascii_case("rusql_parallel") {
                     std::env::set_var("RUSTDB_PARALLEL", &val);
                 }
+                // 행 잠금 대기 타임아웃 조정: SET @lock_wait_timeout = <밀리초>
+                if name.eq_ignore_ascii_case("lock_wait_timeout") {
+                    if let Ok(ms) = val.parse::<u64>() {
+                        self.lock_wait_timeout_ms = ms;
+                    }
+                }
                 self.user_vars.insert(name, val);
                 Ok(String::new())
             }
@@ -1014,7 +1099,7 @@ impl Executor {
                 }
                 std::cmp::Ordering::Equal
             };
-            if parallel_enabled() && result.len() >= PARALLEL_MIN_ROWS {
+            if parallel_enabled() && result.len() >= parallel_min_rows() {
                 result.par_sort_unstable_by(cmp_fn);
             } else {
                 result.sort_by(cmp_fn);
@@ -1181,7 +1266,7 @@ impl Executor {
                 }
                 std::cmp::Ordering::Equal
             };
-            if parallel_enabled() && result.len() >= PARALLEL_MIN_ROWS {
+            if parallel_enabled() && result.len() >= parallel_min_rows() {
                 result.par_sort_unstable_by(cmp_fn);
             } else {
                 result.sort_by(cmp_fn);
@@ -2525,6 +2610,66 @@ impl Executor {
                         return self.format_result(s, rows, columns, table, vec![]);
                     }
                 }
+                // ── AND 조건 인덱스 교차 ─────────────────────────────────
+                AccessPath::IndexIntersection { paths } => {
+                    // 각 sub-path에서 PK 집합을 수집, 교집합으로 후보 행 결정
+                    let pk_col = s.catalog.get_table(&table)
+                        .and_then(|sc| sc.columns.iter().find(|c| c.primary_key).map(|c| c.name.clone()))
+                        .unwrap_or_else(|| {
+                            s.tables.get(&table)
+                                .and_then(|rows| rows.first())
+                                .and_then(|r| r.keys().next())
+                                .cloned()
+                                .unwrap_or_default()
+                        });
+
+                    let mut pk_sets: Vec<HashSet<String>> = Vec::new();
+                    for sub_path in paths {
+                        let pks: HashSet<String> = match sub_path {
+                            AccessPath::SecondaryPoint { index_key, key, .. } => {
+                                s.indexes.get(index_key)
+                                    .and_then(|idx| idx.search(key))
+                                    .map(|json| {
+                                        serde_json::from_str::<Vec<Row>>(&json)
+                                            .unwrap_or_default()
+                                            .into_iter()
+                                            .filter(|r| Self::is_visible(r))
+                                            .filter_map(|r| r.get(&pk_col).cloned())
+                                            .collect()
+                                    })
+                                    .unwrap_or_default()
+                            }
+                            AccessPath::HashPoint { index_key, key, .. } => {
+                                s.hash_indexes.get(index_key)
+                                    .map(|hi| hi.get(key).into_iter()
+                                        .filter(|r| Self::is_visible(r))
+                                        .filter_map(|r| r.get(&pk_col).cloned())
+                                        .collect())
+                                    .unwrap_or_default()
+                            }
+                            _ => HashSet::new(),
+                        };
+                        pk_sets.push(pks);
+                    }
+                    if !pk_sets.is_empty() {
+                        let mut intersection = pk_sets.remove(0);
+                        for set in pk_sets {
+                            intersection.retain(|k| set.contains(k));
+                        }
+                        // tbl_rows를 먼저 clone해 s borrow를 해제 후 subquery 조건 평가
+                        let candidates: Vec<Row> = s.tables.get(&table)
+                            .map(|rows| rows.iter()
+                                .filter(|r| Self::is_visible(r))
+                                .filter(|r| r.get(&pk_col).map(|k| intersection.contains(k)).unwrap_or(false))
+                                .cloned()
+                                .collect())
+                            .unwrap_or_default();
+                        let rows: Vec<Row> = candidates.into_iter()
+                            .filter(|r| self.matches_condition_with_subquery(s, r, &condition))
+                            .collect();
+                        return self.format_result(s, rows, columns, table, vec![]);
+                    }
+                }
                 AccessPath::SeqScan => {} // fall through
             }
         }
@@ -2606,7 +2751,7 @@ impl Executor {
 
         // ── JOIN 처리 (플래너가 선택한 알고리즘 사용) ──────────────────────
         let result: Vec<Row> = if joins.is_empty() {
-            if parallel_enabled() && rows.len() >= PARALLEL_MIN_ROWS && condition.is_some() && !cond_has_subquery(&condition) {
+            if parallel_enabled() && rows.len() >= parallel_min_rows() && condition.is_some() && !cond_has_subquery(&condition) {
                 // 병렬 SeqScan 필터: 서브쿼리 없는 WHERE는 순수 정적 matches_condexpr로 평가 가능.
                 // par_chunks로 청크마다 워커 thread_local을 세팅해 사용자 정의 함수/DATABASE()도 정확히 평가.
                 let uf = s.user_functions.clone();
@@ -2716,7 +2861,7 @@ impl Executor {
                 }
                 std::cmp::Ordering::Equal
             };
-            if parallel_enabled() && result.len() >= PARALLEL_MIN_ROWS {
+            if parallel_enabled() && result.len() >= parallel_min_rows() {
                 result.par_sort_unstable_by(cmp_fn);
             } else {
                 result.sort_by(cmp_fn);
@@ -2728,7 +2873,7 @@ impl Executor {
             // 병렬 ON + 충분한 행 → 청크별 독립 HashMap 병렬 구성 후 순차 merge
             // (par_iter over groups는 그룹 수가 적어 오히려 느림 — 행 스캔 단계를 병렬화)
             let (group_order, group_data): (Vec<Vec<String>>, std::collections::HashMap<Vec<String>, Vec<Row>>) =
-                if parallel_enabled() && result.len() >= PARALLEL_MIN_ROWS {
+                if parallel_enabled() && result.len() >= parallel_min_rows() {
                     let partial_maps: Vec<(Vec<Vec<String>>, std::collections::HashMap<Vec<String>, Vec<Row>>)> =
                         result.par_chunks(PARALLEL_CHUNK).map(|chunk| {
                             let mut order: Vec<Vec<String>> = Vec::new();
@@ -2930,7 +3075,7 @@ impl Executor {
                     }
                     std::cmp::Ordering::Equal
                 };
-                if parallel_enabled() && group_rows.len() >= PARALLEL_MIN_ROWS {
+                if parallel_enabled() && group_rows.len() >= parallel_min_rows() {
                     group_rows.par_sort_unstable_by(cmp_fn);
                 } else {
                     group_rows.sort_by(cmp_fn);
@@ -3074,7 +3219,7 @@ impl Executor {
                     agg_results.push((label, val_str));
                     continue;
                 }
-                let vals: Vec<f64> = if parallel_enabled() && result.len() >= PARALLEL_MIN_ROWS {
+                let vals: Vec<f64> = if parallel_enabled() && result.len() >= parallel_min_rows() {
                     result.par_iter()
                         .filter_map(|r| {
                             if col_name_str == "*" { Some(1.0) }
@@ -3176,8 +3321,10 @@ impl Executor {
                     LockResult::Granted => {}
                     LockResult::Conflict { holder } => {
                         return Err(format!(
-                            "Row '{}' in '{}' is locked by transaction {}. Cannot SELECT FOR UPDATE.",
-                            pk_val, table, holder
+                            "ERROR 1205 (HY000): Lock wait timeout exceeded ({}ms); \
+                            row '{}' in '{}' is held by transaction {}. \
+                            Retry or SET @lock_wait_timeout=<ms> to adjust.",
+                            self.lock_wait_timeout_ms, pk_val, table, holder
                         ));
                     }
                     LockResult::Deadlock { holder } => {
@@ -3205,8 +3352,10 @@ impl Executor {
                     LockResult::Granted => {}
                     LockResult::Conflict { holder } => {
                         return Err(format!(
-                            "Row '{}' in '{}' is locked exclusively by transaction {}. Cannot SELECT FOR SHARE.",
-                            pk_val, table, holder
+                            "ERROR 1205 (HY000): Lock wait timeout exceeded ({}ms); \
+                            row '{}' in '{}' is held exclusively by transaction {}. \
+                            Retry or SET @lock_wait_timeout=<ms> to adjust.",
+                            self.lock_wait_timeout_ms, pk_val, table, holder
                         ));
                     }
                     LockResult::Deadlock { holder } => {
@@ -4836,7 +4985,8 @@ impl Executor {
                         LockResult::Granted => {}
                         LockResult::Conflict { holder } => {
                             return Err(format!(
-                                "Row '{}' in '{}' is locked by transaction {}. Cannot UPDATE.",
+                                "ERROR 1205 (HY000): Lock wait timeout exceeded; \
+                                row '{}' in '{}' is held by transaction {}. Cannot UPDATE.",
                                 key, table, holder
                             ));
                         }
@@ -5438,7 +5588,8 @@ impl Executor {
                         LockResult::Granted => {}
                         LockResult::Conflict { holder } => {
                             return Err(format!(
-                                "Row '{}' in '{}' is locked by transaction {}. Cannot DELETE.",
+                                "ERROR 1205 (HY000): Lock wait timeout exceeded; \
+                                row '{}' in '{}' is held by transaction {}. Cannot DELETE.",
                                 key, table, holder
                             ));
                         }
@@ -7879,14 +8030,23 @@ impl Executor {
     }
 
     /// Auto-ANALYZE: track per-table DML modifications and re-run ANALYZE TABLE when
-    /// ≥20% of rows have changed (minimum threshold: 1000 modifications).
-    /// Keeps cost-based planner histograms fresh without manual intervention.
+    /// enough rows have changed. Threshold scales with table size:
+    ///   - 통계 없음(신규/미분석): 100건마다 분석
+    ///   - 소형(< 10K): 10%, 최소 50건
+    ///   - 중형(10K–1M): 2%, 최소 1,000건
+    ///   - 대형(> 1M): 0.5%, 최소 10,000건
+    /// 이전 20% 고정 비율은 소형 테이블에서 히스토그램을 너무 늦게 갱신하는 문제가 있었다.
     fn maybe_auto_analyze(&self, s: &mut SharedDatabase, table: &str) {
-        const AUTO_ANALYZE_MIN_MODS: usize = 1000;
-        const AUTO_ANALYZE_RATIO: f64 = 0.20;
-
         let total = s.table_stats.get(table).map(|ts| ts.total_rows).unwrap_or(0);
-        let threshold = ((total as f64 * AUTO_ANALYZE_RATIO) as usize).max(AUTO_ANALYZE_MIN_MODS);
+        let threshold = if total == 0 {
+            100
+        } else if total < 10_000 {
+            (total / 10).max(50)
+        } else if total < 1_000_000 {
+            (total / 50).max(1_000)
+        } else {
+            (total / 200).max(10_000)
+        };
 
         let current = {
             let count = s.dml_since_analyze.entry(table.to_string()).or_insert(0);

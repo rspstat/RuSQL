@@ -5,13 +5,14 @@
 - [x] SQL Parser (AST 기반, 재귀 하강)
 - [x] Executor (쿼리 실행 엔진)
 - [x] 비용 기반 쿼리 옵티마이저 (Cost-Based Query Planner)
-  - AccessPath 선택 (SeqScan / PkPoint / PkBetween / PkRange / SecondaryPoint / SecondaryRange / SecondaryBetween / CompositeIndex / CompositeIndexPrefix / SecondaryLikePrefix)
+  - AccessPath 선택 (SeqScan / PkPoint / PkBetween / PkRange / SecondaryPoint / SecondaryRange / SecondaryBetween / CompositeIndex / CompositeIndexPrefix / SecondaryLikePrefix / **IndexIntersection**)
   - 행 수 / 비용 추정 (log₂N 기반)
-  - Join 알고리즘 자동 선택 (Sort-Merge Join / Hash Join / Nested Loop)
+  - Join 알고리즘 비용 기반 선택 (NL cost vs Hash cost 비교, HASH_FACTOR=3; Sort-Merge Join / Hash Join / IndexNL / Nested Loop 중 최저 비용 선택)
   - Join 순서 최적화 (System-R 스타일 비용 기반 동적계획법, 그리디 폴백)
   - EXPLAIN 실행 계획 출력 (비용 · 접근 경로 · Join 알고리즘)
-- [x] 병렬 쿼리 실행 (rayon) — SeqScan WHERE 필터 (par_chunks, WHERE 조건 없는 풀스캔은 순차 유지) + GROUP BY 집계 (par_chunks 청크별 독립 partial HashMap 구축→순차 병합→par_iter 집계) + ORDER BY 정렬 (par_sort_unstable_by) + Hash Join probe (par_iter), 청크 단위 워커 thread_local 전파로 사용자 정의 함수/DATABASE() 정확성 유지, 10k행 이상 자동 적용 (`RUSTDB_PARALLEL` 환경변수 또는 `SET @rusql_parallel = 1/0` 세션 변수), 서브쿼리 포함 시 순차 폴백
-- [x] 쿼리 결과 캐시 — 트랜잭션 외부 단순 SELECT 결과를 LRU 캐시(최대 512개)에 저장, 동일 SQL 재실행 시 즉시 반환, DML(INSERT/UPDATE/DELETE/TRUNCATE/DROP) 발생 시 해당 테이블 참조 항목 즉시 무효화, COMMIT 시 변경된 테이블 자동 무효화, 서브쿼리 포함 SELECT는 캐싱 스킵 (stale 방지)
+- [x] 병렬 쿼리 실행 (rayon) — SeqScan WHERE 필터 (par_chunks, WHERE 조건 없는 풀스캔은 순차 유지) + GROUP BY 집계 (par_chunks 청크별 독립 partial HashMap 구축→순차 병합→par_iter 집계) + ORDER BY 정렬 (par_sort_unstable_by) + Hash Join probe (par_iter), 청크 단위 워커 thread_local 전파로 사용자 정의 함수/DATABASE() 정확성 유지, 적응형 임계값 (`10_000 / rayon::current_num_threads()`, 최소 1,000; `RUSTDB_PARALLEL_MIN_ROWS` 환경변수 오버라이드), `RUSTDB_PARALLEL` 환경변수 또는 `SET @rusql_parallel = 1/0` 세션 변수로 제어, 서브쿼리 포함 시 순차 폴백
+- [x] 쿼리 결과 캐시 — 트랜잭션 외부 단순 SELECT 결과를 LRU 캐시(최대 512개)에 저장, 동일 SQL 재실행 시 즉시 반환, DML(INSERT/UPDATE/DELETE/TRUNCATE/DROP) 발생 시 해당 테이블 참조 항목 즉시 무효화 (O(k) — `table_to_keys` HashMap 역인덱스), COMMIT 시 변경된 테이블 자동 무효화, 서브쿼리 포함 SELECT는 캐싱 스킵 (stale 방지)
+- [x] **인덱스 교차 (Index Intersection)** — AND 조건에서 독립 인덱스가 2개 이상인 컬럼에 자동 적용; 각 인덱스 결과의 PK HashSet 교집합으로 최소 행 집합만 `s.tables` 직접 조회; `AccessPath::IndexIntersection { paths }` 새 변형; EXPLAIN에 `Index Intersection [경로A ∩ 경로B]` 표시; 비용 = 서브 경로 합 + √n
 
 ### 다중 데이터베이스
 - [x] CREATE DATABASE / CREATE DATABASE IF NOT EXISTS
@@ -237,6 +238,7 @@
 - [x] UPDATE / DELETE 시 잠금 충돌 감지
 - [x] COMMIT / ROLLBACK 시 잠금 자동 해제
 - [x] SHOW LOCKS (활성 잠금 목록 조회)
+- [x] 잠금 대기 타임아웃 세션 변수 — `SET @lock_wait_timeout = N` (밀리초, 기본 50,000ms), 세션별 독립 설정 (`Executor.lock_wait_timeout_ms` 필드), 타임아웃 시 MySQL 호환 `ERROR 1205 (HY000): Lock wait timeout exceeded` 반환
 
 ### 모니터링
 - [x] SHOW BUFFER POOL (캐시 히트율, 사용량)
@@ -250,7 +252,7 @@
 - [x] ANALYZE TABLE (컬럼별 통계 수집 — distinct count / null count / min / max / equi-depth 히스토그램 10-bucket, p25/p50/p75 표시, 플래너 PkRange·PkBetween·SecondaryRange selectivity 추정에 반영)
 - [x] BACKUP [DATABASE db] [INTO 'file'] — mysqldump 스타일 SQL 덤프 생성 (DROP TABLE IF EXISTS + CREATE TABLE + INSERT)
 - [x] RESTORE [DATABASE db] FROM 'file' — SQL 덤프 파일 복원 (세미콜론 분리 후 순차 실행, 오류 건너뜀)
-- [x] Auto-ANALYZE — INSERT/UPDATE/DELETE 누적 20% 이상 변경 시 자동 히스토그램 재수집 (플래너 통계 자동 최신화)
+- [x] Auto-ANALYZE — INSERT/UPDATE/DELETE 누적 변경이 테이블 크기 단계별 임계값 초과 시 자동 히스토그램 재수집 (신규 100건·소형 10%·중형 2%·대형 0.5%, 플래너 통계 자동 최신화)
 
 ### SQL 문법 / 파서 호환성
 - [x] 주석 지원 (-- 한 줄 / # MySQL 스타일 / /* */ 블록)

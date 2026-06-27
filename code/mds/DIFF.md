@@ -86,6 +86,7 @@
 | 표현식 인덱스 | ✓ (함수 기반) | ✓ | ✓ (Function-Based Index) | ✗ |
 | 커버링 인덱스 | ✓ | ✓ | ✓ | ✓ (EXPLAIN에서 Covering 표시) |
 | 복합 인덱스 | ✓ | ✓ | ✓ | ✓ |
+| 인덱스 교차 (Index Intersection) | ✓ (index merge) | ✓ | ✓ | ✓ (AND 조건에서 독립 인덱스 2개 이상 → PK HashSet 교집합, `IndexIntersection` AccessPath, EXPLAIN에 `∩` 표시) |
 | 보조 인덱스 증분 갱신 | ✓ (InnoDB 자동) | ✓ | ✓ | ✓ (INSERT/UPDATE/DELETE 시 `index_insert_row` / `index_remove_row`로 O(1) 갱신 — 전체 재빌드 없음) |
 | 내림차순 인덱스 | ✓ (8.0+) | ✓ | ✓ | ✗ |
 | BRIN (블록 범위 인덱스) | ✗ | ✓ | ✗ | ✗ |
@@ -234,11 +235,11 @@
 | 항목 | MySQL | PostgreSQL | Oracle | RuSQL |
 |------|-------|------------|--------|--------|
 | 비용 기반 최적화 (CBO) | ✓ | ✓ | ✓ | ✓ |
-| 통계 기반 선택도 | ✓ (histogram) | ✓ (pg_statistic) | ✓ (DBMS_STATS) | ✓ (ANALYZE TABLE — equi-depth 히스토그램 10-bucket; Auto-ANALYZE: DML 누적 20% 이상 변경 시 자동 재수집) |
-| 인덱스 자동 선택 | ✓ | ✓ | ✓ | ✓ |
-| JOIN 알고리즘 | NestedLoop, Hash, BNL | NestedLoop, Hash, MergeJoin | NestedLoop, Hash, SortMerge | NestedLoop, IndexNestedLoop(INLJ), Hash, SortMerge |
+| 통계 기반 선택도 | ✓ (histogram) | ✓ (pg_statistic) | ✓ (DBMS_STATS) | ✓ (ANALYZE TABLE — equi-depth 히스토그램 10-bucket; Auto-ANALYZE: 테이블 크기 단계별 임계값 — 신규 100건·소형 10%·중형 2%·대형 0.5%) |
+| 인덱스 자동 선택 | ✓ | ✓ | ✓ | ✓ (인덱스 교차 포함 — AND 조건 다중 인덱스 PK HashSet 교집합) |
+| JOIN 알고리즘 | NestedLoop, Hash, BNL | NestedLoop, Hash, MergeJoin | NestedLoop, Hash, SortMerge | NestedLoop, IndexNestedLoop(INLJ), Hash, SortMerge — 비용 기반 자동 선택 (NL cost vs Hash cost, HASH_FACTOR=3) |
 | JOIN 순서 최적화 | ✓ (동적 프로그래밍) | ✓ (Geqo + 동적 프로그래밍) | ✓ (동적 프로그래밍) | ✓ (System-R bitmask DP, INNER 한정 · 그리디 폴백) |
-| 병렬 쿼리 | △ (일부) | ✓ | ✓ (Parallel Query) | △ (SeqScan WHERE 필터 + GROUP BY par_chunks 청크 부분 집계→병합 + Hash Join probe — rayon, `RUSTDB_PARALLEL` 환경변수 / `SET @rusql_parallel = 1/0` 세션 변수, 10k행 이상 자동 적용) |
+| 병렬 쿼리 | △ (일부) | ✓ | ✓ (Parallel Query) | △ (SeqScan WHERE 필터 + GROUP BY par_chunks 청크 부분 집계→병합 + Hash Join probe — rayon, `RUSTDB_PARALLEL` 환경변수 / `SET @rusql_parallel = 1/0` 세션 변수, 적응형 임계값 `10_000 / thread_count` 자동 적용) |
 | JIT 컴파일 | ✗ | ✓ (LLVM) | ✗ (Native Compilation은 별도 옵션) | ✗ |
 | EXPLAIN 출력 | ✓ | ✓ (VERBOSE, BUFFERS, FORMAT JSON) | ✓ (EXPLAIN PLAN + DBMS_XPLAN.DISPLAY) | ✓ (접근 경로·비용·실제 행 수, 74자 포맷) |
 | 쿼리 힌트 | ✓ (USE INDEX, STRAIGHT_JOIN) | ✓ (pg_hint_plan 확장) | ✓ (/*+ INDEX(t idx) */ 등 풍부한 힌트) | ✗ |

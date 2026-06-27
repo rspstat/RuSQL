@@ -40,6 +40,9 @@ pub enum AccessPath {
     HashPoint { index_key: String, col: String, key: String },
     /// 보조 인덱스 LIKE 프리픽스 스캔: 'prefix%' 패턴
     SecondaryLikePrefix { index_key: String, col: String, prefix: String },
+    /// AND 조건 다중 인덱스 교차: 각 단순 경로의 PK 집합을 교집합하여 최종 결과 행 수 감소.
+    /// 예) WHERE a=1 AND b=2 → [SecondaryPoint(a), SecondaryPoint(b)] 교집합
+    IndexIntersection { paths: Vec<AccessPath> },
 }
 
 // ── Join algorithm ────────────────────────────────────────────────────────
@@ -213,7 +216,53 @@ impl<'a> Planner<'a> {
             }
         }
 
+        // AND 조건에서 각 컬럼이 별도 인덱스를 가질 때 IndexIntersection 사용.
+        // 단일 인덱스보다 선택도가 높을 수 있으므로 최소 2개 인덱스가 있는 경우에만 활성화.
+        if let Some(intersection) = self.try_index_intersection(table, expr, pk) {
+            return intersection;
+        }
+
         AccessPath::SeqScan
+    }
+
+    /// AND 조건 트리에서 인덱스 접근 가능한 리프 조건들을 수집해 IndexIntersection 반환.
+    /// 2개 미만이면 None (단일 인덱스 경로 또는 SeqScan이 더 나음).
+    fn try_index_intersection(&self, table: &str, expr: &CondExpr, pk: Option<&str>) -> Option<AccessPath> {
+        let leaves = collect_and_leaves(expr);
+        if leaves.len() < 2 { return None; }
+
+        let mut sub_paths: Vec<AccessPath> = Vec::new();
+        for cond in &leaves {
+            if let ArithExpr::Col(col_full) = &cond.left {
+                let col = col_full.split('.').last().unwrap_or(col_full);
+                // PK 조건은 이미 PkPoint로 처리됐으므로 여기서는 보조 인덱스만
+                if pk == Some(col) { continue; }
+                if cond.operator == Operator::Eq {
+                    if let ConditionValue::Literal(k) = &cond.value {
+                        if !self.is_col_ref_in_context(k, table) {
+                            // Hash index 우선
+                            if let Some(idx_key) = self.find_hash_index(table, col) {
+                                sub_paths.push(AccessPath::HashPoint {
+                                    index_key: idx_key, col: col.to_string(), key: k.clone()
+                                });
+                                continue;
+                            }
+                            // B+Tree secondary
+                            if let Some(idx_key) = self.find_secondary_index(table, col) {
+                                sub_paths.push(AccessPath::SecondaryPoint {
+                                    index_key: idx_key, col: col.to_string(), key: k.clone()
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if sub_paths.len() >= 2 {
+            Some(AccessPath::IndexIntersection { paths: sub_paths })
+        } else {
+            None
+        }
     }
 
     fn pk_access(&self, cond: &Condition, table: &str) -> Option<AccessPath> {
@@ -360,36 +409,59 @@ impl<'a> Planner<'a> {
     }
 
     fn choose_join_algo(&self, left_size: usize, right_size: usize, on_expr: &CondExpr, _left_table: &str, right_table: &str) -> JoinAlgo {
-        if left_size > 4 || right_size > 4 {
-            if let CondExpr::Leaf(cond) = on_expr {
-                if cond.operator == Operator::Eq {
-                    if let (ArithExpr::Col(lc), ConditionValue::Literal(rv)) = (&cond.left, &cond.value) {
-                        let lhs_col = lc.split('.').last().unwrap_or(lc).to_string();
-                        let rhs_col = rv.split('.').last().unwrap_or(rv).to_string();
-                        let lhs_tbl = lc.split('.').next().unwrap_or("").to_lowercase();
-                        let rhs_tbl = rv.split('.').next().unwrap_or("").to_lowercase();
-                        let right_bare = right_table.split('.').last().unwrap_or(right_table).to_lowercase();
-                        let (probe_col, build_col) = if rhs_tbl == right_bare {
-                            (lhs_col, rhs_col)
-                        } else if lhs_tbl == right_bare {
-                            (rhs_col, lhs_col)
-                        } else {
-                            return JoinAlgo::NestedLoop;
-                        };
+        // 비용 모델:
+        //   NestedLoop  cost = left * right
+        //   Hash        cost ≈ (left + right) * HASH_FACTOR
+        //   SortMerge   cost ≈ (left + right) * log2(left + right)
+        //   IndexNL     cost ≈ left * log2(right)
+        //
+        // NestedLoop이 Hash보다 유리한 조건: left * right < (left + right) * HASH_FACTOR
+        // → 두 테이블 곱이 작을 때 NestedLoop 선택. HASH_FACTOR=3 → 임계 약 10 이하.
+        // 하드코딩 `> 4` 대신 실제 비용 비교로 교체.
+        const HASH_FACTOR: usize = 3;
+        let nl_cost = left_size.saturating_mul(right_size);
+        let hash_cost = left_size.saturating_add(right_size).saturating_mul(HASH_FACTOR);
 
-                        // IndexNL: build_col is the PK of the right table → O(log n) probe per left row
-                        if let Some(pk) = self.pk_col(right_table) {
-                            if pk == build_col && right_size > left_size {
+        if nl_cost <= hash_cost {
+            return JoinAlgo::NestedLoop;
+        }
+
+        if let CondExpr::Leaf(cond) = on_expr {
+            if cond.operator == Operator::Eq {
+                if let (ArithExpr::Col(lc), ConditionValue::Literal(rv)) = (&cond.left, &cond.value) {
+                    let lhs_col = lc.split('.').last().unwrap_or(lc).to_string();
+                    let rhs_col = rv.split('.').last().unwrap_or(rv).to_string();
+                    let lhs_tbl = lc.split('.').next().unwrap_or("").to_lowercase();
+                    let rhs_tbl = rv.split('.').next().unwrap_or("").to_lowercase();
+                    let right_bare = right_table.split('.').last().unwrap_or(right_table).to_lowercase();
+                    let (probe_col, build_col) = if rhs_tbl == right_bare {
+                        (lhs_col, rhs_col)
+                    } else if lhs_tbl == right_bare {
+                        (rhs_col, lhs_col)
+                    } else {
+                        return JoinAlgo::NestedLoop;
+                    };
+
+                    // IndexNL: build_col이 right 테이블의 PK → O(left × log right)
+                    // Hash보다 유리: left * log(right) < (left + right) * HASH_FACTOR
+                    if let Some(pk) = self.pk_col(right_table) {
+                        if pk == build_col {
+                            let log_right = (right_size as f64).log2().max(1.0) as usize;
+                            let inl_cost = left_size.saturating_mul(log_right);
+                            if inl_cost <= hash_cost {
                                 return JoinAlgo::IndexNL { probe_col, right_pk_col: build_col };
                             }
                         }
-
-                        // 양쪽 모두 대형 테이블이면 Sort-Merge Join, 한쪽만 크면 Hash Join.
-                        if left_size > 4 && right_size > 4 {
-                            return JoinAlgo::SortMerge { probe_col, build_col };
-                        }
-                        return JoinAlgo::Hash { probe_col, build_col };
                     }
+
+                    // Sort-Merge vs Hash: 양쪽이 모두 대형이면 Sort-Merge (이미 정렬된 경우 우위)
+                    let n = left_size + right_size;
+                    let log_n = (n as f64).log2().max(1.0) as usize;
+                    let sm_cost = n.saturating_mul(log_n);
+                    if sm_cost <= hash_cost {
+                        return JoinAlgo::SortMerge { probe_col, build_col };
+                    }
+                    return JoinAlgo::Hash { probe_col, build_col };
                 }
             }
         }
@@ -434,6 +506,13 @@ impl<'a> Planner<'a> {
             }
             AccessPath::SecondaryLikePrefix { .. } => (total / 10).max(1),
             AccessPath::CompositeIndexPrefix { .. } => (total / 5).max(1),
+            AccessPath::IndexIntersection { paths } => {
+                // 교집합 행 수 ≈ min(각 경로 행 수) — 실제로는 더 적을 수 있음
+                paths.iter()
+                    .map(|p| self.estimate_rows(total, p, table))
+                    .min()
+                    .unwrap_or(1)
+            }
             AccessPath::SecondaryPoint { index_key, col, .. } => {
                 // Use real cardinality from ANALYZE TABLE stats when available.
                 // index_key is "{table}_{index_name}"; table is the prefix before "_idx_".
@@ -492,6 +571,10 @@ impl<'a> Planner<'a> {
             | AccessPath::SecondaryLikePrefix { .. } | AccessPath::CompositeIndexPrefix { .. } => log_n * 2.0 + n / 4.0,
             AccessPath::CompositeIndex { .. } => log_n,
             AccessPath::HashPoint { .. }      => 1.0, // O(1)
+            AccessPath::IndexIntersection { paths } => {
+                // 각 경로 비용 합산 + 교집합 연산 (PK set intersection)
+                paths.iter().map(|p| self.estimate_cost(total, p)).sum::<f64>() + n.sqrt()
+            }
         }
     }
 
@@ -542,6 +625,10 @@ impl<'a> Planner<'a> {
             AccessPath::CompositeIndexPrefix { index_name, .. }   => format!("Composite Index Prefix  {}", index_name),
             AccessPath::HashPoint { index_key, col, key }         => format!("Hash Index Scan  {} ({} = {})", index_key, col, key),
             AccessPath::SecondaryLikePrefix { index_key, col, prefix } => format!("Index Prefix Scan  {} ({} LIKE '{}%')", index_key, col, prefix),
+            AccessPath::IndexIntersection { paths } => {
+                let parts: Vec<String> = paths.iter().map(|p| self.describe_access(p)).collect();
+                format!("Index Intersection  [{}]", parts.join(" ∩ "))
+            }
         }
     }
 
@@ -610,6 +697,24 @@ pub fn collect_eq_map(expr: &CondExpr) -> HashMap<String, String> {
     let mut map = HashMap::new();
     collect_eq_recursive(expr, &mut map);
     map
+}
+
+/// AND 체인에서 모든 리프(단일 Condition) 수집 (OR/NOT은 무시)
+pub fn collect_and_leaves(expr: &CondExpr) -> Vec<&Condition> {
+    let mut out = Vec::new();
+    collect_and_leaves_rec(expr, &mut out);
+    out
+}
+
+fn collect_and_leaves_rec<'a>(expr: &'a CondExpr, out: &mut Vec<&'a Condition>) {
+    match expr {
+        CondExpr::And(l, r) => {
+            collect_and_leaves_rec(l, out);
+            collect_and_leaves_rec(r, out);
+        }
+        CondExpr::Leaf(c) => out.push(c),
+        _ => {}
+    }
 }
 
 /// 'prefix%' 패턴에서 prefix를 추출한다. 중간 와일드카드가 있으면 None.
