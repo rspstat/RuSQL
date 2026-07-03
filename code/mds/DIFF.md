@@ -15,7 +15,7 @@
 | 클러스터드 인덱스 | ✓ (PK 기준 물리 정렬) | ✗ (CLUSTER 명령으로 수동) | ✓ (IOT: Index-Organized Table) | ✓ (INSERT 후 PK 기준 물리 정렬 유지) |
 | 압축 | Transparent Page Compression | TOAST (가변 길이 컬럼) | Advanced Compression (유료) | LZ4 전체 테이블 |
 | WAL | InnoDB Redo Log | WAL (pg_wal/) | Redo Log + Archive Log | ✓ (바이너리, 자동 체크포인트 512 KB) |
-| 크래시 복구 | ✓ Redo/Undo | ✓ Redo + MVCC 정리 | ✓ Redo + Undo tablespace | ✓ WAL Replay + Undo log |
+| 크래시 복구 | ✓ Redo/Undo | ✓ Redo + MVCC 정리 | ✓ Redo + Undo tablespace | ✓ WAL Replay + Undo log (txn_id 그룹 단위 redo/undo — 여러 트랜잭션 레코드가 섞여 있어도 커밋된 것만 정확히 분리 복구) |
 
 ---
 
@@ -48,7 +48,7 @@
 | 원자성 (A) | ✓ | ✓ | ✓ | ✓ (Undo log + WAL) |
 | 일관성 (C) | ✓ | ✓ | ✓ | ✓ (PK/FK/UNIQUE/CHECK 검증) |
 | 격리성 (I) | ✓ | ✓ | ✓ | ✓ (Deferred Write: DML → session_tables 버퍼, COMMIT 시 반영) |
-| 지속성 (D) | ✓ | ✓ | ✓ | ✓ (WAL fsync + 그룹 커밋) |
+| 지속성 (D) | ✓ | ✓ | ✓ | ✓ (WAL fsync + 그룹 커밋; 전역 유일 txn_id 태깅으로 세션 간 공유 WAL/Undo Log 격리 — 한 세션의 COMMIT이 다른 세션의 진행 중인 트랜잭션 레코드를 파괴하지 않음) |
 | MVCC | ✓ (InnoDB Undo segment) | ✓ (튜플 버전 힙 내 저장) | ✓ (Undo tablespace 기반 Consistent Read) | △ (스냅샷 기반, 완전 다중버전 아님) |
 | 격리 수준 | 4가지 (기본: REPEATABLE READ) | 3가지 유효 (기본: READ COMMITTED) | 2가지 유효 — READ COMMITTED / SERIALIZABLE (기본: READ COMMITTED) | 4가지 (기본: READ COMMITTED) |
 | Serializable 구현 | 잠금 기반 + GAP Lock (팬텀 방지) | SSI (Serializable Snapshot Isolation) | 스냅샷 기반 (ORA-08177 직렬화 오류 반환) | 잠금 기반 (완전 SSI 아님) |

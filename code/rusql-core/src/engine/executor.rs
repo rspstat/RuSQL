@@ -14,7 +14,7 @@ use sha2::{Sha256, Digest};
 use sha1::Sha1;
 use chrono;
 use serde::{Serialize, Deserialize};
-use crate::transaction::txn_manager::TransactionManager;
+use crate::transaction::txn_manager::{TransactionManager, TxnIoShared};
 use crate::transaction::group_commit::GroupCommitCoordinator;
 use crate::parser::ast::*;
 use crate::catalog::schema::{Catalog, ColumnDef as SchemaCol};
@@ -170,6 +170,11 @@ pub struct SharedDatabase {
     pub row_pk_pos: HashMap<String, HashMap<String, usize>>,
     /// SELECT 결과 LRU 캐시 (트랜잭션 외부 쿼리 전용)
     pub query_cache: QueryResultCache,
+    /// 세션 간 공유되는 전역 txn_id 발급기 + WAL/Undo 파일 접근 락
+    pub txn_io: Arc<TxnIoShared>,
+    /// 현재 활성(BEGIN~COMMIT/ROLLBACK) 트랜잭션 ID 집합. 체크포인트가 다른 세션의
+    /// 진행 중인 트랜잭션 WAL 레코드를 잘라내지 않도록 게이트하는 데 사용된다.
+    pub active_txn_ids: Arc<Mutex<HashSet<u64>>>,
 }
 
 /// SHA-256 해시 (hex 문자열 반환) — native TCP 인증용
@@ -550,6 +555,7 @@ impl Executor {
         let user_functions = disk.load_functions();
 
         let current_db = databases.iter().min().cloned().unwrap_or_else(|| "rusql".to_string());
+        let txn_io = Arc::new(TxnIoShared::new());
         let mut executor = Executor {
             shared: Arc::new(RwLock::new(SharedDatabase {
                 catalog,
@@ -584,8 +590,10 @@ impl Executor {
                 next_session_id: Arc::new(AtomicUsize::new(1)),
                 row_pk_pos: HashMap::new(),
                 query_cache: QueryResultCache::new(),
+                txn_io: Arc::clone(&txn_io),
+                active_txn_ids: Arc::new(Mutex::new(HashSet::new())),
             })),
-            txn: TransactionManager::new_with_dir(dir),
+            txn: TransactionManager::new_with_shared(dir, txn_io),
             current_db,
             session_tables: HashMap::new(),
             proc_vars: HashMap::new(),
@@ -603,16 +611,16 @@ impl Executor {
     }
 
     pub fn new_session(shared: Arc<RwLock<SharedDatabase>>) -> Self {
-        let (current_db, data_dir, session_id) = {
+        let (current_db, data_dir, session_id, txn_io) = {
             let s = shared.read().unwrap();
             let db = s.databases.iter().min().cloned().unwrap_or_else(|| "rusql".to_string());
             let dir = s.data_dir.clone();
             let id = s.next_session_id.fetch_add(1, Ordering::SeqCst);
-            (db, dir, id)
+            (db, dir, id, Arc::clone(&s.txn_io))
         };
         Executor {
             shared,
-            txn: TransactionManager::new_with_dir(&data_dir),
+            txn: TransactionManager::new_with_shared(&data_dir, txn_io),
             current_db,
             session_tables: HashMap::new(),
             proc_vars: HashMap::new(),
@@ -813,6 +821,7 @@ impl Executor {
         let txn_id = self.txn.current_txn_id();
         self.txn.commit_write_record()?;
         s.lock_mgr.release(txn_id);
+        s.active_txn_ids.lock().unwrap().remove(&txn_id);
 
         Ok(())
     }
@@ -5674,6 +5683,7 @@ impl Executor {
     fn exec_begin(&mut self, s: &SharedDatabase) -> Result<String, String> {
         self.session_tables.clear();
         let txn_id = self.txn.begin_with_snapshot(&s.tables)?;
+        s.active_txn_ids.lock().unwrap().insert(txn_id);
         let level = format!("{:?}", self.txn.isolation_level);
         Ok(format!("Transaction {} started. (isolation: {})", txn_id, level))
     }
@@ -5696,6 +5706,7 @@ impl Executor {
         let txn_id = self.txn.current_txn_id();
         self.txn.commit()?;
         s.lock_mgr.release(txn_id);
+        s.active_txn_ids.lock().unwrap().remove(&txn_id);
         Self::maybe_auto_vacuum(s);
         Ok("Transaction committed.".to_string())
     }
@@ -5705,6 +5716,7 @@ impl Executor {
         let txn_id = self.txn.current_txn_id();
         let _ = self.txn.abort().ok();
         s.lock_mgr.release(txn_id);
+        s.active_txn_ids.lock().unwrap().remove(&txn_id);
 
         // session_tables에 있는 모든 수정 테이블의 인덱스를 커밋 상태(s.tables)로 복원
         // (트랜잭션 중 exec_update_inner/delete_inner가 s.indexes를 갱신하므로 ROLLBACK 시 필요)
@@ -8000,25 +8012,33 @@ impl Executor {
 
     /// 수동 CHECKPOINT 명령 실행:
     /// 1) 버퍼풀의 모든 dirty 페이지를 디스크에 flush
-    /// 2) WAL에 CHECKPOINT 레코드 기록
-    /// 3) 이전 커밋된 레코드를 WAL에서 정리
+    /// 2) 다른 세션에 활성 트랜잭션이 없으면 WAL에 CHECKPOINT 레코드 기록 후 정리
+    ///    (활성 트랜잭션이 있으면 그 세션의 미완료 WAL 레코드가 잘려나갈 수 있어 연기한다)
     fn exec_checkpoint(&mut self, s: &mut SharedDatabase) -> Result<String, String> {
         let dirty_before = s.buffer_pool.usage();
         s.buffer_pool.flush_all(&s.disk);
-        self.txn.do_checkpoint();
+        let safe = s.active_txn_ids.lock().unwrap().is_empty();
+        self.txn.do_checkpoint(safe);
         Ok(format!(
-            "Checkpoint completed. {} dirty page(s) flushed.",
-            dirty_before
+            "Checkpoint completed. {} dirty page(s) flushed.{}",
+            dirty_before,
+            if safe { "" } else { " (WAL truncation deferred — other transaction(s) still active)" }
         ))
     }
 
     /// 자동 체크포인트: WAL 크기가 임계값을 초과하면 체크포인트를 수행한다.
-    /// 활성 트랜잭션 중에도 중간 체크포인트를 찍어 복구 범위를 줄인다.
+    /// 단, 다른 세션에 활성 트랜잭션이 있으면 WAL 정리는 연기한다(그 세션의 미완료
+    /// 레코드가 체크포인트 마커보다 앞에 있어 잘려나가는 것을 방지).
     fn maybe_auto_checkpoint(&mut self, s: &mut SharedDatabase) {
         if self.txn.needs_auto_checkpoint() {
             s.buffer_pool.flush_all(&s.disk);
-            self.txn.do_checkpoint();
-            eprintln!("[AutoCheckpoint] WAL 임계값 초과 → 체크포인트 실행");
+            let safe = s.active_txn_ids.lock().unwrap().is_empty();
+            self.txn.do_checkpoint(safe);
+            if safe {
+                eprintln!("[AutoCheckpoint] WAL 임계값 초과 → 체크포인트 실행");
+            } else {
+                eprintln!("[AutoCheckpoint] WAL 임계값 초과했으나 다른 세션의 활성 트랜잭션이 있어 연기");
+            }
         }
     }
 
@@ -8103,6 +8123,10 @@ impl Executor {
         }
     }
 
+    /// 부팅 시 1회(세션이 하나도 없는 시점)만 실행되는 크래시 복구.
+    /// 여러 트랜잭션의 레코드가 마지막 체크포인트 이후 구간에 섞여 있을 수 있으므로,
+    /// txn_id별로 그룹화해 커밋된 트랜잭션만 redo replay하고, 커밋되지 않은 트랜잭션은
+    /// 그 트랜잭션 몫의 Undo 로그만으로 undo한다.
     fn recover_from_wal(&mut self) {
         let arc = Arc::clone(&self.shared);
         let mut s = arc.write().unwrap();
@@ -8119,141 +8143,158 @@ impl Executor {
         let replay_records = &records[start_idx..];
         if replay_records.is_empty() {
             self.txn.wal_clear();
+            self.txn.clear_undo_log_file();
             return;
         }
 
-        // COMMIT 레코드가 있는지 확인
-        let has_commit = replay_records.iter().any(|r| {
-            matches!(r.op, crate::transaction::wal::WalOp::Commit)
-        });
+        // txn_id별로 데이터 변경 레코드를 그룹화하고, 커밋된 txn_id 집합을 별도로 수집.
+        // order는 최초 등장 순서로 채운 뒤 오름차순 정렬 — txn_id는 전역 발급 순서(=실제
+        // 쓰기 순서)와 일치하므로, 같은 행을 여러 트랜잭션이 건드린 경우에도 정확한
+        // 순서로 replay하기 위해 오름차순으로 처리한다.
+        let mut order: Vec<u64> = Vec::new();
+        let mut groups: HashMap<u64, Vec<&crate::transaction::wal::WalRecord>> = HashMap::new();
+        let mut committed: HashSet<u64> = HashSet::new();
+        for r in replay_records {
+            match r.op {
+                crate::transaction::wal::WalOp::Insert
+                | crate::transaction::wal::WalOp::Update
+                | crate::transaction::wal::WalOp::Delete => {
+                    if !groups.contains_key(&r.txn_id) { order.push(r.txn_id); }
+                    groups.entry(r.txn_id).or_default().push(r);
+                }
+                crate::transaction::wal::WalOp::Commit => { committed.insert(r.txn_id); }
+                _ => {} // Rollback / 잔여 Checkpoint: 무시
+            }
+        }
+        order.sort_unstable();
+        order.dedup();
 
-        if !has_commit {
-            // 미완료 트랜잭션 → Undo Log로 디스크 상태 복원 후 WAL 삭제
-            if self.txn.has_undo_log_file() {
-                let undo_entries = self.txn.read_undo_log_file();
-                eprintln!("[Recovery] 미완료 트랜잭션 감지 → Undo Log {} 개 엔트리 적용", undo_entries.len());
-                // 역순으로 적용 (마지막 변경 → 첫 번째 변경 순서로 복원)
-                for entry in undo_entries.iter().rev() {
-                    match entry.operation.as_str() {
-                        "INSERT" => {
-                            // INSERT 취소: 삽입된 행 삭제
-                            let pk_col = s.catalog.get_table(&entry.table)
+        let mut undo_by_txn: HashMap<u64, Vec<crate::transaction::txn_manager::UndoEntry>> = HashMap::new();
+        for e in self.txn.read_undo_log_file() {
+            undo_by_txn.entry(e.txn_id).or_default().push(e);
+        }
+
+        for txn_id in order {
+            let ops = match groups.get(&txn_id) { Some(v) => v, None => continue };
+            if committed.contains(&txn_id) {
+                eprintln!("[Recovery] txn {} 커밋됨 → {} 레코드 replay", txn_id, ops.len());
+                for record in ops {
+                    match record.op {
+                        crate::transaction::wal::WalOp::Insert => {
+                            if let Ok(row) = serde_json::from_str::<Row>(&record.data) {
+                                let table = &record.table_name;
+                                let pk_col = s.catalog.get_table(table)
+                                    .and_then(|sch| sch.columns.iter().find(|c| c.primary_key).map(|c| c.name.clone()))
+                                    .unwrap_or_else(|| "id".to_string());
+                                if let Some(rows) = s.tables.get_mut(table) {
+                                    let key = row.get(&pk_col).cloned().unwrap_or_default();
+                                    let exists = rows.iter().any(|r| r.get(&pk_col).map(|v| v == &key).unwrap_or(false));
+                                    if !exists {
+                                        rows.push(row.clone());
+                                        let val_json = serde_json::to_string(&row).unwrap();
+                                        if let Some(index) = s.indexes.get_mut(table) {
+                                            index.insert(key, val_json);
+                                        }
+                                        s.disk.save_table(table, s.tables.get(table).unwrap());
+                                        eprintln!("[Recovery] INSERT replay: {}", table);
+                                    }
+                                }
+                            }
+                        }
+                        crate::transaction::wal::WalOp::Update => {
+                            if let Ok(new_row) = serde_json::from_str::<Row>(&record.data) {
+                                let table = &record.table_name;
+                                let pk_col = s.catalog.get_table(table)
+                                    .and_then(|s| s.columns.iter().find(|c| c.primary_key).map(|c| c.name.clone()))
+                                    .unwrap_or_else(|| "id".to_string());
+                                if let Some(rows) = s.tables.get_mut(table) {
+                                    for row in rows.iter_mut() {
+                                        if row.get(&pk_col) == new_row.get(&pk_col) {
+                                            *row = new_row.clone();
+                                            break;
+                                        }
+                                    }
+                                }
+                                s.disk.save_table(table, s.tables.get(table).unwrap());
+                                eprintln!("[Recovery] UPDATE replay: {}", table);
+                            }
+                        }
+                        crate::transaction::wal::WalOp::Delete => {
+                            let table = &record.table_name;
+                            let pk_col = s.catalog.get_table(table)
                                 .and_then(|s| s.columns.iter().find(|c| c.primary_key).map(|c| c.name.clone()))
                                 .unwrap_or_else(|| "id".to_string());
-                            if let Some(rows) = s.tables.get_mut(&entry.table) {
-                                rows.retain(|r| r.get(&pk_col).map(|v| v != &entry.key).unwrap_or(true));
-                                let snap = rows.clone();
-                                s.disk.save_table(&entry.table, &snap);
-                                eprintln!("[Recovery] UNDO INSERT: {} key={}", entry.table, entry.key);
+                            if let Some(rows) = s.tables.get_mut(table) {
+                                rows.retain(|r| r.get(&pk_col).map(|v| v != &record.key).unwrap_or(true));
                             }
-                        }
-                        "UPDATE" => {
-                            // UPDATE 취소: 이전 데이터로 복원
-                            if let Some(old_json) = &entry.old_data {
-                                if let Ok(old_row) = serde_json::from_str::<Row>(old_json) {
-                                    let pk_col = s.catalog.get_table(&entry.table)
-                                        .and_then(|s| s.columns.iter().find(|c| c.primary_key).map(|c| c.name.clone()))
-                                        .unwrap_or_else(|| "id".to_string());
-                                    if let Some(rows) = s.tables.get_mut(&entry.table) {
-                                        for row in rows.iter_mut() {
-                                            if row.get(&pk_col) == Some(&entry.key) {
-                                                *row = old_row.clone();
-                                                break;
-                                            }
-                                        }
-                                        let snap = rows.clone();
-                                        s.disk.save_table(&entry.table, &snap);
-                                        eprintln!("[Recovery] UNDO UPDATE: {} key={}", entry.table, entry.key);
-                                    }
-                                }
-                            }
-                        }
-                        "DELETE" => {
-                            // DELETE 취소: 삭제된 행 재삽입
-                            if let Some(old_json) = &entry.old_data {
-                                if let Ok(old_row) = serde_json::from_str::<Row>(old_json) {
-                                    if let Some(rows) = s.tables.get_mut(&entry.table) {
-                                        rows.push(old_row);
-                                        let snap = rows.clone();
-                                        s.disk.save_table(&entry.table, &snap);
-                                        eprintln!("[Recovery] UNDO DELETE: {} key={}", entry.table, entry.key);
-                                    }
-                                }
-                            }
+                            s.disk.save_table(table, s.tables.get(table).unwrap());
+                            eprintln!("[Recovery] DELETE replay: {}", table);
                         }
                         _ => {}
                     }
                 }
-                self.txn.clear_undo_log_file();
             } else {
-                eprintln!("[Recovery] 미완료 트랜잭션 감지 (Undo Log 없음) → WAL 삭제");
-            }
-            self.txn.wal_clear();
-            return;
-        }
-
-        // COMMIT된 트랜잭션 replay (체크포인트 이후 레코드만)
-        eprintln!("[Recovery] WAL replay 시작 ({} 레코드, start_idx={})", replay_records.len(), start_idx);
-        for record in replay_records {
-            match record.op {
-                crate::transaction::wal::WalOp::Insert => {
-                    if let Ok(row) = serde_json::from_str::<Row>(&record.data) {
-                        let table = &record.table_name;
-                        // catalog 조회를 get_mut 이전에 수행해 borrow 충돌 방지
-                        let pk_col = s.catalog.get_table(table)
-                            .and_then(|sch| sch.columns.iter().find(|c| c.primary_key).map(|c| c.name.clone()))
-                            .unwrap_or_else(|| "id".to_string());
-                        if let Some(rows) = s.tables.get_mut(table) {
-                            let key = row.get(&pk_col).cloned().unwrap_or_default();
-                            let exists = rows.iter().any(|r| r.get(&pk_col).map(|v| v == &key).unwrap_or(false));
-                            if !exists {
-                                rows.push(row.clone());
-                                let val_json = serde_json::to_string(&row).unwrap();
-                                if let Some(index) = s.indexes.get_mut(table) {
-                                    index.insert(key, val_json);
-                                }
-                                s.disk.save_table(table, s.tables.get(table).unwrap());
-                                eprintln!("[Recovery] INSERT replay: {}", table);
-                            }
-                        }
-                    }
-                }
-                crate::transaction::wal::WalOp::Update => {
-                    if let Ok(new_row) = serde_json::from_str::<Row>(&record.data) {
-                        let table = &record.table_name;
-                        let pk_col = s.catalog.get_table(table)
-                            .and_then(|s| s.columns.iter().find(|c| c.primary_key).map(|c| c.name.clone()))
-                            .unwrap_or_else(|| "id".to_string());
-                        if let Some(rows) = s.tables.get_mut(table) {
-                            for row in rows.iter_mut() {
-                                if row.get(&pk_col) == new_row.get(&pk_col) {
-                                    *row = new_row.clone();
-                                    break;
+                eprintln!("[Recovery] txn {} 미완료 → Undo Log로 복원", txn_id);
+                if let Some(entries) = undo_by_txn.get(&txn_id) {
+                    // 역순으로 적용 (마지막 변경 → 첫 번째 변경 순서로 복원)
+                    for entry in entries.iter().rev() {
+                        match entry.operation.as_str() {
+                            "INSERT" => {
+                                let pk_col = s.catalog.get_table(&entry.table)
+                                    .and_then(|s| s.columns.iter().find(|c| c.primary_key).map(|c| c.name.clone()))
+                                    .unwrap_or_else(|| "id".to_string());
+                                if let Some(rows) = s.tables.get_mut(&entry.table) {
+                                    rows.retain(|r| r.get(&pk_col).map(|v| v != &entry.key).unwrap_or(true));
+                                    let snap = rows.clone();
+                                    s.disk.save_table(&entry.table, &snap);
+                                    eprintln!("[Recovery] UNDO INSERT: {} key={}", entry.table, entry.key);
                                 }
                             }
+                            "UPDATE" => {
+                                if let Some(old_json) = &entry.old_data {
+                                    if let Ok(old_row) = serde_json::from_str::<Row>(old_json) {
+                                        let pk_col = s.catalog.get_table(&entry.table)
+                                            .and_then(|s| s.columns.iter().find(|c| c.primary_key).map(|c| c.name.clone()))
+                                            .unwrap_or_else(|| "id".to_string());
+                                        if let Some(rows) = s.tables.get_mut(&entry.table) {
+                                            for row in rows.iter_mut() {
+                                                if row.get(&pk_col) == Some(&entry.key) {
+                                                    *row = old_row.clone();
+                                                    break;
+                                                }
+                                            }
+                                            let snap = rows.clone();
+                                            s.disk.save_table(&entry.table, &snap);
+                                            eprintln!("[Recovery] UNDO UPDATE: {} key={}", entry.table, entry.key);
+                                        }
+                                    }
+                                }
+                            }
+                            "DELETE" => {
+                                if let Some(old_json) = &entry.old_data {
+                                    if let Ok(old_row) = serde_json::from_str::<Row>(old_json) {
+                                        if let Some(rows) = s.tables.get_mut(&entry.table) {
+                                            rows.push(old_row);
+                                            let snap = rows.clone();
+                                            s.disk.save_table(&entry.table, &snap);
+                                            eprintln!("[Recovery] UNDO DELETE: {} key={}", entry.table, entry.key);
+                                        }
+                                    }
+                                }
+                            }
+                            _ => {}
                         }
-                        s.disk.save_table(table, s.tables.get(table).unwrap());
-                        eprintln!("[Recovery] UPDATE replay: {}", table);
                     }
+                } else {
+                    eprintln!("[Recovery] txn {} — Undo 엔트리 없음, 복원할 것 없음", txn_id);
                 }
-                crate::transaction::wal::WalOp::Delete => {
-                    let table = &record.table_name;
-                    let pk_col = s.catalog.get_table(table)
-                        .and_then(|s| s.columns.iter().find(|c| c.primary_key).map(|c| c.name.clone()))
-                        .unwrap_or_else(|| "id".to_string());
-                    if let Some(rows) = s.tables.get_mut(table) {
-                        rows.retain(|r| r.get(&pk_col).map(|v| v != &record.key).unwrap_or(true));
-                    }
-                    s.disk.save_table(table, s.tables.get(table).unwrap());
-                    eprintln!("[Recovery] DELETE replay: {}", table);
-                }
-                _ => {}
             }
         }
 
-        // Replay 완료 후 WAL 삭제
+        // 부팅 시 세션이 하나도 없는 시점의 1회성 복구이므로 전체 삭제가 안전하다.
         self.txn.wal_clear();
-        eprintln!("[Recovery] WAL replay 완료 → WAL 삭제");
+        self.txn.clear_undo_log_file();
+        eprintln!("[Recovery] WAL replay 완료 → WAL/Undo Log 삭제");
     }
 
     // ── 사용자 관리 ──────────────────────────────────────────────────────────

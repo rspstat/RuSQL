@@ -190,13 +190,14 @@
 - [x] WAL (Write-Ahead Logging) — 바이너리 redo log
 - [x] WAL Group Commit — 여러 세션의 COMMIT을 단일 fsync로 묶어 TPS 향상, SharedDatabase 락 해제 후 fsync
 - [x] WAL fsync per-commit — COMMIT 레코드 기록 시 `sync_all()` 호출 (`innodb_flush_log_at_trx_commit=1` 동등, 전원 장애 시 커밋 유실 방지)
+- [x] **WAL/Undo Log 세션 간 트랜잭션 격리** — 전역 유일 트랜잭션 ID(`txn_id`, `TxnIoShared`로 모든 세션이 공유하는 원자적 카운터에서 발급)를 모든 WAL 레코드·Undo 엔트리에 태깅; COMMIT/ROLLBACK/ABORT는 파일 전체 삭제 대신 자기 트랜잭션 레코드만 제거(`remove_txn`)해 같은 data_dir을 공유하는 다른 세션의 진행 중인 트랜잭션 기록을 보존; `lock_mgr`/`_xmin` 태깅도 동일 전역 ID를 사용해 세션 간 잠금 ID 충돌 문제도 함께 해소
 - [x] BEGIN / COMMIT / ROLLBACK
-- [x] SAVEPOINT / ROLLBACK TO SAVEPOINT (session_tables 기반 undo 적용 — Deferred Write와 완전 통합)
+- [x] SAVEPOINT / ROLLBACK TO SAVEPOINT (session_tables 기반 undo 적용 — Deferred Write와 완전 통합; 디스크 Undo Log는 `rewrite_txn`으로 이 트랜잭션 몫만 교체, 다른 세션 엔트리는 보존)
 - [x] RELEASE SAVEPOINT
 - [x] Undo Log 기반 롤백 (B+Tree 인덱스 재빌드 포함)
-- [x] Undo Log 영속화 (`data/_undo.log`) — 트랜잭션 중 변경마다 Undo Entry를 디스크에 즉시 기록, COMMIT/ROLLBACK 시 삭제, 크래시 후 재시작 시 미완료 트랜잭션 자동 롤백
-- [x] WAL 기반 Crash Recovery (재시작 시 자동 복구)
-- [x] Checkpoint (WAL 자동 트런케이션, 512KB 임계값, fsync 보장)
+- [x] Undo Log 영속화 (`data/_undo.log`) — 트랜잭션 중 변경마다 Undo Entry를 디스크에 즉시 기록, COMMIT/ROLLBACK/ABORT 시 해당 트랜잭션 몫만 제거(다른 세션의 진행 중인 트랜잭션은 보존), 크래시 후 재시작 시 미완료 트랜잭션 자동 롤백
+- [x] WAL 기반 Crash Recovery (재시작 시 자동 복구) — 마지막 체크포인트 이후 레코드를 txn_id별로 그룹화해 커밋된 트랜잭션만 redo replay, 미완료 트랜잭션은 그 몫의 Undo Log로만 undo (여러 트랜잭션 레코드가 섞여 있어도 정확히 분리); redo 그룹은 txn_id 오름차순(=전역 발급 순서)으로 적용해 같은 행을 여러 트랜잭션이 건드린 경우도 순서 보장
+- [x] Checkpoint (WAL 자동 트런케이션, 512KB 임계값, fsync 보장) — 다른 세션에 활성 트랜잭션이 하나라도 있으면 WAL 정리를 연기 (그 세션의 미완료 레코드가 체크포인트 마커에 잘려나가는 것을 방지)
 - [x] 트랜잭션 격리 수준 4단계
   - READ UNCOMMITTED / READ COMMITTED
   - REPEATABLE READ (BEGIN 시점 스냅샷 고정)
