@@ -1,0 +1,8 @@
+[workspace]
+members = [
+    "rusql-core",
+    "rusql-server",
+    "rusql-cli",
+    "rusql-client",
+]
+resolver = "2"

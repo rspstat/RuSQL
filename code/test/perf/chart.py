@@ -25,7 +25,7 @@ def save(fig, name):
 def bar2(ax, labels, rusql_vals, mysql_vals, ylabel, title):
     x = range(len(labels))
     w = 0.35
-    ax.bar([i - w/2 for i in x], rusql_vals, w, label="RuSQL v2.2.0", color=COLORS["rusql"])
+    ax.bar([i - w/2 for i in x], rusql_vals, w, label="RuSQL v2.3.0", color=COLORS["rusql"])
     ax.bar([i + w/2 for i in x], mysql_vals,  w, label="MySQL 8.0",     color=COLORS["mysql"])
     ax.set_xticks(list(x))
     ax.set_xticklabels(labels)
@@ -94,7 +94,7 @@ def main():
     threads = sorted(d["concurrent"].keys(), key=int)
     r_vals = [d["concurrent"][t]["rusql"] for t in threads]
     m_vals = [d["concurrent"][t]["mysql"]  for t in threads]
-    ax.plot(threads, r_vals, marker="o", color=COLORS["rusql"], label="RuSQL v2.2.0", linewidth=2)
+    ax.plot(threads, r_vals, marker="o", color=COLORS["rusql"], label="RuSQL v2.3.0", linewidth=2)
     ax.plot(threads, m_vals, marker="s", color=COLORS["mysql"],  label="MySQL 8.0",     linewidth=2)
     ax.set_xlabel("동시 접속 수 (threads)")
     ax.set_ylabel("Total TPS")

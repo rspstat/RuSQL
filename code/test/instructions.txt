@@ -1,0 +1,110 @@
+RuSQL — 빌드 및 실행 명령어 정리
+(전부 리포지토리 루트, 즉 이 파일 기준 ../../ 에서 실행하는 것을 기준으로 작성함)
+
+폴더 구조 요약:
+  code/backend   C++20 엔진 (core, cli, client, server, tests, third_party) — CMake
+  code/frontend  Tauri + React UI — npm/cargo
+  code/mcp       Python MCP 서버 (Claude Desktop 연동) — pip
+  code/test      SQL 테스트 스크립트 (이 파일이 있는 곳)
+  code/build     CMake 빌드 출력 (자동 생성, 삭제해도 재구성됨)
+  old/           원본 Rust 구현 (참조용, 더 이상 빌드/실행 안 함)
+
+
+==============================================================
+1. C++ 백엔드 (엔진 / CLI / 서버 / 클라이언트 / 테스트)
+==============================================================
+
+사전 준비: CMake, Visual Studio 2022 (MSVC, C++20) — Visual Studio 17 2022 제너레이터를
+  레지스트리에서 자동으로 찾으므로 별도 PATH 설정 불필요.
+
+--- 최초 1회 (또는 code/build 삭제 후) 구성 ---
+cmake -S code -B code/build
+
+--- 전체 빌드 (Debug) ---
+cmake --build code/build --config Debug
+
+--- 개별 타겟만 빌드하고 싶을 때 ---
+cmake --build code/build --config Debug --target engine_cli
+cmake --build code/build --config Debug --target engine_server
+cmake --build code/build --config Debug --target engine_client
+cmake --build code/build --config Debug --target engine_tests
+
+--- 단위 테스트 실행 (Catch2, 3080 assertions / 218 test cases) ---
+code/build/backend/tests/Debug/engine_tests.exe
+
+--- CLI 실행 (REPL, SQL 직접 입력) ---
+code/build/backend/cli/Debug/engine_cli.exe
+  옵션: --data-dir <경로>       (기본값: code/data)
+        --buffer-pool-size <n>  (기본값: 64)
+
+  예) 스크립트 파일을 그대로 실행하고 싶을 때:
+  code/build/backend/cli/Debug/engine_cli.exe < code/test/test_full.sql
+
+--- 서버 실행 (네이티브 프로토콜 + MySQL 와이어 프로토콜) ---
+code/build/backend/server/Debug/engine_server.exe
+  옵션: --port <n>              (기본값: 7878, 네이티브 프로토콜)
+        --mysql-port <n>        (기본값: 3306)
+        --no-mysql              (MySQL 프로토콜 비활성화)
+        --data-dir <경로>       (기본값: ./data, 실행 위치 기준 상대경로)
+        --buffer-pool-size <n>  (기본값: 64)
+
+--- 클라이언트 실행 (서버에 접속) ---
+code/build/backend/client/Debug/engine_client.exe
+  옵션: -u <user>   (기본값: root)
+        -p <pass>   (기본값: root)
+        -h <host>   (기본값: 127.0.0.1)
+        -P <port>   (기본값: 7878)
+
+
+==============================================================
+2. Frontend (Tauri + React UI)
+==============================================================
+
+사전 준비: Node.js/npm, Rust/Cargo (Tauri가 내부적으로 cargo build 수행).
+  참고: 프론트엔드는 C++ 백엔드를 임베드하지 않고, 로그인 시 code/build/backend/server/Debug/
+  engine_server.exe 를 자식 프로세스로 띄운 뒤 TCP로 접속하는 방식이므로, UI를 쓰기 전에
+  위 1번의 engine_server 빌드가 먼저 되어 있어야 함.
+
+--- 최초 1회 의존성 설치 ---
+cd code/frontend
+npm install
+
+--- 개발 모드 실행 (핫 리로드) ---
+cd code/frontend
+npm run tauri dev
+
+--- 배포용 빌드 ---
+cd code/frontend
+npm run tauri build
+
+
+==============================================================
+3. MCP 서버 (Claude Desktop 연동, Python)
+==============================================================
+
+사전 준비: Python 3 (mcp, fastmcp 패키지 필요).
+
+--- 의존성 설치 ---
+cd code/mcp
+pip install -r requirements.txt
+
+--- MCP 서버 단독 실행 (보통은 Claude Desktop이 자동으로 이 명령을 실행해줌) ---
+python code/mcp/mcp_server.py
+  참고: RuSQL 서버(engine_server.exe)가 127.0.0.1:7878 에서 먼저 떠 있어야 접속됨.
+
+--- Claude Desktop 연동 설정 ---
+UI(rusql-ui) 안의 "Claude Desktop 연동" 버튼을 누르면 자동으로 claude_desktop_config.json에
+등록됨 (code/frontend/src-tauri/src/main.rs 의 setup_mcp_config 커맨드).
+
+
+==============================================================
+4. 전체 플로우 예시 (처음부터 끝까지)
+==============================================================
+
+1) cmake -S code -B code/build
+2) cmake --build code/build --config Debug
+3) code/build/backend/tests/Debug/engine_tests.exe        (테스트 통과 확인)
+4) cd code/frontend && npm install && npm run tauri dev    (UI로 확인)
+
+   또는 CLI로만 빠르게 확인하고 싶으면:
+4') code/build/backend/cli/Debug/engine_cli.exe < code/test/test_full.sql

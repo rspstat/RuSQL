@@ -15,46 +15,53 @@ Custom RDBMS + AI MCP Project
 | DB Engine | B+Tree, WAL, Buffer Pool (LRU O(1) hit), MVCC, transactions, cost-based optimizer, histogram statistics, adaptive auto statistics collection (size-tiered thresholds), B+Tree index disk persistence (parallel rebuild at startup), incremental secondary index updates (O(1) per INSERT/UPDATE/DELETE), Index Intersection (AND multi-index PK HashSet intersection), DELETE PK fast-path (`row_pk_pos` O(1) swap_remove), parallel query execution (SeqScan · GROUP BY par_chunks · ORDER BY par_sort, adaptive threshold 10k/thread_count), query result cache (LRU 512, O(k) invalidation on DML), lock wait timeout (`SET @lock_wait_timeout`), stored procedures·triggers·UDF persistence, session-isolated WAL/Undo Log (global `txn_id` tagging so concurrent sessions' transactions no longer clobber each other's crash-recovery trail, txn-grouped redo/undo on recovery) |
 | SQL Support | DDL / DML / JOIN / subqueries / CTE / UNION / constraints / transactions / stored procedures / triggers / UDF |
 | MCP | AI MCP (Claude Desktop, stdio JSON-RPC, 16 tools — 7 DB tools (execute_sql · list_databases · list_tables · get_table_schema · explain_query · get_indexes · sample_data) + 9 UI tools (write_to_editor · open_new_tab · execute_in_editor · close_tab · get_tab_content · list_tabs · switch_to_tab · get_query_result · get_current_database), SELECT results as structured JSON array, alwaysAllow auto-configured (no permission popups), no API key required, auto-connect from UI) |
-| DBMS | TCP server, multiple simultaneous client connections, real-time session monitoring, per-session independent Executor + `Arc<RwLock<SharedDatabase>>` shared state |
-| Language | Rust, Python |
+| DBMS | TCP server, multiple simultaneous client connections, real-time session monitoring, per-session independent Executor + `shared_ptr<RwLock<SharedDatabase>>` shared state |
+| Language | C++, Python |
 
 <br/>
 
 ## Execute
+
+Build once with CMake (see `code/test/instructions.txt` for the full command reference):
+```bash
+cmake -S code -B code/build
+cmake --build code/build --config Debug
+```
+
 ```bash
 # REPL mode
-cargo run -p rusql-cli
+code/build/backend/cli/Debug/engine_cli.exe
 
 # Server mode (custom protocol 7878 + MySQL protocol 3306, both listening)
-cargo run -p rusql-server
+code/build/backend/server/Debug/engine_server.exe
 
 # Change or disable MySQL wire protocol port only
-cargo run -p rusql-server -- --mysql-port 13306
-cargo run -p rusql-server -- --no-mysql
+code/build/backend/server/Debug/engine_server.exe --mysql-port 13306
+code/build/backend/server/Debug/engine_server.exe --no-mysql
 
 # Specify buffer pool size (default: 64 pages)
-cargo run -p rusql-server -- --buffer-pool-size 256
-cargo run -p rusql-cli -- --buffer-pool-size 128
+code/build/backend/server/Debug/engine_server.exe --buffer-pool-size 256
+code/build/backend/cli/Debug/engine_cli.exe --buffer-pool-size 128
 
 # Custom client CLI (after starting the server)
-cargo run -p rusql-client -- -u root -p root -h 127.0.0.1 -P 7878
+code/build/backend/client/Debug/engine_client.exe -u root -p root -h 127.0.0.1 -P 7878
 
 # Connect directly with MySQL client (mysql CLI, DBeaver, JDBC, etc.)
 mysql -h 127.0.0.1 -P 3306 -u root --skip-auto-rehash
 
 # UI mode
-cd rusql-ui && npm run tauri dev
+cd code/frontend && npm run tauri dev
 ```
 
 <br/>
 
 ## Test query
 
-`test/test_full.sql`
+`code/test/test_full.sql`
 
 ```bash
-# Run from the code/ directory
-cargo run -p rusql-cli < test/test_full.sql
+# Run from the repo root
+code/build/backend/cli/Debug/engine_cli.exe < code/test/test_full.sql
 ```
 
 ```sql
@@ -669,15 +676,15 @@ SHOW DATABASES;
 
 | Item | Content |
 |------|------|
-| Language | Rust |
+| Language | C++ |
 | Version | v2.2.0 |
 | Index | B+Tree (single / composite / clustered) |
-| Optimizer | Cost-based planner (AccessPath: SeqScan / PkPoint / PkBetween / PkRange / SecondaryPoint / SecondaryRange / **SecondaryBetween** / CompositeIndex / **CompositeIndexPrefix** / **SecondaryLikePrefix** / **IndexIntersection** · cost-based join algorithm selection (NL vs Hash, HASH_FACTOR=3) · System-R DP join order optimization (N≤8), Greedy fallback) · Hash Index equality O(1) preferred · Index Intersection (AND conditions with 2+ indexed columns → PK HashSet intersection) · uncorrelated IN/NOT IN subquery materialization (HashSet caching, O(1) lookup) · histogram selectivity estimation (ANALYZE TABLE, size-tiered auto-ANALYZE) · `total_rows` auto-updated on INSERT/DELETE |
-| Join | Sort-Merge Join (O((N+M)logN)) / Hash Join (O(N+M)) / Nested Loop Join (including Cross/Natural/FullOuter) — cost-based auto-selection, implemented separately in `engine/join.rs` |
+| Optimizer | Cost-based planner (AccessPath: SeqScan / PkPoint / PkBetween / PkRange / SecondaryPoint / SecondaryRange / **SecondaryBetween** / CompositeIndex / **CompositeIndexPrefix** / **SecondaryLikePrefix** / **IndexIntersection** · join cost estimation (NL vs Hash, HASH_FACTOR=3) shown in EXPLAIN · System-R DP join order optimization (N≤8), Greedy fallback) · Hash Index equality O(1) preferred · Index Intersection (AND conditions with 2+ indexed columns → PK HashSet intersection) · uncorrelated IN/NOT IN subquery materialization (HashSet caching, O(1) lookup) · histogram selectivity estimation (ANALYZE TABLE, size-tiered auto-ANALYZE) · `total_rows` auto-updated on INSERT/DELETE |
+| Join | Nested Loop Join is what actually executes (including Cross/Natural/FullOuter) — `hash_join`/`sort_merge_join` are implemented in `code/backend/core/src/engine/join.cpp` and the planner still cost-estimates/labels them in EXPLAIN, but the executor always dispatches to Nested Loop regardless of the label (a deliberate simplification vs. the original engine, which actually executes the cost-selected algorithm) |
 | Index | B+Tree (single/composite/clustered) · **Hash Index** (`USING HASH`, equality O(1), single column) · **Index Intersection** (multi-index AND → PK HashSet intersection) |
 | Transaction | WAL (binary redo log) + Undo Log (in-memory + disk persistence) + MVCC — both tagged with a globally unique `txn_id` (shared atomic counter across sessions), so COMMIT/ROLLBACK/ABORT only remove that transaction's own records instead of clearing the whole shared file, and crash recovery groups replay by `txn_id` |
 | Isolation Level | READ UNCOMMITTED ~ SERIALIZABLE (4 levels) |
-| Concurrency | Row-level Locking (SELECT FOR UPDATE / FOR SHARE, shared·exclusive locks, deadlock detection, `SET @lock_wait_timeout` session variable, MySQL-compatible ERROR 1205) + parallel SeqScan WHERE filter + GROUP BY par_chunks partial aggregation (rayon, `RUSTDB_PARALLEL` env var / `SET @rusql_parallel = 1/0` session variable, adaptive threshold `10_000 / thread_count`, min 1,000) |
+| Concurrency | Row-level Locking (SELECT FOR UPDATE / FOR SHARE, shared·exclusive locks, deadlock detection, `SET @lock_wait_timeout` session variable, MySQL-compatible ERROR 1205) — SeqScan WHERE filter / GROUP BY execute sequentially (the `RUSTDB_PARALLEL` env var / `SET @rusql_parallel = 1/0` session variable are still accepted for compatibility but no longer actually parallelize; the original engine's rayon-based par_chunks scan/aggregation was not ported) |
 | Cache | Buffer Pool (LRU O(1) hit, tick-based, 64 pages × 16KB) · Query Result Cache (LRU 512, O(k) table invalidation via `table_to_keys` reverse index) |
 | Storage | Binary .rdb + LZ4 compression; global files separated into `data/_system/` subfolder (_users.json·_grants.json·_roles.json·_synonyms.json, etc.); per-connection independent directories (`data/local/`, `data/data_N/`) — UI·CLI·server share `code/data/`; B+Tree index `{table}.idx` / `{table}_{index}.idx` (auto-saved on INSERT·DELETE·CREATE INDEX, loaded on startup) |
 | Multi-DB | CREATE / DROP / USE / SHOW DATABASES, auto table qualification, isolation |
@@ -691,13 +698,19 @@ SHOW DATABASES;
 ## Project structure
 ```
 code/
-├── rusql-core/     DB engine library
-├── rusql-server/   TCP server
-├── rusql-cli/      terminal REPL (direct stdin execution)
-├── rusql-client/   TCP client CLI (-u/-p/-H/-P options)
-├── rusql-ui/       Tauri + React UI
-├── rusql-mcp/      MCP server (Python / FastMCP) — Claude Desktop stdio integration, 7 tools
+├── CMakeLists.txt   thin shell, just add_subdirectory(backend)
+├── build/           CMake build output (generated, not checked in)
+├── backend/         C++ engine (CMake)
+│   ├── core/        DB engine library (engine_core)
+│   ├── server/      TCP server (engine_server) — native protocol + MySQL wire protocol
+│   ├── cli/         terminal REPL (engine_cli, direct stdin execution)
+│   ├── client/      TCP client CLI (engine_client, -u/-p/-h/-P options)
+│   ├── third_party/ vendored deps (nlohmann json, lz4, catch2, sha1, picosha2)
+│   └── tests/       Catch2 unit tests (engine_tests)
+├── frontend/        Tauri + React UI — connects to engine_server over TCP (does not embed the engine)
+├── mcp/             MCP server (Python / FastMCP) — Claude Desktop stdio integration, 7 tools
 └── test/
+    ├── instructions.txt           build/run command reference
     ├── test_full.sql              full feature verification SQL (DDL/DML/transactions/histograms, etc.)
     └── perf/
         ├── bench.py               RuSQL performance measurement (single-row·Bulk INSERT/DELETE TPS, B+Tree index TPS, transaction TPS — AutoCommit vs BEGIN/COMMIT, parallel query)
@@ -712,7 +725,7 @@ code/
 ## Architecture
 ```
 ┌──────────────────────────────────────────┐
-│               rusql-core                 │
+│            engine_core (C++)             │
 │                                          │
 │  Lexer → Parser → AST                    │
 │              ↓                           │
@@ -724,7 +737,7 @@ code/
 │  │ DDL: CREATE/DROP/ALTER/TRUNC  │       │
 │  │ DML: INSERT/SELECT/UPDATE/DEL │       │
 │  │ INSERT ... SELECT             │       │
-│  │ Hash/SortMerge/NestedLoop Join │       │
+│  │ NestedLoop Join (H/SM unused) │       │
 │  │ Table aliases                 │       │
 │  │ WHERE / SUBQUERY / EXISTS     │       │
 │  │ IN (literal/subquery) / NOT IN│       │
@@ -772,14 +785,16 @@ code/
 │                                          │
 └──────────────────────────────────────────┘
         ↓              ↓
-  rusql-cli       rusql-server
+  engine_cli      engine_server
   (terminal REPL) (Native :7878 + MySQL :3306)
                       ↓
-               rusql-client
+               engine_client
                (TCP client CLI, -u/-p/-h/-P)
         ↓
-  rusql-ui         rusql-mcp
-  (Tauri + React)  (MCP server, Python)
+  frontend/        mcp/
+  (Tauri + React,  (MCP server, Python,
+   TCP client of    connects to
+   engine_server)   engine_server)
 ```
 
 <br/>

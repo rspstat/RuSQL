@@ -1,0 +1,39 @@
+#pragma once
+
+// Faithful port of rusql-core/src/storage/hash_index.rs.
+
+#include <string>
+#include <unordered_map>
+#include <vector>
+
+#include "engine/row.hpp"
+
+namespace engine {
+
+class HashIndex {
+public:
+    HashIndex(std::string table, std::string column) : table(std::move(table)), column(std::move(column)) {}
+
+    std::string table;
+    std::string column;
+
+    /// 테이블 전체 행으로 인덱스를 (재)빌드한다.
+    void rebuild(const std::vector<Row>& rows);
+
+    /// key에 해당하는 행 슬라이스를 반환한다.
+    const std::vector<Row>& get(const std::string& key) const;
+
+    /// 단일 행을 인덱스에 추가한다 (O(1)).
+    void insert_row(const Row& row);
+
+    /// PK 값이 pk_val인 행을 col_val 버킷에서 제거한다 (O(bucket size)).
+    void remove_row(const std::string& col_val, const std::string& pk_col, const std::string& pk_val);
+
+    std::size_t bucket_count() const { return data_.size(); }
+    std::size_t row_count() const;
+
+private:
+    std::unordered_map<std::string, std::vector<Row>> data_;
+};
+
+} // namespace engine

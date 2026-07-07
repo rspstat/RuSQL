@@ -1,9 +1,0 @@
-[workspace]
-members = [
-    "rusql-core",
-    "rusql-server",
-    "rusql-cli",
-    "rusql-client",
-    "rusql-ui/src-tauri",
-]
-resolver = "2"
