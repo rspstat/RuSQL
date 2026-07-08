@@ -88,6 +88,8 @@ Condition expand_leaf(const Condition& cond, const std::unordered_map<std::strin
                 return ConditionValue(ConditionValue::Literal{expand_alias_str(alt.value, map)});
             } else if constexpr (std::is_same_v<T, ConditionValue::Between>) {
                 return ConditionValue(ConditionValue::Between{expand_alias_str(alt.lo, map), expand_alias_str(alt.hi, map)});
+            } else if constexpr (std::is_same_v<T, ConditionValue::Arith>) {
+                return ConditionValue(ConditionValue::Arith{expand_arith(alt.expr, map)});
             } else {
                 // Subquery holds a non-copyable unique_ptr<Statement>; copy via
                 // ConditionValue's own deep-copy constructor instead of copying `alt` directly.

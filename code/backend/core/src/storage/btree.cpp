@@ -23,16 +23,47 @@ bool try_parse_f64(const std::string& s, double& out) {
 std::unique_ptr<Node> clone_node(const std::unique_ptr<Node>& p) {
     return p ? std::make_unique<Node>(*p) : nullptr;
 }
-} // namespace
 
-int cmp_keys(const std::string& a, const std::string& b) {
+int cmp_key_segment(const std::string& a, const std::string& b) {
+    if (a == b) return 0;
     double af, bf;
     if (try_parse_f64(a, af) && try_parse_f64(b, bf)) {
         if (af < bf) return -1;
         if (af > bf) return 1;
-        return 0;
+        // PLAN.md P0 fix: numerically equal but different string representations
+        // (e.g. "007" vs "07") used to compare as the same key, colliding two
+        // distinct string-PK values. Break the tie lexicographically instead of
+        // reporting equality, so they stay adjacent in numeric order (same as
+        // before) but are never treated as duplicates of each other.
+        return a.compare(b) < 0 ? -1 : (a.compare(b) > 0 ? 1 : 0);
     }
     return a.compare(b) < 0 ? -1 : (a.compare(b) > 0 ? 1 : 0);
+}
+} // namespace
+
+int cmp_keys(const std::string& a, const std::string& b) {
+    // PLAN.md P0 fix: composite-index keys join multiple columns with a NUL byte
+    // ("val1\x00val2\x00..."), so the whole joined string almost never parses as
+    // one f64 (an embedded '\x00' isn't a valid numeric character) and always fell
+    // back to plain lexicographic comparison — sorting e.g. department_id "10"
+    // before "9". Splitting on '\x00' and comparing segment-by-segment (numeric-
+    // aware per segment, like a multi-column ORDER BY) fixes that while leaving
+    // plain, non-composite keys (the overwhelming majority; no '\x00' at all)
+    // behaving exactly as the single-segment comparison already did.
+    std::size_t pa = 0, pb = 0;
+    for (;;) {
+        std::size_t da = a.find('\x00', pa);
+        std::size_t db = b.find('\x00', pb);
+        std::string sa = a.substr(pa, da == std::string::npos ? std::string::npos : da - pa);
+        std::string sb = b.substr(pb, db == std::string::npos ? std::string::npos : db - pb);
+        int c = cmp_key_segment(sa, sb);
+        if (c != 0) return c;
+        if (da == std::string::npos && db == std::string::npos) return 0;
+        if (da == std::string::npos) return -1;
+        if (db == std::string::npos) return 1;
+        pa = da + 1;
+        pb = db + 1;
+    }
 }
 
 Node::Node(const Node& other)

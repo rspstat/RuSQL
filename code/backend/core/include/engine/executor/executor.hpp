@@ -257,6 +257,7 @@ private:
     static bool eval_single(const Row& row, const Condition& cond);
     static bool eval_check_expr(const std::string& expr, const Row& row);
     static CondExpr substitute_correlated_condexpr(const CondExpr& expr, const Row& outer_row);
+    static ArithExpr substitute_arith_outer_refs(const ArithExpr& expr, const Row& outer_row);
     static std::string format_returning_rows(const std::vector<Row>& rows, const std::vector<SelectColumn>& cols);
     static void update_stat_rows(SharedDatabase& s, const std::string& table, std::int64_t delta);
     static std::pair<std::vector<std::string>, std::vector<Row>> parse_table_output(const std::string& output);

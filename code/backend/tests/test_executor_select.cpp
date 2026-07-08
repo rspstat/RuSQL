@@ -30,6 +30,97 @@ TEST_CASE("SELECT * with WHERE returns matching rows", "[executor][select]") {
     REQUIRE(r.value().find("2 row(s) returned.") != std::string::npos);
 }
 
+TEST_CASE("WHERE supports an arithmetic expression on the right-hand side", "[executor][select]") {
+    // PLAN.md P0 regression test: the RHS of a comparison used to parse a single
+    // token, so `WHERE v > id + 100` silently dropped `+ 100` and evaluated as
+    // `v > id`. id=1,v=50: 50 > 101 is false. id=2,v=150: 150 > 102 is true.
+    TempDataDir dir("exec_sel_data_where_arith");
+    Executor ex(dir.path);
+    REQUIRE(ex.execute_sql("CREATE DATABASE company").is_ok());
+    REQUIRE(ex.execute_sql("USE company").is_ok());
+    REQUIRE(ex.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, v INT)").is_ok());
+    REQUIRE(ex.execute_sql("INSERT INTO t VALUES (1,50),(2,150)").is_ok());
+
+    auto r = ex.execute_sql("SELECT id, v FROM t WHERE v > id + 100");
+    REQUIRE(r.is_ok());
+    REQUIRE(r.value().find("1 row(s) returned.") != std::string::npos);
+    REQUIRE(r.value().find("150") != std::string::npos);
+}
+
+TEST_CASE("Double unary minus evaluates correctly instead of producing the literal string \"--N\"",
+          "[executor][select]") {
+    // PLAN.md P0 regression test: the lexer folds a `-` immediately followed by a
+    // digit into a single negative NumberLit token whenever the preceding token
+    // isn't itself a value (see lexer.cpp) -- which is exactly what happens to the
+    // second `-` in `- -5` (the first bare Minus operator isn't a "value", so "-5"
+    // lexes as one already-negative token). Several parser call sites then blindly
+    // prepended another '-' onto that already-negative text, turning `- -5` into
+    // the literal string "--5" instead of the correctly re-negated "5".
+    TempDataDir dir("exec_sel_data_double_unary_minus");
+    Executor ex(dir.path);
+    REQUIRE(ex.execute_sql("CREATE DATABASE company").is_ok());
+    REQUIRE(ex.execute_sql("USE company").is_ok());
+    REQUIRE(ex.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, v INT)").is_ok());
+    REQUIRE(ex.execute_sql("INSERT INTO t VALUES (1,5),(2,10),(3,-5)").is_ok());
+
+    auto r_scalar = ex.execute_sql("SELECT - -5 AS a");
+    REQUIRE(r_scalar.is_ok());
+    REQUIRE(r_scalar.value().find("| 5 |") != std::string::npos);
+    REQUIRE(r_scalar.value().find("--5") == std::string::npos);
+
+    auto r_eq = ex.execute_sql("SELECT id FROM t WHERE v = - -5");
+    REQUIRE(r_eq.is_ok());
+    REQUIRE(r_eq.value().find("1 row(s) returned.") != std::string::npos);
+
+    auto r_between = ex.execute_sql("SELECT id FROM t WHERE v BETWEEN - -5 AND 10");
+    REQUIRE(r_between.is_ok());
+    REQUIRE(r_between.value().find("2 row(s) returned.") != std::string::npos);
+
+    auto r_in = ex.execute_sql("SELECT id FROM t WHERE v IN (- -5, 10)");
+    REQUIRE(r_in.is_ok());
+    REQUIRE(r_in.value().find("2 row(s) returned.") != std::string::npos);
+
+    auto r_interval = ex.execute_sql("SELECT DATE_ADD('2024-01-10', INTERVAL - -3 DAY) AS d");
+    REQUIRE(r_interval.is_ok());
+    REQUIRE(r_interval.value().find("2024-01-13") != std::string::npos);
+}
+
+TEST_CASE("WHERE with a simple RHS still resolves to a PK index access path", "[executor][select]") {
+    // Regression guard for the arithmetic-RHS fix above: simple comparisons
+    // (`WHERE id = 2`) must still reduce to ConditionValue::Literal so the
+    // Planner's PK/secondary-index access-path selection keeps working, instead
+    // of every comparison going through the new, more general Arith path.
+    TempDataDir dir("exec_sel_data_where_simple_still_indexed");
+    Executor ex(dir.path);
+    REQUIRE(ex.execute_sql("CREATE DATABASE company").is_ok());
+    REQUIRE(ex.execute_sql("USE company").is_ok());
+    REQUIRE(ex.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, v INT)").is_ok());
+    REQUIRE(ex.execute_sql("INSERT INTO t VALUES (1,50),(2,150)").is_ok());
+
+    auto ex_plan = ex.execute_sql("EXPLAIN SELECT * FROM t WHERE id = 2");
+    REQUIRE(ex_plan.is_ok());
+    REQUIRE(ex_plan.value().find("Index Scan") != std::string::npos);
+}
+
+TEST_CASE("Correlated subquery outer reference works inside an arithmetic RHS expression", "[executor][subquery]") {
+    // PLAN.md P0 fix follow-up: substitute_correlated_condexpr must substitute an
+    // outer-row column reference wherever it appears inside a ConditionValue::Arith
+    // tree (e.g. `d.id = e.dept_id + 0`), not just when the whole RHS is a bare
+    // outer-column reference.
+    TempDataDir dir("exec_sel_data_correlated_arith");
+    Executor ex(dir.path);
+    REQUIRE(ex.execute_sql("CREATE DATABASE company").is_ok());
+    REQUIRE(ex.execute_sql("USE company").is_ok());
+    REQUIRE(ex.execute_sql("CREATE TABLE dept (id INT PRIMARY KEY)").is_ok());
+    REQUIRE(ex.execute_sql("CREATE TABLE emp (id INT PRIMARY KEY, dept_id INT)").is_ok());
+    REQUIRE(ex.execute_sql("INSERT INTO dept VALUES (1),(2)").is_ok());
+    REQUIRE(ex.execute_sql("INSERT INTO emp VALUES (1,1),(2,2),(3,1)").is_ok());
+
+    auto r = ex.execute_sql("SELECT id FROM emp e WHERE EXISTS (SELECT 1 FROM dept d WHERE d.id = e.dept_id + 0)");
+    REQUIRE(r.is_ok());
+    REQUIRE(r.value().find("3 row(s) returned.") != std::string::npos);
+}
+
 TEST_CASE("SELECT with explicit column list and alias", "[executor][select]") {
     TempDataDir dir("exec_sel_data_2");
     Executor ex(dir.path);

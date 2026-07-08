@@ -490,6 +490,7 @@ void to_json(nlohmann::json& j, const ConditionValue& cv) {
             else if constexpr (std::is_same_v<T, ConditionValue::Subquery>) j = nlohmann::json{{"Subquery", *alt.query}};
             else if constexpr (std::is_same_v<T, ConditionValue::Between>) j = nlohmann::json{{"Between", nlohmann::json::array({alt.lo, alt.hi})}};
             else if constexpr (std::is_same_v<T, ConditionValue::LiteralList>) j = nlohmann::json{{"LiteralList", alt.values}};
+            else if constexpr (std::is_same_v<T, ConditionValue::Arith>) j = nlohmann::json{{"Arith", alt.expr}};
         },
         cv.data);
 }
@@ -503,6 +504,7 @@ void from_json(const nlohmann::json& j, ConditionValue& cv) {
     else if (tag == "Subquery") cv = ConditionValue(ConditionValue::Subquery{std::make_unique<Statement>(p.get<Statement>())});
     else if (tag == "Between") cv = ConditionValue(ConditionValue::Between{p.at(0).get<std::string>(), p.at(1).get<std::string>()});
     else if (tag == "LiteralList") cv = ConditionValue(ConditionValue::LiteralList{p.get<std::vector<std::string>>()});
+    else if (tag == "Arith") cv = ConditionValue(ConditionValue::Arith{p.get<ArithExpr>()});
     else throw std::runtime_error("unknown ConditionValue tag: " + tag);
 }
 

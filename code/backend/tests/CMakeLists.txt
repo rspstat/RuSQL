@@ -29,6 +29,7 @@ add_executable(engine_tests
     test_executor_proc.cpp
     test_executor_dcl.cpp
     test_executor_misc.cpp
+    test_server_stmt_split.cpp
 )
 
 target_link_libraries(engine_tests PRIVATE engine_core)

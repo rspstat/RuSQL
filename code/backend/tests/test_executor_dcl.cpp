@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <filesystem>
 
 #include "catch.hpp"
@@ -199,6 +200,42 @@ TEST_CASE("VACUUM removes dead (deleted) rows and reclaims them", "[executor][dc
 
     auto s = ex.get_shared()->read();
     REQUIRE(s->tables.at("company.t").size() == 1);
+}
+
+TEST_CASE("VACUUM rebuilds the PK index using the real PK column, not an arbitrary row value",
+          "[executor][dcl]") {
+    // PLAN.md P0 regression test: exec_vacuum used to rebuild the PK B+Tree with
+    // `row.begin()->second` (the first entry in Row's unordered_map, in whatever
+    // order that happens to iterate) instead of resolving the schema's actual PK
+    // column. Declaring the PK as a non-first column reproduces the corruption
+    // reliably; after the fix, PK point lookups must still find every surviving row.
+    TempDataDir dir("exec_dcl_data_vacuum_pk");
+    Executor ex(dir.path);
+    REQUIRE(ex.execute_sql("CREATE DATABASE company").is_ok());
+    REQUIRE(ex.execute_sql("USE company").is_ok());
+    REQUIRE(ex.execute_sql("CREATE TABLE t (aa VARCHAR(20), bb VARCHAR(20), id INT PRIMARY KEY, cc VARCHAR(20))").is_ok());
+    REQUIRE(ex.execute_sql("INSERT INTO t (aa,bb,id,cc) VALUES ('a1','b1',1,'c1')").is_ok());
+    REQUIRE(ex.execute_sql("INSERT INTO t (aa,bb,id,cc) VALUES ('a2','b2',2,'c2')").is_ok());
+    REQUIRE(ex.execute_sql("INSERT INTO t (aa,bb,id,cc) VALUES ('a3','b3',3,'c3')").is_ok());
+
+    {
+        auto sw = ex.get_shared()->write();
+        auto& rows = sw->tables.at("company.t");
+        auto it = std::find_if(rows.begin(), rows.end(), [](const Row& r) { return r.at("id") == "2"; });
+        REQUIRE(it != rows.end());
+        (*it)["_xmax"] = "999";
+    }
+
+    auto r = ex.execute_sql("VACUUM t");
+    REQUIRE(r.is_ok());
+    REQUIRE(r.value() == "VACUUM complete. 1 dead row(s) removed.");
+
+    auto r1 = ex.execute_sql("SELECT id, aa FROM t WHERE id = 1");
+    REQUIRE(r1.is_ok());
+    REQUIRE(r1.value().find("a1") != std::string::npos);
+    auto r3 = ex.execute_sql("SELECT id, aa FROM t WHERE id = 3");
+    REQUIRE(r3.is_ok());
+    REQUIRE(r3.value().find("a3") != std::string::npos);
 }
 
 TEST_CASE("ANALYZE TABLE collects column statistics", "[executor][dcl]") {

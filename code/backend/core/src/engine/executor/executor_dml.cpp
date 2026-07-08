@@ -102,12 +102,19 @@ void Executor::maybe_auto_vacuum(SharedDatabase& s) {
             std::vector<Row> rows_clone = rows;
             if (auto idx_it = s.indexes.find(t); idx_it != s.indexes.end()) {
                 idx_it->second = BPlusTree();
+                // PLAN.md P0 fix: see exec_vacuum in executor_maint.cpp for the same fix —
+                // resolve the real PK column from the schema instead of grabbing an
+                // arbitrary (HashMap-order-dependent) row value.
+                std::string pk_col_name;
+                if (auto* schema = s.catalog.get_table(t)) {
+                    for (auto& c : schema->columns) {
+                        if (c.primary_key) { pk_col_name = c.name; break; }
+                    }
+                    if (pk_col_name.empty() && !schema->columns.empty()) pk_col_name = schema->columns.front().name;
+                }
                 for (auto& row : rows_clone) {
-                    // Matches the Rust original's `row.values().next()` — an arbitrary
-                    // (HashMap-iteration-order-dependent) value, not necessarily the PK.
-                    // This is a known pre-existing quirk, faithfully preserved rather
-                    // than silently fixed (see migration plan).
-                    std::string key = row.empty() ? std::string() : row.begin()->second;
+                    auto it = row.find(pk_col_name);
+                    std::string key = it != row.end() ? it->second : std::string();
                     nlohmann::json j = row;
                     idx_it->second.insert(key, j.dump());
                 }

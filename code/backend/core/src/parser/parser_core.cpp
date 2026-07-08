@@ -47,7 +47,15 @@ bool Parser::peek_at_is(std::size_t offset, TokenKind k) const {
 
 Result<Statement, std::string> Parser::parse() {
     try {
-        return Result<Statement, std::string>::Ok(parse_stmt());
+        Statement stmt = parse_stmt();
+        // PLAN.md P0 fix: parse_stmt() used to return successfully even when tokens
+        // remained after a syntactically complete statement (e.g. `SELECT * FROM t)))
+        // garbage` silently ran as `SELECT * FROM t`), because nothing ever checked
+        // that the whole input was consumed. Only the top-level entry point checks
+        // this — parse_stmt() is also called recursively (EXPLAIN's inner statement,
+        // stored-procedure body statements), where more tokens are expected to follow.
+        if (peek() != nullptr) throw ParseError("Unexpected token(s) after end of statement");
+        return Result<Statement, std::string>::Ok(std::move(stmt));
     } catch (const ParseError& e) {
         return Result<Statement, std::string>::Err(e.what());
     }

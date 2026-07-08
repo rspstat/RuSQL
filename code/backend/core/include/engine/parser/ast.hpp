@@ -149,8 +149,13 @@ struct ConditionValue {
     struct Subquery { StatementPtr query; };
     struct Between { std::string lo, hi; };
     struct LiteralList { std::vector<std::string> values; };
+    // PLAN.md P0 fix: the RHS of a comparison (`WHERE v > id + 100`) used to parse
+    // as a single token, silently dropping the rest of the expression. Arith holds
+    // a full ArithExpr so the RHS can be any arithmetic/function expression, not
+    // just a bare literal or column reference.
+    struct Arith { ArithExpr expr; };
 
-    using Data = std::variant<Literal, Subquery, Between, LiteralList>;
+    using Data = std::variant<Literal, Subquery, Between, LiteralList, Arith>;
     Data data;
 
     ConditionValue() : data(Literal{}) {}

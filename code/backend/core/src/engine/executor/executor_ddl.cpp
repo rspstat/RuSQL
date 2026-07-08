@@ -214,6 +214,47 @@ StringResult Executor::exec_alter(SharedDatabase& s, const std::string& table, A
                 }
             }
         }
+
+        // PLAN.md P0 fix: every index caches a serialized copy of each row (or, for
+        // composite/hash indexes, tracks the renamed column by name) — none of that
+        // was ever refreshed here, so an index-based read (PK point lookup,
+        // secondary/hash/composite lookup) kept returning the renamed column as
+        // missing even though the schema and s.tables rows above were already
+        // correctly updated. Rebuild every index for this table, same as VACUUM's
+        // rebuild pattern (exec_vacuum).
+        if (auto it = s.tables.find(table); it != s.tables.end()) {
+            const std::vector<Row>& rows = it->second;
+            if (auto idx_it = s.indexes.find(table); idx_it != s.indexes.end()) {
+                idx_it->second = BPlusTree();
+                std::string pk_col_name;
+                for (auto& c : schema->columns) {
+                    if (c.primary_key) { pk_col_name = c.name; break; }
+                }
+                if (pk_col_name.empty() && !schema->columns.empty()) pk_col_name = schema->columns.front().name;
+                for (auto& row : rows) {
+                    auto rit = row.find(pk_col_name);
+                    std::string key = rit != row.end() ? rit->second : std::string();
+                    nlohmann::json j = row;
+                    idx_it->second.insert(key, j.dump());
+                }
+            }
+            for (auto& [name, meta] : s.index_meta) {
+                if (meta.first == table && meta.second == v->from) meta.second = v->to;
+            }
+            for (auto& [name, meta] : s.hash_index_meta) {
+                if (meta.first == table && meta.second == v->from) meta.second = v->to;
+            }
+            rebuild_secondary_indexes(s, table, rows);
+            for (auto& [key, ci] : s.composite_indexes) {
+                if (ci.table != table) continue;
+                for (auto& col : ci.columns) {
+                    if (col == v->from) col = v->to;
+                }
+                ci.rebuild(rows);
+            }
+            persist_index_meta(s);
+        }
+
         s.disk.save_schema(table, *s.catalog.get_table(table));
         s.disk.save_table(table, s.tables.at(table));
         s.buffer_pool.write_page(table, s.tables.at(table));

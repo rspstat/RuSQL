@@ -11,6 +11,52 @@ TEST_CASE("cmp_keys is numeric-aware", "[btree]") {
     REQUIRE(cmp_keys("abc", "abd") < 0);
 }
 
+TEST_CASE("cmp_keys treats differently-formatted equal-valued numeric strings as distinct", "[btree]") {
+    // PLAN.md P0 regression test: "007" and "07" both parse to the f64 value 7.0,
+    // so cmp_keys used to report them equal — colliding two distinct string PK
+    // values (e.g. zip codes, SKUs) into what looked like a single duplicate key.
+    REQUIRE(cmp_keys("007", "07") != 0);
+    REQUIRE(cmp_keys("07", "007") != 0);
+    REQUIRE(cmp_keys("007", "007") == 0);
+    // Still numeric-order-consistent: both sit at the same numeric position (7),
+    // strictly between the neighboring distinct numeric values 5 and 9.
+    REQUIRE(cmp_keys("5", "007") < 0);
+    REQUIRE(cmp_keys("007", "9") < 0);
+    REQUIRE(cmp_keys("5", "07") < 0);
+    REQUIRE(cmp_keys("07", "9") < 0);
+}
+
+TEST_CASE("BPlusTree keeps differently-formatted equal-valued numeric string keys distinct", "[btree]") {
+    BPlusTree tree;
+    tree.insert("007", "agent");
+    tree.insert("07", "other");
+    REQUIRE(tree.search("007") == "agent");
+    REQUIRE(tree.search("07") == "other");
+}
+
+TEST_CASE("cmp_keys compares composite-index keys (NUL-joined columns) segment-by-segment, numerically", "[btree]") {
+    // PLAN.md P0 regression test: CompositeIndex::make_key joins column values with
+    // a '\x00' separator ("val1\x00val2..."). The embedded NUL byte means the whole
+    // joined string never parses as a single f64, so cmp_keys always fell back to
+    // plain lexicographic comparison of the WHOLE key -- sorting a leading numeric
+    // column like "10\x00..." before "9\x00..." (lexicographic '1' < '9'), the
+    // opposite of the correct numeric order. Splitting on '\x00' and comparing each
+    // column segment independently (like a multi-column ORDER BY) fixes this.
+    std::string k9 = std::string("9") + '\x00' + "100";
+    std::string k10 = std::string("10") + '\x00' + "200";
+    REQUIRE(cmp_keys(k10, k9) > 0);
+    REQUIRE(cmp_keys(k9, k10) < 0);
+
+    // Tie on the leading segment falls through to the second segment, numerically.
+    std::string k10a = std::string("10") + '\x00' + "9";
+    std::string k10b = std::string("10") + '\x00' + "10";
+    REQUIRE(cmp_keys(k10a, k10b) < 0);
+
+    // Plain (non-composite) keys are unaffected -- no '\x00' means a single segment,
+    // identical behavior to the numeric-aware single-key comparison above.
+    REQUIRE(cmp_keys("10", "9") > 0);
+}
+
 TEST_CASE("BPlusTree insert/search", "[btree]") {
     BPlusTree tree;
     for (int i : {1, 10, 5, 3, 7, 2, 8, 4, 6, 9}) {

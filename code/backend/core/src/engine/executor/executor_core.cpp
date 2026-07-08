@@ -528,6 +528,30 @@ std::size_t count_occurrences(const std::string& haystack, const std::string& ne
     }
     return count;
 }
+
+// PLAN.md P0 fix: the query cache had no notion of non-determinism, so a SELECT
+// calling NOW()/RAND()/UUID()/etc. got cached on first execution and then kept
+// returning that same stale value forever (nothing ever invalidates a cache entry
+// that doesn't reference a table whose DML/DDL changed). Word-boundary matching
+// (not a bare substring search) avoids false positives on ordinary identifiers
+// that merely contain one of these names, e.g. a `brand` or `uuid_col` column.
+bool contains_nondeterministic_func(const std::string& lower_sql) {
+    static const char* kFuncs[] = {"now",       "curdate",       "curtime",        "current_time", "current_timestamp",
+                                   "localtime", "localtimestamp", "unix_timestamp", "rand",         "uuid"};
+    auto is_ident_char = [](char c) { return std::isalnum(static_cast<unsigned char>(c)) != 0 || c == '_'; };
+    for (const char* name_c : kFuncs) {
+        std::string name = name_c;
+        std::size_t pos = 0;
+        while ((pos = lower_sql.find(name, pos)) != std::string::npos) {
+            bool left_ok = pos == 0 || !is_ident_char(lower_sql[pos - 1]);
+            std::size_t after = pos + name.size();
+            bool right_ok = after >= lower_sql.size() || !is_ident_char(lower_sql[after]);
+            if (left_ok && right_ok) return true;
+            pos = after;
+        }
+    }
+    return false;
+}
 } // namespace
 
 StringResult Executor::execute_sql(const std::string& sql) {
@@ -565,10 +589,11 @@ StringResult Executor::execute_sql(const std::string& sql) {
     if (looks_like_select && !in_txn) cache_tables = select_tables(stmt, current_db);
 
     bool has_subquery = looks_like_select && count_occurrences(to_ascii_lower(trimmed), "select") > 1;
+    bool has_nondeterministic = looks_like_select && contains_nondeterministic_func(to_ascii_lower(trimmed));
 
     StringResult result = execute(std::move(stmt));
 
-    if (looks_like_select && !in_txn && !has_subquery && result.is_ok()) {
+    if (looks_like_select && !in_txn && !has_subquery && !has_nondeterministic && result.is_ok()) {
         std::string cache_key = current_db + "::" + trimmed;
         auto s = shared->write();
         s->query_cache.put(cache_key, result.value(), cache_tables);

@@ -24,6 +24,45 @@ std::optional<double> parse_f64(const std::string& s) {
     if (res.ec != std::errc() || res.ptr != s.data() + s.size()) return std::nullopt;
     return val;
 }
+
+bool looks_like_qualified_col(const std::string& s) {
+    auto dot = s.find('.');
+    if (dot == std::string::npos) return false;
+    std::string a = s.substr(0, dot);
+    std::string rest = s.substr(dot + 1);
+    auto is_ident = [](const std::string& p) {
+        if (p.empty()) return false;
+        if (!(std::isalpha(static_cast<unsigned char>(p[0])) || p[0] == '_')) return false;
+        return std::all_of(p.begin(), p.end(), [](unsigned char c) { return std::isalnum(c) || c == '_'; });
+    };
+    return is_ident(a) && is_ident(rest);
+}
+
+// PLAN.md P0 fix follow-up: ConditionValue::Arith's RHS is now a full expression tree
+// (see the WHERE-RHS-arithmetic fix), so a qualified outer-table reference like
+// `p.lead_id = employee.id` can appear nested inside it (or, in the simple case with
+// no operators at all, be the whole tree) rather than as a bare Literal. Walk the tree
+// to preserve has_outer_ref's original Literal-based correlation heuristic.
+bool arith_has_qualified_col(const ArithExpr& expr) {
+    return std::visit(
+        [](const auto& alt) -> bool {
+            using T = std::decay_t<decltype(alt)>;
+            if constexpr (std::is_same_v<T, ArithExpr::Col>) return looks_like_qualified_col(alt.name);
+            else if constexpr (std::is_same_v<T, ArithExpr::Add> || std::is_same_v<T, ArithExpr::Sub> ||
+                                std::is_same_v<T, ArithExpr::Mul> || std::is_same_v<T, ArithExpr::Div>)
+                return arith_has_qualified_col(*alt.lhs) || arith_has_qualified_col(*alt.rhs);
+            else if constexpr (std::is_same_v<T, ArithExpr::Cmp>)
+                return arith_has_qualified_col(*alt.lhs) || arith_has_qualified_col(*alt.rhs);
+            else if constexpr (std::is_same_v<T, ArithExpr::Func>) {
+                for (auto& a : alt.args) {
+                    if (arith_has_qualified_col(a)) return true;
+                }
+                return false;
+            } else
+                return false;
+        },
+        expr.data);
+}
 } // namespace
 
 bool Executor::matches_condition_with_subquery(SharedDatabase& s, const Row& row, const std::optional<CondExpr>& condition) {
@@ -44,25 +83,18 @@ bool Executor::has_outer_ref(const CondExpr& expr) {
     if (auto* v = std::get_if<CondExpr::Not>(&expr.data)) return has_outer_ref(*v->inner);
     auto* leaf = std::get_if<CondExpr::Leaf>(&expr.data);
     if (!leaf) return false;
-    auto* lit = std::get_if<ConditionValue::Literal>(&leaf->condition.value.data);
-    if (!lit) return false;
-    const std::string& s = lit->value;
-    auto dot = s.find('.');
-    if (dot == std::string::npos) return false;
-    std::string a = s.substr(0, dot);
-    std::string rest = s.substr(dot + 1);
-    // splitn(2, '.') semantics: the second part keeps any further dots.
-    auto is_ident = [](const std::string& p) {
-        if (p.empty()) return false;
-        if (!(std::isalpha(static_cast<unsigned char>(p[0])) || p[0] == '_')) return false;
-        return std::all_of(p.begin(), p.end(), [](unsigned char c) { return std::isalnum(c) || c == '_'; });
-    };
-    return is_ident(a) && is_ident(rest);
+    if (auto* lit = std::get_if<ConditionValue::Literal>(&leaf->condition.value.data)) {
+        return looks_like_qualified_col(lit->value);
+    }
+    if (auto* ar = std::get_if<ConditionValue::Arith>(&leaf->condition.value.data)) {
+        return arith_has_qualified_col(ar->expr);
+    }
+    return false;
 }
 
 bool Executor::eval_single_with_subquery(SharedDatabase& s, const Row& row, const Condition& cond) {
     if (std::holds_alternative<ConditionValue::Literal>(cond.value.data) || std::holds_alternative<ConditionValue::Between>(cond.value.data) ||
-        std::holds_alternative<ConditionValue::LiteralList>(cond.value.data)) {
+        std::holds_alternative<ConditionValue::LiteralList>(cond.value.data) || std::holds_alternative<ConditionValue::Arith>(cond.value.data)) {
         return eval_single(row, cond);
     }
 

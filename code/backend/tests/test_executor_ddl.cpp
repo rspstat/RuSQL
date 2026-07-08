@@ -140,6 +140,48 @@ TEST_CASE("ALTER TABLE add/drop/rename/modify column", "[executor][ddl]") {
     REQUIRE(modify_missing.is_err());
 }
 
+TEST_CASE("ALTER TABLE RENAME COLUMN keeps PK/secondary/hash/composite index reads correct",
+          "[executor][ddl]") {
+    // PLAN.md P0 regression test: RENAME COLUMN updated the schema and s.tables rows
+    // but never refreshed the indexes' own cached row-JSON payloads or column-name
+    // metadata. Reading the renamed column through ANY index-based access path (PK
+    // point lookup, secondary/hash/composite index lookup) used to silently return
+    // it as missing, because the cached blob inside the index still had the old key.
+    TempDataDir dir("exec_ddl_data_rename_indexes");
+    Executor ex(dir.path);
+    REQUIRE(ex.execute_sql("CREATE DATABASE company").is_ok());
+    REQUIRE(ex.execute_sql("USE company").is_ok());
+    REQUIRE(ex.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, dept INT, salary INT, email VARCHAR(30))").is_ok());
+    REQUIRE(ex.execute_sql("CREATE INDEX idx_dept ON t (dept)").is_ok());
+    REQUIRE(ex.execute_sql("CREATE INDEX idx_email ON t (email) USING HASH").is_ok());
+    REQUIRE(ex.execute_sql("CREATE INDEX idx_comp ON t (dept, salary)").is_ok());
+    REQUIRE(ex.execute_sql("INSERT INTO t VALUES (1,10,500,'a@x.com'),(2,20,600,'b@x.com')").is_ok());
+
+    REQUIRE(ex.execute_sql("ALTER TABLE t RENAME COLUMN dept TO department").is_ok());
+    REQUIRE(ex.execute_sql("ALTER TABLE t RENAME COLUMN email TO email_addr").is_ok());
+
+    // PK index (point lookup on id).
+    auto r_pk = ex.execute_sql("SELECT id, department, salary FROM t WHERE id = 1");
+    REQUIRE(r_pk.is_ok());
+    REQUIRE(r_pk.value().find("| 10") != std::string::npos);
+
+    // Secondary BTree index on the renamed column.
+    auto r_sec = ex.execute_sql("SELECT id, department FROM t WHERE department = 10");
+    REQUIRE(r_sec.is_ok());
+    REQUIRE(r_sec.value().find("1 row(s) returned.") != std::string::npos);
+    REQUIRE(r_sec.value().find("| 10") != std::string::npos);
+
+    // Hash index on the renamed column.
+    auto r_hash = ex.execute_sql("SELECT id, email_addr FROM t WHERE email_addr = 'a@x.com'");
+    REQUIRE(r_hash.is_ok());
+    REQUIRE(r_hash.value().find("a@x.com") != std::string::npos);
+
+    // Composite index whose leading column was renamed.
+    auto r_comp = ex.execute_sql("SELECT id, department, salary FROM t WHERE department = 10 AND salary = 500");
+    REQUIRE(r_comp.is_ok());
+    REQUIRE(r_comp.value().find("1 row(s) returned.") != std::string::npos);
+}
+
 TEST_CASE("ALTER TABLE MODIFY COLUMN rejects incompatible existing data", "[executor][ddl]") {
     TempDataDir dir("exec_ddl_data_4");
     Executor ex(dir.path);

@@ -22,7 +22,7 @@ Custom RDBMS + AI MCP Project
 
 ## Execute
 
-Build once with CMake (see `code/test/instructions.txt` for the full command reference):
+Build once with CMake (see `docs/instructions/instructions.md` for the full command reference):
 ```bash
 cmake -S code -B code/build
 cmake --build code/build --config Debug
@@ -57,11 +57,13 @@ cd code/frontend && npm run tauri dev
 
 ## Test query
 
-`code/test/test_full.sql`
+`code/test/test_full.sql` — the golden feature/parity verification script (also diffed line-by-line against the original Rust CLI's output during the C++ port).
+`code/test/test_full-ver2.sql` — a second, independent stress-test script (fresh retail-domain schema, intentionally mixed authoring styles, all supported data types/syntax, higher-difficulty queries).
 
 ```bash
 # Run from the repo root
 code/build/backend/cli/Debug/engine_cli.exe < code/test/test_full.sql
+code/build/backend/cli/Debug/engine_cli.exe < code/test/test_full-ver2.sql
 ```
 
 ```sql
@@ -677,14 +679,14 @@ SHOW DATABASES;
 | Item | Content |
 |------|------|
 | Language | C++ |
-| Version | v2.2.0 |
+| Version | v2.3.0 |
 | Index | B+Tree (single / composite / clustered) |
-| Optimizer | Cost-based planner (AccessPath: SeqScan / PkPoint / PkBetween / PkRange / SecondaryPoint / SecondaryRange / **SecondaryBetween** / CompositeIndex / **CompositeIndexPrefix** / **SecondaryLikePrefix** / **IndexIntersection** · join cost estimation (NL vs Hash, HASH_FACTOR=3) shown in EXPLAIN · System-R DP join order optimization (N≤8), Greedy fallback) · Hash Index equality O(1) preferred · Index Intersection (AND conditions with 2+ indexed columns → PK HashSet intersection) · uncorrelated IN/NOT IN subquery materialization (HashSet caching, O(1) lookup) · histogram selectivity estimation (ANALYZE TABLE, size-tiered auto-ANALYZE) · `total_rows` auto-updated on INSERT/DELETE |
-| Join | Nested Loop Join is what actually executes (including Cross/Natural/FullOuter) — `hash_join`/`sort_merge_join` are implemented in `code/backend/core/src/engine/join.cpp` and the planner still cost-estimates/labels them in EXPLAIN, but the executor always dispatches to Nested Loop regardless of the label (a deliberate simplification vs. the original engine, which actually executes the cost-selected algorithm) |
+| Optimizer | Cost-based planner (AccessPath: SeqScan / PkPoint / PkBetween / PkRange / SecondaryPoint / SecondaryRange / **SecondaryBetween** / CompositeIndex / **CompositeIndexPrefix** / **SecondaryLikePrefix** / **IndexIntersection** · join cost estimation (NL vs Hash vs SortMerge vs IndexNL, HASH_FACTOR=3) · System-R DP join order optimization (N≤8), Greedy fallback) — the chosen AccessPath/JoinAlgo is what actually executes, not just what EXPLAIN displays · Hash Index equality O(1) preferred · Index Intersection (AND conditions with 2+ indexed columns → PK HashSet intersection) · uncorrelated IN/NOT IN subquery materialization (HashSet caching, O(1) lookup) · histogram selectivity estimation (ANALYZE TABLE, size-tiered auto-ANALYZE) · `total_rows` auto-updated on INSERT/DELETE |
+| Join | Cost-based dispatch to NestedLoop / Hash / SortMerge / IndexNL per join, matching the planner's chosen `JoinAlgo` (`code/backend/core/src/engine/join.cpp`); Cross/Natural/FullOuter always force NestedLoop regardless of cost, by design; `hash_join`'s Inner/Left probe phase runs in parallel across the ThreadPool |
 | Index | B+Tree (single/composite/clustered) · **Hash Index** (`USING HASH`, equality O(1), single column) · **Index Intersection** (multi-index AND → PK HashSet intersection) |
 | Transaction | WAL (binary redo log) + Undo Log (in-memory + disk persistence) + MVCC — both tagged with a globally unique `txn_id` (shared atomic counter across sessions), so COMMIT/ROLLBACK/ABORT only remove that transaction's own records instead of clearing the whole shared file, and crash recovery groups replay by `txn_id` |
 | Isolation Level | READ UNCOMMITTED ~ SERIALIZABLE (4 levels) |
-| Concurrency | Row-level Locking (SELECT FOR UPDATE / FOR SHARE, shared·exclusive locks, deadlock detection, `SET @lock_wait_timeout` session variable, MySQL-compatible ERROR 1205) — SeqScan WHERE filter / GROUP BY execute sequentially (the `RUSTDB_PARALLEL` env var / `SET @rusql_parallel = 1/0` session variable are still accepted for compatibility but no longer actually parallelize; the original engine's rayon-based par_chunks scan/aggregation was not ported) |
+| Concurrency | Row-level Locking (SELECT FOR UPDATE / FOR SHARE, shared·exclusive locks, deadlock detection, `SET @lock_wait_timeout` session variable, MySQL-compatible ERROR 1205) — WHERE filter / GROUP BY bucketing+aggregation / ORDER BY sort / plain-aggregate collection genuinely run in parallel across a process-wide `ThreadPool` (adaptive threshold `10000/thread_count`, `RUSTDB_PARALLEL` env var / `SET @rusql_parallel = 1/0` session variable to toggle) |
 | Cache | Buffer Pool (LRU O(1) hit, tick-based, 64 pages × 16KB) · Query Result Cache (LRU 512, O(k) table invalidation via `table_to_keys` reverse index) |
 | Storage | Binary .rdb + LZ4 compression; global files separated into `data/_system/` subfolder (_users.json·_grants.json·_roles.json·_synonyms.json, etc.); per-connection independent directories (`data/local/`, `data/data_N/`) — UI·CLI·server share `code/data/`; B+Tree index `{table}.idx` / `{table}_{index}.idx` (auto-saved on INSERT·DELETE·CREATE INDEX, loaded on startup) |
 | Multi-DB | CREATE / DROP / USE / SHOW DATABASES, auto table qualification, isolation |
@@ -710,8 +712,8 @@ code/
 ├── frontend/        Tauri + React UI — connects to engine_server over TCP (does not embed the engine)
 ├── mcp/             MCP server (Python / FastMCP) — Claude Desktop stdio integration, 7 tools
 └── test/
-    ├── instructions.txt           build/run command reference
     ├── test_full.sql              full feature verification SQL (DDL/DML/transactions/histograms, etc.)
+    ├── test_full-ver2.sql         second stress-test SQL (fresh retail schema, mixed authoring styles)
     └── perf/
         ├── bench.py               RuSQL performance measurement (single-row·Bulk INSERT/DELETE TPS, B+Tree index TPS, transaction TPS — AutoCommit vs BEGIN/COMMIT, parallel query)
         ├── chart.py               measurement results → matplotlib PNG chart generation
@@ -719,6 +721,8 @@ code/
         ├── requirements.txt       Python dependency packages
         └── README.txt             execution guide
 ```
+
+Build/run command reference: `docs/instructions/instructions.md` (repo root, sibling of `code/`).
 
 <br/>
 
@@ -737,7 +741,7 @@ code/
 │  │ DDL: CREATE/DROP/ALTER/TRUNC  │       │
 │  │ DML: INSERT/SELECT/UPDATE/DEL │       │
 │  │ INSERT ... SELECT             │       │
-│  │ NestedLoop Join (H/SM unused) │       │
+│  │ NestedLoop/Hash/SortMerge Join│       │
 │  │ Table aliases                 │       │
 │  │ WHERE / SUBQUERY / EXISTS     │       │
 │  │ IN (literal/subquery) / NOT IN│       │

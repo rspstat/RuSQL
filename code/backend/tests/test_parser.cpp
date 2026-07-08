@@ -101,7 +101,14 @@ std::vector<std::string> split_statements(const std::string& sql) {
             // or DDL clauses (IF [NOT] EXISTS) elsewhere in the grammar — only treat them
             // as block openers when neither of those applies.
             bool is_block_opener = false;
-            if (word == "BEGIN" || word == "CASE") {
+            if (word == "BEGIN") {
+                // A transaction `BEGIN;` / `BEGIN WORK;` has no matching END — only
+                // a procedure/trigger body's BEGIN does. Mirrors the CLI's
+                // find_stmt_end (cli/src/main.cpp) is_transaction check.
+                std::string nxt = peek_word_after(j);
+                bool at_semi_or_eof = j >= n || sql[j] == ';';
+                is_block_opener = !at_semi_or_eof && nxt != "WORK";
+            } else if (word == "CASE") {
                 is_block_opener = true;
             } else if (word == "IF") {
                 std::string nxt = peek_word_after(j);
@@ -146,6 +153,34 @@ std::vector<std::string> split_statements(const std::string& sql) {
 }
 
 } // namespace
+
+TEST_CASE("Trailing garbage after a complete statement is rejected", "[parser]") {
+    // PLAN.md P0 regression test: Parser::parse() used to return Ok as soon as
+    // parse_stmt() produced a valid statement, without checking that every token
+    // had been consumed — so `SELECT * FROM t))) garbage` silently ran as
+    // `SELECT * FROM t`. EXPLAIN's recursive parse_stmt() call must still be
+    // unaffected (only the outermost parse() enforces end-of-input).
+    {
+        Parser p("SELECT * FROM t))) garbage");
+        auto res = p.parse();
+        REQUIRE(res.is_err());
+    }
+    {
+        Parser p("SELECT * FROM t WHERE id = 1 xyz_nonsense");
+        auto res = p.parse();
+        REQUIRE(res.is_err());
+    }
+    {
+        Parser p("SELECT * FROM t");
+        auto res = p.parse();
+        REQUIRE(res.is_ok());
+    }
+    {
+        Parser p("EXPLAIN SELECT * FROM t WHERE id = 1");
+        auto res = p.parse();
+        REQUIRE(res.is_ok());
+    }
+}
 
 TEST_CASE("CREATE TABLE with constraints parses correctly", "[parser]") {
     Parser p("CREATE TABLE employee ("

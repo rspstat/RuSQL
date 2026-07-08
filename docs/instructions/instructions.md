@@ -26,7 +26,7 @@ git checkout cpptest
 
 git add -A
 git commit -m "메시지"
-git push
+git push origin 브랜치이름
 
 git checkout -b 브랜치이름
 git add -A

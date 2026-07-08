@@ -1,6 +1,6 @@
 # RuSQL vs MySQL vs PostgreSQL vs Oracle — 기능 비교
 
-> 기준: RuSQL v2.2.0 / MySQL 8.0 / PostgreSQL 16 / Oracle 21c  
+> 기준: RuSQL v2.3.0 / MySQL 8.0 / PostgreSQL 16 / Oracle 21c  
 > ✓ 지원 · △ 부분 지원 · ✗ 미지원
 
 ---

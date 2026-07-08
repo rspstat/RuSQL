@@ -1,8 +1,6 @@
 #include <cctype>
 #include <charconv>
 #include <cstdlib>
-#include <ctime>
-#include <sstream>
 
 #include "engine/parser/parser.hpp"
 
@@ -23,6 +21,20 @@ bool parses_as_number(const std::string& s) {
     double out = 0.0;
     auto res = std::from_chars(s.data(), s.data() + s.size(), out);
     return res.ec == std::errc() && res.ptr == s.data() + s.size();
+}
+
+// PLAN.md P0 fix: a lone `-` followed directly (no whitespace) by a digit, where the
+// preceding token isn't itself a value, gets folded by the lexer into a single
+// negative NumberLit token (see lexer.cpp's '-' case) -- which is exactly what
+// happens to the second `-` in a double-unary chain like `- -5` (the first bare
+// Minus operator token isn't a "value", so lexing the second "-5" folds it into
+// NumberLit("-5")). Every call site below used to blindly prepend another '-' onto
+// that already-negative text, turning `- -5` into the literal string "--5" instead
+// of the correctly re-negated "5". Toggling the existing sign instead of always
+// prepending handles both the already-negative and the plain-positive case.
+std::string negate_number_text(const std::string& text) {
+    if (!text.empty() && text.front() == '-') return text.substr(1);
+    return "-" + text;
 }
 } // namespace
 
@@ -116,7 +128,7 @@ Condition Parser::parse_single_pred() {
             case TokenKind::Minus: {
                 const Token* n = advance();
                 if (!n || n->kind != TokenKind::NumberLit) throw ParseError("Expected number after '-' in IN list");
-                return "-" + n->text;
+                return negate_number_text(n->text);
             }
             default:
                 throw ParseError("Expected value in IN list");
@@ -183,7 +195,7 @@ Condition Parser::parse_single_pred() {
             case TokenKind::Minus: {
                 const Token* n = advance();
                 if (!n || n->kind != TokenKind::NumberLit) throw ParseError(std::string("Expected number after '-' in ") + ctx);
-                return "-" + n->text;
+                return negate_number_text(n->text);
             }
             default:
                 throw ParseError(std::string("Expected value after ") + ctx);
@@ -281,90 +293,40 @@ Condition Parser::parse_single_pred() {
     }
 
     ConditionValue value = [&]() -> ConditionValue {
-        if (peek_is(TokenKind::LParen)) {
-            advance();
-            if (!peek_is(TokenKind::Select)) throw ParseError("Expected SELECT in subquery");
-            advance();
+        if (peek_is(TokenKind::LParen) && peek_at_is(1, TokenKind::Select)) {
+            advance(); // (
+            advance(); // SELECT
             Statement sub_stmt = parse_select();
             if (!peek_is(TokenKind::RParen)) throw ParseError("Expected ')' after subquery");
             advance();
             return ConditionValue(ConditionValue::Subquery{std::make_unique<Statement>(std::move(sub_stmt))});
         }
-        const Token* t = advance();
-        if (!t) throw ParseError("Expected value");
-        switch (t->kind) {
-            case TokenKind::Ident: {
-                std::string s = t->text;
-                if (peek_is(TokenKind::Dot)) {
-                    advance();
-                    std::string col = expect_any_name();
-                    return ConditionValue(ConditionValue::Literal{s + "." + col});
-                }
-                return ConditionValue(ConditionValue::Literal{s});
-            }
-            case TokenKind::NumberLit: return ConditionValue(ConditionValue::Literal{t->text});
-            case TokenKind::StringLit: return ConditionValue(ConditionValue::Literal{t->text});
-            case TokenKind::Null: return ConditionValue(ConditionValue::Literal{"__NULL__"});
-            case TokenKind::Minus: {
-                const Token* n = advance();
-                if (!n || n->kind != TokenKind::NumberLit) throw ParseError("Expected number after '-'");
-                return ConditionValue(ConditionValue::Literal{"-" + n->text});
-            }
-            case TokenKind::Curdate: {
-                if (peek_is(TokenKind::LParen)) { advance(); if (peek_is(TokenKind::RParen)) advance(); }
-                std::time_t now = std::time(nullptr);
-                std::tm tmv{};
-#if defined(_WIN32)
-                localtime_s(&tmv, &now);
-#else
-                localtime_r(&now, &tmv);
-#endif
-                std::ostringstream oss;
-                oss.imbue(std::locale::classic());
-                char buf[32];
-                std::strftime(buf, sizeof(buf), "%Y-%m-%d", &tmv);
-                return ConditionValue(ConditionValue::Literal{buf});
-            }
-            case TokenKind::Now: {
-                if (peek_is(TokenKind::LParen)) { advance(); if (peek_is(TokenKind::RParen)) advance(); }
-                std::time_t now = std::time(nullptr);
-                std::tm tmv{};
-#if defined(_WIN32)
-                localtime_s(&tmv, &now);
-#else
-                localtime_r(&now, &tmv);
-#endif
-                char buf[32];
-                std::strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", &tmv);
-                return ConditionValue(ConditionValue::Literal{buf});
-            }
-            // Keywords used as column references on the RHS (e.g. WHERE t.id = u.user)
-            default: {
-                const char* kw_name = nullptr;
-                switch (t->kind) {
-                    case TokenKind::User: kw_name = "user"; break;
-                    case TokenKind::Row: kw_name = "row"; break;
-                    case TokenKind::Order: kw_name = "order"; break;
-                    case TokenKind::Group: kw_name = "group"; break;
-                    case TokenKind::Key: kw_name = "key"; break;
-                    case TokenKind::Role: kw_name = "role"; break;
-                    case TokenKind::Check: kw_name = "check"; break;
-                    case TokenKind::Database: kw_name = "database"; break;
-                    case TokenKind::Index: kw_name = "index"; break;
-                    case TokenKind::View: kw_name = "view"; break;
-                    default: break;
-                }
-                if (kw_name) {
-                    if (peek_is(TokenKind::Dot)) {
-                        advance();
-                        std::string col = expect_any_name();
-                        return ConditionValue(ConditionValue::Literal{std::string(kw_name) + "." + col});
-                    }
-                    return ConditionValue(ConditionValue::Literal{kw_name});
-                }
-                throw ParseError("Expected value");
-            }
+        // NULL is special-cased ahead of the general expression parse: it needs the
+        // "__NULL__" sentinel (not the literal 4-char string "NULL", which is also how a
+        // real NULL *value* happens to be represented elsewhere in this string-based
+        // engine) so `WHERE x = NULL` reliably evaluates to false rather than matching
+        // NULL-valued rows.
+        if (peek_is(TokenKind::Null)) {
+            advance();
+            return ConditionValue(ConditionValue::Literal{"__NULL__"});
         }
+        // PLAN.md P0 fix: the RHS used to consume a single token (column/number/string/
+        // keyword-as-column), so `WHERE v > id + 100` silently dropped `+ 100` and
+        // evaluated as `v > id`. Parsing a full arithmetic expression here — the same
+        // parser already used for the LHS just above — makes the RHS support the same
+        // columns/numbers/strings/functions plus +,-,*,/,||,->,->> that the LHS does.
+        //
+        // Simple terminals (bare column, number, or string — everything the old
+        // single-token parse already handled) are reduced back to ConditionValue::Literal
+        // rather than wrapped as Arith, so existing Literal-based logic (Planner's
+        // index-access-path selection, has_outer_ref's correlation heuristic, equi-join
+        // column extraction, etc.) keeps matching exactly as before. Only a genuinely
+        // compound expression (+,-,*,/, a function call, ...) becomes an Arith.
+        ArithExpr expr = parse_arith_expr();
+        if (auto* col = std::get_if<ArithExpr::Col>(&expr.data)) return ConditionValue(ConditionValue::Literal{col->name});
+        if (auto* num = std::get_if<ArithExpr::Num>(&expr.data)) return ConditionValue(ConditionValue::Literal{num->value});
+        if (auto* str = std::get_if<ArithExpr::Str>(&expr.data)) return ConditionValue(ConditionValue::Literal{str->value});
+        return ConditionValue(ConditionValue::Arith{std::move(expr)});
     }();
 
     return Condition{std::move(left), op, std::move(value)};
@@ -474,7 +436,7 @@ ArithExpr Parser::parse_arith_factor() {
         advance();
         if (peek_is(TokenKind::NumberLit)) {
             const Token* n = advance();
-            return ArithExpr(ArithExpr::Num{"-" + n->text});
+            return ArithExpr(ArithExpr::Num{negate_number_text(n->text)});
         }
         ArithExpr inner = parse_arith_factor();
         return ArithExpr(ArithExpr::Sub{std::make_unique<ArithExpr>(ArithExpr::Num{"0"}), std::make_unique<ArithExpr>(std::move(inner))});
@@ -972,7 +934,7 @@ std::vector<std::string> Parser::parse_date_add_args() {
         } else if (t->kind == TokenKind::Minus) {
             const Token* n = advance();
             if (!n || n->kind != TokenKind::NumberLit) throw ParseError("Expected number after - in INTERVAL");
-            amount = "-" + n->text;
+            amount = negate_number_text(n->text);
         } else {
             throw ParseError("Expected number in INTERVAL");
         }

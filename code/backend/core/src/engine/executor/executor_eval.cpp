@@ -207,24 +207,36 @@ bool Executor::eval_single(const Row& row, const Condition& cond) {
         return false;
     }
 
-    auto* lit_v = std::get_if<ConditionValue::Literal>(&cond.value.data);
-    if (!lit_v) return false;
-    const std::string& lit = lit_v->value;
-
     std::string resolved;
-    bool is_ident_like = !lit.empty() && (std::isalpha(static_cast<unsigned char>(lit[0])) || lit[0] == '_') && !parse_f64(lit).has_value();
-    const std::string* effective_lit = &lit;
-    if (is_ident_like) {
-        if (const std::string* v = get_col(row, lit)) {
-            resolved = *v;
-            effective_lit = &resolved;
+    const std::string* effective_lit = nullptr;
+
+    // PLAN.md P0 fix: the RHS of a comparison is now a full arithmetic expression
+    // (ConditionValue::Arith) rather than always a single-token Literal, so
+    // `WHERE v > id + 100` actually evaluates `id + 100` instead of silently
+    // dropping the `+ 100`. eval_arith already resolves any Col references inside
+    // the expression, so no separate column-lookup step is needed here (unlike
+    // the Literal branch below, which still needs its own ident-vs-literal check).
+    if (auto* av = std::get_if<ConditionValue::Arith>(&cond.value.data)) {
+        resolved = eval_arith(row, av->expr);
+        effective_lit = &resolved;
+    } else if (auto* lit_v = std::get_if<ConditionValue::Literal>(&cond.value.data)) {
+        const std::string& lit = lit_v->value;
+        bool is_ident_like = !lit.empty() && (std::isalpha(static_cast<unsigned char>(lit[0])) || lit[0] == '_') && !parse_f64(lit).has_value();
+        effective_lit = &lit;
+        if (is_ident_like) {
+            if (const std::string* v = get_col(row, lit)) {
+                resolved = *v;
+                effective_lit = &resolved;
+            }
         }
+    } else {
+        return false;
     }
 
     if (cond.op == Operator::IsNull) return val == EXECUTOR_NULL_VALUE || val.empty();
     if (cond.op == Operator::IsNotNull) return val != EXECUTOR_NULL_VALUE && !val.empty();
     if (val == EXECUTOR_NULL_VALUE) return false;
-    if (*effective_lit == "__NULL__") return false;
+    if (*effective_lit == "__NULL__" || *effective_lit == EXECUTOR_NULL_VALUE) return false;
 
     switch (cond.op) {
         case Operator::Eq: {
@@ -291,6 +303,46 @@ bool Executor::eval_check_expr(const std::string& expr, const Row& row) {
     return true;
 }
 
+// PLAN.md P0 fix follow-up: mirrors substitute_correlated_condexpr's Literal-based
+// outer-row substitution, but walks a full ArithExpr tree (needed now that a
+// ConditionValue::Arith RHS can embed an outer-table column reference anywhere
+// inside an expression, e.g. `WHERE d.id = e.dept_id + 0`, not just as the whole RHS).
+ArithExpr Executor::substitute_arith_outer_refs(const ArithExpr& expr, const Row& outer_row) {
+    return std::visit(
+        [&](const auto& alt) -> ArithExpr {
+            using T = std::decay_t<decltype(alt)>;
+            if constexpr (std::is_same_v<T, ArithExpr::Col>) {
+                if (alt.name.find('.') != std::string::npos) {
+                    if (const std::string* rv = get_col(outer_row, alt.name)) return ArithExpr(ArithExpr::Str{*rv});
+                }
+                return ArithExpr(alt);
+            } else if constexpr (std::is_same_v<T, ArithExpr::Add>) {
+                return ArithExpr(ArithExpr::Add{std::make_unique<ArithExpr>(substitute_arith_outer_refs(*alt.lhs, outer_row)),
+                                                 std::make_unique<ArithExpr>(substitute_arith_outer_refs(*alt.rhs, outer_row))});
+            } else if constexpr (std::is_same_v<T, ArithExpr::Sub>) {
+                return ArithExpr(ArithExpr::Sub{std::make_unique<ArithExpr>(substitute_arith_outer_refs(*alt.lhs, outer_row)),
+                                                 std::make_unique<ArithExpr>(substitute_arith_outer_refs(*alt.rhs, outer_row))});
+            } else if constexpr (std::is_same_v<T, ArithExpr::Mul>) {
+                return ArithExpr(ArithExpr::Mul{std::make_unique<ArithExpr>(substitute_arith_outer_refs(*alt.lhs, outer_row)),
+                                                 std::make_unique<ArithExpr>(substitute_arith_outer_refs(*alt.rhs, outer_row))});
+            } else if constexpr (std::is_same_v<T, ArithExpr::Div>) {
+                return ArithExpr(ArithExpr::Div{std::make_unique<ArithExpr>(substitute_arith_outer_refs(*alt.lhs, outer_row)),
+                                                 std::make_unique<ArithExpr>(substitute_arith_outer_refs(*alt.rhs, outer_row))});
+            } else if constexpr (std::is_same_v<T, ArithExpr::Cmp>) {
+                return ArithExpr(ArithExpr::Cmp{std::make_unique<ArithExpr>(substitute_arith_outer_refs(*alt.lhs, outer_row)), alt.op,
+                                                 std::make_unique<ArithExpr>(substitute_arith_outer_refs(*alt.rhs, outer_row))});
+            } else if constexpr (std::is_same_v<T, ArithExpr::Func>) {
+                std::vector<ArithExpr> args;
+                args.reserve(alt.args.size());
+                for (auto& a : alt.args) args.push_back(substitute_arith_outer_refs(a, outer_row));
+                return ArithExpr(ArithExpr::Func{alt.name, std::move(args)});
+            } else {
+                return ArithExpr(alt);
+            }
+        },
+        expr.data);
+}
+
 CondExpr Executor::substitute_correlated_condexpr(const CondExpr& expr, const Row& outer_row) {
     if (auto* v = std::get_if<CondExpr::And>(&expr.data)) {
         return CondExpr(CondExpr::And{std::make_unique<CondExpr>(substitute_correlated_condexpr(*v->lhs, outer_row)),
@@ -311,6 +363,8 @@ CondExpr Executor::substitute_correlated_condexpr(const CondExpr& expr, const Ro
                     new_cond.value = ConditionValue(ConditionValue::Literal{*rv});
                 }
             }
+        } else if (auto* ar = std::get_if<ConditionValue::Arith>(&v->condition.value.data)) {
+            new_cond.value = ConditionValue(ConditionValue::Arith{substitute_arith_outer_refs(ar->expr, outer_row)});
         }
         return CondExpr(CondExpr::Leaf{std::move(new_cond)});
     }

@@ -44,11 +44,21 @@ StringResult Executor::exec_vacuum(SharedDatabase& s, std::optional<std::string>
             std::vector<Row> rows_clone = s.tables.at(t);
             if (auto idx_it = s.indexes.find(t); idx_it != s.indexes.end()) {
                 idx_it->second = BPlusTree();
+                // PLAN.md P0 fix: the Rust original used `row.values().next()` here — an
+                // arbitrary (HashMap-iteration-order-dependent) value, not necessarily the
+                // PK, silently corrupting the rebuilt index. Resolve the real PK column
+                // from the schema instead (same pattern as the insert/update reindex paths
+                // below in executor_dml.cpp).
+                std::string pk_col_name;
+                if (auto* schema = s.catalog.get_table(t)) {
+                    for (auto& c : schema->columns) {
+                        if (c.primary_key) { pk_col_name = c.name; break; }
+                    }
+                    if (pk_col_name.empty() && !schema->columns.empty()) pk_col_name = schema->columns.front().name;
+                }
                 for (auto& row : rows_clone) {
-                    // Matches the Rust original's `row.values().next()` — an arbitrary
-                    // (HashMap-iteration-order-dependent) value, not necessarily the PK.
-                    // A known pre-existing quirk, faithfully preserved rather than fixed.
-                    std::string key = row.empty() ? std::string() : row.begin()->second;
+                    auto it = row.find(pk_col_name);
+                    std::string key = it != row.end() ? it->second : std::string();
                     nlohmann::json j = row;
                     idx_it->second.insert(key, j.dump());
                 }

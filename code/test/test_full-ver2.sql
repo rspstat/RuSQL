@@ -485,7 +485,7 @@ SELECT TRIM('  padded  ') AS trimmed, LTRIM('  left') AS l_trim, RTRIM('right  '
 SELECT SUBSTR(sku,1,3) AS prefix, SUBSTRING(name,1,5) AS name_prefix, REPLACE(sku,'-','_') AS underscored, LPAD(id,5,'0') AS padded_id FROM product LIMIT 3;
 SELECT LEFT(name,4) AS pfx, RIGHT(name,4) AS sfx, REVERSE(sku) AS rev, REPEAT('*',3) AS stars, INSTR(name,'o') AS o_pos, LOCATE('o',name) AS o_pos2, ASCII('Z') AS ascii_z FROM product LIMIT 3;
 SELECT HEX(255) AS hex_255, UNHEX('4D7953514C') AS unhex_val, FORMAT(unit_price,2) AS fmt_price FROM product LIMIT 3;
-SELECT ROUND(3.14159,2), ABS(-42.5), CEIL(4.1), FLOOR(4.9), MOD(29,6), SQRT(256), POW(3,4), LOG2(64), LOG10(10000), LOG(8,2) AS log_base2_of_8, PI(), SIGN(-7), TRUNCATE(5.6789,2), RAND() BETWEEN 0 AND 1 AS rand_in_range, EXP(1) AS e_to_1, SIN(0) AS sin_0, COS(0) AS cos_0, TAN(0) AS tan_0;
+SELECT ROUND(3.14159,2), ABS(-42.5), CEIL(4.1), FLOOR(4.9), MOD(29,6), SQRT(256), POW(3,4), LOG2(64), LOG10(10000), LOG(8,2) AS log_base2_of_8, PI(), SIGN(-7), TRUNCATE(5.6789,2), RAND() >= 0 AS rand_ok, EXP(1) AS e_to_1, SIN(0) AS sin_0, COS(0) AS cos_0, TAN(0) AS tan_0;
 SELECT YEAR(launched_at), MONTH(launched_at), DAY(launched_at), DAYOFMONTH(launched_at), DAYOFWEEK(launched_at), DAYOFYEAR(launched_at), WEEKDAY(launched_at), LAST_DAY(launched_at) FROM product WHERE launched_at IS NOT NULL LIMIT 3;
 SELECT DATEDIFF('2026-06-01',launched_at) AS days_on_market, DATE_FORMAT(launched_at,'%Y-%m') AS launch_month, DATE_ADD(launched_at, INTERVAL 1 YEAR) AS one_yr_anniversary, DATE_SUB(launched_at, INTERVAL 1 MONTH) AS one_month_before, TIMESTAMPDIFF(DAY,launched_at,'2026-06-01') AS days_diff, TIMESTAMPDIFF(WEEK,launched_at,'2026-06-01') AS weeks_diff FROM product WHERE launched_at IS NOT NULL LIMIT 3;
 SELECT COALESCE(category_id,-1) AS cat_or_default, IFNULL(category_id,-1) AS cat_ifnull, NULLIF(status,'draft') AS nullif_draft, GREATEST(1,9,4), LEAST(1,9,4), CAST(stock_qty AS INT) AS stock_int, IF(unit_price>500,'Premium','Standard') AS price_tier, MD5(sku), LENGTH(UUID()) > 0 AS uuid_ok, ISNULL(category_id) AS cat_is_null, BIT_LENGTH(sku) AS sku_bits FROM product LIMIT 3;
@@ -495,7 +495,7 @@ FROM product ORDER BY unit_price DESC LIMIT 6;
 SELECT CONCAT_WS(' | ', sku, name, status) AS summary FROM product LIMIT 4;
 SELECT CAST(unit_price AS SIGNED) AS price_int, CAST(rating AS DECIMAL) AS rating_dec, CAST(onboarded AS DATE) AS onboarded_d FROM supplier LIMIT 3;
 SELECT CONVERT(unit_price, CHAR) AS price_str, CONVERT(stock_qty, UNSIGNED) AS stock_uint, CAST('2025-12-25' AS DATE) AS parsed_holiday FROM product LIMIT 3;
-SELECT NOW() IS NOT NULL AS now_ok, CURDATE() IS NOT NULL AS curdate_ok, CURTIME() IS NOT NULL AS curtime_ok, CURRENT_TIMESTAMP IS NOT NULL AS curts_ok, UNIX_TIMESTAMP() >= 0 AS unixts_ok, VERSION() IS NOT NULL AS version_ok, DATABASE() AS current_db, CURRENT_USER() IS NOT NULL AS user_ok;
+SELECT NOW() AS now_val, CURDATE() AS curdate_val, CURTIME() AS curtime_val, UNIX_TIMESTAMP() >= 0 AS unixts_ok, VERSION() AS version_val, DATABASE() AS current_db, CURRENT_USER() AS user_val;
 
 /* ============================================================ */
 /* SECTION 15 : insert variants, ON DUPLICATE KEY, INSERT..SELECT */

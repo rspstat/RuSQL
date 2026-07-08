@@ -1,4 +1,4 @@
-# RuSQL v2.2.0 — 완료된 기능
+# RuSQL v2.3.0 — 완료된 기능
 
 ### 엔진 코어
 - [x] Lexer / Tokenizer

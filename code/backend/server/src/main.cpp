@@ -13,6 +13,7 @@
 #include <cstdio>
 #include <iostream>
 #include <mutex>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -64,11 +65,14 @@ std::string trim_copy(const std::string& s) {
     return s.substr(start, end - start + 1);
 }
 
-// Splits input into individual statements on ';' boundaries, skipping --/#/block
-// comments and string literals, and not splitting inside BEGIN...END bodies.
-std::vector<std::string> split_proc_aware(const std::string& input) {
-    std::vector<std::string> queries;
-    std::string current;
+// Returns the byte offset of the first ';' at BEGIN...END depth 0, skipping
+// --/#/block comments and string literals. std::nullopt means the buffer so
+// far holds no complete top-level statement yet (e.g. an unclosed BEGIN body
+// spanning multiple lines) -- the caller must keep accumulating more input
+// before trying again, mirroring the CLI's find_stmt_end (cli/src/main.cpp).
+// Unlike a naive "does buf contain any ';'" check, this is depth-aware, so a
+// ';' inside an open BEGIN block never causes a premature, partial split.
+std::optional<std::size_t> find_stmt_end(const std::string& input) {
     int begin_depth = 0;
     std::size_t i = 0;
     std::size_t len = input.size();
@@ -94,12 +98,10 @@ std::vector<std::string> split_proc_aware(const std::string& input) {
             continue;
         }
         if (input[i] == '\'') {
-            current += input[i];
             i++;
             while (i < len) {
                 char c = input[i];
                 i++;
-                current += c;
                 if (c == '\'') break;
             }
             continue;
@@ -110,7 +112,27 @@ std::vector<std::string> split_proc_aware(const std::string& input) {
             std::string word = input.substr(start, i - start);
             std::string upper = to_upper_str(word);
             if (upper == "BEGIN") {
-                begin_depth++;
+                // A transaction `BEGIN;` / `BEGIN WORK;` has no matching END -- only a
+                // procedure/trigger body's BEGIN does. Without this check, a bare
+                // transaction BEGIN made begin_depth stick above 0 for the rest of the
+                // input, silently fusing every following statement into one chunk (this
+                // was masked for a long time by a separate parser bug that ignored
+                // trailing tokens after a valid statement; now that that's fixed, the
+                // fused chunk fails outright with "Unexpected token(s) after end of
+                // statement"). Mirrors the CLI's find_stmt_end (cli/src/main.cpp).
+                std::size_t j = i;
+                while (j < len && std::isspace(static_cast<unsigned char>(input[j]))) j++;
+                bool is_transaction;
+                if (j >= len || input[j] == ';') {
+                    is_transaction = true;
+                } else if (std::isalpha(static_cast<unsigned char>(input[j]))) {
+                    std::size_t s2 = j, k = j;
+                    while (k < len && (std::isalnum(static_cast<unsigned char>(input[k])) || input[k] == '_')) k++;
+                    is_transaction = to_upper_str(input.substr(s2, k - s2)) == "WORK";
+                } else {
+                    is_transaction = false;
+                }
+                if (!is_transaction) begin_depth++;
             } else if (upper == "END") {
                 std::size_t j = i;
                 while (j < len && std::isspace(static_cast<unsigned char>(input[j]))) j++;
@@ -123,26 +145,12 @@ std::vector<std::string> split_proc_aware(const std::string& input) {
                 }
                 if (!next_is_sub && begin_depth > 0) begin_depth--;
             }
-            current += word;
             continue;
         }
-        if (input[i] == ';') {
-            if (begin_depth == 0) {
-                std::string t = trim_copy(current);
-                if (!t.empty()) queries.push_back(t);
-                current.clear();
-            } else {
-                current += ';';
-            }
-            i++;
-            continue;
-        }
-        current += input[i];
+        if (input[i] == ';' && begin_depth == 0) return i;
         i++;
     }
-    std::string t = trim_copy(current);
-    if (!t.empty()) queries.push_back(t);
-    return queries;
+    return std::nullopt;
 }
 
 std::optional<std::string> handle_builtin(const std::string& cmd, std::size_t client_count,
@@ -318,17 +326,24 @@ void handle_client(SOCKET sock, std::shared_ptr<RwLock<SharedDatabase>> shared, 
         buf += line;
         buf += "\n";
 
-        if (buf.find(';') == std::string::npos) continue;
+        // Extract one complete (BEGIN...END depth-0-terminated) statement at a time.
+        // A naive "does buf contain any ';'" check here would misfire on a ';' inside
+        // a still-open, multi-line BEGIN body (e.g. a CREATE TRIGGER whose body spans
+        // several lines): it would call the old whole-buffer splitter early, which
+        // always flushed its trailing partial content as if it were a real statement,
+        // then clear buf -- discarding the "still inside BEGIN" context and causing the
+        // trigger/procedure body's own inner statements to leak out as separate
+        // top-level queries on subsequent lines.
+        for (;;) {
+            auto pos = find_stmt_end(buf);
+            if (!pos) break;
+            std::string q = trim_copy(buf.substr(0, *pos));
+            buf = buf.substr(*pos + 1);
+            if (q.empty()) {
+                send_line_raw(sock, "---END---\n");
+                continue;
+            }
 
-        auto queries = split_proc_aware(buf);
-        buf.clear();
-
-        if (queries.empty()) {
-            send_line_raw(sock, "---END---\n");
-            continue;
-        }
-
-        for (auto& q : queries) {
             std::string preview = q.size() > 60 ? q.substr(0, 60) + "..." : q;
             log("[" + auth_user + "@" + peer + "] " + preview);
 
