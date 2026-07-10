@@ -98,21 +98,47 @@ StringResult Executor::exec_multi_update(SharedDatabase& s, std::vector<std::str
         const TableSchema* schema = s.catalog.get_table(tgt);
         if (!schema) return StringResult::Err("Table '" + tgt + "' not found");
         std::string pk_col = "id";
+        std::vector<std::string> pk_cols;
         for (auto& c : schema->columns) {
-            if (c.primary_key) {
-                pk_col = c.name;
-                break;
-            }
+            if (c.primary_key) pk_cols.push_back(c.name);
         }
+        if (pk_cols.empty()) pk_cols.push_back("id");
+        pk_col = pk_cols.front();
         std::string pk_prefix = tgt + ".";
+
+        // Composite identity key, same fix/reasoning as plain UPDATE (executor_update.cpp):
+        // a composite-PK target table's rows must be identified by ALL of its PK columns,
+        // not just the first, or two distinct rows sharing the leading column's value get
+        // conflated (one's assignments silently overwrite/merge into the other's, and both
+        // rows end up updated even if only one matched the JOIN+WHERE). \x00-joined,
+        // mirroring the composite index convention.
+        auto merged_row_key = [&](const Row& merged_row) -> std::optional<std::string> {
+            std::string key;
+            for (std::size_t i = 0; i < pk_cols.size(); i++) {
+                std::string val;
+                if (auto it = merged_row.find(pk_prefix + pk_cols[i]); it != merged_row.end()) val = it->second;
+                else if (auto it2 = merged_row.find(pk_cols[i]); it2 != merged_row.end()) val = it2->second;
+                if (val.empty()) return std::nullopt;
+                if (i) key += '\x00';
+                key += val;
+            }
+            return key;
+        };
+        auto row_key = [&pk_cols](const Row& row) {
+            std::string key;
+            for (std::size_t i = 0; i < pk_cols.size(); i++) {
+                if (i) key += '\x00';
+                auto it = row.find(pk_cols[i]);
+                key += (it != row.end() ? it->second : std::string());
+            }
+            return key;
+        };
 
         std::unordered_map<std::string, std::unordered_map<std::string, std::string>> pk_updates;
         for (auto& merged_row : matched) {
-            std::string pk_val;
-            if (auto it = merged_row.find(pk_prefix + pk_col); it != merged_row.end()) pk_val = it->second;
-            else if (auto it2 = merged_row.find(pk_col); it2 != merged_row.end()) pk_val = it2->second;
-            if (pk_val.empty()) continue;
-            auto& entry = pk_updates[pk_val];
+            auto pk_val = merged_row_key(merged_row);
+            if (!pk_val) continue;
+            auto& entry = pk_updates[*pk_val];
             for (auto& [col_expr, rhs_expr] : assignments) {
                 std::string tbl_name, bare_col;
                 if (auto dot = col_expr.find('.'); dot != std::string::npos) {
@@ -131,9 +157,7 @@ StringResult Executor::exec_multi_update(SharedDatabase& s, std::vector<std::str
         if (rit == s.tables.end()) return StringResult::Err("Table '" + tgt + "' not found");
         auto& rows = rit->second;
         for (auto& row : rows) {
-            auto pkit = row.find(pk_col);
-            std::string row_pk = pkit != row.end() ? pkit->second : std::string();
-            if (auto uit = pk_updates.find(row_pk); uit != pk_updates.end()) {
+            if (auto uit = pk_updates.find(row_key(row)); uit != pk_updates.end()) {
                 for (auto& [col, val] : uit->second) row[col] = val;
                 total_count++;
             }
@@ -301,18 +325,42 @@ StringResult Executor::exec_multi_delete(SharedDatabase& s, std::vector<std::str
         const TableSchema* schema = s.catalog.get_table(tgt);
         if (!schema) return StringResult::Err("Table '" + tgt + "' not found");
         std::string pk_col = "id";
+        std::vector<std::string> pk_cols;
         for (auto& c : schema->columns) {
-            if (c.primary_key) {
-                pk_col = c.name;
-                break;
-            }
+            if (c.primary_key) pk_cols.push_back(c.name);
         }
+        if (pk_cols.empty()) pk_cols.push_back("id");
+        pk_col = pk_cols.front();
         std::string pk_prefix = tgt + ".";
+
+        // Composite identity key, same fix/reasoning as exec_multi_update above and
+        // plain UPDATE (executor_update.cpp) -- a composite-PK target table's rows must
+        // be identified by ALL of its PK columns, not just the first.
+        auto merged_row_key = [&](const Row& r) -> std::optional<std::string> {
+            std::string key;
+            for (std::size_t i = 0; i < pk_cols.size(); i++) {
+                std::string val;
+                if (auto it = r.find(pk_prefix + pk_cols[i]); it != r.end()) val = it->second;
+                else if (auto it2 = r.find(pk_cols[i]); it2 != r.end()) val = it2->second;
+                if (val.empty()) return std::nullopt;
+                if (i) key += '\x00';
+                key += val;
+            }
+            return key;
+        };
+        auto row_key = [&pk_cols](const Row& r) {
+            std::string key;
+            for (std::size_t i = 0; i < pk_cols.size(); i++) {
+                if (i) key += '\x00';
+                auto it = r.find(pk_cols[i]);
+                key += (it != r.end() ? it->second : std::string());
+            }
+            return key;
+        };
 
         std::unordered_set<std::string> target_pks;
         for (auto& r : matched) {
-            if (auto it = r.find(pk_prefix + pk_col); it != r.end()) target_pks.insert(it->second);
-            else if (auto it2 = r.find(pk_col); it2 != r.end()) target_pks.insert(it2->second);
+            if (auto key = merged_row_key(r)) target_pks.insert(*key);
         }
 
         auto rit = s.tables.find(tgt);
@@ -326,9 +374,7 @@ StringResult Executor::exec_multi_delete(SharedDatabase& s, std::vector<std::str
         rows.erase(std::remove_if(rows.begin(), rows.end(),
                                    [&](const Row& r) {
                                        if (!is_visible(r)) return false;
-                                       auto it = r.find(pk_col);
-                                       std::string pk_val = it != r.end() ? it->second : std::string();
-                                       return target_pks.count(pk_val) != 0;
+                                       return target_pks.count(row_key(r)) != 0;
                                    }),
                    rows.end());
         std::size_t after = 0;

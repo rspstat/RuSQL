@@ -84,6 +84,19 @@ function unqualify(name: string): string {
   return dot >= 0 ? name.slice(dot + 1) : name;
 }
 
+// 셀 편집 시 PK WHERE절 값 이스케이프용 — 컬럼의 실제 data_type을 보고 숫자 리터럴로 둘지
+// 문자열로 따옴표 처리할지 결정한다 (값의 겉모양만으로 추측하면 문자열 PK가 조용히 실패한다).
+const NUMERIC_COL_TYPES = new Set([
+  "INT", "INTEGER", "INT2", "INT3", "INT4", "INT8", "BIGINT", "SMALLINT", "TINYINT", "MEDIUMINT",
+  "FLOAT", "REAL", "DOUBLE", "DECIMAL", "NUMERIC",
+]);
+function isNumericColType(dataType: string): boolean {
+  return NUMERIC_COL_TYPES.has(dataType.split("(")[0].trim().toUpperCase());
+}
+function quoteForColType(value: string, dataType: string): string {
+  return isNumericColType(dataType) ? value : `'${value.replace(/'/g, "''")}'`;
+}
+
 // 직각 꺾임 경로: x1,y1 → midX 수평 → y2 수직 → x2 수평, 모서리 r=8 라운드
 function erdOrthPath(x1: number, y1: number, x2: number, y2: number): string {
   const r = 8;
@@ -218,7 +231,7 @@ function App() {
   const [tabResultSearch, setTabResultSearch] = useState<Record<string, string>>({});
   const [editingCell, setEditingCell] = useState<{
     resultIdx: number; rowIdx: number; colIdx: number;
-    tableName: string; pkColName: string; pkValue: string;
+    tableName: string; pkCols: { name: string; value: string; dataType: string }[];
   } | null>(null);
   const [editingValue, setEditingValue] = useState("");
   const cellEditCommittedRef = useRef(false);
@@ -1324,27 +1337,34 @@ function App() {
       setTableColumns(p => ({ ...p, [tableName]: cols }));
     }
 
-    const pkCol = cols.find(c => c.is_pk);
-    if (!pkCol) return;
+    const pkColsAll = cols.filter(c => c.is_pk);
+    if (pkColsAll.length === 0) return;
 
-    const pkColIdx = columns.indexOf(pkCol.name);
-    if (pkColIdx === -1) return;
+    // 복합 PK 테이블도 안전하게 편집하려면 PK 컬럼 전부가 현재 결과셋에 있어야 한다 —
+    // 하나라도 없으면 WHERE 조건을 완전하게 못 만드므로 편집을 시작하지 않는다.
+    const pkCols: { name: string; value: string; dataType: string }[] = [];
+    for (const pkCol of pkColsAll) {
+      const pkColIdx = columns.indexOf(pkCol.name);
+      if (pkColIdx === -1) return;
+      pkCols.push({ name: pkCol.name, value: row[pkColIdx], dataType: pkCol.data_type });
+    }
 
     cellEditCommittedRef.current = false;
-    setEditingCell({ resultIdx, rowIdx, colIdx, tableName, pkColName: pkCol.name, pkValue: row[pkColIdx] });
+    setEditingCell({ resultIdx, rowIdx, colIdx, tableName, pkCols });
     setEditingValue(currentValue);
   };
 
   const commitCellEdit = async () => {
     if (!editingCell || cellEditCommittedRef.current) return;
     cellEditCommittedRef.current = true;
-    const { tableName, pkColName, pkValue, resultIdx, colIdx } = editingCell;
+    const { tableName, pkCols, resultIdx, colIdx } = editingCell;
     const colName = results[resultIdx].columns[colIdx];
     const newVal = editingValue;
     setEditingCell(null);
     const isNum = newVal.trim() !== "" && !isNaN(Number(newVal));
     const quoted = isNum ? newVal : `'${newVal.replace(/'/g, "''")}'`;
-    const q = `UPDATE ${tableName} SET ${colName} = ${quoted} WHERE ${pkColName} = ${pkValue};`;
+    const whereClause = pkCols.map(pk => `${pk.name} = ${quoteForColType(pk.value, pk.dataType)}`).join(" AND ");
+    const q = `UPDATE ${tableName} SET ${colName} = ${quoted} WHERE ${whereClause};`;
     try {
       await invoke<MultiQueryResult>("execute_query", { query: q, ts: Date.now() });
       await runQuery();

@@ -37,13 +37,25 @@ StringResult Executor::exec_merge(SharedDatabase& s, std::string target, std::op
 
     const TableSchema* schema0 = s.catalog.get_table(target);
     if (!schema0) return StringResult::Err("Table '" + target + "' not found");
-    std::string pk_col = "id";
+    std::vector<std::string> pk_cols;
     for (auto& c : schema0->columns) {
-        if (c.primary_key) {
-            pk_col = c.name;
-            break;
-        }
+        if (c.primary_key) pk_cols.push_back(c.name);
     }
+    if (pk_cols.empty()) pk_cols.push_back("id");
+    // Composite identity key, same fix/reasoning as UPDATE (executor_update.cpp) and
+    // multi-table UPDATE/DELETE (executor_multi.cpp) -- a composite-PK target table's
+    // rows must be identified by ALL of its PK columns, not just the first, or two
+    // distinct rows sharing the leading column's value get conflated (MERGE could then
+    // update/delete the wrong physical row, or delete both).
+    auto row_key = [&pk_cols](const Row& r) {
+        std::string key;
+        for (std::size_t i = 0; i < pk_cols.size(); i++) {
+            if (i) key += '\x00';
+            auto it = r.find(pk_cols[i]);
+            key += (it != r.end() ? it->second : std::string());
+        }
+        return key;
+    };
     std::vector<std::string> target_col_names;
     for (auto& c : schema0->columns) target_col_names.push_back(c.name);
 
@@ -71,8 +83,7 @@ StringResult Executor::exec_merge(SharedDatabase& s, std::string target, std::op
             }
 
             if (eval_condexpr(merged, on)) {
-                auto pkit = tgt_row.find(pk_col);
-                std::string pk = pkit != tgt_row.end() ? pkit->second : std::string();
+                std::string pk = row_key(tgt_row);
                 found = true;
                 bool delete_cond_ok = when_matched_delete_cond ? eval_condexpr(merged, *when_matched_delete_cond) : true;
                 if (when_matched_delete && delete_cond_ok) {
@@ -123,8 +134,7 @@ StringResult Executor::exec_merge(SharedDatabase& s, std::string target, std::op
         auto& rows = rit->second;
         for (auto& [pk, resolved] : update_rows) {
             for (auto& row : rows) {
-                auto it = row.find(pk_col);
-                if (it != row.end() && it->second == pk && is_visible(row)) {
+                if (row_key(row) == pk && is_visible(row)) {
                     for (auto& [col, val] : resolved) row[col] = val;
                     break;
                 }
@@ -132,9 +142,7 @@ StringResult Executor::exec_merge(SharedDatabase& s, std::string target, std::op
         }
         rows.erase(std::remove_if(rows.begin(), rows.end(),
                                    [&](const Row& r) {
-                                       auto it = r.find(pk_col);
-                                       std::string pk_val = it != r.end() ? it->second : std::string();
-                                       return std::find(delete_pks.begin(), delete_pks.end(), pk_val) != delete_pks.end();
+                                       return std::find(delete_pks.begin(), delete_pks.end(), row_key(r)) != delete_pks.end();
                                    }),
                    rows.end());
     }

@@ -62,12 +62,29 @@ StringResult Executor::exec_update_inner(SharedDatabase& s, const std::string& t
     const TableSchema* schema0 = s.catalog.get_table(table);
     if (!schema0) return StringResult::Err("Table '" + table + "' not found");
     std::string pk_col = "id";
+    std::vector<std::string> pk_cols;
     for (auto& c : schema0->columns) {
-        if (c.primary_key) {
-            pk_col = c.name;
-            break;
-        }
+        if (c.primary_key) pk_cols.push_back(c.name);
     }
+    if (pk_cols.empty()) pk_cols.push_back("id");
+    pk_col = pk_cols.front();
+
+    // Composite identity key for WHERE-condition row matching. On a composite-PK table,
+    // distinct rows can share the same value in just the leading PK column, so reducing
+    // a row's identity to `pk_col` alone (as the locking/undo-log/PK-index code below
+    // still does, unchanged) would make matching_pks conflate them -- an UPDATE would
+    // then touch every row sharing that one column's value, not just the row(s) that
+    // actually satisfied `condition`. \x00-joins every PK column's value, mirroring the
+    // composite index convention (btree.cpp's cmp_keys segment split).
+    auto match_key = [&pk_cols](const Row& r) {
+        std::string key;
+        for (std::size_t i = 0; i < pk_cols.size(); i++) {
+            if (i) key += '\x00';
+            auto it = r.find(pk_cols[i]);
+            key += (it != r.end() ? it->second : std::string());
+        }
+        return key;
+    };
 
     auto tit0 = s.tables.find(table);
     if (tit0 == s.tables.end()) return StringResult::Err("Table '" + table + "' not found");
@@ -84,8 +101,7 @@ StringResult Executor::exec_update_inner(SharedDatabase& s, const std::string& t
     std::unordered_set<std::string> matching_pks;
     for (auto& r : candidate_rows) {
         if (matches_condition_with_subquery(s, r, condition)) {
-            auto it = r.find(pk_col);
-            matching_pks.insert(it != r.end() ? it->second : std::string());
+            matching_pks.insert(match_key(r));
         }
     }
 
@@ -100,10 +116,10 @@ StringResult Executor::exec_update_inner(SharedDatabase& s, const std::string& t
     std::uint64_t cur_txn = txn.current_txn_id();
 
     for (auto& row : rows) {
+        if (!matching_pks.count(match_key(row))) continue;
+
         auto pkit = row.find(pk_col);
         std::string row_pk = pkit != row.end() ? pkit->second : std::string();
-        if (!matching_pks.count(row_pk)) continue;
-
         const std::string& key = row_pk;
         if (cur_txn != 0) {
             LockResult lr = s.lock_mgr.acquire(table, key, cur_txn);
@@ -325,9 +341,7 @@ StringResult Executor::exec_update_inner(SharedDatabase& s, const std::string& t
         std::vector<Row> updated_rows;
         for (auto& r : s.tables.at(table)) {
             if (!is_visible(r)) continue;
-            auto it = r.find(pk_col);
-            std::string v = it != r.end() ? it->second : std::string();
-            if (matching_pks.count(v)) updated_rows.push_back(r);
+            if (matching_pks.count(match_key(r))) updated_rows.push_back(r);
         }
         return StringResult::Ok(format_returning_rows(updated_rows, *returning));
     }

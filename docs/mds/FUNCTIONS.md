@@ -318,7 +318,7 @@
 - [x] 사이드바 테이블 검색 — SCHEMAS 상단 검색 입력으로 테이블 이름 실시간 필터
 - [x] EXPLAIN 트리 시각화 — EXPLAIN / EXPLAIN ANALYZE 결과를 구조화된 카드(Access / Table / Condition 항목)로 렌더링
 - [x] BEGIN...END 블록 인식 쿼리 분리 — SQL 에디터에서 CREATE PROCEDURE / CREATE TRIGGER 등 BEGIN...END 포함 멀티 쿼리를 올바르게 분리·실행 (IF/ELSEIF/WHILE/LOOP/REPEAT/ITERATE 제어문 UI 검증 완료)
-- [x] 결과 셀 직접 편집 — 단일 테이블 SELECT 결과에서 셀 더블클릭 → 인풋 전환, Enter/blur 커밋 시 `UPDATE tableName SET col = val WHERE pk = pkVal` 자동 생성·실행 후 SELECT 재실행 (Escape = 취소, JOIN/PK 없는 경우 자동 비활성)
+- [x] 결과 셀 직접 편집 — 단일 테이블 SELECT 결과에서 셀 더블클릭 → 인풋 전환, Enter/blur 커밋 시 `UPDATE tableName SET col = val WHERE ...` 자동 생성·실행 후 SELECT 재실행 (Escape = 취소, JOIN/PK 없는 경우 자동 비활성). 복합 PK는 전체 PK 컬럼을 AND로 묶어 WHERE절 구성, PK값은 컬럼의 실제 타입(숫자/문자열)에 맞춰 이스케이프
 
 ### TCP 서버 / MySQL 프로토콜 (rusql-server)
 - [x] 커스텀 텍스트 프로토콜 TCP 서버 — 포트 7878, `---END---` 구분자, 멀티 클라이언트 동시 접속, 세션별 독립 Executor

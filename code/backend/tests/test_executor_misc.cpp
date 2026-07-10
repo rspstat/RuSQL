@@ -129,6 +129,82 @@ TEST_CASE("Multi-table DELETE via JOIN deletes only matching rows", "[executor][
     REQUIRE(rows[0].at("id") == "2");
 }
 
+TEST_CASE("Multi-table UPDATE on a composite-PK target only touches the row matching every PK column",
+          "[executor][misc][regression]") {
+    // Regression, same class as plain UPDATE (test_executor_update_delete.cpp): the
+    // target-row identity used to be just the first PK-marked column, so a composite-PK
+    // target table's rows sharing that column's value got conflated -- both would be
+    // updated (with whichever merged row's assignments happened to land in the shared
+    // pk_updates[] entry last), not just the one the JOIN+WHERE actually matched.
+    TempDataDir dir("exec_misc_data_multi_upd_composite");
+    Executor ex(dir.path);
+    REQUIRE(ex.execute_sql("CREATE DATABASE company").is_ok());
+    REQUIRE(ex.execute_sql("USE company").is_ok());
+    REQUIRE(ex.execute_sql("CREATE TABLE t1 (a INT, b INT, val VARCHAR(50), PRIMARY KEY(a, b))").is_ok());
+    REQUIRE(ex.execute_sql("CREATE TABLE t2 (id INT PRIMARY KEY, a_ref INT)").is_ok());
+    REQUIRE(ex.execute_sql("INSERT INTO t1 VALUES (1, 1, 'x')").is_ok());
+    REQUIRE(ex.execute_sql("INSERT INTO t1 VALUES (1, 2, 'y')").is_ok());
+    REQUIRE(ex.execute_sql("INSERT INTO t2 VALUES (1, 1)").is_ok());
+
+    auto r = ex.execute_sql("UPDATE t1, t2 SET t1.val = 'JOINED' WHERE t1.a = t2.a_ref AND t2.id = 1 AND t1.b = 1");
+    REQUIRE(r.is_ok());
+    REQUIRE(r.value() == "1 row(s) updated.");
+
+    auto s = ex.get_shared()->read();
+    auto& rows = s->tables.at("company.t1");
+    for (auto& row : rows) {
+        if (row.at("a") == "1" && row.at("b") == "1") REQUIRE(row.at("val") == "JOINED");
+        else REQUIRE(row.at("val") != "JOINED");
+    }
+}
+
+TEST_CASE("Multi-table DELETE on a composite-PK target only deletes the row matching every PK column",
+          "[executor][misc][regression]") {
+    TempDataDir dir("exec_misc_data_multi_del_composite");
+    Executor ex(dir.path);
+    REQUIRE(ex.execute_sql("CREATE DATABASE company").is_ok());
+    REQUIRE(ex.execute_sql("USE company").is_ok());
+    REQUIRE(ex.execute_sql("CREATE TABLE t3 (a INT, b INT, val VARCHAR(50), PRIMARY KEY(a, b))").is_ok());
+    REQUIRE(ex.execute_sql("CREATE TABLE t2 (id INT PRIMARY KEY, a_ref INT)").is_ok());
+    REQUIRE(ex.execute_sql("INSERT INTO t3 VALUES (1, 1, 'x')").is_ok());
+    REQUIRE(ex.execute_sql("INSERT INTO t3 VALUES (1, 2, 'y')").is_ok());
+    REQUIRE(ex.execute_sql("INSERT INTO t2 VALUES (1, 1)").is_ok());
+
+    auto r = ex.execute_sql("DELETE t3 FROM t3 JOIN t2 ON t3.a = t2.a_ref WHERE t2.id = 1 AND t3.b = 1");
+    REQUIRE(r.is_ok());
+    REQUIRE(r.value() == "1 row(s) deleted.");
+
+    auto s = ex.get_shared()->read();
+    auto& rows = s->tables.at("company.t3");
+    REQUIRE(rows.size() == 1);
+    REQUIRE(rows[0].at("a") == "1");
+    REQUIRE(rows[0].at("b") == "2");
+}
+
+TEST_CASE("MERGE on a composite-PK target only updates the row matching every PK column", "[executor][misc][regression]") {
+    TempDataDir dir("exec_misc_data_merge_composite");
+    Executor ex(dir.path);
+    REQUIRE(ex.execute_sql("CREATE DATABASE company").is_ok());
+    REQUIRE(ex.execute_sql("USE company").is_ok());
+    REQUIRE(ex.execute_sql("CREATE TABLE t4 (a INT, b INT, val VARCHAR(50), PRIMARY KEY(a, b))").is_ok());
+    REQUIRE(ex.execute_sql("CREATE TABLE t4_src (a INT, b INT, newval VARCHAR(50))").is_ok());
+    REQUIRE(ex.execute_sql("INSERT INTO t4 VALUES (1, 1, 'x')").is_ok());
+    REQUIRE(ex.execute_sql("INSERT INTO t4 VALUES (1, 2, 'y')").is_ok());
+    REQUIRE(ex.execute_sql("INSERT INTO t4_src VALUES (1, 1, 'MERGED')").is_ok());
+
+    auto r = ex.execute_sql("MERGE INTO t4 USING t4_src ON t4.a = t4_src.a AND t4.b = t4_src.b "
+                             "WHEN MATCHED THEN UPDATE SET val = t4_src.newval");
+    REQUIRE(r.is_ok());
+    REQUIRE(r.value() == "MERGE: 1 updated, 0 deleted, 0 inserted.");
+
+    auto s = ex.get_shared()->read();
+    auto& rows = s->tables.at("company.t4");
+    for (auto& row : rows) {
+        if (row.at("a") == "1" && row.at("b") == "1") REQUIRE(row.at("val") == "MERGED");
+        else REQUIRE(row.at("val") != "MERGED");
+    }
+}
+
 TEST_CASE("MERGE applies matched-update, matched-delete, and not-matched-insert branches", "[executor][misc]") {
     TempDataDir dir("exec_misc_data_6");
     Executor ex(dir.path);

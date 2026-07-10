@@ -40,6 +40,44 @@ TEST_CASE("Basic UPDATE modifies matching rows only", "[executor][update]") {
     }
 }
 
+TEST_CASE("UPDATE on a composite-PK table only touches the row matching every PK column", "[executor][update][regression]") {
+    // Regression: exec_update_inner used to reduce a row's identity to just the first
+    // PK-marked column (matching_pks keyed on that alone). On a composite PK, distinct
+    // rows sharing the same leading column's value got conflated, so `WHERE a=1 AND b=1`
+    // incorrectly updated every row with a=1 regardless of b. Faithfully-preserved from
+    // the original Rust (legacy/rusql-core/src/engine/executor.rs), fixed here by using
+    // a \x00-joined composite key (mirrors the composite index convention) for WHERE-
+    // condition row matching, while locking/undo/PK-index upkeep keep using the single
+    // leading column, unchanged, matching the rest of the engine's row-identity model.
+    TempDataDir dir("exec_upd_data_composite_pk");
+    Executor ex(dir.path);
+    REQUIRE(ex.execute_sql("CREATE DATABASE company").is_ok());
+    REQUIRE(ex.execute_sql("USE company").is_ok());
+    REQUIRE(ex.execute_sql("CREATE TABLE t (a INT, b INT, val VARCHAR(50), PRIMARY KEY(a, b))").is_ok());
+    REQUIRE(ex.execute_sql("INSERT INTO t VALUES (1, 1, 'row-a1-b1')").is_ok());
+    REQUIRE(ex.execute_sql("INSERT INTO t VALUES (1, 2, 'row-a1-b2')").is_ok());
+    REQUIRE(ex.execute_sql("INSERT INTO t VALUES (2, 1, 'row-a2-b1')").is_ok());
+
+    auto upd = ex.execute_sql("UPDATE t SET val = 'ONLY_B1' WHERE a = 1 AND b = 1");
+    REQUIRE(upd.is_ok());
+    REQUIRE(upd.value() == "1 row(s) updated.");
+
+    auto rows = table_rows(ex, "company.t");
+    for (auto& r : rows) {
+        if (r.at("a") == "1" && r.at("b") == "1") REQUIRE(r.at("val") == "ONLY_B1");
+        else REQUIRE(r.at("val") != "ONLY_B1");
+    }
+
+    // RETURNING has the identical bug surface (same matching_pks membership check) --
+    // only the a=1,b=2 row should come back, not a=1,b=1 (also a=1) or a=2,b=1.
+    auto ret = ex.execute_sql("UPDATE t SET val = 'RET_B2' WHERE a = 1 AND b = 2 RETURNING a, b, val");
+    REQUIRE(ret.is_ok());
+    std::size_t hit_count = 0;
+    std::size_t pos = 0;
+    while ((pos = ret.value().find("RET_B2", pos)) != std::string::npos) { hit_count++; pos += 1; }
+    REQUIRE(hit_count == 1);
+}
+
 TEST_CASE("UPDATE with arithmetic self-reference evaluates RHS before writing", "[executor][update]") {
     TempDataDir dir("exec_upd_data_2");
     Executor ex(dir.path);

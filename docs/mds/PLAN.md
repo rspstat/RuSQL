@@ -11,7 +11,13 @@
 > **업데이트 (2026-07-08 세션 연속):** UI로 `test_full.sql`/`test_full-ver2.sql`을 직접 돌려보며
 > 실사용 테스트를 하던 중, 아래 P1 "BEGIN...END 내부 세미콜론으로 프로시저 조기 실행" 항목이 C++
 > 서버(`code/backend/server/src/main.cpp`)에도 실재함을 확인하고 수정 완료 (✅ 표시).
-> `engine_tests.exe` 3192/3192 통과 (신규 `test_server_stmt_split.cpp` 3케이스 포함).
+>
+> **업데이트 (같은 세션, 계속):** 섹션 A의 UI 쪽 남은 P0 2건(`App.tsx` 셀 편집)도 수정 완료. 검증
+> 과정에서 엔진 자체의 복합 PK UPDATE 버그(PLAN.md에 없던 신규 발견, 위 표 참고)를 찾아 plain UPDATE
+> (`executor_update.cpp`)에서 먼저 수정했고, 이어서 같은 "첫 PK 컬럼만 사용" 패턴이 다중 테이블
+> UPDATE/DELETE(`executor_multi.cpp`)와 MERGE(`executor_merge.cpp`)에도 있는 걸 확인해 전부 동일한
+> 방식(복합 인덱스와 같은 `\x00` 결합 키)으로 수정. `engine_tests.exe` 3239/3239 통과 (Debug/Release
+> 둘 다 재빌드·확인).
 
 **P0**=정확성/무결성 직결(즉시 수정) · **P1**=핵심 아키텍처/보안 · **P2**=성능/호환성/사용성 · **P3**=장기 확장·정리
 
@@ -27,8 +33,9 @@
 | ✅ 완료 | 쿼리 캐시가 비결정 함수 영구 캐싱 | 원인(Rust `executor.rs:686-759`): NOW()/RAND()/UUID() 포함 SELECT가 무효화 없이 과거값 반환. C++ `executor_core.cpp`에 단어경계 인식 비결정 함수 탐지(`contains_nondeterministic_func`) 추가해 캐시 저장 단계에서 제외 (`brand` 같은 컬럼명 오탐 방지 확인됨) | 시간·난수 쿼리 정확성 | 낮음 |
 | ✅ 완료 | 이중 단항 마이너스 파싱 오류 | 원인(Rust `parser.rs:1039-1051`, C++에선 근본 원인이 lexer): `-` 바로 뒤에 숫자가 오고 직전 토큰이 값이 아니면 렉서가 음수 리터럴로 접어버림 — `- -5`의 두 번째 `-5`가 이미 음수 토큰이 되어, 파서가 거기에 또 `-`를 붙여 "--5" 문자열 생성(실증 확인). C++ `parser_expr.cpp`의 4개 지점(단항 마이너스/IN 리스트/BETWEEN/INTERVAL) 모두 부호 토글 방식(`negate_number_text`)으로 수정 | 산술식 파싱 신뢰성 | 낮음 |
 | ✅ 완료 | RENAME COLUMN 후 인덱스 무효화 | 원인(Rust `executor.rs:5863-5882`): 인덱스 메타 미갱신. 실제로는 문서 설명(SeqScan 전락)보다 심각해서, C++에서 재현해보니 **PK 인덱스 기반 조회가 이름이 바뀐 컬럼을 빈 값으로 반환**하는 정확성 버그였음(캐시된 인덱스 JSON이 예전 컬럼명 그대로). C++ `executor_ddl.cpp`에서 PK/보조/해시/복합 인덱스 전부 재구축 + 메타데이터 갱신하도록 수정 | 스키마 변경 후 인덱스 성능 유지 | 중간 |
-| P0 | UI 셀 편집 — PK값 미이스케이프 | `App.tsx:1338-1352` — WHERE절 pkValue를 항상 숫자로 취급, 문자열 PK 편집 시 조용히 실패 | 모든 PK 타입에서 셀 편집 동작 | 낮음 |
-| P0 | UI 셀 편집 — 복합 PK 미지원 | `App.tsx:1327` — 첫 PK 컬럼만 사용, 복합 PK 테이블에서 조건 불충분(다중 행 오업데이트 위험) | 복합 PK 테이블 안전 편집 | 중간 |
+| ✅ 완료 | UI 셀 편집 — PK값 미이스케이프 | 원인(`App.tsx:1338-1352`): WHERE절 pkValue를 항상 숫자로 취급, 문자열 PK 편집 시 조용히 실패. `ColumnDetail.data_type` 기준으로 숫자 타입일 때만 비따옴표 처리하는 `quoteForColType` 헬퍼 추가, WHERE절에 적용 | 모든 PK 타입에서 셀 편집 동작 | 낮음 |
+| ✅ 완료 | UI 셀 편집 — 복합 PK 미지원 | 원인(`App.tsx:1327`): 첫 PK 컬럼만 사용, 복합 PK 테이블에서 조건 불충분(다중 행 오업데이트 위험). `cols.find` → `cols.filter`로 PK 컬럼 전부 수집해 `pkCols` 배열로 저장, WHERE절을 AND로 전부 결합하도록 수정 | 복합 PK 테이블 안전 편집 | 중간 |
+| ✅ 완료 | (신규 발견) UPDATE/MERGE가 복합 PK 첫 컬럼만으로 행 식별 | 원인(Rust `legacy/rusql-core/src/engine/executor.rs:4960-4988`, 이식 시 그대로 보존): 단일 테이블 `UPDATE`(`exec_update_inner`), 다중 테이블 `UPDATE`/`DELETE`(`executor_multi.cpp`), `MERGE`(`executor_merge.cpp`) 전부 대상 행을 PK컬럼 중 첫 번째 값만으로 식별해, 복합 PK 테이블에서 `WHERE a=1 AND b=1`이 `a=1`인 행 전부를 잘못 건드림(UPDATE의 RETURNING, 다중 UPDATE/DELETE, MERGE 모두 동일 버그 확인). 위 두 UI 수정을 검증하다 CLI로 직접 재현해 발견 — UI가 완벽한 복합 WHERE절을 보내도 엔진이 내부적으로 더 많은 행을 건드리는 상태였음. 3개 파일 전부 PK 컬럼 전체를 `\x00`로 결합한 복합 키(복합 인덱스와 동일한 컨벤션)로 행 매칭 로직을 수정; 락/undo-log/PK 인덱스 갱신은 기존처럼 첫 PK 컬럼만 사용(엔진 전반의 기존 관례와 일관되게 유지, 별도 이슈). `test_executor_update_delete.cpp`(단일 UPDATE+RETURNING)·`test_executor_misc.cpp`(다중 UPDATE/DELETE, MERGE)에 회귀 테스트 6건 추가 | 복합 PK 테이블에서 UPDATE/DELETE/MERGE가 실제로 안전해짐 | 중간 |
 | P1 | SELECT USER()가 항상 root@localhost | `mysql.rs:648-652` — 실제 인증 사용자명 미반영 | 권한 확인 툴 오작동 방지 | 낮음 |
 | P1 | 모든 SET 문이 무조건 OK 응답 | `mysql.rs:637-638` — SET PASSWORD 등 실제 변경 없이도 성공 응답 | DBA 도구 신뢰성 | 낮음 |
 | ✅ 완료 | BEGIN...END 내부 세미콜론으로 프로시저 조기 실행 | 원인(Rust `rusql-server/main.rs:94-111,241-247`): UI 실사용 테스트로 2건 확인 — (1) 트랜잭션 `BEGIN;`이 블록으로 오인되어 이후 전체가 한 문장으로 합쳐짐(`test_full.sql`), (2) 트리거/프로시저처럼 본문이 여러 줄에 걸친 `BEGIN...END`는 커넥션 루프가 버퍼에 `;`이 하나라도 보이면(깊이 무시) 바로 분리 후 버퍼를 통째로 비워, 본문 내부 문장·`END`가 최상위 문장으로 새어나감(`test_full-ver2.sql`의 멀티라인 트리거로 실증). C++ `server/main.cpp`의 커넥션 루프를 CLI의 깊이 인식 방식(`find_stmt_end`)과 동일한 점진적 추출 방식으로 재작성; `test_server_stmt_split.cpp`에 회귀 테스트 추가 | 저장 프로시저/트리거 생성 및 실행 안정성 | 중간 |
