@@ -2387,11 +2387,18 @@ body {
 .srv-inline-group:first-child {
   width: 190px;
 }
+/* Parallel Query 그룹(가운데)만 축소 가능하게 — 아니면 긴 설명 텍스트가 행 전체를
+   넓혀서 Open Terminal 버튼이 패널 밖으로 밀려남 */
+.srv-inline-group:nth-child(2) {
+  flex-shrink: 1;
+  min-width: 0;
+}
 .srv-toggle-row {
   display: flex;
   align-items: center;
   gap: 8px;
   height: 34px; /* srv-form-input와 높이 맞춤 */
+  min-width: 0;
 }
 .srv-toggle-btn {
   position: relative;
@@ -2420,6 +2427,10 @@ body {
 .srv-toggle-label {
   font-size: 12px;
   color: #888;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
 }
 .srv-terminal-btn {
   display: flex;

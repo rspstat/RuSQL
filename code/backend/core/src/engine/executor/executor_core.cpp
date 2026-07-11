@@ -96,7 +96,10 @@ void from_json(const nlohmann::json& j, RoleGrant& rg) {
 }
 
 bool SharedDatabase::validate_credentials(const std::string& user, const std::string& password) const {
-    if (users.empty()) return true;
+    // No "users.empty() -> allow everyone" fallback: the server always calls
+    // ensure_default_user() at boot, before either listener starts accepting
+    // connections, so a genuinely empty user table here would mean something is
+    // already wrong -- failing closed (deny) is safer than an implicit open-admin mode.
     for (auto& u : users) {
         if (u.user != user) continue;
         if (!u.password_hash.has_value()) {
@@ -111,8 +114,7 @@ bool SharedDatabase::validate_credentials(const std::string& user, const std::st
 
 bool SharedDatabase::verify_mysql_native_password(const std::string& user, const std::vector<std::uint8_t>& nonce,
                                                    const std::vector<std::uint8_t>& auth_response) const {
-    if (users.empty()) return true; // open mode
-
+    // Same fail-closed reasoning as validate_credentials above -- no open-mode fallback.
     const UserRecord* record = nullptr;
     for (auto& u : users) {
         if (u.user == user && (u.host == "%" || u.host == "localhost" || u.host == "127.0.0.1" || u.host == "::1")) {

@@ -5,14 +5,39 @@
 
 #include <algorithm>
 #include <chrono>
+#include <filesystem>
 #include <fstream>
 #include <sstream>
 
 #include "engine/parser/parser.hpp"
 
+namespace fs = std::filesystem;
+
 namespace engine {
 
 namespace {
+
+// PLAN.md (section D): BACKUP/RESTORE used to pass the user-supplied filename straight
+// to std::ofstream/ifstream with no validation -- arbitrary file write (BACKUP) / read+
+// execute-as-SQL (RESTORE) anywhere the server process can reach. Only a bare filename
+// (no '/', '\', ':', or "..") is accepted, confined to <data_dir>/_backups/.
+StringResult resolve_backup_path(const std::string& data_dir, const std::string& user_file) {
+    if (user_file.empty()) return StringResult::Err("파일명이 비어 있습니다.");
+    for (char c : user_file) {
+        bool ok = std::isalnum(static_cast<unsigned char>(c)) != 0 || c == '_' || c == '-' || c == '.';
+        if (!ok) {
+            return StringResult::Err("허용되지 않는 파일명입니다 (영문/숫자/'_'/'-'/'.'만 가능): '" + user_file + "'");
+        }
+    }
+    if (user_file.find("..") != std::string::npos) {
+        return StringResult::Err("파일명에 상위 경로 이동('..')을 포함할 수 없습니다: '" + user_file + "'");
+    }
+
+    std::string backup_dir = data_dir + "/_backups";
+    std::error_code ec;
+    fs::create_directories(backup_dir, ec);
+    return StringResult::Ok(backup_dir + "/" + user_file);
+}
 
 std::string to_lower_str(const std::string& s) {
     std::string out = s;
@@ -208,7 +233,9 @@ StringResult Executor::exec_backup(const SharedDatabase& s, std::optional<std::s
     }
 
     if (output_file) {
-        std::ofstream f(*output_file, std::ios::binary | std::ios::trunc);
+        auto resolved = resolve_backup_path(s.disk.data_dir(), *output_file);
+        if (resolved.is_err()) return StringResult::Err(resolved.error());
+        std::ofstream f(resolved.value(), std::ios::binary | std::ios::trunc);
         if (!f) return StringResult::Err("Failed to write backup file '" + *output_file + "'");
         f.write(out.data(), static_cast<std::streamsize>(out.size()));
         if (!f) return StringResult::Err("Failed to write backup file '" + *output_file + "'");
@@ -218,7 +245,9 @@ StringResult Executor::exec_backup(const SharedDatabase& s, std::optional<std::s
 }
 
 StringResult Executor::exec_restore(SharedDatabase& s, std::string source_file, std::optional<std::string> database) {
-    std::ifstream f(source_file, std::ios::binary);
+    auto resolved = resolve_backup_path(s.disk.data_dir(), source_file);
+    if (resolved.is_err()) return StringResult::Err(resolved.error());
+    std::ifstream f(resolved.value(), std::ios::binary);
     if (!f) return StringResult::Err("Cannot read restore file '" + source_file + "'");
     std::ostringstream ss;
     ss << f.rdbuf();

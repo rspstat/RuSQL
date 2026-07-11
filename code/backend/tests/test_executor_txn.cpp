@@ -155,6 +155,48 @@ TEST_CASE("SHOW BUFFER POOL / SHOW WAL / SHOW LOCKS / CHECKPOINT", "[executor][t
     REQUIRE(checkpoint.value().find("Checkpoint completed.") != std::string::npos);
 }
 
+TEST_CASE("Crash recovery rebuilds secondary/hash indexes for a redone commit, not just the table rows",
+          "[executor][txn][regression]") {
+    // Regression, faithfully preserved from Rust (legacy/rusql-core/src/engine/executor.rs
+    // recover_from_wal): the REDO/UNDO replay loop only ever patched s.tables (and, for a
+    // REDO INSERT only, the PK B+Tree) -- secondary/hash/composite indexes were left
+    // exactly as they were before the crash, stale relative to the just-recovered rows.
+    // To reproduce without a real process crash: write the INSERT + an *unfinalized*
+    // COMMIT record directly via txn.commit_write_record() (mirrors real 2-phase commit's
+    // first phase) and drop the Executor without ever calling commit_finalize()/COMMIT,
+    // so the WAL retains a "committed but never applied" transaction exactly like a crash
+    // between those two steps would.
+    TempDataDir dir("exec_txn_data_recovery_idx");
+    {
+        Executor ex(dir.path);
+        REQUIRE(ex.execute_sql("CREATE DATABASE company").is_ok());
+        REQUIRE(ex.execute_sql("USE company").is_ok());
+        REQUIRE(ex.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, val VARCHAR(20))").is_ok());
+        REQUIRE(ex.execute_sql("CREATE INDEX idx_val ON t (val) USING HASH").is_ok());
+
+        REQUIRE(ex.execute_sql("BEGIN").is_ok());
+        REQUIRE(ex.execute_sql("INSERT INTO t VALUES (1, 'hello')").is_ok());
+        REQUIRE(ex.txn.commit_write_record().is_ok());
+    }
+
+    // recover_from_wal() runs in the constructor and must REDO the committed insert into
+    // s.tables *and* rebuild idx_val's hash index so a lookup on it finds the new row.
+    Executor ex2(dir.path);
+    {
+        auto s = ex2.get_shared()->read();
+        REQUIRE(s->tables.at("company.t").size() == 1);
+    }
+
+    auto plan = ex2.execute_sql("EXPLAIN SELECT * FROM t WHERE val = 'hello'");
+    REQUIRE(plan.is_ok());
+    REQUIRE(plan.value().find("Hash Index") != std::string::npos);
+
+    auto sel = ex2.execute_sql("SELECT * FROM t WHERE val = 'hello'");
+    REQUIRE(sel.is_ok());
+    REQUIRE(sel.value().find("hello") != std::string::npos);
+    REQUIRE(sel.value().find("0 rows") == std::string::npos);
+}
+
 TEST_CASE("A fresh Executor recovers cleanly when there is no WAL to replay", "[executor][txn]") {
     TempDataDir dir("exec_txn_data_5");
     {

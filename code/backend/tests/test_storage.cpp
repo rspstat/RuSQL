@@ -151,6 +151,36 @@ TEST_CASE("DiskManager schema/table/index round trip", "[storage][disk]") {
     fs::remove_all("disk_test_data");
 }
 
+TEST_CASE("DiskManager save_table replaces an existing file atomically, leaving no .tmp behind", "[storage][disk][regression]") {
+    // Regression: save_table used to open its destination with truncate(true) and write
+    // in place, with no fsync -- a crash between the truncate and the write completing
+    // left the file corrupt with the old contents already gone, and even a clean write
+    // was never durably synced to disk (PLAN.md, section C). The fix writes to a sibling
+    // .tmp file, fsyncs it, then renames it over the destination; this checks the
+    // happy-path result of that (overwrite still works, no leftover .tmp file) since a
+    // real crash mid-write isn't something a unit test can inject.
+    fs::remove_all("disk_test_data_atomic");
+    DiskManager disk("disk_test_data_atomic");
+
+    disk.save_table("company.t", {make_row({{"id", "1"}, {"val", "first"}})});
+    auto first = disk.load_table("company.t");
+    REQUIRE(first.size() == 1);
+    REQUIRE(first[0].at("val") == "first");
+
+    // Overwrite: exercises the rename-over-an-existing-file path, not just create-new.
+    disk.save_table("company.t", {make_row({{"id", "1"}, {"val", "second"}}), make_row({{"id", "2"}, {"val", "third"}})});
+    auto second = disk.load_table("company.t");
+    REQUIRE(second.size() == 2);
+
+    bool found_tmp = false;
+    for (auto& entry : fs::recursive_directory_iterator("disk_test_data_atomic")) {
+        if (entry.path().extension() == ".tmp") found_tmp = true;
+    }
+    REQUIRE_FALSE(found_tmp);
+
+    fs::remove_all("disk_test_data_atomic");
+}
+
 TEST_CASE("DiskManager views/view_raw_sql round trip", "[storage][disk]") {
     fs::remove_all("disk_test_data2");
     DiskManager disk("disk_test_data2");

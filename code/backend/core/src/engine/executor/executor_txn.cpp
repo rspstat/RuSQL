@@ -244,6 +244,14 @@ void Executor::recover_from_wal() {
     std::unordered_map<std::uint64_t, std::vector<UndoEntry>> undo_by_txn;
     for (auto& e : txn.read_undo_log_file()) undo_by_txn[e.txn_id].push_back(e);
 
+    // Faithful port of a real Rust bug: replay below only ever patches sw->tables (and,
+    // for a REDO INSERT only, the PK B+Tree) -- secondary/hash/composite indexes, and the
+    // PK B+Tree for every other operation kind, are never touched. After a crash-recovery
+    // replay, any such index on a table this loop modified is stale relative to the
+    // recovered rows. Fixed here (not in the per-record branches above) by rebuilding
+    // every index for each touched table once, after the whole replay finishes.
+    std::unordered_set<std::string> touched_tables;
+
     for (auto txn_id : order) {
         auto git = groups.find(txn_id);
         if (git == groups.end()) continue;
@@ -251,6 +259,7 @@ void Executor::recover_from_wal() {
         if (committed.count(txn_id)) {
             for (auto* record : git->second) {
                 const std::string& table = record->table_name;
+                touched_tables.insert(table);
                 std::string pk_col = "id";
                 if (auto* sc = sw->catalog.get_table(table)) {
                     for (auto& c : sc->columns) {
@@ -318,6 +327,7 @@ void Executor::recover_from_wal() {
             if (uit != undo_by_txn.end()) {
                 for (auto entry_it = uit->second.rbegin(); entry_it != uit->second.rend(); ++entry_it) {
                     auto& entry = *entry_it;
+                    touched_tables.insert(entry.table);
                     std::string pk_col = "id";
                     if (auto* sc = sw->catalog.get_table(entry.table)) {
                         for (auto& c : sc->columns) {
@@ -373,6 +383,37 @@ void Executor::recover_from_wal() {
                 }
             }
         }
+    }
+
+    for (auto& table : touched_tables) {
+        auto tit = sw->tables.find(table);
+        if (tit == sw->tables.end()) continue;
+        const std::vector<Row>& rows = tit->second;
+
+        std::string pk_col = "id";
+        if (auto* sc = sw->catalog.get_table(table)) {
+            for (auto& c : sc->columns) {
+                if (c.primary_key) {
+                    pk_col = c.name;
+                    break;
+                }
+            }
+        }
+        if (auto idx_it = sw->indexes.find(table); idx_it != sw->indexes.end()) {
+            idx_it->second = BPlusTree();
+            for (auto& row : rows) {
+                auto it = row.find(pk_col);
+                std::string key = it != row.end() ? it->second : std::string();
+                nlohmann::json j = row;
+                idx_it->second.insert(key, j.dump());
+            }
+        }
+        rebuild_secondary_indexes(*sw, table, rows);
+        std::vector<std::string> comp_keys;
+        for (auto& [k, ci] : sw->composite_indexes) {
+            if (ci.table == table) comp_keys.push_back(k);
+        }
+        for (auto& k : comp_keys) sw->composite_indexes.at(k).rebuild(rows);
     }
 
     txn.wal_clear();

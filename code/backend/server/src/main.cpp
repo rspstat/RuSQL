@@ -349,9 +349,26 @@ void handle_client(SOCKET sock, std::shared_ptr<RwLock<SharedDatabase>> shared, 
 
             exec.update_process_command("Query", q);
             auto t0 = std::chrono::steady_clock::now();
-            auto result = exec.execute_sql(q);
-            std::string status = result.is_ok() ? "OK" : "ERR";
-            std::string output = result.is_ok() ? result.value() : result.error();
+            std::string status, output;
+            // An uncaught exception here would propagate out of this connection's thread
+            // entry point and call std::terminate() -- unlike Rust, where a panic inside
+            // a spawned thread only kills that one thread, an uncaught C++ exception
+            // aborts the ENTIRE process, dropping every other connected client too. A few
+            // internal paths (WAL/table-file fsync, undo-log writes) throw on I/O failure
+            // by design (matching Rust's own `.expect()` panics there), so this boundary
+            // must convert any such failure into an ERR response for just this statement
+            // instead of taking the whole server down.
+            try {
+                auto result = exec.execute_sql(q);
+                status = result.is_ok() ? "OK" : "ERR";
+                output = result.is_ok() ? result.value() : result.error();
+            } catch (const std::exception& e) {
+                status = "ERR";
+                output = std::string("Internal error: ") + e.what();
+            } catch (...) {
+                status = "ERR";
+                output = "Internal error: unknown exception";
+            }
             exec.update_process_command("Sleep", "");
             double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
             if (!send_response(sock, status, output, elapsed)) {

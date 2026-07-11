@@ -10,6 +10,7 @@
 #include <array>
 #include <atomic>
 #include <cctype>
+#include <charconv>
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
@@ -268,6 +269,16 @@ std::pair<std::size_t, std::size_t> read_lenenc(const std::uint8_t* buf, std::si
     return {0, 1};
 }
 
+// Matches Rust's `format!("{}", v)` / f64 Display: the shortest decimal representation
+// that round-trips exactly. `std::to_string(double)` instead uses fixed 6-decimal-place
+// formatting, silently truncating a bound FLOAT/DOUBLE prepared-statement parameter's
+// precision before it's substituted into the query text (e.g. 3.141592653589793 -> "3.141593").
+std::string fmt_double_param(double v) {
+    char buf[64];
+    auto res = std::to_chars(buf, buf + sizeof(buf), v, std::chars_format::fixed);
+    return std::string(buf, res.ptr);
+}
+
 std::vector<std::string> parse_execute_params(const std::vector<std::uint8_t>& payload, std::size_t num_params) {
     if (num_params == 0) return {};
 
@@ -357,7 +368,7 @@ std::vector<std::string> parse_execute_params(const std::vector<std::uint8_t>& p
                 float v;
                 std::memcpy(&v, payload.data() + pos, 4);
                 pos += 4;
-                val = std::to_string(v);
+                val = fmt_double_param(v);
                 break;
             }
             case 0x05: { // DOUBLE
@@ -369,7 +380,7 @@ std::vector<std::string> parse_execute_params(const std::vector<std::uint8_t>& p
                 double v;
                 std::memcpy(&v, payload.data() + pos, 8);
                 pos += 8;
-                val = std::to_string(v);
+                val = fmt_double_param(v);
                 break;
             }
             case 0x0a: { // DATE

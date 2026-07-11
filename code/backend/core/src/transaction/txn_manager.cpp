@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <filesystem>
 #include <fstream>
+#include <stdexcept>
 
 namespace fs = std::filesystem;
 
@@ -107,7 +108,9 @@ std::optional<UndoEntry> UndoLogFile::decode(const std::vector<std::uint8_t>& bu
 void UndoLogFile::append_locked(const UndoEntry& entry) const {
     auto encoded = encode(entry);
     std::ofstream file(path_, std::ios::binary | std::ios::app);
+    if (!file) throw std::runtime_error("Undo log 파일 열기 실패");
     file.write(reinterpret_cast<const char*>(encoded.data()), static_cast<std::streamsize>(encoded.size()));
+    if (!file) throw std::runtime_error("Undo log 기록 실패");
 }
 
 void UndoLogFile::append(const UndoEntry& entry) {

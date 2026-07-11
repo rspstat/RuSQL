@@ -89,11 +89,28 @@ struct ServerStatus {
 }
 
 // ─── C++ engine_server.exe 위치/포트 헬퍼 ─────────────────────
+// MSVC Debug 빌드는 최적화가 전혀 없어 Release 대비 한 자릿수~두 자릿수 배 느리다
+// (실측: 단건 INSERT 9x, Bulk DELETE 21x, SeqScan 22x 등) -- UI가 항상 Debug 바이너리를
+// 띄우고 있었던 게 "Rust 버전보다 훨씬 느려 보인다"는 오해의 실제 원인이었다. Release를
+// 우선하되, 개발 중 Debug만 새로 빌드했을 수도 있으니 두 바이너리 다 있으면 더 최근에
+// 빌드된 쪽을 쓴다 (특정 설정 하나로 고정하면 반대 방향의 "왜 최신 빌드가 반영 안 되지"
+// 혼란이 재발할 뿐이라 mtime 비교가 더 안전하다).
 fn engine_server_path() -> std::path::PathBuf {
     let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    manifest.parent().and_then(|p| p.parent()).and_then(|p| p.parent())
-        .map(|root| root.join("code").join("build").join("backend").join("server").join("Debug").join("engine_server.exe"))
-        .unwrap_or_else(|| std::path::PathBuf::from("engine_server.exe"))
+    let build_dir = match manifest.parent().and_then(|p| p.parent()).and_then(|p| p.parent()) {
+        Some(root) => root.join("code").join("build").join("backend").join("server"),
+        None => return std::path::PathBuf::from("engine_server.exe"),
+    };
+    let release = build_dir.join("Release").join("engine_server.exe");
+    let debug = build_dir.join("Debug").join("engine_server.exe");
+    let mtime = |p: &std::path::Path| p.metadata().and_then(|m| m.modified()).ok();
+
+    match (mtime(&release), mtime(&debug)) {
+        (Some(r), Some(d)) => if r >= d { release } else { debug },
+        (Some(_), None) => release,
+        (None, Some(_)) => debug,
+        (None, None) => release, // 둘 다 없으면 에러 메시지에 Release 경로가 보이는 쪽이 낫다
+    }
 }
 
 fn pick_free_port() -> u16 {
@@ -369,6 +386,14 @@ fn execute_query(query: String, _ts: Option<u64>, state: State<AppState>) -> Mul
                 message: e, elapsed: q_start.elapsed().as_secs_f64(), success: false,
             },
         };
+        let preview: String = q.chars().take(60).collect();
+        let preview = if q.chars().count() > 60 { format!("{}...", preview) } else { preview };
+        add_conn_log(conn, &format!(
+            "{} ({:.3}s) {}",
+            if result.success { "OK" } else { "ERR" },
+            result.elapsed,
+            preview
+        ));
         results.push(result);
     }
 

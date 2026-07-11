@@ -130,7 +130,14 @@ void colorize_table(const std::string& output) {
 
 void run_query(engine::Executor& executor, const std::string& query) {
     auto start = std::chrono::steady_clock::now();
-    auto result = executor.execute_sql(query);
+    engine::StringResult result = engine::StringResult::Err("");
+    try {
+        result = executor.execute_sql(query);
+    } catch (const std::exception& e) {
+        result = engine::StringResult::Err(std::string("Internal error: ") + e.what());
+    } catch (...) {
+        result = engine::StringResult::Err("Internal error: unknown exception");
+    }
     if (result.is_ok()) {
         auto elapsed = std::chrono::steady_clock::now() - start;
         colorize_table(result.value());

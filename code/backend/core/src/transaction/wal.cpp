@@ -1,7 +1,15 @@
 #include "engine/transaction/wal.hpp"
 
+#include <cstdio>
 #include <filesystem>
 #include <fstream>
+#include <stdexcept>
+
+#ifdef _WIN32
+#include <io.h>
+#else
+#include <unistd.h>
+#endif
 
 namespace fs = std::filesystem;
 
@@ -102,11 +110,36 @@ std::optional<WalRecord> WalManager::decode(const std::vector<std::uint8_t>& buf
     return WalRecord{*op, *txn_id, *table_name, *key, *data};
 }
 
+// std::fstream has no portable fsync, but its underlying FILE*/fd does -- write via C
+// stdio instead so a real disk sync (matching Rust's file.sync_all()) is possible. Every
+// step's return value is checked and throws on failure, matching Rust's
+// `.expect("WAL 기록 실패")`/`.expect("WAL fsync 실패")` panics -- a silently-swallowed
+// write/flush/sync failure here would let a COMMIT report success without the record
+// actually being durable, defeating the entire point of this function.
 void WalManager::write_encoded_locked(const std::vector<std::uint8_t>& encoded, bool sync) const {
-    std::ofstream file(path_, std::ios::binary | std::ios::app);
-    file.write(reinterpret_cast<const char*>(encoded.data()), static_cast<std::streamsize>(encoded.size()));
-    file.flush();
-    (void)sync; // fstream has no portable fsync; data is flushed to the OS above.
+    std::FILE* fp = std::fopen(path_.c_str(), "ab");
+    if (!fp) throw std::runtime_error("WAL 파일 열기 실패");
+    std::size_t written = std::fwrite(encoded.data(), 1, encoded.size(), fp);
+    if (written != encoded.size()) {
+        std::fclose(fp);
+        throw std::runtime_error("WAL 기록 실패");
+    }
+    if (std::fflush(fp) != 0) {
+        std::fclose(fp);
+        throw std::runtime_error("WAL 기록 실패");
+    }
+    if (sync) {
+#ifdef _WIN32
+        bool ok = _commit(_fileno(fp)) == 0;
+#else
+        bool ok = fsync(fileno(fp)) == 0;
+#endif
+        if (!ok) {
+            std::fclose(fp);
+            throw std::runtime_error("WAL fsync 실패");
+        }
+    }
+    std::fclose(fp);
 }
 
 void WalManager::append(const WalRecord& record) {

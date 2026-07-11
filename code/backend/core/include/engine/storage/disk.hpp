@@ -37,6 +37,8 @@ public:
     DiskManager() : DiskManager("data") {}
     explicit DiskManager(const std::string& dir);
 
+    const std::string& data_dir() const { return data_dir_; }
+
     void create_db_dir(const std::string& db) const;
     void drop_db_dir(const std::string& db) const;
     std::vector<std::string> list_databases() const;

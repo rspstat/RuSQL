@@ -1,11 +1,19 @@
 #include "engine/storage/disk.hpp"
 
 #include <algorithm>
+#include <cstdio>
 #include <filesystem>
 #include <fstream>
 #include <sstream>
+#include <stdexcept>
 
 #include <lz4/lz4.h>
+
+#ifdef _WIN32
+#include <io.h>
+#else
+#include <unistd.h>
+#endif
 
 #include "engine/parser/ast_json.hpp"
 #include "engine/storage/page.hpp"
@@ -73,14 +81,43 @@ bool read_file_bytes(const std::string& path, std::vector<std::uint8_t>& out) {
     return true;
 }
 
+// Writes the full content to a sibling ".tmp" file, fsyncs it, then atomically renames
+// it over `path`. Without this, a crash between the pre-existing truncate-on-open and
+// the write completing left the file empty/corrupt with the old contents already gone
+// (PLAN.md: "테이블 저장이 원자적이지 않음"), and even a clean write was never fsynced
+// to physical disk (PLAN.md: "fsync 없이 flush만 됨") -- std::ofstream has no portable
+// fsync, so this goes through a C stdio FILE* to reach the real fd/handle.
+void write_bytes_atomic(const std::string& path, const void* data, std::size_t size) {
+    std::string tmp = path + ".tmp";
+    std::FILE* fp = std::fopen(tmp.c_str(), "wb");
+    if (!fp) throw std::runtime_error("파일 쓰기 실패: " + tmp);
+    std::size_t written = std::fwrite(data, 1, size, fp);
+    if (written != size) {
+        std::fclose(fp);
+        throw std::runtime_error("파일 쓰기 실패: " + tmp);
+    }
+    if (std::fflush(fp) != 0) {
+        std::fclose(fp);
+        throw std::runtime_error("파일 쓰기 실패: " + tmp);
+    }
+#ifdef _WIN32
+    bool synced = _commit(_fileno(fp)) == 0;
+#else
+    bool synced = fsync(fileno(fp)) == 0;
+#endif
+    std::fclose(fp);
+    if (!synced) throw std::runtime_error("파일 동기화 실패: " + tmp);
+    std::error_code ec;
+    fs::rename(tmp, path, ec);
+    if (ec) throw std::runtime_error("파일 교체 실패: " + path + " (" + ec.message() + ")");
+}
+
 void write_file(const std::string& path, const std::string& content) {
-    std::ofstream f(path, std::ios::binary | std::ios::trunc);
-    f << content;
+    write_bytes_atomic(path, content.data(), content.size());
 }
 
 void write_file_bytes(const std::string& path, const std::vector<std::uint8_t>& content) {
-    std::ofstream f(path, std::ios::binary | std::ios::trunc);
-    f.write(reinterpret_cast<const char*>(content.data()), static_cast<std::streamsize>(content.size()));
+    write_bytes_atomic(path, content.data(), content.size());
 }
 
 } // namespace
@@ -118,7 +155,11 @@ std::vector<std::string> DiskManager::list_databases() const {
     for (auto& entry : fs::directory_iterator(data_dir_, ec)) {
         if (entry.is_directory()) {
             std::string name = entry.path().filename().string();
-            if (name != "_system") dbs.push_back(name);
+            // Leading underscore is reserved for the engine's own top-level directories
+            // (_system, _backups, ...), which must never surface as a "database" a client
+            // can USE/SHOW -- a real CREATE DATABASE name isn't required to avoid this
+            // prefix, but nothing in normal usage would ever name one this way.
+            if (!name.empty() && name.front() != '_') dbs.push_back(name);
         }
     }
     return dbs;

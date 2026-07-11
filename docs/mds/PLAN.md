@@ -16,8 +16,32 @@
 > 과정에서 엔진 자체의 복합 PK UPDATE 버그(PLAN.md에 없던 신규 발견, 위 표 참고)를 찾아 plain UPDATE
 > (`executor_update.cpp`)에서 먼저 수정했고, 이어서 같은 "첫 PK 컬럼만 사용" 패턴이 다중 테이블
 > UPDATE/DELETE(`executor_multi.cpp`)와 MERGE(`executor_merge.cpp`)에도 있는 걸 확인해 전부 동일한
-> 방식(복합 인덱스와 같은 `\x00` 결합 키)으로 수정. `engine_tests.exe` 3239/3239 통과 (Debug/Release
-> 둘 다 재빌드·확인).
+> 방식(복합 인덱스와 같은 `\x00` 결합 키)으로 수정.
+>
+> **업데이트 (같은 세션, 계속):** 섹션 C·D의 남은 P0 5건도 전부 수정 완료 — WAL 커밋 fsync
+> 무동작(C++ 신규 회귀, Rust엔 없던 버그), 테이블/스키마 파일 fsync+원자적 쓰기, 크래시 복구의
+> 보조/복합 인덱스 미갱신, 인증 fail-open, BACKUP/RESTORE 경로 미검증(+ 그 수정 과정에서 발견한
+> `_backups` 디렉터리가 실제 DB로 오인되던 부수 버그).
+>
+> **업데이트 (같은 세션, 계속):** 사용자 요청으로 C++ 포팅 전체를 원본 Rust와 대조하는 별도 감사를
+> 서브에이전트로 진행 — 버퍼풀/페이지/해시인덱스/복합인덱스/락매니저/btree/group_commit/트랜잭션
+> 매니저(rollback/savepoint/checkpoint)/CLI·클라이언트는 전부 원본과 일치 확인(신규 이슈 없음).
+> 2건의 신규 회귀 발견 후 수정: (1) 위 fsync 수정이 남긴 갭 — fwrite/fflush/fsync 실패를 확인 안
+> 하던 것(섹션 C에 추가), (2) MySQL 바이너리 프로토콜의 COM_STMT_EXECUTE에서 FLOAT/DOUBLE
+> 파라미터가 `std::to_string`의 고정 6자리 반올림으로 정밀도 손실되던 것(섹션 F에 추가, 직접 구현한
+> MySQL 프로토콜 클라이언트로 라이브 재현·수정 확인).
+>
+> **업데이트 (같은 세션, 계속):** UI로 실사용 테스트 하던 중 벤치마크 실행 중 서버가 실제로
+> `abort()`로 크래시하는 걸 발견 — 근본 원인(커넥션 핸들러 예외 안전장치 부재)을 찾아 서버/CLI
+> 양쪽에 try/catch 추가(섹션 C에 추가). 그 외 UI 쪽에서: (a) `code/test/perf/bench.py`가 콘솔
+> cp949 코드페이지에서 em dash(—) 출력 시 크래시하던 것 수정 + UI가 실제로 쓰는 4개 항목만
+> 측정하도록 트리밍, (b) UI가 항상 Debug 빌드 `engine_server.exe`를 띄우고 있었던 것을
+> Debug/Release 중 더 최근에 빌드된 쪽을 자동 선택하도록 수정(Release 대비 9~22배 느려서
+> "Rust보다 훨씬 느리다"는 오해의 원인이었음, Release로 전환 후 정상 범위 확인), (c) Server
+> Manager의 ACTIVITY LOG가 서버 시작 메시지 1건 외엔 아무것도 기록 안 하던 것을 발견해 매 쿼리
+> 실행 결과를 기록하도록 추가, (d) Connect to Server 폼의 레이아웃 오버플로 CSS 버그 수정.
+> 세션 종료 전 `test_full.sql`/`test_full-ver2.sql` 재실행 + `engine_tests.exe` 전체 재확인 —
+> **3276/3276 통과** (Debug/Release 둘 다).
 
 **P0**=정확성/무결성 직결(즉시 수정) · **P1**=핵심 아키텍처/보안 · **P2**=성능/호환성/사용성 · **P3**=장기 확장·정리
 
@@ -56,12 +80,14 @@
 
 | 우선순위 | 항목 | 현재 문제 (근거) | 기대 효과 | 난이도 |
 |---|---|---|---|---|
-| P0 | 테이블 파일이 fsync 없이 flush만 됨 | `disk.rs:150-179` — WAL 커밋기록은 fsync되지만 커밋 직후 바로 삭제되어, 크래시 시 데이터도 WAL도 없는 상태 가능 | WAL 본연의 내구성 목적 달성 | 중간 |
-| P0 | 테이블 저장이 원자적이지 않음 | `disk.rs:154-156,203-245` — truncate 후 즉시 write, 손상 시 "빈 테이블"로 오인 | 손상을 명확한 에러로 표시 | 중간 |
+| ✅ 완료 | (C++ 신규 회귀) WAL 커밋 fsync가 완전히 무동작 | 원인: 원본 Rust `wal.rs`/`group_commit.rs`는 `file.sync_all()`로 실제 fsync를 하는데, C++ 이식 과정에서 "std::fstream has no portable fsync"라는 (틀린) 주석과 함께 `flush()`만 호출 — `group_commit.cpp`는 그 `flush()`조차 아무것도 안 쓴 새로 연 빈 스트림에 호출해 완전히 무동작이었음. **이식 때 새로 생긴 회귀지 원본 버그가 아님.** C++ `wal.cpp`/`group_commit.cpp`를 C stdio(`FILE*`)로 바꿔 `_commit`(Windows)/`fsync`(POSIX)로 실제 디스크 동기화하도록 수정 | 커밋 직후 크래시 시에도 데이터 유실 방지 (그룹 커밋 기능의 존재 이유 자체) | 중간 |
+| ✅ 완료 | 테이블/스키마 파일이 fsync 없이 flush만 됨 + 저장이 원자적이지 않음 | 원인(Rust `disk.rs:150-179,154-156,203-245`): `truncate(true)`로 열자마자 즉시 write, fsync 없음 — 크래시 시 손상되거나(truncate 후 write 실패) 디스크에 실제로 반영 안 됐을 수 있음. C++ `disk.cpp`의 `write_file`/`write_file_bytes`를 "임시파일(.tmp)에 쓰기 → fsync → 원래 경로로 원자적 rename" 방식으로 재작성(WAL과 동일한 `_commit`/`fsync` 사용) | 테이블/스키마/인덱스메타 등 모든 영속 파일의 내구성·원자성 확보 | 중간 |
+| ✅ 완료 | (위 두 수정이 남긴 신규 갭) fwrite/fflush/fsync 실패를 아무도 확인 안 함 | 원인: 원본 Rust는 `.expect(...)`로 파일 열기/쓰기/fsync 실패 시 즉시 panic(=디스크 풀 등 I/O 에러 시 "커밋됐다"는 거짓 성공 응답 대신 프로세스 중단)하는데, 위 두 항목을 고치며 새로 쓴 C stdio 코드(`wal.cpp`/`disk.cpp`)와 기존 `txn_manager.cpp`의 Undo 로그 append가 반환값을 하나도 확인 안 하고 있었음(C++-대-Rust 전체 대조 감사에서 발견). 세 곳 모두 `fwrite`/`fflush`/`_commit`·`fsync`/스트림 open 실패 시 예외를 던지도록 수정, Rust의 `.expect()` 실패 시맨틱과 동일하게 맞춤 | I/O 실패를 거짓 커밋 성공으로 조용히 삼키는 것 방지 | 낮음 |
+| ✅ 완료 | (실사용 중 실제로 크래시 재현) 커넥션 핸들러에 예외 안전장치 없음 → 서버 전체 다운 | 원인: 위 항목대로 예외를 던지게 고친 뒤, UI에서 벤치마크 실행 중 실제로 `engine_server.exe`가 `abort()`로 죽는 걸 사용자가 직접 겪음(Debug Error 다이얼로그) — Rust는 커넥션 스레드 하나가 panic해도 `std::thread::spawn`이 그 스레드만 격리해서 죽이는데, C++은 스레드 안에서 예외가 하나라도 처리 안 되고 새어나가면 `std::terminate()`가 프로세스 전체를 abort시켜 **접속해있는 모든 클라이언트가 같이 끊김**. 정확한 예외 트리거 지점은 재현 못 했지만(사용자의 오래 누적된 데이터 디렉터리에서만 발생, 새 디렉터리 3종 시나리오로 재현 시도했으나 실패), 근본 원인(예외 안전장치 부재)은 명확해 서버(`server/main.cpp`)와 CLI(`cli/main.cpp`) 양쪽의 쿼리 실행부를 try/catch로 감싸 예외를 그 쿼리 하나의 ERR 응답으로 변환하도록 수정 | 어떤 내부 오류가 나도 서버 전체가 아니라 해당 쿼리 하나만 실패 (Rust의 스레드별 panic 격리와 동등한 효과) | 낮음 |
 | P1 | WAL/Undo "트랜잭션 제거"가 비원자적 전체 재작성 | `wal.rs:234-249, txn_manager.rs:181-206` — 다른 세션과 공유 파일이라 크래시 시 타 세션 기록도 손상 가능 | 안전한 로그 관리 | 높음 |
 | P1 | 체크포인트-그룹커밋 TOCTOU 레이스 | `executor.rs:824` vs 실제 fsync 시점 불일치 | 크래시 복구 시 커밋 유실 방지 | 높음 |
 | P1 | WAL/Undo 디코딩이 첫 손상 지점서 이후 전부 폐기 | `wal.rs:80-95, txn_manager.rs:101-123` — 체크섬 없음 | 부분 손상에도 최대 복구 | 중간 |
-| P0 | 크래시 복구가 보조/복합 인덱스 미갱신 | `executor.rs:8130-8298` — REDO/UNDO가 `s.tables`만 갱신 | 복구 후 인덱스 조회 정확성 | 높음 |
+| ✅ 완료 | 크래시 복구가 보조/복합 인덱스 미갱신 | 원인(Rust `executor.rs:8130-8298`, 이식 시 그대로 보존): REDO/UNDO replay가 `s.tables`와(REDO INSERT에 한해서만) PK B+Tree만 갱신하고, 보조 btree/hash/복합 인덱스는 물론 UPDATE/DELETE/UNDO 경로의 PK B+Tree조차 갱신 안 함. C++ `executor_txn.cpp`의 `recover_from_wal`에서 replay 중 건드린 테이블을 모아 replay 완료 후 PK/보조/해시/복합 인덱스를 전부 재구축하도록 수정. `test_executor_txn.cpp`에 `commit_write_record()`로 "커밋 WAL은 썼지만 finalize 전 크래시"를 재현하는 회귀 테스트 추가 | 크래시 복구 후 인덱스 기반 조회 정확성 | 높음 |
 | P2 | SERIALIZABLE이 phantom(행 개수)만 감지 | `txn_manager.rs:293-310` — write-skew 미탐지 | 이상현상 탐지 정교화 | 높음 |
 | P1 | Lock wait timeout이 실제로 대기 안 함 | `executor.rs:3319-3378` — 즉시 에러 반환, sleep 없음(사실상 NOWAIT) | 락 타임아웃 설명대로 동작 | 중간 |
 | P2 | READ UNCOMMITTED/COMMITTED 코드상 미분화 | `txn_manager.rs:262-289` — 동일 분기 처리 | 격리수준 문서-동작 일치 | 중간 |
@@ -70,8 +96,8 @@
 
 | 우선순위 | 항목 | 현재 문제 (근거) | 기대 효과 | 난이도 |
 |---|---|---|---|---|
-| P0 | 사용자 테이블 비면 인증 무조건 통과 | `executor.rs:198,215` — fail-open (`if users.is_empty() { return true }`) | fail-closed 보장 | 낮음 |
-| P0 | BACKUP/RESTORE 경로 미검증 | `parser.rs:3783-3830, executor.rs:7435-7478` — 임의 파일 쓰기/읽기, RESTORE는 사실상 SQL include 취약점 | 백업 디렉터리 샌드박싱 | 낮음~중간 |
+| ✅ 완료 | 사용자 테이블 비면 인증 무조건 통과 | 원인(Rust `executor.rs:198,215`, 이식 시 그대로 보존): fail-open (`if users.is_empty() { return true }`). 서버는 두 리스너(native/MySQL) 모두 `ensure_default_user()`를 부팅 시 미리 호출해 실제로는 이 분기가 도달 안 되지만, 방어적으로 C++ `validate_credentials`/`verify_mysql_native_password`에서 open-mode 폴백 완전히 제거(fail-closed) | 향후 진입점 추가/`ensure_default_user` 누락 시에도 인증 우회 불가 | 낮음 |
+| ✅ 완료 | BACKUP/RESTORE 경로 미검증 | 원인(Rust `parser.rs:3783-3830, executor.rs:7435-7478`, 이식 시 그대로 보존): 사용자가 준 파일명을 그대로 `fs::write`/`fs::read_to_string`에 전달 — BACKUP은 임의 파일 쓰기, RESTORE는 임의 파일을 읽어 SQL로 **실행**(사실상 SQL include). C++ `executor_backup.cpp`에 `resolve_backup_path` 추가 — 영문/숫자/`_`/`-`/`.`만 허용하는 순수 파일명만 받아 `<data_dir>/_backups/`로 샌드박싱, 절대경로·`..`·구분자 전부 거부. 부수적으로 `DiskManager::list_databases()`가 새로 생긴 `_backups` 디렉터리를 실제 DB로 오인해 기본 `current_db`를 가로채던 버그도 같이 발견해 수정(밑줄로 시작하는 최상위 디렉터리는 전부 제외) | 임의 파일 읽기/쓰기(SQL include) 취약점 제거 | 낮음~중간 |
 | P1 | Native TCP가 비밀번호 평문 전송 | `main.rs:185-199, client/main.rs:120` — MySQL 프로토콜은 이미 SHA1 챌린지-응답 구현했는데 반대로 이게 더 취약 | 두 프로토콜 보안 수준 통일 | 중간 |
 | P1 | MySQL 리스너 기본 0.0.0.0 바인딩 | `mysql.rs:1030` — native는 127.0.0.1인데 이건 LAN 전체 노출, root/root 기본계정과 결합 시 위험 | 안전한 기본값/명시적 바인드 선택 | 낮음 |
 | P2 | TLS/SSL 전무 | `code/backend/third_party`에 OpenSSL/Schannel 등 TLS 라이브러리 없음 (원본 Rust도 rustls/native-tls 없었음) | 전송 계층 보안 | 높음 |
@@ -96,6 +122,7 @@
 | P1 | SHOW INDEX/TABLE STATUS 등 하드코딩 빈 결과 | `mysql.rs:726-750` — MCP get_indexes 도구도 항상 오답 | 실제 조회 가능, MCP 도구 정상화 | 중간 |
 | P2 | information_schema 실구현 부재 | JDBC/ORM(Hibernate 등) 메타데이터 조회 실패 위험 | 표준 드라이버 호환성 | 높음 |
 | P2 | 커넥션풀 커맨드 미지원→패킷 디싱크 | `mysql.rs:921-1021` — COM_CHANGE_USER 등 | 풀링 드라이버 호환성 | 중간 |
+| ✅ 완료 | (C++ 이식 시 신규 발견) COM_STMT_EXECUTE FLOAT/DOUBLE 파라미터 정밀도 손실 | 원인: 원본 Rust `mysql.rs:285-298`는 `format!("{}", v)`(반올림 없는 최단 왕복 표현)를 쓰는데, C++ 이식은 `std::to_string(double)`(고정 소수점 6자리)을 써서 바인딩된 FLOAT/DOUBLE 파라미터가 쿼리 실행 전에 이미 정밀도 손실(예: `3.141592653589793` → `3.141593`). 원본 코드 리뷰 중이 아니라 이후 C++-대-Rust 전체 대조 감사에서 발견. 실제 MySQL 바이너리 프로토콜(수동 구현한 핸드셰이크+COM_STMT_PREPARE/EXECUTE)로 라이브 재현 — 수정 전/후 정밀도 차이 직접 확인. C++ `mysql.cpp`에 `fmt_double_param`(엔진 코어의 `fmt_double`과 동일한 `to_chars`+`chars_format::fixed` 기법) 추가해 두 케이스 모두 교체 | 프리페어드 스테이트먼트로 FLOAT/DOUBLE 바인딩하는 모든 클라이언트(ORM 등)의 정확성 | 낮음 |
 
 ## G. UI/UX
 

@@ -53,8 +53,7 @@ TEST_CASE("EXPLAIN ANALYZE executes the query and reports actual timing/row coun
 
 TEST_CASE("BACKUP produces SQL text and RESTORE replays it into a fresh database", "[executor][misc]") {
     TempDataDir dir("exec_misc_data_3");
-    std::string backup_file = dir.path + "_backup.sql";
-    fs::remove(backup_file);
+    std::string backup_filename = "exec_misc_data_3_backup.sql";
 
     {
         Executor ex(dir.path);
@@ -64,23 +63,80 @@ TEST_CASE("BACKUP produces SQL text and RESTORE replays it into a fresh database
         REQUIRE(ex.execute_sql("INSERT INTO t VALUES (1, 'Alice')").is_ok());
         REQUIRE(ex.execute_sql("INSERT INTO t VALUES (2, 'Bob')").is_ok());
 
-        auto backup = ex.execute_sql("BACKUP DATABASE company INTO '" + backup_file + "'");
+        auto backup = ex.execute_sql("BACKUP DATABASE company INTO '" + backup_filename + "'");
         REQUIRE(backup.is_ok());
         REQUIRE(backup.value().find("Backup of 'company' written") != std::string::npos);
-        REQUIRE(fs::exists(backup_file));
+        // BACKUP/RESTORE are sandboxed to <data_dir>/_backups/ (PLAN.md section D fix),
+        // not the raw path the caller supplied.
+        REQUIRE(fs::exists(dir.path + "/_backups/" + backup_filename));
     }
 
+    // Simulate "the backup file was carried over to a different data dir" by copying it
+    // into the restoring Executor's own sandboxed directory.
     TempDataDir dir2("exec_misc_data_3_restore");
+    fs::create_directories(dir2.path + "/_backups");
+    fs::copy_file(dir.path + "/_backups/" + backup_filename, dir2.path + "/_backups/" + backup_filename);
+
     Executor ex2(dir2.path);
-    auto restore = ex2.execute_sql("RESTORE FROM '" + backup_file + "'");
+    auto restore = ex2.execute_sql("RESTORE FROM '" + backup_filename + "'");
     REQUIRE(restore.is_ok());
     REQUIRE(restore.value().find("statement(s) OK") != std::string::npos);
 
     auto s = ex2.get_shared()->read();
     REQUIRE(s->tables.count("company.t") == 1);
     REQUIRE(s->tables.at("company.t").size() == 2);
+}
 
-    fs::remove(backup_file);
+TEST_CASE("BACKUP/RESTORE reject path traversal and absolute paths", "[executor][misc][regression]") {
+    // Regression, faithfully preserved from Rust (legacy/rusql-core/src/engine/executor.rs
+    // exec_backup/exec_restore): the output/source filename used to be passed straight to
+    // std::ofstream/ifstream with no validation -- BACKUP could overwrite an arbitrary
+    // file the server process can reach, and RESTORE would read *and execute as SQL*
+    // whatever text is at an arbitrary path. Both are now confined to
+    // <data_dir>/_backups/, rejecting anything but a bare alnum/'_'/'-'/'.' filename.
+    TempDataDir dir("exec_misc_data_backup_sandbox");
+    Executor ex(dir.path);
+    REQUIRE(ex.execute_sql("CREATE DATABASE company").is_ok());
+    REQUIRE(ex.execute_sql("USE company").is_ok());
+
+    auto traversal = ex.execute_sql("BACKUP DATABASE company INTO '../escape.sql'");
+    REQUIRE(traversal.is_err());
+
+    auto absolute_unix = ex.execute_sql("BACKUP DATABASE company INTO '/etc/passwd'");
+    REQUIRE(absolute_unix.is_err());
+
+    auto restore_traversal = ex.execute_sql("RESTORE FROM '../../some_other_file.sql'");
+    REQUIRE(restore_traversal.is_err());
+
+    // A plain filename must still work (the sandboxed, non-malicious path).
+    auto ok = ex.execute_sql("BACKUP DATABASE company INTO 'plain_name.sql'");
+    REQUIRE(ok.is_ok());
+    REQUIRE(fs::exists(dir.path + "/_backups/plain_name.sql"));
+}
+
+TEST_CASE("The _backups sandbox directory never surfaces as a real database", "[executor][misc][regression]") {
+    // Regression introduced by the BACKUP/RESTORE sandboxing fix above: a fresh Executor
+    // picks its default current_db as *std::min_element(databases) (executor_core.cpp),
+    // and DiskManager::list_databases() originally only excluded "_system" -- so once a
+    // data dir had ever taken a backup, the new top-level "_backups" directory sorted
+    // before any real db name and got silently adopted as the default database for every
+    // later session with no explicit USE, breaking unqualified statements like
+    // "DROP TABLE IF EXISTS t" (resolved against "_backups.t" instead of the real db).
+    TempDataDir dir("exec_misc_data_backup_no_fake_db");
+    {
+        Executor ex(dir.path);
+        REQUIRE(ex.execute_sql("CREATE DATABASE company").is_ok());
+        REQUIRE(ex.execute_sql("USE company").is_ok());
+        REQUIRE(ex.execute_sql("CREATE TABLE t (id INT PRIMARY KEY)").is_ok());
+        REQUIRE(ex.execute_sql("BACKUP DATABASE company INTO 'b.sql'").is_ok());
+        REQUIRE(fs::exists(dir.path + "/_backups/b.sql"));
+    }
+
+    Executor ex2(dir.path);
+    REQUIRE(ex2.current_db == "company");
+    auto dbs = ex2.execute_sql("SHOW DATABASES");
+    REQUIRE(dbs.is_ok());
+    REQUIRE(dbs.value().find("_backups") == std::string::npos);
 }
 
 TEST_CASE("Multi-table UPDATE via JOIN updates matching rows in the target table", "[executor][misc]") {

@@ -1,41 +1,22 @@
 {
   "single": {
     "rows": 10000,
-    "insert_s": 3.5,
-    "delete_s": 3.79
+    "insert_s": 2.83,
+    "delete_s": 2.28
   },
   "bulk": {
     "rows": 100000,
-    "insert_s": 3.61,
-    "delete_s": 0.89
+    "insert_s": 2.51,
+    "delete_s": 0.51
   },
   "point_lookup": {
-    "seq_ms": 14.782,
-    "idx_ms": 0.193,
-    "speedup": 76.6
-  },
-  "range_query": {
-    "seq_ms": 11.07,
-    "idx_ms": 1.31,
-    "speedup": 8.5
-  },
-  "top_k": {
-    "seq_ms": 11.348,
-    "idx_ms": 4.54,
-    "speedup": 2.5
+    "seq_ms": 4.257,
+    "idx_ms": 0.093,
+    "speedup": 45.8
   },
   "transaction": {
     "rows": 1000,
-    "auto_s": 0.3,
-    "txn_s": 9.15
-  },
-  "parallel": {
-    "off_ms": 274.0,
-    "on_ms": 156.9
-  },
-  "order_by": {
-    "off_ms": 129.3,
-    "on_ms": 129.6,
-    "speedup": 1.0
+    "auto_s": 0.17,
+    "txn_s": 11.69
   }
 }
