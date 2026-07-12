@@ -90,21 +90,15 @@ Statement Parser::parse_select() {
                     std::string first = advance()->text;
                     std::string col_name = first;
                     if (peek_is(TokenKind::Dot)) { advance(); col_name = expect_ident(); }
-                    // SUM(col IS NULL) / SUM(col IS NOT NULL) → SumCase/CountCase
-                    if (peek_is(TokenKind::Is)) {
-                        advance(); // consume IS
-                        bool negated = false;
-                        if (peek_is(TokenKind::Not)) { advance(); negated = true; }
-                        if (!peek_is(TokenKind::Null)) throw ParseError("Expected NULL after IS [NOT]");
-                        advance();
-                        if (!peek_is(TokenKind::RParen)) throw ParseError("Expected ')' after IS NULL expression");
-                        advance();
-                        rparen_consumed = true;
-                        Operator op = negated ? Operator::IsNotNull : Operator::IsNull;
-                        CondExpr cond = CondExpr(CondExpr::Leaf{
-                            Condition{ArithExpr(ArithExpr::Col{col_name}), op, ConditionValue(ConditionValue::Literal{""})}});
+                    // SUM(col > x) / SUM(col IS NULL) / SUM(col LIKE ..) / SUM(col BETWEEN ..) /
+                    // SUM(col IN (..)) → SumCase/CountCase over a synthesized
+                    // CASE WHEN <predicate> THEN 1 ELSE 0 END, reusing the same predicate-tail
+                    // parser as a normal WHERE-clause condition instead of a narrower one-off.
+                    if (!peek_is(TokenKind::RParen)) {
+                        Condition cond = parse_pred_tail(ArithExpr(ArithExpr::Col{col_name}));
+                        CondExpr cond_expr = CondExpr(CondExpr::Leaf{std::move(cond)});
                         std::vector<CaseWhenBranch> branches;
-                        branches.push_back(CaseWhenBranch{std::move(cond), "1"});
+                        branches.push_back(CaseWhenBranch{std::move(cond_expr), "1"});
                         func = std::visit([&](const auto& alt) -> AggFunc {
                             using T = std::decay_t<decltype(alt)>;
                             if constexpr (std::is_same_v<T, AggFunc::Count> || std::is_same_v<T, AggFunc::CountDistinct>)

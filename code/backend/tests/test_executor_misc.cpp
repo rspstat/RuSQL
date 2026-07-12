@@ -88,7 +88,7 @@ TEST_CASE("BACKUP produces SQL text and RESTORE replays it into a fresh database
 }
 
 TEST_CASE("BACKUP/RESTORE reject path traversal and absolute paths", "[executor][misc][regression]") {
-    // Regression, faithfully preserved from Rust (legacy/rusql-core/src/engine/executor.rs
+    // Regression, faithfully preserved from Rust (code/legacy/rusql-core/src/engine/executor.rs
     // exec_backup/exec_restore): the output/source filename used to be passed straight to
     // std::ofstream/ifstream with no validation -- BACKUP could overwrite an arbitrary
     // file the server process can reach, and RESTORE would read *and execute as SQL*

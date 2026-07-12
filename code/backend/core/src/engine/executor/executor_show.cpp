@@ -214,10 +214,22 @@ StringResult Executor::exec_show_index(const SharedDatabase& s, const std::strin
     std::string q_table = table.find('.') != std::string::npos ? table : current_db + "." + table;
     std::string bare = bare_name(table);
 
-    if (!s.catalog.tables.count(q_table)) return StringResult::Err("Table '" + bare + "' not found");
+    const TableSchema* schema = s.catalog.get_table(q_table);
+    if (!schema) return StringResult::Err("Table '" + bare + "' not found");
 
     std::vector<std::string> rows;
     rows.push_back("Table\tKey_name\tColumn_name\tIndex_type");
+
+    // PRIMARY KEY B+Tree — every table's own PK index, tracked separately from the
+    // secondary/composite index metadata iterated below (s.index_meta/composite_indexes
+    // only ever holds CREATE INDEX-created indexes, never the implicit PK one).
+    if (!schema->primary_key_columns.empty()) {
+        for (auto& col : schema->primary_key_columns) rows.push_back(bare + "\tPRIMARY\t" + col + "\tBTREE");
+    } else {
+        for (auto& col : schema->columns) {
+            if (col.primary_key) rows.push_back(bare + "\tPRIMARY\t" + col.name + "\tBTREE");
+        }
+    }
 
     for (auto& [idx_name, meta] : s.index_meta) {
         if (meta.first == q_table) rows.push_back(bare + "\t" + idx_name + "\t" + meta.second + "\tBTREE");

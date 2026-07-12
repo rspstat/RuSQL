@@ -215,6 +215,28 @@ TEST_CASE("SELECT with GROUP BY and HAVING", "[executor][select]") {
     REQUIRE(r.value().find("1 row(s) returned.") != std::string::npos);
 }
 
+TEST_CASE("SUM/COUNT over a comparison expression", "[executor][select]") {
+    // Regression: the aggregate-argument parser only accepted '*' or a bare column
+    // identifier, so SUM(col > x) (a common "conditional sum" idiom, e.g. counting rows
+    // matching a predicate) failed to parse with "Expected ')' after aggregate". Fixed by
+    // reusing the same predicate-tail parser WHERE uses, converting it into the existing
+    // SumCase/CountCase machinery (the same one already used for SUM(col IS NULL)).
+    TempDataDir dir("exec_sel_data_7b");
+    Executor ex(dir.path);
+    REQUIRE(ex.execute_sql("CREATE DATABASE company").is_ok());
+    REQUIRE(ex.execute_sql("USE company").is_ok());
+    REQUIRE(ex.execute_sql("CREATE TABLE emp (id INT PRIMARY KEY, age INT)").is_ok());
+    REQUIRE(ex.execute_sql("INSERT INTO emp VALUES (1,30),(2,25),(3,40)").is_ok());
+
+    auto r1 = ex.execute_sql("SELECT SUM(age > 26) AS cnt FROM emp");
+    REQUIRE(r1.is_ok());
+    REQUIRE(r1.value().find("2") != std::string::npos); // ages 30 and 40 qualify
+
+    auto r2 = ex.execute_sql("SELECT COUNT(age >= 30) AS cnt FROM emp");
+    REQUIRE(r2.is_ok());
+    REQUIRE(r2.value().find("2") != std::string::npos);
+}
+
 TEST_CASE("SELECT with INNER JOIN", "[executor][select]") {
     TempDataDir dir("exec_sel_data_8");
     Executor ex(dir.path);

@@ -863,9 +863,41 @@ std::optional<StringResult> mysql_compat(const std::string& q, Executor& exec) {
     }
 
     if (up.rfind("SHOW INDEX FROM", 0) == 0 || up.rfind("SHOW INDEXES FROM", 0) == 0 || up.rfind("SHOW KEYS FROM", 0) == 0) {
+        auto tbl_opt = extract_first_from(q);
+        std::vector<std::vector<std::string>> rows;
+        if (tbl_opt) {
+            auto out = exec_inner(exec, "SHOW INDEX FROM " + *tbl_opt);
+            // exec_show_index's native TSV is Table/Key_name/Column_name/Index_type, with a
+            // composite index's columns crammed into one comma-joined Column_name -- expand
+            // that into one row per column (with an incrementing Seq_in_index) to match what
+            // real MySQL's SHOW INDEX returns for a multi-column index.
+            if (out.is_ok()) {
+                if (auto parsed = parse_table(out.value())) {
+                    for (auto& r : parsed->second) {
+                        std::string table_name = r.size() > 0 ? r[0] : *tbl_opt;
+                        std::string key_name = r.size() > 1 ? r[1] : "";
+                        std::string col_list = r.size() > 2 ? r[2] : "";
+                        std::string idx_type = r.size() > 3 ? r[3] : "BTREE";
+                        std::string non_unique = key_name == "PRIMARY" ? "0" : "1";
+                        int seq = 1;
+                        std::size_t start = 0;
+                        for (;;) {
+                            auto comma = col_list.find(", ", start);
+                            std::string col = trim_copy(col_list.substr(start, comma == std::string::npos ? std::string::npos : comma - start));
+                            if (!col.empty()) {
+                                rows.push_back({table_name, non_unique, key_name, std::to_string(seq++), col, "A", "NULL", "NULL",
+                                                 "NULL", "", idx_type, "", ""});
+                            }
+                            if (comma == std::string::npos) break;
+                            start = comma + 2;
+                        }
+                    }
+                }
+            }
+        }
         return StringResult::Ok(box_table({"Table", "Non_unique", "Key_name", "Seq_in_index", "Column_name", "Collation", "Cardinality",
                                             "Sub_part", "Packed", "Null", "Index_type", "Comment", "Index_comment"},
-                                           {}));
+                                           rows));
     }
 
     if (up.rfind("SHOW FULL TABLES", 0) == 0) {

@@ -58,7 +58,7 @@ TEST_CASE("CREATE USER / DROP USER / GRANT / REVOKE / SHOW GRANTS", "[executor][
 
 TEST_CASE("validate_credentials/verify_mysql_native_password fail closed when the user table is empty",
           "[executor][dcl][regression]") {
-    // Regression, faithfully preserved from Rust (legacy/rusql-core/src/engine/executor.rs:198,215):
+    // Regression, faithfully preserved from Rust (code/legacy/rusql-core/src/engine/executor.rs:198,215):
     // both functions used to return true unconditionally ("open mode") whenever `users`
     // was empty, on the assumption that the server always calls ensure_default_user() at
     // boot (before either listener accepts a connection) so this state is unreachable in
@@ -199,6 +199,26 @@ TEST_CASE("SHOW CREATE VIEW and SHOW INDEX", "[executor][dcl]") {
     REQUIRE(idx.is_ok());
     REQUIRE(idx.value().find("idx_name") != std::string::npos);
     REQUIRE(idx.value().find("name") != std::string::npos);
+    // Regression: exec_show_index used to only iterate s.index_meta/composite_indexes
+    // (CREATE INDEX-created indexes), never the table's own implicit PRIMARY KEY B+Tree,
+    // so SHOW INDEX looked "always empty" on any table with only a PK and no secondary index.
+    REQUIRE(idx.value().find("PRIMARY") != std::string::npos);
+}
+
+TEST_CASE("SHOW INDEX on a table with only a PRIMARY KEY (no CREATE INDEX)", "[executor][dcl]") {
+    // Regression: a table with just a PK and no secondary/composite index used to report
+    // "No indexes found" -- SHOW INDEX only ever looked at CREATE INDEX-tracked metadata.
+    TempDataDir dir("exec_dcl_data_7b");
+    Executor ex(dir.path);
+    REQUIRE(ex.execute_sql("CREATE DATABASE company").is_ok());
+    REQUIRE(ex.execute_sql("USE company").is_ok());
+    REQUIRE(ex.execute_sql("CREATE TABLE dept (id INT PRIMARY KEY, name VARCHAR(50))").is_ok());
+
+    auto idx = ex.execute_sql("SHOW INDEX FROM dept");
+    REQUIRE(idx.is_ok());
+    REQUIRE(idx.value().find("No indexes found") == std::string::npos);
+    REQUIRE(idx.value().find("PRIMARY") != std::string::npos);
+    REQUIRE(idx.value().find("\tid\t") != std::string::npos);
 }
 
 TEST_CASE("VACUUM removes dead (deleted) rows and reclaims them", "[executor][dcl]") {

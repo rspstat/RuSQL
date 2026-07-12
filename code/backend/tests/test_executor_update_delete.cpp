@@ -45,7 +45,7 @@ TEST_CASE("UPDATE on a composite-PK table only touches the row matching every PK
     // PK-marked column (matching_pks keyed on that alone). On a composite PK, distinct
     // rows sharing the same leading column's value got conflated, so `WHERE a=1 AND b=1`
     // incorrectly updated every row with a=1 regardless of b. Faithfully-preserved from
-    // the original Rust (legacy/rusql-core/src/engine/executor.rs), fixed here by using
+    // the original Rust (code/legacy/rusql-core/src/engine/executor.rs), fixed here by using
     // a \x00-joined composite key (mirrors the composite index convention) for WHERE-
     // condition row matching, while locking/undo/PK-index upkeep keep using the single
     // leading column, unchanged, matching the rest of the engine's row-identity model.

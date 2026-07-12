@@ -114,7 +114,14 @@ Condition Parser::parse_single_pred() {
 
     // Left side: arithmetic expression (handles columns, aggregates, arithmetic)
     ArithExpr left = parse_arith_expr();
+    return parse_pred_tail(std::move(left));
+}
 
+/// Parses the operator + RHS following an already-parsed LHS: OP val, IS NULL, BETWEEN,
+/// LIKE, IN, REGEXP, etc. Factored out of parse_single_pred() so callers that already
+/// have an ArithExpr in hand (e.g. an aggregate's bare column argument, for `SUM(col > x)`)
+/// can reuse the same predicate grammar instead of duplicating a narrower one.
+Condition Parser::parse_pred_tail(ArithExpr left) {
     auto read_in_value = [this]() -> std::string {
         const Token* t = advance();
         if (!t) throw ParseError("Expected value in IN list");

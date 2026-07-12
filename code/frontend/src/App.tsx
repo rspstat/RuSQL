@@ -351,6 +351,11 @@ function App() {
         if (migrated.some((c, i) => c.dataDir !== prev[i].dataDir)) {
           localStorage.setItem("rusql_connections", JSON.stringify(migrated));
         }
+        // 저장된 연결 어디에도 속하지 않는 고아 데이터 디렉토리 정리 (인증 실패/취소,
+        // UI 밖에서 직접 띄운 서버 등으로 생긴 잔여물)
+        invoke<string[]>("cleanup_orphan_data_dirs", { base, keep: migrated.map(c => c.dataDir) })
+          .then(removed => { if (removed.length) console.log("정리된 고아 데이터 디렉토리:", removed); })
+          .catch(() => {});
         return migrated;
       });
     });

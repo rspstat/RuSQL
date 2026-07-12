@@ -157,7 +157,7 @@ TEST_CASE("SHOW BUFFER POOL / SHOW WAL / SHOW LOCKS / CHECKPOINT", "[executor][t
 
 TEST_CASE("Crash recovery rebuilds secondary/hash indexes for a redone commit, not just the table rows",
           "[executor][txn][regression]") {
-    // Regression, faithfully preserved from Rust (legacy/rusql-core/src/engine/executor.rs
+    // Regression, faithfully preserved from Rust (code/legacy/rusql-core/src/engine/executor.rs
     // recover_from_wal): the REDO/UNDO replay loop only ever patched s.tables (and, for a
     // REDO INSERT only, the PK B+Tree) -- secondary/hash/composite indexes were left
     // exactly as they were before the crash, stale relative to the just-recovered rows.

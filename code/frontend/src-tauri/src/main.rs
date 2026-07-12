@@ -721,6 +721,30 @@ fn delete_conn_data(data_dir: String) -> bool {
     }
 }
 
+// data/ 바로 아래에는 각 연결(Connection)의 전용 dataDir만 있어야 하는데, 연결 추가 후
+// 인증 실패/중도 취소나 UI 밖에서(CLI 등으로) 직접 띄운 서버 때문에 어떤 저장된 연결에도
+// 속하지 않는 디렉토리가 남을 수 있다. 앱 시작 시 한 번, 현재 저장된 연결들의 dataDir(keep)
+// 목록에 없는 하위 디렉토리를 정리한다. `_`로 시작하는 예약 디렉토리(_system, _backups 등)는
+// list_databases()와 동일한 규칙으로 건드리지 않는다.
+#[tauri::command]
+fn cleanup_orphan_data_dirs(base: String, keep: Vec<String>) -> Vec<String> {
+    let norm = |s: &str| s.trim_end_matches(['\\', '/']).to_lowercase();
+    let keep_set: std::collections::HashSet<String> = keep.iter().map(|k| norm(k)).collect();
+    let mut removed = Vec::new();
+    let Ok(entries) = std::fs::read_dir(&base) else { return removed; };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() { continue; }
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name.starts_with('_') { continue; }
+        if keep_set.contains(&norm(&path.to_string_lossy())) { continue; }
+        if std::fs::remove_dir_all(&path).is_ok() {
+            removed.push(path.to_string_lossy().to_string());
+        }
+    }
+    removed
+}
+
 #[tauri::command]
 fn authenticate(user: String, password: String, data_dir: String, buffer_pool_size: usize, state: State<AppState>) -> bool {
     let bp = if buffer_pool_size > 0 { buffer_pool_size } else { 64 };
@@ -944,10 +968,7 @@ fn setup_mcp_config() -> Result<String, String> {
         "args": ["-u", mcp_server_path.to_string_lossy().as_ref()],
         "alwaysAllow": [
             "execute_sql", "list_databases", "list_tables", "get_table_schema",
-            "explain_query", "get_indexes", "sample_data",
-            "write_to_editor", "open_new_tab", "execute_in_editor", "close_tab",
-            "get_tab_content", "list_tabs", "switch_to_tab",
-            "get_query_result", "get_current_database"
+            "explain_query", "get_indexes", "sample_data"
         ]
     });
 
@@ -1077,6 +1098,7 @@ fn main() {
             get_triggers_for_db,
             authenticate,
             delete_conn_data,
+            cleanup_orphan_data_dirs,
             start_server,
             stop_server,
             get_server_status,

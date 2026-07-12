@@ -88,6 +88,7 @@ private:
     CondExpr parse_not_expr();
     CondExpr parse_primary_cond();
     Condition parse_single_pred();
+    Condition parse_pred_tail(ArithExpr left);
     Statement parse_exists_subquery();
 
     ArithExpr parse_arith_factor();
