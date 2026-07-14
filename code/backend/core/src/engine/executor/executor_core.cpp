@@ -490,12 +490,91 @@ std::vector<std::string> Executor::select_tables(const Statement& stmt, const st
 }
 
 // ---------------------------------------------------------------------------
+// is_pure_read_only(): classifies a statement as safe to execute under
+// shared->read() (concurrently with other readers) instead of shared->write().
+//
+// A statement is read-only only if NOTHING reachable from executing it ever
+// mutates any field of SharedDatabase. A WHERE/HAVING/JOIN-ON subquery, or a
+// SELECT-list scalar subquery, can itself carry a FROM-derived-table (which
+// materializes into s.tables via exec_select_with_subquery) even when the
+// *top-level* statement has none — so this must recurse into every nested
+// Statement, not just inspect the top-level Select's own fields. Keep this
+// exhaustive and conservative (default to "not read-only") whenever
+// execute_with_s's dispatch changes; see Executor::execute()'s use of this.
+// ---------------------------------------------------------------------------
+namespace {
+bool cond_value_is_read_only(const ConditionValue& v) {
+    if (auto* sq = std::get_if<ConditionValue::Subquery>(&v.data)) return Executor::is_pure_read_only(*sq->query);
+    return true;
+}
+bool condexpr_is_read_only(const CondExpr& e) {
+    if (auto* v = std::get_if<CondExpr::And>(&e.data)) return condexpr_is_read_only(*v->lhs) && condexpr_is_read_only(*v->rhs);
+    if (auto* v = std::get_if<CondExpr::Or>(&e.data)) return condexpr_is_read_only(*v->lhs) && condexpr_is_read_only(*v->rhs);
+    if (auto* v = std::get_if<CondExpr::Not>(&e.data)) return condexpr_is_read_only(*v->inner);
+    if (auto* v = std::get_if<CondExpr::Leaf>(&e.data)) return cond_value_is_read_only(v->condition.value);
+    return true;
+}
+bool opt_condexpr_is_read_only(const std::optional<CondExpr>& e) { return !e || condexpr_is_read_only(*e); }
+} // namespace
+
+bool Executor::is_pure_read_only(const Statement& stmt) {
+    return std::visit(
+        [](const auto& v) -> bool {
+            using T = std::decay_t<decltype(v)>;
+            if constexpr (std::is_same_v<T, Statement::Select>) {
+                if (v.for_update || v.for_share || v.subquery.has_value()) return false;
+                if (!opt_condexpr_is_read_only(v.condition) || !opt_condexpr_is_read_only(v.having)) return false;
+                for (auto& j : v.joins) {
+                    if (!condexpr_is_read_only(j.on_expr)) return false;
+                }
+                for (auto& c : v.columns) {
+                    if (auto* sq = std::get_if<SelectColumn::Subquery>(&c.data)) {
+                        if (!is_pure_read_only(*sq->query)) return false;
+                    }
+                }
+                return true;
+            } else if constexpr (std::is_same_v<T, Statement::Union> || std::is_same_v<T, Statement::Intersect> ||
+                                  std::is_same_v<T, Statement::Except>) {
+                return is_pure_read_only(*v.left) && is_pure_read_only(*v.right);
+            } else if constexpr (std::is_same_v<T, Statement::Explain>) {
+                return true; // never actually executes v.inner
+            } else if constexpr (std::is_same_v<T, Statement::ExplainAnalyze>) {
+                return is_pure_read_only(*v.inner); // DOES execute v.inner for real
+            } else if constexpr (std::is_same_v<T, Statement::ShowTables> || std::is_same_v<T, Statement::Describe> ||
+                                  std::is_same_v<T, Statement::ShowBufferPool> || std::is_same_v<T, Statement::ShowWal> ||
+                                  std::is_same_v<T, Statement::ShowIsolationLevel> || std::is_same_v<T, Statement::ShowLocks> ||
+                                  std::is_same_v<T, Statement::ShowGrants> || std::is_same_v<T, Statement::ShowRoles> ||
+                                  std::is_same_v<T, Statement::ShowSynonyms> || std::is_same_v<T, Statement::ShowDatabases> ||
+                                  std::is_same_v<T, Statement::ShowCreateTable> || std::is_same_v<T, Statement::ShowCreateView> ||
+                                  std::is_same_v<T, Statement::ShowIndex> || std::is_same_v<T, Statement::ShowProcessList>) {
+                return true; // all provably const-qualified handlers (exec_show_*/exec_describe)
+            } else {
+                // Default: everything else (INSERT/UPDATE/DELETE/DDL/DCL, BEGIN/COMMIT/
+                // ROLLBACK/SAVEPOINT, With (CTE — always materializes into s.tables even
+                // with no subquery), procedure CALL, SET forms, VACUUM/ANALYZE/CHECKPOINT,
+                // ...) stays write-required. Safe default: unknown => not read-only.
+                return false;
+            }
+        },
+        stmt.data);
+}
+
+// ---------------------------------------------------------------------------
 // execute() / execute_sql() / execute_with_s()
 // ---------------------------------------------------------------------------
 
 StringResult Executor::execute(Statement stmt) {
     subquery_cache_.clear();
     if (std::holds_alternative<Statement::Commit>(stmt.data)) return execute_commit_grouped();
+    if (is_pure_read_only(stmt)) {
+        auto s = shared->read();
+        // SAFETY: is_pure_read_only() guarantees this call graph never mutates any
+        // SharedDatabase field except BufferPool's own cache/LRU bookkeeping, which has
+        // its own internal mutex (buffer_pool.hpp) precisely because it's reachable from
+        // here. Multiple sessions may hold shared->read() at the same time — re-audit
+        // is_pure_read_only() whenever execute_with_s's dispatch changes.
+        return execute_with_s(const_cast<SharedDatabase&>(*s), std::move(stmt));
+    }
     auto s = shared->write();
     return execute_with_s(*s, std::move(stmt));
 }

@@ -46,12 +46,14 @@ StringResult Executor::exec_update(SharedDatabase& s, std::string table, std::ve
         committed_backups = std::move(backups);
     }
 
-    fire_triggers(s, table, "BEFORE", "UPDATE");
+    if (auto tr = fire_triggers(s, table, "BEFORE", "UPDATE"); tr.is_err()) return tr;
     auto result = exec_update_inner(s, table, assignments, condition, returning);
     if (committed_backups) {
         for (auto& [tname, committed] : *committed_backups) session_swap_out(s, tname, std::move(committed));
     }
-    if (result.is_ok()) fire_triggers(s, table, "AFTER", "UPDATE");
+    if (result.is_ok()) {
+        if (auto tr = fire_triggers(s, table, "AFTER", "UPDATE"); tr.is_err()) return tr;
+    }
     return result;
 }
 

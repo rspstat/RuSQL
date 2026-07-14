@@ -51,6 +51,22 @@
 > 전부 수정(섹션 F·I에 추가): SHOW INDEX 하드코딩/PK 누락, SUM/COUNT(비교식) 파싱 불가, MCP의
 > UI 제어형 도구 9개가 원래부터 미작동이던 것 제거. 회귀 테스트 3건 추가 후 전체 244 테스트 케이스
 > 3292 assertion 통과 확인.
+>
+> **업데이트 (같은 세션, 계속):** 사용자가 섹션 B(동시성 아키텍처, "가장 가치 있는 구조 개선")를
+> 지목 — 코드 조사 후 완전한 MVCC 재설계 없이 실질적 이득을 낼 수 있는 범위로 계획을 잡고(Plan
+> Mode로 사용자 승인 받음) 진행. 핵심: `SharedDatabase`를 감싸는 `RwLock`이 이미 진짜
+> `std::shared_mutex`인데도 SELECT 포함 모든 문장이 exclusive write lock을 잡던 것을,
+> `is_pure_read_only()` 분류기로 진짜 읽기 전용 문장만 `shared->read()`로 동시 실행하도록 수정
+> (WHERE/HAVING/JOIN-ON에 중첩된 서브쿼리까지 재귀 검사하는 게 핵심 — 안 그러면 파생테이블을 숨긴
+> 서브쿼리가 새 동시-읽기 경로에서 `s.tables`를 조용히 mutate하는 레이스가 생김). 이 과정에서
+> 전에는 전역 락이 사실상 보호막이던 `BufferPool`에 진짜 스레드 안전성이 필요해져 자체 뮤텍스 추가.
+> 덤으로, 이 수정 이후에도 여전히 write-분류로 남는 프로시저 루프/트리거 재귀에 상한이 없어 한
+> 클라이언트의 무한루프가 서버 전체를 영구 정지시킬 수 있던 것도 같이 수정(WHILE/LOOP/REPEAT 10만
+> 회 상한, 트리거 재귀 32단 상한). `test_concurrency.cpp` 신규(실제 스레드로 동시 SELECT/쓰기
+> 스트레스 테스트) + Part B 회귀 테스트 3건 추가, 전체 249 테스트 케이스 3352 assertion 통과.
+> 실제 서버로 대용량 풀스캔 SELECT 진행 중 다른 세션의 `SELECT 1`이 1.06초 대신 0.0002초 만에
+> 응답하는 것으로 실측 확인. 섹션 B의 나머지 항목(트랜잭션 스냅샷 deep-clone, 버퍼풀 read-cache,
+> ASCII 표 재파싱, 조인 카디널리티)은 동시성과 무관하거나 훨씬 큰 별도 작업이라 의도적으로 미착수.
 
 **P0**=정확성/무결성 직결(즉시 수정) · **P1**=핵심 아키텍처/보안 · **P2**=성능/호환성/사용성 · **P3**=장기 확장·정리
 
@@ -78,12 +94,12 @@
 
 | 우선순위 | 항목 | 현재 문제 (근거) | 기대 효과 | 난이도 |
 |---|---|---|---|---|
-| P1 | 전역 단일 락으로 모든 문장 완전 직렬화 | `executor.rs:674-683` — SELECT 포함 모든 문장이 전체 write lock 획득, 두 세션 동시 실행 불가 | LockManager·격리수준·MVCC·병렬실행이 실질적 이득으로 연결 (최우선 리팩토링) | 높음 |
-| P1 | 트랜잭션 스냅샷이 DB 전체 deep clone | `txn_manager.rs:262-278` — BEGIN마다 `tables.clone()` 전체 복제 | 행 단위 버전 체인 전환 시 비용 절감 | 높음 |
-| P1 | 버퍼 풀이 테이블 전체 단위 캐싱(사실상 무의미) | `buffer_pool.rs` — 시작 시 전 테이블이 이미 로드되어 get_page 경로 도달 불가 | 페이지 캐싱 구현 시 대용량 테이블 지원 | 높음 |
-| P1 | 내부 쿼리 합성이 ASCII 표 문자열 재파싱 방식 | `executor.rs` 다수 — UNION/CTE/서브쿼리가 표시용 표를 `\|`로 split해 재파싱, 값에 `\|`/개행 있으면 깨짐 | 구조화된 내부 API로 정확성·성능 개선 | 높음 |
-| P2 | 다중 조인 알고리즘 선택이 누적 카디널리티 미반영 | `planner.rs:121-125` — 2·3번째 조인이 항상 원래 base 테이블 행수 기준 | 다중 테이블 조인 실행계획 정확도 | 중간 |
-| P1 | 프로시저 루프/트리거 재귀에 상한·타임아웃 없음 | `executor.rs:9210-9285,9381-9391` — 전역 락 구조상 무한루프 하나가 서버 전체 정지 | 서버 가용성 확보 | 중간 |
+| ✅ 완료 | 전역 단일 락으로 모든 문장 완전 직렬화 | 원인(Rust `executor.rs:674-683`, C++도 동일하게 `executor_core.cpp`의 `Executor::execute()`가 무조건 `shared->write()`): SELECT 포함 모든 문장이 전체 write lock 획득, 두 세션 동시 실행 불가. `SharedDatabase`를 감싸는 `RwLock<T>`(`sync.hpp`)가 이미 진짜 `std::shared_mutex` 기반이라는 걸 활용 — 완전한 MVCC 재설계 없이, 진짜 읽기 전용 문장(FOR UPDATE/FOR SHARE·파생테이블 없는 SELECT, WHERE/HAVING/JOIN-ON에 중첩된 서브쿼리까지 재귀 검사, SHOW류, DESCRIBE, EXPLAIN)만 `is_pure_read_only()`로 분류해 `shared->read()`로 동시 실행하도록 수정(`executor_core.cpp`). 이 경로에서도 도달 가능한 `BufferPool::get_page`의 캐시미스 채움이 실제 레이스였어서 `BufferPool`에 자체 뮤텍스+atomic 카운터 추가(move 생성자 직접 작성 필요); `LockManager`는 모든 변경 경로가 여전히 write-분류로 남아 레이스 시나리오 자체가 없어 뮤텍스 불필요(불변조건을 헤더에 명시). `test_concurrency.cpp` 신규 — 실제 스레드로 대용량 풀스캔 SELECT 진행 중 다른 세션의 `SELECT 1`이 즉시 응답하는지 실측(1.06초 vs 0.0002초로 확인) | LockManager·격리수준·병렬실행이 실질적 동시성 이득으로 연결 | 높음 |
+| P1 | 트랜잭션 스냅샷이 DB 전체 deep clone | `txn_manager.rs:262-278` — BEGIN마다 `tables.clone()` 전체 복제. 단, 기본 격리수준(ReadCommitted)에서는 발동 안 하고 REPEATABLE READ/SERIALIZABLE을 명시적으로 요청했을 때만 — 진짜 고치려면 row-level MVCC 재설계 필요, 이번 패스에서 의도적으로 제외 | 행 단위 버전 체인 전환 시 비용 절감 | 높음 |
+| P1 | 버퍼 풀이 테이블 전체 단위 캐싱(사실상 무의미) | `buffer_pool.rs` — 시작 시 전 테이블이 이미 로드되어 get_page 경로 도달 불가. 위 동시성 수정으로 이 경로에 스레드 안전성은 확보했으나(자체 뮤텍스), "죽은 read-cache 경로를 실제로 페이지 단위로 살리는" 근본 수정 자체는 이번 패스에서 의도적으로 제외 | 페이지 캐싱 구현 시 대용량 테이블 지원 | 높음 |
+| P1 | 내부 쿼리 합성이 ASCII 표 문자열 재파싱 방식 | `executor.rs` 다수 — UNION/CTE/서브쿼리가 표시용 표를 `\|`로 split해 재파싱, 값에 `\|`/개행 있으면 깨짐. 동시성 개선과 무관한 별도 정확성 이슈라 이번 패스에서 제외 | 구조화된 내부 API로 정확성·성능 개선 | 높음 |
+| P2 | 다중 조인 알고리즘 선택이 누적 카디널리티 미반영 | `planner.rs:121-125` — 2·3번째 조인이 항상 원래 base 테이블 행수 기준(join *순서* 결정에는 누적 카디널리티 DP가 이미 쓰이지만, join *알고리즘 선택*에는 반영 안 됨). 동시성과 무관한 planner 품질 이슈라 이번 패스에서 제외 | 다중 테이블 조인 실행계획 정확도 | 중간 |
+| ✅ 완료 | 프로시저 루프/트리거 재귀에 상한·타임아웃 없음 | 원인(Rust `executor.rs:9210-9285,9381-9391`, C++도 동일): `exec_proc_while`/`exec_proc_loop`/`exec_proc_repeat`(`executor_proc.cpp`)에 반복 상한이 전혀 없고 `fire_triggers`(`executor_dml.cpp`)도 재귀 깊이 제한이 없어, 위 전역 락 항목이 고쳐진 뒤에도 DML/DDL/프로시저 CALL은 여전히 write-분류로 남기 때문에 무한루프 하나가 서버 전체를 영원히 멈출 수 있었음. 이미 있던 재귀 CTE의 1000회 상한(`executor_cte.cpp`) 패턴을 재사용해 세 반복문에 10만회 상한(초과 시 에러) 추가, `fire_triggers`에 재귀 깊이 32단 상한 추가(반환형을 `StringResult`로 변경해 INSERT/UPDATE/DELETE 3곳 호출부에 에러 전파 추가). 단, `fire_triggers`의 개별 트리거문 실패를 무시하는 기존 동작(Rust 원본의 `let _ = ...`와 동일, 의도적으로 보존)때문에 재귀 상한 초과 에러가 최상위 호출까지 전파되진 않음 — 그래도 재귀 자체는 확실히 유한 깊이에서 멈춤(실제 관찰 가능한 안전성 속성이자 이번 수정의 핵심 목표). `test_executor_proc.cpp`에 회귀 테스트 3건 추가 | 서버 가용성 확보 — 한 클라이언트의 버그가 전체 서버를 영구 정지시키지 않음 | 중간 |
 
 ## C. 트랜잭션 내구성 (WAL·Undo·Checkpoint)
 

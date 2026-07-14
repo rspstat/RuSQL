@@ -42,6 +42,18 @@ std::string trim_ws(const std::string& s) {
     return s.substr(start, end - start + 1);
 }
 
+// A trigger body's own DML can fire further triggers (directly, or via a chain through
+// another table) with no natural termination guarantee -- cap the depth so a runaway
+// trigger chain fails loudly instead of recursing until stack overflow while holding
+// SharedDatabase's exclusive write lock for the whole time.
+constexpr std::size_t TRIGGER_MAX_DEPTH = 32;
+
+struct TriggerDepthGuard {
+    std::size_t& depth;
+    explicit TriggerDepthGuard(std::size_t& d) : depth(d) { depth++; }
+    ~TriggerDepthGuard() { depth--; }
+};
+
 } // namespace
 
 std::vector<Row> Executor::session_swap_in(SharedDatabase& s, const std::string& table) {
@@ -67,15 +79,20 @@ void Executor::session_swap_out(SharedDatabase& s, const std::string& table, std
     s.tables[table] = std::move(committed);
 }
 
-void Executor::fire_triggers(SharedDatabase& s, const std::string& table, const std::string& timing, const std::string& event) {
+StringResult Executor::fire_triggers(SharedDatabase& s, const std::string& table, const std::string& timing, const std::string& event) {
+    if (trigger_depth_ >= TRIGGER_MAX_DEPTH) {
+        return StringResult::Err("Trigger recursion exceeded maximum depth (" + std::to_string(TRIGGER_MAX_DEPTH) + ")");
+    }
     std::vector<std::vector<Statement>> bodies;
     for (auto& [name, def] : s.triggers) {
         auto& [t, ti, ev, body] = def;
         if (t == table && ti == timing && ev == event) bodies.push_back(body);
     }
+    TriggerDepthGuard guard(trigger_depth_);
     for (auto& body : bodies) {
         for (auto& stmt : body) execute_with_s(s, stmt);
     }
+    return StringResult::Ok("");
 }
 
 void Executor::maybe_auto_checkpoint(SharedDatabase& s) {
@@ -190,14 +207,16 @@ StringResult Executor::exec_insert(SharedDatabase& s, std::string table, std::op
         return StringResult::Err("View '" + strip_db_prefix(table) + "' is not updatable (has JOINs, DISTINCT, GROUP BY, or subquery)");
     }
 
-    fire_triggers(s, table, "BEFORE", "INSERT");
+    if (auto tr = fire_triggers(s, table, "BEFORE", "INSERT"); tr.is_err()) return tr;
     std::optional<std::vector<Row>> committed;
     if (txn.is_active()) committed = session_swap_in(s, table);
 
     auto result = exec_insert_inner(s, table, col_list, std::move(all_values), on_conflict, returning);
 
     if (committed) session_swap_out(s, table, std::move(*committed));
-    if (result.is_ok()) fire_triggers(s, table, "AFTER", "INSERT");
+    if (result.is_ok()) {
+        if (auto tr = fire_triggers(s, table, "AFTER", "INSERT"); tr.is_err()) return tr;
+    }
     return result;
 }
 

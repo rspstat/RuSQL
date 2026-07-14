@@ -10,6 +10,15 @@
 
 namespace engine {
 
+namespace {
+// WHILE/LOOP/REPEAT have no natural termination guarantee (unlike recursive CTEs, which
+// are already capped at 1000 iterations in executor_cte.cpp) -- a runaway loop in a
+// procedure holds SharedDatabase's exclusive shared->write() lock for its entire body
+// execution (see Executor::execute()), so it would otherwise freeze the whole server for
+// every connected client, forever. Set generously high so no realistic loop hits it.
+constexpr std::size_t PROC_LOOP_MAX_ITERATIONS = 100000;
+} // namespace
+
 StringResult Executor::exec_create_procedure(SharedDatabase& s, std::string name,
                                               std::vector<std::tuple<std::string, std::string, std::string>> params,
                                               std::vector<Statement> body) {
@@ -42,7 +51,10 @@ StringResult Executor::exec_proc_if(SharedDatabase& s, CondExpr condition, std::
 
 StringResult Executor::exec_proc_while(SharedDatabase& s, std::optional<std::string> label, CondExpr condition, std::vector<Statement> body) {
     std::string last;
-    for (;;) {
+    for (std::size_t iter = 0;; iter++) {
+        if (iter >= PROC_LOOP_MAX_ITERATIONS) {
+            return StringResult::Err("WHILE loop exceeded maximum iteration count (" + std::to_string(PROC_LOOP_MAX_ITERATIONS) + ")");
+        }
         if (!eval_condexpr(proc_vars, condition)) break;
         auto res = exec_proc_stmts(s, body);
         if (res.is_err()) return res;
@@ -69,7 +81,10 @@ StringResult Executor::exec_proc_while(SharedDatabase& s, std::optional<std::str
 
 StringResult Executor::exec_proc_loop(SharedDatabase& s, std::optional<std::string> label, std::vector<Statement> body) {
     std::string last;
-    for (;;) {
+    for (std::size_t iter = 0;; iter++) {
+        if (iter >= PROC_LOOP_MAX_ITERATIONS) {
+            return StringResult::Err("LOOP exceeded maximum iteration count (" + std::to_string(PROC_LOOP_MAX_ITERATIONS) + ")");
+        }
         auto res = exec_proc_stmts(s, body);
         if (res.is_err()) return res;
         last = res.value();
@@ -97,7 +112,10 @@ StringResult Executor::exec_proc_loop(SharedDatabase& s, std::optional<std::stri
 
 StringResult Executor::exec_proc_repeat(SharedDatabase& s, std::optional<std::string> label, std::vector<Statement> body, CondExpr until) {
     std::string last;
-    for (;;) {
+    for (std::size_t iter = 0;; iter++) {
+        if (iter >= PROC_LOOP_MAX_ITERATIONS) {
+            return StringResult::Err("REPEAT loop exceeded maximum iteration count (" + std::to_string(PROC_LOOP_MAX_ITERATIONS) + ")");
+        }
         auto res = exec_proc_stmts(s, body);
         if (res.is_err()) return res;
         last = res.value();

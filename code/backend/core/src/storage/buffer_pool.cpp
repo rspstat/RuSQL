@@ -2,7 +2,25 @@
 
 namespace engine {
 
+BufferPool::BufferPool(BufferPool&& other) noexcept
+    : capacity(other.capacity),
+      hit_count(other.hit_count.load()),
+      miss_count(other.miss_count.load()),
+      cache_(std::move(other.cache_)),
+      tick_(other.tick_) {}
+
+BufferPool& BufferPool::operator=(BufferPool&& other) noexcept {
+    if (this == &other) return *this;
+    capacity = other.capacity;
+    hit_count.store(other.hit_count.load());
+    miss_count.store(other.miss_count.load());
+    cache_ = std::move(other.cache_);
+    tick_ = other.tick_;
+    return *this;
+}
+
 std::vector<Row> BufferPool::get_page(const std::string& table_name, const DiskManager& disk) {
+    std::lock_guard<std::mutex> lock(mutex_);
     auto it = cache_.find(table_name);
     if (it != cache_.end()) {
         hit_count++;
@@ -18,6 +36,7 @@ std::vector<Row> BufferPool::get_page(const std::string& table_name, const DiskM
 }
 
 void BufferPool::write_page(const std::string& table_name, std::vector<Row> rows) {
+    std::lock_guard<std::mutex> lock(mutex_);
     auto it = cache_.find(table_name);
     if (it != cache_.end()) {
         tick_++;
@@ -30,6 +49,7 @@ void BufferPool::write_page(const std::string& table_name, std::vector<Row> rows
 }
 
 void BufferPool::flush_page(const std::string& table_name, const DiskManager& disk) {
+    std::lock_guard<std::mutex> lock(mutex_);
     auto it = cache_.find(table_name);
     if (it != cache_.end() && it->second.first.is_dirty) {
         disk.save_table(table_name, it->second.first.rows);
@@ -38,6 +58,7 @@ void BufferPool::flush_page(const std::string& table_name, const DiskManager& di
 }
 
 void BufferPool::flush_all(const DiskManager& disk) {
+    std::lock_guard<std::mutex> lock(mutex_);
     std::vector<std::string> dirty;
     for (auto& [name, entry] : cache_) {
         if (entry.first.is_dirty) dirty.push_back(name);
@@ -52,13 +73,21 @@ void BufferPool::flush_all(const DiskManager& disk) {
 }
 
 void BufferPool::invalidate(const std::string& table_name) {
+    std::lock_guard<std::mutex> lock(mutex_);
     cache_.erase(table_name);
 }
 
+std::size_t BufferPool::usage() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return cache_.size();
+}
+
 double BufferPool::hit_rate() const {
-    std::uint64_t total = hit_count + miss_count;
+    std::uint64_t h = hit_count.load();
+    std::uint64_t m = miss_count.load();
+    std::uint64_t total = h + m;
     if (total == 0) return 0.0;
-    return (static_cast<double>(hit_count) / static_cast<double>(total)) * 100.0;
+    return (static_cast<double>(h) / static_cast<double>(total)) * 100.0;
 }
 
 void BufferPool::insert_page(std::string table_name, std::vector<Row> rows, bool is_dirty, const DiskManager* disk) {

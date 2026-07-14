@@ -96,7 +96,7 @@
 │    SecondaryRange / Between / LikePrefix /         COMMIT 시 s.tables 일괄 반영)               │
 │    CompositeIndexPrefix 경로 지원                SAVEPOINT 기반 세션 로컬 undo                   │
 │  수치 인식 키 비교 ("10" > "9" 정상 처리)         세션별 독립 Executor                           │
-│                                                   (Arc<RwLock<SharedDatabase>> 공유)            │
+│                                            (shared_ptr<RwLock<SharedDatabase>> 공유)            │
 │  쿼리 실행 최적화                                                                               │
 │  ────────────────────────────────────────      영속화                                           │
 │  비용 기반 AccessPath 자동 선택                  ──────────────────────────────────────────────  │

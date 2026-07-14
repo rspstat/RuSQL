@@ -241,6 +241,10 @@
 - [x] SHOW LOCKS (활성 잠금 목록 조회)
 - [x] 잠금 대기 타임아웃 세션 변수 — `SET @lock_wait_timeout = N` (밀리초, 기본 50,000ms), 세션별 독립 설정 (`Executor.lock_wait_timeout_ms` 필드), 타임아웃 시 MySQL 호환 `ERROR 1205 (HY000): Lock wait timeout exceeded` 반환
 
+### 동시성
+- [x] 읽기 전용 문장 동시 실행 — `SharedDatabase`를 감싸는 `shared_ptr<RwLock<...>>`(실제 `std::shared_mutex`)를 활용, `FOR UPDATE`/`FOR SHARE`·파생테이블·CTE가 없는 SELECT(WHERE/HAVING/JOIN-ON에 중첩된 서브쿼리까지 재귀 판정), `SHOW`류, `DESCRIBE`, `EXPLAIN`을 공유(read) 잠금으로 분류해 여러 세션이 동시에 실행 — 그 외 모든 문장(DML/DDL/DCL/트랜잭션 제어/CTE/프로시저 등)은 기존처럼 배타(write) 잠금
+- [x] 프로시저 WHILE/LOOP/REPEAT 반복 상한 (10만 회) 및 트리거 재귀 깊이 상한 (32단) — 무한루프/재귀가 전역 배타 잠금을 영구히 점유해 서버 전체를 정지시키는 것 방지
+
 ### 모니터링
 - [x] SHOW BUFFER POOL (캐시 히트율, 사용량)
 - [x] SHOW WAL (로그 레코드, 파일 크기)
@@ -333,7 +337,7 @@
 - [x] Prepared Statement — `?` 플레이스홀더 바인딩, 타입별 파라미터 디코딩 (TINY/SHORT/LONG/LONGLONG/FLOAT/DOUBLE/DATE/DATETIME/VAR_STRING)
 - [x] `SHOW FULL TABLES FROM db` — 엔진의 `SHOW TABLES` 실행 후 `Table_type` 컬럼(BASE TABLE/VIEW) 추가 → DBeaver 테이블 트리 정상 표시
 - [x] `SHOW FULL COLUMNS FROM table FROM db` — `DESCRIBE table` 실행 후 MySQL 전체 컬럼 구조(Collation/Privileges/Comment 포함)로 확장 → DBeaver 컬럼 패널 정상 표시
-- [x] `SHOW INDEX FROM table` / `SHOW INDEXES FROM` / `SHOW KEYS FROM` — 올바른 컬럼 구조(13개 컬럼)의 빈 결과 반환
+- [x] `SHOW INDEX FROM table` / `SHOW INDEXES FROM` / `SHOW KEYS FROM` — 실제 인덱스 정보(PRIMARY KEY 포함, 복합 인덱스는 컬럼별로 행 분리) 반환, MySQL 13개 컬럼 구조
 - [x] `SHOW TABLE STATUS FROM db` — MySQL TABLE STATUS 컬럼 구조(18개)의 빈 결과 반환
 - [x] `SHOW TRIGGERS FROM db` — 올바른 컬럼 구조의 빈 결과 반환
 - [x] `SHOW FUNCTION STATUS` / `SHOW PROCEDURE STATUS` — 올바른 컬럼 구조의 빈 결과 반환
@@ -369,6 +373,4 @@
 - [x] **서버 연결 아이콘 교체** — Server Manager 헤더의 서버 랙 아이콘 → 주황색 원통형 DB 아이콘
 - [x] **Server Manager Bench 패널** — "Bench" 우측 버튼으로 슬라이드 패널 토글; "결과 불러오기" → `read_bench_result` Tauri 커맨드로 `code/test/perf/result.json` 파싱·포맷 표시 (로딩 중 버튼 disabled + "불러오는 중..." 텍스트, 파일 없으면 주황색 안내), "터미널 실행" → `open_bench_terminal` 커맨드로 cmd 창에서 `pip install -q -r requirements.txt && python bench.py` 자동 실행 (`bench_dir()` = CARGO_MANIFEST_DIR 기반); `bench.py` 완료 후 `bench_db` 자동 삭제; 결과 패널 4종 (모두 **TPS** 단위) — 단건 쓰기 (INSERT/DELETE), Bulk 쓰기 (500행 묶음), 인덱스 성능 (SeqScan vs B+Tree), 트랜잭션 (AutoCommit vs BEGIN/COMMIT)
 - [x] **Server Manager Session 패널** — "Session" 우측 버튼으로 슬라이드 패널 토글; `SessionInfo`(addr·user·connected_at·query_count) 목록을 기존 1.5s 상태 폴링에 내장해 별도 폴링 없이 실시간 갱신, 경과 시간 초/분 자동 단위 표시
-- [x] **Server Manager AI MCP 패널** — "AI MCP" 우측 버튼으로 슬라이드 패널 토글; "Claude Desktop 자동 연결" 버튼 → `setup_mcp_config` Tauri 커맨드로 `%AppData%\Claude\` (일반 설치) + `LocalCache\Roaming\Claude\` (Windows Store) 두 경로에 BOM 없는 UTF-8로 `claude_desktop_config.json` 자동 생성·병합, **16개 도구** `alwaysAllow` 자동 등록 (허용 팝업 없음); `where python`으로 `mcp` 패키지 설치된 Python 자동 탐지
-- [x] **MCP UI 제어 도구 9개** — `write_to_editor` (에디터에 SQL 작성) · `open_new_tab` (새 탭 열기) · `execute_in_editor` (SQL 즉시 실행) · `close_tab` (탭 닫기) · `get_tab_content` (탭 내용 읽기) · `list_tabs` (열린 탭 목록) · `switch_to_tab` (탭 전환) · `get_query_result` (마지막 실행 결과) · `get_current_database` (현재 DB 조회); 로그인 시 탭 내용 자동 동기화 (`sync_tab_content`)
-- [x] **MCP DDL 사이드바 자동 갱신** — `execute_sql`에서 CREATE / DROP / ALTER / RENAME / USE 로 시작하는 DDL 감지 후 `_run_ui("refresh_sidebar", "")` 호출, UI 사이드바가 즉시 갱신됨 (데이터베이스·테이블 목록 반영)
+- [x] **Server Manager AI MCP 패널** — "AI MCP" 우측 버튼으로 슬라이드 패널 토글; "Claude Desktop 자동 연결" 버튼 → `setup_mcp_config` Tauri 커맨드로 `%AppData%\Claude\` (일반 설치) + `LocalCache\Roaming\Claude\` (Windows Store) 두 경로에 BOM 없는 UTF-8로 `claude_desktop_config.json` 자동 생성·병합, **7개 도구** `alwaysAllow` 자동 등록 (허용 팝업 없음); `where python`으로 `mcp` 패키지 설치된 Python 자동 탐지

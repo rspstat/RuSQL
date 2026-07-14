@@ -77,12 +77,14 @@ StringResult Executor::exec_delete(SharedDatabase& s, const std::string& table, 
         committed_backups = std::move(backups);
     }
 
-    fire_triggers(s, table, "BEFORE", "DELETE");
+    if (auto tr = fire_triggers(s, table, "BEFORE", "DELETE"); tr.is_err()) return tr;
     auto result = exec_delete_inner(s, table, condition, returning);
     if (committed_backups) {
         for (auto& [tname, committed] : *committed_backups) session_swap_out(s, tname, std::move(committed));
     }
-    if (result.is_ok()) fire_triggers(s, table, "AFTER", "DELETE");
+    if (result.is_ok()) {
+        if (auto tr = fire_triggers(s, table, "AFTER", "DELETE"); tr.is_err()) return tr;
+    }
     return result;
 }
 

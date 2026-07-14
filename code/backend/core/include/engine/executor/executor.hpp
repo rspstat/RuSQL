@@ -199,6 +199,9 @@ private:
     std::optional<ProcSignal> proc_signal_;
     // Uncorrelated IN/NOT IN subquery result cache (Phase 8c).
     std::unordered_map<std::string, std::unordered_set<std::string>> subquery_cache_;
+    // Trigger recursion depth (a trigger body's own DML can fire further triggers,
+    // directly or via a chain through another table) -- see fire_triggers().
+    std::size_t trigger_depth_ = 0;
 
     static std::pair<std::string, std::string> split_key(const std::string& key);
     std::string qualify_name(const std::string& name) const;
@@ -210,6 +213,13 @@ private:
     static std::vector<std::string> select_tables(const Statement& stmt, const std::string& current_db);
     // MVCC row visibility: a row is visible unless it's been deleted (_xmax != "0").
     static bool is_visible(const Row& row);
+    // Concurrency: true iff executing `stmt` is guaranteed to never mutate any
+    // SharedDatabase field, so it's safe to run under shared->read() concurrently with
+    // other readers. See executor_core.cpp for the exhaustive classification and why it
+    // must recurse into nested subqueries. Used by execute().
+public:
+    static bool is_pure_read_only(const Statement& stmt);
+private:
 
     StringResult execute_with_s(SharedDatabase& s, Statement stmt);
 
@@ -268,7 +278,9 @@ private:
     void maybe_auto_analyze(SharedDatabase& s, const std::string& table);
     std::vector<Row> session_swap_in(SharedDatabase& s, const std::string& table);
     void session_swap_out(SharedDatabase& s, const std::string& table, std::vector<Row> committed);
-    void fire_triggers(SharedDatabase& s, const std::string& table, const std::string& timing, const std::string& event);
+    // Returns Err only if trigger recursion exceeds the depth cap; a failing trigger-body
+    // statement is otherwise ignored (matches the pre-existing best-effort behavior).
+    StringResult fire_triggers(SharedDatabase& s, const std::string& table, const std::string& timing, const std::string& event);
     static std::optional<std::pair<std::string, std::optional<CondExpr>>> resolve_updatable_view(const SharedDatabase& s,
                                                                                                     const std::string& name);
 

@@ -32,6 +32,17 @@ struct LockResult {
     static LockResult deadlock(std::uint64_t h) { return LockResult{Kind::Deadlock, h}; }
 };
 
+// Not internally synchronized — row_locks_/wait_for_/deadlock_history_ are plain
+// containers with no mutex of their own. This is safe ONLY because every mutating touch
+// (acquire/acquire_shared/release/insert_lock, reached from DML, SELECT ... FOR UPDATE/
+// FOR SHARE, and COMMIT/ROLLBACK) is classified write-required by
+// Executor::is_pure_read_only() and therefore always runs under SharedDatabase's
+// exclusive shared->write() lock, fully serialized against every other statement
+// including concurrent readers. The only read-classified access (SHOW LOCKS, via
+// lock_rows()/wait_for_rows()/deadlock_history()) never mutates. If FOR UPDATE/FOR SHARE
+// or any DML/transaction-control statement is ever reclassified as read-only, this class
+// needs its own mutex added first — don't assume that invariant holds without re-checking
+// is_pure_read_only().
 class LockManager {
 public:
     LockManager() = default;

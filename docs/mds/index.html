@@ -59,7 +59,7 @@
     margin-bottom: 20px;
   }
 
-  /* ── rusql-core top pipeline ── */
+  /* ── engine_core top pipeline ── */
   .pipeline {
     display: flex;
     align-items: center;
@@ -320,11 +320,11 @@
 <body>
 
 <h1>RuSQL Architecture</h1>
-<p class="subtitle">v2.2.0 · Rust · Custom RDBMS + AI MCP</p>
+<p class="subtitle">v2.3.0 · C++ · Custom RDBMS + AI MCP</p>
 
-<!-- ═══ rusql-core ═══ -->
+<!-- ═══ engine_core ═══ -->
 <div class="outer-card">
-  <div class="card-title">rusql-core</div>
+  <div class="card-title">engine_core</div>
 
   <!-- pipeline -->
   <div class="pipeline">
@@ -697,7 +697,9 @@
         <li class="note">DML → session_tables buffer, applied on COMMIT</li>
         <li>SAVEPOINT-based session-local undo</li>
         <li>Per-session independent Executor</li>
-        <li class="note">Arc&lt;RwLock&lt;SharedDatabase&gt;&gt; shared</li>
+        <li class="note">shared_ptr&lt;RwLock&lt;SharedDatabase&gt;&gt; shared</li>
+        <li>Concurrent read-only SELECT execution</li>
+        <li class="note">shared lock for SELECT (no FOR UPDATE/SHARE/derived-table/CTE), exclusive lock otherwise</li>
       </ul>
     </div>
 

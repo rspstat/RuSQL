@@ -213,3 +213,69 @@ TEST_CASE("DATABASE()/SCHEMA() reflect the current session database", "[executor
     REQUIRE(r.is_ok());
     REQUIRE(r.value().find("company") != std::string::npos);
 }
+
+TEST_CASE("WHILE loop with a condition that never becomes false errors instead of hanging", "[executor][proc]") {
+    // Regression (Section B, Part B): procedure loops had no iteration cap, so a runaway
+    // WHILE/LOOP/REPEAT would hold SharedDatabase's exclusive write lock forever, freezing
+    // the whole server for every client. Confirms this now fails fast with a clear error
+    // instead of hanging (the test itself would never finish if it didn't).
+    TempDataDir dir("exec_proc_data_11");
+    Executor ex(dir.path);
+    REQUIRE(ex.execute_sql("CREATE DATABASE company").is_ok());
+    REQUIRE(ex.execute_sql("USE company").is_ok());
+
+    REQUIRE(ex.execute_sql("CREATE PROCEDURE runaway() BEGIN "
+                            "DECLARE i INT DEFAULT 0; "
+                            "WHILE 1 = 1 DO SET i = i + 1; END WHILE; "
+                            "END")
+                .is_ok());
+
+    auto r = ex.execute_sql("CALL runaway()");
+    REQUIRE(r.is_err());
+    REQUIRE(r.error().find("maximum iteration count") != std::string::npos);
+}
+
+TEST_CASE("LOOP with no LEAVE errors instead of hanging", "[executor][proc]") {
+    TempDataDir dir("exec_proc_data_12");
+    Executor ex(dir.path);
+    REQUIRE(ex.execute_sql("CREATE DATABASE company").is_ok());
+    REQUIRE(ex.execute_sql("USE company").is_ok());
+
+    REQUIRE(ex.execute_sql("CREATE PROCEDURE runaway_loop() BEGIN "
+                            "DECLARE i INT DEFAULT 0; "
+                            "my_loop: LOOP SET i = i + 1; END LOOP; "
+                            "END")
+                .is_ok());
+
+    auto r = ex.execute_sql("CALL runaway_loop()");
+    REQUIRE(r.is_err());
+    REQUIRE(r.error().find("maximum iteration count") != std::string::npos);
+}
+
+TEST_CASE("Self-referential AFTER INSERT trigger recursion is bounded, not infinite", "[executor][proc]") {
+    // Regression (Section B, Part B): fire_triggers had no recursion-depth guard, so a
+    // trigger whose own body inserts into the same table (directly, or via a chain
+    // through another table) would recurse with no natural termination -- eventually a
+    // stack overflow, and in the meantime holding the global write lock indefinitely.
+    // Note: fire_triggers deliberately ignores each trigger-body statement's individual
+    // result (faithfully matches the Rust original's `let _ = self.execute_with_s(...)`),
+    // so the depth-cap error raised deep in the recursion doesn't bubble all the way back
+    // up to this top-level INSERT's own return value -- what's actually verifiable (and
+    // what actually matters for server safety) is that the recursion terminates at a
+    // small bounded depth instead of continuing forever.
+    TempDataDir dir("exec_proc_data_13");
+    Executor ex(dir.path);
+    REQUIRE(ex.execute_sql("CREATE DATABASE company").is_ok());
+    REQUIRE(ex.execute_sql("USE company").is_ok());
+    REQUIRE(ex.execute_sql("CREATE TABLE t (id INT PRIMARY KEY AUTO_INCREMENT, val INT)").is_ok());
+    REQUIRE(ex.execute_sql("CREATE TRIGGER trg_self AFTER INSERT ON t FOR EACH ROW INSERT INTO t (val) VALUES (1)").is_ok());
+
+    ex.execute_sql("INSERT INTO t (val) VALUES (1)");
+
+    auto s = ex.get_shared()->read();
+    std::size_t row_count = s->tables.at("company.t").size();
+    // Bounded by the trigger-depth cap, not unbounded/hung -- comfortably under 100
+    // regardless of the exact off-by-one at the cap boundary.
+    REQUIRE(row_count > 0);
+    REQUIRE(row_count < 100);
+}
