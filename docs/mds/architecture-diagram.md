@@ -116,11 +116,11 @@
 │  병렬 쿼리 실행 (rayon)                                                                          │
 │    SeqScan WHERE 필터 par_chunks                 인증 & 보안                                    │
 │    GROUP BY 부분 집계 par_chunks → 병합           ──────────────────────────────────────────────  │
-│    ORDER BY par_sort_unstable_by                 Native TCP: SHA-256 해시 인증                   │
-│    Hash Join probe par_iter                      MySQL 프로토콜: mysql_native_password           │
-│    적응형 임계값 (10k/thread_count, 최소 1k)       (SHA1(SHA1(pw)), 챌린지-응답)                │
-│    SET @rusql_parallel / RUSTDB_PARALLEL 제어    레거시 평문 → SHA-256 자동 마이그레이션         │
-│  쿼리 결과 캐시 (LRU-512, O(k) 무효화)           mysql_native_hash 자동 채움                   │
+│    ORDER BY par_sort_unstable_by                 Native TCP + MySQL 프로토콜 둘 다 동일한        │
+│    Hash Join probe par_iter                      mysql_native_password 방식 챌린지-응답          │
+│    적응형 임계값 (10k/thread_count, 최소 1k)       (SHA1(SHA1(pw)), 비밀번호 평문 전송 없음)      │
+│    SET @rusql_parallel / RUSTDB_PARALLEL 제어                                                    │
+│  쿼리 결과 캐시 (LRU-512, O(k) 무효화)                                                          │
 │    트랜잭션 외부 SELECT 전용                      root/root 기본 계정 자동 생성                  │
 │    DML 시 참조 테이블 항목 즉시 무효화                                                           │
 │    COMMIT 시 변경 테이블 자동 무효화                                                             │

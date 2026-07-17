@@ -123,8 +123,8 @@
 |---|---|---|---|---|
 | ✅ 완료 | 사용자 테이블 비면 인증 무조건 통과 | 원인(Rust `executor.rs:198,215`, 이식 시 그대로 보존): fail-open (`if users.is_empty() { return true }`). 서버는 두 리스너(native/MySQL) 모두 `ensure_default_user()`를 부팅 시 미리 호출해 실제로는 이 분기가 도달 안 되지만, 방어적으로 C++ `validate_credentials`/`verify_mysql_native_password`에서 open-mode 폴백 완전히 제거(fail-closed) | 향후 진입점 추가/`ensure_default_user` 누락 시에도 인증 우회 불가 | 낮음 |
 | ✅ 완료 | BACKUP/RESTORE 경로 미검증 | 원인(Rust `parser.rs:3783-3830, executor.rs:7435-7478`, 이식 시 그대로 보존): 사용자가 준 파일명을 그대로 `fs::write`/`fs::read_to_string`에 전달 — BACKUP은 임의 파일 쓰기, RESTORE는 임의 파일을 읽어 SQL로 **실행**(사실상 SQL include). C++ `executor_backup.cpp`에 `resolve_backup_path` 추가 — 영문/숫자/`_`/`-`/`.`만 허용하는 순수 파일명만 받아 `<data_dir>/_backups/`로 샌드박싱, 절대경로·`..`·구분자 전부 거부. 부수적으로 `DiskManager::list_databases()`가 새로 생긴 `_backups` 디렉터리를 실제 DB로 오인해 기본 `current_db`를 가로채던 버그도 같이 발견해 수정(밑줄로 시작하는 최상위 디렉터리는 전부 제외) | 임의 파일 읽기/쓰기(SQL include) 취약점 제거 | 낮음~중간 |
-| P1 | Native TCP가 비밀번호 평문 전송 | `main.rs:185-199, client/main.rs:120` — MySQL 프로토콜은 이미 SHA1 챌린지-응답 구현했는데 반대로 이게 더 취약 | 두 프로토콜 보안 수준 통일 | 중간 |
-| P1 | MySQL 리스너 기본 0.0.0.0 바인딩 | `mysql.rs:1030` — native는 127.0.0.1인데 이건 LAN 전체 노출, root/root 기본계정과 결합 시 위험 | 안전한 기본값/명시적 바인드 선택 | 낮음 |
+| ✅ 완료 | Native TCP가 비밀번호 평문 전송 | 원인(Rust `main.rs:185-199, client/main.rs:120`, 이식 시 그대로 보존): MySQL 프로토콜은 이미 SHA1 챌린지-응답(`mysql_native_password`) 구현했는데 자체 native 프로토콜은 `AUTH user password`로 평문 전송. 이미 구현·검증된 `verify_mysql_native_password`를 native 프로토콜에도 그대로 재사용 — 서버가 연결마다 20바이트 nonce를 생성해 배너에 `NONCE <hex>` 줄로 전송, 클라이언트(`engine_client`/Tauri UI)가 `SHA1(password) XOR SHA1(nonce \|\| SHA1(SHA1(password)))` 토큰을 계산해 hex로 전송(평문 비밀번호는 와이어에 절대 안 실림). `engine_client`는 벤더링된 헤더온리 SHA1(`third_party/sha1`)을 엔진 링크 없이 직접 사용, Tauri UI는 `sha1` crate 신규 추가. 이 변경으로 유일한 호출부를 잃은 `validate_credentials`/`migrate_mysql_hash` 완전 삭제. Python으로 독립 구현해 실제 서버에 접속해 검증 — 평문 전송 시 거부, 올바른 챌린지-응답만 인증 성공하는 것을 직접 확인, Rust 구현도 별도 스탠드얼론 프로그램으로 동일 입력에 대해 Python·C++와 바이트 단위로 일치하는 토큰을 계산하는 것 확인 | 두 프로토콜 보안 수준 통일, 평문 비밀번호 와이어 전송 완전 제거 | 중간 |
+| ✅ 완료 | MySQL 리스너 기본 0.0.0.0 바인딩 | 원인(Rust `mysql.rs:1030`, 이식 시 그대로 보존): native는 127.0.0.1인데 이건 LAN 전체 노출, root/root 기본계정과 결합 시 위험. `start_mysql_listener`에 `bind_addr` 매개변수 추가, `main.cpp`에 `--mysql-bind <addr>` 플래그 신규(기본값 `127.0.0.1`로 변경, 필요시 `--mysql-bind 0.0.0.0`으로 명시적 선택 가능 — Tauri UI는 이 플래그를 안 넘기므로 자동으로 새 안전한 기본값 적용). `netstat`으로 기본값이 `127.0.0.1`에만, 명시적 지정 시 `0.0.0.0`에 바인딩되는 것 직접 확인 | 안전한 기본값 + 명시적 바인드 선택 모두 확보 | 낮음 |
 | P2 | TLS/SSL 전무 | `code/backend/third_party`에 OpenSSL/Schannel 등 TLS 라이브러리 없음 (원본 Rust도 rustls/native-tls 없었음) | 전송 계층 보안 | 높음 |
 | P2 | mcp_server.py 하드코딩 접속정보, 재시도 없음 | `mcp_server.py:14-32` | 배포 유연성, 응답속도 개선 | 낮음 |
 
@@ -132,7 +132,7 @@
 
 | 우선순위 | 항목 | 현재 문제 (근거) | 기대 효과 | 난이도 |
 |---|---|---|---|---|
-| P2 | B+Tree 삭제 시 언더플로우 리밸런싱 없음 | `btree.rs:357` 주석에 명시 — 삭제 잦으면 트리 무한정 성겨짐 | 장기 운영 성능 저하 방지 | 높음 |
+| ✅ 완료 | B+Tree 삭제 시 언더플로우 리밸런싱 없음 | 원인(원본 Rust `btree.rs:357` 주석에 명시, C++ 이식본엔 관련 상수·체크·주석 전무 확인): 리프가 완전히 비어야만(0개) 노드를 버리고, 그 외엔 키가 1개까지 줄어도 그대로 방치 — 병합/재분배 전무. 표준 B-tree 공식(`ORDER=16` 기준 `t=8`, 비-루트 최소 키 수 `MIN_KEYS=t-1=7`)에 맞춰 `remove_node`의 internal-node 분기를 재작성 — 자식이 언더플로우하면 형제가 여유 있으면 빌리고(회전), 아니면 병합(왼쪽 우선). 리프/internal 노드 모두 처리(internal은 부모 구분키가 자식으로 내려가고 형제 키가 부모로 올라가는 표준 회전). 부모 포인터·리프 형제 연결 리스트가 원래 없는 구조라 병합/재분배가 sibling-link 불변조건을 신경 쓸 필요 없어 범위가 좁음. 공개 API(`remove(key)`) 시그니처 불변, 순수 내부 구현. 2000개 키 삽입 후 앞/뒤/중간/산발/무작위 순서로 대량 삭제하는 회귀 테스트 5건 추가 — 매 삭제 후 트리 재귀 순회로 "루트 아닌 모든 노드가 MIN_KEYS 이상"인 실제 구조적 불변조건까지 검증(단순 검색 정확성뿐 아니라) | 대량 삭제 워크로드에서 트리가 무한정 성겨지는 것 방지, 장기 운영 성능 저하 방지 | 높음 |
 | P2 | FK/UNIQUE 검증이 O(n) 선형 스캔 | `executor.rs:2021-2025, 1885-1968` — 이미 있는 인덱스 미활용 | 대량 INSERT 시 O(log n)으로 개선 | 중간 |
 | P2 | Index Intersection이 결국 전체 재스캔 | `executor.rs:2623-2680` — 포인트 룩업 미사용 | 문서상 성능 이득 실제 구현 | 중간 |
 | P1 | 재귀 CTE 1000회 상한 도달 시 무경고 종료 | `executor.rs:1603` | 결과 완전성 신뢰 | 낮음 |

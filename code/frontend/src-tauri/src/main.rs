@@ -7,6 +7,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::time::Instant;
 use std::process::{Child, Command, Stdio};
 
+use sha1::{Digest, Sha1};
 use tauri::{Manager, State};
 
 // ─── 세션 정보 ────────────────────────────────────────────────
@@ -128,6 +129,42 @@ fn add_conn_log(conn: &mut EngineConn, msg: &str) {
     if conn.log.len() > 500 { conn.log.drain(0..100); }
 }
 
+// mysql_native_password 방식 challenge-response (MySQL 프로토콜이 이미 쓰는 것과 동일한
+// 스킴, 엔진 쪽 구현은 SharedDatabase::verify_mysql_native_password) -- native 프로토콜의
+// AUTH도 이 방식으로 바꿔 비밀번호 평문이 와이어에 절대 실리지 않게 한다.
+fn hex_decode(hex: &str) -> Vec<u8> {
+    (0..hex.len() / 2)
+        .filter_map(|i| u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16).ok())
+        .collect()
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{:02x}", b)).collect()
+}
+
+// token = SHA1(password) XOR SHA1(nonce || SHA1(SHA1(password)))
+fn compute_native_password_token(password: &str, nonce: &[u8]) -> String {
+    let stage1 = Sha1::digest(password.as_bytes());
+    let stage2 = Sha1::digest(&stage1);
+
+    let mut concat = nonce.to_vec();
+    concat.extend_from_slice(&stage2);
+    let xor_key = Sha1::digest(&concat);
+
+    let token: Vec<u8> = stage1.iter().zip(xor_key.iter()).map(|(a, b)| a ^ b).collect();
+    hex_encode(&token)
+}
+
+// 배너 줄 목록에서 "NONCE <hex>" 줄을 찾아 20바이트로 디코딩한다.
+fn extract_nonce(banner_lines: &[String]) -> Option<Vec<u8>> {
+    banner_lines.iter().find_map(|line| {
+        line.strip_prefix("NONCE ").and_then(|hex| {
+            let bytes = hex_decode(hex);
+            if bytes.len() == 20 { Some(bytes) } else { None }
+        })
+    })
+}
+
 // 서버 응답을 ---END--- 가 올 때까지 읽어 줄 목록 반환 (rusql-client와 동일한 프로토콜)
 fn read_block(reader: &mut BufReader<TcpStream>) -> Vec<String> {
     let mut lines = Vec::new();
@@ -183,7 +220,9 @@ fn spawn_and_connect(
     stream.set_nodelay(true).ok();
     let writer = stream.try_clone().map_err(|e| e.to_string())?;
     let mut reader = BufReader::new(stream);
-    read_block(&mut reader); // 배너 소비
+    let banner_lines = read_block(&mut reader); // NONCE 줄 포함 (challenge-response 인증에 필요)
+    let nonce = extract_nonce(&banner_lines)
+        .ok_or_else(|| "서버가 인증 challenge(NONCE)를 보내지 않았습니다.".to_string())?;
 
     let mut conn = EngineConn {
         child, writer, reader, port, mysql_port,
@@ -192,7 +231,8 @@ fn spawn_and_connect(
         current_db: String::new(), log: Vec::new(),
     };
 
-    if writeln!(conn.writer, "AUTH {} {}", user, password).is_err() || conn.writer.flush().is_err() {
+    let token = compute_native_password_token(password, &nonce);
+    if writeln!(conn.writer, "AUTH {} {}", user, token).is_err() || conn.writer.flush().is_err() {
         return Err("AUTH 전송 실패.".to_string());
     }
     let resp = read_block(&mut conn.reader);

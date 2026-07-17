@@ -765,12 +765,8 @@
         <div class="engine-card-name">Auth &amp; Security</div>
       </div>
       <ul class="engine-list">
-        <li>Native TCP: SHA-256 hash auth</li>
-        <li>MySQL protocol: mysql_native_password</li>
-        <li class="note">SHA1(SHA1(pw)), challenge-response verification</li>
-        <li>Legacy plaintext → SHA-256 auto-migration</li>
-        <li>mysql_native_hash auto-fill</li>
-        <li class="note">Auto-applied to legacy accounts on successful login</li>
+        <li>Native TCP + MySQL protocol: both use mysql_native_password</li>
+        <li class="note">SHA1(SHA1(pw)), challenge-response verification -- plaintext password never sent over the wire</li>
         <li>root/root default account auto-created</li>
         <li class="note">Created on first run if users list is empty</li>
         <li>Full MySQL wire protocol compatibility</li>

@@ -326,12 +326,11 @@
 
 ### TCP 서버 / MySQL 프로토콜 (rusql-server)
 - [x] 커스텀 텍스트 프로토콜 TCP 서버 — 포트 7878, `---END---` 구분자, 멀티 클라이언트 동시 접속, 세션별 독립 Executor
-- [x] AUTH 핸드셰이크 — `AUTH user password` 줄 기반 인증, SHA-256 해시 비교, 레거시 평문 자동 마이그레이션
+- [x] AUTH 핸드셰이크 — 배너의 `NONCE <hex>` 줄로 연결별 20바이트 챌린지 전송, 클라이언트가 `AUTH user <hex_token>`으로 mysql_native_password 방식 챌린지-응답 전송(MySQL 프로토콜과 동일한 검증 로직 재사용) — 비밀번호 평문이 와이어에 전혀 실리지 않음
 - [x] 기본 사용자 자동 생성 — users가 비어있으면 root/root 자동 생성 (`ensure_default_user`)
 - [x] SHOW PROCESSLIST — `ProcessInfo` 구조체 + `process_list: Arc<Mutex<...>>` 실제 활성 세션 추적 (세션 등록/갱신/해제)
 - [x] MySQL wire protocol (포트 3306) — COM_QUERY / COM_PING / COM_INIT_DB / COM_STMT_PREPARE / COM_STMT_EXECUTE / COM_STMT_CLOSE / COM_STMT_RESET
 - [x] **mysql_native_password 인증 구현** — 연결별 20바이트 nonce 생성, SHA1(password) XOR SHA1(nonce||SHA1(SHA1(pw))) 챌린지-응답 검증, UserRecord에 `mysql_native_hash`(SHA1(SHA1(pw))) 저장, 레거시 사용자(hash 없음) 자동 거부
-- [x] **레거시 사용자 자동 마이그레이션** — `migrate_mysql_hash()`: native/Tauri 로그인 성공 시 `mysql_native_hash` 없는 계정에 자동 채움 (평문 비밀번호 보유 시점 활용)
 - [x] MySQL 세션 process_list 등록 — MySQL 프로토콜 연결도 SHOW PROCESSLIST에 표시
 - [x] **parse_table 탭 구분 형식 지원** — SHOW DATABASES/TABLES, SELECT, DESCRIBE 등 탭 구분 출력을 MySQL result set으로 정상 변환 (기존 박스 형식도 유지)
 - [x] Prepared Statement — `?` 플레이스홀더 바인딩, 타입별 파라미터 디코딩 (TINY/SHORT/LONG/LONGLONG/FLOAT/DOUBLE/DATE/DATETIME/VAR_STRING)

@@ -6,11 +6,14 @@
 #include <ws2tcpip.h>
 
 #include <algorithm>
+#include <cstdint>
 #include <cstdlib>
 #include <iostream>
 #include <optional>
 #include <string>
 #include <vector>
+
+#include <sha1/sha1.hpp>
 
 #pragma comment(lib, "ws2_32.lib")
 
@@ -143,6 +146,64 @@ void print_help() {
     std::cout << "  " << DIM << "\\help" << RESET << "           — This help\n";
 }
 
+// ---------------------------------------------------------------------------
+// mysql_native_password-style challenge-response (same scheme the MySQL wire
+// protocol already uses, engine-side implementation in
+// SharedDatabase::verify_mysql_native_password). Computes the token the server
+// expects, so the plaintext password itself is never sent over the wire.
+// ---------------------------------------------------------------------------
+std::string sha1_hex(const std::string& data) {
+    SHA1 hasher;
+    hasher.update(data);
+    return hasher.final();
+}
+
+std::vector<std::uint8_t> hex_decode(const std::string& hex) {
+    std::vector<std::uint8_t> out;
+    out.reserve(hex.size() / 2);
+    for (size_t i = 0; i + 1 < hex.size(); i += 2) {
+        out.push_back(static_cast<std::uint8_t>(std::stoul(hex.substr(i, 2), nullptr, 16)));
+    }
+    return out;
+}
+
+std::string hex_encode(const std::vector<std::uint8_t>& bytes) {
+    static const char* digits = "0123456789abcdef";
+    std::string out;
+    out.reserve(bytes.size() * 2);
+    for (auto b : bytes) {
+        out.push_back(digits[(b >> 4) & 0xf]);
+        out.push_back(digits[b & 0xf]);
+    }
+    return out;
+}
+
+// token = SHA1(password) XOR SHA1(nonce || SHA1(SHA1(password)))
+std::string compute_native_password_token(const std::string& password, const std::vector<std::uint8_t>& nonce) {
+    auto stage1 = hex_decode(sha1_hex(password));
+    std::string stage1_str(stage1.begin(), stage1.end());
+    auto stage2 = hex_decode(sha1_hex(stage1_str));
+
+    std::string concat(nonce.begin(), nonce.end());
+    concat.append(stage2.begin(), stage2.end());
+    auto xor_key = hex_decode(sha1_hex(concat));
+
+    std::vector<std::uint8_t> token(20);
+    for (size_t i = 0; i < 20; i++) token[i] = stage1[i] ^ xor_key[i];
+    return hex_encode(token);
+}
+
+// Extracts the 20-byte nonce from a "NONCE <hex>" line in the server's banner.
+std::optional<std::vector<std::uint8_t>> extract_nonce(const std::vector<std::string>& banner_lines) {
+    for (const auto& line : banner_lines) {
+        if (line.rfind("NONCE ", 0) == 0) {
+            auto bytes = hex_decode(line.substr(6));
+            if (bytes.size() == 20) return bytes;
+        }
+    }
+    return std::nullopt;
+}
+
 bool send_line(SOCKET sock, const std::string& text) {
     std::string out = text + "\n";
     size_t sent = 0;
@@ -218,11 +279,19 @@ int main(int argc, char** argv) {
 
     LineReader reader(sock);
 
-    // ── 배너 수신 ──
-    read_response(reader);
+    // ── 배너 수신 (NONCE 라인 포함 — challenge-response 인증에 필요) ──
+    auto banner_lines = read_response(reader);
+    auto nonce = extract_nonce(banner_lines);
+    if (!nonce) {
+        std::cerr << RED << BOLD << "Server did not send an auth challenge (NONCE)." << RESET << "\n";
+        closesocket(sock);
+        WSACleanup();
+        return 1;
+    }
 
-    // ── AUTH 송신 ──
-    if (!send_line(sock, "AUTH " + user + " " + pass)) {
+    // ── AUTH 송신 (평문 비밀번호 대신 mysql_native_password 방식 challenge-response) ──
+    std::string token = compute_native_password_token(pass, *nonce);
+    if (!send_line(sock, "AUTH " + user + " " + token)) {
         std::cerr << RED << "Connection lost during auth." << RESET << "\n";
         closesocket(sock);
         WSACleanup();

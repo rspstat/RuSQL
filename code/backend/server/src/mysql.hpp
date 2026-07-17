@@ -5,7 +5,8 @@
 
 #include <cstdint>
 #include <memory>
+#include <string>
 
 #include "engine/executor/executor.hpp"
 
-void start_mysql_listener(int port, std::shared_ptr<engine::RwLock<engine::SharedDatabase>> shared);
+void start_mysql_listener(int port, const std::string& bind_addr, std::shared_ptr<engine::RwLock<engine::SharedDatabase>> shared);

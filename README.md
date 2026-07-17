@@ -692,7 +692,7 @@ SHOW DATABASES;
 | Multi-DB | CREATE / DROP / USE / SHOW DATABASES, auto table qualification, isolation |
 | User Management | CREATE/DROP USER, GRANT/REVOKE, SHOW GRANTS, ROLE management, SYNONYM, persistence |
 | UI | Tauri + React + Monaco Editor (home screen: quick action buttons·RDBMS intro·connection card grid·bottom status bar·activity bar, multi-tab, tab right-click menu, tab pinning, split editor, MySQL-style editor toolbar, panel toggle buttons, Canvas-based auto column width, connection sidebar drag-resize, Server Manager — benchmark result UI·real-time session monitoring·AI MCP auto-connect) |
-| TCP Server | Native protocol (127.0.0.1:7878, SHA-256 auth) + MySQL wire protocol (0.0.0.0:3306, `mysql_native_password` challenge-response auth, fully compatible with DBeaver·mysql CLI·mysql-connector-python) — `--mysql-port` / `--no-mysql` / `--buffer-pool-size` options |
+| TCP Server | Native protocol (127.0.0.1:7878, `mysql_native_password`-style challenge-response auth — plaintext password never sent over the wire) + MySQL wire protocol (127.0.0.1:3306 by default, same challenge-response auth, fully compatible with DBeaver·mysql CLI·mysql-connector-python) — `--mysql-port` / `--mysql-bind` / `--no-mysql` / `--buffer-pool-size` options |
 | AI Integration | **AI MCP** (Python / FastMCP, stdio JSON-RPC) — Claude Desktop queries RuSQL directly via **7 tools**: `execute_sql` · `list_databases` · `list_tables` · `get_table_schema` · `explain_query` · `get_indexes` · `sample_data`, SELECT results as structured JSON array, `alwaysAllow` auto-configured (no permission popups), no API key required, auto-connect Claude Desktop from UI (supports both standard install and Windows Store version) |
 
 <br/>

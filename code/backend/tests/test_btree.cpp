@@ -1,8 +1,46 @@
+#include <algorithm>
+#include <random>
+
 #include "catch.hpp"
 #include "engine/storage/btree.hpp"
 #include "engine/storage/btree_json.hpp"
 
 using namespace engine;
+
+namespace {
+// Mirrors btree.cpp's private MIN_KEYS constant (ORDER=16 => ORDER/2 - 1 = 7). Not part
+// of BPlusTree's public API, so duplicated here for the invariant checks below -- if
+// ORDER ever changes, this must be updated to match.
+constexpr std::size_t TEST_MIN_KEYS = 7;
+
+// Recursively verifies every non-root node has at least TEST_MIN_KEYS keys (the B-tree
+// minimum-key invariant a correct delete-side rebalance must maintain -- this is exactly
+// what PLAN.md's "no underflow rebalancing" gap meant nothing enforced), and returns the
+// total number of leaf keys found (cross-checked against BPlusTree::len() by callers).
+std::size_t check_min_keys_invariant(const Node& node, bool is_root) {
+    return std::visit(
+        [&](const auto& alt) -> std::size_t {
+            using T = std::decay_t<decltype(alt)>;
+            if (!is_root) REQUIRE(alt.keys.size() >= TEST_MIN_KEYS);
+            if constexpr (std::is_same_v<T, LeafNode>) {
+                return alt.keys.size();
+            } else {
+                std::size_t total = 0;
+                for (auto& c : alt.children) total += check_min_keys_invariant(*c, false);
+                return total;
+            }
+        },
+        node.data);
+}
+
+// Checks the invariant across the whole tree (no-op on an empty tree) and cross-checks
+// the leaf-key total against len().
+void check_tree_balanced(const BPlusTree& tree) {
+    if (tree.is_empty()) return;
+    std::size_t counted = check_min_keys_invariant(*tree.root_ptr(), /*is_root=*/true);
+    REQUIRE(counted == tree.len());
+}
+} // namespace
 
 TEST_CASE("cmp_keys is numeric-aware", "[btree]") {
     REQUIRE(cmp_keys("10", "9") > 0);
@@ -128,6 +166,95 @@ TEST_CASE("BPlusTree remove", "[btree]") {
     REQUIRE(!tree.search("5").has_value());
     REQUIRE(tree.search("4").has_value());
     REQUIRE(tree.len() == 9);
+}
+
+// Regression tests for PLAN.md's "B+Tree 삭제 시 언더플로우 리밸런싱 없음" (no delete-side
+// rebalancing -- a node could shrink to a single key and just stay that way forever,
+// with no borrow/merge, letting the tree grow arbitrarily sparse under a heavy-delete
+// workload). All of these use enough keys (well beyond ORDER=16 squared) to force
+// multi-level internal-node splits, so the deletes below exercise rebalancing at both
+// leaf and internal levels, not just a single-node tree.
+constexpr int kBigN = 2000;
+
+TEST_CASE("BPlusTree rebalances after deleting a contiguous prefix", "[btree][rebalance]") {
+    BPlusTree tree;
+    for (int i = 0; i < kBigN; i++) tree.insert(std::to_string(i), "v" + std::to_string(i));
+    for (int i = 0; i < kBigN / 2; i++) tree.remove(std::to_string(i)); // delete the leftmost half
+
+    check_tree_balanced(tree);
+    REQUIRE(tree.len() == static_cast<std::size_t>(kBigN / 2));
+    for (int i = 0; i < kBigN / 2; i++) REQUIRE(!tree.search(std::to_string(i)).has_value());
+    for (int i = kBigN / 2; i < kBigN; i++) {
+        auto v = tree.search(std::to_string(i));
+        REQUIRE(v.has_value());
+        REQUIRE(*v == "v" + std::to_string(i));
+    }
+}
+
+TEST_CASE("BPlusTree rebalances after deleting a contiguous suffix", "[btree][rebalance]") {
+    BPlusTree tree;
+    for (int i = 0; i < kBigN; i++) tree.insert(std::to_string(i), "v" + std::to_string(i));
+    for (int i = kBigN / 2; i < kBigN; i++) tree.remove(std::to_string(i)); // delete the rightmost half
+
+    check_tree_balanced(tree);
+    REQUIRE(tree.len() == static_cast<std::size_t>(kBigN / 2));
+    for (int i = kBigN / 2; i < kBigN; i++) REQUIRE(!tree.search(std::to_string(i)).has_value());
+    for (int i = 0; i < kBigN / 2; i++) {
+        auto v = tree.search(std::to_string(i));
+        REQUIRE(v.has_value());
+        REQUIRE(*v == "v" + std::to_string(i));
+    }
+}
+
+TEST_CASE("BPlusTree rebalances after deleting a contiguous middle chunk", "[btree][rebalance]") {
+    BPlusTree tree;
+    for (int i = 0; i < kBigN; i++) tree.insert(std::to_string(i), "v" + std::to_string(i));
+    int lo = kBigN / 3, hi = 2 * kBigN / 3;
+    for (int i = lo; i < hi; i++) tree.remove(std::to_string(i));
+
+    check_tree_balanced(tree);
+    REQUIRE(tree.len() == static_cast<std::size_t>(kBigN - (hi - lo)));
+    for (int i = lo; i < hi; i++) REQUIRE(!tree.search(std::to_string(i)).has_value());
+    for (int i = 0; i < lo; i++) REQUIRE(tree.search(std::to_string(i)).has_value());
+    for (int i = hi; i < kBigN; i++) REQUIRE(tree.search(std::to_string(i)).has_value());
+}
+
+TEST_CASE("BPlusTree rebalances after scattered interleaved deletes", "[btree][rebalance]") {
+    BPlusTree tree;
+    for (int i = 0; i < kBigN; i++) tree.insert(std::to_string(i), "v" + std::to_string(i));
+    for (int i = 0; i < kBigN; i += 3) tree.remove(std::to_string(i)); // delete every 3rd key
+
+    check_tree_balanced(tree);
+    std::size_t expected_removed = (kBigN + 2) / 3;
+    REQUIRE(tree.len() == static_cast<std::size_t>(kBigN) - expected_removed);
+    for (int i = 0; i < kBigN; i++) {
+        bool was_removed = (i % 3 == 0);
+        REQUIRE(tree.search(std::to_string(i)).has_value() == !was_removed);
+    }
+}
+
+TEST_CASE("BPlusTree rebalances after random-order deletes down to a handful of keys", "[btree][rebalance]") {
+    BPlusTree tree;
+    std::vector<int> keys(kBigN);
+    for (int i = 0; i < kBigN; i++) keys[static_cast<std::size_t>(i)] = i;
+    for (int i : keys) tree.insert(std::to_string(i), "v" + std::to_string(i));
+
+    std::mt19937 rng(42); // fixed seed for reproducibility
+    std::shuffle(keys.begin(), keys.end(), rng);
+
+    // Remove all but the last 5 keys (in shuffled order), checking the invariant
+    // periodically -- not just once at the very end -- so a rebalance bug that only
+    // shows up transiently (e.g. right after a merge cascades up several levels) isn't
+    // masked by later operations happening to "heal" the structure.
+    for (std::size_t removed = 0; removed + 5 < keys.size(); removed++) {
+        tree.remove(std::to_string(keys[removed]));
+        if (removed % 97 == 0) check_tree_balanced(tree);
+    }
+    check_tree_balanced(tree);
+    REQUIRE(tree.len() == 5);
+    for (std::size_t i = keys.size() - 5; i < keys.size(); i++) {
+        REQUIRE(tree.search(std::to_string(keys[i])).has_value());
+    }
 }
 
 TEST_CASE("BPlusTree range_keys", "[btree]") {

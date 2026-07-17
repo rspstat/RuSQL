@@ -7,7 +7,11 @@
 namespace engine {
 
 namespace {
-constexpr std::size_t ORDER = 16; // 노드당 최대 키 수
+constexpr std::size_t ORDER = 16;    // 노드당 최대 키 수 (분할 임계값)
+// 표준 B-tree 공식: t = ORDER/2 (최소 차수), 비-루트 노드의 최소 키 수 = t-1.
+// 삭제 시 언더플로우 판단 기준 — 삽입/분할의 ORDER와 짝을 이루는 값(둘 다 이 파일에만 존재,
+// 공개 API/생성자로 노출되지 않음).
+constexpr std::size_t MIN_KEYS = ORDER / 2 - 1;
 
 // Rust's `s.parse::<f64>()` validates the WHOLE string slice (embedded null bytes
 // included, e.g. composite-index keys use '\x00' as a column separator). Using
@@ -296,6 +300,150 @@ void range_collect_keys(const Node& node, const std::string& start, const std::s
         node.data);
 }
 
+std::size_t key_count(const Node& node) {
+    return std::visit([](const auto& alt) { return alt.keys.size(); }, node.data);
+}
+
+// Moves parent.children[idx-1]'s last key/value (leaf) or last child + a rotated
+// separator (internal) into parent.children[idx], which is underfull. Precondition:
+// idx > 0 and parent.children[idx-1] has more than MIN_KEYS keys (safe to give one up).
+void borrow_from_left(InternalNode& parent, std::size_t idx) {
+    Node& left = *parent.children[idx - 1];
+    Node& target = *parent.children[idx];
+    std::visit(
+        [&](auto& target_alt) {
+            using T = std::decay_t<decltype(target_alt)>;
+            if constexpr (std::is_same_v<T, LeafNode>) {
+                auto& left_leaf = std::get<LeafNode>(left.data);
+                target_alt.keys.insert(target_alt.keys.begin(), left_leaf.keys.back());
+                target_alt.values.insert(target_alt.values.begin(), left_leaf.values.back());
+                left_leaf.keys.pop_back();
+                left_leaf.values.pop_back();
+                parent.keys[idx - 1] = target_alt.keys.front(); // matches this codebase's
+                                                                 // "separator == right subtree's min key" convention (see insert_node's leaf split)
+            } else {
+                auto& left_internal = std::get<InternalNode>(left.data);
+                target_alt.keys.insert(target_alt.keys.begin(), parent.keys[idx - 1]);
+                target_alt.children.insert(target_alt.children.begin(), std::move(left_internal.children.back()));
+                left_internal.children.pop_back();
+                parent.keys[idx - 1] = left_internal.keys.back();
+                left_internal.keys.pop_back();
+            }
+        },
+        target.data);
+}
+
+// Mirror of borrow_from_left: parent.children[idx+1]'s first key/value (leaf) or first
+// child + a rotated separator (internal) moves into parent.children[idx].
+void borrow_from_right(InternalNode& parent, std::size_t idx) {
+    Node& right = *parent.children[idx + 1];
+    Node& target = *parent.children[idx];
+    std::visit(
+        [&](auto& target_alt) {
+            using T = std::decay_t<decltype(target_alt)>;
+            if constexpr (std::is_same_v<T, LeafNode>) {
+                auto& right_leaf = std::get<LeafNode>(right.data);
+                target_alt.keys.push_back(right_leaf.keys.front());
+                target_alt.values.push_back(right_leaf.values.front());
+                right_leaf.keys.erase(right_leaf.keys.begin());
+                right_leaf.values.erase(right_leaf.values.begin());
+                parent.keys[idx] = right_leaf.keys.front();
+            } else {
+                auto& right_internal = std::get<InternalNode>(right.data);
+                target_alt.keys.push_back(parent.keys[idx]);
+                target_alt.children.push_back(std::move(right_internal.children.front()));
+                right_internal.children.erase(right_internal.children.begin());
+                parent.keys[idx] = right_internal.keys.front();
+                right_internal.keys.erase(right_internal.keys.begin());
+            }
+        },
+        target.data);
+}
+
+// Merges parent.children[idx] into parent.children[idx-1] (absorbing the parent
+// separator key for internal nodes), then removes the now-redundant child slot and
+// separator key from parent. Precondition: idx > 0.
+void merge_with_left(InternalNode& parent, std::size_t idx) {
+    std::unique_ptr<Node> target = std::move(parent.children[idx]);
+    Node& left = *parent.children[idx - 1];
+    std::visit(
+        [&](auto& left_alt) {
+            using T = std::decay_t<decltype(left_alt)>;
+            if constexpr (std::is_same_v<T, LeafNode>) {
+                auto& target_leaf = std::get<LeafNode>(target->data);
+                left_alt.keys.insert(left_alt.keys.end(), std::make_move_iterator(target_leaf.keys.begin()),
+                                      std::make_move_iterator(target_leaf.keys.end()));
+                left_alt.values.insert(left_alt.values.end(), std::make_move_iterator(target_leaf.values.begin()),
+                                        std::make_move_iterator(target_leaf.values.end()));
+            } else {
+                auto& target_internal = std::get<InternalNode>(target->data);
+                left_alt.keys.push_back(parent.keys[idx - 1]); // separator drops down into the merged node
+                left_alt.keys.insert(left_alt.keys.end(), std::make_move_iterator(target_internal.keys.begin()),
+                                      std::make_move_iterator(target_internal.keys.end()));
+                left_alt.children.insert(left_alt.children.end(), std::make_move_iterator(target_internal.children.begin()),
+                                          std::make_move_iterator(target_internal.children.end()));
+            }
+        },
+        left.data);
+    parent.children.erase(parent.children.begin() + static_cast<std::ptrdiff_t>(idx));
+    parent.keys.erase(parent.keys.begin() + static_cast<std::ptrdiff_t>(idx - 1));
+}
+
+// Mirror of merge_with_left: merges parent.children[idx+1] into parent.children[idx].
+void merge_with_right(InternalNode& parent, std::size_t idx) {
+    std::unique_ptr<Node> right = std::move(parent.children[idx + 1]);
+    Node& target = *parent.children[idx];
+    std::visit(
+        [&](auto& target_alt) {
+            using T = std::decay_t<decltype(target_alt)>;
+            if constexpr (std::is_same_v<T, LeafNode>) {
+                auto& right_leaf = std::get<LeafNode>(right->data);
+                target_alt.keys.insert(target_alt.keys.end(), std::make_move_iterator(right_leaf.keys.begin()),
+                                        std::make_move_iterator(right_leaf.keys.end()));
+                target_alt.values.insert(target_alt.values.end(), std::make_move_iterator(right_leaf.values.begin()),
+                                          std::make_move_iterator(right_leaf.values.end()));
+            } else {
+                auto& right_internal = std::get<InternalNode>(right->data);
+                target_alt.keys.push_back(parent.keys[idx]); // separator drops down into the merged node
+                target_alt.keys.insert(target_alt.keys.end(), std::make_move_iterator(right_internal.keys.begin()),
+                                        std::make_move_iterator(right_internal.keys.end()));
+                target_alt.children.insert(target_alt.children.end(), std::make_move_iterator(right_internal.children.begin()),
+                                            std::make_move_iterator(right_internal.children.end()));
+            }
+        },
+        target.data);
+    parent.children.erase(parent.children.begin() + static_cast<std::ptrdiff_t>(idx + 1));
+    parent.keys.erase(parent.keys.begin() + static_cast<std::ptrdiff_t>(idx));
+}
+
+// Restores the B-tree minimum-key invariant for the underfull child at parent.children[idx]:
+// prefer borrowing a key from a sibling that can spare one (keeps both siblings balanced,
+// no node count change), falling back to merging with a sibling otherwise (reduces
+// parent.children by one, which may itself underflow -- handled by the caller's own
+// recursion unwinding, one level at a time, exactly like insert's split-then-propagate).
+void rebalance_child(InternalNode& parent, std::size_t idx) {
+    bool has_left = idx > 0;
+    bool has_right = idx + 1 < parent.children.size();
+
+    if (has_left && key_count(*parent.children[idx - 1]) > MIN_KEYS) {
+        borrow_from_left(parent, idx);
+        return;
+    }
+    if (has_right && key_count(*parent.children[idx + 1]) > MIN_KEYS) {
+        borrow_from_right(parent, idx);
+        return;
+    }
+    if (has_left) {
+        merge_with_left(parent, idx);
+    } else if (has_right) {
+        merge_with_right(parent, idx);
+    }
+    // else: idx is parent's only child -- nothing to borrow from or merge with. Only
+    // reachable when parent itself is the tree root with a single child, which the
+    // caller's own children.size()==1 collapse (below) already handles correctly (the
+    // root is exempt from the minimum-key invariant in standard B-tree theory).
+}
+
 std::unique_ptr<Node> remove_node(std::unique_ptr<Node> node, const std::string& key) {
     if (std::holds_alternative<LeafNode>(node->data)) {
         LeafNode leaf = std::move(std::get<LeafNode>(node->data));
@@ -313,19 +461,26 @@ std::unique_ptr<Node> remove_node(std::unique_ptr<Node> node, const std::string&
     std::size_t idx = first_greater(internal.keys, key);
     idx = std::min(idx, internal.children.size() - 1);
 
-    std::unique_ptr<Node> child = std::move(internal.children[idx]);
-    internal.children.erase(internal.children.begin() + static_cast<std::ptrdiff_t>(idx));
-    std::unique_ptr<Node> updated = remove_node(std::move(child), key);
+    std::unique_ptr<Node> updated_child = remove_node(std::move(internal.children[idx]), key);
 
-    if (updated) {
-        internal.children.insert(internal.children.begin() + static_cast<std::ptrdiff_t>(idx), std::move(updated));
+    if (!updated_child) {
+        // Child fully emptied with no sibling to merge into -- only possible when this
+        // internal node has exactly one child (a defensive fallback; proper rebalancing
+        // below should mean this is never actually reached in practice, since a non-root
+        // child never persists below MIN_KEYS long enough to reach zero).
+        internal.children.erase(internal.children.begin() + static_cast<std::ptrdiff_t>(idx));
+        std::size_t key_idx = idx == 0 ? 0 : idx - 1;
+        if (key_idx < internal.keys.size()) internal.keys.erase(internal.keys.begin() + static_cast<std::ptrdiff_t>(key_idx));
+        if (internal.children.empty()) return nullptr;
+        if (internal.children.size() == 1) return std::move(internal.children[0]);
         return std::make_unique<Node>(Node(std::move(internal)));
     }
 
-    std::size_t key_idx = idx == 0 ? 0 : idx - 1;
-    if (key_idx < internal.keys.size()) internal.keys.erase(internal.keys.begin() + static_cast<std::ptrdiff_t>(key_idx));
+    internal.children[idx] = std::move(updated_child);
+    if (key_count(*internal.children[idx]) < MIN_KEYS) {
+        rebalance_child(internal, idx);
+    }
 
-    if (internal.children.empty()) return nullptr;
     if (internal.children.size() == 1) return std::move(internal.children[0]);
     return std::make_unique<Node>(Node(std::move(internal)));
 }

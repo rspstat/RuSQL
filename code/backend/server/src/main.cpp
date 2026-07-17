@@ -65,6 +65,59 @@ std::string trim_copy(const std::string& s) {
     return s.substr(start, end - start + 1);
 }
 
+// ---------------------------------------------------------------------------
+// Native-protocol AUTH challenge-response (mysql_native_password-style, reusing
+// SharedDatabase::verify_mysql_native_password -- the server side never hashes
+// anything itself, just generates a nonce and hex-encodes/decodes the wire values;
+// all SHA1 work happens inside verify_mysql_native_password, same as the MySQL
+// protocol listener). Replaces the previous plaintext `AUTH <user> <password>`.
+// ---------------------------------------------------------------------------
+std::string hex_encode(const std::vector<std::uint8_t>& bytes) {
+    static const char* digits = "0123456789abcdef";
+    std::string out;
+    out.reserve(bytes.size() * 2);
+    for (auto b : bytes) {
+        out.push_back(digits[(b >> 4) & 0xf]);
+        out.push_back(digits[b & 0xf]);
+    }
+    return out;
+}
+
+std::vector<std::uint8_t> hex_decode(const std::string& hex) {
+    std::vector<std::uint8_t> out;
+    out.reserve(hex.size() / 2);
+    for (std::size_t i = 0; i + 1 < hex.size(); i += 2) {
+        try {
+            out.push_back(static_cast<std::uint8_t>(std::stoul(hex.substr(i, 2), nullptr, 16)));
+        } catch (...) {
+            return {};
+        }
+    }
+    return out;
+}
+
+// Mirrors mysql.cpp's make_nonce (timestamp + connection-identifying data + a fixed
+// magic, zero bytes remapped) -- not shared directly since that one lives in mysql.cpp's
+// own anonymous namespace; duplicated here rather than exporting it across translation
+// units for a few lines of code.
+std::vector<std::uint8_t> make_nonce(unsigned short peer_port) {
+    auto t = static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::system_clock::now().time_since_epoch()).count());
+    std::vector<std::uint8_t> n(20, 0);
+    for (int i = 0; i < 8; i++) n[i] = static_cast<std::uint8_t>((t >> (i * 8)) & 0xff);
+    n[8] = static_cast<std::uint8_t>(peer_port & 0xff);
+    n[9] = static_cast<std::uint8_t>((peer_port >> 8) & 0xff);
+    for (int i = 0; i < 4; i++) n[12 + i] = static_cast<std::uint8_t>(((t >> 32) >> (i * 8)) & 0xff);
+    n[16] = 0x52;
+    n[17] = 0x44;
+    n[18] = 0x42;
+    n[19] = 0x21; // "RDB!"
+    for (auto& b : n) {
+        if (b == 0) b = 0x5a;
+    }
+    return n;
+}
+
 // Returns the byte offset of the first ';' at BEGIN...END depth 0, skipping
 // --/#/block comments and string literals. std::nullopt means the buffer so
 // far holds no complete top-level statement yet (e.g. an unclosed BEGIN body
@@ -244,7 +297,8 @@ void handle_client(SOCKET sock, std::shared_ptr<RwLock<SharedDatabase>> shared, 
 
     auto cleanup_and_return = [&]() { client_count->fetch_sub(1); };
 
-    // 1. banner
+    // 1. banner (includes a NONCE line for the challenge-response AUTH handshake below)
+    std::vector<std::uint8_t> nonce = make_nonce(peer_addr.sin_port);
     {
         std::ostringstream oss;
         oss << "+-----------------------------------------+\n";
@@ -252,6 +306,7 @@ void handle_client(SOCKET sock, std::shared_ptr<RwLock<SharedDatabase>> shared, 
         std::size_t pad = peer.size() >= 23 ? 0 : 23 - peer.size();
         oss << "|   Connected: " << peer << std::string(pad, ' ') << "|\n";
         oss << "+-----------------------------------------+\n";
+        oss << "NONCE " << hex_encode(nonce) << "\n";
         oss << "---END---\n";
         if (!send_line_raw(sock, oss.str())) {
             cleanup_and_return();
@@ -261,7 +316,8 @@ void handle_client(SOCKET sock, std::shared_ptr<RwLock<SharedDatabase>> shared, 
 
     LineReader reader(sock);
 
-    // 2. AUTH handshake
+    // 2. AUTH handshake -- client sends a mysql_native_password-style challenge-response
+    // token (hex-encoded) computed from the nonce above, never the plaintext password.
     std::string auth_line;
     if (!reader.read_line(auth_line)) {
         cleanup_and_return();
@@ -281,22 +337,21 @@ void handle_client(SOCKET sock, std::shared_ptr<RwLock<SharedDatabase>> shared, 
     }
     std::string cmd = parts.size() > 0 ? parts[0] : "";
     std::string auth_user = parts.size() > 1 ? trim_copy(parts[1]) : "";
-    std::string auth_pass = parts.size() > 2 ? trim_copy(parts[2]) : "";
+    std::string auth_token_hex = parts.size() > 2 ? trim_copy(parts[2]) : "";
 
     if (!ieq(cmd, "auth") || auth_user.empty()) {
-        send_line_raw(sock, "ERR expected: AUTH <user> <password>\n---END---\n");
+        send_line_raw(sock, "ERR expected: AUTH <user> <token>\n---END---\n");
         cleanup_and_return();
         return;
     }
 
-    bool ok = shared->read()->validate_credentials(auth_user, auth_pass);
+    bool ok = shared->read()->verify_mysql_native_password(auth_user, nonce, hex_decode(auth_token_hex));
     if (!ok) {
         log("[" + peer + "] AUTH failed: '" + auth_user + "'");
         send_line_raw(sock, "ERR Access denied for user '" + auth_user + "'\n---END---\n");
         cleanup_and_return();
         return;
     }
-    shared->write()->migrate_mysql_hash(auth_user, auth_pass);
 
     log("[" + peer + "] Authenticated as '" + auth_user + "'");
     send_line_raw(sock, "OK authenticated as '" + auth_user + "'\n---END---\n");
@@ -428,6 +483,10 @@ int main(int argc, char** argv) {
         } catch (...) {
         }
     }
+    std::string mysql_bind = "127.0.0.1";
+    if (auto v = find_arg(args, "--mysql-bind")) {
+        mysql_bind = *v;
+    }
     std::size_t buffer_pool_size = 64;
     if (auto v = find_arg(args, "--buffer-pool-size")) {
         try {
@@ -495,7 +554,10 @@ int main(int argc, char** argv) {
     }
     if (!no_mysql) {
         std::string s = std::to_string(mysql_port);
-        std::cout << "|   MySQL protocol on 0.0.0.0:" << s << std::string(s.size() >= 12 ? 0 : 12 - s.size(), ' ') << "|\n";
+        std::string prefix = mysql_bind + ":";
+        std::size_t total_width = 12 + 8; // matches the original 0.0.0.0:{:<12} column width
+        std::size_t used = prefix.size() + s.size();
+        std::cout << "|   MySQL protocol on " << prefix << s << std::string(used >= total_width ? 0 : total_width - used, ' ') << "|\n";
     }
     {
         std::string s = std::to_string(buffer_pool_size);
@@ -505,7 +567,7 @@ int main(int argc, char** argv) {
     std::cout << "+-----------------------------------------+\n";
 
     if (!no_mysql) {
-        start_mysql_listener(mysql_port, shared);
+        start_mysql_listener(mysql_port, mysql_bind, shared);
     }
 
     log("Server started.");

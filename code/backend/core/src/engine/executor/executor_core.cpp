@@ -95,26 +95,10 @@ void from_json(const nlohmann::json& j, RoleGrant& rg) {
     j.at("with_admin_option").get_to(rg.with_admin_option);
 }
 
-bool SharedDatabase::validate_credentials(const std::string& user, const std::string& password) const {
-    // No "users.empty() -> allow everyone" fallback: the server always calls
-    // ensure_default_user() at boot, before either listener starts accepting
-    // connections, so a genuinely empty user table here would mean something is
-    // already wrong -- failing closed (deny) is safer than an implicit open-admin mode.
-    for (auto& u : users) {
-        if (u.user != user) continue;
-        if (!u.password_hash.has_value()) {
-            if (password.empty()) return true;
-            continue;
-        }
-        std::string hashed = hash_password(password);
-        if (*u.password_hash == hashed || *u.password_hash == password) return true;
-    }
-    return false;
-}
-
 bool SharedDatabase::verify_mysql_native_password(const std::string& user, const std::vector<std::uint8_t>& nonce,
                                                    const std::vector<std::uint8_t>& auth_response) const {
-    // Same fail-closed reasoning as validate_credentials above -- no open-mode fallback.
+    // Fail-closed: no "users empty -> allow everyone" open-mode fallback (see
+    // ensure_default_user()'s boot-time guarantee that this table is never empty in practice).
     const UserRecord* record = nullptr;
     for (auto& u : users) {
         if (u.user == user && (u.host == "%" || u.host == "localhost" || u.host == "127.0.0.1" || u.host == "::1")) {
@@ -141,21 +125,6 @@ bool SharedDatabase::verify_mysql_native_password(const std::string& user, const
     std::string claimed_str(claimed.begin(), claimed.end());
     auto verified = hex_decode(sha1_hex(claimed_str));
     return verified == stored;
-}
-
-void SharedDatabase::migrate_mysql_hash(const std::string& user, const std::string& password) {
-    bool needs = false;
-    for (auto& u : users) {
-        if (u.user == user && !u.mysql_native_hash.has_value()) { needs = true; break; }
-    }
-    if (!needs) return;
-    for (auto& u : users) {
-        if (u.user == user) {
-            u.mysql_native_hash = mysql_native_hash_compute(password);
-            break;
-        }
-    }
-    disk.save_users(users);
 }
 
 bool SharedDatabase::ensure_default_user() {

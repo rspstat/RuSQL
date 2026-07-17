@@ -1193,7 +1193,7 @@ void handle_mysql_client(SOCKET sock, std::shared_ptr<RwLock<SharedDatabase>> sh
 
 } // namespace
 
-void start_mysql_listener(int port, std::shared_ptr<RwLock<SharedDatabase>> shared) {
+void start_mysql_listener(int port, const std::string& bind_addr, std::shared_ptr<RwLock<SharedDatabase>> shared) {
     SOCKET listener = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (listener == INVALID_SOCKET) {
         std::cerr << "[mysql] Failed to create socket\n";
@@ -1203,26 +1203,29 @@ void start_mysql_listener(int port, std::shared_ptr<RwLock<SharedDatabase>> shar
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
     addr.sin_port = htons(static_cast<u_short>(port));
-    addr.sin_addr.s_addr = INADDR_ANY;
+    // Defaults to 127.0.0.1 (main.cpp's --mysql-bind default) rather than the previous
+    // hardcoded INADDR_ANY (0.0.0.0) -- combined with the ensure_default_user() root/root
+    // fallback account, binding all interfaces by default exposed the server to anyone on
+    // the same network out of the box. Pass --mysql-bind 0.0.0.0 explicitly to restore that.
+    inet_pton(AF_INET, bind_addr.c_str(), &addr.sin_addr);
 
     if (bind(listener, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {
-        std::cerr << "[mysql] Failed to bind 0.0.0.0:" << port << "\n";
+        std::cerr << "[mysql] Failed to bind " << bind_addr << ":" << port << "\n";
         closesocket(listener);
         return;
     }
     if (listen(listener, SOMAXCONN) != 0) {
-        std::cerr << "[mysql] Failed to listen on 0.0.0.0:" << port << "\n";
+        std::cerr << "[mysql] Failed to listen on " << bind_addr << ":" << port << "\n";
         closesocket(listener);
         return;
     }
 
     {
-        // Matches Rust's `println!("...0.0.0.0:{:<16}|", port)` — only the port
-        // number is padded, not the "host:port" string (this print is a near-duplicate
-        // of main.cpp's own MySQL banner line with a different padding width — a real
-        // quirk in the Rust original, faithfully preserved rather than deduplicated).
         std::string s = std::to_string(port);
-        std::cout << "|   MySQL protocol on 0.0.0.0:" << s << std::string(s.size() >= 16 ? 0 : 16 - s.size(), ' ') << "|\n";
+        std::string prefix = bind_addr + ":";
+        std::size_t total_width = 16 + 8; // matches the original 0.0.0.0:{:<16} column width
+        std::size_t used = prefix.size() + s.size();
+        std::cout << "|   MySQL protocol on " << prefix << s << std::string(used >= total_width ? 0 : total_width - used, ' ') << "|\n";
     }
 
     auto counter = std::make_shared<std::atomic<std::uint32_t>>(1);

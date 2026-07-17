@@ -9,7 +9,11 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 if(MSVC)
-    add_compile_options(/utf-8 /W4)
+    # /bigobj: executor_core.cpp's std::visit-heavy code (is_pure_read_only's recursive
+    # Statement-variant dispatch, among others) exceeds the default COFF object file
+    # section limit in Debug builds specifically (Debug doesn't fold/inline as
+    # aggressively as Release, generating far more sections per translation unit).
+    add_compile_options(/utf-8 /W4 /bigobj)
 else()
     add_compile_options(-Wall -Wextra)
 endif()

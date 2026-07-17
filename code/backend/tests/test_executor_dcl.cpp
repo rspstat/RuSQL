@@ -56,23 +56,20 @@ TEST_CASE("CREATE USER / DROP USER / GRANT / REVOKE / SHOW GRANTS", "[executor][
     REQUIRE(drop_again.is_err());
 }
 
-TEST_CASE("validate_credentials/verify_mysql_native_password fail closed when the user table is empty",
-          "[executor][dcl][regression]") {
-    // Regression, faithfully preserved from Rust (code/legacy/rusql-core/src/engine/executor.rs:198,215):
-    // both functions used to return true unconditionally ("open mode") whenever `users`
-    // was empty, on the assumption that the server always calls ensure_default_user() at
-    // boot (before either listener accepts a connection) so this state is unreachable in
-    // practice. Removed the fallback so a genuinely empty user table -- reachable if
-    // ensure_default_user() is ever skipped, fails, or a future entry point forgets to
-    // call it -- denies everyone instead of silently granting universal access.
+TEST_CASE("verify_mysql_native_password fails closed when the user table is empty", "[executor][dcl][regression]") {
+    // Regression, faithfully preserved from Rust (code/legacy/rusql-core/src/engine/executor.rs:215):
+    // used to return true unconditionally ("open mode") whenever `users` was empty, on the
+    // assumption that the server always calls ensure_default_user() at boot (before either
+    // listener accepts a connection) so this state is unreachable in practice. Removed the
+    // fallback so a genuinely empty user table -- reachable if ensure_default_user() is
+    // ever skipped, fails, or a future entry point forgets to call it -- denies everyone
+    // instead of silently granting universal access. (validate_credentials, the SHA-256
+    // plaintext-compare native-protocol auth this test used to also cover, was removed
+    // once the native protocol switched to this same challenge-response scheme.)
     TempDataDir dir("exec_dcl_data_authfail");
     Executor ex(dir.path);
     auto s = ex.get_shared()->read();
     REQUIRE(s->users.empty());
-
-    REQUIRE_FALSE(s->validate_credentials("root", "root"));
-    REQUIRE_FALSE(s->validate_credentials("anyone", ""));
-    REQUIRE_FALSE(s->validate_credentials("", ""));
 
     std::vector<std::uint8_t> nonce(20, 0x01);
     std::vector<std::uint8_t> response(20, 0x02);

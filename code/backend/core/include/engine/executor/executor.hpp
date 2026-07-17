@@ -138,13 +138,12 @@ struct SharedDatabase {
     std::shared_ptr<TxnIoShared> txn_io;
     std::shared_ptr<Mutex<std::unordered_set<std::uint64_t>>> active_txn_ids;
 
-    // Native TCP auth: SHA-256 hex compare (with legacy-plaintext fallback + migration).
-    bool validate_credentials(const std::string& user, const std::string& password) const;
-    // mysql_native_password challenge-response verification (nonce is a 20-byte challenge).
+    // mysql_native_password challenge-response verification (nonce is a 20-byte challenge)
+    // -- used by both the MySQL wire protocol listener and the native TCP protocol's own
+    // AUTH handshake (server/src/main.cpp), so no plaintext password is ever transmitted
+    // by either protocol.
     bool verify_mysql_native_password(const std::string& user, const std::vector<std::uint8_t>& nonce,
                                        const std::vector<std::uint8_t>& auth_response) const;
-    // Backfills mysql_native_hash for legacy accounts that only have password_hash.
-    void migrate_mysql_hash(const std::string& user, const std::string& password);
     // Creates a default root/root account if `users` is empty; returns true if created.
     bool ensure_default_user();
 };
