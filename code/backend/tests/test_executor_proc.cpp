@@ -214,6 +214,33 @@ TEST_CASE("DATABASE()/SCHEMA() reflect the current session database", "[executor
     REQUIRE(r.value().find("company") != std::string::npos);
 }
 
+TEST_CASE("USER()/CURRENT_USER() reflect the actual authenticated session user", "[executor][proc]") {
+    // Regression: used to always hardcode "root@localhost" regardless of who actually
+    // authenticated (Executor::auth_user, set by the native/MySQL protocol servers after
+    // a successful AUTH handshake -- defaults to "root" here since this test drives the
+    // Executor directly with no network auth step).
+    TempDataDir dir("exec_proc_data_14");
+    Executor ex(dir.path);
+    REQUIRE(ex.execute_sql("CREATE DATABASE company").is_ok());
+    REQUIRE(ex.execute_sql("USE company").is_ok());
+    REQUIRE(ex.execute_sql("CREATE TABLE t (id INT PRIMARY KEY)").is_ok());
+    REQUIRE(ex.execute_sql("INSERT INTO t VALUES (1)").is_ok());
+
+    auto r1 = ex.execute_sql("SELECT USER() AS u FROM t");
+    REQUIRE(r1.is_ok());
+    REQUIRE(r1.value().find("root@localhost") != std::string::npos);
+
+    ex.auth_user = "alice";
+    auto r2 = ex.execute_sql("SELECT USER() AS u FROM t");
+    REQUIRE(r2.is_ok());
+    REQUIRE(r2.value().find("alice@localhost") != std::string::npos);
+    REQUIRE(r2.value().find("root@localhost") == std::string::npos);
+
+    auto r3 = ex.execute_sql("SELECT CURRENT_USER() AS u FROM t");
+    REQUIRE(r3.is_ok());
+    REQUIRE(r3.value().find("alice@localhost") != std::string::npos);
+}
+
 TEST_CASE("WHILE loop with a condition that never becomes false errors instead of hanging", "[executor][proc]") {
     // Regression (Section B, Part B): procedure loops had no iteration cap, so a runaway
     // WHILE/LOOP/REPEAT would hold SharedDatabase's exclusive write lock forever, freezing

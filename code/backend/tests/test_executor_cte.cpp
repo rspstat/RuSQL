@@ -98,3 +98,27 @@ TEST_CASE("Recursive CTE walks a management tree to completion", "[executor][cte
     // Boss (depth 0) must appear before Leaf (depth 2) since ORDER BY depth ASC.
     REQUIRE(r.value().find("Boss") < r.value().find("Leaf"));
 }
+
+TEST_CASE("Non-terminating recursive CTE errors instead of silently returning a truncated result", "[executor][cte]") {
+    // Regression: exec_with's 1000-iteration cap used to have no way to distinguish
+    // "stopped because a genuine fixed point was reached" from "stopped because the
+    // iteration cap was hit while still producing new rows" -- both fell through to the
+    // same code, silently returning whatever partial rows had accumulated with no
+    // indication the result might be incomplete. A recursive CTE with no natural
+    // termination (each iteration produces a strictly new value, so the row set never
+    // stops growing) must now fail with a clear error instead of quietly truncating.
+    TempDataDir dir("exec_cte_data_6");
+    Executor ex(dir.path);
+    REQUIRE(ex.execute_sql("CREATE DATABASE d").is_ok());
+    REQUIRE(ex.execute_sql("USE d").is_ok());
+
+    auto r = ex.execute_sql(
+        "WITH RECURSIVE counter AS ("
+        "SELECT 1 AS n "
+        "UNION ALL "
+        "SELECT n + 1 FROM counter WHERE n < 100000"
+        ") SELECT * FROM counter");
+    REQUIRE(r.is_err());
+    REQUIRE(r.error().find("did not reach a fixed point") != std::string::npos);
+    REQUIRE(r.error().find("1000 iterations") != std::string::npos);
+}

@@ -139,7 +139,7 @@
 - [x] INTERSECT / INTERSECT ALL — 교집합
 - [x] EXCEPT / EXCEPT ALL — 차집합
 - [x] CTE (WITH ... AS) — 단순 / 다중 / INSERT 메인 쿼리 지원
-- [x] 재귀 CTE (WITH RECURSIVE) — base case + UNION ALL 반복, positional 컬럼 매핑
+- [x] 재귀 CTE (WITH RECURSIVE) — base case + UNION ALL 반복, positional 컬럼 매핑, 1000회 반복 내 고정점 미도달 시 (불완전한 결과를 조용히 반환하는 대신) 명확한 에러로 실패
 - [x] SELECT ... FOR UPDATE (배타 잠금)
 - [x] SELECT ... FOR SHARE (공유 잠금 — 다중 독자 허용, 쓰기 잠금과 충돌)
 - [x] table.column dot notation (SELECT / JOIN ON / GROUP BY / ORDER BY)
@@ -346,7 +346,8 @@
 - [x] `SHOW ENGINES` — RuSQL 엔진 정보 반환 (DBeaver 엔진 목록 초기화 정상 처리)
 - [x] `SHOW VARIABLES [LIKE 'pattern']` — 21개 주요 MySQL 시스템 변수 의미 있는 값 반환 (autocommit / character_set / collation / max_allowed_packet / tx_isolation 등), LIKE 패턴 필터링 지원
 - [x] `SELECT @@var1 AS a, @@var2 AS b, ...` — 다중 시스템 변수 SELECT를 컬럼별로 올바르게 파싱·반환 (DBeaver 접속 초기화 쿼리 정상 처리)
-- [x] `SELECT DATABASE()` / `SELECT SCHEMA()` / `SELECT USER()` — 각각 현재 DB / 현재 DB / 'root@localhost' 반환
+- [x] `SELECT DATABASE()` / `SELECT SCHEMA()` — 현재 DB 반환
+- [x] `SELECT USER()` / `CURRENT_USER()` / `SESSION_USER()` / `SYSTEM_USER()` — 실제로 인증된 세션 사용자명을 `'user@localhost'` 형태로 반환 (native/MySQL 프로토콜 AUTH 핸드셰이크 이후 세션별로 정확히 반영, 이전엔 항상 'root@localhost' 하드코딩)
 - [x] `SET ...` (charset / autocommit / session 변수 등) — 무조건 OK 반환
 
 ### 전용 클라이언트 (rusql-client)

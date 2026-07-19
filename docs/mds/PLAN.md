@@ -67,6 +67,17 @@
 > 실제 서버로 대용량 풀스캔 SELECT 진행 중 다른 세션의 `SELECT 1`이 1.06초 대신 0.0002초 만에
 > 응답하는 것으로 실측 확인. 섹션 B의 나머지 항목(트랜잭션 스냅샷 deep-clone, 버퍼풀 read-cache,
 > ASCII 표 재파싱, 조인 카디널리티)은 동시성과 무관하거나 훨씬 큰 별도 작업이라 의도적으로 미착수.
+>
+> **업데이트 (2026-07-19):** 섹션 E "재귀 CTE 1000회 상한 무경고 종료", 섹션 A "SELECT USER()가
+> 항상 root@localhost", 섹션 G "파괴적 작업 확인 절차 없음" 3건 수정 완료(위 ✅ 표시).
+> USER() 수정 과정에서 파서가 `SELECT USER()` 자체를 못 받아들이던 갭과, USER()가 세션별로
+> 달라진 이후 쿼리 캐시가 여전히 이를 비결정 함수로 취급 안 해 다른 세션의 캐싱된 값을 반환하던
+> 갭 2건을 자체 회귀 테스트로 추가 발견해 같이 수정. 검증 중 `engine_cli`/`engine_server`
+> Release 바이너리 일부가 마지막 소스 변경보다 먼저 빌드된 상태(불완전한 이전 빌드)로 남아있던
+> 것도 발견 — 전체 타겟 Debug/Release 재빌드 후 `engine_tests.exe`(256 테스트 케이스, 16911
+> assertion, 양쪽 구성 모두 통과) + `test_full.sql`/`test_full-ver2.sql` 재실행(기존에 알려진
+> 오류만 재현, 신규 회귀 없음) + 실제 `mysql` CLI·`engine_client`(서로 다른 두 계정)로 라이브
+> 재검증 완료.
 
 **P0**=정확성/무결성 직결(즉시 수정) · **P1**=핵심 아키텍처/보안 · **P2**=성능/호환성/사용성 · **P3**=장기 확장·정리
 
@@ -85,7 +96,7 @@
 | ✅ 완료 | UI 셀 편집 — PK값 미이스케이프 | 원인(`App.tsx:1338-1352`): WHERE절 pkValue를 항상 숫자로 취급, 문자열 PK 편집 시 조용히 실패. `ColumnDetail.data_type` 기준으로 숫자 타입일 때만 비따옴표 처리하는 `quoteForColType` 헬퍼 추가, WHERE절에 적용 | 모든 PK 타입에서 셀 편집 동작 | 낮음 |
 | ✅ 완료 | UI 셀 편집 — 복합 PK 미지원 | 원인(`App.tsx:1327`): 첫 PK 컬럼만 사용, 복합 PK 테이블에서 조건 불충분(다중 행 오업데이트 위험). `cols.find` → `cols.filter`로 PK 컬럼 전부 수집해 `pkCols` 배열로 저장, WHERE절을 AND로 전부 결합하도록 수정 | 복합 PK 테이블 안전 편집 | 중간 |
 | ✅ 완료 | (신규 발견) UPDATE/MERGE가 복합 PK 첫 컬럼만으로 행 식별 | 원인(Rust `code/legacy/rusql-core/src/engine/executor.rs:4960-4988`, 이식 시 그대로 보존): 단일 테이블 `UPDATE`(`exec_update_inner`), 다중 테이블 `UPDATE`/`DELETE`(`executor_multi.cpp`), `MERGE`(`executor_merge.cpp`) 전부 대상 행을 PK컬럼 중 첫 번째 값만으로 식별해, 복합 PK 테이블에서 `WHERE a=1 AND b=1`이 `a=1`인 행 전부를 잘못 건드림(UPDATE의 RETURNING, 다중 UPDATE/DELETE, MERGE 모두 동일 버그 확인). 위 두 UI 수정을 검증하다 CLI로 직접 재현해 발견 — UI가 완벽한 복합 WHERE절을 보내도 엔진이 내부적으로 더 많은 행을 건드리는 상태였음. 3개 파일 전부 PK 컬럼 전체를 `\x00`로 결합한 복합 키(복합 인덱스와 동일한 컨벤션)로 행 매칭 로직을 수정; 락/undo-log/PK 인덱스 갱신은 기존처럼 첫 PK 컬럼만 사용(엔진 전반의 기존 관례와 일관되게 유지, 별도 이슈). `test_executor_update_delete.cpp`(단일 UPDATE+RETURNING)·`test_executor_misc.cpp`(다중 UPDATE/DELETE, MERGE)에 회귀 테스트 6건 추가 | 복합 PK 테이블에서 UPDATE/DELETE/MERGE가 실제로 안전해짐 | 중간 |
-| P1 | SELECT USER()가 항상 root@localhost | `mysql.rs:648-652` — 실제 인증 사용자명 미반영 | 권한 확인 툴 오작동 방지 | 낮음 |
+| ✅ 완료 | SELECT USER()가 항상 root@localhost | 원인(Rust `mysql.rs:648-652`, 이식 시 그대로 보존): 실제 인증 사용자명 미반영. `Executor::auth_user`(기본값 `"root"`) 신규 추가 — native/MySQL 프로토콜 서버가 AUTH 성공 직후 실제 인증 사용자명을 대입, `sync_udf_context`(기존 `DATABASE()`용 `g_current_db_ctx`와 동일 패턴)로 스레드 로컬 `g_current_user_ctx`에 동기화해 `USER()`/`CURRENT_USER()`/`SESSION_USER()`/`SYSTEM_USER()` 스칼라 함수가 이를 반환하도록 수정. 검증 중 신규 버그 2건 추가 발견: (1) 파서 갭 — `TokenKind::User`가 `parser_select.cpp`의 SELECT 컬럼-리스트 스칼라 함수 인식 목록(`DATABASE()`는 이미 있던)에서 누락돼 `SELECT USER()` 자체가 파싱 실패(직접 작성한 회귀 테스트로 발견, mysql.cpp의 리터럴-문자열 호환 shim이 이 경로를 우회해 이전엔 안 드러남) — 인식 조건과 `fname` switch 양쪽에 추가해 수정. (2) 쿼리 캐시 비결정 함수 목록(`contains_nondeterministic_func`)에 `user`/`current_user`/`session_user`/`system_user`가 없어, USER()가 세션별로 달라지게 된 이후 두 세션이 동일 SQL 텍스트를 실행하면 먼저 캐싱된 세션의 값을 계속 반환하던 것(USER()를 동적으로 만든 직접적 부작용) — 4개 단어 추가해 수정. `mysql.cpp`의 `SELECT USER()` shim도 하드코딩 리터럴 대신 실제 파서 실행 결과로 교체(폴백은 유지). `test_executor_proc.cpp`에 회귀 테스트 추가, 실제 `mysql` CLI·`engine_client`로 서로 다른 두 계정(root/신규 생성한 bob)에 대해 라이브 검증 | 권한 확인 툴 오작동 방지 | 낮음 |
 | P1 | 모든 SET 문이 무조건 OK 응답 | `mysql.rs:637-638` — SET PASSWORD 등 실제 변경 없이도 성공 응답 | DBA 도구 신뢰성 | 낮음 |
 | ✅ 완료 | BEGIN...END 내부 세미콜론으로 프로시저 조기 실행 | 원인(Rust `rusql-server/main.rs:94-111,241-247`): UI 실사용 테스트로 2건 확인 — (1) 트랜잭션 `BEGIN;`이 블록으로 오인되어 이후 전체가 한 문장으로 합쳐짐(`test_full.sql`), (2) 트리거/프로시저처럼 본문이 여러 줄에 걸친 `BEGIN...END`는 커넥션 루프가 버퍼에 `;`이 하나라도 보이면(깊이 무시) 바로 분리 후 버퍼를 통째로 비워, 본문 내부 문장·`END`가 최상위 문장으로 새어나감(`test_full-ver2.sql`의 멀티라인 트리거로 실증). C++ `server/main.cpp`의 커넥션 루프를 CLI의 깊이 인식 방식(`find_stmt_end`)과 동일한 점진적 추출 방식으로 재작성; `test_server_stmt_split.cpp`에 회귀 테스트 추가 | 저장 프로시저/트리거 생성 및 실행 안정성 | 중간 |
 | P1 | rusql-client 세미콜론 카운트 불일치→hang | `rusql-client/main.rs:33-57,184-204` — BEGIN/END 미인식, 타임아웃 없음 | 클라이언트 안정성 | 중간 |
@@ -135,7 +146,7 @@
 | ✅ 완료 | B+Tree 삭제 시 언더플로우 리밸런싱 없음 | 원인(원본 Rust `btree.rs:357` 주석에 명시, C++ 이식본엔 관련 상수·체크·주석 전무 확인): 리프가 완전히 비어야만(0개) 노드를 버리고, 그 외엔 키가 1개까지 줄어도 그대로 방치 — 병합/재분배 전무. 표준 B-tree 공식(`ORDER=16` 기준 `t=8`, 비-루트 최소 키 수 `MIN_KEYS=t-1=7`)에 맞춰 `remove_node`의 internal-node 분기를 재작성 — 자식이 언더플로우하면 형제가 여유 있으면 빌리고(회전), 아니면 병합(왼쪽 우선). 리프/internal 노드 모두 처리(internal은 부모 구분키가 자식으로 내려가고 형제 키가 부모로 올라가는 표준 회전). 부모 포인터·리프 형제 연결 리스트가 원래 없는 구조라 병합/재분배가 sibling-link 불변조건을 신경 쓸 필요 없어 범위가 좁음. 공개 API(`remove(key)`) 시그니처 불변, 순수 내부 구현. 2000개 키 삽입 후 앞/뒤/중간/산발/무작위 순서로 대량 삭제하는 회귀 테스트 5건 추가 — 매 삭제 후 트리 재귀 순회로 "루트 아닌 모든 노드가 MIN_KEYS 이상"인 실제 구조적 불변조건까지 검증(단순 검색 정확성뿐 아니라) | 대량 삭제 워크로드에서 트리가 무한정 성겨지는 것 방지, 장기 운영 성능 저하 방지 | 높음 |
 | P2 | FK/UNIQUE 검증이 O(n) 선형 스캔 | `executor.rs:2021-2025, 1885-1968` — 이미 있는 인덱스 미활용 | 대량 INSERT 시 O(log n)으로 개선 | 중간 |
 | P2 | Index Intersection이 결국 전체 재스캔 | `executor.rs:2623-2680` — 포인트 룩업 미사용 | 문서상 성능 이득 실제 구현 | 중간 |
-| P1 | 재귀 CTE 1000회 상한 도달 시 무경고 종료 | `executor.rs:1603` | 결과 완전성 신뢰 | 낮음 |
+| ✅ 완료 | 재귀 CTE 1000회 상한 도달 시 무경고 종료 | 원인(Rust `executor.rs:1603`, 이식 시 그대로 보존): `exec_with`의 재귀 반복 루프가 "고정점 도달로 정상 종료"와 "여전히 새 행을 만들어내는 중인데 1000회 상한에 걸려 종료"를 구분할 방법이 없어 둘 다 동일하게 그때까지 누적된(불완전할 수 있는) 결과를 조용히 반환. `executor_cte.cpp`에 `reached_fixed_point` 플래그 추가 — 상한에 걸렸는데 고정점이 아니면 CTE 임시 테이블/인덱스를 정리하고 명확한 에러(`"did not reach a fixed point after 1000 iterations"`)로 실패하도록 변경(이미 있던 `WHILE`/`LOOP`/`REPEAT` 10만회 상한이 이 CTE 상한을 원조로 인용하던 것과 동일한 원칙 적용). `test_executor_cte.cpp`에 종료 조건 없는 재귀 CTE 회귀 테스트 추가, 실제 `mysql` CLI·`engine_client` 양쪽에서 동일 에러 메시지로 라이브 확인 | 결과 완전성 신뢰 | 낮음 |
 | P2 | 재귀 CTE 중복제거 O(n²) | `executor.rs:1621` — Vec::contains 사용 | HashSet 전환 시 성능 개선 | 낮음 |
 | P2 | GROUP BY 병렬집계 임계값 체크 누락 | `executor.rs:3062-3063` | 소규모 쿼리 오버헤드 제거 | 낮음 |
 | P2 | 병렬 임계값 환경변수 오타로 항상 무시 | `executor.rs:38-40` — `RUSTDB_parallel_min_rows()` 오타 | 튜닝 옵션 실제 동작 | 낮음 |
@@ -153,7 +164,7 @@
 
 | 우선순위 | 항목 | 현재 문제 (근거) | 기대 효과 | 난이도 |
 |---|---|---|---|---|
-| P1 | 파괴적 작업에 확인 절차 없음 | DROP DATABASE/TABLE/VIEW/INDEX, 연결삭제가 클릭 한 번에 즉시 실행 | 실수 방지, UX 완성도 | 낮음 |
+| ✅ 완료 | 파괴적 작업에 확인 절차 없음 | 원인: DROP DATABASE/TABLE/VIEW/INDEX, 연결삭제가 클릭 한 번에 즉시 실행(기존 재사용 가능한 확인 다이얼로그 컴포넌트 자체가 없었음 — `window.confirm()` 1곳, `.dlg-*` CSS 컨벤션 기반 개별 다이얼로그만 존재). `App.tsx`에 `confirmDialog` 상태 + `confirmThenRun(title, message, action)` 헬퍼 신규 추가해 6개 트리거 지점(DB/테이블/뷰/인덱스 드롭, 테이블 TRUNCATE, 저장된 연결 삭제) 전부에서 재사용, `App.css`에 `.dlg-danger` 스타일 추가(기존 `.dlg-connect` 구조 재사용, `.ctx-item-danger`의 빨간 톤 적용). `tsc --noEmit` 클린 확인 | 실수 방지, UX 완성도 | 낮음 |
 | P1 | 컴파일타임 개발자 경로 하드코딩→배포 불가 | `main.rs` — `env!("CARGO_MANIFEST_DIR")`, open_terminal 절대경로 리터럴 | 다른 PC 배포 가능 | 중간 |
 | P1 | MCP 설정 병합 실패 시 기존 설정 덮어씀 | `main.rs:953-960` — JSON 파싱 실패 시 빈 객체로 대체 | 사용자 기존 설정 보존 | 낮음 |
 | P2 | App.tsx 4090줄 단일 컴포넌트 | useState 41개·useEffect 12개가 한 함수에 혼재 | 유지보수성 향상 | 높음 |

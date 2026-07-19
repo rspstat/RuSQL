@@ -358,6 +358,7 @@ void handle_client(SOCKET sock, std::shared_ptr<RwLock<SharedDatabase>> shared, 
 
     // 3. query session
     Executor exec = Executor::new_session(shared);
+    exec.auth_user = auth_user;
     exec.register_process(auth_user, peer);
     std::string buf;
 

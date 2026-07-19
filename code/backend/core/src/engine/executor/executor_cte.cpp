@@ -57,6 +57,17 @@ StringResult Executor::exec_with(SharedDatabase& s, std::vector<std::pair<std::s
             s.buffer_pool.write_page(name, accumulated);
             s.indexes[name] = BPlusTree();
 
+            // Regression: this loop used to have no way to tell "stopped because no new
+            // rows appeared" (correct fixed point) apart from "stopped because we hit the
+            // iteration cap" (recursion didn't converge) -- both fell through to the exact
+            // same code below, silently returning whatever partial rows had accumulated so
+            // far with nothing telling the caller the result might be incomplete. Real
+            // MySQL fails a recursive CTE that exceeds its depth limit by default
+            // (ER_CTE_RECURSION_LIMIT) rather than silently truncating, and this project's
+            // own newer, more deliberate precedent for an analogous cap (procedure
+            // WHILE/LOOP/REPEAT, executor_proc.cpp) also fails with an error rather than
+            // silently returning a partial result -- match both here.
+            bool reached_fixed_point = false;
             for (int iter = 0; iter < 1000; iter++) {
                 auto rec_out = execute_with_s(s, right);
                 if (rec_out.is_err()) {
@@ -89,10 +100,30 @@ StringResult Executor::exec_with(SharedDatabase& s, std::vector<std::pair<std::s
                     mapped["_xmax"] = "0";
                     if (std::find(accumulated.begin(), accumulated.end(), mapped) == accumulated.end()) fresh.push_back(std::move(mapped));
                 }
-                if (fresh.empty()) break;
+                if (fresh.empty()) {
+                    reached_fixed_point = true;
+                    break;
+                }
                 accumulated.insert(accumulated.end(), fresh.begin(), fresh.end());
                 s.tables[name] = accumulated;
                 s.buffer_pool.write_page(name, accumulated);
+            }
+
+            if (!reached_fixed_point) {
+                for (auto& n : cte_names) {
+                    s.tables.erase(n);
+                    s.indexes.erase(n);
+                    s.buffer_pool.invalidate(n);
+                    s.catalog.drop_table(n);
+                }
+                s.tables.erase(name);
+                s.indexes.erase(name);
+                s.buffer_pool.invalidate(name);
+                s.catalog.drop_table(name);
+                return StringResult::Err("Recursive CTE '" + name +
+                                          "' did not reach a fixed point after 1000 iterations "
+                                          "(still producing new rows) -- aborted instead of returning an incomplete result. "
+                                          "Check the recursive term terminates, or the recursion may be genuinely unbounded.");
             }
 
             cte_names.push_back(name);

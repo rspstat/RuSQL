@@ -585,9 +585,14 @@ std::size_t count_occurrences(const std::string& haystack, const std::string& ne
 // that doesn't reference a table whose DML/DDL changed). Word-boundary matching
 // (not a bare substring search) avoids false positives on ordinary identifiers
 // that merely contain one of these names, e.g. a `brand` or `uuid_col` column.
+// USER()/CURRENT_USER()/SESSION_USER()/SYSTEM_USER() joined this list once USER()
+// started reflecting the real per-session Executor::auth_user instead of a fixed
+// literal -- otherwise two different sessions running the identical SQL text (e.g.
+// "SELECT USER()") could get back whichever user's result was cached first.
 bool contains_nondeterministic_func(const std::string& lower_sql) {
-    static const char* kFuncs[] = {"now",       "curdate",       "curtime",        "current_time", "current_timestamp",
-                                   "localtime", "localtimestamp", "unix_timestamp", "rand",         "uuid"};
+    static const char* kFuncs[] = {"now",         "curdate",     "curtime",        "current_time", "current_timestamp",
+                                   "localtime",   "localtimestamp", "unix_timestamp", "rand",      "uuid",
+                                   "user",        "current_user", "session_user",   "system_user"};
     auto is_ident_char = [](char c) { return std::isalnum(static_cast<unsigned char>(c)) != 0 || c == '_'; };
     for (const char* name_c : kFuncs) {
         std::string name = name_c;
@@ -656,7 +661,7 @@ StringResult Executor::execute_sql(const std::string& sql) {
 }
 
 StringResult Executor::execute_with_s(SharedDatabase& s, Statement stmt) {
-    sync_udf_context(s.user_functions, current_db);
+    sync_udf_context(s.user_functions, current_db, auth_user);
 
     if (auto* v = std::get_if<Statement::Use>(&stmt.data)) return exec_use(s, v->database);
     if (auto* v = std::get_if<Statement::CreateDatabase>(&stmt.data)) return exec_create_database(s, v->name, v->if_not_exists);

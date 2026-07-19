@@ -3031,6 +3031,17 @@ body {
 }
 .dlg-connect:hover:not(:disabled) { background: #3db89e; }
 .dlg-connect:disabled { opacity: 0.4; cursor: default; }
+.dlg-danger {
+  background: #f48771;
+  border: none;
+  border-radius: 3px;
+  color: #1e1e1e;
+  font-size: 12px;
+  font-weight: 700;
+  padding: 6px 20px;
+  cursor: pointer;
+}
+.dlg-danger:hover { background: #e06a52; }
 
 /* ── 다이얼로그 확장 스타일 ── */
 .dlg-box-wide { width: 480px; }

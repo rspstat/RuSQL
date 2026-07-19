@@ -161,6 +161,10 @@ public:
     std::unordered_map<std::string, std::string> prepared_stmts;
     std::size_t session_id = 0;
     std::uint64_t lock_wait_timeout_ms = 50000;
+    // The username that authenticated this session (native/MySQL protocol servers set
+    // this after a successful AUTH handshake; defaults to "root" for the CLI/in-process
+    // embedding, which has no network auth step of its own). Read by USER()/CURRENT_USER().
+    std::string auth_user = "root";
 
     Executor() : Executor("data", 64) {}
     explicit Executor(std::size_t buffer_pool_capacity) : Executor("data", buffer_pool_capacity) {}
@@ -254,13 +258,14 @@ private:
     static std::string eval_arith(const Row& row, const ArithExpr& expr);
     static std::string format_arith_result(double f);
     // Scalar function dispatcher (MD5/string/date/JSON/math functions, plus
-    // user-defined functions and DATABASE()/SCHEMA()). Mirrors the Rust original's use
-    // of thread_local USER_FUNCTIONS/CURRENT_DB_CTX to give this otherwise-static
+    // user-defined functions and DATABASE()/SCHEMA()/USER()). Mirrors the Rust original's
+    // use of thread_local USER_FUNCTIONS/CURRENT_DB_CTX to give this otherwise-static
     // function session context: sync_udf_context() (executor_scalar_func.cpp) sets
     // those thread_locals and is called at the top of execute_with_s, exactly where
     // the Rust original syncs them.
     static std::string apply_scalar_func(const std::string& func_name, const std::vector<std::string>& args, const Row& row);
-    static void sync_udf_context(const std::unordered_map<std::string, UserFunctionDef>& user_functions, const std::string& current_db);
+    static void sync_udf_context(const std::unordered_map<std::string, UserFunctionDef>& user_functions, const std::string& current_db,
+                                  const std::string& current_user);
     static bool matches_condexpr(const Row& row, const std::optional<CondExpr>& condition);
     static bool eval_condexpr(const Row& row, const CondExpr& expr);
     static bool eval_single(const Row& row, const Condition& cond);

@@ -830,10 +830,11 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
             std::vector<std::vector<Row>> chunk_results(n_chunks);
             auto uf = s.user_functions;
             std::string cur_db = current_db;
+            std::string cur_user = auth_user;
             ThreadPool::global().parallel_for(n_chunks, [&](std::size_t ci) {
                 std::size_t start = ci * PARALLEL_CHUNK;
                 std::size_t end = std::min(start + PARALLEL_CHUNK, visible_rows.size());
-                sync_udf_context(uf, cur_db);
+                sync_udf_context(uf, cur_db, cur_user);
                 auto& out = chunk_results[ci];
                 for (std::size_t i = start; i < end; i++) {
                     if (matches_condexpr(visible_rows[i], condition)) out.push_back(visible_rows[i]);

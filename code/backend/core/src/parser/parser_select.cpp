@@ -363,7 +363,7 @@ Statement Parser::parse_select() {
                       p->kind == TokenKind::Replace || p->kind == TokenKind::Round || p->kind == TokenKind::Abs ||
                       p->kind == TokenKind::Ceil || p->kind == TokenKind::Floor || p->kind == TokenKind::Mod ||
                       p->kind == TokenKind::Nullif || p->kind == TokenKind::Lpad || p->kind == TokenKind::Rpad ||
-                      p->kind == TokenKind::DateDiff || p->kind == TokenKind::Database)) {
+                      p->kind == TokenKind::DateDiff || p->kind == TokenKind::Database || p->kind == TokenKind::User)) {
                 const Token* ft = advance();
                 std::string fname;
                 switch (ft->kind) {
@@ -390,6 +390,7 @@ Statement Parser::parse_select() {
                     case TokenKind::Rpad: fname = "RPAD"; break;
                     case TokenKind::DateDiff: fname = "DATEDIFF"; break;
                     case TokenKind::Database: fname = "DATABASE"; break;
+                    case TokenKind::User: fname = "USER"; break;
                     default: break;
                 }
                 std::vector<std::string> args = parse_func_args();

@@ -31,6 +31,7 @@ constexpr double kPi = 3.14159265358979323846;
 
 thread_local std::unordered_map<std::string, UserFunctionDef> g_user_functions;
 thread_local std::string g_current_db_ctx;
+thread_local std::string g_current_user_ctx;
 
 std::string to_lower_str(const std::string& s) {
     std::string out = s;
@@ -396,9 +397,11 @@ std::string json_extract(const std::string& json_str, const std::string& path_in
 
 } // namespace
 
-void Executor::sync_udf_context(const std::unordered_map<std::string, UserFunctionDef>& user_functions, const std::string& current_db) {
+void Executor::sync_udf_context(const std::unordered_map<std::string, UserFunctionDef>& user_functions, const std::string& current_db,
+                                 const std::string& current_user) {
     g_user_functions = user_functions;
     g_current_db_ctx = current_db;
+    g_current_user_ctx = current_user;
 }
 
 std::string Executor::apply_scalar_func(const std::string& func_name, const std::vector<std::string>& args, const Row& row) {
@@ -1000,7 +1003,12 @@ std::string Executor::apply_scalar_func(const std::string& func_name, const std:
     }
     if (func_name == "DATABASE" || func_name == "SCHEMA") return g_current_db_ctx;
     if (func_name == "VERSION") return "2.3.0";
-    if (func_name == "CURRENT_USER" || func_name == "USER" || func_name == "SESSION_USER" || func_name == "SYSTEM_USER") return "root@localhost";
+    // Regression: used to hardcode "root@localhost" regardless of who actually
+    // authenticated -- g_current_user_ctx is synced from Executor::auth_user (set by the
+    // native/MySQL protocol servers after a successful AUTH handshake) the same way
+    // g_current_db_ctx is synced from current_db, just above.
+    if (func_name == "CURRENT_USER" || func_name == "USER" || func_name == "SESSION_USER" || func_name == "SYSTEM_USER")
+        return g_current_user_ctx + "@localhost";
 
     return func_name + "()";
 }

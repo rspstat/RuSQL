@@ -789,7 +789,13 @@ std::optional<StringResult> mysql_compat(const std::string& q, Executor& exec) {
     }
 
     if (up == "SELECT USER()" || up == "SELECT CURRENT_USER()" || up == "SELECT USER() AS USER" || up == "SELECT CURRENT_USER() AS USER") {
-        return StringResult::Ok(box_table({"user()"}, {{"root@localhost"}}));
+        // Regression: used to always answer "root@localhost" regardless of who actually
+        // authenticated on this connection. Delegate to real execution (same pattern as
+        // the DATABASE() shim just below) so it reflects exec.auth_user via the engine's
+        // own USER()/CURRENT_USER() evaluator (executor_scalar_func.cpp).
+        auto out = exec_inner(exec, "SELECT USER()");
+        if (out.is_ok() && !out.value().empty()) return out;
+        return StringResult::Ok(box_table({"user()"}, {{exec.auth_user + "@localhost"}}));
     }
 
     if (up == "SELECT DATABASE()" || up == "SELECT SCHEMA()" || up == "SELECT DATABASE() AS DATABASE" || up == "SELECT SCHEMA() AS SCHEMA") {
@@ -1069,6 +1075,7 @@ void handle_mysql_client(SOCKET sock, std::shared_ptr<RwLock<SharedDatabase>> sh
 
     // 5. Query loop
     Executor exec = Executor::new_session(shared);
+    exec.auth_user = username;
     exec.register_process(username, peer);
     StmtMap stmts;
     std::uint32_t next_stmt_id = 1;

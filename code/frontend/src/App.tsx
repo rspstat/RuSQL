@@ -372,6 +372,13 @@ function App() {
   const [dlgError, setDlgError] = useState("");
   const [dlgLoading, setDlgLoading] = useState(false);
 
+  // 파괴적 작업(DROP/TRUNCATE/연결 삭제) 확인 다이얼로그 상태 -- 여러 트리거 지점이
+  // 하나의 재사용 가능한 다이얼로그를 공유 (개별 다이얼로그 5~6개 중복 대신)
+  const [confirmDialog, setConfirmDialog] = useState<{ title: string; message: string; onConfirm: () => void } | null>(null);
+  const confirmThenRun = (title: string, message: string, action: () => void) => {
+    setConfirmDialog({ title, message, onConfirm: action });
+  };
+
   // 새 연결 추가 폼 상태
   const [showNewConn, setShowNewConn] = useState(false);
   const [newName, setNewName] = useState("New Connection");
@@ -1702,14 +1709,20 @@ function App() {
                     title="Delete"
                     onClick={e => {
                       e.stopPropagation();
-                      // localStorage 키 정리
-                      localStorage.removeItem(`rusql_tabs_${conn.id}`);
-                      localStorage.removeItem(`rusql_active_tab_${conn.id}`);
-                      localStorage.removeItem(`rusql_history_${conn.id}`);
-                      localStorage.removeItem(`rusql_query_${conn.id}`);
-                      // 디스크 데이터 디렉토리 삭제
-                      invoke("delete_conn_data", { dataDir: conn.dataDir });
-                      saveConnections(connections.filter(c => c.id !== conn.id));
+                      confirmThenRun(
+                        "Delete Connection",
+                        `Permanently delete "${conn.name}" and all its local data? This cannot be undone.`,
+                        () => {
+                          // localStorage 키 정리
+                          localStorage.removeItem(`rusql_tabs_${conn.id}`);
+                          localStorage.removeItem(`rusql_active_tab_${conn.id}`);
+                          localStorage.removeItem(`rusql_history_${conn.id}`);
+                          localStorage.removeItem(`rusql_query_${conn.id}`);
+                          // 디스크 데이터 디렉토리 삭제
+                          invoke("delete_conn_data", { dataDir: conn.dataDir });
+                          saveConnections(connections.filter(c => c.id !== conn.id));
+                        }
+                      );
                     }}
                   >✕</button>
                 </div>
@@ -1850,6 +1863,24 @@ function App() {
               <div className="dlg-actions">
                 <button type="button" className="dlg-cancel" onClick={() => setShowNewConn(false)}>Cancel</button>
                 <button type="button" className="dlg-connect" onClick={handleAddConnection}>Add</button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* ── 파괴적 작업 확인 다이얼로그 ── */}
+        {confirmDialog && (
+          <div className="dlg-overlay" onClick={() => setConfirmDialog(null)}>
+            <div className="dlg-box" onClick={e => e.stopPropagation()}>
+              <div className="dlg-header">
+                <div>
+                  <div className="dlg-title">{confirmDialog.title}</div>
+                  <div className="dlg-subtitle">{confirmDialog.message}</div>
+                </div>
+              </div>
+              <div className="dlg-actions">
+                <button type="button" className="dlg-cancel" onClick={() => setConfirmDialog(null)}>Cancel</button>
+                <button type="button" className="dlg-danger" onClick={() => { const fn = confirmDialog.onConfirm; setConfirmDialog(null); fn(); }}>Delete</button>
               </div>
             </div>
           </div>
@@ -2344,7 +2375,12 @@ function App() {
                   setDbCtxMenu(null);
                 }}>Copy Schema Name</div>
                 <div className="ctx-divider" />
-                <div className="ctx-item-danger" onClick={() => runDbCtxQuery(`DROP DATABASE ${dbCtxMenu.db};`)}>
+                <div className="ctx-item-danger" onClick={() => {
+                  const db = dbCtxMenu.db;
+                  setDbCtxMenu(null);
+                  confirmThenRun("Drop Schema", `Permanently drop database "${db}" and all its tables? This cannot be undone.`,
+                    () => runDbCtxQuery(`DROP DATABASE ${db};`));
+                }}>
                   Drop Schema...
                 </div>
               </div>
@@ -2374,8 +2410,18 @@ function App() {
                   setTableCtxMenu(null);
                 }}>Copy as INSERT</div>
                 <div className="ctx-divider" />
-                <div className="ctx-item-warn" onClick={() => runCtxQuery(`TRUNCATE TABLE ${tableCtxMenu.table};`)}>Truncate Table</div>
-                <div className="ctx-item-danger" onClick={() => runCtxQuery(`DROP TABLE ${tableCtxMenu.table};`, tableCtxMenu.table)}>
+                <div className="ctx-item-warn" onClick={() => {
+                  const t = tableCtxMenu.table;
+                  setTableCtxMenu(null);
+                  confirmThenRun("Truncate Table", `Permanently delete all rows in "${t}"? This cannot be undone.`,
+                    () => runCtxQuery(`TRUNCATE TABLE ${t};`));
+                }}>Truncate Table</div>
+                <div className="ctx-item-danger" onClick={() => {
+                  const t = tableCtxMenu.table;
+                  setTableCtxMenu(null);
+                  confirmThenRun("Drop Table", `Permanently drop table "${t}" and all its data? This cannot be undone.`,
+                    () => runCtxQuery(`DROP TABLE ${t};`, t));
+                }}>
                   DROP Table
                 </div>
               </div>
@@ -2398,7 +2444,12 @@ function App() {
                 <div className="ctx-divider" />
                 <div onClick={() => { navigator.clipboard.writeText(viewCtxMenu.view); setViewCtxMenu(null); }}>Copy View Name</div>
                 <div className="ctx-divider" />
-                <div className="ctx-item-danger" onClick={() => runViewCtxQuery(`DROP VIEW ${viewCtxMenu.view};`, viewCtxMenu.view)}>
+                <div className="ctx-item-danger" onClick={() => {
+                  const v = viewCtxMenu.view;
+                  setViewCtxMenu(null);
+                  confirmThenRun("Drop View", `Permanently drop view "${v}"? This cannot be undone.`,
+                    () => runViewCtxQuery(`DROP VIEW ${v};`, v));
+                }}>
                   Drop View
                 </div>
               </div>
@@ -2419,11 +2470,34 @@ function App() {
                 <div className="ctx-divider" />
                 <div onClick={() => { navigator.clipboard.writeText(indexCtxMenu.index); setIndexCtxMenu(null); }}>Copy Index Name</div>
                 <div className="ctx-divider" />
-                <div className="ctx-item-danger" onClick={() => runIndexCtxQuery(`DROP INDEX ${indexCtxMenu.index} ON ${indexCtxMenu.table};`, indexCtxMenu.index)}>
+                <div className="ctx-item-danger" onClick={() => {
+                  const idx = indexCtxMenu.index, t = indexCtxMenu.table;
+                  setIndexCtxMenu(null);
+                  confirmThenRun("Drop Index", `Permanently drop index "${idx}" on "${t}"? This cannot be undone.`,
+                    () => runIndexCtxQuery(`DROP INDEX ${idx} ON ${t};`, idx));
+                }}>
                   Drop Index
                 </div>
               </div>
             </>
+          )}
+
+          {/* ── 파괴적 작업 확인 다이얼로그 ── */}
+          {confirmDialog && (
+            <div className="dlg-overlay" onClick={() => setConfirmDialog(null)}>
+              <div className="dlg-box" onClick={e => e.stopPropagation()}>
+                <div className="dlg-header">
+                  <div>
+                    <div className="dlg-title">{confirmDialog.title}</div>
+                    <div className="dlg-subtitle">{confirmDialog.message}</div>
+                  </div>
+                </div>
+                <div className="dlg-actions">
+                  <button type="button" className="dlg-cancel" onClick={() => setConfirmDialog(null)}>Cancel</button>
+                  <button type="button" className="dlg-danger" onClick={() => { const fn = confirmDialog.onConfirm; setConfirmDialog(null); fn(); }}>Delete</button>
+                </div>
+              </div>
+            </div>
           )}
 
           {/* 탭 컨텍스트 메뉴 */}
