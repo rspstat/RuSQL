@@ -5,6 +5,8 @@
 #include <fstream>
 #include <stdexcept>
 
+#include "engine/storage/atomic_write.hpp"
+
 namespace fs = std::filesystem;
 
 namespace engine {
@@ -154,8 +156,16 @@ void UndoLogFile::remove_txn(std::uint64_t txn_id) {
     for (auto& e : all) {
         if (e.txn_id != txn_id) remaining.push_back(e);
     }
-    clear_locked();
-    for (auto& e : remaining) append_locked(e);
+    if (remaining.empty()) {
+        clear_locked();
+        return;
+    }
+    std::vector<std::uint8_t> buf;
+    for (auto& e : remaining) {
+        auto enc = encode(e);
+        buf.insert(buf.end(), enc.begin(), enc.end());
+    }
+    write_bytes_atomic(path_, buf.data(), buf.size());
 }
 
 void UndoLogFile::rewrite_txn(std::uint64_t txn_id, const std::vector<UndoEntry>& entries) {
@@ -166,8 +176,16 @@ void UndoLogFile::rewrite_txn(std::uint64_t txn_id, const std::vector<UndoEntry>
         if (e.txn_id != txn_id) all.push_back(e);
     }
     all.insert(all.end(), entries.begin(), entries.end());
-    clear_locked();
-    for (auto& e : all) append_locked(e);
+    if (all.empty()) {
+        clear_locked();
+        return;
+    }
+    std::vector<std::uint8_t> buf;
+    for (auto& e : all) {
+        auto enc = encode(e);
+        buf.insert(buf.end(), enc.begin(), enc.end());
+    }
+    write_bytes_atomic(path_, buf.data(), buf.size());
 }
 
 // ─── TransactionManager ───────────────────────────────────────────────────

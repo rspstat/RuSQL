@@ -348,7 +348,7 @@
 - [x] `SELECT @@var1 AS a, @@var2 AS b, ...` — 다중 시스템 변수 SELECT를 컬럼별로 올바르게 파싱·반환 (DBeaver 접속 초기화 쿼리 정상 처리)
 - [x] `SELECT DATABASE()` / `SELECT SCHEMA()` — 현재 DB 반환
 - [x] `SELECT USER()` / `CURRENT_USER()` / `SESSION_USER()` / `SYSTEM_USER()` — 실제로 인증된 세션 사용자명을 `'user@localhost'` 형태로 반환 (native/MySQL 프로토콜 AUTH 핸드셰이크 이후 세션별로 정확히 반영, 이전엔 항상 'root@localhost' 하드코딩)
-- [x] `SET ...` (charset / autocommit / session 변수 등) — 무조건 OK 반환
+- [x] `SET ...` — `SET @var = expr` / `SET ISOLATION LEVEL ...`(엔진이 실제로 지원하는 두 형태)는 실제로 실행되어 반영됨(성공/실패 그대로 응답); 그 외(SET NAMES / autocommit / SESSION·GLOBAL 변수 / PASSWORD 등 미지원 형태)는 실제 클라이언트 세션 초기화 호환을 위해 기존처럼 무조건 OK 반환
 
 ### 전용 클라이언트 (rusql-client)
 - [x] rusql-server native 프로토콜 전용 TCP 클라이언트
@@ -364,13 +364,13 @@
 - [x] **레거시 자동 마이그레이션** — `load_sys_json()`: 구 루트 경로 파일이 있으면 `_system/`으로 자동 이동 후 삭제
 - [x] **SHOW DATABASES에서 `_system` 제외** — `list_databases()`에서 필터링
 - [x] **연결별 독립 데이터 디렉터리** — `code/data/local/` (기본 연결), `code/data/data_숫자/` (추가 연결) — UI·CLI·서버가 `code/data/`를 공유
-- [x] **Tauri `get_app_data_dir` 커맨드** — `CARGO_MANIFEST_DIR` 기반 `code/data/` 절대경로 반환
+- [x] **Tauri `get_app_data_dir` 커맨드** — `code_dir()` 기반 `code/data/` 절대경로 반환(디버그 빌드는 `CARGO_MANIFEST_DIR`, 릴리즈 빌드는 실행 파일의 실제 현재 위치(`current_exe()`) 기준 — 빌드한 PC와 다른 곳에 배포해도 정상 동작)
 - [x] **상대경로 자동 절대경로 변환** — 앱 시작 시 localStorage의 상대경로 연결을 절대경로로 마이그레이션 후 재저장
 
 ### UI 추가 기능 (rusql-ui)
 - [x] **Server Manager MySQL 포트 필드** — `+/-` 버튼 포함, 0 입력 시 MySQL 프로토콜 비활성, Tauri `start_server`에 `mysql_port` 파라미터 추가
 - [x] **Tauri UI MySQL 리스너** — UI에서 서버 Start 시 `mysql::start_mysql_listener(mysql_port, shared_db)` 호출로 MySQL 프로토콜 동시 기동
 - [x] **서버 연결 아이콘 교체** — Server Manager 헤더의 서버 랙 아이콘 → 주황색 원통형 DB 아이콘
-- [x] **Server Manager Bench 패널** — "Bench" 우측 버튼으로 슬라이드 패널 토글; "결과 불러오기" → `read_bench_result` Tauri 커맨드로 `code/test/perf/result.json` 파싱·포맷 표시 (로딩 중 버튼 disabled + "불러오는 중..." 텍스트, 파일 없으면 주황색 안내), "터미널 실행" → `open_bench_terminal` 커맨드로 cmd 창에서 `pip install -q -r requirements.txt && python bench.py` 자동 실행 (`bench_dir()` = CARGO_MANIFEST_DIR 기반); `bench.py` 완료 후 `bench_db` 자동 삭제; 결과 패널 4종 (모두 **TPS** 단위) — 단건 쓰기 (INSERT/DELETE), Bulk 쓰기 (500행 묶음), 인덱스 성능 (SeqScan vs B+Tree), 트랜잭션 (AutoCommit vs BEGIN/COMMIT)
+- [x] **Server Manager Bench 패널** — "Bench" 우측 버튼으로 슬라이드 패널 토글; "결과 불러오기" → `read_bench_result` Tauri 커맨드로 `code/test/perf/result.json` 파싱·포맷 표시 (로딩 중 버튼 disabled + "불러오는 중..." 텍스트, 파일 없으면 주황색 안내), "터미널 실행" → `open_bench_terminal` 커맨드로 cmd 창에서 `pip install -q -r requirements.txt && python bench.py` 자동 실행 (`bench_dir()` = `code_dir()` 기반, 배포 환경에서도 정상 동작); `bench.py` 완료 후 `bench_db` 자동 삭제; 결과 패널 4종 (모두 **TPS** 단위) — 단건 쓰기 (INSERT/DELETE), Bulk 쓰기 (500행 묶음), 인덱스 성능 (SeqScan vs B+Tree), 트랜잭션 (AutoCommit vs BEGIN/COMMIT)
 - [x] **Server Manager Session 패널** — "Session" 우측 버튼으로 슬라이드 패널 토글; `SessionInfo`(addr·user·connected_at·query_count) 목록을 기존 1.5s 상태 폴링에 내장해 별도 폴링 없이 실시간 갱신, 경과 시간 초/분 자동 단위 표시
 - [x] **Server Manager AI MCP 패널** — "AI MCP" 우측 버튼으로 슬라이드 패널 토글; "Claude Desktop 자동 연결" 버튼 → `setup_mcp_config` Tauri 커맨드로 `%AppData%\Claude\` (일반 설치) + `LocalCache\Roaming\Claude\` (Windows Store) 두 경로에 BOM 없는 UTF-8로 `claude_desktop_config.json` 자동 생성·병합, **7개 도구** `alwaysAllow` 자동 등록 (허용 팝업 없음); `where python`으로 `mcp` 패키지 설치된 Python 자동 탐지

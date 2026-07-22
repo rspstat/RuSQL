@@ -155,6 +155,50 @@ TEST_CASE("SHOW BUFFER POOL / SHOW WAL / SHOW LOCKS / CHECKPOINT", "[executor][t
     REQUIRE(checkpoint.value().find("Checkpoint completed.") != std::string::npos);
 }
 
+TEST_CASE("Grouped COMMIT clears active_txn_ids only after the commit is fully durable", "[executor][txn][regression]") {
+    // Regression (checkpoint/group-commit TOCTOU): active_txn_ids used to be erased
+    // inside exec_commit_phase1, before execute_commit_grouped()'s sync_commit() (the
+    // actual fsync) and commit_finalize() (WAL/undo pruning) had run -- a checkpoint
+    // racing in that window could treat the commit as durable and truncate the WAL
+    // before it actually was. A plain COMMIT via execute_sql goes through Executor::
+    // execute(), which dispatches Statement::Commit to execute_commit_grouped() (the
+    // grouped/2-phase path), not the simpler single-phase exec_commit -- so this
+    // exercises the exact path the bug was in.
+    TempDataDir dir("exec_txn_data_toctou_1");
+    Executor ex(dir.path);
+    REQUIRE(ex.execute_sql("CREATE DATABASE d").is_ok());
+    REQUIRE(ex.execute_sql("USE d").is_ok());
+    REQUIRE(ex.execute_sql("CREATE TABLE t (id INT PRIMARY KEY)").is_ok());
+
+    REQUIRE(ex.execute_sql("BEGIN").is_ok());
+    REQUIRE(ex.execute_sql("INSERT INTO t VALUES (1)").is_ok());
+    REQUIRE(ex.execute_sql("COMMIT").is_ok());
+
+    auto s = ex.get_shared()->read();
+    REQUIRE(s->active_txn_ids->lock()->empty());
+}
+
+TEST_CASE("CHECKPOINT defers WAL truncation while any transaction id is still marked active", "[executor][txn][regression]") {
+    // Directly exercises the "safe to truncate" gate exec_checkpoint/maybe_auto_checkpoint
+    // rely on: as long as a txn_id remains in active_txn_ids, checkpoint must not
+    // truncate the WAL. Manually marking a txn_id active stands in for the window (now
+    // closed) between a grouped commit's WAL write and its actual fsync completing.
+    TempDataDir dir("exec_txn_data_toctou_2");
+    Executor ex(dir.path);
+    REQUIRE(ex.execute_sql("CREATE DATABASE d").is_ok());
+    REQUIRE(ex.execute_sql("USE d").is_ok());
+    REQUIRE(ex.execute_sql("CREATE TABLE t (id INT PRIMARY KEY)").is_ok());
+    REQUIRE(ex.execute_sql("INSERT INTO t VALUES (1)").is_ok());
+
+    ex.get_shared()->write()->active_txn_ids->lock()->insert(999);
+
+    auto checkpoint = ex.execute_sql("CHECKPOINT");
+    REQUIRE(checkpoint.is_ok());
+    REQUIRE(checkpoint.value().find("deferred") != std::string::npos);
+
+    ex.get_shared()->write()->active_txn_ids->lock()->erase(999);
+}
+
 TEST_CASE("Crash recovery rebuilds secondary/hash indexes for a redone commit, not just the table rows",
           "[executor][txn][regression]") {
     // Regression, faithfully preserved from Rust (code/legacy/rusql-core/src/engine/executor.rs

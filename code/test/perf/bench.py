@@ -18,10 +18,10 @@ import socket, time, json, os, sys
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
-RUSTDB_HOST = "127.0.0.1"
-RUSTDB_PORT = 7878
-RUSTDB_USER = "root"
-RUSTDB_PASS = "root"
+RUSQL_HOST = "127.0.0.1"
+RUSQL_PORT = 7878
+RUSQL_USER = "root"
+RUSQL_PASS = "root"
 
 N_SINGLE  = 10_000
 N_BULK    = 100_000
@@ -35,10 +35,10 @@ RESULT_FILE = "result.json"
 class RuSQL:
     def __init__(self):
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.sock.connect((RUSTDB_HOST, RUSTDB_PORT))
+        self.sock.connect((RUSQL_HOST, RUSQL_PORT))
         self.sock.settimeout(120)
         self._read_until_end()
-        self._send(f"AUTH {RUSTDB_USER} {RUSTDB_PASS}")
+        self._send(f"AUTH {RUSQL_USER} {RUSQL_PASS}")
         self._read_until_end()
 
     def _send(self, data):

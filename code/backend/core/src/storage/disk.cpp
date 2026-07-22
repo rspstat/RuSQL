@@ -9,13 +9,8 @@
 
 #include <lz4/lz4.h>
 
-#ifdef _WIN32
-#include <io.h>
-#else
-#include <unistd.h>
-#endif
-
 #include "engine/parser/ast_json.hpp"
+#include "engine/storage/atomic_write.hpp"
 #include "engine/storage/page.hpp"
 
 namespace fs = std::filesystem;
@@ -81,36 +76,13 @@ bool read_file_bytes(const std::string& path, std::vector<std::uint8_t>& out) {
     return true;
 }
 
-// Writes the full content to a sibling ".tmp" file, fsyncs it, then atomically renames
-// it over `path`. Without this, a crash between the pre-existing truncate-on-open and
-// the write completing left the file empty/corrupt with the old contents already gone
-// (PLAN.md: "테이블 저장이 원자적이지 않음"), and even a clean write was never fsynced
-// to physical disk (PLAN.md: "fsync 없이 flush만 됨") -- std::ofstream has no portable
-// fsync, so this goes through a C stdio FILE* to reach the real fd/handle.
-void write_bytes_atomic(const std::string& path, const void* data, std::size_t size) {
-    std::string tmp = path + ".tmp";
-    std::FILE* fp = std::fopen(tmp.c_str(), "wb");
-    if (!fp) throw std::runtime_error("파일 쓰기 실패: " + tmp);
-    std::size_t written = std::fwrite(data, 1, size, fp);
-    if (written != size) {
-        std::fclose(fp);
-        throw std::runtime_error("파일 쓰기 실패: " + tmp);
-    }
-    if (std::fflush(fp) != 0) {
-        std::fclose(fp);
-        throw std::runtime_error("파일 쓰기 실패: " + tmp);
-    }
-#ifdef _WIN32
-    bool synced = _commit(_fileno(fp)) == 0;
-#else
-    bool synced = fsync(fileno(fp)) == 0;
-#endif
-    std::fclose(fp);
-    if (!synced) throw std::runtime_error("파일 동기화 실패: " + tmp);
-    std::error_code ec;
-    fs::rename(tmp, path, ec);
-    if (ec) throw std::runtime_error("파일 교체 실패: " + path + " (" + ec.message() + ")");
-}
+// write_bytes_atomic itself now lives in the shared engine/storage/atomic_write.hpp
+// (wal.cpp/txn_manager.cpp needed the same tmp-write+fsync+rename pattern for their own
+// non-atomic rewrite bugs, PLAN.md's WAL/Undo durability item). Without it, a crash
+// between the pre-existing truncate-on-open and the write completing left the file
+// empty/corrupt with the old contents already gone (PLAN.md: "테이블 저장이 원자적이지
+// 않음"), and even a clean write was never fsynced to physical disk (PLAN.md: "fsync
+// 없이 flush만 됨").
 
 void write_file(const std::string& path, const std::string& content) {
     write_bytes_atomic(path, content.data(), content.size());

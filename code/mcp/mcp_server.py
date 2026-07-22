@@ -11,10 +11,10 @@ import socket
 import sys
 from mcp.server.fastmcp import FastMCP
 
-RUSTDB_HOST = "127.0.0.1"
-RUSTDB_PORT = 7878
-RUSTDB_USER = "root"
-RUSTDB_PASS = "root"
+RUSQL_HOST = "127.0.0.1"
+RUSQL_PORT = 7878
+RUSQL_USER = "root"
+RUSQL_PASS = "root"
 
 mcp = FastMCP("RuSQL v2.3.0")
 
@@ -22,10 +22,10 @@ mcp = FastMCP("RuSQL v2.3.0")
 class _Conn:
     def __init__(self):
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.sock.connect((RUSTDB_HOST, RUSTDB_PORT))
+        self.sock.connect((RUSQL_HOST, RUSQL_PORT))
         self.sock.settimeout(30)
         self._recv()  # welcome banner
-        self._raw(f"AUTH {RUSTDB_USER} {RUSTDB_PASS}")
+        self._raw(f"AUTH {RUSQL_USER} {RUSQL_PASS}")
 
     def _raw(self, msg: str) -> str:
         self.sock.sendall((msg + "\n").encode())
@@ -64,7 +64,7 @@ def _run(sql: str, db: str = "") -> str:
         finally:
             c.close()
     except ConnectionRefusedError:
-        msg = f"Error: RuSQL is not running on {RUSTDB_HOST}:{RUSTDB_PORT}. Start the server first."
+        msg = f"Error: RuSQL is not running on {RUSQL_HOST}:{RUSQL_PORT}. Start the server first."
         print(f"[mcp] {msg}", file=sys.stderr, flush=True)
         return msg
     except Exception as e:

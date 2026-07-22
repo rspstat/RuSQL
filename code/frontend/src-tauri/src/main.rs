@@ -89,6 +89,32 @@ struct ServerStatus {
     sessions:     Vec<SessionInfo>,
 }
 
+// ─── code/ 디렉터리 위치 헬퍼 ─────────────────────────────────
+// PLAN.md P1 "컴파일타임 개발자 경로 하드코딩 → 배포 불가" 수정: env!("CARGO_MANIFEST_DIR")는
+// 빌드 당시 소스 체크아웃 경로를 실행 파일에 그대로 박아 넣어서, 빌드한 PC와 다른 곳에
+// 복사하면 존재하지 않는 디렉터리를 가리키게 됐다. 디버그 빌드(`cargo tauri dev`)에서는
+// 그대로 CARGO_MANIFEST_DIR 기준으로 계산하고(개발 중엔 항상 유효), 릴리즈 빌드에서는
+// 실행 파일이 실제로 지금 있는 위치(`current_exe()`) 기준으로 계산한다. 이 프로젝트는
+// 정식 인스톨러/사이드카 바이너리 번들링 파이프라인이 없고 "code/ 트리 전체를 복사해서
+// 어디서든 실행"하는 모델이므로, 그 모델은 유지한 채 컴파일타임 하드코딩만 없앤다.
+fn code_dir() -> std::path::PathBuf {
+    if cfg!(debug_assertions) {
+        // CARGO_MANIFEST_DIR = .../code/frontend/src-tauri → 두 단계 상위 = code/
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .nth(2)
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| std::path::PathBuf::from("code"))
+    } else {
+        // 실행 파일 위치: .../code/frontend/src-tauri/target/release/rusql-ui.exe
+        // ancestors(): 0=exe 자신, 1=release/, 2=target/, 3=src-tauri/, 4=frontend/, 5=code/
+        std::env::current_exe()
+            .ok()
+            .and_then(|p| p.ancestors().nth(5).map(|p| p.to_path_buf()))
+            .unwrap_or_else(|| std::path::PathBuf::from("code"))
+    }
+}
+
 // ─── C++ engine_server.exe 위치/포트 헬퍼 ─────────────────────
 // MSVC Debug 빌드는 최적화가 전혀 없어 Release 대비 한 자릿수~두 자릿수 배 느리다
 // (실측: 단건 INSERT 9x, Bulk DELETE 21x, SeqScan 22x 등) -- UI가 항상 Debug 바이너리를
@@ -97,11 +123,7 @@ struct ServerStatus {
 // 빌드된 쪽을 쓴다 (특정 설정 하나로 고정하면 반대 방향의 "왜 최신 빌드가 반영 안 되지"
 // 혼란이 재발할 뿐이라 mtime 비교가 더 안전하다).
 fn engine_server_path() -> std::path::PathBuf {
-    let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let build_dir = match manifest.parent().and_then(|p| p.parent()).and_then(|p| p.parent()) {
-        Some(root) => root.join("code").join("build").join("backend").join("server"),
-        None => return std::path::PathBuf::from("engine_server.exe"),
-    };
+    let build_dir = code_dir().join("build").join("backend").join("server");
     let release = build_dir.join("Release").join("engine_server.exe");
     let debug = build_dir.join("Debug").join("engine_server.exe");
     let mtime = |p: &std::path::Path| p.metadata().and_then(|m| m.modified()).ok();
@@ -740,11 +762,7 @@ fn start_server(conn_id: String, port: u16, mysql_port: u16, state: State<AppSta
 #[tauri::command]
 fn get_app_data_dir(_app: tauri::AppHandle) -> String {
     // code/ 폴더를 기준으로 사용 → UI와 CLI/서버가 같은 데이터 공유
-    let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    // CARGO_MANIFEST_DIR = .../code/rusql-ui/src-tauri → 두 단계 상위 = code/
-    manifest.parent().and_then(|p| p.parent())
-        .map(|p| p.join("data").to_string_lossy().to_string())
-        .unwrap_or_else(|| "data".to_string())
+    code_dir().join("data").to_string_lossy().to_string()
 }
 
 #[tauri::command]
@@ -974,9 +992,14 @@ fn find_python_with_mcp() -> Result<String, String> {
 }
 
 fn write_mcp_into(config_path: &std::path::Path, entry: &serde_json::Value) -> Result<(), String> {
+    // PLAN.md P1 "MCP 설정 병합 실패 시 기존 설정 덮어씀" 수정: 기존 설정 파일이 있는데
+    // 파싱에 실패하면(트렁케이트/문법 오류 등) 조용히 빈 객체로 대체한 뒤 그대로 덮어써서
+    // 사용자의 기존 설정(다른 MCP 서버 등록 등)이 전부 사라지던 것 -- 파일을 건드리지
+    // 않고 즉시 에러로 반환한다.
     let mut config: serde_json::Value = if config_path.exists() {
         let content = std::fs::read_to_string(config_path).map_err(|e| e.to_string())?;
-        serde_json::from_str(&content).unwrap_or(serde_json::json!({}))
+        serde_json::from_str(&content)
+            .map_err(|e| format!("기존 MCP 설정 파일을 읽는 데 실패했습니다 ({}): {}", config_path.display(), e))?
     } else {
         serde_json::json!({})
     };
@@ -991,12 +1014,7 @@ fn write_mcp_into(config_path: &std::path::Path, entry: &serde_json::Value) -> R
 
 #[tauri::command]
 fn setup_mcp_config() -> Result<String, String> {
-    let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let mcp_server_path = manifest
-        .parent().ok_or("경로 오류")?
-        .parent().ok_or("경로 오류")?
-        .join("mcp")
-        .join("mcp_server.py");
+    let mcp_server_path = code_dir().join("mcp").join("mcp_server.py");
 
     if !mcp_server_path.exists() {
         return Err(format!("mcp_server.py를 찾을 수 없습니다:\n{}", mcp_server_path.display()));
@@ -1040,9 +1058,7 @@ fn setup_mcp_config() -> Result<String, String> {
 
 #[tauri::command]
 fn open_terminal() {
-    let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let frontend_dir = manifest.parent().map(|p| p.to_path_buf())
-        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    let frontend_dir = code_dir().join("frontend");
     let _ = std::process::Command::new("cmd")
         .args(["/c", "start", "cmd"])
         .current_dir(frontend_dir)
@@ -1057,8 +1073,7 @@ fn open_url(url: String) {
 }
 
 fn bench_dir() -> std::path::PathBuf {
-    let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    manifest.parent().unwrap().parent().unwrap().join("test").join("perf")
+    code_dir().join("test").join("perf")
 }
 
 #[tauri::command]
@@ -1160,4 +1175,52 @@ fn main() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Regression: write_mcp_into used to silently replace a malformed existing
+    // claude_desktop_config.json with `serde_json::json!({})` on parse failure, then
+    // overwrite the file with just the RuSQL entry -- destroying whatever else was in
+    // there (other MCP servers, unrelated settings). It must now refuse to touch the
+    // file at all when the existing content doesn't parse.
+    #[test]
+    fn write_mcp_into_does_not_overwrite_a_malformed_existing_config() {
+        let dir = std::env::temp_dir().join(format!("rusql_mcp_test_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let config_path = dir.join("claude_desktop_config.json");
+
+        let malformed = r#"{ "mcpServers": { "other": {"command": "x"} "#; // truncated, invalid JSON
+        std::fs::write(&config_path, malformed).unwrap();
+
+        let entry = serde_json::json!({"command": "python", "args": []});
+        let result = write_mcp_into(&config_path, &entry);
+
+        assert!(result.is_err(), "expected an error for malformed existing config, got {:?}", result);
+        let after = std::fs::read_to_string(&config_path).unwrap();
+        assert_eq!(after, malformed, "malformed config file must be left completely untouched");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn write_mcp_into_merges_into_a_valid_existing_config() {
+        let dir = std::env::temp_dir().join(format!("rusql_mcp_test_valid_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let config_path = dir.join("claude_desktop_config.json");
+
+        std::fs::write(&config_path, r#"{"mcpServers": {"other": {"command": "x"}}}"#).unwrap();
+
+        let entry = serde_json::json!({"command": "python", "args": []});
+        write_mcp_into(&config_path, &entry).unwrap();
+
+        let after: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&config_path).unwrap()).unwrap();
+        assert!(after["mcpServers"]["other"].is_object(), "pre-existing entry must survive the merge");
+        assert!(after["mcpServers"]["RuSQL"].is_object(), "new entry must be added");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
 }

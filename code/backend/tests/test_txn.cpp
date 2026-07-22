@@ -205,3 +205,70 @@ TEST_CASE("remove_txn preserves other transactions in WAL", "[txn][wal]") {
 
     fs::remove_all(dir);
 }
+
+// Regression: remove_txn/truncate_to_last_checkpoint used to rewrite the whole shared
+// WAL file via a plain std::ofstream(..., ios::trunc) -- no fsync, no atomic rename via
+// a tmp file. A crash mid-write left the file truncated/corrupt, losing other sessions'
+// still-pending records too. Both now go through the same write_bytes_atomic tmp+fsync+
+// rename helper disk.cpp already uses for table/schema files -- verify no stray ".tmp"
+// survives a successful call (the rename should always consume it).
+TEST_CASE("remove_txn leaves no stray .tmp file behind", "[txn][wal]") {
+    auto dir = test_dir("wal_remove_no_tmp");
+    auto io = std::make_shared<TxnIoShared>();
+    WalManager wal(dir, io);
+
+    wal.log_insert(1, "t", "k1", "{}");
+    wal.log_insert(2, "t", "k2", "{}");
+    wal.remove_txn(1);
+
+    REQUIRE_FALSE(fs::exists(dir + "/rusql.wal.tmp"));
+    fs::remove_all(dir);
+}
+
+TEST_CASE("truncate_to_last_checkpoint keeps only records from the last checkpoint onward, no stray .tmp file", "[txn][wal]") {
+    auto dir = test_dir("wal_truncate_checkpoint");
+    auto io = std::make_shared<TxnIoShared>();
+    WalManager wal(dir, io);
+
+    wal.log_insert(1, "t", "k1", "{}");
+    wal.log_checkpoint();
+    wal.log_insert(2, "t", "k2", "{}");
+    wal.log_commit(2);
+
+    wal.truncate_to_last_checkpoint();
+
+    auto remaining = wal.read_all();
+    REQUIRE(remaining.size() == 3); // checkpoint marker + insert(2) + commit(2)
+    REQUIRE(remaining[0].op == WalOp::Checkpoint);
+    REQUIRE(remaining[1].txn_id == 2);
+    REQUIRE(remaining[2].op == WalOp::Commit);
+
+    REQUIRE_FALSE(fs::exists(dir + "/rusql.wal.tmp"));
+    fs::remove_all(dir);
+}
+
+TEST_CASE("UndoLogFile remove_txn/rewrite_txn are atomic (no stray .tmp file, no dropped entries)", "[txn][wal]") {
+    auto dir = test_dir("undo_atomic");
+    auto io = std::make_shared<TxnIoShared>();
+    UndoLogFile undo(dir, io);
+
+    UndoEntry e1{1, "INSERT", "t", "k1", std::nullopt};
+    UndoEntry e2{2, "INSERT", "t", "k2", std::nullopt};
+    undo.append(e1);
+    undo.append(e2);
+
+    undo.remove_txn(1);
+    auto after_remove = undo.read_all();
+    REQUIRE(after_remove.size() == 1);
+    REQUIRE(after_remove[0].txn_id == 2);
+    REQUIRE_FALSE(fs::exists(dir + "/_undo.log.tmp"));
+
+    UndoEntry e3{2, "UPDATE", "t", "k2", std::string("{}")};
+    undo.rewrite_txn(2, {e3});
+    auto after_rewrite = undo.read_all();
+    REQUIRE(after_rewrite.size() == 1);
+    REQUIRE(after_rewrite[0].operation == "UPDATE");
+    REQUIRE_FALSE(fs::exists(dir + "/_undo.log.tmp"));
+
+    fs::remove_all(dir);
+}

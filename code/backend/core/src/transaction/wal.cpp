@@ -5,11 +5,7 @@
 #include <fstream>
 #include <stdexcept>
 
-#ifdef _WIN32
-#include <io.h>
-#else
-#include <unistd.h>
-#endif
+#include "engine/storage/atomic_write.hpp"
 
 namespace fs = std::filesystem;
 
@@ -222,8 +218,7 @@ void WalManager::remove_txn(std::uint64_t txn_id) {
         auto enc = encode(r);
         buf.insert(buf.end(), enc.begin(), enc.end());
     }
-    std::ofstream file(path_, std::ios::binary | std::ios::trunc);
-    file.write(reinterpret_cast<const char*>(buf.data()), static_cast<std::streamsize>(buf.size()));
+    write_bytes_atomic(path_, buf.data(), buf.size());
 }
 
 std::uint64_t WalManager::file_size() const {
@@ -253,8 +248,7 @@ void WalManager::truncate_to_last_checkpoint() {
         auto enc = encode(r);
         buf.insert(buf.end(), enc.begin(), enc.end());
     }
-    std::ofstream file(path_, std::ios::binary | std::ios::trunc);
-    file.write(reinterpret_cast<const char*>(buf.data()), static_cast<std::streamsize>(buf.size()));
+    write_bytes_atomic(path_, buf.data(), buf.size());
 }
 
 bool WalManager::needs_auto_checkpoint() const {

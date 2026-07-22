@@ -76,22 +76,37 @@ StringResult Executor::exec_commit_phase1(SharedDatabase& s) {
     std::uint64_t txn_id = txn.current_txn_id();
     if (auto res = txn.commit_write_record(); res.is_err()) return StringResult::Err(res.error());
     s.lock_mgr.release(txn_id);
-    s.active_txn_ids->lock()->erase(txn_id);
+    // Regression (checkpoint/group-commit TOCTOU): active_txn_ids used to be erased here,
+    // right after commit_write_record() writes the COMMIT record WITHOUT an fsync
+    // (log_commit_no_sync). exec_checkpoint/maybe_auto_checkpoint treat an empty
+    // active_txn_ids as "safe to truncate the WAL" -- erasing this early meant a
+    // checkpoint racing in the window between this line and execute_commit_grouped()'s
+    // sync_commit()/commit_finalize() (below, outside the write lock) could truncate the
+    // WAL before this commit's own record was ever durably fsynced. The erase now happens
+    // only once the commit is truly durable -- see execute_commit_grouped().
     return StringResult::Ok("");
 }
 
 StringResult Executor::execute_commit_grouped() {
+    std::uint64_t txn_id = txn.current_txn_id();
     std::shared_ptr<GroupCommitCoordinator> coord;
+    std::shared_ptr<Mutex<std::unordered_set<std::uint64_t>>> active_txn_ids;
     {
         auto sw = shared->write();
         auto phase1 = exec_commit_phase1(*sw);
         if (phase1.is_err()) return phase1;
         coord = sw->group_commit_coord;
+        active_txn_ids = sw->active_txn_ids;
     }
 
     coord->sync_commit();
 
     txn.commit_finalize();
+    // Only now -- once the commit is truly durable (fsync'd via sync_commit(), WAL/undo
+    // pruned via commit_finalize()) -- is it safe for a concurrent checkpoint to treat
+    // this txn as fully done. active_txn_ids has its own independent mutex, so this
+    // doesn't need to re-acquire the big SharedDatabase write lock.
+    active_txn_ids->lock()->erase(txn_id);
     {
         auto sw = shared->write();
         maybe_auto_vacuum(*sw);

@@ -781,7 +781,22 @@ StringResult exec_inner(Executor& exec, const std::string& q) { return exec.exec
 std::optional<StringResult> mysql_compat(const std::string& q, Executor& exec) {
     std::string up = to_upper_str(trim_copy(q));
 
-    if (up.rfind("SET ", 0) == 0) return StringResult::Ok("");
+    if (up.rfind("SET ", 0) == 0) {
+        // Regression: every SET variant used to get an unconditional OK regardless of
+        // whether it was understood/applied at all. The native protocol's real parser
+        // (parser_dcl.cpp's parse_set()) only ever supports two forms -- SET @var = expr
+        // and SET ISOLATION LEVEL ... -- everything else (SET NAMES, SET autocommit,
+        // SET SESSION/GLOBAL ..., SET PASSWORD, etc.) is unmodeled MySQL client
+        // session-setup boilerplate that must keep returning a bare OK, or real client
+        // libraries' connection-init chatter would hard error. Route the two forms the
+        // engine actually implements through real execution so they actually take
+        // effect via this protocol too (previously silently no-op'd exactly like every
+        // other SET variant), reflecting genuine success/failure instead of a fake OK.
+        if (up.rfind("SET @", 0) == 0 || up.rfind("SET ISOLATION LEVEL", 0) == 0) {
+            return exec_inner(exec, q);
+        }
+        return StringResult::Ok("");
+    }
 
     if (up == "SELECT VERSION()" || up.rfind("SELECT VERSION() ", 0) == 0 || up == "SELECT @@VERSION" ||
         up.rfind("SELECT @@VERSION ", 0) == 0) {
