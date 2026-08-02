@@ -6,7 +6,9 @@ Claude Desktop config:
   %APPDATA%\\Claude\\claude_desktop_config.json
   → see claude_desktop_config_example.json
 """
+import hashlib
 import json
+import re
 import socket
 import sys
 from mcp.server.fastmcp import FastMCP
@@ -19,13 +21,27 @@ RUSQL_PASS = "root"
 mcp = FastMCP("RuSQL v2.3.0")
 
 
+def _compute_native_password_token(password: str, nonce: bytes) -> bytes:
+    """mysql_native_password-style challenge-response, matching engine_client's
+    compute_native_password_token (client/src/main.cpp): the native protocol no longer
+    accepts a plaintext password (Phase 19 security fix), only this token."""
+    stage1 = hashlib.sha1(password.encode()).digest()
+    stage2 = hashlib.sha1(stage1).digest()
+    xor_key = hashlib.sha1(nonce + stage2).digest()
+    return bytes(a ^ b for a, b in zip(stage1, xor_key))
+
+
 class _Conn:
     def __init__(self):
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.sock.connect((RUSQL_HOST, RUSQL_PORT))
         self.sock.settimeout(30)
-        self._recv()  # welcome banner
-        self._raw(f"AUTH {RUSQL_USER} {RUSQL_PASS}")
+        banner = self._recv()  # welcome banner, includes a "NONCE <hex>" line
+        nonce_hex = next((l.split(" ", 1)[1] for l in banner.splitlines() if l.startswith("NONCE ")), None)
+        if not nonce_hex:
+            raise RuntimeError("Server did not send an auth challenge (NONCE)")
+        token = _compute_native_password_token(RUSQL_PASS, bytes.fromhex(nonce_hex))
+        self._raw(f"AUTH {RUSQL_USER} {token.hex()}")
 
     def _raw(self, msg: str) -> str:
         self.sock.sendall((msg + "\n").encode())
@@ -74,19 +90,51 @@ def _run(sql: str, db: str = "") -> str:
 
 
 def _parse_table_output(text: str) -> list[dict]:
-    """탭 구분 RuSQL 출력을 JSON 배열로 변환."""
+    """RuSQL native 프로토콜 출력을 JSON 배열로 변환. 두 형식을 지원:
+    박스 그림 표(SHOW DATABASES/TABLES, SELECT 등 — "+---+"/"| a | b |") 및 탭 구분
+    (SHOW INDEX 등). 응답은 항상 "OK"/"ERR" 상태 줄로 시작하고 "(N.NNN sec)" 타이밍
+    줄(과 종종 "N row(s) returned." 요약 줄)로 끝나므로, 실제 표 내용을 보기 전에
+    이 앞뒤 줄들을 먼저 걷어낸다.
+
+    Regression: 이전엔 첫 번째 줄(항상 "OK")을 헤더 행으로 착각해 탭 검사를 해서
+    모든 응답이 파싱 실패로 처리되고 있었음(list_databases/list_tables/sample_data/
+    get_indexes가 독스트링과 달리 실제 행 배열이 아니라 원본 텍스트를 그대로
+    감싸서 반환하던 문제)."""
     lines = [l for l in text.splitlines() if l.strip()]
     if not lines:
         return []
-    # 헤더 행 탐지: 첫 번째 비어있지 않은 줄
-    header_line = lines[0]
+    if lines[0].strip().upper().startswith("ERR"):
+        return [{"error": text}]
+
+    body = lines[1:] if lines[0].strip().upper() == "OK" else lines
+    while body and (
+        (body[-1].startswith("(") and body[-1].endswith(")"))
+        or re.match(r"^\d+ row", body[-1])
+    ):
+        body.pop()
+    if not body:
+        return [{"result": text}]
+
+    # 박스 그림 표: "+---+" 테두리로 둘러싸인 "| a | b |" 행들
+    if body[0].startswith("+") and body[0].endswith("+"):
+        content_lines = [l for l in body if l.startswith("|") and l.endswith("|")]
+        if not content_lines:
+            return [{"result": text}]
+        headers = [c.strip() for c in content_lines[0].strip("|").split("|")]
+        rows = []
+        for line in content_lines[1:]:
+            cells = [c.strip() for c in line.strip("|").split("|")]
+            if len(cells) == len(headers):
+                rows.append(dict(zip(headers, cells)))
+        return rows
+
+    # 탭 구분 표 (예: SHOW INDEX)
+    header_line = body[0]
     if "\t" not in header_line:
         return [{"result": text}]
     headers = [h.strip() for h in header_line.split("\t")]
     rows = []
-    for line in lines[1:]:
-        if line.startswith("(") and line.endswith(")"):  # "(N rows returned.)" 무시
-            continue
+    for line in body[1:]:
         parts = [p.strip() for p in line.split("\t")]
         if len(parts) == len(headers):
             rows.append(dict(zip(headers, parts)))
@@ -105,11 +153,14 @@ def execute_sql(sql: str, database: str = "") -> str:
     `DELETE t1, t2 FROM t1 JOIN t2 ON ...`). See docs/mds/FUNCTIONS.md in the repo for the
     full feature list."""
     raw = _run(sql, database)
-    # SELECT 계열 결과는 JSON 배열로 변환
+    # SELECT 계열 결과는 JSON 배열로 변환. 성공 응답은 항상 "OK"로 시작하므로
+    # (과거엔 이 접두어 때문에 파싱 자체가 항상 스킵됐음), ERR이 아니면 일단
+    # 파싱을 시도하고 실제로 표 형태로 파싱됐을 때만 JSON을 반환한다 — CREATE/
+    # INSERT 같은 단순 상태 메시지는 표로 파싱 안 되니 원본 텍스트 그대로 반환.
     stripped = raw.strip()
-    if "\t" in stripped and not stripped.startswith("ERR") and not stripped.startswith("OK"):
+    if not stripped.upper().startswith("ERR"):
         rows = _parse_table_output(stripped)
-        if rows and not (len(rows) == 1 and "result" in rows[0]):
+        if rows and not (len(rows) == 1 and ("result" in rows[0] or "error" in rows[0])):
             return json.dumps(rows, ensure_ascii=False)
     return raw
 

@@ -9,7 +9,7 @@ RuSQL 성능 벤치마크 (UI의 Benchmark 패널이 표시하는 4개 항목만
   python bench.py    # rusql-server 가 7878 포트로 실행 중이어야 함
 """
 
-import socket, time, json, os, sys
+import hashlib, socket, time, json, os, sys
 
 # Windows에서 cmd.exe 콘솔은 시스템 기본 코드페이지(한국어 환경에선 cp949)로 열리는데,
 # 이 스크립트의 print()가 쓰는 em dash(—) 등은 cp949로 인코딩할 수 없어
@@ -32,13 +32,27 @@ N_TXN     = 1_000
 RESULT_FILE = "result.json"
 
 
+def _compute_native_password_token(password, nonce):
+    """mysql_native_password-style challenge-response, matching engine_client's
+    compute_native_password_token (client/src/main.cpp): the native protocol no longer
+    accepts a plaintext password (Phase 19 security fix), only this token."""
+    stage1 = hashlib.sha1(password.encode()).digest()
+    stage2 = hashlib.sha1(stage1).digest()
+    xor_key = hashlib.sha1(nonce + stage2).digest()
+    return bytes(a ^ b for a, b in zip(stage1, xor_key))
+
+
 class RuSQL:
     def __init__(self):
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.sock.connect((RUSQL_HOST, RUSQL_PORT))
         self.sock.settimeout(120)
-        self._read_until_end()
-        self._send(f"AUTH {RUSQL_USER} {RUSQL_PASS}")
+        banner = self._read_until_end()
+        nonce_hex = next((l.split(" ", 1)[1] for l in banner.splitlines() if l.startswith("NONCE ")), None)
+        if not nonce_hex:
+            raise RuntimeError("Server did not send an auth challenge (NONCE)")
+        token = _compute_native_password_token(RUSQL_PASS, bytes.fromhex(nonce_hex))
+        self._send(f"AUTH {RUSQL_USER} {token.hex()}")
         self._read_until_end()
 
     def _send(self, data):
