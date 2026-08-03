@@ -148,6 +148,14 @@ Executor::Executor(const std::string& dir, std::size_t buffer_pool_capacity) {
     Catalog catalog;
     std::unordered_map<std::string, std::vector<Row>> tables;
     std::unordered_map<std::string, BPlusTree> indexes;
+    std::unordered_map<std::string, std::shared_ptr<std::shared_mutex>> table_locks;
+    // Stage 4: pre-populated here for the same reason as table_locks -- see exec_create's
+    // comment (executor_ddl.cpp). Populated once at startup for every table loaded from
+    // disk so later per-table-locked DML never inserts a fresh key into these maps.
+    std::unordered_map<std::string, TableStats> table_stats;
+    std::unordered_map<std::string, std::size_t> dml_since_vacuum;
+    std::unordered_map<std::string, std::size_t> dml_since_analyze;
+    std::unordered_map<std::string, std::unordered_map<std::string, std::size_t>> row_pk_pos;
 
     std::unordered_set<std::string> databases;
     for (auto& db : disk.list_databases()) {
@@ -193,6 +201,11 @@ Executor::Executor(const std::string& dir, std::size_t buffer_pool_capacity) {
 
         auto [tit, inserted] = tables.insert({qualified_key, std::move(rows)});
         (void)inserted;
+        table_locks[qualified_key] = std::make_shared<std::shared_mutex>();
+        table_stats[qualified_key] = TableStats{};
+        dml_since_vacuum[qualified_key] = 0;
+        dml_since_analyze[qualified_key] = 0;
+        row_pk_pos[qualified_key] = {};
         if (needs_rebuild) {
             std::string first_col = schema.columns.empty() ? std::string() : schema.columns.front().name;
             rebuild_needed.push_back({qualified_key, std::move(first_col), &tit->second});
@@ -332,18 +345,19 @@ Executor::Executor(const std::string& dir, std::size_t buffer_pool_capacity) {
         .synonyms = std::move(synonyms),
         .group_commit_coord = std::make_shared<GroupCommitCoordinator>(dir + "/rusql.wal"),
         .data_dir = dir,
-        .table_stats = {},
+        .table_stats = std::move(table_stats),
         .procedures = std::move(procedures),
         .triggers = std::move(triggers),
-        .dml_since_vacuum = 0,
-        .dml_since_analyze = {},
+        .dml_since_vacuum = std::move(dml_since_vacuum),
+        .dml_since_analyze = std::move(dml_since_analyze),
         .user_functions = std::move(user_functions),
         .process_list = std::make_shared<Mutex<std::unordered_map<std::size_t, ProcessInfo>>>(),
         .next_session_id = std::make_shared<std::atomic<std::size_t>>(1),
-        .row_pk_pos = {},
+        .row_pk_pos = std::move(row_pk_pos),
         .query_cache = QueryResultCache(),
         .txn_io = txn_io,
         .active_txn_ids = std::make_shared<Mutex<std::unordered_set<std::uint64_t>>>(),
+        .table_locks = std::move(table_locks),
     };
 
     shared = std::make_shared<RwLock<SharedDatabase>>(std::move(db_value));
@@ -353,6 +367,34 @@ Executor::Executor(const std::string& dir, std::size_t buffer_pool_capacity) {
     lock_wait_timeout_ms = 50000;
 
     recover_from_wal();
+
+    // MVCC: _xmin/_xmax bake real transaction ids into rows persisted on disk, but
+    // TxnIoShared's counter always restarts at 1 on a fresh process -- without this, a
+    // freshly-issued id could collide with (or, worse, be numerically LESS than) an id
+    // already sitting in a loaded/recovered row's _xmin/_xmax, which would make
+    // is_visible_for_read's cutoff comparison wrongly treat that already-committed row
+    // as "didn't exist yet" for every session from the moment this Executor starts. Scan
+    // once at startup (after WAL redo/undo has finished mutating s.tables) and bump the
+    // counter past the highest id found.
+    {
+        std::uint64_t max_id = 0;
+        auto sr = shared->read();
+        for (auto& [table_name, rows] : sr->tables) {
+            (void)table_name;
+            for (auto& row : rows) {
+                for (const char* col : {"_xmin", "_xmax"}) {
+                    auto it = row.find(col);
+                    if (it == row.end()) continue;
+                    try {
+                        std::uint64_t id = std::stoull(it->second);
+                        if (id > max_id) max_id = id;
+                    } catch (...) {
+                    }
+                }
+            }
+        }
+        if (max_id > 0) txn_io->ensure_next_id_at_least(max_id + 1);
+    }
 }
 
 Executor::Executor(SessionTag, std::shared_ptr<RwLock<SharedDatabase>> shared_db, std::string dir,
@@ -529,20 +571,289 @@ bool Executor::is_pure_read_only(const Statement& stmt) {
 }
 
 // ---------------------------------------------------------------------------
+// Stage 4 (table-level concurrency): table-set discovery for the per-table locking
+// path. See Executor::table_lock_set_for's doc comment (executor.hpp) for what this
+// covers and why every fallback (nullopt) case exists.
+// ---------------------------------------------------------------------------
+namespace {
+
+std::string qualify_local(const std::string& name, const std::string& current_db) {
+    if (name.find('.') != std::string::npos) return name;
+    return current_db + "." + name;
+}
+
+bool cond_tables_ok(const CondExpr& e, const std::string& current_db, const SharedDatabase& s, std::vector<std::string>& out);
+
+bool select_tables_ok(const Statement::Select& sel, const std::string& current_db, const SharedDatabase& s,
+                      std::vector<std::string>& out) {
+    // FROM-derived subquery / view reference: both insert/erase a table-name KEY into
+    // s.tables/s.catalog/s.indexes at execution time (a synthetic alias, or the view's own
+    // name reused as a temp key) -- not safe to pre-lock a fixed table set for, since that
+    // key doesn't exist before execution starts and two concurrent statements could pick
+    // the same one. See the Stage 4 plan's audit.
+    if (sel.subquery.has_value()) return false;
+    if (sel.for_update || sel.for_share) return false; // keep today's shared->write() behavior unchanged for these
+    std::string qtable = qualify_local(sel.table, current_db);
+    if (s.views.count(qtable)) return false;
+    out.push_back(qtable);
+    for (auto& j : sel.joins) {
+        std::string qj = qualify_local(j.table, current_db);
+        if (s.views.count(qj)) return false;
+        out.push_back(qj);
+        if (!cond_tables_ok(j.on_expr, current_db, s, out)) return false;
+    }
+    if (sel.condition && !cond_tables_ok(*sel.condition, current_db, s, out)) return false;
+    // HAVING subqueries are a non-issue: eval_single's ConditionValue::Subquery case
+    // always returns false without executing anything (executor_eval.cpp) -- no table is
+    // actually touched, so there's nothing to lock and no need to walk into it here.
+    for (auto& c : sel.columns) {
+        if (auto* sq = std::get_if<SelectColumn::Subquery>(&c.data)) {
+            auto* nested = std::get_if<Statement::Select>(&sq->query->data);
+            if (!nested || !select_tables_ok(*nested, current_db, s, out)) return false;
+        }
+    }
+    return true;
+}
+
+// Real bug found via live multi-threaded stress testing: is_pure_read_only() classifies
+// Select/Union/Intersect/Except/Explain/ExplainAnalyze as safe under structural-shared
+// alone, which was true under the single whole-database exclusive lock (a concurrent
+// writer could never be running at all) but is NOT true anymore -- these all read actual
+// row data (Union/Intersect/Except execute their branches for real; Explain/
+// ExplainAnalyze consult Planner::table_size(), which reads s.tables[table].size())
+// without holding that specific table's own lock, racing a per-table-locked concurrent
+// writer on the exact same std::vector<Row>. Recurses through every shape
+// table_lock_set_for's "candidate" statements can nest via Union/Intersect/Except/
+// Explain/ExplainAnalyze so all of them get proper per-table locks too, not just plain
+// SELECT.
+bool stmt_tables_ok(const Statement& stmt, const std::string& current_db, const SharedDatabase& s, std::vector<std::string>& out) {
+    if (auto* sel = std::get_if<Statement::Select>(&stmt.data)) return select_tables_ok(*sel, current_db, s, out);
+    if (auto* v = std::get_if<Statement::Union>(&stmt.data)) {
+        return stmt_tables_ok(*v->left, current_db, s, out) && stmt_tables_ok(*v->right, current_db, s, out);
+    }
+    if (auto* v = std::get_if<Statement::Intersect>(&stmt.data)) {
+        return stmt_tables_ok(*v->left, current_db, s, out) && stmt_tables_ok(*v->right, current_db, s, out);
+    }
+    if (auto* v = std::get_if<Statement::Except>(&stmt.data)) {
+        return stmt_tables_ok(*v->left, current_db, s, out) && stmt_tables_ok(*v->right, current_db, s, out);
+    }
+    if (auto* v = std::get_if<Statement::Explain>(&stmt.data)) return stmt_tables_ok(*v->inner, current_db, s, out);
+    if (auto* v = std::get_if<Statement::ExplainAnalyze>(&stmt.data)) return stmt_tables_ok(*v->inner, current_db, s, out);
+    return false; // unknown/unexpected shape -- fall back, don't guess
+}
+
+bool cond_tables_ok(const CondExpr& e, const std::string& current_db, const SharedDatabase& s, std::vector<std::string>& out) {
+    if (auto* v = std::get_if<CondExpr::And>(&e.data)) return cond_tables_ok(*v->lhs, current_db, s, out) && cond_tables_ok(*v->rhs, current_db, s, out);
+    if (auto* v = std::get_if<CondExpr::Or>(&e.data)) return cond_tables_ok(*v->lhs, current_db, s, out) && cond_tables_ok(*v->rhs, current_db, s, out);
+    if (auto* v = std::get_if<CondExpr::Not>(&e.data)) return cond_tables_ok(*v->inner, current_db, s, out);
+    if (auto* v = std::get_if<CondExpr::Leaf>(&e.data)) {
+        if (auto* sq = std::get_if<ConditionValue::Subquery>(&v->condition.value.data)) {
+            auto* nested = std::get_if<Statement::Select>(&sq->query->data);
+            if (!nested) return false; // unexpected shape -- fall back, don't guess
+            return select_tables_ok(*nested, current_db, s, out);
+        }
+        return true;
+    }
+    return true;
+}
+
+bool has_firing_trigger(const SharedDatabase& s, const std::string& qtable, const char* event) {
+    for (auto& [name, def] : s.triggers) {
+        (void)name;
+        auto& [t, ti, ev, body] = def;
+        (void)ti;
+        (void)body;
+        if (t == qtable && ev == event) return true;
+    }
+    return false;
+}
+
+// FK parents of `qtable` (its own schema's foreign_key->ref_table -- INSERT's existence
+// check reads these) and/or FK children (other tables whose foreign_key->ref_table ==
+// qtable -- UPDATE/DELETE cascade reads/writes these). Both are exactly one hop, matching
+// this codebase's actual cascade behavior (confirmed non-recursive, non-trigger-firing).
+void add_fk_neighbors(const SharedDatabase& s, const std::string& qtable, bool parents, bool children, std::vector<std::string>& out) {
+    if (parents) {
+        if (auto* schema = s.catalog.get_table(qtable)) {
+            for (auto& c : schema->columns) {
+                if (c.foreign_key) out.push_back(c.foreign_key->ref_table);
+            }
+        }
+    }
+    if (children) {
+        for (auto& [tname, tschema] : s.catalog.tables) {
+            for (auto& c : tschema.columns) {
+                if (c.foreign_key && c.foreign_key->ref_table == qtable) out.push_back(tname);
+            }
+        }
+    }
+}
+
+} // namespace
+
+std::optional<std::vector<std::string>> Executor::table_lock_set_for(const SharedDatabase& s, const Statement& stmt) const {
+    std::vector<std::string> out;
+
+    if (auto* v = std::get_if<Statement::Insert>(&stmt.data)) {
+        std::string qtable = qualify_local(v->table, current_db);
+        if (s.views.count(qtable)) return std::nullopt; // updatable-view redirect -- fall back
+        if (has_firing_trigger(s, qtable, "INSERT")) return std::nullopt;
+        out.push_back(qtable);
+        add_fk_neighbors(s, qtable, /*parents=*/true, /*children=*/false, out);
+    } else if (auto* v = std::get_if<Statement::InsertSelect>(&stmt.data)) {
+        std::string qtable = qualify_local(v->table, current_db);
+        if (s.views.count(qtable)) return std::nullopt;
+        if (has_firing_trigger(s, qtable, "INSERT")) return std::nullopt;
+        out.push_back(qtable);
+        add_fk_neighbors(s, qtable, true, false, out);
+        if (!v->query || !stmt_tables_ok(*v->query, current_db, s, out)) return std::nullopt;
+    } else if (std::holds_alternative<Statement::Select>(stmt.data) || std::holds_alternative<Statement::Union>(stmt.data) ||
+               std::holds_alternative<Statement::Intersect>(stmt.data) || std::holds_alternative<Statement::Except>(stmt.data) ||
+               std::holds_alternative<Statement::Explain>(stmt.data) || std::holds_alternative<Statement::ExplainAnalyze>(stmt.data)) {
+        if (!stmt_tables_ok(stmt, current_db, s, out)) return std::nullopt;
+    } else if (auto* v = std::get_if<Statement::Update>(&stmt.data)) {
+        std::string qtable = qualify_local(v->table, current_db);
+        if (s.views.count(qtable)) return std::nullopt;
+        if (has_firing_trigger(s, qtable, "UPDATE")) return std::nullopt;
+        out.push_back(qtable);
+        add_fk_neighbors(s, qtable, true, true, out);
+        if (v->condition && !cond_tables_ok(*v->condition, current_db, s, out)) return std::nullopt;
+    } else if (auto* v = std::get_if<Statement::Delete>(&stmt.data)) {
+        std::string qtable = qualify_local(v->table, current_db);
+        if (s.views.count(qtable)) return std::nullopt;
+        if (has_firing_trigger(s, qtable, "DELETE")) return std::nullopt;
+        out.push_back(qtable);
+        add_fk_neighbors(s, qtable, false, true, out);
+        if (v->condition && !cond_tables_ok(*v->condition, current_db, s, out)) return std::nullopt;
+    } else if (auto* v = std::get_if<Statement::MultiUpdate>(&stmt.data)) {
+        for (auto& t : v->tables) out.push_back(qualify_local(t, current_db));
+        for (auto& j : v->joins) out.push_back(qualify_local(j.table, current_db));
+        for (auto& t : out) {
+            if (s.views.count(t)) return std::nullopt;
+            if (has_firing_trigger(s, t, "UPDATE")) return std::nullopt;
+        }
+        std::vector<std::string> base = out;
+        for (auto& t : base) add_fk_neighbors(s, t, true, true, out);
+        for (auto& j : v->joins) {
+            if (!cond_tables_ok(j.on_expr, current_db, s, out)) return std::nullopt;
+        }
+        if (v->condition && !cond_tables_ok(*v->condition, current_db, s, out)) return std::nullopt;
+    } else if (auto* v = std::get_if<Statement::MultiDelete>(&stmt.data)) {
+        for (auto& t : v->delete_tables) out.push_back(qualify_local(t, current_db));
+        out.push_back(qualify_local(v->from_table, current_db));
+        for (auto& j : v->joins) out.push_back(qualify_local(j.table, current_db));
+        for (auto& t : out) {
+            if (s.views.count(t)) return std::nullopt;
+            if (has_firing_trigger(s, t, "DELETE")) return std::nullopt;
+        }
+        std::vector<std::string> base = out;
+        for (auto& t : base) add_fk_neighbors(s, t, false, true, out);
+        for (auto& j : v->joins) {
+            if (!cond_tables_ok(j.on_expr, current_db, s, out)) return std::nullopt;
+        }
+        if (v->condition && !cond_tables_ok(*v->condition, current_db, s, out)) return std::nullopt;
+    } else if (auto* v = std::get_if<Statement::Merge>(&stmt.data)) {
+        // exec_merge's own cross-table footprint is exactly {source, target} -- no FK
+        // existence/cascade checks, no triggers fired (confirmed in the Stage 4 audit).
+        std::string qtarget = qualify_local(v->target, current_db);
+        std::string qsource = qualify_local(v->source, current_db);
+        if (s.views.count(qtarget) || s.views.count(qsource)) return std::nullopt;
+        out.push_back(qtarget);
+        out.push_back(qsource);
+        if (!cond_tables_ok(v->on, current_db, s, out)) return std::nullopt;
+        if (v->when_matched_delete_cond && !cond_tables_ok(*v->when_matched_delete_cond, current_db, s, out)) return std::nullopt;
+    } else {
+        // Not a "candidate" type -- caller falls through to the unchanged
+        // is_pure_read_only()-based dispatch (DDL/DCL/SHOW*/session-variable statements,
+        // VACUUM/CHECKPOINT, BEGIN/COMMIT/ROLLBACK/SAVEPOINT-family, CALL, etc.).
+        return std::nullopt;
+    }
+
+    std::sort(out.begin(), out.end());
+    out.erase(std::unique(out.begin(), out.end()), out.end());
+    return out;
+}
+
+Executor::TableLockGuard Executor::acquire_table_locks(RwLock<SharedDatabase>::ReadGuard structural, const std::vector<std::string>& tables,
+                                                        bool exclusive) {
+    // Takes an ALREADY-acquired structural shared guard (rather than acquiring its own)
+    // so the caller can look up the table set (table_lock_set_for) and acquire the actual
+    // per-table locks under the SAME hold -- calling shared->read() twice in a row here
+    // would be a TOCTOU gap (a DDL statement could run in between) and is also not
+    // guaranteed deadlock-free for a std::shared_mutex re-acquired shared on the same
+    // thread.
+    TableLockGuard guard{std::move(structural), {}, {}};
+    for (auto& t : tables) {
+        // A name with no entry is either a table that doesn't exist (the statement will
+        // fail naturally downstream with "not found", same as today) or a virtual/
+        // computed table (e.g. INFORMATION_SCHEMA.*) that never has one -- either way,
+        // there's nothing real to protect, so skip it rather than throwing.
+        auto it = guard.structural->table_locks.find(t);
+        if (it == guard.structural->table_locks.end()) continue;
+        std::shared_mutex& m = *it->second;
+        if (exclusive) guard.exclusive_locks.emplace_back(m);
+        else guard.shared_locks.emplace_back(m);
+    }
+    return guard;
+}
+
+// ---------------------------------------------------------------------------
 // execute() / execute_sql() / execute_with_s()
 // ---------------------------------------------------------------------------
 
 StringResult Executor::execute(Statement stmt) {
     subquery_cache_.clear();
     if (std::holds_alternative<Statement::Commit>(stmt.data)) return execute_commit_grouped();
-    if (is_pure_read_only(stmt)) {
+
+    // BEGIN/SAVEPOINT/RELEASE SAVEPOINT touch only TransactionManager's own session-local
+    // state, never any table data -- structural shared is enough, no table locks needed.
+    if (std::holds_alternative<Statement::Begin>(stmt.data) || std::holds_alternative<Statement::Savepoint>(stmt.data) ||
+        std::holds_alternative<Statement::ReleaseSavepoint>(stmt.data)) {
         auto s = shared->read();
-        // SAFETY: is_pure_read_only() guarantees this call graph never mutates any
-        // SharedDatabase field except BufferPool's own cache/LRU bookkeeping, which has
-        // its own internal mutex (buffer_pool.hpp) precisely because it's reachable from
-        // here. Multiple sessions may hold shared->read() at the same time — re-audit
-        // is_pure_read_only() whenever execute_with_s's dispatch changes.
         return execute_with_s(const_cast<SharedDatabase&>(*s), std::move(stmt));
+    }
+
+    if (std::holds_alternative<Statement::Rollback>(stmt.data)) {
+        // dirty_tables() is a pure read of TransactionManager's own undo log -- safe to
+        // call before touching SharedDatabase at all, and apply_rollback (Stage 2) already
+        // re-derives the same list itself before txn.abort() clears it.
+        auto tables = txn.dirty_tables();
+        std::sort(tables.begin(), tables.end());
+        auto guard = acquire_table_locks(shared->read(), tables, /*exclusive=*/true);
+        return execute_with_s(const_cast<SharedDatabase&>(*guard.structural), std::move(stmt));
+    }
+
+    // Single structural-shared acquisition, reused for both the table-set classification
+    // and (if it doesn't fall back) the actual per-table lock acquisition -- calling
+    // shared->read() twice in a row here would be a TOCTOU gap against a concurrent DDL
+    // statement and isn't guaranteed deadlock-free for the same thread either.
+    {
+        auto s = shared->read();
+        if (auto tables = table_lock_set_for(*s, stmt)) {
+            bool exclusive = !is_pure_read_only(stmt);
+            auto guard = acquire_table_locks(std::move(s), *tables, exclusive);
+            // SAFETY: table_lock_set_for()'s fallback conditions (see its doc comment)
+            // guarantee that, for any statement reaching here, every table it will read
+            // or write is already locked (exclusive for anything that writes, shared for
+            // a plain read) for the statement's whole execution -- no exec_* function
+            // needs to (or should) acquire any further lock itself. Re-audit
+            // table_lock_set_for whenever execute_with_s's dispatch changes, exactly
+            // like is_pure_read_only().
+            return execute_with_s(const_cast<SharedDatabase&>(*guard.structural), std::move(stmt));
+        }
+        if (is_pure_read_only(stmt)) {
+            // SAFETY: is_pure_read_only() guarantees this call graph never mutates any
+            // SharedDatabase field except BufferPool's own cache/LRU bookkeeping, which
+            // has its own internal mutex (buffer_pool.hpp) precisely because it's
+            // reachable from here. Multiple sessions may hold shared->read() at the same
+            // time — re-audit is_pure_read_only() whenever execute_with_s's dispatch
+            // changes.
+            return execute_with_s(const_cast<SharedDatabase&>(*s), std::move(stmt));
+        }
+        // `s` (structural shared) released here, at the end of this block -- must happen
+        // before acquiring shared->write() below (a shared_mutex has no upgrade, and a
+        // thread holding a shared lock then trying to also acquire the same mutex
+        // exclusively would deadlock).
     }
     auto s = shared->write();
     return execute_with_s(*s, std::move(stmt));
@@ -618,7 +929,16 @@ StringResult Executor::execute_sql(const std::string& sql) {
     if (looks_like_select && !in_txn) {
         std::string cache_key = current_db + "::" + trimmed;
         auto s = shared->read();
-        if (const std::string* cached = s->query_cache.get(cache_key)) return StringResult::Ok(*cached);
+        // MVCC regression guard: once any transaction is open anywhere, the identical
+        // SQL text can legitimately produce different results for different sessions
+        // (a REPEATABLE READ transaction's frozen snapshot, READ UNCOMMITTED seeing an
+        // in-progress write, or even plain READ COMMITTED sessions straddling another
+        // session's still-open commit) -- the cache key (db + SQL text) has no way to
+        // capture that, so a hit here could silently serve one session's view to
+        // another. Only trust/populate the cache when the DB is fully quiescent.
+        if (s->active_txn_ids->lock()->empty()) {
+            if (auto cached = s->query_cache.get(cache_key)) return StringResult::Ok(std::move(*cached));
+        }
     }
 
     Parser parser(trimmed);
@@ -649,9 +969,14 @@ StringResult Executor::execute_sql(const std::string& sql) {
     StringResult result = execute(std::move(stmt));
 
     if (looks_like_select && !in_txn && !has_subquery && !has_nondeterministic && result.is_ok()) {
-        std::string cache_key = current_db + "::" + trimmed;
         auto s = shared->write();
-        s->query_cache.put(cache_key, result.value(), cache_tables);
+        // Same guard as the lookup above -- don't let a result computed under one
+        // session's in-progress-transaction-aware view get cached and served to another
+        // session that would have computed something different.
+        if (s->active_txn_ids->lock()->empty()) {
+            std::string cache_key = current_db + "::" + trimmed;
+            s->query_cache.put(cache_key, result.value(), cache_tables);
+        }
     }
     if (dml_table && result.is_ok()) {
         auto s = shared->write();

@@ -168,6 +168,11 @@ TEST_CASE("UPDATE WHERE with a subquery condition", "[executor][subquery]") {
     auto s = ex.get_shared()->read();
     auto& rows = s->tables.at("company.employee");
     for (auto& row : rows) {
+        // MVCC: UPDATE appends a new version and marks the old one dead instead of
+        // mutating in place -- skip superseded (_xmax != "0") rows, only the live one
+        // reflects this UPDATE's result.
+        auto xit = row.find("_xmax");
+        if (xit != row.end() && xit->second != "0") continue;
         if (row.at("department_id") == "1") REQUIRE(row.at("bonus") == "100");
         else REQUIRE(row.at("bonus") == "0");
     }

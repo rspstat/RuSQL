@@ -32,11 +32,12 @@ StringResult Executor::exec_vacuum(SharedDatabase& s, std::optional<std::string>
         for (auto& [k, _] : s.tables) targets.push_back(k);
     }
 
+    std::uint64_t horizon = oldest_active_txn_id(s);
     std::size_t total_removed = 0;
     for (auto& t : targets) {
         auto& rows = s.tables.at(t);
         std::size_t before = rows.size();
-        rows.erase(std::remove_if(rows.begin(), rows.end(), [](const Row& r) { return !is_visible(r); }), rows.end());
+        rows.erase(std::remove_if(rows.begin(), rows.end(), [&](const Row& r) { return is_vacuumable(r, horizon); }), rows.end());
         std::size_t removed = before - rows.size();
         total_removed += removed;
 
@@ -81,9 +82,13 @@ StringResult Executor::exec_analyze_table(SharedDatabase& s, const std::string& 
     auto tit = s.tables.find(table);
     if (tit == s.tables.end()) return StringResult::Err("Table '" + display_name(table) + "' not found");
 
+    // MVCC: always a fresh "right now" ReadCommitted-style ctx, regardless of the calling
+    // transaction's own isolation level -- statistics should reflect the current committed
+    // state, not stale data, and must not count another session's uncommitted rows.
+    SnapshotCtx now_ctx{txn.current_txn_id(), s.txn_io->peek_next_id(), *s.active_txn_ids->lock()};
     std::vector<Row> rows;
     for (auto& r : tit->second) {
-        if (is_visible(r)) rows.push_back(r);
+        if (is_visible_for_read(r, now_ctx)) rows.push_back(r);
     }
 
     std::size_t total = rows.size();

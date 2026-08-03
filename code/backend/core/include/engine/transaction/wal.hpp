@@ -41,6 +41,15 @@ public:
     TxnIoShared& operator=(const TxnIoShared&) = delete;
 
     std::uint64_t next_id();
+    // Reads the next id that would be handed out WITHOUT allocating it -- used by MVCC
+    // read snapshots as a "cutoff" (ids >= this didn't exist yet when the snapshot was
+    // taken).
+    std::uint64_t peek_next_id();
+    // Bumps the counter up to `min_next` if it's currently lower, never down -- used at
+    // startup to make sure freshly-issued ids never collide with (or read as "not yet
+    // existing" to) real transaction ids already baked into _xmin/_xmax on rows loaded
+    // from disk, since this counter itself resets to 1 on every process restart.
+    void ensure_next_id_at_least(std::uint64_t min_next);
 
     std::mutex wal_lock;
     std::mutex undo_lock;

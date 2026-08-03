@@ -61,27 +61,8 @@ StringResult Executor::exec_delete(SharedDatabase& s, const std::string& table, 
         return StringResult::Err("View '" + strip_db_prefix(table) + "' is not updatable");
     }
 
-    std::optional<std::vector<std::pair<std::string, std::vector<Row>>>> committed_backups;
-    if (txn.is_active()) {
-        std::vector<std::pair<std::string, std::vector<Row>>> backups;
-        backups.emplace_back(table, session_swap_in(s, table));
-        std::vector<std::string> fk_tables;
-        for (auto& [tname, tschema] : s.catalog.tables) {
-            if (tname == table) continue;
-            bool refs = std::any_of(tschema.columns.begin(), tschema.columns.end(), [&](const ColumnDef& c) {
-                return c.foreign_key && c.foreign_key->ref_table == table && c.foreign_key->on_delete != FkAction::Restrict;
-            });
-            if (refs) fk_tables.push_back(tname);
-        }
-        for (auto& t : fk_tables) backups.emplace_back(t, session_swap_in(s, t));
-        committed_backups = std::move(backups);
-    }
-
     if (auto tr = fire_triggers(s, table, "BEFORE", "DELETE"); tr.is_err()) return tr;
     auto result = exec_delete_inner(s, table, condition, returning);
-    if (committed_backups) {
-        for (auto& [tname, committed] : *committed_backups) session_swap_out(s, tname, std::move(committed));
-    }
     if (result.is_ok()) {
         if (auto tr = fire_triggers(s, table, "AFTER", "DELETE"); tr.is_err()) return tr;
     }
@@ -95,7 +76,14 @@ StringResult Executor::exec_delete_inner(SharedDatabase& s, const std::string& t
                             [&](const ColumnDef& c) { return c.foreign_key && c.foreign_key->ref_table == table; });
     });
 
-    if (!has_fk_ref && !condition_has_subquery(condition) && !txn.is_active()) {
+    // MVCC: a physical (hard) delete is only safe when no session anywhere has an open
+    // snapshot that might still need to see the pre-delete row -- otherwise it must be a
+    // soft delete (mark _xmax, keep the row physically present) exactly like an
+    // in-progress transaction's own DELETE already does below, or another session's
+    // still-open REPEATABLE READ/SERIALIZABLE snapshot would lose a row it's entitled to see.
+    bool globally_quiescent = s.active_txn_ids->lock()->empty();
+
+    if (!has_fk_ref && !condition_has_subquery(condition) && !txn.is_active() && globally_quiescent) {
         std::string pk_col = "id";
         if (auto* sc = s.catalog.get_table(table)) {
             for (auto& c : sc->columns) {
@@ -139,7 +127,13 @@ StringResult Executor::exec_delete_inner(SharedDatabase& s, const std::string& t
                     rows_to_delete.push_back(std::move(del_row));
                     used_pos_idx = true;
                 } else {
-                    s.row_pk_pos.erase(table);
+                    // Stage 4: clear the entry's VALUE in place rather than erasing the
+                    // top-level key -- under per-table locking, only DDL (CREATE/DROP
+                    // TABLE, structural exclusive) may add/remove table-name keys from
+                    // this map; a DML-triggered erase-then-later-reinsert on a shared,
+                    // table-keyed unordered_map would race with a different table's
+                    // concurrent DML doing the same.
+                    if (auto it = s.row_pk_pos.find(table); it != s.row_pk_pos.end()) it->second.clear();
                 }
             }
         }
@@ -193,7 +187,7 @@ StringResult Executor::exec_delete_inner(SharedDatabase& s, const std::string& t
                                            }),
                            rows.end());
                 deleted = before - rows.size();
-                s.row_pk_pos.erase(table);
+                if (auto it = s.row_pk_pos.find(table); it != s.row_pk_pos.end()) it->second.clear();
             }
         } else {
             auto tit = s.tables.find(table);
@@ -210,7 +204,7 @@ StringResult Executor::exec_delete_inner(SharedDatabase& s, const std::string& t
                                        }),
                        rows.end());
             deleted = before - rows.size();
-            s.row_pk_pos.erase(table);
+            if (auto it = s.row_pk_pos.find(table); it != s.row_pk_pos.end()) it->second.clear();
         }
 
         for (auto& del_row : rows_to_delete) index_remove_row(s, table, del_row, pk_col);
@@ -229,7 +223,7 @@ StringResult Executor::exec_delete_inner(SharedDatabase& s, const std::string& t
             for (auto& k : comp_keys) s.composite_indexes.at(k).rebuild(rows_clone);
         }
 
-        maybe_auto_vacuum(s);
+        maybe_auto_vacuum(s, table);
         maybe_auto_analyze(s, table);
         update_stat_rows(s, table, -static_cast<std::int64_t>(deleted));
         maybe_auto_checkpoint(s);
@@ -372,6 +366,24 @@ StringResult Executor::exec_delete_inner(SharedDatabase& s, const std::string& t
         }
     }
     std::size_t deleted = 0;
+    bool hard_deleted = false;
+    bool soft_deleted = false;
+
+    // MVCC: a soft delete only flips _xmax on the Row object living in s.tables -- the PK
+    // B+Tree and every secondary/hash index hold their own separate JSON copy of that same
+    // row's data (inserted once at INSERT/UPDATE time), which this does NOT touch. Left
+    // alone, index-based fast-path reads (AccessPath::PkPoint et al.) would keep serving
+    // the stale pre-delete copy (_xmax still "0") forever, even to a session with no
+    // reason to still see it -- re-upsert the PK entry and refresh secondary/hash indexes
+    // via the same remove-then-insert pattern UPDATE already uses for its two-row swap.
+    auto refresh_indexes_for_soft_delete = [&](const Row& old_row, const Row& new_row, const std::string& key) {
+        if (auto idx_it = s.indexes.find(table); idx_it != s.indexes.end()) {
+            nlohmann::json j = new_row;
+            idx_it->second.insert(key, j.dump());
+        }
+        index_remove_row(s, table, old_row, pk_col);
+        index_insert_row(s, table, new_row);
+    };
 
     if (txn.is_active()) {
         std::uint64_t txn_id = txn.current_txn_id();
@@ -396,16 +408,48 @@ StringResult Executor::exec_delete_inner(SharedDatabase& s, const std::string& t
             nlohmann::json old_j = row;
             txn.log_delete(table, key, old_j.dump());
             row["_xmax"] = txn_id_str;
+            refresh_indexes_for_soft_delete(old_j.get<Row>(), row, key);
+            soft_deleted = true;
             deleted++;
         }
-    } else {
+    } else if (globally_quiescent) {
         auto& rows = s.tables.at(table);
         std::size_t before = rows.size();
         rows.erase(std::remove_if(rows.begin(), rows.end(), [&](Row& r) { return is_visible(r) && matches_condexpr(r, condition); }), rows.end());
         deleted = before - rows.size();
+        hard_deleted = true;
+    } else {
+        // MVCC: another session has an open snapshot that may still need to see these
+        // rows -- soft-delete instead (same shape as the in-txn branch above), tagged
+        // with a fresh global id since autocommit has no txn of its own (mirrors INSERT's
+        // tagging_txn_id since Stage 1).
+        std::uint64_t my_id = tagging_txn_id(s);
+        std::string txn_id_str = std::to_string(my_id);
+        auto& rows = s.tables.at(table);
+        for (auto& row : rows) {
+            if (!is_visible(row) || !matches_condexpr(row, condition)) continue;
+            auto it = row.find(pk_col);
+            std::string key = it != row.end() ? it->second : std::string();
+            Row old_row = row;
+            row["_xmax"] = txn_id_str;
+            refresh_indexes_for_soft_delete(old_row, row, key);
+            soft_deleted = true;
+            deleted++;
+        }
     }
 
-    if (!txn.is_active()) {
+    if (soft_deleted) {
+        std::vector<std::string> comp_keys;
+        for (auto& [k, ci] : s.composite_indexes) {
+            if (ci.table == table) comp_keys.push_back(k);
+        }
+        if (!comp_keys.empty()) {
+            std::vector<Row> rows_clone = s.tables.at(table);
+            for (auto& k : comp_keys) s.composite_indexes.at(k).rebuild(rows_clone);
+        }
+    }
+
+    if (hard_deleted) {
         for (auto& del_row : rows_to_delete) index_remove_row(s, table, del_row, pk_col);
         if (auto idx_it = s.indexes.find(table); idx_it != s.indexes.end()) {
             for (auto& del_row : rows_to_delete) {
@@ -421,7 +465,7 @@ StringResult Executor::exec_delete_inner(SharedDatabase& s, const std::string& t
             std::vector<Row> rows_clone = s.tables.at(table);
             for (auto& k : comp_keys) s.composite_indexes.at(k).rebuild(rows_clone);
         }
-        maybe_auto_vacuum(s);
+        maybe_auto_vacuum(s, table);
         maybe_auto_analyze(s, table);
     }
     update_stat_rows(s, table, -static_cast<std::int64_t>(deleted));

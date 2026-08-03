@@ -1,7 +1,12 @@
 // Faithful port of the INSERT path and its shared DML infrastructure from
-// rusql-core/src/engine/executor.rs (Phase 8b): session_swap_in/out, fire_triggers,
+// rusql-core/src/engine/executor.rs (Phase 8b): fire_triggers,
 // maybe_auto_checkpoint/maybe_auto_vacuum/maybe_auto_analyze, resolve_updatable_view,
 // exec_insert_select, exec_insert, exec_insert_inner.
+// MVCC Stage 2: session_swap_in/out (the private per-session table buffer this file used
+// to swap into/out of s.tables around in-transaction DML) were retired -- all DML now
+// writes directly into s.tables, tagged with the writer's real txn id (see _xmin/_xmax
+// and Executor::is_visible_for_read), so no swap is needed for a transaction to see its
+// own uncommitted work.
 
 #include "engine/executor/executor.hpp"
 
@@ -56,29 +61,6 @@ struct TriggerDepthGuard {
 
 } // namespace
 
-std::vector<Row> Executor::session_swap_in(SharedDatabase& s, const std::string& table) {
-    std::vector<Row> committed = s.tables.count(table) ? s.tables.at(table) : std::vector<Row>{};
-    std::vector<Row> working;
-    if (auto it = session_tables.find(table); it != session_tables.end()) {
-        working = std::move(it->second);
-        session_tables.erase(it);
-    } else {
-        working = committed;
-    }
-    s.tables[table] = std::move(working);
-    return committed;
-}
-
-void Executor::session_swap_out(SharedDatabase& s, const std::string& table, std::vector<Row> committed) {
-    std::vector<Row> modified;
-    if (auto it = s.tables.find(table); it != s.tables.end()) {
-        modified = std::move(it->second);
-        s.tables.erase(it);
-    }
-    session_tables[table] = std::move(modified);
-    s.tables[table] = std::move(committed);
-}
-
 StringResult Executor::fire_triggers(SharedDatabase& s, const std::string& table, const std::string& timing, const std::string& event) {
     if (trigger_depth_ >= TRIGGER_MAX_DEPTH) {
         return StringResult::Err("Trigger recursion exceeded maximum depth (" + std::to_string(TRIGGER_MAX_DEPTH) + ")");
@@ -103,48 +85,47 @@ void Executor::maybe_auto_checkpoint(SharedDatabase& s) {
     }
 }
 
-void Executor::maybe_auto_vacuum(SharedDatabase& s) {
+void Executor::maybe_auto_vacuum(SharedDatabase& s, const std::string& table) {
     constexpr std::size_t AUTO_VACUUM_THRESHOLD = 200;
-    s.dml_since_vacuum += 1;
-    if (s.dml_since_vacuum < AUTO_VACUUM_THRESHOLD) return;
-    s.dml_since_vacuum = 0;
+    // Stage 4: single-table scoped (was a global counter sweeping every table in the DB)
+    // -- under per-table locking, this call only ever holds `table`'s own lock, so it must
+    // never touch any other table's rows/index/buffer-pool page. Mirrors dml_since_analyze/
+    // maybe_auto_analyze's existing per-table pattern.
+    std::size_t& counter = s.dml_since_vacuum[table];
+    counter += 1;
+    if (counter < AUTO_VACUUM_THRESHOLD) return;
+    counter = 0;
 
-    std::vector<std::string> tables;
-    for (auto& [k, _] : s.tables) tables.push_back(k);
-    for (auto& t : tables) {
-        auto& rows = s.tables.at(t);
-        std::size_t before = rows.size();
-        rows.erase(std::remove_if(rows.begin(), rows.end(), [](const Row& r) { return !is_visible(r); }), rows.end());
-        if (rows.size() < before) {
-            std::vector<Row> rows_clone = rows;
-            if (auto idx_it = s.indexes.find(t); idx_it != s.indexes.end()) {
-                idx_it->second = BPlusTree();
-                // PLAN.md P0 fix: see exec_vacuum in executor_maint.cpp for the same fix —
-                // resolve the real PK column from the schema instead of grabbing an
-                // arbitrary (HashMap-order-dependent) row value.
-                std::string pk_col_name;
-                if (auto* schema = s.catalog.get_table(t)) {
-                    for (auto& c : schema->columns) {
-                        if (c.primary_key) { pk_col_name = c.name; break; }
-                    }
-                    if (pk_col_name.empty() && !schema->columns.empty()) pk_col_name = schema->columns.front().name;
+    auto tit = s.tables.find(table);
+    if (tit == s.tables.end()) return;
+    std::uint64_t horizon = oldest_active_txn_id(s);
+    auto& rows = tit->second;
+    std::size_t before = rows.size();
+    rows.erase(std::remove_if(rows.begin(), rows.end(), [&](const Row& r) { return is_vacuumable(r, horizon); }), rows.end());
+    if (rows.size() < before) {
+        std::vector<Row> rows_clone = rows;
+        if (auto idx_it = s.indexes.find(table); idx_it != s.indexes.end()) {
+            idx_it->second = BPlusTree();
+            // PLAN.md P0 fix: see exec_vacuum in executor_maint.cpp for the same fix —
+            // resolve the real PK column from the schema instead of grabbing an
+            // arbitrary (HashMap-order-dependent) row value.
+            std::string pk_col_name;
+            if (auto* schema = s.catalog.get_table(table)) {
+                for (auto& c : schema->columns) {
+                    if (c.primary_key) { pk_col_name = c.name; break; }
                 }
-                for (auto& row : rows_clone) {
-                    auto it = row.find(pk_col_name);
-                    std::string key = it != row.end() ? it->second : std::string();
-                    nlohmann::json j = row;
-                    idx_it->second.insert(key, j.dump());
-                }
+                if (pk_col_name.empty() && !schema->columns.empty()) pk_col_name = schema->columns.front().name;
             }
-            s.buffer_pool.write_page(t, rows_clone);
-            s.buffer_pool.flush_page(t, s.disk);
+            for (auto& row : rows_clone) {
+                auto it = row.find(pk_col_name);
+                std::string key = it != row.end() ? it->second : std::string();
+                nlohmann::json j = row;
+                idx_it->second.insert(key, j.dump());
+            }
+            s.disk.save_btree_index(table, idx_it->second);
         }
-    }
-    s.buffer_pool.flush_all(s.disk);
-    std::vector<std::string> all_idx_keys;
-    for (auto& [k, _] : s.indexes) all_idx_keys.push_back(k);
-    for (auto& key : all_idx_keys) {
-        if (auto it = s.indexes.find(key); it != s.indexes.end()) s.disk.save_btree_index(key, it->second);
+        s.buffer_pool.write_page(table, rows_clone);
+        s.buffer_pool.flush_page(table, s.disk);
     }
 }
 
@@ -208,12 +189,8 @@ StringResult Executor::exec_insert(SharedDatabase& s, std::string table, std::op
     }
 
     if (auto tr = fire_triggers(s, table, "BEFORE", "INSERT"); tr.is_err()) return tr;
-    std::optional<std::vector<Row>> committed;
-    if (txn.is_active()) committed = session_swap_in(s, table);
-
     auto result = exec_insert_inner(s, table, col_list, std::move(all_values), on_conflict, returning);
 
-    if (committed) session_swap_out(s, table, std::move(*committed));
     if (result.is_ok()) {
         if (auto tr = fire_triggers(s, table, "AFTER", "INSERT"); tr.is_err()) return tr;
     }
@@ -454,7 +431,7 @@ StringResult Executor::exec_insert_inner(SharedDatabase& s, const std::string& t
 
         Row row;
         for (std::size_t i = 0; i < col_names.size(); i++) row[col_names[i]] = final_values[i].empty() ? EXECUTOR_NULL_VALUE : final_values[i];
-        row["_xmin"] = std::to_string(txn.current_txn_id());
+        row["_xmin"] = std::to_string(tagging_txn_id(s));
         row["_xmax"] = "0";
 
         for (auto& col : schema.columns) {
@@ -564,7 +541,7 @@ StringResult Executor::exec_insert_inner(SharedDatabase& s, const std::string& t
     }
 
     if (!txn.is_active()) {
-        maybe_auto_vacuum(s);
+        maybe_auto_vacuum(s, table);
         maybe_auto_analyze(s, table);
     }
     update_stat_rows(s, table, static_cast<std::int64_t>(inserted));

@@ -30,27 +30,8 @@ StringResult Executor::exec_update(SharedDatabase& s, std::string table, std::ve
         return StringResult::Err("View '" + strip_db_prefix(table) + "' is not updatable");
     }
 
-    std::optional<std::vector<std::pair<std::string, std::vector<Row>>>> committed_backups;
-    if (txn.is_active()) {
-        std::vector<std::pair<std::string, std::vector<Row>>> backups;
-        backups.emplace_back(table, session_swap_in(s, table));
-        std::vector<std::string> fk_tables;
-        for (auto& [tname, tschema] : s.catalog.tables) {
-            if (tname == table) continue;
-            bool refs = std::any_of(tschema.columns.begin(), tschema.columns.end(), [&](const ColumnDef& c) {
-                return c.foreign_key && c.foreign_key->ref_table == table && c.foreign_key->on_update != FkAction::Restrict;
-            });
-            if (refs) fk_tables.push_back(tname);
-        }
-        for (auto& t : fk_tables) backups.emplace_back(t, session_swap_in(s, t));
-        committed_backups = std::move(backups);
-    }
-
     if (auto tr = fire_triggers(s, table, "BEFORE", "UPDATE"); tr.is_err()) return tr;
     auto result = exec_update_inner(s, table, assignments, condition, returning);
-    if (committed_backups) {
-        for (auto& [tname, committed] : *committed_backups) session_swap_out(s, tname, std::move(committed));
-    }
     if (result.is_ok()) {
         if (auto tr = fire_triggers(s, table, "AFTER", "UPDATE"); tr.is_err()) return tr;
     }
@@ -91,13 +72,23 @@ StringResult Executor::exec_update_inner(SharedDatabase& s, const std::string& t
     auto tit0 = s.tables.find(table);
     if (tit0 == s.tables.end()) return StringResult::Err("Table '" + table + "' not found");
 
+    // MVCC: a fresh "right now" ctx (not this transaction's frozen RR/Serializable one,
+    // if any -- UPDATE must always match against the latest committed state + its own
+    // prior writes, exactly like the pre-MVCC session_tables swap already did, or it
+    // couldn't safely lock/version the row it's about to touch) -- and, critically,
+    // this is what stops an UPDATE from touching a PK another still-open transaction
+    // inserted but hasn't committed yet, now that session_tables no longer hides that
+    // row from other sessions between statements.
+    std::uint64_t my_id = tagging_txn_id(s);
+    SnapshotCtx write_ctx{my_id, s.txn_io->peek_next_id(), *s.active_txn_ids->lock()};
+
     // Cloned first (not iterated in place): matches_condition_with_subquery can invoke
     // exec_select, which for FROM-subqueries/views temporarily inserts/erases entries in
     // s.tables — holding a live reference into s.tables across that call would risk
     // iterator/reference invalidation on rehash.
     std::vector<Row> candidate_rows;
     for (auto& r : tit0->second) {
-        if (is_visible(r)) candidate_rows.push_back(r);
+        if (is_visible_for_read(r, write_ctx)) candidate_rows.push_back(r);
     }
 
     std::unordered_set<std::string> matching_pks;
@@ -116,9 +107,14 @@ StringResult Executor::exec_update_inner(SharedDatabase& s, const std::string& t
     };
     std::vector<UndoEntry> undo_entries;
     std::uint64_t cur_txn = txn.current_txn_id();
+    std::vector<Row> new_versions; // appended to `rows` only after this loop finishes
 
     for (auto& row : rows) {
         if (!matching_pks.count(match_key(row))) continue;
+        // A stale dead version sharing this PK with the live matched row (from an
+        // earlier UPDATE on the same key, still un-vacuumed) -- skip, only the live
+        // version should ever be re-updated.
+        if (!is_visible_for_read(row, write_ctx)) continue;
 
         auto pkit = row.find(pk_col);
         std::string row_pk = pkit != row.end() ? pkit->second : std::string();
@@ -139,6 +135,10 @@ StringResult Executor::exec_update_inner(SharedDatabase& s, const std::string& t
         nlohmann::json old_j = row;
         std::string old_json = old_j.dump();
 
+        // MVCC: UPDATE now creates a new physical version instead of mutating `row` in
+        // place -- `new_row` holds it; `row` (the OLD version) only gets its _xmax
+        // stamped below, once new_row has passed every validation check.
+        Row new_row = row;
         std::vector<std::pair<std::string, std::string>> new_vals;
         for (auto& [col, expr] : assignments) new_vals.emplace_back(col, eval_arith(row, expr));
 
@@ -176,25 +176,31 @@ StringResult Executor::exec_update_inner(SharedDatabase& s, const std::string& t
             }
         }
 
-        for (auto& [col, val] : new_vals) row[col] = val;
+        for (auto& [col, val] : new_vals) new_row[col] = val;
 
         if (auto* schema = s.catalog.get_table(table)) {
             for (auto& col : schema->columns) {
-                if (col.check_expr && !eval_check_expr(*col.check_expr, row)) {
+                if (col.check_expr && !eval_check_expr(*col.check_expr, new_row)) {
                     return StringResult::Err("CHECK constraint violated on column '" + col.name + "': " + *col.check_expr);
                 }
             }
             for (auto& check : schema->check_constraints) {
-                if (!eval_check_expr(check.expression, row)) {
+                if (!eval_check_expr(check.expression, new_row)) {
                     return StringResult::Err("CHECK constraint '" + check.name.value_or(check.expression) + "' violated");
                 }
             }
         }
 
-        nlohmann::json new_j = row;
+        new_row["_xmin"] = std::to_string(my_id);
+        new_row["_xmax"] = "0";
+        row["_xmax"] = std::to_string(my_id);
+
+        nlohmann::json new_j = new_row;
         undo_entries.push_back({key, old_json, new_j.dump()});
+        new_versions.push_back(std::move(new_row));
         count++;
     }
+    rows.insert(rows.end(), std::make_move_iterator(new_versions.begin()), std::make_move_iterator(new_versions.end()));
 
     for (auto& u : undo_entries) txn.log_update(table, u.key, u.old_json, u.new_json);
 
@@ -334,7 +340,7 @@ StringResult Executor::exec_update_inner(SharedDatabase& s, const std::string& t
         std::vector<Row> rc = s.tables.at(table);
         s.buffer_pool.write_page(table, rc);
         s.buffer_pool.flush_page(table, s.disk);
-        maybe_auto_vacuum(s);
+        maybe_auto_vacuum(s, table);
         maybe_auto_analyze(s, table);
     }
     maybe_auto_checkpoint(s);

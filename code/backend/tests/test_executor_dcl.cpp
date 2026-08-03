@@ -228,10 +228,13 @@ TEST_CASE("VACUUM removes dead (deleted) rows and reclaims them", "[executor][dc
     REQUIRE(ex.execute_sql("INSERT INTO t VALUES (2)").is_ok());
 
     // Mark row 1 dead (_xmax != "0") the same way MVCC delete does, without going
-    // through DELETE (which already physically removes non-transactional rows).
+    // through DELETE (which already physically removes non-transactional rows). Uses a
+    // real, already-issued txn id (not a made-up sentinel like 999) -- VACUUM's GC
+    // horizon (Stage 2) only purges rows whose deleting txn is older than any currently
+    // open snapshot, so a future-looking fake id would make this row look not-yet-dead.
     {
         auto sw = ex.get_shared()->write();
-        sw->tables.at("company.t")[0]["_xmax"] = "999";
+        sw->tables.at("company.t")[0]["_xmax"] = "1";
     }
 
     auto r = ex.execute_sql("VACUUM t");
@@ -263,7 +266,8 @@ TEST_CASE("VACUUM rebuilds the PK index using the real PK column, not an arbitra
         auto& rows = sw->tables.at("company.t");
         auto it = std::find_if(rows.begin(), rows.end(), [](const Row& r) { return r.at("id") == "2"; });
         REQUIRE(it != rows.end());
-        (*it)["_xmax"] = "999";
+        // Real, already-issued txn id -- see the comment in the VACUUM test above.
+        (*it)["_xmax"] = "1";
     }
 
     auto r = ex.execute_sql("VACUUM t");

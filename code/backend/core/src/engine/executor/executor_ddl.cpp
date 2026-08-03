@@ -10,14 +10,68 @@
 #include <algorithm>
 #include <cctype>
 #include <charconv>
+#include <limits>
 
 #include "engine/parser/parser.hpp"
 
 namespace engine {
 
+namespace {
+std::uint64_t parse_txn_id(const Row& row, const char* col) {
+    auto it = row.find(col);
+    if (it == row.end()) return 0;
+    try {
+        return std::stoull(it->second);
+    } catch (...) {
+        return 0;
+    }
+}
+} // namespace
+
 bool Executor::is_visible(const Row& row) {
     auto it = row.find("_xmax");
     return it == row.end() || it->second == "0";
+}
+
+bool Executor::is_visible_for_read(const Row& row, const SnapshotCtx& ctx) {
+    auto committed_as_of = [&](std::uint64_t id) { return id == 0 || (id < ctx.cutoff && !ctx.in_progress.count(id)); };
+
+    std::uint64_t xmin = parse_txn_id(row, "_xmin");
+    if (xmin != ctx.self_txn_id && !committed_as_of(xmin)) return false; // didn't exist yet, to this reader
+
+    auto xmax_it = row.find("_xmax");
+    if (xmax_it == row.end() || xmax_it->second == "0") return true;
+    std::uint64_t xmax = parse_txn_id(row, "_xmax");
+    if (xmax == ctx.self_txn_id) return false;       // deleted/superseded by this same transaction
+    if (committed_as_of(xmax)) return false;          // deleted by a transaction already committed as of this snapshot
+    return true;                                       // deleted by a transaction not (yet) committed as of this snapshot
+}
+
+SnapshotCtx Executor::current_read_ctx(SharedDatabase& s) const {
+    if (txn.isolation_level() == IsolationLevel::ReadUncommitted) {
+        return SnapshotCtx{txn.current_txn_id(), std::numeric_limits<std::uint64_t>::max(), {}};
+    }
+    if (txn.is_active()) {
+        if (auto frozen = txn.frozen_ctx()) return *frozen;
+    }
+    return SnapshotCtx{txn.current_txn_id(), s.txn_io->peek_next_id(), *s.active_txn_ids->lock()};
+}
+
+std::uint64_t Executor::tagging_txn_id(SharedDatabase& s) const {
+    return txn.is_active() ? txn.current_txn_id() : s.txn_io->next_id();
+}
+
+std::uint64_t Executor::oldest_active_txn_id(SharedDatabase& s) {
+    auto active = s.active_txn_ids->lock();
+    if (active->empty()) return s.txn_io->peek_next_id();
+    return *std::min_element(active->begin(), active->end());
+}
+
+bool Executor::is_vacuumable(const Row& row, std::uint64_t oldest_active_txn_id) {
+    auto it = row.find("_xmax");
+    if (it == row.end() || it->second == "0") return false; // still live
+    std::uint64_t xmax = parse_txn_id(row, "_xmax");
+    return xmax != 0 && xmax < oldest_active_txn_id;
 }
 
 namespace {
@@ -129,6 +183,19 @@ StringResult Executor::exec_create(SharedDatabase& s, std::string name, std::vec
 
     s.tables[name] = {};
     s.indexes[name] = BPlusTree();
+    s.table_locks[name] = std::make_shared<std::shared_mutex>();
+    // Stage 4: pre-populate every other table-keyed map too. Under per-table locking, a
+    // DML statement on this table only ever holds THIS table's own lock -- if its first
+    // touch to one of these maps used operator[] to insert a brand-new key, that could
+    // race with a concurrent DML statement on a DIFFERENT table doing the same to the
+    // same shared unordered_map, and an insert-triggered rehash would invalidate a
+    // reference/iterator the other thread is mid-use of. Creating the entry now, under
+    // the structural exclusive lock DDL always holds, means later DML only ever finds an
+    // existing key (safe to access concurrently across different tables).
+    s.table_stats[name] = TableStats{};
+    s.dml_since_vacuum[name] = 0;
+    s.dml_since_analyze[name] = 0;
+    s.row_pk_pos[name] = {};
     s.disk.save_schema(name, *s.catalog.get_table(name));
     return StringResult::Ok("Table '" + name + "' created.");
 }
@@ -139,6 +206,10 @@ StringResult Executor::exec_drop(SharedDatabase& s, const std::string& name, boo
     if (res.is_err()) return StringResult::Err(res.error());
     s.tables.erase(name);
     s.indexes.erase(name);
+    s.table_locks.erase(name);
+    s.table_stats.erase(name);
+    s.dml_since_vacuum.erase(name);
+    s.dml_since_analyze.erase(name);
     s.row_pk_pos.erase(name);
     s.buffer_pool.invalidate(name);
     s.disk.delete_table(name);
@@ -317,6 +388,31 @@ StringResult Executor::exec_alter(SharedDatabase& s, const std::string& table, A
             s.indexes.erase(it);
             s.indexes.insert({v->to, std::move(tree)});
         }
+        if (auto it = s.table_locks.find(table); it != s.table_locks.end()) {
+            auto lock = std::move(it->second);
+            s.table_locks.erase(it);
+            s.table_locks.insert({v->to, std::move(lock)});
+        }
+        if (auto it = s.table_stats.find(table); it != s.table_stats.end()) {
+            auto st = std::move(it->second);
+            s.table_stats.erase(it);
+            s.table_stats.insert({v->to, std::move(st)});
+        }
+        if (auto it = s.dml_since_vacuum.find(table); it != s.dml_since_vacuum.end()) {
+            auto v2 = it->second;
+            s.dml_since_vacuum.erase(it);
+            s.dml_since_vacuum.insert({v->to, v2});
+        }
+        if (auto it = s.dml_since_analyze.find(table); it != s.dml_since_analyze.end()) {
+            auto v2 = it->second;
+            s.dml_since_analyze.erase(it);
+            s.dml_since_analyze.insert({v->to, v2});
+        }
+        if (auto it = s.row_pk_pos.find(table); it != s.row_pk_pos.end()) {
+            auto pm = std::move(it->second);
+            s.row_pk_pos.erase(it);
+            s.row_pk_pos.insert({v->to, std::move(pm)});
+        }
         for (auto& [name, meta] : s.index_meta) {
             if (meta.first == table) meta.first = v->to;
         }
@@ -456,6 +552,11 @@ StringResult Executor::exec_drop_database(SharedDatabase& s, const std::string& 
         s.catalog.tables.erase(t);
         s.tables.erase(t);
         s.indexes.erase(t);
+        s.table_locks.erase(t);
+        s.table_stats.erase(t);
+        s.dml_since_vacuum.erase(t);
+        s.dml_since_analyze.erase(t);
+        s.row_pk_pos.erase(t);
         s.buffer_pool.invalidate(t);
         s.disk.delete_table(t);
     }

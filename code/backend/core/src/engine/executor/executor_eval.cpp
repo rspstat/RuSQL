@@ -478,7 +478,13 @@ std::pair<std::vector<std::string>, std::vector<Row>> Executor::parse_table_outp
             } else {
                 Row row;
                 for (std::size_t i = 0; i < col_names.size(); i++) row[col_names[i]] = i < cells.size() ? cells[i] : "";
-                row["_xmin"] = "1";
+                // MVCC: "0" is the permanent "always visible" sentinel. These rows are
+                // reconstructed from another query's already-materialized text output
+                // (CTE/subquery/UNION temp tables, INSERT-SELECT source rows) -- ephemeral,
+                // single-statement-lifetime data with no real transaction identity of its
+                // own, so a real or fake nonzero txn id here would make is_visible_for_read
+                // spuriously reject them depending on the current global txn-id counter.
+                row["_xmin"] = "0";
                 row["_xmax"] = "0";
                 rows.push_back(std::move(row));
             }

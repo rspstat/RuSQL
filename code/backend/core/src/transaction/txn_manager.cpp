@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <stdexcept>
 
 #include "engine/storage/atomic_write.hpp"
@@ -24,6 +25,31 @@ std::optional<std::uint64_t> read_u64_le(const std::vector<std::uint8_t>& buf, s
     for (int i = 0; i < 8; i++) v |= static_cast<std::uint64_t>(buf[pos + static_cast<std::size_t>(i)]) << (8 * i);
     return v;
 }
+std::uint64_t parse_txn_id(const Row& row, const char* col) {
+    auto it = row.find(col);
+    if (it == row.end()) return 0;
+    try {
+        return std::stoull(it->second);
+    } catch (...) {
+        return 0;
+    }
+}
+
+// Mirrors Executor::is_visible_for_read (executor_ddl.cpp) exactly -- duplicated here
+// rather than shared, since this transaction-module file has no dependency on the engine
+// module and Row/SnapshotCtx are the only pieces it actually needs.
+bool visible_under(const Row& row, const SnapshotCtx& ctx) {
+    auto committed_as_of = [&](std::uint64_t id) { return id == 0 || (id < ctx.cutoff && !ctx.in_progress.count(id)); };
+    std::uint64_t xmin = parse_txn_id(row, "_xmin");
+    if (xmin != ctx.self_txn_id && !committed_as_of(xmin)) return false;
+    auto xmax_it = row.find("_xmax");
+    if (xmax_it == row.end() || xmax_it->second == "0") return true;
+    std::uint64_t xmax = parse_txn_id(row, "_xmax");
+    if (xmax == ctx.self_txn_id) return false;
+    if (committed_as_of(xmax)) return false;
+    return true;
+}
+
 std::optional<std::uint32_t> read_u32_le(const std::vector<std::uint8_t>& buf, std::size_t pos) {
     if (pos + 4 > buf.size()) return std::nullopt;
     std::uint32_t v = 0;
@@ -197,37 +223,60 @@ void TransactionManager::set_isolation_level(IsolationLevel level) {
     isolation_level_ = level;
 }
 
-Result<std::uint64_t, std::string> TransactionManager::begin_with_snapshot(
-    const std::unordered_map<std::string, std::vector<Row>>& tables) {
+Result<std::uint64_t, std::string> TransactionManager::begin_with_snapshot(const std::unordered_set<std::uint64_t>& active_txn_ids) {
     if (active_) return Result<std::uint64_t, std::string>::Err("Transaction already active. COMMIT or ROLLBACK first.");
     txn_id_ = io_->next_id();
     active_ = true;
     undo_log_.clear();
+    read_set_.clear();
 
     if (isolation_level_ == IsolationLevel::RepeatableRead || isolation_level_ == IsolationLevel::Serializable) {
-        snapshot_ = tables;
+        frozen_ctx_ = SnapshotCtx{txn_id_, io_->peek_next_id(), active_txn_ids};
     } else {
-        snapshot_ = std::nullopt;
+        frozen_ctx_ = std::nullopt;
     }
     return Result<std::uint64_t, std::string>::Ok(txn_id_);
 }
 
-const std::vector<Row>* TransactionManager::get_snapshot_table(const std::string& table) const {
-    if (isolation_level_ != IsolationLevel::RepeatableRead && isolation_level_ != IsolationLevel::Serializable) return nullptr;
-    if (!snapshot_) return nullptr;
-    auto it = snapshot_->find(table);
-    return it != snapshot_->end() ? &it->second : nullptr;
+void TransactionManager::record_read(const std::string& table, const std::string& pk_col, const std::string& key) {
+    if (!active_ || isolation_level_ != IsolationLevel::Serializable) return;
+    read_set_.insert(table + '\x00' + pk_col + '\x00' + key);
 }
 
 Result<void, std::string> TransactionManager::validate_serializable(
-    const std::unordered_map<std::string, std::vector<Row>>& live_tables) const {
+    const std::unordered_map<std::string, std::vector<Row>>& live_tables,
+    const std::unordered_set<std::uint64_t>& active_txn_ids_now) const {
     if (isolation_level_ != IsolationLevel::Serializable) return Result<void, std::string>::Ok();
-    if (snapshot_) {
-        for (auto& [table, snap_rows] : *snapshot_) {
-            auto it = live_tables.find(table);
-            if (it != live_tables.end() && it->second.size() != snap_rows.size()) {
-                return Result<void, std::string>::Err(
-                    "Serialization failure: table '" + table + "' was modified since transaction started. ROLLBACK required.");
+    if (!frozen_ctx_) return Result<void, std::string>::Ok();
+
+    // "Right now" ctx, for the *committed* side of the comparison: an xmin/xmax id not in
+    // active_txn_ids_now has definitely terminated by now (Stage 2's apply_rollback
+    // physically erases/reverts a rolled-back transaction's own marks, so mere presence
+    // means it committed) -- cutoff is a generous upper bound, id membership in
+    // active_txn_ids_now is what actually matters here.
+    SnapshotCtx now_ctx{txn_id_, std::numeric_limits<std::uint64_t>::max(), active_txn_ids_now};
+
+    for (auto& encoded : read_set_) {
+        auto sep1 = encoded.find('\x00');
+        auto sep2 = encoded.find('\x00', sep1 + 1);
+        std::string table = encoded.substr(0, sep1);
+        std::string pk_col = encoded.substr(sep1 + 1, sep2 - sep1 - 1);
+        std::string key = encoded.substr(sep2 + 1);
+
+        auto it = live_tables.find(table);
+        if (it == live_tables.end()) continue;
+
+        for (auto& row : it->second) {
+            auto pit = row.find(pk_col);
+            if (pit == row.end() || pit->second != key) continue;
+            // A physical version of a row this transaction read whose visibility differs
+            // between what was frozen at BEGIN and what's true right now (excluding
+            // still-in-flight writers, which aren't a conflict yet) means some other
+            // transaction wrote (inserted/updated/deleted) this exact key after this
+            // transaction's snapshot began, and that write has since committed.
+            if (visible_under(row, *frozen_ctx_) != visible_under(row, now_ctx)) {
+                return Result<void, std::string>::Err("Serialization failure: table '" + table + "' row '" + key +
+                                                        "' was modified by another transaction since this one started. ROLLBACK required.");
             }
         }
     }
@@ -257,7 +306,8 @@ Result<void, std::string> TransactionManager::commit() {
     wal_.remove_txn(txn_id_);
     undo_log_.clear();
     undo_log_file_.remove_txn(txn_id_);
-    snapshot_ = std::nullopt;
+    frozen_ctx_ = std::nullopt;
+    read_set_.clear();
     savepoints_.clear();
     active_ = false;
     return Result<void, std::string>::Ok();
@@ -273,7 +323,8 @@ void TransactionManager::commit_finalize() {
     wal_.remove_txn(txn_id_);
     undo_log_.clear();
     undo_log_file_.remove_txn(txn_id_);
-    snapshot_ = std::nullopt;
+    frozen_ctx_ = std::nullopt;
+    read_set_.clear();
     savepoints_.clear();
     active_ = false;
 }
@@ -284,7 +335,8 @@ std::vector<UndoEntry> TransactionManager::rollback() {
     std::vector<UndoEntry> entries(undo_log_.rbegin(), undo_log_.rend());
     undo_log_.clear();
     undo_log_file_.remove_txn(txn_id_);
-    snapshot_ = std::nullopt;
+    frozen_ctx_ = std::nullopt;
+    read_set_.clear();
     savepoints_.clear();
     active_ = false;
     return entries;
@@ -297,7 +349,8 @@ Result<std::vector<UndoEntry>, std::string> TransactionManager::abort() {
     std::vector<UndoEntry> entries(undo_log_.rbegin(), undo_log_.rend());
     undo_log_.clear();
     undo_log_file_.remove_txn(txn_id_);
-    snapshot_ = std::nullopt;
+    frozen_ctx_ = std::nullopt;
+    read_set_.clear();
     savepoints_.clear();
     active_ = false;
     return Result<std::vector<UndoEntry>, std::string>::Ok(entries);

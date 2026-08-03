@@ -70,6 +70,16 @@ std::uint64_t TxnIoShared::next_id() {
     return next_txn_id_++;
 }
 
+std::uint64_t TxnIoShared::peek_next_id() {
+    std::lock_guard<std::mutex> g(counter_mutex_);
+    return next_txn_id_;
+}
+
+void TxnIoShared::ensure_next_id_at_least(std::uint64_t min_next) {
+    std::lock_guard<std::mutex> g(counter_mutex_);
+    if (min_next > next_txn_id_) next_txn_id_ = min_next;
+}
+
 WalManager::WalManager(const std::string& dir, std::shared_ptr<TxnIoShared> io)
     : path_(dir + "/rusql.wal"), io_(std::move(io)) {}
 

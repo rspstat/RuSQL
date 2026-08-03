@@ -8,6 +8,7 @@
 #include <optional>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "engine/parser/ast.hpp"
@@ -16,6 +17,17 @@
 #include "engine/transaction/wal.hpp"
 
 namespace engine {
+
+// A reading transaction's MVCC visibility context: which other transaction ids count as
+// "already committed" from this reader's point of view. `cutoff` is an id ceiling (any
+// id >= cutoff didn't exist yet when this ctx was captured); `in_progress` is the subset
+// of ids below that ceiling that were still open at capture time -- both together answer
+// "was txn `id` committed as of this snapshot?" without needing to consult anything else.
+struct SnapshotCtx {
+    std::uint64_t self_txn_id = 0;
+    std::uint64_t cutoff = 0;
+    std::unordered_set<std::uint64_t> in_progress;
+};
 
 struct UndoEntry {
     std::uint64_t txn_id; // 이 엔트리를 발생시킨 트랜잭션의 전역 유일 ID.
@@ -60,9 +72,20 @@ public:
     void set_isolation_level(IsolationLevel level);
     IsolationLevel isolation_level() const { return isolation_level_; }
 
-    Result<std::uint64_t, std::string> begin_with_snapshot(const std::unordered_map<std::string, std::vector<Row>>& tables);
-    const std::vector<Row>* get_snapshot_table(const std::string& table) const;
-    Result<void, std::string> validate_serializable(const std::unordered_map<std::string, std::vector<Row>>& live_tables) const;
+    Result<std::uint64_t, std::string> begin_with_snapshot(const std::unordered_set<std::uint64_t>& active_txn_ids = {});
+    // Populated by begin_with_snapshot for RepeatableRead/Serializable only -- the
+    // read-visibility ctx frozen at BEGIN time, reused for every statement in the
+    // transaction instead of recomputing it per-statement (which is what ReadCommitted/
+    // autocommit do instead, via a fresh capture -- see Executor::current_read_ctx).
+    std::optional<SnapshotCtx> frozen_ctx() const { return frozen_ctx_; }
+    // Stage 3: records that a Serializable transaction observed the row identified by
+    // (table, pk_col, key) -- validate_serializable checks at COMMIT whether any of these
+    // specific rows' visibility has since changed due to another transaction's write that
+    // has now committed, replacing the old row-count-only check (which missed same-count-
+    // different-content interleavings, e.g. one row deleted and a different one inserted).
+    void record_read(const std::string& table, const std::string& pk_col, const std::string& key);
+    Result<void, std::string> validate_serializable(const std::unordered_map<std::string, std::vector<Row>>& live_tables,
+                                                      const std::unordered_set<std::uint64_t>& active_txn_ids_now) const;
 
     Result<std::uint64_t, std::string> begin();
     std::vector<std::string> dirty_tables() const;
@@ -102,7 +125,10 @@ private:
     WalManager wal_;
     UndoLogFile undo_log_file_;
     IsolationLevel isolation_level_ = IsolationLevel::ReadCommitted;
-    std::optional<std::unordered_map<std::string, std::vector<Row>>> snapshot_;
+    std::optional<SnapshotCtx> frozen_ctx_;
+    // Stage 3: (table, pk_col, key) triples read during a Serializable transaction,
+    // encoded as "table\x00pk_col\x00key". Only populated/consulted for Serializable.
+    std::unordered_set<std::string> read_set_;
     std::vector<std::pair<std::string, std::size_t>> savepoints_;
 };
 

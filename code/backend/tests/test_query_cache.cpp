@@ -17,10 +17,10 @@ struct TempDataDir {
 
 TEST_CASE("QueryResultCache basic put/get", "[query_cache]") {
     QueryResultCache cache;
-    REQUIRE(cache.get("k1") == nullptr);
+    REQUIRE_FALSE(cache.get("k1").has_value());
     cache.put("k1", "result1", {"employee"});
-    auto* v = cache.get("k1");
-    REQUIRE(v != nullptr);
+    auto v = cache.get("k1");
+    REQUIRE(v.has_value());
     REQUIRE(*v == "result1");
     REQUIRE(cache.len() == 1);
 }
@@ -39,9 +39,9 @@ TEST_CASE("QueryResultCache invalidate_table removes only matching entries", "[q
     cache.put("k3", "r3", {"employee", "department"});
 
     cache.invalidate_table("employee");
-    REQUIRE(cache.get("k1") == nullptr);
-    REQUIRE(cache.get("k2") != nullptr);
-    REQUIRE(cache.get("k3") == nullptr);
+    REQUIRE_FALSE(cache.get("k1").has_value());
+    REQUIRE(cache.get("k2").has_value());
+    REQUIRE_FALSE(cache.get("k3").has_value());
     REQUIRE(cache.len() == 1);
 }
 
@@ -52,9 +52,9 @@ TEST_CASE("QueryResultCache evicts oldest entry when over capacity", "[query_cac
     cache.put("k3", "r3", {"t"}); // should evict k1 (oldest)
 
     REQUIRE(cache.len() == 2);
-    REQUIRE(cache.get("k1") == nullptr);
-    REQUIRE(cache.get("k2") != nullptr);
-    REQUIRE(cache.get("k3") != nullptr);
+    REQUIRE_FALSE(cache.get("k1").has_value());
+    REQUIRE(cache.get("k2").has_value());
+    REQUIRE(cache.get("k3").has_value());
 }
 
 TEST_CASE("QueryResultCache clear resets everything", "[query_cache]") {
@@ -62,7 +62,7 @@ TEST_CASE("QueryResultCache clear resets everything", "[query_cache]") {
     cache.put("k1", "r1", {"t"});
     cache.clear();
     REQUIRE(cache.len() == 0);
-    REQUIRE(cache.get("k1") == nullptr);
+    REQUIRE_FALSE(cache.get("k1").has_value());
 }
 
 TEST_CASE("execute_sql never caches a query calling a non-deterministic function", "[query_cache][executor]") {

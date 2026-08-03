@@ -11,6 +11,7 @@
 #include <cstdint>
 #include <memory>
 #include <optional>
+#include <shared_mutex>
 #include <string>
 #include <tuple>
 #include <type_traits>
@@ -125,7 +126,10 @@ struct SharedDatabase {
     std::unordered_map<std::string, TableStats> table_stats;
     std::unordered_map<std::string, ProcedureDef> procedures;
     std::unordered_map<std::string, TriggerDef> triggers;
-    std::size_t dml_since_vacuum = 0;
+    // Stage 4: per-table (not global) so a table's auto-vacuum threshold is driven only
+    // by DML on that table, and firing it only ever needs that one table's own lock
+    // (mirrors dml_since_analyze, which was already correctly scoped this way).
+    std::unordered_map<std::string, std::size_t> dml_since_vacuum;
     std::unordered_map<std::string, std::size_t> dml_since_analyze;
     std::unordered_map<std::string, UserFunctionDef> user_functions;
     // SHOW PROCESS LIST state, guarded by its own lock (matches Rust's separate
@@ -137,6 +141,17 @@ struct SharedDatabase {
     QueryResultCache query_cache;
     std::shared_ptr<TxnIoShared> txn_io;
     std::shared_ptr<Mutex<std::unordered_set<std::uint64_t>>> active_txn_ids;
+    // Stage 4 (table-level concurrency): one shared_mutex per real, catalog-registered
+    // table, keyed the same way as s.tables. Populated on CREATE TABLE (and at startup
+    // for every table loaded from disk) and erased on DROP TABLE -- entries are only ever
+    // added/removed while the outer RwLock<SharedDatabase> is held exclusively (DDL is
+    // always "structural"), so looking up an *existing* entry while the outer lock is
+    // only held shared is safe (no concurrent insert/erase can be racing that lookup).
+    // Ephemeral tables (CTE/FROM-subquery-alias/view-materialization keys transiently
+    // inserted into s.tables) deliberately have NO entry here -- statements that create
+    // them always fall back to holding the outer lock exclusively instead of using this
+    // map at all (see Executor::execute()'s dispatch).
+    std::unordered_map<std::string, std::shared_ptr<std::shared_mutex>> table_locks;
 
     // mysql_native_password challenge-response verification (nonce is a 20-byte challenge)
     // -- used by both the MySQL wire protocol listener and the native TCP protocol's own
@@ -153,9 +168,6 @@ public:
     std::shared_ptr<RwLock<SharedDatabase>> shared;
     TransactionManager txn;
     std::string current_db;
-    // Session-local table buffer holding in-flight DML changes during a transaction;
-    // applied to s.tables on COMMIT, discarded on ROLLBACK.
-    std::unordered_map<std::string, std::vector<Row>> session_tables;
     std::unordered_map<std::string, std::string> proc_vars;
     std::unordered_map<std::string, std::string> user_vars;
     std::unordered_map<std::string, std::string> prepared_stmts;
@@ -214,8 +226,38 @@ private:
     std::string display_name(const std::string& key) const;
     static std::string qualify_static(const std::string& name, const std::string& current_db);
     static std::vector<std::string> select_tables(const Statement& stmt, const std::string& current_db);
-    // MVCC row visibility: a row is visible unless it's been deleted (_xmax != "0").
+    // MVCC row visibility: a row is visible unless it's been deleted (_xmax != "0"). This
+    // permissive check ignores the reading transaction's own snapshot entirely -- it's
+    // what PK/UNIQUE/FK constraint-checking call sites must keep using (two sessions
+    // must each see the other's uncommitted same-PK insert as "live" for duplicate
+    // detection to work at all, since writes stay fully serialized under the exclusive
+    // per-statement lock -- see is_visible_for_read's doc comment for the read-path
+    // counterpart).
     static bool is_visible(const Row& row);
+    // Strict MVCC visibility for read paths that must respect a specific reading
+    // transaction's snapshot (index-based fast-path SELECTs in particular, and every
+    // other read of s.tables -- without this a concurrent read could see another
+    // session's still-open transaction's uncommitted INSERT/UPDATE/DELETE).
+    static bool is_visible_for_read(const Row& row, const SnapshotCtx& ctx);
+    // Builds the SnapshotCtx for the current statement's reads: the frozen BEGIN-time
+    // ctx for an open RepeatableRead/Serializable transaction, or a fresh "right now"
+    // capture otherwise (ReadCommitted, autocommit, and ReadUncommitted -- which always
+    // treats everything as committed regardless of timing, i.e. a genuine dirty read).
+    SnapshotCtx current_read_ctx(SharedDatabase& s) const;
+    // Real transaction id to tag _xmin/_xmax with: the active explicit transaction's id,
+    // or a freshly-allocated one-off id for an autocommit statement (never 0 -- 0 is
+    // reserved as the "pre-MVCC legacy row, always visible" sentinel).
+    std::uint64_t tagging_txn_id(SharedDatabase& s) const;
+    // GC horizon: the smallest txn id any currently open transaction's frozen snapshot
+    // could still need (min of active_txn_ids, or peek_next_id() if none are open --
+    // matching "nothing has an open snapshot, anything already dead is fair game").
+    static std::uint64_t oldest_active_txn_id(SharedDatabase& s);
+    // True iff a dead row (_xmax != "0") can be physically purged: its deletion must have
+    // committed strictly before the oldest currently open transaction's snapshot could
+    // have started, i.e. _xmax < oldest_active_txn_id(s) -- replaces the old permissive
+    // !is_visible(r) VACUUM predicate, which purged a row the instant _xmax was set with
+    // no regard for any other session's still-open snapshot.
+    static bool is_vacuumable(const Row& row, std::uint64_t oldest_active_txn_id);
     // Concurrency: true iff executing `stmt` is guaranteed to never mutate any
     // SharedDatabase field, so it's safe to run under shared->read() concurrently with
     // other readers. See executor_core.cpp for the exhaustive classification and why it
@@ -223,6 +265,39 @@ private:
 public:
     static bool is_pure_read_only(const Statement& stmt);
 private:
+
+    // Stage 4 (table-level concurrency): holds the outer RwLock<SharedDatabase>'s shared
+    // "structural" lock (protects the SHAPE of every table-keyed map -- e.g. against a
+    // concurrent CREATE/DROP TABLE resizing/rehashing them while this statement runs) plus
+    // a specific, sorted set of per-table locks, all acquired in the SAME mode (shared for
+    // a statement that only reads, exclusive for anything that writes -- this stage
+    // doesn't mix read/write granularity within one statement's lock set). Destructor
+    // order releases the table locks first, then the structural shared lock.
+    struct TableLockGuard {
+        RwLock<SharedDatabase>::ReadGuard structural;
+        std::vector<std::shared_lock<std::shared_mutex>> shared_locks;
+        std::vector<std::unique_lock<std::shared_mutex>> exclusive_locks;
+    };
+    // Acquires `tables` (already sorted+deduplicated real, catalog-registered table
+    // names) in the given mode, under the given already-acquired structural shared guard
+    // (moved in -- see the .cpp definition for why this must not acquire its own). Every
+    // name must already have an entry in s.table_locks (true for any real table,
+    // populated at CREATE TABLE time) -- a missing entry is a bug in the caller's
+    // table-set computation, not a runtime condition to handle gracefully.
+    TableLockGuard acquire_table_locks(RwLock<SharedDatabase>::ReadGuard structural, const std::vector<std::string>& tables, bool exclusive);
+    // Stage 4: computes the exact set of real tables `stmt` will touch (including FK
+    // existence-check parents for INSERT and FK cascade children for UPDATE/DELETE --
+    // both statically known from the catalog, see the Stage 4 plan's audit), or nullopt if
+    // `stmt` needs the full structural exclusive lock instead. Only handles
+    // Insert/InsertSelect/Select/Update/Delete/MultiUpdate/MultiDelete/Merge -- every other
+    // Statement variant returns nullopt unconditionally, falling through to today's
+    // unchanged is_pure_read_only()-based dispatch in execute(). Falls back (nullopt)
+    // whenever `stmt` involves a FROM-derived subquery, a view reference, or a table with
+    // a trigger that would fire for this statement's DML type -- none of those are safe to
+    // pre-lock a fixed table set for (see the plan's audit findings). Re-audit this
+    // whenever a new Statement variant or execute_with_s dispatch case is added, same as
+    // is_pure_read_only().
+    std::optional<std::vector<std::string>> table_lock_set_for(const SharedDatabase& s, const Statement& stmt) const;
 
     StringResult execute_with_s(SharedDatabase& s, Statement stmt);
 
@@ -278,10 +353,8 @@ private:
 
     // ── Phase 8b: shared DML infrastructure ─────────────────────────────
     void maybe_auto_checkpoint(SharedDatabase& s);
-    static void maybe_auto_vacuum(SharedDatabase& s);
+    static void maybe_auto_vacuum(SharedDatabase& s, const std::string& table);
     void maybe_auto_analyze(SharedDatabase& s, const std::string& table);
-    std::vector<Row> session_swap_in(SharedDatabase& s, const std::string& table);
-    void session_swap_out(SharedDatabase& s, const std::string& table, std::vector<Row> committed);
     // Returns Err only if trigger recursion exceeds the depth cap; a failing trigger-body
     // statement is otherwise ignored (matches the pre-existing best-effort behavior).
     StringResult fire_triggers(SharedDatabase& s, const std::string& table, const std::string& timing, const std::string& event);

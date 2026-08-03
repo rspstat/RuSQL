@@ -14,10 +14,19 @@ struct TempDataDir {
     ~TempDataDir() { fs::remove_all(path); }
 };
 
+// MVCC: filters to live rows only (_xmax == "0") -- UPDATE now appends a new version and
+// marks the old one dead instead of mutating in place, so a raw unfiltered read would
+// return both the current row and every superseded version still awaiting VACUUM.
 std::vector<Row> table_rows(Executor& ex, const std::string& qualified_table) {
     auto s = ex.get_shared()->read();
     auto it = s->tables.find(qualified_table);
-    return it != s->tables.end() ? it->second : std::vector<Row>{};
+    if (it == s->tables.end()) return {};
+    std::vector<Row> live;
+    for (auto& r : it->second) {
+        auto xit = r.find("_xmax");
+        if (xit == r.end() || xit->second == "0") live.push_back(r);
+    }
+    return live;
 }
 } // namespace
 

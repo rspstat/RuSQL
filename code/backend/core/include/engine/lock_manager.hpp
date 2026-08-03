@@ -5,6 +5,7 @@
 
 #include <cstdint>
 #include <map>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <tuple>
@@ -32,20 +33,25 @@ struct LockResult {
     static LockResult deadlock(std::uint64_t h) { return LockResult{Kind::Deadlock, h}; }
 };
 
-// Not internally synchronized — row_locks_/wait_for_/deadlock_history_ are plain
-// containers with no mutex of their own. This is safe ONLY because every mutating touch
-// (acquire/acquire_shared/release/insert_lock, reached from DML, SELECT ... FOR UPDATE/
-// FOR SHARE, and COMMIT/ROLLBACK) is classified write-required by
-// Executor::is_pure_read_only() and therefore always runs under SharedDatabase's
-// exclusive shared->write() lock, fully serialized against every other statement
-// including concurrent readers. The only read-classified access (SHOW LOCKS, via
-// lock_rows()/wait_for_rows()/deadlock_history()) never mutates. If FOR UPDATE/FOR SHARE
-// or any DML/transaction-control statement is ever reclassified as read-only, this class
-// needs its own mutex added first — don't assume that invariant holds without re-checking
-// is_pure_read_only().
+// Stage 4 (table-level concurrency): guarded by its own mutex_ so that two sessions
+// operating on different tables (each holding only that table's own lock, not a single
+// whole-database exclusive lock anymore) can safely call acquire/acquire_shared/release
+// concurrently. Semantics are unchanged from before -- still "detect a conflict/deadlock
+// and fail immediately," never a real blocking wait; that would be row-level concurrency
+// (explicitly out of scope for this stage). All public methods take mutex_ internally;
+// deadlock_history()/is_empty() were changed to return by value (a copy) instead of by
+// reference, since a reference into row_locks_/deadlock_history_ would no longer be safe
+// to read after the method returns and the lock is released.
 class LockManager {
 public:
     LockManager() = default;
+    LockManager(const LockManager&) = delete;
+    LockManager& operator=(const LockManager&) = delete;
+    // mutex_ isn't movable -- manually moves the other members, leaving a fresh mutex_ in
+    // the moved-to object (same pattern as BufferPool, which SharedDatabase already relies
+    // on for its own move-construction).
+    LockManager(LockManager&& other) noexcept;
+    LockManager& operator=(LockManager&& other) noexcept;
 
     LockResult acquire(const std::string& table, const std::string& pk, std::uint64_t txn_id);
     LockResult acquire_shared(const std::string& table, const std::string& pk, std::uint64_t txn_id);
@@ -55,16 +61,18 @@ public:
 
     std::vector<std::tuple<std::string, std::string, std::uint64_t>> lock_rows() const;
     std::vector<std::pair<std::uint64_t, std::uint64_t>> wait_for_rows() const;
-    const std::vector<std::pair<std::uint64_t, std::uint64_t>>& deadlock_history() const { return deadlock_history_; }
-    bool is_empty() const { return row_locks_.empty(); }
+    std::vector<std::pair<std::uint64_t, std::uint64_t>> deadlock_history() const;
+    bool is_empty() const;
 
 private:
+    mutable std::mutex mutex_;
     // (table, pk) key — a std::map (ordered) avoids needing a custom hash for
     // pair<string,string>; row lock tables are small so this has no practical cost.
     std::map<std::pair<std::string, std::string>, LockEntry> row_locks_;
     std::unordered_map<std::uint64_t, std::uint64_t> wait_for_;
     std::vector<std::pair<std::uint64_t, std::uint64_t>> deadlock_history_;
 
+    // Internal, called only while mutex_ is already held.
     bool creates_cycle(std::uint64_t from, std::uint64_t to) const;
 };
 

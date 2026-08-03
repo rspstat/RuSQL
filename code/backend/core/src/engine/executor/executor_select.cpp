@@ -562,14 +562,32 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
     SelectPlan plan = planner.plan_covering(table, condition, joins, columns);
 
     // 인덱스 경로 실행 (집계 / FOR UPDATE / JOIN / LIMIT / ORDER BY 없을 때만)
-    if (joins.empty() && !has_agg && !has_win && !for_update && !for_share
+    // read_ctx: 이 경로들은 s.indexes/s.hash_indexes/s.composite_indexes를 세션 격리
+    // 없이 직접 읽으므로(session_tables/snapshot_는 s.tables만 스왑함), 여기서만큼은
+    // is_visible의 permissive 체크 대신 이 문장을 실행하는 트랜잭션의 실제 스냅샷
+    // 기준으로 가시성을 판단해야 함 — 그래야 다른 세션의 아직 커밋 안 된 INSERT/DELETE가
+    // 인덱스 경로를 통해 새어나가지 않음.
+    SnapshotCtx read_ctx = current_read_ctx(s);
+    // MVCC: every index (PK B+Tree, secondary B+Tree/HashIndex buckets, composite) holds
+    // only the LATEST physical version per key -- index_remove_row+index_insert_row purge
+    // the old entry and add the new one on every UPDATE, so an older version an open
+    // RR/Serializable snapshot still needs can be entirely absent from the index, not just
+    // present-but-filtered. For a non-frozen ctx (ReadUncommitted, ReadCommitted, or
+    // autocommit) read_ctx was captured moments ago under the same statement-wide lock, so
+    // "the index's current latest version" and "what this ctx should see" can never
+    // diverge -- no fallback needed. Only a frozen RR/Serializable ctx (captured at a past
+    // BEGIN) can be looking for a version older than what the index now holds; for that
+    // case, skip these fast paths entirely and fall through to the generic scan below,
+    // which reads every physical version directly from s.tables.
+    bool use_fast_index_paths = !(txn.is_active() && txn.frozen_ctx().has_value());
+    if (use_fast_index_paths && joins.empty() && !has_agg && !has_win && !for_update && !for_share
         && !limit.has_value() && !offset.has_value() && order_by.empty() && !distinct) {
         auto& access = plan.base.access.data;
         if (auto* ap = std::get_if<AccessPath::PkPoint>(&access)) {
             if (auto it = s.indexes.find(table); it != s.indexes.end()) {
                 if (auto val_json = it->second.search(ap->key)) {
                     Row row = nlohmann::json::parse(*val_json).get<Row>();
-                    if (is_visible(row)) {
+                    if (is_visible_for_read(row, read_ctx)) {
                         std::vector<Row> one{std::move(row)};
                         return format_result(s, std::move(one), columns, table, {});
                     }
@@ -581,7 +599,7 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
                 std::vector<Row> rows;
                 for (auto& j : it->second.range_search(ap->start, ap->end)) {
                     Row r = nlohmann::json::parse(j).get<Row>();
-                    if (is_visible(r)) rows.push_back(std::move(r));
+                    if (is_visible_for_read(r, read_ctx)) rows.push_back(std::move(r));
                 }
                 return format_result(s, std::move(rows), columns, table, {});
             }
@@ -592,7 +610,7 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
                 std::vector<Row> rows;
                 for (auto& [k, j] : pairs) {
                     Row r = nlohmann::json::parse(j).get<Row>();
-                    if (is_visible(r)) rows.push_back(std::move(r));
+                    if (is_visible_for_read(r, read_ctx)) rows.push_back(std::move(r));
                 }
                 return format_result(s, std::move(rows), columns, table, {});
             }
@@ -600,7 +618,7 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
             if (auto it = s.hash_indexes.find(ap->index_key); it != s.hash_indexes.end()) {
                 std::vector<Row> rows;
                 for (auto& r : it->second.get(ap->key)) {
-                    if (is_visible(r) && matches_condition_with_subquery(s, r, condition)) rows.push_back(r);
+                    if (is_visible_for_read(r, read_ctx) && matches_condition_with_subquery(s, r, condition)) rows.push_back(r);
                 }
                 return format_result(s, std::move(rows), columns, table, {});
             }
@@ -626,7 +644,7 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
                     }
                     std::vector<Row> rows;
                     for (auto& r : nlohmann::json::parse(*json).get<std::vector<Row>>()) {
-                        if (is_visible(r) && matches_condition_with_subquery(s, r, condition)) rows.push_back(r);
+                        if (is_visible_for_read(r, read_ctx) && matches_condition_with_subquery(s, r, condition)) rows.push_back(r);
                     }
                     return format_result(s, std::move(rows), columns, table, {});
                 }
@@ -657,7 +675,7 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
                 std::vector<Row> rows;
                 for (auto& [k, json] : pairs) {
                     for (auto& r : nlohmann::json::parse(json).get<std::vector<Row>>()) {
-                        if (is_visible(r) && matches_condition_with_subquery(s, r, condition)) rows.push_back(r);
+                        if (is_visible_for_read(r, read_ctx) && matches_condition_with_subquery(s, r, condition)) rows.push_back(r);
                     }
                 }
                 return format_result(s, std::move(rows), columns, table, {});
@@ -667,7 +685,7 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
                 std::vector<Row> rows;
                 for (auto& json : it->second.range_search(ap->start, ap->end)) {
                     for (auto& r : nlohmann::json::parse(json).get<std::vector<Row>>()) {
-                        if (is_visible(r) && matches_condition_with_subquery(s, r, condition)) rows.push_back(r);
+                        if (is_visible_for_read(r, read_ctx) && matches_condition_with_subquery(s, r, condition)) rows.push_back(r);
                     }
                 }
                 return format_result(s, std::move(rows), columns, table, {});
@@ -685,7 +703,7 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
                 std::vector<Row> rows;
                 for (auto& j : it->second.prefix_scan(ap->prefix)) {
                     Row r = nlohmann::json::parse(j).get<Row>();
-                    if (is_visible(r) && matches_condition_with_subquery(s, r, condition)) rows.push_back(std::move(r));
+                    if (is_visible_for_read(r, read_ctx) && matches_condition_with_subquery(s, r, condition)) rows.push_back(std::move(r));
                 }
                 return format_result(s, std::move(rows), columns, table, {});
             }
@@ -695,7 +713,7 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
                 for (auto& [k, j] : it->second.scan_from(ap->prefix, true)) {
                     if (k.compare(0, ap->prefix.size(), ap->prefix) != 0) break;
                     for (auto& r : nlohmann::json::parse(j).get<std::vector<Row>>()) {
-                        if (is_visible(r) && matches_condition_with_subquery(s, r, condition)) rows.push_back(r);
+                        if (is_visible_for_read(r, read_ctx) && matches_condition_with_subquery(s, r, condition)) rows.push_back(r);
                     }
                 }
                 return format_result(s, std::move(rows), columns, table, {});
@@ -719,7 +737,7 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
                     if (auto it = s.indexes.find(sp->index_key); it != s.indexes.end()) {
                         if (auto json = it->second.search(sp->key)) {
                             for (auto& r : nlohmann::json::parse(*json).get<std::vector<Row>>()) {
-                                if (is_visible(r)) {
+                                if (is_visible_for_read(r, read_ctx)) {
                                     if (const std::string* v = get_col(r, pk_col)) pks.insert(*v);
                                 }
                             }
@@ -728,7 +746,7 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
                 } else if (auto* hp = std::get_if<AccessPath::HashPoint>(&sub_path.data)) {
                     if (auto it = s.hash_indexes.find(hp->index_key); it != s.hash_indexes.end()) {
                         for (auto& r : it->second.get(hp->key)) {
-                            if (is_visible(r)) {
+                            if (is_visible_for_read(r, read_ctx)) {
                                 if (const std::string* v = get_col(r, pk_col)) pks.insert(*v);
                             }
                         }
@@ -746,7 +764,7 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
                 std::vector<Row> rows;
                 if (auto it = s.tables.find(table); it != s.tables.end()) {
                     for (auto& r : it->second) {
-                        if (!is_visible(r)) continue;
+                        if (!is_visible_for_read(r, read_ctx)) continue;
                         const std::string* v = get_col(r, pk_col);
                         if (v && intersection.count(*v) && matches_condition_with_subquery(s, r, condition)) rows.push_back(r);
                     }
@@ -758,7 +776,7 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
     }
 
     // Top-K 인덱스 경로: ORDER BY 1컬럼 + LIMIT + OFFSET 없음 + 단순 SELECT
-    if (joins.empty() && !has_agg && !has_win && !for_update && !for_share && !distinct
+    if (use_fast_index_paths && joins.empty() && !has_agg && !has_win && !for_update && !for_share && !distinct
         && !offset.has_value() && order_by.size() == 1 && limit.has_value()) {
         std::size_t lim = *limit;
         const OrderBy& ob = order_by[0];
@@ -772,7 +790,7 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
                 auto pairs = range_op_is_lower_bound(ap->op) ? it->second.scan_from(ap->key, inclusive) : it->second.scan_to(ap->key, inclusive);
                 for (auto& [k, j] : pairs) {
                     for (auto& r : nlohmann::json::parse(j).get<std::vector<Row>>()) {
-                        if (is_visible(r) && matches_condition_with_subquery(s, r, condition)) topk_rows.push_back(r);
+                        if (is_visible_for_read(r, read_ctx) && matches_condition_with_subquery(s, r, condition)) topk_rows.push_back(r);
                     }
                 }
             }
@@ -781,7 +799,7 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
                 matched = true;
                 for (auto& j : it->second.range_search(ap->start, ap->end)) {
                     for (auto& r : nlohmann::json::parse(j).get<std::vector<Row>>()) {
-                        if (is_visible(r) && matches_condition_with_subquery(s, r, condition)) topk_rows.push_back(r);
+                        if (is_visible_for_read(r, read_ctx) && matches_condition_with_subquery(s, r, condition)) topk_rows.push_back(r);
                     }
                 }
             }
@@ -791,7 +809,7 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
                 for (auto& [k, j] : it->second.scan_from(ap->prefix, true)) {
                     if (k.compare(0, ap->prefix.size(), ap->prefix) != 0) break;
                     for (auto& r : nlohmann::json::parse(j).get<std::vector<Row>>()) {
-                        if (is_visible(r) && matches_condition_with_subquery(s, r, condition)) topk_rows.push_back(r);
+                        if (is_visible_for_read(r, read_ctx) && matches_condition_with_subquery(s, r, condition)) topk_rows.push_back(r);
                     }
                 }
             }
@@ -804,11 +822,7 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
     }
 
     std::vector<Row> rows;
-    if (auto it = session_tables.find(table); it != session_tables.end()) {
-        rows = it->second;
-    } else if (const auto* snap = txn.get_snapshot_table(table)) {
-        rows = *snap;
-    } else if (auto it = s.tables.find(table); it != s.tables.end()) {
+    if (auto it = s.tables.find(table); it != s.tables.end()) {
         rows = it->second;
     } else {
         rows = s.buffer_pool.get_page(table, s.disk);
@@ -817,7 +831,7 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
     std::vector<Row> visible_rows;
     visible_rows.reserve(rows.size());
     for (auto& r : rows) {
-        if (is_visible(r)) visible_rows.push_back(std::move(r));
+        if (is_visible_for_read(r, read_ctx)) visible_rows.push_back(std::move(r));
     }
 
     std::vector<Row> result;
@@ -853,11 +867,7 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
         for (std::size_t ji = 0; ji < joins.size(); ji++) {
             auto& j = joins[ji];
             std::vector<Row> right_rows_raw;
-            if (auto it = session_tables.find(j.table); it != session_tables.end()) {
-                right_rows_raw = it->second;
-            } else if (const auto* snap = txn.get_snapshot_table(j.table)) {
-                right_rows_raw = *snap;
-            } else {
+            {
                 auto it = s.tables.find(j.table);
                 if (it == s.tables.end()) return StringResult::Err("Table '" + j.table + "' not found");
                 right_rows_raw = it->second;
@@ -865,7 +875,7 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
             std::vector<Row> right_rows;
             right_rows.reserve(right_rows_raw.size());
             for (auto& r : right_rows_raw) {
-                if (is_visible(r)) right_rows.push_back(std::move(r));
+                if (is_visible_for_read(r, read_ctx)) right_rows.push_back(std::move(r));
             }
 
             std::vector<std::string> right_schema_cols;
@@ -900,7 +910,7 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
                         if (!key || key->empty() || *key == "NULL") continue;
                         if (auto val_json = rit->second.search(*key)) {
                             Row right_row = nlohmann::json::parse(*val_json).get<Row>();
-                            if (is_visible(right_row)) {
+                            if (is_visible_for_read(right_row, read_ctx)) {
                                 Row merged = left_row;
                                 merge_right(merged, right_row, j.table);
                                 out.push_back(std::move(merged));
@@ -1225,6 +1235,30 @@ StringResult Executor::exec_select_with_subquery(SharedDatabase& s, Statement in
 StringResult Executor::format_result(SharedDatabase& s, std::vector<Row> result, const std::vector<SelectColumn>& columns,
                                       const std::string& table, const std::vector<Join>& joins) {
     if (result.empty()) return StringResult::Ok("0 rows returned.");
+
+    // MVCC Stage 3: a Serializable transaction records every row it reads here (the
+    // single choke point nearly every SELECT path -- fast index paths, generic scan,
+    // groups -- funnels through) so validate_serializable can check at COMMIT whether any
+    // of them were touched by another transaction that has since committed. Scoped to
+    // single-table reads (joins.empty()) -- a joined/merged row has no single owning
+    // table's PK to key the read-set on, and a real catalog table (not an ephemeral CTE/
+    // subquery-derived alias, which s.catalog.get_table wouldn't resolve) to read from.
+    if (joins.empty() && txn.is_active() && txn.isolation_level() == IsolationLevel::Serializable) {
+        std::string pk_col;
+        if (auto* sc = s.catalog.get_table(table)) {
+            for (auto& c : sc->columns) {
+                if (c.primary_key) {
+                    pk_col = c.name;
+                    break;
+                }
+            }
+        }
+        if (!pk_col.empty()) {
+            for (auto& row : result) {
+                if (auto it = row.find(pk_col); it != row.end()) txn.record_read(table, pk_col, it->second);
+            }
+        }
+    }
 
     // Pre-compute SELECT-list scalar subqueries ("(SELECT ...) [AS alias]" columns)
     // and inject as "__sq_N__" keys into each row. Uncorrelated subqueries (no outer

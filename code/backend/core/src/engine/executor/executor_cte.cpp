@@ -96,7 +96,14 @@ StringResult Executor::exec_with(SharedDatabase& s, std::vector<std::pair<std::s
                         }
                         mapped[cols[i]] = val;
                     }
-                    mapped["_xmin"] = "1";
+                    // MVCC: "0" is the permanent "always visible" sentinel (matches the
+                    // base case's rows, which have no _xmin key at all and so default to
+                    // the same 0 via parse_txn_id) -- this synthetic, single-statement-
+                    // lifetime CTE table isn't real MVCC-tracked data, so a real txn id
+                    // (or the old hardcoded "1") would make is_visible_for_read's cutoff
+                    // check spuriously reject these rows depending on the current global
+                    // txn-id counter, breaking the recursive accumulation loop below.
+                    mapped["_xmin"] = "0";
                     mapped["_xmax"] = "0";
                     if (std::find(accumulated.begin(), accumulated.end(), mapped) == accumulated.end()) fresh.push_back(std::move(mapped));
                 }

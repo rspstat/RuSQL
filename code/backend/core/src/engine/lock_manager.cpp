@@ -4,7 +4,24 @@
 
 namespace engine {
 
+LockManager::LockManager(LockManager&& other) noexcept {
+    std::lock_guard<std::mutex> g(other.mutex_);
+    row_locks_ = std::move(other.row_locks_);
+    wait_for_ = std::move(other.wait_for_);
+    deadlock_history_ = std::move(other.deadlock_history_);
+}
+
+LockManager& LockManager::operator=(LockManager&& other) noexcept {
+    if (this == &other) return *this;
+    std::scoped_lock lock(mutex_, other.mutex_);
+    row_locks_ = std::move(other.row_locks_);
+    wait_for_ = std::move(other.wait_for_);
+    deadlock_history_ = std::move(other.deadlock_history_);
+    return *this;
+}
+
 LockResult LockManager::acquire(const std::string& table, const std::string& pk, std::uint64_t txn_id) {
+    std::lock_guard<std::mutex> g(mutex_);
     auto key = std::make_pair(table, pk);
     auto it = row_locks_.find(key);
     if (it == row_locks_.end()) {
@@ -43,6 +60,7 @@ LockResult LockManager::acquire(const std::string& table, const std::string& pk,
 }
 
 LockResult LockManager::acquire_shared(const std::string& table, const std::string& pk, std::uint64_t txn_id) {
+    std::lock_guard<std::mutex> g(mutex_);
     auto key = std::make_pair(table, pk);
     auto it = row_locks_.find(key);
     if (it == row_locks_.end()) {
@@ -69,6 +87,7 @@ LockResult LockManager::acquire_shared(const std::string& table, const std::stri
 }
 
 void LockManager::release(std::uint64_t txn_id) {
+    std::lock_guard<std::mutex> g(mutex_);
     for (auto it = row_locks_.begin(); it != row_locks_.end();) {
         bool keep = std::visit(
             [&](auto& alt) -> bool {
@@ -90,10 +109,12 @@ void LockManager::release(std::uint64_t txn_id) {
 }
 
 void LockManager::insert_lock(const std::string& table, const std::string& pk, std::uint64_t txn_id) {
+    std::lock_guard<std::mutex> g(mutex_);
     row_locks_[std::make_pair(table, pk)] = LockEntry{LockEntry::Exclusive{txn_id}};
 }
 
 std::optional<std::uint64_t> LockManager::holder(const std::string& table, const std::string& pk) const {
+    std::lock_guard<std::mutex> g(mutex_);
     auto it = row_locks_.find(std::make_pair(table, pk));
     if (it == row_locks_.end()) return std::nullopt;
     if (std::holds_alternative<LockEntry::Exclusive>(it->second.data)) return std::get<LockEntry::Exclusive>(it->second.data).holder;
@@ -101,6 +122,7 @@ std::optional<std::uint64_t> LockManager::holder(const std::string& table, const
 }
 
 std::vector<std::tuple<std::string, std::string, std::uint64_t>> LockManager::lock_rows() const {
+    std::lock_guard<std::mutex> g(mutex_);
     std::vector<std::tuple<std::string, std::string, std::uint64_t>> v;
     for (auto& [key, entry] : row_locks_) {
         std::visit(
@@ -122,11 +144,23 @@ std::vector<std::tuple<std::string, std::string, std::uint64_t>> LockManager::lo
 }
 
 std::vector<std::pair<std::uint64_t, std::uint64_t>> LockManager::wait_for_rows() const {
+    std::lock_guard<std::mutex> g(mutex_);
     std::vector<std::pair<std::uint64_t, std::uint64_t>> v(wait_for_.begin(), wait_for_.end());
     std::sort(v.begin(), v.end());
     return v;
 }
 
+std::vector<std::pair<std::uint64_t, std::uint64_t>> LockManager::deadlock_history() const {
+    std::lock_guard<std::mutex> g(mutex_);
+    return deadlock_history_;
+}
+
+bool LockManager::is_empty() const {
+    std::lock_guard<std::mutex> g(mutex_);
+    return row_locks_.empty();
+}
+
+// Internal -- called only from acquire()/acquire_shared(), which already hold mutex_.
 bool LockManager::creates_cycle(std::uint64_t from, std::uint64_t to) const {
     std::uint64_t current = to;
     std::unordered_set<std::uint64_t> visited;

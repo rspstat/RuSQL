@@ -15,11 +15,19 @@ struct TempDataDir {
 
 // Basic INSERT relies on exec_select for RETURNING/INSERT-SELECT tests to be fully
 // exercised through execute_sql; where SELECT isn't available yet, this reads rows
-// straight out of SharedDatabase instead.
+// straight out of SharedDatabase instead. MVCC: filters to live rows only (_xmax ==
+// "0") -- a soft-deleted or UPDATE-superseded dead version can now coexist physically
+// alongside the current one, which raw unfiltered access would otherwise surface.
 std::vector<Row> table_rows(Executor& ex, const std::string& qualified_table) {
     auto s = ex.get_shared()->read();
     auto it = s->tables.find(qualified_table);
-    return it != s->tables.end() ? it->second : std::vector<Row>{};
+    if (it == s->tables.end()) return {};
+    std::vector<Row> live;
+    for (auto& r : it->second) {
+        auto xit = r.find("_xmax");
+        if (xit == r.end() || xit->second == "0") live.push_back(r);
+    }
+    return live;
 }
 } // namespace
 

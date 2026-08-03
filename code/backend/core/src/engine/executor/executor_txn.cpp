@@ -29,8 +29,7 @@ std::string isolation_level_debug(IsolationLevel level) {
 } // namespace
 
 StringResult Executor::exec_begin(SharedDatabase& s) {
-    session_tables.clear();
-    auto res = txn.begin_with_snapshot(s.tables);
+    auto res = txn.begin_with_snapshot(*s.active_txn_ids->lock());
     if (res.is_err()) return StringResult::Err(res.error());
     std::uint64_t txn_id = res.value();
     s.active_txn_ids->lock()->insert(txn_id);
@@ -39,39 +38,45 @@ StringResult Executor::exec_begin(SharedDatabase& s) {
 }
 
 StringResult Executor::exec_commit(SharedDatabase& s) {
-    if (auto res = txn.validate_serializable(s.tables); res.is_err()) {
+    if (auto res = txn.validate_serializable(s.tables, *s.active_txn_ids->lock()); res.is_err()) {
         apply_rollback(s);
         return StringResult::Err(res.error() + " (auto-rolled back)");
     }
 
-    for (auto& [table, rows] : session_tables) {
-        s.tables[table] = rows;
-        s.buffer_pool.write_page(table, rows);
-        s.buffer_pool.flush_page(table, s.disk);
+    // MVCC Stage 2: writes now land directly in s.tables as they happen (no more
+    // session_tables staging to merge in here) -- COMMIT's remaining job is just to
+    // persist whatever tables this transaction actually touched, per the undo log.
+    auto dirty_tables = txn.dirty_tables();
+    for (auto& table : dirty_tables) {
+        if (auto it = s.tables.find(table); it != s.tables.end()) {
+            s.buffer_pool.write_page(table, it->second);
+            s.buffer_pool.flush_page(table, s.disk);
+        }
     }
-    session_tables.clear();
 
     std::uint64_t txn_id = txn.current_txn_id();
     if (auto res = txn.commit(); res.is_err()) return StringResult::Err(res.error());
     s.lock_mgr.release(txn_id);
     s.active_txn_ids->lock()->erase(txn_id);
-    maybe_auto_vacuum(s);
+    // Stage 4: per touched table, not a single global call -- COMMIT's own lock set
+    // (see Executor::execute()) already covers exactly these tables.
+    for (auto& table : dirty_tables) maybe_auto_vacuum(s, table);
     return StringResult::Ok("Transaction committed.");
 }
 
 StringResult Executor::exec_commit_phase1(SharedDatabase& s) {
-    if (auto res = txn.validate_serializable(s.tables); res.is_err()) {
+    if (auto res = txn.validate_serializable(s.tables, *s.active_txn_ids->lock()); res.is_err()) {
         apply_rollback(s);
         return StringResult::Err(res.error() + " (auto-rolled back)");
     }
 
-    for (auto& [table, rows] : session_tables) {
-        s.tables[table] = rows;
-        s.buffer_pool.write_page(table, rows);
-        s.buffer_pool.flush_page(table, s.disk);
-        s.query_cache.invalidate_table(table);
+    for (auto& table : txn.dirty_tables()) {
+        if (auto it = s.tables.find(table); it != s.tables.end()) {
+            s.buffer_pool.write_page(table, it->second);
+            s.buffer_pool.flush_page(table, s.disk);
+            s.query_cache.invalidate_table(table);
+        }
     }
-    session_tables.clear();
 
     std::uint64_t txn_id = txn.current_txn_id();
     if (auto res = txn.commit_write_record(); res.is_err()) return StringResult::Err(res.error());
@@ -89,14 +94,23 @@ StringResult Executor::exec_commit_phase1(SharedDatabase& s) {
 
 StringResult Executor::execute_commit_grouped() {
     std::uint64_t txn_id = txn.current_txn_id();
+    // Stage 4: dirty_tables() is a pure read of this transaction's own undo log -- safe to
+    // capture before touching SharedDatabase at all, and before exec_commit_phase1 (via
+    // txn.commit_write_record()) leaves it in a state this call no longer needs to trust.
+    // Only these specific tables' locks are needed for both critical sections below
+    // (instead of the whole database's exclusive lock), so an unrelated table's
+    // concurrent statement isn't blocked by this commit.
+    auto dirty_tables = txn.dirty_tables();
+    std::sort(dirty_tables.begin(), dirty_tables.end());
+
     std::shared_ptr<GroupCommitCoordinator> coord;
     std::shared_ptr<Mutex<std::unordered_set<std::uint64_t>>> active_txn_ids;
     {
-        auto sw = shared->write();
-        auto phase1 = exec_commit_phase1(*sw);
+        auto guard = acquire_table_locks(shared->read(), dirty_tables, /*exclusive=*/true);
+        auto phase1 = exec_commit_phase1(const_cast<SharedDatabase&>(*guard.structural));
         if (phase1.is_err()) return phase1;
-        coord = sw->group_commit_coord;
-        active_txn_ids = sw->active_txn_ids;
+        coord = guard.structural->group_commit_coord;
+        active_txn_ids = guard.structural->active_txn_ids;
     }
 
     coord->sync_commit();
@@ -108,8 +122,8 @@ StringResult Executor::execute_commit_grouped() {
     // doesn't need to re-acquire the big SharedDatabase write lock.
     active_txn_ids->lock()->erase(txn_id);
     {
-        auto sw = shared->write();
-        maybe_auto_vacuum(*sw);
+        auto guard = acquire_table_locks(shared->read(), dirty_tables, /*exclusive=*/true);
+        for (auto& table : dirty_tables) maybe_auto_vacuum(const_cast<SharedDatabase&>(*guard.structural), table);
     }
 
     return StringResult::Ok("Transaction committed.");
@@ -117,15 +131,35 @@ StringResult Executor::execute_commit_grouped() {
 
 void Executor::apply_rollback(SharedDatabase& s) {
     std::uint64_t txn_id = txn.current_txn_id();
+    std::string txn_id_str = std::to_string(txn_id);
+    // dirty_tables() reads the undo log, which txn.abort() below clears -- must capture
+    // it first.
+    std::vector<std::string> dirty_tables = txn.dirty_tables();
     (void)txn.abort();
     s.lock_mgr.release(txn_id);
     s.active_txn_ids->lock()->erase(txn_id);
 
-    std::vector<std::string> dirty_tables;
-    for (auto& [table, _] : session_tables) dirty_tables.push_back(table);
-
+    // MVCC Stage 2: writes now live directly in s.tables, tagged with this transaction's
+    // id -- undoing them is a single filtered pass per touched table instead of a JSON
+    // undo-log replay: physically erase whatever this txn created (_xmin == its id), and
+    // revive whatever it soft-deleted or superseded via UPDATE (_xmax == its id resets to
+    // the "0" == alive sentinel).
     for (auto& table : dirty_tables) {
-        std::vector<Row> rows_clone = s.tables.count(table) ? s.tables.at(table) : std::vector<Row>{};
+        auto tit = s.tables.find(table);
+        if (tit == s.tables.end()) continue;
+        auto& rows = tit->second;
+        rows.erase(std::remove_if(rows.begin(), rows.end(),
+                                   [&](const Row& r) {
+                                       auto it = r.find("_xmin");
+                                       return it != r.end() && it->second == txn_id_str;
+                                   }),
+                   rows.end());
+        for (auto& row : rows) {
+            auto it = row.find("_xmax");
+            if (it != row.end() && it->second == txn_id_str) it->second = "0";
+        }
+
+        std::vector<Row> rows_clone = rows;
 
         std::string pk_col = "id";
         if (auto* sc = s.catalog.get_table(table)) {
@@ -154,8 +188,6 @@ void Executor::apply_rollback(SharedDatabase& s) {
         }
         for (auto& k : comp_keys) s.composite_indexes.at(k).rebuild(rows_clone);
     }
-
-    session_tables.clear();
 }
 
 StringResult Executor::exec_rollback(SharedDatabase& s) {
@@ -177,7 +209,11 @@ StringResult Executor::exec_rollback_to(SharedDatabase& s, const std::string& na
     auto res = txn.rollback_to_savepoint(name);
     if (res.is_err()) return StringResult::Err(res.error());
 
+    std::string txn_id_str = std::to_string(txn.current_txn_id());
+    std::unordered_set<std::string> touched_tables;
+
     for (auto& entry : res.value()) {
+        touched_tables.insert(entry.table);
         std::string pk_col = "id";
         if (auto* sc = s.catalog.get_table(entry.table)) {
             for (auto& c : sc->columns) {
@@ -187,25 +223,52 @@ StringResult Executor::exec_rollback_to(SharedDatabase& s, const std::string& na
                 }
             }
         }
-        auto tit = session_tables.find(entry.table);
-        if (tit == session_tables.end()) continue;
+        auto tit = s.tables.find(entry.table);
+        if (tit == s.tables.end()) continue;
         auto& rows = tit->second;
 
         if (entry.operation == "INSERT") {
             rows.erase(std::remove_if(rows.begin(), rows.end(),
                                        [&](const Row& r) {
-                                           auto it = r.find(pk_col);
-                                           return it != r.end() && it->second == entry.key;
+                                           auto pit = r.find(pk_col);
+                                           auto xnit = r.find("_xmin");
+                                           return pit != r.end() && pit->second == entry.key && xnit != r.end() &&
+                                                  xnit->second == txn_id_str;
                                        }),
                        rows.end());
         } else if (entry.operation == "UPDATE") {
             if (entry.old_data) {
                 try {
                     Row old_row = nlohmann::json::parse(*entry.old_data).get<Row>();
+                    // MVCC: this UPDATE created exactly one new "tip" version (tagged
+                    // with this txn's id, still live) and marked exactly one earlier
+                    // version dead (_xmax == this txn's id) -- remove the tip, then
+                    // revive the specific earlier version by content match against
+                    // old_data (more than one row can carry _xmax == this txn's id if the
+                    // same key was updated more than once in this transaction, so a bare
+                    // key+_xmax match would be ambiguous).
+                    rows.erase(std::remove_if(rows.begin(), rows.end(),
+                                               [&](const Row& r) {
+                                                   auto pit = r.find(pk_col);
+                                                   if (pit == r.end() || pit->second != entry.key) return false;
+                                                   auto xnit = r.find("_xmin");
+                                                   auto xxit = r.find("_xmax");
+                                                   return xnit != r.end() && xnit->second == txn_id_str && xxit != r.end() &&
+                                                          xxit->second == "0";
+                                               }),
+                               rows.end());
                     for (auto& row : rows) {
-                        auto it = row.find(pk_col);
-                        if (it != row.end() && it->second == entry.key) {
-                            row = old_row;
+                        auto pit = row.find(pk_col);
+                        if (pit == row.end() || pit->second != entry.key) continue;
+                        auto xxit = row.find("_xmax");
+                        if (xxit == row.end() || xxit->second != txn_id_str) continue;
+                        bool matches = std::all_of(old_row.begin(), old_row.end(), [&](auto& kv) {
+                            if (kv.first == "_xmax") return true;
+                            auto it2 = row.find(kv.first);
+                            return it2 != row.end() && it2->second == kv.second;
+                        });
+                        if (matches) {
+                            row["_xmax"] = "0";
                             break;
                         }
                     }
@@ -214,11 +277,49 @@ StringResult Executor::exec_rollback_to(SharedDatabase& s, const std::string& na
             }
         } else if (entry.operation == "DELETE") {
             for (auto& row : rows) {
-                auto it = row.find(pk_col);
-                if (it != row.end() && it->second == entry.key) row["_xmax"] = "0";
+                auto pit = row.find(pk_col);
+                auto xxit = row.find("_xmax");
+                if (pit != row.end() && pit->second == entry.key && xxit != row.end() && xxit->second == txn_id_str) {
+                    row["_xmax"] = "0";
+                }
             }
         }
     }
+
+    // Indexes were already mutated live by the DML this savepoint is undoing (Stage 2
+    // writes hit s.tables/indexes directly, no more session_tables staging) -- rebuild
+    // them for every table this rollback touched so they reflect the restored rows.
+    for (auto& table : touched_tables) {
+        auto tit = s.tables.find(table);
+        if (tit == s.tables.end()) continue;
+        std::vector<Row> rows_clone = tit->second;
+
+        std::string pk_col = "id";
+        if (auto* sc = s.catalog.get_table(table)) {
+            for (auto& c : sc->columns) {
+                if (c.primary_key) {
+                    pk_col = c.name;
+                    break;
+                }
+            }
+        }
+        if (auto idx_it = s.indexes.find(table); idx_it != s.indexes.end()) {
+            idx_it->second = BPlusTree();
+            for (auto& row : rows_clone) {
+                auto it = row.find(pk_col);
+                std::string k = it != row.end() ? it->second : std::string();
+                nlohmann::json j = row;
+                idx_it->second.insert(k, j.dump());
+            }
+        }
+        rebuild_secondary_indexes(s, table, rows_clone);
+        std::vector<std::string> comp_keys;
+        for (auto& [k, ci] : s.composite_indexes) {
+            if (ci.table == table) comp_keys.push_back(k);
+        }
+        for (auto& k : comp_keys) s.composite_indexes.at(k).rebuild(rows_clone);
+    }
+
     return StringResult::Ok("Rolled back to savepoint '" + name + "'.");
 }
 
@@ -541,7 +642,7 @@ StringResult Executor::exec_show_locks(const SharedDatabase& s) const {
         }
     }
 
-    auto& history = s.lock_mgr.deadlock_history();
+    auto history = s.lock_mgr.deadlock_history();
     if (!history.empty()) {
         out << "\nDeadlock history (this session):\n";
         for (auto& [victim, blocker] : history) {

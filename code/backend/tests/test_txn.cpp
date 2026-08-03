@@ -120,48 +120,72 @@ TEST_CASE("do_checkpoint deferred when unsafe is a no-op", "[txn]") {
     fs::remove_all(dir);
 }
 
-TEST_CASE("REPEATABLE READ snapshot isolates reads from live table changes", "[txn]") {
+// MVCC Stage 2: the deep-clone snapshot_/get_snapshot_table mechanism this test used to
+// exercise was retired (SELECT now filters s.tables directly via is_visible_for_read +
+// SnapshotCtx instead of reading from a frozen full-table copy) -- rewritten to test the
+// mechanism that replaced it: frozen_ctx(), captured once at BEGIN and never recomputed
+// for the rest of the transaction, regardless of what happens afterward.
+TEST_CASE("REPEATABLE READ freezes its read ctx at BEGIN, unaffected by later activity", "[txn]") {
     auto dir = test_dir("rr_snapshot");
     auto io = std::make_shared<TxnIoShared>();
     TransactionManager a(dir, io);
     a.set_isolation_level(IsolationLevel::RepeatableRead);
 
-    std::unordered_map<std::string, std::vector<Row>> tables;
-    Row r1;
-    r1["id"] = "1";
-    tables["t"] = {r1};
+    std::unordered_set<std::uint64_t> active_before = {42}; // some other txn open at BEGIN time
+    a.begin_with_snapshot(active_before);
+    REQUIRE(a.frozen_ctx().has_value());
+    REQUIRE(a.frozen_ctx()->in_progress.count(42) == 1);
 
-    a.begin_with_snapshot(tables);
-    REQUIRE(a.get_snapshot_table("t") != nullptr);
-    REQUIRE(a.get_snapshot_table("t")->size() == 1);
-
-    // Live table changes after BEGIN must not affect the snapshot.
-    tables["t"].push_back(r1);
-    REQUIRE(a.get_snapshot_table("t")->size() == 1);
+    // A later capture (what a fresh per-statement ctx would see) must differ from what
+    // was frozen at BEGIN -- proving frozen_ctx() really is captured once, not live.
+    std::uint64_t cutoff_at_begin = a.frozen_ctx()->cutoff;
+    io->next_id(); // simulate other activity issuing more ids after BEGIN
+    REQUIRE(a.frozen_ctx()->cutoff == cutoff_at_begin);
+    REQUIRE(io->peek_next_id() > cutoff_at_begin);
 
     a.abort();
     fs::remove_all(dir);
 }
 
-TEST_CASE("SERIALIZABLE validate_serializable detects row-count drift", "[txn]") {
+// MVCC Stage 3: validate_serializable used to compare table-wide row counts between a
+// deep clone taken at BEGIN and the live tables at COMMIT -- a real gap, since a same-
+// count interleaving (one row deleted, a different row inserted) passed undetected.
+// Replaced with real read-set tracking: record_read() logs which specific rows a
+// Serializable transaction observed, and validate_serializable now checks whether any of
+// those specific rows' visibility has changed due to another transaction's write that has
+// since committed.
+TEST_CASE("SERIALIZABLE validate_serializable detects a read row modified by a since-committed transaction",
+          "[txn]") {
     auto dir = test_dir("serializable");
     auto io = std::make_shared<TxnIoShared>();
     TransactionManager a(dir, io);
     a.set_isolation_level(IsolationLevel::Serializable);
 
-    std::unordered_map<std::string, std::vector<Row>> tables;
+    a.begin_with_snapshot({});
+    a.record_read("t", "id", "1"); // simulates a SELECT that observed row id=1
+
     Row r1;
     r1["id"] = "1";
-    tables["t"] = {r1};
-    a.begin_with_snapshot(tables);
+    r1["_xmin"] = "0";
+    r1["_xmax"] = "0";
+    std::unordered_map<std::string, std::vector<Row>> tables{{"t", {r1}}};
 
-    // No drift yet.
-    REQUIRE(a.validate_serializable(tables).is_ok());
+    // Row unchanged -- no conflict yet.
+    REQUIRE(a.validate_serializable(tables, {}).is_ok());
 
-    // Simulate a phantom row appearing after BEGIN.
-    auto live = tables;
-    live["t"].push_back(r1);
-    REQUIRE(a.validate_serializable(live).is_err());
+    // Simulate a different, already-committed transaction (its id isn't in
+    // active_txn_ids_now) updating row id=1 sometime after `a` began: old version marked
+    // dead, a new version appended -- same physical row *count* as before (still one row
+    // for this key, or two if not yet vacuumed), but the content a read is no longer what
+    // `a`'s snapshot saw, which the old count-only check could never catch.
+    std::uint64_t other_txn = io->next_id(); // allocated after a's frozen cutoff was captured
+    Row r1_dead = r1;
+    r1_dead["_xmax"] = std::to_string(other_txn);
+    Row r1_new = r1;
+    r1_new["_xmin"] = std::to_string(other_txn);
+    tables["t"] = {r1_dead, r1_new};
+
+    REQUIRE(a.validate_serializable(tables, {}).is_err());
 
     a.abort();
     fs::remove_all(dir);
