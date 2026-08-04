@@ -163,6 +163,15 @@ struct SharedDatabase {
     bool ensure_default_user();
 };
 
+// Gap lock range (InnoDB-style phantom-read prevention), extracted from a WHERE clause's
+// PK-column leaves. nullopt bound == unbounded on that side. See gap_lock.cpp.
+struct GapRange {
+    std::optional<std::string> lo;
+    std::optional<std::string> hi;
+    bool lo_inclusive = true;
+    bool hi_inclusive = true;
+};
+
 class Executor {
 public:
     std::shared_ptr<RwLock<SharedDatabase>> shared;
@@ -382,6 +391,22 @@ private:
     static std::optional<std::string> extract_pk_eq_value(const std::optional<CondExpr>& condition, const std::string& pk_col);
     static std::optional<std::pair<std::string, std::string>> extract_pk_between_value(const std::optional<CondExpr>& condition,
                                                                                           const std::string& pk_col);
+
+public:
+    // ── Gap Lock (InnoDB-style phantom-read prevention, see gap_lock.cpp) ────
+    // Extracts a conservative range covering every PK-column leaf ANDed into `condition`
+    // (Eq/Gt/Gte/Lt/Lte/Between); ignores non-PK leaves and anything under an OR/NOT
+    // (collect_and_leaves only flattens AND), falling back to a fully unbounded range in
+    // those cases -- always safe (over-locking costs concurrency, never correctness).
+    // Public (unlike the surrounding DELETE helpers) so it's directly unit-testable.
+    static GapRange extract_pk_gap_range(const std::optional<CondExpr>& condition, const std::string& pk_col);
+    // Same numeric-priority/lexicographic-fallback comparison semantics as eval_single's
+    // BETWEEN/Gt/Lt/Gte/Lte handling (executor_eval.cpp's cmp_num), so a value considered
+    // "inside" a gap-locked range matches how the same value would evaluate against the
+    // original WHERE clause elsewhere in the engine.
+    static bool gap_range_contains(const GapRange& range, const std::string& value);
+
+private:
     StringResult exec_delete(SharedDatabase& s, const std::string& table, std::optional<CondExpr> condition,
                               std::optional<std::vector<SelectColumn>> returning);
     StringResult exec_delete_inner(SharedDatabase& s, const std::string& table, const std::optional<CondExpr>& condition,

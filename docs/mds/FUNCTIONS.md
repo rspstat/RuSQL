@@ -192,7 +192,7 @@
 - [x] WAL fsync per-commit — COMMIT 레코드 기록 시 `sync_all()` 호출 (`innodb_flush_log_at_trx_commit=1` 동등, 전원 장애 시 커밋 유실 방지)
 - [x] **WAL/Undo Log 세션 간 트랜잭션 격리** — 전역 유일 트랜잭션 ID(`txn_id`, `TxnIoShared`로 모든 세션이 공유하는 원자적 카운터에서 발급)를 모든 WAL 레코드·Undo 엔트리에 태깅; COMMIT/ROLLBACK/ABORT는 파일 전체 삭제 대신 자기 트랜잭션 레코드만 제거(`remove_txn`)해 같은 data_dir을 공유하는 다른 세션의 진행 중인 트랜잭션 기록을 보존; `lock_mgr`/`_xmin` 태깅도 동일 전역 ID를 사용해 세션 간 잠금 ID 충돌 문제도 함께 해소
 - [x] BEGIN / COMMIT / ROLLBACK
-- [x] SAVEPOINT / ROLLBACK TO SAVEPOINT (session_tables 기반 undo 적용 — Deferred Write와 완전 통합; 디스크 Undo Log는 `rewrite_txn`으로 이 트랜잭션 몫만 교체, 다른 세션 엔트리는 보존)
+- [x] SAVEPOINT / ROLLBACK TO SAVEPOINT (Undo Log 기반 content-matching undo — 같은 키가 한 트랜잭션 안에서 여러 번 갱신돼도 정확한 시점으로 복원; 디스크 Undo Log는 `rewrite_txn`으로 이 트랜잭션 몫만 교체, 다른 세션 엔트리는 보존)
 - [x] RELEASE SAVEPOINT
 - [x] Undo Log 기반 롤백 (B+Tree 인덱스 재빌드 포함)
 - [x] Undo Log 영속화 (`data/_undo.log`) — 트랜잭션 중 변경마다 Undo Entry를 디스크에 즉시 기록, COMMIT/ROLLBACK/ABORT 시 해당 트랜잭션 몫만 제거(다른 세션의 진행 중인 트랜잭션은 보존), 크래시 후 재시작 시 미완료 트랜잭션 자동 롤백
@@ -202,7 +202,7 @@
   - READ UNCOMMITTED / READ COMMITTED
   - REPEATABLE READ (BEGIN 시점 스냅샷 고정)
   - SERIALIZABLE (팬텀 읽기 감지 + 자동 롤백)
-- [x] Deferred Write (ACID Isolation 완전 충족) — DML은 session_tables(세션 로컬 버퍼)에만 기록, COMMIT 시 s.tables·buffer_pool에 일괄 반영, ROLLBACK 시 버퍼 폐기. 미커밋 데이터가 다른 세션에 노출(Dirty Read)되지 않음
+- [x] MVCC 기반 Isolation (ACID 완전 충족) — DML은 `s.tables`에 직접 기록되고 작성자의 실제 트랜잭션 ID(`_xmin`)로 태깅됨(구버전 session_tables 방식은 폐지, 자세한 내용은 아래 MVCC 절 참고); 다른 세션은 `SnapshotCtx` 기반 가시성 필터로 미커밋 행을 못 봄(Dirty Read 방지, READ UNCOMMITTED는 예외), 자기 자신의 미커밋 행은 `xmin==self` 특례로 정상적으로 보임
 
 ### 인덱스 & 저장
 - [x] B+Tree 인덱스 (단일 컬럼, ORDER=16으로 트리 깊이 최소화)
@@ -225,25 +225,29 @@
 - [x] TRUNCATE 후 AUTO INCREMENT 리셋
 
 ### MVCC
-- [x] 행 버전 스탬프 (`_xmin`, `_xmax`)
-- [x] DELETE → MVCC 논리 삭제 (트랜잭션 내) / 물리 삭제 (트랜잭션 외)
-- [x] SELECT 가시성 필터 (`_xmax == "0"` 인 행만 표시)
-- [x] ROLLBACK → `_xmax` 복원 + PK/보조/복합 인덱스 완전 재빌드 (인덱스 stale 버그 수정)
-- [x] VACUUM (dead row 물리 제거)
-- [x] AUTO VACUUM — DML 200회 누적 시 자동 dead row 정리 (`dml_since_vacuum` 카운터)
+- [x] 행 버전 스탬프 (`_xmin`, `_xmax`) — 실제 트랜잭션 ID 태깅(전역 유일 카운터에서 발급), `0`은 "이전부터 존재/항상 가시" 예약값
+- [x] `SnapshotCtx` 기반 격리수준별 실제 가시성 — READ UNCOMMITTED(모든 트랜잭션을 이미 커밋으로 간주 → 진짜 dirty read), READ COMMITTED(문장마다 새로 캡처한 스냅샷), REPEATABLE READ/SERIALIZABLE(BEGIN 시점에 한 번만 고정한 스냅샷을 트랜잭션 내내 재사용) — 이전엔 RU/RC가 코드상 동일하게 처리됐으나 현재는 실제로 분기
+- [x] UPDATE → 실제 다중 버전 생성 — 기존 행은 그대로 두고 `_xmax`만 스탬프, 새 물리 버전을 `_xmin`=본인 트랜잭션 ID로 append (in-place 수정 아님, autocommit 포함 항상 버전화)
+- [x] DELETE → 논리 삭제(트랜잭션 내부이거나, 다른 세션에 활성 트랜잭션이 하나라도 있을 때) / 물리 삭제(DB 전체가 quiescent한 autocommit) — 논리 삭제 시 PK/보조/해시 인덱스도 즉시 최신 버전으로 갱신(인덱스 기반 조회가 죽은 행을 계속 보여주는 stale 버그 수정)
+- [x] ROLLBACK → 자신이 만든 버전 물리 제거 + 자신이 죽인 버전의 `_xmax` 복원, PK/보조/복합 인덱스 완전 재빌드
+- [x] ROLLBACK TO SAVEPOINT → 여러 물리 버전 중 정확한 시점으로 되돌리는 content-matching 기반 undo (같은 키가 한 트랜잭션 안에서 여러 번 갱신돼도 정확)
+- [x] GC(VACUUM) 호라이즌 기반 판정 — 현재 활성인 트랜잭션들의 스냅샷 중 가장 오래된 것보다 먼저 죽은 행만 물리 제거(아직 필요한 옛 버전은 보존), 예전의 무조건적 판정 방식 대체
+- [x] AUTO VACUUM — 테이블 단위 DML 200회 누적 시 자동 dead row 정리 (`dml_since_vacuum` 카운터)
+- [x] SERIALIZABLE 충돌 감지 — read-set 기반: 트랜잭션이 실제로 읽은 각 행이 BEGIN 시점과 커밋 시점 사이에 이미 커밋된 다른 트랜잭션에 의해 바뀌었는지 재검증해 충돌 시 자동 ROLLBACK (단순 행 개수 비교 대체 — 개수는 같지만 내용이 다른 인터리빙도 감지). 완전한 SSI(Serializable Snapshot Isolation)는 아님 — predicate lock이 없어 잠금 없는 일반 SELECT의 phantom/write-skew까지는 못 잡음(아래 Gap Lock은 잠그는 읽기·범위 UPDATE/DELETE 한정 보완)
 
-### Row-level Locking
+### Row-level Locking & Gap Lock
 - [x] SELECT ... FOR UPDATE (배타 잠금 획득)
 - [x] SELECT ... FOR SHARE (공유 잠금 — 다중 독자 허용)
 - [x] 공유/배타 잠금 충돌 감지 및 데드락 감지 (wait-for 그래프 DFS)
 - [x] UPDATE / DELETE 시 잠금 충돌 감지
 - [x] COMMIT / ROLLBACK 시 잠금 자동 해제
-- [x] SHOW LOCKS (활성 잠금 목록 조회)
+- [x] SHOW LOCKS (활성 행 잠금 + Gap Lock 목록 조회)
 - [x] 잠금 대기 타임아웃 세션 변수 — `SET @lock_wait_timeout = N` (밀리초, 기본 50,000ms), 세션별 독립 설정 (`Executor.lock_wait_timeout_ms` 필드), 타임아웃 시 MySQL 호환 `ERROR 1205 (HY000): Lock wait timeout exceeded` 반환
+- [x] **Gap Lock (InnoDB 스타일 phantom 방지)** — REPEATABLE READ/SERIALIZABLE에서 `FOR UPDATE`/`FOR SHARE`와 트랜잭션 내 `UPDATE`/`DELETE`가 WHERE절에서 PK 범위(Eq/Gt/Gte/Lt/Lte/Between, AND 조합, 그 외엔 안전하게 테이블 전체 범위로 폴백)를 추출해 범위 자체를 잠금 — 같은 범위로의 동시 INSERT를 거부해 재조회 시 유령 행(phantom row) 등장 방지. Gap Lock끼리는 서로 충돌하지 않음(실제 InnoDB와 동일한 호환성 의미론), 자기 자신이 잡은 Gap Lock은 자신의 INSERT를 막지 않음, 데드락 그래프는 행 잠금과 완전히 공유. V1 범위: 단일 컬럼 PK 테이블만
 
 ### 동시성
-- [x] 읽기 전용 문장 동시 실행 — `SharedDatabase`를 감싸는 `shared_ptr<RwLock<...>>`(실제 `std::shared_mutex`)를 활용, `FOR UPDATE`/`FOR SHARE`·파생테이블·CTE가 없는 SELECT(WHERE/HAVING/JOIN-ON에 중첩된 서브쿼리까지 재귀 판정), `SHOW`류, `DESCRIBE`, `EXPLAIN`을 공유(read) 잠금으로 분류해 여러 세션이 동시에 실행 — 그 외 모든 문장(DML/DDL/DCL/트랜잭션 제어/CTE/프로시저 등)은 기존처럼 배타(write) 잠금
-- [x] 프로시저 WHILE/LOOP/REPEAT 반복 상한 (10만 회) 및 트리거 재귀 깊이 상한 (32단) — 무한루프/재귀가 전역 배타 잠금을 영구히 점유해 서버 전체를 정지시키는 것 방지
+- [x] 테이블 단위 동시 쓰기 — 2계층 잠금: ① 구조적 잠금(`RwLock<SharedDatabase>`, 여전히 배타 — DDL/DCL/VACUUM/CHECKPOINT 및 CTE·FROM-서브쿼리·뷰 참조·발화하는 트리거가 있는 문장 전용), ② 테이블별 `shared_mutex`(그 외 평범한 단일/조인 INSERT/UPDATE/DELETE/SELECT/MERGE/다중 UPDATE·DELETE — 대상 테이블 + FK 부모/자식 1-hop을 정렬된 순서로 잠금, 락 순서 데드락 방지). 서로 다른 테이블에 대한 쓰기는 실제로 동시 실행되고, 같은 테이블 내부는 여전히 그 테이블의 락 하나로 완전히 직렬화. 순수 읽기 전용 문장(FOR UPDATE/FOR SHARE 제외 SELECT, SHOW류, DESCRIBE, EXPLAIN 등 — 서브쿼리까지 재귀 판정)은 대상 테이블 세트를 공유(read)로 잡아 다른 테이블의 쓰기와도 병렬 실행
+- [x] 프로시저 WHILE/LOOP/REPEAT 반복 상한 (10만 회) 및 트리거 재귀 깊이 상한 (32단) — 무한루프/재귀가 잠금을 영구히 점유해 서버 전체를 정지시키는 것 방지
 
 ### 모니터링
 - [x] SHOW BUFFER POOL (캐시 히트율, 사용량)

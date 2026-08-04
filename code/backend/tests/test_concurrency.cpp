@@ -315,3 +315,75 @@ TEST_CASE("READ UNCOMMITTED sees another session's in-progress INSERT via the in
 
     REQUIRE(a.execute_sql("ROLLBACK").is_ok());
 }
+
+// Gap Lock (InnoDB-style phantom-read prevention): a REPEATABLE READ transaction that
+// locks a range via SELECT ... FOR UPDATE should block a concurrent session's INSERT of a
+// new row whose PK falls inside that range (a phantom), while an INSERT outside the range
+// still succeeds -- and the gap lock must be released once the holder's transaction ends.
+TEST_CASE("Gap lock blocks a phantom INSERT into a locked range and releases on COMMIT", "[executor][concurrency][gap_lock]") {
+    TempDataDir dir("exec_concurrency_gap_lock_1");
+    Executor a(dir.path);
+    REQUIRE(a.execute_sql("CREATE DATABASE d").is_ok());
+    REQUIRE(a.execute_sql("USE d").is_ok());
+    REQUIRE(a.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, val INT)").is_ok());
+    REQUIRE(a.execute_sql("INSERT INTO t VALUES (5, 5)").is_ok());
+    REQUIRE(a.execute_sql("INSERT INTO t VALUES (30, 30)").is_ok());
+
+    auto shared = a.get_shared();
+    Executor b = Executor::new_session(shared);
+    REQUIRE(b.execute_sql("USE d").is_ok());
+
+    REQUIRE(a.execute_sql("SET ISOLATION LEVEL REPEATABLE READ").is_ok());
+    REQUIRE(a.execute_sql("BEGIN").is_ok());
+    REQUIRE(a.execute_sql("SELECT * FROM t WHERE id BETWEEN 10 AND 20 FOR UPDATE").is_ok());
+
+    // Phantom candidate: falls inside the locked [10, 20] range -- must be rejected.
+    auto phantom = b.execute_sql("INSERT INTO t VALUES (15, 15)");
+    REQUIRE(phantom.is_err());
+    REQUIRE(phantom.error().find("gap lock") != std::string::npos);
+
+    // Outside the locked range -- unaffected, must succeed.
+    REQUIRE(b.execute_sql("INSERT INTO t VALUES (100, 100)").is_ok());
+
+    REQUIRE(a.execute_sql("COMMIT").is_ok());
+
+    // Gap lock released with the transaction -- the same INSERT now succeeds.
+    REQUIRE(b.execute_sql("INSERT INTO t VALUES (15, 15)").is_ok());
+}
+
+// A READ COMMITTED transaction (the default) must NOT take a gap lock at all (matching
+// InnoDB, where gap locking is disabled below REPEATABLE READ) -- a concurrent phantom
+// INSERT into the "locked" range must succeed.
+TEST_CASE("Gap lock is not taken under READ COMMITTED", "[executor][concurrency][gap_lock]") {
+    TempDataDir dir("exec_concurrency_gap_lock_2");
+    Executor a(dir.path);
+    REQUIRE(a.execute_sql("CREATE DATABASE d").is_ok());
+    REQUIRE(a.execute_sql("USE d").is_ok());
+    REQUIRE(a.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, val INT)").is_ok());
+
+    auto shared = a.get_shared();
+    Executor b = Executor::new_session(shared);
+    REQUIRE(b.execute_sql("USE d").is_ok());
+
+    REQUIRE(a.execute_sql("BEGIN").is_ok()); // default isolation: READ COMMITTED
+    REQUIRE(a.execute_sql("SELECT * FROM t WHERE id BETWEEN 10 AND 20 FOR UPDATE").is_ok());
+
+    REQUIRE(b.execute_sql("INSERT INTO t VALUES (15, 15)").is_ok());
+
+    REQUIRE(a.execute_sql("COMMIT").is_ok());
+}
+
+// A transaction's own gap lock must not block its own subsequent INSERT into that range.
+TEST_CASE("Gap lock does not block the holder's own INSERT into its locked range", "[executor][concurrency][gap_lock]") {
+    TempDataDir dir("exec_concurrency_gap_lock_3");
+    Executor a(dir.path);
+    REQUIRE(a.execute_sql("CREATE DATABASE d").is_ok());
+    REQUIRE(a.execute_sql("USE d").is_ok());
+    REQUIRE(a.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, val INT)").is_ok());
+
+    REQUIRE(a.execute_sql("SET ISOLATION LEVEL SERIALIZABLE").is_ok());
+    REQUIRE(a.execute_sql("BEGIN").is_ok());
+    REQUIRE(a.execute_sql("SELECT * FROM t WHERE id BETWEEN 10 AND 20 FOR UPDATE").is_ok());
+    REQUIRE(a.execute_sql("INSERT INTO t VALUES (15, 15)").is_ok());
+    REQUIRE(a.execute_sql("COMMIT").is_ok());
+}

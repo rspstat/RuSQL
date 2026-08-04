@@ -34,6 +34,7 @@ add_library(engine_core STATIC
     src/engine/executor/executor_dml.cpp
     src/engine/executor/executor_update.cpp
     src/engine/executor/executor_delete.cpp
+    src/engine/executor/gap_lock.cpp
     src/engine/executor/executor_select.cpp
     src/engine/executor/executor_scalar_func.cpp
     src/engine/executor/executor_subquery.cpp

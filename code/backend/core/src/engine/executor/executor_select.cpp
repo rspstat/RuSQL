@@ -1144,13 +1144,22 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
         if (!txn.is_active()) return StringResult::Err("SELECT FOR UPDATE requires an active transaction (BEGIN first).");
         std::uint64_t txn_id = txn.current_txn_id();
         std::string pk_col = "id";
+        std::size_t pk_col_count = 0;
         if (auto* sc = s.catalog.get_table(table)) {
             for (auto& c : sc->columns) {
                 if (c.primary_key) {
-                    pk_col = c.name;
-                    break;
+                    if (pk_col_count == 0) pk_col = c.name;
+                    pk_col_count++;
                 }
             }
+        }
+        // Gap lock: only under RR/Serializable (matches InnoDB -- READ COMMITTED and
+        // below allow phantoms by design, so no gap lock is taken there), and only for
+        // single-column PK tables (V1 scope, matching extract_pk_eq_value/between_value).
+        if (pk_col_count == 1 &&
+            (txn.isolation_level() == IsolationLevel::RepeatableRead || txn.isolation_level() == IsolationLevel::Serializable)) {
+            GapRange range = extract_pk_gap_range(condition, pk_col);
+            s.lock_mgr.acquire_gap(table, range.lo, range.lo_inclusive, range.hi, range.hi_inclusive, txn_id);
         }
         for (auto& row : result) {
             auto it = row.find(pk_col);
@@ -1172,13 +1181,19 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
         if (!txn.is_active()) return StringResult::Err("SELECT FOR SHARE requires an active transaction (BEGIN first).");
         std::uint64_t txn_id = txn.current_txn_id();
         std::string pk_col = "id";
+        std::size_t pk_col_count = 0;
         if (auto* sc = s.catalog.get_table(table)) {
             for (auto& c : sc->columns) {
                 if (c.primary_key) {
-                    pk_col = c.name;
-                    break;
+                    if (pk_col_count == 0) pk_col = c.name;
+                    pk_col_count++;
                 }
             }
+        }
+        if (pk_col_count == 1 &&
+            (txn.isolation_level() == IsolationLevel::RepeatableRead || txn.isolation_level() == IsolationLevel::Serializable)) {
+            GapRange range = extract_pk_gap_range(condition, pk_col);
+            s.lock_mgr.acquire_gap(table, range.lo, range.lo_inclusive, range.hi, range.hi_inclusive, txn_id);
         }
         for (auto& row : result) {
             auto it = row.find(pk_col);

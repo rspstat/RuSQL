@@ -224,6 +224,20 @@ StringResult Executor::exec_insert_inner(SharedDatabase& s, const std::string& t
     std::vector<Row> prepared;
     std::vector<std::pair<std::string, std::vector<std::pair<std::string, ArithExpr>>>> pending_updates;
 
+    // Gap lock conflict check needs the single-column PK's name (V1 scope, matching the
+    // FOR UPDATE/FOR SHARE/UPDATE/DELETE acquisition sites). Note: schema.primary_key_columns
+    // only reflects a table-level composite PRIMARY KEY (col1, col2) constraint -- an inline
+    // `id INT PRIMARY KEY` column only sets col.primary_key, so PK columns must be counted
+    // this way rather than via that field.
+    std::string gap_pk_col;
+    std::size_t gap_pk_col_count = 0;
+    for (auto& col : schema.columns) {
+        if (col.primary_key) {
+            if (gap_pk_col_count == 0) gap_pk_col = col.name;
+            gap_pk_col_count++;
+        }
+    }
+
     for (auto& values : all_values) {
         std::vector<std::string> positional;
         if (!col_list) {
@@ -459,6 +473,30 @@ StringResult Executor::exec_insert_inner(SharedDatabase& s, const std::string& t
         for (auto& check : schema.check_constraints) {
             if (!eval_check_expr(check.expression, row)) {
                 return StringResult::Err("CHECK constraint '" + check.name.value_or(check.expression) + "' violated");
+            }
+        }
+
+        // Gap lock conflict check (InnoDB-style phantom-read prevention): applies
+        // regardless of THIS transaction's own isolation level/state -- a gap lock
+        // protects its holder, not the inserter (see gap_lock.cpp).
+        if (gap_pk_col_count == 1) {
+            auto pk_it = row.find(gap_pk_col);
+            if (pk_it != row.end()) {
+                std::uint64_t my_txn_id = txn.current_txn_id();
+                for (auto& g : s.lock_mgr.gap_locks_for(table)) {
+                    if (g.holder == my_txn_id) continue; // a txn's own gap never blocks its own INSERT
+                    GapRange range{g.lo, g.hi, g.lo_inclusive, g.hi_inclusive};
+                    if (!gap_range_contains(range, pk_it->second)) continue;
+                    LockResult lr = s.lock_mgr.register_gap_conflict(my_txn_id, g.holder);
+                    if (lr.kind == LockResult::Kind::Deadlock) {
+                        return StringResult::Err("Deadlock detected: transaction " + std::to_string(my_txn_id) + " waits for transaction " +
+                                                  std::to_string(lr.holder) + " (INSERT '" + table + "'). Transaction " +
+                                                  std::to_string(my_txn_id) + " aborted.");
+                    }
+                    return StringResult::Err("ERROR 1205 (HY000): Lock wait timeout exceeded; value '" + pk_it->second + "' for '" + table +
+                                              "'.'" + gap_pk_col + "' falls within a gap lock held by transaction " + std::to_string(g.holder) +
+                                              ". Cannot INSERT.");
+                }
             }
         }
 

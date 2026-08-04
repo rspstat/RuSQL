@@ -109,6 +109,14 @@ StringResult Executor::exec_update_inner(SharedDatabase& s, const std::string& t
     std::uint64_t cur_txn = txn.current_txn_id();
     std::vector<Row> new_versions; // appended to `rows` only after this loop finishes
 
+    // Gap lock: only under RR/Serializable and only for single-column PK tables (V1
+    // scope), matching the same gating used at the FOR UPDATE/FOR SHARE call sites.
+    if (cur_txn != 0 && pk_cols.size() == 1 &&
+        (txn.isolation_level() == IsolationLevel::RepeatableRead || txn.isolation_level() == IsolationLevel::Serializable)) {
+        GapRange range = extract_pk_gap_range(condition, pk_col);
+        s.lock_mgr.acquire_gap(table, range.lo, range.lo_inclusive, range.hi, range.hi_inclusive, cur_txn);
+    }
+
     for (auto& row : rows) {
         if (!matching_pks.count(match_key(row))) continue;
         // A stale dead version sharing this PK with the live matched row (from an

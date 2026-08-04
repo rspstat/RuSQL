@@ -9,6 +9,7 @@ LockManager::LockManager(LockManager&& other) noexcept {
     row_locks_ = std::move(other.row_locks_);
     wait_for_ = std::move(other.wait_for_);
     deadlock_history_ = std::move(other.deadlock_history_);
+    gap_locks_ = std::move(other.gap_locks_);
 }
 
 LockManager& LockManager::operator=(LockManager&& other) noexcept {
@@ -17,6 +18,7 @@ LockManager& LockManager::operator=(LockManager&& other) noexcept {
     row_locks_ = std::move(other.row_locks_);
     wait_for_ = std::move(other.wait_for_);
     deadlock_history_ = std::move(other.deadlock_history_);
+    gap_locks_ = std::move(other.gap_locks_);
     return *this;
 }
 
@@ -106,6 +108,12 @@ void LockManager::release(std::uint64_t txn_id) {
         if (it->first == txn_id || it->second == txn_id) it = wait_for_.erase(it);
         else ++it;
     }
+    for (auto it = gap_locks_.begin(); it != gap_locks_.end();) {
+        auto& rows = it->second;
+        rows.erase(std::remove_if(rows.begin(), rows.end(), [&](const GapLockRow& r) { return r.holder == txn_id; }),
+                   rows.end());
+        if (rows.empty()) it = gap_locks_.erase(it); else ++it;
+    }
 }
 
 void LockManager::insert_lock(const std::string& table, const std::string& pk, std::uint64_t txn_id) {
@@ -158,6 +166,56 @@ std::vector<std::pair<std::uint64_t, std::uint64_t>> LockManager::deadlock_histo
 bool LockManager::is_empty() const {
     std::lock_guard<std::mutex> g(mutex_);
     return row_locks_.empty();
+}
+
+void LockManager::acquire_gap(const std::string& table, std::optional<std::string> lo, bool lo_inclusive,
+                               std::optional<std::string> hi, bool hi_inclusive, std::uint64_t txn_id) {
+    std::lock_guard<std::mutex> g(mutex_);
+    GapLockRow row;
+    row.lo = std::move(lo);
+    row.hi = std::move(hi);
+    row.lo_inclusive = lo_inclusive;
+    row.hi_inclusive = hi_inclusive;
+    row.holder = txn_id;
+    gap_locks_[table].push_back(std::move(row));
+}
+
+std::vector<GapLockRow> LockManager::gap_locks_for(const std::string& table) const {
+    std::lock_guard<std::mutex> g(mutex_);
+    auto it = gap_locks_.find(table);
+    if (it == gap_locks_.end()) return {};
+    return it->second;
+}
+
+LockResult LockManager::register_gap_conflict(std::uint64_t txn_id, std::uint64_t holder) {
+    std::lock_guard<std::mutex> g(mutex_);
+    if (creates_cycle(txn_id, holder)) {
+        deadlock_history_.emplace_back(txn_id, holder);
+        return LockResult::deadlock(holder);
+    }
+    wait_for_[txn_id] = holder;
+    return LockResult::conflict(holder);
+}
+
+std::vector<std::tuple<std::string, std::string, std::uint64_t>> LockManager::gap_lock_rows() const {
+    std::lock_guard<std::mutex> g(mutex_);
+    std::vector<std::tuple<std::string, std::string, std::uint64_t>> v;
+    for (auto& [table, rows] : gap_locks_) {
+        for (auto& r : rows) {
+            std::string range;
+            range += r.lo_inclusive ? "[" : "(";
+            range += r.lo ? *r.lo : "-inf";
+            range += ", ";
+            range += r.hi ? *r.hi : "+inf";
+            range += r.hi_inclusive ? "]" : ")";
+            v.emplace_back(table, range, r.holder);
+        }
+    }
+    std::sort(v.begin(), v.end(), [](auto& a, auto& b) {
+        if (std::get<0>(a) != std::get<0>(b)) return std::get<0>(a) < std::get<0>(b);
+        return std::get<1>(a) < std::get<1>(b);
+    });
+    return v;
 }
 
 // Internal -- called only from acquire()/acquire_shared(), which already hold mutex_.

@@ -634,6 +634,18 @@ StringResult Executor::exec_show_locks(const SharedDatabase& s) const {
         out << "+------------------+-----+--------+\n";
     }
 
+    auto gap_locks = s.lock_mgr.gap_lock_rows();
+    if (!gap_locks.empty()) {
+        out << "\nGap locks:\n";
+        out << "+------------------+----------------------+--------+\n";
+        out << "| table            | range                | txn_id |\n";
+        out << "+------------------+----------------------+--------+\n";
+        for (auto& [tbl, range, txn_id] : gap_locks) {
+            out << "| " << pad_right(tbl, 16) << " | " << pad_right(range, 20) << " | " << pad_left(std::to_string(txn_id), 6) << " |\n";
+        }
+        out << "+------------------+----------------------+--------+\n";
+    }
+
     auto wait_for = s.lock_mgr.wait_for_rows();
     if (!wait_for.empty()) {
         out << "\nWait-for graph:\n";

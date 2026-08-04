@@ -47,12 +47,12 @@
 |------|-------|------------|--------|--------|
 | 원자성 (A) | ✓ | ✓ | ✓ | ✓ (Undo log + WAL) |
 | 일관성 (C) | ✓ | ✓ | ✓ | ✓ (PK/FK/UNIQUE/CHECK 검증) |
-| 격리성 (I) | ✓ | ✓ | ✓ | ✓ (Deferred Write: DML → session_tables 버퍼, COMMIT 시 반영) |
+| 격리성 (I) | ✓ | ✓ | ✓ | ✓ (`SnapshotCtx` 기반 MVCC 가시성: DML은 `s.tables`에 직접 기록되고 격리수준별 스냅샷으로 필터링 — 미커밋 행은 작성자 본인에게만 보임) |
 | 지속성 (D) | ✓ | ✓ | ✓ | ✓ (WAL fsync + 그룹 커밋; 전역 유일 txn_id 태깅으로 세션 간 공유 WAL/Undo Log 격리 — 한 세션의 COMMIT이 다른 세션의 진행 중인 트랜잭션 레코드를 파괴하지 않음) |
-| MVCC | ✓ (InnoDB Undo segment) | ✓ (튜플 버전 힙 내 저장) | ✓ (Undo tablespace 기반 Consistent Read) | △ (스냅샷 기반, 완전 다중버전 아님) |
+| MVCC | ✓ (InnoDB Undo segment) | ✓ (튜플 버전 힙 내 저장) | ✓ (Undo tablespace 기반 Consistent Read) | ✓ (`_xmin`/`_xmax` 태깅 실제 다중버전 — UPDATE마다 새 물리 버전 생성, `SnapshotCtx` 기반 격리수준별 가시성, GC 호라이즌 기반 VACUUM; 단 쓰기 자체는 테이블 단위 직렬화 — 완전한 행 단위 동시 쓰기는 아님) |
 | 격리 수준 | 4가지 (기본: REPEATABLE READ) | 3가지 유효 (기본: READ COMMITTED) | 2가지 유효 — READ COMMITTED / SERIALIZABLE (기본: READ COMMITTED) | 4가지 (기본: READ COMMITTED) |
-| Serializable 구현 | 잠금 기반 + GAP Lock (팬텀 방지) | SSI (Serializable Snapshot Isolation) | 스냅샷 기반 (ORA-08177 직렬화 오류 반환) | 잠금 기반 (완전 SSI 아님) |
-| SAVEPOINT | ✓ | ✓ | ✓ | ✓ (session_tables 기반, ROLLBACK TO 정상 동작) |
+| Serializable 구현 | 잠금 기반 + GAP Lock (팬텀 방지) | SSI (Serializable Snapshot Isolation) | 스냅샷 기반 (ORA-08177 직렬화 오류 반환) | read-set 기반 충돌 검증 + Gap Lock (완전한 SSI 아님 — predicate lock 없어 잠금 없는 일반 SELECT의 phantom/write-skew는 미방지) |
+| SAVEPOINT | ✓ | ✓ | ✓ | ✓ (Undo Log content-matching 기반, ROLLBACK TO 정상 동작) |
 | XA (분산 트랜잭션) | ✓ | ✓ | ✓ | ✗ |
 | 그룹 커밋 | ✓ (binlog 그룹 커밋) | ✓ (WAL writer 통합) | ✓ (LGWR 배치 플러시) | ✓ (GroupCommitCoordinator) |
 | 데드락 감지 | ✓ (wait-for 그래프) | ✓ (wait-for 그래프) | ✓ (wait-for 그래프) | ✓ (DFS 사이클 탐지) |
@@ -66,7 +66,7 @@
 |------|-------|------------|--------|--------|
 | 행 레벨 잠금 | ✓ | ✓ | ✓ | ✓ |
 | 테이블 잠금 | ✓ (LOCK TABLES) | ✓ (LOCK TABLE) | ✓ (LOCK TABLE) | ✗ |
-| 갭 잠금 (Gap Lock) | ✓ (REPEATABLE READ 이상) | ✗ (SSI로 처리) | ✗ (MVCC로 처리) | ✗ |
+| 갭 잠금 (Gap Lock) | ✓ (REPEATABLE READ 이상) | ✗ (SSI로 처리) | ✗ (MVCC로 처리) | ✓ (REPEATABLE READ/SERIALIZABLE, FOR UPDATE/FOR SHARE + 트랜잭션 내 UPDATE/DELETE, 단일 컬럼 PK 범위 한정, gap-vs-gap 무충돌) |
 | SELECT FOR UPDATE | ✓ | ✓ | ✓ | ✓ |
 | SELECT FOR SHARE | ✓ | ✓ | △ (FOR UPDATE SKIP LOCKED로 유사 처리) | ✓ (공유 잠금, 다중 독자 허용) |
 | Advisory Lock | ✗ | ✓ (pg_advisory_lock) | ✗ | ✗ |

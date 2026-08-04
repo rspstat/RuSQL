@@ -87,14 +87,14 @@
 │  B+Tree 범위 스캔 가지치기                       MVCC (_xmin / _xmax 버전 스탬프)                │
 │    scan_from / scan_to O(log N + k)              논리 삭제 → VACUUM → 물리 삭제                  │
 │  range_keys BETWEEN 삭제 최적화                  AUTO VACUUM (DML 200회 누적 임계값)             │
-│    (역순 swap_remove, 인덱스 깨짐 없음)           Row-level Locking (공유 / 배타)                │
+│    (역순 swap_remove, 인덱스 깨짐 없음)           Row-level Locking + Gap Lock                   │
 │  row_pk_pos 위치 인덱스                          SELECT FOR UPDATE / FOR SHARE                   │
 │    DELETE WHERE PK = ? → O(1) swap_remove        데드락 감지 (DFS wait-for 그래프)               │
 │    FK 피참조 테이블은 safe-path 폴백              4단계 격리 수준 (RC ~ SERIALIZABLE)             │
-│  Top-K 인덱스 조기 종료                          Deferred Write                                 │
-│    ORDER BY + LIMIT 시 조건 충족 즉시 중단         (DML → session_tables 버퍼,                  │
-│    SecondaryRange / Between / LikePrefix /         COMMIT 시 s.tables 일괄 반영)               │
-│    CompositeIndexPrefix 경로 지원                SAVEPOINT 기반 세션 로컬 undo                   │
+│  Top-K 인덱스 조기 종료                          MVCC 가시성 (SnapshotCtx)                      │
+│    ORDER BY + LIMIT 시 조건 충족 즉시 중단         (DML → s.tables 직접 기록,                   │
+│    SecondaryRange / Between / LikePrefix /         격리수준별 가시성 필터 적용)                │
+│    CompositeIndexPrefix 경로 지원                SAVEPOINT undo (Undo Log 기반)                  │
 │  수치 인식 키 비교 ("10" > "9" 정상 처리)         세션별 독립 Executor                           │
 │                                            (shared_ptr<RwLock<SharedDatabase>> 공유)            │
 │  쿼리 실행 최적화                                                                               │

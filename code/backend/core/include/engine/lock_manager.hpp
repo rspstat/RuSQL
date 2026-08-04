@@ -33,6 +33,22 @@ struct LockResult {
     static LockResult deadlock(std::uint64_t h) { return LockResult{Kind::Deadlock, h}; }
 };
 
+// Gap lock (InnoDB-style phantom-read prevention): a range over a table's PK values held
+// by a transaction. Unlike row locks, gap locks never conflict with each other at
+// acquire time -- only a later INSERT whose PK value falls inside the range conflicts
+// (see LockManager::register_gap_conflict). Bound comparison/containment is deliberately
+// NOT done here -- LockManager stays SQL-semantics-free; the executor layer (which knows
+// the numeric-vs-lexicographic comparison rules used elsewhere for BETWEEN/Gt/Lt/...)
+// decides containment and only calls register_gap_conflict once it already knows which
+// holder conflicts.
+struct GapLockRow {
+    std::optional<std::string> lo;
+    std::optional<std::string> hi;
+    bool lo_inclusive = true;
+    bool hi_inclusive = true;
+    std::uint64_t holder = 0;
+};
+
 // Stage 4 (table-level concurrency): guarded by its own mutex_ so that two sessions
 // operating on different tables (each holding only that table's own lock, not a single
 // whole-database exclusive lock anymore) can safely call acquire/acquire_shared/release
@@ -64,6 +80,15 @@ public:
     std::vector<std::pair<std::uint64_t, std::uint64_t>> deadlock_history() const;
     bool is_empty() const;
 
+    // Gap locks: always granted immediately (gap-vs-gap never conflicts). The executor
+    // decides range containment and calls register_gap_conflict only when it already
+    // knows a specific holder's range collides with a value being inserted.
+    void acquire_gap(const std::string& table, std::optional<std::string> lo, bool lo_inclusive,
+                      std::optional<std::string> hi, bool hi_inclusive, std::uint64_t txn_id);
+    std::vector<GapLockRow> gap_locks_for(const std::string& table) const;
+    LockResult register_gap_conflict(std::uint64_t txn_id, std::uint64_t holder);
+    std::vector<std::tuple<std::string, std::string, std::uint64_t>> gap_lock_rows() const;
+
 private:
     mutable std::mutex mutex_;
     // (table, pk) key — a std::map (ordered) avoids needing a custom hash for
@@ -71,6 +96,7 @@ private:
     std::map<std::pair<std::string, std::string>, LockEntry> row_locks_;
     std::unordered_map<std::uint64_t, std::uint64_t> wait_for_;
     std::vector<std::pair<std::uint64_t, std::uint64_t>> deadlock_history_;
+    std::unordered_map<std::string, std::vector<GapLockRow>> gap_locks_;
 
     // Internal, called only while mutex_ is already held.
     bool creates_cycle(std::uint64_t from, std::uint64_t to) const;

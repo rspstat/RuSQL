@@ -93,6 +93,32 @@
 > ISOLATION LEVEL이 이제 진짜 에러를 내는 것 확인). 전체 마무리: Debug/Release 전체 타겟
 > 재빌드 → `engine_tests.exe` **261 테스트 케이스 / 16936 assertion, 양쪽 구성 모두 통과**
 > (256/16911에서 5건 증가) → `test_full.sql`/`test_full-ver2.sql` 재실행(신규 회귀 없음).
+>
+> **업데이트 (2026-07-22 ~ 2026-08-05, MVCC 실제 재설계 세션):** 사용자가 "진짜 MVCC + XA"를
+> 물어봐 MVCC부터 단계적으로 진행하기로 하고(XA는 이후로 연기), Section B "트랜잭션 스냅샷이 DB
+> 전체 deep clone"과 Section C "SERIALIZABLE이 phantom(행 개수)만 감지" 두 항목을 실제로 해결.
+> **Stage 1~2**: `SnapshotCtx` 기반 실제 격리수준별 가시성(RU/RC/RR/Serializable이 이제 코드상
+> 실제로 다르게 동작), UPDATE가 항상 새 물리 버전을 append, `session_tables` 세션 로컬 버퍼
+> 방식 완전 삭제(모든 DML이 `s.tables`에 직접 실제 txn id로 태깅되어 기록), GC를 호라이즌
+> 기반으로 교체. **Stage 3**: `validate_serializable`을 행 개수 비교에서 read-set 기반 재검증으로
+> 교체(같은 개수·다른 내용 인터리빙도 감지) — 이 과정에서 이제 완전히 죽은 `snapshot_` deep-clone
+> 필드 자체를 삭제해 Section B의 그 항목도 함께 해결(O(DB 크기)→O(1)). **Stage 4**: "읽기 전용만
+> 동시, 그 외 전부 배타"였던 락을 구조적 락(DDL 등)+테이블별 `shared_mutex` 2계층으로 재설계해
+> 서로 다른 테이블에 대한 쓰기도 실제로 병렬 실행되도록 확장 — 실제 멀티스레드 스트레스 테스트로
+> 데이터 레이스 2건(테이블-키 맵 지연초기화 레이스, UNION/EXPLAIN 테이블 락 누락) 발견해 수정.
+> **Gap Lock**: Section H에 P3로 남아있던 항목 — InnoDB 스타일로 `FOR UPDATE`/`FOR SHARE`·
+> 트랜잭션 내 UPDATE/DELETE가 PK 범위를 잠가 동시 INSERT phantom을 차단하도록 구현(단일 컬럼 PK
+> V1 범위), 검증 중 INSERT측 PK 컬럼 판정 버그(복합 PK 전용 필드를 잘못 사용해 흔한 인라인 PK
+> 테이블에서 항상 스킵되던 것) 발견해 수정. 상세 내역은 새로 추가된 Section B의 3개 행(MVCC
+> Stage 1~2/Stage 4/Gap Lock)과 Section C의 갱신된 SERIALIZABLE 행 참고. **아직 의도적으로 보류**:
+> 행 단위 완전 동시 쓰기(Stage 4는 테이블 단위까지만), 잠금 대기가 진짜로 블로킹되는 방식(현재도
+> 여전히 "즉시 충돌/데드락 감지", sleep 없음 — Section C "Lock wait timeout이 실제로 대기 안 함"
+> 항목 그대로), Postgres 수준 완전한 SSI(predicate lock 기반, 잠금 없는 SELECT의 phantom까지
+> 방지), XA 분산 트랜잭션 — 4가지 모두 사용자와 논의 후 "필수 아님" 판단, 다음 세션으로 이월.
+> 전체 마무리: Debug/Release 전체 타겟 재빌드 → `engine_tests.exe` **284 테스트 케이스 / 17372
+> assertion, 양쪽 구성 모두 통과** → `test_full.sql`/`test_full-ver2.sql` 재실행(신규 회귀 없음)
+> → 실제 서버 + Python 소켓 스크립트(네이티브 프로토콜 챌린지-응답 인증 재사용, `threading`으로
+> 진짜 동시 연결)로 각 단계 라이브 검증.
 
 **P0**=정확성/무결성 직결(즉시 수정) · **P1**=핵심 아키텍처/보안 · **P2**=성능/호환성/사용성 · **P3**=장기 확장·정리
 
@@ -120,12 +146,15 @@
 
 | 우선순위 | 항목 | 현재 문제 (근거) | 기대 효과 | 난이도 |
 |---|---|---|---|---|
-| ✅ 완료 | 전역 단일 락으로 모든 문장 완전 직렬화 | 원인(Rust `executor.rs:674-683`, C++도 동일하게 `executor_core.cpp`의 `Executor::execute()`가 무조건 `shared->write()`): SELECT 포함 모든 문장이 전체 write lock 획득, 두 세션 동시 실행 불가. `SharedDatabase`를 감싸는 `RwLock<T>`(`sync.hpp`)가 이미 진짜 `std::shared_mutex` 기반이라는 걸 활용 — 완전한 MVCC 재설계 없이, 진짜 읽기 전용 문장(FOR UPDATE/FOR SHARE·파생테이블 없는 SELECT, WHERE/HAVING/JOIN-ON에 중첩된 서브쿼리까지 재귀 검사, SHOW류, DESCRIBE, EXPLAIN)만 `is_pure_read_only()`로 분류해 `shared->read()`로 동시 실행하도록 수정(`executor_core.cpp`). 이 경로에서도 도달 가능한 `BufferPool::get_page`의 캐시미스 채움이 실제 레이스였어서 `BufferPool`에 자체 뮤텍스+atomic 카운터 추가(move 생성자 직접 작성 필요); `LockManager`는 모든 변경 경로가 여전히 write-분류로 남아 레이스 시나리오 자체가 없어 뮤텍스 불필요(불변조건을 헤더에 명시). `test_concurrency.cpp` 신규 — 실제 스레드로 대용량 풀스캔 SELECT 진행 중 다른 세션의 `SELECT 1`이 즉시 응답하는지 실측(1.06초 vs 0.0002초로 확인) | LockManager·격리수준·병렬실행이 실질적 동시성 이득으로 연결 | 높음 |
-| P1 | 트랜잭션 스냅샷이 DB 전체 deep clone | `txn_manager.rs:262-278` — BEGIN마다 `tables.clone()` 전체 복제. 단, 기본 격리수준(ReadCommitted)에서는 발동 안 하고 REPEATABLE READ/SERIALIZABLE을 명시적으로 요청했을 때만 — 진짜 고치려면 row-level MVCC 재설계 필요, 이번 패스에서 의도적으로 제외 | 행 단위 버전 체인 전환 시 비용 절감 | 높음 |
+| ✅ 완료 | 전역 단일 락으로 모든 문장 완전 직렬화 | 원인(Rust `executor.rs:674-683`, C++도 동일하게 `executor_core.cpp`의 `Executor::execute()`가 무조건 `shared->write()`): SELECT 포함 모든 문장이 전체 write lock 획득, 두 세션 동시 실행 불가. `SharedDatabase`를 감싸는 `RwLock<T>`(`sync.hpp`)가 이미 진짜 `std::shared_mutex` 기반이라는 걸 활용 — 완전한 MVCC 재설계 없이, 진짜 읽기 전용 문장(FOR UPDATE/FOR SHARE·파생테이블 없는 SELECT, WHERE/HAVING/JOIN-ON에 중첩된 서브쿼리까지 재귀 검사, SHOW류, DESCRIBE, EXPLAIN)만 `is_pure_read_only()`로 분류해 `shared->read()`로 동시 실행하도록 수정(`executor_core.cpp`). 이 경로에서도 도달 가능한 `BufferPool::get_page`의 캐시미스 채움이 실제 레이스였어서 `BufferPool`에 자체 뮤텍스+atomic 카운터 추가(move 생성자 직접 작성 필요); `LockManager`는 모든 변경 경로가 여전히 write-분류로 남아 레이스 시나리오 자체가 없어 뮤텍스 불필요(불변조건을 헤더에 명시). `test_concurrency.cpp` 신규 — 실제 스레드로 대용량 풀스캔 SELECT 진행 중 다른 세션의 `SELECT 1`이 즉시 응답하는지 실측(1.06초 vs 0.0002초로 확인). **후속(MVCC Stage 4, 아래 새 행 참고)으로 이 항목 자체가 더 확장됨**: 이 시점엔 "읽기 전용만 동시, 그 외 전부 배타"였지만, 이후 서로 다른 테이블에 대한 쓰기도 실제로 동시 실행되도록(테이블별 `shared_mutex`) 재설계 — 이때 "모든 변경 경로가 write-분류로 남아 뮤텍스 불필요"였던 `LockManager`도 실제로 동시 호출될 수 있게 되어 자체 뮤텍스가 추가됨 | LockManager·격리수준·병렬실행이 실질적 동시성 이득으로 연결 | 높음 |
+| ✅ 완료 | 트랜잭션 스냅샷이 DB 전체 deep clone | 원인(Rust `txn_manager.rs:262-278`, 이식 시 그대로 보존): BEGIN마다 REPEATABLE READ/SERIALIZABLE이면 `tables.clone()`으로 DB 전체 복제. MVCC 실제 재설계(Stage 1~3)로 근본 해결 — 행 단위 버전 체인(`_xmin`/`_xmax` + `SnapshotCtx`)이 도입되면서 BEGIN은 이제 가벼운 값 몇 개(`{self_txn_id, cutoff, in_progress}`)만 캡처하면 됨, DB 전체를 복제하는 무거운 `snapshot_` 필드는 완전히 제거(`begin_with_snapshot`의 이제 안 쓰는 `tables` 매개변수도 함께 제거) — O(DB 크기)에서 O(1)로 | 행 단위 버전 체인 전환 시 비용 절감 | 높음 |
 | P1 | 버퍼 풀이 테이블 전체 단위 캐싱(사실상 무의미) | `buffer_pool.rs` — 시작 시 전 테이블이 이미 로드되어 get_page 경로 도달 불가. 위 동시성 수정으로 이 경로에 스레드 안전성은 확보했으나(자체 뮤텍스), "죽은 read-cache 경로를 실제로 페이지 단위로 살리는" 근본 수정 자체는 이번 패스에서 의도적으로 제외 | 페이지 캐싱 구현 시 대용량 테이블 지원 | 높음 |
 | P1 | 내부 쿼리 합성이 ASCII 표 문자열 재파싱 방식 | `executor.rs` 다수 — UNION/CTE/서브쿼리가 표시용 표를 `\|`로 split해 재파싱, 값에 `\|`/개행 있으면 깨짐. 동시성 개선과 무관한 별도 정확성 이슈라 이번 패스에서 제외 | 구조화된 내부 API로 정확성·성능 개선 | 높음 |
 | P2 | 다중 조인 알고리즘 선택이 누적 카디널리티 미반영 | `planner.rs:121-125` — 2·3번째 조인이 항상 원래 base 테이블 행수 기준(join *순서* 결정에는 누적 카디널리티 DP가 이미 쓰이지만, join *알고리즘 선택*에는 반영 안 됨). 동시성과 무관한 planner 품질 이슈라 이번 패스에서 제외 | 다중 테이블 조인 실행계획 정확도 | 중간 |
 | ✅ 완료 | 프로시저 루프/트리거 재귀에 상한·타임아웃 없음 | 원인(Rust `executor.rs:9210-9285,9381-9391`, C++도 동일): `exec_proc_while`/`exec_proc_loop`/`exec_proc_repeat`(`executor_proc.cpp`)에 반복 상한이 전혀 없고 `fire_triggers`(`executor_dml.cpp`)도 재귀 깊이 제한이 없어, 위 전역 락 항목이 고쳐진 뒤에도 DML/DDL/프로시저 CALL은 여전히 write-분류로 남기 때문에 무한루프 하나가 서버 전체를 영원히 멈출 수 있었음. 이미 있던 재귀 CTE의 1000회 상한(`executor_cte.cpp`) 패턴을 재사용해 세 반복문에 10만회 상한(초과 시 에러) 추가, `fire_triggers`에 재귀 깊이 32단 상한 추가(반환형을 `StringResult`로 변경해 INSERT/UPDATE/DELETE 3곳 호출부에 에러 전파 추가). 단, `fire_triggers`의 개별 트리거문 실패를 무시하는 기존 동작(Rust 원본의 `let _ = ...`와 동일, 의도적으로 보존)때문에 재귀 상한 초과 에러가 최상위 호출까지 전파되진 않음 — 그래도 재귀 자체는 확실히 유한 깊이에서 멈춤(실제 관찰 가능한 안전성 속성이자 이번 수정의 핵심 목표). `test_executor_proc.cpp`에 회귀 테스트 3건 추가 | 서버 가용성 확보 — 한 클라이언트의 버그가 전체 서버를 영구 정지시키지 않음 | 중간 |
+| ✅ 완료 | (MVCC Stage 1~2, 신규) `session_tables` 세션 로컬 버퍼 방식 — 진짜 다중버전이 아니라 "DML을 세션별 버퍼에 쌓았다가 COMMIT 때 한꺼번에 반영"하는 방식이라 행 단위 버전 체인이 없었음 | 원인: 위 두 항목(전역 단일 락, deep-clone 스냅샷)의 근본 배경 — `_xmin`/`_xmax`는 있었지만 실제 다중버전 판정 로직이 없어 사실상 장식이었음. `SnapshotCtx{self_txn_id, cutoff, in_progress}` 도입 + `is_visible_for_read(row, ctx)`(격리수준별로 실제로 다르게 동작 — RU는 진짜 dirty read, RC는 문장마다 새 스냅샷, RR/Serializable은 BEGIN 시점 고정)로 전면 교체. UPDATE는 이제 항상 새 물리 버전을 append(구버전은 `_xmax`만 스탬프)하고 `session_tables`/`session_swap_in`/`session_swap_out`은 완전히 삭제 — 모든 DML이 `s.tables`에 직접, 실제 트랜잭션 ID로 태깅되어 기록됨. VACUUM도 "GC 호라이즌"(현재 활성 트랜잭션들 중 가장 오래된 스냅샷보다 먼저 죽은 행만 제거) 기반으로 교체. 15개 인덱스 기반 fast-path 읽기 전부에 새 가시성 검사 배선, 라이브 교차세션 검증(RR 격리 확인, ROLLBACK 완전 정리, SAVEPOINT undo, VACUUM 호라이즌 보호) 완료 | 위 두 항목이 임시방편이 아니라 실제 아키텍처가 됨, `_xmin`/`_xmax`가 이름값을 함 | 매우 높음 |
+| ✅ 완료 | (MVCC Stage 4, 신규) 위 "전역 단일 락" 수정이 읽기 전용에만 그쳐 서로 다른 테이블에 대한 쓰기도 여전히 완전 직렬화 | 원인: `is_pure_read_only()` 분류는 SELECT류만 동시 실행을 허용, INSERT/UPDATE/DELETE는 테이블이 겹치든 안 겹치든 전부 배타 락. 구조적 잠금(`RwLock<SharedDatabase>`, DDL/DCL/VACUUM/CHECKPOINT + CTE·FROM-서브쿼리·뷰·발화 트리거가 있는 문장 전용 — 이런 문장은 실행 중 `s.tables`/`s.catalog`에 없던 이름을 임시로 삽입/삭제해 고정된 테이블 락 세트를 미리 잡을 수 없음)과 테이블별 `shared_mutex`(그 외 평범한 단일/조인 INSERT/UPDATE/DELETE/SELECT/MERGE/다중 UPDATE·DELETE — 대상 + FK 부모/자식 1-hop을 정렬된 순서로) 2계층으로 재설계. `LockManager`/`QueryResultCache`에 자체 뮤텍스 추가(더 이상 전역 락이 보호막이 아니게 됨), `maybe_auto_vacuum`을 전체-DB 스윕에서 단일 테이블 스코프로 축소. 실제 멀티스레드 스트레스 테스트로 데이터 레이스 2건 발견해 수정(테이블-키 맵 지연 초기화 레이스, UNION/EXPLAIN의 누락된 테이블 락). 실제 서버 + Python `threading`으로 서로 다른 테이블 동시 쓰기 실측 검증 | 서로 다른 테이블에 대한 쓰기가 실제로 병렬 실행됨 (행 단위 동시 쓰기는 여전히 범위 밖, 아래 참고) | 높음 |
+| ✅ 완료 | (Gap Lock, 신규) Section H에 P3로 남아있던 "LOCK TABLES / Gap Lock" 갭 중 Gap Lock 부분 | 원인: 행만 잠그는 방식이라, REPEATABLE READ/SERIALIZABLE 트랜잭션이 범위를 잠그고 재조회해도 다른 트랜잭션이 그 범위에 새 행을 INSERT하면 유령 행(phantom)이 보일 수 있었음. InnoDB 스타일로 구현: `FOR UPDATE`/`FOR SHARE`와 트랜잭션 내 UPDATE/DELETE가 WHERE절의 PK 범위(Eq/Gt/Gte/Lt/Lte/Between, AND 조합 — `collect_and_leaves`로 추출, 그 외엔 안전하게 테이블 전체 범위로 폴백)를 잠그고, 같은 범위로의 동시 INSERT를 거부. Gap Lock끼리는 무충돌(실제 InnoDB와 동일), 데드락 그래프는 행 잠금과 공유. V1 범위: 단일 컬럼 PK만. 검증 중 실제 버그 발견: INSERT 쪽 체크가 처음엔 `schema.primary_key_columns`(테이블 레벨 복합 PK 제약 전용 필드)를 읽어서, 흔한 인라인 `id INT PRIMARY KEY` 테이블에서 항상 조용히 스킵되고 있었음 — 통합 테스트가 즉시 잡아냄, 다른 3곳과 같은 컬럼 스캔 방식으로 수정. Debug+Release 284케이스/17372assertion 통과, 실제 서버 라이브 검증 완료 | REPEATABLE READ/SERIALIZABLE에서 잠그는 읽기·범위 UPDATE/DELETE의 phantom 방지 (LOCK TABLES 자체는 여전히 미지원, Postgres 수준 predicate-lock 기반 완전 SSI도 아직 아님 — Section C의 SERIALIZABLE 행 참고) | 중간 |
 
 ## C. 트랜잭션 내구성 (WAL·Undo·Checkpoint)
 
@@ -139,9 +168,9 @@
 | ✅ 완료 | 체크포인트-그룹커밋 TOCTOU 레이스 | 원인(Rust `executor.rs:824`, 이식 시 그대로 보존): `executor_txn.cpp`의 그룹 커밋 경로(`exec_commit_phase1`/`execute_commit_grouped`)에서 `active_txn_ids`(체크포인트가 "WAL 잘라내도 안전한가"의 유일한 판단 근거) 삭제가 `commit_write_record()`(WAL COMMIT 레코드를 **fsync 없이** 기록) 직후, 즉 `sync_commit()`(실제 fsync, 락 밖에서 실행)과 `commit_finalize()`(WAL/undo 정리)가 끝나기 *전에* 일어남 — 그 사이 창에서 체크포인트가 끼어들면 아직 디스크에 안전하게 fsync되지 않은 커밋을 안전으로 오판해 WAL을 잘라낼 수 있었음(단순/비그룹 커밋 경로는 원래도 안전 — `txn.commit()`이 동기 fsync 후 삭제). `active_txn_ids` 삭제를 `sync_commit()`+`commit_finalize()` 완료 후로 이동(자체 뮤텍스로 보호돼 `shared->write()` 재획득 불필요). `test_executor_txn.cpp`에 회귀 테스트 2건 추가 — 그룹 커밋 후 정말로 지워지는지, 그리고 진행 중인 트랜잭션이 `active_txn_ids`에 남아있는 동안 CHECKPOINT가 실제로 트렁케이션을 보류하는지 | 크래시 복구 시 커밋 유실 방지 | 높음 |
 | P1 | WAL/Undo 디코딩이 첫 손상 지점서 이후 전부 폐기 | `wal.rs:80-95, txn_manager.rs:101-123` — 체크섬 없음 | 부분 손상에도 최대 복구 | 중간 |
 | ✅ 완료 | 크래시 복구가 보조/복합 인덱스 미갱신 | 원인(Rust `executor.rs:8130-8298`, 이식 시 그대로 보존): REDO/UNDO replay가 `s.tables`와(REDO INSERT에 한해서만) PK B+Tree만 갱신하고, 보조 btree/hash/복합 인덱스는 물론 UPDATE/DELETE/UNDO 경로의 PK B+Tree조차 갱신 안 함. C++ `executor_txn.cpp`의 `recover_from_wal`에서 replay 중 건드린 테이블을 모아 replay 완료 후 PK/보조/해시/복합 인덱스를 전부 재구축하도록 수정. `test_executor_txn.cpp`에 `commit_write_record()`로 "커밋 WAL은 썼지만 finalize 전 크래시"를 재현하는 회귀 테스트 추가 | 크래시 복구 후 인덱스 기반 조회 정확성 | 높음 |
-| P2 | SERIALIZABLE이 phantom(행 개수)만 감지 | `txn_manager.rs:293-310` — write-skew 미탐지 | 이상현상 탐지 정교화 | 높음 |
+| 🟡 부분 완료 | SERIALIZABLE이 phantom(행 개수)만 감지 | 원래 원인(Rust `txn_manager.rs:293-310`): 행 개수 비교만 해서 "개수는 같지만 내용이 다른" 인터리빙(한 행 삭제 + 다른 행 삽입 등)을 못 잡았음. `validate_serializable`을 read-set 기반 재검증(트랜잭션이 실제로 읽은 각 행이 BEGIN~커밋 사이 이미 커밋된 다른 트랜잭션에 의해 바뀌었는지 확인)으로 교체 + Gap Lock(InnoDB 스타일, `FOR UPDATE`/`FOR SHARE`·트랜잭션 내 UPDATE/DELETE가 PK 범위를 잠가 동시 INSERT phantom을 차단) 추가 — 둘 다 완료. **아직 남은 갭**: predicate lock이 없어 **잠금 없는 일반 SELECT**로 범위를 조회하는 경우엔 read-set에 아직 존재하지 않던 phantom 행이 잡히지 않고, Gap Lock도 잠그는 읽기(FOR UPDATE/SHARE)와 범위 UPDATE/DELETE에만 걸림 — Postgres 수준의 진짜 SSI(SIREAD 락 기반 predicate 추적)는 아님. 사용자와 논의 후 "필수 아님, 나중에 여유 있으면" 판단으로 보류 | 이상현상 탐지 정교화 | 높음(잔여분) |
 | P1 | Lock wait timeout이 실제로 대기 안 함 | `executor.rs:3319-3378` — 즉시 에러 반환, sleep 없음(사실상 NOWAIT) | 락 타임아웃 설명대로 동작 | 중간 |
-| P2 | READ UNCOMMITTED/COMMITTED 코드상 미분화 | `txn_manager.rs:262-289` — 동일 분기 처리 | 격리수준 문서-동작 일치 | 중간 |
+| ✅ 완료 | READ UNCOMMITTED/COMMITTED 코드상 미분화 | 원인(Rust `txn_manager.rs:262-289`, 이식 시 그대로 보존): RU/RC가 완전히 동일한 코드 경로. MVCC 실제 재설계(Stage 1, `SnapshotCtx`) 과정에서 실제로 갈라짐 — RU는 `{self, UINT64_MAX, {}}`(모든 트랜잭션 id를 이미 커밋으로 간주하는 진짜 dirty read), RC는 문장마다 새로 캡처하는 스냅샷. 라이브 검증: 같은 세션이 RU/RC 각각으로 접속해 다른 세션의 아직 커밋 안 된 INSERT를 조회 — RU는 보이고 RC는 안 보이는 것 확인 | 격리수준 문서-동작 일치 | 중간 |
 
 ## D. 보안
 
@@ -191,7 +220,7 @@
 
 | 우선순위 | 항목 | 기대 효과 | 난이도 |
 |---|---|---|---|
-| P3 | LOCK TABLES / Gap Lock | 동시성 제어 갭 해소 | 중간 |
+| P3 | LOCK TABLES | 동시성 제어 갭 해소 (Gap Lock은 Section B에서 완료) | 중간 |
 | P3 | REPLACE INTO / DEFERRABLE 제약 | 실무 관용구 지원 | 낮음~중간 |
 | P3 | 표현식/부분/내림차순 인덱스 | 인덱스 실무 완성도 | 중간 |
 | P3 | LATERAL JOIN | 표준 SQL 지원 확장 | 높음 |

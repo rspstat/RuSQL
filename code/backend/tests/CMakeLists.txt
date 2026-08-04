@@ -12,6 +12,7 @@ add_executable(engine_tests
     test_storage.cpp
     test_txn.cpp
     test_lock_manager.cpp
+    test_gap_lock.cpp
     test_query_cache.cpp
     test_join.cpp
     test_planner.cpp
