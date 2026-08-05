@@ -212,15 +212,17 @@ StringResult Executor::exec_update_inner(SharedDatabase& s, const std::string& t
 
     for (auto& u : undo_entries) txn.log_update(table, u.key, u.old_json, u.new_json);
 
-    std::vector<Row> rows_clone = s.tables.at(table);
-    if (auto idx_it = s.indexes.find(table); idx_it != s.indexes.end()) {
-        idx_it->second = BPlusTree();
-        for (auto& row : rows_clone) {
-            auto it = row.find(pk_col);
-            std::string k = it != row.end() ? it->second : std::string();
-            nlohmann::json j = row;
-            idx_it->second.insert(k, j.dump());
-        }
+    // Incremental index maintenance (PK B+Tree + composite indexes): previously this
+    // cloned the whole table and fully rebuilt both from scratch on every UPDATE,
+    // regardless of how few rows actually changed -- replaced with per-row
+    // remove-old-key/insert-new-key updates, matching what index_remove_row/
+    // index_insert_row already do for secondary/hash indexes just below. `u.key` is the
+    // OLD row's pk_col value (captured before this row was touched); the new key is
+    // read from `new_row` rather than assumed equal to `u.key`, since the PK column
+    // itself can be part of the UPDATE's SET list.
+    std::vector<std::string> comp_keys;
+    for (auto& [k, ci] : s.composite_indexes) {
+        if (ci.table == table) comp_keys.push_back(k);
     }
 
     for (auto& u : undo_entries) {
@@ -233,15 +235,20 @@ StringResult Executor::exec_update_inner(SharedDatabase& s, const std::string& t
             new_row = nlohmann::json::parse(u.new_json).get<Row>();
         } catch (...) {
         }
+        if (auto idx_it = s.indexes.find(table); idx_it != s.indexes.end()) {
+            idx_it->second.remove(u.key);
+            auto new_pk_it = new_row.find(pk_col);
+            std::string new_pk = new_pk_it != new_row.end() ? new_pk_it->second : u.key;
+            nlohmann::json j = new_row;
+            idx_it->second.insert(new_pk, j.dump());
+        }
         index_remove_row(s, table, old_row, pk_col);
         index_insert_row(s, table, new_row);
+        for (auto& k : comp_keys) {
+            s.composite_indexes.at(k).remove_row(old_row);
+            s.composite_indexes.at(k).insert_row(new_row);
+        }
     }
-
-    std::vector<std::string> comp_keys;
-    for (auto& [k, ci] : s.composite_indexes) {
-        if (ci.table == table) comp_keys.push_back(k);
-    }
-    for (auto& k : comp_keys) s.composite_indexes.at(k).rebuild(rows_clone);
 
     std::vector<std::string> changed_cols;
     for (auto& [c, _] : assignments) changed_cols.push_back(c);

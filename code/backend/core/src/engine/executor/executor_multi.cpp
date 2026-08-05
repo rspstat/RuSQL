@@ -156,30 +156,40 @@ StringResult Executor::exec_multi_update(SharedDatabase& s, std::vector<std::str
         auto rit = s.tables.find(tgt);
         if (rit == s.tables.end()) return StringResult::Err("Table '" + tgt + "' not found");
         auto& rows = rit->second;
+        std::vector<std::pair<Row, Row>> updated_pairs; // (old_row, new_row)
         for (auto& row : rows) {
             if (auto uit = pk_updates.find(row_key(row)); uit != pk_updates.end()) {
+                Row old_row = row;
                 for (auto& [col, val] : uit->second) row[col] = val;
+                updated_pairs.emplace_back(std::move(old_row), row);
                 total_count++;
             }
         }
 
-        std::vector<Row> rows_clone = s.tables.at(tgt);
-        if (auto idx_it = s.indexes.find(tgt); idx_it != s.indexes.end()) {
-            idx_it->second = BPlusTree();
-            for (auto& row : rows_clone) {
-                auto it = row.find(pk_col);
-                std::string k = it != row.end() ? it->second : std::string();
-                nlohmann::json j = row;
-                idx_it->second.insert(k, j.dump());
+        // Incremental index maintenance (PK B+Tree, secondary, hash, composite):
+        // previously this cloned the whole table and fully rebuilt every index kind from
+        // scratch on every statement regardless of how few rows changed -- replaced with
+        // per-row remove-old-key/insert-new-key updates (the PK value itself can be part
+        // of the assignments, so the new key is read from `new_row` rather than assumed
+        // unchanged).
+        for (auto& [old_row, new_row] : updated_pairs) {
+            if (auto idx_it = s.indexes.find(tgt); idx_it != s.indexes.end()) {
+                auto old_it = old_row.find(pk_col);
+                idx_it->second.remove(old_it != old_row.end() ? old_it->second : std::string());
+                auto new_it = new_row.find(pk_col);
+                nlohmann::json j = new_row;
+                idx_it->second.insert(new_it != new_row.end() ? new_it->second : std::string(), j.dump());
+            }
+            index_remove_row(s, tgt, old_row, pk_col);
+            index_insert_row(s, tgt, new_row);
+            for (auto& [k, ci] : s.composite_indexes) {
+                if (ci.table != tgt) continue;
+                ci.remove_row(old_row);
+                ci.insert_row(new_row);
             }
         }
-        rebuild_secondary_indexes(s, tgt, rows_clone);
-        std::vector<std::string> comp_keys;
-        for (auto& [k, ci] : s.composite_indexes) {
-            if (ci.table == tgt) comp_keys.push_back(k);
-        }
-        for (auto& k : comp_keys) s.composite_indexes.at(k).rebuild(rows_clone);
 
+        std::vector<Row> rows_clone = s.tables.at(tgt);
         s.buffer_pool.write_page(tgt, rows_clone);
         s.buffer_pool.flush_page(tgt, s.disk);
     }
@@ -371,10 +381,13 @@ StringResult Executor::exec_multi_delete(SharedDatabase& s, std::vector<std::str
         for (auto& r : rows) {
             if (is_visible(r)) before++;
         }
+        std::vector<Row> deleted_rows;
         rows.erase(std::remove_if(rows.begin(), rows.end(),
                                    [&](const Row& r) {
                                        if (!is_visible(r)) return false;
-                                       return target_pks.count(row_key(r)) != 0;
+                                       if (target_pks.count(row_key(r)) == 0) return false;
+                                       deleted_rows.push_back(r);
+                                       return true;
                                    }),
                    rows.end());
         std::size_t after = 0;
@@ -383,22 +396,21 @@ StringResult Executor::exec_multi_delete(SharedDatabase& s, std::vector<std::str
         }
         total_count += before - after;
 
-        std::vector<Row> rows_clone = s.tables.at(tgt);
+        // Incremental index maintenance (PK B+Tree + composite): previously this cloned
+        // the whole table and fully rebuilt both from scratch on every statement,
+        // regardless of how few rows were actually deleted.
         if (auto idx_it = s.indexes.find(tgt); idx_it != s.indexes.end()) {
-            idx_it->second = BPlusTree();
-            for (auto& row : rows_clone) {
+            for (auto& row : deleted_rows) {
                 auto it = row.find(pk_col);
-                std::string k = it != row.end() ? it->second : std::string();
-                nlohmann::json j = row;
-                idx_it->second.insert(k, j.dump());
+                idx_it->second.remove(it != row.end() ? it->second : std::string());
             }
         }
-        std::vector<std::string> comp_keys;
         for (auto& [k, ci] : s.composite_indexes) {
-            if (ci.table == tgt) comp_keys.push_back(k);
+            if (ci.table != tgt) continue;
+            for (auto& row : deleted_rows) ci.remove_row(row);
         }
-        for (auto& k : comp_keys) s.composite_indexes.at(k).rebuild(rows_clone);
 
+        std::vector<Row> rows_clone = s.tables.at(tgt);
         s.buffer_pool.write_page(tgt, rows_clone);
         s.buffer_pool.flush_page(tgt, s.disk);
     }

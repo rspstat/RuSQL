@@ -237,6 +237,53 @@ TEST_CASE("Multi-table DELETE on a composite-PK target only deletes the row matc
     REQUIRE(rows[0].at("b") == "2");
 }
 
+// Regression for switching multi-table UPDATE's index maintenance from "clone the whole
+// target table and rebuild every index kind from scratch" to per-row incremental
+// updates (PK B+Tree, secondary/hash via index_remove_row/index_insert_row, composite).
+TEST_CASE("Multi-table UPDATE keeps the target table's composite secondary index consistent",
+          "[executor][misc][regression]") {
+    TempDataDir dir("exec_misc_data_multi_upd_idx");
+    Executor ex(dir.path);
+    REQUIRE(ex.execute_sql("CREATE DATABASE company").is_ok());
+    REQUIRE(ex.execute_sql("USE company").is_ok());
+    REQUIRE(ex.execute_sql("CREATE TABLE dept (id INT PRIMARY KEY, region INT, budget INT)").is_ok());
+    REQUIRE(ex.execute_sql("CREATE TABLE dept_upd (dept_id INT PRIMARY KEY, new_budget INT)").is_ok());
+    REQUIRE(ex.execute_sql("INSERT INTO dept VALUES (1, 5, 100), (2, 6, 200)").is_ok());
+    REQUIRE(ex.execute_sql("INSERT INTO dept_upd VALUES (1, 999)").is_ok());
+    REQUIRE(ex.execute_sql("CREATE INDEX idx_region_budget ON dept (region, budget)").is_ok());
+
+    auto r = ex.execute_sql("UPDATE dept JOIN dept_upd ON dept.id = dept_upd.dept_id SET dept.budget = dept_upd.new_budget");
+    REQUIRE(r.is_ok());
+
+    auto s = ex.get_shared()->read();
+    auto& ci = s->composite_indexes.at("idx_region_budget");
+    REQUIRE_FALSE(ci.search_exact({"5", "100"}).has_value());
+    REQUIRE(ci.search_exact({"5", "999"}).has_value());
+    REQUIRE(ci.search_exact({"6", "200"}).has_value()); // untouched row still present
+}
+
+// Same "full rebuild -> incremental" regression, for multi-table DELETE.
+TEST_CASE("Multi-table DELETE keeps the target table's composite secondary index consistent",
+          "[executor][misc][regression]") {
+    TempDataDir dir("exec_misc_data_multi_del_idx");
+    Executor ex(dir.path);
+    REQUIRE(ex.execute_sql("CREATE DATABASE company").is_ok());
+    REQUIRE(ex.execute_sql("USE company").is_ok());
+    REQUIRE(ex.execute_sql("CREATE TABLE emp (id INT PRIMARY KEY, dept_id INT, region INT, salary INT)").is_ok());
+    REQUIRE(ex.execute_sql("CREATE TABLE to_remove (dept_id INT PRIMARY KEY)").is_ok());
+    REQUIRE(ex.execute_sql("INSERT INTO emp VALUES (1, 10, 5, 1000), (2, 20, 6, 2000)").is_ok());
+    REQUIRE(ex.execute_sql("INSERT INTO to_remove VALUES (10)").is_ok());
+    REQUIRE(ex.execute_sql("CREATE INDEX idx_region_sal ON emp (region, salary)").is_ok());
+
+    auto r = ex.execute_sql("DELETE emp FROM emp JOIN to_remove ON emp.dept_id = to_remove.dept_id");
+    REQUIRE(r.is_ok());
+
+    auto s = ex.get_shared()->read();
+    auto& ci = s->composite_indexes.at("idx_region_sal");
+    REQUIRE_FALSE(ci.search_exact({"5", "1000"}).has_value());
+    REQUIRE(ci.search_exact({"6", "2000"}).has_value());
+}
+
 TEST_CASE("MERGE on a composite-PK target only updates the row matching every PK column", "[executor][misc][regression]") {
     TempDataDir dir("exec_misc_data_merge_composite");
     Executor ex(dir.path);

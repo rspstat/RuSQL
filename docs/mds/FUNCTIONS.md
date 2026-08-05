@@ -212,6 +212,7 @@
 - [x] 클러스터드 인덱스 (PK 기준 물리적 정렬 유지)
 - [x] 보조 인덱스 중복 키 지원 (배열 저장, 동일 컬럼 값 다중 행)
 - [x] 보조 인덱스 증분 갱신 (INSERT/UPDATE/DELETE 시 `index_insert_row` / `index_remove_row`로 O(1) 개별 갱신 — 전체 재빌드 제거, stale 방지)
+- [x] PK B+Tree/복합 인덱스 증분 갱신 (UPDATE·다중 UPDATE/DELETE·INSERT ON DUPLICATE KEY UPDATE에서 바뀐 행마다 old-key 제거+new-key 삽입 — 이전엔 문장 하나당 몇 행이 바뀌든 항상 테이블 전체를 복제해 인덱스를 통째로 재구축했음, PK 컬럼 자체가 SET 대상이어도 정확)
 - [x] 커버링 인덱스 (SELECT 컬럼 ⊆ 인덱스 컬럼 시 Index-only scan 자동 활성화)
 - [x] B+Tree 범위 스캔 최적화 (scan_from_node / scan_to_node 가지치기, O(log N + k))
 - [x] B+Tree `range_keys` — BETWEEN 조건 DELETE 시 가지치기로 대상 PK 키 목록 수집, 역순 `swap_remove`로 인덱스 깨짐 없이 O(k) 일괄 삭제

@@ -25,6 +25,7 @@ public:
 
     std::optional<std::string> key_from_row(const Row& row) const;
     void insert_row(const Row& row);
+    void remove_row(const Row& row);
     std::optional<std::string> search_exact(const std::vector<std::string>& values) const;
     bool matches_conditions(const std::unordered_map<std::string, std::string>& eq_map) const;
     std::optional<std::string> search_from_eq_map(const std::unordered_map<std::string, std::string>& eq_map) const;

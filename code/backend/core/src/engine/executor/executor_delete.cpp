@@ -214,13 +214,9 @@ StringResult Executor::exec_delete_inner(SharedDatabase& s, const std::string& t
                 idx_it->second.remove(it != del_row.end() ? it->second : std::string());
             }
         }
-        std::vector<std::string> comp_keys;
         for (auto& [k, ci] : s.composite_indexes) {
-            if (ci.table == table) comp_keys.push_back(k);
-        }
-        if (!comp_keys.empty()) {
-            std::vector<Row> rows_clone = s.tables.at(table);
-            for (auto& k : comp_keys) s.composite_indexes.at(k).rebuild(rows_clone);
+            if (ci.table != table) continue;
+            for (auto& del_row : rows_to_delete) ci.remove_row(del_row);
         }
 
         maybe_auto_vacuum(s, table);
@@ -368,7 +364,6 @@ StringResult Executor::exec_delete_inner(SharedDatabase& s, const std::string& t
     }
     std::size_t deleted = 0;
     bool hard_deleted = false;
-    bool soft_deleted = false;
 
     // MVCC: a soft delete only flips _xmax on the Row object living in s.tables -- the PK
     // B+Tree and every secondary/hash index hold their own separate JSON copy of that same
@@ -384,6 +379,11 @@ StringResult Executor::exec_delete_inner(SharedDatabase& s, const std::string& t
         }
         index_remove_row(s, table, old_row, pk_col);
         index_insert_row(s, table, new_row);
+        for (auto& [k, ci] : s.composite_indexes) {
+            if (ci.table != table) continue;
+            ci.remove_row(old_row);
+            ci.insert_row(new_row);
+        }
     };
 
     if (txn.is_active()) {
@@ -417,7 +417,6 @@ StringResult Executor::exec_delete_inner(SharedDatabase& s, const std::string& t
             txn.log_delete(table, key, old_j.dump());
             row["_xmax"] = txn_id_str;
             refresh_indexes_for_soft_delete(old_j.get<Row>(), row, key);
-            soft_deleted = true;
             deleted++;
         }
     } else if (globally_quiescent) {
@@ -441,19 +440,7 @@ StringResult Executor::exec_delete_inner(SharedDatabase& s, const std::string& t
             Row old_row = row;
             row["_xmax"] = txn_id_str;
             refresh_indexes_for_soft_delete(old_row, row, key);
-            soft_deleted = true;
             deleted++;
-        }
-    }
-
-    if (soft_deleted) {
-        std::vector<std::string> comp_keys;
-        for (auto& [k, ci] : s.composite_indexes) {
-            if (ci.table == table) comp_keys.push_back(k);
-        }
-        if (!comp_keys.empty()) {
-            std::vector<Row> rows_clone = s.tables.at(table);
-            for (auto& k : comp_keys) s.composite_indexes.at(k).rebuild(rows_clone);
         }
     }
 
@@ -465,13 +452,9 @@ StringResult Executor::exec_delete_inner(SharedDatabase& s, const std::string& t
                 idx_it->second.remove(it != del_row.end() ? it->second : std::string());
             }
         }
-        std::vector<std::string> comp_keys;
         for (auto& [k, ci] : s.composite_indexes) {
-            if (ci.table == table) comp_keys.push_back(k);
-        }
-        if (!comp_keys.empty()) {
-            std::vector<Row> rows_clone = s.tables.at(table);
-            for (auto& k : comp_keys) s.composite_indexes.at(k).rebuild(rows_clone);
+            if (ci.table != table) continue;
+            for (auto& del_row : rows_to_delete) ci.remove_row(del_row);
         }
         maybe_auto_vacuum(s, table);
         maybe_auto_analyze(s, table);

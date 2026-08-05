@@ -268,3 +268,133 @@ TEST_CASE("UPDATE and DELETE against an updatable view redirect to the base tabl
     REQUIRE(del.is_ok());
     REQUIRE(table_rows(ex, "company.department").empty());
 }
+
+// Regression for switching UPDATE's PK B+Tree maintenance from "clone the whole table
+// and rebuild the index from scratch" to per-row incremental remove-old-key/insert-
+// new-key: the PK column itself can be part of the SET list, so the new index key must
+// come from the row's post-update value, not be assumed identical to the pre-update key.
+TEST_CASE("UPDATE that changes the PK column keeps the PK index consistent", "[executor][update][regression]") {
+    TempDataDir dir("exec_upd_data_pk_change");
+    Executor ex(dir.path);
+    REQUIRE(ex.execute_sql("CREATE DATABASE company").is_ok());
+    REQUIRE(ex.execute_sql("USE company").is_ok());
+    REQUIRE(ex.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, val INT)").is_ok());
+    REQUIRE(ex.execute_sql("INSERT INTO t VALUES (1, 100)").is_ok());
+
+    auto upd = ex.execute_sql("UPDATE t SET id = 99 WHERE id = 1");
+    REQUIRE(upd.is_ok());
+
+    {
+        auto s = ex.get_shared()->read();
+        auto& idx = s->indexes.at("company.t");
+        REQUIRE_FALSE(idx.search("1").has_value());
+        REQUIRE(idx.search("99").has_value());
+    }
+
+    // Also verify via a real PK point-lookup query (exercises the index fast path), not
+    // just the raw index contents.
+    auto old_lookup = ex.execute_sql("SELECT * FROM t WHERE id = 1");
+    REQUIRE(old_lookup.is_ok());
+    REQUIRE(old_lookup.value().find("0 rows returned.") != std::string::npos);
+    auto new_lookup = ex.execute_sql("SELECT * FROM t WHERE id = 99");
+    REQUIRE(new_lookup.is_ok());
+    REQUIRE(new_lookup.value().find("1 row(s) returned.") != std::string::npos);
+}
+
+// Regression for the same "full rebuild -> incremental" switch applied to composite
+// (multi-column) secondary indexes on UPDATE.
+TEST_CASE("UPDATE keeps a composite (multi-column) secondary index consistent, not stale", "[executor][update][regression]") {
+    TempDataDir dir("exec_upd_data_composite_idx");
+    Executor ex(dir.path);
+    REQUIRE(ex.execute_sql("CREATE DATABASE company").is_ok());
+    REQUIRE(ex.execute_sql("USE company").is_ok());
+    REQUIRE(ex.execute_sql("CREATE TABLE emp (id INT PRIMARY KEY, dept INT, salary INT)").is_ok());
+    REQUIRE(ex.execute_sql("INSERT INTO emp VALUES (1, 10, 1000), (2, 20, 2000)").is_ok());
+    REQUIRE(ex.execute_sql("CREATE INDEX idx_dept_sal ON emp (dept, salary)").is_ok());
+
+    auto upd = ex.execute_sql("UPDATE emp SET dept = 30, salary = 3000 WHERE id = 1");
+    REQUIRE(upd.is_ok());
+
+    auto s = ex.get_shared()->read();
+    auto& ci = s->composite_indexes.at("idx_dept_sal");
+    REQUIRE_FALSE(ci.search_exact({"10", "1000"}).has_value());
+    REQUIRE(ci.search_exact({"30", "3000"}).has_value());
+    REQUIRE(ci.search_exact({"20", "2000"}).has_value()); // untouched row still present
+}
+
+// Regression: DELETE's composite-index maintenance (autocommit / hard-delete path).
+TEST_CASE("DELETE removes the row's entry from a composite (multi-column) secondary index", "[executor][delete][regression]") {
+    TempDataDir dir("exec_del_data_composite_idx");
+    Executor ex(dir.path);
+    REQUIRE(ex.execute_sql("CREATE DATABASE company").is_ok());
+    REQUIRE(ex.execute_sql("USE company").is_ok());
+    REQUIRE(ex.execute_sql("CREATE TABLE emp (id INT PRIMARY KEY, dept INT, salary INT)").is_ok());
+    REQUIRE(ex.execute_sql("INSERT INTO emp VALUES (1, 10, 1000), (2, 20, 2000)").is_ok());
+    REQUIRE(ex.execute_sql("CREATE INDEX idx_dept_sal ON emp (dept, salary)").is_ok());
+
+    auto del = ex.execute_sql("DELETE FROM emp WHERE id = 1");
+    REQUIRE(del.is_ok());
+
+    auto s = ex.get_shared()->read();
+    auto& ci = s->composite_indexes.at("idx_dept_sal");
+    REQUIRE_FALSE(ci.search_exact({"10", "1000"}).has_value());
+    REQUIRE(ci.search_exact({"20", "2000"}).has_value());
+}
+
+// Regression: DELETE's composite-index maintenance via the soft-delete (in-transaction)
+// path, a different code branch (refresh_indexes_for_soft_delete) than the autocommit
+// hard-delete path above. A soft delete does NOT remove the composite index's entry
+// (same as the PK/secondary/hash indexes it sits alongside -- the row is only tombstoned
+// via _xmax until VACUUM physically removes it) -- it re-upserts the SAME composite key
+// with the row's refreshed data, so a raw index probe still finds the key. What must
+// actually hold is that a query going through that composite index no longer returns the
+// soft-deleted row once the delete is visible.
+TEST_CASE("Soft DELETE (inside a transaction) doesn't leave a composite-indexed query seeing the deleted row",
+          "[executor][delete][regression]") {
+    TempDataDir dir("exec_del_data_composite_idx_txn");
+    Executor ex(dir.path);
+    REQUIRE(ex.execute_sql("CREATE DATABASE company").is_ok());
+    REQUIRE(ex.execute_sql("USE company").is_ok());
+    REQUIRE(ex.execute_sql("CREATE TABLE emp (id INT PRIMARY KEY, dept INT, salary INT)").is_ok());
+    REQUIRE(ex.execute_sql("INSERT INTO emp VALUES (1, 10, 1000), (2, 20, 2000)").is_ok());
+    REQUIRE(ex.execute_sql("CREATE INDEX idx_dept_sal ON emp (dept, salary)").is_ok());
+
+    REQUIRE(ex.execute_sql("BEGIN").is_ok());
+    auto del = ex.execute_sql("DELETE FROM emp WHERE id = 1");
+    REQUIRE(del.is_ok());
+    REQUIRE(ex.execute_sql("COMMIT").is_ok());
+
+    auto deleted_lookup = ex.execute_sql("SELECT * FROM emp WHERE dept = 10 AND salary = 1000");
+    REQUIRE(deleted_lookup.is_ok());
+    REQUIRE(deleted_lookup.value().find("0 rows returned.") != std::string::npos);
+    auto live_lookup = ex.execute_sql("SELECT * FROM emp WHERE dept = 20 AND salary = 2000");
+    REQUIRE(live_lookup.is_ok());
+    REQUIRE(live_lookup.value().find("1 row(s) returned.") != std::string::npos);
+}
+
+// Regression for INSERT ... ON DUPLICATE KEY UPDATE's PK-index maintenance switching
+// from "clone + rebuild the whole table's index" to a targeted same-key upsert.
+TEST_CASE("INSERT ... ON DUPLICATE KEY UPDATE keeps the PK index's stored row data fresh", "[executor][insert][regression]") {
+    TempDataDir dir("exec_ins_data_odku_idx");
+    Executor ex(dir.path);
+    REQUIRE(ex.execute_sql("CREATE DATABASE company").is_ok());
+    REQUIRE(ex.execute_sql("USE company").is_ok());
+    REQUIRE(ex.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, val INT)").is_ok());
+    REQUIRE(ex.execute_sql("INSERT INTO t VALUES (1, 100)").is_ok());
+
+    auto r = ex.execute_sql("INSERT INTO t VALUES (1, 999) ON DUPLICATE KEY UPDATE val = 999");
+    REQUIRE(r.is_ok());
+
+    {
+        auto s = ex.get_shared()->read();
+        auto& idx = s->indexes.at("company.t");
+        auto j = idx.search("1");
+        REQUIRE(j.has_value());
+        REQUIRE(j->find("999") != std::string::npos);
+    }
+
+    // Also confirm via a real PK point-lookup query (exercises the index fast path).
+    auto lookup = ex.execute_sql("SELECT val FROM t WHERE id = 1");
+    REQUIRE(lookup.is_ok());
+    REQUIRE(lookup.value().find("999") != std::string::npos);
+}

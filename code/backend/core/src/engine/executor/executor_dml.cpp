@@ -504,12 +504,14 @@ StringResult Executor::exec_insert_inner(SharedDatabase& s, const std::string& t
     }
 
     bool had_updates = !pending_updates.empty();
+    std::vector<Row> updated_rows;
     for (auto& [pk_val, assignments] : pending_updates) {
         if (auto it = s.tables.find(table); it != s.tables.end()) {
             for (auto& row : it->second) {
                 auto pkit = row.find(col_names[0]);
                 if (pkit != row.end() && pkit->second == pk_val && is_visible(row)) {
                     for (auto& [col, aexpr] : assignments) row[col] = eval_arith(row, aexpr);
+                    updated_rows.push_back(row);
                     break;
                 }
             }
@@ -523,10 +525,11 @@ StringResult Executor::exec_insert_inner(SharedDatabase& s, const std::string& t
                 break;
             }
         }
-        std::vector<Row> rows_snap = s.tables.count(table) ? s.tables.at(table) : std::vector<Row>{};
+        // Incremental index maintenance: the PK value itself never changes here (rows
+        // were matched by exact PK equality above), so each updated row is a same-key
+        // upsert -- no need to clone and rebuild the whole table's PK index.
         if (auto idx_it = s.indexes.find(table); idx_it != s.indexes.end()) {
-            idx_it->second = BPlusTree();
-            for (auto& row : rows_snap) {
+            for (auto& row : updated_rows) {
                 auto it = row.find(pk_col_name);
                 std::string k = it != row.end() ? it->second : std::string();
                 nlohmann::json j = row;

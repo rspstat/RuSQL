@@ -32,6 +32,11 @@ void CompositeIndex::insert_row(const Row& row) {
     }
 }
 
+void CompositeIndex::remove_row(const Row& row) {
+    auto key = key_from_row(row);
+    if (key) tree_.remove(*key);
+}
+
 std::optional<std::string> CompositeIndex::search_exact(const std::vector<std::string>& values) const {
     return tree_.search(make_key(values));
 }

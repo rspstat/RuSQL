@@ -283,6 +283,40 @@ TEST_CASE("Index-based PK point lookup does not leak another session's uncommitt
     REQUIRE(seen_after.value().find("1 row(s) returned.") != std::string::npos);
 }
 
+// Regression: unlike PkPoint/CompositeIndexPrefix and the other ~15 AccessPath fast
+// paths, CompositeIndexPath (an exact-match multi-column index lookup) never checked
+// MVCC visibility at all -- found while adding incremental composite-index maintenance
+// for UPDATE/DELETE (a separate, unrelated fix) via a test that queried through this
+// exact path and got back another session's still-uncommitted row.
+TEST_CASE("Composite-index exact-match lookup does not leak another session's uncommitted INSERT",
+          "[executor][concurrency][mvcc][regression]") {
+    TempDataDir dir("exec_concurrency_mvcc_composite");
+    Executor a(dir.path);
+    REQUIRE(a.execute_sql("CREATE DATABASE d").is_ok());
+    REQUIRE(a.execute_sql("USE d").is_ok());
+    REQUIRE(a.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, dept INT, salary INT)").is_ok());
+    REQUIRE(a.execute_sql("CREATE INDEX idx_dept_sal ON t (dept, salary)").is_ok());
+
+    auto shared = a.get_shared();
+    Executor b = Executor::new_session(shared);
+    REQUIRE(b.execute_sql("USE d").is_ok());
+
+    REQUIRE(a.execute_sql("BEGIN").is_ok());
+    REQUIRE(a.execute_sql("INSERT INTO t VALUES (1, 10, 1000)").is_ok());
+
+    // Default isolation is ReadCommitted -- b must not see a's still-uncommitted row via
+    // the CompositeIndexPath fast path (WHERE on every indexed column, equality).
+    auto seen = b.execute_sql("SELECT * FROM t WHERE dept = 10 AND salary = 1000");
+    REQUIRE(seen.is_ok());
+    REQUIRE(seen.value().find("0 rows returned.") != std::string::npos);
+
+    REQUIRE(a.execute_sql("COMMIT").is_ok());
+
+    auto seen_after = b.execute_sql("SELECT * FROM t WHERE dept = 10 AND salary = 1000");
+    REQUIRE(seen_after.is_ok());
+    REQUIRE(seen_after.value().find("1 row(s) returned.") != std::string::npos);
+}
+
 // MVCC Stage 1: this is the first point where ReadUncommitted and ReadCommitted actually
 // diverge in code (SnapshotCtx construction, Executor::current_read_ctx) -- previously
 // both isolation levels were coded identically (a documented gap). RU's ctx treats every

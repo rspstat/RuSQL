@@ -694,8 +694,10 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
             auto eq_map = collect_eq_map(*condition);
             if (auto val_json = s.composite_indexes.at(ap->index_name).search_from_eq_map(eq_map)) {
                 Row row = nlohmann::json::parse(*val_json).get<Row>();
-                std::vector<Row> one{std::move(row)};
-                return format_result(s, std::move(one), columns, table, {});
+                if (is_visible_for_read(row, read_ctx)) {
+                    std::vector<Row> one{std::move(row)};
+                    return format_result(s, std::move(one), columns, table, {});
+                }
             }
             return StringResult::Ok("0 rows returned.");
         } else if (auto* ap = std::get_if<AccessPath::CompositeIndexPrefix>(&access)) {
