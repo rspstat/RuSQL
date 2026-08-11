@@ -144,6 +144,13 @@ TEST_CASE("UPDATE ON UPDATE CASCADE propagates the new key to referencing rows",
     auto upd = ex.execute_sql("UPDATE department SET id = 99 WHERE id = 1");
     REQUIRE(upd.is_ok());
     REQUIRE(table_rows(ex, "company.employee")[0].at("department_id") == "99");
+
+    // Regression: FK cascade used to leave the cascaded table's own PK B+Tree stale --
+    // `WHERE id = 1` is a PK-indexed point lookup on employee, distinct from the raw-scan
+    // table_rows() check above, and used to keep returning the pre-cascade department_id.
+    auto pk_check = ex.execute_sql("SELECT department_id FROM employee WHERE id = 1");
+    REQUIRE(pk_check.is_ok());
+    REQUIRE(pk_check.value().find("99") != std::string::npos);
 }
 
 TEST_CASE("Basic DELETE removes only matching rows", "[executor][delete]") {
@@ -232,6 +239,13 @@ TEST_CASE("DELETE with FK CASCADE removes dependent rows", "[executor][delete]")
     auto emp_rows = table_rows(ex, "company.employee");
     REQUIRE(emp_rows.size() == 1);
     REQUIRE(emp_rows[0].at("department_id") == "2");
+
+    // Regression: FK cascade used to erase rows from s.tables without removing them from
+    // the cascaded table's own PK B+Tree -- a PK-indexed point lookup on the removed
+    // employee (id=1) would keep returning it as if it still existed.
+    auto pk_check = ex.execute_sql("SELECT id FROM employee WHERE id = 1");
+    REQUIRE(pk_check.is_ok());
+    REQUIRE(pk_check.value() == "0 rows returned.");
 }
 
 TEST_CASE("DELETE with FK SET NULL clears the referencing column", "[executor][delete]") {
@@ -249,6 +263,60 @@ TEST_CASE("DELETE with FK SET NULL clears the referencing column", "[executor][d
     auto del = ex.execute_sql("DELETE FROM department WHERE id = 1");
     REQUIRE(del.is_ok());
     REQUIRE(table_rows(ex, "company.employee")[0].at("department_id") == "NULL");
+
+    // Regression: FK cascade used to leave the cascaded table's own PK B+Tree stale --
+    // `WHERE id = 1` is a PK-indexed point lookup on employee.
+    auto pk_check = ex.execute_sql("SELECT department_id FROM employee WHERE id = 1");
+    REQUIRE(pk_check.is_ok());
+    REQUIRE(pk_check.value().find("NULL") != std::string::npos);
+}
+
+TEST_CASE("DELETE with FK SET DEFAULT resets the referencing column", "[executor][delete]") {
+    TempDataDir dir("exec_del_data_setdefault");
+    Executor ex(dir.path);
+    REQUIRE(ex.execute_sql("CREATE DATABASE company").is_ok());
+    REQUIRE(ex.execute_sql("USE company").is_ok());
+    REQUIRE(ex.execute_sql("CREATE TABLE department (id INT PRIMARY KEY)").is_ok());
+    REQUIRE(ex.execute_sql("INSERT INTO department VALUES (1), (9)").is_ok());
+    REQUIRE(ex.execute_sql("CREATE TABLE employee (id INT PRIMARY KEY, department_id INT DEFAULT 9, "
+                            "CONSTRAINT fk_dept FOREIGN KEY (department_id) REFERENCES department(id) ON DELETE SET DEFAULT)")
+                .is_ok());
+    REQUIRE(ex.execute_sql("INSERT INTO employee VALUES (1, 1)").is_ok());
+
+    auto del = ex.execute_sql("DELETE FROM department WHERE id = 1");
+    REQUIRE(del.is_ok());
+    REQUIRE(table_rows(ex, "company.employee")[0].at("department_id") == "9");
+
+    // Regression: FK cascade used to leave the cascaded table's own PK B+Tree stale --
+    // `WHERE id = 1` is a PK-indexed point lookup on employee.
+    auto pk_check = ex.execute_sql("SELECT department_id FROM employee WHERE id = 1");
+    REQUIRE(pk_check.is_ok());
+    REQUIRE(pk_check.value().find("9") != std::string::npos);
+}
+
+TEST_CASE("DELETE with FK CASCADE inside an explicit transaction keeps the cascaded row's PK index in sync",
+          "[executor][delete][regression]") {
+    // Distinct code path from the autocommit CASCADE test above: inside an explicit
+    // transaction, the cascaded row is MVCC soft-deleted (_xmax set) rather than physically
+    // erased -- exercises executor_delete.cpp's txn.is_active() Cascade branch specifically.
+    TempDataDir dir("exec_del_data_cascade_txn");
+    Executor ex(dir.path);
+    REQUIRE(ex.execute_sql("CREATE DATABASE company").is_ok());
+    REQUIRE(ex.execute_sql("USE company").is_ok());
+    REQUIRE(ex.execute_sql("CREATE TABLE department (id INT PRIMARY KEY)").is_ok());
+    REQUIRE(ex.execute_sql("INSERT INTO department VALUES (1), (2)").is_ok());
+    REQUIRE(ex.execute_sql("CREATE TABLE employee (id INT PRIMARY KEY, department_id INT, "
+                            "CONSTRAINT fk_dept FOREIGN KEY (department_id) REFERENCES department(id) ON DELETE CASCADE)")
+                .is_ok());
+    REQUIRE(ex.execute_sql("INSERT INTO employee VALUES (1, 1), (2, 2)").is_ok());
+
+    REQUIRE(ex.execute_sql("BEGIN").is_ok());
+    REQUIRE(ex.execute_sql("DELETE FROM department WHERE id = 1").is_ok());
+    REQUIRE(ex.execute_sql("COMMIT").is_ok());
+
+    auto pk_check = ex.execute_sql("SELECT id FROM employee WHERE id = 1");
+    REQUIRE(pk_check.is_ok());
+    REQUIRE(pk_check.value() == "0 rows returned.");
 }
 
 TEST_CASE("UPDATE and DELETE against an updatable view redirect to the base table", "[executor][update][delete]") {

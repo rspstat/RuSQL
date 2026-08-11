@@ -5,9 +5,11 @@
 //
 // Cache-key deviation (documented, behavior-preserving): the Rust original keys its
 // uncorrelated IN/NOT IN subquery cache with `format!("{:?}", sub_stmt)` (Debug output).
-// This port uses the subquery Statement's JSON serialization instead — any stable,
-// unique-per-distinct-subquery string works equally well as a cache key; the Debug
-// text itself is never observable.
+// This port keys subquery_cache_ (executor.hpp) by the subquery AST's own address
+// instead -- any identity that's stable and unique for as long as a cache entry could
+// possibly be looked up works equally well, and the address is dramatically cheaper
+// than formatting/serializing the whole AST on every row (see eval_single_with_subquery,
+// Row-level-concurrency Stage 4/5 perf fix).
 
 #include "engine/executor/executor.hpp"
 
@@ -100,9 +102,9 @@ bool Executor::eval_single_with_subquery(SharedDatabase& s, const Row& row, cons
 
     auto* sub = std::get_if<ConditionValue::Subquery>(&cond.value.data);
     if (!sub) return false;
-    Statement sub_stmt = *sub->query;
 
     if (cond.op == Operator::Exists || cond.op == Operator::NotExists) {
+        Statement sub_stmt = *sub->query;
         if (auto* sel = std::get_if<Statement::Select>(&sub_stmt.data)) {
             auto sub_cond = sel->condition;
             if (sub_cond) sub_cond = substitute_correlated_condexpr(*sub_cond, row);
@@ -117,16 +119,31 @@ bool Executor::eval_single_with_subquery(SharedDatabase& s, const Row& row, cons
     std::string val = eval_arith(row, cond.left);
     if (val == EXECUTOR_NULL_VALUE) return false;
 
-    std::string cache_key = nlohmann::json(sub_stmt).dump();
-
     if (cond.op == Operator::In || cond.op == Operator::NotIn) {
-        if (auto* sel = std::get_if<Statement::Select>(&sub_stmt.data)) {
-            bool is_correlated = sel->condition.has_value() && has_outer_ref(*sel->condition);
+        if (auto* sel_peek = std::get_if<Statement::Select>(&sub->query->data)) {
+            bool is_correlated = sel_peek->condition.has_value() && has_outer_ref(*sel_peek->condition);
             if (!is_correlated) {
+                // Row-level-concurrency Stage 4/5 correctness/perf fix (found via
+                // concurrent-reader stress testing): check the cache BEFORE copying or
+                // serializing anything -- sub->query.get() is a stable identity for this
+                // subquery AST for as long as subquery_cache_ can possibly still hold an
+                // entry for it (the cache is cleared at the start of every new top-level
+                // statement, and this same condition/AST is reused unchanged across every
+                // row exec_select's caller scans). The OLD code did a full Statement copy
+                // + JSON serialization of the subquery AST on EVERY row regardless of hit
+                // or miss (the cache only ever saved the exec_select call itself) -- for a
+                // scan of N rows that's O(N) AST copies/serializations just to compute the
+                // key, dwarfing the O(1) hash lookup the cache was supposed to provide.
+                const void* cache_key = sub->query.get();
                 if (auto it = subquery_cache_.find(cache_key); it != subquery_cache_.end()) {
                     bool contains = it->second.count(val) > 0;
                     return cond.op == Operator::In ? contains : !contains;
                 }
+                // Cache miss: only now pay for a copy -- exec_select needs to move
+                // fields out of it (sel->subquery), and the original AST (still pointed
+                // to by `sub->query`, untouched) must survive for the next row's lookup.
+                Statement sub_stmt = *sub->query;
+                auto* sel = std::get_if<Statement::Select>(&sub_stmt.data);
                 auto result = exec_select(s, sel->table, std::move(sel->subquery), sel->distinct, sel->columns, sel->condition, sel->joins,
                                            sel->order_by, sel->group_by, sel->having, sel->limit, sel->offset, false, false);
                 if (result.is_ok()) {
@@ -142,6 +159,11 @@ bool Executor::eval_single_with_subquery(SharedDatabase& s, const Row& row, cons
         }
     }
 
+    // Correlated IN/NOT IN, and every other (scalar Eq/Gt/Lt/Gte/Lte) operator, fall
+    // through here -- always need a fresh per-row copy regardless of caching, since
+    // substitute_correlated_condexpr's result varies per row and exec_select moves
+    // fields out of it.
+    Statement sub_stmt = *sub->query;
     if (auto* sel = std::get_if<Statement::Select>(&sub_stmt.data)) {
         auto sub_cond = sel->condition;
         if (sub_cond) sub_cond = substitute_correlated_condexpr(*sub_cond, row);

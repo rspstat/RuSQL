@@ -18,6 +18,7 @@ void to_json(nlohmann::json& j, const TableSchema& s) {
         {"auto_increment_counters", s.auto_increment_counters},
         {"primary_key_columns", s.primary_key_columns},
         {"check_constraints", s.check_constraints},
+        {"partition_info", s.partition_info},
     };
 }
 
@@ -25,11 +26,14 @@ void from_json(const nlohmann::json& j, TableSchema& s) {
     j.at("name").get_to(s.name);
     j.at("columns").get_to(s.columns);
     j.at("auto_increment_counters").get_to(s.auto_increment_counters);
-    // #[serde(default)] fields — tolerate absence for backward compatibility.
+    // #[serde(default)]-style fields — tolerate absence for backward compatibility with
+    // schema files saved before these fields existed.
     if (j.contains("primary_key_columns")) j.at("primary_key_columns").get_to(s.primary_key_columns);
     else s.primary_key_columns.clear();
     if (j.contains("check_constraints")) j.at("check_constraints").get_to(s.check_constraints);
     else s.check_constraints.clear();
+    if (j.contains("partition_info")) j.at("partition_info").get_to(s.partition_info);
+    else s.partition_info = std::nullopt;
 }
 
 Result<void, std::string> Catalog::create_table(std::string name, std::vector<ColumnDef> columns) {

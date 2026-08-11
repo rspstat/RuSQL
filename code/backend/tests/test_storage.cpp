@@ -1,5 +1,7 @@
 #include <filesystem>
 #include <fstream>
+#include <thread>
+#include <vector>
 
 #include "catch.hpp"
 #include "engine/storage/buffer_pool.hpp"
@@ -40,6 +42,38 @@ TEST_CASE("HashIndex rebuild/get/insert/remove", "[storage][hash_index]") {
     idx.remove_row("10", "id", "2");
     REQUIRE(idx.get("10").empty()); // bucket removed once empty
     REQUIRE(idx.bucket_count() == 1);
+}
+
+// Row-level-concurrency Stage 2: HashIndex gained its own internal mutex_ (same
+// reasoning/pattern as BPlusTree) and get() now returns by value instead of a reference
+// into data_ (a reference would dangle the instant the lock inside get() is released).
+// Each thread here owns a disjoint bucket key, so any wrong/missing/crashed result here
+// is necessarily a real data race with another thread's concurrent bucket.
+TEST_CASE("HashIndex is safe under real concurrent insert_row/remove_row/get on disjoint buckets", "[storage][hash_index][concurrency]") {
+    HashIndex idx("t", "bucket_col");
+    constexpr int kThreads = 8;
+    constexpr int kPerThread = 300;
+
+    std::vector<std::thread> threads;
+    for (int t = 0; t < kThreads; t++) {
+        threads.emplace_back([&idx, t] {
+            std::string bucket_key = "b" + std::to_string(t);
+            for (int i = 0; i < kPerThread; i++) {
+                idx.insert_row(make_row({{"bucket_col", bucket_key.c_str()}, {"id", std::to_string(i).c_str()}}));
+            }
+            for (int i = 0; i < kPerThread; i += 2) {
+                idx.remove_row(bucket_key, "id", std::to_string(i));
+            }
+            auto bucket = idx.get(bucket_key);
+            if (bucket.size() != static_cast<std::size_t>(kPerThread / 2)) {
+                throw std::runtime_error("bucket " + bucket_key + " has wrong size after concurrent ops");
+            }
+        });
+    }
+    for (auto& th : threads) th.join();
+
+    REQUIRE(idx.bucket_count() == static_cast<std::size_t>(kThreads));
+    REQUIRE(idx.row_count() == static_cast<std::size_t>(kThreads * kPerThread / 2));
 }
 
 TEST_CASE("CompositeIndex key construction and search", "[storage][composite_index]") {

@@ -1,4 +1,6 @@
+#include <algorithm>
 #include <filesystem>
+#include <vector>
 
 #include "catch.hpp"
 #include "engine/executor/executor.hpp"
@@ -99,6 +101,42 @@ TEST_CASE("AUTO_INCREMENT and DEFAULT value handling", "[executor][insert]") {
     }
     REQUIRE(std::find(ids.begin(), ids.end(), "1") != ids.end());
     REQUIRE(std::find(ids.begin(), ids.end(), "2") != ids.end());
+}
+
+// Row-level-concurrency prep: AUTO_INCREMENT allocation switched from "copy the counter,
+// mutate the copy across the whole batch, write it back once at the end" to "allocate
+// directly against the real Catalog entry, immediately, per row." A single multi-row
+// batch INSERT is exactly the case where the old copy-based approach's within-batch
+// bookkeeping mattered even with no concurrency at all -- confirms the new approach still
+// gives every row in one statement a distinct, sequential value.
+TEST_CASE("AUTO_INCREMENT gives every row in a multi-row batch INSERT a distinct sequential value",
+          "[executor][insert][regression]") {
+    TempDataDir dir("exec_insert_data_ai_batch");
+    Executor ex(dir.path);
+    REQUIRE(ex.execute_sql("CREATE DATABASE company").is_ok());
+    REQUIRE(ex.execute_sql("USE company").is_ok());
+    REQUIRE(ex.execute_sql("CREATE TABLE emp (id INT PRIMARY KEY AUTO_INCREMENT, name VARCHAR(50))").is_ok());
+
+    REQUIRE(ex.execute_sql("INSERT INTO emp (name) VALUES ('a'), ('b'), ('c'), ('d'), ('e')").is_ok());
+
+    auto rows = table_rows(ex, "company.emp");
+    REQUIRE(rows.size() == 5);
+    std::vector<int> ids;
+    for (auto& r : rows) ids.push_back(std::stoi(r.at("id")));
+    std::sort(ids.begin(), ids.end());
+    REQUIRE(ids == std::vector<int>{1, 2, 3, 4, 5});
+
+    // A following statement must continue from where the batch left off, not restart or
+    // collide -- and the counter must have actually persisted to disk (save_schema is
+    // now only called once per statement, driven by any_auto_increment_allocated).
+    REQUIRE(ex.execute_sql("INSERT INTO emp (name) VALUES ('f')").is_ok());
+    auto rows2 = table_rows(ex, "company.emp");
+    REQUIRE(rows2.size() == 6);
+    bool found_six = false;
+    for (auto& r : rows2) {
+        if (r.at("id") == "6") found_six = true;
+    }
+    REQUIRE(found_six);
 }
 
 TEST_CASE("NOT NULL, duplicate PK, and duplicate UNIQUE violations", "[executor][insert]") {

@@ -97,34 +97,48 @@ StringResult Executor::execute_commit_grouped() {
     // Stage 4: dirty_tables() is a pure read of this transaction's own undo log -- safe to
     // capture before touching SharedDatabase at all, and before exec_commit_phase1 (via
     // txn.commit_write_record()) leaves it in a state this call no longer needs to trust.
-    // Only these specific tables' locks are needed for both critical sections below
-    // (instead of the whole database's exclusive lock), so an unrelated table's
-    // concurrent statement isn't blocked by this commit.
+    // Only these specific tables' locks are needed for the critical section below (instead
+    // of the whole database's exclusive lock), so an unrelated table's concurrent statement
+    // isn't blocked by this commit.
     auto dirty_tables = txn.dirty_tables();
     std::sort(dirty_tables.begin(), dirty_tables.end());
 
-    std::shared_ptr<GroupCommitCoordinator> coord;
-    std::shared_ptr<Mutex<std::unordered_set<std::uint64_t>>> active_txn_ids;
-    {
-        auto guard = acquire_table_locks(shared->read(), dirty_tables, /*exclusive=*/true);
-        auto phase1 = exec_commit_phase1(const_cast<SharedDatabase&>(*guard.structural));
-        if (phase1.is_err()) return phase1;
-        coord = guard.structural->group_commit_coord;
-        active_txn_ids = guard.structural->active_txn_ids;
-    }
+    // Row-level-concurrency correctness fix (found via same-row explicit-transaction
+    // stress testing, see "Two explicit transactions racing the SAME row" in
+    // test_concurrency.cpp): table_locks for `dirty_tables` must stay held EXCLUSIVE
+    // continuously from phase1 all the way through the active_txn_ids erase below --
+    // this used to be two separate critical sections (phase1 in one, the erase+vacuum in
+    // a second one re-acquired after sync_commit()/commit_finalize() ran lock-free), which
+    // left a real gap where table_locks was released with active_txn_ids still containing
+    // this (now-durable) txn_id. A concurrent UPDATE only needs table_locks SHARED, so it
+    // could run in that gap and compute its MVCC visibility snapshot while this txn still
+    // read as "in progress": its OLD, already-superseded row (xmax = this txn) then looked
+    // visible again, and its NEW row (xmin = this txn) looked NOT visible yet -- a version
+    // fork. Each recurrence compounds (every future commit re-discovers the resurrected
+    // old version as an extra "still visible" match and forks it again), observed directly
+    // as literal Fibonacci-shaped unbounded row growth (233, 377, 610, 987, 1597, ...) and
+    // multi-second-then-multi-minute commit latency under just two threads. Holding the
+    // lock through the erase closes the gap: any reader taking table_locks SHARED either
+    // runs before this whole section (sees the pre-commit state, correctly) or waits for
+    // it and then sees post-commit state where active_txn_ids has already been updated --
+    // never the inconsistent in-between. This does serialize concurrent COMMITs of the
+    // SAME table (previously only phase1 was serialized; sync_commit()'s fsync and
+    // commit_finalize() ran unlocked) -- group commit's cross-session fsync batching still
+    // works fully for commits touching DIFFERENT tables, just not for the same one
+    // concurrently, which correctness now requires anyway.
+    auto guard = acquire_table_locks(shared->read(), dirty_tables, /*exclusive=*/true);
+    auto phase1 = exec_commit_phase1(const_cast<SharedDatabase&>(*guard.structural));
+    if (phase1.is_err()) return phase1;
+    auto coord = guard.structural->group_commit_coord;
+    auto active_txn_ids = guard.structural->active_txn_ids;
 
     coord->sync_commit();
-
     txn.commit_finalize();
     // Only now -- once the commit is truly durable (fsync'd via sync_commit(), WAL/undo
-    // pruned via commit_finalize()) -- is it safe for a concurrent checkpoint to treat
-    // this txn as fully done. active_txn_ids has its own independent mutex, so this
-    // doesn't need to re-acquire the big SharedDatabase write lock.
+    // pruned via commit_finalize()) -- is it safe for a concurrent reader/checkpoint to
+    // treat this txn as fully done. Still holding table_locks EXCLUSIVE here (see above).
     active_txn_ids->lock()->erase(txn_id);
-    {
-        auto guard = acquire_table_locks(shared->read(), dirty_tables, /*exclusive=*/true);
-        for (auto& table : dirty_tables) maybe_auto_vacuum(const_cast<SharedDatabase&>(*guard.structural), table);
-    }
+    for (auto& table : dirty_tables) maybe_auto_vacuum(const_cast<SharedDatabase&>(*guard.structural), table);
 
     return StringResult::Ok("Transaction committed.");
 }

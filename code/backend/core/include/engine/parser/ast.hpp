@@ -120,6 +120,37 @@ struct ColumnDef {
     std::optional<std::string> check_expr;
 };
 
+// ---------------------------------------------------------------------------
+// PartitionBy (table partitioning -- no Rust original, new C++-native feature)
+// ---------------------------------------------------------------------------
+enum class PartitionKind { Range, List, Hash };
+
+// One partition's bounds. RANGE uses range_upper_bound (or range_is_maxvalue for the
+// catch-all last partition); LIST uses list_values. `child_table` is empty as parsed --
+// the executor fills it in at CREATE TABLE time (see executor_ddl.cpp) once the physical
+// hidden child table's name is decided, and it's what gets persisted in TableSchema
+// (catalog/schema.hpp reuses this exact struct for both the parsed statement and the
+// on-disk/in-catalog representation, matching this header's existing ColumnDef/ForeignKey
+// convention).
+struct PartitionDef {
+    std::string name;
+    std::optional<std::string> range_upper_bound;
+    bool range_is_maxvalue = false;
+    std::vector<std::string> list_values;
+    std::string child_table;
+};
+
+struct PartitionBy {
+    PartitionKind kind = PartitionKind::Range;
+    std::string column;
+    // RANGE/LIST: as written by the user. HASH: filled in by the executor at CREATE TABLE
+    // time from `hash_partitions` (auto-named p0..pN-1) -- by the time this is stored in
+    // TableSchema, `partitions` is always the complete, authoritative child list
+    // regardless of kind, so routing code never needs to special-case HASH's naming.
+    std::vector<PartitionDef> partitions;
+    int hash_partitions = 0;
+};
+
 struct OrderBy {
     std::string column;
     bool ascending = true;
@@ -355,10 +386,14 @@ struct AlterAction {
     struct AddUniqueConstraint { std::optional<std::string> name; std::string column; };
     struct AddCheckConstraint { std::optional<std::string> name; std::string expr; };
     struct DropConstraint { std::string name; };
+    // Table partitioning (V1, no Rust original): RANGE/LIST only -- ADD PARTITION on a
+    // HASH-partitioned table would need rehashing every existing row, out of scope.
+    struct AddPartition { PartitionDef def; };
+    struct DropPartition { std::string name; };
 
     using Data = std::variant<AddColumn, DropColumn, RenameColumn, ModifyColumn, RenameTable,
                                AddForeignKey, DropForeignKey, AddUniqueConstraint,
-                               AddCheckConstraint, DropConstraint>;
+                               AddCheckConstraint, DropConstraint, AddPartition, DropPartition>;
     Data data;
 
     AlterAction() : data(DropColumn{}) {}
@@ -382,6 +417,7 @@ struct Statement {
         bool if_not_exists = false;
         std::vector<std::string> primary_key_columns;
         std::vector<std::pair<std::optional<std::string>, std::string>> check_constraints;
+        std::optional<PartitionBy> partition_by;
     };
     struct DropTable { std::string name; bool if_exists = false; };
     struct TruncateTable { std::string name; };

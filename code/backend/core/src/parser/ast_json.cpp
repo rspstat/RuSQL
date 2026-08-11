@@ -135,6 +135,55 @@ void from_json(const nlohmann::json& j, ColumnDef& col) {
     else col.check_expr = std::nullopt;
 }
 
+void to_json(nlohmann::json& j, const PartitionKind& kind) {
+    switch (kind) {
+        case PartitionKind::Range: j = "Range"; break;
+        case PartitionKind::List: j = "List"; break;
+        case PartitionKind::Hash: j = "Hash"; break;
+    }
+}
+
+void from_json(const nlohmann::json& j, PartitionKind& kind) {
+    const std::string tag = j.get<std::string>();
+    if (tag == "List") kind = PartitionKind::List;
+    else if (tag == "Hash") kind = PartitionKind::Hash;
+    else kind = PartitionKind::Range;
+}
+
+void to_json(nlohmann::json& j, const PartitionDef& def) {
+    j = nlohmann::json{
+        {"name", def.name},
+        {"range_upper_bound", def.range_upper_bound},
+        {"range_is_maxvalue", def.range_is_maxvalue},
+        {"list_values", def.list_values},
+        {"child_table", def.child_table},
+    };
+}
+
+void from_json(const nlohmann::json& j, PartitionDef& def) {
+    j.at("name").get_to(def.name);
+    j.at("range_upper_bound").get_to(def.range_upper_bound);
+    j.at("range_is_maxvalue").get_to(def.range_is_maxvalue);
+    j.at("list_values").get_to(def.list_values);
+    j.at("child_table").get_to(def.child_table);
+}
+
+void to_json(nlohmann::json& j, const PartitionBy& pb) {
+    j = nlohmann::json{
+        {"kind", pb.kind},
+        {"column", pb.column},
+        {"partitions", pb.partitions},
+        {"hash_partitions", pb.hash_partitions},
+    };
+}
+
+void from_json(const nlohmann::json& j, PartitionBy& pb) {
+    j.at("kind").get_to(pb.kind);
+    j.at("column").get_to(pb.column);
+    j.at("partitions").get_to(pb.partitions);
+    j.at("hash_partitions").get_to(pb.hash_partitions);
+}
+
 void to_json(nlohmann::json& j, const ArithExpr& expr) {
     std::visit(
         [&j](const auto& alt) {
@@ -630,6 +679,8 @@ void to_json(nlohmann::json& j, const AlterAction& action) {
             else if constexpr (std::is_same_v<T, AlterAction::AddCheckConstraint>)
                 j = nlohmann::json{{"AddCheckConstraint", nlohmann::json{{"name", alt.name}, {"expr", alt.expr}}}};
             else if constexpr (std::is_same_v<T, AlterAction::DropConstraint>) j = nlohmann::json{{"DropConstraint", alt.name}};
+            else if constexpr (std::is_same_v<T, AlterAction::AddPartition>) j = nlohmann::json{{"AddPartition", alt.def}};
+            else if constexpr (std::is_same_v<T, AlterAction::DropPartition>) j = nlohmann::json{{"DropPartition", alt.name}};
         },
         action.data);
 }
@@ -654,6 +705,8 @@ void from_json(const nlohmann::json& j, AlterAction& action) {
     else if (tag == "AddCheckConstraint")
         action = AlterAction(AlterAction::AddCheckConstraint{p.at("name").get<std::optional<std::string>>(), p.at("expr").get<std::string>()});
     else if (tag == "DropConstraint") action = AlterAction(AlterAction::DropConstraint{p.get<std::string>()});
+    else if (tag == "AddPartition") action = AlterAction(AlterAction::AddPartition{p.get<PartitionDef>()});
+    else if (tag == "DropPartition") action = AlterAction(AlterAction::DropPartition{p.get<std::string>()});
     else throw std::runtime_error("unknown AlterAction tag: " + tag);
 }
 
@@ -679,7 +732,8 @@ void to_json(nlohmann::json& j, const Statement& stmt) {
                                                                    {"columns", alt.columns},
                                                                    {"if_not_exists", alt.if_not_exists},
                                                                    {"primary_key_columns", alt.primary_key_columns},
-                                                                   {"check_constraints", alt.check_constraints}}}};
+                                                                   {"check_constraints", alt.check_constraints},
+                                                                   {"partition_by", alt.partition_by}}}};
             else if constexpr (std::is_same_v<T, Statement::DropTable>)
                 j = nlohmann::json{{"DropTable", nlohmann::json{{"name", alt.name}, {"if_exists", alt.if_exists}}}};
             else if constexpr (std::is_same_v<T, Statement::TruncateTable>)
@@ -915,6 +969,7 @@ void from_json(const nlohmann::json& j, Statement& stmt) {
         v.if_not_exists = p.at("if_not_exists").get<bool>();
         v.primary_key_columns = p.at("primary_key_columns").get<std::vector<std::string>>();
         v.check_constraints = p.at("check_constraints").get<std::vector<std::pair<std::optional<std::string>, std::string>>>();
+        if (p.contains("partition_by")) v.partition_by = p.at("partition_by").get<std::optional<PartitionBy>>();
         stmt = Statement(std::move(v));
     } else if (tag == "DropTable") {
         stmt = Statement(Statement::DropTable{p.at("name").get<std::string>(), p.at("if_exists").get<bool>()});

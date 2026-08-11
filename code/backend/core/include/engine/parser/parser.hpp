@@ -112,6 +112,12 @@ private:
     ColConstraints parse_col_constraints(const std::string& col_name);
     void parse_fk_table_level(std::vector<ColumnDef>& columns);
     FkAction parse_fk_action();
+    std::optional<PartitionBy> parse_partition_by();
+    // Parses the "LESS THAN (bound) / LESS THAN MAXVALUE" (RANGE) or "IN (v1, v2, ...)"
+    // (LIST) tail of a single partition definition into `def` -- callers have already
+    // consumed "PARTITION name VALUES". Shared by parse_partition_by's own list and by
+    // ALTER TABLE ... ADD PARTITION (parse_alter).
+    void parse_partition_values(PartitionKind kind, PartitionDef& def);
 
     Statement parse_create();
     Statement parse_drop();

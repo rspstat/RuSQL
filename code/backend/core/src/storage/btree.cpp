@@ -487,19 +487,41 @@ std::unique_ptr<Node> remove_node(std::unique_ptr<Node> node, const std::string&
 
 } // namespace
 
-BPlusTree::BPlusTree(const BPlusTree& other) : root_(clone_node(other.root_)) {}
+BPlusTree::BPlusTree(const BPlusTree& other) {
+    std::lock_guard<std::mutex> g(other.mutex_);
+    root_ = clone_node(other.root_);
+}
 
 BPlusTree& BPlusTree::operator=(const BPlusTree& other) {
-    if (this != &other) root_ = clone_node(other.root_);
+    if (this != &other) {
+        std::scoped_lock lock(mutex_, other.mutex_);
+        root_ = clone_node(other.root_);
+    }
+    return *this;
+}
+
+// mutex_ isn't movable -- manually moves root_, leaving a fresh mutex_ in the moved-to
+// object (same pattern LockManager/QueryResultCache already use).
+BPlusTree::BPlusTree(BPlusTree&& other) noexcept {
+    std::lock_guard<std::mutex> g(other.mutex_);
+    root_ = std::move(other.root_);
+}
+
+BPlusTree& BPlusTree::operator=(BPlusTree&& other) noexcept {
+    if (this == &other) return *this;
+    std::scoped_lock lock(mutex_, other.mutex_);
+    root_ = std::move(other.root_);
     return *this;
 }
 
 std::optional<std::string> BPlusTree::search(const std::string& key) const {
+    std::lock_guard<std::mutex> g(mutex_);
     if (!root_) return std::nullopt;
     return search_node(*root_, key);
 }
 
 void BPlusTree::insert(std::string key, std::string value) {
+    std::lock_guard<std::mutex> g(mutex_);
     if (!root_) {
         LeafNode leaf;
         leaf.keys.push_back(key);
@@ -522,41 +544,48 @@ void BPlusTree::insert(std::string key, std::string value) {
 }
 
 void BPlusTree::remove(const std::string& key) {
+    std::lock_guard<std::mutex> g(mutex_);
     if (!root_) return;
     root_ = remove_node(std::move(root_), key);
 }
 
 std::vector<std::string> BPlusTree::range_search(const std::string& start, const std::string& end) const {
+    std::lock_guard<std::mutex> g(mutex_);
     std::vector<std::string> result;
     if (root_) range_collect(*root_, start, end, result);
     return result;
 }
 
 std::vector<std::pair<std::string, std::string>> BPlusTree::scan_from(const std::string& start, bool inclusive) const {
+    std::lock_guard<std::mutex> g(mutex_);
     std::vector<std::pair<std::string, std::string>> result;
     if (root_) scan_from_node(*root_, start, inclusive, result);
     return result;
 }
 
 std::vector<std::pair<std::string, std::string>> BPlusTree::scan_to(const std::string& end, bool inclusive) const {
+    std::lock_guard<std::mutex> g(mutex_);
     std::vector<std::pair<std::string, std::string>> result;
     if (root_) scan_to_node(*root_, end, inclusive, result);
     return result;
 }
 
 std::vector<std::string> BPlusTree::all_values() const {
+    std::lock_guard<std::mutex> g(mutex_);
     std::vector<std::string> result;
     if (root_) collect_all(*root_, result);
     return result;
 }
 
 std::vector<std::pair<std::string, std::string>> BPlusTree::collect_all_kv() const {
+    std::lock_guard<std::mutex> g(mutex_);
     std::vector<std::pair<std::string, std::string>> result;
     if (root_) collect_kv_node(*root_, result);
     return result;
 }
 
 std::vector<std::string> BPlusTree::range_keys(const std::string& start, const std::string& end) const {
+    std::lock_guard<std::mutex> g(mutex_);
     std::vector<std::string> result;
     if (root_) range_collect_keys(*root_, start, end, result);
     return result;

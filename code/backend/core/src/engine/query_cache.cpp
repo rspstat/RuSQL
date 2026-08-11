@@ -7,6 +7,7 @@ QueryResultCache::QueryResultCache(QueryResultCache&& other) noexcept : capacity
     entries_ = std::move(other.entries_);
     table_to_keys_ = std::move(other.table_to_keys_);
     insert_order_ = std::move(other.insert_order_);
+    table_generation_ = std::move(other.table_generation_);
     tick_ = other.tick_;
 }
 
@@ -17,6 +18,7 @@ QueryResultCache& QueryResultCache::operator=(QueryResultCache&& other) noexcept
     entries_ = std::move(other.entries_);
     table_to_keys_ = std::move(other.table_to_keys_);
     insert_order_ = std::move(other.insert_order_);
+    table_generation_ = std::move(other.table_generation_);
     tick_ = other.tick_;
     return *this;
 }
@@ -25,10 +27,25 @@ std::optional<std::string> QueryResultCache::get(const std::string& key) const {
     std::lock_guard<std::mutex> g(mutex_);
     auto it = entries_.find(key);
     if (it == entries_.end()) return std::nullopt;
-    return it->second;
+    for (auto& [table, gen] : it->second.table_gens) {
+        auto git = table_generation_.find(table);
+        std::uint64_t current = git != table_generation_.end() ? git->second : 0;
+        if (current != gen) {
+            // Stale relative to a write this entry didn't account for -- evict now
+            // (cheap opportunistic cleanup) and report a miss.
+            entries_.erase(it);
+            insert_order_.erase(key);
+            for (auto& [t, keys] : table_to_keys_) {
+                (void)t;
+                keys.erase(key);
+            }
+            return std::nullopt;
+        }
+    }
+    return it->second.result;
 }
 
-void QueryResultCache::put(std::string key, std::string result, const std::vector<std::string>& tables) {
+void QueryResultCache::put(std::string key, std::string result, const std::vector<std::pair<std::string, std::uint64_t>>& table_gens) const {
     std::lock_guard<std::mutex> g(mutex_);
     if (entries_.count(key)) return;
 
@@ -52,13 +69,17 @@ void QueryResultCache::put(std::string key, std::string result, const std::vecto
     }
 
     tick_++;
-    for (auto& table : tables) table_to_keys_[table].insert(key);
+    for (auto& [table, gen] : table_gens) {
+        (void)gen;
+        table_to_keys_[table].insert(key);
+    }
     insert_order_[key] = tick_;
-    entries_[std::move(key)] = std::move(result);
+    entries_[std::move(key)] = CacheEntry{std::move(result), table_gens};
 }
 
-void QueryResultCache::invalidate_table(const std::string& table) {
+void QueryResultCache::invalidate_table(const std::string& table) const {
     std::lock_guard<std::mutex> g(mutex_);
+    table_generation_[table]++;
     auto it = table_to_keys_.find(table);
     if (it == table_to_keys_.end()) return;
     for (auto& key : it->second) {
@@ -68,7 +89,7 @@ void QueryResultCache::invalidate_table(const std::string& table) {
     table_to_keys_.erase(it);
 }
 
-void QueryResultCache::clear() {
+void QueryResultCache::clear() const {
     std::lock_guard<std::mutex> g(mutex_);
     entries_.clear();
     table_to_keys_.clear();
@@ -79,6 +100,12 @@ void QueryResultCache::clear() {
 std::size_t QueryResultCache::len() const {
     std::lock_guard<std::mutex> g(mutex_);
     return entries_.size();
+}
+
+std::uint64_t QueryResultCache::table_generation(const std::string& table) const {
+    std::lock_guard<std::mutex> g(mutex_);
+    auto it = table_generation_.find(table);
+    return it != table_generation_.end() ? it->second : 0;
 }
 
 } // namespace engine

@@ -11,6 +11,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <utility>
@@ -49,13 +50,21 @@ struct Node {
 /// 수치 인식 키 비교: 두 키가 모두 숫자로 파싱되면 수치 비교, 아니면 문자열 비교.
 int cmp_keys(const std::string& a, const std::string& b);
 
+// Row-level-concurrency Stage 2: guarded by its own mutex_ so that two threads
+// operating on DIFFERENT rows/keys of the same table (and therefore the same index
+// instance) can safely call insert/remove/search concurrently -- one mutex per
+// instance, held only for the short duration of a single call (not true node-level
+// fine-grained locking; a B+Tree's node split/merge/rebalance touches an
+// unpredictable number of nodes per operation, so latch-crabbing-style concurrency
+// isn't attempted here). Every public method already returns by value, so nothing
+// is ever exposed as a reference into mutex_-guarded state.
 class BPlusTree {
 public:
     BPlusTree() = default;
     BPlusTree(const BPlusTree& other);
     BPlusTree& operator=(const BPlusTree& other);
-    BPlusTree(BPlusTree&&) noexcept = default;
-    BPlusTree& operator=(BPlusTree&&) noexcept = default;
+    BPlusTree(BPlusTree&& other) noexcept;
+    BPlusTree& operator=(BPlusTree&& other) noexcept;
     ~BPlusTree() = default;
 
     std::optional<std::string> search(const std::string& key) const;
@@ -69,15 +78,22 @@ public:
     std::vector<std::pair<std::string, std::string>> collect_all_kv() const;
     std::vector<std::string> range_keys(const std::string& start, const std::string& end) const;
 
-    std::size_t len() const { return all_values().size(); }
-    bool is_empty() const { return root_ == nullptr; }
+    std::size_t len() const { return all_values().size(); } // delegates -- already locked
+    bool is_empty() const {
+        std::lock_guard<std::mutex> g(mutex_);
+        return root_ == nullptr;
+    }
 
-    // Internal accessors used only by btree_json.cpp for (de)serialization — not
-    // meant as part of the tree's ordinary public API.
+    // Internal accessors used only by btree_json.cpp for (de)serialization, which only
+    // ever runs under the outer structural-exclusive lock (CREATE INDEX / startup load /
+    // ALTER) -- deliberately NOT guarded by mutex_ (root_ptr() returns a reference, which
+    // a lock held only inside this accessor couldn't protect after it returns anyway).
+    // Not meant as part of the tree's ordinary per-instance-concurrent public API.
     const std::unique_ptr<Node>& root_ptr() const { return root_; }
     void set_root(std::unique_ptr<Node> r) { root_ = std::move(r); }
 
 private:
+    mutable std::mutex mutex_;
     std::unique_ptr<Node> root_;
 };
 

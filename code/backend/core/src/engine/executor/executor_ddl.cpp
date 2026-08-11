@@ -171,19 +171,71 @@ bool value_matches_data_type(const DataType& dt, const std::string& val) {
 
 StringResult Executor::exec_create(SharedDatabase& s, std::string name, std::vector<ColumnDef> columns, bool if_not_exists,
                                     std::vector<std::string> primary_key_columns,
-                                    std::vector<std::pair<std::optional<std::string>, std::string>> check_constraints) {
+                                    std::vector<std::pair<std::optional<std::string>, std::string>> check_constraints,
+                                    std::optional<PartitionBy> partition_by) {
     if (if_not_exists && s.tables.count(name)) return StringResult::Ok("Table '" + name + "' already exists, skipped.");
+
+    // Table partitioning (V1): expand HASH into an explicit partition list and validate
+    // RANGE's MAXVALUE placement BEFORE creating anything, so a bad PARTITION BY clause
+    // fails cleanly with nothing half-created. Child table names are `name__pname` (a
+    // separator this parser's identifiers can never produce on their own).
+    if (partition_by) {
+        auto col_it = std::find_if(columns.begin(), columns.end(), [&](const ColumnDef& c) { return c.name == partition_by->column; });
+        if (col_it == columns.end()) return StringResult::Err("PARTITION BY column '" + partition_by->column + "' not defined");
+        // V1 correctness restriction: the partition column can't be AUTO_INCREMENT --
+        // routing a row to a child (RANGE/LIST) needs the partition-key value BEFORE the
+        // row is inserted, but an auto-increment value is only assigned INSIDE the
+        // per-child exec_insert_inner call the router recurses into (chicken-and-egg).
+        if (col_it->auto_increment) return StringResult::Err("PARTITION BY column cannot be AUTO_INCREMENT");
+        // V1 correctness restriction: if the table has a primary key at all, the
+        // partition column must be part of it (matches MySQL's own "every unique key
+        // must include all partitioning columns" rule) -- each child table only enforces
+        // PK uniqueness within ITSELF, so without this, two different children could
+        // independently accept the same PK value with nothing to catch the collision.
+        // When the partition column IS part of the PK, two rows sharing a PK necessarily
+        // share the same partition-key value too, so they're always routed to the SAME
+        // child, where its own PK uniqueness check catches the duplicate correctly.
+        bool has_explicit_pk = !primary_key_columns.empty();
+        bool has_inline_pk = std::any_of(columns.begin(), columns.end(), [](const ColumnDef& c) { return c.primary_key; });
+        if (has_explicit_pk || has_inline_pk) {
+            bool col_in_pk = has_explicit_pk
+                                  ? std::find(primary_key_columns.begin(), primary_key_columns.end(), partition_by->column) != primary_key_columns.end()
+                                  : col_it->primary_key;
+            if (!col_in_pk) return StringResult::Err("PARTITION BY column '" + partition_by->column + "' must be part of the PRIMARY KEY");
+        }
+        if (partition_by->kind == PartitionKind::Hash) {
+            if (partition_by->hash_partitions < 1) return StringResult::Err("PARTITION BY HASH requires at least 1 partition");
+            partition_by->partitions.clear();
+            for (int i = 0; i < partition_by->hash_partitions; i++) {
+                PartitionDef def;
+                def.name = "p" + std::to_string(i);
+                partition_by->partitions.push_back(std::move(def));
+            }
+        } else {
+            if (partition_by->partitions.empty()) return StringResult::Err("PARTITION BY requires at least one partition");
+            for (std::size_t i = 0; i < partition_by->partitions.size(); i++) {
+                if (partition_by->partitions[i].range_is_maxvalue && i + 1 != partition_by->partitions.size()) {
+                    return StringResult::Err("MAXVALUE partition must be the last one in PARTITION BY RANGE");
+                }
+            }
+        }
+        for (auto& def : partition_by->partitions) def.child_table = name + "__" + def.name;
+    }
 
     std::vector<CheckConstraint> schema_checks;
     schema_checks.reserve(check_constraints.size());
     for (auto& [cname, expr] : check_constraints) schema_checks.push_back(CheckConstraint{cname, expr});
 
-    auto res = s.catalog.create_table_full(name, std::move(columns), std::move(primary_key_columns), std::move(schema_checks));
+    // `columns`/`primary_key_columns`/`check_constraints` are deliberately NOT moved into
+    // create_table_full below (unlike before partitioning existed) -- the partitioned
+    // branch further down needs to reuse them unchanged, once per child table.
+    auto res = s.catalog.create_table_full(name, columns, primary_key_columns, schema_checks);
     if (res.is_err()) return StringResult::Err(res.error());
 
     s.tables[name] = {};
     s.indexes[name] = BPlusTree();
-    s.table_locks[name] = std::make_shared<std::shared_mutex>();
+    s.table_locks[name] = std::make_shared<FairSharedMutex>();
+    s.table_data_locks[name] = std::make_shared<FairSharedMutex>();
     // Stage 4: pre-populate every other table-keyed map too. Under per-table locking, a
     // DML statement on this table only ever holds THIS table's own lock -- if its first
     // touch to one of these maps used operator[] to insert a brand-new key, that could
@@ -196,29 +248,71 @@ StringResult Executor::exec_create(SharedDatabase& s, std::string name, std::vec
     s.dml_since_vacuum[name] = 0;
     s.dml_since_analyze[name] = 0;
     s.row_pk_pos[name] = {};
+
+    // Table partitioning (V1): `s.tables[name]` above stays a permanently-empty phantom --
+    // every child gets the exact same schema via a plain (non-partitioned) recursive
+    // exec_create call, reusing every line above unchanged for each one. The partition
+    // router (executor_partition.cpp) is what actually redirects INSERT/UPDATE/DELETE/
+    // SELECT on `name` to these children; nothing else in this function needs to know
+    // partitioning exists.
+    if (partition_by) {
+        for (auto& def : partition_by->partitions) {
+            auto child_res = exec_create(s, def.child_table, columns, /*if_not_exists=*/false, primary_key_columns, check_constraints);
+            if (child_res.is_err()) {
+                // Best-effort cleanup so a failed CREATE TABLE ... PARTITION BY doesn't
+                // leave a half-created table behind for this session to trip over later.
+                for (auto& cleanup : partition_by->partitions) {
+                    if (cleanup.child_table == def.child_table) break;
+                    exec_drop(s, cleanup.child_table, /*if_exists=*/true);
+                }
+                exec_drop(s, name, /*if_exists=*/true);
+                return child_res;
+            }
+        }
+        s.catalog.get_table_mut(name)->partition_info = partition_by;
+    }
+
     s.disk.save_schema(name, *s.catalog.get_table(name));
     return StringResult::Ok("Table '" + name + "' created.");
 }
 
 StringResult Executor::exec_drop(SharedDatabase& s, const std::string& name, bool if_exists) {
     if (if_exists && !s.tables.count(name)) return StringResult::Ok("Table '" + name + "' does not exist, skipped.");
+    // Table partitioning: capture the child list BEFORE drop_table erases the catalog
+    // entry (and so partition_info with it) below.
+    std::optional<PartitionBy> partition_by;
+    if (auto* schema = s.catalog.get_table(name)) partition_by = schema->partition_info;
     auto res = s.catalog.drop_table(name);
     if (res.is_err()) return StringResult::Err(res.error());
     s.tables.erase(name);
     s.indexes.erase(name);
     s.table_locks.erase(name);
+    s.table_data_locks.erase(name);
     s.table_stats.erase(name);
     s.dml_since_vacuum.erase(name);
     s.dml_since_analyze.erase(name);
     s.row_pk_pos.erase(name);
     s.buffer_pool.invalidate(name);
     s.disk.delete_table(name);
+    if (partition_by) {
+        for (auto& def : partition_by->partitions) exec_drop(s, def.child_table, /*if_exists=*/true);
+    }
     return StringResult::Ok("Table '" + name + "' dropped.");
 }
 
 StringResult Executor::exec_truncate(SharedDatabase& s, const std::string& name) {
     auto it = s.tables.find(name);
     if (it == s.tables.end()) return StringResult::Err("Table '" + name + "' not found");
+    // Table partitioning: the logical table's own `s.tables[name]` is a permanently-empty
+    // phantom (see exec_create) -- truncate every real child instead. The clear()/erase()/
+    // BPlusTree-reset below still run for `name` itself too (harmless no-ops on an
+    // already-empty phantom), so a non-partitioned TRUNCATE is completely unaffected.
+    if (auto* schema = s.catalog.get_table(name); schema && schema->partition_info) {
+        for (auto& def : schema->partition_info->partitions) {
+            auto child_res = exec_truncate(s, def.child_table);
+            if (child_res.is_err()) return child_res;
+        }
+    }
     it->second.clear();
     s.row_pk_pos.erase(name);
     if (auto idx_it = s.indexes.find(name); idx_it != s.indexes.end()) idx_it->second = BPlusTree();
@@ -229,6 +323,68 @@ StringResult Executor::exec_truncate(SharedDatabase& s, const std::string& name)
 }
 
 StringResult Executor::exec_alter(SharedDatabase& s, const std::string& table, AlterAction action) {
+    // Table partitioning (V1): every action except ADD/DROP PARTITION is blocked on a
+    // partitioned table -- a schema change (ADD/DROP/MODIFY/RENAME COLUMN, FK/constraint
+    // changes) would need to propagate identically to every child, which this version
+    // doesn't implement. Rejecting with a clear error here is far safer than silently
+    // altering only the permanently-empty logical parent.
+    bool is_partition_action =
+        std::holds_alternative<AlterAction::AddPartition>(action.data) || std::holds_alternative<AlterAction::DropPartition>(action.data);
+    if (!is_partition_action) {
+        if (auto* schema = s.catalog.get_table(table); schema && schema->partition_info) {
+            return StringResult::Err("ALTER TABLE only supports ADD PARTITION/DROP PARTITION on a partitioned table in this version");
+        }
+    }
+
+    if (auto* v = std::get_if<AlterAction::AddPartition>(&action.data)) {
+        auto* schema = s.catalog.get_table_mut(table);
+        if (!schema) return StringResult::Err("Table '" + table + "' not found");
+        if (!schema->partition_info) return StringResult::Err("Table '" + table + "' is not partitioned");
+        PartitionBy& info = *schema->partition_info;
+        if (info.kind == PartitionKind::Hash) return StringResult::Err("Cannot ADD PARTITION on a HASH-partitioned table");
+        // The parser detects RANGE vs LIST from LESS-THAN vs IN, so a mismatch here means
+        // e.g. `ADD PARTITION (... VALUES IN (...))` was used on a RANGE table.
+        if (info.kind == PartitionKind::Range && !v->def.list_values.empty())
+            return StringResult::Err("Table '" + table + "' is RANGE-partitioned -- use VALUES LESS THAN");
+        if (info.kind == PartitionKind::List && (v->def.range_upper_bound || v->def.range_is_maxvalue))
+            return StringResult::Err("Table '" + table + "' is LIST-partitioned -- use VALUES IN");
+        if (std::any_of(info.partitions.begin(), info.partitions.end(), [&](const PartitionDef& d) { return d.name == v->def.name; })) {
+            return StringResult::Err("Partition '" + v->def.name + "' already exists");
+        }
+        if (info.kind == PartitionKind::Range && !info.partitions.empty() && info.partitions.back().range_is_maxvalue) {
+            return StringResult::Err("Cannot ADD PARTITION after a MAXVALUE partition");
+        }
+        PartitionDef new_def = v->def;
+        new_def.child_table = table + "__" + new_def.name;
+        // exec_create's check_constraints parameter is the raw (name, expr) pair form;
+        // TableSchema only stores the already-converted CheckConstraint form -- convert back.
+        std::vector<std::pair<std::optional<std::string>, std::string>> raw_checks;
+        raw_checks.reserve(schema->check_constraints.size());
+        for (auto& c : schema->check_constraints) raw_checks.emplace_back(c.name, c.expression);
+        auto create_res =
+            exec_create(s, new_def.child_table, schema->columns, /*if_not_exists=*/false, schema->primary_key_columns, raw_checks);
+        if (create_res.is_err()) return create_res;
+        schema = s.catalog.get_table_mut(table); // exec_create above may have invalidated schema (map rehash)
+        schema->partition_info->partitions.push_back(new_def);
+        s.disk.save_schema(table, *schema);
+        return StringResult::Ok("Partition '" + new_def.name + "' added to '" + table + "'.");
+    }
+
+    if (auto* v = std::get_if<AlterAction::DropPartition>(&action.data)) {
+        auto* schema = s.catalog.get_table_mut(table);
+        if (!schema) return StringResult::Err("Table '" + table + "' not found");
+        if (!schema->partition_info) return StringResult::Err("Table '" + table + "' is not partitioned");
+        PartitionBy& info = *schema->partition_info;
+        auto it = std::find_if(info.partitions.begin(), info.partitions.end(), [&](const PartitionDef& d) { return d.name == v->name; });
+        if (it == info.partitions.end()) return StringResult::Err("Partition '" + v->name + "' not found in '" + table + "'");
+        std::string child_table = it->child_table;
+        info.partitions.erase(it);
+        s.disk.save_schema(table, *schema);
+        return exec_drop(s, child_table, /*if_exists=*/true).is_err()
+                   ? StringResult::Err("Partition '" + v->name + "' metadata removed but dropping its data failed")
+                   : StringResult::Ok("Partition '" + v->name + "' dropped from '" + table + "'.");
+    }
+
     if (auto* v = std::get_if<AlterAction::AddColumn>(&action.data)) {
         auto* schema = s.catalog.get_table_mut(table);
         if (!schema) return StringResult::Err("Table '" + table + "' not found");
@@ -393,6 +549,11 @@ StringResult Executor::exec_alter(SharedDatabase& s, const std::string& table, A
             s.table_locks.erase(it);
             s.table_locks.insert({v->to, std::move(lock)});
         }
+        if (auto it = s.table_data_locks.find(table); it != s.table_data_locks.end()) {
+            auto lock = std::move(it->second);
+            s.table_data_locks.erase(it);
+            s.table_data_locks.insert({v->to, std::move(lock)});
+        }
         if (auto it = s.table_stats.find(table); it != s.table_stats.end()) {
             auto st = std::move(it->second);
             s.table_stats.erase(it);
@@ -553,6 +714,7 @@ StringResult Executor::exec_drop_database(SharedDatabase& s, const std::string& 
         s.tables.erase(t);
         s.indexes.erase(t);
         s.table_locks.erase(t);
+        s.table_data_locks.erase(t);
         s.table_stats.erase(t);
         s.dml_since_vacuum.erase(t);
         s.dml_since_analyze.erase(t);

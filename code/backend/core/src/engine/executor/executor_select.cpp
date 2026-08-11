@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <charconv>
+#include <chrono>
 #include <cmath>
 #include <numeric>
 #include <unordered_set>
@@ -1163,18 +1164,40 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
             GapRange range = extract_pk_gap_range(condition, pk_col);
             s.lock_mgr.acquire_gap(table, range.lo, range.lo_inclusive, range.hi, range.hi_inclusive, txn_id);
         }
+        // Real-blocking-wait stage: one deadline for the whole FOR UPDATE lock-acquisition
+        // phase, matching exec_insert_inner's identical field.
+        auto lock_deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(lock_wait_timeout_ms);
         for (auto& row : result) {
             auto it = row.find(pk_col);
             std::string pk_val = it != row.end() ? it->second : std::string();
             LockResult lr = s.lock_mgr.acquire(table, pk_val, txn_id);
-            if (lr.kind == LockResult::Kind::Conflict) {
-                return StringResult::Err("ERROR 1205 (HY000): Lock wait timeout exceeded (" + std::to_string(lock_wait_timeout_ms) +
-                                          "ms); row '" + pk_val + "' in '" + table + "' is held by transaction " + std::to_string(lr.holder) +
-                                          ". Retry or SET @lock_wait_timeout=<ms> to adjust.");
-            }
             if (lr.kind == LockResult::Kind::Deadlock) {
                 return StringResult::Err("Deadlock detected: transaction " + std::to_string(txn_id) + " waits for transaction " +
                                           std::to_string(lr.holder) + " (SELECT FOR UPDATE). Transaction " + std::to_string(txn_id) + " aborted.");
+            }
+            if (lr.kind == LockResult::Kind::Conflict) {
+                // `result` is already a materialized snapshot -- blocking here never needs
+                // a rescan the way UPDATE's mutation loop does, since nothing has been (or
+                // will be) mutated by this loop. Just release both dispatcher-owned guards
+                // (table_data_locks AND table_locks -- see release_table_locks_for_block's
+                // doc comment: a statement blocked while still holding either can deadlock
+                // against a concurrent COMMIT/write needing the other one EXCLUSIVE),
+                // block on just this one row, and reacquire before touching `s` again.
+                release_table_data_locks_for_block();
+                release_table_locks_for_block();
+                LockResult lr2 = block_on_row(s.lock_mgr, table, pk_val, txn_id, /*exclusive=*/true, lock_deadline);
+                reacquire_table_locks_after_block();
+                reacquire_table_data_locks_after_block(s);
+                if (lr2.kind == LockResult::Kind::Deadlock) {
+                    return StringResult::Err("Deadlock detected: transaction " + std::to_string(txn_id) + " waits for transaction " +
+                                              std::to_string(lr2.holder) + " (SELECT FOR UPDATE). Transaction " + std::to_string(txn_id) +
+                                              " aborted.");
+                }
+                if (lr2.kind != LockResult::Kind::Granted) {
+                    return StringResult::Err("ERROR 1205 (HY000): Lock wait timeout exceeded (" + std::to_string(lock_wait_timeout_ms) +
+                                              "ms); row '" + pk_val + "' in '" + table + "' is held by transaction " +
+                                              std::to_string(lr2.holder) + ". Retry or SET @lock_wait_timeout=<ms> to adjust.");
+                }
             }
         }
     }
@@ -1197,18 +1220,33 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
             GapRange range = extract_pk_gap_range(condition, pk_col);
             s.lock_mgr.acquire_gap(table, range.lo, range.lo_inclusive, range.hi, range.hi_inclusive, txn_id);
         }
+        // Real-blocking-wait stage: see the FOR UPDATE block above for the full reasoning
+        // (identical shape, exclusive=false here).
+        auto lock_deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(lock_wait_timeout_ms);
         for (auto& row : result) {
             auto it = row.find(pk_col);
             std::string pk_val = it != row.end() ? it->second : std::string();
             LockResult lr = s.lock_mgr.acquire_shared(table, pk_val, txn_id);
-            if (lr.kind == LockResult::Kind::Conflict) {
-                return StringResult::Err("ERROR 1205 (HY000): Lock wait timeout exceeded (" + std::to_string(lock_wait_timeout_ms) +
-                                          "ms); row '" + pk_val + "' in '" + table + "' is held exclusively by transaction " +
-                                          std::to_string(lr.holder) + ". Retry or SET @lock_wait_timeout=<ms> to adjust.");
-            }
             if (lr.kind == LockResult::Kind::Deadlock) {
                 return StringResult::Err("Deadlock detected: transaction " + std::to_string(txn_id) + " waits for transaction " +
                                           std::to_string(lr.holder) + " (SELECT FOR SHARE). Transaction " + std::to_string(txn_id) + " aborted.");
+            }
+            if (lr.kind == LockResult::Kind::Conflict) {
+                release_table_data_locks_for_block();
+                release_table_locks_for_block();
+                LockResult lr2 = block_on_row(s.lock_mgr, table, pk_val, txn_id, /*exclusive=*/false, lock_deadline);
+                reacquire_table_locks_after_block();
+                reacquire_table_data_locks_after_block(s);
+                if (lr2.kind == LockResult::Kind::Deadlock) {
+                    return StringResult::Err("Deadlock detected: transaction " + std::to_string(txn_id) + " waits for transaction " +
+                                              std::to_string(lr2.holder) + " (SELECT FOR SHARE). Transaction " + std::to_string(txn_id) +
+                                              " aborted.");
+                }
+                if (lr2.kind != LockResult::Kind::Granted) {
+                    return StringResult::Err("ERROR 1205 (HY000): Lock wait timeout exceeded (" + std::to_string(lock_wait_timeout_ms) +
+                                              "ms); row '" + pk_val + "' in '" + table + "' is held exclusively by transaction " +
+                                              std::to_string(lr2.holder) + ". Retry or SET @lock_wait_timeout=<ms> to adjust.");
+                }
             }
         }
     }

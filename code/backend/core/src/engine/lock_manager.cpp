@@ -22,70 +22,137 @@ LockManager& LockManager::operator=(LockManager&& other) noexcept {
     return *this;
 }
 
-LockResult LockManager::acquire(const std::string& table, const std::string& pk, std::uint64_t txn_id) {
-    std::lock_guard<std::mutex> g(mutex_);
-    auto key = std::make_pair(table, pk);
+std::optional<std::uint64_t> LockManager::try_grant_exclusive_locked(const std::pair<std::string, std::string>& key,
+                                                                       std::uint64_t txn_id) {
     auto it = row_locks_.find(key);
     if (it == row_locks_.end()) {
         row_locks_[key] = LockEntry{LockEntry::Exclusive{txn_id}};
-        return LockResult::granted();
+        return std::nullopt;
     }
 
     LockEntry& entry = it->second;
     if (std::holds_alternative<LockEntry::Exclusive>(entry.data)) {
         std::uint64_t holder = std::get<LockEntry::Exclusive>(entry.data).holder;
-        if (holder == txn_id) return LockResult::granted();
-        if (creates_cycle(txn_id, holder)) {
-            deadlock_history_.emplace_back(txn_id, holder);
-            return LockResult::deadlock(holder);
-        }
-        wait_for_[txn_id] = holder;
-        return LockResult::conflict(holder);
+        if (holder == txn_id) return std::nullopt;
+        return holder;
     }
 
     // Shared
     auto& holders = std::get<LockEntry::Shared>(entry.data).holders;
     if (holders.size() == 1 && holders.count(txn_id)) {
         row_locks_[key] = LockEntry{LockEntry::Exclusive{txn_id}};
-        return LockResult::granted();
+        return std::nullopt;
     }
-    std::uint64_t holder = txn_id;
     for (auto h : holders) {
-        if (h != txn_id) { holder = h; break; }
+        if (h != txn_id) return h;
     }
-    if (creates_cycle(txn_id, holder)) {
-        deadlock_history_.emplace_back(txn_id, holder);
-        return LockResult::deadlock(holder);
-    }
-    wait_for_[txn_id] = holder;
-    return LockResult::conflict(holder);
+    return std::nullopt; // unreachable: holders is non-empty and not solely {txn_id}
 }
 
-LockResult LockManager::acquire_shared(const std::string& table, const std::string& pk, std::uint64_t txn_id) {
-    std::lock_guard<std::mutex> g(mutex_);
-    auto key = std::make_pair(table, pk);
+std::optional<std::uint64_t> LockManager::try_grant_shared_locked(const std::pair<std::string, std::string>& key,
+                                                                    std::uint64_t txn_id) {
     auto it = row_locks_.find(key);
     if (it == row_locks_.end()) {
         LockEntry::Shared s;
         s.holders.insert(txn_id);
         row_locks_[key] = LockEntry{std::move(s)};
-        return LockResult::granted();
+        return std::nullopt;
     }
 
     LockEntry& entry = it->second;
     if (std::holds_alternative<LockEntry::Exclusive>(entry.data)) {
         std::uint64_t holder = std::get<LockEntry::Exclusive>(entry.data).holder;
-        if (holder == txn_id) return LockResult::granted(); // 재진입
-        if (creates_cycle(txn_id, holder)) {
-            deadlock_history_.emplace_back(txn_id, holder);
-            return LockResult::deadlock(holder);
-        }
-        wait_for_[txn_id] = holder;
-        return LockResult::conflict(holder);
+        if (holder == txn_id) return std::nullopt; // 재진입
+        return holder;
     }
 
     std::get<LockEntry::Shared>(entry.data).holders.insert(txn_id);
-    return LockResult::granted();
+    return std::nullopt;
+}
+
+// Real-blocking-wait stage (see lock_manager.hpp's class-level doc comment): both
+// acquire() and acquire_shared() share this exact shape --
+//   1. Try to grant instantly (unchanged logic, now factored into try_grant_*_locked).
+//   2. On conflict, check creates_cycle() ONCE, at this call's own start, exactly like
+//      the pre-blocking version did -- this is deliberately NOT re-checked later while
+//      asleep. Reasoning: a cycle that forms *after* this point is always completed by
+//      some OTHER transaction's own acquire() call (the one that would create the last
+//      edge closing the loop) -- that call detects it via the same creates_cycle() walk
+//      over the live wait_for_ graph (this thread's edge, even while asleep, is exactly
+//      what makes that walk succeed) and fails immediately as the deadlock "victim". This
+//      thread just keeps waiting normally, matching standard victim-selection (the last
+//      transaction to complete the cycle aborts, not every member of it).
+//   3. If timeout <= 0, return Conflict immediately -- byte-identical to every call site
+//      that never passes a timeout.
+//   4. Otherwise, sleep on cv_ (notified by release(), the only place a lock ever becomes
+//      newly grantable) up to the deadline. On every wake (spurious or real), re-derive
+//      the row's CURRENT holder from row_locks_ -- never trust the holder captured before
+//      sleeping, since the row can change hands to a different waiter while this thread
+//      slept. Grant if now possible; otherwise refresh wait_for_[txn_id] to the current
+//      holder (keeping other threads' future cycle checks accurate) and keep waiting,
+//      unless the deadline has passed, in which case give up with Kind::Timeout.
+LockResult LockManager::acquire(const std::string& table, const std::string& pk, std::uint64_t txn_id,
+                                 std::chrono::milliseconds timeout) {
+    std::unique_lock<std::mutex> lk(mutex_);
+    auto key = std::make_pair(table, pk);
+
+    auto conflict_holder = try_grant_exclusive_locked(key, txn_id);
+    if (!conflict_holder) return LockResult::granted();
+
+    if (creates_cycle(txn_id, *conflict_holder)) {
+        deadlock_history_.emplace_back(txn_id, *conflict_holder);
+        return LockResult::deadlock(*conflict_holder);
+    }
+    wait_for_[txn_id] = *conflict_holder;
+
+    if (timeout.count() <= 0) return LockResult::conflict(*conflict_holder);
+
+    auto deadline = std::chrono::steady_clock::now() + timeout;
+    for (;;) {
+        cv_.wait_until(lk, deadline);
+        auto retry_holder = try_grant_exclusive_locked(key, txn_id);
+        if (!retry_holder) {
+            wait_for_.erase(txn_id);
+            return LockResult::granted();
+        }
+        if (std::chrono::steady_clock::now() >= deadline) {
+            wait_for_.erase(txn_id);
+            return LockResult::timed_out(*retry_holder);
+        }
+        wait_for_[txn_id] = *retry_holder;
+    }
+}
+
+LockResult LockManager::acquire_shared(const std::string& table, const std::string& pk, std::uint64_t txn_id,
+                                        std::chrono::milliseconds timeout) {
+    std::unique_lock<std::mutex> lk(mutex_);
+    auto key = std::make_pair(table, pk);
+
+    auto conflict_holder = try_grant_shared_locked(key, txn_id);
+    if (!conflict_holder) return LockResult::granted();
+
+    if (creates_cycle(txn_id, *conflict_holder)) {
+        deadlock_history_.emplace_back(txn_id, *conflict_holder);
+        return LockResult::deadlock(*conflict_holder);
+    }
+    wait_for_[txn_id] = *conflict_holder;
+
+    if (timeout.count() <= 0) return LockResult::conflict(*conflict_holder);
+
+    auto deadline = std::chrono::steady_clock::now() + timeout;
+    for (;;) {
+        cv_.wait_until(lk, deadline);
+        auto retry_holder = try_grant_shared_locked(key, txn_id);
+        if (!retry_holder) {
+            wait_for_.erase(txn_id);
+            return LockResult::granted();
+        }
+        if (std::chrono::steady_clock::now() >= deadline) {
+            wait_for_.erase(txn_id);
+            return LockResult::timed_out(*retry_holder);
+        }
+        wait_for_[txn_id] = *retry_holder;
+    }
 }
 
 void LockManager::release(std::uint64_t txn_id) {
@@ -114,6 +181,10 @@ void LockManager::release(std::uint64_t txn_id) {
                    rows.end());
         if (rows.empty()) it = gap_locks_.erase(it); else ++it;
     }
+    // The only place a row lock ever becomes newly grantable to someone else -- wakes
+    // every thread blocked in acquire()/acquire_shared()'s real-wait loop so each can
+    // re-check whether the row(s) it wants are now free.
+    cv_.notify_all();
 }
 
 void LockManager::insert_lock(const std::string& table, const std::string& pk, std::uint64_t txn_id) {
@@ -187,14 +258,34 @@ std::vector<GapLockRow> LockManager::gap_locks_for(const std::string& table) con
     return it->second;
 }
 
-LockResult LockManager::register_gap_conflict(std::uint64_t txn_id, std::uint64_t holder) {
-    std::lock_guard<std::mutex> g(mutex_);
+LockResult LockManager::register_gap_conflict(const std::string& table, std::uint64_t txn_id, std::uint64_t holder,
+                                                std::chrono::milliseconds timeout) {
+    std::unique_lock<std::mutex> lk(mutex_);
     if (creates_cycle(txn_id, holder)) {
         deadlock_history_.emplace_back(txn_id, holder);
         return LockResult::deadlock(holder);
     }
     wait_for_[txn_id] = holder;
-    return LockResult::conflict(holder);
+
+    if (timeout.count() <= 0) return LockResult::conflict(holder);
+
+    auto still_held = [&] {
+        auto it = gap_locks_.find(table);
+        if (it == gap_locks_.end()) return false;
+        return std::any_of(it->second.begin(), it->second.end(), [&](const GapLockRow& r) { return r.holder == holder; });
+    };
+    auto deadline = std::chrono::steady_clock::now() + timeout;
+    for (;;) {
+        cv_.wait_until(lk, deadline);
+        if (!still_held()) {
+            wait_for_.erase(txn_id);
+            return LockResult::granted();
+        }
+        if (std::chrono::steady_clock::now() >= deadline) {
+            wait_for_.erase(txn_id);
+            return LockResult::timed_out(holder);
+        }
+    }
 }
 
 std::vector<std::tuple<std::string, std::string, std::uint64_t>> LockManager::gap_lock_rows() const {
@@ -216,6 +307,10 @@ std::vector<std::tuple<std::string, std::string, std::uint64_t>> LockManager::ga
         return std::get<1>(a) < std::get<1>(b);
     });
     return v;
+}
+
+RowClaimGuard::~RowClaimGuard() {
+    if (owns_) lm_->release(txn_id_);
 }
 
 // Internal -- called only from acquire()/acquire_shared(), which already hold mutex_.

@@ -27,6 +27,7 @@
 
 ### DDL
 - [x] CREATE TABLE / DROP TABLE / DROP TABLE IF EXISTS
+- [x] **테이블 파티셔닝 (PARTITION BY RANGE/LIST/HASH, V1)** — `CREATE TABLE t (...) PARTITION BY RANGE(col) (PARTITION p0 VALUES LESS THAN (100), ..., PARTITION pN VALUES LESS THAN MAXVALUE)` / `PARTITION BY LIST(col) (PARTITION p VALUES IN (...))` / `PARTITION BY HASH(col) PARTITIONS n`. 논리 테이블은 항상 비어있는 껍데기이고 실제 행은 `t__p0` 등 평범한 물리 자식 테이블에 저장 — INSERT/UPDATE/DELETE/SELECT가 자동으로 올바른 자식으로 라우팅되고, WHERE절 기반 파티션 프루닝으로 관련 없는 자식은 스캔하지 않음(RANGE/LIST는 WHERE절 범위·값 분석, HASH는 등호 조건만). `ALTER TABLE t ADD PARTITION (...)` / `DROP PARTITION name`. FK가 파티션 테이블을 참조(`REFERENCES`)하는 것도 지원(자식 전체를 존재-확인). 파티션 키가 PK와 겹치면(V1 요구사항 — PK 있는 테이블은 파티션 컬럼이 PK의 일부여야 함) 전역 PK 유일성도 자동 보장. **V1 범위 밖**: 파티션 컬럼 변경 UPDATE, 파티션 테이블에 ALTER ADD/MODIFY/DROP COLUMN, 파티션 테이블을 FK 캐스케이드 대상(자식 쪽)으로 사용, RETURNING, GROUP BY/집계함수/DISTINCT/JOIN이 있는 SELECT, InsertSelect/MultiUpdate/MultiDelete/Merge, 다중 컬럼 파티션 키, 파티션 컬럼 AUTO_INCREMENT — 전부 명확한 에러로 거부(침묵하는 빈 결과 없음)
 - [x] TRUNCATE TABLE
 - [x] ALTER TABLE (ADD / MODIFY / DROP / RENAME COLUMN)
 - [x] ALTER TABLE RENAME TO (테이블 이름 변경)
@@ -185,6 +186,7 @@
 - [x] ON UPDATE CASCADE
 - [x] ON UPDATE SET NULL / SET DEFAULT
 - [x] NO ACTION (RESTRICT 동등)
+- [x] FK 캐스케이드 후 인덱스 일관성 — CASCADE/SET NULL/SET DEFAULT가 캐스케이드 대상 테이블의 PK B+Tree/보조·해시 인덱스/복합 인덱스까지 즉시 갱신(주 테이블 자신의 UPDATE/DELETE와 동일한 증분 갱신 방식) — PK 인덱스 포인트 조회(`WHERE <PK 컬럼> = ...`)도 캐스케이드 직후부터 정확한 값 반환
 
 ### 트랜잭션
 - [x] WAL (Write-Ahead Logging) — 바이너리 redo log
@@ -237,17 +239,19 @@
 - [x] SERIALIZABLE 충돌 감지 — read-set 기반: 트랜잭션이 실제로 읽은 각 행이 BEGIN 시점과 커밋 시점 사이에 이미 커밋된 다른 트랜잭션에 의해 바뀌었는지 재검증해 충돌 시 자동 ROLLBACK (단순 행 개수 비교 대체 — 개수는 같지만 내용이 다른 인터리빙도 감지). 완전한 SSI(Serializable Snapshot Isolation)는 아님 — predicate lock이 없어 잠금 없는 일반 SELECT의 phantom/write-skew까지는 못 잡음(아래 Gap Lock은 잠그는 읽기·범위 UPDATE/DELETE 한정 보완)
 
 ### Row-level Locking & Gap Lock
-- [x] SELECT ... FOR UPDATE (배타 잠금 획득)
-- [x] SELECT ... FOR SHARE (공유 잠금 — 다중 독자 허용)
+- [x] SELECT ... FOR UPDATE (배타 잠금 획득, 충돌 시 진짜 블로킹 대기 — 아래 "진짜 블로킹 대기 락" 참고)
+- [x] SELECT ... FOR SHARE (공유 잠금 — 다중 독자 허용, 충돌 시 진짜 블로킹 대기)
 - [x] 공유/배타 잠금 충돌 감지 및 데드락 감지 (wait-for 그래프 DFS)
 - [x] UPDATE / DELETE 시 잠금 충돌 감지
 - [x] COMMIT / ROLLBACK 시 잠금 자동 해제
 - [x] SHOW LOCKS (활성 행 잠금 + Gap Lock 목록 조회)
 - [x] 잠금 대기 타임아웃 세션 변수 — `SET @lock_wait_timeout = N` (밀리초, 기본 50,000ms), 세션별 독립 설정 (`Executor.lock_wait_timeout_ms` 필드), 타임아웃 시 MySQL 호환 `ERROR 1205 (HY000): Lock wait timeout exceeded` 반환
-- [x] **Gap Lock (InnoDB 스타일 phantom 방지)** — REPEATABLE READ/SERIALIZABLE에서 `FOR UPDATE`/`FOR SHARE`와 트랜잭션 내 `UPDATE`/`DELETE`가 WHERE절에서 PK 범위(Eq/Gt/Gte/Lt/Lte/Between, AND 조합, 그 외엔 안전하게 테이블 전체 범위로 폴백)를 추출해 범위 자체를 잠금 — 같은 범위로의 동시 INSERT를 거부해 재조회 시 유령 행(phantom row) 등장 방지. Gap Lock끼리는 서로 충돌하지 않음(실제 InnoDB와 동일한 호환성 의미론), 자기 자신이 잡은 Gap Lock은 자신의 INSERT를 막지 않음, 데드락 그래프는 행 잠금과 완전히 공유. V1 범위: 단일 컬럼 PK 테이블만
+- [x] **Gap Lock (InnoDB 스타일 phantom 방지)** — REPEATABLE READ/SERIALIZABLE에서 `FOR UPDATE`/`FOR SHARE`와 트랜잭션 내 `UPDATE`/`DELETE`가 WHERE절에서 PK 범위(Eq/Gt/Gte/Lt/Lte/Between, AND 조합, 그 외엔 안전하게 테이블 전체 범위로 폴백)를 추출해 범위 자체를 잠금 — 같은 범위로의 동시 INSERT는 그 Gap Lock의 보유자가 COMMIT/ROLLBACK할 때까지 진짜 블로킹 대기(`@lock_wait_timeout` 적용, 시간 내에 안 풀리면 `ERROR 1205`). Gap Lock끼리는 서로 충돌하지 않음(실제 InnoDB와 동일한 호환성 의미론), 자기 자신이 잡은 Gap Lock은 자신의 INSERT를 막지 않음, 데드락 그래프는 행 잠금과 완전히 공유. V1 범위: 단일 컬럼 PK 테이블만
 
 ### 동시성
-- [x] 테이블 단위 동시 쓰기 — 2계층 잠금: ① 구조적 잠금(`RwLock<SharedDatabase>`, 여전히 배타 — DDL/DCL/VACUUM/CHECKPOINT 및 CTE·FROM-서브쿼리·뷰 참조·발화하는 트리거가 있는 문장 전용), ② 테이블별 `shared_mutex`(그 외 평범한 단일/조인 INSERT/UPDATE/DELETE/SELECT/MERGE/다중 UPDATE·DELETE — 대상 테이블 + FK 부모/자식 1-hop을 정렬된 순서로 잠금, 락 순서 데드락 방지). 서로 다른 테이블에 대한 쓰기는 실제로 동시 실행되고, 같은 테이블 내부는 여전히 그 테이블의 락 하나로 완전히 직렬화. 순수 읽기 전용 문장(FOR UPDATE/FOR SHARE 제외 SELECT, SHOW류, DESCRIBE, EXPLAIN 등 — 서브쿼리까지 재귀 판정)은 대상 테이블 세트를 공유(read)로 잡아 다른 테이블의 쓰기와도 병렬 실행
+- [x] 테이블 단위 동시 쓰기 — 2계층 잠금: ① 구조적 잠금(`RwLock<SharedDatabase>`, 여전히 배타 — DDL/DCL/VACUUM/CHECKPOINT 및 CTE·FROM-서브쿼리·뷰 참조·발화하는 트리거가 있는 문장 전용), ② 테이블별 `FairSharedMutex`(그 외 평범한 단일/조인 INSERT/UPDATE/DELETE/SELECT/MERGE/다중 UPDATE·DELETE — 대상 테이블 + FK 부모/자식 1-hop을 정렬된 순서로 잠금, 락 순서 데드락 방지). 서로 다른 테이블에 대한 쓰기는 실제로 동시 실행됨. 순수 읽기 전용 문장(FOR UPDATE/FOR SHARE 제외 SELECT, SHOW류, DESCRIBE, EXPLAIN 등 — 서브쿼리까지 재귀 판정)은 대상 테이블 세트를 공유(read)로 잡아 다른 테이블의 쓰기와도 병렬 실행
+- [x] **행 단위 동시 쓰기** — 같은 테이블의 서로 다른 행에 대한 INSERT/UPDATE/DELETE(FOR UPDATE/FOR SHARE 포함)도 이제 실제로 동시 실행됨(이전엔 테이블 하나의 락으로 완전 직렬화). 위 테이블별 `table_locks`는 평범한 단일 테이블 DML은 전부 SHARED로(MultiUpdate/MultiDelete/Merge만 배타 유지), 신규 `table_data_locks[table]`가 벡터 모양(push_back/insert/erase) + `row_pk_pos`만 보호(전체 스캔은 SHARED, 모양 변경 순간만 EXCLUSIVE로 짧게); `LockManager`의 행 클레임을 오토커밋까지 확장(`RowClaimGuard` RAII)해 같은 행 경합이 조용한 데이터 손상 없이 명확히 구분됨. writer 기아를 막기 위해 조건변수 기반의 명시적 writer-preferring `FairSharedMutex`(`sync.hpp`) 사용. `GroupCommitCoordinator`(그룹 커밋 fsync 배칭)와의 상호작용까지 포함해 `table_locks` EXCLUSIVE를 COMMIT의 phase1부터 fsync·`active_txn_ids` 갱신까지 하나의 연속 임계구역으로 유지 — 그 사이 틈을 다른 세션의 SHARED 읽기가 파고들면 방금 커밋한 트랜잭션이 아직 "진행 중"으로 잘못 보여 MVCC 버전이 갈라지는(fork) 레이스가 있었음(스트레스 테스트로 재현·수정)
+- [x] **진짜 블로킹 대기 락 + 데드락 감지** — 행 락 충돌이 이제 MySQL/InnoDB의 `innodb_lock_wait_timeout`처럼 실제로 대기함(이전엔 충돌 즉시 실패만 했음). `SET @lock_wait_timeout = <ms>`(기본 50000ms)로 세션별 대기 한도 설정, 시간 내에 안 풀리면 `ERROR 1205 (HY000): Lock wait timeout exceeded` 반환, 대기 중 진짜 사이클(데드락)이 형성되면 그 사이클을 완성시키는 트랜잭션이 즉시 실패(victim, 표준 데드락 희생자 선정과 동일) — 먼저 기다리던 쪽은 계속 정상 대기. INSERT(중복 키 클레임 포함)/UPDATE/DELETE와 이들의 FK 캐스케이드(Cascade/SetNull/SetDefault), SELECT FOR UPDATE/FOR SHARE, INSERT-vs-Gap-Lock 충돌까지 전부 적용 — 남은 범위 밖은 Postgres 수준 완전 SSI(predicate lock 기반 write-skew 감지)와 XA 분산 트랜잭션뿐. 블로킹 대기 자체는 행 단위 `table_data_locks`뿐 아니라 문장 전체를 감싸는 `table_locks`(SELECT 계열은 `DataLockGuard`도 마찬가지)도 함께 풀었다가 재획득해야 함 — 그렇지 않으면 대기 중인 문장이 그 락을 계속 쥔 채, 같은 테이블에 EXCLUSIVE가 필요한 COMMIT/동시 쓰기와 서로 다른 두 락 메커니즘 사이에서 교착되는 실제 데드락이 존재(개발 중 실제 hang으로 발견·수정)
 - [x] 프로시저 WHILE/LOOP/REPEAT 반복 상한 (10만 회) 및 트리거 재귀 깊이 상한 (32단) — 무한루프/재귀가 잠금을 영구히 점유해 서버 전체를 정지시키는 것 방지
 
 ### 모니터링

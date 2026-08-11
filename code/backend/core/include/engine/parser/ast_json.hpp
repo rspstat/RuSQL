@@ -27,6 +27,13 @@ void from_json(const nlohmann::json& j, ForeignKey& fk);
 void to_json(nlohmann::json& j, const ColumnDef& col);
 void from_json(const nlohmann::json& j, ColumnDef& col);
 
+void to_json(nlohmann::json& j, const PartitionKind& kind);
+void from_json(const nlohmann::json& j, PartitionKind& kind);
+void to_json(nlohmann::json& j, const PartitionDef& def);
+void from_json(const nlohmann::json& j, PartitionDef& def);
+void to_json(nlohmann::json& j, const PartitionBy& pb);
+void from_json(const nlohmann::json& j, PartitionBy& pb);
+
 // Needed by CREATE FUNCTION (its RETURN expression is JSON-serialized into
 // Statement::CreateFunction::body at parse time, mirroring
 // `serde_json::to_string(&expr)` in parser.rs's parse_create_function).

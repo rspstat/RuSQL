@@ -379,6 +379,126 @@ void Parser::parse_fk_table_level(std::vector<ColumnDef>& columns) {
     it->foreign_key = ForeignKey{fk_col, ref_table, ref_column, on_delete, on_update};
 }
 
+/// Parses the tail of a single partition definition after "PARTITION name VALUES" has
+/// already been consumed -- RANGE: "LESS THAN (bound)" or "LESS THAN MAXVALUE" (no
+/// parens for the MAXVALUE form, per MySQL's own grammar); LIST: "IN (v1, v2, ...)".
+void Parser::parse_partition_values(PartitionKind kind, PartitionDef& def) {
+    if (kind == PartitionKind::Range) {
+        if (!peek_is(TokenKind::Ident) || to_upper(peek()->text) != "LESS") throw ParseError("Expected LESS THAN");
+        advance();
+        if (!peek_is(TokenKind::Ident) || to_upper(peek()->text) != "THAN") throw ParseError("Expected LESS THAN");
+        advance();
+        if (peek_is(TokenKind::Ident) && to_upper(peek()->text) == "MAXVALUE") {
+            advance();
+            def.range_is_maxvalue = true;
+        } else {
+            if (!peek_is(TokenKind::LParen)) throw ParseError("Expected '(' or MAXVALUE after LESS THAN");
+            advance();
+            const Token* v = advance();
+            if (!v || (v->kind != TokenKind::NumberLit && v->kind != TokenKind::StringLit)) throw ParseError("Expected a bound value");
+            def.range_upper_bound = v->text;
+            if (!peek_is(TokenKind::RParen)) throw ParseError("Expected ')' after the bound value");
+            advance();
+        }
+    } else if (kind == PartitionKind::List) {
+        if (!peek_is(TokenKind::In)) throw ParseError("Expected IN");
+        advance();
+        if (!peek_is(TokenKind::LParen)) throw ParseError("Expected '(' after IN");
+        advance();
+        for (;;) {
+            const Token* v = advance();
+            if (!v || (v->kind != TokenKind::NumberLit && v->kind != TokenKind::StringLit)) throw ParseError("Expected a list value");
+            def.list_values.push_back(v->text);
+            if (peek_is(TokenKind::Comma)) {
+                advance();
+                continue;
+            }
+            break;
+        }
+        if (!peek_is(TokenKind::RParen)) throw ParseError("Expected ')' after the value list");
+        advance();
+    } else {
+        throw ParseError("parse_partition_values: HASH has no per-partition VALUES clause");
+    }
+}
+
+/// PARTITION BY RANGE(col) (PARTITION p0 VALUES LESS THAN (100), ..., PARTITION pN VALUES LESS THAN MAXVALUE)
+/// PARTITION BY LIST(col) (PARTITION p0 VALUES IN ('a','b'), ...)
+/// PARTITION BY HASH(col) PARTITIONS n
+/// Returns nullopt if the next token isn't PARTITION (i.e. an ordinary, non-partitioned
+/// CREATE TABLE) -- called right after CREATE TABLE's column/constraint list closes.
+/// LIST/HASH/LESS/THAN/MAXVALUE/PARTITIONS aren't dedicated keywords (no existing lexer
+/// entries for them, and adding new TokenKind values isn't worth it for a single call
+/// site) -- matched via ident-text comparison, the same pattern already used for
+/// AUTO_INCREMENT (parse_col_constraints) and USING HASH (parse_create_index).
+std::optional<PartitionBy> Parser::parse_partition_by() {
+    if (!peek_is(TokenKind::Partition)) return std::nullopt;
+    advance(); // PARTITION
+    if (!peek_is(TokenKind::By)) throw ParseError("Expected BY after PARTITION");
+    advance();
+
+    PartitionKind kind;
+    if (peek_is(TokenKind::Range)) {
+        kind = PartitionKind::Range;
+        advance();
+    } else if (peek_is(TokenKind::Ident) && to_upper(peek()->text) == "LIST") {
+        kind = PartitionKind::List;
+        advance();
+    } else if (peek_is(TokenKind::Ident) && to_upper(peek()->text) == "HASH") {
+        kind = PartitionKind::Hash;
+        advance();
+    } else {
+        throw ParseError("Expected RANGE, LIST, or HASH after PARTITION BY");
+    }
+
+    if (!peek_is(TokenKind::LParen)) throw ParseError("Expected '(' after partition kind");
+    advance();
+    std::string column = expect_ident();
+    if (!peek_is(TokenKind::RParen)) throw ParseError("Expected ')' after partition column");
+    advance();
+
+    PartitionBy pb;
+    pb.kind = kind;
+    pb.column = column;
+
+    if (kind == PartitionKind::Hash) {
+        if (!peek_is(TokenKind::Ident) || to_upper(peek()->text) != "PARTITIONS") throw ParseError("Expected PARTITIONS after HASH(...)");
+        advance();
+        const Token* n = advance();
+        if (!n || n->kind != TokenKind::NumberLit) throw ParseError("Expected a partition count after PARTITIONS");
+        pb.hash_partitions = std::stoi(n->text);
+        if (pb.hash_partitions < 1) throw ParseError("PARTITIONS count must be at least 1");
+        return pb;
+    }
+
+    // RANGE / LIST: an explicit ( PARTITION name VALUES ... [, ...] ) list.
+    if (!peek_is(TokenKind::LParen)) throw ParseError("Expected '(' to start the partition list");
+    advance();
+    for (;;) {
+        if (!peek_is(TokenKind::Partition)) throw ParseError("Expected PARTITION");
+        advance();
+        PartitionDef def;
+        def.name = expect_ident();
+        if (!peek_is(TokenKind::Values)) throw ParseError("Expected VALUES");
+        advance();
+
+        parse_partition_values(kind, def);
+        pb.partitions.push_back(std::move(def));
+
+        if (peek_is(TokenKind::Comma)) {
+            advance();
+            continue;
+        }
+        if (peek_is(TokenKind::RParen)) {
+            advance();
+            break;
+        }
+        throw ParseError("Expected ',' or ')' in the partition list");
+    }
+    if (pb.partitions.empty()) throw ParseError("PARTITION BY requires at least one partition");
+    return pb;
+}
+
 Statement Parser::parse_create() {
     if (!peek_is(TokenKind::Table)) throw ParseError("Expected TABLE");
     advance();
@@ -514,7 +634,13 @@ Statement Parser::parse_create() {
         else throw ParseError("Expected ',' or ')'");
     }
 
-    return Statement(Statement::CreateTable{name, columns, if_not_exists, primary_key_columns, check_constraints});
+    std::optional<PartitionBy> partition_by = parse_partition_by();
+    if (partition_by) {
+        auto it = std::find_if(columns.begin(), columns.end(), [&](const ColumnDef& c) { return c.name == partition_by->column; });
+        if (it == columns.end()) throw ParseError("PARTITION BY column '" + partition_by->column + "' not defined");
+    }
+
+    return Statement(Statement::CreateTable{name, columns, if_not_exists, primary_key_columns, check_constraints, partition_by});
 }
 
 Statement Parser::parse_drop() {
@@ -612,6 +738,30 @@ Statement Parser::parse_alter() {
             }
             throw ParseError("Expected FOREIGN, UNIQUE, or CHECK after CONSTRAINT");
         }
+        // Table partitioning: ADD PARTITION (PARTITION name VALUES ...) -- a single
+        // partition per statement in V1. The kind (RANGE vs LIST) isn't known
+        // syntactically here (unlike CREATE TABLE's PARTITION BY, which states it up
+        // front) -- detected from whichever of LESS THAN / IN follows VALUES, and
+        // exec_alter cross-checks it against the table's actual partition kind.
+        if (peek_is(TokenKind::Partition)) {
+            advance();
+            if (!peek_is(TokenKind::LParen)) throw ParseError("Expected '(' after PARTITION");
+            advance();
+            if (!peek_is(TokenKind::Partition)) throw ParseError("Expected PARTITION");
+            advance();
+            PartitionDef def;
+            def.name = expect_ident();
+            if (!peek_is(TokenKind::Values)) throw ParseError("Expected VALUES");
+            advance();
+            PartitionKind detected_kind;
+            if (peek_is(TokenKind::Ident) && to_upper(peek()->text) == "LESS") detected_kind = PartitionKind::Range;
+            else if (peek_is(TokenKind::In)) detected_kind = PartitionKind::List;
+            else throw ParseError("Expected LESS THAN or IN after VALUES");
+            parse_partition_values(detected_kind, def);
+            if (!peek_is(TokenKind::RParen)) throw ParseError("Expected ')' to close ADD PARTITION");
+            advance();
+            return Statement(Statement::AlterTable{table, AlterAction(AlterAction::AddPartition{def})});
+        }
         if (peek_is(TokenKind::Column)) advance();
         std::string col_name = expect_ident();
         DataType data_type = parse_data_type();
@@ -622,6 +772,11 @@ Statement Parser::parse_alter() {
     }
 
     if (t->kind == TokenKind::Drop) {
+        if (peek_is(TokenKind::Partition)) {
+            advance();
+            std::string name = expect_ident();
+            return Statement(Statement::AlterTable{table, AlterAction(AlterAction::DropPartition{name})});
+        }
         if (peek_is(TokenKind::Constraint)) {
             advance();
             std::string name = expect_ident();

@@ -1,5 +1,7 @@
 #include <algorithm>
 #include <random>
+#include <thread>
+#include <vector>
 
 #include "catch.hpp"
 #include "engine/storage/btree.hpp"
@@ -295,4 +297,55 @@ TEST_CASE("empty BPlusTree JSON round trip", "[btree][json]") {
     REQUIRE(j.at("root").is_null());
     BPlusTree restored = j.get<BPlusTree>();
     REQUIRE(restored.is_empty());
+}
+
+// Row-level-concurrency Stage 2: BPlusTree gained its own internal mutex_ (one per
+// instance, short critical sections) so genuinely concurrent threads can share a single
+// tree instance -- exactly the scenario a table's PK/secondary/composite index sees once
+// two sessions insert/update/delete different rows of the same table at the same time.
+// Each thread here owns a disjoint key range, so the ONLY way this test can fail is a
+// real data race (a lost/corrupted insert, a crash, or a torn read) -- there's no
+// legitimate reason for any key to end up missing or wrong.
+TEST_CASE("BPlusTree is safe under real concurrent insert/remove/search on disjoint keys", "[btree][concurrency]") {
+    BPlusTree tree;
+    constexpr int kThreads = 8;
+    constexpr int kPerThread = 500;
+
+    std::vector<std::thread> threads;
+    for (int t = 0; t < kThreads; t++) {
+        threads.emplace_back([&tree, t] {
+            int base = t * kPerThread;
+            for (int i = 0; i < kPerThread; i++) {
+                std::string key = std::to_string(base + i);
+                tree.insert(key, "v" + key);
+            }
+            // Remove every other key this thread inserted, then confirm the tree agrees
+            // with what should still be there -- all within the same thread's own
+            // disjoint range, so any wrong answer is necessarily a race with another
+            // thread's concurrent operation on ITS range corrupting shared tree state.
+            for (int i = 0; i < kPerThread; i += 2) {
+                tree.remove(std::to_string(base + i));
+            }
+            for (int i = 0; i < kPerThread; i++) {
+                std::string key = std::to_string(base + i);
+                auto v = tree.search(key);
+                if (i % 2 == 0) {
+                    if (v.has_value()) throw std::runtime_error("key " + key + " should have been removed");
+                } else {
+                    if (!v.has_value() || *v != "v" + key) throw std::runtime_error("key " + key + " missing or wrong");
+                }
+            }
+        });
+    }
+    for (auto& th : threads) th.join();
+
+    REQUIRE(tree.len() == static_cast<std::size_t>(kThreads * kPerThread / 2));
+    for (int t = 0; t < kThreads; t++) {
+        for (int i = 1; i < kPerThread; i += 2) {
+            std::string key = std::to_string(t * kPerThread + i);
+            auto v = tree.search(key);
+            REQUIRE(v.has_value());
+            REQUIRE(*v == "v" + key);
+        }
+    }
 }

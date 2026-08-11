@@ -158,24 +158,41 @@ std::optional<std::pair<std::string, std::optional<CondExpr>>> Executor::resolve
 
 StringResult Executor::exec_insert_select(SharedDatabase& s, std::string table, std::optional<std::vector<std::string>> columns,
                                            Statement query, InsertConflict on_conflict, std::optional<std::vector<SelectColumn>> returning) {
-    auto output = execute_with_s(s, std::move(query));
-    if (output.is_err()) return output;
-    auto [col_names, rows] = parse_table_output(output.value());
-    if (rows.empty()) return StringResult::Ok("0 row(s) inserted.");
-
-    std::vector<std::vector<std::string>> all_values;
-    all_values.reserve(rows.size());
-    for (auto& row : rows) {
-        std::vector<std::string> vals;
-        vals.reserve(col_names.size());
-        for (auto& c : col_names) {
-            auto it = row.find(c);
-            vals.push_back(it != row.end() ? it->second : std::string());
+    // Row-level-concurrency Stage 4: `query`'s own tables are already covered by
+    // table_lock_set_for's InsertSelect branch at the table_locks (SHARED) level, but
+    // table_data_locks is deliberately NOT acquired for InsertSelect at that dispatch
+    // level (see execute()'s comment) -- exec_insert_inner below needs to escalate the
+    // TARGET table to EXCLUSIVE for its own brief push_back phase, which would deadlock
+    // against a shared table_data_locks hold taken here on the same thread if it
+    // included the target table. So: acquire table_data_locks SHARED for exactly the
+    // SOURCE query's table closure (table_lock_set_for recurses through any WHERE/
+    // SELECT-list subqueries in `query` too, same as a top-level Select) for the
+    // duration of running it, protecting the read scan from a concurrent writer
+    // resizing the same vector -- then release before exec_insert_inner runs.
+    {
+        DataLockGuard src_data_guard;
+        if (auto src_tables = table_lock_set_for(s, query)) {
+            src_data_guard = acquire_table_data_locks(s, *src_tables, /*exclusive=*/false);
         }
-        all_values.push_back(std::move(vals));
+        auto output = execute_with_s(s, std::move(query));
+        if (output.is_err()) return output;
+        auto [col_names, rows] = parse_table_output(output.value());
+        if (rows.empty()) return StringResult::Ok("0 row(s) inserted.");
+
+        std::vector<std::vector<std::string>> all_values;
+        all_values.reserve(rows.size());
+        for (auto& row : rows) {
+            std::vector<std::string> vals;
+            vals.reserve(col_names.size());
+            for (auto& c : col_names) {
+                auto it = row.find(c);
+                vals.push_back(it != row.end() ? it->second : std::string());
+            }
+            all_values.push_back(std::move(vals));
+        }
+        auto insert_cols = columns ? columns : std::optional<std::vector<std::string>>(col_names);
+        return exec_insert(s, table, insert_cols, std::move(all_values), on_conflict, returning);
     }
-    auto insert_cols = columns ? columns : std::optional<std::vector<std::string>>(col_names);
-    return exec_insert(s, table, insert_cols, std::move(all_values), on_conflict, returning);
 }
 
 StringResult Executor::exec_insert(SharedDatabase& s, std::string table, std::optional<std::vector<std::string>> col_list,
@@ -217,7 +234,16 @@ StringResult Executor::exec_insert_inner(SharedDatabase& s, const std::string& t
     std::vector<ColConstraint> constraints;
     for (auto& c : schema.columns) constraints.push_back({c.primary_key, c.not_null, c.unique, c.auto_increment});
 
-    auto local_counters = schema.auto_increment_counters;
+    // Row-level-concurrency prep: previously this took a stack COPY of the counters,
+    // mutated it locally across the whole batch, and wrote it back once at the end
+    // (schema_mut->auto_increment_counters = local_counters below) -- safe only because
+    // the caller held the whole table exclusively for the statement's duration. Two
+    // concurrent INSERTs into the same table would each copy the same starting value,
+    // each independently compute the same "next" value, and both write it back --
+    // duplicate AUTO_INCREMENT values, silently. Fixed by allocating directly against
+    // the real Catalog entry, immediately, per row that actually needs one.
+    TableSchema* schema_mut_for_ai = s.catalog.get_table_mut(table);
+    bool any_auto_increment_allocated = false;
 
     std::vector<std::vector<std::pair<std::size_t, std::string>>> seen_unique;
     std::vector<std::vector<std::string>> seen_composite_pk;
@@ -237,6 +263,44 @@ StringResult Executor::exec_insert_inner(SharedDatabase& s, const std::string& t
             gap_pk_col_count++;
         }
     }
+
+    // Row-level-concurrency Stage 4: one claim-id per STATEMENT (not per row) -- reuses
+    // the active explicit transaction's id (claims released later by its real COMMIT/
+    // ROLLBACK) or, for autocommit (no natural release point of its own), a fresh
+    // one-off id released by RowClaimGuard's destructor on every exit path. Closes a
+    // real TOCTOU: without this, two concurrent INSERTs could each pass the PK/UNIQUE
+    // duplicate check below (against the state as of when each one scanned) before
+    // either had actually written its row, and both would proceed to insert the "same"
+    // supposedly-unique value.
+    std::uint64_t cur_txn = txn.current_txn_id();
+    bool autocommit_claim = (cur_txn == 0);
+    std::uint64_t claim_txn_id = autocommit_claim ? s.txn_io->next_id() : cur_txn;
+    RowClaimGuard row_claim_guard(s.lock_mgr, claim_txn_id, /*owns=*/autocommit_claim);
+    // Real-blocking-wait stage: one deadline for the WHOLE statement (computed once, not
+    // reset per retry) -- every block_on_row() call below shares this budget so repeated
+    // conflicts can't add up to far more than @lock_wait_timeout actually allows.
+    auto lock_deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(lock_wait_timeout_ms);
+
+    // Row-level-concurrency Stage 4: table_data_locks SHARED for `table` itself (the
+    // duplicate-check scan below only ever reads s.tables[table], never resizes it) plus
+    // every FK parent this schema references (the existence check further below reads
+    // THEIR s.tables too). Held for the whole read/validate phase, released before the
+    // write phase below escalates `table` alone to EXCLUSIVE.
+    std::vector<std::string> insert_read_tables{table};
+    for (auto& col : schema.columns) {
+        if (!col.foreign_key) continue;
+        // Table partitioning: lock the ref_table's actual children (where the existence
+        // check below really reads), not its permanently-empty phantom logical name.
+        if (auto part_info = partition_info_for(s, col.foreign_key->ref_table)) {
+            for (auto& def : part_info->partitions) insert_read_tables.push_back(def.child_table);
+        } else {
+            insert_read_tables.push_back(col.foreign_key->ref_table);
+        }
+    }
+    bool had_updates = false;
+    std::vector<Row> updated_rows;
+    {
+        auto insert_read_lock = acquire_table_data_locks(s, insert_read_tables, /*exclusive=*/false);
 
     for (auto& values : all_values) {
         std::vector<std::string> positional;
@@ -279,9 +343,10 @@ StringResult Executor::exec_insert_inner(SharedDatabase& s, const std::string& t
 
         for (std::size_t i = 0; i < constraints.size(); i++) {
             if (constraints[i].auto_increment && final_values[i].empty()) {
-                auto& counter = local_counters[col_names[i]];
+                auto& counter = schema_mut_for_ai->auto_increment_counters[col_names[i]];
                 counter += 1;
                 final_values[i] = std::to_string(counter);
+                any_auto_increment_allocated = true;
             }
         }
 
@@ -382,7 +447,7 @@ StringResult Executor::exec_insert_inner(SharedDatabase& s, const std::string& t
                             }
                             if (!hi_key.empty()) {
                                 if (auto hit = s.hash_indexes.find(hi_key); hit != s.hash_indexes.end()) {
-                                    auto& bucket = hit->second.get(val);
+                                    const auto& bucket = hit->second.get(val);
                                     if (!bucket.empty() && is_visible(bucket.front())) existing = bucket.front();
                                 }
                             } else {
@@ -453,11 +518,25 @@ StringResult Executor::exec_insert_inner(SharedDatabase& s, const std::string& t
             auto it = row.find(col.name);
             std::string val = it != row.end() ? it->second : std::string();
             if (val.empty() || val == EXECUTOR_NULL_VALUE) continue;
-            auto ref_it = s.tables.find(col.foreign_key->ref_table);
-            if (ref_it == s.tables.end()) return StringResult::Err("Referenced table '" + col.foreign_key->ref_table + "' not found");
-            bool exists = std::any_of(ref_it->second.begin(), ref_it->second.end(), [&](const Row& r) {
-                auto rit = r.find(col.foreign_key->ref_column);
-                return rit != r.end() && rit->second == val;
+            // Table partitioning: a partitioned ref_table's own s.tables[...] entry is a
+            // permanently-empty phantom (exec_create/executor_partition.cpp) -- scan its
+            // children instead, so an FK into a partitioned parent validates correctly
+            // instead of always reporting "not found".
+            std::vector<const std::vector<Row>*> ref_row_sets;
+            if (auto part_info = partition_info_for(s, col.foreign_key->ref_table)) {
+                for (auto& def : part_info->partitions) {
+                    if (auto child_it = s.tables.find(def.child_table); child_it != s.tables.end()) ref_row_sets.push_back(&child_it->second);
+                }
+            } else {
+                auto ref_it = s.tables.find(col.foreign_key->ref_table);
+                if (ref_it == s.tables.end()) return StringResult::Err("Referenced table '" + col.foreign_key->ref_table + "' not found");
+                ref_row_sets.push_back(&ref_it->second);
+            }
+            bool exists = std::any_of(ref_row_sets.begin(), ref_row_sets.end(), [&](const std::vector<Row>* rows) {
+                return std::any_of(rows->begin(), rows->end(), [&](const Row& r) {
+                    auto rit = r.find(col.foreign_key->ref_column);
+                    return rit != r.end() && rit->second == val;
+                });
             });
             if (!exists) {
                 return StringResult::Err("Foreign key violation: '" + val + "' not found in '" + col.foreign_key->ref_table + "'.'" +
@@ -483,39 +562,170 @@ StringResult Executor::exec_insert_inner(SharedDatabase& s, const std::string& t
             auto pk_it = row.find(gap_pk_col);
             if (pk_it != row.end()) {
                 std::uint64_t my_txn_id = txn.current_txn_id();
-                for (auto& g : s.lock_mgr.gap_locks_for(table)) {
-                    if (g.holder == my_txn_id) continue; // a txn's own gap never blocks its own INSERT
-                    GapRange range{g.lo, g.hi, g.lo_inclusive, g.hi_inclusive};
-                    if (!gap_range_contains(range, pk_it->second)) continue;
-                    LockResult lr = s.lock_mgr.register_gap_conflict(my_txn_id, g.holder);
+                // Real-blocking-wait stage: retry-capable outer loop -- each iteration
+                // rescans gap_locks_for(table) from scratch (a prior block may have let
+                // ONE holder's gap release while others still conflict, or a brand-new gap
+                // lock may have appeared) and stops as soon as no conflict remains.
+                for (;;) {
+                    bool conflict_found = false;
+                    std::uint64_t conflict_holder = 0;
+                    for (auto& g : s.lock_mgr.gap_locks_for(table)) {
+                        if (g.holder == my_txn_id) continue; // a txn's own gap never blocks its own INSERT
+                        GapRange range{g.lo, g.hi, g.lo_inclusive, g.hi_inclusive};
+                        if (!gap_range_contains(range, pk_it->second)) continue;
+                        conflict_found = true;
+                        conflict_holder = g.holder;
+                        break;
+                    }
+                    if (!conflict_found) break;
+                    LockResult lr = s.lock_mgr.register_gap_conflict(table, my_txn_id, conflict_holder);
                     if (lr.kind == LockResult::Kind::Deadlock) {
                         return StringResult::Err("Deadlock detected: transaction " + std::to_string(my_txn_id) + " waits for transaction " +
                                                   std::to_string(lr.holder) + " (INSERT '" + table + "'). Transaction " +
                                                   std::to_string(my_txn_id) + " aborted.");
                     }
-                    return StringResult::Err("ERROR 1205 (HY000): Lock wait timeout exceeded; value '" + pk_it->second + "' for '" + table +
-                                              "'.'" + gap_pk_col + "' falls within a gap lock held by transaction " + std::to_string(g.holder) +
-                                              ". Cannot INSERT.");
+                    // Kind::Conflict (the only other outcome at timeout=0): release both
+                    // dispatcher-owned guards -- must never block while holding either, see
+                    // release_table_locks_for_block's doc comment -- block on just this
+                    // holder's gap lock releasing, then reacquire before touching `s` again.
+                    insert_read_lock = DataLockGuard{};
+                    release_table_locks_for_block();
+                    auto now = std::chrono::steady_clock::now();
+                    auto remaining =
+                        now < lock_deadline ? std::chrono::duration_cast<std::chrono::milliseconds>(lock_deadline - now) : std::chrono::milliseconds{0};
+                    LockResult lr2 = s.lock_mgr.register_gap_conflict(table, my_txn_id, conflict_holder, remaining);
+                    reacquire_table_locks_after_block();
+                    insert_read_lock = acquire_table_data_locks(s, insert_read_tables, /*exclusive=*/false);
+                    if (lr2.kind == LockResult::Kind::Deadlock) {
+                        return StringResult::Err("Deadlock detected: transaction " + std::to_string(my_txn_id) + " waits for transaction " +
+                                                  std::to_string(lr2.holder) + " (INSERT '" + table + "'). Transaction " +
+                                                  std::to_string(my_txn_id) + " aborted.");
+                    }
+                    if (lr2.kind != LockResult::Kind::Granted) {
+                        return StringResult::Err("ERROR 1205 (HY000): Lock wait timeout exceeded; value '" + pk_it->second + "' for '" + table +
+                                                  "'.'" + gap_pk_col + "' falls within a gap lock held by transaction " +
+                                                  std::to_string(lr2.holder) + ". Cannot INSERT.");
+                    }
+                    // else: granted -- loop back and rescan gap_locks_for(table) from scratch.
+                }
+
+                // Row-level-concurrency Stage 4: claim this PK value now, under the SAME
+                // claim_txn_id for the whole statement -- a concurrent INSERT racing the
+                // identical value (which may have passed ITS OWN duplicate check moments
+                // ago, before either writer has actually pushed a row) gets told apart
+                // here instead of both silently proceeding.
+                //
+                // Real-blocking-wait stage: on conflict, release insert_read_lock first
+                // (must never block while holding table_data_locks -- see block_on_row's
+                // doc comment) and block on just this one row. Once granted, re-validate:
+                // whoever we were waiting on may have COMMITTED the exact value we want
+                // while we slept -- a genuine duplicate now, which the duplicate-check
+                // earlier in this same loop iteration ran too soon to have seen.
+                LockResult lr = s.lock_mgr.acquire(table, pk_it->second, claim_txn_id);
+                if (lr.kind == LockResult::Kind::Deadlock) {
+                    return StringResult::Err("Deadlock detected: transaction " + std::to_string(claim_txn_id) + " waits for transaction " +
+                                              std::to_string(lr.holder) + " (INSERT '" + table + "'). Transaction " +
+                                              std::to_string(claim_txn_id) + " aborted.");
+                }
+                if (lr.kind == LockResult::Kind::Conflict) {
+                    insert_read_lock = DataLockGuard{}; // release -- must not block while holding it
+                    // Real-blocking-wait stage, second correctness fix: table_locks[table]
+                    // (SHARED, held for this whole statement by execute()'s dispatcher)
+                    // must ALSO be released before blocking, or a concurrent COMMIT
+                    // needing table_locks EXCLUSIVE on this table can deadlock against us
+                    // -- see release_table_locks_for_block's doc comment in executor.hpp.
+                    release_table_locks_for_block();
+                    lr = block_on_row(s.lock_mgr, table, pk_it->second, claim_txn_id, /*exclusive=*/true, lock_deadline);
+                    reacquire_table_locks_after_block();
+                    insert_read_lock = acquire_table_data_locks(s, insert_read_tables, /*exclusive=*/false);
+                    if (lr.kind == LockResult::Kind::Deadlock) {
+                        return StringResult::Err("Deadlock detected: transaction " + std::to_string(claim_txn_id) + " waits for transaction " +
+                                                  std::to_string(lr.holder) + " (INSERT '" + table + "'). Transaction " +
+                                                  std::to_string(claim_txn_id) + " aborted.");
+                    }
+                    if (lr.kind != LockResult::Kind::Granted) {
+                        return StringResult::Err("ERROR 1205 (HY000): Lock wait timeout exceeded; value '" + pk_it->second + "' for '" + table +
+                                                  "'.'" + gap_pk_col + "' is being concurrently inserted/updated by transaction " +
+                                                  std::to_string(lr.holder) + ".");
+                    }
+                    if (auto tit = s.tables.find(table); tit != s.tables.end()) {
+                        for (auto& r : tit->second) {
+                            if (!is_visible(r)) continue;
+                            auto rit = r.find(gap_pk_col);
+                            if (rit != r.end() && rit->second == pk_it->second) {
+                                return StringResult::Err("Duplicate value '" + pk_it->second + "' for column '" + gap_pk_col + "'");
+                            }
+                        }
+                    }
                 }
             }
         }
 
         prepared.push_back(std::move(row));
     }
+    } // insert_read_lock (SHARED) released here -- ON DUPLICATE KEY UPDATE's in-place
+      // mutation below needs EXCLUSIVE (see the correctness-fix comment), not SHARED.
 
-    bool had_updates = !pending_updates.empty();
-    std::vector<Row> updated_rows;
-    for (auto& [pk_val, assignments] : pending_updates) {
-        if (auto it = s.tables.find(table); it != s.tables.end()) {
-            for (auto& row : it->second) {
-                auto pkit = row.find(col_names[0]);
-                if (pkit != row.end() && pkit->second == pk_val && is_visible(row)) {
-                    for (auto& [col, aexpr] : assignments) row[col] = eval_arith(row, aexpr);
-                    updated_rows.push_back(row);
-                    break;
+    // Row-level-concurrency Stage 4 correctness fix (found via concurrent-reader
+    // monotonicity stress testing): ON DUPLICATE KEY UPDATE mutates an EXISTING row in
+    // place (`row[col] = ...` below) -- this is NOT safe under SHARED alone, since a
+    // plain autocommit SELECT's scan/copy takes no LockManager claim at all and could
+    // still hold table_data_locks SHARED at the same moment, racing this mutation at the
+    // raw std::map level (undefined behavior). EXCLUSIVE is required for any in-place
+    // mutation of an existing row, matching exec_update_inner/exec_delete_inner. The
+    // per-row LockManager claim below is still needed too, but only to keep a SECOND
+    // WRITER from interleaving field-by-field with this one within the same statement's
+    // EXCLUSIVE window (two different pk_val entries can't conflict, but it's cheap
+    // insurance and matches the UPDATE path's own pattern).
+    had_updates = !pending_updates.empty();
+    if (had_updates) {
+        auto insert_upsert_lock = acquire_table_data_locks(s, {table}, /*exclusive=*/true);
+        for (auto& [pk_val, assignments] : pending_updates) {
+            LockResult lr = s.lock_mgr.acquire(table, pk_val, claim_txn_id);
+            if (lr.kind == LockResult::Kind::Deadlock) {
+                return StringResult::Err("Deadlock detected: transaction " + std::to_string(claim_txn_id) + " waits for transaction " +
+                                          std::to_string(lr.holder) + " (INSERT ... ON DUPLICATE KEY UPDATE '" + table + "'). Transaction " +
+                                          std::to_string(claim_txn_id) + " aborted.");
+            }
+            if (lr.kind == LockResult::Kind::Conflict) {
+                // Real-blocking-wait stage: release insert_upsert_lock (EXCLUSIVE) before
+                // blocking -- see block_on_row's doc comment. The row lookup right below
+                // always runs fresh AFTER the (possibly blocked) claim is achieved, so no
+                // separate re-validation is needed here: whatever this pk_val's row looks
+                // like once we're granted is exactly what gets mutated.
+                insert_upsert_lock = DataLockGuard{};
+                // Real-blocking-wait stage, second correctness fix: also release
+                // table_locks[table] before blocking -- see release_table_locks_for_
+                // block's doc comment in executor.hpp.
+                release_table_locks_for_block();
+                lr = block_on_row(s.lock_mgr, table, pk_val, claim_txn_id, /*exclusive=*/true, lock_deadline);
+                reacquire_table_locks_after_block();
+                insert_upsert_lock = acquire_table_data_locks(s, {table}, /*exclusive=*/true);
+                if (lr.kind == LockResult::Kind::Deadlock) {
+                    return StringResult::Err("Deadlock detected: transaction " + std::to_string(claim_txn_id) + " waits for transaction " +
+                                              std::to_string(lr.holder) + " (INSERT ... ON DUPLICATE KEY UPDATE '" + table + "'). Transaction " +
+                                              std::to_string(claim_txn_id) + " aborted.");
+                }
+                if (lr.kind != LockResult::Kind::Granted) {
+                    return StringResult::Err("ERROR 1205 (HY000): Lock wait timeout exceeded; row '" + pk_val + "' in '" + table +
+                                              "' is held by transaction " + std::to_string(lr.holder) + ". Cannot UPDATE.");
+                }
+            }
+            if (auto it = s.tables.find(table); it != s.tables.end()) {
+                for (auto& row : it->second) {
+                    auto pkit = row.find(col_names[0]);
+                    if (pkit != row.end() && pkit->second == pk_val && is_visible(row)) {
+                        for (auto& [col, aexpr] : assignments) row[col] = eval_arith(row, aexpr);
+                        updated_rows.push_back(row);
+                        break;
+                    }
                 }
             }
         }
+        // Row-level-concurrency Stage 4/5 correctness fix: see the identical
+        // invalidate_table comment on the push_back path above -- must run before this
+        // EXCLUSIVE lock releases, not later in execute_sql.
+        s.query_cache.invalidate_table(table);
     }
     if (had_updates) {
         std::string pk_col_name = col_names.empty() ? std::string() : col_names[0];
@@ -538,54 +748,76 @@ StringResult Executor::exec_insert_inner(SharedDatabase& s, const std::string& t
         }
     }
 
-    if (!(local_counters == schema.auto_increment_counters)) {
-        auto* schema_mut = s.catalog.get_table_mut(table);
-        schema_mut->auto_increment_counters = local_counters;
+    // Counters were already allocated directly against the real Catalog entry above (as
+    // each row needed one); only the disk persistence is still batched once per
+    // statement here, matching the original single-save behavior.
+    if (any_auto_increment_allocated) {
         s.disk.save_schema(table, *s.catalog.get_table(table));
     }
 
     std::size_t inserted = prepared.size();
     std::vector<Row> returning_rows = returning ? prepared : std::vector<Row>{};
 
-    for (auto& row : prepared) {
-        auto pkit = row.find(col_names.empty() ? std::string() : col_names[0]);
-        std::string pk_val = pkit != row.end() ? pkit->second : std::string();
-        nlohmann::json jrow = row;
-        std::string val_json = jrow.dump();
+    // Row-level-concurrency Stage 4: EXCLUSIVE only for this short tail -- the actual
+    // vector-shape change (push_back) and the paired row_pk_pos[table] update, plus
+    // maybe_auto_vacuum (which erases rows -- also shape-changing) and the
+    // dml_since_vacuum/dml_since_analyze/table_stats counter touches. s.indexes/
+    // s.composite_indexes are separately protected by their own per-instance mutex
+    // (Stage 2), not by this lock.
+    {
+        auto insert_write_lock = acquire_table_data_locks(s, {table}, /*exclusive=*/true);
+        for (auto& row : prepared) {
+            auto pkit = row.find(col_names.empty() ? std::string() : col_names[0]);
+            std::string pk_val = pkit != row.end() ? pkit->second : std::string();
+            nlohmann::json jrow = row;
+            std::string val_json = jrow.dump();
 
-        txn.log_insert(table, pk_val, val_json);
+            txn.log_insert(table, pk_val, val_json);
 
-        if (auto idx_it = s.indexes.find(table); idx_it != s.indexes.end()) idx_it->second.insert(pk_val, val_json);
+            if (auto idx_it = s.indexes.find(table); idx_it != s.indexes.end()) idx_it->second.insert(pk_val, val_json);
 
-        std::vector<std::string> comp_keys;
-        for (auto& [k, ci] : s.composite_indexes) {
-            if (ci.table == table) comp_keys.push_back(k);
-        }
-        for (auto& k : comp_keys) s.composite_indexes.at(k).insert_row(row);
+            std::vector<std::string> comp_keys;
+            for (auto& [k, ci] : s.composite_indexes) {
+                if (ci.table == table) comp_keys.push_back(k);
+            }
+            for (auto& k : comp_keys) s.composite_indexes.at(k).insert_row(row);
 
-        index_insert_row(s, table, row);
+            index_insert_row(s, table, row);
 
-        std::optional<std::string> pk_val_for_idx;
-        if (!txn.is_active()) {
-            for (auto& c : schema.columns) {
-                if (c.primary_key) {
-                    if (auto it = row.find(c.name); it != row.end()) pk_val_for_idx = it->second;
-                    break;
+            std::optional<std::string> pk_val_for_idx;
+            if (!txn.is_active()) {
+                for (auto& c : schema.columns) {
+                    if (c.primary_key) {
+                        if (auto it = row.find(c.name); it != row.end()) pk_val_for_idx = it->second;
+                        break;
+                    }
                 }
             }
+            auto tit = s.tables.find(table);
+            if (tit == s.tables.end()) return StringResult::Err("Table '" + table + "' not found");
+            std::size_t pos = tit->second.size();
+            tit->second.push_back(std::move(row));
+            if (pk_val_for_idx) s.row_pk_pos[table][*pk_val_for_idx] = pos;
         }
-        auto tit = s.tables.find(table);
-        if (tit == s.tables.end()) return StringResult::Err("Table '" + table + "' not found");
-        std::size_t pos = tit->second.size();
-        tit->second.push_back(std::move(row));
-        if (pk_val_for_idx) s.row_pk_pos[table][*pk_val_for_idx] = pos;
-    }
 
-    if (!txn.is_active()) {
-        maybe_auto_vacuum(s, table);
-        maybe_auto_analyze(s, table);
+        if (!txn.is_active()) {
+            maybe_auto_vacuum(s, table);
+            maybe_auto_analyze(s, table);
+        }
+        update_stat_rows(s, table, static_cast<std::int64_t>(inserted));
+
+        // Row-level-concurrency Stage 4/5 correctness fix (found via concurrent-reader
+        // monotonicity stress testing): invalidate the query cache HERE, still holding
+        // table_data_locks EXCLUSIVE, not later in execute_sql (which only runs after
+        // this lock has already been released). QueryResultCache::invalidate_table is
+        // self-synchronized (its own mutex_) and safe to call under any lock mode, but
+        // WHEN it runs relative to this lock's release is what matters: a reader whose
+        // cache lookup happens after we release this lock must never be able to observe
+        // a still-stale cache entry -- calling invalidate_table before releasing closes
+        // that window. execute_sql's own post-execute invalidate_table call is left in
+        // place too (harmless no-op redundancy), but is no longer load-bearing.
+        s.query_cache.invalidate_table(table);
     }
-    update_stat_rows(s, table, static_cast<std::int64_t>(inserted));
 
     maybe_auto_checkpoint(s);
     if (returning) return StringResult::Ok(format_returning_rows(returning_rows, *returning));

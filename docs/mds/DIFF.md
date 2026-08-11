@@ -49,13 +49,14 @@
 | 일관성 (C) | ✓ | ✓ | ✓ | ✓ (PK/FK/UNIQUE/CHECK 검증) |
 | 격리성 (I) | ✓ | ✓ | ✓ | ✓ (`SnapshotCtx` 기반 MVCC 가시성: DML은 `s.tables`에 직접 기록되고 격리수준별 스냅샷으로 필터링 — 미커밋 행은 작성자 본인에게만 보임) |
 | 지속성 (D) | ✓ | ✓ | ✓ | ✓ (WAL fsync + 그룹 커밋; 전역 유일 txn_id 태깅으로 세션 간 공유 WAL/Undo Log 격리 — 한 세션의 COMMIT이 다른 세션의 진행 중인 트랜잭션 레코드를 파괴하지 않음) |
-| MVCC | ✓ (InnoDB Undo segment) | ✓ (튜플 버전 힙 내 저장) | ✓ (Undo tablespace 기반 Consistent Read) | ✓ (`_xmin`/`_xmax` 태깅 실제 다중버전 — UPDATE마다 새 물리 버전 생성, `SnapshotCtx` 기반 격리수준별 가시성, GC 호라이즌 기반 VACUUM; 단 쓰기 자체는 테이블 단위 직렬화 — 완전한 행 단위 동시 쓰기는 아님) |
+| MVCC | ✓ (InnoDB Undo segment) | ✓ (튜플 버전 힙 내 저장) | ✓ (Undo tablespace 기반 Consistent Read) | ✓ (`_xmin`/`_xmax` 태깅 실제 다중버전 — UPDATE마다 새 물리 버전 생성, `SnapshotCtx` 기반 격리수준별 가시성, GC 호라이즌 기반 VACUUM; 같은 테이블의 서로 다른 행에 대한 쓰기도 실제로 동시 실행됨(행 단위 잠금 — `table_data_locks`+`LockManager` 행 클레임, 진짜 블로킹 대기 포함); Postgres 수준 완전 SSI는 아직 아님) |
 | 격리 수준 | 4가지 (기본: REPEATABLE READ) | 3가지 유효 (기본: READ COMMITTED) | 2가지 유효 — READ COMMITTED / SERIALIZABLE (기본: READ COMMITTED) | 4가지 (기본: READ COMMITTED) |
 | Serializable 구현 | 잠금 기반 + GAP Lock (팬텀 방지) | SSI (Serializable Snapshot Isolation) | 스냅샷 기반 (ORA-08177 직렬화 오류 반환) | read-set 기반 충돌 검증 + Gap Lock (완전한 SSI 아님 — predicate lock 없어 잠금 없는 일반 SELECT의 phantom/write-skew는 미방지) |
 | SAVEPOINT | ✓ | ✓ | ✓ | ✓ (Undo Log content-matching 기반, ROLLBACK TO 정상 동작) |
 | XA (분산 트랜잭션) | ✓ | ✓ | ✓ | ✗ |
 | 그룹 커밋 | ✓ (binlog 그룹 커밋) | ✓ (WAL writer 통합) | ✓ (LGWR 배치 플러시) | ✓ (GroupCommitCoordinator) |
-| 데드락 감지 | ✓ (wait-for 그래프) | ✓ (wait-for 그래프) | ✓ (wait-for 그래프) | ✓ (DFS 사이클 탐지) |
+| 락 대기 방식 | ✓ 진짜 블로킹 대기 (`innodb_lock_wait_timeout`) | ✓ 진짜 블로킹 대기 | ✓ 진짜 블로킹 대기 | ✓ 진짜 블로킹 대기 (`condition_variable` 기반, `@lock_wait_timeout` 세션 변수, 기본 50000ms; 행 잠금·SELECT FOR UPDATE/FOR SHARE·INSERT-vs-Gap-Lock 전부 적용, 예외 없음) |
+| 데드락 감지 | ✓ (wait-for 그래프) | ✓ (wait-for 그래프) | ✓ (wait-for 그래프) | ✓ (DFS 사이클 탐지 — 대기 중에도 형성되는 사이클을 완성시키는 트랜잭션이 즉시 victim으로 실패) |
 | VACUUM / 공간 회수 | 자동 Purge (InnoDB) | AUTOVACUUM | 자동 Undo 관리 (AUM) | ✓ (수동 VACUUM + DML 200회마다 AUTO VACUUM) |
 
 ---
@@ -193,7 +194,7 @@
 | CREATE TYPE | ✗ | ✓ (도메인/열거형/복합) | ✓ (객체 타입, NESTED TABLE) | ✗ |
 | ALTER TABLE ADD CONSTRAINT | ✓ | ✓ | ✓ | ✓ (FK/UNIQUE/CHECK) |
 | 온라인 DDL | ✓ (대부분 non-blocking) | ✓ (일부 non-blocking) | ✓ (Online Redefinition) | ✗ |
-| 파티셔닝 | ✓ (RANGE/LIST/HASH/KEY) | ✓ (선언적 파티셔닝) | ✓ (RANGE/LIST/HASH/COMPOSITE) | ✗ |
+| 파티셔닝 | ✓ (RANGE/LIST/HASH/KEY) | ✓ (선언적 파티셔닝) | ✓ (RANGE/LIST/HASH/COMPOSITE) | ✓ (RANGE/LIST/HASH, V1 — WHERE절 기반 프루닝 포함; ADD/DROP PARTITION 지원, KEY·서브파티셔닝·다중 컬럼 키는 미지원) |
 
 ---
 

@@ -36,6 +36,10 @@ struct TableSchema {
     std::vector<std::string> primary_key_columns;
     // 테이블 레벨 CHECK 제약
     std::vector<CheckConstraint> check_constraints;
+    // 파티셔닝 (PARTITION BY) 정보 -- 있으면 이 TableSchema는 "논리" 테이블이고 실제 행은
+    // partition_info->partitions[i].child_table 이름의 평범한 물리 테이블에 저장됨
+    // (executor_partition.cpp의 라우터가 처리, executor_ddl.cpp의 exec_create가 채움).
+    std::optional<PartitionBy> partition_info;
 };
 
 void to_json(nlohmann::json& j, const TableSchema& s);

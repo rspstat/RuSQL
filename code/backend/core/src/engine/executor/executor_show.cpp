@@ -193,7 +193,34 @@ StringResult Executor::exec_show_create_table(const SharedDatabase& s, const std
         if (i) body += ",\n";
         body += lines[i];
     }
-    std::string ddl = "CREATE TABLE `" + bare + "` (\n" + body + "\n);";
+    std::string ddl = "CREATE TABLE `" + bare + "` (\n" + body + "\n)";
+    if (schema->partition_info) {
+        auto& info = *schema->partition_info;
+        std::string kind_str = info.kind == PartitionKind::Range ? "RANGE" : info.kind == PartitionKind::List ? "LIST" : "HASH";
+        ddl += "\nPARTITION BY " + kind_str + " (`" + info.column + "`)";
+        if (info.kind == PartitionKind::Hash) {
+            ddl += " PARTITIONS " + std::to_string(info.partitions.size());
+        } else {
+            ddl += " (\n";
+            for (std::size_t i = 0; i < info.partitions.size(); i++) {
+                auto& def = info.partitions[i];
+                ddl += "  PARTITION `" + def.name + "` VALUES ";
+                if (info.kind == PartitionKind::Range) {
+                    ddl += def.range_is_maxvalue ? "LESS THAN MAXVALUE" : "LESS THAN (" + def.range_upper_bound.value_or("") + ")";
+                } else {
+                    ddl += "IN (";
+                    for (std::size_t j = 0; j < def.list_values.size(); j++) {
+                        if (j) ddl += ", ";
+                        ddl += "'" + def.list_values[j] + "'";
+                    }
+                    ddl += ")";
+                }
+                ddl += (i + 1 < info.partitions.size()) ? ",\n" : "\n";
+            }
+            ddl += ")";
+        }
+    }
+    ddl += ";";
     return StringResult::Ok("Table: " + bare + "\n" + ddl);
 }
 

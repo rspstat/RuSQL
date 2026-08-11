@@ -151,7 +151,22 @@ struct SharedDatabase {
     // inserted into s.tables) deliberately have NO entry here -- statements that create
     // them always fall back to holding the outer lock exclusively instead of using this
     // map at all (see Executor::execute()'s dispatch).
-    std::unordered_map<std::string, std::shared_ptr<std::shared_mutex>> table_locks;
+    std::unordered_map<std::string, std::shared_ptr<FairSharedMutex>> table_locks;
+
+    // Row-level-concurrency Stage 4: same key/lifecycle as table_locks (populated on
+    // CREATE TABLE / startup load, erased on DROP TABLE, renamed alongside RENAME TABLE,
+    // only ever touched while the outer lock is exclusive) but a SEPARATE mutex serving a
+    // different purpose. table_locks now stays SHARED for plain single-table
+    // INSERT/UPDATE/DELETE/SELECT (only MultiUpdate/MultiDelete/Merge and the structural
+    // fallback path still take it exclusive) -- table_data_locks is what actually
+    // protects s.tables[table]'s vector SHAPE (push_back/insert/erase/pop_back/clear) and
+    // the paired row_pk_pos[table] positions: held SHARED for a full-table scan (WHERE
+    // matching, FK existence checks), held EXCLUSIVE only for the brief moment the
+    // vector's shape actually changes. In-place mutation of an EXISTING row's fields
+    // (e.g. `row["_xmax"] = ...`) needs only table_data_locks SHARED -- the guarantee that
+    // no two threads mutate the SAME row concurrently comes from LockManager's per-row
+    // claim (see RowClaimGuard), not from this mutex.
+    std::unordered_map<std::string, std::shared_ptr<FairSharedMutex>> table_data_locks;
 
     // mysql_native_password challenge-response verification (nonce is a 20-byte challenge)
     // -- used by both the MySQL wire protocol listener and the native TCP protocol's own
@@ -203,6 +218,19 @@ public:
     StringResult execute_sql(const std::string& sql);
 
 private:
+    // Row-level-concurrency Stage 4/5 correctness fix (found via concurrent-reader
+    // stress testing): execute_sql's actual body -- pulled out so execute_sql itself
+    // can wrap the call in a try/catch. Before this fix, an exception escaping from
+    // deep inside (e.g. DiskManager's schema-file atomic-replace throwing on a Windows
+    // file-handle/antivirus timing conflict -- a real, if rare, pre-existing condition)
+    // would propagate all the way out of execute_sql. On the thread that owns the
+    // top-level test/request loop that's usually survivable (caught by a REQUIRE macro
+    // or an RPC layer's own try/catch), but execute_sql is also called directly from
+    // spawned std::threads in this codebase's own concurrency tests -- and a C++
+    // exception escaping a std::thread's function with no catch of its own calls
+    // std::terminate() immediately, crashing the entire process. execute_sql must never
+    // let that happen regardless of which thread calls it.
+    StringResult execute_sql_inner(const std::string& sql);
     // Tag-dispatched constructor for new_session(): builds a session Executor that
     // reuses an existing SharedDatabase instead of loading one from disk.
     struct SessionTag {};
@@ -221,8 +249,20 @@ private:
         ProcSignal(Alt alt) : data(std::move(alt)) {}
     };
     std::optional<ProcSignal> proc_signal_;
-    // Uncorrelated IN/NOT IN subquery result cache (Phase 8c).
-    std::unordered_map<std::string, std::unordered_set<std::string>> subquery_cache_;
+    // Uncorrelated IN/NOT IN subquery result cache (Phase 8c). Keyed by the subquery
+    // AST's own address (sub->query.get()) rather than a serialized string -- see
+    // eval_single_with_subquery's comment for why this matters (found via concurrent-
+    // reader stress testing): a JSON-dump string key means copying and re-serializing
+    // the ENTIRE subquery AST on every single row evaluated by the OUTER query, even on
+    // a cache HIT, since that work has to happen before the lookup even knows whether
+    // it's a hit. The AST is parsed once per SQL statement and reused unchanged across
+    // every row of that statement's scan (condition is passed once to exec_select, not
+    // rebuilt per row), and subquery_cache_ itself is cleared at the start of every new
+    // statement (execute()'s first line) -- so the raw pointer is a valid, stable,
+    // dramatically cheaper identity for "which subquery is this" for as long as the
+    // cache entry can possibly be looked up, with no risk of a stale/reused-address
+    // collision across different statements.
+    std::unordered_map<const void*, std::unordered_set<std::string>> subquery_cache_;
     // Trigger recursion depth (a trigger body's own DML can fire further triggers,
     // directly or via a chain through another table) -- see fire_triggers().
     std::size_t trigger_depth_ = 0;
@@ -284,8 +324,8 @@ private:
     // order releases the table locks first, then the structural shared lock.
     struct TableLockGuard {
         RwLock<SharedDatabase>::ReadGuard structural;
-        std::vector<std::shared_lock<std::shared_mutex>> shared_locks;
-        std::vector<std::unique_lock<std::shared_mutex>> exclusive_locks;
+        std::vector<std::shared_lock<FairSharedMutex>> shared_locks;
+        std::vector<std::unique_lock<FairSharedMutex>> exclusive_locks;
     };
     // Acquires `tables` (already sorted+deduplicated real, catalog-registered table
     // names) in the given mode, under the given already-acquired structural shared guard
@@ -294,6 +334,97 @@ private:
     // populated at CREATE TABLE time) -- a missing entry is a bug in the caller's
     // table-set computation, not a runtime condition to handle gracefully.
     TableLockGuard acquire_table_locks(RwLock<SharedDatabase>::ReadGuard structural, const std::vector<std::string>& tables, bool exclusive);
+
+    // Row-level-concurrency Stage 4: analogous to TableLockGuard/acquire_table_locks but
+    // for s.table_data_locks instead of s.table_locks. No structural member -- the caller
+    // already holds (via the outer TableLockGuard) whatever structural/table_locks
+    // protection it needs; this guard only ever nests INSIDE that, never on its own.
+    // Unlike table_locks (held for a whole statement), callers are expected to acquire
+    // this for the SHORTEST phase that actually needs it (e.g. just the push_back
+    // moment for INSERT), except exec_select, which holds it SHARED for its whole body
+    // since a read has no shape-changing phase to isolate.
+    struct DataLockGuard {
+        std::vector<std::shared_lock<FairSharedMutex>> shared_locks;
+        std::vector<std::unique_lock<FairSharedMutex>> exclusive_locks;
+    };
+    // `tables` need not be pre-sorted by the caller -- this function sorts+dedups its own
+    // copy, so call sites can pass e.g. {table} or {table, fk_parent} in any order without
+    // thinking about lock-ordering themselves. A name with no entry in s.table_data_locks
+    // (ephemeral CTE/subquery-alias table) is skipped, same as acquire_table_locks.
+    DataLockGuard acquire_table_data_locks(SharedDatabase& s, std::vector<std::string> tables, bool exclusive);
+
+    // Real-blocking-wait stage: thin shared helper for the "probe under table_data_locks
+    // (timeout=0), on conflict release table_data_locks, block on just the ONE contested
+    // row, then retry the whole scan from scratch" pattern used by exec_insert_inner/
+    // exec_update_inner/exec_delete_inner (see executor_update.cpp's UPDATE mutation loop
+    // for the fullest example -- probe-then-mutate, since that phase's atomicity is load-
+    // bearing for a prior phantom-disappearance fix). Computes the remaining time until
+    // `deadline` itself (clamped to zero, never negative) so call sites don't repeat that
+    // arithmetic. The CALLER must not be holding any table_data_locks/table_locks when
+    // calling this -- blocking while holding either would freeze the whole table for
+    // other sessions, exactly the risk this feature's design exists to avoid.
+    //
+    // Result handling for callers: Kind::Granted means retry the scan now; Kind::Deadlock
+    // means fail with the deadlock error immediately (unchanged message). Both
+    // Kind::Timeout (a real wait ran out) AND Kind::Conflict (deadline was already exactly
+    // exhausted when this was called, so LockManager took its instant-fail path) mean the
+    // SAME thing to a caller here -- give up with the standard ERROR 1205 message; treat
+    // them identically, don't special-case Conflict.
+    static LockResult block_on_row(LockManager& lock_mgr, const std::string& table, const std::string& pk, std::uint64_t txn_id,
+                                    bool exclusive, std::chrono::steady_clock::time_point deadline);
+
+    // Real-blocking-wait stage, second correctness fix (found via a live hang, not a
+    // static review): releasing table_data_locks before block_on_row is NOT sufficient by
+    // itself. execute()'s dispatcher acquires table_locks[table] SHARED (or EXCLUSIVE for
+    // MultiUpdate/MultiDelete/Merge) ONCE, for the entire statement, in a TableLockGuard
+    // that lives on execute()'s OWN stack frame -- exec_update_inner/exec_insert_inner/
+    // exec_delete_inner have no access to it and, without help, cannot release it before
+    // blocking. Meanwhile execute_commit_grouped() holds table_locks[table] EXCLUSIVE
+    // continuously from phase1 through the active_txn_ids erase (a Phase-27 fix for a
+    // separate MVCC visibility race). Put those two facts together: a statement parked in
+    // block_on_row() while still holding table_locks SHARED can deadlock against a
+    // concurrent COMMIT that needs table_locks EXCLUSIVE on the same table -- neither
+    // waits on the other through LockManager, so its row-only wait-for graph never sees
+    // it (confirmed via a real, reproducible hang before this fix).
+    //
+    // Fix: execute() stashes a pointer to its own local TableLockGuard (kept in a
+    // std::optional so it can be reset()+re-emplaced in place -- TableLockGuard holds a
+    // RwLock<SharedDatabase>::ReadGuard, which has a reference member and so is
+    // move-constructible but NOT assignable) here, plus the exact table set/mode used to
+    // build it, for the statement's duration. exec_*_inner calls
+    // release_table_locks_for_block() immediately before block_on_row() and
+    // reacquire_table_locks_after_block() immediately after it returns. Both are no-ops
+    // if execute() didn't stash a guard (shouldn't happen for any statement that ever
+    // calls block_on_row, but safe regardless). Resetting/re-emplacing the guard destroys
+    // and recreates its `structural` ReadGuard too, not just the table_locks entries --
+    // safe because `s`
+    // (the SharedDatabase& every exec_*_inner already holds) is a reference into the
+    // RwLock<SharedDatabase>'s own persistent value_, not into the transient guard, so it
+    // stays valid across the whole release/reacquire cycle.
+    std::optional<TableLockGuard>* active_table_lock_guard_ = nullptr;
+    std::vector<std::string> active_table_lock_tables_;
+    bool active_table_lock_exclusive_ = false;
+    void release_table_locks_for_block();
+    void reacquire_table_locks_after_block();
+
+    // Real-blocking-wait stage, extended to SELECT FOR UPDATE/FOR SHARE: the exact same
+    // problem as active_table_lock_guard_ above, but for the DataLockGuard execute()'s
+    // dispatcher acquires SHARED for the whole SELECT family (is_select_family, see
+    // executor_core.cpp) and holds for the whole recursive execute_with_s call --
+    // exec_select's FOR UPDATE/FOR SHARE row-locking loop is deep inside that call and has
+    // no way to release it before a genuine block_on_row() wait (which would otherwise
+    // freeze the table for every other session's writes, and for a concurrent COMMIT that
+    // needs table_data_locks EXCLUSIVE, for the whole wait).
+    //
+    // Unlike TableLockGuard, DataLockGuard has no reference member (just two vectors of
+    // locks) -- it's plain move-assignable (see e.g. executor_dml.cpp's `x = DataLockGuard{};`
+    // reset idiom), so no std::optional wrapping is needed here, just a raw pointer.
+    DataLockGuard* active_table_data_lock_guard_ = nullptr;
+    std::vector<std::string> active_table_data_lock_tables_;
+    bool active_table_data_lock_exclusive_ = false;
+    void release_table_data_locks_for_block();
+    void reacquire_table_data_locks_after_block(SharedDatabase& s);
+
     // Stage 4: computes the exact set of real tables `stmt` will touch (including FK
     // existence-check parents for INSERT and FK cascade children for UPDATE/DELETE --
     // both statically known from the catalog, see the Stage 4 plan's audit), or nullopt if
@@ -317,7 +448,8 @@ private:
     // ── Phase 8a: DDL ────────────────────────────────────────────────────
     StringResult exec_create(SharedDatabase& s, std::string name, std::vector<ColumnDef> columns, bool if_not_exists,
                               std::vector<std::string> primary_key_columns,
-                              std::vector<std::pair<std::optional<std::string>, std::string>> check_constraints);
+                              std::vector<std::pair<std::optional<std::string>, std::string>> check_constraints,
+                              std::optional<PartitionBy> partition_by = std::nullopt);
     StringResult exec_drop(SharedDatabase& s, const std::string& name, bool if_exists);
     StringResult exec_truncate(SharedDatabase& s, const std::string& name);
     StringResult exec_alter(SharedDatabase& s, const std::string& table, AlterAction action);
@@ -406,7 +538,52 @@ public:
     // original WHERE clause elsewhere in the engine.
     static bool gap_range_contains(const GapRange& range, const std::string& value);
 
+    // ── Table partitioning (PARTITION BY RANGE/LIST/HASH, V1 -- executor_partition.cpp)
+    // A partitioned table's catalog entry (TableSchema::partition_info) is the single
+    // source of truth: `s.tables[logical_name]` is a permanently-empty phantom (every
+    // real row lives in one of `partitions[i].child_table`, an ordinary table with its
+    // own full set of the 8 per-table SharedDatabase maps). Public/static so both DDL
+    // (child-table setup) and FK-existence-check code can reuse them without a full
+    // Executor instance.
+    static std::optional<PartitionBy> partition_info_for(const SharedDatabase& s, const std::string& table);
+    // Which child a single partition-key VALUE belongs to (INSERT routing; also HASH's
+    // Eq-pruning path). Empty string means "no partition matches" (RANGE only, when the
+    // value exceeds every bound and there's no MAXVALUE catch-all) -- caller must error.
+    static std::string partition_child_for_value(const PartitionBy& info, const std::string& value);
+    // WHERE-clause pruning: returns the (possibly full) subset of child table names that
+    // could contain a matching row. Reuses extract_pk_gap_range (already generic on
+    // column name, not just PK) for RANGE; scans AND-leaves for Eq/In on LIST/HASH.
+    // Always safe to over-return (a extra child just gets scanned and finds nothing).
+    static std::vector<std::string> prune_partition_children(const PartitionBy& info, const std::optional<CondExpr>& where);
+
 private:
+    // Entry point called from execute(), BEFORE any lock is acquired for the current
+    // statement (so it's free to recurse back into execute() once per relevant child --
+    // see the design note in executor_partition.cpp for why that's required instead of
+    // hooking inside execute_with_s, which may already be running under a lock held by
+    // an outer execute() call on the same thread). Returns nullopt if `stmt` doesn't
+    // target a partitioned table (caller continues with the normal dispatch, zero
+    // overhead beyond one catalog lookup); otherwise returns the final routed result
+    // (success, or a clear "not supported on partitioned tables in this version" error
+    // for statement kinds this V1 doesn't route).
+    std::optional<StringResult> try_route_partitioned(Statement& stmt);
+    StringResult route_partitioned_insert(const std::string& table, const PartitionBy& info, Statement::Insert ins);
+    StringResult route_partitioned_update(const std::string& table, const PartitionBy& info, Statement::Update upd);
+    StringResult route_partitioned_delete(const std::string& table, const PartitionBy& info, Statement::Delete del);
+    StringResult route_partitioned_select(const PartitionBy& info, Statement stmt);
+    // Runs `child_stmts` in order via execute() (reusing 100% of normal locking/MVCC/undo
+    // machinery -- each child is executed exactly as if a client had sent it directly).
+    // Wraps them in an implicit BEGIN/COMMIT/ROLLBACK when the caller isn't already in an
+    // explicit transaction, so a multi-child autocommit statement is all-or-nothing
+    // (matching a single-table statement's atomicity) -- stops and rolls back on the
+    // first error.
+    struct RoutedRun {
+        bool ok = true;
+        std::vector<StringResult> child_results; // one per successfully-run child, in order
+        StringResult error = StringResult::Ok(""); // meaningful only when !ok
+    };
+    RoutedRun run_routed_statements(std::vector<Statement> child_stmts);
+
     StringResult exec_delete(SharedDatabase& s, const std::string& table, std::optional<CondExpr> condition,
                               std::optional<std::vector<SelectColumn>> returning);
     StringResult exec_delete_inner(SharedDatabase& s, const std::string& table, const std::optional<CondExpr>& condition,
