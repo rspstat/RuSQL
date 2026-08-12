@@ -113,6 +113,10 @@ private:
     void parse_fk_table_level(std::vector<ColumnDef>& columns);
     FkAction parse_fk_action();
     std::optional<PartitionBy> parse_partition_by();
+    // PostgreSQL's `FILTER (WHERE cond)` clause on an aggregate -- no Rust original.
+    // Returns nullopt (consuming nothing) if the next token isn't FILTER. Shared by the
+    // main aggregate dispatch and GROUP_CONCAT's separate branch (parse_select).
+    std::optional<CondExpr> parse_optional_filter_clause();
     // Parses the "LESS THAN (bound) / LESS THAN MAXVALUE" (RANGE) or "IN (v1, v2, ...)"
     // (LIST) tail of a single partition definition into `def` -- callers have already
     // consumed "PARTITION name VALUES". Shared by parse_partition_by's own list and by

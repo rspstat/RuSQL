@@ -234,10 +234,26 @@ struct CondExpr {
 enum class JoinType { Inner, Left, Right, Cross, Natural, FullOuter };
 
 struct Join {
-    std::string table;
+    std::string table; // LATERAL이면 서브쿼리의 별칭
     CondExpr on_expr;
     JoinType join_type;
     std::vector<std::string> using_cols;
+    // LATERAL 서브쿼리 -- Rust 원본에 없음, Select::subquery와 동일한 모양(StatementPtr + 별칭).
+    std::optional<std::pair<StatementPtr, std::string>> subquery;
+    bool lateral = false;
+
+    Join() = default;
+    Join(std::string t, CondExpr on, JoinType jt, std::vector<std::string> uc,
+         std::optional<std::pair<StatementPtr, std::string>> sq = std::nullopt, bool lat = false)
+        : table(std::move(t)), on_expr(std::move(on)), join_type(jt), using_cols(std::move(uc)),
+          subquery(std::move(sq)), lateral(lat) {}
+    // subquery가 unique_ptr를 담아 암시적 복사가 불가능해지므로, 명시적 깊은 복사 생성자가 필요
+    // (SelectColumn과 동일한 패턴). Statement::Select의 기존 복사 생성자가 `joins` 벡터를
+    // 그대로(변경 없이) 복사할 수 있도록 이 생성자가 std::vector<Join>의 복사를 가능하게 한다.
+    Join(const Join&);
+    Join& operator=(const Join&);
+    Join(Join&&) noexcept = default;
+    Join& operator=(Join&&) noexcept = default;
 };
 
 // ---------------------------------------------------------------------------
@@ -262,9 +278,13 @@ struct AggFunc {
     struct GroupConcat { std::string separator; };
     struct CountCase { std::vector<CaseWhenBranch> branches; std::optional<std::string> else_val; };
     struct SumCase { std::vector<CaseWhenBranch> branches; std::optional<std::string> else_val; };
+    // No Rust/MySQL original for these two -- new C++-native additions.
+    struct BitAnd {};
+    struct BitOr {};
+    struct JsonAgg {};
 
     using Data = std::variant<Count, CountDistinct, Sum, Avg, Min, Max, SumDistinct, AvgDistinct,
-                               Stddev, Variance, GroupConcat, CountCase, SumCase>;
+                               Stddev, Variance, GroupConcat, CountCase, SumCase, BitAnd, BitOr, JsonAgg>;
     Data data;
 
     AggFunc() : data(Count{}) {}
@@ -328,8 +348,12 @@ struct SelectColumn {
     struct All {};
     struct Column { std::string name; };
     struct ColumnAlias { std::string name, alias; };
-    struct Agg { AggFunc func; std::string col; };
-    struct AggAlias { AggFunc func; std::string col; std::string alias; };
+    // `filter`: PostgreSQL's `FILTER (WHERE ...)` clause on an aggregate -- no Rust
+    // original, new C++-native addition. Restricts which rows THIS aggregate considers,
+    // independent of the query's own WHERE/HAVING (e.g. `COUNT(*) FILTER (WHERE
+    // status='active')` alongside a plain unfiltered `COUNT(*)` in the same SELECT).
+    struct Agg { AggFunc func; std::string col; std::optional<CondExpr> filter; };
+    struct AggAlias { AggFunc func; std::string col; std::string alias; std::optional<CondExpr> filter; };
     struct Func { std::string name; std::vector<std::string> args; std::optional<std::string> alias; };
     struct Expr { ArithExpr expr; std::optional<std::string> alias; };
     struct CaseWhen {

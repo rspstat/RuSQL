@@ -105,6 +105,7 @@
 - [x] NATURAL JOIN (공통 컬럼명 자동 equi-join, ON 절 없음)
 - [x] JOIN ... USING (col, ...) — 지정 컬럼 기준 equi-join (`ON t1.col = t2.col` 단축 문법)
 - [x] LEFT OUTER JOIN / RIGHT OUTER JOIN / INNER JOIN 키워드 별칭 지원
+- [x] LATERAL JOIN — `[INNER|LEFT|CROSS] JOIN LATERAL (SELECT ...) alias [ON cond]`, 서브쿼리가 앞쪽 FROM/JOIN 테이블 컬럼을 참조하고 바깥 행마다 재평가됨(일반 FROM 서브쿼리는 1회만 평가); RIGHT/NATURAL/FULL OUTER + LATERAL 조합은 파서에서 명확히 거부
 - [x] Sort-Merge Join (양쪽 > 4행 Equi-Join, O((N+M)logN) sort + O(N+M) merge, 투 포인터 키 그룹 병합)
 - [x] Hash Join (한쪽 > 4행 Equi-Join, O(N+M)) / Nested Loop Join (소규모·비등가) — ON 조건 방향 무관 (left.col = right.col / right.col = left.col 모두 지원)
 - [x] 테이블 별칭 (alias) — `FROM emp e JOIN dept d ON e.dept_id = d.id`
@@ -115,9 +116,10 @@
 - [x] DISTINCT
 - [x] 산술 표현식 — SELECT / WHERE / UPDATE SET에서 `price * qty`, `salary + 100`, `salary % 12` (모듈로), `a || b` (문자열 연결 — CONCAT 동의어)
 - [x] 비교 표현식 — SELECT 컬럼에서 `expr > val AS alias` 형태 지원 (`LENGTH(UUID()) > 0 AS uuid_ok`, `RAND() >= 0` 등)
-- [x] 집계 함수 — COUNT / SUM / AVG / MIN / MAX / STDDEV / VARIANCE (모집단 기준)
+- [x] 집계 함수 — COUNT / SUM / AVG / MIN / MAX / STDDEV / VARIANCE (모집단 기준) / BIT_AND / BIT_OR / JSON_AGG
 - [x] DISTINCT 집계 — COUNT(DISTINCT) / SUM(DISTINCT) / AVG(DISTINCT)
 - [x] GROUP_CONCAT (SEPARATOR 옵션, GROUP BY 및 비집계 양쪽 지원)
+- [x] FILTER (WHERE ...) 절 — 집계 함수 하나만 다른 행 집합으로 좁힘, 같은 SELECT 절의 다른 (필터 없는) 집계와는 독립적 (`COUNT(*) FILTER (WHERE active = 1)`); GROUP_CONCAT 포함, OVER와는 결합 미지원(V1 범위)
 - [x] 윈도우 함수 — ROW_NUMBER / RANK / DENSE_RANK / LAG / LEAD / FIRST_VALUE / LAST_VALUE / NTH_VALUE / NTILE / PERCENT_RANK / CUME_DIST (OVER PARTITION BY + ORDER BY)
 - [x] 윈도우 함수 ROWS/RANGE 프레임 — `ROWS/RANGE BETWEEN <bound> AND <bound>` (UNBOUNDED PRECEDING / CURRENT ROW / FOLLOWING 등)
 - [x] 집계 윈도우 함수 — SUM / AVG / COUNT / MIN / MAX OVER (PARTITION BY … ORDER BY … ROWS/RANGE …)

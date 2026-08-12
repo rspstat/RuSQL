@@ -230,8 +230,9 @@
 | P3 | LOCK TABLES | 동시성 제어 갭 해소 (Gap Lock은 Section B에서 완료) | 중간 |
 | P3 | REPLACE INTO / DEFERRABLE 제약 | 실무 관용구 지원 | 낮음~중간 |
 | P3 | 표현식/부분/내림차순 인덱스 | 인덱스 실무 완성도 | 중간 |
-| P3 | LATERAL JOIN | 표준 SQL 지원 확장 | 높음 |
-| P3 | FILTER절/ARRAY_AGG/JSON_AGG/PERCENTILE_CONT | 집계 표현력 확장 | 중간 |
+| ✅ 완료 | LATERAL JOIN | 아래 "LATERAL JOIN + 신규 집계 함수 확장 구현 완료" 참고 | 높음 |
+| ✅ 완료 | FILTER절/BIT_AND/BIT_OR/JSON_AGG | 아래 "LATERAL JOIN + 신규 집계 함수 확장 구현 완료" 참고 | 중간 |
+| P3 | ARRAY_AGG/PERCENTILE_CONT | 집계 표현력 확장 | 중간 |
 | P3 | CREATE SEQUENCE | DDL 완성도 | 중간 |
 | P3 | 열 레벨 권한 / 이벤트 스케줄러 | DCL·운영 완성도 | 중간 |
 | ✅ 완료 | 파티셔닝(PARTITION BY RANGE/LIST/HASH) | 아래 "파티셔닝 구현 완료" 참고 | 중간 |
@@ -268,6 +269,22 @@
 **테스트**: `test_partitioning.cpp` 신규 16케이스(RANGE/LIST/HASH 라우팅+pruning, UPDATE/DELETE 라우팅, 파티션 컬럼 UPDATE 거부, DROP/TRUNCATE/ALTER ADD·DROP PARTITION 생명주기, PK/AUTO_INCREMENT 제약 검증, 파티션 부모로의 FK 참조, 오토커밋 다중-자식 원자성, RETURNING/MultiUpdate 등 미지원 문장 거부가 침묵하지 않고 명확히 실패하는지, 비파티션 테이블 회귀 가드). Debug+Release **340케이스/22024assertion** 통과(324/21863에서 +16케이스/+161assertion), `test_full.sql`/`test_full-ver2.sql` 재실행(신규 회귀 없음).
 
 **남은 범위**: SSI, XA — Section H 위 비교표 참고.
+
+### LATERAL JOIN + 신규 집계 함수 확장 구현 완료 (BIT_AND/BIT_OR, FILTER, JSON_AGG, LATERAL JOIN — 2026-08-12)
+
+`DIFF.md` Section 6/7(쿼리 기능/집계 함수) 비교표에서 사용자 요청으로 ROI 순 4개 항목을 골라 구현. BIT_AND/BIT_OR·JSON_AGG는 기존 STDDEV/VARIANCE·GROUP_CONCAT 패턴을 그대로 재사용하는 저난이도 확장, FILTER절은 기존 ~150줄짜리 집계별 분기를 건드리지 않는 scoped-shadowing 방식, LATERAL JOIN은 파서(AST 신규 필드)·실행기(조인 루프 조기 분기)·qualify(재귀 처리) 3개 계층에 걸친 아키텍처 확장이라 별도 `EnterPlanMode` 승인을 거쳐 진행.
+
+**BIT_AND/BIT_OR**: `std::int64_t` 누적(다른 대부분 집계처럼 `double`이 아님) — AND의 빈 집합 항등값은 `-1`(all-bits-set), OR는 `0`.
+
+**FILTER (WHERE ...)**: PostgreSQL 문법, 한 집계만 별도 행 집합으로 좁히고 같은 SELECT의 다른 집계·쿼리 자체의 WHERE/HAVING과는 독립(`COUNT(*) FILTER (WHERE active=1)`가 필터 없는 `COUNT(*)`와 같은 SELECT에 공존 가능). `compute_aggregates`에서 `grp_ptr`을 먼저 계산한 뒤 `const std::vector<Row>& grp = *grp_ptr;`로 바깥 `grp` 파라미터를 shadow(자기 자신을 참조하는 초기화자는 UB이므로 반드시 이 순서로 작성). GROUP_CONCAT 포함, OVER와의 결합은 V1 범위 밖(명확히 미지원).
+
+**JSON_AGG**: `nlohmann::json::array()` 빌드, GROUP_CONCAT과 동일한 수집 루프 재사용. `format_num_or_int`와 동일한 정수 판별 규칙으로 `[1.0,2.0]`이 아닌 `[1,2]` 출력, NULL은 JSON `null`.
+
+**LATERAL JOIN**: `[INNER|LEFT|CROSS] JOIN LATERAL (SELECT ...) alias [ON cond]` — 서브쿼리가 앞선 FROM/JOIN 테이블 컬럼을 참조하고 바깥 행마다 재평가됨(일반 FROM 서브쿼리는 1회만 평가되는 고정 임시 테이블). `Join` 구조체에 `subquery`(`Select::subquery`와 동일한 `optional<pair<StatementPtr,string>>`)와 `lateral` 필드 신규 추가 — `unique_ptr` 보유로 암시적 복사가 깨지는 문제는 `SelectColumn`과 동일한 명시적 깊은 복사 생성자 패턴으로 해결해, `Statement::Select`의 기존 `joins` 벡터 복사 코드는 한 줄도 안 건드림. 실행은 `exec_select`의 조인 루프 맨 앞에서 `j.lateral`이면 조기 분기해 왼쪽 행마다 `execute_with_s`로 서브쿼리를 재실행(→`parse_table_output`으로 재파싱) 후 `merge_right`/`null_right`(UNION 등 기존 코드가 이미 쓰던 병합 헬퍼)를 그대로 재사용. 서브쿼리 자신의 최상위 WHERE절만 바깥 행 값으로 치환(중첩 JOIN/HAVING/서브쿼리 내부는 V1 범위 밖). RIGHT/NATURAL/FULL OUTER + LATERAL은 파서 단계에서 명확한 에러로 거부. 락 계산 fast-path(`select_tables_ok`)는 LATERAL이면 FROM-서브쿼리와 동일한 이유(서브쿼리가 실행 시점에만 알 수 있는 테이블을 건드릴 수 있음)로 포기하고 전체 구조적 배타 락으로 폴백.
+
+**검증 중 발견한 실제 실행기 버그**: `qualify_stmt`(모든 문장 실행 전 테이블명에 현재 DB 접두어를 붙이는 단계)가 호출하는 `qualify_join_` 헬퍼가 `Join`을 필드별로 새로 조립하면서 `subquery`/`lateral`을 그냥 누락시키고 있었고, 게다가 LATERAL의 별칭(`j.table`, 실테이블이 아님)까지 실테이블처럼 `qualify_name_with_synonyms`로 DB 접두어를 붙여버려 `"rusql.o" 테이블을 찾을 수 없음` 에러가 발생했다 — `engine_cli.exe`로 직접 재현해 발견, `qualify_join_`이 `lateral && subquery`일 때는 별칭을 그대로 두고 서브쿼리 자체만 재귀적으로 `qualify_stmt`하도록 수정.
+
+**테스트**: `test_executor_select.cpp`에 신규 7케이스(BIT_AND/BIT_OR 1, FILTER 1, JSON_AGG 1, LATERAL JOIN INNER/LEFT/CROSS 의미론 + RIGHT/NATURAL/FULL 거부 4). Debug+Release 전체 스위트 통과, `test_full.sql`/`test_full-ver2.sql` 재실행 — 신규 회귀 없음(ver2의 BACKUP/RESTORE 에러 카운트는 기존에 이미 알려진 self-referential FK 이슈로, 이 작업 이전 커밋에서도 동일하게 재현되는 것을 직접 확인해 무관함을 검증 — [[rusql-test-full-ver2]] 참고).
 
 ## I. 테스트·문서 품질
 

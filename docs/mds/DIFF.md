@@ -110,7 +110,7 @@
 | NATURAL JOIN | ✓ | ✓ | ✓ | ✓ |
 | JOIN ... USING | ✓ | ✓ | ✓ | ✓ |
 | SELF JOIN | ✓ | ✓ | ✓ | ✓ |
-| LATERAL JOIN | ✓ (8.0.14+) | ✓ | ✓ (CROSS APPLY / OUTER APPLY) | ✗ |
+| LATERAL JOIN | ✓ (8.0.14+) | ✓ | ✓ (CROSS APPLY / OUTER APPLY) | ✓ (INNER/LEFT/CROSS만; RIGHT/NATURAL/FULL+LATERAL은 파서에서 거부) |
 | UNION / UNION ALL | ✓ | ✓ | ✓ | ✓ |
 | INTERSECT / EXCEPT | ✓ (8.0+) | ✓ | ✓ (MINUS) | ✓ |
 | 서브쿼리 (FROM / WHERE / SELECT) | ✓ | ✓ | ✓ | ✓ |
@@ -138,11 +138,11 @@
 | COUNT / SUM / AVG / MIN / MAX | ✓ | ✓ | ✓ | ✓ |
 | GROUP_CONCAT / STRING_AGG / LISTAGG | GROUP_CONCAT | STRING_AGG | LISTAGG | GROUP_CONCAT |
 | STDDEV / VARIANCE | ✓ | ✓ | ✓ | ✓ (STDDEV_POP / VAR_POP 별칭 포함) |
-| BIT_AND / BIT_OR | ✓ | ✓ | ✗ | ✗ |
+| BIT_AND / BIT_OR | ✓ | ✓ | ✗ | ✓ |
 | ARRAY_AGG / COLLECT | ✗ | ARRAY_AGG | COLLECT | ✗ |
-| JSON_AGG | ✓ | ✓ | ✓ (JSON_ARRAYAGG) | ✗ |
+| JSON_AGG | ✓ | ✓ | ✓ (JSON_ARRAYAGG) | ✓ |
 | PERCENTILE_CONT / DISC | ✗ | ✓ | ✓ | ✗ |
-| FILTER (WHERE ...) 절 | ✗ | ✓ | ✗ | ✗ |
+| FILTER (WHERE ...) 절 | ✗ | ✓ | ✗ | ✓ |
 | DISTINCT 집계 | ✓ | ✓ | ✓ | ✓ (COUNT / SUM / AVG DISTINCT 모두 지원) |
 
 ---

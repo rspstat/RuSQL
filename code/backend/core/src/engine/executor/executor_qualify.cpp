@@ -35,7 +35,16 @@ CondExpr Executor::qualify_condexpr(const SharedDatabase& s, CondExpr expr) cons
 // on_expr via qualify_condexpr, so this private helper avoids repeating that pairing.
 Join Executor::qualify_join_(const SharedDatabase& s, const Join& j) const {
     Join out;
-    out.table = qualify_name_with_synonyms(s, j.table);
+    if (j.lateral && j.subquery) {
+        // LATERAL JOIN -- Rust 원본에 없음. j.table은 서브쿼리의 별칭이지 실테이블이 아니므로
+        // db-접두어를 붙이지 않는다(붙이면 "rusql.o" 같은 존재하지 않는 테이블명이 되어버림).
+        // 서브쿼리 자신은 재귀적으로 qualify (다른 서브쿼리 필드들과 동일한 처리 방식).
+        out.table = j.table;
+        out.subquery = std::make_pair(std::make_unique<Statement>(qualify_stmt(s, Statement(*j.subquery->first))), j.subquery->second);
+        out.lateral = true;
+    } else {
+        out.table = qualify_name_with_synonyms(s, j.table);
+    }
     out.on_expr = qualify_condexpr(s, j.on_expr);
     out.join_type = j.join_type;
     out.using_cols = j.using_cols;

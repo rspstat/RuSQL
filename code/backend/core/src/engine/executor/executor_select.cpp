@@ -126,6 +126,9 @@ std::string debug_agg_func_dual(const AggFunc& func) {
     if (auto* gc = std::get_if<AggFunc::GroupConcat>(&func.data)) return "GroupConcat { separator: \"" + gc->separator + "\" }";
     if (std::holds_alternative<AggFunc::CountCase>(func.data)) return "CountCase { .. }";
     if (std::holds_alternative<AggFunc::SumCase>(func.data)) return "SumCase { .. }";
+    if (std::holds_alternative<AggFunc::BitAnd>(func.data)) return "BitAnd";
+    if (std::holds_alternative<AggFunc::BitOr>(func.data)) return "BitOr";
+    if (std::holds_alternative<AggFunc::JsonAgg>(func.data)) return "JsonAgg";
     return "";
 }
 } // namespace
@@ -166,6 +169,9 @@ std::string Executor::agg_label(const AggFunc& func, const std::string& col) {
     if (std::holds_alternative<AggFunc::GroupConcat>(func.data)) return "GROUP_CONCAT(" + col + ")";
     if (std::holds_alternative<AggFunc::CountCase>(func.data)) return "COUNT(CASE)";
     if (std::holds_alternative<AggFunc::SumCase>(func.data)) return "SUM(CASE)";
+    if (std::holds_alternative<AggFunc::BitAnd>(func.data)) return "BIT_AND(" + col + ")";
+    if (std::holds_alternative<AggFunc::BitOr>(func.data)) return "BIT_OR(" + col + ")";
+    if (std::holds_alternative<AggFunc::JsonAgg>(func.data)) return "JSON_AGG(" + col + ")";
     return "";
 }
 
@@ -248,17 +254,37 @@ Row Executor::compute_aggregates(const std::vector<Row>& grp, const std::vector<
     for (auto& col : columns) {
         const AggFunc* func = nullptr;
         std::string col_name, label;
+        const CondExpr* filter = nullptr;
         if (auto* agg = std::get_if<SelectColumn::Agg>(&col.data)) {
             func = &agg->func;
             col_name = agg->col;
             label = agg_label(*func, col_name);
+            if (agg->filter) filter = &*agg->filter;
         } else if (auto* agg_a = std::get_if<SelectColumn::AggAlias>(&col.data)) {
             func = &agg_a->func;
             col_name = agg_a->col;
             label = agg_a->alias;
+            if (agg_a->filter) filter = &*agg_a->filter;
         } else {
             continue;
         }
+
+        // FILTER (WHERE ...): narrows just THIS aggregate's row set, independent of the
+        // query's own WHERE/HAVING. `grp_ptr` is resolved BEFORE the shadowing
+        // declaration below so its initializer never textually mentions `grp` itself
+        // (self-referencing a not-yet-initialized reference is undefined behavior) --
+        // once shadowed, every existing grp-referencing branch below (GroupConcat/
+        // CountCase/SumCase/Min-Max/BitAnd-BitOr/JsonAgg/the generic numeric path)
+        // transparently applies to the filtered rows with no other changes needed.
+        std::vector<Row> filtered_storage;
+        const std::vector<Row>* grp_ptr = &grp;
+        if (filter) {
+            for (auto& r : grp) {
+                if (eval_condexpr(r, *filter)) filtered_storage.push_back(r);
+            }
+            grp_ptr = &filtered_storage;
+        }
+        const std::vector<Row>& grp = *grp_ptr;
 
         if (auto* gc = std::get_if<AggFunc::GroupConcat>(&func->data)) {
             std::vector<std::string> strs;
@@ -272,6 +298,23 @@ Row Executor::compute_aggregates(const std::vector<Row>& grp, const std::vector<
                 joined += strs[i];
             }
             out[label] = joined;
+            continue;
+        }
+        if (std::holds_alternative<AggFunc::JsonAgg>(func->data)) {
+            nlohmann::json arr = nlohmann::json::array();
+            for (auto& r : grp) {
+                auto it = r.find(col_name);
+                if (it == r.end() || it->second == EXECUTOR_NULL_VALUE) {
+                    arr.push_back(nullptr);
+                    continue;
+                }
+                // Mirrors format_num_or_int's integral-vs-decimal check so JSON_AGG(id)
+                // produces clean [1, 2, 3] instead of [1.0, 2.0, 3.0].
+                if (auto p = parse_f64(it->second); p && *p == std::trunc(*p)) arr.push_back(static_cast<std::int64_t>(*p));
+                else if (p) arr.push_back(*p);
+                else arr.push_back(it->second);
+            }
+            out[label] = arr.dump();
             continue;
         }
         if (auto* cc = std::get_if<AggFunc::CountCase>(&func->data)) {
@@ -337,6 +380,22 @@ Row Executor::compute_aggregates(const std::vector<Row>& grp, const std::vector<
                 }
             }
             out[label] = res;
+            continue;
+        }
+        if (std::holds_alternative<AggFunc::BitAnd>(func->data) || std::holds_alternative<AggFunc::BitOr>(func->data)) {
+            bool is_and = std::holds_alternative<AggFunc::BitAnd>(func->data);
+            // BIT_AND over an empty set is the all-1s identity (getting this wrong as 0
+            // would silently zero out any real AND); BIT_OR's identity is a plain 0.
+            std::int64_t acc = is_and ? -1 : 0; // -1 == all bits set, two's complement
+            for (auto& r : grp) {
+                auto it = r.find(col_name);
+                if (it == r.end() || it->second == EXECUTOR_NULL_VALUE) continue;
+                if (auto p = parse_f64(it->second)) {
+                    std::int64_t n = static_cast<std::int64_t>(*p);
+                    acc = is_and ? (acc & n) : (acc | n);
+                }
+            }
+            out[label] = std::to_string(acc);
             continue;
         }
 
@@ -869,6 +928,43 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
         std::vector<Row> current = std::move(visible_rows);
         for (std::size_t ji = 0; ji < joins.size(); ji++) {
             auto& j = joins[ji];
+
+            // LATERAL JOIN -- Rust 원본에 없음. j.table은 실제 물리 테이블이 아니라 서브쿼리의
+            // 별칭이므로, 아래의 정상 조인 경로(s.tables.find(j.table) 이하)에 들어가기 전에
+            // 완전히 별도로 가로챈다. 서브쿼리는 왼쪽(current) 행마다 다시 실행되고, 그 자신의
+            // 최상위 WHERE절만 바깥 행 값으로 치환된다(V1 축소 범위).
+            if (j.lateral && j.subquery) {
+                std::vector<Row> new_current;
+                std::vector<std::string> right_cols_for_null;
+                for (auto& left_row : current) {
+                    Statement sub(*j.subquery->first);
+                    if (auto* sel = std::get_if<Statement::Select>(&sub.data)) {
+                        if (sel->condition) sel->condition = substitute_correlated_condexpr(*sel->condition, left_row);
+                    }
+                    auto inner_result = execute_with_s(s, std::move(sub));
+                    if (inner_result.is_err()) return inner_result;
+                    auto [inner_cols, inner_rows] = parse_table_output(inner_result.value());
+                    if (!inner_cols.empty() && right_cols_for_null.empty()) right_cols_for_null = inner_cols;
+
+                    bool any_match = false;
+                    for (auto& r : inner_rows) {
+                        Row merged = left_row;
+                        merge_right(merged, r, j.table);
+                        if (!eval_condexpr(merged, j.on_expr)) continue;
+                        any_match = true;
+                        new_current.push_back(std::move(merged));
+                    }
+                    if (!any_match && j.join_type == JoinType::Left) {
+                        Row merged = left_row;
+                        null_right(merged, right_cols_for_null, j.table);
+                        new_current.push_back(std::move(merged));
+                    }
+                    // Inner/Cross에서 any_match == false면 표준 join 의미론대로 그 행은 드롭.
+                }
+                current = std::move(new_current);
+                continue;
+            }
+
             std::vector<Row> right_rows_raw;
             {
                 auto it = s.tables.find(j.table);

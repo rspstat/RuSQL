@@ -28,6 +28,19 @@ bool is_arith_continuation(TokenKind k) {
 }
 } // namespace
 
+std::optional<CondExpr> Parser::parse_optional_filter_clause() {
+    if (!peek_is(TokenKind::Filter)) return std::nullopt;
+    advance();
+    if (!peek_is(TokenKind::LParen)) throw ParseError("Expected '(' after FILTER");
+    advance();
+    if (!peek_is(TokenKind::Where)) throw ParseError("Expected WHERE after FILTER(");
+    advance();
+    CondExpr cond = parse_condexpr();
+    if (!peek_is(TokenKind::RParen)) throw ParseError("Expected ')' after FILTER (WHERE ...)");
+    advance();
+    return cond;
+}
+
 Statement Parser::parse_select() {
     // DISTINCT
     bool distinct = false;
@@ -43,7 +56,8 @@ Statement Parser::parse_select() {
 
             if (p && (p->kind == TokenKind::Count || p->kind == TokenKind::Sum || p->kind == TokenKind::Avg ||
                       p->kind == TokenKind::Min || p->kind == TokenKind::Max ||
-                      p->kind == TokenKind::Stddev || p->kind == TokenKind::Variance)) {
+                      p->kind == TokenKind::Stddev || p->kind == TokenKind::Variance ||
+                      p->kind == TokenKind::BitAnd || p->kind == TokenKind::BitOr || p->kind == TokenKind::JsonAgg)) {
                 const Token* ft = advance();
                 AggFunc func = [&]() -> AggFunc {
                     switch (ft->kind) {
@@ -53,7 +67,10 @@ Statement Parser::parse_select() {
                         case TokenKind::Min: return AggFunc(AggFunc::Min{});
                         case TokenKind::Max: return AggFunc(AggFunc::Max{});
                         case TokenKind::Stddev: return AggFunc(AggFunc::Stddev{});
-                        default: return AggFunc(AggFunc::Variance{});
+                        case TokenKind::Variance: return AggFunc(AggFunc::Variance{});
+                        case TokenKind::BitAnd: return AggFunc(AggFunc::BitAnd{});
+                        case TokenKind::BitOr: return AggFunc(AggFunc::BitOr{});
+                        default: return AggFunc(AggFunc::JsonAgg{});
                     }
                 }();
                 if (!peek_is(TokenKind::LParen)) throw ParseError("Expected '('");
@@ -175,13 +192,18 @@ Statement Parser::parse_select() {
                     if (peek_is(TokenKind::As)) { advance(); alias = expect_alias_ident(); }
                     return SelectColumn(SelectColumn::Expr{std::move(lhs), alias});
                 }
+                // FILTER (WHERE ...) -- only meaningful for the plain aggregate case
+                // reached here (OVER and the arith-continuation case above both already
+                // returned); deliberately not supported combined with OVER (aggregate
+                // window functions), out of scope for this addition.
+                std::optional<CondExpr> filter_cond = parse_optional_filter_clause();
                 // AS 별칭
                 if (peek_is(TokenKind::As)) {
                     advance();
                     std::string alias = expect_alias_ident();
-                    return SelectColumn(SelectColumn::AggAlias{func, agg_col, alias});
+                    return SelectColumn(SelectColumn::AggAlias{func, agg_col, alias, filter_cond});
                 }
-                return SelectColumn(SelectColumn::Agg{func, agg_col});
+                return SelectColumn(SelectColumn::Agg{func, agg_col, filter_cond});
             }
 
             // GROUP_CONCAT(col [SEPARATOR 'sep'])
@@ -207,12 +229,13 @@ Statement Parser::parse_select() {
                 if (!peek_is(TokenKind::RParen)) throw ParseError("Expected ')' after GROUP_CONCAT");
                 advance();
                 AggFunc func = AggFunc(AggFunc::GroupConcat{separator});
+                std::optional<CondExpr> filter_cond = parse_optional_filter_clause();
                 if (peek_is(TokenKind::As)) {
                     advance();
                     std::string alias = expect_alias_ident();
-                    return SelectColumn(SelectColumn::AggAlias{func, agg_col, alias});
+                    return SelectColumn(SelectColumn::AggAlias{func, agg_col, alias, filter_cond});
                 }
-                return SelectColumn(SelectColumn::Agg{func, agg_col});
+                return SelectColumn(SelectColumn::Agg{func, agg_col, filter_cond});
             }
 
             // CASE WHEN ... THEN ... [ELSE ...] END
@@ -537,10 +560,32 @@ Statement Parser::parse_select() {
             break;
         }
 
-        std::string join_table = expect_ident();
-        if (peek_is(TokenKind::Ident)) {
-            std::string a = expect_ident();
-            alias_map[a] = join_table;
+        // LATERAL JOIN -- Rust 원본에 없음. 서브쿼리가 앞쪽 FROM/JOIN 테이블의 컬럼을 참조할 수
+        // 있고, 바깥 행마다 재평가된다(일반 FROM 서브쿼리는 한 번만 평가되는 고정 임시 테이블).
+        bool lateral = false;
+        if (peek_is(TokenKind::Lateral)) { advance(); lateral = true; }
+
+        std::string join_table;
+        std::optional<std::pair<StatementPtr, std::string>> join_subquery;
+        if (lateral) {
+            if (*jt != JoinType::Inner && *jt != JoinType::Left && *jt != JoinType::Cross)
+                throw ParseError("LATERAL is only supported with INNER/LEFT/CROSS JOIN");
+            if (!peek_is(TokenKind::LParen)) throw ParseError("Expected '(' after LATERAL");
+            advance();
+            if (!peek_is(TokenKind::Select)) throw ParseError("Expected SELECT in LATERAL subquery");
+            advance();
+            Statement inner = parse_select();
+            if (!peek_is(TokenKind::RParen)) throw ParseError("Expected ')' after LATERAL subquery");
+            advance();
+            if (peek_is(TokenKind::As)) advance();
+            join_table = expect_ident(); // 별칭 필수 (파생 테이블은 반드시 별칭 필요)
+            join_subquery = std::make_pair(std::make_unique<Statement>(std::move(inner)), join_table);
+        } else {
+            join_table = expect_ident();
+            if (peek_is(TokenKind::Ident)) {
+                std::string a = expect_ident();
+                alias_map[a] = join_table;
+            }
         }
         auto dummy_true = []() {
             return CondExpr(CondExpr::Leaf{
@@ -568,7 +613,7 @@ Statement Parser::parse_select() {
             advance();
             return parse_condexpr();
         }();
-        joins.push_back(Join{join_table, std::move(on_expr), *jt, using_cols});
+        joins.push_back(Join{join_table, std::move(on_expr), *jt, using_cols, std::move(join_subquery), lateral});
     }
 
     // WHERE

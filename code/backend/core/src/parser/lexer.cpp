@@ -81,6 +81,8 @@ const std::unordered_map<std::string, TokenKind>& keyword_map() {
         {"DATABASES", TokenKind::Databases}, {"ANALYZE", TokenKind::Analyze},
         {"STDDEV", TokenKind::Stddev}, {"STD", TokenKind::Stddev}, {"STDDEV_POP", TokenKind::Stddev},
         {"VARIANCE", TokenKind::Variance}, {"VAR_POP", TokenKind::Variance},
+        {"BIT_AND", TokenKind::BitAnd}, {"BIT_OR", TokenKind::BitOr}, {"JSON_AGG", TokenKind::JsonAgg}, {"FILTER", TokenKind::Filter},
+        {"LATERAL", TokenKind::Lateral},
         {"NTILE", TokenKind::Ntile}, {"PERCENT_RANK", TokenKind::PercentRank},
         {"CUME_DIST", TokenKind::CumeDist}, {"ROW_NUMBER", TokenKind::RowNumber},
         {"REGEXP", TokenKind::Regexp}, {"RLIKE", TokenKind::Regexp}, {"MERGE", TokenKind::Merge},

@@ -117,6 +117,20 @@ std::vector<std::pair<std::string, StatementPtr>> clone_cte_vec(
 
 } // namespace
 
+// LATERAL JOIN -- Rust 원본에 없음. subquery가 unique_ptr를 담으므로 명시적 깊은 복사가 필요
+// (SelectColumn과 동일한 패턴). clone_subquery_pair는 Select::subquery와 모양이 같아 그대로 재사용.
+Join::Join(const Join& other)
+    : table(other.table), on_expr(other.on_expr), join_type(other.join_type), using_cols(other.using_cols),
+      subquery(clone_subquery_pair(other.subquery)), lateral(other.lateral) {}
+
+Join& Join::operator=(const Join& other) {
+    if (this != &other) {
+        Join tmp(other);
+        *this = std::move(tmp);
+    }
+    return *this;
+}
+
 Statement::Statement(const Statement& other)
     : data(std::visit(
           [](const auto& alt) -> Data {

@@ -237,6 +237,165 @@ TEST_CASE("SUM/COUNT over a comparison expression", "[executor][select]") {
     REQUIRE(r2.value().find("2") != std::string::npos);
 }
 
+TEST_CASE("SELECT with BIT_AND/BIT_OR aggregate functions", "[executor][select]") {
+    TempDataDir dir("exec_sel_data_bitagg");
+    Executor ex(dir.path);
+    REQUIRE(ex.execute_sql("CREATE DATABASE company").is_ok());
+    REQUIRE(ex.execute_sql("USE company").is_ok());
+    REQUIRE(ex.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, flags INT)").is_ok());
+    REQUIRE(ex.execute_sql("INSERT INTO t VALUES (1,6),(2,3),(3,7)").is_ok()); // 110, 011, 111
+
+    auto and_r = ex.execute_sql("SELECT BIT_AND(flags) AS a FROM t");
+    REQUIRE(and_r.is_ok());
+    REQUIRE(and_r.value().find("| 2 ") != std::string::npos); // 110 & 011 & 111 = 010 = 2
+
+    auto or_r = ex.execute_sql("SELECT BIT_OR(flags) AS o FROM t");
+    REQUIRE(or_r.is_ok());
+    REQUIRE(or_r.value().find("| 7 ") != std::string::npos); // 110 | 011 | 111 = 111 = 7
+
+    // Per-group correctness (compute_aggregates is also called once per GROUP BY group).
+    REQUIRE(ex.execute_sql("CREATE TABLE g (id INT PRIMARY KEY, grp INT, flags INT)").is_ok());
+    REQUIRE(ex.execute_sql("INSERT INTO g VALUES (1,1,6),(2,1,2),(3,2,5),(4,2,1)").is_ok());
+    auto grouped = ex.execute_sql("SELECT grp, BIT_AND(flags) AS a FROM g GROUP BY grp ORDER BY grp");
+    REQUIRE(grouped.is_ok());
+    REQUIRE(grouped.value().find("2") != std::string::npos); // group 1: 6 & 2 = 2
+    REQUIRE(grouped.value().find("1") != std::string::npos); // group 2: 5 & 1 = 1
+}
+
+TEST_CASE("SELECT with FILTER (WHERE ...) narrows only that one aggregate", "[executor][select]") {
+    TempDataDir dir("exec_sel_data_aggfilter");
+    Executor ex(dir.path);
+    REQUIRE(ex.execute_sql("CREATE DATABASE company").is_ok());
+    REQUIRE(ex.execute_sql("USE company").is_ok());
+    REQUIRE(ex.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, status VARCHAR(10), val INT)").is_ok());
+    REQUIRE(ex.execute_sql("INSERT INTO t VALUES (1,'active',10),(2,'active',20),(3,'inactive',30)").is_ok());
+
+    // A filtered and an unfiltered aggregate in the SAME SELECT -- the filter must not
+    // leak into the unfiltered one (this is exactly what a shared, unfiltered `grp`
+    // reused across every SelectColumn in one compute_aggregates() call would get wrong).
+    auto r = ex.execute_sql("SELECT COUNT(*) AS total, COUNT(*) FILTER (WHERE status = 'active') AS active_count FROM t");
+    REQUIRE(r.is_ok());
+    REQUIRE(r.value().find("| 3 ") != std::string::npos); // total unaffected by the filter
+    REQUIRE(r.value().find("| 2 ") != std::string::npos); // active_count only counts the 2 active rows
+
+    auto sum_r = ex.execute_sql("SELECT SUM(val) FILTER (WHERE status = 'active') AS active_sum FROM t");
+    REQUIRE(sum_r.is_ok());
+    REQUIRE(sum_r.value().find("30") != std::string::npos); // 10 + 20, row 3 (val=30) excluded by the filter
+
+    // GROUP BY interaction: the filter applies within each group independently -- group 1
+    // has 3 active rows (a distinctive count), group 2 has zero (the filter should be able
+    // to legitimately produce 0, not silently fall back to the group's full unfiltered set).
+    REQUIRE(ex.execute_sql("CREATE TABLE g (id INT PRIMARY KEY, grp INT, status VARCHAR(10))").is_ok());
+    REQUIRE(ex.execute_sql("INSERT INTO g VALUES "
+                            "(1,1,'active'),(2,1,'active'),(3,1,'active'),(4,1,'inactive'),"
+                            "(5,2,'inactive'),(6,2,'inactive')")
+                .is_ok());
+    auto grouped = ex.execute_sql("SELECT grp, COUNT(*) FILTER (WHERE status = 'active') AS c FROM g GROUP BY grp ORDER BY grp");
+    REQUIRE(grouped.is_ok());
+    REQUIRE(grouped.value().find("2 row(s) returned.") != std::string::npos);
+    REQUIRE(grouped.value().find("| 1   | 3 |") != std::string::npos); // group 1: 3 active
+    REQUIRE(grouped.value().find("| 2   | 0 |") != std::string::npos); // group 2: 0 active
+}
+
+TEST_CASE("SELECT with JSON_AGG aggregate function", "[executor][select]") {
+    TempDataDir dir("exec_sel_data_jsonagg");
+    Executor ex(dir.path);
+    REQUIRE(ex.execute_sql("CREATE DATABASE company").is_ok());
+    REQUIRE(ex.execute_sql("USE company").is_ok());
+    REQUIRE(ex.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, val INT, label VARCHAR(10))").is_ok());
+    REQUIRE(ex.execute_sql("INSERT INTO t VALUES (1,10,'a'),(2,20,'b'),(3,30,NULL)").is_ok());
+
+    auto num_r = ex.execute_sql("SELECT JSON_AGG(val) AS j FROM t");
+    REQUIRE(num_r.is_ok());
+    REQUIRE(num_r.value().find("[10,20,30]") != std::string::npos); // clean integers, no ".0" suffix
+
+    auto str_r = ex.execute_sql("SELECT JSON_AGG(label) AS j FROM t");
+    REQUIRE(str_r.is_ok());
+    REQUIRE(str_r.value().find("\"a\"") != std::string::npos);
+    REQUIRE(str_r.value().find("\"b\"") != std::string::npos);
+    REQUIRE(str_r.value().find("null") != std::string::npos); // NULL label becomes JSON null
+}
+
+TEST_CASE("SELECT with JOIN LATERAL correlated subquery (INNER)", "[executor][select]") {
+    TempDataDir dir("exec_sel_data_lateral_inner");
+    Executor ex(dir.path);
+    REQUIRE(ex.execute_sql("CREATE DATABASE company").is_ok());
+    REQUIRE(ex.execute_sql("USE company").is_ok());
+    REQUIRE(ex.execute_sql("CREATE TABLE customers (id INT PRIMARY KEY, name VARCHAR(50))").is_ok());
+    REQUIRE(ex.execute_sql("CREATE TABLE orders (id INT PRIMARY KEY, customer_id INT, total INT)").is_ok());
+    REQUIRE(ex.execute_sql("INSERT INTO customers VALUES (1,'Alice'),(2,'Bob'),(3,'Carol')").is_ok());
+    REQUIRE(ex.execute_sql("INSERT INTO orders VALUES (1,1,100),(2,1,300),(3,1,200),(4,2,50)").is_ok());
+
+    // Carol has no orders -- INNER JOIN LATERAL must drop her row entirely.
+    auto r = ex.execute_sql(
+        "SELECT c.name, o.total FROM customers c JOIN LATERAL "
+        "(SELECT total FROM orders WHERE customer_id = c.id ORDER BY total DESC LIMIT 1) o ON 1=1");
+    REQUIRE(r.is_ok());
+    REQUIRE(r.value().find("Alice") != std::string::npos);
+    REQUIRE(r.value().find("300") != std::string::npos); // Alice's top order, per-row correlated re-eval
+    REQUIRE(r.value().find("Bob") != std::string::npos);
+    REQUIRE(r.value().find("50") != std::string::npos);
+    REQUIRE(r.value().find("Carol") == std::string::npos);
+}
+
+TEST_CASE("SELECT with LEFT JOIN LATERAL fills NULL when subquery returns no rows", "[executor][select]") {
+    TempDataDir dir("exec_sel_data_lateral_left");
+    Executor ex(dir.path);
+    REQUIRE(ex.execute_sql("CREATE DATABASE company").is_ok());
+    REQUIRE(ex.execute_sql("USE company").is_ok());
+    REQUIRE(ex.execute_sql("CREATE TABLE customers (id INT PRIMARY KEY, name VARCHAR(50))").is_ok());
+    REQUIRE(ex.execute_sql("CREATE TABLE orders (id INT PRIMARY KEY, customer_id INT, total INT)").is_ok());
+    REQUIRE(ex.execute_sql("INSERT INTO customers VALUES (1,'Alice'),(2,'Bob'),(3,'Carol')").is_ok());
+    REQUIRE(ex.execute_sql("INSERT INTO orders VALUES (1,1,100),(2,1,300),(3,1,200),(4,2,50)").is_ok());
+
+    auto r = ex.execute_sql(
+        "SELECT c.name, o.total FROM customers c LEFT JOIN LATERAL "
+        "(SELECT total FROM orders WHERE customer_id = c.id ORDER BY total DESC LIMIT 1) o ON 1=1");
+    REQUIRE(r.is_ok());
+    REQUIRE(r.value().find("3 row(s) returned") != std::string::npos); // Carol kept, unlike INNER
+    REQUIRE(r.value().find("Carol") != std::string::npos);
+    REQUIRE(r.value().find("NULL") != std::string::npos);
+}
+
+TEST_CASE("SELECT with CROSS JOIN LATERAL re-evaluates subquery per left row", "[executor][select]") {
+    TempDataDir dir("exec_sel_data_lateral_cross");
+    Executor ex(dir.path);
+    REQUIRE(ex.execute_sql("CREATE DATABASE company").is_ok());
+    REQUIRE(ex.execute_sql("USE company").is_ok());
+    REQUIRE(ex.execute_sql("CREATE TABLE customers (id INT PRIMARY KEY, name VARCHAR(50))").is_ok());
+    REQUIRE(ex.execute_sql("CREATE TABLE orders (id INT PRIMARY KEY, customer_id INT, total INT)").is_ok());
+    REQUIRE(ex.execute_sql("INSERT INTO customers VALUES (1,'Alice'),(2,'Bob'),(3,'Carol')").is_ok());
+    REQUIRE(ex.execute_sql("INSERT INTO orders VALUES (1,1,100),(2,1,300),(3,1,200),(4,2,50)").is_ok());
+
+    // CROSS JOIN LATERAL needs no ON clause; each left row gets its own subquery execution
+    // (Alice: 3 orders, Bob: 1 order, Carol: 0 orders -> 4 rows total).
+    auto r = ex.execute_sql(
+        "SELECT c.name, o.total FROM customers c CROSS JOIN LATERAL "
+        "(SELECT total FROM orders WHERE customer_id = c.id) o");
+    REQUIRE(r.is_ok());
+    REQUIRE(r.value().find("4 row(s) returned") != std::string::npos);
+    REQUIRE(r.value().find("Carol") == std::string::npos);
+}
+
+TEST_CASE("JOIN LATERAL rejects RIGHT/NATURAL/FULL join types", "[executor][select]") {
+    TempDataDir dir("exec_sel_data_lateral_reject");
+    Executor ex(dir.path);
+    REQUIRE(ex.execute_sql("CREATE DATABASE company").is_ok());
+    REQUIRE(ex.execute_sql("USE company").is_ok());
+    REQUIRE(ex.execute_sql("CREATE TABLE customers (id INT PRIMARY KEY, name VARCHAR(50))").is_ok());
+    REQUIRE(ex.execute_sql("CREATE TABLE orders (id INT PRIMARY KEY, customer_id INT, total INT)").is_ok());
+
+    REQUIRE(ex.execute_sql("SELECT c.name FROM customers c RIGHT JOIN LATERAL "
+                            "(SELECT total FROM orders WHERE customer_id = c.id) o ON 1=1")
+                .is_err());
+    REQUIRE(ex.execute_sql("SELECT c.name FROM customers c NATURAL JOIN LATERAL "
+                            "(SELECT total FROM orders WHERE customer_id = c.id) o")
+                .is_err());
+    REQUIRE(ex.execute_sql("SELECT c.name FROM customers c FULL JOIN LATERAL "
+                            "(SELECT total FROM orders WHERE customer_id = c.id) o ON 1=1")
+                .is_err());
+}
+
 TEST_CASE("SELECT with INNER JOIN", "[executor][select]") {
     TempDataDir dir("exec_sel_data_8");
     Executor ex(dir.path);

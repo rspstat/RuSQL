@@ -327,8 +327,13 @@ void from_json(const nlohmann::json& j, TriggerEvent& e) {
 }
 
 void to_json(nlohmann::json& j, const Join& join) {
+    // LATERAL JOIN -- Rust 원본에 없음. subquery는 Select::subquery(769/1011-1013번 줄)와
+    // 동일한 [stmt, alias] 2-원소 배열 관례를 그대로 따른다.
+    nlohmann::json sub = nullptr;
+    if (join.subquery) sub = nlohmann::json::array({*join.subquery->first, join.subquery->second});
     j = nlohmann::json{{"table", join.table}, {"on_expr", join.on_expr},
-                        {"join_type", join.join_type}, {"using_cols", join.using_cols}};
+                        {"join_type", join.join_type}, {"using_cols", join.using_cols},
+                        {"subquery", sub}, {"lateral", join.lateral}};
 }
 
 void from_json(const nlohmann::json& j, Join& join) {
@@ -336,6 +341,11 @@ void from_json(const nlohmann::json& j, Join& join) {
     j.at("on_expr").get_to(join.on_expr);
     j.at("join_type").get_to(join.join_type);
     j.at("using_cols").get_to(join.using_cols);
+    join.lateral = j.contains("lateral") && j.at("lateral").get<bool>();
+    if (j.contains("subquery") && !j.at("subquery").is_null()) {
+        auto sub_j = j.at("subquery");
+        join.subquery = std::make_pair(std::make_unique<Statement>(sub_j.at(0).get<Statement>()), sub_j.at(1).get<std::string>());
+    }
 }
 
 void to_json(nlohmann::json& j, const OrderBy& ob) {
@@ -375,6 +385,9 @@ void to_json(nlohmann::json& j, const AggFunc& f) {
                 j = nlohmann::json{{"CountCase", nlohmann::json{{"branches", alt.branches}, {"else_val", alt.else_val}}}};
             else if constexpr (std::is_same_v<T, AggFunc::SumCase>)
                 j = nlohmann::json{{"SumCase", nlohmann::json{{"branches", alt.branches}, {"else_val", alt.else_val}}}};
+            else if constexpr (std::is_same_v<T, AggFunc::BitAnd>) j = "BitAnd";
+            else if constexpr (std::is_same_v<T, AggFunc::BitOr>) j = "BitOr";
+            else if constexpr (std::is_same_v<T, AggFunc::JsonAgg>) j = "JsonAgg";
         },
         f.data);
 }
@@ -392,6 +405,9 @@ void from_json(const nlohmann::json& j, AggFunc& f) {
         else if (tag == "AvgDistinct") f = AggFunc::AvgDistinct{};
         else if (tag == "Stddev") f = AggFunc::Stddev{};
         else if (tag == "Variance") f = AggFunc::Variance{};
+        else if (tag == "BitAnd") f = AggFunc::BitAnd{};
+        else if (tag == "BitOr") f = AggFunc::BitOr{};
+        else if (tag == "JsonAgg") f = AggFunc::JsonAgg{};
         else throw std::runtime_error("unknown AggFunc tag: " + tag);
         return;
     }
@@ -592,9 +608,10 @@ void to_json(nlohmann::json& j, const SelectColumn& col) {
             else if constexpr (std::is_same_v<T, SelectColumn::ColumnAlias>)
                 j = nlohmann::json{{"ColumnAlias", nlohmann::json::array({alt.name, alt.alias})}};
             else if constexpr (std::is_same_v<T, SelectColumn::Agg>)
-                j = nlohmann::json{{"Agg", nlohmann::json{{"func", alt.func}, {"col", alt.col}}}};
+                j = nlohmann::json{{"Agg", nlohmann::json{{"func", alt.func}, {"col", alt.col}, {"filter", alt.filter}}}};
             else if constexpr (std::is_same_v<T, SelectColumn::AggAlias>)
-                j = nlohmann::json{{"AggAlias", nlohmann::json{{"func", alt.func}, {"col", alt.col}, {"alias", alt.alias}}}};
+                j = nlohmann::json{
+                    {"AggAlias", nlohmann::json{{"func", alt.func}, {"col", alt.col}, {"alias", alt.alias}, {"filter", alt.filter}}}};
             else if constexpr (std::is_same_v<T, SelectColumn::Func>)
                 j = nlohmann::json{{"Func", nlohmann::json{{"name", alt.name}, {"args", alt.args}, {"alias", alt.alias}}}};
             else if constexpr (std::is_same_v<T, SelectColumn::Expr>)
@@ -626,9 +643,16 @@ void from_json(const nlohmann::json& j, SelectColumn& col) {
     const auto& p = it.value();
     if (tag == "Column") col = SelectColumn(SelectColumn::Column{p.get<std::string>()});
     else if (tag == "ColumnAlias") col = SelectColumn(SelectColumn::ColumnAlias{p.at(0).get<std::string>(), p.at(1).get<std::string>()});
-    else if (tag == "Agg") col = SelectColumn(SelectColumn::Agg{p.at("func").get<AggFunc>(), p.at("col").get<std::string>()});
-    else if (tag == "AggAlias")
-        col = SelectColumn(SelectColumn::AggAlias{p.at("func").get<AggFunc>(), p.at("col").get<std::string>(), p.at("alias").get<std::string>()});
+    else if (tag == "Agg") {
+        std::optional<CondExpr> filter;
+        if (p.contains("filter")) filter = p.at("filter").get<std::optional<CondExpr>>();
+        col = SelectColumn(SelectColumn::Agg{p.at("func").get<AggFunc>(), p.at("col").get<std::string>(), filter});
+    } else if (tag == "AggAlias") {
+        std::optional<CondExpr> filter;
+        if (p.contains("filter")) filter = p.at("filter").get<std::optional<CondExpr>>();
+        col = SelectColumn(
+            SelectColumn::AggAlias{p.at("func").get<AggFunc>(), p.at("col").get<std::string>(), p.at("alias").get<std::string>(), filter});
+    }
     else if (tag == "Func")
         col = SelectColumn(SelectColumn::Func{p.at("name").get<std::string>(), p.at("args").get<std::vector<std::string>>(),
                                                p.at("alias").get<std::optional<std::string>>()});
