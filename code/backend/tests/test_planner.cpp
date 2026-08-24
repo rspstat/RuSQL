@@ -122,6 +122,45 @@ TEST_CASE("collect_eq_map extracts equality literals from an AND chain", "[plann
     REQUIRE(map.at("status") == "active");
 }
 
+TEST_CASE("Multi-join algorithm selection reflects accumulated cardinality, not the base table's row count",
+          "[planner]") {
+    // a has 1000 rows, but the first join (a JOIN b) is very selective (b has only 10 rows;
+    // with no NDV stats available, the equi-join row estimate falls back to
+    // min(left_rows, right_rows) = 10) -- so by the time the SECOND join (against c, 4 rows)
+    // picks its algorithm, the true left-hand cardinality flowing into it is ~10, not a's
+    // original 1000. If the planner still used a's base cardinality here, nl_cost=1000*4=4000
+    // would exceed hash_cost=(1000+4)*3=3012 and NestedLoop would NOT be chosen; using the
+    // correct accumulated ~10, nl_cost=10*4=40 stays under hash_cost=(10+4)*3=42, so
+    // NestedLoop IS chosen. Regression guard for PLAN.md's "다중 조인 알고리즘 선택이 누적
+    // 카디널리티 미반영".
+    std::vector<Row> a_rows, b_rows, c_rows;
+    for (int i = 0; i < 1000; i++) a_rows.push_back(row({{"id", "1"}}));
+    for (int i = 0; i < 10; i++) b_rows.push_back(row({{"id", "1"}}));
+    for (int i = 0; i < 4; i++) c_rows.push_back(row({{"id", "1"}}));
+    std::unordered_map<std::string, std::vector<Row>> tables = {{"a", a_rows}, {"b", b_rows}, {"c", c_rows}};
+    std::unordered_map<std::string, BPlusTree> indexes;
+    std::unordered_map<std::string, std::pair<std::string, std::string>> index_meta;
+    std::unordered_map<std::string, CompositeIndex> composite_indexes;
+    std::unordered_map<std::string, HashIndex> hash_indexes;
+    std::unordered_map<std::string, std::pair<std::string, std::string>> hash_index_meta;
+    Catalog catalog;
+    std::unordered_map<std::string, TableStats> stats; // NDV 통계 없음 -> min(left,right) 폴백 사용
+    Planner planner(tables, indexes, index_meta, composite_indexes, hash_indexes, hash_index_meta, catalog, stats);
+
+    auto ab_cond = CondExpr(CondExpr::Leaf{
+        Condition{ArithExpr(ArithExpr::Col{"a.x"}), Operator::Eq, ConditionValue(ConditionValue::Literal{"b.x"})}});
+    auto bc_cond = CondExpr(CondExpr::Leaf{
+        Condition{ArithExpr(ArithExpr::Col{"b.y"}), Operator::Eq, ConditionValue(ConditionValue::Literal{"c.y"})}});
+    std::vector<Join> joins;
+    joins.push_back(Join{"b", ab_cond, JoinType::Inner, {}});
+    joins.push_back(Join{"c", bc_cond, JoinType::Inner, {}});
+
+    SelectPlan plan = planner.plan("a", std::nullopt, joins);
+    REQUIRE(plan.joins.size() == 2);
+    REQUIRE(plan.joins[0].est_rows == 10); // min(1000, 10)
+    REQUIRE(std::holds_alternative<JoinAlgo::NestedLoop>(plan.joins[1].algo.data));
+}
+
 TEST_CASE("reorder_joins_greedy puts the smallest joinable table first", "[planner]") {
     std::unordered_map<std::string, std::vector<Row>> tables = {
         {"big", std::vector<Row>(100)},

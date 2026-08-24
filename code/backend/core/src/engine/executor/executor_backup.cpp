@@ -17,6 +17,16 @@ namespace engine {
 
 namespace {
 
+// exec_restore()의 재생 루프 동안만 Executor::skip_fk_checks를 켰다가, 루프가 정상 종료하든
+// (WAL/디스크 오류 등으로) 예외가 던져지든 항상 원래 값으로 되돌린다. 이 restore 세션 하나의
+// FK 검사만 끄고, 그 뒤 이 Executor로 실행되는 다른 문장에는 영향 없음.
+struct FkCheckSuppressGuard {
+    Executor& exec;
+    bool prev;
+    explicit FkCheckSuppressGuard(Executor& e) : exec(e), prev(e.skip_fk_checks) { exec.skip_fk_checks = true; }
+    ~FkCheckSuppressGuard() { exec.skip_fk_checks = prev; }
+};
+
 // PLAN.md (section D): BACKUP/RESTORE used to pass the user-supplied filename straight
 // to std::ofstream/ifstream with no validation -- arbitrary file write (BACKUP) / read+
 // execute-as-SQL (RESTORE) anywhere the server process can reach. Only a bare filename
@@ -256,6 +266,13 @@ StringResult Executor::exec_restore(SharedDatabase& s, std::string source_file, 
     if (database) current_db = to_lower_str(*database);
 
     std::size_t stmts_ok = 0, stmts_err = 0;
+
+    // BACKUP은 테이블을 알파벳순으로, 각 테이블의 행은 물리 벡터 순서로 덤프한다 -- 어느
+    // 쪽도 FK(특히 자기참조 FK) 의존성 순서를 보장하지 않아, 정상적으로 일관된 덤프라도
+    // FK 검사를 켠 채 그대로 재생하면 "아직 재생 안 된 부모 행을 참조하는 자식 행"에서
+    // 거짓 FK 위반이 난다(실제 mysqldump 재생 시 SET FOREIGN_KEY_CHECKS=0으로 우회하는
+    // 것과 동일한 문제). RESTORE 재생 구간에서만 FK 검사를 끈다.
+    FkCheckSuppressGuard fk_guard(*this);
 
     std::size_t start = 0;
     while (start <= sql_text.size()) {

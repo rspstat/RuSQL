@@ -201,6 +201,15 @@ public:
     // this after a successful AUTH handshake; defaults to "root" for the CLI/in-process
     // embedding, which has no network auth step of its own). Read by USER()/CURRENT_USER().
     std::string auth_user = "root";
+    // exec_restore()-only escape hatch (executor_backup.cpp) -- NOT a general SQL feature
+    // (there's no SET FOREIGN_KEY_CHECKS statement). A backup dumps tables alphabetically
+    // and rows in physical vector order, neither of which is guaranteed to respect
+    // FK/self-referential-FK dependency order; replaying INSERTs with FK checks on can
+    // therefore reject rows whose referenced row simply hasn't been replayed yet, even
+    // though the full dump is internally consistent. Set for the duration of a single
+    // restore's replay loop via an RAII guard, exactly like mysql.exe's dump format
+    // bracketing itself with SET FOREIGN_KEY_CHECKS=0/1.
+    bool skip_fk_checks = false;
 
     Executor() : Executor("data", 64) {}
     explicit Executor(std::size_t buffer_pool_capacity) : Executor("data", buffer_pool_capacity) {}

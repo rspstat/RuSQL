@@ -514,6 +514,7 @@ StringResult Executor::exec_insert_inner(SharedDatabase& s, const std::string& t
         row["_xmax"] = "0";
 
         for (auto& col : schema.columns) {
+            if (skip_fk_checks) break; // exec_restore()만 사용 -- executor.hpp의 필드 주석 참고
             if (!col.foreign_key) continue;
             auto it = row.find(col.name);
             std::string val = it != row.end() ? it->second : std::string();

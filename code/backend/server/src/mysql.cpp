@@ -30,11 +30,13 @@ namespace {
 constexpr std::uint8_t COM_QUIT = 0x01;
 constexpr std::uint8_t COM_INIT_DB = 0x02;
 constexpr std::uint8_t COM_QUERY = 0x03;
+constexpr std::uint8_t COM_CHANGE_USER = 0x11;
 constexpr std::uint8_t COM_PING = 0x0e;
 constexpr std::uint8_t COM_STMT_PREPARE = 0x16;
 constexpr std::uint8_t COM_STMT_EXECUTE = 0x17;
 constexpr std::uint8_t COM_STMT_CLOSE = 0x19;
 constexpr std::uint8_t COM_STMT_RESET = 0x1a;
+constexpr std::uint8_t COM_RESET_CONNECTION = 0x1f;
 
 // Server capability flags advertised to clients
 constexpr std::uint32_t CAPS = 0x0001 |       // CLIENT_LONG_PASSWORD
@@ -1200,6 +1202,81 @@ void handle_mysql_client(SOCKET sock, std::shared_ptr<RwLock<SharedDatabase>> sh
                 break;
             }
             case COM_STMT_RESET: {
+                write_packet(sock, 1, ok_pkt(0));
+                break;
+            }
+            case COM_CHANGE_USER: {
+                // 페이로드: username\0 auth-response database\0 [charset(2)] [plugin\0] [attrs...]
+                // auth-response 길이 인코딩은 최초 핸드셰이크와 동일하게 client_caps의
+                // CLIENT_SECURE_CONNECTION(0x8000) 여부로 결정 -- 같은 연결의 원본 nonce를 그대로
+                // 재사용해 검증한다(MySQL 프로토콜 스펙: COM_CHANGE_USER는 새 핸드셰이크 없이
+                // 기존 nonce로 재인증). 커넥션 풀 재사용 목적엔 불필요한 플러그인명/연결
+                // 속성은 파싱하지 않는다.
+                auto find_nul_at = [&](std::size_t from) -> std::size_t {
+                    for (std::size_t i = from; i < payload.size(); i++) {
+                        if (payload[i] == 0) return i;
+                    }
+                    return payload.size();
+                };
+                std::size_t cp = 1;
+                std::size_t cuend = find_nul_at(cp);
+                std::string new_user(reinterpret_cast<const char*>(payload.data() + cp), cuend - cp);
+                cp = cuend + 1;
+
+                std::vector<std::uint8_t> new_auth;
+                if (client_caps & 0x8000) {
+                    std::size_t auth_len = cp < payload.size() ? payload[cp] : 0;
+                    cp += 1;
+                    std::size_t avail = cp < payload.size() ? payload.size() - cp : 0;
+                    std::size_t take = std::min(auth_len, avail);
+                    new_auth.assign(payload.begin() + static_cast<std::ptrdiff_t>(cp),
+                                     payload.begin() + static_cast<std::ptrdiff_t>(cp + take));
+                    cp += auth_len;
+                } else {
+                    std::size_t end = find_nul_at(cp);
+                    new_auth.assign(payload.begin() + static_cast<std::ptrdiff_t>(cp), payload.begin() + static_cast<std::ptrdiff_t>(end));
+                    cp = end + 1;
+                }
+
+                std::string new_db;
+                if (cp < payload.size()) {
+                    std::size_t end = find_nul_at(cp);
+                    new_db.assign(reinterpret_cast<const char*>(payload.data() + cp), end - cp);
+                }
+
+                bool reauth_ok =
+                    shared->read()->verify_mysql_native_password(new_user, std::vector<std::uint8_t>(nonce.begin(), nonce.end()), new_auth);
+                if (!reauth_ok) {
+                    write_packet(sock, 1, err_pkt("Access denied for user '" + new_user + "'"));
+                    break;
+                }
+
+                // 이전 사용자의 미완료 트랜잭션이 새 사용자 컨텍스트로 넘어가지 않도록 롤백.
+                if (exec.txn.is_active()) {
+                    auto ignore_ = exec_query(exec, "ROLLBACK");
+                    (void)ignore_;
+                }
+                exec.deregister_process();
+                exec.auth_user = new_user;
+                exec.register_process(new_user, peer);
+                if (!new_db.empty()) {
+                    auto ignore_ = exec_query(exec, "USE " + new_db);
+                    (void)ignore_;
+                }
+                stmts.clear();
+                next_stmt_id = 1;
+                write_packet(sock, 1, ok_pkt(0));
+                break;
+            }
+            case COM_RESET_CONNECTION: {
+                // 사용자·DB는 그대로 유지, 세션 상태만 초기화(커넥션 풀이 재사용 전 "깨끗한"
+                // 연결을 원할 때 씀 -- 재인증 없이 미완료 트랜잭션·prepared statement만 정리).
+                if (exec.txn.is_active()) {
+                    auto ignore_ = exec_query(exec, "ROLLBACK");
+                    (void)ignore_;
+                }
+                stmts.clear();
+                next_stmt_id = 1;
                 write_packet(sock, 1, ok_pkt(0));
                 break;
             }

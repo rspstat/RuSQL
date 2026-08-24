@@ -25,6 +25,17 @@ std::optional<std::uint64_t> read_u64_le(const std::vector<std::uint8_t>& buf, s
     for (int i = 0; i < 8; i++) v |= static_cast<std::uint64_t>(buf[pos + static_cast<std::size_t>(i)]) << (8 * i);
     return v;
 }
+// FNV-1a 32비트 -- wal.cpp의 동일 헬퍼와 같은 이유로 여기도 중복 정의(이 파일 전체의 기존
+// 관례). 디스크 손상으로 Undo 레코드 내용은 바뀌었지만 길이 프리픽스는 우연히 그대로인 경우를
+// decode()가 명시적으로 감지하도록 함.
+std::uint32_t fnv1a32(const std::uint8_t* data, std::size_t len) {
+    std::uint32_t h = 2166136261u;
+    for (std::size_t i = 0; i < len; i++) {
+        h ^= data[i];
+        h *= 16777619u;
+    }
+    return h;
+}
 std::uint64_t parse_txn_id(const Row& row, const char* col) {
     auto it = row.find(col);
     if (it == row.end()) return 0;
@@ -101,10 +112,12 @@ std::vector<std::uint8_t> UndoLogFile::encode(const UndoEntry& entry) {
     } else {
         buf.push_back(0);
     }
+    push_u32_le(buf, fnv1a32(buf.data(), buf.size())); // 체크섬은 그 앞의 전체 레코드 바이트를 커버
     return buf;
 }
 
 std::optional<UndoEntry> UndoLogFile::decode(const std::vector<std::uint8_t>& buf, std::size_t& pos) {
+    std::size_t start = pos;
     if (pos >= buf.size()) return std::nullopt;
     std::uint8_t op_byte = buf[pos];
     pos += 1;
@@ -130,6 +143,13 @@ std::optional<UndoEntry> UndoLogFile::decode(const std::vector<std::uint8_t>& bu
         old_data = read_string(buf, pos);
         if (!old_data) return std::nullopt;
     }
+
+    auto stored_checksum = read_u32_le(buf, pos);
+    if (!stored_checksum) return std::nullopt;
+    std::uint32_t actual = fnv1a32(buf.data() + start, pos - start);
+    if (actual != *stored_checksum) return std::nullopt; // 손상 감지 -- 기존과 동일하게 이 지점에서 중단
+    pos += 4;
+
     return UndoEntry{*txn_id, operation, *table, *key, old_data};
 }
 

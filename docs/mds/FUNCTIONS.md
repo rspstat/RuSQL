@@ -194,6 +194,7 @@
 - [x] WAL (Write-Ahead Logging) — 바이너리 redo log
 - [x] WAL Group Commit — 여러 세션의 COMMIT을 단일 fsync로 묶어 TPS 향상, SharedDatabase 락 해제 후 fsync
 - [x] WAL fsync per-commit — COMMIT 레코드 기록 시 `sync_all()` 호출 (`innodb_flush_log_at_trx_commit=1` 동등, 전원 장애 시 커밋 유실 방지)
+- [x] WAL/Undo 레코드 체크섬 — 각 레코드 끝에 FNV-1a 32비트 체크섬 추가, decode 시 불일치하면 손상을 명시적으로 감지해 해당 지점에서 안전하게 중단(내용만 손상되고 길이 프레이밍은 멀쩡한 경우를 이전엔 조용히 정상으로 오인)
 - [x] **WAL/Undo Log 세션 간 트랜잭션 격리** — 전역 유일 트랜잭션 ID(`txn_id`, `TxnIoShared`로 모든 세션이 공유하는 원자적 카운터에서 발급)를 모든 WAL 레코드·Undo 엔트리에 태깅; COMMIT/ROLLBACK/ABORT는 파일 전체 삭제 대신 자기 트랜잭션 레코드만 제거(`remove_txn`)해 같은 data_dir을 공유하는 다른 세션의 진행 중인 트랜잭션 기록을 보존; `lock_mgr`/`_xmin` 태깅도 동일 전역 ID를 사용해 세션 간 잠금 ID 충돌 문제도 함께 해소
 - [x] BEGIN / COMMIT / ROLLBACK
 - [x] SAVEPOINT / ROLLBACK TO SAVEPOINT (Undo Log 기반 content-matching undo — 같은 키가 한 트랜잭션 안에서 여러 번 갱신돼도 정확한 시점으로 복원; 디스크 Undo Log는 `rewrite_txn`으로 이 트랜잭션 몫만 교체, 다른 세션 엔트리는 보존)
@@ -340,7 +341,7 @@
 - [x] AUTH 핸드셰이크 — 배너의 `NONCE <hex>` 줄로 연결별 20바이트 챌린지 전송, 클라이언트가 `AUTH user <hex_token>`으로 mysql_native_password 방식 챌린지-응답 전송(MySQL 프로토콜과 동일한 검증 로직 재사용) — 비밀번호 평문이 와이어에 전혀 실리지 않음
 - [x] 기본 사용자 자동 생성 — users가 비어있으면 root/root 자동 생성 (`ensure_default_user`)
 - [x] SHOW PROCESSLIST — `ProcessInfo` 구조체 + `process_list: Arc<Mutex<...>>` 실제 활성 세션 추적 (세션 등록/갱신/해제)
-- [x] MySQL wire protocol (포트 3306) — COM_QUERY / COM_PING / COM_INIT_DB / COM_STMT_PREPARE / COM_STMT_EXECUTE / COM_STMT_CLOSE / COM_STMT_RESET
+- [x] MySQL wire protocol (포트 3306) — COM_QUERY / COM_PING / COM_INIT_DB / COM_STMT_PREPARE / COM_STMT_EXECUTE / COM_STMT_CLOSE / COM_STMT_RESET / COM_CHANGE_USER / COM_RESET_CONNECTION (커넥션 풀 드라이버용, 같은 연결에서 재인증/세션 초기화 — 실제 pymysql 클라이언트로 라이브 검증)
 - [x] **mysql_native_password 인증 구현** — 연결별 20바이트 nonce 생성, SHA1(password) XOR SHA1(nonce||SHA1(SHA1(pw))) 챌린지-응답 검증, UserRecord에 `mysql_native_hash`(SHA1(SHA1(pw))) 저장, 레거시 사용자(hash 없음) 자동 거부
 - [x] MySQL 세션 process_list 등록 — MySQL 프로토콜 연결도 SHOW PROCESSLIST에 표시
 - [x] **parse_table 탭 구분 형식 지원** — SHOW DATABASES/TABLES, SELECT, DESCRIBE 등 탭 구분 출력을 MySQL result set으로 정상 변환 (기존 박스 형식도 유지)
@@ -364,7 +365,7 @@
 ### 전용 클라이언트 (rusql-client)
 - [x] rusql-server native 프로토콜 전용 TCP 클라이언트
 - [x] CLI 옵션: `-u user` / `-p password` / `-h host` / `-P port` (기본: root/root@127.0.0.1:7878)
-- [x] 멀티라인 SQL 입력 — 세미콜론(`;`)으로 실행 트리거, 주석/문자열 내 `;` 제외 계산
+- [x] 멀티라인 SQL 입력 — 세미콜론(`;`)으로 실행 트리거, 주석/문자열 내 `;` 제외 계산, BEGIN...END 안쪽(프로시저·트리거 본문)의 `;`도 깊이 추적으로 제외해 조기 전송·응답 개수 불일치(hang) 방지
 - [x] ANSI 컬러 출력 (빨강: 에러, 초록: 성공, 청록: 프롬프트)
 - [x] `\status` — 서버 uptime · 연결 수 조회
 - [x] `\help` — 사용 가능한 명령 안내

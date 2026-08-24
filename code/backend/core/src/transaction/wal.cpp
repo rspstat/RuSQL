@@ -40,6 +40,18 @@ std::optional<std::string> read_string(const std::vector<std::uint8_t>& buf, std
     pos += len;
     return s;
 }
+// FNV-1a 32비트 -- 룩업 테이블 없이 몇 줄로 계산 가능한 가벼운 비암호화 해시. WAL 레코드 하나가
+// 디스크 손상(예: 섹터 일부만 쓰기 실패)으로 내용은 바뀌었지만 길이 프리픽스는 우연히 그대로인
+// 경우, 기존 decode()는 이를 감지할 방법이 전혀 없어 손상된 데이터를 조용히 정상 레코드로 받아
+// 들였다 -- 이제 레코드 인코딩 끝에 이 체크섬을 붙여 decode()가 명시적으로 검증한다.
+std::uint32_t fnv1a32(const std::uint8_t* data, std::size_t len) {
+    std::uint32_t h = 2166136261u;
+    for (std::size_t i = 0; i < len; i++) {
+        h ^= data[i];
+        h *= 16777619u;
+    }
+    return h;
+}
 bool read_all_bytes(const std::string& path, std::vector<std::uint8_t>& out) {
     std::ifstream f(path, std::ios::binary);
     if (!f) return false;
@@ -93,10 +105,12 @@ std::vector<std::uint8_t> WalManager::encode(const WalRecord& record) {
     buf.insert(buf.end(), record.key.begin(), record.key.end());
     push_u32_le(buf, static_cast<std::uint32_t>(record.data.size()));
     buf.insert(buf.end(), record.data.begin(), record.data.end());
+    push_u32_le(buf, fnv1a32(buf.data(), buf.size())); // 체크섬은 그 앞의 전체 레코드 바이트를 커버
     return buf;
 }
 
 std::optional<WalRecord> WalManager::decode(const std::vector<std::uint8_t>& buf, std::size_t& pos) {
+    std::size_t start = pos;
     if (pos >= buf.size()) return std::nullopt;
     auto op = wal_op_from_u8(buf[pos]);
     if (!op) return std::nullopt;
@@ -112,6 +126,12 @@ std::optional<WalRecord> WalManager::decode(const std::vector<std::uint8_t>& buf
     if (!key) return std::nullopt;
     auto data = read_string(buf, pos);
     if (!data) return std::nullopt;
+
+    auto stored_checksum = read_u32_le(buf, pos);
+    if (!stored_checksum) return std::nullopt;
+    std::uint32_t actual = fnv1a32(buf.data() + start, pos - start);
+    if (actual != *stored_checksum) return std::nullopt; // 손상 감지 -- 기존과 동일하게 이 지점에서 중단
+    pos += 4;
 
     return WalRecord{*op, *txn_id, *table_name, *key, *data};
 }

@@ -50,7 +50,17 @@ SelectPlan Planner::plan(const std::string& table, const std::optional<CondExpr>
     TablePlan base = plan_table(table, condition);
     std::vector<JoinPlan> join_plans;
     join_plans.reserve(joins.size());
-    for (auto& j : joins) join_plans.push_back(plan_join(base, j));
+    // 2번째 이후 조인의 알고리즘 선택(Hash/SortMerge/IndexNL/NestedLoop)이 매번 원본 base 테이블의
+    // 행 수만 보고 결정되던 버그 수정 -- current.est_rows를 매 조인 후 누적 갱신해 실제 중간 결과
+    // 크기를 반영한다. current.table은 일부러 base.table 그대로 유지: estimate_join_output의
+    // NDV(고유값 개수) 조회가 원래도 좌변을 "원본 테이블 하나"로만 다뤄왔던 기존 한계라 이 수정
+    // 범위 밖(중간 결과 자체의 컬럼 통계는 추적하지 않음) -- 카디널리티(행 수)만 정확해진다.
+    TablePlan current = base;
+    for (auto& j : joins) {
+        JoinPlan jp = plan_join(current, j);
+        current.est_rows = jp.est_rows;
+        join_plans.push_back(std::move(jp));
+    }
     return SelectPlan{std::move(base), std::move(join_plans)};
 }
 

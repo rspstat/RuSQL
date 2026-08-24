@@ -211,6 +211,45 @@ TEST_CASE("WAL encode/decode round trip with txn_id", "[txn][wal]") {
     REQUIRE(decoded->op == WalOp::Insert);
 }
 
+TEST_CASE("WAL decode rejects a record whose content was corrupted without breaking its length framing",
+          "[txn][wal]") {
+    // 손상이 길이 프리픽스가 아니라 문자열 "내용" 바이트를 건드리면, 체크섬 없이는 프레이밍이
+    // 그대로 유효해 보여 decode()가 손상된 데이터를 조용히 정상 레코드로 받아들였다. 체크섬
+    // 도입 후엔 이런 경우를 명시적으로 감지해 nullopt를 반환해야 한다(PLAN.md: "WAL/Undo
+    // 디코딩이 체크섬 없음").
+    WalRecord record{WalOp::Insert, 42, "t", "k1", "{\"a\":1}"};
+    auto encoded = WalManager::encode(record);
+
+    // data 필드("{\"a\":1}") 안의 한 바이트를 플립 -- 길이는 그대로라 프레이밍은 안 깨짐.
+    auto data_pos = std::string(encoded.begin(), encoded.end()).find("{\"a\":1}");
+    REQUIRE(data_pos != std::string::npos);
+    encoded[data_pos] ^= 0xFF;
+
+    std::size_t pos = 0;
+    auto decoded = WalManager::decode(encoded, pos);
+    REQUIRE_FALSE(decoded.has_value());
+}
+
+TEST_CASE("UndoLogFile encode/decode round trip, and rejects content-corrupted entries", "[txn][wal]") {
+    UndoEntry entry{7, "UPDATE", "t", "k1", std::optional<std::string>("{\"a\":1}")};
+    auto encoded = UndoLogFile::encode(entry);
+
+    std::size_t pos = 0;
+    auto decoded = UndoLogFile::decode(encoded, pos);
+    REQUIRE(decoded.has_value());
+    REQUIRE(decoded->txn_id == 7);
+    REQUIRE(decoded->operation == "UPDATE");
+    REQUIRE(decoded->table == "t");
+    REQUIRE(decoded->key == "k1");
+    REQUIRE(decoded->old_data == "{\"a\":1}");
+
+    auto data_pos = std::string(encoded.begin(), encoded.end()).find("{\"a\":1}");
+    REQUIRE(data_pos != std::string::npos);
+    encoded[data_pos] ^= 0xFF;
+    pos = 0;
+    REQUIRE_FALSE(UndoLogFile::decode(encoded, pos).has_value());
+}
+
 TEST_CASE("remove_txn preserves other transactions in WAL", "[txn][wal]") {
     auto dir = test_dir("wal_remove_preserve");
     auto io = std::make_shared<TxnIoShared>();
