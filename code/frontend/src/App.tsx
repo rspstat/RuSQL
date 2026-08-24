@@ -61,7 +61,7 @@ interface ColumnDetail {
   default_val: string | null;
   fk_ref: string | null;
 }
-type ActiveView = "editor" | "erd" | "server";
+type ActiveView = "editor" | "erd" | "server" | "ai";
 const PAGE_SIZE = 100;
 
 // ─── ERD 타입/상수 ────────────────────────────────────────────
@@ -1998,6 +1998,16 @@ function App() {
           )}
         </div>
 
+        {/* AI */}
+        <div
+          className={`activity-icon ${activeView === "ai" ? "active" : ""}`}
+          title="AI"
+          onClick={() => setActiveView("ai")}
+        >
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor">
+            <path d="M12 2l1.8 5.6L19.4 9.4 13.8 11.2 12 16.8 10.2 11.2 4.6 9.4l5.6-1.8L12 2zM19 13l.9 2.8L22.7 16.7 19.9 17.6 19 20.4 18.1 17.6 15.3 16.7 18.1 15.8 19 13zM5.5 14l.7 2.1L8.3 16.8 6.2 17.5 5.5 19.6 4.8 17.5 2.7 16.8 4.8 16.1 5.5 14z"/>
+          </svg>
+        </div>
 
         <div className="activity-bar-bottom">
           <div className="activity-icon" title="Account">
@@ -4179,6 +4189,10 @@ function App() {
             </div>
           </div>
         </div>
+      )}
+
+      {activeView === "ai" && (
+        <div className="ai-view" />
       )}
 
       </div> {/* app-body */}

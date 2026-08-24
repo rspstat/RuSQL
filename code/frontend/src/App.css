@@ -2043,6 +2043,13 @@ body {
   min-width: 0;
 }
 
+.ai-view {
+  flex: 1;
+  background: #1e1e1e;
+  overflow: hidden;
+  min-width: 0;
+}
+
 /* 메인 영역: 좌측 + 슬라이드 패널 + 우측 버튼바 */
 .srv-main-area {
   flex: 1;
