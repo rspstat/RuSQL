@@ -170,6 +170,40 @@ TEST_CASE("gap_lock_rows formats ranges and is sorted", "[lock_manager][gap_lock
     REQUIRE(std::get<1>(rows[1]) == "[10, 20)");
 }
 
+TEST_CASE("register_predicate_read never conflicts and predicate_reads_for returns it", "[lock_manager][predicate_lock]") {
+    LockManager lm;
+    lm.register_predicate_read("t", "10", true, "20", true, 1);
+    lm.register_predicate_read("t", "15", true, "25", true, 2); // overlapping range, different txn -- fine
+    auto reads = lm.predicate_reads_for("t");
+    REQUIRE(reads.size() == 2);
+}
+
+TEST_CASE("predicate_reads_for returns empty for untouched table", "[lock_manager][predicate_lock]") {
+    LockManager lm;
+    REQUIRE(lm.predicate_reads_for("nope").empty());
+}
+
+TEST_CASE("flag_predicate_violation/take_predicate_violation round-trip exactly once", "[lock_manager][predicate_lock]") {
+    LockManager lm;
+    REQUIRE_FALSE(lm.take_predicate_violation(1)); // nothing flagged yet
+    lm.flag_predicate_violation(1);
+    REQUIRE(lm.take_predicate_violation(1)); // consumes it
+    REQUIRE_FALSE(lm.take_predicate_violation(1)); // already consumed
+}
+
+TEST_CASE("release sweeps predicate reads and any pending violation flag for the released txn only",
+          "[lock_manager][predicate_lock]") {
+    LockManager lm;
+    lm.register_predicate_read("t", "1", true, "10", true, 1);
+    lm.register_predicate_read("t", "5", true, "15", true, 2);
+    lm.flag_predicate_violation(1);
+    lm.release(1);
+    auto reads = lm.predicate_reads_for("t");
+    REQUIRE(reads.size() == 1);
+    REQUIRE(reads[0].holder == 2);
+    REQUIRE_FALSE(lm.take_predicate_violation(1)); // cleared by release(), not just consumed
+}
+
 // Row-level-concurrency prep: RowClaimGuard is the release point for autocommit-scoped
 // (one-off id) claims, since autocommit statements have no COMMIT/ROLLBACK of their own
 // to call release() at. Not wired into any executor code yet at this stage -- these

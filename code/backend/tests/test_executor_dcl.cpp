@@ -306,6 +306,31 @@ TEST_CASE("ANALYZE TABLE collects column statistics", "[executor][dcl]") {
     REQUIRE(stats.columns.at("val").max_val == "300");
 }
 
+TEST_CASE("ANALYZE TABLE collects a most-common-values list for a skewed column", "[executor][dcl]") {
+    TempDataDir dir("exec_dcl_data_9b");
+    Executor ex(dir.path);
+    REQUIRE(ex.execute_sql("CREATE DATABASE company").is_ok());
+    REQUIRE(ex.execute_sql("USE company").is_ok());
+    REQUIRE(ex.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, status VARCHAR(20))").is_ok());
+    for (int i = 1; i <= 8; i++) {
+        REQUIRE(ex.execute_sql("INSERT INTO t VALUES (" + std::to_string(i) + ", 'active')").is_ok());
+    }
+    REQUIRE(ex.execute_sql("INSERT INTO t VALUES (9, 'inactive')").is_ok());
+    REQUIRE(ex.execute_sql("INSERT INTO t VALUES (10, 'pending')").is_ok());
+
+    auto r = ex.execute_sql("ANALYZE TABLE t");
+    REQUIRE(r.is_ok());
+    REQUIRE(r.value().find("Most common values") != std::string::npos);
+    REQUIRE(r.value().find("active (8)") != std::string::npos);
+
+    auto s = ex.get_shared()->read();
+    auto& status_stats = s->table_stats.at("company.t").columns.at("status");
+    REQUIRE(status_stats.distinct_count == 3);
+    REQUIRE(status_stats.mcv.size() == 1); // 'inactive'/'pending' each appear once -- not "common"
+    REQUIRE(status_stats.mcv[0].first == "active");
+    REQUIRE(status_stats.mcv[0].second == 8);
+}
+
 TEST_CASE("SHOW PROCESSLIST includes the current session", "[executor][dcl]") {
     TempDataDir dir("exec_dcl_data_10");
     Executor ex(dir.path);

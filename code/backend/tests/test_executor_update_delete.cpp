@@ -384,7 +384,7 @@ TEST_CASE("UPDATE keeps a composite (multi-column) secondary index consistent, n
     REQUIRE(upd.is_ok());
 
     auto s = ex.get_shared()->read();
-    auto& ci = s->composite_indexes.at("idx_dept_sal");
+    auto& ci = s->composite_indexes.at("company.emp_idx_dept_sal");
     REQUIRE_FALSE(ci.search_exact({"10", "1000"}).has_value());
     REQUIRE(ci.search_exact({"30", "3000"}).has_value());
     REQUIRE(ci.search_exact({"20", "2000"}).has_value()); // untouched row still present
@@ -404,7 +404,7 @@ TEST_CASE("DELETE removes the row's entry from a composite (multi-column) second
     REQUIRE(del.is_ok());
 
     auto s = ex.get_shared()->read();
-    auto& ci = s->composite_indexes.at("idx_dept_sal");
+    auto& ci = s->composite_indexes.at("company.emp_idx_dept_sal");
     REQUIRE_FALSE(ci.search_exact({"10", "1000"}).has_value());
     REQUIRE(ci.search_exact({"20", "2000"}).has_value());
 }

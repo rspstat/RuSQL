@@ -61,6 +61,74 @@ struct TriggerDepthGuard {
 
 } // namespace
 
+bool Executor::index_or_scan_exists(const SharedDatabase& s, const std::string& table, const std::vector<Row>& table_rows,
+                                      const std::string& column, const std::string& val, const std::function<bool(const Row&)>& accept) {
+    // PK index: keyed directly by table name, single-column PK only. PK values are unique
+    // by definition, so a miss (or an `accept` rejection of the sole hit) here is final --
+    // no other row could possibly also have this PK value.
+    //
+    // NOTE: `TableSchema::primary_key_columns` is NOT the right field to check here -- it's
+    // only populated from an explicit table-level `PRIMARY KEY (a, b)` constraint clause
+    // (see exec_create's `has_explicit_pk = !primary_key_columns.empty()`, executor_ddl.cpp),
+    // so it's empty for the overwhelmingly common inline case (`id INT PRIMARY KEY`) even
+    // though that IS a single-column PK. Detecting it correctly means scanning each
+    // ColumnDef's own `primary_key` flag and counting, exactly like the pre-existing
+    // FOR-UPDATE/UNIQUE-check code elsewhere in this file already does.
+    std::string schema_pk_col;
+    std::size_t schema_pk_count = 0;
+    if (const auto* schema = s.catalog.get_table(table)) {
+        for (auto& c : schema->columns) {
+            if (c.primary_key) {
+                if (schema_pk_count == 0) schema_pk_col = c.name;
+                schema_pk_count++;
+            }
+        }
+    }
+    if (schema_pk_count == 1 && schema_pk_col == column) {
+        if (auto idx_it = s.indexes.find(table); idx_it != s.indexes.end()) {
+            if (auto j = idx_it->second.search(val); j && !j->empty()) {
+                try {
+                    return accept(nlohmann::json::parse(*j).get<Row>());
+                } catch (...) {
+                }
+            }
+            return false;
+        }
+    }
+    // Secondary B+Tree index: stores only one value per key, so it can positively confirm a
+    // match but can't rule one out for a non-unique column -- fall through to the next index
+    // type (or the linear scan) rather than returning false when it comes up empty/rejected.
+    for (auto& [idx_key, meta] : s.index_meta) {
+        if (meta.first != table || meta.second != column) continue;
+        if (auto idx_it = s.indexes.find(idx_key); idx_it != s.indexes.end()) {
+            if (auto j = idx_it->second.search(val); j && !j->empty()) {
+                try {
+                    if (accept(nlohmann::json::parse(*j).get<Row>())) return true;
+                } catch (...) {
+                }
+            }
+        }
+        break;
+    }
+    // Hash index: the bucket already holds every physical row sharing this value, so it's
+    // authoritative either way.
+    for (auto& [idx_key, meta] : s.hash_index_meta) {
+        if (meta.first != table || meta.second != column) continue;
+        if (auto hit = s.hash_indexes.find(idx_key); hit != s.hash_indexes.end()) {
+            for (auto& r : hit->second.get(val)) {
+                if (accept(r)) return true;
+            }
+            return false;
+        }
+    }
+    // No index covers this column -- linear scan, exactly the pre-existing behavior.
+    for (auto& r : table_rows) {
+        auto it = r.find(column);
+        if (it != r.end() && it->second == val && accept(r)) return true;
+    }
+    return false;
+}
+
 StringResult Executor::fire_triggers(SharedDatabase& s, const std::string& table, const std::string& timing, const std::string& event) {
     if (trigger_depth_ >= TRIGGER_MAX_DEPTH) {
         return StringResult::Err("Trigger recursion exceeded maximum depth (" + std::to_string(TRIGGER_MAX_DEPTH) + ")");
@@ -441,7 +509,7 @@ StringResult Executor::exec_insert_inner(SharedDatabase& s, const std::string& t
                             std::string hi_key;
                             for (auto& [name, meta] : s.hash_index_meta) {
                                 if (meta.first == table && meta.second == col_names[i]) {
-                                    hi_key = table + "_" + name;
+                                    hi_key = name;
                                     break;
                                 }
                             }
@@ -523,21 +591,20 @@ StringResult Executor::exec_insert_inner(SharedDatabase& s, const std::string& t
             // permanently-empty phantom (exec_create/executor_partition.cpp) -- scan its
             // children instead, so an FK into a partitioned parent validates correctly
             // instead of always reporting "not found".
-            std::vector<const std::vector<Row>*> ref_row_sets;
+            std::vector<std::pair<std::string, const std::vector<Row>*>> ref_row_sets;
             if (auto part_info = partition_info_for(s, col.foreign_key->ref_table)) {
                 for (auto& def : part_info->partitions) {
-                    if (auto child_it = s.tables.find(def.child_table); child_it != s.tables.end()) ref_row_sets.push_back(&child_it->second);
+                    if (auto child_it = s.tables.find(def.child_table); child_it != s.tables.end())
+                        ref_row_sets.emplace_back(def.child_table, &child_it->second);
                 }
             } else {
                 auto ref_it = s.tables.find(col.foreign_key->ref_table);
                 if (ref_it == s.tables.end()) return StringResult::Err("Referenced table '" + col.foreign_key->ref_table + "' not found");
-                ref_row_sets.push_back(&ref_it->second);
+                ref_row_sets.emplace_back(col.foreign_key->ref_table, &ref_it->second);
             }
-            bool exists = std::any_of(ref_row_sets.begin(), ref_row_sets.end(), [&](const std::vector<Row>* rows) {
-                return std::any_of(rows->begin(), rows->end(), [&](const Row& r) {
-                    auto rit = r.find(col.foreign_key->ref_column);
-                    return rit != r.end() && rit->second == val;
-                });
+            auto always_ok = [](const Row&) { return true; }; // no visibility filter -- matches pre-existing behavior
+            bool exists = std::any_of(ref_row_sets.begin(), ref_row_sets.end(), [&](const auto& named_rows) {
+                return index_or_scan_exists(s, named_rows.first, *named_rows.second, col.foreign_key->ref_column, val, always_ok);
             });
             if (!exists) {
                 return StringResult::Err("Foreign key violation: '" + val + "' not found in '" + col.foreign_key->ref_table + "'.'" +
@@ -608,6 +675,19 @@ StringResult Executor::exec_insert_inner(SharedDatabase& s, const std::string& t
                                                   std::to_string(lr2.holder) + ". Cannot INSERT.");
                     }
                     // else: granted -- loop back and rescan gap_locks_for(table) from scratch.
+                }
+
+                // Predicate lock conflict check (SSI phantom detection): unlike the gap-lock
+                // loop above, this never blocks the INSERT -- it just flags the *reading*
+                // transaction (a SERIALIZABLE holder that scanned a range covering this new
+                // row) so its own COMMIT fails later with a serialization error, mirroring
+                // PostgreSQL's non-blocking SIREAD predicate check. Applies regardless of
+                // THIS (inserting) transaction's own isolation level -- same reasoning as the
+                // gap-lock check above: the predicate protects its holder, not the inserter.
+                for (auto& p : s.lock_mgr.predicate_reads_for(table)) {
+                    if (p.holder == txn.current_txn_id()) continue; // a txn's own reads never block its own INSERT
+                    GapRange range{p.lo, p.hi, p.lo_inclusive, p.hi_inclusive};
+                    if (gap_range_contains(range, pk_it->second)) s.lock_mgr.flag_predicate_violation(p.holder);
                 }
 
                 // Row-level-concurrency Stage 4: claim this PK value now, under the SAME

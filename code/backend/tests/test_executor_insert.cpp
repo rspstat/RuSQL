@@ -218,6 +218,56 @@ TEST_CASE("Foreign key and CHECK constraint violations", "[executor][insert]") {
     REQUIRE(check_violation.error().find("CHECK constraint") != std::string::npos);
 }
 
+TEST_CASE("Foreign key validation into a non-PK but hash-indexed column still works", "[executor][insert]") {
+    TempDataDir dir("exec_insert_data_7b");
+    Executor ex(dir.path);
+    REQUIRE(ex.execute_sql("CREATE DATABASE company").is_ok());
+    REQUIRE(ex.execute_sql("USE company").is_ok());
+    REQUIRE(ex.execute_sql("CREATE TABLE department (id INT PRIMARY KEY, code VARCHAR(10) UNIQUE)").is_ok());
+    REQUIRE(ex.execute_sql("CREATE INDEX idx_dept_code ON department(code) USING HASH").is_ok());
+    REQUIRE(ex.execute_sql("INSERT INTO department VALUES (1, 'ENG')").is_ok());
+    REQUIRE(ex.execute_sql(
+                 "CREATE TABLE employee (id INT PRIMARY KEY, dept_code VARCHAR(10), "
+                 "CONSTRAINT fk_dept FOREIGN KEY (dept_code) REFERENCES department(code))")
+                .is_ok());
+
+    REQUIRE(ex.execute_sql("INSERT INTO employee VALUES (1, 'ENG')").is_ok());
+    auto fk_violation = ex.execute_sql("INSERT INTO employee VALUES (2, 'NOPE')");
+    REQUIRE(fk_violation.is_err());
+    REQUIRE(fk_violation.error().find("Foreign key violation") != std::string::npos);
+}
+
+TEST_CASE("Executor::index_or_scan_exists finds matches via PK index, hash index, and plain linear scan alike",
+          "[executor][insert][index_or_scan_exists]") {
+    TempDataDir dir("exec_insert_data_7c");
+    Executor ex(dir.path);
+    REQUIRE(ex.execute_sql("CREATE DATABASE company").is_ok());
+    REQUIRE(ex.execute_sql("USE company").is_ok());
+    REQUIRE(ex.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, tag VARCHAR(10), plain VARCHAR(10))").is_ok());
+    REQUIRE(ex.execute_sql("CREATE INDEX idx_t_tag ON t(tag) USING HASH").is_ok());
+    REQUIRE(ex.execute_sql("INSERT INTO t VALUES (1, 'alpha', 'x')").is_ok());
+    REQUIRE(ex.execute_sql("INSERT INTO t VALUES (2, 'beta', 'y')").is_ok());
+
+    auto s = ex.get_shared()->read();
+    const auto& rows = s->tables.at("company.t");
+    auto always_ok = [](const Row&) { return true; };
+    auto never_ok = [](const Row&) { return false; };
+
+    // Via the PK B+Tree index.
+    REQUIRE(Executor::index_or_scan_exists(*s, "company.t", rows, "id", "1", always_ok));
+    REQUIRE_FALSE(Executor::index_or_scan_exists(*s, "company.t", rows, "id", "999", always_ok));
+    REQUIRE_FALSE(Executor::index_or_scan_exists(*s, "company.t", rows, "id", "1", never_ok)); // accept() still applied
+
+    // Via the hash index.
+    REQUIRE(Executor::index_or_scan_exists(*s, "company.t", rows, "tag", "alpha", always_ok));
+    REQUIRE_FALSE(Executor::index_or_scan_exists(*s, "company.t", rows, "tag", "gamma", always_ok));
+    REQUIRE_FALSE(Executor::index_or_scan_exists(*s, "company.t", rows, "tag", "alpha", never_ok));
+
+    // No index on `plain` at all -- falls back to a linear scan, still correct.
+    REQUIRE(Executor::index_or_scan_exists(*s, "company.t", rows, "plain", "x", always_ok));
+    REQUIRE_FALSE(Executor::index_or_scan_exists(*s, "company.t", rows, "plain", "z", always_ok));
+}
+
 TEST_CASE("INSERT RETURNING formats the inserted row(s)", "[executor][insert]") {
     TempDataDir dir("exec_insert_data_8");
     Executor ex(dir.path);

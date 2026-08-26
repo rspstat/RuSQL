@@ -163,6 +163,16 @@ StringResult Executor::exec_analyze_table(SharedDatabase& s, const std::string& 
         }
     }
     for (auto& [col, vals0] : col_all_values) {
+        std::unordered_map<std::string, std::size_t> freq;
+        for (auto& v : vals0) freq[v]++;
+        std::vector<std::pair<std::string, std::size_t>> mcv;
+        for (auto& [v, cnt] : freq) {
+            if (cnt > 1) mcv.emplace_back(v, cnt);
+        }
+        std::sort(mcv.begin(), mcv.end(), [](auto& a, auto& b) { return a.second > b.second; });
+        if (mcv.size() > NUM_MCV_ENTRIES) mcv.resize(NUM_MCV_ENTRIES);
+        if (auto it = col_stats.find(col); it != col_stats.end()) it->second.mcv = std::move(mcv);
+
         std::vector<std::string> vals = vals0;
         if (vals.size() < 2) continue;
         bool is_numeric = true;
@@ -250,6 +260,26 @@ StringResult Executor::exec_analyze_table(SharedDatabase& s, const std::string& 
                          pad_right(p_bucket(25), 10) + " | " + pad_right(p_bucket(50), 10) + " | " + pad_right(p_bucket(75), 10) + " |");
     }
     lines.push_back(col_bar);
+
+    bool any_mcv = false;
+    for (auto& col : col_order) {
+        auto it = col_stats.find(col);
+        if (it != col_stats.end() && !it->second.mcv.empty()) { any_mcv = true; break; }
+    }
+    if (any_mcv) {
+        lines.push_back("Most common values:");
+        for (auto& col : col_order) {
+            auto it = col_stats.find(col);
+            if (it == col_stats.end() || it->second.mcv.empty()) continue;
+            std::string entry = "  " + col + ": ";
+            for (std::size_t i = 0; i < it->second.mcv.size(); i++) {
+                if (i) entry += ", ";
+                auto& [val, cnt] = it->second.mcv[i];
+                entry += val + " (" + std::to_string(cnt) + ")";
+            }
+            lines.push_back(entry);
+        }
+    }
 
     std::string out;
     for (std::size_t i = 0; i < lines.size(); i++) {

@@ -429,6 +429,53 @@ TEST_CASE("SELECT LEFT JOIN fills NULL for unmatched right rows", "[executor][se
     REQUIRE(r.value().find("1 row(s) returned.") != std::string::npos);
 }
 
+TEST_CASE("SELECT with a size-asymmetric INNER JOIN chooses ReverseIndexNL and returns correct rows",
+          "[executor][select]") {
+    TempDataDir dir("exec_sel_data_9b");
+    Executor ex(dir.path);
+    REQUIRE(ex.execute_sql("CREATE DATABASE company").is_ok());
+    REQUIRE(ex.execute_sql("USE company").is_ok());
+    REQUIRE(ex.execute_sql("CREATE TABLE orders (id INT PRIMARY KEY, customer_id INT)").is_ok());
+    REQUIRE(ex.execute_sql("CREATE INDEX idx_orders_customer ON orders(customer_id)").is_ok());
+    for (int i = 0; i < 50; i++) {
+        REQUIRE(ex.execute_sql("INSERT INTO orders VALUES (" + std::to_string(i) + ", " + std::to_string(i % 2 + 1) + ")").is_ok());
+    }
+    REQUIRE(ex.execute_sql("CREATE TABLE customers (id INT PRIMARY KEY, name VARCHAR(50))").is_ok());
+    REQUIRE(ex.execute_sql("INSERT INTO customers VALUES (1,'Alice'),(2,'Bob')").is_ok());
+
+    auto plan = ex.execute_sql("EXPLAIN SELECT orders.id, customers.name FROM orders JOIN customers ON orders.customer_id = customers.id");
+    REQUIRE(plan.is_ok());
+    REQUIRE(plan.value().find("Reverse Index NL") != std::string::npos);
+
+    auto r = ex.execute_sql(
+        "SELECT orders.id, customers.name FROM orders JOIN customers ON orders.customer_id = customers.id "
+        "WHERE customers.name = 'Alice'");
+    REQUIRE(r.is_ok());
+    REQUIRE(r.value().find("25 row(s) returned.") != std::string::npos); // half of the 50 orders have customer_id=1
+    REQUIRE(r.value().find("Bob") == std::string::npos);
+}
+
+TEST_CASE("A size-asymmetric LEFT JOIN still NULL-pads unmatched rows (does not silently degrade to INNER JOIN "
+          "semantics when an index-assisted algo would otherwise apply)",
+          "[executor][select]") {
+    TempDataDir dir("exec_sel_data_9c");
+    Executor ex(dir.path);
+    REQUIRE(ex.execute_sql("CREATE DATABASE company").is_ok());
+    REQUIRE(ex.execute_sql("USE company").is_ok());
+    REQUIRE(ex.execute_sql("CREATE TABLE orders (id INT PRIMARY KEY, customer_id INT)").is_ok());
+    REQUIRE(ex.execute_sql("CREATE INDEX idx_orders_customer ON orders(customer_id)").is_ok());
+    for (int i = 0; i < 50; i++) {
+        REQUIRE(ex.execute_sql("INSERT INTO orders VALUES (" + std::to_string(i) + ", " + std::to_string(i % 2 + 1) + ")").is_ok());
+    }
+    REQUIRE(ex.execute_sql("INSERT INTO orders VALUES (999, 777)").is_ok()); // customer_id with no match at all
+    REQUIRE(ex.execute_sql("CREATE TABLE customers (id INT PRIMARY KEY, name VARCHAR(50))").is_ok());
+    REQUIRE(ex.execute_sql("INSERT INTO customers VALUES (1,'Alice'),(2,'Bob')").is_ok());
+
+    auto r = ex.execute_sql("SELECT orders.id, customers.name FROM orders LEFT JOIN customers ON orders.customer_id = customers.id");
+    REQUIRE(r.is_ok());
+    REQUIRE(r.value().find("51 row(s) returned.") != std::string::npos); // all 50 matched + the 1 unmatched, NULL-padded
+}
+
 TEST_CASE("SELECT against a view executes the view's stored query", "[executor][select]") {
     TempDataDir dir("exec_sel_data_10");
     Executor ex(dir.path);

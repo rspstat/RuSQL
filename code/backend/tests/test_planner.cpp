@@ -161,6 +161,86 @@ TEST_CASE("Multi-join algorithm selection reflects accumulated cardinality, not 
     REQUIRE(std::holds_alternative<JoinAlgo::NestedLoop>(plan.joins[1].algo.data));
 }
 
+TEST_CASE("Planner chooses ReverseIndexNL via a secondary index when the base table is far larger than the joined table",
+          "[planner]") {
+    // Mirrors the recursive-CTE shape that motivated this: a large static table (`chain`)
+    // joined against a tiny table (`delta`) on chain's own non-PK, secondary-indexed
+    // column. Forward IndexNL (probe delta's PK) is also technically available here since
+    // delta.id is delta's PK, but iterating a large left/base table and doing a cheap
+    // probe into the tiny right table is still O(left_size) -- ReverseIndexNL (iterate the
+    // tiny right table, probe the large left table's secondary index) should win instead.
+    std::vector<Row> chain_rows(900), delta_rows(2);
+    std::unordered_map<std::string, std::vector<Row>> tables = {{"chain", chain_rows}, {"delta", delta_rows}};
+    std::unordered_map<std::string, BPlusTree> indexes;
+    std::unordered_map<std::string, std::pair<std::string, std::string>> index_meta = {{"idx_parent", {"chain", "parent_id"}}};
+    std::unordered_map<std::string, CompositeIndex> composite_indexes;
+    std::unordered_map<std::string, HashIndex> hash_indexes;
+    std::unordered_map<std::string, std::pair<std::string, std::string>> hash_index_meta;
+
+    Catalog catalog;
+    ColumnDef chain_id;
+    chain_id.name = "id";
+    chain_id.primary_key = true;
+    catalog.create_table("chain", {chain_id});
+    ColumnDef delta_id;
+    delta_id.name = "id";
+    delta_id.primary_key = true;
+    catalog.create_table("delta", {delta_id});
+
+    std::unordered_map<std::string, TableStats> stats;
+    Planner planner(tables, indexes, index_meta, composite_indexes, hash_indexes, hash_index_meta, catalog, stats);
+
+    auto cond = CondExpr(CondExpr::Leaf{
+        Condition{ArithExpr(ArithExpr::Col{"chain.parent_id"}), Operator::Eq, ConditionValue(ConditionValue::Literal{"delta.id"})}});
+    std::vector<Join> joins;
+    joins.push_back(Join{"delta", cond, JoinType::Inner, {}});
+
+    SelectPlan plan = planner.plan("chain", std::nullopt, joins);
+    REQUIRE(plan.joins.size() == 1);
+    REQUIRE(std::holds_alternative<JoinAlgo::ReverseIndexNL>(plan.joins[0].algo.data));
+    auto& rev = std::get<JoinAlgo::ReverseIndexNL>(plan.joins[0].algo.data);
+    REQUIRE(rev.right_extract_col == "id");
+    REQUIRE(rev.left_index_key == "idx_parent");
+    REQUIRE(rev.left_is_secondary_btree);
+    REQUIRE_FALSE(rev.left_is_hash);
+}
+
+TEST_CASE("ReverseIndexNL is never chosen for the 2nd+ join in a chain, even when the size shape would favor it",
+          "[planner]") {
+    std::vector<Row> a_rows(3), chain_rows(900), delta_rows(2);
+    std::unordered_map<std::string, std::vector<Row>> tables = {{"a", a_rows}, {"chain", chain_rows}, {"delta", delta_rows}};
+    std::unordered_map<std::string, BPlusTree> indexes;
+    std::unordered_map<std::string, std::pair<std::string, std::string>> index_meta = {{"idx_parent", {"chain", "parent_id"}}};
+    std::unordered_map<std::string, CompositeIndex> composite_indexes;
+    std::unordered_map<std::string, HashIndex> hash_indexes;
+    std::unordered_map<std::string, std::pair<std::string, std::string>> hash_index_meta;
+
+    Catalog catalog;
+    ColumnDef chain_id;
+    chain_id.name = "id";
+    chain_id.primary_key = true;
+    catalog.create_table("chain", {chain_id});
+    ColumnDef delta_id;
+    delta_id.name = "id";
+    delta_id.primary_key = true;
+    catalog.create_table("delta", {delta_id});
+
+    std::unordered_map<std::string, TableStats> stats;
+    Planner planner(tables, indexes, index_meta, composite_indexes, hash_indexes, hash_index_meta, catalog, stats);
+
+    auto a_chain_cond = CondExpr(CondExpr::Leaf{
+        Condition{ArithExpr(ArithExpr::Col{"a.chain_id"}), Operator::Eq, ConditionValue(ConditionValue::Literal{"chain.id"})}});
+    auto chain_delta_cond = CondExpr(CondExpr::Leaf{
+        Condition{ArithExpr(ArithExpr::Col{"chain.parent_id"}), Operator::Eq, ConditionValue(ConditionValue::Literal{"delta.id"})}});
+    std::vector<Join> joins;
+    joins.push_back(Join{"chain", a_chain_cond, JoinType::Inner, {}});
+    joins.push_back(Join{"delta", chain_delta_cond, JoinType::Inner, {}});
+
+    SelectPlan plan = planner.plan("a", std::nullopt, joins);
+    REQUIRE(plan.joins.size() == 2);
+    REQUIRE_FALSE(std::holds_alternative<JoinAlgo::ReverseIndexNL>(plan.joins[1].algo.data));
+}
+
 TEST_CASE("reorder_joins_greedy puts the smallest joinable table first", "[planner]") {
     std::unordered_map<std::string, std::vector<Row>> tables = {
         {"big", std::vector<Row>(100)},
@@ -172,4 +252,34 @@ TEST_CASE("reorder_joins_greedy puts the smallest joinable table first", "[plann
     auto reordered = reorder_joins_greedy("employee", {j_big, j_small}, tables);
     REQUIRE(reordered.size() == 2);
     REQUIRE(reordered[0].table == "small");
+}
+
+TEST_CASE("estimate_rows uses the exact MCV count for a skewed equality lookup instead of the plain NDV average",
+          "[planner]") {
+    std::unordered_map<std::string, std::vector<Row>> tables;
+    std::unordered_map<std::string, BPlusTree> indexes;
+    std::unordered_map<std::string, std::pair<std::string, std::string>> index_meta;
+    std::unordered_map<std::string, CompositeIndex> composite_indexes;
+    std::unordered_map<std::string, HashIndex> hash_indexes;
+    std::unordered_map<std::string, std::pair<std::string, std::string>> hash_index_meta;
+    Catalog catalog;
+
+    ColumnStats status_stats;
+    status_stats.distinct_count = 5;
+    status_stats.mcv = {{"active", 900}};
+    TableStats emp_stats;
+    emp_stats.total_rows = 1000;
+    emp_stats.columns["status"] = status_stats;
+    std::unordered_map<std::string, TableStats> stats = {{"employee", emp_stats}};
+
+    Planner planner(tables, indexes, index_meta, composite_indexes, hash_indexes, hash_index_meta, catalog, stats);
+
+    AccessPath mcv_hit(AccessPath::SecondaryPoint{"employee", "status", "active"});
+    REQUIRE(planner.estimate_rows(1000, mcv_hit, "employee") == 900);
+
+    // Non-MCV value: (total - mcv_rows) / (distinct_count - mcv.size()) = (1000-900)/(5-1) = 25,
+    // not the plain NDV average (1000/5 = 200) which would ignore that "active" already
+    // accounts for 900 of the 1000 rows.
+    AccessPath mcv_miss(AccessPath::SecondaryPoint{"employee", "status", "inactive"});
+    REQUIRE(planner.estimate_rows(1000, mcv_miss, "employee") == 25);
 }

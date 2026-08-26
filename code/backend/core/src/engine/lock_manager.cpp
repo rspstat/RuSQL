@@ -10,6 +10,8 @@ LockManager::LockManager(LockManager&& other) noexcept {
     wait_for_ = std::move(other.wait_for_);
     deadlock_history_ = std::move(other.deadlock_history_);
     gap_locks_ = std::move(other.gap_locks_);
+    predicate_reads_ = std::move(other.predicate_reads_);
+    predicate_violations_ = std::move(other.predicate_violations_);
 }
 
 LockManager& LockManager::operator=(LockManager&& other) noexcept {
@@ -19,6 +21,8 @@ LockManager& LockManager::operator=(LockManager&& other) noexcept {
     wait_for_ = std::move(other.wait_for_);
     deadlock_history_ = std::move(other.deadlock_history_);
     gap_locks_ = std::move(other.gap_locks_);
+    predicate_reads_ = std::move(other.predicate_reads_);
+    predicate_violations_ = std::move(other.predicate_violations_);
     return *this;
 }
 
@@ -181,6 +185,13 @@ void LockManager::release(std::uint64_t txn_id) {
                    rows.end());
         if (rows.empty()) it = gap_locks_.erase(it); else ++it;
     }
+    for (auto it = predicate_reads_.begin(); it != predicate_reads_.end();) {
+        auto& rows = it->second;
+        rows.erase(std::remove_if(rows.begin(), rows.end(), [&](const GapLockRow& r) { return r.holder == txn_id; }),
+                   rows.end());
+        if (rows.empty()) it = predicate_reads_.erase(it); else ++it;
+    }
+    predicate_violations_.erase(txn_id);
     // The only place a row lock ever becomes newly grantable to someone else -- wakes
     // every thread blocked in acquire()/acquire_shared()'s real-wait loop so each can
     // re-check whether the row(s) it wants are now free.
@@ -292,6 +303,59 @@ std::vector<std::tuple<std::string, std::string, std::uint64_t>> LockManager::ga
     std::lock_guard<std::mutex> g(mutex_);
     std::vector<std::tuple<std::string, std::string, std::uint64_t>> v;
     for (auto& [table, rows] : gap_locks_) {
+        for (auto& r : rows) {
+            std::string range;
+            range += r.lo_inclusive ? "[" : "(";
+            range += r.lo ? *r.lo : "-inf";
+            range += ", ";
+            range += r.hi ? *r.hi : "+inf";
+            range += r.hi_inclusive ? "]" : ")";
+            v.emplace_back(table, range, r.holder);
+        }
+    }
+    std::sort(v.begin(), v.end(), [](auto& a, auto& b) {
+        if (std::get<0>(a) != std::get<0>(b)) return std::get<0>(a) < std::get<0>(b);
+        return std::get<1>(a) < std::get<1>(b);
+    });
+    return v;
+}
+
+void LockManager::register_predicate_read(const std::string& table, std::optional<std::string> lo, bool lo_inclusive,
+                                            std::optional<std::string> hi, bool hi_inclusive, std::uint64_t txn_id) {
+    std::lock_guard<std::mutex> g(mutex_);
+    GapLockRow row;
+    row.lo = std::move(lo);
+    row.hi = std::move(hi);
+    row.lo_inclusive = lo_inclusive;
+    row.hi_inclusive = hi_inclusive;
+    row.holder = txn_id;
+    predicate_reads_[table].push_back(std::move(row));
+}
+
+std::vector<GapLockRow> LockManager::predicate_reads_for(const std::string& table) const {
+    std::lock_guard<std::mutex> g(mutex_);
+    auto it = predicate_reads_.find(table);
+    if (it == predicate_reads_.end()) return {};
+    return it->second;
+}
+
+void LockManager::flag_predicate_violation(std::uint64_t txn_id) {
+    std::lock_guard<std::mutex> g(mutex_);
+    predicate_violations_.insert(txn_id);
+}
+
+bool LockManager::take_predicate_violation(std::uint64_t txn_id) {
+    std::lock_guard<std::mutex> g(mutex_);
+    auto it = predicate_violations_.find(txn_id);
+    if (it == predicate_violations_.end()) return false;
+    predicate_violations_.erase(it);
+    return true;
+}
+
+std::vector<std::tuple<std::string, std::string, std::uint64_t>> LockManager::predicate_lock_rows() const {
+    std::lock_guard<std::mutex> g(mutex_);
+    std::vector<std::tuple<std::string, std::string, std::uint64_t>> v;
+    for (auto& [table, rows] : predicate_reads_) {
         for (auto& r : rows) {
             std::string range;
             range += r.lo_inclusive ? "[" : "(";

@@ -42,6 +42,15 @@ StringResult Executor::exec_commit(SharedDatabase& s) {
         apply_rollback(s);
         return StringResult::Err(res.error() + " (auto-rolled back)");
     }
+    // Predicate lock (SSI phantom detection): validate_serializable above only re-checks
+    // rows this transaction actually read; this catches the complementary case -- a
+    // brand-new row inserted into a range this transaction scanned (see
+    // register_predicate_read's doc comment and the INSERT-side check in executor_dml.cpp).
+    // Must run before lock_mgr.release() below, which clears this transaction's flag.
+    if (s.lock_mgr.take_predicate_violation(txn.current_txn_id())) {
+        apply_rollback(s);
+        return StringResult::Err("Serialization failure: a row was inserted into a range this transaction scanned (auto-rolled back)");
+    }
 
     // MVCC Stage 2: writes now land directly in s.tables as they happen (no more
     // session_tables staging to merge in here) -- COMMIT's remaining job is just to
@@ -68,6 +77,11 @@ StringResult Executor::exec_commit_phase1(SharedDatabase& s) {
     if (auto res = txn.validate_serializable(s.tables, *s.active_txn_ids->lock()); res.is_err()) {
         apply_rollback(s);
         return StringResult::Err(res.error() + " (auto-rolled back)");
+    }
+    // Predicate lock (SSI phantom detection): see exec_commit's identical check above.
+    if (s.lock_mgr.take_predicate_violation(txn.current_txn_id())) {
+        apply_rollback(s);
+        return StringResult::Err("Serialization failure: a row was inserted into a range this transaction scanned (auto-rolled back)");
     }
 
     for (auto& table : txn.dirty_tables()) {
@@ -655,6 +669,18 @@ StringResult Executor::exec_show_locks(const SharedDatabase& s) const {
         out << "| table            | range                | txn_id |\n";
         out << "+------------------+----------------------+--------+\n";
         for (auto& [tbl, range, txn_id] : gap_locks) {
+            out << "| " << pad_right(tbl, 16) << " | " << pad_right(range, 20) << " | " << pad_left(std::to_string(txn_id), 6) << " |\n";
+        }
+        out << "+------------------+----------------------+--------+\n";
+    }
+
+    auto predicate_locks = s.lock_mgr.predicate_lock_rows();
+    if (!predicate_locks.empty()) {
+        out << "\nPredicate locks (SSI phantom detection, non-blocking):\n";
+        out << "+------------------+----------------------+--------+\n";
+        out << "| table            | range                | txn_id |\n";
+        out << "+------------------+----------------------+--------+\n";
+        for (auto& [tbl, range, txn_id] : predicate_locks) {
             out << "| " << pad_right(tbl, 16) << " | " << pad_right(range, 20) << " | " << pad_left(std::to_string(txn_id), 6) << " |\n";
         }
         out << "+------------------+----------------------+--------+\n";

@@ -7,7 +7,7 @@
 - [x] 비용 기반 쿼리 옵티마이저 (Cost-Based Query Planner)
   - AccessPath 선택 (SeqScan / PkPoint / PkBetween / PkRange / SecondaryPoint / SecondaryRange / SecondaryBetween / CompositeIndex / CompositeIndexPrefix / SecondaryLikePrefix / **IndexIntersection**)
   - 행 수 / 비용 추정 (log₂N 기반)
-  - Join 알고리즘 비용 기반 선택 (NL cost vs Hash cost 비교, HASH_FACTOR=3; Sort-Merge Join / Hash Join / IndexNL / Nested Loop 중 최저 비용 선택)
+  - Join 알고리즘 비용 기반 선택 (NL cost vs Hash cost 비교, HASH_FACTOR=3; Sort-Merge Join / Hash Join / IndexNL / **ReverseIndexNL** / Nested Loop 중 최저 비용 선택) — ReverseIndexNL은 base(FROM절 첫 테이블)가 join 대상보다 훨씬 클 때 반대로 작은 쪽을 순회하며 base의 PK/보조 B+Tree/해시 인덱스를 프로브(첫 번째 join에만 적용, INNER JOIN 전용 — LEFT/RIGHT는 NULL 채움 안전성을 위해 항상 검증된 nested_loop_join 경로 사용)
   - Join 순서 최적화 (System-R 스타일 비용 기반 동적계획법, 그리디 폴백)
   - EXPLAIN 실행 계획 출력 (비용 · 접근 경로 · Join 알고리즘)
 - [x] 병렬 쿼리 실행 (rayon) — SeqScan WHERE 필터 (par_chunks, WHERE 조건 없는 풀스캔은 순차 유지) + GROUP BY 집계 (par_chunks 청크별 독립 partial HashMap 구축→순차 병합→par_iter 집계) + ORDER BY 정렬 (par_sort_unstable_by) + Hash Join probe (par_iter), 청크 단위 워커 thread_local 전파로 사용자 정의 함수/DATABASE() 정확성 유지, 적응형 임계값 (`10_000 / rayon::current_num_threads()`, 최소 1,000; `RUSTDB_PARALLEL_MIN_ROWS` 환경변수 오버라이드), `RUSTDB_PARALLEL` 환경변수 또는 `SET @rusql_parallel = 1/0` 세션 변수로 제어, 서브쿼리 포함 시 순차 폴백
@@ -142,7 +142,7 @@
 - [x] INTERSECT / INTERSECT ALL — 교집합
 - [x] EXCEPT / EXCEPT ALL — 차집합
 - [x] CTE (WITH ... AS) — 단순 / 다중 / INSERT 메인 쿼리 지원
-- [x] 재귀 CTE (WITH RECURSIVE) — base case + UNION ALL 반복, positional 컬럼 매핑, 1000회 반복 내 고정점 미도달 시 (불완전한 결과를 조용히 반환하는 대신) 명확한 에러로 실패
+- [x] 재귀 CTE (WITH RECURSIVE) — base case + UNION ALL 반복, positional 컬럼 매핑, 1000회 반복 내 고정점 미도달 시 (불완전한 결과를 조용히 반환하는 대신) 명확한 에러로 실패; 반복당 중복제거는 해시셋 기반(O(1) 평균); 재귀 항이 CTE 자신을 정확히 한 번만 단순 참조하는 안전한 형태(서브쿼리/LATERAL/GROUP BY/집계/LIMIT 없음)일 때 semi-naive 평가로 매 반복 직전 추가분(delta)만 JOIN — 안전 조건 미충족 시 기존 전체-누적 방식으로 자동 폴백
 - [x] SELECT ... FOR UPDATE (배타 잠금)
 - [x] SELECT ... FOR SHARE (공유 잠금 — 다중 독자 허용, 쓰기 잠금과 충돌)
 - [x] table.column dot notation (SELECT / JOIN ON / GROUP BY / ORDER BY)
@@ -189,6 +189,7 @@
 - [x] ON UPDATE SET NULL / SET DEFAULT
 - [x] NO ACTION (RESTRICT 동등)
 - [x] FK 캐스케이드 후 인덱스 일관성 — CASCADE/SET NULL/SET DEFAULT가 캐스케이드 대상 테이블의 PK B+Tree/보조·해시 인덱스/복합 인덱스까지 즉시 갱신(주 테이블 자신의 UPDATE/DELETE와 동일한 증분 갱신 방식) — PK 인덱스 포인트 조회(`WHERE <PK 컬럼> = ...`)도 캐스케이드 직후부터 정확한 값 반환
+- [x] FK/RESTRICT 검증의 인덱스 활용 — INSERT의 FK 존재 확인, UPDATE/DELETE의 ON UPDATE/DELETE RESTRICT "참조되는지" 확인이 참조(대상) 테이블에 이미 있는 PK B+Tree/보조 B+Tree/해시 인덱스를 우선 활용(`index_or_scan_exists`), 없을 때만 전체 스캔 폴백 — FK 관계가 있는 대량 INSERT/UPDATE/DELETE가 참조 테이블 크기에 덜 좌우됨
 
 ### 트랜잭션
 - [x] WAL (Write-Ahead Logging) — 바이너리 redo log
@@ -229,6 +230,7 @@
 - [x] 인덱스 영속화 — 재시작 시 indexes.json으로 자동 재빌드
 - [x] 뷰 영속화 — 재시작 시 views.json에서 AST 복원
 - [x] TRUNCATE 후 AUTO INCREMENT 리셋
+- [x] 인덱스 이름 테이블/DB 간 재사용 안전 — `index_meta`/`hash_index_meta`/`composite_indexes` 인메모리 키를 사용자 지정 bare 이름이 아닌 `테이블명_인덱스명`으로 통일(실제 인덱스 저장소 `s.indexes`/`s.hash_indexes`가 이미 쓰던 컨벤션과 일치). 서로 다른 테이블/데이터베이스가 같은 인덱스 이름을 재사용하면 나중 인덱스가 `unordered_map::insert()`의 조용한 no-op으로 등록 자체가 누락되던 버그 수정(디스크 포맷은 이미 DB별 분리라 마이그레이션 불필요) — `ALTER TABLE RENAME`이 인덱스 키를 갱신하지 않아 rename 후 인덱스가 못 찾아지던 연쇄 버그, 그리고 그 자리에서 원래부터 빠져 있던 해시 인덱스의 RENAME 이관도 함께 수정
 
 ### MVCC
 - [x] 행 버전 스탬프 (`_xmin`, `_xmax`) — 실제 트랜잭션 ID 태깅(전역 유일 카운터에서 발급), `0`은 "이전부터 존재/항상 가시" 예약값
@@ -247,9 +249,10 @@
 - [x] 공유/배타 잠금 충돌 감지 및 데드락 감지 (wait-for 그래프 DFS)
 - [x] UPDATE / DELETE 시 잠금 충돌 감지
 - [x] COMMIT / ROLLBACK 시 잠금 자동 해제
-- [x] SHOW LOCKS (활성 행 잠금 + Gap Lock 목록 조회)
+- [x] SHOW LOCKS (활성 행 잠금 + Gap Lock + Predicate Lock 목록 조회)
 - [x] 잠금 대기 타임아웃 세션 변수 — `SET @lock_wait_timeout = N` (밀리초, 기본 50,000ms), 세션별 독립 설정 (`Executor.lock_wait_timeout_ms` 필드), 타임아웃 시 MySQL 호환 `ERROR 1205 (HY000): Lock wait timeout exceeded` 반환
 - [x] **Gap Lock (InnoDB 스타일 phantom 방지)** — REPEATABLE READ/SERIALIZABLE에서 `FOR UPDATE`/`FOR SHARE`와 트랜잭션 내 `UPDATE`/`DELETE`가 WHERE절에서 PK 범위(Eq/Gt/Gte/Lt/Lte/Between, AND 조합, 그 외엔 안전하게 테이블 전체 범위로 폴백)를 추출해 범위 자체를 잠금 — 같은 범위로의 동시 INSERT는 그 Gap Lock의 보유자가 COMMIT/ROLLBACK할 때까지 진짜 블로킹 대기(`@lock_wait_timeout` 적용, 시간 내에 안 풀리면 `ERROR 1205`). Gap Lock끼리는 서로 충돌하지 않음(실제 InnoDB와 동일한 호환성 의미론), 자기 자신이 잡은 Gap Lock은 자신의 INSERT를 막지 않음, 데드락 그래프는 행 잠금과 완전히 공유. V1 범위: 단일 컬럼 PK 테이블만
+- [x] **Predicate Lock (PostgreSQL SIREAD 스타일, non-blocking phantom 탐지)** — SERIALIZABLE에서 `FOR UPDATE`/`FOR SHARE` 없는 일반 SELECT가 WHERE절 PK 범위(Gap Lock과 동일한 추출 로직)를 등록만 해둠(INSERT를 막지 않음). 그 범위에 다른 트랜잭션이 실제로 INSERT하면, 인서트는 그대로 성공하고 대신 **읽었던 쪽의 다음 COMMIT이 "Serialization failure"로 실패**(non-blocking — Gap Lock과 반대로 절대 대기하지 않음). REPEATABLE READ는 등록 안 함(ANSI 표준상 phantom-free 보장 대상 아님). V1 범위: 단일 컬럼 PK 테이블만, 집계 쿼리 제외. 정직한 한계: 범위가 겹치면 무조건 실패시키는 보수적 근사이며, Postgres의 진짜 rw-antidependency 사이클(dangerous structure) 판정은 아님 — 불필요한 실패(false positive)는 있을 수 있어도 놓치는 이상현상(false negative)은 없음
 
 ### 동시성
 - [x] 테이블 단위 동시 쓰기 — 2계층 잠금: ① 구조적 잠금(`RwLock<SharedDatabase>`, 여전히 배타 — DDL/DCL/VACUUM/CHECKPOINT 및 CTE·FROM-서브쿼리·뷰 참조·발화하는 트리거가 있는 문장 전용), ② 테이블별 `FairSharedMutex`(그 외 평범한 단일/조인 INSERT/UPDATE/DELETE/SELECT/MERGE/다중 UPDATE·DELETE — 대상 테이블 + FK 부모/자식 1-hop을 정렬된 순서로 잠금, 락 순서 데드락 방지). 서로 다른 테이블에 대한 쓰기는 실제로 동시 실행됨. 순수 읽기 전용 문장(FOR UPDATE/FOR SHARE 제외 SELECT, SHOW류, DESCRIBE, EXPLAIN 등 — 서브쿼리까지 재귀 판정)은 대상 테이블 세트를 공유(read)로 잡아 다른 테이블의 쓰기와도 병렬 실행
@@ -267,6 +270,7 @@
 - [x] CHECKPOINT (수동 체크포인트)
 - [x] VACUUM (dead row 물리 제거)
 - [x] ANALYZE TABLE (컬럼별 통계 수집 — distinct count / null count / min / max / equi-depth 히스토그램 10-bucket, p25/p50/p75 표시, 플래너 PkRange·PkBetween·SecondaryRange selectivity 추정에 반영)
+- [x] **MCV(최빈값) 카디널리티 추정** — PostgreSQL 스타일: `ANALYZE TABLE`이 히스토그램과 같은 패스에서 컬럼별 최빈값 최대 10개(정확한 관측 행 수 포함, 리포트에 "Most common values:" 섹션으로 표시)를 함께 계산. 플래너의 등호 조회(`SecondaryPoint`) selectivity가 조회 값이 MCV에 있으면 정확한 행 수를, 없으면 "MCV로 설명된 몫을 제외한 나머지의 평균"을 사용 — 쏠린 분포 컬럼에서 단순 `total/distinct` 평균보다 정확. V1 범위: 등호 조회 전용(범위 조건·조인 카디널리티는 기존 히스토그램/NDV 방식 그대로)
 - [x] BACKUP [DATABASE db] [INTO 'file'] — mysqldump 스타일 SQL 덤프 생성 (DROP TABLE IF EXISTS + CREATE TABLE + INSERT)
 - [x] RESTORE [DATABASE db] FROM 'file' — SQL 덤프 파일 복원 (세미콜론 분리 후 순차 실행, 오류 건너뜀)
 - [x] Auto-ANALYZE — INSERT/UPDATE/DELETE 누적 변경이 테이블 크기 단계별 임계값 초과 시 자동 히스토그램 재수집 (신규 100건·소형 10%·중형 2%·대형 0.5%, 플래너 통계 자동 최신화)

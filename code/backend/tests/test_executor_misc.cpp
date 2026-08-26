@@ -256,7 +256,7 @@ TEST_CASE("Multi-table UPDATE keeps the target table's composite secondary index
     REQUIRE(r.is_ok());
 
     auto s = ex.get_shared()->read();
-    auto& ci = s->composite_indexes.at("idx_region_budget");
+    auto& ci = s->composite_indexes.at("company.dept_idx_region_budget");
     REQUIRE_FALSE(ci.search_exact({"5", "100"}).has_value());
     REQUIRE(ci.search_exact({"5", "999"}).has_value());
     REQUIRE(ci.search_exact({"6", "200"}).has_value()); // untouched row still present
@@ -279,7 +279,7 @@ TEST_CASE("Multi-table DELETE keeps the target table's composite secondary index
     REQUIRE(r.is_ok());
 
     auto s = ex.get_shared()->read();
-    auto& ci = s->composite_indexes.at("idx_region_sal");
+    auto& ci = s->composite_indexes.at("company.emp_idx_region_sal");
     REQUIRE_FALSE(ci.search_exact({"5", "1000"}).has_value());
     REQUIRE(ci.search_exact({"6", "2000"}).has_value());
 }

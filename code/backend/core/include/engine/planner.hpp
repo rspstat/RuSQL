@@ -55,8 +55,28 @@ struct JoinAlgo {
     struct Hash { std::string probe_col, build_col; };
     struct SortMerge { std::string probe_col, build_col; };
     struct IndexNL { std::string probe_col, right_pk_col; };
+    // Mirror image of IndexNL: iterates the RIGHT (joined-in) table and probes an index on
+    // the LEFT/base table instead -- chosen when the base table is much larger than the
+    // right table and the base table's own join column has a PK, secondary B+Tree, or hash
+    // index (e.g. a recursive CTE's static "chain" table, indexed on the parent-pointer
+    // column, joined against a tiny per-iteration delta). Only ever produced for the
+    // base<->first-join step, where "left" is still a real physical table with its own
+    // index -- see choose_join_algo's left_table parameter and plan_join's is_first_join
+    // gate. `right_extract_col`: the column read from each iterated RIGHT row to get the
+    // join value. `left_index_key`: the map key to probe -- `left_table`'s own name for a PK
+    // index (s.indexes), or find_secondary_index()/find_hash_index()'s result otherwise.
+    // `left_is_hash`/`left_is_secondary_btree` distinguish which map AND which JSON shape to
+    // expect back: PK (both false) stores one Row per key in s.indexes; a secondary B+Tree
+    // (left_is_secondary_btree) stores a JSON ARRAY of Rows per key in the same s.indexes
+    // map (a column need not be unique); a hash index (left_is_hash) is probed via
+    // s.hash_indexes and already returns a vector<Row> bucket directly, no JSON involved.
+    struct ReverseIndexNL {
+        std::string right_extract_col, left_index_key;
+        bool left_is_hash = false;
+        bool left_is_secondary_btree = false;
+    };
 
-    using Data = std::variant<NestedLoop, Hash, SortMerge, IndexNL>;
+    using Data = std::variant<NestedLoop, Hash, SortMerge, IndexNL, ReverseIndexNL>;
     Data data;
 
     JoinAlgo() : data(NestedLoop{}) {}
@@ -138,7 +158,7 @@ private:
     std::optional<std::string> find_secondary_index(const std::string& table, const std::string& col) const;
     std::optional<std::string> find_hash_index(const std::string& table, const std::string& col) const;
 
-    JoinPlan plan_join(const TablePlan& base, const Join& join) const;
+    JoinPlan plan_join(const TablePlan& base, const Join& join, bool is_first_join) const;
     std::size_t estimate_join_output(const TablePlan& base, std::size_t right_size, const CondExpr& on_expr, const std::string& right_table) const;
     JoinAlgo choose_join_algo(std::size_t left_size, std::size_t right_size, const CondExpr& on_expr,
                               const std::string& left_table, const std::string& right_table) const;

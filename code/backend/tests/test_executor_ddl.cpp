@@ -291,7 +291,7 @@ TEST_CASE("CREATE INDEX btree/hash/composite and DROP INDEX", "[executor][ddl]")
         auto s = ex.get_shared()->read();
         REQUIRE(s->indexes.count("company.employee_idx_emp_dept") == 1);
         REQUIRE(s->hash_indexes.count("company.employee_idx_emp_email") == 1);
-        REQUIRE(s->composite_indexes.count("idx_emp_dept_sal") == 1);
+        REQUIRE(s->composite_indexes.count("company.employee_idx_emp_dept_sal") == 1);
     }
 
     REQUIRE(ex.execute_sql("DROP INDEX IF EXISTS idx_emp_dept").is_ok());
@@ -306,8 +306,191 @@ TEST_CASE("CREATE INDEX btree/hash/composite and DROP INDEX", "[executor][ddl]")
         auto s = ex.get_shared()->read();
         REQUIRE(s->indexes.count("company.employee_idx_emp_dept") == 0);
         REQUIRE(s->hash_indexes.count("company.employee_idx_emp_email") == 0);
-        REQUIRE(s->composite_indexes.count("idx_emp_dept_sal") == 0);
+        REQUIRE(s->composite_indexes.count("company.employee_idx_emp_dept_sal") == 0);
     }
+}
+
+// Regression for a real bug: index_meta/hash_index_meta/composite_indexes used to be keyed
+// by the bare, user-supplied index name alone (not "<table>_<index_name>", the convention
+// already correctly used by the underlying s.indexes/s.hash_indexes storage maps). Since
+// unordered_map::insert() is a silent no-op when the key already exists, creating an index
+// with a name already used by ANOTHER table/database silently failed to register at all --
+// no error, no warning, just a missing index. This reproduces that exact scenario (same bare
+// index name reused across two different tables) and confirms both indexes independently
+// exist and are usable, for all three index kinds (btree, hash, composite).
+TEST_CASE("CREATE INDEX with a name already used by another table registers independently, not silently",
+          "[executor][ddl][regression]") {
+    TempDataDir dir("exec_ddl_data_idx_name_collision");
+    Executor ex(dir.path);
+    REQUIRE(ex.execute_sql("CREATE DATABASE d1").is_ok());
+    REQUIRE(ex.execute_sql("USE d1").is_ok());
+    REQUIRE(ex.execute_sql("CREATE TABLE t1 (id INT PRIMARY KEY, a INT, b INT, c VARCHAR(50))").is_ok());
+    REQUIRE(ex.execute_sql("CREATE TABLE t2 (id INT PRIMARY KEY, a INT, b INT, c VARCHAR(50))").is_ok());
+    REQUIRE(ex.execute_sql("INSERT INTO t1 VALUES (1, 10, 100, 'x')").is_ok());
+    REQUIRE(ex.execute_sql("INSERT INTO t2 VALUES (1, 20, 200, 'y')").is_ok());
+
+    // Same bare index name ("idx_a") reused across t1 and t2, for all 3 index kinds.
+    REQUIRE(ex.execute_sql("CREATE INDEX idx_a ON t1 (a)").is_ok());
+    REQUIRE(ex.execute_sql("CREATE INDEX idx_a ON t2 (a)").is_ok());
+    REQUIRE(ex.execute_sql("CREATE INDEX idx_c ON t1 (c) USING HASH").is_ok());
+    REQUIRE(ex.execute_sql("CREATE INDEX idx_c ON t2 (c) USING HASH").is_ok());
+    REQUIRE(ex.execute_sql("CREATE INDEX idx_ab ON t1 (a, b)").is_ok());
+    REQUIRE(ex.execute_sql("CREATE INDEX idx_ab ON t2 (a, b)").is_ok());
+
+    {
+        auto s = ex.get_shared()->read();
+        REQUIRE(s->index_meta.count("d1.t1_idx_a") == 1);
+        REQUIRE(s->index_meta.count("d1.t2_idx_a") == 1);
+        REQUIRE(s->hash_index_meta.count("d1.t1_idx_c") == 1);
+        REQUIRE(s->hash_index_meta.count("d1.t2_idx_c") == 1);
+        REQUIRE(s->composite_indexes.count("d1.t1_idx_ab") == 1);
+        REQUIRE(s->composite_indexes.count("d1.t2_idx_ab") == 1);
+    }
+
+    // Both indexes are genuinely usable (not just present in metadata): a planner-driven
+    // point lookup on each table must actually find its own row via its own index.
+    auto r1 = ex.execute_sql("EXPLAIN SELECT * FROM t1 WHERE a = 10");
+    REQUIRE(r1.is_ok());
+    REQUIRE(r1.value().find("Index Scan") != std::string::npos);
+    auto r2 = ex.execute_sql("SELECT * FROM t2 WHERE a = 20");
+    REQUIRE(r2.is_ok());
+    REQUIRE(r2.value().find("1 row(s) returned.") != std::string::npos);
+
+    // SHOW INDEX must display the bare name back (not the qualified "table_name" key).
+    auto show1 = ex.execute_sql("SHOW INDEX FROM t1");
+    REQUIRE(show1.is_ok());
+    REQUIRE(show1.value().find("idx_a") != std::string::npos);
+    REQUIRE(show1.value().find("t1_idx_a") == std::string::npos);
+    auto show2 = ex.execute_sql("SHOW INDEX FROM t2");
+    REQUIRE(show2.is_ok());
+    REQUIRE(show2.value().find("idx_a") != std::string::npos);
+    REQUIRE(show2.value().find("t2_idx_a") == std::string::npos);
+}
+
+// Same collision scenario as above, but across two DATABASES instead of two tables in the
+// same database with the same bare table name too -- confirms the fix isn't accidentally
+// scoped to "same database" only.
+TEST_CASE("CREATE INDEX with a name already used in another database registers independently",
+          "[executor][ddl][regression]") {
+    TempDataDir dir("exec_ddl_data_idx_name_collision_db");
+    Executor ex(dir.path);
+    REQUIRE(ex.execute_sql("CREATE DATABASE db1").is_ok());
+    REQUIRE(ex.execute_sql("USE db1").is_ok());
+    REQUIRE(ex.execute_sql("CREATE TABLE chain (id INT PRIMARY KEY, parent_id INT)").is_ok());
+    REQUIRE(ex.execute_sql("INSERT INTO chain VALUES (1, 100)").is_ok());
+    REQUIRE(ex.execute_sql("CREATE INDEX idx_chain_parent ON chain (parent_id)").is_ok());
+
+    REQUIRE(ex.execute_sql("CREATE DATABASE db2").is_ok());
+    REQUIRE(ex.execute_sql("USE db2").is_ok());
+    REQUIRE(ex.execute_sql("CREATE TABLE chain (id INT PRIMARY KEY, parent_id INT)").is_ok());
+    REQUIRE(ex.execute_sql("INSERT INTO chain VALUES (1, 200)").is_ok());
+    REQUIRE(ex.execute_sql("CREATE INDEX idx_chain_parent ON chain (parent_id)").is_ok());
+
+    auto show2 = ex.execute_sql("SHOW INDEX FROM chain");
+    REQUIRE(show2.is_ok());
+    REQUIRE(show2.value().find("idx_chain_parent") != std::string::npos);
+    REQUIRE(show2.value().find("PRIMARY") != std::string::npos);
+
+    REQUIRE(ex.execute_sql("USE db1").is_ok());
+    auto show1 = ex.execute_sql("SHOW INDEX FROM chain");
+    REQUIRE(show1.is_ok());
+    REQUIRE(show1.value().find("idx_chain_parent") != std::string::npos);
+
+    {
+        auto s = ex.get_shared()->read();
+        REQUIRE(s->index_meta.count("db1.chain_idx_chain_parent") == 1);
+        REQUIRE(s->index_meta.count("db2.chain_idx_chain_parent") == 1);
+    }
+}
+
+// DROP INDEX has no "ON table" clause to disambiguate, so it must fall back to a suffix
+// match -- confirm it drops the intended index (by bare name) without disturbing the
+// same-named index that happens to live on a different table.
+TEST_CASE("DROP INDEX with a name reused on another table only drops one, by suffix match",
+          "[executor][ddl][regression]") {
+    TempDataDir dir("exec_ddl_data_drop_idx_collision");
+    Executor ex(dir.path);
+    REQUIRE(ex.execute_sql("CREATE DATABASE d1").is_ok());
+    REQUIRE(ex.execute_sql("USE d1").is_ok());
+    REQUIRE(ex.execute_sql("CREATE TABLE t1 (id INT PRIMARY KEY, a INT)").is_ok());
+    REQUIRE(ex.execute_sql("CREATE TABLE t2 (id INT PRIMARY KEY, a INT)").is_ok());
+    REQUIRE(ex.execute_sql("CREATE INDEX idx_a ON t1 (a)").is_ok());
+    REQUIRE(ex.execute_sql("CREATE INDEX idx_a ON t2 (a)").is_ok());
+
+    auto drop = ex.execute_sql("DROP INDEX idx_a");
+    REQUIRE(drop.is_ok());
+
+    auto s = ex.get_shared()->read();
+    std::size_t remaining = s->index_meta.count("d1.t1_idx_a") + s->index_meta.count("d1.t2_idx_a");
+    REQUIRE(remaining == 1); // exactly one of the two was dropped, not both, not neither
+}
+
+// The persisted-index-meta round trip must survive the same bare-name-reuse scenario: a
+// fresh Executor reloading from disk should see BOTH indexes, correctly attributed to their
+// own tables, not have one clobber the other during load.
+TEST_CASE("Reused index names across tables survive a reload from disk, independently",
+          "[executor][ddl][regression]") {
+    TempDataDir dir("exec_ddl_data_idx_name_collision_reload");
+    {
+        Executor ex(dir.path);
+        REQUIRE(ex.execute_sql("CREATE DATABASE d1").is_ok());
+        REQUIRE(ex.execute_sql("USE d1").is_ok());
+        REQUIRE(ex.execute_sql("CREATE TABLE t1 (id INT PRIMARY KEY, a INT)").is_ok());
+        REQUIRE(ex.execute_sql("CREATE TABLE t2 (id INT PRIMARY KEY, a INT)").is_ok());
+        REQUIRE(ex.execute_sql("INSERT INTO t1 VALUES (1, 10)").is_ok());
+        REQUIRE(ex.execute_sql("INSERT INTO t2 VALUES (1, 20)").is_ok());
+        REQUIRE(ex.execute_sql("CREATE INDEX idx_a ON t1 (a)").is_ok());
+        REQUIRE(ex.execute_sql("CREATE INDEX idx_a ON t2 (a)").is_ok());
+    }
+    {
+        // Row-level data persistence across a fresh-Executor reload isn't a property this
+        // suite otherwise relies on (the sibling "reloads persisted schema/tables/indexes"
+        // test above only checks catalog/index_meta counts, never actual row data) -- so
+        // this test sticks to the same scope: confirming the index METADATA survives the
+        // reload correctly attributed per-table, not clobbered by the name collision.
+        Executor ex2(dir.path);
+        auto s = ex2.get_shared()->read();
+        REQUIRE(s->index_meta.count("d1.t1_idx_a") == 1);
+        REQUIRE(s->index_meta.count("d1.t2_idx_a") == 1);
+        REQUIRE(s->index_meta.at("d1.t1_idx_a").first == "d1.t1");
+        REQUIRE(s->index_meta.at("d1.t2_idx_a").first == "d1.t2");
+    }
+}
+
+// ALTER TABLE RENAME must keep index_meta/hash_index_meta/composite_indexes' qualified keys
+// (and their .first/.table values) in sync with the renamed table -- otherwise a
+// find_secondary_index/find_hash_index lookup post-rename returns a stale key that no longer
+// exists in s.indexes/s.hash_indexes (a real bug introduced by qualifying these keys with the
+// table name, fixed in the same pass as the collision bug above).
+TEST_CASE("ALTER TABLE RENAME keeps secondary/hash/composite indexes usable under the new name",
+          "[executor][ddl][regression]") {
+    TempDataDir dir("exec_ddl_data_rename_keeps_indexes");
+    Executor ex(dir.path);
+    REQUIRE(ex.execute_sql("CREATE DATABASE d1").is_ok());
+    REQUIRE(ex.execute_sql("USE d1").is_ok());
+    REQUIRE(ex.execute_sql("CREATE TABLE old_t (id INT PRIMARY KEY, a INT, b INT, c VARCHAR(50))").is_ok());
+    REQUIRE(ex.execute_sql("INSERT INTO old_t VALUES (1, 10, 100, 'x')").is_ok());
+    REQUIRE(ex.execute_sql("CREATE INDEX idx_a ON old_t (a)").is_ok());
+    REQUIRE(ex.execute_sql("CREATE INDEX idx_c ON old_t (c) USING HASH").is_ok());
+    REQUIRE(ex.execute_sql("CREATE INDEX idx_ab ON old_t (a, b)").is_ok());
+
+    REQUIRE(ex.execute_sql("ALTER TABLE old_t RENAME TO new_t").is_ok());
+
+    {
+        auto s = ex.get_shared()->read();
+        REQUIRE(s->index_meta.count("d1.new_t_idx_a") == 1);
+        REQUIRE(s->hash_index_meta.count("d1.new_t_idx_c") == 1);
+        REQUIRE(s->composite_indexes.count("d1.new_t_idx_ab") == 1);
+        REQUIRE(s->index_meta.count("d1.old_t_idx_a") == 0);
+    }
+
+    auto r = ex.execute_sql("EXPLAIN SELECT * FROM new_t WHERE a = 10");
+    REQUIRE(r.is_ok());
+    REQUIRE(r.value().find("Index Scan") != std::string::npos);
+
+    auto show = ex.execute_sql("SHOW INDEX FROM new_t");
+    REQUIRE(show.is_ok());
+    REQUIRE(show.value().find("idx_a") != std::string::npos);
 }
 
 TEST_CASE("CREATE VIEW rejects unknown base table and DROP VIEW is idempotent", "[executor][ddl]") {
@@ -424,6 +607,6 @@ TEST_CASE("A fresh Executor pointed at the same directory reloads persisted sche
         auto s = ex2.get_shared()->read();
         REQUIRE(s->databases.count("company") == 1);
         REQUIRE(s->catalog.tables.count("company.department") == 1);
-        REQUIRE(s->index_meta.count("idx_dept_name") == 1);
+        REQUIRE(s->index_meta.count("company.department_idx_dept_name") == 1);
     }
 }

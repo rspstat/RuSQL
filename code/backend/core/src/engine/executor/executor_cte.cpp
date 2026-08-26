@@ -7,6 +7,7 @@
 #include "engine/executor/executor.hpp"
 
 #include <algorithm>
+#include <unordered_set>
 
 namespace engine {
 
@@ -57,6 +58,76 @@ StringResult Executor::exec_with(SharedDatabase& s, std::vector<std::pair<std::s
             s.buffer_pool.write_page(name, accumulated);
             s.indexes[name] = BPlusTree();
 
+            // Perf: dedup used to be std::find(accumulated.begin(), accumulated.end(), mapped)
+            // -- an O(n) linear scan per candidate row, making the whole recursive-accumulation
+            // loop O(n^2) in the number of rows produced (PLAN.md Section E). Every `mapped` row
+            // in this loop has exactly `cols`'s columns plus the two constant "_xmin"/"_xmax"
+            // sentinels (see below), so joining `cols`'s values in their fixed vector order is a
+            // faithful stand-in for Row equality here -- lets dedup use an O(1)-average hash set
+            // instead. `seen` mirrors `accumulated` only (updated once per iteration, after that
+            // iteration's whole new_rows batch is processed) so within-iteration duplicates are
+            // still NOT deduped against each other, exactly matching the original std::find
+            // behavior (which only ever checked against `accumulated`, never against `fresh`).
+            auto row_key = [&cols](const Row& r) {
+                std::string key;
+                for (auto& c : cols) {
+                    auto it = r.find(c);
+                    key += it != r.end() ? it->second : std::string();
+                    key += '\x01';
+                }
+                return key;
+            };
+            std::unordered_set<std::string> seen;
+            seen.reserve(accumulated.size());
+            for (auto& r : accumulated) seen.insert(row_key(r));
+
+            // Perf (semi-naive evaluation): the loop below used to re-execute `right`
+            // against the FULL accumulated-so-far table every iteration, re-deriving
+            // already-known relationships over and over -- O(iterations * accumulated
+            // size) even with the O(1) dedup fix above. Classic semi-naive recursive-query
+            // evaluation (Datalog's standard optimization for monotonic recursion) instead
+            // joins the recursive term against only the DELTA (rows added in the previous
+            // iteration): any row derivable by joining against an OLDER row was already
+            // derived in that older row's own iteration, so re-deriving it again from the
+            // full table is pure waste -- it'll just get filtered out by `seen` anyway.
+            // This is only sound when `right` references the CTE exactly once and has no
+            // other construct that would see a different (wrong) answer when its input
+            // shrinks from "everything so far" to "just the delta": no FROM-subquery, no
+            // LATERAL/subquery join, no GROUP BY, no aggregate or scalar-subquery SELECT
+            // column, no subquery in WHERE/HAVING, and no LIMIT/OFFSET (which would return
+            // a different row SET, not just a slower-to-compute same set, over a smaller
+            // input). Whenever any of these appear, fall back to the original always-safe
+            // full-accumulation behavior unchanged -- never a correctness trade, only a
+            // perf one that's foregone for shapes this analysis can't yet prove safe for.
+            bool semi_naive_ok = false;
+            if (auto* right_sel = std::get_if<Statement::Select>(&right.data)) {
+                semi_naive_ok = !right_sel->subquery && !right_sel->group_by && !right_sel->limit && !right_sel->offset &&
+                                !condition_has_subquery(right_sel->condition) && !condition_has_subquery(right_sel->having);
+                if (semi_naive_ok) {
+                    for (auto& col : right_sel->columns) {
+                        if (std::holds_alternative<SelectColumn::Agg>(col.data) || std::holds_alternative<SelectColumn::AggAlias>(col.data) ||
+                            std::holds_alternative<SelectColumn::Subquery>(col.data)) {
+                            semi_naive_ok = false;
+                            break;
+                        }
+                    }
+                }
+                if (semi_naive_ok) {
+                    std::size_t cte_refs = (right_sel->table == name) ? 1 : 0;
+                    for (auto& j : right_sel->joins) {
+                        if (j.lateral || j.subquery) {
+                            semi_naive_ok = false;
+                            break;
+                        }
+                        if (j.table == name) cte_refs++;
+                    }
+                    if (semi_naive_ok && cte_refs != 1) semi_naive_ok = false;
+                }
+            }
+            // The first iteration's delta is the base case itself -- nothing has been
+            // derived yet, so joining against the base case IS the correct starting input.
+            std::vector<Row> delta = accumulated;
+
             // Regression: this loop used to have no way to tell "stopped because no new
             // rows appeared" (correct fixed point) apart from "stopped because we hit the
             // iteration cap" (recursion didn't converge) -- both fell through to the exact
@@ -69,6 +140,13 @@ StringResult Executor::exec_with(SharedDatabase& s, std::vector<std::pair<std::s
             // silently returning a partial result -- match both here.
             bool reached_fixed_point = false;
             for (int iter = 0; iter < 1000; iter++) {
+                if (semi_naive_ok) {
+                    s.tables[name] = delta;
+                    s.buffer_pool.write_page(name, delta);
+                } else {
+                    s.tables[name] = accumulated;
+                    s.buffer_pool.write_page(name, accumulated);
+                }
                 auto rec_out = execute_with_s(s, right);
                 if (rec_out.is_err()) {
                     for (auto& n : cte_names) {
@@ -86,6 +164,7 @@ StringResult Executor::exec_with(SharedDatabase& s, std::vector<std::pair<std::s
                 auto [rec_cols, new_rows] = parse_table_output(rec_out.value());
 
                 std::vector<Row> fresh;
+                std::vector<std::string> fresh_keys;
                 for (auto& rec_row : new_rows) {
                     Row mapped;
                     for (std::size_t i = 0; i < cols.size(); i++) {
@@ -105,16 +184,27 @@ StringResult Executor::exec_with(SharedDatabase& s, std::vector<std::pair<std::s
                     // txn-id counter, breaking the recursive accumulation loop below.
                     mapped["_xmin"] = "0";
                     mapped["_xmax"] = "0";
-                    if (std::find(accumulated.begin(), accumulated.end(), mapped) == accumulated.end()) fresh.push_back(std::move(mapped));
+                    std::string key = row_key(mapped);
+                    if (!seen.count(key)) {
+                        fresh_keys.push_back(std::move(key));
+                        fresh.push_back(std::move(mapped));
+                    }
                 }
                 if (fresh.empty()) {
                     reached_fixed_point = true;
                     break;
                 }
+                for (auto& k : fresh_keys) seen.insert(std::move(k));
                 accumulated.insert(accumulated.end(), fresh.begin(), fresh.end());
-                s.tables[name] = accumulated;
-                s.buffer_pool.write_page(name, accumulated);
+                if (semi_naive_ok) delta = std::move(fresh);
             }
+
+            // Whatever the loop above left in s.tables[name] mid-iteration (possibly just
+            // the last delta, under semi-naive evaluation) -- restore the FULL accumulated
+            // result before anything downstream (the main query below, or a later sibling
+            // CTE) reads this CTE's table.
+            s.tables[name] = accumulated;
+            s.buffer_pool.write_page(name, accumulated);
 
             if (!reached_fixed_point) {
                 for (auto& n : cte_names) {

@@ -258,8 +258,15 @@ StringResult Executor::exec_show_index(const SharedDatabase& s, const std::strin
         }
     }
 
+    // Keys are stored as "<table>_<index_name>" (to allow the same bare index name to be
+    // reused across tables/databases) -- strip the table prefix back off for display.
+    std::string key_prefix = q_table + "_";
+    auto strip_prefix = [&](const std::string& key) {
+        return key.compare(0, key_prefix.size(), key_prefix) == 0 ? key.substr(key_prefix.size()) : key;
+    };
+
     for (auto& [idx_name, meta] : s.index_meta) {
-        if (meta.first == q_table) rows.push_back(bare + "\t" + idx_name + "\t" + meta.second + "\tBTREE");
+        if (meta.first == q_table) rows.push_back(bare + "\t" + strip_prefix(idx_name) + "\t" + meta.second + "\tBTREE");
     }
     for (auto& [idx_name, comp] : s.composite_indexes) {
         if (comp.table == q_table) {
@@ -268,7 +275,7 @@ StringResult Executor::exec_show_index(const SharedDatabase& s, const std::strin
                 if (i) cols += ", ";
                 cols += comp.columns[i];
             }
-            rows.push_back(bare + "\t" + idx_name + "\t" + cols + "\tBTREE");
+            rows.push_back(bare + "\t" + strip_prefix(idx_name) + "\t" + cols + "\tBTREE");
         }
     }
 

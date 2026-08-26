@@ -118,6 +118,25 @@ public:
                                        std::chrono::milliseconds timeout = std::chrono::milliseconds{0});
     std::vector<std::tuple<std::string, std::string, std::uint64_t>> gap_lock_rows() const;
 
+    // Predicate locks (SSI phantom detection for plain, unlocked SELECTs under
+    // SERIALIZABLE): unlike gap_locks_, these never block anything -- an INSERT into a
+    // registered range is always allowed to proceed immediately. They exist purely so a
+    // later COMMIT can tell whether a phantom row was inserted into a range this
+    // transaction read, at which point the READING transaction (not the inserter) is the
+    // one that must fail with a serialization error. Reuses GapLockRow's shape (lo/hi/
+    // inclusive/holder) since the range representation is identical to a gap lock's; the
+    // executor computes containment itself (same `gap_range_contains` it already uses for
+    // gap locks) and calls flag_predicate_violation() only once it knows a specific
+    // predicate-holder's range was hit by a new row.
+    void register_predicate_read(const std::string& table, std::optional<std::string> lo, bool lo_inclusive,
+                                   std::optional<std::string> hi, bool hi_inclusive, std::uint64_t txn_id);
+    std::vector<GapLockRow> predicate_reads_for(const std::string& table) const;
+    std::vector<std::tuple<std::string, std::string, std::uint64_t>> predicate_lock_rows() const;
+    void flag_predicate_violation(std::uint64_t txn_id);
+    // Returns true (and clears the flag) exactly once per violation -- called at COMMIT
+    // time by validate_serializable's caller.
+    bool take_predicate_violation(std::uint64_t txn_id);
+
 private:
     mutable std::mutex mutex_;
     // Notified (notify_all) from release() -- the only place a row lock ever becomes
@@ -131,6 +150,8 @@ private:
     std::unordered_map<std::uint64_t, std::uint64_t> wait_for_;
     std::vector<std::pair<std::uint64_t, std::uint64_t>> deadlock_history_;
     std::unordered_map<std::string, std::vector<GapLockRow>> gap_locks_;
+    std::unordered_map<std::string, std::vector<GapLockRow>> predicate_reads_;
+    std::unordered_set<std::uint64_t> predicate_violations_;
 
     // Internal, called only while mutex_ is already held. Returns nullopt if `txn_id` was
     // granted the lock (row_locks_ already updated to reflect it); otherwise returns the

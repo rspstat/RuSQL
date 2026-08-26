@@ -9,6 +9,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <shared_mutex>
@@ -546,6 +547,23 @@ public:
     // "inside" a gap-locked range matches how the same value would evaluate against the
     // original WHERE clause elsewhere in the engine.
     static bool gap_range_contains(const GapRange& range, const std::string& value);
+
+    // ── Index-assisted existence checks (FK/UNIQUE validation perf, see PLAN.md Section E)
+    // Does `table_rows` contain a row where `column` == val? Prefers an existing PK B+Tree /
+    // secondary B+Tree / hash index covering (table, column) over a linear scan when one is
+    // available. Safe to use even for an existence-ONLY question against a non-unique
+    // column: a secondary B+Tree index stores only one value per key, so finding (or not
+    // finding) a match through it isn't authoritative on its own for a non-unique column --
+    // this function only ever treats an index lookup as the final answer when it provably
+    // is one (the PK index, since PK is unique by definition; or a hash index, whose bucket
+    // already holds every physical row sharing that value), and otherwise falls through to
+    // the next index type or, ultimately, a full linear scan over `table_rows` -- so the
+    // result is always exactly what a full scan would have found, just usually faster.
+    // `accept` lets each call site apply its own exact pre-existing predicate (MVCC
+    // visibility, etc.) on top of the plain equality match, so no call site's semantics
+    // change -- only how fast the matching candidate is located.
+    static bool index_or_scan_exists(const SharedDatabase& s, const std::string& table, const std::vector<Row>& table_rows,
+                                       const std::string& column, const std::string& val, const std::function<bool(const Row&)>& accept);
 
     // ── Table partitioning (PARTITION BY RANGE/LIST/HASH, V1 -- executor_partition.cpp)
     // A partitioned table's catalog entry (TableSchema::partition_info) is the single

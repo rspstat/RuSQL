@@ -49,9 +49,9 @@
 | 일관성 (C) | ✓ | ✓ | ✓ | ✓ (PK/FK/UNIQUE/CHECK 검증) |
 | 격리성 (I) | ✓ | ✓ | ✓ | ✓ (`SnapshotCtx` 기반 MVCC 가시성: DML은 `s.tables`에 직접 기록되고 격리수준별 스냅샷으로 필터링 — 미커밋 행은 작성자 본인에게만 보임) |
 | 지속성 (D) | ✓ | ✓ | ✓ | ✓ (WAL fsync + 그룹 커밋; 전역 유일 txn_id 태깅으로 세션 간 공유 WAL/Undo Log 격리 — 한 세션의 COMMIT이 다른 세션의 진행 중인 트랜잭션 레코드를 파괴하지 않음) |
-| MVCC | ✓ (InnoDB Undo segment) | ✓ (튜플 버전 힙 내 저장) | ✓ (Undo tablespace 기반 Consistent Read) | ✓ (`_xmin`/`_xmax` 태깅 실제 다중버전 — UPDATE마다 새 물리 버전 생성, `SnapshotCtx` 기반 격리수준별 가시성, GC 호라이즌 기반 VACUUM; 같은 테이블의 서로 다른 행에 대한 쓰기도 실제로 동시 실행됨(행 단위 잠금 — `table_data_locks`+`LockManager` 행 클레임, 진짜 블로킹 대기 포함); Postgres 수준 완전 SSI는 아직 아님) |
+| MVCC | ✓ (InnoDB Undo segment) | ✓ (튜플 버전 힙 내 저장) | ✓ (Undo tablespace 기반 Consistent Read) | ✓ (`_xmin`/`_xmax` 태깅 실제 다중버전 — UPDATE마다 새 물리 버전 생성, `SnapshotCtx` 기반 격리수준별 가시성, GC 호라이즌 기반 VACUUM; 같은 테이블의 서로 다른 행에 대한 쓰기도 실제로 동시 실행됨(행 단위 잠금 — `table_data_locks`+`LockManager` 행 클레임, 진짜 블로킹 대기 포함); predicate lock으로 phantom 탐지는 되지만 Postgres 수준 완전 SSI(진짜 dangerous-structure 판정)는 아직 아님 — 아래 행 참고) |
 | 격리 수준 | 4가지 (기본: REPEATABLE READ) | 3가지 유효 (기본: READ COMMITTED) | 2가지 유효 — READ COMMITTED / SERIALIZABLE (기본: READ COMMITTED) | 4가지 (기본: READ COMMITTED) |
-| Serializable 구현 | 잠금 기반 + GAP Lock (팬텀 방지) | SSI (Serializable Snapshot Isolation) | 스냅샷 기반 (ORA-08177 직렬화 오류 반환) | read-set 기반 충돌 검증 + Gap Lock (완전한 SSI 아님 — predicate lock 없어 잠금 없는 일반 SELECT의 phantom/write-skew는 미방지) |
+| Serializable 구현 | 잠금 기반 + GAP Lock (팬텀 방지) | SSI (Serializable Snapshot Isolation) | 스냅샷 기반 (ORA-08177 직렬화 오류 반환) | read-set 기반 충돌 검증 + Gap Lock + **non-blocking predicate lock**(잠금 없는 일반 SELECT가 스캔한 PK 범위를 등록해두고, 나중에 그 범위에 phantom이 INSERT되면 인서트는 막지 않되 읽은 쪽의 COMMIT을 "Serialization failure"로 실패시킴 — PostgreSQL의 SIREAD와 같은 non-blocking 방식). 다만 "범위가 겹치면 무조건 실패"하는 보수적 근사이지 Postgres의 진짜 rw-antidependency 사이클 판정(Cahill et al.)은 아님 — false positive(불필요한 실패)는 있을 수 있어도 false negative(놓치는 이상현상)는 없음 |
 | SAVEPOINT | ✓ | ✓ | ✓ | ✓ (Undo Log content-matching 기반, ROLLBACK TO 정상 동작) |
 | XA (분산 트랜잭션) | ✓ | ✓ | ✓ | ✗ |
 | 그룹 커밋 | ✓ (binlog 그룹 커밋) | ✓ (WAL writer 통합) | ✓ (LGWR 배치 플러시) | ✓ (GroupCommitCoordinator) |
@@ -236,7 +236,7 @@
 | 항목 | MySQL | PostgreSQL | Oracle | RuSQL |
 |------|-------|------------|--------|--------|
 | 비용 기반 최적화 (CBO) | ✓ | ✓ | ✓ | ✓ |
-| 통계 기반 선택도 | ✓ (histogram) | ✓ (pg_statistic) | ✓ (DBMS_STATS) | ✓ (ANALYZE TABLE — equi-depth 히스토그램 10-bucket; Auto-ANALYZE: 테이블 크기 단계별 임계값 — 신규 100건·소형 10%·중형 2%·대형 0.5%) |
+| 통계 기반 선택도 | ✓ (histogram, 8.0+ MCV 포함) | ✓ (pg_statistic — MCV 리스트 + 나머지 구간 히스토그램 하이브리드) | ✓ (DBMS_STATS — frequency/height-balanced/hybrid) | ✓ (ANALYZE TABLE — equi-depth 히스토그램 10-bucket + MCV 최대 10개(등호 조회 전용, count>1인 값만); Auto-ANALYZE: 테이블 크기 단계별 임계값 — 신규 100건·소형 10%·중형 2%·대형 0.5%) |
 | 인덱스 자동 선택 | ✓ | ✓ | ✓ | ✓ (인덱스 교차 포함 — AND 조건 다중 인덱스 PK HashSet 교집합) |
 | JOIN 알고리즘 | NestedLoop, Hash, BNL | NestedLoop, Hash, MergeJoin | NestedLoop, Hash, SortMerge | NestedLoop, IndexNestedLoop(INLJ), Hash, SortMerge — 비용 기반 자동 선택 (NL cost vs Hash cost, HASH_FACTOR=3) |
 | JOIN 순서 최적화 | ✓ (동적 프로그래밍) | ✓ (Geqo + 동적 프로그래밍) | ✓ (동적 프로그래밍) | ✓ (System-R bitmask DP, INNER 한정 · 그리디 폴백) |

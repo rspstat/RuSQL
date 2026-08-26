@@ -982,10 +982,18 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
                 for (auto& c : sc->columns) right_schema_cols.push_back(c.name);
             }
 
-            // Cross/Natural/FullOuter joins always use nested loop (no hash/sort-merge)
+            // Correctness fix: the planner-chosen algo (IndexNL/ReverseIndexNL especially)
+            // never NULL-pads an unmatched left row -- a probe miss is just dropped, which
+            // is correct ONLY for Inner (and Cross, already excluded below via nested_loop_
+            // join's own dedicated Cross handling). A LEFT/RIGHT JOIN previously could still
+            // be assigned IndexNL by the planner (only Cross/Natural/FullOuter were
+            // excluded), silently degrading to Inner-JOIN semantics whenever a probe missed
+            // -- switched from a denylist to an allowlist (Inner only) so no join type can
+            // reach an algo that doesn't know how to preserve its own NULL-padding
+            // semantics; everything else falls through to nested_loop_join below, which
+            // already has explicit, tested Left/Right/FullOuter branches.
             const JoinAlgo::Data* algo = nullptr;
-            if (j.join_type != JoinType::Cross && j.join_type != JoinType::Natural && j.join_type != JoinType::FullOuter
-                && ji < plan.joins.size()) {
+            if (j.join_type == JoinType::Inner && ji < plan.joins.size()) {
                 algo = &plan.joins[ji].algo.data;
             }
 
@@ -1019,6 +1027,69 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
                     current = std::move(out);
                 } else {
                     current = hash_join(current, right_rows, j.join_type, j.table, a->probe_col, a->probe_col, right_schema_cols);
+                }
+            } else if (algo && std::get_if<JoinAlgo::ReverseIndexNL>(algo)) {
+                auto* a = std::get_if<JoinAlgo::ReverseIndexNL>(algo);
+                // Mirror image of IndexNL above: iterate the (small) RIGHT table, probe an
+                // index on the LEFT/base table per right row. Only ever planned for the
+                // base<->first-join step (Planner::plan_join's is_first_join gate), where
+                // `current` still holds exactly the LEFT/base table's own rows -- never true
+                // for a 2nd+ join, where `current` is an accumulated multi-table result with
+                // no single backing index. Falls back to hash_join whenever a transaction is
+                // active or the expected index is missing, exactly like IndexNL does.
+                auto reverse_fallback = [&] {
+                    current = hash_join(current, right_rows, j.join_type, j.table, a->right_extract_col, a->right_extract_col, right_schema_cols);
+                };
+                if (txn.is_active()) {
+                    reverse_fallback();
+                } else if (a->left_is_hash) {
+                    if (auto hit = s.hash_indexes.find(a->left_index_key); hit != s.hash_indexes.end()) {
+                        std::vector<Row> out;
+                        out.reserve(right_rows.size());
+                        for (auto& right_row : right_rows) {
+                            const std::string* key = get_col(right_row, a->right_extract_col);
+                            if (!key || key->empty() || *key == "NULL") continue;
+                            for (auto& left_row : hit->second.get(*key)) {
+                                if (!is_visible_for_read(left_row, read_ctx)) continue;
+                                Row merged = left_row;
+                                merge_right(merged, right_row, j.table);
+                                out.push_back(std::move(merged));
+                            }
+                        }
+                        current = std::move(out);
+                    } else {
+                        reverse_fallback();
+                    }
+                } else if (auto lit = s.indexes.find(a->left_index_key); lit != s.indexes.end()) {
+                    std::vector<Row> out;
+                    out.reserve(right_rows.size());
+                    for (auto& right_row : right_rows) {
+                        const std::string* key = get_col(right_row, a->right_extract_col);
+                        if (!key || key->empty() || *key == "NULL") continue;
+                        if (auto val_json = lit->second.search(*key)) {
+                            // A secondary B+Tree index stores a JSON ARRAY of rows per key
+                            // (the column need not be unique); a PK index stores exactly one
+                            // Row object per key -- must parse each shape correctly.
+                            if (a->left_is_secondary_btree) {
+                                for (auto& left_row : nlohmann::json::parse(*val_json).get<std::vector<Row>>()) {
+                                    if (!is_visible_for_read(left_row, read_ctx)) continue;
+                                    Row merged = left_row;
+                                    merge_right(merged, right_row, j.table);
+                                    out.push_back(std::move(merged));
+                                }
+                            } else {
+                                Row left_row = nlohmann::json::parse(*val_json).get<Row>();
+                                if (is_visible_for_read(left_row, read_ctx)) {
+                                    Row merged = left_row;
+                                    merge_right(merged, right_row, j.table);
+                                    out.push_back(std::move(merged));
+                                }
+                            }
+                        }
+                    }
+                    current = std::move(out);
+                } else {
+                    reverse_fallback();
                 }
             } else {
                 const CondExpr& on_expr = j.on_expr;
@@ -1344,6 +1415,33 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
                                               std::to_string(lr2.holder) + ". Retry or SET @lock_wait_timeout=<ms> to adjust.");
                 }
             }
+        }
+    }
+
+    // Predicate lock (SSI phantom detection): a plain, unlocked SELECT under SERIALIZABLE
+    // currently only protects itself against rows it actually read being changed later
+    // (via record_read below, checked by validate_serializable at COMMIT) -- it registers
+    // nothing that would catch a brand-new row inserted into its WHERE range afterward.
+    // Unlike Gap Lock (for_update/for_share above), this never blocks the INSERT -- it
+    // just remembers the range so a later phantom INSERT into it can fail *this*
+    // transaction's COMMIT instead (see register_predicate_read's doc comment). Same V1
+    // scope as Gap Lock: single-column PK tables only, and (matching this function's
+    // existing for_update/for_share gap-lock scope) not applied to aggregate queries,
+    // which return earlier above.
+    if (!for_update && !for_share && txn.is_active() && txn.isolation_level() == IsolationLevel::Serializable) {
+        std::string pk_col = "id";
+        std::size_t pk_col_count = 0;
+        if (auto* sc = s.catalog.get_table(table)) {
+            for (auto& c : sc->columns) {
+                if (c.primary_key) {
+                    if (pk_col_count == 0) pk_col = c.name;
+                    pk_col_count++;
+                }
+            }
+        }
+        if (pk_col_count == 1) {
+            GapRange range = extract_pk_gap_range(condition, pk_col);
+            s.lock_mgr.register_predicate_read(table, range.lo, range.lo_inclusive, range.hi, range.hi_inclusive, txn.current_txn_id());
         }
     }
 

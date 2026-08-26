@@ -511,6 +511,103 @@ TEST_CASE("Gap lock does not block the holder's own INSERT into its locked range
     REQUIRE(a.execute_sql("COMMIT").is_ok());
 }
 
+// Predicate lock (SSI phantom detection): a plain, unlocked SELECT under SERIALIZABLE now
+// registers its WHERE-range as a predicate; a phantom INSERT into that range does NOT
+// block (unlike Gap Lock/FOR UPDATE above) but instead fails the READING transaction's
+// own COMMIT, mirroring PostgreSQL's non-blocking SIREAD check.
+TEST_CASE("A plain SELECT under SERIALIZABLE fails its own COMMIT if a phantom row lands in its scanned range",
+          "[executor][concurrency][predicate_lock]") {
+    TempDataDir dir("exec_concurrency_predicate_lock_1");
+    Executor a(dir.path);
+    REQUIRE(a.execute_sql("CREATE DATABASE d").is_ok());
+    REQUIRE(a.execute_sql("USE d").is_ok());
+    REQUIRE(a.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, val INT)").is_ok());
+    REQUIRE(a.execute_sql("INSERT INTO t VALUES (5, 5)").is_ok());
+    REQUIRE(a.execute_sql("INSERT INTO t VALUES (30, 30)").is_ok());
+
+    auto shared = a.get_shared();
+    Executor b = Executor::new_session(shared);
+    REQUIRE(b.execute_sql("USE d").is_ok());
+
+    REQUIRE(a.execute_sql("SET ISOLATION LEVEL SERIALIZABLE").is_ok());
+    REQUIRE(a.execute_sql("BEGIN").is_ok());
+    REQUIRE(a.execute_sql("SELECT * FROM t WHERE id BETWEEN 10 AND 20").is_ok()); // plain, no FOR UPDATE
+
+    // Does NOT block -- unlike Gap Lock, a predicate lock never stops the writer.
+    REQUIRE(b.execute_sql("INSERT INTO t VALUES (15, 15)").is_ok());
+
+    auto commit = a.execute_sql("COMMIT");
+    REQUIRE(commit.is_err());
+    REQUIRE(commit.error().find("Serialization failure") != std::string::npos);
+}
+
+TEST_CASE("A phantom INSERT outside the scanned range does not fail the reader's COMMIT",
+          "[executor][concurrency][predicate_lock]") {
+    TempDataDir dir("exec_concurrency_predicate_lock_2");
+    Executor a(dir.path);
+    REQUIRE(a.execute_sql("CREATE DATABASE d").is_ok());
+    REQUIRE(a.execute_sql("USE d").is_ok());
+    REQUIRE(a.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, val INT)").is_ok());
+
+    auto shared = a.get_shared();
+    Executor b = Executor::new_session(shared);
+    REQUIRE(b.execute_sql("USE d").is_ok());
+
+    REQUIRE(a.execute_sql("SET ISOLATION LEVEL SERIALIZABLE").is_ok());
+    REQUIRE(a.execute_sql("BEGIN").is_ok());
+    REQUIRE(a.execute_sql("SELECT * FROM t WHERE id BETWEEN 10 AND 20").is_ok());
+
+    REQUIRE(b.execute_sql("INSERT INTO t VALUES (100, 100)").is_ok()); // outside [10,20]
+
+    REQUIRE(a.execute_sql("COMMIT").is_ok());
+}
+
+// Matches Gap Lock's own scope: predicate locks are SERIALIZABLE-only (not REPEATABLE
+// READ), since the read-set/Gap Lock machinery already gives RR its InnoDB-style phantom
+// protection for the operations that take real locks (FOR UPDATE/FOR SHARE, range
+// UPDATE/DELETE) -- a plain SELECT under RR was never promised phantom-freedom to begin
+// with (ANSI RR doesn't require it), so no predicate is registered and this must not abort.
+TEST_CASE("A plain SELECT under REPEATABLE READ does not register a predicate, so a phantom does not fail its COMMIT",
+          "[executor][concurrency][predicate_lock]") {
+    TempDataDir dir("exec_concurrency_predicate_lock_3");
+    Executor a(dir.path);
+    REQUIRE(a.execute_sql("CREATE DATABASE d").is_ok());
+    REQUIRE(a.execute_sql("USE d").is_ok());
+    REQUIRE(a.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, val INT)").is_ok());
+
+    auto shared = a.get_shared();
+    Executor b = Executor::new_session(shared);
+    REQUIRE(b.execute_sql("USE d").is_ok());
+
+    REQUIRE(a.execute_sql("SET ISOLATION LEVEL REPEATABLE READ").is_ok());
+    REQUIRE(a.execute_sql("BEGIN").is_ok());
+    REQUIRE(a.execute_sql("SELECT * FROM t WHERE id BETWEEN 10 AND 20").is_ok());
+
+    REQUIRE(b.execute_sql("INSERT INTO t VALUES (15, 15)").is_ok());
+
+    REQUIRE(a.execute_sql("COMMIT").is_ok());
+}
+
+TEST_CASE("SHOW LOCKS lists an active predicate lock's range while its transaction is open",
+          "[executor][concurrency][predicate_lock]") {
+    TempDataDir dir("exec_concurrency_predicate_lock_4");
+    Executor a(dir.path);
+    REQUIRE(a.execute_sql("CREATE DATABASE d").is_ok());
+    REQUIRE(a.execute_sql("USE d").is_ok());
+    REQUIRE(a.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, val INT)").is_ok());
+
+    REQUIRE(a.execute_sql("SET ISOLATION LEVEL SERIALIZABLE").is_ok());
+    REQUIRE(a.execute_sql("BEGIN").is_ok());
+    REQUIRE(a.execute_sql("SELECT * FROM t WHERE id BETWEEN 10 AND 20").is_ok());
+
+    auto locks = a.execute_sql("SHOW LOCKS");
+    REQUIRE(locks.is_ok());
+    REQUIRE(locks.value().find("Predicate locks") != std::string::npos);
+    REQUIRE(locks.value().find("[10, 20]") != std::string::npos);
+
+    REQUIRE(a.execute_sql("COMMIT").is_ok());
+}
+
 // Row-level-concurrency prep, Stage 1: execute_sql's query-cache populate/invalidate
 // calls moved from shared->write() (whole database exclusive) to shared->read(), since
 // QueryResultCache is fully self-synchronized. This is the regression that matters: many

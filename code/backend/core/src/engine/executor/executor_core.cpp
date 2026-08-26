@@ -269,13 +269,13 @@ Executor::Executor(const std::string& dir, std::size_t buffer_pool_capacity) {
                 HashIndex hi(q_table, column);
                 if (auto it = tables.find(q_table); it != tables.end()) hi.rebuild(it->second);
                 hash_indexes.insert({q_table + "_" + meta.name, std::move(hi)});
-                hash_index_meta.insert({meta.name, {q_table, column}});
+                hash_index_meta.insert({q_table + "_" + meta.name, {q_table, column}});
             } else if (meta.columns.size() == 1) {
                 const std::string& column = meta.columns.front();
                 std::string key = q_table + "_" + meta.name;
                 if (auto tree = disk.load_btree_index(key)) {
                     indexes.insert({key, std::move(*tree)});
-                    index_meta.insert({meta.name, {q_table, column}});
+                    index_meta.insert({key, {q_table, column}});
                 } else {
                     std::vector<Row> rows;
                     if (auto it = tables.find(q_table); it != tables.end()) rows = it->second;
@@ -285,7 +285,7 @@ Executor::Executor(const std::string& dir, std::size_t buffer_pool_capacity) {
             } else {
                 CompositeIndex comp(q_table, meta.columns);
                 if (auto it = tables.find(q_table); it != tables.end()) comp.rebuild(it->second);
-                composite_indexes.insert({meta.name, std::move(comp)});
+                composite_indexes.insert({q_table + "_" + meta.name, std::move(comp)});
             }
         }
     }
@@ -309,7 +309,7 @@ Executor::Executor(const std::string& dir, std::size_t buffer_pool_capacity) {
         for (std::size_t i = 0; i < sec_rebuild_work.size(); i++) {
             auto& work = sec_rebuild_work[i];
             indexes.insert({work.index_key, std::move(built[i])});
-            index_meta.insert({work.meta_name, {work.q_table, work.column}});
+            index_meta.insert({work.index_key, {work.q_table, work.column}});
         }
     }
 

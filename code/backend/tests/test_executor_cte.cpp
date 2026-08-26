@@ -99,6 +99,61 @@ TEST_CASE("Recursive CTE walks a management tree to completion", "[executor][cte
     REQUIRE(r.value().find("Boss") < r.value().find("Leaf"));
 }
 
+// Perf (semi-naive evaluation): a diamond DAG where two different paths converge on the
+// same node (4) in the SAME iteration -- this is exactly the shape that distinguishes
+// "join against the whole accumulated table" from "join against just the previous
+// iteration's delta" if the two were NOT provably equivalent. Also exercises the
+// preserved quirk (within-one-iteration duplicates aren't deduped against each other):
+// node 4 is derived twice in one iteration (via 2->4 and 3->4), so the CTE's own raw rows
+// contain a literal duplicate -- the outer SELECT DISTINCT is what a real query would use
+// to get a clean answer, and that's what this test asserts on.
+TEST_CASE("Recursive CTE over a diamond DAG finds all reachable nodes despite converging paths",
+          "[executor][cte]") {
+    TempDataDir dir("exec_cte_data_7");
+    Executor ex(dir.path);
+    REQUIRE(ex.execute_sql("CREATE DATABASE d").is_ok());
+    REQUIRE(ex.execute_sql("USE d").is_ok());
+    REQUIRE(ex.execute_sql("CREATE TABLE edges (src INT, dst INT)").is_ok());
+    // 1->2, 1->3, 2->4, 3->4 (both 2 and 3 reach 4)
+    REQUIRE(ex.execute_sql("INSERT INTO edges VALUES (1,2),(1,3),(2,4),(3,4)").is_ok());
+
+    auto r = ex.execute_sql(
+        "WITH RECURSIVE reach AS ("
+        "SELECT 1 AS node "
+        "UNION ALL "
+        "SELECT e.dst FROM edges e JOIN reach r ON e.src = r.node"
+        ") SELECT DISTINCT node FROM reach ORDER BY node");
+    REQUIRE(r.is_ok());
+    REQUIRE(r.value().find("4 row(s) returned.") != std::string::npos); // {1,2,3,4}, deduped
+}
+
+// Perf (semi-naive evaluation): a WHERE-clause subquery in the recursive term must force
+// the safety check to fall back to the original always-correct full-accumulation
+// evaluation (not attempt delta-only substitution) -- this test exists to confirm the
+// fallback path itself still produces the correct answer, not just that it compiles.
+TEST_CASE("Recursive CTE with a subquery in its recursive term's WHERE clause still works (forces the "
+          "non-semi-naive fallback path)",
+          "[executor][cte]") {
+    TempDataDir dir("exec_cte_data_8");
+    Executor ex(dir.path);
+    REQUIRE(ex.execute_sql("CREATE DATABASE d").is_ok());
+    REQUIRE(ex.execute_sql("USE d").is_ok());
+    REQUIRE(ex.execute_sql("CREATE TABLE edges (src INT, dst INT)").is_ok());
+    REQUIRE(ex.execute_sql("INSERT INTO edges VALUES (1,2),(2,3),(3,4)").is_ok());
+    REQUIRE(ex.execute_sql("CREATE TABLE excluded (node INT)").is_ok());
+    REQUIRE(ex.execute_sql("INSERT INTO excluded VALUES (99)").is_ok()); // excludes nothing real
+
+    auto r = ex.execute_sql(
+        "WITH RECURSIVE reach AS ("
+        "SELECT 1 AS node "
+        "UNION ALL "
+        "SELECT e.dst FROM edges e JOIN reach r ON e.src = r.node "
+        "WHERE e.dst NOT IN (SELECT node FROM excluded)"
+        ") SELECT node FROM reach ORDER BY node");
+    REQUIRE(r.is_ok());
+    REQUIRE(r.value().find("4 row(s) returned.") != std::string::npos); // {1,2,3,4}
+}
+
 TEST_CASE("Non-terminating recursive CTE errors instead of silently returning a truncated result", "[executor][cte]") {
     // Regression: exec_with's 1000-iteration cap used to have no way to distinguish
     // "stopped because a genuine fixed point was reached" from "stopped because the

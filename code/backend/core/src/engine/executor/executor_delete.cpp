@@ -412,11 +412,7 @@ StringResult Executor::exec_delete_inner(SharedDatabase& s, const std::string& t
                     auto dit = del_row.find(col.foreign_key->ref_column);
                     std::string del_val = dit != del_row.end() ? dit->second : std::string();
                     if (auto oit = s.tables.find(other_table); oit != s.tables.end()) {
-                        bool referenced = std::any_of(oit->second.begin(), oit->second.end(), [&](const Row& r) {
-                            if (!is_visible(r)) return false;
-                            auto it = r.find(col.name);
-                            return it != r.end() && it->second == del_val;
-                        });
+                        bool referenced = index_or_scan_exists(s, other_table, oit->second, col.name, del_val, is_visible);
                         if (referenced) {
                             return CascadeAttemptResult::hard_error(StringResult::Err(
                                 "Foreign key violation: row in '" + table + "' is referenced by '" + other_table + "'.'" + col.name + "'"));

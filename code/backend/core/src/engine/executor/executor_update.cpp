@@ -538,11 +538,7 @@ StringResult Executor::exec_update_inner(SharedDatabase& s, const std::string& t
                     switch (col.foreign_key->on_update) {
                         case FkAction::Restrict: {
                             if (auto oit2 = s.tables.find(other_table); oit2 != s.tables.end()) {
-                                bool referenced = std::any_of(oit2->second.begin(), oit2->second.end(), [&](const Row& r) {
-                                    if (!is_visible(r)) return false;
-                                    auto it = r.find(col.name);
-                                    return it != r.end() && it->second == old_val;
-                                });
+                                bool referenced = index_or_scan_exists(s, other_table, oit2->second, col.name, old_val, is_visible);
                                 if (referenced) {
                                     return CascadeAttemptResult::hard_error(StringResult::Err("Foreign key violation (ON UPDATE RESTRICT): '" +
                                                                                                 assign_col + "' is referenced by '" + other_table +

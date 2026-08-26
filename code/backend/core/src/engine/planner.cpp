@@ -56,8 +56,10 @@ SelectPlan Planner::plan(const std::string& table, const std::optional<CondExpr>
     // NDV(고유값 개수) 조회가 원래도 좌변을 "원본 테이블 하나"로만 다뤄왔던 기존 한계라 이 수정
     // 범위 밖(중간 결과 자체의 컬럼 통계는 추적하지 않음) -- 카디널리티(행 수)만 정확해진다.
     TablePlan current = base;
+    bool is_first_join = true;
     for (auto& j : joins) {
-        JoinPlan jp = plan_join(current, j);
+        JoinPlan jp = plan_join(current, j, is_first_join);
+        is_first_join = false;
         current.est_rows = jp.est_rows;
         join_plans.push_back(std::move(jp));
     }
@@ -285,21 +287,28 @@ bool Planner::is_col_ref_in_context(const std::string& k, const std::string& tab
 
 std::optional<std::string> Planner::find_secondary_index(const std::string& table, const std::string& col) const {
     for (auto& [name, tc] : index_meta_) {
-        if (tc.first == table && tc.second == col) return table + "_" + name;
+        if (tc.first == table && tc.second == col) return name;
     }
     return std::nullopt;
 }
 
 std::optional<std::string> Planner::find_hash_index(const std::string& table, const std::string& col) const {
     for (auto& [name, tc] : hash_index_meta_) {
-        if (tc.first == table && tc.second == col) return table + "_" + name;
+        if (tc.first == table && tc.second == col) return name;
     }
     return std::nullopt;
 }
 
-JoinPlan Planner::plan_join(const TablePlan& base, const Join& join) const {
+JoinPlan Planner::plan_join(const TablePlan& base, const Join& join, bool is_first_join) const {
     std::size_t right_size = table_size(join.table);
-    JoinAlgo algo = choose_join_algo(base.est_rows, right_size, join.on_expr, base.table, join.table);
+    // ReverseIndexNL (iterate the right/joined table, probe the LEFT/base table's own index)
+    // is only sound when `base` is still a real physical table with its own index -- true
+    // only for the very first join in a chain. From the 2nd join on, `base.table` is
+    // deliberately kept pointing at the ORIGINAL first table (see plan()'s comment) purely
+    // for NDV lookups; passing it here too would let choose_join_algo probe an index that
+    // has nothing to do with the actual accumulated intermediate result.
+    static const std::string kNoLeftTable;
+    JoinAlgo algo = choose_join_algo(base.est_rows, right_size, join.on_expr, is_first_join ? base.table : kNoLeftTable, join.table);
     double est_cost = std::visit(
         [&](const auto& alt) -> double {
             using T = std::decay_t<decltype(alt)>;
@@ -310,7 +319,10 @@ JoinPlan Planner::plan_join(const TablePlan& base, const Join& join) const {
             } else if constexpr (std::is_same_v<T, JoinAlgo::SortMerge>) {
                 double n = static_cast<double>(base.est_rows + right_size);
                 return n * std::max(std::log2(n), 1.0) + n;
-            } else {
+            } else if constexpr (std::is_same_v<T, JoinAlgo::ReverseIndexNL>) {
+                double log_m = std::max(std::log2(static_cast<double>(std::max<std::size_t>(base.est_rows, 1))), 1.0);
+                return static_cast<double>(right_size) * log_m;
+            } else { // IndexNL
                 double log_m = std::max(std::log2(static_cast<double>(right_size)), 1.0);
                 return static_cast<double>(base.est_rows) * log_m;
             }
@@ -363,13 +375,21 @@ std::size_t Planner::estimate_join_output(const TablePlan& base, std::size_t rig
 }
 
 JoinAlgo Planner::choose_join_algo(std::size_t left_size, std::size_t right_size, const CondExpr& on_expr,
-                                    const std::string& /*left_table*/, const std::string& right_table) const {
+                                    const std::string& left_table, const std::string& right_table) const {
     constexpr std::size_t HASH_FACTOR = 3;
     std::size_t nl_cost = left_size * right_size; // saturating_mul: sizes here are in-memory row counts, overflow not a practical concern
     std::size_t hash_cost = (left_size + right_size) * HASH_FACTOR;
 
-    if (nl_cost <= hash_cost) return JoinAlgo(JoinAlgo::NestedLoop{});
-
+    // Parse the ON-condition's column shape once, up front (previously this happened only
+    // after an early "nl_cost <= hash_cost -> NestedLoop" exit, which meant NEITHER
+    // IndexNL direction was ever even considered whenever the crude left*right product
+    // happened to look cheap -- exactly the common "huge static table joined against a
+    // tiny table" shape, where that product IS numerically small (one side is tiny) even
+    // though NestedLoop still means "fully scan the huge side every single time". Now both
+    // index-assisted options are computed first and compared against nl_cost directly, not
+    // just against hash_cost, before any early return.
+    std::string probe_col, build_col; // probe_col: LEFT/base table's join column; build_col: RIGHT table's
+    bool shape_ok = false;
     if (std::holds_alternative<CondExpr::Leaf>(on_expr.data)) {
         const Condition& cond = std::get<CondExpr::Leaf>(on_expr.data).condition;
         if (cond.op == Operator::Eq && std::holds_alternative<ArithExpr::Col>(cond.left.data) &&
@@ -381,27 +401,70 @@ JoinAlgo Planner::choose_join_algo(std::size_t left_size, std::size_t right_size
             std::string lhs_tbl = to_lower(table_prefix(lc));
             std::string rhs_tbl = to_lower(table_prefix(rv));
             std::string right_bare = to_lower(bare_col(right_table));
-
-            std::string probe_col, build_col;
-            if (rhs_tbl == right_bare) { probe_col = lhs_col; build_col = rhs_col; }
-            else if (lhs_tbl == right_bare) { probe_col = rhs_col; build_col = lhs_col; }
-            else return JoinAlgo(JoinAlgo::NestedLoop{});
-
-            if (auto pk = pk_col(right_table); pk && *pk == build_col) {
-                double log_right = std::max(std::log2(static_cast<double>(right_size)), 1.0);
-                std::size_t inl_cost = static_cast<std::size_t>(static_cast<double>(left_size) * log_right);
-                if (inl_cost <= hash_cost) return JoinAlgo(JoinAlgo::IndexNL{probe_col, build_col});
-            }
-
-            std::size_t n = left_size + right_size;
-            double log_n_d = std::max(std::log2(static_cast<double>(n)), 1.0);
-            std::size_t log_n = static_cast<std::size_t>(log_n_d);
-            std::size_t sm_cost = n * log_n;
-            if (sm_cost <= hash_cost) return JoinAlgo(JoinAlgo::SortMerge{probe_col, build_col});
-            return JoinAlgo(JoinAlgo::Hash{probe_col, build_col});
+            if (rhs_tbl == right_bare) { probe_col = lhs_col; build_col = rhs_col; shape_ok = true; }
+            else if (lhs_tbl == right_bare) { probe_col = rhs_col; build_col = lhs_col; shape_ok = true; }
         }
     }
-    return JoinAlgo(JoinAlgo::NestedLoop{});
+
+    // Forward IndexNL: iterate LEFT, probe RIGHT's own PK index by build_col (original).
+    std::optional<std::size_t> fwd_inl_cost;
+    if (shape_ok) {
+        if (auto pk = pk_col(right_table); pk && *pk == build_col) {
+            double log_right = std::max(std::log2(static_cast<double>(right_size)), 1.0);
+            fwd_inl_cost = static_cast<std::size_t>(static_cast<double>(left_size) * log_right);
+        }
+    }
+    // Reverse IndexNL (new): iterate RIGHT, probe an index on LEFT/base's own probe_col --
+    // only offered when `left_table` names a real physical table (non-empty; plan_join only
+    // passes one for the base<->first-join step, see its own comment). Tries PK first, then
+    // a secondary B+Tree, then a hash index -- same priority order index_or_scan_exists
+    // (executor_dml.cpp) already uses for the same reason: whichever is cheapest/most
+    // direct wins, and only the first match found is used (no point comparing further).
+    std::optional<std::size_t> rev_inl_cost;
+    std::string rev_left_index_key;
+    bool rev_left_is_hash = false;
+    bool rev_left_is_secondary_btree = false;
+    if (shape_ok && !left_table.empty()) {
+        std::optional<std::string> found_key;
+        if (auto lpk = pk_col(left_table); lpk && *lpk == probe_col) {
+            found_key = left_table;
+        } else if (auto sidx = find_secondary_index(left_table, probe_col)) {
+            found_key = *sidx;
+            rev_left_is_secondary_btree = true;
+        } else if (auto hidx = find_hash_index(left_table, probe_col)) {
+            found_key = *hidx;
+            rev_left_is_hash = true;
+        }
+        if (found_key) {
+            double log_left = std::max(std::log2(static_cast<double>(left_size)), 1.0);
+            rev_inl_cost = static_cast<std::size_t>(static_cast<double>(right_size) * log_left);
+            rev_left_index_key = *found_key;
+        }
+    }
+
+    // Only take the "cheap enough, don't bother looking further" NestedLoop shortcut when
+    // neither indexed option would do strictly better than the raw nl_cost estimate.
+    bool fwd_beats_nl = fwd_inl_cost && *fwd_inl_cost < nl_cost;
+    bool rev_beats_nl = rev_inl_cost && *rev_inl_cost < nl_cost;
+    if (nl_cost <= hash_cost && !fwd_beats_nl && !rev_beats_nl) return JoinAlgo(JoinAlgo::NestedLoop{});
+
+    if (!shape_ok) return JoinAlgo(JoinAlgo::NestedLoop{}); // unchanged: no usable equi-join column shape to build/hash/index by
+
+    // Prefer whichever indexed direction is cheaper; reverse wins ties (it's the newer,
+    // otherwise-unreachable option, and only ever offered when it's actually applicable).
+    if (rev_inl_cost && (!fwd_inl_cost || *rev_inl_cost <= *fwd_inl_cost) && *rev_inl_cost <= hash_cost) {
+        return JoinAlgo(JoinAlgo::ReverseIndexNL{build_col, rev_left_index_key, rev_left_is_hash, rev_left_is_secondary_btree});
+    }
+    if (fwd_inl_cost && *fwd_inl_cost <= hash_cost) {
+        return JoinAlgo(JoinAlgo::IndexNL{probe_col, build_col});
+    }
+
+    std::size_t n = left_size + right_size;
+    double log_n_d = std::max(std::log2(static_cast<double>(n)), 1.0);
+    std::size_t log_n = static_cast<std::size_t>(log_n_d);
+    std::size_t sm_cost = n * log_n;
+    if (sm_cost <= hash_cost) return JoinAlgo(JoinAlgo::SortMerge{probe_col, build_col});
+    return JoinAlgo(JoinAlgo::Hash{probe_col, build_col});
 }
 
 std::size_t Planner::table_size(const std::string& table) const {
@@ -463,7 +526,18 @@ std::size_t Planner::estimate_rows(std::size_t total, const AccessPath& access, 
                 else tbl = alt.index_key;
                 if (auto it = table_stats_.find(tbl); it != table_stats_.end()) {
                     if (auto cit = it->second.columns.find(alt.col); cit != it->second.columns.end() && cit->second.distinct_count > 0) {
-                        return std::max<std::size_t>(total / cit->second.distinct_count, 1);
+                        const auto& cs = cit->second;
+                        for (auto& [mcv_val, mcv_cnt] : cs.mcv) {
+                            if (mcv_val == alt.key) return std::max<std::size_t>(mcv_cnt, 1);
+                        }
+                        // Not an MCV: estimate over the "long tail" left after excluding the
+                        // MCV entries' rows/distinct-values from the plain NDV average, so a
+                        // skewed column's common values don't drag down the non-MCV estimate.
+                        std::size_t mcv_rows = 0;
+                        for (auto& [mcv_val, mcv_cnt] : cs.mcv) mcv_rows += mcv_cnt;
+                        std::size_t remaining_rows = total > mcv_rows ? total - mcv_rows : 0;
+                        std::size_t remaining_distinct = cs.distinct_count > cs.mcv.size() ? cs.distinct_count - cs.mcv.size() : 1;
+                        return std::max<std::size_t>(remaining_rows / remaining_distinct, 1);
                     }
                 }
                 return std::max<std::size_t>(total / 10, 1);
@@ -650,6 +724,8 @@ std::string Planner::describe_join(const JoinPlan& jp) const {
             if constexpr (std::is_same_v<T, JoinAlgo::NestedLoop>) return "Nested Loop";
             else if constexpr (std::is_same_v<T, JoinAlgo::Hash>) return "Hash Join       probe=" + alt.probe_col + " build=" + alt.build_col;
             else if constexpr (std::is_same_v<T, JoinAlgo::SortMerge>) return "Sort-Merge Join probe=" + alt.probe_col + " build=" + alt.build_col;
+            else if constexpr (std::is_same_v<T, JoinAlgo::ReverseIndexNL>)
+                return "Reverse Index NL Join extract=" + alt.right_extract_col + " idx=" + alt.left_index_key;
             else return "Index NL Join   probe=" + alt.probe_col + " pk=" + alt.right_pk_col;
         },
         jp.algo.data);

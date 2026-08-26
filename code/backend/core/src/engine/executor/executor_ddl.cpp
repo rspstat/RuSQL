@@ -574,8 +574,33 @@ StringResult Executor::exec_alter(SharedDatabase& s, const std::string& table, A
             s.row_pk_pos.erase(it);
             s.row_pk_pos.insert({v->to, std::move(pm)});
         }
-        for (auto& [name, meta] : s.index_meta) {
-            if (meta.first == table) meta.first = v->to;
+        // index_meta/hash_index_meta/composite_indexes keys are qualified as "<table>_<name>"
+        // (so the same index name can be reused across tables/databases) -- rebuild both the
+        // key and the .first/.table value together so they stay in sync with the renamed
+        // s.indexes/s.hash_indexes storage keys below.
+        {
+            std::vector<std::string> old_keys;
+            for (auto& [k, meta] : s.index_meta) {
+                if (meta.first == table) old_keys.push_back(k);
+            }
+            for (auto& old_key : old_keys) {
+                auto meta_node = s.index_meta.extract(old_key);
+                meta_node.key() = v->to + old_key.substr(table.size());
+                meta_node.mapped().first = v->to;
+                s.index_meta.insert(std::move(meta_node));
+            }
+        }
+        {
+            std::vector<std::string> old_keys;
+            for (auto& [k, meta] : s.hash_index_meta) {
+                if (meta.first == table) old_keys.push_back(k);
+            }
+            for (auto& old_key : old_keys) {
+                auto meta_node = s.hash_index_meta.extract(old_key);
+                meta_node.key() = v->to + old_key.substr(table.size());
+                meta_node.mapped().first = v->to;
+                s.hash_index_meta.insert(std::move(meta_node));
+            }
         }
         std::string prefix = table + "_";
         std::vector<std::string> sec_keys;
@@ -590,9 +615,32 @@ StringResult Executor::exec_alter(SharedDatabase& s, const std::string& table, A
             s.indexes.erase(it);
             s.indexes.insert({new_key, std::move(tree)});
         }
-        for (auto& [name, ci] : s.composite_indexes) {
-            if (ci.table == table) ci.table = v->to;
+        std::vector<std::string> hash_keys;
+        for (auto& [k, _] : s.hash_indexes) {
+            if (k.compare(0, prefix.size(), prefix) == 0) hash_keys.push_back(k);
         }
+        for (auto& old_key : hash_keys) {
+            std::string suffix = old_key.substr(table.size());
+            std::string new_key = v->to + suffix;
+            auto it = s.hash_indexes.find(old_key);
+            auto hi = std::move(it->second);
+            s.hash_indexes.erase(it);
+            hi.table = v->to;
+            s.hash_indexes.insert({new_key, std::move(hi)});
+        }
+        {
+            std::vector<std::string> old_keys;
+            for (auto& [k, ci] : s.composite_indexes) {
+                if (ci.table == table) old_keys.push_back(k);
+            }
+            for (auto& old_key : old_keys) {
+                auto ci_node = s.composite_indexes.extract(old_key);
+                ci_node.key() = v->to + old_key.substr(table.size());
+                ci_node.mapped().table = v->to;
+                s.composite_indexes.insert(std::move(ci_node));
+            }
+        }
+        persist_index_meta(s);
 
         s.disk.save_schema(v->to, *s.catalog.get_table(v->to));
         if (auto it = s.tables.find(v->to); it != s.tables.end()) s.disk.save_table(v->to, it->second);
@@ -765,7 +813,7 @@ StringResult Executor::exec_create_index(SharedDatabase& s, const std::string& i
         HashIndex hi(table, column);
         if (auto it = s.tables.find(table); it != s.tables.end()) hi.rebuild(it->second);
         s.hash_indexes.insert({table + "_" + index_name, std::move(hi)});
-        s.hash_index_meta.insert({index_name, {table, column}});
+        s.hash_index_meta.insert({table + "_" + index_name, {table, column}});
         persist_index_meta(s);
         return StringResult::Ok("Hash index '" + index_name + "' created on '" + table + "'.'" + column + "'.");
     }
@@ -786,14 +834,14 @@ StringResult Executor::exec_create_index(SharedDatabase& s, const std::string& i
         std::string idx_key = table + "_" + index_name;
         s.disk.save_btree_index(idx_key, tree);
         s.indexes.insert({idx_key, std::move(tree)});
-        s.index_meta.insert({index_name, {table, column}});
+        s.index_meta.insert({idx_key, {table, column}});
         persist_index_meta(s);
         return StringResult::Ok("Index '" + index_name + "' created on '" + table + "'.'" + column + "'.");
     }
 
     CompositeIndex comp(table, columns);
     if (auto it = s.tables.find(table); it != s.tables.end()) comp.rebuild(it->second);
-    s.composite_indexes.insert({index_name, std::move(comp)});
+    s.composite_indexes.insert({table + "_" + index_name, std::move(comp)});
     persist_index_meta(s);
     std::string cols_joined;
     for (std::size_t i = 0; i < columns.size(); i++) {
@@ -804,23 +852,34 @@ StringResult Executor::exec_create_index(SharedDatabase& s, const std::string& i
 }
 
 StringResult Executor::exec_drop_index(SharedDatabase& s, const std::string& index_name) {
-    if (auto it = s.index_meta.find(index_name); it != s.index_meta.end()) {
-        std::string table = it->second.first;
+    // Index names are stored as "<table>_<index_name>" (to allow the same index name to be
+    // reused across different tables/databases), but DROP INDEX has no "ON table" clause to
+    // disambiguate -- so we match by suffix and drop the first match found.
+    std::string suffix = "_" + index_name;
+    auto has_suffix = [&](const std::string& key) {
+        return key.size() >= suffix.size() && key.compare(key.size() - suffix.size(), suffix.size(), suffix) == 0;
+    };
+
+    for (auto it = s.index_meta.begin(); it != s.index_meta.end(); ++it) {
+        if (!has_suffix(it->first)) continue;
+        std::string idx_key = it->first;
         s.index_meta.erase(it);
-        std::string idx_key = table + "_" + index_name;
         s.indexes.erase(idx_key);
         s.disk.delete_btree_index(idx_key);
         persist_index_meta(s);
         return StringResult::Ok("Index '" + index_name + "' dropped.");
     }
-    if (auto it = s.hash_index_meta.find(index_name); it != s.hash_index_meta.end()) {
-        std::string table = it->second.first;
+    for (auto it = s.hash_index_meta.begin(); it != s.hash_index_meta.end(); ++it) {
+        if (!has_suffix(it->first)) continue;
+        std::string idx_key = it->first;
         s.hash_index_meta.erase(it);
-        s.hash_indexes.erase(table + "_" + index_name);
+        s.hash_indexes.erase(idx_key);
         persist_index_meta(s);
         return StringResult::Ok("Hash index '" + index_name + "' dropped.");
     }
-    if (s.composite_indexes.erase(index_name)) {
+    for (auto it = s.composite_indexes.begin(); it != s.composite_indexes.end(); ++it) {
+        if (!has_suffix(it->first)) continue;
+        s.composite_indexes.erase(it);
         persist_index_meta(s);
         return StringResult::Ok("Composite index '" + index_name + "' dropped.");
     }
@@ -864,7 +923,7 @@ void Executor::persist_views_for_db(const SharedDatabase& s, const std::string& 
 void Executor::index_insert_row(SharedDatabase& s, const std::string& table, const Row& row) {
     std::vector<std::pair<std::string, std::string>> sec;
     for (auto& [name, meta] : s.index_meta) {
-        if (meta.first == table) sec.emplace_back(table + "_" + name, meta.second);
+        if (meta.first == table) sec.emplace_back(name, meta.second);
     }
     for (auto& [key, col] : sec) {
         auto vit = row.find(col);
@@ -885,7 +944,7 @@ void Executor::index_insert_row(SharedDatabase& s, const std::string& table, con
 
     std::vector<std::string> hsec;
     for (auto& [name, meta] : s.hash_index_meta) {
-        if (meta.first == table) hsec.push_back(table + "_" + name);
+        if (meta.first == table) hsec.push_back(name);
     }
     for (auto& key : hsec) {
         if (auto it = s.hash_indexes.find(key); it != s.hash_indexes.end()) it->second.insert_row(row);
@@ -899,7 +958,7 @@ void Executor::index_remove_row(SharedDatabase& s, const std::string& table, con
 
     std::vector<std::pair<std::string, std::string>> sec;
     for (auto& [name, meta] : s.index_meta) {
-        if (meta.first == table) sec.emplace_back(table + "_" + name, meta.second);
+        if (meta.first == table) sec.emplace_back(name, meta.second);
     }
     for (auto& [key, col] : sec) {
         auto vit = row.find(col);
@@ -924,7 +983,7 @@ void Executor::index_remove_row(SharedDatabase& s, const std::string& table, con
 
     std::vector<std::pair<std::string, std::string>> hsec;
     for (auto& [name, meta] : s.hash_index_meta) {
-        if (meta.first == table) hsec.emplace_back(table + "_" + name, meta.second);
+        if (meta.first == table) hsec.emplace_back(name, meta.second);
     }
     for (auto& [key, col] : hsec) {
         auto vit = row.find(col);
@@ -948,7 +1007,7 @@ void Executor::rebuild_secondary_indexes(SharedDatabase& s, const std::string& t
             nlohmann::json j = bucket_rows;
             tree.insert(key, j.dump());
         }
-        s.indexes.insert_or_assign(table + "_" + idx_name, std::move(tree));
+        s.indexes.insert_or_assign(idx_name, std::move(tree));
     }
 
     std::vector<std::pair<std::string, std::string>> hsec;
@@ -958,20 +1017,28 @@ void Executor::rebuild_secondary_indexes(SharedDatabase& s, const std::string& t
     for (auto& [idx_name, col] : hsec) {
         HashIndex hi(table, col);
         hi.rebuild(rows);
-        s.hash_indexes.insert_or_assign(table + "_" + idx_name, std::move(hi));
+        s.hash_indexes.insert_or_assign(idx_name, std::move(hi));
     }
 }
 
 void Executor::persist_index_meta(const SharedDatabase& s) const {
+    // Live maps are keyed by "<table>_<index_name>" (to allow the same bare index name to be
+    // reused across tables/databases), but the on-disk IndexMeta record stores the bare name
+    // (files are already split per-database, so no qualification is needed there).
+    auto bare_name = [](const std::string& key, const std::string& table) {
+        std::string prefix = table + "_";
+        return (key.size() > prefix.size() && key.compare(0, prefix.size(), prefix) == 0) ? key.substr(prefix.size())
+                                                                                           : key;
+    };
     std::vector<IndexMeta> meta_list;
-    for (auto& [name, meta] : s.index_meta) {
-        meta_list.push_back(IndexMeta{name, meta.first, {meta.second}, "btree"});
+    for (auto& [key, meta] : s.index_meta) {
+        meta_list.push_back(IndexMeta{bare_name(key, meta.first), meta.first, {meta.second}, "btree"});
     }
-    for (auto& [name, meta] : s.hash_index_meta) {
-        meta_list.push_back(IndexMeta{name, meta.first, {meta.second}, "hash"});
+    for (auto& [key, meta] : s.hash_index_meta) {
+        meta_list.push_back(IndexMeta{bare_name(key, meta.first), meta.first, {meta.second}, "hash"});
     }
-    for (auto& [name, comp] : s.composite_indexes) {
-        meta_list.push_back(IndexMeta{name, comp.table, comp.columns, "btree"});
+    for (auto& [key, comp] : s.composite_indexes) {
+        meta_list.push_back(IndexMeta{bare_name(key, comp.table), comp.table, comp.columns, "btree"});
     }
 
     std::unordered_map<std::string, std::vector<IndexMeta>> per_db;
