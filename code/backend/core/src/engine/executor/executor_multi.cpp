@@ -409,6 +409,9 @@ StringResult Executor::exec_multi_delete(SharedDatabase& s, std::vector<std::str
             if (ci.table != tgt) continue;
             for (auto& row : deleted_rows) ci.remove_row(row);
         }
+        // PLAN.md P2 fix: secondary/hash indexes were never touched here at all
+        // (previously stale after a multi-table DELETE).
+        for (auto& row : deleted_rows) index_remove_row(s, tgt, row, pk_col);
 
         std::vector<Row> rows_clone = s.tables.at(tgt);
         s.buffer_pool.write_page(tgt, rows_clone);

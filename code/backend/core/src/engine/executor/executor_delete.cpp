@@ -634,7 +634,14 @@ StringResult Executor::exec_delete_inner(SharedDatabase& s, const std::string& t
             std::string conflict_key;
             auto& rows = s.tables.at(table);
             for (auto& row : rows) {
-                if (!is_visible(row) || !matches_condexpr(row, condition)) continue;
+                // PLAN.md-tracked bug fix: the plain matches_condexpr can't evaluate a
+                // ConditionValue::Subquery leaf, so a subquery-bearing WHERE clause matched
+                // zero rows here even though rows_to_delete (above) correctly identified the
+                // candidates via matches_condition_with_subquery -- dispatch on the same
+                // condition_has_subquery check that governs rows_to_delete's own computation.
+                bool row_matches = condition_has_subquery(condition) ? matches_condition_with_subquery(s, row, condition)
+                                                                      : matches_condexpr(row, condition);
+                if (!is_visible(row) || !row_matches) continue;
                 auto it = row.find(pk_col);
                 std::string key = it != row.end() ? it->second : std::string();
 
@@ -686,7 +693,15 @@ StringResult Executor::exec_delete_inner(SharedDatabase& s, const std::string& t
         auto table_lock = acquire_table_data_locks(s, {table}, /*exclusive=*/true);
         auto& rows = s.tables.at(table);
         std::size_t before = rows.size();
-        rows.erase(std::remove_if(rows.begin(), rows.end(), [&](Row& r) { return is_visible(r) && matches_condexpr(r, condition); }), rows.end());
+        // PLAN.md-tracked bug fix: same reasoning as the two soft-delete loops below --
+        // dispatch to the subquery-aware matcher when the condition needs it.
+        bool has_subq = condition_has_subquery(condition);
+        rows.erase(std::remove_if(rows.begin(), rows.end(),
+                                   [&](Row& r) {
+                                       if (!is_visible(r)) return false;
+                                       return has_subq ? matches_condition_with_subquery(s, r, condition) : matches_condexpr(r, condition);
+                                   }),
+                   rows.end());
         deleted = before - rows.size();
         hard_deleted = true;
         if (deleted > 0) s.query_cache.invalidate_table(table);
@@ -715,7 +730,14 @@ StringResult Executor::exec_delete_inner(SharedDatabase& s, const std::string& t
             std::string conflict_key;
             auto& rows = s.tables.at(table);
             for (auto& row : rows) {
-                if (!is_visible(row) || !matches_condexpr(row, condition)) continue;
+                // PLAN.md-tracked bug fix: the plain matches_condexpr can't evaluate a
+                // ConditionValue::Subquery leaf, so a subquery-bearing WHERE clause matched
+                // zero rows here even though rows_to_delete (above) correctly identified the
+                // candidates via matches_condition_with_subquery -- dispatch on the same
+                // condition_has_subquery check that governs rows_to_delete's own computation.
+                bool row_matches = condition_has_subquery(condition) ? matches_condition_with_subquery(s, row, condition)
+                                                                      : matches_condexpr(row, condition);
+                if (!is_visible(row) || !row_matches) continue;
                 auto it = row.find(pk_col);
                 std::string key = it != row.end() ? it->second : std::string();
 

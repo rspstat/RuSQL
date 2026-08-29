@@ -284,6 +284,37 @@ TEST_CASE("Multi-table DELETE keeps the target table's composite secondary index
     REQUIRE(ci.search_exact({"6", "2000"}).has_value());
 }
 
+// Regression for PLAN.md P2: multi-table DELETE previously only maintained the PK B+Tree
+// and composite indexes (test above) -- secondary B+Tree and hash indexes were never
+// touched at all, left stale after the deleted rows' entries should have been removed.
+TEST_CASE("Multi-table DELETE keeps secondary and hash indexes consistent, not stale",
+          "[executor][misc][regression]") {
+    TempDataDir dir("exec_misc_data_multi_del_sec_hash_idx");
+    Executor ex(dir.path);
+    REQUIRE(ex.execute_sql("CREATE DATABASE company").is_ok());
+    REQUIRE(ex.execute_sql("USE company").is_ok());
+    REQUIRE(ex.execute_sql("CREATE TABLE emp (id INT PRIMARY KEY, dept_id INT, region INT, email VARCHAR(50))").is_ok());
+    REQUIRE(ex.execute_sql("CREATE TABLE to_remove (dept_id INT PRIMARY KEY)").is_ok());
+    REQUIRE(ex.execute_sql("INSERT INTO emp VALUES (1, 10, 5, 'a@x.com'), (2, 20, 6, 'b@x.com')").is_ok());
+    REQUIRE(ex.execute_sql("INSERT INTO to_remove VALUES (10)").is_ok());
+    REQUIRE(ex.execute_sql("CREATE INDEX idx_region ON emp (region)").is_ok());
+    REQUIRE(ex.execute_sql("CREATE INDEX idx_email ON emp (email) USING HASH").is_ok());
+
+    auto r = ex.execute_sql("DELETE emp FROM emp JOIN to_remove ON emp.dept_id = to_remove.dept_id");
+    REQUIRE(r.is_ok());
+
+    auto s = ex.get_shared()->read();
+    auto& idx = s->indexes.at("company.emp_idx_region");
+    auto bucket = idx.search("5");
+    REQUIRE(bucket.has_value());
+    REQUIRE(bucket.value() == "[]"); // deleted row's entry removed, not left stale
+    REQUIRE(idx.search("6").has_value());
+
+    auto& hi = s->hash_indexes.at("company.emp_idx_email");
+    REQUIRE(hi.get("a@x.com").empty());
+    REQUIRE(hi.get("b@x.com").size() == 1);
+}
+
 TEST_CASE("MERGE on a composite-PK target only updates the row matching every PK column", "[executor][misc][regression]") {
     TempDataDir dir("exec_misc_data_merge_composite");
     Executor ex(dir.path);
@@ -342,6 +373,66 @@ TEST_CASE("MERGE applies matched-update, matched-delete, and not-matched-insert 
     auto new_dept = std::find_if(rows.begin(), rows.end(), [](const Row& r2) { return r2.at("code") == "NEW"; });
     REQUIRE(new_dept != rows.end());
     REQUIRE(new_dept->at("name") == "New Division");
+}
+
+// Regression for PLAN.md P2 (the most severe of the three): MERGE previously touched ZERO
+// index kinds at all -- not PK B+Tree, not secondary, not hash, not composite -- across its
+// UPDATE/DELETE/INSERT branches. This exercises all three branches in one MERGE and checks
+// every index kind stays consistent, not stale.
+TEST_CASE("MERGE keeps secondary, hash, and composite indexes fresh across update/delete/insert branches",
+          "[executor][misc][regression]") {
+    TempDataDir dir("exec_misc_data_merge_indexes");
+    Executor ex(dir.path);
+    REQUIRE(ex.execute_sql("CREATE DATABASE company").is_ok());
+    REQUIRE(ex.execute_sql("USE company").is_ok());
+    REQUIRE(ex.execute_sql("CREATE TABLE department (id INT PRIMARY KEY AUTO_INCREMENT, code VARCHAR(10), "
+                            "region INT, contact VARCHAR(50), budget INT)")
+                .is_ok());
+    REQUIRE(ex.execute_sql("CREATE TABLE dept_upd (code VARCHAR(10) PRIMARY KEY, region INT, contact VARCHAR(50), budget INT)").is_ok());
+    REQUIRE(ex.execute_sql("INSERT INTO department (id, code, region, contact, budget) VALUES (1, 'ENG', 5, 'eng@x.com', 1000)").is_ok());
+    REQUIRE(ex.execute_sql("INSERT INTO department (id, code, region, contact, budget) VALUES (2, 'TMP', 9, 'tmp@x.com', 0)").is_ok());
+    REQUIRE(ex.execute_sql("CREATE INDEX idx_region ON department (region)").is_ok());
+    REQUIRE(ex.execute_sql("CREATE INDEX idx_contact ON department (contact) USING HASH").is_ok());
+    REQUIRE(ex.execute_sql("CREATE INDEX idx_region_budget ON department (region, budget)").is_ok());
+
+    REQUIRE(ex.execute_sql("INSERT INTO dept_upd VALUES ('ENG', 7, 'newcontact@x.com', 6000)").is_ok());
+    REQUIRE(ex.execute_sql("INSERT INTO dept_upd VALUES ('TMP', 9, 'tmp@x.com', 0)").is_ok());
+    REQUIRE(ex.execute_sql("INSERT INTO dept_upd VALUES ('NEW', 3, 'new@x.com', 500)").is_ok());
+
+    auto r = ex.execute_sql(
+        "MERGE INTO department USING dept_upd ON department.code = dept_upd.code "
+        "WHEN MATCHED AND dept_upd.budget = 0 THEN DELETE "
+        "WHEN MATCHED THEN UPDATE SET region = dept_upd.region, contact = dept_upd.contact, budget = dept_upd.budget "
+        "WHEN NOT MATCHED THEN INSERT (code, region, contact, budget) VALUES (dept_upd.code, dept_upd.region, dept_upd.contact, dept_upd.budget)");
+    REQUIRE(r.is_ok());
+    REQUIRE(r.value() == "MERGE: 1 updated, 1 deleted, 1 inserted.");
+
+    auto s = ex.get_shared()->read();
+    auto& idx = s->indexes.at("company.department_idx_region");
+    auto& hi = s->hash_indexes.at("company.department_idx_contact");
+    auto& ci = s->composite_indexes.at("company.department_idx_region_budget");
+
+    // UPDATE branch (ENG): old region/contact/budget gone, new values present.
+    auto old_region_bucket = idx.search("5");
+    REQUIRE(old_region_bucket.has_value());
+    REQUIRE(old_region_bucket.value() == "[]");
+    REQUIRE(idx.search("7").has_value());
+    REQUIRE(hi.get("eng@x.com").empty());
+    REQUIRE(hi.get("newcontact@x.com").size() == 1);
+    REQUIRE_FALSE(ci.search_exact({"5", "1000"}).has_value());
+    REQUIRE(ci.search_exact({"7", "6000"}).has_value());
+
+    // DELETE branch (TMP): its region/contact/budget entries gone.
+    auto deleted_region_bucket = idx.search("9");
+    REQUIRE(deleted_region_bucket.has_value());
+    REQUIRE(deleted_region_bucket.value() == "[]");
+    REQUIRE(hi.get("tmp@x.com").empty());
+    REQUIRE_FALSE(ci.search_exact({"9", "0"}).has_value());
+
+    // INSERT branch (NEW): its region/contact/budget now present.
+    REQUIRE(idx.search("3").has_value());
+    REQUIRE(hi.get("new@x.com").size() == 1);
+    REQUIRE(ci.search_exact({"3", "500"}).has_value());
 }
 
 TEST_CASE("INFORMATION_SCHEMA.TABLES / .COLUMNS reflect created tables", "[executor][misc]") {

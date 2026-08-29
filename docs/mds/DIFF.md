@@ -301,7 +301,7 @@
 | 공식 프로토콜 | MySQL Protocol (포트 3306) | PostgreSQL wire protocol (포트 5432) | Oracle SQL*Net / TNS (포트 1521) | 텍스트 기반 TCP (포트 7878, ---END--- 구분자) + MySQL wire protocol (포트 3306) |
 | MySQL wire protocol 호환 | ✓ | ✗ | ✗ | ✓ (포트 3306, mysql_native_password 인증 구현, mysql CLI / DBeaver / mysql-connector-python 완전 연동 — SHOW VARIABLES/COLLATION/FULL TABLES/FULL COLUMNS 등 자동 쿼리 처리) |
 | 드라이버 호환 | JDBC, ODBC, Python, Go, Node.js | JDBC, ODBC, libpq, Python, Go, Node.js | JDBC (ojdbc), ODBC, OCI, Python (cx_Oracle) | rusql-client (전용 CLI, -u/-p/-h/-P 플래그) + MySQL 호환 클라이언트 |
-| 커넥션 풀 지원 | ✓ | ✓ | ✓ (DRCP) | ✗ |
+| 커넥션 풀 지원 | ✓ | ✓ | ✓ (DRCP) | △ (자체 풀러는 없으나 `COM_CHANGE_USER`/`COM_RESET_CONNECTION` 지원으로 HikariCP 등 클라이언트 측 풀링 드라이버는 정상 연동됨) |
 | Prepared Statements | ✓ | ✓ | ✓ | ✓ (PREPARE/EXECUTE/DEALLOCATE USING @var) |
 | 배치 실행 | ✓ | ✓ | ✓ | ✗ (멀티쿼리 ; 분리) |
 | WebSocket / HTTP API | ✗ | ✗ (PostgREST 등) | ✓ (ORDS: Oracle REST Data Services) | ✗ |
@@ -320,5 +320,5 @@
 | 다중 탭 | ✓ | ✓ | ✓ | ✓ (탭별 결과·에디터 상태 유지, 우클릭 컨텍스트 메뉴 — 닫기/분할/고정/이름 변경, 탭 고정 📌, 분할 시 왼쪽 탭바에서 제거·닫으면 복원) |
 | 연결 관리 | ✓ | ✓ | ✓ | ✓ (연결별 독립 데이터 디렉토리) |
 | 서버 모니터링 | ✓ | ✓ | ✓ (Performance Hub) | ✓ (TCP 서버 on/off·클라이언트 수·로그, 접속 세션 실시간 모니터링 패널 — addr·user·경과 시간·쿼리 건수, 벤치마크 결과 UI 패널) |
-| 데이터 임포트/익스포트 | ✓ (CSV, SQL) | ✓ | ✓ (CSV, Excel, XML) | ✓ (CSV 익스포트·임포트) |
+| 데이터 임포트/익스포트 | ✓ (CSV, SQL) | ✓ | ✓ (CSV, Excel, XML) | △ (CSV 익스포트만 — 결과 패널의 클라이언트 사이드 다운로드 버튼; CSV 임포트는 UI 없음) |
 | AI 연동 | △ (HeatWave AutoML) | ✗ | △ (Oracle AI) | ✓ (AI MCP — mcp_server.py: Claude Desktop 연동, stdio JSON-RPC, **7개 도구** — execute_sql · list_databases · list_tables · get_table_schema · explain_query · get_indexes · sample_data, SELECT 결과 JSON 배열 구조화, alwaysAllow 자동 설정 (허용 팝업 없음), API 키 불필요, UI 자동 연결 버튼) |

@@ -24,6 +24,8 @@
 │  TABLE / DATABASE         ON CONFLICT          SHOW ROLES             SET ISOLATION LEVEL       │
 │  INDEX (B+Tree / HASH)      (ABORT/IGNORE/     CREATE / DROP          SHOW ISOLATION LEVEL      │
 │  VIEW / SYNONYM             UPDATE)            SYNONYM                                           │
+│  PARTITION (RANGE/LIST/                                                                          │
+│    HASH), ADD/DROP PARTITION                                                                     │
 │  PROCEDURE / TRIGGER      RETURNING            SHOW SYNONYMS                                     │
 │  FUNCTION               UPDATE                                                                   │
 │                           단일 / 다중          Join 연산              모니터링                   │
@@ -36,6 +38,9 @@
 │                           MATCHED DELETE       Hash Join              SHOW BUFFER POOL / WAL    │
 │                           NOT MATCHED INSERT   Sort-Merge Join        SHOW LOCKS / GRANTS       │
 │                                                Nested Loop Join       SHOW ROLES / SYNONYMS     │
+│                                                ReverseIndexNL Join                                │
+│                                                LATERAL JOIN (INNER/                              │
+│                                                  LEFT/CROSS, per-row 상관 서브쿼리)              │
 │                                                                       CHECKPOINT / VACUUM        │
 │                                                                       ANALYZE TABLE              │
 │                                                                       BACKUP DATABASE            │
@@ -48,13 +53,15 @@
 │  AVG(DISTINCT)            FIRST / LAST VALUE     LEAVE / ITERATE                                │
 │  STDDEV / VARIANCE        NTH_VALUE / NTILE                                                     │
 │  GROUP_CONCAT(SEPARATOR)  PERCENT_RANK / CUME_DIST                                              │
-│                           OVER (PARTITION BY / ORDER BY)                                        │
-│                           ROWS / RANGE BETWEEN / 집계 윈도우 함수                               │
+│  BIT_AND / BIT_OR         OVER (PARTITION BY / ORDER BY)                                        │
+│  JSON_AGG                 ROWS / RANGE BETWEEN / 집계 윈도우 함수                               │
+│  FILTER (WHERE ...)                                                                              │
 │                                                                                                  │
 │  쿼리 기능              고급 쿼리                                                               │
 │  ──────────────────     ──────────────────────────────────────────────────────────              │
 │  SELECT / DISTINCT      서브쿼리 (FROM절 / WHERE절 / SELECT 스칼라 / 상관)                      │
-│  WHERE                  CTE (WITH ... AS) / 재귀 CTE (WITH RECURSIVE)                           │
+│  WHERE                  CTE (WITH ... AS) / 재귀 CTE (WITH RECURSIVE,                          │
+│                            semi-naive 평가 — 안전 조건 충족 시 직전 반복분만 재조인)             │
 │    =/!=/<>/>/</>=/<= )  UNION / UNION ALL / INTERSECT / EXCEPT                                  │
 │    AND / OR / NOT       Updatable VIEW                                                          │
 │    IN / NOT IN          INFORMATION_SCHEMA (가상 뷰 10개)                                       │
@@ -82,15 +89,21 @@
 │  Hash Index (USING HASH, 등호 O(1))             WAL fsync per-commit                            │
 │  커버링 인덱스 (Index-only scan)                WAL Group Commit (leader/follower, 단일 fsync)   │
 │  보조 인덱스 중복 키 배열 저장                   Undo Log 디스크 영속화 (_undo.log)               │
+│  (테이블/DB 간 인덱스 이름 재사용 안전)           WAL/Undo 레코드 체크섬 (FNV-1a, 손상 감지)      │
 │  증분 보조 인덱스 갱신 O(1) per row              Crash Recovery (WAL Replay)                    │
 │    (전체 재빌드 없음, DML마다 즉시 반영)          Checkpoint (자동 512KB / 수동)                 │
-│  B+Tree 범위 스캔 가지치기                       MVCC (_xmin / _xmax 버전 스탬프)                │
-│    scan_from / scan_to O(log N + k)              논리 삭제 → VACUUM → 물리 삭제                  │
+│  B+Tree 범위 스캔 가지치기                       진짜 행 단위 MVCC (_xmin/_xmax 버전 체인)        │
+│    scan_from / scan_to O(log N + k)              UPDATE도 신규 버전 append(제자리 수정 아님)     │
+│                                                   GC 호라이즌 기반 VACUUM(열린 스냅샷 보호)       │
 │  range_keys BETWEEN 삭제 최적화                  AUTO VACUUM (DML 200회 누적 임계값)             │
-│    (역순 swap_remove, 인덱스 깨짐 없음)           Row-level Locking + Gap Lock                   │
-│  row_pk_pos 위치 인덱스                          SELECT FOR UPDATE / FOR SHARE                   │
-│    DELETE WHERE PK = ? → O(1) swap_remove        데드락 감지 (DFS wait-for 그래프)               │
-│    FK 피참조 테이블은 safe-path 폴백              4단계 격리 수준 (RC ~ SERIALIZABLE)             │
+│    (역순 swap_remove, 인덱스 깨짐 없음)           행 단위 동시 쓰기(같은 테이블 다른 행도 병렬)  │
+│  row_pk_pos 위치 인덱스                          Row-level Locking + Gap Lock (팬텀 방지)        │
+│    DELETE WHERE PK = ? → O(1) swap_remove        SSI predicate lock (non-blocking, SIREAD 스타일 │
+│    FK 피참조 테이블은 safe-path 폴백                — 잠금 없는 SELECT도 SERIALIZABLE 팬텀 감지) │
+│                                                   SELECT FOR UPDATE / FOR SHARE                   │
+│                                                   진짜 블로킹 대기 + 데드락 감지                 │
+│                                                     (@lock_wait_timeout, wait-for 그래프)         │
+│                                                   4단계 격리 수준 (RC ~ SERIALIZABLE)             │
 │  Top-K 인덱스 조기 종료                          MVCC 가시성 (SnapshotCtx)                      │
 │    ORDER BY + LIMIT 시 조건 충족 즉시 중단         (DML → s.tables 직접 기록,                   │
 │    SecondaryRange / Between / LikePrefix /         격리수준별 가시성 필터 적용)                │
@@ -107,11 +120,13 @@
 │    System-R bitmask DP (N≤8)                    뷰 (views.json)                                │
 │    그리디 폴백 (N>8 / OUTER JOIN 포함)           저장 프로시저 (_procedures.json)               │
 │  Join 알고리즘 비용 기반 선택                    트리거 (_triggers.json)                        │
-│    NL vs Hash 비용 비교 (HASH_FACTOR=3)           UDF (_functions.json)                          │
+│    NL vs Hash vs ReverseIndexNL(작은 쪽         UDF (_functions.json)                          │
+│    기준 반대 방향 인덱스 프로브) 비용 비교                                                       │
 │  비상관 서브쿼리 HashSet 머티리얼라이제이션       사용자 / 권한 (_users / _grants.json)           │
 │    (최초 1회 실행 후 O(1) 조회)                  역할 (_roles / _role_grants.json)              │
-│  히스토그램 selectivity 추정                     동의어 (_synonyms.json)                        │
+│  히스토그램 + MCV(최빈값) selectivity 추정        동의어 (_synonyms.json)                        │
 │    ANALYZE TABLE → equi-depth 10-bucket          전역 파일 → data/_system/ 분리                 │
+│    + 최빈값 10개 정확 카운트(쏠린 컬럼 보정)                                                      │
 │    Auto-ANALYZE: 크기 단계별 임계값              구버전 루트 경로 → _system/ 자동 마이그레이션  │
 │  병렬 쿼리 실행 (rayon)                                                                          │
 │    SeqScan WHERE 필터 par_chunks                 인증 & 보안                                    │
@@ -119,8 +134,8 @@
 │    ORDER BY par_sort_unstable_by                 Native TCP + MySQL 프로토콜 둘 다 동일한        │
 │    Hash Join probe par_iter                      mysql_native_password 방식 챌린지-응답          │
 │    적응형 임계값 (10k/thread_count, 최소 1k)       (SHA1(SHA1(pw)), 비밀번호 평문 전송 없음)      │
-│    SET @rusql_parallel / RUSTDB_PARALLEL 제어                                                    │
-│  쿼리 결과 캐시 (LRU-512, O(k) 무효화)                                                          │
+│    SET @rusql_parallel / RUSTDB_PARALLEL 제어    COM_CHANGE_USER / COM_RESET_CONNECTION          │
+│  쿼리 결과 캐시 (LRU-512, O(k) 무효화)             (커넥션 풀 드라이버 지원, 예: HikariCP)        │
 │    트랜잭션 외부 SELECT 전용                      root/root 기본 계정 자동 생성                  │
 │    DML 시 참조 테이블 항목 즉시 무효화                                                           │
 │    COMMIT 시 변경 테이블 자동 무효화                                                             │

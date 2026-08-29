@@ -42,6 +42,10 @@ StringResult Executor::exec_merge(SharedDatabase& s, std::string target, std::op
         if (c.primary_key) pk_cols.push_back(c.name);
     }
     if (pk_cols.empty()) pk_cols.push_back("id");
+    // Single PK column used for secondary/hash index maintenance below
+    // (index_remove_row/index_insert_row and the PK B+Tree only ever key on one column --
+    // same pre-existing composite-PK approximation already used by exec_multi_delete).
+    std::string pk_col = pk_cols.front();
     // Composite identity key, same fix/reasoning as UPDATE (executor_update.cpp) and
     // multi-table UPDATE/DELETE (executor_multi.cpp) -- a composite-PK target table's
     // rows must be identified by ALL of its PK columns, not just the first, or two
@@ -132,19 +136,53 @@ StringResult Executor::exec_merge(SharedDatabase& s, std::string target, std::op
 
     if (auto rit = s.tables.find(target); rit != s.tables.end()) {
         auto& rows = rit->second;
+        // PLAN.md P2 fix: MERGE previously touched zero index kinds at all for UPDATE/
+        // DELETE (INSERT below had the same gap) -- mirror the remove-old/insert-new
+        // pattern already used by plain UPDATE/multi-table UPDATE/DELETE.
         for (auto& [pk, resolved] : update_rows) {
             for (auto& row : rows) {
                 if (row_key(row) == pk && is_visible(row)) {
+                    Row old_row = row;
                     for (auto& [col, val] : resolved) row[col] = val;
+                    if (auto idx_it = s.indexes.find(target); idx_it != s.indexes.end()) {
+                        auto old_it = old_row.find(pk_col);
+                        idx_it->second.remove(old_it != old_row.end() ? old_it->second : std::string());
+                        auto new_it = row.find(pk_col);
+                        nlohmann::json j = row;
+                        idx_it->second.insert(new_it != row.end() ? new_it->second : std::string(), j.dump());
+                    }
+                    index_remove_row(s, target, old_row, pk_col);
+                    index_insert_row(s, target, row);
+                    for (auto& [k, ci] : s.composite_indexes) {
+                        if (ci.table != target) continue;
+                        ci.remove_row(old_row);
+                        ci.insert_row(row);
+                    }
                     break;
                 }
             }
+        }
+
+        std::vector<Row> rows_to_delete;
+        for (auto& r : rows) {
+            if (std::find(delete_pks.begin(), delete_pks.end(), row_key(r)) != delete_pks.end()) rows_to_delete.push_back(r);
         }
         rows.erase(std::remove_if(rows.begin(), rows.end(),
                                    [&](const Row& r) {
                                        return std::find(delete_pks.begin(), delete_pks.end(), row_key(r)) != delete_pks.end();
                                    }),
                    rows.end());
+        if (auto idx_it = s.indexes.find(target); idx_it != s.indexes.end()) {
+            for (auto& row : rows_to_delete) {
+                auto it = row.find(pk_col);
+                idx_it->second.remove(it != row.end() ? it->second : std::string());
+            }
+        }
+        for (auto& row : rows_to_delete) index_remove_row(s, target, row, pk_col);
+        for (auto& [k, ci] : s.composite_indexes) {
+            if (ci.table != target) continue;
+            for (auto& row : rows_to_delete) ci.remove_row(row);
+        }
     }
 
     {
@@ -187,6 +225,17 @@ StringResult Executor::exec_merge(SharedDatabase& s, std::string target, std::op
                 }
                 if (!row.count("_xmin")) row["_xmin"] = txn_id;
                 if (!row.count("_xmax")) row["_xmax"] = "0";
+                // PLAN.md P2 fix: MERGE's INSERT branch previously touched zero index
+                // kinds at all -- index while `row` is still valid, before the move below.
+                if (auto idx_it = s.indexes.find(target); idx_it != s.indexes.end()) {
+                    auto pk_it = row.find(pk_col);
+                    nlohmann::json j = row;
+                    idx_it->second.insert(pk_it != row.end() ? pk_it->second : std::string(), j.dump());
+                }
+                index_insert_row(s, target, row);
+                for (auto& [k, ci] : s.composite_indexes) {
+                    if (ci.table == target) ci.insert_row(row);
+                }
                 it->second.push_back(std::move(row));
             }
         }

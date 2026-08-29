@@ -5,6 +5,7 @@ import Editor from "@monaco-editor/react";
 import type * as Monaco from "monaco-editor";
 import "./App.css";
 import { format as sqlFormat } from "sql-formatter";
+import AiView from "./components/AiView";
 
 
 // ─── 타입 ─────────────────────────────────────────────────────
@@ -4191,9 +4192,7 @@ function App() {
         </div>
       )}
 
-      {activeView === "ai" && (
-        <div className="ai-view" />
-      )}
+      {activeView === "ai" && <AiView />}
 
       </div> {/* app-body */}
     </div>

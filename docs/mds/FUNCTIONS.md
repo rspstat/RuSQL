@@ -231,6 +231,7 @@
 - [x] 뷰 영속화 — 재시작 시 views.json에서 AST 복원
 - [x] TRUNCATE 후 AUTO INCREMENT 리셋
 - [x] 인덱스 이름 테이블/DB 간 재사용 안전 — `index_meta`/`hash_index_meta`/`composite_indexes` 인메모리 키를 사용자 지정 bare 이름이 아닌 `테이블명_인덱스명`으로 통일(실제 인덱스 저장소 `s.indexes`/`s.hash_indexes`가 이미 쓰던 컨벤션과 일치). 서로 다른 테이블/데이터베이스가 같은 인덱스 이름을 재사용하면 나중 인덱스가 `unordered_map::insert()`의 조용한 no-op으로 등록 자체가 누락되던 버그 수정(디스크 포맷은 이미 DB별 분리라 마이그레이션 불필요) — `ALTER TABLE RENAME`이 인덱스 키를 갱신하지 않아 rename 후 인덱스가 못 찾아지던 연쇄 버그, 그리고 그 자리에서 원래부터 빠져 있던 해시 인덱스의 RENAME 이관도 함께 수정
+- [x] INSERT ON DUPLICATE KEY UPDATE·다중 DELETE·MERGE의 secondary/hash/복합(MERGE는 PK 포함 전체) 인덱스 유지 — 세 경로 모두 일부 인덱스 종류를 전혀 갱신하지 않아 그 이후의 인덱스 기반 조회가 stale해지던 버그. 이미 확립된 `index_remove_row`/`index_insert_row` 패턴을 세 곳에 동일하게 적용(MERGE는 UPDATE/DELETE/INSERT 세 분기 전부 신규로 추가)
 
 ### MVCC
 - [x] 행 버전 스탬프 (`_xmin`, `_xmax`) — 실제 트랜잭션 ID 태깅(전역 유일 카운터에서 발급), `0`은 "이전부터 존재/항상 가시" 예약값
@@ -326,8 +327,8 @@
 - [x] 탭별 결과 보존 (탭 전환 시 결과 패널 유지, tabResults Record로 탭별 독립 관리)
 - [x] 결과 테이블 컬럼 너비 조절 — th 드래그 resize handle, table-layout: fixed 항상 적용
 - [x] 결과 테이블 컬럼 자동 너비 — Canvas `measureText`로 헤더·데이터 실제 픽셀 너비 측정 (한글/CJK 포함), 최대 200행 샘플링, 최소 60px / 최대 500px; 헤더 측정 시 정렬 아이콘(` ⇅`) 포함, `white-space: nowrap` + `vertical-align: middle`로 줄바꿈·수직 밀림 방지
-- [x] CSV 익스포트 (Tauri `export_csv` 커맨드) — SELECT 결과를 CSV 파일로 저장
-- [x] CSV 임포트 (Tauri `import_csv` 커맨드) — CSV 파일을 지정 테이블에 INSERT 일괄 실행
+- [x] CSV 익스포트 — 결과 패널의 "⬇ CSV" 버튼, 순수 클라이언트 사이드(Blob 생성 + `<a download>`)로 SELECT 결과를 CSV 파일로 저장. 실제로는 Tauri `export_csv` 커맨드를 호출하지 않음 — 그 백엔드 커맨드는 등록만 되어 있고 프런트에서 한 번도 호출되지 않는 죽은 코드(`PLAN.md` Section G 참고)
+- [ ] CSV 임포트 — UI 자체가 없음(백엔드 `import_csv` Tauri 커맨드는 존재하나 프런트에서 호출하는 곳이 전혀 없음). 이전에 이 문서에 "완료"로 잘못 기재돼 있던 걸 정정
 - [x] 결과 컬럼 헤더 클릭 정렬 — ▲ ASC / ▼ DESC / ⇅ 기본 토글, 수치·문자열 자동 감지, 정렬 후 페이징 재계산
 - [x] 결과 행 번호 — 결과 테이블 첫 열 `#` (1-based, 페이지 오프셋 반영, 고정 40px 너비, 왼쪽 정렬)
 - [x] 쿼리 실행 진행 바 — `isRunning` 시 탭바 하단에 teal 슬라이딩 바 표시, 최소 400ms 보장으로 빠른 쿼리도 시각적 피드백 제공

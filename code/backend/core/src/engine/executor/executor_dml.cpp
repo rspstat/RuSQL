@@ -796,8 +796,24 @@ StringResult Executor::exec_insert_inner(SharedDatabase& s, const std::string& t
                 for (auto& row : it->second) {
                     auto pkit = row.find(col_names[0]);
                     if (pkit != row.end() && pkit->second == pk_val && is_visible(row)) {
+                        Row old_row = row;
                         for (auto& [col, aexpr] : assignments) row[col] = eval_arith(row, aexpr);
                         updated_rows.push_back(row);
+                        // PLAN.md P2 fix: this in-place mutation previously left secondary/
+                        // hash/composite indexes entirely stale (only the PK B+Tree was
+                        // refreshed below) -- mirror the remove-old/insert-new pattern
+                        // already used by plain UPDATE (executor_update.cpp).
+                        index_remove_row(s, table, old_row, col_names[0]);
+                        index_insert_row(s, table, row);
+                        for (auto& [k, ci] : s.composite_indexes) {
+                            if (ci.table != table) continue;
+                            if (ci.key_from_row(old_row) == ci.key_from_row(row)) {
+                                ci.insert_row(row);
+                            } else {
+                                ci.remove_row(old_row);
+                                ci.insert_row(row);
+                            }
+                        }
                         break;
                     }
                 }

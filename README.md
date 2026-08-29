@@ -12,17 +12,18 @@ Custom RDBMS + AI MCP Project
 
 | Category | Content |
 |------|------|
-| DB Engine | B+Tree, WAL, Buffer Pool (LRU O(1) hit), MVCC, transactions, cost-based optimizer, histogram statistics, adaptive auto statistics collection (size-tiered thresholds), B+Tree index disk persistence (parallel rebuild at startup), incremental secondary index updates (O(1) per INSERT/UPDATE/DELETE), Index Intersection (AND multi-index PK HashSet intersection), DELETE PK fast-path (`row_pk_pos` O(1) swap_remove), parallel query execution (SeqScan · GROUP BY par_chunks · ORDER BY par_sort, adaptive threshold 10k/thread_count), query result cache (LRU 512, O(k) invalidation on DML), lock wait timeout (`SET @lock_wait_timeout`), stored procedures·triggers·UDF persistence, session-isolated WAL/Undo Log (global `txn_id` tagging so concurrent sessions' transactions no longer clobber each other's crash-recovery trail, txn-grouped redo/undo on recovery) |
-| SQL Support | DDL / DML / JOIN / subqueries / CTE / UNION / constraints / transactions / stored procedures / triggers / UDF |
+| DB Engine | B+Tree (with underflow rebalancing), WAL + Undo Log (checksummed, atomic rewrite), Buffer Pool (LRU O(1) hit), **real row-level MVCC** (version chains via `_xmin`/`_xmax`, per-isolation-level visibility, GC-horizon VACUUM — not just logical delete), cost-based optimizer with **MCV** (most-common-value) + histogram cardinality estimation, `JoinAlgo::ReverseIndexNL` (drives a join off whichever side is actually smaller), **table partitioning** (`PARTITION BY RANGE/LIST/HASH`), recursive CTE **semi-naive evaluation**, incremental secondary/hash/composite/PK index maintenance (O(1) per INSERT/UPDATE/DELETE/MERGE, no full-table rebuild), FK/UNIQUE existence checks via existing indexes (not a linear scan), DELETE PK fast-path (`row_pk_pos` O(1) swap_remove), parallel query execution (SeqScan · GROUP BY · ORDER BY), query result cache (LRU 512), stored procedures·triggers·UDF persistence |
+| Concurrency | **Row-level concurrent writes** on the same table (not just table-level), **real blocking-wait locks with deadlock detection** (`@lock_wait_timeout`, not instant-fail), **Gap Lock** (InnoDB-style phantom-read prevention for range scans/inserts), **SSI predicate lock** (non-blocking, PostgreSQL-SIREAD-style — a plain unlocked SELECT under SERIALIZABLE now catches phantom rows), session-isolated WAL/Undo (global `txn_id` tagging so concurrent sessions never clobber each other's crash-recovery trail) |
+| SQL Support | DDL / DML / JOIN (incl. **LATERAL**) / subqueries / CTE (incl. recursive) / UNION / constraints / transactions / stored procedures / triggers / UDF / table partitioning / `FILTER (WHERE ...)` / `JSON_AGG` / `BIT_AND` / `BIT_OR` |
 | MCP | AI MCP (Claude Desktop, stdio JSON-RPC, 7 tools — execute_sql · list_databases · list_tables · get_table_schema · explain_query · get_indexes · sample_data, SELECT results as structured JSON array, alwaysAllow auto-configured (no permission popups), no API key required, auto-connect from UI) |
-| DBMS | TCP server, multiple simultaneous client connections, real-time session monitoring, per-session independent Executor + `shared_ptr<RwLock<SharedDatabase>>` shared state, concurrent read-only SELECT execution (shared lock; DML/DDL/procedures/CTE stay exclusive) |
+| DBMS | TCP server (native + MySQL wire protocol), multiple simultaneous client connections, real-time session monitoring, connection-pool support (`COM_CHANGE_USER`/`COM_RESET_CONNECTION`), per-session independent Executor + `shared_ptr<RwLock<SharedDatabase>>` shared state |
 | Language | C++, Python |
 
 <br/>
 
 ## Execute
 
-Build once with CMake (see `docs/instructions/instructions.md` for the full command reference):
+Build once with CMake (see `docs/mds/instructions.md` for the full command reference):
 ```bash
 cmake -S code -B code/build
 cmake --build code/build --config Debug
@@ -681,18 +682,18 @@ SHOW DATABASES;
 | Language | C++ |
 | Version | v2.3.0 |
 | Index | B+Tree (single / composite / clustered) |
-| Optimizer | Cost-based planner (AccessPath: SeqScan / PkPoint / PkBetween / PkRange / SecondaryPoint / SecondaryRange / **SecondaryBetween** / CompositeIndex / **CompositeIndexPrefix** / **SecondaryLikePrefix** / **IndexIntersection** · join cost estimation (NL vs Hash vs SortMerge vs IndexNL, HASH_FACTOR=3) · System-R DP join order optimization (N≤8), Greedy fallback) — the chosen AccessPath/JoinAlgo is what actually executes, not just what EXPLAIN displays · Hash Index equality O(1) preferred · Index Intersection (AND conditions with 2+ indexed columns → PK HashSet intersection) · uncorrelated IN/NOT IN subquery materialization (HashSet caching, O(1) lookup) · histogram selectivity estimation (ANALYZE TABLE, size-tiered auto-ANALYZE) · `total_rows` auto-updated on INSERT/DELETE |
-| Join | Cost-based dispatch to NestedLoop / Hash / SortMerge / IndexNL per join, matching the planner's chosen `JoinAlgo` (`code/backend/core/src/engine/join.cpp`); Cross/Natural/FullOuter always force NestedLoop regardless of cost, by design; `hash_join`'s Inner/Left probe phase runs in parallel across the ThreadPool |
-| Index | B+Tree (single/composite/clustered) · **Hash Index** (`USING HASH`, equality O(1), single column) · **Index Intersection** (multi-index AND → PK HashSet intersection) |
-| Transaction | WAL (binary redo log) + Undo Log (in-memory + disk persistence) + MVCC — both tagged with a globally unique `txn_id` (shared atomic counter across sessions), so COMMIT/ROLLBACK/ABORT only remove that transaction's own records instead of clearing the whole shared file, and crash recovery groups replay by `txn_id` |
-| Isolation Level | READ UNCOMMITTED ~ SERIALIZABLE (4 levels) |
-| Concurrency | Row-level Locking (SELECT FOR UPDATE / FOR SHARE, shared·exclusive locks, deadlock detection, `SET @lock_wait_timeout` session variable, MySQL-compatible ERROR 1205) — WHERE filter / GROUP BY bucketing+aggregation / ORDER BY sort / plain-aggregate collection genuinely run in parallel across a process-wide `ThreadPool` (adaptive threshold `10000/thread_count`, `RUSTDB_PARALLEL` env var / `SET @rusql_parallel = 1/0` session variable to toggle) |
+| Optimizer | Cost-based planner (AccessPath: SeqScan / PkPoint / PkBetween / PkRange / SecondaryPoint / SecondaryRange / **SecondaryBetween** / CompositeIndex / **CompositeIndexPrefix** / **SecondaryLikePrefix** / **IndexIntersection** · join cost estimation (NL vs Hash vs SortMerge vs IndexNL vs **ReverseIndexNL**, HASH_FACTOR=3) · System-R DP join order optimization (N≤8), Greedy fallback, cumulative cardinality carried into the 2nd+ join's algorithm choice) — the chosen AccessPath/JoinAlgo is what actually executes, not just what EXPLAIN displays · Hash Index equality O(1) preferred · Index Intersection (AND conditions with 2+ indexed columns → PK HashSet intersection) · uncorrelated IN/NOT IN subquery materialization (HashSet caching, O(1) lookup) · **MCV** (most-common-values, exact count for skewed equality lookups) + histogram selectivity estimation (ANALYZE TABLE, size-tiered auto-ANALYZE) · `total_rows` auto-updated on INSERT/DELETE |
+| Join | Cost-based dispatch to NestedLoop / Hash / SortMerge / IndexNL / **ReverseIndexNL** per join, matching the planner's chosen `JoinAlgo` (`code/backend/core/src/engine/join.cpp`); ReverseIndexNL drives the join off whichever side of the *first* join is actually smaller, probing an index (PK/secondary/hash) on the other side instead of always scanning the FROM-clause's first table; Cross/Natural/FullOuter always force NestedLoop regardless of cost, by design; `hash_join`'s Inner/Left probe phase runs in parallel across the ThreadPool; **LATERAL JOIN** (INNER/LEFT/CROSS) re-evaluates its subquery per outer row |
+| Index | B+Tree (single/composite/clustered, underflow-rebalanced on delete) · **Hash Index** (`USING HASH`, equality O(1), single column) · **Index Intersection** (multi-index AND → PK HashSet intersection) · index names may be reused across different tables/databases without collision |
+| Transaction | WAL (binary redo log) + Undo Log (in-memory + disk persistence) + **real row-level MVCC** — both tagged with a globally unique `txn_id` (shared atomic counter across sessions), so COMMIT/ROLLBACK/ABORT only remove that transaction's own records instead of clearing the whole shared file, and crash recovery groups replay by `txn_id`; WAL/Undo records are FNV-1a checksummed (corruption is detected and stops recovery cleanly instead of propagating garbage) |
+| Isolation Level | READ UNCOMMITTED ~ SERIALIZABLE (4 levels), each genuinely different (not just labeled) — RU is a true dirty read, RC re-snapshots per statement, RR/Serializable freeze a snapshot at BEGIN |
+| Concurrency | **Row-level concurrent writes** — two sessions can INSERT/UPDATE/DELETE different rows of the *same* table at the same time, not just different tables. **Real blocking-wait locks** (`SELECT FOR UPDATE`/`FOR SHARE`, shared·exclusive, `SET @lock_wait_timeout`, MySQL-compatible ERROR 1205) that genuinely wait and wake on release, plus full deadlock detection (cycle check on every acquire). **Gap Lock** (InnoDB-style — REPEATABLE READ/SERIALIZABLE range reads/writes block a concurrent INSERT into the same PK range, preventing phantoms). **SSI predicate lock** (non-blocking, PostgreSQL-SIREAD-style — an unlocked plain SELECT under SERIALIZABLE now fails its own COMMIT if a phantom lands in its scanned range). WHERE filter / GROUP BY bucketing+aggregation / ORDER BY sort / plain-aggregate collection genuinely run in parallel across a process-wide `ThreadPool` (adaptive threshold `10000/thread_count`, `RUSTDB_PARALLEL` env var / `SET @rusql_parallel = 1/0` session variable to toggle) |
 | Cache | Buffer Pool (LRU O(1) hit, tick-based, 64 pages × 16KB) · Query Result Cache (LRU 512, O(k) table invalidation via `table_to_keys` reverse index) |
 | Storage | Binary .rdb + LZ4 compression; global files separated into `data/_system/` subfolder (_users.json·_grants.json·_roles.json·_synonyms.json, etc.); per-connection independent directories (`data/local/`, `data/data_N/`) — UI·CLI·server share `code/data/`; B+Tree index `{table}.idx` / `{table}_{index}.idx` (auto-saved on INSERT·DELETE·CREATE INDEX, loaded on startup) |
 | Multi-DB | CREATE / DROP / USE / SHOW DATABASES, auto table qualification, isolation |
 | User Management | CREATE/DROP USER, GRANT/REVOKE, SHOW GRANTS, ROLE management, SYNONYM, persistence |
 | UI | Tauri + React + Monaco Editor (home screen: quick action buttons·RDBMS intro·connection card grid·bottom status bar·activity bar, multi-tab, tab right-click menu, tab pinning, split editor, MySQL-style editor toolbar, panel toggle buttons, Canvas-based auto column width, connection sidebar drag-resize, Server Manager — benchmark result UI·real-time session monitoring·AI MCP auto-connect) |
-| TCP Server | Native protocol (127.0.0.1:7878, `mysql_native_password`-style challenge-response auth — plaintext password never sent over the wire) + MySQL wire protocol (127.0.0.1:3306 by default, same challenge-response auth, fully compatible with DBeaver·mysql CLI·mysql-connector-python) — `--mysql-port` / `--mysql-bind` / `--no-mysql` / `--buffer-pool-size` options |
+| TCP Server | Native protocol (127.0.0.1:7878, `mysql_native_password`-style challenge-response auth — plaintext password never sent over the wire) + MySQL wire protocol (127.0.0.1:3306 by default, same challenge-response auth, fully compatible with DBeaver·mysql CLI·mysql-connector-python) — `--mysql-port` / `--mysql-bind` / `--no-mysql` / `--buffer-pool-size` options; connection-pool driver support (`COM_CHANGE_USER` / `COM_RESET_CONNECTION`, e.g. HikariCP) |
 | AI Integration | **AI MCP** (Python / FastMCP, stdio JSON-RPC) — Claude Desktop queries RuSQL directly via **7 tools**: `execute_sql` · `list_databases` · `list_tables` · `get_table_schema` · `explain_query` · `get_indexes` · `sample_data`, SELECT results as structured JSON array, `alwaysAllow` auto-configured (no permission popups), no API key required, auto-connect Claude Desktop from UI (supports both standard install and Windows Store version) |
 
 <br/>
@@ -764,21 +765,37 @@ Build/run command reference: `docs/instructions/instructions.md` (repo root, sib
 │  │ CREATE/DROP/SHOW SYNONYM      │       │
 │  │ FETCH FIRST n ROWS ONLY       │       │
 │  │ JOIN ... USING (col, ...)     │       │
+│  │ LATERAL JOIN (INNER/LEFT/CROSS│       │
+│  │ TABLE PARTITIONING (RANGE/    │       │
+│  │   LIST/HASH), ADD/DROP PART.  │       │
 │  │ BEGIN / COMMIT / ROLLBACK     │       │
 │  │ SAVEPOINT / ROLLBACK TO sp    │       │
-│  │ 4-level isolation             │       │
-│  │ MVCC (logical delete/VACUUM)  │       │
+│  │ 4-level isolation (genuinely  │       │
+│  │   distinct, not just labeled) │       │
+│  │ Real row-level MVCC (version  │       │
+│  │   chains, GC-horizon VACUUM)  │       │
 │  │ Row-level Locking (FOR UPDATE)│       │
+│  │   — real blocking wait +      │       │
+│  │   deadlock detection          │       │
+│  │ Gap Lock (phantom prevention) │       │
+│  │ SSI predicate lock (non-      │       │
+│  │   blocking, SIREAD-style)     │       │
 │  │ Checkpoint / WAL Recovery     │       │
 │  └───────────────────────────────┘       │
 │          ↓                               │
-│  B+Tree index (single/composite/clustered)│
-│  Incremental secondary index (O(1)/row)   │
+│  B+Tree index (single/composite/clustered,│
+│    underflow-rebalanced on delete)        │
+│  Incremental secondary/hash/composite/PK  │
+│    index maintenance (O(1)/row, no full-  │
+│    table rebuild — INSERT/UPDATE/DELETE/  │
+│    MERGE/ON DUPLICATE KEY UPDATE all)     │
 │  WAL binary redo log + Checkpoint         │
 │  Undo Log disk persistence (_undo.log)    │
+│  WAL/Undo record checksums (FNV-1a)       │
 │  Buffer Pool (LRU 64p 16KB, SELECT        │
 │    bypasses via direct s.tables read)     │
-│  MVCC (_xmin / _xmax version stamps)      │
+│  Real MVCC (_xmin/_xmax version chains,   │
+│    not just logical-delete stamps)        │
 │  Binary .rdb + LZ4 compressed storage     │
 │  Index metadata persistence (indexes.json)│
 │  B+Tree .idx auto-saved (DML/CREATE IDX)  │

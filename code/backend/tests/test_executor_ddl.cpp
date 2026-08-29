@@ -557,13 +557,15 @@ TEST_CASE("DROP DATABASE removes tables/indexes/views scoped to that db only", "
     Executor ex(dir.path);
     REQUIRE(ex.execute_sql("CREATE DATABASE company").is_ok());
     REQUIRE(ex.execute_sql("USE company").is_ok());
-    REQUIRE(ex.execute_sql("CREATE TABLE department (id INT PRIMARY KEY)").is_ok());
+    REQUIRE(ex.execute_sql("CREATE TABLE department (id INT PRIMARY KEY, code VARCHAR(10))").is_ok());
     REQUIRE(ex.execute_sql("CREATE INDEX idx_dept ON department (id)").is_ok());
+    REQUIRE(ex.execute_sql("CREATE INDEX idx_dept_code ON department (code) USING HASH").is_ok());
     REQUIRE(ex.execute_sql("CREATE VIEW v_dept AS SELECT id FROM department").is_ok());
 
     REQUIRE(ex.execute_sql("CREATE DATABASE other").is_ok());
     REQUIRE(ex.execute_sql("USE other").is_ok());
-    REQUIRE(ex.execute_sql("CREATE TABLE keep_me (id INT PRIMARY KEY)").is_ok());
+    REQUIRE(ex.execute_sql("CREATE TABLE keep_me (id INT PRIMARY KEY, code VARCHAR(10))").is_ok());
+    REQUIRE(ex.execute_sql("CREATE INDEX idx_keep_code ON keep_me (code) USING HASH").is_ok());
 
     auto drop_db = ex.execute_sql("DROP DATABASE company");
     REQUIRE(drop_db.is_ok());
@@ -573,9 +575,15 @@ TEST_CASE("DROP DATABASE removes tables/indexes/views scoped to that db only", "
     REQUIRE(s->tables.count("company.department") == 0);
     REQUIRE(s->indexes.count("company.department_idx_dept") == 0);
     REQUIRE(s->views.count("company.v_dept") == 0);
-    // The other database's data must survive untouched.
+    // Regression: hash indexes were never cleaned up here at all (a real, disclosed bug,
+    // now fixed) -- confirm both the storage map and its metadata map are gone.
+    REQUIRE(s->hash_indexes.count("company.department_idx_dept_code") == 0);
+    REQUIRE(s->hash_index_meta.count("company.department_idx_dept_code") == 0);
+    // The other database's data (including its own hash index) must survive untouched.
     REQUIRE(s->databases.count("other") == 1);
     REQUIRE(s->tables.count("other.keep_me") == 1);
+    REQUIRE(s->hash_indexes.count("other.keep_me_idx_keep_code") == 1);
+    REQUIRE(s->hash_index_meta.count("other.keep_me_idx_keep_code") == 1);
 }
 
 TEST_CASE("A query that references a nonexistent table errors rather than misbehaving", "[executor][ddl]") {

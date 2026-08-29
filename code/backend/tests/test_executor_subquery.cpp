@@ -178,16 +178,18 @@ TEST_CASE("UPDATE WHERE with a subquery condition", "[executor][subquery]") {
     }
 }
 
-TEST_CASE("DELETE WHERE with a subquery condition deletes nothing (faithfully-preserved Rust quirk)", "[executor][subquery]") {
-    // The Rust original's exec_delete_inner slow path computes rows_to_delete (used for
-    // RETURNING/FK-cascade side effects) via the subquery-aware matcher, but the actual
-    // deletion pass — both the transactional MVCC-mark loop and the non-transaction
-    // `rows.retain(...)` — always re-checks with the plain, non-subquery-aware
-    // matches_condexpr. Since that matcher's ConditionValue::Subquery arm is always
-    // false, DELETE with a subquery WHERE clause matches zero rows for the actual
-    // deletion, no matter what rows_to_delete found. This is a genuine pre-existing bug
-    // in the Rust original (see migration plan: bugs are preserved, not fixed, during
-    // porting), not something introduced by this port.
+TEST_CASE("DELETE WHERE with a subquery condition actually deletes the matching rows", "[executor][subquery][regression]") {
+    // Regression for a genuine, long-standing bug (faithfully preserved from the Rust
+    // original, now fixed): exec_delete_inner's slow path computed rows_to_delete (used
+    // for RETURNING/FK-cascade side effects) via the subquery-aware matcher, but the
+    // actual deletion pass — both the transactional MVCC-mark loop and the
+    // non-transaction erase — always re-checked with the plain, non-subquery-aware
+    // matches_condexpr, whose ConditionValue::Subquery arm is always false. So DELETE
+    // with a subquery WHERE clause always matched zero rows for the actual deletion, no
+    // matter what rows_to_delete found. Fixed by dispatching to the same
+    // matches_condition_with_subquery helper rows_to_delete already used, at all 3
+    // deletion-pass call sites (in-txn soft delete, autocommit hard delete, autocommit
+    // soft delete).
     TempDataDir dir("exec_subq_data_8");
     Executor ex(dir.path);
     REQUIRE(ex.execute_sql("CREATE DATABASE company").is_ok());
@@ -200,9 +202,39 @@ TEST_CASE("DELETE WHERE with a subquery condition deletes nothing (faithfully-pr
     auto r = ex.execute_sql(
         "DELETE FROM employee WHERE department_id IN (SELECT id FROM department WHERE is_active = 'false')");
     REQUIRE(r.is_ok());
-    REQUIRE(r.value() == "0 row(s) deleted.");
+    REQUIRE(r.value() == "1 row(s) deleted.");
 
     auto s = ex.get_shared()->read();
     auto& rows = s->tables.at("company.employee");
-    REQUIRE(rows.size() == 2);
+    REQUIRE(rows.size() == 1);
+    REQUIRE(rows[0].at("id") == "1"); // employee 2 (inactive dept) deleted, employee 1 survives
+}
+
+// Same fix, verified for the in-transaction (soft-delete) path too -- a separate code
+// path from the autocommit hard-delete case above.
+TEST_CASE("DELETE WHERE with a subquery condition works inside an explicit transaction", "[executor][subquery][regression]") {
+    TempDataDir dir("exec_subq_data_9");
+    Executor ex(dir.path);
+    REQUIRE(ex.execute_sql("CREATE DATABASE company").is_ok());
+    REQUIRE(ex.execute_sql("USE company").is_ok());
+    REQUIRE(ex.execute_sql("CREATE TABLE department (id INT PRIMARY KEY, is_active VARCHAR(5))").is_ok());
+    REQUIRE(ex.execute_sql("INSERT INTO department VALUES (1,'true'),(2,'false')").is_ok());
+    REQUIRE(ex.execute_sql("CREATE TABLE employee (id INT PRIMARY KEY, department_id INT)").is_ok());
+    REQUIRE(ex.execute_sql("INSERT INTO employee VALUES (1,1),(2,2)").is_ok());
+
+    REQUIRE(ex.execute_sql("BEGIN").is_ok());
+    auto r = ex.execute_sql(
+        "DELETE FROM employee WHERE department_id IN (SELECT id FROM department WHERE is_active = 'false')");
+    REQUIRE(r.is_ok());
+    REQUIRE(r.value() == "1 row(s) deleted.");
+    REQUIRE(ex.execute_sql("COMMIT").is_ok());
+
+    auto s = ex.get_shared()->read();
+    auto& rows = s->tables.at("company.employee");
+    std::size_t live = 0;
+    for (auto& row : rows) {
+        auto xit = row.find("_xmax");
+        if (xit == row.end() || xit->second == "0") live++;
+    }
+    REQUIRE(live == 1);
 }

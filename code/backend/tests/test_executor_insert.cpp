@@ -181,6 +181,44 @@ TEST_CASE("INSERT IGNORE and ON DUPLICATE KEY UPDATE", "[executor][insert]") {
     REQUIRE(rows[0].at("budget") == "500");
 }
 
+// Regression for PLAN.md P2: ON DUPLICATE KEY UPDATE's in-place mutation previously only
+// refreshed the PK B+Tree, leaving secondary/hash/composite indexes on the changed columns
+// stale (still pointing at the pre-conflict values).
+TEST_CASE("ON DUPLICATE KEY UPDATE keeps secondary, hash, and composite indexes fresh, not stale",
+          "[executor][insert][regression]") {
+    TempDataDir dir("exec_insert_data_on_dup_indexes");
+    Executor ex(dir.path);
+    REQUIRE(ex.execute_sql("CREATE DATABASE company").is_ok());
+    REQUIRE(ex.execute_sql("USE company").is_ok());
+    REQUIRE(ex.execute_sql("CREATE TABLE dept (id INT PRIMARY KEY, dept_code INT, region VARCHAR(20), budget INT)").is_ok());
+    REQUIRE(ex.execute_sql("INSERT INTO dept VALUES (1, 10, 'east', 100)").is_ok());
+    REQUIRE(ex.execute_sql("CREATE INDEX idx_dept_code ON dept (dept_code)").is_ok());
+    REQUIRE(ex.execute_sql("CREATE INDEX idx_region ON dept (region) USING HASH").is_ok());
+    REQUIRE(ex.execute_sql("CREATE INDEX idx_dept_budget ON dept (dept_code, budget)").is_ok());
+
+    auto r = ex.execute_sql("INSERT INTO dept (id, dept_code, region, budget) VALUES (1, 20, 'west', 999) "
+                             "ON DUPLICATE KEY UPDATE dept_code = 20, region = 'west', budget = 999");
+    REQUIRE(r.is_ok());
+
+    auto s = ex.get_shared()->read();
+
+    auto& idx = s->indexes.at("company.dept_idx_dept_code");
+    auto old_bucket = idx.search("10");
+    REQUIRE(old_bucket.has_value());
+    REQUIRE(old_bucket.value() == "[]"); // old value's bucket emptied, not left stale
+    auto new_bucket = idx.search("20");
+    REQUIRE(new_bucket.has_value());
+    REQUIRE(new_bucket->find("\"id\":\"1\"") != std::string::npos);
+
+    auto& hi = s->hash_indexes.at("company.dept_idx_region");
+    REQUIRE(hi.get("east").empty());
+    REQUIRE(hi.get("west").size() == 1);
+
+    auto& ci = s->composite_indexes.at("company.dept_idx_dept_budget");
+    REQUIRE_FALSE(ci.search_exact({"10", "100"}).has_value());
+    REQUIRE(ci.search_exact({"20", "999"}).has_value());
+}
+
 TEST_CASE("ENUM and SET column value validation", "[executor][insert]") {
     TempDataDir dir("exec_insert_data_6");
     Executor ex(dir.path);

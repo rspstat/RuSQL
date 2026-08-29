@@ -780,6 +780,20 @@ StringResult Executor::exec_drop_database(SharedDatabase& s, const std::string& 
         s.indexes.erase(k);
     }
 
+    // PLAN.md-tracked bug fix: hash indexes were never cleaned up here at all (unlike
+    // the secondary B+Tree / composite index loops just above/below), leaking every
+    // dropped database's hash indexes in memory permanently.
+    std::vector<std::string> hash_keys;
+    for (auto& [k, _] : s.hash_indexes) {
+        if (k.compare(0, prefix.size(), prefix) == 0) hash_keys.push_back(k);
+    }
+    for (auto& k : hash_keys) s.hash_indexes.erase(k);
+
+    for (auto it = s.hash_index_meta.begin(); it != s.hash_index_meta.end();) {
+        if (it->second.first.compare(0, prefix.size(), prefix) == 0) it = s.hash_index_meta.erase(it);
+        else ++it;
+    }
+
     for (auto it = s.index_meta.begin(); it != s.index_meta.end();) {
         if (it->second.first.compare(0, prefix.size(), prefix) == 0) it = s.index_meta.erase(it);
         else ++it;
