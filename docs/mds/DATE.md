@@ -142,6 +142,24 @@ App.tsx(4090줄 단일 컴포넌트)를 전면 리팩터링할지, AI 탭 부분
 
 Debug+Release **377 케이스/22,506 assertions** 전부 통과, `test_full.sql`/`test_full-ver2.sql` 재검증 완료.
 
+### 8월 29일 — Phase 42: 전체 문서 최신화 + 커밋/푸시
+
+사용자가 "최종 테스트를 진행한 후, 모든 문서 파일을 전부 최신화해달라"고 명시적으로 요청, 완료되면 커밋&푸시까지 승인. 리포지토리 전체 `.md` 파일을 훑어 stale한 부분을 찾아 갱신:
+
+- **`README.md`**(루트): 가장 크게 갱신됐음 — 이전에는 "읽기 전용 동시성만 지원", "논리 삭제 → VACUUM"만 언급하는 등 1학기 수준 설명이 그대로 남아있었음. Core Features/Technology Stack 표와 아키텍처 다이어그램을 실제 행 단위 MVCC, 블로킹 대기 락 + 데드락 감지, Gap Lock, SSI predicate lock, 테이블 파티셔닝, LATERAL JOIN, ReverseIndexNL, MCV, WAL/Undo 체크섬, 커넥션 풀 명령까지 반영하도록 전면 수정. 깨진 링크(`docs/instructions/` → `docs/mds/`) 2곳도 수정. 내장된 `test_full.sql` 사본이 실제 파일과 바이트 단위로 동일한지 diff로 확인(변경 없음, 그대로 둠).
+- **`docs/mds/architecture-diagram.md`**: README와 동일한 최신화 — PARTITION BY DDL, LATERAL JOIN, ReverseIndexNL, BIT_AND/BIT_OR/JSON_AGG/FILTER, semi-naive 재귀 CTE, 실제 블로킹 락+데드락 감지, SSI predicate lock, MCV, WAL/Undo 체크섬, 커넥션 풀 명령 추가.
+- **`docs/mds/DIFF.md`**: stale한 행 2건 수정 — "커넥션 풀 지원"(✗ → △, 내장 풀러는 없지만 클라이언트 드라이버 풀링 지원 명시), "데이터 임포트/익스포트"(✓ → △, 당시 CSV 임포트에 UI가 없었음).
+
+(git: `b890def`, 2026-08-29, origin/main에 푸시 완료)
+
+### 8월 31일 — Phase 43~45: 프런트엔드 정리 + CSV 임포트 UI + 우클릭 메뉴 검증에서 발견한 캐시 버그
+
+- **Phase 43**: AI 방향이 아직 정해지지 않아 대기하는 동안, 죽은 코드 정리 — 프런트엔드 어디서도 호출하지 않는 Tauri 커맨드 `get_views`/`get_indexes`(각각 `_for_db` 버전이 실제로 쓰이고 있어 이쪽만 완전히 죽어있었음)와 빈 스크래치 파일 `srv_cut.txt` 삭제.
+- **Phase 44**: 마지막까지 UI가 없던 CSV 임포트 기능 구현. 기존 SQL 파일 임포트 버튼과 동일한 방식(`<input type="file">` + `FileReader`, 별도 Tauri 다이얼로그 플러그인 없이)으로 테이블 우클릭 메뉴에 "Import CSV..." 항목 추가. `import_csv` Tauri 커맨드 시그니처를 파일 경로 대신 파일 내용을 직접 받도록 변경. WebView2 CDP 드라이버로 실제 앱을 띄워 라이브 검증(네이티브 OS 파일 선택 창은 자동화가 불가능해 `HTMLInputElement.prototype.click`을 가로채 가짜 `File` 객체를 주입하는 방식 사용) — CSV 3행 임포트 후 실제로 테이블에 반영된 것까지 확인.
+- **Phase 45**: 사용자가 "우클릭 메뉴들 전부 작동하는지" 확인을 요청, 10개 항목을 실제 앱으로 하나씩 라이브 검증. 9개는 정상이었고, 10번째(DROP Table)는 SQL 실행 자체는 정상이었지만 검증 과정에서 **별개의 진짜 버그**를 발견 — 쿼리 결과 캐시가 `SELECT ... FROM information_schema.tables`류 쿼리를 캐싱할 때 "information_schema.tables"라는 가상 테이블명을 캐시 의존성으로 등록하는데, DDL(DROP TABLE 등)의 캐시 무효화는 항상 실제로 건드린 진짜 테이블만 대상으로 해서, 한 번 캐싱된 information_schema 조회 결과는 이후 어떤 스키마 변경에도 절대 무효화되지 않음 — DROP TABLE 후에도 사이드바가 드롭된 테이블을 영구히 계속 보여주는 버그였음. 기존 `has_subquery`/`has_nondeterministic` 캐시 제외 패턴과 동일하게, information_schema를 참조하는 쿼리는 아예 캐싱하지 않도록 수정(`references_infoschema` 단어경계 인식 헬퍼 신규 추가). 정확히 이 시나리오(캐시 데우기 → DROP TABLE → 동일 SQL 재실행 → 드롭된 테이블이 결과에서 사라졌는지)를 검증하는 회귀 테스트 추가.
+
+Debug+Release **378 케이스/22,514 assertions** 전부 통과, `test_full.sql`/`test_full-ver2.sql`을 `engine_cli.exe`로 양쪽 설정 모두 재검증 완료.
+
 ---
 
 ## 요약: 1학기 대비 2학기에 달라진 것
@@ -155,6 +173,6 @@ Debug+Release **377 케이스/22,506 assertions** 전부 통과, `test_full.sql`
 | 인덱스 유지보수 | 일부 경로에서 전체 재구축 | 대부분 증분 갱신으로 전환, 인덱스 이름 충돌·미유지보수 버그 다수 발견/수정 |
 | 신규 SQL 기능 | JOIN/서브쿼리/CTE/윈도우함수 | **테이블 파티셔닝**, LATERAL JOIN, FILTER/JSON_AGG/BIT_AND·OR |
 | 쿼리 플래너 | 존재하나 실제 실행에 미연결 | 실제 실행에 배선 + MCV 통계 + ReverseIndexNL + 누적 카디널리티 반영 |
-| 검증 방식 | — | **매 변경마다 Debug+Release 전체 회귀 테스트 + 실 서버/실 클라이언트(mysql CLI, pymysql, MCP SDK 등)로 라이브 검증**하는 방법론이 이번 학기에 정착 (테스트 218 → 377 케이스, 3,080 → 22,506 assertions) |
+| 검증 방식 | — | **매 변경마다 Debug+Release 전체 회귀 테스트 + 실 서버/실 클라이언트(mysql CLI, pymysql, MCP SDK 등)로 라이브 검증**하는 방법론이 이번 학기에 정착 (테스트 218 → 378 케이스, 3,080 → 22,514 assertions) |
 
-이 기간 동안 발견되어 수정된 실제 버그는 60건 이상이며, 그중 다수(피보나치형 행 증가 MVCC 레이스, 크로스 프리미티브 데드락, MCP 서버 완전 고장, 원본 Rust부터 이어져 온 DELETE-서브쿼리 버그 등)는 실제 라이브 테스트 없이는 발견 불가능했던 것으로, 이 프로젝트의 테스트 방법론 자체가 "Catch2 단위 테스트만으로는 부족하다"는 교훈을 반복적으로 확인하며 발전해 온 과정이기도 합니다.
+이 기간 동안 발견되어 수정된 실제 버그는 60건 이상이며, 그중 다수(피보나치형 행 증가 MVCC 레이스, 크로스 프리미티브 데드락, MCP 서버 완전 고장, 원본 Rust부터 이어져 온 DELETE-서브쿼리 버그, information_schema 쿼리 캐시 영구 stale 버그 등)는 실제 라이브 테스트 없이는 발견 불가능했던 것으로, 이 프로젝트의 테스트 방법론 자체가 "Catch2 단위 테스트만으로는 부족하다"는 교훈을 반복적으로 확인하며 발전해 온 과정이기도 합니다.

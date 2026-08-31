@@ -452,3 +452,30 @@ TEST_CASE("INFORMATION_SCHEMA.TABLES / .COLUMNS reflect created tables", "[execu
     REQUIRE(cols.value().find("name") != std::string::npos);
     REQUIRE(cols.value().find("varchar") != std::string::npos);
 }
+
+TEST_CASE("INFORMATION_SCHEMA.TABLES query is not cached stale across a DROP TABLE", "[executor][misc]") {
+    // Regression test: the query result cache used to key information_schema.* queries by the
+    // literal pseudo-table name, but DDL only ever invalidated the real table it touched -- so a
+    // cached "SELECT ... FROM information_schema.tables" result never got invalidated by a later
+    // DROP TABLE and kept reporting a table that no longer existed.
+    TempDataDir dir("exec_misc_data_infoschema_cache");
+    Executor ex(dir.path);
+    REQUIRE(ex.execute_sql("CREATE DATABASE company").is_ok());
+    REQUIRE(ex.execute_sql("USE company").is_ok());
+    REQUIRE(ex.execute_sql("CREATE TABLE employee (id INT PRIMARY KEY)").is_ok());
+
+    const std::string q =
+        "SELECT table_name FROM information_schema.tables WHERE table_schema='company' AND table_type='BASE TABLE'";
+
+    // Warm the query cache.
+    auto before = ex.execute_sql(q);
+    REQUIRE(before.is_ok());
+    REQUIRE(before.value().find("employee") != std::string::npos);
+
+    REQUIRE(ex.execute_sql("DROP TABLE employee").is_ok());
+
+    // Re-running the identical SQL text must reflect the drop, not a stale cached result.
+    auto after = ex.execute_sql(q);
+    REQUIRE(after.is_ok());
+    REQUIRE(after.value().find("employee") == std::string::npos);
+}

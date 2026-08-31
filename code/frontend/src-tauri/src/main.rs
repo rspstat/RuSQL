@@ -706,31 +706,6 @@ fn get_columns_detail(table: String, state: State<AppState>) -> Vec<ColumnDetail
     }).collect()
 }
 
-#[tauri::command]
-fn get_views(state: State<AppState>) -> Vec<String> {
-    let mut guard = state.db.lock().unwrap();
-    let conn = match guard.as_mut() { Some(c) => c, None => return Vec::new() };
-    let db = conn.current_db.clone();
-    let sql = format!(
-        "SELECT table_name FROM information_schema.tables WHERE table_schema='{}' AND table_type='VIEW';",
-        db.replace('\'', "''")
-    );
-    query_infoschema_col(conn, &sql, "table_name")
-}
-
-#[tauri::command]
-fn get_indexes(state: State<AppState>) -> Vec<IndexInfo> {
-    let mut guard = state.db.lock().unwrap();
-    let conn = match guard.as_mut() { Some(c) => c, None => return Vec::new() };
-    let db = conn.current_db.clone();
-    let sql = format!(
-        "SELECT table_name FROM information_schema.tables WHERE table_schema='{}' AND table_type='BASE TABLE';",
-        db.replace('\'', "''")
-    );
-    let tables = query_infoschema_col(conn, &sql, "table_name");
-    fetch_indexes(conn, &db, &tables)
-}
-
 // ─── Tauri 커맨드: 서버 관리 ─────────────────────────────────
 // engine_server.exe는 독립 프로세스라 같은 data_dir을 두 프로세스가 동시에 열 수 없다.
 // 그래서 "서버 시작/중지"는 지금 붙어있는 프로세스를 내려받고, 원하는 포트로 다시
@@ -916,9 +891,11 @@ fn csv_escape(s: &str) -> String {
 }
 
 // ─── CSV 가져오기 ─────────────────────────────────────────────
+// 프런트가 <input type="file"> + FileReader로 이미 읽어 넘겨준 content를 그대로
+// 파싱한다 (importSqlFile과 동일한 파일 읽기 방식 — 네이티브 dialog 플러그인 불필요,
+// 그래서 실제 파일시스템 경로 대신 파일 내용 문자열을 받는다).
 #[tauri::command]
-fn import_csv(table: String, file_path: String, state: State<AppState>) -> Result<String, String> {
-    let content = std::fs::read_to_string(&file_path).map_err(|e| e.to_string())?;
+fn import_csv(table: String, content: String, state: State<AppState>) -> Result<String, String> {
     let mut lines = content.lines();
 
     let header = match lines.next() {
@@ -943,7 +920,7 @@ fn import_csv(table: String, file_path: String, state: State<AppState>) -> Resul
             _ => errors += 1,
         }
     }
-    Ok(format!("Imported {} rows ({} errors) from '{}'.", count, errors, file_path))
+    Ok(format!("Imported {} rows ({} errors).", count, errors))
 }
 
 fn csv_parse_row(line: &str) -> Vec<String> {
@@ -1145,8 +1122,6 @@ fn main() {
             get_tables,
             get_columns,
             get_columns_detail,
-            get_views,
-            get_indexes,
             get_tables_for_db,
             get_views_for_db,
             get_indexes_for_db,

@@ -328,7 +328,7 @@
 - [x] 결과 테이블 컬럼 너비 조절 — th 드래그 resize handle, table-layout: fixed 항상 적용
 - [x] 결과 테이블 컬럼 자동 너비 — Canvas `measureText`로 헤더·데이터 실제 픽셀 너비 측정 (한글/CJK 포함), 최대 200행 샘플링, 최소 60px / 최대 500px; 헤더 측정 시 정렬 아이콘(` ⇅`) 포함, `white-space: nowrap` + `vertical-align: middle`로 줄바꿈·수직 밀림 방지
 - [x] CSV 익스포트 — 결과 패널의 "⬇ CSV" 버튼, 순수 클라이언트 사이드(Blob 생성 + `<a download>`)로 SELECT 결과를 CSV 파일로 저장. 실제로는 Tauri `export_csv` 커맨드를 호출하지 않음 — 그 백엔드 커맨드는 등록만 되어 있고 프런트에서 한 번도 호출되지 않는 죽은 코드(`PLAN.md` Section G 참고)
-- [ ] CSV 임포트 — UI 자체가 없음(백엔드 `import_csv` Tauri 커맨드는 존재하나 프런트에서 호출하는 곳이 전혀 없음). 이전에 이 문서에 "완료"로 잘못 기재돼 있던 걸 정정
+- [x] CSV 임포트 — 테이블 우클릭 컨텍스트 메뉴의 "Import CSV..." 항목. `<input type="file">` + `FileReader`로 파일 내용을 읽어(기존 "Open SQL file" 기능과 동일한 방식, 네이티브 dialog 플러그인 불필요) Tauri `import_csv` 커맨드로 전달 — 첫 줄을 헤더(컬럼명)로 파싱해 나머지 각 행을 `INSERT INTO table (...) VALUES (...)`로 실행, "Imported N rows (M errors)." 결과를 쿼리 결과 패널에 표시. `import_csv`는 기존엔 파일 경로를 받았으나 프런트의 파일 읽기 방식에 맞춰 파일 내용 문자열을 받도록 시그니처 변경. 실제 앱 실행 후 테이블 생성→CSV 임포트→SELECT로 라이브 검증 완료
 - [x] 결과 컬럼 헤더 클릭 정렬 — ▲ ASC / ▼ DESC / ⇅ 기본 토글, 수치·문자열 자동 감지, 정렬 후 페이징 재계산
 - [x] 결과 행 번호 — 결과 테이블 첫 열 `#` (1-based, 페이지 오프셋 반영, 고정 40px 너비, 왼쪽 정렬)
 - [x] 쿼리 실행 진행 바 — `isRunning` 시 탭바 하단에 teal 슬라이딩 바 표시, 최소 400ms 보장으로 빠른 쿼리도 시각적 피드백 제공

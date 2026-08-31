@@ -1044,6 +1044,30 @@ bool contains_nondeterministic_func(const std::string& lower_sql) {
     }
     return false;
 }
+
+// Query-cache staleness fix: a SELECT against an information_schema.* virtual view is
+// tracked (for cache get/put + invalidation) as depending on the literal table name
+// "information_schema.<view>" -- but DDL (CREATE/DROP TABLE, CREATE/DROP VIEW, CREATE/DROP
+// INDEX, ALTER TABLE) only ever invalidates the *real* table it touches (e.g.
+// "db.mytable"), never "information_schema.tables" itself. So a cached
+// "SELECT ... FROM information_schema.tables" result never gets invalidated by a later
+// DROP TABLE, and silently keeps reporting a table that no longer exists -- found live via
+// the sidebar's "Import CSV"/DROP-table right-click flow still listing a just-dropped
+// table. Simplest safe fix, matching how has_subquery/has_nondeterministic already work:
+// never cache these queries at all (they're cheap metadata lookups, not worth caching).
+bool references_infoschema(const std::string& lower_sql) {
+    static const std::string name = "information_schema";
+    auto is_ident_char = [](char c) { return std::isalnum(static_cast<unsigned char>(c)) != 0 || c == '_'; };
+    std::size_t pos = 0;
+    while ((pos = lower_sql.find(name, pos)) != std::string::npos) {
+        bool left_ok = pos == 0 || !is_ident_char(lower_sql[pos - 1]);
+        std::size_t after = pos + name.size();
+        bool right_ok = after >= lower_sql.size() || !is_ident_char(lower_sql[after]);
+        if (left_ok && right_ok) return true;
+        pos = after;
+    }
+    return false;
+}
 } // namespace
 
 StringResult Executor::execute_sql(const std::string& sql) {
@@ -1105,6 +1129,7 @@ StringResult Executor::execute_sql_inner(const std::string& sql) {
 
     bool has_subquery = looks_like_select && count_occurrences(to_ascii_lower(trimmed), "select") > 1;
     bool has_nondeterministic = looks_like_select && contains_nondeterministic_func(to_ascii_lower(trimmed));
+    bool has_infoschema = looks_like_select && references_infoschema(to_ascii_lower(trimmed));
 
     // Row-level-concurrency Stage 4/5 correctness fix (found via concurrent-reader
     // monotonicity stress testing): capture each involved table's cache generation
@@ -1125,7 +1150,7 @@ StringResult Executor::execute_sql_inner(const std::string& sql) {
 
     StringResult result = execute(std::move(stmt));
 
-    if (looks_like_select && !in_txn && !has_subquery && !has_nondeterministic && result.is_ok()) {
+    if (looks_like_select && !in_txn && !has_subquery && !has_nondeterministic && !has_infoschema && result.is_ok()) {
         // shared->read() is enough here -- QueryResultCache is fully self-synchronized
         // (its own mutex_), so populating it doesn't need the whole database exclusive.
         auto s = shared->read();

@@ -459,6 +459,34 @@ function App() {
     input.click();
   };
 
+  const triggerCsvImport = (table: string) => {
+    const input = document.createElement("input");
+    input.type = "file";
+    input.accept = ".csv";
+    input.onchange = (e) => {
+      const file = (e.target as HTMLInputElement).files?.[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = async ev => {
+        const content = ev.target?.result as string;
+        if (!content) return;
+        setActiveView("editor");
+        setIsRunning(true);
+        try {
+          const msg = await invoke<string>("import_csv", { table, content });
+          setTabResults(p => ({ ...p, [activeTabId]: [{ columns: [], rows: [], message: msg, elapsed: 0, success: true }] }));
+          await refreshSidebar();
+        } catch (err) {
+          setTabResults(p => ({ ...p, [activeTabId]: [{ columns: [], rows: [], message: String(err), elapsed: 0, success: false }] }));
+        } finally {
+          setIsRunning(false);
+        }
+      };
+      reader.readAsText(file);
+    };
+    input.click();
+  };
+
   const toggleResultPanel = () => {
     if (resultHeight > 0) {
       lastResultHeightRef.current = resultHeight;
@@ -2420,6 +2448,7 @@ function App() {
                   navigator.clipboard.writeText(`INSERT INTO ${tableCtxMenu.table} VALUES ();`);
                   setTableCtxMenu(null);
                 }}>Copy as INSERT</div>
+                <div onClick={() => { const t = tableCtxMenu.table; setTableCtxMenu(null); triggerCsvImport(t); }}>Import CSV...</div>
                 <div className="ctx-divider" />
                 <div className="ctx-item-warn" onClick={() => {
                   const t = tableCtxMenu.table;
