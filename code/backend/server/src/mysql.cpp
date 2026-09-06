@@ -1112,6 +1112,7 @@ void handle_mysql_client(SOCKET sock, std::shared_ptr<RwLock<SharedDatabase>> sh
         switch (cmd) {
             case COM_QUIT: {
                 exec.deregister_process();
+                exec.release_explicit_table_locks(); // LOCK TABLES V1 -- release on disconnect
                 return;
             }
             case COM_PING: {
@@ -1257,6 +1258,7 @@ void handle_mysql_client(SOCKET sock, std::shared_ptr<RwLock<SharedDatabase>> sh
                     (void)ignore_;
                 }
                 exec.deregister_process();
+                exec.release_explicit_table_locks(); // LOCK TABLES V1 -- release on disconnect
                 exec.auth_user = new_user;
                 exec.register_process(new_user, peer);
                 if (!new_db.empty()) {
@@ -1288,6 +1290,7 @@ void handle_mysql_client(SOCKET sock, std::shared_ptr<RwLock<SharedDatabase>> sh
     }
 
     exec.deregister_process();
+    exec.release_explicit_table_locks(); // LOCK TABLES V1 -- release on disconnect
 }
 
 } // namespace

@@ -1,5 +1,8 @@
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <filesystem>
+#include <thread>
 
 #include "catch.hpp"
 #include "engine/executor/executor.hpp"
@@ -339,4 +342,120 @@ TEST_CASE("SHOW PROCESSLIST includes the current session", "[executor][dcl]") {
     auto r = ex.execute_sql("SHOW PROCESSLIST");
     REQUIRE(r.is_ok());
     REQUIRE(r.value().find("root") != std::string::npos);
+}
+
+TEST_CASE("LOCK TABLES basic syntax and UNLOCK TABLES", "[executor][dcl][lock_tables]") {
+    TempDataDir dir("exec_dcl_data_lock_1");
+    Executor ex(dir.path);
+    REQUIRE(ex.execute_sql("CREATE DATABASE d").is_ok());
+    REQUIRE(ex.execute_sql("USE d").is_ok());
+    REQUIRE(ex.execute_sql("CREATE TABLE t (id INT PRIMARY KEY)").is_ok());
+
+    REQUIRE(ex.execute_sql("LOCK TABLES t READ").is_ok());
+    REQUIRE(ex.execute_sql("UNLOCK TABLES").is_ok());
+    REQUIRE(ex.execute_sql("LOCK TABLES t WRITE").is_ok());
+    REQUIRE(ex.execute_sql("UNLOCK TABLES").is_ok());
+    REQUIRE_FALSE(ex.execute_sql("LOCK TABLES nosuch READ").is_ok()); // unknown table rejected
+}
+
+TEST_CASE("LOCK TABLES ... WRITE fails immediately (NOWAIT) against a conflicting session, "
+          "then succeeds once that session UNLOCKs",
+          "[executor][dcl][lock_tables]") {
+    // V1 scope, discovered via a real hang while testing an earlier blocking-poll design:
+    // execute()'s dispatcher holds shared->write() (the whole database's structural
+    // exclusive lock) for LOCK TABLES's entire call (it has no per-table fast-path entry
+    // in table_lock_set_for) -- sleeping/retrying inside exec_lock_tables while
+    // conflicted would hold that database-wide lock the whole time, freezing every
+    // session's every statement, including the very UNLOCK TABLES this session is
+    // waiting on. So conflicts fail immediately with a clear error instead of blocking.
+    TempDataDir dir("exec_dcl_data_lock_2");
+    Executor ex(dir.path);
+    REQUIRE(ex.execute_sql("CREATE DATABASE d").is_ok());
+    REQUIRE(ex.execute_sql("USE d").is_ok());
+    REQUIRE(ex.execute_sql("CREATE TABLE t (id INT PRIMARY KEY)").is_ok());
+
+    auto shared = ex.get_shared();
+    Executor sess_a = Executor::new_session(shared);
+    Executor sess_b = Executor::new_session(shared);
+    REQUIRE(sess_a.execute_sql("USE d").is_ok());
+    REQUIRE(sess_b.execute_sql("USE d").is_ok());
+
+    REQUIRE(sess_a.execute_sql("LOCK TABLES t WRITE").is_ok());
+    auto conflict = sess_b.execute_sql("LOCK TABLES t WRITE");
+    REQUIRE_FALSE(conflict.is_ok());
+    REQUIRE(conflict.error().find("already locked by another session") != std::string::npos);
+
+    REQUIRE(sess_a.execute_sql("UNLOCK TABLES").is_ok());
+    REQUIRE(sess_b.execute_sql("LOCK TABLES t WRITE").is_ok()); // succeeds now that a released
+    sess_b.execute_sql("UNLOCK TABLES");
+}
+
+TEST_CASE("LOCK TABLES ... READ allows concurrent READ holders from other sessions",
+          "[executor][dcl][lock_tables]") {
+    TempDataDir dir("exec_dcl_data_lock_3");
+    Executor ex(dir.path);
+    REQUIRE(ex.execute_sql("CREATE DATABASE d").is_ok());
+    REQUIRE(ex.execute_sql("USE d").is_ok());
+    REQUIRE(ex.execute_sql("CREATE TABLE t (id INT PRIMARY KEY)").is_ok());
+
+    auto shared = ex.get_shared();
+    Executor sess_a = Executor::new_session(shared);
+    Executor sess_b = Executor::new_session(shared);
+    REQUIRE(sess_a.execute_sql("USE d").is_ok());
+    REQUIRE(sess_b.execute_sql("USE d").is_ok());
+
+    REQUIRE(sess_a.execute_sql("LOCK TABLES t READ").is_ok());
+    REQUIRE(sess_b.execute_sql("LOCK TABLES t READ").is_ok()); // must NOT block -- READ+READ is compatible
+
+    sess_a.execute_sql("UNLOCK TABLES");
+    sess_b.execute_sql("UNLOCK TABLES");
+}
+
+TEST_CASE("LOCK TABLES implicitly releases a session's previous hold before acquiring the new one",
+          "[executor][dcl][lock_tables]") {
+    TempDataDir dir("exec_dcl_data_lock_4");
+    Executor ex(dir.path);
+    REQUIRE(ex.execute_sql("CREATE DATABASE d").is_ok());
+    REQUIRE(ex.execute_sql("USE d").is_ok());
+    REQUIRE(ex.execute_sql("CREATE TABLE t1 (id INT PRIMARY KEY)").is_ok());
+    REQUIRE(ex.execute_sql("CREATE TABLE t2 (id INT PRIMARY KEY)").is_ok());
+
+    auto shared = ex.get_shared();
+    Executor sess_a = Executor::new_session(shared);
+    Executor sess_b = Executor::new_session(shared);
+    REQUIRE(sess_a.execute_sql("USE d").is_ok());
+    REQUIRE(sess_b.execute_sql("USE d").is_ok());
+
+    REQUIRE(sess_a.execute_sql("LOCK TABLES t1 WRITE").is_ok());
+    // A brand-new LOCK TABLES (even naming a different table) must release t1 first --
+    // sess_b should be able to lock t1 immediately afterward without waiting at all.
+    REQUIRE(sess_a.execute_sql("LOCK TABLES t2 WRITE").is_ok());
+    REQUIRE(sess_b.execute_sql("LOCK TABLES t1 WRITE").is_ok());
+
+    sess_a.execute_sql("UNLOCK TABLES");
+    sess_b.execute_sql("UNLOCK TABLES");
+}
+
+TEST_CASE("LOCK TABLES ... READ vs WRITE conflict in both directions (NOWAIT)", "[executor][dcl][lock_tables]") {
+    TempDataDir dir("exec_dcl_data_lock_5");
+    Executor ex(dir.path);
+    REQUIRE(ex.execute_sql("CREATE DATABASE d").is_ok());
+    REQUIRE(ex.execute_sql("USE d").is_ok());
+    REQUIRE(ex.execute_sql("CREATE TABLE t (id INT PRIMARY KEY)").is_ok());
+
+    auto shared = ex.get_shared();
+    Executor sess_a = Executor::new_session(shared);
+    Executor sess_b = Executor::new_session(shared);
+    REQUIRE(sess_a.execute_sql("USE d").is_ok());
+    REQUIRE(sess_b.execute_sql("USE d").is_ok());
+
+    // A holds READ -- B's WRITE must conflict.
+    REQUIRE(sess_a.execute_sql("LOCK TABLES t READ").is_ok());
+    REQUIRE_FALSE(sess_b.execute_sql("LOCK TABLES t WRITE").is_ok());
+    REQUIRE(sess_a.execute_sql("UNLOCK TABLES").is_ok());
+
+    // A holds WRITE -- B's READ must also conflict.
+    REQUIRE(sess_a.execute_sql("LOCK TABLES t WRITE").is_ok());
+    REQUIRE_FALSE(sess_b.execute_sql("LOCK TABLES t READ").is_ok());
+    sess_a.execute_sql("UNLOCK TABLES");
 }

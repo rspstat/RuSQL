@@ -278,13 +278,18 @@ struct AggFunc {
     struct GroupConcat { std::string separator; };
     struct CountCase { std::vector<CaseWhenBranch> branches; std::optional<std::string> else_val; };
     struct SumCase { std::vector<CaseWhenBranch> branches; std::optional<std::string> else_val; };
-    // No Rust/MySQL original for these two -- new C++-native additions.
+    // No Rust/MySQL original for these -- new C++-native additions.
     struct BitAnd {};
     struct BitOr {};
     struct JsonAgg {};
+    // PostgreSQL-style ARRAY_AGG. This engine has no distinct array storage type, so it
+    // is rendered identically to JSON_AGG (a JSON array text value) -- a separate AggFunc
+    // alternative only so EXPLAIN/SHOW CREATE VIEW and the column label ("ARRAY_AGG(x)"
+    // vs "JSON_AGG(x)") stay faithful to what the user actually wrote.
+    struct ArrayAgg {};
 
     using Data = std::variant<Count, CountDistinct, Sum, Avg, Min, Max, SumDistinct, AvgDistinct,
-                               Stddev, Variance, GroupConcat, CountCase, SumCase, BitAnd, BitOr, JsonAgg>;
+                               Stddev, Variance, GroupConcat, CountCase, SumCase, BitAnd, BitOr, JsonAgg, ArrayAgg>;
     Data data;
 
     AggFunc() : data(Count{}) {}
@@ -332,8 +337,13 @@ struct InsertConflict {
     struct Abort {};
     struct Ignore {};
     struct Update { std::vector<std::pair<std::string, ArithExpr>> assignments; };
+    // REPLACE INTO: on conflict, delete the existing row(s) then insert the new one --
+    // no Rust/MySQL-parity original, new C++-native addition (parser_dml.cpp's
+    // parse_replace() is the only place that produces this; it reuses the plain
+    // Statement::Insert/InsertSelect shape rather than introducing a new Statement kind).
+    struct Replace {};
 
-    using Data = std::variant<Abort, Ignore, Update>;
+    using Data = std::variant<Abort, Ignore, Update, Replace>;
     Data data;
 
     InsertConflict() : data(Abort{}) {}
@@ -629,6 +639,12 @@ struct Statement {
     struct ExecuteStmt { std::string name; std::vector<std::string> using_vars; };
     struct DeallocatePrepare { std::string name; };
     struct SetUserVar { std::string name; ArithExpr expr; };
+    // LOCK TABLES / UNLOCK TABLES -- no Rust/MySQL-parity original, new C++-native
+    // addition (V1 scope: session-to-session LOCK TABLES cooperation only -- see
+    // executor_dcl.cpp's exec_lock_tables design note). `tables` pairs a table name with
+    // whether it's WRITE (true, exclusive) or READ (false, shared).
+    struct LockTables { std::vector<std::pair<std::string, bool>> tables; };
+    struct UnlockTables {};
 
     using Data = std::variant<
         Begin, Commit, Rollback, CreateTable, DropTable, TruncateTable, Insert, InsertSelect,
@@ -642,7 +658,7 @@ struct Statement {
         CreateProcedure, CallProcedure, CreateTrigger, DropTrigger, DropProcedure, Backup,
         Restore, ShowProcessList, CreateFunction, DropFunction, ProcDeclare, ProcSet, ProcIf,
         ProcWhile, ProcLoop, ProcRepeat, ProcLeave, ProcIterate, PrepareStmt, ExecuteStmt,
-        DeallocatePrepare, SetUserVar>;
+        DeallocatePrepare, SetUserVar, LockTables, UnlockTables>;
     Data data;
 
     Statement() : data(Begin{}) {}

@@ -263,6 +263,83 @@ StringResult Executor::exec_insert_select(SharedDatabase& s, std::string table, 
     }
 }
 
+// REPLACE INTO: for each incoming row, delete any existing row that conflicts on a
+// PK/UNIQUE column -- via a real DELETE statement through execute_with_s (reuses that
+// path's full locking/index/trigger correctness rather than mutating s.tables directly;
+// the same recursive execute_with_s-from-within-a-statement pattern CTEs/UNION/LATERAL/
+// exec_insert_select already rely on). A DELETE matching zero rows is a harmless no-op,
+// so this doesn't need to pre-check whether a conflict actually exists.
+//
+// V1 scope: only considers PK/UNIQUE columns that have an explicit (non-empty, non-NULL)
+// value in the given row -- a column relying on DEFAULT/AUTO_INCREMENT to coincidentally
+// produce a duplicate isn't detected. Matches the overwhelmingly common real-world
+// REPLACE INTO usage (PK/UNIQUE columns are given explicitly; that's the point of doing
+// a REPLACE INTO in the first place).
+StringResult Executor::replace_delete_conflicts(SharedDatabase& s, const std::string& table,
+                                                 const std::optional<std::vector<std::string>>& col_list,
+                                                 const std::vector<std::vector<std::string>>& all_values) {
+    const TableSchema* schema = s.catalog.get_table(table);
+    if (!schema) return StringResult::Ok(""); // let the real INSERT surface the "not found" error
+
+    auto value_for = [&](const std::vector<std::string>& values, const std::string& col_name) -> std::optional<std::string> {
+        if (col_list) {
+            auto pos = std::find(col_list->begin(), col_list->end(), col_name);
+            if (pos == col_list->end()) return std::nullopt;
+            std::size_t idx = static_cast<std::size_t>(pos - col_list->begin());
+            return idx < values.size() ? std::optional<std::string>(values[idx]) : std::nullopt;
+        }
+        auto pos = std::find_if(schema->columns.begin(), schema->columns.end(), [&](const ColumnDef& c) { return c.name == col_name; });
+        if (pos == schema->columns.end()) return std::nullopt;
+        std::size_t idx = static_cast<std::size_t>(pos - schema->columns.begin());
+        return idx < values.size() ? std::optional<std::string>(values[idx]) : std::nullopt;
+    };
+    auto eq_leaf = [](const std::string& col, const std::string& val) {
+        return CondExpr(CondExpr::Leaf{Condition{ArithExpr(ArithExpr::Col{col}), Operator::Eq, ConditionValue(ConditionValue::Literal{val})}});
+    };
+    auto run_delete = [&](CondExpr cond) -> StringResult {
+        Statement del(Statement::Delete{table, std::move(cond), std::nullopt});
+        return execute_with_s(s, std::move(del));
+    };
+
+    for (auto& values : all_values) {
+        // A column's own `primary_key` flag is set for BOTH an inline single-column PK
+        // (`id INT PRIMARY KEY`) AND each individual column of a table-level composite
+        // PRIMARY KEY (a, b) -- schema.primary_key_columns is only ever populated for the
+        // latter (matching the rest of this file's existing is_composite_pk convention,
+        // e.g. exec_insert_inner's own conflict-detection loop above). Treating a
+        // composite-PK column as independently unique here would be wrong: `a=1` alone
+        // can match many rows when only the (a,b) *pair* is actually unique -- that case
+        // is handled correctly by the AND-combined composite block below instead.
+        bool is_composite_pk_table = schema->primary_key_columns.size() > 1;
+        for (auto& col : schema->columns) {
+            bool solo_pk = col.primary_key && !is_composite_pk_table;
+            if (!solo_pk && !col.unique) continue;
+            auto val = value_for(values, col.name);
+            if (!val || val->empty() || *val == "NULL") continue;
+            auto del_result = run_delete(eq_leaf(col.name, *val));
+            if (del_result.is_err()) return del_result;
+        }
+        // Table-level composite PRIMARY KEY (col1, col2): only handled if every column
+        // has an explicit value (a partial composite key can't safely target one row).
+        if (is_composite_pk_table) {
+            std::optional<CondExpr> cond;
+            bool all_present = true;
+            for (auto& pk_col : schema->primary_key_columns) {
+                auto val = value_for(values, pk_col);
+                if (!val || val->empty() || *val == "NULL") { all_present = false; break; }
+                CondExpr leaf = eq_leaf(pk_col, *val);
+                cond = cond ? CondExpr(CondExpr::And{std::make_unique<CondExpr>(std::move(*cond)), std::make_unique<CondExpr>(std::move(leaf))})
+                            : std::move(leaf);
+            }
+            if (all_present && cond) {
+                auto del_result = run_delete(std::move(*cond));
+                if (del_result.is_err()) return del_result;
+            }
+        }
+    }
+    return StringResult::Ok("");
+}
+
 StringResult Executor::exec_insert(SharedDatabase& s, std::string table, std::optional<std::vector<std::string>> col_list,
                                     std::vector<std::vector<std::string>> all_values, InsertConflict on_conflict,
                                     std::optional<std::vector<SelectColumn>> returning) {
@@ -271,6 +348,11 @@ StringResult Executor::exec_insert(SharedDatabase& s, std::string table, std::op
             return exec_insert(s, resolved->first, col_list, std::move(all_values), on_conflict, returning);
         }
         return StringResult::Err("View '" + strip_db_prefix(table) + "' is not updatable (has JOINs, DISTINCT, GROUP BY, or subquery)");
+    }
+
+    if (std::holds_alternative<InsertConflict::Replace>(on_conflict.data)) {
+        if (auto del_result = replace_delete_conflicts(s, table, col_list, all_values); del_result.is_err()) return del_result;
+        on_conflict = InsertConflict(InsertConflict::Abort{}); // conflicts are gone now; a real remaining duplicate should still error
     }
 
     if (auto tr = fire_triggers(s, table, "BEFORE", "INSERT"); tr.is_err()) return tr;

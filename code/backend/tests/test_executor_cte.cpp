@@ -29,6 +29,29 @@ TEST_CASE("Basic non-recursive CTE materializes and is queryable", "[executor][c
     REQUIRE(r.value().find("1 row(s) returned.") != std::string::npos);
 }
 
+TEST_CASE("CTE correctly round-trips a value containing an embedded newline", "[executor][cte]") {
+    // Regression test: a non-recursive CTE materializes its base term via
+    // execute_with_s() + parse_table_output(), which splits the ASCII table string into
+    // lines on literal '\n'. Before Executor::escape_cell() was introduced, a value
+    // containing an embedded newline split its own row across two "lines" mid-parse,
+    // silently truncating the value at the newline instead of visibly corrupting the
+    // result.
+    TempDataDir dir("exec_cte_data_newline");
+    Executor ex(dir.path);
+    REQUIRE(ex.execute_sql("CREATE DATABASE company").is_ok());
+    REQUIRE(ex.execute_sql("USE company").is_ok());
+    REQUIRE(ex.execute_sql("CREATE TABLE note (id INT PRIMARY KEY, content VARCHAR(50))").is_ok());
+    REQUIRE(ex.execute_sql("INSERT INTO note VALUES (1, 'line1" "\n" "line2')").is_ok());
+
+    auto r = ex.execute_sql("WITH n AS (SELECT id, content FROM note) SELECT * FROM n");
+    REQUIRE(r.is_ok());
+    REQUIRE(r.value().find("1 row(s) returned.") != std::string::npos);
+    // The embedded newline survives the internal round-trip only if it was escaped
+    // before parse_table_output() ever saw it -- shown here (correctly) as the 2-char
+    // sequence "\n", not truncated to just "line1".
+    REQUIRE(r.value().find("line1\\nline2") != std::string::npos);
+}
+
 TEST_CASE("CTE table is torn down afterward and does not leak into the catalog", "[executor][cte]") {
     TempDataDir dir("exec_cte_data_2");
     Executor ex(dir.path);

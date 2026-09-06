@@ -425,12 +425,17 @@ StringResult Executor::exec_information_schema(SharedDatabase& s, const std::str
 
     if (col_names.empty()) return StringResult::Ok("0 rows returned.");
 
+    // Escape headers/cells up front (widths below are computed on the escaped form,
+    // matching the visual padding actually written) -- see Executor::escape_cell.
+    std::vector<std::string> headers(col_names.size());
+    for (std::size_t i = 0; i < col_names.size(); i++) headers[i] = escape_cell(col_names[i]);
+
     std::vector<std::size_t> col_widths;
-    for (auto& h : col_names) {
-        std::size_t w = h.size();
+    for (std::size_t i = 0; i < col_names.size(); i++) {
+        std::size_t w = headers[i].size();
         for (auto& r : rows) {
-            const std::string* v = get_col(r, h);
-            if (v) w = std::max(w, v->size());
+            const std::string* v = get_col(r, col_names[i]);
+            if (v) w = std::max(w, escape_cell(*v).size());
         }
         col_widths.push_back(w);
     }
@@ -440,8 +445,8 @@ StringResult Executor::exec_information_schema(SharedDatabase& s, const std::str
     sep += "+";
 
     std::string hdr;
-    for (std::size_t i = 0; i < col_names.size(); i++) {
-        hdr += "| " + col_names[i] + std::string(col_widths[i] - col_names[i].size(), ' ') + " ";
+    for (std::size_t i = 0; i < headers.size(); i++) {
+        hdr += "| " + headers[i] + std::string(col_widths[i] - headers[i].size(), ' ') + " ";
     }
     hdr += "|";
 
@@ -450,7 +455,7 @@ StringResult Executor::exec_information_schema(SharedDatabase& s, const std::str
         std::string line;
         for (std::size_t i = 0; i < col_names.size(); i++) {
             const std::string* v = get_col(row, col_names[i]);
-            std::string val = v ? *v : std::string();
+            std::string val = v ? escape_cell(*v) : std::string();
             line += "| " + val + std::string(col_widths[i] - val.size(), ' ') + " ";
         }
         line += "|";

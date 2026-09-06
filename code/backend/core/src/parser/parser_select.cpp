@@ -57,7 +57,8 @@ Statement Parser::parse_select() {
             if (p && (p->kind == TokenKind::Count || p->kind == TokenKind::Sum || p->kind == TokenKind::Avg ||
                       p->kind == TokenKind::Min || p->kind == TokenKind::Max ||
                       p->kind == TokenKind::Stddev || p->kind == TokenKind::Variance ||
-                      p->kind == TokenKind::BitAnd || p->kind == TokenKind::BitOr || p->kind == TokenKind::JsonAgg)) {
+                      p->kind == TokenKind::BitAnd || p->kind == TokenKind::BitOr ||
+                      p->kind == TokenKind::JsonAgg || p->kind == TokenKind::ArrayAgg)) {
                 const Token* ft = advance();
                 AggFunc func = [&]() -> AggFunc {
                     switch (ft->kind) {
@@ -70,6 +71,7 @@ Statement Parser::parse_select() {
                         case TokenKind::Variance: return AggFunc(AggFunc::Variance{});
                         case TokenKind::BitAnd: return AggFunc(AggFunc::BitAnd{});
                         case TokenKind::BitOr: return AggFunc(AggFunc::BitOr{});
+                        case TokenKind::ArrayAgg: return AggFunc(AggFunc::ArrayAgg{});
                         default: return AggFunc(AggFunc::JsonAgg{});
                     }
                 }();

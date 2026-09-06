@@ -431,6 +431,50 @@ void Executor::update_stat_rows(SharedDatabase& s, const std::string& table, std
     stats.total_rows = static_cast<std::size_t>(std::max<std::int64_t>(updated, 0));
 }
 
+std::string Executor::escape_cell(const std::string& v) {
+    std::string out;
+    out.reserve(v.size());
+    for (char c : v) {
+        if (c == '\\') out += "\\\\";
+        else if (c == '\n') out += "\\n";
+        else if (c == '|') out += "\\|";
+        else out += c;
+    }
+    return out;
+}
+
+namespace {
+// Reverses Executor::escape_cell() on a cell substring already extracted (and
+// whitespace-trimmed) by parse_table_output(). A lone unescaped '\' should never occur
+// in properly-escaped input (escape_cell() always escapes '\' itself first), so the
+// fallback below is defensive only.
+std::string unescape_cell(const std::string& v) {
+    std::string out;
+    out.reserve(v.size());
+    for (std::size_t i = 0; i < v.size(); i++) {
+        if (v[i] == '\\' && i + 1 < v.size()) {
+            char n = v[i + 1];
+            if (n == '\\') { out += '\\'; i++; }
+            else if (n == 'n') { out += '\n'; i++; }
+            else if (n == '|') { out += '|'; i++; }
+            else out += v[i];
+        } else {
+            out += v[i];
+        }
+    }
+    return out;
+}
+// Finds the next delimiter in `line` starting at `start`, skipping any escaped '\X'
+// pair (so an escaped '\|' is never mistaken for a real cell boundary).
+std::size_t find_unescaped_bar(const std::string& line, std::size_t start) {
+    for (std::size_t i = start; i < line.size(); i++) {
+        if (line[i] == '\\' && i + 1 < line.size()) { i++; continue; }
+        if (line[i] == '|') return i;
+    }
+    return std::string::npos;
+}
+}
+
 std::pair<std::vector<std::string>, std::vector<Row>> Executor::parse_table_output(const std::string& output) {
     std::vector<std::string> col_names;
     std::vector<Row> rows;
@@ -462,12 +506,12 @@ std::pair<std::vector<std::string>, std::vector<Row>> Executor::parse_table_outp
             std::vector<std::string> cells;
             std::size_t start = 0;
             for (;;) {
-                auto bar = line.find('|', start);
+                auto bar = find_unescaped_bar(line, start);
                 std::string cell = line.substr(start, bar == std::string::npos ? std::string::npos : bar - start);
                 if (!cell.empty()) {
                     auto ws0 = cell.find_first_not_of(" \t");
                     if (ws0 == std::string::npos) cells.push_back("");
-                    else cells.push_back(cell.substr(ws0, cell.find_last_not_of(" \t") - ws0 + 1));
+                    else cells.push_back(unescape_cell(cell.substr(ws0, cell.find_last_not_of(" \t") - ws0 + 1)));
                 }
                 if (bar == std::string::npos) break;
                 start = bar + 1;

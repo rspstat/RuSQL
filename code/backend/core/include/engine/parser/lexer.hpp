@@ -146,8 +146,8 @@ enum class TokenKind {
     // 통계 집계 함수
     Stddev, Variance,
 
-    // 신규 집계 함수 (BIT_AND/BIT_OR/JSON_AGG) + FILTER (WHERE ...) 절 -- Rust 원본에 없음
-    BitAnd, BitOr, JsonAgg, Filter,
+    // 신규 집계 함수 (BIT_AND/BIT_OR/JSON_AGG/ARRAY_AGG) + FILTER (WHERE ...) 절 -- Rust 원본에 없음
+    BitAnd, BitOr, JsonAgg, ArrayAgg, Filter,
 
     // LATERAL JOIN -- Rust 원본에 없음
     Lateral,

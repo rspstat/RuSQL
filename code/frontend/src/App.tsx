@@ -6,7 +6,16 @@ import type * as Monaco from "monaco-editor";
 import "./App.css";
 import { format as sqlFormat } from "sql-formatter";
 import AiView from "./components/AiView";
-
+import Sidebar from "./components/Sidebar";
+import ErdView from "./components/ErdView";
+import ConfirmDialog from "./components/ConfirmDialog";
+import EditTableModal from "./components/EditTableModal";
+import { DbContextMenu, TableContextMenu, ViewContextMenu, IndexContextMenu } from "./components/ContextMenus";
+import type {
+  QueryResult, MultiQueryResult, ServerStatus, IndexInfo, TriggerInfo, ColumnDetail, DbData,
+} from "./types";
+import { computeErdLayout, type ErdPos } from "./lib/erd";
+import { measureTextPx } from "./lib/measureText";
 
 // ─── 타입 ─────────────────────────────────────────────────────
 interface HistoryEntry {
@@ -16,74 +25,8 @@ interface HistoryEntry {
   success: boolean;
   elapsed: number;
 }
-interface QueryResult {
-  columns: string[];
-  rows: string[][];
-  message: string;
-  elapsed: number;
-  success: boolean;
-}
-interface MultiQueryResult {
-  results: QueryResult[];
-  total_elapsed: number;
-}
-interface SessionInfo {
-  addr: string;
-  user: string;
-  connected_at: number;
-  query_count: number;
-}
-interface ServerStatus {
-  running: boolean;
-  port: number;
-  client_count: number;
-  log: string[];
-  sessions: SessionInfo[];
-}
-interface IndexInfo {
-  name: string;
-  table: string;
-  columns: string[];
-  kind: "single" | "composite" | "hash";
-}
-interface TriggerInfo {
-  name: string;
-  table: string;
-  timing: string;
-  event: string;
-}
-interface ColumnDetail {
-  name: string;
-  data_type: string;
-  is_pk: boolean;
-  is_not_null: boolean;
-  is_unique: boolean;
-  is_auto_inc: boolean;
-  default_val: string | null;
-  fk_ref: string | null;
-}
 type ActiveView = "editor" | "erd" | "server" | "ai";
 const PAGE_SIZE = 100;
-
-// ─── ERD 타입/상수 ────────────────────────────────────────────
-interface ErdPos { x: number; y: number; }
-const ERD_CARD_W = 360;
-const ERD_HEADER_H = 32;
-const ERD_COL_H = 24;
-
-// fk_ref 형식: "db1.dept(id)" 또는 "dept(id)" — 괄호가 우선
-function parseRef(ref: string): { table: string; col: string } | null {
-  const paren = ref.indexOf("(");
-  if (paren > 0) return { table: ref.slice(0, paren), col: ref.slice(paren + 1).replace(")", "") };
-  const dot = ref.lastIndexOf(".");
-  if (dot > 0) return { table: ref.slice(0, dot), col: ref.slice(dot + 1) };
-  return null;
-}
-// "db1.dept" → "dept" (DB 한정자 제거)
-function unqualify(name: string): string {
-  const dot = name.indexOf(".");
-  return dot >= 0 ? name.slice(dot + 1) : name;
-}
 
 // 셀 편집 시 PK WHERE절 값 이스케이프용 — 컬럼의 실제 data_type을 보고 숫자 리터럴로 둘지
 // 문자열로 따옴표 처리할지 결정한다 (값의 겉모양만으로 추측하면 문자열 PK가 조용히 실패한다).
@@ -96,82 +39,6 @@ function isNumericColType(dataType: string): boolean {
 }
 function quoteForColType(value: string, dataType: string): string {
   return isNumericColType(dataType) ? value : `'${value.replace(/'/g, "''")}'`;
-}
-
-// 직각 꺾임 경로: x1,y1 → midX 수평 → y2 수직 → x2 수평, 모서리 r=8 라운드
-function erdOrthPath(x1: number, y1: number, x2: number, y2: number): string {
-  const r = 8;
-  if (Math.abs(y1 - y2) < 1) return `M${x1} ${y1} H${x2}`;
-  const midX = (x1 + x2) / 2;
-  const sdx = Math.sign(midX - x1); // 수평 진행 방향 (+1 오른쪽, -1 왼쪽)
-  const sdy = Math.sign(y2 - y1);   // 수직 진행 방향 (+1 아래, -1 위)
-  const r1 = Math.min(r, Math.abs(midX - x1), Math.abs(y2 - y1) / 2);
-  const r2 = Math.min(r, Math.abs(x2 - midX), Math.abs(y2 - y1) / 2);
-  if (r1 < 1 || r2 < 1) return `M${x1} ${y1} H${midX} V${y2} H${x2}`;
-  return [
-    `M${x1} ${y1}`,
-    `H${midX - sdx * r1}`,
-    `Q${midX} ${y1} ${midX} ${y1 + sdy * r1}`,
-    `V${y2 - sdy * r2}`,
-    `Q${midX} ${y2} ${midX + sdx * r2} ${y2}`,
-    `H${x2}`,
-  ].join(" ");
-}
-
-// ─── ERD 레이아웃 계산 (pure) ─────────────────────────────────
-function computeErdLayout(columns: Record<string, ColumnDetail[]>): Record<string, ErdPos> {
-  const allTables = Object.keys(columns);
-  if (allTables.length === 0) return {};
-  const deps: Record<string, Set<string>> = {};
-  for (const t of allTables) deps[t] = new Set();
-  for (const [tbl, cols] of Object.entries(columns)) {
-    for (const col of cols) {
-      if (col.fk_ref) {
-        const parsed = parseRef(col.fk_ref);
-        if (parsed) { const ref = unqualify(parsed.table); if (allTables.includes(ref)) deps[tbl].add(ref); }
-      }
-    }
-  }
-  const depth: Record<string, number> = {};
-  const computing = new Set<string>();
-  const getDepth = (t: string): number => {
-    if (depth[t] !== undefined) return depth[t];
-    if (computing.has(t)) { depth[t] = 0; return 0; }
-    computing.add(t);
-    depth[t] = deps[t].size === 0 ? 0 : Math.max(...Array.from(deps[t]).map(d => getDepth(d) + 1));
-    computing.delete(t);
-    return depth[t];
-  };
-  for (const t of allTables) getDepth(t);
-  const byDepth: Record<number, string[]> = {};
-  for (const t of allTables) { const d = depth[t]; (byDepth[d] = byDepth[d] ?? []).push(t); }
-  const maxDepth = Math.max(...Object.keys(byDepth).map(Number));
-  const cardH = (t: string) => ERD_HEADER_H + (columns[t]?.length ?? 0) * ERD_COL_H + 8;
-  const COL_W = 480, ROW_GAP = 56;
-  // 바리센터 정렬: 부모 노드 평균 위치 기준으로 자식 노드를 정렬해 교차선 최소화
-  const sortedByDepth: Record<number, string[]> = { 0: [...(byDepth[0] ?? [])] };
-  for (let d = 1; d <= maxDepth; d++) {
-    const tables = [...(byDepth[d] ?? [])];
-    const prevSorted = sortedByDepth[d - 1] ?? [];
-    const bc: Record<string, number> = {};
-    for (const t of tables) {
-      const parents = [...deps[t]].filter(p => prevSorted.includes(p));
-      bc[t] = parents.length === 0 ? prevSorted.length / 2 : parents.reduce((s, p) => s + prevSorted.indexOf(p), 0) / parents.length;
-    }
-    sortedByDepth[d] = tables.sort((a, b) => bc[a] - bc[b]);
-  }
-  // 열 높이 계산 후 수직 중앙 정렬
-  const colH = (d: number) => (sortedByDepth[d] ?? []).reduce((s, t) => s + cardH(t) + ROW_GAP, -ROW_GAP);
-  const maxColH = Math.max(0, ...Array.from({ length: maxDepth + 1 }, (_, d) => colH(d)));
-  const positions: Record<string, ErdPos> = {};
-  for (let d = 0; d <= maxDepth; d++) {
-    let y = 60 + Math.max(0, (maxColH - colH(d)) / 2);
-    for (const t of sortedByDepth[d] ?? []) {
-      positions[t] = { x: 60 + d * COL_W, y };
-      y += cardH(t) + ROW_GAP;
-    }
-  }
-  return positions;
 }
 
 // ─── 탭 타입 ──────────────────────────────────────────────────
@@ -199,18 +66,6 @@ function loadHistory(connId: string): HistoryEntry[] {
 function saveHistory(connId: string, h: HistoryEntry[]) {
   localStorage.setItem(`rusql_history_${connId}`, JSON.stringify(h.slice(0, MAX_HISTORY)));
 }
-
-// ─── 텍스트 너비 측정 (한글/CJK 포함, canvas 사용) ──────────
-let _measureCtx: CanvasRenderingContext2D | null = null;
-const measureTextPx = (text: string): number => {
-  if (!_measureCtx) {
-    const c = document.createElement('canvas');
-    _measureCtx = c.getContext('2d');
-    if (!_measureCtx) return text.length * 8;
-    _measureCtx.font = '13px Consolas, "Malgun Gothic", monospace';
-  }
-  return _measureCtx.measureText(text).width;
-};
 
 // ─── 메인 컴포넌트 ────────────────────────────────────────────
 function App() {
@@ -253,7 +108,6 @@ function App() {
   const [currentDb, setCurrentDb] = useState<string>("rusql");
   const [expandedDbs, setExpandedDbs] = useState<Set<string>>(new Set(["rusql"]));
   // DB별 Tables/Views/Indexes/Triggers 데이터
-  interface DbData { tables: string[]; views: string[]; indexes: IndexInfo[]; triggers: TriggerInfo[]; }
   const [dbData, setDbData] = useState<Record<string, DbData>>({});
   const [tablesOpen, setTablesOpen] = useState<Record<string, boolean>>({});
   const [viewsOpen, setViewsOpen] = useState<Record<string, boolean>>({});
@@ -1898,22 +1752,7 @@ function App() {
         )}
 
         {/* ── 파괴적 작업 확인 다이얼로그 ── */}
-        {confirmDialog && (
-          <div className="dlg-overlay" onClick={() => setConfirmDialog(null)}>
-            <div className="dlg-box" onClick={e => e.stopPropagation()}>
-              <div className="dlg-header">
-                <div>
-                  <div className="dlg-title">{confirmDialog.title}</div>
-                  <div className="dlg-subtitle">{confirmDialog.message}</div>
-                </div>
-              </div>
-              <div className="dlg-actions">
-                <button type="button" className="dlg-cancel" onClick={() => setConfirmDialog(null)}>Cancel</button>
-                <button type="button" className="dlg-danger" onClick={() => { const fn = confirmDialog.onConfirm; setConfirmDialog(null); fn(); }}>Delete</button>
-              </div>
-            </div>
-          </div>
-        )}
+        <ConfirmDialog dialog={confirmDialog} onCancel={() => setConfirmDialog(null)} />
       </div>
     );
   }
@@ -2055,490 +1894,89 @@ function App() {
       {/* ── 에디터 뷰 ──────────────────────────────────────────── */}
       {activeView === "editor" && (
         <>
-          <div className="sidebar" style={{ width: `${sidebarWidth}px` }}>
-            <div className="sidebar-title-row">
-              <span className="sidebar-title">SCHEMAS</span>
-              <button
-                className="sidebar-refresh-btn"
-                onClick={refreshSidebar}
-                title="Refresh"
-              >⟳</button>
-            </div>
-            <input
-              className="sidebar-search"
-              placeholder="Search tables..."
-              value={sidebarSearch}
-              onChange={e => setSidebarSearch(e.target.value)}
-            />
-
-            {/* ── DATABASE NODES (MySQL Workbench style) ── */}
-            <div className="sidebar-db-node">
-              {databases.length === 0 ? (
-                <div className="sidebar-empty" style={{ padding: "8px 12px" }}>No databases</div>
-              ) : databases.map(dbName => {
-                const isActive = dbName === currentDb;
-                const isOpen = expandedDbs.has(dbName);
-                const data = dbData[dbName] ?? { tables: [], views: [], indexes: [] };
-                const tOpen = tablesOpen[dbName] ?? true;
-                const vOpen = viewsOpen[dbName] ?? true;
-
-                const toggleDb = async () => {
-                  const willOpen = !isOpen;
-                  setExpandedDbs(prev => {
-                    const s = new Set(prev);
-                    willOpen ? s.add(dbName) : s.delete(dbName);
-                    return s;
-                  });
-                  if (willOpen) await loadDbData(dbName);
-                };
-
-                const switchDb = async (e: React.MouseEvent) => {
-                  e.stopPropagation();
-                  if (isActive) return;
-                  await invoke<MultiQueryResult>("execute_query", { query: `USE ${dbName};`, ts: Date.now() });
-                  await refreshSidebar();
-                };
-
-                return (
-                  <div key={dbName}>
-                    <div
-                      className={`sidebar-db-header${isActive ? " sidebar-db-active" : ""}`}
-                      onClick={toggleDb}
-                      onDoubleClick={switchDb}
-                      onContextMenu={e => {
-                        e.preventDefault();
-                        e.stopPropagation();
-                        setDbCtxMenu({ x: e.clientX, y: e.clientY, db: dbName });
-                      }}
-                      title={isActive ? "Current database" : "Double-click to switch"}
-                    >
-                      <span className="sidebar-group-arrow">{isOpen ? "▼" : "▶"}</span>
-                      <svg className="sidebar-db-icon" viewBox="0 0 24 24" width="13" height="16" preserveAspectRatio="none" fill="none">
-                        <ellipse cx="12" cy="5" rx="9" ry="3.5" stroke="currentColor" strokeWidth="1.5" vectorEffect="non-scaling-stroke"/>
-                        <path d="M3 5v6c0 1.93 4.03 3.5 9 3.5s9-1.57 9-3.5V5" stroke="currentColor" strokeWidth="1.5" fill="none" vectorEffect="non-scaling-stroke"/>
-                        <path d="M3 11v6c0 1.93 4.03 3.5 9 3.5s9-1.57 9-3.5v-6" stroke="currentColor" strokeWidth="1.5" fill="none" vectorEffect="non-scaling-stroke"/>
-                      </svg>
-                      <span className="sidebar-db-name">{dbName}{isActive ? " ◀" : ""}</span>
-                      <button
-                        className={`sidebar-db-expand-btn${dbAllExpanded[dbName] ? " active" : ""}`}
-                        onClick={e => toggleDbExpandAll(dbName, e)}
-                        title={dbAllExpanded[dbName] ? "Collapse all" : "Expand all"}
-                      >
-                        {dbAllExpanded[dbName] ? (
-                          <svg viewBox="0 0 14 14" width="11" height="11" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-                            <polyline points="2,9 7,5 12,9"/>
-                            <polyline points="2,5 7,1 12,5"/>
-                          </svg>
-                        ) : (
-                          <svg viewBox="0 0 14 14" width="11" height="11" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-                            <polyline points="2,5 7,9 12,5"/>
-                            <polyline points="2,9 7,13 12,9"/>
-                          </svg>
-                        )}
-                      </button>
-                    </div>
-
-                    {isOpen && (
-                      <div className="sidebar-db-children">
-
-                        {/* ── TABLES ── */}
-                        <div className="sidebar-group sidebar-group-nested">
-                          <div className="sidebar-group-header sidebar-section-header" onClick={() => setTablesOpen(p => ({ ...p, [dbName]: !tOpen }))}>
-                            <span className="sidebar-group-arrow">{tOpen ? "▼" : "▶"}</span>
-                            <span className="sidebar-section-icon">⊞</span>
-                            Tables
-                            <span className="sidebar-badge">{data.tables.length}</span>
-                          </div>
-                          {tOpen && (data.tables.length === 0 ? (
-                            <div className="sidebar-empty sidebar-empty-nested">No tables yet</div>
-                          ) : data.tables.filter(t => !sidebarSearch || t.toLowerCase().includes(sidebarSearch.toLowerCase())).map(t => {
-                            const tExpanded = expandedTables.has(t);
-                            const tCols     = tableColumns[t] ?? [];
-                            const tIdxs     = data.indexes.filter(i => i.table === t);
-                            const tFkeys    = tCols.filter(c => c.fk_ref);
-                            const tTrgs     = data.triggers.filter(tr => tr.table === t);
-                            const secOpen   = (sec: string) => expandedTableSections[`${t}::${sec}`] ?? false;
-                            const toggleSec = (sec: string) =>
-                              setExpandedTableSections(p => ({ ...p, [`${t}::${sec}`]: !p[`${t}::${sec}`] }));
-                            return (
-                            <div key={t}>
-                              {/* 테이블 행 */}
-                              <div
-                                className={`sidebar-item sidebar-item-nested ${tExpanded ? "sidebar-item-expanded" : ""}`}
-                                onClick={() => toggleTable(t)}
-                                onContextMenu={e => {
-                                  e.preventDefault();
-                                  e.stopPropagation();
-                                  setTableCtxMenu({ x: e.clientX, y: e.clientY, table: t });
-                                }}
-                              >
-                                <span className="sidebar-arrow">{tExpanded ? "▼" : "▶"}</span>
-                                <span className="sidebar-table-icon">⊞</span>
-                                <span className="sidebar-name">{t}</span>
-                              </div>
-
-                              {/* 하위 섹션: Columns / Indexes / Foreign Keys / Triggers */}
-                              {tExpanded && (
-                                <div className="sidebar-table-children">
-
-                                  {/* Columns */}
-                                  <div className="sidebar-subsec-header" onClick={() => toggleSec("columns")}>
-                                    <span className="sidebar-group-arrow">{secOpen("columns") ? "▼" : "▶"}</span>
-                                    <span className="sidebar-subsec-icon" style={{ color: "#9cdcfe" }}>≡</span>
-                                    Columns
-                                    <span className="sidebar-badge">{tCols.length}</span>
-                                  </div>
-                                  {secOpen("columns") && (
-                                    <div className="sidebar-subsec-list">
-                                      {tCols.length === 0
-                                        ? <div className="sidebar-subsec-empty">loading…</div>
-                                        : tCols.map(col => (
-                                          <div key={col.name} className="sidebar-subsec-item" title={[
-                                            col.data_type,
-                                            col.is_pk ? "PRIMARY KEY" : "",
-                                            col.is_not_null ? "NOT NULL" : "",
-                                            col.is_unique && !col.is_pk ? "UNIQUE" : "",
-                                            col.is_auto_inc ? "AUTO_INCREMENT" : "",
-                                            col.default_val ? `DEFAULT ${col.default_val}` : "",
-                                            col.fk_ref ? `FK → ${col.fk_ref}` : "",
-                                          ].filter(Boolean).join(" | ")}>
-                                            <span className="col-icon" style={{ color: col.is_pk ? "#f0c040" : col.fk_ref ? "#9cdcfe" : "#666" }}>
-                                              {col.is_pk ? "🔑" : col.fk_ref ? "🔗" : "≡"}
-                                            </span>
-                                            <span className="col-name">{col.name}</span>
-                                            <span className="col-type">{col.data_type}</span>
-                                            {col.is_not_null && <span className="col-badge col-badge-nn">NN</span>}
-                                            {col.is_unique && !col.is_pk && <span className="col-badge col-badge-uq">UQ</span>}
-                                          </div>
-                                        ))
-                                      }
-                                    </div>
-                                  )}
-
-                                  {/* Indexes */}
-                                  <div className="sidebar-subsec-header" onClick={() => toggleSec("indexes")}>
-                                    <span className="sidebar-group-arrow">{secOpen("indexes") ? "▼" : "▶"}</span>
-                                    <span className="sidebar-subsec-icon" style={{ color: "#c586c0" }}>⌗</span>
-                                    Indexes
-                                    <span className="sidebar-badge">{tIdxs.length}</span>
-                                  </div>
-                                  {secOpen("indexes") && (
-                                    <div className="sidebar-subsec-list">
-                                      {tIdxs.length === 0
-                                        ? <div className="sidebar-subsec-empty">no indexes</div>
-                                        : tIdxs.map(idx => (
-                                          <div key={idx.name} className="sidebar-subsec-item"
-                                            title={`${idx.kind} · ${idx.columns.join(", ")}`}
-                                            onContextMenu={e => {
-                                              e.preventDefault();
-                                              e.stopPropagation();
-                                              setIndexCtxMenu({ x: e.clientX, y: e.clientY, index: idx.name, table: idx.table, kind: idx.kind });
-                                            }}
-                                          >
-                                            <span className="sidebar-subsec-icon" style={{ color: idx.kind === "hash" ? "#4ec9b0" : idx.kind === "composite" ? "#ddb05d" : "#c586c0" }}>
-                                              {idx.kind === "hash" ? "#" : idx.kind === "composite" ? "⋈" : "⌗"}
-                                            </span>
-                                            <span className="col-name">{idx.name}</span>
-                                            <span className="col-type" style={{ fontSize: "10px" }}>{idx.kind}</span>
-                                          </div>
-                                        ))
-                                      }
-                                    </div>
-                                  )}
-
-                                  {/* Foreign Keys */}
-                                  <div className="sidebar-subsec-header" onClick={() => toggleSec("fkeys")}>
-                                    <span className="sidebar-group-arrow">{secOpen("fkeys") ? "▼" : "▶"}</span>
-                                    <span className="sidebar-subsec-icon" style={{ color: "#9cdcfe" }}>🔗</span>
-                                    Foreign Keys
-                                    <span className="sidebar-badge">{tFkeys.length}</span>
-                                  </div>
-                                  {secOpen("fkeys") && (
-                                    <div className="sidebar-subsec-list">
-                                      {tFkeys.length === 0
-                                        ? <div className="sidebar-subsec-empty">no foreign keys</div>
-                                        : tFkeys.map(col => (
-                                          <div key={col.name} className="sidebar-subsec-item" title={`${col.name} → ${col.fk_ref}`}>
-                                            <span className="col-icon" style={{ color: "#9cdcfe" }}>🔗</span>
-                                            <span className="col-name">{col.name}</span>
-                                            <span className="col-type" style={{ fontSize: "10px", color: "#888" }}>→ {col.fk_ref}</span>
-                                          </div>
-                                        ))
-                                      }
-                                    </div>
-                                  )}
-
-                                  {/* Triggers */}
-                                  <div className="sidebar-subsec-header" onClick={() => toggleSec("triggers")}>
-                                    <span className="sidebar-group-arrow">{secOpen("triggers") ? "▼" : "▶"}</span>
-                                    <span className="sidebar-subsec-icon" style={{ color: "#f08080" }}>⚡</span>
-                                    Triggers
-                                    <span className="sidebar-badge">{tTrgs.length}</span>
-                                  </div>
-                                  {secOpen("triggers") && (
-                                    <div className="sidebar-subsec-list">
-                                      {tTrgs.length === 0
-                                        ? <div className="sidebar-subsec-empty">no triggers</div>
-                                        : tTrgs.map(trg => (
-                                          <div key={trg.name} className="sidebar-subsec-item" title={`${trg.timing} ${trg.event}`}>
-                                            <span className="sidebar-subsec-icon" style={{ color: "#f08080" }}>⚡</span>
-                                            <span className="col-name">{trg.name}</span>
-                                            <span className="col-type" style={{ fontSize: "10px" }}>{trg.timing} {trg.event}</span>
-                                          </div>
-                                        ))
-                                      }
-                                    </div>
-                                  )}
-
-                                </div>
-                              )}
-                            </div>
-                            );
-                          }))}
-                        </div>
-
-                        {/* ── VIEWS ── */}
-                        <div className="sidebar-group sidebar-group-nested">
-                          <div className="sidebar-group-header sidebar-section-header" onClick={() => setViewsOpen(p => ({ ...p, [dbName]: !vOpen }))}>
-                            <span className="sidebar-group-arrow">{vOpen ? "▼" : "▶"}</span>
-                            <span className="sidebar-section-icon">◈</span>
-                            Views
-                            <span className="sidebar-badge">{data.views.length}</span>
-                          </div>
-                          {vOpen && (data.views.length === 0 ? (
-                            <div className="sidebar-empty sidebar-empty-nested">No views yet</div>
-                          ) : data.views.map(v => (
-                            <div key={v}>
-                              <div
-                                className={`sidebar-item sidebar-item-nested ${expandedViews.has(v) ? "active" : ""}`}
-                                onClick={() => toggleView(v)}
-                                onContextMenu={e => {
-                                  e.preventDefault();
-                                  e.stopPropagation();
-                                  setViewCtxMenu({ x: e.clientX, y: e.clientY, view: v });
-                                }}
-                              >
-                                <span className="sidebar-arrow">{expandedViews.has(v) ? "▼" : "▶"}</span>
-                                <span className="sidebar-view-icon">◈</span>
-                                <span className="sidebar-name">{v}</span>
-                              </div>
-                              {expandedViews.has(v) && (
-                                <div className="sidebar-columns sidebar-columns-nested">
-                                  {viewColumns[v] && viewColumns[v].length > 0
-                                    ? viewColumns[v].map(col => (
-                                        <div key={col} className="sidebar-column sidebar-column-nested">
-                                          <span className="col-icon">◉</span>
-                                          <span>{col}</span>
-                                        </div>
-                                      ))
-                                    : <div className="sidebar-column sidebar-column-nested" style={{ color: "var(--text-muted)" }}>no column info</div>
-                                  }
-                                </div>
-                              )}
-                            </div>
-                          )))}
-                        </div>
-
-                      </div>
-                    )}
-                  </div>
-                );
-              })}
-            </div>
-
-            {bookmarks.length > 0 && (
-              <div className="sidebar-bookmarks">
-                <div className="sidebar-group-header">
-                  <span className="sidebar-group-arrow">▼</span>
-                  BOOKMARKS
-                </div>
-                {bookmarks.map(bk => (
-                  <div key={bk.id} className="sidebar-bookmark-item">
-                    <span className="sidebar-bookmark-star">★</span>
-                    <span className="sidebar-bookmark-name" onClick={() => setEditorQuery(bk.sql)} title={bk.sql}>{bk.name}</span>
-                    <span className="sidebar-bookmark-del" onClick={() => removeBookmark(bk.id)}>×</span>
-                  </div>
-                ))}
-              </div>
-            )}
-
-            <div className="sidebar-bottom">
-              <div className="sidebar-group-header">
-                <span className="sidebar-group-arrow">▼</span>
-                INFO
-              </div>
-              <div className="sidebar-info-item"><span className="col-icon">◉</span> v2.3.0</div>
-              <div className="sidebar-info-item"><span className="col-icon">◉</span> Rust · Python</div>
-              <div className="sidebar-info-item">
-                <span className="col-icon" style={{ color: serverStatus.running ? "#4ec9b0" : "#858585" }}>◉</span>
-                {serverStatus.running ? `TCP :${serverStatus.port} (${serverStatus.client_count})` : "TCP Stopped"}
-              </div>
-            </div>
-          </div>
-
-          {/* 사이드바 ↔ 에디터 구분선 (가로 드래그) */}
-          <div
-            className="sidebar-divider"
-            onMouseDown={() => {
-              isSidebarDragging.current = true;
-              document.body.style.cursor = "col-resize";
-              document.body.style.userSelect = "none";
-            }}
+          <Sidebar
+            databases={databases}
+            currentDb={currentDb}
+            expandedDbs={expandedDbs}
+            setExpandedDbs={setExpandedDbs}
+            dbData={dbData}
+            loadDbData={loadDbData}
+            refreshSidebar={refreshSidebar}
+            tablesOpen={tablesOpen}
+            setTablesOpen={setTablesOpen}
+            viewsOpen={viewsOpen}
+            setViewsOpen={setViewsOpen}
+            dbAllExpanded={dbAllExpanded}
+            toggleDbExpandAll={toggleDbExpandAll}
+            sidebarSearch={sidebarSearch}
+            setSidebarSearch={setSidebarSearch}
+            expandedTables={expandedTables}
+            toggleTable={toggleTable}
+            tableColumns={tableColumns}
+            expandedTableSections={expandedTableSections}
+            setExpandedTableSections={setExpandedTableSections}
+            expandedViews={expandedViews}
+            toggleView={toggleView}
+            viewColumns={viewColumns}
+            bookmarks={bookmarks}
+            setEditorQuery={setEditorQuery}
+            removeBookmark={removeBookmark}
+            serverStatus={serverStatus}
+            sidebarWidth={sidebarWidth}
+            isSidebarDragging={isSidebarDragging}
+            setDbCtxMenu={setDbCtxMenu}
+            setTableCtxMenu={setTableCtxMenu}
+            setViewCtxMenu={setViewCtxMenu}
+            setIndexCtxMenu={setIndexCtxMenu}
           />
 
           {/* DB 우클릭 컨텍스트 메뉴 */}
           {dbCtxMenu && (
-            <>
-              <div style={{ position: "fixed", inset: 0, zIndex: 999 }} onClick={() => setDbCtxMenu(null)} />
-              <div
-                className="ctx-menu table-ctx-menu"
-                style={{ top: dbCtxMenu.y, left: dbCtxMenu.x, zIndex: 1000 }}
-              >
-                <div className="ctx-menu-header">{dbCtxMenu.db}</div>
-                <div className="ctx-divider" />
-                <div onClick={async () => {
-                  setDbCtxMenu(null);
-                  await invoke<MultiQueryResult>("execute_query", { query: `USE ${dbCtxMenu.db};`, ts: Date.now() });
-                  await refreshSidebar();
-                }}>Set as Default Schema</div>
-                <div className="ctx-divider" />
-                <div onClick={() => {
-                  setDbCtxMenu(null);
-                  setEditorQuery(
-                    `CREATE TABLE ${dbCtxMenu.db}.table_name (\n  id INT PRIMARY KEY AUTO INCREMENT,\n  name VARCHAR(50) NOT NULL\n);`
-                  );
-                }}>Create Table...</div>
-                <div className="ctx-divider" />
-                <div onClick={() => {
-                  navigator.clipboard.writeText(dbCtxMenu.db);
-                  setDbCtxMenu(null);
-                }}>Copy Schema Name</div>
-                <div className="ctx-divider" />
-                <div className="ctx-item-danger" onClick={() => {
-                  const db = dbCtxMenu.db;
-                  setDbCtxMenu(null);
-                  confirmThenRun("Drop Schema", `Permanently drop database "${db}" and all its tables? This cannot be undone.`,
-                    () => runDbCtxQuery(`DROP DATABASE ${db};`));
-                }}>
-                  Drop Schema...
-                </div>
-              </div>
-            </>
+            <DbContextMenu
+              menu={dbCtxMenu}
+              onClose={() => setDbCtxMenu(null)}
+              refreshSidebar={refreshSidebar}
+              setEditorQuery={setEditorQuery}
+              confirmThenRun={confirmThenRun}
+              runDbCtxQuery={runDbCtxQuery}
+            />
           )}
 
           {/* 테이블 우클릭 컨텍스트 메뉴 */}
           {tableCtxMenu && (
-            <>
-              <div style={{ position: "fixed", inset: 0, zIndex: 999 }} onClick={() => setTableCtxMenu(null)} />
-              <div
-                className="ctx-menu table-ctx-menu"
-                style={{ top: tableCtxMenu.y, left: tableCtxMenu.x, zIndex: 1000 }}
-              >
-                <div className="ctx-menu-header">{tableCtxMenu.table}</div>
-                <div className="ctx-divider" />
-                <div onClick={() => openEditTableModal(tableCtxMenu.table)}>Edit Table...</div>
-                <div className="ctx-divider" />
-                <div onClick={() => runCtxQuery(`SELECT * FROM ${tableCtxMenu.table};`)}>Select Rows</div>
-                <div onClick={() => runCtxQuery(`SELECT * FROM ${tableCtxMenu.table} LIMIT 100;`)}>Select Rows (LIMIT 100)</div>
-                <div onClick={() => runCtxQuery(`DESCRIBE ${tableCtxMenu.table};`)}>Describe Table</div>
-                <div onClick={() => runCtxQuery(`SHOW CREATE TABLE ${tableCtxMenu.table};`)}>Show Create Table</div>
-                <div className="ctx-divider" />
-                <div onClick={() => handleCopyTableName(tableCtxMenu.table)}>Copy Table Name</div>
-                <div onClick={() => {
-                  navigator.clipboard.writeText(`INSERT INTO ${tableCtxMenu.table} VALUES ();`);
-                  setTableCtxMenu(null);
-                }}>Copy as INSERT</div>
-                <div onClick={() => { const t = tableCtxMenu.table; setTableCtxMenu(null); triggerCsvImport(t); }}>Import CSV...</div>
-                <div className="ctx-divider" />
-                <div className="ctx-item-warn" onClick={() => {
-                  const t = tableCtxMenu.table;
-                  setTableCtxMenu(null);
-                  confirmThenRun("Truncate Table", `Permanently delete all rows in "${t}"? This cannot be undone.`,
-                    () => runCtxQuery(`TRUNCATE TABLE ${t};`));
-                }}>Truncate Table</div>
-                <div className="ctx-item-danger" onClick={() => {
-                  const t = tableCtxMenu.table;
-                  setTableCtxMenu(null);
-                  confirmThenRun("Drop Table", `Permanently drop table "${t}" and all its data? This cannot be undone.`,
-                    () => runCtxQuery(`DROP TABLE ${t};`, t));
-                }}>
-                  DROP Table
-                </div>
-              </div>
-            </>
+            <TableContextMenu
+              menu={tableCtxMenu}
+              onClose={() => setTableCtxMenu(null)}
+              openEditTableModal={openEditTableModal}
+              runCtxQuery={runCtxQuery}
+              handleCopyTableName={handleCopyTableName}
+              triggerCsvImport={triggerCsvImport}
+              confirmThenRun={confirmThenRun}
+            />
           )}
 
           {/* 뷰 우클릭 컨텍스트 메뉴 */}
           {viewCtxMenu && (
-            <>
-              <div style={{ position: "fixed", inset: 0, zIndex: 999 }} onClick={() => setViewCtxMenu(null)} />
-              <div
-                className="ctx-menu table-ctx-menu"
-                style={{ top: viewCtxMenu.y, left: viewCtxMenu.x, zIndex: 1000 }}
-              >
-                <div className="ctx-menu-header">{viewCtxMenu.view}</div>
-                <div className="ctx-divider" />
-                <div onClick={() => runViewCtxQuery(`SELECT * FROM ${viewCtxMenu.view};`)}>Select Rows</div>
-                <div onClick={() => runViewCtxQuery(`SELECT * FROM ${viewCtxMenu.view} LIMIT 100;`)}>Select Rows (LIMIT 100)</div>
-                <div onClick={() => runViewCtxQuery(`SHOW CREATE VIEW ${viewCtxMenu.view};`)}>Show Create View</div>
-                <div className="ctx-divider" />
-                <div onClick={() => { navigator.clipboard.writeText(viewCtxMenu.view); setViewCtxMenu(null); }}>Copy View Name</div>
-                <div className="ctx-divider" />
-                <div className="ctx-item-danger" onClick={() => {
-                  const v = viewCtxMenu.view;
-                  setViewCtxMenu(null);
-                  confirmThenRun("Drop View", `Permanently drop view "${v}"? This cannot be undone.`,
-                    () => runViewCtxQuery(`DROP VIEW ${v};`, v));
-                }}>
-                  Drop View
-                </div>
-              </div>
-            </>
+            <ViewContextMenu
+              menu={viewCtxMenu}
+              onClose={() => setViewCtxMenu(null)}
+              runViewCtxQuery={runViewCtxQuery}
+              confirmThenRun={confirmThenRun}
+            />
           )}
 
           {/* 인덱스 우클릭 컨텍스트 메뉴 */}
           {indexCtxMenu && (
-            <>
-              <div style={{ position: "fixed", inset: 0, zIndex: 999 }} onClick={() => setIndexCtxMenu(null)} />
-              <div
-                className="ctx-menu table-ctx-menu"
-                style={{ top: indexCtxMenu.y, left: indexCtxMenu.x, zIndex: 1000 }}
-              >
-                <div className="ctx-menu-header">{indexCtxMenu.index}</div>
-                <div className="ctx-divider" />
-                <div onClick={() => runIndexCtxQuery(`SHOW INDEX FROM ${indexCtxMenu.table};`)}>Show Index Info</div>
-                <div className="ctx-divider" />
-                <div onClick={() => { navigator.clipboard.writeText(indexCtxMenu.index); setIndexCtxMenu(null); }}>Copy Index Name</div>
-                <div className="ctx-divider" />
-                <div className="ctx-item-danger" onClick={() => {
-                  const idx = indexCtxMenu.index, t = indexCtxMenu.table;
-                  setIndexCtxMenu(null);
-                  confirmThenRun("Drop Index", `Permanently drop index "${idx}" on "${t}"? This cannot be undone.`,
-                    () => runIndexCtxQuery(`DROP INDEX ${idx} ON ${t};`, idx));
-                }}>
-                  Drop Index
-                </div>
-              </div>
-            </>
+            <IndexContextMenu
+              menu={indexCtxMenu}
+              onClose={() => setIndexCtxMenu(null)}
+              runIndexCtxQuery={runIndexCtxQuery}
+              confirmThenRun={confirmThenRun}
+            />
           )}
 
           {/* ── 파괴적 작업 확인 다이얼로그 ── */}
-          {confirmDialog && (
-            <div className="dlg-overlay" onClick={() => setConfirmDialog(null)}>
-              <div className="dlg-box" onClick={e => e.stopPropagation()}>
-                <div className="dlg-header">
-                  <div>
-                    <div className="dlg-title">{confirmDialog.title}</div>
-                    <div className="dlg-subtitle">{confirmDialog.message}</div>
-                  </div>
-                </div>
-                <div className="dlg-actions">
-                  <button type="button" className="dlg-cancel" onClick={() => setConfirmDialog(null)}>Cancel</button>
-                  <button type="button" className="dlg-danger" onClick={() => { const fn = confirmDialog.onConfirm; setConfirmDialog(null); fn(); }}>Delete</button>
-                </div>
-              </div>
-            </div>
-          )}
+          <ConfirmDialog dialog={confirmDialog} onCancel={() => setConfirmDialog(null)} />
 
           {/* 탭 컨텍스트 메뉴 */}
           {tabCtxMenu && (() => {
@@ -2610,67 +2048,14 @@ function App() {
 
           {/* Edit Table 모달 */}
           {editTableModal && (
-            <div className="modal-overlay" onClick={() => setEditTableModal(null)}>
-              <div className="edit-table-modal" onClick={e => e.stopPropagation()}>
-                <div className="edit-table-header">
-                  <span>Edit Table: <strong>{editTableModal.table}</strong></span>
-                  <button className="edit-table-close" onClick={() => setEditTableModal(null)}>✕</button>
-                </div>
-                <div className="edit-table-body">
-                  <div className="edit-table-section">Columns</div>
-                  <table className="edit-table-cols">
-                    <thead><tr><th>Name</th><th>Type</th><th>Constraints</th><th></th></tr></thead>
-                    <tbody>
-                      {editTableModal.cols.map(col => (
-                        <tr key={col.name}>
-                          <td>{col.is_pk ? "🔑 " : ""}{col.name}</td>
-                          <td>{col.data_type}</td>
-                          <td className="edit-table-constraints">
-                            {[col.is_pk && "PK", col.is_not_null && "NOT NULL", col.is_unique && !col.is_pk && "UNIQUE", col.is_auto_inc && "AUTO_INC"].filter(Boolean).join(", ")}
-                          </td>
-                          <td>
-                            {!col.is_pk && (
-                              <button className="drop-col-btn" onClick={() => dropColumn(editTableModal.table, col.name)}>Drop</button>
-                            )}
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                  <div className="edit-table-section" style={{ marginTop: 20 }}>Add Column</div>
-                  <div className="add-col-form">
-                    <input
-                      className="add-col-input"
-                      placeholder="Column name"
-                      value={editTableNewCol.name}
-                      onChange={e => setEditTableNewCol(p => ({ ...p, name: e.target.value }))}
-                      onKeyDown={e => { if (e.key === "Enter") addColumn(); }}
-                    />
-                    <select
-                      className="add-col-select"
-                      value={editTableNewCol.type}
-                      onChange={e => setEditTableNewCol(p => ({ ...p, type: e.target.value }))}
-                    >
-                      {["INT","BIGINT","VARCHAR(50)","VARCHAR(100)","VARCHAR(255)","TEXT","FLOAT","DOUBLE","DECIMAL(10,2)","BOOLEAN","DATE","DATETIME","TIMESTAMP"].map(t => (
-                        <option key={t} value={t}>{t}</option>
-                      ))}
-                    </select>
-                    <label className="add-col-check">
-                      <input type="checkbox" checked={editTableNewCol.notNull} onChange={e => setEditTableNewCol(p => ({ ...p, notNull: e.target.checked }))} />
-                      NOT NULL
-                    </label>
-                    <input
-                      className="add-col-input"
-                      placeholder="DEFAULT value (optional)"
-                      value={editTableNewCol.defaultVal}
-                      onChange={e => setEditTableNewCol(p => ({ ...p, defaultVal: e.target.value }))}
-                      onKeyDown={e => { if (e.key === "Enter") addColumn(); }}
-                    />
-                    <button className="add-col-btn" onClick={addColumn}>Add Column</button>
-                  </div>
-                </div>
-              </div>
-            </div>
+            <EditTableModal
+              modal={editTableModal}
+              newCol={editTableNewCol}
+              onClose={() => setEditTableModal(null)}
+              onNewColChange={setEditTableNewCol}
+              onDropColumn={dropColumn}
+              onAddColumn={addColumn}
+            />
           )}
 
           <div className="main">
@@ -3385,323 +2770,39 @@ function App() {
 
       {/* ── ERD Editor 뷰 ────────────────────────────────────── */}
       {activeView === "erd" && (
-        <div className="erd-view">
-          <div className="erd-header">
-            <div className="erd-header-left">
-              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" style={{ opacity: 0.7 }}>
-                <rect x="1" y="2" width="9" height="6" rx="1.5"/>
-                <rect x="1" y="16" width="9" height="6" rx="1.5"/>
-                <rect x="14" y="9" width="9" height="6" rx="1.5"/>
-                <path d="M10 5H12V12H14"/>
-                <path d="M10 19H12V12"/>
-              </svg>
-              <span className="erd-header-title">ERD — {currentDb}</span>
-              <span className="erd-table-count">{Object.keys(erdColumns).length} tables</span>
-            </div>
-            <div className="erd-header-right">
-              <div className="erd-zoom-slider">
-                <input
-                  type="range"
-                  min={0}
-                  max={200}
-                  value={Math.round(erdZoom * 100)}
-                  onChange={e => setErdZoom(Number(e.target.value) / 100)}
-                  title="Zoom (0~200%)"
-                />
-                <span className="erd-zoom-label">{Math.round(erdZoom * 100)}%</span>
-              </div>
-              <button className="erd-tool-btn" onClick={autoLayoutErd} title={isAutoLayout ? "Restore original positions" : "Auto arrange by FK"}>
-                {isAutoLayout ? "↩ Reset Layout" : "⊞ Auto Layout"}
-              </button>
-              <button className="erd-tool-btn" onClick={() => { setErdPan({ x: 40, y: 40 }); setErdZoom(1); }} title="Reset view">⊡ Reset</button>
-              <button className="erd-tool-btn" onClick={loadErd} title="Refresh">↻ Refresh</button>
-            </div>
-          </div>
-
-          <div
-            className="erd-canvas"
-            ref={erdCanvasRef}
-            onMouseDown={e => {
-              if ((e.target as HTMLElement).closest(".erd-card")) return;
-              erdCanvasWasDragged.current = false;
-              erdCanvasDragRef.current = { startMX: e.clientX, startMY: e.clientY, startPX: erdPan.x, startPY: erdPan.y };
-              document.body.style.cursor = "grabbing";
-              document.body.style.userSelect = "none";
-            }}
-            onClick={e => {
-              // 빈 캔버스를 클릭(드래그 아님)하면 선택 해제 + 데이터 패널 닫기
-              if (erdCanvasWasDragged.current) return;
-              if ((e.target as HTMLElement).closest(".erd-card")) return;
-              setErdSelectedTable("");
-              setErdTableData(null);
-              setErdDataHeight(0);
-            }}
-            onWheel={e => {
-              e.preventDefault();
-              const factor = e.deltaY < 0 ? 1.1 : 0.9;
-              setErdZoom(z => Math.max(0.2, Math.min(2.5, z * factor)));
-            }}
-          >
-            {erdLoading ? (
-              <div className="erd-loading">Loading ERD...</div>
-            ) : Object.keys(erdColumns).length === 0 ? (
-              <div className="erd-empty">
-                <div className="erd-empty-icon">⬡</div>
-                <div className="erd-empty-text">No tables in <b>{currentDb}</b></div>
-                <div className="erd-empty-sub">Create a table and press ↻ Refresh</div>
-              </div>
-            ) : (
-              <div
-                className="erd-transform"
-                style={{ transform: `translate(${erdPan.x}px, ${erdPan.y}px) scale(${erdZoom})`, transformOrigin: "0 0" }}
-              >
-                {/* FK 관계선 SVG */}
-                <svg style={{ position: "absolute", top: 0, left: 0, width: 1, height: 1, overflow: "visible", pointerEvents: "none", zIndex: 0 }}>
-                  <defs>
-                    <marker id="erd-one" markerWidth="14" markerHeight="18" refX="11" refY="9" orient="auto">
-                      <line x1="5" y1="3" x2="5" y2="15" stroke="#c0395a" strokeWidth="1.4"/>
-                      <line x1="9" y1="3" x2="9" y2="15" stroke="#c0395a" strokeWidth="1.4"/>
-                    </marker>
-                    <marker id="erd-many" markerWidth="24" markerHeight="18" refX="21" refY="9" orient="auto-start-reverse">
-                      <circle cx="4" cy="9" r="3" fill="none" stroke="#c0395a" strokeWidth="1.2"/>
-                      <path d="M8 9 L21 3 M8 9 L21 9 M8 9 L21 15" stroke="#c0395a" strokeWidth="1.2" fill="none"/>
-                    </marker>
-                    <marker id="erd-one-hi" markerWidth="14" markerHeight="18" refX="11" refY="9" orient="auto">
-                      <line x1="5" y1="3" x2="5" y2="15" stroke="#4ec9b0" strokeWidth="1.8"/>
-                      <line x1="9" y1="3" x2="9" y2="15" stroke="#4ec9b0" strokeWidth="1.8"/>
-                    </marker>
-                    <marker id="erd-many-hi" markerWidth="24" markerHeight="18" refX="21" refY="9" orient="auto-start-reverse">
-                      <circle cx="4" cy="9" r="3" fill="none" stroke="#4ec9b0" strokeWidth="1.5"/>
-                      <path d="M8 9 L21 3 M8 9 L21 9 M8 9 L21 15" stroke="#4ec9b0" strokeWidth="1.5" fill="none"/>
-                    </marker>
-                  </defs>
-                  {Object.entries(erdColumns).flatMap(([tableName, cols]) =>
-                    cols.map((col, colIdx) => {
-                      if (!col.fk_ref) return null;
-                      const parsed = parseRef(col.fk_ref);
-                      if (!parsed) return null;
-                      const refTable = unqualify(parsed.table);
-                      const srcPos = erdPositions[tableName];
-                      const tgtPos = erdPositions[refTable];
-                      const tgtCols = erdColumns[refTable];
-                      if (!srcPos || !tgtPos || !tgtCols) return null;
-                      const tgtColIdx = tgtCols.findIndex(c => c.name === parsed.col);
-                      const srcY = srcPos.y + ERD_HEADER_H + colIdx * ERD_COL_H + ERD_COL_H / 2;
-                      const tgtY = tgtPos.y + ERD_HEADER_H + (tgtColIdx >= 0 ? tgtColIdx * ERD_COL_H : 0) + ERD_COL_H / 2;
-                      const srcRight = srcPos.x + ERD_CARD_W;
-                      const tgtRight = tgtPos.x + ERD_CARD_W;
-                      const isHovered = erdHoveredTable !== null && (erdHoveredTable === tableName || erdHoveredTable === refTable);
-                      const isDimmed = erdHoveredTable !== null && !isHovered;
-                      let px1: number, py1: number, px2: number, py2: number, pathD: string;
-                      if (srcRight + 10 <= tgtPos.x) {
-                        px1 = srcRight; py1 = srcY; px2 = tgtPos.x; py2 = tgtY;
-                        pathD = erdOrthPath(px1, py1, px2, py2);
-                      } else if (tgtRight + 10 <= srcPos.x) {
-                        px1 = srcPos.x; py1 = srcY; px2 = tgtRight; py2 = tgtY;
-                        pathD = erdOrthPath(px1, py1, px2, py2);
-                      } else {
-                        // 수평 겹침: 짧은 쪽으로 우회
-                        const rightX = Math.max(srcRight, tgtRight) + 44 + colIdx * 14;
-                        const leftX  = Math.min(srcPos.x, tgtPos.x) - 44 - colIdx * 14;
-                        const useLeft = leftX > 0 && (rightX - leftX > leftX);
-                        const detourX = useLeft ? leftX : rightX;
-                        px1 = useLeft ? srcPos.x : srcRight; py1 = srcY;
-                        px2 = useLeft ? tgtPos.x : tgtRight; py2 = tgtY;
-                        const sdy = Math.sign(tgtY - srcY);
-                        const r = Math.min(8, Math.abs(tgtY - srcY) / 2);
-                        if (r < 1) {
-                          pathD = `M${px1} ${srcY} H${detourX} V${tgtY} H${px2}`;
-                        } else {
-                          const sdx = useLeft ? 1 : -1;
-                          pathD = [
-                            `M${px1} ${srcY}`,
-                            `H${detourX + sdx * r}`,
-                            `Q${detourX} ${srcY} ${detourX} ${srcY + sdy * r}`,
-                            `V${tgtY - sdy * r}`,
-                            `Q${detourX} ${tgtY} ${detourX + sdx * r} ${tgtY}`,
-                            `H${px2}`,
-                          ].join(" ");
-                        }
-                      }
-                      const stroke = isHovered ? "#4ec9b0" : "#c0395a";
-                      const sw = isHovered ? 2.5 : 1.5;
-                      const opacity = isDimmed ? 0.15 : isHovered ? 1 : 0.75;
-                      return (
-                        <g key={`${tableName}.${col.name}`}>
-                          <path
-                            d={pathD}
-                            fill="none"
-                            stroke={stroke}
-                            strokeWidth={sw}
-                            strokeDasharray="6 4"
-                            opacity={opacity}
-                            markerStart={isHovered ? "url(#erd-many-hi)" : "url(#erd-many)"}
-                            markerEnd={isHovered ? "url(#erd-one-hi)" : "url(#erd-one)"}
-                            className={isHovered ? "erd-edge-active" : isDimmed ? "erd-edge-dim" : "erd-edge"}
-                          />
-                          {isHovered && (
-                            <>
-                              <circle cx={px1} cy={py1} r="4" fill="#4ec9b0" opacity="0.9"/>
-                              <circle cx={px2} cy={py2} r="4" fill="#4ec9b0" opacity="0.9"/>
-                            </>
-                          )}
-                        </g>
-                      );
-                    })
-                  )}
-                </svg>
-
-                {/* 테이블 카드 */}
-                {Object.entries(erdColumns).map(([tableName, cols]) => {
-                  const pos = erdPositions[tableName];
-                  if (!pos) return null;
-                  const maxNameW = Math.max(40, ...cols.map(c => measureTextPx(c.name))) + 10;
-                  const isLinked = erdHoveredTable !== null && erdHoveredTable !== tableName && (
-                    cols.some(c => c.fk_ref && unqualify(parseRef(c.fk_ref)?.table ?? "") === erdHoveredTable) ||
-                    Object.entries(erdColumns).some(([t, cs]) => t === erdHoveredTable && cs.some(c => c.fk_ref && unqualify(parseRef(c.fk_ref)?.table ?? "") === tableName))
-                  );
-                  return (
-                    <div
-                      key={tableName}
-                      className={`erd-card${erdSelectedTable === tableName ? " erd-card-selected" : ""}${erdHoveredTable === tableName ? " erd-card-focused" : ""}${isLinked ? " erd-card-linked" : ""}${erdAnimating ? " erd-card-anim" : ""}`}
-                      style={{ position: "absolute", left: pos.x, top: pos.y, width: ERD_CARD_W, zIndex: erdHoveredTable === tableName ? 10 : 1 }}
-                      onClick={() => { if (!erdCardWasDragged.current) handleErdCardClick(tableName); }}
-                      onMouseEnter={() => setErdHoveredTable(tableName)}
-                      onMouseLeave={() => setErdHoveredTable(null)}
-                    >
-                      <div
-                        className="erd-card-header"
-                        onMouseDown={e => {
-                          e.stopPropagation();
-                          e.preventDefault();
-                          erdCardWasDragged.current = false;
-                          erdCardDragRef.current = {
-                            table: tableName,
-                            startMX: e.clientX,
-                            startMY: e.clientY,
-                            startCX: pos.x,
-                            startCY: pos.y,
-                            zoom: erdZoom,
-                          };
-                          document.body.style.userSelect = "none";
-                        }}
-                      >
-                        <span className="erd-card-name">{tableName}</span>
-                        <span className="erd-card-comment">comment</span>
-                      </div>
-                      {cols.map(col => (
-                        <div
-                          key={col.name}
-                          className={`erd-col-row${col.is_pk ? " erd-pk" : col.fk_ref ? " erd-fk" : ""}`}
-                        >
-                          <span className="erd-col-key">
-                            {(col.is_pk || col.fk_ref) && (
-                              <svg width="12" height="12" viewBox="0 0 24 24" fill={col.is_pk ? "#f0c040" : "#e0556b"}>
-                                <path d="M12.65 10A5.99 5.99 0 0 0 7 6c-3.31 0-6 2.69-6 6s2.69 6 6 6a5.99 5.99 0 0 0 5.65-4H17v4h4v-4h2v-4H12.65zM7 14c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2z"/>
-                              </svg>
-                            )}
-                          </span>
-                          <span className="erd-col-name" style={{ width: maxNameW }}>{col.name}</span>
-                          <span className="erd-col-type" title={col.data_type}>{col.data_type}</span>
-                          <span className={`erd-badge${col.is_not_null ? " on-nn" : ""}`}>{col.is_not_null ? "N-N" : "NULL"}</span>
-                          <span className={`erd-badge${col.is_unique ? " on-uq" : ""}`}>UQ</span>
-                          <span className={`erd-badge${col.is_auto_inc ? " on-ai" : ""}`}>AI</span>
-                        </div>
-                      ))}
-                    </div>
-                  );
-                })}
-              </div>
-            )}
-          </div>
-
-          {/* 데이터 패널 */}
-          {erdSelectedTable && (
-            <>
-              <div
-                className="divider"
-                onMouseDown={() => {
-                  erdDataDragging.current = true;
-                  document.body.style.cursor = "row-resize";
-                  document.body.style.userSelect = "none";
-                }}
-              />
-              <div className="erd-data-panel" style={{ height: erdDataHeight }}>
-                <div className="erd-data-header">
-                  <span className="erd-data-table-name">⊞ {erdSelectedTable}</span>
-                  <input
-                    className="erd-data-filter"
-                    placeholder="Filter rows..."
-                    value={erdFilter}
-                    onChange={e => setErdFilter(e.target.value)}
-                  />
-                  <button className="erd-tool-btn" onClick={() => loadErdTableData(erdSelectedTable)} title="Refresh">↻</button>
-                  <button className="erd-tool-btn" onClick={() => { setErdSelectedTable(""); setErdTableData(null); setErdDataHeight(0); }} title="Close">✕</button>
-                </div>
-                <div className="erd-data-body">
-                  {erdTableLoading ? (
-                    <div className="erd-data-empty">Loading...</div>
-                  ) : !erdTableData || !erdTableData.success ? (
-                    <div className="erd-data-error">{erdTableData?.message ?? "Unknown error"}</div>
-                  ) : erdTableData.columns.length === 0 ? (
-                    <div className="erd-data-empty">{erdTableData.message || "No rows"}</div>
-                  ) : (() => {
-                    const low = erdFilter.toLowerCase();
-                    const filtered = erdFilter
-                      ? erdTableData.rows.filter(r => r.some(c => c.toLowerCase().includes(low)))
-                      : erdTableData.rows;
-                    // 컬럼 자동 너비 — 쿼리 결과 표와 동일 로직 (canvas measureText, 한글/CJK 지원)
-                    const CELL_PAD = 36;
-                    const sample = filtered.slice(0, 200);
-                    const widths = erdTableData.columns.map((col, ci) => {
-                      const maxData = sample.reduce((m, row) => Math.max(m, measureTextPx(row[ci] ?? "")), 0);
-                      const w = Math.max(measureTextPx(col), maxData);
-                      return Math.min(500, Math.max(60, Math.round(w + CELL_PAD)));
-                    });
-                    return (
-                      <>
-                        <div className="erd-data-meta">
-                          {filtered.length}{erdFilter ? ` / ${erdTableData.rows.length}` : ""} row(s) · {erdTableData.columns.length} col(s) · {erdTableData.elapsed.toFixed(3)}s
-                        </div>
-                        <table className="erd-data-table" style={{ tableLayout: "fixed", width: "auto" }}>
-                          <thead><tr>
-                            <th className="erd-data-rownum" style={{ width: 40 }}>#</th>
-                            {erdTableData.columns.map((c, ci) => <th key={c} style={{ width: widths[ci] }}>{c}</th>)}
-                          </tr></thead>
-                          <tbody>
-                            {filtered.map((row, ri) => (
-                              <tr key={ri}>
-                                <td className="erd-data-rownum">{ri + 1}</td>
-                                {row.map((cell, ci) => (
-                                  <td key={ci}>{cell || <span className="erd-data-null">NULL</span>}</td>
-                                ))}
-                              </tr>
-                            ))}
-                          </tbody>
-                        </table>
-                      </>
-                    );
-                  })()}
-                </div>
-              </div>
-            </>
-          )}
-
-          <div className="status-bar">
-            <div className="status-left">
-              <span className="status-item">⎇ main</span>
-              <span className="status-item" style={{ color: "#9cdcfe" }}>⬡ {currentDb}</span>
-              {erdSelectedTable && <span className="status-item" style={{ color: "#4ec9b0" }}>⊞ {erdSelectedTable}</span>}
-              <span className="status-item" style={{ color: "#555" }}>
-                {Object.keys(erdColumns).length} tables · {Object.values(erdColumns).flat().filter(c => c.fk_ref).length} relations
-              </span>
-            </div>
-            <div className="status-right">
-              <span className="status-item">RuSQL v2.3.0</span>
-              <span className="status-item">ERD Editor</span>
-            </div>
-          </div>
-        </div>
+        <ErdView
+          currentDb={currentDb}
+          erdColumns={erdColumns}
+          erdPositions={erdPositions}
+          erdZoom={erdZoom}
+          setErdZoom={setErdZoom}
+          erdPan={erdPan}
+          setErdPan={setErdPan}
+          isAutoLayout={isAutoLayout}
+          autoLayoutErd={autoLayoutErd}
+          erdLoading={erdLoading}
+          loadErd={loadErd}
+          erdSelectedTable={erdSelectedTable}
+          setErdSelectedTable={setErdSelectedTable}
+          handleErdCardClick={handleErdCardClick}
+          erdHoveredTable={erdHoveredTable}
+          setErdHoveredTable={setErdHoveredTable}
+          erdAnimating={erdAnimating}
+          erdCanvasRef={erdCanvasRef}
+          erdCardDragRef={erdCardDragRef}
+          erdCanvasDragRef={erdCanvasDragRef}
+          erdCardWasDragged={erdCardWasDragged}
+          erdCanvasWasDragged={erdCanvasWasDragged}
+          erdDataDragging={erdDataDragging}
+          erdDataHeight={erdDataHeight}
+          setErdDataHeight={setErdDataHeight}
+          erdTableData={erdTableData}
+          setErdTableData={setErdTableData}
+          erdTableLoading={erdTableLoading}
+          loadErdTableData={loadErdTableData}
+          erdFilter={erdFilter}
+          setErdFilter={setErdFilter}
+        />
       )}
 
 
@@ -4089,7 +3190,12 @@ function App() {
                       onClick={async () => {
                         setMcpSetupMsg(null);
                         try {
-                          const msg = await invoke<string>("setup_mcp_config");
+                          const msg = await invoke<string>("setup_mcp_config", {
+                            host: "127.0.0.1",
+                            port: parseInt(portInput) || 7878,
+                            user: srvUser,
+                            password: srvPass,
+                          });
                           setMcpSetupMsg({ ok: true, text: msg });
                         } catch (e) {
                           setMcpSetupMsg({ ok: false, text: String(e) });

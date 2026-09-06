@@ -316,6 +316,37 @@ TEST_CASE("SELECT with JSON_AGG aggregate function", "[executor][select]") {
     REQUIRE(str_r.value().find("null") != std::string::npos); // NULL label becomes JSON null
 }
 
+TEST_CASE("SELECT with ARRAY_AGG aggregate function", "[executor][select]") {
+    // ARRAY_AGG shares JSON_AGG's implementation (this engine has no distinct array
+    // storage type) -- same assertions as the JSON_AGG test above, just via ARRAY_AGG.
+    TempDataDir dir("exec_sel_data_arrayagg");
+    Executor ex(dir.path);
+    REQUIRE(ex.execute_sql("CREATE DATABASE company").is_ok());
+    REQUIRE(ex.execute_sql("USE company").is_ok());
+    REQUIRE(ex.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, val INT, label VARCHAR(10))").is_ok());
+    REQUIRE(ex.execute_sql("INSERT INTO t VALUES (1,10,'a'),(2,20,'b'),(3,30,NULL)").is_ok());
+
+    auto num_r = ex.execute_sql("SELECT ARRAY_AGG(val) AS a FROM t");
+    REQUIRE(num_r.is_ok());
+    REQUIRE(num_r.value().find("[10,20,30]") != std::string::npos);
+
+    auto str_r = ex.execute_sql("SELECT ARRAY_AGG(label) AS a FROM t");
+    REQUIRE(str_r.is_ok());
+    REQUIRE(str_r.value().find("\"a\"") != std::string::npos);
+    REQUIRE(str_r.value().find("\"b\"") != std::string::npos);
+    REQUIRE(str_r.value().find("null") != std::string::npos);
+
+    // GROUP BY grouping: ARRAY_AGG must correctly trigger has_agg-driven grouping just
+    // like JSON_AGG (verified via a distinct group producing its own array).
+    REQUIRE(ex.execute_sql("CREATE TABLE g (id INT PRIMARY KEY, grp INT, val INT)").is_ok());
+    REQUIRE(ex.execute_sql("INSERT INTO g VALUES (1,1,10),(2,1,20),(3,2,30)").is_ok());
+    auto grouped = ex.execute_sql("SELECT grp, ARRAY_AGG(val) AS a FROM g GROUP BY grp ORDER BY grp");
+    REQUIRE(grouped.is_ok());
+    REQUIRE(grouped.value().find("2 row(s) returned.") != std::string::npos);
+    REQUIRE(grouped.value().find("[10,20]") != std::string::npos);
+    REQUIRE(grouped.value().find("[30]") != std::string::npos);
+}
+
 TEST_CASE("SELECT with JOIN LATERAL correlated subquery (INNER)", "[executor][select]") {
     TempDataDir dir("exec_sel_data_lateral_inner");
     Executor ex(dir.path);

@@ -91,6 +91,69 @@ Statement Parser::parse_insert() {
     return Statement(Statement::Insert{table, columns, all_values, on_conflict, returning});
 }
 
+Statement Parser::parse_replace() {
+    // REPLACE [INTO] table [(col1, col2, ...)] VALUES (...) | REPLACE [INTO] table [(cols)] SELECT ...
+    // No Rust/MySQL-parity original -- new C++-native addition. Reuses the plain
+    // Statement::Insert/InsertSelect shape with on_conflict = InsertConflict::Replace
+    // rather than introducing a new Statement kind (see executor_dml.cpp's
+    // replace_delete_conflicts for the actual delete-then-insert execution). Unlike
+    // INSERT, REPLACE has no IGNORE keyword and no ON DUPLICATE KEY UPDATE clause.
+    if (peek_is(TokenKind::Into)) advance(); // INTO is optional in real MySQL REPLACE syntax
+    std::string table = expect_ident();
+
+    std::optional<std::vector<std::string>> columns;
+    if (peek_is(TokenKind::LParen)) {
+        advance();
+        std::vector<std::string> cols;
+        cols.push_back(expect_ident());
+        while (peek_is(TokenKind::Comma)) { advance(); cols.push_back(expect_ident()); }
+        if (!peek_is(TokenKind::RParen)) throw ParseError("Expected ')' after column list");
+        advance();
+        columns = cols;
+    }
+
+    if (peek_is(TokenKind::Select)) {
+        advance(); // consume SELECT
+        Statement query = parse_select();
+        auto returning = parse_returning();
+        return Statement(Statement::InsertSelect{table, columns, std::make_unique<Statement>(std::move(query)),
+                                                   InsertConflict(InsertConflict::Replace{}), returning});
+    }
+
+    if (!peek_is(TokenKind::Values)) throw ParseError("Expected VALUES or SELECT");
+    advance();
+
+    std::vector<std::vector<std::string>> all_values;
+    for (;;) {
+        if (!peek_is(TokenKind::LParen)) throw ParseError("Expected '('");
+        advance();
+        std::vector<std::string> row_vals;
+        for (;;) {
+            std::string val;
+            if (peek_is(TokenKind::Comma) || peek_is(TokenKind::RParen)) {
+                val = "";
+            } else {
+                const Token* t = advance();
+                if (!t) throw ParseError("Expected value");
+                switch (t->kind) {
+                    case TokenKind::StringLit: case TokenKind::NumberLit: case TokenKind::Ident: val = t->text; break;
+                    case TokenKind::Null: val = "NULL"; break;
+                    default: throw ParseError("Expected value");
+                }
+            }
+            row_vals.push_back(val);
+            if (peek_is(TokenKind::Comma)) { advance(); }
+            else if (peek_is(TokenKind::RParen)) { advance(); break; }
+            else throw ParseError("Expected ',' or ')'");
+        }
+        all_values.push_back(std::move(row_vals));
+        if (peek_is(TokenKind::Comma)) advance(); else break;
+    }
+
+    auto returning = parse_returning();
+    return Statement(Statement::Insert{table, columns, all_values, InsertConflict(InsertConflict::Replace{}), returning});
+}
+
 Statement Parser::parse_update() {
     // UPDATE [t1 [alias1]] [, t2 [alias2]] | [JOIN t2 ON ...] SET col = val [WHERE ...]
     std::string first_table = expect_ident();

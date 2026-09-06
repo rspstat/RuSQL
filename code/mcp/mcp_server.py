@@ -8,15 +8,26 @@ Claude Desktop config:
 """
 import hashlib
 import json
+import os
 import re
 import socket
 import sys
+import time
 from mcp.server.fastmcp import FastMCP
 
-RUSQL_HOST = "127.0.0.1"
-RUSQL_PORT = 7878
-RUSQL_USER = "root"
-RUSQL_PASS = "root"
+# 접속정보는 Claude Desktop 설정의 "env" 필드로 오버라이드 가능 (RuSQL UI의 "Auto-connect
+# Claude Desktop" 버튼이 지금 이 세션의 실제 host/port/계정으로 채워 씀 -- setup_mcp_config,
+# code/frontend/src-tauri/src/main.rs). env가 없으면(수동 설정 등) 기존 기본값으로 폴백.
+RUSQL_HOST = os.environ.get("RUSQL_HOST", "127.0.0.1")
+RUSQL_PORT = int(os.environ.get("RUSQL_PORT", "7878"))
+RUSQL_USER = os.environ.get("RUSQL_USER", "root")
+RUSQL_PASS = os.environ.get("RUSQL_PASS", "root")
+
+# RuSQL 서버가 막 (재)시작돼 리스닝 소켓이 아직 안 열려 있는 짧은 순간의 접속 실패를
+# 흡수하기 위한 재시도 -- 이전엔 ConnectionRefusedError가 한 번이라도 나면 그 도구 호출
+# 전체가 바로 실패했음.
+_CONNECT_RETRIES = 3
+_CONNECT_RETRY_DELAY_SEC = 0.5
 
 mcp = FastMCP("RuSQL v2.3.0")
 
@@ -33,8 +44,20 @@ def _compute_native_password_token(password: str, nonce: bytes) -> bytes:
 
 class _Conn:
     def __init__(self):
-        self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.sock.connect((RUSQL_HOST, RUSQL_PORT))
+        last_err = None
+        for attempt in range(_CONNECT_RETRIES):
+            self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            try:
+                self.sock.connect((RUSQL_HOST, RUSQL_PORT))
+                last_err = None
+                break
+            except OSError as e:
+                last_err = e
+                self.sock.close()
+                if attempt < _CONNECT_RETRIES - 1:
+                    time.sleep(_CONNECT_RETRY_DELAY_SEC)
+        if last_err is not None:
+            raise last_err
         self.sock.settimeout(30)
         banner = self._recv()  # welcome banner, includes a "NONCE <hex>" line
         nonce_hex = next((l.split(" ", 1)[1] for l in banner.splitlines() if l.startswith("NONCE ")), None)

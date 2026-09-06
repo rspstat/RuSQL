@@ -103,6 +103,10 @@ using TriggerDef = std::tuple<std::string, std::string, std::string, std::vector
 // User-defined scalar function: (param names, body expression string).
 using UserFunctionDef = std::pair<std::vector<std::string>, std::string>;
 
+// LOCK TABLES / UNLOCK TABLES holder record (V1 scope -- see executor_dcl.cpp's
+// exec_lock_tables design note: session-to-session LOCK TABLES cooperation only).
+struct ExplicitTableLockHolder { std::size_t session_id; bool exclusive; };
+
 struct SharedDatabase {
     Catalog catalog;
     std::unordered_map<std::string, std::vector<Row>> tables;
@@ -169,6 +173,14 @@ struct SharedDatabase {
     // claim (see RowClaimGuard), not from this mutex.
     std::unordered_map<std::string, std::shared_ptr<FairSharedMutex>> table_data_locks;
 
+    // LOCK TABLES / UNLOCK TABLES holder registry (V1 scope -- see executor_dcl.cpp's
+    // exec_lock_tables). Guarded by its own dedicated Mutex, independent of the outer
+    // RwLock<SharedDatabase>: a session's held lock must stay checkable/waitable even
+    // between statements, when this session may not be holding any statement-level lock
+    // on `s` at all (LOCK TABLES ... UNLOCK TABLES spans multiple separate client
+    // round-trips, unlike every other lock in this codebase).
+    std::shared_ptr<Mutex<std::unordered_map<std::string, std::vector<ExplicitTableLockHolder>>>> explicit_table_locks;
+
     // mysql_native_password challenge-response verification (nonce is a 20-byte challenge)
     // -- used by both the MySQL wire protocol listener and the native TCP protocol's own
     // AUTH handshake (server/src/main.cpp), so no plaintext password is ever transmitted
@@ -211,6 +223,10 @@ public:
     // restore's replay loop via an RAII guard, exactly like mysql.exe's dump format
     // bracketing itself with SET FOREIGN_KEY_CHECKS=0/1.
     bool skip_fk_checks = false;
+    // Tables this session currently holds via LOCK TABLES (V1 scope, see
+    // executor_dcl.cpp's exec_lock_tables) -- released by UNLOCK TABLES or
+    // release_explicit_table_locks() at connection teardown.
+    std::vector<std::pair<std::string, bool>> held_explicit_locks;
 
     Executor() : Executor("data", 64) {}
     explicit Executor(std::size_t buffer_pool_capacity) : Executor("data", buffer_pool_capacity) {}
@@ -223,6 +239,11 @@ public:
     void update_process_command(const std::string& command, const std::string& info) const;
     void deregister_process() const;
     std::shared_ptr<RwLock<SharedDatabase>> get_shared() const { return shared; }
+    // Releases this session's LOCK TABLES holds (V1 scope) without an explicit UNLOCK
+    // TABLES statement -- call at connection teardown, alongside deregister_process()
+    // (mirrors its explicit-call convention; Executor doesn't own SharedDatabase's
+    // lifetime so this can't be a destructor).
+    void release_explicit_table_locks();
 
     StringResult execute(Statement stmt);
     StringResult execute_sql(const std::string& sql);
@@ -501,6 +522,14 @@ private:
     static std::string format_returning_rows(const std::vector<Row>& rows, const std::vector<SelectColumn>& cols);
     static void update_stat_rows(SharedDatabase& s, const std::string& table, std::int64_t delta);
     static std::pair<std::vector<std::string>, std::vector<Row>> parse_table_output(const std::string& output);
+    // Escapes '\', '\n', and '|' in a cell value before it is written into the ASCII
+    // table string that parse_table_output() later re-parses (UNION/CTE/subquery/
+    // LATERAL/partition-routing all round-trip a SELECT's result through this exact
+    // string format) -- without this, a value containing a literal '|' or newline
+    // would silently corrupt the round-trip (extra/missing columns, or a row cut off
+    // mid-value). Called at every headers/cells insertion site that builds one of
+    // these tables; parse_table_output() reverses it after extracting each cell.
+    static std::string escape_cell(const std::string& v);
 
     // ── Phase 8b: shared DML infrastructure ─────────────────────────────
     void maybe_auto_checkpoint(SharedDatabase& s);
@@ -521,6 +550,14 @@ private:
     StringResult exec_insert_inner(SharedDatabase& s, const std::string& table, const std::optional<std::vector<std::string>>& col_list,
                                     std::vector<std::vector<std::string>> all_values, const InsertConflict& on_conflict,
                                     const std::optional<std::vector<SelectColumn>>& returning);
+    // REPLACE INTO support: before the real INSERT runs, deletes any existing row(s) that
+    // would conflict on a PK/UNIQUE column of the incoming row(s) -- via a real DELETE
+    // statement through execute_with_s (full locking/index/trigger correctness reused,
+    // not reimplemented), not by mutating s.tables directly. See executor_dml.cpp for the
+    // V1 scope note (only explicit-valued PK/UNIQUE columns are considered).
+    StringResult replace_delete_conflicts(SharedDatabase& s, const std::string& table,
+                                           const std::optional<std::vector<std::string>>& col_list,
+                                           const std::vector<std::vector<std::string>>& all_values);
 
     // ── Phase 8b: UPDATE ─────────────────────────────────────────────────
     StringResult exec_update(SharedDatabase& s, std::string table, std::vector<std::pair<std::string, ArithExpr>> assignments,
@@ -699,6 +736,19 @@ private:
     StringResult exec_show_isolation_level() const;
     StringResult exec_show_locks(const SharedDatabase& s) const;
     StringResult exec_checkpoint(SharedDatabase& s);
+
+    // ── LOCK TABLES / UNLOCK TABLES (V1 -- session-to-session cooperation only,
+    // see executor_txn.cpp's exec_lock_tables for the full design note) ────────
+    StringResult exec_lock_tables(SharedDatabase& s, std::vector<std::pair<std::string, bool>> tables);
+    StringResult exec_unlock_tables(SharedDatabase& s);
+    // Actual release logic given an already-obtained `s` -- used both by the two
+    // functions above (which already have `s` from their caller) and by the public
+    // no-arg release_explicit_table_locks() (which acquires `s` itself for the
+    // connection-teardown case). Never call shared->read() from inside a function that
+    // may already be running under execute()'s own outer guard on the same thread --
+    // that's a real recursive-lock deadlock risk if a writer happens to be queued at that
+    // moment (FairSharedMutex has no reentrancy tracking).
+    void release_explicit_table_locks_impl(const SharedDatabase& s);
 
     // ── Phase 8e: stored procedures / triggers / UDF ────────────────────
     StringResult exec_create_procedure(SharedDatabase& s, std::string name,

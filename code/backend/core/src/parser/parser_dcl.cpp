@@ -114,6 +114,34 @@ Statement Parser::parse_show() {
     throw ParseError("Expected TABLES, BUFFER, WAL, ISOLATION, LOCKS, DATABASES, GRANTS, CREATE, INDEX, or PROCESSLIST");
 }
 
+Statement Parser::parse_lock_tables() {
+    // LOCK TABLES tbl_name [READ | WRITE] [, tbl_name2 [READ | WRITE] ...]
+    // No Rust/MySQL-parity original -- new C++-native addition (V1 scope: see
+    // executor_dcl.cpp's exec_lock_tables design note). READ/WRITE are recognized as
+    // plain identifier text (not reserved keywords), matching this file's own SHOW-clause
+    // convention just above and parser_core.cpp's BACKUP/RESTORE handling -- reserving the
+    // bare words "read"/"write" globally would risk breaking a real column/table named
+    // that.
+    if (!peek_is(TokenKind::Tables)) throw ParseError("Expected TABLES after LOCK");
+    advance();
+    std::vector<std::pair<std::string, bool>> tables; // (name, exclusive)
+    for (;;) {
+        std::string name = expect_ident();
+        const Token* p = peek();
+        if (!p || p->kind != TokenKind::Ident) throw ParseError("Expected READ or WRITE after '" + name + "' in LOCK TABLES");
+        std::string mode = to_upper(p->text);
+        bool exclusive;
+        if (mode == "READ") exclusive = false;
+        else if (mode == "WRITE") exclusive = true;
+        else throw ParseError("Expected READ or WRITE after '" + name + "' in LOCK TABLES");
+        advance();
+        tables.emplace_back(std::move(name), exclusive);
+        if (peek_is(TokenKind::Comma)) { advance(); continue; }
+        break;
+    }
+    return Statement(Statement::LockTables{std::move(tables)});
+}
+
 Statement Parser::parse_set() {
     const Token* t = advance();
     if (!t) throw ParseError("Expected ISOLATION");

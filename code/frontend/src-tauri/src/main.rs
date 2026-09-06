@@ -64,6 +64,16 @@ struct AppState {
     ui:      Arc<UiStore>,
 }
 
+// Every `.lock()` call site in this file uses `.unwrap_or_else(|e| e.into_inner())`
+// instead of `.unwrap()`: a panic inside any single Tauri command while holding one of
+// these Mutexes would otherwise poison it, and every later `.lock().unwrap()` on the
+// same Mutex would then also panic -- turning one unrelated bug into every command that
+// touches shared state (i.e. almost the whole app) becoming permanently unusable until
+// restart. Recovering the guard even when poisoned trades strict "never observe
+// possibly-inconsistent state after a panic" correctness for availability, which is the
+// right tradeoff here: a single-process desktop app where the underlying data lives in
+// the separately-supervised `engine_server` process, not in these Mutexes themselves.
+
 // ─── 직렬화 타입 ──────────────────────────────────────────────
 #[derive(serde::Serialize)]
 struct QueryResult {
@@ -420,7 +430,7 @@ fn split_queries_smart(input: &str) -> Vec<String> {
 #[tauri::command]
 fn execute_query(query: String, _ts: Option<u64>, state: State<AppState>) -> MultiQueryResult {
     let start = Instant::now();
-    let mut guard = state.db.lock().unwrap();
+    let mut guard = state.db.lock().unwrap_or_else(|e| e.into_inner());
     let conn = match guard.as_mut() {
         Some(c) => c,
         None => return MultiQueryResult {
@@ -486,7 +496,7 @@ fn query_infoschema_col(conn: &mut EngineConn, sql: &str, col: &str) -> Vec<Stri
 
 #[tauri::command]
 fn get_databases(state: State<AppState>) -> Vec<String> {
-    let mut guard = state.db.lock().unwrap();
+    let mut guard = state.db.lock().unwrap_or_else(|e| e.into_inner());
     let conn = match guard.as_mut() { Some(c) => c, None => return Vec::new() };
     match send_one(conn, "SHOW DATABASES;") {
         Ok((true, body, _)) => {
@@ -502,12 +512,12 @@ fn get_databases(state: State<AppState>) -> Vec<String> {
 
 #[tauri::command]
 fn get_current_db(state: State<AppState>) -> String {
-    state.db.lock().unwrap().as_ref().map(|c| c.current_db.clone()).unwrap_or_default()
+    state.db.lock().unwrap_or_else(|e| e.into_inner()).as_ref().map(|c| c.current_db.clone()).unwrap_or_default()
 }
 
 #[tauri::command]
 fn get_tables_for_db(db: String, state: State<AppState>) -> Vec<String> {
-    let mut guard = state.db.lock().unwrap();
+    let mut guard = state.db.lock().unwrap_or_else(|e| e.into_inner());
     let conn = match guard.as_mut() { Some(c) => c, None => return Vec::new() };
     let sql = format!(
         "SELECT table_name FROM information_schema.tables WHERE table_schema='{}' AND table_type='BASE TABLE';",
@@ -518,7 +528,7 @@ fn get_tables_for_db(db: String, state: State<AppState>) -> Vec<String> {
 
 #[tauri::command]
 fn get_views_for_db(db: String, state: State<AppState>) -> Vec<String> {
-    let mut guard = state.db.lock().unwrap();
+    let mut guard = state.db.lock().unwrap_or_else(|e| e.into_inner());
     let conn = match guard.as_mut() { Some(c) => c, None => return Vec::new() };
     let sql = format!(
         "SELECT table_name FROM information_schema.tables WHERE table_schema='{}' AND table_type='VIEW';",
@@ -571,7 +581,7 @@ fn fetch_indexes(conn: &mut EngineConn, db: &str, tables: &[String]) -> Vec<Inde
 
 #[tauri::command]
 fn get_indexes_for_db(db: String, state: State<AppState>) -> Vec<IndexInfo> {
-    let mut guard = state.db.lock().unwrap();
+    let mut guard = state.db.lock().unwrap_or_else(|e| e.into_inner());
     let conn = match guard.as_mut() { Some(c) => c, None => return Vec::new() };
     let db_lc = db.to_lowercase();
     let sql = format!(
@@ -591,7 +601,7 @@ fn get_triggers_for_db(_db: String, _state: State<AppState>) -> Vec<TriggerInfo>
 
 #[tauri::command]
 fn get_tables(state: State<AppState>) -> Vec<String> {
-    let mut guard = state.db.lock().unwrap();
+    let mut guard = state.db.lock().unwrap_or_else(|e| e.into_inner());
     let conn = match guard.as_mut() { Some(c) => c, None => return Vec::new() };
     match send_one(conn, "SHOW TABLES;") {
         Ok((true, body, _)) => {
@@ -613,7 +623,7 @@ fn split_qualified(table: &str, current_db: &str) -> (String, String) {
 
 #[tauri::command]
 fn get_columns(table: String, state: State<AppState>) -> Vec<String> {
-    let mut guard = state.db.lock().unwrap();
+    let mut guard = state.db.lock().unwrap_or_else(|e| e.into_inner());
     let conn = match guard.as_mut() { Some(c) => c, None => return Vec::new() };
     match send_one(conn, &format!("DESCRIBE {};", table)) {
         Ok((true, body, _)) => {
@@ -639,7 +649,7 @@ struct ColumnDetail {
 
 #[tauri::command]
 fn get_columns_detail(table: String, state: State<AppState>) -> Vec<ColumnDetail> {
-    let mut guard = state.db.lock().unwrap();
+    let mut guard = state.db.lock().unwrap_or_else(|e| e.into_inner());
     let conn = match guard.as_mut() { Some(c) => c, None => return Vec::new() };
     let (db, bare) = split_qualified(&table, &conn.current_db);
 
@@ -712,7 +722,7 @@ fn get_columns_detail(table: String, state: State<AppState>) -> Vec<ColumnDetail
 // 띄운 뒤 제어용 연결을 재접속하는 방식으로 구현한다 (같은 data_dir이라 안전).
 #[tauri::command]
 fn start_server(conn_id: String, port: u16, mysql_port: u16, state: State<AppState>) -> Result<String, String> {
-    let mut guard = state.db.lock().unwrap();
+    let mut guard = state.db.lock().unwrap_or_else(|e| e.into_inner());
     let old = guard.take().ok_or("연결된 데이터베이스가 없습니다.")?;
     let (data_dir, bp, user, password, current_db) =
         (old.data_dir.clone(), old.buffer_pool_size, old.user.clone(), old.password.clone(), old.current_db.clone());
@@ -730,7 +740,7 @@ fn start_server(conn_id: String, port: u16, mysql_port: u16, state: State<AppSta
     ));
     *guard = Some(conn);
 
-    state.servers.lock().unwrap().insert(conn_id, ServerEntry { running: true, port, mysql_port: mp });
+    state.servers.lock().unwrap_or_else(|e| e.into_inner()).insert(conn_id, ServerEntry { running: true, port, mysql_port: mp });
     Ok(format!("포트 {}에서 서버를 시작합니다...", port))
 }
 
@@ -782,11 +792,11 @@ fn cleanup_orphan_data_dirs(base: String, keep: Vec<String>) -> Vec<String> {
 fn authenticate(user: String, password: String, data_dir: String, buffer_pool_size: usize, state: State<AppState>) -> bool {
     let bp = if buffer_pool_size > 0 { buffer_pool_size } else { 64 };
     // 이전 연결이 있으면 정리 (Drop이 자식 프로세스를 종료한다)
-    *state.db.lock().unwrap() = None;
+    *state.db.lock().unwrap_or_else(|e| e.into_inner()) = None;
 
     let port = pick_free_port();
     match spawn_and_connect(&data_dir, bp, &user, &password, port, None) {
-        Ok(conn) => { *state.db.lock().unwrap() = Some(conn); true }
+        Ok(conn) => { *state.db.lock().unwrap_or_else(|e| e.into_inner()) = Some(conn); true }
         Err(_) => false,
     }
 }
@@ -815,7 +825,7 @@ fn query_processlist(conn: &mut EngineConn) -> Vec<SessionInfo> {
 
 #[tauri::command]
 fn stop_server(conn_id: String, state: State<AppState>) -> Result<String, String> {
-    let mut guard = state.db.lock().unwrap();
+    let mut guard = state.db.lock().unwrap_or_else(|e| e.into_inner());
     let old = guard.take().ok_or("연결된 데이터베이스가 없습니다.")?;
     let (data_dir, bp, user, password, current_db) =
         (old.data_dir.clone(), old.buffer_pool_size, old.user.clone(), old.password.clone(), old.current_db.clone());
@@ -829,7 +839,7 @@ fn stop_server(conn_id: String, state: State<AppState>) -> Result<String, String
     }
     *guard = Some(conn);
 
-    if let Some(e) = state.servers.lock().unwrap().get_mut(&conn_id) {
+    if let Some(e) = state.servers.lock().unwrap_or_else(|e| e.into_inner()).get_mut(&conn_id) {
         e.running = false;
     }
     Ok("서버를 중지했습니다.".to_string())
@@ -837,8 +847,8 @@ fn stop_server(conn_id: String, state: State<AppState>) -> Result<String, String
 
 #[tauri::command]
 fn get_server_status(conn_id: String, state: State<AppState>) -> ServerStatus {
-    let entry = state.servers.lock().unwrap().get(&conn_id).map(|e| (e.running, e.port));
-    let mut guard = state.db.lock().unwrap();
+    let entry = state.servers.lock().unwrap_or_else(|e| e.into_inner()).get(&conn_id).map(|e| (e.running, e.port));
+    let mut guard = state.db.lock().unwrap_or_else(|e| e.into_inner());
     let (sessions, log, fallback_port) = match guard.as_mut() {
         Some(conn) => (query_processlist(conn), conn.log.clone(), conn.port),
         None => (Vec::new(), Vec::new(), 7878),
@@ -849,7 +859,7 @@ fn get_server_status(conn_id: String, state: State<AppState>) -> ServerStatus {
 
 #[tauri::command]
 fn clear_server_log(_conn_id: String, state: State<AppState>) {
-    if let Some(conn) = state.db.lock().unwrap().as_mut() {
+    if let Some(conn) = state.db.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
         conn.log.clear();
     }
 }
@@ -858,7 +868,7 @@ fn clear_server_log(_conn_id: String, state: State<AppState>) {
 // ─── CSV 내보내기 ─────────────────────────────────────────────
 #[tauri::command]
 fn export_csv(query: String, file_path: String, state: State<AppState>) -> Result<String, String> {
-    let mut guard = state.db.lock().unwrap();
+    let mut guard = state.db.lock().unwrap_or_else(|e| e.into_inner());
     let conn = guard.as_mut().ok_or("연결된 데이터베이스가 없습니다.")?;
     let (ok, body, _) = send_one(conn, &query)?;
     if !ok {
@@ -907,7 +917,7 @@ fn import_csv(table: String, content: String, state: State<AppState>) -> Result<
 
     let mut count = 0usize;
     let mut errors = 0usize;
-    let mut guard = state.db.lock().unwrap();
+    let mut guard = state.db.lock().unwrap_or_else(|e| e.into_inner());
     let conn = guard.as_mut().ok_or("연결된 데이터베이스가 없습니다.")?;
 
     for line in lines {
@@ -990,7 +1000,7 @@ fn write_mcp_into(config_path: &std::path::Path, entry: &serde_json::Value) -> R
 }
 
 #[tauri::command]
-fn setup_mcp_config() -> Result<String, String> {
+fn setup_mcp_config(host: String, port: u16, user: String, password: String) -> Result<String, String> {
     let mcp_server_path = code_dir().join("mcp").join("mcp_server.py");
 
     if !mcp_server_path.exists() {
@@ -998,9 +1008,20 @@ fn setup_mcp_config() -> Result<String, String> {
     }
 
     let python_path = find_python_with_mcp()?;
+    // mcp_server.py의 접속정보(RUSQL_HOST/PORT/USER/PASS)는 하드코딩 기본값(127.0.0.1:7878,
+    // root/root)만 있었고 이 UI가 실제로 연결 중인 서버의 host/port/계정을 전혀 전달하지
+    // 않아, 기본값과 다른 연결에서는 MCP 도구가 항상 연결/인증에 실패했음. Claude Desktop
+    // 설정의 "env" 필드로 지금 이 세션의 실제 값을 넘겨 mcp_server.py가 그대로 읽어 쓰도록 함
+    // (mcp_server.py 쪽은 env가 없으면 기존 하드코딩 기본값으로 폴백 — 하위 호환 유지).
     let mcp_entry = serde_json::json!({
         "command": python_path,
         "args": ["-u", mcp_server_path.to_string_lossy().as_ref()],
+        "env": {
+            "RUSQL_HOST": host,
+            "RUSQL_PORT": port.to_string(),
+            "RUSQL_USER": user,
+            "RUSQL_PASS": password,
+        },
         "alwaysAllow": [
             "execute_sql", "list_databases", "list_tables", "get_table_schema",
             "explain_query", "get_indexes", "sample_data"
@@ -1069,22 +1090,22 @@ fn open_bench_terminal() {
 
 #[tauri::command]
 fn sync_tab_content(name: String, content: String, state: State<AppState>) {
-    state.ui.tab_content.lock().unwrap().insert(name, content);
+    state.ui.tab_content.lock().unwrap_or_else(|e| e.into_inner()).insert(name, content);
 }
 
 #[tauri::command]
 fn sync_tab_list(names: Vec<String>, state: State<AppState>) {
-    *state.ui.tab_list.lock().unwrap() = names;
+    *state.ui.tab_list.lock().unwrap_or_else(|e| e.into_inner()) = names;
 }
 
 #[tauri::command]
 fn sync_query_result(result: String, state: State<AppState>) {
-    *state.ui.last_result.lock().unwrap() = result;
+    *state.ui.last_result.lock().unwrap_or_else(|e| e.into_inner()) = result;
 }
 
 #[tauri::command]
 fn sync_current_db(db: String, state: State<AppState>) {
-    *state.ui.current_db.lock().unwrap() = db;
+    *state.ui.current_db.lock().unwrap_or_else(|e| e.into_inner()) = db;
 }
 
 #[tauri::command]
@@ -1197,5 +1218,31 @@ mod tests {
         assert!(after["mcpServers"]["RuSQL"].is_object(), "new entry must be added");
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // Regression: every `state.db`/`state.servers`/`state.ui.*` `.lock()` call site used
+    // to be `.lock().unwrap()` -- if any single Tauri command panicked while holding one
+    // of those Mutexes, it would poison it, and every later `.lock().unwrap()` on the
+    // same Mutex would then also panic, permanently bricking every command that touches
+    // shared state until the app was restarted. `.unwrap_or_else(|e| e.into_inner())`
+    // recovers the guard instead. This test proves the *pattern* (not AppState directly,
+    // since its fields aren't independently constructible outside Tauri's own state
+    // machinery) using a plain Mutex poisoned the same way a panicking command would.
+    #[test]
+    fn poisoned_mutex_is_recovered_instead_of_panicking_again() {
+        let m = std::sync::Mutex::new(42);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = m.lock().unwrap_or_else(|e| e.into_inner());
+            panic!("simulated panic while holding the lock");
+        }));
+        assert!(result.is_err(), "the simulated panic should have propagated");
+        assert!(m.is_poisoned(), "the Mutex should now be poisoned");
+
+        // The old `.lock().unwrap()` pattern would panic here on the poisoned Mutex.
+        // `.unwrap_or_else(|e| e.into_inner())` must instead recover the guard.
+        let recovered = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            *m.lock().unwrap_or_else(|e| e.into_inner())
+        }));
+        assert_eq!(recovered.ok(), Some(42), "lock() must recover from poisoning, not panic again");
     }
 }

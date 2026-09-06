@@ -388,6 +388,7 @@ void to_json(nlohmann::json& j, const AggFunc& f) {
             else if constexpr (std::is_same_v<T, AggFunc::BitAnd>) j = "BitAnd";
             else if constexpr (std::is_same_v<T, AggFunc::BitOr>) j = "BitOr";
             else if constexpr (std::is_same_v<T, AggFunc::JsonAgg>) j = "JsonAgg";
+            else if constexpr (std::is_same_v<T, AggFunc::ArrayAgg>) j = "ArrayAgg";
         },
         f.data);
 }
@@ -408,6 +409,7 @@ void from_json(const nlohmann::json& j, AggFunc& f) {
         else if (tag == "BitAnd") f = AggFunc::BitAnd{};
         else if (tag == "BitOr") f = AggFunc::BitOr{};
         else if (tag == "JsonAgg") f = AggFunc::JsonAgg{};
+        else if (tag == "ArrayAgg") f = AggFunc::ArrayAgg{};
         else throw std::runtime_error("unknown AggFunc tag: " + tag);
         return;
     }
@@ -521,13 +523,17 @@ void to_json(nlohmann::json& j, const InsertConflict& ic) {
             if constexpr (std::is_same_v<T, InsertConflict::Abort>) j = "Abort";
             else if constexpr (std::is_same_v<T, InsertConflict::Ignore>) j = "Ignore";
             else if constexpr (std::is_same_v<T, InsertConflict::Update>) j = nlohmann::json{{"Update", alt.assignments}};
+            else if constexpr (std::is_same_v<T, InsertConflict::Replace>) j = "Replace";
         },
         ic.data);
 }
 
 void from_json(const nlohmann::json& j, InsertConflict& ic) {
     if (j.is_string()) {
-        ic = (j.get<std::string>() == "Ignore") ? InsertConflict(InsertConflict::Ignore{}) : InsertConflict(InsertConflict::Abort{});
+        std::string tag = j.get<std::string>();
+        ic = tag == "Ignore" ? InsertConflict(InsertConflict::Ignore{})
+           : tag == "Replace" ? InsertConflict(InsertConflict::Replace{})
+           : InsertConflict(InsertConflict::Abort{});
         return;
     }
     if (j.is_object() && !j.empty() && j.begin().key() == "Update") {

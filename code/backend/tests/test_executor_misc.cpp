@@ -2,6 +2,7 @@
 
 #include "catch.hpp"
 #include "engine/executor/executor.hpp"
+#include "engine/parallel_util.hpp"
 
 using namespace engine;
 namespace fs = std::filesystem;
@@ -478,4 +479,14 @@ TEST_CASE("INFORMATION_SCHEMA.TABLES query is not cached stale across a DROP TAB
     auto after = ex.execute_sql(q);
     REQUIRE(after.is_ok());
     REQUIRE(after.value().find("employee") == std::string::npos);
+}
+
+TEST_CASE("parallel_min_rows() actually honors its env var override", "[executor][misc]") {
+    // Regression test: the env var this function checked used to be literally named
+    // "RUSTDB_parallel_min_rows()" (parens included), which isn't a settable variable
+    // name on any platform -- so the override never took effect and this always fell
+    // through to the CPU-count-based default. Now named RUSTDB_PARALLEL_MIN_ROWS.
+    _putenv_s("RUSTDB_PARALLEL_MIN_ROWS", "12345");
+    REQUIRE(engine::parallel_min_rows() == 12345);
+    _putenv_s("RUSTDB_PARALLEL_MIN_ROWS", ""); // unset for other tests
 }

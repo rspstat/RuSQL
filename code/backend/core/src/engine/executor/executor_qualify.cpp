@@ -212,6 +212,13 @@ Statement Executor::qualify_stmt(const SharedDatabase& s, Statement stmt) const 
         v->table = qualify_name(v->table);
         return stmt;
     }
+    if (auto* v = std::get_if<Statement::LockTables>(&stmt.data)) {
+        // Two sessions naming the same table differently (bare "t" under an active USE vs.
+        // "mydb.t") must resolve to the identical explicit_table_locks key, or LOCK TABLES
+        // coordination silently fails to recognize a real conflict.
+        for (auto& [name, exclusive] : v->tables) { (void)exclusive; name = qualify_name(name); }
+        return stmt;
+    }
     return stmt;
 }
 

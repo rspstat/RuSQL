@@ -207,6 +207,9 @@ Statement Parser::parse_stmt() {
     switch (t->kind) {
         case TokenKind::Select: return parse_select();
         case TokenKind::Insert: return parse_insert();
+        // At statement-start, REPLACE can only mean REPLACE INTO -- the REPLACE(str, from,
+        // to) string function only ever appears inside an expression parse, never here.
+        case TokenKind::Replace: return parse_replace();
         case TokenKind::Update: return parse_update();
         case TokenKind::Delete: return parse_delete();
         case TokenKind::Create: {
@@ -304,6 +307,12 @@ Statement Parser::parse_stmt() {
             }
             if (to_upper(t->text) == "BACKUP") return parse_backup();
             if (to_upper(t->text) == "RESTORE") return parse_restore();
+            if (to_upper(t->text) == "LOCK") return parse_lock_tables();
+            if (to_upper(t->text) == "UNLOCK") {
+                if (!peek_is(TokenKind::Tables)) throw ParseError("Expected TABLES after UNLOCK");
+                advance();
+                return Statement(Statement::UnlockTables{});
+            }
             throw ParseError("Unknown statement: " + t->text);
         }
         case TokenKind::Savepoint: {

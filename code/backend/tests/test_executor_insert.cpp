@@ -332,3 +332,103 @@ TEST_CASE("INSERT into an updatable view redirects to its base table", "[executo
     REQUIRE(via_view.is_ok());
     REQUIRE(table_rows(ex, "company.department").size() == 1);
 }
+
+TEST_CASE("REPLACE INTO with no conflict behaves like a plain INSERT", "[executor][insert][replace]") {
+    TempDataDir dir("exec_insert_data_replace_1");
+    Executor ex(dir.path);
+    REQUIRE(ex.execute_sql("CREATE DATABASE company").is_ok());
+    REQUIRE(ex.execute_sql("USE company").is_ok());
+    REQUIRE(ex.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, name VARCHAR(50))").is_ok());
+
+    auto r = ex.execute_sql("REPLACE INTO t VALUES (1, 'alice')");
+    REQUIRE(r.is_ok());
+    REQUIRE(r.value() == "1 row(s) inserted.");
+    auto rows = table_rows(ex, "company.t");
+    REQUIRE(rows.size() == 1);
+    REQUIRE(rows[0].at("name") == "alice");
+}
+
+TEST_CASE("REPLACE INTO deletes the conflicting row on a PRIMARY KEY collision", "[executor][insert][replace]") {
+    TempDataDir dir("exec_insert_data_replace_2");
+    Executor ex(dir.path);
+    REQUIRE(ex.execute_sql("CREATE DATABASE company").is_ok());
+    REQUIRE(ex.execute_sql("USE company").is_ok());
+    REQUIRE(ex.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, name VARCHAR(50))").is_ok());
+    REQUIRE(ex.execute_sql("INSERT INTO t VALUES (1, 'alice'), (2, 'bob')").is_ok());
+
+    auto r = ex.execute_sql("REPLACE INTO t VALUES (1, 'carol')");
+    REQUIRE(r.is_ok());
+    auto rows = table_rows(ex, "company.t");
+    REQUIRE(rows.size() == 2); // (1,'alice') replaced, (2,'bob') untouched -- not 3 rows
+    bool found_carol = false, found_bob = false;
+    for (auto& row : rows) {
+        if (row.at("id") == "1") { found_carol = true; REQUIRE(row.at("name") == "carol"); }
+        if (row.at("id") == "2") found_bob = true;
+    }
+    REQUIRE(found_carol);
+    REQUIRE(found_bob);
+}
+
+TEST_CASE("REPLACE INTO deletes the conflicting row on a non-PK UNIQUE collision", "[executor][insert][replace]") {
+    // The conflicting row's PK need not match the new row's PK at all -- REPLACE INTO
+    // matches on ANY PK/UNIQUE column, then deletes whichever physical row that was.
+    TempDataDir dir("exec_insert_data_replace_3");
+    Executor ex(dir.path);
+    REQUIRE(ex.execute_sql("CREATE DATABASE company").is_ok());
+    REQUIRE(ex.execute_sql("USE company").is_ok());
+    REQUIRE(ex.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, name VARCHAR(50), UNIQUE(name))").is_ok());
+    REQUIRE(ex.execute_sql("INSERT INTO t VALUES (1, 'alice'), (2, 'bob')").is_ok());
+
+    auto r = ex.execute_sql("REPLACE INTO t (id, name) VALUES (3, 'bob')");
+    REQUIRE(r.is_ok());
+    auto rows = table_rows(ex, "company.t");
+    REQUIRE(rows.size() == 2); // old (2,'bob') gone, new (3,'bob') present, (1,'alice') untouched
+    bool found_alice = false, found_new_bob = false, found_old_bob = false;
+    for (auto& row : rows) {
+        if (row.at("id") == "1") found_alice = true;
+        if (row.at("id") == "2") found_old_bob = true;
+        if (row.at("id") == "3") { found_new_bob = true; REQUIRE(row.at("name") == "bob"); }
+    }
+    REQUIRE(found_alice);
+    REQUIRE(found_new_bob);
+    REQUIRE_FALSE(found_old_bob);
+}
+
+TEST_CASE("REPLACE INTO respects a table-level composite PRIMARY KEY", "[executor][insert][replace]") {
+    TempDataDir dir("exec_insert_data_replace_4");
+    Executor ex(dir.path);
+    REQUIRE(ex.execute_sql("CREATE DATABASE company").is_ok());
+    REQUIRE(ex.execute_sql("USE company").is_ok());
+    REQUIRE(ex.execute_sql("CREATE TABLE t (a INT, b INT, val VARCHAR(50), PRIMARY KEY (a, b))").is_ok());
+    REQUIRE(ex.execute_sql("INSERT INTO t VALUES (1, 1, 'orig'), (1, 2, 'other')").is_ok());
+
+    // (1,2) doesn't match the composite key (1,1) -- must NOT be deleted.
+    auto r = ex.execute_sql("REPLACE INTO t VALUES (1, 1, 'replaced')");
+    REQUIRE(r.is_ok());
+    auto rows = table_rows(ex, "company.t");
+    REQUIRE(rows.size() == 2);
+    bool found_replaced = false, found_other = false;
+    for (auto& row : rows) {
+        if (row.at("a") == "1" && row.at("b") == "1") { found_replaced = true; REQUIRE(row.at("val") == "replaced"); }
+        if (row.at("a") == "1" && row.at("b") == "2") found_other = true;
+    }
+    REQUIRE(found_replaced);
+    REQUIRE(found_other);
+}
+
+TEST_CASE("REPLACE INTO ... SELECT replaces conflicting rows from a query source", "[executor][insert][replace]") {
+    TempDataDir dir("exec_insert_data_replace_5");
+    Executor ex(dir.path);
+    REQUIRE(ex.execute_sql("CREATE DATABASE company").is_ok());
+    REQUIRE(ex.execute_sql("USE company").is_ok());
+    REQUIRE(ex.execute_sql("CREATE TABLE src (id INT PRIMARY KEY, name VARCHAR(50))").is_ok());
+    REQUIRE(ex.execute_sql("INSERT INTO src VALUES (1, 'fresh')").is_ok());
+    REQUIRE(ex.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, name VARCHAR(50))").is_ok());
+    REQUIRE(ex.execute_sql("INSERT INTO t VALUES (1, 'stale')").is_ok());
+
+    auto r = ex.execute_sql("REPLACE INTO t (id, name) SELECT id, name FROM src");
+    REQUIRE(r.is_ok());
+    auto rows = table_rows(ex, "company.t");
+    REQUIRE(rows.size() == 1);
+    REQUIRE(rows[0].at("name") == "fresh");
+}

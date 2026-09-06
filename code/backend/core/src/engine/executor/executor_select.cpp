@@ -129,6 +129,7 @@ std::string debug_agg_func_dual(const AggFunc& func) {
     if (std::holds_alternative<AggFunc::BitAnd>(func.data)) return "BitAnd";
     if (std::holds_alternative<AggFunc::BitOr>(func.data)) return "BitOr";
     if (std::holds_alternative<AggFunc::JsonAgg>(func.data)) return "JsonAgg";
+    if (std::holds_alternative<AggFunc::ArrayAgg>(func.data)) return "ArrayAgg";
     return "";
 }
 } // namespace
@@ -172,6 +173,7 @@ std::string Executor::agg_label(const AggFunc& func, const std::string& col) {
     if (std::holds_alternative<AggFunc::BitAnd>(func.data)) return "BIT_AND(" + col + ")";
     if (std::holds_alternative<AggFunc::BitOr>(func.data)) return "BIT_OR(" + col + ")";
     if (std::holds_alternative<AggFunc::JsonAgg>(func.data)) return "JSON_AGG(" + col + ")";
+    if (std::holds_alternative<AggFunc::ArrayAgg>(func.data)) return "ARRAY_AGG(" + col + ")";
     return "";
 }
 
@@ -300,7 +302,11 @@ Row Executor::compute_aggregates(const std::vector<Row>& grp, const std::vector<
             out[label] = joined;
             continue;
         }
-        if (std::holds_alternative<AggFunc::JsonAgg>(func->data)) {
+        if (std::holds_alternative<AggFunc::JsonAgg>(func->data) || std::holds_alternative<AggFunc::ArrayAgg>(func->data)) {
+            // ARRAY_AGG shares JSON_AGG's exact implementation -- this engine has no
+            // distinct array storage type, so both render as a JSON array text value;
+            // ArrayAgg only exists as its own AggFunc alternative so labels/EXPLAIN stay
+            // faithful to what the user actually wrote.
             nlohmann::json arr = nlohmann::json::array();
             for (auto& r : grp) {
                 auto it = r.find(col_name);
@@ -558,13 +564,19 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
             return "";
         };
 
+        // Escape headers/cells up front (widths below are computed on the escaped form,
+        // matching the visual padding actually written) -- see Executor::escape_cell.
+        std::vector<std::string> headers;
+        headers.reserve(col_defs.size());
+        for (auto& cd : col_defs) headers.push_back(escape_cell(cd.header));
+
         std::vector<std::string> vals;
         vals.reserve(col_defs.size());
-        for (auto& cd : col_defs) vals.push_back(eval_col_val(*cd.col));
+        for (auto& cd : col_defs) vals.push_back(escape_cell(eval_col_val(*cd.col)));
 
         std::vector<std::size_t> widths;
         widths.reserve(col_defs.size());
-        for (std::size_t i = 0; i < col_defs.size(); i++) widths.push_back(std::max(col_defs[i].header.size(), vals[i].size()));
+        for (std::size_t i = 0; i < col_defs.size(); i++) widths.push_back(std::max(headers[i].size(), vals[i].size()));
 
         std::string sep;
         for (auto w : widths) sep += "+" + std::string(w + 2, '-');
@@ -572,7 +584,7 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
 
         std::string hdr;
         for (std::size_t i = 0; i < col_defs.size(); i++) {
-            hdr += "| " + col_defs[i].header + std::string(widths[i] - col_defs[i].header.size(), ' ') + " ";
+            hdr += "| " + headers[i] + std::string(widths[i] - headers[i].size(), ' ') + " ";
         }
         hdr += "|";
 
@@ -1295,7 +1307,9 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
             else if (auto* agg_a = std::get_if<SelectColumn::AggAlias>(&col.data)) label = agg_a->alias;
             else continue;
             auto it = agg_row.find(label);
-            agg_results.emplace_back(label, it != agg_row.end() ? it->second : std::string());
+            // Escaped up front (widths below are computed on the escaped form, matching
+            // the visual padding actually written) -- see Executor::escape_cell.
+            agg_results.emplace_back(escape_cell(label), escape_cell(it != agg_row.end() ? it->second : std::string()));
         }
         std::vector<std::size_t> widths;
         widths.reserve(agg_results.size());
@@ -1705,16 +1719,21 @@ StringResult Executor::format_result(SharedDatabase& s, std::vector<Row> result,
                     break;
                 }
             }
-            vals.push_back(raw == EXECUTOR_NULL_VALUE ? "NULL" : raw);
+            // Escaped up front (widths below are computed on the escaped form, matching
+            // the visual padding actually written) -- see Executor::escape_cell.
+            vals.push_back(escape_cell(raw == EXECUTOR_NULL_VALUE ? "NULL" : raw));
         }
         resolved_rows.push_back(std::move(vals));
     }
+
+    std::vector<std::string> headers(col_defs.size());
+    for (std::size_t i = 0; i < col_defs.size(); i++) headers[i] = escape_cell(col_defs[i].first);
 
     std::vector<std::size_t> col_widths(col_defs.size());
     for (std::size_t i = 0; i < col_defs.size(); i++) {
         std::size_t max_val = 0;
         for (auto& row_vals : resolved_rows) max_val = std::max(max_val, row_vals[i].size());
-        col_widths[i] = std::max(col_defs[i].first.size(), max_val);
+        col_widths[i] = std::max(headers[i].size(), max_val);
     }
 
     std::string separator = "+";
@@ -1722,7 +1741,7 @@ StringResult Executor::format_result(SharedDatabase& s, std::vector<Row> result,
 
     std::string output = separator + "\n|";
     for (std::size_t i = 0; i < col_defs.size(); i++) {
-        output += " " + col_defs[i].first + std::string(col_widths[i] - col_defs[i].first.size(), ' ') + " |";
+        output += " " + headers[i] + std::string(col_widths[i] - headers[i].size(), ' ') + " |";
     }
     output += "\n" + separator + "\n";
     for (auto& row_vals : resolved_rows) {

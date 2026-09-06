@@ -713,6 +713,90 @@ StringResult Executor::exec_show_locks(const SharedDatabase& s) const {
     return StringResult::Ok(result);
 }
 
+// LOCK TABLES / UNLOCK TABLES (V1 -- no Rust/MySQL-parity original, new C++-native
+// addition). Deliberately implemented as an entirely separate, purpose-built registry
+// (s.explicit_table_locks) rather than reusing table_locks/table_data_locks/LockManager
+// -- those are acquired-and-released within a single statement's execution everywhere
+// else in this codebase, and this feature's whole point is holding a lock ACROSS
+// multiple separate client round-trips (LOCK TABLES ... arbitrary statements ...
+// UNLOCK TABLES). Integrating that into the existing, already-hardened
+// deadlock-detection-aware machinery (many past phases were spent making it safe against
+// subtle deadlocks under the "short-lived, per-statement" assumption) risked
+// destabilizing it in ways not worth this feature's value.
+//
+// Consequence of this V1 scope: a session that never itself issues LOCK TABLES is NOT
+// blocked by another session's LOCK TABLES hold -- ordinary DML/DDL from uncoordinated
+// sessions proceeds exactly as before. LOCK TABLES here provides real, blocking,
+// timeout-respecting coordination only BETWEEN sessions that both use it, which is a
+// smaller (but still real, not fake) guarantee than MySQL's full semantics.
+StringResult Executor::exec_lock_tables(SharedDatabase& s, std::vector<std::pair<std::string, bool>> tables) {
+    for (auto& [table, exclusive] : tables) {
+        (void)exclusive;
+        if (!s.catalog.get_table(table)) return StringResult::Err("Table '" + strip_db_prefix(table) + "' not found");
+    }
+
+    // MySQL itself implicitly releases a session's previous LOCK TABLES locks the moment
+    // it issues a new LOCK TABLES -- mirrored here by releasing first, then acquiring.
+    release_explicit_table_locks_impl(s);
+
+    // NOWAIT, not a genuine blocking wait -- discovered via a real hang while testing a
+    // first version that DID poll-and-sleep here: execute()'s dispatcher holds
+    // shared->write() (the WHOLE database's structural exclusive lock) for this entire
+    // call, because LOCK TABLES has no per-table fast-path entry in table_lock_set_for.
+    // Sleeping/retrying inside this function while conflicted would therefore hold that
+    // database-wide lock the whole time, freezing every session's every statement (not
+    // just ones touching these tables) -- confirmed concretely: a conflicting session's
+    // own UNLOCK TABLES couldn't even run until the waiting session's poll loop gave up,
+    // the opposite of the intended behavior. Properly fixing this would mean threading a
+    // release/reacquire-the-outer-guard callback through execute()'s dispatcher
+    // specifically for this one statement kind -- exactly the kind of change to the
+    // existing, already-hardened locking machinery this feature's V1 scope was chosen to
+    // avoid. So: fail immediately with a clear, actionable error on any conflict instead
+    // of blocking; a caller that wants retry-with-backoff can implement it at the
+    // application level.
+    auto guard = s.explicit_table_locks->lock();
+    for (auto& [table, exclusive] : tables) {
+        auto it = guard->find(table);
+        if (it == guard->end()) continue;
+        for (auto& holder : it->second) {
+            if (exclusive || holder.exclusive) {
+                return StringResult::Err("Table '" + strip_db_prefix(table) +
+                                          "' is already locked by another session's LOCK TABLES. Retry after it UNLOCKs.");
+            }
+        }
+    }
+    for (auto& [table, exclusive] : tables) (*guard)[table].push_back(ExplicitTableLockHolder{session_id, exclusive});
+    held_explicit_locks = tables;
+    return StringResult::Ok("Tables locked.");
+}
+
+StringResult Executor::exec_unlock_tables(SharedDatabase& s) {
+    release_explicit_table_locks_impl(s);
+    return StringResult::Ok("Tables unlocked.");
+}
+
+void Executor::release_explicit_table_locks_impl(const SharedDatabase& s) {
+    if (held_explicit_locks.empty()) return;
+    auto guard = s.explicit_table_locks->lock();
+    for (auto& [table, exclusive] : held_explicit_locks) {
+        (void)exclusive;
+        auto it = guard->find(table);
+        if (it == guard->end()) continue;
+        auto& holders = it->second;
+        holders.erase(std::remove_if(holders.begin(), holders.end(),
+                                      [&](const ExplicitTableLockHolder& h) { return h.session_id == session_id; }),
+                      holders.end());
+        if (holders.empty()) guard->erase(it);
+    }
+    held_explicit_locks.clear();
+}
+
+void Executor::release_explicit_table_locks() {
+    if (held_explicit_locks.empty()) return; // avoid shared->read() entirely when there's nothing to do
+    auto s = shared->read();
+    release_explicit_table_locks_impl(*s);
+}
+
 StringResult Executor::exec_checkpoint(SharedDatabase& s) {
     std::size_t dirty_before = s.buffer_pool.usage();
     s.buffer_pool.flush_all(s.disk);

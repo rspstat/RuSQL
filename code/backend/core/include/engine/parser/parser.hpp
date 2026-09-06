@@ -100,6 +100,7 @@ private:
 
     Statement parse_select();
     Statement parse_insert();
+    Statement parse_replace();
     Statement parse_update();
     Statement parse_delete();
 
@@ -136,6 +137,7 @@ private:
     Statement parse_restore();
     Statement parse_show();
     Statement parse_set();
+    Statement parse_lock_tables();
     Statement parse_prepare();
     Statement parse_execute();
     Statement parse_deallocate();

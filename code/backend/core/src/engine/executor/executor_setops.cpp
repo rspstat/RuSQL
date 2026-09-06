@@ -80,27 +80,32 @@ void Executor::apply_set_postprocess(std::vector<Row>& result, const std::vector
 std::string Executor::format_set_result(const std::vector<std::string>& cols, const std::vector<Row>& result) {
     if (result.empty()) return "0 rows returned.";
 
+    // Escape headers/cells up front (widths below are computed on the escaped form,
+    // matching the visual padding actually written) -- see Executor::escape_cell.
+    std::vector<std::string> headers(cols.size());
+    for (std::size_t i = 0; i < cols.size(); i++) headers[i] = escape_cell(cols[i]);
+
     std::vector<std::size_t> col_widths(cols.size());
     for (std::size_t i = 0; i < cols.size(); i++) {
         std::size_t max_val = 0;
         for (auto& row : result) {
             auto it = row.find(cols[i]);
-            if (it != row.end()) max_val = std::max(max_val, it->second.size());
+            if (it != row.end()) max_val = std::max(max_val, escape_cell(it->second).size());
         }
-        col_widths[i] = std::max(cols[i].size(), max_val);
+        col_widths[i] = std::max(headers[i].size(), max_val);
     }
 
     std::string sep = "+";
     for (auto w : col_widths) sep += std::string(w + 2, '-') + "+";
 
     std::string out = sep + "\n|";
-    for (std::size_t i = 0; i < cols.size(); i++) out += " " + cols[i] + std::string(col_widths[i] - cols[i].size(), ' ') + " |";
+    for (std::size_t i = 0; i < cols.size(); i++) out += " " + headers[i] + std::string(col_widths[i] - headers[i].size(), ' ') + " |";
     out += "\n" + sep + "\n";
     for (auto& row : result) {
         out += "|";
         for (std::size_t i = 0; i < cols.size(); i++) {
             auto it = row.find(cols[i]);
-            std::string v = it != row.end() ? (it->second == EXECUTOR_NULL_VALUE ? "NULL" : it->second) : std::string();
+            std::string v = it != row.end() ? (it->second == EXECUTOR_NULL_VALUE ? "NULL" : escape_cell(it->second)) : std::string();
             out += " " + v + std::string(col_widths[i] - v.size(), ' ') + " |";
         }
         out += "\n";

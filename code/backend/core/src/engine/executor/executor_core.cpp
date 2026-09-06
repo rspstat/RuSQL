@@ -361,6 +361,7 @@ Executor::Executor(const std::string& dir, std::size_t buffer_pool_capacity) {
         .active_txn_ids = std::make_shared<Mutex<std::unordered_set<std::uint64_t>>>(),
         .table_locks = std::move(table_locks),
         .table_data_locks = std::move(table_data_locks),
+        .explicit_table_locks = std::make_shared<Mutex<std::unordered_map<std::string, std::vector<ExplicitTableLockHolder>>>>(),
     };
 
     shared = std::make_shared<RwLock<SharedDatabase>>(std::move(db_value));
@@ -1256,6 +1257,8 @@ StringResult Executor::execute_with_s(SharedDatabase& s, Statement stmt) {
     if (auto* v = std::get_if<Statement::SetIsolationLevel>(&stmt.data)) return exec_set_isolation_level(v->level);
     if (std::holds_alternative<Statement::ShowIsolationLevel>(stmt.data)) return exec_show_isolation_level();
     if (std::holds_alternative<Statement::ShowLocks>(stmt.data)) return exec_show_locks(s);
+    if (auto* v = std::get_if<Statement::LockTables>(&stmt.data)) return exec_lock_tables(s, v->tables);
+    if (std::holds_alternative<Statement::UnlockTables>(stmt.data)) return exec_unlock_tables(s);
 
     if (auto* v = std::get_if<Statement::CreateTable>(&stmt.data))
         return exec_create(s, v->name, v->columns, v->if_not_exists, v->primary_key_columns, v->check_constraints, v->partition_by);

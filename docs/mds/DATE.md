@@ -160,6 +160,61 @@ Debug+Release **377 케이스/22,506 assertions** 전부 통과, `test_full.sql`
 
 Debug+Release **378 케이스/22,514 assertions** 전부 통과, `test_full.sql`/`test_full-ver2.sql`을 `engine_cli.exe`로 양쪽 설정 모두 재검증 완료.
 
+### 9월 6일 — Phase 46: App.tsx UI 섹션 분리 리팩터링
+
+AI 방향을 제외하고 남은 엔진/프런트/서버/성능 개선 항목을 순서대로 진행하기로 함(사용자 승인) — 그 1번인 App.tsx(4231줄 단일 컴포넌트) 리팩터링. 실제 코드를 열어 상태 결합도를 재확인한 뒤 리팩터링 범위를 사전 확정: 전체 재작성이나 Redux/Zustand 같은 상태관리 라이브러리 도입은 이번 스코프에서 배제하고, "UI 섹션만 컴포넌트로 분리, 상태는 App.tsx에 그대로 유지"로 결정. 그중에서도 사이드바/다이얼로그/컨텍스트메뉴/ERD 뷰(거의 순수 프레젠테이션)만 1차로 분리하고, 에디터·탭바·결과패널(Monaco 에디터 ref·쿼리 실행·split-view 드래그 상태와 가장 깊게 얽혀있어 정확성 리스크가 큼)은 이번 라운드에서 의도적으로 제외.
+
+신규 파일: `src/types.ts`(공유 인터페이스), `src/lib/erd.ts`(ERD 순수 레이아웃 계산 헬퍼), `src/lib/measureText.ts`(캔버스 텍스트 측정, 결과 표/ERD 데이터 패널 공유), `src/components/Sidebar.tsx`·`ErdView.tsx`·`ConfirmDialog.tsx`·`EditTableModal.tsx`·`ContextMenus.tsx`(DB/테이블/뷰/인덱스 4종 우클릭 메뉴를 한 파일에 묶음). 전부 동작 변경 없는 순수 이동(로직 그대로, JSX와 지역 클로저만 이전) — App.tsx가 4231줄 → 3332줄로 약 21% 감소.
+
+**검증**: `tsc --noEmit`(strict + noUnusedLocals 전부 켜진 채로 클린) → `vite build` 클린 → 실제 앱을 재빌드·재실행해 WebView2 CDP 드라이버로 사이드바 펼치기, DB/테이블 우클릭 메뉴, Edit Table 모달, DROP Table→ConfirmDialog→실제 삭제 후 사이드바 즉시 갱신, ERD 뷰(FK 있는 2테이블 카드 렌더링)까지 전부 라이브 재현·확인. 이 라이브 검증 과정에서 Phase 45 정보-스키마 캐시 수정이 실제로 살아있는 서버에서도 동작함을 재확인(사이드바가 DROP 직후 즉시 갱신됨), 그리고 별개의 새 버그도 발견 — `get_columns_detail` Tauri 커맨드가 FK 컬럼의 `fk_ref`를 인라인/테이블 레벨 선언 방식과 무관하게 항상 null로 반환해(엔진 자체는 `SHOW CREATE TABLE`로 확인한 대로 FK를 정확히 저장 중 — 조회 커맨드만의 누락) 사이드바 Foreign Keys 섹션과 ERD 관계선이 항상 비어 보이는 증상으로 이어짐 — 이번 스코프 밖이라 원인 위치만 특정해 기록, 미수정.
+
+(같은 세션, 아직 커밋 전)
+
+### 9월 6일 — Phase 47: 내부 쿼리 합성 ASCII 재파싱 방식의 값-손상 버그 수정
+
+두 번째로 진행한 항목. UNION/CTE/서브쿼리/LATERAL/파티션 자식 라우팅 등이 실행 결과를 사람이 보는 ASCII 표 문자열로 만든 뒤 다시 `\|`/개행으로 split해서 `Row`로 복원하는 구조(`parse_table_output`, 13개 호출부가 공유)라, 값 안에 실제 `\|`나 개행이 있으면 셀 경계를 잘못 잡아 값 뒷부분이 조용히 잘리거나 줄 경계 자체가 깨지는 문제. 조사 결과 표를 만드는 코드 자체가 `executor_select.cpp` 3곳(스칼라 `_dual_` SELECT/집계 SELECT/일반 SELECT)·`executor_setops.cpp`·`executor_infoschema.cpp`에 흩어져 있어, "구조화된 내부 API로 완전 교체"는 예상보다 훨씬 큰 작업임을 재확인 — 대신 두 지점(표 생성 + 재파싱)에 이스케이프를 추가하는 낮은 리스크 수정으로 진행. 신규 `Executor::escape_cell`을 5개 표-생성 지점 전부에 적용, `parse_table_output`은 이스케이프 인식 스캐너 + unescape 쌍 추가. UNION(`\|` 포함 값)·CTE(개행 포함 값) 회귀 테스트 2건 신규 추가, 나머지 3개 지점은 `engine_cli.exe`로 라이브 확인(`SELECT 'a|b'`, `GROUP_CONCAT`, `information_schema.tables` 전부 정확히 이스케이프되어 표시·보존됨).
+
+Debug+Release **380 케이스/22,530 assertions** 전부 통과, `test_full.sql`/`test_full-ver2.sql` 양쪽 설정 재검증 완료.
+
+### 9월 6일 — Phase 48: mcp_server.py 접속정보 하드코딩 + 재시도 부재 수정
+
+세 번째로 진행한 항목. `mcp_server.py`의 접속정보(host/port/계정)가 모듈 상수로 고정돼 있고, 이를 Claude Desktop에 등록하는 `main.rs`의 `setup_mcp_config`도 실제 접속 중인 서버 정보를 전혀 전달하지 않아 기본값(127.0.0.1:7878, root/root)과 다른 서버에서는 MCP 도구가 항상 실패하던 문제. `mcp_server.py`는 환경변수(`RUSQL_HOST`/`PORT`/`USER`/`PASS`, 없으면 기존 기본값 폴백)를 읽도록, `setup_mcp_config`는 매개변수로 받은 실제 접속정보를 Claude Desktop 설정의 `"env"` 필드에 실어 보내도록 수정 — 프런트의 "Auto-connect Claude Desktop" 버튼이 같은 Server Manager 탭의 기존 포트/계정 입력 필드를 그대로 전달. 재시도 부재는 `_Conn.__init__`에 0.5초 간격 최대 3회 재시도 추가(서버가 막 재시작된 순간의 일시적 연결 실패 흡수).
+
+`cargo build --release`/`cargo test`(기존 write_mcp_into 테스트 2건 포함)/`tsc --noEmit` 전부 클린. 실제 Python으로 env var 오버라이드·재시도 타임아웃·실제 `engine_server.exe` 상대 연결/인증/쿼리 실행까지 라이브 검증 완료(성공 경로는 0.022초, 불필요한 재시도 없음). 실제 앱을 띄워 "Auto-connect Claude Desktop" 버튼도 라이브 검증 — 기본값(root/root)으로 클릭 시 `claude_desktop_config.json`에 `"env"` 필드가 정확히 기록되는지, 폼의 사용자명을 "bob"으로 바꾼 뒤 재클릭하면 `RUSQL_USER`가 실제로 "bob"으로 갱신되는지(하드코딩이 아니라 진짜 동적으로 반영됨) 둘 다 확인.
+
+### 9월 6일 — Phase 49: Mutex unwrap→패닉 전파 수정 (main.rs)
+
+네 번째로 진행한 항목. `state.db`/`state.servers`/`state.ui.*` Mutex에 대한 `.lock().unwrap()` 24곳(실제로 세어보니 PLAN.md의 "52곳"은 부정확했음, 전부 `.write()`/`.read()`가 아닌 `.lock()`) — 어느 한 Tauri 커맨드가 이 Mutex를 잡은 채 패닉하면 poison되고, 이후 같은 Mutex를 쓰는 모든 커맨드가 전부 패닉해 사실상 앱 전체가 재시작 전까지 먹통이 됨. 24곳 전부 `.lock().unwrap_or_else(\|e\| e.into_inner())`로 일괄 교체(poison 여부와 무관하게 guard 복구 — 실제 데이터는 별도 `engine_server` 프로세스에 있어 "가용성"이 맞는 트레이드오프). `AppState` 옆에 이유를 설명하는 주석 추가, poison-recovery 자체를 증명하는 유닛테스트 신규 추가(평범한 Mutex를 일부러 패닉으로 poison시킨 뒤 실제로 복구되는지 확인).
+
+`cargo build --release`/`cargo test`(기존 2건 + 신규 1건, 총 3건)/`tsc --noEmit` 전부 클린.
+
+### 9월 6일 — Phase 50: 병렬 임계값 환경변수 오타 수정
+
+다섯 번째로 진행한 항목(가장 낮은 우선순위, 기본 동작 자체엔 영향 없음). `parallel_min_rows()`가 확인하던 환경변수 이름이 `RUSTDB_parallel_min_rows()`처럼 괄호가 포함돼 있어 애초에 어떤 플랫폼에서도 설정 불가능했음 — `RUSTDB_PARALLEL_MIN_ROWS`로 수정(기존 `parallel_enabled()`의 `RUSTDB_PARALLEL` 네이밍과 통일). 실제로 설정 시 값이 반영되는지 확인하는 유닛 테스트 신규 추가.
+
+Debug+Release **381 케이스/22,531 assertions** 전부 통과.
+
+### 9월 6일 — Phase 51: 6번 항목(신규 SQL 기능) 중 가치 높은 2개 진행 — ARRAY_AGG, REPLACE INTO
+
+6번 항목(LOCK TABLES/REPLACE INTO/표현식·부분·내림차순 인덱스/ARRAY_AGG·PERCENTILE_CONT/CREATE SEQUENCE/열 레벨 권한·이벤트 스케줄러, 6개 묶음)을 전부 진행하는 대신 가치 높은 것만 선택 진행하기로 사용자와 합의 — ARRAY_AGG, REPLACE INTO, LOCK TABLES 3개를 우선순위로 선정.
+
+- **ARRAY_AGG**: 이미 구현된 JSON_AGG와 완전히 동일한 로직(이 엔진엔 배열 타입이 없어 JSON 배열 텍스트로 직렬화)을 공유하는 새 `AggFunc::ArrayAgg` variant 추가 — 렉서/파서/실행기/AST 직렬화 전부 JsonAgg와 대칭으로 확장. 회귀 테스트(숫자/문자열/NULL/GROUP BY) 추가.
+- **REPLACE INTO**: PK/UNIQUE 충돌 시 기존 행을 삭제 후 새 행을 통째로 삽입하는 MySQL 관용구. 기존 `InsertConflict`에 `Replace` variant만 추가해 `Statement::Insert`/`InsertSelect`를 그대로 재사용(새 Statement 타입 불필요) — 가장 delicate한 `exec_insert_inner` 내부는 전혀 안 건드리고, 그 앞단에서 충돌 컬럼마다 실제 `DELETE` 문을 `execute_with_s`로 실행(락·인덱스·트리거 정합성 전부 재사용)한 뒤 원래 INSERT 경로로 넘기는 방식으로 낮은 리스크로 구현. **라이브 테스트 중 실제 버그 발견+수정**: 테이블 레벨 복합 PK `(a,b)`에서 각 컬럼의 `primary_key` 플래그가 개별적으로도 true라는 걸 몰라 컬럼별 순회가 `a=1`만으로 삭제해 다른 행까지 잘못 지워짐 — 복합 PK일 땐 컬럼별 개별 처리를 건너뛰고 AND로 묶은 전용 분기만 타도록 수정. 회귀 테스트 5건(무충돌/단일PK/UNIQUE/복합PK/REPLACE INTO...SELECT) 신규 추가.
+
+Debug+Release **387 케이스/22,591 assertions** 전부 통과(항목 5까지의 381→387, +6건: ARRAY_AGG 1건, REPLACE INTO 5건), `test_full.sql`/`test_full-ver2.sql` 양쪽 설정 재검증 완료. `engine_cli.exe`로 두 기능 모두 실제 시나리오 라이브 확인.
+
+### 9월 6일 — Phase 52: LOCK TABLES / UNLOCK TABLES (V1) — 라이브 테스트로 설계를 한 번 뒤집은 사례
+
+3번째로 선정한 항목. 여러 문장에 걸쳐 잠금을 들고 있어야 하는 LOCK TABLES의 특성상, 기존 `table_locks`/`table_data_locks`/`LockManager`(전부 "한 문장 실행 동안만" 전제로 여러 단계에 걸쳐 하드닝됨)와는 완전히 분리된 전용 레지스트리로 구현하기로 사용자와 사전 합의 — V1 스코프: 세션간 LOCK TABLES끼리만 상호 조율, LOCK TABLES를 안 쓰는 세션의 평범한 DML엔 영향 없음.
+
+처음엔 "진짜 블로킹 대기"(폴링+sleep)로 구현하고 멀티스레드 Catch2 테스트까지 작성했는데, 실행해보니 테스트가 수십 초씩 걸리며 실패 — 원인 추적 결과, `execute()`의 최상위 디스패처가 LOCK TABLES 문장 실행 내내 데이터베이스 전체의 구조적 배타 락(`shared->write()`)을 잡고 있어서, 그 안에서 폴링하며 sleep하는 동안 **다른 모든 세션의 모든 문장이 멈춰버리는** 심각한 문제였음 — 충돌 중이던 세션 자신의 UNLOCK TABLES조차 대기 세션의 폴링이 끝날 때까지 실행이 안 되는 것까지 직접 확인. 이걸 제대로 고치려면 `execute()`의 락 획득 전략 자체를 바꿔야 하는데, 그건 이번 V1의 스코프를 좁힌 이유(기존 하드닝된 락 코드 비침습)와 정면으로 충돌하는 선택 — 그래서 **NOWAIT 방식으로 재설계**: 충돌 시 즉시 명확한 에러로 실패, 재시도는 애플리케이션 레벨에 맡김. 대기 로직 자체가 없어져 문제가 원천 차단됨.
+
+AST에 `Statement::LockTables`/`UnlockTables` 신규 추가, `LOCK`/`UNLOCK`/`READ`/`WRITE`는 `BACKUP`/`RESTORE`와 동일하게 전용 예약어 없이 문맥상 식별자 텍스트로만 인식(실제 컬럼/테이블명과의 충돌 방지). 연결 종료 시 자동 해제도 `deregister_process()`와 동일한 명시적 호출 컨벤션으로 서버의 5개 연결종료 지점에 추가. 실제 멀티스레드(`Executor::new_session`) 테스트 5건 신규.
+
+Debug+Release **392 케이스/22,635 assertions** 전부 통과(+5). `engine_cli.exe`로 기본 문법 라이브 확인.
+
+(같은 세션, 아직 커밋 전)
+
 ---
 
 ## 요약: 1학기 대비 2학기에 달라진 것

@@ -429,6 +429,7 @@ void handle_client(SOCKET sock, std::shared_ptr<RwLock<SharedDatabase>> shared, 
             double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
             if (!send_response(sock, status, output, elapsed)) {
                 exec.deregister_process();
+                exec.release_explicit_table_locks(); // LOCK TABLES V1 -- release on disconnect
                 cleanup_and_return();
                 return;
             }
@@ -436,6 +437,7 @@ void handle_client(SOCKET sock, std::shared_ptr<RwLock<SharedDatabase>> shared, 
     }
 
     exec.deregister_process();
+    exec.release_explicit_table_locks(); // LOCK TABLES V1 -- release on disconnect
     std::size_t remaining = client_count->fetch_sub(1) - 1;
     log("Client disconnected: " + peer + " (remaining: " + std::to_string(remaining) + ")");
 }
