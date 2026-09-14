@@ -667,7 +667,7 @@ fn get_columns_detail(table: String, state: State<AppState>) -> Vec<ColumnDetail
     // UNIQUE 여부는 information_schema.columns의 COLUMN_KEY로 보강
     let uniq_sql = format!(
         "SELECT column_name, column_key FROM information_schema.columns WHERE table_schema='{}' AND table_name='{}';",
-        db.to_lowercase().replace('\'', "''"), bare.to_lowercase().replace('\'', "''")
+        db.to_lowercase().replace('\'', "''"), bare.replace('\'', "''")
     );
     let mut unique_cols: std::collections::HashSet<String> = std::collections::HashSet::new();
     if let Ok((true, body, _)) = send_one(conn, &uniq_sql) {
@@ -684,7 +684,7 @@ fn get_columns_detail(table: String, state: State<AppState>) -> Vec<ColumnDetail
     // FK 참조는 information_schema.key_column_usage로 보강
     let fk_sql = format!(
         "SELECT column_name, referenced_table_name, referenced_column_name FROM information_schema.key_column_usage WHERE table_schema='{}' AND table_name='{}';",
-        db.to_lowercase().replace('\'', "''"), bare.to_lowercase().replace('\'', "''")
+        db.to_lowercase().replace('\'', "''"), bare.replace('\'', "''")
     );
     let mut fk_map: HashMap<String, String> = HashMap::new();
     if let Ok((true, body, _)) = send_one(conn, &fk_sql) {

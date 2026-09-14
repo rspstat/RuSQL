@@ -248,6 +248,14 @@ Phase 46~52(App.tsx 리팩터링부터 LOCK TABLES까지 6개 항목 전부)를 
 
 정리 후 전체 재검증: C++ Debug+Release Catch2(392/22,635, 둘 다 통과) + `engine_cli.exe` 스모크 테스트, 프런트 `tsc`/`vite build`, `cargo build --release`/`cargo test --release`(3/3) 전부 클린.
 
+### 9월 14일 — Phase 46에서 발견만 하고 미뤄뒀던 `get_columns_detail`의 `fk_ref` null 버그 진짜 원인 특정 + 수정
+
+사용자가 "null 버그 같은 게 있는 것 같다"고 막연히 언급 — Phase 46에서 발견했지만 원인 위치까지만 특정하고 수정은 미뤄뒀던 그 버그(사이드바 FK 섹션·ERD 관계선이 항상 비어 보임)로 추정하고 재조사.
+
+`engine_cli.exe`로 직접 재현하며 진짜 원인을 찾음: 엔진은 **데이터베이스 이름은 소문자로 정규화해 저장하지만 테이블 이름은 입력한 대소문자를 그대로 보존**한다(`executor_infoschema.cpp`의 `columns`/`key_column_usage` 정보 스키마 뷰 둘 다 확인). 그런데 `main.rs`의 `get_columns_detail`이 UNIQUE/FK 메타데이터를 보강 조회하는 `uniq_sql`/`fk_sql` 두 곳 모두 테이블명까지 `.to_lowercase()`로 강제 변환한 뒤 `WHERE table_name='...'`로 비교하고 있어서, 테이블명에 대문자가 하나라도 있으면(`Child`, `Employee` 등 흔한 파스칼/카멜케이스 관례) 절대 매칭이 안 되어 조용히 0행이 반환되고 `fk_ref`/`is_unique`가 항상 비어버림 — Phase 46 당시 테스트에 쓴 테이블명이 소문자였다면 그때는 다른 이유로 실패했을 가능성이 있으나(당시 코드가 지금과 달랐을 수도 있음), 현재 코드 기준으로는 이 대소문자 불일치가 유일하고 확실한 원인.
+
+라이브로 재현·검증: `CREATE TABLE Child (... FOREIGN KEY (parent_id) REFERENCES Parent(id))` 후 `WHERE table_name='child'`(강제 소문자)는 0행, `table_name='Child'`(원본 대소문자)는 정상 반환됨을 `engine_cli.exe`로 직접 확인. 두 쿼리 모두 테이블명 쪽 `.to_lowercase()`만 제거(DB명 쪽은 실제로 소문자 저장이므로 그대로 유지) — `bare`(테이블명 파라미터) 자체는 프런트의 `SHOW TABLES` 결과에서 이미 올바른 원본 대소문자로 넘어오는 것도 확인해 안전한 수정임을 확인. `cargo build --release`/`cargo test --release`(3/3)/`tsc --noEmit` 클린. 수정된 정확한 쿼리 문자열을 `engine_cli.exe`로 재실행해 대문자 포함 테이블(`Employee`/`Department`)에서 FK·UNIQUE 정보가 정상 반환되는 것까지 라이브로 재확인(단, 실행 중인 Tauri 앱을 직접 띄워 사이드바/ERD 화면으로 재확인하는 것까지는 이번 라운드에서 하지 않음 — 아래 참고).
+
 ---
 
 ## 요약: 1학기 대비 2학기에 달라진 것
