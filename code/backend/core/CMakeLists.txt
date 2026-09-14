@@ -1,5 +1,4 @@
 add_library(engine_core STATIC
-    src/version.cpp
     src/catalog/schema.cpp
     src/parser/ast.cpp
     src/parser/ast_json.cpp

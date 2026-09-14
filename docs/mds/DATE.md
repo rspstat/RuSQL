@@ -231,6 +231,23 @@ Phase 46~52(App.tsx 리팩터링부터 LOCK TABLES까지 6개 항목 전부)를 
 
 이 로컬(CPU-only) 환경에서는 실제 GPU 학습을 돌려볼 수 없어 노트북은 JSON 구조 유효성만 확인, 실제 Colab GPU 실행은 아직 안 됨 — 사용자가 Colab에서 직접 실행 후 결과 공유 예정.
 
+이 작업들이 기존 엔진/프런트/서버에 영향이 없는지 사용자 요청으로 전체 재검증: C++ 엔진 Debug+Release Catch2 스위트(392 케이스/22,635 assertions) 양쪽 다 통과, `engine_cli.exe`로 `test_full.sql`/`test_full-ver2.sql` 재실행 클린, 프런트 `tsc --noEmit`/`vite build` 클린, Tauri(`src-tauri`) `cargo build --release`/`cargo test --release`(3/3) 클린 — AI 작업이 새 폴더(`code/AI/`)에만 있었다는 것과 일치하게 전부 이전과 동일하게 정상.
+
+### 9월 14일 — `code/mcp/server.py` 죽은 코드 삭제
+
+사용자가 `code/mcp/`를 검토하다 `server.py`(FastAPI + Google Gemini API 기반 REST 서버 — `/api/nl-to-sql`·`/api/chat`·`/api/explain` 등, 사용자가 넘긴 `api_key`로 Gemini를 직접 호출)가 실제 쓰이는 `mcp_server.py`(FastMCP, 로컬 엔진에 직접 연동, 외부 LLM API 호출 없음)와 별개로 남아있다는 걸 지적 — 캡스톤이 애초에 배제한 "기존 모델 API 소비" 방향의 잔재로 보인다는 지적이었음. `git log --follow`로 확인한 결과 마지막 수정이 2026-07-08(C++ 마이그레이션 마라톤 시작 직후)이고 이후 두 달 넘게 미수정, `main.rs`/프런트(TS·TSX)/`docs/` 어디에도 `server.py`나 그 포트(8765)·엔드포인트를 참조하는 코드가 전혀 없음을 확인 — 실제로 완전한 죽은 코드였음. 사용자 승인 후 삭제, `requirements.txt`도 `server.py` 전용 의존성(`google-genai`/`fastapi`/`uvicorn`/`pydantic`) 제거하고 `mcp[cli]`만 남김.
+
+### 9월 14일 — 프로젝트 전역 죽은 코드 스윕
+
+`server.py` 건을 계기로 사용자가 "이런 것처럼 죽은 코드가 또 있는지" 전체 검사를 요청 — C++ 백엔드/Rust(Tauri)/TS·React 프런트엔드 3개 영역을 병렬 Explore 에이전트로 조사(빌드 설정 대조 + 실제 참조 여부 grep, 추측 배제).
+
+- **C++ 백엔드**: `core/include/engine/version.hpp` + `core/src/version.cpp` 발견 — `engine::version()`을 CLI/서버/클라이언트 어디서도 호출 안 함(Phase 1 시절 스캐폴딩이 그대로 방치됨). 삭제 + `CMakeLists.txt`에서 참조 제거, `cmake --build`로 `engine_core` 재빌드 클린 확인.
+- **Rust(Tauri) 백엔드**: `export_csv` 커맨드(`main.rs`) — 이미 `PLAN.md`에 "의도적으로 남겨둔 잔여 항목"으로 기록돼 있던 건이 재발견됨(실제 CSV 내보내기는 프런트 Blob 방식으로만 동작, 이 커맨드는 등록만 되고 호출처가 전혀 없었음). `lib.rs`(모바일 지원용으로 예약된 빈 파일, 정상적인 Tauri 2.0 스캐폴딩)는 죽은 코드 아님으로 확인, 손 안 댐. 사용자 승인 후 `export_csv` + 전용 헬퍼 `csv_escape` 삭제, `generate_handler!` 등록도 제거, `cargo build --release` 클린 확인.
+- **프런트엔드 CSS**: `App.css`에서 이전 감사(Phase 40) 때 기록됐던 "~250줄" `.ai-chat-*` 블록이 실제로는 **541줄/59개 클래스**로 더 컸다는 게 확인됐고, 그 감사에서 놓쳤던 **완전히 별개의, 더 오래된 죽은 AI 설정 UI 블록(307줄/31개 클래스 — API 키 입력·모드 탭·쿼리 텍스트에어리아·결과/가이드 패널을 갖춘 완결된 미사용 UI)**도 새로 발견. 그 외 사이드바 인덱스 아이콘/split-pane-close/home-topbar-ver/dlg-readonly(4개, ~38줄)와 `.ai-view` 중복 정의(6줄, 최근 AI 탭 placeholder 추가 커밋에서 실수로 중복 생성된 것)도 함께 발견. 실제 사용 중인 `.ai-view` 규칙 1개만 남기고 총 **~890줄(App.css의 약 23%)** 삭제 — 삭제 후 `tsc --noEmit`/`vite build` 클린 확인, 빌드된 CSS 번들이 58.21kB → 43.84kB로 실제 감소한 것으로 교차 검증.
+- `.ts`/`.tsx` 파일 단위 죽은 파일, 죽은 컴포넌트/함수 export, 프런트→백엔드 커맨드 이름 불일치는 전부 없음(0건) — 이 세 영역은 이번 스윕에서 새로 발견되지 않음.
+
+정리 후 전체 재검증: C++ Debug+Release Catch2(392/22,635, 둘 다 통과) + `engine_cli.exe` 스모크 테스트, 프런트 `tsc`/`vite build`, `cargo build --release`/`cargo test --release`(3/3) 전부 클린.
+
 ---
 
 ## 요약: 1학기 대비 2학기에 달라진 것

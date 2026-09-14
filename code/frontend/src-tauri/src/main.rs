@@ -865,41 +865,6 @@ fn clear_server_log(_conn_id: String, state: State<AppState>) {
 }
 
 
-// ─── CSV 내보내기 ─────────────────────────────────────────────
-#[tauri::command]
-fn export_csv(query: String, file_path: String, state: State<AppState>) -> Result<String, String> {
-    let mut guard = state.db.lock().unwrap_or_else(|e| e.into_inner());
-    let conn = guard.as_mut().ok_or("연결된 데이터베이스가 없습니다.")?;
-    let (ok, body, _) = send_one(conn, &query)?;
-    if !ok {
-        return Err(body);
-    }
-
-    let qr = parse_output(&body, 0.0);
-    if qr.columns.is_empty() {
-        return Err("Query returned no columns.".to_string());
-    }
-
-    let mut csv = String::new();
-    csv.push_str(&qr.columns.iter().map(|c| csv_escape(c)).collect::<Vec<_>>().join(","));
-    csv.push('\n');
-    for row in &qr.rows {
-        csv.push_str(&row.iter().map(|v| csv_escape(v)).collect::<Vec<_>>().join(","));
-        csv.push('\n');
-    }
-
-    std::fs::write(&file_path, &csv).map_err(|e| e.to_string())?;
-    Ok(format!("Exported {} rows to '{}'.", qr.rows.len(), file_path))
-}
-
-fn csv_escape(s: &str) -> String {
-    if s.contains(',') || s.contains('"') || s.contains('\n') {
-        format!("\"{}\"", s.replace('"', "\"\""))
-    } else {
-        s.to_string()
-    }
-}
-
 // ─── CSV 가져오기 ─────────────────────────────────────────────
 // 프런트가 <input type="file"> + FileReader로 이미 읽어 넘겨준 content를 그대로
 // 파싱한다 (importSqlFile과 동일한 파일 읽기 방식 — 네이티브 dialog 플러그인 불필요,
@@ -1154,7 +1119,6 @@ fn main() {
             stop_server,
             get_server_status,
             clear_server_log,
-            export_csv,
             import_csv,
             open_terminal,
             open_url,
