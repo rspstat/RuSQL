@@ -17,7 +17,7 @@ Custom RDBMS + AI MCP Project
 | SQL Support | DDL / DML / JOIN (incl. **LATERAL**) / subqueries / CTE (incl. recursive) / UNION / constraints / transactions / stored procedures / triggers / UDF / table partitioning / `FILTER (WHERE ...)` / `JSON_AGG` / `BIT_AND` / `BIT_OR` |
 | MCP | AI MCP (Claude Desktop, stdio JSON-RPC, 7 tools — execute_sql · list_databases · list_tables · get_table_schema · explain_query · get_indexes · sample_data, SELECT results as structured JSON array, alwaysAllow auto-configured (no permission popups), no API key required, auto-connect from UI) |
 | DBMS | TCP server (native + MySQL wire protocol), multiple simultaneous client connections, real-time session monitoring, connection-pool support (`COM_CHANGE_USER`/`COM_RESET_CONNECTION`), per-session independent Executor + `shared_ptr<RwLock<SharedDatabase>>` shared state |
-| Language | C++, Python |
+| Language | C++, Python, Rust |
 
 <br/>
 
@@ -679,7 +679,7 @@ SHOW DATABASES;
 
 | Item | Content |
 |------|------|
-| Language | C++ |
+| Language | C++, Python, Rust |
 | Version | v2.3.0 |
 | Index | B+Tree (single / composite / clustered) |
 | Optimizer | Cost-based planner (AccessPath: SeqScan / PkPoint / PkBetween / PkRange / SecondaryPoint / SecondaryRange / **SecondaryBetween** / CompositeIndex / **CompositeIndexPrefix** / **SecondaryLikePrefix** / **IndexIntersection** · join cost estimation (NL vs Hash vs SortMerge vs IndexNL vs **ReverseIndexNL**, HASH_FACTOR=3) · System-R DP join order optimization (N≤8), Greedy fallback, cumulative cardinality carried into the 2nd+ join's algorithm choice) — the chosen AccessPath/JoinAlgo is what actually executes, not just what EXPLAIN displays · Hash Index equality O(1) preferred · Index Intersection (AND conditions with 2+ indexed columns → PK HashSet intersection) · uncorrelated IN/NOT IN subquery materialization (HashSet caching, O(1) lookup) · **MCV** (most-common-values, exact count for skewed equality lookups) + histogram selectivity estimation (ANALYZE TABLE, size-tiered auto-ANALYZE) · `total_rows` auto-updated on INSERT/DELETE |
