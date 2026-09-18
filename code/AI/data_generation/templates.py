@@ -232,16 +232,25 @@ def gen_join_filter(schema: Schema, table: Table, rng: random.Random) -> QueryIn
     val = _sample_value(fcol, rng)
     a_ko = label_ko(table.name)
     a_pl = label_en_plural(table.name)
-    b_en, b_ko = label_en(ref_table.name), label_ko(ref_table.name)
+    # If 2+ FK columns on this table point at the same referenced table (e.g.
+    # flight.origin_id and flight.destination_id both -> airport), phrasing this
+    # generically as "the associated airport" is ambiguous about which relationship
+    # is meant even though the SQL (built from the specific fkcol chosen above) isn't -
+    # disambiguate by naming the FK column itself instead of the referenced table.
+    same_target = [c for c in fk_cols if c.fk[0] == ref_table_name]
+    if len(same_target) > 1:
+        rel_en, rel_ko = label_en(fkcol.name), label_ko(fkcol.name)
+    else:
+        rel_en, rel_ko = label_en(ref_table.name), label_ko(ref_table.name)
     fc_en, fc_ko = label_en(fcol.name), label_ko(fcol.name)
     return QueryInstance(
         sql=(f"SELECT {table.name}.* FROM {table.name} JOIN {ref_table.name} "
              f"ON {table.name}.{fkcol.name} = {ref_table.name}.id "
              f"WHERE {ref_table.name}.{fcol.name} = '{val}';"),
-        ko=[f"{gwa_wa(b_ko)} 연결된 {a_ko} 중에서 {b_ko}의 {i_ga(fc_ko)} {val}인 것들 보여줘",
-            f"{b_ko}의 {i_ga(fc_ko)} {val}인 {eul_reul(a_ko)} 알려줘"],
-        en=[f"Show {a_pl} where the associated {b_en}'s {fc_en} is '{val}'",
-            f"List {a_pl} whose {b_en} has {fc_en} = '{val}'"],
+        ko=[f"{gwa_wa(rel_ko)} 연결된 {a_ko} 중에서 {rel_ko}의 {i_ga(fc_ko)} {val}인 것들 보여줘",
+            f"{rel_ko}의 {i_ga(fc_ko)} {val}인 {eul_reul(a_ko)} 알려줘"],
+        en=[f"Show {a_pl} where the associated {rel_en}'s {fc_en} is '{val}'",
+            f"List {a_pl} whose {rel_en} has {fc_en} = '{val}'"],
     )
 
 
@@ -259,14 +268,19 @@ def gen_join_count_group(schema: Schema, table: Table, rng: random.Random) -> Qu
         return None
     a_ko = label_ko(table.name)
     a_pl = label_en_plural(table.name)
-    b_en, b_ko = label_en(ref_table.name), label_ko(ref_table.name)
+    # Same multi-FK disambiguation as gen_join_filter above.
+    same_target = [c for c in fk_cols if c.fk[0] == ref_table_name]
+    if len(same_target) > 1:
+        rel_en, rel_ko = label_en(fkcol.name), label_ko(fkcol.name)
+    else:
+        rel_en, rel_ko = label_en(ref_table.name), label_ko(ref_table.name)
     lc = label_column.name
     return QueryInstance(
         sql=(f"SELECT {ref_table.name}.{lc}, COUNT(*) FROM {table.name} "
              f"JOIN {ref_table.name} ON {table.name}.{fkcol.name} = {ref_table.name}.id "
              f"GROUP BY {ref_table.name}.{lc};"),
-        ko=[f"{b_ko}별로 {a_ko} 개수를 보여줘", f"각 {b_ko}마다 {eul_reul(a_ko)} 몇 개씩 갖고 있는지 알려줘"],
-        en=[f"Show the number of {a_pl} per {b_en}", f"How many {a_pl} does each {b_en} have?"],
+        ko=[f"{rel_ko}별로 {a_ko} 개수를 보여줘", f"각 {rel_ko}마다 {eul_reul(a_ko)} 몇 개씩 갖고 있는지 알려줘"],
+        en=[f"Show the number of {a_pl} per {rel_en}", f"How many {a_pl} does each {rel_en} have?"],
     )
 
 
@@ -381,9 +395,10 @@ def gen_order_no_limit(schema: Schema, table: Table, rng: random.Random) -> Quer
     order = "DESC" if desc else "ASC"
     return QueryInstance(
         sql=f"SELECT * FROM {table.name} ORDER BY {col.name} {order};",
-        ko=[f"{eul_reul(t_ko)} {c_ko} 기준 {dir_ko}으로 정렬해서 보여줘", f"{ro_euro(c_ko)} 정렬한 {t_ko} 전체를 보여줘"],
+        ko=[f"{eul_reul(t_ko)} {c_ko} 기준 {dir_ko}으로 정렬해서 보여줘",
+            f"{ro_euro(c_ko)} {dir_ko}으로 정렬한 {t_ko} 전체를 보여줘"],
         en=[f"Show {t_pl} sorted by {c_en} ({'descending' if desc else 'ascending'})",
-            f"List all {t_pl} ordered by {c_en}"],
+            f"List all {t_pl} ordered by {c_en} ({'descending' if desc else 'ascending'})"],
     )
 
 

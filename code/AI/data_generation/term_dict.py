@@ -218,7 +218,7 @@ TERMS: dict[str, tuple[str, str]] = {
     "joined_date": ("joined date", "가입일"),
     "license_number": ("license number", "면허 번호"),
     "listed_date": ("listed date", "등록일"),
-    "listing": ("listing", "매물"),
+    "listing": ("listing", "매물 등록"),
     "location": ("location", "위치"),
     "movement_date": ("movement date", "이동일"),
     "movement_type": ("movement type", "이동 유형"),
