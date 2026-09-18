@@ -69,11 +69,10 @@ XA 분산 트랜잭션과 샤딩은 여전히 스코프 밖(단일 프로세스 
      3. 한국어 조사가 여러 곳에서 받침 여부와 무관하게 하드코딩(예: "티켓를", "이름가", "주행거리으로") — 전부 `i_ga`/`eul_reul`/`ro_euro` 헬퍼 호출로 교체.
      4. DISTINCT 질문에서 컬럼 라벨에 이미 포함된 단어가 중복 출력(예: "회원권 종류 **종류**를"). — 문구를 재구성해 중복 제거.
    - 수정 후 재검증: 여러 랜덤 샘플을 `Read` 도구로 직접 재확인해 한/영 문장 품질 이상 없음 확인.
-3. Colab Pro에서 LoRA/QLoRA 파인튜닝. **노트북 준비 완료 (2026-09-13), 실제 Colab 실행은 사용자 몫** — 이 환경(로컬, GPU 없음)에서는 학습을 직접 돌릴 수 없어서, Colab에 그대로 열어서 실행할 수 있는 단일 노트북만 준비함.
-   - `code/AI/finetuning/rusql_nl2sql_finetune.ipynb` (파일 하나): 의존성 설치 → (선택) Drive 마운트 → 설정값 → 공유 프롬프트 포맷(추후 로컬 추론 코드도 동일 로직 재사용 예정) → Qwen2.5-Coder-1.5B-Instruct 로드+LoRA 부착 → 데이터셋 로드/포맷팅 → trl `SFTTrainer`로 학습 → held-out test 셋(`real_estate`/`airline`/`insurance`, 학습에 전혀 안 쓰인 스키마)으로 정확/정규화 일치율 평가, 순서로 셀이 구성됨.
-   - 사용법: Colab에서 노트북을 열고(런타임을 GPU로 설정) `code/AI/data_generation/dataset/{train,val,test}.jsonl`을 업로드한 뒤 위에서부터 순서대로 실행. 기본은 4bit QLoRA(T4 16GB에서도 동작), A100/L4 등 24GB+ 환경이면 설정 셀에서 `USE_4BIT = False`로 품질을 약간 더 확보 가능. `OUTPUT_DIR`을 Google Drive 경로로 지정해야 세션 종료 후에도 학습된 어댑터가 남음.
+3. Colab Pro에서 LoRA/QLoRA 파인튜닝. **완료 (2026-09-18) — 실제 학습·평가 성공.**
+   - `code/AI/finetuning/rusql_nl2sql_finetune.ipynb`: 의존성 설치 → Drive 마운트 → 설정값 → 공유 프롬프트 포맷 → Qwen2.5-Coder-1.5B-Instruct 로드+LoRA 부착 → 데이터셋 로드/포맷팅 → trl `SFTTrainer`로 학습 → held-out test 셋(`real_estate`/`airline`/`insurance`) 평가, 순서. 데이터셋은 `code/AI/data_generation/dataset/`에서 Google Drive(`MyDrive/projects/RuSQL/dataset/`)로 한 번 업로드해두면 런타임 리셋에도 안전. 어댑터도 Drive(`MyDrive/projects/RuSQL/rusql-nl2sql-lora`)에 저장.
+   - **실행 중 겪은 문제와 수정**: (1) `bitsandbytes` 4bit 양자화가 `transformers==4.46.3`과 버전 불일치 → `0.44.1`→`0.46.1`로 상향. (2) T4(16GB)에서 배치 크기 8 + max_seq_len 1024로 학습 시 CUDA OOM(Qwen2.5 vocab이 커서 loss 계산의 logits 텐서가 큼) → `BATCH_SIZE` 8→2 + `GRAD_ACCUM` 2→8(실효 배치 동일), `MAX_SEQ_LEN` 1024→512, `gradient_checkpointing=True`+`model.enable_input_require_grads()` 추가로 해결.
+   - **1차 학습 결과**: held-out(학습에 전혀 안 쓰인 3개 스키마) 572문항 기준 **정확 일치 87.9%**. 실패 케이스를 도메인별/언어별로 쪼개 분석한 결과(영어 실패율 2.8% vs 한국어 21.7%로 큰 격차) 실패의 상당수가 모델 문제가 아니라 **데이터 생성기 자체의 모호성 버그**였음을 발견 — (a) `term_dict.py`에서 `property`/`listing`(real_estate)이 완전히 같은 한글 라벨("매물")을 공유해 질문 자체가 구분 불가능했음(→ `listing`에 "매물 등록"으로 별도 라벨 부여, 스키마 내 라벨 충돌 자동 검사 로직도 추가해 다른 충돌 없음 확인), (b) `flight` 테이블처럼 같은 참조 테이블(`airport`)을 가리키는 FK가 2개(`origin_id`/`destination_id`)인 경우 질문 문구가 어느 쪽인지 명시하지 않아 정답이 사실상 랜덤이었음(→ FK 컬럼 자체의 라벨로 명확화), (c) `gen_order_no_limit`의 두 번째 문구 변형이 정렬 방향(ASC/DESC)을 아예 언급 안 해서 답을 알 수 없었음(→ 방향 명시 추가). 세 가지 다 고치고 데이터셋 재생성 완료 — 재학습은 다음 세션 몫. `insurance` 도메인의 `policy`↔`claim` 테이블 혼동(라벨은 서로 다름에도 발생)은 데이터 버그가 아니라 진짜 모델의 일반화 한계로 보임 — 참고로 기록.
    - test 셋 평가는 SQL을 실제로 실행해서 채점하는 게 아니라 문자열 일치(정확/정규화) 기준 — Colab에서 RuSQL 엔진에 접근할 수 없어서 대략적인 진행 지표로만 사용.
-   - trl/transformers/peft는 API가 버전마다 자주 바뀌므로 첫 셀에서 정확한 버전으로 고정 설치.
-   - **주의**: 로컬에서는 JSON 구조 유효성만 확인했고(파이썬 문법/노트북 형식이 유효한지), 실제 GPU 환경(Colab)에서 end-to-end로 돌려본 적은 없음 — Colab에서 처음 실행할 때 패키지 버전 충돌 등 사소한 디버깅이 필요할 수 있음.
 4. 로컬 추론 통합: 양자화(GGUF) → CPU/GPU 겸용 런타임을 Tauri 앱에 내장 → 기존 "AI 탭" UI(`code/frontend/src/components/AiView.tsx`)에 연결.
 5. 평가/스코프 방어: 작은 모델이 틀린 SQL을 낼 위험 완화(스키마/쿼리 복잡도 범위 제한 + 실행 전 검증 레이어 등).
