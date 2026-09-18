@@ -187,31 +187,36 @@ function App() {
     return [{ id: "1", name: "RuSQL Local", host: "localhost", port: 7878, user: "root", password: "root", autoLogin: false, dataDir: "local" }];
   };
   const [connections, setConnections] = useState<Connection[]>(loadConnections);
-  const saveConnections = (c: Connection[]) => { localStorage.setItem("rusql_connections", JSON.stringify(c)); setConnections(c); };
+  const saveConnections = (c: Connection[]) => {
+    setConnections(c);
+    invoke("save_connections", { connections: c }).catch(() => {});
+  };
   const [appDataBase, setAppDataBase] = useState("");
 
-  // 앱 데이터 디렉터리 조회 및 기존 상대경로 연결 마이그레이션
-
+  // 앱 데이터 디렉터리 조회 + 저장된 연결 목록 로드(파일 기반) + 기존 상대경로 연결 마이그레이션
+  //
+  // Connections는 code/data/connections.json 파일에 저장한다(localStorage가 아님) — MCP
+  // 서버(별도 Python 프로세스)도 같은 파일을 직접 읽고 써서 Claude가 연결을 추가/삭제할 수
+  // 있게 하려면, 이 웹뷰 프로세스만 접근 가능한 localStorage로는 안 되기 때문. 파일이 아직
+  // 없는 예전 설치(localStorage에만 저장돼 있던 경우)는 이 시점에 파일로 1회 이관한다.
   useEffect(() => {
     invoke<string>("get_app_data_dir").then(base => {
       setAppDataBase(base);
-      setConnections(prev => {
-        const migrated = prev.map(c => {
+      invoke<Connection[]>("get_connections").then(fileConns => {
+        const initial = fileConns.length > 0 ? fileConns : loadConnections();
+        const migrated = initial.map(c => {
           // 이미 절대경로면 그대로
           if (c.dataDir.includes("\\") || c.dataDir.includes("/") || c.dataDir.startsWith(".")) return c;
           // 모든 상대경로 → code/data/{relative}
           return { ...c, dataDir: `${base}\\${c.dataDir}` };
         });
-        // 변경이 있으면 localStorage에도 저장
-        if (migrated.some((c, i) => c.dataDir !== prev[i].dataDir)) {
-          localStorage.setItem("rusql_connections", JSON.stringify(migrated));
-        }
+        setConnections(migrated);
+        invoke("save_connections", { connections: migrated }).catch(() => {});
         // 저장된 연결 어디에도 속하지 않는 고아 데이터 디렉토리 정리 (인증 실패/취소,
         // UI 밖에서 직접 띄운 서버 등으로 생긴 잔여물)
         invoke<string[]>("cleanup_orphan_data_dirs", { base, keep: migrated.map(c => c.dataDir) })
           .then(removed => { if (removed.length) console.log("정리된 고아 데이터 디렉토리:", removed); })
           .catch(() => {});
-        return migrated;
       });
     });
   }, []);
@@ -219,6 +224,17 @@ function App() {
   // 홈 화면 상태
   const [loggedIn, setLoggedIn] = useState(false);
   const [sessionUser, setSessionUser] = useState("");
+
+  // 로그인 전(홈 화면)에는 MCP가 방금 추가/삭제했을 수 있는 연결 목록을 주기적으로 반영
+  useEffect(() => {
+    if (loggedIn) return;
+    const id = setInterval(() => {
+      invoke<Connection[]>("get_connections").then(fileConns => {
+        if (fileConns.length > 0) setConnections(fileConns);
+      }).catch(() => {});
+    }, 3000);
+    return () => clearInterval(id);
+  }, [loggedIn]);
 
   // 연결 다이얼로그 상태
   const [connectingTo, setConnectingTo] = useState<Connection | null>(null);

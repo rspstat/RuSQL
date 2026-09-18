@@ -750,6 +750,52 @@ fn get_app_data_dir(_app: tauri::AppHandle) -> String {
     code_dir().join("data").to_string_lossy().to_string()
 }
 
+// ─── 저장된 연결 목록 ──────────────────────────────────────────
+// code/data/connections.json 파일에 저장 — localStorage가 아니라 파일인 이유는,
+// MCP 서버(별도 Python 프로세스, code/mcp/mcp_server.py)도 같은 파일을 직접 읽고 써서
+// Claude가 Connections를 추가/삭제할 수 있게 하기 위함(웹뷰 localStorage는 다른 프로세스가
+// 접근할 방법이 없음). 필드명은 프런트의 Connection 인터페이스와 그대로 맞춤.
+#[derive(serde::Serialize, serde::Deserialize, Clone)]
+struct ConnectionEntry {
+    id: String,
+    name: String,
+    host: String,
+    port: u16,
+    user: String,
+    password: String,
+    #[serde(rename = "autoLogin")]
+    auto_login: bool,
+    #[serde(rename = "dataDir")]
+    data_dir: String,
+}
+
+fn connections_file_path() -> std::path::PathBuf {
+    code_dir().join("data").join("connections.json")
+}
+
+#[tauri::command]
+fn get_connections() -> Vec<ConnectionEntry> {
+    std::fs::read_to_string(connections_file_path())
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+#[tauri::command]
+fn save_connections(connections: Vec<ConnectionEntry>) -> Result<(), String> {
+    let path = connections_file_path();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let json = serde_json::to_string_pretty(&connections).map_err(|e| e.to_string())?;
+    // 임시 파일에 쓴 뒤 원자적으로 교체 — MCP 서버가 거의 동시에 같은 파일을 쓰는
+    // 경우에도 절반만 쓰인 손상된 JSON을 절대 남기지 않기 위함(WAL 원자적 재작성과 동일한 이유).
+    let tmp_path = path.with_extension("json.tmp");
+    std::fs::write(&tmp_path, json).map_err(|e| e.to_string())?;
+    std::fs::rename(&tmp_path, &path).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 #[tauri::command]
 fn set_parallel_query(enabled: bool) {
     std::env::set_var("RUSTDB_PARALLEL", if enabled { "1" } else { "0" });
@@ -1123,6 +1169,8 @@ fn main() {
             open_terminal,
             open_url,
             get_app_data_dir,
+            get_connections,
+            save_connections,
             set_parallel_query,
             read_bench_result,
             open_bench_terminal,

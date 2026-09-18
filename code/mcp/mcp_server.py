@@ -13,6 +13,8 @@ import re
 import socket
 import sys
 import time
+from pathlib import Path
+
 from mcp.server.fastmcp import FastMCP
 
 # 접속정보는 Claude Desktop 설정의 "env" 필드로 오버라이드 가능 (RuSQL UI의 "Auto-connect
@@ -237,6 +239,74 @@ def sample_data(table: str, n: int = 10, database: str = "") -> str:
     raw = _run(f"SELECT * FROM {table} LIMIT {n}", database)
     rows = _parse_table_output(raw)
     return json.dumps(rows, ensure_ascii=False)
+
+
+# ─── 저장된 연결(Connections) 관리 ─────────────────────────────
+# code/data/connections.json 파일을 RuSQL UI(main.rs의 get_connections/save_connections)와
+# 그대로 공유 — 이 파일이 두 프로세스 사이의 유일한 다리다(웹뷰 localStorage는 이 프로세스가
+# 접근할 방법이 없음). UI가 홈 화면(로그인 전)에서 3초마다 이 파일을 다시 읽으므로, 여기서
+# 추가/삭제하면 앱을 재시작하지 않아도 잠시 후 화면에 반영된다.
+_CONNECTIONS_FILE = Path(__file__).resolve().parent.parent / "data" / "connections.json"
+
+
+def _load_connections() -> list[dict]:
+    try:
+        return json.loads(_CONNECTIONS_FILE.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError):
+        return []
+
+
+def _save_connections(connections: list[dict]) -> None:
+    _CONNECTIONS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = _CONNECTIONS_FILE.with_suffix(".json.tmp")
+    tmp_path.write_text(json.dumps(connections, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp_path.replace(_CONNECTIONS_FILE)  # 원자적 교체 — UI가 절반만 쓰인 JSON을 읽는 일이 없게
+
+
+@mcp.tool()
+def list_connections() -> str:
+    """List all connections saved in the RuSQL UI's home screen. Returns a JSON array
+    with id/name/host/port/user/dataDir (passwords are redacted, never returned)."""
+    redacted = [{k: v for k, v in c.items() if k != "password"} for c in _load_connections()]
+    return json.dumps(redacted, ensure_ascii=False)
+
+
+@mcp.tool()
+def add_connection(name: str, host: str, port: int, user: str, password: str) -> str:
+    """Add a new connection to the RuSQL UI's home screen. Ask the user for name, host,
+    port, user, and password first if they haven't already given them - do not guess or
+    default any of these, especially the password. Appears in the UI within a few seconds
+    (no restart needed) if the UI is currently showing its home/connection-list screen."""
+    connections = _load_connections()
+    conn_id = str(int(time.time() * 1000))
+    data_dir = str(_CONNECTIONS_FILE.parent / f"data_{conn_id}")
+    connections.append({
+        "id": conn_id, "name": name, "host": host, "port": port,
+        "user": user, "password": password, "autoLogin": False, "dataDir": data_dir,
+    })
+    _save_connections(connections)
+    return f"Added connection '{name}' (id: {conn_id})."
+
+
+@mcp.tool()
+def delete_connection(id_or_name: str) -> str:
+    """Delete a saved connection by its id (preferred, from list_connections) or by exact
+    name. If multiple connections share that name, nothing is deleted and the matching ids
+    are returned so the caller can retry with a specific id."""
+    connections = _load_connections()
+    by_id = [c for c in connections if c["id"] == id_or_name]
+    if by_id:
+        _save_connections([c for c in connections if c["id"] != id_or_name])
+        return f"Deleted connection '{by_id[0]['name']}' (id: {id_or_name})."
+
+    by_name = [c for c in connections if c["name"] == id_or_name]
+    if not by_name:
+        return f"No connection found with id or name '{id_or_name}'."
+    if len(by_name) > 1:
+        ids = ", ".join(c["id"] for c in by_name)
+        return f"{len(by_name)} connections are named '{id_or_name}' (ids: {ids}). Retry delete_connection with a specific id."
+    _save_connections([c for c in connections if c["id"] != by_name[0]["id"]])
+    return f"Deleted connection '{id_or_name}' (id: {by_name[0]['id']})."
 
 
 if __name__ == "__main__":

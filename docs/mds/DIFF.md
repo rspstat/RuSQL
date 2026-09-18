@@ -321,4 +321,4 @@
 | 연결 관리 | ✓ | ✓ | ✓ | ✓ (연결별 독립 데이터 디렉토리) |
 | 서버 모니터링 | ✓ | ✓ | ✓ (Performance Hub) | ✓ (TCP 서버 on/off·클라이언트 수·로그, 접속 세션 실시간 모니터링 패널 — addr·user·경과 시간·쿼리 건수, 벤치마크 결과 UI 패널) |
 | 데이터 임포트/익스포트 | ✓ (CSV, SQL) | ✓ | ✓ (CSV, Excel, XML) | ✓ (CSV 익스포트 — 결과 패널 다운로드 버튼; CSV 임포트 — 테이블 우클릭 메뉴 "Import CSV...") |
-| AI 연동 | △ (HeatWave AutoML) | ✗ | △ (Oracle AI) | ✓ (AI MCP — mcp_server.py: Claude Desktop 연동, stdio JSON-RPC, **7개 도구** — execute_sql · list_databases · list_tables · get_table_schema · explain_query · get_indexes · sample_data, SELECT 결과 JSON 배열 구조화, alwaysAllow 자동 설정 (허용 팝업 없음), API 키 불필요, UI 자동 연결 버튼) |
+| AI 연동 | △ (HeatWave AutoML) | ✗ | △ (Oracle AI) | ✓ (AI MCP — mcp_server.py: Claude Desktop 연동, stdio JSON-RPC, **10개 도구** — execute_sql · list_databases · list_tables · get_table_schema · explain_query · get_indexes · sample_data · list_connections · add_connection · delete_connection(뒤 3개는 `code/data/connections.json` 파일을 UI와 공유해 Claude가 홈 화면의 저장된 연결을 추가/삭제 가능), SELECT 결과 JSON 배열 구조화, alwaysAllow 자동 설정 (허용 팝업 없음), API 키 불필요, UI 자동 연결 버튼) |

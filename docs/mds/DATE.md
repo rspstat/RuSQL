@@ -256,6 +256,16 @@ Phase 46~52(App.tsx 리팩터링부터 LOCK TABLES까지 6개 항목 전부)를 
 
 라이브로 재현·검증: `CREATE TABLE Child (... FOREIGN KEY (parent_id) REFERENCES Parent(id))` 후 `WHERE table_name='child'`(강제 소문자)는 0행, `table_name='Child'`(원본 대소문자)는 정상 반환됨을 `engine_cli.exe`로 직접 확인. 두 쿼리 모두 테이블명 쪽 `.to_lowercase()`만 제거(DB명 쪽은 실제로 소문자 저장이므로 그대로 유지) — `bare`(테이블명 파라미터) 자체는 프런트의 `SHOW TABLES` 결과에서 이미 올바른 원본 대소문자로 넘어오는 것도 확인해 안전한 수정임을 확인. `cargo build --release`/`cargo test --release`(3/3)/`tsc --noEmit` 클린. 수정된 정확한 쿼리 문자열을 `engine_cli.exe`로 재실행해 대문자 포함 테이블(`Employee`/`Department`)에서 FK·UNIQUE 정보가 정상 반환되는 것까지 라이브로 재확인(단, 실행 중인 Tauri 앱을 직접 띄워 사이드바/ERD 화면으로 재확인하는 것까지는 이번 라운드에서 하지 않음 — 아래 참고).
 
+### 9월 19일 — MCP에 Connections 관리 도구 3개 추가 (list/add/delete_connection)
+
+사용자가 "Claude가 모든 버튼을 다 누를 수 있게" 만들 수 있는지 질문 — 대부분의 버튼은 결국 SQL문 하나라 이미 `execute_sql`로 가능하고, ERD 줌/탭 전환 같은 순수 UI 동작은 자연어로 조작할 실익이 없으며, 무엇보다 예전에 정확히 이런 시도(UI 제어용 도구 9개, Phase 17에서 전부 가짜였음이 밝혀져 제거)가 있었던 전례를 근거로 반대 — 대신 실제로 가치 있고 지금 비어있는 한 가지, **홈 화면의 저장된 Connections 목록 관리**로 스코프를 좁히자고 역제안, 사용자 승인.
+
+기술적 난제: Connections 목록은 웹뷰 `localStorage`에 있고 MCP 서버(별도 Python 프로세스)는 그 프로세스에 접근할 방법이 전혀 없음 — 둘 사이에 다리가 아예 없었음. `code/data/connections.json` 파일을 새 공유 저장소로 도입해 해결:
+
+- **`main.rs`**: `get_connections`/`save_connections` Tauri 커맨드 신규 추가(파일 없으면 빈 배열, 저장은 임시 파일+원자적 rename으로 절반만 쓰인 JSON 방지 — WAL 원자적 재작성과 동일한 이유). 기존 localStorage 기반 `loadConnections`/`saveConnections`를 파일 기반으로 교체하면서, 파일이 비어있으면(예전 설치) 기존 localStorage 내용을 1회 이관하는 마이그레이션도 같은 자리에 통합(기존 dataDir 마이그레이션·고아 디렉토리 정리 로직과 순서가 꼬이지 않도록 한 `useEffect`로 합침). 로그인 전(홈 화면) 상태에서는 3초 간격으로 파일을 다시 읽어, 앱을 재시작하지 않아도 MCP가 방금 추가/삭제한 연결이 화면에 반영되게 함.
+- **`mcp_server.py`**: `list_connections`(비밀번호는 항상 제외하고 반환) · `add_connection`(name/host/port/user/password 전부 필수 파라미터로 선언 — Claude가 대화 중에 먼저 물어보게 강제) · `delete_connection`(id 우선 매칭, 이름은 유일할 때만 삭제하고 겹치면 후보 id 목록을 반환해 안전하게 거부) 3개 신규. 같은 파일을 직접 읽고 쓰며, 쓰기는 Rust 쪽과 동일하게 임시 파일+원자적 교체.
+- **검증**: `cargo build --release`/`cargo test --release`(3/3)/`tsc --noEmit`/`vite build` 전부 클린. `mcp` 패키지가 로컬에 없어 `FastMCP`를 스텁으로 대체해 `mcp_server.py`를 직접 import하는 방식으로(Phase 48과 동일 기법) 7가지 시나리오(빈 목록, 추가, `list_connections`의 비밀번호 제외 확인, 이름으로 삭제, id로 삭제, 이름 중복 시 안전 거부, 존재하지 않는 id/이름 처리) 전부 실제 로직으로 통과 확인. 실제 `code/data/connections.json` 경로에 대해서도 추가→삭제 왕복 확인(테스트 잔여물 없이 정리). 개발 모드로 띄워둔 실제 앱이 Rust 변경을 자동 재빌드하는 것도 확인.
+
 ---
 
 ## 요약: 1학기 대비 2학기에 달라진 것
