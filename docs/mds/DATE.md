@@ -256,6 +256,14 @@ Phase 46~52(App.tsx 리팩터링부터 LOCK TABLES까지 6개 항목 전부)를 
 
 라이브로 재현·검증: `CREATE TABLE Child (... FOREIGN KEY (parent_id) REFERENCES Parent(id))` 후 `WHERE table_name='child'`(강제 소문자)는 0행, `table_name='Child'`(원본 대소문자)는 정상 반환됨을 `engine_cli.exe`로 직접 확인. 두 쿼리 모두 테이블명 쪽 `.to_lowercase()`만 제거(DB명 쪽은 실제로 소문자 저장이므로 그대로 유지) — `bare`(테이블명 파라미터) 자체는 프런트의 `SHOW TABLES` 결과에서 이미 올바른 원본 대소문자로 넘어오는 것도 확인해 안전한 수정임을 확인. `cargo build --release`/`cargo test --release`(3/3)/`tsc --noEmit` 클린. 수정된 정확한 쿼리 문자열을 `engine_cli.exe`로 재실행해 대문자 포함 테이블(`Employee`/`Department`)에서 FK·UNIQUE 정보가 정상 반환되는 것까지 라이브로 재확인(단, 실행 중인 Tauri 앱을 직접 띄워 사이드바/ERD 화면으로 재확인하는 것까지는 이번 라운드에서 하지 않음 — 아래 참고).
 
+### 9월 16일~18일 — Colab Pro에서 첫 실제 LoRA/QLoRA 파인튜닝 실행 + 실패 케이스 분석으로 데이터 생성 버그 3건 발견·수정
+
+9월 12일~13일에 작성해둔 `rusql_nl2sql_finetune.ipynb`를 사용자가 실제로 Colab Pro에서 실행하며 겪은 문제들을 세션 내내 그때그때 진단·수정: (1) pip 설치 경고를 에러로 오인한 것으로 판명(실제 문제 아님), (2) `bitsandbytes==0.44.1`이 `transformers==4.46.3`과 버전 불일치로 4bit 양자화 `ImportError` → `0.46.1`로 상향, (3) Google Drive 연동 경로를 `내 드라이브/projects/RuSQL`로 재구성(데이터셋·출력 디렉터리를 Colab 휘발성 `/content/`가 아니라 `MyDrive/projects/RuSQL/dataset`·`.../rusql-nl2sql-lora`로), (4) 그 과정에서 반복 재현된 `FileNotFoundError: /content/train.jsonl`은 실제로는 사용자가 이전 커밋 이전 상태의 Colab 탭을 계속 재사용한 클라이언트 측 문제였음(GitHub main 기준 새 탭으로 열도록 안내해 해결), (5) T4(16GB)에서 배치 크기 8·max_seq_len 1024로 학습 시 CUDA OOM(Qwen2.5의 큰 vocab 때문에 loss 계산의 logits 텐서가 큼) → `BATCH_SIZE` 8→2 + `GRAD_ACCUM` 2→8(실효 배치 동일) + `MAX_SEQ_LEN` 1024→512 + `gradient_checkpointing=True`+`model.enable_input_require_grads()`로 해결.
+
+첫 실제 학습 결과: held-out 3개 스키마(`real_estate`/`airline`/`insurance`) 572문항 기준 **정확 일치 87.9%**. 평가 셀에 도메인별/언어별 실패율 breakdown을 추가해 재분석한 결과(영어 실패율 2.8% vs 한국어 21.7%로 큰 격차) 실패 상당수가 모델이 아니라 **데이터 생성기 자체의 모호성 버그**로 드러남 — 자세한 내용은 `AI.md` 3번 항목 참고. 3가지 다 고치고(`term_dict.py`의 `property`/`listing` 라벨 충돌, `flight`의 FK 2개(`origin_id`/`destination_id`)가 같은 참조 테이블을 가리킬 때의 문구 모호성, `gen_order_no_limit`의 정렬 방향 누락) 데이터셋을 재생성(train 2993/val 157/test **568**, 총 3718행 — 최초 3722행에서 소폭 변동).
+
+재생성된 데이터셋으로 재학습한 결과(같은 날 세션 내): held-out 568문항 기준 **정확/정규화 일치 93.7% (532/568)**로 대폭 개선 — `airline` 실패율 7.0%→1.9%, `real_estate` ~14.5~15.1%→1.1%로 거의 해소. `insurance`만 13.6%로 거의 그대로인데, 실패 대부분이 `policy`↔`claim` 테이블 혼동(두 한글 라벨이 명확히 다름에도 발생)이라 데이터 버그가 아니라 모델의 진짜 일반화 한계로 결론. 상세 수치·실패 예시는 `AI.md`가 canonical.
+
 ### 9월 19일 — MCP에 Connections 관리 도구 3개 추가 (list/add/delete_connection)
 
 사용자가 "Claude가 모든 버튼을 다 누를 수 있게" 만들 수 있는지 질문 — 대부분의 버튼은 결국 SQL문 하나라 이미 `execute_sql`로 가능하고, ERD 줌/탭 전환 같은 순수 UI 동작은 자연어로 조작할 실익이 없으며, 무엇보다 예전에 정확히 이런 시도(UI 제어용 도구 9개, Phase 17에서 전부 가짜였음이 밝혀져 제거)가 있었던 전례를 근거로 반대 — 대신 실제로 가치 있고 지금 비어있는 한 가지, **홈 화면의 저장된 Connections 목록 관리**로 스코프를 좁히자고 역제안, 사용자 승인.
