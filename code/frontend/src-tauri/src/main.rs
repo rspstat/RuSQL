@@ -8,7 +8,7 @@ use std::time::Instant;
 use std::process::{Child, Command, Stdio};
 
 use sha1::{Digest, Sha1};
-use tauri::{Manager, State};
+use tauri::{Emitter, Manager, State};
 
 // ─── 세션 정보 ────────────────────────────────────────────────
 #[derive(serde::Serialize, Clone)]
@@ -1099,24 +1099,174 @@ fn open_bench_terminal() {
         .spawn();
 }
 
+// ─── MCP용 UI 상태 파일 (읽기 전용 조회) ────────────────────────
+// UiStore(state.ui)는 프런트가 sync_* 커맨드로 계속 채워왔지만, 예전엔 이걸 읽어가는
+// 쪽(Phase 17에서 제거된 get_tab_content 등 9개 MCP 도구)이 전부 가짜였어서 사실상 아무도
+// 안 읽는 죽은 상태였다. MCP 서버(별도 프로세스)는 이 프로세스의 메모리에 접근할 방법이
+// 없으므로, sync_* 호출 시마다 code/data/ui_state.json에도 그대로 반영해 MCP가 직접
+// 읽을 수 있게 한다(Connections와 동일한 "공유 파일" 다리 패턴).
+#[derive(serde::Serialize)]
+struct UiStateSnapshot {
+    tabs: Vec<String>,
+    #[serde(rename = "tabContent")]
+    tab_content: HashMap<String, String>,
+    #[serde(rename = "lastResult")]
+    last_result: String,
+    #[serde(rename = "currentDb")]
+    current_db: String,
+}
+
+fn ui_state_file_path() -> std::path::PathBuf {
+    code_dir().join("data").join("ui_state.json")
+}
+
+fn persist_ui_state(ui: &UiStore) {
+    let snapshot = UiStateSnapshot {
+        tabs: ui.tab_list.lock().unwrap_or_else(|e| e.into_inner()).clone(),
+        tab_content: ui.tab_content.lock().unwrap_or_else(|e| e.into_inner()).clone(),
+        last_result: ui.last_result.lock().unwrap_or_else(|e| e.into_inner()).clone(),
+        current_db: ui.current_db.lock().unwrap_or_else(|e| e.into_inner()).clone(),
+    };
+    let path = ui_state_file_path();
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Ok(json) = serde_json::to_string_pretty(&snapshot) {
+        let tmp = path.with_extension("json.tmp");
+        if std::fs::write(&tmp, json).is_ok() {
+            let _ = std::fs::rename(&tmp, &path);
+        }
+    }
+}
+
 #[tauri::command]
 fn sync_tab_content(name: String, content: String, state: State<AppState>) {
     state.ui.tab_content.lock().unwrap_or_else(|e| e.into_inner()).insert(name, content);
+    persist_ui_state(&state.ui);
 }
 
 #[tauri::command]
 fn sync_tab_list(names: Vec<String>, state: State<AppState>) {
     *state.ui.tab_list.lock().unwrap_or_else(|e| e.into_inner()) = names;
+    persist_ui_state(&state.ui);
 }
 
 #[tauri::command]
 fn sync_query_result(result: String, state: State<AppState>) {
     *state.ui.last_result.lock().unwrap_or_else(|e| e.into_inner()) = result;
+    persist_ui_state(&state.ui);
 }
 
 #[tauri::command]
 fn sync_current_db(db: String, state: State<AppState>) {
     *state.ui.current_db.lock().unwrap_or_else(|e| e.into_inner()) = db;
+    persist_ui_state(&state.ui);
+}
+
+// ─── MCP용 UI 명령 큐 (에디터/탭 조작, 쓰기 방향) ────────────────
+// 읽기(UiStateSnapshot)와 반대 방향 — MCP가 "이 탭에 이 SQL 써줘" 같은 명령을 파일에
+// 추가하면, 프런트가 실행 중인 동안 주기적으로(로그인 후 1초 간격) 이 파일을 폴링해
+// 실제 화면에 반영하고 결과를 같은 항목에 채워 돌려준다. Phase 17에서 제거됐던
+// UI 제어형 도구들과 달리, 이번엔 실제로 응답하는 쪽(이 폴링 루프)이 존재한다.
+#[derive(serde::Serialize, serde::Deserialize, Clone)]
+struct UiCommand {
+    id: String,
+    action: String,
+    #[serde(default)]
+    params: serde_json::Value,
+    status: String,
+    #[serde(default)]
+    result: Option<String>,
+}
+
+fn ui_commands_file_path() -> std::path::PathBuf {
+    code_dir().join("data").join("ui_commands.json")
+}
+
+// ui_commands.json에 대한 파일 기반 상호 배제 락. 이 파일은 이 배경 스레드/
+// complete_ui_command와 별도 Python(MCP) 프로세스 양쪽이 "읽고-고치고-통째로
+// 다시 쓰기" 하므로, 락 없이 두 쓰기가 겹치면 나중에 쓰는 쪽이 상대가 방금 큐에
+// 넣은 항목을 못 본 채 자기 스냅샷으로 덮어써 그 항목이 사라질 수 있다(Python
+// 쪽 동시 도구 호출 2개로 실제 재현됨). mcp_server.py의 _UiCommandsLock과 동일한
+// 파일명 규칙(O_CREAT|O_EXCL 방식의 락 파일)을 공유해 서로를 잠근다.
+fn ui_lock_path() -> std::path::PathBuf {
+    ui_commands_file_path().with_extension("json.lock")
+}
+
+struct UiCommandsLock;
+
+impl UiCommandsLock {
+    fn acquire() -> Self {
+        let path = ui_lock_path();
+        let mut deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            match std::fs::OpenOptions::new().write(true).create_new(true).open(&path) {
+                Ok(_) => return UiCommandsLock,
+                Err(_) => {
+                    if std::time::Instant::now() > deadline {
+                        let _ = std::fs::remove_file(&path);
+                        deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+            }
+        }
+    }
+}
+
+impl Drop for UiCommandsLock {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(ui_lock_path());
+    }
+}
+
+fn read_ui_commands() -> Vec<UiCommand> {
+    std::fs::read_to_string(ui_commands_file_path())
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+fn write_ui_commands(cmds: &[UiCommand]) -> Result<(), String> {
+    let path = ui_commands_file_path();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let json = serde_json::to_string_pretty(cmds).map_err(|e| e.to_string())?;
+    // 이 파일은 Rust 배경 스레드와 별도 Python(MCP) 프로세스가 둘 다 자주 쓴다.
+    // 고정된 이름의 임시 파일을 공유하면 두 쓰기가 겹칠 때 한쪽의 rename이
+    // 상대가 이미 없애버린 파일을 찾다 FileNotFoundError 나는 경합이 생기므로,
+    // 쓰기마다 고유한 임시 파일명을 사용한다.
+    let tmp = path.with_extension(format!(
+        "json.tmp.{:?}.{}",
+        std::thread::current().id(),
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0)
+    ));
+    std::fs::write(&tmp, json).map_err(|e| e.to_string())?;
+    std::fs::rename(&tmp, &path).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+// UiCommand.params -> "ui-command" 이벤트의 data 필드로 변환.
+// 문자열이면 그대로(탭 이름처럼 프런트가 JSON.parse 없이 바로 쓰는 경우), 그 외(객체 등)는
+// JSON 텍스트로 직렬화해 프런트 쪽에서 JSON.parse(data)로 풀어 쓰게 한다.
+fn ui_command_data_string(v: &serde_json::Value) -> String {
+    match v {
+        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::Null => String::new(),
+        other => other.to_string(),
+    }
+}
+
+#[tauri::command]
+fn complete_ui_command(id: String, result: String) -> Result<(), String> {
+    let _lock = UiCommandsLock::acquire();
+    let mut cmds = read_ui_commands();
+    if let Some(c) = cmds.iter_mut().find(|c| c.id == id) {
+        c.status = "done".to_string();
+        c.result = Some(result);
+    }
+    write_ui_commands(&cmds)
 }
 
 #[tauri::command]
@@ -1145,6 +1295,31 @@ fn main() {
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.set_icon(tauri::include_image!("icons/icon.png"));
             }
+            // MCP가 code/data/ui_commands.json에 넣어둔 "pending" 명령을 폴링해
+            // 프런트로 "ui-command" 이벤트를 emit. 프런트는 처리 후 complete_ui_command로
+            // 결과를 같은 파일에 채워 되돌려준다(쓰기는 프런트, 큐 관리는 여기).
+            let app_handle = app.handle().clone();
+            std::thread::spawn(move || loop {
+                std::thread::sleep(std::time::Duration::from_millis(400));
+                let _lock = UiCommandsLock::acquire();
+                let mut cmds = read_ui_commands();
+                let mut changed = false;
+                for c in cmds.iter_mut() {
+                    if c.status == "pending" {
+                        c.status = "in_progress".to_string();
+                        changed = true;
+                        let data = ui_command_data_string(&c.params);
+                        let _ = app_handle.emit(
+                            "ui-command",
+                            serde_json::json!({ "id": c.id, "action": c.action, "data": data }),
+                        );
+                    }
+                }
+                if changed {
+                    let _ = write_ui_commands(&cmds);
+                }
+                drop(_lock);
+            });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -1171,6 +1346,7 @@ fn main() {
             get_app_data_dir,
             get_connections,
             save_connections,
+            complete_ui_command,
             set_parallel_query,
             read_bench_result,
             open_bench_terminal,

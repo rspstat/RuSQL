@@ -266,6 +266,22 @@ Phase 46~52(App.tsx 리팩터링부터 LOCK TABLES까지 6개 항목 전부)를 
 - **`mcp_server.py`**: `list_connections`(비밀번호는 항상 제외하고 반환) · `add_connection`(name/host/port/user/password 전부 필수 파라미터로 선언 — Claude가 대화 중에 먼저 물어보게 강제) · `delete_connection`(id 우선 매칭, 이름은 유일할 때만 삭제하고 겹치면 후보 id 목록을 반환해 안전하게 거부) 3개 신규. 같은 파일을 직접 읽고 쓰며, 쓰기는 Rust 쪽과 동일하게 임시 파일+원자적 교체.
 - **검증**: `cargo build --release`/`cargo test --release`(3/3)/`tsc --noEmit`/`vite build` 전부 클린. `mcp` 패키지가 로컬에 없어 `FastMCP`를 스텁으로 대체해 `mcp_server.py`를 직접 import하는 방식으로(Phase 48과 동일 기법) 7가지 시나리오(빈 목록, 추가, `list_connections`의 비밀번호 제외 확인, 이름으로 삭제, id로 삭제, 이름 중복 시 안전 거부, 존재하지 않는 id/이름 처리) 전부 실제 로직으로 통과 확인. 실제 `code/data/connections.json` 경로에 대해서도 추가→삭제 왕복 확인(테스트 잔여물 없이 정리). 개발 모드로 띄워둔 실제 앱이 Rust 변경을 자동 재빌드하는 것도 확인.
 
+### 9월 19일 — MCP 쿼리 에디터 UI 제어 부활 (write_to_editor / 탭 조작 / execute_in_editor)
+
+Connections 관리 기능을 마친 뒤, 사용자가 이어서 요청: (1) VS Code처럼 탭을 드래그해서 순서를 바꿀 수 있게, (2) Claude가 쿼리 입력·탭 조작·쿼리 실행도 UI 조작으로 할 수 있게, (3) "예전에 있었던 것 같은데 삭제된 UI 조작 기능"을 다시 살려달라 — 이 세 번째 요청이 정확히 Phase 17에서 제거됐던 그 기능을 가리킴.
+
+먼저 새 폴링 방식(`invoke("get_pending_ui_commands")`를 1초마다 호출)으로 구현을 시작했다가, `App.tsx`에 이미 존재하던 죽은 코드를 발견: `uiCmdHandlerRef`(액션 디스패처를 담은 ref, `runQueryRef`와 동일한 stale-closure 방지 패턴)와 `listen("ui-command", ...)` 이벤트 리스너가 `write_to_editor`/`new_tab`/`execute_in_editor`/`close_tab`/`switch_to_tab`/`refresh_sidebar`를 이미 전부 처리할 수 있게 구현돼 있었음 — 다만 이 `"ui-command"` 이벤트를 emit하는 쪽이 어디에도 없어서 죽어있었을 뿐(Phase 17에서 제거된 `_run_ui`가 SQL TCP 포트로 문자열을 보내는 방식이었던 흔적으로 추정, 그 서버 쪽만 제거되고 프런트 쪽은 안 치워졌던 것). 새로 짠 폴링 코드를 지우고, 이 기존 디스패처를 실제로 살리는 방향으로 설계를 바꿈:
+
+- **`main.rs`**: `UiCommand{id, action, params, status, result}` 구조체 + `code/data/ui_commands.json` 큐(읽기/쓰기 헬퍼는 Connections와 동일한 임시 파일+원자적 rename 패턴). 앱 시작 시(`setup`) 배경 스레드를 하나 띄워 400ms 간격으로 이 큐를 폴링 — `pending` 항목을 찾으면 `in_progress`로 바꾸고 `app_handle.emit("ui-command", {id, action, data})`로 프런트에 전달(`data`는 문자열이면 그대로, 객체면 JSON 텍스트로 직렬화해 프런트가 필요시 `JSON.parse`). `complete_ui_command` Tauri 커맨드는 프런트가 처리를 끝낸 뒤 같은 항목에 결과를 채워 `done`으로 바꿈. 처음 만들었던 `get_pending_ui_commands`(프런트 폴링용)는 이 이벤트 기반 설계로 대체되며 안 쓰게 돼 삭제.
+- **`App.tsx`**: 기존 `uiCmdHandlerRef`를 확장 — `id`를 받아 처리 후 `invoke("complete_ui_command", {id, result})`로 결과를 돌려주도록 모든 액션 분기에 `finish(...)` 호출 추가. `execute_in_editor`는 기존의 `setTimeout(..., 200)` 실행 후 결과를 안 돌려주던 방식에서, 실행 후 실제 `tabResults`를 읽어 JSON으로 반환하도록 개선. `write_to_editor`는 특정 탭을 지정할 수 있도록(`{tab, content}`) 확장. `list_tabs`/`get_tab_content` 두 조회용 액션도 같은 디스패처에 추가.
+- **동시성 버그 발견 및 수정** (모두 실제 테스트로 재현 후 수정, 가정으로 넘어가지 않음):
+  1. 이 큐 파일은 Rust 배경 스레드(400ms)와 별도 Python 프로세스(200ms) 양쪽이 자주 쓰기 때문에, 고정된 이름의 임시 파일(`ui_commands.json.tmp`)을 공유하면 두 쓰기가 겹칠 때 한쪽의 rename이 상대가 이미 지운 파일을 찾다 `FileNotFoundError`/`PermissionError`가 나는 경합을 실제로 재현 — 양쪽 다 호출마다 고유한 임시 파일명(pid+스레드id+타임스탬프)을 쓰도록 수정.
+  2. 그걸 고친 뒤에도, 두 MCP 도구 호출이 거의 동시에 큐에 항목을 추가하면 "읽고-고치고-통째로 다시 쓰기"가 원자적이지 않아 나중에 쓰는 쪽이 먼저 쓴 쪽의 항목을 통째로 덮어써 사라지는 경합을 멀티스레드 테스트로 재현(둘 중 하나가 응답을 영영 못 받고 자기 타임아웃까지 멈춰있었음) — `code/data/ui_commands.json.lock`(`O_CREAT|O_EXCL`로 만드는 락 파일 자체를 뮤텍스로 사용)로 Rust·Python 양쪽의 read-modify-write 구간을 직렬화해 해결. 두 프로세스가 동일한 락 파일명 규칙을 공유하므로 언어와 무관하게 서로 잠금.
+- **`mcp_server.py`**: `write_to_editor`/`new_editor_tab`/`close_editor_tab`/`switch_editor_tab`/`list_editor_tabs`/`get_editor_tab_content`/`execute_in_editor` 7개 신규 도구 — 전부 위 큐에 pending 항목을 넣고 최대 20초 폴링해 `done` 결과를 기다리는 공통 헬퍼(`_send_ui_command`) 사용, 타임아웃 시 큐에서 자동 제거(응답 포기한 호출이 나중에 앱이 켜졌을 때 뒤늦게 처리되는 것 방지).
+- **검증**: `cargo build/test --release`, `tsc --noEmit`, `vite build` 전부 클린. `mcp_server.py`는 Phase 48/9월 19일 Connections 작업과 동일한 스텁 기법으로 9가지 시나리오(타임아웃+큐 정리, 개별 액션 6종의 라운드트립과 파라미터 모양, 오래된 완료 항목 정리, 동시 호출 2개 격리) 3회 연속 반복 통과 확인. 여기서 그치지 않고 **실제로 켜져 있던 개발 모드 앱**(사용자가 직접 로그인)을 대상으로 `code/data/ui_commands.json`에 직접 명령을 써 넣는 방식으로 `list_tabs`·`execute_in_editor`(실제 쿼리 실행 결과 반환 확인)·`new_tab`·`write_to_editor`·`get_tab_content`·`switch_to_tab`·`close_tab` 7개 액션을 실제 화면에 반영되는 것까지 라이브로 확인 — Phase 17이 "그럴듯해 보이지만 실제로는 응답하는 쪽이 없었던" 실패였던 것과 달리, 이번엔 파일을 통해 실제 앱 창의 탭이 생기고 사라지고 쿼리가 실행되는 것을 직접 확인.
+
+VS Code 스타일 탭 드래그 순서 변경(요청의 1번 항목)은 같은 세션에서 별도로 완료 — 메인 탭바 안에서의 순서 변경만 지원(스플릿 뷰는 탭 1개만 지원하는 기존 구조라 드래그로 스플릿에 넣는 것은 범위 밖으로 명시적으로 제외).
+
 ---
 
 ## 요약: 1학기 대비 2학기에 달라진 것

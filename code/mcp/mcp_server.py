@@ -12,6 +12,7 @@ import os
 import re
 import socket
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -307,6 +308,175 @@ def delete_connection(id_or_name: str) -> str:
         return f"{len(by_name)} connections are named '{id_or_name}' (ids: {ids}). Retry delete_connection with a specific id."
     _save_connections([c for c in connections if c["id"] != by_name[0]["id"]])
     return f"Deleted connection '{id_or_name}' (id: {by_name[0]['id']})."
+
+
+# ─── UI 조작 (에디터/탭/쿼리 실행) ───────────────────────────────
+# code/data/ui_commands.json을 통한 큐. 여기서 "pending" 항목을 넣으면 RuSQL 앱의
+# 백그라운드 스레드(main.rs)가 그걸 집어 "ui-command" Tauri 이벤트로 프런트에 보내고,
+# 프런트가 실제로 화면을 조작한 뒤 결과를 같은 항목에 채워 "done"으로 바꾼다 - 그걸
+# 여기서 잠깐 폴링해 기다렸다가 돌려준다. Phase 17에서 제거됐던 UI 제어 도구들과
+# 겉모습은 비슷하지만, 그때는 응답하는 쪽이 아예 없는 죽은 프로토콜이었고 이번엔
+# main.rs 스레드 + App.tsx의 uiCmdHandlerRef가 실제로 응답한다.
+_UI_COMMANDS_FILE = Path(__file__).resolve().parent.parent / "data" / "ui_commands.json"
+_UI_COMMAND_TIMEOUT_SEC = 20.0
+_UI_COMMAND_POLL_SEC = 0.2
+
+
+def _load_ui_commands() -> list[dict]:
+    try:
+        return json.loads(_UI_COMMANDS_FILE.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError):
+        return []
+
+
+def _save_ui_commands(cmds: list[dict]) -> None:
+    _UI_COMMANDS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    # 이 파일은 Rust 배경 스레드(main.rs)와 이 프로세스 양쪽이 자주 쓴다. 고정된
+    # 이름의 임시 파일을 공유하면 두 쓰기가 겹칠 때 한쪽의 replace가 상대가 이미
+    # 없애버린 파일을 찾다 FileNotFoundError 나는 경합이 생기므로(동시 호출 2개로
+    # 실제 재현됨), 쓰기마다 고유한 임시 파일명을 쓴다.
+    tmp_path = _UI_COMMANDS_FILE.with_suffix(f".json.tmp.{os.getpid()}.{threading.get_ident()}.{time.time_ns()}")
+    tmp_path.write_text(json.dumps(cmds, ensure_ascii=False, indent=2), encoding="utf-8")
+    # Windows는 다른 프로세스/스레드가 대상 파일을 잠깐 열어둔 순간에 os.replace가
+    # ERROR_SHARING_VIOLATION으로 실패할 수 있음 (POSIX rename과 달리) — 몇 번 짧게
+    # 재시도해서 흡수한다.
+    for attempt in range(10):
+        try:
+            tmp_path.replace(_UI_COMMANDS_FILE)
+            return
+        except PermissionError:
+            if attempt == 9:
+                raise
+            time.sleep(0.03)
+
+
+def _ui_lock_path() -> "Path":
+    return _UI_COMMANDS_FILE.with_suffix(".json.lock")
+
+
+class _UiCommandsLock:
+    """code/data/ui_commands.json에 대한 파일 기반 상호 배제 락.
+
+    Rust 배경 스레드(main.rs)와 이 프로세스(및 그 안의 동시 도구 호출들) 양쪽이 이
+    파일에 "읽고 - 고치고 - 통째로 다시 쓰기"를 한다. 락 없이 이 read-modify-write를
+    하면, 두 호출이 겹칠 때 나중에 쓰는 쪽이 상대가 방금 큐에 넣은 항목을 못 본 채
+    자기 스냅샷으로 덮어써 그 항목이 통째로 사라질 수 있다(동시 MCP 도구 호출 2개로
+    실제 재현: 하나는 처리됐지만 다른 하나는 큐에서 사라져 자기 타임아웃까지 응답
+    없이 멈춰있었음). O_CREAT|O_EXCL로 만드는 락 파일 자체를 뮤텍스로 쓰며, Rust
+    쪽도 (main.rs의 UiCommandsLock) 동일한 파일명 규칙으로 잠근다."""
+
+    def __enter__(self):
+        path = _ui_lock_path()
+        deadline = time.time() + 5.0
+        while True:
+            try:
+                fd = os.open(str(path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                os.close(fd)
+                return self
+            except FileExistsError:
+                if time.time() > deadline:
+                    # 락을 쥔 프로세스가 죽어서 남은 파일일 수 있으니 정리 후 재시도
+                    try:
+                        path.unlink()
+                    except OSError:
+                        pass
+                    deadline = time.time() + 5.0
+                time.sleep(0.01)
+
+    def __exit__(self, exc_type, exc, tb):
+        try:
+            _ui_lock_path().unlink()
+        except OSError:
+            pass
+        return False
+
+
+def _send_ui_command(action: str, params) -> str:
+    cmd_id = str(int(time.time() * 1_000_000))
+    with _UiCommandsLock():
+        cmds = [c for c in _load_ui_commands() if c.get("status") in ("pending", "in_progress")]
+        cmds.append({"id": cmd_id, "action": action, "params": params, "status": "pending", "result": None})
+        _save_ui_commands(cmds)
+
+    deadline = time.time() + _UI_COMMAND_TIMEOUT_SEC
+    while time.time() < deadline:
+        time.sleep(_UI_COMMAND_POLL_SEC)
+        entry = next((c for c in _load_ui_commands() if c["id"] == cmd_id), None)
+        if entry and entry.get("status") == "done":
+            with _UiCommandsLock():
+                _save_ui_commands([c for c in _load_ui_commands() if c["id"] != cmd_id])
+            return entry.get("result") or ""
+    # 타임아웃 시 이 항목을 큐에서 지운다 — 안 지우면 앱이 나중에 다시 켜졌을 때
+    # 이미 포기한 이 호출을 뒤늦게 처리해버리거나, 큐가 계속 불어날 수 있음.
+    with _UiCommandsLock():
+        _save_ui_commands([c for c in _load_ui_commands() if c["id"] != cmd_id])
+    return "Error: timed out waiting for the RuSQL app to respond. Is it running and logged in?"
+
+
+@mcp.tool()
+def write_to_editor(query: str, tab: str = "") -> str:
+    """Write SQL text into the RuSQL query editor, replacing the current content of the
+    given tab (or the currently active tab if `tab` is omitted). This only fills the
+    editor - it does not run the query; use execute_in_editor for that. Requires the
+    RuSQL app to be open and logged in."""
+    params = {"content": query, "tab": tab} if tab else {"content": query}
+    return _send_ui_command("write_to_editor", params)
+
+
+@mcp.tool()
+def new_editor_tab(name: str = "", query: str = "") -> str:
+    """Open a new query tab in the RuSQL editor, optionally pre-filled with SQL and a
+    custom tab name. Requires the RuSQL app to be open and logged in."""
+    params = {}
+    if name:
+        params["name"] = name
+    if query:
+        params["query"] = query
+    return _send_ui_command("new_tab", params)
+
+
+@mcp.tool()
+def close_editor_tab(tab: str) -> str:
+    """Close the RuSQL editor tab with this exact name. Requires the RuSQL app to be
+    open and logged in."""
+    return _send_ui_command("close_tab", tab)
+
+
+@mcp.tool()
+def switch_editor_tab(tab: str) -> str:
+    """Switch focus to the RuSQL editor tab with this exact name. Requires the RuSQL
+    app to be open and logged in."""
+    return _send_ui_command("switch_to_tab", tab)
+
+
+@mcp.tool()
+def list_editor_tabs() -> str:
+    """List the names of all open tabs in the RuSQL editor, in order. Returns a JSON
+    array. Requires the RuSQL app to be open and logged in."""
+    return _send_ui_command("list_tabs", "")
+
+
+@mcp.tool()
+def get_editor_tab_content(tab: str = "") -> str:
+    """Get the current SQL text in the given RuSQL editor tab (or the active tab if
+    `tab` is omitted). Requires the RuSQL app to be open and logged in."""
+    return _send_ui_command("get_tab_content", tab)
+
+
+@mcp.tool()
+def execute_in_editor(query: str = "", tab: str = "") -> str:
+    """Run a query in the RuSQL editor UI itself (as if the user clicked Run), in the
+    given tab or the active tab if omitted. If `query` is given it replaces that tab's
+    content first, otherwise whatever is already in the tab is run as-is. Returns the
+    result as JSON. Unlike execute_sql (which runs invisibly against the engine), this
+    drives the real UI so the user sees the query and its result appear on screen.
+    Requires the RuSQL app to be open and logged in."""
+    params = {}
+    if tab:
+        params["tab"] = tab
+    if query:
+        params["query"] = query
+    return _send_ui_command("execute_in_editor", params)
 
 
 if __name__ == "__main__":

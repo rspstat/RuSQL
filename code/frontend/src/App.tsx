@@ -76,6 +76,9 @@ function App() {
   // 탭 상태 (로그인 전까지 기본값, doLogin 시 연결별 저장 데이터로 교체)
   const [tabs, setTabs] = useState<Tab[]>([{ id: "1", name: "query.sql", content: "SHOW TABLES;" }]);
   const [activeTabId, setActiveTabId] = useState<string>("1");
+  // 탭 드래그 재정렬 (VS Code 스타일 — 메인 탭 목록 안에서만, 스플릿 패널로의 드래그는 미지원)
+  const [draggedTabId, setDraggedTabId] = useState<string | null>(null);
+  const [dragOverTabId, setDragOverTabId] = useState<string | null>(null);
   const activeTab = tabs.find(t => t.id === activeTabId) ?? tabs[0];
   const queryRef = useRef<string>(activeTab?.content ?? "");
   // setValue() 호출 중 onChange가 잘못된 탭에 내용을 저장하지 못하도록 막는 플래그
@@ -125,7 +128,7 @@ function App() {
   const [splitTabStash, setSplitTabStash] = useState<(Tab & { insertIdx: number }) | null>(null);
   const [splitLeftPct, setSplitLeftPct] = useState(50);
   const runQueryRef = useRef<() => Promise<void>>(async () => {});
-  const uiCmdHandlerRef = useRef<(action: string, data: string) => void>(() => {});
+  const uiCmdHandlerRef = useRef<(id: string, action: string, data: string) => void>(() => {});
   const syncTabTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const splitEditorRef = useRef<Monaco.editor.IStandaloneCodeEditor | null>(null);
   const splitQueryRef = useRef<string>("");
@@ -689,11 +692,24 @@ function App() {
   // addCommand가 첫 렌더링의 runQuery를 캡처하는 stale closure 방지
   useEffect(() => { runQueryRef.current = runQuery; });
 
-  // MCP UI 커맨드 핸들러 — 매 렌더마다 최신 state를 캡처
+  // MCP UI 커맨드 핸들러 — 매 렌더마다 최신 state를 캡처.
+  // Rust가 code/data/ui_commands.json을 폴링하다 새 항목을 찾으면 "ui-command" 이벤트로
+  // {id, action, data}를 emit한다. 여기서 실제로 처리한 뒤 complete_ui_command로 결과를
+  // 돌려보내야 MCP 쪽 도구 호출이 완료된다 (Phase 17과 달리 응답하는 쪽이 진짜로 존재함).
   useEffect(() => {
-    uiCmdHandlerRef.current = (action: string, data: string) => {
+    uiCmdHandlerRef.current = (id: string, action: string, data: string) => {
+      const finish = (result: string) => { invoke("complete_ui_command", { id, result }).catch(() => {}); };
       if (action === "write_to_editor") {
-        setEditorQuery(data);
+        let tabName = "";
+        let content = data;
+        try { const p = JSON.parse(data); if (p && typeof p.content === "string") { tabName = p.tab || ""; content = p.content; } } catch {}
+        if (tabName) {
+          applyExternalTabContent(tabName, content);
+          finish(`Wrote to tab '${tabName}'.`);
+        } else {
+          setEditorQuery(content);
+          finish("Wrote to the active tab.");
+        }
       } else if (action === "new_tab") {
         let tabName = "query.sql";
         let content = data;
@@ -710,17 +726,39 @@ function App() {
         isSwitchingTab.current = true;
         editorRef.current?.setValue(content);
         isSwitchingTab.current = false;
+        invoke("sync_tab_list", { names: next.map(t => t.name) });
+        finish(`Opened new tab '${tabName}'.`);
       } else if (action === "execute_in_editor") {
-        setEditorQuery(data);
-        setTimeout(() => runQueryRef.current(), 200);
+        let tabName = "";
+        let content: string | null = null;
+        try { const p = JSON.parse(data); tabName = p.tab || ""; if (typeof p.query === "string") content = p.query; } catch { if (data) content = data; }
+        const target = tabName ? tabs.find(t => t.name === tabName) : tabs.find(t => t.id === activeTabId);
+        if (!target) { finish(`No tab named '${tabName}' found.`); return; }
+        if (target.id !== activeTabId) switchTab(target.id);
+        if (content !== null) setEditorQuery(content);
+        setTimeout(async () => {
+          await runQueryRef.current();
+          const finalId = localStorage.getItem(`rusql_active_tab_${connIdRef.current}`) || target.id;
+          setTabResults(cur => { finish(JSON.stringify(cur[finalId] ?? [])); return cur; });
+        }, 200);
       } else if (action === "close_tab") {
         const target = tabs.find(t => t.name === data);
-        if (target) closeTab(target.id);
+        if (target) { closeTab(target.id); finish(`Closed tab '${data}'.`); }
+        else finish(`No tab named '${data}' found.`);
       } else if (action === "switch_to_tab") {
         const target = tabs.find(t => t.name === data);
-        if (target) switchTab(target.id);
+        if (target) { switchTab(target.id); finish(`Switched to tab '${data}'.`); }
+        else finish(`No tab named '${data}' found.`);
+      } else if (action === "list_tabs") {
+        finish(JSON.stringify(tabs.map(t => t.name)));
+      } else if (action === "get_tab_content") {
+        const target = data ? tabs.find(t => t.name === data) : tabs.find(t => t.id === activeTabId);
+        finish(target ? target.content : `No tab named '${data}' found.`);
       } else if (action === "refresh_sidebar") {
         refreshSidebar();
+        finish("Sidebar refreshed.");
+      } else {
+        finish(`Unknown action '${action}'.`);
       }
     };
   });
@@ -730,8 +768,8 @@ function App() {
     if (!loggedIn) return;
     let unlisten: (() => void) | undefined;
     import("@tauri-apps/api/event").then(({ listen }) => {
-      listen<{ action: string; data: string }>("ui-command", (e) => {
-        uiCmdHandlerRef.current(e.payload.action, e.payload.data);
+      listen<{ id: string; action: string; data: string }>("ui-command", (e) => {
+        uiCmdHandlerRef.current(e.payload.id, e.payload.action, e.payload.data);
       }).then(fn => { unlisten = fn; });
     });
     return () => { unlisten?.(); };
@@ -782,7 +820,7 @@ function App() {
   };
 
   // 새 탭 추가
-  const addTab = () => {
+  const addTab = (): Tab => {
     const currentContent = editorRef.current?.getValue() ?? queryRef.current;
     const updated = tabs.map(t => t.id === activeTabId ? { ...t, content: currentContent } : t);
     const newId = Date.now().toString();
@@ -801,6 +839,7 @@ function App() {
     isSwitchingTab.current = true;
     editorRef.current?.setValue("");
     isSwitchingTab.current = false;
+    return newTab;
   };
 
   // 탭 닫기
@@ -883,6 +922,24 @@ function App() {
     a.click();
     a.remove();
     URL.revokeObjectURL(url);
+  };
+
+  // MCP write_to_editor용 — 이름으로 탭을 찾아 내용을 덮어쓰거나(없으면 새로 만들어) 채움.
+  // 활성 탭이면 Monaco 에디터에도 즉시 반영.
+  const applyExternalTabContent = (name: string, content: string): Tab => {
+    const existing = tabs.find(t => t.name === name);
+    const target: Tab = existing ? { ...existing, content } : { id: Date.now().toString(), name, content };
+    const next = existing ? tabs.map(t => t.id === target.id ? target : t) : [...tabs, target];
+    saveTabs(next);
+    invoke("sync_tab_list", { names: next.map(t => t.name) });
+    invoke("sync_tab_content", { name: target.name, content: target.content });
+    if (target.id === activeTabId) {
+      queryRef.current = content;
+      isSwitchingTab.current = true;
+      editorRef.current?.setValue(content);
+      isSwitchingTab.current = false;
+    }
+    return target;
   };
 
   const togglePin = (id: string) => {
@@ -2081,7 +2138,7 @@ function App() {
                 {tabs.map(tab => (
                   <div
                     key={tab.id}
-                    className={`tab ${tab.id === activeTabId ? "active" : ""}${pinnedTabs.has(tab.id) ? " pinned" : ""}`}
+                    className={`tab ${tab.id === activeTabId ? "active" : ""}${pinnedTabs.has(tab.id) ? " pinned" : ""}${draggedTabId === tab.id ? " dragging" : ""}${dragOverTabId === tab.id ? " drag-over" : ""}`}
                     onClick={() => switchTab(tab.id)}
                     onDoubleClick={e => {
                       e.stopPropagation();
@@ -2092,6 +2149,35 @@ function App() {
                       e.preventDefault();
                       e.stopPropagation();
                       setTabCtxMenu({ x: e.clientX, y: e.clientY, tabId: tab.id, source: "main" });
+                    }}
+                    draggable
+                    onDragStart={e => {
+                      setDraggedTabId(tab.id);
+                      e.dataTransfer.effectAllowed = "move";
+                    }}
+                    onDragOver={e => {
+                      e.preventDefault();
+                      if (draggedTabId && draggedTabId !== tab.id) setDragOverTabId(tab.id);
+                    }}
+                    onDragLeave={() => setDragOverTabId(prev => (prev === tab.id ? null : prev))}
+                    onDrop={e => {
+                      e.preventDefault();
+                      if (draggedTabId && draggedTabId !== tab.id) {
+                        const fromIdx = tabs.findIndex(t => t.id === draggedTabId);
+                        const toIdx = tabs.findIndex(t => t.id === tab.id);
+                        if (fromIdx !== -1 && toIdx !== -1) {
+                          const reordered = [...tabs];
+                          const [moved] = reordered.splice(fromIdx, 1);
+                          reordered.splice(toIdx, 0, moved);
+                          saveTabs(reordered);
+                        }
+                      }
+                      setDraggedTabId(null);
+                      setDragOverTabId(null);
+                    }}
+                    onDragEnd={() => {
+                      setDraggedTabId(null);
+                      setDragOverTabId(null);
                     }}
                   >
                     {pinnedTabs.has(tab.id) && <span className="tab-pin-icon" title="Pinned">📌</span>}

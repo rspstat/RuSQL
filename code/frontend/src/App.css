@@ -589,6 +589,14 @@ body {
   border-top: 1px solid #4ec9b0;
 }
 
+.tab.dragging {
+  opacity: 0.4;
+}
+
+.tab.drag-over {
+  box-shadow: inset 2px 0 0 0 #4ec9b0;
+}
+
 .tab-icon {
   color: #4ec9b0;
   font-size: 12px;
