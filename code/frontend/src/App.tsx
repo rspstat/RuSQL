@@ -67,6 +67,59 @@ function saveHistory(connId: string, h: HistoryEntry[]) {
   localStorage.setItem(`rusql_history_${connId}`, JSON.stringify(h.slice(0, MAX_HISTORY)));
 }
 
+// 마우스 이벤트 기반 드래그 순서 변경. 네이티브 HTML5 draggable/dragstart/drop 대신 이걸 쓰는 이유:
+// WebView2에서 네이티브 드래그가 (겉보기엔 로직이 맞는데도) 시각적 피드백 없이 사실상
+// 동작하지 않는다는 사용자 리포트가 있어, 어떤 브라우저/webview에서도 항상 동작하는
+// mousedown/mousemove/mouseup 기반 수동 구현으로 교체 — 탭 재정렬과 Connections
+// 재정렬 둘 다 이 함수 하나를 공유한다. 임계값(4px) 전까지는 그냥 클릭으로 취급해
+// 기존 onClick(탭 전환/연결 등)이 그대로 동작하고, 실제로 드래그가 일어났을 때만
+// justDraggedRef를 잠깐 세워 뒤따라오는 click 이벤트가 원치 않게 발동하지 않게 막는다.
+function startReorderDrag(
+  e: React.MouseEvent,
+  id: string,
+  containerSelector: string,
+  onDragState: (draggedId: string | null, overId: string | null) => void,
+  onReorder: (fromId: string, toId: string) => void,
+  justDraggedRef: React.MutableRefObject<boolean>
+) {
+  if (e.button !== 0) return;
+  const startX = e.clientX;
+  const startY = e.clientY;
+  const THRESHOLD = 4;
+  let dragging = false;
+
+  const overIdAt = (x: number, y: number): string | null => {
+    const el = document.elementFromPoint(x, y)?.closest(containerSelector) as HTMLElement | null;
+    return el?.getAttribute("data-drag-id") ?? null;
+  };
+
+  const onMove = (me: MouseEvent) => {
+    if (!dragging) {
+      if (Math.abs(me.clientX - startX) < THRESHOLD && Math.abs(me.clientY - startY) < THRESHOLD) return;
+      dragging = true;
+      document.body.style.userSelect = "none";
+    }
+    const overId = overIdAt(me.clientX, me.clientY);
+    onDragState(id, overId && overId !== id ? overId : null);
+  };
+
+  const onUp = (me: MouseEvent) => {
+    document.removeEventListener("mousemove", onMove);
+    document.removeEventListener("mouseup", onUp);
+    document.body.style.userSelect = "";
+    if (dragging) {
+      const overId = overIdAt(me.clientX, me.clientY);
+      if (overId && overId !== id) onReorder(id, overId);
+      justDraggedRef.current = true;
+      setTimeout(() => { justDraggedRef.current = false; }, 0);
+    }
+    onDragState(null, null);
+  };
+
+  document.addEventListener("mousemove", onMove);
+  document.addEventListener("mouseup", onUp);
+}
+
 // ─── 메인 컴포넌트 ────────────────────────────────────────────
 function App() {
   // 현재 연결 ID (localStorage 키 네임스페이스용, ref는 클로저에서 안전하게 참조)
@@ -79,6 +132,7 @@ function App() {
   // 탭 드래그 재정렬 (VS Code 스타일 — 메인 탭 목록 안에서만, 스플릿 패널로의 드래그는 미지원)
   const [draggedTabId, setDraggedTabId] = useState<string | null>(null);
   const [dragOverTabId, setDragOverTabId] = useState<string | null>(null);
+  const justDraggedTabRef = useRef(false);
   const activeTab = tabs.find(t => t.id === activeTabId) ?? tabs[0];
   const queryRef = useRef<string>(activeTab?.content ?? "");
   // setValue() 호출 중 onChange가 잘못된 탭에 내용을 저장하지 못하도록 막는 플래그
@@ -193,6 +247,21 @@ function App() {
   const saveConnections = (c: Connection[]) => {
     setConnections(c);
     invoke("save_connections", { connections: c }).catch(() => {});
+  };
+  // Connections 드래그 재정렬 (홈 화면 사이드바 목록 + 카드 그리드 둘 다 같은 connections
+  // 배열을 그리므로 재정렬 로직도 하나만 공유 — startReorderDrag는 어느 쪽에서 드래그를
+  // 시작하든 동일하게 동작)
+  const [draggedConnId, setDraggedConnId] = useState<string | null>(null);
+  const [dragOverConnId, setDragOverConnId] = useState<string | null>(null);
+  const justDraggedConnRef = useRef(false);
+  const reorderConnections = (fromId: string, toId: string) => {
+    const fromIdx = connections.findIndex(c => c.id === fromId);
+    const toIdx = connections.findIndex(c => c.id === toId);
+    if (fromIdx === -1 || toIdx === -1) return;
+    const reordered = [...connections];
+    const [moved] = reordered.splice(fromIdx, 1);
+    reordered.splice(toIdx, 0, moved);
+    saveConnections(reordered);
   };
   const [appDataBase, setAppDataBase] = useState("");
 
@@ -1526,11 +1595,21 @@ function App() {
             {connections.map(conn => (
               <div
                 key={conn.id}
-                className="home-sidebar-item"
+                data-drag-id={conn.id}
+                className={`home-sidebar-item${draggedConnId === conn.id ? " dragging" : ""}${dragOverConnId === conn.id ? " drag-over" : ""}`}
                 title={conn.name}
                 onClick={() => {
+                  if (justDraggedConnRef.current) return;
                   if (conn.autoLogin && conn.password) { handleAutoLogin(conn); }
                   else { setConnectingTo(conn); setDlgPass(conn.password ?? ""); setDlgError(""); }
+                }}
+                onMouseDown={e => {
+                  startReorderDrag(
+                    e, conn.id, ".home-sidebar-item[data-drag-id]",
+                    (d, o) => { setDraggedConnId(d); setDragOverConnId(o); },
+                    reorderConnections,
+                    justDraggedConnRef
+                  );
                 }}
               >
                 <svg width="13" height="16" viewBox="0 0 24 24" preserveAspectRatio="none" fill="none" style={{ flexShrink: 0 }}>
@@ -1631,10 +1710,21 @@ function App() {
               {connections.map(conn => (
                 <div
                   key={conn.id}
-                  className="home-conn-card"
+                  data-drag-id={conn.id}
+                  className={`home-conn-card${draggedConnId === conn.id ? " dragging" : ""}${dragOverConnId === conn.id ? " drag-over" : ""}`}
                   onClick={() => {
+                    if (justDraggedConnRef.current) return;
                     if (conn.autoLogin && conn.password) { handleAutoLogin(conn); }
                     else { setConnectingTo(conn); setDlgPass(conn.password ?? ""); setDlgError(""); }
+                  }}
+                  onMouseDown={e => {
+                    if ((e.target as HTMLElement).closest(".home-conn-del")) return;
+                    startReorderDrag(
+                      e, conn.id, ".home-conn-card[data-drag-id]",
+                      (d, o) => { setDraggedConnId(d); setDragOverConnId(o); },
+                      reorderConnections,
+                      justDraggedConnRef
+                    );
                   }}
                 >
                   <div className="home-conn-card-icon">
@@ -2138,8 +2228,9 @@ function App() {
                 {tabs.map(tab => (
                   <div
                     key={tab.id}
+                    data-drag-id={tab.id}
                     className={`tab ${tab.id === activeTabId ? "active" : ""}${pinnedTabs.has(tab.id) ? " pinned" : ""}${draggedTabId === tab.id ? " dragging" : ""}${dragOverTabId === tab.id ? " drag-over" : ""}`}
-                    onClick={() => switchTab(tab.id)}
+                    onClick={() => { if (justDraggedTabRef.current) return; switchTab(tab.id); }}
                     onDoubleClick={e => {
                       e.stopPropagation();
                       setEditingTabId(tab.id);
@@ -2150,34 +2241,23 @@ function App() {
                       e.stopPropagation();
                       setTabCtxMenu({ x: e.clientX, y: e.clientY, tabId: tab.id, source: "main" });
                     }}
-                    draggable
-                    onDragStart={e => {
-                      setDraggedTabId(tab.id);
-                      e.dataTransfer.effectAllowed = "move";
-                    }}
-                    onDragOver={e => {
-                      e.preventDefault();
-                      if (draggedTabId && draggedTabId !== tab.id) setDragOverTabId(tab.id);
-                    }}
-                    onDragLeave={() => setDragOverTabId(prev => (prev === tab.id ? null : prev))}
-                    onDrop={e => {
-                      e.preventDefault();
-                      if (draggedTabId && draggedTabId !== tab.id) {
-                        const fromIdx = tabs.findIndex(t => t.id === draggedTabId);
-                        const toIdx = tabs.findIndex(t => t.id === tab.id);
-                        if (fromIdx !== -1 && toIdx !== -1) {
-                          const reordered = [...tabs];
-                          const [moved] = reordered.splice(fromIdx, 1);
-                          reordered.splice(toIdx, 0, moved);
-                          saveTabs(reordered);
-                        }
-                      }
-                      setDraggedTabId(null);
-                      setDragOverTabId(null);
-                    }}
-                    onDragEnd={() => {
-                      setDraggedTabId(null);
-                      setDragOverTabId(null);
+                    onMouseDown={e => {
+                      if (editingTabId === tab.id || (e.target as HTMLElement).closest(".tab-close")) return;
+                      startReorderDrag(
+                        e, tab.id, ".tab-list .tab[data-drag-id]",
+                        (d, o) => { setDraggedTabId(d); setDragOverTabId(o); },
+                        (fromId, toId) => {
+                          const fromIdx = tabs.findIndex(t => t.id === fromId);
+                          const toIdx = tabs.findIndex(t => t.id === toId);
+                          if (fromIdx !== -1 && toIdx !== -1) {
+                            const reordered = [...tabs];
+                            const [moved] = reordered.splice(fromIdx, 1);
+                            reordered.splice(toIdx, 0, moved);
+                            saveTabs(reordered);
+                          }
+                        },
+                        justDraggedTabRef
+                      );
                     }}
                   >
                     {pinnedTabs.has(tab.id) && <span className="tab-pin-icon" title="Pinned">📌</span>}

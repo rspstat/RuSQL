@@ -282,6 +282,26 @@ Connections 관리 기능을 마친 뒤, 사용자가 이어서 요청: (1) VS C
 
 VS Code 스타일 탭 드래그 순서 변경(요청의 1번 항목)은 같은 세션에서 별도로 완료 — 메인 탭바 안에서의 순서 변경만 지원(스플릿 뷰는 탭 1개만 지원하는 기존 구조라 드래그로 스플릿에 넣는 것은 범위 밖으로 명시적으로 제외).
 
+### 9월 19일 — 탭 드래그가 실제로는 동작 안 함 발견 + 네이티브 HTML5 DnD → 마우스 이벤트 기반으로 전면 교체, Connections 드래그 재정렬 신규 추가
+
+사용자가 방금 완료한 탭 드래그 순서 변경이 실제로는 동작하지 않는다고 리포트. 코드만 읽어서는 로직 자체(`draggable`/`onDragStart`/`onDragOver`/`onDrop`)에 문제가 없어 보였는데, 이게 바로 함정 — Phase 53과 같은 교훈으로, tsc 통과와 "로직이 맞아 보임"은 실제 동작을 보장하지 않는다는 걸 다시 확인.
+
+원인을 코드 검토만으로 확신할 수 없어, 사용자 동의를 받고 떠있던 개발 모드 앱을 `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=9223`로 재시작 후 Chrome DevTools Protocol에 raw WebSocket으로 직접 붙어(`websocket-client`/`websockets` 둘 다 로컬에 없어 소켓+HTTP 업그레이드 핸드셰이크부터 직접 구현한 최소 CDP 클라이언트) `Input.dispatchMouseEvent`로 실제 마우스 press→move(여러 스텝)→release 시퀀스를 재현해 디버깅. 놀랍게도 이 합성 마우스 이벤트로는 네이티브 HTML5 드래그가 실제로 동작했음 — 즉 로직 자체는 맞았지만, Chromium이 CDP 합성 입력을 처리하는 경로와 WebView2에서 실제 물리 마우스가 트리거하는 네이티브 OS 드래그 세션 경로가 다를 수 있어(자동화 테스트에서 종종 보고되는 WebView2/Electron류의 알려진 간극), 진짜 사용자 마우스로는 안 될 가능성이 남음. 근본 원인을 100% 특정하기보다, 브라우저/webview에 무관하게 항상 동작이 보장되는 방식으로 아예 교체하는 쪽을 택함.
+
+**네이티브 HTML5 DnD(`draggable`+`onDragStart`/`onDragOver`/`onDrop`/`onDragEnd`) 완전 제거, 순수 `mousedown`/`mousemove`/`mouseup` 기반 커스텀 드래그로 교체** — 공용 헬퍼 `startReorderDrag(e, id, containerSelector, onDragState, onReorder, justDraggedRef)`를 새로 작성해 탭 재정렬과 (아래) Connections 재정렬 둘 다 하나의 구현을 공유:
+- `mousedown` 시점엔 아직 드래그로 취급하지 않고, 4px 이상 움직여야(threshold) 비로소 "드래그 중"으로 전환 — 그 전까지는 그냥 클릭으로 남아 기존 `onClick`(탭 전환/연결 열기)이 그대로 동작.
+- 드래그 중엔 `document.elementFromPoint(x, y)`로 커서 아래 어느 항목인지 찾아 `dragOverId` 갱신(각 항목에 `data-drag-id` 속성 부여).
+- `mouseup` 시 실제로 드래그가 있었으면 재정렬 콜백 호출 + `justDraggedRef`를 한 틱만 세워 뒤이어 발생하는 `click` 이벤트가 `switchTab`/연결 열기를 잘못 트리거하지 않게 막음(마우스다운·업 타깃이 같으면 이동 거리와 무관하게 `click`이 항상 발생하는 브라우저 특성 때문에 필요).
+
+**Connections 드래그 재정렬 신규 추가** (요청 2번 항목) — 홈 화면의 사이드바 목록(`.home-sidebar-item`)과 카드 그리드(`.home-conn-card`) 둘 다, 같은 `connections` 배열을 그리므로 `reorderConnections(fromId, toId)` 하나만 공유해서 적용. 어느 쪽에서 순서를 바꾸든 `saveConnections`를 통해 `code/data/connections.json`에 저장되므로 두 뷰가 항상 같은 순서를 보여줌. 그리드 카드는 우상단 삭제(✕) 버튼 위에서 시작한 마우스다운은 드래그로 취급하지 않도록 제외.
+
+**라이브 검증** (전부 CDP로 실제 합성 마우스 press/move/release 시퀀스 재현, 코드만 보고 넘어가지 않음):
+- 탭: query1.sql → query.sql 위치로 드래그해 실제 DOM 순서가 바뀌는 것 확인, 이어서 순수 클릭(이동 없음)으로 다른 탭 전환도 정상 동작 확인.
+- Connections 사이드바: 두 항목 드래그로 순서 변경 → `code/data/connections.json` 파일에 실제로 반영됨을 파일 읽기로 직접 확인.
+- Connections 그리드: 사이드바와 같은 배열을 공유하므로 순서가 자동으로 동기화되는 것 확인, 반대 방향 드래그로 원래 순서 복원, 이후 순수 클릭이 연결 다이얼로그를 정상적으로 여는 것까지 확인(드래그 판정이 클릭을 막지 않음을 검증).
+
+`tsc --noEmit`/`vite build` 클린. Rust 쪽 변경 없음(순수 프런트엔드 수정).
+
 ---
 
 ## 요약: 1학기 대비 2학기에 달라진 것

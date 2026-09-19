@@ -297,11 +297,13 @@
 ### UI (rusql-ui)
 - [x] Tauri + React 데스크탑 앱
 - [x] 홈(연결) 화면 — 3티어 실린더 아이콘 헤더, 퀵 액션 버튼 3종 (새 연결·터미널 열기·GitHub 방문), RDBMS 영문 소개 텍스트 (4줄), 저장된 연결 카드 그리드, 하단 상태 표시줄 (브랜치·버전·기술 스택), 좌측 액티비티 바 (유저 아이콘·설정 버튼), Tauri `open_terminal` (기본 경로: dbe/code) · `open_url` 커맨드
+- [x] 저장된 Connections 드래그 순서 변경 — 사이드바 목록(`.home-sidebar-item`)·카드 그리드(`.home-conn-card`) 둘 다 지원, 둘이 같은 `connections` 배열을 그리므로 어느 쪽에서 순서를 바꿔도 `code/data/connections.json`에 저장돼 항상 서로 동기화됨; 탭 드래그와 동일한 `startReorderDrag` 공용 헬퍼 재사용(마우스 이벤트 기반, 4px 임계값 이전엔 클릭으로 처리돼 연결 열기가 그대로 동작); 그리드 카드는 삭제(✕) 버튼 위에서 시작한 드래그는 무시
 - [x] Monaco Editor (SQL 문법 강조, 주석 회색)
 - [x] 다중 쿼리 탭 (탭 추가 / 전환 / 닫기, localStorage 자동 저장)
 - [x] 탭 이름 변경 — 탭 더블클릭 → 인라인 편집 → Enter/blur 커밋
 - [x] 탭 우클릭 컨텍스트 메뉴 (VSCode 스타일) — 닫기 / 다른 탭 닫기 / 오른쪽 탭 닫기 / 모두 닫기 / 이름 변경 / 고정·고정 해제 / 오른쪽으로 분할 / 왼쪽으로 분할 / 분할 및 이동; `source: "main" | "split"` 구분으로 분할 탭바에서도 동일 메뉴 제공
 - [x] 탭 고정 — `pinnedTabs: Set<string>`, 📌 아이콘 표시, 고정된 탭은 × 닫기 버튼 비활성화
+- [x] 탭 드래그 순서 변경 (VS Code 스타일, 메인 탭바 안에서만 — 스플릿 패널로의 드래그는 미지원) — 처음엔 네이티브 HTML5 `draggable`/`onDragStart`/`onDrop`으로 구현했으나 실제 마우스로는 동작하지 않는다는 리포트를 받고, WebView2 CDP(Chrome DevTools Protocol)에 raw WebSocket으로 직접 붙어 `Input.dispatchMouseEvent`로 실제 마우스 press→move→release를 재현해 디버깅 — 합성 입력으로는 네이티브 드래그가 동작해 진짜 원인을 특정하진 못했지만(Chromium이 자동화 입력을 처리하는 경로와 WebView2의 실제 OS 네이티브 드래그 세션 경로가 다를 수 있음), 어느 브라우저/webview에서도 항상 보장되는 순수 `mousedown`/`mousemove`/`mouseup` 기반 커스텀 드래그(`startReorderDrag` 공용 헬퍼)로 완전히 교체 — 4px 이동 임계값 이전엔 그냥 클릭으로 남아 기존 탭 전환이 그대로 동작하고, 실제 드래그 후엔 `justDraggedRef`로 뒤이은 `click` 이벤트를 한 틱 무시
 - [x] 분할 에디터 — 오른쪽으로 분할 / 왼쪽으로 분할 / 분할 및 이동 3종 동작, 드래그 가능한 구분선 (`splitLeftPct`), 독립 Monaco 인스턴스; 분할 시 탭이 왼쪽 탭바에서 사라지고 닫을 때 원래 위치에 복원 (`splitTabStash`)
 - [x] 에디터 툴바 (MySQL 스타일) — breadcrumb 아래 고정 행: SQL 파일 열기(폴더 아이콘) / SQL 파일 저장(플로피 아이콘, DOM append 방식으로 WebView2 다운로드 보장) / 번개 실행 버튼 (Ctrl+Enter 연동, `runQueryRef`로 stale closure 방지 — 탭 전환 후에도 항상 현재 활성 탭 기준 실행)
 - [x] 패널 토글 버튼 — 탭바 우측: 사이드바 토글 / 결과창 토글 (이전 높이 기억 후 복원) / 우측 패널(표시 전용); 활성 패널은 teal, 비활성은 회색
