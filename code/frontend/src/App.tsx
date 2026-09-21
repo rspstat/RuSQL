@@ -367,6 +367,7 @@ function App() {
     setActiveView("editor");
     invoke("sync_tab_list", { names: newTabs.map((t: Tab) => t.name) });
     newTabs.forEach((t: Tab) => invoke("sync_tab_content", { name: t.name, content: t.content }));
+    invoke("sync_login_state", { loggedIn: true });
     setLoggedIn(true);
     setConnectingTo(null);
     setDlgPass("");
@@ -438,9 +439,10 @@ function App() {
     }
   };
 
-  const handleAutoLogin = async (conn: Connection) => {
+  const handleAutoLogin = async (conn: Connection): Promise<boolean> => {
     const ok = await invoke<boolean>("authenticate", { user: conn.user, password: conn.password, dataDir: conn.dataDir, bufferPoolSize: parseInt(bufferPoolInput) || 64 });
     if (ok) doLogin(conn);
+    return ok;
   };
 
   const handleConnect = async (e: React.FormEvent) => {
@@ -768,6 +770,22 @@ function App() {
   useEffect(() => {
     uiCmdHandlerRef.current = (id: string, action: string, data: string) => {
       const finish = (result: string) => { invoke("complete_ui_command", { id, result }).catch(() => {}); };
+      if (action === "login") {
+        if (loggedIn) { finish("Error: this RuSQL window is already logged in. Log out first, or target a different app instance."); return; }
+        let idOrName = "";
+        try { const p = JSON.parse(data); idOrName = p.connection || ""; } catch { idOrName = data; }
+        const byId = connections.filter(c => c.id === idOrName);
+        const matches = byId.length ? byId : connections.filter(c => c.name === idOrName);
+        if (matches.length === 0) { finish(`No connection found with id or name '${idOrName}'.`); return; }
+        if (matches.length > 1) { finish(`${matches.length} connections are named '${idOrName}'. Retry with a specific id.`); return; }
+        const conn = matches[0];
+        if (!conn.password) { finish(`Connection '${conn.name}' has no saved password - can't log in without one.`); return; }
+        handleAutoLogin(conn).then(ok => {
+          finish(ok ? `Logged in to '${conn.name}'.` : `Login to '${conn.name}' failed - check host/port/credentials.`);
+        });
+        return;
+      }
+      if (!loggedIn) { finish("Error: not logged in. Call the login tool first (or the app needs to be logged in already)."); return; }
       if (action === "write_to_editor") {
         let tabName = "";
         let content = data;
@@ -826,15 +844,31 @@ function App() {
       } else if (action === "refresh_sidebar") {
         refreshSidebar();
         finish("Sidebar refreshed.");
+      } else if (action === "start_server") {
+        let port = parseInt(portInput) || 7878;
+        let mysqlPort = parseInt(mysqlPortInput) || 0;
+        try { const p = JSON.parse(data); if (p.port) port = p.port; if (p.mysqlPort) mysqlPort = p.mysqlPort; } catch {}
+        invoke<string>("start_server", { connId: connIdRef.current, port, mysqlPort })
+          .then(msg => { setServerMsg(msg); finish(msg); })
+          .catch(e => finish(`Error: ${e}`));
+      } else if (action === "stop_server") {
+        invoke<string>("stop_server", { connId: connIdRef.current })
+          .then(msg => { setServerMsg(msg); finish(msg); })
+          .catch(e => finish(`Error: ${e}`));
+      } else if (action === "get_server_status") {
+        invoke("get_server_status", { connId: connIdRef.current })
+          .then(s => finish(JSON.stringify(s)))
+          .catch(e => finish(`Error: ${e}`));
       } else {
         finish(`Unknown action '${action}'.`);
       }
     };
   });
 
-  // Tauri 이벤트 수신 — 로그인 후 한 번만 등록
+  // Tauri 이벤트 수신 — 앱 시작 시 한 번만 등록(로그인 여부와 무관). MCP의 "login" 액션이
+  // 로그인 전 홈 화면에서도 동작해야 하므로, 로그인 게이트는 uiCmdHandlerRef 안쪽(액션별
+  // 분기)으로 옮겼다 — 여기서 리스너 자체를 로그인 후로 미루면 login 액션을 영영 못 받는다.
   useEffect(() => {
-    if (!loggedIn) return;
     let unlisten: (() => void) | undefined;
     import("@tauri-apps/api/event").then(({ listen }) => {
       listen<{ id: string; action: string; data: string }>("ui-command", (e) => {
@@ -842,7 +876,7 @@ function App() {
       }).then(fn => { unlisten = fn; });
     });
     return () => { unlisten?.(); };
-  }, [loggedIn]);
+  }, []);
 
   // 에디터 내용 프로그래밍 방식으로 변경 — executeEdits로 undo 히스토리 보존
   const setEditorQuery = (q: string) => {
@@ -1967,6 +2001,7 @@ function App() {
               connIdRef.current = "";
               setSessionConnId("");
               setSessionUser("");
+              invoke("sync_login_state", { loggedIn: false });
               setLoggedIn(false);
               setTabs([{ id: "1", name: "query.sql", content: "SHOW TABLES;" }]);
               setActiveTabId("1");

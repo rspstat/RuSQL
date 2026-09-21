@@ -32,6 +32,7 @@ struct UiStore {
     tab_list:    Arc<Mutex<Vec<String>>>,             // ordered tab names
     last_result: Arc<Mutex<String>>,                  // last query result (TSV)
     current_db:  Arc<Mutex<String>>,                  // current database name
+    logged_in:   Arc<Mutex<bool>>,                    // 로그인(DB 세션 접속) 여부 — 다중 인스턴스 레지스트리용
 }
 
 // ─── C++ engine_server.exe 프로세스 + 그 프로세스에 대한 제어용 TCP 연결 ──────
@@ -59,9 +60,10 @@ impl Drop for EngineConn {
 }
 
 struct AppState {
-    db:      Arc<Mutex<Option<EngineConn>>>,
-    servers: Mutex<HashMap<String, ServerEntry>>,
-    ui:      Arc<UiStore>,
+    db:          Arc<Mutex<Option<EngineConn>>>,
+    servers:     Mutex<HashMap<String, ServerEntry>>,
+    ui:          Arc<UiStore>,
+    instance_id: String, // 이 프로세스의 수명 동안 고정 — 다중 인스턴스 레지스트리/타깃팅용
 }
 
 // Every `.lock()` call site in this file uses `.unwrap_or_else(|e| e.into_inner())`
@@ -1024,6 +1026,9 @@ fn setup_mcp_config(host: String, port: u16, user: String, password: String) -> 
     // 않아, 기본값과 다른 연결에서는 MCP 도구가 항상 연결/인증에 실패했음. Claude Desktop
     // 설정의 "env" 필드로 지금 이 세션의 실제 값을 넘겨 mcp_server.py가 그대로 읽어 쓰도록 함
     // (mcp_server.py 쪽은 env가 없으면 기존 하드코딩 기본값으로 폴백 — 하위 호환 유지).
+    // RUSQL_APP_PATH는 launch_app 도구가 앱이 안 켜져 있을 때 무엇을 실행할지 알려주는 값 —
+    // 지금 이 커맨드를 실행 중인 프로세스 자신의 경로(현재 세션의 실제 설치 위치)를 그대로 준다.
+    let app_path = std::env::current_exe().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
     let mcp_entry = serde_json::json!({
         "command": python_path,
         "args": ["-u", mcp_server_path.to_string_lossy().as_ref()],
@@ -1032,10 +1037,18 @@ fn setup_mcp_config(host: String, port: u16, user: String, password: String) -> 
             "RUSQL_PORT": port.to_string(),
             "RUSQL_USER": user,
             "RUSQL_PASS": password,
+            "RUSQL_APP_PATH": app_path,
         },
+        // 파괴적이거나(삭제·자격증명 변경) 위험 SQL 확인 우회처럼 사람이 매번 다시 확인해야
+        // 하는 도구는 일부러 뺐다 — Claude Desktop 자체 권한 팝업이 마지막 방어선.
         "alwaysAllow": [
             "execute_sql", "list_databases", "list_tables", "get_table_schema",
-            "explain_query", "get_indexes", "sample_data"
+            "explain_query", "get_indexes", "sample_data",
+            "list_connections", "add_connection",
+            "write_to_editor", "new_editor_tab", "close_editor_tab", "switch_editor_tab",
+            "list_editor_tabs", "get_editor_tab_content", "execute_in_editor",
+            "login", "list_app_instances", "launch_app",
+            "start_server", "get_server_status"
         ]
     });
 
@@ -1163,6 +1176,11 @@ fn sync_current_db(db: String, state: State<AppState>) {
     persist_ui_state(&state.ui);
 }
 
+#[tauri::command]
+fn sync_login_state(logged_in: bool, state: State<AppState>) {
+    *state.ui.logged_in.lock().unwrap_or_else(|e| e.into_inner()) = logged_in;
+}
+
 // ─── MCP용 UI 명령 큐 (에디터/탭 조작, 쓰기 방향) ────────────────
 // 읽기(UiStateSnapshot)와 반대 방향 — MCP가 "이 탭에 이 SQL 써줘" 같은 명령을 파일에
 // 추가하면, 프런트가 실행 중인 동안 주기적으로(로그인 후 1초 간격) 이 파일을 폴링해
@@ -1177,6 +1195,12 @@ struct UiCommand {
     status: String,
     #[serde(default)]
     result: Option<String>,
+    // 비어있으면("") 아무 인스턴스나 처리 가능(기존 동작과 동일, 하위 호환).
+    // 특정 인스턴스 id가 있으면 그 인스턴스만 pending -> in_progress로 집어갈 수 있음
+    // (RuSQL 창을 여러 개 띄워 서로 다른 DB에 접속해 쓰는 경우, MCP가 list_app_instances로
+    // 확인한 특정 인스턴스를 지정해 명령을 보낼 수 있게).
+    #[serde(default)]
+    target_instance: String,
 }
 
 fn ui_commands_file_path() -> std::path::PathBuf {
@@ -1218,6 +1242,103 @@ impl Drop for UiCommandsLock {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(ui_lock_path());
     }
+}
+
+// ─── 다중 앱 인스턴스 레지스트리 ──────────────────────────────────
+// RuSQL 창을 여러 개 띄워 서로 다른 DB에 동시 접속해 쓰는 경우, MCP가 "어느 창에
+// 명령을 보낼지" 고를 수 있도록 각 인스턴스가 자기 존재를 code/data/app_instances.json에
+// 주기적으로(배경 스레드 하트비트, ~2초 간격) 기록한다. 하트비트가 오래된(15초 이상)
+// 항목은 다음 쓰기 때 정리 — 창이 비정상 종료돼도 레지스트리가 죽은 항목으로 안 남게.
+#[derive(serde::Serialize, serde::Deserialize, Clone)]
+struct AppInstance {
+    id: String,
+    pid: u32,
+    #[serde(rename = "loggedIn")]
+    logged_in: bool,
+    #[serde(rename = "currentDb")]
+    current_db: String,
+    #[serde(rename = "lastHeartbeat")]
+    last_heartbeat: u64,
+}
+
+fn app_instances_file_path() -> std::path::PathBuf {
+    code_dir().join("data").join("app_instances.json")
+}
+
+fn instances_lock_path() -> std::path::PathBuf {
+    app_instances_file_path().with_extension("json.lock")
+}
+
+struct InstancesLock;
+
+impl InstancesLock {
+    fn acquire() -> Self {
+        let path = instances_lock_path();
+        let mut deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            match std::fs::OpenOptions::new().write(true).create_new(true).open(&path) {
+                Ok(_) => return InstancesLock,
+                Err(_) => {
+                    if std::time::Instant::now() > deadline {
+                        let _ = std::fs::remove_file(&path);
+                        deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+            }
+        }
+    }
+}
+
+impl Drop for InstancesLock {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(instances_lock_path());
+    }
+}
+
+fn read_app_instances() -> Vec<AppInstance> {
+    std::fs::read_to_string(app_instances_file_path())
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+fn write_app_instances(instances: &[AppInstance]) {
+    let path = app_instances_file_path();
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let Ok(json) = serde_json::to_string_pretty(instances) else { return };
+    let tmp = path.with_extension(format!(
+        "json.tmp.{:?}.{}",
+        std::thread::current().id(),
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0)
+    ));
+    if std::fs::write(&tmp, json).is_ok() {
+        let _ = std::fs::rename(&tmp, &path);
+    }
+}
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+}
+
+// 이 인스턴스의 하트비트를 기록하고, 15초 넘게 소식 없는(창이 비정상 종료된) 다른
+// 인스턴스는 정리한다.
+fn heartbeat_instance(instance_id: &str, ui: &UiStore) {
+    const STALE_SECS: u64 = 15;
+    let _lock = InstancesLock::acquire();
+    let now = unix_now();
+    let mut instances = read_app_instances();
+    instances.retain(|i| i.id != instance_id && now.saturating_sub(i.last_heartbeat) < STALE_SECS);
+    instances.push(AppInstance {
+        id: instance_id.to_string(),
+        pid: std::process::id(),
+        logged_in: *ui.logged_in.lock().unwrap_or_else(|e| e.into_inner()),
+        current_db: ui.current_db.lock().unwrap_or_else(|e| e.into_inner()).clone(),
+        last_heartbeat: now,
+    });
+    write_app_instances(&instances);
 }
 
 fn read_ui_commands() -> Vec<UiCommand> {
@@ -1278,6 +1399,16 @@ fn open_bench_graph() {
 }
 
 
+// 이 프로세스만의 인스턴스 id — RuSQL 창을 여러 개 띄웠을 때 MCP가 서로 구분해
+// 타깃팅할 수 있게. UUID 크레이트를 새로 추가하는 대신 pid+시각으로 충분히 유일하게 생성.
+fn generate_instance_id() -> String {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    format!("{:x}-{:x}", std::process::id(), nanos)
+}
+
 // ─── 엔트리포인트 ─────────────────────────────────────────────
 fn main() {
     tauri::Builder::default()
@@ -1289,7 +1420,9 @@ fn main() {
                 tab_list:    Arc::new(Mutex::new(Vec::new())),
                 last_result: Arc::new(Mutex::new(String::new())),
                 current_db:  Arc::new(Mutex::new(String::new())),
+                logged_in:   Arc::new(Mutex::new(false)),
             }),
+            instance_id: generate_instance_id(),
         })
         .setup(|app| {
             if let Some(window) = app.get_webview_window("main") {
@@ -1298,14 +1431,24 @@ fn main() {
             // MCP가 code/data/ui_commands.json에 넣어둔 "pending" 명령을 폴링해
             // 프런트로 "ui-command" 이벤트를 emit. 프런트는 처리 후 complete_ui_command로
             // 결과를 같은 파일에 채워 되돌려준다(쓰기는 프런트, 큐 관리는 여기).
+            // 같은 스레드에서 ~2초(400ms*5)마다 이 인스턴스의 하트비트도 함께 기록한다.
             let app_handle = app.handle().clone();
-            std::thread::spawn(move || loop {
+            let state = app.state::<AppState>();
+            let instance_id = state.instance_id.clone();
+            let ui_for_thread = state.ui.clone();
+            std::thread::spawn(move || {
+                let mut tick: u32 = 0;
+                loop {
                 std::thread::sleep(std::time::Duration::from_millis(400));
+                tick = tick.wrapping_add(1);
+                if tick % 5 == 0 {
+                    heartbeat_instance(&instance_id, &ui_for_thread);
+                }
                 let _lock = UiCommandsLock::acquire();
                 let mut cmds = read_ui_commands();
                 let mut changed = false;
                 for c in cmds.iter_mut() {
-                    if c.status == "pending" {
+                    if c.status == "pending" && (c.target_instance.is_empty() || c.target_instance == instance_id) {
                         c.status = "in_progress".to_string();
                         changed = true;
                         let data = ui_command_data_string(&c.params);
@@ -1319,6 +1462,7 @@ fn main() {
                     let _ = write_ui_commands(&cmds);
                 }
                 drop(_lock);
+                }
             });
             Ok(())
         })
@@ -1355,6 +1499,7 @@ fn main() {
             sync_tab_list,
             sync_query_result,
             sync_current_db,
+            sync_login_state,
             setup_mcp_config,
         ])
         .run(tauri::generate_context!())

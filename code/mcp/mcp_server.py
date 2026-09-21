@@ -11,6 +11,7 @@ import json
 import os
 import re
 import socket
+import subprocess
 import sys
 import threading
 import time
@@ -25,6 +26,9 @@ RUSQL_HOST = os.environ.get("RUSQL_HOST", "127.0.0.1")
 RUSQL_PORT = int(os.environ.get("RUSQL_PORT", "7878"))
 RUSQL_USER = os.environ.get("RUSQL_USER", "root")
 RUSQL_PASS = os.environ.get("RUSQL_PASS", "root")
+# launch_app이 앱이 안 켜져 있을 때 무엇을 실행할지 — 위와 동일하게 setup_mcp_config가 씀.
+# 없으면(수동 설정 등) launch_app은 그냥 실패 메시지를 반환.
+RUSQL_APP_PATH = os.environ.get("RUSQL_APP_PATH", "")
 
 # RuSQL 서버가 막 (재)시작돼 리스닝 소켓이 아직 안 열려 있는 짧은 순간의 접속 실패를
 # 흡수하기 위한 재시도 -- 이전엔 ConnectionRefusedError가 한 번이라도 나면 그 도구 호출
@@ -167,17 +171,28 @@ def _parse_table_output(text: str) -> list[dict]:
     return rows
 
 
-@mcp.tool()
-def execute_sql(sql: str, database: str = "") -> str:
-    """Execute any SQL query on RuSQL. Returns a JSON array of row objects for SELECT,
-    or a plain status message for DDL/DML. Optionally specify a database to USE before executing.
+# ─── 위험한 SQL 안전장치 ─────────────────────────────────────────
+# 완전한 SQL 파서가 아니라 휴리스틱 정규식 — 과탐(안전한 걸 위험하다고 잘못 판단)은
+# 괜찮지만 미탐(위험한 걸 놓치는 것)은 피하는 쪽으로 설계. WHERE가 문자열 리터럴 안에
+# 있어도 "있다"고 인식해 안전하다고 판단하는 정도의 오차는 감수한다.
+_DANGEROUS_STATEMENT_RE = re.compile(r"^\s*(DROP|TRUNCATE)\b", re.IGNORECASE)
+_DANGEROUS_NO_WHERE_RE = re.compile(r"^\s*(UPDATE|DELETE)\b(?![\s\S]*\bWHERE\b)", re.IGNORECASE)
 
-    RuSQL is a MySQL-compatible custom engine with broad feature support, including
-    AUTO_INCREMENT, ENUM, TINYINT/SMALLINT, BOOLEAN, CHECK constraints, FOREIGN KEY
-    constraints, date functions (CURDATE/NOW/DATEDIFF/DATE_ADD/DATE_SUB/...), IF(cond, a, b),
-    EXISTS/NOT EXISTS subqueries, and multi-table UPDATE/DELETE (`UPDATE t1, t2 SET ...`,
-    `DELETE t1, t2 FROM t1 JOIN t2 ON ...`). See docs/mds/FUNCTIONS.md in the repo for the
-    full feature list."""
+
+def _dangerous_sql_reason(sql: str) -> str | None:
+    s = sql.strip().rstrip(";")
+    if not s:
+        return None
+    m = _DANGEROUS_STATEMENT_RE.match(s)
+    if m:
+        return f"{m.group(1).upper()} is irreversible and affects an entire table/database."
+    m = _DANGEROUS_NO_WHERE_RE.match(s)
+    if m:
+        return f"{m.group(1).upper()} without a WHERE clause would affect every row in the table."
+    return None
+
+
+def _exec_and_format(sql: str, database: str = "") -> str:
     raw = _run(sql, database)
     # SELECT 계열 결과는 JSON 배열로 변환. 성공 응답은 항상 "OK"로 시작하므로
     # (과거엔 이 접두어 때문에 파싱 자체가 항상 스킵됐음), ERR이 아니면 일단
@@ -189,6 +204,43 @@ def execute_sql(sql: str, database: str = "") -> str:
         if rows and not (len(rows) == 1 and ("result" in rows[0] or "error" in rows[0])):
             return json.dumps(rows, ensure_ascii=False)
     return raw
+
+
+@mcp.tool()
+def execute_sql(sql: str, database: str = "") -> str:
+    """Execute any SQL query on RuSQL. Returns a JSON array of row objects for SELECT,
+    or a plain status message for DDL/DML. Optionally specify a database to USE before executing.
+
+    RuSQL is a MySQL-compatible custom engine with broad feature support, including
+    AUTO_INCREMENT, ENUM, TINYINT/SMALLINT, BOOLEAN, CHECK constraints, FOREIGN KEY
+    constraints, date functions (CURDATE/NOW/DATEDIFF/DATE_ADD/DATE_SUB/...), IF(cond, a, b),
+    EXISTS/NOT EXISTS subqueries, and multi-table UPDATE/DELETE (`UPDATE t1, t2 SET ...`,
+    `DELETE t1, t2 FROM t1 JOIN t2 ON ...`). See docs/mds/FUNCTIONS.md in the repo for the
+    full feature list.
+
+    DROP/TRUNCATE and UPDATE/DELETE without a WHERE clause are refused here - ask the user
+    to explicitly confirm, then call confirm_dangerous_sql with the exact same SQL."""
+    reason = _dangerous_sql_reason(sql)
+    if reason:
+        return (f"Refused: {reason} Ask the user to explicitly confirm this is intended, "
+                f"then call confirm_dangerous_sql with the exact same SQL to run it.")
+    return _exec_and_format(sql, database)
+
+
+@mcp.tool()
+def confirm_dangerous_sql(sql: str, database: str = "", via_editor: bool = False, tab: str = "") -> str:
+    """Execute a SQL statement that execute_sql or execute_in_editor refused as dangerous
+    (DROP/TRUNCATE, or UPDATE/DELETE with no WHERE clause). Only call this after the user
+    has explicitly confirmed in this conversation that they want to proceed - never on your
+    own judgment, and never pre-emptively before execute_sql/execute_in_editor has actually
+    refused. Set via_editor=True to run it visibly in the RuSQL UI (like execute_in_editor,
+    optionally in a specific `tab`) instead of invisibly against the engine (like execute_sql)."""
+    if via_editor:
+        params = {"query": sql}
+        if tab:
+            params["tab"] = tab
+        return _send_ui_command("execute_in_editor", params)
+    return _exec_and_format(sql, database)
 
 
 @mcp.tool()
@@ -310,6 +362,48 @@ def delete_connection(id_or_name: str) -> str:
     return f"Deleted connection '{id_or_name}' (id: {by_name[0]['id']})."
 
 
+def _find_connection(connections: list[dict], id_or_name: str):
+    """id 우선 매칭, 없으면 이름이 유일할 때만 매칭 - delete_connection과 동일한 규칙.
+    (연결 없음, 모호함) 둘 다 None을 반환하고 두 번째 값에 사람이 읽을 에러 메시지를 담는다."""
+    by_id = [c for c in connections if c["id"] == id_or_name]
+    if by_id:
+        return by_id[0], None
+    by_name = [c for c in connections if c["name"] == id_or_name]
+    if not by_name:
+        return None, f"No connection found with id or name '{id_or_name}'."
+    if len(by_name) > 1:
+        ids = ", ".join(c["id"] for c in by_name)
+        return None, f"{len(by_name)} connections are named '{id_or_name}' (ids: {ids}). Retry with a specific id."
+    return by_name[0], None
+
+
+@mcp.tool()
+def update_connection(id_or_name: str, name: str = "", host: str = "", port: int = 0,
+                       user: str = "", password: str = "", auto_login: bool | None = None) -> str:
+    """Update fields of an existing saved connection (matched by id, preferred, or by
+    exact unique name). Only pass the fields you want to change - everything else is left
+    as-is. Ask the user to confirm before changing host/port/user/password on a connection
+    that isn't obviously a scratch/test one."""
+    connections = _load_connections()
+    conn, err = _find_connection(connections, id_or_name)
+    if err:
+        return err
+    if name:
+        conn["name"] = name
+    if host:
+        conn["host"] = host
+    if port:
+        conn["port"] = port
+    if user:
+        conn["user"] = user
+    if password:
+        conn["password"] = password
+    if auto_login is not None:
+        conn["autoLogin"] = auto_login
+    _save_connections(connections)
+    return f"Updated connection '{conn['name']}' (id: {conn['id']})."
+
+
 # ─── UI 조작 (에디터/탭/쿼리 실행) ───────────────────────────────
 # code/data/ui_commands.json을 통한 큐. 여기서 "pending" 항목을 넣으면 RuSQL 앱의
 # 백그라운드 스레드(main.rs)가 그걸 집어 "ui-command" Tauri 이벤트로 프런트에 보내고,
@@ -318,8 +412,9 @@ def delete_connection(id_or_name: str) -> str:
 # 겉모습은 비슷하지만, 그때는 응답하는 쪽이 아예 없는 죽은 프로토콜이었고 이번엔
 # main.rs 스레드 + App.tsx의 uiCmdHandlerRef가 실제로 응답한다.
 _UI_COMMANDS_FILE = Path(__file__).resolve().parent.parent / "data" / "ui_commands.json"
-_UI_COMMAND_TIMEOUT_SEC = 20.0
+_UI_COMMAND_TIMEOUT_SEC = 30.0
 _UI_COMMAND_POLL_SEC = 0.2
+_MAX_UI_COMMAND_TIMEOUT_SEC = 600.0  # execute_in_editor의 timeout_seconds 상한
 
 
 def _load_ui_commands() -> list[dict]:
@@ -391,14 +486,17 @@ class _UiCommandsLock:
         return False
 
 
-def _send_ui_command(action: str, params) -> str:
+def _send_ui_command(action: str, params, timeout: float = _UI_COMMAND_TIMEOUT_SEC, instance: str = "") -> str:
     cmd_id = str(int(time.time() * 1_000_000))
     with _UiCommandsLock():
         cmds = [c for c in _load_ui_commands() if c.get("status") in ("pending", "in_progress")]
-        cmds.append({"id": cmd_id, "action": action, "params": params, "status": "pending", "result": None})
+        cmds.append({
+            "id": cmd_id, "action": action, "params": params, "status": "pending", "result": None,
+            "target_instance": instance,
+        })
         _save_ui_commands(cmds)
 
-    deadline = time.time() + _UI_COMMAND_TIMEOUT_SEC
+    deadline = time.time() + timeout
     while time.time() < deadline:
         time.sleep(_UI_COMMAND_POLL_SEC)
         entry = next((c for c in _load_ui_commands() if c["id"] == cmd_id), None)
@@ -414,69 +512,186 @@ def _send_ui_command(action: str, params) -> str:
 
 
 @mcp.tool()
-def write_to_editor(query: str, tab: str = "") -> str:
+def write_to_editor(query: str, tab: str = "", instance: str = "") -> str:
     """Write SQL text into the RuSQL query editor, replacing the current content of the
     given tab (or the currently active tab if `tab` is omitted). This only fills the
     editor - it does not run the query; use execute_in_editor for that. Requires the
-    RuSQL app to be open and logged in."""
+    RuSQL app to be open and logged in. If more than one window is open, pass `instance`
+    (from list_app_instances) to target a specific one."""
     params = {"content": query, "tab": tab} if tab else {"content": query}
-    return _send_ui_command("write_to_editor", params)
+    return _send_ui_command("write_to_editor", params, instance=instance)
 
 
 @mcp.tool()
-def new_editor_tab(name: str = "", query: str = "") -> str:
+def new_editor_tab(name: str = "", query: str = "", instance: str = "") -> str:
     """Open a new query tab in the RuSQL editor, optionally pre-filled with SQL and a
-    custom tab name. Requires the RuSQL app to be open and logged in."""
+    custom tab name. Requires the RuSQL app to be open and logged in. If more than one
+    window is open, pass `instance` (from list_app_instances) to target a specific one."""
     params = {}
     if name:
         params["name"] = name
     if query:
         params["query"] = query
-    return _send_ui_command("new_tab", params)
+    return _send_ui_command("new_tab", params, instance=instance)
 
 
 @mcp.tool()
-def close_editor_tab(tab: str) -> str:
+def close_editor_tab(tab: str, instance: str = "") -> str:
     """Close the RuSQL editor tab with this exact name. Requires the RuSQL app to be
-    open and logged in."""
-    return _send_ui_command("close_tab", tab)
+    open and logged in. If more than one window is open, pass `instance` (from
+    list_app_instances) to target a specific one."""
+    return _send_ui_command("close_tab", tab, instance=instance)
 
 
 @mcp.tool()
-def switch_editor_tab(tab: str) -> str:
+def switch_editor_tab(tab: str, instance: str = "") -> str:
     """Switch focus to the RuSQL editor tab with this exact name. Requires the RuSQL
-    app to be open and logged in."""
-    return _send_ui_command("switch_to_tab", tab)
+    app to be open and logged in. If more than one window is open, pass `instance` (from
+    list_app_instances) to target a specific one."""
+    return _send_ui_command("switch_to_tab", tab, instance=instance)
 
 
 @mcp.tool()
-def list_editor_tabs() -> str:
+def list_editor_tabs(instance: str = "") -> str:
     """List the names of all open tabs in the RuSQL editor, in order. Returns a JSON
-    array. Requires the RuSQL app to be open and logged in."""
-    return _send_ui_command("list_tabs", "")
+    array. Requires the RuSQL app to be open and logged in. If more than one window is
+    open, pass `instance` (from list_app_instances) to target a specific one."""
+    return _send_ui_command("list_tabs", "", instance=instance)
 
 
 @mcp.tool()
-def get_editor_tab_content(tab: str = "") -> str:
+def get_editor_tab_content(tab: str = "", instance: str = "") -> str:
     """Get the current SQL text in the given RuSQL editor tab (or the active tab if
-    `tab` is omitted). Requires the RuSQL app to be open and logged in."""
-    return _send_ui_command("get_tab_content", tab)
+    `tab` is omitted). Requires the RuSQL app to be open and logged in. If more than one
+    window is open, pass `instance` (from list_app_instances) to target a specific one."""
+    return _send_ui_command("get_tab_content", tab, instance=instance)
 
 
 @mcp.tool()
-def execute_in_editor(query: str = "", tab: str = "") -> str:
+def execute_in_editor(query: str = "", tab: str = "", timeout_seconds: float = 30.0, instance: str = "") -> str:
     """Run a query in the RuSQL editor UI itself (as if the user clicked Run), in the
     given tab or the active tab if omitted. If `query` is given it replaces that tab's
     content first, otherwise whatever is already in the tab is run as-is. Returns the
     result as JSON. Unlike execute_sql (which runs invisibly against the engine), this
     drives the real UI so the user sees the query and its result appear on screen.
-    Requires the RuSQL app to be open and logged in."""
+    Requires the RuSQL app to be open and logged in. If more than one window is open, pass
+    `instance` (from list_app_instances) to target a specific one.
+
+    If you expect the query to be slow (large scan, big JOIN, etc.), raise
+    `timeout_seconds` (up to 600) - the default 30s only bounds how long this call waits
+    for a result, not the query itself, but a timeout before the query finishes means
+    the result never gets reported back even though the UI keeps running it.
+
+    If `query` is a DROP/TRUNCATE or a WHERE-less UPDATE/DELETE, this is refused - ask the
+    user to confirm, then call confirm_dangerous_sql(sql, via_editor=True, tab=...). Running
+    whatever is already in the tab (leaving `query` empty) is never refused - that's SQL the
+    user already typed themselves, not something being injected here."""
+    if query:
+        reason = _dangerous_sql_reason(query)
+        if reason:
+            return (f"Refused: {reason} Ask the user to explicitly confirm this is intended, "
+                    f"then call confirm_dangerous_sql(sql, via_editor=True, tab=...) to run it.")
     params = {}
     if tab:
         params["tab"] = tab
     if query:
         params["query"] = query
-    return _send_ui_command("execute_in_editor", params)
+    timeout = max(1.0, min(timeout_seconds, _MAX_UI_COMMAND_TIMEOUT_SEC))
+    return _send_ui_command("execute_in_editor", params, timeout=timeout, instance=instance)
+
+
+# ─── 다중 앱 인스턴스 ────────────────────────────────────────────
+# RuSQL 창을 여러 개 띄워 서로 다른 DB에 동시 접속해 쓰는 경우를 위해, 각 인스턴스가
+# code/data/app_instances.json에 자기 존재를 주기적으로(main.rs의 배경 스레드, ~2초
+# 간격) 기록한다. 위의 모든 UI 제어 도구(write_to_editor 등)는 여기서 얻은 id를
+# `instance` 파라미터로 넘기면 그 창만 골라서 조작할 수 있다 - 안 넘기면(기본값) 지금처럼
+# 아무 인스턴스나(먼저 집어가는 쪽이) 처리한다.
+_APP_INSTANCES_FILE = Path(__file__).resolve().parent.parent / "data" / "app_instances.json"
+_INSTANCE_STALE_SEC = 15.0  # main.rs의 STALE_SECS와 동일 — 이보다 오래된 하트비트는 죽은 창
+
+
+def _load_app_instances() -> list[dict]:
+    try:
+        raw = json.loads(_APP_INSTANCES_FILE.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError):
+        return []
+    now = time.time()
+    return [i for i in raw if now - i.get("lastHeartbeat", 0) < _INSTANCE_STALE_SEC]
+
+
+@mcp.tool()
+def list_app_instances() -> str:
+    """List every currently-running RuSQL app window, each with its instance id, whether
+    it's logged in, and which database it's connected to (if any). Returns a JSON array.
+    Use an entry's `id` as the `instance` parameter on write_to_editor/new_editor_tab/
+    close_editor_tab/switch_editor_tab/list_editor_tabs/get_editor_tab_content/
+    execute_in_editor/login to target that specific window when more than one is open -
+    most useful when the user has several windows open against different databases."""
+    return json.dumps(_load_app_instances(), ensure_ascii=False)
+
+
+@mcp.tool()
+def launch_app() -> str:
+    """Launch the RuSQL desktop app if no instance is currently running. Does nothing (and
+    says so) if an instance is already open - use list_app_instances to check first if you
+    need to know whether this actually did anything. The launched window still needs the
+    user (or the login tool, once it's had a few seconds to start up) to log in before any
+    editor/tab tools will work."""
+    if _load_app_instances():
+        return "An instance of the RuSQL app is already running."
+    if not RUSQL_APP_PATH:
+        return ("Error: RUSQL_APP_PATH is not set. Use the \"Auto-connect Claude Desktop\" "
+                "button in the RuSQL app's AI MCP panel once to configure it.")
+    try:
+        subprocess.Popen([RUSQL_APP_PATH])
+    except OSError as e:
+        return f"Error: failed to launch '{RUSQL_APP_PATH}': {e}"
+    return "Launched the RuSQL app. Give it a few seconds to start before calling login."
+
+
+@mcp.tool()
+def login(connection: str, instance: str = "") -> str:
+    """Log a running (but not yet logged-in) RuSQL app window into a saved connection, by
+    the connection's id or exact unique name (see list_connections). If more than one app
+    window is open, pass `instance` (from list_app_instances) to pick which one - otherwise
+    whichever window is idle on its home screen handles it. Does nothing useful if that
+    window is already logged in (use list_app_instances to check, or just try it and read
+    the error). The connection must already have a saved password - login can't prompt the
+    user for one."""
+    params = {"connection": connection}
+    return _send_ui_command("login", params, timeout=15.0, instance=instance)
+
+
+@mcp.tool()
+def start_server(port: int = 0, mysql_port: int = 0, instance: str = "") -> str:
+    """Start the RuSQL Server Manager's public listener (native + optional MySQL wire
+    protocol) for the current session, so other clients (mysql CLI, another app, etc.) can
+    connect to the same data this window is logged into. Omit port/mysql_port to reuse
+    whatever is set in that window's Server Manager tab (mysql_port 0 disables the MySQL
+    protocol). Requires that window to already be logged in - this does not start the
+    underlying database engine itself (that already happens automatically at login)."""
+    params = {}
+    if port:
+        params["port"] = port
+    if mysql_port:
+        params["mysqlPort"] = mysql_port
+    return _send_ui_command("start_server", params, timeout=15.0, instance=instance)
+
+
+@mcp.tool()
+def stop_server(instance: str = "") -> str:
+    """Stop the RuSQL Server Manager's public listener started by start_server. Does not
+    log the window out or stop the underlying query engine - only the extra public
+    listener for other clients."""
+    return _send_ui_command("stop_server", "", timeout=15.0, instance=instance)
+
+
+@mcp.tool()
+def get_server_status(instance: str = "") -> str:
+    """Get the RuSQL Server Manager's current status for the given window (or any window if
+    `instance` is omitted): whether the public listener is running, its port, connected
+    client count, recent activity log, and session list. Returns JSON."""
+    return _send_ui_command("get_server_status", "", timeout=10.0, instance=instance)
 
 
 if __name__ == "__main__":

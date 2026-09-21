@@ -321,6 +321,23 @@ VS Code 스타일 탭 드래그 순서 변경(요청의 1번 항목)은 같은 �
 
 **AI 트랙은 "합성 데이터 생성 → LoRA 파인튜닝 → held-out 평가(93.7%)"까지로 최종 확정**하고, 로컬 추론 통합·평가/스코프 방어(로드맵 4·5번) 관련 계획은 전부 폐기. `docs/mds/AI.md`에 철회 사유와 함께 전체 수정 반영(canonical). 남은 개발 기간은 RDBMS 견고화·벤치마크·데모 준비로 재배분하기로 함 — 단, 데모 준비는 아직 이르다고 판단해 보류, 우선 RDBMS 쪽 항목부터 순서대로 진행 예정.
 
+### 9월 21일 — MCP 기능 현황 점검 후 6개 항목 추가 (Connection 수정, 위험 SQL 안전장치, 긴 쿼리 타임아웃, 다중 앱 인스턴스, 앱 실행/로그인, 서버 시작/중지) — 17개 → 25개 도구
+
+사용자가 "지금 MCP 기능에서 되는 것, 안되는 것 뭐가 있음"이라고 질문 — 현재 17개 도구를 되는 것/안되는 것으로 정리해 보고한 뒤, 안되는 것 중 6개(서버 시작/중지, 앱 실행/로그인, Connection 수정, 위험한 SQL 안전장치, 20초 타임아웃보다 오래 걸리는 쿼리, 다중 앱 인스턴스)를 전부 추가해달라는 요청을 받음.
+
+시작 전 설계 확인 두 가지: (1) 위험한 SQL 처리 방식 — "거부 + 별도 confirm 도구" 선택(영향받는 행 수 미리보기 방식 대신); (2) 다중 앱 인스턴스의 실제 필요 상황 — "여러 DB에 동시 접속해서 쓰는 것" 확인. 서버 시작/중지는 묻지 않고 바로 설계 방향을 정함: 코드에 이미 "같은 data_dir을 두 프로세스가 동시에 열 수 없다"는 제약이 있어(Phase 52의 LOCK TABLES 경험과 같은 종류의 교훈), MCP가 `engine_server.exe`를 독자적으로 띄우면 안 되고 반드시 이미 떠있는 앱의 기존 Start/Stop 로직을 그대로 호출해야 한다고 판단.
+
+구현한 것:
+- **Connection 수정** (`update_connection`) — id 우선, 없으면 유일한 이름으로 매칭(기존 `delete_connection`과 동일 규칙); 준 필드만 갱신.
+- **위험한 SQL 안전장치** (`confirm_dangerous_sql`) — 정규식 휴리스틱으로 `DROP`/`TRUNCATE`, `WHERE` 없는 `UPDATE`/`DELETE`를 감지해 `execute_sql`/`execute_in_editor`가 실행 전에 거부; 사용자 확인 후 `confirm_dangerous_sql`을 명시적으로 다시 호출해야만 실행됨(Claude가 판단만으로 우회 불가). 실제 엔진에 `CREATE`→`INSERT`→`DELETE ... WHERE`(정상 실행)→`DROP TABLE`(거부 확인)→`confirm_dangerous_sql`로 실제 DROP까지 라이브로 검증.
+- **긴 쿼리 타임아웃** — `execute_in_editor`에 `timeout_seconds`(최대 600초) 파라미터 추가, 기본값도 20초→30초로 소폭 상향.
+- **다중 앱 인스턴스** (`list_app_instances`) — 각 인스턴스가 `code/data/app_instances.json`에 자기 `id`/`pid`/로그인 여부/현재 DB를 배경 스레드(main.rs, ~2초 간격)로 하트비트, 15초 이상 끊기면 다음 기록 때 정리. 모든 UI 제어 도구 + login/서버 도구에 `instance` 파라미터 추가(`UiCommand`에 `target_instance` 필드, 비어있으면 기존처럼 아무 인스턴스나 처리 — 하위 호환).
+- **앱 실행/로그인** (`launch_app`, `login`) — `launch_app`은 실행 중인 인스턴스가 없을 때만 `RUSQL_APP_PATH`(setup_mcp_config가 `std::env::current_exe()`로 자동 기록)로 새 프로세스 스폰. `login`은 저장된 Connection으로 로그인 전 홈 화면의 창을 로그인시킴 — 여기서 진짜 설계 문제를 하나 발견: 기존 `"ui-command"` 이벤트 리스너가 `[loggedIn]`에 의존해 로그인 후에만 등록되고 있어서, 로그인 전 명령(`login` 자신)을 받을 방법이 원천적으로 없었음. 리스너를 앱 시작 시부터 항상 등록하도록 바꾸고, 로그인 게이트를 리스너 자체가 아니라 디스패처 안의 액션별 분기(`login`만 예외)로 옮겨서 해결.
+- **서버 시작/중지** (`start_server`/`stop_server`/`get_server_status`) — Server Manager 탭의 공개 리스너(네이티브 + 선택적 MySQL)를 `ui_commands.json` 큐를 통해 이미 로그인된 세션의 `connId`로 그대로 제어. 별도 프로세스를 새로 띄우는 게 아니라 앱이 이미 갖고 있는 로직을 그대로 재사용하므로 위에서 우려한 data_dir 충돌 리스크 자체가 없음.
+- `setup_mcp_config`의 `alwaysAllow` 목록이 최초 7개 도구 기준 그대로 방치돼 있던(Connections/UI 제어 도구 10개가 전부 매번 권한 팝업이 뜨고 있었던) 걸 이번에 같이 발견해 수정 — 파괴적이거나 재확인이 필요한 도구(`delete_connection`/`update_connection`/`confirm_dangerous_sql`/`stop_server`)는 의도적으로 빼서 Claude Desktop 자체 팝업이 마지막 방어선으로 남게 함.
+
+**검증**: `cargo build/test --release`(3/3), `tsc --noEmit`, `vite build` 전부 클린. 기존 9-시나리오 큐 회귀 테스트 재실행해 하위 호환 확인. 그 외 전부 실제로 켜져 있던 앱을 대상으로 라이브 검증(정규식 유닛 테스트가 아니라) — 홈 화면에서 `login` 액션으로 실제 로그인 성공(`app_instances.json`의 `loggedIn`이 `false`→`true`로 실제로 바뀌는 것까지 확인), `start_server`→`get_server_status`(실행 중 확인)→`stop_server` 전부 실제 포트에서 성공, `launch_app`은 "이미 떠있으면 무시" 분기와 "떠있는 인스턴스가 없으면 실제로 새 프로세스 스폰" 분기 둘 다 확인(후자는 실제 앱 대신 `notepad.exe`로 대체 검증 — 앱 자체가 아니라 spawn 로직만 검증하면 되므로), `update_connection`/`list_app_instances`도 실제 파일 대상으로 확인. 테스트에 쓴 임시 Connection·데이터 디렉터리·큐 항목은 전부 정리, 테스트 도중 강제 종료로 생긴 고아 `engine_server.exe` 프로세스(정상 로그아웃이 아니라 강제 종료라 Drop이 안 돌아서 발생)도 발견해 정리.
+
 ---
 
 ## 요약: 1학기 대비 2학기에 달라진 것
