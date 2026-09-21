@@ -23,7 +23,6 @@ struct SessionInfo {
 struct ServerEntry {
     running:    bool,
     port:       u16,
-    mysql_port: Option<u16>,
 }
 
 // ─── 상태 구조체 ──────────────────────────────────────────────
@@ -43,7 +42,6 @@ struct EngineConn {
     writer:           TcpStream,
     reader:           BufReader<TcpStream>,
     port:             u16,
-    mysql_port:       Option<u16>,
     data_dir:         String,
     buffer_pool_size: usize,
     user:             String,
@@ -259,7 +257,7 @@ fn spawn_and_connect(
         .ok_or_else(|| "서버가 인증 challenge(NONCE)를 보내지 않았습니다.".to_string())?;
 
     let mut conn = EngineConn {
-        child, writer, reader, port, mysql_port,
+        child, writer, reader, port,
         data_dir: data_dir.to_string(), buffer_pool_size,
         user: user.to_string(), password: password.to_string(),
         current_db: String::new(), log: Vec::new(),
@@ -742,7 +740,7 @@ fn start_server(conn_id: String, port: u16, mysql_port: u16, state: State<AppSta
     ));
     *guard = Some(conn);
 
-    state.servers.lock().unwrap_or_else(|e| e.into_inner()).insert(conn_id, ServerEntry { running: true, port, mysql_port: mp });
+    state.servers.lock().unwrap_or_else(|e| e.into_inner()).insert(conn_id, ServerEntry { running: true, port });
     Ok(format!("포트 {}에서 서버를 시작합니다...", port))
 }
 

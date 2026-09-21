@@ -155,6 +155,12 @@
 > 파괴하지 않음). 체크포인트는 다른 세션에 활성 트랜잭션이 있으면 연기되고, 크래시 복구는
 > txn_id 그룹 단위로 커밋된 트랜잭션만 redo하고 미완료 트랜잭션은 undo한다. 자세한 내용은
 > FUNCTIONS.md의 "트랜잭션" 절 참고.
+>
+> 이후 추가된 DML/DCL 문 3종은 손으로 맞춘 위 박스 정렬이 깨질 위험이 있어 표에 직접 넣지 않고
+> 여기 별도로 기록: `ARRAY_AGG`(집계 함수, JSON_AGG와 동일한 JSON 배열 텍스트 구현 공유),
+> `REPLACE INTO`(DML, 기존 INSERT 경로 위에 충돌 시 DELETE 후 INSERT로 구현), `LOCK TABLES` /
+> `UNLOCK TABLES`(세션 간 협조적 테이블 잠금, NOWAIT — 충돌 시 즉시 에러, 블로킹 대기 없음).
+> 전체 목록은 FUNCTIONS.md가 canonical.
 
                                 │
                                 ▼
