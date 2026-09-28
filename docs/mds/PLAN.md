@@ -266,6 +266,8 @@
 > **업데이트 (2026-08-10):** 사용자가 파티셔닝부터 진행하기로 결정, 같은 세션에서 V1 구현 완료 — 아래 "파티셔닝 구현 완료" 참고. SSI/XA/샤딩은 여전히 미착수.
 >
 > **업데이트 (2026-08-26):** 캡스톤 학습형 쿼리 옵티마이저(AI) 방향과 별개로 "엔진 측 강화"를 요청받아, 이 표에서 가장 ROI 높다고 판단됐던 SSI의 "남은 갭"(predicate lock)을 마저 완성 + MCV 기반 카디널리티 추정 개선까지 함께 진행. **SSI는 이제 이 표가 예상한 범위에서 완료** — Section C의 "SERIALIZABLE이 phantom만 감지" 행 참고(predicate lock 신규 구현, false-positive는 허용하되 false-negative는 없는 보수적 근사, Cahill의 진짜 dangerous-structure 판정까지는 아님). XA/샤딩은 여전히 미착수(이 표의 판단대로 스코프 밖 유지).
+>
+> **업데이트 (2026-09-28):** "큰 작업 하나로 뭘 하나 이루고 싶다"는 요청으로 SSI를 다시 검토 — 실제로는 이미 상당 부분 완성돼 있음을 재확인(당초 계획했던 "conflict-graph 기반 pivot 탐지"를 새로 만들 필요가 없었음). 3-트랜잭션 rw-반의존 순환 테스트를 새로 작성해 실행한 결과, 별도 그래프 구조 없이도 기존 read-set 자체검증(커밋 시점에 "내가 읽은 행이 이미 커밋된 다른 트랜잭션에 의해 바뀌었는가"만 재검사)이 고전적인 "위험 구조(dangerous structure/pivot)" 사이클을 정확히 잡아냄을 실측으로 확인(코드 변경 없음, 검증만). 대신 predicate lock(phantom 탐지)에 문서화돼 있던 V1 갭 3개를 실제로 닫음: 집계 쿼리(이전엔 predicate-lock 블록 도달 전에 리턴해 무방비), 복합/무-PK 테이블(단일 PK 없으면 통째로 스킵 → 테이블 전체를 predicate로 등록하는 폴백 추가, INSERT 쪽 체크도 PK 값 없이 동작하도록 재구성), JOIN(구동 테이블만 보호 → 조인된 모든 테이블에 predicate 등록). UPDATE로 기존 행이 비-PK 조건에 새로 걸리는 케이스도 시도했으나, "이미 존재하는 행에 대한 어떤 쓰기든 무조건 즉시 플래그"하는 방식이 되어 위 3-트랜잭션 pivot 테스트를 깨뜨림(커밋 순서를 존중하던 read-set 검증의 정교함을 해침) — 부작용이 더 커서 되돌리고 **정직한 잔여 갭으로 남김**. 신규 테스트 4건 추가, 397 케이스/22,703 assertions 전부 통과(`d41fe03`). 상세: `DATE.md` 9월 28일 항목.
 
 ### 파티셔닝 구현 완료 (PARTITION BY RANGE/LIST/HASH, V1 — 2026-08-10)
 
@@ -281,7 +283,7 @@
 
 **테스트**: `test_partitioning.cpp` 신규 16케이스(RANGE/LIST/HASH 라우팅+pruning, UPDATE/DELETE 라우팅, 파티션 컬럼 UPDATE 거부, DROP/TRUNCATE/ALTER ADD·DROP PARTITION 생명주기, PK/AUTO_INCREMENT 제약 검증, 파티션 부모로의 FK 참조, 오토커밋 다중-자식 원자성, RETURNING/MultiUpdate 등 미지원 문장 거부가 침묵하지 않고 명확히 실패하는지, 비파티션 테이블 회귀 가드). Debug+Release **340케이스/22024assertion** 통과(324/21863에서 +16케이스/+161assertion), `test_full.sql`/`test_full-ver2.sql` 재실행(신규 회귀 없음).
 
-**남은 범위**: SSI, XA — Section H 위 비교표 참고.
+**남은 범위**: XA뿐(SSI는 2026-09-28 기준 완료 — 위 "업데이트" 참고) — Section H 위 비교표 참고.
 
 ### LATERAL JOIN + 신규 집계 함수 확장 구현 완료 (BIT_AND/BIT_OR, FILTER, JSON_AGG, LATERAL JOIN — 2026-08-12)
 
