@@ -759,19 +759,6 @@ StringResult Executor::exec_insert_inner(SharedDatabase& s, const std::string& t
                     // else: granted -- loop back and rescan gap_locks_for(table) from scratch.
                 }
 
-                // Predicate lock conflict check (SSI phantom detection): unlike the gap-lock
-                // loop above, this never blocks the INSERT -- it just flags the *reading*
-                // transaction (a SERIALIZABLE holder that scanned a range covering this new
-                // row) so its own COMMIT fails later with a serialization error, mirroring
-                // PostgreSQL's non-blocking SIREAD predicate check. Applies regardless of
-                // THIS (inserting) transaction's own isolation level -- same reasoning as the
-                // gap-lock check above: the predicate protects its holder, not the inserter.
-                for (auto& p : s.lock_mgr.predicate_reads_for(table)) {
-                    if (p.holder == txn.current_txn_id()) continue; // a txn's own reads never block its own INSERT
-                    GapRange range{p.lo, p.hi, p.lo_inclusive, p.hi_inclusive};
-                    if (gap_range_contains(range, pk_it->second)) s.lock_mgr.flag_predicate_violation(p.holder);
-                }
-
                 // Row-level-concurrency Stage 4: claim this PK value now, under the SAME
                 // claim_txn_id for the whole statement -- a concurrent INSERT racing the
                 // identical value (which may have passed ITS OWN duplicate check moments
@@ -821,6 +808,35 @@ StringResult Executor::exec_insert_inner(SharedDatabase& s, const std::string& t
                         }
                     }
                 }
+            }
+        }
+
+        // Predicate lock conflict check (SSI phantom detection): unlike the gap-lock loop
+        // above, this never blocks the INSERT -- it just flags the *reading* transaction (a
+        // SERIALIZABLE holder that scanned a range covering this new row) so its own COMMIT
+        // fails later with a serialization error, mirroring PostgreSQL's non-blocking SIREAD
+        // predicate check. Applies regardless of THIS (inserting) transaction's own
+        // isolation level -- the predicate protects its holder, not the inserter.
+        // Deliberately independent of gap_pk_col_count: a composite/no-PK table can't be
+        // narrowed to a [lo,hi] range (see extract_pk_gap_range's single pk_col parameter),
+        // so the SELECT side (executor_select.cpp) registers a fully-unbounded (whole-table)
+        // predicate for it instead -- that predicate matches every inserted row regardless
+        // of PK shape, so no per-row PK value is needed to test it.
+        {
+            auto pk_val_it = gap_pk_col_count == 1 ? row.find(gap_pk_col) : row.end();
+            for (auto& p : s.lock_mgr.predicate_reads_for(table)) {
+                if (p.holder == txn.current_txn_id()) continue; // a txn's own reads never block its own INSERT
+                bool hit;
+                if (pk_val_it != row.end()) {
+                    GapRange range{p.lo, p.hi, p.lo_inclusive, p.hi_inclusive};
+                    hit = gap_range_contains(range, pk_val_it->second);
+                } else {
+                    // No single PK value to test a bounded range against -- only a
+                    // fully-unbounded predicate (the composite/no-PK fallback) can be
+                    // resolved without one, and it always matches.
+                    hit = !p.lo && !p.hi;
+                }
+                if (hit) s.lock_mgr.flag_predicate_violation(p.holder);
             }
         }
 

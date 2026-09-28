@@ -588,6 +588,112 @@ TEST_CASE("A plain SELECT under REPEATABLE READ does not register a predicate, s
     REQUIRE(a.execute_sql("COMMIT").is_ok());
 }
 
+// V1 gap closed: a composite-PK table can't be narrowed to a [lo,hi] PK range, so it used
+// to register (and check) no predicate at all under SERIALIZABLE -- a phantom into it was
+// silently invisible to this transaction's own COMMIT. It now registers a fully-unbounded
+// (whole-table) predicate instead, and the INSERT-side check no longer requires a
+// single-column PK value to test it (see executor_dml.cpp).
+TEST_CASE("A plain SELECT under SERIALIZABLE on a composite-PK table now fails its COMMIT on any phantom insert",
+          "[executor][concurrency][predicate_lock]") {
+    TempDataDir dir("exec_concurrency_predicate_lock_5");
+    Executor a(dir.path);
+    REQUIRE(a.execute_sql("CREATE DATABASE d").is_ok());
+    REQUIRE(a.execute_sql("USE d").is_ok());
+    REQUIRE(a.execute_sql("CREATE TABLE t (x INT, y INT, val INT, PRIMARY KEY (x, y))").is_ok());
+    REQUIRE(a.execute_sql("INSERT INTO t VALUES (1, 1, 5)").is_ok());
+
+    auto shared = a.get_shared();
+    Executor b = Executor::new_session(shared);
+    REQUIRE(b.execute_sql("USE d").is_ok());
+
+    REQUIRE(a.execute_sql("SET ISOLATION LEVEL SERIALIZABLE").is_ok());
+    REQUIRE(a.execute_sql("BEGIN").is_ok());
+    REQUIRE(a.execute_sql("SELECT * FROM t WHERE val = 5").is_ok()); // val isn't part of the PK
+
+    REQUIRE(b.execute_sql("INSERT INTO t VALUES (9, 9, 999)").is_ok()); // unrelated row, unrelated value
+
+    auto commit = a.execute_sql("COMMIT");
+    REQUIRE(commit.is_err());
+    REQUIRE(commit.error().find("Serialization failure") != std::string::npos);
+}
+
+// V1 gap closed: an aggregate query (COUNT/SUM/...) used to return before the predicate-
+// lock block ran at all, so it registered nothing under SERIALIZABLE -- a phantom row that
+// should have changed the aggregate's result went completely undetected.
+TEST_CASE("An aggregate query under SERIALIZABLE fails its own COMMIT if a phantom row lands in its scanned range",
+          "[executor][concurrency][predicate_lock]") {
+    TempDataDir dir("exec_concurrency_predicate_lock_6");
+    Executor a(dir.path);
+    REQUIRE(a.execute_sql("CREATE DATABASE d").is_ok());
+    REQUIRE(a.execute_sql("USE d").is_ok());
+    REQUIRE(a.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, val INT)").is_ok());
+    REQUIRE(a.execute_sql("INSERT INTO t VALUES (5, 5)").is_ok());
+    REQUIRE(a.execute_sql("INSERT INTO t VALUES (30, 30)").is_ok());
+
+    auto shared = a.get_shared();
+    Executor b = Executor::new_session(shared);
+    REQUIRE(b.execute_sql("USE d").is_ok());
+
+    REQUIRE(a.execute_sql("SET ISOLATION LEVEL SERIALIZABLE").is_ok());
+    REQUIRE(a.execute_sql("BEGIN").is_ok());
+    REQUIRE(a.execute_sql("SELECT COUNT(*) FROM t WHERE id BETWEEN 10 AND 20").is_ok());
+
+    REQUIRE(b.execute_sql("INSERT INTO t VALUES (15, 15)").is_ok()); // would change the COUNT
+
+    auto commit = a.execute_sql("COMMIT");
+    REQUIRE(commit.is_err());
+    REQUIRE(commit.error().find("Serialization failure") != std::string::npos);
+}
+
+// Same aggregate case, but the phantom lands outside the scanned range -- must not fail.
+TEST_CASE("An aggregate query under SERIALIZABLE does not fail its COMMIT on a phantom outside its scanned range",
+          "[executor][concurrency][predicate_lock]") {
+    TempDataDir dir("exec_concurrency_predicate_lock_7");
+    Executor a(dir.path);
+    REQUIRE(a.execute_sql("CREATE DATABASE d").is_ok());
+    REQUIRE(a.execute_sql("USE d").is_ok());
+    REQUIRE(a.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, val INT)").is_ok());
+
+    auto shared = a.get_shared();
+    Executor b = Executor::new_session(shared);
+    REQUIRE(b.execute_sql("USE d").is_ok());
+
+    REQUIRE(a.execute_sql("SET ISOLATION LEVEL SERIALIZABLE").is_ok());
+    REQUIRE(a.execute_sql("BEGIN").is_ok());
+    REQUIRE(a.execute_sql("SELECT COUNT(*) FROM t WHERE id BETWEEN 10 AND 20").is_ok());
+
+    REQUIRE(b.execute_sql("INSERT INTO t VALUES (100, 100)").is_ok()); // outside [10,20]
+
+    REQUIRE(a.execute_sql("COMMIT").is_ok());
+}
+
+// JOIN gap closed: a JOINed SELECT used to register no predicate for its joined (non-
+// driving) table at all -- a phantom INSERT there went completely unnoticed.
+TEST_CASE("A phantom INSERT into a JOINed (non-driving) table fails the reader's COMMIT",
+          "[executor][concurrency][predicate_lock]") {
+    TempDataDir dir("exec_concurrency_predicate_lock_10");
+    Executor a(dir.path);
+    REQUIRE(a.execute_sql("CREATE DATABASE d").is_ok());
+    REQUIRE(a.execute_sql("USE d").is_ok());
+    REQUIRE(a.execute_sql("CREATE TABLE accounts (id INT PRIMARY KEY, name VARCHAR(20))").is_ok());
+    REQUIRE(a.execute_sql("CREATE TABLE orders (id INT PRIMARY KEY, account_id INT)").is_ok());
+    REQUIRE(a.execute_sql("INSERT INTO accounts VALUES (1, 'alice')").is_ok());
+
+    auto shared = a.get_shared();
+    Executor b = Executor::new_session(shared);
+    REQUIRE(b.execute_sql("USE d").is_ok());
+
+    REQUIRE(a.execute_sql("SET ISOLATION LEVEL SERIALIZABLE").is_ok());
+    REQUIRE(a.execute_sql("BEGIN").is_ok());
+    REQUIRE(a.execute_sql("SELECT * FROM accounts JOIN orders ON accounts.id = orders.account_id").is_ok());
+
+    REQUIRE(b.execute_sql("INSERT INTO orders VALUES (1, 1)").is_ok()); // phantom in the JOINed table
+
+    auto commit = a.execute_sql("COMMIT");
+    REQUIRE(commit.is_err());
+    REQUIRE(commit.error().find("Serialization failure") != std::string::npos);
+}
+
 TEST_CASE("SHOW LOCKS lists an active predicate lock's range while its transaction is open",
           "[executor][concurrency][predicate_lock]") {
     TempDataDir dir("exec_concurrency_predicate_lock_4");
@@ -606,6 +712,57 @@ TEST_CASE("SHOW LOCKS lists an active predicate lock's range while its transacti
     REQUIRE(locks.value().find("[10, 20]") != std::string::npos);
 
     REQUIRE(a.execute_sql("COMMIT").is_ok());
+}
+
+// SSI "dangerous structure" (pivot) check: a classic 3-transaction rw-antidependency cycle
+// (T1 -rw-> T2 -rw-> T3 -rw-> T1) that plain 2-transaction write-skew tests never exercise.
+// All three BEGIN before any of them writes or commits, so every read below observes the
+// same v=0 snapshot for all three rows. Whichever transaction commits LAST must fail: by
+// the time it validates its own read set, the transaction that wrote what it read has
+// already committed (the other two, by definition of "last"), so validate_serializable's
+// existing per-transaction read-set check -- with no separate conflict graph -- is claimed
+// to already catch this. This test is the empirical check of that claim.
+TEST_CASE("SSI catches a 3-transaction rw-antidependency cycle (dangerous structure/pivot)",
+          "[executor][concurrency][serializable]") {
+    TempDataDir dir("exec_concurrency_ssi_pivot_1");
+    Executor a(dir.path);
+    REQUIRE(a.execute_sql("CREATE DATABASE d").is_ok());
+    REQUIRE(a.execute_sql("USE d").is_ok());
+    REQUIRE(a.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, v INT)").is_ok());
+    REQUIRE(a.execute_sql("INSERT INTO t VALUES (1, 0)").is_ok());
+    REQUIRE(a.execute_sql("INSERT INTO t VALUES (2, 0)").is_ok());
+    REQUIRE(a.execute_sql("INSERT INTO t VALUES (3, 0)").is_ok());
+
+    auto shared = a.get_shared();
+    Executor& t1 = a;
+    Executor t2 = Executor::new_session(shared);
+    Executor t3 = Executor::new_session(shared);
+    REQUIRE(t2.execute_sql("USE d").is_ok());
+    REQUIRE(t3.execute_sql("USE d").is_ok());
+
+    for (auto* s : {&t1, &t2, &t3}) {
+        REQUIRE(s->execute_sql("SET ISOLATION LEVEL SERIALIZABLE").is_ok());
+        REQUIRE(s->execute_sql("BEGIN").is_ok());
+    }
+
+    // T1 reads row 2 (later written by T2); T2 reads row 3 (later written by T3);
+    // T3 reads row 1 (later written by T1) -- closes the cycle T1 -> T2 -> T3 -> T1.
+    REQUIRE(t1.execute_sql("SELECT v FROM t WHERE id = 2").is_ok());
+    REQUIRE(t2.execute_sql("SELECT v FROM t WHERE id = 3").is_ok());
+    REQUIRE(t3.execute_sql("SELECT v FROM t WHERE id = 1").is_ok());
+
+    REQUIRE(t1.execute_sql("UPDATE t SET v = 1 WHERE id = 1").is_ok());
+    REQUIRE(t2.execute_sql("UPDATE t SET v = 1 WHERE id = 2").is_ok());
+    REQUIRE(t3.execute_sql("UPDATE t SET v = 1 WHERE id = 3").is_ok());
+
+    // Commit order T1, T2, T3: neither T1 nor T2 sees a conflict yet (their writer hasn't
+    // committed when they check), but T3's read of row 1 was invalidated by T1, which HAS
+    // committed by the time T3 checks -- T3 (the last committer) must be the one to fail.
+    REQUIRE(t1.execute_sql("COMMIT").is_ok());
+    REQUIRE(t2.execute_sql("COMMIT").is_ok());
+    auto commit3 = t3.execute_sql("COMMIT");
+    REQUIRE(commit3.is_err());
+    REQUIRE(commit3.error().find("Serialization failure") != std::string::npos);
 }
 
 // Row-level-concurrency prep, Stage 1: execute_sql's query-cache populate/invalidate

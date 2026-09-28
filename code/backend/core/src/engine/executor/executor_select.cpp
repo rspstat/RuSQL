@@ -1299,6 +1299,35 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
     }
 
     if (has_agg) {
+        // Predicate lock (SSI phantom detection): an aggregate's result depends on every
+        // row currently matching `condition`, so a phantom INSERT into that range can
+        // silently change what COUNT/SUM/etc. would return. V1 gap closed: this used to
+        // return before ever reaching the plain-SELECT predicate-lock block below, so
+        // aggregate queries under SERIALIZABLE registered nothing at all. Mirrors that
+        // block exactly (same range-narrowing, same whole-table fallback for a composite
+        // or missing PK).
+        if (txn.is_active() && txn.isolation_level() == IsolationLevel::Serializable) {
+            std::string agg_pk_col = "id";
+            std::size_t agg_pk_col_count = 0;
+            if (auto* sc = s.catalog.get_table(table)) {
+                for (auto& c : sc->columns) {
+                    if (c.primary_key) {
+                        if (agg_pk_col_count == 0) agg_pk_col = c.name;
+                        agg_pk_col_count++;
+                    }
+                }
+            }
+            GapRange agg_range = agg_pk_col_count == 1 ? extract_pk_gap_range(condition, agg_pk_col) : GapRange{};
+            s.lock_mgr.register_predicate_read(table, agg_range.lo, agg_range.lo_inclusive, agg_range.hi, agg_range.hi_inclusive,
+                                                 txn.current_txn_id());
+            // JOIN gap closed (see the identical block in the plain-SELECT path below for
+            // the full reasoning): whole-table predicate for every joined table.
+            for (auto& j : joins) {
+                if (j.lateral) continue;
+                s.lock_mgr.register_predicate_read(j.table, std::nullopt, true, std::nullopt, true, txn.current_txn_id());
+            }
+        }
+
         Row agg_row = compute_aggregates(result, columns, /*allow_parallel=*/true);
         std::vector<std::pair<std::string, std::string>> agg_results;
         for (auto& col : columns) {
@@ -1433,15 +1462,14 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
     }
 
     // Predicate lock (SSI phantom detection): a plain, unlocked SELECT under SERIALIZABLE
-    // currently only protects itself against rows it actually read being changed later
-    // (via record_read below, checked by validate_serializable at COMMIT) -- it registers
-    // nothing that would catch a brand-new row inserted into its WHERE range afterward.
-    // Unlike Gap Lock (for_update/for_share above), this never blocks the INSERT -- it
-    // just remembers the range so a later phantom INSERT into it can fail *this*
-    // transaction's COMMIT instead (see register_predicate_read's doc comment). Same V1
-    // scope as Gap Lock: single-column PK tables only, and (matching this function's
-    // existing for_update/for_share gap-lock scope) not applied to aggregate queries,
-    // which return earlier above.
+    // registers its WHERE-range as a predicate so a later phantom INSERT into it can fail
+    // *this* transaction's COMMIT instead (see register_predicate_read's doc comment).
+    // Unlike Gap Lock (for_update/for_share above), this never blocks the INSERT.
+    // V1 gap closed: single-column-PK tables narrow the predicate to the WHERE range
+    // (extract_pk_gap_range, same as before); a table with a composite or no PK can't be
+    // narrowed this way, so it now registers a fully-unbounded (whole-table) predicate
+    // rather than being skipped entirely -- wider than necessary, but never wrong (a
+    // phantom anywhere in the table correctly fails this transaction's COMMIT).
     if (!for_update && !for_share && txn.is_active() && txn.isolation_level() == IsolationLevel::Serializable) {
         std::string pk_col = "id";
         std::size_t pk_col_count = 0;
@@ -1453,9 +1481,20 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
                 }
             }
         }
-        if (pk_col_count == 1) {
-            GapRange range = extract_pk_gap_range(condition, pk_col);
-            s.lock_mgr.register_predicate_read(table, range.lo, range.lo_inclusive, range.hi, range.hi_inclusive, txn.current_txn_id());
+        GapRange range = pk_col_count == 1 ? extract_pk_gap_range(condition, pk_col) : GapRange{};
+        s.lock_mgr.register_predicate_read(table, range.lo, range.lo_inclusive, range.hi, range.hi_inclusive, txn.current_txn_id());
+
+        // JOIN gap closed: a joined row has no single owning table to narrow a range
+        // against (format_result's record_read is scoped to joins.empty() for the same
+        // reason -- see its doc comment), so this can't reuse extract_pk_gap_range at all.
+        // Register a fully-unbounded (whole-table) predicate for every joined table
+        // instead: conservative (any write anywhere in a joined table fails this
+        // transaction's COMMIT, not just ones affecting rows actually joined against), but
+        // sound -- previously joined tables got no phantom protection whatsoever. Skips
+        // `lateral` entries (a subquery alias, not a real catalog table to protect).
+        for (auto& j : joins) {
+            if (j.lateral) continue;
+            s.lock_mgr.register_predicate_read(j.table, std::nullopt, true, std::nullopt, true, txn.current_txn_id());
         }
     }
 
