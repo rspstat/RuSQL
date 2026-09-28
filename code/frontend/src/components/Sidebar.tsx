@@ -373,7 +373,7 @@ export default function Sidebar(props: Props) {
             INFO
           </div>
           <div className="sidebar-info-item"><span className="col-icon">◉</span> v2.3.0</div>
-          <div className="sidebar-info-item"><span className="col-icon">◉</span> Rust · Python</div>
+          <div className="sidebar-info-item"><span className="col-icon">◉</span> by. rspstat</div>
           <div className="sidebar-info-item">
             <span className="col-icon" style={{ color: serverStatus.running ? "#4ec9b0" : "#858585" }}>◉</span>
             {serverStatus.running ? `TCP :${serverStatus.port} (${serverStatus.client_count})` : "TCP Stopped"}
