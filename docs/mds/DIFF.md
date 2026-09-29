@@ -66,7 +66,7 @@
 | 항목 | MySQL | PostgreSQL | Oracle | RuSQL |
 |------|-------|------------|--------|--------|
 | 행 레벨 잠금 | ✓ | ✓ | ✓ | ✓ |
-| 테이블 잠금 | ✓ (LOCK TABLES) | ✓ (LOCK TABLE) | ✓ (LOCK TABLE) | ✗ |
+| 테이블 잠금 | ✓ (LOCK TABLES) | ✓ (LOCK TABLE) | ✓ (LOCK TABLE) | ✓ (LOCK TABLES/UNLOCK TABLES V1, NOWAIT 방식) |
 | 갭 잠금 (Gap Lock) | ✓ (REPEATABLE READ 이상) | ✗ (SSI로 처리) | ✗ (MVCC로 처리) | ✓ (REPEATABLE READ/SERIALIZABLE, FOR UPDATE/FOR SHARE + 트랜잭션 내 UPDATE/DELETE, 단일 컬럼 PK 범위 한정, gap-vs-gap 무충돌) |
 | SELECT FOR UPDATE | ✓ | ✓ | ✓ | ✓ |
 | SELECT FOR SHARE | ✓ | ✓ | △ (FOR UPDATE SKIP LOCKED로 유사 처리) | ✓ (공유 잠금, 다중 독자 허용) |
@@ -89,7 +89,7 @@
 | 복합 인덱스 | ✓ | ✓ | ✓ | ✓ |
 | 인덱스 교차 (Index Intersection) | ✓ (index merge) | ✓ | ✓ | ✓ (AND 조건에서 독립 인덱스 2개 이상 → PK HashSet 교집합, `IndexIntersection` AccessPath, EXPLAIN에 `∩` 표시) |
 | 보조 인덱스 증분 갱신 | ✓ (InnoDB 자동) | ✓ | ✓ | ✓ (INSERT/UPDATE/DELETE 시 `index_insert_row` / `index_remove_row`로 O(1) 갱신 — 전체 재빌드 없음) |
-| 내림차순 인덱스 | ✓ (8.0+) | ✓ | ✓ | ✗ |
+| 내림차순 인덱스 | ✓ (8.0+) | ✓ | ✓ | △ (`CREATE INDEX i ON t (col DESC)` 문법은 수용 — 이전엔 파싱 에러. B+Tree는 항상 오름차순으로 구축되므로 방향은 결과에 영향 없는 물리 힌트일 뿐, 실제 내림차순 저장은 아님) |
 | BRIN (블록 범위 인덱스) | ✗ | ✓ | ✗ | ✗ |
 | GIN / GiST | ✗ | ✓ | ✗ | ✗ |
 
@@ -139,9 +139,9 @@
 | GROUP_CONCAT / STRING_AGG / LISTAGG | GROUP_CONCAT | STRING_AGG | LISTAGG | GROUP_CONCAT |
 | STDDEV / VARIANCE | ✓ | ✓ | ✓ | ✓ (STDDEV_POP / VAR_POP 별칭 포함) |
 | BIT_AND / BIT_OR | ✓ | ✓ | ✗ | ✓ |
-| ARRAY_AGG / COLLECT | ✗ | ARRAY_AGG | COLLECT | ✗ |
+| ARRAY_AGG / COLLECT | ✗ | ARRAY_AGG | COLLECT | ✓ (ARRAY_AGG, JSON 배열 텍스트로 반환 — 별도 배열 저장 타입은 없음) |
 | JSON_AGG | ✓ | ✓ | ✓ (JSON_ARRAYAGG) | ✓ |
-| PERCENTILE_CONT / DISC | ✗ | ✓ | ✓ | ✗ |
+| PERCENTILE_CONT / DISC | ✗ | ✓ | ✓ | △ (`MEDIAN(col)` = PERCENTILE_CONT(0.5)만 지원 — 임의 분위수/`WITHIN GROUP`은 미지원) |
 | FILTER (WHERE ...) 절 | ✗ | ✓ | ✗ | ✓ |
 | DISTINCT 집계 | ✓ | ✓ | ✓ | ✓ (COUNT / SUM / AVG DISTINCT 모두 지원) |
 
@@ -221,7 +221,7 @@
 | INSERT SELECT | ✓ | ✓ | ✓ | ✓ |
 | INSERT ... ON DUPLICATE KEY UPDATE | ✓ | ✗ | ✗ | ✓ |
 | INSERT ... ON CONFLICT (UPSERT) | ✗ | ✓ | ✗ | ✓ (ABORT/IGNORE/UPDATE) |
-| REPLACE INTO | ✓ | ✗ | ✗ | ✗ |
+| REPLACE INTO | ✓ | ✗ | ✗ | ✓ |
 | UPDATE (단일 테이블) | ✓ | ✓ | ✓ | ✓ |
 | UPDATE (다중 테이블 JOIN) | ✓ | ✗ (FROM 절로 에뮬레이션) | ✗ (서브쿼리로 에뮬레이션) | ✓ (MULTI UPDATE) |
 | DELETE (단일 테이블) | ✓ | ✓ | ✓ | ✓ (PK 등호·BETWEEN 조건 시 `swap_remove` O(1) fast-path — FK 피참조 없는 테이블) |

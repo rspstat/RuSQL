@@ -335,3 +335,46 @@ TEST_CASE("UndoLogFile remove_txn/rewrite_txn are atomic (no stray .tmp file, no
 
     fs::remove_all(dir);
 }
+
+// The WAL/Undo append handles are now kept open across records (see TxnIoShared). These
+// exercise every place that must close them first -- commit (delete on empty), rollback,
+// back-to-back transactions re-creating the files, and a rewrite while other data remains.
+TEST_CASE("Persistent WAL/undo handles survive many commit/rollback cycles and never leave stale files",
+          "[txn][wal][persistent_handle]") {
+    auto dir = test_dir("persistent_handles");
+    TransactionManager a(dir);
+    for (int round = 0; round < 25; round++) {
+        REQUIRE(a.begin().is_ok());
+        a.log_insert("t", "k" + std::to_string(round), "{\"id\":1}");
+        a.log_update("t", "k" + std::to_string(round), "{\"id\":1}", "{\"id\":2}");
+        REQUIRE(a.read_undo_log_file().size() == 2); // visible on disk immediately (fflush'd)
+        if (round % 2 == 0) {
+            REQUIRE(a.commit().is_ok());
+        } else {
+            REQUIRE(a.rollback().size() == 2);
+        }
+        REQUIRE(a.wal_records().empty()); // txn's own records removed either way
+        REQUIRE(a.read_undo_log_file().empty());
+        REQUIRE_FALSE(fs::exists(dir + "/_undo.log")); // deleted, not left behind open/empty
+    }
+}
+
+TEST_CASE("Removing one transaction's log records keeps another session's records (rewrite path)",
+          "[txn][wal][persistent_handle]") {
+    auto dir = test_dir("persistent_handles_shared");
+    auto io = std::make_shared<TxnIoShared>();
+    TransactionManager a(dir, io), b(dir, io);
+    REQUIRE(a.begin().is_ok());
+    REQUIRE(b.begin().is_ok());
+    a.log_insert("t", "a1", "{\"x\":1}");
+    b.log_insert("t", "b1", "{\"x\":2}");
+    a.log_insert("t", "a2", "{\"x\":3}");
+    REQUIRE(a.commit().is_ok()); // must rewrite the files (b's records remain) with handles closed first
+    auto left = b.read_undo_log_file();
+    REQUIRE(left.size() == 1);
+    REQUIRE(left[0].key == "b1");
+    b.log_insert("t", "b2", "{\"x\":4}"); // append again after the rewrite
+    REQUIRE(b.read_undo_log_file().size() == 2);
+    REQUIRE(b.commit().is_ok());
+    REQUIRE(b.wal_records().empty());
+}

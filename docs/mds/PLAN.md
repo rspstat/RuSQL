@@ -285,6 +285,8 @@
 
 **남은 범위**: XA뿐(SSI는 2026-09-28 기준 완료 — 위 "업데이트" 참고) — Section H 위 비교표 참고.
 
+> **알려진 한계 (2026-09-29 실측)**: autocommit 문장은 디스크에 즉시 쓰지 않아 응답 후 크래시하면 유실됨(명시적 트랜잭션 COMMIT만 fsync로 내구성 보장). 이번 라운드에선 사용자 결정으로 변경하지 않음. 상세: `DATE.md` 9월 29일 항목.
+
 ### LATERAL JOIN + 신규 집계 함수 확장 구현 완료 (BIT_AND/BIT_OR, FILTER, JSON_AGG, LATERAL JOIN — 2026-08-12)
 
 `DIFF.md` Section 6/7(쿼리 기능/집계 함수) 비교표에서 사용자 요청으로 ROI 순 4개 항목을 골라 구현. BIT_AND/BIT_OR·JSON_AGG는 기존 STDDEV/VARIANCE·GROUP_CONCAT 패턴을 그대로 재사용하는 저난이도 확장, FILTER절은 기존 ~150줄짜리 집계별 분기를 건드리지 않는 scoped-shadowing 방식, LATERAL JOIN은 파서(AST 신규 필드)·실행기(조인 루프 조기 분기)·qualify(재귀 처리) 3개 계층에 걸친 아키텍처 확장이라 별도 `EnterPlanMode` 승인을 거쳐 진행.

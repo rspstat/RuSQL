@@ -3,6 +3,7 @@
 // Faithful port of rusql-core/src/transaction/wal.rs — binary write-ahead log.
 
 #include <cstdint>
+#include <cstdio>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -37,8 +38,24 @@ struct WalRecord {
 class TxnIoShared {
 public:
     TxnIoShared() = default;
+    ~TxnIoShared();
     TxnIoShared(const TxnIoShared&) = delete;
     TxnIoShared& operator=(const TxnIoShared&) = delete;
+
+    // Persistent append-mode handle for the WAL/Undo log file. Reopening ("ab" + fclose)
+    // on every single record cost ~0.18ms each on Windows (file-system metadata + real-time
+    // scanner on close) vs ~0.004ms for a write+fflush on a kept-open handle -- and every
+    // statement inside an explicit transaction appends one record to EACH file, so this was
+    // the dominant per-statement cost of a transaction (3.5x an autocommit statement).
+    // Durability is unchanged: every record is still fflush'd to the OS right away, and
+    // COMMIT still fsyncs. Guarded by the matching lock (wal_lock / undo_lock) -- callers
+    // must hold it. Whoever deletes, truncates or atomically replaces the file MUST call
+    // close_*_handle_locked() first: Windows can neither delete nor rename over a file that
+    // still has an open handle.
+    std::FILE* wal_append_handle_locked(const std::string& path);
+    void close_wal_handle_locked();
+    std::FILE* undo_append_handle_locked(const std::string& path);
+    void close_undo_handle_locked();
 
     std::uint64_t next_id();
     // Reads the next id that would be handed out WITHOUT allocating it -- used by MVCC
@@ -57,6 +74,10 @@ public:
 private:
     std::uint64_t next_txn_id_ = 1;
     std::mutex counter_mutex_;
+    std::FILE* wal_fp_ = nullptr;
+    std::string wal_fp_path_;
+    std::FILE* undo_fp_ = nullptr;
+    std::string undo_fp_path_;
 };
 
 class WalManager {

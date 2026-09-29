@@ -1,6 +1,7 @@
 #include "engine/transaction/txn_manager.hpp"
 
 #include <algorithm>
+#include <cstdio>
 #include <filesystem>
 #include <fstream>
 #include <limits>
@@ -155,10 +156,14 @@ std::optional<UndoEntry> UndoLogFile::decode(const std::vector<std::uint8_t>& bu
 
 void UndoLogFile::append_locked(const UndoEntry& entry) const {
     auto encoded = encode(entry);
-    std::ofstream file(path_, std::ios::binary | std::ios::app);
-    if (!file) throw std::runtime_error("Undo log 파일 열기 실패");
-    file.write(reinterpret_cast<const char*>(encoded.data()), static_cast<std::streamsize>(encoded.size()));
-    if (!file) throw std::runtime_error("Undo log 기록 실패");
+    // Persistent append handle (see TxnIoShared::undo_append_handle_locked) -- reopening the
+    // file for every single record dominated per-statement transaction cost.
+    std::FILE* fp = io_->undo_append_handle_locked(path_);
+    if (!fp) throw std::runtime_error("Undo log 파일 열기 실패");
+    if (std::fwrite(encoded.data(), 1, encoded.size(), fp) != encoded.size() || std::fflush(fp) != 0) {
+        io_->close_undo_handle_locked();
+        throw std::runtime_error("Undo log 기록 실패");
+    }
 }
 
 void UndoLogFile::append(const UndoEntry& entry) {
@@ -182,6 +187,7 @@ std::vector<UndoEntry> UndoLogFile::read_all() {
 }
 
 void UndoLogFile::clear_locked() const {
+    io_->close_undo_handle_locked(); // Windows can't delete a file that still has an open handle
     std::error_code ec;
     fs::remove(path_, ec);
 }
@@ -211,6 +217,7 @@ void UndoLogFile::remove_txn(std::uint64_t txn_id) {
         auto enc = encode(e);
         buf.insert(buf.end(), enc.begin(), enc.end());
     }
+    io_->close_undo_handle_locked(); // can't rename over a file with an open handle on Windows
     write_bytes_atomic(path_, buf.data(), buf.size());
 }
 
@@ -231,6 +238,7 @@ void UndoLogFile::rewrite_txn(std::uint64_t txn_id, const std::vector<UndoEntry>
         auto enc = encode(e);
         buf.insert(buf.end(), enc.begin(), enc.end());
     }
+    io_->close_undo_handle_locked(); // can't rename over a file with an open handle on Windows
     write_bytes_atomic(path_, buf.data(), buf.size());
 }
 

@@ -33,7 +33,7 @@
 - [x] ALTER TABLE RENAME TO (테이블 이름 변경)
 - [x] ALTER TABLE ADD CONSTRAINT (FOREIGN KEY / UNIQUE / CHECK)
 - [x] ALTER TABLE DROP CONSTRAINT / DROP FOREIGN KEY
-- [x] CREATE INDEX / DROP INDEX (단일 / 복합)
+- [x] CREATE INDEX / DROP INDEX (단일 / 복합) — 컬럼별 `ASC`/`DESC` 문법 수용(2026-09-29, 이전엔 파싱 에러; B+Tree는 항상 오름차순 구축이라 결과에 영향 없는 힌트일 뿐 실제 내림차순 저장은 아님)
 - [x] CREATE VIEW / DROP VIEW
 - [x] CREATE SYNONYM name FOR target — 테이블 별명 생성 (SELECT/INSERT/UPDATE/DELETE에서 실제 테이블처럼 사용)
 - [x] CREATE OR REPLACE SYNONYM name FOR target — 기존 별명 덮어쓰기
@@ -116,7 +116,7 @@
 - [x] DISTINCT
 - [x] 산술 표현식 — SELECT / WHERE / UPDATE SET에서 `price * qty`, `salary + 100`, `salary % 12` (모듈로), `a || b` (문자열 연결 — CONCAT 동의어)
 - [x] 비교 표현식 — SELECT 컬럼에서 `expr > val AS alias` 형태 지원 (`LENGTH(UUID()) > 0 AS uuid_ok`, `RAND() >= 0` 등)
-- [x] 집계 함수 — COUNT / SUM / AVG / MIN / MAX / STDDEV / VARIANCE (모집단 기준) / BIT_AND / BIT_OR / JSON_AGG
+- [x] 집계 함수 — COUNT / SUM / AVG / MIN / MAX / STDDEV / VARIANCE (모집단 기준) / BIT_AND / BIT_OR / MEDIAN(2026-09-29 신규, PERCENTILE_CONT(0.5) — 짝수 개면 가운데 두 값의 평균, NULL 무시, GROUP BY 지원) / JSON_AGG
 - [x] DISTINCT 집계 — COUNT(DISTINCT) / SUM(DISTINCT) / AVG(DISTINCT)
 - [x] GROUP_CONCAT (SEPARATOR 옵션, GROUP BY 및 비집계 양쪽 지원)
 - [x] FILTER (WHERE ...) 절 — 집계 함수 하나만 다른 행 집합으로 좁힘, 같은 SELECT 절의 다른 (필터 없는) 집계와는 독립적 (`COUNT(*) FILTER (WHERE active = 1)`); GROUP_CONCAT 포함, OVER와는 결합 미지원(V1 범위)

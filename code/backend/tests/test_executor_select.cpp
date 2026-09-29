@@ -554,3 +554,75 @@ TEST_CASE("Query cache serves repeated identical SELECTs and is invalidated by D
     REQUIRE(r2.value().find("999") != std::string::npos);
     REQUIRE(r2.value().find("100") == std::string::npos);
 }
+
+// MEDIAN(col): PERCENTILE_CONT(0.5) -- middle value, or the mean of the two middle values
+// for an even count; NULLs ignored; per-group under GROUP BY.
+TEST_CASE("MEDIAN aggregate: odd, even, NULLs, decimals, empty, GROUP BY", "[executor][select][aggregate]") {
+    TempDataDir dir("exec_sel_median_1");
+    Executor ex(dir.path);
+    REQUIRE(ex.execute_sql("CREATE DATABASE d").is_ok());
+    REQUIRE(ex.execute_sql("USE d").is_ok());
+    REQUIRE(ex.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, g VARCHAR(5), v INT)").is_ok());
+
+    auto empty = ex.execute_sql("SELECT MEDIAN(v) FROM t");
+    REQUIRE(empty.is_ok()); // no rows -> must not crash
+
+    REQUIRE(ex.execute_sql("INSERT INTO t VALUES (1,'a',10),(2,'a',30),(3,'a',20)").is_ok());
+    auto odd = ex.execute_sql("SELECT MEDIAN(v) FROM t");
+    REQUIRE(odd.is_ok());
+    REQUIRE(odd.value().find("20.0000") != std::string::npos); // unsorted input 10,30,20 -> 20
+
+    REQUIRE(ex.execute_sql("INSERT INTO t VALUES (4,'b',40),(5,'b',50),(6,'b',60),(7,'b',70)").is_ok());
+    auto even_b = ex.execute_sql("SELECT MEDIAN(v) FROM t WHERE g = 'b'");
+    REQUIRE(even_b.is_ok());
+    REQUIRE(even_b.value().find("55.0000") != std::string::npos); // (50+60)/2
+
+    auto grouped = ex.execute_sql("SELECT g, MEDIAN(v) FROM t GROUP BY g ORDER BY g");
+    REQUIRE(grouped.is_ok());
+    REQUIRE(grouped.value().find("20.0000") != std::string::npos);
+    REQUIRE(grouped.value().find("55.0000") != std::string::npos);
+
+    // NULLs are ignored, not counted as zero: median of {10, 30} = 20, not of {0, 10, 30}.
+    REQUIRE(ex.execute_sql("CREATE TABLE n (id INT PRIMARY KEY, v INT)").is_ok());
+    REQUIRE(ex.execute_sql("INSERT INTO n VALUES (1,10),(2,NULL),(3,30)").is_ok());
+    auto with_null = ex.execute_sql("SELECT MEDIAN(v) FROM n");
+    REQUIRE(with_null.is_ok());
+    REQUIRE(with_null.value().find("20.0000") != std::string::npos);
+
+    // Single value, and the label is MEDIAN(col).
+    auto single = ex.execute_sql("SELECT MEDIAN(v) FROM t WHERE id = 1");
+    REQUIRE(single.is_ok());
+    REQUIRE(single.value().find("10.0000") != std::string::npos);
+    REQUIRE(single.value().find("MEDIAN(v)") != std::string::npos);
+}
+
+// CREATE INDEX accepts per-column ASC/DESC (previously a parse error). Direction never
+// changes a query's result here, so the same lookups must return identical rows.
+TEST_CASE("CREATE INDEX accepts ASC/DESC per column and lookups still work", "[executor][select][index]") {
+    TempDataDir dir("exec_sel_descidx_1");
+    Executor ex(dir.path);
+    REQUIRE(ex.execute_sql("CREATE DATABASE d").is_ok());
+    REQUIRE(ex.execute_sql("USE d").is_ok());
+    REQUIRE(ex.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, a INT, b INT)").is_ok());
+    REQUIRE(ex.execute_sql("INSERT INTO t VALUES (1,5,1),(2,3,2),(3,9,3),(4,3,4)").is_ok());
+
+    REQUIRE(ex.execute_sql("CREATE INDEX ia ON t (a DESC)").is_ok());
+    REQUIRE(ex.execute_sql("CREATE INDEX iab ON t (a ASC, b DESC)").is_ok());
+
+    auto eq = ex.execute_sql("SELECT id FROM t WHERE a = 3 ORDER BY id");
+    REQUIRE(eq.is_ok());
+    REQUIRE(eq.value().find("2 row(s) returned.") != std::string::npos);
+
+    auto ordered = ex.execute_sql("SELECT id FROM t ORDER BY a DESC, id");
+    REQUIRE(ordered.is_ok());
+    REQUIRE(ordered.value().find("4 row(s) returned.") != std::string::npos);
+
+    auto idx = ex.execute_sql("SHOW INDEX FROM t");
+    REQUIRE(idx.is_ok());
+    REQUIRE(idx.value().find("ia") != std::string::npos);
+    REQUIRE(idx.value().find("iab") != std::string::npos);
+
+    // Malformed direction syntax is still rejected.
+    REQUIRE(ex.execute_sql("CREATE INDEX bad ON t (a DESCX)").is_err());
+    REQUIRE(ex.execute_sql("CREATE INDEX bad2 ON t (a DESC DESC)").is_err());
+}

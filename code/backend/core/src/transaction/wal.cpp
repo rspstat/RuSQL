@@ -92,6 +92,39 @@ void TxnIoShared::ensure_next_id_at_least(std::uint64_t min_next) {
     if (min_next > next_txn_id_) next_txn_id_ = min_next;
 }
 
+TxnIoShared::~TxnIoShared() {
+    if (wal_fp_) std::fclose(wal_fp_);
+    if (undo_fp_) std::fclose(undo_fp_);
+}
+
+std::FILE* TxnIoShared::wal_append_handle_locked(const std::string& path) {
+    if (wal_fp_ && wal_fp_path_ == path) return wal_fp_;
+    close_wal_handle_locked(); // a different path than last time (e.g. a different data dir)
+    wal_fp_ = std::fopen(path.c_str(), "ab");
+    if (wal_fp_) wal_fp_path_ = path;
+    return wal_fp_;
+}
+
+void TxnIoShared::close_wal_handle_locked() {
+    if (wal_fp_) std::fclose(wal_fp_);
+    wal_fp_ = nullptr;
+    wal_fp_path_.clear();
+}
+
+std::FILE* TxnIoShared::undo_append_handle_locked(const std::string& path) {
+    if (undo_fp_ && undo_fp_path_ == path) return undo_fp_;
+    close_undo_handle_locked();
+    undo_fp_ = std::fopen(path.c_str(), "ab");
+    if (undo_fp_) undo_fp_path_ = path;
+    return undo_fp_;
+}
+
+void TxnIoShared::close_undo_handle_locked() {
+    if (undo_fp_) std::fclose(undo_fp_);
+    undo_fp_ = nullptr;
+    undo_fp_path_.clear();
+}
+
 WalManager::WalManager(const std::string& dir, std::shared_ptr<TxnIoShared> io)
     : path_(dir + "/rusql.wal"), io_(std::move(io)) {}
 
@@ -143,15 +176,15 @@ std::optional<WalRecord> WalManager::decode(const std::vector<std::uint8_t>& buf
 // write/flush/sync failure here would let a COMMIT report success without the record
 // actually being durable, defeating the entire point of this function.
 void WalManager::write_encoded_locked(const std::vector<std::uint8_t>& encoded, bool sync) const {
-    std::FILE* fp = std::fopen(path_.c_str(), "ab");
+    std::FILE* fp = io_->wal_append_handle_locked(path_);
     if (!fp) throw std::runtime_error("WAL 파일 열기 실패");
     std::size_t written = std::fwrite(encoded.data(), 1, encoded.size(), fp);
     if (written != encoded.size()) {
-        std::fclose(fp);
+        io_->close_wal_handle_locked();
         throw std::runtime_error("WAL 기록 실패");
     }
     if (std::fflush(fp) != 0) {
-        std::fclose(fp);
+        io_->close_wal_handle_locked();
         throw std::runtime_error("WAL 기록 실패");
     }
     if (sync) {
@@ -161,11 +194,10 @@ void WalManager::write_encoded_locked(const std::vector<std::uint8_t>& encoded, 
         bool ok = fsync(fileno(fp)) == 0;
 #endif
         if (!ok) {
-            std::fclose(fp);
+            io_->close_wal_handle_locked();
             throw std::runtime_error("WAL fsync 실패");
         }
     }
-    std::fclose(fp);
 }
 
 void WalManager::append(const WalRecord& record) {
@@ -223,6 +255,7 @@ std::vector<WalRecord> WalManager::read_all() const {
 }
 
 void WalManager::clear_locked() const {
+    io_->close_wal_handle_locked(); // Windows can't delete a file that still has an open handle
     std::error_code ec;
     fs::remove(path_, ec);
 }
@@ -248,6 +281,7 @@ void WalManager::remove_txn(std::uint64_t txn_id) {
         auto enc = encode(r);
         buf.insert(buf.end(), enc.begin(), enc.end());
     }
+    io_->close_wal_handle_locked(); // can't rename over a file with an open handle on Windows
     write_bytes_atomic(path_, buf.data(), buf.size());
 }
 
@@ -278,6 +312,7 @@ void WalManager::truncate_to_last_checkpoint() {
         auto enc = encode(r);
         buf.insert(buf.end(), enc.begin(), enc.end());
     }
+    io_->close_wal_handle_locked(); // can't rename over a file with an open handle on Windows
     write_bytes_atomic(path_, buf.data(), buf.size());
 }
 

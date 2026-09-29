@@ -198,12 +198,27 @@ def bench_transaction(n=N_TXN) -> dict:
         db.execute("COMMIT")
     txn_s = time.perf_counter() - t0
 
+    # 하나의 트랜잭션 안에서 n건 INSERT 후 한 번만 COMMIT -- 실제 애플리케이션이 쓰는 형태.
+    # 위의 txn_s는 "건당 BEGIN/COMMIT"이라 커밋마다 fsync가 발생하는 최악 케이스.
+    db.execute("DROP TABLE IF EXISTS bench_txn")
+    db.execute(
+        "CREATE TABLE bench_txn (id INT, val INT, "
+        "CONSTRAINT pk_txn PRIMARY KEY (id))"
+    )
+    t0 = time.perf_counter()
+    db.execute("BEGIN")
+    for i in range(n):
+        db.execute(f"INSERT INTO bench_txn (id, val) VALUES ({i}, {i})")
+    db.execute("COMMIT")
+    txn_batch_s = time.perf_counter() - t0
+
     db.execute("DROP TABLE IF EXISTS bench_txn")
     db.close()
     return {
         "rows": n,
         "auto_s": round(auto_s, 2),
         "txn_s":  round(txn_s, 2),
+        "txn_batch_s": round(txn_batch_s, 2),
     }
 
 
@@ -242,6 +257,7 @@ def main():
     tx = result["transaction"]
     print(f"  AutoCommit  : {round(tx['rows'] / tx['auto_s'])} TPS")
     print(f"  BEGIN/COMMIT: {round(tx['rows'] / tx['txn_s'])} TPS")
+    print(f"  1개 트랜잭션에 {tx['rows']:,}건 INSERT: {round(tx['rows'] / tx['txn_batch_s'])} TPS")
 
     with open(RESULT_FILE, "w", encoding="utf-8") as f:
         json.dump(result, f, indent=2, ensure_ascii=False)

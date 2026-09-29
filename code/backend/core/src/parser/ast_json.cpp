@@ -389,6 +389,7 @@ void to_json(nlohmann::json& j, const AggFunc& f) {
             else if constexpr (std::is_same_v<T, AggFunc::BitOr>) j = "BitOr";
             else if constexpr (std::is_same_v<T, AggFunc::JsonAgg>) j = "JsonAgg";
             else if constexpr (std::is_same_v<T, AggFunc::ArrayAgg>) j = "ArrayAgg";
+            else if constexpr (std::is_same_v<T, AggFunc::Median>) j = "Median";
         },
         f.data);
 }
@@ -410,6 +411,7 @@ void from_json(const nlohmann::json& j, AggFunc& f) {
         else if (tag == "BitOr") f = AggFunc::BitOr{};
         else if (tag == "JsonAgg") f = AggFunc::JsonAgg{};
         else if (tag == "ArrayAgg") f = AggFunc::ArrayAgg{};
+        else if (tag == "Median") f = AggFunc::Median{};
         else throw std::runtime_error("unknown AggFunc tag: " + tag);
         return;
     }

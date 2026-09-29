@@ -845,8 +845,13 @@ Statement Parser::parse_create_index() {
     if (!peek_is(TokenKind::LParen)) throw ParseError("Expected '('");
     advance();
     std::vector<std::string> columns;
+    // Per-column ASC/DESC (MySQL 8 / PostgreSQL syntax) is accepted. The B+Tree is always
+    // built ascending, so the direction is a physical-layout hint this engine has no
+    // separate storage for -- it never changes any query result. Previously `(col DESC)` failed with "Expected ')'".
+    auto skip_direction = [&]() { if (peek_is(TokenKind::Asc) || peek_is(TokenKind::Desc)) advance(); };
     columns.push_back(expect_ident());
-    while (peek_is(TokenKind::Comma)) { advance(); columns.push_back(expect_ident()); }
+    skip_direction();
+    while (peek_is(TokenKind::Comma)) { advance(); columns.push_back(expect_ident()); skip_direction(); }
     if (!peek_is(TokenKind::RParen)) throw ParseError("Expected ')'");
     advance();
     bool using_hash = false;

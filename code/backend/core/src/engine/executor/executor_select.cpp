@@ -130,6 +130,7 @@ std::string debug_agg_func_dual(const AggFunc& func) {
     if (std::holds_alternative<AggFunc::BitOr>(func.data)) return "BitOr";
     if (std::holds_alternative<AggFunc::JsonAgg>(func.data)) return "JsonAgg";
     if (std::holds_alternative<AggFunc::ArrayAgg>(func.data)) return "ArrayAgg";
+    if (std::holds_alternative<AggFunc::Median>(func.data)) return "Median";
     return "";
 }
 } // namespace
@@ -174,6 +175,7 @@ std::string Executor::agg_label(const AggFunc& func, const std::string& col) {
     if (std::holds_alternative<AggFunc::BitOr>(func.data)) return "BIT_OR(" + col + ")";
     if (std::holds_alternative<AggFunc::JsonAgg>(func.data)) return "JSON_AGG(" + col + ")";
     if (std::holds_alternative<AggFunc::ArrayAgg>(func.data)) return "ARRAY_AGG(" + col + ")";
+    if (std::holds_alternative<AggFunc::Median>(func.data)) return "MEDIAN(" + col + ")";
     return "";
 }
 
@@ -504,6 +506,14 @@ Row Executor::compute_aggregates(const std::vector<Row>& grp, const std::vector<
                 double var = 0.0;
                 for (auto v : vals) var += (v - mean) * (v - mean);
                 agg_val = var / static_cast<double>(vals.size());
+            }
+            is_avg_like = true;
+        } else if (std::holds_alternative<AggFunc::Median>(func->data)) {
+            if (!vals.empty()) {
+                std::vector<double> sorted = vals;
+                std::sort(sorted.begin(), sorted.end());
+                std::size_t n = sorted.size();
+                agg_val = n % 2 ? sorted[n / 2] : (sorted[n / 2 - 1] + sorted[n / 2]) / 2.0;
             }
             is_avg_like = true;
         }

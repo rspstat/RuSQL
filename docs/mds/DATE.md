@@ -357,6 +357,18 @@ VS Code 스타일 탭 드래그 순서 변경(요청의 1번 항목)은 같은 �
 
 **결과**: 397 케이스 / **22,703 assertions** 전부 통과(392/22,635에서 +5케이스/+68assertion). git: `d41fe03`.
 
+### 9월 29일 — 명시적 트랜잭션 "성능 이상" 조사 → 이상이 아니라 비대칭 비교였음 + 트랜잭션 로깅 2.8배 개선, MEDIAN·DESC 인덱스 문법 추가
+
+이전에 벤치마크로 발견했던 "BEGIN/COMMIT이 autocommit보다 ~78배 느림"을 조사. 결과부터: **이상 현상이 아니라 비교 자체가 비대칭**이었음. 실측(`engine_server`+bench 클라이언트, 1,000건): autocommit 0.16초 / 건당 BEGIN·INSERT·COMMIT 12초 / 한 트랜잭션에 INSERT 1,000건 0.56초. 그리고 서버를 강제 종료하는 실험으로 더 중요한 사실을 확인 — **autocommit INSERT는 디스크에 쓰지 않는다**(`txn.log_insert`가 트랜잭션 밖에선 no-op이고 buffer pool에 dirty 표시조차 안 함 → 응답은 OK인데 크래시하면 5행이 0행으로 사라짐). 즉 autocommit이 빠른 건 내구성이 없어서이고, 명시적 COMMIT의 ~12ms는 실제로 내구성 있는 커밋의 비용(테이블 통째 원자적 재작성 tmp+fsync+rename ≈3ms, WAL COMMIT fsync ≈2~7ms, WAL/undo 파일 정리). 사용자 결정으로 autocommit 내구성 변경(WAL 기록+그룹 커밋)은 범위 밖으로 두고 COMMIT 경로만 최적화하기로 함 — 다만 autocommit 미내구성은 **알려진 한계**로 문서화.
+
+계측(임시 코드로 COMMIT 단계별 시간 측정 후 전부 제거)으로 찾은 실제 병목은 커밋이 아니라 **트랜잭션 안의 문장당 로깅**: WAL·Undo 레코드마다 파일을 열고(`fopen "ab"`)·쓰고·닫아서 레코드당 0.184ms(파일시스템 메타데이터+Defender 실시간 검사), 핸들을 유지하면 0.004ms(46배). 문장 하나가 두 파일에 각각 쓰므로 트랜잭션 내 INSERT가 autocommit의 3.5배였음. 수정: `TxnIoShared`가 WAL/Undo 추가 전용 핸들을 세션 공유로 유지(기존 락으로 보호, 레코드마다 `fflush`·COMMIT은 여전히 fsync라 내구성 의미 동일). Windows는 열린 파일을 삭제·덮어쓰기(rename) 못 하므로 삭제/truncate/원자적 교체 경로 전부(clear, remove_txn, truncate_to_last_checkpoint, Undo의 clear/remove_txn/rewrite_txn)에서 먼저 핸들을 닫도록 함.
+
+**결과**: 한 트랜잭션에 INSERT 1,000건 0.56초 → **0.20초(2.8배)**, 건당 BEGIN/COMMIT은 fsync 지배라 그대로(~12~14ms, 이 PC는 Defender 실시간 검사·백그라운드 게임 프로세스 때문에 회차별 6~21ms로 변동이 커 A/B 반복 측정 필요했음). `bench.py`에 "1개 트랜잭션 N건 INSERT" 지표(`txn_batch_s`)를 추가 — 기존 "건당 BEGIN/COMMIT"만으론 오해를 부르는 수치였음.
+
+**SQL 기능 갭 저비용 항목**: `MEDIAN(col)`(PERCENTILE_CONT(0.5), 기존 집계 패턴 재사용 — ARRAY_AGG와 같은 지점들 수정)과 `CREATE INDEX ... (col DESC)`(컬럼별 ASC/DESC 문법 수용, 이전엔 "Expected ')'" 파싱 에러). 원래 후보였던 PERCENTILE_CONT/DISC 전체는 AggFunc에 매개변수(분위수)와 `WITHIN GROUP` 문법이 필요해 범위가 커서 MEDIAN만. DESC 인덱스도 실제 내림차순 저장이 아니라 문법 수용(B+Tree는 항상 오름차순)이라는 점을 코드 주석·문서에 명시. UUID는 이미 `UUID()` 함수가 있어(타입만 없음) 제외. `DIFF.md`에서 이미 구현돼 있는데 ✗로 남아 있던 3행(ARRAY_AGG, LOCK TABLES, REPLACE INTO)도 바로잡음(전날 문서 최신화에서 놓쳤던 것).
+
+**테스트/검증**: 신규 4케이스(MEDIAN 홀수·짝수·NULL·빈 집합·GROUP BY, DESC 인덱스 결과 동일성·문법 오류 거부, 25회 커밋/롤백 반복과 핸들 재사용, 다른 세션 레코드가 남은 채 재작성되는 경로). Debug+Release **401 케이스/22,896 assertions** 통과, `test_full.sql`/`test_full-ver2.sql` Debug CLI 실행 결과가 변경 전 CLI와 에러 수 동일(3/2, 차이는 시각·소요시간뿐), 실서버 크래시 복구 라이브 검증(커밋된 2행 유지·미커밋 2행 롤백, 커밋 후 강제 종료 시 3행 유지).
+
 ---
 
 ## 요약: 1학기 대비 2학기에 달라진 것

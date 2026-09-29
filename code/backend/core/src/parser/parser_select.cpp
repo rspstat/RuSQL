@@ -58,7 +58,8 @@ Statement Parser::parse_select() {
                       p->kind == TokenKind::Min || p->kind == TokenKind::Max ||
                       p->kind == TokenKind::Stddev || p->kind == TokenKind::Variance ||
                       p->kind == TokenKind::BitAnd || p->kind == TokenKind::BitOr ||
-                      p->kind == TokenKind::JsonAgg || p->kind == TokenKind::ArrayAgg)) {
+                      p->kind == TokenKind::JsonAgg || p->kind == TokenKind::ArrayAgg ||
+                      p->kind == TokenKind::Median)) {
                 const Token* ft = advance();
                 AggFunc func = [&]() -> AggFunc {
                     switch (ft->kind) {
@@ -72,6 +73,7 @@ Statement Parser::parse_select() {
                         case TokenKind::BitAnd: return AggFunc(AggFunc::BitAnd{});
                         case TokenKind::BitOr: return AggFunc(AggFunc::BitOr{});
                         case TokenKind::ArrayAgg: return AggFunc(AggFunc::ArrayAgg{});
+                        case TokenKind::Median: return AggFunc(AggFunc::Median{});
                         default: return AggFunc(AggFunc::JsonAgg{});
                     }
                 }();

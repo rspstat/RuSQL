@@ -287,9 +287,12 @@ struct AggFunc {
     // alternative only so EXPLAIN/SHOW CREATE VIEW and the column label ("ARRAY_AGG(x)"
     // vs "JSON_AGG(x)") stay faithful to what the user actually wrote.
     struct ArrayAgg {};
+    // MEDIAN(col): the 50th percentile (PERCENTILE_CONT(0.5)) -- linear interpolation between
+    // the two middle values for an even count. NULLs are ignored.
+    struct Median {};
 
     using Data = std::variant<Count, CountDistinct, Sum, Avg, Min, Max, SumDistinct, AvgDistinct,
-                               Stddev, Variance, GroupConcat, CountCase, SumCase, BitAnd, BitOr, JsonAgg, ArrayAgg>;
+                               Stddev, Variance, GroupConcat, CountCase, SumCase, BitAnd, BitOr, JsonAgg, ArrayAgg, Median>;
     Data data;
 
     AggFunc() : data(Count{}) {}
