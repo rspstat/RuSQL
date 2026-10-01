@@ -73,7 +73,7 @@ StringResult Executor::exec_commit(SharedDatabase& s) {
     return StringResult::Ok("Transaction committed.");
 }
 
-StringResult Executor::exec_commit_phase1(SharedDatabase& s) {
+StringResult Executor::exec_commit_phase1(SharedDatabase& s, bool use_redo) {
     if (auto res = txn.validate_serializable(s.tables, *s.active_txn_ids->lock()); res.is_err()) {
         apply_rollback(s);
         return StringResult::Err(res.error() + " (auto-rolled back)");
@@ -86,14 +86,21 @@ StringResult Executor::exec_commit_phase1(SharedDatabase& s) {
 
     for (auto& table : txn.dirty_tables()) {
         if (auto it = s.tables.find(table); it != s.tables.end()) {
-            s.buffer_pool.write_page(table, it->second);
-            s.buffer_pool.flush_page(table, s.disk);
+            // Redo mode: the table file is NOT rewritten here -- the commit's redo batch
+            // (written by execute_commit_grouped) is what makes it durable.
+            if (!use_redo) {
+                s.buffer_pool.write_page(table, it->second);
+                s.buffer_pool.flush_page(table, s.disk);
+                redo_mark_flushed(s, table); // table_locks are held EXCLUSIVE for dirty tables here
+            }
             s.query_cache.invalidate_table(table);
         }
     }
 
     std::uint64_t txn_id = txn.current_txn_id();
-    if (auto res = txn.commit_write_record(); res.is_err()) return StringResult::Err(res.error());
+    if (!use_redo) {
+        if (auto res = txn.commit_write_record(); res.is_err()) return StringResult::Err(res.error());
+    }
     s.lock_mgr.release(txn_id);
     // Regression (checkpoint/group-commit TOCTOU): active_txn_ids used to be erased here,
     // right after commit_write_record() writes the COMMIT record WITHOUT an fsync
@@ -141,12 +148,20 @@ StringResult Executor::execute_commit_grouped() {
     // works fully for commits touching DIFFERENT tables, just not for the same one
     // concurrently, which correctness now requires anyway.
     auto guard = acquire_table_locks(shared->read(), dirty_tables, /*exclusive=*/true);
-    auto phase1 = exec_commit_phase1(const_cast<SharedDatabase&>(*guard.structural));
+    // Redo mode unless a statement ran in this transaction whose changes the redo ops don't
+    // fully describe (cascade/MERGE/multi-table/...): then fall back to flushing dirty tables.
+    const bool use_redo = !txn.redo_incomplete();
+    auto phase1 = exec_commit_phase1(const_cast<SharedDatabase&>(*guard.structural), use_redo);
     if (phase1.is_err()) return phase1;
     auto coord = guard.structural->group_commit_coord;
     auto active_txn_ids = guard.structural->active_txn_ids;
 
-    coord->sync_commit();
+    if (use_redo) {
+        // One batch + one (group-committed) fsync makes the whole transaction durable.
+        write_redo_batch(const_cast<SharedDatabase&>(*guard.structural), txn.take_redo_ops(std::to_string(txn_id)));
+    } else {
+        coord->sync_commit();
+    }
     txn.commit_finalize();
     // Only now -- once the commit is truly durable (fsync'd via sync_commit(), WAL/undo
     // pruned via commit_finalize()) -- is it safe for a concurrent reader/checkpoint to
@@ -467,63 +482,35 @@ void Executor::recover_from_wal() {
                 }
             }
         } else {
+            // Uncommitted at crash time. Its row versions are tagged with its transaction id
+            // (_xmin = created by it, _xmax = killed by it), so undoing it is: drop what it
+            // created, revive what it killed -- the same MVCC rule apply_rollback() uses at
+            // runtime. This is idempotent and does not care whether any of its changes ever
+            // reached the table files. That matters: since COMMIT stopped rewriting tables,
+            // an open transaction's changes usually are NOT on disk, and the old entry-by-
+            // entry undo (re-insert the old image of a deleted row, overwrite "the" row with
+            // an old image) manufactured row versions that never existed there.
             auto uit = undo_by_txn.find(txn_id);
             if (uit != undo_by_txn.end()) {
-                for (auto entry_it = uit->second.rbegin(); entry_it != uit->second.rend(); ++entry_it) {
-                    auto& entry = *entry_it;
-                    touched_tables.insert(entry.table);
-                    std::string pk_col = "id";
-                    if (auto* sc = sw->catalog.get_table(entry.table)) {
-                        for (auto& c : sc->columns) {
-                            if (c.primary_key) {
-                                pk_col = c.name;
-                                break;
-                            }
-                        }
+                const std::string id_str = std::to_string(txn_id);
+                std::unordered_set<std::string> tables_of_txn;
+                for (auto& entry : uit->second) tables_of_txn.insert(entry.table);
+                for (auto& table : tables_of_txn) {
+                    auto tit = sw->tables.find(table);
+                    if (tit == sw->tables.end()) continue;
+                    auto& rows = tit->second;
+                    touched_tables.insert(table);
+                    rows.erase(std::remove_if(rows.begin(), rows.end(),
+                                               [&](const Row& r) {
+                                                   auto it = r.find("_xmin");
+                                                   return it != r.end() && it->second == id_str;
+                                               }),
+                               rows.end());
+                    for (auto& row : rows) {
+                        auto it = row.find("_xmax");
+                        if (it != row.end() && it->second == id_str) it->second = "0";
                     }
-                    if (entry.operation == "INSERT") {
-                        auto tit = sw->tables.find(entry.table);
-                        if (tit != sw->tables.end()) {
-                            auto& rows = tit->second;
-                            rows.erase(std::remove_if(rows.begin(), rows.end(),
-                                                       [&](const Row& r) {
-                                                           auto rit = r.find(pk_col);
-                                                           return rit != r.end() && rit->second == entry.key;
-                                                       }),
-                                       rows.end());
-                            sw->disk.save_table(entry.table, rows);
-                        }
-                    } else if (entry.operation == "UPDATE") {
-                        if (entry.old_data) {
-                            try {
-                                Row old_row = nlohmann::json::parse(*entry.old_data).get<Row>();
-                                auto tit = sw->tables.find(entry.table);
-                                if (tit != sw->tables.end()) {
-                                    for (auto& row : tit->second) {
-                                        auto rit = row.find(pk_col);
-                                        if (rit != row.end() && rit->second == entry.key) {
-                                            row = old_row;
-                                            break;
-                                        }
-                                    }
-                                    sw->disk.save_table(entry.table, tit->second);
-                                }
-                            } catch (...) {
-                            }
-                        }
-                    } else if (entry.operation == "DELETE") {
-                        if (entry.old_data) {
-                            try {
-                                Row old_row = nlohmann::json::parse(*entry.old_data).get<Row>();
-                                auto tit = sw->tables.find(entry.table);
-                                if (tit != sw->tables.end()) {
-                                    tit->second.push_back(old_row);
-                                    sw->disk.save_table(entry.table, tit->second);
-                                }
-                            } catch (...) {
-                            }
-                        }
-                    }
+                    sw->disk.save_table(table, rows);
                 }
             }
         }

@@ -14,6 +14,7 @@
 #include "engine/parser/ast.hpp"
 #include "engine/result.hpp"
 #include "engine/row.hpp"
+#include "engine/transaction/redo_log.hpp"
 #include "engine/transaction/wal.hpp"
 
 namespace engine {
@@ -100,6 +101,21 @@ public:
     Result<std::vector<UndoEntry>, std::string> rollback_to_savepoint(const std::string& name);
     Result<void, std::string> release_savepoint(const std::string& name);
 
+    // Redo capture (see redo_log.hpp). log_insert/update/delete ALWAYS record the row-version
+    // ops describing the change -- even outside an explicit transaction, where they just
+    // accumulate for the current autocommit statement -- while the WAL/undo file writes
+    // below them stay explicit-transaction-only, exactly as before.
+    // Returns the ops recorded since the last take/discard (empty xmax fields are filled
+    // with `fallback_xmax`) and resets the buffer.
+    std::vector<RedoOp> take_redo_ops(const std::string& fallback_xmax);
+    void discard_redo_ops();
+    bool has_redo_ops() const { return !redo_ops_.empty(); }
+    // Set when a statement whose changes are NOT fully described by log_* (cascades, MERGE,
+    // multi-table UPDATE/DELETE, ...) ran inside this transaction: COMMIT must then fall
+    // back to flushing the dirty tables instead of relying on redo ops alone.
+    void mark_redo_incomplete() { redo_incomplete_ = true; }
+    bool redo_incomplete() const { return redo_incomplete_; }
+
     void log_insert(const std::string& table, const std::string& key, const std::string& data);
     void log_update(const std::string& table, const std::string& key, const std::string& old_data, const std::string& new_data);
     void log_delete(const std::string& table, const std::string& key, const std::string& old_data);
@@ -112,6 +128,11 @@ public:
     void wal_clear();
     void do_checkpoint(bool safe_to_truncate);
     bool needs_auto_checkpoint() const;
+
+    // Closes the shared WAL/undo append handles (they reopen lazily on the next record).
+    // Needed by callers that want to delete the data directory while this manager is still
+    // alive -- Windows refuses to delete a file that has an open handle.
+    void release_file_handles();
 
     bool has_undo_log_file() const;
     std::vector<UndoEntry> read_undo_log_file();
@@ -130,6 +151,12 @@ private:
     // encoded as "table\x00pk_col\x00key". Only populated/consulted for Serializable.
     std::unordered_set<std::string> read_set_;
     std::vector<std::pair<std::string, std::size_t>> savepoints_;
+    // See take_redo_ops(). redo_marks_[i] = redo_ops_.size() right after undo_log_[i] was
+    // logged (an UPDATE contributes two ops for one undo entry), so a ROLLBACK TO SAVEPOINT
+    // that truncates undo_log_ to N entries can truncate redo_ops_ consistently.
+    std::vector<RedoOp> redo_ops_;
+    std::vector<std::size_t> redo_marks_;
+    bool redo_incomplete_ = false;
 };
 
 } // namespace engine

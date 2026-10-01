@@ -27,6 +27,7 @@
 #include "engine/storage/composite_index.hpp"
 #include "engine/storage/disk.hpp"
 #include "engine/transaction/group_commit.hpp"
+#include "engine/transaction/redo_log.hpp"
 #include "engine/storage/hash_index.hpp"
 #include "engine/json_support.hpp"
 #include "engine/lock_manager.hpp"
@@ -180,6 +181,14 @@ struct SharedDatabase {
     // on `s` at all (LOCK TABLES ... UNLOCK TABLES spans multiple separate client
     // round-trips, unlike every other lock in this codebase).
     std::shared_ptr<Mutex<std::unordered_map<std::string, std::vector<ExplicitTableLockHolder>>>> explicit_table_locks;
+
+    // Committed-change redo log (see redo_log.hpp): COMMIT and covered autocommit statements
+    // append a small batch here + fsync instead of rewriting whole table files. Tables named
+    // in redo_dirty have committed changes that exist only in memory + this log until the
+    // next checkpoint (checkpoint_redo_locked) rewrites their .rdb files and clears the log.
+    std::shared_ptr<RedoLog> redo_log;
+    std::shared_ptr<GroupCommitCoordinator> redo_commit_coord;
+    std::shared_ptr<Mutex<std::unordered_set<std::string>>> redo_dirty;
 
     // mysql_native_password challenge-response verification (nonce is a 20-byte challenge)
     // -- used by both the MySQL wire protocol listener and the native TCP protocol's own
@@ -533,6 +542,25 @@ private:
 
     // ── Phase 8b: shared DML infrastructure ─────────────────────────────
     void maybe_auto_checkpoint(SharedDatabase& s);
+
+    // ---- redo-log durability (executor_redo.cpp) ----
+    // Lock-free handle to the shared redo log, so execute() can cheaply check its size
+    // before taking any lock (set at boot and in new_session).
+    std::shared_ptr<RedoLog> redo_log_;
+    // True while a statement the dispatcher classified as "fully described by log_* redo
+    // ops" is executing -- exec_update_inner skips its legacy whole-table flush then.
+    bool redo_covered_stmt_ = false;
+    // Redo log size that triggers a checkpoint. RUSQL_REDO_CHECKPOINT_BYTES overrides the
+    // 4MB default (used by the crash-consistency fuzzer to force checkpoints between kills).
+    static std::uint64_t redo_checkpoint_bytes();
+    static bool is_redo_covered_kind(const Statement& stmt);
+    void maybe_checkpoint_redo();
+    void checkpoint_redo_locked(SharedDatabase& s);
+    void write_redo_batch(SharedDatabase& s, std::vector<RedoOp> ops);
+    static void redo_mark_flushed(SharedDatabase& s, const std::string& table);
+    // Autocommit statement epilogue, run while the statement's table locks are still held.
+    void persist_autocommit(SharedDatabase& s, const std::vector<std::string>& lock_tables, bool covered, bool mutating);
+    void recover_from_redo();
     static void maybe_auto_vacuum(SharedDatabase& s, const std::string& table);
     void maybe_auto_analyze(SharedDatabase& s, const std::string& table);
     // Returns Err only if trigger recursion exceeds the depth cap; a failing trigger-body
@@ -719,7 +747,7 @@ private:
     StringResult exec_begin(SharedDatabase& s);
     StringResult exec_commit(SharedDatabase& s);
     StringResult execute_commit_grouped();
-    StringResult exec_commit_phase1(SharedDatabase& s);
+    StringResult exec_commit_phase1(SharedDatabase& s, bool use_redo);
     void apply_rollback(SharedDatabase& s);
     StringResult exec_rollback(SharedDatabase& s);
     StringResult exec_savepoint(const std::string& name);

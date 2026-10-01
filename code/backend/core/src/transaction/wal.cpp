@@ -65,6 +65,15 @@ bool read_all_bytes(const std::string& path, std::vector<std::uint8_t>& out) {
 }
 } // namespace
 
+static bool truncate_to_zero(std::FILE* fp) {
+    if (std::fflush(fp) != 0) return false;
+#ifdef _WIN32
+    return _chsize_s(_fileno(fp), 0) == 0;
+#else
+    return ftruncate(fileno(fp), 0) == 0;
+#endif
+}
+
 std::optional<WalOp> wal_op_from_u8(std::uint8_t v) {
     switch (v) {
         case 0x01: return WalOp::Insert;
@@ -273,6 +282,13 @@ void WalManager::remove_txn(std::uint64_t txn_id) {
         if (r.txn_id != txn_id) remaining.push_back(r);
     }
     if (remaining.empty()) {
+        // Empty the file IN PLACE through the persistent handle instead of delete + recreate:
+        // creating a fresh file for every transaction cost ~1ms+ of file-system metadata work
+        // (and an antivirus scan of the new file) per commit.
+        if (fs::exists(path_)) {
+            std::FILE* fp = io_->wal_append_handle_locked(path_);
+            if (fp && truncate_to_zero(fp)) return;
+        }
         clear_locked();
         return;
     }

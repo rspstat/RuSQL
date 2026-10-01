@@ -14,7 +14,7 @@
 | 버퍼 풀 / 캐시 | InnoDB 버퍼 풀 | shared_buffers | Buffer Cache (SGA) | LRU N 페이지 (--buffer-pool-size, 기본 64) |
 | 클러스터드 인덱스 | ✓ (PK 기준 물리 정렬) | ✗ (CLUSTER 명령으로 수동) | ✓ (IOT: Index-Organized Table) | ✓ (INSERT 후 PK 기준 물리 정렬 유지) |
 | 압축 | Transparent Page Compression | TOAST (가변 길이 컬럼) | Advanced Compression (유료) | LZ4 전체 테이블 |
-| WAL | InnoDB Redo Log | WAL (pg_wal/) | Redo Log + Archive Log | ✓ (바이너리, 자동 체크포인트 512 KB) |
+| WAL | InnoDB Redo Log | WAL (pg_wal/) | Redo Log + Archive Log | ✓ (바이너리, 자동 체크포인트 512 KB) + **커밋 redo 로그(`rusql.redo`, 2026-10-01)** — 커밋 = 작은 배치 1개 + fsync 1번, 테이블 파일은 체크포인트(4MB)에서만 재작성. 멱등·순서 무관 재생 |
 | 크래시 복구 | ✓ Redo/Undo | ✓ Redo + MVCC 정리 | ✓ Redo + Undo tablespace | ✓ WAL Replay + Undo log (txn_id 그룹 단위 redo/undo — 여러 트랜잭션 레코드가 섞여 있어도 커밋된 것만 정확히 분리 복구) |
 
 ---
@@ -48,7 +48,7 @@
 | 원자성 (A) | ✓ | ✓ | ✓ | ✓ (Undo log + WAL) |
 | 일관성 (C) | ✓ | ✓ | ✓ | ✓ (PK/FK/UNIQUE/CHECK 검증) |
 | 격리성 (I) | ✓ | ✓ | ✓ | ✓ (`SnapshotCtx` 기반 MVCC 가시성: DML은 `s.tables`에 직접 기록되고 격리수준별 스냅샷으로 필터링 — 미커밋 행은 작성자 본인에게만 보임) |
-| 지속성 (D) | ✓ | ✓ | ✓ | ✓ (WAL fsync + 그룹 커밋; 전역 유일 txn_id 태깅으로 세션 간 공유 WAL/Undo Log 격리 — 한 세션의 COMMIT이 다른 세션의 진행 중인 트랜잭션 레코드를 파괴하지 않음) |
+| 지속성 (D) | ✓ | ✓ | ✓ | ✓ (redo 로그 fsync + 그룹 커밋 — 2026-10-01부터 autocommit 문장도 내구성 보장(이전엔 autocommit INSERT가 크래시 시 유실), 커밋 비용이 테이블 크기와 무관(1k~20k행에서 평탄 측정); WAL fsync + 그룹 커밋; 전역 유일 txn_id 태깅으로 세션 간 공유 WAL/Undo Log 격리 — 한 세션의 COMMIT이 다른 세션의 진행 중인 트랜잭션 레코드를 파괴하지 않음) |
 | MVCC | ✓ (InnoDB Undo segment) | ✓ (튜플 버전 힙 내 저장) | ✓ (Undo tablespace 기반 Consistent Read) | ✓ (`_xmin`/`_xmax` 태깅 실제 다중버전 — UPDATE마다 새 물리 버전 생성, `SnapshotCtx` 기반 격리수준별 가시성, GC 호라이즌 기반 VACUUM; 같은 테이블의 서로 다른 행에 대한 쓰기도 실제로 동시 실행됨(행 단위 잠금 — `table_data_locks`+`LockManager` 행 클레임, 진짜 블로킹 대기 포함); predicate lock으로 phantom 탐지는 되지만 Postgres 수준 완전 SSI(진짜 dangerous-structure 판정)는 아직 아님 — 아래 행 참고) |
 | 격리 수준 | 4가지 (기본: REPEATABLE READ) | 3가지 유효 (기본: READ COMMITTED) | 2가지 유효 — READ COMMITTED / SERIALIZABLE (기본: READ COMMITTED) | 4가지 (기본: READ COMMITTED) |
 | Serializable 구현 | 잠금 기반 + GAP Lock (팬텀 방지) | SSI (Serializable Snapshot Isolation) | 스냅샷 기반 (ORA-08177 직렬화 오류 반환) | read-set 기반 충돌 검증 + Gap Lock + **non-blocking predicate lock**(잠금 없는 일반 SELECT가 스캔한 PK 범위를 등록해두고, 나중에 그 범위에 phantom이 INSERT되면 인서트는 막지 않되 읽은 쪽의 COMMIT을 "Serialization failure"로 실패시킴 — PostgreSQL의 SIREAD와 같은 non-blocking 방식). 다만 "범위가 겹치면 무조건 실패"하는 보수적 근사이지 Postgres의 진짜 rw-antidependency 사이클 판정(Cahill et al.)은 아님 — false positive(불필요한 실패)는 있을 수 있어도 false negative(놓치는 이상현상)는 없음(2026-09-28 3-트랜잭션 순환 테스트로 직접 검증). 같은 날 predicate lock 범위를 집계 쿼리·복합/무-PK 테이블·JOIN까지 확장 |

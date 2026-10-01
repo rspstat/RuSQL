@@ -31,6 +31,7 @@ TEST_CASE("global txn_id is unique across managers sharing TxnIoShared", "[txn]"
 
     a.abort();
     b.abort();
+    a.release_file_handles();
     fs::remove_all(dir);
 }
 
@@ -66,6 +67,7 @@ TEST_CASE("concurrent commit preserves other open transaction's WAL/undo records
     REQUIRE(b_count == 0);
 
     REQUIRE(a.commit().is_ok());
+    a.release_file_handles();
     fs::remove_all(dir);
 }
 
@@ -97,6 +99,7 @@ TEST_CASE("rollback_to_savepoint preserves other transaction's undo", "[txn]") {
 
     REQUIRE(a.commit().is_ok());
     REQUIRE(b.commit().is_ok());
+    a.release_file_handles();
     fs::remove_all(dir);
 }
 
@@ -117,6 +120,7 @@ TEST_CASE("do_checkpoint deferred when unsafe is a no-op", "[txn]") {
     REQUIRE_FALSE(has_checkpoint);
 
     a.abort();
+    a.release_file_handles();
     fs::remove_all(dir);
 }
 
@@ -144,6 +148,7 @@ TEST_CASE("REPEATABLE READ freezes its read ctx at BEGIN, unaffected by later ac
     REQUIRE(io->peek_next_id() > cutoff_at_begin);
 
     a.abort();
+    a.release_file_handles();
     fs::remove_all(dir);
 }
 
@@ -188,6 +193,7 @@ TEST_CASE("SERIALIZABLE validate_serializable detects a read row modified by a s
     REQUIRE(a.validate_serializable(tables, {}).is_err());
 
     a.abort();
+    a.release_file_handles();
     fs::remove_all(dir);
 }
 
@@ -355,7 +361,8 @@ TEST_CASE("Persistent WAL/undo handles survive many commit/rollback cycles and n
         }
         REQUIRE(a.wal_records().empty()); // txn's own records removed either way
         REQUIRE(a.read_undo_log_file().empty());
-        REQUIRE_FALSE(fs::exists(dir + "/_undo.log")); // deleted, not left behind open/empty
+        // emptied in place (no delete+recreate churn) -- either way no stale content remains
+        REQUIRE((!fs::exists(dir + "/_undo.log") || fs::file_size(dir + "/_undo.log") == 0));
     }
 }
 

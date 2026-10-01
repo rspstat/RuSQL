@@ -194,6 +194,7 @@ void Executor::maybe_auto_vacuum(SharedDatabase& s, const std::string& table) {
         }
         s.buffer_pool.write_page(table, rows_clone);
         s.buffer_pool.flush_page(table, s.disk);
+        redo_mark_flushed(s, table); // vacuum physically removed versions the redo log may still describe
     }
 }
 

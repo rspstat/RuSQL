@@ -7,6 +7,8 @@
 #include <limits>
 #include <stdexcept>
 
+#include <nlohmann/json.hpp>
+
 #include "engine/storage/atomic_write.hpp"
 
 namespace fs = std::filesystem;
@@ -88,6 +90,14 @@ bool read_all_bytes(const std::string& path, std::vector<std::uint8_t>& out) {
     f.seekg(0);
     f.read(reinterpret_cast<char*>(out.data()), size);
     return true;
+}
+bool undo_truncate_to_zero(std::FILE* fp) {
+    if (std::fflush(fp) != 0) return false;
+#ifdef _WIN32
+    return _chsize_s(_fileno(fp), 0) == 0;
+#else
+    return ftruncate(fileno(fp), 0) == 0;
+#endif
 }
 } // namespace
 
@@ -209,6 +219,11 @@ void UndoLogFile::remove_txn(std::uint64_t txn_id) {
         if (e.txn_id != txn_id) remaining.push_back(e);
     }
     if (remaining.empty()) {
+        // Empty in place through the persistent handle (see WalManager::remove_txn).
+        if (fs::exists(path_)) {
+            std::FILE* fp = io_->undo_append_handle_locked(path_);
+            if (fp && undo_truncate_to_zero(fp)) return;
+        }
         clear_locked();
         return;
     }
@@ -257,6 +272,8 @@ Result<std::uint64_t, std::string> TransactionManager::begin_with_snapshot(const
     active_ = true;
     undo_log_.clear();
     read_set_.clear();
+    discard_redo_ops();
+    redo_incomplete_ = false;
 
     if (isolation_level_ == IsolationLevel::RepeatableRead || isolation_level_ == IsolationLevel::Serializable) {
         frozen_ctx_ = SnapshotCtx{txn_id_, io_->peek_next_id(), active_txn_ids};
@@ -316,6 +333,8 @@ Result<std::uint64_t, std::string> TransactionManager::begin() {
     txn_id_ = io_->next_id();
     active_ = true;
     undo_log_.clear();
+    discard_redo_ops();
+    redo_incomplete_ = false;
     return Result<std::uint64_t, std::string>::Ok(txn_id_);
 }
 
@@ -336,6 +355,8 @@ Result<void, std::string> TransactionManager::commit() {
     undo_log_file_.remove_txn(txn_id_);
     frozen_ctx_ = std::nullopt;
     read_set_.clear();
+    discard_redo_ops();
+    redo_incomplete_ = false;
     savepoints_.clear();
     active_ = false;
     return Result<void, std::string>::Ok();
@@ -353,6 +374,8 @@ void TransactionManager::commit_finalize() {
     undo_log_file_.remove_txn(txn_id_);
     frozen_ctx_ = std::nullopt;
     read_set_.clear();
+    discard_redo_ops();
+    redo_incomplete_ = false;
     savepoints_.clear();
     active_ = false;
 }
@@ -365,6 +388,8 @@ std::vector<UndoEntry> TransactionManager::rollback() {
     undo_log_file_.remove_txn(txn_id_);
     frozen_ctx_ = std::nullopt;
     read_set_.clear();
+    discard_redo_ops();
+    redo_incomplete_ = false;
     savepoints_.clear();
     active_ = false;
     return entries;
@@ -379,6 +404,8 @@ Result<std::vector<UndoEntry>, std::string> TransactionManager::abort() {
     undo_log_file_.remove_txn(txn_id_);
     frozen_ctx_ = std::nullopt;
     read_set_.clear();
+    discard_redo_ops();
+    redo_incomplete_ = false;
     savepoints_.clear();
     active_ = false;
     return Result<std::vector<UndoEntry>, std::string>::Ok(entries);
@@ -403,6 +430,8 @@ Result<std::vector<UndoEntry>, std::string> TransactionManager::rollback_to_save
     std::vector<UndoEntry> entries(undo_log_.begin() + static_cast<std::ptrdiff_t>(undo_len), undo_log_.end());
     std::reverse(entries.begin(), entries.end());
     undo_log_.resize(undo_len);
+    redo_ops_.resize(undo_len == 0 ? 0 : redo_marks_[undo_len - 1]);
+    redo_marks_.resize(undo_len);
     savepoints_.resize(pos + 1);
     undo_log_file_.rewrite_txn(txn_id_, undo_log_);
     return Result<std::vector<UndoEntry>, std::string>::Ok(entries);
@@ -417,7 +446,36 @@ Result<void, std::string> TransactionManager::release_savepoint(const std::strin
     return Result<void, std::string>::Ok();
 }
 
+std::vector<RedoOp> TransactionManager::take_redo_ops(const std::string& fallback_xmax) {
+    std::vector<RedoOp> out = std::move(redo_ops_);
+    for (auto& op : out) {
+        if (op.kind == RedoOp::Kind::SetXmax && op.xmax.empty()) op.xmax = fallback_xmax;
+    }
+    discard_redo_ops();
+    return out;
+}
+
+void TransactionManager::discard_redo_ops() {
+    redo_ops_.clear();
+    redo_marks_.clear();
+}
+
+namespace {
+// The _xmin of a row image (the id of the transaction that created that version) -- the
+// matching _xmax value for the version it superseded.
+std::string xmin_of_image(const std::string& json) {
+    try {
+        auto j = nlohmann::json::parse(json);
+        if (j.contains("_xmin")) return j["_xmin"].get<std::string>();
+    } catch (...) {
+    }
+    return "";
+}
+} // namespace
+
 void TransactionManager::log_insert(const std::string& table, const std::string& key, const std::string& data) {
+    redo_ops_.push_back({RedoOp::Kind::InsertVersion, table, data, ""});
+    if (active_) redo_marks_.push_back(redo_ops_.size());
     if (!active_) return;
     wal_.log_insert(txn_id_, table, key, data);
     UndoEntry entry{txn_id_, "INSERT", table, key, std::nullopt};
@@ -427,6 +485,9 @@ void TransactionManager::log_insert(const std::string& table, const std::string&
 
 void TransactionManager::log_update(const std::string& table, const std::string& key, const std::string& old_data,
                                      const std::string& new_data) {
+    redo_ops_.push_back({RedoOp::Kind::SetXmax, table, old_data, xmin_of_image(new_data)});
+    redo_ops_.push_back({RedoOp::Kind::InsertVersion, table, new_data, ""});
+    if (active_) redo_marks_.push_back(redo_ops_.size());
     if (!active_) return;
     wal_.log_update(txn_id_, table, key, new_data);
     UndoEntry entry{txn_id_, "UPDATE", table, key, old_data};
@@ -435,6 +496,8 @@ void TransactionManager::log_update(const std::string& table, const std::string&
 }
 
 void TransactionManager::log_delete(const std::string& table, const std::string& key, const std::string& old_data) {
+    redo_ops_.push_back({RedoOp::Kind::SetXmax, table, old_data, ""}); // xmax = committing txn id, filled at batch time
+    if (active_) redo_marks_.push_back(redo_ops_.size());
     if (!active_) return;
     wal_.log_delete(txn_id_, table, key);
     UndoEntry entry{txn_id_, "DELETE", table, key, old_data};
@@ -453,6 +516,15 @@ void TransactionManager::do_checkpoint(bool safe_to_truncate) {
 }
 
 bool TransactionManager::needs_auto_checkpoint() const { return wal_.needs_auto_checkpoint(); }
+
+void TransactionManager::release_file_handles() {
+    {
+        std::lock_guard<std::mutex> g(io_->wal_lock);
+        io_->close_wal_handle_locked();
+    }
+    std::lock_guard<std::mutex> g(io_->undo_lock);
+    io_->close_undo_handle_locked();
+}
 
 bool TransactionManager::has_undo_log_file() const { return undo_log_file_.exists(); }
 std::vector<UndoEntry> TransactionManager::read_undo_log_file() { return undo_log_file_.read_all(); }

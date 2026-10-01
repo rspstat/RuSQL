@@ -335,6 +335,12 @@ StringResult Executor::exec_delete_inner(SharedDatabase& s, const std::string& t
             if (auto it = s.row_pk_pos.find(table); it != s.row_pk_pos.end()) it->second.clear();
         }
 
+        // Redo capture: physically-removed rows still need to be durable as "this version died".
+        for (auto& del_row : rows_to_delete) {
+            auto kit = del_row.find(pk_col);
+            nlohmann::json dj = del_row;
+            txn.log_delete(table, kit != del_row.end() ? kit->second : std::string(), dj.dump());
+        }
         for (auto& del_row : rows_to_delete) index_remove_row(s, table, del_row, pk_col);
         if (auto idx_it = s.indexes.find(table); idx_it != s.indexes.end()) {
             for (auto& del_row : rows_to_delete) {
@@ -754,6 +760,10 @@ StringResult Executor::exec_delete_inner(SharedDatabase& s, const std::string& t
                 }
 
                 Row old_row = row;
+                {
+                    nlohmann::json oj = old_row;
+                    txn.log_delete(table, key, oj.dump()); // redo capture (no-op for WAL/undo outside a txn)
+                }
                 row["_xmax"] = txn_id_str;
                 refresh_indexes_for_soft_delete(old_row, row, key);
                 deleted++;
@@ -790,6 +800,12 @@ StringResult Executor::exec_delete_inner(SharedDatabase& s, const std::string& t
         // (shape-changing); wrapping the whole tail uniformly matches exec_insert_inner/
         // exec_update_inner.
         auto table_lock = acquire_table_data_locks(s, {table}, /*exclusive=*/true);
+        // Redo capture: physically-removed rows still need to be durable as "this version died".
+        for (auto& del_row : rows_to_delete) {
+            auto kit = del_row.find(pk_col);
+            nlohmann::json dj = del_row;
+            txn.log_delete(table, kit != del_row.end() ? kit->second : std::string(), dj.dump());
+        }
         for (auto& del_row : rows_to_delete) index_remove_row(s, table, del_row, pk_col);
         if (auto idx_it = s.indexes.find(table); idx_it != s.indexes.end()) {
             for (auto& del_row : rows_to_delete) {

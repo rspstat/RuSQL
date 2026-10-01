@@ -684,9 +684,13 @@ StringResult Executor::exec_update_inner(SharedDatabase& s, const std::string& t
         // (shape-changing), so this whole tail (including the buffer_pool snapshot
         // copy) needs `table`'s table_data_locks exclusive, matching exec_insert_inner.
         auto table_lock = acquire_table_data_locks(s, {table}, /*exclusive=*/true);
-        std::vector<Row> rc = s.tables.at(table);
-        s.buffer_pool.write_page(table, rc);
-        s.buffer_pool.flush_page(table, s.disk);
+        // Redo-covered statement: persistence is the redo batch written by execute()'s
+        // epilogue, not a whole-table rewrite here.
+        if (!redo_covered_stmt_) {
+            std::vector<Row> rc = s.tables.at(table);
+            s.buffer_pool.write_page(table, rc);
+            s.buffer_pool.flush_page(table, s.disk);
+        }
         maybe_auto_vacuum(s, table);
         maybe_auto_analyze(s, table);
         s.query_cache.invalidate_table(table);

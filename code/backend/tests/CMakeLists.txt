@@ -33,6 +33,7 @@ add_executable(engine_tests
     test_server_stmt_split.cpp
     test_concurrency.cpp
     test_partitioning.cpp
+    test_redo.cpp
 )
 
 target_link_libraries(engine_tests PRIVATE engine_core)

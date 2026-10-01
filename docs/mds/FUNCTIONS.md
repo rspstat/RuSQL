@@ -202,7 +202,8 @@
 - [x] RELEASE SAVEPOINT
 - [x] Undo Log 기반 롤백 (B+Tree 인덱스 재빌드 포함)
 - [x] Undo Log 영속화 (`data/_undo.log`) — 트랜잭션 중 변경마다 Undo Entry를 디스크에 즉시 기록, COMMIT/ROLLBACK/ABORT 시 해당 트랜잭션 몫만 제거(다른 세션의 진행 중인 트랜잭션은 보존), 크래시 후 재시작 시 미완료 트랜잭션 자동 롤백
-- [x] WAL 기반 Crash Recovery (재시작 시 자동 복구) — 마지막 체크포인트 이후 레코드를 txn_id별로 그룹화해 커밋된 트랜잭션만 redo replay, 미완료 트랜잭션은 그 몫의 Undo Log로만 undo (여러 트랜잭션 레코드가 섞여 있어도 정확히 분리); redo 그룹은 txn_id 오름차순(=전역 발급 순서)으로 적용해 같은 행을 여러 트랜잭션이 건드린 경우도 순서 보장
+- [x] **Redo 로그 기반 내구성 (`rusql.redo`, 2026-10-01)** — COMMIT과 autocommit 문장이 더 이상 테이블 파일 전체를 다시 쓰지 않고, "만들어진/죽은 행 버전"을 기술한 작은 배치를 로그에 추가 + (그룹 커밋) fsync 1번으로 내구성을 확보. 테이블 `.rdb`는 체크포인트(로그 4MB 초과 시 — `RUSQL_REDO_CHECKPOINT_BYTES`로 조정, DDL 직전, 부팅 복구 직후)에서만 다시 씀. 행은 MVCC 버전(`_xmin`/`_xmax`)이라 연산을 `InsertVersion`(이미 같은 이미지가 있으면 건너뜀)과 `SetXmax`(해당 버전이 살아 있을 때만 `_xmax` 찍음, 없으면 무시) 두 가지로 한정해 **재생이 멱등이고 배치 순서와 무관**(INSERT 전부 → SetXmax 전부 순으로 적용)하도록 설계. 로그 끝의 찢어진 배치는 체크섬으로 버림. 대상 문장: 단일 테이블 INSERT/UPDATE/DELETE(FK 이웃 없음)와 그것들로만 이루어진 명시적 트랜잭션; 그 외(캐스케이드/MERGE/다중 테이블/ON DUPLICATE KEY/REPLACE/INSERT..SELECT, 트리거) 문장은 기존처럼 영향받은 테이블 파일을 flush하되, 직후 `TableFlushed` 마커를 로그에 남겨 재생이 그 테이블의 이전 연산을 건너뛰게 함(로그에 기록되지 않은 in-place 변경과 충돌해 삭제된 행이 되살아나는 것을 방지). 이전엔 autocommit INSERT가 디스크에 전혀 안 써져서 "OK" 응답 후 크래시하면 유실됐음
+- [x] WAL 기반 Crash Recovery (재시작 시 자동 복구) — (2026-10-01 변경) 미완료 트랜잭션은 이제 **자기 txn_id로 태깅된 버전만 제거(`_xmin==id`)·되살림(`_xmax==id`→0)**하는 MVCC 방식으로 되돌림(런타임 `apply_rollback`과 동일 규칙). 이전의 "undo 항목별 옛 이미지 재삽입/덮어쓰기"는 COMMIT이 테이블을 flush하지 않게 된 뒤로는 디스크에 없는 행 버전을 만들어냈음(크래시 퍼저가 발견). 그 뒤 위 redo 로그를 재생. 아래는 기존 WAL 기록: 마지막 체크포인트 이후 레코드를 txn_id별로 그룹화해 커밋된 트랜잭션만 redo replay, 미완료 트랜잭션은 그 몫의 Undo Log로만 undo (여러 트랜잭션 레코드가 섞여 있어도 정확히 분리); redo 그룹은 txn_id 오름차순(=전역 발급 순서)으로 적용해 같은 행을 여러 트랜잭션이 건드린 경우도 순서 보장
 - [x] Checkpoint (WAL 자동 트런케이션, 512KB 임계값, fsync 보장) — 다른 세션에 활성 트랜잭션이 하나라도 있으면 WAL 정리를 연기 (그 세션의 미완료 레코드가 체크포인트 마커에 잘려나가는 것을 방지)
 - [x] 트랜잭션 격리 수준 4단계
   - READ UNCOMMITTED / READ COMMITTED

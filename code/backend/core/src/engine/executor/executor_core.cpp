@@ -362,7 +362,11 @@ Executor::Executor(const std::string& dir, std::size_t buffer_pool_capacity) {
         .table_locks = std::move(table_locks),
         .table_data_locks = std::move(table_data_locks),
         .explicit_table_locks = std::make_shared<Mutex<std::unordered_map<std::string, std::vector<ExplicitTableLockHolder>>>>(),
+        .redo_log = std::make_shared<RedoLog>(dir + "/rusql.redo"),
+        .redo_commit_coord = std::make_shared<GroupCommitCoordinator>(dir + "/rusql.redo"),
+        .redo_dirty = std::make_shared<Mutex<std::unordered_set<std::string>>>(),
     };
+    redo_log_ = db_value.redo_log;
 
     shared = std::make_shared<RwLock<SharedDatabase>>(std::move(db_value));
     txn = TransactionManager(dir, txn_io);
@@ -371,6 +375,9 @@ Executor::Executor(const std::string& dir, std::size_t buffer_pool_capacity) {
     lock_wait_timeout_ms = 50000;
 
     recover_from_wal();
+    // After undo recovery (so a crash between a commit's redo fsync and its WAL cleanup
+    // reverts the half-cleaned transaction first and the redo batch then re-applies it).
+    recover_from_redo();
 
     // MVCC: _xmin/_xmax bake real transaction ids into rows persisted on disk, but
     // TxnIoShared's counter always restarts at 1 on a fresh process -- without this, a
@@ -417,7 +424,12 @@ Executor Executor::new_session(std::shared_ptr<RwLock<SharedDatabase>> shared_db
         session_id_val = s->next_session_id->fetch_add(1);
         txn_io_val = s->txn_io;
     }
-    return Executor(SessionTag{}, std::move(shared_db), data_dir_val, std::move(txn_io_val), session_id_val, current_db_val);
+    Executor ex(SessionTag{}, shared_db, data_dir_val, std::move(txn_io_val), session_id_val, current_db_val);
+    {
+        auto s = shared_db->read();
+        ex.redo_log_ = s->redo_log;
+    }
+    return ex;
 }
 
 void Executor::register_process(const std::string& user, const std::string& host) const {
@@ -857,6 +869,7 @@ void Executor::reacquire_table_data_locks_after_block(SharedDatabase& s) {
 
 StringResult Executor::execute(Statement stmt) {
     subquery_cache_.clear();
+    maybe_checkpoint_redo(); // no lock held yet -- see executor_redo.cpp
     if (std::holds_alternative<Statement::Commit>(stmt.data)) return execute_commit_grouped();
 
     // BEGIN/SAVEPOINT/RELEASE SAVEPOINT touch only TransactionManager's own session-local
@@ -892,6 +905,21 @@ StringResult Executor::execute(Statement stmt) {
     {
         auto s = shared->read();
         if (auto tables = table_lock_set_for(*s, stmt)) {
+            // Redo-log durability: a plain single-table INSERT/UPDATE/DELETE whose lock set is
+            // exactly its own table has no FK neighbours to cascade into, so everything it
+            // changes is described by TransactionManager's redo ops. Anything else mutating
+            // keeps the legacy "flush the tables" persistence (see persist_autocommit).
+            // SELECT ... FOR UPDATE/SHARE isn't "pure read-only" (it takes row locks) but it
+            // changes no data -- nothing to persist (and the select family already holds
+            // table_data_locks SHARED for the whole statement, so persisting would self-deadlock).
+            const bool select_like = std::holds_alternative<Statement::Select>(stmt.data) ||
+                                      std::holds_alternative<Statement::Union>(stmt.data) ||
+                                      std::holds_alternative<Statement::Intersect>(stmt.data) ||
+                                      std::holds_alternative<Statement::Except>(stmt.data) ||
+                                      std::holds_alternative<Statement::Explain>(stmt.data) ||
+                                      std::holds_alternative<Statement::ExplainAnalyze>(stmt.data);
+            const bool mutating = !select_like && !is_pure_read_only(stmt);
+            const bool covered = mutating && tables->size() == 1 && is_redo_covered_kind(stmt);
             // Row-level-concurrency Stage 4: table_locks[table] is no longer held
             // exclusive for the whole duration of an ordinary single-table
             // Insert/InsertSelect/Update/Delete/Select (FOR UPDATE/FOR SHARE included
@@ -963,9 +991,19 @@ StringResult Executor::execute(Statement stmt) {
             active_table_data_lock_guard_ = &data_guard;
             active_table_data_lock_tables_ = *tables;
             active_table_data_lock_exclusive_ = false;
+            redo_covered_stmt_ = covered && !txn.is_active();
             auto result = execute_with_s(const_cast<SharedDatabase&>(*guard->structural), std::move(stmt));
+            redo_covered_stmt_ = false;
             active_table_lock_guard_ = nullptr;
             active_table_data_lock_guard_ = nullptr;
+            if (mutating) {
+                if (txn.is_active()) {
+                    if (!covered) txn.mark_redo_incomplete();
+                } else {
+                    // Still holding this statement's table locks: persist before they drop.
+                    persist_autocommit(const_cast<SharedDatabase&>(*guard->structural), *tables, covered, true);
+                }
+            }
             return result;
         }
         if (is_pure_read_only(stmt)) {
@@ -983,7 +1021,29 @@ StringResult Executor::execute(Statement stmt) {
         // exclusively would deadlock).
     }
     auto s = shared->write();
-    return execute_with_s(*s, std::move(stmt));
+    const bool mutating = !is_pure_read_only(stmt);
+    if (mutating) {
+        // DDL/maintenance/anything unclassified writes table files directly (save_table), and
+        // some of it (TRUNCATE, DROP, ALTER) would be undone by replaying older redo batches
+        // on top. Bring the files up to date and retire the log first.
+        bool has_dirty;
+        {
+            auto d = s->redo_dirty->lock();
+            has_dirty = !d->empty();
+        }
+        if (has_dirty) checkpoint_redo_locked(*s);
+    }
+    auto result = execute_with_s(*s, std::move(stmt));
+    if (mutating) {
+        if (txn.is_active()) {
+            txn.mark_redo_incomplete();
+        } else {
+            // Whatever this statement logged (e.g. a trigger body's INSERTs) is committed
+            // work: make it durable rather than letting the ops pile up.
+            write_redo_batch(*s, txn.take_redo_ops(std::to_string(s->txn_io->next_id())));
+        }
+    }
+    return result;
 }
 
 namespace {

@@ -19,6 +19,7 @@ add_library(engine_core STATIC
     src/storage/disk.cpp
     src/storage/buffer_pool.cpp
     src/transaction/wal.cpp
+    src/transaction/redo_log.cpp
     src/transaction/txn_manager.cpp
     src/transaction/group_commit.cpp
     src/engine/planner.cpp
@@ -32,6 +33,7 @@ add_library(engine_core STATIC
     src/engine/executor/executor_eval.cpp
     src/engine/executor/executor_dml.cpp
     src/engine/executor/executor_update.cpp
+    src/engine/executor/executor_redo.cpp
     src/engine/executor/executor_delete.cpp
     src/engine/executor/executor_partition.cpp
     src/engine/executor/gap_lock.cpp
