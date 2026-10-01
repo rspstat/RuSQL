@@ -88,7 +88,7 @@
 | 커버링 인덱스 | ✓ | ✓ | ✓ | ✓ (EXPLAIN에서 Covering 표시) |
 | 복합 인덱스 | ✓ | ✓ | ✓ | ✓ |
 | 인덱스 교차 (Index Intersection) | ✓ (index merge) | ✓ | ✓ | ✓ (AND 조건에서 독립 인덱스 2개 이상 → PK HashSet 교집합, `IndexIntersection` AccessPath, EXPLAIN에 `∩` 표시) |
-| 보조 인덱스 증분 갱신 | ✓ (InnoDB 자동) | ✓ | ✓ | ✓ (INSERT/UPDATE/DELETE 시 `index_insert_row` / `index_remove_row`로 O(1) 갱신 — 전체 재빌드 없음) |
+| 보조 인덱스 증분 갱신 | ✓ (InnoDB 자동) | ✓ | ✓ | ✓ (INSERT/UPDATE/DELETE 시 `index_insert_row` / `index_remove_row`로 O(1) 갱신 — 전체 재빌드 없음. 복합 PK 테이블도 PK 전체 컬럼으로 버킷 항목을 식별 — 2026-10-01 수정) |
 | 내림차순 인덱스 | ✓ (8.0+) | ✓ | ✓ | △ (`CREATE INDEX i ON t (col DESC)` 문법은 수용 — 이전엔 파싱 에러. B+Tree는 항상 오름차순으로 구축되므로 방향은 결과에 영향 없는 물리 힌트일 뿐, 실제 내림차순 저장은 아님) |
 | BRIN (블록 범위 인덱스) | ✗ | ✓ | ✗ | ✗ |
 | GIN / GiST | ✗ | ✓ | ✗ | ✗ |

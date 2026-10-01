@@ -57,14 +57,21 @@ void HashIndex::insert_row(const Row& row) {
 }
 
 void HashIndex::remove_row(const std::string& col_val, const std::string& pk_col, const std::string& pk_val) {
+    remove_row(col_val, std::vector<std::pair<std::string, std::string>>{{pk_col, pk_val}});
+}
+
+void HashIndex::remove_row(const std::string& col_val, const std::vector<std::pair<std::string, std::string>>& pk) {
     std::lock_guard<std::mutex> g(mutex_);
     auto it = data_.find(col_val);
     if (it == data_.end()) return;
     auto& bucket = it->second;
     bucket.erase(std::remove_if(bucket.begin(), bucket.end(),
                                  [&](const Row& r) {
-                                     auto pit = r.find(pk_col);
-                                     return pit != r.end() && pit->second == pk_val;
+                                     for (auto& [col, val] : pk) {
+                                         auto pit = r.find(col);
+                                         if (pit == r.end() || pit->second != val) return false;
+                                     }
+                                     return true;
                                  }),
                  bucket.end());
     if (bucket.empty()) data_.erase(it);

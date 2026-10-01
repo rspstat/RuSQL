@@ -161,11 +161,16 @@ void Executor::maybe_auto_vacuum(SharedDatabase& s, const std::string& table) {
     // maybe_auto_analyze's existing per-table pattern.
     std::size_t& counter = s.dml_since_vacuum[table];
     counter += 1;
-    if (counter < AUTO_VACUUM_THRESHOLD) return;
-    counter = 0;
-
     auto tit = s.tables.find(table);
     if (tit == s.tables.end()) return;
+    // The threshold scales with the table (10% of its versions, never below the old fixed
+    // 200): a vacuum is O(table) -- it rebuilds the PK index from every remaining row and
+    // rewrites the table file -- so with a flat 200 the amortized cost of each INSERT/UPDATE/
+    // DELETE grew with table size (measured: a 247ms stall every 200 updates at 20k rows,
+    // 677ms at 50k). Same idea as PostgreSQL's autovacuum_vacuum_scale_factor.
+    const std::size_t threshold = std::max<std::size_t>(AUTO_VACUUM_THRESHOLD, tit->second.size() / 10);
+    if (counter < threshold) return;
+    counter = 0;
     std::uint64_t horizon = oldest_active_txn_id(s);
     auto& rows = tit->second;
     std::size_t before = rows.size();

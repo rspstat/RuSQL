@@ -34,6 +34,7 @@ add_executable(engine_tests
     test_concurrency.cpp
     test_partitioning.cpp
     test_redo.cpp
+    test_update_fast.cpp
 )
 
 target_link_libraries(engine_tests PRIVATE engine_core)

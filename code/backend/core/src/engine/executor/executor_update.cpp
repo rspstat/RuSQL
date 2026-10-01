@@ -146,8 +146,25 @@ StringResult Executor::exec_update_inner(SharedDatabase& s, const std::string& t
     // specifically because we may have just woken up from waiting on a transaction that,
     // in the meantime, committed, and UPDATE must always match against the latest
     // committed state (see the original MVCC comment this replaces).
+    // Candidate search without cloning the table. The old code copied EVERY visible row (a
+    // std::map<string,string> per row) into a vector and re-derived each row's composite key
+    // string in two more full passes -- ~3us/row, so 60ms for a 20,000-row table even for
+    // `WHERE id = 5`. When the condition has no subquery (the only reason the clone existed:
+    // exec_select may reshuffle s.tables underneath a live reference) rows are matched in
+    // place and only their POSITIONS are kept; the exclusive phase re-verifies each position
+    // (still visible, same composite key) and rescans from scratch if anything shifted in
+    // between (a concurrent vacuum/rollback erasing rows). For a bare `pk = literal` on a
+    // single-column PK the position comes from the row_pk_pos cache in O(1).
+    const bool positions_ok = !condition_has_subquery(condition);
+    const std::optional<std::string> pk_eq =
+        (positions_ok && pk_cols.size() == 1) ? extract_pk_eq_value(condition, pk_col) : std::nullopt;
+    bool bypass_pk_cache = false;  // set after a stale-position retry so the retry really rescans
+    bool rebuild_pk_cache = false; // pk-equality missed the cache although the row exists -> repopulate it once
+
     for (;;) {
         std::vector<Row> candidate_rows;
+        std::vector<std::size_t> cand_pos;
+        std::vector<std::string> cand_key;
         matching_pks.clear();
         SnapshotCtx write_ctx{my_id, s.txn_io->peek_next_id(), *s.active_txn_ids->lock()};
 
@@ -163,12 +180,49 @@ StringResult Executor::exec_update_inner(SharedDatabase& s, const std::string& t
             // invoke exec_select, which for FROM-subqueries/views temporarily inserts/
             // erases entries in s.tables — holding a live reference into s.tables across
             // that call would risk iterator/reference invalidation on rehash.
-            for (auto& r : tit0->second) {
-                if (is_visible_for_read(r, write_ctx)) candidate_rows.push_back(r);
-            }
-            for (auto& r : candidate_rows) {
-                if (matches_condition_with_subquery(s, r, condition)) {
-                    matching_pks.insert(match_key(r));
+            if (positions_ok) {
+                const auto& rows0 = tit0->second;
+                bool via_cache = false;
+                if (pk_eq && !bypass_pk_cache) {
+                    if (auto mit = s.row_pk_pos.find(table); mit != s.row_pk_pos.end()) {
+                        if (auto pit = mit->second.find(*pk_eq); pit != mit->second.end()) {
+                            std::size_t pos = pit->second;
+                            if (pos < rows0.size() && is_visible_for_read(rows0[pos], write_ctx)) {
+                                auto kit = rows0[pos].find(pk_col);
+                                if (kit != rows0[pos].end() && kit->second == *pk_eq) {
+                                    via_cache = true; // the (single) visible version of this pk
+                                    if (matches_condexpr(rows0[pos], condition)) {
+                                        cand_pos.push_back(pos);
+                                        cand_key.push_back(match_key(rows0[pos]));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                if (!via_cache) {
+                    for (std::size_t i = 0; i < rows0.size(); i++) {
+                        const Row& r = rows0[i];
+                        if (!is_visible_for_read(r, write_ctx)) continue;
+                        if (matches_condexpr(r, condition)) {
+                            cand_pos.push_back(i);
+                            cand_key.push_back(match_key(r));
+                        }
+                    }
+                    if (pk_eq && !cand_pos.empty()) rebuild_pk_cache = true;
+                }
+                // RETURNING re-selects the updated rows by composite key after the statement.
+                if (returning) {
+                    for (auto& k : cand_key) matching_pks.insert(k);
+                }
+            } else {
+                for (auto& r : tit0->second) {
+                    if (is_visible_for_read(r, write_ctx)) candidate_rows.push_back(r);
+                }
+                for (auto& r : candidate_rows) {
+                    if (matches_condition_with_subquery(s, r, condition)) {
+                        matching_pks.insert(match_key(r));
+                    }
                 }
             }
         } // table_lock (SHARED) released here -- candidate scan + condition matching only.
@@ -195,16 +249,37 @@ StringResult Executor::exec_update_inner(SharedDatabase& s, const std::string& t
         // reader and nothing to unwind before retrying (a re-request for an already-held
         // claim from an earlier attempt is free/re-entrant in LockManager).
         std::vector<Row> new_versions; // appended to `rows` only if the whole probe succeeds
+        std::vector<std::string> new_version_pks;
         std::vector<UndoEntry> attempt_undo_entries;
         bool conflict = false;
+        bool stale_positions = false;
         std::string conflict_key;
         {
             auto table_lock = acquire_table_data_locks(s, {table}, /*exclusive=*/true);
             auto& rows = tit0->second;
 
-            for (auto& row : rows) {
-                if (!matching_pks.count(match_key(row))) continue;
-                if (!is_visible_for_read(row, write_ctx)) continue;
+            // The rows this statement will touch, resolved once for both passes below.
+            std::vector<Row*> targets;
+            if (positions_ok) {
+                for (std::size_t i = 0; i < cand_pos.size(); i++) {
+                    std::size_t pos = cand_pos[i];
+                    if (pos >= rows.size() || !is_visible_for_read(rows[pos], write_ctx) || match_key(rows[pos]) != cand_key[i]) {
+                        stale_positions = true; // rows shifted/changed since the shared scan -- start over
+                        break;
+                    }
+                    targets.push_back(&rows[pos]);
+                }
+            } else {
+                for (auto& row : rows) {
+                    if (!matching_pks.count(match_key(row))) continue;
+                    if (!is_visible_for_read(row, write_ctx)) continue;
+                    targets.push_back(&row);
+                }
+            }
+            if (stale_positions) targets.clear();
+
+            for (Row* rowp : targets) {
+                Row& row = *rowp;
                 auto pkit = row.find(pk_col);
                 std::string row_pk = pkit != row.end() ? pkit->second : std::string();
                 // Row-level-concurrency Stage 4: unconditional now (was `if (cur_txn !=
@@ -224,14 +299,11 @@ StringResult Executor::exec_update_inner(SharedDatabase& s, const std::string& t
                 }
             }
 
-            if (!conflict) {
-                for (auto& row : rows) {
-                    if (!matching_pks.count(match_key(row))) continue;
-                    // A stale dead version sharing this PK with the live matched row (from
-                    // an earlier UPDATE on the same key, still un-vacuumed) -- skip, only
-                    // the live version should ever be re-updated.
-                    if (!is_visible_for_read(row, write_ctx)) continue;
-
+            if (!conflict && !stale_positions) {
+                for (Row* rowp : targets) {
+                    // (`targets` already excludes stale dead versions sharing this PK with
+                    // the live matched row -- only the live version is ever re-updated.)
+                    Row& row = *rowp;
                     auto pkit = row.find(pk_col);
                     std::string row_pk = pkit != row.end() ? pkit->second : std::string();
                     const std::string& key = row_pk;
@@ -300,12 +372,35 @@ StringResult Executor::exec_update_inner(SharedDatabase& s, const std::string& t
                     new_row["_xmin"] = std::to_string(my_id);
                     new_row["_xmax"] = "0";
                     row["_xmax"] = std::to_string(my_id);
+                    {
+                        auto npk = new_row.find(pk_col);
+                        new_version_pks.push_back(npk != new_row.end() ? npk->second : std::string());
+                    }
 
                     nlohmann::json new_j = new_row;
                     attempt_undo_entries.push_back({key, old_json, new_j.dump()});
                     new_versions.push_back(std::move(new_row));
                 }
+                const std::size_t first_new_pos = rows.size();
                 rows.insert(rows.end(), std::make_move_iterator(new_versions.begin()), std::make_move_iterator(new_versions.end()));
+                if (pk_cols.size() == 1) {
+                    // Keep the pk -> position cache pointing at the newest live version
+                    // (always re-validated on use, so this is purely an accelerator).
+                    auto& pos_map = s.row_pk_pos[table];
+                    if (rebuild_pk_cache) {
+                        pos_map.clear();
+                        for (std::size_t i = 0; i < rows.size(); i++) {
+                            if (!is_visible_for_read(rows[i], write_ctx)) continue;
+                            auto kit = rows[i].find(pk_col);
+                            if (kit != rows[i].end()) pos_map[kit->second] = i;
+                        }
+                    } else {
+                        for (std::size_t i = 0; i < attempt_undo_entries.size(); i++) {
+                            if (new_version_pks[i] != attempt_undo_entries[i].key) pos_map.erase(attempt_undo_entries[i].key);
+                            pos_map[new_version_pks[i]] = first_new_pos + i;
+                        }
+                    }
+                }
                 // Row-level-concurrency Stage 4/5 correctness fix (found via concurrent-
                 // reader monotonicity stress testing): invalidate the query cache HERE,
                 // still holding table_data_locks EXCLUSIVE -- execute_sql's own
@@ -315,6 +410,11 @@ StringResult Executor::exec_update_inner(SharedDatabase& s, const std::string& t
                 s.query_cache.invalidate_table(table);
             }
         } // table_lock (EXCLUSIVE) released here -- probe + mutate + insert as one atomic unit.
+
+        if (stale_positions) {
+            bypass_pk_cache = true; // retry with a genuine rescan
+            continue;
+        }
 
         if (!conflict) {
             count = attempt_undo_entries.size();

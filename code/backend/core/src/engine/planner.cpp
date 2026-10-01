@@ -475,10 +475,17 @@ std::size_t Planner::table_size(const std::string& table) const {
 std::optional<std::string> Planner::pk_col(const std::string& table) const {
     auto* schema = catalog_.get_table(table);
     if (!schema) return std::nullopt;
+    // A composite PRIMARY KEY has no single "the PK column": the PK B+Tree is keyed by the
+    // FIRST PK column only, so rows sharing that value overwrite each other in it and
+    // `WHERE a = 2` on PRIMARY KEY (a, b) returned ONE of the matching rows (found while
+    // testing UPDATE on a composite-PK table). Offer no PK access path for such tables.
+    std::optional<std::string> found;
     for (auto& c : schema->columns) {
-        if (c.primary_key) return c.name;
+        if (!c.primary_key) continue;
+        if (found) return std::nullopt;
+        found = c.name;
     }
-    return std::nullopt;
+    return found;
 }
 
 std::size_t Planner::estimate_rows(std::size_t total, const AccessPath& access, const std::string& table) const {

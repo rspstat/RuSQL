@@ -39,6 +39,9 @@ public:
     /// PK 값이 pk_val인 행을 col_val 버킷에서 제거한다 (O(bucket size)).
     void remove_row(const std::string& col_val, const std::string& pk_col, const std::string& pk_val);
 
+    /// 복합 PK용: pk의 (컬럼, 값) 쌍이 전부 일치하는 행만 col_val 버킷에서 제거한다.
+    void remove_row(const std::string& col_val, const std::vector<std::pair<std::string, std::string>>& pk);
+
     std::size_t bucket_count() const;
     std::size_t row_count() const;
 

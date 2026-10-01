@@ -968,7 +968,27 @@ void Executor::index_insert_row(SharedDatabase& s, const std::string& table, con
 void Executor::index_remove_row(SharedDatabase& s, const std::string& table, const Row& row, const std::string& pk_col) {
     auto pk_it = row.find(pk_col);
     if (pk_it == row.end()) return;
-    const std::string& pk_val = pk_it->second;
+
+    // Composite PRIMARY KEY (a, b): callers hand over only the FIRST key column as `pk_col`, and
+    // matching bucket entries on it alone purged every sibling row sharing that column -- one
+    // UPDATE/DELETE of (2,4) emptied the secondary-index bucket of (2,1)..(2,5) too, so
+    // `WHERE v = ..` silently returned too few rows. Identify the row by its WHOLE key.
+    std::vector<std::pair<std::string, std::string>> pk_parts{{pk_col, pk_it->second}};
+    if (const TableSchema* sch = s.catalog.get_table(table); sch && sch->primary_key_columns.size() > 1) {
+        pk_parts.clear();
+        for (auto& c : sch->primary_key_columns) {
+            auto cit = row.find(c);
+            if (cit == row.end()) return;
+            pk_parts.emplace_back(c, cit->second);
+        }
+    }
+    auto same_pk = [&pk_parts](const Row& r) {
+        for (auto& [c, v] : pk_parts) {
+            auto it = r.find(c);
+            if (it == r.end() || it->second != v) return false;
+        }
+        return true;
+    };
 
     std::vector<std::pair<std::string, std::string>> sec;
     for (auto& [name, meta] : s.index_meta) {
@@ -988,8 +1008,7 @@ void Executor::index_remove_row(SharedDatabase& s, const std::string& table, con
         }
         std::vector<Row> new_bucket;
         for (auto& r : bucket) {
-            auto it = r.find(pk_col);
-            if (it == r.end() || it->second != pk_val) new_bucket.push_back(r);
+            if (!same_pk(r)) new_bucket.push_back(r);
         }
         nlohmann::json j = new_bucket;
         if (auto tit = s.indexes.find(key); tit != s.indexes.end()) tit->second.insert(vit->second, j.dump());
@@ -1002,7 +1021,7 @@ void Executor::index_remove_row(SharedDatabase& s, const std::string& table, con
     for (auto& [key, col] : hsec) {
         auto vit = row.find(col);
         if (vit == row.end()) continue;
-        if (auto it = s.hash_indexes.find(key); it != s.hash_indexes.end()) it->second.remove_row(vit->second, pk_col, pk_val);
+        if (auto it = s.hash_indexes.find(key); it != s.hash_indexes.end()) it->second.remove_row(vit->second, pk_parts);
     }
 }
 

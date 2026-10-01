@@ -214,6 +214,7 @@
 ### 인덱스 & 저장
 - [x] B+Tree 인덱스 (단일 컬럼, ORDER=16으로 트리 깊이 최소화)
 - [x] `row_pk_pos` 위치 인덱스 — `HashMap<테이블명, HashMap<PK값, usize>>` 인메모리 위치 맵, INSERT/DELETE 시 증분 갱신, DELETE WHERE PK = ? 시 O(1) `swap_remove` fast-path 활성화 (FK 피참조 테이블은 safe-path 폴백)
+- [x] **UPDATE 후보 탐색 최적화 (2026-10-01)** — 서브쿼리가 없는 조건은 테이블을 복제하지 않고 제자리에서 매칭해 행 위치+복합 키만 수집, 배타 구간에서 위치를 재검증(범위·가시성·복합 키)하고 어긋나면 재스캔. 단일 컬럼 PK의 `pk = 리터럴`은 `row_pk_pos` 캐시로 O(1)(매번 재검증, 새 버전 추가 시 갱신). 자동 VACUUM 임계값을 `max(고정값, 행 수/10)`로 스케일. 20,000행 기준 `pk = 리터럴` 55ms → 0.67ms(autocommit, redo fsync 바닥)/0.19ms(트랜잭션 내), 그 외 조건은 약 8~11배 저렴(여전히 선형). 부수 수정: (1) 다른 세션의 미커밋 UPDATE가 있을 때 PK 점 조회가 "0 rows"를 내던 버그(다른 트랜잭션이 열려 있으면 일반 스캔 폴백), (2) 복합 PK 테이블에서 `WHERE a = 2`가 1행만 반환하던 플래너 버그, (3) 복합 PK 테이블의 보조 B+Tree/해시 인덱스에서 한 행 UPDATE/DELETE가 PK 첫 컬럼을 공유하는 형제 행을 버킷에서 지우던 버그
 - [x] **Hash Index** — `CREATE INDEX name ON table (col) USING HASH` · 등호 조건 O(1) 검색 · 단일 컬럼 전용 · 비용 기반 플래너에서 등호 조건 시 B+Tree보다 우선 선택 · EXPLAIN에 `Hash Index Scan` 표시 · DML(INSERT/UPDATE/DELETE) 시 증분 갱신 (`insert_row` / `remove_row`) · 재시작 후 `indexes.json`에서 자동 복원 (`index_type: "hash"`)
 - [x] 복합 인덱스 (다중 컬럼, null-byte 키 결합)
 - [x] 클러스터드 인덱스 (PK 기준 물리적 정렬 유지)

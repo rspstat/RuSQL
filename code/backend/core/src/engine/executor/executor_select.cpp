@@ -662,6 +662,22 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
     // case, skip these fast paths entirely and fall through to the generic scan below,
     // which reads every physical version directly from s.tables.
     bool use_fast_index_paths = !(txn.is_active() && txn.frozen_ctx().has_value());
+    // The comment above is only half the story: "the index's latest version == what this
+    // ctx should see" ALSO breaks whenever ANOTHER open transaction has an uncommitted
+    // UPDATE/DELETE on the row -- the index then holds that uncommitted version (or no entry
+    // at all), so a plain PK lookup reported "0 rows" for a row that is perfectly visible
+    // (found while testing UPDATE: session A `BEGIN; UPDATE t SET v=11 WHERE id=1`, session B
+    // `SELECT v FROM t WHERE id=1` -> 0 rows, while `WHERE v >= 0` correctly returned 10).
+    // Uncommitted versions only come from explicit transactions (autocommit statements are
+    // atomic under the table locks), so "is any OTHER transaction open" is the exact test.
+    bool others_active = false;
+    {
+        std::uint64_t self = txn.current_txn_id();
+        auto active = s.active_txn_ids->lock();
+        for (auto id : *active) {
+            if (id != self) { others_active = true; break; }
+        }
+    }
     if (use_fast_index_paths && joins.empty() && !has_agg && !has_win && !for_update && !for_share
         && !limit.has_value() && !offset.has_value() && order_by.empty() && !distinct) {
         auto& access = plan.base.access.data;
@@ -674,8 +690,14 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
                         return format_result(s, std::move(one), columns, table, {});
                     }
                 }
-                return StringResult::Ok("0 rows returned.");
+                // Not found / not visible. With no other transaction open that is final; with
+                // one open, an older visible version may exist that the index no longer
+                // holds -- fall through to the generic scan (reads every physical version).
+                if (!others_active) return StringResult::Ok("0 rows returned.");
             }
+        } else if (others_active) {
+            // Range / secondary / hash / composite index paths silently DROP rows whose latest
+            // version is invisible to this reader -- there is no way to tell which. Generic scan.
         } else if (auto* ap = std::get_if<AccessPath::PkBetween>(&access)) {
             if (auto it = s.indexes.find(table); it != s.indexes.end()) {
                 std::vector<Row> rows;
