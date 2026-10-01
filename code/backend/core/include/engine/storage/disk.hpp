@@ -15,7 +15,6 @@
 #include <vector>
 
 #include "engine/storage/btree.hpp"
-#include "engine/storage/btree_json.hpp"
 #include "engine/json_support.hpp"
 #include "engine/row.hpp"
 #include "engine/catalog/schema.hpp"
@@ -51,8 +50,8 @@ public:
     void delete_table(const std::string& table) const;
     std::vector<std::string> list_tables() const;
 
-    void save_btree_index(const std::string& key, const BPlusTree& tree) const;
-    std::optional<BPlusTree> load_btree_index(const std::string& key) const;
+    // Indexes are no longer persisted (they are rebuilt from the rows at startup); this only removes the `.idx`
+    // file an older version left behind for the index.
     void delete_btree_index(const std::string& key) const;
 
     void save_index_meta(const std::string& db, const std::vector<IndexMeta>& meta_list) const;

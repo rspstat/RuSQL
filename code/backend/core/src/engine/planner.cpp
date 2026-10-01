@@ -156,7 +156,7 @@ AccessPath Planner::choose_access(const std::string& table, const std::optional<
         }
     }
 
-    auto eq_map = collect_eq_map(expr);
+    auto eq_map = constant_eq_map(table, expr);
     if (!eq_map.empty()) {
         for (auto& [name, ci] : composite_indexes_) {
             if (ci.table == table && ci.matches_conditions(eq_map)) {
@@ -174,6 +174,14 @@ AccessPath Planner::choose_access(const std::string& table, const std::optional<
     if (auto intersection = try_index_intersection(table, expr, pk)) return *intersection;
 
     return AccessPath(AccessPath::SeqScan{});
+}
+
+std::unordered_map<std::string, std::string> Planner::constant_eq_map(const std::string& table, const CondExpr& expr) const {
+    auto map = collect_eq_map(expr);
+    for (auto it = map.begin(); it != map.end();) {
+        it = is_col_ref_in_context(it->second, table) ? map.erase(it) : std::next(it);
+    }
+    return map;
 }
 
 std::optional<AccessPath> Planner::try_index_intersection(const std::string& table, const CondExpr& expr,
@@ -453,7 +461,7 @@ JoinAlgo Planner::choose_join_algo(std::size_t left_size, std::size_t right_size
     // Prefer whichever indexed direction is cheaper; reverse wins ties (it's the newer,
     // otherwise-unreachable option, and only ever offered when it's actually applicable).
     if (rev_inl_cost && (!fwd_inl_cost || *rev_inl_cost <= *fwd_inl_cost) && *rev_inl_cost <= hash_cost) {
-        return JoinAlgo(JoinAlgo::ReverseIndexNL{build_col, rev_left_index_key, rev_left_is_hash, rev_left_is_secondary_btree});
+        return JoinAlgo(JoinAlgo::ReverseIndexNL{build_col, rev_left_index_key, rev_left_is_hash, rev_left_is_secondary_btree, probe_col});
     }
     if (fwd_inl_cost && *fwd_inl_cost <= hash_cost) {
         return JoinAlgo(JoinAlgo::IndexNL{probe_col, build_col});

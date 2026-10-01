@@ -44,7 +44,6 @@ StringResult Executor::exec_vacuum(SharedDatabase& s, std::optional<std::string>
         if (removed > 0) {
             std::vector<Row> rows_clone = s.tables.at(t);
             if (auto idx_it = s.indexes.find(t); idx_it != s.indexes.end()) {
-                idx_it->second = BPlusTree();
                 // PLAN.md P0 fix: the Rust original used `row.values().next()` here — an
                 // arbitrary (HashMap-iteration-order-dependent) value, not necessarily the
                 // PK, silently corrupting the rebuilt index. Resolve the real PK column
@@ -57,12 +56,7 @@ StringResult Executor::exec_vacuum(SharedDatabase& s, std::optional<std::string>
                     }
                     if (pk_col_name.empty() && !schema->columns.empty()) pk_col_name = schema->columns.front().name;
                 }
-                for (auto& row : rows_clone) {
-                    auto it = row.find(pk_col_name);
-                    std::string key = it != row.end() ? it->second : std::string();
-                    nlohmann::json j = row;
-                    idx_it->second.insert(key, j.dump());
-                }
+                idx_it->second = build_pk_tree(rows_clone, pk_col_name);
             }
             std::vector<std::string> comp_keys;
             for (auto& [k, ci] : s.composite_indexes) {

@@ -10,6 +10,9 @@ acknowledged.
   python fuzz_concurrent.py [rounds] [base_seed]  4 concurrent clients on one table; in-flight statement may
                                                   land or not, explicit transactions must be all-or-nothing
 
+After recovery fuzz_crash.py also checks the INDEXES against the recovered rows (a lookup through the secondary index
+g and through the primary key must return what the oracle says) -- a table scan alone cannot see a stale index.
+
 Env: RUSQL_REDO_CHECKPOINT_BYTES=3000  forces frequent redo checkpoints between kills (default 4MB)
      RUSQL_DML_INDEX_MIN_ROWS=<n>      UPDATE/DELETE use indexes only on tables of n+ rows (server default 64);
                                        fuzz_crash.py starts the server with 0 so its tiny tables take the index

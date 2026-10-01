@@ -15,18 +15,16 @@
 // and the caller falls back to the plain scan it always had -- so a wrong index can cost
 // speed but not correctness for the rows it does name. What an index can still get wrong is
 // rows it fails to name; the paths below are limited to the ones where that cannot
-// happen by construction (see widen() and the notes at each AccessPath).
+// happen by construction (see widen_numeric_bound() and the notes at each AccessPath).
 
 #include <algorithm>
-#include <charconv>
 #include <cctype>
-#include <cmath>
-#include <cstdio>
 #include <cstdlib>
 #include <unordered_map>
 
 #include "engine/executor/executor.hpp"
 #include "engine/planner.hpp"
+#include "engine/storage/numeric_key.hpp"
 
 namespace engine {
 
@@ -42,12 +40,6 @@ std::size_t min_rows_from_env() {
     return 64;
 }
 
-bool parse_f64(const std::string& s, double& out) {
-    if (s.empty()) return false;
-    auto res = std::from_chars(s.data(), s.data() + s.size(), out);
-    return res.ec == std::errc() && res.ptr == s.data() + s.size();
-}
-
 // One index entry's view of a row version.
 struct Cand {
     std::string pk, xmin, xmax;
@@ -60,24 +52,6 @@ Cand cand_of(const Row& r, const std::string& pk_col) {
         return it != r.end() ? it->second : std::string(dflt);
     };
     return {get(pk_col, ""), get("_xmin", "0"), get("_xmax", "0")};
-}
-
-// B+Tree keys order numerically-equal strings by their text ("07" < "7" < "7.0"), while a
-// WHERE clause treats them as equal -- so `price = 7` must also find a row stored as "7.00",
-// and `qty >= 7` one stored as "07". A numeric bound is therefore widened by one ulp in the
-// direction it needs to cover; the candidates are re-checked against the real condition
-// afterwards, so the widening can only add rows that get filtered out again. A non-numeric
-// bound is used as it is. nullopt = "cannot express this bound safely" -> no index path.
-std::optional<std::string> widen(const std::string& key, bool lower) {
-    double v;
-    if (!parse_f64(key, v)) return key;
-    if (!std::isfinite(v)) return std::nullopt;
-    double w = std::nextafter(v, lower ? -INFINITY : INFINITY);
-    char buf[40];
-    std::snprintf(buf, sizeof buf, "%.17g", w);
-    double back;
-    if (!parse_f64(buf, back) || back != w) return std::nullopt;
-    return std::string(buf);
 }
 
 enum class Gather { Ok, Unsupported, TooMany };
@@ -125,34 +99,34 @@ Gather gather(SharedDatabase& s, const std::string& table, const AccessPath& ap,
             using T = std::decay_t<decltype(a)>;
             if constexpr (std::is_same_v<T, AccessPath::PkPoint>) {
                 auto it = s.indexes.find(table);
-                auto lo = widen(a.key, true), hi = widen(a.key, false);
+                auto lo = widen_numeric_bound(a.key, true), hi = widen_numeric_bound(a.key, false);
                 if (it == s.indexes.end() || !lo || !hi) return Gather::Unsupported;
                 return from_range(it->second, *lo, *hi, false, true);
             } else if constexpr (std::is_same_v<T, AccessPath::PkBetween>) {
                 auto it = s.indexes.find(table);
-                auto lo = widen(a.start, true), hi = widen(a.end, false);
+                auto lo = widen_numeric_bound(a.start, true), hi = widen_numeric_bound(a.end, false);
                 if (it == s.indexes.end() || !lo || !hi) return Gather::Unsupported;
                 return from_range(it->second, *lo, *hi, false, true);
             } else if constexpr (std::is_same_v<T, AccessPath::PkRange>) {
                 auto it = s.indexes.find(table);
                 if (it == s.indexes.end()) return Gather::Unsupported;
-                auto bound = widen(a.key, range_op_is_lower_bound(a.op));
+                auto bound = widen_numeric_bound(a.key, range_op_is_lower_bound(a.op));
                 if (!bound) return Gather::Unsupported;
                 return from_pairs(range_op_is_lower_bound(a.op) ? it->second.scan_from(*bound, true) : it->second.scan_to(*bound, true), false, true);
             } else if constexpr (std::is_same_v<T, AccessPath::SecondaryPoint>) {
                 auto it = s.indexes.find(a.index_key);
-                auto lo = widen(a.key, true), hi = widen(a.key, false);
+                auto lo = widen_numeric_bound(a.key, true), hi = widen_numeric_bound(a.key, false);
                 if (it == s.indexes.end() || !lo || !hi) return Gather::Unsupported;
                 return from_range(it->second, *lo, *hi, true, false);
             } else if constexpr (std::is_same_v<T, AccessPath::SecondaryBetween>) {
                 auto it = s.indexes.find(a.index_key);
-                auto lo = widen(a.start, true), hi = widen(a.end, false);
+                auto lo = widen_numeric_bound(a.start, true), hi = widen_numeric_bound(a.end, false);
                 if (it == s.indexes.end() || !lo || !hi) return Gather::Unsupported;
                 return from_range(it->second, *lo, *hi, true, false);
             } else if constexpr (std::is_same_v<T, AccessPath::SecondaryRange>) {
                 auto it = s.indexes.find(a.index_key);
                 if (it == s.indexes.end()) return Gather::Unsupported;
-                auto bound = widen(a.key, range_op_is_lower_bound(a.op));
+                auto bound = widen_numeric_bound(a.key, range_op_is_lower_bound(a.op));
                 if (!bound) return Gather::Unsupported;
                 return from_pairs(range_op_is_lower_bound(a.op) ? it->second.scan_from(*bound, true) : it->second.scan_to(*bound, true), true, false);
             } else if constexpr (std::is_same_v<T, AccessPath::SecondaryLikePrefix>) {
@@ -169,10 +143,9 @@ Gather gather(SharedDatabase& s, const std::string& table, const AccessPath& ap,
                 }
                 return Gather::Ok;
             } else if constexpr (std::is_same_v<T, AccessPath::HashPoint>) {
-                // A hash bucket is the exact key text; a numeric literal can equal several texts.
-                double dummy;
+                // HashIndex buckets by numeric value ("7" and "7.00" share one), so this is exact.
                 auto it = s.hash_indexes.find(a.index_key);
-                if (it == s.hash_indexes.end() || parse_f64(a.key, dummy)) return Gather::Unsupported;
+                if (it == s.hash_indexes.end()) return Gather::Unsupported;
                 for (auto& r : it->second.get(a.key)) {
                     out.push_back(cand_of(r, pk_col));
                     if (out.size() > cap) return Gather::TooMany;

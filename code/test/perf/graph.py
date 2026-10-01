@@ -127,7 +127,7 @@ style(ax3, "인덱스 성능  (TPS  높을수록 빠름)", "TPS",
       "5,000행 · 포인트 조회 · 300회 평균")
 vbar_label(ax3, bs3[0], "{:,.0f}", ymax3, color=SUB)
 vbar_label(ax3, bi3[0], "{:,.0f}", ymax3, color="#C2410C")
-ax3.text(0.5, ymax3 * 0.55, f"{sp:.0f}×",
+ax3.text(0.5, 0.55, f"{sp:.0f}×",
          ha="center", va="bottom", fontsize=16, fontweight="bold", color="#9A3412",
          transform=ax3.get_xaxis_transform())
 
@@ -145,7 +145,7 @@ style(ax4, "트랜잭션 TPS  (높을수록 빠름)", "TPS",
       f"{tx['rows']:,}건 · AutoCommit {sp_tx:.0f}× 빠름")
 vbar_label(ax4, ba4[0], "{:,.0f}", ymax4, color=INS)
 vbar_label(ax4, bt4[0], "{:,.0f}", ymax4, color=TXN)
-ax4.text(0.5, ymax4 * 0.55, f"{sp_tx:.0f}×",
+ax4.text(0.5, 0.55, f"{sp_tx:.0f}×",
          ha="center", va="bottom", fontsize=16, fontweight="bold", color=TXN,
          transform=ax4.get_xaxis_transform())
 

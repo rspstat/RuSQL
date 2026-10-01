@@ -211,15 +211,7 @@ void Executor::recover_from_redo() {
                 }
             }
         }
-        if (auto idx_it = sw->indexes.find(table); idx_it != sw->indexes.end()) {
-            idx_it->second = BPlusTree();
-            for (auto& row : rows) {
-                auto it = row.find(pk_col);
-                std::string key = it != row.end() ? it->second : std::string();
-                nlohmann::json j = row;
-                idx_it->second.insert(key, j.dump());
-            }
-        }
+        if (auto idx_it = sw->indexes.find(table); idx_it != sw->indexes.end()) idx_it->second = build_pk_tree(rows, pk_col);
         rebuild_secondary_indexes(*sw, table, rows);
         for (auto& [k, ci] : sw->composite_indexes) {
             if (ci.table == table) ci.rebuild(rows);

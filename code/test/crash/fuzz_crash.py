@@ -49,6 +49,26 @@ def table_rows(db, table):
     return rows
 
 
+def index_problems(db, oracle):
+    """The recovered INDEXES must agree with the recovered rows: a lookup through the secondary index (g) and through
+    the primary key has to return exactly what the oracle says. (They used to come back stale after a checkpoint +
+    restart, and a table scan -- which is all the content comparison does -- cannot see that.)"""
+    problems = []
+    for t, rows in oracle.items():
+        for g in range(5):
+            r = db.execute(f"SELECT id FROM {t} WHERE g = {g}")
+            got = {int(m) for m in re.findall(r"\|\s*(\d+)\s*\|", r)}
+            want = {k for k in rows if k % 5 == g}
+            if got != want:
+                problems.append(f"{t}: g = {g}: index returned {sorted(got)}, expected {sorted(want)}")
+        for k, v in sorted(rows.items())[:12]:
+            r = db.execute(f"SELECT v FROM {t} WHERE id = {k}")
+            m = re.search(r"\|\s*(-?\d+)\s*\|", r)
+            if not m or int(m.group(1)) != v:
+                problems.append(f"{t}: id = {k}: pk lookup returned {r.splitlines()[-3:] if r else r}, expected v={v}")
+    return problems
+
+
 def run_round(seed, n_ops):
     rnd = random.Random(seed)
     shutil.rmtree(DATA, ignore_errors=True)
@@ -158,6 +178,9 @@ def run_round(seed, n_ops):
     db = bench.RuSQL(); db.execute("USE d")
     got = {t: table_rows(db, t) for t in ("a", "b")}
     ok = got == oracle
+    problems = index_problems(db, oracle) if ok else []
+    if problems:
+        ok = False
     db.close(); p.terminate(); p.wait()
     if not ok:
         print(f"MISMATCH seed={seed} ops={n_ops}")
@@ -166,6 +189,8 @@ def run_round(seed, n_ops):
                 miss = {k: v for k, v in oracle[t].items() if got[t].get(k) != v}
                 extra = {k: v for k, v in got[t].items() if oracle[t].get(k) != v}
                 print(f"  table {t}: expected-but-wrong/missing={miss} unexpected/wrong={extra}")
+        for line in problems:
+            print(f"  index: {line}")
     return ok
 
 

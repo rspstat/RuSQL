@@ -40,6 +40,16 @@ struct TableSchema {
     // partition_info->partitions[i].child_table 이름의 평범한 물리 테이블에 저장됨
     // (executor_partition.cpp의 라우터가 처리, executor_ddl.cpp의 exec_create가 채움).
     std::optional<PartitionBy> partition_info;
+
+    // The columns that identify a row: the composite PRIMARY KEY if there is one, else the single PRIMARY KEY
+    // column; empty if the table has none.
+    std::vector<std::string> identity_columns() const {
+        if (!primary_key_columns.empty()) return primary_key_columns;
+        for (auto& c : columns) {
+            if (c.primary_key) return {c.name};
+        }
+        return {};
+    }
 };
 
 void to_json(nlohmann::json& j, const TableSchema& s);

@@ -13,7 +13,6 @@ add_library(engine_core STATIC
     src/parser/parser_detail.cpp
     src/storage/page.cpp
     src/storage/btree.cpp
-    src/storage/btree_json.cpp
     src/storage/hash_index.cpp
     src/storage/composite_index.cpp
     src/storage/disk.cpp

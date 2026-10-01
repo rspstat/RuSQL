@@ -1,0 +1,23 @@
+{
+  "single": {
+    "rows": 10000,
+    "insert_s": 6.61,
+    "delete_s": 7.06
+  },
+  "bulk": {
+    "rows": 100000,
+    "insert_s": 0.44,
+    "delete_s": 0.37
+  },
+  "point_lookup": {
+    "seq_ms": 0.95,
+    "idx_ms": 0.167,
+    "speedup": 5.7
+  },
+  "transaction": {
+    "rows": 1000,
+    "auto_s": 0.73,
+    "txn_s": 1.24,
+    "txn_batch_s": 0.11
+  }
+}

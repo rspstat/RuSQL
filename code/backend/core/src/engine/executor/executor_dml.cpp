@@ -178,7 +178,6 @@ void Executor::maybe_auto_vacuum(SharedDatabase& s, const std::string& table) {
     if (rows.size() < before) {
         std::vector<Row> rows_clone = rows;
         if (auto idx_it = s.indexes.find(table); idx_it != s.indexes.end()) {
-            idx_it->second = BPlusTree();
             // PLAN.md P0 fix: see exec_vacuum in executor_maint.cpp for the same fix —
             // resolve the real PK column from the schema instead of grabbing an
             // arbitrary (HashMap-order-dependent) row value.
@@ -189,13 +188,7 @@ void Executor::maybe_auto_vacuum(SharedDatabase& s, const std::string& table) {
                 }
                 if (pk_col_name.empty() && !schema->columns.empty()) pk_col_name = schema->columns.front().name;
             }
-            for (auto& row : rows_clone) {
-                auto it = row.find(pk_col_name);
-                std::string key = it != row.end() ? it->second : std::string();
-                nlohmann::json j = row;
-                idx_it->second.insert(key, j.dump());
-            }
-            s.disk.save_btree_index(table, idx_it->second);
+            idx_it->second = build_pk_tree(rows_clone, pk_col_name);
         }
         s.buffer_pool.write_page(table, rows_clone);
         s.buffer_pool.flush_page(table, s.disk);
@@ -386,6 +379,17 @@ StringResult Executor::exec_insert_inner(SharedDatabase& s, const std::string& t
 
     std::vector<std::string> col_names;
     for (auto& c : schema.columns) col_names.push_back(c.name);
+    // The column the PK B+Tree, the undo log and the pk -> row lookups are keyed by: the primary-key column (the
+    // first one of a composite key), or the first column of a table without a primary key. This used to be
+    // `col_names[0]` everywhere -- wrong whenever the PK is not the first column (`CREATE TABLE t (name ..., id INT
+    // PRIMARY KEY)`): `WHERE id = 2` then found nothing, because the PK index was keyed by `name`.
+    std::string key_col = col_names.empty() ? std::string() : col_names[0];
+    for (auto& c : schema.columns) {
+        if (c.primary_key) {
+            key_col = c.name;
+            break;
+        }
+    }
     struct ColConstraint { bool primary_key, not_null, unique, auto_increment; };
     std::vector<ColConstraint> constraints;
     for (auto& c : schema.columns) constraints.push_back({c.primary_key, c.not_null, c.unique, c.auto_increment});
@@ -572,7 +576,7 @@ StringResult Executor::exec_insert_inner(SharedDatabase& s, const std::string& t
                             break;
                         }
                         if (auto* upd = std::get_if<InsertConflict::Update>(&on_conflict.data)) {
-                            auto pkit = existing.find(col_names[0]);
+                            auto pkit = existing.find(key_col);
                             pending_updates.emplace_back(pkit != existing.end() ? pkit->second : std::string(), upd->assignments);
                             skip_row = true;
                             break;
@@ -624,7 +628,7 @@ StringResult Executor::exec_insert_inner(SharedDatabase& s, const std::string& t
                         if (std::holds_alternative<InsertConflict::Ignore>(on_conflict.data)) {
                             skip_row = true;
                         } else if (auto* upd = std::get_if<InsertConflict::Update>(&on_conflict.data)) {
-                            auto pkit = existing->find(col_names[0]);
+                            auto pkit = existing->find(key_col);
                             pending_updates.emplace_back(pkit != existing->end() ? pkit->second : std::string(), upd->assignments);
                             skip_row = true;
                         }
@@ -898,7 +902,7 @@ StringResult Executor::exec_insert_inner(SharedDatabase& s, const std::string& t
             }
             if (auto it = s.tables.find(table); it != s.tables.end()) {
                 for (auto& row : it->second) {
-                    auto pkit = row.find(col_names[0]);
+                    auto pkit = row.find(key_col);
                     if (pkit != row.end() && pkit->second == pk_val && is_visible(row)) {
                         Row old_row = row;
                         for (auto& [col, aexpr] : assignments) row[col] = eval_arith(row, aexpr);
@@ -907,7 +911,7 @@ StringResult Executor::exec_insert_inner(SharedDatabase& s, const std::string& t
                         // hash/composite indexes entirely stale (only the PK B+Tree was
                         // refreshed below) -- mirror the remove-old/insert-new pattern
                         // already used by plain UPDATE (executor_update.cpp).
-                        index_remove_row(s, table, old_row, col_names[0]);
+                        index_remove_row(s, table, old_row, key_col);
                         index_insert_row(s, table, row);
                         for (auto& [k, ci] : s.composite_indexes) {
                             if (ci.table != table) continue;
@@ -929,13 +933,7 @@ StringResult Executor::exec_insert_inner(SharedDatabase& s, const std::string& t
         s.query_cache.invalidate_table(table);
     }
     if (had_updates) {
-        std::string pk_col_name = col_names.empty() ? std::string() : col_names[0];
-        for (auto& c : schema.columns) {
-            if (c.primary_key) {
-                pk_col_name = c.name;
-                break;
-            }
-        }
+        const std::string& pk_col_name = key_col;
         // Incremental index maintenance: the PK value itself never changes here (rows
         // were matched by exact PK equality above), so each updated row is a same-key
         // upsert -- no need to clone and rebuild the whole table's PK index.
@@ -968,7 +966,7 @@ StringResult Executor::exec_insert_inner(SharedDatabase& s, const std::string& t
     {
         auto insert_write_lock = acquire_table_data_locks(s, {table}, /*exclusive=*/true);
         for (auto& row : prepared) {
-            auto pkit = row.find(col_names.empty() ? std::string() : col_names[0]);
+            auto pkit = row.find(key_col);
             std::string pk_val = pkit != row.end() ? pkit->second : std::string();
             nlohmann::json jrow = row;
             std::string val_json = jrow.dump();

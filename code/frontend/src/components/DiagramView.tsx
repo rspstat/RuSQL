@@ -165,9 +165,10 @@ const TXN: Item[] = [
 const STORAGE: Item[] = [
   {
     t: L("B+Tree indexes", "B+Tree 인덱스"),
-    s: L("single, composite, clustered; maintained incrementally, one bucket write per statement", "단일·복합·클러스터드, 증분 갱신(문장당 버킷 1회 기록)"),
+    s: L("single, composite, clustered; keys compare as numbers (7 = 7.00); maintained incrementally, one bucket write per statement",
+         "단일·복합·클러스터드, 키를 숫자로 비교(7 = 7.00), 증분 갱신(문장당 버킷 1회 기록)"),
   },
-  { t: L("Hash index", "해시 인덱스"), s: L("USING HASH, equality lookups in O(1)", "USING HASH, 등호 조회 O(1)") },
+  { t: L("Hash index", "해시 인덱스"), s: L("USING HASH, O(1) equality lookups, bucketed by numeric value", "USING HASH, 등호 조회 O(1), 숫자 값 기준 버킷") },
   {
     t: L("Table data", "테이블 데이터"),
     s: L("in-memory MVCC row versions + the pk-to-position cache that turns an index hit into its row", "메모리 상의 MVCC 행 버전 + 인덱스 결과를 실제 행으로 연결하는 PK→위치 캐시"),
@@ -183,7 +184,8 @@ const DURABILITY: Item[] = [
   },
   {
     t: "WAL",
-    s: L("binary write-ahead log, FNV-1a record checksums", "바이너리 선행 기록 로그, FNV-1a 레코드 체크섬"),
+    s: L("binary write-ahead log, FNV-1a record checksums; COMMIT never re-reads it (which transactions are in the file is tracked in memory)",
+         "바이너리 선행 기록 로그, FNV-1a 레코드 체크섬, 어떤 트랜잭션이 들어 있는지 메모리에서 추적해 COMMIT이 다시 읽지 않음"),
   },
   { t: L("Undo log", "Undo 로그"), s: L("per-transaction undo records for rollback", "롤백용 트랜잭션별 undo 레코드") },
   {
@@ -192,7 +194,8 @@ const DURABILITY: Item[] = [
   },
   {
     t: L("Crash recovery", "크래시 복구"),
-    s: L("on boot: undo unfinished transactions, replay the redo log", "부팅 시 미완료 트랜잭션 undo, redo 로그 재생"),
+    s: L("on boot: undo unfinished transactions, replay the redo log, rebuild every index from the rows",
+         "부팅 시 미완료 트랜잭션 undo, redo 로그 재생, 모든 인덱스를 행에서 재구성"),
   },
 ];
 
@@ -333,8 +336,8 @@ function LayersView() {
           <Chips items={DURABILITY} />
           <div className="dg-disk">
             <b>{t(L("On disk", "디스크 파일"))}</b>
-            <span>{t(L("*.rdb  *.idx  indexes.json  views.json  rusql.redo  rusql.wal  _undo.log  _system/ (users, grants, roles, synonyms)",
-                       "*.rdb  *.idx  indexes.json  views.json  rusql.redo  rusql.wal  _undo.log  _system/ (사용자, 권한, 역할, 동의어)"))}</span>
+            <span>{t(L("*.rdb  indexes.json  views.json  rusql.redo  rusql.wal  _undo.log  _system/ (users, grants, roles, synonyms)",
+                       "*.rdb  indexes.json  views.json  rusql.redo  rusql.wal  _undo.log  _system/ (사용자, 권한, 역할, 동의어)"))}</span>
           </div>
         </Panel>
       </div>

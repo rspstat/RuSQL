@@ -36,6 +36,7 @@ add_executable(engine_tests
     test_redo.cpp
     test_update_fast.cpp
     test_dml_index.cpp
+    test_select_index.cpp
 )
 
 target_link_libraries(engine_tests PRIVATE engine_core)

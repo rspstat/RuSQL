@@ -520,6 +520,8 @@ private:
     static void index_replace_rows(SharedDatabase& s, const std::string& table, const std::vector<Row>& olds, const std::vector<Row>& news,
                                    const std::string& pk_col);
     void rebuild_secondary_indexes(SharedDatabase& s, const std::string& table, const std::vector<Row>& rows);
+    // The PK B+Tree for `rows`: one entry per pk, a live version always winning over a dead one (see the definition).
+    static BPlusTree build_pk_tree(const std::vector<Row>& rows, const std::string& pk_col);
 
     // ── index-assisted candidate search for UPDATE/DELETE (executor_dml_index.cpp) ──
     struct DmlIndexHit {

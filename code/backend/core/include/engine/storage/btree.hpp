@@ -84,13 +84,10 @@ public:
         return root_ == nullptr;
     }
 
-    // Internal accessors used only by btree_json.cpp for (de)serialization, which only
-    // ever runs under the outer structural-exclusive lock (CREATE INDEX / startup load /
-    // ALTER) -- deliberately NOT guarded by mutex_ (root_ptr() returns a reference, which
-    // a lock held only inside this accessor couldn't protect after it returns anyway).
-    // Not meant as part of the tree's ordinary per-instance-concurrent public API.
+    // Read-only access to the root for the structure-invariant check in test_btree.cpp -- deliberately NOT
+    // guarded by mutex_ (it returns a reference, which a lock held only inside this accessor couldn't protect
+    // after it returns anyway), so not part of the tree's ordinary per-instance-concurrent API.
     const std::unique_ptr<Node>& root_ptr() const { return root_; }
-    void set_root(std::unique_ptr<Node> r) { root_ = std::move(r); }
 
 private:
     mutable std::mutex mutex_;

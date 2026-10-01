@@ -13,6 +13,9 @@ namespace engine {
 
 // Row-level-concurrency Stage 2: guarded by its own mutex_, same pattern/reasoning as
 // BPlusTree -- one mutex per instance, held only for the duration of a single call.
+// Buckets are keyed by numeric VALUE, not by text (numeric_key.hpp): "7", "7.0" and "007" share a bucket, because a
+// WHERE clause treats them as equal -- an exact-text key would miss rows the scan finds.
+//
 // get() returns a copy rather than a reference into data_ -- a reference would dangle
 // the instant the lock is released, since a concurrent insert_row()/remove_row() on an
 // unrelated key can still rehash the underlying unordered_map.

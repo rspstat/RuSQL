@@ -74,6 +74,8 @@ struct JoinAlgo {
         std::string right_extract_col, left_index_key;
         bool left_is_hash = false;
         bool left_is_secondary_btree = false;
+        // the LEFT table's join column: the probe side of the hash join this falls back to inside a transaction
+        std::string left_col;
     };
 
     using Data = std::variant<NestedLoop, Hash, SortMerge, IndexNL, ReverseIndexNL>;
@@ -131,6 +133,9 @@ public:
                               const std::vector<Join>& joins, const std::vector<SelectColumn>& columns) const;
 
     AccessPath choose_access(const std::string& table, const std::optional<CondExpr>& condition, const std::optional<std::string>& pk) const;
+    // The `col = constant` conjuncts of `expr` (collect_eq_map without `a = b` column comparisons, whose
+    // "value" is another column's name, not a key to look up) -- what a composite index can be probed with.
+    std::unordered_map<std::string, std::string> constant_eq_map(const std::string& table, const CondExpr& expr) const;
 
     std::size_t table_size(const std::string& table) const;
     std::optional<std::string> pk_col(const std::string& table) const;

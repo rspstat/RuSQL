@@ -194,6 +194,7 @@
 ### 트랜잭션
 - [x] WAL (Write-Ahead Logging) — 바이너리 redo log
 - [x] WAL Group Commit — 여러 세션의 COMMIT을 단일 fsync로 묶어 TPS 향상, SharedDatabase 락 해제 후 fsync
+- [x] **트랜잭션 로그 추적 (2026-10-02)** — `TxnIoShared::LogContents`: WAL·undo 파일에 어떤 트랜잭션의 레코드가 있는지 메모리에서 추적해, COMMIT/ROLLBACK이 자기 레코드를 지울 때 파일을 열어 읽고 파싱하지 않음(혼자면 제자리 truncate, 없으면 무동작, 다른 트랜잭션이 있으면 기존 재작성 경로). 건당 `BEGIN·INSERT·COMMIT` 7.5ms → 0.9ms(8배), ROLLBACK 7.1 → 0.56ms, 읽기 전용 트랜잭션 0.26 → 0.17ms. 내구성·복구 프로토콜은 불변(파일이 진실, 추적은 캐시)
 - [x] WAL fsync per-commit — COMMIT 레코드 기록 시 `sync_all()` 호출 (`innodb_flush_log_at_trx_commit=1` 동등, 전원 장애 시 커밋 유실 방지)
 - [x] WAL/Undo 레코드 체크섬 — 각 레코드 끝에 FNV-1a 32비트 체크섬 추가, decode 시 불일치하면 손상을 명시적으로 감지해 해당 지점에서 안전하게 중단(내용만 손상되고 길이 프레이밍은 멀쩡한 경우를 이전엔 조용히 정상으로 오인)
 - [x] **WAL/Undo Log 세션 간 트랜잭션 격리** — 전역 유일 트랜잭션 ID(`txn_id`, `TxnIoShared`로 모든 세션이 공유하는 원자적 카운터에서 발급)를 모든 WAL 레코드·Undo 엔트리에 태깅; COMMIT/ROLLBACK/ABORT는 파일 전체 삭제 대신 자기 트랜잭션 레코드만 제거(`remove_txn`)해 같은 data_dir을 공유하는 다른 세션의 진행 중인 트랜잭션 기록을 보존; `lock_mgr`/`_xmin` 태깅도 동일 전역 ID를 사용해 세션 간 잠금 ID 충돌 문제도 함께 해소
@@ -218,13 +219,14 @@
 - [x] **인덱스를 쓰는 UPDATE/DELETE (2026-10-01)** — 대상 행을 찾을 때 플래너의 접근 경로(`Planner::choose_access`, SELECT와 동일)를 사용: PK 점/범위/BETWEEN, 보조 B+Tree 점/범위/BETWEEN/LIKE 접두사, 해시(비숫자 리터럴), IndexIntersection, AND 조건의 인덱스 가능한 리프 하나. 인덱스는 후보만 공급하고 후보마다 `row_pk_pos`로 실제 행을 찾아 같은 버전(pk·`_xmin`)/가시성/전체 조건을 확인하며, 의심스러우면 기존 스캔으로 되돌아감(`executor_dml_index.cpp`). 숫자 경계는 한 ulp 넓혀 `"7"`/`"07"`/`"7.00"` 같은 숫자 동치 표기도 찾음. 쓰지 않는 경우: 복합 인덱스·복합 PK·PK 없는 테이블, 서브쿼리 조건, 다른 트랜잭션이 열려 있을 때, 큰 결과(테이블의 1/8 초과), 64행 미만(`RUSQL_DML_INDEX_MIN_ROWS`, 0=항상). 20,000행에서 인덱스 1개 테이블의 단일/소수 행 UPDATE·DELETE가 크기와 무관한 약 1ms
 - [x] **보조 인덱스 일괄 갱신 (2026-10-01)** — `index_replace_rows`: 문장이 건드린 행들을 버킷별로 한 번만 파싱·기록(UPDATE, DELETE의 물리/소프트 삭제). 다중 행 UPDATE가 제곱 시간이던 것이 선형으로(20,000행에서 `grp = k` 400행 UPDATE 1,237 → 15.7ms). PK를 연쇄로 바꾸는 문장(`SET id = id + 1`)에서 인덱스 항목이 사라지던 버그도 같은 구조 변경(옛 항목을 먼저 전부 제거 후 새 항목 삽입)으로 해결
 - [x] **UPDATE 무결성 (2026-10-01)** — 단일 컬럼 PRIMARY KEY/UNIQUE 중복 거부(새 행들끼리, 그리고 이 문장이 바꾸지 않는 살아 있는 행과; 같은 문장이 비워 주는 자리로의 이동과 UNIQUE의 NULL은 허용, `executor_update_unique.cpp`). 모든 새 버전을 만들고 CHECK/ENUM/중복 검사를 마친 뒤에야 옛 버전을 "죽음"으로 표시 — 이전에는 여러 행 UPDATE가 중간 행에서 실패하면 앞서 처리한 행이 사라졌음. `DELETE ... WHERE pk BETWEEN`의 빠른 경로는 캐시가 가리키는 위치의 pk 일치·가시성을 검증(소프트 삭제된 죽은 행을 지웠다고 세던 버그 수정). 같은 행을 동시에 UPDATE할 때 행이 두 개로 갈라지던 경쟁 상태는 배타 락 획득 직후 스냅샷을 새로 만들어 검증하도록 수정
-- [x] **Hash Index** — `CREATE INDEX name ON table (col) USING HASH` · 등호 조건 O(1) 검색 · 단일 컬럼 전용 · 비용 기반 플래너에서 등호 조건 시 B+Tree보다 우선 선택 · EXPLAIN에 `Hash Index Scan` 표시 · DML(INSERT/UPDATE/DELETE) 시 증분 갱신 (`insert_row` / `remove_row`) · 재시작 후 `indexes.json`에서 자동 복원 (`index_type: "hash"`)
-- [x] 복합 인덱스 (다중 컬럼, null-byte 키 결합)
+- [x] **SELECT 인덱스 경로의 숫자 동치 + 인덱스 정합성 (2026-10-01)** — `numeric_key.hpp`: B+Tree 범위 경계를 한 ulp 넓힌 뒤 찾은 행에 전체 조건 재적용(PK 점/범위/BETWEEN, 보조 점/범위/BETWEEN, 커버링, Top-K, IndexIntersection), 해시 버킷·복합 키는 숫자 정규화, LIKE 접두사는 숫자 접두사면 미사용, 조인(해시/정렬 병합/IndexNL/ReverseIndexNL)도 같은 규칙. 해시/정렬 병합 조인이 NULL 키끼리 매칭하던 것 수정. 인덱스는 파생 데이터라 **시작 때 항상 행에서 재구성**(`.idx` 파일 영속화 제거 — 갱신되지 않아 재시작 뒤 빈 인덱스가 되던 버그), PK B+Tree 재구성은 산 버전이 죽은 버전을 이김(`build_pk_tree`), INSERT가 PK 컬럼(첫 컬럼 아님)으로 PK 인덱스/undo 키잉
+- [x] **Hash Index** — `CREATE INDEX name ON table (col) USING HASH` · 등호 조건 O(1) 검색 · **버킷을 숫자 값으로 키잉(`7`/`7.0`/`07`이 한 버킷, 2026-10-01)** · 단일 컬럼 전용 · 비용 기반 플래너에서 등호 조건 시 B+Tree보다 우선 선택 · EXPLAIN에 `Hash Index Scan` 표시 · DML(INSERT/UPDATE/DELETE) 시 증분 갱신 (`insert_row` / `remove_row`) · 재시작 후 `indexes.json`에서 자동 복원 (`index_type: "hash"`)
+- [x] 복합 인덱스 (다중 컬럼, null-byte 키 결합) — **항목 키 = 숫자 정규화한 컬럼 값들 + 행의 PK(2026-10-01)**: 같은 컬럼 값을 가진 행도 각자 항목을 가져(전엔 마지막 행만 남았음) 비유일 복합 인덱스가 정확하고, 조회는 선두 컬럼이 같은 구간의 범위 스캔 O(log N + k), `7`과 `7.00`을 같은 값으로 취급
 - [x] 클러스터드 인덱스 (PK 기준 물리적 정렬 유지)
 - [x] 보조 인덱스 중복 키 지원 (배열 저장, 동일 컬럼 값 다중 행)
 - [x] 보조 인덱스 증분 갱신 (INSERT/UPDATE/DELETE 시 `index_insert_row` / `index_remove_row`로 O(1) 개별 갱신 — 전체 재빌드 제거, stale 방지)
 - [x] PK B+Tree/복합 인덱스 증분 갱신 (UPDATE·다중 UPDATE/DELETE·INSERT ON DUPLICATE KEY UPDATE에서 바뀐 행마다 old-key 제거+new-key 삽입 — 이전엔 문장 하나당 몇 행이 바뀌든 항상 테이블 전체를 복제해 인덱스를 통째로 재구축했음, PK 컬럼 자체가 SET 대상이어도 정확)
-- [x] 커버링 인덱스 (SELECT 컬럼 ⊆ 인덱스 컬럼 시 Index-only scan 자동 활성화)
+- [x] 커버링 인덱스 (SELECT 컬럼이 그 인덱스의 컬럼 하나뿐일 때 Index-only scan 자동 활성화 — 조회 키가 아니라 저장된 값을 반환, 복합 인덱스 컬럼 부분집합이라고 활성화하지 않음(2026-10-01))
 - [x] B+Tree 범위 스캔 최적화 (scan_from_node / scan_to_node 가지치기, O(log N + k))
 - [x] B+Tree `range_keys` — BETWEEN 조건 DELETE 시 가지치기로 대상 PK 키 목록 수집, 역순 `swap_remove`로 인덱스 깨짐 없이 O(k) 일괄 삭제
 - [x] 수치 인식 키 비교 (`"10" > "9"` 정상 처리)

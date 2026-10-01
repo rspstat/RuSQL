@@ -2,6 +2,8 @@
 
 #include <algorithm>
 
+#include "engine/storage/numeric_key.hpp"
+
 namespace engine {
 
 HashIndex::HashIndex(const HashIndex& other) : table(other.table), column(other.column) {
@@ -40,20 +42,20 @@ void HashIndex::rebuild(const std::vector<Row>& rows) {
     data_.clear();
     for (const auto& row : rows) {
         auto it = row.find(column);
-        if (it != row.end()) data_[it->second].push_back(row);
+        if (it != row.end()) data_[normalize_numeric_key(it->second)].push_back(row);
     }
 }
 
 std::vector<Row> HashIndex::get(const std::string& key) const {
     std::lock_guard<std::mutex> g(mutex_);
-    auto it = data_.find(key);
+    auto it = data_.find(normalize_numeric_key(key));
     return it != data_.end() ? it->second : std::vector<Row>{};
 }
 
 void HashIndex::insert_row(const Row& row) {
     std::lock_guard<std::mutex> g(mutex_);
     auto it = row.find(column);
-    if (it != row.end()) data_[it->second].push_back(row);
+    if (it != row.end()) data_[normalize_numeric_key(it->second)].push_back(row);
 }
 
 void HashIndex::remove_row(const std::string& col_val, const std::string& pk_col, const std::string& pk_val) {
@@ -62,7 +64,7 @@ void HashIndex::remove_row(const std::string& col_val, const std::string& pk_col
 
 void HashIndex::remove_row(const std::string& col_val, const std::vector<std::pair<std::string, std::string>>& pk) {
     std::lock_guard<std::mutex> g(mutex_);
-    auto it = data_.find(col_val);
+    auto it = data_.find(normalize_numeric_key(col_val));
     if (it == data_.end()) return;
     auto& bucket = it->second;
     bucket.erase(std::remove_if(bucket.begin(), bucket.end(),

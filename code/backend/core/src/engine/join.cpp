@@ -1,5 +1,6 @@
 #include "engine/join.hpp"
 
+#include "engine/storage/numeric_key.hpp"
 #include "engine/thread_pool.hpp"
 
 #include <algorithm>
@@ -124,14 +125,17 @@ std::vector<Row> sort_merge_join(const std::vector<Row>& left, const std::vector
         while (li < ls.size() && ri < rs.size()) {
             std::string lk = key_left(ls[li]);
             std::string rk = key_right(rs[ri]);
+            // NULL joins with nothing (the keys sort as text, so NULLs are skipped here and never matched below)
+            if (lk == JOIN_NULL_VALUE) { li++; continue; }
+            if (rk == JOIN_NULL_VALUE) { ri++; continue; }
             int cmp = sort_cmp(lk, rk);
             if (cmp < 0) { li++; }
             else if (cmp > 0) { ri++; }
             else {
                 std::size_t li0 = li;
-                while (li < ls.size() && key_left(ls[li]) == lk) li++;
+                while (li < ls.size() && sort_cmp(key_left(ls[li]), lk) == 0) li++;
                 std::size_t ri0 = ri;
-                while (ri < rs.size() && key_right(rs[ri]) == lk) ri++;
+                while (ri < rs.size() && sort_cmp(key_right(rs[ri]), lk) == 0) ri++;
                 for (std::size_t a = li0; a < li; a++) {
                     for (std::size_t b = ri0; b < ri; b++) {
                         Row merged = ls[a];
@@ -148,7 +152,7 @@ std::vector<Row> sort_merge_join(const std::vector<Row>& left, const std::vector
             while (ri_start < rs.size() && sort_cmp(key_right(rs[ri_start]), lk) < 0) ri_start++;
             std::size_t ri = ri_start;
             bool matched = false;
-            while (ri < rs.size() && sort_cmp(key_right(rs[ri]), lk) == 0) {
+            while (lk != JOIN_NULL_VALUE && ri < rs.size() && sort_cmp(key_right(rs[ri]), lk) == 0) {
                 Row merged = l;
                 merge_right(merged, rs[ri], table);
                 out.push_back(std::move(merged));
@@ -169,7 +173,7 @@ std::vector<Row> sort_merge_join(const std::vector<Row>& left, const std::vector
             while (li_start < ls.size() && sort_cmp(key_left(ls[li_start]), rk) < 0) li_start++;
             std::size_t li = li_start;
             bool matched = false;
-            while (li < ls.size() && sort_cmp(key_left(ls[li]), rk) == 0) {
+            while (rk != JOIN_NULL_VALUE && li < ls.size() && sort_cmp(key_left(ls[li]), rk) == 0) {
                 Row merged = ls[li];
                 merge_right(merged, r, table);
                 out.push_back(std::move(merged));
@@ -195,7 +199,7 @@ std::vector<Row> hash_join(const std::vector<Row>& left, const std::vector<Row>&
         std::string key;
         if (auto it = r.find(build_col); it != r.end()) key = it->second;
         else if (auto it2 = r.find(table + "." + build_col); it2 != r.end()) key = it2->second;
-        hash[key].push_back(&r);
+        if (key != JOIN_NULL_VALUE) hash[normalize_numeric_key(key)].push_back(&r);
     }
 
     std::string probe_suffix = "." + probe_col;
@@ -213,7 +217,7 @@ std::vector<Row> hash_join(const std::vector<Row>& left, const std::vector<Row>&
                 }
             }
             std::vector<Row> matches;
-            auto it = hash.find(pk);
+            auto it = pk == JOIN_NULL_VALUE ? hash.end() : hash.find(normalize_numeric_key(pk));
             if (it != hash.end()) {
                 matches.reserve(it->second.size());
                 for (auto* r : it->second) {
@@ -238,7 +242,7 @@ std::vector<Row> hash_join(const std::vector<Row>& left, const std::vector<Row>&
                 }
             }
             std::vector<Row> matches;
-            auto it = hash.find(pk);
+            auto it = pk == JOIN_NULL_VALUE ? hash.end() : hash.find(normalize_numeric_key(pk));
             if (it != hash.end()) {
                 matches.reserve(it->second.size());
                 for (auto* r : it->second) {
@@ -259,14 +263,14 @@ std::vector<Row> hash_join(const std::vector<Row>& left, const std::vector<Row>&
         for (auto& l : left) {
             std::string key;
             if (auto it = l.find(probe_col); it != l.end()) key = it->second;
-            left_hash[key].push_back(&l);
+            if (key != JOIN_NULL_VALUE) left_hash[normalize_numeric_key(key)].push_back(&l);
         }
         std::vector<std::string> left_cols = non_qualified_keys(left.empty() ? nullptr : &left[0]);
         std::vector<Row> out;
         for (auto& r : right) {
             std::string key;
             if (auto it = r.find(build_col); it != r.end()) key = it->second;
-            auto it = left_hash.find(key);
+            auto it = key == JOIN_NULL_VALUE ? left_hash.end() : left_hash.find(normalize_numeric_key(key));
             if (it != left_hash.end()) {
                 for (auto* l : it->second) {
                     Row merged = *l;

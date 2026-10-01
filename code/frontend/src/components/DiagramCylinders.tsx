@@ -69,18 +69,18 @@ const NODES: Node[] = [
   },
   {
     id: "storage", x: 1085, y: 600, w: 130, h: 104, c: C.storage, name: L("Storage", "스토리지"),
-    desc: L("B+Tree and hash indexes (a statement rewrites each secondary-index bucket once), in-memory MVCC row versions with a pk-to-position cache, buffer pool (LRU, 64 pages x 16 KB), binary .rdb files with LZ4 compression.",
-            "B+Tree·해시 인덱스(문장당 보조 인덱스 버킷을 한 번만 다시 기록), PK→위치 캐시가 있는 메모리 상의 MVCC 행 버전, 버퍼 풀(LRU, 16KB 페이지 64개), LZ4 압축 바이너리 .rdb 파일."),
+    desc: L("B+Tree and hash indexes (keys compare as numbers, so 7 = 7.00; a statement rewrites each secondary-index bucket once), in-memory MVCC row versions with a pk-to-position cache, buffer pool (LRU, 64 pages x 16 KB), binary .rdb files with LZ4 compression.",
+            "B+Tree·해시 인덱스(키를 숫자로 비교해 7 = 7.00, 문장당 보조 인덱스 버킷을 한 번만 다시 기록), PK→위치 캐시가 있는 메모리 상의 MVCC 행 버전, 버퍼 풀(LRU, 16KB 페이지 64개), LZ4 압축 바이너리 .rdb 파일."),
   },
   {
     id: "durability", x: 825, y: 600, w: 130, h: 104, c: C.disk, name: L("Durability", "내구성"),
-    desc: L("Redo log (one checksummed batch per commit, group-commit fsync), WAL and undo log. Checkpoints rewrite the table files; on boot, unfinished transactions are undone and the redo log is replayed.",
-            "Redo 로그(커밋마다 체크섬 배치 1개, 그룹 커밋 fsync), WAL, undo 로그. 체크포인트가 테이블 파일을 재기록하고, 부팅 시 미완료 트랜잭션을 undo한 뒤 redo를 재생."),
+    desc: L("Redo log (one checksummed batch per commit, group-commit fsync), WAL and undo log (which transactions a log file holds is tracked in memory, so COMMIT and ROLLBACK never re-read it). Checkpoints rewrite the table files; on boot, unfinished transactions are undone, the redo log is replayed and every index is rebuilt from the rows.",
+            "Redo 로그(커밋마다 체크섬 배치 1개, 그룹 커밋 fsync), WAL, undo 로그(로그 파일에 어떤 트랜잭션이 들어 있는지 메모리에서 추적해 COMMIT·ROLLBACK이 파일을 다시 읽지 않음). 체크포인트가 테이블 파일을 재기록하고, 부팅 시 미완료 트랜잭션을 undo하고 redo를 재생한 뒤 모든 인덱스를 행에서 재구성."),
   },
   {
     id: "disk", x: 565, y: 600, w: 130, h: 104, c: C.disk, name: L("Disk files", "디스크 파일"),
-    desc: L("*.rdb, *.idx, indexes.json, views.json, rusql.redo, rusql.wal, _undo.log and _system/ (users, grants, roles, synonyms).",
-            "*.rdb, *.idx, indexes.json, views.json, rusql.redo, rusql.wal, _undo.log, _system/ (사용자, 권한, 역할, 동의어)."),
+    desc: L("*.rdb, indexes.json, views.json, rusql.redo, rusql.wal, _undo.log and _system/ (users, grants, roles, synonyms).",
+            "*.rdb, indexes.json, views.json, rusql.redo, rusql.wal, _undo.log, _system/ (사용자, 권한, 역할, 동의어)."),
   },
 ];
 

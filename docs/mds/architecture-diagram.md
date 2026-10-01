@@ -114,7 +114,7 @@
 │  ────────────────────────────────────────      영속화                                           │
 │  비용 기반 AccessPath 자동 선택                  ──────────────────────────────────────────────  │
 │    Hash Index 등호 조건 우선 선택                바이너리 .rdb + LZ4 압축                        │
-│    Index Intersection (AND 다중 인덱스            B+Tree .idx 자동 저장                           │
+│    Index Intersection (AND 다중 인덱스            시작 때 행에서 인덱스 재구성                    │
 │      PK HashSet 교집합, ∩ EXPLAIN 표시)          인덱스 메타 (indexes.json)                      │
 │  Join 순서 최적화                                스키마 (auto_increment 포함)                    │
 │    System-R bitmask DP (N≤8)                    뷰 (views.json)                                │

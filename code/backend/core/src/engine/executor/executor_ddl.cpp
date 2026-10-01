@@ -452,18 +452,12 @@ StringResult Executor::exec_alter(SharedDatabase& s, const std::string& table, A
         if (auto it = s.tables.find(table); it != s.tables.end()) {
             const std::vector<Row>& rows = it->second;
             if (auto idx_it = s.indexes.find(table); idx_it != s.indexes.end()) {
-                idx_it->second = BPlusTree();
                 std::string pk_col_name;
                 for (auto& c : schema->columns) {
                     if (c.primary_key) { pk_col_name = c.name; break; }
                 }
                 if (pk_col_name.empty() && !schema->columns.empty()) pk_col_name = schema->columns.front().name;
-                for (auto& row : rows) {
-                    auto rit = row.find(pk_col_name);
-                    std::string key = rit != row.end() ? rit->second : std::string();
-                    nlohmann::json j = row;
-                    idx_it->second.insert(key, j.dump());
-                }
+                idx_it->second = build_pk_tree(rows, pk_col_name);
             }
             for (auto& [name, meta] : s.index_meta) {
                 if (meta.first == table && meta.second == v->from) meta.second = v->to;
@@ -846,7 +840,6 @@ StringResult Executor::exec_create_index(SharedDatabase& s, const std::string& i
             tree.insert(key, j.dump());
         }
         std::string idx_key = table + "_" + index_name;
-        s.disk.save_btree_index(idx_key, tree);
         s.indexes.insert({idx_key, std::move(tree)});
         s.index_meta.insert({idx_key, {table, column}});
         persist_index_meta(s);
@@ -854,6 +847,7 @@ StringResult Executor::exec_create_index(SharedDatabase& s, const std::string& i
     }
 
     CompositeIndex comp(table, columns);
+    if (const TableSchema* sch = s.catalog.get_table(table)) comp.pk_columns = sch->identity_columns();
     if (auto it = s.tables.find(table); it != s.tables.end()) comp.rebuild(it->second);
     s.composite_indexes.insert({table + "_" + index_name, std::move(comp)});
     persist_index_meta(s);
@@ -1112,6 +1106,28 @@ void Executor::index_replace_rows(SharedDatabase& s, const std::string& table, c
         }
         for (auto& r : news) hit->second.insert_row(r);
     }
+}
+
+// A table can hold several physical versions of one row (the dead ones stay until VACUUM) and VACUUM moves rows
+// around, so a dead version can sit AFTER the live one. Inserting rows in physical order with "the last one wins" then
+// left the tree pointing at the dead copy, and every lookup of that row answered "not found" (found by the SELECT
+// differential fuzz: after a ROLLBACK, `WHERE id = 84` returned nothing while the scan returned the row). The dead
+// versions go in first, then the live ones overwrite them.
+BPlusTree Executor::build_pk_tree(const std::vector<Row>& rows, const std::string& pk_col) {
+    BPlusTree tree;
+    if (pk_col.empty()) return tree;
+    for (bool live_pass : {false, true}) {
+        for (auto& row : rows) {
+            auto x = row.find("_xmax");
+            bool live = x == row.end() || x->second == "0";
+            if (live != live_pass) continue;
+            auto it = row.find(pk_col);
+            if (it == row.end()) continue;
+            nlohmann::json j = row;
+            tree.insert(it->second, j.dump());
+        }
+    }
+    return tree;
 }
 
 void Executor::rebuild_secondary_indexes(SharedDatabase& s, const std::string& table, const std::vector<Row>& rows) {

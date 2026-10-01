@@ -89,15 +89,17 @@ TEST_CASE("CompositeIndex key construction and search", "[storage][composite_ind
 
     std::unordered_map<std::string, std::string> eq_map = {{"department_id", "1"}, {"salary", "60000"}};
     REQUIRE(idx.matches_conditions(eq_map));
-    auto found2 = idx.search_from_eq_map(eq_map);
+    auto found2 = idx.lookup(eq_map);
     REQUIRE(found2.has_value());
-    REQUIRE(found2->find("Bob") != std::string::npos);
+    REQUIRE(found2->size() == 1);
+    REQUIRE(found2->front().at("name") == "Bob");
 
     std::unordered_map<std::string, std::string> prefix_map = {{"department_id", "1"}};
     auto prefix_key = idx.prefix_key_from_eq_map(prefix_map);
     REQUIRE(prefix_key.has_value());
-    auto matches = idx.prefix_scan(*prefix_key);
-    REQUIRE(matches.size() == 2);
+    auto matches = idx.lookup(prefix_map);
+    REQUIRE(matches.has_value());
+    REQUIRE(matches->size() == 2);
 }
 
 TEST_CASE("BufferPool LRU hit/miss/eviction", "[storage][buffer_pool]") {
@@ -163,14 +165,6 @@ TEST_CASE("DiskManager schema/table/index round trip", "[storage][disk]") {
 
     auto dbs = disk.list_databases();
     REQUIRE(std::find(dbs.begin(), dbs.end(), "company") != dbs.end());
-
-    BPlusTree tree;
-    tree.insert("1", "{\"id\":\"1\"}");
-    tree.insert("2", "{\"id\":\"2\"}");
-    disk.save_btree_index("company.employee", tree);
-    auto loaded_tree = disk.load_btree_index("company.employee");
-    REQUIRE(loaded_tree.has_value());
-    REQUIRE(loaded_tree->search("1").has_value());
 
     std::vector<IndexMeta> metas = {IndexMeta{"idx_name", "employee", {"name"}, "btree"}};
     disk.save_index_meta("company", metas);

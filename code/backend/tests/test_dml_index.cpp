@@ -349,15 +349,15 @@ TEST_CASE("DML index: numerically equal spellings are found, exactly like the sc
     REQUIRE(changed(ex.execute_sql("UPDATE d SET price = 70 WHERE qty >= 7"), 2, "updated"));
     REQUIRE(hits() == h + 1);
 
-    // a hash index cannot express "equal as a number": such a literal must not use it, but must still be right
+    // a hash index buckets by numeric value, so a numeric literal reaches every spelling through it as well
     REQUIRE(ex.execute_sql("CREATE TABLE hx (id INT PRIMARY KEY, code VARCHAR(10))").is_ok());
     REQUIRE(ex.execute_sql("CREATE INDEX hxc ON hx (code) USING HASH").is_ok());
     REQUIRE(ex.execute_sql("INSERT INTO hx VALUES (1, '07'), (2, '7'), (3, '7.0'), (4, 'q')").is_ok());
     h = hits();
     REQUIRE(changed(ex.execute_sql("DELETE FROM hx WHERE code = 7"), 3, "deleted"));
-    REQUIRE(hits() == h);
+    REQUIRE(hits() == h + 1);
     h = hits();
-    REQUIRE(changed(ex.execute_sql("DELETE FROM hx WHERE code = 'q'"), 1, "deleted")); // exact text: the hash index is fine
+    REQUIRE(changed(ex.execute_sql("DELETE FROM hx WHERE code = 'q'"), 1, "deleted"));
     REQUIRE(hits() == h + 1);
 }
 

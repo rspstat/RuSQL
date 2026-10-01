@@ -165,12 +165,14 @@ Executor::Executor(const std::string& dir, std::size_t buffer_pool_capacity) {
         databases.insert(lower);
     }
 
-    // Tables whose PK B+Tree wasn't found persisted on disk need a from-scratch rebuild;
-    // collected here (instead of rebuilt inline) so Phase 2 below can do it in parallel,
-    // matching the Rust original's into_par_iter() over rebuild-needed tables.
+    // Indexes are derived data and are rebuilt from the table rows at every start. They used to be loaded from
+    // `.idx` files written when the index was CREATEd (never refreshed by later INSERT/UPDATE/DELETE), so after a
+    // checkpoint and a restart an index created before its data was loaded came back EMPTY and every query through
+    // it answered "0 rows". Every table's PK B+Tree is collected here (instead of rebuilt inline) so Phase 2 below
+    // can do it in parallel.
     struct RebuildEntry {
         std::string key;
-        std::string first_col;
+        std::string pk_col;
         const std::vector<Row>* rows;
     };
     std::vector<RebuildEntry> rebuild_needed;
@@ -196,9 +198,6 @@ Executor::Executor(const std::string& dir, std::size_t buffer_pool_capacity) {
         if (auto* ts = catalog.get_table_mut(qualified_key)) ts->auto_increment_counters = auto_inc_counters;
 
         auto rows = disk.load_table(qualified_key);
-        auto loaded_index = disk.load_btree_index(qualified_key);
-        bool needs_rebuild = !loaded_index.has_value();
-        if (loaded_index) indexes.insert({qualified_key, std::move(*loaded_index)});
 
         auto [tit, inserted] = tables.insert({qualified_key, std::move(rows)});
         (void)inserted;
@@ -208,28 +207,25 @@ Executor::Executor(const std::string& dir, std::size_t buffer_pool_capacity) {
         dml_since_vacuum[qualified_key] = 0;
         dml_since_analyze[qualified_key] = 0;
         row_pk_pos[qualified_key] = {};
-        if (needs_rebuild) {
-            std::string first_col = schema.columns.empty() ? std::string() : schema.columns.front().name;
-            rebuild_needed.push_back({qualified_key, std::move(first_col), &tit->second});
+        // keyed by the primary-key column, as at run time (keying it by the table's FIRST column made
+        // `WHERE id = 2` answer "0 rows" after a restart whenever the PK was not the first column)
+        std::string pk_col;
+        for (auto& c : schema.columns) {
+            if (c.primary_key) {
+                pk_col = c.name;
+                break;
+            }
         }
+        if (pk_col.empty() && !schema.columns.empty()) pk_col = schema.columns.front().name;
+        rebuild_needed.push_back({qualified_key, std::move(pk_col), &tit->second});
     }
 
-    // ── Phase 2: PK 인덱스 재빌드 병렬화 (영속화 인덱스가 없는 테이블만) ──────
+    // ── Phase 2: PK 인덱스 재빌드 병렬화 (모든 테이블) ──────
     if (!rebuild_needed.empty()) {
         std::vector<BPlusTree> built(rebuild_needed.size());
         ThreadPool::global().parallel_for(rebuild_needed.size(), [&](std::size_t i) {
             auto& entry = rebuild_needed[i];
-            BPlusTree tree;
-            if (!entry.first_col.empty()) {
-                for (auto& row : *entry.rows) {
-                    auto it = row.find(entry.first_col);
-                    if (it != row.end()) {
-                        nlohmann::json j = row;
-                        tree.insert(it->second, j.dump());
-                    }
-                }
-            }
-            built[i] = std::move(tree);
+            built[i] = build_pk_tree(*entry.rows, entry.pk_col);
         });
         for (std::size_t i = 0; i < rebuild_needed.size(); i++) {
             indexes.insert({rebuild_needed[i].key, std::move(built[i])});
@@ -254,7 +250,7 @@ Executor::Executor(const std::string& dir, std::size_t buffer_pool_capacity) {
     std::unordered_map<std::string, HashIndex> hash_indexes;
     std::unordered_map<std::string, std::pair<std::string, std::string>> hash_index_meta;
 
-    // 보조 인덱스 재빌드 작업 수집: 영속화 인덱스가 없는 것만 Phase 3에서 병렬 처리.
+    // 보조 인덱스 재빌드 작업 수집: Phase 3에서 병렬 처리.
     struct SecIdxWork {
         std::string index_key, meta_name, q_table, column;
         std::vector<Row> rows;
@@ -273,24 +269,20 @@ Executor::Executor(const std::string& dir, std::size_t buffer_pool_capacity) {
             } else if (meta.columns.size() == 1) {
                 const std::string& column = meta.columns.front();
                 std::string key = q_table + "_" + meta.name;
-                if (auto tree = disk.load_btree_index(key)) {
-                    indexes.insert({key, std::move(*tree)});
-                    index_meta.insert({key, {q_table, column}});
-                } else {
-                    std::vector<Row> rows;
-                    if (auto it = tables.find(q_table); it != tables.end()) rows = it->second;
-                    sec_rebuild_work.push_back({std::move(key), meta.name, q_table, column, std::move(rows)});
-                    continue;
-                }
+                std::vector<Row> rows;
+                if (auto it = tables.find(q_table); it != tables.end()) rows = it->second;
+                sec_rebuild_work.push_back({std::move(key), meta.name, q_table, column, std::move(rows)});
+                continue;
             } else {
                 CompositeIndex comp(q_table, meta.columns);
+                if (const TableSchema* sch = catalog.get_table(q_table)) comp.pk_columns = sch->identity_columns();
                 if (auto it = tables.find(q_table); it != tables.end()) comp.rebuild(it->second);
                 composite_indexes.insert({q_table + "_" + meta.name, std::move(comp)});
             }
         }
     }
 
-    // ── Phase 3: 보조 인덱스 재빌드 병렬화 (영속화 인덱스가 없는 것만) ──────
+    // ── Phase 3: 보조 인덱스 재빌드 병렬화 ──────
     if (!sec_rebuild_work.empty()) {
         std::vector<BPlusTree> built(sec_rebuild_work.size());
         ThreadPool::global().parallel_for(sec_rebuild_work.size(), [&](std::size_t i) {

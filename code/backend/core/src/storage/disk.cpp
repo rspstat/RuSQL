@@ -309,26 +309,6 @@ std::vector<std::string> DiskManager::list_tables() const {
     return tables;
 }
 
-void DiskManager::save_btree_index(const std::string& key, const BPlusTree& tree) const {
-    auto [db, name] = parse_key(key);
-    ensure_db_dir(db);
-    std::string path = table_dir(db) + "/" + name + ".idx";
-    nlohmann::json j = tree;
-    write_file(path, j.dump());
-}
-
-std::optional<BPlusTree> DiskManager::load_btree_index(const std::string& key) const {
-    auto [db, name] = parse_key(key);
-    std::string path = table_dir(db) + "/" + name + ".idx";
-    std::string content;
-    if (!read_file(path, content)) return std::nullopt;
-    try {
-        return nlohmann::json::parse(content).get<BPlusTree>();
-    } catch (...) {
-        return std::nullopt;
-    }
-}
-
 void DiskManager::delete_btree_index(const std::string& key) const {
     auto [db, name] = parse_key(key);
     std::error_code ec;

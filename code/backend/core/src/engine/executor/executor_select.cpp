@@ -17,6 +17,7 @@
 #include "engine/join.hpp"
 #include "engine/planner.hpp"
 #include "engine/parallel_util.hpp"
+#include "engine/storage/numeric_key.hpp"
 
 namespace engine {
 
@@ -52,6 +53,29 @@ int cmp_key(const std::string& a, const std::string& b) {
     if (a < b) return -1;
     if (a > b) return 1;
     return 0;
+}
+
+// What WHERE's `=` says: equal as numbers when both sides parse as numbers, else equal as text.
+bool same_value(const std::string& a, const std::string& b) {
+    auto pa = parse_f64(a), pb = parse_f64(b);
+    return pa && pb ? *pa == *pb : a == b;
+}
+
+// Values of the B+Tree entries whose key is `key` the way WHERE sees it: a probe for "7" finds the entries "7", "7.0"
+// and "07" (an exact-text search found only the first). The keys inside the widened range are checked one by one,
+// because the range also reaches the neighbouring doubles.
+std::vector<std::string> equal_entries(const BPlusTree& tree, const std::string& key) {
+    std::vector<std::string> out;
+    auto lo = widen_numeric_bound(key, true), hi = widen_numeric_bound(key, false);
+    if (!lo || !hi) {
+        if (auto v = tree.search(key)) out.push_back(std::move(*v));
+        return out;
+    }
+    for (auto& k : tree.range_keys(*lo, *hi)) {
+        if (!same_value(key, k)) continue;
+        if (auto v = tree.search(k)) out.push_back(std::move(*v));
+    }
+    return out;
 }
 
 // Mirrors Rust's multi-key Ordering-based ORDER BY comparator as a strict-weak-order
@@ -678,149 +702,161 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
             if (id != self) { others_active = true; break; }
         }
     }
+    // Index entries versus the numeric-equivalence rule (numeric_key.hpp). A B+Tree orders "7", "7.0" and "07" by their
+    // text while WHERE treats them as equal, so every range below is widened by one ulp and what it finds is re-checked
+    // against the full condition (an index can only ever be a source of candidates). A bound that cannot be widened
+    // safely (infinity), or a BETWEEN whose two ends disagree about being numbers (that compares as text), makes the
+    // path fall through to the generic scan.
+    auto row_ok = [&](const Row& r) { return is_visible_for_read(r, read_ctx) && matches_condition_with_subquery(s, r, condition); };
+    auto add_bucket = [&](const std::string& json, std::vector<Row>& out) {
+        for (auto& r : nlohmann::json::parse(json).get<std::vector<Row>>()) {
+            if (row_ok(r)) out.push_back(std::move(r));
+        }
+    };
+    // Covering: the query selects only the indexed column, so a row is just that column's STORED value (not the
+    // lookup key -- "7" and "7.00" both answer `price = 7`). Counts the entries whose _xmax is zero.
+    auto add_bucket_covering = [&](const std::string& json, const std::string& col, std::vector<Row>& out) {
+        for (auto& v : nlohmann::json::parse(json)) {
+            auto xit = v.find("_xmax");
+            if (!(xit == v.end() || (xit->is_string() && xit->get<std::string>() == "0"))) continue;
+            auto cit = v.find(col);
+            if (cit == v.end() || !cit->is_string()) continue;
+            Row r;
+            r[col] = cit->get<std::string>();
+            if (matches_condition_with_subquery(s, r, condition)) out.push_back(std::move(r));
+        }
+    };
+    auto add_bucket_any = [&](const std::string& json, const std::string* covering_col, std::vector<Row>& out) {
+        if (covering_col) add_bucket_covering(json, *covering_col, out);
+        else add_bucket(json, out);
+    };
+    auto scan_secondary_range = [&](const BPlusTree& tree, RangeOp op, const std::string& key, const std::string* covering_col,
+                                    std::vector<Row>& out) {
+        bool lower = range_op_is_lower_bound(op);
+        auto bound = widen_numeric_bound(key, lower);
+        if (!bound) return false;
+        for (auto& kv : lower ? tree.scan_from(*bound, true) : tree.scan_to(*bound, true)) add_bucket_any(kv.second, covering_col, out);
+        return true;
+    };
+    auto scan_secondary_between = [&](const BPlusTree& tree, const std::string& a, const std::string& b, const std::string* covering_col,
+                                      std::vector<Row>& out) {
+        double d;
+        if (parse_number_key(a, d) != parse_number_key(b, d)) return false;
+        auto lo = widen_numeric_bound(a, true), hi = widen_numeric_bound(b, false);
+        if (!lo || !hi) return false;
+        for (auto& json : tree.range_search(*lo, *hi)) add_bucket_any(json, covering_col, out);
+        return true;
+    };
+    // A LIKE prefix scan stops at the first key that does not start with the prefix. For a prefix that looks like a
+    // number that is wrong ("12%": numeric order puts 13 before 120), so only prefixes that cannot be read as a
+    // number are scanned.
+    auto like_prefix_scannable = [](const std::string& prefix) {
+        if (prefix.empty()) return false;
+        char c0 = prefix[0];
+        return !(std::isdigit(static_cast<unsigned char>(c0)) || c0 == '-' || c0 == '+' || c0 == '.');
+    };
+
     if (use_fast_index_paths && joins.empty() && !has_agg && !has_win && !for_update && !for_share
         && !limit.has_value() && !offset.has_value() && order_by.empty() && !distinct) {
         auto& access = plan.base.access.data;
+        // The planner calls an access "covering" when the selected columns all sit in SOME index of the table; the
+        // synthetic rows below carry only the one column of the path's own index, so require exactly that.
+        const std::string* covering_col = nullptr;
+        if (plan.base.is_covering) {
+            const std::string* col = nullptr;
+            if (auto* p = std::get_if<AccessPath::SecondaryPoint>(&access)) col = &p->col;
+            else if (auto* r = std::get_if<AccessPath::SecondaryRange>(&access)) col = &r->col;
+            auto only_col = [&](const SelectColumn& c) {
+                if (auto* x = std::get_if<SelectColumn::Column>(&c.data)) return x->name == *col;
+                if (auto* x = std::get_if<SelectColumn::ColumnAlias>(&c.data)) return x->name == *col;
+                return false;
+            };
+            if (col && std::all_of(columns.begin(), columns.end(), only_col)) covering_col = col;
+        }
         if (auto* ap = std::get_if<AccessPath::PkPoint>(&access)) {
-            if (auto it = s.indexes.find(table); it != s.indexes.end()) {
-                if (auto val_json = it->second.search(ap->key)) {
-                    Row row = nlohmann::json::parse(*val_json).get<Row>();
-                    if (is_visible_for_read(row, read_ctx)) {
-                        std::vector<Row> one{std::move(row)};
-                        return format_result(s, std::move(one), columns, table, {});
-                    }
+            auto lo = widen_numeric_bound(ap->key, true), hi = widen_numeric_bound(ap->key, false);
+            if (auto it = s.indexes.find(table); it != s.indexes.end() && lo && hi) {
+                auto found = it->second.range_search(*lo, *hi);
+                std::vector<Row> rows;
+                for (auto& j : found) {
+                    Row r = nlohmann::json::parse(j).get<Row>();
+                    if (row_ok(r)) rows.push_back(std::move(r));
                 }
-                // Not found / not visible. With no other transaction open that is final; with
-                // one open, an older visible version may exist that the index no longer
-                // holds -- fall through to the generic scan (reads every physical version).
-                if (!others_active) return StringResult::Ok("0 rows returned.");
+                // With no other transaction open the index is final. With one open, the latest version of a row may be
+                // invisible to this reader (or the entry gone) while an older visible version exists that the index no
+                // longer holds -- so only the plain "one entry, visible" answer is taken from it; anything else
+                // (including a lookup that matched several spellings of the key) goes to the generic scan.
+                if (!others_active || (found.size() == 1 && rows.size() == 1)) return format_result(s, std::move(rows), columns, table, {});
             }
         } else if (others_active) {
             // Range / secondary / hash / composite index paths silently DROP rows whose latest
             // version is invisible to this reader -- there is no way to tell which. Generic scan.
         } else if (auto* ap = std::get_if<AccessPath::PkBetween>(&access)) {
-            if (auto it = s.indexes.find(table); it != s.indexes.end()) {
+            double d;
+            auto lo = widen_numeric_bound(ap->start, true), hi = widen_numeric_bound(ap->end, false);
+            if (auto it = s.indexes.find(table); it != s.indexes.end() && lo && hi && parse_number_key(ap->start, d) == parse_number_key(ap->end, d)) {
                 std::vector<Row> rows;
-                for (auto& j : it->second.range_search(ap->start, ap->end)) {
+                for (auto& j : it->second.range_search(*lo, *hi)) {
                     Row r = nlohmann::json::parse(j).get<Row>();
-                    if (is_visible_for_read(r, read_ctx)) rows.push_back(std::move(r));
+                    if (row_ok(r)) rows.push_back(std::move(r));
                 }
                 return format_result(s, std::move(rows), columns, table, {});
             }
         } else if (auto* ap = std::get_if<AccessPath::PkRange>(&access)) {
-            if (auto it = s.indexes.find(table); it != s.indexes.end()) {
-                bool inclusive = range_op_inclusive(ap->op);
-                auto pairs = range_op_is_lower_bound(ap->op) ? it->second.scan_from(ap->key, inclusive) : it->second.scan_to(ap->key, inclusive);
+            bool lower = range_op_is_lower_bound(ap->op);
+            auto bound = widen_numeric_bound(ap->key, lower);
+            if (auto it = s.indexes.find(table); it != s.indexes.end() && bound) {
                 std::vector<Row> rows;
-                for (auto& [k, j] : pairs) {
-                    Row r = nlohmann::json::parse(j).get<Row>();
-                    if (is_visible_for_read(r, read_ctx)) rows.push_back(std::move(r));
+                for (auto& kv : lower ? it->second.scan_from(*bound, true) : it->second.scan_to(*bound, true)) {
+                    Row r = nlohmann::json::parse(kv.second).get<Row>();
+                    if (row_ok(r)) rows.push_back(std::move(r));
                 }
                 return format_result(s, std::move(rows), columns, table, {});
             }
         } else if (auto* ap = std::get_if<AccessPath::HashPoint>(&access)) {
+            // HashIndex buckets by numeric value, so "7", "7.0" and "07" are one bucket: exact.
             if (auto it = s.hash_indexes.find(ap->index_key); it != s.hash_indexes.end()) {
                 std::vector<Row> rows;
                 for (auto& r : it->second.get(ap->key)) {
-                    if (is_visible_for_read(r, read_ctx) && matches_condition_with_subquery(s, r, condition)) rows.push_back(r);
+                    if (row_ok(r)) rows.push_back(r);
                 }
                 return format_result(s, std::move(rows), columns, table, {});
             }
         } else if (auto* ap = std::get_if<AccessPath::SecondaryPoint>(&access)) {
             if (auto it = s.indexes.find(ap->index_key); it != s.indexes.end()) {
-                if (auto json = it->second.search(ap->key)) {
-                    if (plan.base.is_covering) {
-                        auto arr = nlohmann::json::parse(*json);
-                        std::size_t count = 0;
-                        for (auto& v : arr) {
-                            auto xit = v.find("_xmax");
-                            bool zero = xit == v.end() || (xit->is_string() && xit->get<std::string>() == "0");
-                            if (zero) count++;
-                        }
-                        std::vector<Row> synthetic;
-                        synthetic.reserve(count);
-                        for (std::size_t i = 0; i < count; i++) {
-                            Row r;
-                            r[ap->col] = ap->key;
-                            synthetic.push_back(std::move(r));
-                        }
-                        return format_result(s, std::move(synthetic), columns, table, {});
-                    }
-                    std::vector<Row> rows;
-                    for (auto& r : nlohmann::json::parse(*json).get<std::vector<Row>>()) {
-                        if (is_visible_for_read(r, read_ctx) && matches_condition_with_subquery(s, r, condition)) rows.push_back(r);
-                    }
-                    return format_result(s, std::move(rows), columns, table, {});
-                }
-                return StringResult::Ok("0 rows returned.");
+                std::vector<Row> rows;
+                if (scan_secondary_between(it->second, ap->key, ap->key, covering_col, rows)) return format_result(s, std::move(rows), columns, table, {});
             }
         } else if (auto* ap = std::get_if<AccessPath::SecondaryRange>(&access)) {
             if (auto it = s.indexes.find(ap->index_key); it != s.indexes.end()) {
-                bool inclusive = range_op_inclusive(ap->op);
-                auto pairs = range_op_is_lower_bound(ap->op) ? it->second.scan_from(ap->key, inclusive) : it->second.scan_to(ap->key, inclusive);
-                if (plan.base.is_covering) {
-                    std::vector<Row> synthetic;
-                    for (auto& [k, json] : pairs) {
-                        auto arr = nlohmann::json::parse(json);
-                        std::size_t count = 0;
-                        for (auto& v : arr) {
-                            auto xit = v.find("_xmax");
-                            bool zero = xit == v.end() || (xit->is_string() && xit->get<std::string>() == "0");
-                            if (zero) count++;
-                        }
-                        for (std::size_t i = 0; i < count; i++) {
-                            Row r;
-                            r[ap->col] = k;
-                            synthetic.push_back(std::move(r));
-                        }
-                    }
-                    return format_result(s, std::move(synthetic), columns, table, {});
-                }
                 std::vector<Row> rows;
-                for (auto& [k, json] : pairs) {
-                    for (auto& r : nlohmann::json::parse(json).get<std::vector<Row>>()) {
-                        if (is_visible_for_read(r, read_ctx) && matches_condition_with_subquery(s, r, condition)) rows.push_back(r);
-                    }
-                }
-                return format_result(s, std::move(rows), columns, table, {});
+                if (scan_secondary_range(it->second, ap->op, ap->key, covering_col, rows)) return format_result(s, std::move(rows), columns, table, {});
             }
         } else if (auto* ap = std::get_if<AccessPath::SecondaryBetween>(&access)) {
             if (auto it = s.indexes.find(ap->index_key); it != s.indexes.end()) {
                 std::vector<Row> rows;
-                for (auto& json : it->second.range_search(ap->start, ap->end)) {
-                    for (auto& r : nlohmann::json::parse(json).get<std::vector<Row>>()) {
-                        if (is_visible_for_read(r, read_ctx) && matches_condition_with_subquery(s, r, condition)) rows.push_back(r);
+                if (scan_secondary_between(it->second, ap->start, ap->end, nullptr, rows)) return format_result(s, std::move(rows), columns, table, {});
+            }
+        } else if (std::holds_alternative<AccessPath::CompositeIndexPath>(access) || std::holds_alternative<AccessPath::CompositeIndexPrefix>(access)) {
+            const std::string& name = std::holds_alternative<AccessPath::CompositeIndexPath>(access)
+                                          ? std::get<AccessPath::CompositeIndexPath>(access).index_name
+                                          : std::get<AccessPath::CompositeIndexPrefix>(access).index_name;
+            // The index fixes a run of leading columns; everything else in the condition is checked on the rows.
+            if (auto it = s.composite_indexes.find(name); it != s.composite_indexes.end() && condition) {
+                if (auto found = it->second.lookup(planner.constant_eq_map(table, *condition))) {
+                    std::vector<Row> rows;
+                    for (auto& r : *found) {
+                        if (row_ok(r)) rows.push_back(std::move(r));
                     }
+                    return format_result(s, std::move(rows), columns, table, {});
                 }
-                return format_result(s, std::move(rows), columns, table, {});
-            }
-        } else if (auto* ap = std::get_if<AccessPath::CompositeIndexPath>(&access)) {
-            auto eq_map = collect_eq_map(*condition);
-            if (auto val_json = s.composite_indexes.at(ap->index_name).search_from_eq_map(eq_map)) {
-                Row row = nlohmann::json::parse(*val_json).get<Row>();
-                if (is_visible_for_read(row, read_ctx)) {
-                    std::vector<Row> one{std::move(row)};
-                    return format_result(s, std::move(one), columns, table, {});
-                }
-            }
-            return StringResult::Ok("0 rows returned.");
-        } else if (auto* ap = std::get_if<AccessPath::CompositeIndexPrefix>(&access)) {
-            if (auto it = s.composite_indexes.find(ap->index_name); it != s.composite_indexes.end()) {
-                std::vector<Row> rows;
-                for (auto& j : it->second.prefix_scan(ap->prefix)) {
-                    Row r = nlohmann::json::parse(j).get<Row>();
-                    if (is_visible_for_read(r, read_ctx) && matches_condition_with_subquery(s, r, condition)) rows.push_back(std::move(r));
-                }
-                return format_result(s, std::move(rows), columns, table, {});
             }
         } else if (auto* ap = std::get_if<AccessPath::SecondaryLikePrefix>(&access)) {
-            if (auto it = s.indexes.find(ap->index_key); it != s.indexes.end()) {
+            if (auto it = s.indexes.find(ap->index_key); it != s.indexes.end() && like_prefix_scannable(ap->prefix)) {
                 std::vector<Row> rows;
-                for (auto& [k, j] : it->second.scan_from(ap->prefix, true)) {
-                    if (k.compare(0, ap->prefix.size(), ap->prefix) != 0) break;
-                    for (auto& r : nlohmann::json::parse(j).get<std::vector<Row>>()) {
-                        if (is_visible_for_read(r, read_ctx) && matches_condition_with_subquery(s, r, condition)) rows.push_back(r);
-                    }
+                for (auto& kv : it->second.scan_from(ap->prefix, true)) {
+                    if (kv.first.compare(0, ap->prefix.size(), ap->prefix) != 0) break;
+                    add_bucket(kv.second, rows);
                 }
                 return format_result(s, std::move(rows), columns, table, {});
             }
@@ -836,31 +872,38 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
                     pk_col = it->second[0].begin()->first;
                 }
             }
+            // Each sub-path yields a SUPERSET of the pks that can match (numeric widening); the final pass over the
+            // table re-checks the whole condition on the real rows.
+            bool usable = true;
             std::vector<std::unordered_set<std::string>> pk_sets;
             for (auto& sub_path : ap->paths) {
                 std::unordered_set<std::string> pks;
                 if (auto* sp = std::get_if<AccessPath::SecondaryPoint>(&sub_path.data)) {
-                    if (auto it = s.indexes.find(sp->index_key); it != s.indexes.end()) {
-                        if (auto json = it->second.search(sp->key)) {
-                            for (auto& r : nlohmann::json::parse(*json).get<std::vector<Row>>()) {
-                                if (is_visible_for_read(r, read_ctx)) {
-                                    if (const std::string* v = get_col(r, pk_col)) pks.insert(*v);
-                                }
-                            }
-                        }
-                    }
-                } else if (auto* hp = std::get_if<AccessPath::HashPoint>(&sub_path.data)) {
-                    if (auto it = s.hash_indexes.find(hp->index_key); it != s.hash_indexes.end()) {
-                        for (auto& r : it->second.get(hp->key)) {
+                    auto it = s.indexes.find(sp->index_key);
+                    auto lo = widen_numeric_bound(sp->key, true), hi = widen_numeric_bound(sp->key, false);
+                    if (it == s.indexes.end() || !lo || !hi) { usable = false; break; }
+                    for (auto& json : it->second.range_search(*lo, *hi)) {
+                        for (auto& r : nlohmann::json::parse(json).get<std::vector<Row>>()) {
                             if (is_visible_for_read(r, read_ctx)) {
                                 if (const std::string* v = get_col(r, pk_col)) pks.insert(*v);
                             }
                         }
                     }
+                } else if (auto* hp = std::get_if<AccessPath::HashPoint>(&sub_path.data)) {
+                    auto it = s.hash_indexes.find(hp->index_key);
+                    if (it == s.hash_indexes.end()) { usable = false; break; }
+                    for (auto& r : it->second.get(hp->key)) {
+                        if (is_visible_for_read(r, read_ctx)) {
+                            if (const std::string* v = get_col(r, pk_col)) pks.insert(*v);
+                        }
+                    }
+                } else {
+                    usable = false;
+                    break;
                 }
                 pk_sets.push_back(std::move(pks));
             }
-            if (!pk_sets.empty()) {
+            if (usable && !pk_sets.empty()) {
                 std::unordered_set<std::string> intersection = pk_sets[0];
                 for (std::size_t i = 1; i < pk_sets.size(); i++) {
                     std::unordered_set<std::string> next;
@@ -882,7 +925,7 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
     }
 
     // Top-K 인덱스 경로: ORDER BY 1컬럼 + LIMIT + OFFSET 없음 + 단순 SELECT
-    if (use_fast_index_paths && joins.empty() && !has_agg && !has_win && !for_update && !for_share && !distinct
+    if (use_fast_index_paths && !others_active && joins.empty() && !has_agg && !has_win && !for_update && !for_share && !distinct
         && !offset.has_value() && order_by.size() == 1 && limit.has_value()) {
         std::size_t lim = *limit;
         const OrderBy& ob = order_by[0];
@@ -890,33 +933,15 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
         std::vector<Row> topk_rows;
         bool matched = false;
         if (auto* ap = std::get_if<AccessPath::SecondaryRange>(&access); ap && ob.column == ap->col) {
-            if (auto it = s.indexes.find(ap->index_key); it != s.indexes.end()) {
-                matched = true;
-                bool inclusive = range_op_inclusive(ap->op);
-                auto pairs = range_op_is_lower_bound(ap->op) ? it->second.scan_from(ap->key, inclusive) : it->second.scan_to(ap->key, inclusive);
-                for (auto& [k, j] : pairs) {
-                    for (auto& r : nlohmann::json::parse(j).get<std::vector<Row>>()) {
-                        if (is_visible_for_read(r, read_ctx) && matches_condition_with_subquery(s, r, condition)) topk_rows.push_back(r);
-                    }
-                }
-            }
+            if (auto it = s.indexes.find(ap->index_key); it != s.indexes.end()) matched = scan_secondary_range(it->second, ap->op, ap->key, nullptr, topk_rows);
         } else if (auto* ap = std::get_if<AccessPath::SecondaryBetween>(&access); ap && ob.column == ap->col) {
-            if (auto it = s.indexes.find(ap->index_key); it != s.indexes.end()) {
-                matched = true;
-                for (auto& j : it->second.range_search(ap->start, ap->end)) {
-                    for (auto& r : nlohmann::json::parse(j).get<std::vector<Row>>()) {
-                        if (is_visible_for_read(r, read_ctx) && matches_condition_with_subquery(s, r, condition)) topk_rows.push_back(r);
-                    }
-                }
-            }
+            if (auto it = s.indexes.find(ap->index_key); it != s.indexes.end()) matched = scan_secondary_between(it->second, ap->start, ap->end, nullptr, topk_rows);
         } else if (auto* ap = std::get_if<AccessPath::SecondaryLikePrefix>(&access); ap && ob.column == ap->col) {
-            if (auto it = s.indexes.find(ap->index_key); it != s.indexes.end()) {
+            if (auto it = s.indexes.find(ap->index_key); it != s.indexes.end() && like_prefix_scannable(ap->prefix)) {
                 matched = true;
-                for (auto& [k, j] : it->second.scan_from(ap->prefix, true)) {
-                    if (k.compare(0, ap->prefix.size(), ap->prefix) != 0) break;
-                    for (auto& r : nlohmann::json::parse(j).get<std::vector<Row>>()) {
-                        if (is_visible_for_read(r, read_ctx) && matches_condition_with_subquery(s, r, condition)) topk_rows.push_back(r);
-                    }
+                for (auto& kv : it->second.scan_from(ap->prefix, true)) {
+                    if (kv.first.compare(0, ap->prefix.size(), ap->prefix) != 0) break;
+                    add_bucket(kv.second, topk_rows);
                 }
             }
         }
@@ -1052,15 +1077,15 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
                 // Index Nested Loop: probe right table's PK B+Tree per left row.
                 // Only applies outside transactions (session_rows path already loaded above).
                 if (txn.is_active()) {
-                    current = hash_join(current, right_rows, j.join_type, j.table, a->probe_col, a->probe_col, right_schema_cols);
+                    current = hash_join(current, right_rows, j.join_type, j.table, a->probe_col, a->right_pk_col, right_schema_cols);
                 } else if (auto rit = s.indexes.find(j.table); rit != s.indexes.end()) {
                     std::vector<Row> out;
                     out.reserve(current.size());
                     for (auto& left_row : current) {
                         const std::string* key = get_col(left_row, a->probe_col);
                         if (!key || key->empty() || *key == "NULL") continue;
-                        if (auto val_json = rit->second.search(*key)) {
-                            Row right_row = nlohmann::json::parse(*val_json).get<Row>();
+                        for (auto& val_json : equal_entries(rit->second, *key)) {
+                            Row right_row = nlohmann::json::parse(val_json).get<Row>();
                             if (is_visible_for_read(right_row, read_ctx)) {
                                 Row merged = left_row;
                                 merge_right(merged, right_row, j.table);
@@ -1070,7 +1095,7 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
                     }
                     current = std::move(out);
                 } else {
-                    current = hash_join(current, right_rows, j.join_type, j.table, a->probe_col, a->probe_col, right_schema_cols);
+                    current = hash_join(current, right_rows, j.join_type, j.table, a->probe_col, a->right_pk_col, right_schema_cols);
                 }
             } else if (algo && std::get_if<JoinAlgo::ReverseIndexNL>(algo)) {
                 auto* a = std::get_if<JoinAlgo::ReverseIndexNL>(algo);
@@ -1082,7 +1107,7 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
                 // no single backing index. Falls back to hash_join whenever a transaction is
                 // active or the expected index is missing, exactly like IndexNL does.
                 auto reverse_fallback = [&] {
-                    current = hash_join(current, right_rows, j.join_type, j.table, a->right_extract_col, a->right_extract_col, right_schema_cols);
+                    current = hash_join(current, right_rows, j.join_type, j.table, a->left_col, a->right_extract_col, right_schema_cols);
                 };
                 if (txn.is_active()) {
                     reverse_fallback();
@@ -1110,19 +1135,19 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
                     for (auto& right_row : right_rows) {
                         const std::string* key = get_col(right_row, a->right_extract_col);
                         if (!key || key->empty() || *key == "NULL") continue;
-                        if (auto val_json = lit->second.search(*key)) {
+                        for (auto& val_json : equal_entries(lit->second, *key)) {
                             // A secondary B+Tree index stores a JSON ARRAY of rows per key
                             // (the column need not be unique); a PK index stores exactly one
                             // Row object per key -- must parse each shape correctly.
                             if (a->left_is_secondary_btree) {
-                                for (auto& left_row : nlohmann::json::parse(*val_json).get<std::vector<Row>>()) {
+                                for (auto& left_row : nlohmann::json::parse(val_json).get<std::vector<Row>>()) {
                                     if (!is_visible_for_read(left_row, read_ctx)) continue;
                                     Row merged = left_row;
                                     merge_right(merged, right_row, j.table);
                                     out.push_back(std::move(merged));
                                 }
                             } else {
-                                Row left_row = nlohmann::json::parse(*val_json).get<Row>();
+                                Row left_row = nlohmann::json::parse(val_json).get<Row>();
                                 if (is_visible_for_read(left_row, read_ctx)) {
                                     Row merged = left_row;
                                     merge_right(merged, right_row, j.table);

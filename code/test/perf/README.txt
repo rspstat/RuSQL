@@ -1,123 +1,59 @@
 ================================================================
-  RuSQL v2.3.0 vs MySQL — 성능 벤치마크 가이드
+  RuSQL 성능 벤치마크 가이드
 ================================================================
 
 [ 폴더 구조 ]
 
   perf/
-  ├── bench.py          측정 스크립트 (결과 → result.json)
-  ├── chart.py          차트 생성 스크립트 (result.json → charts/*.png)
+  ├── bench.py          RuSQL 측정 스크립트 (결과 → result.json, UI의 Benchmark 패널이 읽음)
+  ├── bench_mysql.py    같은 4개 항목을 MySQL에서 측정 (참고용, 결과 → result_mysql.json)
+  ├── graph.py          발표용 그래프 (result.json → benchmark_result.png)
+  ├── chart.py          예전 형식(RuSQL vs MySQL 5개 항목)용 차트 스크립트 -- 현재 result.json과는 형식이 다름
   ├── requirements.txt  Python 의존 패키지
   └── README.txt        이 파일
 
-  실행 후 생성:
-  ├── result.json       측정 원본 데이터
-  └── charts/
-      ├── 01_insert_tps.png
-      ├── 02_select_eq.png
-      ├── 03_select_range.png
-      ├── 04_parallel.png
-      └── 05_concurrent.png
+  목표는 MySQL을 따라잡는 것이 아니라 RuSQL 자신의 최적화를 전후로 비교하는 것이다.
+  MySQL 수치는 맥락을 잡기 위한 참고값이다.
 
 ----------------------------------------------------------------
-[ 사전 준비 ]
+[ 측정 항목 (bench.py) ]
 
-1. rustdb-server 실행 — 아래 중 하나
-     (a) UI: Server Manager → Start  ← 권장
-     (b) 터미널: cargo run -p rustdb-server  (code/ 디렉터리)
-
-2. MySQL 실행 확인
-     mysql -u root -e "SELECT VERSION();"
-
-3. Python 패키지 설치
-     pip install -r requirements.txt
-
-----------------------------------------------------------------
-[ 설정 변경 (bench.py 상단) ]
-
-  RUSTDB_HOST / RUSTDB_PORT  기본: 127.0.0.1 / 7878
-  RUSTDB_USER / RUSTDB_PASS  기본: root / root
-
-  MYSQL_HOST / MYSQL_PORT    기본: 127.0.0.1 / 3306
-  MYSQL_USER / MYSQL_PASS    기본: root / ""  ← 비밀번호 있으면 수정
-  MYSQL_DB                   기본: bench_db   (자동 생성됨)
-
-  N_INSERT   INSERT TPS 측정 행 수  기본: 10,000
-  N_SELECT   SELECT 반복 횟수       기본: 1,000
+  1. 단건 INSERT/DELETE 10,000건 (autocommit, PK 등호 DELETE)
+  2. Bulk INSERT/DELETE 100,000건 (500행 묶음, DELETE는 PK 범위)
+  3. 포인트 조회 (5,000행, 300회): 인덱스 없음 vs 보조 B+Tree 인덱스
+  4. 트랜잭션: AutoCommit 1,000건 / 건당 BEGIN·INSERT·COMMIT 1,000건 /
+     하나의 트랜잭션에 INSERT 1,000건
 
 ----------------------------------------------------------------
 [ 실행 ]
 
-  # code/test/perf/ 디렉터리에서
-  python bench.py     # 측정 실행 (약 3~10분 소요)
-  python chart.py     # 차트 PNG 생성
+  1. RuSQL 서버 실행 (7878 포트)
+       code/build/backend/server/Release/engine_server.exe --port 7878 --no-mysql --data-dir <빈 디렉터리>
+     (UI의 Server Manager에서 시작해도 됨)
+
+  2. code/test/perf/ 에서
+       python bench.py        # 약 1분, result.json 생성
+       python graph.py        # benchmark_result.png 생성 (MPLBACKEND=Agg 로 창 없이)
+
+  같은 PC에서도 백그라운드 작업(실시간 검사, 빌드 등)에 따라 값이 크게 흔들린다(건당 트랜잭션이 같은 빌드에서
+  7~11초). 전후 비교는 같은 상태에서 번갈아 여러 번(5회 이상) 재고 중앙값을 쓴다.
 
 ----------------------------------------------------------------
-[ 측정 항목 ]
+[ MySQL 참고 측정 (bench_mysql.py) ]
 
-  1. INSERT TPS
-     - 1만 행 단건 INSERT (auto-commit)
-     - RuSQL vs MySQL TPS 비교
+  RuSQL의 autocommit은 문장마다 redo 로그를 fsync(내구성)하므로, MySQL도 같은 내구성 조건으로 돌린다:
+  InnoDB 기본값 innodb_flush_log_at_trx_commit=1 (커밋마다 redo fsync), 바이너리 로그는 끈다(--skip-log-bin;
+  켜 두면 커밋마다 fsync가 한 번 더 생겨 RuSQL보다 불리해진다).
 
-  2. SELECT 등호 latency (5,000 rows)
-     - SeqScan  : 인덱스 없이 full scan
-     - B-tree   : CREATE INDEX ... (일반 인덱스)
-     - Hash     : CREATE INDEX ... USING HASH (RuSQL 전용, 등호 O(1))
-     - MySQL Hash는 Memory 엔진 전용이므로 B-tree 값으로 표시됨
+    mysqld --no-defaults --datadir=<빈 디렉터리> --port=3307 --mysqlx=OFF --skip-log-bin --innodb-flush-log-at-trx-commit=1
+    python bench_mysql.py 3307           # PyMySQL 필요, result_mysql.json 생성
 
-  3. SELECT 범위 latency (5,000 rows)
-     - BETWEEN 조건, 인덱스 없음 vs B-tree 있음
-     - RuSQL vs MySQL 비교
-
-  4. 병렬 스케일링 (RuSQL only)
-     - RUSTDB_PARALLEL=0 (순차) vs RUSTDB_PARALLEL=1 (병렬)
-     - GROUP BY 집계 (COUNT / SUM / AVG) 처리 시간 비교
-     - speedup 배수 출력
-
-  5. 동시 접속 SELECT TPS
-     - 1 / 4 / 8 스레드 동시 접속
-     - 스레드당 500 쿼리 (PK 등호 SELECT)
-     - RuSQL vs MySQL 총 TPS 비교
-
-----------------------------------------------------------------
-[ 출력 예시 ]
-
-  ============================================================
-    RuSQL v2.3.0 vs MySQL — Performance Benchmark
-  ============================================================
-
-  [1/5] INSERT TPS (10,000 rows, auto-commit) ...
-    INSERT TPS                               RuSQL:    3,200.0 TPS   MySQL:    1,800.0 TPS
-
-  [2/5] SELECT 등호 latency (5,000 rows) ...
-    SeqScan                                  RuSQL:        2.5 ms/query   MySQL:        0.3 ms/query
-    B-tree Index                             RuSQL:        0.8 ms/query   MySQL:        0.1 ms/query
-    Hash Index                               RuSQL:        0.4 ms/query   MySQL:        0.1 ms/query
-
-  ...
-
-  결과 저장: result.json
-  차트 생성: python chart.py
-
-----------------------------------------------------------------
-[ 실행 환경 기록 — 측정 후 채워주세요 ]
-
-  OS      : Windows 11 Pro
-  CPU     :
-  RAM     :
-  Storage :                    (SSD / HDD)
-  RuSQL  : v2.3.0
-  MySQL   : 8.0.x
-  Python  : 3.x
+  (처음이면 mysqld --no-defaults --initialize-insecure --datadir=<빈 디렉터리> 로 데이터 디렉터리를 먼저 만든다.)
 
 ----------------------------------------------------------------
 [ 주의 사항 ]
 
-  - bench.py 실행 중 bench_db 데이터베이스를 생성/삭제합니다.
-    기존에 bench_db 가 있다면 데이터가 초기화될 수 있습니다.
-  - rustdb-server 가 실행 중이지 않으면 연결 오류가 발생합니다.
-  - 병렬 스케일링 측정은 RuSQL 단독 측정이며 MySQL과 비교하지 않습니다.
-  - 측정 환경 (CPU 코어 수, RAM, Storage 종류) 에 따라 수치가 달라집니다.
-    result.json 에 측정값이 저장되므로 환경 정보를 별도 기록해두세요.
-
-================================================================
+  - bench.py / bench_mysql.py 는 bench_db 데이터베이스를 만들고 지운다. 기존 bench_db 가 있으면 사라진다.
+  - 서버가 실행 중이지 않으면 연결 오류가 난다.
+  - 수치는 CPU, 디스크(fsync 지연), 백신 실시간 검사에 크게 좌우된다. 최신 측정값과 해석은
+    docs/mds/DATE.md 의 10월 2일 항목을 참고.

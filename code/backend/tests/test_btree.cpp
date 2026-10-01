@@ -5,7 +5,6 @@
 
 #include "catch.hpp"
 #include "engine/storage/btree.hpp"
-#include "engine/storage/btree_json.hpp"
 
 using namespace engine;
 
@@ -273,30 +272,6 @@ TEST_CASE("BPlusTree deep-copies on copy construction", "[btree]") {
     copy.insert("999", "new");
     REQUIRE(copy.search("999").has_value());
     REQUIRE(!tree.search("999").has_value());
-}
-
-TEST_CASE("BPlusTree JSON round trip preserves structure", "[btree][json]") {
-    BPlusTree tree;
-    for (int i = 1; i <= 50; i++) tree.insert(std::to_string(i), "v" + std::to_string(i));
-
-    nlohmann::json j = tree;
-    std::string serialized = j.dump();
-
-    BPlusTree restored = nlohmann::json::parse(serialized).get<BPlusTree>();
-    for (int i = 1; i <= 50; i++) {
-        auto v = restored.search(std::to_string(i));
-        REQUIRE(v.has_value());
-        REQUIRE(*v == "v" + std::to_string(i));
-    }
-    REQUIRE(restored.len() == 50);
-}
-
-TEST_CASE("empty BPlusTree JSON round trip", "[btree][json]") {
-    BPlusTree tree;
-    nlohmann::json j = tree;
-    REQUIRE(j.at("root").is_null());
-    BPlusTree restored = j.get<BPlusTree>();
-    REQUIRE(restored.is_empty());
 }
 
 // Row-level-concurrency Stage 2: BPlusTree gained its own internal mutex_ (one per
