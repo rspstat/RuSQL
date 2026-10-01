@@ -111,4 +111,4 @@ XA 분산 트랜잭션과 샤딩은 여전히 스코프 밖(단일 프로세스 
 
 **남는 것**: `code/AI/`(데이터 생성 코드·데이터셋·Colab 노트북)는 **탐색 실험의 기록으로만** 저장소에 보존한다. 제품 어디에서도 참조하지 않으며, 지울지는 별도 결정 사항이다.
 
-**문서·UI 반영 상태**: `DATE.md`(10월 1일 항목), `README.md`(AI Integration), `FUNCTIONS.md`, `DIFF.md`의 AI 연동 행, 앱의 Diagram 페이지(AI 패널을 "Claude via MCP"로 교체)에 반영. 캡스톤 산출물 D01~D08은 이미 AI 연동을 MCP 기반으로만 기술해서 변경이 필요 없었다. **열린 항목**: 사이드바의 빈 "AI" 탭(`AiView.tsx`)은 원래 사설 모델 UI 자리였으므로 이제 용도가 없다 — 제거/용도 변경 여부 미정.
+**문서·UI 반영 상태**: `DATE.md`(10월 1일 항목), `README.md`(AI Integration), `FUNCTIONS.md`, `DIFF.md`의 AI 연동 행, 앱의 Diagram 페이지(AI 패널을 "Claude via MCP"로 교체)에 반영. 캡스톤 산출물 D01~D08은 이미 AI 연동을 MCP 기반으로만 기술해서 변경이 필요 없었다. 사이드바의 빈 "AI" 탭(`AiView.tsx`)은 원래 사설 모델 UI 자리였으므로 **같은 날(2026-10-01) 제거했다**(활동 바 아이콘·`AiView.tsx`·`.ai-view` CSS). **열린 항목**: `code/AI/` 폴더를 보존할지 삭제할지는 사용자가 나중에 정하기로 함(미정).
