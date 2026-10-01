@@ -65,6 +65,22 @@ bool read_all_bytes(const std::string& path, std::vector<std::uint8_t>& out) {
 }
 } // namespace
 
+// The tracking record of `contents` for the file at `path` (reset when a different file is in use).
+static TxnIoShared::LogContents& tracked_contents(TxnIoShared::LogContents& contents, const std::string& path) {
+    if (contents.path != path) {
+        contents.path = path;
+        contents.known = false;
+        contents.txns.clear();
+    }
+    return contents;
+}
+
+static std::unordered_set<std::uint64_t> txn_ids_of(const std::vector<WalRecord>& records) {
+    std::unordered_set<std::uint64_t> ids;
+    for (auto& r : records) ids.insert(r.txn_id);
+    return ids;
+}
+
 static bool truncate_to_zero(std::FILE* fp) {
     if (std::fflush(fp) != 0) return false;
 #ifdef _WIN32
@@ -184,18 +200,22 @@ std::optional<WalRecord> WalManager::decode(const std::vector<std::uint8_t>& buf
 // `.expect("WAL 기록 실패")`/`.expect("WAL fsync 실패")` panics -- a silently-swallowed
 // write/flush/sync failure here would let a COMMIT report success without the record
 // actually being durable, defeating the entire point of this function.
-void WalManager::write_encoded_locked(const std::vector<std::uint8_t>& encoded, bool sync) const {
+void WalManager::write_encoded_locked(const std::vector<std::uint8_t>& encoded, bool sync, std::uint64_t txn_id) const {
+    auto& contents = tracked_contents(io_->wal_contents, path_);
     std::FILE* fp = io_->wal_append_handle_locked(path_);
     if (!fp) throw std::runtime_error("WAL 파일 열기 실패");
     std::size_t written = std::fwrite(encoded.data(), 1, encoded.size(), fp);
     if (written != encoded.size()) {
+        contents.known = false; // part of a record may be in the file
         io_->close_wal_handle_locked();
         throw std::runtime_error("WAL 기록 실패");
     }
     if (std::fflush(fp) != 0) {
+        contents.known = false;
         io_->close_wal_handle_locked();
         throw std::runtime_error("WAL 기록 실패");
     }
+    if (contents.known) contents.txns.insert(txn_id);
     if (sync) {
 #ifdef _WIN32
         bool ok = _commit(_fileno(fp)) == 0;
@@ -211,7 +231,7 @@ void WalManager::write_encoded_locked(const std::vector<std::uint8_t>& encoded, 
 
 void WalManager::append(const WalRecord& record) {
     std::lock_guard<std::mutex> g(io_->wal_lock);
-    write_encoded_locked(encode(record), false);
+    write_encoded_locked(encode(record), false, record.txn_id);
 }
 
 void WalManager::log_insert(std::uint64_t txn_id, const std::string& table, const std::string& key, const std::string& data) {
@@ -229,13 +249,13 @@ void WalManager::log_delete(std::uint64_t txn_id, const std::string& table, cons
 void WalManager::log_commit(std::uint64_t txn_id) {
     WalRecord record{WalOp::Commit, txn_id, "", "", ""};
     std::lock_guard<std::mutex> g(io_->wal_lock);
-    write_encoded_locked(encode(record), true);
+    write_encoded_locked(encode(record), true, txn_id);
 }
 
 void WalManager::log_commit_no_sync(std::uint64_t txn_id) {
     WalRecord record{WalOp::Commit, txn_id, "", "", ""};
     std::lock_guard<std::mutex> g(io_->wal_lock);
-    write_encoded_locked(encode(record), false);
+    write_encoded_locked(encode(record), false, txn_id);
 }
 
 void WalManager::log_rollback(std::uint64_t txn_id) {
@@ -245,7 +265,7 @@ void WalManager::log_rollback(std::uint64_t txn_id) {
 void WalManager::log_checkpoint() {
     WalRecord record{WalOp::Checkpoint, 0, "", "", ""};
     std::lock_guard<std::mutex> g(io_->wal_lock);
-    write_encoded_locked(encode(record), true);
+    write_encoded_locked(encode(record), true, 0);
 }
 
 std::vector<WalRecord> WalManager::read_all_locked() const {
@@ -267,6 +287,9 @@ void WalManager::clear_locked() const {
     io_->close_wal_handle_locked(); // Windows can't delete a file that still has an open handle
     std::error_code ec;
     fs::remove(path_, ec);
+    auto& contents = tracked_contents(io_->wal_contents, path_);
+    contents.known = true; // the file is gone: nothing in it
+    contents.txns.clear();
 }
 
 void WalManager::clear() {
@@ -276,6 +299,18 @@ void WalManager::clear() {
 
 void WalManager::remove_txn(std::uint64_t txn_id) {
     std::lock_guard<std::mutex> g(io_->wal_lock);
+    auto& contents = tracked_contents(io_->wal_contents, path_);
+    if (contents.known) {
+        if (!contents.txns.count(txn_id)) return; // none of its records are in the file
+        if (contents.txns.size() == 1) {
+            // It is alone in the file: empty it in place -- no need to read anything (see TxnIoShared::LogContents).
+            std::FILE* fp = io_->wal_append_handle_locked(path_);
+            if (fp && truncate_to_zero(fp)) {
+                contents.txns.clear();
+                return;
+            }
+        }
+    }
     auto all = read_all_locked();
     std::vector<WalRecord> remaining;
     for (auto& r : all) {
@@ -287,7 +322,11 @@ void WalManager::remove_txn(std::uint64_t txn_id) {
         // (and an antivirus scan of the new file) per commit.
         if (fs::exists(path_)) {
             std::FILE* fp = io_->wal_append_handle_locked(path_);
-            if (fp && truncate_to_zero(fp)) return;
+            if (fp && truncate_to_zero(fp)) {
+                contents.known = true;
+                contents.txns.clear();
+                return;
+            }
         }
         clear_locked();
         return;
@@ -299,6 +338,8 @@ void WalManager::remove_txn(std::uint64_t txn_id) {
     }
     io_->close_wal_handle_locked(); // can't rename over a file with an open handle on Windows
     write_bytes_atomic(path_, buf.data(), buf.size());
+    contents.known = true;
+    contents.txns = txn_ids_of(remaining);
 }
 
 std::uint64_t WalManager::file_size() const {
@@ -330,6 +371,9 @@ void WalManager::truncate_to_last_checkpoint() {
     }
     io_->close_wal_handle_locked(); // can't rename over a file with an open handle on Windows
     write_bytes_atomic(path_, buf.data(), buf.size());
+    auto& contents = tracked_contents(io_->wal_contents, path_);
+    contents.known = true;
+    contents.txns = txn_ids_of(remaining);
 }
 
 bool WalManager::needs_auto_checkpoint() const {

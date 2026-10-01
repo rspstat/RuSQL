@@ -91,6 +91,15 @@ bool read_all_bytes(const std::string& path, std::vector<std::uint8_t>& out) {
     f.read(reinterpret_cast<char*>(out.data()), size);
     return true;
 }
+// The tracking record of `contents` for the file at `path` (reset when a different file is in use).
+TxnIoShared::LogContents& undo_tracked(TxnIoShared::LogContents& contents, const std::string& path) {
+    if (contents.path != path) {
+        contents.path = path;
+        contents.known = false;
+        contents.txns.clear();
+    }
+    return contents;
+}
 bool undo_truncate_to_zero(std::FILE* fp) {
     if (std::fflush(fp) != 0) return false;
 #ifdef _WIN32
@@ -168,12 +177,15 @@ void UndoLogFile::append_locked(const UndoEntry& entry) const {
     auto encoded = encode(entry);
     // Persistent append handle (see TxnIoShared::undo_append_handle_locked) -- reopening the
     // file for every single record dominated per-statement transaction cost.
+    auto& contents = undo_tracked(io_->undo_contents, path_);
     std::FILE* fp = io_->undo_append_handle_locked(path_);
     if (!fp) throw std::runtime_error("Undo log 파일 열기 실패");
     if (std::fwrite(encoded.data(), 1, encoded.size(), fp) != encoded.size() || std::fflush(fp) != 0) {
+        contents.known = false; // part of a record may be in the file
         io_->close_undo_handle_locked();
         throw std::runtime_error("Undo log 기록 실패");
     }
+    if (contents.known) contents.txns.insert(entry.txn_id);
 }
 
 void UndoLogFile::append(const UndoEntry& entry) {
@@ -200,6 +212,9 @@ void UndoLogFile::clear_locked() const {
     io_->close_undo_handle_locked(); // Windows can't delete a file that still has an open handle
     std::error_code ec;
     fs::remove(path_, ec);
+    auto& contents = undo_tracked(io_->undo_contents, path_);
+    contents.known = true; // the file is gone: nothing in it
+    contents.txns.clear();
 }
 
 void UndoLogFile::clear() {
@@ -209,6 +224,18 @@ void UndoLogFile::clear() {
 
 void UndoLogFile::remove_txn(std::uint64_t txn_id) {
     std::lock_guard<std::mutex> g(io_->undo_lock);
+    auto& contents = undo_tracked(io_->undo_contents, path_);
+    if (contents.known) {
+        if (!contents.txns.count(txn_id)) return; // none of its entries are in the file
+        if (contents.txns.size() == 1) {
+            // Alone in the file: empty it in place without reading it (see TxnIoShared::LogContents).
+            std::FILE* fp = io_->undo_append_handle_locked(path_);
+            if (fp && undo_truncate_to_zero(fp)) {
+                contents.txns.clear();
+                return;
+            }
+        }
+    }
     auto all = read_all_locked();
     std::vector<UndoEntry> remaining;
     for (auto& e : all) {
@@ -218,7 +245,11 @@ void UndoLogFile::remove_txn(std::uint64_t txn_id) {
         // Empty in place through the persistent handle (see WalManager::remove_txn).
         if (fs::exists(path_)) {
             std::FILE* fp = io_->undo_append_handle_locked(path_);
-            if (fp && undo_truncate_to_zero(fp)) return;
+            if (fp && undo_truncate_to_zero(fp)) {
+                contents.known = true;
+                contents.txns.clear();
+                return;
+            }
         }
         clear_locked();
         return;
@@ -230,6 +261,9 @@ void UndoLogFile::remove_txn(std::uint64_t txn_id) {
     }
     io_->close_undo_handle_locked(); // can't rename over a file with an open handle on Windows
     write_bytes_atomic(path_, buf.data(), buf.size());
+    contents.known = true;
+    contents.txns.clear();
+    for (auto& e : remaining) contents.txns.insert(e.txn_id);
 }
 
 void UndoLogFile::rewrite_txn(std::uint64_t txn_id, const std::vector<UndoEntry>& entries) {
@@ -251,6 +285,10 @@ void UndoLogFile::rewrite_txn(std::uint64_t txn_id, const std::vector<UndoEntry>
     }
     io_->close_undo_handle_locked(); // can't rename over a file with an open handle on Windows
     write_bytes_atomic(path_, buf.data(), buf.size());
+    auto& contents = undo_tracked(io_->undo_contents, path_);
+    contents.known = true;
+    contents.txns.clear();
+    for (auto& e : all) contents.txns.insert(e.txn_id);
 }
 
 // ─── TransactionManager ───────────────────────────────────────────────────

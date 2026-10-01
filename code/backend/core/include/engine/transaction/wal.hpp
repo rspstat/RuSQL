@@ -8,6 +8,7 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 namespace engine {
@@ -71,6 +72,21 @@ public:
     std::mutex wal_lock;
     std::mutex undo_lock;
 
+    // Which transactions have records in a log file right now. Removing a finished transaction's records used to
+    // open, read and parse the WHOLE file just to learn that nobody else's records were in it (~1.5 ms per file on
+    // Windows, twice per COMMIT -- 3 of the ~4 ms an explicit COMMIT cost, against 0.07 ms for the truncate itself).
+    // With this a transaction that is alone in the file, or not in it at all, is handled without reading anything.
+    // `known` is false until the file's content has been read once (a file a previous run left behind) and again
+    // after a failed write. Every writer of the file updates it while holding the matching lock (wal_lock /
+    // undo_lock); `path` guards against one TxnIoShared serving a different data dir than last time.
+    struct LogContents {
+        std::string path;
+        bool known = false;
+        std::unordered_set<std::uint64_t> txns;
+    };
+    LogContents wal_contents;
+    LogContents undo_contents;
+
 private:
     std::uint64_t next_txn_id_ = 1;
     std::mutex counter_mutex_;
@@ -107,7 +123,7 @@ private:
     std::string path_;
     std::shared_ptr<TxnIoShared> io_;
 
-    void write_encoded_locked(const std::vector<std::uint8_t>& encoded, bool sync) const;
+    void write_encoded_locked(const std::vector<std::uint8_t>& encoded, bool sync, std::uint64_t txn_id) const;
     std::vector<WalRecord> read_all_locked() const;
     void clear_locked() const;
 };

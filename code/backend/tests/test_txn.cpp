@@ -1,5 +1,7 @@
 #include <filesystem>
 #include <memory>
+#include <random>
+#include <vector>
 
 #include "catch.hpp"
 #include "engine/transaction/group_commit.hpp"
@@ -384,4 +386,173 @@ TEST_CASE("Removing one transaction's log records keeps another session's record
     REQUIRE(b.read_undo_log_file().size() == 2);
     REQUIRE(b.commit().is_ok());
     REQUIRE(b.wal_records().empty());
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// TxnIoShared::LogContents: which transactions have records in the WAL / undo file is tracked in memory, so removing a
+// finished transaction's records does not have to open, read and parse the file (that cost ~1.5 ms per file per COMMIT).
+// The file stays the truth: whatever the tracking decides, what is left on disk must be exactly the other transactions'.
+
+namespace {
+// The append handles stay open; Windows cannot delete a directory with open files in it.
+void close_log_handles(TxnIoShared& io) {
+    {
+        std::lock_guard<std::mutex> g(io.wal_lock);
+        io.close_wal_handle_locked();
+    }
+    std::lock_guard<std::mutex> g(io.undo_lock);
+    io.close_undo_handle_locked();
+}
+} // namespace
+
+TEST_CASE("log tracking: a transaction alone in the file empties it without a read; others' records survive", "[txn][wal][log_tracking]") {
+    auto dir = test_dir("track_alone");
+    auto io = std::make_shared<TxnIoShared>();
+    WalManager wal(dir, io);
+    UndoLogFile undo(dir, io);
+    wal.remove_txn(5); // first call establishes what is in the (absent) file
+    undo.remove_txn(5);
+
+    wal.log_insert(1, "t", "a", "{}");
+    wal.log_insert(1, "t", "b", "{}");
+    undo.append(UndoEntry{1, "INSERT", "t", "a", std::nullopt});
+    wal.remove_txn(1);
+    undo.remove_txn(1);
+    REQUIRE(wal.read_all().empty());
+    REQUIRE(undo.read_all().empty());
+    REQUIRE(wal.file_size() == 0);
+
+    // appends after the in-place empty land in the (re-created or reused) file
+    wal.log_insert(2, "t", "c", "{}");
+    wal.log_insert(3, "t", "d", "{}");
+    wal.remove_txn(99); // not in the file: nothing to do, nothing may be lost
+    REQUIRE(wal.read_all().size() == 2);
+    wal.remove_txn(2);
+    auto left = wal.read_all();
+    REQUIRE(left.size() == 1);
+    REQUIRE(left[0].txn_id == 3);
+    wal.remove_txn(3);
+    REQUIRE(wal.read_all().empty());
+    close_log_handles(*io);
+    fs::remove_all(dir);
+}
+
+TEST_CASE("log tracking: records a previous run left behind are read once and then tracked", "[txn][wal][log_tracking]") {
+    auto dir = test_dir("track_leftover");
+    {
+        auto old_io = std::make_shared<TxnIoShared>();
+        WalManager wal(dir, old_io);
+        UndoLogFile undo(dir, old_io);
+        for (std::uint64_t t : {1, 2, 3}) {
+            wal.log_insert(t, "t", "k" + std::to_string(t), "{}");
+            undo.append(UndoEntry{t, "INSERT", "t", "k" + std::to_string(t), std::nullopt});
+        }
+    }
+    auto io = std::make_shared<TxnIoShared>(); // a "restarted" process: nothing known about the files
+    WalManager wal(dir, io);
+    UndoLogFile undo(dir, io);
+    wal.remove_txn(2);
+    undo.remove_txn(2);
+    REQUIRE(wal.read_all().size() == 2);
+    REQUIRE(undo.read_all().size() == 2);
+    wal.remove_txn(1);
+    undo.remove_txn(1);
+    auto w = wal.read_all();
+    REQUIRE(w.size() == 1);
+    REQUIRE(w[0].txn_id == 3);
+    REQUIRE(undo.read_all().size() == 1);
+    wal.remove_txn(3);
+    undo.remove_txn(3);
+    REQUIRE(wal.read_all().empty());
+    REQUIRE(undo.read_all().empty());
+    close_log_handles(*io);
+    fs::remove_all(dir);
+}
+
+// Random operations against a model of what the files must contain.
+TEST_CASE("log tracking: randomized operations always leave on disk exactly what the model says", "[txn][wal][log_tracking][fuzz]") {
+    for (unsigned seed = 1; seed <= 40; seed++) {
+        INFO("seed " << seed);
+        auto dir = test_dir("track_fuzz");
+        std::mt19937 rng(seed);
+        auto io = std::make_shared<TxnIoShared>();
+        auto wal = std::make_unique<WalManager>(dir, io);
+        auto undo = std::make_unique<UndoLogFile>(dir, io);
+        std::vector<std::pair<std::uint64_t, std::string>> wal_model;  // (txn, key) in file order; txn 0 = checkpoint marker
+        std::vector<std::pair<std::uint64_t, std::string>> undo_model;
+        int next_key = 0;
+        auto check = [&] {
+            auto w = wal->read_all();
+            REQUIRE(w.size() == wal_model.size());
+            for (std::size_t i = 0; i < w.size(); i++) {
+                REQUIRE(w[i].txn_id == wal_model[i].first);
+                REQUIRE(w[i].key == wal_model[i].second);
+            }
+            auto u = undo->read_all();
+            REQUIRE(u.size() == undo_model.size());
+            for (std::size_t i = 0; i < u.size(); i++) {
+                REQUIRE(u[i].txn_id == undo_model[i].first);
+                REQUIRE(u[i].key == undo_model[i].second);
+            }
+        };
+        for (int step = 0; step < 150; step++) {
+            std::uint64_t txn = 1 + rng() % 4;
+            switch (rng() % 9) {
+                case 0: case 1: case 2: {
+                    std::string key = "k" + std::to_string(next_key++);
+                    wal->log_insert(txn, "t", key, "{}");
+                    undo->append(UndoEntry{txn, "INSERT", "t", key, std::nullopt});
+                    wal_model.emplace_back(txn, key);
+                    undo_model.emplace_back(txn, key);
+                    break;
+                }
+                case 3: case 4: {
+                    wal->remove_txn(txn);
+                    undo->remove_txn(txn);
+                    std::erase_if(wal_model, [&](auto& r) { return r.first == txn; });
+                    std::erase_if(undo_model, [&](auto& r) { return r.first == txn; });
+                    break;
+                }
+                case 5: {
+                    std::string key = "r" + std::to_string(next_key++);
+                    undo->rewrite_txn(txn, {UndoEntry{txn, "UPDATE", "t", key, std::string("{}")}});
+                    std::erase_if(undo_model, [&](auto& r) { return r.first == txn; });
+                    undo_model.emplace_back(txn, key);
+                    break;
+                }
+                case 6: {
+                    wal->log_commit_no_sync(txn);
+                    wal_model.emplace_back(txn, "");
+                    break;
+                }
+                case 7: {
+                    if (rng() % 3 == 0) {
+                        wal->log_checkpoint();
+                        wal_model.emplace_back(0, "");
+                        std::size_t cp = wal_model.size() - 1; // keep only from the (last) checkpoint on; a lone marker means "clear"
+                        wal->truncate_to_last_checkpoint();
+                        wal_model.erase(wal_model.begin(), wal_model.begin() + static_cast<std::ptrdiff_t>(cp));
+                        if (wal_model.size() <= 1) wal_model.clear();
+                    }
+                    break;
+                }
+                default: {
+                    if (rng() % 8 == 0) {
+                        wal->clear();
+                        undo->clear();
+                        wal_model.clear();
+                        undo_model.clear();
+                    } else if (rng() % 6 == 0) { // a restarted process: the same files, nothing known about them
+                        io = std::make_shared<TxnIoShared>();
+                        wal = std::make_unique<WalManager>(dir, io);
+                        undo = std::make_unique<UndoLogFile>(dir, io);
+                    }
+                    break;
+                }
+            }
+            check();
+        }
+        close_log_handles(*io);
+        fs::remove_all(dir);
+    }
 }
