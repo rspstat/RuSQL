@@ -165,12 +165,12 @@ const TXN: Item[] = [
 const STORAGE: Item[] = [
   {
     t: L("B+Tree indexes", "B+Tree 인덱스"),
-    s: L("single, composite, clustered; maintained incrementally per row", "단일·복합·클러스터드, 행 단위 증분 갱신"),
+    s: L("single, composite, clustered; maintained incrementally, one bucket write per statement", "단일·복합·클러스터드, 증분 갱신(문장당 버킷 1회 기록)"),
   },
   { t: L("Hash index", "해시 인덱스"), s: L("USING HASH, equality lookups in O(1)", "USING HASH, 등호 조회 O(1)") },
   {
     t: L("Table data", "테이블 데이터"),
-    s: L("in-memory MVCC row versions + pk-to-position cache", "메모리 상의 MVCC 행 버전 + PK→위치 캐시"),
+    s: L("in-memory MVCC row versions + the pk-to-position cache that turns an index hit into its row", "메모리 상의 MVCC 행 버전 + 인덱스 결과를 실제 행으로 연결하는 PK→위치 캐시"),
   },
   { t: L("Buffer pool", "버퍼 풀"), s: L("LRU, 64 pages x 16 KB", "LRU, 16KB 페이지 64개") },
   { t: L("Table files", "테이블 파일"), s: L("binary .rdb with LZ4 compression", "LZ4 압축 바이너리 .rdb") },
@@ -299,14 +299,14 @@ function LayersView() {
             <HArrow c={C.core} phase={1} />
             <div className="dg-stage" style={tint(C.core)}>
               <div className="dg-stage-head"><Num n={4} c={C.core} /><b>{t(L("Query planner", "쿼리 플래너"))}</b></div>
-              <span>{t(L("Cost-based: access path per table, join algorithm, System-R DP join order",
-                         "비용 기반: 테이블별 접근 경로, 조인 알고리즘, System-R DP 조인 순서"))}</span>
+              <span>{t(L("Cost-based: access path per table (also used to find the rows of UPDATE / DELETE), join algorithm, System-R DP join order",
+                         "비용 기반: 테이블별 접근 경로(UPDATE·DELETE의 대상 행 탐색에도 사용), 조인 알고리즘, System-R DP 조인 순서"))}</span>
             </div>
             <HArrow c={C.core} phase={2} />
             <div className="dg-stage" style={tint(C.core)}>
               <div className="dg-stage-head"><Num n={5} c={C.core} /><b>{t(L("Executor", "실행기"))}</b></div>
-              <span>{t(L("Runs the plan: joins (NL, hash, sort-merge, index NL), subqueries, CTE, window functions",
-                         "계획 실행: 조인(NL, 해시, 소트-머지, 인덱스 NL), 서브쿼리, CTE, 윈도우 함수"))}</span>
+              <span>{t(L("Runs the plan: joins (NL, hash, sort-merge, index NL), subqueries, CTE, window functions. UPDATE checks PRIMARY KEY / UNIQUE and applies fully or not at all",
+                         "계획 실행: 조인(NL, 해시, 소트-머지, 인덱스 NL), 서브쿼리, CTE, 윈도우 함수. UPDATE는 PRIMARY KEY·UNIQUE를 검사하고 전부 적용되거나 전혀 적용되지 않음"))}</span>
             </div>
           </div>
           <Chips items={SIDE_MODULES} />

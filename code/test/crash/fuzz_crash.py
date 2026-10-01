@@ -24,8 +24,12 @@ bench.RUSQL_PORT = PORT
 
 
 def start():
+    # The tables here are tiny; by default the server only uses indexes to find UPDATE/DELETE targets on
+    # tables of 64+ rows. 0 makes the index paths run on every statement (override to test the scan).
+    env = dict(os.environ)
+    env.setdefault("RUSQL_DML_INDEX_MIN_ROWS", "0")
     p = subprocess.Popen([EXE, "--port", str(PORT), "--no-mysql", "--data-dir", DATA],
-                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=dict(os.environ))
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env)
     for _ in range(200):
         try:
             socket.create_connection(("127.0.0.1", PORT), timeout=0.2).close()
@@ -51,8 +55,10 @@ def run_round(seed, n_ops):
     p = start()
     db = bench.RuSQL()
     db.execute("CREATE DATABASE d"); db.execute("USE d")
-    db.execute("CREATE TABLE a (id INT PRIMARY KEY, v INT)")
-    db.execute("CREATE TABLE b (id INT PRIMARY KEY, v INT)")
+    # g = id % 5 is fixed by the key, so the oracle needs no extra state; it gives group statements an index to use
+    for tbl in ("a", "b"):
+        db.execute(f"CREATE TABLE {tbl} (id INT PRIMARY KEY, v INT, g INT)")
+        db.execute(f"CREATE INDEX {tbl}_g ON {tbl} (g)")
     oracle = {"a": {}, "b": {}}          # acknowledged-committed state
     txn_buf = None                        # pending changes of the open explicit txn: {table: {id: v|None}}
     in_txn = False
@@ -98,11 +104,18 @@ def run_round(seed, n_ops):
             if k in cur:
                 continue
             v = rnd.randint(0, 999)
-            r = db.execute(f"INSERT INTO {t} VALUES ({k},{v})")
+            r = db.execute(f"INSERT INTO {t} VALUES ({k},{v},{k % 5})")
             if r.startswith("OK"):
                 record(t, k, v)
         elif op < 0.75:      # UPDATE
             if not cur:
+                continue
+            if rnd.random() < 0.35:  # a whole group through the secondary index on g
+                grp = rnd.randint(0, 4); v = rnd.randint(0, 999)
+                r = db.execute(f"UPDATE {t} SET v = {v} WHERE g = {grp}")
+                if r.startswith("OK"):
+                    for k in [k for k in cur if k % 5 == grp]:
+                        record(t, k, v)
                 continue
             k = rnd.choice(list(cur)); v = rnd.randint(0, 999)
             r = db.execute(f"UPDATE {t} SET v = {v} WHERE id = {k}")
@@ -110,6 +123,13 @@ def run_round(seed, n_ops):
                 record(t, k, v)
         elif op < 0.90:      # DELETE
             if not cur:
+                continue
+            if rnd.random() < 0.3:   # a whole group through the secondary index on g
+                grp = rnd.randint(0, 4)
+                r = db.execute(f"DELETE FROM {t} WHERE g = {grp}")
+                if r.startswith("OK"):
+                    for k in [k for k in cur if k % 5 == grp]:
+                        record(t, k, None)
                 continue
             k = rnd.choice(list(cur))
             r = db.execute(f"DELETE FROM {t} WHERE id = {k}")
@@ -121,11 +141,11 @@ def run_round(seed, n_ops):
             k = rnd.randint(1, 60); v = rnd.randint(0, 999)
             kind = rnd.random()
             if kind < 0.5:
-                r = db.execute(f"REPLACE INTO {t} VALUES ({k},{v})")
+                r = db.execute(f"REPLACE INTO {t} VALUES ({k},{v},{k % 5})")
                 if r.startswith("OK"):
                     oracle[t][k] = v
             elif kind < 0.9:
-                r = db.execute(f"INSERT INTO {t} VALUES ({k},{v}) ON DUPLICATE KEY UPDATE v = {v}")
+                r = db.execute(f"INSERT INTO {t} VALUES ({k},{v},{k % 5}) ON DUPLICATE KEY UPDATE v = {v}")
                 if r.startswith("OK"):
                     oracle[t][k] = v
             elif rnd.random() < 0.3:

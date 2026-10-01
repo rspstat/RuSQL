@@ -33,6 +33,8 @@ add_library(engine_core STATIC
     src/engine/executor/executor_eval.cpp
     src/engine/executor/executor_dml.cpp
     src/engine/executor/executor_update.cpp
+    src/engine/executor/executor_dml_index.cpp
+    src/engine/executor/executor_update_unique.cpp
     src/engine/executor/executor_redo.cpp
     src/engine/executor/executor_delete.cpp
     src/engine/executor/executor_partition.cpp

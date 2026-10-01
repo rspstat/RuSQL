@@ -257,6 +257,17 @@ public:
     StringResult execute(Statement stmt);
     StringResult execute_sql(const std::string& sql);
 
+    // UPDATE/DELETE use the table's indexes to find their target rows only when the table has at
+    // least this many physical rows (below that a scan is as cheap and the index adds nothing but
+    // risk). Default 64; the RUSQL_DML_INDEX_MIN_ROWS environment variable overrides it at start-up
+    // (0 = always, which is how the whole test suite and the crash fuzzers are also run). Tests
+    // set 0 to exercise the index paths on small tables and SIZE_MAX to force the plain scan,
+    // then compare the two (see test_dml_index.cpp).
+    static std::atomic<std::size_t> dml_index_min_rows;
+    // Number of UPDATE/DELETE statements whose rows were found through an index (diagnostic;
+    // tests assert on it to prove an index path really ran -- or really did not).
+    static std::atomic<std::uint64_t> dml_index_hits;
+
 private:
     // Row-level-concurrency Stage 4/5 correctness fix (found via concurrent-reader
     // stress testing): execute_sql's actual body -- pulled out so execute_sql itself
@@ -503,7 +514,31 @@ private:
     void persist_views_for_db(const SharedDatabase& s, const std::string& db) const;
     static void index_insert_row(SharedDatabase& s, const std::string& table, const Row& row);
     static void index_remove_row(SharedDatabase& s, const std::string& table, const Row& row, const std::string& pk_col);
+    // index_remove_row for every row of `olds`, then index_insert_row for every row of `news`, but each
+    // secondary bucket is parsed and written once per statement instead of once per row (either list may
+    // be empty). The secondary/hash indexes only -- the PK B+Tree and composite indexes stay with the caller.
+    static void index_replace_rows(SharedDatabase& s, const std::string& table, const std::vector<Row>& olds, const std::vector<Row>& news,
+                                   const std::string& pk_col);
     void rebuild_secondary_indexes(SharedDatabase& s, const std::string& table, const std::vector<Row>& rows);
+
+    // ── index-assisted candidate search for UPDATE/DELETE (executor_dml_index.cpp) ──
+    struct DmlIndexHit {
+        bool usable = false;    // false: no trustworthy index plan -- the caller must scan, as it always did
+        bool cache_gap = false; // a live candidate had no usable row_pk_pos entry (heal the cache, scan this time)
+        std::vector<std::size_t> positions; // ascending positions in s.tables[table]; each visible and matching
+    };
+    // Needs only shared access to the table (read-only); `visible` is the caller's own visibility
+    // rule (UPDATE: its write snapshot, DELETE: the permissive _xmax == 0 check).
+    static DmlIndexHit dml_index_positions(SharedDatabase& s, const std::string& table, const std::optional<CondExpr>& condition,
+                                           const std::string& pk_col, const std::function<bool(const Row&)>& visible,
+                                           std::uint64_t self_txn_id);
+    // Rebuilds s.row_pk_pos[table] from the row store; needs the table's data lock EXCLUSIVE.
+    static void rebuild_pk_positions(SharedDatabase& s, const std::string& table, const std::string& pk_col);
+    // UPDATE (executor_update_unique.cpp): the PRIMARY KEY / UNIQUE violation, if any, that giving `olds[i]` the
+    // contents of `news[i]` would create -- among the new rows themselves or against a live row not being
+    // rewritten. nullopt = fine. (UPDATE used to check nothing, so it could create duplicate keys.)
+    static std::optional<std::string> update_unique_violation(SharedDatabase& s, const std::string& table,
+                                                              const std::vector<const Row*>& olds, const std::vector<Row>& news);
     void persist_index_meta(const SharedDatabase& s) const;
     StringResult exec_use(SharedDatabase& s, const std::string& database);
     StringResult exec_show_tables(const SharedDatabase& s) const;

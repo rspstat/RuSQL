@@ -1025,6 +1025,95 @@ void Executor::index_remove_row(SharedDatabase& s, const std::string& table, con
     }
 }
 
+// Moves a whole statement's worth of rows through the secondary and hash indexes in one go. A
+// secondary B+Tree stores each bucket (all rows sharing an indexed value) as ONE JSON array of
+// full rows, so the per-row index_remove_row + index_insert_row made a statement touching k rows of
+// one bucket parse and rewrite that bucket 2k times -- quadratic (a 400-row UPDATE through a
+// 50-value column took 1.2 s at 20,000 rows). Here every affected bucket is parsed once, loses
+// all its leaving rows, gains all its entering rows and is written back once. Because removals
+// and additions are applied together, a row that moves into a key vacated by another row of the
+// same statement (SET id = id + 1) cannot be confused with the row it replaces either.
+void Executor::index_replace_rows(SharedDatabase& s, const std::string& table, const std::vector<Row>& olds, const std::vector<Row>& news,
+                                  const std::string& pk_col) {
+    if (olds.empty() && news.empty()) return;
+    const TableSchema* sch = s.catalog.get_table(table);
+    // a row's identity inside a bucket: its whole primary key (see index_remove_row)
+    std::vector<std::string> id_cols{pk_col};
+    if (sch && sch->primary_key_columns.size() > 1) id_cols = sch->primary_key_columns;
+    auto identity = [&id_cols](const Row& r, std::string& out) {
+        out.clear();
+        for (auto& c : id_cols) {
+            auto it = r.find(c);
+            if (it == r.end()) return false;
+            out += it->second;
+            out += '\x00';
+        }
+        return true;
+    };
+    std::vector<std::string> old_ids(olds.size());
+    std::vector<char> old_ok(olds.size(), 0);
+    for (std::size_t i = 0; i < olds.size(); i++) old_ok[i] = identity(olds[i], old_ids[i]) ? 1 : 0;
+
+    for (auto& [name, meta] : s.index_meta) {
+        if (meta.first != table) continue;
+        auto tit = s.indexes.find(name);
+        if (tit == s.indexes.end()) continue;
+        const std::string& col = meta.second;
+
+        struct Touch {
+            std::unordered_set<std::string> leaving;
+            std::vector<const Row*> entering;
+        };
+        std::unordered_map<std::string, Touch> touched;
+        for (std::size_t i = 0; i < olds.size(); i++) {
+            if (!old_ok[i]) continue;
+            auto v = olds[i].find(col);
+            if (v != olds[i].end()) touched[v->second].leaving.insert(old_ids[i]);
+        }
+        for (auto& r : news) {
+            auto v = r.find(col);
+            if (v != r.end()) touched[v->second].entering.push_back(&r);
+        }
+        for (auto& [key, t] : touched) {
+            std::vector<Row> bucket;
+            if (auto j = tit->second.search(key)) {
+                try {
+                    bucket = nlohmann::json::parse(*j).get<std::vector<Row>>();
+                } catch (...) {
+                }
+            }
+            if (!t.leaving.empty()) {
+                std::vector<Row> kept;
+                kept.reserve(bucket.size());
+                std::string id;
+                for (auto& r : bucket) {
+                    if (identity(r, id) && t.leaving.count(id)) continue;
+                    kept.push_back(std::move(r));
+                }
+                bucket = std::move(kept);
+            }
+            for (const Row* r : t.entering) bucket.push_back(*r);
+            nlohmann::json j = bucket;
+            tit->second.insert(key, j.dump());
+        }
+    }
+
+    for (auto& [name, meta] : s.hash_index_meta) {
+        if (meta.first != table) continue;
+        auto hit = s.hash_indexes.find(name);
+        if (hit == s.hash_indexes.end()) continue;
+        for (std::size_t i = 0; i < olds.size(); i++) {
+            if (!old_ok[i]) continue;
+            auto v = olds[i].find(meta.second);
+            if (v == olds[i].end()) continue;
+            std::vector<std::pair<std::string, std::string>> parts;
+            for (auto& c : id_cols) parts.emplace_back(c, olds[i].find(c)->second);
+            hit->second.remove_row(v->second, parts);
+        }
+        for (auto& r : news) hit->second.insert_row(r);
+    }
+}
+
 void Executor::rebuild_secondary_indexes(SharedDatabase& s, const std::string& table, const std::vector<Row>& rows) {
     std::vector<std::pair<std::string, std::string>> sec;
     for (auto& [name, meta] : s.index_meta) {

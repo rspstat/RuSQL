@@ -91,7 +91,6 @@ public:
     LockResult acquire_shared(const std::string& table, const std::string& pk, std::uint64_t txn_id,
                                std::chrono::milliseconds timeout = std::chrono::milliseconds{0});
     void release(std::uint64_t txn_id);
-    void insert_lock(const std::string& table, const std::string& pk, std::uint64_t txn_id);
     std::optional<std::uint64_t> holder(const std::string& table, const std::string& pk) const;
 
     std::vector<std::tuple<std::string, std::string, std::uint64_t>> lock_rows() const;

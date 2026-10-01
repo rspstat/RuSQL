@@ -45,7 +45,6 @@ public:
 
     void save_schema(const std::string& table, const TableSchema& schema) const;
     std::optional<TableSchema> load_schema(const std::string& table) const;
-    void save_schema_columns(const std::string& table, const std::vector<std::string>& columns) const;
 
     void save_table(const std::string& table, const std::vector<Row>& rows) const;
     std::vector<Row> load_table(const std::string& table) const;

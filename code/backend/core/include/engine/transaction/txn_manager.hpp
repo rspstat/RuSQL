@@ -47,7 +47,6 @@ public:
     void append(const UndoEntry& entry);
     std::vector<UndoEntry> read_all();
     void clear();
-    bool exists() const;
     void remove_txn(std::uint64_t txn_id);
     void rewrite_txn(std::uint64_t txn_id, const std::vector<UndoEntry>& entries);
 
@@ -109,7 +108,6 @@ public:
     // with `fallback_xmax`) and resets the buffer.
     std::vector<RedoOp> take_redo_ops(const std::string& fallback_xmax);
     void discard_redo_ops();
-    bool has_redo_ops() const { return !redo_ops_.empty(); }
     // Set when a statement whose changes are NOT fully described by log_* (cascades, MERGE,
     // multi-table UPDATE/DELETE, ...) ran inside this transaction: COMMIT must then fall
     // back to flushing the dirty tables instead of relying on redo ops alone.
@@ -134,7 +132,6 @@ public:
     // alive -- Windows refuses to delete a file that has an open handle.
     void release_file_handles();
 
-    bool has_undo_log_file() const;
     std::vector<UndoEntry> read_undo_log_file();
     void clear_undo_log_file();
 

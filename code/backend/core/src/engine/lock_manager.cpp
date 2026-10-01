@@ -198,11 +198,6 @@ void LockManager::release(std::uint64_t txn_id) {
     cv_.notify_all();
 }
 
-void LockManager::insert_lock(const std::string& table, const std::string& pk, std::uint64_t txn_id) {
-    std::lock_guard<std::mutex> g(mutex_);
-    row_locks_[std::make_pair(table, pk)] = LockEntry{LockEntry::Exclusive{txn_id}};
-}
-
 std::optional<std::uint64_t> LockManager::holder(const std::string& table, const std::string& pk) const {
     std::lock_guard<std::mutex> g(mutex_);
     auto it = row_locks_.find(std::make_pair(table, pk));

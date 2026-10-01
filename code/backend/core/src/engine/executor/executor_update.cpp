@@ -200,7 +200,25 @@ StringResult Executor::exec_update_inner(SharedDatabase& s, const std::string& t
                         }
                     }
                 }
-                if (!via_cache) {
+                // Not a bare pk lookup: ask the planner whether an index (secondary, hash, PK range,
+                // an indexable leaf of an AND, ...) narrows the search. The index only proposes
+                // candidates -- each is checked against the real row (see executor_dml_index.cpp);
+                // anything doubtful returns "not usable" and the scan below runs as it always did.
+                bool via_index = false;
+                if (!via_cache && !bypass_pk_cache && pk_cols.size() == 1) {
+                    auto hit = dml_index_positions(s, table, condition, pk_col,
+                                                   [&](const Row& r) { return is_visible_for_read(r, write_ctx); }, cur_txn);
+                    if (hit.usable) {
+                        via_index = true;
+                        for (auto p : hit.positions) {
+                            cand_pos.push_back(p);
+                            cand_key.push_back(match_key(rows0[p]));
+                        }
+                    } else if (hit.cache_gap) {
+                        rebuild_pk_cache = true; // the exclusive phase below repopulates row_pk_pos
+                    }
+                }
+                if (!via_cache && !via_index) {
                     for (std::size_t i = 0; i < rows0.size(); i++) {
                         const Row& r = rows0[i];
                         if (!is_visible_for_read(r, write_ctx)) continue;
@@ -257,6 +275,15 @@ StringResult Executor::exec_update_inner(SharedDatabase& s, const std::string& t
         {
             auto table_lock = acquire_table_data_locks(s, {table}, /*exclusive=*/true);
             auto& rows = tit0->second;
+
+            // The snapshot taken at the top of this attempt is stale by now: this thread may have waited for
+            // the exclusive lock while another statement updated the very same row and finished. That
+            // statement's id is newer than the old cutoff, so the OLD snapshot still sees the version it
+            // killed as alive -- the candidate passed verification, was updated a second time, and the row
+            // forked into two live versions (found by running the concurrent-increment test under heavy CPU
+            // load: `(id=1 v=179) (id=1 v=479)`). Verify against the state as of NOW; a candidate that
+            // changed in between then fails verification and the attempt restarts (stale_positions).
+            write_ctx = SnapshotCtx{my_id, s.txn_io->peek_next_id(), *s.active_txn_ids->lock()};
 
             // The rows this statement will touch, resolved once for both passes below.
             std::vector<Row*> targets;
@@ -371,7 +398,6 @@ StringResult Executor::exec_update_inner(SharedDatabase& s, const std::string& t
 
                     new_row["_xmin"] = std::to_string(my_id);
                     new_row["_xmax"] = "0";
-                    row["_xmax"] = std::to_string(my_id);
                     {
                         auto npk = new_row.find(pk_col);
                         new_version_pks.push_back(npk != new_row.end() ? npk->second : std::string());
@@ -381,6 +407,16 @@ StringResult Executor::exec_update_inner(SharedDatabase& s, const std::string& t
                     attempt_undo_entries.push_back({key, old_json, new_j.dump()});
                     new_versions.push_back(std::move(new_row));
                 }
+                // Nothing is stamped or inserted until EVERY new version has passed every check. Before,
+                // each old version was stamped dead inside the loop above, so a CHECK/ENUM error on a LATER
+                // row returned with the earlier rows already dead and their new versions thrown away --
+                // `UPDATE t SET v = v + 8` failing a CHECK on row 2 silently deleted row 1.
+                // (Targets point into `rows`, so this must stay before the insert below.)
+                {
+                    std::vector<const Row*> olds(targets.begin(), targets.end());
+                    if (auto violation = update_unique_violation(s, table, olds, new_versions)) return StringResult::Err(*violation);
+                }
+                for (Row* rowp : targets) (*rowp)["_xmax"] = std::to_string(my_id);
                 const std::size_t first_new_pos = rows.size();
                 rows.insert(rows.end(), std::make_move_iterator(new_versions.begin()), std::make_move_iterator(new_versions.end()));
                 if (pk_cols.size() == 1) {
@@ -395,10 +431,13 @@ StringResult Executor::exec_update_inner(SharedDatabase& s, const std::string& t
                             if (kit != rows[i].end()) pos_map[kit->second] = i;
                         }
                     } else {
+                        // Erase every old key first, then write the new ones: with a chain such as
+                        // `SET id = id + 1` a per-row erase would remove the entry just written for the key
+                        // the previous row moved into.
                         for (std::size_t i = 0; i < attempt_undo_entries.size(); i++) {
                             if (new_version_pks[i] != attempt_undo_entries[i].key) pos_map.erase(attempt_undo_entries[i].key);
-                            pos_map[new_version_pks[i]] = first_new_pos + i;
                         }
+                        for (std::size_t i = 0; i < attempt_undo_entries.size(); i++) pos_map[new_version_pks[i]] = first_new_pos + i;
                     }
                 }
                 // Row-level-concurrency Stage 4/5 correctness fix (found via concurrent-
@@ -458,6 +497,8 @@ StringResult Executor::exec_update_inner(SharedDatabase& s, const std::string& t
         if (ci.table == table) comp_keys.push_back(k);
     }
 
+    // The old and new image of every updated row, parsed once.
+    std::vector<Row> old_rows_all, new_rows_all;
     for (auto& u : undo_entries) {
         Row old_row, new_row;
         try {
@@ -468,47 +509,66 @@ StringResult Executor::exec_update_inner(SharedDatabase& s, const std::string& t
             new_row = nlohmann::json::parse(u.new_json).get<Row>();
         } catch (...) {
         }
-        if (auto idx_it = s.indexes.find(table); idx_it != s.indexes.end()) {
-            auto new_pk_it = new_row.find(pk_col);
-            std::string new_pk = new_pk_it != new_row.end() ? new_pk_it->second : u.key;
-            nlohmann::json j = new_row;
-            // Row-level-concurrency Stage 4/5 correctness fix (found via concurrent-
-            // reader monotonicity stress testing -- root cause of the "0 rows returned"
-            // phantom, not a cache or Row-field race): remove(key) then insert(key,...)
-            // are two SEPARATE calls, each independently locking/releasing BPlusTree's
-            // own per-instance mutex (Stage 2) -- between them, the index has NO entry
-            // for that key at all. AccessPath::PkPoint (exec_select) deliberately
-            // bypasses table_data_locks for this exact index (relying only on its own
-            // mutex, since index paths are meant to need no other lock) and can search
-            // during exactly that gap. When the PK value is unchanged (the overwhelming
-            // common case), a single insert() call already overwrites the existing
-            // entry atomically -- skip remove() entirely. Only an actual PK-value change
-            // still needs remove(old)+insert(new) (two different keys -- no atomicity
-            // is possible or expected there; a reader querying the OLD key value
-            // legitimately stops finding this row partway through, same as any DELETE).
-            if (new_pk == u.key) {
-                idx_it->second.insert(new_pk, j.dump());
-            } else {
-                idx_it->second.remove(u.key);
-                idx_it->second.insert(new_pk, j.dump());
+        old_rows_all.push_back(std::move(old_row));
+        new_rows_all.push_back(std::move(new_row));
+    }
+    auto new_pk_of = [&](std::size_t i) {
+        auto it = new_rows_all[i].find(pk_col);
+        return it != new_rows_all[i].end() ? it->second : undo_entries[i].key;
+    };
+    bool pk_changes = false;
+    for (std::size_t i = 0; i < undo_entries.size(); i++) {
+        if (new_pk_of(i) != undo_entries[i].key) {
+            pk_changes = true;
+            break;
+        }
+    }
+
+    if (pk_changes) {
+        // When a statement changes primary keys, per-row remove-old/insert-new is order-dependent:
+        // `SET id = id + 1` on ids 2 and 3 first inserts the entry for the new key 3 (the old row 2), then
+        // removes "the old key 3" for the old row 3 -- which erases the entry it has just inserted, and the
+        // index loses a live row. So every old entry leaves first, and only then do the new ones enter.
+        for (std::size_t i = 0; i < undo_entries.size(); i++) {
+            if (new_pk_of(i) != undo_entries[i].key) {
+                if (auto idx_it = s.indexes.find(table); idx_it != s.indexes.end()) idx_it->second.remove(undo_entries[i].key);
+            }
+            for (auto& k : comp_keys) {
+                auto& ci = s.composite_indexes.at(k);
+                if (ci.key_from_row(old_rows_all[i]) != ci.key_from_row(new_rows_all[i])) ci.remove_row(old_rows_all[i]);
             }
         }
-        index_remove_row(s, table, old_row, pk_col);
-        index_insert_row(s, table, new_row);
-        for (auto& k : comp_keys) {
-            // Same atomicity fix as the PK B+Tree above: CompositeIndex::insert_row
-            // already overwrites an existing key in place (single tree_.insert() call),
-            // so when none of this index's columns actually changed value, skip
-            // remove_row() entirely -- calling it first would open the exact same
-            // "key temporarily absent" gap for a concurrent CompositeIndexPath read.
-            auto& ci = s.composite_indexes.at(k);
-            if (ci.key_from_row(old_row) == ci.key_from_row(new_row)) {
-                ci.insert_row(new_row);
-            } else {
-                ci.remove_row(old_row);
+        index_replace_rows(s, table, old_rows_all, new_rows_all, pk_col); // secondary + hash: leaving and entering in one pass
+        for (std::size_t i = 0; i < undo_entries.size(); i++) {
+            if (auto idx_it = s.indexes.find(table); idx_it != s.indexes.end()) {
+                nlohmann::json j = new_rows_all[i];
+                idx_it->second.insert(new_pk_of(i), j.dump());
+            }
+            for (auto& k : comp_keys) s.composite_indexes.at(k).insert_row(new_rows_all[i]);
+        }
+    } else {
+        for (std::size_t i = 0; i < undo_entries.size(); i++) {
+            const Row& old_row = old_rows_all[i];
+            const Row& new_row = new_rows_all[i];
+            if (auto idx_it = s.indexes.find(table); idx_it != s.indexes.end()) {
+                // Row-level-concurrency Stage 4/5 correctness fix (found via concurrent-reader
+                // monotonicity stress testing -- root cause of the "0 rows returned" phantom): the key is
+                // unchanged here, so ONE insert() overwrites the PK B+Tree entry atomically -- no remove()
+                // first, which would leave a window in which AccessPath::PkPoint (lock-free by design)
+                // finds no entry for a row that exists.
+                nlohmann::json j = new_row;
+                idx_it->second.insert(new_pk_of(i), j.dump());
+            }
+            for (auto& k : comp_keys) {
+                // Same atomicity reasoning for the composite indexes: CompositeIndex::insert_row overwrites an
+                // existing key in place, so when none of the index's columns changed value remove_row() is skipped.
+                auto& ci = s.composite_indexes.at(k);
+                if (ci.key_from_row(old_row) != ci.key_from_row(new_row)) ci.remove_row(old_row);
                 ci.insert_row(new_row);
             }
         }
+        // Secondary / hash indexes: each affected bucket is parsed and rewritten once per statement, not once per row.
+        index_replace_rows(s, table, old_rows_all, new_rows_all, pk_col);
     }
 
     std::vector<std::string> changed_cols;

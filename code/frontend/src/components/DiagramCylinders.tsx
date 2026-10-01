@@ -54,13 +54,13 @@ const NODES: Node[] = [
   },
   {
     id: "planner", x: 705, y: 350, w: 120, h: 98, c: C.core, name: L("Planner", "플래너"),
-    desc: L("Cost-based: picks the access path per table, the join algorithm and the join order (System-R DP) from histogram + most-common-value statistics.",
-            "비용 기반: 히스토그램 + 최빈값 통계로 테이블별 접근 경로, 조인 알고리즘, 조인 순서(System-R DP)를 선택."),
+    desc: L("Cost-based: picks the access path per table, the join algorithm and the join order (System-R DP) from histogram + most-common-value statistics. The same access paths find the rows of UPDATE and DELETE.",
+            "비용 기반: 히스토그램 + 최빈값 통계로 테이블별 접근 경로, 조인 알고리즘, 조인 순서(System-R DP)를 선택. 같은 접근 경로가 UPDATE·DELETE의 대상 행도 찾음."),
   },
   {
     id: "executor", x: 885, y: 350, w: 120, h: 98, c: C.core, name: L("Executor", "실행기"),
-    desc: L("Runs the plan: joins (NL, hash, sort-merge, index NL), subqueries, CTE, window functions. Result cache (LRU-512) and a thread pool for parallel scans.",
-            "계획 실행: 조인(NL, 해시, 소트-머지, 인덱스 NL), 서브쿼리, CTE, 윈도우 함수. 결과 캐시(LRU 512)와 병렬 스캔용 스레드 풀 포함."),
+    desc: L("Runs the plan: joins (NL, hash, sort-merge, index NL), subqueries, CTE, window functions. Result cache (LRU-512) and a thread pool for parallel scans. UPDATE / DELETE take index hits only as candidates, verify each against the real row and scan when in doubt; UPDATE checks PRIMARY KEY / UNIQUE and applies fully or not at all.",
+            "계획 실행: 조인(NL, 해시, 소트-머지, 인덱스 NL), 서브쿼리, CTE, 윈도우 함수. 결과 캐시(LRU 512)와 병렬 스캔용 스레드 풀 포함. UPDATE·DELETE는 인덱스 결과를 후보로만 쓰고 실제 행으로 검증하며 의심스러우면 스캔. UPDATE는 PRIMARY KEY·UNIQUE를 검사하고 전부 적용되거나 전혀 적용되지 않음."),
   },
   {
     id: "txn", x: 1085, y: 350, w: 130, h: 104, c: C.txn, name: L("Transactions", "트랜잭션"),
@@ -69,8 +69,8 @@ const NODES: Node[] = [
   },
   {
     id: "storage", x: 1085, y: 600, w: 130, h: 104, c: C.storage, name: L("Storage", "스토리지"),
-    desc: L("B+Tree and hash indexes, in-memory MVCC row versions, buffer pool (LRU, 64 pages x 16 KB), binary .rdb files with LZ4 compression.",
-            "B+Tree·해시 인덱스, 메모리 상의 MVCC 행 버전, 버퍼 풀(LRU, 16KB 페이지 64개), LZ4 압축 바이너리 .rdb 파일."),
+    desc: L("B+Tree and hash indexes (a statement rewrites each secondary-index bucket once), in-memory MVCC row versions with a pk-to-position cache, buffer pool (LRU, 64 pages x 16 KB), binary .rdb files with LZ4 compression.",
+            "B+Tree·해시 인덱스(문장당 보조 인덱스 버킷을 한 번만 다시 기록), PK→위치 캐시가 있는 메모리 상의 MVCC 행 버전, 버퍼 풀(LRU, 16KB 페이지 64개), LZ4 압축 바이너리 .rdb 파일."),
   },
   {
     id: "durability", x: 825, y: 600, w: 130, h: 104, c: C.disk, name: L("Durability", "내구성"),
@@ -129,7 +129,8 @@ export default function DiagramCylinders() {
   const t = useT();
   const [hover, setHover] = useState<string | null>(null);
   const tip = NODES.find(n => n.id === hover);
-  const tipUp = tip !== undefined && tip.y >= 475; // lower nodes: open the tooltip upwards
+  // The bottom row and the pipeline row (x >= 500) open their tooltip upwards: below them sits the next row, above them empty space.
+  const tipUp = tip !== undefined && (tip.y >= 475 || tip.x >= 500);
 
   return (
     <div className="dgc">

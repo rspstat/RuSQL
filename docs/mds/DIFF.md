@@ -46,7 +46,7 @@
 | 항목 | MySQL | PostgreSQL | Oracle | RuSQL |
 |------|-------|------------|--------|--------|
 | 원자성 (A) | ✓ | ✓ | ✓ | ✓ (Undo log + WAL) |
-| 일관성 (C) | ✓ | ✓ | ✓ | ✓ (PK/FK/UNIQUE/CHECK 검증) |
+| 일관성 (C) | ✓ | ✓ | ✓ | ✓ (PK/FK/UNIQUE/CHECK 검증 — UPDATE에서도 PK/UNIQUE 중복 거부, 다중 행 UPDATE는 전부 적용되거나 전혀 적용되지 않음, 2026-10-01) |
 | 격리성 (I) | ✓ | ✓ | ✓ | ✓ (`SnapshotCtx` 기반 MVCC 가시성: DML은 `s.tables`에 직접 기록되고 격리수준별 스냅샷으로 필터링 — 미커밋 행은 작성자 본인에게만 보임) |
 | 지속성 (D) | ✓ | ✓ | ✓ | ✓ (redo 로그 fsync + 그룹 커밋 — 2026-10-01부터 autocommit 문장도 내구성 보장(이전엔 autocommit INSERT가 크래시 시 유실), 커밋 비용이 테이블 크기와 무관(1k~20k행에서 평탄 측정); WAL fsync + 그룹 커밋; 전역 유일 txn_id 태깅으로 세션 간 공유 WAL/Undo Log 격리 — 한 세션의 COMMIT이 다른 세션의 진행 중인 트랜잭션 레코드를 파괴하지 않음) |
 | MVCC | ✓ (InnoDB Undo segment) | ✓ (튜플 버전 힙 내 저장) | ✓ (Undo tablespace 기반 Consistent Read) | ✓ (`_xmin`/`_xmax` 태깅 실제 다중버전 — UPDATE마다 새 물리 버전 생성, `SnapshotCtx` 기반 격리수준별 가시성, GC 호라이즌 기반 VACUUM; 같은 테이블의 서로 다른 행에 대한 쓰기도 실제로 동시 실행됨(행 단위 잠금 — `table_data_locks`+`LockManager` 행 클레임, 진짜 블로킹 대기 포함); predicate lock으로 phantom 탐지는 되지만 Postgres 수준 완전 SSI(진짜 dangerous-structure 판정)는 아직 아님 — 아래 행 참고) |
@@ -89,6 +89,7 @@
 | 복합 인덱스 | ✓ | ✓ | ✓ | ✓ |
 | 인덱스 교차 (Index Intersection) | ✓ (index merge) | ✓ | ✓ | ✓ (AND 조건에서 독립 인덱스 2개 이상 → PK HashSet 교집합, `IndexIntersection` AccessPath, EXPLAIN에 `∩` 표시) |
 | 보조 인덱스 증분 갱신 | ✓ (InnoDB 자동) | ✓ | ✓ | ✓ (INSERT/UPDATE/DELETE 시 `index_insert_row` / `index_remove_row`로 O(1) 갱신 — 전체 재빌드 없음. 복합 PK 테이블도 PK 전체 컬럼으로 버킷 항목을 식별 — 2026-10-01 수정) |
+| UPDATE/DELETE의 대상 행 탐색에 인덱스 사용 | ✓ | ✓ | ✓ | ✓ (플래너 접근 경로를 SELECT와 공유 — PK 점/범위, 보조 B+Tree 점/범위/LIKE 접두사, 해시, 인덱스 교집합, AND의 인덱스 가능 리프. 인덱스는 후보만 공급하고 실제 행으로 검증, 의심스러우면 스캔. 20,000행에서 단일/소수 행 약 1ms. 복합 인덱스·복합 PK·다른 트랜잭션이 열려 있을 때는 스캔, 2026-10-01) |
 | 내림차순 인덱스 | ✓ (8.0+) | ✓ | ✓ | △ (`CREATE INDEX i ON t (col DESC)` 문법은 수용 — 이전엔 파싱 에러. B+Tree는 항상 오름차순으로 구축되므로 방향은 결과에 영향 없는 물리 힌트일 뿐, 실제 내림차순 저장은 아님) |
 | BRIN (블록 범위 인덱스) | ✗ | ✓ | ✗ | ✗ |
 | GIN / GiST | ✗ | ✓ | ✗ | ✗ |

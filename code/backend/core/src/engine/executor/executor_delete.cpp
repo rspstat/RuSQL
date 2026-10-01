@@ -126,7 +126,7 @@ StringResult Executor::exec_delete_inner(SharedDatabase& s, const std::string& t
     // PK B+Tree (s.indexes[other_table], keyed by bare table name), secondary/hash indexes
     // (index_insert_row/index_remove_row), or composite indexes -- a PK-indexed point
     // lookup on the cascaded table kept serving stale data indefinitely. Mirrors the
-    // refresh pattern this same function's own refresh_indexes_for_soft_delete uses below
+    // refresh pattern this same function's own refresh_indexes_for_soft_deletes uses below
     // for the primary table, generalized to take table/pk_col as parameters since cascade
     // operates on `other_table`. A cascade never changes the cascaded row's OWN pk_col
     // value (SetNull/SetDefault only ever touch the FK column pointing at `table`), so the
@@ -274,8 +274,17 @@ StringResult Executor::exec_delete_inner(SharedDatabase& s, const std::string& t
 
             std::vector<std::pair<std::size_t, std::string>> pos_map_snapshot;
             if (auto mit = s.row_pk_pos.find(table); mit != s.row_pk_pos.end()) {
+                auto btit = s.tables.find(table);
                 for (auto& pk : pks_to_delete) {
-                    if (auto pit = mit->second.find(pk); pit != mit->second.end()) pos_map_snapshot.emplace_back(pit->second, pk);
+                    auto pit = mit->second.find(pk);
+                    if (pit == mit->second.end() || btit == s.tables.end() || pit->second >= btit->second.size()) continue;
+                    // The cached position must really hold this key AND a live row. Without the check, a
+                    // key the PK B+Tree still lists for a soft-deleted row (its cache entry survives the
+                    // soft delete) had that DEAD row swap-removed and counted as a deletion -- `0 rows`
+                    // became `1 row(s) deleted` depending on nothing but how warm the cache was.
+                    const Row& cached = btit->second[pit->second];
+                    auto ck = cached.find(pk_col);
+                    if (ck != cached.end() && ck->second == pk && is_visible(cached)) pos_map_snapshot.emplace_back(pit->second, pk);
                 }
             }
 
@@ -321,18 +330,49 @@ StringResult Executor::exec_delete_inner(SharedDatabase& s, const std::string& t
             auto tit = s.tables.find(table);
             if (tit == s.tables.end()) return StringResult::Err("Table '" + table + "' not found");
             auto& rows = tit->second;
-            std::size_t before = rows.size();
-            rows.erase(std::remove_if(rows.begin(), rows.end(),
-                                       [&](Row& r) {
-                                           if (is_visible(r) && matches_condexpr(r, condition)) {
-                                               rows_to_delete.push_back(r);
-                                               return true;
-                                           }
-                                           return false;
-                                       }),
-                       rows.end());
-            deleted = before - rows.size();
-            if (auto it = s.row_pk_pos.find(table); it != s.row_pk_pos.end()) it->second.clear();
+            // Index-assisted: the planner's index narrows the search to a few positions, which are
+            // swap-removed highest first (like the pk BETWEEN branch above) while row_pk_pos is
+            // kept in step. Anything doubtful -> not usable -> the plain scan below, as before.
+            auto visible = [](const Row& r) { return Executor::is_visible(r); };
+            DmlIndexHit hit;
+            if (!condition_has_subquery(condition)) {
+                hit = dml_index_positions(s, table, condition, pk_col, visible, 0);
+                if (hit.cache_gap) {
+                    rebuild_pk_positions(s, table, pk_col); // exclusive here, so it may heal the cache
+                    hit = dml_index_positions(s, table, condition, pk_col, visible, 0);
+                }
+            }
+            if (hit.usable) {
+                auto& pos_map = s.row_pk_pos[table];
+                for (auto it = hit.positions.rbegin(); it != hit.positions.rend(); ++it) {
+                    std::size_t pos = *it;
+                    Row del_row = std::move(rows[pos]);
+                    if (pos + 1 != rows.size()) rows[pos] = std::move(rows.back());
+                    rows.pop_back();
+                    auto dk = del_row.find(pk_col);
+                    if (dk != del_row.end()) pos_map.erase(dk->second);
+                    if (pos < rows.size()) {
+                        auto sit = rows[pos].find(pk_col);
+                        if (sit != rows[pos].end()) pos_map[sit->second] = pos;
+                    }
+                    rows_to_delete.push_back(std::move(del_row));
+                }
+                std::reverse(rows_to_delete.begin(), rows_to_delete.end()); // RETURNING keeps the scan's ascending order
+                deleted = rows_to_delete.size();
+            } else {
+                std::size_t before = rows.size();
+                rows.erase(std::remove_if(rows.begin(), rows.end(),
+                                           [&](Row& r) {
+                                               if (is_visible(r) && matches_condexpr(r, condition)) {
+                                                   rows_to_delete.push_back(r);
+                                                   return true;
+                                               }
+                                               return false;
+                                           }),
+                           rows.end());
+                deleted = before - rows.size();
+                if (auto it = s.row_pk_pos.find(table); it != s.row_pk_pos.end()) it->second.clear();
+            }
         }
 
         // Redo capture: physically-removed rows still need to be durable as "this version died".
@@ -341,7 +381,7 @@ StringResult Executor::exec_delete_inner(SharedDatabase& s, const std::string& t
             nlohmann::json dj = del_row;
             txn.log_delete(table, kit != del_row.end() ? kit->second : std::string(), dj.dump());
         }
-        for (auto& del_row : rows_to_delete) index_remove_row(s, table, del_row, pk_col);
+        index_replace_rows(s, table, rows_to_delete, std::vector<Row>{}, pk_col); // once per bucket, not once per row
         if (auto idx_it = s.indexes.find(table); idx_it != s.indexes.end()) {
             for (auto& del_row : rows_to_delete) {
                 auto it = del_row.find(pk_col);
@@ -386,8 +426,17 @@ StringResult Executor::exec_delete_inner(SharedDatabase& s, const std::string& t
                 if (matches_condition_with_subquery(s, r, condition)) rows_to_delete.push_back(r);
             }
         } else {
-            for (auto& r : tit->second) {
-                if (is_visible(r) && matches_condexpr(r, condition)) rows_to_delete.push_back(r);
+            DmlIndexHit hit;
+            if (auto pkc = single_pk_col(table)) {
+                hit = dml_index_positions(s, table, condition, *pkc, [](const Row& r) { return Executor::is_visible(r); },
+                                          txn.current_txn_id());
+            }
+            if (hit.usable) {
+                for (auto pos : hit.positions) rows_to_delete.push_back(tit->second[pos]);
+            } else {
+                for (auto& r : tit->second) {
+                    if (is_visible(r) && matches_condexpr(r, condition)) rows_to_delete.push_back(r);
+                }
             }
         }
     }
@@ -593,18 +642,22 @@ StringResult Executor::exec_delete_inner(SharedDatabase& s, const std::string& t
     // the stale pre-delete copy (_xmax still "0") forever, even to a session with no
     // reason to still see it -- re-upsert the PK entry and refresh secondary/hash indexes
     // via the same remove-then-insert pattern UPDATE already uses for its two-row swap.
-    auto refresh_indexes_for_soft_delete = [&](const Row& old_row, const Row& new_row, const std::string& key) {
-        if (auto idx_it = s.indexes.find(table); idx_it != s.indexes.end()) {
-            nlohmann::json j = new_row;
-            idx_it->second.insert(key, j.dump());
+    // The rows soft-deleted by one attempt are collected and refreshed together: a secondary
+    // bucket is one JSON array of rows, so refreshing per row rewrote it once per row.
+    auto refresh_indexes_for_soft_deletes = [&](const std::vector<Row>& olds, const std::vector<Row>& news) {
+        for (std::size_t i = 0; i < news.size(); i++) {
+            if (auto idx_it = s.indexes.find(table); idx_it != s.indexes.end()) {
+                auto kit = news[i].find(pk_col);
+                nlohmann::json j = news[i];
+                idx_it->second.insert(kit != news[i].end() ? kit->second : std::string(), j.dump());
+            }
+            for (auto& [k, ci] : s.composite_indexes) {
+                if (ci.table != table) continue;
+                ci.remove_row(olds[i]);
+                ci.insert_row(news[i]);
+            }
         }
-        index_remove_row(s, table, old_row, pk_col);
-        index_insert_row(s, table, new_row);
-        for (auto& [k, ci] : s.composite_indexes) {
-            if (ci.table != table) continue;
-            ci.remove_row(old_row);
-            ci.insert_row(new_row);
-        }
+        index_replace_rows(s, table, olds, news, pk_col);
     };
 
     if (txn.is_active()) {
@@ -639,7 +692,23 @@ StringResult Executor::exec_delete_inner(SharedDatabase& s, const std::string& t
             bool conflict = false;
             std::string conflict_key;
             auto& rows = s.tables.at(table);
-            for (auto& row : rows) {
+            // Index-assisted targets (see executor_dml_index.cpp), recomputed on every attempt under
+            // the exclusive lock so the positions can never be stale. Not usable -> every row.
+            DmlIndexHit hit;
+            if (!condition_has_subquery(condition)) {
+                if (auto pkc = single_pk_col(table)) {
+                    auto visible = [](const Row& r) { return Executor::is_visible(r); };
+                    hit = dml_index_positions(s, table, condition, *pkc, visible, txn_id);
+                    if (hit.cache_gap) {
+                        rebuild_pk_positions(s, table, *pkc);
+                        hit = dml_index_positions(s, table, condition, *pkc, visible, txn_id);
+                    }
+                }
+            }
+            const std::size_t n_targets = hit.usable ? hit.positions.size() : rows.size();
+            std::vector<Row> soft_olds, soft_news;
+            for (std::size_t ti = 0; ti < n_targets; ti++) {
+                Row& row = rows[hit.usable ? hit.positions[ti] : ti];
                 // PLAN.md-tracked bug fix: the plain matches_condexpr can't evaluate a
                 // ConditionValue::Subquery leaf, so a subquery-bearing WHERE clause matched
                 // zero rows here even though rows_to_delete (above) correctly identified the
@@ -666,9 +735,11 @@ StringResult Executor::exec_delete_inner(SharedDatabase& s, const std::string& t
                 nlohmann::json old_j = row;
                 txn.log_delete(table, key, old_j.dump());
                 row["_xmax"] = txn_id_str;
-                refresh_indexes_for_soft_delete(old_j.get<Row>(), row, key);
+                soft_olds.push_back(old_j.get<Row>());
+                soft_news.push_back(row);
                 deleted++;
             }
+            refresh_indexes_for_soft_deletes(soft_olds, soft_news);
             if (!conflict) {
                 // Row-level-concurrency Stage 4/5 correctness fix: invalidate the cache
                 // HERE, still holding table_lock EXCLUSIVE -- see exec_insert_inner's
@@ -702,12 +773,29 @@ StringResult Executor::exec_delete_inner(SharedDatabase& s, const std::string& t
         // PLAN.md-tracked bug fix: same reasoning as the two soft-delete loops below --
         // dispatch to the subquery-aware matcher when the condition needs it.
         bool has_subq = condition_has_subquery(condition);
-        rows.erase(std::remove_if(rows.begin(), rows.end(),
-                                   [&](Row& r) {
-                                       if (!is_visible(r)) return false;
-                                       return has_subq ? matches_condition_with_subquery(s, r, condition) : matches_condexpr(r, condition);
-                                   }),
-                   rows.end());
+        // A handful of index-located rows are erased by position (stable order, like remove_if);
+        // anything else -- no usable index, or many rows -- keeps the single remove_if pass.
+        DmlIndexHit hit;
+        if (!has_subq) {
+            if (auto pkc = single_pk_col(table)) {
+                auto visible = [](const Row& r) { return Executor::is_visible(r); };
+                hit = dml_index_positions(s, table, condition, *pkc, visible, 0);
+                if (hit.cache_gap) {
+                    rebuild_pk_positions(s, table, *pkc);
+                    hit = dml_index_positions(s, table, condition, *pkc, visible, 0);
+                }
+            }
+        }
+        if (hit.usable && hit.positions.size() <= 16) {
+            for (auto it = hit.positions.rbegin(); it != hit.positions.rend(); ++it) rows.erase(rows.begin() + static_cast<std::ptrdiff_t>(*it));
+        } else {
+            rows.erase(std::remove_if(rows.begin(), rows.end(),
+                                       [&](Row& r) {
+                                           if (!is_visible(r)) return false;
+                                           return has_subq ? matches_condition_with_subquery(s, r, condition) : matches_condexpr(r, condition);
+                                       }),
+                       rows.end());
+        }
         deleted = before - rows.size();
         hard_deleted = true;
         if (deleted > 0) s.query_cache.invalidate_table(table);
@@ -735,6 +823,7 @@ StringResult Executor::exec_delete_inner(SharedDatabase& s, const std::string& t
             bool conflict = false;
             std::string conflict_key;
             auto& rows = s.tables.at(table);
+            std::vector<Row> soft_olds, soft_news;
             for (auto& row : rows) {
                 // PLAN.md-tracked bug fix: the plain matches_condexpr can't evaluate a
                 // ConditionValue::Subquery leaf, so a subquery-bearing WHERE clause matched
@@ -765,9 +854,11 @@ StringResult Executor::exec_delete_inner(SharedDatabase& s, const std::string& t
                     txn.log_delete(table, key, oj.dump()); // redo capture (no-op for WAL/undo outside a txn)
                 }
                 row["_xmax"] = txn_id_str;
-                refresh_indexes_for_soft_delete(old_row, row, key);
+                soft_olds.push_back(old_row);
+                soft_news.push_back(row);
                 deleted++;
             }
+            refresh_indexes_for_soft_deletes(soft_olds, soft_news);
             if (!conflict) {
                 // Row-level-concurrency Stage 4/5 correctness fix: invalidate the cache
                 // HERE, still holding table_lock EXCLUSIVE -- see exec_insert_inner's
@@ -806,7 +897,7 @@ StringResult Executor::exec_delete_inner(SharedDatabase& s, const std::string& t
             nlohmann::json dj = del_row;
             txn.log_delete(table, kit != del_row.end() ? kit->second : std::string(), dj.dump());
         }
-        for (auto& del_row : rows_to_delete) index_remove_row(s, table, del_row, pk_col);
+        index_replace_rows(s, table, rows_to_delete, std::vector<Row>{}, pk_col); // once per bucket, not once per row
         if (auto idx_it = s.indexes.find(table); idx_it != s.indexes.end()) {
             for (auto& del_row : rows_to_delete) {
                 auto it = del_row.find(pk_col);

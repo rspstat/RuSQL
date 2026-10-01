@@ -207,10 +207,6 @@ void UndoLogFile::clear() {
     clear_locked();
 }
 
-bool UndoLogFile::exists() const {
-    return fs::exists(path_);
-}
-
 void UndoLogFile::remove_txn(std::uint64_t txn_id) {
     std::lock_guard<std::mutex> g(io_->undo_lock);
     auto all = read_all_locked();
@@ -526,7 +522,6 @@ void TransactionManager::release_file_handles() {
     io_->close_undo_handle_locked();
 }
 
-bool TransactionManager::has_undo_log_file() const { return undo_log_file_.exists(); }
 std::vector<UndoEntry> TransactionManager::read_undo_log_file() { return undo_log_file_.read_all(); }
 void TransactionManager::clear_undo_log_file() { undo_log_file_.clear(); }
 

@@ -397,6 +397,9 @@ TEST_CASE("UPDATE: concurrent increments of one row never lose an update", "[upd
     for (auto& t : threads) t.join();
     REQUIRE(failures == 0);
     auto rows = snapshot(ex);
+    std::string dump; // shown only if an assertion below fails
+    for (auto& r : rows) dump += "(id=" + std::to_string(r.id) + " v=" + std::to_string(r.v) + ") ";
+    INFO("visible rows: " << dump);
     REQUIRE(rows.size() == 2);
     REQUIRE(rows[0].v == kThreads * kIters); // no lost update on the contended row
     REQUIRE(rows[1].v == kIters);

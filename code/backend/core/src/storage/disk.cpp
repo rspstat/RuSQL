@@ -181,14 +181,6 @@ std::optional<TableSchema> DiskManager::load_schema(const std::string& table) co
     }
 }
 
-void DiskManager::save_schema_columns(const std::string& table, const std::vector<std::string>& columns) const {
-    auto [db, tbl] = parse_key(table);
-    ensure_db_dir(db);
-    std::string path = table_dir(db) + "/" + tbl + ".schema.json";
-    nlohmann::json j = columns;
-    write_file(path, j.dump());
-}
-
 void DiskManager::save_table(const std::string& table, const std::vector<Row>& rows) const {
     auto [db, tbl] = parse_key(table);
     ensure_db_dir(db);
