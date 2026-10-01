@@ -1,0 +1,142 @@
+/* DiagramCylinders -- the cylinder-and-arrow picture. Colors come from --c, set per node / arrow. */
+
+.dgc-wrap {
+  position: relative;
+}
+
+.dgc-svg {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+/* ---- cylinders ---- */
+.dgc-node {
+  outline: none;
+  transform-box: fill-box;
+  transform-origin: center;
+  transition: transform 0.18s ease, filter 0.18s ease;
+  /* "backwards", not "both": otherwise the finished animation would pin the transform and block the hover scale */
+  animation: dgc-pop 0.5s ease-out backwards;
+  animation-delay: calc(var(--o, 0) * 90ms);
+}
+
+.dgc-node:hover,
+.dgc-node:focus-visible {
+  transform: scale(1.06);
+  filter: drop-shadow(0 0 10px color-mix(in srgb, var(--c) 55%, transparent));
+}
+
+.dgc-body {
+  fill: #252526;
+  stroke: var(--c);
+  stroke-width: 1.6;
+  transition: stroke-width 0.18s ease;
+}
+
+.dgc-node:hover .dgc-body,
+.dgc-node:focus-visible .dgc-body {
+  stroke-width: 2.6;
+}
+
+/* the lid lights up in flow order, so a glow walks along the path */
+.dgc-top {
+  fill: color-mix(in srgb, var(--c) 18%, #2b2b2f);
+  stroke: var(--c);
+  stroke-width: 1.6;
+  animation: dgc-glow 5s ease-in-out infinite;
+  animation-delay: calc(1.4s + var(--o, 0) * 0.35s);
+}
+
+.dgc-name {
+  fill: #f0f0f0;
+  font: 600 14px 'Segoe UI', sans-serif;
+  pointer-events: none;
+}
+
+/* ---- arrows ---- */
+.dgc-arrows {
+  animation: dgc-fade 0.7s ease-out backwards;
+  animation-delay: 900ms;
+}
+
+.dgc-port {
+  fill: #9d9d9d;
+  font: 11px 'Segoe UI', sans-serif;
+  animation: dgc-fade 0.7s ease-out backwards;
+  animation-delay: 900ms;
+}
+
+/* ---- tooltip (HTML, positioned from the node's SVG coordinates in %) ---- */
+.dgc-tip {
+  position: absolute;
+  z-index: 5;
+  width: 300px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 12px;
+  background: #1b1b1d;
+  border: 1px solid var(--c);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+  transform: translate(-50%, 10px);
+  pointer-events: none;
+  animation: dgc-fade 0.15s ease-out;
+}
+
+.dgc-tip.up {
+  transform: translate(-50%, calc(-100% - 10px));
+}
+
+.dgc-tip b {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--c);
+}
+
+.dgc-tip span {
+  font-size: 12px;
+  line-height: 1.5;
+  color: #d0d0d0;
+}
+
+/* ---- legend ---- */
+.dgc-legend {
+  display: flex;
+  align-items: center;
+  gap: 22px;
+  margin-top: 10px;
+  font-size: 12px;
+  color: #858585;
+}
+
+.dgc-key {
+  display: inline-block;
+  width: 28px;
+  margin-right: 8px;
+  vertical-align: middle;
+  border-top: 2px solid #9d9d9d;
+}
+
+.dgc-key.dashed {
+  border-top-style: dashed;
+}
+
+.dgc-hint {
+  margin-left: auto;
+}
+
+/* ---- motion ---- */
+@keyframes dgc-pop {
+  from { opacity: 0; transform: scale(0.8); }
+}
+
+@keyframes dgc-fade {
+  from { opacity: 0; }
+}
+
+@keyframes dgc-glow {
+  0%, 12%, 100% { fill: color-mix(in srgb, var(--c) 18%, #2b2b2f); }
+  6% { fill: color-mix(in srgb, var(--c) 60%, #2b2b2f); }
+}

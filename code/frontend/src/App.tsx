@@ -6,6 +6,7 @@ import type * as Monaco from "monaco-editor";
 import "./App.css";
 import { format as sqlFormat } from "sql-formatter";
 import AiView from "./components/AiView";
+import DiagramView from "./components/DiagramView";
 import Sidebar from "./components/Sidebar";
 import ErdView from "./components/ErdView";
 import ConfirmDialog from "./components/ConfirmDialog";
@@ -25,7 +26,7 @@ interface HistoryEntry {
   success: boolean;
   elapsed: number;
 }
-type ActiveView = "editor" | "erd" | "server" | "ai";
+type ActiveView = "editor" | "erd" | "server" | "ai" | "diagram";
 const PAGE_SIZE = 100;
 
 // 셀 편집 시 PK WHERE절 값 이스케이프용 — 컬럼의 실제 data_type을 보고 숫자 리터럴로 둘지
@@ -2075,6 +2076,20 @@ function App() {
           </svg>
         </div>
 
+        {/* Diagram */}
+        <div
+          className={`activity-icon ${activeView === "diagram" ? "active" : ""}`}
+          title="Diagram"
+          onClick={() => setActiveView("diagram")}
+        >
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+            <rect x="8" y="2" width="8" height="6" rx="1.5"/>
+            <rect x="1" y="16" width="8" height="6" rx="1.5"/>
+            <rect x="15" y="16" width="8" height="6" rx="1.5"/>
+            <path d="M12 8V12M5 16V12H19V16"/>
+          </svg>
+        </div>
+
         <div className="activity-bar-bottom">
           <div className="activity-icon" title="Account">
             <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor">
@@ -3545,6 +3560,8 @@ function App() {
       )}
 
       {activeView === "ai" && <AiView />}
+
+      {activeView === "diagram" && <DiagramView />}
 
       </div> {/* app-body */}
     </div>

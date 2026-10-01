@@ -1,0 +1,438 @@
+/* DiagramView -- "Diagram" page. Every colored element reads its layer color from --c. */
+
+.dg-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 28px 32px 56px;
+}
+
+.dg-page {
+  max-width: 1180px;
+  min-width: 940px;
+  margin: 0 auto;
+  color: #d4d4d4;
+  font-family: 'Segoe UI', sans-serif;
+  /* Korean: wrap between words, not in the middle of one */
+  word-break: keep-all;
+  overflow-wrap: break-word;
+}
+
+.dg-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+/* language toggle and view toggle, side by side at the right end of the title row */
+.dg-controls {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
+}
+
+/* segmented toggle (language: text buttons, view: icon buttons) */
+.dg-seg {
+  display: inline-flex;
+  flex-shrink: 0;
+  background: #252526;
+  border: 1px solid #3a3a3d;
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.dg-seg button {
+  padding: 5px 14px;
+  background: transparent;
+  border: none;
+  font: inherit;
+  font-size: 12px;
+  color: #858585;
+  cursor: pointer;
+}
+
+.dg-seg button + button {
+  border-left: 1px solid #3a3a3d;
+}
+
+.dg-seg button:hover {
+  color: #d4d4d4;
+}
+
+.dg-seg button.active {
+  background: #4ec9b0;
+  color: #111111;
+  font-weight: 600;
+}
+
+.dg-seg-icons button {
+  display: inline-flex;
+  align-items: center;
+  padding: 5px 11px;
+}
+
+.dg-seg-icons button svg {
+  transition: transform 0.18s ease;
+}
+
+.dg-seg-icons button:hover svg {
+  transform: scale(1.15);
+}
+
+.dg-title {
+  margin: 0;
+  font-size: 22px;
+  font-weight: 600;
+  color: #ffffff;
+  letter-spacing: 0.2px;
+}
+
+.dg-lead {
+  margin: 6px 0 18px;
+  font-size: 13px;
+  color: #858585;
+}
+
+/* numbered badge shared by ribbon, panels and stages */
+.dg-num {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: var(--c);
+  color: #111111;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+/* flow overview */
+.dg-ribbon {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 10px;
+  padding: 10px 14px;
+  margin-bottom: 26px;
+  background: #252526;
+  border: 1px solid #333333;
+  border-radius: 8px;
+  font-size: 12px;
+  color: #cccccc;
+}
+
+.dg-ribbon-step {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.dg-ribbon-step i {
+  font-style: normal;
+  color: #5a5a5a;
+  margin-right: 4px;
+}
+
+.dg-ribbon-back {
+  margin-left: auto;
+  color: #858585;
+}
+
+.dg-caption {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+  font-size: 13px;
+  font-weight: 600;
+  color: #cccccc;
+}
+
+/* the big layout grid: 5 client columns, rows placed explicitly from the component */
+.dg-grid {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  column-gap: 18px;
+}
+
+/* client / tauri cards */
+.dg-card {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 11px 13px;
+  background: #252526;
+  border: 1px solid #3a3a3d;
+  border-top: 3px solid var(--c);
+  border-radius: 8px;
+}
+
+.dg-card b {
+  font-size: 13px;
+  font-weight: 600;
+  color: #f0f0f0;
+}
+
+.dg-card span {
+  font-size: 11.5px;
+  color: #b0b0b0;
+}
+
+.dg-card em {
+  margin-top: 4px;
+  font-style: normal;
+  font-size: 11px;
+  color: #858585;
+}
+
+/* vertical arrow with an optional label pill sitting on the line */
+.dg-wire {
+  position: relative;
+  min-height: 72px;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+}
+
+/* the arrow itself is an svg (FlowArrow) stretched over the whole cell */
+.dg-farrow {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+}
+
+.dg-wire span {
+  position: relative;
+  z-index: 1;
+  padding: 2px 9px;
+  background: #1e1e1e;
+  border: 1px solid var(--c);
+  border-radius: 10px;
+  font-size: 11px;
+  color: var(--c);
+  white-space: nowrap;
+}
+
+/* layer panels */
+.dg-panel {
+  padding: 14px 16px 16px;
+  background: #232326;
+  border: 1px solid #3a3a3d;
+  border-left: 4px solid var(--c);
+  border-radius: 10px;
+}
+
+.dg-panel-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.dg-panel-head h2 {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+  color: #ffffff;
+}
+
+.dg-panel-head span:last-child {
+  font-size: 12px;
+  color: #858585;
+}
+
+.dg-chips {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 10px;
+}
+
+.dg-chip {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 9px 11px;
+  background: #2b2b2f;
+  border: 1px solid #3c3c40;
+  border-radius: 6px;
+}
+
+.dg-chip b {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--c);
+}
+
+.dg-chip span {
+  font-size: 11.5px;
+  line-height: 1.4;
+  color: #b0b0b0;
+}
+
+/* parse -> plan -> execute row inside engine_core */
+.dg-pipeline {
+  display: flex;
+  align-items: stretch;
+  margin-bottom: 12px;
+}
+
+.dg-stage {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 12px 14px;
+  background: #2b2b2f;
+  border: 1px solid var(--c);
+  border-radius: 8px;
+}
+
+.dg-stage-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.dg-stage-head b {
+  font-size: 13px;
+  font-weight: 600;
+  color: #ffffff;
+}
+
+.dg-stage > span {
+  font-size: 11.5px;
+  line-height: 1.45;
+  color: #b0b0b0;
+}
+
+/* horizontal arrow between pipeline stages: room for the 14px head, the svg fills it */
+.dg-harrow {
+  position: relative;
+  flex: 0 0 56px;
+  align-self: center;
+  height: 14px;
+}
+
+/* on-disk file strip at the bottom of the durability panel */
+.dg-disk {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin-top: 12px;
+  padding: 8px 12px;
+  background: #1b1b1d;
+  border: 1px dashed #4a4a4d;
+  border-radius: 6px;
+  font-size: 11.5px;
+}
+
+.dg-disk b {
+  color: var(--c);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.dg-disk span {
+  font-family: 'Consolas', monospace;
+  color: #a0a0a0;
+  word-break: break-word;
+}
+
+/* ------------------------------------------------------------------ */
+/* hover: a box lights up in its layer color and grows a touch          */
+/* ------------------------------------------------------------------ */
+.dg-card,
+.dg-chip,
+.dg-stage,
+.dg-panel {
+  transition: transform 0.18s ease, border-color 0.18s ease, box-shadow 0.18s ease;
+}
+
+.dg-card:hover,
+.dg-chip:hover,
+.dg-stage:hover {
+  position: relative;
+  z-index: 2;
+  transform: scale(1.03);
+  border-color: var(--c);
+  box-shadow: 0 4px 16px color-mix(in srgb, var(--c) 30%, transparent);
+}
+
+/* big panels only get a hint of growth, otherwise the whole row visibly jumps */
+.dg-panel:hover {
+  transform: scale(1.008);
+  border-color: var(--c);
+  box-shadow: 0 6px 22px color-mix(in srgb, var(--c) 18%, transparent);
+}
+
+/* ------------------------------------------------------------------ */
+/* motion                                                              */
+/* ------------------------------------------------------------------ */
+/* The arrow style shared by both pictures (the layered view's wires and the cylinder view's paths):
+   a dim base line, bright dashes sliding along it, a glowing packet, and a head from ArrowDefs. */
+.dg-aline {
+  fill: none;
+  stroke: var(--c);
+  stroke-opacity: 0.4;
+  stroke-width: 2;
+}
+
+.dg-aflow {
+  fill: none;
+  stroke: var(--c);
+  stroke-width: 2.4;
+  stroke-linecap: round;
+  stroke-dasharray: 3 13;
+  animation: dg-dash 0.8s linear infinite;
+}
+
+.dg-apacket {
+  fill: var(--c);
+  filter: drop-shadow(0 0 4px var(--c));
+}
+
+@keyframes dg-dash {
+  to { stroke-dashoffset: -16; }
+}
+
+/* page load: everything rises into place, top to bottom, like the flow itself.
+   "backwards" (not "both") so that the hover transform works once it has finished. */
+@keyframes dg-rise {
+  from { opacity: 0; transform: translateY(14px); }
+}
+
+.dg-top,
+.dg-lead,
+.dg-ribbon,
+.dg-caption {
+  animation: dg-rise 0.5s ease-out backwards;
+}
+
+.dg-lead { animation-delay: 60ms; }
+.dg-ribbon { animation-delay: 120ms; }
+.dg-caption { animation-delay: 180ms; }
+
+.dg-grid > *,
+.dg-page > .dg-panel {
+  animation: dg-rise 0.55s ease-out backwards;
+  animation-delay: calc(240ms + var(--d, 0) * 90ms);
+}
+
+/* the badge of step N pulses together everywhere it appears (ribbon, panel, stage),
+   one step after another, so the eye can follow the numbered path */
+@keyframes dg-ping {
+  0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--c) 70%, transparent); }
+  12%, 100% { box-shadow: 0 0 0 7px transparent; }
+}
+
+.dg-num {
+  animation: dg-ping 3.6s ease-out infinite;
+  animation-delay: calc(1.6s + var(--k, 0) * 0.4s);
+}
