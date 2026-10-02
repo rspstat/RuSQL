@@ -39,6 +39,7 @@ add_executable(engine_tests
     test_select_index.cpp
     test_row_json.cpp
     test_bulk_write.cpp
+    test_query_paths.cpp
 )
 
 target_link_libraries(engine_tests PRIVATE engine_core)

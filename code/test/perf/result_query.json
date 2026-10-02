@@ -1,0 +1,20 @@
+{
+  "rows": 50000,
+  "median_ms": {
+    "COUNT(*)": 18.24,
+    "SUM / AVG": 23.74,
+    "GROUP BY (50 groups)": 34.38,
+    "WHERE val = 4242 (no index)": 20.83,
+    "WHERE val < 300 (no index)": 22.24,
+    "WHERE code LIKE (no index)": 21.44,
+    "ORDER BY val DESC LIMIT 10": 38.93,
+    "DISTINCT grp": 31.73,
+    "SELECT id, val (50,000 rows out)": 80.73,
+    "join u, WHERE t.val < 50": 38.49,
+    "join u, no WHERE (50,000 rows out)": 363.28,
+    "join u + GROUP BY": 305.92,
+    "LEFT JOIN u, WHERE t.val < 50": 39.45,
+    "join u ON two conditions": 496.11,
+    "LEFT JOIN u ON two conditions": 438.97
+  }
+}

@@ -290,6 +290,50 @@ std::vector<Row> hash_join(const std::vector<Row>& left, const std::vector<Row>&
     return {};
 }
 
+std::optional<std::vector<Row>> hashed_join_verified(const std::vector<Row>& left, const std::vector<Row>& right, const std::string& table,
+                                                      bool left_outer, const std::function<const std::string*(const Row&)>& left_key,
+                                                      const std::function<const std::string*(const Row&)>& right_key,
+                                                      const std::vector<std::string>& right_schema_cols,
+                                                      const std::function<bool(const Row&)>& on_match) {
+    std::unordered_map<std::string, std::vector<const Row*>> hash;
+    for (auto& r : right) {
+        const std::string* key = right_key(r);
+        if (!key) return std::nullopt;
+        if (*key != JOIN_NULL_VALUE) hash[normalize_numeric_key(*key)].push_back(&r);
+    }
+    std::vector<const std::string*> left_keys;
+    left_keys.reserve(left.size());
+    for (auto& l : left) {
+        const std::string* key = left_key(l);
+        if (!key) return std::nullopt;
+        left_keys.push_back(key);
+    }
+
+    std::vector<Row> out;
+    if (left_outer) out.reserve(left.size());
+    for (std::size_t i = 0; i < left.size(); i++) {
+        bool matched = false;
+        if (*left_keys[i] != JOIN_NULL_VALUE) {
+            if (auto it = hash.find(normalize_numeric_key(*left_keys[i])); it != hash.end()) {
+                for (const Row* r : it->second) {
+                    Row merged = left[i];
+                    merge_right(merged, *r, table);
+                    if (on_match(merged)) {
+                        out.push_back(std::move(merged));
+                        matched = true;
+                    }
+                }
+            }
+        }
+        if (!matched && left_outer) {
+            Row merged = left[i];
+            null_right(merged, right_schema_cols, table);
+            out.push_back(std::move(merged));
+        }
+    }
+    return out;
+}
+
 std::vector<Row> nested_loop_join(const std::vector<Row>& left, const std::vector<Row>& right, JoinType join_type,
                                    const std::string& table, const std::vector<std::string>& using_cols,
                                    const std::vector<std::string>& right_schema_cols,

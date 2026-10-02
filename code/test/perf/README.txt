@@ -7,6 +7,8 @@
   perf/
   ├── bench.py          RuSQL 측정 스크립트 (결과 → result.json, UI의 Benchmark 패널이 읽음)
   ├── bench_mysql.py    같은 4개 항목을 MySQL에서 측정 (참고용, 결과 → result_mysql.json)
+  ├── bench_query.py    5만 행에서 스캔·집계·GROUP BY·DISTINCT·ORDER BY·조인 15종의 중앙값(ms), 결과 → result_query.json
+                        (UI 패널용이 아니라 두 빌드 비교용; 40초 넘는 질의는 timeout으로 표시하고 이후 질의는 건너뜀)
   ├── graph.py          발표용 그래프 (result.json → benchmark_result.png)
   ├── chart.py          예전 형식(RuSQL vs MySQL 5개 항목)용 차트 스크립트 -- 현재 result.json과는 형식이 다름
   ├── requirements.txt  Python 의존 패키지

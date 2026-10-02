@@ -769,16 +769,20 @@ private:
                                             bool for_update, bool for_share);
     StringResult format_result(SharedDatabase& s, std::vector<Row> result, const std::vector<SelectColumn>& columns, const std::string& table,
                                 const std::vector<Join>& joins);
+    // format_result for rows that stay where they are (the table, or the rows a join made): nothing is copied, so the rows
+    // must not need changing -- no SELECT-list subquery columns (format_result injects their values into the rows).
+    StringResult format_rows(SharedDatabase& s, const std::vector<const Row*>& rows, const std::vector<SelectColumn>& columns,
+                              const std::string& table, const std::vector<Join>& joins);
     static std::string agg_label(const AggFunc& func, const std::string& col);
     static std::vector<std::string> extract_agg_refs_from_cond(const CondExpr& expr);
     static void collect_agg_refs_cond(const CondExpr& expr, std::vector<std::string>& out);
     static void collect_agg_refs_arith(const ArithExpr& expr, std::vector<std::string>& out);
-    static std::string compute_agg_from_key(const std::string& key, const std::vector<Row>& grp);
-    // Computes every Agg/AggAlias column in `columns` over `grp`, keyed by each
-    // column's display label — shared by the GROUP BY path (one call per group) and
+    static std::string compute_agg_from_key(const std::string& key, const std::vector<const Row*>& grp);
+    // Computes every Agg/AggAlias column in `columns` over `grp` (pointers into the rows being aggregated -- a group never
+    // owns copies of its rows), keyed by each column's display label — shared by the GROUP BY path (one call per group) and
     // the whole-result aggregate path (one call over all rows), exactly as the two
     // near-identical loops in the Rust original do it separately.
-    static Row compute_aggregates(const std::vector<Row>& grp, const std::vector<SelectColumn>& columns, bool allow_parallel = false);
+    static Row compute_aggregates(const std::vector<const Row*>& grp, const std::vector<SelectColumn>& columns, bool allow_parallel = false);
     static std::string window_func_default_label(WindowFunc func);
 
     // ── Phase 8d: transactions/MVCC/savepoints ──────────────────────────

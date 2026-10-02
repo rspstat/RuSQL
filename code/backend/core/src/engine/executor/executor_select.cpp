@@ -95,6 +95,128 @@ bool row_order_less(const Row& a, const Row& b, const std::vector<OrderBy>& orde
     return false;
 }
 
+// Which of the joined tables does a WHERE conjunct read? The index into PushdownScope::names (0 = the FROM table, then
+// the joined tables in order), or -1 when it is not certain. A conjunct that reads one table only can be applied to
+// that table's rows BEFORE the join (the join then builds far fewer merged rows); the full WHERE is still evaluated on
+// the joined rows afterwards, so a conjunct pushed down is only ever a shortcut that drops rows the WHERE would drop.
+struct PushdownScope {
+    std::vector<std::string> names; // as the engine names them, "<db>.<table>"
+    std::vector<std::string> bare;  // as a query writes them in "<table>.<column>"
+    std::vector<std::unordered_set<std::string>> columns;
+};
+
+bool names_table(const PushdownScope& sc, std::size_t i, const std::string& qualifier) {
+    return qualifier == sc.names[i] || qualifier == sc.bare[i];
+}
+
+// The table whose value a column reference reads once the tables are merged: "<table>.<col>" reads that table's
+// column (get_col finds a joined table's value under its qualified key, and the FROM table's under the plain key);
+// a bare name reads the FIRST table that has it (merge_right never overwrites a key that is already there).
+int column_owner(const std::string& name, const PushdownScope& sc) {
+    if (auto cut = name.rfind('.'); cut != std::string::npos) {
+        std::string q = name.substr(0, cut), c = name.substr(cut + 1);
+        for (std::size_t i = 0; i < sc.names.size(); i++) {
+            if (names_table(sc, i, q)) return sc.columns[i].count(c) ? static_cast<int>(i) : -1;
+        }
+        return -1;
+    }
+    for (std::size_t i = 0; i < sc.columns.size(); i++) {
+        if (sc.columns[i].count(name)) return static_cast<int>(i);
+    }
+    return -1;
+}
+
+// Owner of a single comparison. Only `<column> <op> <literal / list / range>` qualifies: a right-hand side that is an
+// expression or a subquery, a function on the left, or a literal that could be read as a column name (the evaluation
+// looks an identifier-looking literal up as a column first) all answer -1.
+int leaf_owner(const Condition& c, const PushdownScope& sc) {
+    auto* col = std::get_if<ArithExpr::Col>(&c.left.data);
+    if (!col) return -1;
+    std::string lower = col->name;
+    std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char ch) { return std::tolower(ch); });
+    if (lower == "true" || lower == "false") return -1;
+    switch (c.op) {
+        case Operator::Eq: case Operator::Ne: case Operator::Gt: case Operator::Lt: case Operator::Gte: case Operator::Lte:
+        case Operator::Like: case Operator::NotLike: case Operator::Regexp: case Operator::NotRegexp:
+        case Operator::IsNull: case Operator::IsNotNull: case Operator::Between: case Operator::NotBetween:
+        case Operator::In: case Operator::NotIn:
+            break;
+        default:
+            return -1;
+    }
+    if (auto* lit = std::get_if<ConditionValue::Literal>(&c.value.data)) {
+        const std::string& v = lit->value;
+        bool ident_like = !v.empty() && (std::isalpha(static_cast<unsigned char>(v[0])) || v[0] == '_') && !parse_f64(v).has_value();
+        if (ident_like) {
+            if (v.find('.') != std::string::npos) return -1;
+            for (auto& cols : sc.columns) {
+                if (cols.count(v)) return -1;
+            }
+        }
+    } else if (!std::holds_alternative<ConditionValue::Between>(c.value.data) && !std::holds_alternative<ConditionValue::LiteralList>(c.value.data)) {
+        return -1;
+    }
+    return column_owner(col->name, sc);
+}
+
+int expr_owner(const CondExpr& e, const PushdownScope& sc) {
+    if (auto* a = std::get_if<CondExpr::And>(&e.data)) {
+        int l = expr_owner(*a->lhs, sc), r = expr_owner(*a->rhs, sc);
+        return l == r ? l : -1;
+    }
+    if (auto* o = std::get_if<CondExpr::Or>(&e.data)) {
+        int l = expr_owner(*o->lhs, sc), r = expr_owner(*o->rhs, sc);
+        return l == r ? l : -1;
+    }
+    if (auto* n = std::get_if<CondExpr::Not>(&e.data)) return expr_owner(*n->inner, sc);
+    if (auto* leaf = std::get_if<CondExpr::Leaf>(&e.data)) return leaf_owner(leaf->condition, sc);
+    return -1;
+}
+
+void and_conjuncts(const CondExpr& e, std::vector<const CondExpr*>& out) {
+    if (auto* a = std::get_if<CondExpr::And>(&e.data)) {
+        and_conjuncts(*a->lhs, out);
+        and_conjuncts(*a->rhs, out);
+    } else {
+        out.push_back(&e);
+    }
+}
+
+// A top-level AND-ed part of the ON condition of the form `<a> = <b>` where exactly one side is "<right table>.<column>"
+// of the table being joined: {the other side, that column}. Every pair that satisfies the whole ON satisfies this part.
+std::optional<std::pair<std::string, std::string>> equality_part_of_on(const CondExpr& on, const std::string& right_full,
+                                                                        const std::string& right_bare,
+                                                                        const std::unordered_set<std::string>& right_cols) {
+    auto as_right = [&](const std::string& ref) -> std::optional<std::string> {
+        auto cut = ref.rfind('.');
+        if (cut == std::string::npos) return std::nullopt;
+        std::string q = ref.substr(0, cut), c = ref.substr(cut + 1);
+        if ((q == right_full || q == right_bare) && right_cols.count(c)) return c;
+        return std::nullopt;
+    };
+    std::vector<const CondExpr*> parts;
+    and_conjuncts(on, parts);
+    for (const CondExpr* part : parts) {
+        auto* leaf = std::get_if<CondExpr::Leaf>(&part->data);
+        if (!leaf || leaf->condition.op != Operator::Eq) continue;
+        auto* l = std::get_if<ArithExpr::Col>(&leaf->condition.left.data);
+        auto* r = std::get_if<ConditionValue::Literal>(&leaf->condition.value.data);
+        if (!l || !r) continue;
+        auto rc = as_right(r->value), lc = as_right(l->name);
+        if (rc && !lc) return std::make_pair(l->name, *rc);
+        if (lc && !rc) return std::make_pair(r->value, *lc);
+    }
+    return std::nullopt;
+}
+
+// One more value of a multi-column key as bytes (length first, so ("ab","c") and ("a","bc") differ): GROUP BY and DISTINCT
+// look their keys up in a hash table of these instead of comparing key vectors pairwise.
+void append_key_part(std::string& key, const std::string& value) {
+    std::uint32_t n = static_cast<std::uint32_t>(value.size());
+    key.append(reinterpret_cast<const char*>(&n), sizeof n);
+    key += value;
+}
+
 // The order row_order_less defines, for a whole row set at once: indexes into `rows`, stable. row_order_less looked both
 // columns up in both rows (two hash lookups, two string copies) and parsed both as numbers on EVERY comparison -- about
 // 0.45 us each, 16 comparisons per row of a 50,000-row sort. Here each row's keys are read and parsed once.
@@ -287,7 +409,7 @@ std::vector<std::string> Executor::extract_agg_refs_from_cond(const CondExpr& ex
     return out;
 }
 
-std::string Executor::compute_agg_from_key(const std::string& key, const std::vector<Row>& grp) {
+std::string Executor::compute_agg_from_key(const std::string& key, const std::vector<const Row*>& grp) {
     std::string ku = key;
     std::transform(ku.begin(), ku.end(), ku.begin(), [](unsigned char c) { return std::toupper(c); });
     if (ku.rfind("COUNT(", 0) == 0) return std::to_string(grp.size());
@@ -298,7 +420,8 @@ std::string Executor::compute_agg_from_key(const std::string& key, const std::ve
     std::string inner = key.substr(lp + 1, rp - lp - 1);
 
     std::vector<double> vals;
-    for (auto& r : grp) {
+    for (const Row* r_ptr : grp) {
+        const Row& r = *r_ptr;
         auto it = r.find(inner);
         if (it != r.end()) {
             if (auto p = parse_f64(it->second)) vals.push_back(*p);
@@ -317,7 +440,7 @@ std::string Executor::compute_agg_from_key(const std::string& key, const std::ve
     return format_num_or_int(v);
 }
 
-Row Executor::compute_aggregates(const std::vector<Row>& grp, const std::vector<SelectColumn>& columns, bool allow_parallel) {
+Row Executor::compute_aggregates(const std::vector<const Row*>& grp, const std::vector<SelectColumn>& columns, bool allow_parallel) {
     Row out;
     for (auto& col : columns) {
         const AggFunc* func = nullptr;
@@ -344,19 +467,21 @@ Row Executor::compute_aggregates(const std::vector<Row>& grp, const std::vector<
         // once shadowed, every existing grp-referencing branch below (GroupConcat/
         // CountCase/SumCase/Min-Max/BitAnd-BitOr/JsonAgg/the generic numeric path)
         // transparently applies to the filtered rows with no other changes needed.
-        std::vector<Row> filtered_storage;
-        const std::vector<Row>* grp_ptr = &grp;
+        std::vector<const Row*> filtered_storage;
+        const std::vector<const Row*>* grp_ptr = &grp;
         if (filter) {
-            for (auto& r : grp) {
-                if (eval_condexpr(r, *filter)) filtered_storage.push_back(r);
+            for (const Row* r_ptr : grp) {
+                const Row& r = *r_ptr;
+                if (eval_condexpr(r, *filter)) filtered_storage.push_back(r_ptr);
             }
             grp_ptr = &filtered_storage;
         }
-        const std::vector<Row>& grp = *grp_ptr;
+        const std::vector<const Row*>& grp = *grp_ptr;
 
         if (auto* gc = std::get_if<AggFunc::GroupConcat>(&func->data)) {
             std::vector<std::string> strs;
-            for (auto& r : grp) {
+            for (const Row* r_ptr : grp) {
+                const Row& r = *r_ptr;
                 auto it = r.find(col_name);
                 if (it != r.end() && it->second != EXECUTOR_NULL_VALUE) strs.push_back(it->second);
             }
@@ -374,7 +499,8 @@ Row Executor::compute_aggregates(const std::vector<Row>& grp, const std::vector<
             // ArrayAgg only exists as its own AggFunc alternative so labels/EXPLAIN stay
             // faithful to what the user actually wrote.
             nlohmann::json arr = nlohmann::json::array();
-            for (auto& r : grp) {
+            for (const Row* r_ptr : grp) {
+                const Row& r = *r_ptr;
                 auto it = r.find(col_name);
                 if (it == r.end() || it->second == EXECUTOR_NULL_VALUE) {
                     arr.push_back(nullptr);
@@ -391,7 +517,8 @@ Row Executor::compute_aggregates(const std::vector<Row>& grp, const std::vector<
         }
         if (auto* cc = std::get_if<AggFunc::CountCase>(&func->data)) {
             std::size_t count = 0;
-            for (auto& row : grp) {
+            for (const Row* row_ptr : grp) {
+                const Row& row = *row_ptr;
                 auto resolve = [&](const std::string& sv) -> std::string {
                     const std::string* v = get_col(row, sv);
                     return v ? *v : sv;
@@ -410,7 +537,8 @@ Row Executor::compute_aggregates(const std::vector<Row>& grp, const std::vector<
         }
         if (auto* sc = std::get_if<AggFunc::SumCase>(&func->data)) {
             double sum = 0.0;
-            for (auto& row : grp) {
+            for (const Row* row_ptr : grp) {
+                const Row& row = *row_ptr;
                 auto resolve = [&](const std::string& sv) -> std::string {
                     const std::string* v = get_col(row, sv);
                     return v ? *v : sv;
@@ -432,7 +560,8 @@ Row Executor::compute_aggregates(const std::vector<Row>& grp, const std::vector<
         if (std::holds_alternative<AggFunc::Min>(func->data) || std::holds_alternative<AggFunc::Max>(func->data)) {
             bool is_min = std::holds_alternative<AggFunc::Min>(func->data);
             std::vector<std::string> raw;
-            for (auto& r : grp) {
+            for (const Row* r_ptr : grp) {
+                const Row& r = *r_ptr;
                 auto it = r.find(col_name);
                 if (it != r.end() && it->second != EXECUTOR_NULL_VALUE) raw.push_back(it->second);
             }
@@ -459,7 +588,8 @@ Row Executor::compute_aggregates(const std::vector<Row>& grp, const std::vector<
             // BIT_AND over an empty set is the all-1s identity (getting this wrong as 0
             // would silently zero out any real AND); BIT_OR's identity is a plain 0.
             std::int64_t acc = is_and ? -1 : 0; // -1 == all bits set, two's complement
-            for (auto& r : grp) {
+            for (const Row* r_ptr : grp) {
+                const Row& r = *r_ptr;
                 auto it = r.find(col_name);
                 if (it == r.end() || it->second == EXECUTOR_NULL_VALUE) continue;
                 if (auto p = parse_f64(it->second)) {
@@ -484,7 +614,7 @@ Row Executor::compute_aggregates(const std::vector<Row>& grp, const std::vector<
                 std::size_t end = std::min(start + PARALLEL_CHUNK, grp.size());
                 auto& out_vals = partial[ci];
                 for (std::size_t i = start; i < end; i++) {
-                    auto& r = grp[i];
+                    const Row& r = *grp[i];
                     if (col_name == "*") {
                         out_vals.push_back(1.0);
                         continue;
@@ -499,7 +629,8 @@ Row Executor::compute_aggregates(const std::vector<Row>& grp, const std::vector<
                 vals.insert(vals.end(), chunk.begin(), chunk.end());
             }
         } else {
-            for (auto& r : grp) {
+            for (const Row* r_ptr : grp) {
+                const Row& r = *r_ptr;
                 if (col_name == "*") {
                     vals.push_back(1.0);
                     continue;
@@ -510,9 +641,10 @@ Row Executor::compute_aggregates(const std::vector<Row>& grp, const std::vector<
                 }
             }
         }
-        auto distinct_vals = [&](const std::vector<Row>& rowsv) {
+        auto distinct_vals = [&](const std::vector<const Row*>& rowsv) {
             std::unordered_set<std::string> seen;
-            for (auto& r : rowsv) {
+            for (const Row* r_ptr : rowsv) {
+                const Row& r = *r_ptr;
                 auto it = r.find(col_name);
                 if (it != r.end() && it->second != EXECUTOR_NULL_VALUE) seen.insert(it->second);
             }
@@ -530,7 +662,8 @@ Row Executor::compute_aggregates(const std::vector<Row>& grp, const std::vector<
                 agg_val = static_cast<double>(grp.size());
             } else {
                 std::size_t c = 0;
-                for (auto& r : grp) {
+                for (const Row* r_ptr : grp) {
+                    const Row& r = *r_ptr;
                     auto it = r.find(col_name);
                     if (it != r.end() && it->second != EXECUTOR_NULL_VALUE) c++;
                 }
@@ -538,7 +671,8 @@ Row Executor::compute_aggregates(const std::vector<Row>& grp, const std::vector<
             }
         } else if (std::holds_alternative<AggFunc::CountDistinct>(func->data)) {
             std::unordered_set<std::string> distinct;
-            for (auto& r : grp) {
+            for (const Row* r_ptr : grp) {
+                const Row& r = *r_ptr;
                 auto it = r.find(col_name);
                 if (it != r.end() && it->second != EXECUTOR_NULL_VALUE) distinct.insert(it->second);
             }
@@ -1004,6 +1138,49 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
         base_rows = &buffer_pool_rows;
     }
 
+    // The tables of a join statement with their columns, when every one is a catalog table and no two share a bare name
+    // (a "<table>.<column>" reference must name exactly one of them). The two shortcuts below need it.
+    PushdownScope scope;
+    bool scope_ok = !joins.empty();
+    auto add_table = [&](const std::string& name) {
+        auto* sc = s.catalog.get_table(name);
+        std::string bare = name.substr(name.rfind('.') == std::string::npos ? 0 : name.rfind('.') + 1);
+        if (!sc || std::find(scope.bare.begin(), scope.bare.end(), bare) != scope.bare.end()) {
+            scope_ok = false;
+            return;
+        }
+        scope.names.push_back(name);
+        scope.bare.push_back(bare);
+        scope.columns.emplace_back();
+        for (auto& c : sc->columns) scope.columns.back().insert(c.name);
+    };
+    if (scope_ok) {
+        add_table(table);
+        for (auto& j : joins) {
+            if (j.lateral || j.subquery) scope_ok = false;
+            if (scope_ok) add_table(j.table);
+        }
+    }
+
+    // WHERE conjuncts that read a single table, by the table they read (see PushdownScope). Only for plain inner/left
+    // joins; everything else joins first and filters afterwards, as before.
+    std::vector<std::vector<const CondExpr*>> pushed(joins.size() + 1);
+    if (scope_ok && condition && !condition_has_subquery(condition)) {
+        bool ok = true;
+        for (auto& j : joins) {
+            if (!j.using_cols.empty() || (j.join_type != JoinType::Inner && j.join_type != JoinType::Left)) ok = false;
+        }
+        if (ok) {
+            std::vector<const CondExpr*> parts;
+            and_conjuncts(*condition, parts);
+            for (const CondExpr* part : parts) {
+                int owner = expr_owner(*part, scope);
+                if (owner == 0) pushed[0].push_back(part);
+                else if (owner > 0 && joins[owner - 1].join_type == JoinType::Inner) pushed[owner].push_back(part);
+            }
+        }
+    }
+
     std::vector<Row> visible_rows; // joins only
     std::vector<const Row*> visible_ptrs; // single-table scan
     if (joins.empty()) {
@@ -1014,18 +1191,25 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
     } else {
         visible_rows.reserve(base_rows->size());
         for (auto& r : *base_rows) {
-            if (is_visible_for_read(r, read_ctx)) visible_rows.push_back(r);
+            if (!is_visible_for_read(r, read_ctx)) continue;
+            bool keep = true;
+            for (const CondExpr* f : pushed[0]) {
+                if (!eval_condexpr(r, *f)) {
+                    keep = false;
+                    break;
+                }
+            }
+            if (keep) visible_rows.push_back(r);
         }
     }
 
-    // ORDER BY (with LIMIT/OFFSET) of a plain single-table scan: the rows are ordered by pointer into the table and only
-    // the rows that are returned get copied. Sorting copied hash maps moved every one of them several times (50,000 rows:
-    // ~400 ms for the top 10); a stable sort of pointers is ~5 ms. Everything that needs the whole row set in a different
-    // shape (aggregates, windows, GROUP BY/HAVING, DISTINCT, joins) keeps the generic path below.
-    const bool presort = joins.empty() && !has_win && !has_agg && !group_by && !having && !distinct && !order_by.empty();
-    bool presorted = false;
-
+    // From here the statement works on `rows_p`, pointers to the rows still in the running. A single-table scan points into
+    // the table itself, so ORDER BY, GROUP BY, HAVING, OFFSET/LIMIT, DISTINCT and the aggregates never copy a row (a copied
+    // row is a hash map: ~1 us each, and sorting copies moved every one of them several times) and only the rows that are
+    // finally returned are copied. Rows that are new -- joined rows, window-function output -- live in `result` instead and
+    // are pointed to the same way.
     std::vector<Row> result;
+    std::vector<const Row*> rows_p;
     if (joins.empty()) {
         std::vector<const Row*> matched;
         if (parallel_enabled() && visible_ptrs.size() >= parallel_min_rows() && condition.has_value()
@@ -1052,17 +1236,11 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
                 if (matches_condition_with_subquery(s, *r, condition)) matched.push_back(r);
             }
         }
-        if (presort) {
-            std::vector<std::size_t> order = order_rows(matched, order_by);
-            std::size_t skip = offset ? std::min(*offset, matched.size()) : 0;
-            std::size_t end = matched.size();
-            if (limit && end - skip > *limit) end = skip + *limit;
-            result.reserve(end - skip);
-            for (std::size_t i = skip; i < end; i++) result.push_back(*matched[order[i]]);
-            presorted = true;
-        } else {
+        if (has_win) { // window functions build their output from their own copies of the rows
             result.reserve(matched.size());
             for (const Row* r : matched) result.push_back(*r);
+        } else {
+            rows_p = std::move(matched);
         }
     } else {
         std::vector<Row> current = std::move(visible_rows);
@@ -1105,16 +1283,22 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
                 continue;
             }
 
-            std::vector<Row> right_rows_raw;
+            std::vector<Row> right_rows;
             {
                 auto it = s.tables.find(j.table);
                 if (it == s.tables.end()) return StringResult::Err("Table '" + j.table + "' not found");
-                right_rows_raw = it->second;
-            }
-            std::vector<Row> right_rows;
-            right_rows.reserve(right_rows_raw.size());
-            for (auto& r : right_rows_raw) {
-                if (is_visible_for_read(r, read_ctx)) right_rows.push_back(std::move(r));
+                right_rows.reserve(it->second.size());
+                for (auto& r : it->second) {
+                    if (!is_visible_for_read(r, read_ctx)) continue;
+                    bool keep = true;
+                    for (const CondExpr* f : pushed[ji + 1]) {
+                        if (!eval_condexpr(r, *f)) {
+                            keep = false;
+                            break;
+                        }
+                    }
+                    if (keep) right_rows.push_back(r);
+                }
             }
 
             std::vector<std::string> right_schema_cols;
@@ -1137,7 +1321,31 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
                 algo = &plan.joins[ji].algo.data;
             }
 
-            if (algo && std::get_if<JoinAlgo::SortMerge>(algo)) {
+            // A LEFT JOIN, or an INNER JOIN the planner has no algorithm for (an ON that is more than one equality), whose ON
+            // contains `<left column> = <right table>.<column>` is hashed on that equality instead of a nested loop that
+            // builds a merged row for every pair of rows (see hashed_join_verified). So is every INNER JOIN after the first: the
+            // planner's algorithms name the left column by its bare name ("id"), which in a row that already holds a joined
+            // table is the FROM table's column, not the joined table's `u.id` the ON asked for (`t JOIN u ON u.id = t.grp
+            // JOIN w ON w.k = u.id` matched w.k against t.id and lost most of its rows).
+            std::optional<std::vector<Row>> hashed;
+            const bool nested_planned = !algo || std::holds_alternative<JoinAlgo::NestedLoop>(*algo);
+            if ((j.join_type == JoinType::Left || (j.join_type == JoinType::Inner && (nested_planned || ji > 0))) && scope_ok && j.using_cols.empty()) {
+                std::unordered_set<std::string> right_cols(right_schema_cols.begin(), right_schema_cols.end());
+                if (auto eq = equality_part_of_on(j.on_expr, scope.names[ji + 1], scope.bare[ji + 1], right_cols)) {
+                    const std::string left_ref = eq->first, right_col = eq->second;
+                    hashed = hashed_join_verified(
+                        current, right_rows, j.table, j.join_type == JoinType::Left, [&](const Row& l) { return get_col(l, left_ref); },
+                        [&](const Row& r) -> const std::string* {
+                            auto it = r.find(right_col);
+                            return it != r.end() ? &it->second : nullptr;
+                        },
+                        right_schema_cols, [&](const Row& merged) { return eval_condexpr(merged, j.on_expr); });
+                }
+            }
+
+            if (hashed) {
+                current = std::move(*hashed);
+            } else if (algo && std::get_if<JoinAlgo::SortMerge>(algo)) {
                 auto* a = std::get_if<JoinAlgo::SortMerge>(algo);
                 current = sort_merge_join(current, right_rows, j.join_type, j.table, a->probe_col, a->build_col, right_schema_cols);
             } else if (algo && std::get_if<JoinAlgo::Hash>(algo)) {
@@ -1152,16 +1360,24 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
                 } else if (auto rit = s.indexes.find(j.table); rit != s.indexes.end()) {
                     std::vector<Row> out;
                     out.reserve(current.size());
+                    // Many left rows share a key: look it up (and parse the right rows' JSON) once per distinct key.
+                    std::unordered_map<std::string, std::vector<Row>> right_of_key;
                     for (auto& left_row : current) {
                         const std::string* key = get_col(left_row, a->probe_col);
                         if (!key || key->empty() || *key == "NULL") continue;
-                        for (auto& val_json : equal_entries(rit->second, *key)) {
-                            Row right_row = nlohmann::json::parse(val_json).get<Row>();
-                            if (is_visible_for_read(right_row, read_ctx)) {
-                                Row merged = left_row;
-                                merge_right(merged, right_row, j.table);
-                                out.push_back(std::move(merged));
+                        auto cached = right_of_key.find(*key);
+                        if (cached == right_of_key.end()) {
+                            std::vector<Row> found;
+                            for (auto& val_json : equal_entries(rit->second, *key)) {
+                                Row right_row = nlohmann::json::parse(val_json).get<Row>();
+                                if (is_visible_for_read(right_row, read_ctx)) found.push_back(std::move(right_row));
                             }
+                            cached = right_of_key.emplace(*key, std::move(found)).first;
+                        }
+                        for (auto& right_row : cached->second) {
+                            Row merged = left_row;
+                            merge_right(merged, right_row, j.table);
+                            out.push_back(std::move(merged));
                         }
                     }
                     current = std::move(out);
@@ -1237,74 +1453,64 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
                                                        [&on_expr](const Row& merged) { return eval_condexpr(merged, on_expr); });
             }
         }
-        for (auto& r : current) {
-            if (matches_condition_with_subquery(s, r, condition)) result.push_back(std::move(r));
+        if (!condition) {
+            result = std::move(current);
+        } else {
+            for (auto& r : current) {
+                if (matches_condition_with_subquery(s, r, condition)) result.push_back(std::move(r));
+            }
         }
     }
 
     if (has_win) result = compute_window_functions(std::move(result), columns);
+    const bool rows_in_table = joins.empty() && !has_win; // else rows_p points into `result`
+    if (!rows_in_table) {
+        rows_p.reserve(result.size());
+        for (auto& r : result) rows_p.push_back(&r);
+    }
 
-    if (!order_by.empty() && !presorted) {
-        auto less = [&](const Row& a, const Row& b) { return row_order_less(a, b, order_by); };
-        if (parallel_enabled() && result.size() >= parallel_min_rows()) {
-            parallel_sort(result, less); // unstable, matches Rust's par_sort_unstable_by
-        } else {
-            std::stable_sort(result.begin(), result.end(), less);
-        }
+    if (!order_by.empty() && rows_p.size() > 1) { // stable, same order as comparing the rows pairwise with cmp_key
+        std::vector<std::size_t> order = order_rows(rows_p, order_by);
+        std::vector<const Row*> sorted;
+        sorted.reserve(rows_p.size());
+        for (std::size_t i : order) sorted.push_back(rows_p[i]);
+        rows_p = std::move(sorted);
     }
 
     if (group_by) {
-        std::vector<std::vector<std::string>> group_order;
-        std::map<std::vector<std::string>, std::vector<Row>> group_data;
-        // 병렬 ON + 충분한 행 → 청크별 독립 map 병렬 구성 후 순차 merge
-        // (그룹 수가 적어 par_iter over groups는 오히려 느림 — 행 스캔 단계를 병렬화)
-        if (parallel_enabled() && result.size() >= parallel_min_rows()) {
-            std::size_t n_chunks = (result.size() + PARALLEL_CHUNK - 1) / PARALLEL_CHUNK;
-            std::vector<std::vector<std::vector<std::string>>> partial_order(n_chunks);
-            std::vector<std::map<std::vector<std::string>, std::vector<Row>>> partial_data(n_chunks);
-            ThreadPool::global().parallel_for(n_chunks, [&](std::size_t ci) {
-                std::size_t start = ci * PARALLEL_CHUNK;
-                std::size_t end = std::min(start + PARALLEL_CHUNK, result.size());
-                auto& order = partial_order[ci];
-                auto& map = partial_data[ci];
-                for (std::size_t i = start; i < end; i++) {
-                    auto& row = result[i];
-                    std::vector<std::string> key;
-                    key.reserve(group_by->size());
-                    for (auto& c : *group_by) {
-                        const std::string* v = get_col(row, c);
-                        key.push_back(v ? *v : std::string());
-                    }
-                    if (map.find(key) == map.end()) order.push_back(key);
-                    map[key].push_back(row);
-                }
-            });
-            for (std::size_t ci = 0; ci < n_chunks; ci++) {
-                for (auto& key : partial_order[ci]) {
-                    auto& rows_for_key = partial_data[ci].at(key);
-                    if (group_data.find(key) == group_data.end()) group_order.push_back(key);
-                    auto& dst = group_data[key];
-                    dst.insert(dst.end(), std::make_move_iterator(rows_for_key.begin()), std::make_move_iterator(rows_for_key.end()));
-                }
+        // Groups in order of first appearance, found through a hash table of the encoded key values (a group never owns
+        // copies of its rows: it holds pointers).
+        struct Group {
+            std::vector<std::string> key;
+            std::vector<const Row*> rows;
+        };
+        std::vector<Group> groups;
+        std::unordered_map<std::string, std::size_t> group_of;
+        static const std::string missing;
+        std::vector<const std::string*> vals(group_by->size());
+        std::string encoded;
+        for (const Row* rp : rows_p) {
+            encoded.clear();
+            for (std::size_t i = 0; i < group_by->size(); i++) {
+                const std::string* v = get_col(*rp, (*group_by)[i]);
+                vals[i] = v ? v : &missing;
+                append_key_part(encoded, *vals[i]);
             }
-        } else {
-            for (auto& row : result) {
-                std::vector<std::string> key;
-                key.reserve(group_by->size());
-                for (auto& c : *group_by) {
-                    const std::string* v = get_col(row, c);
-                    key.push_back(v ? *v : std::string());
-                }
-                if (group_data.find(key) == group_data.end()) group_order.push_back(key);
-                group_data[key].push_back(row);
+            auto [it, fresh] = group_of.try_emplace(encoded, groups.size());
+            if (fresh) {
+                Group g;
+                g.key.reserve(vals.size());
+                for (const std::string* v : vals) g.key.push_back(*v);
+                groups.push_back(std::move(g));
             }
+            groups[it->second].rows.push_back(rp);
         }
 
         // 그룹별 집계 row 생성: parallel_enabled() 이면 스레드별 1그룹, 아니면 순차
-        std::vector<Row> group_rows(group_order.size());
+        std::vector<Row> group_rows(groups.size());
         auto make_group_row = [&](std::size_t gi) {
-            auto& key = group_order[gi];
-            auto& grp = group_data.at(key);
+            auto& key = groups[gi].key;
+            auto& grp = groups[gi].rows;
             Row out;
             for (std::size_t i = 0; i < group_by->size(); i++) out[(*group_by)[i]] = key[i];
             Row agg_row = compute_aggregates(grp, columns);
@@ -1317,9 +1523,9 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
             group_rows[gi] = std::move(out);
         };
         if (parallel_enabled()) {
-            ThreadPool::global().parallel_for(group_order.size(), make_group_row);
+            ThreadPool::global().parallel_for(groups.size(), make_group_row);
         } else {
-            for (std::size_t gi = 0; gi < group_order.size(); gi++) make_group_row(gi);
+            for (std::size_t gi = 0; gi < groups.size(); gi++) make_group_row(gi);
         }
 
         if (having) {
@@ -1342,31 +1548,30 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
             group_rows.erase(group_rows.begin(), group_rows.begin() + static_cast<std::ptrdiff_t>(skip));
         }
         if (limit && group_rows.size() > *limit) group_rows.resize(*limit);
-        return format_result(s, group_rows, columns, table, joins);
+        return format_result(s, std::move(group_rows), columns, table, joins);
     }
 
     if (having) {
-        std::vector<Row> filtered;
-        for (auto& row : result) {
-            if (matches_condexpr(row, having)) filtered.push_back(std::move(row));
+        std::vector<const Row*> kept;
+        for (const Row* rp : rows_p) {
+            if (matches_condexpr(*rp, having)) kept.push_back(rp);
         }
-        result = std::move(filtered);
+        rows_p = std::move(kept);
     }
 
-    if (!presorted) { // (a presorted result already is the requested window)
-        if (offset) {
-            std::size_t skip = std::min(*offset, result.size());
-            result.erase(result.begin(), result.begin() + static_cast<std::ptrdiff_t>(skip));
-        }
-        if (limit && result.size() > *limit) result.resize(*limit);
+    if (offset) {
+        std::size_t skip = std::min(*offset, rows_p.size());
+        rows_p.erase(rows_p.begin(), rows_p.begin() + static_cast<std::ptrdiff_t>(skip));
     }
+    if (limit && rows_p.size() > *limit) rows_p.resize(*limit);
 
     if (distinct) {
-        std::vector<std::vector<std::string>> seen;
-        std::vector<Row> filtered;
-        for (auto& row : result) {
-            std::vector<std::string> key;
-            key.reserve(columns.size());
+        std::unordered_set<std::string> seen;
+        std::vector<const Row*> kept;
+        std::string encoded;
+        for (const Row* rp : rows_p) {
+            const Row& row = *rp;
+            encoded.clear();
             for (auto& c : columns) {
                 std::string val;
                 if (std::holds_alternative<SelectColumn::All>(c.data)) {
@@ -1418,14 +1623,11 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
                     // for display purposes only).
                     val.clear();
                 }
-                key.push_back(std::move(val));
+                append_key_part(encoded, val);
             }
-            if (std::find(seen.begin(), seen.end(), key) == seen.end()) {
-                seen.push_back(key);
-                filtered.push_back(std::move(row));
-            }
+            if (seen.insert(encoded).second) kept.push_back(rp);
         }
-        result = std::move(filtered);
+        rows_p = std::move(kept);
     }
 
     if (has_agg) {
@@ -1458,7 +1660,7 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
             }
         }
 
-        Row agg_row = compute_aggregates(result, columns, /*allow_parallel=*/true);
+        Row agg_row = compute_aggregates(rows_p, columns, /*allow_parallel=*/true);
         std::vector<std::pair<std::string, std::string>> agg_results;
         for (auto& col : columns) {
             std::string label;
@@ -1481,6 +1683,24 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
         for (std::size_t i = 0; i < agg_results.size(); i++) out += " " + agg_results[i].second + std::string(widths[i] - agg_results[i].second.size(), ' ') + " |";
         out += "\n" + sep;
         return StringResult::Ok(out);
+    }
+
+    // FOR UPDATE / FOR SHARE walk the rows again, and SELECT-list subqueries write their values into them: those statements
+    // work on rows of their own; every other one formats the rows where they are.
+    const bool own_rows = for_update || for_share ||
+                          std::any_of(columns.begin(), columns.end(), [](const SelectColumn& c) { return std::holds_alternative<SelectColumn::Subquery>(c.data); });
+    if (own_rows) { // the rows that are returned become `result`: copied out of the table, or moved out of the rows this statement made
+        bool untouched = !rows_in_table && rows_p.size() == result.size(); // every row of `result`, in its own order: nothing to move
+        for (std::size_t i = 0; untouched && i < rows_p.size(); i++) untouched = rows_p[i] == &result[i];
+        if (!untouched) {
+            std::vector<Row> out;
+            out.reserve(rows_p.size());
+            for (const Row* rp : rows_p) {
+                if (rows_in_table) out.push_back(*rp);
+                else out.push_back(std::move(result[static_cast<std::size_t>(rp - result.data())]));
+            }
+            result = std::move(out);
+        }
     }
 
     if (for_update) {
@@ -1628,7 +1848,8 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
         }
     }
 
-    return format_result(s, result, columns, table, joins);
+    if (!own_rows) return format_rows(s, rows_p, columns, table, joins);
+    return format_result(s, std::move(result), columns, table, joins);
 }
 
 StringResult Executor::exec_select_with_subquery(SharedDatabase& s, Statement inner_stmt, const std::string& alias, bool distinct,
@@ -1667,30 +1888,6 @@ StringResult Executor::exec_select_with_subquery(SharedDatabase& s, Statement in
 StringResult Executor::format_result(SharedDatabase& s, std::vector<Row> result, const std::vector<SelectColumn>& columns,
                                       const std::string& table, const std::vector<Join>& joins) {
     if (result.empty()) return StringResult::Ok("0 rows returned.");
-
-    // MVCC Stage 3: a Serializable transaction records every row it reads here (the
-    // single choke point nearly every SELECT path -- fast index paths, generic scan,
-    // groups -- funnels through) so validate_serializable can check at COMMIT whether any
-    // of them were touched by another transaction that has since committed. Scoped to
-    // single-table reads (joins.empty()) -- a joined/merged row has no single owning
-    // table's PK to key the read-set on, and a real catalog table (not an ephemeral CTE/
-    // subquery-derived alias, which s.catalog.get_table wouldn't resolve) to read from.
-    if (joins.empty() && txn.is_active() && txn.isolation_level() == IsolationLevel::Serializable) {
-        std::string pk_col;
-        if (auto* sc = s.catalog.get_table(table)) {
-            for (auto& c : sc->columns) {
-                if (c.primary_key) {
-                    pk_col = c.name;
-                    break;
-                }
-            }
-        }
-        if (!pk_col.empty()) {
-            for (auto& row : result) {
-                if (auto it = row.find(pk_col); it != row.end()) txn.record_read(table, pk_col, it->second);
-            }
-        }
-    }
 
     // Pre-compute SELECT-list scalar subqueries ("(SELECT ...) [AS alias]" columns)
     // and inject as "__sq_N__" keys into each row. Uncorrelated subqueries (no outer
@@ -1752,6 +1949,40 @@ StringResult Executor::format_result(SharedDatabase& s, std::vector<Row> result,
                     }
                     row[key] = val;
                 }
+            }
+        }
+    }
+
+    std::vector<const Row*> rows;
+    rows.reserve(result.size());
+    for (auto& r : result) rows.push_back(&r);
+    return format_rows(s, rows, columns, table, joins);
+}
+
+StringResult Executor::format_rows(SharedDatabase& s, const std::vector<const Row*>& rows, const std::vector<SelectColumn>& columns,
+                                    const std::string& table, const std::vector<Join>& joins) {
+    if (rows.empty()) return StringResult::Ok("0 rows returned.");
+
+    // MVCC Stage 3: a Serializable transaction records every row it reads here (the
+    // single choke point nearly every SELECT path -- fast index paths, generic scan,
+    // groups -- funnels through) so validate_serializable can check at COMMIT whether any
+    // of them were touched by another transaction that has since committed. Scoped to
+    // single-table reads (joins.empty()) -- a joined/merged row has no single owning
+    // table's PK to key the read-set on, and a real catalog table (not an ephemeral CTE/
+    // subquery-derived alias, which s.catalog.get_table wouldn't resolve) to read from.
+    if (joins.empty() && txn.is_active() && txn.isolation_level() == IsolationLevel::Serializable) {
+        std::string pk_col;
+        if (auto* sc = s.catalog.get_table(table)) {
+            for (auto& c : sc->columns) {
+                if (c.primary_key) {
+                    pk_col = c.name;
+                    break;
+                }
+            }
+        }
+        if (!pk_col.empty()) {
+            for (const Row* rp : rows) {
+                if (auto it = rp->find(pk_col); it != rp->end()) txn.record_read(table, pk_col, it->second);
             }
         }
     }
@@ -1854,8 +2085,9 @@ StringResult Executor::format_result(SharedDatabase& s, std::vector<Row> result,
     }
 
     std::vector<std::vector<std::string>> resolved_rows;
-    resolved_rows.reserve(result.size());
-    for (auto& row : result) {
+    resolved_rows.reserve(rows.size());
+    for (const Row* row_ptr : rows) {
+        const Row& row = *row_ptr;
         std::vector<std::string> vals;
         vals.reserve(col_defs.size());
         for (auto& [header, src] : col_defs) {
@@ -1919,7 +2151,7 @@ StringResult Executor::format_result(SharedDatabase& s, std::vector<Row> result,
         output += "\n";
     }
     output += separator;
-    output += "\n" + std::to_string(result.size()) + " row(s) returned.";
+    output += "\n" + std::to_string(rows.size()) + " row(s) returned.";
     return StringResult::Ok(output);
 }
 
