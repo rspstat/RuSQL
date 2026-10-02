@@ -14,6 +14,9 @@ After recovery fuzz_crash.py also checks the INDEXES against the recovered rows 
 g and through the primary key must return what the oracle says) -- a table scan alone cannot see a stale index.
 
 Env: RUSQL_REDO_CHECKPOINT_BYTES=3000  forces frequent redo checkpoints between kills (default 4MB)
+     RUSQL_REDO_CHECKPOINT_ROW_BYTES=<n>  a checkpoint is due once the redo log passes max(CHECKPOINT_BYTES, n x rows of the
+                                       tables changed since the last one); server default 128. Both fuzzers start the server
+                                       with 0 (fixed threshold) -- set 128 to fuzz recovery from a long redo log instead
      RUSQL_DML_INDEX_MIN_ROWS=<n>      UPDATE/DELETE use indexes only on tables of n+ rows (server default 64);
                                        fuzz_crash.py starts the server with 0 so its tiny tables take the index
                                        paths -- set a huge number (e.g. 999999) for a scan-only control run

@@ -58,8 +58,7 @@ StringResult Executor::exec_commit(SharedDatabase& s) {
     auto dirty_tables = txn.dirty_tables();
     for (auto& table : dirty_tables) {
         if (auto it = s.tables.find(table); it != s.tables.end()) {
-            s.buffer_pool.write_page(table, it->second);
-            s.buffer_pool.flush_page(table, s.disk);
+            s.buffer_pool.write_through(table, it->second, s.disk);
         }
     }
 
@@ -89,8 +88,7 @@ StringResult Executor::exec_commit_phase1(SharedDatabase& s, bool use_redo) {
             // Redo mode: the table file is NOT rewritten here -- the commit's redo batch
             // (written by execute_commit_grouped) is what makes it durable.
             if (!use_redo) {
-                s.buffer_pool.write_page(table, it->second);
-                s.buffer_pool.flush_page(table, s.disk);
+                s.buffer_pool.write_through(table, it->second, s.disk);
                 redo_mark_flushed(s, table); // table_locks are held EXCLUSIVE for dirty tables here
             }
             s.query_cache.invalidate_table(table);
@@ -425,8 +423,7 @@ void Executor::recover_from_wal() {
                             });
                             if (!exists) {
                                 tit->second.push_back(row);
-                                nlohmann::json j = row;
-                                if (auto idx_it = sw->indexes.find(table); idx_it != sw->indexes.end()) idx_it->second.insert(key, j.dump());
+                                if (auto idx_it = sw->indexes.find(table); idx_it != sw->indexes.end()) idx_it->second.insert(key, row_to_json(row));
                                 sw->disk.save_table(table, tit->second);
                             }
                         }

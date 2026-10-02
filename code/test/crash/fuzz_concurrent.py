@@ -24,7 +24,7 @@ SPAN = 1000
 
 def start():
     p = subprocess.Popen([EXE, "--port", str(PORT), "--no-mysql", "--data-dir", DATA],
-                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=dict(os.environ))
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=dict({"RUSQL_REDO_CHECKPOINT_ROW_BYTES": "0"}, **os.environ))
     for _ in range(200):
         try:
             socket.create_connection(("127.0.0.1", PORT), timeout=0.2).close()

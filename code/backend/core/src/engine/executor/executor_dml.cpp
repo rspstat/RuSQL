@@ -10,6 +10,8 @@
 
 #include "engine/executor/executor.hpp"
 
+#include <unordered_set>
+
 #include <algorithm>
 #include <ctime>
 #include <iomanip>
@@ -190,8 +192,7 @@ void Executor::maybe_auto_vacuum(SharedDatabase& s, const std::string& table) {
             }
             idx_it->second = build_pk_tree(rows_clone, pk_col_name);
         }
-        s.buffer_pool.write_page(table, rows_clone);
-        s.buffer_pool.flush_page(table, s.disk);
+        s.buffer_pool.write_through(table, rows_clone, s.disk);
         redo_mark_flushed(s, table); // vacuum physically removed versions the redo log may still describe
     }
 }
@@ -405,9 +406,15 @@ StringResult Executor::exec_insert_inner(SharedDatabase& s, const std::string& t
     TableSchema* schema_mut_for_ai = s.catalog.get_table_mut(table);
     bool any_auto_increment_allocated = false;
 
-    std::vector<std::vector<std::pair<std::size_t, std::string>>> seen_unique;
-    std::vector<std::vector<std::string>> seen_composite_pk;
+    // Duplicates WITHIN this statement: for every PRIMARY KEY / UNIQUE column the first row of the statement that carried
+    // each value (and, for a composite primary key, the encoded tuples seen). This used to scan every earlier row of the
+    // statement for every row -- quadratic in the number of rows of one INSERT (a 5,000-row batch compared 12.5 million
+    // pairs of values).
+    std::vector<std::unordered_map<std::string, std::size_t>> seen_unique_first(constraints.size());
+    std::unordered_set<std::string> seen_composite_pk;
+    std::size_t batch_rows_recorded = 0;
     std::vector<Row> prepared;
+    prepared.reserve(all_values.size());
     std::vector<std::pair<std::string, std::vector<std::pair<std::string, ArithExpr>>>> pending_updates;
 
     // Gap lock conflict check needs the single-column PK's name (V1 scope, matching the
@@ -483,7 +490,7 @@ StringResult Executor::exec_insert_inner(SharedDatabase& s, const std::string& t
             }
         }
 
-        std::vector<std::string> final_values = positional;
+        std::vector<std::string> final_values = std::move(positional);
 
         for (std::size_t i = 0; i < schema.columns.size(); i++) {
             if (!final_values[i].empty()) continue;
@@ -547,7 +554,7 @@ StringResult Executor::exec_insert_inner(SharedDatabase& s, const std::string& t
         }
 
         {
-            std::vector<std::string> pk_cols = schema.primary_key_columns;
+            const std::vector<std::string>& pk_cols = schema.primary_key_columns;
             bool is_composite_pk = pk_cols.size() > 1;
             auto tit = s.tables.find(table);
             bool skip_row = false;
@@ -639,32 +646,42 @@ StringResult Executor::exec_insert_inner(SharedDatabase& s, const std::string& t
         }
 
         {
-            std::vector<std::string> pk_cols_batch = schema.primary_key_columns;
-            bool is_composite_batch = pk_cols_batch.size() > 1;
-            if (is_composite_batch) {
+            const std::vector<std::string>& pk_cols_batch = schema.primary_key_columns;
+            if (pk_cols_batch.size() > 1) {
                 std::vector<std::string> new_pk_tuple;
                 for (auto& pk : pk_cols_batch) {
                     auto pos = std::find(col_names.begin(), col_names.end(), pk);
                     new_pk_tuple.push_back(pos != col_names.end() ? final_values[static_cast<std::size_t>(pos - col_names.begin())]
                                                                    : std::string());
                 }
-                for (auto& prev : seen_composite_pk) {
-                    if (prev == new_pk_tuple) return StringResult::Err("Duplicate composite primary key (" + join_quoted(new_pk_tuple) + ")");
+                std::string encoded; // length-prefixed, so no two different tuples encode alike
+                for (auto& v : new_pk_tuple) {
+                    encoded += std::to_string(v.size());
+                    encoded += ':';
+                    encoded += v;
                 }
-                seen_composite_pk.push_back(std::move(new_pk_tuple));
+                if (!seen_composite_pk.insert(std::move(encoded)).second) {
+                    return StringResult::Err("Duplicate composite primary key (" + join_quoted(new_pk_tuple) + ")");
+                }
             } else {
-                std::vector<std::pair<std::size_t, std::string>> this_row_unique;
+                // Same verdict (and the same column named in the message) as the scan this replaces: the earliest earlier
+                // row that matches, and among its columns the lowest.
+                std::size_t best_row = 0, best_col = 0;
+                bool found = false;
                 for (std::size_t i = 0; i < constraints.size(); i++) {
-                    if (constraints[i].primary_key || constraints[i].unique) this_row_unique.emplace_back(i, final_values[i]);
-                }
-                for (auto& prev : seen_unique) {
-                    for (auto& [i, val] : this_row_unique) {
-                        for (auto& [pi, pv] : prev) {
-                            if (pi == i && pv == val) return StringResult::Err("Duplicate value '" + val + "' for column '" + col_names[i] + "'");
-                        }
+                    if (!constraints[i].primary_key && !constraints[i].unique) continue;
+                    auto it = seen_unique_first[i].find(final_values[i]);
+                    if (it != seen_unique_first[i].end() && (!found || it->second < best_row)) {
+                        found = true;
+                        best_row = it->second;
+                        best_col = i;
                     }
                 }
-                seen_unique.push_back(std::move(this_row_unique));
+                if (found) return StringResult::Err("Duplicate value '" + final_values[best_col] + "' for column '" + col_names[best_col] + "'");
+                for (std::size_t i = 0; i < constraints.size(); i++) {
+                    if (constraints[i].primary_key || constraints[i].unique) seen_unique_first[i].emplace(final_values[i], batch_rows_recorded);
+                }
+                batch_rows_recorded++;
             }
         }
 
@@ -941,8 +958,7 @@ StringResult Executor::exec_insert_inner(SharedDatabase& s, const std::string& t
             for (auto& row : updated_rows) {
                 auto it = row.find(pk_col_name);
                 std::string k = it != row.end() ? it->second : std::string();
-                nlohmann::json j = row;
-                idx_it->second.insert(k, j.dump());
+                idx_it->second.insert(k, row_to_json(row));
             }
         }
     }
@@ -965,38 +981,55 @@ StringResult Executor::exec_insert_inner(SharedDatabase& s, const std::string& t
     // (Stage 2), not by this lock.
     {
         auto insert_write_lock = acquire_table_data_locks(s, {table}, /*exclusive=*/true);
+        auto tit = s.tables.find(table);
+        if (tit == s.tables.end()) return StringResult::Err("Table '" + table + "' not found");
+        auto idx_it = s.indexes.find(table);
+        std::vector<CompositeIndex*> composite;
+        for (auto& [k, ci] : s.composite_indexes) {
+            if (ci.table == table) composite.push_back(&ci);
+        }
         for (auto& row : prepared) {
             auto pkit = row.find(key_col);
             std::string pk_val = pkit != row.end() ? pkit->second : std::string();
-            nlohmann::json jrow = row;
-            std::string val_json = jrow.dump();
+            std::string val_json = row_to_json(row);
 
             txn.log_insert(table, pk_val, val_json);
 
-            if (auto idx_it = s.indexes.find(table); idx_it != s.indexes.end()) idx_it->second.insert(pk_val, val_json);
+            if (idx_it != s.indexes.end()) idx_it->second.insert(pk_val, val_json);
+            for (auto* ci : composite) ci->insert_row(row);
+        }
+        // Secondary and hash indexes: every affected bucket is parsed and rewritten once for the whole statement
+        // (one JSON array of rows per key), instead of once per row -- quadratic for an index on a column with few
+        // distinct values. Same helper UPDATE and DELETE use.
+        index_replace_rows(s, table, std::vector<Row>{}, prepared, key_col);
 
-            std::vector<std::string> comp_keys;
-            for (auto& [k, ci] : s.composite_indexes) {
-                if (ci.table == table) comp_keys.push_back(k);
-            }
-            for (auto& k : comp_keys) s.composite_indexes.at(k).insert_row(row);
-
-            index_insert_row(s, table, row);
-
-            std::optional<std::string> pk_val_for_idx;
-            if (!txn.is_active()) {
-                for (auto& c : schema.columns) {
-                    if (c.primary_key) {
-                        if (auto it = row.find(c.name); it != row.end()) pk_val_for_idx = it->second;
-                        break;
-                    }
+        // autocommit only: pk -> position cache, filled while the rows are appended
+        std::string pos_col;
+        if (!txn.is_active()) {
+            for (auto& c : schema.columns) {
+                if (c.primary_key) {
+                    pos_col = c.name;
+                    break;
                 }
             }
-            auto tit = s.tables.find(table);
-            if (tit == s.tables.end()) return StringResult::Err("Table '" + table + "' not found");
-            std::size_t pos = tit->second.size();
-            tit->second.push_back(std::move(row));
-            if (pk_val_for_idx) s.row_pk_pos[table][*pk_val_for_idx] = pos;
+        }
+        auto& rows_vec = tit->second;
+        if (rows_vec.size() + prepared.size() > rows_vec.capacity()) {
+            rows_vec.reserve(std::max(rows_vec.capacity() * 2, rows_vec.size() + prepared.size()));
+        }
+        std::unordered_map<std::string, std::size_t>* pos_map = nullptr;
+        if (!pos_col.empty() && !prepared.empty()) {
+            pos_map = &s.row_pk_pos[table];
+            pos_map->reserve(pos_map->size() + prepared.size());
+        }
+        for (auto& row : prepared) {
+            std::size_t pos = rows_vec.size();
+            std::optional<std::string> pos_key;
+            if (pos_map) {
+                if (auto it = row.find(pos_col); it != row.end()) pos_key = it->second;
+            }
+            rows_vec.push_back(std::move(row));
+            if (pos_key) (*pos_map)[*pos_key] = pos;
         }
 
         if (!txn.is_active()) {

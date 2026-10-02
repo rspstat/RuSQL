@@ -293,8 +293,7 @@ Executor::Executor(const std::string& dir, std::size_t buffer_pool_capacity) {
             }
             BPlusTree t;
             for (auto& [k, bucket_rows] : bucket) {
-                nlohmann::json j = bucket_rows;
-                t.insert(k, j.dump());
+                t.insert(k, rows_to_json(bucket_rows));
             }
             built[i] = std::move(t);
         });

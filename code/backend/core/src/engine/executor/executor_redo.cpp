@@ -17,8 +17,7 @@ namespace {
 // changes after the version is created -- a version is stamped dead exactly once).
 std::string version_identity(Row row) {
     row.erase("_xmax");
-    nlohmann::json j = row;
-    return j.dump();
+    return row_to_json(row);
 }
 } // namespace
 
@@ -68,8 +67,7 @@ void Executor::checkpoint_redo_locked(SharedDatabase& s) {
     for (auto& table : dirty) {
         auto it = s.tables.find(table);
         if (it == s.tables.end()) continue; // dropped since
-        s.buffer_pool.write_page(table, it->second);
-        s.buffer_pool.flush_page(table, s.disk);
+        s.buffer_pool.write_through(table, it->second, s.disk);
     }
     s.redo_dirty->lock()->clear();
     s.redo_log->clear();
@@ -92,10 +90,46 @@ std::uint64_t Executor::redo_checkpoint_bytes() {
     return v;
 }
 
+// Bytes of log a table row is "worth" when deciding how large the redo log may grow (see maybe_checkpoint_redo).
+// RUSQL_REDO_CHECKPOINT_ROW_BYTES=0 turns the size-awareness off (the crash fuzzers do, to checkpoint at tiny sizes).
+static std::uint64_t redo_checkpoint_row_bytes() {
+    static const std::uint64_t v = [] {
+        if (const char* e = std::getenv("RUSQL_REDO_CHECKPOINT_ROW_BYTES")) {
+            try {
+                return static_cast<std::uint64_t>(std::stoull(e));
+            } catch (...) {
+            }
+        }
+        return static_cast<std::uint64_t>(128);
+    }();
+    return v;
+}
+
 void Executor::maybe_checkpoint_redo() {
-    if (!redo_log_ || redo_log_->bytes() < redo_checkpoint_bytes()) return;
+    auto threshold_of = [](const RedoLog& log) { return log.checkpoint_at() ? log.checkpoint_at() : redo_checkpoint_bytes(); };
+    if (!redo_log_ || redo_log_->bytes() < threshold_of(*redo_log_)) return;
     auto s = shared->write();
-    if (s->redo_log->bytes() >= redo_checkpoint_bytes()) checkpoint_redo_locked(*s);
+    RedoLog& log = *s->redo_log;
+    if (log.bytes() < threshold_of(log)) return;
+    // A checkpoint rewrites the files of every table with logged changes, so its cost grows with those tables. With a
+    // fixed trigger (4 MB of log ~ 50,000 changed rows) a table of a million rows was rewritten after every 50,000
+    // changes -- each change paid for ~20 rows of rewriting. The log is allowed to grow in proportion to the rows a
+    // checkpoint has to write (128 bytes per row, so a change costs a constant ~1 row), which keeps recovery (a replay of
+    // that log) cheaper than loading the tables it protects.
+    std::uint64_t want = redo_checkpoint_bytes();
+    {
+        std::uint64_t rows = 0;
+        auto dirty = s->redo_dirty->lock();
+        for (auto& table : *dirty) {
+            if (auto it = s->tables.find(table); it != s->tables.end()) rows += it->second.size();
+        }
+        want = std::max<std::uint64_t>(want, rows * redo_checkpoint_row_bytes());
+    }
+    if (log.bytes() >= want) {
+        checkpoint_redo_locked(*s);
+    } else {
+        log.set_checkpoint_at(want); // not yet: do not take the write lock again until the log is this big
+    }
 }
 
 void Executor::persist_autocommit(SharedDatabase& s, const std::vector<std::string>& lock_tables, bool covered, bool mutating) {
@@ -114,9 +148,7 @@ void Executor::persist_autocommit(SharedDatabase& s, const std::vector<std::stri
         auto data_lock = acquire_table_data_locks(s, {table}, /*exclusive=*/true);
         auto it = s.tables.find(table);
         if (it == s.tables.end()) continue;
-        std::vector<Row> copy = it->second;
-        s.buffer_pool.write_page(table, std::move(copy));
-        s.buffer_pool.flush_page(table, s.disk);
+        s.buffer_pool.write_through(table, it->second, s.disk);
         redo_mark_flushed(s, table);
     }
 }
@@ -146,21 +178,29 @@ void Executor::recover_from_redo() {
     }
 
     std::unordered_set<std::string> touched;
-    // table -> identity -> position in sw->tables[table]
-    std::unordered_map<std::string, std::unordered_map<std::string, std::size_t>> pos;
-    auto ensure_index = [&](const std::string& table) -> std::unordered_map<std::string, std::size_t>* {
+    // Identical row images are NOT one version: a table without a primary key can hold several rows with the very same
+    // image (same values, same _xmin when one transaction inserted them), and a replay that treated "identical image" as
+    // "already there" kept one of them -- `BEGIN; INSERT (1,'x'),(1,'x'); COMMIT` came back with ONE row after a crash
+    // (autocommit statements escaped only because every row of one used to get its own _xmin). So the replay counts:
+    // the k-th logged copy of an image is only added if fewer than k copies are present, and the k-th logged kill of
+    // an image by one transaction only stamps a row if fewer than k copies are already killed by it.
+    // table -> identity -> positions in sw->tables[table] (ascending) of every row with that identity
+    using Positions = std::unordered_map<std::string, std::vector<std::size_t>>;
+    std::unordered_map<std::string, Positions> pos;
+    auto ensure_index = [&](const std::string& table) -> Positions* {
         auto tit = sw->tables.find(table);
         if (tit == sw->tables.end()) return nullptr; // table no longer exists
         auto pit = pos.find(table);
         if (pit == pos.end()) {
             auto& m = pos[table];
-            for (std::size_t i = 0; i < tit->second.size(); i++) m.emplace(version_identity(tit->second[i]), i);
+            for (std::size_t i = 0; i < tit->second.size(); i++) m[version_identity(tit->second[i])].push_back(i);
             return &m;
         }
         return &pit->second;
     };
 
-    // Phase 1: every version that was created (idempotent: skip if already on disk).
+    // Phase 1: every version that was created (idempotent: not added again if already on disk).
+    std::unordered_map<std::string, std::size_t> inserts_seen; // table \0 identity -> logged copies seen so far
     for (auto& op : ops) {
         if (op.kind != RedoOp::Kind::InsertVersion) continue;
         auto* idx = ensure_index(op.table);
@@ -168,9 +208,11 @@ void Executor::recover_from_redo() {
         try {
             Row row = nlohmann::json::parse(op.row_json).get<Row>();
             std::string id = version_identity(row);
-            if (idx->count(id)) continue;
+            std::size_t k = ++inserts_seen[op.table + '\x00' + id];
+            auto& at = (*idx)[id];
+            if (k <= at.size()) continue; // this copy is already in the table
             auto& rows = sw->tables[op.table];
-            idx->emplace(id, rows.size());
+            at.push_back(rows.size());
             rows.push_back(std::move(row));
             touched.insert(op.table);
         } catch (...) {
@@ -178,6 +220,8 @@ void Executor::recover_from_redo() {
     }
     // Phase 2: every version that was killed. Done after all inserts so batch order (which
     // may differ from logical commit order) cannot matter.
+    std::unordered_map<std::string, std::size_t> kills_seen;    // table \0 identity \0 xmax -> logged kills seen so far
+    std::unordered_map<std::string, std::size_t> kills_present; // ... -> copies already killed by that transaction
     for (auto& op : ops) {
         if (op.kind != RedoOp::Kind::SetXmax) continue;
         auto* idx = ensure_index(op.table);
@@ -186,11 +230,25 @@ void Executor::recover_from_redo() {
             Row old = nlohmann::json::parse(op.row_json).get<Row>();
             auto it = idx->find(version_identity(old));
             if (it == idx->end()) continue; // garbage-collected before the crash
-            Row& live = sw->tables[op.table][it->second];
-            auto xit = live.find("_xmax");
-            if (xit == live.end() || xit->second == "0") {
-                live["_xmax"] = op.xmax;
-                touched.insert(op.table);
+            auto& rows = sw->tables[op.table];
+            std::string key = op.table + '\x00' + it->first + '\x00' + op.xmax;
+            auto present = kills_present.find(key);
+            if (present == kills_present.end()) {
+                std::size_t n = 0;
+                for (std::size_t p : it->second) {
+                    auto x = rows[p].find("_xmax");
+                    if (x != rows[p].end() && x->second == op.xmax) n++;
+                }
+                present = kills_present.emplace(key, n).first;
+            }
+            if (++kills_seen[key] <= present->second) continue; // this kill is already applied
+            for (std::size_t p : it->second) {
+                auto xit = rows[p].find("_xmax");
+                if (xit == rows[p].end() || xit->second == "0") {
+                    rows[p]["_xmax"] = op.xmax;
+                    touched.insert(op.table);
+                    break;
+                }
             }
         } catch (...) {
         }
@@ -217,8 +275,7 @@ void Executor::recover_from_redo() {
             if (ci.table == table) ci.rebuild(rows);
         }
         if (auto mit = sw->row_pk_pos.find(table); mit != sw->row_pk_pos.end()) mit->second.clear();
-        sw->buffer_pool.write_page(table, rows);
-        sw->buffer_pool.flush_page(table, sw->disk);
+        sw->buffer_pool.write_through(table, rows, sw->disk);
     }
     sw->redo_log->clear();
 }

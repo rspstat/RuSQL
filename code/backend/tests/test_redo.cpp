@@ -336,3 +336,85 @@ TEST_CASE("Redo: crash with an open transaction that updated then deleted a comm
     REQUIRE(rows_of(ex, "SELECT v FROM t WHERE id = 15").find("| 1 ") != std::string::npos);
     REQUIRE(rows_of(ex, "SELECT * FROM t WHERE id = 16").find("0 rows") != std::string::npos);
 }
+
+// A table without a primary key can hold rows with identical images (same values, same _xmin when one transaction
+// inserted them). The replay used to treat "identical image" as "already present": `BEGIN; INSERT (1,'x'),(1,'x');
+// COMMIT` came back with one row after a crash, and killing two identical rows stamped only one of them.
+namespace {
+std::string count_where(Executor& ex, const std::string& table, const std::string& where) {
+    return rows_of(ex, "SELECT COUNT(*) FROM " + table + " WHERE " + where);
+}
+bool has_count(const std::string& out, int n) { return out.find("| " + std::to_string(n) + " ") != std::string::npos; }
+} // namespace
+
+TEST_CASE("Redo: identical rows of a table without a primary key all survive recovery", "[redo][durability]") {
+    TempDataDir dir("redo_dup_rows");
+    {
+        Executor ex(dir.path);
+        REQUIRE(ex.execute_sql("CREATE DATABASE d").is_ok());
+        REQUIRE(ex.execute_sql("USE d").is_ok());
+        REQUIRE(ex.execute_sql("CREATE TABLE np (a INT, b VARCHAR(5))").is_ok());
+        REQUIRE(ex.execute_sql("BEGIN").is_ok());
+        REQUIRE(ex.execute_sql("INSERT INTO np VALUES (1, 'x'), (1, 'x'), (1, 'x'), (2, 'y'), (2, 'y')").is_ok());
+        REQUIRE(ex.execute_sql("COMMIT").is_ok());
+        REQUIRE(ex.execute_sql("INSERT INTO np VALUES (3, 'z'), (3, 'z')").is_ok()); // autocommit
+    } // crash
+    {
+        Executor ex(dir.path);
+        REQUIRE(ex.execute_sql("USE d").is_ok());
+        REQUIRE(count_rows(ex, "np") == 7);
+        REQUIRE(has_count(count_where(ex, "np", "a = 1"), 3));
+        REQUIRE(has_count(count_where(ex, "np", "a = 2"), 2));
+        // the same shapes again on top of the recovered state: kill two identical rows, rewrite three
+        REQUIRE(ex.execute_sql("BEGIN").is_ok());
+        REQUIRE(ex.execute_sql("DELETE FROM np WHERE a = 2").is_ok());
+        REQUIRE(ex.execute_sql("COMMIT").is_ok());
+        REQUIRE(ex.execute_sql("BEGIN").is_ok());
+        REQUIRE(ex.execute_sql("UPDATE np SET b = 'w' WHERE a = 1").is_ok());
+        REQUIRE(ex.execute_sql("COMMIT").is_ok());
+    } // crash again
+    Executor ex(dir.path);
+    REQUIRE(ex.execute_sql("USE d").is_ok());
+    REQUIRE(count_rows(ex, "np") == 5);
+    REQUIRE(has_count(count_where(ex, "np", "a = 2"), 0));
+    REQUIRE(has_count(count_where(ex, "np", "b = 'w'"), 3));
+    REQUIRE(has_count(count_where(ex, "np", "b = 'x'"), 0));
+    REQUIRE(has_count(count_where(ex, "np", "a = 3"), 2));
+}
+
+TEST_CASE("Redo: replaying a log whose effects are already in the table files changes nothing", "[redo][durability]") {
+    TempDataDir dir("redo_replay_twice");
+    const std::string redo = dir.path + "/rusql.redo";
+    {
+        Executor ex(dir.path);
+        REQUIRE(ex.execute_sql("CREATE DATABASE d").is_ok());
+        REQUIRE(ex.execute_sql("USE d").is_ok());
+        REQUIRE(ex.execute_sql("CREATE TABLE np (a INT, b VARCHAR(5))").is_ok());
+        REQUIRE(ex.execute_sql("BEGIN").is_ok());
+        REQUIRE(ex.execute_sql("INSERT INTO np VALUES (1, 'x'), (1, 'x'), (1, 'x'), (2, 'y'), (2, 'y')").is_ok());
+        REQUIRE(ex.execute_sql("COMMIT").is_ok());
+        REQUIRE(ex.execute_sql("BEGIN").is_ok());
+        REQUIRE(ex.execute_sql("DELETE FROM np WHERE a = 2").is_ok());
+        REQUIRE(ex.execute_sql("UPDATE np SET b = 'w' WHERE a = 1").is_ok());
+        REQUIRE(ex.execute_sql("COMMIT").is_ok());
+    } // crash
+    REQUIRE(fs::exists(redo));
+    fs::copy_file(redo, dir.path + "/redo.saved", fs::copy_options::overwrite_existing);
+    {
+        Executor ex(dir.path); // first recovery: replays, flushes the table files, clears the log
+        REQUIRE(ex.execute_sql("USE d").is_ok());
+        REQUIRE(count_rows(ex, "np") == 3);
+    }
+    // a crash between "table files written" and "log cleared": the old log is back next to the already-updated files
+    fs::copy_file(dir.path + "/redo.saved", redo, fs::copy_options::overwrite_existing);
+    for (int boot = 0; boot < 2; boot++) {
+        {
+            Executor ex(dir.path);
+            REQUIRE(ex.execute_sql("USE d").is_ok());
+            REQUIRE(count_rows(ex, "np") == 3);
+            REQUIRE(has_count(count_where(ex, "np", "b = 'w'"), 3));
+            REQUIRE(has_count(count_where(ex, "np", "a = 2"), 0));
+        }
+        fs::copy_file(dir.path + "/redo.saved", redo, fs::copy_options::overwrite_existing);
+    }
+}

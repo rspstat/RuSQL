@@ -10,6 +10,7 @@
 #include <lz4/lz4.h>
 
 #include "engine/parser/ast_json.hpp"
+#include "engine/row_json.hpp"
 #include "engine/storage/atomic_write.hpp"
 #include "engine/storage/page.hpp"
 
@@ -188,8 +189,7 @@ void DiskManager::save_table(const std::string& table, const std::vector<Row>& r
 
     std::vector<std::uint8_t> raw;
     for (auto& row : rows) {
-        nlohmann::json j = row;
-        std::string json = j.dump();
+        std::string json = row_to_json(row);
         std::uint32_t len = static_cast<std::uint32_t>(json.size());
         for (int i = 0; i < 4; i++) raw.push_back(static_cast<std::uint8_t>((len >> (8 * i)) & 0xFF));
         raw.insert(raw.end(), json.begin(), json.end());

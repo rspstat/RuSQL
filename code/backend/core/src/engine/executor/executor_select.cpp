@@ -95,6 +95,46 @@ bool row_order_less(const Row& a, const Row& b, const std::vector<OrderBy>& orde
     return false;
 }
 
+// The order row_order_less defines, for a whole row set at once: indexes into `rows`, stable. row_order_less looked both
+// columns up in both rows (two hash lookups, two string copies) and parsed both as numbers on EVERY comparison -- about
+// 0.45 us each, 16 comparisons per row of a 50,000-row sort. Here each row's keys are read and parsed once.
+std::vector<std::size_t> order_rows(const std::vector<const Row*>& rows, const std::vector<OrderBy>& order_by) {
+    struct Cell {
+        bool numeric = false;
+        double num = 0;
+        const std::string* text = nullptr;
+    };
+    static const std::string empty;
+    const std::size_t ncols = order_by.size();
+    std::vector<Cell> cells(rows.size() * ncols);
+    for (std::size_t i = 0; i < rows.size(); i++) {
+        for (std::size_t c = 0; c < ncols; c++) {
+            auto it = rows[i]->find(order_by[c].column);
+            Cell& cell = cells[i * ncols + c];
+            cell.text = it != rows[i]->end() ? &it->second : &empty;
+            if (auto v = parse_f64(*cell.text)) {
+                cell.numeric = true;
+                cell.num = *v;
+            }
+        }
+    }
+    std::vector<std::size_t> order(rows.size());
+    for (std::size_t i = 0; i < order.size(); i++) order[i] = i;
+    std::stable_sort(order.begin(), order.end(), [&](std::size_t a, std::size_t b) {
+        for (std::size_t c = 0; c < ncols; c++) {
+            const Cell& x = cells[a * ncols + c];
+            const Cell& y = cells[b * ncols + c];
+            int cmp;
+            if (x.numeric && y.numeric) cmp = x.num < y.num ? -1 : (x.num > y.num ? 1 : 0); // same as cmp_key
+            else cmp = *x.text < *y.text ? -1 : (*x.text > *y.text ? 1 : 0);
+            if (!order_by[c].ascending) cmp = -cmp;
+            if (cmp != 0) return cmp < 0;
+        }
+        return false;
+    });
+    return order;
+}
+
 // Faithful port of executor.rs's own free-standing `arith_to_str` — a SEPARATE,
 // differently-formatted function from Parser::arith_to_string (which joins Func args
 // with ", " and puts spaces around binary operators). This one (used for default
@@ -952,46 +992,77 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
         }
     }
 
-    std::vector<Row> rows;
+    // The table's rows are read IN PLACE (this statement holds the table's data lock shared, so nothing can change the
+    // vector under it). A scan used to copy the whole table first -- one hash map per row, ~1 us each -- only to throw
+    // away every row that is invisible or fails the WHERE; now only the rows that are returned (or joined) are copied.
+    std::vector<Row> buffer_pool_rows;
+    const std::vector<Row>* base_rows = nullptr;
     if (auto it = s.tables.find(table); it != s.tables.end()) {
-        rows = it->second;
+        base_rows = &it->second;
     } else {
-        rows = s.buffer_pool.get_page(table, s.disk);
+        buffer_pool_rows = s.buffer_pool.get_page(table, s.disk);
+        base_rows = &buffer_pool_rows;
     }
 
-    std::vector<Row> visible_rows;
-    visible_rows.reserve(rows.size());
-    for (auto& r : rows) {
-        if (is_visible_for_read(r, read_ctx)) visible_rows.push_back(std::move(r));
+    std::vector<Row> visible_rows; // joins only
+    std::vector<const Row*> visible_ptrs; // single-table scan
+    if (joins.empty()) {
+        visible_ptrs.reserve(base_rows->size());
+        for (auto& r : *base_rows) {
+            if (is_visible_for_read(r, read_ctx)) visible_ptrs.push_back(&r);
+        }
+    } else {
+        visible_rows.reserve(base_rows->size());
+        for (auto& r : *base_rows) {
+            if (is_visible_for_read(r, read_ctx)) visible_rows.push_back(r);
+        }
     }
+
+    // ORDER BY (with LIMIT/OFFSET) of a plain single-table scan: the rows are ordered by pointer into the table and only
+    // the rows that are returned get copied. Sorting copied hash maps moved every one of them several times (50,000 rows:
+    // ~400 ms for the top 10); a stable sort of pointers is ~5 ms. Everything that needs the whole row set in a different
+    // shape (aggregates, windows, GROUP BY/HAVING, DISTINCT, joins) keeps the generic path below.
+    const bool presort = joins.empty() && !has_win && !has_agg && !group_by && !having && !distinct && !order_by.empty();
+    bool presorted = false;
 
     std::vector<Row> result;
     if (joins.empty()) {
-        if (parallel_enabled() && visible_rows.size() >= parallel_min_rows() && condition.has_value()
+        std::vector<const Row*> matched;
+        if (parallel_enabled() && visible_ptrs.size() >= parallel_min_rows() && condition.has_value()
             && !condition_has_subquery(condition)) {
             // 병렬 SeqScan 필터: 서브쿼리 없는 WHERE는 순수 정적 matches_condexpr로 평가 가능.
             // 청크마다 워커 스레드에 thread_local UDF 컨텍스트를 세팅해 사용자 정의 함수/DATABASE()도 정확히 평가.
-            std::size_t n_chunks = (visible_rows.size() + PARALLEL_CHUNK - 1) / PARALLEL_CHUNK;
-            std::vector<std::vector<Row>> chunk_results(n_chunks);
+            std::size_t n_chunks = (visible_ptrs.size() + PARALLEL_CHUNK - 1) / PARALLEL_CHUNK;
+            std::vector<std::vector<const Row*>> chunk_results(n_chunks);
             auto uf = s.user_functions;
             std::string cur_db = current_db;
             std::string cur_user = auth_user;
             ThreadPool::global().parallel_for(n_chunks, [&](std::size_t ci) {
                 std::size_t start = ci * PARALLEL_CHUNK;
-                std::size_t end = std::min(start + PARALLEL_CHUNK, visible_rows.size());
+                std::size_t end = std::min(start + PARALLEL_CHUNK, visible_ptrs.size());
                 sync_udf_context(uf, cur_db, cur_user);
                 auto& out = chunk_results[ci];
                 for (std::size_t i = start; i < end; i++) {
-                    if (matches_condexpr(visible_rows[i], condition)) out.push_back(visible_rows[i]);
+                    if (matches_condexpr(*visible_ptrs[i], condition)) out.push_back(visible_ptrs[i]);
                 }
             });
-            for (auto& chunk : chunk_results) {
-                for (auto& r : chunk) result.push_back(std::move(r));
-            }
+            for (auto& chunk : chunk_results) matched.insert(matched.end(), chunk.begin(), chunk.end());
         } else {
-            for (auto& r : visible_rows) {
-                if (matches_condition_with_subquery(s, r, condition)) result.push_back(std::move(r));
+            for (const Row* r : visible_ptrs) {
+                if (matches_condition_with_subquery(s, *r, condition)) matched.push_back(r);
             }
+        }
+        if (presort) {
+            std::vector<std::size_t> order = order_rows(matched, order_by);
+            std::size_t skip = offset ? std::min(*offset, matched.size()) : 0;
+            std::size_t end = matched.size();
+            if (limit && end - skip > *limit) end = skip + *limit;
+            result.reserve(end - skip);
+            for (std::size_t i = skip; i < end; i++) result.push_back(*matched[order[i]]);
+            presorted = true;
+        } else {
+            result.reserve(matched.size());
+            for (const Row* r : matched) result.push_back(*r);
         }
     } else {
         std::vector<Row> current = std::move(visible_rows);
@@ -1173,7 +1244,7 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
 
     if (has_win) result = compute_window_functions(std::move(result), columns);
 
-    if (!order_by.empty()) {
+    if (!order_by.empty() && !presorted) {
         auto less = [&](const Row& a, const Row& b) { return row_order_less(a, b, order_by); };
         if (parallel_enabled() && result.size() >= parallel_min_rows()) {
             parallel_sort(result, less); // unstable, matches Rust's par_sort_unstable_by
@@ -1282,11 +1353,13 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
         result = std::move(filtered);
     }
 
-    if (offset) {
-        std::size_t skip = std::min(*offset, result.size());
-        result.erase(result.begin(), result.begin() + static_cast<std::ptrdiff_t>(skip));
+    if (!presorted) { // (a presorted result already is the requested window)
+        if (offset) {
+            std::size_t skip = std::min(*offset, result.size());
+            result.erase(result.begin(), result.begin() + static_cast<std::ptrdiff_t>(skip));
+        }
+        if (limit && result.size() > *limit) result.resize(*limit);
     }
-    if (limit && result.size() > *limit) result.resize(*limit);
 
     if (distinct) {
         std::vector<std::vector<std::string>> seen;

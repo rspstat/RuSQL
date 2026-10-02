@@ -62,6 +62,11 @@ public:
     void clear();
 
     std::uint64_t bytes() const { return bytes_.load(); }
+
+    // Log size at which Executor::maybe_checkpoint_redo() looks at checkpointing; 0 = the configured minimum. Raised
+    // when the tables a checkpoint would rewrite are large (see there), reset whenever the log is cleared.
+    std::uint64_t checkpoint_at() const { return checkpoint_at_.load(); }
+    void set_checkpoint_at(std::uint64_t bytes) { checkpoint_at_ = bytes; }
     const std::string& path() const { return path_; }
 
 private:
@@ -69,6 +74,7 @@ private:
     mutable std::mutex mu_;
     std::FILE* fp_ = nullptr;
     std::atomic<std::uint64_t> bytes_{0};
+    std::atomic<std::uint64_t> checkpoint_at_{0};
     bool size_known_ = false;
     std::atomic<std::uint64_t> appended_{0};
     std::atomic<std::uint64_t> synced_{0};

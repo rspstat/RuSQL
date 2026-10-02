@@ -59,8 +59,8 @@ const NODES: Node[] = [
   },
   {
     id: "executor", x: 885, y: 350, w: 120, h: 98, c: C.core, name: L("Executor", "실행기"),
-    desc: L("Runs the plan: joins (NL, hash, sort-merge, index NL), subqueries, CTE, window functions. Result cache (LRU-512) and a thread pool for parallel scans. UPDATE / DELETE take index hits only as candidates, verify each against the real row and scan when in doubt; UPDATE checks PRIMARY KEY / UNIQUE and applies fully or not at all.",
-            "계획 실행: 조인(NL, 해시, 소트-머지, 인덱스 NL), 서브쿼리, CTE, 윈도우 함수. 결과 캐시(LRU 512)와 병렬 스캔용 스레드 풀 포함. UPDATE·DELETE는 인덱스 결과를 후보로만 쓰고 실제 행으로 검증하며 의심스러우면 스캔. UPDATE는 PRIMARY KEY·UNIQUE를 검사하고 전부 적용되거나 전혀 적용되지 않음."),
+    desc: L("Runs the plan: joins (NL, hash, sort-merge, index NL), subqueries, CTE, window functions. Result cache (LRU-512) and a thread pool for parallel scans. Single-table scans read rows in place, ORDER BY ... LIMIT sorts pointers, a multi-row INSERT checks duplicates and updates indexes once per statement. UPDATE / DELETE take index hits only as candidates, verify each against the real row and scan when in doubt; UPDATE checks PRIMARY KEY / UNIQUE and applies fully or not at all.",
+            "계획 실행: 조인(NL, 해시, 소트-머지, 인덱스 NL), 서브쿼리, CTE, 윈도우 함수. 결과 캐시(LRU 512)와 병렬 스캔용 스레드 풀 포함. 단일 테이블 스캔은 행을 복사하지 않고 제자리에서 읽고, ORDER BY ... LIMIT은 포인터를 정렬하며, 여러 행 INSERT는 중복 검사와 인덱스 갱신을 문장당 한 번만 함. UPDATE·DELETE는 인덱스 결과를 후보로만 쓰고 실제 행으로 검증하며 의심스러우면 스캔. UPDATE는 PRIMARY KEY·UNIQUE를 검사하고 전부 적용되거나 전혀 적용되지 않음."),
   },
   {
     id: "txn", x: 1085, y: 350, w: 130, h: 104, c: C.txn, name: L("Transactions", "트랜잭션"),
@@ -74,8 +74,8 @@ const NODES: Node[] = [
   },
   {
     id: "durability", x: 825, y: 600, w: 130, h: 104, c: C.disk, name: L("Durability", "내구성"),
-    desc: L("Redo log (one checksummed batch per commit, group-commit fsync), WAL and undo log (which transactions a log file holds is tracked in memory, so COMMIT and ROLLBACK never re-read it). Checkpoints rewrite the table files; on boot, unfinished transactions are undone, the redo log is replayed and every index is rebuilt from the rows.",
-            "Redo 로그(커밋마다 체크섬 배치 1개, 그룹 커밋 fsync), WAL, undo 로그(로그 파일에 어떤 트랜잭션이 들어 있는지 메모리에서 추적해 COMMIT·ROLLBACK이 파일을 다시 읽지 않음). 체크포인트가 테이블 파일을 재기록하고, 부팅 시 미완료 트랜잭션을 undo하고 redo를 재생한 뒤 모든 인덱스를 행에서 재구성."),
+    desc: L("Redo log (one checksummed batch per commit, group-commit fsync), WAL and undo log (which transactions a log file holds is tracked in memory, so COMMIT and ROLLBACK never re-read it). Checkpoints rewrite the table files once the redo log outgrows a limit that scales with the table size; on boot, unfinished transactions are undone, the redo log is replayed (identical rows of one table all survive) and every index is rebuilt from the rows.",
+            "Redo 로그(커밋마다 체크섬 배치 1개, 그룹 커밋 fsync), WAL, undo 로그(로그 파일에 어떤 트랜잭션이 들어 있는지 메모리에서 추적해 COMMIT·ROLLBACK이 파일을 다시 읽지 않음). redo 로그가 테이블 크기에 비례하는 한도를 넘으면 체크포인트가 테이블 파일을 재기록하고, 부팅 시 미완료 트랜잭션을 undo하고 redo를 재생(한 테이블의 동일한 행도 모두 보존)한 뒤 모든 인덱스를 행에서 재구성."),
   },
   {
     id: "disk", x: 565, y: 600, w: 130, h: 104, c: C.disk, name: L("Disk files", "디스크 파일"),

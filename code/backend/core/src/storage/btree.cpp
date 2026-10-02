@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <charconv>
 #include <cstdlib>
+#include <string_view>
 
 namespace engine {
 
@@ -18,18 +19,34 @@ constexpr std::size_t MIN_KEYS = ORDER / 2 - 1;
 // strtod()/c_str() here would stop at the first embedded '\0' and misreport a
 // composite key like "1\x0050000" as the plain number 1 — use from_chars instead,
 // which works on an explicit [first,last) range with no null-termination assumption.
-bool try_parse_f64(const std::string& s, double& out) {
+bool try_parse_f64(std::string_view s, double& out) {
     if (s.empty()) return false;
     auto res = std::from_chars(s.data(), s.data() + s.size(), out);
     return res.ec == std::errc() && res.ptr == s.data() + s.size();
+}
+
+// Canonical non-negative integer text ("0", "7", "120" -- digits only, no leading zero, at most 15 digits so it is exact
+// as a double). Two such texts are numerically equal only if they are the same text, and their numeric order is
+// "shorter first, then by text" -- no parsing needed. Ids and counters, by far the most common keys, are all of this form.
+bool plain_uint(std::string_view s) {
+    if (s.empty() || s.size() > 15) return false;
+    if (s.size() > 1 && s[0] == '0') return false;
+    for (char c : s) {
+        if (c < '0' || c > '9') return false;
+    }
+    return true;
 }
 
 std::unique_ptr<Node> clone_node(const std::unique_ptr<Node>& p) {
     return p ? std::make_unique<Node>(*p) : nullptr;
 }
 
-int cmp_key_segment(const std::string& a, const std::string& b) {
+int cmp_key_segment(std::string_view a, std::string_view b) {
     if (a == b) return 0;
+    if (plain_uint(a) && plain_uint(b)) {
+        if (a.size() != b.size()) return a.size() < b.size() ? -1 : 1;
+        return a.compare(b) < 0 ? -1 : 1;
+    }
     double af, bf;
     if (try_parse_f64(a, af) && try_parse_f64(b, bf)) {
         if (af < bf) return -1;
@@ -46,6 +63,8 @@ int cmp_key_segment(const std::string& a, const std::string& b) {
 } // namespace
 
 int cmp_keys(const std::string& a, const std::string& b) {
+    // A plain key (no NUL byte -- everything but a composite key) is a single segment: no splitting, no copies.
+    if (a.find('\x00') == std::string::npos && b.find('\x00') == std::string::npos) return cmp_key_segment(a, b);
     // PLAN.md P0 fix: composite-index keys join multiple columns with a NUL byte
     // ("val1\x00val2\x00..."), so the whole joined string almost never parses as
     // one f64 (an embedded '\x00' isn't a valid numeric character) and always fell
@@ -54,17 +73,18 @@ int cmp_keys(const std::string& a, const std::string& b) {
     // aware per segment, like a multi-column ORDER BY) fixes that while leaving
     // plain, non-composite keys (the overwhelming majority; no '\x00' at all)
     // behaving exactly as the single-segment comparison already did.
+    std::string_view va(a), vb(b);
     std::size_t pa = 0, pb = 0;
     for (;;) {
-        std::size_t da = a.find('\x00', pa);
-        std::size_t db = b.find('\x00', pb);
-        std::string sa = a.substr(pa, da == std::string::npos ? std::string::npos : da - pa);
-        std::string sb = b.substr(pb, db == std::string::npos ? std::string::npos : db - pb);
+        std::size_t da = va.find('\x00', pa);
+        std::size_t db = vb.find('\x00', pb);
+        std::string_view sa = va.substr(pa, da == std::string_view::npos ? std::string_view::npos : da - pa);
+        std::string_view sb = vb.substr(pb, db == std::string_view::npos ? std::string_view::npos : db - pb);
         int c = cmp_key_segment(sa, sb);
         if (c != 0) return c;
-        if (da == std::string::npos && db == std::string::npos) return 0;
-        if (da == std::string::npos) return -1;
-        if (db == std::string::npos) return 1;
+        if (da == std::string_view::npos && db == std::string_view::npos) return 0;
+        if (da == std::string_view::npos) return -1;
+        if (db == std::string_view::npos) return 1;
         pa = da + 1;
         pb = db + 1;
     }

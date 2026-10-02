@@ -177,8 +177,7 @@ StringResult Executor::exec_multi_update(SharedDatabase& s, std::vector<std::str
                 auto old_it = old_row.find(pk_col);
                 idx_it->second.remove(old_it != old_row.end() ? old_it->second : std::string());
                 auto new_it = new_row.find(pk_col);
-                nlohmann::json j = new_row;
-                idx_it->second.insert(new_it != new_row.end() ? new_it->second : std::string(), j.dump());
+                idx_it->second.insert(new_it != new_row.end() ? new_it->second : std::string(), row_to_json(new_row));
             }
             index_remove_row(s, tgt, old_row, pk_col);
             index_insert_row(s, tgt, new_row);
@@ -190,8 +189,7 @@ StringResult Executor::exec_multi_update(SharedDatabase& s, std::vector<std::str
         }
 
         std::vector<Row> rows_clone = s.tables.at(tgt);
-        s.buffer_pool.write_page(tgt, rows_clone);
-        s.buffer_pool.flush_page(tgt, s.disk);
+        s.buffer_pool.write_through(tgt, rows_clone, s.disk);
     }
 
     maybe_auto_checkpoint(s);
@@ -414,8 +412,7 @@ StringResult Executor::exec_multi_delete(SharedDatabase& s, std::vector<std::str
         for (auto& row : deleted_rows) index_remove_row(s, tgt, row, pk_col);
 
         std::vector<Row> rows_clone = s.tables.at(tgt);
-        s.buffer_pool.write_page(tgt, rows_clone);
-        s.buffer_pool.flush_page(tgt, s.disk);
+        s.buffer_pool.write_through(tgt, rows_clone, s.disk);
     }
 
     maybe_auto_checkpoint(s);

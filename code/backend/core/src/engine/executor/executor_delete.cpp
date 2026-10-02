@@ -135,8 +135,7 @@ StringResult Executor::exec_delete_inner(SharedDatabase& s, const std::string& t
         auto key_it = new_row.find(pk_col);
         std::string key = key_it != new_row.end() ? key_it->second : std::string();
         if (auto idx_it = s.indexes.find(tbl); idx_it != s.indexes.end()) {
-            nlohmann::json j = new_row;
-            idx_it->second.insert(key, j.dump());
+            idx_it->second.insert(key, row_to_json(new_row));
         }
         index_remove_row(s, tbl, old_row, pk_col);
         index_insert_row(s, tbl, new_row);
@@ -378,8 +377,7 @@ StringResult Executor::exec_delete_inner(SharedDatabase& s, const std::string& t
         // Redo capture: physically-removed rows still need to be durable as "this version died".
         for (auto& del_row : rows_to_delete) {
             auto kit = del_row.find(pk_col);
-            nlohmann::json dj = del_row;
-            txn.log_delete(table, kit != del_row.end() ? kit->second : std::string(), dj.dump());
+            txn.log_delete(table, kit != del_row.end() ? kit->second : std::string(), row_to_json(del_row));
         }
         index_replace_rows(s, table, rows_to_delete, std::vector<Row>{}, pk_col); // once per bucket, not once per row
         if (auto idx_it = s.indexes.find(table); idx_it != s.indexes.end()) {
@@ -538,8 +536,7 @@ StringResult Executor::exec_delete_inner(SharedDatabase& s, const std::string& t
                         }
                         if (!txn.is_active()) {
                             std::vector<Row> rc = s.tables.at(other_table);
-                            s.buffer_pool.write_page(other_table, rc);
-                            s.buffer_pool.flush_page(other_table, s.disk);
+                            s.buffer_pool.write_through(other_table, rc, s.disk);
                         }
                         break;
                     }
@@ -558,8 +555,7 @@ StringResult Executor::exec_delete_inner(SharedDatabase& s, const std::string& t
                         }
                         if (!txn.is_active()) {
                             std::vector<Row> rc = s.tables.at(other_table);
-                            s.buffer_pool.write_page(other_table, rc);
-                            s.buffer_pool.flush_page(other_table, s.disk);
+                            s.buffer_pool.write_through(other_table, rc, s.disk);
                         }
                         break;
                     }
@@ -583,8 +579,7 @@ StringResult Executor::exec_delete_inner(SharedDatabase& s, const std::string& t
                         }
                         if (!txn.is_active()) {
                             std::vector<Row> rc = s.tables.at(other_table);
-                            s.buffer_pool.write_page(other_table, rc);
-                            s.buffer_pool.flush_page(other_table, s.disk);
+                            s.buffer_pool.write_through(other_table, rc, s.disk);
                         }
                         break;
                     }
@@ -648,8 +643,7 @@ StringResult Executor::exec_delete_inner(SharedDatabase& s, const std::string& t
         for (std::size_t i = 0; i < news.size(); i++) {
             if (auto idx_it = s.indexes.find(table); idx_it != s.indexes.end()) {
                 auto kit = news[i].find(pk_col);
-                nlohmann::json j = news[i];
-                idx_it->second.insert(kit != news[i].end() ? kit->second : std::string(), j.dump());
+                idx_it->second.insert(kit != news[i].end() ? kit->second : std::string(), row_to_json(news[i]));
             }
             for (auto& [k, ci] : s.composite_indexes) {
                 if (ci.table != table) continue;
@@ -850,8 +844,7 @@ StringResult Executor::exec_delete_inner(SharedDatabase& s, const std::string& t
 
                 Row old_row = row;
                 {
-                    nlohmann::json oj = old_row;
-                    txn.log_delete(table, key, oj.dump()); // redo capture (no-op for WAL/undo outside a txn)
+                    txn.log_delete(table, key, row_to_json(old_row)); // redo capture (no-op for WAL/undo outside a txn)
                 }
                 row["_xmax"] = txn_id_str;
                 soft_olds.push_back(old_row);
@@ -894,8 +887,7 @@ StringResult Executor::exec_delete_inner(SharedDatabase& s, const std::string& t
         // Redo capture: physically-removed rows still need to be durable as "this version died".
         for (auto& del_row : rows_to_delete) {
             auto kit = del_row.find(pk_col);
-            nlohmann::json dj = del_row;
-            txn.log_delete(table, kit != del_row.end() ? kit->second : std::string(), dj.dump());
+            txn.log_delete(table, kit != del_row.end() ? kit->second : std::string(), row_to_json(del_row));
         }
         index_replace_rows(s, table, rows_to_delete, std::vector<Row>{}, pk_col); // once per bucket, not once per row
         if (auto idx_it = s.indexes.find(table); idx_it != s.indexes.end()) {

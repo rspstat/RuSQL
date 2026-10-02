@@ -28,6 +28,8 @@ def start():
     # tables of 64+ rows. 0 makes the index paths run on every statement (override to test the scan).
     env = dict(os.environ)
     env.setdefault("RUSQL_DML_INDEX_MIN_ROWS", "0")
+    # checkpoint at the (tiny) RUSQL_REDO_CHECKPOINT_BYTES size instead of letting the log grow with the table
+    env.setdefault("RUSQL_REDO_CHECKPOINT_ROW_BYTES", "0")
     p = subprocess.Popen([EXE, "--port", str(PORT), "--no-mysql", "--data-dir", DATA],
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env)
     for _ in range(200):

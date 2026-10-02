@@ -14,7 +14,7 @@
 | 버퍼 풀 / 캐시 | InnoDB 버퍼 풀 | shared_buffers | Buffer Cache (SGA) | LRU N 페이지 (--buffer-pool-size, 기본 64) |
 | 클러스터드 인덱스 | ✓ (PK 기준 물리 정렬) | ✗ (CLUSTER 명령으로 수동) | ✓ (IOT: Index-Organized Table) | ✓ (INSERT 후 PK 기준 물리 정렬 유지) |
 | 압축 | Transparent Page Compression | TOAST (가변 길이 컬럼) | Advanced Compression (유료) | LZ4 전체 테이블 |
-| WAL | InnoDB Redo Log | WAL (pg_wal/) | Redo Log + Archive Log | ✓ (바이너리, 자동 체크포인트 512 KB) + **커밋 redo 로그(`rusql.redo`, 2026-10-01)** — 커밋 = 작은 배치 1개 + fsync 1번, 테이블 파일은 체크포인트(4MB)에서만 재작성. 멱등·순서 무관 재생 |
+| WAL | InnoDB Redo Log | WAL (pg_wal/) | Redo Log + Archive Log | ✓ (바이너리, 자동 체크포인트 512 KB) + **커밋 redo 로그(`rusql.redo`, 2026-10-01)** — 커밋 = 작은 배치 1개 + fsync 1번, 테이블 파일은 체크포인트(max(4MB, 행당 128B × 변경된 테이블의 행 수))에서만 재작성. 멱등·순서 무관 재생(같은 행의 개수도 보존) |
 | 크래시 복구 | ✓ Redo/Undo | ✓ Redo + MVCC 정리 | ✓ Redo + Undo tablespace | ✓ WAL Replay + Undo log (txn_id 그룹 단위 redo/undo — 여러 트랜잭션 레코드가 섞여 있어도 커밋된 것만 정확히 분리 복구) |
 
 ---

@@ -14,6 +14,7 @@ add_library(engine_core STATIC
     src/storage/page.cpp
     src/storage/btree.cpp
     src/storage/hash_index.cpp
+    src/storage/row_json.cpp
     src/storage/composite_index.cpp
     src/storage/disk.cpp
     src/storage/buffer_pool.cpp

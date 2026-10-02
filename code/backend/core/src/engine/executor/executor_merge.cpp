@@ -148,8 +148,7 @@ StringResult Executor::exec_merge(SharedDatabase& s, std::string target, std::op
                         auto old_it = old_row.find(pk_col);
                         idx_it->second.remove(old_it != old_row.end() ? old_it->second : std::string());
                         auto new_it = row.find(pk_col);
-                        nlohmann::json j = row;
-                        idx_it->second.insert(new_it != row.end() ? new_it->second : std::string(), j.dump());
+                        idx_it->second.insert(new_it != row.end() ? new_it->second : std::string(), row_to_json(row));
                     }
                     index_remove_row(s, target, old_row, pk_col);
                     index_insert_row(s, target, row);
@@ -229,8 +228,7 @@ StringResult Executor::exec_merge(SharedDatabase& s, std::string target, std::op
                 // kinds at all -- index while `row` is still valid, before the move below.
                 if (auto idx_it = s.indexes.find(target); idx_it != s.indexes.end()) {
                     auto pk_it = row.find(pk_col);
-                    nlohmann::json j = row;
-                    idx_it->second.insert(pk_it != row.end() ? pk_it->second : std::string(), j.dump());
+                    idx_it->second.insert(pk_it != row.end() ? pk_it->second : std::string(), row_to_json(row));
                 }
                 index_insert_row(s, target, row);
                 for (auto& [k, ci] : s.composite_indexes) {
@@ -245,8 +243,7 @@ StringResult Executor::exec_merge(SharedDatabase& s, std::string target, std::op
     if (!txn.is_active()) {
         if (auto it = s.tables.find(target); it != s.tables.end()) {
             std::vector<Row> rows_clone = it->second;
-            s.buffer_pool.write_page(target, rows_clone);
-            s.buffer_pool.flush_page(target, s.disk);
+            s.buffer_pool.write_through(target, rows_clone, s.disk);
         }
     }
 

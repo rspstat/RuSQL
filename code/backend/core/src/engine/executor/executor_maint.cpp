@@ -64,8 +64,7 @@ StringResult Executor::exec_vacuum(SharedDatabase& s, std::optional<std::string>
             }
             for (auto& k : comp_keys) s.composite_indexes.at(k).rebuild(rows_clone);
 
-            s.buffer_pool.write_page(t, rows_clone);
-            s.buffer_pool.flush_page(t, s.disk);
+            s.buffer_pool.write_through(t, rows_clone, s.disk);
         }
     }
 

@@ -190,7 +190,7 @@ const DURABILITY: Item[] = [
   { t: L("Undo log", "Undo 로그"), s: L("per-transaction undo records for rollback", "롤백용 트랜잭션별 undo 레코드") },
   {
     t: L("Checkpoint", "체크포인트"),
-    s: L("redo over 4 MB, before DDL, after recovery: rewrite table files", "redo 4MB 초과·DDL 직전·복구 직후에 테이블 파일 재기록"),
+    s: L("redo past a limit that grows with the table (min 4 MB), before DDL, after recovery: rewrite table files", "redo가 테이블 크기에 비례하는 한도(최소 4MB)를 넘을 때·DDL 직전·복구 직후에 테이블 파일 재기록"),
   },
   {
     t: L("Crash recovery", "크래시 복구"),
@@ -308,8 +308,8 @@ function LayersView() {
             <HArrow c={C.core} phase={2} />
             <div className="dg-stage" style={tint(C.core)}>
               <div className="dg-stage-head"><Num n={5} c={C.core} /><b>{t(L("Executor", "실행기"))}</b></div>
-              <span>{t(L("Runs the plan: joins (NL, hash, sort-merge, index NL), subqueries, CTE, window functions. UPDATE checks PRIMARY KEY / UNIQUE and applies fully or not at all",
-                         "계획 실행: 조인(NL, 해시, 소트-머지, 인덱스 NL), 서브쿼리, CTE, 윈도우 함수. UPDATE는 PRIMARY KEY·UNIQUE를 검사하고 전부 적용되거나 전혀 적용되지 않음"))}</span>
+              <span>{t(L("Runs the plan: joins (NL, hash, sort-merge, index NL), subqueries, CTE, window functions. Single-table scans read rows in place and ORDER BY ... LIMIT sorts pointers; a multi-row INSERT checks duplicates and updates indexes once per statement. UPDATE checks PRIMARY KEY / UNIQUE and applies fully or not at all",
+                         "계획 실행: 조인(NL, 해시, 소트-머지, 인덱스 NL), 서브쿼리, CTE, 윈도우 함수. 단일 테이블 스캔은 행을 복사하지 않고 제자리에서 읽고 ORDER BY ... LIMIT은 포인터를 정렬하며, 여러 행 INSERT는 중복 검사와 인덱스 갱신을 문장당 한 번만 함. UPDATE는 PRIMARY KEY·UNIQUE를 검사하고 전부 적용되거나 전혀 적용되지 않음"))}</span>
             </div>
           </div>
           <Chips items={SIDE_MODULES} />

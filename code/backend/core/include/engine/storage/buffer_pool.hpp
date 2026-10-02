@@ -40,7 +40,10 @@ public:
 
     std::vector<Row> get_page(const std::string& table_name, const DiskManager& disk);
     void write_page(const std::string& table_name, std::vector<Row> rows);
-    void flush_page(const std::string& table_name, const DiskManager& disk);
+    // Saves `rows` as the table's file and drops any cached copy of it (now stale). The write_page + flush_page pair this
+    // replaced copied the whole table into the pool first -- a checkpoint of a 100,000-row table copied 100,000 hash maps
+    // just to write them out, and left a second full copy of the table in memory afterwards.
+    void write_through(const std::string& table_name, const std::vector<Row>& rows, const DiskManager& disk);
     void flush_all(const DiskManager& disk);
     void invalidate(const std::string& table_name);
 

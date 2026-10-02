@@ -34,6 +34,7 @@
 #include "engine/query_cache.hpp"
 #include "engine/result.hpp"
 #include "engine/row.hpp"
+#include "engine/row_json.hpp"
 #include "engine/catalog/schema.hpp"
 #include "engine/sync.hpp"
 #include "engine/table_stats.hpp"

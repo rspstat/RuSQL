@@ -1,23 +1,23 @@
 {
   "single": {
     "rows": 10000,
-    "insert_s": 6.68,
-    "delete_s": 6.79
+    "insert_s": 8.16,
+    "delete_s": 8.29
   },
   "bulk": {
     "rows": 100000,
-    "insert_s": 1.52,
-    "delete_s": 0.8
+    "insert_s": 1.04,
+    "delete_s": 0.72
   },
   "point_lookup": {
-    "seq_ms": 2.854,
-    "idx_ms": 0.078,
-    "speedup": 36.6
+    "seq_ms": 1.271,
+    "idx_ms": 0.134,
+    "speedup": 9.5
   },
   "transaction": {
     "rows": 1000,
-    "auto_s": 0.67,
-    "txn_s": 0.92,
-    "txn_batch_s": 0.16
+    "auto_s": 0.79,
+    "txn_s": 1.16,
+    "txn_batch_s": 0.24
   }
 }

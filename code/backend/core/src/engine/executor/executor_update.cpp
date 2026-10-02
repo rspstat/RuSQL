@@ -335,8 +335,7 @@ StringResult Executor::exec_update_inner(SharedDatabase& s, const std::string& t
                     std::string row_pk = pkit != row.end() ? pkit->second : std::string();
                     const std::string& key = row_pk;
 
-                    nlohmann::json old_j = row;
-                    std::string old_json = old_j.dump();
+                    std::string old_json = row_to_json(row);
 
                     // MVCC: UPDATE now creates a new physical version instead of mutating
                     // `row` in place -- `new_row` holds it; `row` (the OLD version) only
@@ -403,8 +402,7 @@ StringResult Executor::exec_update_inner(SharedDatabase& s, const std::string& t
                         new_version_pks.push_back(npk != new_row.end() ? npk->second : std::string());
                     }
 
-                    nlohmann::json new_j = new_row;
-                    attempt_undo_entries.push_back({key, old_json, new_j.dump()});
+                    attempt_undo_entries.push_back({key, old_json, row_to_json(new_row)});
                     new_versions.push_back(std::move(new_row));
                 }
                 // Nothing is stamped or inserted until EVERY new version has passed every check. Before,
@@ -541,8 +539,7 @@ StringResult Executor::exec_update_inner(SharedDatabase& s, const std::string& t
         index_replace_rows(s, table, old_rows_all, new_rows_all, pk_col); // secondary + hash: leaving and entering in one pass
         for (std::size_t i = 0; i < undo_entries.size(); i++) {
             if (auto idx_it = s.indexes.find(table); idx_it != s.indexes.end()) {
-                nlohmann::json j = new_rows_all[i];
-                idx_it->second.insert(new_pk_of(i), j.dump());
+                idx_it->second.insert(new_pk_of(i), row_to_json(new_rows_all[i]));
             }
             for (auto& k : comp_keys) s.composite_indexes.at(k).insert_row(new_rows_all[i]);
         }
@@ -556,8 +553,7 @@ StringResult Executor::exec_update_inner(SharedDatabase& s, const std::string& t
                 // unchanged here, so ONE insert() overwrites the PK B+Tree entry atomically -- no remove()
                 // first, which would leave a window in which AccessPath::PkPoint (lock-free by design)
                 // finds no entry for a row that exists.
-                nlohmann::json j = new_row;
-                idx_it->second.insert(new_pk_of(i), j.dump());
+                idx_it->second.insert(new_pk_of(i), row_to_json(new_row));
             }
             for (auto& k : comp_keys) {
                 // Same atomicity reasoning for the composite indexes: CompositeIndex::insert_row overwrites an
@@ -621,8 +617,7 @@ StringResult Executor::exec_update_inner(SharedDatabase& s, const std::string& t
         auto key_it = new_row.find(pk_col);
         std::string key = key_it != new_row.end() ? key_it->second : std::string();
         if (auto idx_it = s.indexes.find(tbl); idx_it != s.indexes.end()) {
-            nlohmann::json j = new_row;
-            idx_it->second.insert(key, j.dump());
+            idx_it->second.insert(key, row_to_json(new_row));
         }
         index_remove_row(s, tbl, old_row, pk_col);
         index_insert_row(s, tbl, new_row);
@@ -732,8 +727,7 @@ StringResult Executor::exec_update_inner(SharedDatabase& s, const std::string& t
                             }
                             if (!txn.is_active()) {
                                 std::vector<Row> rc = s.tables.at(other_table);
-                                s.buffer_pool.write_page(other_table, rc);
-                                s.buffer_pool.flush_page(other_table, s.disk);
+                                s.buffer_pool.write_through(other_table, rc, s.disk);
                             }
                             break;
                         }
@@ -762,8 +756,7 @@ StringResult Executor::exec_update_inner(SharedDatabase& s, const std::string& t
                             }
                             if (!txn.is_active()) {
                                 std::vector<Row> rc = s.tables.at(other_table);
-                                s.buffer_pool.write_page(other_table, rc);
-                                s.buffer_pool.flush_page(other_table, s.disk);
+                                s.buffer_pool.write_through(other_table, rc, s.disk);
                             }
                             break;
                         }
@@ -798,8 +791,7 @@ StringResult Executor::exec_update_inner(SharedDatabase& s, const std::string& t
                             }
                             if (!txn.is_active()) {
                                 std::vector<Row> rc = s.tables.at(other_table);
-                                s.buffer_pool.write_page(other_table, rc);
-                                s.buffer_pool.flush_page(other_table, s.disk);
+                                s.buffer_pool.write_through(other_table, rc, s.disk);
                             }
                             break;
                         }
@@ -848,8 +840,7 @@ StringResult Executor::exec_update_inner(SharedDatabase& s, const std::string& t
         // epilogue, not a whole-table rewrite here.
         if (!redo_covered_stmt_) {
             std::vector<Row> rc = s.tables.at(table);
-            s.buffer_pool.write_page(table, rc);
-            s.buffer_pool.flush_page(table, s.disk);
+            s.buffer_pool.write_through(table, rc, s.disk);
         }
         maybe_auto_vacuum(s, table);
         maybe_auto_analyze(s, table);

@@ -3,6 +3,8 @@
 #include <thread>
 #include <vector>
 
+#include <charconv>
+#include <string>
 #include "catch.hpp"
 #include "engine/storage/btree.hpp"
 
@@ -322,5 +324,78 @@ TEST_CASE("BPlusTree is safe under real concurrent insert/remove/search on disjo
             REQUIRE(v.has_value());
             REQUIRE(*v == "v" + key);
         }
+    }
+}
+
+// cmp_keys is the comparison under every index operation, so it was rewritten without per-call allocations and with a
+// parse-free path for plain integers. The ORDER it defines must not change by a single comparison: this keeps a copy of
+// the previous implementation and compares the two on random keys -- numbers in many spellings, composite (NUL-joined)
+// keys, text, empties, signs, exponents, leading zeros, very long digit strings.
+namespace {
+bool ref_parse_f64(const std::string& s, double& out) {
+    if (s.empty()) return false;
+    auto res = std::from_chars(s.data(), s.data() + s.size(), out);
+    return res.ec == std::errc() && res.ptr == s.data() + s.size();
+}
+int ref_segment(const std::string& a, const std::string& b) {
+    if (a == b) return 0;
+    double af, bf;
+    if (ref_parse_f64(a, af) && ref_parse_f64(b, bf)) {
+        if (af < bf) return -1;
+        if (af > bf) return 1;
+        return a.compare(b) < 0 ? -1 : (a.compare(b) > 0 ? 1 : 0);
+    }
+    return a.compare(b) < 0 ? -1 : (a.compare(b) > 0 ? 1 : 0);
+}
+int ref_cmp_keys(const std::string& a, const std::string& b) {
+    std::size_t pa = 0, pb = 0;
+    for (;;) {
+        std::size_t da = a.find('\x00', pa);
+        std::size_t db = b.find('\x00', pb);
+        std::string sa = a.substr(pa, da == std::string::npos ? std::string::npos : da - pa);
+        std::string sb = b.substr(pb, db == std::string::npos ? std::string::npos : db - pb);
+        int c = ref_segment(sa, sb);
+        if (c != 0) return c;
+        if (da == std::string::npos && db == std::string::npos) return 0;
+        if (da == std::string::npos) return -1;
+        if (db == std::string::npos) return 1;
+        pa = da + 1;
+        pb = db + 1;
+    }
+}
+int sign(int v) { return v < 0 ? -1 : (v > 0 ? 1 : 0); }
+
+std::string random_segment(std::mt19937& rng) {
+    static const char* fixed[] = {"", "0", "00", "-0", "0.0", "7", "07", "7.0", "7.00", "+7", "-7", "1e3", "1E3", "1000", "0x10", "inf", "nan", "abc",
+                                  "ab", "a", "Z", " 7", "7 ", "12a", "9223372036854775807", "9223372036854775808", "123456789012345", "1234567890123456",
+                                  "999999999999999", "100000000000000", "0.5", ".5", "5.", "-.5", "한글", "x\xff"};
+    switch (rng() % 5) {
+        case 0: return fixed[rng() % (sizeof fixed / sizeof *fixed)];
+        case 1: return std::to_string(rng() % 2000);                    // canonical integers
+        case 2: return std::to_string(rng() % 50) + "." + std::to_string(rng() % 100);
+        case 3: {                                                       // digit strings of random length
+            std::string t;
+            for (std::size_t n = rng() % 18, i = 0; i < n; i++) t += static_cast<char>('0' + rng() % 10);
+            return t;
+        }
+        default: return std::string(1, static_cast<char>('a' + rng() % 6)) + std::to_string(rng() % 12);
+    }
+}
+} // namespace
+
+TEST_CASE("cmp_keys orders keys exactly as the previous implementation did", "[btree][cmp_keys]") {
+    std::mt19937 rng(12345);
+    for (int i = 0; i < 400000; i++) {
+        std::string a = random_segment(rng), b = random_segment(rng);
+        if (rng() % 4 == 0) { // composite keys: 2-3 segments joined with NUL
+            for (std::size_t n = 1 + rng() % 2, k = 0; k < n; k++) {
+                a += '\x00' + random_segment(rng);
+                b += '\x00' + random_segment(rng);
+            }
+            if (rng() % 3 == 0) b = a.substr(0, rng() % (a.size() + 1)); // prefix of the other
+        }
+        INFO("a=[" << a << "] b=[" << b << "]");
+        REQUIRE(sign(cmp_keys(a, b)) == sign(ref_cmp_keys(a, b)));
+        REQUIRE(sign(cmp_keys(a, a)) == 0);
     }
 }

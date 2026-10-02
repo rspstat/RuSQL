@@ -836,8 +836,7 @@ StringResult Executor::exec_create_index(SharedDatabase& s, const std::string& i
         }
         BPlusTree tree;
         for (auto& [key, rows] : bucket) {
-            nlohmann::json j = rows;
-            tree.insert(key, j.dump());
+            tree.insert(key, rows_to_json(rows));
         }
         std::string idx_key = table + "_" + index_name;
         s.indexes.insert({idx_key, std::move(tree)});
@@ -946,8 +945,7 @@ void Executor::index_insert_row(SharedDatabase& s, const std::string& table, con
             }
         }
         bucket.push_back(row);
-        nlohmann::json j = bucket;
-        if (auto tit = s.indexes.find(key); tit != s.indexes.end()) tit->second.insert(vit->second, j.dump());
+        if (auto tit = s.indexes.find(key); tit != s.indexes.end()) tit->second.insert(vit->second, rows_to_json(bucket));
     }
 
     std::vector<std::string> hsec;
@@ -1004,8 +1002,7 @@ void Executor::index_remove_row(SharedDatabase& s, const std::string& table, con
         for (auto& r : bucket) {
             if (!same_pk(r)) new_bucket.push_back(r);
         }
-        nlohmann::json j = new_bucket;
-        if (auto tit = s.indexes.find(key); tit != s.indexes.end()) tit->second.insert(vit->second, j.dump());
+        if (auto tit = s.indexes.find(key); tit != s.indexes.end()) tit->second.insert(vit->second, rows_to_json(new_bucket));
     }
 
     std::vector<std::pair<std::string, std::string>> hsec;
@@ -1087,8 +1084,7 @@ void Executor::index_replace_rows(SharedDatabase& s, const std::string& table, c
                 bucket = std::move(kept);
             }
             for (const Row* r : t.entering) bucket.push_back(*r);
-            nlohmann::json j = bucket;
-            tit->second.insert(key, j.dump());
+            tit->second.insert(key, rows_to_json(bucket));
         }
     }
 
@@ -1123,8 +1119,7 @@ BPlusTree Executor::build_pk_tree(const std::vector<Row>& rows, const std::strin
             if (live != live_pass) continue;
             auto it = row.find(pk_col);
             if (it == row.end()) continue;
-            nlohmann::json j = row;
-            tree.insert(it->second, j.dump());
+            tree.insert(it->second, row_to_json(row));
         }
     }
     return tree;
@@ -1142,8 +1137,7 @@ void Executor::rebuild_secondary_indexes(SharedDatabase& s, const std::string& t
         }
         BPlusTree tree;
         for (auto& [key, bucket_rows] : bucket) {
-            nlohmann::json j = bucket_rows;
-            tree.insert(key, j.dump());
+            tree.insert(key, rows_to_json(bucket_rows));
         }
         s.indexes.insert_or_assign(idx_name, std::move(tree));
     }

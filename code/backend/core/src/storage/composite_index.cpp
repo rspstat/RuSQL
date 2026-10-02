@@ -4,6 +4,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include "engine/row_json.hpp"
 #include "engine/storage/numeric_key.hpp"
 
 namespace engine {
@@ -44,8 +45,7 @@ std::optional<std::string> CompositeIndex::key_from_row(const Row& row) const {
 void CompositeIndex::insert_row(const Row& row) {
     auto key = key_from_row(row);
     if (key) {
-        nlohmann::json j = row;
-        tree_.insert(*key, j.dump());
+        tree_.insert(*key, row_to_json(row));
     }
 }
 

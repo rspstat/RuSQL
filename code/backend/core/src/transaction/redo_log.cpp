@@ -144,6 +144,7 @@ void RedoLog::clear() {
     std::error_code ec;
     fs::remove(path_, ec);
     bytes_ = 0;
+    checkpoint_at_ = 0;
     size_known_ = true;
     synced_ = appended_.load();
 }

@@ -48,13 +48,10 @@ void BufferPool::write_page(const std::string& table_name, std::vector<Row> rows
     }
 }
 
-void BufferPool::flush_page(const std::string& table_name, const DiskManager& disk) {
+void BufferPool::write_through(const std::string& table_name, const std::vector<Row>& rows, const DiskManager& disk) {
     std::lock_guard<std::mutex> lock(mutex_);
-    auto it = cache_.find(table_name);
-    if (it != cache_.end() && it->second.first.is_dirty) {
-        disk.save_table(table_name, it->second.first.rows);
-        it->second.first.is_dirty = false;
-    }
+    disk.save_table(table_name, rows);
+    cache_.erase(table_name);
 }
 
 void BufferPool::flush_all(const DiskManager& disk) {
