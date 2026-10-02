@@ -273,9 +273,61 @@ class Gen:
         if k == 4: return f"SELECT tag, COUNT(*) AS n FROM t{self.where()} GROUP BY tag ORDER BY n DESC, tag"
         return f"SELECT MIN(id), MAX(id), COUNT(*) FROM t{self.where()}"
 
+    def subquery_where(self):
+        """A WHERE-able predicate with a subquery: scalar comparisons, EXISTS, IN -- correlated or not."""
+        r = self.r
+        n = r.randint(0, 20)
+        op = r.choice([">", "<", ">=", "<=", "="])
+        outer = r.choice(["val", "grp", "id % 20"])
+        shapes = [
+            f"{outer} {op} (SELECT AVG(val) FROM t)",
+            f"val {op} (SELECT MAX(val) FROM t WHERE grp = {r.randint(0, 8)})",
+            f"grp {op} (SELECT MIN(grp) FROM u WHERE id > {n})",
+            f"val {op} (SELECT val FROM t WHERE id = {r.randint(0, 300)})",          # one row, or none, or NULL
+            f"val {op} (SELECT val FROM t WHERE id > {r.randint(0, 400)})",          # several rows: only the first counts
+            f"val {op} (SELECT val FROM t WHERE id < 0)",                              # no rows
+            f"val {op} (SELECT nosuchcol FROM t)",                                     # an error inside the subquery
+            f"EXISTS (SELECT 1 FROM u WHERE name = 'N{n}')",
+            f"NOT EXISTS (SELECT 1 FROM u WHERE id > {n + 30})",
+            f"EXISTS (SELECT 1 FROM u WHERE u.id = t.grp AND u.grp {op} {r.randint(0, 8)})",
+            f"NOT EXISTS (SELECT 1 FROM v WHERE v.t_id = t.id)",
+            f"EXISTS (SELECT 1 FROM v WHERE v.t_id = t.id AND v.qty > {r.randint(0, 9)})",
+            f"grp IN (SELECT id FROM u WHERE grp = {r.randint(0, 8)})",
+            f"grp NOT IN (SELECT grp FROM u WHERE id < {n})",
+            f"id IN (SELECT t_id FROM v WHERE qty > {r.randint(0, 9)})",
+            f"val IN (SELECT qty FROM v WHERE v.t_id = t.id)",
+            f"grp {op} (SELECT grp FROM u WHERE u.id = t.grp)",                       # correlated scalar
+            f"id = {r.randint(0, 300)} AND val {op} (SELECT AVG(val) FROM t)",       # an indexed equality AND a subquery
+        ]
+        return r.choice(shapes)
+
+    def subquery_select(self):
+        r = self.r
+        w = self.subquery_where()
+        k = r.randrange(4)
+        if k == 0: return f"SELECT COUNT(*) FROM t WHERE {w}"
+        if k == 1: return f"SELECT id, val FROM t WHERE {w} AND {self.leaf()}{self.tail(['id'])}"
+        if k == 2: return f"SELECT grp, COUNT(*) AS n FROM t WHERE {w} GROUP BY grp ORDER BY grp"
+        return f"SELECT id FROM t WHERE {self.leaf()} OR {w}{self.tail(['id'])}"
+
+    def and_point(self):
+        """An indexed equality (primary key, hash index on tag, B+Tree index on grp) AND other predicates."""
+        r = self.r
+        keyed = r.choice([f"id = {r.randint(0, 400)}", f"id = {r.randint(0, 400)}.0", f"grp = {r.randint(0, 8)}", f"grp = {r.randint(0, 8)}.0",
+                          f"tag = '{r.choice(TAGS)}'", f"id = {r.randint(0, 400)}"])
+        parts = [keyed] + [self.leaf() for _ in range(r.randint(1, 2))]
+        r.shuffle(parts)
+        cond = " AND ".join(parts)
+        cols = r.choice(["id", "*", "grp", "tag", "COUNT(*)", "id, val", "val"])
+        return f"SELECT {cols} FROM t WHERE {cond}"
+
     def mutation(self):
         r = self.r
-        k = r.randrange(4)
+        k = r.randrange(7)
+        if k == 4: return f"UPDATE t SET val = val + 1 WHERE {self.subquery_where()} AND id % 7 = {r.randint(0, 6)}"
+        if k == 5: return f"DELETE FROM t WHERE {self.subquery_where()} AND id % 23 = {r.randint(0, 22)}"
+        if k == 6: return f"UPDATE t SET tag = 'sq' WHERE grp = {r.randint(0, 8)} AND val {r.choice(['>', '<'])} (SELECT AVG(val) FROM t)"
+        k = k % 4
         if k == 0: return f"UPDATE t SET val = val + 1 WHERE id % {r.randint(5, 20)} = 0"
         if k == 1: return f"DELETE FROM t WHERE id % {r.randint(17, 40)} = {r.randint(0, 10)}"
         if k == 2: return f"UPDATE t SET tag = '{r.choice(TAGS)}' WHERE grp = {r.randint(0, 8)}"
@@ -283,7 +335,8 @@ class Gen:
 
     def query(self):
         k = self.r.random()
-        for limit, fn in ((0.12, self.whole_agg), (0.34, self.group_by), (0.50, self.distinct), (0.62, self.plain), (0.84, self.join), (0.92, self.window)):
+        for limit, fn in ((0.10, self.whole_agg), (0.28, self.group_by), (0.40, self.distinct), (0.48, self.plain), (0.66, self.join), (0.72, self.window),
+                          (0.84, self.subquery_select), (0.92, self.and_point)):
             if k < limit:
                 return fn()
         return self.other()

@@ -939,7 +939,7 @@ void Executor::index_insert_row(SharedDatabase& s, const std::string& table, con
         if (auto tit = s.indexes.find(key); tit != s.indexes.end()) {
             if (auto j = tit->second.search(vit->second)) {
                 try {
-                    bucket = nlohmann::json::parse(*j).get<std::vector<Row>>();
+                    bucket = rows_from_json(*j);
                 } catch (...) {
                 }
             }
@@ -993,7 +993,7 @@ void Executor::index_remove_row(SharedDatabase& s, const std::string& table, con
         if (auto tit = s.indexes.find(key); tit != s.indexes.end()) {
             if (auto j = tit->second.search(vit->second)) {
                 try {
-                    bucket = nlohmann::json::parse(*j).get<std::vector<Row>>();
+                    bucket = rows_from_json(*j);
                 } catch (...) {
                 }
             }
@@ -1069,7 +1069,7 @@ void Executor::index_replace_rows(SharedDatabase& s, const std::string& table, c
             std::vector<Row> bucket;
             if (auto j = tit->second.search(key)) {
                 try {
-                    bucket = nlohmann::json::parse(*j).get<std::vector<Row>>();
+                    bucket = rows_from_json(*j);
                 } catch (...) {
                 }
             }

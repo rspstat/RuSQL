@@ -883,7 +883,7 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
     // path fall through to the generic scan.
     auto row_ok = [&](const Row& r) { return is_visible_for_read(r, read_ctx) && matches_condition_with_subquery(s, r, condition); };
     auto add_bucket = [&](const std::string& json, std::vector<Row>& out) {
-        for (auto& r : nlohmann::json::parse(json).get<std::vector<Row>>()) {
+        for (auto& r : rows_from_json(json)) {
             if (row_ok(r)) out.push_back(std::move(r));
         }
     };
@@ -953,7 +953,7 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
                 auto found = it->second.range_search(*lo, *hi);
                 std::vector<Row> rows;
                 for (auto& j : found) {
-                    Row r = nlohmann::json::parse(j).get<Row>();
+                    Row r = row_from_json(j);
                     if (row_ok(r)) rows.push_back(std::move(r));
                 }
                 // With no other transaction open the index is final. With one open, the latest version of a row may be
@@ -971,7 +971,7 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
             if (auto it = s.indexes.find(table); it != s.indexes.end() && lo && hi && parse_number_key(ap->start, d) == parse_number_key(ap->end, d)) {
                 std::vector<Row> rows;
                 for (auto& j : it->second.range_search(*lo, *hi)) {
-                    Row r = nlohmann::json::parse(j).get<Row>();
+                    Row r = row_from_json(j);
                     if (row_ok(r)) rows.push_back(std::move(r));
                 }
                 return format_result(s, std::move(rows), columns, table, {});
@@ -982,7 +982,7 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
             if (auto it = s.indexes.find(table); it != s.indexes.end() && bound) {
                 std::vector<Row> rows;
                 for (auto& kv : lower ? it->second.scan_from(*bound, true) : it->second.scan_to(*bound, true)) {
-                    Row r = nlohmann::json::parse(kv.second).get<Row>();
+                    Row r = row_from_json(kv.second);
                     if (row_ok(r)) rows.push_back(std::move(r));
                 }
                 return format_result(s, std::move(rows), columns, table, {});
@@ -1057,7 +1057,7 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
                     auto lo = widen_numeric_bound(sp->key, true), hi = widen_numeric_bound(sp->key, false);
                     if (it == s.indexes.end() || !lo || !hi) { usable = false; break; }
                     for (auto& json : it->second.range_search(*lo, *hi)) {
-                        for (auto& r : nlohmann::json::parse(json).get<std::vector<Row>>()) {
+                        for (auto& r : rows_from_json(json)) {
                             if (is_visible_for_read(r, read_ctx)) {
                                 if (const std::string* v = get_col(r, pk_col)) pks.insert(*v);
                             }
@@ -1369,7 +1369,7 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
                         if (cached == right_of_key.end()) {
                             std::vector<Row> found;
                             for (auto& val_json : equal_entries(rit->second, *key)) {
-                                Row right_row = nlohmann::json::parse(val_json).get<Row>();
+                                Row right_row = row_from_json(val_json);
                                 if (is_visible_for_read(right_row, read_ctx)) found.push_back(std::move(right_row));
                             }
                             cached = right_of_key.emplace(*key, std::move(found)).first;
@@ -1427,14 +1427,14 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
                             // (the column need not be unique); a PK index stores exactly one
                             // Row object per key -- must parse each shape correctly.
                             if (a->left_is_secondary_btree) {
-                                for (auto& left_row : nlohmann::json::parse(val_json).get<std::vector<Row>>()) {
+                                for (auto& left_row : rows_from_json(val_json)) {
                                     if (!is_visible_for_read(left_row, read_ctx)) continue;
                                     Row merged = left_row;
                                     merge_right(merged, right_row, j.table);
                                     out.push_back(std::move(merged));
                                 }
                             } else {
-                                Row left_row = nlohmann::json::parse(val_json).get<Row>();
+                                Row left_row = row_from_json(val_json);
                                 if (is_visible_for_read(left_row, read_ctx)) {
                                     Row merged = left_row;
                                     merge_right(merged, right_row, j.table);

@@ -90,7 +90,7 @@ bool Executor::index_or_scan_exists(const SharedDatabase& s, const std::string& 
         if (auto idx_it = s.indexes.find(table); idx_it != s.indexes.end()) {
             if (auto j = idx_it->second.search(val); j && !j->empty()) {
                 try {
-                    return accept(nlohmann::json::parse(*j).get<Row>());
+                    return accept(row_from_json(*j));
                 } catch (...) {
                 }
             }
@@ -105,7 +105,7 @@ bool Executor::index_or_scan_exists(const SharedDatabase& s, const std::string& 
         if (auto idx_it = s.indexes.find(idx_key); idx_it != s.indexes.end()) {
             if (auto j = idx_it->second.search(val); j && !j->empty()) {
                 try {
-                    if (accept(nlohmann::json::parse(*j).get<Row>())) return true;
+                    if (accept(row_from_json(*j))) return true;
                 } catch (...) {
                 }
             }
@@ -598,7 +598,7 @@ StringResult Executor::exec_insert_inner(SharedDatabase& s, const std::string& t
                             if (auto idx_it = s.indexes.find(table); idx_it != s.indexes.end()) {
                                 if (auto j = idx_it->second.search(val); j && !j->empty()) {
                                     try {
-                                        Row r = nlohmann::json::parse(*j).get<Row>();
+                                        Row r = row_from_json(*j);
                                         if (is_visible(r)) existing = std::move(r);
                                     } catch (...) {
                                     }

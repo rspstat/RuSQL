@@ -302,14 +302,14 @@ function LayersView() {
             <HArrow c={C.core} phase={1} />
             <div className="dg-stage" style={tint(C.core)}>
               <div className="dg-stage-head"><Num n={4} c={C.core} /><b>{t(L("Query planner", "쿼리 플래너"))}</b></div>
-              <span>{t(L("Cost-based: access path per table (also used to find the rows of UPDATE / DELETE), join algorithm, System-R DP join order",
-                         "비용 기반: 테이블별 접근 경로(UPDATE·DELETE의 대상 행 탐색에도 사용), 조인 알고리즘, System-R DP 조인 순서"))}</span>
+              <span>{t(L("Cost-based: access path per table (also used to find the rows of UPDATE / DELETE; an AND with an indexed equality starts from that index), join algorithm, System-R DP join order",
+                         "비용 기반: 테이블별 접근 경로(UPDATE·DELETE의 대상 행 탐색에도 사용, 인덱스 등호가 든 AND는 그 인덱스로 시작), 조인 알고리즘, System-R DP 조인 순서"))}</span>
             </div>
             <HArrow c={C.core} phase={2} />
             <div className="dg-stage" style={tint(C.core)}>
               <div className="dg-stage-head"><Num n={5} c={C.core} /><b>{t(L("Executor", "실행기"))}</b></div>
-              <span>{t(L("Runs the plan: joins (NL, hash, sort-merge, index NL), subqueries, CTE, window functions. Scans, aggregates, GROUP BY, DISTINCT and ORDER BY work on pointers to the table's rows (no copies); joins apply single-table WHERE parts before joining and hash LEFT JOINs and multi-condition ONs on their equality; a multi-row INSERT checks duplicates and updates indexes once per statement. UPDATE checks PRIMARY KEY / UNIQUE and applies fully or not at all",
-                         "계획 실행: 조인(NL, 해시, 소트-머지, 인덱스 NL), 서브쿼리, CTE, 윈도우 함수. 스캔·집계·GROUP BY·DISTINCT·ORDER BY는 테이블 행을 복사하지 않고 포인터로 처리하고, 조인은 한 테이블만 읽는 WHERE 조건을 조인 전에 적용하며 LEFT JOIN과 여러 조건 ON을 등호로 해시 처리하고, 여러 행 INSERT는 중복 검사와 인덱스 갱신을 문장당 한 번만 함. UPDATE는 PRIMARY KEY·UNIQUE를 검사하고 전부 적용되거나 전혀 적용되지 않음"))}</span>
+              <span>{t(L("Runs the plan: joins (NL, hash, sort-merge, index NL), subqueries, CTE, window functions. Scans, aggregates, GROUP BY, DISTINCT and ORDER BY work on pointers to the table's rows (no copies); joins apply single-table WHERE parts before joining and hash LEFT JOINs and multi-condition ONs on their equality; uncorrelated subqueries (scalar, EXISTS, IN) run once per statement; a multi-row INSERT checks duplicates and updates indexes once per statement. UPDATE checks PRIMARY KEY / UNIQUE and applies fully or not at all",
+                         "계획 실행: 조인(NL, 해시, 소트-머지, 인덱스 NL), 서브쿼리, CTE, 윈도우 함수. 스캔·집계·GROUP BY·DISTINCT·ORDER BY는 테이블 행을 복사하지 않고 포인터로 처리하고, 조인은 한 테이블만 읽는 WHERE 조건을 조인 전에 적용하며 LEFT JOIN과 여러 조건 ON을 등호로 해시 처리하고, 상관 없는 서브쿼리(스칼라·EXISTS·IN)는 문장당 한 번만 실행하고, 여러 행 INSERT는 중복 검사와 인덱스 갱신을 문장당 한 번만 함. UPDATE는 PRIMARY KEY·UNIQUE를 검사하고 전부 적용되거나 전혀 적용되지 않음"))}</span>
             </div>
           </div>
           <Chips items={SIDE_MODULES} />

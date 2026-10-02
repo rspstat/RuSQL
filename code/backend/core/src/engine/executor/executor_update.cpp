@@ -500,11 +500,11 @@ StringResult Executor::exec_update_inner(SharedDatabase& s, const std::string& t
     for (auto& u : undo_entries) {
         Row old_row, new_row;
         try {
-            old_row = nlohmann::json::parse(u.old_json).get<Row>();
+            old_row = row_from_json(u.old_json);
         } catch (...) {
         }
         try {
-            new_row = nlohmann::json::parse(u.new_json).get<Row>();
+            new_row = row_from_json(u.new_json);
         } catch (...) {
         }
         old_rows_all.push_back(std::move(old_row));
@@ -672,7 +672,7 @@ StringResult Executor::exec_update_inner(SharedDatabase& s, const std::string& t
     for (auto& u : undo_entries) {
         Row old_row;
         try {
-            old_row = nlohmann::json::parse(u.old_json).get<Row>();
+            old_row = row_from_json(u.old_json);
         } catch (...) {
         }
         for (auto& assign_col : changed_cols) {

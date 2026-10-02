@@ -315,6 +315,15 @@ private:
     // cache entry can possibly be looked up, with no risk of a stale/reused-address
     // collision across different statements.
     std::unordered_map<const void*, std::unordered_set<std::string>> subquery_cache_;
+    // The same for uncorrelated scalar comparisons (`val > (SELECT AVG(val) ...)`: the values the subquery returned, in order,
+    // and whether it ran at all) and uncorrelated EXISTS / NOT EXISTS (did it return a row). They used to run the whole
+    // subquery again for every row of the outer statement.
+    struct SubqueryAnswer {
+        bool ok = false;
+        std::vector<std::string> values;
+    };
+    std::unordered_map<const void*, SubqueryAnswer> subquery_scalar_cache_;
+    std::unordered_map<const void*, bool> subquery_exists_cache_;
     // Trigger recursion depth (a trigger body's own DML can fire further triggers,
     // directly or via a chain through another table) -- see fire_triggers().
     std::size_t trigger_depth_ = 0;

@@ -860,6 +860,8 @@ void Executor::reacquire_table_data_locks_after_block(SharedDatabase& s) {
 
 StringResult Executor::execute(Statement stmt) {
     subquery_cache_.clear();
+    subquery_scalar_cache_.clear();
+    subquery_exists_cache_.clear();
     maybe_checkpoint_redo(); // no lock held yet -- see executor_redo.cpp
     if (std::holds_alternative<Statement::Commit>(stmt.data)) return execute_commit_grouped();
 

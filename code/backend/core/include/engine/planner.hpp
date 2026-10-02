@@ -155,6 +155,10 @@ private:
     const std::unordered_map<std::string, TableStats>& table_stats_;
 
     TablePlan plan_table(const std::string& table, const std::optional<CondExpr>& condition) const;
+    // An AND of several predicates may use ANY ONE of them that a point index answers (primary key, hash or secondary B+Tree
+    // equality). The rows the index finds are a superset of what the whole condition matches and every one is re-checked
+    // against all of it, as the index paths of UPDATE/DELETE already do.
+    std::optional<AccessPath> point_leaf_of_and(const std::string& table, const CondExpr& expr, const std::optional<std::string>& pk) const;
     bool is_covering_access(const AccessPath& access, const std::vector<SelectColumn>& columns, const std::string& table) const;
     std::optional<AccessPath> try_index_intersection(const std::string& table, const CondExpr& expr, const std::optional<std::string>& pk) const;
     std::optional<AccessPath> pk_access(const Condition& cond, const std::string& table) const;

@@ -235,7 +235,7 @@ std::vector<Row> DiskManager::load_rdb(const std::string& path) const {
         if (pos + len > raw.size()) break;
         std::string json(reinterpret_cast<const char*>(raw.data() + pos), len);
         try {
-            rows.push_back(nlohmann::json::parse(json).get<Row>());
+            rows.push_back(row_from_json(json));
         } catch (...) {
             // matches Rust's `.unwrap_or("{}")` + `if let Ok(row) = ...` — skip malformed rows
         }
@@ -257,7 +257,7 @@ std::vector<Row> DiskManager::load_table(const std::string& table) const {
             std::string content;
             read_file(flat_json, content);
             try {
-                return nlohmann::json::parse(content).get<std::vector<Row>>();
+                return rows_from_json(content);
             } catch (...) {
                 return {};
             }

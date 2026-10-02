@@ -272,7 +272,7 @@ StringResult Executor::exec_rollback_to(SharedDatabase& s, const std::string& na
         } else if (entry.operation == "UPDATE") {
             if (entry.old_data) {
                 try {
-                    Row old_row = nlohmann::json::parse(*entry.old_data).get<Row>();
+                    Row old_row = row_from_json(*entry.old_data);
                     // MVCC: this UPDATE created exactly one new "tip" version (tagged
                     // with this txn's id, still live) and marked exactly one earlier
                     // version dead (_xmax == this txn's id) -- remove the tip, then
@@ -412,7 +412,7 @@ void Executor::recover_from_wal() {
                 }
                 if (record->op == WalOp::Insert) {
                     try {
-                        Row row = nlohmann::json::parse(record->data).get<Row>();
+                        Row row = row_from_json(record->data);
                         auto tit = sw->tables.find(table);
                         if (tit != sw->tables.end()) {
                             auto it = row.find(pk_col);
@@ -431,7 +431,7 @@ void Executor::recover_from_wal() {
                     }
                 } else if (record->op == WalOp::Update) {
                     try {
-                        Row new_row = nlohmann::json::parse(record->data).get<Row>();
+                        Row new_row = row_from_json(record->data);
                         auto tit = sw->tables.find(table);
                         if (tit != sw->tables.end()) {
                             auto nit = new_row.find(pk_col);

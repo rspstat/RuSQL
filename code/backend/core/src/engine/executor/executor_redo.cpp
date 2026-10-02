@@ -206,7 +206,7 @@ void Executor::recover_from_redo() {
         auto* idx = ensure_index(op.table);
         if (!idx) continue;
         try {
-            Row row = nlohmann::json::parse(op.row_json).get<Row>();
+            Row row = row_from_json(op.row_json);
             std::string id = version_identity(row);
             std::size_t k = ++inserts_seen[op.table + '\x00' + id];
             auto& at = (*idx)[id];
@@ -227,7 +227,7 @@ void Executor::recover_from_redo() {
         auto* idx = ensure_index(op.table);
         if (!idx) continue;
         try {
-            Row old = nlohmann::json::parse(op.row_json).get<Row>();
+            Row old = row_from_json(op.row_json);
             auto it = idx->find(version_identity(old));
             if (it == idx->end()) continue; // garbage-collected before the crash
             auto& rows = sw->tables[op.table];

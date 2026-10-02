@@ -442,6 +442,8 @@ TEST_CASE("LEFT JOIN on NULL, empty and numeric look-alike keys", "[query_paths]
     REQUIRE(rows.at(0)[0] == "1");
     REQUIRE(rows.at(0)[1] == "p");
     REQUIRE(rows.at(1)[1] == "t");
+    // EXPLAIN says what runs: a LEFT JOIN is a hash join, never an index nested loop
+    REQUIRE(ok_text(ex, "EXPLAIN SELECT a.id, b.tag FROM a LEFT JOIN b ON a.k = b.k").find("Index NL") == std::string::npos);
     // an inner join with the same condition drops the unmatched rows
     REQUIRE(table_cells(ok_text(ex, "SELECT a.id FROM a JOIN b ON a.k = b.k AND b.tag <> 'zzz'")).size() == 7);
 }
@@ -470,4 +472,62 @@ TEST_CASE("IndexNL probes cached per key give the rows an uncached join would", 
     auto rows = table_cells(ok_text(ex, "SELECT small.id, big.name FROM small JOIN big ON small.grp = big.id"));
     REQUIRE(rows.size() == 150);
     for (auto& r : rows) REQUIRE(r[1] == "n" + std::to_string(std::stoi(r[0]) % 10));
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// `WHERE <indexed equality> AND <anything else>`: the planner starts from the point index and every row it finds is checked
+// against the whole condition. The twin is the same condition with `OR id < 0` appended (never true; a top-level OR is
+// always a scan).
+
+TEST_CASE("an AND with one indexed equality uses the index and answers like a scan", "[query_paths][planner]") {
+    TempDataDir dir("qp_and_point");
+    Executor ex(dir.path);
+    open_db(ex);
+    REQUIRE(ex.execute_sql("CREATE TABLE g (id INT PRIMARY KEY, grp INT, tag VARCHAR(10), val INT, note VARCHAR(10))").is_ok());
+    std::mt19937 rng(1357);
+    static const char* grp_text[] = {"0", "1", "2", "3", "3.0", "03", "4", "5", "NULL"};
+    static const char* tags[] = {"'red'", "'green'", "'blue'", "NULL"};
+    static const char* notes[] = {"'abc'", "'axe'", "'bob'", "NULL"};
+    std::string values;
+    for (int i = 1; i <= 400; i++) {
+        values += std::string(i > 1 ? ", (" : "(") + std::to_string(i) + ", " + grp_text[rng() % 9] + ", " + tags[rng() % 4] + ", " +
+                  (rng() % 7 == 0 ? "NULL" : std::to_string(rng() % 100)) + ", " + notes[rng() % 4] + ")";
+    }
+    REQUIRE(ex.execute_sql("INSERT INTO g VALUES " + values).is_ok());
+    REQUIRE(ex.execute_sql("CREATE INDEX g_grp ON g (grp)").is_ok());
+    REQUIRE(ex.execute_sql("CREATE INDEX g_tag ON g (tag) USING HASH").is_ok());
+
+    auto plan_uses_index = [&](const std::string& sql) {
+        auto plan = ok_text(ex, "EXPLAIN " + sql);
+        auto at = plan.find("Access: ");
+        return at != std::string::npos && plan.compare(at + 8, 8, "Seq Scan") != 0;
+    };
+    REQUIRE(plan_uses_index("SELECT id FROM g WHERE id = 5 AND val > 3"));
+    REQUIRE(plan_uses_index("SELECT id FROM g WHERE val > 3 AND grp = 2"));
+    REQUIRE(plan_uses_index("SELECT id FROM g WHERE val > 3 AND tag = 'red'"));
+    REQUIRE_FALSE(plan_uses_index("SELECT id FROM g WHERE val > 3 AND note = 'abc'")); // nothing indexed
+    REQUIRE_FALSE(plan_uses_index("SELECT id FROM g WHERE id > 5 AND val > 3"));       // a range stays a scan
+
+    std::vector<std::string> keyed = {"id = " + std::to_string(1 + rng() % 400), "id = 7.0", "id = 07", "id = 9999", "grp = 3", "grp = 3.0", "grp = 03",
+                                      "grp = 0", "grp = 5", "tag = 'red'", "tag = 'blue'", "tag = 'none'"};
+    std::vector<std::string> rest = {"val > 50", "val < 10", "val IS NULL", "note LIKE 'a%'", "grp <> 3", "id < 100", "(val < 5 OR val > 90)", "tag IS NOT NULL",
+                                     "note = 'bob'", "NOT (val > 20)"};
+    for (int iter = 0; iter < 300; iter++) {
+        std::string cond = keyed[rng() % keyed.size()];
+        for (std::size_t k = 0, n = 1 + rng() % 2; k < n; k++) cond = (rng() % 2 ? cond + " AND " + rest[rng() % rest.size()] : rest[rng() % rest.size()] + " AND " + cond);
+        // selecting only the indexed column must not be answered from the index entry: the other predicates need more
+        std::string select = std::vector<std::string>{"id", "*", "grp", "tag", "COUNT(*)", "id, val"}[rng() % 6];
+        std::string sql = "SELECT " + select + " FROM g WHERE " + cond, twin = "SELECT " + select + " FROM g WHERE (" + cond + ") OR id < 0";
+        INFO(sql);
+        REQUIRE(sorted_lines(ok_text(ex, sql)) == sorted_lines(ok_text(ex, twin)));
+    }
+    // the same inside an open transaction by another session's absence/presence is covered by test_select_index; here the
+    // statement-level result after DML keeps agreeing
+    REQUIRE(ex.execute_sql("UPDATE g SET grp = 3 WHERE id % 11 = 0").is_ok());
+    REQUIRE(ex.execute_sql("DELETE FROM g WHERE id % 13 = 0").is_ok());
+    for (const char* cond : {"grp = 3 AND val > 10", "id = 22 AND grp = 3", "id = 26 AND val > 0", "tag = 'red' AND grp = 3.0"}) {
+        std::string sql = std::string("SELECT id FROM g WHERE ") + cond, twin = std::string("SELECT id FROM g WHERE (") + cond + ") OR id < 0";
+        INFO(sql);
+        REQUIRE(sorted_lines(ok_text(ex, sql)) == sorted_lines(ok_text(ex, twin)));
+    }
 }

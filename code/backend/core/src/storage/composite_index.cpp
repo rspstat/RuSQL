@@ -105,7 +105,7 @@ std::optional<std::vector<Row>> CompositeIndex::lookup(const std::unordered_map<
     }
     if (values.empty()) return std::nullopt;
     std::vector<Row> out;
-    for (auto& j : rows_with_prefix(values)) out.push_back(nlohmann::json::parse(j).get<Row>());
+    for (auto& j : rows_with_prefix(values)) out.push_back(row_from_json(j));
     return out;
 }
 

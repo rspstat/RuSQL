@@ -12,7 +12,9 @@ The queries are generated from the seed: every aggregate function (FILTER, DISTI
 ORDER BY / LIMIT / OFFSET in every combination, window functions, subqueries, FOR UPDATE, statements inside an explicit
 transaction at every isolation level, and joins (inner / left, up to three tables, ON clauses with one or several
 conditions, WHERE clauses that read one table or several, identifier-looking literals that name a column of another
-table, ambiguous bare names). A statement that fails must fail with the same message on both builds.
+table, ambiguous bare names), subqueries in WHERE and in UPDATE / DELETE (scalar comparisons that return one row, several,
+none, NULL or an error; EXISTS / NOT EXISTS / IN / NOT IN, correlated or not) and `<indexed equality> AND ...` conditions.
+A statement that fails must fail with the same message on both builds.
 
   default            both servers run with RUSTDB_PARALLEL=0: ties in ORDER BY come out in the same order, the text must match
   --parallel         the thread pool on for both, answers compared as sets of lines (an unstable parallel sort orders tied

@@ -54,13 +54,13 @@ const NODES: Node[] = [
   },
   {
     id: "planner", x: 705, y: 350, w: 120, h: 98, c: C.core, name: L("Planner", "플래너"),
-    desc: L("Cost-based: picks the access path per table, the join algorithm and the join order (System-R DP) from histogram + most-common-value statistics. The same access paths find the rows of UPDATE and DELETE.",
-            "비용 기반: 히스토그램 + 최빈값 통계로 테이블별 접근 경로, 조인 알고리즘, 조인 순서(System-R DP)를 선택. 같은 접근 경로가 UPDATE·DELETE의 대상 행도 찾음."),
+    desc: L("Cost-based: picks the access path per table, the join algorithm and the join order (System-R DP) from histogram + most-common-value statistics. The same access paths find the rows of UPDATE and DELETE, and an AND with an indexed equality starts from that index.",
+            "비용 기반: 히스토그램 + 최빈값 통계로 테이블별 접근 경로, 조인 알고리즘, 조인 순서(System-R DP)를 선택. 같은 접근 경로가 UPDATE·DELETE의 대상 행도 찾고, 인덱스 등호가 든 AND는 그 인덱스로 시작함."),
   },
   {
     id: "executor", x: 885, y: 350, w: 120, h: 98, c: C.core, name: L("Executor", "실행기"),
-    desc: L("Runs the plan: joins (NL, hash, sort-merge, index NL), subqueries, CTE, window functions. Result cache (LRU-512) and a thread pool for parallel scans. Scans, aggregates, GROUP BY, DISTINCT and ORDER BY work on pointers to the table's rows (no copies); joins apply single-table WHERE parts before joining and hash LEFT JOINs and multi-condition ONs on their equality; a multi-row INSERT checks duplicates and updates indexes once per statement. UPDATE / DELETE take index hits only as candidates, verify each against the real row and scan when in doubt; UPDATE checks PRIMARY KEY / UNIQUE and applies fully or not at all.",
-            "계획 실행: 조인(NL, 해시, 소트-머지, 인덱스 NL), 서브쿼리, CTE, 윈도우 함수. 결과 캐시(LRU 512)와 병렬 스캔용 스레드 풀 포함. 스캔·집계·GROUP BY·DISTINCT·ORDER BY는 테이블 행을 복사하지 않고 포인터로 처리하고, 조인은 한 테이블만 읽는 WHERE 조건을 조인 전에 적용하며 LEFT JOIN과 여러 조건 ON을 등호로 해시 처리하고, 여러 행 INSERT는 중복 검사와 인덱스 갱신을 문장당 한 번만 함. UPDATE·DELETE는 인덱스 결과를 후보로만 쓰고 실제 행으로 검증하며 의심스러우면 스캔. UPDATE는 PRIMARY KEY·UNIQUE를 검사하고 전부 적용되거나 전혀 적용되지 않음."),
+    desc: L("Runs the plan: joins (NL, hash, sort-merge, index NL), subqueries, CTE, window functions. Result cache (LRU-512) and a thread pool for parallel scans. Scans, aggregates, GROUP BY, DISTINCT and ORDER BY work on pointers to the table's rows (no copies); joins apply single-table WHERE parts before joining and hash LEFT JOINs and multi-condition ONs on their equality; uncorrelated subqueries (scalar, EXISTS, IN) run once per statement; a multi-row INSERT checks duplicates and updates indexes once per statement. UPDATE / DELETE take index hits only as candidates, verify each against the real row and scan when in doubt; UPDATE checks PRIMARY KEY / UNIQUE and applies fully or not at all.",
+            "계획 실행: 조인(NL, 해시, 소트-머지, 인덱스 NL), 서브쿼리, CTE, 윈도우 함수. 결과 캐시(LRU 512)와 병렬 스캔용 스레드 풀 포함. 스캔·집계·GROUP BY·DISTINCT·ORDER BY는 테이블 행을 복사하지 않고 포인터로 처리하고, 조인은 한 테이블만 읽는 WHERE 조건을 조인 전에 적용하며 LEFT JOIN과 여러 조건 ON을 등호로 해시 처리하고, 상관 없는 서브쿼리(스칼라·EXISTS·IN)는 문장당 한 번만 실행하고, 여러 행 INSERT는 중복 검사와 인덱스 갱신을 문장당 한 번만 함. UPDATE·DELETE는 인덱스 결과를 후보로만 쓰고 실제 행으로 검증하며 의심스러우면 스캔. UPDATE는 PRIMARY KEY·UNIQUE를 검사하고 전부 적용되거나 전혀 적용되지 않음."),
   },
   {
     id: "txn", x: 1085, y: 350, w: 130, h: 104, c: C.txn, name: L("Transactions", "트랜잭션"),

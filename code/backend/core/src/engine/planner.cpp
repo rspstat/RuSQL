@@ -48,6 +48,17 @@ const char* range_op_label(RangeOp op) {
 
 SelectPlan Planner::plan(const std::string& table, const std::optional<CondExpr>& condition, const std::vector<Join>& joins) const {
     TablePlan base = plan_table(table, condition);
+    // A single-table SELECT that the planner would scan, `WHERE pk = 5 AND flag = 1`, can start from the point predicate.
+    // (Not with joins: there the base access only feeds the cost estimates that choose the join algorithms.)
+    if (joins.empty() && condition && !std::holds_alternative<CondExpr::Leaf>(condition->data) &&
+        std::holds_alternative<AccessPath::SeqScan>(base.access.data)) {
+        if (auto point = point_leaf_of_and(table, *condition, pk_col(table))) {
+            std::size_t total = table_size(table);
+            base.access = *point;
+            base.est_rows = estimate_rows(total, base.access, table);
+            base.est_cost = estimate_cost(total, base.access);
+        }
+    }
     std::vector<JoinPlan> join_plans;
     join_plans.reserve(joins.size());
     // 2번째 이후 조인의 알고리즘 선택(Hash/SortMerge/IndexNL/NestedLoop)이 매번 원본 base 테이블의
@@ -69,7 +80,9 @@ SelectPlan Planner::plan(const std::string& table, const std::optional<CondExpr>
 SelectPlan Planner::plan_covering(const std::string& table, const std::optional<CondExpr>& condition,
                                    const std::vector<Join>& joins, const std::vector<SelectColumn>& columns) const {
     SelectPlan p = plan(table, condition, joins);
-    p.base.is_covering = is_covering_access(p.base.access, columns, table);
+    // Covering answers a query from the index entry alone, which holds the indexed column only -- fine when that column is
+    // all the condition reads, never for an AND whose other predicates need the rest of the row.
+    p.base.is_covering = (!condition || std::holds_alternative<CondExpr::Leaf>(condition->data)) && is_covering_access(p.base.access, columns, table);
     return p;
 }
 
@@ -174,6 +187,18 @@ AccessPath Planner::choose_access(const std::string& table, const std::optional<
     if (auto intersection = try_index_intersection(table, expr, pk)) return *intersection;
 
     return AccessPath(AccessPath::SeqScan{});
+}
+
+std::optional<AccessPath> Planner::point_leaf_of_and(const std::string& table, const CondExpr& expr, const std::optional<std::string>& pk) const {
+    for (const Condition* leaf : collect_and_leaves(expr)) {
+        CondExpr one{CondExpr::Leaf{*leaf}};
+        AccessPath p = choose_access(table, one, pk);
+        if (std::holds_alternative<AccessPath::PkPoint>(p.data) || std::holds_alternative<AccessPath::HashPoint>(p.data) ||
+            std::holds_alternative<AccessPath::SecondaryPoint>(p.data)) {
+            return p;
+        }
+    }
+    return std::nullopt;
 }
 
 std::unordered_map<std::string, std::string> Planner::constant_eq_map(const std::string& table, const CondExpr& expr) const {
@@ -317,6 +342,13 @@ JoinPlan Planner::plan_join(const TablePlan& base, const Join& join, bool is_fir
     // has nothing to do with the actual accumulated intermediate result.
     static const std::string kNoLeftTable;
     JoinAlgo algo = choose_join_algo(base.est_rows, right_size, join.on_expr, is_first_join ? base.table : kNoLeftTable, join.table);
+    // A LEFT JOIN is never run as an index nested loop (a probe that misses would drop the row instead of NULL-padding it):
+    // the executor hashes the right rows on the ON equality (hashed_join_verified), so the plan says so.
+    if (join.join_type == JoinType::Left) {
+        if (auto* a = std::get_if<JoinAlgo::IndexNL>(&algo.data)) algo = JoinAlgo(JoinAlgo::Hash{a->probe_col, a->right_pk_col});
+        else if (auto* r = std::get_if<JoinAlgo::ReverseIndexNL>(&algo.data)) algo = JoinAlgo(JoinAlgo::Hash{r->left_col, r->right_extract_col});
+        else if (auto* m = std::get_if<JoinAlgo::SortMerge>(&algo.data)) algo = JoinAlgo(JoinAlgo::Hash{m->probe_col, m->build_col});
+    }
     double est_cost = std::visit(
         [&](const auto& alt) -> double {
             using T = std::decay_t<decltype(alt)>;

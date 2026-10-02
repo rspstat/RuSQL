@@ -15,6 +15,7 @@
 
 #include <algorithm>
 #include <charconv>
+#include <chrono>
 
 namespace engine {
 
@@ -65,6 +66,41 @@ bool arith_has_qualified_col(const ArithExpr& expr) {
         },
         expr.data);
 }
+
+// Can substitute_correlated_condexpr change this condition for some outer row? It replaces a literal that contains a dot and
+// a column reference with a dot by the outer row's value, so a condition with neither is the same for every row and the
+// subquery that carries it has one answer per statement. (A number such as 1.5 contains a dot but never names a column.)
+bool arith_has_dotted_col(const ArithExpr& expr) {
+    return std::visit(
+        [](const auto& alt) -> bool {
+            using T = std::decay_t<decltype(alt)>;
+            if constexpr (std::is_same_v<T, ArithExpr::Col>) return alt.name.find('.') != std::string::npos;
+            else if constexpr (std::is_same_v<T, ArithExpr::Add> || std::is_same_v<T, ArithExpr::Sub> || std::is_same_v<T, ArithExpr::Mul> ||
+                                std::is_same_v<T, ArithExpr::Div> || std::is_same_v<T, ArithExpr::Cmp>)
+                return arith_has_dotted_col(*alt.lhs) || arith_has_dotted_col(*alt.rhs);
+            else if constexpr (std::is_same_v<T, ArithExpr::Func>) {
+                for (auto& a : alt.args) {
+                    if (arith_has_dotted_col(a)) return true;
+                }
+                return false;
+            } else
+                return false;
+        },
+        expr.data);
+}
+
+bool cond_may_be_substituted(const CondExpr& expr) {
+    if (auto* v = std::get_if<CondExpr::And>(&expr.data)) return cond_may_be_substituted(*v->lhs) || cond_may_be_substituted(*v->rhs);
+    if (auto* v = std::get_if<CondExpr::Or>(&expr.data)) return cond_may_be_substituted(*v->lhs) || cond_may_be_substituted(*v->rhs);
+    if (auto* v = std::get_if<CondExpr::Not>(&expr.data)) return cond_may_be_substituted(*v->inner);
+    auto* leaf = std::get_if<CondExpr::Leaf>(&expr.data);
+    if (!leaf) return false;
+    if (auto* lit = std::get_if<ConditionValue::Literal>(&leaf->condition.value.data)) {
+        return lit->value.find('.') != std::string::npos && !parse_f64(lit->value).has_value();
+    }
+    if (auto* ar = std::get_if<ConditionValue::Arith>(&leaf->condition.value.data)) return arith_has_dotted_col(ar->expr);
+    return false;
+}
 } // namespace
 
 bool Executor::matches_condition_with_subquery(SharedDatabase& s, const Row& row, const std::optional<CondExpr>& condition) {
@@ -104,13 +140,23 @@ bool Executor::eval_single_with_subquery(SharedDatabase& s, const Row& row, cons
     if (!sub) return false;
 
     if (cond.op == Operator::Exists || cond.op == Operator::NotExists) {
+        // An EXISTS whose condition cannot depend on the outer row has one answer for the whole statement.
+        const void* exists_key = sub->query.get();
+        auto* peek = std::get_if<Statement::Select>(&sub->query->data);
+        if (peek && !(peek->condition && cond_may_be_substituted(*peek->condition))) {
+            if (auto it = subquery_exists_cache_.find(exists_key); it != subquery_exists_cache_.end()) {
+                return cond.op == Operator::Exists ? it->second : !it->second;
+            }
+        }
         Statement sub_stmt = *sub->query;
         if (auto* sel = std::get_if<Statement::Select>(&sub_stmt.data)) {
+            const bool cacheable = !(sel->condition && cond_may_be_substituted(*sel->condition));
             auto sub_cond = sel->condition;
             if (sub_cond) sub_cond = substitute_correlated_condexpr(*sub_cond, row);
             auto result = exec_select(s, sel->table, std::move(sel->subquery), sel->distinct, sel->columns, sub_cond, sel->joins, sel->order_by,
                                        sel->group_by, sel->having, sel->limit, sel->offset, false, false);
             bool has_rows = result.is_ok() && result.value().find("0 rows returned") == std::string::npos;
+            if (cacheable) subquery_exists_cache_[exists_key] = has_rows;
             return cond.op == Operator::Exists ? has_rows : !has_rows;
         }
         return false;
@@ -160,17 +206,39 @@ bool Executor::eval_single_with_subquery(SharedDatabase& s, const Row& row, cons
     }
 
     // Correlated IN/NOT IN, and every other (scalar Eq/Gt/Lt/Gte/Lte) operator, fall
-    // through here -- always need a fresh per-row copy regardless of caching, since
+    // through here. A correlated subquery needs a fresh per-row copy, since
     // substitute_correlated_condexpr's result varies per row and exec_select moves
-    // fields out of it.
-    Statement sub_stmt = *sub->query;
-    if (auto* sel = std::get_if<Statement::Select>(&sub_stmt.data)) {
-        auto sub_cond = sel->condition;
-        if (sub_cond) sub_cond = substitute_correlated_condexpr(*sub_cond, row);
-        auto result = exec_select(s, sel->table, std::move(sel->subquery), sel->distinct, sel->columns, sub_cond, sel->joins, sel->order_by,
-                                   sel->group_by, sel->having, sel->limit, sel->offset, false, false);
-        if (!result.is_ok()) return false;
-        auto sub_vals = extract_values_from_output(result.value());
+    // fields out of it. One whose condition cannot depend on the outer row (the scalar
+    // `val > (SELECT AVG(val) FROM t)`) runs once per statement and its values are kept.
+    const SubqueryAnswer* cached_answer = nullptr;
+    auto* peek = std::get_if<Statement::Select>(&sub->query->data);
+    if (peek && !(peek->condition && cond_may_be_substituted(*peek->condition))) {
+        if (auto it = subquery_scalar_cache_.find(sub->query.get()); it != subquery_scalar_cache_.end()) cached_answer = &it->second;
+    }
+    Statement sub_stmt = cached_answer ? Statement() : *sub->query;
+    auto* sel = std::get_if<Statement::Select>(&sub_stmt.data);
+    if (cached_answer || sel) {
+        std::vector<std::string> fresh_vals;
+        const std::vector<std::string>* sub_vals_ptr = nullptr;
+        if (cached_answer) {
+            if (!cached_answer->ok) return false;
+            sub_vals_ptr = &cached_answer->values;
+        } else {
+            const bool cacheable = !(sel->condition && cond_may_be_substituted(*sel->condition));
+            auto sub_cond = sel->condition;
+            if (sub_cond) sub_cond = substitute_correlated_condexpr(*sub_cond, row);
+            auto result = exec_select(s, sel->table, std::move(sel->subquery), sel->distinct, sel->columns, sub_cond, sel->joins, sel->order_by,
+                                       sel->group_by, sel->having, sel->limit, sel->offset, false, false);
+            if (cacheable) {
+                SubqueryAnswer& slot = subquery_scalar_cache_[sub->query.get()];
+                slot.ok = result.is_ok();
+                if (slot.ok) slot.values = extract_values_from_output(result.value());
+            }
+            if (!result.is_ok()) return false;
+            fresh_vals = extract_values_from_output(result.value());
+            sub_vals_ptr = &fresh_vals;
+        }
+        const std::vector<std::string>& sub_vals = *sub_vals_ptr;
         switch (cond.op) {
             case Operator::In:
                 return std::find(sub_vals.begin(), sub_vals.end(), val) != sub_vals.end();
