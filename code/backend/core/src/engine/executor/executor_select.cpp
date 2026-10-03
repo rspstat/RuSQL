@@ -1216,11 +1216,11 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
     // A pure-read statement that keeps asking one table for `<column> = <constant>` (a correlated subquery does, once per
     // outer row) builds a hash index on that column for itself on the third ask, and reads the bucket from then on.
     const std::vector<const Row*>* bucket = nullptr;
-    if (point_index_allowed_ && joins.empty() && condition && base_rows->size() >= 512 && s.tables.count(table)) {
+    if (point_index_allowed_ && joins.empty() && condition && base_rows->size() >= 512 && s.tables.count(table) && !temporary_tables_.count(table)) {
         if (auto* schema = s.catalog.get_table(table)) {
-            std::unordered_set<std::string> columns;
-            for (auto& c : schema->columns) columns.insert(c.name);
-            if (auto eq = constant_equality_part(*condition, table, columns)) {
+            std::unordered_set<std::string> table_columns;
+            for (auto& c : schema->columns) table_columns.insert(c.name);
+            if (auto eq = constant_equality_part(*condition, table, table_columns)) {
                 std::string key = table + std::string(1, '\0') + eq->first;
                 auto cached = point_index_cache_.find(key);
                 if (cached == point_index_cache_.end() && ++point_probe_count_[key] >= 3) {
@@ -1930,6 +1930,7 @@ StringResult Executor::exec_select_with_subquery(SharedDatabase& s, Statement in
     if (col_names.empty()) return StringResult::Ok("0 rows returned.");
 
     s.tables[alias] = virtual_rows;
+    temporary_tables_.insert(alias);
     s.buffer_pool.write_page(alias, virtual_rows);
     std::vector<ColumnDef> schema_cols;
     for (auto& name : col_names) {
@@ -1943,6 +1944,7 @@ StringResult Executor::exec_select_with_subquery(SharedDatabase& s, Statement in
     auto result = exec_select(s, alias, std::nullopt, distinct, std::move(columns), std::move(condition), std::move(joins), std::move(order_by),
                                std::move(group_by), std::move(having), limit, offset, for_update, for_share);
 
+    temporary_tables_.erase(alias);
     s.tables.erase(alias);
     s.buffer_pool.invalidate(alias);
     s.catalog.drop_table(alias);

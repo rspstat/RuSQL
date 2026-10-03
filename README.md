@@ -726,11 +726,12 @@ code/
         ├── bench_query.py         scans / aggregates / GROUP BY / DISTINCT / ORDER BY / joins on 50,000 rows, median ms (compares two builds; result_query.json)
         ├── chart.py               measurement results → matplotlib PNG chart generation
         ├── graph.py               presentation benchmark result visualization (light mode, result.json → PNG)
+        ├── speedup_chart.py       speed-up ratios of the performance rounds (before ÷ after on the same machine/state, log scale → speedup_chart.png)
         ├── requirements.txt       Python dependency packages
         └── README.txt             execution guide
 ```
 
-Build/run command reference: `docs/mds/instructions.md` (repo root, sibling of `code/`).
+Build/run command reference: `docs/mds/instructions.md` (repo root, sibling of `code/`). One-page project summary for presentations (Korean): `docs/mds/SUMMARY.md`.
 
 <br/>
 

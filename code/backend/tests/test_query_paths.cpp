@@ -686,3 +686,33 @@ TEST_CASE("UPDATE keeps every index equal to the table (with and without seconda
         }
     }
 }
+
+// A view is run by materializing its result as a temporary table under the view's name and erasing it afterwards. A
+// statement-scoped point index built on that name would be left pointing at erased rows (found by reading the code, not by
+// a failure): a correlated subquery over a view re-materializes it for every outer row.
+TEST_CASE("statement-scoped point indexes are never built on a view's temporary table", "[query_paths][point_index]") {
+    TempDataDir dir("qp_point_index_view");
+    Executor ex(dir.path);
+    open_db(ex);
+    REQUIRE(ex.execute_sql("CREATE TABLE cust (id INT PRIMARY KEY, tier INT)").is_ok());
+    REQUIRE(ex.execute_sql("CREATE TABLE ord (id INT PRIMARY KEY, cust_id INT, amount INT)").is_ok());
+    std::string cv, ov;
+    for (int i = 1; i <= 40; i++) cv += std::string(i > 1 ? ", (" : "(") + std::to_string(i) + ", " + std::to_string(i % 3) + ")";
+    REQUIRE(ex.execute_sql("INSERT INTO cust VALUES " + cv).is_ok());
+    for (int start = 1; start <= 700; start += 175) {
+        ov.clear();
+        for (int i = start; i < start + 175; i++) ov += std::string(i > start ? ", (" : "(") + std::to_string(i) + ", " + std::to_string(1 + (i * 7) % 60) + ", " + std::to_string(i % 40) + ")";
+        REQUIRE(ex.execute_sql("INSERT INTO ord VALUES " + ov).is_ok());
+    }
+    REQUIRE(ex.execute_sql("CREATE VIEW ordv AS SELECT id, cust_id, amount FROM ord").is_ok());
+    struct Shape {
+        const char* before; // text up to the inner WHERE condition
+        const char* cond;
+        const char* after;
+    };
+    for (const Shape& sh : {Shape{"SELECT COUNT(*) FROM cust WHERE EXISTS (SELECT 1 FROM ordv WHERE ", "ordv.cust_id = cust.id", ")"},
+                            Shape{"SELECT id FROM cust WHERE NOT EXISTS (SELECT 1 FROM ordv WHERE ", "ordv.cust_id = cust.id AND ordv.amount > 30", ")"},
+                            Shape{"SELECT id FROM cust WHERE tier IN (SELECT amount FROM ordv WHERE ", "ordv.cust_id = cust.id", ")"}}) {
+        require_same_answer(ex, std::string(sh.before) + sh.cond + sh.after, std::string(sh.before) + "(" + sh.cond + ") OR 1 = 0" + sh.after);
+    }
+}

@@ -336,6 +336,10 @@ private:
     std::unordered_map<std::string, StatementPointIndex> point_index_cache_; // "table\0column"
     std::unordered_map<std::string, std::size_t> point_probe_count_;
     bool point_index_allowed_ = false;
+    // Names under which exec_select_with_subquery has a view's / FROM-subquery's result in s.tables right now: such a table is
+    // erased when the statement over it returns and rebuilt (possibly with other rows) by the next one, so no point index may
+    // hold pointers into it.
+    std::unordered_set<std::string> temporary_tables_;
     // Trigger recursion depth (a trigger body's own DML can fire further triggers,
     // directly or via a chain through another table) -- see fire_triggers().
     std::size_t trigger_depth_ = 0;
