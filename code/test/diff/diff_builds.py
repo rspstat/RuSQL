@@ -230,7 +230,7 @@ class Gen:
             ons = [o for o in self.JOIN_ON[name] if all(tb in readable for tb in re.findall(r"\b([tuvw])\.", o))]
             if self.big:  # an ON that is not a single equality is a nested loop in older builds: minutes on big tables
                 ons = [o for o in ons if " AND " not in o and " OR " not in o] or ons[:1]
-            jt = r.choice(["JOIN", "INNER JOIN"] if self.big else ["JOIN", "INNER JOIN", "LEFT JOIN", "LEFT JOIN"])
+            jt = r.choice(["JOIN", "INNER JOIN"] if self.big else ["JOIN", "INNER JOIN", "LEFT JOIN", "LEFT JOIN", "RIGHT JOIN", "FULL OUTER JOIN"])
             base += f" {jt} {name} ON {r.choice(ons)}"
             joined.append(name)
         w = self.jwhere(joined)

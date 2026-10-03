@@ -184,6 +184,38 @@ void and_conjuncts(const CondExpr& e, std::vector<const CondExpr*>& out) {
 
 // A top-level AND-ed part of the ON condition of the form `<a> = <b>` where exactly one side is "<right table>.<column>"
 // of the table being joined: {the other side, that column}. Every pair that satisfies the whole ON satisfies this part.
+// `<column> = <constant>` among the AND-ed parts of a WHERE, on a column of `table` (unqualified, or qualified with the table's
+// full or bare name), where the constant cannot be read as a column of the table (an identifier-looking literal is looked
+// up as a column first): {column, constant}.
+std::optional<std::pair<std::string, std::string>> constant_equality_part(const CondExpr& where, const std::string& table,
+                                                                           const std::unordered_set<std::string>& columns) {
+    std::string bare = table.substr(table.rfind('.') == std::string::npos ? 0 : table.rfind('.') + 1);
+    std::vector<const CondExpr*> parts;
+    and_conjuncts(where, parts);
+    for (const CondExpr* part : parts) {
+        auto* leaf = std::get_if<CondExpr::Leaf>(&part->data);
+        if (!leaf || leaf->condition.op != Operator::Eq) continue;
+        auto* col = std::get_if<ArithExpr::Col>(&leaf->condition.left.data);
+        auto* lit = std::get_if<ConditionValue::Literal>(&leaf->condition.value.data);
+        if (!col || !lit) continue;
+        std::string name = col->name;
+        if (auto cut = name.rfind('.'); cut != std::string::npos) {
+            std::string q = name.substr(0, cut);
+            if (q != table && q != bare) continue;
+            name = name.substr(cut + 1);
+        }
+        if (!columns.count(name)) continue;
+        std::string lower = name;
+        std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char ch) { return std::tolower(ch); });
+        if (lower == "true" || lower == "false") continue;
+        const std::string& v = lit->value;
+        bool ident_like = !v.empty() && (std::isalpha(static_cast<unsigned char>(v[0])) || v[0] == '_') && !parse_f64(v).has_value();
+        if (ident_like && (v.find('.') != std::string::npos || columns.count(v))) continue;
+        return std::make_pair(name, v);
+    }
+    return std::nullopt;
+}
+
 std::optional<std::pair<std::string, std::string>> equality_part_of_on(const CondExpr& on, const std::string& right_full,
                                                                         const std::string& right_bare,
                                                                         const std::unordered_set<std::string>& right_cols) {
@@ -1181,9 +1213,40 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
         }
     }
 
+    // A pure-read statement that keeps asking one table for `<column> = <constant>` (a correlated subquery does, once per
+    // outer row) builds a hash index on that column for itself on the third ask, and reads the bucket from then on.
+    const std::vector<const Row*>* bucket = nullptr;
+    if (point_index_allowed_ && joins.empty() && condition && base_rows->size() >= 512 && s.tables.count(table)) {
+        if (auto* schema = s.catalog.get_table(table)) {
+            std::unordered_set<std::string> columns;
+            for (auto& c : schema->columns) columns.insert(c.name);
+            if (auto eq = constant_equality_part(*condition, table, columns)) {
+                std::string key = table + std::string(1, '\0') + eq->first;
+                auto cached = point_index_cache_.find(key);
+                if (cached == point_index_cache_.end() && ++point_probe_count_[key] >= 3) {
+                    StatementPointIndex built;
+                    for (auto& r : *base_rows) {
+                        if (auto v = r.find(eq->first); v != r.end()) built.buckets[normalize_numeric_key(v->second)].push_back(&r);
+                    }
+                    cached = point_index_cache_.emplace(key, std::move(built)).first;
+                }
+                if (cached != point_index_cache_.end()) {
+                    static const std::vector<const Row*> none;
+                    auto b = cached->second.buckets.find(normalize_numeric_key(eq->second));
+                    bucket = b != cached->second.buckets.end() ? &b->second : &none;
+                }
+            }
+        }
+    }
+
     std::vector<Row> visible_rows; // joins only
     std::vector<const Row*> visible_ptrs; // single-table scan
-    if (joins.empty()) {
+    if (joins.empty() && bucket) {
+        visible_ptrs.reserve(bucket->size());
+        for (const Row* r : *bucket) {
+            if (is_visible_for_read(*r, read_ctx)) visible_ptrs.push_back(r);
+        }
+    } else if (joins.empty()) {
         visible_ptrs.reserve(base_rows->size());
         for (auto& r : *base_rows) {
             if (is_visible_for_read(r, read_ctx)) visible_ptrs.push_back(&r);
@@ -1321,20 +1384,22 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
                 algo = &plan.joins[ji].algo.data;
             }
 
-            // A LEFT JOIN, or an INNER JOIN the planner has no algorithm for (an ON that is more than one equality), whose ON
-            // contains `<left column> = <right table>.<column>` is hashed on that equality instead of a nested loop that
-            // builds a merged row for every pair of rows (see hashed_join_verified). So is every INNER JOIN after the first: the
+            // A LEFT, RIGHT or FULL OUTER JOIN, or an INNER JOIN the planner has no algorithm for (an ON that is more than one
+            // equality), whose ON contains `<left column> = <right table>.<column>` is hashed on that equality instead of a
+            // nested loop that builds a merged row for every pair of rows (see hashed_join_verified). So is every INNER JOIN after the first: the
             // planner's algorithms name the left column by its bare name ("id"), which in a row that already holds a joined
             // table is the FROM table's column, not the joined table's `u.id` the ON asked for (`t JOIN u ON u.id = t.grp
             // JOIN w ON w.k = u.id` matched w.k against t.id and lost most of its rows).
             std::optional<std::vector<Row>> hashed;
             const bool nested_planned = !algo || std::holds_alternative<JoinAlgo::NestedLoop>(*algo);
-            if ((j.join_type == JoinType::Left || (j.join_type == JoinType::Inner && (nested_planned || ji > 0))) && scope_ok && j.using_cols.empty()) {
+            const bool hashable_type = j.join_type == JoinType::Left || j.join_type == JoinType::Right || j.join_type == JoinType::FullOuter ||
+                                       (j.join_type == JoinType::Inner && (nested_planned || ji > 0));
+            if (hashable_type && scope_ok && j.using_cols.empty()) {
                 std::unordered_set<std::string> right_cols(right_schema_cols.begin(), right_schema_cols.end());
                 if (auto eq = equality_part_of_on(j.on_expr, scope.names[ji + 1], scope.bare[ji + 1], right_cols)) {
                     const std::string left_ref = eq->first, right_col = eq->second;
                     hashed = hashed_join_verified(
-                        current, right_rows, j.table, j.join_type == JoinType::Left, [&](const Row& l) { return get_col(l, left_ref); },
+                        current, right_rows, j.table, j.join_type, [&](const Row& l) { return get_col(l, left_ref); },
                         [&](const Row& r) -> const std::string* {
                             auto it = r.find(right_col);
                             return it != r.end() ? &it->second : nullptr;

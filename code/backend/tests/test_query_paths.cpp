@@ -396,9 +396,12 @@ TEST_CASE("joins whose ON holds an equality (and WHERE conjuncts of one table) a
     for (unsigned iter = 0; iter < iterations; iter++) {
         bool with_u = rng() % 3 != 0, with_w = !with_u || rng() % 2 == 0;
         std::string from = "FROM t", ref_from = "FROM t";
+        bool only_outer = true; // no INNER join among them: the planner does not reorder or re-algorithm them, the row order is the loop's
         auto add_join = [&](const std::string& table, const std::vector<std::string>& ons) {
             std::string on = ons[rng() % ons.size()];
-            std::string jt = rng() % 2 == 0 ? "LEFT JOIN" : "JOIN";
+            static const char* kinds[] = {"LEFT JOIN", "JOIN", "LEFT JOIN", "RIGHT JOIN", "FULL OUTER JOIN", "JOIN"};
+            std::string jt = kinds[rng() % 6];
+            if (jt == "JOIN") only_outer = false;
             from += " " + jt + " " + table + " ON " + on;
             ref_from += " " + jt + " " + table + " ON (" + on + ") OR 1 = 0";
         };
@@ -421,6 +424,11 @@ TEST_CASE("joins whose ON holds an equality (and WHERE conjuncts of one table) a
         std::string select = with_u && with_w ? "t.id, t.val, u.name, w.code" : (with_u ? "t.id, t.val, u.name" : "t.id, t.val, w.code");
         if (rng() % 5 == 0) select = "COUNT(*), MAX(t.val)";
         require_same_answer(fx.ex, "SELECT " + select + " " + from + where, "SELECT " + select + " " + ref_from + ref_where);
+        if (only_outer && select.rfind("COUNT", 0) != 0) { // the same rows in the same ORDER
+            std::string a = ok_text(fx.ex, "SELECT " + select + " " + from + where), b = ok_text(fx.ex, "SELECT " + select + " " + ref_from + ref_where);
+            INFO("SELECT " << select << " " << from << where);
+            REQUIRE(a == b);
+        }
     }
 }
 
@@ -529,5 +537,152 @@ TEST_CASE("an AND with one indexed equality uses the index and answers like a sc
         std::string sql = std::string("SELECT id FROM g WHERE ") + cond, twin = std::string("SELECT id FROM g WHERE (") + cond + ") OR id < 0";
         INFO(sql);
         REQUIRE(sorted_lines(ok_text(ex, sql)) == sorted_lines(ok_text(ex, twin)));
+    }
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// A pure-read statement that asks one table for `<column> = <constant>` over and over (a correlated subquery, once per outer
+// row) builds a hash index on that column for itself. The twin hides the equality from it with `(<cond>) OR 1 = 0`.
+
+TEST_CASE("correlated subqueries over an unindexed column answer like a scan", "[query_paths][point_index]") {
+    TempDataDir dir("qp_point_index");
+    Executor ex(dir.path);
+    open_db(ex);
+    REQUIRE(ex.execute_sql("CREATE TABLE cust (id INT PRIMARY KEY, name VARCHAR(10), tier INT, code VARCHAR(10))").is_ok());
+    REQUIRE(ex.execute_sql("CREATE TABLE ord (id INT PRIMARY KEY, cust_id INT, code VARCHAR(10), amount INT, status VARCHAR(10))").is_ok());
+    std::mt19937 rng(9753);
+    static const char* codes[] = {"'7'", "'007'", "'7.0'", "'07'", "'C1'", "'C2'", "NULL", "'10'", "'1e1'"};
+    static const char* status[] = {"'open'", "'done'", "'void'", "NULL"};
+    std::string cv;
+    for (int i = 1; i <= 300; i++) {
+        cv += std::string(i > 1 ? ", (" : "(") + std::to_string(i) + ", 'C" + std::to_string(i) + "', " + std::to_string(rng() % 4) + ", " + codes[rng() % 9] + ")";
+    }
+    REQUIRE(ex.execute_sql("INSERT INTO cust VALUES " + cv).is_ok());
+    for (int start = 1; start <= 800; start += 200) {
+        std::string ov;
+        for (int i = start; i < start + 200; i++) {
+            ov += std::string(i > start ? ", (" : "(") + std::to_string(i) + ", " + (rng() % 12 == 0 ? "NULL" : std::to_string(1 + rng() % 400)) + ", " + codes[rng() % 9] + ", " +
+                  std::to_string(rng() % 50) + ", " + status[rng() % 4] + ")";
+        }
+        REQUIRE(ex.execute_sql("INSERT INTO ord VALUES " + ov).is_ok());
+    }
+    // by key (cust_id), by a numeric-lookalike code, by a residual status
+    std::vector<std::string> inner = {"ord.cust_id = cust.id", "ord.code = cust.code", "ord.cust_id = cust.id AND ord.status = 'done'",
+                                      "ord.cust_id = cust.id AND ord.amount > 25", "ord.status = 'open' AND ord.cust_id = cust.id", "ord.code = cust.code AND ord.cust_id = cust.id"};
+    for (int iter = 0; iter < 120; iter++) {
+        std::string cond = inner[rng() % inner.size()];
+        std::string twin_cond = "(" + cond + ") OR 1 = 0";
+        int shape = static_cast<int>(rng() % 6);
+        auto make = [&](const std::string& c) {
+            switch (shape) {
+                case 0: return "SELECT COUNT(*) FROM cust WHERE EXISTS (SELECT 1 FROM ord WHERE " + c + ")";
+                case 1: return "SELECT id FROM cust WHERE NOT EXISTS (SELECT 1 FROM ord WHERE " + c + ")";
+                case 2: return "SELECT id FROM cust WHERE tier IN (SELECT amount FROM ord WHERE " + c + ")";
+                case 3: return "SELECT id FROM cust WHERE 30 < (SELECT MAX(amount) FROM ord WHERE " + c + ")";
+                case 4: return "SELECT cust.id, (SELECT COUNT(*) FROM ord WHERE " + c + ") AS n FROM cust WHERE cust.id < 120";
+                default: return "SELECT id FROM cust WHERE tier = (SELECT MIN(amount) FROM ord WHERE " + c + ")";
+            }
+        };
+        require_same_answer(ex, make(cond), make(twin_cond));
+    }
+    // a plain statement that repeats the lookup: the same rows in the same order as the scan gives
+    for (int id : {1, 7, 42, 77, 300}) {
+        std::string q = "SELECT id FROM ord WHERE cust_id = " + std::to_string(id);
+        REQUIRE(ok_text(ex, q) == ok_text(ex, "SELECT id FROM ord WHERE (cust_id = " + std::to_string(id) + ") OR 1 = 0"));
+    }
+}
+
+TEST_CASE("statement-scoped point indexes never outlive their statement", "[query_paths][point_index]") {
+    TempDataDir dir("qp_point_index_scope");
+    Executor ex(dir.path);
+    open_db(ex);
+    REQUIRE(ex.execute_sql("CREATE TABLE a (id INT PRIMARY KEY, k INT)").is_ok());
+    REQUIRE(ex.execute_sql("CREATE TABLE b (id INT PRIMARY KEY, k INT)").is_ok());
+    std::string av, bv;
+    for (int i = 1; i <= 600; i++) {
+        av += std::string(i > 1 ? ", (" : "(") + std::to_string(i) + ", " + std::to_string(i % 50) + ")";
+        bv += std::string(i > 1 ? ", (" : "(") + std::to_string(i) + ", " + std::to_string(i % 50) + ")";
+    }
+    REQUIRE(ex.execute_sql("INSERT INTO a VALUES " + av).is_ok());
+    REQUIRE(ex.execute_sql("INSERT INTO b VALUES " + bv).is_ok());
+    const std::string probe = "SELECT COUNT(*) FROM a WHERE EXISTS (SELECT 1 FROM b WHERE b.k = a.k AND b.id > 590)"; // asks b.k = <value> 600 times
+    auto before = ok_text(ex, probe);
+    // rows change between statements: the next statement must see them
+    REQUIRE(ex.execute_sql("DELETE FROM b WHERE id > 590").is_ok());
+    auto after_delete = ok_text(ex, probe);
+    REQUIRE(after_delete != before);
+    REQUIRE(after_delete.find("| 0 ") != std::string::npos);
+    REQUIRE(ex.execute_sql("INSERT INTO b VALUES (9001, 7)").is_ok());
+    REQUIRE(ok_text(ex, "SELECT COUNT(*) FROM a WHERE EXISTS (SELECT 1 FROM b WHERE b.k = a.k AND b.id > 9000)").find("| 12 ") != std::string::npos);
+    // a write that consults the table while it changes: the subquery is not a pure read, so it scans
+    REQUIRE(ex.execute_sql("UPDATE b SET k = k + 100 WHERE EXISTS (SELECT 1 FROM a WHERE a.k = b.k AND a.id < 100)").is_ok());
+    REQUIRE(ok_text(ex, "SELECT COUNT(*) FROM b WHERE k >= 100").find("| 5") != std::string::npos);
+    // inside an open transaction, with the transaction's own writes
+    REQUIRE(ex.execute_sql("BEGIN").is_ok());
+    REQUIRE(ex.execute_sql("INSERT INTO b VALUES (9002, 7)").is_ok());
+    REQUIRE(ok_text(ex, "SELECT COUNT(*) FROM a WHERE EXISTS (SELECT 1 FROM b WHERE b.k = a.k AND b.id > 9001)").find("| 12 ") != std::string::npos);
+    REQUIRE(ex.execute_sql("ROLLBACK").is_ok());
+    REQUIRE(ok_text(ex, "SELECT COUNT(*) FROM a WHERE EXISTS (SELECT 1 FROM b WHERE b.k = a.k AND b.id > 9001)").find("| 0 ") != std::string::npos);
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// UPDATE builds the old and new row image of every row it touches only when a secondary, hash or composite index has to be
+// rewritten; the PK B+Tree takes the new version's JSON text. After every statement, whatever indexes a table has must answer
+// like a scan -- for plain changes, for changes of the indexed columns and for changes of the primary key itself.
+
+TEST_CASE("UPDATE keeps every index equal to the table (with and without secondary indexes, primary key changes)", "[query_paths][update]") {
+    TempDataDir dir("qp_update_indexes");
+    {
+        Executor ex(dir.path);
+        open_db(ex);
+        REQUIRE(ex.execute_sql("CREATE TABLE p0 (id INT PRIMARY KEY, a INT, b VARCHAR(10), c INT)").is_ok());            // primary key only
+        REQUIRE(ex.execute_sql("CREATE TABLE p1 (id INT PRIMARY KEY, a INT, b VARCHAR(10), c INT)").is_ok());            // + B+Tree index
+        REQUIRE(ex.execute_sql("CREATE TABLE p2 (id INT PRIMARY KEY, a INT, b VARCHAR(10), c INT)").is_ok());            // + hash index
+        REQUIRE(ex.execute_sql("CREATE TABLE p3 (id INT PRIMARY KEY, a INT, b VARCHAR(10), c INT)").is_ok());            // + composite index
+        REQUIRE(ex.execute_sql("CREATE INDEX p1_a ON p1 (a)").is_ok());
+        REQUIRE(ex.execute_sql("CREATE INDEX p2_b ON p2 (b) USING HASH").is_ok());
+        REQUIRE(ex.execute_sql("CREATE INDEX p3_ac ON p3 (a, c)").is_ok());
+        std::mt19937 rng(246);
+        std::string values;
+        for (int i = 1; i <= 200; i++) {
+            values += std::string(i > 1 ? ", (" : "(") + std::to_string(i) + ", " + std::to_string(rng() % 10) + ", 'k" + std::to_string(rng() % 8) + "', " + std::to_string(rng() % 6) + ")";
+        }
+        for (const char* t : {"p0", "p1", "p2", "p3"}) REQUIRE(ex.execute_sql(std::string("INSERT INTO ") + t + " VALUES " + values).is_ok());
+
+        auto check_all = [&](const std::string& t) {
+            const std::vector<std::string> preds = {"id = 7", "id = " + std::to_string(1 + rng() % 400), "a = 3", "a = 3.0", "b = 'k2'", "a = 4 AND c = 2", "id = 1007",
+                                                    "id = 1" + std::to_string(rng() % 50)};
+            for (const std::string& pred : preds) {
+                std::string sql = "SELECT id, a, b, c FROM " + t + " WHERE " + pred, twin = "SELECT id, a, b, c FROM " + t + " WHERE (" + pred + ") OR id < 0";
+                INFO(sql);
+                REQUIRE(sorted_lines(ok_text(ex, sql)) == sorted_lines(ok_text(ex, twin)));
+            }
+        };
+        for (int iter = 0; iter < 60; iter++) {
+            for (const std::string t : std::vector<std::string>{"p0", "p1", "p2", "p3"}) {
+                std::string sql;
+                switch (rng() % 5) {
+                    case 0: sql = "UPDATE " + t + " SET c = c + 1 WHERE a = " + std::to_string(rng() % 10); break;                       // no indexed column
+                    case 1: sql = "UPDATE " + t + " SET a = a + 1 WHERE id % 7 = " + std::to_string(rng() % 7); break;                 // the B+Tree / composite column
+                    case 2: sql = "UPDATE " + t + " SET b = 'k" + std::to_string(rng() % 8) + "' WHERE c = " + std::to_string(rng() % 6); break; // the hash column
+                    case 3: sql = "UPDATE " + t + " SET id = id + 1000 WHERE id = " + std::to_string(1 + rng() % 200); break;          // the primary key (may find no row)
+                    default: sql = "UPDATE " + t + " SET id = id + 1 WHERE id > 1000 AND id < " + std::to_string(1000 + rng() % 60); break; // a chain of key changes
+                }
+                auto r = ex.execute_sql(sql);
+                (void)r; // a duplicate key is a legitimate refusal; the indexes must be right either way
+                if (iter % 6 == 0) check_all(t);
+            }
+        }
+        for (const char* t : {"p0", "p1", "p2", "p3"}) check_all(t);
+    }
+    // and after a restart: the indexes are rebuilt from the rows, the redo log replayed
+    Executor again(dir.path);
+    REQUIRE(again.execute_sql("USE d").is_ok());
+    for (const char* t : {"p0", "p1", "p2", "p3"}) {
+        for (const std::string pred : std::vector<std::string>{"id = 1007", "id = 7", "a = 3", "b = 'k2'"}) {
+            std::string sql = std::string("SELECT id, a, b, c FROM ") + t + " WHERE " + pred, twin = std::string("SELECT id, a, b, c FROM ") + t + " WHERE (" + pred + ") OR id < 0";
+            INFO(sql);
+            REQUIRE(sorted_lines(ok_text(again, sql)) == sorted_lines(ok_text(again, twin)));
+        }
     }
 }

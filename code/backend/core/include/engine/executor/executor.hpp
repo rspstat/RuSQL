@@ -324,6 +324,18 @@ private:
     };
     std::unordered_map<const void*, SubqueryAnswer> subquery_scalar_cache_;
     std::unordered_map<const void*, bool> subquery_exists_cache_;
+    // Hash indexes the statement builds for itself. A correlated subquery runs once per outer row, and when its WHERE has
+    // `<column without an index> = <value>` every run scanned the whole inner table. The third time one statement looks
+    // up the same column of the same table, the table's rows are bucketed by that column (numeric values by their
+    // numeric key) once, and later lookups read the bucket; the candidates still go through the whole WHERE, so the
+    // buckets can only narrow what is looked at. Only a pure read (is_pure_read_only) may use them: nothing can change a
+    // table under the pointers during such a statement. execute() clears them around every statement.
+    struct StatementPointIndex {
+        std::unordered_map<std::string, std::vector<const Row*>> buckets; // normalize_numeric_key(value) -> rows, in table order
+    };
+    std::unordered_map<std::string, StatementPointIndex> point_index_cache_; // "table\0column"
+    std::unordered_map<std::string, std::size_t> point_probe_count_;
+    bool point_index_allowed_ = false;
     // Trigger recursion depth (a trigger body's own DML can fire further triggers,
     // directly or via a chain through another table) -- see fire_triggers().
     std::size_t trigger_depth_ = 0;

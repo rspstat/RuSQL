@@ -862,6 +862,22 @@ StringResult Executor::execute(Statement stmt) {
     subquery_cache_.clear();
     subquery_scalar_cache_.clear();
     subquery_exists_cache_.clear();
+    // The statement-scoped point indexes hold pointers into table rows: they live for one pure-read statement only, and a
+    // statement run from inside another (a procedure's body) must neither inherit nor leave behind the caller's.
+    struct PointIndexScope {
+        Executor& ex;
+        bool saved;
+        PointIndexScope(Executor& e, bool allowed) : ex(e), saved(e.point_index_allowed_) {
+            ex.point_index_cache_.clear();
+            ex.point_probe_count_.clear();
+            ex.point_index_allowed_ = allowed;
+        }
+        ~PointIndexScope() {
+            ex.point_index_cache_.clear();
+            ex.point_probe_count_.clear();
+            ex.point_index_allowed_ = saved;
+        }
+    } point_index_scope(*this, is_pure_read_only(stmt));
     maybe_checkpoint_redo(); // no lock held yet -- see executor_redo.cpp
     if (std::holds_alternative<Statement::Commit>(stmt.data)) return execute_commit_grouped();
 

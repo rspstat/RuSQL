@@ -1,3 +1,4 @@
+#include "engine/row_json.hpp"
 #include "engine/transaction/txn_manager.hpp"
 
 #include <algorithm>
@@ -499,8 +500,8 @@ namespace {
 // matching _xmax value for the version it superseded.
 std::string xmin_of_image(const std::string& json) {
     try {
-        auto j = nlohmann::json::parse(json);
-        if (j.contains("_xmin")) return j["_xmin"].get<std::string>();
+        Row row = row_from_json(json); // (the same text nlohmann::json::parse reads, without building a json tree per row)
+        if (auto it = row.find("_xmin"); it != row.end()) return it->second;
     } catch (...) {
     }
     return "";

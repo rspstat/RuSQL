@@ -30,14 +30,15 @@ std::vector<Row> hash_join(const std::vector<Row>& left, const std::vector<Row>&
                             const std::string& table, const std::string& probe_col, const std::string& build_col,
                             const std::vector<std::string>& right_schema_cols);
 
-// INNER or LEFT JOIN whose ON condition contains an equality `left_key = right_key` that every matching pair must satisfy,
-// without the nested loop: the right rows are hashed by `right_key`, every left row only meets the right rows whose key
-// equals its own `left_key` (numeric values compare as numbers, NULL matches nothing), and each such pair still has to
-// pass `on_match` -- the whole ON condition -- so the answer is exactly the nested loop's: same rows, same order (left
-// order, right order within a left row), and with `left_outer` unmatched left rows padded with NULLs. Candidate pairs are
-// only ever skipped, never added. nullopt = a key could not be read from some row; the caller falls back to the loop.
+// INNER, LEFT, RIGHT or FULL OUTER JOIN whose ON condition contains an equality `left_key = right_key` that every matching
+// pair must satisfy, without the nested loop: one side is hashed by its key, every row of the other side only meets the rows
+// whose key equals its own (numeric values compare as numbers, NULL matches nothing), and each such pair still has to pass
+// `on_match` -- the whole ON condition -- so the answer is exactly the nested loop's: same rows in the same order (INNER/LEFT/
+// FULL: left order, right order within a left row, then FULL's unmatched right rows; RIGHT: right order, left order within
+// a right row), unmatched rows padded with NULLs the way the loop pads them. Candidate pairs are only ever skipped, never
+// added. nullopt = another join type, or a key could not be read from some row; the caller falls back to the loop.
 std::optional<std::vector<Row>> hashed_join_verified(const std::vector<Row>& left, const std::vector<Row>& right, const std::string& table,
-                                                      bool left_outer, const std::function<const std::string*(const Row&)>& left_key,
+                                                      JoinType join_type, const std::function<const std::string*(const Row&)>& left_key,
                                                       const std::function<const std::string*(const Row&)>& right_key,
                                                       const std::vector<std::string>& right_schema_cols,
                                                       const std::function<bool(const Row&)>& on_match);

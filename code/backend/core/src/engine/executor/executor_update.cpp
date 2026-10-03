@@ -135,6 +135,21 @@ StringResult Executor::exec_update_inner(SharedDatabase& s, const std::string& t
         std::string key, old_json, new_json;
     };
     std::vector<UndoEntry> undo_entries;
+    std::vector<Row> old_rows_all, new_rows_all; // the old and new image of every updated row, in undo_entries order
+    std::vector<std::string> final_new_pks;       // the primary key of every new version, in undo_entries order
+    std::vector<char> final_new_pk_found;         // ... and whether the new row has that column at all
+    // Rows as images are only needed to rewrite a secondary, hash or composite index; the PK B+Tree takes the JSON text the
+    // new version already has. (A copy of a row is ~5 us -- two per row doubled a 100,000-row UPDATE's version building.)
+    bool need_images = false;
+    for (auto& [k, ci] : s.composite_indexes) {
+        if (ci.table == table) need_images = true;
+    }
+    for (auto& [name, meta] : s.index_meta) {
+        if (meta.first == table) need_images = true;
+    }
+    for (auto& [name, meta] : s.hash_index_meta) {
+        if (meta.first == table) need_images = true;
+    }
     std::unordered_set<std::string> matching_pks; // final (successful-attempt) value used after the loop too (RETURNING)
 
     // Real-blocking-wait stage: the candidate scan (SHARED) and the probe+mutate phase
@@ -267,7 +282,9 @@ StringResult Executor::exec_update_inner(SharedDatabase& s, const std::string& t
         // reader and nothing to unwind before retrying (a re-request for an already-held
         // claim from an earlier attempt is free/re-entrant in LockManager).
         std::vector<Row> new_versions; // appended to `rows` only if the whole probe succeeds
+        std::vector<Row> attempt_old_images, attempt_new_images; // copies of every row's image before and after, for index maintenance
         std::vector<std::string> new_version_pks;
+        std::vector<char> new_version_pk_found;
         std::vector<UndoEntry> attempt_undo_entries;
         bool conflict = false;
         bool stale_positions = false;
@@ -400,9 +417,14 @@ StringResult Executor::exec_update_inner(SharedDatabase& s, const std::string& t
                     {
                         auto npk = new_row.find(pk_col);
                         new_version_pks.push_back(npk != new_row.end() ? npk->second : std::string());
+                        new_version_pk_found.push_back(npk != new_row.end() ? 1 : 0);
                     }
 
                     attempt_undo_entries.push_back({key, old_json, row_to_json(new_row)});
+                    if (need_images) {
+                        attempt_old_images.push_back(row);
+                        attempt_new_images.push_back(new_row);
+                    }
                     new_versions.push_back(std::move(new_row));
                 }
                 // Nothing is stamped or inserted until EVERY new version has passed every check. Before,
@@ -456,6 +478,10 @@ StringResult Executor::exec_update_inner(SharedDatabase& s, const std::string& t
         if (!conflict) {
             count = attempt_undo_entries.size();
             undo_entries = std::move(attempt_undo_entries);
+            old_rows_all = std::move(attempt_old_images);
+            new_rows_all = std::move(attempt_new_images);
+            final_new_pks = std::move(new_version_pks);
+            final_new_pk_found = std::move(new_version_pk_found);
             break;
         }
 
@@ -495,25 +521,9 @@ StringResult Executor::exec_update_inner(SharedDatabase& s, const std::string& t
         if (ci.table == table) comp_keys.push_back(k);
     }
 
-    // The old and new image of every updated row, parsed once.
-    std::vector<Row> old_rows_all, new_rows_all;
-    for (auto& u : undo_entries) {
-        Row old_row, new_row;
-        try {
-            old_row = row_from_json(u.old_json);
-        } catch (...) {
-        }
-        try {
-            new_row = row_from_json(u.new_json);
-        } catch (...) {
-        }
-        old_rows_all.push_back(std::move(old_row));
-        new_rows_all.push_back(std::move(new_row));
-    }
-    auto new_pk_of = [&](std::size_t i) {
-        auto it = new_rows_all[i].find(pk_col);
-        return it != new_rows_all[i].end() ? it->second : undo_entries[i].key;
-    };
+    // (old_rows_all / new_rows_all were filled while the new versions were built: re-parsing the JSON images of every row
+    // took a quarter of a 100,000-row UPDATE)
+    auto new_pk_of = [&](std::size_t i) { return final_new_pk_found[i] ? final_new_pks[i] : undo_entries[i].key; };
     bool pk_changes = false;
     for (std::size_t i = 0; i < undo_entries.size(); i++) {
         if (new_pk_of(i) != undo_entries[i].key) {
@@ -531,30 +541,35 @@ StringResult Executor::exec_update_inner(SharedDatabase& s, const std::string& t
             if (new_pk_of(i) != undo_entries[i].key) {
                 if (auto idx_it = s.indexes.find(table); idx_it != s.indexes.end()) idx_it->second.remove(undo_entries[i].key);
             }
-            for (auto& k : comp_keys) {
-                auto& ci = s.composite_indexes.at(k);
-                if (ci.key_from_row(old_rows_all[i]) != ci.key_from_row(new_rows_all[i])) ci.remove_row(old_rows_all[i]);
+            if (need_images) {
+                for (auto& k : comp_keys) {
+                    auto& ci = s.composite_indexes.at(k);
+                    if (ci.key_from_row(old_rows_all[i]) != ci.key_from_row(new_rows_all[i])) ci.remove_row(old_rows_all[i]);
+                }
             }
         }
-        index_replace_rows(s, table, old_rows_all, new_rows_all, pk_col); // secondary + hash: leaving and entering in one pass
+        if (need_images) index_replace_rows(s, table, old_rows_all, new_rows_all, pk_col); // secondary + hash: leaving and entering in one pass
         for (std::size_t i = 0; i < undo_entries.size(); i++) {
             if (auto idx_it = s.indexes.find(table); idx_it != s.indexes.end()) {
-                idx_it->second.insert(new_pk_of(i), row_to_json(new_rows_all[i]));
+                idx_it->second.insert(new_pk_of(i), undo_entries[i].new_json);
             }
-            for (auto& k : comp_keys) s.composite_indexes.at(k).insert_row(new_rows_all[i]);
+            if (need_images) {
+                for (auto& k : comp_keys) s.composite_indexes.at(k).insert_row(new_rows_all[i]);
+            }
         }
     } else {
         for (std::size_t i = 0; i < undo_entries.size(); i++) {
-            const Row& old_row = old_rows_all[i];
-            const Row& new_row = new_rows_all[i];
             if (auto idx_it = s.indexes.find(table); idx_it != s.indexes.end()) {
                 // Row-level-concurrency Stage 4/5 correctness fix (found via concurrent-reader
                 // monotonicity stress testing -- root cause of the "0 rows returned" phantom): the key is
                 // unchanged here, so ONE insert() overwrites the PK B+Tree entry atomically -- no remove()
                 // first, which would leave a window in which AccessPath::PkPoint (lock-free by design)
                 // finds no entry for a row that exists.
-                idx_it->second.insert(new_pk_of(i), row_to_json(new_row));
+                idx_it->second.insert(new_pk_of(i), undo_entries[i].new_json);
             }
+            if (!need_images) continue;
+            const Row& old_row = old_rows_all[i];
+            const Row& new_row = new_rows_all[i];
             for (auto& k : comp_keys) {
                 // Same atomicity reasoning for the composite indexes: CompositeIndex::insert_row overwrites an
                 // existing key in place, so when none of the index's columns changed value remove_row() is skipped.
@@ -564,7 +579,7 @@ StringResult Executor::exec_update_inner(SharedDatabase& s, const std::string& t
             }
         }
         // Secondary / hash indexes: each affected bucket is parsed and rewritten once per statement, not once per row.
-        index_replace_rows(s, table, old_rows_all, new_rows_all, pk_col);
+        if (need_images) index_replace_rows(s, table, old_rows_all, new_rows_all, pk_col);
     }
 
     std::vector<std::string> changed_cols;

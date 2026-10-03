@@ -291,43 +291,96 @@ std::vector<Row> hash_join(const std::vector<Row>& left, const std::vector<Row>&
 }
 
 std::optional<std::vector<Row>> hashed_join_verified(const std::vector<Row>& left, const std::vector<Row>& right, const std::string& table,
-                                                      bool left_outer, const std::function<const std::string*(const Row&)>& left_key,
+                                                      JoinType join_type, const std::function<const std::string*(const Row&)>& left_key,
                                                       const std::function<const std::string*(const Row&)>& right_key,
                                                       const std::vector<std::string>& right_schema_cols,
                                                       const std::function<bool(const Row&)>& on_match) {
-    std::unordered_map<std::string, std::vector<const Row*>> hash;
+    if (join_type != JoinType::Inner && join_type != JoinType::Left && join_type != JoinType::Right && join_type != JoinType::FullOuter) {
+        return std::nullopt;
+    }
+    std::vector<const std::string*> right_keys, left_keys;
+    right_keys.reserve(right.size());
+    left_keys.reserve(left.size());
     for (auto& r : right) {
         const std::string* key = right_key(r);
         if (!key) return std::nullopt;
-        if (*key != JOIN_NULL_VALUE) hash[normalize_numeric_key(*key)].push_back(&r);
+        right_keys.push_back(key);
     }
-    std::vector<const std::string*> left_keys;
-    left_keys.reserve(left.size());
     for (auto& l : left) {
         const std::string* key = left_key(l);
         if (!key) return std::nullopt;
         left_keys.push_back(key);
     }
-
     std::vector<Row> out;
-    if (left_outer) out.reserve(left.size());
+
+    if (join_type == JoinType::Right) {
+        // the nested loop walks the right rows and pads a right row nothing matched with NULL for the left row's plain columns
+        std::unordered_map<std::string, std::vector<std::size_t>> by_key; // left row indexes, in left order
+        for (std::size_t i = 0; i < left.size(); i++) {
+            if (*left_keys[i] != JOIN_NULL_VALUE) by_key[normalize_numeric_key(*left_keys[i])].push_back(i);
+        }
+        std::vector<std::string> left_cols = non_qualified_keys(left.empty() ? nullptr : &left[0]);
+        out.reserve(right.size());
+        for (std::size_t ri = 0; ri < right.size(); ri++) {
+            bool matched = false;
+            if (*right_keys[ri] != JOIN_NULL_VALUE) {
+                if (auto it = by_key.find(normalize_numeric_key(*right_keys[ri])); it != by_key.end()) {
+                    for (std::size_t li : it->second) {
+                        Row merged = left[li];
+                        merge_right(merged, right[ri], table);
+                        if (on_match(merged)) {
+                            out.push_back(std::move(merged));
+                            matched = true;
+                        }
+                    }
+                }
+            }
+            if (!matched) {
+                Row merged;
+                for (auto& col : left_cols) merged[col] = JOIN_NULL_VALUE;
+                merge_right(merged, right[ri], table);
+                out.push_back(std::move(merged));
+            }
+        }
+        return out;
+    }
+
+    // INNER / LEFT / FULL OUTER: the right rows are hashed (indexes, in right order)
+    std::unordered_map<std::string, std::vector<std::size_t>> by_key;
+    for (std::size_t ri = 0; ri < right.size(); ri++) {
+        if (*right_keys[ri] != JOIN_NULL_VALUE) by_key[normalize_numeric_key(*right_keys[ri])].push_back(ri);
+    }
+    const bool pad_left_rows = join_type == JoinType::Left || join_type == JoinType::FullOuter;
+    std::vector<char> right_matched(join_type == JoinType::FullOuter ? right.size() : 0, 0);
+    if (pad_left_rows) out.reserve(left.size());
     for (std::size_t i = 0; i < left.size(); i++) {
         bool matched = false;
         if (*left_keys[i] != JOIN_NULL_VALUE) {
-            if (auto it = hash.find(normalize_numeric_key(*left_keys[i])); it != hash.end()) {
-                for (const Row* r : it->second) {
+            if (auto it = by_key.find(normalize_numeric_key(*left_keys[i])); it != by_key.end()) {
+                for (std::size_t ri : it->second) {
                     Row merged = left[i];
-                    merge_right(merged, *r, table);
+                    merge_right(merged, right[ri], table);
                     if (on_match(merged)) {
                         out.push_back(std::move(merged));
                         matched = true;
+                        if (join_type == JoinType::FullOuter) right_matched[ri] = 1;
                     }
                 }
             }
         }
-        if (!matched && left_outer) {
+        if (!matched && pad_left_rows) {
             Row merged = left[i];
             null_right(merged, right_schema_cols, table);
+            out.push_back(std::move(merged));
+        }
+    }
+    if (join_type == JoinType::FullOuter) { // then every right row nothing matched, padded with NULL for the left row's plain columns
+        std::vector<std::string> left_cols = non_qualified_keys(left.empty() ? nullptr : &left[0]);
+        for (std::size_t ri = 0; ri < right.size(); ri++) {
+            if (right_matched[ri]) continue;
+            Row merged;
+            for (auto& col : left_cols) merged[col] = JOIN_NULL_VALUE;
+            merge_right(merged, right[ri], table);
             out.push_back(std::move(merged));
         }
     }
