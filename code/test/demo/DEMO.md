@@ -62,7 +62,8 @@ Claude Desktop에 MCP가 연결되어 있다면 "demo 데이터베이스에서 �
 
 ## 피할 것 (알려진 문제)
 
-- **`ORDER BY`나 `DISTINCT`에 `테이블.열` 형태를 쓰지 마세요.** `SELECT DISTINCT o.status FROM orders o`는 값이 여러 개여도 한 행만 돌려주고, `ORDER BY o.amount DESC`는 정렬하지 않습니다(결과가 테이블 순서 그대로). `ORDER BY amount DESC`, `SELECT DISTINCT status`처럼 열 이름만 쓰면 정상입니다. 원본 Rust 포팅 때부터 있던 문제이고 아직 고치지 않았습니다(`GROUP BY c.city` 같은 `GROUP BY`·`WHERE`·`SELECT` 목록의 `테이블.열`은 정상).
+- **두 테이블에 같은 이름의 열이 있을 때 집계 안에 `테이블.열`을 쓰지 마세요.** 예를 들어 `orders`와 `customers` 둘 다 `id`가 있는데 `COUNT(o.id)`·`SUM(o.id)`처럼 쓰면 한정자(`o.`)가 버려져서 왼쪽(FROM) 테이블의 `id`를 읽습니다. `LEFT JOIN`에서 `COUNT(o.id)`로 "주문 수"를 세면 주문이 없는 고객도 1로 셉니다. 겹치지 않는 열(`COUNT(o.amount)`)이나 `COUNT(*)`를 쓰세요. 집계 안의 `테이블.열`은 아직 고치지 않았고, `HAVING SUM(o.amount) > 100`처럼 HAVING 안에서는 파싱 오류가 납니다(`HAVING SUM(amount) > 100`처럼 열 이름만 쓰면 정상).
+- `ORDER BY o.amount DESC`, `SELECT DISTINCT o.status`처럼 `ORDER BY`·`DISTINCT`에 `테이블.열`을 쓰는 것은 정상입니다(2026-10-05에 고침).
 
 ## 되돌리기
 

@@ -716,3 +716,274 @@ TEST_CASE("statement-scoped point indexes are never built on a view's temporary 
         require_same_answer(ex, std::string(sh.before) + sh.cond + sh.after, std::string(sh.before) + "(" + sh.cond + ") OR 1 = 0" + sh.after);
     }
 }
+
+// ---------------------------------------------------------------------------------------------------------------------
+// A column written with its table -- `t.id`, or `x.id` through an alias -- in ORDER BY and DISTINCT. A row keeps its columns
+// under their bare names, and both read the column as the row's own key, so `ORDER BY t.id` read nothing (every row compared
+// equal, nothing was sorted) and `SELECT DISTINCT t.col` gave every row the same empty key (a single row survived). Both
+// now resolve the name the way WHERE and the select list do. When two joined tables share a column name the qualifier is
+// what tells them apart, so the reference below is computed here, from the data, never from the engine's other spelling.
+
+namespace {
+struct QT {
+    int id, grp, val;
+    std::string tag;
+};
+struct QU {
+    int id;
+    std::string name;
+    int grp;
+};
+
+// The value of one `t.*` / `u.*` column of a joined row; u is null for a LEFT JOIN row without a partner.
+std::string q_value(const QT& t, const QU* u, const std::string& col) {
+    if (col == "t.id") return std::to_string(t.id);
+    if (col == "t.grp") return std::to_string(t.grp);
+    if (col == "t.val") return std::to_string(t.val);
+    if (col == "t.tag") return t.tag;
+    if (!u) return "NULL";
+    if (col == "u.id") return std::to_string(u->id);
+    if (col == "u.name") return u->name;
+    return std::to_string(u->grp);
+}
+} // namespace
+
+TEST_CASE("ORDER BY and DISTINCT on table.column match a reference when both tables have the same column names",
+          "[query_paths][qualified]") {
+    unsigned seed_count = 2; // RUSQL_FUZZ_SEEDS=30 runs a much longer campaign
+    if (const char* e = std::getenv("RUSQL_FUZZ_SEEDS")) seed_count = static_cast<unsigned>(std::strtoul(e, nullptr, 10));
+    unsigned seed_start = 0;
+    if (const char* e = std::getenv("RUSQL_FUZZ_START")) seed_start = static_cast<unsigned>(std::strtoul(e, nullptr, 10));
+    struct Config {
+        int t_rows, u_rows;
+        bool index;     // a secondary index on t.grp: lets the planner pick the index-driven join algorithms
+        int grp_values; // distinct values of t.grp (0: u_rows + 2, so a few rows have no partner)
+    };
+    std::set<std::string> algorithms; // the join algorithms the queries ran through
+    std::size_t checked = 0;
+    // sizes chosen for the planner to pick Index NL (small left), Hash, Nested Loop (one right row) and Reverse Index NL (a few
+    // right rows probing an index on a big left table whose keys are nearly unique)
+    for (const Config& cfg : {Config{90, 5, false, 0}, Config{90, 5, true, 0}, Config{400, 40, false, 0}, Config{400, 40, true, 0},
+                              Config{10, 1, false, 0}, Config{400, 10, true, 200}}) {
+        for (unsigned k = seed_start; k < seed_start + seed_count; k++) {
+            INFO("rows " << cfg.t_rows << "/" << cfg.u_rows << " index " << cfg.index << " seed " << k);
+            std::mt19937 rng(777 + k * 13 + static_cast<unsigned>(cfg.t_rows) + (cfg.index ? 1u : 0u));
+            TempDataDir dir("qp_qualified_names");
+            Executor ex(dir.path);
+            open_db(ex);
+            REQUIRE(ex.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, grp INT, val INT, tag VARCHAR(8))").is_ok());
+            REQUIRE(ex.execute_sql("CREATE TABLE u (id INT PRIMARY KEY, name VARCHAR(8), grp INT)").is_ok());
+            static const char* tags[] = {"a", "b", "c", "d"};
+            static const char* names[] = {"nx", "ny", "nz", "nw", "nv"};
+            std::vector<QT> T;
+            std::vector<QU> U;
+            for (int i = 1; i <= cfg.u_rows; i++) U.push_back({i, names[rng() % 5], static_cast<int>(rng() % 4)});
+            for (int i = 1; i <= cfg.t_rows; i++) {
+                // grp reaches values with no partner in u (0 and above u_rows)
+                const unsigned grp_values = static_cast<unsigned>(cfg.grp_values ? cfg.grp_values : cfg.u_rows + 2);
+                T.push_back({i, static_cast<int>(rng() % grp_values), static_cast<int>(rng() % 25), tags[rng() % 4]});
+            }
+            std::string tv, uv;
+            for (auto& t : T) tv += std::string(tv.empty() ? "(" : ", (") + std::to_string(t.id) + ", " + std::to_string(t.grp) + ", " + std::to_string(t.val) + ", '" + t.tag + "')";
+            for (auto& u : U) uv += std::string(uv.empty() ? "(" : ", (") + std::to_string(u.id) + ", '" + u.name + "', " + std::to_string(u.grp) + ")";
+            REQUIRE(ex.execute_sql("INSERT INTO t VALUES " + tv).is_ok());
+            REQUIRE(ex.execute_sql("INSERT INTO u VALUES " + uv).is_ok());
+            if (cfg.index) REQUIRE(ex.execute_sql("CREATE INDEX t_grp ON t (grp)").is_ok());
+
+            const std::vector<std::string> all_cols = {"t.id", "t.grp", "t.val", "t.tag", "u.id", "u.name", "u.grp"};
+            struct JR {
+                const QT* t;
+                const QU* u;
+            };
+            struct Key {
+                std::string col;
+                bool asc;
+            };
+            for (int iter = 0; iter < 60; iter++) {
+                const bool left = rng() % 3 == 0, alias = rng() % 2 == 0;
+                const std::string tq = alias ? "x" : "t", uq = alias ? "y" : "u";
+                auto spell = [&](const std::string& col) { return (col[0] == 't' ? tq : uq) + col.substr(1); };
+                const std::string from = std::string("FROM t") + (alias ? " x" : "") + (left ? " LEFT JOIN u" : " JOIN u") + (alias ? " y" : "") + " ON " + uq + ".id = " + tq + ".grp";
+                std::vector<JR> joined;
+                for (auto& t : T) {
+                    const QU* match = nullptr;
+                    for (auto& u : U) {
+                        if (u.id == t.grp) match = &u;
+                    }
+                    if (match || left) joined.push_back({&t, match});
+                }
+                // a LEFT JOIN row without a partner has NULL in every u column: those never take part in an order (how the engine
+                // places a NULL is not what is being tested here)
+                std::vector<std::string> order_pool;
+                for (auto& c : all_cols) {
+                    if (!left || c[0] == 't') order_pool.push_back(c);
+                }
+                auto pick = [&](const std::vector<std::string>& pool, std::size_t n) {
+                    std::vector<std::string> p = pool;
+                    std::shuffle(p.begin(), p.end(), rng);
+                    p.resize(std::min(n, p.size()));
+                    return p;
+                };
+                auto sort_by = [&](std::vector<JR>& rows, const std::vector<Key>& keys) {
+                    std::stable_sort(rows.begin(), rows.end(), [&](const JR& a, const JR& b) {
+                        for (auto& key : keys) {
+                            int c = ref_cmp(q_value(*a.t, a.u, key.col), q_value(*b.t, b.u, key.col));
+                            if (c != 0) return key.asc ? c < 0 : c > 0;
+                        }
+                        return false;
+                    });
+                };
+                auto join_names = [&](const std::vector<std::string>& cols) {
+                    std::string s;
+                    for (auto& c : cols) s += (s.empty() ? "" : ", ") + spell(c);
+                    return s;
+                };
+                auto order_text = [&](const std::vector<Key>& keys) {
+                    std::string s;
+                    for (auto& key : keys) s += (s.empty() ? "" : ", ") + spell(key.col) + (key.asc ? "" : " DESC");
+                    return s;
+                };
+
+                if (iter % 3 != 2) {
+                    // ORDER BY (with a unique last key, so the answer does not depend on the join algorithm) [LIMIT n OFFSET m]
+                    std::vector<std::string> select = pick(all_cols, 1 + rng() % 4);
+                    std::vector<Key> keys;
+                    for (auto& c : pick(order_pool, rng() % 3)) keys.push_back({c, rng() % 2 == 0});
+                    keys.push_back({"t.id", rng() % 2 == 0});
+                    std::string sql = "SELECT " + join_names(select) + " " + from + " ORDER BY " + order_text(keys);
+                    std::size_t offset = 0, limit = joined.size();
+                    if (rng() % 3 == 0) {
+                        limit = 1 + rng() % 15;
+                        offset = rng() % 4 == 0 ? rng() % 10 : 0;
+                        sql += " LIMIT " + std::to_string(limit) + (offset ? " OFFSET " + std::to_string(offset) : "");
+                    }
+                    sort_by(joined, keys);
+                    std::vector<std::vector<std::string>> expected;
+                    for (std::size_t i = offset; i < joined.size() && expected.size() < limit; i++) {
+                        std::vector<std::string> row;
+                        for (auto& c : select) row.push_back(q_value(*joined[i].t, joined[i].u, c));
+                        expected.push_back(std::move(row));
+                    }
+                    INFO(sql);
+                    REQUIRE(table_cells(ok_text(ex, sql)) == expected);
+                    auto plan = ok_text(ex, "EXPLAIN " + sql);
+                    for (const char* name : {"Nested Loop", "Hash Join", "Reverse Index NL", "Index NL", "Sort Merge"}) {
+                        if (plan.find(std::string("Join: ") + name) != std::string::npos) algorithms.insert(name);
+                    }
+                } else if (iter % 2 == 0) {
+                    // DISTINCT, ordered by every column it selects (a total order on the distinct rows)
+                    std::vector<std::string> select = pick(order_pool, 1 + rng() % 3);
+                    std::vector<Key> keys;
+                    for (auto& c : select) keys.push_back({c, rng() % 2 == 0});
+                    std::string sql = "SELECT DISTINCT " + join_names(select) + " " + from + " ORDER BY " + order_text(keys);
+                    std::vector<std::vector<std::string>> distinct_rows;
+                    {
+                        std::set<std::vector<std::string>> seen;
+                        for (auto& r : joined) {
+                            std::vector<std::string> row;
+                            for (auto& c : select) row.push_back(q_value(*r.t, r.u, c));
+                            if (seen.insert(row).second) distinct_rows.push_back(std::move(row));
+                        }
+                    }
+                    std::stable_sort(distinct_rows.begin(), distinct_rows.end(), [&](const std::vector<std::string>& a, const std::vector<std::string>& b) {
+                        for (std::size_t i = 0; i < keys.size(); i++) {
+                            int c = ref_cmp(a[i], b[i]);
+                            if (c != 0) return keys[i].asc ? c < 0 : c > 0;
+                        }
+                        return false;
+                    });
+                    INFO(sql);
+                    REQUIRE(table_cells(ok_text(ex, sql)) == distinct_rows);
+                } else {
+                    // DISTINCT over any columns, a LEFT JOIN's NULLs included: the same set of rows
+                    std::vector<std::string> select = pick(all_cols, 1 + rng() % 3);
+                    std::string sql = "SELECT DISTINCT " + join_names(select) + " " + from;
+                    std::set<std::vector<std::string>> expected;
+                    for (auto& r : joined) {
+                        std::vector<std::string> row;
+                        for (auto& c : select) row.push_back(q_value(*r.t, r.u, c));
+                        expected.insert(std::move(row));
+                    }
+                    auto got = table_cells(ok_text(ex, sql));
+                    INFO(sql);
+                    REQUIRE(got.size() == expected.size());
+                    REQUIRE(std::set<std::vector<std::string>>(got.begin(), got.end()) == expected);
+                }
+                checked++;
+            }
+
+            // GROUP BY on a qualified key, ordered by it spelled qualified and bare
+            std::map<std::string, std::pair<int, int>> groups; // name -> (rows, sum of val)
+            for (auto& t : T) {
+                for (auto& u : U) {
+                    if (u.id == t.grp) {
+                        groups[u.name].first++;
+                        groups[u.name].second += t.val;
+                    }
+                }
+            }
+            for (const char* order : {"y.name DESC", "name DESC", "y.name"}) {
+                std::vector<std::vector<std::string>> expected;
+                for (auto& [name, agg] : groups) expected.push_back({name, std::to_string(agg.first), std::to_string(agg.second)});
+                if (std::string(order).find("DESC") != std::string::npos) std::reverse(expected.begin(), expected.end());
+                std::string sql = std::string("SELECT y.name, COUNT(*), SUM(x.val) FROM t x JOIN u y ON y.id = x.grp GROUP BY y.name ORDER BY ") + order;
+                INFO(sql);
+                REQUIRE(table_cells(ok_text(ex, sql)) == expected);
+            }
+        }
+    }
+    std::string seen_algorithms;
+    for (auto& a : algorithms) seen_algorithms += a + "; ";
+    INFO("join algorithms seen: " << seen_algorithms);
+    REQUIRE(algorithms.size() >= 4); // the answers held through different join algorithms, not through one of them
+    REQUIRE(checked >= 600);
+}
+
+// The same statement spelled with and without a table qualifier, on tables whose column names do not collide (so the bare
+// spelling is unambiguous): the rows have to be the same, wherever the statement reads its columns from -- a plain scan, a
+// join, a group, a view, a CTE, a derived table, an index path.
+TEST_CASE("table.column spellings answer like the bare spellings in ORDER BY, DISTINCT and everywhere around them",
+          "[query_paths][qualified]") {
+    TempDataDir dir("qp_qualified_twins");
+    Executor ex(dir.path);
+    open_db(ex);
+    REQUIRE(ex.execute_sql("CREATE TABLE a (aid INT PRIMARY KEY, g INT, v INT)").is_ok());
+    REQUIRE(ex.execute_sql("CREATE TABLE b (bid INT PRIMARY KEY, nm VARCHAR(5), w INT)").is_ok());
+    REQUIRE(ex.execute_sql("INSERT INTO a VALUES (1,2,50),(2,1,40),(3,2,30),(4,1,20),(5,3,10),(6,2,NULL),(7,3,60),(8,1,35)").is_ok());
+    REQUIRE(ex.execute_sql("INSERT INTO b VALUES (1,'x',7),(2,'y',8),(3,'z',9)").is_ok());
+    REQUIRE(ex.execute_sql("CREATE INDEX a_v ON a (v)").is_ok());
+    REQUIRE(ex.execute_sql("CREATE VIEW vv AS SELECT aid, v FROM a").is_ok());
+    const std::string J = "FROM a JOIN b ON b.bid = a.g";
+    const std::vector<std::pair<std::string, std::string>> twins = {
+        {"SELECT aid FROM a ORDER BY a.v DESC", "SELECT aid FROM a ORDER BY v DESC"},
+        {"SELECT x.aid FROM a x ORDER BY x.v DESC, x.aid", "SELECT aid FROM a ORDER BY v DESC, aid"},
+        {"SELECT a.aid, b.nm " + J + " ORDER BY a.v DESC, a.aid", "SELECT aid, nm " + J + " ORDER BY v DESC, aid"},
+        {"SELECT a.aid, b.nm " + J + " ORDER BY b.nm, a.aid DESC", "SELECT aid, nm " + J + " ORDER BY nm, aid DESC"},
+        {"SELECT b.nm, COUNT(*) " + J + " GROUP BY b.nm ORDER BY b.nm DESC", "SELECT nm, COUNT(*) " + J + " GROUP BY nm ORDER BY nm DESC"},
+        {"SELECT b.nm, COUNT(*) " + J + " GROUP BY b.nm ORDER BY nm DESC", "SELECT nm, COUNT(*) " + J + " GROUP BY nm ORDER BY nm DESC"},
+        {"SELECT nm, COUNT(*) " + J + " GROUP BY nm ORDER BY b.nm DESC", "SELECT nm, COUNT(*) " + J + " GROUP BY nm ORDER BY nm DESC"},
+        {"SELECT aid FROM a ORDER BY a.v DESC, a.aid LIMIT 3 OFFSET 1", "SELECT aid FROM a ORDER BY v DESC, aid LIMIT 3 OFFSET 1"},
+        {"SELECT aid FROM a WHERE a.v > 15 ORDER BY a.v DESC LIMIT 2", "SELECT aid FROM a WHERE v > 15 ORDER BY v DESC LIMIT 2"}, // the index's top-K path
+        {"SELECT DISTINCT a.g FROM a ORDER BY g", "SELECT DISTINCT g FROM a ORDER BY g"},
+        {"SELECT DISTINCT x.g FROM a x ORDER BY x.g DESC", "SELECT DISTINCT g FROM a ORDER BY g DESC"},
+        {"SELECT DISTINCT b.nm " + J + " ORDER BY nm", "SELECT DISTINCT nm " + J + " ORDER BY nm"},
+        {"SELECT DISTINCT a.g, b.nm " + J + " ORDER BY a.g", "SELECT DISTINCT g, nm " + J + " ORDER BY g"},
+        {"SELECT DISTINCT a.g AS gg FROM a ORDER BY gg", "SELECT DISTINCT g AS gg FROM a ORDER BY gg"},
+        {"SELECT DISTINCT a.g FROM a ORDER BY a.g DESC LIMIT 2", "SELECT DISTINCT g FROM a ORDER BY g DESC LIMIT 2"},
+        {"SELECT aid, ROW_NUMBER() OVER (ORDER BY a.v DESC) AS rn FROM a ORDER BY aid", "SELECT aid, ROW_NUMBER() OVER (ORDER BY v DESC) AS rn FROM a ORDER BY aid"},
+        {"WITH c AS (SELECT a.aid, a.v FROM a) SELECT c.aid FROM c ORDER BY c.v DESC", "WITH c AS (SELECT aid, v FROM a) SELECT aid FROM c ORDER BY v DESC"},
+        {"SELECT vv.aid FROM vv ORDER BY vv.v DESC", "SELECT aid FROM vv ORDER BY v DESC"},
+        {"SELECT d.aid FROM (SELECT aid, v FROM a) d ORDER BY d.v DESC", "SELECT aid FROM (SELECT aid, v FROM a) d ORDER BY v DESC"},
+        {"SELECT a.aid, b.nm FROM a LEFT JOIN b ON b.bid = a.g ORDER BY a.v DESC, a.aid", "SELECT aid, nm FROM a LEFT JOIN b ON b.bid = a.g ORDER BY v DESC, aid"},
+        {"SELECT a.aid FROM a WHERE a.g IN (SELECT b.bid FROM b WHERE b.w > 7) ORDER BY a.v, a.aid", "SELECT aid FROM a WHERE g IN (SELECT bid FROM b WHERE w > 7) ORDER BY v, aid"},
+    };
+    for (auto& [qualified, bare] : twins) {
+        INFO(qualified << "   vs   " << bare);
+        auto q = table_cells(ok_text(ex, qualified)), b = table_cells(ok_text(ex, bare));
+        REQUIRE(q == b);
+        REQUIRE_FALSE(q.empty());
+    }
+    // they are not trivially equal: the sorted answers differ from the table order, and DISTINCT really drops rows
+    REQUIRE(table_cells(ok_text(ex, "SELECT aid FROM a ORDER BY a.v DESC, a.aid"))[0][0] != "1");
+    REQUIRE(table_cells(ok_text(ex, "SELECT DISTINCT a.g FROM a")).size() == 3);
+}

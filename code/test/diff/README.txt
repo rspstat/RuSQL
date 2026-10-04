@@ -30,5 +30,12 @@ A statement that fails must fail with the same message on both builds.
 
 Exit code 1 and the query plus both outputs for the first --max-report differences. A seed is deterministic.
 
+diff_builds.py cannot say WHICH of two builds is right. verify_orderby_distinct.py checks one build by itself, on the same
+corpus (tables that share column names, columns spelled `t.id`): every DISTINCT statement returns the distinct rows of the
+statement without DISTINCT, every ORDER BY statement returns the rows of the statement without it, in order of its first key
+when that key is a selected column.
+
+  python verify_orderby_distinct.py <engine_server.exe> [--queries N] [--seed S] [--rows R]
+
 To check that the comparison can see a bug, plant one on purpose in the new build (for instance read an unqualified column
 from the last table that has it instead of the first) and run the same seed: it has to report differences.

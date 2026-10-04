@@ -78,16 +78,19 @@ std::vector<std::string> equal_entries(const BPlusTree& tree, const std::string&
     return out;
 }
 
-// Mirrors Rust's multi-key Ordering-based ORDER BY comparator as a strict-weak-order
-// "less than" predicate. Looks up columns directly via Row::find rather than
-// Executor::get_col's dotted-suffix fallback — ORDER BY column names in this port's
-// current scope are always the row's own keys (join-qualified names included).
-bool row_order_less(const Row& a, const Row& b, const std::vector<OrderBy>& order_by) {
+// How a column named in ORDER BY is read from a row: Executor::get_col (private, so the callers pass it in). The exact key
+// first, then the same "table.col" / bare-name resolution WHERE, GROUP BY and the select list use -- the parser has already
+// replaced an alias by its table name. Looking the name up as the row's own key only made `ORDER BY t.col` (a row keeps
+// its columns under their bare names) read nothing, so every row compared equal and nothing was sorted.
+using RowLookup = const std::string* (*)(const Row&, const std::string&);
+
+// Mirrors Rust's multi-key Ordering-based ORDER BY comparator as a strict-weak-order "less than" predicate.
+bool row_order_less(const Row& a, const Row& b, const std::vector<OrderBy>& order_by, RowLookup lookup) {
     for (auto& ord : order_by) {
-        auto ita = a.find(ord.column);
-        auto itb = b.find(ord.column);
-        std::string av = ita != a.end() ? ita->second : std::string();
-        std::string bv = itb != b.end() ? itb->second : std::string();
+        const std::string* pa = lookup(a, ord.column);
+        const std::string* pb = lookup(b, ord.column);
+        std::string av = pa ? *pa : std::string();
+        std::string bv = pb ? *pb : std::string();
         int c = cmp_key(av, bv);
         if (!ord.ascending) c = -c;
         if (c != 0) return c < 0;
@@ -252,7 +255,7 @@ void append_key_part(std::string& key, const std::string& value) {
 // The order row_order_less defines, for a whole row set at once: indexes into `rows`, stable. row_order_less looked both
 // columns up in both rows (two hash lookups, two string copies) and parsed both as numbers on EVERY comparison -- about
 // 0.45 us each, 16 comparisons per row of a 50,000-row sort. Here each row's keys are read and parsed once.
-std::vector<std::size_t> order_rows(const std::vector<const Row*>& rows, const std::vector<OrderBy>& order_by) {
+std::vector<std::size_t> order_rows(const std::vector<const Row*>& rows, const std::vector<OrderBy>& order_by, RowLookup lookup) {
     struct Cell {
         bool numeric = false;
         double num = 0;
@@ -263,9 +266,9 @@ std::vector<std::size_t> order_rows(const std::vector<const Row*>& rows, const s
     std::vector<Cell> cells(rows.size() * ncols);
     for (std::size_t i = 0; i < rows.size(); i++) {
         for (std::size_t c = 0; c < ncols; c++) {
-            auto it = rows[i]->find(order_by[c].column);
+            const std::string* found = lookup(*rows[i], order_by[c].column);
             Cell& cell = cells[i * ncols + c];
-            cell.text = it != rows[i]->end() ? &it->second : &empty;
+            cell.text = found ? found : &empty;
             if (auto v = parse_f64(*cell.text)) {
                 cell.numeric = true;
                 cell.num = *v;
@@ -1564,7 +1567,7 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
     }
 
     if (!order_by.empty() && rows_p.size() > 1) { // stable, same order as comparing the rows pairwise with cmp_key
-        std::vector<std::size_t> order = order_rows(rows_p, order_by);
+        std::vector<std::size_t> order = order_rows(rows_p, order_by, &Executor::get_col);
         std::vector<const Row*> sorted;
         sorted.reserve(rows_p.size());
         for (std::size_t i : order) sorted.push_back(rows_p[i]);
@@ -1630,7 +1633,7 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
             group_rows = std::move(filtered);
         }
         if (!order_by.empty()) {
-            auto less = [&](const Row& a, const Row& b) { return row_order_less(a, b, order_by); };
+            auto less = [&](const Row& a, const Row& b) { return row_order_less(a, b, order_by, &Executor::get_col); };
             if (parallel_enabled() && group_rows.size() >= parallel_min_rows()) {
                 parallel_sort(group_rows, less); // unstable, matches Rust's par_sort_unstable_by
             } else {
@@ -1679,11 +1682,13 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
                     }
                     val = joined;
                 } else if (auto* col = std::get_if<SelectColumn::Column>(&c.data)) {
-                    auto it = row.find(col->name);
-                    val = it != row.end() ? it->second : std::string();
+                    // the same name resolution as the select list: `SELECT DISTINCT t.col` named a key the row does not have
+                    // (it holds the bare name), so every row's key was empty and a single row survived
+                    const std::string* v = get_col(row, col->name);
+                    val = v ? *v : std::string();
                 } else if (auto* ca = std::get_if<SelectColumn::ColumnAlias>(&c.data)) {
-                    auto it = row.find(ca->name);
-                    val = it != row.end() ? it->second : std::string();
+                    const std::string* v = get_col(row, ca->name);
+                    val = v ? *v : std::string();
                 } else if (auto* agg = std::get_if<SelectColumn::Agg>(&c.data)) {
                     auto it = row.find(agg->col);
                     val = it != row.end() ? it->second : std::string();

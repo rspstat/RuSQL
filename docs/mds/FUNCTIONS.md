@@ -146,6 +146,7 @@
 - [x] SELECT ... FOR UPDATE (배타 잠금)
 - [x] SELECT ... FOR SHARE (공유 잠금 — 다중 독자 허용, 쓰기 잠금과 충돌)
 - [x] table.column dot notation (SELECT / JOIN ON / GROUP BY / ORDER BY)
+- [x] **`ORDER BY 테이블.열`·`SELECT DISTINCT 테이블.열` 수정 (2026-10-05)** — 두 곳 다 열 이름을 행의 키 그대로 `Row::find`로 찾았는데 행은 열을 맨 이름으로 보관해서(오른쪽 조인 테이블만 `테이블.열` 키도 가짐) 한정 이름은 못 찾았음: `ORDER BY a.id DESC`는 모든 행이 같다고 보고 정렬하지 않았고(조인에서는 조인 알고리즘의 출력 순서), `SELECT DISTINCT a.g`는 모든 행의 키가 빈 문자열이라 한 행만 남았음(원본 Rust 포팅 때부터). 이제 WHERE·GROUP BY·SELECT 목록과 같은 이름 해석(`get_col`: 정확한 키 → `테이블.열` 접미 일치 → 열 이름)을 씀. 파서가 별칭을 테이블 이름으로 풀어 주므로 `x.id`도 동작. **남은 것**: 집계 인자의 한정자(`SUM(b.id)`)는 파서가 버려서 두 테이블에 같은 열 이름이 있으면 왼쪽 열을 읽음, `HAVING SUM(a.v)`는 파싱 오류
 - [x] EXPLAIN (비용 기반 실행 계획 조회 — 너비 74자, 단어 경계 줄바꿈 포맷)
 - [x] EXPLAIN ANALYZE (실제 실행 후 Actual rows / Actual time 출력)
 - [x] PREPARE / EXECUTE / DEALLOCATE — `PREPARE name FROM 'sql'`, `SET @v = expr`, `EXECUTE name USING @v`, `DEALLOCATE PREPARE name`
