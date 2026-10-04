@@ -409,3 +409,25 @@ TEST_CASE("an aggregate keeps the table qualifier of its argument; an alias is r
         REQUIRE(names == std::vector<std::string>{"SUM(t.v)", "COUNT(*)", "MAX(t.w)"});
     }
 }
+
+// An alias in an aggregate that sits inside an expression, a function's argument text or a CASE condition is resolved to its
+// table like the alias in a plain aggregate (the aggregate's argument is what the rows hold under the table's name).
+TEST_CASE("aliases inside aggregates nested in expressions, function arguments and CASE are resolved", "[parser][aggregate]") {
+    Parser p("SELECT ROUND(SUM(o.v) / COUNT(*), 1), SUM(o.v) + 1 AS t, CASE WHEN COUNT(y.id) > MAX(o.w) THEN 'm' ELSE 's' END AS c "
+             "FROM t o JOIN u y ON y.id = o.id");
+    auto res = p.parse();
+    REQUIRE(res.is_ok());
+    auto& sel = std::get<Statement::Select>(res.value().data);
+    REQUIRE(sel.columns.size() == 3);
+    auto& round = std::get<SelectColumn::Func>(sel.columns[0].data);
+    REQUIRE(round.args.size() == 2);
+    REQUIRE(round.args[0].find("SUM(t.v)") != std::string::npos);
+    REQUIRE(round.args[0].find("o.v") == std::string::npos);
+    auto& expr = std::get<SelectColumn::Expr>(sel.columns[1].data);
+    auto& add = std::get<ArithExpr::Add>(expr.expr.data);
+    REQUIRE(std::get<ArithExpr::Col>(add.lhs->data).name == "SUM(t.v)");
+    auto& cw = std::get<SelectColumn::CaseWhen>(sel.columns[2].data);
+    auto& leaf = std::get<CondExpr::Leaf>(cw.branches.at(0).condition.data).condition;
+    REQUIRE(std::get<ArithExpr::Col>(leaf.left.data).name == "COUNT(u.id)");
+    REQUIRE(std::get<ConditionValue::Literal>(leaf.value.data).value == "MAX(t.w)");
+}

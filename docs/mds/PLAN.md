@@ -313,7 +313,11 @@
 >
 > **수정됨 (2026-10-05, 세 번째 항목)**: 파서가 집계 인자를 쓴 그대로(`b.id`) 보존하고(결과 열 이름도 그대로: `SUM(b.id)`), 별칭은 따로 `source`에 테이블 이름으로 풀어 둠(`Agg`/`AggAlias`에 필드 추가, 뷰·프로시저의 JSON 형태에도 저장). 실행기는 인자를 행이 실제로 가진 키로 한 번 해석해서 읽음. HAVING 안의 집계도 `테이블.열`을 받고, **같은 함수에서 HAVING의 `COUNT(열)`이 NULL을 세지 않고 그룹의 행 수를 돌려주던 것**(select 목록에 같은 집계가 없을 때, 예: `LEFT JOIN … HAVING COUNT(o.id) = 0`)도 같이 고침. 상세는 `DATE.md` 10월 5일 세 번째 항목.
 >
-> **이 점검에서 새로 찾았지만 고치지 않은 것 (사용자 결정 대기)**: **select 목록의 집계 간 산술**(`MAX(v) - MIN(v)`, `SUM(v) / COUNT(*)`)은 피연산자 집계가 select 목록에 따로 들어 있을 때만 맞고, 아니면 `GROUP BY`가 있어도 0을 돌려주며 `GROUP BY`가 없으면 집계로 취급되지 않아 **입력 행마다 한 행씩 0**이 나옴(`SELECT MAX(v) - MIN(v) FROM a` → 5행). HAVING은 같은 식을 `extract_agg_refs_from_cond`로 먼저 계산해 두어 맞지만 select 목록에는 그 단계가 없음.
+> **이 점검에서 새로 찾았던 것 (2026-10-05 사용자 승인으로 같은 날 수정 — 아래 "수정됨" 문단)**: **select 목록의 집계 간 산술**(`MAX(v) - MIN(v)`, `SUM(v) / COUNT(*)`)은 피연산자 집계가 select 목록에 따로 들어 있을 때만 맞고, 아니면 `GROUP BY`가 있어도 0을 돌려주며 `GROUP BY`가 없으면 집계로 취급되지 않아 **입력 행마다 한 행씩 0**이 나옴(`SELECT MAX(v) - MIN(v) FROM a` → 5행). HAVING은 같은 식을 `extract_agg_refs_from_cond`로 먼저 계산해 두어 맞지만 select 목록에는 그 단계가 없음.
+>
+> **수정됨 (2026-10-05, 네 번째 항목)**: 조사해 보니 `MAX(v) - MIN(v)`만이 아니라 select 목록에서 **식·함수·CASE 안에 든 집계 전부**가 같은 문제였다(`ROUND(AVG(v), 2)`, `COALESCE(SUM(v), 0)`, `SUM(v) * 2`, `CASE WHEN COUNT(*) > 2 …`, `UPPER(MAX(g))`). 이제 그런 select 목록은 집계 질의로 취급되고(`columns_have_aggregate`), 안에 든 집계(`select_agg_refs`)를 HAVING이 쓰던 `compute_agg_from_key`로 계산해 그룹 행(또는 집계 한 행)에 넣은 뒤 식을 평가한다. `GROUP BY` 없는 질의는 정확히 한 행. HAVING도 같이 좋아짐: 함수로 감싼 집계(`HAVING ROUND(AVG(v), 0) >= 30`)와 비교 오른쪽의 집계(`HAVING SUM(v) > MAX(v)`)를 이제 계산하고, `MIN`/`MAX`가 텍스트 값을 select 목록과 같은 규칙으로 비교(값이 전부 숫자면 숫자, 아니면 텍스트; 예전엔 숫자가 아닌 값을 건너뛰어 ±무한대가 됨), `COUNT(DISTINCT …)`도 지원. 파티션 테이블은 일반 집계처럼 식 속 집계도 오류로 거절(전에는 자식 테이블별로 조용히 잘못 합쳐질 수 있었음). 상세는 `DATE.md` 10월 5일 네 번째 항목.
+>
+> **이 점검에서 새로 찾았지만 고치지 않은 것 (사용자 결정 대기)**: ① **산술에서 NULL이 NULL로 계산되지 않음** — `SELECT v + 1`이 NULL인 행에서 `NULL1`(글자 이어 붙이기), `v * 2`가 0(NULL이어야 함). `MIN`/`MAX`가 NULL인 식(`SUM(v) + MAX(v)`)도 같은 영향. ② 함수 열의 결과 열 이름이 인자를 빼고 `ROUND()`/`COALESCE()`로 나옴(MySQL은 `ROUND(AVG(v), 2)`). ③ select 목록에 같은 `AVG(x)`가 따로 있고 식에도 쓰이면 식은 4자리로 반올림된 값을 읽음(다른 집계는 해당 없음).
 
 ### LATERAL JOIN + 신규 집계 함수 확장 구현 완료 (BIT_AND/BIT_OR, FILTER, JSON_AGG, LATERAL JOIN — 2026-08-12)
 

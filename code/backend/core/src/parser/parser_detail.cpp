@@ -1,20 +1,41 @@
 #include "parser_detail.hpp"
 
 #include <cctype>
+#include <cstring>
 
 namespace engine::detail {
 
 std::string expand_alias_str(const std::string& s, const std::unordered_map<std::string, std::string>& map) {
-    // an aggregate in a condition is kept as one name, `SUM(o.amount)`: expand its argument
-    if (s.size() > 4 && s.back() == ')') {
-        auto lp = s.find('(');
-        if (lp != std::string::npos && lp > 0 && s.find('(', lp + 1) == std::string::npos) {
-            std::string fn = s.substr(0, lp);
-            for (auto& c : fn) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
-            if (fn == "COUNT" || fn == "SUM" || fn == "AVG" || fn == "MIN" || fn == "MAX") {
-                return s.substr(0, lp + 1) + expand_alias_str(s.substr(lp + 1, s.size() - lp - 2), map) + ")";
+    // an aggregate call inside a name or a function's argument text -- a condition keeps `SUM(o.amount)` as one name, and an
+    // argument such as `SUM(o.v)/COUNT(*)` is text: the alias in each call's argument becomes its table
+    if (s.find('(') != std::string::npos) {
+        static const char* names[] = {"COUNT", "SUM", "AVG", "MIN", "MAX"};
+        std::string out;
+        bool changed = false, in_string = false; // a quoted string that reads `SUM(o.x)` is text
+        for (std::size_t i = 0; i < s.size(); i++) {
+            bool expanded = false;
+            if (s[i] == '\'') in_string = !in_string;
+            if (!in_string && (i == 0 || !(std::isalnum(static_cast<unsigned char>(s[i - 1])) || s[i - 1] == '_' || s[i - 1] == '.'))) {
+                for (const char* name : names) {
+                    const std::size_t n = std::strlen(name);
+                    if (i + n >= s.size() || s[i + n] != '(') continue;
+                    bool same = true;
+                    for (std::size_t k = 0; k < n; k++) same = same && std::toupper(static_cast<unsigned char>(s[i + k])) == name[k];
+                    if (!same) continue;
+                    const std::size_t close = s.find(')', i + n + 1);
+                    if (close == std::string::npos || s.find('(', i + n + 1) < close) break;
+                    const std::string inner = s.substr(i + n + 1, close - (i + n + 1));
+                    const std::string inner_expanded = expand_alias_str(inner, map);
+                    out += s.substr(i, n + 1) + inner_expanded + ")";
+                    changed = changed || inner_expanded != inner;
+                    i = close;
+                    expanded = true;
+                    break;
+                }
             }
+            if (!expanded) out += s[i];
         }
+        if (changed) return out;
     }
     auto dot = s.find('.');
     if (dot != std::string::npos) {

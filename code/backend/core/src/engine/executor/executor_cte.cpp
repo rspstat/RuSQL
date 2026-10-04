@@ -105,8 +105,7 @@ StringResult Executor::exec_with(SharedDatabase& s, std::vector<std::pair<std::s
                                 !condition_has_subquery(right_sel->condition) && !condition_has_subquery(right_sel->having);
                 if (semi_naive_ok) {
                     for (auto& col : right_sel->columns) {
-                        if (std::holds_alternative<SelectColumn::Agg>(col.data) || std::holds_alternative<SelectColumn::AggAlias>(col.data) ||
-                            std::holds_alternative<SelectColumn::Subquery>(col.data)) {
+                        if (column_has_aggregate(col) || std::holds_alternative<SelectColumn::Subquery>(col.data)) {
                             semi_naive_ok = false;
                             break;
                         }

@@ -344,9 +344,7 @@ StringResult Executor::route_partitioned_select(const PartitionBy& info, Stateme
     if (!sel->joins.empty()) return StringResult::Err("JOIN is not yet supported on partitioned tables in this version");
     if (sel->group_by) return StringResult::Err("GROUP BY is not yet supported on partitioned tables in this version");
     if (sel->distinct) return StringResult::Err("SELECT DISTINCT is not yet supported on partitioned tables in this version");
-    bool has_agg = std::any_of(sel->columns.begin(), sel->columns.end(), [](const SelectColumn& c) {
-        return std::holds_alternative<SelectColumn::Agg>(c.data) || std::holds_alternative<SelectColumn::AggAlias>(c.data);
-    });
+    bool has_agg = columns_have_aggregate(sel->columns);
     if (has_agg) return StringResult::Err("Aggregate functions are not yet supported on partitioned tables in this version");
 
     auto children = prune_partition_children(info, sel->condition);

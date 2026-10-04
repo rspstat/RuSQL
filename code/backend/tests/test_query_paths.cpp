@@ -1348,3 +1348,298 @@ TEST_CASE("a view with qualified aggregates reads back the same after a restart"
     REQUIRE(again.execute_sql("USE d").is_ok());
     REQUIRE(ok_text(again, "SELECT * FROM per_g ORDER BY g") == first);
 }
+
+// ---------------------------------------------------------------------------------------------------------------------
+// An aggregate written INSIDE a select-list expression, function or CASE: `MAX(v) - MIN(v)`, `SUM(v) / COUNT(*)`,
+// `ROUND(AVG(v), 2)`, `COALESCE(SUM(v), 0)`, `CASE WHEN COUNT(*) > 1 ...`. Only an aggregate that was also selected on its own
+// had a value (HAVING computes the same expressions properly); otherwise the aggregate read as 0 or NULL, a statement with no
+// plain aggregate was not an aggregate query at all (`SELECT MAX(v) - MIN(v) FROM a` returned one 0 row PER ROW of the table), and
+// a column next to a plain aggregate was dropped from the result.
+
+TEST_CASE("aggregates inside expressions, functions and CASE in the select list", "[query_paths][aggregate][expression]") {
+    TempDataDir dir("qp_aggregate_expressions");
+    Executor ex(dir.path);
+    open_db(ex);
+    REQUIRE(ex.execute_sql("CREATE TABLE a (aid INT PRIMARY KEY, g INT, v INT)").is_ok());
+    REQUIRE(ex.execute_sql("INSERT INTO a VALUES (1,2,50),(2,1,40),(3,2,30),(4,1,20),(5,3,10),(6,2,NULL)").is_ok());
+    using Rows = std::vector<std::vector<std::string>>;
+
+    // one row, whatever the size of the table, and without the row count line a plain aggregate result does not carry
+    struct Case {
+        std::string sql;
+        Rows want;
+    };
+    for (auto& c : std::vector<Case>{
+             {"SELECT MAX(v) - MIN(v) AS spread FROM a", {{"40"}}},
+             {"SELECT SUM(v) / COUNT(*) AS m FROM a", {{"25"}}},
+             {"SELECT SUM(v) / COUNT(v) AS m FROM a", {{"30"}}},
+             {"SELECT ROUND(AVG(v), 2) FROM a", {{"30"}}},
+             {"SELECT COALESCE(SUM(v), 0) FROM a", {{"150"}}},
+             {"SELECT SUM(v) + 1 FROM a", {{"151"}}},
+             {"SELECT 1 + SUM(v) AS t FROM a", {{"151"}}},
+             {"SELECT 100 * SUM(v) / COUNT(*) FROM a", {{"2500"}}},
+             {"SELECT (MAX(v) - MIN(v)) / 2 AS h FROM a", {{"20"}}},
+             {"SELECT CASE WHEN COUNT(*) > 5 THEN 'many' ELSE 'few' END AS size FROM a", {{"many"}}},
+             {"SELECT CASE WHEN COUNT(*) > 6 THEN 'many' ELSE 'few' END AS size FROM a", {{"few"}}},
+             {"SELECT UPPER(MAX(g)) FROM a", {{"3"}}},
+             {"SELECT COUNT(DISTINCT g) * 2 AS d FROM a", {{"6"}}},
+             {"SELECT COUNT(*) + COUNT(v) AS c FROM a", {{"11"}}},
+             {"SELECT ABS(MIN(v) - MAX(v)) AS r FROM a", {{"40"}}},
+             {"SELECT SUM(v), SUM(v) + 1 AS t, COUNT(*) FROM a", {{"150", "151", "6"}}},
+             {"SELECT AVG(v), AVG(v) * 3 AS t FROM a", {{"30.0000", "90"}}},
+         }) {
+        INFO(c.sql);
+        auto text = ok_text(ex, c.sql);
+        REQUIRE(table_cells(text) == c.want);
+        REQUIRE(text.find("row(s) returned") == std::string::npos);
+    }
+
+    // per group
+    for (auto& c : std::vector<Case>{
+             {"SELECT g, MAX(v) - MIN(v) AS spread, SUM(v) * 2 AS dbl, COUNT(*) FROM a GROUP BY g ORDER BY g",
+              {{"1", "20", "120", "2"}, {"2", "20", "160", "3"}, {"3", "0", "20", "1"}}},
+             {"SELECT g, ROUND(SUM(v) / COUNT(*), 1) AS m FROM a GROUP BY g ORDER BY g", {{"1", "30"}, {"2", "26.7"}, {"3", "10"}}},
+             {"SELECT g, SUM(v) / COUNT(v) AS m FROM a GROUP BY g ORDER BY g", {{"1", "30"}, {"2", "40"}, {"3", "10"}}},
+             {"SELECT g, CASE WHEN COUNT(*) > 2 THEN 'big' ELSE 'small' END AS size FROM a GROUP BY g ORDER BY g",
+              {{"1", "small"}, {"2", "big"}, {"3", "small"}}},
+             {"SELECT g FROM a GROUP BY g HAVING ROUND(AVG(v), 0) >= 30 ORDER BY g", {{"1"}, {"2"}}},
+             {"SELECT g FROM a GROUP BY g HAVING MAX(v) - MIN(v) > 5 ORDER BY g", {{"1"}, {"2"}}},
+             {"SELECT g FROM a GROUP BY g HAVING SUM(v) > MAX(v) ORDER BY g", {{"1"}, {"2"}}}, // an aggregate on the right of the comparison
+         }) {
+        INFO(c.sql);
+        REQUIRE(table_cells(ok_text(ex, c.sql)) == c.want);
+    }
+
+    // text that merely reads like an aggregate is text: the statement is not an aggregate query
+    REQUIRE(table_cells(ok_text(ex, "SELECT UPPER('max(v)') AS u FROM a ORDER BY aid")) == Rows(6, {"MAX(V)"}));
+
+    // the answer is not rounded on the way: a select-list AVG shows 4 places, a calculation goes on from the real value
+    REQUIRE(ex.execute_sql("CREATE TABLE f (id INT PRIMARY KEY, v INT)").is_ok());
+    REQUIRE(ex.execute_sql("INSERT INTO f VALUES (1,1),(2,2),(3,2)").is_ok());
+    REQUIRE(table_cells(ok_text(ex, "SELECT AVG(v) * 3 AS t FROM f")) == Rows{{"5"}});
+    REQUIRE(table_cells(ok_text(ex, "SELECT SUM(v) / 3 AS t FROM f")) == Rows{{"1.666667"}});
+    REQUIRE(table_cells(ok_text(ex, "SELECT id FROM f GROUP BY id HAVING AVG(v) * 3 = 3 OR AVG(v) * 3 = 6 ORDER BY id")) == Rows{{"1"}, {"2"}, {"3"}});
+
+    // nothing to aggregate: still one row
+    REQUIRE(ex.execute_sql("CREATE TABLE e (id INT PRIMARY KEY, v INT)").is_ok());
+    REQUIRE(table_cells(ok_text(ex, "SELECT SUM(v) + 1 AS t FROM e")) == Rows{{"1"}});
+    REQUIRE(table_cells(ok_text(ex, "SELECT COUNT(*) * 5 AS c FROM e")) == Rows{{"0"}});
+
+    // text values: MIN/MAX compare as text, and NULLs are skipped
+    REQUIRE(ex.execute_sql("CREATE TABLE b (bid INT PRIMARY KEY, nm VARCHAR(5))").is_ok());
+    REQUIRE(ex.execute_sql("INSERT INTO b VALUES (1,'x'),(2,'y'),(3,'z'),(4,NULL)").is_ok());
+    REQUIRE(table_cells(ok_text(ex, "SELECT UPPER(MAX(nm)) AS hi, LOWER(MIN(nm)) AS lo FROM b")) == Rows{{"Z", "x"}});
+    REQUIRE(table_cells(ok_text(ex, "SELECT COUNT(nm) + COUNT(*) AS c FROM b")) == Rows{{"7"}});
+
+    // joined tables with the same column name, columns written with their table or through an alias: the aggregates inside an
+    // expression, a function argument or a CASE resolve to the right table's column
+    REQUIRE(ex.execute_sql("CREATE TABLE c (id INT PRIMARY KEY, name VARCHAR(5))").is_ok());
+    REQUIRE(ex.execute_sql("CREATE TABLE o (id INT PRIMARY KEY, cid INT, amt INT)").is_ok());
+    REQUIRE(ex.execute_sql("INSERT INTO c VALUES (1,'a'),(2,'b'),(3,'c'),(4,'d')").is_ok());
+    REQUIRE(ex.execute_sql("INSERT INTO o VALUES (10,1,5),(11,1,7),(12,2,9)").is_ok());
+    REQUIRE(table_cells(ok_text(ex, "SELECT x.name, SUM(y.amt) / COUNT(y.id) AS m FROM c x JOIN o y ON y.cid = x.id GROUP BY x.name ORDER BY x.name")) ==
+            Rows{{"a", "6"}, {"b", "9"}});
+    REQUIRE(table_cells(ok_text(ex, "SELECT x.name, SUM(y.id) * 2 AS d FROM c x JOIN o y ON y.cid = x.id GROUP BY x.name ORDER BY x.name")) ==
+            Rows{{"a", "42"}, {"b", "24"}});
+    REQUIRE(table_cells(ok_text(ex, "SELECT x.name, ROUND(SUM(y.id) / COUNT(*), 1) AS m FROM c x JOIN o y ON y.cid = x.id GROUP BY x.name ORDER BY x.name")) ==
+            Rows{{"a", "10.5"}, {"b", "12"}});
+    REQUIRE(table_cells(ok_text(ex, "SELECT x.name, CASE WHEN SUM(y.id) > 20 THEN 'high' ELSE 'low' END AS lvl FROM c x JOIN o y ON y.cid = x.id GROUP BY x.name ORDER BY x.name")) ==
+            Rows{{"a", "high"}, {"b", "low"}});
+    REQUIRE(table_cells(ok_text(ex, "SELECT x.name, COUNT(y.id) * 10 AS n10, SUM(y.amt) + 0 AS s FROM c x LEFT JOIN o y ON y.cid = x.id GROUP BY x.name ORDER BY x.name")) ==
+            Rows{{"a", "20", "12"}, {"b", "10", "9"}, {"c", "0", "0"}, {"d", "0", "0"}});
+    REQUIRE(table_cells(ok_text(ex, "SELECT MAX(o.amt) - MIN(o.amt) AS spread, COUNT(c.id) + COUNT(o.id) AS n FROM c LEFT JOIN o ON o.cid = c.id")) == Rows{{"4", "8"}}); // 5 rows + 3 orders
+
+    // a partitioned table refuses aggregates, and an aggregate inside an expression is one (it would be merged child by child,
+    // silently wrong)
+    REQUIRE(ex.execute_sql("CREATE TABLE p (id INT PRIMARY KEY, val INT) PARTITION BY HASH (id) PARTITIONS 4").is_ok());
+    REQUIRE(ex.execute_sql("INSERT INTO p VALUES (1,5),(2,6),(3,7)").is_ok());
+    auto plain = ex.execute_sql("SELECT SUM(val) FROM p");
+    auto inside = ex.execute_sql("SELECT SUM(val) + 1 FROM p");
+    REQUIRE(plain.is_err());
+    REQUIRE(inside.is_err());
+    REQUIRE(inside.error() == plain.error());
+    REQUIRE(ex.execute_sql("SELECT val + 1 FROM p").is_ok());
+}
+
+// the same, against a reference computed here from the data: two aggregates (COUNT, SUM, AVG, MIN, MAX over any column the tables
+// have in common or not) combined with + - * /, a constant, ABS, COALESCE or CASE, scalar or per group, over INNER and LEFT joins
+// of tables that share column names, with and without aliases
+TEST_CASE("expressions over aggregates match a reference when both tables have the same column names",
+          "[query_paths][qualified][aggregate][expression]") {
+    unsigned seed_count = 2; // RUSQL_FUZZ_SEEDS=30 runs a much longer campaign
+    if (const char* e = std::getenv("RUSQL_FUZZ_SEEDS")) seed_count = static_cast<unsigned>(std::strtoul(e, nullptr, 10));
+    unsigned seed_start = 0;
+    if (const char* e = std::getenv("RUSQL_FUZZ_START")) seed_start = static_cast<unsigned>(std::strtoul(e, nullptr, 10));
+    struct Config {
+        int t_rows, u_rows;
+        bool index;
+    };
+    std::size_t checked = 0, grouped = 0, with_left = 0;
+    for (const Config& cfg : {Config{90, 5, false}, Config{90, 5, true}, Config{400, 40, true}, Config{12, 1, false}}) {
+        for (unsigned k = seed_start; k < seed_start + seed_count; k++) {
+            INFO("rows " << cfg.t_rows << "/" << cfg.u_rows << " index " << cfg.index << " seed " << k);
+            std::mt19937 rng(9191 + k * 19 + static_cast<unsigned>(cfg.t_rows) + (cfg.index ? 1u : 0u));
+            TempDataDir dir("qp_aggregate_expressions_random");
+            Executor ex(dir.path);
+            open_db(ex);
+            REQUIRE(ex.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, grp INT, val INT, tag VARCHAR(8))").is_ok());
+            REQUIRE(ex.execute_sql("CREATE TABLE u (id INT PRIMARY KEY, name VARCHAR(8), grp INT)").is_ok());
+            static const char* tags[] = {"a", "b", "c", "d"};
+            static const char* names[] = {"nx", "ny", "nz", "nw", "nv"};
+            std::vector<QT> T;
+            std::vector<QU> U;
+            for (int i = 1; i <= cfg.u_rows; i++) U.push_back({i, names[rng() % 5], static_cast<int>(rng() % 4)});
+            for (int i = 1; i <= cfg.t_rows; i++) {
+                T.push_back({i, static_cast<int>(rng() % static_cast<unsigned>(cfg.u_rows + 2)), static_cast<int>(rng() % 25), tags[rng() % 4]});
+            }
+            std::string tv, uv;
+            for (auto& t : T) tv += std::string(tv.empty() ? "(" : ", (") + std::to_string(t.id) + ", " + std::to_string(t.grp) + ", " + std::to_string(t.val) + ", '" + t.tag + "')";
+            for (auto& u : U) uv += std::string(uv.empty() ? "(" : ", (") + std::to_string(u.id) + ", '" + u.name + "', " + std::to_string(u.grp) + ")";
+            REQUIRE(ex.execute_sql("INSERT INTO t VALUES " + tv).is_ok());
+            REQUIRE(ex.execute_sql("INSERT INTO u VALUES " + uv).is_ok());
+            if (cfg.index) REQUIRE(ex.execute_sql("CREATE INDEX t_grp ON t (grp)").is_ok());
+
+            struct JR {
+                const QT* t;
+                const QU* u;
+            };
+            struct Spec {
+                std::string fn; // COUNT* COUNT SUM AVG MIN MAX
+                std::string col;
+            };
+            for (int iter = 0; iter < 80; iter++) {
+                const bool left = rng() % 3 == 0, alias = rng() % 2 == 0;
+                const std::string tq = alias ? "x" : "t", uq = alias ? "y" : "u";
+                auto spell = [&](const std::string& col) { return (col[0] == 't' ? tq : uq) + col.substr(1); };
+                const std::string from = std::string("FROM t") + (alias ? " x" : "") + (left ? " LEFT JOIN u" : " JOIN u") + (alias ? " y" : "") + " ON " + uq + ".id = " + tq + ".grp";
+                std::vector<JR> joined;
+                for (auto& t : T) {
+                    const QU* match = nullptr;
+                    for (auto& u : U) {
+                        if (u.id == t.grp) match = &u;
+                    }
+                    if (match || left) joined.push_back({&t, match});
+                }
+                if (joined.empty()) continue;
+                const std::vector<std::string> numeric = {"t.id", "t.grp", "t.val", "u.id", "u.grp"};
+                auto pick_numeric = [&]() {
+                    std::vector<std::string> allowed;
+                    for (auto& c : numeric) {
+                        if (!left || c[0] == 't') allowed.push_back(c); // the u columns of an unmatched LEFT JOIN row are NULL
+                    }
+                    return allowed[rng() % allowed.size()];
+                };
+                auto make_spec = [&]() -> Spec {
+                    switch (rng() % 5) {
+                        case 0: return {"COUNT*", "*"};
+                        case 1: return {"COUNT", numeric[rng() % numeric.size()]};
+                        case 2: return {"SUM", pick_numeric()};
+                        case 3: return {"AVG", pick_numeric()};
+                        default: return {rng() % 2 ? "MIN" : "MAX", pick_numeric()};
+                    }
+                };
+                auto text_of = [&](const Spec& sp) {
+                    if (sp.fn == "COUNT*") return std::string("COUNT(*)");
+                    return sp.fn + "(" + spell(sp.col) + ")";
+                };
+                auto eval = [&](const Spec& sp, const std::vector<const JR*>& rows) -> double {
+                    if (sp.fn == "COUNT*") return static_cast<double>(rows.size());
+                    std::vector<double> vals;
+                    for (const JR* r : rows) {
+                        std::string v = q_value(*r->t, r->u, sp.col);
+                        if (v != "NULL") vals.push_back(std::stod(v));
+                    }
+                    if (sp.fn == "COUNT") return static_cast<double>(vals.size());
+                    double sum = 0;
+                    for (double v : vals) sum += v;
+                    if (sp.fn == "SUM") return sum;
+                    if (sp.fn == "AVG") return vals.empty() ? 0.0 : sum / static_cast<double>(vals.size());
+                    return sp.fn == "MIN" ? *std::min_element(vals.begin(), vals.end()) : *std::max_element(vals.begin(), vals.end());
+                };
+
+                Spec A = make_spec(), B = make_spec();
+                const std::string a = text_of(A), b = text_of(B);
+                struct Shape {
+                    std::string text;
+                    std::function<double(double, double, double)> value; // (A, B, COUNT(*)) -> number
+                    bool is_case = false;
+                };
+                std::vector<Shape> shapes = {
+                    {a + " + " + b, [](double x, double y, double) { return x + y; }},
+                    {a + " - " + b, [](double x, double y, double) { return x - y; }},
+                    {a + " * " + b, [](double x, double y, double) { return x * y; }},
+                    {a + " / COUNT(*)", [](double x, double, double n) { return x / n; }},
+                    {a + " + 7", [](double x, double, double) { return x + 7; }},
+                    {"3 * " + a, [](double x, double, double) { return 3 * x; }},
+                    {"ABS(" + a + " - " + b + ")", [](double x, double y, double) { return std::abs(x - y); }},
+                    {"COALESCE(" + a + ", 0)", [](double x, double, double) { return x; }},
+                    {"CASE WHEN " + a + " > " + b + " THEN 'gt' ELSE 'le' END", [](double x, double y, double) { return x > y ? 1.0 : 0.0; }, true},
+                };
+                const Shape& shape = shapes[rng() % shapes.size()];
+                const bool selects_a = A.fn != "AVG" && A.fn != "COUNT*" && rng() % 3 == 0; // the plain aggregate next to its expression
+                auto cell_ok = [&](const std::string& got, double want, bool is_case) {
+                    if (is_case) return got == (want > 0.5 ? "gt" : "le");
+                    try {
+                        return std::abs(std::stod(got) - want) <= 1e-5 * (1 + std::abs(want));
+                    } catch (...) {
+                        return false;
+                    }
+                };
+                const std::string expr = shape.text + " AS e";
+                std::vector<const JR*> all;
+                for (auto& r : joined) all.push_back(&r);
+
+                if (iter % 2 == 0) {
+                    std::string sql = "SELECT " + std::string(selects_a ? a + ", " : "") + expr + " " + from;
+                    const std::string text = ok_text(ex, sql);
+                    auto got = table_cells(text);
+                    INFO(sql);
+                    REQUIRE(got.size() == 1);
+                    REQUIRE(text.find("row(s) returned") == std::string::npos);
+                    const double x = eval(A, all), y = eval(B, all), n = static_cast<double>(all.size());
+                    REQUIRE(got[0].size() == (selects_a ? 2u : 1u));
+                    if (selects_a) REQUIRE(cell_ok(got[0][0], x, false));
+                    REQUIRE(cell_ok(got[0].back(), shape.value(x, y, n), shape.is_case));
+                } else {
+                    std::vector<std::string> key_pool = {"t.grp", "t.tag"};
+                    if (!left) {
+                        key_pool.push_back("u.name");
+                        key_pool.push_back("u.id");
+                    }
+                    const std::string key = key_pool[rng() % key_pool.size()];
+                    std::vector<std::pair<std::string, std::vector<const JR*>>> groups;
+                    {
+                        std::map<std::string, std::size_t> at;
+                        for (auto& r : joined) {
+                            std::string kv = q_value(*r.t, r.u, key);
+                            auto it = at.find(kv);
+                            if (it == at.end()) {
+                                it = at.emplace(kv, groups.size()).first;
+                                groups.push_back({kv, {}});
+                            }
+                            groups[it->second].second.push_back(&r);
+                        }
+                    }
+                    std::stable_sort(groups.begin(), groups.end(), [](auto& p, auto& q) { return ref_cmp(p.first, q.first) < 0; });
+                    std::string sql = "SELECT " + spell(key) + ", " + std::string(selects_a ? a + ", " : "") + expr + " " + from + " GROUP BY " + spell(key) + " ORDER BY " + spell(key);
+                    auto got = table_cells(ok_text(ex, sql));
+                    INFO(sql);
+                    REQUIRE(got.size() == groups.size());
+                    for (std::size_t r = 0; r < got.size(); r++) {
+                        INFO("group " << groups[r].first);
+                        const double x = eval(A, groups[r].second), y = eval(B, groups[r].second), n = static_cast<double>(groups[r].second.size());
+                        REQUIRE(got[r][0] == groups[r].first);
+                        if (selects_a) REQUIRE(cell_ok(got[r][1], x, false));
+                        REQUIRE(cell_ok(got[r].back(), shape.value(x, y, n), shape.is_case));
+                    }
+                    grouped++;
+                }
+                if (left) with_left++;
+                checked++;
+            }
+        }
+    }
+    REQUIRE(checked >= 400);
+    REQUIRE(grouped >= 150);
+    REQUIRE(with_left >= 40);
+}

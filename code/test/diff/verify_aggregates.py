@@ -81,7 +81,7 @@ def main():
     args = ap.parse_args()
     proc, db = D.start(args.exe, 17964, os.path.join(os.environ.get("TEMP", "/tmp"), "verify_aggregates"), False)
     rng = random.Random(args.seed)
-    checked = groups_checked = 0
+    checked = groups_checked = having_checked = 0
     try:
         for sql in D.load(rng, args.rows):
             db.execute(sql)
@@ -113,13 +113,27 @@ def main():
                     return "COUNT(*)"
                 name = f"{tables[col[0]]}.{col[1]}"
                 return {"COUNT": f"COUNT({name})", "COUNTD": f"COUNT(DISTINCT {name})"}.get(fn, f"{fn}({name})")
+            # HAVING <an aggregate that the select list does not repeat> > k (a repeated one reads the select list's rounded value)
+            having, threshold = None, rng.randint(0, 30)
+            if key and rng.random() < 0.4:
+                hfn = rng.choice(["COUNT*", "COUNT", "SUM", "AVG", "MIN", "MAX"])
+                if hfn == "COUNT*":
+                    having = (hfn, None)
+                else:
+                    pool = ANY if hfn == "COUNT" else NUMERIC
+                    tb = rng.choice(["t", other])
+                    having = (hfn, (tb, rng.choice(pool[tb])))
+                if text(having) in [text(sp) for sp in specs]:
+                    having = None
             items = ([f"{tables[key[0]]}.{key[1]}"] if key else []) + [text(sp) for sp in specs]
-            sql = f"SELECT {', '.join(items)} {frm}" + (f" GROUP BY {tables[key[0]]}.{key[1]}" if key else "")
+            sql = (f"SELECT {', '.join(items)} {frm}" + (f" GROUP BY {tables[key[0]]}.{key[1]}" if key else "") +
+                   (f" HAVING {text(having)} > {threshold}" if having else ""))
             header, got = cells(db.execute(sql))
             if got is None:
                 continue
             args_cols = [f"{tables[sp[1][0]]}.{sp[1][1]}" for sp in specs if sp[1]]
-            raw_sel = ([f"{tables[key[0]]}.{key[1]}"] if key else []) + (args_cols or [f"{tq}.id"])
+            having_cols = [f"{tables[having[1][0]]}.{having[1][1]}"] if having and having[1] else []
+            raw_sel = ([f"{tables[key[0]]}.{key[1]}"] if key else []) + (args_cols + having_cols or [f"{tq}.id"])
             hdr2, raw = cells(db.execute(f"SELECT {', '.join(raw_sel)} {frm}"))
             if raw is None:
                 continue
@@ -135,6 +149,25 @@ def main():
                 grouped.setdefault(row[0] if key else "", []).append(row)
             if not key and not raw:
                 grouped[""] = []
+            if having:
+                # the groups HAVING keeps: the aggregate over the group's rows (the engine's rules) compared with the threshold the
+                # way the engine compares (numbers as numbers, else as text)
+                hpos = ks + len(args_cols)
+                kept, unpredictable = {}, False
+                for group_key, group_rows in grouped.items():
+                    values = group_rows if having[0] == "COUNT*" else [r[hpos] for r in group_rows]
+                    hv = aggregate(having[0], values, True)
+                    if hv == "NULL":
+                        unpredictable = True
+                        break
+                    # a text that reads as a number is compared as one (the engine's rule), any other text as text
+                    hn = hv if not isinstance(hv, str) else num(hv)
+                    if (float(hn) > threshold) if hn is not None else (hv > str(threshold)):
+                        kept[group_key] = group_rows
+                if unpredictable:
+                    continue
+                grouped = kept
+                having_checked += 1
             if len(got) != len(grouped):
                 print("GROUP COUNT:", sql, len(got), "groups, expected", len(grouped))
                 return 1
@@ -168,7 +201,7 @@ def main():
     finally:
         proc.kill()
         proc.wait()
-    print(f"queries={args.queries} checked={checked} groups={groups_checked} -- no violation")
+    print(f"queries={args.queries} checked={checked} groups={groups_checked} with HAVING={having_checked} -- no violation")
     return 0
 
 

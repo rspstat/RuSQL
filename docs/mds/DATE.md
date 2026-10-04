@@ -852,9 +852,36 @@ VS Code 스타일 탭 드래그 순서 변경(요청의 1번 항목)은 같은 �
 
 **눈에 띄는 변화(의도한 것)**: 한정자가 든 집계의 **결과 열 이름이 쓴 그대로** 나온다(`SUM(o.amount)`, 전에는 `SUM(amount)`). 한정하지 않은 집계(`SUM(amount)`)와 `AS` 별칭은 그대로. 기존 테스트 중 이 이름에 기대는 것은 없었다.
 
-**이 점검에서 새로 찾았지만 고치지 않은 것(사용자 결정 대기)**: **select 목록의 집계 간 산술**(`MAX(v) - MIN(v)`, `SUM(v) / COUNT(*)`)은 피연산자 집계가 select 목록에 따로 들어 있을 때만 맞는다. 아니면 `GROUP BY`가 있어도 0이고, `GROUP BY`가 없으면 집계로 취급되지 않아 **입력 행마다 0 한 행**이 나온다(`SELECT MAX(v) - MIN(v) FROM a` → 5행). HAVING의 같은 식은 맞다(`extract_agg_refs_from_cond`가 미리 계산).
+**이 점검에서 새로 찾았지만 고치지 않은 것(→ 사용자 승인으로 같은 날 네 번째 항목에서 수정)**: **select 목록의 집계 간 산술**(`MAX(v) - MIN(v)`, `SUM(v) / COUNT(*)`)은 피연산자 집계가 select 목록에 따로 들어 있을 때만 맞는다. 아니면 `GROUP BY`가 있어도 0이고, `GROUP BY`가 없으면 집계로 취급되지 않아 **입력 행마다 0 한 행**이 나온다(`SELECT MAX(v) - MIN(v) FROM a` → 5행). HAVING의 같은 식은 맞다(`extract_agg_refs_from_cond`가 미리 계산).
 
 **Diagram 페이지**: 구성요소·흐름이 바뀐 것이 없어 변경 없음. **정직한 한계**: FILTER 안에 `SUM(o.amount > 5)` 꼴로 쓰는 조건부 집계(`CASE` 변환)의 안쪽 열은 별칭이 풀리지 않는다(별칭을 쓰지 않거나 기본 테이블 열이면 정상, 오른쪽 조인 테이블 열을 별칭으로 쓰는 드문 경우만 영향).
+
+### 10월 5일 (네 번째) — select 목록의 식·함수·CASE 안에 든 집계(`MAX(v) - MIN(v)`, `ROUND(AVG(v), 2)`, `COALESCE(SUM(v), 0)`) 수정
+
+**왜 이 항목인가**: 바로 위 항목에서 찾았지만 고치지 않은 "select 목록의 집계 간 산술"을 사용자가 수정하기로 했다. 조사해 보니 `MAX(v) - MIN(v)`만의 문제가 아니라 **식·함수·CASE 안에 든 집계 전부**가 같은 원인이었다.
+
+**원인과 영향**: 실행기는 select 목록의 `Agg` 열(`SUM(v)`처럼 집계가 열 자체인 것)만 집계로 인식했다. 식(`MAX(v) - MIN(v)`, `SUM(v) * 2`)·함수(`ROUND(AVG(v), 2)`, `COALESCE(SUM(v), 0)`, `UPPER(MAX(g))`)·`CASE WHEN COUNT(*) > 2 …` 안의 집계는 ① 같은 집계가 select 목록에 **따로** 있어야만 값이 있었고(없으면 0 또는 NULL을 이어 붙인 글자, 예: `NULLNULL`), ② 그런 열만 있는 질의는 **집계 질의로 취급되지도 않아** `GROUP BY` 없이 `SELECT MAX(v) - MIN(v) FROM a`가 테이블의 **행마다 0 한 행**을 돌려줬다(`SELECT SUM(v), SUM(v) + 1`은 두 번째 열이 사라짐). HAVING의 같은 식은 `extract_agg_refs_from_cond`가 미리 계산해서 맞았다. 같은 함수(`compute_agg_from_key`, HAVING의 집계 계산기)에 따로 있던 결함도 이번에 같이 드러났다: 함수로 감싼 집계(`HAVING ROUND(AVG(v), 0) >= 30`)·비교 오른쪽의 집계(`HAVING SUM(v) > MAX(v)`)를 계산하지 않았고, `MIN`/`MAX`가 숫자가 아닌 값을 건너뛰어(전부 텍스트인 열이면 ±무한대) select 목록의 같은 집계와 값이 달랐다.
+
+**수정**:
+- `Executor::column_agg_refs`/`select_agg_refs`/`column_has_aggregate`/`columns_have_aggregate`(신규): select 열 하나(식·CASE 조건·함수 인자 텍스트)가 품은 집계 호출을 모은다. 함수의 인자는 파서가 **텍스트**로 들고 있어서 텍스트 스캐너(`collect_agg_refs_text`: `COUNT/SUM/AVG/MIN/MAX` + `(`…`)`, 단어 경계, **작은따옴표 안의 글자는 제외** — `UPPER('max(v)')`는 집계가 아님)를 따로 둠. CASE 조건은 비교의 오른쪽 값(리터럴·BETWEEN·IN 목록·산술)까지 훑는다.
+- **실행기**: 집계 질의 판정(`has_agg`)이 `columns_have_aggregate`를 쓴다. 그룹 행(`make_group_row`)과 `GROUP BY` 없는 집계 한 행에 select 열이 품은 집계를 `compute_agg_from_key`로 계산해 넣은 뒤 식·함수·CASE를 평가한다. `GROUP BY` 없는 질의는 **정확히 한 행**(출력은 일반 집계와 같은 형식, "N row(s) returned." 줄 없음). 식에 들어가는 값은 반올림하지 않은 정확한 값(`format_exact`: 정수는 정수, 아니면 왕복 가능한 최단 표기).
+- `compute_agg_from_key`를 다시 씀: `DISTINCT` 접두, `COUNT(*)`, `resolve_arg_key`, NULL 제외, `SUM`/`AVG` 정확값, `MIN`/`MAX`는 값이 **전부 숫자면 숫자, 아니면 텍스트**로 비교(select 목록과 같은 규칙), 빈 그룹의 `MIN`/`MAX`는 NULL.
+- **파서**: `expand_alias_str`이 문자열 전체에서 집계 호출을 찾아 각 호출의 인자 별칭을 테이블 이름으로 풀어 준다(`ROUND(SUM(o.v) / COUNT(*), 1)`; 따옴표 안은 건드리지 않음).
+- **파티션 테이블**은 식 속 집계도 일반 집계처럼 오류로 거절(전에는 자식 테이블별로 조용히 잘못 합쳐질 수 있었음). 재귀 CTE의 반-순진(semi-naive) 판정도 같은 `column_has_aggregate`를 씀.
+
+**검증**:
+- 신규 Catch2 3케이스(478 → 481): ① 결정적 케이스 — 스칼라·그룹·조인·LEFT JOIN·별칭·`HAVING SUM(v) > MAX(v)`·함수·CASE·따옴표 속 텍스트·반올림 안 된 값·파티션 거절, ② **같은 열 이름의 두 테이블에서 무작위 식 질의**를 테스트 안에서 데이터로 계산한 기준값과 비교, ③ 파서 — 식·함수 인자·CASE 속 별칭 풀기.
+- 심은 버그 14종을 **모두** 새 테스트가 잡음(집계 질의 판정, 그룹 행에 집계 넣기 누락, 스칼라 경로, 스칼라 결과의 꼬리 줄, 함수 인자 텍스트 수집, 산술 속 함수 수집, 비교 오른쪽 값 수집, 정확값 대신 반올림값, NULL 건너뛰기, `COUNT(DISTINCT)`, 텍스트 `MIN`/`MAX`, 파티션 거절, 파서의 별칭 풀기, 따옴표 처리). 도구가 되돌린 소스는 md5로 다시 확인했다.
+- 새 도구 `code/test/diff/verify_agg_expressions.py`: 이름이 겹치는 4개 테이블의 INNER/LEFT/RIGHT/FULL OUTER 조인(별칭·WHERE 포함)에서 식·함수·CASE 속 집계의 모든 그룹을 **같은 FROM을 집계 없이 읽은 행에서 다시 계산**하고 스칼라 질의는 정확히 한 행인지 확인. **이전 빌드는 위반**(`SELECT x.grp, AVG(x.price) + MAX(x.price) … GROUP BY x.grp` → `NULLNULL`, 정답 142.83), 새 빌드는 5시드 × 1,500질의(7,279문장, 53,528그룹) 위반 0. `verify_aggregates.py`에는 HAVING 검증(select 목록에 없는 집계의 `HAVING <집계> > k`)을 더해 5시드 6,814문장·50,768그룹(HAVING 1,500)에서 위반 0. `verify_orderby_distinct.py` 3시드 × 3,000질의도 위반 0.
+- 빌드 간 차분(이전 빌드 대비, `--ignore-header`가 아닌 전체 비교): 6시드 × 1,500질의(9,000질의)에서 차이 32건이고 **전부** `HAVING`에 `MIN`/`MAX`가 든 문장(말뭉치에는 UPDATE로 생긴 텍스트 값 `NULL1` 등이 있어 예전에는 건너뛰던 값이 이제 텍스트 비교에 들어감, 예: `HAVING MAX(val) > 10`이 `NULL1`이 든 그룹을 이제 포함 — `SELECT MAX(val)`이 같은 그룹에서 보여주는 값과 일치). 말뭉치에는 select 목록 안의 집계 식이 없어 다른 차이는 0.
+- Release/Debug **481 케이스/1,395,341 assertions**를 기본 설정과 `RUSQL_DML_INDEX_MIN_ROWS=0` 양쪽에서 통과. SELECT 차분 퍼저 150시드(1,819,528 assertions), DML 퍼저 80시드(1,946,487 assertions), `[aggregate]` 긴 캠페인 30시드, 크래시 퍼저 90라운드·동시 퍼저 30라운드(확인한 확정 행 15,075) 불일치 0.
+- 성능(50,000행, 이전/새 빌드를 번갈아 두 번씩): `COUNT(*)` 12.2·10.6 → 10.5·12.5ms, `SUM`/`AVG` 11.5·11.7 → 11.2·11.2, `GROUP BY` 15.8·15.7 → 16.6·15.8, 조인+`GROUP BY` 206·207 → 204·205ms — 오차 범위(집계 식이 없는 질의는 경로가 같다). 집계 식 질의 자체(100,000행 시연 데이터의 스칼라 집계 식)는 약 76ms로 단순 집계(약 35ms)의 두 배 남짓 — HAVING과 같은 계산 경로(`compute_agg_from_key`, 값 문자열을 모아서 계산)를 쓰기 때문(성능 작업은 동결 상태라 최적화하지 않음).
+
+**눈에 띄는 변화(의도한 것)**: 식·함수·CASE 속 집계가 값을 갖고, `GROUP BY` 없는 집계 식은 한 행만 돌려준다. `HAVING`의 `MIN`/`MAX`가 텍스트 값이 섞인 열에서 텍스트로 비교한다(select 목록과 같은 규칙).
+
+**이 점검에서 새로 찾았지만 고치지 않은 것(사용자 결정 대기)**: ① **산술에서 NULL이 NULL로 계산되지 않음** — `SELECT v + 1`이 NULL인 행에서 `NULL1`(글자 이어 붙이기), `v * 2`가 0(NULL이어야 함)이고, `MIN`/`MAX`가 NULL인 식(`SUM(v) + MAX(v)`)도 같은 영향을 받는다. 집계 식을 고치다가 나온 것이지만 집계와 무관한 `SELECT v + 1`에서도 그대로 나타난다(산술 평가에 NULL 규칙이 없음). ② 함수 열의 결과 열 이름이 인자를 빼고 `ROUND()`/`COALESCE()`로 나온다(MySQL은 `ROUND(AVG(v), 2)`).
+
+**Diagram 페이지**: 구성요소·흐름이 바뀐 것이 없어 변경 없음. **정직한 한계**: select 목록에 같은 `AVG(x)`가 따로 있고 식에도 `AVG(x)`가 쓰이면 식은 select 목록의 4자리 반올림 값을 읽는다(키가 같아서; 다른 집계는 해당 없음). `SUM(o.amount > 5)` 꼴(`CASE` 변환)의 안쪽 열은 오른쪽 조인 테이블 열을 별칭으로 쓰면 별칭이 풀리지 않는다(이전 항목과 같음).
 
 ---
 

@@ -802,6 +802,12 @@ private:
                               const std::string& table, const std::vector<Join>& joins);
     static std::string agg_label(const AggFunc& func, const std::string& col);
     static std::string resolve_arg_key(const std::vector<const Row*>& rows, const std::string& col);
+    // The aggregates written INSIDE a select-list column -- `SUM(v) + 1`, `ROUND(AVG(v), 2)`, `CASE WHEN COUNT(*) > 1 ...` -- as the
+    // names the parser gives them (`SUM(v)`); and whether a column / a select list holds an aggregate at all (a plain one or such).
+    static void column_agg_refs(const SelectColumn& column, std::vector<std::string>& out);
+    static std::vector<std::string> select_agg_refs(const std::vector<SelectColumn>& columns);
+    static bool column_has_aggregate(const SelectColumn& column);
+    static bool columns_have_aggregate(const std::vector<SelectColumn>& columns);
     static std::vector<std::string> extract_agg_refs_from_cond(const CondExpr& expr);
     static void collect_agg_refs_cond(const CondExpr& expr, std::vector<std::string>& out);
     static void collect_agg_refs_arith(const ArithExpr& expr, std::vector<std::string>& out);

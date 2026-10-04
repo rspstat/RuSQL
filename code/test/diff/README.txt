@@ -46,5 +46,11 @@ as the statement wrote them (--no-header-check for builds before that).
 
   python verify_aggregates.py <engine_server.exe> [--queries N] [--seed S] [--rows R] [--no-header-check]
 
+verify_agg_expressions.py checks aggregates INSIDE select-list expressions, functions and CASE (`MAX(x) - MIN(y)`,
+`ROUND(AVG(x), 1)`, `COALESCE(SUM(x), 0)`, `CASE WHEN COUNT(*) > 3 ...`) the same way: every group of the answer is computed
+here from the un-aggregated rows of the same FROM, and a scalar statement has to return exactly one row.
+
+  python verify_agg_expressions.py <engine_server.exe> [--queries N] [--seed S] [--rows R]
+
 To check that the comparison can see a bug, plant one on purpose in the new build (for instance read an unqualified column
 from the last table that has it instead of the first) and run the same seed: it has to report differences.

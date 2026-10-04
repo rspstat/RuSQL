@@ -17,6 +17,8 @@ SELECT status, COUNT(*), SUM(amount) FROM orders GROUP BY status;               
 SELECT c.city, COUNT(*) AS orders, SUM(o.amount) AS total
 FROM orders o JOIN customers c ON o.customer_id = c.id
 WHERE o.status = 'DONE' GROUP BY c.city ORDER BY total DESC;                   -- 조인 + 집계, 약 1초
+
+SELECT ROUND(AVG(amount), 0) AS avg_amount, MAX(amount) - MIN(amount) AS spread FROM orders;   -- 집계 식, 약 0.1초
 ```
 
 ## 2. 인덱스를 만들면 계획이 바뀐다
@@ -62,7 +64,8 @@ Claude Desktop에 MCP가 연결되어 있다면 "demo 데이터베이스에서 �
 
 ## 피할 것 (알려진 문제)
 
-- **select 목록에서 집계끼리 계산하지 마세요.** `SELECT MAX(amount) - MIN(amount) FROM orders`나 `SUM(amount) / COUNT(*)`는 0을 돌려주고, `GROUP BY` 없이 쓰면 주문 한 건당 한 행씩 나옵니다. `MAX(amount), MIN(amount)`를 따로 select하거나 클라이언트에서 계산하세요(아직 고치지 않았습니다. `HAVING` 안의 같은 계산은 정상입니다).
+- **NULL이 든 열로 산술을 하지 마세요.** `SELECT v + 1`이 NULL인 행에서 NULL이 아니라 `NULL1`로, `v * 2`는 0으로 나옵니다(아직 고치지 않았습니다. 데모 데이터에는 NULL이 없어서 해당 없음).
+- 집계 식(`MAX(amount) - MIN(amount)`, `ROUND(AVG(amount), 0)`, `COALESCE(SUM(amount), 0)`)은 정상입니다(2026-10-05에 고침). 결과 열 이름만 함수의 인자가 빠져서 `ROUND()`로 나옵니다 — `AS avg_amount`처럼 별칭을 붙이면 깔끔합니다.
 - `LEFT JOIN`에서 `COUNT(o.id)`, `ORDER BY o.amount DESC`, `SELECT DISTINCT o.status`, `HAVING COUNT(o.id) = 0`처럼 `테이블.열`을 쓰는 것은 모두 정상입니다(2026-10-05에 고침). 결과 열 이름도 쓴 그대로(`COUNT(o.id)`) 나옵니다.
 
 ## 되돌리기

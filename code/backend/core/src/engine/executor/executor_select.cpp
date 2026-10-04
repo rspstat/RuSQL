@@ -11,6 +11,7 @@
 #include <charconv>
 #include <chrono>
 #include <cmath>
+#include <cstring>
 #include <numeric>
 #include <unordered_set>
 
@@ -40,6 +41,15 @@ std::string format_4dp(double v) {
 std::string format_num_or_int(double v) {
     if (v == std::trunc(v)) return std::to_string(static_cast<long long>(v));
     return format_4dp(v);
+}
+
+// A number as text that reads back as the same number: whole numbers as integers, anything else with the digits it needs. For
+// aggregates an expression or HAVING goes on to compute with (format_num_or_int keeps 4 places, which is for display).
+std::string format_exact(double v) {
+    if (v == std::trunc(v) && std::abs(v) < 1e15) return std::to_string(static_cast<long long>(v));
+    char buf[64];
+    auto res = std::to_chars(buf, buf + sizeof buf, v);
+    return std::string(buf, res.ptr);
 }
 
 int cmp_key(const std::string& a, const std::string& b) {
@@ -421,7 +431,66 @@ void Executor::collect_agg_refs_arith(const ArithExpr& expr, std::vector<std::st
     } else if (auto* v = std::get_if<ArithExpr::Div>(&expr.data)) {
         collect_agg_refs_arith(*v->lhs, out);
         collect_agg_refs_arith(*v->rhs, out);
+    } else if (auto* v = std::get_if<ArithExpr::Func>(&expr.data)) {
+        for (auto& a : v->args) collect_agg_refs_arith(a, out);
+    } else if (auto* v = std::get_if<ArithExpr::Cmp>(&expr.data)) {
+        collect_agg_refs_arith(*v->lhs, out);
+        collect_agg_refs_arith(*v->rhs, out);
     }
+}
+
+namespace {
+// The aggregate calls written in the text of a scalar function's argument: `AVG(v)`, `SUM(v)/COUNT(*)` (the parser keeps a
+// function's arguments as text). Only a call with a plain argument, as parse_arith_factor builds them.
+void collect_agg_refs_text(const std::string& text, std::vector<std::string>& out) {
+    static const char* names[] = {"COUNT", "SUM", "AVG", "MIN", "MAX"};
+    bool in_string = false; // inside '...': text, never an aggregate call
+    for (std::size_t i = 0; i < text.size(); i++) {
+        if (text[i] == '\'') in_string = !in_string;
+        if (in_string) continue;
+        if (i > 0 && (std::isalnum(static_cast<unsigned char>(text[i - 1])) || text[i - 1] == '_' || text[i - 1] == '.')) continue;
+        for (const char* name : names) {
+            const std::size_t n = std::strlen(name);
+            if (i + n >= text.size() || text[i + n] != '(') continue;
+            bool same = true;
+            for (std::size_t k = 0; k < n; k++) same = same && std::toupper(static_cast<unsigned char>(text[i + k])) == name[k];
+            if (!same) continue;
+            const std::size_t close = text.find(')', i + n + 1);
+            if (close == std::string::npos || text.find('(', i + n + 1) < close) break;
+            std::string key = std::string(name) + text.substr(i + n, close - (i + n) + 1);
+            if (std::find(out.begin(), out.end(), key) == out.end()) out.push_back(key);
+            i = close;
+            break;
+        }
+    }
+}
+} // namespace
+
+void Executor::column_agg_refs(const SelectColumn& column, std::vector<std::string>& out) {
+    if (auto* e = std::get_if<SelectColumn::Expr>(&column.data)) {
+        collect_agg_refs_arith(e->expr, out);
+    } else if (auto* cw = std::get_if<SelectColumn::CaseWhen>(&column.data)) {
+        for (auto& b : cw->branches) collect_agg_refs_cond(b.condition, out);
+    } else if (auto* f = std::get_if<SelectColumn::Func>(&column.data)) {
+        for (auto& a : f->args) collect_agg_refs_text(a, out);
+    }
+}
+
+std::vector<std::string> Executor::select_agg_refs(const std::vector<SelectColumn>& columns) {
+    std::vector<std::string> out;
+    for (auto& c : columns) column_agg_refs(c, out);
+    return out;
+}
+
+bool Executor::column_has_aggregate(const SelectColumn& column) {
+    if (std::holds_alternative<SelectColumn::Agg>(column.data) || std::holds_alternative<SelectColumn::AggAlias>(column.data)) return true;
+    std::vector<std::string> refs;
+    column_agg_refs(column, refs);
+    return !refs.empty();
+}
+
+bool Executor::columns_have_aggregate(const std::vector<SelectColumn>& columns) {
+    return std::any_of(columns.begin(), columns.end(), [](const SelectColumn& c) { return column_has_aggregate(c); });
 }
 
 void Executor::collect_agg_refs_cond(const CondExpr& expr, std::vector<std::string>& out) {
@@ -435,6 +504,18 @@ void Executor::collect_agg_refs_cond(const CondExpr& expr, std::vector<std::stri
         collect_agg_refs_cond(*v->inner, out);
     } else if (auto* v = std::get_if<CondExpr::Leaf>(&expr.data)) {
         collect_agg_refs_arith(v->condition.left, out);
+        // an aggregate on the right of the comparison too: `HAVING SUM(v) > AVG(w)`, `CASE WHEN MIN(v) > COUNT(*) ...`
+        const auto& value = v->condition.value.data;
+        if (auto* lit = std::get_if<ConditionValue::Literal>(&value)) {
+            collect_agg_refs_text(lit->value, out);
+        } else if (auto* between = std::get_if<ConditionValue::Between>(&value)) {
+            collect_agg_refs_text(between->lo, out);
+            collect_agg_refs_text(between->hi, out);
+        } else if (auto* list = std::get_if<ConditionValue::LiteralList>(&value)) {
+            for (auto& item : list->values) collect_agg_refs_text(item, out);
+        } else if (auto* arith = std::get_if<ConditionValue::Arith>(&value)) {
+            collect_agg_refs_arith(arith->expr, out);
+        }
     }
 }
 
@@ -459,47 +540,47 @@ std::string Executor::resolve_arg_key(const std::vector<const Row*>& rows, const
     return col;
 }
 
+// An aggregate that HAVING or a select-list expression/function/CASE asks for by name (`SUM(v)`, `COUNT(DISTINCT x)`), computed
+// over the rows of one group with the rules of the select list: NULLs are skipped, COUNT(*) counts rows, SUM/AVG read the numeric
+// values, MIN/MAX compare numbers when every value is one and text otherwise, and MIN/MAX of nothing is NULL. The answer is not
+// rounded (the select list shows AVG with 4 places), since a comparison or a calculation goes on from it.
 std::string Executor::compute_agg_from_key(const std::string& key, const std::vector<const Row*>& grp) {
     std::string ku = key;
     std::transform(ku.begin(), ku.end(), ku.begin(), [](unsigned char c) { return std::toupper(c); });
-    auto lp = key.find('(');
-    auto rp = key.rfind(')');
-    if (ku.rfind("COUNT(", 0) == 0 && (lp == std::string::npos || rp == std::string::npos || rp <= lp)) return std::to_string(grp.size());
-    if (lp == std::string::npos || rp == std::string::npos || rp <= lp) return "0";
+    const auto lp = key.find('(');
+    const auto rp = key.rfind(')');
+    const bool is_count = ku.rfind("COUNT(", 0) == 0;
+    if (lp == std::string::npos || rp == std::string::npos || rp <= lp) return is_count ? std::to_string(grp.size()) : "0";
     std::string inner = key.substr(lp + 1, rp - lp - 1);
-    if (ku.rfind("COUNT(", 0) == 0) {
-        if (inner == "*") return std::to_string(grp.size());
-        // COUNT(col) counts the rows whose value is not NULL, as it does in the select list (`HAVING COUNT(o.id) = 0` on a LEFT
-        // JOIN is how customers without orders are found: every group has a row, only the matched ones have an `o.id`)
-        const std::string arg = resolve_arg_key(grp, inner);
-        std::size_t n = 0;
-        for (const Row* r_ptr : grp) {
-            auto it = r_ptr->find(arg);
-            if (it != r_ptr->end() && it->second != EXECUTOR_NULL_VALUE) n++;
-        }
-        return std::to_string(n);
-    }
-    inner = resolve_arg_key(grp, inner);
+    if (is_count && inner == "*") return std::to_string(grp.size());
+    const bool distinct = inner.rfind("DISTINCT ", 0) == 0;
+    if (distinct) inner.erase(0, 9);
 
-    std::vector<double> vals;
+    // the values of the argument that are not NULL (`COUNT(o.id) = 0` on a LEFT JOIN is how customers without orders are found:
+    // every group has a row, only the matched ones have an `o.id`)
+    const std::string arg = resolve_arg_key(grp, inner);
+    std::vector<std::string> present;
     for (const Row* r_ptr : grp) {
-        const Row& r = *r_ptr;
-        auto it = r.find(inner);
-        if (it != r.end()) {
-            if (auto p = parse_f64(it->second)) vals.push_back(*p);
-        }
+        auto it = r_ptr->find(arg);
+        if (it != r_ptr->end() && it->second != EXECUTOR_NULL_VALUE) present.push_back(it->second);
     }
-    double v = 0.0;
-    if (ku.rfind("SUM(", 0) == 0) {
-        v = std::accumulate(vals.begin(), vals.end(), 0.0);
-    } else if (ku.rfind("AVG(", 0) == 0) {
-        v = vals.empty() ? 0.0 : std::accumulate(vals.begin(), vals.end(), 0.0) / static_cast<double>(vals.size());
-    } else if (ku.rfind("MIN(", 0) == 0) {
-        v = vals.empty() ? std::numeric_limits<double>::infinity() : *std::min_element(vals.begin(), vals.end());
-    } else if (ku.rfind("MAX(", 0) == 0) {
-        v = vals.empty() ? -std::numeric_limits<double>::infinity() : *std::max_element(vals.begin(), vals.end());
+    if (distinct) {
+        std::sort(present.begin(), present.end());
+        present.erase(std::unique(present.begin(), present.end()), present.end());
     }
-    return format_num_or_int(v);
+    if (is_count) return std::to_string(present.size());
+
+    std::vector<double> nums;
+    for (auto& v : present) {
+        if (auto p = parse_f64(v)) nums.push_back(*p);
+    }
+    if (ku.rfind("SUM(", 0) == 0) return format_exact(std::accumulate(nums.begin(), nums.end(), 0.0));
+    if (ku.rfind("AVG(", 0) == 0) return format_exact(nums.empty() ? 0.0 : std::accumulate(nums.begin(), nums.end(), 0.0) / static_cast<double>(nums.size()));
+    const bool is_min = ku.rfind("MIN(", 0) == 0;
+    if (!is_min && ku.rfind("MAX(", 0) != 0) return "0";
+    if (present.empty()) return EXECUTOR_NULL_VALUE;
+    if (nums.size() == present.size()) return format_exact(is_min ? *std::min_element(nums.begin(), nums.end()) : *std::max_element(nums.begin(), nums.end()));
+    return is_min ? *std::min_element(present.begin(), present.end()) : *std::max_element(present.begin(), present.end());
 }
 
 Row Executor::compute_aggregates(const std::vector<const Row*>& grp, const std::vector<SelectColumn>& columns, bool allow_parallel) {
@@ -895,9 +976,10 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
     joins = reorder_joins_dp(table, std::move(joins), s.tables);
 
     // ── Planner: 인덱스 / 조인 알고리즘 결정 ──────────────────────────────
-    bool has_agg = std::any_of(columns.begin(), columns.end(), [](const SelectColumn& c) {
-        return std::holds_alternative<SelectColumn::Agg>(c.data) || std::holds_alternative<SelectColumn::AggAlias>(c.data);
-    });
+    // an aggregate inside an expression, a function or a CASE (`SUM(v) + 1`, `ROUND(AVG(v), 2)`) makes it an aggregate query too:
+    // such a statement used to run row by row, with 0 or NULL where the aggregate was
+    const std::vector<std::string> expr_agg_refs = select_agg_refs(columns);
+    bool has_agg = columns_have_aggregate(columns);
     bool has_win = std::any_of(columns.begin(), columns.end(), [](const SelectColumn& c) {
         return std::holds_alternative<SelectColumn::WinFunc>(c.data);
     });
@@ -1640,6 +1722,9 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
             for (std::size_t i = 0; i < group_by->size(); i++) out[(*group_by)[i]] = key[i];
             Row agg_row = compute_aggregates(grp, columns);
             for (auto& [k, v] : agg_row) out[k] = v;
+            for (auto& ref : expr_agg_refs) {
+                if (!out.count(ref)) out[ref] = compute_agg_from_key(ref, grp);
+            }
             if (having) {
                 for (auto& agg_key : extract_agg_refs_from_cond(*having)) {
                     if (!out.count(agg_key)) out[agg_key] = compute_agg_from_key(agg_key, grp);
@@ -1788,6 +1873,25 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
         }
 
         Row agg_row = compute_aggregates(rows_p, columns, /*allow_parallel=*/true);
+        if (!expr_agg_refs.empty()) {
+            // `SUM(v) + 1`, `ROUND(AVG(v), 2)`, `CASE WHEN COUNT(*) > 1 ...`: the aggregates inside are computed as HAVING computes
+            // them and the columns are evaluated on this one row of aggregates. The plain aggregates keep their place; a column
+            // with no aggregate in it is not part of an aggregate result (as before). Formatted like any result, minus the row
+            // count line a plain aggregate result does not carry.
+            for (auto& ref : expr_agg_refs) {
+                if (!agg_row.count(ref)) agg_row[ref] = compute_agg_from_key(ref, rows_p);
+            }
+            std::vector<SelectColumn> shown;
+            for (auto& col : columns) {
+                if (column_has_aggregate(col)) shown.push_back(col);
+            }
+            auto text = format_result(s, std::vector<Row>{agg_row}, shown, table, joins);
+            if (text.is_err()) return text;
+            std::string out = text.value();
+            static const std::string footer = "\n1 row(s) returned.";
+            if (out.size() >= footer.size() && out.compare(out.size() - footer.size(), footer.size(), footer) == 0) out.erase(out.size() - footer.size());
+            return StringResult::Ok(out);
+        }
         std::vector<std::pair<std::string, std::string>> agg_results;
         for (auto& col : columns) {
             std::string label;
