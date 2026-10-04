@@ -801,6 +801,7 @@ private:
     StringResult format_rows(SharedDatabase& s, const std::vector<const Row*>& rows, const std::vector<SelectColumn>& columns,
                               const std::string& table, const std::vector<Join>& joins);
     static std::string agg_label(const AggFunc& func, const std::string& col);
+    static std::string resolve_arg_key(const std::vector<const Row*>& rows, const std::string& col);
     static std::vector<std::string> extract_agg_refs_from_cond(const CondExpr& expr);
     static void collect_agg_refs_cond(const CondExpr& expr, std::vector<std::string>& out);
     static void collect_agg_refs_arith(const ArithExpr& expr, std::vector<std::string>& out);

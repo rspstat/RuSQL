@@ -62,8 +62,8 @@ Claude Desktop에 MCP가 연결되어 있다면 "demo 데이터베이스에서 �
 
 ## 피할 것 (알려진 문제)
 
-- **두 테이블에 같은 이름의 열이 있을 때 집계 안에 `테이블.열`을 쓰지 마세요.** 예를 들어 `orders`와 `customers` 둘 다 `id`가 있는데 `COUNT(o.id)`·`SUM(o.id)`처럼 쓰면 한정자(`o.`)가 버려져서 왼쪽(FROM) 테이블의 `id`를 읽습니다. `LEFT JOIN`에서 `COUNT(o.id)`로 "주문 수"를 세면 주문이 없는 고객도 1로 셉니다. 겹치지 않는 열(`COUNT(o.amount)`)이나 `COUNT(*)`를 쓰세요. 집계 안의 `테이블.열`은 아직 고치지 않았고, `HAVING SUM(o.amount) > 100`처럼 HAVING 안에서는 파싱 오류가 납니다(`HAVING SUM(amount) > 100`처럼 열 이름만 쓰면 정상).
-- `ORDER BY o.amount DESC`, `SELECT DISTINCT o.status`처럼 `ORDER BY`·`DISTINCT`에 `테이블.열`을 쓰는 것은 정상입니다(2026-10-05에 고침).
+- **select 목록에서 집계끼리 계산하지 마세요.** `SELECT MAX(amount) - MIN(amount) FROM orders`나 `SUM(amount) / COUNT(*)`는 0을 돌려주고, `GROUP BY` 없이 쓰면 주문 한 건당 한 행씩 나옵니다. `MAX(amount), MIN(amount)`를 따로 select하거나 클라이언트에서 계산하세요(아직 고치지 않았습니다. `HAVING` 안의 같은 계산은 정상입니다).
+- `LEFT JOIN`에서 `COUNT(o.id)`, `ORDER BY o.amount DESC`, `SELECT DISTINCT o.status`, `HAVING COUNT(o.id) = 0`처럼 `테이블.열`을 쓰는 것은 모두 정상입니다(2026-10-05에 고침). 결과 열 이름도 쓴 그대로(`COUNT(o.id)`) 나옵니다.
 
 ## 되돌리기
 

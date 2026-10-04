@@ -309,7 +309,11 @@
 >
 > **수정됨 (2026-10-05)**: `ORDER BY`(행 정렬·그룹 행 재정렬)와 `DISTINCT`(`Column`·`ColumnAlias`)가 WHERE·GROUP BY·SELECT 목록과 같은 이름 해석(`get_col`: 정확한 키 → `테이블.열` 접미 일치 → 열 이름)을 쓰게 했다. 열 이름이 두 테이블에 겹쳐도 한정자로 구분됨(무작위 질의 720개를 데이터에서 계산한 기준값과 비교). 상세는 `DATE.md` 10월 5일 두 번째 항목.
 >
-> **같은 계열에서 남은 것 (미수정, 사용자 결정 대기)**: ① **집계 인자의 한정자가 파서에서 버려짐** — `SUM(b.id)`·`COUNT(b.id)`·`MAX(b.id)`가 두 테이블에 같은 열 이름(`id`)이 있으면 왼쪽(FROM) 테이블의 열을 읽음(예: `a LEFT JOIN b`에서 `COUNT(b.id)`가 짝이 없는 행도 세고, 헤더도 `COUNT(id)`로 나옴). 고치려면 파서가 한정 이름을 보존하고 헤더 규칙(`COUNT(id)` vs `COUNT(b.id)`)을 정해야 해서 작은 설계가 필요함. ② `HAVING SUM(a.v) > 30`처럼 HAVING 안의 집계 인자에 한정자를 쓰면 `Expected ')' after aggregate` 파싱 오류(조용한 오답은 아니고 오류로 거절됨).
+> **같은 계열에서 남아 있던 것 (2026-10-05 사용자 승인으로 같은 날 수정 — 아래 "수정됨" 문단)**: ① **집계 인자의 한정자가 파서에서 버려짐** — `SUM(b.id)`·`COUNT(b.id)`·`MAX(b.id)`가 두 테이블에 같은 열 이름(`id`)이 있으면 왼쪽(FROM) 테이블의 열을 읽음(예: `a LEFT JOIN b`에서 `COUNT(b.id)`가 짝이 없는 행도 세고, 헤더도 `COUNT(id)`로 나옴). 고치려면 파서가 한정 이름을 보존하고 헤더 규칙(`COUNT(id)` vs `COUNT(b.id)`)을 정해야 해서 작은 설계가 필요함. ② `HAVING SUM(a.v) > 30`처럼 HAVING 안의 집계 인자에 한정자를 쓰면 `Expected ')' after aggregate` 파싱 오류(조용한 오답은 아니고 오류로 거절됨).
+>
+> **수정됨 (2026-10-05, 세 번째 항목)**: 파서가 집계 인자를 쓴 그대로(`b.id`) 보존하고(결과 열 이름도 그대로: `SUM(b.id)`), 별칭은 따로 `source`에 테이블 이름으로 풀어 둠(`Agg`/`AggAlias`에 필드 추가, 뷰·프로시저의 JSON 형태에도 저장). 실행기는 인자를 행이 실제로 가진 키로 한 번 해석해서 읽음. HAVING 안의 집계도 `테이블.열`을 받고, **같은 함수에서 HAVING의 `COUNT(열)`이 NULL을 세지 않고 그룹의 행 수를 돌려주던 것**(select 목록에 같은 집계가 없을 때, 예: `LEFT JOIN … HAVING COUNT(o.id) = 0`)도 같이 고침. 상세는 `DATE.md` 10월 5일 세 번째 항목.
+>
+> **이 점검에서 새로 찾았지만 고치지 않은 것 (사용자 결정 대기)**: **select 목록의 집계 간 산술**(`MAX(v) - MIN(v)`, `SUM(v) / COUNT(*)`)은 피연산자 집계가 select 목록에 따로 들어 있을 때만 맞고, 아니면 `GROUP BY`가 있어도 0을 돌려주며 `GROUP BY`가 없으면 집계로 취급되지 않아 **입력 행마다 한 행씩 0**이 나옴(`SELECT MAX(v) - MIN(v) FROM a` → 5행). HAVING은 같은 식을 `extract_agg_refs_from_cond`로 먼저 계산해 두어 맞지만 select 목록에는 그 단계가 없음.
 
 ### LATERAL JOIN + 신규 집계 함수 확장 구현 완료 (BIT_AND/BIT_OR, FILTER, JSON_AGG, LATERAL JOIN — 2026-08-12)
 

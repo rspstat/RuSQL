@@ -1,5 +1,7 @@
 #include <cctype>
 #include <fstream>
+#include <functional>
+#include <memory>
 #include <sstream>
 #include <vector>
 
@@ -348,4 +350,62 @@ TEST_CASE("every statement in test/test_full.sql parses without error", "[parser
 
     INFO(all_failures);
     REQUIRE(failures == 0);
+}
+
+// The parser kept only the column name of an aggregate's argument (`SUM(b.id)` became `SUM(id)`): with `id` in both tables
+// the executor could not tell whose column was meant. It now keeps the argument as typed (that is also what names the result
+// column, like MySQL) and, when the qualifier is a table ALIAS, records the argument with the table in `source`.
+TEST_CASE("an aggregate keeps the table qualifier of its argument; an alias is resolved in `source`", "[parser][aggregate]") {
+    auto parse = [](const std::string& sql) {
+        Parser p(sql);
+        auto res = p.parse();
+        REQUIRE(res.is_ok());
+        REQUIRE(std::holds_alternative<Statement::Select>(res.value().data));
+        return std::make_shared<Statement>(std::move(res.value()));
+    };
+    auto sel_of = [](const std::shared_ptr<Statement>& s) -> Statement::Select& { return std::get<Statement::Select>(s->data); };
+    auto agg = [&](const std::shared_ptr<Statement>& s, std::size_t i) { return std::get<SelectColumn::Agg>(sel_of(s).columns.at(i).data); };
+    auto leaf_name = [](const CondExpr& e) { return std::get<ArithExpr::Col>(std::get<CondExpr::Leaf>(e.data).condition.left.data).name; };
+
+    {   // a table's own name: nothing to resolve
+        auto s = parse("SELECT SUM(b.id), COUNT(DISTINCT a.g), GROUP_CONCAT(b.nm), MAX(v) FROM a JOIN b ON b.id = a.g");
+        REQUIRE(agg(s, 0).col == "b.id");
+        REQUIRE(agg(s, 1).col == "a.g");
+        REQUIRE(agg(s, 2).col == "b.nm");
+        REQUIRE(agg(s, 3).col == "v");
+        for (std::size_t i = 0; i < 4; i++) REQUIRE(agg(s, i).source.empty());
+    }
+    {   // through aliases: `col` as typed, `source` with the table
+        auto s = parse("SELECT SUM(o.amount), COUNT(c.id) AS n, MIN(amount) FROM orders o JOIN customers c ON c.id = o.cid");
+        REQUIRE(agg(s, 0).col == "o.amount");
+        REQUIRE(agg(s, 0).source == "orders.amount");
+        auto n = std::get<SelectColumn::AggAlias>(sel_of(s).columns.at(1).data);
+        REQUIRE(n.col == "c.id");
+        REQUIRE(n.source == "customers.id");
+        REQUIRE(n.alias == "n");
+        REQUIRE(agg(s, 2).source.empty());
+    }
+    {   // the FILTER clause of an aggregate and the columns of a window function are resolved too
+        auto s = parse("SELECT COUNT(*) FILTER (WHERE y.k > 1), SUM(x.v) OVER (PARTITION BY y.grp ORDER BY x.id) FROM t x JOIN u y ON y.id = x.id");
+        REQUIRE(leaf_name(*agg(s, 0).filter) == "u.k");
+        auto w = std::get<SelectColumn::WinFunc>(sel_of(s).columns.at(1).data);
+        REQUIRE(w.col.value() == "t.v");
+        REQUIRE(w.partition_by == std::vector<std::string>{"u.grp"});
+        REQUIRE(w.order_by.at(0).column == "t.id");
+    }
+    {   // HAVING: an aggregate takes `table.column`, and an alias in it is resolved
+        auto s = parse("SELECT g FROM t x GROUP BY g HAVING SUM(x.v) > 3 AND COUNT(*) > 1 AND MAX(t.w) < 9");
+        REQUIRE(sel_of(s).having.has_value());
+        std::vector<std::string> names;
+        std::function<void(const CondExpr&)> walk = [&](const CondExpr& e) {
+            if (auto* a = std::get_if<CondExpr::And>(&e.data)) {
+                walk(*a->lhs);
+                walk(*a->rhs);
+            } else {
+                names.push_back(leaf_name(e));
+            }
+        };
+        walk(*sel_of(s).having);
+        REQUIRE(names == std::vector<std::string>{"SUM(t.v)", "COUNT(*)", "MAX(t.w)"});
+    }
 }

@@ -1,8 +1,21 @@
 #include "parser_detail.hpp"
 
+#include <cctype>
+
 namespace engine::detail {
 
 std::string expand_alias_str(const std::string& s, const std::unordered_map<std::string, std::string>& map) {
+    // an aggregate in a condition is kept as one name, `SUM(o.amount)`: expand its argument
+    if (s.size() > 4 && s.back() == ')') {
+        auto lp = s.find('(');
+        if (lp != std::string::npos && lp > 0 && s.find('(', lp + 1) == std::string::npos) {
+            std::string fn = s.substr(0, lp);
+            for (auto& c : fn) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+            if (fn == "COUNT" || fn == "SUM" || fn == "AVG" || fn == "MIN" || fn == "MAX") {
+                return s.substr(0, lp + 1) + expand_alias_str(s.substr(lp + 1, s.size() - lp - 2), map) + ")";
+            }
+        }
+    }
     auto dot = s.find('.');
     if (dot != std::string::npos) {
         std::string prefix = s.substr(0, dot);
@@ -69,8 +82,25 @@ SelectColumn expand_select_column(const SelectColumn& col, const std::unordered_
                 branches.reserve(alt.branches.size());
                 for (auto& b : alt.branches) branches.push_back(CaseWhenBranch{expand_condexpr(b.condition, map), b.result});
                 return SelectColumn(SelectColumn::CaseWhen{std::move(branches), alt.else_val, alt.alias});
+            } else if constexpr (std::is_same_v<T, SelectColumn::Agg>) {
+                // `col` stays as typed (it is the result column's name); `source` is what the rows hold
+                std::string source = expand_alias_str(alt.col, map);
+                std::optional<CondExpr> filter;
+                if (alt.filter) filter = expand_condexpr(*alt.filter, map);
+                return SelectColumn(SelectColumn::Agg{alt.func, alt.col, std::move(filter), source == alt.col ? std::string() : source});
+            } else if constexpr (std::is_same_v<T, SelectColumn::AggAlias>) {
+                std::string source = expand_alias_str(alt.col, map);
+                std::optional<CondExpr> filter;
+                if (alt.filter) filter = expand_condexpr(*alt.filter, map);
+                return SelectColumn(SelectColumn::AggAlias{alt.func, alt.col, alt.alias, std::move(filter), source == alt.col ? std::string() : source});
+            } else if constexpr (std::is_same_v<T, SelectColumn::WinFunc>) {
+                SelectColumn::WinFunc w = alt;
+                if (w.col) w.col = expand_alias_str(*w.col, map);
+                for (auto& c : w.partition_by) c = expand_alias_str(c, map);
+                for (auto& o : w.order_by) o.column = expand_alias_str(o.column, map);
+                return SelectColumn(std::move(w));
             } else {
-                // All/Agg/AggAlias/WinFunc/Subquery pass through unchanged — copy via
+                // All/Subquery pass through unchanged — copy via
                 // SelectColumn's own deep-copy constructor (Subquery holds a
                 // non-copyable unique_ptr<Statement>, so `alt` itself can't be copied
                 // directly; `col` can, via SelectColumn::SelectColumn(const SelectColumn&)).

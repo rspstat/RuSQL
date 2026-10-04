@@ -1,5 +1,6 @@
 #include "catch.hpp"
 #include "engine/parser/ast_json.hpp"
+#include "engine/parser/parser.hpp"
 
 using namespace engine;
 
@@ -281,4 +282,31 @@ TEST_CASE("Bare unit-variant Statements round-trip as plain strings", "[ast_json
         Statement back = roundtrip(s);
         REQUIRE(back.data.index() == s.data.index());
     }
+}
+
+// A view or procedure is stored as the JSON form of its statement: the aggregate's `source` (its argument through a table alias)
+// has to survive it, and a statement saved without one reads back as before.
+TEST_CASE("an aggregate's source survives the JSON form of the statement", "[ast_json][aggregate]") {
+    Parser p("SELECT SUM(o.amount), COUNT(c.id) AS n, MAX(amount), MIN(b.id) FROM orders o JOIN customers c ON c.id = o.cid JOIN b ON b.id = o.cid");
+    auto parsed = p.parse();
+    REQUIRE(parsed.is_ok());
+    Statement back = roundtrip(parsed.value());
+    auto& sel = std::get<Statement::Select>(back.data);
+    auto& orig = std::get<Statement::Select>(parsed.value().data);
+    REQUIRE(sel.columns.size() == 4);
+    auto sum = std::get<SelectColumn::Agg>(sel.columns[0].data);
+    REQUIRE(sum.col == "o.amount");
+    REQUIRE(sum.source == "orders.amount");
+    auto n = std::get<SelectColumn::AggAlias>(sel.columns[1].data);
+    REQUIRE(n.col == "c.id");
+    REQUIRE(n.source == "customers.id");
+    REQUIRE(n.alias == "n");
+    REQUIRE(std::get<SelectColumn::Agg>(sel.columns[2].data).source.empty());
+    REQUIRE(std::get<SelectColumn::Agg>(sel.columns[3].data).source.empty());
+    REQUIRE(std::get<SelectColumn::Agg>(orig.columns[3].data).col == "b.id");
+    // a statement written before the field existed has none
+    nlohmann::json old_form = nlohmann::json::parse(R"({"Agg":{"func":"Sum","col":"amount","filter":null}})");
+    SelectColumn old_col = old_form.get<SelectColumn>();
+    REQUIRE(std::get<SelectColumn::Agg>(old_col.data).col == "amount");
+    REQUIRE(std::get<SelectColumn::Agg>(old_col.data).source.empty());
 }

@@ -615,11 +615,14 @@ void to_json(nlohmann::json& j, const SelectColumn& col) {
             else if constexpr (std::is_same_v<T, SelectColumn::Column>) j = nlohmann::json{{"Column", alt.name}};
             else if constexpr (std::is_same_v<T, SelectColumn::ColumnAlias>)
                 j = nlohmann::json{{"ColumnAlias", nlohmann::json::array({alt.name, alt.alias})}};
-            else if constexpr (std::is_same_v<T, SelectColumn::Agg>)
+            else if constexpr (std::is_same_v<T, SelectColumn::Agg>) {
                 j = nlohmann::json{{"Agg", nlohmann::json{{"func", alt.func}, {"col", alt.col}, {"filter", alt.filter}}}};
-            else if constexpr (std::is_same_v<T, SelectColumn::AggAlias>)
+                if (!alt.source.empty()) j["Agg"]["source"] = alt.source;
+            } else if constexpr (std::is_same_v<T, SelectColumn::AggAlias>) {
                 j = nlohmann::json{
                     {"AggAlias", nlohmann::json{{"func", alt.func}, {"col", alt.col}, {"alias", alt.alias}, {"filter", alt.filter}}}};
+                if (!alt.source.empty()) j["AggAlias"]["source"] = alt.source;
+            }
             else if constexpr (std::is_same_v<T, SelectColumn::Func>)
                 j = nlohmann::json{{"Func", nlohmann::json{{"name", alt.name}, {"args", alt.args}, {"alias", alt.alias}}}};
             else if constexpr (std::is_same_v<T, SelectColumn::Expr>)
@@ -654,12 +657,13 @@ void from_json(const nlohmann::json& j, SelectColumn& col) {
     else if (tag == "Agg") {
         std::optional<CondExpr> filter;
         if (p.contains("filter")) filter = p.at("filter").get<std::optional<CondExpr>>();
-        col = SelectColumn(SelectColumn::Agg{p.at("func").get<AggFunc>(), p.at("col").get<std::string>(), filter});
+        col = SelectColumn(SelectColumn::Agg{p.at("func").get<AggFunc>(), p.at("col").get<std::string>(), filter,
+                                             p.contains("source") ? p.at("source").get<std::string>() : std::string()});
     } else if (tag == "AggAlias") {
         std::optional<CondExpr> filter;
         if (p.contains("filter")) filter = p.at("filter").get<std::optional<CondExpr>>();
-        col = SelectColumn(
-            SelectColumn::AggAlias{p.at("func").get<AggFunc>(), p.at("col").get<std::string>(), p.at("alias").get<std::string>(), filter});
+        col = SelectColumn(SelectColumn::AggAlias{p.at("func").get<AggFunc>(), p.at("col").get<std::string>(), p.at("alias").get<std::string>(),
+                                                  filter, p.contains("source") ? p.at("source").get<std::string>() : std::string()});
     }
     else if (tag == "Func")
         col = SelectColumn(SelectColumn::Func{p.at("name").get<std::string>(), p.at("args").get<std::vector<std::string>>(),

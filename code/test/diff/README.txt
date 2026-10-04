@@ -24,6 +24,8 @@ A statement that fails must fail with the same message on both builds.
   --skip-chain-refs  no ON clause that reads a table joined earlier: builds before b3ca102 answered `t JOIN u ON u.id = t.grp
                      JOIN w ON w.k = u.id` wrongly (the left column of the second join was read by its bare name from the
                      FROM table), so such queries differ from the fixed build by design
+  --ignore-header    compare the rows only (not the result-column names, separator lines or cell padding): for a change
+                     of how columns are NAMED, to show that no value moved
   --log-new FILE     the new server's stderr (for builds that print debug output)
   --rows R           table size (default 400); above 3000 the generator drops LEFT JOINs, three-way joins and multi-condition
                      ON clauses, which are nested loops (minutes per query) in older builds
@@ -36,6 +38,13 @@ statement without DISTINCT, every ORDER BY statement returns the rows of the sta
 when that key is a selected column.
 
   python verify_orderby_distinct.py <engine_server.exe> [--queries N] [--seed S] [--rows R]
+
+verify_aggregates.py does the same for aggregates over `table.column` arguments (COUNT, COUNT DISTINCT, SUM, AVG, MIN, MAX,
+grouped or not, over INNER / LEFT / RIGHT / FULL OUTER joins of tables that share column names, with aliases and WHERE):
+every group of the answer is recomputed from the un-aggregated rows of the same FROM, and the result columns have to be named
+as the statement wrote them (--no-header-check for builds before that).
+
+  python verify_aggregates.py <engine_server.exe> [--queries N] [--seed S] [--rows R] [--no-header-check]
 
 To check that the comparison can see a bug, plant one on purpose in the new build (for instance read an unqualified column
 from the last table that has it instead of the first) and run the same seed: it has to report differences.

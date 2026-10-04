@@ -65,9 +65,25 @@ def start(exe, port, data, parallel, log=None):
     return p, Client()
 
 
+IGNORE_HEADER = False  # --ignore-header
+
+
 def norm(out, unordered):
     out = TIMING.sub("", out)
     lines = [l.rstrip() for l in out.splitlines() if l.strip()]
+    if IGNORE_HEADER:
+        # the rows only: no result-column names, no separator lines, cells compared without their padding (which follows the
+        # width of the header)
+        seen_header = False
+        rows = []
+        for l in lines:
+            if l.startswith("+"):
+                continue
+            if l.startswith("|") and not seen_header:
+                seen_header = True
+                continue
+            rows.append(" ".join(l.split()))
+        lines = rows
     return sorted(lines) if unordered else lines
 
 
@@ -382,11 +398,14 @@ def main():
     ap.add_argument("--parallel", action="store_true", help="thread pool on for both servers; answers compared as sets of lines")
     ap.add_argument("--modes", default="seq,seq", help="'seq' or 'par' for the old and the new server, e.g. seq,par")
     ap.add_argument("--exact", action="store_true", help="with --parallel or --modes: compare the text itself, not sets of lines")
+    ap.add_argument("--ignore-header", action="store_true", help="compare the rows only: not the result-column names, separator lines or padding (for a change of how columns are named)")
     ap.add_argument("--skip-chain-refs", action="store_true", help="no ON clause that reads an earlier joined table (older builds answered those wrongly)")
     ap.add_argument("--max-report", type=int, default=5)
     ap.add_argument("--log-new", help="write the new server's stderr to this file (for builds with debug output)")
     ap.add_argument("--show", type=int, default=0, help="print the first N queries with the first lines of the old build's answer")
     args = ap.parse_args()
+    global IGNORE_HEADER
+    IGNORE_HEADER = args.ignore_header
     modes = ["par", "par"] if args.parallel else args.modes.split(",")
     unordered = args.parallel and not args.exact
 

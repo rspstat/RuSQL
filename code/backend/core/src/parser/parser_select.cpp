@@ -110,7 +110,8 @@ Statement Parser::parse_select() {
                 } else if (peek_is(TokenKind::Ident)) {
                     std::string first = advance()->text;
                     std::string col_name = first;
-                    if (peek_is(TokenKind::Dot)) { advance(); col_name = expect_ident(); }
+                    // the qualifier stays: with `a.id` and `b.id` the bare name cannot say which table's column is meant
+                    if (peek_is(TokenKind::Dot)) { advance(); col_name = first + "." + expect_ident(); }
                     // SUM(col > x) / SUM(col IS NULL) / SUM(col LIKE ..) / SUM(col BETWEEN ..) /
                     // SUM(col IN (..)) → SumCase/CountCase over a synthesized
                     // CASE WHEN <predicate> THEN 1 ELSE 0 END, reusing the same predicate-tail
@@ -220,7 +221,7 @@ Statement Parser::parse_select() {
                     const Token* it = advance();
                     if (!it || it->kind != TokenKind::Ident) throw ParseError("Expected column in GROUP_CONCAT");
                     std::string first = it->text;
-                    if (peek_is(TokenKind::Dot)) { advance(); agg_col = expect_ident(); }
+                    if (peek_is(TokenKind::Dot)) { advance(); agg_col = first + "." + expect_ident(); }
                     else agg_col = first;
                 }
                 std::string separator = ",";

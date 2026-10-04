@@ -444,15 +444,42 @@ std::vector<std::string> Executor::extract_agg_refs_from_cond(const CondExpr& ex
     return out;
 }
 
+// The key under which the rows of `rows` hold an aggregate's argument. The argument is spelled as the query spells it (`b.id`,
+// or `orders.amount` for `o.amount` through an alias); a row keeps its columns under their bare names and a joined-in table's
+// also as `<db>.<table>.<column>`. Resolved once, on the first row: every row of one result has the same keys.
+std::string Executor::resolve_arg_key(const std::vector<const Row*>& rows, const std::string& col) {
+    if (rows.empty() || col == "*") return col;
+    const Row& first = *rows.front();
+    if (first.find(col) != first.end()) return col;
+    if (const std::string* found = get_col(first, col)) {
+        for (auto& kv : first) {
+            if (&kv.second == found) return kv.first;
+        }
+    }
+    return col;
+}
+
 std::string Executor::compute_agg_from_key(const std::string& key, const std::vector<const Row*>& grp) {
     std::string ku = key;
     std::transform(ku.begin(), ku.end(), ku.begin(), [](unsigned char c) { return std::toupper(c); });
-    if (ku.rfind("COUNT(", 0) == 0) return std::to_string(grp.size());
-
     auto lp = key.find('(');
     auto rp = key.rfind(')');
+    if (ku.rfind("COUNT(", 0) == 0 && (lp == std::string::npos || rp == std::string::npos || rp <= lp)) return std::to_string(grp.size());
     if (lp == std::string::npos || rp == std::string::npos || rp <= lp) return "0";
     std::string inner = key.substr(lp + 1, rp - lp - 1);
+    if (ku.rfind("COUNT(", 0) == 0) {
+        if (inner == "*") return std::to_string(grp.size());
+        // COUNT(col) counts the rows whose value is not NULL, as it does in the select list (`HAVING COUNT(o.id) = 0` on a LEFT
+        // JOIN is how customers without orders are found: every group has a row, only the matched ones have an `o.id`)
+        const std::string arg = resolve_arg_key(grp, inner);
+        std::size_t n = 0;
+        for (const Row* r_ptr : grp) {
+            auto it = r_ptr->find(arg);
+            if (it != r_ptr->end() && it->second != EXECUTOR_NULL_VALUE) n++;
+        }
+        return std::to_string(n);
+    }
+    inner = resolve_arg_key(grp, inner);
 
     std::vector<double> vals;
     for (const Row* r_ptr : grp) {
@@ -483,12 +510,12 @@ Row Executor::compute_aggregates(const std::vector<const Row*>& grp, const std::
         const CondExpr* filter = nullptr;
         if (auto* agg = std::get_if<SelectColumn::Agg>(&col.data)) {
             func = &agg->func;
-            col_name = agg->col;
-            label = agg_label(*func, col_name);
+            col_name = agg->source.empty() ? agg->col : agg->source;
+            label = agg_label(*func, agg->col);
             if (agg->filter) filter = &*agg->filter;
         } else if (auto* agg_a = std::get_if<SelectColumn::AggAlias>(&col.data)) {
             func = &agg_a->func;
-            col_name = agg_a->col;
+            col_name = agg_a->source.empty() ? agg_a->col : agg_a->source;
             label = agg_a->alias;
             if (agg_a->filter) filter = &*agg_a->filter;
         } else {
@@ -512,6 +539,7 @@ Row Executor::compute_aggregates(const std::vector<const Row*>& grp, const std::
             grp_ptr = &filtered_storage;
         }
         const std::vector<const Row*>& grp = *grp_ptr;
+        col_name = resolve_arg_key(grp, col_name);
 
         if (auto* gc = std::get_if<AggFunc::GroupConcat>(&func->data)) {
             std::vector<std::string> strs;

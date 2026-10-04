@@ -428,6 +428,7 @@ ArithExpr Parser::parse_arith_factor() {
             const Token* it = advance();
             if (!it || it->kind != TokenKind::Ident) throw ParseError("Expected column in aggregate");
             inner = it->text;
+            if (peek_is(TokenKind::Dot)) { advance(); inner += "." + expect_ident(); }
         }
         if (!peek_is(TokenKind::RParen)) throw ParseError("Expected ')' after aggregate");
         advance();

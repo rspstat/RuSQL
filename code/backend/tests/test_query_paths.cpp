@@ -1,5 +1,8 @@
 #include <algorithm>
 #include <array>
+#include <cstdlib>
+#include <cstdio>
+#include <cmath>
 #include <filesystem>
 #include <functional>
 #include <map>
@@ -986,4 +989,362 @@ TEST_CASE("table.column spellings answer like the bare spellings in ORDER BY, DI
     // they are not trivially equal: the sorted answers differ from the table order, and DISTINCT really drops rows
     REQUIRE(table_cells(ok_text(ex, "SELECT aid FROM a ORDER BY a.v DESC, a.aid"))[0][0] != "1");
     REQUIRE(table_cells(ok_text(ex, "SELECT DISTINCT a.g FROM a")).size() == 3);
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// An aggregate's argument written with its table: `COUNT(u.id)`, or `COUNT(y.id)` through an alias. The parser kept the bare
+// column name only, so with `id` in both tables every such aggregate read the FROM table's column: `COUNT(u.id)` over a LEFT
+// JOIN counted the rows without a partner too, and `SUM(a.id)` and `SUM(b.id)` were one number under one name. The argument
+// now keeps its qualifier (it also names the result column, as typed) and an alias is resolved to its table. The reference
+// below is computed here, from the data, and the tables share their column names on purpose.
+
+namespace {
+// the cells of the header line of a result table
+std::vector<std::string> header_cells(const std::string& text) {
+    std::istringstream in(text);
+    std::string line;
+    while (std::getline(in, line)) {
+        if (line.empty() || line[0] != '|') continue;
+        std::vector<std::string> row;
+        std::size_t pos = 1;
+        while (pos < line.size()) {
+            std::size_t bar = line.find('|', pos);
+            if (bar == std::string::npos) break;
+            std::string v = line.substr(pos, bar - pos);
+            v.erase(0, v.find_first_not_of(' '));
+            v.erase(v.find_last_not_of(' ') + 1);
+            row.push_back(v);
+            pos = bar + 1;
+        }
+        return row;
+    }
+    return {};
+}
+} // namespace
+
+TEST_CASE("aggregates over table.column match a reference when both tables have the same column names",
+          "[query_paths][qualified][aggregate]") {
+    unsigned seed_count = 2; // RUSQL_FUZZ_SEEDS=30 runs a much longer campaign
+    if (const char* e = std::getenv("RUSQL_FUZZ_SEEDS")) seed_count = static_cast<unsigned>(std::strtoul(e, nullptr, 10));
+    unsigned seed_start = 0;
+    if (const char* e = std::getenv("RUSQL_FUZZ_START")) seed_start = static_cast<unsigned>(std::strtoul(e, nullptr, 10));
+    struct Config {
+        int t_rows, u_rows;
+        bool index;
+    };
+    std::size_t checked = 0, with_having = 0, with_left = 0;
+    for (const Config& cfg : {Config{90, 5, false}, Config{90, 5, true}, Config{400, 40, true}, Config{12, 1, false}}) {
+        for (unsigned k = seed_start; k < seed_start + seed_count; k++) {
+            INFO("rows " << cfg.t_rows << "/" << cfg.u_rows << " index " << cfg.index << " seed " << k);
+            std::mt19937 rng(4242 + k * 17 + static_cast<unsigned>(cfg.t_rows) + (cfg.index ? 1u : 0u));
+            TempDataDir dir("qp_qualified_aggregates");
+            Executor ex(dir.path);
+            open_db(ex);
+            REQUIRE(ex.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, grp INT, val INT, tag VARCHAR(8))").is_ok());
+            REQUIRE(ex.execute_sql("CREATE TABLE u (id INT PRIMARY KEY, name VARCHAR(8), grp INT)").is_ok());
+            static const char* tags[] = {"a", "b", "c", "d"};
+            static const char* names[] = {"nx", "ny", "nz", "nw", "nv"};
+            std::vector<QT> T;
+            std::vector<QU> U;
+            for (int i = 1; i <= cfg.u_rows; i++) U.push_back({i, names[rng() % 5], static_cast<int>(rng() % 4)});
+            for (int i = 1; i <= cfg.t_rows; i++) {
+                T.push_back({i, static_cast<int>(rng() % static_cast<unsigned>(cfg.u_rows + 2)), static_cast<int>(rng() % 25), tags[rng() % 4]});
+            }
+            std::string tv, uv;
+            for (auto& t : T) tv += std::string(tv.empty() ? "(" : ", (") + std::to_string(t.id) + ", " + std::to_string(t.grp) + ", " + std::to_string(t.val) + ", '" + t.tag + "')";
+            for (auto& u : U) uv += std::string(uv.empty() ? "(" : ", (") + std::to_string(u.id) + ", '" + u.name + "', " + std::to_string(u.grp) + ")";
+            REQUIRE(ex.execute_sql("INSERT INTO t VALUES " + tv).is_ok());
+            REQUIRE(ex.execute_sql("INSERT INTO u VALUES " + uv).is_ok());
+            if (cfg.index) REQUIRE(ex.execute_sql("CREATE INDEX t_grp ON t (grp)").is_ok());
+
+            struct JR {
+                const QT* t;
+                const QU* u;
+            };
+            struct Spec {
+                std::string fn; // COUNT* COUNT COUNTD SUM AVG MIN MAX
+                std::string col;
+            };
+            struct Val {
+                std::string text;
+                double num;
+            };
+            const std::vector<std::string> all_cols = {"t.id", "t.grp", "t.val", "t.tag", "u.id", "u.name", "u.grp"};
+            const std::set<std::string> numeric_cols = {"t.id", "t.grp", "t.val", "u.id", "u.grp"};
+            for (int iter = 0; iter < 80; iter++) {
+                const bool left = rng() % 3 == 0, alias = rng() % 2 == 0;
+                const std::string tq = alias ? "x" : "t", uq = alias ? "y" : "u";
+                auto spell = [&](const std::string& col) { return (col[0] == 't' ? tq : uq) + col.substr(1); };
+                const std::string from = std::string("FROM t") + (alias ? " x" : "") + (left ? " LEFT JOIN u" : " JOIN u") + (alias ? " y" : "") + " ON " + uq + ".id = " + tq + ".grp";
+                std::vector<JR> joined;
+                for (auto& t : T) {
+                    const QU* match = nullptr;
+                    for (auto& u : U) {
+                        if (u.id == t.grp) match = &u;
+                    }
+                    if (match || left) joined.push_back({&t, match});
+                }
+                if (joined.empty()) continue;
+                // the u columns of a LEFT JOIN row without a partner are NULL: only the aggregates with a defined answer on them
+                // (COUNT, whose NULL handling is what the original bug broke) take part
+                auto pick_col = [&](const std::vector<std::string>& pool) {
+                    std::vector<std::string> allowed;
+                    for (auto& c : pool) {
+                        if (!left || c[0] == 't') allowed.push_back(c);
+                    }
+                    return allowed[rng() % allowed.size()];
+                };
+                auto make_spec = [&]() -> Spec {
+                    switch (rng() % 7) {
+                        case 0: return {"COUNT*", "*"};
+                        case 1: return {"COUNT", all_cols[rng() % all_cols.size()]};
+                        case 2: return {"COUNTD", all_cols[rng() % all_cols.size()]};
+                        case 3: return {"SUM", pick_col({"t.id", "t.grp", "t.val", "u.id", "u.grp"})};
+                        case 4: return {"AVG", pick_col({"t.id", "t.grp", "t.val", "u.id", "u.grp"})};
+                        case 5: return {"MIN", pick_col(all_cols)};
+                        default: return {"MAX", pick_col(all_cols)};
+                    }
+                };
+                auto text_of = [&](const Spec& sp) {
+                    if (sp.fn == "COUNT*") return std::string("COUNT(*)");
+                    const std::string name = spell(sp.col);
+                    if (sp.fn == "COUNT") return "COUNT(" + name + ")";
+                    if (sp.fn == "COUNTD") return "COUNT(DISTINCT " + name + ")";
+                    return sp.fn + "(" + name + ")";
+                };
+                auto eval = [&](const Spec& sp, const std::vector<const JR*>& rows) -> Val {
+                    if (sp.fn == "COUNT*") return {std::to_string(rows.size()), static_cast<double>(rows.size())};
+                    std::vector<std::string> vals; // the non-NULL values of the argument
+                    for (const JR* r : rows) {
+                        std::string v = q_value(*r->t, r->u, sp.col);
+                        if (v != "NULL") vals.push_back(v);
+                    }
+                    if (sp.fn == "COUNT") return {std::to_string(vals.size()), static_cast<double>(vals.size())};
+                    if (sp.fn == "COUNTD") {
+                        std::set<std::string> distinct(vals.begin(), vals.end());
+                        return {std::to_string(distinct.size()), static_cast<double>(distinct.size())};
+                    }
+                    const bool numeric = numeric_cols.count(sp.col) > 0;
+                    std::vector<double> nums;
+                    if (numeric) {
+                        for (auto& v : vals) nums.push_back(std::stod(v));
+                    }
+                    if (sp.fn == "SUM" || sp.fn == "AVG") {
+                        double sum = 0;
+                        for (double n : nums) sum += n;
+                        if (sp.fn == "SUM") return {std::to_string(static_cast<long long>(sum)), sum};
+                        double avg = nums.empty() ? 0.0 : sum / static_cast<double>(nums.size());
+                        char buf[64];
+                        std::snprintf(buf, sizeof buf, "%.4f", avg);
+                        return {buf, avg};
+                    }
+                    if (numeric) {
+                        double v = sp.fn == "MIN" ? *std::min_element(nums.begin(), nums.end()) : *std::max_element(nums.begin(), nums.end());
+                        return {std::to_string(static_cast<long long>(v)), v};
+                    }
+                    std::string v = sp.fn == "MIN" ? *std::min_element(vals.begin(), vals.end()) : *std::max_element(vals.begin(), vals.end());
+                    return {v, 0.0};
+                };
+                auto to_num = [](const std::string& text) {
+                    try {
+                        return std::stod(text);
+                    } catch (...) {
+                        return 0.0;
+                    }
+                };
+                auto same_cell = [&](const Spec& sp, const std::string& got, const Val& want) {
+                    if (sp.fn == "AVG") return std::abs(to_num(got) - want.num) < 1e-3;
+                    return got == want.text;
+                };
+
+                std::vector<Spec> specs;
+                for (std::size_t n = 1 + rng() % 3; n > 0; n--) specs.push_back(make_spec());
+                std::string agg_list;
+                for (auto& sp : specs) agg_list += (agg_list.empty() ? "" : ", ") + text_of(sp);
+
+                if (iter % 2 == 0) {
+                    // scalar aggregates over the whole join
+                    std::string sql = "SELECT " + agg_list + " " + from;
+                    std::vector<const JR*> all;
+                    for (auto& r : joined) all.push_back(&r);
+                    const std::string text = ok_text(ex, sql);
+                    auto got = table_cells(text);
+                    auto header = header_cells(text);
+                    INFO(sql);
+                    REQUIRE(got.size() == 1);
+                    REQUIRE(got[0].size() == specs.size());
+                    REQUIRE(header.size() == specs.size());
+                    for (std::size_t i = 0; i < specs.size(); i++) {
+                        INFO("column " << i << ": " << text_of(specs[i]));
+                        REQUIRE(same_cell(specs[i], got[0][i], eval(specs[i], all)));
+                        REQUIRE(header[i] == text_of(specs[i])); // the result column is named as the query wrote it
+                    }
+                } else {
+                    // GROUP BY a qualified key [HAVING an aggregate] ORDER BY the key
+                    std::vector<std::string> key_pool = {"t.grp", "t.tag"};
+                    if (!left) {
+                        key_pool.push_back("u.name");
+                        key_pool.push_back("u.id");
+                    }
+                    const std::string key = key_pool[rng() % key_pool.size()];
+                    std::vector<std::pair<std::string, std::vector<const JR*>>> groups;
+                    {
+                        std::map<std::string, std::size_t> at;
+                        for (auto& r : joined) {
+                            std::string kv = q_value(*r.t, r.u, key);
+                            auto it = at.find(kv);
+                            if (it == at.end()) {
+                                it = at.emplace(kv, groups.size()).first;
+                                groups.push_back({kv, {}});
+                            }
+                            groups[it->second].second.push_back(&r);
+                        }
+                    }
+                    std::stable_sort(groups.begin(), groups.end(), [](auto& a, auto& b) { return ref_cmp(a.first, b.first) < 0; });
+                    std::string sql = "SELECT " + spell(key) + ", " + agg_list + " " + from + " GROUP BY " + spell(key);
+                    std::optional<Spec> having;
+                    double threshold = 0;
+                    if (rng() % 2 == 0) {
+                        // an aggregate over a numeric column (or COUNT) in HAVING, which the select list need not repeat
+                        std::vector<Spec> candidates = {{"COUNT*", "*"}, {"COUNT", all_cols[rng() % all_cols.size()]}, {"SUM", pick_col({"t.val", "t.id", "u.id"})},
+                                                        {"AVG", pick_col({"t.val", "t.grp"})}, {"MAX", pick_col({"t.val", "t.id"})}, {"MIN", pick_col({"t.val", "t.id"})}};
+                        having = candidates[rng() % candidates.size()];
+                        const std::string h = text_of(*having);
+                        threshold = (having->fn == "COUNT*" || having->fn == "COUNT" ? static_cast<double>(rng() % 6) : static_cast<double>(rng() % (having->fn == "SUM" ? 200 : 20))) + 0.5;
+                        char buf[32];
+                        std::snprintf(buf, sizeof buf, "%.1f", threshold);
+                        sql += " HAVING " + h + " > " + buf;
+                        with_having++;
+                    }
+                    sql += " ORDER BY " + spell(key);
+                    std::vector<std::vector<std::string>> expected;
+                    for (auto& [kv, rows] : groups) {
+                        if (having && !(eval(*having, rows).num > threshold)) continue;
+                        std::vector<std::string> row = {kv};
+                        for (auto& sp : specs) row.push_back(eval(sp, rows).text);
+                        expected.push_back(std::move(row));
+                    }
+                    auto got = table_cells(ok_text(ex, sql));
+                    INFO(sql);
+                    REQUIRE(got.size() == expected.size());
+                    for (std::size_t r = 0; r < got.size(); r++) {
+                        INFO("group row " << r);
+                        REQUIRE(got[r].size() == specs.size() + 1);
+                        REQUIRE(got[r][0] == expected[r][0]);
+                        for (std::size_t i = 0; i < specs.size(); i++) {
+                            INFO("column " << i << ": " << text_of(specs[i]) << " got " << got[r][i + 1] << " want " << expected[r][i + 1]);
+                            REQUIRE(same_cell(specs[i], got[r][i + 1], Val{expected[r][i + 1], to_num(expected[r][i + 1])}));
+                        }
+                    }
+                }
+                if (left) with_left++;
+                checked++;
+            }
+        }
+    }
+    REQUIRE(checked >= 400);
+    REQUIRE(with_having >= 40);
+    REQUIRE(with_left >= 40);
+}
+
+TEST_CASE("an aggregate's result column is named as the query wrote it", "[query_paths][qualified][aggregate]") {
+    TempDataDir dir("qp_aggregate_headers");
+    Executor ex(dir.path);
+    open_db(ex);
+    REQUIRE(ex.execute_sql("CREATE TABLE a (id INT PRIMARY KEY, g INT, v INT)").is_ok());
+    REQUIRE(ex.execute_sql("CREATE TABLE b (id INT PRIMARY KEY, nm VARCHAR(5), w INT)").is_ok());
+    REQUIRE(ex.execute_sql("INSERT INTO a VALUES (1,1,5),(2,1,6),(3,2,7),(4,9,8)").is_ok());
+    REQUIRE(ex.execute_sql("INSERT INTO b VALUES (1,'x',10),(2,'y',20)").is_ok());
+    using H = std::vector<std::string>;
+    REQUIRE(header_cells(ok_text(ex, "SELECT SUM(b.id), SUM(a.id) FROM a JOIN b ON b.id = a.g")) == H{"SUM(b.id)", "SUM(a.id)"});
+    REQUIRE(header_cells(ok_text(ex, "SELECT SUM(x.id), COUNT(DISTINCT y.nm), MAX(y.w), GROUP_CONCAT(y.nm) FROM a x JOIN b y ON y.id = x.g")) ==
+            H{"SUM(x.id)", "COUNT(DISTINCT y.nm)", "MAX(y.w)", "GROUP_CONCAT(y.nm)"});
+    REQUIRE(header_cells(ok_text(ex, "SELECT COUNT(*), SUM(v), MIN(a.v) FROM a")) == H{"COUNT(*)", "SUM(v)", "MIN(a.v)"});
+    REQUIRE(header_cells(ok_text(ex, "SELECT COUNT(y.id) AS n, SUM(y.w) AS total FROM a x JOIN b y ON y.id = x.g")) == H{"n", "total"});
+    // and the values are the right table's, which the old bare name could not tell
+    REQUIRE(table_cells(ok_text(ex, "SELECT SUM(a.id), SUM(b.id) FROM a JOIN b ON b.id = a.g")) == std::vector<std::vector<std::string>>{{"6", "4"}});
+    REQUIRE(table_cells(ok_text(ex, "SELECT MAX(x.id), MAX(y.id), MIN(y.id) FROM a x LEFT JOIN b y ON y.id = x.g")) == std::vector<std::vector<std::string>>{{"4", "2", "1"}});
+}
+
+// customers without orders: every group of a LEFT JOIN has a row, only the matched ones have an `o.id`. COUNT(o.id) counts those,
+// in the select list and in HAVING (where COUNT(col) counted every row of the group, NULL or not, unless the select list repeated it)
+TEST_CASE("COUNT of a column of the LEFT-joined table skips the rows without a partner, in HAVING too", "[query_paths][qualified][aggregate]") {
+    TempDataDir dir("qp_count_left_join");
+    Executor ex(dir.path);
+    open_db(ex);
+    REQUIRE(ex.execute_sql("CREATE TABLE c (id INT PRIMARY KEY, name VARCHAR(5))").is_ok());
+    REQUIRE(ex.execute_sql("CREATE TABLE o (id INT PRIMARY KEY, cid INT, amt INT)").is_ok());
+    REQUIRE(ex.execute_sql("INSERT INTO c VALUES (1,'a'),(2,'b'),(3,'c'),(4,'d')").is_ok());
+    REQUIRE(ex.execute_sql("INSERT INTO o VALUES (10,1,5),(11,1,7),(12,2,9)").is_ok());
+    using Rows = std::vector<std::vector<std::string>>;
+    const std::string left = "FROM c LEFT JOIN o ON o.cid = c.id GROUP BY c.name";
+    REQUIRE(table_cells(ok_text(ex, "SELECT c.name, COUNT(o.id) " + left + " ORDER BY c.name")) == Rows{{"a", "2"}, {"b", "1"}, {"c", "0"}, {"d", "0"}});
+    REQUIRE(table_cells(ok_text(ex, "SELECT c.name " + left + " HAVING COUNT(o.id) = 0 ORDER BY c.name")) == Rows{{"c"}, {"d"}});
+    REQUIRE(table_cells(ok_text(ex, "SELECT c.name " + left + " HAVING COUNT(o.amt) >= 1 ORDER BY c.name")) == Rows{{"a"}, {"b"}});
+    REQUIRE(table_cells(ok_text(ex, "SELECT c.name " + left + " HAVING COUNT(*) = 1 ORDER BY c.name")) == Rows{{"b"}, {"c"}, {"d"}}); // COUNT(*) still counts rows
+    REQUIRE(table_cells(ok_text(ex, "SELECT c.name " + left + " HAVING COUNT(o.id) > 1")) == Rows{{"a"}});
+    // through aliases (and the alias of the joined table is what resolves `y.id` to orders' column, not customers')
+    REQUIRE(table_cells(ok_text(ex, "SELECT x.name FROM c x LEFT JOIN o y ON y.cid = x.id GROUP BY x.name HAVING COUNT(y.id) = 0 ORDER BY x.name")) == Rows{{"c"}, {"d"}});
+    REQUIRE(table_cells(ok_text(ex, "SELECT x.name, SUM(y.amt) FROM c x JOIN o y ON y.cid = x.id GROUP BY x.name HAVING SUM(y.id) > 11 ORDER BY x.name")) == Rows{{"a", "12"}, {"b", "9"}});
+    // window functions over a qualified argument, a partition and an alias
+    REQUIRE(table_cells(ok_text(ex, "SELECT x.id, SUM(y.id) OVER (PARTITION BY x.name) AS s, COUNT(y.id) OVER (PARTITION BY y.cid) AS n FROM c x JOIN o y ON y.cid = x.id ORDER BY y.id")) ==
+            Rows{{"1", "21", "2"}, {"1", "21", "2"}, {"2", "12", "1"}});
+}
+
+// qualified and bare spellings of the same aggregate on tables whose column names do not collide: the same rows, in a plain
+// scan, a join, a LEFT JOIN, a group, a view, a CTE and a derived table, with FILTER, DISTINCT, HAVING and a window function
+TEST_CASE("table.column arguments of aggregates answer like the bare spellings", "[query_paths][qualified][aggregate]") {
+    TempDataDir dir("qp_aggregate_twins");
+    Executor ex(dir.path);
+    open_db(ex);
+    REQUIRE(ex.execute_sql("CREATE TABLE a (aid INT PRIMARY KEY, g INT, v INT)").is_ok());
+    REQUIRE(ex.execute_sql("CREATE TABLE b (bid INT PRIMARY KEY, nm VARCHAR(5), w INT)").is_ok());
+    REQUIRE(ex.execute_sql("INSERT INTO a VALUES (1,2,50),(2,1,40),(3,2,30),(4,1,20),(5,3,10),(6,2,NULL),(7,3,60),(8,1,35),(9,7,5)").is_ok());
+    REQUIRE(ex.execute_sql("INSERT INTO b VALUES (1,'x',7),(2,'y',8),(3,'z',9),(4,'w',NULL)").is_ok());
+    REQUIRE(ex.execute_sql("CREATE VIEW vv AS SELECT aid, g, v FROM a").is_ok());
+    const std::string J = "FROM a JOIN b ON b.bid = a.g", L = "FROM a LEFT JOIN b ON b.bid = a.g";
+    const std::vector<std::pair<std::string, std::string>> twins = {
+        {"SELECT COUNT(a.v), SUM(a.v), AVG(a.v), MIN(a.v), MAX(a.v) FROM a", "SELECT COUNT(v), SUM(v), AVG(v), MIN(v), MAX(v) FROM a"},
+        {"SELECT SUM(x.v), COUNT(DISTINCT x.g) FROM a x", "SELECT SUM(v), COUNT(DISTINCT g) FROM a"},
+        {"SELECT a.g, SUM(a.v), COUNT(a.v) FROM a GROUP BY a.g ORDER BY a.g", "SELECT g, SUM(v), COUNT(v) FROM a GROUP BY g ORDER BY g"},
+        {"SELECT b.nm, SUM(a.v), MAX(b.w) " + J + " GROUP BY b.nm ORDER BY b.nm", "SELECT nm, SUM(v), MAX(w) " + J + " GROUP BY nm ORDER BY nm"},
+        {"SELECT b.nm, COUNT(b.w), COUNT(a.aid) " + L + " GROUP BY b.nm ORDER BY b.nm", "SELECT nm, COUNT(w), COUNT(aid) " + L + " GROUP BY nm ORDER BY nm"},
+        {"SELECT a.g, COUNT(b.bid), SUM(b.w) " + L + " GROUP BY a.g ORDER BY a.g", "SELECT g, COUNT(bid), SUM(w) " + L + " GROUP BY g ORDER BY g"},
+        {"SELECT y.nm, SUM(x.v) FROM a x JOIN b y ON y.bid = x.g GROUP BY y.nm ORDER BY y.nm", "SELECT nm, SUM(v) " + J + " GROUP BY nm ORDER BY nm"},
+        {"SELECT a.g FROM a GROUP BY a.g HAVING SUM(a.v) > 40 ORDER BY a.g", "SELECT g FROM a GROUP BY g HAVING SUM(v) > 40 ORDER BY g"},
+        {"SELECT b.nm " + J + " GROUP BY b.nm HAVING MAX(a.v) >= 50 AND COUNT(a.aid) > 1 ORDER BY b.nm", "SELECT nm " + J + " GROUP BY nm HAVING MAX(v) >= 50 AND COUNT(aid) > 1 ORDER BY nm"},
+        {"SELECT COUNT(*) FILTER (WHERE a.v > 25), SUM(a.v) FILTER (WHERE a.g = 2) FROM a", "SELECT COUNT(*) FILTER (WHERE v > 25), SUM(v) FILTER (WHERE g = 2) FROM a"},
+        {"SELECT GROUP_CONCAT(a.aid), JSON_AGG(a.v) FROM a WHERE a.g = 1", "SELECT GROUP_CONCAT(aid), JSON_AGG(v) FROM a WHERE g = 1"},
+        {"SELECT aid, SUM(a.v) OVER (PARTITION BY a.g) AS s FROM a ORDER BY aid", "SELECT aid, SUM(v) OVER (PARTITION BY g) AS s FROM a ORDER BY aid"},
+        {"SELECT vv.g, SUM(vv.v), COUNT(vv.v) FROM vv GROUP BY vv.g ORDER BY vv.g", "SELECT g, SUM(v), COUNT(v) FROM vv GROUP BY g ORDER BY g"},
+        {"WITH c AS (SELECT a.g, a.v FROM a) SELECT c.g, SUM(c.v) FROM c GROUP BY c.g ORDER BY c.g", "WITH c AS (SELECT g, v FROM a) SELECT g, SUM(v) FROM c GROUP BY g ORDER BY g"},
+        {"SELECT d.g, MAX(d.v) FROM (SELECT g, v FROM a) d GROUP BY d.g ORDER BY d.g", "SELECT g, MAX(v) FROM (SELECT g, v FROM a) d GROUP BY g ORDER BY g"},
+    };
+    for (auto& [qualified, bare] : twins) {
+        INFO(qualified << "   vs   " << bare);
+        auto q = table_cells(ok_text(ex, qualified)), b = table_cells(ok_text(ex, bare));
+        REQUIRE(q == b);
+        REQUIRE_FALSE(q.empty());
+    }
+}
+
+// A view is stored as the JSON form of its statement: an aggregate written with qualifiers and an alias has to read back the same
+// (its column named as typed, its `source` resolved) after the database is reopened.
+TEST_CASE("a view with qualified aggregates reads back the same after a restart", "[query_paths][qualified][aggregate]") {
+    TempDataDir dir("qp_aggregate_view_restart");
+    std::string first;
+    {
+        Executor ex(dir.path);
+        open_db(ex);
+        REQUIRE(ex.execute_sql("CREATE TABLE a (id INT PRIMARY KEY, g INT, v INT)").is_ok());
+        REQUIRE(ex.execute_sql("CREATE TABLE b (id INT PRIMARY KEY, nm VARCHAR(5), w INT)").is_ok());
+        REQUIRE(ex.execute_sql("INSERT INTO a VALUES (1,1,5),(2,1,6),(3,2,7),(4,9,8)").is_ok());
+        REQUIRE(ex.execute_sql("INSERT INTO b VALUES (1,'x',10),(2,'y',20)").is_ok());
+        REQUIRE(ex.execute_sql("CREATE VIEW per_g AS SELECT x.g, COUNT(y.id) AS n, SUM(x.id), MAX(y.w) FROM a x LEFT JOIN b y ON y.id = x.g GROUP BY x.g").is_ok());
+        first = ok_text(ex, "SELECT * FROM per_g ORDER BY g");
+        REQUIRE(table_cells(first) == std::vector<std::vector<std::string>>{{"1", "2", "3", "10"}, {"2", "1", "3", "20"}, {"9", "0", "4", "NULL"}});
+    }
+    Executor again(dir.path);
+    REQUIRE(again.execute_sql("USE d").is_ok());
+    REQUIRE(ok_text(again, "SELECT * FROM per_g ORDER BY g") == first);
 }

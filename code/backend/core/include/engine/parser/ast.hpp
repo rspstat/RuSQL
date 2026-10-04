@@ -365,8 +365,11 @@ struct SelectColumn {
     // original, new C++-native addition. Restricts which rows THIS aggregate considers,
     // independent of the query's own WHERE/HAVING (e.g. `COUNT(*) FILTER (WHERE
     // status='active')` alongside a plain unfiltered `COUNT(*)` in the same SELECT).
-    struct Agg { AggFunc func; std::string col; std::optional<CondExpr> filter; };
-    struct AggAlias { AggFunc func; std::string col; std::string alias; std::optional<CondExpr> filter; };
+    // `col` is the argument as the query spells it (`b.id`, `o.amount`): it names the result column (`SUM(o.amount)`), like the
+    // text the user typed. `source` is where a row holds that value when `col` goes through a table ALIAS: the same name with the
+    // table in place of the alias (`orders.amount`); empty when `col` already names the table (or none).
+    struct Agg { AggFunc func; std::string col; std::optional<CondExpr> filter; std::string source; };
+    struct AggAlias { AggFunc func; std::string col; std::string alias; std::optional<CondExpr> filter; std::string source; };
     struct Func { std::string name; std::vector<std::string> args; std::optional<std::string> alias; };
     struct Expr { ArithExpr expr; std::optional<std::string> alias; };
     struct CaseWhen {
