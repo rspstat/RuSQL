@@ -11,9 +11,10 @@
                         (UI 패널용이 아니라 두 빌드 비교용; 40초 넘는 질의는 timeout으로 표시하고 이후 질의는 건너뜀)
   ├── graph.py          발표용 그래프 (result.json → benchmark_result.png)
   ├── speedup_chart.py  성능 작업의 개선 배율 그래프 (같은 상태에서 이전 빌드와 번갈아 잰 쌍만 사용 → speedup_chart.png)
-  ├── chart.py          예전 형식(RuSQL vs MySQL 5개 항목)용 차트 스크립트 -- 현재 result.json과는 형식이 다름
   ├── requirements.txt  Python 의존 패키지
   └── README.txt        이 파일
+
+  (현재 result.json과 형식이 맞지 않던 예전 차트 스크립트 chart.py는 archive/code/test/perf/ 로 옮겼다.)
 
   목표는 MySQL을 따라잡는 것이 아니라 RuSQL 자신의 최적화를 전후로 비교하는 것이다.
   MySQL 수치는 맥락을 잡기 위한 참고값이다.

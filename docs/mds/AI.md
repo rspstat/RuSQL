@@ -77,12 +77,12 @@ XA 분산 트랜잭션과 샤딩은 여전히 스코프 밖(단일 프로세스 
 
 ### 완료된 작업
 1. ~~베이스 모델 선택~~ **완료 (2026-09-07)**: Qwen2.5-Coder-1.5B-Instruct 확정(Apache 2.0 라이선스, 코드/SQL 특화 사전학습, CPU 추론에 적합한 크기, Instruct 변형이라 LoRA는 도메인 특화만 추가하면 됨). Qwen2.5-Coder-3B-Instruct는 이후 품질 비교용 후보로 남겨둠.
-2. ~~데이터 생성 설계~~ **완료 (2026-09-12, 확장판)**: `code/AI/data_generation/`에 합성 데이터 생성 파이프라인 구현 완료.
+2. ~~데이터 생성 설계~~ **완료 (2026-09-12, 확장판)**: `archive/AI/data_generation/`에 합성 데이터 생성 파이프라인 구현 완료.
    - 스키마 20개(도메인당 3~4 테이블, FK 포함) — `schemas.py`. 그중 3개(`real_estate`, `airline`, `insurance`)는 학습에서 완전히 제외하고 test 셋 전용(일반화 검증용 held-out 스키마). 최초 17개에서 `coffee_shop`/`veterinary_clinic`/`conference` 3개를 학습 도메인으로 추가.
    - 쿼리 의도(intent) 16종 — `templates.py`: 전체 조회, 텍스트/enum 등호 필터, 숫자 비교 필터, 정렬+LIMIT, 전체 개수, 필터 후 개수, 숫자 집계(SUM/AVG/MAX/MIN), GROUP BY 집계, JOIN+필터, JOIN+GROUP BY 개수, LIKE 패턴 검색, 다중 AND 조건, IS NULL/IS NOT NULL, DISTINCT, BETWEEN 범위, LIMIT 없는 ORDER BY. 최초 10종에서 6종 추가.
    - 한국어 조사(이/가, 은/는, 을/를, 과/와, 으로/로) 배치침 기반 자동 선택 — `korean.py`. 영어 테이블 라벨의 단/복수 자동 변환 — `term_dict.py`의 `pluralize_en`/`label_en_plural`.
    - 한/영 이중언어, 스키마 조건부(프롬프트에 대상 스키마 DDL 포함) 질문-SQL 쌍 생성 — `generate.py`.
-   - 생성 결과(시드 42, 아래 품질 버그 수정 후 재생성된 최종본 — 현재 `code/AI/data_generation/dataset/`에 커밋된 실제 파일 기준): train 2993행/val 157행(17개 학습 도메인) + test 568행(held-out 3개 도메인) = 총 3718행. 목표치(3000~6000행) 달성. (최초 생성 시점엔 test 572행/총 3722행으로 기록됐었으나, 아래 3가지 버그 수정 후 재생성되며 568/3718로 바뀜 — 정확한 변동 원인은 별도 확인 안 함.)
+   - 생성 결과(시드 42, 아래 품질 버그 수정 후 재생성된 최종본 — 현재 `archive/AI/data_generation/dataset/`에 커밋된 실제 파일 기준): train 2993행/val 157행(17개 학습 도메인) + test 568행(held-out 3개 도메인) = 총 3718행. 목표치(3000~6000행) 달성. (최초 생성 시점엔 test 572행/총 3722행으로 기록됐었으나, 아래 3가지 버그 수정 후 재생성되며 568/3718로 바뀜 — 정확한 변동 원인은 별도 확인 안 함.)
    - **1차 생성 후 발견 및 수정한 품질 버그** (실제 생성물을 `Read` 도구로 직접 읽어 검증하며 발견 — 터미널 출력이 아니라 파일 자체를 확인):
      1. 68개 테이블/컬럼 식별자가 `term_dict.py`의 한/영 용어 사전에 아예 없어서 한글 문장에 영어 원문이 그대로 섞여 나옴(예: "총액이 50보다 큰 **orders**를 보여줘") — 스키마 전체를 스캔해 누락된 식별자를 모두 사전에 추가.
      2. 영어 문장이 단수 라벨을 복수 문맥에 그대로 써서 문법 오류(예: "Which customer have..." → "customers"가 맞음) — `pluralize_en()` 추가, 바른 문맥에만 적용(고정 관사/every 등은 단수 유지).
@@ -90,7 +90,7 @@ XA 분산 트랜잭션과 샤딩은 여전히 스코프 밖(단일 프로세스 
      4. DISTINCT 질문에서 컬럼 라벨에 이미 포함된 단어가 중복 출력(예: "회원권 종류 **종류**를"). — 문구를 재구성해 중복 제거.
    - 수정 후 재검증: 여러 랜덤 샘플을 `Read` 도구로 직접 재확인해 한/영 문장 품질 이상 없음 확인.
 3. Colab Pro에서 LoRA/QLoRA 파인튜닝. **완료 (2026-09-18) — 실제 학습·평가 성공.**
-   - `code/AI/finetuning/rusql_nl2sql_finetune.ipynb`: 의존성 설치 → Drive 마운트 → 설정값 → 공유 프롬프트 포맷 → Qwen2.5-Coder-1.5B-Instruct 로드+LoRA 부착 → 데이터셋 로드/포맷팅 → trl `SFTTrainer`로 학습 → held-out test 셋(`real_estate`/`airline`/`insurance`) 평가, 순서. 데이터셋은 `code/AI/data_generation/dataset/`에서 Google Drive(`MyDrive/projects/RuSQL/dataset/`)로 한 번 업로드해두면 런타임 리셋에도 안전. 어댑터도 Drive(`MyDrive/projects/RuSQL/rusql-nl2sql-lora`)에 저장.
+   - `archive/AI/finetuning/rusql_nl2sql_finetune.ipynb`: 의존성 설치 → Drive 마운트 → 설정값 → 공유 프롬프트 포맷 → Qwen2.5-Coder-1.5B-Instruct 로드+LoRA 부착 → 데이터셋 로드/포맷팅 → trl `SFTTrainer`로 학습 → held-out test 셋(`real_estate`/`airline`/`insurance`) 평가, 순서. 데이터셋은 `archive/AI/data_generation/dataset/`에서 Google Drive(`MyDrive/projects/RuSQL/dataset/`)로 한 번 업로드해두면 런타임 리셋에도 안전. 어댑터도 Drive(`MyDrive/projects/RuSQL/rusql-nl2sql-lora`)에 저장.
    - **실행 중 겪은 문제와 수정**: (1) `bitsandbytes` 4bit 양자화가 `transformers==4.46.3`과 버전 불일치 → `0.44.1`→`0.46.1`로 상향. (2) T4(16GB)에서 배치 크기 8 + max_seq_len 1024로 학습 시 CUDA OOM(Qwen2.5 vocab이 커서 loss 계산의 logits 텐서가 큼) → `BATCH_SIZE` 8→2 + `GRAD_ACCUM` 2→8(실효 배치 동일), `MAX_SEQ_LEN` 1024→512, `gradient_checkpointing=True`+`model.enable_input_require_grads()` 추가로 해결.
    - **1차 학습 결과**: held-out(학습에 전혀 안 쓰인 3개 스키마) 572문항 기준 **정확 일치 87.9%**. 실패 케이스를 도메인별/언어별로 쪼개 분석한 결과(영어 실패율 2.8% vs 한국어 21.7%로 큰 격차) 실패의 상당수가 모델 문제가 아니라 **데이터 생성기 자체의 모호성 버그**였음을 발견 — (a) `term_dict.py`에서 `property`/`listing`(real_estate)이 완전히 같은 한글 라벨("매물")을 공유해 질문 자체가 구분 불가능했음(→ `listing`에 "매물 등록"으로 별도 라벨 부여, 스키마 내 라벨 충돌 자동 검사 로직도 추가해 다른 충돌 없음 확인), (b) `flight` 테이블처럼 같은 참조 테이블(`airport`)을 가리키는 FK가 2개(`origin_id`/`destination_id`)인 경우 질문 문구가 어느 쪽인지 명시하지 않아 정답이 사실상 랜덤이었음(→ FK 컬럼 자체의 라벨로 명확화), (c) `gen_order_no_limit`의 두 번째 문구 변형이 정렬 방향(ASC/DESC)을 아예 언급 안 해서 답을 알 수 없었음(→ 방향 명시 추가). 세 가지 다 고치고 데이터셋 재생성 완료.
    - **2차 재학습 결과 (2026-09-19, 위 3가지 버그 수정된 데이터셋으로 재학습)**: held-out 568문항 기준 **정확/정규화 일치 93.7% (532/568)** — 1차 대비 대폭 개선. 도메인별 실패율: `airline` 7.0%→**1.9%**, `real_estate` ~14.5~15.1%→**1.1%**로 거의 해소. `insurance`는 13.6%로 거의 그대로 — 실패 상당수가 `policy`(보험 증권)↔`claim`(보험금 청구) 테이블 혼동인데, 두 라벨이 한글로도 명확히 다름에도 발생해 데이터 버그가 아니라 **모델의 진짜 일반화 한계**로 결론(참고: 라벨 충돌이었던 real_estate `listing`/`property`와는 다른 종류의 실패). 언어별로는 영어 0.7% vs 한국어 12.0%로 격차가 여전히 남아있음. 일부 "실패"는 모델이 JOIN 대신 동등한 서브쿼리를 낸 경우처럼 문자열 완전일치 채점 방식 자체의 한계로 인한 false negative라 실제 정확도는 이보다 다소 높을 것으로 추정.
@@ -109,6 +109,6 @@ XA 분산 트랜잭션과 샤딩은 여전히 스코프 밖(단일 프로세스 
 
 **이전 결정과의 관계**: 2026-09-07의 "MCP(기존 모델 연동) + 직접 학습시킨 전용 모델, 둘 다 있는 게 더 강한 이야기"라는 판단을 **번복**한다. 학습 경험이라는 개인 목표는 이미 달성됐다 — 데이터 생성 파이프라인 설계, Colab에서의 LoRA/QLoRA 학습, 실패 분석을 통한 데이터 버그 3건 수정, held-out 평가까지 실제로 수행했다(위 "완료된 작업" 기록은 사실 그대로 유지).
 
-**남는 것**: `code/AI/`(데이터 생성 코드·데이터셋·Colab 노트북)는 **탐색 실험의 기록으로만** 저장소에 보존한다. 제품 어디에서도 참조하지 않으며, 지울지는 별도 결정 사항이다.
+**남는 것**: `archive/AI/`(데이터 생성 코드·데이터셋·Colab 노트북)는 **탐색 실험의 기록으로만** 저장소에 보존한다. 제품 어디에서도 참조하지 않는다. 2026-10-05에 삭제하지 않고 저장소 루트의 `archive/` 폴더로 옮겨 보관하기로 했다(`archive/AI/`).
 
-**문서·UI 반영 상태**: `DATE.md`(10월 1일 항목), `README.md`(AI Integration), `FUNCTIONS.md`, `DIFF.md`의 AI 연동 행, 앱의 Diagram 페이지(AI 패널을 "Claude via MCP"로 교체)에 반영. 캡스톤 산출물 D01~D08은 이미 AI 연동을 MCP 기반으로만 기술해서 변경이 필요 없었다. 사이드바의 빈 "AI" 탭(`AiView.tsx`)은 원래 사설 모델 UI 자리였으므로 **같은 날(2026-10-01) 제거했다**(활동 바 아이콘·`AiView.tsx`·`.ai-view` CSS). **열린 항목**: `code/AI/` 폴더를 보존할지 삭제할지는 사용자가 나중에 정하기로 함(미정).
+**문서·UI 반영 상태**: `DATE.md`(10월 1일 항목), `README.md`(AI Integration), `FUNCTIONS.md`, `DIFF.md`의 AI 연동 행, 앱의 Diagram 페이지(AI 패널을 "Claude via MCP"로 교체)에 반영. 캡스톤 산출물 D01~D08은 이미 AI 연동을 MCP 기반으로만 기술해서 변경이 필요 없었다. 사이드바의 빈 "AI" 탭(`AiView.tsx`)은 원래 사설 모델 UI 자리였으므로 **같은 날(2026-10-01) 제거했다**(활동 바 아이콘·`AiView.tsx`·`.ai-view` CSS). **결정됨 (2026-10-05)**: 폴더는 삭제하지 않고 `archive/AI/`로 옮겨 보존한다(코드·테스트·MCP·UI에서 참조하는 곳이 없어 경로 변경만 문서에 반영).

@@ -727,7 +727,6 @@ code/
         ├── bench.py               RuSQL performance measurement (single-row·Bulk INSERT/DELETE TPS, B+Tree index TPS, transaction TPS — AutoCommit vs BEGIN/COMMIT, parallel query)
         ├── bench_mysql.py         the same 4 workloads on MySQL (reference run; result_mysql.json)
         ├── bench_query.py         scans / aggregates / GROUP BY / DISTINCT / ORDER BY / joins on 50,000 rows, median ms (compares two builds; result_query.json)
-        ├── chart.py               measurement results → matplotlib PNG chart generation
         ├── graph.py               presentation benchmark result visualization (light mode, result.json → PNG)
         ├── speedup_chart.py       speed-up ratios of the performance rounds (before ÷ after on the same machine/state, log scale → speedup_chart.png)
         ├── requirements.txt       Python dependency packages
@@ -735,6 +734,8 @@ code/
 ```
 
 Build/run command reference: `docs/mds/instructions.md` (repo root, sibling of `code/`). One-page project summary for presentations (Korean): `docs/mds/SUMMARY.md`.
+
+Retired material kept for the record (the dropped NL→SQL fine-tuning experiment `archive/AI/`, first-semester documents `archive/docs/`, an old chart script `archive/code/test/perf/chart.py`): `archive/` — see `archive/README.md`. The first-semester Rust original is on the `legacy` git branch.
 
 <br/>
 
