@@ -1239,6 +1239,32 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
         }
     }
 
+    // An aggregate, ORDER BY, LIMIT or DISTINCT over one table never reached the index shortcuts above (they answer a plain
+    // SELECT straight from the index), so `SELECT COUNT(*) FROM t WHERE indexed = 5` read every row although EXPLAIN said
+    // "Index Scan". The candidate search UPDATE and DELETE use finds the positions of the matching rows (each is checked
+    // against the real row and the whole WHERE; anything doubtful makes it "not usable" and the scan below runs as before)
+    // and the statement carries on from them exactly as from a scan. The positions come back in table order, so the order of
+    // the output does not change either.
+    DmlIndexHit index_hit;
+    if (joins.empty() && !bucket && condition && use_fast_index_paths && !for_update && !for_share
+        && (has_agg || has_win || distinct || limit.has_value() || offset.has_value() || !order_by.empty())
+        && !condition_has_subquery(condition) && s.tables.count(table) && !temporary_tables_.count(table)) {
+        if (auto* schema = s.catalog.get_table(table)) {
+            std::string table_pk;
+            for (auto& c : schema->columns) {
+                if (c.primary_key) {
+                    table_pk = c.name;
+                    break;
+                }
+            }
+            if (!table_pk.empty()) {
+                index_hit = dml_index_positions(s, table, condition, table_pk,
+                                                [&](const Row& r) { return is_visible_for_read(r, read_ctx); }, txn.current_txn_id(),
+                                                /*share_divisor=*/32);
+            }
+        }
+    }
+
     std::vector<Row> visible_rows; // joins only
     std::vector<const Row*> visible_ptrs; // single-table scan
     if (joins.empty() && bucket) {
@@ -1246,6 +1272,9 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
         for (const Row* r : *bucket) {
             if (is_visible_for_read(*r, read_ctx)) visible_ptrs.push_back(r);
         }
+    } else if (joins.empty() && index_hit.usable) {
+        visible_ptrs.reserve(index_hit.positions.size());
+        for (std::size_t pos : index_hit.positions) visible_ptrs.push_back(&(*base_rows)[pos]);
     } else if (joins.empty()) {
         visible_ptrs.reserve(base_rows->size());
         for (auto& r : *base_rows) {

@@ -54,8 +54,8 @@ const NODES: Node[] = [
   },
   {
     id: "planner", x: 705, y: 350, w: 120, h: 98, c: C.core, name: L("Planner", "플래너"),
-    desc: L("Cost-based: picks the access path per table, the join algorithm and the join order (System-R DP) from histogram + most-common-value statistics. The same access paths find the rows of UPDATE and DELETE, and an AND with an indexed equality starts from that index.",
-            "비용 기반: 히스토그램 + 최빈값 통계로 테이블별 접근 경로, 조인 알고리즘, 조인 순서(System-R DP)를 선택. 같은 접근 경로가 UPDATE·DELETE의 대상 행도 찾고, 인덱스 등호가 든 AND는 그 인덱스로 시작함."),
+    desc: L("Cost-based: picks the access path per table, the join algorithm and the join order (System-R DP) from histogram + most-common-value statistics. The same access paths find the rows of UPDATE and DELETE, and an AND with an indexed equality starts from that index, as do aggregates, GROUP BY, DISTINCT and ORDER BY ... LIMIT. A join through a non-unique index is charged for the rows each probe returns.",
+            "비용 기반: 히스토그램 + 최빈값 통계로 테이블별 접근 경로, 조인 알고리즘, 조인 순서(System-R DP)를 선택. 같은 접근 경로가 UPDATE·DELETE의 대상 행도 찾고, 인덱스 등호가 든 AND와 집계·GROUP BY·DISTINCT·ORDER BY … LIMIT도 그 인덱스로 시작함. 비유일 인덱스로 조인할 때는 한 번 찾을 때 나오는 행 수까지 비용에 반영함."),
   },
   {
     id: "executor", x: 885, y: 350, w: 120, h: 98, c: C.core, name: L("Executor", "실행기"),

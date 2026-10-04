@@ -302,8 +302,8 @@ function LayersView() {
             <HArrow c={C.core} phase={1} />
             <div className="dg-stage" style={tint(C.core)}>
               <div className="dg-stage-head"><Num n={4} c={C.core} /><b>{t(L("Query planner", "쿼리 플래너"))}</b></div>
-              <span>{t(L("Cost-based: access path per table (also used to find the rows of UPDATE / DELETE; an AND with an indexed equality starts from that index), join algorithm, System-R DP join order",
-                         "비용 기반: 테이블별 접근 경로(UPDATE·DELETE의 대상 행 탐색에도 사용, 인덱스 등호가 든 AND는 그 인덱스로 시작), 조인 알고리즘, System-R DP 조인 순서"))}</span>
+              <span>{t(L("Cost-based: access path per table (also used to find the rows of UPDATE / DELETE; an AND with an indexed equality starts from that index, and so do aggregates, GROUP BY, DISTINCT and ORDER BY ... LIMIT), join algorithm (counts the rows a probe of a non-unique index returns), System-R DP join order",
+                         "비용 기반: 테이블별 접근 경로(UPDATE·DELETE의 대상 행 탐색에도 사용, 인덱스 등호가 든 AND와 집계·GROUP BY·DISTINCT·ORDER BY … LIMIT도 그 인덱스로 시작), 조인 알고리즘(비유일 인덱스를 한 번 찾을 때 나오는 행 수까지 비용에 반영), System-R DP 조인 순서"))}</span>
             </div>
             <HArrow c={C.core} phase={2} />
             <div className="dg-stage" style={tint(C.core)}>

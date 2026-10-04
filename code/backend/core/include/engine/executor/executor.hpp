@@ -556,10 +556,12 @@ private:
         std::vector<std::size_t> positions; // ascending positions in s.tables[table]; each visible and matching
     };
     // Needs only shared access to the table (read-only); `visible` is the caller's own visibility
-    // rule (UPDATE: its write snapshot, DELETE: the permissive _xmax == 0 check).
+    // rule (UPDATE: its write snapshot, DELETE: the permissive _xmax == 0 check). A result larger than 1/share_divisor of the
+    // table is not worth parsing out of the index, so the search gives up (UPDATE/DELETE: 1/8; SELECT: 1/32 -- a scan reads
+    // a row for a tenth of what an index candidate costs, the break-even measured at about 6% of the table).
     static DmlIndexHit dml_index_positions(SharedDatabase& s, const std::string& table, const std::optional<CondExpr>& condition,
                                            const std::string& pk_col, const std::function<bool(const Row&)>& visible,
-                                           std::uint64_t self_txn_id);
+                                           std::uint64_t self_txn_id, std::size_t share_divisor = 8);
     // Rebuilds s.row_pk_pos[table] from the row store; needs the table's data lock EXCLUSIVE.
     static void rebuild_pk_positions(SharedDatabase& s, const std::string& table, const std::string& pk_col);
     // UPDATE (executor_update_unique.cpp): the PRIMARY KEY / UNIQUE violation, if any, that giving `olds[i]` the

@@ -205,6 +205,101 @@ TEST_CASE("Planner chooses ReverseIndexNL via a secondary index when the base ta
     REQUIRE_FALSE(rev.left_is_hash);
 }
 
+TEST_CASE("ReverseIndexNL counts the rows a probe of a non-unique index returns", "[planner]") {
+    // `fact.dim_id` (a foreign key, indexed, not unique) joined with `dim`: iterating dim and probing the index returns EVERY
+    // fact row of each key and copies each one -- measured 2.5x a hash join for 100,000 rows. The distinct count of the indexed
+    // column (ANALYZE) says how many rows a probe returns; without statistics the planner assumes one, as everywhere else.
+    auto algo_for = [](std::size_t fact_rows, std::size_t dim_rows, std::optional<std::size_t> ndv, bool probe_the_pk) {
+        std::unordered_map<std::string, std::vector<Row>> tables = {{"fact", std::vector<Row>(fact_rows)}, {"dim", std::vector<Row>(dim_rows)}};
+        std::unordered_map<std::string, BPlusTree> indexes;
+        std::unordered_map<std::string, std::pair<std::string, std::string>> index_meta;
+        if (!probe_the_pk) index_meta = {{"idx_fk", {"fact", "dim_id"}}};
+        std::unordered_map<std::string, CompositeIndex> composite_indexes;
+        std::unordered_map<std::string, HashIndex> hash_indexes;
+        std::unordered_map<std::string, std::pair<std::string, std::string>> hash_index_meta;
+        Catalog catalog;
+        ColumnDef id;
+        id.name = "id";
+        id.primary_key = true;
+        catalog.create_table("fact", {id});
+        catalog.create_table("dim", {id});
+        std::unordered_map<std::string, TableStats> stats;
+        const std::string probe_col = probe_the_pk ? "fact.id" : "fact.dim_id";
+        if (ndv) {
+            stats["fact"].total_rows = fact_rows;
+            stats["fact"].columns[probe_the_pk ? "id" : "dim_id"].distinct_count = *ndv;
+        }
+        Planner planner(tables, indexes, index_meta, composite_indexes, hash_indexes, hash_index_meta, catalog, stats);
+        auto cond = CondExpr(CondExpr::Leaf{Condition{ArithExpr(ArithExpr::Col{probe_col}), Operator::Eq,
+                                                      ConditionValue(ConditionValue::Literal{probe_the_pk ? "dim.fid" : "dim.id"})}});
+        std::vector<Join> joins;
+        joins.push_back(Join{"dim", cond, JoinType::Inner, {}});
+        SelectPlan plan = planner.plan("fact", std::nullopt, joins);
+        REQUIRE(plan.joins.size() == 1);
+        return plan.joins[0].algo;
+    };
+    auto is_reverse = [](const JoinAlgo& a) { return std::holds_alternative<JoinAlgo::ReverseIndexNL>(a.data); };
+    auto is_hash = [](const JoinAlgo& a) { return std::holds_alternative<JoinAlgo::Hash>(a.data); };
+
+    // 20 fact rows per dim row: the hash join is cheaper
+    REQUIRE(is_hash(algo_for(20000, 1000, 1000, false)));
+    // about one fact row per key (statistics say the column is nearly unique), or a couple: the index probe stays
+    REQUIRE(is_reverse(algo_for(20000, 1000, 20000, false)));
+    REQUIRE(is_reverse(algo_for(20000, 1000, 10000, false)));
+    // a few probes of a selective key beat scanning the big table whatever the table size
+    REQUIRE(is_reverse(algo_for(20000, 10, 20000, false)));
+    // no statistics: one match per probe is assumed, so the plan is what it always was
+    REQUIRE(is_reverse(algo_for(20000, 1000, std::nullopt, false)));
+    // a unique key (the primary key) returns one row per probe, whatever the statistics say
+    REQUIRE(is_reverse(algo_for(20000, 1000, 1000, true)));
+    REQUIRE(is_reverse(algo_for(20000, 1000, std::nullopt, true)));
+}
+
+TEST_CASE("ReverseIndexNL without ANALYZE statistics samples how many rows a probe returns", "[planner]") {
+    // Tables are rarely analyzed (and the automatic ANALYZE counts statements, not rows), so the planner reads a few rows of the
+    // left table and looks their keys up in the index: 20,000 fact rows over `keys` distinct dim_id values.
+    auto algo_for = [](std::size_t keys, std::size_t dim_rows) {
+        const std::size_t fact_rows = 20000;
+        std::vector<Row> fact(fact_rows);
+        std::unordered_map<std::string, std::string> bucket_json;
+        for (std::size_t i = 0; i < fact_rows; i++) {
+            std::string key = std::to_string(i % keys);
+            fact[i] = row({{"id", std::to_string(i).c_str()}, {"dim_id", key.c_str()}, {"_xmin", "1"}, {"_xmax", "0"}});
+            std::string& json = bucket_json[key];
+            json += (json.empty() ? "[" : ",") + std::string("{\"id\":\"") + std::to_string(i) + "\",\"dim_id\":\"" + key + "\",\"_xmin\":\"1\",\"_xmax\":\"0\"}";
+        }
+        std::unordered_map<std::string, BPlusTree> indexes;
+        for (auto& [key, json] : bucket_json) indexes["idx_fk"].insert(key, json + "]");
+        std::unordered_map<std::string, std::vector<Row>> tables = {{"fact", fact}, {"dim", std::vector<Row>(dim_rows)}};
+        std::unordered_map<std::string, std::pair<std::string, std::string>> index_meta = {{"idx_fk", {"fact", "dim_id"}}};
+        std::unordered_map<std::string, CompositeIndex> composite_indexes;
+        std::unordered_map<std::string, HashIndex> hash_indexes;
+        std::unordered_map<std::string, std::pair<std::string, std::string>> hash_index_meta;
+        Catalog catalog;
+        ColumnDef id;
+        id.name = "id";
+        id.primary_key = true;
+        catalog.create_table("fact", {id});
+        catalog.create_table("dim", {id});
+        std::unordered_map<std::string, TableStats> stats; // none: nobody ran ANALYZE
+        Planner planner(tables, indexes, index_meta, composite_indexes, hash_indexes, hash_index_meta, catalog, stats);
+        auto cond = CondExpr(CondExpr::Leaf{
+            Condition{ArithExpr(ArithExpr::Col{"fact.dim_id"}), Operator::Eq, ConditionValue(ConditionValue::Literal{"dim.id"})}});
+        std::vector<Join> joins;
+        joins.push_back(Join{"dim", cond, JoinType::Inner, {}});
+        SelectPlan plan = planner.plan("fact", std::nullopt, joins);
+        REQUIRE(plan.joins.size() == 1);
+        return plan.joins[0].algo;
+    };
+    auto is_reverse = [](const JoinAlgo& a) { return std::holds_alternative<JoinAlgo::ReverseIndexNL>(a.data); };
+    auto is_hash = [](const JoinAlgo& a) { return std::holds_alternative<JoinAlgo::Hash>(a.data); };
+
+    REQUIRE(is_hash(algo_for(1000, 1000)));      // 20 rows per key, every key probed: the hash join
+    REQUIRE(is_reverse(algo_for(20000, 1000)));  // one row per key: the index probe stays
+    REQUIRE(is_reverse(algo_for(10000, 1000)));  // two rows per key
+    REQUIRE(is_reverse(algo_for(1000, 3)));      // 20 rows per key but only 3 probes: still far cheaper than reading 20,000 rows
+}
+
 TEST_CASE("ReverseIndexNL is never chosen for the 2nd+ join in a chain, even when the size shape would favor it",
           "[planner]") {
     std::vector<Row> a_rows(3), chain_rows(900), delta_rows(2);

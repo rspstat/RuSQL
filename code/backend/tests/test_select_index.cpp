@@ -562,6 +562,7 @@ TEST_CASE("SELECT index: randomized differential test, index paths vs plain scan
     if (const char* e = std::getenv("RUSQL_FUZZ_START")) seed_start = static_cast<unsigned>(std::strtoul(e, nullptr, 10));
     const bool trace = std::getenv("RUSQL_FUZZ_TRACE") != nullptr;
     std::size_t indexed_plans = 0, queries = 0;
+    const std::uint64_t candidate_searches_before = Executor::dml_index_hits.load();
 
     for (unsigned k = seed_start; k < seed_start + seed_count; k++) {
         const unsigned seed = 31u + k * 197u;
@@ -635,6 +636,15 @@ TEST_CASE("SELECT index: randomized differential test, index paths vs plain scan
                     check_same(ex, "c", tbl, "c = " + g.cval());
                     check_same(ex, "a, c", tbl, "a = " + g.spelled_int(0, 29));
                 }
+                // aggregates, GROUP BY, DISTINCT, LIMIT and windows start from the same candidate search as UPDATE/DELETE
+                if (g.n(0, 2) == 0) {
+                    check_same(ex, "COUNT(*), SUM(d), MIN(a), MAX(d), COUNT(b)", tbl, pred);
+                    check_same(ex, "a, COUNT(*), SUM(d)", tbl, pred, " GROUP BY a");
+                    check_same(ex, "b, COUNT(*)", tbl, pred, " GROUP BY b HAVING COUNT(*) > 1");
+                    check_same(ex, "DISTINCT b, d", tbl, pred);
+                    check_same(ex, "id, d", tbl, pred, " ORDER BY d DESC, id LIMIT 4 OFFSET 1");
+                    check_same(ex, "id, ROW_NUMBER() OVER (ORDER BY id) AS rn", tbl, pred);
+                }
                 // Top-K: ORDER BY the indexed column with LIMIT
                 if (g.n(0, 2) == 0) {
                     std::string col = g.n(0, 1) ? "a" : "c";
@@ -654,4 +664,6 @@ TEST_CASE("SELECT index: randomized differential test, index paths vs plain scan
     }
     // the indexes really were in play (otherwise this would only compare the scan with itself)
     REQUIRE(indexed_plans * 3 > queries);
+    // ... and so did the candidate search the aggregate / GROUP BY / LIMIT / window shapes start from
+    REQUIRE(Executor::dml_index_hits.load() - candidate_searches_before > 30 * seed_count);
 }

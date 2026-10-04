@@ -1,5 +1,7 @@
 #include "engine/planner.hpp"
 
+#include "engine/row_json.hpp"
+
 #include <algorithm>
 #include <charconv>
 #include <cmath>
@@ -464,10 +466,12 @@ JoinAlgo Planner::choose_join_algo(std::size_t left_size, std::size_t right_size
     std::string rev_left_index_key;
     bool rev_left_is_hash = false;
     bool rev_left_is_secondary_btree = false;
+    bool rev_left_unique = false;
     if (shape_ok && !left_table.empty()) {
         std::optional<std::string> found_key;
         if (auto lpk = pk_col(left_table); lpk && *lpk == probe_col) {
             found_key = left_table;
+            rev_left_unique = true;
         } else if (auto sidx = find_secondary_index(left_table, probe_col)) {
             found_key = *sidx;
             rev_left_is_secondary_btree = true;
@@ -477,7 +481,22 @@ JoinAlgo Planner::choose_join_algo(std::size_t left_size, std::size_t right_size
         }
         if (found_key) {
             double log_left = std::max(std::log2(static_cast<double>(left_size)), 1.0);
-            rev_inl_cost = static_cast<std::size_t>(static_cast<double>(right_size) * log_left);
+            // A probe of a non-unique index (a foreign key, typically) returns EVERY left row with that key, and the executor
+            // parses each from its bucket and copies it into the joined row -- about 5 hash-join row units apiece, measured
+            // (100,000 rows through a secondary index took 2.5x a hash join). Count the rows beyond the first of each probe:
+            // the left column's distinct values when ANALYZE has them, else the average bucket of a few sampled keys.
+            double extra_per_probe = 0;
+            if (!rev_left_unique) {
+                constexpr double EXTRA_ROW_UNITS = 5;
+                std::size_t ndv = 0;
+                if (auto it = table_stats_.find(left_table); it != table_stats_.end()) {
+                    if (auto cit = it->second.columns.find(probe_col); cit != it->second.columns.end()) ndv = cit->second.distinct_count;
+                }
+                double matches = ndv > 0 ? static_cast<double>(table_size(left_table)) / static_cast<double>(ndv)
+                                         : sampled_rows_per_key(left_table, probe_col, *found_key, rev_left_is_hash);
+                if (matches > 1.0) extra_per_probe = (matches - 1.0) * EXTRA_ROW_UNITS;
+            }
+            rev_inl_cost = static_cast<std::size_t>(static_cast<double>(right_size) * (log_left + extra_per_probe));
             rev_left_index_key = *found_key;
         }
     }
@@ -505,6 +524,38 @@ JoinAlgo Planner::choose_join_algo(std::size_t left_size, std::size_t right_size
     std::size_t sm_cost = n * log_n;
     if (sm_cost <= hash_cost) return JoinAlgo(JoinAlgo::SortMerge{probe_col, build_col});
     return JoinAlgo(JoinAlgo::Hash{probe_col, build_col});
+}
+
+double Planner::sampled_rows_per_key(const std::string& table, const std::string& col, const std::string& index_key, bool is_hash) const {
+    constexpr std::size_t SAMPLES = 16;
+    constexpr std::size_t MIN_PROBES = 4;
+    auto tit = tables_.find(table);
+    if (tit == tables_.end() || tit->second.empty()) return 1.0;
+    const std::vector<Row>& rows = tit->second;
+    const BPlusTree* tree = nullptr;
+    const HashIndex* hash = nullptr;
+    if (is_hash) {
+        if (auto it = hash_indexes_.find(index_key); it != hash_indexes_.end()) hash = &it->second;
+    } else if (auto it = indexes_.find(index_key); it != indexes_.end()) {
+        tree = &it->second;
+    }
+    if (!tree && !hash) return 1.0;
+    std::size_t probes = 0, returned = 0;
+    for (std::size_t i = 0; i < SAMPLES; i++) {
+        const Row& r = rows[i * rows.size() / SAMPLES];
+        auto v = r.find(col);
+        if (v == r.end() || v->second.empty() || v->second == "NULL") continue;
+        std::size_t n = 0;
+        if (hash) {
+            n = hash->get(v->second).size();
+        } else if (auto bucket = tree->search(v->second)) {
+            n = rows_from_json(*bucket).size();
+        }
+        if (n == 0) continue;
+        probes++;
+        returned += n;
+    }
+    return probes >= MIN_PROBES ? static_cast<double>(returned) / static_cast<double>(probes) : 1.0;
 }
 
 std::size_t Planner::table_size(const std::string& table) const {

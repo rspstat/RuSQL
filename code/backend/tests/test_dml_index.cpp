@@ -274,8 +274,25 @@ TEST_CASE("DML index: randomized differential test, index paths vs plain scan", 
             } else if (kind < 84) {
                 sql = "DELETE FROM " + tbl + " WHERE " + g.pred() + " RETURNING id, b";
             } else {
+                // SELECTs take the index paths too -- the plain ones straight from the index, the ones with an aggregate,
+                // GROUP BY, DISTINCT, LIMIT or window function through the same candidate search as UPDATE/DELETE. The two
+                // engines' physical row orders differ (see above), so every shape orders its output by something unique, and
+                // the aggregates read integer columns only (a text or decimal MIN/MAX of numerically equal spellings depends
+                // on the order the rows are met in).
                 mutating = false;
-                sql = "SELECT id FROM " + tbl + " WHERE " + g.pred() + " ORDER BY id";
+                const std::string pred = g.pred();
+                switch (g.n(0, 9)) {
+                    case 0: sql = "SELECT id FROM " + tbl + " WHERE " + pred + " ORDER BY id"; break;
+                    case 1: sql = "SELECT COUNT(*) FROM " + tbl + " WHERE " + pred; break;
+                    case 2: sql = "SELECT COUNT(b), SUM(a), MIN(a), MAX(d), AVG(d) FROM " + tbl + " WHERE " + pred; break;
+                    case 3: sql = "SELECT a, COUNT(*), SUM(d) FROM " + tbl + " WHERE " + pred + " GROUP BY a ORDER BY a"; break;
+                    case 4: sql = "SELECT d, COUNT(*) FROM " + tbl + " WHERE " + pred + " GROUP BY d HAVING COUNT(*) > 1 ORDER BY d"; break;
+                    case 5: sql = "SELECT DISTINCT a FROM " + tbl + " WHERE " + pred + " ORDER BY a"; break;
+                    case 6: sql = "SELECT id, d FROM " + tbl + " WHERE " + pred + " ORDER BY d DESC, id LIMIT 5"; break;
+                    case 7: sql = "SELECT id FROM " + tbl + " WHERE " + pred + " ORDER BY id LIMIT 3 OFFSET 2"; break;
+                    case 8: sql = "SELECT id, ROW_NUMBER() OVER (ORDER BY id) AS rn FROM " + tbl + " WHERE " + pred + " ORDER BY id"; break;
+                    default: sql = "SELECT DISTINCT a, d FROM " + tbl + " WHERE " + pred + " ORDER BY a, d"; break;
+                }
             }
             INFO("step " << step << ": " << sql);
             if (const char* dump = std::getenv("RUSQL_FUZZ_DUMP_STEP"); dump && step == std::atoi(dump)) {
@@ -470,6 +487,201 @@ TEST_CASE("DML index: another open transaction forces the scan until it ends", "
     REQUIRE(a.execute_sql("ROLLBACK").is_ok());
     REQUIRE(count_of(a, "FROM t WHERE a = 3 AND d = 5") == 5); // back as before the txn
     REQUIRE(changed(a.execute_sql("UPDATE t SET d = 8 WHERE a = 3"), 5, "updated"));
+}
+
+// SELECTs with an aggregate, GROUP BY, DISTINCT, ORDER BY / LIMIT or window function used to scan the whole table whatever the
+// WHERE said (EXPLAIN claimed an index scan); they now start from the same candidate search as UPDATE/DELETE. The oracle is the
+// same statement with the index paths forced off.
+TEST_CASE("SELECT index: aggregates, GROUP BY, DISTINCT, LIMIT and windows over an indexed WHERE use the index, the rest keep the scan",
+          "[dml_index][select]") {
+    IndexMode always(ALWAYS);
+    TempDataDir dir("dml_idx_select_agg");
+    Executor a(dir.path);
+    open_db(a);
+    make_table(a, "t", false);
+    Gen g(9);
+    load_rows(a, "t", 300, g);
+    REQUIRE(a.execute_sql("CREATE TABLE u (id INT PRIMARY KEY, a INT)").is_ok());
+    REQUIRE(a.execute_sql("INSERT INTO u VALUES (3, 1), (4, 2)").is_ok());
+
+    struct Case {
+        std::string sql;
+        bool uses_index;
+    };
+    const std::vector<Case> cases = {
+        {"SELECT COUNT(*) FROM t WHERE a = 3", true},
+        {"SELECT SUM(d), MIN(id), MAX(id), AVG(d) FROM t WHERE a = 3", true},
+        {"SELECT d, COUNT(*) FROM t WHERE a = 3 GROUP BY d ORDER BY d", true},
+        {"SELECT DISTINCT d FROM t WHERE a = 3 ORDER BY d", true},
+        {"SELECT id FROM t WHERE a = 3 ORDER BY id DESC LIMIT 2", true},
+        {"SELECT id FROM t WHERE a = 3 ORDER BY id LIMIT 2 OFFSET 1", true},
+        {"SELECT id, ROW_NUMBER() OVER (ORDER BY id) AS rn FROM t WHERE a = 3", true},
+        {"SELECT COUNT(*) FROM t x WHERE x.a = 3", true},
+        {"SELECT COUNT(*) FROM t WHERE a = 3 AND d >= 0", true},
+        {"SELECT COUNT(*) FROM t WHERE id = 17", true},
+        {"SELECT COUNT(*) FROM t WHERE a BETWEEN 3 AND 4", true},
+        {"SELECT COUNT(*) FROM t WHERE a = 3.0", true},
+        {"SELECT COUNT(*) FROM t WHERE b = 'x1' AND a = 3", true},
+        // nothing for an index to narrow, or a shape the candidate search does not handle: the scan, as before
+        {"SELECT COUNT(*) FROM t", false},
+        {"SELECT COUNT(*) FROM t WHERE d = 1", false},
+        {"SELECT COUNT(*) FROM t WHERE a = 3 OR a = 4", false},
+        {"SELECT COUNT(*) FROM t WHERE a IN (SELECT a FROM u)", false},
+        {"SELECT COUNT(*) FROM t WHERE a = 3 AND d >= (SELECT MIN(a) FROM u)", false}, // an indexed leaf next to a subquery
+        {"SELECT COUNT(*) FROM t WHERE a >= 0", false}, // most of the table: a scan is cheaper than parsing the index entries
+        {"SELECT t.id FROM t JOIN u ON t.a = u.id WHERE t.a = 3 ORDER BY t.id", false},
+    };
+    for (auto& c : cases) {
+        INFO(c.sql);
+        auto before = hits();
+        auto with_index = run(a, ALWAYS, c.sql);
+        REQUIRE(with_index.is_ok());
+        REQUIRE((hits() > before) == c.uses_index);
+        before = hits();
+        auto scanned = run(a, NEVER, c.sql);
+        REQUIRE(scanned.is_ok());
+        REQUIRE(hits() == before);
+        REQUIRE(with_index.value() == scanned.value());
+    }
+    // the answers are the ones the data gives, not merely the scan's: a = 3 holds some rows, and the aggregates see them all
+    const int in_group = count_of(a, "FROM t WHERE a + 0 = 3"); // `a + 0` hides the column from the index
+    REQUIRE(in_group > 0);
+    REQUIRE(count_of(a, "FROM t WHERE a = 3") == in_group);
+
+    // changes in between: the index keeps agreeing with the scan
+    REQUIRE(a.execute_sql("UPDATE t SET a = 3 WHERE id % 17 = 0").is_ok());
+    REQUIRE(a.execute_sql("DELETE FROM t WHERE a = 3 AND id % 5 = 0").is_ok());
+    REQUIRE(a.execute_sql("INSERT INTO t VALUES (1001, 3, 'x1', 1, 5), (1002, 3, 'x2', 2, 5)").is_ok());
+    for (const char* sql : {"SELECT COUNT(*), SUM(d), MAX(id) FROM t WHERE a = 3", "SELECT d, COUNT(*) FROM t WHERE a = 3 GROUP BY d ORDER BY d",
+                            "SELECT id FROM t WHERE a = 3 ORDER BY id DESC LIMIT 4", "SELECT DISTINCT d FROM t WHERE a = 3 ORDER BY d"}) {
+        INFO(sql);
+        auto before = hits();
+        auto with_index = run(a, ALWAYS, sql);
+        REQUIRE(hits() == before + 1);
+        REQUIRE(with_index.is_ok());
+        REQUIRE(with_index.value() == run(a, NEVER, sql).value());
+    }
+}
+
+TEST_CASE("SELECT index: a result larger than 1/32 of the table is scanned, UPDATE/DELETE keep their 1/8 limit", "[dml_index][select]") {
+    // An index candidate costs about ten scanned rows (parse the entry, resolve its pk, re-check it): reading a larger share of the
+    // table through the index is slower than scanning it, so SELECT gives up earlier than UPDATE/DELETE do.
+    IndexMode always(ALWAYS);
+    TempDataDir dir("dml_idx_select_cap");
+    Executor a(dir.path);
+    open_db(a);
+    make_table(a, "big", false);
+    for (int chunk = 0; chunk < 8; chunk++) { // 4,000 rows, a = id % 40: 100 rows per value
+        std::string values;
+        for (int i = chunk * 500; i < chunk * 500 + 500; i++) {
+            values += std::string(i == chunk * 500 ? "(" : ",(") + std::to_string(i + 1) + "," + std::to_string(i % 40) + ",'x',1," + std::to_string(i % 5) + ")";
+        }
+        REQUIRE(a.execute_sql("INSERT INTO big VALUES " + values).is_ok());
+    }
+    // cap = max(128, 4000 / 32) = 128 rows for SELECT, 4000 / 8 = 500 for UPDATE/DELETE
+    auto h = hits();
+    REQUIRE(ok_text(a, "SELECT COUNT(*) FROM big WHERE a = 3").find("| 100 ") != std::string::npos);
+    REQUIRE(hits() == h + 1); // 100 rows
+    h = hits();
+    auto wide = "SELECT COUNT(*) FROM big WHERE a BETWEEN 3 AND 6"; // 400 rows
+    REQUIRE(ok_text(a, wide).find("| 400 ") != std::string::npos);
+    REQUIRE(hits() == h);
+    REQUIRE(ok_text(a, wide) == run(a, NEVER, wide).value());
+    h = hits();
+    REQUIRE(changed(a.execute_sql("UPDATE big SET d = 9 WHERE a BETWEEN 3 AND 6"), 400, "updated"));
+    REQUIRE(hits() == h + 1);
+    // the same rows through the index and through the scan
+    REQUIRE(ok_text(a, "SELECT COUNT(*), SUM(d) FROM big WHERE a BETWEEN 3 AND 6").find("| 3600 ") != std::string::npos);
+}
+
+TEST_CASE("SELECT index: another open transaction, a frozen snapshot and a transaction's own writes", "[dml_index][select][concurrency]") {
+    IndexMode always(ALWAYS);
+    TempDataDir dir("dml_idx_select_txn");
+    Executor a(dir.path);
+    open_db(a);
+    make_table(a, "t", false);
+    Gen g(11);
+    load_rows(a, "t", 150, g);
+    REQUIRE(a.execute_sql("UPDATE t SET a = 20 WHERE a = 3").is_ok());
+    REQUIRE(a.execute_sql("UPDATE t SET a = 3, d = 1 WHERE id <= 10").is_ok()); // group 3 = ids 1..10
+    const std::string agg = "SELECT COUNT(*), SUM(d) FROM t WHERE a = 3";
+    const std::string before_any = ok_text(a, agg); // 10 rows, d = 1 each
+    REQUIRE(before_any.find("| 10 ") != std::string::npos);
+    Executor b = Executor::new_session(a.get_shared());
+    REQUIRE(b.execute_sql("USE d").is_ok());
+
+    // another session's open transaction has uncommitted versions the index does not describe: the scan answers
+    REQUIRE(b.execute_sql("BEGIN").is_ok());
+    REQUIRE(changed(b.execute_sql("UPDATE t SET d = 100 WHERE a = 3"), 10, "updated"));
+    auto h = hits();
+    REQUIRE(ok_text(a, agg) == before_any); // a sees the committed rows only
+    REQUIRE(hits() == h);
+    h = hits();
+    auto own = ok_text(b, agg); // b sees its own writes, through the index (nobody else is open)
+    REQUIRE(own.find("| 1000 ") != std::string::npos);
+    REQUIRE(hits() == h + 1);
+    REQUIRE(own == run(b, NEVER, agg).value());
+    REQUIRE(b.execute_sql("COMMIT").is_ok());
+    h = hits();
+    REQUIRE(ok_text(a, agg).find("| 1000 ") != std::string::npos);
+    REQUIRE(hits() == h + 1);
+
+    // a frozen REPEATABLE READ snapshot may need versions the index no longer holds: always the scan
+    REQUIRE(a.execute_sql("SET ISOLATION LEVEL REPEATABLE READ").is_ok());
+    REQUIRE(a.execute_sql("BEGIN").is_ok());
+    const std::string snapshot = ok_text(a, agg);
+    REQUIRE(changed(b.execute_sql("UPDATE t SET d = 7 WHERE a = 3"), 10, "updated"));
+    h = hits();
+    REQUIRE(ok_text(a, agg) == snapshot); // still the old versions
+    REQUIRE(ok_text(a, "SELECT id FROM t WHERE a = 3 ORDER BY id LIMIT 2") == run(a, NEVER, "SELECT id FROM t WHERE a = 3 ORDER BY id LIMIT 2").value());
+    REQUIRE(hits() == h);
+    REQUIRE(a.execute_sql("COMMIT").is_ok());
+    REQUIRE(a.execute_sql("SET ISOLATION LEVEL READ COMMITTED").is_ok());
+    h = hits();
+    REQUIRE(ok_text(a, agg).find("| 70 ") != std::string::npos); // the new versions, now through the index again
+    REQUIRE(hits() == h + 1);
+
+    // a transaction's own writes are visible to its later indexed statements, and gone after ROLLBACK
+    REQUIRE(a.execute_sql("BEGIN").is_ok());
+    REQUIRE(changed(a.execute_sql("UPDATE t SET a = 9 WHERE id = 1"), 1, "updated"));
+    h = hits();
+    auto inside = ok_text(a, agg);
+    REQUIRE(hits() == h + 1);
+    REQUIRE(inside.find("| 9 ") != std::string::npos); // one row left the group
+    REQUIRE(inside == run(a, NEVER, agg).value());
+    h = hits();
+    REQUIRE(a.execute_sql("SELECT id FROM t WHERE a = 3 ORDER BY id FOR UPDATE").is_ok()); // a locking read never takes the shortcut
+    REQUIRE(hits() == h);
+    REQUIRE(a.execute_sql("ROLLBACK").is_ok());
+    REQUIRE(ok_text(a, agg).find("| 10 ") != std::string::npos);
+}
+
+TEST_CASE("SELECT index: a cold position cache falls back to the scan until a write heals it", "[dml_index][select]") {
+    IndexMode always(ALWAYS);
+    TempDataDir dir("dml_idx_select_cold");
+    {
+        Executor ex(dir.path);
+        open_db(ex);
+        make_table(ex, "t", false);
+        for (int i = 1; i <= 150; i++) {
+            REQUIRE(ex.execute_sql("INSERT INTO t VALUES (" + std::to_string(i) + ", " + std::to_string(i % 10) + ", 'x" + std::to_string(i % 6) + "', 1, 0)").is_ok());
+        }
+    }
+    Executor ex(dir.path); // the position cache starts empty
+    REQUIRE(ex.execute_sql("USE d").is_ok());
+    const std::string agg = "SELECT COUNT(*), SUM(id) FROM t WHERE a = 3";
+    auto h = hits();
+    auto cold = ok_text(ex, agg);
+    REQUIRE(cold == run(ex, NEVER, agg).value());
+    REQUIRE(hits() == h); // a read cannot rebuild the cache (it holds the table shared): the scan answered
+    REQUIRE(changed(ex.execute_sql("UPDATE t SET d = 1 WHERE a = 4"), 15, "updated")); // the write heals it
+    h = hits();
+    REQUIRE(ok_text(ex, agg) == cold);
+    REQUIRE(hits() == h + 1);
+    // VACUUM moves rows: stale positions are noticed, never trusted
+    REQUIRE(ex.execute_sql("VACUUM t").is_ok());
+    REQUIRE(ok_text(ex, agg) == cold);
+    REQUIRE(ok_text(ex, agg) == run(ex, NEVER, agg).value());
 }
 
 TEST_CASE("DML index: a cold position cache (restart, after a scan delete) heals instead of failing", "[dml_index]") {

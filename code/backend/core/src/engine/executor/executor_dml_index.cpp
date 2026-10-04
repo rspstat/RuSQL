@@ -56,9 +56,19 @@ Cand cand_of(const Row& r, const std::string& pk_col) {
 
 enum class Gather { Ok, Unsupported, TooMany };
 
+// The rows of a bucket (a JSON array of rows), counted without parsing: every row carries an "_xmin". A bucket that alone holds
+// more than the search may return is given up on before a row of it is parsed (an index entry costs ~10x a scanned row).
+std::size_t rows_in_bucket(const std::string& json) {
+    static const std::string needle = "\"_xmin\"";
+    std::size_t n = 0;
+    for (std::size_t at = json.find(needle); at != std::string::npos; at = json.find(needle, at + needle.size())) n++;
+    return n;
+}
+
 // Parses one index value (a JSON row, or a JSON array of rows) into candidates.
 bool append_json(const std::string& json, bool is_array, const std::string& pk_col, std::vector<Cand>& out, std::size_t cap,
                  bool via_pk_index = false) {
+    if (is_array && out.size() + rows_in_bucket(json) > cap) return false;
     try {
         auto j = nlohmann::json::parse(json);
         if (is_array) {
@@ -81,13 +91,26 @@ bool append_json(const std::string& json, bool is_array, const std::string& pk_c
 Gather gather(SharedDatabase& s, const std::string& table, const AccessPath& ap, const std::string& pk_col, std::vector<Cand>& out,
               std::size_t cap) {
     // `pk_tree`: the values are the PK B+Tree's (one row per pk), not a secondary index's buckets
+    // Buckets are counted before any is parsed: a range that holds more than `cap` rows is given up on for the price of a
+    // substring search, not of parsing `cap` rows first.
     auto from_range = [&](const BPlusTree& tree, const std::string& lo, const std::string& hi, bool is_array, bool pk_tree) {
-        for (auto& v : tree.range_search(lo, hi)) {
+        auto values = tree.range_search(lo, hi);
+        if (is_array) {
+            std::size_t total = out.size();
+            for (auto& v : values) total += rows_in_bucket(v);
+            if (total > cap) return Gather::TooMany;
+        }
+        for (auto& v : values) {
             if (!append_json(v, is_array, pk_col, out, cap, pk_tree)) return Gather::TooMany;
         }
         return Gather::Ok;
     };
     auto from_pairs = [&](const std::vector<std::pair<std::string, std::string>>& pairs, bool is_array, bool pk_tree) {
+        if (is_array) {
+            std::size_t total = out.size();
+            for (auto& kv : pairs) total += rows_in_bucket(kv.second);
+            if (total > cap) return Gather::TooMany;
+        }
         for (auto& kv : pairs) {
             if (!append_json(kv.second, is_array, pk_col, out, cap, pk_tree)) return Gather::TooMany;
         }
@@ -219,7 +242,7 @@ std::atomic<std::uint64_t> Executor::dml_index_hits{0};
 
 Executor::DmlIndexHit Executor::dml_index_positions(SharedDatabase& s, const std::string& table, const std::optional<CondExpr>& condition,
                                                     const std::string& pk_col, const std::function<bool(const Row&)>& visible,
-                                                    std::uint64_t self_txn_id) {
+                                                    std::uint64_t self_txn_id, std::size_t share_divisor) {
     DmlIndexHit hit;
     auto tit = s.tables.find(table);
     if (!condition || tit == s.tables.end()) return hit;
@@ -249,7 +272,7 @@ Executor::DmlIndexHit Executor::dml_index_positions(SharedDatabase& s, const std
     if (std::holds_alternative<AccessPath::SeqScan>(ap.data)) return hit;
 
     // A result that is a large share of the table is cheaper to scan than to parse out of JSON.
-    const std::size_t cap = std::max<std::size_t>(128, rows.size() / 8);
+    const std::size_t cap = std::max<std::size_t>(128, rows.size() / std::max<std::size_t>(share_divisor, 1));
     std::vector<Cand> cands;
     if (gather(s, table, ap, pk_col, cands, cap) != Gather::Ok) return hit;
 

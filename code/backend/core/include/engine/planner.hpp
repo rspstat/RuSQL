@@ -171,6 +171,10 @@ private:
     std::size_t estimate_join_output(const TablePlan& base, std::size_t right_size, const CondExpr& on_expr, const std::string& right_table) const;
     JoinAlgo choose_join_algo(std::size_t left_size, std::size_t right_size, const CondExpr& on_expr,
                               const std::string& left_table, const std::string& right_table) const;
+    // The average number of rows one probe of the index on `col` of `table` returns, measured on a few evenly spaced rows
+    // (1.0 when nothing can be measured). For a column ANALYZE has no distinct count for -- tables are rarely analyzed by hand,
+    // and the automatic ANALYZE counts statements, not rows, so a table bulk-loaded in a few statements never gets one.
+    double sampled_rows_per_key(const std::string& table, const std::string& col, const std::string& index_key, bool is_hash) const;
 
     double histogram_sel_range(const std::string& table, const std::string& col, RangeOp op, const std::string& key) const;
     double histogram_sel_between(const std::string& table, const std::string& col, const std::string& lo, const std::string& hi) const;

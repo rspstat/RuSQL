@@ -468,8 +468,12 @@ TEST_CASE("SELECT with a size-asymmetric INNER JOIN chooses ReverseIndexNL and r
     REQUIRE(ex.execute_sql("USE company").is_ok());
     REQUIRE(ex.execute_sql("CREATE TABLE orders (id INT PRIMARY KEY, customer_id INT)").is_ok());
     REQUIRE(ex.execute_sql("CREATE INDEX idx_orders_customer ON orders(customer_id)").is_ok());
-    for (int i = 0; i < 50; i++) {
-        REQUIRE(ex.execute_sql("INSERT INTO orders VALUES (" + std::to_string(i) + ", " + std::to_string(i % 2 + 1) + ")").is_ok());
+    // 200 orders, but only 10 belong to a customer that exists: each probe of the index returns a few rows, so iterating the two
+    // customers and probing the orders' index is the cheap plan. (Were every probe to return a quarter of the table, a hash join
+    // would be as good, and the planner counts that -- see "ReverseIndexNL counts the rows a probe ... returns" in test_planner.)
+    for (int i = 0; i < 200; i++) {
+        std::string customer = i < 10 ? std::to_string(i % 2 + 1) : std::to_string(1000 + i);
+        REQUIRE(ex.execute_sql("INSERT INTO orders VALUES (" + std::to_string(i) + ", " + customer + ")").is_ok());
     }
     REQUIRE(ex.execute_sql("CREATE TABLE customers (id INT PRIMARY KEY, name VARCHAR(50))").is_ok());
     REQUIRE(ex.execute_sql("INSERT INTO customers VALUES (1,'Alice'),(2,'Bob')").is_ok());
@@ -482,8 +486,41 @@ TEST_CASE("SELECT with a size-asymmetric INNER JOIN chooses ReverseIndexNL and r
         "SELECT orders.id, customers.name FROM orders JOIN customers ON orders.customer_id = customers.id "
         "WHERE customers.name = 'Alice'");
     REQUIRE(r.is_ok());
-    REQUIRE(r.value().find("25 row(s) returned.") != std::string::npos); // half of the 50 orders have customer_id=1
+    REQUIRE(r.value().find("5 row(s) returned.") != std::string::npos); // half of the 10 matching orders have customer_id=1
     REQUIRE(r.value().find("Bob") == std::string::npos);
+}
+
+TEST_CASE("an index on a foreign key does not turn a join into a Reverse Index NL when every probe returns many rows",
+          "[executor][select]") {
+    // 100 customers, 3,000 orders (30 per customer), no ANALYZE: probing the orders' index once per customer returns every order
+    // and copies each, which costs more than hashing the customers. The planner samples the index to see that.
+    TempDataDir dir("exec_sel_fk_hash");
+    Executor ex(dir.path);
+    REQUIRE(ex.execute_sql("CREATE DATABASE company").is_ok());
+    REQUIRE(ex.execute_sql("USE company").is_ok());
+    REQUIRE(ex.execute_sql("CREATE TABLE customers (id INT PRIMARY KEY, name VARCHAR(20))").is_ok());
+    REQUIRE(ex.execute_sql("CREATE TABLE orders (id INT PRIMARY KEY, customer_id INT, amount INT)").is_ok());
+    std::string customers, orders;
+    for (int i = 0; i < 100; i++) customers += std::string(i ? "," : "") + "(" + std::to_string(i) + ",'c" + std::to_string(i) + "')";
+    REQUIRE(ex.execute_sql("INSERT INTO customers VALUES " + customers).is_ok());
+    for (int i = 0; i < 3000; i++) orders += std::string(i ? "," : "") + "(" + std::to_string(i) + "," + std::to_string(i % 100) + "," + std::to_string(i % 7) + ")";
+    REQUIRE(ex.execute_sql("INSERT INTO orders VALUES " + orders).is_ok());
+    REQUIRE(ex.execute_sql("CREATE INDEX idx_orders_customer ON orders(customer_id)").is_ok());
+
+    const std::string join = "SELECT c.name, COUNT(*), SUM(o.amount) FROM orders o JOIN customers c ON o.customer_id = c.id GROUP BY c.name ORDER BY c.name";
+    auto plan = ex.execute_sql("EXPLAIN " + join);
+    REQUIRE(plan.is_ok());
+    REQUIRE(plan.value().find("Reverse Index NL") == std::string::npos);
+    REQUIRE(plan.value().find("Hash Join") != std::string::npos);
+    auto with_index = ex.execute_sql(join);
+    REQUIRE(with_index.is_ok());
+    REQUIRE(with_index.value().find("100 row(s) returned.") != std::string::npos);
+
+    // the answer does not depend on the index (or on the algorithm it led to)
+    REQUIRE(ex.execute_sql("DROP INDEX idx_orders_customer").is_ok());
+    auto without_index = ex.execute_sql(join);
+    REQUIRE(without_index.is_ok());
+    REQUIRE(with_index.value() == without_index.value());
 }
 
 TEST_CASE("A size-asymmetric LEFT JOIN still NULL-pads unmatched rows (does not silently degrade to INNER JOIN "

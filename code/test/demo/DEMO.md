@@ -5,7 +5,7 @@
 ## 준비 (미리, 1분)
 
 1. 서버를 띄웁니다(앱의 Server Manager, 또는 `code\build\backend\server\Release\engine_server.exe --port 7878 --no-mysql --data-dir <빈 폴더>`).
-2. `python code/test/demo/seed.py` — `demo` 데이터베이스에 `customers` 5,000행, `orders` 100,000행을 만듭니다(약 1초).
+2. `python code/test/demo/seed.py` — `demo` 데이터베이스에 `customers` 5,000행, `orders` 100,000행을 만듭니다(약 1.5초).
    `demo` 이외의 데이터베이스는 건드리지 않고, 다시 실행하면 처음 상태로 돌아갑니다(이미 만든 인덱스도 사라짐).
 3. 앱 쿼리 에디터에서 `USE demo;`
 
@@ -16,24 +16,23 @@ SELECT status, COUNT(*), SUM(amount) FROM orders GROUP BY status;               
 
 SELECT c.city, COUNT(*) AS orders, SUM(o.amount) AS total
 FROM orders o JOIN customers c ON o.customer_id = c.id
-WHERE o.status = 'DONE' GROUP BY c.city ORDER BY total DESC;                   -- 조인 + 집계, 약 0.7초
+WHERE o.status = 'DONE' GROUP BY c.city ORDER BY total DESC;                   -- 조인 + 집계, 약 1초
 ```
 
 ## 2. 인덱스를 만들면 계획이 바뀐다
 
 ```sql
-SELECT id, status, amount FROM orders WHERE customer_id = 1234;                -- 26행, 약 35ms
-EXPLAIN SELECT id, status, amount FROM orders WHERE customer_id = 1234;        -- Seq Scan, Est. cost 100000
+SELECT COUNT(*), SUM(amount) FROM orders WHERE customer_id = 1234;             -- 26행, 약 40ms
+EXPLAIN SELECT COUNT(*), SUM(amount) FROM orders WHERE customer_id = 1234;     -- Seq Scan, Est. cost 100000
 
 CREATE INDEX idx_orders_customer ON orders(customer_id);                       -- 약 0.5초
 
-EXPLAIN SELECT id, status, amount FROM orders WHERE customer_id = 1234;        -- Index Scan, Est. cost 33.2
-SELECT id, status, amount FROM orders WHERE customer_id = 2345;                -- 22행, 1ms 미만
+EXPLAIN SELECT COUNT(*), SUM(amount) FROM orders WHERE customer_id = 1234;     -- Index Scan, Est. cost 33.2
+SELECT COUNT(*), SUM(amount) FROM orders WHERE customer_id = 2345;             -- 22행, 1ms 미만
 ```
 
 - 같은 질의를 두 번 치면 결과 캐시 때문에 0ms가 나옵니다. "인덱스 후" 시간은 **다른 고객 번호**(2345)로 보여 주고, 근거는 EXPLAIN의 계획 변화로 설명하세요.
-- **`COUNT(*)`·`SUM()` 같은 집계 질의로는 이 시연을 하지 마세요.** `SELECT COUNT(*) FROM orders WHERE customer_id = 1234`는 EXPLAIN에는 Index Scan이 나오지만 실제로는 인덱스를 타지 않고 테이블 전체를 읽어서 인덱스를 만들어도 35ms 그대로입니다(집계는 인덱스 경로를 쓰지 않는 기존 동작).
-- **인덱스를 만든 뒤에는 `orders`와 `customers`를 조인하는 질의를 다시 돌리지 마세요.** 플래너가 이 인덱스를 쓰는 조인(Reverse Index NL)을 골라서 `orders ... JOIN customers` 형태가 0.7초 → 약 2초로 느려지는 알려진 문제가 있습니다(해시 조인이 더 빠름). 조인은 인덱스를 만들기 **전에** 보여 주세요.
+- 인덱스를 만든 뒤에 1번의 조인을 다시 돌려도 느려지지 않습니다(약 1초 그대로).
 
 ## 3. 서버가 죽어도 커밋한 데이터는 남는다
 
@@ -54,13 +53,16 @@ SELECT id, customer_id, amount FROM orders WHERE id >= 100001;   -- 100001만 �
 SELECT COUNT(*) FROM orders;                                      -- 100001
 ```
 
-복구 뒤에도 인덱스가 그대로 쓰입니다(2번을 먼저 했다면 `EXPLAIN SELECT id, status, amount FROM orders WHERE customer_id = 1234;`가 Index Scan).
+- 재시작 직후에는 인덱스는 살아 있지만(`EXPLAIN`은 Index Scan), `COUNT`·`SUM` 같은 **집계 질의는 전체를 읽습니다(약 36ms)**. 행 위치 캐시가 비어 있어서 그렇고, 인덱스를 쓰는 `UPDATE`/`DELETE`가 한 번 실행되어야 채워집니다. 이 단계에서는 집계 대신 위처럼 집계 없는 조회로 보여 주세요.
 
 ## 4. (선택) Claude로 자연어 질의
 
 Claude Desktop에 MCP가 연결되어 있다면 "demo 데이터베이스에서 도시별 취소 주문 비율을 알려 줘"처럼 물어봅니다.
 이 단계는 자동으로 검증하지 못했으니 **발표 전에 한 번 미리 돌려 보세요**(연결 상태에 달려 있음).
-인덱스를 만든 뒤라면 Claude가 만드는 조인이 느릴 수 있으니, 이 단계는 2번 이전이나 `seed.py`를 다시 돌린 직후에 하세요.
+
+## 피할 것 (알려진 문제)
+
+- **`ORDER BY`나 `DISTINCT`에 `테이블.열` 형태를 쓰지 마세요.** `SELECT DISTINCT o.status FROM orders o`는 값이 여러 개여도 한 행만 돌려주고, `ORDER BY o.amount DESC`는 정렬하지 않습니다(결과가 테이블 순서 그대로). `ORDER BY amount DESC`, `SELECT DISTINCT status`처럼 열 이름만 쓰면 정상입니다. 원본 Rust 포팅 때부터 있던 문제이고 아직 고치지 않았습니다(`GROUP BY c.city` 같은 `GROUP BY`·`WHERE`·`SELECT` 목록의 `테이블.열`은 정상).
 
 ## 되돌리기
 
