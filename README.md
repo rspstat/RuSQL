@@ -718,6 +718,9 @@ code/
     ├── crash/
     │   ├── fuzz_crash.py          kill -9 consistency fuzzer (random autocommit/explicit DML vs an acknowledged-state oracle)
     │   └── fuzz_concurrent.py     same with 4 concurrent clients (explicit transactions must be all-or-nothing)
+    ├── demo/
+    │   ├── seed.py                builds the demo database (5,000 customers + 100,000 orders in ~1 s) for a live walkthrough
+    │   └── DEMO.md                one-page walkthrough: big-data queries, index plan change, crash recovery (measured numbers + pitfalls)
     ├── diff/
     │   └── diff_builds.py         runs one random SELECT corpus on two engine_server builds and compares the output (for changes that must not alter a result)
     └── perf/
