@@ -343,6 +343,9 @@ private:
     // Trigger recursion depth (a trigger body's own DML can fire further triggers,
     // directly or via a chain through another table) -- see fire_triggers().
     std::size_t trigger_depth_ = 0;
+    // How many execute_with_s calls are running on this executor (a derived table, a subquery, a view, a trigger or a procedure body
+    // runs its statements through it too): the columns of a statement are checked once, for the one that starts at 0.
+    std::size_t exec_depth_ = 0;
 
     static std::pair<std::string, std::string> split_key(const std::string& key);
     std::string qualify_name(const std::string& name) const;
@@ -840,6 +843,9 @@ private:
     // The columns a SELECT answers with, named the way format_rows names them, for a derived table that came back with no rows (an
     // empty answer has no header to read them from). Empty when the statement is not a plain SELECT.
     std::vector<std::string> derived_column_names(SharedDatabase& s, const Statement& stmt);
+    // "Unknown column 'x' in 'where clause'" (executor_bind.cpp): the first column name of a SELECT / UPDATE / DELETE that no table
+    // of the statement (or of the queries around a subquery) has.
+    std::optional<std::string> check_columns(SharedDatabase& s, const Statement& stmt);
     // Joins read the way SQL says: NATURAL / USING joins become an ON condition (`joined_using` keeps their columns, which `*` shows
     // once), a cross join that the WHERE pairs up becomes an inner join on that, and `*` / `t.*` over a join become the columns they stand
     // for (a plain `*` over one table too when `expand_plain_star`: next to other columns, or under DISTINCT, where the row's own

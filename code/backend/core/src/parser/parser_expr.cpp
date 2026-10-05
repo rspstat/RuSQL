@@ -552,6 +552,10 @@ ArithExpr Parser::parse_arith_factor() {
             return ArithExpr(ArithExpr::Func{fname, std::move(args)});
         }
         std::string s = expect_col_ref();
+        // TRUE and FALSE (the lexer hands them over as the identifiers "true" / "false") are the numbers 1 and 0, as in MySQL: a BOOLEAN
+        // column holds 1 / 0, so `flag = TRUE` has to compare with 1
+        if (s == "true") return ArithExpr(ArithExpr::Num{"1"});
+        if (s == "false") return ArithExpr(ArithExpr::Num{"0"});
         return ArithExpr(ArithExpr::Col{s});
     }
 

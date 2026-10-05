@@ -989,6 +989,33 @@ VS Code 스타일 탭 드래그 순서 변경(요청의 1번 항목)은 같은 �
 
 **Diagram 페이지**: 구성요소·흐름이 바뀐 것이 없어(실행기 안의 단계 하나가 늘었을 뿐) 변경 없음.
 
+### 10월 6일 (두 번째) — 존재하지 않는 열 이름이 오류가 아니라 빈 값이던 것(`SELECT nosuch`, `WHERE nosuch > 1`, `ORDER BY nosuch` …), 그리고 이 점검에서 찾은 앞 항목의 회귀(`WHERE flag = TRUE`)
+
+**왜 이 항목인가**: 앞 항목(조인 이름)의 `UPDATE … SET zz = 5`가 "1 row(s) updated"인데 행에 보이지 않는 열을 만들던 것을 고치다가, **어느 문장에서든 없는 열 이름이 조용히 받아들여진다**는 것을 확인했다. 오타가 "데이터 없음"으로 보이는 문제라 정확성이 중요한 이 프로젝트에서 사용자가 고치기로 한 것에 포함되고, Claude(MCP)가 만든 SQL의 철자 오류를 알려 주는 유일한 신호이기도 하다.
+
+**원인과 영향** (원본 Rust 포팅 때부터): 열을 읽는 곳은 값이 없으면 빈 값을 돌려주고 조건은 거짓으로 평가한다. `SELECT nosuch FROM t`는 **열 하나가 비어서** 나오고(NULL도 아님), `WHERE nosuch > 1`은 0행, `UPDATE/DELETE … WHERE nosuch = 1`은 "0 row(s)", `ORDER BY nosuch`는 순서가 아무렇게나 바뀌고, `GROUP BY nosuch`는 머리글만 나오고, `COUNT(nosuch)`는 0. MySQL은 모두 오류 1054 `Unknown column 'nosuch' in 'where clause'`.
+
+**수정**: 새 `executor_bind.cpp`(`Executor::check_columns`)가 **최상위 문장마다 실행 전에 한 번** 열 이름을 정적으로 확인한다(`execute_with_s`의 첫 호출에서만; 파생 테이블·서브쿼리·뷰·트리거·프로시저 본문이 도는 중첩 실행은 시작한 문장의 일부로 이미 확인됐거나 바깥 행의 값이 들어가 있어서 확인하지 않고, 확인 비용은 문장당 마이크로초 단위):
+- 대상: SELECT의 select 목록(함수 호출 인자는 제외)·ON·WHERE·GROUP BY·HAVING·ORDER BY, UPDATE/DELETE의 WHERE와 SET 식(다중 테이블 UPDATE의 SET 대상도), 그 안의 서브쿼리와 UNION/CTE/`INSERT … SELECT`/`CREATE VIEW`의 SELECT. 보는 이름은 `이름`과 `테이블.이름`뿐이다(함수 호출·JSON 경로·`@변수`·`*`·숫자는 열이 아님).
+- 범위: FROM의 테이블들(카탈로그 스키마; 파생 테이블은 select 목록의 이름; 뷰·CTE·information_schema·알 수 없는 테이블은 아무 이름이나 받음). 서브쿼리는 바깥 쿼리의 테이블도 본다. `GROUP BY`/`HAVING`/`ORDER BY`(와 WHERE)는 select 목록이 붙인 이름(별칭)도 받는다. 어느 테이블도 아닌 한정자(`z.id`)는 오류지만 서브쿼리 안(바깥 쿼리의 별칭일 수 있음, 파서가 서브쿼리 안의 바깥 별칭은 풀지 않음)과 UPDATE/DELETE(자기 별칭을 SET 식에 둠)에서는 받는다. 비교의 오른쪽은 파서가 따옴표 없이 보관해서 글자와 구별되지 않으므로 **`테이블.열`이고 그 테이블이 이 쿼리에 있을 때만** 열로 본다(`ON a.x = b.nosuch`는 오류, `name = 'e.g'`는 글자).
+- 메시지는 MySQL과 같다: `Unknown column 'x' in 'field list'` / `'where clause'` / `'on clause'` / `'group statement'` / `'having clause'` / `'order clause'`.
+- 이 점검에서 **앞 항목(여섯 번째)이 만든 회귀**를 찾아 같이 고쳤다: BOOLEAN이 1/0으로 저장되게 되면서(타입 검증) `WHERE flag = TRUE`가 아무것도 찾지 못했다(`TRUE`가 글자 "true"로 비교됨; 이전 빌드는 "true"/"false"를 저장해서 우연히 맞았다). 파서가 `TRUE`/`FALSE`를 숫자 1/0으로 만든다(`flag = TRUE`, `SET flag = TRUE`, `SELECT TRUE` → 1, MySQL과 같음). 이 회귀는 커밋 b9c9653과 ffcf3c7에 있었다.
+
+**검증**:
+- 신규 Catch2 6케이스(506 → 512, `test_unknown_columns.cpp`): select 목록·절별·UPDATE/DELETE·서브쿼리(바깥 열 읽기: 맨이름·한정·바깥 별칭·식 안, `CREATE VIEW`가 만들 때 거절)·받아 주는 것들(따옴표 글자, 뷰·CTE, 파생 테이블의 열, 별칭을 쓴 ORDER BY/HAVING, 함수 인자)·트리거 — 메시지까지 정확히 비교하고, 실패한 문장이 아무것도 바꾸지 않았는지(UPDATE) 확인. BOOLEAN 비교는 `test_write_integrity.cpp`의 타입 케이스에 추가(`= TRUE`, `= FALSE`, `<> TRUE`, 갱신 뒤 `COUNT`, `SELECT TRUE, FALSE`).
+- 심은 버그 19종(`uc_*`: 절마다 확인 끄기, 한정자 허용, 별칭 모름, 파생 테이블이 아무 열이나 받음, 서브쿼리가 바깥을 못 봄, 오른쪽 `테이블.열` 안 봄, 서브쿼리·UNION·`INSERT … SELECT`·`CREATE VIEW` 안 봄, 다중 테이블 UPDATE의 SET 대상, 키워드 목록, 중첩 문장도 확인) 중 17종을 새 테스트가 잡았다. 나머지 둘: 키워드 목록(파서가 TRUE를 숫자로 만들면서 도달할 수 없게 돼 **코드를 지움**), 최상위에서만 확인하는 가드(결과가 아니라 서브쿼리 반복 실행의 비용만 달라짐). 소스는 md5로 되돌려졌는지 확인했다.
+- 빌드 간 차분(이전 빌드 = 앞 항목): 30시드 × 99질의(2,970질의)에서 차이 14건이고 **전부** 말뭉치가 오류 사례로 일부러 넣은 `(SELECT nosuchcol FROM t)` 스칼라 서브쿼리(이전 빌드는 빈 답이나 0행, 새 빌드는 `Unknown column 'nosuchcol' in 'field list'`). 설명되지 않는 차이 0.
+- Release/Debug **512 케이스/1,418,851 assertions**를 기본 설정과 `RUSQL_DML_INDEX_MIN_ROWS=0` 양쪽에서 통과. SELECT 차분 퍼저 150시드(1,819,528 assertions), DML 퍼저 80시드(1,946,487), 쓰기 퍼저 40시드(43,182), 조인 퍼저 60시드(7,178), `[aggregate]` 긴 캠페인(11케이스 317,618), 크래시 퍼저 90라운드·동시 퍼저 30라운드(확인한 확정 행 16,773) 불일치 0. 검증 도구(`verify_joins` 8시드 × 600문장 + 30행 3시드, `verify_writes` 3시드, `verify_null_expressions`·`verify_agg_expressions`·`verify_aggregates`·`verify_orderby_distinct` 각 2시드) 위반 0.
+- 성능(이전/새 빌드를 번갈아 두 번씩, 짧은 문장 5,000개): 키 `SELECT` 130·122 → 131·106µs, `GROUP BY … HAVING` 92·82 → 82·80, `UPDATE … WHERE id = N` 919·859 → 957·862, `INSERT` 804·738 → 766·764 — 오차 범위(확인이 문장당 마이크로초 단위).
+
+**눈에 띄는 변화(의도한 것)**: 없는 열 이름은 오류(`SELECT nosuch`, `WHERE t.nosuch = 1`, `ORDER BY nosuch`, `JOIN … ON a.x = b.nosuch`, `UPDATE … SET v = nosuch`, `CREATE VIEW` 안의 SELECT); `flag = TRUE`가 다시 맞고 `TRUE`는 1.
+
+**정직한 한계**: ① 함수의 인자(`UPPER(nosuch)`, `WHERE LENGTH(nosuch) > 3`)는 확인하지 않는다(단위·타입 이름과 열이 구별되지 않음; 인자를 식으로 파싱하는 식 문법 항목에서). ② 서브쿼리 안의 모르는 한정자는 바깥 별칭일 수 있어 받아 준다(`WHERE id IN (SELECT zz.id FROM u)`는 오류가 아님). ③ 프로시저·트리거 본문의 문장은 실행할 때 확인하지 않는다. ④ 비교의 오른쪽이 따옴표 없는 맨이름(`WHERE a = nosuch`)이면 열인지 글자인지 구별할 수 없어 확인하지 않는다. ⑤ 모호한 열 이름(`SELECT id FROM a JOIN b …`, MySQL 1052)은 아직 오류가 아니다.
+
+**이 점검에서 새로 찾았지만 고치지 않은 것**: ① **변수가 문장 안에서 쓰이지 않음** — 저장 프로시저의 매개변수·`DECLARE` 변수는 `IF`/`WHILE` 조건과 FROM 없는 `SELECT`에서만 쓰이고, `UPDATE t SET … WHERE id = p_id`는 "0 row(s) updated"로 아무것도 안 하며(`CALL`이 오류 없이 끝남), 사용자 변수도 `SET @x = 15; SELECT … WHERE v > @x`가 0행(MySQL은 행을 돌려줌). ② 문법 틈: `CURRENT_DATE`/`CURRENT_TIMESTAMP`를 괄호 없이, `WHERE TRUE`·`WHERE flag`·`x IS TRUE`, `db.테이블.열` 세 부분 이름은 파싱 오류. 다음 항목들에서 고친다.
+
+**Diagram 페이지**: 구성요소·흐름이 바뀐 것이 없어(실행기 안의 단계 하나가 늘었을 뿐) 변경 없음.
+
 ---
 
 ## 요약: 1학기 대비 2학기에 달라진 것

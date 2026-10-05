@@ -1257,6 +1257,13 @@ StringResult Executor::execute_sql_inner(const std::string& sql) {
 }
 
 StringResult Executor::execute_with_s(SharedDatabase& s, Statement stmt) {
+    struct DepthGuard {
+        std::size_t& depth;
+        explicit DepthGuard(std::size_t& d) : depth(d) { ++depth; }
+        ~DepthGuard() { --depth; }
+    };
+    const bool top_level = exec_depth_ == 0;
+    DepthGuard depth_guard(exec_depth_);
     sync_udf_context(s.user_functions, current_db, auth_user);
 
     if (auto* v = std::get_if<Statement::Use>(&stmt.data)) return exec_use(s, v->database);
@@ -1283,6 +1290,12 @@ StringResult Executor::execute_with_s(SharedDatabase& s, Statement stmt) {
     if (std::holds_alternative<Statement::ShowSynonyms>(stmt.data)) return exec_show_synonyms(s);
 
     stmt = qualify_stmt(s, std::move(stmt));
+
+    // an unknown column is an error, not an empty value (the nested statements of a procedure, a trigger, a view or a subquery were
+    // checked as part of the one that started them, or run with the outer row's values already in place)
+    if (top_level && proc_vars.empty()) {
+        if (auto error = check_columns(s, stmt)) return StringResult::Err(*error);
+    }
 
     // Table partitioning safety net: execute()'s dispatcher already intercepts and routes
     // Insert/Update/Delete/Select against a partitioned table BEFORE any lock is taken

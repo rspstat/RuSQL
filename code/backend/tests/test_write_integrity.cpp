@@ -184,6 +184,16 @@ TEST_CASE("a value has to fit its column and is stored in the column's own form"
     REQUIRE(q(ex, "SELECT id, w FROM m ORDER BY id") == Rows{{"1", "a"}, {"2", "bb"}, {"3", "c"}});
     // two spellings of one number are one key
     REQUIRE(fails(ex, "INSERT INTO m VALUES ('01', 9, 'z')").find("Duplicate value") != std::string::npos);
+    // a BOOLEAN holds 1 / 0, and TRUE / FALSE are those numbers wherever they are written
+    ok(ex, "CREATE TABLE flags (id INT PRIMARY KEY, on_ BOOLEAN)");
+    ok(ex, "INSERT INTO flags VALUES (1, FALSE), (2, TRUE), (3, 1), (4, NULL)");
+    REQUIRE(q(ex, "SELECT id FROM flags WHERE on_ = TRUE ORDER BY id") == Rows{{"2"}, {"3"}});
+    REQUIRE(q(ex, "SELECT id FROM flags WHERE on_ = FALSE") == Rows{{"1"}});
+    REQUIRE(q(ex, "SELECT id FROM flags WHERE on_ <> TRUE") == Rows{{"1"}});
+    REQUIRE(q(ex, "SELECT id FROM flags WHERE on_ = 1 AND id > 2") == Rows{{"3"}});
+    ok(ex, "UPDATE flags SET on_ = TRUE WHERE id = 1");
+    REQUIRE(q(ex, "SELECT COUNT(*) FROM flags WHERE on_ = TRUE") == Rows{{"3"}});
+    REQUIRE(q(ex, "SELECT TRUE, FALSE") == Rows{{"1", "0"}});
 }
 
 TEST_CASE("UPDATE checks NOT NULL and both sides of a foreign key, and a failed UPDATE changes nothing", "[write_integrity][update]") {
