@@ -17,6 +17,7 @@
 #include <ctime>
 #include <regex>
 #include <sstream>
+#include <unordered_map>
 
 #include "engine/parser/parser.hpp"
 
@@ -395,6 +396,27 @@ std::string json_extract(const std::string& json_str, const std::string& path_in
     return std::string(current);
 }
 
+// Functions whose result is NULL when one of their first N arguments is NULL (N = the number of value arguments: ROUND(v, d) has two,
+// DATE_ADD(d, n, unit) two plus a unit keyword; kAllArgs = every argument). The ones that deal with NULL themselves (COALESCE, IFNULL,
+// NULLIF, ISNULL, IF, CONCAT, CONCAT_WS, CHAR) and the ones without arguments are not listed.
+constexpr std::size_t kAllArgs = static_cast<std::size_t>(-1);
+const std::unordered_map<std::string, std::size_t>& null_propagating_functions() {
+    static const std::unordered_map<std::string, std::size_t> table = {
+        {"UPPER", 1}, {"LOWER", 1}, {"LENGTH", 1}, {"CHAR_LENGTH", 1}, {"CHARACTER_LENGTH", 1}, {"BIT_LENGTH", 1}, {"TRIM", 1},
+        {"LTRIM", 1}, {"RTRIM", 1}, {"REVERSE", 1}, {"SPACE", 1}, {"ASCII", 1}, {"HEX", 1}, {"UNHEX", 1}, {"MD5", 1},
+        {"ABS", 1}, {"CEIL", 1}, {"FLOOR", 1}, {"SQRT", 1}, {"EXP", 1}, {"SIN", 1}, {"COS", 1}, {"TAN", 1}, {"SIGN", 1},
+        {"LOG2", 1}, {"LOG10", 1}, {"YEAR", 1}, {"MONTH", 1}, {"DAY", 1}, {"DAYOFMONTH", 1}, {"HOUR", 1}, {"MINUTE", 1},
+        {"SECOND", 1}, {"DAYOFWEEK", 1}, {"DAYOFYEAR", 1}, {"WEEKDAY", 1}, {"LAST_DAY", 1}, {"FROM_UNIXTIME", 1},
+        {"UNIX_TIMESTAMP", 1}, {"JSON_UNQUOTE", 1}, {"CAST", 1}, {"CONVERT", 1},
+        {"ROUND", 2}, {"TRUNCATE", 2}, {"MOD", 2}, {"POW", 2}, {"POWER", 2}, {"LOG", 2}, {"LEFT", 2}, {"RIGHT", 2}, {"REPEAT", 2},
+        {"INSTR", 2}, {"LOCATE", 3}, {"FORMAT", 2}, {"DATE_FORMAT", 2}, {"DATEDIFF", 2}, {"DATE_ADD", 2}, {"DATE_SUB", 2},
+        {"REGEXP_LIKE", 2}, {"REGEXP", 2}, {"REGEXP_MATCH", 2}, {"REGEXP_SUBSTR", 2}, {"JSON_EXTRACT", 2}, {"JSON_VALUE", 2},
+        {"SUBSTR", 3}, {"SUBSTRING", 3}, {"REPLACE", 3}, {"LPAD", 3}, {"RPAD", 3}, {"REGEXP_REPLACE", 3},
+        {"GREATEST", kAllArgs}, {"LEAST", kAllArgs},
+    };
+    return table;
+}
+
 } // namespace
 
 void Executor::sync_udf_context(const std::unordered_map<std::string, UserFunctionDef>& user_functions, const std::string& current_db,
@@ -423,12 +445,19 @@ std::string Executor::apply_scalar_func(const std::string& func_name, const std:
         }
     }
 
+    std::vector<std::string> checked; // the leading arguments the NULL check below has resolved (an expression is parsed on every resolve)
     auto resolve = [&](const std::string& arg) -> std::string {
+        for (std::size_t i = 0; i < checked.size(); i++) {
+            if (args[i] == arg) return checked[i];
+        }
         if (arg.size() >= 2 && arg.front() == '\'' && arg.back() == '\'') return arg.substr(1, arg.size() - 2);
-        if (const std::string* v = get_col(row, arg)) return *v;
-        if (auto dot = arg.rfind('.'); dot != std::string::npos) {
-            auto it = row.find(arg.substr(dot + 1));
-            if (it != row.end()) return it->second;
+        // an argument such as `a.x * a.y` is an expression, not a column: get_col would read what follows its last dot ("y") as the column
+        if (arg.find_first_of(" +-*/%()<>=!,") == std::string::npos) {
+            if (const std::string* v = get_col(row, arg)) return *v;
+            if (auto dot = arg.rfind('.'); dot != std::string::npos) {
+                auto it = row.find(arg.substr(dot + 1));
+                if (it != row.end()) return it->second;
+            }
         }
         try {
             Parser p(arg);
@@ -439,6 +468,15 @@ std::string Executor::apply_scalar_func(const std::string& func_name, const std:
         return arg;
     };
     auto arg_at = [&](std::size_t i) -> std::string { return i < args.size() ? resolve(args[i]) : std::string(); };
+
+    if (auto it = null_propagating_functions().find(func_name); it != null_propagating_functions().end()) {
+        const std::size_t value_args = std::min(it->second, args.size());
+        checked.reserve(value_args);
+        for (std::size_t i = 0; i < value_args; i++) {
+            checked.push_back(resolve(args[i]));
+            if (checked.back() == EXECUTOR_NULL_VALUE) return EXECUTOR_NULL_VALUE;
+        }
+    }
 
     if (func_name == "UPPER") return to_upper(arg_at(0));
     if (func_name == "LOWER") return to_lower(arg_at(0));

@@ -105,26 +105,32 @@ std::string Executor::eval_arith(const Row& row, const ArithExpr& expr) {
     }
     if (auto* v = std::get_if<ArithExpr::Num>(&expr.data)) return v->value;
     if (auto* v = std::get_if<ArithExpr::Str>(&expr.data)) return v->value;
+    // NULL in, NULL out: `NULL + 1` is NULL (not the text "NULL1"), `NULL * 2` is NULL (not 0); x / 0 is NULL, as in MySQL.
     if (auto* v = std::get_if<ArithExpr::Add>(&expr.data)) {
         std::string lv = eval_arith(row, *v->lhs), rv = eval_arith(row, *v->rhs);
+        if (lv == EXECUTOR_NULL_VALUE || rv == EXECUTOR_NULL_VALUE) return EXECUTOR_NULL_VALUE;
         auto a = parse_f64(lv), b = parse_f64(rv);
         if (a && b) return format_arith_result(*a + *b);
         return lv + rv;
     }
     if (auto* v = std::get_if<ArithExpr::Sub>(&expr.data)) {
         std::string lv = eval_arith(row, *v->lhs), rv = eval_arith(row, *v->rhs);
+        if (lv == EXECUTOR_NULL_VALUE || rv == EXECUTOR_NULL_VALUE) return EXECUTOR_NULL_VALUE;
         auto a = parse_f64(lv), b = parse_f64(rv);
         return (a && b) ? format_arith_result(*a - *b) : "0";
     }
     if (auto* v = std::get_if<ArithExpr::Mul>(&expr.data)) {
         std::string lv = eval_arith(row, *v->lhs), rv = eval_arith(row, *v->rhs);
+        if (lv == EXECUTOR_NULL_VALUE || rv == EXECUTOR_NULL_VALUE) return EXECUTOR_NULL_VALUE;
         auto a = parse_f64(lv), b = parse_f64(rv);
         return (a && b) ? format_arith_result(*a * *b) : "0";
     }
     if (auto* v = std::get_if<ArithExpr::Div>(&expr.data)) {
         std::string lv = eval_arith(row, *v->lhs), rv = eval_arith(row, *v->rhs);
+        if (lv == EXECUTOR_NULL_VALUE || rv == EXECUTOR_NULL_VALUE) return EXECUTOR_NULL_VALUE;
         auto a = parse_f64(lv), b = parse_f64(rv);
-        return (a && b && *b != 0.0) ? format_arith_result(*a / *b) : "0";
+        if (a && b && *b == 0.0) return EXECUTOR_NULL_VALUE;
+        return (a && b) ? format_arith_result(*a / *b) : "0";
     }
     if (auto* v = std::get_if<ArithExpr::Func>(&expr.data)) {
         std::vector<std::string> str_args;
@@ -139,6 +145,7 @@ std::string Executor::eval_arith(const Row& row, const ArithExpr& expr) {
     }
     if (auto* v = std::get_if<ArithExpr::Cmp>(&expr.data)) {
         std::string lv = eval_arith(row, *v->lhs), rv = eval_arith(row, *v->rhs);
+        if (lv == EXECUTOR_NULL_VALUE || rv == EXECUTOR_NULL_VALUE) return EXECUTOR_NULL_VALUE; // a comparison with NULL is NULL
         auto a = parse_f64(lv), b = parse_f64(rv);
         bool result;
         if (a && b) {

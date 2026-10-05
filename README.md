@@ -725,7 +725,8 @@ code/
     │   ├── diff_builds.py         runs one random SELECT corpus on two engine_server builds and compares the output (for changes that must not alter a result)
     │   ├── verify_orderby_distinct.py  checks ORDER BY / DISTINCT of one build on that corpus (tables sharing column names, columns spelled `t.id`) against the same statements without them
     │   ├── verify_aggregates.py   recomputes every group of aggregates over `table.column` arguments (all join types, shared column names, HAVING) from the un-aggregated rows
-    │   └── verify_agg_expressions.py  the same for aggregates inside select-list expressions / functions / CASE (`MAX(x) - MIN(x)`, `ROUND(AVG(x), 1)`)
+    │   ├── verify_agg_expressions.py  the same for aggregates inside select-list expressions / functions / CASE (`MAX(x) - MIN(x)`, `ROUND(AVG(x), 1)`)
+    │   └── verify_null_expressions.py arithmetic / comparisons / scalar functions over NULLs and joins: SELECT, WHERE and UPDATE checked against values computed from the plain columns
     └── perf/
         ├── bench.py               RuSQL performance measurement (single-row·Bulk INSERT/DELETE TPS, B+Tree index TPS, transaction TPS — AutoCommit vs BEGIN/COMMIT, parallel query)
         ├── bench_mysql.py         the same 4 workloads on MySQL (reference run; result_mysql.json)

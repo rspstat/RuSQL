@@ -431,3 +431,23 @@ TEST_CASE("aliases inside aggregates nested in expressions, function arguments a
     REQUIRE(std::get<ArithExpr::Col>(leaf.left.data).name == "COUNT(u.id)");
     REQUIRE(std::get<ConditionValue::Literal>(leaf.value.data).value == "MAX(t.w)");
 }
+
+TEST_CASE("every alias inside a function argument that is an expression is resolved", "[parser]") {
+    Parser p("SELECT ROUND(y.g * y.g, 2), ABS(x.a - y.g) FROM t x JOIN u y ON y.id = x.id");
+    auto res = p.parse();
+    REQUIRE(res.is_ok());
+    auto& sel = std::get<Statement::Select>(res.value().data);
+    REQUIRE(sel.columns.size() == 2);
+    auto count = [](const std::string& text, const std::string& what) {
+        std::size_t n = 0;
+        for (auto at = text.find(what); at != std::string::npos; at = text.find(what, at + 1)) n++;
+        return n;
+    };
+    auto& round = std::get<SelectColumn::Func>(sel.columns[0].data);
+    REQUIRE(count(round.args[0], "u.g") == 2);
+    REQUIRE(round.args[0].find("y.") == std::string::npos);
+    auto& abs = std::get<SelectColumn::Func>(sel.columns[1].data);
+    REQUIRE(count(abs.args[0], "t.a") == 1);
+    REQUIRE(count(abs.args[0], "u.g") == 1);
+    REQUIRE(abs.args[0].find("x.") == std::string::npos);
+}

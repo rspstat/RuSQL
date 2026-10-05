@@ -15,7 +15,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import diff_builds as D
 from verify_aggregates import ANY, KEYS, NUMERIC, ON, aggregate, cells, num
 
-# MIN / MAX only over columns that never hold text that is not a number (val has "NULL1" after the corpus's UPDATE)
+# MIN / MAX only over columns that never hold text that is not a number (val has "NULL1" after the corpus's UPDATE in builds before the NULL fix)
 CLEAN = {"t": ["id", "grp", "price"], "u": ["id", "grp"], "v": ["id", "t_id", "qty"], "w": ["id", "k"]}
 
 

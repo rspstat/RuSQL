@@ -37,15 +37,27 @@ std::string expand_alias_str(const std::string& s, const std::unordered_map<std:
         }
         if (changed) return out;
     }
-    auto dot = s.find('.');
-    if (dot != std::string::npos) {
-        std::string prefix = s.substr(0, dot);
-        auto it = map.find(prefix);
-        if (it != map.end()) {
-            return it->second + "." + s.substr(dot + 1);
+    // every `alias.column` in the text: a function's argument may be an expression (`ROUND(y.g * y.g, 2)` keeps `y.g*y.g` as text)
+    if (s.find('.') == std::string::npos) return s;
+    std::string out;
+    bool in_string = false;
+    for (std::size_t i = 0; i < s.size(); i++) {
+        if (s[i] == '\'') in_string = !in_string;
+        if (!in_string && (std::isalpha(static_cast<unsigned char>(s[i])) || s[i] == '_') &&
+            (i == 0 || !(std::isalnum(static_cast<unsigned char>(s[i - 1])) || s[i - 1] == '_' || s[i - 1] == '.'))) {
+            std::size_t end = i;
+            while (end < s.size() && (std::isalnum(static_cast<unsigned char>(s[end])) || s[end] == '_')) end++;
+            if (end < s.size() && s[end] == '.') {
+                if (auto it = map.find(s.substr(i, end - i)); it != map.end()) {
+                    out += it->second;
+                    i = end - 1;
+                    continue;
+                }
+            }
         }
+        out += s[i];
     }
-    return s;
+    return out;
 }
 
 ArithExpr expand_arith(const ArithExpr& expr, const std::unordered_map<std::string, std::string>& map) {

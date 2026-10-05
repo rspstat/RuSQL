@@ -66,6 +66,7 @@ def start(exe, port, data, parallel, log=None):
 
 
 IGNORE_HEADER = False  # --ignore-header
+NOT_NULL_UPDATES = ""  # --no-null-arithmetic: "val IS NOT NULL AND " in front of the WHERE of every `SET val = val + 1`
 
 
 def norm(out, unordered):
@@ -340,11 +341,11 @@ class Gen:
     def mutation(self):
         r = self.r
         k = r.randrange(7)
-        if k == 4: return f"UPDATE t SET val = val + 1 WHERE {self.subquery_where()} AND id % 7 = {r.randint(0, 6)}"
+        if k == 4: return f"UPDATE t SET val = val + 1 WHERE {NOT_NULL_UPDATES}{self.subquery_where()} AND id % 7 = {r.randint(0, 6)}"
         if k == 5: return f"DELETE FROM t WHERE {self.subquery_where()} AND id % 23 = {r.randint(0, 22)}"
         if k == 6: return f"UPDATE t SET tag = 'sq' WHERE grp = {r.randint(0, 8)} AND val {r.choice(['>', '<'])} (SELECT AVG(val) FROM t)"
         k = k % 4
-        if k == 0: return f"UPDATE t SET val = val + 1 WHERE id % {r.randint(5, 20)} = 0"
+        if k == 0: return f"UPDATE t SET val = val + 1 WHERE {NOT_NULL_UPDATES}id % {r.randint(5, 20)} = 0"
         if k == 1: return f"DELETE FROM t WHERE id % {r.randint(17, 40)} = {r.randint(0, 10)}"
         if k == 2: return f"UPDATE t SET tag = '{r.choice(TAGS)}' WHERE grp = {r.randint(0, 8)}"
         return f"INSERT INTO t VALUES ({self.r.randint(10 ** 6, 10 ** 7)}, {r.randint(0, 8)}, {r.randint(0, 99)}, {r.randint(0, 99)}.25, 'C{r.randint(0, 99)}', 'beta', 'abc')"
@@ -384,7 +385,7 @@ def load(rng, rows):
     stmts.append("INSERT INTO w VALUES " + ", ".join(
         f"({i}, {c if c in ('NULL', chr(39) * 2) else repr(c)}, {'NULL' if rng.random() < 0.15 else rng.randint(0, 8)})" for i, c in enumerate(wcodes)))
     stmts += ["CREATE INDEX idx_grp ON t (grp)", "CREATE INDEX idx_tag ON t (tag) USING HASH",
-              "UPDATE t SET val = val + 1 WHERE id % 13 = 0", "DELETE FROM t WHERE id % 29 = 0"]
+              f"UPDATE t SET val = val + 1 WHERE {NOT_NULL_UPDATES}id % 13 = 0", "DELETE FROM t WHERE id % 29 = 0"]
     return stmts
 
 
@@ -399,13 +400,16 @@ def main():
     ap.add_argument("--modes", default="seq,seq", help="'seq' or 'par' for the old and the new server, e.g. seq,par")
     ap.add_argument("--exact", action="store_true", help="with --parallel or --modes: compare the text itself, not sets of lines")
     ap.add_argument("--ignore-header", action="store_true", help="compare the rows only: not the result-column names, separator lines or padding (for a change of how columns are named)")
+    ap.add_argument("--no-null-arithmetic", action="store_true",
+                    help='the corpus\'s `SET val = val + 1` skips NULL rows: builds before the NULL fix stored "NULL1" there, so the two builds\' tables would differ')
     ap.add_argument("--skip-chain-refs", action="store_true", help="no ON clause that reads an earlier joined table (older builds answered those wrongly)")
     ap.add_argument("--max-report", type=int, default=5)
     ap.add_argument("--log-new", help="write the new server's stderr to this file (for builds with debug output)")
     ap.add_argument("--show", type=int, default=0, help="print the first N queries with the first lines of the old build's answer")
     args = ap.parse_args()
-    global IGNORE_HEADER
+    global IGNORE_HEADER, NOT_NULL_UPDATES
     IGNORE_HEADER = args.ignore_header
+    NOT_NULL_UPDATES = "val IS NOT NULL AND " if args.no_null_arithmetic else ""
     modes = ["par", "par"] if args.parallel else args.modes.split(",")
     unordered = args.parallel and not args.exact
 

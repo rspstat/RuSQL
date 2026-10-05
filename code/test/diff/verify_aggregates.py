@@ -52,7 +52,7 @@ def aggregate(fn, values, numeric):
         return len(present)
     if fn == "COUNTD":
         return len(set(present))
-    nums = [n for n in map(num, present) if n is not None]  # a text that is no number (the corpus has "NULL1") is skipped by SUM / AVG
+    nums = [n for n in map(num, present) if n is not None]  # a text that is no number (builds before the NULL fix left "NULL1" in the corpus) is skipped by SUM / AVG
     if fn == "SUM":
         return sum(nums)
     if fn == "AVG":

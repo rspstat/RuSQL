@@ -879,9 +879,37 @@ VS Code 스타일 탭 드래그 순서 변경(요청의 1번 항목)은 같은 �
 
 **눈에 띄는 변화(의도한 것)**: 식·함수·CASE 속 집계가 값을 갖고, `GROUP BY` 없는 집계 식은 한 행만 돌려준다. `HAVING`의 `MIN`/`MAX`가 텍스트 값이 섞인 열에서 텍스트로 비교한다(select 목록과 같은 규칙).
 
-**이 점검에서 새로 찾았지만 고치지 않은 것(사용자 결정 대기)**: ① **산술에서 NULL이 NULL로 계산되지 않음** — `SELECT v + 1`이 NULL인 행에서 `NULL1`(글자 이어 붙이기), `v * 2`가 0(NULL이어야 함)이고, `MIN`/`MAX`가 NULL인 식(`SUM(v) + MAX(v)`)도 같은 영향을 받는다. 집계 식을 고치다가 나온 것이지만 집계와 무관한 `SELECT v + 1`에서도 그대로 나타난다(산술 평가에 NULL 규칙이 없음). ② 함수 열의 결과 열 이름이 인자를 빼고 `ROUND()`/`COALESCE()`로 나온다(MySQL은 `ROUND(AVG(v), 2)`).
+**이 점검에서 새로 찾았지만 고치지 않은 것(→ 사용자 승인으로 같은 날 다섯 번째 항목에서 ① 수정)**: ① **산술에서 NULL이 NULL로 계산되지 않음** — `SELECT v + 1`이 NULL인 행에서 `NULL1`(글자 이어 붙이기), `v * 2`가 0(NULL이어야 함)이고, `MIN`/`MAX`가 NULL인 식(`SUM(v) + MAX(v)`)도 같은 영향을 받는다. 집계 식을 고치다가 나온 것이지만 집계와 무관한 `SELECT v + 1`에서도 그대로 나타난다(산술 평가에 NULL 규칙이 없음). ② 함수 열의 결과 열 이름이 인자를 빼고 `ROUND()`/`COALESCE()`로 나온다(MySQL은 `ROUND(AVG(v), 2)`).
 
 **Diagram 페이지**: 구성요소·흐름이 바뀐 것이 없어 변경 없음. **정직한 한계**: select 목록에 같은 `AVG(x)`가 따로 있고 식에도 `AVG(x)`가 쓰이면 식은 select 목록의 4자리 반올림 값을 읽는다(키가 같아서; 다른 집계는 해당 없음). `SUM(o.amount > 5)` 꼴(`CASE` 변환)의 안쪽 열은 오른쪽 조인 테이블 열을 별칭으로 쓰면 별칭이 풀리지 않는다(이전 항목과 같음).
+
+### 10월 5일 (다섯 번째) — 식 속 NULL(`v + 1`, `v * 2`, `x / 0`, `v > 5`, 스칼라 함수 인자)과 함수 인자 속 한정된 열·별칭 수정
+
+**왜 이 항목인가**: 바로 위 항목에서 찾았지만 고치지 않은 "산술에서 NULL이 NULL로 계산되지 않음"을 사용자가 수정하기로 했다. 실제로 조사해 보니 `+`만의 문제가 아니라 **식을 평가하는 곳 전체**가 NULL을 모르고 있었고, 새 검증 도구가 같은 점검에서 함수 인자의 별개 버그 2건을 더 찾았다.
+
+**원인과 영향** (모두 원본 Rust 포팅 때부터):
+- **산술**(`eval_arith`): NULL은 엔진 안에서 글자 `"NULL"`이라 `v + 1`은 두 글자를 이어 붙여 `NULL1`, `v - 1`·`v * 2`·`v / 2`는 숫자가 아니라서 0이 됐다. `x / 0`도 0. select 목록의 비교(`v > 5`, `v = NULL`)는 글자 비교로 NULL 행에서 1이 나왔다. 그리고 **`UPDATE a SET v = v + 1`이 그 값을 테이블에 저장**했다(NULL 행이 `NULL1` 글자가 되고, `SET w = w * 2`는 NULL을 0으로 바꿈).
+- **스칼라 함수**(`apply_scalar_func`): 인자가 NULL이면 `ROUND(NULL)` 0, `ABS`/`CEIL`/`FLOOR`/`SQRT`/`SIGN` 0, `POWER(NULL, 2)` 0, `LENGTH(NULL)` **4**(글자 "NULL"의 길이), `LOWER(NULL)` `null`, `REVERSE(NULL)` `LLUN`, `LEFT(NULL, 3)` `NUL`, `SUBSTR(NULL, 2, 3)` `ULL`, `LPAD('5', 3, NULL)` `NU5`, `LEAST(3, 7, NULL)` 3. `%`는 `MOD`라서 **`WHERE v % 5 = 0`이 NULL 행을 골랐다**: RIGHT/FULL 조인이 짝 없는 쪽을 NULL로 채운 행이 `WHERE t.id % 5 = 0`을 통과했다(조인 질의의 답에 맞지 않는 행이 섞임).
+- **함수 인자가 한정된 열의 식일 때**(검증 도구가 찾음): `ABS(a.x * a.y)`처럼 select 목록의 함수 인자가 `테이블.열`이 든 식이면 `resolve`가 `get_col`을 먼저 불러, 마지막 점 뒤(`y`)를 열 이름으로 읽고 **그 열의 값**을 돌려줬다(곱셈이 사라짐: `ROUND(p.v / p.w, 1)`이 `w`). 별칭 풀기(`expand_alias_str`)는 인자 텍스트에서 **첫 번째** 별칭만 풀어, 같은 이름의 열이 두 테이블에 있으면 `ROUND(y.g * y.g, 2)`가 `u.g * y.g`로 읽혔다.
+
+**수정**:
+- `eval_arith`: `+ - * /`는 한쪽이 NULL이면 NULL, 0으로 나누면 NULL(숫자가 아닌 글자의 `- * /`가 0인 것과 `+`가 이어 붙이는 것은 그대로), 비교(`Cmp`)도 NULL 피연산자면 NULL.
+- `apply_scalar_func`: `null_propagating_functions()` 표(함수 이름 → 앞의 몇 개 인자가 "값"인지; `ROUND(v, d)`는 2, `DATE_ADD`는 날짜와 양만, `GREATEST`/`LEAST`는 전부) 약 70개 함수가 값 인자 중 하나가 NULL이면 NULL. NULL을 스스로 다루는 `COALESCE`·`IFNULL`·`NULLIF`·`ISNULL`·`IF`·`CONCAT`·`CONCAT_WS`·`CHAR`는 표에 없음. 검사한 인자는 `checked`에 담아 다시 풀지 않는다(인자가 식이면 풀 때마다 파싱).
+- `resolve`: 연산자·괄호·공백이 든 인자는 열 이름으로 보지 않고 식으로 평가. `expand_alias_str`: 텍스트 안의 모든 `별칭.열`을 풀고(따옴표 안은 제외) 집계 호출 안의 인자 처리는 그대로.
+
+**검증**:
+- 신규 Catch2 5케이스(481 → 486): ① 결정적 케이스(`v + 1`·`v - w`·`3 * d`·`9 / d`·NULL 리터럴·`x / 0`, 비교, WHERE·CASE, 집계 식, `%`와 RIGHT JOIN으로 채운 행, UPDATE 세 가지, 문자 값 산술이 그대로임), ② **표 기반 함수 테스트** — 표의 모든 함수를 유효한 인자로 부르면 전과 같은 값이고(값은 이전 빌드의 출력으로 확인) 값 인자 자리마다 NULL을 넣으면 NULL, 열로도(`LENGTH(s)`, `DATE_ADD(dt, INTERVAL 5 DAY)`, `CAST(n AS INT)`), 식 인자(`ROUND(n / 3, 2)`, `GREATEST(n + 1, n + 1)`)와 NULL을 스스로 다루는 함수는 그대로, ③ 한정된 열의 식 인자(단일 테이블·조인·별칭·같은 이름의 열이 두 테이블에 있는 경우), ④ **무작위 식 테스트**: NULL이 든 `a`·`b`·`c`와 0 포함 리터럴로 `x op y`, 우선순위 `x op y op z`, 괄호 두 모양, `ABS(...)`, `ROUND(..., 2)`, 비교를 만들어 SELECT(절반은 `n.a`처럼 한정)·WHERE·UPDATE(VARCHAR 열에 저장 후 읽기)를 테스트 안에서 계산한 기준값과 비교(연산마다 엔진이 쓰는 6자리 반올림을 같이 적용). 파서 테스트 1개(인자 속 모든 별칭).
+- 심은 버그 16종을 **모두** 새 테스트가 잡음(`+`·`-`·`*`·`/`의 NULL 검사 각각, 0으로 나누기, 비교, 함수 표 검사 끄기·첫 인자만 보기·`ROUND`/`CAST`/`GREATEST`·`LEAST`/`LOCATE`/`MOD` 항목 빼기, 검사한 인자의 캐시가 다른 인자 값을 돌려줌, 식 인자를 열로 읽음, 첫 번째 별칭만 풀기). 심은 버그를 되돌린 소스는 md5로 확인했다.
+- 새 도구 `code/test/diff/verify_null_expressions.py`: 단일 테이블과 INNER/LEFT/RIGHT/FULL OUTER 조인(별칭 유무, 짝 없는 쪽은 NULL)에서 `val + 1`·`val * price`·`grp / val`·`(x - y) * z`·`ABS(x - y)`·`ROUND(x / y, 2)`·`x > y`를 만들고, **같은 FROM/WHERE의 평범한 열을 읽어** 식을 다시 계산해 SELECT 답의 모든 행, WHERE 필터, UPDATE로 저장한 값이 같은지 확인. **이전 빌드는 위반**(`ABS(x.id * x.price)`가 109.84가 아니라 54.92), 도구가 찾은 별칭 버그(`ROUND(y.grp * y.grp, 2)` 18, 정답 36)를 고친 뒤 새 빌드는 5시드 × 1,500질의(7,500문장, NULL 답 324,469행, WHERE 3,260, UPDATE 421) 위반 0. `verify_agg_expressions.py` 3시드(4,366문장·31,519그룹)·`verify_aggregates.py` 3시드(4,090문장·30,230그룹, HAVING 876)·`verify_orderby_distinct.py` 2시드 위반 0.
+- 빌드 간 차분(`diff_builds.py`에 `--no-null-arithmetic` 추가: 말뭉치의 `SET val = val + 1`이 NULL 행을 건너뛰어 이전 빌드가 `NULL1`을 저장해 두 표가 달라지는 것을 막음): 이전 빌드 대비 6시드 × 1,500질의(9,000질의)에서 차이 153건이고 **전부** 두 모양: ① 선택 목록의 `val * 2` over NULL 행(0 → NULL) 141건, ② RIGHT/FULL OUTER 조인의 `WHERE t.id % k = r`에서 짝 없이 채워진 행이 더 이상 `= 0`을 통과하지 않음 12건(예: `SELECT t.id, t.val, v.qty FROM t RIGHT JOIN v ON … WHERE t.id % 5 = 0 OR …`의 이전 답에 `NULL | NULL | 3` 행이 섞여 있었음). 설명되지 않는 차이 0.
+- Release/Debug **486 케이스/1,413,676 assertions**를 기본 설정과 `RUSQL_DML_INDEX_MIN_ROWS=0` 양쪽에서 통과. SELECT 차분 퍼저 150시드(1,819,528 assertions), DML 퍼저 80시드(1,946,487), `[aggregate]` 30시드·`[null_expr]` 40시드(233,817 assertions) 긴 캠페인, 크래시 퍼저 90라운드·동시 퍼저 30라운드(확인한 확정 행 16,732) 불일치 0.
+- 성능(10만 행, 이전/새 빌드를 번갈아 두 번씩): `v * 2 + w` 107·104 → 105·102ms, `v / w` 159·158 → 162·152, `ROUND(v / 3, 2)` 290·304 → 284·278(검사한 인자를 다시 풀지 않아 오히려 약간 빠름), `ABS(v - w)` 194·196 → 189·176, `UPPER(s)` 99·109 → 105·100, `SUBSTR(s, 2, 3)` 138·144 → 150·144, `WHERE v * 2 > 100` 78·73 → 75·72 — 오차 범위. `bench_query.py 50000`(번갈아 두 번): `COUNT(*)` 18.8·21.6 → 17.1·18.9ms, `SUM`/`AVG` 27.0·24.3 → 24.3·24.9, `GROUP BY` 35.0·35.5 → 34.4·35.4, 조인+`GROUP BY` 297·292 → 296·283ms — 오차 범위(이 측정은 앞 항목보다 전체적으로 느린 상태의 PC에서 이전·새 빌드 모두 같게 나왔다).
+
+**눈에 띄는 변화(의도한 것)**: NULL이 든 식은 NULL로 나온다(`v + 1`, `v * 2`, `ROUND(v)`, `LENGTH(s)`, `v > 5`); `x / 0`은 NULL; `WHERE v % 5 = 0`이 NULL 행을 고르지 않는다; 한정된 열의 식을 함수 인자로 쓸 수 있다. 문자 값 산술(`'x' + 1` → `x1`)은 바뀌지 않았다.
+
+**이 점검에서 새로 찾았지만 고치지 않은 것(사용자 결정 대기)**: 데모·실사용에 걸릴 가능성이 큰 순서로 ① **집계 인자에 식을 쓸 수 없음**(`SUM(price * qty)`, `SUM(COALESCE(x, 0))`: 파싱 오류), ② **함수 결과를 산술의 왼쪽에 쓸 수 없음**(`ROUND(x, 1) * 100`, `COALESCE(a, 0) + COALESCE(b, 0)`: 파싱 오류; `1 + ROUND(x)`은 됨), ③ **`UPDATE`가 NOT NULL을 검사하지 않음**(`UPDATE t SET not_null_col = NULL` 통과, INSERT는 막음; NULL 산술이 고쳐져 `SET x = x / y`도 NULL을 넣을 수 있게 됨), ④ `IF(c, 'n', …)`·`CASE … THEN 'n'`의 문자열이 열 이름과 같으면 그 열의 값이 나옴, ⑤ `SUM`/`AVG`가 빈 입력(또는 전부 NULL)에서 NULL이 아니라 0/0.0000, ⑥ `INSERT … VALUES (1 + 2)` 불가, ⑦ 문자 값 산술(`'12abc' + 1`), ⑧ 함수 열 이름 `ROUND()`, ⑨ 같은 `AVG(x)`를 select하고 식에도 쓰면 식은 반올림 값을 읽음.
+
+**Diagram 페이지**: 구성요소·흐름이 바뀐 것이 없어 변경 없음.
 
 ---
 
