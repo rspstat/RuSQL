@@ -835,6 +835,7 @@ void to_json(nlohmann::json& j, const Statement& stmt) {
             else if constexpr (std::is_same_v<T, Statement::ReleaseSavepoint>)
                 j = nlohmann::json{{"ReleaseSavepoint", nlohmann::json{{"name", alt.name}}}};
             else if constexpr (std::is_same_v<T, Statement::RollbackTo>) j = nlohmann::json{{"RollbackTo", nlohmann::json{{"name", alt.name}}}};
+            else if constexpr (std::is_same_v<T, Statement::SelectInto>) j = nlohmann::json{{"SelectInto", nlohmann::json{{"query", *alt.query}, {"vars", alt.vars}}}};
             else if constexpr (std::is_same_v<T, Statement::Explain>) j = nlohmann::json{{"Explain", *alt.inner}};
             else if constexpr (std::is_same_v<T, Statement::ExplainAnalyze>) j = nlohmann::json{{"ExplainAnalyze", *alt.inner}};
             else if constexpr (std::is_same_v<T, Statement::AnalyzeTable>) j = nlohmann::json{{"AnalyzeTable", nlohmann::json{{"table", alt.table}}}};
@@ -1186,6 +1187,8 @@ void from_json(const nlohmann::json& j, Statement& stmt) {
         v.params = p.at("params").get<std::vector<std::tuple<std::string, std::string, std::string>>>();
         v.body = p.at("body").get<std::vector<Statement>>();
         stmt = Statement(std::move(v));
+    } else if (tag == "SelectInto") {
+        stmt = Statement(Statement::SelectInto{std::make_unique<Statement>(p.at("query").get<Statement>()), p.at("vars").get<std::vector<std::string>>()});
     } else if (tag == "CallProcedure") {
         stmt = Statement(Statement::CallProcedure{p.at("name").get<std::string>(), p.at("args").get<std::vector<std::string>>()});
     } else if (tag == "CreateTrigger") {

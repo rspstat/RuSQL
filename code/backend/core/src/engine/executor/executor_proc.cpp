@@ -6,6 +6,7 @@
 
 #include "engine/executor/executor.hpp"
 
+#include "engine/parser/ast_json.hpp"
 #include "engine/parser/parser.hpp"
 
 namespace engine {
@@ -148,13 +149,36 @@ StringResult Executor::exec_call_procedure(SharedDatabase& s, std::string name, 
     if (it == s.procedures.end()) return StringResult::Err("Procedure '" + name + "' not found");
     auto [params, body] = it->second;
 
+    // The value of each argument: text as typed (quotes taken off), an @variable's value, or an expression (kept as "\x01" + JSON by the
+    // parser) evaluated with the variables of the caller.
+    Row caller_vars = proc_vars;
+    for (auto& [k, val] : user_vars) caller_vars["@" + k] = val;
+    std::vector<std::string> arg_values;
+    for (auto& arg : args) {
+        if (!arg.empty() && arg[0] == '\x01') {
+            ArithExpr expr = nlohmann::json::parse(arg.substr(1)).get<ArithExpr>();
+            arg_values.push_back(eval_arith(caller_vars, expr));
+        } else if (!arg.empty() && arg[0] == '@') {
+            auto it = user_vars.find(arg.substr(1));
+            arg_values.push_back(it != user_vars.end() ? it->second : EXECUTOR_NULL_VALUE);
+        } else if (arg.size() >= 2 && arg.front() == '\'' && arg.back() == '\'') {
+            std::string unquoted = arg.substr(1, arg.size() - 2);
+            for (std::size_t p = unquoted.find("''"); p != std::string::npos; p = unquoted.find("''", p + 1)) unquoted.erase(p, 1);
+            arg_values.push_back(std::move(unquoted));
+        } else {
+            arg_values.push_back(arg);
+        }
+    }
+
     auto saved_vars = std::move(proc_vars);
     proc_vars.clear();
     for (std::size_t i = 0; i < params.size(); i++) {
         auto& [dir, pname, ptype] = params[i];
         (void)ptype;
         if (dir == "IN" || dir == "INOUT") {
-            proc_vars[pname] = i < args.size() ? args[i] : std::string();
+            proc_vars[pname] = i < arg_values.size() ? arg_values[i] : std::string();
+        } else {
+            proc_vars[pname] = EXECUTOR_NULL_VALUE; // an OUT parameter starts as NULL
         }
     }
 
@@ -164,6 +188,14 @@ StringResult Executor::exec_call_procedure(SharedDatabase& s, std::string name, 
     // reaching the `self.proc_vars = saved_vars;` line below it.
     auto res = exec_proc_stmts(s, std::move(body));
     if (res.is_err()) return res;
+    // OUT and INOUT parameters called with an @variable give it their value
+    for (std::size_t i = 0; i < params.size() && i < args.size(); i++) {
+        auto& [dir, pname, ptype] = params[i];
+        (void)ptype;
+        if ((dir == "OUT" || dir == "INOUT") && !args[i].empty() && args[i][0] == '@') {
+            if (auto it = proc_vars.find(pname); it != proc_vars.end()) user_vars[args[i].substr(1)] = it->second;
+        }
+    }
     proc_vars = std::move(saved_vars);
     proc_signal_.reset(); // clear any signal that escaped the body
 

@@ -149,6 +149,14 @@ Statement Parser::parse_set() {
         std::string name = expect_ident();
         if (!peek_is(TokenKind::Eq)) throw ParseError("Expected '=' after @" + name);
         advance();
+        if (peek_is(TokenKind::LParen) && peek_at_is(1, TokenKind::Select)) { // SET @x = (SELECT ...)
+            advance();
+            advance();
+            Statement query = parse_select();
+            if (!peek_is(TokenKind::RParen)) throw ParseError("Expected ')' after subquery");
+            advance();
+            return Statement(Statement::SelectInto{std::make_unique<Statement>(std::move(query)), {"@" + name}});
+        }
         ArithExpr expr = parse_arith_expr();
         return Statement(Statement::SetUserVar{name, std::move(expr)});
     }

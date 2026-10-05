@@ -27,7 +27,19 @@ Statement Parser::parse_call() {
         advance();
         if (!peek_is(TokenKind::RParen)) {
             for (;;) {
-                args.push_back(parse_single_value());
+                // a plain value is kept as text; anything longer (`n + 1`, `LENGTH(s)`) is an expression, kept as "\x01" + its JSON
+                // and evaluated when the procedure is called
+                const Token* first = peek();
+                const std::size_t end = first && first->kind == TokenKind::At ? 2 : 1; // `@name` is two tokens
+                const bool plain = first && (first->kind == TokenKind::StringLit || first->kind == TokenKind::NumberLit || first->kind == TokenKind::Null ||
+                                             first->kind == TokenKind::At || first->kind == TokenKind::Ident) &&
+                                   (peek_at_is(end, TokenKind::Comma) || peek_at_is(end, TokenKind::RParen) || peek_at_is(1, TokenKind::Dot));
+                if (plain) {
+                    args.push_back(parse_single_value());
+                } else {
+                    ArithExpr expr = parse_arith_expr();
+                    args.push_back("\x01" + nlohmann::json(expr).dump());
+                }
                 if (peek_is(TokenKind::Comma)) advance(); else break;
             }
         }
@@ -96,6 +108,13 @@ Statement Parser::parse_create_function() {
         advance();
         while (!peek_is(TokenKind::RParen) && peek() != nullptr) {
             params.push_back(expect_ident());
+            // the type of the parameter (`x INT`, `s VARCHAR(20)`, `d DECIMAL(10, 2)`) is not used: the value is text, as everywhere in the engine
+            int depth = 0;
+            while (peek() != nullptr && !(depth == 0 && (peek_is(TokenKind::Comma) || peek_is(TokenKind::RParen)))) {
+                if (peek_is(TokenKind::LParen)) depth++;
+                else if (peek_is(TokenKind::RParen)) depth--;
+                advance();
+            }
             if (peek_is(TokenKind::Comma)) advance(); else break;
         }
         if (!peek_is(TokenKind::RParen)) throw ParseError("Expected ')' after params");
@@ -286,9 +305,26 @@ Statement Parser::parse_proc_declare() {
 }
 
 Statement Parser::parse_proc_set_var() {
-    std::string name = expect_ident();
+    std::string name;
+    if (peek_is(TokenKind::NewKw) || peek_is(TokenKind::OldKw)) { // SET NEW.x = ... in a trigger
+        name = peek_is(TokenKind::NewKw) ? "NEW" : "OLD";
+        advance();
+        if (!peek_is(TokenKind::Dot)) throw ParseError("Expected '.' after NEW / OLD");
+        advance();
+        name += "." + expect_ident();
+    } else {
+        name = expect_ident();
+    }
     if (!peek_is(TokenKind::Eq)) throw ParseError("Expected '=' in SET");
     advance();
+    if (peek_is(TokenKind::LParen) && peek_at_is(1, TokenKind::Select)) { // SET v = (SELECT ...)
+        advance();
+        advance();
+        Statement query = parse_select();
+        if (!peek_is(TokenKind::RParen)) throw ParseError("Expected ')' after subquery");
+        advance();
+        return Statement(Statement::SelectInto{std::make_unique<Statement>(std::move(query)), {name}});
+    }
     ArithExpr expr = parse_arith_expr();
     return Statement(Statement::ProcSet{name, std::move(expr)});
 }

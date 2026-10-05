@@ -284,12 +284,10 @@ TEST_CASE("Self-referential AFTER INSERT trigger recursion is bounded, not infin
     // trigger whose own body inserts into the same table (directly, or via a chain
     // through another table) would recurse with no natural termination -- eventually a
     // stack overflow, and in the meantime holding the global write lock indefinitely.
-    // Note: fire_triggers deliberately ignores each trigger-body statement's individual
-    // result (faithfully matches the Rust original's `let _ = self.execute_with_s(...)`),
-    // so the depth-cap error raised deep in the recursion doesn't bubble all the way back
-    // up to this top-level INSERT's own return value -- what's actually verifiable (and
-    // what actually matters for server safety) is that the recursion terminates at a
-    // small bounded depth instead of continuing forever.
+    // A trigger body's failing statement fails the statement that fired it, so the depth-cap
+    // error raised deep in the recursion comes back as this top-level INSERT's own error. The
+    // rows the AFTER triggers already wrote stay, and the recursion stops at a small bounded
+    // depth instead of continuing forever.
     TempDataDir dir("exec_proc_data_13");
     Executor ex(dir.path);
     REQUIRE(ex.execute_sql("CREATE DATABASE company").is_ok());
@@ -297,7 +295,9 @@ TEST_CASE("Self-referential AFTER INSERT trigger recursion is bounded, not infin
     REQUIRE(ex.execute_sql("CREATE TABLE t (id INT PRIMARY KEY AUTO_INCREMENT, val INT)").is_ok());
     REQUIRE(ex.execute_sql("CREATE TRIGGER trg_self AFTER INSERT ON t FOR EACH ROW INSERT INTO t (val) VALUES (1)").is_ok());
 
-    ex.execute_sql("INSERT INTO t (val) VALUES (1)");
+    auto r = ex.execute_sql("INSERT INTO t (val) VALUES (1)");
+    REQUIRE(r.is_err());
+    REQUIRE(r.error().find("Trigger recursion exceeded maximum depth") != std::string::npos);
 
     auto s = ex.get_shared()->read();
     std::size_t row_count = s->tables.at("company.t").size();

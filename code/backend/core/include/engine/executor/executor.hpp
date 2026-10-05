@@ -664,9 +664,20 @@ private:
     void recover_from_redo();
     static void maybe_auto_vacuum(SharedDatabase& s, const std::string& table);
     void maybe_auto_analyze(SharedDatabase& s, const std::string& table);
-    // Returns Err only if trigger recursion exceeds the depth cap; a failing trigger-body
-    // statement is otherwise ignored (matches the pre-existing best-effort behavior).
-    StringResult fire_triggers(SharedDatabase& s, const std::string& table, const std::string& timing, const std::string& event);
+    // A row a trigger runs for: the row an UPDATE / DELETE replaces (OLD) and the row an INSERT / UPDATE leaves (NEW).
+    struct TriggerRow {
+        std::optional<Row> old_row, new_row;
+    };
+    static bool has_trigger(const SharedDatabase& s, const std::string& table, const char* timing, const char* event);
+    // Runs the BEFORE / AFTER triggers of `table` for `event` once for each of `rows` (executor_trigger.cpp), the statements of the body with that
+    // row's NEW.x / OLD.x in place. A statement of the body that fails fails the triggering statement (the error names the trigger); recursion is capped.
+    // A BEFORE INSERT trigger may set NEW.x (`SET NEW.x = expr`): `rows` then holds the values that are inserted.
+    StringResult fire_triggers(SharedDatabase& s, const std::string& table, const std::string& timing, const std::string& event,
+                               std::vector<TriggerRow>& rows);
+    // The rows an UPDATE (`assignments`: with the values they become) or a DELETE with this WHERE would touch, before it runs.
+    std::vector<TriggerRow> trigger_rows_for(SharedDatabase& s, const std::string& table, const std::optional<CondExpr>& condition,
+                                             const std::vector<std::pair<std::string, ArithExpr>>* assignments,
+                                             const std::unordered_map<std::string, std::unordered_map<std::string, std::string>>* per_row);
     static std::optional<std::pair<std::string, std::optional<CondExpr>>> resolve_updatable_view(const SharedDatabase& s,
                                                                                                     const std::string& name);
 
@@ -682,7 +693,7 @@ private:
     StringResult exec_insert_inner(SharedDatabase& s, const std::string& table, const std::optional<std::vector<std::string>>& col_list,
                                     std::vector<std::vector<std::string>> all_values, const InsertConflict& on_conflict,
                                     const std::optional<std::vector<SelectColumn>>& returning, bool validate_only = false,
-                                    std::vector<Row>* replace_victims = nullptr);
+                                    std::vector<Row>* replace_victims = nullptr, std::vector<Row>* inserted_rows = nullptr);
     // REPLACE INTO: the rows of the statement that no later row of it replaces (see executor_dml.cpp).
     static std::vector<std::vector<std::string>> replace_supersede(SharedDatabase& s, const std::string& table,
                                                                    const std::optional<std::vector<std::string>>& col_list,
@@ -846,6 +857,10 @@ private:
     // "Unknown column 'x' in 'where clause'" (executor_bind.cpp): the first column name of a SELECT / UPDATE / DELETE that no table
     // of the statement (or of the queries around a subquery) has.
     std::optional<std::string> check_columns(SharedDatabase& s, const Statement& stmt);
+    // Replaces every place a statement names a variable -- a procedure's parameter or DECLAREd variable, an @user variable, and, when `row` is
+    // given, a trigger's `NEW.x` / `OLD.x` -- by its value (executor_vars.cpp).
+    void substitute_variables(Statement& stmt, const std::unordered_map<std::string, std::string>* row = nullptr) const;
+    void substitute_variables(ArithExpr& expr, const std::unordered_map<std::string, std::string>* row = nullptr) const;
     // Joins read the way SQL says: NATURAL / USING joins become an ON condition (`joined_using` keeps their columns, which `*` shows
     // once), a cross join that the WHERE pairs up becomes an inner join on that, and `*` / `t.*` over a join become the columns they stand
     // for (a plain `*` over one table too when `expand_plain_star`: next to other columns, or under DISTINCT, where the row's own

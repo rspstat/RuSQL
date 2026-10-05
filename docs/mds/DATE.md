@@ -1016,6 +1016,38 @@ VS Code 스타일 탭 드래그 순서 변경(요청의 1번 항목)은 같은 �
 
 **Diagram 페이지**: 구성요소·흐름이 바뀐 것이 없어(실행기 안의 단계 하나가 늘었을 뿐) 변경 없음.
 
+### 10월 6일 (세 번째) — 저장 프로시저·변수·트리거·함수가 문장 안에서 쓰이지 않던 것(`UPDATE … WHERE id = p_id`가 "0 row(s)", `WHERE v > @x`가 0행, 트리거의 `NEW.id` 없음) 수정
+
+**왜 이 항목인가**: 앞 항목에서 프로시저에 `UPDATE … WHERE id = p_id`를 넣어 `CALL`했더니 **오류 없이 "0 row(s) updated"**였다. 조사해 보니 저장 프로시저·트리거·사용자 변수는 **제어문과 FROM 없는 `SELECT`에서만** 동작하고 일반 문장 안에서는 변수 이름이 열 이름으로 취급돼 있었다(원본 Rust 포팅 때부터). 사용자 결정("전부 고쳐")에 따라 이 기능들이 실제로 쓸 수 있게 만들었다.
+
+**원인과 영향**:
+- **변수가 문장 안에서 값이 아님**: 프로시저의 매개변수·`DECLARE` 변수(`proc_vars`)와 `@변수`(`user_vars`)는 `IF`/`WHILE`/`SET`의 조건 평가와 FROM 없는 SELECT의 한 행에서만 읽혔다. `UPDATE t SET v = pv WHERE id = pid`는 `pid`라는 열을 찾다가 못 찾아 0행, `INSERT … VALUES (pid, pv)`는 `Incorrect integer value: 'pid'`, `SELECT … WHERE v > lim`은 0행, `WHERE v > @x`는 0행(MySQL은 행을 돌려줌), `UPDATE t SET v = @x`는 "1 row(s) updated"인데 글자 `@x`가 값이 됐고, `INSERT … VALUES (@x, 1)`은 파싱 오류, `SELECT @x + id`는 NULL.
+- **설정하지 않은 `@변수`**를 읽으면 NULL이 아니라 **변수 이름 글자**(`@r`)가 나왔다.
+- **트리거는 문장당 한 번만, 행 값 없이** 돌았다: `FOR EACH ROW`인데 3행 INSERT도 한 번, 0행을 바꾼 UPDATE/DELETE도 한 번 돌았고, `NEW.id`/`OLD.id`는 토큰만 있고 파서가 쓰지 않아 쓸 수 없었다. 본체의 문장이 실패해도 **무시**됐다.
+- **사용자 정의 함수** `CREATE FUNCTION f(x INT) RETURNS INT RETURN …`가 파싱 오류(매개변수에 타입을 못 씀; 타입 없는 옛 문법만 됨).
+- **`CALL`**: 인자는 값(문자열은 따옴표까지)과 변수 이름뿐이고 식(`a + 10`)은 파싱 오류, `OUT`/`INOUT` 매개변수가 호출한 쪽의 `@변수`로 돌아오지 않았고, `SELECT … INTO 변수`와 `SET @x = (SELECT …)`가 없었다.
+
+**수정**:
+- 새 `executor_vars.cpp`(`substitute_variables`): 문장을 실행하기 전에 변수를 부르는 모든 곳을 그 값으로 바꾼다 — 조건의 양쪽(`WHERE id = p_id`, `IN (@x, 20)`, `BETWEEN`)·식(`SET v = pv + 1`)·`INSERT` 값·select 목록(`SELECT id, lim`)·함수 인자(`ROUND(@n / 2)`, 문자열은 따옴표로 써서)·`CALL` 인자·서브쿼리·UNION/CTE. 열과 이름이 같으면 변수가 이긴다(MySQL과 같음). 설정하지 않은 `@변수`는 NULL(`SELECT @never`도). 이름이 따옴표 없이 보관되는 곳(비교의 오른쪽, `INSERT` 값, 함수 인자)에서는 변수 이름과 같은 글자가 변수로 읽힌다. `execute_with_s`의 맨 앞에서 한 번(변수가 없으면 아무 일도 안 함). `@변수`를 읽는 SELECT는 글자가 같아도 답이 달라지므로 **결과 캐시를 쓰지 않는다**.
+- 파서: `INSERT … VALUES (@x, NEW.id)`·`IN (@x, …)`·`BETWEEN @a AND @b`, 트리거의 `NEW.x`/`OLD.x`(소문자도), `CALL p(a + 10, @r, 'it''s')`(식 인자는 JSON으로 두었다가 호출할 때 계산), 타입 있는 함수 매개변수(`x INT`, `d DECIMAL(10, 2)`), `SELECT … INTO 변수[, 변수]`(새 문장 `SelectInto`; AST JSON 호환), `SET @x = (SELECT …)`, 프로시저의 `SET v = (SELECT …)`.
+- `CALL`: 문자열 인자는 따옴표를 벗기고, `@변수` 인자는 값으로, 식은 계산해서 넘기며 `OUT` 매개변수는 NULL로 시작해서 끝나면 `@변수`에 값을 돌려준다(`INOUT`도). `SELECT … INTO`는 첫 행을 변수에 넣는다(행이 없으면 NULL).
+- 새 `executor_trigger.cpp`(`fire_triggers`, `trigger_rows_for`): 트리거 본체를 **행마다** 한 번씩 돌린다 — INSERT는 넣은 행(`NEW`), UPDATE는 바뀔 행(`OLD`)과 바뀐 뒤의 행(`NEW`; 갱신 식을 행에 적용해 계산), DELETE는 지울 행(`OLD`). 행이 없으면 돌지 않는다. BEFORE는 쓰기 전에, AFTER는 쓴 뒤에 돈다. 본체의 문장이 실패하면 그 문장이 실패한다(`Trigger 'x' failed: …`; AFTER는 이미 쓴 뒤라 `… failed after the change was made: …`). **BEFORE INSERT 트리거는 `SET NEW.v = NEW.v * 2`로 넣는 값을 바꾸거나 INSERT가 안 쓴 열의 값을 정할 수 있다**(다른 트리거에서는 오류로 거절).
+
+- **트리거 재귀 깊이 상한 32 → 16단**: 최종 회귀의 Debug 실행이 자기 참조 트리거 테스트에서 **스택 오버플로로 중단**됐다(그 뒤 200여 케이스는 실행조차 안 됨). 한 단계의 스택 사용량을 직접 재 보니 Release는 4.7KB(32단 = 150KB)지만 Debug는 32KB라 1MB 스택에 32단이 들어가지 않았다(원래도 한계 직전이었고 이번 변경으로 한 단계가 조금 커져 넘었다). Release 제품에는 문제가 없었으나 가장 불리한 구성에서도 안전하도록 16단으로 낮췄다(합법적인 트리거 체인은 2~3단). 이 상한 오류는 이제 최상위 문장의 오류로 돌아오므로 기존 테스트의 낡은 주석("트리거문의 실패를 무시")을 고치고 그 오류를 검증하게 했다.
+
+**검증**:
+- 신규 Catch2 8케이스(512 → 520, `test_stored_routines.cpp`): ① 프로시저 매개변수·변수가 UPDATE/INSERT/DELETE/SELECT에서 값(마지막 SELECT의 답에 매개변수가 들어감, DECLARE/SET, WHILE과 IF 안의 문장, 프로시저가 프로시저를 변수·식 인자로 호출, 문자열 인자와 `''`), ② OUT/INOUT·SELECT INTO·설정 안 한 변수, ③ `@변수`(WHERE·SET·VALUES·식·IN·BETWEEN·NULL, SET 뒤 같은 글자의 SELECT가 새 답, 서브쿼리로 설정), ④ 함수(타입 있는/없는 매개변수, WHERE·UPDATE·select 목록), ⑤ 트리거(AFTER/BEFORE × INSERT/UPDATE/DELETE, 여러 행, 소문자, 0행, 같은 이벤트의 두 트리거, 지난 UPDATE가 남긴 옛 버전은 행이 아님), ⑥ 트리거 실패(BEFORE는 아무것도 안 씀, AFTER 메시지, 트랜잭션 안에서 ROLLBACK, 자기 자신을 부르는 트리거는 깊이 제한), ⑦ `SET NEW.x`(바꾼 값·안 쓴 열·다른 트리거는 거절), ⑧ 재시작 뒤에도 프로시저·트리거(JSON 저장)가 그대로 동작.
+- 심은 버그 28종(`rv_*`/`tr_*`: 조건·식·VALUES·select 목록·SET의 치환 끄기, 캐시, OUT 값 반환·NULL 시작, 식 인자·따옴표 벗기기, 설정 안 한 변수, INTO(사용자·프로시저 변수), 트리거의 행마다·오류 무시·AFTER 메시지·UPDATE의 NEW·SET NEW·안 쓴 열, 지난 버전, 함수 매개변수 타입, IN 목록·CALL의 `@`, 함수 인자 속 변수·따옴표, `@`로 시작하는 식 인자, SET의 서브쿼리) 중 27종을 새 테스트가 잡았고, 처음에 살아남은 3종이 테스트의 구멍을 알려 줘 보강했다(FROM 있는 select 목록의 변수 이름, 변수가 하나도 없는 세션의 `SELECT @never`, 함수 인자 속 변수가 테이블 위에서도 치환되는지). 나머지 1종(트리거의 `new.x` 대문자 변환)은 파서가 이미 대문자로 써서 도달할 수 없어 **코드를 지웠다**.
+- 빌드 간 차분(이전 빌드 = 앞 항목): 30시드 × 99질의(2,970질의) 차이 0. 검증 도구·퍼저는 아래.
+- 성능: 앞 항목 빌드와 번갈아 3라운드(문장 8,000개 × 3회 중 최솟값) — 키 SELECT 124→127µs(+2%), HAVING 집계 94→95µs(+1%), 키 UPDATE 950→947µs, INSERT 816→819µs로 측정 잡음 안(문장마다 변수·트리거 확인이 추가되지만 둘 다 없으면 곧바로 반환). 50,000행 질의 벤치(`bench_query.py`)도 잡음 안.
+- Release/Debug **520 케이스/1,419,112 assertions**를 기본 설정과 `RUSQL_DML_INDEX_MIN_ROWS=0` 양쪽에서 통과. SELECT 차분 퍼저 150시드(1,819,528 assertions), DML 퍼저 80시드(1,946,487), 쓰기 퍼저 40시드(43,182), 조인 퍼저 60시드(7,178), `[aggregate]` 긴 캠페인(11케이스 317,618), 크래시 퍼저 90라운드·동시 퍼저 30라운드(확인한 확정 행 15,930) 불일치 0. 검증 도구(`verify_joins` 8시드 × 600문장 + 30행 3시드, `verify_writes` 3시드, `verify_null_expressions`·`verify_agg_expressions`·`verify_aggregates`·`verify_orderby_distinct` 각 2시드) 위반 0.
+
+**눈에 띄는 변화(의도한 것)**: 프로시저·`@변수`가 문장 안에서 값이다(`CALL p(1)` 안의 `UPDATE … WHERE id = pid`가 갱신, `WHERE v > @x`가 행을 찾음); `CALL p(@r)`의 OUT 값이 `@r`로 돌아오고 `SELECT … INTO`가 된다; 함수 매개변수에 타입을 쓸 수 있다; **트리거가 행마다 돌고 `NEW.x`/`OLD.x`를 읽으며 본체의 오류가 문장의 오류**다(전에는 문장당 한 번, 오류 무시).
+
+**정직한 한계**: ① **AFTER 트리거가 실패하면** 오류를 돌려주지만 그 문장이 쓴 행(과 앞선 트리거의 부작용)은 남는다(메시지에 그렇게 적음; 명시적 트랜잭션 안에서는 ROLLBACK으로 되돌림). BEFORE 트리거의 실패는 아무것도 쓰기 전이다. ② `SET NEW.x = …`는 BEFORE **INSERT** 트리거에서만(BEFORE UPDATE는 오류로 거절). ③ 이름이 따옴표 없이 보관되는 곳에서는 변수 이름과 같은 문자열이 변수로 읽힌다(`WHERE name = 'n'`인데 변수 `n`이 있으면 변수 값). ④ `LIMIT @n`, `@x := 식`, `@@시스템변수`는 안 됨. ⑤ `INSERT … VALUES (1 + 2)`처럼 VALUES의 식(`VALUES (@x + 1)`)은 아직(식 문법 항목). ⑥ 트리거의 행은 쓰기 전에 계산한 값이다(UPDATE의 NEW는 갱신 식을 적용한 값이고 타입 변환 전). ⑦ 커서·`DECLARE … HANDLER`는 없음.
+
+**Diagram 페이지**: 구성요소·흐름이 바뀐 것이 없어 변경 없음.
+
 ---
 
 ## 요약: 1학기 대비 2학기에 달라진 것

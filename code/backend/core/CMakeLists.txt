@@ -36,6 +36,8 @@ add_library(engine_core STATIC
     src/engine/executor/executor_dml_index.cpp
     src/engine/executor/executor_update_unique.cpp
     src/engine/executor/executor_bind.cpp
+    src/engine/executor/executor_vars.cpp
+    src/engine/executor/executor_trigger.cpp
     src/engine/executor/executor_row_check.cpp
     src/engine/executor/executor_types.cpp
     src/engine/executor/executor_redo.cpp

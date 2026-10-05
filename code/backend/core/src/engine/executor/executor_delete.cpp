@@ -61,10 +61,15 @@ StringResult Executor::exec_delete(SharedDatabase& s, const std::string& table, 
         return StringResult::Err("View '" + strip_db_prefix(table) + "' is not updatable");
     }
 
-    if (auto tr = fire_triggers(s, table, "BEFORE", "DELETE"); tr.is_err()) return tr;
+    const bool before_trigger = has_trigger(s, table, "BEFORE", "DELETE"), after_trigger = has_trigger(s, table, "AFTER", "DELETE");
+    std::vector<TriggerRow> trigger_rows;
+    if (before_trigger || after_trigger) trigger_rows = trigger_rows_for(s, table, condition, nullptr, nullptr);
+    if (before_trigger) {
+        if (auto tr = fire_triggers(s, table, "BEFORE", "DELETE", trigger_rows); tr.is_err()) return tr;
+    }
     auto result = exec_delete_inner(s, table, condition, returning);
-    if (result.is_ok()) {
-        if (auto tr = fire_triggers(s, table, "AFTER", "DELETE"); tr.is_err()) return tr;
+    if (result.is_ok() && after_trigger) {
+        if (auto tr = fire_triggers(s, table, "AFTER", "DELETE", trigger_rows); tr.is_err()) return tr;
     }
     return result;
 }

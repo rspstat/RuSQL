@@ -1202,7 +1202,8 @@ StringResult Executor::execute_sql_inner(const std::string& sql) {
     if (looks_like_select && !in_txn) cache_tables = select_tables(stmt, current_db);
 
     bool has_subquery = looks_like_select && count_occurrences(to_ascii_lower(trimmed), "select") > 1;
-    bool has_nondeterministic = looks_like_select && contains_nondeterministic_func(to_ascii_lower(trimmed));
+    // (a SELECT that reads an @variable has no answer of its own: the same text asks for different rows after `SET @x = ...`)
+    bool has_nondeterministic = looks_like_select && (contains_nondeterministic_func(to_ascii_lower(trimmed)) || trimmed.find('@') != std::string::npos);
     bool has_infoschema = looks_like_select && references_infoschema(to_ascii_lower(trimmed));
 
     // Row-level-concurrency Stage 4/5 correctness fix (found via concurrent-reader
@@ -1265,6 +1266,7 @@ StringResult Executor::execute_with_s(SharedDatabase& s, Statement stmt) {
     const bool top_level = exec_depth_ == 0;
     DepthGuard depth_guard(exec_depth_);
     sync_udf_context(s.user_functions, current_db, auth_user);
+    substitute_variables(stmt); // a procedure's variables and the session's @variables, by their values
 
     if (auto* v = std::get_if<Statement::Use>(&stmt.data)) return exec_use(s, v->database);
     if (auto* v = std::get_if<Statement::CreateDatabase>(&stmt.data)) return exec_create_database(s, v->name, v->if_not_exists);
@@ -1440,6 +1442,21 @@ StringResult Executor::execute_with_s(SharedDatabase& s, Statement stmt) {
         std::transform(upper.begin(), upper.end(), upper.begin(), [](unsigned char c) { return std::toupper(c); });
         if (prepared_stmts.erase(upper) > 0) return StringResult::Ok("Query OK");
         return StringResult::Err("Unknown prepared statement: " + v->name);
+    }
+    if (auto* v = std::get_if<Statement::SelectInto>(&stmt.data)) {
+        auto out = execute_with_s(s, std::move(*v->query));
+        if (out.is_err()) return out;
+        auto [cols, rows] = parse_table_output(out.value());
+        for (std::size_t i = 0; i < v->vars.size(); i++) {
+            std::string value = EXECUTOR_NULL_VALUE; // no row, or fewer columns than variables: NULL
+            if (!rows.empty() && i < cols.size()) {
+                if (auto it = rows.front().find(cols[i]); it != rows.front().end()) value = it->second;
+            }
+            const std::string& var = v->vars[i];
+            if (!var.empty() && var[0] == '@') user_vars[var.substr(1)] = value;
+            else proc_vars[var] = value;
+        }
+        return StringResult::Ok("");
     }
     if (auto* v = std::get_if<Statement::SetUserVar>(&stmt.data)) {
         Row vars = proc_vars;

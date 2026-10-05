@@ -50,18 +50,6 @@ std::string trim_ws(const std::string& s) {
     return s.substr(start, end - start + 1);
 }
 
-// A trigger body's own DML can fire further triggers (directly, or via a chain through
-// another table) with no natural termination guarantee -- cap the depth so a runaway
-// trigger chain fails loudly instead of recursing until stack overflow while holding
-// SharedDatabase's exclusive write lock for the whole time.
-constexpr std::size_t TRIGGER_MAX_DEPTH = 32;
-
-struct TriggerDepthGuard {
-    std::size_t& depth;
-    explicit TriggerDepthGuard(std::size_t& d) : depth(d) { depth++; }
-    ~TriggerDepthGuard() { depth--; }
-};
-
 } // namespace
 
 bool Executor::index_or_scan_exists(const SharedDatabase& s, const std::string& table, const std::vector<Row>& table_rows,
@@ -130,22 +118,6 @@ bool Executor::index_or_scan_exists(const SharedDatabase& s, const std::string& 
         if (it != r.end() && it->second == val && accept(r)) return true;
     }
     return false;
-}
-
-StringResult Executor::fire_triggers(SharedDatabase& s, const std::string& table, const std::string& timing, const std::string& event) {
-    if (trigger_depth_ >= TRIGGER_MAX_DEPTH) {
-        return StringResult::Err("Trigger recursion exceeded maximum depth (" + std::to_string(TRIGGER_MAX_DEPTH) + ")");
-    }
-    std::vector<std::vector<Statement>> bodies;
-    for (auto& [name, def] : s.triggers) {
-        auto& [t, ti, ev, body] = def;
-        if (t == table && ti == timing && ev == event) bodies.push_back(body);
-    }
-    TriggerDepthGuard guard(trigger_depth_);
-    for (auto& body : bodies) {
-        for (auto& stmt : body) execute_with_s(s, stmt);
-    }
-    return StringResult::Ok("");
 }
 
 void Executor::maybe_auto_checkpoint(SharedDatabase& s) {
@@ -462,15 +434,63 @@ StringResult Executor::exec_insert(SharedDatabase& s, std::string table, std::op
         }
     }
 
-    if (auto tr = fire_triggers(s, table, "BEFORE", "INSERT"); tr.is_err()) return tr;
+    if (has_trigger(s, table, "BEFORE", "INSERT")) {
+        // NEW of a BEFORE trigger: the values the statement names (a column it leaves out, or a DEFAULT, has no value yet)
+        std::vector<std::string> names;
+        if (col_list) names = *col_list;
+        else if (const TableSchema* schema = s.catalog.get_table(table)) {
+            for (auto& c : schema->columns) names.push_back(c.name);
+        }
+        std::vector<TriggerRow> new_rows;
+        for (auto& values : all_values) {
+            Row row;
+            for (std::size_t i = 0; i < names.size() && i < values.size(); i++) {
+                if (values[i] != INSERT_DEFAULT) row[names[i]] = values[i];
+            }
+            new_rows.push_back(TriggerRow{std::nullopt, std::move(row)});
+        }
+        if (auto tr = fire_triggers(s, table, "BEFORE", "INSERT", new_rows); tr.is_err()) return tr;
+        // what the triggers made of NEW is what is inserted: a value they changed, a column they set that the statement left out
+        std::vector<std::string> added;
+        for (auto& row : new_rows) {
+            if (!row.new_row) continue;
+            for (auto& [column, value] : *row.new_row) {
+                (void)value;
+                if (std::find(names.begin(), names.end(), column) == names.end() && std::find(added.begin(), added.end(), column) == added.end() &&
+                    column.size() > 0 && column[0] != '_') {
+                    added.push_back(column);
+                }
+            }
+        }
+        for (std::size_t i = 0; i < all_values.size() && i < new_rows.size(); i++) {
+            if (!new_rows[i].new_row) continue;
+            for (std::size_t j = 0; j < names.size() && j < all_values[i].size(); j++) {
+                if (auto it = new_rows[i].new_row->find(names[j]); it != new_rows[i].new_row->end()) all_values[i][j] = it->second;
+            }
+            all_values[i].resize(names.size(), std::string(INSERT_DEFAULT));
+            for (auto& column : added) {
+                auto it = new_rows[i].new_row->find(column);
+                all_values[i].push_back(it != new_rows[i].new_row->end() ? it->second : std::string(INSERT_DEFAULT));
+            }
+        }
+        if (!added.empty()) {
+            for (auto& column : added) names.push_back(column);
+            col_list = names;
+        }
+    }
     if (replacing) {
         if (auto del_result = replace_delete_conflicts(s, table, col_list, replace_rows); del_result.is_err()) return del_result;
         on_conflict = InsertConflict(InsertConflict::Abort{}); // conflicts are gone now; a real remaining duplicate should still error
     }
-    auto result = exec_insert_inner(s, table, col_list, std::move(all_values), on_conflict, returning);
+    const bool after_trigger = has_trigger(s, table, "AFTER", "INSERT");
+    std::vector<Row> inserted;
+    auto result = exec_insert_inner(s, table, col_list, std::move(all_values), on_conflict, returning, false, nullptr,
+                                    after_trigger ? &inserted : nullptr);
 
-    if (result.is_ok()) {
-        if (auto tr = fire_triggers(s, table, "AFTER", "INSERT"); tr.is_err()) return tr;
+    if (result.is_ok() && after_trigger) {
+        std::vector<TriggerRow> new_rows;
+        for (auto& row : inserted) new_rows.push_back(TriggerRow{std::nullopt, std::move(row)});
+        if (auto tr = fire_triggers(s, table, "AFTER", "INSERT", new_rows); tr.is_err()) return tr;
     }
     return result;
 }
@@ -478,7 +498,7 @@ StringResult Executor::exec_insert(SharedDatabase& s, std::string table, std::op
 StringResult Executor::exec_insert_inner(SharedDatabase& s, const std::string& table, const std::optional<std::vector<std::string>>& col_list,
                                           std::vector<std::vector<std::string>> all_values, const InsertConflict& on_conflict,
                                           const std::optional<std::vector<SelectColumn>>& returning, bool validate_only,
-                                          std::vector<Row>* replace_victims) {
+                                          std::vector<Row>* replace_victims, std::vector<Row>* inserted_rows) {
     const TableSchema* schema_ptr = s.catalog.get_table(table);
     if (!schema_ptr) return StringResult::Err("Table '" + table + "' not found");
     TableSchema schema = *schema_ptr;
@@ -1055,6 +1075,7 @@ StringResult Executor::exec_insert_inner(SharedDatabase& s, const std::string& t
 
     std::size_t inserted = prepared.size();
     std::vector<Row> returning_rows = returning ? prepared : std::vector<Row>{};
+    if (inserted_rows) *inserted_rows = prepared; // (the rows an AFTER trigger runs for)
 
     // Row-level-concurrency Stage 4: EXCLUSIVE only for this short tail -- the actual
     // vector-shape change (push_back) and the paired row_pk_pos[table] update, plus

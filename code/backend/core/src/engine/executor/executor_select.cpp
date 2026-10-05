@@ -1162,13 +1162,14 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
         auto eval_col_val = [&](const SelectColumn& col) -> std::string {
             if (auto* v = std::get_if<SelectColumn::Func>(&col.data)) return apply_scalar_func(v->name, v->args, eval_row);
             if (auto* v = std::get_if<SelectColumn::Expr>(&col.data)) return eval_arith(eval_row, v->expr);
+            // (an @variable that was never set is NULL, not its own name)
             if (auto* v = std::get_if<SelectColumn::Column>(&col.data)) {
                 auto it = eval_row.find(v->name);
-                return it != eval_row.end() ? it->second : v->name;
+                return it != eval_row.end() ? it->second : (!v->name.empty() && v->name[0] == '@' ? EXECUTOR_NULL_VALUE : v->name);
             }
             if (auto* v = std::get_if<SelectColumn::ColumnAlias>(&col.data)) {
                 auto it = eval_row.find(v->name);
-                return it != eval_row.end() ? it->second : v->name;
+                return it != eval_row.end() ? it->second : (!v->name.empty() && v->name[0] == '@' ? EXECUTOR_NULL_VALUE : v->name);
             }
             return "";
         };

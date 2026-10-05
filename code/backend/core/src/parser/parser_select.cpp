@@ -502,11 +502,30 @@ Statement Parser::parse_select() {
         if (peek_is(TokenKind::Comma)) advance(); else break;
     }
 
+    // SELECT ... INTO var [, var] (a procedure's variables, or @user variables)
+    std::vector<std::string> into_vars;
+    if (peek_is(TokenKind::Into)) {
+        advance();
+        for (;;) {
+            if (peek_is(TokenKind::At)) {
+                advance();
+                into_vars.push_back("@" + expect_ident());
+            } else {
+                into_vars.push_back(expect_ident());
+            }
+            if (peek_is(TokenKind::Comma)) advance(); else break;
+        }
+    }
+    auto with_into = [&into_vars](Statement select) {
+        if (into_vars.empty()) return select;
+        return Statement(Statement::SelectInto{std::make_unique<Statement>(std::move(select)), into_vars});
+    };
+
     // FROM is optional: scalar SELECT (no FROM) is supported
     if (!peek_is(TokenKind::From)) {
-        return Statement(Statement::Select{
+        return with_into(Statement(Statement::Select{
             "_dual_", std::nullopt, std::move(columns), distinct, std::nullopt, {}, {}, std::nullopt,
-            std::nullopt, std::nullopt, std::nullopt, false, false});
+            std::nullopt, std::nullopt, std::nullopt, false, false}));
     }
     advance(); // consume FROM
 
@@ -749,9 +768,9 @@ Statement Parser::parse_select() {
     }
     if (having) having = detail::expand_condexpr(*having, alias_map);
 
-    Statement select_stmt = Statement(Statement::Select{
+    Statement select_stmt = with_into(Statement(Statement::Select{
         table, std::move(subquery), columns, distinct, condition, joins, order_by, group_by,
-        having, limit, offset, for_update, for_share});
+        having, limit, offset, for_update, for_share}));
 
     // UNION / INTERSECT / EXCEPT [ALL]
     int set_op = 0;

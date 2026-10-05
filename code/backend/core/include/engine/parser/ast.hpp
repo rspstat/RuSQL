@@ -655,6 +655,11 @@ struct Statement {
     // whether it's WRITE (true, exclusive) or READ (false, shared).
     struct LockTables { std::vector<std::pair<std::string, bool>> tables; };
     struct UnlockTables {};
+    // SELECT ... INTO var [, var]: the first row of the query goes into the variables (a procedure's, or an @user variable)
+    struct SelectInto {
+        StatementPtr query;
+        std::vector<std::string> vars;
+    };
 
     using Data = std::variant<
         Begin, Commit, Rollback, CreateTable, DropTable, TruncateTable, Insert, InsertSelect,
@@ -668,7 +673,7 @@ struct Statement {
         CreateProcedure, CallProcedure, CreateTrigger, DropTrigger, DropProcedure, Backup,
         Restore, ShowProcessList, CreateFunction, DropFunction, ProcDeclare, ProcSet, ProcIf,
         ProcWhile, ProcLoop, ProcRepeat, ProcLeave, ProcIterate, PrepareStmt, ExecuteStmt,
-        DeallocatePrepare, SetUserVar, LockTables, UnlockTables>;
+        DeallocatePrepare, SetUserVar, LockTables, UnlockTables, SelectInto>;
     Data data;
 
     Statement() : data(Begin{}) {}

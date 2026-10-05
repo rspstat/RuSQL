@@ -130,6 +130,8 @@ Condition Parser::parse_pred_tail(ArithExpr left) {
             case TokenKind::NumberLit:
             case TokenKind::Ident:
                 return t->text;
+            case TokenKind::At:
+                return "@" + expect_ident(); // a user variable
             case TokenKind::Null:
                 return "NULL";
             case TokenKind::Minus: {
@@ -199,6 +201,8 @@ Condition Parser::parse_pred_tail(ArithExpr left) {
             case TokenKind::StringLit:
             case TokenKind::Ident:
                 return t->text;
+            case TokenKind::At:
+                return "@" + expect_ident();
             case TokenKind::Minus: {
                 const Token* n = advance();
                 if (!n || n->kind != TokenKind::NumberLit) throw ParseError(std::string("Expected number after '-' in ") + ctx);
@@ -621,6 +625,8 @@ ArithExpr Parser::parse_arith_factor() {
             case TokenKind::View: col_name = "view"; break;
             case TokenKind::Column: col_name = "column"; break;
             case TokenKind::Tables: col_name = "tables"; break;
+            case TokenKind::NewKw: col_name = "NEW"; break; // a trigger's NEW.x / OLD.x
+            case TokenKind::OldKw: col_name = "OLD"; break;
             default: break;
         }
         if (col_name) {

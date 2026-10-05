@@ -71,6 +71,10 @@
 - [x] 트리거 영속화 (`data/_triggers.json`) — 재시작 후에도 유지
 - [x] CREATE FUNCTION / DROP FUNCTION — `CREATE FUNCTION name(p1, p2) RETURNS type RETURN expr` 형식의 사용자 정의 스칼라 함수, SELECT/UPDATE에서 일반 함수처럼 호출 가능
 - [x] 사용자 정의 함수 영속화 (`data/_functions.json`) — 재시작 후에도 유지
+- [x] **변수가 문장 안에서 값 (2026-10-06, `executor_vars.cpp`)** — 프로시저 매개변수·`DECLARE` 변수와 `@변수`가 WHERE·SET 식·INSERT 값·select 목록·함수 인자·`IN`/`BETWEEN`·`CALL` 인자·서브쿼리 안에서 값으로 치환된다(전에는 `UPDATE … WHERE id = p_id`가 "0 row(s)", `WHERE v > @x`가 0행). 열과 이름이 같으면 변수가 이김, 설정 안 한 `@변수`는 NULL. `@변수`를 읽는 SELECT는 결과 캐시를 안 씀.
+- [x] **프로시저 호출 (2026-10-06)** — `CALL p(a + 10, @r, 'it''s')` 식 인자·`@변수` 인자·문자열 인자, `OUT`/`INOUT` 매개변수가 호출한 쪽 `@변수`로 값을 돌려줌(OUT은 NULL로 시작), `SELECT … INTO 변수[, 변수]`, `SET @x = (SELECT …)`, 프로시저의 `SET v = (SELECT …)`.
+- [x] **함수 매개변수의 타입 (2026-10-06)** — `CREATE FUNCTION f(x INT, d DECIMAL(10, 2)) RETURNS … RETURN …`(타입은 쓰지 않음; 타입 없는 옛 문법도 됨).
+- [x] **트리거가 행마다 돌고 NEW/OLD를 읽음 (2026-10-06, `executor_trigger.cpp`)** — `FOR EACH ROW`: INSERT는 넣은 행(`NEW.x`), UPDATE는 `OLD.x`와 바뀐 뒤의 `NEW.x`, DELETE는 `OLD.x`; 행이 없으면 안 돈다(전에는 문장당 한 번). 본체의 문장이 실패하면 문장이 실패(`Trigger 'x' failed: …`, AFTER는 이미 쓴 뒤라 `… after the change was made: …`). BEFORE INSERT 트리거는 `SET NEW.v = …`로 넣는 값을 바꿀 수 있음. 한계: AFTER 실패는 쓴 행을 되돌리지 않음(트랜잭션 안에서는 ROLLBACK), BEFORE UPDATE의 `SET NEW`는 거절.
 
 ### DCL
 - [x] CREATE USER [IF NOT EXISTS] `'user'@'host'` [IDENTIFIED BY 'password']
@@ -292,7 +296,7 @@
 - [x] 테이블 단위 동시 쓰기 — 2계층 잠금: ① 구조적 잠금(`RwLock<SharedDatabase>`, 여전히 배타 — DDL/DCL/VACUUM/CHECKPOINT 및 CTE·FROM-서브쿼리·뷰 참조·발화하는 트리거가 있는 문장 전용), ② 테이블별 `FairSharedMutex`(그 외 평범한 단일/조인 INSERT/UPDATE/DELETE/SELECT/MERGE/다중 UPDATE·DELETE — 대상 테이블 + FK 부모/자식 1-hop을 정렬된 순서로 잠금, 락 순서 데드락 방지). 서로 다른 테이블에 대한 쓰기는 실제로 동시 실행됨. 순수 읽기 전용 문장(FOR UPDATE/FOR SHARE 제외 SELECT, SHOW류, DESCRIBE, EXPLAIN 등 — 서브쿼리까지 재귀 판정)은 대상 테이블 세트를 공유(read)로 잡아 다른 테이블의 쓰기와도 병렬 실행
 - [x] **행 단위 동시 쓰기** — 같은 테이블의 서로 다른 행에 대한 INSERT/UPDATE/DELETE(FOR UPDATE/FOR SHARE 포함)도 이제 실제로 동시 실행됨(이전엔 테이블 하나의 락으로 완전 직렬화). 위 테이블별 `table_locks`는 평범한 단일 테이블 DML은 전부 SHARED로(MultiUpdate/MultiDelete/Merge만 배타 유지), 신규 `table_data_locks[table]`가 벡터 모양(push_back/insert/erase) + `row_pk_pos`만 보호(전체 스캔은 SHARED, 모양 변경 순간만 EXCLUSIVE로 짧게); `LockManager`의 행 클레임을 오토커밋까지 확장(`RowClaimGuard` RAII)해 같은 행 경합이 조용한 데이터 손상 없이 명확히 구분됨. writer 기아를 막기 위해 조건변수 기반의 명시적 writer-preferring `FairSharedMutex`(`sync.hpp`) 사용. `GroupCommitCoordinator`(그룹 커밋 fsync 배칭)와의 상호작용까지 포함해 `table_locks` EXCLUSIVE를 COMMIT의 phase1부터 fsync·`active_txn_ids` 갱신까지 하나의 연속 임계구역으로 유지 — 그 사이 틈을 다른 세션의 SHARED 읽기가 파고들면 방금 커밋한 트랜잭션이 아직 "진행 중"으로 잘못 보여 MVCC 버전이 갈라지는(fork) 레이스가 있었음(스트레스 테스트로 재현·수정)
 - [x] **진짜 블로킹 대기 락 + 데드락 감지** — 행 락 충돌이 이제 MySQL/InnoDB의 `innodb_lock_wait_timeout`처럼 실제로 대기함(이전엔 충돌 즉시 실패만 했음). `SET @lock_wait_timeout = <ms>`(기본 50000ms)로 세션별 대기 한도 설정, 시간 내에 안 풀리면 `ERROR 1205 (HY000): Lock wait timeout exceeded` 반환, 대기 중 진짜 사이클(데드락)이 형성되면 그 사이클을 완성시키는 트랜잭션이 즉시 실패(victim, 표준 데드락 희생자 선정과 동일) — 먼저 기다리던 쪽은 계속 정상 대기. INSERT(중복 키 클레임 포함)/UPDATE/DELETE와 이들의 FK 캐스케이드(Cascade/SetNull/SetDefault), SELECT FOR UPDATE/FOR SHARE, INSERT-vs-Gap-Lock 충돌까지 전부 적용 — 남은 범위 밖은 XA 분산 트랜잭션뿐(SSI는 predicate lock까지 포함해 완료, 위 SERIALIZABLE/Predicate Lock 항목 참고). 블로킹 대기 자체는 행 단위 `table_data_locks`뿐 아니라 문장 전체를 감싸는 `table_locks`(SELECT 계열은 `DataLockGuard`도 마찬가지)도 함께 풀었다가 재획득해야 함 — 그렇지 않으면 대기 중인 문장이 그 락을 계속 쥔 채, 같은 테이블에 EXCLUSIVE가 필요한 COMMIT/동시 쓰기와 서로 다른 두 락 메커니즘 사이에서 교착되는 실제 데드락이 존재(개발 중 실제 hang으로 발견·수정)
-- [x] 프로시저 WHILE/LOOP/REPEAT 반복 상한 (10만 회) 및 트리거 재귀 깊이 상한 (32단) — 무한루프/재귀가 잠금을 영구히 점유해 서버 전체를 정지시키는 것 방지
+- [x] 프로시저 WHILE/LOOP/REPEAT 반복 상한 (10만 회) 및 트리거 재귀 깊이 상한 (16단; 2026-10-06에 32에서 낮춤 — Debug 빌드는 한 단계에 32KB 스택을 써서 1MB 스택에 32단이 안 들어감) — 무한루프/재귀가 잠금을 영구히 점유해 서버 전체를 정지시키는 것 방지
 
 ### 모니터링
 - [x] SHOW BUFFER POOL (캐시 히트율, 사용량)

@@ -49,7 +49,21 @@ Statement Parser::parse_insert() {
                 const Token* t = advance();
                 if (!t) throw ParseError("Expected value");
                 switch (t->kind) {
-                    case TokenKind::StringLit: case TokenKind::NumberLit: case TokenKind::Ident: val = t->text; break;
+                    case TokenKind::StringLit: case TokenKind::NumberLit: val = t->text; break;
+                    case TokenKind::Ident:
+                        val = t->text;
+                        if (peek_is(TokenKind::Dot)) { // `NEW.id` in a trigger
+                            advance();
+                            val += "." + expect_ident();
+                        }
+                        break;
+                    case TokenKind::At: val = "@" + expect_ident(); break; // a user variable
+                    case TokenKind::NewKw: case TokenKind::OldKw: // a trigger's NEW.x / OLD.x
+                        val = t->kind == TokenKind::NewKw ? "NEW" : "OLD";
+                        if (!peek_is(TokenKind::Dot)) throw ParseError("Expected '.' after NEW / OLD");
+                        advance();
+                        val += "." + expect_ident();
+                        break;
                     case TokenKind::Null: val = "NULL"; break;
                     case TokenKind::Default: val = INSERT_DEFAULT; break;
                     default: throw ParseError("Expected value");
@@ -137,7 +151,21 @@ Statement Parser::parse_replace() {
                 const Token* t = advance();
                 if (!t) throw ParseError("Expected value");
                 switch (t->kind) {
-                    case TokenKind::StringLit: case TokenKind::NumberLit: case TokenKind::Ident: val = t->text; break;
+                    case TokenKind::StringLit: case TokenKind::NumberLit: val = t->text; break;
+                    case TokenKind::Ident:
+                        val = t->text;
+                        if (peek_is(TokenKind::Dot)) {
+                            advance();
+                            val += "." + expect_ident();
+                        }
+                        break;
+                    case TokenKind::At: val = "@" + expect_ident(); break;
+                    case TokenKind::NewKw: case TokenKind::OldKw:
+                        val = t->kind == TokenKind::NewKw ? "NEW" : "OLD";
+                        if (!peek_is(TokenKind::Dot)) throw ParseError("Expected '.' after NEW / OLD");
+                        advance();
+                        val += "." + expect_ident();
+                        break;
                     case TokenKind::Null: val = "NULL"; break;
                     case TokenKind::Default: val = INSERT_DEFAULT; break;
                     default: throw ParseError("Expected value");
@@ -312,6 +340,7 @@ std::string Parser::parse_single_value() {
         case TokenKind::StringLit: return "'" + t->text + "'";
         case TokenKind::NumberLit: return t->text;
         case TokenKind::Null: return "NULL";
+        case TokenKind::At: return "@" + expect_ident();
         case TokenKind::Ident: {
             std::string s = t->text;
             if (peek_is(TokenKind::Dot)) {

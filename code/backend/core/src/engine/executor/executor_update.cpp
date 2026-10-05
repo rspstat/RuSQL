@@ -32,10 +32,15 @@ StringResult Executor::exec_update(SharedDatabase& s, std::string table, std::ve
         return StringResult::Err("View '" + strip_db_prefix(table) + "' is not updatable");
     }
 
-    if (auto tr = fire_triggers(s, table, "BEFORE", "UPDATE"); tr.is_err()) return tr;
+    const bool before_trigger = has_trigger(s, table, "BEFORE", "UPDATE"), after_trigger = has_trigger(s, table, "AFTER", "UPDATE");
+    std::vector<TriggerRow> trigger_rows;
+    if (before_trigger || after_trigger) trigger_rows = trigger_rows_for(s, table, condition, &assignments, per_row);
+    if (before_trigger) {
+        if (auto tr = fire_triggers(s, table, "BEFORE", "UPDATE", trigger_rows); tr.is_err()) return tr;
+    }
     auto result = exec_update_inner(s, table, assignments, condition, returning, per_row);
-    if (result.is_ok()) {
-        if (auto tr = fire_triggers(s, table, "AFTER", "UPDATE"); tr.is_err()) return tr;
+    if (result.is_ok() && after_trigger) {
+        if (auto tr = fire_triggers(s, table, "AFTER", "UPDATE", trigger_rows); tr.is_err()) return tr;
     }
     return result;
 }
