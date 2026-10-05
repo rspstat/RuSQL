@@ -15,11 +15,20 @@
 #include <sstream>
 #include <string_view>
 
+#include "engine/numeric_text.hpp"
 #include "engine/parser/parser.hpp"
 
 namespace engine {
 
 namespace {
+
+// `lv op rv` ('+', '-' or '*') when both texts are integers and the result fits: an integer, exact (a double would round above 2^53).
+std::optional<std::string> exact_int_text(char op, const std::string& lv, const std::string& rv) {
+    auto a = parse_int64_text(lv), b = parse_int64_text(rv);
+    if (!a || !b) return std::nullopt;
+    if (auto result = int64_arith(op, *a, *b)) return std::to_string(*result);
+    return std::nullopt;
+}
 
 std::optional<double> parse_f64(const std::string& s) {
     if (s.empty()) return std::nullopt;
@@ -109,28 +118,27 @@ std::string Executor::eval_arith(const Row& row, const ArithExpr& expr) {
     if (auto* v = std::get_if<ArithExpr::Add>(&expr.data)) {
         std::string lv = eval_arith(row, *v->lhs), rv = eval_arith(row, *v->rhs);
         if (lv == EXECUTOR_NULL_VALUE || rv == EXECUTOR_NULL_VALUE) return EXECUTOR_NULL_VALUE;
-        auto a = parse_f64(lv), b = parse_f64(rv);
-        if (a && b) return format_arith_result(*a + *b);
-        return lv + rv;
+        if (auto exact = exact_int_text('+', lv, rv)) return *exact;
+        return format_arith_result(text_to_number(lv) + text_to_number(rv));
     }
     if (auto* v = std::get_if<ArithExpr::Sub>(&expr.data)) {
         std::string lv = eval_arith(row, *v->lhs), rv = eval_arith(row, *v->rhs);
         if (lv == EXECUTOR_NULL_VALUE || rv == EXECUTOR_NULL_VALUE) return EXECUTOR_NULL_VALUE;
-        auto a = parse_f64(lv), b = parse_f64(rv);
-        return (a && b) ? format_arith_result(*a - *b) : "0";
+        if (auto exact = exact_int_text('-', lv, rv)) return *exact;
+        return format_arith_result(text_to_number(lv) - text_to_number(rv));
     }
     if (auto* v = std::get_if<ArithExpr::Mul>(&expr.data)) {
         std::string lv = eval_arith(row, *v->lhs), rv = eval_arith(row, *v->rhs);
         if (lv == EXECUTOR_NULL_VALUE || rv == EXECUTOR_NULL_VALUE) return EXECUTOR_NULL_VALUE;
-        auto a = parse_f64(lv), b = parse_f64(rv);
-        return (a && b) ? format_arith_result(*a * *b) : "0";
+        if (auto exact = exact_int_text('*', lv, rv)) return *exact;
+        return format_arith_result(text_to_number(lv) * text_to_number(rv));
     }
     if (auto* v = std::get_if<ArithExpr::Div>(&expr.data)) {
         std::string lv = eval_arith(row, *v->lhs), rv = eval_arith(row, *v->rhs);
         if (lv == EXECUTOR_NULL_VALUE || rv == EXECUTOR_NULL_VALUE) return EXECUTOR_NULL_VALUE;
-        auto a = parse_f64(lv), b = parse_f64(rv);
-        if (a && b && *b == 0.0) return EXECUTOR_NULL_VALUE;
-        return (a && b) ? format_arith_result(*a / *b) : "0";
+        const double divisor = text_to_number(rv);
+        if (divisor == 0.0) return EXECUTOR_NULL_VALUE;
+        return format_arith_result(text_to_number(lv) / divisor);
     }
     if (auto* v = std::get_if<ArithExpr::Func>(&expr.data)) {
         std::vector<std::string> str_args;

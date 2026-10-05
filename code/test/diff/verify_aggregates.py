@@ -10,7 +10,7 @@ random statement
 
 the same FROM/WHERE is run once more as `SELECT <key>, <the arguments> FROM ...` (no aggregate, no GROUP BY), the groups are
 formed and the aggregates computed here with the engine's rules (NULLs are skipped, COUNT(*) counts rows, SUM/AVG/MIN/MAX
-read numeric columns, MIN/MAX of nothing is NULL, SUM of nothing 0), and every group of the engine's answer has to match.
+read numeric columns, MIN/MAX/SUM/AVG of nothing is NULL), and every group of the engine's answer has to match.
 The result columns are also checked to be named as the statement wrote them (`COUNT(u.id)`).
 Exit code 1 and the statement on the first violation.
 """
@@ -53,12 +53,12 @@ def aggregate(fn, values, numeric):
     if fn == "COUNTD":
         return len(set(present))
     nums = [n for n in map(num, present) if n is not None]  # a text that is no number (builds before the NULL fix left "NULL1" in the corpus) is skipped by SUM / AVG
+    if not present:  # no value: SUM, AVG, MIN and MAX have no answer
+        return "NULL"
     if fn == "SUM":
         return sum(nums)
     if fn == "AVG":
-        return sum(nums) / len(nums) if nums else 0.0
-    if not present:
-        return "NULL"
+        return sum(nums) / len(nums) if nums else "NULL"
     if len(nums) == len(present):  # every value is a number: compared as numbers, else as text (the engine's rule)
         return min(nums) if fn == "MIN" else max(nums)
     return min(present) if fn == "MIN" else max(present)
@@ -153,19 +153,16 @@ def main():
                 # the groups HAVING keeps: the aggregate over the group's rows (the engine's rules) compared with the threshold the
                 # way the engine compares (numbers as numbers, else as text)
                 hpos = ks + len(args_cols)
-                kept, unpredictable = {}, False
+                kept = {}
                 for group_key, group_rows in grouped.items():
                     values = group_rows if having[0] == "COUNT*" else [r[hpos] for r in group_rows]
                     hv = aggregate(having[0], values, True)
-                    if hv == "NULL":
-                        unpredictable = True
-                        break
+                    if hv == "NULL":  # a comparison with NULL is not true: the group is dropped
+                        continue
                     # a text that reads as a number is compared as one (the engine's rule), any other text as text
                     hn = hv if not isinstance(hv, str) else num(hv)
                     if (float(hn) > threshold) if hn is not None else (hv > str(threshold)):
                         kept[group_key] = group_rows
-                if unpredictable:
-                    continue
                 grouped = kept
                 having_checked += 1
             if len(got) != len(grouped):
@@ -185,7 +182,7 @@ def main():
                         values = [r[pos] for r in rows]
                         pos += 1
                     want = aggregate(fn, values, True)
-                    if fn == "SUM":
+                    if fn == "SUM" and want != "NULL":
                         want = float(want)
                     if isinstance(want, str) and fn in ("MIN", "MAX") and num(want) is not None:
                         want = float(want)

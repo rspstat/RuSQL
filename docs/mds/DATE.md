@@ -1048,6 +1048,38 @@ VS Code 스타일 탭 드래그 순서 변경(요청의 1번 항목)은 같은 �
 
 **Diagram 페이지**: 구성요소·흐름이 바뀐 것이 없어 변경 없음.
 
+### 10월 6일 (네 번째) — 값이 없는 집계가 NULL이 아니라 0이던 것, 텍스트 산술(`'x' + 1` = `x1`), 소수·큰 정수 합계의 오차, AVG의 두 얼굴, FROM 없는 SELECT가 빈 값, 그리고 이 점검에서 찾은 R6 회귀(`SUM(CASE …)`가 오류)
+
+**왜 이 항목인가**: 사용자 결정("전부 고쳐")의 집계·산술 의미 항목. 프로브를 돌리다 **앞 항목(R6, 이미 푸시된 `f813213`)이 `SUM(CASE WHEN …)`·`COUNT(CASE WHEN …)`·`SUM(v > 1)` — 조건부 집계 전부를 `Unknown column '__case__'`로 깨뜨렸다**는 것도 찾았다(테스트에 `SUM(CASE`가 한 건도 없어 못 잡았다). 가장 먼저 고쳤다.
+
+**원인과 영향**:
+- **값이 없는 집계**: 빈 입력(행이 없음, 전부 NULL)에서 `SUM`·`AVG`·`STDDEV`·`VARIANCE`·`MEDIAN`·윈도 `SUM`이 `0`/`0.0000`, `GROUP_CONCAT`이 `''`, `JSON_AGG`가 `[]`였다(MySQL은 모두 NULL, `COUNT`만 0). 그래서 `v IN (SELECT SUM(v) … 빈 집합)`이 `v = 0`인 행을 맞혔고(NULL이어야 해서 아무 행도 안 맞아야 함), `SUM(v) + 1`이 `1`, `HAVING AVG(v) < 60`이 값 없는 그룹을 통과시켰다.
+- **텍스트 산술**: `+`가 글자를 이어 붙였고(`'x' + 1` → `x1`, `s + v` → `x10`), `- * /`는 숫자가 아닌 글자를 통째로 0으로 읽었다(`'12abc' * 2` = 0, `s - 1` = 0 — MySQL은 앞의 숫자만 읽어 24, -1). `' 5' + 1`은 `51`. `MOD(7, 'x')`는 0(MySQL은 NULL), `7 % '4q'`는 0(3). `ABS`·`ROUND`·`CAST` 등 숫자 인자도 같은 규칙이 필요했다.
+- **정확도**: 합계를 double로 더해 `SUM(0.10 × 10)`이 `0.9999999999999999`라 `HAVING SUM(x) = 1`이 거짓이었고, 2^53을 넘는 정수는 `n + 1`·`SUM(n)`·`MIN/MAX`가 조용히 틀렸다(`9007199254740993` → `…992`).
+- **AVG의 두 얼굴**: select 목록은 4자리로 반올림해 보이고 `HAVING`/식은 전체 정밀도로 계산해, **같은 `HAVING AVG(v) = 1.6667`이 select 목록에 `AVG(v)`가 있느냐에 따라 결과가 달랐다**. MySQL은 반올림된 값(`AVG * 3` = 5.0001)으로 계속 계산한다. 4자리 반올림도 이진 반올림이라 정확한 중간값(43.15625)이 43.1562로 내려갔다(MySQL 43.1563).
+- `MIN`/`MAX`가 숫자를 다시 찍어(`1.98` → `1.9800`, 큰 정수 부정확), `BIT_AND`의 빈 집합이 `-1`(부호 없는 64비트 18446744073709551615), `LOG(b, x)`의 인자 순서가 거꾸로(`LOG(2, 8)` = 0.333).
+- **FROM 없는 SELECT가 빈 값**: `SELECT CASE WHEN 1 = 1 THEN 'a' END`, `SELECT IF(…)`, `SELECT (SELECT COUNT(*) FROM t)`, `SELECT COUNT(*)`가 전부 `''`(조용한 오답). 서브쿼리의 NULL과 오류도 빈 칸이 됐다.
+
+**수정**:
+- 새 헤더 `numeric_text.hpp`: MySQL식 텍스트→숫자(`text_to_number`: 앞 공백 건너뜀, 부호·소수·지수, 뒤는 무시, 숫자가 없으면 0), 정확한 int64 산술(오버플로는 double로), 정확한 10진 합계(`DecimalSum`: 소수 자리가 다른 값도 10^-자리 단위의 정수로 더함, 합이 int64를 넘거나 지수 표기면 double로), 정확한 몫을 4자리로 반올림하는 평균(0에서 먼 쪽으로), 큰 정수를 정확히 비교하는 `compare_numbers`.
+- 집계(`executor_select.cpp`, `executor_window.cpp`): 값이 없으면 NULL(`SUM`·`AVG`·`STDDEV`·`VARIANCE`·`MEDIAN`·`GROUP_CONCAT`·`JSON_AGG`·`ARRAY_AGG`·`SUM(CASE…)`·윈도 `SUM`/`AVG`), 텍스트 값은 앞의 숫자로 합산, `SUM`은 정수·소수를 정확히 더하고(결과의 끝자리 0은 정리), **`AVG`는 정확한 몫을 4자리로 반올림한 값 하나**를 select 목록·`HAVING`·식이 같이 쓴다(윈도 `AVG`도 4자리), `MIN`/`MAX`는 저장된 값 그대로(큰 정수는 정확히 비교), `BIT_AND`/`BIT_OR`는 부호 없는 64비트. 숫자를 모으는 일은 문자열 복사 대신 포인터로 해서 **집계가 8~19% 빨라졌다**.
+- `eval_arith`: `+`는 더하기만(정수는 정확히, 아니면 앞의 숫자로), `- * /`도 같은 규칙, 0으로 나누기는 NULL. 숫자 인자를 받는 스칼라 함수(`ROUND`·`ABS`·`CEIL`·`FLOOR`·`MOD`·`SQRT`·`POWER`·`LOG*`·`EXP`·`SIN`·`COS`·`TAN`·`SIGN`·`TRUNCATE`·`FORMAT`)와 `CAST(… AS INT/DECIMAL …)`가 같은 규칙으로 읽는다. `LOG(b, x)`의 순서를 바로잡았다.
+- FROM 없는 SELECT(`_dual_`): `CASE`/`IF`, 스칼라 서브쿼리(없는 행·NULL은 NULL, 오류는 문장의 오류), 집계(`COUNT(*)` = 1)를 계산하고, 표가 필요한 열(`*`, 윈도 함수)은 빈 값 대신 오류.
+- 바인더(R6 회귀): `SUM`/`COUNT` of CASE의 자리표시자 `__case__`를 열 이름으로 검사하지 않고 CASE의 조건들을 검사한다(`SUM(CASE WHEN nosuch > 1 …)`는 여전히 `Unknown column 'nosuch'`).
+
+**검증**:
+- 신규 Catch2 7케이스(520 → 527, `test_aggregate_semantics.cpp`): ① 값 없는 집계(14개 집계 × 행 없음/전부 NULL, 그룹별, 윈도 프레임, 식·`COALESCE`·`HAVING`·서브쿼리·`IN`, `BIT_AND`/`BIT_OR`, `JSON_AGG`), ② 텍스트 산술(26개 문자열 × 연산자 × 리터럴/열/두 텍스트를 **정규식으로 쓴 독립 참조**와 비교, `SUM`/`AVG` of 텍스트 열, 숫자 함수, `CAST`, `LOG`), ③ 정확한 정수·소수(`SUM(0.10 × 10)` = 1, `HAVING SUM(x) = 0.3`, 2^53 넘는 `SUM`/`+`/`-`/`*`/`MIN`/`MAX`, int64 넘는 것은 double, 소수 5자리 `SUM`의 `HAVING`), ④ AVG(양수·음수·같은 집계가 select 목록에 있을 때와 없을 때의 `HAVING`·32행 평균의 정확한 중간값 0.0313·윈도 `AVG`), ⑤ 무작위 모델(NULL·소수 3자리·텍스트 섞인 표의 `SUM`/`AVG`/`MIN`/`MAX`/`COUNT`를 정수 천분 단위 참조로 계산해 정확히 비교, 그룹별), ⑥ FROM 없는 SELECT, ⑦ `SUM(CASE …)`·`COUNT(CASE …)`·`SUM(v > 1)`(R6 회귀)와 존재하지 않는 열 오류. 기존 테스트 7곳의 기대값이 옛 의미(빈 SUM = 0, `'x' + 1` = `x1`, `AVG * 3` = 5, `LOG(8, 2)` = 3)를 박아 둔 것이어서 MySQL의 값으로 고쳤다.
+- 심은 버그 46종(숫자 변환의 공백·지수·부호, 정수 `+ - *`의 오버플로와 정확 산술, 10진 합계·끝자리 정리, AVG의 반올림·동점·음수, 큰 정수 비교, 빈 입력의 `SUM`/`AVG`/`STDDEV`/`GROUP_CONCAT`/`JSON_AGG`/윈도, 텍스트 `+ - *`·0 나누기, `MOD`·`LOG`·`CAST`·`ABS`, `MIN`/`MAX`의 형식·비교, `SUM(DISTINCT)`/`AVG(DISTINCT)`, `BIT_AND`, HAVING이 읽는 SUM, FROM 없는 SELECT의 CASE·집계·서브쿼리·오류, 바인더) 중 45종을 새 테스트가 잡았고, 살아남은 1종(뺄셈 오버플로 검사 제거)의 구멍을 메워 잡게 했다.
+- 빌드 간 차분(이전 빌드 = 앞 항목): 30시드 × 99질의(2,970질의) 중 **187개가 달랐고 전부 의도한 변화**로 분류했다(값 없는 집계의 0 → NULL 101 · 숫자 표기가 저장된 값 그대로로 58 · NULL AVG의 `HAVING`이 그룹을 거름 17 · AVG 동점 반올림 5 · 정렬/LIMIT 경계가 NULL 때문에 바뀜·`ARRAY_AGG`의 빈 집합 6). 모든 차이 질의가 바뀐 집계(SUM/AVG/MIN/MAX/STDDEV/VARIANCE/GROUP_CONCAT/JSON_AGG/ARRAY_AGG/BIT_*)를 쓰는 것이었고 그 밖의 질의는 차이가 없었다. 분류를 위해 `diff_builds.py`에 `--diff-lines`(차이 줄을 3줄이 아니라 전부 나열) 옵션을 추가했다.
+- Release/Debug **527 케이스/1,421,575 assertions**를 기본 설정과 `RUSQL_DML_INDEX_MIN_ROWS=0` 양쪽에서 통과. SELECT 차분 퍼저 150시드(1,819,528 assertions), DML 퍼저 80시드(1,946,487), 쓰기 퍼저 40시드(43,182), 조인 퍼저 60시드(7,178), `[aggregate]` 긴 캠페인(11케이스 317,626), 새 무작위 모델 60시드(23,151), 크래시 퍼저 90라운드·동시 퍼저 30라운드(확인한 확정 행 16,080) 불일치 0. 검증 도구는 참조 모델을 MySQL 의미로 고쳤다(`verify_aggregates`·`verify_agg_expressions`: 값 없는 집계는 NULL, 식 속 NULL 전파 — 건너뛰는 그룹이 288 → 0이 되어 더 많이 검증한다) — 두 도구와 `verify_joins` 8시드 × 600문장 + 30행 3시드, `verify_writes` 3시드, `verify_null_expressions`·`verify_orderby_distinct` 각 2시드 위반 0.
+- 성능(앞 항목 빌드와 번갈아 3라운드, 캐시를 피하려고 매번 다른 문장): 50,000행에서 `SUM`/`AVG` 71.8 → 63.9ms, 소수 열 67.3 → 54.6, `MIN`/`MAX` 70.8 → 64.2, `STDDEV` 64.4 → 55.6, `GROUP BY` + 4개 집계 91.4 → 79.1, `HAVING AVG` 72.3 → 66.1, `COUNT(*)` 44.9 → 45.1(최솟값 기준, 모두 같거나 빨라짐).
+
+**눈에 띄는 변화(의도한 것)**: 값이 없는 `SUM`/`AVG`/`STDDEV`/`GROUP_CONCAT`/`JSON_AGG`가 NULL이고 그것으로 한 계산도 NULL(`COALESCE(SUM(v), 0)`이 0을 되돌려 줌); `'x' + 1` = 1, `'12abc' * 2` = 24; `AVG(v) * 3`이 5.0001(1, 2, 2); `MIN`/`MAX`가 저장된 값 그대로(`1.98`); `BIT_AND`의 빈 집합이 18446744073709551615; `LOG(2, 8)` = 3; `SELECT CASE …`/`SELECT (SELECT …)`가 값을 낸다; `SUM(CASE …)`가 다시 된다.
+
+**정직한 한계**: ① `/`의 몫은 최대 6자리(MySQL은 피연산자 소수 자리 + 4; `1 / 3`이 0.333333 대 0.3333); ② `AVG`는 DOUBLE/FLOAT 열에서도 4자리로 반올림한 값으로 식을 계산한다(MySQL은 double 전체 정밀도); ③ select 목록에 같은 `SUM(x)`가 있고 소수 5자리 이상이면 `HAVING SUM(x) = …`는 표시된 4자리 값과 비교한다; ④ int64를 넘는 합은 double이며 1e15 이상의 정수 합 표기가 지수일 수 있다; ⑤ `GROUP_CONCAT`의 순서·`DISTINCT`·`SEPARATOR`, `STDDEV_SAMP`/`VAR_SAMP`, 집계 인자의 식(`SUM(a * b)`)은 아직(R3). **이 점검에서 새로 찾아 따로 고칠 것**: **VARCHAR 열의 비교·정렬·인덱스가 열 타입이 아니라 값의 모양으로 정해진다**(숫자처럼 보이는 문자열과 영숫자 키가 섞인 VARCHAR 기본키에서 `WHERE code = '32'`가 존재하는 행을 못 찾음 — 344개 중 58개 조회 실패; `ORDER BY code`가 사전식이 아님; `code = '7'`이 `'007'`·`'7.0'`도 맞힘; 우변의 따옴표를 잃어 `WHERE name = 'city'`가 `city` 열과 비교됨; 2^53 넘는 정수 비교) → 타입 인식 비교 항목, **스칼라 서브쿼리가 여러 행·여러 열을 돌려줘도 오류 없이 첫 값**(MySQL 1242/1241) → 서브쿼리 항목, 대소문자 구분(MySQL 기본은 구분 안 함)은 바이트 비교로 두고 문서에만 적는다.
+
+**Diagram 페이지**: 구성요소·흐름이 바뀐 것이 없어 변경 없음.
+
 ---
 
 ## 요약: 1학기 대비 2학기에 달라진 것

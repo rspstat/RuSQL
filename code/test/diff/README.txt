@@ -4,7 +4,7 @@ For a change that must not alter any result (a faster aggregate / GROUP BY / DIS
 format, ...): run the same random SELECT corpus on two engine_server builds and compare what they print.
 
   python diff_builds.py <old engine_server.exe> <new engine_server.exe> [--queries N] [--seed S] [--rows R]
-                        [--parallel | --modes seq,par] [--exact] [--skip-chain-refs] [--max-report K] [--show N] [--log-new FILE]
+                        [--parallel | --modes seq,par] [--exact] [--skip-chain-refs] [--max-report K] [--diff-lines L] [--show N] [--log-new FILE]
 
 Both servers get the same schema (4 tables: t, u, v, w), data (NULLs, numeric-looking text such as '7' / '007' / '7.0',
 empty strings), mutations and queries, and every answer is compared as text (the "(0.001 sec)" timing line is ignored).
@@ -32,6 +32,8 @@ A statement that fails must fail with the same message on both builds.
                      FROM table), so such queries differ from the fixed build by design
   --ignore-header    compare the rows only (not the result-column names, separator lines or cell padding): for a change
                      of how columns are NAMED, to show that no value moved
+  --diff-lines L     how many lines only one of the two answers has are listed for a difference (default 3; all of them when many
+                     differences are to be classified: every cell of the answers, not three lines)
   --log-new FILE     the new server's stderr (for builds that print debug output)
   --rows R           table size (default 400); above 3000 the generator drops LEFT JOINs, three-way joins and multi-condition
                      ON clauses, which are nested loops (minutes per query) in older builds
@@ -48,13 +50,15 @@ when that key is a selected column.
 verify_aggregates.py does the same for aggregates over `table.column` arguments (COUNT, COUNT DISTINCT, SUM, AVG, MIN, MAX,
 grouped or not, over INNER / LEFT / RIGHT / FULL OUTER joins of tables that share column names, with aliases and WHERE):
 every group of the answer is recomputed from the un-aggregated rows of the same FROM, and the result columns have to be named
-as the statement wrote them (--no-header-check for builds before that).
+as the statement wrote them (--no-header-check for builds before that). An aggregate of no value (SUM, AVG, MIN, MAX of an empty group or
+only NULLs) is NULL, and a HAVING drops a group whose aggregate is NULL.
 
   python verify_aggregates.py <engine_server.exe> [--queries N] [--seed S] [--rows R] [--no-header-check]
 
 verify_agg_expressions.py checks aggregates INSIDE select-list expressions, functions and CASE (`MAX(x) - MIN(y)`,
 `ROUND(AVG(x), 1)`, `COALESCE(SUM(x), 0)`, `CASE WHEN COUNT(*) > 3 ...`) the same way: every group of the answer is computed
-here from the un-aggregated rows of the same FROM, and a scalar statement has to return exactly one row.
+here from the un-aggregated rows of the same FROM, and a scalar statement has to return exactly one row. NULL goes through the expression
+(`SUM(x) + 1` of nothing is NULL, `COALESCE(SUM(x), 0)` is 0, a CASE whose condition is NULL takes the ELSE).
 
   python verify_agg_expressions.py <engine_server.exe> [--queries N] [--seed S] [--rows R]
 

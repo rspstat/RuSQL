@@ -410,6 +410,7 @@ def main():
                          "of where NULL sorts (builds before 2026-10-05 compared NULL as the text \"NULL\"), which moves rows inside an order and across a LIMIT")
     ap.add_argument("--skip-chain-refs", action="store_true", help="no ON clause that reads an earlier joined table (older builds answered those wrongly)")
     ap.add_argument("--max-report", type=int, default=5)
+    ap.add_argument("--diff-lines", type=int, default=3, help="how many lines only one of the two answers has are listed for a difference (a classification of many differences wants all of them)")
     ap.add_argument("--log-new", help="write the new server's stderr to this file (for builds with debug output)")
     ap.add_argument("--show", type=int, default=0, help="print the first N queries with the first lines of the old build's answer")
     args = ap.parse_args()
@@ -468,9 +469,9 @@ def main():
                 diffs += 1
                 if diffs <= args.max_report:
                     la, lb = norm(oa, False), norm(ob, False)
-                    only_old = [l for l in la if l not in set(lb)][:3]
-                    only_new = [l for l in lb if l not in set(la)][:3]
-                    print(f"DIFFERENT (query {n}, seed {args.seed}): {sql}\n  lines old/new: {len(la)}/{len(lb)}; only in old: {[l[:140] for l in only_old]}; only in new: {[l[:140] for l in only_new]}")
+                    only_old = [l for l in la if l not in set(lb)][:args.diff_lines]
+                    only_new = [l for l in lb if l not in set(la)][:args.diff_lines]
+                    print(f"DIFFERENT (query {n}, seed {args.seed}): {sql}\n  lines old/new: {len(la)}/{len(lb)}; only in old: {[l[:400] for l in only_old]}; only in new: {[l[:400] for l in only_new]}")
                     if len(la) < 60:
                         print(f"--- old\n{TIMING.sub('', oa)[:1500]}\n--- new\n{TIMING.sub('', ob)[:1500]}\n")
         print(f"queries={checked} errors(on both)={errors} differences={diffs}" + (f" (ORDER BY ... LIMIT statements not compared: {skipped_cut})" if args.order_as_sets else ""))

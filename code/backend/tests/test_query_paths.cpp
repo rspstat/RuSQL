@@ -237,7 +237,7 @@ TEST_CASE("GROUP BY with aggregates, WHERE, HAVING, ORDER BY and LIMIT matches a
             std::vector<std::string> row = g.key;
             row.push_back(std::to_string(g.rows.size()));
             row.push_back(std::to_string(count_val));
-            row.push_back(std::to_string(sum));
+            row.push_back(count_val ? std::to_string(sum) : "NULL"); // the SUM of no value is NULL
             row.push_back(mn ? std::to_string(*mn) : "NULL");
             row.push_back(mx ? std::to_string(*mx) : "NULL");
             row.push_back(std::to_string(distinct_tags.size()));
@@ -1414,16 +1414,23 @@ TEST_CASE("aggregates inside expressions, functions and CASE in the select list"
     // text that merely reads like an aggregate is text: the statement is not an aggregate query
     REQUIRE(table_cells(ok_text(ex, "SELECT UPPER('max(v)') AS u FROM a ORDER BY aid")) == Rows(6, {"MAX(V)"}));
 
-    // the answer is not rounded on the way: a select-list AVG shows 4 places, a calculation goes on from the real value
+    // a calculation goes on from the AVG the select list shows (4 places, rounded half away from zero), as in MySQL: 1, 2, 2 is 1.6667
+    // and 1.6667 * 3 is 5.0001
     REQUIRE(ex.execute_sql("CREATE TABLE f (id INT PRIMARY KEY, v INT)").is_ok());
     REQUIRE(ex.execute_sql("INSERT INTO f VALUES (1,1),(2,2),(3,2)").is_ok());
-    REQUIRE(table_cells(ok_text(ex, "SELECT AVG(v) * 3 AS t FROM f")) == Rows{{"5"}});
+    REQUIRE(table_cells(ok_text(ex, "SELECT AVG(v) * 3 AS t FROM f")) == Rows{{"5.0001"}});
+    REQUIRE(table_cells(ok_text(ex, "SELECT AVG(v) AS a FROM f")) == Rows{{"1.6667"}});
+    // HAVING sees the same value whether or not the select list shows the aggregate
+    REQUIRE(ex.execute_sql("CREATE TABLE f2 (id INT PRIMARY KEY, g INT, v INT)").is_ok());
+    REQUIRE(ex.execute_sql("INSERT INTO f2 VALUES (1,1,1),(2,1,2),(3,1,2),(4,2,7)").is_ok());
+    REQUIRE(table_cells(ok_text(ex, "SELECT g FROM f2 GROUP BY g HAVING AVG(v) = 1.6667")) == Rows{{"1"}});
+    REQUIRE(table_cells(ok_text(ex, "SELECT g, AVG(v) FROM f2 GROUP BY g HAVING AVG(v) = 1.6667")) == Rows{{"1", "1.6667"}});
     REQUIRE(table_cells(ok_text(ex, "SELECT SUM(v) / 3 AS t FROM f")) == Rows{{"1.666667"}});
     REQUIRE(table_cells(ok_text(ex, "SELECT id FROM f GROUP BY id HAVING AVG(v) * 3 = 3 OR AVG(v) * 3 = 6 ORDER BY id")) == Rows{{"1"}, {"2"}, {"3"}});
 
-    // nothing to aggregate: still one row
+    // nothing to aggregate: still one row, and the SUM of no value is NULL (NULL + 1 is NULL)
     REQUIRE(ex.execute_sql("CREATE TABLE e (id INT PRIMARY KEY, v INT)").is_ok());
-    REQUIRE(table_cells(ok_text(ex, "SELECT SUM(v) + 1 AS t FROM e")) == Rows{{"1"}});
+    REQUIRE(table_cells(ok_text(ex, "SELECT SUM(v) + 1 AS t FROM e")) == Rows{{"NULL"}});
     REQUIRE(table_cells(ok_text(ex, "SELECT COUNT(*) * 5 AS c FROM e")) == Rows{{"0"}});
 
     // text values: MIN/MAX compare as text, and NULLs are skipped
@@ -1447,7 +1454,7 @@ TEST_CASE("aggregates inside expressions, functions and CASE in the select list"
     REQUIRE(table_cells(ok_text(ex, "SELECT x.name, CASE WHEN SUM(y.id) > 20 THEN 'high' ELSE 'low' END AS lvl FROM c x JOIN o y ON y.cid = x.id GROUP BY x.name ORDER BY x.name")) ==
             Rows{{"a", "high"}, {"b", "low"}});
     REQUIRE(table_cells(ok_text(ex, "SELECT x.name, COUNT(y.id) * 10 AS n10, SUM(y.amt) + 0 AS s FROM c x LEFT JOIN o y ON y.cid = x.id GROUP BY x.name ORDER BY x.name")) ==
-            Rows{{"a", "20", "12"}, {"b", "10", "9"}, {"c", "0", "0"}, {"d", "0", "0"}});
+            Rows{{"a", "20", "12"}, {"b", "10", "9"}, {"c", "0", "NULL"}, {"d", "0", "NULL"}}); // (a customer without orders has no SUM)
     REQUIRE(table_cells(ok_text(ex, "SELECT MAX(o.amt) - MIN(o.amt) AS spread, COUNT(c.id) + COUNT(o.id) AS n FROM c LEFT JOIN o ON o.cid = c.id")) == Rows{{"4", "8"}}); // 5 rows + 3 orders
 
     // a partitioned table refuses aggregates, and an aggregate inside an expression is one (it would be merged child by child,
@@ -1554,7 +1561,14 @@ TEST_CASE("expressions over aggregates match a reference when both tables have t
                     double sum = 0;
                     for (double v : vals) sum += v;
                     if (sp.fn == "SUM") return sum;
-                    if (sp.fn == "AVG") return vals.empty() ? 0.0 : sum / static_cast<double>(vals.size());
+                    if (sp.fn == "AVG") {
+                        // the AVG the select list shows: the exact quotient rounded half away from zero to 4 places
+                        const long long numerator = static_cast<long long>(sum) * 10000, count = static_cast<long long>(vals.size());
+                        long long quotient = numerator / count;
+                        const long long remainder = numerator % count;
+                        if (2 * (remainder < 0 ? -remainder : remainder) >= count) quotient += numerator < 0 ? -1 : 1;
+                        return static_cast<double>(quotient) / 10000.0;
+                    }
                     return sp.fn == "MIN" ? *std::min_element(vals.begin(), vals.end()) : *std::max_element(vals.begin(), vals.end());
                 };
 

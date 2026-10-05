@@ -75,6 +75,18 @@ def main():
                 (f"CASE WHEN {a} > {b} THEN 'gt' ELSE 'le' END", lambda x, y, c: "gt" if x > y else "le"),
             ]
             expr, fn_value = shapes[k]
+            # NULL (None) in, NULL out -- except COALESCE, and a CASE whose condition is not true takes the ELSE
+            def null_aware(shape_index, vals, count):
+                x, y = vals
+                if shape_index == 7:  # COALESCE(a, 0)
+                    return 0.0 if x is None else x
+                if shape_index == 8:  # CASE WHEN a > b THEN 'gt' ELSE 'le' END
+                    return "gt" if x is not None and y is not None and x > y else "le"
+                needs_y = shape_index in (0, 1, 2, 6)
+                needs_count = shape_index == 3
+                if x is None or (needs_y and y is None) or (needs_count and count == 0):
+                    return None
+                return fn_value(x, y if y is not None else 0.0, count)
             sql = f"SELECT {tables[key[0]] + '.' + key[1] + ', ' if key else ''}{expr} AS e {frm}" + (f" GROUP BY {tables[key[0]]}.{key[1]}" if key else "")
             header, got = cells(db.execute(sql))
             if got is None:
@@ -100,9 +112,6 @@ def main():
                 if rows is None:
                     print("UNKNOWN GROUP:", sql, row[0])
                     return 1
-                if not rows:  # nothing to aggregate (COUNT(*) is 0 and a division by it has no answer to compare with)
-                    skipped += 1
-                    continue
                 vals, pos = [], ks
                 for sp in (A, B):
                     if sp[0] == "COUNT*":
@@ -111,12 +120,14 @@ def main():
                         values = [r[pos] for r in rows]
                         pos += 1
                     vals.append(aggregate(sp[0], values, True))
-                if any(isinstance(v, str) for v in vals):  # a MIN/MAX of nothing (NULL), or text: no number to calculate with
+                if any(isinstance(v, str) and v != "NULL" for v in vals):  # text: no number to calculate with
                     skipped += 1
                     continue
-                want = fn_value(float(vals[0]), float(vals[1]), float(len(rows)) if rows else 1.0)
+                want = null_aware(k, [None if v == "NULL" else float(v) for v in vals], len(rows))
                 cell = row[ks]
-                if isinstance(want, str):
+                if want is None:
+                    ok = cell == "NULL"
+                elif isinstance(want, str):
                     ok = cell == want
                 else:
                     g = num(cell)

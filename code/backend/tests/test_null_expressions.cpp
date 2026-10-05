@@ -125,9 +125,9 @@ TEST_CASE("arithmetic with a NULL operand is NULL, in the select list, WHERE, CA
     REQUIRE(table_cells(ok_text(ex, "SELECT a.id, r.id FROM a RIGHT JOIN r ON r.id = a.id WHERE a.id % 5 = 0 OR a.id = 1 ORDER BY r.id")) ==
             Rows{{"1", "1"}});
 
-    // text operands that are not NULL keep the engine's old rules (+ joins them, - * / read them as 0)
+    // a text operand that is not NULL is the number it starts with ('x' is 0, '12' is 12): `+` never joins strings
     REQUIRE(table_cells(ok_text(ex, "SELECT id, s + 1, s * 2 FROM a WHERE id IN (1, 3, 4) ORDER BY id")) ==
-            Rows{{"1", "x1", "0"}, {"3", "z1", "0"}, {"4", "13", "24"}});
+            Rows{{"1", "1", "0"}, {"3", "1", "0"}, {"4", "13", "24"}});
 
     // UPDATE: a NULL stays NULL (it became "NULL1" / 0), x / 0 is NULL (it became 0)
     REQUIRE(ex.execute_sql("UPDATE a SET v = v + 1").is_ok());
@@ -169,7 +169,7 @@ TEST_CASE("scalar functions return NULL for a NULL argument and keep their value
         {"LAST_DAY", {"'2026-03-04'"}, 1, "2026-03-31"}, {"FROM_UNIXTIME", {"86400"}, 1, "1970-01-02 00:00:00"},
         {"UNIX_TIMESTAMP", {"'1970-01-02 00:00:00'"}, 1, "86400"}, {"JSON_UNQUOTE", {"'\"a\"'"}, 1, "a"},
         {"ROUND", {"3.14159", "2"}, 2, "3.14"}, {"TRUNCATE", {"3.14159", "2"}, 2, "3.14"}, {"MOD", {"10", "3"}, 2, "1"},
-        {"POW", {"2", "3"}, 2, "8"}, {"POWER", {"2", "10"}, 2, "1024"}, {"LOG", {"8", "2"}, 2, "3.000000"},
+        {"POW", {"2", "3"}, 2, "8"}, {"POWER", {"2", "10"}, 2, "1024"}, {"LOG", {"2", "8"}, 2, "3.000000"},
         {"LEFT", {"'hello'", "3"}, 2, "hel"}, {"RIGHT", {"'hello'", "3"}, 2, "llo"}, {"REPEAT", {"'ab'", "2"}, 2, "abab"},
         {"INSTR", {"'hello'", "'l'"}, 2, "3"}, {"LOCATE", {"'l'", "'hello'", "1"}, 3, "3"}, {"FORMAT", {"1234.5", "1"}, 2, "1,234.5"},
         {"DATE_FORMAT", {"'2026-03-04'", "'%Y/%m/%d'"}, 2, "2026/03/04"}, {"DATEDIFF", {"'2026-03-04'", "'2026-03-01'"}, 2, "3"},

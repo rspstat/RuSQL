@@ -75,6 +75,10 @@
 - [x] **프로시저 호출 (2026-10-06)** — `CALL p(a + 10, @r, 'it''s')` 식 인자·`@변수` 인자·문자열 인자, `OUT`/`INOUT` 매개변수가 호출한 쪽 `@변수`로 값을 돌려줌(OUT은 NULL로 시작), `SELECT … INTO 변수[, 변수]`, `SET @x = (SELECT …)`, 프로시저의 `SET v = (SELECT …)`.
 - [x] **함수 매개변수의 타입 (2026-10-06)** — `CREATE FUNCTION f(x INT, d DECIMAL(10, 2)) RETURNS … RETURN …`(타입은 쓰지 않음; 타입 없는 옛 문법도 됨).
 - [x] **트리거가 행마다 돌고 NEW/OLD를 읽음 (2026-10-06, `executor_trigger.cpp`)** — `FOR EACH ROW`: INSERT는 넣은 행(`NEW.x`), UPDATE는 `OLD.x`와 바뀐 뒤의 `NEW.x`, DELETE는 `OLD.x`; 행이 없으면 안 돈다(전에는 문장당 한 번). 본체의 문장이 실패하면 문장이 실패(`Trigger 'x' failed: …`, AFTER는 이미 쓴 뒤라 `… after the change was made: …`). BEFORE INSERT 트리거는 `SET NEW.v = …`로 넣는 값을 바꿀 수 있음. 한계: AFTER 실패는 쓴 행을 되돌리지 않음(트랜잭션 안에서는 ROLLBACK), BEFORE UPDATE의 `SET NEW`는 거절.
+- [x] **집계의 값 없는 입력은 NULL (2026-10-06, `numeric_text.hpp`)** — 행이 없거나 전부 NULL이면 `SUM`·`AVG`·`STDDEV`·`VARIANCE`·`MEDIAN`·`GROUP_CONCAT`·`JSON_AGG`·`ARRAY_AGG`·`SUM(CASE…)`·`SUM(DISTINCT)`·`AVG(DISTINCT)`와 윈도 `SUM`/`AVG`가 NULL(`COUNT`는 0, `BIT_AND`는 18446744073709551615, `BIT_OR`는 0), 그것으로 한 계산도 NULL(`COALESCE`로 감쌀 수 있음). `HAVING`은 NULL 그룹을 거름.
+- [x] **문자 값 산술은 MySQL식 (2026-10-06)** — 텍스트는 앞의 숫자(`'12abc'` = 12, `' 5'` = 5, `'x'` = 0)로 읽고 `+`는 이어 붙이지 않음; 0으로 나누기·`MOD(x, 0)`은 NULL; `ABS`·`ROUND`·`CEIL`·`FLOOR`·`MOD`·`SQRT`·`POWER`·`LOG*`·`EXP`·`SIN`·`COS`·`TAN`·`SIGN`·`TRUNCATE`·`FORMAT`·`CAST`의 숫자 인자도 같은 규칙. `LOG(b, x)`의 인자 순서.
+- [x] **정확한 합계와 평균 (2026-10-06)** — 정수는 int64로 정확히(`+ - *`, `SUM`, 2^53 넘는 값도; 넘치면 double), 소수의 `SUM`은 정확히(0.1을 열 번 더하면 1), `AVG`는 정확한 몫을 4자리로 반올림한 값 하나를 select 목록·`HAVING`·식이 같이 씀(1, 2, 2 → 1.6667, `AVG * 3` = 5.0001), `MIN`/`MAX`는 저장된 값 그대로.
+- [x] **FROM 없는 SELECT (2026-10-06)** — `SELECT CASE WHEN … END`, `IF(…)`, `(SELECT …)`(NULL·오류 포함), `COUNT(*)`가 값을 냄(전에는 빈 값).
 
 ### DCL
 - [x] CREATE USER [IF NOT EXISTS] `'user'@'host'` [IDENTIFIED BY 'password']

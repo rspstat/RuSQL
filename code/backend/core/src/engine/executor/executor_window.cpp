@@ -12,6 +12,8 @@
 #include <map>
 #include <numeric>
 
+#include "engine/numeric_text.hpp"
+
 namespace engine {
 
 namespace {
@@ -202,14 +204,12 @@ std::vector<Row> Executor::compute_window_functions(std::vector<Row> rows, const
                     std::string col_name = wf->col.value_or("");
                     for (std::size_t pos = 0; pos < sorted.size(); pos++) {
                         auto [start, end] = frame_bounds(pos, total, wf->frame, has_order);
-                        double sum = 0.0;
+                        std::vector<const std::string*> frame_values; // the values in the frame that are not NULL
                         for (std::size_t i = start; i <= end; i++) {
                             const std::string* v = get_col(rows[sorted[i]], col_name);
-                            if (v) {
-                                if (auto p = parse_f64(*v)) sum += *p;
-                            }
+                            if (v && *v != EXECUTOR_NULL_VALUE) frame_values.push_back(v);
                         }
-                        values[sorted[pos]] = format_arith_result(sum);
+                        values[sorted[pos]] = sum_of_texts(frame_values, false).value_or(EXECUTOR_NULL_VALUE);
                     }
                     break;
                 }
@@ -217,15 +217,12 @@ std::vector<Row> Executor::compute_window_functions(std::vector<Row> rows, const
                     std::string col_name = wf->col.value_or("");
                     for (std::size_t pos = 0; pos < sorted.size(); pos++) {
                         auto [start, end] = frame_bounds(pos, total, wf->frame, has_order);
-                        std::vector<double> vals;
+                        std::vector<const std::string*> frame_values; // the values in the frame that are not NULL
                         for (std::size_t i = start; i <= end; i++) {
                             const std::string* v = get_col(rows[sorted[i]], col_name);
-                            if (v) {
-                                if (auto p = parse_f64(*v)) vals.push_back(*p);
-                            }
+                            if (v && *v != EXECUTOR_NULL_VALUE) frame_values.push_back(v);
                         }
-                        values[sorted[pos]] =
-                            vals.empty() ? "NULL" : format_arith_result(std::accumulate(vals.begin(), vals.end(), 0.0) / vals.size());
+                        values[sorted[pos]] = average_of_texts(frame_values).value_or(EXECUTOR_NULL_VALUE);
                     }
                     break;
                 }

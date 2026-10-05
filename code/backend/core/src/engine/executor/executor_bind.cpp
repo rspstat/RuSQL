@@ -156,17 +156,27 @@ std::optional<std::string> Executor::check_columns(SharedDatabase& s, const Stat
             return t;
         }
 
+        // The argument of an aggregate: a column, `*`, or for SUM / COUNT of a CASE (or of a condition: SUM(v > 1)) the conditions of
+        // the CASE -- the parser leaves the placeholder "__case__" in the column then.
+        void aggregate(const AggFunc& func, const std::string& column, const std::optional<CondExpr>& filter) {
+            const std::vector<CaseWhenBranch>* branches = nullptr;
+            if (auto* counted = std::get_if<AggFunc::CountCase>(&func.data)) branches = &counted->branches;
+            else if (auto* summed = std::get_if<AggFunc::SumCase>(&func.data)) branches = &summed->branches;
+            if (branches) {
+                for (auto& b : *branches) cond(b.condition, "field list");
+            } else {
+                name(column, "field list");
+            }
+            if (filter) cond(*filter, "field list");
+        }
+
         void select_column(const SelectColumn& c) {
             if (error) return;
             if (auto* col = std::get_if<SelectColumn::Column>(&c.data)) name(col->name, "field list");
             else if (auto* ca = std::get_if<SelectColumn::ColumnAlias>(&c.data)) name(ca->name, "field list");
-            else if (auto* agg = std::get_if<SelectColumn::Agg>(&c.data)) {
-                name(agg->source.empty() ? agg->col : agg->source, "field list");
-                if (agg->filter) cond(*agg->filter, "field list");
-            } else if (auto* aa = std::get_if<SelectColumn::AggAlias>(&c.data)) {
-                name(aa->source.empty() ? aa->col : aa->source, "field list");
-                if (aa->filter) cond(*aa->filter, "field list");
-            } else if (auto* ex_col = std::get_if<SelectColumn::Expr>(&c.data)) arith(ex_col->expr, "field list");
+            else if (auto* agg = std::get_if<SelectColumn::Agg>(&c.data)) aggregate(agg->func, agg->source.empty() ? agg->col : agg->source, agg->filter);
+            else if (auto* aa = std::get_if<SelectColumn::AggAlias>(&c.data)) aggregate(aa->func, aa->source.empty() ? aa->col : aa->source, aa->filter);
+            else if (auto* ex_col = std::get_if<SelectColumn::Expr>(&c.data)) arith(ex_col->expr, "field list");
             else if (auto* cw = std::get_if<SelectColumn::CaseWhen>(&c.data)) {
                 for (auto& b : cw->branches) cond(b.condition, "field list");
             } else if (auto* wf = std::get_if<SelectColumn::WinFunc>(&c.data)) {

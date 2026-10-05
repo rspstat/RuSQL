@@ -19,6 +19,7 @@
 #include <sstream>
 #include <unordered_map>
 
+#include "engine/numeric_text.hpp"
 #include "engine/parser/parser.hpp"
 
 namespace engine {
@@ -27,7 +28,6 @@ namespace {
 
 using namespace std::chrono;
 
-constexpr double kE = 2.71828182845904523536;
 constexpr double kPi = 3.14159265358979323846;
 
 thread_local std::unordered_map<std::string, UserFunctionDef> g_user_functions;
@@ -587,17 +587,17 @@ std::string Executor::apply_scalar_func(const std::string& func_name, const std:
         return out;
     }
     if (func_name == "ROUND") {
-        double v = parse_f64(arg_at(0)).value_or(0.0);
+        double v = text_to_number(arg_at(0));
         int decimals = args.size() > 1 ? static_cast<int>(parse_i64(arg_at(1)).value_or(0)) : 0;
         double factor = std::pow(10.0, decimals);
         return fmt_double(std::round(v * factor) / factor);
     }
-    if (func_name == "ABS") return fmt_double(std::abs(parse_f64(arg_at(0)).value_or(0.0)));
-    if (func_name == "CEIL") return fmt_double(std::ceil(parse_f64(arg_at(0)).value_or(0.0)));
-    if (func_name == "FLOOR") return fmt_double(std::floor(parse_f64(arg_at(0)).value_or(0.0)));
+    if (func_name == "ABS") return fmt_double(std::abs(text_to_number(arg_at(0))));
+    if (func_name == "CEIL") return fmt_double(std::ceil(text_to_number(arg_at(0))));
+    if (func_name == "FLOOR") return fmt_double(std::floor(text_to_number(arg_at(0))));
     if (func_name == "MOD") {
-        double a = parse_f64(arg_at(0)).value_or(0.0);
-        double b = args.size() > 1 ? parse_f64(arg_at(1)).value_or(1.0) : 1.0;
+        double a = text_to_number(arg_at(0));
+        double b = args.size() > 1 ? text_to_number(arg_at(1)) : 1.0;
         if (b == 0.0) return EXECUTOR_NULL_VALUE;
         return fmt_double(std::fmod(a, b));
     }
@@ -632,17 +632,15 @@ std::string Executor::apply_scalar_func(const std::string& func_name, const std:
         if (type_str == "INT" || type_str == "INTEGER" || type_str == "SIGNED" || type_str == "TINYINT" || type_str == "SMALLINT" ||
             type_str == "MEDIUMINT") {
             if (auto n = parse_i64(val)) return std::to_string(*n);
-            if (auto f = parse_f64(val)) return std::to_string(static_cast<long long>(*f));
-            return "0";
+            return std::to_string(static_cast<long long>(text_to_number(val)));
         }
         if (type_str == "UNSIGNED" || type_str == "BIGINT") {
             if (auto n = parse_i64(val); n && *n >= 0) return std::to_string(*n);
-            if (auto f = parse_f64(val); f && *f >= 0) return std::to_string(static_cast<unsigned long long>(*f));
-            return "0";
+            const double f = text_to_number(val);
+            return f >= 0 ? std::to_string(static_cast<unsigned long long>(f)) : "0";
         }
         if (type_str == "FLOAT" || type_str == "DOUBLE" || type_str == "DECIMAL" || type_str == "NUMERIC" || type_str == "REAL") {
-            if (auto f = parse_f64(val)) return fmt_double(*f);
-            return "0";
+            return fmt_double(text_to_number(val));
         }
         if (type_str == "BOOLEAN" || type_str == "BOOL") {
             bool b = !val.empty() && val != "0" && to_lower(val) != "false" && val != EXECUTOR_NULL_VALUE;
@@ -704,42 +702,42 @@ std::string Executor::apply_scalar_func(const std::string& func_name, const std:
         return EXECUTOR_NULL_VALUE;
     }
     if (func_name == "SQRT") {
-        double v = parse_f64(arg_at(0)).value_or(0.0);
+        double v = text_to_number(arg_at(0));
         return v < 0.0 ? EXECUTOR_NULL_VALUE : fmt_prec(std::sqrt(v), 6);
     }
     if (func_name == "POW" || func_name == "POWER") {
-        double base = parse_f64(arg_at(0)).value_or(0.0);
-        double exp = args.size() > 1 ? parse_f64(arg_at(1)).value_or(0.0) : 0.0;
+        double base = text_to_number(arg_at(0));
+        double exp = args.size() > 1 ? text_to_number(arg_at(1)) : 0.0;
         return fmt_double(std::pow(base, exp));
     }
     if (func_name == "LOG") {
-        double v = parse_f64(arg_at(0)).value_or(0.0);
-        if (args.size() >= 2) {
-            double base = parse_f64(arg_at(1)).value_or(kE);
-            if (v <= 0.0 || base <= 0.0 || base == 1.0) return EXECUTOR_NULL_VALUE;
-            return fmt_prec(std::log(v) / std::log(base), 6);
+        double v = text_to_number(arg_at(0));
+        if (args.size() >= 2) { // LOG(base, x)
+            const double base = v, x = text_to_number(arg_at(1));
+            if (x <= 0.0 || base <= 0.0 || base == 1.0) return EXECUTOR_NULL_VALUE;
+            return fmt_prec(std::log(x) / std::log(base), 6);
         }
         return v <= 0.0 ? EXECUTOR_NULL_VALUE : fmt_prec(std::log(v), 6);
     }
     if (func_name == "LOG2") {
-        double v = parse_f64(arg_at(0)).value_or(0.0);
+        double v = text_to_number(arg_at(0));
         return v <= 0.0 ? EXECUTOR_NULL_VALUE : fmt_prec(std::log2(v), 6);
     }
     if (func_name == "LOG10") {
-        double v = parse_f64(arg_at(0)).value_or(0.0);
+        double v = text_to_number(arg_at(0));
         return v <= 0.0 ? EXECUTOR_NULL_VALUE : fmt_prec(std::log10(v), 6);
     }
-    if (func_name == "EXP") return fmt_prec(std::exp(parse_f64(arg_at(0)).value_or(0.0)), 6);
-    if (func_name == "SIN") return fmt_prec(std::sin(parse_f64(arg_at(0)).value_or(0.0)), 6);
-    if (func_name == "COS") return fmt_prec(std::cos(parse_f64(arg_at(0)).value_or(0.0)), 6);
-    if (func_name == "TAN") return fmt_prec(std::tan(parse_f64(arg_at(0)).value_or(0.0)), 6);
+    if (func_name == "EXP") return fmt_prec(std::exp(text_to_number(arg_at(0))), 6);
+    if (func_name == "SIN") return fmt_prec(std::sin(text_to_number(arg_at(0))), 6);
+    if (func_name == "COS") return fmt_prec(std::cos(text_to_number(arg_at(0))), 6);
+    if (func_name == "TAN") return fmt_prec(std::tan(text_to_number(arg_at(0))), 6);
     if (func_name == "PI") return fmt_double(kPi);
     if (func_name == "SIGN") {
-        double v = parse_f64(arg_at(0)).value_or(0.0);
+        double v = text_to_number(arg_at(0));
         return v > 0.0 ? "1" : (v < 0.0 ? "-1" : "0");
     }
     if (func_name == "TRUNCATE") {
-        double v = parse_f64(arg_at(0)).value_or(0.0);
+        double v = text_to_number(arg_at(0));
         int d = args.size() > 1 ? static_cast<int>(parse_i64(arg_at(1)).value_or(0)) : 0;
         double factor = std::pow(10.0, d);
         return fmt_double(std::trunc(v * factor) / factor);
@@ -845,7 +843,7 @@ std::string Executor::apply_scalar_func(const std::string& func_name, const std:
         return out;
     }
     if (func_name == "FORMAT") {
-        double v = parse_f64(arg_at(0)).value_or(0.0);
+        double v = text_to_number(arg_at(0));
         int d = args.size() > 1 ? static_cast<int>(parse_i64(arg_at(1)).value_or(0)) : 0;
         std::string s = fmt_prec(v, d);
         auto dot = s.find('.');

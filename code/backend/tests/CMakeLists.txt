@@ -45,6 +45,7 @@ add_executable(engine_tests
     test_join_names.cpp
     test_unknown_columns.cpp
     test_stored_routines.cpp
+    test_aggregate_semantics.cpp
 )
 
 target_link_libraries(engine_tests PRIVATE engine_core)

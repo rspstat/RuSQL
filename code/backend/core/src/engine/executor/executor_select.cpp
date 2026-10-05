@@ -18,6 +18,7 @@
 #include "engine/join.hpp"
 #include "engine/planner.hpp"
 #include "engine/parallel_util.hpp"
+#include "engine/numeric_text.hpp"
 #include "engine/storage/numeric_key.hpp"
 
 namespace engine {
@@ -32,24 +33,47 @@ std::optional<double> parse_f64(const std::string& s) {
     return val;
 }
 
-std::string format_4dp(double v) {
-    char buf[64];
-    std::snprintf(buf, sizeof(buf), "%.4f", v);
-    return buf;
+std::string format_4dp(double v) { return format_places(v, 4); }
+
+// MIN or MAX of the values: the smallest / largest, comparing numbers as numbers when every value is one (integers exactly) and as text
+// otherwise, and the value itself as it is stored (not a number printed again). NULL for no value.
+std::string extreme_text(const std::vector<const std::string*>& values, bool smallest) {
+    if (values.empty()) return EXECUTOR_NULL_VALUE;
+    const bool numeric = std::all_of(values.begin(), values.end(), [](const std::string* v) { return parse_f64(*v).has_value(); });
+    const std::string* best = values.front();
+    for (const std::string* v : values) {
+        const int order = numeric ? compare_numbers(*v, *best) : v->compare(*best);
+        if (smallest ? order < 0 : order > 0) best = v;
+    }
+    return *best;
 }
 
-std::string format_num_or_int(double v) {
-    if (v == std::trunc(v)) return std::to_string(static_cast<long long>(v));
-    return format_4dp(v);
+// STDDEV and VARIANCE (of the whole population, as MySQL's) and MEDIAN of the values, 4 places; NULL for no value.
+std::string spread_text(const AggFunc& func, const std::vector<const std::string*>& values) {
+    if (values.empty()) return EXECUTOR_NULL_VALUE;
+    std::vector<double> nums;
+    nums.reserve(values.size());
+    for (const std::string* v : values) nums.push_back(text_to_number(*v));
+    if (std::holds_alternative<AggFunc::Median>(func.data)) {
+        std::sort(nums.begin(), nums.end());
+        const std::size_t n = nums.size();
+        return format_4dp(n % 2 ? nums[n / 2] : (nums[n / 2 - 1] + nums[n / 2]) / 2.0);
+    }
+    const double mean = std::accumulate(nums.begin(), nums.end(), 0.0) / static_cast<double>(nums.size());
+    double variance = 0.0;
+    for (double v : nums) variance += (v - mean) * (v - mean);
+    variance /= static_cast<double>(nums.size());
+    return format_4dp(std::holds_alternative<AggFunc::Stddev>(func.data) ? std::sqrt(variance) : variance);
 }
 
-// A number as text that reads back as the same number: whole numbers as integers, anything else with the digits it needs. For
-// aggregates an expression or HAVING goes on to compute with (format_num_or_int keeps 4 places, which is for display).
-std::string format_exact(double v) {
-    if (v == std::trunc(v) && std::abs(v) < 1e15) return std::to_string(static_cast<long long>(v));
-    char buf[64];
-    auto res = std::to_chars(buf, buf + sizeof buf, v);
-    return std::string(buf, res.ptr);
+// The values of `values` that differ, the first of each.
+std::vector<const std::string*> distinct_texts(const std::vector<const std::string*>& values) {
+    std::unordered_set<std::string_view> seen;
+    std::vector<const std::string*> out;
+    for (const std::string* v : values) {
+        if (seen.insert(*v).second) out.push_back(v);
+    }
+    return out;
 }
 
 // NULL sorts before every value (MySQL: first in ASC, last in DESC); NULLs are equal. It used to be compared as the text "NULL", which put
@@ -549,8 +573,8 @@ std::string Executor::resolve_arg_key(const std::vector<const Row*>& rows, const
 
 // An aggregate that HAVING or a select-list expression/function/CASE asks for by name (`SUM(v)`, `COUNT(DISTINCT x)`), computed
 // over the rows of one group with the rules of the select list: NULLs are skipped, COUNT(*) counts rows, SUM/AVG read the numeric
-// values, MIN/MAX compare numbers when every value is one and text otherwise, and MIN/MAX of nothing is NULL. The answer is not
-// rounded (the select list shows AVG with 4 places), since a comparison or a calculation goes on from it.
+// values, MIN/MAX compare numbers when every value is one and text otherwise, and MIN/MAX, SUM and AVG of nothing are NULL. The answer
+// is the one the select list shows (AVG with 4 places) except that a SUM keeps all its decimals.
 std::string Executor::compute_agg_from_key(const std::string& key, const std::vector<const Row*>& grp) {
     std::string ku = key;
     std::transform(ku.begin(), ku.end(), ku.begin(), [](unsigned char c) { return std::toupper(c); });
@@ -566,28 +590,19 @@ std::string Executor::compute_agg_from_key(const std::string& key, const std::ve
     // the values of the argument that are not NULL (`COUNT(o.id) = 0` on a LEFT JOIN is how customers without orders are found:
     // every group has a row, only the matched ones have an `o.id`)
     const std::string arg = resolve_arg_key(grp, inner);
-    std::vector<std::string> present;
+    std::vector<const std::string*> present;
     for (const Row* r_ptr : grp) {
         auto it = r_ptr->find(arg);
-        if (it != r_ptr->end() && it->second != EXECUTOR_NULL_VALUE) present.push_back(it->second);
+        if (it != r_ptr->end() && it->second != EXECUTOR_NULL_VALUE) present.push_back(&it->second);
     }
-    if (distinct) {
-        std::sort(present.begin(), present.end());
-        present.erase(std::unique(present.begin(), present.end()), present.end());
-    }
+    if (distinct) present = distinct_texts(present);
     if (is_count) return std::to_string(present.size());
 
-    std::vector<double> nums;
-    for (auto& v : present) {
-        if (auto p = parse_f64(v)) nums.push_back(*p);
-    }
-    if (ku.rfind("SUM(", 0) == 0) return format_exact(std::accumulate(nums.begin(), nums.end(), 0.0));
-    if (ku.rfind("AVG(", 0) == 0) return format_exact(nums.empty() ? 0.0 : std::accumulate(nums.begin(), nums.end(), 0.0) / static_cast<double>(nums.size()));
+    if (ku.rfind("SUM(", 0) == 0) return sum_of_texts(present, false).value_or(EXECUTOR_NULL_VALUE);
+    if (ku.rfind("AVG(", 0) == 0) return average_of_texts(present).value_or(EXECUTOR_NULL_VALUE);
     const bool is_min = ku.rfind("MIN(", 0) == 0;
     if (!is_min && ku.rfind("MAX(", 0) != 0) return "0";
-    if (present.empty()) return EXECUTOR_NULL_VALUE;
-    if (nums.size() == present.size()) return format_exact(is_min ? *std::min_element(nums.begin(), nums.end()) : *std::max_element(nums.begin(), nums.end()));
-    return is_min ? *std::min_element(present.begin(), present.end()) : *std::max_element(present.begin(), present.end());
+    return extreme_text(present, is_min);
 }
 
 Row Executor::compute_aggregates(const std::vector<const Row*>& grp, const std::vector<SelectColumn>& columns, bool allow_parallel) {
@@ -641,7 +656,7 @@ Row Executor::compute_aggregates(const std::vector<const Row*>& grp, const std::
                 if (i) joined += gc->separator;
                 joined += strs[i];
             }
-            out[label] = joined;
+            out[label] = strs.empty() ? EXECUTOR_NULL_VALUE : joined; // no value to join: NULL, not ''
             continue;
         }
         if (std::holds_alternative<AggFunc::JsonAgg>(func->data) || std::holds_alternative<AggFunc::ArrayAgg>(func->data)) {
@@ -657,13 +672,13 @@ Row Executor::compute_aggregates(const std::vector<const Row*>& grp, const std::
                     arr.push_back(nullptr);
                     continue;
                 }
-                // Mirrors format_num_or_int's integral-vs-decimal check so JSON_AGG(id)
+                // Whole numbers are written as integers so JSON_AGG(id)
                 // produces clean [1, 2, 3] instead of [1.0, 2.0, 3.0].
                 if (auto p = parse_f64(it->second); p && *p == std::trunc(*p)) arr.push_back(static_cast<std::int64_t>(*p));
                 else if (p) arr.push_back(*p);
                 else arr.push_back(it->second);
             }
-            out[label] = arr.dump();
+            out[label] = grp.empty() ? EXECUTOR_NULL_VALUE : arr.dump(); // no row: NULL, not []
             continue;
         }
         if (auto* cc = std::get_if<AggFunc::CountCase>(&func->data)) {
@@ -687,7 +702,7 @@ Row Executor::compute_aggregates(const std::vector<const Row*>& grp, const std::
             continue;
         }
         if (auto* sc = std::get_if<AggFunc::SumCase>(&func->data)) {
-            double sum = 0.0;
+            std::vector<std::string> results; // the CASE result of each row that is not NULL
             for (const Row* row_ptr : grp) {
                 const Row& row = *row_ptr;
                 auto resolve = [&](const std::string& sv) -> std::string {
@@ -701,172 +716,91 @@ Row Executor::compute_aggregates(const std::vector<const Row*>& grp, const std::
                         break;
                     }
                 }
-                if (val != EXECUTOR_NULL_VALUE && !val.empty()) {
-                    if (auto p = parse_f64(val)) sum += *p;
-                }
+                if (val != EXECUTOR_NULL_VALUE) results.push_back(std::move(val));
             }
-            out[label] = format_arith_result(sum);
+            std::vector<const std::string*> present;
+            for (const std::string& v : results) present.push_back(&v);
+            out[label] = sum_of_texts(present, true).value_or(EXECUTOR_NULL_VALUE);
             continue;
         }
         if (std::holds_alternative<AggFunc::Min>(func->data) || std::holds_alternative<AggFunc::Max>(func->data)) {
-            bool is_min = std::holds_alternative<AggFunc::Min>(func->data);
-            std::vector<std::string> raw;
+            std::vector<const std::string*> present;
             for (const Row* r_ptr : grp) {
-                const Row& r = *r_ptr;
-                auto it = r.find(col_name);
-                if (it != r.end() && it->second != EXECUTOR_NULL_VALUE) raw.push_back(it->second);
+                auto it = r_ptr->find(col_name);
+                if (it != r_ptr->end() && it->second != EXECUTOR_NULL_VALUE) present.push_back(&it->second);
             }
-            std::string res;
-            if (raw.empty()) {
-                res = EXECUTOR_NULL_VALUE;
-            } else {
-                std::vector<double> nums;
-                for (auto& rv : raw) {
-                    if (auto p = parse_f64(rv)) nums.push_back(*p);
-                }
-                if (nums.size() == raw.size()) {
-                    double v = is_min ? *std::min_element(nums.begin(), nums.end()) : *std::max_element(nums.begin(), nums.end());
-                    res = format_num_or_int(v);
-                } else {
-                    res = is_min ? *std::min_element(raw.begin(), raw.end()) : *std::max_element(raw.begin(), raw.end());
-                }
-            }
-            out[label] = res;
+            out[label] = extreme_text(present, std::holds_alternative<AggFunc::Min>(func->data));
             continue;
         }
         if (std::holds_alternative<AggFunc::BitAnd>(func->data) || std::holds_alternative<AggFunc::BitOr>(func->data)) {
             bool is_and = std::holds_alternative<AggFunc::BitAnd>(func->data);
-            // BIT_AND over an empty set is the all-1s identity (getting this wrong as 0
-            // would silently zero out any real AND); BIT_OR's identity is a plain 0.
-            std::int64_t acc = is_and ? -1 : 0; // -1 == all bits set, two's complement
+            // BIT_AND over an empty set is the all-1s identity (getting this wrong as 0 would silently zero out any real AND);
+            // BIT_OR's identity is a plain 0. The result is an unsigned 64-bit number, as in MySQL (BIT_AND of nothing is
+            // 18446744073709551615, and -1 counts as all bits set).
+            std::uint64_t acc = is_and ? ~std::uint64_t{0} : 0;
             for (const Row* r_ptr : grp) {
                 const Row& r = *r_ptr;
                 auto it = r.find(col_name);
                 if (it == r.end() || it->second == EXECUTOR_NULL_VALUE) continue;
-                if (auto p = parse_f64(it->second)) {
-                    std::int64_t n = static_cast<std::int64_t>(*p);
-                    acc = is_and ? (acc & n) : (acc | n);
-                }
+                const double v = std::clamp(text_to_number(it->second), -9.2e18, 9.2e18);
+                const auto n = static_cast<std::uint64_t>(static_cast<std::int64_t>(std::llround(v)));
+                acc = is_and ? (acc & n) : (acc | n);
             }
             out[label] = std::to_string(acc);
             continue;
         }
 
-        // NOTE: Rust only parallelizes this specific value collection for the plain
-        // (non-GROUP-BY, whole-result) aggregate call site, never for per-group
-        // computation (group row counts are usually small) — hence the allow_parallel
-        // flag rather than an unconditional threshold check here.
-        std::vector<double> vals;
+        if (std::holds_alternative<AggFunc::Count>(func->data)) {
+            if (col_name == "*") {
+                out[label] = std::to_string(grp.size());
+                continue;
+            }
+            std::size_t c = 0;
+            for (const Row* r_ptr : grp) {
+                auto it = r_ptr->find(col_name);
+                if (it != r_ptr->end() && it->second != EXECUTOR_NULL_VALUE) c++;
+            }
+            out[label] = std::to_string(c);
+            continue;
+        }
+        if (std::holds_alternative<AggFunc::CountDistinct>(func->data)) {
+            std::unordered_set<std::string_view> distinct;
+            for (const Row* r_ptr : grp) {
+                auto it = r_ptr->find(col_name);
+                if (it != r_ptr->end() && it->second != EXECUTOR_NULL_VALUE) distinct.insert(it->second);
+            }
+            out[label] = std::to_string(distinct.size());
+            continue;
+        }
+
+        // The values of the argument that are not NULL. NOTE: Rust only parallelizes this specific value collection for the plain
+        // (non-GROUP-BY, whole-result) aggregate call site, never for per-group computation (group row counts are usually small)
+        // -- hence the allow_parallel flag rather than an unconditional threshold check here.
+        std::vector<const std::string*> present;
         if (allow_parallel && parallel_enabled() && grp.size() >= parallel_min_rows()) {
             std::size_t n_chunks = (grp.size() + PARALLEL_CHUNK - 1) / PARALLEL_CHUNK;
-            std::vector<std::vector<double>> partial(n_chunks);
+            std::vector<std::vector<const std::string*>> partial(n_chunks);
             ThreadPool::global().parallel_for(n_chunks, [&](std::size_t ci) {
                 std::size_t start = ci * PARALLEL_CHUNK;
                 std::size_t end = std::min(start + PARALLEL_CHUNK, grp.size());
-                auto& out_vals = partial[ci];
                 for (std::size_t i = start; i < end; i++) {
-                    const Row& r = *grp[i];
-                    if (col_name == "*") {
-                        out_vals.push_back(1.0);
-                        continue;
-                    }
-                    auto it = r.find(col_name);
-                    if (it != r.end()) {
-                        if (auto p = parse_f64(it->second)) out_vals.push_back(*p);
-                    }
+                    auto it = grp[i]->find(col_name);
+                    if (it != grp[i]->end() && it->second != EXECUTOR_NULL_VALUE) partial[ci].push_back(&it->second);
                 }
             });
-            for (auto& chunk : partial) {
-                vals.insert(vals.end(), chunk.begin(), chunk.end());
-            }
+            for (auto& chunk : partial) present.insert(present.end(), chunk.begin(), chunk.end());
         } else {
             for (const Row* r_ptr : grp) {
-                const Row& r = *r_ptr;
-                if (col_name == "*") {
-                    vals.push_back(1.0);
-                    continue;
-                }
-                auto it = r.find(col_name);
-                if (it != r.end()) {
-                    if (auto p = parse_f64(it->second)) vals.push_back(*p);
-                }
+                auto it = r_ptr->find(col_name);
+                if (it != r_ptr->end() && it->second != EXECUTOR_NULL_VALUE) present.push_back(&it->second);
             }
         }
-        auto distinct_vals = [&](const std::vector<const Row*>& rowsv) {
-            std::unordered_set<std::string> seen;
-            for (const Row* r_ptr : rowsv) {
-                const Row& r = *r_ptr;
-                auto it = r.find(col_name);
-                if (it != r.end() && it->second != EXECUTOR_NULL_VALUE) seen.insert(it->second);
-            }
-            std::vector<double> res;
-            for (auto& sv : seen) {
-                if (auto p = parse_f64(sv)) res.push_back(*p);
-            }
-            return res;
-        };
 
-        double agg_val = 0.0;
-        bool is_avg_like = false;
-        if (std::holds_alternative<AggFunc::Count>(func->data)) {
-            if (col_name == "*") {
-                agg_val = static_cast<double>(grp.size());
-            } else {
-                std::size_t c = 0;
-                for (const Row* r_ptr : grp) {
-                    const Row& r = *r_ptr;
-                    auto it = r.find(col_name);
-                    if (it != r.end() && it->second != EXECUTOR_NULL_VALUE) c++;
-                }
-                agg_val = static_cast<double>(c);
-            }
-        } else if (std::holds_alternative<AggFunc::CountDistinct>(func->data)) {
-            std::unordered_set<std::string> distinct;
-            for (const Row* r_ptr : grp) {
-                const Row& r = *r_ptr;
-                auto it = r.find(col_name);
-                if (it != r.end() && it->second != EXECUTOR_NULL_VALUE) distinct.insert(it->second);
-            }
-            agg_val = static_cast<double>(distinct.size());
-        } else if (std::holds_alternative<AggFunc::Sum>(func->data)) {
-            agg_val = std::accumulate(vals.begin(), vals.end(), 0.0);
-        } else if (std::holds_alternative<AggFunc::SumDistinct>(func->data)) {
-            auto dv = distinct_vals(grp);
-            agg_val = std::accumulate(dv.begin(), dv.end(), 0.0);
-        } else if (std::holds_alternative<AggFunc::Avg>(func->data)) {
-            agg_val = vals.empty() ? 0.0 : std::accumulate(vals.begin(), vals.end(), 0.0) / static_cast<double>(vals.size());
-            is_avg_like = true;
-        } else if (std::holds_alternative<AggFunc::AvgDistinct>(func->data)) {
-            auto dv = distinct_vals(grp);
-            agg_val = dv.empty() ? 0.0 : std::accumulate(dv.begin(), dv.end(), 0.0) / static_cast<double>(dv.size());
-            is_avg_like = true;
-        } else if (std::holds_alternative<AggFunc::Stddev>(func->data)) {
-            if (!vals.empty()) {
-                double mean = std::accumulate(vals.begin(), vals.end(), 0.0) / static_cast<double>(vals.size());
-                double var = 0.0;
-                for (auto v : vals) var += (v - mean) * (v - mean);
-                var /= static_cast<double>(vals.size());
-                agg_val = std::sqrt(var);
-            }
-            is_avg_like = true;
-        } else if (std::holds_alternative<AggFunc::Variance>(func->data)) {
-            if (!vals.empty()) {
-                double mean = std::accumulate(vals.begin(), vals.end(), 0.0) / static_cast<double>(vals.size());
-                double var = 0.0;
-                for (auto v : vals) var += (v - mean) * (v - mean);
-                agg_val = var / static_cast<double>(vals.size());
-            }
-            is_avg_like = true;
-        } else if (std::holds_alternative<AggFunc::Median>(func->data)) {
-            if (!vals.empty()) {
-                std::vector<double> sorted = vals;
-                std::sort(sorted.begin(), sorted.end());
-                std::size_t n = sorted.size();
-                agg_val = n % 2 ? sorted[n / 2] : (sorted[n / 2 - 1] + sorted[n / 2]) / 2.0;
-            }
-            is_avg_like = true;
-        }
-        out[label] = is_avg_like ? format_4dp(agg_val) : format_num_or_int(agg_val);
+        if (std::holds_alternative<AggFunc::Sum>(func->data)) out[label] = sum_of_texts(present, true).value_or(EXECUTOR_NULL_VALUE);
+        else if (std::holds_alternative<AggFunc::SumDistinct>(func->data)) out[label] = sum_of_texts(distinct_texts(present), true).value_or(EXECUTOR_NULL_VALUE);
+        else if (std::holds_alternative<AggFunc::Avg>(func->data)) out[label] = average_of_texts(present).value_or(EXECUTOR_NULL_VALUE);
+        else if (std::holds_alternative<AggFunc::AvgDistinct>(func->data)) out[label] = average_of_texts(distinct_texts(present)).value_or(EXECUTOR_NULL_VALUE);
+        else out[label] = spread_text(*func, present); // STDDEV, VARIANCE, MEDIAN
     }
     return out;
 }
@@ -1159,6 +1093,7 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
         Row eval_row = proc_vars;
         for (auto& [k, v] : user_vars) eval_row["@" + k] = v;
 
+        std::string dual_error; // a column this select cannot evaluate without a table, or a failing subquery
         auto eval_col_val = [&](const SelectColumn& col) -> std::string {
             if (auto* v = std::get_if<SelectColumn::Func>(&col.data)) return apply_scalar_func(v->name, v->args, eval_row);
             if (auto* v = std::get_if<SelectColumn::Expr>(&col.data)) return eval_arith(eval_row, v->expr);
@@ -1171,6 +1106,36 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
                 auto it = eval_row.find(v->name);
                 return it != eval_row.end() ? it->second : (!v->name.empty() && v->name[0] == '@' ? EXECUTOR_NULL_VALUE : v->name);
             }
+            if (auto* v = std::get_if<SelectColumn::CaseWhen>(&col.data)) {
+                auto resolve = [&](const std::string& sv) -> std::string {
+                    const std::string* found = get_col(eval_row, sv);
+                    return found ? *found : sv;
+                };
+                for (auto& b : v->branches) {
+                    if (eval_condexpr(eval_row, b.condition)) return resolve(b.result);
+                }
+                return v->else_val ? resolve(*v->else_val) : EXECUTOR_NULL_VALUE;
+            }
+            if (std::holds_alternative<SelectColumn::Agg>(col.data) || std::holds_alternative<SelectColumn::AggAlias>(col.data)) {
+                // a select without FROM is one row: the aggregate is over a group of one row (COUNT(*) is 1)
+                const Row aggregated = compute_aggregates({&eval_row}, {col});
+                return aggregated.empty() ? std::string(EXECUTOR_NULL_VALUE) : aggregated.begin()->second;
+            }
+            if (auto* v = std::get_if<SelectColumn::Subquery>(&col.data)) {
+                Statement query_copy = *v->query;
+                auto* sc = std::get_if<Statement::Select>(&query_copy.data);
+                if (!sc) return EXECUTOR_NULL_VALUE;
+                auto out = exec_select(s, sc->table, std::move(sc->subquery), sc->distinct, std::move(sc->columns), std::move(sc->condition),
+                                        std::move(sc->joins), std::move(sc->order_by), std::move(sc->group_by), std::move(sc->having), sc->limit,
+                                        sc->offset, false, false);
+                if (out.is_err()) {
+                    dual_error = out.error();
+                    return "";
+                }
+                auto found = extract_values_from_output(out.value());
+                return found.empty() ? std::string(EXECUTOR_NULL_VALUE) : found.front();
+            }
+            dual_error = "This column needs a table to read from"; // `*`, a window function
             return "";
         };
 
@@ -1183,6 +1148,7 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
         std::vector<std::string> vals;
         vals.reserve(col_defs.size());
         for (auto& cd : col_defs) vals.push_back(escape_cell(eval_col_val(*cd.col)));
+        if (!dual_error.empty()) return StringResult::Err(dual_error);
 
         std::vector<std::size_t> widths;
         widths.reserve(col_defs.size());
