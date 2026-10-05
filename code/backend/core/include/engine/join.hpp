@@ -1,5 +1,9 @@
 #pragma once
 
+// `left_pad`, where the joins take it: every key the left rows carry (the plain column names and "<table>.<column>" of the tables
+// joined so far), for the NULL padding of a RIGHT / FULL OUTER JOIN row that no left row matched. Without it the keys of the first
+// left row are used, which misses the "<table>.<column>" keys of the joined tables and everything when the left side has no row.
+//
 // Faithful port of rusql-core/src/engine/join.rs — join execution algorithms.
 //
 // hash_join's Inner/Left probe phase is parallelized over the global ThreadPool
@@ -24,11 +28,11 @@ void null_right(Row& merged, const std::vector<std::string>& cols, const std::st
 
 std::vector<Row> sort_merge_join(const std::vector<Row>& left, const std::vector<Row>& right, JoinType join_type,
                                   const std::string& table, const std::string& probe_col, const std::string& build_col,
-                                  const std::vector<std::string>& right_schema_cols);
+                                  const std::vector<std::string>& right_schema_cols, const std::vector<std::string>* left_pad = nullptr);
 
 std::vector<Row> hash_join(const std::vector<Row>& left, const std::vector<Row>& right, JoinType join_type,
                             const std::string& table, const std::string& probe_col, const std::string& build_col,
-                            const std::vector<std::string>& right_schema_cols);
+                            const std::vector<std::string>& right_schema_cols, const std::vector<std::string>* left_pad = nullptr);
 
 // INNER, LEFT, RIGHT or FULL OUTER JOIN whose ON condition contains an equality `left_key = right_key` that every matching
 // pair must satisfy, without the nested loop: one side is hashed by its key, every row of the other side only meets the rows
@@ -41,11 +45,12 @@ std::optional<std::vector<Row>> hashed_join_verified(const std::vector<Row>& lef
                                                       JoinType join_type, const std::function<const std::string*(const Row&)>& left_key,
                                                       const std::function<const std::string*(const Row&)>& right_key,
                                                       const std::vector<std::string>& right_schema_cols,
-                                                      const std::function<bool(const Row&)>& on_match);
+                                                      const std::function<bool(const Row&)>& on_match,
+                                                      const std::vector<std::string>* left_pad = nullptr);
 
 std::vector<Row> nested_loop_join(const std::vector<Row>& left, const std::vector<Row>& right, JoinType join_type,
                                    const std::string& table, const std::vector<std::string>& using_cols,
                                    const std::vector<std::string>& right_schema_cols,
-                                   const std::function<bool(const Row&)>& on_match);
+                                   const std::function<bool(const Row&)>& on_match, const std::vector<std::string>* left_pad = nullptr);
 
 } // namespace engine

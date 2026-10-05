@@ -161,10 +161,7 @@ Statement Parser::parse_update() {
     std::string first_table = expect_ident();
     std::unordered_map<std::string, std::string> alias_map;
 
-    if (peek_is(TokenKind::Ident)) {
-        std::string a = expect_ident();
-        alias_map[a] = first_table;
-    }
+    if (auto a = parse_table_alias()) alias_map[*a] = first_table;
 
     std::vector<std::string> tables = {first_table};
     std::vector<Join> joins;
@@ -173,10 +170,7 @@ Statement Parser::parse_update() {
     while (peek_is(TokenKind::Comma)) {
         advance();
         std::string t = expect_ident();
-        if (peek_is(TokenKind::Ident)) {
-            std::string a = expect_ident();
-            alias_map[a] = t;
-        }
+        if (auto a = parse_table_alias()) alias_map[*a] = t;
         tables.push_back(t);
     }
 
@@ -207,10 +201,7 @@ Statement Parser::parse_update() {
             break;
         }
         std::string join_table = expect_ident();
-        if (peek_is(TokenKind::Ident)) {
-            std::string a = expect_ident();
-            alias_map[a] = join_table;
-        }
+        if (auto a = parse_table_alias()) alias_map[*a] = join_table;
         if (!peek_is(TokenKind::On)) throw ParseError("Expected ON");
         advance();
         CondExpr on_expr = detail::expand_condexpr(parse_condexpr(), alias_map);
@@ -241,6 +232,11 @@ Statement Parser::parse_update() {
     if (tables.size() > 1 || !joins.empty()) {
         return Statement(Statement::MultiUpdate{tables, joins, assignments, condition});
     }
+    // the target of a one-table UPDATE is a column of that table: `SET t.v = 1` (t = the table or its alias) names the column v
+    for (auto& assignment : assignments) {
+        std::string& col = assignment.first;
+        col = col.substr(col.rfind('.') == std::string::npos ? 0 : col.rfind('.') + 1);
+    }
     return Statement(Statement::Update{first_table, assignments, condition, returning});
 }
 
@@ -261,10 +257,7 @@ Statement Parser::parse_delete() {
 
     std::string from_table = expect_ident();
     std::unordered_map<std::string, std::string> alias_map;
-    if (peek_is(TokenKind::Ident)) {
-        std::string a = expect_ident();
-        alias_map[a] = from_table;
-    }
+    if (auto a = parse_table_alias()) alias_map[*a] = from_table;
 
     std::vector<Join> joins;
     for (;;) {
@@ -289,10 +282,7 @@ Statement Parser::parse_delete() {
             break;
         }
         std::string join_table = expect_ident();
-        if (peek_is(TokenKind::Ident)) {
-            std::string a = expect_ident();
-            alias_map[a] = join_table;
-        }
+        if (auto a = parse_table_alias()) alias_map[*a] = join_table;
         if (!peek_is(TokenKind::On)) throw ParseError("Expected ON");
         advance();
         CondExpr on_expr = detail::expand_condexpr(parse_condexpr(), alias_map);

@@ -72,5 +72,13 @@ NOTHING (statement atomicity); after every statement both tables are read back a
 
   python verify_writes.py <engine_server.exe> [--statements N] [--seed S]
 
+verify_joins.py checks joins against a model of what SQL says: three small tables that share column names, random statements over 1 to 4
+table uses (a table used twice with an alias for each use, written `t x` or `t AS x`; INNER / LEFT / RIGHT / FULL OUTER / CROSS, the comma form,
+NATURAL and USING; derived tables `(SELECT * FROM t WHERE ...) AS d` in FROM and in JOIN; ON conditions of several parts; WHERE with AND / OR /
+NOT / IS NULL; `*`, `t.*`, qualified columns, COUNT(*)). Every answer is computed here by nested loops with three-valued logic and compared as a
+multiset of rows together with the column names.
+
+  python verify_joins.py <engine_server.exe> [--queries N] [--seed S] [--rows R]
+
 To check that the comparison can see a bug, plant one on purpose in the new build (for instance read an unqualified column
 from the last table that has it instead of the first) and run the same seed: it has to report differences.

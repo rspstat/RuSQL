@@ -132,8 +132,13 @@ SelectColumn expand_select_column(const SelectColumn& col, const std::unordered_
                 for (auto& c : w.partition_by) c = expand_alias_str(c, map);
                 for (auto& o : w.order_by) o.column = expand_alias_str(o.column, map);
                 return SelectColumn(std::move(w));
+            } else if constexpr (std::is_same_v<T, SelectColumn::All>) {
+                // `alias.*` names the table
+                if (alt.table.empty()) return col;
+                auto it = map.find(alt.table);
+                return SelectColumn(SelectColumn::All{it != map.end() ? it->second : alt.table});
             } else {
-                // All/Subquery pass through unchanged — copy via
+                // Subquery passes through unchanged — copy via
                 // SelectColumn's own deep-copy constructor (Subquery holds a
                 // non-copyable unique_ptr<Statement>, so `alt` itself can't be copied
                 // directly; `col` can, via SelectColumn::SelectColumn(const SelectColumn&)).

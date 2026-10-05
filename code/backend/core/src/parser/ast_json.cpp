@@ -334,6 +334,7 @@ void to_json(nlohmann::json& j, const Join& join) {
     j = nlohmann::json{{"table", join.table}, {"on_expr", join.on_expr},
                         {"join_type", join.join_type}, {"using_cols", join.using_cols},
                         {"subquery", sub}, {"lateral", join.lateral}};
+    if (!join.alias.empty()) j["alias"] = join.alias; // absent in anything stored before 2026-10-05
 }
 
 void from_json(const nlohmann::json& j, Join& join) {
@@ -342,6 +343,7 @@ void from_json(const nlohmann::json& j, Join& join) {
     j.at("join_type").get_to(join.join_type);
     j.at("using_cols").get_to(join.using_cols);
     join.lateral = j.contains("lateral") && j.at("lateral").get<bool>();
+    if (j.contains("alias")) j.at("alias").get_to(join.alias);
     if (j.contains("subquery") && !j.at("subquery").is_null()) {
         auto sub_j = j.at("subquery");
         join.subquery = std::make_pair(std::make_unique<Statement>(sub_j.at(0).get<Statement>()), sub_j.at(1).get<std::string>());
@@ -611,7 +613,10 @@ void to_json(nlohmann::json& j, const SelectColumn& col) {
     std::visit(
         [&j](const auto& alt) {
             using T = std::decay_t<decltype(alt)>;
-            if constexpr (std::is_same_v<T, SelectColumn::All>) j = "All";
+            if constexpr (std::is_same_v<T, SelectColumn::All>) {
+                if (alt.table.empty()) j = "All";
+                else j = nlohmann::json{{"AllOf", alt.table}};
+            }
             else if constexpr (std::is_same_v<T, SelectColumn::Column>) j = nlohmann::json{{"Column", alt.name}};
             else if constexpr (std::is_same_v<T, SelectColumn::ColumnAlias>)
                 j = nlohmann::json{{"ColumnAlias", nlohmann::json::array({alt.name, alt.alias})}};
@@ -652,7 +657,8 @@ void from_json(const nlohmann::json& j, SelectColumn& col) {
     auto it = j.begin();
     const std::string& tag = it.key();
     const auto& p = it.value();
-    if (tag == "Column") col = SelectColumn(SelectColumn::Column{p.get<std::string>()});
+    if (tag == "AllOf") col = SelectColumn(SelectColumn::All{p.get<std::string>()});
+    else if (tag == "Column") col = SelectColumn(SelectColumn::Column{p.get<std::string>()});
     else if (tag == "ColumnAlias") col = SelectColumn(SelectColumn::ColumnAlias{p.at(0).get<std::string>(), p.at(1).get<std::string>()});
     else if (tag == "Agg") {
         std::optional<CondExpr> filter;

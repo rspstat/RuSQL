@@ -837,6 +837,16 @@ private:
                               bool distinct, std::vector<SelectColumn> columns, std::optional<CondExpr> condition, std::vector<Join> joins,
                               std::vector<OrderBy> order_by, std::optional<std::vector<std::string>> group_by, std::optional<CondExpr> having,
                               std::optional<std::size_t> limit, std::optional<std::size_t> offset, bool for_update, bool for_share);
+    // The columns a SELECT answers with, named the way format_rows names them, for a derived table that came back with no rows (an
+    // empty answer has no header to read them from). Empty when the statement is not a plain SELECT.
+    std::vector<std::string> derived_column_names(SharedDatabase& s, const Statement& stmt);
+    // Joins read the way SQL says: NATURAL / USING joins become an ON condition (`joined_using` keeps their columns, which `*` shows
+    // once), a cross join that the WHERE pairs up becomes an inner join on that, and `*` / `t.*` over a join become the columns they stand
+    // for (a plain `*` over one table too when `expand_plain_star`: next to other columns, or under DISTINCT, where the row's own
+    // columns decide and not the hidden ones). Returns the message of an error (an unknown table or column).
+    std::optional<std::string> resolve_join_columns(SharedDatabase& s, const std::string& table, std::vector<Join>& joins,
+                                                    std::vector<SelectColumn>& columns, const std::optional<CondExpr>& condition,
+                                                    bool expand_plain_star, std::vector<std::vector<std::string>>& joined_using);
     StringResult exec_select_with_subquery(SharedDatabase& s, Statement inner_stmt, const std::string& alias, bool distinct,
                                             std::vector<SelectColumn> columns, std::optional<CondExpr> condition, std::vector<Join> joins,
                                             std::vector<OrderBy> order_by, std::optional<std::vector<std::string>> group_by,

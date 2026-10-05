@@ -121,7 +121,7 @@ std::vector<std::pair<std::string, StatementPtr>> clone_cte_vec(
 // (SelectColumn과 동일한 패턴). clone_subquery_pair는 Select::subquery와 모양이 같아 그대로 재사용.
 Join::Join(const Join& other)
     : table(other.table), on_expr(other.on_expr), join_type(other.join_type), using_cols(other.using_cols),
-      subquery(clone_subquery_pair(other.subquery)), lateral(other.lateral) {}
+      subquery(clone_subquery_pair(other.subquery)), lateral(other.lateral), alias(other.alias) {}
 
 Join& Join::operator=(const Join& other) {
     if (this != &other) {

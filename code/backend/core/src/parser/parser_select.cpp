@@ -1,4 +1,5 @@
 #include <unordered_map>
+#include <unordered_set>
 
 #include "engine/parser/parser.hpp"
 #include "parser_detail.hpp"
@@ -53,6 +54,15 @@ Statement Parser::parse_select() {
             const Token* p = peek();
 
             if (p && p->kind == TokenKind::Asterisk) { advance(); return SelectColumn(SelectColumn::All{}); }
+
+            // `table.*`
+            if (p && p->kind == TokenKind::Ident && peek_at_is(1, TokenKind::Dot) && peek_at_is(2, TokenKind::Asterisk)) {
+                std::string qualifier = p->text;
+                advance();
+                advance();
+                advance();
+                return SelectColumn(SelectColumn::All{std::move(qualifier)});
+            }
 
             if (p && (p->kind == TokenKind::Count || p->kind == TokenKind::Sum || p->kind == TokenKind::Avg ||
                       p->kind == TokenKind::Min || p->kind == TokenKind::Max ||
@@ -501,6 +511,14 @@ Statement Parser::parse_select() {
     advance(); // consume FROM
 
     std::unordered_map<std::string, std::string> alias_map;
+    // The name each table of the FROM list is known by (its alias, else its own name) is unique within the list, and a table used
+    // a second time (a self-join, a lookup table joined twice) needs an alias to keep the uses apart.
+    std::unordered_set<std::string> used_names;
+    auto note_name = [&used_names](const std::string& name) {
+        if (!used_names.insert(name).second) throw ParseError("Not unique table/alias: '" + name + "'");
+    };
+    auto bare_table = [](const std::string& t) { return t.substr(t.rfind('.') == std::string::npos ? 0 : t.rfind('.') + 1); };
+    std::unordered_set<std::string> used_tables; // by their own (bare) names
 
     std::string table;
     std::optional<std::pair<StatementPtr, std::string>> subquery;
@@ -513,14 +531,15 @@ Statement Parser::parse_select() {
         advance();
         if (peek_is(TokenKind::As)) advance();
         std::string alias = expect_ident();
+        note_name(alias);
         table = "";
         subquery = std::make_pair(std::make_unique<Statement>(std::move(inner)), alias);
     } else {
         table = expect_col_ref();
-        if (peek_is(TokenKind::Ident)) {
-            std::string a = expect_ident();
-            alias_map[a] = table;
-        }
+        std::optional<std::string> a = parse_table_alias();
+        note_name(a ? *a : bare_table(table));
+        used_tables.insert(bare_table(table));
+        if (a) alias_map[*a] = table;
     }
 
     // JOIN / LEFT JOIN / RIGHT JOIN / CROSS JOIN / NATURAL JOIN (다중 반복)
@@ -561,6 +580,9 @@ Statement Parser::parse_select() {
             if (!peek_is(TokenKind::Join)) throw ParseError("Expected JOIN after FULL");
             advance();
             jt = JoinType::FullOuter;
+        } else if (peek_is(TokenKind::Comma)) {
+            advance(); // `FROM a, b WHERE ...` is a cross join
+            jt = JoinType::Cross;
         } else {
             break;
         }
@@ -571,26 +593,38 @@ Statement Parser::parse_select() {
         if (peek_is(TokenKind::Lateral)) { advance(); lateral = true; }
 
         std::string join_table;
+        std::string join_alias; // only for a table that is used again
         std::optional<std::pair<StatementPtr, std::string>> join_subquery;
-        if (lateral) {
-            if (*jt != JoinType::Inner && *jt != JoinType::Left && *jt != JoinType::Cross)
-                throw ParseError("LATERAL is only supported with INNER/LEFT/CROSS JOIN");
-            if (!peek_is(TokenKind::LParen)) throw ParseError("Expected '(' after LATERAL");
+        if (lateral && *jt != JoinType::Inner && *jt != JoinType::Left && *jt != JoinType::Cross)
+            throw ParseError("LATERAL is only supported with INNER/LEFT/CROSS JOIN");
+        if (lateral || peek_is(TokenKind::LParen)) {
+            // a derived table: `(SELECT ...) [AS] alias` is evaluated once, and LATERAL once for each row of the tables on its left
+            const char* what = lateral ? " LATERAL" : "";
+            if (!peek_is(TokenKind::LParen)) throw ParseError(std::string("Expected '(' after") + what);
             advance();
-            if (!peek_is(TokenKind::Select)) throw ParseError("Expected SELECT in LATERAL subquery");
+            if (!peek_is(TokenKind::Select)) throw ParseError(lateral ? "Expected SELECT in LATERAL subquery" : "Expected SELECT in subquery");
             advance();
             Statement inner = parse_select();
-            if (!peek_is(TokenKind::RParen)) throw ParseError("Expected ')' after LATERAL subquery");
+            if (!peek_is(TokenKind::RParen)) throw ParseError(lateral ? "Expected ')' after LATERAL subquery" : "Expected ')' after subquery");
             advance();
             if (peek_is(TokenKind::As)) advance();
             join_table = expect_ident(); // 별칭 필수 (파생 테이블은 반드시 별칭 필요)
+            note_name(join_table);
             join_subquery = std::make_pair(std::make_unique<Statement>(std::move(inner)), join_table);
         } else {
             join_table = expect_ident();
-            if (peek_is(TokenKind::Ident)) {
-                std::string a = expect_ident();
-                alias_map[a] = join_table;
+            std::optional<std::string> a = parse_table_alias();
+            if (used_tables.count(join_table)) {
+                // a second use of the table: the alias is what its columns are called in the joined rows (`m.name`), so it is
+                // kept as it is instead of being replaced by the table name, which the first use is known by
+                if (!a) throw ParseError("Not unique table/alias: '" + join_table + "'");
+                join_alias = *a;
+                alias_map[*a] = *a;
+            } else if (a) {
+                alias_map[*a] = join_table;
             }
+            note_name(a ? *a : join_table);
+            used_tables.insert(join_table);
         }
         auto dummy_true = []() {
             return CondExpr(CondExpr::Leaf{
@@ -618,7 +652,7 @@ Statement Parser::parse_select() {
             advance();
             return parse_condexpr();
         }();
-        joins.push_back(Join{join_table, std::move(on_expr), *jt, using_cols, std::move(join_subquery), lateral});
+        joins.push_back(Join{join_table, std::move(on_expr), *jt, using_cols, std::move(join_subquery), lateral, std::move(join_alias)});
     }
 
     // WHERE

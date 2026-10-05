@@ -602,7 +602,7 @@ bool select_tables_ok(const Statement::Select& sel, const std::string& current_d
     // LATERAL JOIN -- Rust 원본에 없음. 서브쿼리가 실행 시점에 어떤 테이블을 건드릴지 정적으로
     // 알 수 없고 j.table도 실테이블이 아니므로, FROM-서브쿼리와 같은 이유로 fast-path를 포기하고
     // 전체 구조적 배타 락으로 폴백한다.
-    for (auto& j : sel.joins) if (j.lateral) return false;
+    for (auto& j : sel.joins) if (j.lateral || j.subquery) return false; // (a derived table is a temporary table of its own, as in FROM)
     // Row-level-concurrency Stage 5: FOR UPDATE/FOR SHARE no longer forces a fallback to
     // the full structural-exclusive path -- exec_select's FOR UPDATE/FOR SHARE handling
     // (executor_select.cpp) only ever takes real LockManager row/gap claims on an

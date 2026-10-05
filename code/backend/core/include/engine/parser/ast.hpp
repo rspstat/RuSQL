@@ -241,12 +241,16 @@ struct Join {
     // LATERAL 서브쿼리 -- Rust 원본에 없음, Select::subquery와 동일한 모양(StatementPtr + 별칭).
     std::optional<std::pair<StatementPtr, std::string>> subquery;
     bool lateral = false;
+    // Set only when `table` is used a second time in the same FROM list (a self-join, a lookup table joined twice): the parser
+    // replaces every alias by its table name, which would make the two uses one, so this use keeps its alias as the name
+    // its columns carry in the joined rows (`alias.column`).
+    std::string alias;
 
     Join() = default;
     Join(std::string t, CondExpr on, JoinType jt, std::vector<std::string> uc,
-         std::optional<std::pair<StatementPtr, std::string>> sq = std::nullopt, bool lat = false)
+         std::optional<std::pair<StatementPtr, std::string>> sq = std::nullopt, bool lat = false, std::string al = {})
         : table(std::move(t)), on_expr(std::move(on)), join_type(jt), using_cols(std::move(uc)),
-          subquery(std::move(sq)), lateral(lat) {}
+          subquery(std::move(sq)), lateral(lat), alias(std::move(al)) {}
     // subquery가 unique_ptr를 담아 암시적 복사가 불가능해지므로, 명시적 깊은 복사 생성자가 필요
     // (SelectColumn과 동일한 패턴). Statement::Select의 기존 복사 생성자가 `joins` 벡터를
     // 그대로(변경 없이) 복사할 수 있도록 이 생성자가 std::vector<Join>의 복사를 가능하게 한다.
@@ -358,7 +362,7 @@ struct InsertConflict {
 // SelectColumn
 // ---------------------------------------------------------------------------
 struct SelectColumn {
-    struct All {};
+    struct All { std::string table; }; // `*`, or `table.*` (the table name or alias as typed)
     struct Column { std::string name; };
     struct ColumnAlias { std::string name, alias; };
     // `filter`: PostgreSQL's `FILTER (WHERE ...)` clause on an aggregate -- no Rust

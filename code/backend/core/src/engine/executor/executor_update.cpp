@@ -53,6 +53,12 @@ StringResult Executor::exec_update_inner(SharedDatabase& s, const std::string& t
     }
     if (pk_cols.empty()) pk_cols.push_back("id");
     pk_col = pk_cols.front();
+    // a column the table does not have used to be written into every row it matched (and read back by name), under "1 row(s) updated"
+    for (auto& [c, _] : assignments) {
+        if (std::none_of(schema0->columns.begin(), schema0->columns.end(), [&](const ColumnDef& def) { return def.name == c; })) {
+            return StringResult::Err("Unknown column '" + c + "' in 'field list'");
+        }
+    }
     std::vector<std::string> assigned_cols; // the columns this statement sets
     for (auto& [c, _] : assignments) assigned_cols.push_back(c);
     // the parent rows of the foreign keys among them are read while the rows are rewritten

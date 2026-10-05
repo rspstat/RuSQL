@@ -727,7 +727,8 @@ code/
     │   ├── verify_aggregates.py   recomputes every group of aggregates over `table.column` arguments (all join types, shared column names, HAVING) from the un-aggregated rows
     │   ├── verify_agg_expressions.py  the same for aggregates inside select-list expressions / functions / CASE (`MAX(x) - MIN(x)`, `ROUND(AVG(x), 1)`)
     │   ├── verify_null_expressions.py arithmetic / comparisons / scalar functions over NULLs and joins: SELECT, WHERE and UPDATE checked against values computed from the plain columns
-    │   └── verify_writes.py      INSERT / REPLACE / ON DUPLICATE KEY UPDATE / UPDATE / DELETE / multi-table / MERGE against a model: constraints, types, foreign keys, a failed statement changes nothing
+    │   ├── verify_writes.py      INSERT / REPLACE / ON DUPLICATE KEY UPDATE / UPDATE / DELETE / multi-table / MERGE against a model: constraints, types, foreign keys, a failed statement changes nothing
+    │   └── verify_joins.py       joins against a model: self-joins and aliases (AS), every join type, comma / NATURAL / USING, derived tables, `*` and `t.*`, NULL padding
     └── perf/
         ├── bench.py               RuSQL performance measurement (single-row·Bulk INSERT/DELETE TPS, B+Tree index TPS, transaction TPS — AutoCommit vs BEGIN/COMMIT, parallel query)
         ├── bench_mysql.py         the same 4 workloads on MySQL (reference run; result_mysql.json)

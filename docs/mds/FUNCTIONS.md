@@ -110,6 +110,7 @@
 - [x] Sort-Merge Join (양쪽 > 4행 Equi-Join, O((N+M)logN) sort + O(N+M) merge, 투 포인터 키 그룹 병합)
 - [x] Hash Join (한쪽 > 4행 Equi-Join, O(N+M)) / Nested Loop Join (소규모·비등가) — ON 조건 방향 무관 (left.col = right.col / right.col = left.col 모두 지원)
 - [x] 테이블 별칭 (alias) — `FROM emp e JOIN dept d ON e.dept_id = d.id`
+- [x] **조인의 이름 체계 (2026-10-06)** — 별칭을 `AS` 있이도 없이도(`FROM a AS x JOIN b AS y`, `UPDATE t AS x`, `DELETE FROM t AS x`); **같은 테이블을 두 번 쓰는 조인**(자기 조인, 조회 테이블을 두 번 조인: 두 번째 사용에는 별칭 필수, 중복은 `Not unique table/alias`; 사용마다 `별칭.열`로 구분, 이전엔 두 사용이 한 테이블이 되어 틀린 행); `*`가 각 테이블의 자기 열을 보여 줌(같은 이름의 열 포함), `t.*`/`별칭.*`, `*, 열`, `SELECT DISTINCT *`(숨은 열 제외); **쉼표 조인** `FROM a, b WHERE a.k = b.k`(WHERE가 짝지으면 해시 조인); **파생 테이블 조인** `JOIN (SELECT …) [AS] d ON …`(한 번 평가, 행이 없어도 열 이름은 select 목록에서); `NATURAL`·`USING`이 평범한 ON으로 바뀌어 `LEFT/RIGHT/FULL … USING`이 바깥 조인이고 NULL은 매칭하지 않으며 `*`는 공통 열을 한 번 앞쪽에 보여 줌(RIGHT/FULL의 병합 열은 오른쪽 값); RIGHT/FULL OUTER JOIN이 짝 없는 행의 상대편을 스키마 기준 모든 키로 NULL 채움; 한 테이블 UPDATE의 `SET 별칭.열`/`SET 테이블.열`과 없는 열 오류(`Unknown column 'zz' in 'field list'`). 한계: 모호한 열 이름은 오류 없이 첫 테이블 값, 두 번째 이후 조인의 USING은 병합 열이 아님, 자기 조인은 계획기 알고리즘 없이 ON으로 조인.
 - [x] ORDER BY (ASC / DESC, 다중 컬럼)
 - [x] LIMIT / OFFSET — `LIMIT 10 OFFSET 20` (표준) / `LIMIT 20, 10` (MySQL 단축 문법: offset, count)
 - [x] FETCH FIRST n ROWS ONLY / FETCH NEXT n ROWS ONLY — SQL 표준 페이징 문법, LIMIT의 동의어

@@ -871,6 +871,209 @@ Row Executor::compute_aggregates(const std::vector<const Row*>& grp, const std::
     return out;
 }
 
+// ---------------------------------------------------------------------------------------------------------------------
+// Names in a join: which table a column belongs to, and what `*` stands for
+// ---------------------------------------------------------------------------------------------------------------------
+namespace {
+
+// What a joined table's columns are called in the joined rows ("<name>.<column>"): its alias when the table is used a second time
+// (a self-join), else its own name.
+const std::string& join_qualifier(const Join& j) { return j.alias.empty() ? j.table : j.alias; }
+
+std::string last_name_part(const std::string& qualified) {
+    auto cut = qualified.rfind('.');
+    return cut == std::string::npos ? qualified : qualified.substr(cut + 1);
+}
+
+bool has_column(const TableSchema* t, const std::string& name) {
+    return t && std::any_of(t->columns.begin(), t->columns.end(), [&](const ColumnDef& c) { return c.name == name; });
+}
+
+bool listed(const std::vector<std::string>& names, const std::string& name) { return std::find(names.begin(), names.end(), name) != names.end(); }
+
+CondExpr and_of(std::optional<CondExpr>& so_far, CondExpr next) {
+    if (!so_far) return next;
+    return CondExpr(CondExpr::And{std::make_unique<CondExpr>(std::move(*so_far)), std::make_unique<CondExpr>(std::move(next))});
+}
+
+} // namespace
+
+std::vector<std::string> Executor::derived_column_names(SharedDatabase& s, const Statement& stmt) {
+    std::vector<std::string> names;
+    auto* sel = std::get_if<Statement::Select>(&stmt.data);
+    if (!sel) return names;
+    auto table_columns = [&](const std::string& table) {
+        if (auto* sc = s.catalog.get_table(table)) {
+            for (auto& c : sc->columns) names.push_back(c.name);
+        }
+    };
+    for (auto& c : sel->columns) {
+        if (auto* col = std::get_if<SelectColumn::Column>(&c.data)) names.push_back(last_name_part(col->name));
+        else if (auto* ca = std::get_if<SelectColumn::ColumnAlias>(&c.data)) names.push_back(ca->alias);
+        else if (auto* agg = std::get_if<SelectColumn::Agg>(&c.data)) names.push_back(agg_label(agg->func, agg->col));
+        else if (auto* aa = std::get_if<SelectColumn::AggAlias>(&c.data)) names.push_back(aa->alias);
+        else if (auto* fn = std::get_if<SelectColumn::Func>(&c.data)) names.push_back(fn->alias.value_or(fn->name + "()"));
+        else if (auto* cw = std::get_if<SelectColumn::CaseWhen>(&c.data)) names.push_back(cw->alias.value_or("CASE"));
+        else if (auto* ex = std::get_if<SelectColumn::Expr>(&c.data)) names.push_back(ex->alias.value_or(arith_to_str(ex->expr)));
+        else if (auto* wf = std::get_if<SelectColumn::WinFunc>(&c.data)) names.push_back(wf->alias.value_or(window_func_default_label(wf->func)));
+        else if (auto* sq = std::get_if<SelectColumn::Subquery>(&c.data)) names.push_back(sq->alias.value_or("(subquery)"));
+        else if (auto* all = std::get_if<SelectColumn::All>(&c.data)) {
+            if (all->table.empty()) {
+                table_columns(sel->table);
+                for (auto& j : sel->joins) table_columns(j.table);
+            } else {
+                table_columns(all->table);
+            }
+        }
+    }
+    return names;
+}
+
+std::optional<std::string> Executor::resolve_join_columns(SharedDatabase& s, const std::string& table, std::vector<Join>& joins,
+                                                          std::vector<SelectColumn>& columns, const std::optional<CondExpr>& condition,
+                                                          bool expand_plain_star, std::vector<std::vector<std::string>>& joined_using) {
+    joined_using.assign(joins.size(), {});
+    // `*` over a join, `t.*` anywhere
+    bool star = false;
+    for (auto& c : columns) {
+        if (auto* all = std::get_if<SelectColumn::All>(&c.data)) star = star || !joins.empty() || !all->table.empty() || expand_plain_star;
+    }
+    if (joins.empty() && !star) return std::nullopt;
+
+    // The tables of the FROM list, the FROM table first: their schemas (null for one that is not a catalog table, a LATERAL
+    // subquery) and the names a query writes before the dot of "<name>.<column>".
+    std::vector<const TableSchema*> schemas{s.catalog.get_table(table)};
+    std::vector<std::string> full_names{table}, names{last_name_part(table)};
+    for (auto& j : joins) {
+        schemas.push_back(j.lateral ? nullptr : s.catalog.get_table(j.table));
+        full_names.push_back(join_qualifier(j));
+        names.push_back(last_name_part(join_qualifier(j)));
+    }
+
+    // NATURAL and USING: the columns the two sides share are compared in an ordinary ON condition (so the join types, the hash joins and
+    // the NULL rules are the ones of ON); `joined_using` remembers them for `*`, which shows each of them once.
+    for (std::size_t i = 0; i < joins.size(); i++) {
+        Join& j = joins[i];
+        const bool natural = j.join_type == JoinType::Natural;
+        if (!natural && j.using_cols.empty()) continue;
+        std::vector<std::string> common = j.using_cols;
+        if (natural && schemas[i + 1]) {
+            for (auto& rc : schemas[i + 1]->columns) {
+                for (std::size_t k = 0; k <= i; k++) {
+                    if (has_column(schemas[k], rc.name)) {
+                        common.push_back(rc.name);
+                        break;
+                    }
+                }
+            }
+        }
+        std::optional<CondExpr> on;
+        for (auto& c : common) {
+            bool left_has = false;
+            for (std::size_t k = 0; k <= i; k++) left_has = left_has || !schemas[k] || has_column(schemas[k], c);
+            if (!left_has || (schemas[i + 1] && !has_column(schemas[i + 1], c))) return "Unknown column '" + c + "' in 'from clause'";
+            on = and_of(on, CondExpr(CondExpr::Leaf{Condition{ArithExpr(ArithExpr::Col{c}), Operator::Eq,
+                                                              ConditionValue(ConditionValue::Literal{names[i + 1] + "." + c})}}));
+        }
+        if (on) j.on_expr = std::move(*on);
+        if (natural) j.join_type = common.empty() ? JoinType::Cross : JoinType::Inner;
+        j.using_cols.clear();
+        joined_using[i] = std::move(common);
+    }
+
+    const bool all_known = std::none_of(schemas.begin(), schemas.end(), [](const TableSchema* t) { return t == nullptr; });
+    PushdownScope scope;
+    if (all_known) {
+        scope.names = full_names;
+        scope.bare = names;
+        for (auto* t : schemas) {
+            scope.columns.emplace_back();
+            for (auto& c : t->columns) scope.columns.back().insert(c.name);
+        }
+    }
+
+    // A cross join (`FROM a, b WHERE a.k = b.k`) whose WHERE pairs its rows up by `<table>.<column> = <table>.<column>` is an inner join
+    // on that: it can then be hashed instead of making every pair of rows first. The WHERE stays as it is (the same test again).
+    if (all_known && condition) {
+        std::vector<const CondExpr*> parts;
+        and_conjuncts(*condition, parts);
+        for (std::size_t i = 0; i < joins.size(); i++) {
+            Join& j = joins[i];
+            if (j.join_type != JoinType::Cross || j.lateral || j.subquery) continue;
+            std::optional<CondExpr> on;
+            for (const CondExpr* part : parts) {
+                auto* leaf = std::get_if<CondExpr::Leaf>(&part->data);
+                if (!leaf || leaf->condition.op != Operator::Eq) continue;
+                auto* l = std::get_if<ArithExpr::Col>(&leaf->condition.left.data);
+                auto* r = std::get_if<ConditionValue::Literal>(&leaf->condition.value.data);
+                if (!l || !r || l->name.find('.') == std::string::npos || r->value.find('.') == std::string::npos) continue;
+                const int lo = column_owner(l->name, scope), ro = column_owner(r->value, scope);
+                if (lo < 0 || ro < 0 || lo == ro || std::max(lo, ro) != static_cast<int>(i) + 1) continue;
+                on = and_of(on, CondExpr(*part));
+            }
+            if (on) {
+                j.on_expr = std::move(*on);
+                j.join_type = JoinType::Inner;
+            }
+        }
+    }
+
+    if (!star) return std::nullopt;
+    if (!all_known) return std::nullopt; // a table without a schema keeps the old `*` (every column the row holds)
+
+    // `*` and `t.*` become the columns they stand for. A column of the FROM table is read by its own name, one of a joined table by
+    // "<name>.<column>" (get_col finds it in the joined row); the header is the part after the dot either way.
+    // (after a RIGHT / FULL JOIN ... USING the plain name of a USING column is the merged one, so the FROM table's own is read qualified)
+    bool coalesced = false;
+    for (std::size_t i = 0; i < joins.size(); i++) {
+        coalesced = coalesced || (!joined_using[i].empty() && (joins[i].join_type == JoinType::Right || joins[i].join_type == JoinType::FullOuter));
+    }
+    auto read_as = [&](std::size_t t, const std::string& column) { return t == 0 && !coalesced ? column : names[t] + "." + column; };
+    // is the column of table `t` one a USING / NATURAL join has merged into the first column of its kind (shown once, in front)?
+    auto merged = [&](std::size_t t, const std::string& column) {
+        if (t >= 1 && listed(joined_using[t - 1], column)) return true;
+        for (std::size_t k = 0; k < t; k++) {
+            if (has_column(schemas[k], column)) return false;
+        }
+        for (std::size_t i = t; i < joins.size(); i++) {
+            if (listed(joined_using[i], column)) return true;
+        }
+        return false;
+    };
+    std::vector<SelectColumn> expanded;
+    for (auto& col : columns) {
+        auto* all = std::get_if<SelectColumn::All>(&col.data);
+        if (!all) {
+            expanded.push_back(std::move(col));
+            continue;
+        }
+        if (all->table.empty()) {
+            std::vector<std::string> front;
+            for (auto& per_join : joined_using) {
+                for (auto& c : per_join) {
+                    if (!listed(front, c)) front.push_back(c);
+                }
+            }
+            for (auto& c : front) expanded.push_back(SelectColumn(SelectColumn::Column{c}));
+            for (std::size_t t = 0; t < schemas.size(); t++) {
+                for (auto& c : schemas[t]->columns) {
+                    if (!merged(t, c.name)) expanded.push_back(SelectColumn(SelectColumn::Column{read_as(t, c.name)}));
+                }
+            }
+            continue;
+        }
+        const std::string wanted = last_name_part(all->table);
+        std::optional<std::size_t> owner;
+        for (std::size_t t = 0; t < schemas.size() && !owner; t++) {
+            if (names[t] == wanted) owner = t;
+        }
+        if (!owner) return "Unknown table '" + all->table + "'";
+        for (auto& c : schemas[*owner]->columns) expanded.push_back(SelectColumn(SelectColumn::Column{read_as(*owner, c.name)}));
+    }
+    columns = std::move(expanded);
+    return std::nullopt;
+}
+
 StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::optional<std::pair<std::unique_ptr<Statement>, std::string>> subquery,
                                     bool distinct, std::vector<SelectColumn> columns, std::optional<CondExpr> condition, std::vector<Join> joins,
                                     std::vector<OrderBy> order_by, std::optional<std::vector<std::string>> group_by,
@@ -880,6 +1083,53 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
         return exec_select_with_subquery(s, std::move(*subquery->first), subquery->second, distinct, std::move(columns), std::move(condition),
                                           std::move(joins), std::move(order_by), std::move(group_by), std::move(having), limit, offset, for_update,
                                           for_share);
+    }
+
+    // `JOIN (SELECT ...) AS d`: each derived table is evaluated once and read as a temporary table of its alias, as a derived table in
+    // FROM is (exec_select_with_subquery).
+    if (std::any_of(joins.begin(), joins.end(), [](const Join& j) { return j.subquery && !j.lateral; })) {
+        std::vector<std::string> made;
+        auto drop_all = [&] {
+            for (auto& name : made) {
+                temporary_tables_.erase(name);
+                s.tables.erase(name);
+                s.buffer_pool.invalidate(name);
+                s.catalog.drop_table(name);
+            }
+        };
+        for (auto& j : joins) {
+            if (!j.subquery || j.lateral) continue;
+            const std::string alias = j.subquery->second;
+            if (s.tables.count(alias) || s.views.count(alias)) {
+                drop_all();
+                return StringResult::Err("Alias '" + alias + "' conflicts with an existing table or view");
+            }
+            auto inner_output = execute_with_s(s, Statement(*j.subquery->first));
+            if (inner_output.is_err()) {
+                drop_all();
+                return inner_output;
+            }
+            auto [col_names, virtual_rows] = parse_table_output(inner_output.value());
+            if (col_names.empty()) col_names = derived_column_names(s, *j.subquery->first); // no rows, so no header
+            s.tables[alias] = virtual_rows;
+            temporary_tables_.insert(alias);
+            s.buffer_pool.write_page(alias, virtual_rows);
+            std::vector<ColumnDef> schema_cols;
+            for (auto& name : col_names) {
+                ColumnDef c;
+                c.name = name;
+                c.data_type = DataType(DataType::Text{});
+                schema_cols.push_back(c);
+            }
+            s.catalog.create_table(alias, schema_cols);
+            made.push_back(alias);
+            j.table = alias;
+            j.subquery.reset();
+        }
+        auto result = exec_select(s, std::move(table), std::nullopt, distinct, std::move(columns), std::move(condition), std::move(joins),
+                                  std::move(order_by), std::move(group_by), std::move(having), limit, offset, for_update, for_share);
+        drop_all();
+        return result;
     }
 
     // FROM-less scalar SELECT (e.g. a bare `SELECT expr;` inside a stored-procedure
@@ -978,6 +1228,22 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
     }
 
     if (!s.tables.count(table)) return StringResult::Err("Table '" + table + "' not found");
+
+    // NATURAL / USING, comma joins and `*` read the way SQL says (see resolve_join_columns)
+    std::vector<std::vector<std::string>> joined_using;
+    if (auto error = resolve_join_columns(s, table, joins, columns, condition, distinct || columns.size() > 1, joined_using)) {
+        return StringResult::Err(*error);
+    }
+
+    // A table used a second time (a self-join) keeps its alias as its name in the joined rows; the planner, which reasons by table
+    // name, then has nothing to say about the join (it would take the two uses for one table): they are joined by the ON condition.
+    const bool aliased = std::any_of(joins.begin(), joins.end(), [](const Join& j) { return !j.alias.empty(); });
+    // RIGHT / FULL JOIN ... USING (c): the merged column `c` of a right row without a partner is the right row's (a plain `c` and `*`
+    // read it), so the NULL padding of the FROM table also carries its columns as "<table>.<column>", which `<alias>.c` reads
+    bool coalesce_bare = false;
+    for (std::size_t i = 0; i < joins.size(); i++) {
+        coalesce_bare = coalesce_bare || (!joined_using[i].empty() && (joins[i].join_type == JoinType::Right || joins[i].join_type == JoinType::FullOuter));
+    }
 
     // ── JOIN 순서 최적화 (cost-based DP, INNER-only; greedy 폴백) ──────────
     joins = reorder_joins_dp(table, std::move(joins), s.tables);
@@ -1294,23 +1560,23 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
     // (a "<table>.<column>" reference must name exactly one of them). The two shortcuts below need it.
     PushdownScope scope;
     bool scope_ok = !joins.empty();
-    auto add_table = [&](const std::string& name) {
+    auto add_table = [&](const std::string& name, const std::string& qualifier) {
         auto* sc = s.catalog.get_table(name);
-        std::string bare = name.substr(name.rfind('.') == std::string::npos ? 0 : name.rfind('.') + 1);
+        std::string bare = qualifier.substr(qualifier.rfind('.') == std::string::npos ? 0 : qualifier.rfind('.') + 1);
         if (!sc || std::find(scope.bare.begin(), scope.bare.end(), bare) != scope.bare.end()) {
             scope_ok = false;
             return;
         }
-        scope.names.push_back(name);
+        scope.names.push_back(qualifier);
         scope.bare.push_back(bare);
         scope.columns.emplace_back();
         for (auto& c : sc->columns) scope.columns.back().insert(c.name);
     };
     if (scope_ok) {
-        add_table(table);
+        add_table(table, table);
         for (auto& j : joins) {
             if (j.lateral || j.subquery) scope_ok = false;
-            if (scope_ok) add_table(j.table);
+            if (scope_ok) add_table(j.table, join_qualifier(j));
         }
     }
 
@@ -1458,6 +1724,7 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
         std::vector<Row> current = std::move(visible_rows);
         for (std::size_t ji = 0; ji < joins.size(); ji++) {
             auto& j = joins[ji];
+            const std::string& jq = join_qualifier(j); // what the joined table's columns are called in the merged rows
 
             // LATERAL JOIN -- Rust 원본에 없음. j.table은 실제 물리 테이블이 아니라 서브쿼리의
             // 별칭이므로, 아래의 정상 조인 경로(s.tables.find(j.table) 이하)에 들어가기 전에
@@ -1518,6 +1785,39 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
                 for (auto& c : sc->columns) right_schema_cols.push_back(c.name);
             }
 
+            // A RIGHT / FULL OUTER JOIN pads a right row that no left row matched with NULL for every key the left rows carry: the
+            // columns of the FROM table by their names, those of each table joined before by "<name>.<column>" (and by their own names,
+            // which the first table that has one owns). Read from the schemas, so it does not depend on there being a left row at all.
+            std::optional<std::vector<std::string>> left_pad_keys;
+            if (j.join_type == JoinType::Right || j.join_type == JoinType::FullOuter) {
+                std::vector<std::string> keys;
+                std::unordered_set<std::string> seen;
+                auto add = [&](const std::string& key) {
+                    if (seen.insert(key).second) keys.push_back(key);
+                };
+                bool known = false;
+                if (auto* from = s.catalog.get_table(table)) {
+                    known = true;
+                    for (auto& c : from->columns) {
+                        add(c.name);
+                        if (coalesce_bare) add(table + "." + c.name);
+                    }
+                }
+                for (std::size_t k = 0; k < ji && known; k++) {
+                    auto* sc = joins[k].lateral ? nullptr : s.catalog.get_table(joins[k].table);
+                    if (!sc) {
+                        known = false;
+                        break;
+                    }
+                    for (auto& c : sc->columns) {
+                        add(join_qualifier(joins[k]) + "." + c.name);
+                        add(c.name);
+                    }
+                }
+                if (known) left_pad_keys = std::move(keys);
+            }
+            const std::vector<std::string>* left_pad = left_pad_keys ? &*left_pad_keys : nullptr;
+
             // Correctness fix: the planner-chosen algo (IndexNL/ReverseIndexNL especially)
             // never NULL-pads an unmatched left row -- a probe miss is just dropped, which
             // is correct ONLY for Inner (and Cross, already excluded below via nested_loop_
@@ -1529,7 +1829,7 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
             // semantics; everything else falls through to nested_loop_join below, which
             // already has explicit, tested Left/Right/FullOuter branches.
             const JoinAlgo::Data* algo = nullptr;
-            if (j.join_type == JoinType::Inner && ji < plan.joins.size()) {
+            if (j.join_type == JoinType::Inner && ji < plan.joins.size() && !aliased) {
                 algo = &plan.joins[ji].algo.data;
             }
 
@@ -1548,12 +1848,12 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
                 if (auto eq = equality_part_of_on(j.on_expr, scope.names[ji + 1], scope.bare[ji + 1], right_cols)) {
                     const std::string left_ref = eq->first, right_col = eq->second;
                     hashed = hashed_join_verified(
-                        current, right_rows, j.table, j.join_type, [&](const Row& l) { return get_col(l, left_ref); },
+                        current, right_rows, jq, j.join_type, [&](const Row& l) { return get_col(l, left_ref); },
                         [&](const Row& r) -> const std::string* {
                             auto it = r.find(right_col);
                             return it != r.end() ? &it->second : nullptr;
                         },
-                        right_schema_cols, [&](const Row& merged) { return eval_condexpr(merged, j.on_expr); });
+                        right_schema_cols, [&](const Row& merged) { return eval_condexpr(merged, j.on_expr); }, left_pad);
                 }
             }
 
@@ -1561,16 +1861,16 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
                 current = std::move(*hashed);
             } else if (algo && std::get_if<JoinAlgo::SortMerge>(algo)) {
                 auto* a = std::get_if<JoinAlgo::SortMerge>(algo);
-                current = sort_merge_join(current, right_rows, j.join_type, j.table, a->probe_col, a->build_col, right_schema_cols);
+                current = sort_merge_join(current, right_rows, j.join_type, jq, a->probe_col, a->build_col, right_schema_cols);
             } else if (algo && std::get_if<JoinAlgo::Hash>(algo)) {
                 auto* a = std::get_if<JoinAlgo::Hash>(algo);
-                current = hash_join(current, right_rows, j.join_type, j.table, a->probe_col, a->build_col, right_schema_cols);
+                current = hash_join(current, right_rows, j.join_type, jq, a->probe_col, a->build_col, right_schema_cols);
             } else if (algo && std::get_if<JoinAlgo::IndexNL>(algo)) {
                 auto* a = std::get_if<JoinAlgo::IndexNL>(algo);
                 // Index Nested Loop: probe right table's PK B+Tree per left row.
                 // Only applies outside transactions (session_rows path already loaded above).
                 if (txn.is_active()) {
-                    current = hash_join(current, right_rows, j.join_type, j.table, a->probe_col, a->right_pk_col, right_schema_cols);
+                    current = hash_join(current, right_rows, j.join_type, jq, a->probe_col, a->right_pk_col, right_schema_cols);
                 } else if (auto rit = s.indexes.find(j.table); rit != s.indexes.end()) {
                     std::vector<Row> out;
                     out.reserve(current.size());
@@ -1590,13 +1890,13 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
                         }
                         for (auto& right_row : cached->second) {
                             Row merged = left_row;
-                            merge_right(merged, right_row, j.table);
+                            merge_right(merged, right_row, jq);
                             out.push_back(std::move(merged));
                         }
                     }
                     current = std::move(out);
                 } else {
-                    current = hash_join(current, right_rows, j.join_type, j.table, a->probe_col, a->right_pk_col, right_schema_cols);
+                    current = hash_join(current, right_rows, j.join_type, jq, a->probe_col, a->right_pk_col, right_schema_cols);
                 }
             } else if (algo && std::get_if<JoinAlgo::ReverseIndexNL>(algo)) {
                 auto* a = std::get_if<JoinAlgo::ReverseIndexNL>(algo);
@@ -1608,7 +1908,7 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
                 // no single backing index. Falls back to hash_join whenever a transaction is
                 // active or the expected index is missing, exactly like IndexNL does.
                 auto reverse_fallback = [&] {
-                    current = hash_join(current, right_rows, j.join_type, j.table, a->left_col, a->right_extract_col, right_schema_cols);
+                    current = hash_join(current, right_rows, j.join_type, jq, a->left_col, a->right_extract_col, right_schema_cols);
                 };
                 if (txn.is_active()) {
                     reverse_fallback();
@@ -1622,7 +1922,7 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
                             for (auto& left_row : hit->second.get(*key)) {
                                 if (!is_visible_for_read(left_row, read_ctx)) continue;
                                 Row merged = left_row;
-                                merge_right(merged, right_row, j.table);
+                                merge_right(merged, right_row, jq);
                                 out.push_back(std::move(merged));
                             }
                         }
@@ -1644,14 +1944,14 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
                                 for (auto& left_row : rows_from_json(val_json)) {
                                     if (!is_visible_for_read(left_row, read_ctx)) continue;
                                     Row merged = left_row;
-                                    merge_right(merged, right_row, j.table);
+                                    merge_right(merged, right_row, jq);
                                     out.push_back(std::move(merged));
                                 }
                             } else {
                                 Row left_row = row_from_json(val_json);
                                 if (is_visible_for_read(left_row, read_ctx)) {
                                     Row merged = left_row;
-                                    merge_right(merged, right_row, j.table);
+                                    merge_right(merged, right_row, jq);
                                     out.push_back(std::move(merged));
                                 }
                             }
@@ -1663,8 +1963,21 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
                 }
             } else {
                 const CondExpr& on_expr = j.on_expr;
-                current = nested_loop_join(current, right_rows, j.join_type, j.table, j.using_cols, right_schema_cols,
-                                                       [&on_expr](const Row& merged) { return eval_condexpr(merged, on_expr); });
+                current = nested_loop_join(current, right_rows, j.join_type, jq, j.using_cols, right_schema_cols,
+                                                       [&on_expr](const Row& merged) { return eval_condexpr(merged, on_expr); }, left_pad);
+            }
+
+            // RIGHT / FULL JOIN ... USING (c): a right row without a partner has NULL in the left table's `c`, but the merged column
+            // `c` that `*` and an unqualified `c` read is the right row's
+            if (j.join_type == JoinType::Right || j.join_type == JoinType::FullOuter) {
+                for (auto& c : joined_using[ji]) {
+                    const std::string qualified = jq + "." + c;
+                    for (auto& row : current) {
+                        auto own = row.find(c);
+                        auto right_value = row.find(qualified);
+                        if (own != row.end() && right_value != row.end() && own->second == JOIN_NULL_VALUE) own->second = right_value->second;
+                    }
+                }
             }
         }
         if (!condition) {
@@ -2097,9 +2410,11 @@ StringResult Executor::exec_select_with_subquery(SharedDatabase& s, Statement in
                                                    std::optional<std::size_t> offset, bool for_update, bool for_share) {
     if (s.tables.count(alias) || s.views.count(alias)) return StringResult::Err("Alias '" + alias + "' conflicts with an existing table or view");
 
+    const Statement inner_copy = inner_stmt; // (the names of an empty answer's columns come from the statement)
     auto inner_output = execute_with_s(s, std::move(inner_stmt));
     if (inner_output.is_err()) return inner_output;
     auto [col_names, virtual_rows] = parse_table_output(inner_output.value());
+    if (col_names.empty()) col_names = derived_column_names(s, inner_copy);
     if (col_names.empty()) return StringResult::Ok("0 rows returned.");
 
     s.tables[alias] = virtual_rows;

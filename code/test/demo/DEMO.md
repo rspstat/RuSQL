@@ -66,6 +66,7 @@ Claude Desktop에 MCP가 연결되어 있다면 "demo 데이터베이스에서 �
 
 - **집계 안에서 계산하지 마세요.** `SUM(amount * 2)`, `SUM(price * qty)`는 아직 파싱 오류입니다(`SUM(amount) * 2`는 됩니다). **함수 결과를 계산의 왼쪽에 쓰지 마세요**: `ROUND(AVG(amount), 0) * 2`는 오류, `2 * ROUND(AVG(amount), 0)`은 됩니다.
 - NULL이 든 계산(`v + 1`, `v * 2`, `ROUND(v)`)은 NULL로 나옵니다(2026-10-05에 고침; 전에는 `NULL1`·0). 데모 데이터에는 NULL이 없습니다. `UPDATE`가 NOT NULL 열에 NULL을 넣는 것은 막습니다(2026-10-05; 전에는 통과했음). 빈 문자열 `''`은 NULL이 아니라 값입니다(`WHERE s = ''`로 찾습니다).
+- 테이블 별칭은 `FROM orders AS o`처럼 `AS`를 써도 되고(2026-10-06부터), 쉼표 조인(`FROM a, b WHERE …`)·같은 테이블을 두 번 쓰는 조인(별칭 필수)·`JOIN (SELECT …) AS d`·`o.*`도 됩니다. 존재하지 않는 열 이름은 `SELECT`·`WHERE`에서 아직 오류가 아니라 빈 값이 됩니다(철자를 확인하세요; `UPDATE`의 `SET`은 오류).
 - 집계 식(`MAX(amount) - MIN(amount)`, `ROUND(AVG(amount), 0)`, `COALESCE(SUM(amount), 0)`)은 정상입니다(2026-10-05에 고침). 결과 열 이름만 함수의 인자가 빠져서 `ROUND()`로 나옵니다 — `AS avg_amount`처럼 별칭을 붙이면 깔끔합니다.
 - `LEFT JOIN`에서 `COUNT(o.id)`, `ORDER BY o.amount DESC`, `SELECT DISTINCT o.status`, `HAVING COUNT(o.id) = 0`처럼 `테이블.열`을 쓰는 것은 모두 정상입니다(2026-10-05에 고침). 결과 열 이름도 쓴 그대로(`COUNT(o.id)`) 나옵니다.
 

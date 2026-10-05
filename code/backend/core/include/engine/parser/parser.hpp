@@ -79,6 +79,8 @@ private:
 
     std::string expect_ident();
     std::string expect_alias_ident();
+    /// `[AS] alias` after a table name, if there is one
+    std::optional<std::string> parse_table_alias();
     std::string expect_col_ref();
     std::string expect_any_name();
     std::string expect_any_ident();
