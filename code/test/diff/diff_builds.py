@@ -66,6 +66,7 @@ def start(exe, port, data, parallel, log=None):
 
 
 IGNORE_HEADER = False  # --ignore-header
+EMPTY_STRING = "''"  # --no-empty-strings: the corpus writes NULL where it would write an empty string (builds before 2026-10-05 stored '' as NULL)
 NOT_NULL_UPDATES = ""  # --no-null-arithmetic: "val IS NOT NULL AND " in front of the WHERE of every `SET val = val + 1`
 
 
@@ -371,7 +372,7 @@ def load(rng, rows):
         val = "NULL" if rng.random() < 0.1 else str(rng.randint(0, 99))
         tag = "NULL" if rng.random() < 0.15 else "'" + rng.choice(TAGS) + "'"
         roll = rng.random()
-        code = "NULL" if roll < 0.04 else "''" if roll < 0.07 else "'" + (rng.choice(codes) if roll < 0.2 else f"C{rng.randint(0, 99)}") + "'"
+        code = "NULL" if roll < 0.04 else EMPTY_STRING if roll < 0.07 else "'" + (rng.choice(codes) if roll < 0.2 else f"C{rng.randint(0, 99)}") + "'"
         note = rng.choice(["'abc'", "'a,b'", "'it''s'", "'zzz'", "NULL", "'café'"])
         batch.append(f"({i}, {rng.randint(0, 8)}, {val}, {rng.randint(0, 99)}.{rng.randint(0, 99):02d}, {code}, {tag}, {note})")
         if len(batch) == 200 or i == rows - 1:
@@ -381,7 +382,7 @@ def load(rng, rows):
     vb = [f"({i}, {rng.randint(0, rows - 1)}, {rng.randint(1, 9)})" for i in range(max(rows // 2, 1))]
     for i in range(0, len(vb), 200):
         stmts.append("INSERT INTO v VALUES " + ", ".join(vb[i:i + 200]))
-    wcodes = codes + [f"C{i}" for i in range(0, 40)] + ["NULL", "''", "7.00", "+7", "1e1", "10"]
+    wcodes = codes + [f"C{i}" for i in range(0, 40)] + ["NULL", EMPTY_STRING, "7.00", "+7", "1e1", "10"]
     stmts.append("INSERT INTO w VALUES " + ", ".join(
         f"({i}, {c if c in ('NULL', chr(39) * 2) else repr(c)}, {'NULL' if rng.random() < 0.15 else rng.randint(0, 8)})" for i, c in enumerate(wcodes)))
     stmts += ["CREATE INDEX idx_grp ON t (grp)", "CREATE INDEX idx_tag ON t (tag) USING HASH",
@@ -402,13 +403,19 @@ def main():
     ap.add_argument("--ignore-header", action="store_true", help="compare the rows only: not the result-column names, separator lines or padding (for a change of how columns are named)")
     ap.add_argument("--no-null-arithmetic", action="store_true",
                     help='the corpus\'s `SET val = val + 1` skips NULL rows: builds before the NULL fix stored "NULL1" there, so the two builds\' tables would differ')
+    ap.add_argument("--no-empty-strings", action="store_true",
+                    help="the corpus writes NULL where it would write an empty string: builds before the empty-string fix stored '' as NULL")
+    ap.add_argument("--order-as-sets", action="store_true",
+                    help="a statement with ORDER BY is compared as a set of lines, and one with ORDER BY + LIMIT / OFFSET not at all: for a change "
+                         "of where NULL sorts (builds before 2026-10-05 compared NULL as the text \"NULL\"), which moves rows inside an order and across a LIMIT")
     ap.add_argument("--skip-chain-refs", action="store_true", help="no ON clause that reads an earlier joined table (older builds answered those wrongly)")
     ap.add_argument("--max-report", type=int, default=5)
     ap.add_argument("--log-new", help="write the new server's stderr to this file (for builds with debug output)")
     ap.add_argument("--show", type=int, default=0, help="print the first N queries with the first lines of the old build's answer")
     args = ap.parse_args()
-    global IGNORE_HEADER, NOT_NULL_UPDATES
+    global IGNORE_HEADER, NOT_NULL_UPDATES, EMPTY_STRING
     IGNORE_HEADER = args.ignore_header
+    EMPTY_STRING = "NULL" if args.no_empty_strings else "''"
     NOT_NULL_UPDATES = "val IS NOT NULL AND " if args.no_null_arithmetic else ""
     modes = ["par", "par"] if args.parallel else args.modes.split(",")
     unordered = args.parallel and not args.exact
@@ -418,7 +425,7 @@ def main():
     pb, b = start(args.new, 17962, os.path.join(tmp, "diff_builds_b"), modes[1] == "par", args.log_new)
     rng = random.Random(args.seed)
     gen = Gen(random.Random(args.seed * 7919 + 1), big=args.rows > 3000, chain_refs=not args.skip_chain_refs)
-    diffs = errors = checked = 0
+    diffs = errors = checked = skipped_cut = 0
 
     def both(sql):
         try:
@@ -452,7 +459,12 @@ def main():
                 print(f"[{n}] {sql}\n      -> " + " | ".join(norm(oa, False)[:3])[:300])
             if oa.startswith("ERR"):
                 errors += 1
-            if norm(oa, unordered) != norm(ob, unordered):
+            ordered_by = args.order_as_sets and "ORDER BY" in sql
+            if ordered_by and re.search(r"\b(LIMIT|OFFSET|FETCH)\b", sql):
+                skipped_cut += 1
+                continue
+            stmt_unordered = unordered or ordered_by
+            if norm(oa, stmt_unordered) != norm(ob, stmt_unordered):
                 diffs += 1
                 if diffs <= args.max_report:
                     la, lb = norm(oa, False), norm(ob, False)
@@ -461,7 +473,7 @@ def main():
                     print(f"DIFFERENT (query {n}, seed {args.seed}): {sql}\n  lines old/new: {len(la)}/{len(lb)}; only in old: {[l[:140] for l in only_old]}; only in new: {[l[:140] for l in only_new]}")
                     if len(la) < 60:
                         print(f"--- old\n{TIMING.sub('', oa)[:1500]}\n--- new\n{TIMING.sub('', ob)[:1500]}\n")
-        print(f"queries={checked} errors(on both)={errors} differences={diffs}")
+        print(f"queries={checked} errors(on both)={errors} differences={diffs}" + (f" (ORDER BY ... LIMIT statements not compared: {skipped_cut})" if args.order_as_sets else ""))
         return 1 if diffs else 0
     finally:
         for c, p in ((a, pa), (b, pb)):

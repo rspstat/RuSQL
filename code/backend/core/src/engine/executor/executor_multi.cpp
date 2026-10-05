@@ -3,6 +3,8 @@
 
 #include "engine/executor/executor.hpp"
 
+#include <algorithm>
+#include <cstdlib>
 #include <unordered_set>
 
 #include "engine/join.hpp"
@@ -97,13 +99,11 @@ StringResult Executor::exec_multi_update(SharedDatabase& s, std::vector<std::str
     for (auto& tgt : assignment_tables) {
         const TableSchema* schema = s.catalog.get_table(tgt);
         if (!schema) return StringResult::Err("Table '" + tgt + "' not found");
-        std::string pk_col = "id";
         std::vector<std::string> pk_cols;
         for (auto& c : schema->columns) {
             if (c.primary_key) pk_cols.push_back(c.name);
         }
         if (pk_cols.empty()) pk_cols.push_back("id");
-        pk_col = pk_cols.front();
         std::string pk_prefix = tgt + ".";
 
         // Composite identity key, same fix/reasoning as plain UPDATE (executor_update.cpp):
@@ -115,21 +115,12 @@ StringResult Executor::exec_multi_update(SharedDatabase& s, std::vector<std::str
         auto merged_row_key = [&](const Row& merged_row) -> std::optional<std::string> {
             std::string key;
             for (std::size_t i = 0; i < pk_cols.size(); i++) {
-                std::string val;
-                if (auto it = merged_row.find(pk_prefix + pk_cols[i]); it != merged_row.end()) val = it->second;
-                else if (auto it2 = merged_row.find(pk_cols[i]); it2 != merged_row.end()) val = it2->second;
-                if (val.empty()) return std::nullopt;
+                const std::string* val = nullptr;
+                if (auto it = merged_row.find(pk_prefix + pk_cols[i]); it != merged_row.end()) val = &it->second;
+                else if (auto it2 = merged_row.find(pk_cols[i]); it2 != merged_row.end()) val = &it2->second;
+                if (!val || *val == EXECUTOR_NULL_VALUE) return std::nullopt; // a row the join padded: nothing to update
                 if (i) key += '\x00';
-                key += val;
-            }
-            return key;
-        };
-        auto row_key = [&pk_cols](const Row& row) {
-            std::string key;
-            for (std::size_t i = 0; i < pk_cols.size(); i++) {
-                if (i) key += '\x00';
-                auto it = row.find(pk_cols[i]);
-                key += (it != row.end() ? it->second : std::string());
+                key += *val;
             }
             return key;
         };
@@ -153,43 +144,22 @@ StringResult Executor::exec_multi_update(SharedDatabase& s, std::vector<std::str
             }
         }
 
-        auto rit = s.tables.find(tgt);
-        if (rit == s.tables.end()) return StringResult::Err("Table '" + tgt + "' not found");
-        auto& rows = rit->second;
-        std::vector<std::pair<Row, Row>> updated_pairs; // (old_row, new_row)
-        for (auto& row : rows) {
-            if (auto uit = pk_updates.find(row_key(row)); uit != pk_updates.end()) {
-                Row old_row = row;
-                for (auto& [col, val] : uit->second) row[col] = val;
-                updated_pairs.emplace_back(std::move(old_row), row);
-                total_count++;
+        // The rows go through the one-table UPDATE as one statement: every constraint is checked for the whole set before any row is
+        // rewritten, the new versions are MVCC versions that ROLLBACK undoes, the indexes, triggers and foreign-key actions of that
+        // path apply. (This used to rewrite the rows in place, checking nothing.)
+        if (pk_updates.empty()) continue;
+        std::vector<std::pair<std::string, ArithExpr>> columns;
+        for (auto& [col_expr, _] : assignments) {
+            std::string bare = col_expr.substr(col_expr.find('.') == std::string::npos ? 0 : col_expr.find('.') + 1);
+            std::string tbl_name = col_expr.find('.') == std::string::npos ? first_table : resolve_tbl(col_expr.substr(0, col_expr.find('.')));
+            if (tbl_name == tgt && std::none_of(columns.begin(), columns.end(), [&](auto& c) { return c.first == bare; })) {
+                columns.emplace_back(bare, ArithExpr(ArithExpr::Str{""}));
             }
         }
-
-        // Incremental index maintenance (PK B+Tree, secondary, hash, composite):
-        // previously this cloned the whole table and fully rebuilt every index kind from
-        // scratch on every statement regardless of how few rows changed -- replaced with
-        // per-row remove-old-key/insert-new-key updates (the PK value itself can be part
-        // of the assignments, so the new key is read from `new_row` rather than assumed
-        // unchanged).
-        for (auto& [old_row, new_row] : updated_pairs) {
-            if (auto idx_it = s.indexes.find(tgt); idx_it != s.indexes.end()) {
-                auto old_it = old_row.find(pk_col);
-                idx_it->second.remove(old_it != old_row.end() ? old_it->second : std::string());
-                auto new_it = new_row.find(pk_col);
-                idx_it->second.insert(new_it != new_row.end() ? new_it->second : std::string(), row_to_json(new_row));
-            }
-            index_remove_row(s, tgt, old_row, pk_col);
-            index_insert_row(s, tgt, new_row);
-            for (auto& [k, ci] : s.composite_indexes) {
-                if (ci.table != tgt) continue;
-                ci.remove_row(old_row);
-                ci.insert_row(new_row);
-            }
-        }
-
-        std::vector<Row> rows_clone = s.tables.at(tgt);
-        s.buffer_pool.write_through(tgt, rows_clone, s.disk);
+        PerRowValues per_row(pk_updates.begin(), pk_updates.end());
+        auto updated = exec_update(s, tgt, std::move(columns), std::nullopt, std::nullopt, &per_row);
+        if (updated.is_err()) return updated;
+        total_count += static_cast<std::size_t>(std::strtoull(updated.value().c_str(), nullptr, 10));
     }
 
     maybe_auto_checkpoint(s);
@@ -332,87 +302,53 @@ StringResult Executor::exec_multi_delete(SharedDatabase& s, std::vector<std::str
     for (auto& tgt : delete_tables) {
         const TableSchema* schema = s.catalog.get_table(tgt);
         if (!schema) return StringResult::Err("Table '" + tgt + "' not found");
-        std::string pk_col = "id";
         std::vector<std::string> pk_cols;
         for (auto& c : schema->columns) {
             if (c.primary_key) pk_cols.push_back(c.name);
         }
         if (pk_cols.empty()) pk_cols.push_back("id");
-        pk_col = pk_cols.front();
         std::string pk_prefix = tgt + ".";
 
         // Composite identity key, same fix/reasoning as exec_multi_update above and
         // plain UPDATE (executor_update.cpp) -- a composite-PK target table's rows must
         // be identified by ALL of its PK columns, not just the first.
-        auto merged_row_key = [&](const Row& r) -> std::optional<std::string> {
-            std::string key;
-            for (std::size_t i = 0; i < pk_cols.size(); i++) {
-                std::string val;
-                if (auto it = r.find(pk_prefix + pk_cols[i]); it != r.end()) val = it->second;
-                else if (auto it2 = r.find(pk_cols[i]); it2 != r.end()) val = it2->second;
-                if (val.empty()) return std::nullopt;
-                if (i) key += '\x00';
-                key += val;
-            }
-            return key;
-        };
-        auto row_key = [&pk_cols](const Row& r) {
-            std::string key;
-            for (std::size_t i = 0; i < pk_cols.size(); i++) {
-                if (i) key += '\x00';
-                auto it = r.find(pk_cols[i]);
-                key += (it != r.end() ? it->second : std::string());
-            }
-            return key;
-        };
-
-        std::unordered_set<std::string> target_pks;
+        // The rows to delete: one row per primary key the join matched (all of a composite one)
+        std::vector<std::vector<std::string>> keys;
+        std::unordered_set<std::string> seen;
         for (auto& r : matched) {
-            if (auto key = merged_row_key(r)) target_pks.insert(*key);
+            std::vector<std::string> key;
+            std::string joined;
+            bool whole = true;
+            for (auto& c : pk_cols) {
+                const std::string* val = nullptr;
+                if (auto it = r.find(pk_prefix + c); it != r.end()) val = &it->second;
+                else if (auto it2 = r.find(c); it2 != r.end()) val = &it2->second;
+                if (!val || *val == EXECUTOR_NULL_VALUE) { whole = false; break; } // a row the join padded
+                key.push_back(*val);
+                joined += *val + '\x00';
+            }
+            if (whole && seen.insert(joined).second) keys.push_back(std::move(key));
         }
-
-        auto rit = s.tables.find(tgt);
-        if (rit == s.tables.end()) return StringResult::Err("Table '" + tgt + "' not found");
-        auto& rows = rit->second;
-
-        std::size_t before = 0;
-        for (auto& r : rows) {
-            if (is_visible(r)) before++;
-        }
-        std::vector<Row> deleted_rows;
-        rows.erase(std::remove_if(rows.begin(), rows.end(),
-                                   [&](const Row& r) {
-                                       if (!is_visible(r)) return false;
-                                       if (target_pks.count(row_key(r)) == 0) return false;
-                                       deleted_rows.push_back(r);
-                                       return true;
-                                   }),
-                   rows.end());
-        std::size_t after = 0;
-        for (auto& r : rows) {
-            if (is_visible(r)) after++;
-        }
-        total_count += before - after;
-
-        // Incremental index maintenance (PK B+Tree + composite): previously this cloned
-        // the whole table and fully rebuilt both from scratch on every statement,
-        // regardless of how few rows were actually deleted.
-        if (auto idx_it = s.indexes.find(tgt); idx_it != s.indexes.end()) {
-            for (auto& row : deleted_rows) {
-                auto it = row.find(pk_col);
-                idx_it->second.remove(it != row.end() ? it->second : std::string());
+        if (keys.empty()) continue;
+        // ... deleted by one DELETE statement: foreign keys (RESTRICT, CASCADE, SET NULL), MVCC, undo log, indexes and triggers apply
+        std::optional<CondExpr> cond;
+        if (pk_cols.size() == 1) {
+            std::vector<std::string> values;
+            for (auto& k : keys) values.push_back(k[0]);
+            cond = CondExpr(CondExpr::Leaf{Condition{ArithExpr(ArithExpr::Col{pk_cols[0]}), Operator::In, ConditionValue(ConditionValue::LiteralList{std::move(values)})}});
+        } else {
+            for (auto& k : keys) {
+                std::optional<CondExpr> one;
+                for (std::size_t i = 0; i < pk_cols.size(); i++) {
+                    CondExpr leaf = CondExpr(CondExpr::Leaf{Condition{ArithExpr(ArithExpr::Col{pk_cols[i]}), Operator::Eq, ConditionValue(ConditionValue::Literal{k[i]})}});
+                    one = one ? CondExpr(CondExpr::And{std::make_unique<CondExpr>(std::move(*one)), std::make_unique<CondExpr>(std::move(leaf))}) : std::move(leaf);
+                }
+                cond = cond ? CondExpr(CondExpr::Or{std::make_unique<CondExpr>(std::move(*cond)), std::make_unique<CondExpr>(std::move(*one))}) : std::move(*one);
             }
         }
-        for (auto& [k, ci] : s.composite_indexes) {
-            if (ci.table != tgt) continue;
-            for (auto& row : deleted_rows) ci.remove_row(row);
-        }
-        // PLAN.md P2 fix: secondary/hash indexes were never touched here at all
-        // (previously stale after a multi-table DELETE).
-        for (auto& row : deleted_rows) index_remove_row(s, tgt, row, pk_col);
-
-        std::vector<Row> rows_clone = s.tables.at(tgt);
-        s.buffer_pool.write_through(tgt, rows_clone, s.disk);
+        auto deleted = exec_delete(s, tgt, std::move(cond), std::nullopt);
+        if (deleted.is_err()) return deleted;
+        total_count += static_cast<std::size_t>(std::strtoull(deleted.value().c_str(), nullptr, 10));
     }
 
     maybe_auto_checkpoint(s);

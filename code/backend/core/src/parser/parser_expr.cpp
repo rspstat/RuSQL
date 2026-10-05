@@ -522,6 +522,17 @@ ArithExpr Parser::parse_arith_factor() {
         return ArithExpr(ArithExpr::Func{"CONVERT", std::move(args)});
     }
 
+    // VALUES(col): the value an INSERT ... ON DUPLICATE KEY UPDATE was going to insert into col
+    if (p->kind == TokenKind::Values && peek_at_is(1, TokenKind::LParen)) {
+        advance();
+        advance();
+        std::vector<ArithExpr> args;
+        args.push_back(parse_arith_expr());
+        if (!peek_is(TokenKind::RParen)) throw ParseError("Expected ')' after VALUES");
+        advance();
+        return ArithExpr(ArithExpr::Func{"VALUES", std::move(args)});
+    }
+
     if (p->kind == TokenKind::Ident) {
         // Check for generic function call: IDENT(...)
         if (peek_at_is(1, TokenKind::LParen)) {

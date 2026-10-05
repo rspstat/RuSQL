@@ -44,13 +44,14 @@ Statement Parser::parse_insert() {
         for (;;) {
             std::string val;
             if (peek_is(TokenKind::Comma) || peek_is(TokenKind::RParen)) {
-                val = "";
+                val = INSERT_DEFAULT;
             } else {
                 const Token* t = advance();
                 if (!t) throw ParseError("Expected value");
                 switch (t->kind) {
                     case TokenKind::StringLit: case TokenKind::NumberLit: case TokenKind::Ident: val = t->text; break;
                     case TokenKind::Null: val = "NULL"; break;
+                    case TokenKind::Default: val = INSERT_DEFAULT; break;
                     default: throw ParseError("Expected value");
                 }
             }
@@ -131,13 +132,14 @@ Statement Parser::parse_replace() {
         for (;;) {
             std::string val;
             if (peek_is(TokenKind::Comma) || peek_is(TokenKind::RParen)) {
-                val = "";
+                val = INSERT_DEFAULT;
             } else {
                 const Token* t = advance();
                 if (!t) throw ParseError("Expected value");
                 switch (t->kind) {
                     case TokenKind::StringLit: case TokenKind::NumberLit: case TokenKind::Ident: val = t->text; break;
                     case TokenKind::Null: val = "NULL"; break;
+                    case TokenKind::Default: val = INSERT_DEFAULT; break;
                     default: throw ParseError("Expected value");
                 }
             }

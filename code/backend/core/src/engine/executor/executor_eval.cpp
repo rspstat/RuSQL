@@ -172,46 +172,62 @@ bool Executor::matches_condexpr(const Row& row, const std::optional<CondExpr>& c
     return !condition || eval_condexpr(row, *condition);
 }
 
-bool Executor::eval_condexpr(const Row& row, const CondExpr& expr) {
-    if (auto* v = std::get_if<CondExpr::And>(&expr.data)) return eval_condexpr(row, *v->lhs) && eval_condexpr(row, *v->rhs);
-    if (auto* v = std::get_if<CondExpr::Or>(&expr.data)) return eval_condexpr(row, *v->lhs) || eval_condexpr(row, *v->rhs);
-    if (auto* v = std::get_if<CondExpr::Not>(&expr.data)) return !eval_condexpr(row, *v->inner);
-    if (auto* v = std::get_if<CondExpr::Leaf>(&expr.data)) return eval_single(row, v->condition);
-    return false;
+bool Executor::eval_condexpr(const Row& row, const CondExpr& expr) { return eval_cond3(row, expr) == Tri::True; }
+
+Executor::Tri Executor::eval_cond3(const Row& row, const CondExpr& expr) {
+    if (auto* v = std::get_if<CondExpr::And>(&expr.data)) {
+        Tri l = eval_cond3(row, *v->lhs);
+        if (l == Tri::False) return Tri::False;
+        Tri r = eval_cond3(row, *v->rhs);
+        if (r == Tri::False) return Tri::False;
+        return (l == Tri::True && r == Tri::True) ? Tri::True : Tri::Unknown;
+    }
+    if (auto* v = std::get_if<CondExpr::Or>(&expr.data)) {
+        Tri l = eval_cond3(row, *v->lhs);
+        if (l == Tri::True) return Tri::True;
+        Tri r = eval_cond3(row, *v->rhs);
+        if (r == Tri::True) return Tri::True;
+        return (l == Tri::False && r == Tri::False) ? Tri::False : Tri::Unknown;
+    }
+    if (auto* v = std::get_if<CondExpr::Not>(&expr.data)) {
+        Tri i = eval_cond3(row, *v->inner);
+        return i == Tri::True ? Tri::False : i == Tri::False ? Tri::True : Tri::Unknown;
+    }
+    if (auto* v = std::get_if<CondExpr::Leaf>(&expr.data)) return eval_single3(row, v->condition);
+    return Tri::False;
 }
 
-bool Executor::eval_single(const Row& row, const Condition& cond) {
+bool Executor::eval_single(const Row& row, const Condition& cond) { return eval_single3(row, cond) == Tri::True; }
+
+// A comparison with a NULL operand is UNKNOWN (so is NOT of it); IS NULL / IS NOT NULL are the only predicates that answer for NULL;
+// `x IN (1, NULL)` is TRUE or UNKNOWN, `x NOT IN (1, NULL)` FALSE or UNKNOWN.
+Executor::Tri Executor::eval_single3(const Row& row, const Condition& cond) {
+    auto tri = [](bool b) { return b ? Tri::True : Tri::False; };
     std::string val = eval_arith(row, cond.left);
 
-    if (std::holds_alternative<ConditionValue::Subquery>(cond.value.data)) return false;
+    if (std::holds_alternative<ConditionValue::Subquery>(cond.value.data)) return Tri::False;
 
     if (auto* bv = std::get_if<ConditionValue::Between>(&cond.value.data)) {
-        if (val == EXECUTOR_NULL_VALUE) return false;
+        if (val == EXECUTOR_NULL_VALUE) return Tri::Unknown;
         bool in_range;
         auto sc = cmp_num(val, bv->lo);
         auto ec = cmp_num(val, bv->hi);
         if (sc && ec) in_range = (*sc != -1) && (*ec != 1);
         else in_range = (val >= bv->lo) && (val <= bv->hi);
-        return cond.op == Operator::NotBetween ? !in_range : in_range;
+        return tri(cond.op == Operator::NotBetween ? !in_range : in_range);
     }
 
     if (auto* ll = std::get_if<ConditionValue::LiteralList>(&cond.value.data)) {
-        if (val == EXECUTOR_NULL_VALUE) return false;
-        if (cond.op == Operator::In) {
+        if (val == EXECUTOR_NULL_VALUE) return Tri::Unknown;
+        const bool has_null = std::any_of(ll->values.begin(), ll->values.end(), [](const std::string& v) { return v == EXECUTOR_NULL_VALUE; });
+        if (cond.op == Operator::In || cond.op == Operator::NotIn) {
             for (auto& item : ll->values) {
                 auto a = parse_f64(val), b = parse_f64(item);
-                if (a && b ? (*a == *b) : (val == item)) return true;
+                if (a && b ? (*a == *b) : (val == item)) return tri(cond.op == Operator::In);
             }
-            return false;
+            return has_null ? Tri::Unknown : tri(cond.op == Operator::NotIn);
         }
-        if (cond.op == Operator::NotIn) {
-            for (auto& item : ll->values) {
-                auto a = parse_f64(val), b = parse_f64(item);
-                if (a && b ? (*a == *b) : (val == item)) return false;
-            }
-            return true;
-        }
-        return false;
+        return Tri::False;
     }
 
     std::string resolved;
@@ -237,65 +253,65 @@ bool Executor::eval_single(const Row& row, const Condition& cond) {
             }
         }
     } else {
-        return false;
+        return Tri::False;
     }
 
-    if (cond.op == Operator::IsNull) return val == EXECUTOR_NULL_VALUE || val.empty();
-    if (cond.op == Operator::IsNotNull) return val != EXECUTOR_NULL_VALUE && !val.empty();
-    if (val == EXECUTOR_NULL_VALUE) return false;
-    if (*effective_lit == "__NULL__" || *effective_lit == EXECUTOR_NULL_VALUE) return false;
+    if (cond.op == Operator::IsNull) return tri(val == EXECUTOR_NULL_VALUE);
+    if (cond.op == Operator::IsNotNull) return tri(val != EXECUTOR_NULL_VALUE);
+    if (val == EXECUTOR_NULL_VALUE) return Tri::Unknown;
+    if (*effective_lit == "__NULL__" || *effective_lit == EXECUTOR_NULL_VALUE) return Tri::Unknown;
 
     switch (cond.op) {
         case Operator::Eq: {
             auto a = parse_f64(val), b = parse_f64(*effective_lit);
-            return (a && b) ? (*a == *b) : (val == *effective_lit);
+            return tri((a && b) ? (*a == *b) : (val == *effective_lit));
         }
         case Operator::Ne: {
             auto a = parse_f64(val), b = parse_f64(*effective_lit);
-            return (a && b) ? (*a != *b) : (val != *effective_lit);
+            return tri((a && b) ? (*a != *b) : (val != *effective_lit));
         }
         case Operator::In:
         case Operator::NotIn:
         case Operator::Exists:
         case Operator::NotExists:
-            return false;
+            return Tri::False;
         case Operator::Like:
-            return like_match(val, *effective_lit);
+            return tri(like_match(val, *effective_lit));
         case Operator::NotLike:
-            return !like_match(val, *effective_lit);
+            return tri(!like_match(val, *effective_lit));
         case Operator::Regexp:
             try {
-                return std::regex_search(val, std::regex(*effective_lit));
+                return tri(std::regex_search(val, std::regex(*effective_lit)));
             } catch (...) {
-                return false;
+                return Tri::False;
             }
         case Operator::NotRegexp:
             try {
-                return !std::regex_search(val, std::regex(*effective_lit));
+                return tri(!std::regex_search(val, std::regex(*effective_lit)));
             } catch (...) {
-                return true;
+                return Tri::True;
             }
         case Operator::Between:
         case Operator::NotBetween:
-            return false;
+            return Tri::False;
         case Operator::Gt: {
             auto c = cmp_num(val, *effective_lit);
-            return c ? (*c == 1) : (val > *effective_lit);
+            return tri(c ? (*c == 1) : (val > *effective_lit));
         }
         case Operator::Lt: {
             auto c = cmp_num(val, *effective_lit);
-            return c ? (*c == -1) : (val < *effective_lit);
+            return tri(c ? (*c == -1) : (val < *effective_lit));
         }
         case Operator::Gte: {
             auto c = cmp_num(val, *effective_lit);
-            return c ? (*c != -1) : (val >= *effective_lit);
+            return tri(c ? (*c != -1) : (val >= *effective_lit));
         }
         case Operator::Lte: {
             auto c = cmp_num(val, *effective_lit);
-            return c ? (*c != 1) : (val <= *effective_lit);
+            return tri(c ? (*c != 1) : (val <= *effective_lit));
         }
         default:
-            return false;
+            return Tri::False;
     }
 }
 
@@ -304,7 +320,8 @@ bool Executor::eval_check_expr(const std::string& expr, const Row& row) {
     auto result = parser.parse();
     if (result.is_ok()) {
         if (auto* sel = std::get_if<Statement::Select>(&result.value().data)) {
-            if (sel->condition) return eval_condexpr(row, *sel->condition);
+            // a CHECK constraint is violated only when its condition is FALSE: UNKNOWN (a NULL operand) passes
+            if (sel->condition) return eval_cond3(row, *sel->condition) != Tri::False;
         }
     }
     return true;

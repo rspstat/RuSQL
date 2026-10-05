@@ -172,20 +172,21 @@ TEST_CASE("SELECT index: numerically equal spellings are found on every access p
     }
 
     SECTION("covering lookups return what is stored, not the lookup key") {
-        // before: `SELECT price WHERE price = 7` answered "7" once -- the key -- instead of "7" and "7.00"
-        REQUIRE(sorted_lines(ok_text(ex, "SELECT price FROM d WHERE price = 7")) == sorted_lines(ok_text(ex, "SELECT price FROM d WHERE price = 7 OR id < 0")));
-        auto got = cells(ok_text(ex, "SELECT price FROM d WHERE price = 7"));
-        REQUIRE(got.size() == 2);
-        std::vector<std::string> vals{got[0][0], got[1][0]};
+        // (a DECIMAL column stores 7 and 7.00 alike, as "7.00": the spellings that differ live in the VARCHAR column `code`)
+        // before: `SELECT code WHERE code = 7` answered "7" once -- the key -- instead of "07", "7" and "7.0"
+        REQUIRE(sorted_lines(ok_text(ex, "SELECT code FROM d WHERE code = 7")) == sorted_lines(ok_text(ex, "SELECT code FROM d WHERE code = 7 OR id < 0")));
+        auto got = cells(ok_text(ex, "SELECT code FROM d WHERE code = 7"));
+        REQUIRE(got.size() == 3);
+        std::vector<std::string> vals{got[0][0], got[1][0], got[2][0]};
         std::sort(vals.begin(), vals.end());
-        REQUIRE(vals == std::vector<std::string>{"7", "7.00"});
+        REQUIRE(vals == std::vector<std::string>{"07", "7", "7.0"});
         // a strict bound must not return the boundary value in another spelling (it used to: 7.00 for `> 7`)
-        for (const char* p : {"price > 7", "price >= 7", "price < 7.00", "price <= 7.0", "price = 7.00"}) {
-            check_same(ex, "price", "d", p);
+        for (const char* p : {"code > 7", "code >= 7", "code < 7.00", "code <= 7.0", "code = 7.00", "price > 7", "price >= 7", "price = 7.00"}) {
+            check_same(ex, p[0] == 'c' ? "code" : "price", "d", p);
         }
         // the covering shortcut only applies to the index's own column
-        check_same(ex, "price, qty", "d", "price = 7");
-        check_same(ex, "price, code", "d", "price > 7");
+        check_same(ex, "code, qty", "d", "code = 7");
+        check_same(ex, "price, code", "d", "code > 7");
     }
 
     SECTION("ORDER BY ... LIMIT through the index") {
@@ -312,8 +313,9 @@ TEST_CASE("SELECT index: joins match numerically equal keys through every algori
     // build l(lid PK, v, k) and r(rid PK, v, w, k2) with `n_l`/`n_r` rows over a small value domain so keys repeat
     auto build = [&](const std::string& sfx, int n_l, int n_r, const std::string& extra_ddl) {
         std::string l = "l" + sfx, r = "r" + sfx;
-        REQUIRE(ex.execute_sql("CREATE TABLE " + l + " (lid INT PRIMARY KEY, v DECIMAL(10,2), k INT)").is_ok());
-        REQUIRE(ex.execute_sql("CREATE TABLE " + r + " (rid INT PRIMARY KEY, v DECIMAL(10,2), w INT, k2 INT)").is_ok());
+        // text columns: an INT / DECIMAL column stores every spelling of a number alike, and these joins are about the spellings
+        REQUIRE(ex.execute_sql("CREATE TABLE " + l + " (lid INT PRIMARY KEY, v VARCHAR(12), k VARCHAR(12))").is_ok());
+        REQUIRE(ex.execute_sql("CREATE TABLE " + r + " (rid INT PRIMARY KEY, v VARCHAR(12), w INT, k2 VARCHAR(12))").is_ok());
         for (int i = 1; i <= n_l; i++) {
             REQUIRE(ex.execute_sql("INSERT INTO " + l + " VALUES (" + std::to_string(i) + ", " + spell(static_cast<int>(rng() % 9)) + ", " +
                                    spell(static_cast<int>(rng() % 12)) + ")")

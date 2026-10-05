@@ -23,6 +23,10 @@ A statement that fails must fail with the same message on both builds.
                      pass the same build twice to prove it gives one answer whatever the parallelism
   --no-null-arithmetic  the corpus's `SET val = val + 1` skips NULL rows: builds before the NULL fix stored "NULL1" in the NULL rows,
                      which would make the two tables (and every later answer) differ; the remaining differences are `val * 2` over NULL
+  --no-empty-strings the corpus writes NULL where it would write an empty string: builds before 2026-10-05 stored '' as NULL
+  --order-as-sets    a statement with ORDER BY is compared as a set of lines and one with ORDER BY + LIMIT / OFFSET not at all: for a change
+                     of where NULL sorts (builds before 2026-10-05 compared NULL as the text "NULL"), which moves rows inside an order and
+                     across a LIMIT
   --skip-chain-refs  no ON clause that reads a table joined earlier: builds before b3ca102 answered `t JOIN u ON u.id = t.grp
                      JOIN w ON w.k = u.id` wrongly (the left column of the second join was read by its bare name from the
                      FROM table), so such queries differ from the fixed build by design
@@ -60,6 +64,13 @@ aliased or not. The expression is computed here from the plain columns of the sa
 and the SELECT answer, a WHERE on the expression and an UPDATE ... SET r = <expression> read back must all agree.
 
   python verify_null_expressions.py <engine_server.exe> [--queries N] [--seed S] [--rows R]
+
+verify_writes.py checks INSERT / REPLACE / INSERT ... ON DUPLICATE KEY UPDATE / UPDATE / DELETE, UPDATE ... JOIN, DELETE ... JOIN and MERGE
+against a model of what MySQL does: two tables with NOT NULL, UNIQUE, a typed column and a RESTRICT foreign key, random statements over
+values that include NULLs, numeric strings, fractions and text that does not fit. Every statement either succeeds or fails and changes
+NOTHING (statement atomicity); after every statement both tables are read back and compared with the model.
+
+  python verify_writes.py <engine_server.exe> [--statements N] [--seed S]
 
 To check that the comparison can see a bug, plant one on purpose in the new build (for instance read an unqualified column
 from the last table that has it instead of the first) and run the same seed: it has to report differences.

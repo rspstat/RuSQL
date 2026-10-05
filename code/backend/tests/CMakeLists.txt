@@ -41,6 +41,7 @@ add_executable(engine_tests
     test_bulk_write.cpp
     test_query_paths.cpp
     test_null_expressions.cpp
+    test_write_integrity.cpp
 )
 
 target_link_libraries(engine_tests PRIVATE engine_core)

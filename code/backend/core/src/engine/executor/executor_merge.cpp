@@ -42,10 +42,6 @@ StringResult Executor::exec_merge(SharedDatabase& s, std::string target, std::op
         if (c.primary_key) pk_cols.push_back(c.name);
     }
     if (pk_cols.empty()) pk_cols.push_back("id");
-    // Single PK column used for secondary/hash index maintenance below
-    // (index_remove_row/index_insert_row and the PK B+Tree only ever key on one column --
-    // same pre-existing composite-PK approximation already used by exec_multi_delete).
-    std::string pk_col = pk_cols.front();
     // Composite identity key, same fix/reasoning as UPDATE (executor_update.cpp) and
     // multi-table UPDATE/DELETE (executor_multi.cpp) -- a composite-PK target table's
     // rows must be identified by ALL of its PK columns, not just the first, or two
@@ -68,7 +64,8 @@ StringResult Executor::exec_merge(SharedDatabase& s, std::string target, std::op
 
     std::vector<std::pair<std::string, std::vector<std::pair<std::string, std::string>>>> update_rows;
     std::vector<std::string> delete_pks;
-    std::vector<Row> insert_rows;
+    const std::vector<std::string> insert_cols = when_not_matched_columns.value_or(target_col_names);
+    std::vector<std::vector<std::string>> insert_values;
 
     for (auto& src_row : source_rows) {
         bool found = false;
@@ -101,150 +98,104 @@ StringResult Executor::exec_merge(SharedDatabase& s, std::string target, std::op
             }
         }
         if (!found && !when_not_matched_values.empty()) {
-            std::vector<std::string> cols = when_not_matched_columns.value_or(target_col_names);
-            Row row;
-            for (std::size_t i = 0; i < cols.size(); i++) {
+            std::vector<std::string> values;
+            for (std::size_t i = 0; i < insert_cols.size(); i++) {
                 std::string raw = i < when_not_matched_values.size() ? when_not_matched_values[i] : std::string();
-                std::string value;
                 if (raw.size() >= 2 && raw.front() == '\'' && raw.back() == '\'') {
-                    value = trim_quotes(raw);
+                    values.push_back(trim_quotes(raw));
                 } else if (auto it = src_row.find(raw); it != src_row.end()) {
-                    value = it->second;
+                    values.push_back(it->second);
                 } else if (auto dot = raw.find('.'); dot != std::string::npos) {
-                    std::string col_part = raw.substr(dot + 1);
-                    auto it2 = src_row.find(col_part);
-                    value = it2 != src_row.end() ? it2->second : trim_quotes(raw);
+                    auto it2 = src_row.find(raw.substr(dot + 1));
+                    values.push_back(it2 != src_row.end() ? it2->second : trim_quotes(raw));
                 } else {
-                    value = trim_quotes(raw);
-                }
-                row[cols[i]] = value;
-            }
-            if (const auto* schema = s.catalog.get_table(target)) {
-                for (auto& col_def : schema->columns) {
-                    if (!row.count(col_def.name) && !col_def.auto_increment) {
-                        if (col_def.default_value) row[col_def.name] = *col_def.default_value;
-                    }
+                    values.push_back(trim_quotes(raw));
                 }
             }
-            insert_rows.push_back(std::move(row));
+            insert_values.push_back(std::move(values));
         }
     }
 
-    std::size_t update_count = update_rows.size();
-    std::size_t delete_count = delete_pks.size();
-    std::size_t insert_count = insert_rows.size();
+    // Each kind of change is one statement of the one-table paths (MVCC, undo log, constraints, indexes, triggers, foreign-key
+    // actions). They are ordered so that a failure changes nothing: the rows to insert are checked without writing, the deletes are
+    // checked against ON DELETE RESTRICT, the update is one statement (checked as a whole before any row is rewritten); then
+    // the update, the deletes and the inserts run. (The old code rewrote, erased and appended rows in place, checking nothing.)
+    const std::size_t update_count = update_rows.size();
+    const std::size_t delete_count = delete_pks.size();
+    const std::size_t insert_count = insert_values.size();
 
-    if (auto rit = s.tables.find(target); rit != s.tables.end()) {
-        auto& rows = rit->second;
-        // PLAN.md P2 fix: MERGE previously touched zero index kinds at all for UPDATE/
-        // DELETE (INSERT below had the same gap) -- mirror the remove-old/insert-new
-        // pattern already used by plain UPDATE/multi-table UPDATE/DELETE.
+    std::vector<Row> doomed;
+    for (auto& r : target_rows) {
+        if (std::find(delete_pks.begin(), delete_pks.end(), row_key(r)) != delete_pks.end()) doomed.push_back(r);
+    }
+    if (!insert_values.empty()) {
+        if (auto checked = exec_insert_inner(s, target, insert_cols, insert_values, InsertConflict(InsertConflict::Abort{}), std::nullopt, /*validate_only=*/true);
+            checked.is_err()) {
+            return checked;
+        }
+    }
+    if (!doomed.empty()) {
+        auto child_lock = acquire_table_data_locks(s, fk_child_tables(s, target), /*exclusive=*/false);
+        for (auto& r : doomed) {
+            if (auto violation = delete_restrict_violation(s, target, r)) return StringResult::Err(*violation);
+        }
+    }
+
+    // composite keys travel as the \x00-joined values of the primary-key columns, in the order of `pk_cols`
+    auto key_values = [&](const std::string& key) {
+        std::vector<std::string> out;
+        std::size_t from = 0;
+        for (std::size_t i = 0; i < pk_cols.size(); i++) {
+            std::size_t to = key.find('\x00', from);
+            out.push_back(key.substr(from, to == std::string::npos ? std::string::npos : to - from));
+            from = to == std::string::npos ? key.size() : to + 1;
+        }
+        return out;
+    };
+
+    if (!update_rows.empty()) {
+        PerRowValues per_row;
+        std::vector<std::pair<std::string, ArithExpr>> columns;
         for (auto& [pk, resolved] : update_rows) {
-            for (auto& row : rows) {
-                if (row_key(row) == pk && is_visible(row)) {
-                    Row old_row = row;
-                    for (auto& [col, val] : resolved) row[col] = val;
-                    if (auto idx_it = s.indexes.find(target); idx_it != s.indexes.end()) {
-                        auto old_it = old_row.find(pk_col);
-                        idx_it->second.remove(old_it != old_row.end() ? old_it->second : std::string());
-                        auto new_it = row.find(pk_col);
-                        idx_it->second.insert(new_it != row.end() ? new_it->second : std::string(), row_to_json(row));
-                    }
-                    index_remove_row(s, target, old_row, pk_col);
-                    index_insert_row(s, target, row);
-                    for (auto& [k, ci] : s.composite_indexes) {
-                        if (ci.table != target) continue;
-                        ci.remove_row(old_row);
-                        ci.insert_row(row);
-                    }
-                    break;
-                }
+            auto& values = per_row[pk];
+            for (auto& [col, val] : resolved) {
+                values[col] = val; // a target row matched by several source rows takes the last one's values
+                if (std::none_of(columns.begin(), columns.end(), [&](auto& c) { return c.first == col; })) columns.emplace_back(col, ArithExpr(ArithExpr::Str{""}));
             }
         }
-
-        std::vector<Row> rows_to_delete;
-        for (auto& r : rows) {
-            if (std::find(delete_pks.begin(), delete_pks.end(), row_key(r)) != delete_pks.end()) rows_to_delete.push_back(r);
-        }
-        rows.erase(std::remove_if(rows.begin(), rows.end(),
-                                   [&](const Row& r) {
-                                       return std::find(delete_pks.begin(), delete_pks.end(), row_key(r)) != delete_pks.end();
-                                   }),
-                   rows.end());
-        if (auto idx_it = s.indexes.find(target); idx_it != s.indexes.end()) {
-            for (auto& row : rows_to_delete) {
-                auto it = row.find(pk_col);
-                idx_it->second.remove(it != row.end() ? it->second : std::string());
-            }
-        }
-        for (auto& row : rows_to_delete) index_remove_row(s, target, row, pk_col);
-        for (auto& [k, ci] : s.composite_indexes) {
-            if (ci.table != target) continue;
-            for (auto& row : rows_to_delete) ci.remove_row(row);
-        }
-    }
-
-    {
-        std::vector<std::pair<std::string, bool>> ai_cols;
-        if (const auto* sc = s.catalog.get_table(target)) {
-            for (auto& c : sc->columns) ai_cols.emplace_back(c.name, c.auto_increment);
-        }
-        std::unordered_map<std::string, std::int64_t> local_counters;
-        if (const auto* sc = s.catalog.get_table(target)) local_counters = sc->auto_increment_counters;
-
-        for (auto& [col_name, is_ai] : ai_cols) {
-            if (is_ai && !local_counters.count(col_name)) {
-                std::int64_t max_id = 0;
-                if (auto it = s.tables.find(target); it != s.tables.end()) {
-                    for (auto& r : it->second) {
-                        if (!is_visible(r)) continue;
-                        auto cit = r.find(col_name);
-                        if (cit == r.end()) continue;
-                        try {
-                            std::size_t pos;
-                            std::int64_t v = std::stoll(cit->second, &pos);
-                            if (pos == cit->second.size()) max_id = std::max(max_id, v);
-                        } catch (...) {
+        // a row that one source row updates and another does not name a column of: leave that column as it is
+        for (auto& [pk, values] : per_row) {
+            for (auto& [col, _] : columns) {
+                if (!values.count(col)) {
+                    for (auto& r : target_rows) {
+                        if (row_key(r) == pk) {
+                            auto it = r.find(col);
+                            values[col] = it != r.end() ? it->second : std::string(EXECUTOR_NULL_VALUE);
+                            break;
                         }
                     }
                 }
-                local_counters[col_name] = max_id;
             }
         }
-
-        std::string txn_id = std::to_string(txn.current_txn_id());
-        if (auto it = s.tables.find(target); it != s.tables.end()) {
-            for (auto& row : insert_rows) {
-                for (auto& [col_name, is_ai] : ai_cols) {
-                    if (is_ai && (!row.count(col_name) || row[col_name].empty())) {
-                        std::int64_t& counter = local_counters[col_name];
-                        counter += 1;
-                        row[col_name] = std::to_string(counter);
-                    }
-                }
-                if (!row.count("_xmin")) row["_xmin"] = txn_id;
-                if (!row.count("_xmax")) row["_xmax"] = "0";
-                // PLAN.md P2 fix: MERGE's INSERT branch previously touched zero index
-                // kinds at all -- index while `row` is still valid, before the move below.
-                if (auto idx_it = s.indexes.find(target); idx_it != s.indexes.end()) {
-                    auto pk_it = row.find(pk_col);
-                    idx_it->second.insert(pk_it != row.end() ? pk_it->second : std::string(), row_to_json(row));
-                }
-                index_insert_row(s, target, row);
-                for (auto& [k, ci] : s.composite_indexes) {
-                    if (ci.table == target) ci.insert_row(row);
-                }
-                it->second.push_back(std::move(row));
-            }
-        }
-        if (auto* ts = s.catalog.get_table_mut(target)) ts->auto_increment_counters = local_counters;
+        if (auto r = exec_update(s, target, std::move(columns), std::nullopt, std::nullopt, &per_row); r.is_err()) return r;
     }
 
-    if (!txn.is_active()) {
-        if (auto it = s.tables.find(target); it != s.tables.end()) {
-            std::vector<Row> rows_clone = it->second;
-            s.buffer_pool.write_through(target, rows_clone, s.disk);
+    if (!delete_pks.empty()) {
+        std::optional<CondExpr> cond;
+        for (auto& pk : delete_pks) {
+            auto vals = key_values(pk);
+            std::optional<CondExpr> one;
+            for (std::size_t i = 0; i < pk_cols.size(); i++) {
+                CondExpr leaf = CondExpr(CondExpr::Leaf{Condition{ArithExpr(ArithExpr::Col{pk_cols[i]}), Operator::Eq, ConditionValue(ConditionValue::Literal{vals[i]})}});
+                one = one ? CondExpr(CondExpr::And{std::make_unique<CondExpr>(std::move(*one)), std::make_unique<CondExpr>(std::move(leaf))}) : std::move(leaf);
+            }
+            cond = cond ? CondExpr(CondExpr::Or{std::make_unique<CondExpr>(std::move(*cond)), std::make_unique<CondExpr>(std::move(*one))}) : std::move(*one);
         }
+        if (auto r = exec_delete(s, target, std::move(cond), std::nullopt); r.is_err()) return r;
+    }
+
+    if (!insert_values.empty()) {
+        if (auto r = exec_insert(s, target, insert_cols, std::move(insert_values), InsertConflict(InsertConflict::Abort{}), std::nullopt); r.is_err()) return r;
     }
 
     return StringResult::Ok("MERGE: " + std::to_string(update_count) + " updated, " + std::to_string(delete_count) + " deleted, " +

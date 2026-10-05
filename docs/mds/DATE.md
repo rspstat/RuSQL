@@ -907,9 +907,52 @@ VS Code 스타일 탭 드래그 순서 변경(요청의 1번 항목)은 같은 �
 
 **눈에 띄는 변화(의도한 것)**: NULL이 든 식은 NULL로 나온다(`v + 1`, `v * 2`, `ROUND(v)`, `LENGTH(s)`, `v > 5`); `x / 0`은 NULL; `WHERE v % 5 = 0`이 NULL 행을 고르지 않는다; 한정된 열의 식을 함수 인자로 쓸 수 있다. 문자 값 산술(`'x' + 1` → `x1`)은 바뀌지 않았다.
 
-**이 점검에서 새로 찾았지만 고치지 않은 것(사용자 결정 대기)**: 데모·실사용에 걸릴 가능성이 큰 순서로 ① **집계 인자에 식을 쓸 수 없음**(`SUM(price * qty)`, `SUM(COALESCE(x, 0))`: 파싱 오류), ② **함수 결과를 산술의 왼쪽에 쓸 수 없음**(`ROUND(x, 1) * 100`, `COALESCE(a, 0) + COALESCE(b, 0)`: 파싱 오류; `1 + ROUND(x)`은 됨), ③ **`UPDATE`가 NOT NULL을 검사하지 않음**(`UPDATE t SET not_null_col = NULL` 통과, INSERT는 막음; NULL 산술이 고쳐져 `SET x = x / y`도 NULL을 넣을 수 있게 됨), ④ `IF(c, 'n', …)`·`CASE … THEN 'n'`의 문자열이 열 이름과 같으면 그 열의 값이 나옴, ⑤ `SUM`/`AVG`가 빈 입력(또는 전부 NULL)에서 NULL이 아니라 0/0.0000, ⑥ `INSERT … VALUES (1 + 2)` 불가, ⑦ 문자 값 산술(`'12abc' + 1`), ⑧ 함수 열 이름 `ROUND()`, ⑨ 같은 `AVG(x)`를 select하고 식에도 쓰면 식은 반올림 값을 읽음.
+**이 점검에서 새로 찾았지만 고치지 않은 것(→ 같은 날 여섯 번째 항목에서 ③ 수정, 나머지는 이어서 수정 예정)**: 데모·실사용에 걸릴 가능성이 큰 순서로 ① **집계 인자에 식을 쓸 수 없음**(`SUM(price * qty)`, `SUM(COALESCE(x, 0))`: 파싱 오류), ② **함수 결과를 산술의 왼쪽에 쓸 수 없음**(`ROUND(x, 1) * 100`, `COALESCE(a, 0) + COALESCE(b, 0)`: 파싱 오류; `1 + ROUND(x)`은 됨), ③ **`UPDATE`가 NOT NULL을 검사하지 않음**(`UPDATE t SET not_null_col = NULL` 통과, INSERT는 막음; NULL 산술이 고쳐져 `SET x = x / y`도 NULL을 넣을 수 있게 됨), ④ `IF(c, 'n', …)`·`CASE … THEN 'n'`의 문자열이 열 이름과 같으면 그 열의 값이 나옴, ⑤ `SUM`/`AVG`가 빈 입력(또는 전부 NULL)에서 NULL이 아니라 0/0.0000, ⑥ `INSERT … VALUES (1 + 2)` 불가, ⑦ 문자 값 산술(`'12abc' + 1`), ⑧ 함수 열 이름 `ROUND()`, ⑨ 같은 `AVG(x)`를 select하고 식에도 쓰면 식은 반올림 값을 읽음.
 
 **Diagram 페이지**: 구성요소·흐름이 바뀐 것이 없어 변경 없음.
+
+### 10월 5일 (여섯 번째) — 쓰기 경로의 정합성: 빈 문자열이 NULL로 저장되던 것, 타입 검사 부재, UPDATE의 제약 미검사, 실패한 REPLACE가 행을 지우던 것, ON DUPLICATE KEY UPDATE, 3값 논리, NULL 정렬 위치, AUTO_INCREMENT
+
+**왜 이 항목인가**: 사용자가 "정확해야 하는 소프트웨어에서 버그는 치명적"이라며 열려 있던 문제를 **전부** 고치라고 했다. 데이터를 잃거나 잘못 저장하는 쓰기 경로를 가장 먼저 잡았다(순서: 쓰기 정합성 → 집계·문자 산술 의미 → 집계 인자의 식 → 식 문법). 이전 항목들의 점검에서 나온 "고치지 않은 것" 목록(UPDATE의 NOT NULL 미검사 외)에 더해, 같은 경로를 `probe_many.py`로 더 파헤쳐 심각한 것들을 찾았다. 모두 원본 Rust 포팅 때부터 있던 문제다.
+
+**원인과 영향**:
+- **빈 문자열이 NULL로 저장됨**: `INSERT … VALUES (1, '')`가 `final_values[i].empty() ? NULL`로 NULL이 됐다(열을 생략한 경우와 명시한 `''`를 구별하지 못함). `IS NULL`·`COALESCE`·`IFNULL`·`ISNULL`·UNIQUE 검사가 `''`를 NULL로 취급했고 `WHERE s = ''`는 아무 행도 못 찾았다.
+- **타입 검사가 전혀 없음**: `INT`에 `'abc'`, `VARCHAR(3)`에 `'toolong'`, `DATE`에 `'not a date'`·`'2024-02-30'`, `DECIMAL(5,2)`에 `123456.789`, `BOOLEAN`에 `'maybe'`가 그대로 저장됐다(MySQL 엄격 모드는 오류 1366/1406/1292/1264).
+- **UPDATE가 제약을 검사하지 않음**: NOT NULL(PK·AUTO_INCREMENT 포함)과 자식 쪽 외래 키(`UPDATE ch SET p_id = 99`가 통과)와 타입을 검사하지 않았다. 부모 키를 바꾸는 UPDATE의 ON UPDATE RESTRICT는 **행을 이미 바꾼 뒤** 검사해 오류를 내도 행이 바뀌어 있었다.
+- **`REPLACE INTO`가 실패해도 옛 행을 이미 지움**: 충돌 행 삭제가 새 행의 검증보다 먼저라, NOT NULL 위반 같은 오류로 REPLACE가 실패하면 **옛 행만 사라졌다**(데이터 유실). 같은 REPLACE 안의 중복 행도 처리가 맞지 않았다.
+- **`INSERT … ON DUPLICATE KEY UPDATE`가 행을 제자리에서 바꿈**: MVCC 버전도 되돌리기(undo) 기록도 남기지 않아 트랜잭션 안에서 ROLLBACK해도 되돌아오지 않았고, NOT NULL·UNIQUE·CHECK·ENUM·FK 검사가 전혀 없었으며, 메시지는 갱신된 행이 있어도 "0 row(s) inserted"였다.
+- **MERGE와 다중 테이블 UPDATE/DELETE**: 위와 같은 검증(NOT NULL·UNIQUE·FK·RESTRICT)이 문장 단위로 되지 않았고, 다중 테이블 UPDATE는 행을 제자리에서 바꿔 ROLLBACK이 되돌리지 못했다.
+- **3값 논리가 없음**: NULL과의 비교·`NOT`·`IN`·`NOT IN`·`NOT LIKE`가 UNKNOWN이 아니라 TRUE/FALSE로 나왔다(`x NOT IN (1, NULL)`이 TRUE, 행이 없거나 NULL인 스칼라 서브쿼리는 글자 "NULL"을 0으로 비교). CHECK는 UNKNOWN을 거부했다(MySQL은 통과).
+- **NULL이 정렬에서 글자 "NULL"로 비교됨**: `ORDER BY`·윈도우·집합 연산에서 NULL의 위치가 값의 모양에 달려 있었다(MySQL: ASC에서 맨 앞, DESC에서 맨 뒤).
+- **AUTO_INCREMENT 카운터가 직접 넣은 번호를 모름**: 명시한 id 뒤에 자동 번호가 겹쳐 충돌했고(MERGE 점검 중 발견), `0`/NULL로 번호를 생성하지 않았다. UNIQUE 열은 한 문장 안에서든 기존 행과든 NULL끼리 중복으로 취급됐다(MySQL은 NULL 여럿 허용). 외래 키 검사는 삭제된 부모 행도 부모로 인정했고, 자기 참조 다중 행 INSERT는 같은 문장의 앞 행을 부모로 인정하지 않았다.
+
+**수정**:
+- 새 sentinel `INSERT_DEFAULT`(`"__INSERT_DEFAULT__"`, `parser.hpp`): 생략한 값(`(1, , 3)`, `DEFAULT`, 열 목록에 없는 열)만 기본값을 받고 명시한 `''`는 진짜 값. `IS NULL`·`COALESCE`·`IFNULL`·`ISNULL`·UNIQUE 건너뛰기는 글자 `NULL`만 NULL로 본다(`executor_update_unique.cpp`·`executor_ddl.cpp`·`executor_maint.cpp`·윈도우 `MIN/MAX/COUNT`도 `''`를 건너뛰지 않음).
+- 새 `executor_types.cpp`의 `coerce_column_value`: INT 계열(범위, 반올림은 0에서 먼 쪽, `true`/`false`), FLOAT/DOUBLE(왕복 가능한 가장 짧은 표기), DECIMAL(p,s)(자릿수 문자열로 정확히 반올림하고 소수부를 채움), VARCHAR(n)(글자 수, 뒤쪽 공백은 잘림), DATE/DATETIME/TIMESTAMP/TIME/YEAR(윤년 포함 검증 후 표준 표기), BOOLEAN(TINYINT), JSON(`nlohmann::json::accept`). 메시지는 MySQL 엄격 모드 형식(`at row N`).
+- 새 `executor_row_check.cpp`: UPDATE·ODKU·MERGE·다중 테이블 UPDATE가 같이 쓰는 `rewritten_row_violation`(NOT NULL, 자식 쪽 FK — 바뀌지 않은 FK 값은 건너뜀), `update_restrict_violation`(**바꾸기 전에** ON UPDATE RESTRICT 검사), `delete_restrict_violation`, 외래 키 이웃 테이블까지 정렬 순서로 잡는 `acquire_table_data_locks_mixed`. 삭제된 부모 행은 부모가 아니다.
+- `REPLACE`: 전체 행 목록을 `exec_insert_inner(…, validate_only=true)`로 **먼저 검증**(기존 행과의 충돌과 문장 안 중복은 허용)하고, 피해 행들의 ON DELETE RESTRICT와 BEFORE INSERT 트리거를 확인한 뒤에야 삭제하고 넣는다(`replace_supersede`: 뒤 행이 대체하는 앞 행은 건너뛰되 그 앞 행의 충돌 행은 여전히 지움). 실패하면 아무것도 바뀌지 않는다.
+- `ON DUPLICATE KEY UPDATE`: 충돌 행을 PK(복합 PK 포함)로 찾아 **UPDATE 문장 큐**로 실행(`VALUES(col)`은 넣으려던 값으로 묶음; 파서가 `VALUES(col)` 지원). MVCC·undo·모든 제약 검사를 UPDATE와 공유하고 메시지는 "N row(s) inserted, M row(s) updated."
+- MERGE·다중 테이블 UPDATE/DELETE: 갱신은 `exec_update(PerRowValues)`(행 키 → 열 → 값; 한 번의 원자적 단일 테이블 UPDATE 문장), 삭제는 `exec_delete`, 삽입은 `exec_insert`로 재작성. MERGE의 잠금 집합은 외래 키 이웃을 포함하고 트리거가 있으면 전역 잠금으로 물러선다.
+- 3값 논리: `enum class Tri {False, True, Unknown}`, `eval_cond3`/`eval_single3`와 서브쿼리 버전이 NOT/AND/OR/IN/NOT IN/BETWEEN/LIKE를 3값으로 평가하고 `eval_condexpr`/`eval_single`은 `== True` 래퍼. CHECK는 False만 거부. 스칼라 서브쿼리(행 없음/NULL)와의 비교와 IN 목록·서브쿼리 안의 NULL은 UNKNOWN.
+- NULL 정렬: `cmp_key`(SELECT·집합 연산·윈도우)와 `order_rows` 모두 NULL이 ASC에서 맨 앞, DESC에서 맨 뒤.
+- AUTO_INCREMENT: `counter_of`가 보이는 최댓값에서 지연 초기화하고 직접 넣은 정수가 카운터를 올림(스키마도 저장), NULL·0·생략이 다음 번호를 생성. 검증 전용 실행은 음수 자리표시자 `-(행번호+1)`을 쓴다. UNIQUE의 NULL 건너뛰기(기존 행·문장 안 모두), 자기 참조 FK는 같은 문장의 앞 행을 부모로 허용.
+
+**검증**:
+- 신규 Catch2 11케이스(486 → 497, `test_write_integrity.cpp`): 빈 문자열, 타입 표(모든 타입의 허용·거부·표준 표기), UPDATE 제약(NOT NULL·양쪽 FK·RESTRICT, 실패한 UPDATE는 아무것도 바꾸지 않음), REPLACE(실패하면 변화 없음·충돌 행 전부 삭제·ROLLBACK), ODKU(VALUES(col)·복합 PK·ROLLBACK·제약), 3값 논리 두 케이스(비교·NOT·IN·BETWEEN·LIKE·CHECK), NULL 정렬, 다중 테이블 UPDATE/DELETE·MERGE(ROLLBACK 포함), AUTO_INCREMENT(재시작 포함), 그리고 **무작위 모델 테스트** — 테스트 안의 모델이 제약·원자적 문장·REPLACE·ODKU를 계산해 엔진과 행 단위로 비교(40시드 43,182 assertions). 기존 테스트 중 빈 문자열 기대값·NULL 정렬 기준 비교기(`ref_cmp`)·DECIMAL 표기에 의존하던 부분(`test_select_index.cpp`는 표기 변형을 VARCHAR 열로)을 새 의미에 맞게 고쳤다.
+- 심은 버그 34종(`mutate.py`의 `wi_*`: 빈 문자열을 NULL로 보기, 생략한 값, UNIQUE의 NULL(기존 행·문장 안), INT 반올림, VARCHAR 길이, DECIMAL 채우기, 윤년, UPDATE의 NOT NULL·FK·RESTRICT 순서, 삭제된 부모, REPLACE의 검증·RESTRICT·대체·삭제 대상, ODKU의 `VALUES(col)`·복합 PK, 3값 논리(NOT·AND·OR를 SELECT용·UPDATE/ON용 두 평가기에 각각, IN, CHECK), NULL 정렬, AUTO_INCREMENT 카운터·0, 자기 참조 FK, MERGE의 검증·RESTRICT, 다중 테이블 UPDATE의 선택)을 **모두** 새 테스트가 잡음. 첫 실행에서 살아남은 5건이 테스트의 구멍을 알려 줘서 보강했다: ① 삭제된 부모 행(UPDATE로 키가 바뀌어 남은 옛 버전과 아직 커밋 안 된 DELETE)을 부모로 인정하는 것, ② SELECT의 WHERE는 서브쿼리를 아는 별도 평가기(`eval_cond3_with_subquery`)를 쓰므로 UPDATE/DELETE/조인 ON이 쓰는 `eval_cond3`의 NOT·AND·OR는 따로 검증해야 했다(두 평가기 모두 UPDATE·DELETE·ON 케이스로 확인), ③ 문장 안 UNIQUE NULL 검사의 조회 쪽 건너뛰기는 기록 쪽 건너뛰기와 겹쳐 있어 심은 버그가 실제로는 동작이 같았다(겹치는 줄을 지움), ④ MERGE의 삭제 분기가 외래 키로 참조되는 행을 지울 때 같은 MERGE의 다른 행 갱신까지 되돌려지는지 확인하는 케이스가 없었다, ⑤ 한 심은 버그의 되돌리기 텍스트가 소스에서 유일하지 않아 소스가 심어진 채로 남았다(그 뒤 심은 버그 5건을 다시 돌렸고, 소스 체크섬이 되돌려졌음을 확인).
+- 새 도구 `code/test/diff/verify_writes.py`: 열 `t`(자식, FK·NOT NULL·UNIQUE·CHECK·타입)와 `c`의 쓰기(INSERT·REPLACE·ODKU·UPDATE·DELETE, `UPDATE … JOIN`, `DELETE … JOIN`, MERGE)를 모델로 따라 계산해 **매 문장의 성공/거부와 그 뒤 표 내용 전체**가 엔진과 같은지 확인. 5시드 × 1,500문장(7,500문장: 성공 2,674·거부 4,638) 위반 0. 이전 빌드는 위반(실패한 REPLACE가 행을 지움 등).
+- 같은 변경이 닿는 기존 도구: `verify_null_expressions.py` 3시드(NULL 답 198,441행, WHERE 1,993, UPDATE 248)·`verify_agg_expressions.py` 2시드(2,920질의, 21,438그룹)·`verify_aggregates.py` 2시드(2,735질의, 20,308그룹, HAVING 572)·`verify_orderby_distinct.py` 2시드(DISTINCT 549·ORDER 241·정렬 키 103; NULL이 앞이라는 새 규칙으로 비교기를 고침) 위반 0.
+- 빌드 간 차분(`diff_builds.py`에 `--no-empty-strings`(말뭉치가 `''` 대신 NULL을 씀: 이전 빌드는 `''`를 NULL로 저장했다)와 `--order-as-sets`(ORDER BY는 집합으로, ORDER BY … LIMIT은 비교 안 함: NULL 위치가 바뀌어 LIMIT 경계가 움직인다) 추가): 이전 빌드 대비 30시드 × 99질의(2,970질의; ORDER BY … LIMIT 561개는 비교 제외)에서 차이 113건이고 **전부 설명됨**: ① 윈도우 `OVER (… ORDER BY)` 36건(NULL이 먼저 정렬돼 순위·행 번호·LAG가 옮겨짐), ② 스칼라 서브쿼리 비교 6건(행 없음/NULL → UNKNOWN), ③ NOT 70건(`NOT IN`·`NOT LIKE`·`NOT (…)` over NULL은 UNKNOWN), ④ 1건: `ARRAY_AGG(val) … ORDER BY val DESC`의 NULL 원소 위치. 설명되지 않는 차이 0.
+- Release/Debug **497 케이스/1,417,892 assertions**를 기본 설정과 `RUSQL_DML_INDEX_MIN_ROWS=0` 양쪽에서 통과. SELECT 차분 퍼저 150시드(1,819,528 assertions), DML 퍼저 80시드(1,946,487), `[aggregate]` 긴 캠페인(11케이스 317,618 assertions), 크래시 퍼저 90라운드·동시 퍼저 30라운드(확인한 확정 행 16,744) 불일치 0.
+- 성능(이전/새 빌드를 번갈아 두 번씩, 10만 행을 1,000행씩 INSERT): INT·INT 163~177k → 163~170k rows/s, INT·VARCHAR(20) 178k → 170~173k, INT·DECIMAL·DATE 154k → 143~146k, INT·DOUBLE·DATETIME 145~147k → 125~130k(타입 검사·표준 표기 변환 비용, 약 5~15% 느림; DOUBLE·DATETIME이 가장 큼). 5만 행 UPDATE는 0.46~0.60초로 같음. `bench_query.py 50000`(번갈아 두 번): `COUNT(*)` 15.2·14.6 → 14.6·15.1ms, `GROUP BY` 25.3·22.4 → 26.4·28.2, 조인+`GROUP BY` 229·221 → 221·224, 인덱스 없는 `WHERE` 3종 17~22 → 14~16ms(오차 범위 또는 약간 빠름).
+
+**눈에 띄는 변화(의도한 것)**: `''`는 NULL이 아니라 값이다(`WHERE s = ''`가 찾고 `IS NULL`은 아님); 타입에 맞지 않는 값은 오류(`INSERT INTO t(n) VALUES ('abc')`, 범위를 벗어난 INT, 없는 날짜); DECIMAL은 열의 소수 자릿수로 반올림·채움(`1.5` → `1.50`), DATE 등은 표준 표기, VARCHAR(n)을 넘으면 오류; `UPDATE`가 NOT NULL·외래 키를 지킨다; 실패한 REPLACE/MERGE/다중 테이블 UPDATE는 아무것도 바꾸지 않는다; `NULL`과의 비교는 UNKNOWN이라 `NOT IN (…, NULL)`은 행을 고르지 않고 CHECK는 UNKNOWN을 통과; NULL은 `ORDER BY ASC`에서 맨 앞.
+
+**정직한 한계(MySQL과 다르게 남긴 것)**: ① **정렬 규칙(collation)이 바이트 단위·대소문자 구분**이다(`'a' < 'B'`가 거짓). ② **비교와 정렬은 열 타입이 아니라 값의 모양**(숫자로 읽히면 숫자)으로 정한다: 문자열 열의 `'10'`과 `'9'`가 숫자로 비교된다. ③ 산술은 6자리 반올림이다(앞 항목과 같음). ④ MERGE는 단계별로 잠금 시간 초과가 나면 단계 사이가 완전히 원자적이지 않을 수 있다(각 단계는 원자적). ⑤ 여러 테이블을 지우는 대규모 DELETE는 IN 목록 크기에 비례(O(N·M)). ⑥ `COUNT(조건)`은 참인 행만 센다. ⑦ 파서가 만든 AST JSON에서 생략한 INSERT 값이 `__INSERT_DEFAULT__` 글자로 보인다.
+
+**이 점검에서 새로 찾았지만 고치지 않고 다음 항목으로 넘긴 것(조인 이름)**: 3값 논리 테스트를 조인 ON으로 확인하다가 **같은 테이블을 두 번 쓰는 조인이 틀린 답을 낸다**는 것을 찾았다(이전 빌드에도 있음, 이번 변경과 무관). 파서가 별칭을 실제 테이블 이름으로 바꾸기 때문에 `FROM emp e JOIN emp m ON e.mgr = m.id`의 `e.x`와 `m.x`가 둘 다 `emp.x`가 되고, 조인이 `emp.x` 키를 오른쪽 행으로 덮어쓴다: `SELECT e.name, m.name`이 `ann | ann …`, `ON a.id < b.id`가 0행, `LEFT JOIN`이 전부 NULL. 또 `SELECT * FROM a JOIN b ON …`에서 오른쪽 테이블의 같은 이름 열(`id`)이 왼쪽 값으로 나오고, `SELECT a.*`와 쉼표 조인(`FROM a, b WHERE …`)은 파싱 오류, `NATURAL`/`USING`의 `*`가 공통 열을 두 번 보여 준다. 이어지는 항목에서 조인 이름 체계를 고친다. 그 뒤로 남은 묶음: "집계·문자 산술(SUM/AVG 빈 입력, 문자 값 산술, AVG 반올림)", "집계 인자의 식", "식 문법(함수로 시작하는 식, CASE의 문자열, ORDER BY/GROUP BY 식, INSERT VALUES의 식, 열 이름 `ROUND()`, `1e3` 리터럴)".
+
+**Diagram 페이지**: 구성요소·흐름이 바뀐 것이 없어(실행기 안의 새 파일 2개는 같은 "실행기" 상자 안) 변경 없음.
 
 ---
 

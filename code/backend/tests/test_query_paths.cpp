@@ -84,6 +84,7 @@ bool ref_number(const std::string& s, double& out) {
     return end == s.c_str() + s.size() && s.find_first_of("xXnN") == std::string::npos;
 }
 int ref_cmp(const std::string& a, const std::string& b) {
+    if (a == "NULL" || b == "NULL") return a == b ? 0 : (a == "NULL" ? -1 : 1); // NULL sorts before every value
     double x, y;
     if (ref_number(a, x) && ref_number(b, y)) return x < y ? -1 : (x > y ? 1 : 0);
     return a < b ? -1 : (a > b ? 1 : 0);
@@ -101,14 +102,14 @@ TEST_CASE("GROUP BY and DISTINCT tell composite keys apart value by value", "[qu
     Executor ex(dir.path);
     open_db(ex);
     REQUIRE(ex.execute_sql("CREATE TABLE k (id INT PRIMARY KEY, a VARCHAR(10), b VARCHAR(10))").is_ok());
-    // ("ab","c") and ("a","bc") concatenate to the same text; so do (NULL, "abc") and ("abc", NULL) -- the engine stores an
-    // empty string as NULL
+    // ("ab","c") and ("a","bc") concatenate to the same text; so do ("", "abc") and ("abc", "") (and with NULL for ""): the
+    // empty string is a value of its own, not NULL
     REQUIRE(ex.execute_sql("INSERT INTO k VALUES (1,'ab','c'), (2,'a','bc'), (3,'ab','c'), (4,'a','bc'), (5,'','abc'), (6,'abc',''), "
                            "(7,'ab','c'), (8,NULL,'x'), (9,NULL,'x'), (10,'x',NULL)")
                 .is_ok());
     std::map<std::string, std::string> groups; // "a|b" -> COUNT(*)
     for (auto& r : table_cells(ok_text(ex, "SELECT a, b, COUNT(*) FROM k GROUP BY a, b"))) groups[r[0] + "|" + r[1]] = r[2];
-    REQUIRE(groups == std::map<std::string, std::string>{{"ab|c", "3"}, {"a|bc", "2"}, {"NULL|abc", "1"}, {"abc|NULL", "1"}, {"NULL|x", "2"}, {"x|NULL", "1"}});
+    REQUIRE(groups == std::map<std::string, std::string>{{"ab|c", "3"}, {"a|bc", "2"}, {"|abc", "1"}, {"abc|", "1"}, {"NULL|x", "2"}, {"x|NULL", "1"}});
 
     std::set<std::string> distinct;
     auto cells = table_cells(ok_text(ex, "SELECT DISTINCT a, b FROM k"));
@@ -120,7 +121,7 @@ TEST_CASE("GROUP BY and DISTINCT tell composite keys apart value by value", "[qu
     REQUIRE(order.size() == 6);
     REQUIRE(order[0][0] == "ab");
     REQUIRE(order[1][0] == "a");
-    REQUIRE(order[2][0] == "NULL");
+    REQUIRE(order[2][0] == "");
     REQUIRE(order[3][0] == "abc");
 }
 
@@ -443,12 +444,12 @@ TEST_CASE("LEFT JOIN on NULL, empty and numeric look-alike keys", "[query_paths]
     REQUIRE(ex.execute_sql("CREATE TABLE b (id INT PRIMARY KEY, k VARCHAR(10), tag VARCHAR(10))").is_ok());
     REQUIRE(ex.execute_sql("INSERT INTO a VALUES (1,'7'), (2,'7.0'), (3,NULL), (4,''), (5,'x'), (6,'07'), (7,'8')").is_ok());
     REQUIRE(ex.execute_sql("INSERT INTO b VALUES (1,'007','p'), (2,NULL,'q'), (3,'','r'), (4,'x','s'), (5,'7.00','t'), (6,'9','u')").is_ok());
-    // 7, 7.0, 07 meet 007 and 7.00 (numbers); NULL meets nothing, not even a NULL (and the engine stores '' as NULL);
+    // 7, 7.0, 07 meet 007 and 7.00 (numbers); NULL meets nothing, not even a NULL; '' meets '' (an empty string is a value);
     // 'x' meets 'x'; 8 meets nothing
     auto rows = table_cells(ok_text(ex, "SELECT a.id, b.tag FROM a LEFT JOIN b ON a.k = b.k"));
     std::multiset<std::string> got;
     for (auto& r : rows) got.insert(r[0] + ":" + r[1]);
-    REQUIRE(got == std::multiset<std::string>{"1:p", "1:t", "2:p", "2:t", "3:NULL", "4:NULL", "5:s", "6:p", "6:t", "7:NULL"});
+    REQUIRE(got == std::multiset<std::string>{"1:p", "1:t", "2:p", "2:t", "3:NULL", "4:r", "5:s", "6:p", "6:t", "7:NULL"});
     // left rows keep their order, a left row's matches keep the right table's order
     REQUIRE(rows.at(0)[0] == "1");
     REQUIRE(rows.at(0)[1] == "p");
@@ -456,7 +457,7 @@ TEST_CASE("LEFT JOIN on NULL, empty and numeric look-alike keys", "[query_paths]
     // EXPLAIN says what runs: a LEFT JOIN is a hash join, never an index nested loop
     REQUIRE(ok_text(ex, "EXPLAIN SELECT a.id, b.tag FROM a LEFT JOIN b ON a.k = b.k").find("Index NL") == std::string::npos);
     // an inner join with the same condition drops the unmatched rows
-    REQUIRE(table_cells(ok_text(ex, "SELECT a.id FROM a JOIN b ON a.k = b.k AND b.tag <> 'zzz'")).size() == 7);
+    REQUIRE(table_cells(ok_text(ex, "SELECT a.id FROM a JOIN b ON a.k = b.k AND b.tag <> 'zzz'")).size() == 8);
 }
 
 TEST_CASE("IndexNL probes cached per key give the rows an uncached join would", "[query_paths][join]") {

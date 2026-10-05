@@ -24,6 +24,8 @@ std::optional<double> parse_f64(const std::string& s) {
 }
 
 int cmp_key(const std::string& a, const std::string& b) {
+    const bool a_null = a == "NULL", b_null = b == "NULL"; // NULL sorts before every value
+    if (a_null || b_null) return a_null == b_null ? 0 : (a_null ? -1 : 1);
     auto pa = parse_f64(a), pb = parse_f64(b);
     if (pa && pb) {
         if (*pa < *pb) return -1;
@@ -238,7 +240,7 @@ std::vector<Row> Executor::compute_window_functions(std::vector<Row> rows, const
                             count = 0;
                             for (std::size_t i = start; i <= end; i++) {
                                 const std::string* v = get_col(rows[sorted[i]], col_name);
-                                if (v && *v != "NULL" && !v->empty()) count++;
+                                if (v && *v != "NULL") count++;
                             }
                         }
                         values[sorted[pos]] = std::to_string(count);
@@ -252,7 +254,7 @@ std::vector<Row> Executor::compute_window_functions(std::vector<Row> rows, const
                         std::optional<std::string> best;
                         for (std::size_t i = start; i <= end; i++) {
                             const std::string* v = get_col(rows[sorted[i]], col_name);
-                            if (!v || *v == "NULL" || v->empty()) continue;
+                            if (!v || *v == "NULL") continue;
                             if (!best || cmp_key(*v, *best) < 0) best = *v;
                         }
                         values[sorted[pos]] = best.value_or("NULL");
@@ -266,7 +268,7 @@ std::vector<Row> Executor::compute_window_functions(std::vector<Row> rows, const
                         std::optional<std::string> best;
                         for (std::size_t i = start; i <= end; i++) {
                             const std::string* v = get_col(rows[sorted[i]], col_name);
-                            if (!v || *v == "NULL" || v->empty()) continue;
+                            if (!v || *v == "NULL") continue;
                             if (!best || cmp_key(*v, *best) > 0) best = *v;
                         }
                         values[sorted[pos]] = best.value_or("NULL");

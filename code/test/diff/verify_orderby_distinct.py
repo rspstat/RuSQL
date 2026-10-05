@@ -35,6 +35,8 @@ def cells(out):
 
 
 def compare(a, b):
+    if a == "NULL" or b == "NULL":  # NULL sorts before every value (builds before 2026-10-05 compared it as the text "NULL")
+        return (a != "NULL") - (b != "NULL")
     try:
         x, y = float(a), float(b)
         return (x > y) - (x < y)

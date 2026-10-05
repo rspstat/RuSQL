@@ -429,6 +429,9 @@ private:
     // thinking about lock-ordering themselves. A name with no entry in s.table_data_locks
     // (ephemeral CTE/subquery-alias table) is skipped, same as acquire_table_locks.
     DataLockGuard acquire_table_data_locks(SharedDatabase& s, std::vector<std::string> tables, bool exclusive);
+    // Some tables EXCLUSIVE and some SHARED in one acquisition, in the same sorted order as the single-mode version (a table named
+    // in both gets EXCLUSIVE). An UPDATE that must read the parent rows of a foreign key while it rewrites the child table.
+    DataLockGuard acquire_table_data_locks_mixed(SharedDatabase& s, const std::vector<std::string>& exclusive, const std::vector<std::string>& shared_tables);
 
     // Real-blocking-wait stage: thin shared helper for the "probe under table_data_locks
     // (timeout=0), on conflict release table_data_locks, block on just the ONE contested
@@ -567,8 +570,32 @@ private:
     // UPDATE (executor_update_unique.cpp): the PRIMARY KEY / UNIQUE violation, if any, that giving `olds[i]` the
     // contents of `news[i]` would create -- among the new rows themselves or against a live row not being
     // rewritten. nullopt = fine. (UPDATE used to check nothing, so it could create duplicate keys.)
+    // executor_types.cpp: checks `value` against the type of `col` (MySQL strict mode: "Incorrect integer value", "Data too long",
+    // "Incorrect date value", "Out of range value", ...) and rewrites it into the column's own text form ('7.9' in an INT -> '8',
+    // 5 in a DECIMAL(5,2) -> '5.00', '2024-1-5' in a DATE -> '2024-01-05'). NULL passes. `row` is the 1-based row of the statement
+    // for the message. Returns the error message, or nullopt.
+    static std::optional<std::string> coerce_column_value(const ColumnDef& col, std::string& value, std::size_t row);
     static std::optional<std::string> update_unique_violation(SharedDatabase& s, const std::string& table,
                                                               const std::vector<const Row*>& olds, const std::vector<Row>& news);
+    // executor_row_check.cpp: what a rewritten row must satisfy besides PRIMARY KEY / UNIQUE. `changed_cols` are the columns the
+    // statement assigned: NOT NULL (also PRIMARY KEY / AUTO_INCREMENT) and the child side of a FOREIGN KEY (not for a value equal
+    // to the one in `old_row`, when that is given). nullopt = fine.
+    static std::optional<std::string> rewritten_row_violation(SharedDatabase& s, const TableSchema& schema, const Row& row,
+                                                              const std::vector<std::string>& changed_cols, const Row* old_row = nullptr);
+    // Deleting `row` of `table` is refused by a child row under ON DELETE RESTRICT (the message; same text as DELETE's), else nullopt.
+    static std::optional<std::string> delete_restrict_violation(SharedDatabase& s, const std::string& table, const Row& row);
+    // UPDATE of a column that a child row references, under ON UPDATE RESTRICT: the message when `old_row`'s value is referenced and
+    // `new_row` changes it, else nullopt. It runs BEFORE the row is rewritten (the check after the rewrite returned an error with the
+    // row already changed). `fk_restrict_children` are the tables it reads.
+    static std::optional<std::string> update_restrict_violation(SharedDatabase& s, const std::string& table, const Row& old_row, const Row& new_row,
+                                                                const std::vector<std::string>& changed_cols);
+    static std::vector<std::string> fk_restrict_children(const SharedDatabase& s, const std::string& table, const std::vector<std::string>& changed_cols);
+    // The tables with a foreign key into `table`.
+    static std::vector<std::string> fk_child_tables(const SharedDatabase& s, const std::string& table);
+    // A foreign-key value that names no live parent row (the message), nullopt when the parent exists or the value is NULL.
+    static std::optional<std::string> fk_child_violation(SharedDatabase& s, const ColumnDef& col, const std::string& val);
+    // The tables whose rows those foreign keys read (partitioned parents: their children); `cols` empty = every foreign key.
+    static std::vector<std::string> fk_parent_tables(const SharedDatabase& s, const TableSchema& schema, const std::vector<std::string>& cols);
     void persist_index_meta(const SharedDatabase& s) const;
     StringResult exec_use(SharedDatabase& s, const std::string& database);
     StringResult exec_show_tables(const SharedDatabase& s) const;
@@ -588,6 +615,12 @@ private:
     static void sync_udf_context(const std::unordered_map<std::string, UserFunctionDef>& user_functions, const std::string& current_db,
                                   const std::string& current_user);
     static bool matches_condexpr(const Row& row, const std::optional<CondExpr>& condition);
+    // Three-valued logic (SQL's TRUE / FALSE / UNKNOWN): a comparison with a NULL operand is UNKNOWN, NOT UNKNOWN is UNKNOWN, AND / OR
+    // as in Kleene logic. WHERE / HAVING / ON keep a row only when the condition is TRUE (eval_condexpr / eval_single); a CHECK
+    // constraint rejects a row only when its condition is FALSE.
+    enum class Tri : unsigned char { False, True, Unknown };
+    static Tri eval_cond3(const Row& row, const CondExpr& expr);
+    static Tri eval_single3(const Row& row, const Condition& cond);
     static bool eval_condexpr(const Row& row, const CondExpr& expr);
     static bool eval_single(const Row& row, const Condition& cond);
     static bool eval_check_expr(const std::string& expr, const Row& row);
@@ -640,9 +673,17 @@ private:
     StringResult exec_insert(SharedDatabase& s, std::string table, std::optional<std::vector<std::string>> col_list,
                               std::vector<std::vector<std::string>> all_values, InsertConflict on_conflict,
                               std::optional<std::vector<SelectColumn>> returning);
+    // validate_only: run every check the INSERT makes (NOT NULL, ENUM, FOREIGN KEY, CHECK, duplicates within the statement; a
+    // conflict with an existing row is tolerated under REPLACE, and that row is added to `replace_victims`) and write nothing --
+    // REPLACE's pass before it deletes anything.
     StringResult exec_insert_inner(SharedDatabase& s, const std::string& table, const std::optional<std::vector<std::string>>& col_list,
                                     std::vector<std::vector<std::string>> all_values, const InsertConflict& on_conflict,
-                                    const std::optional<std::vector<SelectColumn>>& returning);
+                                    const std::optional<std::vector<SelectColumn>>& returning, bool validate_only = false,
+                                    std::vector<Row>* replace_victims = nullptr);
+    // REPLACE INTO: the rows of the statement that no later row of it replaces (see executor_dml.cpp).
+    static std::vector<std::vector<std::string>> replace_supersede(SharedDatabase& s, const std::string& table,
+                                                                   const std::optional<std::vector<std::string>>& col_list,
+                                                                   std::vector<std::vector<std::string>> all_values);
     // REPLACE INTO support: before the real INSERT runs, deletes any existing row(s) that
     // would conflict on a PK/UNIQUE column of the incoming row(s) -- via a real DELETE
     // statement through execute_with_s (full locking/index/trigger correctness reused,
@@ -653,10 +694,16 @@ private:
                                            const std::vector<std::vector<std::string>>& all_values);
 
     // ── Phase 8b: UPDATE ─────────────────────────────────────────────────
+    // The rows to update, identified by their primary key (the \x00-joined values of all of its columns), each with the values to
+    // store: multi-table UPDATE and MERGE compute them from a join and let the one-table UPDATE (MVCC, undo log, every constraint,
+    // indexes, triggers) write them. When given, `condition` is not used and `assignments` only names the columns.
+    using PerRowValues = std::unordered_map<std::string, std::unordered_map<std::string, std::string>>;
     StringResult exec_update(SharedDatabase& s, std::string table, std::vector<std::pair<std::string, ArithExpr>> assignments,
-                              std::optional<CondExpr> condition, std::optional<std::vector<SelectColumn>> returning);
+                              std::optional<CondExpr> condition, std::optional<std::vector<SelectColumn>> returning,
+                              const PerRowValues* per_row = nullptr);
     StringResult exec_update_inner(SharedDatabase& s, const std::string& table, const std::vector<std::pair<std::string, ArithExpr>>& assignments,
-                                    const std::optional<CondExpr>& condition, const std::optional<std::vector<SelectColumn>>& returning);
+                                    const std::optional<CondExpr>& condition, const std::optional<std::vector<SelectColumn>>& returning,
+                                    const PerRowValues* per_row = nullptr);
 
     // ── Phase 8b: DELETE ─────────────────────────────────────────────────
     static bool condition_has_subquery(const std::optional<CondExpr>& condition);
@@ -752,8 +799,9 @@ private:
     // leaf falls through to the plain (static) eval_single/eval_condexpr.
     bool matches_condition_with_subquery(SharedDatabase& s, const Row& row, const std::optional<CondExpr>& condition);
     bool eval_condexpr_with_subquery(SharedDatabase& s, const Row& row, const CondExpr& expr);
+    Tri eval_cond3_with_subquery(SharedDatabase& s, const Row& row, const CondExpr& expr);
     static bool has_outer_ref(const CondExpr& expr);
-    bool eval_single_with_subquery(SharedDatabase& s, const Row& row, const Condition& cond);
+    Tri eval_single_with_subquery(SharedDatabase& s, const Row& row, const Condition& cond);
     std::vector<std::string> extract_values_from_output(const std::string& output) const;
 
     // ── Phase 8c: CTE (WITH ... [RECURSIVE]) ────────────────────────────

@@ -6,6 +6,7 @@
 namespace engine {
 
 const std::string NULL_DEFAULT = "__NULL_DEFAULT__";
+const std::string INSERT_DEFAULT = "__INSERT_DEFAULT__";
 
 namespace {
 std::string to_upper(const std::string& s) {

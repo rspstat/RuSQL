@@ -561,13 +561,13 @@ std::string Executor::apply_scalar_func(const std::string& func_name, const std:
     if (func_name == "COALESCE") {
         for (auto& a : args) {
             std::string v = resolve(a);
-            if (v != EXECUTOR_NULL_VALUE && !v.empty()) return v;
+            if (v != EXECUTOR_NULL_VALUE) return v;
         }
         return EXECUTOR_NULL_VALUE;
     }
     if (func_name == "IFNULL") {
         std::string v = arg_at(0);
-        if (v == EXECUTOR_NULL_VALUE || v.empty()) return arg_at(1);
+        if (v == EXECUTOR_NULL_VALUE) return arg_at(1);
         return v;
     }
     if (func_name == "REPLACE") {
@@ -982,7 +982,7 @@ std::string Executor::apply_scalar_func(const std::string& func_name, const std:
     }
     if (func_name == "ISNULL") {
         std::string v = arg_at(0);
-        return (v == EXECUTOR_NULL_VALUE || v.empty()) ? "1" : "0";
+        return v == EXECUTOR_NULL_VALUE ? "1" : "0";
     }
     if (func_name == "BIT_LENGTH") return std::to_string(arg_at(0).size() * 8);
     if (func_name == "MD5") {

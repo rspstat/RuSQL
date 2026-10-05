@@ -13,6 +13,7 @@
 #include <unordered_set>
 
 #include <algorithm>
+#include <charconv>
 #include <ctime>
 #include <iomanip>
 #include <sstream>
@@ -254,7 +255,7 @@ StringResult Executor::exec_insert_select(SharedDatabase& s, std::string table, 
             vals.reserve(col_names.size());
             for (auto& c : col_names) {
                 auto it = row.find(c);
-                vals.push_back(it != row.end() ? it->second : std::string());
+                vals.push_back(it != row.end() ? it->second : INSERT_DEFAULT);
             }
             all_values.push_back(std::move(vals));
         }
@@ -315,7 +316,7 @@ StringResult Executor::replace_delete_conflicts(SharedDatabase& s, const std::st
             bool solo_pk = col.primary_key && !is_composite_pk_table;
             if (!solo_pk && !col.unique) continue;
             auto val = value_for(values, col.name);
-            if (!val || val->empty() || *val == "NULL") continue;
+            if (!val || *val == INSERT_DEFAULT || *val == "NULL") continue;
             auto del_result = run_delete(eq_leaf(col.name, *val));
             if (del_result.is_err()) return del_result;
         }
@@ -326,7 +327,7 @@ StringResult Executor::replace_delete_conflicts(SharedDatabase& s, const std::st
             bool all_present = true;
             for (auto& pk_col : schema->primary_key_columns) {
                 auto val = value_for(values, pk_col);
-                if (!val || val->empty() || *val == "NULL") { all_present = false; break; }
+                if (!val || *val == INSERT_DEFAULT || *val == "NULL") { all_present = false; break; }
                 CondExpr leaf = eq_leaf(pk_col, *val);
                 cond = cond ? CondExpr(CondExpr::And{std::make_unique<CondExpr>(std::move(*cond)), std::make_unique<CondExpr>(std::move(leaf))})
                             : std::move(leaf);
@@ -340,6 +341,97 @@ StringResult Executor::replace_delete_conflicts(SharedDatabase& s, const std::st
     return StringResult::Ok("");
 }
 
+namespace {
+// ON DUPLICATE KEY UPDATE: VALUES(col) is the value the statement was going to insert into `col`.
+ArithExpr bind_insert_values(const ArithExpr& expr, const std::vector<std::string>& col_names, const std::vector<std::string>& values) {
+    return std::visit(
+        [&](const auto& alt) -> ArithExpr {
+            using T = std::decay_t<decltype(alt)>;
+            auto bind = [&](const std::unique_ptr<ArithExpr>& p) { return std::make_unique<ArithExpr>(bind_insert_values(*p, col_names, values)); };
+            if constexpr (std::is_same_v<T, ArithExpr::Func>) {
+                if (alt.name == "VALUES" && alt.args.size() == 1) {
+                    if (auto* c = std::get_if<ArithExpr::Col>(&alt.args[0].data)) {
+                        std::string bare = c->name.substr(c->name.rfind('.') == std::string::npos ? 0 : c->name.rfind('.') + 1);
+                        for (std::size_t i = 0; i < col_names.size() && i < values.size(); i++) {
+                            if (col_names[i] == bare) return ArithExpr(ArithExpr::Str{values[i]});
+                        }
+                    }
+                }
+                std::vector<ArithExpr> args;
+                for (auto& a : alt.args) args.push_back(bind_insert_values(a, col_names, values));
+                return ArithExpr(ArithExpr::Func{alt.name, std::move(args)});
+            } else if constexpr (std::is_same_v<T, ArithExpr::Add>) {
+                return ArithExpr(ArithExpr::Add{bind(alt.lhs), bind(alt.rhs)});
+            } else if constexpr (std::is_same_v<T, ArithExpr::Sub>) {
+                return ArithExpr(ArithExpr::Sub{bind(alt.lhs), bind(alt.rhs)});
+            } else if constexpr (std::is_same_v<T, ArithExpr::Mul>) {
+                return ArithExpr(ArithExpr::Mul{bind(alt.lhs), bind(alt.rhs)});
+            } else if constexpr (std::is_same_v<T, ArithExpr::Div>) {
+                return ArithExpr(ArithExpr::Div{bind(alt.lhs), bind(alt.rhs)});
+            } else if constexpr (std::is_same_v<T, ArithExpr::Cmp>) {
+                return ArithExpr(ArithExpr::Cmp{bind(alt.lhs), alt.op, bind(alt.rhs)});
+            } else {
+                return ArithExpr(alt);
+            }
+        },
+        expr.data);
+}
+} // namespace
+
+// REPLACE INTO ... VALUES (1,'a'), (1,'b') leaves 'b': a row that a LATER row of the same statement replaces (same PRIMARY KEY, or the
+// same value in a UNIQUE column, as far as the statement states them) is dropped before anything is checked or deleted.
+std::vector<std::vector<std::string>> Executor::replace_supersede(SharedDatabase& s, const std::string& table,
+                                                                  const std::optional<std::vector<std::string>>& col_list,
+                                                                  std::vector<std::vector<std::string>> all_values) {
+    const TableSchema* schema = s.catalog.get_table(table);
+    if (!schema || all_values.size() < 2) return all_values;
+    auto value_for = [&](const std::vector<std::string>& values, const std::string& col_name) -> std::optional<std::string> {
+        std::size_t idx;
+        if (col_list) {
+            auto pos = std::find(col_list->begin(), col_list->end(), col_name);
+            if (pos == col_list->end()) return std::nullopt;
+            idx = static_cast<std::size_t>(pos - col_list->begin());
+        } else {
+            auto pos = std::find_if(schema->columns.begin(), schema->columns.end(), [&](const ColumnDef& c) { return c.name == col_name; });
+            if (pos == schema->columns.end()) return std::nullopt;
+            idx = static_cast<std::size_t>(pos - schema->columns.begin());
+        }
+        if (idx >= values.size() || values[idx] == INSERT_DEFAULT || values[idx] == EXECUTOR_NULL_VALUE) return std::nullopt;
+        return values[idx];
+    };
+    const bool composite = schema->primary_key_columns.size() > 1;
+    auto keys_of = [&](const std::vector<std::string>& values) {
+        std::vector<std::string> keys;
+        for (auto& col : schema->columns) {
+            if ((col.primary_key && !composite) || col.unique) {
+                if (auto v = value_for(values, col.name)) keys.push_back(col.name + '\x1f' + *v);
+            }
+        }
+        if (composite) {
+            std::string tuple = "\x1epk";
+            bool all = true;
+            for (auto& pk : schema->primary_key_columns) {
+                auto v = value_for(values, pk);
+                if (!v) { all = false; break; }
+                tuple += '\x1f' + *v;
+            }
+            if (all) keys.push_back(tuple);
+        }
+        return keys;
+    };
+    std::unordered_set<std::string> later;
+    std::vector<std::vector<std::string>> kept;
+    for (std::size_t i = all_values.size(); i-- > 0;) {
+        auto keys = keys_of(all_values[i]);
+        bool superseded = std::any_of(keys.begin(), keys.end(), [&](const std::string& k) { return later.count(k) > 0; });
+        if (superseded) continue;
+        for (auto& k : keys) later.insert(k);
+        kept.push_back(std::move(all_values[i]));
+    }
+    std::reverse(kept.begin(), kept.end());
+    return kept;
+}
+
 StringResult Executor::exec_insert(SharedDatabase& s, std::string table, std::optional<std::vector<std::string>> col_list,
                                     std::vector<std::vector<std::string>> all_values, InsertConflict on_conflict,
                                     std::optional<std::vector<SelectColumn>> returning) {
@@ -350,12 +442,31 @@ StringResult Executor::exec_insert(SharedDatabase& s, std::string table, std::op
         return StringResult::Err("View '" + strip_db_prefix(table) + "' is not updatable (has JOINs, DISTINCT, GROUP BY, or subquery)");
     }
 
-    if (std::holds_alternative<InsertConflict::Replace>(on_conflict.data)) {
-        if (auto del_result = replace_delete_conflicts(s, table, col_list, all_values); del_result.is_err()) return del_result;
-        on_conflict = InsertConflict(InsertConflict::Abort{}); // conflicts are gone now; a real remaining duplicate should still error
+    const bool replacing = std::holds_alternative<InsertConflict::Replace>(on_conflict.data);
+    std::vector<std::vector<std::string>> replace_rows; // every row of a REPLACE: each one deletes what it conflicts with
+    if (replacing) {
+        // A REPLACE that fails must leave the table as it was (it used to delete the old rows first and then fail on the new one:
+        // `REPLACE INTO t VALUES (1, NULL)` into a NOT NULL column lost row 1). So every check the real INSERT makes runs first,
+        // without writing anything, and only then do the old rows go. A row that a later row of the statement replaces is checked
+        // and deletes its conflicts like any other, but is not inserted.
+        replace_rows = all_values;
+        all_values = replace_supersede(s, table, col_list, std::move(all_values));
+        std::vector<Row> victims; // the rows the replacement deletes
+        if (auto checked = exec_insert_inner(s, table, col_list, replace_rows, on_conflict, std::nullopt, /*validate_only=*/true, &victims); checked.is_err()) return checked;
+        // ... and DELETE refuses a row that a child row restricts: that too is found before anything is deleted
+        if (!victims.empty()) {
+            auto child_lock = acquire_table_data_locks(s, fk_child_tables(s, table), /*exclusive=*/false);
+            for (auto& v : victims) {
+                if (auto violation = delete_restrict_violation(s, table, v)) return StringResult::Err(*violation);
+            }
+        }
     }
 
     if (auto tr = fire_triggers(s, table, "BEFORE", "INSERT"); tr.is_err()) return tr;
+    if (replacing) {
+        if (auto del_result = replace_delete_conflicts(s, table, col_list, replace_rows); del_result.is_err()) return del_result;
+        on_conflict = InsertConflict(InsertConflict::Abort{}); // conflicts are gone now; a real remaining duplicate should still error
+    }
     auto result = exec_insert_inner(s, table, col_list, std::move(all_values), on_conflict, returning);
 
     if (result.is_ok()) {
@@ -366,7 +477,8 @@ StringResult Executor::exec_insert(SharedDatabase& s, std::string table, std::op
 
 StringResult Executor::exec_insert_inner(SharedDatabase& s, const std::string& table, const std::optional<std::vector<std::string>>& col_list,
                                           std::vector<std::vector<std::string>> all_values, const InsertConflict& on_conflict,
-                                          const std::optional<std::vector<SelectColumn>>& returning) {
+                                          const std::optional<std::vector<SelectColumn>>& returning, bool validate_only,
+                                          std::vector<Row>* replace_victims) {
     const TableSchema* schema_ptr = s.catalog.get_table(table);
     if (!schema_ptr) return StringResult::Err("Table '" + table + "' not found");
     TableSchema schema = *schema_ptr;
@@ -415,7 +527,11 @@ StringResult Executor::exec_insert_inner(SharedDatabase& s, const std::string& t
     std::size_t batch_rows_recorded = 0;
     std::vector<Row> prepared;
     prepared.reserve(all_values.size());
-    std::vector<std::pair<std::string, std::vector<std::pair<std::string, ArithExpr>>>> pending_updates;
+    // ON DUPLICATE KEY UPDATE: the row a conflicting row hits (as a condition on its primary key) and the assignments to apply to it,
+    // with VALUES(col) already replaced by the value this statement was going to insert. They run as ordinary UPDATE statements
+    // after the insert (own MVCC version, undo log, constraints, indexes, triggers) -- the old code rewrote the row in place.
+    std::vector<std::pair<CondExpr, std::vector<std::pair<std::string, ArithExpr>>>> pending_updates;
+    std::size_t row_no = 0; // 1-based row of the statement, for type error messages
 
     // Gap lock conflict check needs the single-column PK's name (V1 scope, matching the
     // FOR UPDATE/FOR SHARE/UPDATE/DELETE acquisition sites). Note: schema.primary_key_columns
@@ -464,8 +580,6 @@ StringResult Executor::exec_insert_inner(SharedDatabase& s, const std::string& t
             insert_read_tables.push_back(col.foreign_key->ref_table);
         }
     }
-    bool had_updates = false;
-    std::vector<Row> updated_rows;
     {
         auto insert_read_lock = acquire_table_data_locks(s, insert_read_tables, /*exclusive=*/false);
 
@@ -486,14 +600,14 @@ StringResult Executor::exec_insert_inner(SharedDatabase& s, const std::string& t
             for (std::size_t i = 0; i < col_list->size(); i++) col_map[(*col_list)[i]] = values[i];
             for (auto& c : schema.columns) {
                 auto it = col_map.find(c.name);
-                positional.push_back(it != col_map.end() ? it->second : std::string());
+                positional.push_back(it != col_map.end() ? it->second : INSERT_DEFAULT);
             }
         }
 
         std::vector<std::string> final_values = std::move(positional);
 
         for (std::size_t i = 0; i < schema.columns.size(); i++) {
-            if (!final_values[i].empty()) continue;
+            if (final_values[i] != INSERT_DEFAULT) continue;
             auto& col = schema.columns[i];
             if (col.default_value) {
                 if (*col.default_value == NULL_DEFAULT) {
@@ -508,25 +622,70 @@ StringResult Executor::exec_insert_inner(SharedDatabase& s, const std::string& t
             }
         }
 
+        // AUTO_INCREMENT: a left-out value, NULL or 0 takes the next number; an explicit number moves the counter up to it (it used to
+        // leave the counter alone, so the next generated number collided with a row that was inserted by number)
+        auto counter_of = [&](std::size_t i) -> std::int64_t& {
+            auto& counters = schema_mut_for_ai->auto_increment_counters;
+            auto it = counters.find(col_names[i]);
+            if (it == counters.end()) { // a table without a counter yet: continue after the largest number it holds
+                std::int64_t largest = 0;
+                if (auto tit = s.tables.find(table); tit != s.tables.end()) {
+                    for (auto& r : tit->second) {
+                        auto cit = r.find(col_names[i]);
+                        if (cit == r.end() || !is_visible(r)) continue;
+                        std::int64_t v = 0;
+                        auto res = std::from_chars(cit->second.data(), cit->second.data() + cit->second.size(), v);
+                        if (res.ec == std::errc() && res.ptr == cit->second.data() + cit->second.size()) largest = std::max(largest, v);
+                    }
+                }
+                it = counters.emplace(col_names[i], largest).first;
+            }
+            return it->second;
+        };
         for (std::size_t i = 0; i < constraints.size(); i++) {
-            if (constraints[i].auto_increment && final_values[i].empty()) {
-                auto& counter = schema_mut_for_ai->auto_increment_counters[col_names[i]];
+            if (constraints[i].auto_increment && (final_values[i] == INSERT_DEFAULT || final_values[i] == EXECUTOR_NULL_VALUE || final_values[i] == "0")) {
+                if (validate_only) { // the real insert numbers the row: here a number no other row of the statement has
+                    final_values[i] = std::to_string(-static_cast<long long>(row_no + 1));
+                    continue;
+                }
+                auto& counter = counter_of(i);
                 counter += 1;
                 final_values[i] = std::to_string(counter);
                 any_auto_increment_allocated = true;
             }
         }
 
+        for (auto& v : final_values) {
+            if (v == INSERT_DEFAULT) v = EXECUTOR_NULL_VALUE; // left out and no default: NULL
+        }
         for (std::size_t i = 0; i < constraints.size(); i++) {
-            if (constraints[i].not_null && (final_values[i].empty() || final_values[i] == EXECUTOR_NULL_VALUE)) {
+            if ((constraints[i].not_null || constraints[i].primary_key) && final_values[i] == EXECUTOR_NULL_VALUE) {
                 return StringResult::Err("Column '" + col_names[i] + "' cannot be NULL");
+            }
+        }
+
+        row_no++;
+        for (std::size_t i = 0; i < schema.columns.size(); i++) {
+            if (auto err = coerce_column_value(schema.columns[i], final_values[i], row_no)) return StringResult::Err(*err);
+        }
+        if (!validate_only) {
+            for (std::size_t i = 0; i < constraints.size(); i++) {
+                if (!constraints[i].auto_increment || final_values[i] == EXECUTOR_NULL_VALUE) continue;
+                std::int64_t v = 0;
+                auto res = std::from_chars(final_values[i].data(), final_values[i].data() + final_values[i].size(), v);
+                if (res.ec != std::errc()) continue;
+                auto& counter = counter_of(i);
+                if (v > counter) {
+                    counter = v;
+                    any_auto_increment_allocated = true; // the schema file keeps the counter
+                }
             }
         }
 
         for (std::size_t i = 0; i < schema.columns.size(); i++) {
             auto& col = schema.columns[i];
             const std::string& val = final_values[i];
-            if (val.empty() || val == EXECUTOR_NULL_VALUE) continue;
+            if (val == EXECUTOR_NULL_VALUE) continue;
             if (auto* en = std::get_if<DataType::Enum>(&col.data_type.data)) {
                 if (std::find(en->values.begin(), en->values.end(), val) == en->values.end()) {
                     std::vector<std::string> quoted;
@@ -552,6 +711,21 @@ StringResult Executor::exec_insert_inner(SharedDatabase& s, const std::string& t
                 }
             }
         }
+
+        // identifies `existing` by its primary key (all of a composite one) and queues the assignments for it
+        auto queue_update = [&](const Row& existing, const std::vector<std::pair<std::string, ArithExpr>>& assigns) {
+            std::optional<CondExpr> cond;
+            const std::vector<std::string> id_cols = schema.primary_key_columns.size() > 1 ? schema.primary_key_columns : std::vector<std::string>{key_col};
+            for (auto& c : id_cols) {
+                auto it = existing.find(c);
+                CondExpr leaf = CondExpr(CondExpr::Leaf{Condition{ArithExpr(ArithExpr::Col{c}), Operator::Eq,
+                                                                  ConditionValue(ConditionValue::Literal{it != existing.end() ? it->second : std::string()})}});
+                cond = cond ? CondExpr(CondExpr::And{std::make_unique<CondExpr>(std::move(*cond)), std::make_unique<CondExpr>(std::move(leaf))}) : std::move(leaf);
+            }
+            std::vector<std::pair<std::string, ArithExpr>> bound;
+            for (auto& [col, expr] : assigns) bound.emplace_back(col, bind_insert_values(expr, col_names, final_values));
+            pending_updates.emplace_back(std::move(*cond), std::move(bound));
+        };
 
         {
             const std::vector<std::string>& pk_cols = schema.primary_key_columns;
@@ -583,9 +757,12 @@ StringResult Executor::exec_insert_inner(SharedDatabase& s, const std::string& t
                             break;
                         }
                         if (auto* upd = std::get_if<InsertConflict::Update>(&on_conflict.data)) {
-                            auto pkit = existing.find(key_col);
-                            pending_updates.emplace_back(pkit != existing.end() ? pkit->second : std::string(), upd->assignments);
+                            queue_update(existing, upd->assignments);
                             skip_row = true;
+                            break;
+                        }
+                        if (std::holds_alternative<InsertConflict::Replace>(on_conflict.data)) { // the old row goes before the real insert
+                            if (replace_victims) replace_victims->push_back(existing);
                             break;
                         }
                     }
@@ -593,6 +770,7 @@ StringResult Executor::exec_insert_inner(SharedDatabase& s, const std::string& t
                     for (std::size_t i = 0; i < constraints.size() && !skip_row; i++) {
                         if (!constraints[i].primary_key && !constraints[i].unique) continue;
                         const std::string& val = final_values[i];
+                        if (!constraints[i].primary_key && val == EXECUTOR_NULL_VALUE) continue;
                         std::optional<Row> existing;
                         if (constraints[i].primary_key) {
                             if (auto idx_it = s.indexes.find(table); idx_it != s.indexes.end()) {
@@ -629,14 +807,17 @@ StringResult Executor::exec_insert_inner(SharedDatabase& s, const std::string& t
                             }
                         }
                         if (!existing) continue;
+                        if (std::holds_alternative<InsertConflict::Replace>(on_conflict.data)) { // the old row goes before the real insert
+                            if (replace_victims) replace_victims->push_back(*existing);
+                            continue;
+                        }
                         if (std::holds_alternative<InsertConflict::Abort>(on_conflict.data)) {
                             return StringResult::Err("Duplicate value '" + val + "' for column '" + col_names[i] + "'");
                         }
                         if (std::holds_alternative<InsertConflict::Ignore>(on_conflict.data)) {
                             skip_row = true;
                         } else if (auto* upd = std::get_if<InsertConflict::Update>(&on_conflict.data)) {
-                            auto pkit = existing->find(key_col);
-                            pending_updates.emplace_back(pkit != existing->end() ? pkit->second : std::string(), upd->assignments);
+                            queue_update(*existing, upd->assignments);
                             skip_row = true;
                         }
                     }
@@ -660,7 +841,7 @@ StringResult Executor::exec_insert_inner(SharedDatabase& s, const std::string& t
                     encoded += ':';
                     encoded += v;
                 }
-                if (!seen_composite_pk.insert(std::move(encoded)).second) {
+                if (!seen_composite_pk.insert(std::move(encoded)).second && !(validate_only && std::holds_alternative<InsertConflict::Replace>(on_conflict.data))) {
                     return StringResult::Err("Duplicate composite primary key (" + join_quoted(new_pk_tuple) + ")");
                 }
             } else {
@@ -670,15 +851,18 @@ StringResult Executor::exec_insert_inner(SharedDatabase& s, const std::string& t
                 bool found = false;
                 for (std::size_t i = 0; i < constraints.size(); i++) {
                     if (!constraints[i].primary_key && !constraints[i].unique) continue;
-                    auto it = seen_unique_first[i].find(final_values[i]);
+                    auto it = seen_unique_first[i].find(final_values[i]); // (a NULL is never recorded below)
                     if (it != seen_unique_first[i].end() && (!found || it->second < best_row)) {
                         found = true;
                         best_row = it->second;
                         best_col = i;
                     }
                 }
-                if (found) return StringResult::Err("Duplicate value '" + final_values[best_col] + "' for column '" + col_names[best_col] + "'");
+                if (found && !(validate_only && std::holds_alternative<InsertConflict::Replace>(on_conflict.data))) {
+                    return StringResult::Err("Duplicate value '" + final_values[best_col] + "' for column '" + col_names[best_col] + "'");
+                }
                 for (std::size_t i = 0; i < constraints.size(); i++) {
+                    if (!constraints[i].primary_key && final_values[i] == EXECUTOR_NULL_VALUE) continue;
                     if (constraints[i].primary_key || constraints[i].unique) seen_unique_first[i].emplace(final_values[i], batch_rows_recorded);
                 }
                 batch_rows_recorded++;
@@ -686,7 +870,7 @@ StringResult Executor::exec_insert_inner(SharedDatabase& s, const std::string& t
         }
 
         Row row;
-        for (std::size_t i = 0; i < col_names.size(); i++) row[col_names[i]] = final_values[i].empty() ? EXECUTOR_NULL_VALUE : final_values[i];
+        for (std::size_t i = 0; i < col_names.size(); i++) row[col_names[i]] = final_values[i];
         row["_xmin"] = std::to_string(tagging_txn_id(s));
         row["_xmax"] = "0";
 
@@ -695,29 +879,14 @@ StringResult Executor::exec_insert_inner(SharedDatabase& s, const std::string& t
             if (!col.foreign_key) continue;
             auto it = row.find(col.name);
             std::string val = it != row.end() ? it->second : std::string();
-            if (val.empty() || val == EXECUTOR_NULL_VALUE) continue;
-            // Table partitioning: a partitioned ref_table's own s.tables[...] entry is a
-            // permanently-empty phantom (exec_create/executor_partition.cpp) -- scan its
-            // children instead, so an FK into a partitioned parent validates correctly
-            // instead of always reporting "not found".
-            std::vector<std::pair<std::string, const std::vector<Row>*>> ref_row_sets;
-            if (auto part_info = partition_info_for(s, col.foreign_key->ref_table)) {
-                for (auto& def : part_info->partitions) {
-                    if (auto child_it = s.tables.find(def.child_table); child_it != s.tables.end())
-                        ref_row_sets.emplace_back(def.child_table, &child_it->second);
-                }
-            } else {
-                auto ref_it = s.tables.find(col.foreign_key->ref_table);
-                if (ref_it == s.tables.end()) return StringResult::Err("Referenced table '" + col.foreign_key->ref_table + "' not found");
-                ref_row_sets.emplace_back(col.foreign_key->ref_table, &ref_it->second);
-            }
-            auto always_ok = [](const Row&) { return true; }; // no visibility filter -- matches pre-existing behavior
-            bool exists = std::any_of(ref_row_sets.begin(), ref_row_sets.end(), [&](const auto& named_rows) {
-                return index_or_scan_exists(s, named_rows.first, *named_rows.second, col.foreign_key->ref_column, val, always_ok);
-            });
-            if (!exists) {
-                return StringResult::Err("Foreign key violation: '" + val + "' not found in '" + col.foreign_key->ref_table + "'.'" +
-                                          col.foreign_key->ref_column + "'");
+            if (val == EXECUTOR_NULL_VALUE) continue;
+            // (a partitioned parent is read through its children; a deleted parent row is no parent)
+            if (auto violation = fk_child_violation(s, col, val)) {
+                // ... unless it names the row itself or an earlier row of this very statement (a self-referencing table)
+                const std::string& ref_col = col.foreign_key->ref_column;
+                auto names_val = [&](const Row& r) { auto rit = r.find(ref_col); return rit != r.end() && rit->second == val; };
+                const bool in_statement = col.foreign_key->ref_table == table && (names_val(row) || std::any_of(prepared.begin(), prepared.end(), names_val));
+                if (!in_statement) return StringResult::Err(*violation);
             }
         }
 
@@ -730,6 +899,11 @@ StringResult Executor::exec_insert_inner(SharedDatabase& s, const std::string& t
             if (!eval_check_expr(check.expression, row)) {
                 return StringResult::Err("CHECK constraint '" + check.name.value_or(check.expression) + "' violated");
             }
+        }
+
+        if (validate_only) { // REPLACE's pass over the rows before it deletes anything: the checks above, no locks, no writes
+            prepared.push_back(std::move(row));
+            continue;
         }
 
         // Gap lock conflict check (InnoDB-style phantom-read prevention): applies
@@ -869,99 +1043,8 @@ StringResult Executor::exec_insert_inner(SharedDatabase& s, const std::string& t
 
         prepared.push_back(std::move(row));
     }
-    } // insert_read_lock (SHARED) released here -- ON DUPLICATE KEY UPDATE's in-place
-      // mutation below needs EXCLUSIVE (see the correctness-fix comment), not SHARED.
-
-    // Row-level-concurrency Stage 4 correctness fix (found via concurrent-reader
-    // monotonicity stress testing): ON DUPLICATE KEY UPDATE mutates an EXISTING row in
-    // place (`row[col] = ...` below) -- this is NOT safe under SHARED alone, since a
-    // plain autocommit SELECT's scan/copy takes no LockManager claim at all and could
-    // still hold table_data_locks SHARED at the same moment, racing this mutation at the
-    // raw std::map level (undefined behavior). EXCLUSIVE is required for any in-place
-    // mutation of an existing row, matching exec_update_inner/exec_delete_inner. The
-    // per-row LockManager claim below is still needed too, but only to keep a SECOND
-    // WRITER from interleaving field-by-field with this one within the same statement's
-    // EXCLUSIVE window (two different pk_val entries can't conflict, but it's cheap
-    // insurance and matches the UPDATE path's own pattern).
-    had_updates = !pending_updates.empty();
-    if (had_updates) {
-        auto insert_upsert_lock = acquire_table_data_locks(s, {table}, /*exclusive=*/true);
-        for (auto& [pk_val, assignments] : pending_updates) {
-            LockResult lr = s.lock_mgr.acquire(table, pk_val, claim_txn_id);
-            if (lr.kind == LockResult::Kind::Deadlock) {
-                return StringResult::Err("Deadlock detected: transaction " + std::to_string(claim_txn_id) + " waits for transaction " +
-                                          std::to_string(lr.holder) + " (INSERT ... ON DUPLICATE KEY UPDATE '" + table + "'). Transaction " +
-                                          std::to_string(claim_txn_id) + " aborted.");
-            }
-            if (lr.kind == LockResult::Kind::Conflict) {
-                // Real-blocking-wait stage: release insert_upsert_lock (EXCLUSIVE) before
-                // blocking -- see block_on_row's doc comment. The row lookup right below
-                // always runs fresh AFTER the (possibly blocked) claim is achieved, so no
-                // separate re-validation is needed here: whatever this pk_val's row looks
-                // like once we're granted is exactly what gets mutated.
-                insert_upsert_lock = DataLockGuard{};
-                // Real-blocking-wait stage, second correctness fix: also release
-                // table_locks[table] before blocking -- see release_table_locks_for_
-                // block's doc comment in executor.hpp.
-                release_table_locks_for_block();
-                lr = block_on_row(s.lock_mgr, table, pk_val, claim_txn_id, /*exclusive=*/true, lock_deadline);
-                reacquire_table_locks_after_block();
-                insert_upsert_lock = acquire_table_data_locks(s, {table}, /*exclusive=*/true);
-                if (lr.kind == LockResult::Kind::Deadlock) {
-                    return StringResult::Err("Deadlock detected: transaction " + std::to_string(claim_txn_id) + " waits for transaction " +
-                                              std::to_string(lr.holder) + " (INSERT ... ON DUPLICATE KEY UPDATE '" + table + "'). Transaction " +
-                                              std::to_string(claim_txn_id) + " aborted.");
-                }
-                if (lr.kind != LockResult::Kind::Granted) {
-                    return StringResult::Err("ERROR 1205 (HY000): Lock wait timeout exceeded; row '" + pk_val + "' in '" + table +
-                                              "' is held by transaction " + std::to_string(lr.holder) + ". Cannot UPDATE.");
-                }
-            }
-            if (auto it = s.tables.find(table); it != s.tables.end()) {
-                for (auto& row : it->second) {
-                    auto pkit = row.find(key_col);
-                    if (pkit != row.end() && pkit->second == pk_val && is_visible(row)) {
-                        Row old_row = row;
-                        for (auto& [col, aexpr] : assignments) row[col] = eval_arith(row, aexpr);
-                        updated_rows.push_back(row);
-                        // PLAN.md P2 fix: this in-place mutation previously left secondary/
-                        // hash/composite indexes entirely stale (only the PK B+Tree was
-                        // refreshed below) -- mirror the remove-old/insert-new pattern
-                        // already used by plain UPDATE (executor_update.cpp).
-                        index_remove_row(s, table, old_row, key_col);
-                        index_insert_row(s, table, row);
-                        for (auto& [k, ci] : s.composite_indexes) {
-                            if (ci.table != table) continue;
-                            if (ci.key_from_row(old_row) == ci.key_from_row(row)) {
-                                ci.insert_row(row);
-                            } else {
-                                ci.remove_row(old_row);
-                                ci.insert_row(row);
-                            }
-                        }
-                        break;
-                    }
-                }
-            }
-        }
-        // Row-level-concurrency Stage 4/5 correctness fix: see the identical
-        // invalidate_table comment on the push_back path above -- must run before this
-        // EXCLUSIVE lock releases, not later in execute_sql.
-        s.query_cache.invalidate_table(table);
-    }
-    if (had_updates) {
-        const std::string& pk_col_name = key_col;
-        // Incremental index maintenance: the PK value itself never changes here (rows
-        // were matched by exact PK equality above), so each updated row is a same-key
-        // upsert -- no need to clone and rebuild the whole table's PK index.
-        if (auto idx_it = s.indexes.find(table); idx_it != s.indexes.end()) {
-            for (auto& row : updated_rows) {
-                auto it = row.find(pk_col_name);
-                std::string k = it != row.end() ? it->second : std::string();
-                idx_it->second.insert(k, row_to_json(row));
-            }
-        }
-    }
+    } // insert_read_lock (SHARED) released here
+    if (validate_only) return StringResult::Ok("");
 
     // Counters were already allocated directly against the real Catalog entry above (as
     // each row needed one); only the disk persistence is still batched once per
@@ -1051,8 +1134,16 @@ StringResult Executor::exec_insert_inner(SharedDatabase& s, const std::string& t
         s.query_cache.invalidate_table(table);
     }
 
+    std::size_t updated = 0;
+    for (auto& [cond, assigns] : pending_updates) {
+        auto r = exec_update(s, table, assigns, cond, std::nullopt);
+        if (r.is_err()) return r;
+        updated += static_cast<std::size_t>(std::strtoull(r.value().c_str(), nullptr, 10));
+    }
+
     maybe_auto_checkpoint(s);
     if (returning) return StringResult::Ok(format_returning_rows(returning_rows, *returning));
+    if (!pending_updates.empty()) return StringResult::Ok(std::to_string(inserted) + " row(s) inserted, " + std::to_string(updated) + " row(s) updated.");
     return StringResult::Ok(std::to_string(inserted) + " row(s) inserted.");
 }
 

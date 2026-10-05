@@ -99,7 +99,7 @@ StringResult Executor::exec_analyze_table(SharedDatabase& s, const std::string& 
         for (auto& [key, val] : row) {
             if (!key.empty() && key.front() == '_') continue; // skip _xmin/_xmax
             std::string col = col_name_of(key);
-            if (val == EXECUTOR_NULL_VALUE || val.empty()) {
+            if (val == EXECUTOR_NULL_VALUE) {
                 null_cnt[col] += 1;
             } else {
                 distinct[col].insert(val);

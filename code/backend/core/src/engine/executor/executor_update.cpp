@@ -22,17 +22,18 @@ std::string trim_ws(const std::string& s) {
 } // namespace
 
 StringResult Executor::exec_update(SharedDatabase& s, std::string table, std::vector<std::pair<std::string, ArithExpr>> assignments,
-                                    std::optional<CondExpr> condition, std::optional<std::vector<SelectColumn>> returning) {
+                                    std::optional<CondExpr> condition, std::optional<std::vector<SelectColumn>> returning,
+                                    const PerRowValues* per_row) {
     if (s.views.count(table)) {
         if (auto resolved = resolve_updatable_view(s, table)) {
             auto merged_cond = merge_conditions(resolved->second, condition);
-            return exec_update(s, resolved->first, assignments, merged_cond, returning);
+            return exec_update(s, resolved->first, assignments, merged_cond, returning, per_row);
         }
         return StringResult::Err("View '" + strip_db_prefix(table) + "' is not updatable");
     }
 
     if (auto tr = fire_triggers(s, table, "BEFORE", "UPDATE"); tr.is_err()) return tr;
-    auto result = exec_update_inner(s, table, assignments, condition, returning);
+    auto result = exec_update_inner(s, table, assignments, condition, returning, per_row);
     if (result.is_ok()) {
         if (auto tr = fire_triggers(s, table, "AFTER", "UPDATE"); tr.is_err()) return tr;
     }
@@ -42,7 +43,7 @@ StringResult Executor::exec_update(SharedDatabase& s, std::string table, std::ve
 StringResult Executor::exec_update_inner(SharedDatabase& s, const std::string& table,
                                           const std::vector<std::pair<std::string, ArithExpr>>& assignments,
                                           const std::optional<CondExpr>& condition,
-                                          const std::optional<std::vector<SelectColumn>>& returning) {
+                                          const std::optional<std::vector<SelectColumn>>& returning, const PerRowValues* per_row) {
     const TableSchema* schema0 = s.catalog.get_table(table);
     if (!schema0) return StringResult::Err("Table '" + table + "' not found");
     std::string pk_col = "id";
@@ -52,6 +53,12 @@ StringResult Executor::exec_update_inner(SharedDatabase& s, const std::string& t
     }
     if (pk_cols.empty()) pk_cols.push_back("id");
     pk_col = pk_cols.front();
+    std::vector<std::string> assigned_cols; // the columns this statement sets
+    for (auto& [c, _] : assignments) assigned_cols.push_back(c);
+    // the parent rows of the foreign keys among them are read while the rows are rewritten
+    std::vector<std::string> fk_parents = fk_parent_tables(s, *schema0, assigned_cols);
+    // ... and the child rows that reference a column it changes (ON UPDATE RESTRICT)
+    for (auto& t : fk_restrict_children(s, table, assigned_cols)) fk_parents.push_back(t);
 
     // Row-level-concurrency Stage 4: reconstruct the equivalent Statement::Update to
     // reuse table_lock_set_for's exact table-closure computation (target + FK parent/
@@ -107,6 +114,9 @@ StringResult Executor::exec_update_inner(SharedDatabase& s, const std::string& t
         }
         return key;
     };
+
+    // which rows this statement updates: those the WHERE matches, or the ones the caller listed by key
+    auto selected = [&](const Row& r) { return per_row ? per_row->count(match_key(r)) > 0 : matches_condexpr(r, condition); };
 
     auto tit0 = s.tables.find(table);
     if (tit0 == s.tables.end()) return StringResult::Err("Table '" + table + "' not found");
@@ -206,7 +216,7 @@ StringResult Executor::exec_update_inner(SharedDatabase& s, const std::string& t
                                 auto kit = rows0[pos].find(pk_col);
                                 if (kit != rows0[pos].end() && kit->second == *pk_eq) {
                                     via_cache = true; // the (single) visible version of this pk
-                                    if (matches_condexpr(rows0[pos], condition)) {
+                                    if (selected(rows0[pos])) {
                                         cand_pos.push_back(pos);
                                         cand_key.push_back(match_key(rows0[pos]));
                                     }
@@ -237,7 +247,7 @@ StringResult Executor::exec_update_inner(SharedDatabase& s, const std::string& t
                     for (std::size_t i = 0; i < rows0.size(); i++) {
                         const Row& r = rows0[i];
                         if (!is_visible_for_read(r, write_ctx)) continue;
-                        if (matches_condexpr(r, condition)) {
+                        if (selected(r)) {
                             cand_pos.push_back(i);
                             cand_key.push_back(match_key(r));
                         }
@@ -290,7 +300,7 @@ StringResult Executor::exec_update_inner(SharedDatabase& s, const std::string& t
         bool stale_positions = false;
         std::string conflict_key;
         {
-            auto table_lock = acquire_table_data_locks(s, {table}, /*exclusive=*/true);
+            auto table_lock = acquire_table_data_locks_mixed(s, {table}, fk_parents);
             auto& rows = tit0->second;
 
             // The snapshot taken at the top of this attempt is stale by now: this thread may have waited for
@@ -360,14 +370,19 @@ StringResult Executor::exec_update_inner(SharedDatabase& s, const std::string& t
                     // validation check.
                     Row new_row = row;
                     std::vector<std::pair<std::string, std::string>> new_vals;
-                    for (auto& [col, expr] : assignments) new_vals.emplace_back(col, eval_arith(row, expr));
+                    if (per_row) {
+                        for (auto& [col, v] : per_row->at(match_key(row))) new_vals.emplace_back(col, v);
+                    } else {
+                        for (auto& [col, expr] : assignments) new_vals.emplace_back(col, eval_arith(row, expr));
+                    }
 
                     if (auto* schema = s.catalog.get_table(table)) {
                         for (auto& [col_name, val] : new_vals) {
-                            if (val.empty() || val == EXECUTOR_NULL_VALUE) continue;
+                            if (val == EXECUTOR_NULL_VALUE) continue;
                             auto cit = std::find_if(schema->columns.begin(), schema->columns.end(),
                                                      [&](const ColumnDef& c) { return c.name == col_name; });
                             if (cit == schema->columns.end()) continue;
+                            if (auto err = coerce_column_value(*cit, val, new_versions.size() + 1)) return StringResult::Err(*err);
                             if (auto* en = std::get_if<DataType::Enum>(&cit->data_type.data)) {
                                 if (std::find(en->values.begin(), en->values.end(), val) == en->values.end()) {
                                     std::string allowed;
@@ -400,6 +415,8 @@ StringResult Executor::exec_update_inner(SharedDatabase& s, const std::string& t
                     for (auto& [col, val] : new_vals) new_row[col] = val;
 
                     if (auto* schema = s.catalog.get_table(table)) {
+                        if (auto violation = rewritten_row_violation(s, *schema, new_row, assigned_cols, &row)) return StringResult::Err(*violation);
+                        if (auto violation = update_restrict_violation(s, table, row, new_row, assigned_cols)) return StringResult::Err(*violation);
                         for (auto& col : schema->columns) {
                             if (col.check_expr && !eval_check_expr(*col.check_expr, new_row)) {
                                 return StringResult::Err("CHECK constraint violated on column '" + col.name + "': " + *col.check_expr);
@@ -694,10 +711,16 @@ StringResult Executor::exec_update_inner(SharedDatabase& s, const std::string& t
             auto oit = old_row.find(assign_col);
             std::string old_val = oit != old_row.end() ? oit->second : std::string();
             std::string new_val;
-            for (auto& [c, expr] : assignments) {
-                if (c == assign_col) {
-                    new_val = eval_arith(old_row, expr);
-                    break;
+            if (per_row) {
+                if (auto pit = per_row->find(match_key(old_row)); pit != per_row->end()) {
+                    if (auto vit = pit->second.find(assign_col); vit != pit->second.end()) new_val = vit->second;
+                }
+            } else {
+                for (auto& [c, expr] : assignments) {
+                    if (c == assign_col) {
+                        new_val = eval_arith(old_row, expr);
+                        break;
+                    }
                 }
             }
             if (old_val == new_val) continue;

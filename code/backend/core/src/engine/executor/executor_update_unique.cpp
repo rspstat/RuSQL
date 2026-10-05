@@ -44,7 +44,7 @@ std::optional<std::string> Executor::update_unique_violation(SharedDatabase& s, 
         }
         if (!any_changed) continue;
 
-        auto skipped = [&](const std::string& v) { return !is_pk && (v.empty() || v == EXECUTOR_NULL_VALUE); }; // UNIQUE allows NULLs
+        auto skipped = [&](const std::string& v) { return !is_pk && v == EXECUTOR_NULL_VALUE; }; // UNIQUE allows NULLs
 
         // 1) the statement's own result must not repeat a value
         std::unordered_set<std::string> final_values;

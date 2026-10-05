@@ -13,6 +13,17 @@ struct TempDataDir {
     explicit TempDataDir(std::string p) : path(std::move(p)) { fs::remove_all(path); }
     ~TempDataDir() { fs::remove_all(path); }
 };
+
+// The rows a table holds now: UPDATE and MERGE write MVCC versions (the old version stays in the table, stamped dead, until a vacuum),
+// so a test that looks into the stored rows has to leave the dead versions out.
+std::vector<Row> live_rows(const std::vector<Row>& rows) {
+    std::vector<Row> out;
+    for (auto& r : rows) {
+        auto it = r.find("_xmax");
+        if (it == r.end() || it->second == "0") out.push_back(r);
+    }
+    return out;
+}
 } // namespace
 
 TEST_CASE("EXPLAIN describes a SELECT's access plan without executing it", "[executor][misc]") {
@@ -156,7 +167,7 @@ TEST_CASE("Multi-table UPDATE via JOIN updates matching rows in the target table
     REQUIRE(r.value() == "1 row(s) updated.");
 
     auto s = ex.get_shared()->read();
-    auto& rows = s->tables.at("company.dept");
+    auto rows = live_rows(s->tables.at("company.dept"));
     auto it = std::find_if(rows.begin(), rows.end(), [](const Row& row) { return row.at("id") == "1"; });
     REQUIRE(it != rows.end());
     REQUIRE(it->at("budget") == "999");
@@ -208,7 +219,8 @@ TEST_CASE("Multi-table UPDATE on a composite-PK target only touches the row matc
     REQUIRE(r.value() == "1 row(s) updated.");
 
     auto s = ex.get_shared()->read();
-    auto& rows = s->tables.at("company.t1");
+    auto rows = live_rows(s->tables.at("company.t1"));
+    REQUIRE(rows.size() == 2);
     for (auto& row : rows) {
         if (row.at("a") == "1" && row.at("b") == "1") REQUIRE(row.at("val") == "JOINED");
         else REQUIRE(row.at("val") != "JOINED");
@@ -333,7 +345,8 @@ TEST_CASE("MERGE on a composite-PK target only updates the row matching every PK
     REQUIRE(r.value() == "MERGE: 1 updated, 0 deleted, 0 inserted.");
 
     auto s = ex.get_shared()->read();
-    auto& rows = s->tables.at("company.t4");
+    auto rows = live_rows(s->tables.at("company.t4"));
+    REQUIRE(rows.size() == 2);
     for (auto& row : rows) {
         if (row.at("a") == "1" && row.at("b") == "1") REQUIRE(row.at("val") == "MERGED");
         else REQUIRE(row.at("val") != "MERGED");
@@ -345,7 +358,7 @@ TEST_CASE("MERGE applies matched-update, matched-delete, and not-matched-insert 
     Executor ex(dir.path);
     REQUIRE(ex.execute_sql("CREATE DATABASE company").is_ok());
     REQUIRE(ex.execute_sql("USE company").is_ok());
-    REQUIRE(ex.execute_sql("CREATE TABLE department (id INT PRIMARY KEY, code VARCHAR(10), name VARCHAR(50), budget INT)").is_ok());
+    REQUIRE(ex.execute_sql("CREATE TABLE department (id INT PRIMARY KEY AUTO_INCREMENT, code VARCHAR(10), name VARCHAR(50), budget INT)").is_ok());
     REQUIRE(ex.execute_sql("CREATE TABLE dept_upd (code VARCHAR(10) PRIMARY KEY, name VARCHAR(50), budget INT)").is_ok());
     REQUIRE(ex.execute_sql("INSERT INTO department VALUES (1, 'ENG', 'Engineering', 1000)").is_ok());
     REQUIRE(ex.execute_sql("INSERT INTO department VALUES (2, 'TMP', 'Temp Dept', 0)").is_ok());
@@ -361,7 +374,7 @@ TEST_CASE("MERGE applies matched-update, matched-delete, and not-matched-insert 
     REQUIRE(r.value() == "MERGE: 1 updated, 1 deleted, 1 inserted.");
 
     auto s = ex.get_shared()->read();
-    auto& rows = s->tables.at("company.department");
+    auto rows = live_rows(s->tables.at("company.department"));
     REQUIRE(rows.size() == 2); // ENG (updated), NEW (inserted); TMP deleted
 
     auto eng = std::find_if(rows.begin(), rows.end(), [](const Row& r2) { return r2.at("code") == "ENG"; });

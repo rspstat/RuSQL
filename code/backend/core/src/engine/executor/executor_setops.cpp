@@ -23,6 +23,8 @@ std::optional<double> parse_f64(const std::string& s) {
 }
 
 int cmp_key(const std::string& a, const std::string& b) {
+    const bool a_null = a == "NULL", b_null = b == "NULL"; // NULL sorts before every value
+    if (a_null || b_null) return a_null == b_null ? 0 : (a_null ? -1 : 1);
     auto pa = parse_f64(a), pb = parse_f64(b);
     if (pa && pb) {
         if (*pa < *pb) return -1;

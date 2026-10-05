@@ -28,6 +28,10 @@ namespace engine {
 // Mirrors parser.rs's `pub const NULL_DEFAULT: &str = "__NULL_DEFAULT__";`
 extern const std::string NULL_DEFAULT;
 
+// An INSERT value that was left out -- `(1, , 3)`, the DEFAULT keyword, a column missing from the column list -- takes the column's
+// default. It is not the empty string '', which is a value like any other (it used to be stored as NULL).
+extern const std::string INSERT_DEFAULT;
+
 class ParseError : public std::runtime_error {
 public:
     explicit ParseError(const std::string& message) : std::runtime_error(message) {}

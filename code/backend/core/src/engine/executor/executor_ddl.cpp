@@ -495,7 +495,7 @@ StringResult Executor::exec_alter(SharedDatabase& s, const std::string& table, A
                 auto vit = row.find(v->column.name);
                 if (vit == row.end()) continue;
                 const std::string& val = vit->second;
-                if (val == EXECUTOR_NULL_VALUE || val.empty()) continue;
+                if (val == EXECUTOR_NULL_VALUE) continue;
                 if (!value_matches_data_type(v->column.data_type, val)) {
                     return StringResult::Err("Cannot convert value '" + val + "' in column '" + v->column.name + "' to " +
                                               debug_data_type(v->column.data_type));

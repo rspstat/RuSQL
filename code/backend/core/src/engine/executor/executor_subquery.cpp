@@ -108,11 +108,30 @@ bool Executor::matches_condition_with_subquery(SharedDatabase& s, const Row& row
 }
 
 bool Executor::eval_condexpr_with_subquery(SharedDatabase& s, const Row& row, const CondExpr& expr) {
-    if (auto* v = std::get_if<CondExpr::And>(&expr.data)) return eval_condexpr_with_subquery(s, row, *v->lhs) && eval_condexpr_with_subquery(s, row, *v->rhs);
-    if (auto* v = std::get_if<CondExpr::Or>(&expr.data)) return eval_condexpr_with_subquery(s, row, *v->lhs) || eval_condexpr_with_subquery(s, row, *v->rhs);
-    if (auto* v = std::get_if<CondExpr::Not>(&expr.data)) return !eval_condexpr_with_subquery(s, row, *v->inner);
+    return eval_cond3_with_subquery(s, row, expr) == Tri::True;
+}
+
+Executor::Tri Executor::eval_cond3_with_subquery(SharedDatabase& s, const Row& row, const CondExpr& expr) {
+    if (auto* v = std::get_if<CondExpr::And>(&expr.data)) {
+        Tri l = eval_cond3_with_subquery(s, row, *v->lhs);
+        if (l == Tri::False) return Tri::False;
+        Tri r = eval_cond3_with_subquery(s, row, *v->rhs);
+        if (r == Tri::False) return Tri::False;
+        return (l == Tri::True && r == Tri::True) ? Tri::True : Tri::Unknown;
+    }
+    if (auto* v = std::get_if<CondExpr::Or>(&expr.data)) {
+        Tri l = eval_cond3_with_subquery(s, row, *v->lhs);
+        if (l == Tri::True) return Tri::True;
+        Tri r = eval_cond3_with_subquery(s, row, *v->rhs);
+        if (r == Tri::True) return Tri::True;
+        return (l == Tri::False && r == Tri::False) ? Tri::False : Tri::Unknown;
+    }
+    if (auto* v = std::get_if<CondExpr::Not>(&expr.data)) {
+        Tri i = eval_cond3_with_subquery(s, row, *v->inner);
+        return i == Tri::True ? Tri::False : i == Tri::False ? Tri::True : Tri::Unknown;
+    }
     if (auto* v = std::get_if<CondExpr::Leaf>(&expr.data)) return eval_single_with_subquery(s, row, v->condition);
-    return false;
+    return Tri::False;
 }
 
 bool Executor::has_outer_ref(const CondExpr& expr) {
@@ -130,14 +149,15 @@ bool Executor::has_outer_ref(const CondExpr& expr) {
     return false;
 }
 
-bool Executor::eval_single_with_subquery(SharedDatabase& s, const Row& row, const Condition& cond) {
+Executor::Tri Executor::eval_single_with_subquery(SharedDatabase& s, const Row& row, const Condition& cond) {
+    auto tri = [](bool b) { return b ? Tri::True : Tri::False; };
     if (std::holds_alternative<ConditionValue::Literal>(cond.value.data) || std::holds_alternative<ConditionValue::Between>(cond.value.data) ||
         std::holds_alternative<ConditionValue::LiteralList>(cond.value.data) || std::holds_alternative<ConditionValue::Arith>(cond.value.data)) {
-        return eval_single(row, cond);
+        return eval_single3(row, cond);
     }
 
     auto* sub = std::get_if<ConditionValue::Subquery>(&cond.value.data);
-    if (!sub) return false;
+    if (!sub) return Tri::False;
 
     if (cond.op == Operator::Exists || cond.op == Operator::NotExists) {
         // An EXISTS whose condition cannot depend on the outer row has one answer for the whole statement.
@@ -145,7 +165,7 @@ bool Executor::eval_single_with_subquery(SharedDatabase& s, const Row& row, cons
         auto* peek = std::get_if<Statement::Select>(&sub->query->data);
         if (peek && !(peek->condition && cond_may_be_substituted(*peek->condition))) {
             if (auto it = subquery_exists_cache_.find(exists_key); it != subquery_exists_cache_.end()) {
-                return cond.op == Operator::Exists ? it->second : !it->second;
+                return tri(cond.op == Operator::Exists ? it->second : !it->second);
             }
         }
         Statement sub_stmt = *sub->query;
@@ -157,13 +177,19 @@ bool Executor::eval_single_with_subquery(SharedDatabase& s, const Row& row, cons
                                        sel->group_by, sel->having, sel->limit, sel->offset, false, false);
             bool has_rows = result.is_ok() && result.value().find("0 rows returned") == std::string::npos;
             if (cacheable) subquery_exists_cache_[exists_key] = has_rows;
-            return cond.op == Operator::Exists ? has_rows : !has_rows;
+            return tri(cond.op == Operator::Exists ? has_rows : !has_rows);
         }
-        return false;
+        return Tri::False;
     }
 
     std::string val = eval_arith(row, cond.left);
-    if (val == EXECUTOR_NULL_VALUE) return false;
+    if (val == EXECUTOR_NULL_VALUE) return Tri::Unknown;
+
+    // x IN (subquery): TRUE on a match, otherwise UNKNOWN when the subquery returned a NULL, else FALSE; NOT IN the other way round
+    auto membership = [&](bool contains, bool has_null) {
+        if (cond.op == Operator::In) return contains ? Tri::True : (has_null ? Tri::Unknown : Tri::False);
+        return contains ? Tri::False : (has_null ? Tri::Unknown : Tri::True);
+    };
 
     if (cond.op == Operator::In || cond.op == Operator::NotIn) {
         if (auto* sel_peek = std::get_if<Statement::Select>(&sub->query->data)) {
@@ -182,8 +208,7 @@ bool Executor::eval_single_with_subquery(SharedDatabase& s, const Row& row, cons
                 // key, dwarfing the O(1) hash lookup the cache was supposed to provide.
                 const void* cache_key = sub->query.get();
                 if (auto it = subquery_cache_.find(cache_key); it != subquery_cache_.end()) {
-                    bool contains = it->second.count(val) > 0;
-                    return cond.op == Operator::In ? contains : !contains;
+                    return membership(it->second.count(val) > 0, it->second.count(EXECUTOR_NULL_VALUE) > 0);
                 }
                 // Cache miss: only now pay for a copy -- exec_select needs to move
                 // fields out of it (sel->subquery), and the original AST (still pointed
@@ -195,12 +220,11 @@ bool Executor::eval_single_with_subquery(SharedDatabase& s, const Row& row, cons
                 if (result.is_ok()) {
                     auto vals = extract_values_from_output(result.value());
                     std::unordered_set<std::string> sub_vals(vals.begin(), vals.end());
-                    bool contains = sub_vals.count(val) > 0;
-                    bool hit = cond.op == Operator::In ? contains : !contains;
+                    Tri hit = membership(sub_vals.count(val) > 0, sub_vals.count(EXECUTOR_NULL_VALUE) > 0);
                     subquery_cache_[cache_key] = std::move(sub_vals);
                     return hit;
                 }
-                return false;
+                return Tri::False;
             }
         }
     }
@@ -221,7 +245,7 @@ bool Executor::eval_single_with_subquery(SharedDatabase& s, const Row& row, cons
         std::vector<std::string> fresh_vals;
         const std::vector<std::string>* sub_vals_ptr = nullptr;
         if (cached_answer) {
-            if (!cached_answer->ok) return false;
+            if (!cached_answer->ok) return Tri::False;
             sub_vals_ptr = &cached_answer->values;
         } else {
             const bool cacheable = !(sel->condition && cond_may_be_substituted(*sel->condition));
@@ -234,41 +258,41 @@ bool Executor::eval_single_with_subquery(SharedDatabase& s, const Row& row, cons
                 slot.ok = result.is_ok();
                 if (slot.ok) slot.values = extract_values_from_output(result.value());
             }
-            if (!result.is_ok()) return false;
+            if (!result.is_ok()) return Tri::False;
             fresh_vals = extract_values_from_output(result.value());
             sub_vals_ptr = &fresh_vals;
         }
         const std::vector<std::string>& sub_vals = *sub_vals_ptr;
         switch (cond.op) {
             case Operator::In:
-                return std::find(sub_vals.begin(), sub_vals.end(), val) != sub_vals.end();
             case Operator::NotIn:
-                return std::find(sub_vals.begin(), sub_vals.end(), val) == sub_vals.end();
-            case Operator::Eq: {
-                if (sub_vals.empty()) return false;
-                auto a = parse_f64(val), b = parse_f64(sub_vals.front());
-                return (a && b) ? (*a == *b) : (sub_vals.front() == val);
-            }
+                return membership(std::find(sub_vals.begin(), sub_vals.end(), val) != sub_vals.end(),
+                                  std::find(sub_vals.begin(), sub_vals.end(), EXECUTOR_NULL_VALUE) != sub_vals.end());
+            case Operator::Eq:
+            case Operator::Ne:
             case Operator::Gt:
             case Operator::Lt:
             case Operator::Gte:
             case Operator::Lte: {
-                if (sub_vals.empty()) return false;
-                double a = parse_f64(val).value_or(0.0);
-                double b = parse_f64(sub_vals.front()).value_or(0.0);
+                // a scalar subquery with no row, or a NULL, makes the comparison UNKNOWN
+                if (sub_vals.empty() || sub_vals.front() == EXECUTOR_NULL_VALUE) return Tri::Unknown;
+                const std::string& rhs = sub_vals.front();
+                auto a = parse_f64(val), b = parse_f64(rhs);
+                int c = (a && b) ? (*a < *b ? -1 : (*a > *b ? 1 : 0)) : (val < rhs ? -1 : (val > rhs ? 1 : 0)); // numbers as numbers, else as text
                 switch (cond.op) {
-                    case Operator::Gt: return a > b;
-                    case Operator::Lt: return a < b;
-                    case Operator::Gte: return a >= b;
-                    case Operator::Lte: return a <= b;
-                    default: return false;
+                    case Operator::Eq: return tri(c == 0);
+                    case Operator::Ne: return tri(c != 0);
+                    case Operator::Gt: return tri(c > 0);
+                    case Operator::Lt: return tri(c < 0);
+                    case Operator::Gte: return tri(c >= 0);
+                    default: return tri(c <= 0);
                 }
             }
             default:
-                return false;
+                return Tri::False;
         }
     }
-    return false;
+    return Tri::False;
 }
 
 std::vector<std::string> Executor::extract_values_from_output(const std::string& output) const {
@@ -290,8 +314,9 @@ std::vector<std::string> Executor::extract_values_from_output(const std::string&
             auto a = first_cell.find_first_not_of(' ');
             if (a != std::string::npos) {
                 auto b = first_cell.find_last_not_of(' ');
-                std::string v = first_cell.substr(a, b - a + 1);
-                if (!v.empty()) vals.push_back(v);
+                vals.push_back(first_cell.substr(a, b - a + 1));
+            } else {
+                vals.push_back(""); // an empty string is a value (it used to be dropped)
             }
         }
         if (nl == std::string::npos) break;

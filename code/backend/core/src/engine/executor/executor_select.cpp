@@ -52,7 +52,11 @@ std::string format_exact(double v) {
     return std::string(buf, res.ptr);
 }
 
+// NULL sorts before every value (MySQL: first in ASC, last in DESC); NULLs are equal. It used to be compared as the text "NULL", which put
+// it between 'Alice' and 'Zed' and after every number.
 int cmp_key(const std::string& a, const std::string& b) {
+    const bool a_null = a == "NULL", b_null = b == "NULL";
+    if (a_null || b_null) return a_null == b_null ? 0 : (a_null ? -1 : 1);
     auto pa = parse_f64(a);
     auto pb = parse_f64(b);
     if (pa && pb) {
@@ -268,6 +272,7 @@ void append_key_part(std::string& key, const std::string& value) {
 std::vector<std::size_t> order_rows(const std::vector<const Row*>& rows, const std::vector<OrderBy>& order_by, RowLookup lookup) {
     struct Cell {
         bool numeric = false;
+        bool null = false;
         double num = 0;
         const std::string* text = nullptr;
     };
@@ -279,6 +284,7 @@ std::vector<std::size_t> order_rows(const std::vector<const Row*>& rows, const s
             const std::string* found = lookup(*rows[i], order_by[c].column);
             Cell& cell = cells[i * ncols + c];
             cell.text = found ? found : &empty;
+            cell.null = *cell.text == "NULL";
             if (auto v = parse_f64(*cell.text)) {
                 cell.numeric = true;
                 cell.num = *v;
@@ -292,7 +298,8 @@ std::vector<std::size_t> order_rows(const std::vector<const Row*>& rows, const s
             const Cell& x = cells[a * ncols + c];
             const Cell& y = cells[b * ncols + c];
             int cmp;
-            if (x.numeric && y.numeric) cmp = x.num < y.num ? -1 : (x.num > y.num ? 1 : 0); // same as cmp_key
+            if (x.null || y.null) cmp = x.null == y.null ? 0 : (x.null ? -1 : 1); // same as cmp_key
+            else if (x.numeric && y.numeric) cmp = x.num < y.num ? -1 : (x.num > y.num ? 1 : 0);
             else cmp = *x.text < *y.text ? -1 : (*x.text > *y.text ? 1 : 0);
             if (!order_by[c].ascending) cmp = -cmp;
             if (cmp != 0) return cmp < 0;
@@ -1571,7 +1578,7 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
                     std::unordered_map<std::string, std::vector<Row>> right_of_key;
                     for (auto& left_row : current) {
                         const std::string* key = get_col(left_row, a->probe_col);
-                        if (!key || key->empty() || *key == "NULL") continue;
+                        if (!key || *key == "NULL") continue;
                         auto cached = right_of_key.find(*key);
                         if (cached == right_of_key.end()) {
                             std::vector<Row> found;
@@ -1611,7 +1618,7 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
                         out.reserve(right_rows.size());
                         for (auto& right_row : right_rows) {
                             const std::string* key = get_col(right_row, a->right_extract_col);
-                            if (!key || key->empty() || *key == "NULL") continue;
+                            if (!key || *key == "NULL") continue;
                             for (auto& left_row : hit->second.get(*key)) {
                                 if (!is_visible_for_read(left_row, read_ctx)) continue;
                                 Row merged = left_row;
@@ -1628,7 +1635,7 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
                     out.reserve(right_rows.size());
                     for (auto& right_row : right_rows) {
                         const std::string* key = get_col(right_row, a->right_extract_col);
-                        if (!key || key->empty() || *key == "NULL") continue;
+                        if (!key || *key == "NULL") continue;
                         for (auto& val_json : equal_entries(lit->second, *key)) {
                             // A secondary B+Tree index stores a JSON ARRAY of rows per key
                             // (the column need not be unique); a PK index stores exactly one

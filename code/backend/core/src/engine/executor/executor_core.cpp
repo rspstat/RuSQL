@@ -770,13 +770,17 @@ std::optional<std::vector<std::string>> Executor::table_lock_set_for(const Share
         }
         if (v->condition && !cond_tables_ok(*v->condition, current_db, s, out)) return std::nullopt;
     } else if (auto* v = std::get_if<Statement::Merge>(&stmt.data)) {
-        // exec_merge's own cross-table footprint is exactly {source, target} -- no FK
-        // existence/cascade checks, no triggers fired (confirmed in the Stage 4 audit).
+        // MERGE is made of the one-table UPDATE / DELETE / INSERT paths: the footprint is {source, target} plus the foreign-key
+        // neighbours those read and cascade into, and any trigger on the target fires, so it takes the global lock then.
         std::string qtarget = qualify_local(v->target, current_db);
         std::string qsource = qualify_local(v->source, current_db);
         if (s.views.count(qtarget) || s.views.count(qsource)) return std::nullopt;
+        for (const char* kind : {"INSERT", "UPDATE", "DELETE"}) {
+            if (has_firing_trigger(s, qtarget, kind)) return std::nullopt;
+        }
         out.push_back(qtarget);
         out.push_back(qsource);
+        add_fk_neighbors(s, qtarget, /*parents=*/true, /*children=*/true, out);
         if (!cond_tables_ok(v->on, current_db, s, out)) return std::nullopt;
         if (v->when_matched_delete_cond && !cond_tables_ok(*v->when_matched_delete_cond, current_db, s, out)) return std::nullopt;
     } else {
