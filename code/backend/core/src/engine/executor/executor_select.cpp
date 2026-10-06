@@ -579,6 +579,28 @@ std::vector<std::string> Executor::extract_agg_refs_from_cond(const CondExpr& ex
     return out;
 }
 
+// `SELECT id % 2, COUNT(*) FROM t GROUP BY id % 2`: a group has no `id`, only the value of the expression it was grouped by (kept under the text of the
+// expression), so every part of `expr` that is that expression becomes a read of that value.
+void replace_expression(ArithExpr& expr, const std::string& text) {
+    if (!std::holds_alternative<ArithExpr::Col>(expr.data)) {
+        std::string printed;
+        try {
+            printed = Parser::arith_to_string(expr);
+        } catch (const ParseError&) {
+        }
+        if (printed == text) {
+            expr = ArithExpr(ArithExpr::Col{text});
+            return;
+        }
+    }
+    if (auto* v = std::get_if<ArithExpr::Add>(&expr.data)) { replace_expression(*v->lhs, text); replace_expression(*v->rhs, text); }
+    else if (auto* v = std::get_if<ArithExpr::Sub>(&expr.data)) { replace_expression(*v->lhs, text); replace_expression(*v->rhs, text); }
+    else if (auto* v = std::get_if<ArithExpr::Mul>(&expr.data)) { replace_expression(*v->lhs, text); replace_expression(*v->rhs, text); }
+    else if (auto* v = std::get_if<ArithExpr::Div>(&expr.data)) { replace_expression(*v->lhs, text); replace_expression(*v->rhs, text); }
+    else if (auto* v = std::get_if<ArithExpr::Cmp>(&expr.data)) { replace_expression(*v->lhs, text); replace_expression(*v->rhs, text); }
+    else if (auto* v = std::get_if<ArithExpr::Func>(&expr.data)) { for (auto& a : v->args) replace_expression(a, text); }
+}
+
 // What the `MIN(x)` / `MAX(x)` that a HAVING or a select-list expression names holds: the binder gave the reference (a column named "MAX(code)")
 // the class of its argument.
 void collect_aggregate_classes(const CondExpr& e, std::unordered_map<std::string, ValueClass>& out);
@@ -1315,6 +1337,52 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
     bool has_win = std::any_of(columns.begin(), columns.end(), [](const SelectColumn& c) {
         return std::holds_alternative<SelectColumn::WinFunc>(c.data);
     });
+
+    // ORDER BY / GROUP BY items. The binder has replaced a position or a select-list name by the column or the expression it stands for; an item that
+    // is not a plain column is an expression, and its text is the name its value is kept under. For a GROUP BY expression every row gets the value
+    // before the groups are made (below, with the aggregates' arguments); the ORDER BY expressions of a grouped query are computed on the groups
+    // (the aggregates in them, the grouped expressions and the grouped columns are what a group has); otherwise on the rows.
+    struct SortExpression {
+        std::string text;
+        ArithExpr expr;
+        std::vector<std::string> aggregates; // the aggregate calls in it (`SUM(v)`)
+    };
+    std::vector<std::string> row_sort_texts;   // computed on every row before sorting / grouping
+    std::vector<SortExpression> group_sorts;   // computed on every group
+    std::vector<std::string> group_expressions; // the GROUP BY items that are expressions
+    {
+        auto position = [](const std::string& text) { return !text.empty() && text.find_first_not_of("0123456789") == std::string::npos; };
+        for (auto& o : order_by) {
+            if (position(o.column)) return StringResult::Err("Unknown column '" + o.column + "' in 'order clause'");
+        }
+        if (group_by) {
+            for (auto& g : *group_by) {
+                if (position(g)) return StringResult::Err("Unknown column '" + g + "' in 'group statement'");
+                if (!plain_reference(g) && std::find(group_expressions.begin(), group_expressions.end(), g) == group_expressions.end()) group_expressions.push_back(g);
+            }
+        }
+        for (auto& o : order_by) {
+            if (plain_reference(o.column)) continue;
+            ArithExpr e = parse_bound_expression(s, o.column, table, joins);
+            std::vector<std::string> refs;
+            collect_agg_refs_arith(e, refs);
+            if (auto* col = std::get_if<ArithExpr::Col>(&e.data); col && col->name == o.column && refs.empty()) continue; // (a name that is not an identifier: read as it is)
+            if (group_by) {
+                if (std::any_of(group_sorts.begin(), group_sorts.end(), [&](const SortExpression& x) { return x.text == o.column; })) continue;
+                for (auto& g : group_expressions) replace_expression(e, g);
+                collect_aggregate_classes(e, aggregate_classes);
+                group_sorts.push_back(SortExpression{o.column, std::move(e), std::move(refs)});
+            } else if (refs.empty()) {
+                if (std::find(row_sort_texts.begin(), row_sort_texts.end(), o.column) == row_sort_texts.end()) row_sort_texts.push_back(o.column);
+            }
+        }
+        // the select list reads a grouped expression as the column the groups keep it in
+        for (auto& g : group_expressions) {
+            for (auto& c : columns) {
+                if (auto* ex = std::get_if<SelectColumn::Expr>(&c.data)) replace_expression(ex->expr, g);
+            }
+        }
+    }
     Planner planner(s.tables, s.indexes, s.index_meta, s.composite_indexes, s.hash_indexes, s.hash_index_meta, s.catalog, s.table_stats);
     SelectPlan plan = planner.plan_covering(table, condition, joins, columns);
 
@@ -2077,11 +2145,16 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
         if (having) {
             for (auto& ref : extract_agg_refs_from_cond(*having)) want(aggregate_reference_argument(ref));
         }
+        for (auto& text : row_sort_texts) want(text);
+        for (auto& text : group_expressions) want(text);
+        for (auto& sort : group_sorts) {
+            for (auto& ref : sort.aggregates) want(aggregate_reference_argument(ref));
+        }
     }
     if (!expression_arguments.empty()) {
         std::vector<ArithExpr> arguments;
         for (auto& text : expression_arguments) {
-            ArithExpr e = Parser::str_to_arith(text);
+            ArithExpr e = parse_bound_expression(s, text, table, joins);
             if (auto* col = std::get_if<ArithExpr::Col>(&e.data); col && col->name == text) {
                 return StringResult::Err("Cannot read the argument '" + text + "' of an aggregate");
             }
@@ -2122,13 +2195,17 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
         std::unordered_map<std::string, std::size_t> group_of;
         static const std::string missing;
         std::vector<const std::string*> vals(group_by->size());
+        // numbers group by value (`0` and `0.00` are one group, as COALESCE(w, 0) over a DECIMAL column gives them), text by its characters
+        std::vector<ValueClass> group_classes;
+        for (auto& item : *group_by) group_classes.push_back(class_of_expr(parse_bound_expression(s, item, table, joins)));
         std::string encoded;
         for (const Row* rp : rows_p) {
             encoded.clear();
             for (std::size_t i = 0; i < group_by->size(); i++) {
                 const std::string* v = get_col(*rp, (*group_by)[i]);
                 vals[i] = v ? v : &missing;
-                append_key_part(encoded, *vals[i]);
+                if (group_classes[i] == ValueClass::Number) append_key_part(encoded, normalize_numeric_key(*vals[i]));
+                else append_key_part(encoded, *vals[i]);
             }
             auto [it, fresh] = group_of.try_emplace(encoded, groups.size());
             if (fresh) {
@@ -2156,6 +2233,12 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
                 for (auto& agg_key : extract_agg_refs_from_cond(*having)) {
                     if (!out.count(agg_key)) out[agg_key] = compute_agg_from_key(agg_key, grp, aggregate_class(agg_key));
                 }
+            }
+            for (auto& sort : group_sorts) {
+                for (auto& ref : sort.aggregates) {
+                    if (!out.count(ref)) out[ref] = compute_agg_from_key(ref, grp, aggregate_class(ref));
+                }
+                if (!out.count(sort.text)) out[sort.text] = eval_arith(out, sort.expr);
             }
             group_rows[gi] = std::move(out);
         };
@@ -2206,10 +2289,20 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
         std::unordered_set<std::string> seen;
         std::vector<const Row*> kept;
         std::string encoded;
+        // numbers are distinct by value (`0` and `0.00` are one), text by its characters
+        std::vector<ValueClass> distinct_classes;
+        for (auto& c : columns) {
+            ValueClass k = ValueClass::Unknown;
+            if (auto* col = std::get_if<SelectColumn::Column>(&c.data)) k = col->cls;
+            else if (auto* ca = std::get_if<SelectColumn::ColumnAlias>(&c.data)) k = ca->cls;
+            else if (auto* ex = std::get_if<SelectColumn::Expr>(&c.data)) k = class_of_expr(ex->expr);
+            distinct_classes.push_back(k);
+        }
         for (const Row* rp : rows_p) {
             const Row& row = *rp;
             encoded.clear();
-            for (auto& c : columns) {
+            for (std::size_t column_index = 0; column_index < columns.size(); column_index++) {
+                auto& c = columns[column_index];
                 std::string val;
                 if (std::holds_alternative<SelectColumn::All>(c.data)) {
                     std::string joined;
@@ -2262,7 +2355,7 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
                     // for display purposes only).
                     val.clear();
                 }
-                append_key_part(encoded, val);
+                append_key_part(encoded, distinct_classes[column_index] == ValueClass::Number ? normalize_numeric_key(val) : val);
             }
             if (seen.insert(encoded).second) kept.push_back(rp);
         }

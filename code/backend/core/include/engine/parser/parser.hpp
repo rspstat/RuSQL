@@ -106,6 +106,8 @@ private:
     bool at_pred_operator() const;
     bool at_value_continuation() const;
     bool select_item_continues() const;
+    /// An item of ORDER BY / GROUP BY: a column (its name), a position (`2`), or an expression (the text of it: `a + b`, `COUNT(*)`, `YEAR(d)`)
+    std::string parse_sort_item();
 
     /// A value expression: arithmetic, functions, CASE, and conditions as values (`v > 5`, `a AND b`, `v IS NULL`; 1, 0 or NULL).
     ArithExpr parse_value_expr();

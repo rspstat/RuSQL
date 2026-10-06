@@ -528,6 +528,8 @@ struct Statement {
         std::optional<std::size_t> offset;
         bool for_update = false;
         bool for_share = false;
+        // The binder replaced the positions and select-list names in ORDER BY / GROUP BY by what they stand for (done once per statement).
+        bool sort_resolved = false;
     };
     struct Update {
         std::string table;

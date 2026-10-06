@@ -43,6 +43,24 @@ bool row_order_less(const Row& a, const Row& b, const std::vector<OrderBy>& orde
     return false;
 }
 
+// The ORDER BY of a UNION / INTERSECT / EXCEPT sorts the columns of the answer, by name or by position (`ORDER BY 1`): what no column of the answer
+// is called is an error (MySQL 1054), not a sort by nothing.
+std::optional<std::string> resolve_set_order(std::vector<OrderBy>& order_by, const std::vector<std::string>& cols) {
+    for (auto& ord : order_by) {
+        if (!ord.column.empty() && ord.column.find_first_not_of("0123456789") == std::string::npos) {
+            const std::size_t n = ord.column.size() > 9 ? 0 : static_cast<std::size_t>(std::stoul(ord.column));
+            if (n < 1 || n > cols.size()) return "Unknown column '" + ord.column + "' in 'order clause'";
+            ord.column = cols[n - 1];
+            continue;
+        }
+        if (std::find(cols.begin(), cols.end(), ord.column) != cols.end()) continue;
+        const std::string bare = ord.column.substr(ord.column.rfind('.') == std::string::npos ? 0 : ord.column.rfind('.') + 1);
+        if (std::find(cols.begin(), cols.end(), bare) == cols.end()) return "Unknown column '" + ord.column + "' in 'order clause'";
+        ord.column = bare;
+    }
+    return std::nullopt;
+}
+
 std::vector<std::string> row_key(const Row& row, const std::vector<std::string>& cols) {
     std::vector<std::string> key;
     key.reserve(cols.size());
@@ -155,6 +173,8 @@ StringResult Executor::exec_union(SharedDatabase& s, Statement left, Statement r
         result = std::move(filtered);
     }
 
+    const std::vector<std::string>& cols = left_cols.empty() ? right_cols : left_cols;
+    if (auto error = resolve_set_order(order_by, cols)) return StringResult::Err(*error);
     if (!order_by.empty()) {
         auto less = [&](const Row& a, const Row& b) { return row_order_less(a, b, order_by); };
         if (parallel_enabled() && result.size() >= parallel_min_rows()) {
@@ -171,7 +191,6 @@ StringResult Executor::exec_union(SharedDatabase& s, Statement left, Statement r
 
     if (result.empty()) return StringResult::Ok("0 rows returned.");
 
-    const std::vector<std::string>& cols = left_cols.empty() ? right_cols : left_cols;
     return StringResult::Ok(format_set_result(cols, result));
 }
 
@@ -226,6 +245,7 @@ StringResult Executor::exec_intersect(SharedDatabase& s, Statement left, Stateme
             if (in_right && !already_in_result) result.push_back(row);
         }
     }
+    if (auto error = resolve_set_order(order_by, cols)) return StringResult::Err(*error);
     apply_set_postprocess(result, cols, order_by, limit, offset);
     return StringResult::Ok(format_set_result(cols, result));
 }
@@ -278,6 +298,7 @@ StringResult Executor::exec_except(SharedDatabase& s, Statement left, Statement 
             if (!in_right && !already_in_result) result.push_back(row);
         }
     }
+    if (auto error = resolve_set_order(order_by, cols)) return StringResult::Err(*error);
     apply_set_postprocess(result, cols, order_by, limit, offset);
     return StringResult::Ok(format_set_result(cols, result));
 }

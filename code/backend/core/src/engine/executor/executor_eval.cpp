@@ -52,19 +52,29 @@ ValueClass Executor::class_of_expr(const ArithExpr& expr) {
     if (auto* col = std::get_if<ArithExpr::Col>(&expr.data)) return col->cls;
     if (std::holds_alternative<ArithExpr::Str>(expr.data)) return ValueClass::Text;
     if (auto* f = std::get_if<ArithExpr::Func>(&expr.data)) {
-        if (f->name != "CASE") return function_result_class(f->name);
-        // a CASE holds what all of its results hold (a NULL result says nothing); results of different kinds, or not known, are not known
-        std::vector<const ArithExpr*> results;
-        for (std::size_t i = 1; i < f->args.size(); i += 2) results.push_back(&f->args[i]);
-        if (f->args.size() % 2 == 1) results.push_back(&f->args.back());
-        ValueClass kind = ValueClass::Unknown;
-        for (const ArithExpr* result : results) {
-            if (auto* str = std::get_if<ArithExpr::Str>(&result->data); str && str->value == EXECUTOR_NULL_VALUE) continue;
-            const ValueClass k = class_of_expr(*result);
-            if (k == ValueClass::Unknown || (kind != ValueClass::Unknown && k != kind)) return ValueClass::Unknown;
-            kind = k;
+        // what a function of several values holds is what all of them hold (a NULL says nothing); values of different kinds, or not known, are not known
+        auto common = [](const std::vector<const ArithExpr*>& values) {
+            ValueClass kind = ValueClass::Unknown;
+            for (const ArithExpr* value : values) {
+                if (auto* str = std::get_if<ArithExpr::Str>(&value->data); str && str->value == EXECUTOR_NULL_VALUE) continue;
+                const ValueClass k = class_of_expr(*value);
+                if (k == ValueClass::Unknown || (kind != ValueClass::Unknown && k != kind)) return ValueClass::Unknown;
+                kind = k;
+            }
+            return kind;
+        };
+        std::vector<const ArithExpr*> values;
+        if (f->name == "CASE") { // its results
+            for (std::size_t i = 1; i < f->args.size(); i += 2) values.push_back(&f->args[i]);
+            if (f->args.size() % 2 == 1) values.push_back(&f->args.back());
+            return common(values);
         }
-        return kind;
+        if (f->name == "COALESCE" || f->name == "IFNULL" || f->name == "GREATEST" || f->name == "LEAST") {
+            for (auto& a : f->args) values.push_back(&a);
+            return common(values);
+        }
+        if (f->name == "NULLIF" && !f->args.empty()) return class_of_expr(f->args[0]);
+        return function_result_class(f->name);
     }
     return ValueClass::Number; // a number, + - * /, a comparison, a condition
 }

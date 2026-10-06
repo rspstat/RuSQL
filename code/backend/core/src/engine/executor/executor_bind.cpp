@@ -192,8 +192,21 @@ std::optional<std::string> Executor::bind_statement(SharedDatabase& s, Statement
             else if (auto* v = std::get_if<ArithExpr::Pred>(&e.data)) cond(*v->cond, clause);
             else if (auto* v = std::get_if<ArithExpr::Func>(&e.data); v && v->name == "CASE") {
                 for (auto& a : v->args) arith(a, clause); // (its conditions and results are expressions)
+            } else if (auto* f = std::get_if<ArithExpr::Func>(&e.data)) {
+                // the arguments of any other function are not checked (they may name a unit or a type as well as a column), but a column in them
+                // still holds what its type says: IFNULL(y, w) over two number columns is a number
+                for (auto& a : f->args) annotate(a);
             }
-            // (the arguments of any other function are not looked at: they may name a unit or a type as well as a column)
+        }
+
+        // what the columns in `e` hold, without asking for them to exist
+        void annotate(ArithExpr& e) {
+            if (auto* col = std::get_if<ArithExpr::Col>(&e.data)) col->cls = class_of_name(col->name);
+            else if (auto* v = std::get_if<ArithExpr::Add>(&e.data)) { annotate(*v->lhs); annotate(*v->rhs); }
+            else if (auto* v = std::get_if<ArithExpr::Sub>(&e.data)) { annotate(*v->lhs); annotate(*v->rhs); }
+            else if (auto* v = std::get_if<ArithExpr::Mul>(&e.data)) { annotate(*v->lhs); annotate(*v->rhs); }
+            else if (auto* v = std::get_if<ArithExpr::Div>(&e.data)) { annotate(*v->lhs); annotate(*v->rhs); }
+            else if (auto* v = std::get_if<ArithExpr::Func>(&e.data)) { for (auto& a : v->args) annotate(a); }
         }
 
         // Binds a statement nested in this one (a subquery, a derived table): the columns of this query are in sight of it. Its output
@@ -397,6 +410,8 @@ std::optional<std::string> Executor::bind_statement(SharedDatabase& s, Statement
             }
             chain.push_back(&scope);
             std::vector<std::pair<std::string, ValueClass>> out;
+            std::vector<std::string> positions; // what each output column is called as an ORDER BY / GROUP BY item ("" when it cannot be one)
+            std::unordered_map<std::string, std::string> given; // the names the select list gives, and what each stands for
             for (auto& c : sel.columns) {
                 select_column(c);
                 if (error) break;
@@ -406,21 +421,94 @@ std::optional<std::string> Executor::bind_statement(SharedDatabase& s, Statement
                 else if (auto* fn = std::get_if<SelectColumn::Func>(&c.data); fn && fn->alias) scope.alias_classes[*fn->alias] = k;
                 else if (auto* e = std::get_if<SelectColumn::Expr>(&c.data); e && e->alias) scope.alias_classes[*e->alias] = k;
                 else if (auto* wf = std::get_if<SelectColumn::WinFunc>(&c.data); wf && wf->alias) scope.alias_classes[*wf->alias] = k;
-                if (auto* all = std::get_if<SelectColumn::All>(&c.data)) star_columns(scope, all->table, out);
-                else out.emplace_back(std::string(), k);
+                if (auto* all = std::get_if<SelectColumn::All>(&c.data)) {
+                    const std::size_t before = out.size();
+                    star_columns(scope, all->table, out);
+                    for (std::size_t i = before; i < out.size(); i++) positions.push_back(out[i].first);
+                } else {
+                    out.emplace_back(std::string(), k);
+                    positions.push_back(sort_key(c));
+                    if (const std::string alias = alias_of(c); !alias.empty() && !positions.back().empty()) given.emplace(alias, positions.back());
+                }
             }
             for (auto& j : sel.joins) cond(j.on_expr, "on clause");
             if (sel.condition) cond(*sel.condition, "where clause");
+            if (!sel.sort_resolved && !error) {
+                for (auto& o : sel.order_by) resolve_sort_item(o.column, "order clause", positions, given);
+                if (sel.group_by) {
+                    for (auto& g : *sel.group_by) resolve_sort_item(g, "group statement", positions, given);
+                }
+                sel.sort_resolved = true;
+            }
             if (sel.group_by) {
-                for (auto& g : *sel.group_by) name(g, "group statement");
+                for (auto& g : *sel.group_by) {
+                    if (plain_reference(g)) name(g, "group statement");
+                    else expression_argument(g, "group statement");
+                }
             }
             if (sel.having) cond(*sel.having, "having clause");
             for (auto& o : sel.order_by) {
-                name(o.column, "order clause");
-                o.cls = class_of_name(o.column);
+                if (plain_reference(o.column)) {
+                    name(o.column, "order clause");
+                    o.cls = class_of_name(o.column);
+                } else {
+                    o.cls = expression_argument(o.column, "order clause");
+                }
             }
             chain.pop_back();
             outputs = std::move(out);
+        }
+
+        // The name an ORDER BY / GROUP BY item uses for a select-list column: a column by its name, an aggregate by its label, an expression by
+        // its text; "" for what cannot be sorted by (a legacy function column, a subquery).
+        std::string sort_key(SelectColumn& c) const {
+            if (auto* col = std::get_if<SelectColumn::Column>(&c.data)) return col->name;
+            if (auto* ca = std::get_if<SelectColumn::ColumnAlias>(&c.data)) return ca->name;
+            if (auto* agg = std::get_if<SelectColumn::Agg>(&c.data)) return Executor::agg_label(agg->func, agg->col);
+            if (auto* aa = std::get_if<SelectColumn::AggAlias>(&c.data)) return aa->alias;
+            if (auto* e = std::get_if<SelectColumn::Expr>(&c.data)) {
+                try {
+                    const std::string printed = Parser::arith_to_string(e->expr);
+                    // (a number alone would read as a position: the parentheses make it the constant it is)
+                    return printed.find_first_not_of("0123456789") == std::string::npos ? "(" + printed + ")" : printed;
+                } catch (const ParseError&) {
+                    return std::string();
+                }
+            }
+            if (auto* wf = std::get_if<SelectColumn::WinFunc>(&c.data)) return wf->alias.value_or(Executor::window_func_default_label(wf->func));
+            return std::string();
+        }
+
+        static std::string alias_of(const SelectColumn& c) {
+            if (auto* ca = std::get_if<SelectColumn::ColumnAlias>(&c.data)) return ca->alias;
+            if (auto* aa = std::get_if<SelectColumn::AggAlias>(&c.data)) return aa->alias;
+            if (auto* e = std::get_if<SelectColumn::Expr>(&c.data)) return e->alias.value_or(std::string());
+            if (auto* wf = std::get_if<SelectColumn::WinFunc>(&c.data)) return wf->alias.value_or(std::string());
+            return std::string();
+        }
+
+        // `ORDER BY 2` is the second column of the select list, `ORDER BY total` the column the select list calls total (a name the select list
+        // gives wins over a column of the same name, as in MySQL): either becomes what it stands for, the name of a column or the text of an
+        // expression, which is all the executor has to know how to sort / group by.
+        void resolve_sort_item(std::string& item, const char* clause, const std::vector<std::string>& positions,
+                               const std::unordered_map<std::string, std::string>& given) {
+            if (item.empty()) return;
+            if (item.find_first_not_of("0123456789") == std::string::npos) {
+                const std::size_t n = item.size() > 9 ? 0 : static_cast<std::size_t>(std::stoul(item));
+                if (n < 1 || n > positions.size()) {
+                    if (check && !error) error = "Unknown column '" + item + "' in '" + clause + "'";
+                    return;
+                }
+                if (positions[n - 1].empty()) {
+                    if (check && !error) error = std::string("Cannot use column ") + item + " of the select list in '" + clause + "'";
+                    return;
+                }
+                item = positions[n - 1];
+                return;
+            }
+            if (item.find('.') == std::string::npos) {
+                if (auto it = given.find(item); it != given.end()) item = it->second;
+            }
         }
 
         // an UPDATE / DELETE: the table (and the joined ones) as the one scope of its WHERE and SET expressions
@@ -490,6 +578,18 @@ std::optional<std::string> Executor::bind_statement(SharedDatabase& s, Statement
     Binder binder{*this, s, check, {}, std::nullopt, {}, {}, {}};
     binder.statement(stmt);
     return binder.error;
+}
+
+ArithExpr Executor::parse_bound_expression(SharedDatabase& s, const std::string& text, const std::string& table, const std::vector<Join>& joins) {
+    ArithExpr expr = Parser::str_to_arith(text);
+    // (bound as the one select item of a query over the same tables)
+    Statement::Select sel;
+    sel.table = table;
+    sel.joins = joins;
+    sel.columns.push_back(SelectColumn(SelectColumn::Expr{std::move(expr), std::nullopt}));
+    Statement stmt(std::move(sel));
+    bind_statement(s, stmt, false);
+    return std::move(std::get<SelectColumn::Expr>(std::get<Statement::Select>(stmt.data).columns[0].data).expr);
 }
 
 } // namespace engine

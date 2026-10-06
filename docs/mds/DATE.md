@@ -1211,6 +1211,39 @@ VS Code 스타일 탭 드래그 순서 변경(요청의 1번 항목)은 같은 �
 
 **Diagram 페이지**: 구성요소·흐름이 바뀐 것이 없어 변경 없음.
 
+### 10월 7일 — 정렬·그룹: `ORDER BY`·`GROUP BY`가 select 목록의 이름·번호·식을 받음(별칭으로 정렬하면 조용히 정렬이 안 되던 것), UNION의 `ORDER BY`, 집계 안 식의 열 타입(앞 항목의 회귀), 숫자 그룹 키·`DISTINCT`, 함수 인자 안의 열 타입
+
+**왜 이 항목인가**: 사용자 결정("전부 고쳐")의 식 문법 항목(R4) 가운데 정렬·그룹 쪽. 앞 항목의 점검에서 **`ORDER BY 별칭`이 정렬을 하지 않는다**는 조용히 틀리는 버그를 찾았고(`SELECT v AS val … ORDER BY val DESC`가 테이블 순서 그대로; 집계의 별칭만 정렬됨), 같은 뿌리의 파싱 오류(번호·식)와 함께 고쳤다.
+
+**원인과 영향**:
+- **select 목록의 이름으로 정렬하면 정렬이 안 됨**: 정렬은 `ORDER BY` 이름을 *원본 행*에서 찾는데 별칭은 행에 없는 키라 모든 행이 같은 값으로 비교되어 순서가 그대로였다 — `v AS val`·`id AS i`·`v + w AS k`·`UPPER(s) AS up`·`CASE … AS size`·윈도 함수 별칭(집계의 별칭만 됨). 오류 없이 틀린 순서.
+- **번호·식은 파싱 오류**: `ORDER BY 2`·`GROUP BY 1`, `ORDER BY a + b`·`ABS(x)`·`CASE …`·`x IS NULL`·`COUNT(*) DESC`·`SUM(v)`, `GROUP BY id % 2`·`GROUP BY 별칭`.
+- **UNION/INTERSECT/EXCEPT의 `ORDER BY`**: `ORDER BY 1`은 정렬 안 함(열 이름만 찾음), 없는 이름도 오류 없이 정렬 안 함.
+- (이 점검에서 찾은 앞 항목의 **회귀**) 집계 안의 `CASE`·식은 텍스트로 다시 읽혀 열 타입을 잃었다: `SUM(CASE WHEN code = '007' THEN 1 ELSE 0 END)`가 `'7'`·`'7.0'`까지 센다(VARCHAR는 글자 비교인데 숫자 비교; 옛 `SumCase` 경로는 맞았음).
+- **숫자 그룹 키·DISTINCT**: `GROUP BY COALESCE(w, 0)`(w DECIMAL)가 `0.00`과 NULL의 `0`을 서로 다른 그룹으로, `SELECT DISTINCT COALESCE(w, 0)`도 같음(그룹·중복 키가 글자).
+- **함수 인자 안의 열은 타입을 모름**: `COALESCE(code, 'x') = '007'`이 숫자 비교라 `'7'`도 맞음(함수 인자는 바인더가 보지 않았음).
+
+**수정**:
+- 바인더: `ORDER BY`·`GROUP BY`의 항목이 번호이면 select 목록의 그 열(별 `*`는 열 이름들)로, select 목록이 주는 이름이면 그 이름이 뜻하는 것(열의 이름·식의 텍스트·집계 라벨)으로 바꾼다(이름은 같은 이름의 열보다 우선, MySQL처럼; 상수의 이름은 괄호로 감싸 번호와 구별). 한 `SELECT`에 한 번만(`Select::sort_resolved`; 다시 묶여도 — 파생 테이블·뷰 — 그대로) 하고, 범위 밖 번호는 `Unknown column 'N' in 'order clause'`.
+- 파서: `ORDER BY`·`GROUP BY` 항목은 열(`date`처럼 키워드인 열 이름도)이면 이름, 정수면 번호, 아니면 **식의 텍스트**(`parse_value_expr`).
+- 실행기: 식인 항목은 그 텍스트를 이름으로 한 숨은 값을 만들어 정렬·그룹이 열처럼 읽는다 — 행 단위(`ORDER BY` 식, `GROUP BY` 식)는 집계 인자와 같은 "행마다 계산" 단계에서, 그룹된 질의의 `ORDER BY` 식은 그룹마다(집계 호출 `SUM(v)`, 그룹 키, 그룹된 식을 읽음; 그룹된 식이 든 select 식·ORDER BY 식은 그 값을 읽도록 바꿈: `SELECT id % 2 … GROUP BY id % 2 ORDER BY id % 2`). 식은 질의의 테이블에 묶어(`parse_bound_expression`) 다시 읽으므로 열과 비교의 타입이 남는다(이 점검의 회귀도 이 경로로 고침; 바인더가 함수 인자 안의 열에도 타입을 줌, `COALESCE`·`IFNULL`·`GREATEST`·`LEAST`·`NULLIF`의 타입은 인자들의 공통 타입).
+- 숫자 그룹 키·`DISTINCT` 키는 값으로(`0`과 `0.00`은 한 그룹), 글자는 글자로.
+- UNION/INTERSECT/EXCEPT: `ORDER BY`는 답의 열 이름 또는 번호, 없는 이름·범위 밖 번호는 오류.
+
+**검증**:
+- 신규 Catch2 6케이스(574 → 580, `test_sort_group.cpp`): ① select 목록의 이름(열·식·함수·CASE·윈도·집계·집계의 식, LIMIT·OFFSET·DISTINCT·WHERE, 같은 이름의 열보다 우선, 상수의 이름), ② 번호(`*` 포함, 범위 밖 오류), ③ 식(산술·ABS·CASE·`IS NULL`·`LENGTH`·`COUNT(*)`·`SUM`·집계의 식·그룹된 식, 번호·별칭으로 `GROUP BY`), ④ 조인·뷰·파생 테이블·CTE·UNION/INTERSECT/EXCEPT, ⑤ 타입(VARCHAR의 `'007'`, 함수 인자, 숫자 그룹 키·DISTINCT), ⑥ **무작위 정렬·그룹을 독립 참조와 비교**(열·`t.열`·별칭·번호·식 키, 오름·내림, 그룹 식 × 정렬 항목).
+- **새 검증 도구 `verify_sort_group.py`**(정렬 결과의 순서를 참조와 비교: 열·별칭·번호·식(숫자·글자) 키, 그룹 + 정렬, 조인, UNION). 앞 빌드는 첫 질의에서 위반이라 도구가 버그를 본다는 것을 확인했고, 이 점검에서 숫자 그룹 키와 함수 인자의 타입 두 건을 찾아 고쳤다.
+- 심은 버그 25종(파서의 항목 판정·번호·GROUP BY, 바인더의 번호 풀이·이름 풀이·집계 라벨·식 텍스트·상수·다시 묶기·함수 인자 타입·식 묶기, 그룹 키 타입·`COALESCE`/`NULLIF` 타입, 숨은 값 넷, 그룹된 식 바꾸기 둘, DISTINCT 키, 집합 연산 둘) 가운데 **처음에는 2종이 살아남았고**(`NULLIF`의 타입, 그룹된 식이 든 ORDER BY 식) 테스트를 보강해 잡게 했다. 최종 25종을 모두 테스트가 잡는다. 이 점검 중 테스트가 찾은 구현 버그 하나: 풀이했다는 표시가 이름 한정 단계에서 지워져 파생 테이블 안의 정렬이 다시 풀이됨(`SELECT id AS v, v AS w … ORDER BY w`) — 고쳐서 테스트로 남김.
+- Release/Debug **580 케이스/1,333,872 assertions**를 기본 설정과 `RUSQL_DML_INDEX_MIN_ROWS=0` 양쪽에서 통과(네 가지 모두). SELECT 차분 퍼저 150시드(1,819,528 assertions), DML 퍼저 80시드(1,950,808), 쓰기 퍼저 40시드(43,182), 조인 퍼저 60시드(7,178), `[aggregate]` 긴 캠페인(11케이스 317,627), `[aggregate_semantics][random]`(23,151), `[aggregate_arguments][random]`(4,560), `[subquery_cardinality][random]`(5,269), `[typed_comparison][random]`(68,100 / DML 인덱스 강제 227,000), `[value_expressions][random]`(34,700 / 강제 20,820), 새 `[sort_group][random]`(7,800 / 강제 4,160), 크래시 퍼저 90라운드·동시 퍼저 30라운드(확인한 확정 행 15,398) 불일치 0. 새 `verify_sort_group.py` 12시드 × 200라운드 위반 없음(앞 빌드는 첫 질의에서 위반), `verify_value_expressions`·`verify_subqueries`·`verify_agg_arguments`·`verify_compare`·`verify_joins`(큰 표 포함)·`verify_writes`·`verify_null_expressions`·`verify_agg_expressions`·`verify_aggregates`·`verify_orderby_distinct`도 위반 없음.
+- 빌드 간 차분(이전 빌드 = 앞 항목): 30시드 × 99질의(2,970질의) **차이 0건** — 이 말뭉치의 질의는 별칭·번호·식으로 정렬하지 않아 의도한 변화가 나타나지 않는다(그 경우는 `verify_sort_group.py`와 새 테스트가 직접 검증한다). 곧 평범한 질의의 답과 열 이름은 이 항목 전후로 같다.
+- 성능: 앞 항목 빌드와 번갈아 측정(5만 행): 집계(`COUNT(*)` 약 50ms, `SUM`/`AVG` 약 70, `GROUP BY` + 4집계 약 88, `HAVING AVG` 약 77), 식(`UPPER(s), LENGTH(s)` 약 300ms, `val * 2 + 1` 약 280, `SUM(CASE …)` + GROUP BY 약 140, `SUM(price * val)` 약 170), WHERE 식(35~40ms) 모두 **두 빌드가 ±3% 안(측정 잡음)에서 같다** — 숫자 그룹 키를 값으로 바꾼 것(`GROUP BY grp` 88.7 vs 90.5ms)도 차이가 보이지 않는다. 정렬·그룹이 식이 아닌 평범한 질의는 새 경로를 지나지 않는다.
+
+**눈에 띄는 변화(의도한 것)**: 별칭으로 정렬한 질의가 이제 정렬됨(전에는 테이블 순서); `ORDER BY 1`이 UNION에서 정렬함, 없는 이름은 오류; 결과 열 이름은 그룹된 식이 select에 있으면 그 식의 텍스트(`MOD(id, 2)`, `g + 1`).
+
+**정직한 한계**: ① 결과 열 이름은 아직 MySQL처럼 타이핑한 글자 그대로가 아니다(공백이 빠진 `ROUND(d)*100`·`CASE`); ② 윈도의 `OVER (ORDER BY 식)`·`PARTITION BY 식`은 열만; ③ 괄호로 감싼 UNION 피연산자 `(SELECT …) UNION (SELECT …)`는 파싱 오류; ④ 그룹에 없는 열을 select에 쓰면(`SELECT id … GROUP BY g`) MySQL의 ONLY_FULL_GROUP_BY 오류 대신 빈 값; ⑤ `ORDER BY (3)`처럼 숫자 하나는 괄호가 있어도 번호로 읽음; ⑥ `date`·`year`·`time`·`count`·`text`·`level`·`user` 같은 이름의 열은 `CREATE TABLE`이 거절함(다음 항목); ⑦ 서브쿼리의 바깥 참조가 왼쪽에 있으면 틀림(별도 항목).
+
+**Diagram 페이지**: 구성요소·흐름이 바뀐 것이 없어 변경 없음.
+
 ## 요약: 1학기 대비 2학기에 달라진 것
 
 | 항목 | 1학기 (~2026년 6월) | 2학기 (2026년 7~8월) |

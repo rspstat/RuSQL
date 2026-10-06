@@ -93,6 +93,12 @@ here from the rows with exact rational arithmetic.
 
   python verify_compare.py <engine_server.exe> [--statements N] [--seed S] [--rows R]
 
+verify_sort_group.py checks ORDER BY and GROUP BY against a model: rows sorted by a mix of columns, t.column, names the select list gives, positions and expressions (numbers
+and strings, ASC / DESC, ties by the next key and the id); groups by an expression (spelled out, by its name or by position) sorted by a count, a sum, a position or an
+expression of aggregates; a join sorted by an alias, a position or an expression; UNION [ALL] sorted by position or name.
+
+  python verify_sort_group.py <engine_server.exe> [--queries N] [--seed S] [--rows R]
+
 verify_value_expressions.py checks expressions against a model: tables t(id, g, x, y, w, s) of random integers, two-place decimals and short strings (NULLs included),
 and random expressions -- arithmetic, ABS, COALESCE / IFNULL / NULLIF, CASE (searched and simple), IF, conditions as values (comparison, IS [NOT] NULL / TRUE / FALSE, BETWEEN,
 IN with a NULL in the list, LIKE, AND / OR / NOT), strings (CONCAT, UPPER) -- in the select list, WHERE (the rows where it is TRUE, and where NOT of it is TRUE), aggregates of

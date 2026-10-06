@@ -37,6 +37,25 @@ bool Parser::select_item_continues() const {
     return false;
 }
 
+std::string Parser::parse_sort_item() {
+    // a column the way it has always been read (a word that is also a keyword -- `date`, `year`, `count` -- is a column here), unless
+    // something goes on after it: then the whole item is an expression
+    const std::size_t start = pos_;
+    try {
+        std::string name = expect_col_ref();
+        if (!peek_is(TokenKind::LParen) && !at_value_continuation()) return name;
+    } catch (const ParseError&) {
+    }
+    pos_ = start;
+    ArithExpr e = parse_value_expr();
+    if (auto* col = std::get_if<ArithExpr::Col>(&e.data)) return col->name;
+    if (auto* num = std::get_if<ArithExpr::Num>(&e.data); num && !num->value.empty() &&
+                                                           num->value.find_first_not_of("0123456789") == std::string::npos) {
+        return num->value; // a position in the select list
+    }
+    return aggregate_argument_text(e);
+}
+
 std::optional<CondExpr> Parser::parse_optional_filter_clause() {
     if (!peek_is(TokenKind::Filter)) return std::nullopt;
     advance();
@@ -525,8 +544,8 @@ Statement Parser::parse_select() {
         if (!peek_is(TokenKind::By)) throw ParseError("Expected BY");
         advance();
         std::vector<std::string> cols;
-        cols.push_back(expect_col_ref());
-        while (peek_is(TokenKind::Comma)) { advance(); cols.push_back(expect_col_ref()); }
+        cols.push_back(parse_sort_item());
+        while (peek_is(TokenKind::Comma)) { advance(); cols.push_back(parse_sort_item()); }
         group_by = cols;
     }
 
@@ -541,7 +560,7 @@ Statement Parser::parse_select() {
         if (!peek_is(TokenKind::By)) throw ParseError("Expected BY");
         advance();
         for (;;) {
-            std::string col = expect_col_ref();
+            std::string col = parse_sort_item();
             bool asc = true;
             if (peek_is(TokenKind::Desc)) { advance(); asc = false; }
             else if (peek_is(TokenKind::Asc)) { advance(); asc = true; }

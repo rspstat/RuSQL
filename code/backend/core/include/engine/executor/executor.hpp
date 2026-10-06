@@ -865,6 +865,9 @@ private:
     // With `check`: "Unknown column 'x' in 'where clause'" for the first column name of a SELECT / UPDATE / DELETE that no table of the
     // statement (or of the queries around a subquery) has.
     std::optional<std::string> bind_statement(SharedDatabase& s, Statement& stmt, bool check);
+    // The expression written as `text` (the text of an aggregate's argument, an ORDER BY / GROUP BY expression), read again and bound to the
+    // tables of a query: its columns, and the comparisons in it, know what they hold, as they did in the statement the text came from.
+    ArithExpr parse_bound_expression(SharedDatabase& s, const std::string& text, const std::string& table, const std::vector<Join>& joins);
     // Replaces every place a statement names a variable -- a procedure's parameter or DECLAREd variable, an @user variable, and, when `row` is
     // given, a trigger's `NEW.x` / `OLD.x` -- by its value (executor_vars.cpp).
     void substitute_variables(Statement& stmt, const std::unordered_map<std::string, std::string>* row = nullptr) const;
