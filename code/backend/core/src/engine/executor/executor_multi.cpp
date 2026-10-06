@@ -335,12 +335,12 @@ StringResult Executor::exec_multi_delete(SharedDatabase& s, std::vector<std::str
         if (pk_cols.size() == 1) {
             std::vector<std::string> values;
             for (auto& k : keys) values.push_back(k[0]);
-            cond = CondExpr(CondExpr::Leaf{Condition{ArithExpr(ArithExpr::Col{pk_cols[0]}), Operator::In, ConditionValue(ConditionValue::LiteralList{std::move(values)})}});
+            cond = CondExpr(CondExpr::Leaf{Condition{ArithExpr(ArithExpr::Col{pk_cols[0]}), Operator::In, ConditionValue(ConditionValue::LiteralList{std::move(values), std::vector<bool>(keys.size(), true)})}});
         } else {
             for (auto& k : keys) {
                 std::optional<CondExpr> one;
                 for (std::size_t i = 0; i < pk_cols.size(); i++) {
-                    CondExpr leaf = CondExpr(CondExpr::Leaf{Condition{ArithExpr(ArithExpr::Col{pk_cols[i]}), Operator::Eq, ConditionValue(ConditionValue::Literal{k[i]})}});
+                    CondExpr leaf = CondExpr(CondExpr::Leaf{Condition{ArithExpr(ArithExpr::Col{pk_cols[i]}), Operator::Eq, ConditionValue(ConditionValue::Literal{k[i], true})}});
                     one = one ? CondExpr(CondExpr::And{std::make_unique<CondExpr>(std::move(*one)), std::make_unique<CondExpr>(std::move(leaf))}) : std::move(leaf);
                 }
                 cond = cond ? CondExpr(CondExpr::Or{std::make_unique<CondExpr>(std::move(*cond)), std::make_unique<CondExpr>(std::move(*one))}) : std::move(*one);

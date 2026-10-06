@@ -122,34 +122,34 @@ Gather gather(SharedDatabase& s, const std::string& table, const AccessPath& ap,
             using T = std::decay_t<decltype(a)>;
             if constexpr (std::is_same_v<T, AccessPath::PkPoint>) {
                 auto it = s.indexes.find(table);
-                auto lo = widen_numeric_bound(a.key, true), hi = widen_numeric_bound(a.key, false);
+                auto lo = index_bound(s.indexes, table, a.key, true), hi = index_bound(s.indexes, table, a.key, false);
                 if (it == s.indexes.end() || !lo || !hi) return Gather::Unsupported;
                 return from_range(it->second, *lo, *hi, false, true);
             } else if constexpr (std::is_same_v<T, AccessPath::PkBetween>) {
                 auto it = s.indexes.find(table);
-                auto lo = widen_numeric_bound(a.start, true), hi = widen_numeric_bound(a.end, false);
+                auto lo = index_bound(s.indexes, table, a.start, true), hi = index_bound(s.indexes, table, a.end, false);
                 if (it == s.indexes.end() || !lo || !hi) return Gather::Unsupported;
                 return from_range(it->second, *lo, *hi, false, true);
             } else if constexpr (std::is_same_v<T, AccessPath::PkRange>) {
                 auto it = s.indexes.find(table);
                 if (it == s.indexes.end()) return Gather::Unsupported;
-                auto bound = widen_numeric_bound(a.key, range_op_is_lower_bound(a.op));
+                auto bound = tree_bound(it->second, a.key, range_op_is_lower_bound(a.op));
                 if (!bound) return Gather::Unsupported;
                 return from_pairs(range_op_is_lower_bound(a.op) ? it->second.scan_from(*bound, true) : it->second.scan_to(*bound, true), false, true);
             } else if constexpr (std::is_same_v<T, AccessPath::SecondaryPoint>) {
                 auto it = s.indexes.find(a.index_key);
-                auto lo = widen_numeric_bound(a.key, true), hi = widen_numeric_bound(a.key, false);
+                auto lo = index_bound(s.indexes, a.index_key, a.key, true), hi = index_bound(s.indexes, a.index_key, a.key, false);
                 if (it == s.indexes.end() || !lo || !hi) return Gather::Unsupported;
                 return from_range(it->second, *lo, *hi, true, false);
             } else if constexpr (std::is_same_v<T, AccessPath::SecondaryBetween>) {
                 auto it = s.indexes.find(a.index_key);
-                auto lo = widen_numeric_bound(a.start, true), hi = widen_numeric_bound(a.end, false);
+                auto lo = index_bound(s.indexes, a.index_key, a.start, true), hi = index_bound(s.indexes, a.index_key, a.end, false);
                 if (it == s.indexes.end() || !lo || !hi) return Gather::Unsupported;
                 return from_range(it->second, *lo, *hi, true, false);
             } else if constexpr (std::is_same_v<T, AccessPath::SecondaryRange>) {
                 auto it = s.indexes.find(a.index_key);
                 if (it == s.indexes.end()) return Gather::Unsupported;
-                auto bound = widen_numeric_bound(a.key, range_op_is_lower_bound(a.op));
+                auto bound = tree_bound(it->second, a.key, range_op_is_lower_bound(a.op));
                 if (!bound) return Gather::Unsupported;
                 return from_pairs(range_op_is_lower_bound(a.op) ? it->second.scan_from(*bound, true) : it->second.scan_to(*bound, true), true, false);
             } else if constexpr (std::is_same_v<T, AccessPath::SecondaryLikePrefix>) {

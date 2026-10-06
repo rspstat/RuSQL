@@ -24,6 +24,8 @@
 #include <variant>
 #include <vector>
 
+#include "engine/value_class.hpp"
+
 namespace engine {
 
 // ---------------------------------------------------------------------------
@@ -35,7 +37,9 @@ enum class IsolationLevel { ReadUncommitted, ReadCommitted, RepeatableRead, Seri
 // ArithExpr (recursive arithmetic expression tree)
 // ---------------------------------------------------------------------------
 struct ArithExpr {
-    struct Col  { std::string name; };
+    // `cls`: what kind of value the column holds (its declared type), set by Executor::bind_statement before a statement runs; a comparison
+    // reads it (two text columns compare as text, a number column as numbers). Unknown for a column that has not been bound.
+    struct Col  { std::string name; ValueClass cls = ValueClass::Unknown; };
     struct Num  { std::string value; };
     struct Str  { std::string value; };
     struct Add  { std::unique_ptr<ArithExpr> lhs, rhs; };
@@ -93,6 +97,24 @@ struct DataType {
     template <typename Alt, typename = std::enable_if_t<!std::is_same_v<std::decay_t<Alt>, DataType>>>
     DataType(Alt alt) : data(std::move(alt)) {}
 };
+
+// What a column of this declared type holds: numbers, or text (dates and times are kept as text in their canonical form, which compares right as text).
+inline ValueClass class_of_type(const DataType& type) {
+    return std::visit(
+        [](const auto& alt) -> ValueClass {
+            using T = std::decay_t<decltype(alt)>;
+            if constexpr (std::is_same_v<T, DataType::Int> || std::is_same_v<T, DataType::BigInt> || std::is_same_v<T, DataType::SmallInt> ||
+                          std::is_same_v<T, DataType::TinyInt> || std::is_same_v<T, DataType::Float> || std::is_same_v<T, DataType::Double> ||
+                          std::is_same_v<T, DataType::Decimal> || std::is_same_v<T, DataType::Boolean> || std::is_same_v<T, DataType::Year>) {
+                return ValueClass::Number;
+            } else if constexpr (std::is_same_v<T, DataType::Unknown>) {
+                return ValueClass::Unknown;
+            } else {
+                return ValueClass::Text;
+            }
+        },
+        type.data);
+}
 
 // ---------------------------------------------------------------------------
 // FkAction / ForeignKey / ColumnDef
@@ -154,6 +176,7 @@ struct PartitionBy {
 struct OrderBy {
     std::string column;
     bool ascending = true;
+    ValueClass cls = ValueClass::Unknown; // what the column holds (set by Executor::bind_statement): text sorts as text, numbers as numbers
 };
 
 // ---------------------------------------------------------------------------
@@ -176,10 +199,12 @@ enum class Operator {
 };
 
 struct ConditionValue {
-    struct Literal { std::string value; };
+    // `quoted`: the value was written as a string ('abc'), so it is a string and never the name of a column or a number. (A value is kept
+    // without its quotes, which made `name = 'city'` read the column city.) LiteralList::quoted is empty when no item is quoted.
+    struct Literal { std::string value; bool quoted = false; };
     struct Subquery { StatementPtr query; };
-    struct Between { std::string lo, hi; };
-    struct LiteralList { std::vector<std::string> values; };
+    struct Between { std::string lo, hi; bool lo_quoted = false, hi_quoted = false; };
+    struct LiteralList { std::vector<std::string> values; std::vector<bool> quoted; };
     // PLAN.md P0 fix: the RHS of a comparison (`WHERE v > id + 100`) used to parse
     // as a single token, silently dropping the rest of the expression. Arith holds
     // a full ArithExpr so the RHS can be any arithmetic/function expression, not
@@ -205,6 +230,9 @@ struct Condition {
     ArithExpr left;
     Operator op;
     ConditionValue value;
+    // What each side of the comparison is (set by Executor::bind_statement): how the two compare (see value_class.hpp).
+    ValueClass left_class = ValueClass::Unknown;
+    ValueClass right_class = ValueClass::Unknown;
 };
 
 // Boolean expression tree with proper AND > OR precedence.
@@ -363,8 +391,9 @@ struct InsertConflict {
 // ---------------------------------------------------------------------------
 struct SelectColumn {
     struct All { std::string table; }; // `*`, or `table.*` (the table name or alias as typed)
-    struct Column { std::string name; };
-    struct ColumnAlias { std::string name, alias; };
+    // `cls` / `arg_class` / `col_class`: what the column the select item reads holds (set by Executor::bind_statement)
+    struct Column { std::string name; ValueClass cls = ValueClass::Unknown; };
+    struct ColumnAlias { std::string name, alias; ValueClass cls = ValueClass::Unknown; };
     // `filter`: PostgreSQL's `FILTER (WHERE ...)` clause on an aggregate -- no Rust
     // original, new C++-native addition. Restricts which rows THIS aggregate considers,
     // independent of the query's own WHERE/HAVING (e.g. `COUNT(*) FILTER (WHERE
@@ -372,8 +401,8 @@ struct SelectColumn {
     // `col` is the argument as the query spells it (`b.id`, `o.amount`): it names the result column (`SUM(o.amount)`), like the
     // text the user typed. `source` is where a row holds that value when `col` goes through a table ALIAS: the same name with the
     // table in place of the alias (`orders.amount`); empty when `col` already names the table (or none).
-    struct Agg { AggFunc func; std::string col; std::optional<CondExpr> filter; std::string source; };
-    struct AggAlias { AggFunc func; std::string col; std::string alias; std::optional<CondExpr> filter; std::string source; };
+    struct Agg { AggFunc func; std::string col; std::optional<CondExpr> filter; std::string source; ValueClass arg_class = ValueClass::Unknown; };
+    struct AggAlias { AggFunc func; std::string col; std::string alias; std::optional<CondExpr> filter; std::string source; ValueClass arg_class = ValueClass::Unknown; };
     struct Func { std::string name; std::vector<std::string> args; std::optional<std::string> alias; };
     struct Expr { ArithExpr expr; std::optional<std::string> alias; };
     struct CaseWhen {
@@ -389,6 +418,7 @@ struct SelectColumn {
         std::vector<OrderBy> order_by;
         std::optional<std::string> alias;
         std::optional<WindowFrame> frame;
+        ValueClass col_class = ValueClass::Unknown;
     };
     struct Subquery {
         StatementPtr query;

@@ -13,18 +13,14 @@ namespace engine {
 
 namespace {
 bool try_parse_f64(const std::string& s, double& out) {
-    if (s.empty()) return false;
-    auto res = std::from_chars(s.data(), s.data() + s.size(), out);
-    return res.ec == std::errc() && res.ptr == s.data() + s.size();
+    auto value = parse_number(s);
+    if (value) out = *value;
+    return value.has_value();
 }
 
 int sort_cmp(const std::string& a, const std::string& b) {
     double af, bf;
-    if (try_parse_f64(a, af) && try_parse_f64(b, bf)) {
-        if (af < bf) return -1;
-        if (af > bf) return 1;
-        return 0;
-    }
+    if (try_parse_f64(a, af) && try_parse_f64(b, bf)) return compare_numbers(a, b); // (integers exactly)
     return a.compare(b) < 0 ? -1 : (a.compare(b) > 0 ? 1 : 0);
 }
 
@@ -295,10 +291,11 @@ std::optional<std::vector<Row>> hashed_join_verified(const std::vector<Row>& lef
                                                       const std::function<const std::string*(const Row&)>& right_key,
                                                       const std::vector<std::string>& right_schema_cols,
                                                       const std::function<bool(const Row&)>& on_match,
-                                                      const std::vector<std::string>* left_pad) {
+                                                      const std::vector<std::string>* left_pad, bool exact_keys) {
     if (join_type != JoinType::Inner && join_type != JoinType::Left && join_type != JoinType::Right && join_type != JoinType::FullOuter) {
         return std::nullopt;
     }
+    auto norm = [exact_keys](const std::string& key) { return exact_keys ? key : normalize_numeric_key(key); };
     std::vector<const std::string*> right_keys, left_keys;
     right_keys.reserve(right.size());
     left_keys.reserve(left.size());
@@ -318,14 +315,14 @@ std::optional<std::vector<Row>> hashed_join_verified(const std::vector<Row>& lef
         // the nested loop walks the right rows and pads a right row nothing matched with NULL for the left row's plain columns
         std::unordered_map<std::string, std::vector<std::size_t>> by_key; // left row indexes, in left order
         for (std::size_t i = 0; i < left.size(); i++) {
-            if (*left_keys[i] != JOIN_NULL_VALUE) by_key[normalize_numeric_key(*left_keys[i])].push_back(i);
+            if (*left_keys[i] != JOIN_NULL_VALUE) by_key[norm(*left_keys[i])].push_back(i);
         }
         std::vector<std::string> left_cols = left_pad ? *left_pad : non_qualified_keys(left.empty() ? nullptr : &left[0]);
         out.reserve(right.size());
         for (std::size_t ri = 0; ri < right.size(); ri++) {
             bool matched = false;
             if (*right_keys[ri] != JOIN_NULL_VALUE) {
-                if (auto it = by_key.find(normalize_numeric_key(*right_keys[ri])); it != by_key.end()) {
+                if (auto it = by_key.find(norm(*right_keys[ri])); it != by_key.end()) {
                     for (std::size_t li : it->second) {
                         Row merged = left[li];
                         merge_right(merged, right[ri], table);
@@ -349,7 +346,7 @@ std::optional<std::vector<Row>> hashed_join_verified(const std::vector<Row>& lef
     // INNER / LEFT / FULL OUTER: the right rows are hashed (indexes, in right order)
     std::unordered_map<std::string, std::vector<std::size_t>> by_key;
     for (std::size_t ri = 0; ri < right.size(); ri++) {
-        if (*right_keys[ri] != JOIN_NULL_VALUE) by_key[normalize_numeric_key(*right_keys[ri])].push_back(ri);
+        if (*right_keys[ri] != JOIN_NULL_VALUE) by_key[norm(*right_keys[ri])].push_back(ri);
     }
     const bool pad_left_rows = join_type == JoinType::Left || join_type == JoinType::FullOuter;
     std::vector<char> right_matched(join_type == JoinType::FullOuter ? right.size() : 0, 0);
@@ -357,7 +354,7 @@ std::optional<std::vector<Row>> hashed_join_verified(const std::vector<Row>& lef
     for (std::size_t i = 0; i < left.size(); i++) {
         bool matched = false;
         if (*left_keys[i] != JOIN_NULL_VALUE) {
-            if (auto it = by_key.find(normalize_numeric_key(*left_keys[i])); it != by_key.end()) {
+            if (auto it = by_key.find(norm(*left_keys[i])); it != by_key.end()) {
                 for (std::size_t ri : it->second) {
                     Row merged = left[i];
                     merge_right(merged, right[ri], table);

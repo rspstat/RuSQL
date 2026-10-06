@@ -16,22 +16,27 @@
 #include <optional>
 #include <string>
 
+#include "engine/numeric_text.hpp"
+#include "engine/storage/btree.hpp"
+
 namespace engine {
 
 // Same notion of "is a number" as executor_eval.cpp's parse_f64: the WHOLE string must parse.
 inline bool parse_number_key(const std::string& s, double& out) {
-    if (s.empty()) return false;
-    auto res = std::from_chars(s.data(), s.data() + s.size(), out);
-    return res.ec == std::errc() && res.ptr == s.data() + s.size();
+    auto value = parse_number(s);
+    if (value) out = *value;
+    return value.has_value();
 }
 
 // Numerically equal texts ("7", "7.0", "007", "7e0") map to the same string; anything that is not a number
-// is returned unchanged. NaN is never equal to anything, so it keeps its own text.
+// is returned unchanged. NaN is never equal to anything, so it keeps its own text. An integer is its own exact
+// text, so 2^53 + 1 stays apart from 2^53 (as doubles they are one number).
 inline std::string normalize_numeric_key(const std::string& s) {
+    if (auto whole = parse_int64_text(s)) return std::to_string(*whole);
     double v;
     if (!parse_number_key(s, v) || std::isnan(v)) return s;
     if (std::isinf(v)) return v > 0 ? "inf" : "-inf";
-    if (v == 0) return "0"; // also folds "-0"
+    if (v == std::trunc(v) && std::fabs(v) < 9.2e18) return std::to_string(static_cast<long long>(v)); // "7.0" and "7e0" are "7", "-0" is "0"
     char buf[40];
     std::snprintf(buf, sizeof buf, "%.17g", v);
     return buf;
@@ -54,6 +59,20 @@ inline std::optional<std::string> widen_numeric_bound(const std::string& key, bo
     double back;
     if (!parse_number_key(buf, back) || back != w) return std::nullopt;
     return std::string(buf);
+}
+
+// The bound a lookup of `key` in `tree` uses. A tree of text keys is ordered by bytes, so it is searched by the key itself -- a bound widened as a
+// number would point into the wrong part of a byte order; any other tree by the key widened as a number (widen_numeric_bound).
+inline std::optional<std::string> tree_bound(const BPlusTree& tree, const std::string& key, bool lower) {
+    if (tree.text_keyed()) return key;
+    return widen_numeric_bound(key, lower);
+}
+
+// The same for the index named `index_key` of a map of trees (a tree that is not there: the key widened as a number).
+template <typename IndexMap>
+inline std::optional<std::string> index_bound(const IndexMap& indexes, const std::string& index_key, const std::string& key, bool lower) {
+    auto it = indexes.find(index_key);
+    return it != indexes.end() ? tree_bound(it->second, key, lower) : widen_numeric_bound(key, lower);
 }
 
 } // namespace engine

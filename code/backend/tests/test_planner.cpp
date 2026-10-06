@@ -10,9 +10,9 @@ Row row(std::initializer_list<std::pair<const char*, const char*>> kvs) {
     return r;
 }
 
-CondExpr eq_cond(const std::string& col, const std::string& val) {
+CondExpr eq_cond(const std::string& col, const std::string& val, bool quoted = false) {
     return CondExpr(CondExpr::Leaf{
-        Condition{ArithExpr(ArithExpr::Col{col}), Operator::Eq, ConditionValue(ConditionValue::Literal{val})}});
+        Condition{ArithExpr(ArithExpr::Col{col}), Operator::Eq, ConditionValue(ConditionValue::Literal{val, quoted})}});
 }
 } // namespace
 
@@ -66,14 +66,38 @@ TEST_CASE("Planner chooses HashPoint when a hash index exists on the column", "[
     Catalog catalog;
     ColumnDef email_col;
     email_col.name = "email";
+    email_col.data_type = DataType(DataType::Varchar{30});
     catalog.create_table("employee", {email_col});
 
     std::unordered_map<std::string, TableStats> stats;
     Planner planner(tables, indexes, index_meta, composite_indexes, hash_indexes, hash_index_meta, catalog, stats);
 
-    auto cond = eq_cond("email", "a@b.com");
+    auto cond = eq_cond("email", "a@b.com", true);
     AccessPath access = planner.choose_access("employee", cond, std::nullopt);
     REQUIRE(std::holds_alternative<AccessPath::HashPoint>(access.data));
+    // a text column compared with a number is read by the number each text starts with: no index of texts answers that
+    AccessPath by_number = planner.choose_access("employee", eq_cond("email", "7"), std::nullopt);
+    REQUIRE(std::holds_alternative<AccessPath::SeqScan>(by_number.data));
+}
+
+TEST_CASE("Planner uses an index of a column whose type it does not know, for a string and for a number", "[planner]") {
+    std::unordered_map<std::string, std::vector<Row>> tables = {{"employee", {row({{"email", "a@b.com"}})}}};
+    std::unordered_map<std::string, BPlusTree> indexes;
+    std::unordered_map<std::string, std::pair<std::string, std::string>> index_meta;
+    std::unordered_map<std::string, CompositeIndex> composite_indexes;
+    std::unordered_map<std::string, HashIndex> hash_indexes;
+    std::unordered_map<std::string, std::pair<std::string, std::string>> hash_index_meta = {{"idx_email", {"employee", "email"}}};
+
+    Catalog catalog;
+    ColumnDef email_col;
+    email_col.name = "email";
+    email_col.data_type = DataType(DataType::Unknown{}); // (a schema written by a build that knew a type this one does not)
+    catalog.create_table("employee", {email_col});
+
+    std::unordered_map<std::string, TableStats> stats;
+    Planner planner(tables, indexes, index_meta, composite_indexes, hash_indexes, hash_index_meta, catalog, stats);
+    REQUIRE(std::holds_alternative<AccessPath::HashPoint>(planner.choose_access("employee", eq_cond("email", "a@b.com", true), std::nullopt).data));
+    REQUIRE(std::holds_alternative<AccessPath::HashPoint>(planner.choose_access("employee", eq_cond("email", "7"), std::nullopt).data));
 }
 
 TEST_CASE("Planner estimate_cost: SeqScan scales with table size, PkPoint is near-constant", "[planner]") {

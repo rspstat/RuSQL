@@ -248,9 +248,10 @@ bool ref_number(const std::string& s, double& out) {
     out = std::strtod(s.c_str(), &end);
     return end == s.c_str() + s.size() && s.find_first_of("xXnN") == std::string::npos; // from_chars grammar, not strtod's hex/inf/nan
 }
-int ref_cmp(const std::string& a, const std::string& b) {
+// `text`: the values are those of a text column, which sort as text whatever they look like ('10' < '9'); the others of a number column
+int ref_cmp(const std::string& a, const std::string& b, bool text) {
     double x, y;
-    if (ref_number(a, x) && ref_number(b, y)) return x < y ? -1 : (x > y ? 1 : 0);
+    if (!text && ref_number(a, x) && ref_number(b, y)) return x < y ? -1 : (x > y ? 1 : 0);
     return a < b ? -1 : (a > b ? 1 : 0);
 }
 } // namespace
@@ -292,7 +293,7 @@ TEST_CASE("ORDER BY / LIMIT / OFFSET of a scan returns exactly the reference ord
         for (std::size_t i = 0; i < order.size(); i++) order[i] = i;
         std::stable_sort(order.begin(), order.end(), [&](std::size_t x, std::size_t y) {
             for (auto& [col, asc] : keys) {
-                int c = ref_cmp(all[x][static_cast<std::size_t>(col)], all[y][static_cast<std::size_t>(col)]);
+                int c = ref_cmp(all[x][static_cast<std::size_t>(col)], all[y][static_cast<std::size_t>(col)], col == 1 || col == 3); // (a and c are text)
                 if (!asc) c = -c;
                 if (c != 0) return c < 0;
             }

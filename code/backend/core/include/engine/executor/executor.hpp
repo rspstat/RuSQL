@@ -553,7 +553,9 @@ private:
                                    const std::string& pk_col);
     void rebuild_secondary_indexes(SharedDatabase& s, const std::string& table, const std::vector<Row>& rows);
     // The PK B+Tree for `rows`: one entry per pk, a live version always winning over a dead one (see the definition).
-    static BPlusTree build_pk_tree(const std::vector<Row>& rows, const std::string& pk_col);
+    static BPlusTree build_pk_tree(const std::vector<Row>& rows, const std::string& pk_col, std::vector<KeyKind> kinds = {});
+    // How an index on these columns of the table orders its keys: numbers by value, text by bytes (btree.hpp).
+    static std::vector<KeyKind> key_kinds_of(const TableSchema* schema, const std::vector<std::string>& columns);
 
     // ── index-assisted candidate search for UPDATE/DELETE (executor_dml_index.cpp) ──
     struct DmlIndexHit {
@@ -607,6 +609,9 @@ private:
     // "table.col" or "col" lookup with dotted-suffix/bare-column fallback.
     static const std::string* get_col(const Row& row, const std::string& col);
     static std::string eval_arith(const Row& row, const ArithExpr& expr);
+    // What an expression gives, which says how it compares: a number for arithmetic, text for a string, what the column holds for a (bound)
+    // column, a function's result class for a call (value_class.hpp).
+    static ValueClass class_of_expr(const ArithExpr& expr);
     static std::string format_arith_result(double f);
     // Scalar function dispatcher (MD5/string/date/JSON/math functions, plus
     // user-defined functions and DATABASE()/SCHEMA()/USER()). Mirrors the Rust original's
@@ -721,9 +726,9 @@ private:
 
     // ── Phase 8b: DELETE ─────────────────────────────────────────────────
     static bool condition_has_subquery(const std::optional<CondExpr>& condition);
-    static std::optional<std::string> extract_pk_eq_value(const std::optional<CondExpr>& condition, const std::string& pk_col);
-    static std::optional<std::pair<std::string, std::string>> extract_pk_between_value(const std::optional<CondExpr>& condition,
-                                                                                          const std::string& pk_col);
+    static std::optional<std::string> extract_pk_eq_value(const std::optional<CondExpr>& condition, const std::string& pk_col, const TableSchema* schema);
+    static std::optional<std::pair<std::string, std::string>> extract_pk_between_value(const std::optional<CondExpr>& condition, const std::string& pk_col,
+                                                                                          const TableSchema* schema);
 
 public:
     // ── Gap Lock (InnoDB-style phantom-read prevention, see gap_lock.cpp) ────
@@ -854,9 +859,11 @@ private:
     // The columns a SELECT answers with, named the way format_rows names them, for a derived table that came back with no rows (an
     // empty answer has no header to read them from). Empty when the statement is not a plain SELECT.
     std::vector<std::string> derived_column_names(SharedDatabase& s, const Statement& stmt);
-    // "Unknown column 'x' in 'where clause'" (executor_bind.cpp): the first column name of a SELECT / UPDATE / DELETE that no table
-    // of the statement (or of the queries around a subquery) has.
-    std::optional<std::string> check_columns(SharedDatabase& s, const Statement& stmt);
+    // Binding (executor_bind.cpp): gives every column reference, comparison, ORDER BY column and aggregate argument of the statement what it
+    // holds (a number or text, from the column's declared type, a literal's quotes, an expression's operators), which the evaluators read.
+    // With `check`: "Unknown column 'x' in 'where clause'" for the first column name of a SELECT / UPDATE / DELETE that no table of the
+    // statement (or of the queries around a subquery) has.
+    std::optional<std::string> bind_statement(SharedDatabase& s, Statement& stmt, bool check);
     // Replaces every place a statement names a variable -- a procedure's parameter or DECLAREd variable, an @user variable, and, when `row` is
     // given, a trigger's `NEW.x` / `OLD.x` -- by its value (executor_vars.cpp).
     void substitute_variables(Statement& stmt, const std::unordered_map<std::string, std::string>* row = nullptr) const;
@@ -890,7 +897,7 @@ private:
     static std::vector<std::string> extract_agg_refs_from_cond(const CondExpr& expr);
     static void collect_agg_refs_cond(const CondExpr& expr, std::vector<std::string>& out);
     static void collect_agg_refs_arith(const ArithExpr& expr, std::vector<std::string>& out);
-    static std::string compute_agg_from_key(const std::string& key, const std::vector<const Row*>& grp);
+    static std::string compute_agg_from_key(const std::string& key, const std::vector<const Row*>& grp, ValueClass arg_class = ValueClass::Unknown);
     // Computes every Agg/AggAlias column in `columns` over `grp` (pointers into the rows being aggregated -- a group never
     // owns copies of its rows), keyed by each column's display label — shared by the GROUP BY path (one call per group) and
     // the whole-result aggregate path (one call over all rows), exactly as the two

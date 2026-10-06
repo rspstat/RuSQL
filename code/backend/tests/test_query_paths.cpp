@@ -83,11 +83,17 @@ bool ref_number(const std::string& s, double& out) {
     out = std::strtod(s.c_str(), &end);
     return end == s.c_str() + s.size() && s.find_first_of("xXnN") == std::string::npos;
 }
-int ref_cmp(const std::string& a, const std::string& b) {
+// `text`: the values are those of a text column, which sort as text whatever they look like ('10' < '9'); the others of a number column
+int ref_cmp(const std::string& a, const std::string& b, bool text = false) {
     if (a == "NULL" || b == "NULL") return a == b ? 0 : (a == "NULL" ? -1 : 1); // NULL sorts before every value
     double x, y;
-    if (ref_number(a, x) && ref_number(b, y)) return x < y ? -1 : (x > y ? 1 : 0);
+    if (!text && ref_number(a, x) && ref_number(b, y)) return x < y ? -1 : (x > y ? 1 : 0);
     return a < b ? -1 : (a > b ? 1 : 0);
+}
+// the columns of the join tests that hold text (t.code, t.tag, u.name, w.code); the others hold numbers
+bool ref_text_column(const std::string& col) {
+    auto ends = [&](const char* suffix) { std::string s = suffix; return col.size() >= s.size() && col.compare(col.size() - s.size(), s.size(), s) == 0; };
+    return ends("code") || ends("tag") || ends("name");
 }
 
 // A table of the reference model: every value is text, "NULL" for NULL, like the engine stores it.
@@ -198,7 +204,7 @@ TEST_CASE("GROUP BY with aggregates, WHERE, HAVING, ORDER BY and LIMIT matches a
             if (keep) rows.push_back(&r);
         }
         auto less_by_order = [&](const RefRow* a, const RefRow* b) {
-            int c = ref_cmp(a->at(order_key), b->at(order_key));
+            int c = ref_cmp(a->at(order_key), b->at(order_key), order_key == "tag");
             return order_desc ? c > 0 : c < 0;
         };
         if (has_order) std::stable_sort(rows.begin(), rows.end(), less_by_order);
@@ -249,7 +255,7 @@ TEST_CASE("GROUP BY with aggregates, WHERE, HAVING, ORDER BY and LIMIT matches a
         if (has_order) {
             std::size_t col = static_cast<std::size_t>(std::find(keys.begin(), keys.end(), order_key) - keys.begin());
             std::stable_sort(expected.begin(), expected.end(), [&](const std::vector<std::string>& a, const std::vector<std::string>& b) {
-                int c = ref_cmp(a[col], b[col]);
+                int c = ref_cmp(a[col], b[col], order_key == "tag");
                 return order_desc ? c > 0 : c < 0;
             });
         }
@@ -294,7 +300,7 @@ TEST_CASE("DISTINCT with ORDER BY / LIMIT / OFFSET matches a reference", "[query
         if (has_order) {
             std::size_t col = order_col == "a" ? 1 : 2;
             std::stable_sort(rows.begin(), rows.end(), [&](const auto& x, const auto& y) {
-                int c = ref_cmp(x[col], y[col]);
+                int c = ref_cmp(x[col], y[col], col == 1); // (a is the text column)
                 return desc ? c > 0 : c < 0;
             });
         }
@@ -444,20 +450,27 @@ TEST_CASE("LEFT JOIN on NULL, empty and numeric look-alike keys", "[query_paths]
     REQUIRE(ex.execute_sql("CREATE TABLE b (id INT PRIMARY KEY, k VARCHAR(10), tag VARCHAR(10))").is_ok());
     REQUIRE(ex.execute_sql("INSERT INTO a VALUES (1,'7'), (2,'7.0'), (3,NULL), (4,''), (5,'x'), (6,'07'), (7,'8')").is_ok());
     REQUIRE(ex.execute_sql("INSERT INTO b VALUES (1,'007','p'), (2,NULL,'q'), (3,'','r'), (4,'x','s'), (5,'7.00','t'), (6,'9','u')").is_ok());
-    // 7, 7.0, 07 meet 007 and 7.00 (numbers); NULL meets nothing, not even a NULL; '' meets '' (an empty string is a value);
-    // 'x' meets 'x'; 8 meets nothing
+    // two text columns are equal when the texts are: '7', '7.0', '07', '007' and '7.00' meet nothing but themselves; NULL meets nothing,
+    // not even a NULL; '' meets '' (an empty string is a value); 'x' meets 'x'
     auto rows = table_cells(ok_text(ex, "SELECT a.id, b.tag FROM a LEFT JOIN b ON a.k = b.k"));
     std::multiset<std::string> got;
     for (auto& r : rows) got.insert(r[0] + ":" + r[1]);
-    REQUIRE(got == std::multiset<std::string>{"1:p", "1:t", "2:p", "2:t", "3:NULL", "4:r", "5:s", "6:p", "6:t", "7:NULL"});
-    // left rows keep their order, a left row's matches keep the right table's order
+    REQUIRE(got == std::multiset<std::string>{"1:NULL", "2:NULL", "3:NULL", "4:r", "5:s", "6:NULL", "7:NULL"});
+    // left rows keep their order
     REQUIRE(rows.at(0)[0] == "1");
-    REQUIRE(rows.at(0)[1] == "p");
-    REQUIRE(rows.at(1)[1] == "t");
+    REQUIRE(rows.at(0)[1] == "NULL");
+    // the same keys in number columns meet by value: 7, 7.0, 07 meet 007 and 7.00
+    REQUIRE(ex.execute_sql("CREATE TABLE an (id INT PRIMARY KEY, k DECIMAL(10,2))").is_ok());
+    REQUIRE(ex.execute_sql("CREATE TABLE bn (id INT PRIMARY KEY, k DECIMAL(10,2), tag VARCHAR(10))").is_ok());
+    REQUIRE(ex.execute_sql("INSERT INTO an VALUES (1, 7), (2, 7.0), (3, NULL), (4, 8), (6, 07)").is_ok());
+    REQUIRE(ex.execute_sql("INSERT INTO bn VALUES (1, 007, 'p'), (2, NULL, 'q'), (5, 7.00, 't'), (6, 9, 'u')").is_ok());
+    std::multiset<std::string> numbers;
+    for (auto& r : table_cells(ok_text(ex, "SELECT an.id, bn.tag FROM an LEFT JOIN bn ON an.k = bn.k"))) numbers.insert(r[0] + ":" + r[1]);
+    REQUIRE(numbers == std::multiset<std::string>{"1:p", "1:t", "2:p", "2:t", "3:NULL", "4:NULL", "6:p", "6:t"});
     // EXPLAIN says what runs: a LEFT JOIN is a hash join, never an index nested loop
     REQUIRE(ok_text(ex, "EXPLAIN SELECT a.id, b.tag FROM a LEFT JOIN b ON a.k = b.k").find("Index NL") == std::string::npos);
     // an inner join with the same condition drops the unmatched rows
-    REQUIRE(table_cells(ok_text(ex, "SELECT a.id FROM a JOIN b ON a.k = b.k AND b.tag <> 'zzz'")).size() == 8);
+    REQUIRE(table_cells(ok_text(ex, "SELECT a.id FROM a JOIN b ON a.k = b.k AND b.tag <> 'zzz'")).size() == 2);
 }
 
 TEST_CASE("IndexNL probes cached per key give the rows an uncached join would", "[query_paths][join]") {
@@ -831,7 +844,7 @@ TEST_CASE("ORDER BY and DISTINCT on table.column match a reference when both tab
                 auto sort_by = [&](std::vector<JR>& rows, const std::vector<Key>& keys) {
                     std::stable_sort(rows.begin(), rows.end(), [&](const JR& a, const JR& b) {
                         for (auto& key : keys) {
-                            int c = ref_cmp(q_value(*a.t, a.u, key.col), q_value(*b.t, b.u, key.col));
+                            int c = ref_cmp(q_value(*a.t, a.u, key.col), q_value(*b.t, b.u, key.col), ref_text_column(key.col));
                             if (c != 0) return key.asc ? c < 0 : c > 0;
                         }
                         return false;
@@ -891,7 +904,7 @@ TEST_CASE("ORDER BY and DISTINCT on table.column match a reference when both tab
                     }
                     std::stable_sort(distinct_rows.begin(), distinct_rows.end(), [&](const std::vector<std::string>& a, const std::vector<std::string>& b) {
                         for (std::size_t i = 0; i < keys.size(); i++) {
-                            int c = ref_cmp(a[i], b[i]);
+                            int c = ref_cmp(a[i], b[i], ref_text_column(keys[i].col));
                             if (c != 0) return keys[i].asc ? c < 0 : c > 0;
                         }
                         return false;
@@ -1201,7 +1214,7 @@ TEST_CASE("aggregates over table.column match a reference when both tables have 
                             groups[it->second].second.push_back(&r);
                         }
                     }
-                    std::stable_sort(groups.begin(), groups.end(), [](auto& a, auto& b) { return ref_cmp(a.first, b.first) < 0; });
+                    std::stable_sort(groups.begin(), groups.end(), [&](auto& a, auto& b) { return ref_cmp(a.first, b.first, ref_text_column(key)) < 0; });
                     std::string sql = "SELECT " + spell(key) + ", " + agg_list + " " + from + " GROUP BY " + spell(key);
                     std::optional<Spec> having;
                     double threshold = 0;
@@ -1635,7 +1648,7 @@ TEST_CASE("expressions over aggregates match a reference when both tables have t
                             groups[it->second].second.push_back(&r);
                         }
                     }
-                    std::stable_sort(groups.begin(), groups.end(), [](auto& p, auto& q) { return ref_cmp(p.first, q.first) < 0; });
+                    std::stable_sort(groups.begin(), groups.end(), [&](auto& p, auto& q) { return ref_cmp(p.first, q.first, ref_text_column(key)) < 0; });
                     std::string sql = "SELECT " + spell(key) + ", " + std::string(selects_a ? a + ", " : "") + expr + " " + from + " GROUP BY " + spell(key) + " ORDER BY " + spell(key);
                     auto got = table_cells(ok_text(ex, sql));
                     INFO(sql);

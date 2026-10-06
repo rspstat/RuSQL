@@ -269,7 +269,7 @@ void Executor::recover_from_redo() {
                 }
             }
         }
-        if (auto idx_it = sw->indexes.find(table); idx_it != sw->indexes.end()) idx_it->second = build_pk_tree(rows, pk_col);
+        if (auto idx_it = sw->indexes.find(table); idx_it != sw->indexes.end()) idx_it->second = build_pk_tree(rows, pk_col, idx_it->second.kinds());
         rebuild_secondary_indexes(*sw, table, rows);
         for (auto& [k, ci] : sw->composite_indexes) {
             if (ci.table == table) ci.rebuild(rows);

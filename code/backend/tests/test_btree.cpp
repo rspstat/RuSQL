@@ -1,5 +1,7 @@
 #include <algorithm>
 #include <random>
+#include <regex>
+#include <set>
 #include <thread>
 #include <vector>
 
@@ -327,25 +329,36 @@ TEST_CASE("BPlusTree is safe under real concurrent insert/remove/search on disjo
     }
 }
 
-// cmp_keys is the comparison under every index operation, so it was rewritten without per-call allocations and with a
-// parse-free path for plain integers. The ORDER it defines must not change by a single comparison: this keeps a copy of
-// the previous implementation and compares the two on random keys -- numbers in many spellings, composite (NUL-joined)
-// keys, text, empties, signs, exponents, leading zeros, very long digit strings.
+// cmp_keys is the comparison under every index operation. Its order for a key of unknown type is a total order -- the empty key, then numbers
+// by value (the same value: by bytes), then every other key by bytes -- written out here independently (a regular expression for "is a
+// number"). The order it replaced (numbers by value when both keys were numbers, else by bytes) was not transitive -- 9 < 10, 10 < 1a, 1a < 9
+// -- and a tree built on it could miss keys it held. A composite key is compared segment by segment (NUL-joined), a prefix first.
 namespace {
-bool ref_parse_f64(const std::string& s, double& out) {
-    if (s.empty()) return false;
-    auto res = std::from_chars(s.data(), s.data() + s.size(), out);
-    return res.ec == std::errc() && res.ptr == s.data() + s.size();
+bool ref_is_number(const std::string& s) {
+    static const std::regex re(R"(^[+-]?([0-9]+\.?[0-9]*|\.[0-9]+)([eE][+-]?[0-9]+)?$)");
+    return std::regex_match(s, re);
 }
+int sign(int v) { return v < 0 ? -1 : (v > 0 ? 1 : 0); }
 int ref_segment(const std::string& a, const std::string& b) {
     if (a == b) return 0;
-    double af, bf;
-    if (ref_parse_f64(a, af) && ref_parse_f64(b, bf)) {
-        if (af < bf) return -1;
-        if (af > bf) return 1;
-        return a.compare(b) < 0 ? -1 : (a.compare(b) > 0 ? 1 : 0);
+    if (a.empty()) return -1;
+    if (b.empty()) return 1;
+    const bool na = ref_is_number(a), nb = ref_is_number(b);
+    if (na && nb) {
+        double x = 0, y = 0;
+        try {
+            x = std::stod(a);
+            y = std::stod(b);
+        } catch (...) {
+            return sign(a.compare(b)); // (out of the range of a double: the engine does not read it as a number either, see below)
+        }
+        if (x < y) return -1;
+        if (x > y) return 1;
+        return sign(a.compare(b));
     }
-    return a.compare(b) < 0 ? -1 : (a.compare(b) > 0 ? 1 : 0);
+    if (na) return -1;
+    if (nb) return 1;
+    return sign(a.compare(b));
 }
 int ref_cmp_keys(const std::string& a, const std::string& b) {
     std::size_t pa = 0, pb = 0;
@@ -363,7 +376,6 @@ int ref_cmp_keys(const std::string& a, const std::string& b) {
         pb = db + 1;
     }
 }
-int sign(int v) { return v < 0 ? -1 : (v > 0 ? 1 : 0); }
 
 std::string random_segment(std::mt19937& rng) {
     static const char* fixed[] = {"", "0", "00", "-0", "0.0", "7", "07", "7.0", "7.00", "+7", "-7", "1e3", "1E3", "1000", "0x10", "inf", "nan", "abc",
@@ -383,9 +395,9 @@ std::string random_segment(std::mt19937& rng) {
 }
 } // namespace
 
-TEST_CASE("cmp_keys orders keys exactly as the previous implementation did", "[btree][cmp_keys]") {
+TEST_CASE("cmp_keys orders keys of an unknown type as numbers first, then text", "[btree][cmp_keys]") {
     std::mt19937 rng(12345);
-    for (int i = 0; i < 400000; i++) {
+    for (int i = 0; i < 200000; i++) {
         std::string a = random_segment(rng), b = random_segment(rng);
         if (rng() % 4 == 0) { // composite keys: 2-3 segments joined with NUL
             for (std::size_t n = 1 + rng() % 2, k = 0; k < n; k++) {
@@ -397,5 +409,136 @@ TEST_CASE("cmp_keys orders keys exactly as the previous implementation did", "[b
         INFO("a=[" << a << "] b=[" << b << "]");
         REQUIRE(sign(cmp_keys(a, b)) == sign(ref_cmp_keys(a, b)));
         REQUIRE(sign(cmp_keys(a, a)) == 0);
+        REQUIRE(sign(cmp_keys(a, b)) == -sign(cmp_keys(b, a)));
+    }
+}
+
+TEST_CASE("cmp_keys is transitive", "[btree][cmp_keys]") {
+    std::mt19937 rng(777);
+    for (int i = 0; i < 200000; i++) {
+        std::string a = random_segment(rng), b = random_segment(rng), c = random_segment(rng);
+        INFO("a=[" << a << "] b=[" << b << "] c=[" << c << "]");
+        if (cmp_keys(a, b) <= 0 && cmp_keys(b, c) <= 0) REQUIRE(cmp_keys(a, c) <= 0);
+        if (cmp_keys(a, b) < 0 && cmp_keys(b, c) < 0) REQUIRE(cmp_keys(a, c) < 0);
+    }
+    // the case that broke the old order: 9 < 10 (numbers), 10 < 1a (text), 1a < 9 (text)
+    REQUIRE(cmp_keys("9", "10") < 0);
+    REQUIRE(cmp_keys("10", "1a") < 0);
+    REQUIRE(cmp_keys("9", "1a") < 0);
+}
+
+// a key set with numbers, numbers with leading zeros and signs, decimals, and words
+std::vector<std::string> mixed_keys(unsigned seed, std::size_t count) {
+    std::mt19937 rng(seed);
+    std::set<std::string> keys;
+    while (keys.size() < count) {
+        switch (rng() % 6) {
+            case 0: keys.insert(std::to_string(rng() % 400)); break;
+            case 1: keys.insert(std::to_string(rng() % 400) + "abc"[rng() % 3]); break;
+            case 2: keys.insert(std::string(1, "ABC"[rng() % 3]) + std::to_string(rng() % 400)); break;
+            case 3: keys.insert("0" + std::to_string(rng() % 99)); break;
+            case 4: keys.insert(std::to_string(rng() % 99) + "." + std::to_string(rng() % 10)); break;
+            default: keys.insert(std::string(1, static_cast<char>('a' + rng() % 26)) + std::to_string(rng() % 50)); break;
+        }
+    }
+    return std::vector<std::string>(keys.begin(), keys.end());
+}
+
+TEST_CASE("a tree of text keys is ordered by bytes and finds every key", "[btree][key_kinds]") {
+    for (unsigned seed = 1; seed <= 4; seed++) {
+        auto keys = mixed_keys(seed, 1500);
+        std::mt19937 rng(seed);
+        std::shuffle(keys.begin(), keys.end(), rng);
+        BPlusTree tree(std::vector<KeyKind>{KeyKind::Text});
+        for (auto& k : keys) tree.insert(k, "v" + k);
+        for (auto& k : keys) {
+            auto found = tree.search(k);
+            INFO("key " << k);
+            REQUIRE(found.has_value());
+            REQUIRE(*found == "v" + k);
+        }
+        auto all = tree.collect_all_kv();
+        REQUIRE(all.size() == keys.size());
+        std::vector<std::string> sorted = keys;
+        std::sort(sorted.begin(), sorted.end()); // bytes
+        for (std::size_t i = 0; i < sorted.size(); i++) REQUIRE(all[i].first == sorted[i]);
+        // a range is a range of bytes ('10' < '9' < '9a')
+        std::vector<std::string> in_range;
+        for (auto& k : sorted) {
+            if (k >= "10" && k <= "9") in_range.push_back(k);
+        }
+        REQUIRE(tree.range_keys("10", "9") == in_range);
+        // deleting every other key leaves the others findable
+        for (std::size_t i = 0; i < keys.size(); i += 2) tree.remove(keys[i]);
+        for (std::size_t i = 0; i < keys.size(); i++) REQUIRE(tree.search(keys[i]).has_value() == (i % 2 == 1));
+    }
+}
+
+TEST_CASE("a tree of number keys is ordered by value, integers exactly", "[btree][key_kinds]") {
+    BPlusTree tree(std::vector<KeyKind>{KeyKind::Number});
+    std::vector<std::string> keys = {"9007199254740993", "9007199254740992", "9007199254740991", "-5", "0", "7", "10", "9", "100", "7.5", "-0.5", "1000000"};
+    for (auto& k : keys) tree.insert(k, "v" + k);
+    for (auto& k : keys) REQUIRE(*tree.search(k) == "v" + k);
+    std::vector<std::string> order;
+    for (auto& [k, v] : tree.collect_all_kv()) order.push_back(k);
+    REQUIRE(order == std::vector<std::string>{"-5", "-0.5", "0", "7", "7.5", "9", "10", "100", "1000000", "9007199254740991", "9007199254740992", "9007199254740993"});
+    REQUIRE(tree.range_keys("9", "100") == std::vector<std::string>{"9", "10", "100"});
+}
+
+TEST_CASE("a tree of number keys keeps the spellings of one number apart", "[btree][key_kinds]") {
+    // "007", "07", "7" and "7.0" are one number; a column of numbers can hold them all (the user's text is kept), and an index must not merge them
+    BPlusTree tree(std::vector<KeyKind>{KeyKind::Number});
+    for (const char* k : {"7.0", "007", "7", "07", "8", "6"}) tree.insert(k, std::string("v") + k);
+    REQUIRE(tree.collect_all_kv().size() == 6);
+    for (const char* k : {"7.0", "007", "7", "07", "8", "6"}) {
+        auto found = tree.search(k);
+        INFO("key " << k);
+        REQUIRE(found.has_value());
+        REQUIRE(*found == std::string("v") + k);
+    }
+    std::vector<std::string> order;
+    for (auto& [k, v] : tree.collect_all_kv()) order.push_back(k);
+    REQUIRE(order == std::vector<std::string>{"6", "007", "07", "7", "7.0", "8"});
+    tree.remove("07");
+    REQUIRE(!tree.search("07").has_value());
+    REQUIRE(tree.search("007").has_value());
+    REQUIRE(tree.search("7").has_value());
+}
+
+TEST_CASE("each segment of a composite key is ordered by its own kind", "[btree][key_kinds]") {
+    auto key = [](const std::string& a, const std::string& b) { return a + std::string(1, '\0') + b; };
+    // (text, number): the first segment by bytes ("10" < "9"), the second by value (9 < 10)
+    {
+        BPlusTree tree(std::vector<KeyKind>{KeyKind::Text, KeyKind::Number});
+        for (auto& k : {key("9", "10"), key("10", "9"), key("9", "9"), key("10", "10")}) tree.insert(k, "v");
+        std::vector<std::string> order;
+        for (auto& [k, v] : tree.collect_all_kv()) order.push_back(k);
+        REQUIRE(order == std::vector<std::string>{key("10", "9"), key("10", "10"), key("9", "9"), key("9", "10")});
+    }
+    // (number, text): the other way round
+    {
+        BPlusTree tree(std::vector<KeyKind>{KeyKind::Number, KeyKind::Text});
+        for (auto& k : {key("9", "10"), key("10", "9"), key("9", "9"), key("10", "10")}) tree.insert(k, "v");
+        std::vector<std::string> order;
+        for (auto& [k, v] : tree.collect_all_kv()) order.push_back(k);
+        REQUIRE(order == std::vector<std::string>{key("9", "10"), key("9", "9"), key("10", "10"), key("10", "9")});
+    }
+}
+
+TEST_CASE("a tree of unknown key type finds every key", "[btree][key_kinds]") {
+    // (344 of 1,000 keys of a table were lost to lookups with the old order, which was not transitive)
+    for (unsigned seed = 1; seed <= 4; seed++) {
+        auto keys = mixed_keys(seed + 50, 2000);
+        std::mt19937 rng(seed);
+        std::shuffle(keys.begin(), keys.end(), rng);
+        BPlusTree tree;
+        for (auto& k : keys) tree.insert(k, "v" + k);
+        for (auto& k : keys) {
+            INFO("key " << k);
+            REQUIRE(tree.search(k).has_value());
+        }
+        std::vector<std::string> order;
+        for (auto& [k, v] : tree.collect_all_kv()) order.push_back(k);
+        REQUIRE(std::is_sorted(order.begin(), order.end(), [](const std::string& a, const std::string& b) { return cmp_keys(a, b) < 0; }));
     }
 }

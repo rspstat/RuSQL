@@ -561,10 +561,19 @@ void to_json(nlohmann::json& j, const ConditionValue& cv) {
     std::visit(
         [&j](const auto& alt) {
             using T = std::decay_t<decltype(alt)>;
-            if constexpr (std::is_same_v<T, ConditionValue::Literal>) j = nlohmann::json{{"Literal", alt.value}};
+            if constexpr (std::is_same_v<T, ConditionValue::Literal>) {
+                j = nlohmann::json{{"Literal", alt.value}};
+                if (alt.quoted) j["quoted"] = true;
+            }
             else if constexpr (std::is_same_v<T, ConditionValue::Subquery>) j = nlohmann::json{{"Subquery", *alt.query}};
-            else if constexpr (std::is_same_v<T, ConditionValue::Between>) j = nlohmann::json{{"Between", nlohmann::json::array({alt.lo, alt.hi})}};
-            else if constexpr (std::is_same_v<T, ConditionValue::LiteralList>) j = nlohmann::json{{"LiteralList", alt.values}};
+            else if constexpr (std::is_same_v<T, ConditionValue::Between>) {
+                j = nlohmann::json{{"Between", nlohmann::json::array({alt.lo, alt.hi})}};
+                if (alt.lo_quoted) j["lo_quoted"] = true;
+                if (alt.hi_quoted) j["hi_quoted"] = true;
+            } else if constexpr (std::is_same_v<T, ConditionValue::LiteralList>) {
+                j = nlohmann::json{{"LiteralList", alt.values}};
+                if (!alt.quoted.empty()) j["quoted"] = alt.quoted;
+            }
             else if constexpr (std::is_same_v<T, ConditionValue::Arith>) j = nlohmann::json{{"Arith", alt.expr}};
         },
         cv.data);
@@ -575,10 +584,12 @@ void from_json(const nlohmann::json& j, ConditionValue& cv) {
     auto it = j.begin();
     const std::string& tag = it.key();
     const auto& p = it.value();
-    if (tag == "Literal") cv = ConditionValue(ConditionValue::Literal{p.get<std::string>()});
+    if (tag == "Literal") cv = ConditionValue(ConditionValue::Literal{p.get<std::string>(), j.value("quoted", false)});
     else if (tag == "Subquery") cv = ConditionValue(ConditionValue::Subquery{std::make_unique<Statement>(p.get<Statement>())});
-    else if (tag == "Between") cv = ConditionValue(ConditionValue::Between{p.at(0).get<std::string>(), p.at(1).get<std::string>()});
-    else if (tag == "LiteralList") cv = ConditionValue(ConditionValue::LiteralList{p.get<std::vector<std::string>>()});
+    else if (tag == "Between")
+        cv = ConditionValue(ConditionValue::Between{p.at(0).get<std::string>(), p.at(1).get<std::string>(), j.value("lo_quoted", false), j.value("hi_quoted", false)});
+    else if (tag == "LiteralList")
+        cv = ConditionValue(ConditionValue::LiteralList{p.get<std::vector<std::string>>(), j.contains("quoted") ? j.at("quoted").get<std::vector<bool>>() : std::vector<bool>{}});
     else if (tag == "Arith") cv = ConditionValue(ConditionValue::Arith{p.get<ArithExpr>()});
     else throw std::runtime_error("unknown ConditionValue tag: " + tag);
 }

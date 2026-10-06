@@ -148,15 +148,26 @@ TEST_CASE("SELECT index: numerically equal spellings are found on every access p
         REQUIRE(ids_of(ex, "SELECT id FROM d WHERE price BETWEEN 7 AND 7") == std::vector<int>{1, 2});
         REQUIRE(ids_of(ex, "SELECT id FROM d WHERE price BETWEEN 7.0 AND 7.5") == std::vector<int>{1, 2, 3});
         REQUIRE(ids_of(ex, "SELECT id FROM d WHERE code = 7") == std::vector<int>{1, 2, 3});
-        REQUIRE(ids_of(ex, "SELECT id FROM d WHERE code = '7.00'") == std::vector<int>{1, 2, 3});
+        REQUIRE(ids_of(ex, "SELECT id FROM d WHERE code = 7.00") == std::vector<int>{1, 2, 3});
+        // two strings are equal when the texts are
+        REQUIRE(ids_of(ex, "SELECT id FROM d WHERE code = '7.00'").empty());
+        REQUIRE(ids_of(ex, "SELECT id FROM d WHERE code = '7'") == std::vector<int>{2});
+        REQUIRE(ids_of(ex, "SELECT id FROM d WHERE code = '07'") == std::vector<int>{1});
+        REQUIRE(ids_of(ex, "SELECT id FROM d WHERE code = '7.0'") == std::vector<int>{3});
         REQUIRE(ids_of(ex, "SELECT id FROM d WHERE qty = 7") == std::vector<int>{1, 2, 5});
         REQUIRE(ids_of(ex, "SELECT id FROM d WHERE qty >= 7") == std::vector<int>{1, 2, 3, 5});
         REQUIRE(ids_of(ex, "SELECT id FROM d WHERE qty < 7.0") == std::vector<int>{4});
-        for (const char* p : {"price = 7", "price >= 7.00", "price > 7.0", "price <= 7", "price BETWEEN 7 AND 7.5", "code = 7", "code = '07'",
-                              "qty = 7.0", "qty > 6.0", "qty BETWEEN 7.0 AND 8"}) {
+        for (const char* p : {"price = 7", "price >= 7.00", "price > 7.0", "price <= 7", "price BETWEEN 7 AND 7.5", "code = '07'", "code = '7.0'",
+                              "code > '5'", "code BETWEEN '0' AND '8'", "qty = 7.0", "qty > 6.0", "qty BETWEEN 7.0 AND 8"}) {
             REQUIRE(uses_index(ex, std::string("SELECT id FROM d WHERE ") + p));
             check_same(ex, "id", "d", p);
             check_same(ex, "*", "d", p);
+        }
+        // a text column compared with a number reads each text by the number it starts with ('x' is 0): its index of texts cannot answer that,
+        // the scan does -- with the same answer a scan gives
+        for (const char* p : {"code = 7", "code > 6", "code <= 7.0", "code BETWEEN 7 AND 8"}) {
+            REQUIRE(!uses_index(ex, std::string("SELECT id FROM d WHERE ") + p));
+            check_same(ex, "id", "d", p);
         }
     }
 
@@ -227,7 +238,10 @@ TEST_CASE("SELECT index: a hash index buckets by numeric value", "[select_index]
     REQUIRE(ex.execute_sql("CREATE INDEX hxn ON hx (n) USING HASH").is_ok());
     REQUIRE(ex.execute_sql("INSERT INTO hx VALUES (1, '07', 7), (2, '7', 07), (3, '7.0', 7.0), (4, 'q', 8), (5, '7e0', 70)").is_ok());
     REQUIRE(ids_of(ex, "SELECT id FROM hx WHERE code = 7") == std::vector<int>{1, 2, 3, 5});
-    REQUIRE(ids_of(ex, "SELECT id FROM hx WHERE code = '07.0'") == std::vector<int>{1, 2, 3, 5});
+    REQUIRE(ids_of(ex, "SELECT id FROM hx WHERE code = 07.0") == std::vector<int>{1, 2, 3, 5});
+    REQUIRE(ids_of(ex, "SELECT id FROM hx WHERE code = '07.0'").empty());
+    REQUIRE(ids_of(ex, "SELECT id FROM hx WHERE code = '7.0'") == std::vector<int>{3});
+    REQUIRE(ids_of(ex, "SELECT id FROM hx WHERE code = '7'") == std::vector<int>{2});
     REQUIRE(ids_of(ex, "SELECT id FROM hx WHERE code = 'q'") == std::vector<int>{4});
     REQUIRE(ids_of(ex, "SELECT id FROM hx WHERE n = 7.00") == std::vector<int>{1, 2, 3});
     for (const char* p : {"code = 7", "code = '7.0'", "code = 'q'", "n = 7", "n = 8.0", "code = 7 AND n = 7.0", "code = '07' AND n = 7"}) {
@@ -406,6 +420,47 @@ TEST_CASE("SELECT index: a primary key that is not the first column", "[select_i
     check();
     REQUIRE(ids_of(ex, "SELECT id FROM t WHERE id = 3 AND v = 5") == std::vector<int>{3});
     REQUIRE(ids_of(ex, "SELECT id FROM t WHERE id = 1").empty());
+}
+
+TEST_CASE("SELECT index: LIKE and composite indexes answer only what their keys can", "[select_index][typed]") {
+    TempDataDir dir("sel_idx_like_composite");
+    Executor ex(dir.path);
+    open_db(ex);
+    // LIKE '1%' on a column of numbers is not "the numbers from 1 up": the index of numbers does not answer it, the scan does
+    REQUIRE(ex.execute_sql("CREATE TABLE l (id INT PRIMARY KEY, n INT, s VARCHAR(10))").is_ok());
+    REQUIRE(ex.execute_sql("CREATE INDEX l_n ON l (n)").is_ok());
+    REQUIRE(ex.execute_sql("CREATE INDEX l_s ON l (s)").is_ok());
+    REQUIRE(ex.execute_sql("INSERT INTO l VALUES (1, 1, '7'), (2, 10, '007'), (3, 12, 'abc'), (4, 100, '7'), (5, 21, 'x'), (6, 5, ''), (7, 15, '7x')").is_ok());
+    REQUIRE(!uses_index(ex, "SELECT id FROM l WHERE n LIKE '1%'"));
+    REQUIRE(ids_of(ex, "SELECT id FROM l WHERE n LIKE '1%'") == std::vector<int>{1, 2, 3, 4, 7});
+    check_same(ex, "id", "l", "n LIKE '1%'");
+    // an index of texts does (a prefix of a text is a range of bytes)
+    REQUIRE(uses_index(ex, "SELECT id FROM l WHERE s LIKE '7%'"));
+    REQUIRE(ids_of(ex, "SELECT id FROM l WHERE s LIKE '7%'") == std::vector<int>{1, 4, 7});
+    check_same(ex, "id", "l", "s LIKE '7%'");
+    // a composite index of numbers answers numbers (a string that is a number as well) ...
+    REQUIRE(ex.execute_sql("CREATE TABLE c1 (id INT PRIMARY KEY, a INT, b INT)").is_ok());
+    REQUIRE(ex.execute_sql("CREATE INDEX c1_ab ON c1 (a, b)").is_ok());
+    REQUIRE(ex.execute_sql("INSERT INTO c1 VALUES (1, 1, 2), (2, 1, 2), (3, 1, 3), (4, 2, 2), (5, 1, 2), (6, 0, 0)").is_ok());
+    REQUIRE(uses_index(ex, "SELECT id FROM c1 WHERE a = 1 AND b = 2"));
+    REQUIRE(uses_index(ex, "SELECT id FROM c1 WHERE a = 1 AND b = '2'"));
+    REQUIRE(ids_of(ex, "SELECT id FROM c1 WHERE a = 1 AND b = '2'") == std::vector<int>{1, 2, 5});
+    check_same(ex, "id", "c1", "a = 1 AND b = 2");
+    check_same(ex, "id", "c1", "a = 1 AND b = '2'");
+    // ... but not a text, which is read by its leading number ('x' is 0)
+    REQUIRE(!uses_index(ex, "SELECT id FROM c1 WHERE a = 0 AND b = 'x'"));
+    REQUIRE(ids_of(ex, "SELECT id FROM c1 WHERE a = 0 AND b = 'x'") == std::vector<int>{6});
+    check_same(ex, "id", "c1", "a = 0 AND b = 'x'");
+    // a composite index with a column of texts answers nothing: '7' = '007' is false, 7 = '007' is true
+    REQUIRE(ex.execute_sql("CREATE TABLE c2 (id INT PRIMARY KEY, s VARCHAR(10), a INT)").is_ok());
+    REQUIRE(ex.execute_sql("CREATE INDEX c2_sa ON c2 (s, a)").is_ok());
+    REQUIRE(ex.execute_sql("INSERT INTO c2 VALUES (1, '7', 1), (2, '007', 1), (3, 'abc', 1), (4, '7', 2), (5, '', 1), (6, '0', 1), (7, '7x', 1)").is_ok());
+    REQUIRE(!uses_index(ex, "SELECT id FROM c2 WHERE s = '7' AND a = 1"));
+    REQUIRE(!uses_index(ex, "SELECT id FROM c2 WHERE s = 7 AND a = 1"));
+    REQUIRE(ids_of(ex, "SELECT id FROM c2 WHERE s = '7' AND a = 1") == std::vector<int>{1});
+    REQUIRE(ids_of(ex, "SELECT id FROM c2 WHERE s = 7 AND a = 1") == std::vector<int>{1, 2, 7});
+    check_same(ex, "id", "c2", "s = '7' AND a = 1");
+    check_same(ex, "id", "c2", "s = 7 AND a = 1");
 }
 
 TEST_CASE("SELECT index: indexes answer correctly after a checkpoint and a restart", "[select_index][persist]") {

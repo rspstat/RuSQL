@@ -11,9 +11,9 @@ namespace engine {
 
 namespace {
 bool try_parse_f64(const std::string& s, double& out) {
-    if (s.empty()) return false;
-    auto res = std::from_chars(s.data(), s.data() + s.size(), out);
-    return res.ec == std::errc() && res.ptr == s.data() + s.size();
+    auto value = parse_number(s);
+    if (value) out = *value;
+    return value.has_value();
 }
 
 std::string bare_col(const std::string& s) {
@@ -152,21 +152,23 @@ AccessPath Planner::choose_access(const std::string& table, const std::optional<
         if (std::holds_alternative<ArithExpr::Col>(cond.left.data)) {
             const std::string& col_full = std::get<ArithExpr::Col>(cond.left.data).name;
             std::string col = bare_col(col_full);
-            if (pk && *pk == col) {
+            const bool answers = index_answers(table, col, cond);
+            if (answers && pk && *pk == col) {
                 if (auto path = pk_access(cond, table)) return *path;
             }
-            if (cond.op == Operator::Eq) {
-                if (std::holds_alternative<ConditionValue::Literal>(cond.value.data)) {
-                    const std::string& k = std::get<ConditionValue::Literal>(cond.value.data).value;
-                    if (!is_col_ref_in_context(k, table)) {
+            if (answers && cond.op == Operator::Eq) {
+                if (auto* lit = std::get_if<ConditionValue::Literal>(&cond.value.data)) {
+                    if (lit->quoted || !is_col_ref_in_context(lit->value, table)) {
                         if (auto idx_key = find_hash_index(table, col)) {
-                            return AccessPath(AccessPath::HashPoint{*idx_key, col, k});
+                            return AccessPath(AccessPath::HashPoint{*idx_key, col, lit->value});
                         }
                     }
                 }
             }
-            if (auto idx_key = find_secondary_index(table, col)) {
-                if (auto path = secondary_access(*idx_key, col, cond, table)) return *path;
+            if (answers) {
+                if (auto idx_key = find_secondary_index(table, col)) {
+                    if (auto path = secondary_access(*idx_key, col, cond, table)) return *path;
+                }
             }
         }
     }
@@ -174,12 +176,12 @@ AccessPath Planner::choose_access(const std::string& table, const std::optional<
     auto eq_map = constant_eq_map(table, expr);
     if (!eq_map.empty()) {
         for (auto& [name, ci] : composite_indexes_) {
-            if (ci.table == table && ci.matches_conditions(eq_map)) {
+            if (ci.table == table && ci.matches_conditions(eq_map) && composite_answers(table, ci, eq_map)) {
                 return AccessPath(AccessPath::CompositeIndexPath{name});
             }
         }
         for (auto& [name, ci] : composite_indexes_) {
-            if (ci.table != table) continue;
+            if (ci.table != table || !composite_answers(table, ci, eq_map)) continue;
             if (auto prefix = ci.prefix_key_from_eq_map(eq_map)) {
                 return AccessPath(AccessPath::CompositeIndexPrefix{name, *prefix});
             }
@@ -224,8 +226,10 @@ std::optional<AccessPath> Planner::try_index_intersection(const std::string& tab
         if (pk && *pk == col) continue;
         if (cond->op != Operator::Eq) continue;
         if (!std::holds_alternative<ConditionValue::Literal>(cond->value.data)) continue;
-        const std::string& k = std::get<ConditionValue::Literal>(cond->value.data).value;
-        if (is_col_ref_in_context(k, table)) continue;
+        const auto& literal = std::get<ConditionValue::Literal>(cond->value.data);
+        const std::string& k = literal.value;
+        if (!literal.quoted && is_col_ref_in_context(k, table)) continue;
+        if (!index_answers(table, col, *cond)) continue;
         if (auto idx_key = find_hash_index(table, col)) {
             sub_paths.push_back(AccessPath(AccessPath::HashPoint{*idx_key, col, k}));
             continue;
@@ -240,23 +244,22 @@ std::optional<AccessPath> Planner::try_index_intersection(const std::string& tab
 
 std::optional<AccessPath> Planner::pk_access(const Condition& cond, const std::string& table) const {
     auto lit = [&]() -> const std::string* {
-        return std::holds_alternative<ConditionValue::Literal>(cond.value.data)
-                   ? &std::get<ConditionValue::Literal>(cond.value.data).value
-                   : nullptr;
+        auto* l = std::get_if<ConditionValue::Literal>(&cond.value.data);
+        return l && (l->quoted || !is_col_ref_in_context(l->value, table)) ? &l->value : nullptr; // (a quoted value is a string, not a column)
     };
     if (cond.op == Operator::Eq) {
-        if (auto* k = lit(); k && !is_col_ref_in_context(*k, table)) return AccessPath(AccessPath::PkPoint{*k});
+        if (auto* k = lit()) return AccessPath(AccessPath::PkPoint{*k});
     } else if (cond.op == Operator::Between && std::holds_alternative<ConditionValue::Between>(cond.value.data)) {
         auto& b = std::get<ConditionValue::Between>(cond.value.data);
         return AccessPath(AccessPath::PkBetween{b.lo, b.hi});
     } else if (cond.op == Operator::Gt) {
-        if (auto* k = lit(); k && !is_col_ref_in_context(*k, table)) return AccessPath(AccessPath::PkRange{RangeOp::Gt, *k});
+        if (auto* k = lit()) return AccessPath(AccessPath::PkRange{RangeOp::Gt, *k});
     } else if (cond.op == Operator::Gte) {
-        if (auto* k = lit(); k && !is_col_ref_in_context(*k, table)) return AccessPath(AccessPath::PkRange{RangeOp::Gte, *k});
+        if (auto* k = lit()) return AccessPath(AccessPath::PkRange{RangeOp::Gte, *k});
     } else if (cond.op == Operator::Lt) {
-        if (auto* k = lit(); k && !is_col_ref_in_context(*k, table)) return AccessPath(AccessPath::PkRange{RangeOp::Lt, *k});
+        if (auto* k = lit()) return AccessPath(AccessPath::PkRange{RangeOp::Lt, *k});
     } else if (cond.op == Operator::Lte) {
-        if (auto* k = lit(); k && !is_col_ref_in_context(*k, table)) return AccessPath(AccessPath::PkRange{RangeOp::Lte, *k});
+        if (auto* k = lit()) return AccessPath(AccessPath::PkRange{RangeOp::Lte, *k});
     }
     return std::nullopt;
 }
@@ -273,23 +276,22 @@ std::optional<std::string> like_prefix(const std::string& pat) {
 std::optional<AccessPath> Planner::secondary_access(const std::string& index_key, const std::string& col,
                                                      const Condition& cond, const std::string& table) const {
     auto lit = [&]() -> const std::string* {
-        return std::holds_alternative<ConditionValue::Literal>(cond.value.data)
-                   ? &std::get<ConditionValue::Literal>(cond.value.data).value
-                   : nullptr;
+        auto* l = std::get_if<ConditionValue::Literal>(&cond.value.data);
+        return l && (l->quoted || !is_col_ref_in_context(l->value, table)) ? &l->value : nullptr;
     };
     if (cond.op == Operator::Eq) {
-        if (auto* k = lit(); k && !is_col_ref_in_context(*k, table)) return AccessPath(AccessPath::SecondaryPoint{index_key, col, *k});
+        if (auto* k = lit()) return AccessPath(AccessPath::SecondaryPoint{index_key, col, *k});
     } else if (cond.op == Operator::Between && std::holds_alternative<ConditionValue::Between>(cond.value.data)) {
         auto& b = std::get<ConditionValue::Between>(cond.value.data);
         return AccessPath(AccessPath::SecondaryBetween{index_key, col, b.lo, b.hi});
     } else if (cond.op == Operator::Gt) {
-        if (auto* k = lit(); k && !is_col_ref_in_context(*k, table)) return AccessPath(AccessPath::SecondaryRange{index_key, col, RangeOp::Gt, *k});
+        if (auto* k = lit()) return AccessPath(AccessPath::SecondaryRange{index_key, col, RangeOp::Gt, *k});
     } else if (cond.op == Operator::Gte) {
-        if (auto* k = lit(); k && !is_col_ref_in_context(*k, table)) return AccessPath(AccessPath::SecondaryRange{index_key, col, RangeOp::Gte, *k});
+        if (auto* k = lit()) return AccessPath(AccessPath::SecondaryRange{index_key, col, RangeOp::Gte, *k});
     } else if (cond.op == Operator::Lt) {
-        if (auto* k = lit(); k && !is_col_ref_in_context(*k, table)) return AccessPath(AccessPath::SecondaryRange{index_key, col, RangeOp::Lt, *k});
+        if (auto* k = lit()) return AccessPath(AccessPath::SecondaryRange{index_key, col, RangeOp::Lt, *k});
     } else if (cond.op == Operator::Lte) {
-        if (auto* k = lit(); k && !is_col_ref_in_context(*k, table)) return AccessPath(AccessPath::SecondaryRange{index_key, col, RangeOp::Lte, *k});
+        if (auto* k = lit()) return AccessPath(AccessPath::SecondaryRange{index_key, col, RangeOp::Lte, *k});
     } else if (cond.op == Operator::Like) {
         if (auto* pat = lit()) {
             if (auto prefix = like_prefix(*pat)) return AccessPath(AccessPath::SecondaryLikePrefix{index_key, col, *prefix});
@@ -318,6 +320,51 @@ bool Planner::is_col_ref_in_context(const std::string& k, const std::string& tab
                             [&](const ColumnDef& c) { return ieq(c.name, k); });
     }
     return false;
+}
+
+bool Planner::index_answers(const std::string& table, const std::string& col, const Condition& cond) const {
+    ValueClass col_class = ValueClass::Unknown;
+    if (const TableSchema* schema = catalog_.get_table(table)) {
+        for (auto& c : schema->columns) {
+            if (ieq(c.name, col)) {
+                col_class = class_of_type(c.data_type);
+                break;
+            }
+        }
+    }
+    if (col_class == ValueClass::Unknown) return true; // a column of no known type: as before
+    if (cond.op == Operator::Like) return col_class == ValueClass::Text;
+    // the values the index would be searched with
+    std::vector<std::pair<const std::string*, bool>> values; // text, quoted
+    if (auto* lit = std::get_if<ConditionValue::Literal>(&cond.value.data)) values.emplace_back(&lit->value, lit->quoted);
+    else if (auto* between = std::get_if<ConditionValue::Between>(&cond.value.data)) {
+        values.emplace_back(&between->lo, between->lo_quoted);
+        values.emplace_back(&between->hi, between->hi_quoted);
+    }
+    for (auto& [text, quoted] : values) {
+        if (col_class == ValueClass::Number && !parse_number(*text)) return false; // a number is searched by the number the text is
+        if (col_class == ValueClass::Text && !quoted) return false;                // a text is searched by a string, not by a number
+    }
+    return true;
+}
+
+bool Planner::composite_answers(const std::string& table, const CompositeIndex& index, const std::unordered_map<std::string, std::string>& eq_map) const {
+    const TableSchema* schema = catalog_.get_table(table);
+    for (auto& col : index.columns) {
+        auto value = eq_map.find(col);
+        if (value == eq_map.end()) break; // (the columns the search does not use do not matter)
+        ValueClass col_class = ValueClass::Unknown;
+        if (schema) {
+            for (auto& c : schema->columns) {
+                if (ieq(c.name, col)) {
+                    col_class = class_of_type(c.data_type);
+                    break;
+                }
+            }
+        }
+        if (col_class != ValueClass::Number || !parse_number(value->second)) return false;
+    }
+    return true;
 }
 
 std::optional<std::string> Planner::find_secondary_index(const std::string& table, const std::string& col) const {
@@ -435,7 +482,8 @@ JoinAlgo Planner::choose_join_algo(std::size_t left_size, std::size_t right_size
     if (std::holds_alternative<CondExpr::Leaf>(on_expr.data)) {
         const Condition& cond = std::get<CondExpr::Leaf>(on_expr.data).condition;
         if (cond.op == Operator::Eq && std::holds_alternative<ArithExpr::Col>(cond.left.data) &&
-            std::holds_alternative<ConditionValue::Literal>(cond.value.data)) {
+            std::holds_alternative<ConditionValue::Literal>(cond.value.data) && cond.left_class != ValueClass::Text &&
+            cond.right_class != ValueClass::Text) { // (a text column: the executor's exact hash join, not a numeric one)
             const std::string& lc = std::get<ArithExpr::Col>(cond.left.data).name;
             const std::string& rv = std::get<ConditionValue::Literal>(cond.value.data).value;
             std::string lhs_col = bare_col(lc);

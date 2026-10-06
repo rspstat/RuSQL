@@ -41,13 +41,7 @@ namespace {
 // that file's own comment for why it doesn't share code with executor_eval.cpp) --
 // numeric-priority compare so RANGE partition bounds compare the same way a WHERE clause
 // would evaluate the same values.
-std::optional<double> parse_f64(const std::string& s) {
-    if (s.empty()) return std::nullopt;
-    double val;
-    auto res = std::from_chars(s.data(), s.data() + s.size(), val);
-    if (res.ec != std::errc() || res.ptr != s.data() + s.size()) return std::nullopt;
-    return val;
-}
+std::optional<double> parse_f64(const std::string& s) { return parse_number(s); }
 
 int cmp_val(const std::string& a, const std::string& b) {
     auto da = parse_f64(a);

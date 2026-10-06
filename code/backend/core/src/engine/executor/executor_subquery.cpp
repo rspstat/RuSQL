@@ -20,13 +20,7 @@
 namespace engine {
 
 namespace {
-std::optional<double> parse_f64(const std::string& s) {
-    if (s.empty()) return std::nullopt;
-    double val;
-    auto res = std::from_chars(s.data(), s.data() + s.size(), val);
-    if (res.ec != std::errc() || res.ptr != s.data() + s.size()) return std::nullopt;
-    return val;
-}
+std::optional<double> parse_f64(const std::string& s) { return parse_number(s); }
 
 bool looks_like_qualified_col(const std::string& s) {
     auto dot = s.find('.');
@@ -277,8 +271,7 @@ Executor::Tri Executor::eval_single_with_subquery(SharedDatabase& s, const Row& 
                 // a scalar subquery with no row, or a NULL, makes the comparison UNKNOWN
                 if (sub_vals.empty() || sub_vals.front() == EXECUTOR_NULL_VALUE) return Tri::Unknown;
                 const std::string& rhs = sub_vals.front();
-                auto a = parse_f64(val), b = parse_f64(rhs);
-                int c = (a && b) ? (*a < *b ? -1 : (*a > *b ? 1 : 0)) : (val < rhs ? -1 : (val > rhs ? 1 : 0)); // numbers as numbers, else as text
+                const int c = compare_classed(cond.left_class != ValueClass::Unknown ? cond.left_class : class_of_expr(cond.left), cond.right_class, val, rhs);
                 switch (cond.op) {
                     case Operator::Eq: return tri(c == 0);
                     case Operator::Ne: return tri(c != 0);

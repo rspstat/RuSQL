@@ -34,14 +34,19 @@ def cells(out):
     return rows
 
 
-def compare(a, b):
+TEXT_COLUMNS = {"code", "tag", "note", "name"}  # the VARCHAR columns of the corpus: they sort as text whatever the values look like ('10' < '9')
+
+
+def compare(a, b, text=False):
     if a == "NULL" or b == "NULL":  # NULL sorts before every value (builds before 2026-10-05 compared it as the text "NULL")
         return (a != "NULL") - (b != "NULL")
-    try:
-        x, y = float(a), float(b)
-        return (x > y) - (x < y)
-    except ValueError:
-        return (a > b) - (a < b)
+    if not text:
+        try:
+            x, y = float(a), float(b)
+            return (x > y) - (x < y)
+        except ValueError:
+            pass
+    return (a > b) - (a < b)
 
 
 SIMPLE_ITEM = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)?$")
@@ -116,7 +121,7 @@ def main():
                     col = items.index(first)
                     checked["sorted_key"] += 1
                     for a, b in zip(got, got[1:]):
-                        c = compare(a[col], b[col])
+                        c = compare(a[col], b[col], first.split(".")[-1] in TEXT_COLUMNS)
                         if (c > 0 and asc) or (c < 0 and not asc):
                             print("NOT IN ORDER on", first, "(asc)" if asc else "(desc)", ":", sql, "|", a[col], "then", b[col])
                             return 1

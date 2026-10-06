@@ -193,7 +193,7 @@ StringResult Executor::exec_update_inner(SharedDatabase& s, const std::string& t
     // single-column PK the position comes from the row_pk_pos cache in O(1).
     const bool positions_ok = !condition_has_subquery(condition);
     const std::optional<std::string> pk_eq =
-        (positions_ok && pk_cols.size() == 1) ? extract_pk_eq_value(condition, pk_col) : std::nullopt;
+        (positions_ok && pk_cols.size() == 1) ? extract_pk_eq_value(condition, pk_col, schema0) : std::nullopt;
     bool bypass_pk_cache = false;  // set after a stale-position retry so the retry really rescans
     bool rebuild_pk_cache = false; // pk-equality missed the cache although the row exists -> repopulate it once
 

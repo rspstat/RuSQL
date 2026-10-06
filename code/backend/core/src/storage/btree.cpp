@@ -5,6 +5,8 @@
 #include <cstdlib>
 #include <string_view>
 
+#include "engine/numeric_text.hpp"
+
 namespace engine {
 
 namespace {
@@ -14,16 +16,15 @@ constexpr std::size_t ORDER = 16;    // 노드당 최대 키 수 (분할 임계�
 // 공개 API/생성자로 노출되지 않음).
 constexpr std::size_t MIN_KEYS = ORDER / 2 - 1;
 
-// Rust's `s.parse::<f64>()` validates the WHOLE string slice (embedded null bytes
-// included, e.g. composite-index keys use '\x00' as a column separator). Using
-// strtod()/c_str() here would stop at the first embedded '\0' and misreport a
-// composite key like "1\x0050000" as the plain number 1 — use from_chars instead,
-// which works on an explicit [first,last) range with no null-termination assumption.
-bool try_parse_f64(std::string_view s, double& out) {
-    if (s.empty()) return false;
-    auto res = std::from_chars(s.data(), s.data() + s.size(), out);
-    return res.ec == std::errc() && res.ptr == s.data() + s.size();
-}
+// The kinds of the tree the calling thread is working in (set by every public BPlusTree method for the length of the call, so the recursive
+// helpers below need no extra argument); null when there is none: Mixed.
+thread_local const std::vector<KeyKind>* current_kinds = nullptr;
+
+struct KindsGuard {
+    const std::vector<KeyKind>* saved;
+    explicit KindsGuard(const std::vector<KeyKind>& kinds) : saved(current_kinds) { current_kinds = &kinds; }
+    ~KindsGuard() { current_kinds = saved; }
+};
 
 // Canonical non-negative integer text ("0", "7", "120" -- digits only, no leading zero, at most 15 digits so it is exact
 // as a double). Two such texts are numerically equal only if they are the same text, and their numeric order is
@@ -41,30 +42,49 @@ std::unique_ptr<Node> clone_node(const std::unique_ptr<Node>& p) {
     return p ? std::make_unique<Node>(*p) : nullptr;
 }
 
-int cmp_key_segment(std::string_view a, std::string_view b) {
+int bytes_order(std::string_view a, std::string_view b) {
+    const int c = a.compare(b);
+    return c < 0 ? -1 : (c > 0 ? 1 : 0);
+}
+
+int cmp_key_segment(std::string_view a, std::string_view b, KeyKind kind) {
     if (a == b) return 0;
+    if (kind == KeyKind::Text) return bytes_order(a, b);
     if (plain_uint(a) && plain_uint(b)) {
         if (a.size() != b.size()) return a.size() < b.size() ? -1 : 1;
         return a.compare(b) < 0 ? -1 : 1;
     }
-    double af, bf;
-    if (try_parse_f64(a, af) && try_parse_f64(b, bf)) {
-        if (af < bf) return -1;
-        if (af > bf) return 1;
-        // PLAN.md P0 fix: numerically equal but different string representations
-        // (e.g. "007" vs "07") used to compare as the same key, colliding two
-        // distinct string-PK values. Break the tie lexicographically instead of
-        // reporting equality, so they stay adjacent in numeric order (same as
-        // before) but are never treated as duplicates of each other.
-        return a.compare(b) < 0 ? -1 : (a.compare(b) > 0 ? 1 : 0);
+    if (kind == KeyKind::Number) {
+        // PLAN.md P0 fix: numerically equal but different string representations (e.g. "007" vs "07") used to compare as the
+        // same key, colliding two distinct values. The tie is broken by the bytes, so they stay adjacent but are never duplicates.
+        if (int c = compare_numbers(a, b)) return c;
+        return bytes_order(a, b);
     }
-    return a.compare(b) < 0 ? -1 : (a.compare(b) > 0 ? 1 : 0);
+    // an unknown column: the empty key first (a composite key's prefix search is bounded by an empty and by a 0xFF segment), then numbers by
+    // value, then everything else by bytes -- a total order: the old "numbers when both are numbers, else text" was not transitive
+    // (9 < 10, 10 < 1a, 1a < 9) and lookups missed existing keys
+    if (a.empty()) return -1; // (a == b is handled above: not both are empty)
+    if (b.empty()) return 1;
+    const auto x = parse_number(a), y = parse_number(b);
+    if (x && y) {
+        if (*x < *y) return -1;
+        if (*x > *y) return 1;
+        return bytes_order(a, b);
+    }
+    if (x) return -1;
+    if (y) return 1;
+    return bytes_order(a, b);
 }
 } // namespace
 
 int cmp_keys(const std::string& a, const std::string& b) {
+    const std::vector<KeyKind>* kinds = current_kinds;
+    auto kind_of = [&](std::size_t segment) {
+        if (!kinds || kinds->empty()) return KeyKind::Mixed;
+        return (*kinds)[std::min(segment, kinds->size() - 1)];
+    };
     // A plain key (no NUL byte -- everything but a composite key) is a single segment: no splitting, no copies.
-    if (a.find('\x00') == std::string::npos && b.find('\x00') == std::string::npos) return cmp_key_segment(a, b);
+    if (a.find('\x00') == std::string::npos && b.find('\x00') == std::string::npos) return cmp_key_segment(a, b, kind_of(0));
     // PLAN.md P0 fix: composite-index keys join multiple columns with a NUL byte
     // ("val1\x00val2\x00..."), so the whole joined string almost never parses as
     // one f64 (an embedded '\x00' isn't a valid numeric character) and always fell
@@ -74,13 +94,13 @@ int cmp_keys(const std::string& a, const std::string& b) {
     // plain, non-composite keys (the overwhelming majority; no '\x00' at all)
     // behaving exactly as the single-segment comparison already did.
     std::string_view va(a), vb(b);
-    std::size_t pa = 0, pb = 0;
+    std::size_t pa = 0, pb = 0, segment = 0;
     for (;;) {
         std::size_t da = va.find('\x00', pa);
         std::size_t db = vb.find('\x00', pb);
         std::string_view sa = va.substr(pa, da == std::string_view::npos ? std::string_view::npos : da - pa);
         std::string_view sb = vb.substr(pb, db == std::string_view::npos ? std::string_view::npos : db - pb);
-        int c = cmp_key_segment(sa, sb);
+        int c = cmp_key_segment(sa, sb, kind_of(segment++));
         if (c != 0) return c;
         if (da == std::string_view::npos && db == std::string_view::npos) return 0;
         if (da == std::string_view::npos) return -1;
@@ -507,7 +527,7 @@ std::unique_ptr<Node> remove_node(std::unique_ptr<Node> node, const std::string&
 
 } // namespace
 
-BPlusTree::BPlusTree(const BPlusTree& other) {
+BPlusTree::BPlusTree(const BPlusTree& other) : kinds_(other.kinds_) {
     std::lock_guard<std::mutex> g(other.mutex_);
     root_ = clone_node(other.root_);
 }
@@ -516,13 +536,14 @@ BPlusTree& BPlusTree::operator=(const BPlusTree& other) {
     if (this != &other) {
         std::scoped_lock lock(mutex_, other.mutex_);
         root_ = clone_node(other.root_);
+        kinds_ = other.kinds_;
     }
     return *this;
 }
 
 // mutex_ isn't movable -- manually moves root_, leaving a fresh mutex_ in the moved-to
 // object (same pattern LockManager/QueryResultCache already use).
-BPlusTree::BPlusTree(BPlusTree&& other) noexcept {
+BPlusTree::BPlusTree(BPlusTree&& other) noexcept : kinds_(std::move(other.kinds_)) {
     std::lock_guard<std::mutex> g(other.mutex_);
     root_ = std::move(other.root_);
 }
@@ -531,17 +552,20 @@ BPlusTree& BPlusTree::operator=(BPlusTree&& other) noexcept {
     if (this == &other) return *this;
     std::scoped_lock lock(mutex_, other.mutex_);
     root_ = std::move(other.root_);
+    kinds_ = std::move(other.kinds_);
     return *this;
 }
 
 std::optional<std::string> BPlusTree::search(const std::string& key) const {
     std::lock_guard<std::mutex> g(mutex_);
+    KindsGuard kinds_guard(kinds_);
     if (!root_) return std::nullopt;
     return search_node(*root_, key);
 }
 
 void BPlusTree::insert(std::string key, std::string value) {
     std::lock_guard<std::mutex> g(mutex_);
+    KindsGuard kinds_guard(kinds_);
     if (!root_) {
         LeafNode leaf;
         leaf.keys.push_back(key);
@@ -565,12 +589,14 @@ void BPlusTree::insert(std::string key, std::string value) {
 
 void BPlusTree::remove(const std::string& key) {
     std::lock_guard<std::mutex> g(mutex_);
+    KindsGuard kinds_guard(kinds_);
     if (!root_) return;
     root_ = remove_node(std::move(root_), key);
 }
 
 std::vector<std::string> BPlusTree::range_search(const std::string& start, const std::string& end) const {
     std::lock_guard<std::mutex> g(mutex_);
+    KindsGuard kinds_guard(kinds_);
     std::vector<std::string> result;
     if (root_) range_collect(*root_, start, end, result);
     return result;
@@ -578,6 +604,7 @@ std::vector<std::string> BPlusTree::range_search(const std::string& start, const
 
 std::vector<std::pair<std::string, std::string>> BPlusTree::scan_from(const std::string& start, bool inclusive) const {
     std::lock_guard<std::mutex> g(mutex_);
+    KindsGuard kinds_guard(kinds_);
     std::vector<std::pair<std::string, std::string>> result;
     if (root_) scan_from_node(*root_, start, inclusive, result);
     return result;
@@ -585,6 +612,7 @@ std::vector<std::pair<std::string, std::string>> BPlusTree::scan_from(const std:
 
 std::vector<std::pair<std::string, std::string>> BPlusTree::scan_to(const std::string& end, bool inclusive) const {
     std::lock_guard<std::mutex> g(mutex_);
+    KindsGuard kinds_guard(kinds_);
     std::vector<std::pair<std::string, std::string>> result;
     if (root_) scan_to_node(*root_, end, inclusive, result);
     return result;
@@ -606,6 +634,7 @@ std::vector<std::pair<std::string, std::string>> BPlusTree::collect_all_kv() con
 
 std::vector<std::string> BPlusTree::range_keys(const std::string& start, const std::string& end) const {
     std::lock_guard<std::mutex> g(mutex_);
+    KindsGuard kinds_guard(kinds_);
     std::vector<std::string> result;
     if (root_) range_collect_keys(*root_, start, end, result);
     return result;

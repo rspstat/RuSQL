@@ -50,6 +50,24 @@ inline double number_value(std::string_view number) {
     return result.ec == std::errc() ? value : 0.0;
 }
 
+// The value of text that is exactly one number: "12", "-0.5", "+3", "1e3", ".5", "5."; nullopt for anything else ("12abc", " 5", "", "inf",
+// "nan", "0x10"). This is the engine's one notion of "is a number" (what a column of numbers holds, what a comparison may read as one).
+inline std::optional<double> parse_number(std::string_view s) {
+    const char* p = s.data();
+    const char* const end = p + s.size();
+    if (p != end && *p == '+') {
+        if (p + 1 != end && (p[1] == '+' || p[1] == '-')) return std::nullopt;
+        ++p;
+    }
+    const char* q = p;
+    if (q != end && *q == '-') ++q;
+    if (q == end || !((*q >= '0' && *q <= '9') || *q == '.')) return std::nullopt; // not "inf", "nan", "0x..." either
+    double value = 0.0;
+    auto result = std::from_chars(p, end, value);
+    if (result.ec != std::errc() || result.ptr != end) return std::nullopt;
+    return value;
+}
+
 // A number the way arithmetic reads a string: white space before it is skipped, what follows it is ignored, no number at the start is 0.
 inline double text_to_number(std::string_view s) {
     std::size_t start = 0;
@@ -68,12 +86,12 @@ inline std::optional<std::int64_t> parse_int64_text(std::string_view s) {
     return value;
 }
 
-// Which of two numbers (texts that are exactly one number) is bigger: -1, 0 or 1. Integers are compared as integers, so 9007199254740993
-// and 9007199254740992 differ; anything else as doubles.
+// Which of two values is bigger as numbers (a text by the number it starts with, see text_to_number): -1, 0 or 1. Integers are compared as
+// integers, so 9007199254740993 and 9007199254740992 differ; anything else as doubles.
 inline int compare_numbers(std::string_view a, std::string_view b) {
     auto x = parse_int64_text(a), y = parse_int64_text(b);
     if (x && y) return *x < *y ? -1 : (*x > *y ? 1 : 0);
-    const double u = number_value(a), v = number_value(b);
+    const double u = text_to_number(a), v = text_to_number(b);
     return u < v ? -1 : (u > v ? 1 : 0);
 }
 

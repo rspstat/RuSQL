@@ -132,13 +132,26 @@ void cond(const Vars& v, CondExpr& e) {
     else if (auto* leaf = std::get_if<CondExpr::Leaf>(&e.data)) {
         Condition& c = leaf->condition;
         arith(v, c.left);
+        // (what a variable holds is a string unless it is a number: not the name of a column)
         if (auto* lit = std::get_if<ConditionValue::Literal>(&c.value.data)) {
-            if (auto value = v.value(lit->value)) lit->value = *value == EXECUTOR_NULL_VALUE ? "__NULL__" : *value;
+            if (auto value = v.value(lit->value)) {
+                lit->value = *value == EXECUTOR_NULL_VALUE ? "__NULL__" : *value;
+                lit->quoted = *value != EXECUTOR_NULL_VALUE && !parse_number(*value);
+            }
         } else if (auto* list = std::get_if<ConditionValue::LiteralList>(&c.value.data)) {
-            for (auto& item : list->values) item = text_of(v, item);
+            list->quoted.resize(list->values.size(), false);
+            for (std::size_t i = 0; i < list->values.size(); i++) {
+                std::string replaced = text_of(v, list->values[i]);
+                if (replaced == list->values[i]) continue;
+                list->quoted[i] = replaced != EXECUTOR_NULL_VALUE && !parse_number(replaced);
+                list->values[i] = std::move(replaced);
+            }
         } else if (auto* between = std::get_if<ConditionValue::Between>(&c.value.data)) {
-            between->lo = text_of(v, between->lo);
-            between->hi = text_of(v, between->hi);
+            std::string lo = text_of(v, between->lo), hi = text_of(v, between->hi);
+            if (lo != between->lo) between->lo_quoted = !parse_number(lo);
+            if (hi != between->hi) between->hi_quoted = !parse_number(hi);
+            between->lo = std::move(lo);
+            between->hi = std::move(hi);
         } else if (auto* value = std::get_if<ConditionValue::Arith>(&c.value.data)) {
             arith(v, value->expr);
         } else if (auto* sub = std::get_if<ConditionValue::Subquery>(&c.value.data)) {

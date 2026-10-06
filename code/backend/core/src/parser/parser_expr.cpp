@@ -122,9 +122,10 @@ Condition Parser::parse_single_pred() {
 /// have an ArithExpr in hand (e.g. an aggregate's bare column argument, for `SUM(col > x)`)
 /// can reuse the same predicate grammar instead of duplicating a narrower one.
 Condition Parser::parse_pred_tail(ArithExpr left) {
-    auto read_in_value = [this]() -> std::string {
+    auto read_in_value = [this](bool& quoted) -> std::string {
         const Token* t = advance();
         if (!t) throw ParseError("Expected value in IN list");
+        quoted = t->kind == TokenKind::StringLit;
         switch (t->kind) {
             case TokenKind::StringLit:
             case TokenKind::NumberLit:
@@ -158,14 +159,17 @@ Condition Parser::parse_pred_tail(ArithExpr left) {
                               ConditionValue(ConditionValue::Subquery{std::make_unique<Statement>(std::move(sub_stmt))})};
         }
         std::vector<std::string> values;
+        std::vector<bool> quoted;
         for (;;) {
-            values.push_back(read_in_value());
+            bool is_string = false;
+            values.push_back(read_in_value(is_string));
+            quoted.push_back(is_string);
             if (peek_is(TokenKind::Comma)) { advance(); }
             else if (peek_is(TokenKind::RParen)) { break; }
             else throw ParseError("Expected ',' or ')' in IN list");
         }
         advance(); // consume ')'
-        return Condition{std::move(left), Operator::In, ConditionValue(ConditionValue::LiteralList{std::move(values)})};
+        return Condition{std::move(left), Operator::In, ConditionValue(ConditionValue::LiteralList{std::move(values), std::move(quoted)})};
     }
 
     // NOT IN (subquery or literal list)
@@ -183,19 +187,23 @@ Condition Parser::parse_pred_tail(ArithExpr left) {
                               ConditionValue(ConditionValue::Subquery{std::make_unique<Statement>(std::move(sub_stmt))})};
         }
         std::vector<std::string> values;
+        std::vector<bool> quoted;
         for (;;) {
-            values.push_back(read_in_value());
+            bool is_string = false;
+            values.push_back(read_in_value(is_string));
+            quoted.push_back(is_string);
             if (peek_is(TokenKind::Comma)) { advance(); }
             else if (peek_is(TokenKind::RParen)) { break; }
             else throw ParseError("Expected ',' or ')' in NOT IN list");
         }
         advance(); // consume ')'
-        return Condition{std::move(left), Operator::NotIn, ConditionValue(ConditionValue::LiteralList{std::move(values)})};
+        return Condition{std::move(left), Operator::NotIn, ConditionValue(ConditionValue::LiteralList{std::move(values), std::move(quoted)})};
     }
 
-    auto read_between_value = [this](const char* ctx) -> std::string {
+    auto read_between_value = [this](const char* ctx, bool& quoted) -> std::string {
         const Token* t = advance();
         if (!t) throw ParseError(std::string("Expected value after ") + ctx);
+        quoted = t->kind == TokenKind::StringLit;
         switch (t->kind) {
             case TokenKind::NumberLit:
             case TokenKind::StringLit:
@@ -217,11 +225,12 @@ Condition Parser::parse_pred_tail(ArithExpr left) {
     if (peek_is(TokenKind::Not) && peek_at_is(1, TokenKind::Between)) {
         advance(); // NOT
         advance(); // BETWEEN
-        std::string start = read_between_value("NOT BETWEEN");
+        bool start_quoted = false, end_quoted = false;
+        std::string start = read_between_value("NOT BETWEEN", start_quoted);
         if (!peek_is(TokenKind::And)) throw ParseError("Expected AND in NOT BETWEEN");
         advance();
-        std::string end = read_between_value("NOT BETWEEN ... AND");
-        return Condition{std::move(left), Operator::NotBetween, ConditionValue(ConditionValue::Between{start, end})};
+        std::string end = read_between_value("NOT BETWEEN ... AND", end_quoted);
+        return Condition{std::move(left), Operator::NotBetween, ConditionValue(ConditionValue::Between{start, end, start_quoted, end_quoted})};
     }
 
     // NOT LIKE pattern
@@ -237,11 +246,12 @@ Condition Parser::parse_pred_tail(ArithExpr left) {
     // BETWEEN val AND val
     if (peek_is(TokenKind::Between)) {
         advance();
-        std::string start = read_between_value("BETWEEN");
+        bool start_quoted = false, end_quoted = false;
+        std::string start = read_between_value("BETWEEN", start_quoted);
         if (!peek_is(TokenKind::And)) throw ParseError("Expected AND in BETWEEN");
         advance();
-        std::string end = read_between_value("BETWEEN ... AND");
-        return Condition{std::move(left), Operator::Between, ConditionValue(ConditionValue::Between{start, end})};
+        std::string end = read_between_value("BETWEEN ... AND", end_quoted);
+        return Condition{std::move(left), Operator::Between, ConditionValue(ConditionValue::Between{start, end, start_quoted, end_quoted})};
     }
 
     // LIKE pattern
@@ -336,7 +346,7 @@ Condition Parser::parse_pred_tail(ArithExpr left) {
         ArithExpr expr = parse_arith_expr();
         if (auto* col = std::get_if<ArithExpr::Col>(&expr.data)) return ConditionValue(ConditionValue::Literal{col->name});
         if (auto* num = std::get_if<ArithExpr::Num>(&expr.data)) return ConditionValue(ConditionValue::Literal{num->value});
-        if (auto* str = std::get_if<ArithExpr::Str>(&expr.data)) return ConditionValue(ConditionValue::Literal{str->value});
+        if (auto* str = std::get_if<ArithExpr::Str>(&expr.data)) return ConditionValue(ConditionValue::Literal{str->value, true});
         return ConditionValue(ConditionValue::Arith{std::move(expr)});
     }();
 

@@ -164,6 +164,12 @@ private:
     std::optional<AccessPath> pk_access(const Condition& cond, const std::string& table) const;
     std::optional<AccessPath> secondary_access(const std::string& index_key, const std::string& col, const Condition& cond, const std::string& table) const;
     bool is_col_ref_in_context(const std::string& k, const std::string& table) const;
+    // Can an index on `col` of `table` answer the comparison `cond` (col OP literal)? A column of numbers has an index of numbers: it answers a
+    // comparison with a number (or a string that is one). A column of text has an index of text keys in byte order: it answers a comparison
+    // with a string, but not one with a number (which compares each text by the number it starts with) -- and a LIKE only on text.
+    bool index_answers(const std::string& table, const std::string& col, const Condition& cond) const;
+    // The same for a composite index: every column it is searched by must be a column of numbers compared with a number.
+    bool composite_answers(const std::string& table, const CompositeIndex& index, const std::unordered_map<std::string, std::string>& eq_map) const;
     std::optional<std::string> find_secondary_index(const std::string& table, const std::string& col) const;
     std::optional<std::string> find_hash_index(const std::string& table, const std::string& col) const;
 

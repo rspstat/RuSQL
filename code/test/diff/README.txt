@@ -84,5 +84,14 @@ multiset of rows together with the column names.
 
   python verify_joins.py <engine_server.exe> [--queries N] [--seed S] [--rows R]
 
+verify_compare.py checks comparisons, ordering, MIN / MAX and joins against MySQL's rules for the TYPES of the two sides (two strings compare
+as strings, a number against anything compares as numbers, a string read by the number it starts with). Four tables hold the same random rows --
+a VARCHAR column, an INT, a DECIMAL and a BIGINT (values around 2^53) -- with no index, with an index on every column, with hash indexes, and
+with the VARCHAR column as the PRIMARY KEY. Each random WHERE (= <> < <= > >=, BETWEEN, IN, NOT IN, AND / OR; the literal written as a string or as
+a number), ORDER BY, MIN / MAX and JOIN (text = text, number = number, text = number) is run on each table and compared with a reference computed
+here from the rows with exact rational arithmetic.
+
+  python verify_compare.py <engine_server.exe> [--statements N] [--seed S] [--rows R]
+
 To check that the comparison can see a bug, plant one on purpose in the new build (for instance read an unqualified column
 from the last table that has it instead of the first) and run the same seed: it has to report differences.

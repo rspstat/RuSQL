@@ -355,9 +355,13 @@ TEST_CASE("DML index: numerically equal spellings are found, exactly like the sc
     REQUIRE(hits() == h + 1);
     REQUIRE(count_of(ex, "FROM d WHERE qty + 0 = 99") == 2);
 
-    // text column, numeric literal: '07', '7' and '7.0' are all equal to 7
+    // text column, numeric literal: '07', '7' and '7.0' are all equal to 7 (each text is read by its number) -- no index of texts answers
+    // that, the scan does; with a string only the equal text is
     h = hits();
     REQUIRE(changed(ex.execute_sql("UPDATE d SET qty = 5 WHERE code = 7"), 3, "updated"));
+    REQUIRE(hits() == h);
+    h = hits();
+    REQUIRE(changed(ex.execute_sql("UPDATE d SET qty = 5 WHERE code = '7'"), 1, "updated"));
     REQUIRE(hits() == h + 1);
 
     // inclusive bounds reach every spelling of the boundary value
@@ -366,13 +370,13 @@ TEST_CASE("DML index: numerically equal spellings are found, exactly like the sc
     REQUIRE(changed(ex.execute_sql("UPDATE d SET price = 70 WHERE qty >= 7"), 2, "updated"));
     REQUIRE(hits() == h + 1);
 
-    // a hash index buckets by numeric value, so a numeric literal reaches every spelling through it as well
+    // a hash index of a text column answers a comparison with a string; a number reads each text by its number, which the scan does
     REQUIRE(ex.execute_sql("CREATE TABLE hx (id INT PRIMARY KEY, code VARCHAR(10))").is_ok());
     REQUIRE(ex.execute_sql("CREATE INDEX hxc ON hx (code) USING HASH").is_ok());
     REQUIRE(ex.execute_sql("INSERT INTO hx VALUES (1, '07'), (2, '7'), (3, '7.0'), (4, 'q')").is_ok());
     h = hits();
     REQUIRE(changed(ex.execute_sql("DELETE FROM hx WHERE code = 7"), 3, "deleted"));
-    REQUIRE(hits() == h + 1);
+    REQUIRE(hits() == h);
     h = hits();
     REQUIRE(changed(ex.execute_sql("DELETE FROM hx WHERE code = 'q'"), 1, "deleted"));
     REQUIRE(hits() == h + 1);

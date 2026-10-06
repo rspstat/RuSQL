@@ -25,21 +25,16 @@ namespace engine {
 
 namespace {
 
-std::optional<double> parse_f64(const std::string& s) {
-    if (s.empty()) return std::nullopt;
-    double val;
-    auto res = std::from_chars(s.data(), s.data() + s.size(), val);
-    if (res.ec != std::errc() || res.ptr != s.data() + s.size()) return std::nullopt;
-    return val;
-}
+std::optional<double> parse_f64(const std::string& s) { return parse_number(s); }
 
 std::string format_4dp(double v) { return format_places(v, 4); }
 
 // MIN or MAX of the values: the smallest / largest, comparing numbers as numbers when every value is one (integers exactly) and as text
 // otherwise, and the value itself as it is stored (not a number printed again). NULL for no value.
-std::string extreme_text(const std::vector<const std::string*>& values, bool smallest) {
+std::string extreme_text(const std::vector<const std::string*>& values, bool smallest, ValueClass cls) {
     if (values.empty()) return EXECUTOR_NULL_VALUE;
-    const bool numeric = std::all_of(values.begin(), values.end(), [](const std::string* v) { return parse_f64(*v).has_value(); });
+    const bool numeric = cls == ValueClass::Number ||
+                         (cls != ValueClass::Text && std::all_of(values.begin(), values.end(), [](const std::string* v) { return parse_f64(*v).has_value(); }));
     const std::string* best = values.front();
     for (const std::string* v : values) {
         const int order = numeric ? compare_numbers(*v, *best) : v->compare(*best);
@@ -78,25 +73,16 @@ std::vector<const std::string*> distinct_texts(const std::vector<const std::stri
 
 // NULL sorts before every value (MySQL: first in ASC, last in DESC); NULLs are equal. It used to be compared as the text "NULL", which put
 // it between 'Alice' and 'Zed' and after every number.
-int cmp_key(const std::string& a, const std::string& b) {
+int cmp_key(const std::string& a, const std::string& b, ValueClass cls) {
     const bool a_null = a == "NULL", b_null = b == "NULL";
     if (a_null || b_null) return a_null == b_null ? 0 : (a_null ? -1 : 1);
-    auto pa = parse_f64(a);
-    auto pb = parse_f64(b);
-    if (pa && pb) {
-        if (*pa < *pb) return -1;
-        if (*pa > *pb) return 1;
-        return 0;
-    }
-    if (a < b) return -1;
-    if (a > b) return 1;
-    return 0;
+    return compare_classed(cls, cls, a, b);
 }
 
 // What WHERE's `=` says: equal as numbers when both sides parse as numbers, else equal as text.
 bool same_value(const std::string& a, const std::string& b) {
     auto pa = parse_f64(a), pb = parse_f64(b);
-    return pa && pb ? *pa == *pb : a == b;
+    return pa && pb ? compare_numbers(a, b) == 0 : a == b; // (integers exactly)
 }
 
 // Values of the B+Tree entries whose key is `key` the way WHERE sees it: a probe for "7" finds the entries "7", "7.0"
@@ -104,7 +90,7 @@ bool same_value(const std::string& a, const std::string& b) {
 // because the range also reaches the neighbouring doubles.
 std::vector<std::string> equal_entries(const BPlusTree& tree, const std::string& key) {
     std::vector<std::string> out;
-    auto lo = widen_numeric_bound(key, true), hi = widen_numeric_bound(key, false);
+    auto lo = tree_bound(tree, key, true), hi = tree_bound(tree, key, false);
     if (!lo || !hi) {
         if (auto v = tree.search(key)) out.push_back(std::move(*v));
         return out;
@@ -129,7 +115,7 @@ bool row_order_less(const Row& a, const Row& b, const std::vector<OrderBy>& orde
         const std::string* pb = lookup(b, ord.column);
         std::string av = pa ? *pa : std::string();
         std::string bv = pb ? *pb : std::string();
-        int c = cmp_key(av, bv);
+        int c = cmp_key(av, bv, ord.cls);
         if (!ord.ascending) c = -c;
         if (c != 0) return c < 0;
     }
@@ -187,7 +173,7 @@ int leaf_owner(const Condition& c, const PushdownScope& sc) {
     }
     if (auto* lit = std::get_if<ConditionValue::Literal>(&c.value.data)) {
         const std::string& v = lit->value;
-        bool ident_like = !v.empty() && (std::isalpha(static_cast<unsigned char>(v[0])) || v[0] == '_') && !parse_f64(v).has_value();
+        bool ident_like = !lit->quoted && !v.empty() && (std::isalpha(static_cast<unsigned char>(v[0])) || v[0] == '_') && !parse_f64(v).has_value();
         if (ident_like) {
             if (v.find('.') != std::string::npos) return -1;
             for (auto& cols : sc.columns) {
@@ -239,6 +225,9 @@ std::optional<std::pair<std::string, std::string>> constant_equality_part(const 
         auto* col = std::get_if<ArithExpr::Col>(&leaf->condition.left.data);
         auto* lit = std::get_if<ConditionValue::Literal>(&leaf->condition.value.data);
         if (!col || !lit) continue;
+        // (the hash is of the texts of the column: it answers a text column compared with a string and a number column with a number)
+        if (col->cls == ValueClass::Text && !lit->quoted) continue;
+        if (col->cls == ValueClass::Number && !parse_number(lit->value)) continue;
         std::string name = col->name;
         if (auto cut = name.rfind('.'); cut != std::string::npos) {
             std::string q = name.substr(0, cut);
@@ -250,16 +239,21 @@ std::optional<std::pair<std::string, std::string>> constant_equality_part(const 
         std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char ch) { return std::tolower(ch); });
         if (lower == "true" || lower == "false") continue;
         const std::string& v = lit->value;
-        bool ident_like = !v.empty() && (std::isalpha(static_cast<unsigned char>(v[0])) || v[0] == '_') && !parse_f64(v).has_value();
+        bool ident_like = !lit->quoted && !v.empty() && (std::isalpha(static_cast<unsigned char>(v[0])) || v[0] == '_') && !parse_f64(v).has_value();
         if (ident_like && (v.find('.') != std::string::npos || columns.count(v))) continue;
         return std::make_pair(name, v);
     }
     return std::nullopt;
 }
 
-std::optional<std::pair<std::string, std::string>> equality_part_of_on(const CondExpr& on, const std::string& right_full,
-                                                                        const std::string& right_bare,
-                                                                        const std::unordered_set<std::string>& right_cols) {
+struct OnEquality {
+    std::string left_ref;  // the side that is not a column of the joined table
+    std::string right_col; // the column of the joined table
+    ValueClass left_class, right_class; // what each side holds
+};
+
+std::optional<OnEquality> equality_part_of_on(const CondExpr& on, const std::string& right_full, const std::string& right_bare,
+                                              const std::unordered_set<std::string>& right_cols) {
     auto as_right = [&](const std::string& ref) -> std::optional<std::string> {
         auto cut = ref.rfind('.');
         if (cut == std::string::npos) return std::nullopt;
@@ -274,10 +268,10 @@ std::optional<std::pair<std::string, std::string>> equality_part_of_on(const Con
         if (!leaf || leaf->condition.op != Operator::Eq) continue;
         auto* l = std::get_if<ArithExpr::Col>(&leaf->condition.left.data);
         auto* r = std::get_if<ConditionValue::Literal>(&leaf->condition.value.data);
-        if (!l || !r) continue;
+        if (!l || !r || r->quoted) continue;
         auto rc = as_right(r->value), lc = as_right(l->name);
-        if (rc && !lc) return std::make_pair(l->name, *rc);
-        if (lc && !rc) return std::make_pair(r->value, *lc);
+        if (rc && !lc) return OnEquality{l->name, *rc, leaf->condition.left_class, leaf->condition.right_class};
+        if (lc && !rc) return OnEquality{r->value, *lc, leaf->condition.right_class, leaf->condition.left_class};
     }
     return std::nullopt;
 }
@@ -297,6 +291,8 @@ std::vector<std::size_t> order_rows(const std::vector<const Row*>& rows, const s
     struct Cell {
         bool numeric = false;
         bool null = false;
+        bool is_int = false; // an integer is compared as an integer (a double cannot tell 2^53 + 1 from 2^53)
+        std::int64_t whole = 0;
         double num = 0;
         const std::string* text = nullptr;
     };
@@ -309,9 +305,20 @@ std::vector<std::size_t> order_rows(const std::vector<const Row*>& rows, const s
             Cell& cell = cells[i * ncols + c];
             cell.text = found ? found : &empty;
             cell.null = *cell.text == "NULL";
-            if (auto v = parse_f64(*cell.text)) {
-                cell.numeric = true;
-                cell.num = *v;
+            // a text column is sorted as text whatever its values look like; a number column as numbers (a text in one by its leading number)
+            const ValueClass cls = order_by[c].cls;
+            if (cls != ValueClass::Text && !cell.null) {
+                if (auto whole = parse_int64_text(*cell.text)) {
+                    cell.numeric = cell.is_int = true;
+                    cell.whole = *whole;
+                    cell.num = static_cast<double>(*whole);
+                } else if (auto v = parse_f64(*cell.text)) {
+                    cell.numeric = true;
+                    cell.num = *v;
+                } else if (cls == ValueClass::Number) {
+                    cell.numeric = true;
+                    cell.num = text_to_number(*cell.text);
+                }
             }
         }
     }
@@ -323,7 +330,7 @@ std::vector<std::size_t> order_rows(const std::vector<const Row*>& rows, const s
             const Cell& y = cells[b * ncols + c];
             int cmp;
             if (x.null || y.null) cmp = x.null == y.null ? 0 : (x.null ? -1 : 1); // same as cmp_key
-            else if (x.numeric && y.numeric) cmp = x.num < y.num ? -1 : (x.num > y.num ? 1 : 0);
+            else if (x.numeric && y.numeric) cmp = x.is_int && y.is_int ? (x.whole < y.whole ? -1 : (x.whole > y.whole ? 1 : 0)) : (x.num < y.num ? -1 : (x.num > y.num ? 1 : 0));
             else cmp = *x.text < *y.text ? -1 : (*x.text > *y.text ? 1 : 0);
             if (!order_by[c].ascending) cmp = -cmp;
             if (cmp != 0) return cmp < 0;
@@ -556,6 +563,28 @@ std::vector<std::string> Executor::extract_agg_refs_from_cond(const CondExpr& ex
     return out;
 }
 
+// What the `MIN(x)` / `MAX(x)` that a HAVING or a select-list expression names holds: the binder gave the reference (a column named "MAX(code)")
+// the class of its argument.
+void collect_aggregate_classes(const ArithExpr& e, std::unordered_map<std::string, ValueClass>& out) {
+    if (auto* col = std::get_if<ArithExpr::Col>(&e.data)) {
+        if (col->cls != ValueClass::Unknown && col->name.find('(') != std::string::npos) out[col->name] = col->cls;
+    } else if (auto* v = std::get_if<ArithExpr::Add>(&e.data)) { collect_aggregate_classes(*v->lhs, out); collect_aggregate_classes(*v->rhs, out); }
+    else if (auto* v = std::get_if<ArithExpr::Sub>(&e.data)) { collect_aggregate_classes(*v->lhs, out); collect_aggregate_classes(*v->rhs, out); }
+    else if (auto* v = std::get_if<ArithExpr::Mul>(&e.data)) { collect_aggregate_classes(*v->lhs, out); collect_aggregate_classes(*v->rhs, out); }
+    else if (auto* v = std::get_if<ArithExpr::Div>(&e.data)) { collect_aggregate_classes(*v->lhs, out); collect_aggregate_classes(*v->rhs, out); }
+    else if (auto* v = std::get_if<ArithExpr::Cmp>(&e.data)) { collect_aggregate_classes(*v->lhs, out); collect_aggregate_classes(*v->rhs, out); }
+}
+
+void collect_aggregate_classes(const CondExpr& e, std::unordered_map<std::string, ValueClass>& out) {
+    if (auto* a = std::get_if<CondExpr::And>(&e.data)) { collect_aggregate_classes(*a->lhs, out); collect_aggregate_classes(*a->rhs, out); }
+    else if (auto* o = std::get_if<CondExpr::Or>(&e.data)) { collect_aggregate_classes(*o->lhs, out); collect_aggregate_classes(*o->rhs, out); }
+    else if (auto* n = std::get_if<CondExpr::Not>(&e.data)) collect_aggregate_classes(*n->inner, out);
+    else if (auto* leaf = std::get_if<CondExpr::Leaf>(&e.data)) {
+        collect_aggregate_classes(leaf->condition.left, out);
+        if (auto* value = std::get_if<ConditionValue::Arith>(&leaf->condition.value.data)) collect_aggregate_classes(value->expr, out);
+    }
+}
+
 // The key under which the rows of `rows` hold an aggregate's argument. The argument is spelled as the query spells it (`b.id`,
 // or `orders.amount` for `o.amount` through an alias); a row keeps its columns under their bare names and a joined-in table's
 // also as `<db>.<table>.<column>`. Resolved once, on the first row: every row of one result has the same keys.
@@ -575,7 +604,7 @@ std::string Executor::resolve_arg_key(const std::vector<const Row*>& rows, const
 // over the rows of one group with the rules of the select list: NULLs are skipped, COUNT(*) counts rows, SUM/AVG read the numeric
 // values, MIN/MAX compare numbers when every value is one and text otherwise, and MIN/MAX, SUM and AVG of nothing are NULL. The answer
 // is the one the select list shows (AVG with 4 places) except that a SUM keeps all its decimals.
-std::string Executor::compute_agg_from_key(const std::string& key, const std::vector<const Row*>& grp) {
+std::string Executor::compute_agg_from_key(const std::string& key, const std::vector<const Row*>& grp, ValueClass arg_class) {
     std::string ku = key;
     std::transform(ku.begin(), ku.end(), ku.begin(), [](unsigned char c) { return std::toupper(c); });
     const auto lp = key.find('(');
@@ -602,7 +631,7 @@ std::string Executor::compute_agg_from_key(const std::string& key, const std::ve
     if (ku.rfind("AVG(", 0) == 0) return average_of_texts(present).value_or(EXECUTOR_NULL_VALUE);
     const bool is_min = ku.rfind("MIN(", 0) == 0;
     if (!is_min && ku.rfind("MAX(", 0) != 0) return "0";
-    return extreme_text(present, is_min);
+    return extreme_text(present, is_min, arg_class);
 }
 
 Row Executor::compute_aggregates(const std::vector<const Row*>& grp, const std::vector<SelectColumn>& columns, bool allow_parallel) {
@@ -611,15 +640,18 @@ Row Executor::compute_aggregates(const std::vector<const Row*>& grp, const std::
         const AggFunc* func = nullptr;
         std::string col_name, label;
         const CondExpr* filter = nullptr;
+        ValueClass arg_class = ValueClass::Unknown; // what the argument holds: how MIN / MAX compare
         if (auto* agg = std::get_if<SelectColumn::Agg>(&col.data)) {
             func = &agg->func;
             col_name = agg->source.empty() ? agg->col : agg->source;
             label = agg_label(*func, agg->col);
+            arg_class = agg->arg_class;
             if (agg->filter) filter = &*agg->filter;
         } else if (auto* agg_a = std::get_if<SelectColumn::AggAlias>(&col.data)) {
             func = &agg_a->func;
             col_name = agg_a->source.empty() ? agg_a->col : agg_a->source;
             label = agg_a->alias;
+            arg_class = agg_a->arg_class;
             if (agg_a->filter) filter = &*agg_a->filter;
         } else {
             continue;
@@ -729,7 +761,7 @@ Row Executor::compute_aggregates(const std::vector<const Row*>& grp, const std::
                 auto it = r_ptr->find(col_name);
                 if (it != r_ptr->end() && it->second != EXECUTOR_NULL_VALUE) present.push_back(&it->second);
             }
-            out[label] = extreme_text(present, std::holds_alternative<AggFunc::Min>(func->data));
+            out[label] = extreme_text(present, std::holds_alternative<AggFunc::Min>(func->data), arg_class);
             continue;
         }
         if (std::holds_alternative<AggFunc::BitAnd>(func->data) || std::holds_alternative<AggFunc::BitOr>(func->data)) {
@@ -906,8 +938,19 @@ std::optional<std::string> Executor::resolve_join_columns(SharedDatabase& s, con
             bool left_has = false;
             for (std::size_t k = 0; k <= i; k++) left_has = left_has || !schemas[k] || has_column(schemas[k], c);
             if (!left_has || (schemas[i + 1] && !has_column(schemas[i + 1], c))) return "Unknown column '" + c + "' in 'from clause'";
-            on = and_of(on, CondExpr(CondExpr::Leaf{Condition{ArithExpr(ArithExpr::Col{c}), Operator::Eq,
-                                                              ConditionValue(ConditionValue::Literal{names[i + 1] + "." + c})}}));
+            auto class_in = [&](const TableSchema* t) {
+                if (t) {
+                    for (auto& column : t->columns) {
+                        if (column.name == c) return class_of_type(column.data_type);
+                    }
+                }
+                return ValueClass::Unknown;
+            };
+            ValueClass left_class = ValueClass::Unknown;
+            for (std::size_t k = 0; k <= i && left_class == ValueClass::Unknown; k++) left_class = class_in(schemas[k]);
+            on = and_of(on, CondExpr(CondExpr::Leaf{Condition{ArithExpr(ArithExpr::Col{c, left_class}), Operator::Eq,
+                                                              ConditionValue(ConditionValue::Literal{names[i + 1] + "." + c}), left_class,
+                                                              class_in(schemas[i + 1])}}));
         }
         if (on) j.on_expr = std::move(*on);
         if (natural) j.join_type = common.empty() ? JoinType::Cross : JoinType::Inner;
@@ -940,7 +983,7 @@ std::optional<std::string> Executor::resolve_join_columns(SharedDatabase& s, con
                 if (!leaf || leaf->condition.op != Operator::Eq) continue;
                 auto* l = std::get_if<ArithExpr::Col>(&leaf->condition.left.data);
                 auto* r = std::get_if<ConditionValue::Literal>(&leaf->condition.value.data);
-                if (!l || !r || l->name.find('.') == std::string::npos || r->value.find('.') == std::string::npos) continue;
+                if (!l || !r || r->quoted || l->name.find('.') == std::string::npos || r->value.find('.') == std::string::npos) continue;
                 const int lo = column_owner(l->name, scope), ro = column_owner(r->value, scope);
                 if (lo < 0 || ro < 0 || lo == ro || std::max(lo, ro) != static_cast<int>(i) + 1) continue;
                 on = and_of(on, CondExpr(*part));
@@ -1219,6 +1262,18 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
     // an aggregate inside an expression, a function or a CASE (`SUM(v) + 1`, `ROUND(AVG(v), 2)`) makes it an aggregate query too:
     // such a statement used to run row by row, with 0 or NULL where the aggregate was
     const std::vector<std::string> expr_agg_refs = select_agg_refs(columns);
+    std::unordered_map<std::string, ValueClass> aggregate_classes;
+    for (auto& c : columns) {
+        if (auto* e = std::get_if<SelectColumn::Expr>(&c.data)) collect_aggregate_classes(e->expr, aggregate_classes);
+        else if (auto* cw = std::get_if<SelectColumn::CaseWhen>(&c.data)) {
+            for (auto& b : cw->branches) collect_aggregate_classes(b.condition, aggregate_classes);
+        }
+    }
+    if (having) collect_aggregate_classes(*having, aggregate_classes);
+    auto aggregate_class = [&](const std::string& ref) {
+        auto it = aggregate_classes.find(ref);
+        return it == aggregate_classes.end() ? ValueClass::Unknown : it->second;
+    };
     bool has_agg = columns_have_aggregate(columns);
     bool has_win = std::any_of(columns.begin(), columns.end(), [](const SelectColumn& c) {
         return std::holds_alternative<SelectColumn::WinFunc>(c.data);
@@ -1292,7 +1347,7 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
     auto scan_secondary_range = [&](const BPlusTree& tree, RangeOp op, const std::string& key, const std::string* covering_col,
                                     std::vector<Row>& out) {
         bool lower = range_op_is_lower_bound(op);
-        auto bound = widen_numeric_bound(key, lower);
+        auto bound = tree_bound(tree, key, lower);
         if (!bound) return false;
         for (auto& kv : lower ? tree.scan_from(*bound, true) : tree.scan_to(*bound, true)) add_bucket_any(kv.second, covering_col, out);
         return true;
@@ -1300,8 +1355,8 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
     auto scan_secondary_between = [&](const BPlusTree& tree, const std::string& a, const std::string& b, const std::string* covering_col,
                                       std::vector<Row>& out) {
         double d;
-        if (parse_number_key(a, d) != parse_number_key(b, d)) return false;
-        auto lo = widen_numeric_bound(a, true), hi = widen_numeric_bound(b, false);
+        if (!tree.text_keyed() && parse_number_key(a, d) != parse_number_key(b, d)) return false;
+        auto lo = tree_bound(tree, a, true), hi = tree_bound(tree, b, false);
         if (!lo || !hi) return false;
         for (auto& json : tree.range_search(*lo, *hi)) add_bucket_any(json, covering_col, out);
         return true;
@@ -1333,7 +1388,7 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
             if (col && std::all_of(columns.begin(), columns.end(), only_col)) covering_col = col;
         }
         if (auto* ap = std::get_if<AccessPath::PkPoint>(&access)) {
-            auto lo = widen_numeric_bound(ap->key, true), hi = widen_numeric_bound(ap->key, false);
+            auto lo = index_bound(s.indexes, table, ap->key, true), hi = index_bound(s.indexes, table, ap->key, false);
             if (auto it = s.indexes.find(table); it != s.indexes.end() && lo && hi) {
                 auto found = it->second.range_search(*lo, *hi);
                 std::vector<Row> rows;
@@ -1352,8 +1407,8 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
             // version is invisible to this reader -- there is no way to tell which. Generic scan.
         } else if (auto* ap = std::get_if<AccessPath::PkBetween>(&access)) {
             double d;
-            auto lo = widen_numeric_bound(ap->start, true), hi = widen_numeric_bound(ap->end, false);
-            if (auto it = s.indexes.find(table); it != s.indexes.end() && lo && hi && parse_number_key(ap->start, d) == parse_number_key(ap->end, d)) {
+            auto lo = index_bound(s.indexes, table, ap->start, true), hi = index_bound(s.indexes, table, ap->end, false);
+            if (auto it = s.indexes.find(table); it != s.indexes.end() && lo && hi && (it->second.text_keyed() || parse_number_key(ap->start, d) == parse_number_key(ap->end, d))) {
                 std::vector<Row> rows;
                 for (auto& j : it->second.range_search(*lo, *hi)) {
                     Row r = row_from_json(j);
@@ -1363,7 +1418,7 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
             }
         } else if (auto* ap = std::get_if<AccessPath::PkRange>(&access)) {
             bool lower = range_op_is_lower_bound(ap->op);
-            auto bound = widen_numeric_bound(ap->key, lower);
+            auto bound = index_bound(s.indexes, table, ap->key, lower);
             if (auto it = s.indexes.find(table); it != s.indexes.end() && bound) {
                 std::vector<Row> rows;
                 for (auto& kv : lower ? it->second.scan_from(*bound, true) : it->second.scan_to(*bound, true)) {
@@ -1439,7 +1494,7 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
                 std::unordered_set<std::string> pks;
                 if (auto* sp = std::get_if<AccessPath::SecondaryPoint>(&sub_path.data)) {
                     auto it = s.indexes.find(sp->index_key);
-                    auto lo = widen_numeric_bound(sp->key, true), hi = widen_numeric_bound(sp->key, false);
+                    auto lo = index_bound(s.indexes, sp->index_key, sp->key, true), hi = index_bound(s.indexes, sp->index_key, sp->key, false);
                     if (it == s.indexes.end() || !lo || !hi) { usable = false; break; }
                     for (auto& json : it->second.range_search(*lo, *hi)) {
                         for (auto& r : rows_from_json(json)) {
@@ -1813,14 +1868,21 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
             if (hashable_type && scope_ok && j.using_cols.empty()) {
                 std::unordered_set<std::string> right_cols(right_schema_cols.begin(), right_schema_cols.end());
                 if (auto eq = equality_part_of_on(j.on_expr, scope.names[ji + 1], scope.bare[ji + 1], right_cols)) {
-                    const std::string left_ref = eq->first, right_col = eq->second;
-                    hashed = hashed_join_verified(
-                        current, right_rows, jq, j.join_type, [&](const Row& l) { return get_col(l, left_ref); },
-                        [&](const Row& r) -> const std::string* {
-                            auto it = r.find(right_col);
-                            return it != r.end() ? &it->second : nullptr;
-                        },
-                        right_schema_cols, [&](const Row& merged) { return eval_condexpr(merged, j.on_expr); }, left_pad);
+                    const std::string left_ref = eq->left_ref, right_col = eq->right_col;
+                    // two text columns are equal when the texts are ("007" and "7" are not); a text column against a number column
+                    // compares by number (the text by its leading number), which no hash of the text can answer: the nested loop does
+                    const bool text_vs_number = (eq->left_class == ValueClass::Text && eq->right_class == ValueClass::Number) ||
+                                                (eq->left_class == ValueClass::Number && eq->right_class == ValueClass::Text);
+                    if (!text_vs_number) {
+                        hashed = hashed_join_verified(
+                            current, right_rows, jq, j.join_type, [&](const Row& l) { return get_col(l, left_ref); },
+                            [&](const Row& r) -> const std::string* {
+                                auto it = r.find(right_col);
+                                return it != r.end() ? &it->second : nullptr;
+                            },
+                            right_schema_cols, [&](const Row& merged) { return eval_condexpr(merged, j.on_expr); }, left_pad,
+                            eq->left_class == ValueClass::Text && eq->right_class == ValueClass::Text);
+                    }
                 }
             }
 
@@ -2010,11 +2072,11 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
             Row agg_row = compute_aggregates(grp, columns);
             for (auto& [k, v] : agg_row) out[k] = v;
             for (auto& ref : expr_agg_refs) {
-                if (!out.count(ref)) out[ref] = compute_agg_from_key(ref, grp);
+                if (!out.count(ref)) out[ref] = compute_agg_from_key(ref, grp, aggregate_class(ref));
             }
             if (having) {
                 for (auto& agg_key : extract_agg_refs_from_cond(*having)) {
-                    if (!out.count(agg_key)) out[agg_key] = compute_agg_from_key(agg_key, grp);
+                    if (!out.count(agg_key)) out[agg_key] = compute_agg_from_key(agg_key, grp, aggregate_class(agg_key));
                 }
             }
             group_rows[gi] = std::move(out);
@@ -2166,7 +2228,7 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
             // with no aggregate in it is not part of an aggregate result (as before). Formatted like any result, minus the row
             // count line a plain aggregate result does not carry.
             for (auto& ref : expr_agg_refs) {
-                if (!agg_row.count(ref)) agg_row[ref] = compute_agg_from_key(ref, rows_p);
+                if (!agg_row.count(ref)) agg_row[ref] = compute_agg_from_key(ref, rows_p, aggregate_class(ref));
             }
             std::vector<SelectColumn> shown;
             for (auto& col : columns) {

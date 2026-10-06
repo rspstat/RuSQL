@@ -14,13 +14,7 @@ namespace engine {
 
 namespace {
 
-std::optional<double> parse_f64(const std::string& s) {
-    if (s.empty()) return std::nullopt;
-    double val;
-    auto res = std::from_chars(s.data(), s.data() + s.size(), val);
-    if (res.ec != std::errc() || res.ptr != s.data() + s.size()) return std::nullopt;
-    return val;
-}
+std::optional<double> parse_f64(const std::string& s) { return parse_number(s); }
 
 int cmp_key(const std::string& a, const std::string& b) {
     const bool a_null = a == "NULL", b_null = b == "NULL"; // NULL sorts before every value

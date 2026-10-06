@@ -40,17 +40,7 @@ std::string to_lower_str(const std::string& s) {
     return out;
 }
 
-std::optional<double> parse_f64(const std::string& s) {
-    if (s.empty()) return std::nullopt;
-    try {
-        std::size_t pos;
-        double v = std::stod(s, &pos);
-        if (pos != s.size()) return std::nullopt;
-        return v;
-    } catch (...) {
-        return std::nullopt;
-    }
-}
+std::optional<double> parse_f64(const std::string& s) { return parse_number(s); }
 
 std::optional<long long> parse_i64(const std::string& s) {
     if (s.empty()) return std::nullopt;

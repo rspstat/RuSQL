@@ -18,6 +18,8 @@
 #include <variant>
 #include <vector>
 
+#include "engine/value_class.hpp"
+
 namespace engine {
 
 struct Node;
@@ -47,7 +49,15 @@ struct Node {
     ~Node() = default;
 };
 
-/// 수치 인식 키 비교: 두 키가 모두 숫자로 파싱되면 수치 비교, 아니면 문자열 비교.
+// How the keys of one column of an index are ordered. A column of numbers is ordered by value (integers exactly), a column of text by its
+// bytes -- so '10' < '9' and "007" and "7" are different keys, as a comparison on the column says. Mixed is a tree whose column type is
+// not known: numbers by value, before every other key, which are ordered by their bytes.
+enum class KeyKind : std::uint8_t { Mixed = 0, Number, Text };
+
+// The ordering a column of this class gets in an index.
+inline KeyKind key_kind_of(ValueClass cls) { return cls == ValueClass::Number ? KeyKind::Number : (cls == ValueClass::Text ? KeyKind::Text : KeyKind::Mixed); }
+
+/// 키 비교: 현재 트리의 KeyKind(복합 키는 NUL로 나뉜 세그먼트마다)에 따라 숫자/문자열 순서 (BPlusTree의 공개 메서드가 설정).
 int cmp_keys(const std::string& a, const std::string& b);
 
 // Row-level-concurrency Stage 2: guarded by its own mutex_ so that two threads
@@ -61,6 +71,8 @@ int cmp_keys(const std::string& a, const std::string& b);
 class BPlusTree {
 public:
     BPlusTree() = default;
+    // `kinds`: how each column of the key is ordered (one for a plain key, one per column of a composite key); empty = Mixed
+    explicit BPlusTree(std::vector<KeyKind> kinds) : kinds_(std::move(kinds)) {}
     BPlusTree(const BPlusTree& other);
     BPlusTree& operator=(const BPlusTree& other);
     BPlusTree(BPlusTree&& other) noexcept;
@@ -89,9 +101,14 @@ public:
     // after it returns anyway), so not part of the tree's ordinary per-instance-concurrent API.
     const std::unique_ptr<Node>& root_ptr() const { return root_; }
 
+    // How the (first column of the) key is ordered; fixed when the tree is made.
+    const std::vector<KeyKind>& kinds() const { return kinds_; }
+    bool text_keyed() const { return !kinds_.empty() && kinds_.front() == KeyKind::Text; }
+
 private:
     mutable std::mutex mutex_;
     std::unique_ptr<Node> root_;
+    std::vector<KeyKind> kinds_;
 };
 
 } // namespace engine

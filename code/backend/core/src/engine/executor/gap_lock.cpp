@@ -17,13 +17,7 @@ namespace {
 // translation unit, so not directly reusable) -- must stay in lockstep with eval_single's
 // BETWEEN/Gt/Lt/Gte/Lte comparison semantics so gap-lock containment agrees with how the
 // same value would evaluate against the original WHERE clause.
-std::optional<double> parse_f64(const std::string& s) {
-    if (s.empty()) return std::nullopt;
-    double val;
-    auto res = std::from_chars(s.data(), s.data() + s.size(), val);
-    if (res.ec != std::errc() || res.ptr != s.data() + s.size()) return std::nullopt;
-    return val;
-}
+std::optional<double> parse_f64(const std::string& s) { return parse_number(s); }
 
 // -1/0/1, numeric-priority with lexicographic fallback (mirrors cmp_num + the plain
 // string-compare fallback used throughout eval_single).

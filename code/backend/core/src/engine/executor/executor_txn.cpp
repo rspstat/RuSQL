@@ -211,7 +211,7 @@ void Executor::apply_rollback(SharedDatabase& s) {
                 }
             }
         }
-        if (auto idx_it = s.indexes.find(table); idx_it != s.indexes.end()) idx_it->second = build_pk_tree(rows_clone, pk_col);
+        if (auto idx_it = s.indexes.find(table); idx_it != s.indexes.end()) idx_it->second = build_pk_tree(rows_clone, pk_col, idx_it->second.kinds());
 
         rebuild_secondary_indexes(s, table, rows_clone);
 
@@ -336,7 +336,7 @@ StringResult Executor::exec_rollback_to(SharedDatabase& s, const std::string& na
                 }
             }
         }
-        if (auto idx_it = s.indexes.find(table); idx_it != s.indexes.end()) idx_it->second = build_pk_tree(rows_clone, pk_col);
+        if (auto idx_it = s.indexes.find(table); idx_it != s.indexes.end()) idx_it->second = build_pk_tree(rows_clone, pk_col, idx_it->second.kinds());
         rebuild_secondary_indexes(s, table, rows_clone);
         std::vector<std::string> comp_keys;
         for (auto& [k, ci] : s.composite_indexes) {
@@ -511,7 +511,7 @@ void Executor::recover_from_wal() {
                 }
             }
         }
-        if (auto idx_it = sw->indexes.find(table); idx_it != sw->indexes.end()) idx_it->second = build_pk_tree(rows, pk_col);
+        if (auto idx_it = sw->indexes.find(table); idx_it != sw->indexes.end()) idx_it->second = build_pk_tree(rows, pk_col, idx_it->second.kinds());
         rebuild_secondary_indexes(*sw, table, rows);
         std::vector<std::string> comp_keys;
         for (auto& [k, ci] : sw->composite_indexes) {

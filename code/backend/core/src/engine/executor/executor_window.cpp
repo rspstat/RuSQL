@@ -17,26 +17,12 @@
 namespace engine {
 
 namespace {
-std::optional<double> parse_f64(const std::string& s) {
-    if (s.empty()) return std::nullopt;
-    double val;
-    auto res = std::from_chars(s.data(), s.data() + s.size(), val);
-    if (res.ec != std::errc() || res.ptr != s.data() + s.size()) return std::nullopt;
-    return val;
-}
+std::optional<double> parse_f64(const std::string& s) { return parse_number(s); }
 
-int cmp_key(const std::string& a, const std::string& b) {
+int cmp_key(const std::string& a, const std::string& b, ValueClass cls) {
     const bool a_null = a == "NULL", b_null = b == "NULL"; // NULL sorts before every value
     if (a_null || b_null) return a_null == b_null ? 0 : (a_null ? -1 : 1);
-    auto pa = parse_f64(a), pb = parse_f64(b);
-    if (pa && pb) {
-        if (*pa < *pb) return -1;
-        if (*pa > *pb) return 1;
-        return 0;
-    }
-    if (a < b) return -1;
-    if (a > b) return 1;
-    return 0;
+    return compare_classed(cls, cls, a, b);
 }
 
 std::string fmt4(double v) {
@@ -103,7 +89,7 @@ std::vector<Row> Executor::compute_window_functions(std::vector<Row> rows, const
                         const std::string* bvp = get_col(rows[b], ord.column);
                         std::string av = avp ? *avp : std::string();
                         std::string bv = bvp ? *bvp : std::string();
-                        int c = cmp_key(av, bv);
+                        int c = cmp_key(av, bv, ord.cls);
                         if (!ord.ascending) c = -c;
                         if (c != 0) return c < 0;
                     }
@@ -252,7 +238,7 @@ std::vector<Row> Executor::compute_window_functions(std::vector<Row> rows, const
                         for (std::size_t i = start; i <= end; i++) {
                             const std::string* v = get_col(rows[sorted[i]], col_name);
                             if (!v || *v == "NULL") continue;
-                            if (!best || cmp_key(*v, *best) < 0) best = *v;
+                            if (!best || cmp_key(*v, *best, wf->col_class) < 0) best = *v;
                         }
                         values[sorted[pos]] = best.value_or("NULL");
                     }
@@ -266,7 +252,7 @@ std::vector<Row> Executor::compute_window_functions(std::vector<Row> rows, const
                         for (std::size_t i = start; i <= end; i++) {
                             const std::string* v = get_col(rows[sorted[i]], col_name);
                             if (!v || *v == "NULL") continue;
-                            if (!best || cmp_key(*v, *best) > 0) best = *v;
+                            if (!best || cmp_key(*v, *best, wf->col_class) > 0) best = *v;
                         }
                         values[sorted[pos]] = best.value_or("NULL");
                     }

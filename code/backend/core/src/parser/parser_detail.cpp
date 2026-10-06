@@ -153,9 +153,9 @@ Condition expand_leaf(const Condition& cond, const std::unordered_map<std::strin
         [&map, &cond](const auto& alt) -> ConditionValue {
             using T = std::decay_t<decltype(alt)>;
             if constexpr (std::is_same_v<T, ConditionValue::Literal>) {
-                return ConditionValue(ConditionValue::Literal{expand_alias_str(alt.value, map)});
+                return ConditionValue(ConditionValue::Literal{alt.quoted ? alt.value : expand_alias_str(alt.value, map), alt.quoted}); // (a string is not a column)
             } else if constexpr (std::is_same_v<T, ConditionValue::Between>) {
-                return ConditionValue(ConditionValue::Between{expand_alias_str(alt.lo, map), expand_alias_str(alt.hi, map)});
+                return ConditionValue(ConditionValue::Between{alt.lo_quoted ? alt.lo : expand_alias_str(alt.lo, map), alt.hi_quoted ? alt.hi : expand_alias_str(alt.hi, map), alt.lo_quoted, alt.hi_quoted});
             } else if constexpr (std::is_same_v<T, ConditionValue::Arith>) {
                 return ConditionValue(ConditionValue::Arith{expand_arith(alt.expr, map)});
             } else {

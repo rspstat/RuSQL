@@ -163,7 +163,7 @@ void Executor::maybe_auto_vacuum(SharedDatabase& s, const std::string& table) {
                 }
                 if (pk_col_name.empty() && !schema->columns.empty()) pk_col_name = schema->columns.front().name;
             }
-            idx_it->second = build_pk_tree(rows_clone, pk_col_name);
+            idx_it->second = build_pk_tree(rows_clone, pk_col_name, idx_it->second.kinds());
         }
         s.buffer_pool.write_through(table, rows_clone, s.disk);
         redo_mark_flushed(s, table); // vacuum physically removed versions the redo log may still describe
@@ -267,7 +267,7 @@ StringResult Executor::replace_delete_conflicts(SharedDatabase& s, const std::st
         return idx < values.size() ? std::optional<std::string>(values[idx]) : std::nullopt;
     };
     auto eq_leaf = [](const std::string& col, const std::string& val) {
-        return CondExpr(CondExpr::Leaf{Condition{ArithExpr(ArithExpr::Col{col}), Operator::Eq, ConditionValue(ConditionValue::Literal{val})}});
+        return CondExpr(CondExpr::Leaf{Condition{ArithExpr(ArithExpr::Col{col}), Operator::Eq, ConditionValue(ConditionValue::Literal{val, true})}});
     };
     auto run_delete = [&](CondExpr cond) -> StringResult {
         Statement del(Statement::Delete{table, std::move(cond), std::nullopt});
@@ -739,7 +739,7 @@ StringResult Executor::exec_insert_inner(SharedDatabase& s, const std::string& t
             for (auto& c : id_cols) {
                 auto it = existing.find(c);
                 CondExpr leaf = CondExpr(CondExpr::Leaf{Condition{ArithExpr(ArithExpr::Col{c}), Operator::Eq,
-                                                                  ConditionValue(ConditionValue::Literal{it != existing.end() ? it->second : std::string()})}});
+                                                                  ConditionValue(ConditionValue::Literal{it != existing.end() ? it->second : std::string(), true})}});
                 cond = cond ? CondExpr(CondExpr::And{std::make_unique<CondExpr>(std::move(*cond)), std::make_unique<CondExpr>(std::move(leaf))}) : std::move(leaf);
             }
             std::vector<std::pair<std::string, ArithExpr>> bound;

@@ -17,6 +17,24 @@
 
 namespace engine {
 
+namespace {
+// "-12", "0", "345": an integer written the way an INT column keeps it (no '+', no leading zeros, no fraction)
+bool canonical_integer(const std::string& s) {
+    const std::size_t sign = !s.empty() && s[0] == '-' ? 1 : 0;
+    if (s.size() == sign) return false;
+    if (s[sign] == '0') return sign == 0 && s.size() == 1;
+    return std::all_of(s.begin() + static_cast<std::ptrdiff_t>(sign), s.end(), [](char c) { return c >= '0' && c <= '9'; });
+}
+
+const ColumnDef* column_def(const TableSchema* schema, const std::string& name) {
+    if (!schema) return nullptr;
+    for (auto& c : schema->columns) {
+        if (c.name == name) return &c;
+    }
+    return nullptr;
+}
+} // namespace
+
 bool Executor::condition_has_subquery(const std::optional<CondExpr>& condition) {
     struct Walker {
         static bool check(const CondExpr& e) {
@@ -30,24 +48,43 @@ bool Executor::condition_has_subquery(const std::optional<CondExpr>& condition) 
     return condition && Walker::check(*condition);
 }
 
-std::optional<std::string> Executor::extract_pk_eq_value(const std::optional<CondExpr>& condition, const std::string& pk_col) {
+// The key of `pk = <literal>`, when that names ONE row exactly: a string (against a column of texts the equal text, against a column of numbers the
+// number it spells) or a number written for a column of numbers. A number written for a column of texts reads every text by its number ('7', '007' and
+// '7.0' are all equal to 7), and a bare word is the name of a column (`a = b`): neither is a key, and the caller scans.
+std::optional<std::string> Executor::extract_pk_eq_value(const std::optional<CondExpr>& condition, const std::string& pk_col, const TableSchema* schema) {
     if (!condition) return std::nullopt;
     auto* leaf = std::get_if<CondExpr::Leaf>(&condition->data);
     if (!leaf || leaf->condition.op != Operator::Eq) return std::nullopt;
     auto* col = std::get_if<ArithExpr::Col>(&leaf->condition.left.data);
     auto* lit = std::get_if<ConditionValue::Literal>(&leaf->condition.value.data);
-    if (col && lit && col->name == pk_col) return lit->value;
+    if (!col || !lit || col->name != pk_col) return std::nullopt;
+    const ColumnDef* def = column_def(schema, pk_col);
+    if (!def) return std::nullopt;
+    const ValueClass cls = class_of_type(def->data_type);
+    if (lit->quoted ? cls != ValueClass::Unknown : (cls == ValueClass::Number && parse_number(lit->value))) return lit->value;
     return std::nullopt;
 }
 
-std::optional<std::pair<std::string, std::string>> Executor::extract_pk_between_value(const std::optional<CondExpr>& condition,
-                                                                                         const std::string& pk_col) {
+// The bounds of `pk BETWEEN lo AND hi`, when the keys of that range are exactly the rows it names: strings against a column of texts (a range of bytes), or
+// whole numbers against an INT column (a range of values; a bound spelled "5.0" would sit after the key "5" in the tree). Anything else is scanned.
+std::optional<std::pair<std::string, std::string>> Executor::extract_pk_between_value(const std::optional<CondExpr>& condition, const std::string& pk_col,
+                                                                                         const TableSchema* schema) {
     if (!condition) return std::nullopt;
     auto* leaf = std::get_if<CondExpr::Leaf>(&condition->data);
     if (!leaf || leaf->condition.op != Operator::Between) return std::nullopt;
     auto* col = std::get_if<ArithExpr::Col>(&leaf->condition.left.data);
     auto* between = std::get_if<ConditionValue::Between>(&leaf->condition.value.data);
-    if (col && between && col->name == pk_col) return std::make_pair(between->lo, between->hi);
+    if (!col || !between || col->name != pk_col) return std::nullopt;
+    const ColumnDef* def = column_def(schema, pk_col);
+    if (!def) return std::nullopt;
+    const ValueClass cls = class_of_type(def->data_type);
+    if (cls == ValueClass::Text) {
+        if (between->lo_quoted && between->hi_quoted) return std::make_pair(between->lo, between->hi);
+        return std::nullopt;
+    }
+    const bool whole_number_column = std::holds_alternative<DataType::Int>(def->data_type.data) || std::holds_alternative<DataType::BigInt>(def->data_type.data) ||
+                                     std::holds_alternative<DataType::SmallInt>(def->data_type.data) || std::holds_alternative<DataType::TinyInt>(def->data_type.data);
+    if (whole_number_column && canonical_integer(between->lo) && canonical_integer(between->hi)) return std::make_pair(between->lo, between->hi);
     return std::nullopt;
 }
 
@@ -229,7 +266,7 @@ StringResult Executor::exec_delete_inner(SharedDatabase& s, const std::string& t
         std::size_t deleted = 0;
 
         bool used_pos_idx = false;
-        if (auto pk_val = extract_pk_eq_value(condition, pk_col)) {
+        if (auto pk_val = extract_pk_eq_value(condition, pk_col, s.catalog.get_table(table))) {
             std::optional<std::size_t> pos_opt;
             if (auto mit = s.row_pk_pos.find(table); mit != s.row_pk_pos.end()) {
                 if (auto pit = mit->second.find(*pk_val); pit != mit->second.end()) pos_opt = pit->second;
@@ -272,7 +309,7 @@ StringResult Executor::exec_delete_inner(SharedDatabase& s, const std::string& t
 
         if (used_pos_idx) {
             deleted = rows_to_delete.size();
-        } else if (auto range = extract_pk_between_value(condition, pk_col)) {
+        } else if (auto range = extract_pk_between_value(condition, pk_col, s.catalog.get_table(table))) {
             std::vector<std::string> pks_to_delete;
             if (auto idx_it = s.indexes.find(table); idx_it != s.indexes.end()) pks_to_delete = idx_it->second.range_keys(range->first, range->second);
 

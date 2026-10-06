@@ -174,6 +174,7 @@ Executor::Executor(const std::string& dir, std::size_t buffer_pool_capacity) {
         std::string key;
         std::string pk_col;
         const std::vector<Row>* rows;
+        std::vector<KeyKind> kinds; // how the key column is ordered
     };
     std::vector<RebuildEntry> rebuild_needed;
 
@@ -217,7 +218,8 @@ Executor::Executor(const std::string& dir, std::size_t buffer_pool_capacity) {
             }
         }
         if (pk_col.empty() && !schema.columns.empty()) pk_col = schema.columns.front().name;
-        rebuild_needed.push_back({qualified_key, std::move(pk_col), &tit->second});
+        auto kinds = key_kinds_of(catalog.get_table(qualified_key), {pk_col});
+        rebuild_needed.push_back({qualified_key, std::move(pk_col), &tit->second, std::move(kinds)});
     }
 
     // ── Phase 2: PK 인덱스 재빌드 병렬화 (모든 테이블) ──────
@@ -225,7 +227,7 @@ Executor::Executor(const std::string& dir, std::size_t buffer_pool_capacity) {
         std::vector<BPlusTree> built(rebuild_needed.size());
         ThreadPool::global().parallel_for(rebuild_needed.size(), [&](std::size_t i) {
             auto& entry = rebuild_needed[i];
-            built[i] = build_pk_tree(*entry.rows, entry.pk_col);
+            built[i] = build_pk_tree(*entry.rows, entry.pk_col, entry.kinds);
         });
         for (std::size_t i = 0; i < rebuild_needed.size(); i++) {
             indexes.insert({rebuild_needed[i].key, std::move(built[i])});
@@ -254,6 +256,7 @@ Executor::Executor(const std::string& dir, std::size_t buffer_pool_capacity) {
     struct SecIdxWork {
         std::string index_key, meta_name, q_table, column;
         std::vector<Row> rows;
+        std::vector<KeyKind> kinds;
     };
     std::vector<SecIdxWork> sec_rebuild_work;
 
@@ -271,7 +274,8 @@ Executor::Executor(const std::string& dir, std::size_t buffer_pool_capacity) {
                 std::string key = q_table + "_" + meta.name;
                 std::vector<Row> rows;
                 if (auto it = tables.find(q_table); it != tables.end()) rows = it->second;
-                sec_rebuild_work.push_back({std::move(key), meta.name, q_table, column, std::move(rows)});
+                auto kinds = key_kinds_of(catalog.get_table(q_table), {column});
+                sec_rebuild_work.push_back({std::move(key), meta.name, q_table, column, std::move(rows), std::move(kinds)});
                 continue;
             } else {
                 CompositeIndex comp(q_table, meta.columns);
@@ -291,7 +295,7 @@ Executor::Executor(const std::string& dir, std::size_t buffer_pool_capacity) {
             for (auto& row : work.rows) {
                 if (auto vit = row.find(work.column); vit != row.end()) bucket[vit->second].push_back(row);
             }
-            BPlusTree t;
+            BPlusTree t(work.kinds);
             for (auto& [k, bucket_rows] : bucket) {
                 t.insert(k, rows_to_json(bucket_rows));
             }
@@ -1293,11 +1297,10 @@ StringResult Executor::execute_with_s(SharedDatabase& s, Statement stmt) {
 
     stmt = qualify_stmt(s, std::move(stmt));
 
-    // an unknown column is an error, not an empty value (the nested statements of a procedure, a trigger, a view or a subquery were
-    // checked as part of the one that started them, or run with the outer row's values already in place)
-    if (top_level && proc_vars.empty()) {
-        if (auto error = check_columns(s, stmt)) return StringResult::Err(*error);
-    }
+    // what every column holds is told to the evaluators; an unknown column is an error, not an empty value (the nested statements of a
+    // procedure, a trigger, a view or a subquery were checked as part of the one that started them, or run with the outer row's values
+    // already in place)
+    if (auto error = bind_statement(s, stmt, top_level && proc_vars.empty())) return StringResult::Err(*error);
 
     // Table partitioning safety net: execute()'s dispatcher already intercepts and routes
     // Insert/Update/Delete/Select against a partitioned table BEFORE any lock is taken

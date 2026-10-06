@@ -10,17 +10,7 @@
 namespace engine {
 
 namespace {
-std::optional<double> try_parse_f64(const std::string& s) {
-    if (s.empty()) return std::nullopt;
-    try {
-        std::size_t pos;
-        double v = std::stod(s, &pos);
-        if (pos != s.size()) return std::nullopt;
-        return v;
-    } catch (...) {
-        return std::nullopt;
-    }
-}
+std::optional<double> try_parse_f64(const std::string& s) { return parse_number(s); }
 } // namespace
 
 StringResult Executor::exec_vacuum(SharedDatabase& s, std::optional<std::string> table) {
@@ -56,7 +46,7 @@ StringResult Executor::exec_vacuum(SharedDatabase& s, std::optional<std::string>
                     }
                     if (pk_col_name.empty() && !schema->columns.empty()) pk_col_name = schema->columns.front().name;
                 }
-                idx_it->second = build_pk_tree(rows_clone, pk_col_name);
+                idx_it->second = build_pk_tree(rows_clone, pk_col_name, idx_it->second.kinds());
             }
             std::vector<std::string> comp_keys;
             for (auto& [k, ci] : s.composite_indexes) {

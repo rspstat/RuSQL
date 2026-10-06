@@ -30,24 +30,10 @@ std::optional<std::string> exact_int_text(char op, const std::string& lv, const 
     return std::nullopt;
 }
 
-std::optional<double> parse_f64(const std::string& s) {
-    if (s.empty()) return std::nullopt;
-    double val;
-    auto res = std::from_chars(s.data(), s.data() + s.size(), val);
-    if (res.ec != std::errc() || res.ptr != s.data() + s.size()) return std::nullopt;
-    return val;
-}
+std::optional<double> parse_f64(const std::string& s) { return parse_number(s); }
 
-// Returns -1/0/1 (like/unlike Ordering::Less/Equal/Greater) or nullopt if either side
-// isn't numeric — mirrors the `cmp_num` closure used throughout eval_single in Rust.
-std::optional<int> cmp_num(const std::string& a, const std::string& b) {
-    auto da = parse_f64(a);
-    auto db = parse_f64(b);
-    if (!da || !db) return std::nullopt;
-    if (*da < *db) return -1;
-    if (*da > *db) return 1;
-    return 0;
-}
+// What a value written without quotes in an IN list or after BETWEEN is: a number, or (a name, @variable) not told.
+ValueClass written_class(const std::string& value, bool quoted) { return quoted ? ValueClass::Text : (parse_number(value) ? ValueClass::Number : ValueClass::Unknown); }
 
 bool like_match(std::string_view val, std::string_view pat) {
     if (pat.empty()) return val.empty();
@@ -61,6 +47,13 @@ bool like_match(std::string_view val, std::string_view pat) {
 }
 
 } // namespace
+
+ValueClass Executor::class_of_expr(const ArithExpr& expr) {
+    if (auto* col = std::get_if<ArithExpr::Col>(&expr.data)) return col->cls;
+    if (std::holds_alternative<ArithExpr::Str>(expr.data)) return ValueClass::Text;
+    if (auto* f = std::get_if<ArithExpr::Func>(&expr.data)) return function_result_class(f->name);
+    return ValueClass::Number; // a number, + - * /, a comparison
+}
 
 const std::string* Executor::get_col(const Row& row, const std::string& col) {
     if (auto it = row.find(col); it != row.end()) return &it->second;
@@ -154,23 +147,14 @@ std::string Executor::eval_arith(const Row& row, const ArithExpr& expr) {
     if (auto* v = std::get_if<ArithExpr::Cmp>(&expr.data)) {
         std::string lv = eval_arith(row, *v->lhs), rv = eval_arith(row, *v->rhs);
         if (lv == EXECUTOR_NULL_VALUE || rv == EXECUTOR_NULL_VALUE) return EXECUTOR_NULL_VALUE; // a comparison with NULL is NULL
-        auto a = parse_f64(lv), b = parse_f64(rv);
+        const int order = compare_classed(class_of_expr(*v->lhs), class_of_expr(*v->rhs), lv, rv);
         bool result;
-        if (a && b) {
-            if (v->op == ">") result = *a > *b;
-            else if (v->op == "<") result = *a < *b;
-            else if (v->op == ">=") result = *a >= *b;
-            else if (v->op == "<=") result = *a <= *b;
-            else if (v->op == "=") result = std::abs(*a - *b) < 1e-9;
-            else result = *a != *b;
-        } else {
-            if (v->op == "=") result = lv == rv;
-            else if (v->op == ">") result = lv > rv;
-            else if (v->op == "<") result = lv < rv;
-            else if (v->op == ">=") result = lv >= rv;
-            else if (v->op == "<=") result = lv <= rv;
-            else result = lv != rv;
-        }
+        if (v->op == ">") result = order > 0;
+        else if (v->op == "<") result = order < 0;
+        else if (v->op == ">=") result = order >= 0;
+        else if (v->op == "<=") result = order <= 0;
+        else if (v->op == "=") result = order == 0;
+        else result = order != 0;
         return result ? "1" : "0";
     }
     return EXECUTOR_NULL_VALUE;
@@ -212,26 +196,34 @@ bool Executor::eval_single(const Row& row, const Condition& cond) { return eval_
 Executor::Tri Executor::eval_single3(const Row& row, const Condition& cond) {
     auto tri = [](bool b) { return b ? Tri::True : Tri::False; };
     std::string val = eval_arith(row, cond.left);
+    // how the two sides compare: what each is (set by the binder; an expression that was not bound tells itself)
+    const ValueClass left_class = cond.left_class != ValueClass::Unknown ? cond.left_class : class_of_expr(cond.left);
 
     if (std::holds_alternative<ConditionValue::Subquery>(cond.value.data)) return Tri::False;
 
     if (auto* bv = std::get_if<ConditionValue::Between>(&cond.value.data)) {
         if (val == EXECUTOR_NULL_VALUE) return Tri::Unknown;
-        bool in_range;
-        auto sc = cmp_num(val, bv->lo);
-        auto ec = cmp_num(val, bv->hi);
-        if (sc && ec) in_range = (*sc != -1) && (*ec != 1);
-        else in_range = (val >= bv->lo) && (val <= bv->hi);
-        return tri(cond.op == Operator::NotBetween ? !in_range : in_range);
+        // `x BETWEEN lo AND hi` is `x >= lo AND x <= hi`: a NULL bound (a variable that holds NULL) makes its side UNKNOWN, and the other side can
+        // still say FALSE (so BETWEEN never selects and NOT BETWEEN selects what the other bound rules out)
+        auto side = [&](const std::string& bound, bool quoted, bool lower) {
+            if (bound == EXECUTOR_NULL_VALUE) return Tri::Unknown;
+            const int order = compare_classed(left_class, written_class(bound, quoted), val, bound);
+            return tri(lower ? order >= 0 : order <= 0);
+        };
+        const Tri low = side(bv->lo, bv->lo_quoted, true), high = side(bv->hi, bv->hi_quoted, false);
+        const Tri inside = (low == Tri::False || high == Tri::False) ? Tri::False : (low == Tri::True && high == Tri::True ? Tri::True : Tri::Unknown);
+        if (cond.op != Operator::NotBetween) return inside;
+        return inside == Tri::True ? Tri::False : (inside == Tri::False ? Tri::True : Tri::Unknown);
     }
 
     if (auto* ll = std::get_if<ConditionValue::LiteralList>(&cond.value.data)) {
         if (val == EXECUTOR_NULL_VALUE) return Tri::Unknown;
         const bool has_null = std::any_of(ll->values.begin(), ll->values.end(), [](const std::string& v) { return v == EXECUTOR_NULL_VALUE; });
         if (cond.op == Operator::In || cond.op == Operator::NotIn) {
-            for (auto& item : ll->values) {
-                auto a = parse_f64(val), b = parse_f64(item);
-                if (a && b ? (*a == *b) : (val == item)) return tri(cond.op == Operator::In);
+            for (std::size_t i = 0; i < ll->values.size(); i++) {
+                if (ll->values[i] == EXECUTOR_NULL_VALUE) continue; // (a NULL in the list is UNKNOWN below, never equal)
+                const bool quoted = i < ll->quoted.size() && ll->quoted[i];
+                if (compare_classed(left_class, written_class(ll->values[i], quoted), val, ll->values[i]) == 0) return tri(cond.op == Operator::In);
             }
             return has_null ? Tri::Unknown : tri(cond.op == Operator::NotIn);
         }
@@ -240,6 +232,7 @@ Executor::Tri Executor::eval_single3(const Row& row, const Condition& cond) {
 
     std::string resolved;
     const std::string* effective_lit = nullptr;
+    ValueClass right_class = cond.right_class;
 
     // PLAN.md P0 fix: the RHS of a comparison is now a full arithmetic expression
     // (ConditionValue::Arith) rather than always a single-token Literal, so
@@ -250,9 +243,11 @@ Executor::Tri Executor::eval_single3(const Row& row, const Condition& cond) {
     if (auto* av = std::get_if<ConditionValue::Arith>(&cond.value.data)) {
         resolved = eval_arith(row, av->expr);
         effective_lit = &resolved;
+        if (right_class == ValueClass::Unknown) right_class = class_of_expr(av->expr);
     } else if (auto* lit_v = std::get_if<ConditionValue::Literal>(&cond.value.data)) {
         const std::string& lit = lit_v->value;
-        bool is_ident_like = !lit.empty() && (std::isalpha(static_cast<unsigned char>(lit[0])) || lit[0] == '_') && !parse_f64(lit).has_value();
+        // a quoted value is a string, never the name of a column
+        bool is_ident_like = !lit_v->quoted && !lit.empty() && (std::isalpha(static_cast<unsigned char>(lit[0])) || lit[0] == '_') && !parse_f64(lit).has_value();
         effective_lit = &lit;
         if (is_ident_like) {
             if (const std::string* v = get_col(row, lit)) {
@@ -260,6 +255,7 @@ Executor::Tri Executor::eval_single3(const Row& row, const Condition& cond) {
                 effective_lit = &resolved;
             }
         }
+        if (right_class == ValueClass::Unknown) right_class = written_class(lit, lit_v->quoted);
     } else {
         return Tri::False;
     }
@@ -270,14 +266,8 @@ Executor::Tri Executor::eval_single3(const Row& row, const Condition& cond) {
     if (*effective_lit == "__NULL__" || *effective_lit == EXECUTOR_NULL_VALUE) return Tri::Unknown;
 
     switch (cond.op) {
-        case Operator::Eq: {
-            auto a = parse_f64(val), b = parse_f64(*effective_lit);
-            return tri((a && b) ? (*a == *b) : (val == *effective_lit));
-        }
-        case Operator::Ne: {
-            auto a = parse_f64(val), b = parse_f64(*effective_lit);
-            return tri((a && b) ? (*a != *b) : (val != *effective_lit));
-        }
+        case Operator::Eq: return tri(compare_classed(left_class, right_class, val, *effective_lit) == 0);
+        case Operator::Ne: return tri(compare_classed(left_class, right_class, val, *effective_lit) != 0);
         case Operator::In:
         case Operator::NotIn:
         case Operator::Exists:
@@ -302,22 +292,10 @@ Executor::Tri Executor::eval_single3(const Row& row, const Condition& cond) {
         case Operator::Between:
         case Operator::NotBetween:
             return Tri::False;
-        case Operator::Gt: {
-            auto c = cmp_num(val, *effective_lit);
-            return tri(c ? (*c == 1) : (val > *effective_lit));
-        }
-        case Operator::Lt: {
-            auto c = cmp_num(val, *effective_lit);
-            return tri(c ? (*c == -1) : (val < *effective_lit));
-        }
-        case Operator::Gte: {
-            auto c = cmp_num(val, *effective_lit);
-            return tri(c ? (*c != -1) : (val >= *effective_lit));
-        }
-        case Operator::Lte: {
-            auto c = cmp_num(val, *effective_lit);
-            return tri(c ? (*c != 1) : (val <= *effective_lit));
-        }
+        case Operator::Gt: return tri(compare_classed(left_class, right_class, val, *effective_lit) > 0);
+        case Operator::Lt: return tri(compare_classed(left_class, right_class, val, *effective_lit) < 0);
+        case Operator::Gte: return tri(compare_classed(left_class, right_class, val, *effective_lit) >= 0);
+        case Operator::Lte: return tri(compare_classed(left_class, right_class, val, *effective_lit) <= 0);
         default:
             return Tri::False;
     }

@@ -233,7 +233,17 @@ StringResult Executor::exec_create(SharedDatabase& s, std::string name, std::vec
     if (res.is_err()) return StringResult::Err(res.error());
 
     s.tables[name] = {};
-    s.indexes[name] = BPlusTree();
+    {
+        std::string pk_name;
+        for (auto& c : columns) {
+            if (c.primary_key) { pk_name = c.name; break; }
+        }
+        std::vector<KeyKind> kinds;
+        for (auto& c : columns) {
+            if (c.name == pk_name) kinds.push_back(key_kind_of(class_of_type(c.data_type)));
+        }
+        s.indexes[name] = BPlusTree(std::move(kinds));
+    }
     s.table_locks[name] = std::make_shared<FairSharedMutex>();
     s.table_data_locks[name] = std::make_shared<FairSharedMutex>();
     // Stage 4: pre-populate every other table-keyed map too. Under per-table locking, a
@@ -315,7 +325,7 @@ StringResult Executor::exec_truncate(SharedDatabase& s, const std::string& name)
     }
     it->second.clear();
     s.row_pk_pos.erase(name);
-    if (auto idx_it = s.indexes.find(name); idx_it != s.indexes.end()) idx_it->second = BPlusTree();
+    if (auto idx_it = s.indexes.find(name); idx_it != s.indexes.end()) idx_it->second = BPlusTree(idx_it->second.kinds());
     if (auto* schema = s.catalog.get_table_mut(name)) schema->auto_increment_counters.clear();
     s.buffer_pool.invalidate(name);
     s.disk.save_table(name, {});
@@ -457,7 +467,7 @@ StringResult Executor::exec_alter(SharedDatabase& s, const std::string& table, A
                     if (c.primary_key) { pk_col_name = c.name; break; }
                 }
                 if (pk_col_name.empty() && !schema->columns.empty()) pk_col_name = schema->columns.front().name;
-                idx_it->second = build_pk_tree(rows, pk_col_name);
+                idx_it->second = build_pk_tree(rows, pk_col_name, idx_it->second.kinds());
             }
             for (auto& [name, meta] : s.index_meta) {
                 if (meta.first == table && meta.second == v->from) meta.second = v->to;
@@ -834,7 +844,7 @@ StringResult Executor::exec_create_index(SharedDatabase& s, const std::string& i
                 if (auto vit = row.find(column); vit != row.end()) bucket[vit->second].push_back(row);
             }
         }
-        BPlusTree tree;
+        BPlusTree tree(key_kinds_of(s.catalog.get_table(table), {column}));
         for (auto& [key, rows] : bucket) {
             tree.insert(key, rows_to_json(rows));
         }
@@ -1109,8 +1119,22 @@ void Executor::index_replace_rows(SharedDatabase& s, const std::string& table, c
 // left the tree pointing at the dead copy, and every lookup of that row answered "not found" (found by the SELECT
 // differential fuzz: after a ROLLBACK, `WHERE id = 84` returned nothing while the scan returned the row). The dead
 // versions go in first, then the live ones overwrite them.
-BPlusTree Executor::build_pk_tree(const std::vector<Row>& rows, const std::string& pk_col) {
-    BPlusTree tree;
+std::vector<KeyKind> Executor::key_kinds_of(const TableSchema* schema, const std::vector<std::string>& columns) {
+    std::vector<KeyKind> kinds;
+    for (auto& name : columns) {
+        KeyKind kind = KeyKind::Mixed;
+        if (schema) {
+            for (auto& c : schema->columns) {
+                if (c.name == name) kind = key_kind_of(class_of_type(c.data_type));
+            }
+        }
+        kinds.push_back(kind);
+    }
+    return kinds;
+}
+
+BPlusTree Executor::build_pk_tree(const std::vector<Row>& rows, const std::string& pk_col, std::vector<KeyKind> kinds) {
+    BPlusTree tree(std::move(kinds));
     if (pk_col.empty()) return tree;
     for (bool live_pass : {false, true}) {
         for (auto& row : rows) {
@@ -1135,7 +1159,7 @@ void Executor::rebuild_secondary_indexes(SharedDatabase& s, const std::string& t
         for (auto& row : rows) {
             if (auto vit = row.find(col); vit != row.end()) bucket[vit->second].push_back(row);
         }
-        BPlusTree tree;
+        BPlusTree tree(key_kinds_of(s.catalog.get_table(table), {col}));
         for (auto& [key, bucket_rows] : bucket) {
             tree.insert(key, rows_to_json(bucket_rows));
         }

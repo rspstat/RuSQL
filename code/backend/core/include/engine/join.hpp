@@ -36,7 +36,7 @@ std::vector<Row> hash_join(const std::vector<Row>& left, const std::vector<Row>&
 
 // INNER, LEFT, RIGHT or FULL OUTER JOIN whose ON condition contains an equality `left_key = right_key` that every matching
 // pair must satisfy, without the nested loop: one side is hashed by its key, every row of the other side only meets the rows
-// whose key equals its own (numeric values compare as numbers, NULL matches nothing), and each such pair still has to pass
+// whose key equals its own (numeric values compare as numbers -- unless `exact_keys`, the keys being text: equal as texts --, NULL matches nothing), and each such pair still has to pass
 // `on_match` -- the whole ON condition -- so the answer is exactly the nested loop's: same rows in the same order (INNER/LEFT/
 // FULL: left order, right order within a left row, then FULL's unmatched right rows; RIGHT: right order, left order within
 // a right row), unmatched rows padded with NULLs the way the loop pads them. Candidate pairs are only ever skipped, never
@@ -46,7 +46,7 @@ std::optional<std::vector<Row>> hashed_join_verified(const std::vector<Row>& lef
                                                       const std::function<const std::string*(const Row&)>& right_key,
                                                       const std::vector<std::string>& right_schema_cols,
                                                       const std::function<bool(const Row&)>& on_match,
-                                                      const std::vector<std::string>* left_pad = nullptr);
+                                                      const std::vector<std::string>* left_pad = nullptr, bool exact_keys = false);
 
 std::vector<Row> nested_loop_join(const std::vector<Row>& left, const std::vector<Row>& right, JoinType join_type,
                                    const std::string& table, const std::vector<std::string>& using_cols,
