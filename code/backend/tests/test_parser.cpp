@@ -419,15 +419,18 @@ TEST_CASE("aliases inside aggregates nested in expressions, function arguments a
     REQUIRE(res.is_ok());
     auto& sel = std::get<Statement::Select>(res.value().data);
     REQUIRE(sel.columns.size() == 3);
-    auto& round = std::get<SelectColumn::Func>(sel.columns[0].data);
+    auto& round = std::get<ArithExpr::Func>(std::get<SelectColumn::Expr>(sel.columns[0].data).expr.data);
     REQUIRE(round.args.size() == 2);
-    REQUIRE(round.args[0].find("SUM(t.v)") != std::string::npos);
-    REQUIRE(round.args[0].find("o.v") == std::string::npos);
+    const std::string round_arg = Parser::arith_to_string(round.args[0]);
+    REQUIRE(round_arg.find("SUM(t.v)") != std::string::npos);
+    REQUIRE(round_arg.find("o.v") == std::string::npos);
     auto& expr = std::get<SelectColumn::Expr>(sel.columns[1].data);
     auto& add = std::get<ArithExpr::Add>(expr.expr.data);
     REQUIRE(std::get<ArithExpr::Col>(add.lhs->data).name == "SUM(t.v)");
-    auto& cw = std::get<SelectColumn::CaseWhen>(sel.columns[2].data);
-    auto& leaf = std::get<CondExpr::Leaf>(cw.branches.at(0).condition.data).condition;
+    // (a CASE is the function CASE(when, then, ..., else): its conditions are conditions used as values)
+    auto& cw = std::get<ArithExpr::Func>(std::get<SelectColumn::Expr>(sel.columns[2].data).expr.data);
+    REQUIRE(cw.name == "CASE");
+    auto& leaf = std::get<CondExpr::Leaf>(std::get<ArithExpr::Pred>(cw.args.at(0).data).cond->data).condition;
     REQUIRE(std::get<ArithExpr::Col>(leaf.left.data).name == "COUNT(u.id)");
     REQUIRE(std::get<ConditionValue::Literal>(leaf.value.data).value == "MAX(t.w)");
 }
@@ -443,11 +446,13 @@ TEST_CASE("every alias inside a function argument that is an expression is resol
         for (auto at = text.find(what); at != std::string::npos; at = text.find(what, at + 1)) n++;
         return n;
     };
-    auto& round = std::get<SelectColumn::Func>(sel.columns[0].data);
-    REQUIRE(count(round.args[0], "u.g") == 2);
-    REQUIRE(round.args[0].find("y.") == std::string::npos);
-    auto& abs = std::get<SelectColumn::Func>(sel.columns[1].data);
-    REQUIRE(count(abs.args[0], "t.a") == 1);
-    REQUIRE(count(abs.args[0], "u.g") == 1);
-    REQUIRE(abs.args[0].find("x.") == std::string::npos);
+    auto& round = std::get<ArithExpr::Func>(std::get<SelectColumn::Expr>(sel.columns[0].data).expr.data);
+    const std::string round_arg = Parser::arith_to_string(round.args[0]);
+    REQUIRE(count(round_arg, "u.g") == 2);
+    REQUIRE(round_arg.find("y.") == std::string::npos);
+    auto& abs = std::get<ArithExpr::Func>(std::get<SelectColumn::Expr>(sel.columns[1].data).expr.data);
+    const std::string abs_arg = Parser::arith_to_string(abs.args[0]);
+    REQUIRE(count(abs_arg, "t.a") == 1);
+    REQUIRE(count(abs_arg, "u.g") == 1);
+    REQUIRE(abs_arg.find("x.") == std::string::npos);
 }

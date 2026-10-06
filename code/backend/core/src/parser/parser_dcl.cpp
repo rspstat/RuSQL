@@ -157,7 +157,7 @@ Statement Parser::parse_set() {
             advance();
             return Statement(Statement::SelectInto{std::make_unique<Statement>(std::move(query)), {"@" + name}});
         }
-        ArithExpr expr = parse_arith_expr();
+        ArithExpr expr = parse_value_expr();
         return Statement(Statement::SetUserVar{name, std::move(expr)});
     }
     if (t->kind == TokenKind::Isolation) {

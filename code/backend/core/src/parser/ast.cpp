@@ -22,6 +22,7 @@ ArithExpr::ArithExpr(const ArithExpr& other)
               else if constexpr (std::is_same_v<T, Mul>) return Data(Mul{clone_ptr(alt.lhs), clone_ptr(alt.rhs)});
               else if constexpr (std::is_same_v<T, Div>) return Data(Div{clone_ptr(alt.lhs), clone_ptr(alt.rhs)});
               else if constexpr (std::is_same_v<T, Cmp>) return Data(Cmp{clone_ptr(alt.lhs), alt.op, clone_ptr(alt.rhs)});
+              else if constexpr (std::is_same_v<T, Pred>) return Data(Pred{clone_ptr(alt.cond)});
               else return Data(alt); // Col/Num/Str copy trivially; Func's vector<ArithExpr> recurses via this ctor
           },
           other.data)) {}
@@ -33,6 +34,11 @@ ArithExpr& ArithExpr::operator=(const ArithExpr& other) {
     }
     return *this;
 }
+
+// (out of line: a Pred holds a CondExpr, which is only complete after ArithExpr)
+ArithExpr::ArithExpr(ArithExpr&&) noexcept = default;
+ArithExpr& ArithExpr::operator=(ArithExpr&&) noexcept = default;
+ArithExpr::~ArithExpr() = default;
 
 // ---------------------------------------------------------------------------
 // ConditionValue

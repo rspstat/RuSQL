@@ -36,6 +36,8 @@ enum class IsolationLevel { ReadUncommitted, ReadCommitted, RepeatableRead, Seri
 // ---------------------------------------------------------------------------
 // ArithExpr (recursive arithmetic expression tree)
 // ---------------------------------------------------------------------------
+struct CondExpr;
+
 struct ArithExpr {
     // `cls`: what kind of value the column holds (its declared type), set by Executor::bind_statement before a statement runs; a comparison
     // reads it (two text columns compare as text, a number column as numbers). Unknown for a column that has not been bound.
@@ -48,8 +50,11 @@ struct ArithExpr {
     struct Div  { std::unique_ptr<ArithExpr> lhs, rhs; };
     struct Func { std::string name; std::vector<ArithExpr> args; };
     struct Cmp  { std::unique_ptr<ArithExpr> lhs; std::string op; std::unique_ptr<ArithExpr> rhs; };
+    // A condition used as a value: 1 when it is true, 0 when false, NULL when unknown (`v > 5`, `v IS NULL`, `a AND b`). A CASE is the
+    // function CASE whose arguments are (a Pred, its result) pairs and, when the count is odd, the ELSE result last.
+    struct Pred { std::unique_ptr<CondExpr> cond; };
 
-    using Data = std::variant<Col, Num, Str, Add, Sub, Mul, Div, Func, Cmp>;
+    using Data = std::variant<Col, Num, Str, Add, Sub, Mul, Div, Func, Cmp, Pred>;
     Data data;
 
     ArithExpr() : data(Col{}) {}
@@ -58,9 +63,9 @@ struct ArithExpr {
 
     ArithExpr(const ArithExpr& other);
     ArithExpr& operator=(const ArithExpr& other);
-    ArithExpr(ArithExpr&&) noexcept = default;
-    ArithExpr& operator=(ArithExpr&&) noexcept = default;
-    ~ArithExpr() = default;
+    ArithExpr(ArithExpr&&) noexcept;
+    ArithExpr& operator=(ArithExpr&&) noexcept;
+    ~ArithExpr();
 };
 
 // ---------------------------------------------------------------------------

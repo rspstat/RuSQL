@@ -51,8 +51,22 @@ bool like_match(std::string_view val, std::string_view pat) {
 ValueClass Executor::class_of_expr(const ArithExpr& expr) {
     if (auto* col = std::get_if<ArithExpr::Col>(&expr.data)) return col->cls;
     if (std::holds_alternative<ArithExpr::Str>(expr.data)) return ValueClass::Text;
-    if (auto* f = std::get_if<ArithExpr::Func>(&expr.data)) return function_result_class(f->name);
-    return ValueClass::Number; // a number, + - * /, a comparison
+    if (auto* f = std::get_if<ArithExpr::Func>(&expr.data)) {
+        if (f->name != "CASE") return function_result_class(f->name);
+        // a CASE holds what all of its results hold (a NULL result says nothing); results of different kinds, or not known, are not known
+        std::vector<const ArithExpr*> results;
+        for (std::size_t i = 1; i < f->args.size(); i += 2) results.push_back(&f->args[i]);
+        if (f->args.size() % 2 == 1) results.push_back(&f->args.back());
+        ValueClass kind = ValueClass::Unknown;
+        for (const ArithExpr* result : results) {
+            if (auto* str = std::get_if<ArithExpr::Str>(&result->data); str && str->value == EXECUTOR_NULL_VALUE) continue;
+            const ValueClass k = class_of_expr(*result);
+            if (k == ValueClass::Unknown || (kind != ValueClass::Unknown && k != kind)) return ValueClass::Unknown;
+            kind = k;
+        }
+        return kind;
+    }
+    return ValueClass::Number; // a number, + - * /, a comparison, a condition
 }
 
 const std::string* Executor::get_col(const Row& row, const std::string& col) {
@@ -134,6 +148,14 @@ std::string Executor::eval_arith(const Row& row, const ArithExpr& expr) {
         return format_arith_result(text_to_number(lv) / divisor);
     }
     if (auto* v = std::get_if<ArithExpr::Func>(&expr.data)) {
+        if (v->name == "CASE") {
+            // CASE(when1, then1, when2, then2, .. [, else]): the first branch whose condition is true (not false, not unknown) gives the value
+            const std::size_t branches = v->args.size() / 2;
+            for (std::size_t i = 0; i < branches; i++) {
+                if (eval_arith(row, v->args[2 * i]) == "1") return eval_arith(row, v->args[2 * i + 1]);
+            }
+            return v->args.size() % 2 == 1 ? eval_arith(row, v->args.back()) : std::string(EXECUTOR_NULL_VALUE);
+        }
         std::vector<std::string> str_args;
         str_args.reserve(v->args.size());
         for (auto& a : v->args) {
@@ -143,6 +165,15 @@ std::string Executor::eval_arith(const Row& row, const ArithExpr& expr) {
             else str_args.push_back("'" + eval_arith(row, a) + "'");
         }
         return apply_scalar_func(v->name, str_args, row);
+    }
+    if (auto* v = std::get_if<ArithExpr::Pred>(&expr.data)) {
+        // a condition as a value: 1, 0 or (unknown) NULL
+        switch (eval_cond3(row, *v->cond)) {
+            case Tri::True: return "1";
+            case Tri::False: return "0";
+            case Tri::Unknown: break;
+        }
+        return EXECUTOR_NULL_VALUE;
     }
     if (auto* v = std::get_if<ArithExpr::Cmp>(&expr.data)) {
         std::string lv = eval_arith(row, *v->lhs), rv = eval_arith(row, *v->rhs);
@@ -346,6 +377,8 @@ ArithExpr Executor::substitute_arith_outer_refs(const ArithExpr& expr, const Row
                 args.reserve(alt.args.size());
                 for (auto& a : alt.args) args.push_back(substitute_arith_outer_refs(a, outer_row));
                 return ArithExpr(ArithExpr::Func{alt.name, std::move(args)});
+            } else if constexpr (std::is_same_v<T, ArithExpr::Pred>) {
+                return ArithExpr(ArithExpr::Pred{std::make_unique<CondExpr>(substitute_correlated_condexpr(*alt.cond, outer_row))});
             } else {
                 return ArithExpr(alt);
             }

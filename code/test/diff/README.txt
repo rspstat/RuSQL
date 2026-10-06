@@ -93,6 +93,13 @@ here from the rows with exact rational arithmetic.
 
   python verify_compare.py <engine_server.exe> [--statements N] [--seed S] [--rows R]
 
+verify_value_expressions.py checks expressions against a model: tables t(id, g, x, y, w, s) of random integers, two-place decimals and short strings (NULLs included),
+and random expressions -- arithmetic, ABS, COALESCE / IFNULL / NULLIF, CASE (searched and simple), IF, conditions as values (comparison, IS [NOT] NULL / TRUE / FALSE, BETWEEN,
+IN with a NULL in the list, LIKE, AND / OR / NOT), strings (CONCAT, UPPER) -- in the select list, WHERE (the rows where it is TRUE, and where NOT of it is TRUE), aggregates of
+the expression, SUM / COUNT of a CASE with GROUP BY and HAVING, an expression around aggregates, UPDATE ... SET and INSERT of constants. Exact rational arithmetic, three-valued logic.
+
+  python verify_value_expressions.py <engine_server.exe> [--queries N] [--seed S] [--rows R]
+
 verify_subqueries.py checks scalar subqueries against a model of what SQL says: tables t(id, v, g) and u(id, a, b, g) with random rows (NULLs included), and
 random statements -- a scalar subquery in WHERE (uncorrelated and correlated), in the select list, in HAVING (with and without GROUP BY), IN / NOT IN
 with a NULL in the list (three-valued), a subquery of two columns, UPDATE / DELETE with a subquery (an error changes nothing). Two rows are an error

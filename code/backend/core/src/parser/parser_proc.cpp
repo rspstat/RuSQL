@@ -134,7 +134,7 @@ Statement Parser::parse_create_function() {
     if (const Token* p = peek(); p && p->kind == TokenKind::Ident && to_upper(p->text) == "RETURN") {
         advance();
     }
-    ArithExpr expr = parse_arith_expr();
+    ArithExpr expr = parse_value_expr();
     nlohmann::json j = expr;
     std::string body = j.dump();
     return Statement(Statement::CreateFunction{name, params, body});
@@ -325,7 +325,7 @@ Statement Parser::parse_proc_set_var() {
         advance();
         return Statement(Statement::SelectInto{std::make_unique<Statement>(std::move(query)), {name}});
     }
-    ArithExpr expr = parse_arith_expr();
+    ArithExpr expr = parse_value_expr();
     return Statement(Statement::ProcSet{name, std::move(expr)});
 }
 

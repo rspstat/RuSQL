@@ -1175,6 +1175,42 @@ VS Code 스타일 탭 드래그 순서 변경(요청의 1번 항목)은 같은 �
 
 **Diagram 페이지**: 구성요소·흐름이 바뀐 것이 없어 변경 없음.
 
+### 10월 6일 (여덟 번째) — 식: 함수·집계·CASE·IF·CAST가 식의 처음에 올 수 없던 것(`ROUND(x) * 100`), CASE의 결과가 식이 아니던 것·따옴표 문자열이 열 이름으로 읽히던 것, 조건이 값이 아니던 것(`v BETWEEN 5 AND 20`·`a AND b`), `SUM(CASE …) * 100.0 / COUNT(*)`가 NULL이던 것, `COUNT(CASE … ELSE 0 END)`가 조건이 참인 행만 세던 것, INSERT VALUES·UPDATE SET의 식
+
+**왜 이 항목인가**: 사용자 결정("전부 고쳐")의 식 문법 항목(R4) 가운데 값을 만드는 식(select 목록·WHERE·HAVING·VALUES·SET). 정렬·GROUP BY의 식과 서브쿼리가 든 식은 다음 항목으로 남겼다. 새 기능이 아니라 **파싱 오류이거나 조용히 틀리던 것**을 고친 것이다.
+
+**원인과 영향** (프로브 81문장 가운데 52개가 파싱 오류였고, 조용히 틀린 것도 있었다):
+- **함수·CAST·CASE·IF·집계 뒤에 연산자가 오면 파싱 오류**: `ROUND(d) * 100`, `COALESCE(a, 0) + COALESCE(b, 0)`, `LENGTH(s) + 1`, `UPPER(s) || '!'`, `CAST(v AS SIGNED) + 1`, `ABS(a - b) * 2`, `IF(c, a, b) * 3`, `IFNULL(MAX(v), 0) + 1`(오른쪽 `1 + ROUND(x)`는 됨). select 목록은 첫 토큰이 함수면 함수만 읽고 끝냈다.
+- **`CASE`·`IF`의 결과가 식이 아니었다**: `CASE WHEN v > 5 THEN v * 2 ELSE w + 1 END`, `CASE x WHEN 1 THEN … END`는 파싱 오류, **`THEN 'n'`은 열 n이 있으면 그 열의 값**(따옴표를 잃은 문자열을 열 이름으로 읽음).
+- **조건이 값이 아니고, 값이 조건이 아니었다**: `SELECT v BETWEEN 5 AND 20`·`v IN (7, 10)`·`v IS NULL`·`a AND b`는 파싱 오류, `WHERE flag`·`WHERE TRUE`·`WHERE v IS TRUE`·`WHERE NOT v`도 파싱 오류. 괄호로 시작하는 값(`WHERE (v + w) * 2 > 20`)과 `WHERE CAST(v AS SIGNED) > 5`, `x < NULL + 3`도.
+- **BETWEEN의 경계가 토큰 하나**: `v BETWEEN w AND w + 20`은 파싱 오류, **`v BETWEEN w AND 20`은 열 w를 문자열 "w"로 비교**해 조용히 틀린 답.
+- **집계와 CASE**: `SUM(CASE WHEN … END) * 100.0 / COUNT(*)`가 조용히 `NULL`(내부 이름 `AGG(__case__)`), `HAVING SUM(CASE …) > 0`·`SUM(CASE WHEN c THEN a * b END)`·`AVG`/`MIN`/`MAX(CASE …)`가 파싱 오류 또는 `Unknown column '__case__'`, **`COUNT(CASE WHEN v > 5 THEN 1 ELSE 0 END)`가 5가 아니라 조건이 참인 행의 수 3**(MySQL은 NULL이 아닌 값 = 모든 행), `COUNT(age >= 30)`도 같다.
+- **INSERT VALUES·UPDATE SET의 식**: `INSERT … VALUES (1 + 2, UPPER('x'), NOW())`는 파싱 오류, `UPDATE … SET v = CASE …`·`ON DUPLICATE KEY UPDATE v = CASE …`도.
+- **괄호 없는 `CURRENT_DATE`/`CURRENT_TIMESTAMP`**, 식 안의 `DATE_ADD(d, INTERVAL n DAY)`·`DATE_FORMAT`·`DATABASE()`·`USER()`가 파싱 오류(`WHERE d > DATE_SUB(CURDATE(), INTERVAL 30 DAY)` 포함).
+- (무작위 검증이 찾은 것) **`NULLIF(5, 5.00)`이 NULL이 아님**(문자열로 비교), **5자리 이상 소수의 합이 4자리로 반올림**(`SUM(price * rate)` = 14.451375가 14.4514), **리터럴 `-0`이 `-0`으로 출력**.
+
+**수정**:
+- 새 식 노드 `ArithExpr::Pred`(조건을 값으로: 참 1·거짓 0·모름 NULL)와 `CASE`(함수 `CASE(when1, then1, …, [else])`, 조건은 Pred). 조건의 비교·3값 논리·타입 규칙은 WHERE의 것을 그대로 쓴다. 식 파서 `parse_value_expr`(OR > AND > NOT > 술어 > 산술)가 select 목록·함수 인자·괄호·집계 인자·SET·VALUES·ON DUPLICATE의 식을 읽고, 술어가 없으면 값 그대로(조건으로 쓰이면 "NULL도 0도 아니면 참", 텍스트는 앞의 숫자로).
+- select 목록: 함수 호출·`CASE`·`IF`·`CAST`는 모두 식으로 읽고(결과 열 `SelectColumn::Expr`), 집계는 뒤에 연산자가 이어질 때 식으로 읽는다(`select_item_continues`: 괄호·CASE 밖의 연산자를 앞서 살핌). `SUM`/`COUNT`/`AVG`/`MIN`/`MAX(CASE …)`는 앞의 항목의 "인자는 식의 텍스트" 경로로 한 곳에서 처리(옛 `SumCase`/`CountCase` 경로와 `__case__` 번호는 읽기 전용으로만 남음).
+- 조건 `(a + b) * 2 > 10`처럼 괄호로 시작하는 값: 조건의 묶음으로 먼저 읽어 보고, 뒤에 식이 이어지면 술어 하나로 다시 읽는다. `BETWEEN`의 경계가 숫자·문자열·`@변수`가 아니면 두 비교(`>= lo AND <= hi`)로 푼다.
+- INSERT VALUES: 값이 글자·숫자·NULL·DEFAULT·`@변수`·`NEW.x`이면 전과 같이 텍스트, 아니면 `"\x01" + 식의 JSON`으로 두고 실행기가 변수를 넣은 뒤(트리거의 NEW/OLD 포함) 계산해 값으로 만든다(파티션 라우팅 전에도).
+- `Parser::arith_to_string`/`cond_to_string`이 CASE·조건·CAST·DATE_ADD를 다시 읽으면 같은 식이 되게 쓴다(집계 인자의 텍스트가 되기 때문); 서브쿼리가 든 조건은 쓸 수 없어 오류(`A subquery inside this expression is not supported`).
+- 그 밖: `NULLIF`가 숫자는 값으로 비교, 합의 표시는 정수가 아니면 4자리 이상(5자리 이상이면 모든 자리), `-0`은 `0`, 비교의 오른쪽 `NULL + 3`.
+
+**검증**:
+- 신규 Catch2 10케이스(564 → 574, `test_value_expressions.cpp`): ① 함수·집계·CAST가 식의 처음에, ② CASE·IF(결과가 식, 단순 CASE, NULL 조건, 중첩, 열 이름과 같은 문자열, 따옴표, 타입, 형식 오류, 없는 열), ③ 조건이 값/값이 조건(3값 논리, IS TRUE/FALSE/UNKNOWN, 텍스트, BETWEEN 식 경계), ④ 집계 안의 식(비율·HAVING·COUNT(CASE …)·옛 형태와 같은 답), ⑤ INSERT/REPLACE/UPDATE/ON DUPLICATE의 식(변수·날짜 함수), ⑥ 트리거·프로시저·뷰·재시작 뒤, ⑦ 쓴 식을 다시 읽으면 같은 식, ⑧ 날짜 함수·`DATABASE()`, ⑨ 작은 것들(NULLIF·`-0`·`NULL + 3`·합 표시·파티션 키의 식·프로시저/변수의 식), ⑩ **무작위 식(정수 산술·ABS·COALESCE·IFNULL·NULLIF·CASE 둘·IF·CAST·조건을 숫자로·비교·IS …·BETWEEN·IN(NULL 포함)·AND/OR/NOT·숫자를 조건으로)을 독립 참조(3값 논리)와 비교**: select 목록·WHERE·NOT WHERE·집계·`SUM(CASE WHEN … END)`·GROUP BY/HAVING·UPDATE·상수의 INSERT.
+- **새 검증 도구 `verify_value_expressions.py`**(한 빌드를 정확한 분수 산술·3값 논리로 계산한 참조와 비교; 정수·소수 2자리·글자 열, LIKE, 문자열 CASE/IF/CONCAT/UPPER). 첫 실행에서 `NULLIF`와 합의 반올림 두 건을 찾았다.
+- 심은 버그 48종(식의 파서 — 술어 연산자·`IS TRUE`·BETWEEN 경계·OR/AND/NOT·CASE의 ELSE·단순 CASE·CAST 형식·NULL 오른쪽 식·`-0`·함수 뒤 연산자 판단·집계 인자·INSERT 값; 식을 다시 쓰는 곳 여섯; 실행기 — CASE·Pred 평가·타입·바인더·변수·집계 찾기·INSERT 식 계산 두 곳·합 표시·NULLIF·쿼리 캐시 목록; SET·RETURN의 식 셋) 가운데 **처음에는 6종이 살아남았고**(`CAST(x AS SIGNED INT)`, 다시 읽기에서 남은 글자, `- 0`, 함수·집계 뒤의 `<` `>=` `<=`, `CASE x WHEN NULL`, INSERT 값 `a.b`) 테스트를 보강해 4종을 잡게 했다. 최종 45종을 테스트가 잡고, 2종은 결과가 같은 변이(`CASE x WHEN NULL`의 NULL을 따옴표 없는 `NULL`로 쓰기 — 어느 쪽이든 아무 값과도 같지 않음; INSERT 값이 `a.b` 모양일 때의 옛 입력 처리 — 뜻 있는 입력이 없음)이고 1종은 죽은 코드(`SIGNED INTEGER`의 `INTEGER` 건너뛰기: 이미 키워드 토큰이라 닿지 않아 코드를 줄임)다.
+- Release/Debug **574 케이스/1,333,363 assertions**를 기본 설정과 `RUSQL_DML_INDEX_MIN_ROWS=0` 양쪽에서 통과(Debug도 574케이스). SELECT 차분 퍼저 150시드(1,819,528 assertions), DML 퍼저 80시드(1,950,808), 쓰기 퍼저 40시드(43,182), 조인 퍼저 60시드(7,178), `[aggregate]` 긴 캠페인(11케이스 317,627), `[aggregate_semantics][random]` 60시드(23,151), `[aggregate_arguments][random]` 60시드(4,560), `[subquery_cardinality][random]` 80시드(5,269), `[typed_comparison][random]`(68,100 / DML 인덱스 강제 227,000), 새 `[value_expressions][random]` 100시드(34,700 / DML 인덱스 강제 60시드 20,820), 크래시 퍼저 90라운드·동시 퍼저 30라운드(확인한 확정 행 16,356) 불일치 0. 새 `verify_value_expressions.py` 12시드 × 250라운드 위반 없음(그 앞의 시드 31개에서 `NULLIF`와 합의 반올림 두 건을 찾아 고침), `verify_subqueries`·`verify_agg_arguments`·`verify_compare`·`verify_joins`·`verify_writes`·`verify_null_expressions`·`verify_agg_expressions`·`verify_aggregates`·`verify_orderby_distinct`도 위반 없음.
+- 빌드 간 차분(이전 빌드 = 앞 항목): 30시드 × 99질의(2,970질의) 중 **40개가 달랐고, 40개 모두 `SELECT DISTINCT UPPER(tag) …`의 결과 열 이름이 `UPPER()`에서 `UPPER(tag)`로 바뀐 것**(의도한 변화)이며 값이 달라진 질의는 없다 — 이 말뭉치에는 함수가 식의 처음에 오거나 CASE가 든 질의가 없어서 새로 되는 것은 `verify_value_expressions.py`와 새 테스트가 직접 검증한다.
+- 성능: 앞 항목 빌드와 번갈아 3라운드, 5만 행, 가장 빠른 값(이전 → 이번): 집계 `COUNT(*)` 47.5 → 45.8ms, `GROUP BY` + 4집계 79.3 → 78.2, `HAVING AVG` 69.3 → 68.2, `SUM`/`AVG` 64.9 → 63.3, `SUM(price * val)` 143.3 → 138.8; select 목록의 함수 `UPPER(s), LENGTH(s)` 239 → 250ms, `ROUND(price, 1), ABS(val)` 283 → 302(+7%: 함수 인자를 식으로 계산해 넘김), `CASE WHEN … THEN 'a' ELSE 'b'` 244 → 233, `val * 2 + 1` 239 → 228; WHERE `val BETWEEN a AND b` 32.4 → 32.1. **`SUM(CASE WHEN … END)` + GROUP BY는 62 → 119ms로 느려졌다**(조건부 집계가 앞 항목의 "식을 행마다 계산해 숨은 열로 두는" 경로를 쓰게 되어 행을 복사하기 때문; 전에는 틀린 답을 더 빨리 냈다). 새로 되는 것: `WHERE (val + id) * 2 > n` 35ms, `WHERE CASE … END = 1` 29ms, `COALESCE(val, 0) + 1` 225ms.
+
+**눈에 띄는 변화(의도한 것)**: `COUNT(CASE WHEN … THEN 1 ELSE 0 END)`·`COUNT(조건)`이 NULL이 아닌 값을 센다(전에는 조건이 참인 행만); `SUM(조건)`이 모든 값이 NULL이면 NULL; 결과 열 이름: 함수·CASE 열은 `UPPER(s)`/`CASE`처럼 식 모양(전에는 `UPPER()`), 조건부 집계는 `SUM(CASE WHEN … END)`(전에는 `SUM(CASE)`, `SUM(CASE)2`); `-0`이 `0`; 5자리 이상 소수의 합이 반올림 없이.
+
+**정직한 한계**: ① 결과 열 이름은 아직 MySQL처럼 타이핑한 글자 그대로가 아니다(공백을 뺀 `ROUND(d)*100`, `CASE`); ② 함수 안의 서브쿼리·`(SELECT …) + 1`·`WHERE x = (SELECT …) * 1.1`·`IN (식)`·`LIKE 식`은 파싱 오류(다음 항목); ③ `ORDER BY`·`GROUP BY`의 식·번호·별칭이 아직 안 됨(별칭으로 정렬하면 조용히 정렬 안 됨은 다음 항목에서); ④ 서브쿼리의 바깥 참조가 비교의 **왼쪽**에 있으면(`WHERE a.id = b.a_id`) 조용히 틀림(별도 항목); ⑤ 집계 안 CASE에 서브쿼리가 있으면 오류; ⑥ `STDDEV(x) / AVG(x)`처럼 `COUNT/SUM/AVG/MIN/MAX` 밖의 집계 뒤에 연산자를 쓰면 파싱 오류.
+
+**Diagram 페이지**: 구성요소·흐름이 바뀐 것이 없어 변경 없음.
+
 ## 요약: 1학기 대비 2학기에 달라진 것
 
 | 항목 | 1학기 (~2026년 6월) | 2학기 (2026년 7~8월) |

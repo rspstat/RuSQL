@@ -10,6 +10,7 @@
 
 #include "engine/column_text.hpp"
 #include "engine/executor/executor.hpp"
+#include "engine/parser/ast_json.hpp"
 #include "engine/parser/parser.hpp"
 
 namespace engine {
@@ -113,6 +114,7 @@ std::string argument_of(const Vars& v, const std::string& s) {
 }
 
 void statement(const Vars& v, Statement& st);
+void cond(const Vars& v, CondExpr& e);
 
 void arith(const Vars& v, ArithExpr& e) {
     if (auto* col = std::get_if<ArithExpr::Col>(&e.data)) {
@@ -124,6 +126,8 @@ void arith(const Vars& v, ArithExpr& e) {
     else if (auto* c = std::get_if<ArithExpr::Cmp>(&e.data)) { arith(v, *c->lhs); arith(v, *c->rhs); }
     else if (auto* f = std::get_if<ArithExpr::Func>(&e.data)) {
         for (auto& arg : f->args) arith(v, arg);
+    } else if (auto* p = std::get_if<ArithExpr::Pred>(&e.data)) {
+        cond(v, *p->cond);
     }
 }
 
@@ -224,7 +228,15 @@ void statement(const Vars& v, Statement& st) {
         if (sel->subquery) statement(v, *sel->subquery->first);
     } else if (auto* ins = std::get_if<Statement::Insert>(&st.data)) {
         for (auto& row : ins->values) {
-            for (auto& value : row) value = text_of(v, value);
+            for (auto& value : row) {
+                if (!value.empty() && value[0] == '\x01') { // a value written as an expression: its variables are replaced inside it
+                    ArithExpr expr = nlohmann::json::parse(value.substr(1)).get<ArithExpr>();
+                    arith(v, expr);
+                    value = "\x01" + nlohmann::json(expr).dump();
+                } else {
+                    value = text_of(v, value);
+                }
+            }
         }
         conflict(v, ins->on_conflict);
     } else if (auto* is = std::get_if<Statement::InsertSelect>(&st.data)) {
@@ -272,6 +284,21 @@ void Executor::substitute_variables(Statement& stmt, const std::unordered_map<st
 
 void Executor::substitute_variables(ArithExpr& expr, const std::unordered_map<std::string, std::string>* row) const {
     arith(Vars{proc_vars, user_vars, row}, expr);
+}
+
+// An INSERT value that was written as an expression (`1 + 2`, `UPPER('x')`, `NOW()`) is kept by the parser as "\x01" + the JSON of the expression:
+// it is computed here (after the variables in it have been replaced) and becomes the text of the value.
+void Executor::evaluate_insert_expressions(Statement& stmt) const {
+    auto* ins = std::get_if<Statement::Insert>(&stmt.data);
+    if (!ins) return;
+    for (auto& row : ins->values) {
+        for (auto& value : row) {
+            if (value.empty() || value[0] != '\x01') continue;
+            ArithExpr expr = nlohmann::json::parse(value.substr(1)).get<ArithExpr>();
+            substitute_variables(expr);
+            value = eval_arith(Row{}, expr);
+        }
+    }
 }
 
 } // namespace engine

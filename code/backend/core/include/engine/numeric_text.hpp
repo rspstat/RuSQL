@@ -250,7 +250,12 @@ inline std::optional<std::string> sum_of_texts(const std::vector<const std::stri
     DecimalSum sum;
     for (const std::string* v : values) sum.add(*v);
     sum.normalize();
-    if (sum.exact) return display && sum.scale > 0 ? format_places(number_value(sum.text()), 4) : sum.text();
+    if (sum.exact) {
+        // (a result column shows at least 4 places for a sum that is not an integer, and every place it has when it has more)
+        std::string text = sum.text();
+        if (display && sum.scale > 0 && sum.scale < 4) text.append(static_cast<std::size_t>(4 - sum.scale), '0');
+        return text;
+    }
     double total = 0.0;
     for (const std::string* v : values) total += text_to_number(*v);
     if (display && total != std::trunc(total)) return format_places(total, 4);

@@ -869,6 +869,7 @@ private:
     // given, a trigger's `NEW.x` / `OLD.x` -- by its value (executor_vars.cpp).
     void substitute_variables(Statement& stmt, const std::unordered_map<std::string, std::string>* row = nullptr) const;
     void substitute_variables(ArithExpr& expr, const std::unordered_map<std::string, std::string>* row = nullptr) const;
+    void evaluate_insert_expressions(Statement& stmt) const;
     // Joins read the way SQL says: NATURAL / USING joins become an ON condition (`joined_using` keeps their columns, which `*` shows
     // once), a cross join that the WHERE pairs up becomes an inner join on that, and `*` / `t.*` over a join become the columns they stand
     // for (a plain `*` over one table too when `expand_plain_star`: next to other columns, or under DISTINCT, where the row's own

@@ -599,8 +599,11 @@ std::string Executor::apply_scalar_func(const std::string& func_name, const std:
         return is_true ? true_val : false_val;
     }
     if (func_name == "NULLIF") {
+        // NULL when the two are equal as `=` says: numbers by value (5 and 5.00 are equal), anything else as text
         std::string a = arg_at(0), b = arg_at(1);
-        return a == b ? EXECUTOR_NULL_VALUE : a;
+        const bool both_numbers = parse_number(a) && parse_number(b);
+        const bool equal = both_numbers ? compare_numbers(a, b) == 0 : a == b;
+        return equal ? EXECUTOR_NULL_VALUE : a;
     }
     if (func_name == "LPAD" || func_name == "RPAD") {
         std::string s = arg_at(0);

@@ -94,6 +94,16 @@ TEST_CASE("execute_sql never caches a query calling a non-deterministic function
     REQUIRE(r1.is_ok());
     REQUIRE(r2.is_ok());
     REQUIRE(r1.value() != r2.value());
+
+    // the date and time keywords too, with and without parentheses (a cached CURRENT_DATE would still say yesterday after midnight)
+    REQUIRE(ex.execute_sql("CREATE TABLE p (id INT PRIMARY KEY)").is_ok());
+    REQUIRE(ex.execute_sql("INSERT INTO p VALUES (1)").is_ok());
+    for (const char* sql : {"SELECT CURRENT_DATE AS d FROM p", "SELECT CURRENT_DATE() AS d FROM p", "SELECT CURRENT_TIMESTAMP AS d FROM p",
+                            "SELECT SYSDATE() AS d FROM p", "SELECT NOW() AS d FROM p", "SELECT CURDATE() AS d FROM p"}) {
+        INFO(sql);
+        REQUIRE(ex.execute_sql(sql).is_ok());
+        REQUIRE(ex.get_shared()->read()->query_cache.len() == 0);
+    }
 }
 
 TEST_CASE("execute_sql still caches a deterministic query, incl. one mentioning a column named like 'brand'",

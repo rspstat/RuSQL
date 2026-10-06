@@ -6,28 +6,36 @@
 
 namespace engine {
 
-namespace {
-std::string agg_display_string(const AggFunc& func, const std::string& col) {
-    return std::visit(
-        [&col](const auto& alt) -> std::string {
-            using T = std::decay_t<decltype(alt)>;
-            if constexpr (std::is_same_v<T, AggFunc::Count>) return "COUNT(" + col + ")";
-            else if constexpr (std::is_same_v<T, AggFunc::CountDistinct>) return "COUNT(DISTINCT " + col + ")";
-            else if constexpr (std::is_same_v<T, AggFunc::Sum>) return "SUM(" + col + ")";
-            else if constexpr (std::is_same_v<T, AggFunc::SumDistinct>) return "SUM(DISTINCT " + col + ")";
-            else if constexpr (std::is_same_v<T, AggFunc::Avg>) return "AVG(" + col + ")";
-            else if constexpr (std::is_same_v<T, AggFunc::AvgDistinct>) return "AVG(DISTINCT " + col + ")";
-            else if constexpr (std::is_same_v<T, AggFunc::Min>) return "MIN(" + col + ")";
-            else if constexpr (std::is_same_v<T, AggFunc::Max>) return "MAX(" + col + ")";
-            else return "AGG(" + col + ")";
-        },
-        func.data);
+// Whether the select item that starts at the current token -- a function call, an aggregate, a CAST -- goes on as an expression: an operator outside
+// every parenthesis before the item ends (`ROUND(x) * 100`, `SUM(a) / COUNT(*)`, `UPPER(s) || '!'`, `LENGTH(s) > 3`).
+bool Parser::select_item_continues() const {
+    int depth = 0; // parentheses and CASE ... END
+    for (std::size_t i = pos_; i < tokens_.size(); i++) {
+        switch (tokens_[i].kind) {
+            case TokenKind::LParen: case TokenKind::Case: depth++; break;
+            case TokenKind::End: if (depth > 0) depth--; break;
+            case TokenKind::RParen:
+                if (depth == 0) return false; // the end of the select that holds this one
+                depth--;
+                break;
+            case TokenKind::Comma: case TokenKind::From: case TokenKind::As: case TokenKind::Semicolon: case TokenKind::Into:
+            case TokenKind::Where: case TokenKind::Group: case TokenKind::Having: case TokenKind::Order: case TokenKind::Limit:
+            case TokenKind::Union: case TokenKind::Intersect: case TokenKind::Except: case TokenKind::Offset: case TokenKind::For:
+            case TokenKind::Fetch: case TokenKind::Over: case TokenKind::Filter:
+                if (depth == 0) return false;
+                break;
+            case TokenKind::Plus: case TokenKind::Minus: case TokenKind::Asterisk: case TokenKind::Slash: case TokenKind::Percent:
+            case TokenKind::PipePipe: case TokenKind::Arrow: case TokenKind::LongArrow: case TokenKind::Eq: case TokenKind::Ne:
+            case TokenKind::Gt: case TokenKind::Lt: case TokenKind::Gte: case TokenKind::Lte: case TokenKind::Is: case TokenKind::Between:
+            case TokenKind::In: case TokenKind::Like: case TokenKind::Regexp: case TokenKind::And: case TokenKind::Or: case TokenKind::Not:
+                if (depth == 0) return true;
+                break;
+            default:
+                break;
+        }
+    }
+    return false;
 }
-
-bool is_arith_continuation(TokenKind k) {
-    return k == TokenKind::Plus || k == TokenKind::Minus || k == TokenKind::Asterisk || k == TokenKind::Slash;
-}
-} // namespace
 
 std::optional<CondExpr> Parser::parse_optional_filter_clause() {
     if (!peek_is(TokenKind::Filter)) return std::nullopt;
@@ -62,6 +70,32 @@ Statement Parser::parse_select() {
                 advance();
                 advance();
                 return SelectColumn(SelectColumn::All{std::move(qualifier)});
+            }
+
+            // a scalar function, CASE, IF and CAST are expressions (with whatever goes on after them); an aggregate is one when it goes on
+            if (p) {
+                const bool aggregate = p->kind == TokenKind::Count || p->kind == TokenKind::Sum || p->kind == TokenKind::Avg ||
+                                       p->kind == TokenKind::Min || p->kind == TokenKind::Max || p->kind == TokenKind::Stddev ||
+                                       p->kind == TokenKind::Variance || p->kind == TokenKind::BitAnd || p->kind == TokenKind::BitOr ||
+                                       p->kind == TokenKind::JsonAgg || p->kind == TokenKind::ArrayAgg || p->kind == TokenKind::Median ||
+                                       p->kind == TokenKind::GroupConcat;
+                const bool function = p->kind == TokenKind::DateAdd || p->kind == TokenKind::DateSub || p->kind == TokenKind::Upper ||
+                                      p->kind == TokenKind::Lower || p->kind == TokenKind::Length || p->kind == TokenKind::Trim ||
+                                      p->kind == TokenKind::Concat || p->kind == TokenKind::Substr || p->kind == TokenKind::Substring ||
+                                      p->kind == TokenKind::Now || p->kind == TokenKind::Curdate || p->kind == TokenKind::DateFormat ||
+                                      p->kind == TokenKind::Coalesce || p->kind == TokenKind::Ifnull || p->kind == TokenKind::Replace ||
+                                      p->kind == TokenKind::Round || p->kind == TokenKind::Abs || p->kind == TokenKind::Ceil ||
+                                      p->kind == TokenKind::Floor || p->kind == TokenKind::Mod || p->kind == TokenKind::Nullif ||
+                                      p->kind == TokenKind::Lpad || p->kind == TokenKind::Rpad || p->kind == TokenKind::DateDiff ||
+                                      ((p->kind == TokenKind::Database || p->kind == TokenKind::User) && peek_at_is(1, TokenKind::LParen));
+                const bool always = p->kind == TokenKind::Case || (p->kind == TokenKind::If && peek_at_is(1, TokenKind::LParen)) ||
+                                    (p->kind == TokenKind::Cast && peek_at_is(1, TokenKind::LParen));
+                if (always || function || (aggregate && select_item_continues())) {
+                    ArithExpr expr = parse_value_expr();
+                    std::optional<std::string> alias;
+                    if (peek_is(TokenKind::As)) { advance(); alias = expect_alias_ident(); }
+                    return SelectColumn(SelectColumn::Expr{std::move(expr), alias});
+                }
             }
 
             if (p && (p->kind == TokenKind::Count || p->kind == TokenKind::Sum || p->kind == TokenKind::Avg ||
@@ -99,54 +133,16 @@ Statement Parser::parse_select() {
                         else return AggFunc(alt);
                     }, func.data);
                 }
-                bool rparen_consumed = false;
                 std::string agg_col;
                 if (peek_is(TokenKind::Asterisk)) { advance(); agg_col = "*"; }
-                else if (peek_is(TokenKind::Case)) {
-                    advance(); // consume CASE
-                    auto [branches, else_val] = parse_case_when_inner();
-                    if (!peek_is(TokenKind::RParen)) throw ParseError("Expected ')' after CASE WHEN in aggregate");
-                    advance();
-                    rparen_consumed = true;
-                    func = std::visit([&](const auto& alt) -> AggFunc {
-                        using T = std::decay_t<decltype(alt)>;
-                        if constexpr (std::is_same_v<T, AggFunc::Count> || std::is_same_v<T, AggFunc::CountDistinct>)
-                            return AggFunc(AggFunc::CountCase{branches, else_val});
-                        else if constexpr (std::is_same_v<T, AggFunc::Sum> || std::is_same_v<T, AggFunc::SumDistinct>)
-                            return AggFunc(AggFunc::SumCase{branches, else_val});
-                        else return AggFunc(alt);
-                    }, func.data);
-                    agg_col = "__case__";
-                } else {
+                else {
                     // a column (its qualifier stays: with `a.id` and `b.id` the bare name cannot say which table's column is meant) or any
-                    // expression -- `price * qty`, `COALESCE(x, 0)`, `1` --, kept as the text of the expression: the executor computes it
-                    // for every row under that text
-                    ArithExpr arg = parse_arith_expr();
-                    const std::string col_name = aggregate_argument_text(arg);
-                    // SUM(col > x) / SUM(col IS NULL) / SUM(col LIKE ..) / SUM(col BETWEEN ..) /
-                    // SUM(col IN (..)) → SumCase/CountCase over a synthesized
-                    // CASE WHEN <predicate> THEN 1 ELSE 0 END, reusing the same predicate-tail
-                    // parser as a normal WHERE-clause condition instead of a narrower one-off.
-                    if (!peek_is(TokenKind::RParen)) {
-                        Condition cond = parse_pred_tail(std::move(arg));
-                        CondExpr cond_expr = CondExpr(CondExpr::Leaf{std::move(cond)});
-                        std::vector<CaseWhenBranch> branches;
-                        branches.push_back(CaseWhenBranch{std::move(cond_expr), "1"});
-                        func = std::visit([&](const auto& alt) -> AggFunc {
-                            using T = std::decay_t<decltype(alt)>;
-                            if constexpr (std::is_same_v<T, AggFunc::Count> || std::is_same_v<T, AggFunc::CountDistinct>)
-                                return AggFunc(AggFunc::CountCase{branches, std::optional<std::string>("0")});
-                            else if constexpr (std::is_same_v<T, AggFunc::Sum> || std::is_same_v<T, AggFunc::SumDistinct>)
-                                return AggFunc(AggFunc::SumCase{branches, std::optional<std::string>("0")});
-                            else return AggFunc(alt);
-                        }, func.data);
-                    }
-                    agg_col = col_name;
+                    // expression -- `price * qty`, `COALESCE(x, 0)`, `1`, `CASE WHEN .. END`, `v > 5` --, kept as the text of the expression:
+                    // the executor computes it for every row under that text
+                    agg_col = aggregate_argument_text(parse_value_expr());
                 }
-                if (!rparen_consumed) {
-                    if (!peek_is(TokenKind::RParen)) throw ParseError("Expected ')'");
-                    advance();
-                }
+                if (!peek_is(TokenKind::RParen)) throw ParseError("Expected ')'");
+                advance();
                 // 집계함수 + OVER → aggregate window function
                 if (peek_is(TokenKind::Over)) {
                     advance(); // consume OVER
@@ -191,23 +187,8 @@ Statement Parser::parse_select() {
                     return SelectColumn(SelectColumn::WinFunc{win_func, std::optional<std::string>(agg_col), 0,
                                                               partition_by, win_order_by, alias, frame});
                 }
-                if (peek() && is_arith_continuation(peek()->kind)) {
-                    // COUNT(a) - COUNT(b) 등 집계 간 산술 연산
-                    std::string agg_str = agg_display_string(func, agg_col);
-                    ArithExpr lhs = ArithExpr(ArithExpr::Col{agg_str});
-                    for (;;) {
-                        if (peek_is(TokenKind::Plus)) { advance(); lhs = ArithExpr(ArithExpr::Add{std::make_unique<ArithExpr>(std::move(lhs)), std::make_unique<ArithExpr>(parse_arith_term())}); }
-                        else if (peek_is(TokenKind::Minus)) { advance(); lhs = ArithExpr(ArithExpr::Sub{std::make_unique<ArithExpr>(std::move(lhs)), std::make_unique<ArithExpr>(parse_arith_term())}); }
-                        else if (peek_is(TokenKind::Asterisk)) { advance(); lhs = ArithExpr(ArithExpr::Mul{std::make_unique<ArithExpr>(std::move(lhs)), std::make_unique<ArithExpr>(parse_arith_term())}); }
-                        else if (peek_is(TokenKind::Slash)) { advance(); lhs = ArithExpr(ArithExpr::Div{std::make_unique<ArithExpr>(std::move(lhs)), std::make_unique<ArithExpr>(parse_arith_term())}); }
-                        else break;
-                    }
-                    std::optional<std::string> alias;
-                    if (peek_is(TokenKind::As)) { advance(); alias = expect_alias_ident(); }
-                    return SelectColumn(SelectColumn::Expr{std::move(lhs), alias});
-                }
                 // FILTER (WHERE ...) -- only meaningful for the plain aggregate case
-                // reached here (OVER and the arith-continuation case above both already
+                // reached here (OVER and the expression case above both already
                 // returned); deliberately not supported combined with OVER (aggregate
                 // window functions), out of scope for this addition.
                 std::optional<CondExpr> filter_cond = parse_optional_filter_clause();
@@ -243,61 +224,6 @@ Statement Parser::parse_select() {
                     return SelectColumn(SelectColumn::AggAlias{func, agg_col, alias, filter_cond});
                 }
                 return SelectColumn(SelectColumn::Agg{func, agg_col, filter_cond});
-            }
-
-            // CASE WHEN ... THEN ... [ELSE ...] END
-            if (p && p->kind == TokenKind::Case) {
-                advance();
-                return parse_case_when();
-            }
-
-            // IF(cond, true_val, false_val)
-            if (p && p->kind == TokenKind::If) {
-                advance();
-                if (!peek_is(TokenKind::LParen)) throw ParseError("Expected '(' after IF");
-                advance();
-                CondExpr cond = parse_condexpr();
-                if (!peek_is(TokenKind::Comma)) throw ParseError("Expected ',' in IF()");
-                advance();
-                auto read_val = [this]() -> std::string {
-                    const Token* t = advance();
-                    if (!t) throw ParseError("Expected value in IF()");
-                    switch (t->kind) {
-                        case TokenKind::StringLit: case TokenKind::NumberLit: case TokenKind::Ident: return t->text;
-                        case TokenKind::Null: return "NULL";
-                        default: throw ParseError("Expected value in IF()");
-                    }
-                };
-                std::string true_val = read_val();
-                if (!peek_is(TokenKind::Comma)) throw ParseError("Expected ',' in IF()");
-                advance();
-                std::string false_val = read_val();
-                if (!peek_is(TokenKind::RParen)) throw ParseError("Expected ')' after IF()");
-                advance();
-                std::optional<std::string> alias;
-                if (peek_is(TokenKind::As)) { advance(); alias = expect_alias_ident(); }
-                std::vector<CaseWhenBranch> branches;
-                branches.push_back(CaseWhenBranch{std::move(cond), true_val});
-                return SelectColumn(SelectColumn::CaseWhen{std::move(branches), std::optional<std::string>(false_val), alias});
-            }
-
-            // CAST(expr AS type)
-            if (p && p->kind == TokenKind::Cast) {
-                advance();
-                std::vector<std::string> args = parse_cast_args();
-                std::optional<std::string> alias;
-                if (peek_is(TokenKind::As)) { advance(); alias = expect_alias_ident(); }
-                return SelectColumn(SelectColumn::Func{"CAST", std::move(args), alias});
-            }
-
-            // DATE_ADD / DATE_SUB (date, INTERVAL n unit)
-            if (p && (p->kind == TokenKind::DateAdd || p->kind == TokenKind::DateSub)) {
-                std::string fname = p->kind == TokenKind::DateAdd ? "DATE_ADD" : "DATE_SUB";
-                advance();
-                std::vector<std::string> args = parse_date_add_args();
-                std::optional<std::string> alias;
-                if (peek_is(TokenKind::As)) { advance(); alias = expect_alias_ident(); }
-                return SelectColumn(SelectColumn::Func{fname, std::move(args), alias});
             }
 
             // 윈도우 함수
@@ -385,69 +311,6 @@ Statement Parser::parse_select() {
                 return SelectColumn(SelectColumn::WinFunc{func, wf_col, wf_offset, partition_by, win_order_by, alias, frame});
             }
 
-            // 스칼라 함수: UPPER(col), NOW(), CONCAT(a, b), ...
-            if (p && (p->kind == TokenKind::Upper || p->kind == TokenKind::Lower || p->kind == TokenKind::Length ||
-                      p->kind == TokenKind::Trim || p->kind == TokenKind::Concat || p->kind == TokenKind::Substr ||
-                      p->kind == TokenKind::Substring || p->kind == TokenKind::Now || p->kind == TokenKind::Curdate ||
-                      p->kind == TokenKind::DateFormat || p->kind == TokenKind::Coalesce || p->kind == TokenKind::Ifnull ||
-                      p->kind == TokenKind::Replace || p->kind == TokenKind::Round || p->kind == TokenKind::Abs ||
-                      p->kind == TokenKind::Ceil || p->kind == TokenKind::Floor || p->kind == TokenKind::Mod ||
-                      p->kind == TokenKind::Nullif || p->kind == TokenKind::Lpad || p->kind == TokenKind::Rpad ||
-                      p->kind == TokenKind::DateDiff || p->kind == TokenKind::Database || p->kind == TokenKind::User)) {
-                const Token* ft = advance();
-                std::string fname;
-                switch (ft->kind) {
-                    case TokenKind::Upper: fname = "UPPER"; break;
-                    case TokenKind::Lower: fname = "LOWER"; break;
-                    case TokenKind::Length: fname = "LENGTH"; break;
-                    case TokenKind::Trim: fname = "TRIM"; break;
-                    case TokenKind::Concat: fname = "CONCAT"; break;
-                    case TokenKind::Substr: fname = "SUBSTR"; break;
-                    case TokenKind::Substring: fname = "SUBSTRING"; break;
-                    case TokenKind::Now: fname = "NOW"; break;
-                    case TokenKind::Curdate: fname = "CURDATE"; break;
-                    case TokenKind::DateFormat: fname = "DATE_FORMAT"; break;
-                    case TokenKind::Coalesce: fname = "COALESCE"; break;
-                    case TokenKind::Ifnull: fname = "IFNULL"; break;
-                    case TokenKind::Replace: fname = "REPLACE"; break;
-                    case TokenKind::Round: fname = "ROUND"; break;
-                    case TokenKind::Abs: fname = "ABS"; break;
-                    case TokenKind::Ceil: fname = "CEIL"; break;
-                    case TokenKind::Floor: fname = "FLOOR"; break;
-                    case TokenKind::Mod: fname = "MOD"; break;
-                    case TokenKind::Nullif: fname = "NULLIF"; break;
-                    case TokenKind::Lpad: fname = "LPAD"; break;
-                    case TokenKind::Rpad: fname = "RPAD"; break;
-                    case TokenKind::DateDiff: fname = "DATEDIFF"; break;
-                    case TokenKind::Database: fname = "DATABASE"; break;
-                    case TokenKind::User: fname = "USER"; break;
-                    default: break;
-                }
-                std::vector<std::string> args = parse_func_args();
-                // detect comparison after scalar func: LENGTH(x) > 0 AS alias
-                std::optional<std::string> cmp_op;
-                if (peek_is(TokenKind::Gt)) { advance(); cmp_op = ">"; }
-                else if (peek_is(TokenKind::Lt)) { advance(); cmp_op = "<"; }
-                else if (peek_is(TokenKind::Gte)) { advance(); cmp_op = ">="; }
-                else if (peek_is(TokenKind::Lte)) { advance(); cmp_op = "<="; }
-                else if (peek_is(TokenKind::Eq)) { advance(); cmp_op = "="; }
-                else if (peek_is(TokenKind::Ne)) { advance(); cmp_op = "!="; }
-                if (cmp_op) {
-                    ArithExpr rhs = parse_arith_expr();
-                    std::optional<std::string> alias;
-                    if (peek_is(TokenKind::As)) { advance(); alias = expect_alias_ident(); }
-                    std::vector<ArithExpr> fargs;
-                    for (auto& a : args) fargs.push_back(str_to_arith(a));
-                    ArithExpr lhs = ArithExpr(ArithExpr::Func{fname, std::move(fargs)});
-                    return SelectColumn(SelectColumn::Expr{
-                        ArithExpr(ArithExpr::Cmp{std::make_unique<ArithExpr>(std::move(lhs)), *cmp_op, std::make_unique<ArithExpr>(std::move(rhs))}),
-                        alias});
-                }
-                std::optional<std::string> alias;
-                if (peek_is(TokenKind::As)) { advance(); alias = expect_alias_ident(); }
-                return SelectColumn(SelectColumn::Func{fname, std::move(args), alias});
-            }
-
             // 스칼라 서브쿼리: (SELECT ...) [AS alias]
             if (p && p->kind == TokenKind::LParen && peek_at_is(1, TokenKind::Select)) {
                 advance(); // consume (
@@ -462,22 +325,7 @@ Statement Parser::parse_select() {
 
             // default: arithmetic expression, possibly Column/ColumnAlias/Expr/Cmp
             {
-                ArithExpr expr = parse_arith_expr();
-                std::optional<std::string> cmp_op;
-                if (peek_is(TokenKind::Gt)) { advance(); cmp_op = ">"; }
-                else if (peek_is(TokenKind::Lt)) { advance(); cmp_op = "<"; }
-                else if (peek_is(TokenKind::Gte)) { advance(); cmp_op = ">="; }
-                else if (peek_is(TokenKind::Lte)) { advance(); cmp_op = "<="; }
-                else if (peek_is(TokenKind::Eq)) { advance(); cmp_op = "="; }
-                else if (peek_is(TokenKind::Ne)) { advance(); cmp_op = "!="; }
-                if (cmp_op) {
-                    ArithExpr rhs = parse_arith_expr();
-                    std::optional<std::string> alias;
-                    if (peek_is(TokenKind::As)) { advance(); alias = expect_alias_ident(); }
-                    return SelectColumn(SelectColumn::Expr{
-                        ArithExpr(ArithExpr::Cmp{std::make_unique<ArithExpr>(std::move(expr)), *cmp_op, std::make_unique<ArithExpr>(std::move(rhs))}),
-                        alias});
-                }
+                ArithExpr expr = parse_value_expr();
                 std::optional<std::string> alias;
                 if (peek_is(TokenKind::As)) { advance(); alias = expect_alias_ident(); }
                 if (std::holds_alternative<ArithExpr::Col>(expr.data) && !alias) {
@@ -492,20 +340,6 @@ Statement Parser::parse_select() {
 
         columns.push_back(std::move(col));
         if (peek_is(TokenKind::Comma)) advance(); else break;
-    }
-
-    // Two conditional aggregates of one select list (`SUM(CASE WHEN a > 1 ...)`, `SUM(a > 4)`) were both the result column `SUM(CASE)`, so the value
-    // of the last was shown for every one of them: the later ones are numbered (`SUM(CASE)2`, through the placeholder `__case__2`)
-    {
-        int counted = 0, summed = 0;
-        for (auto& c : columns) {
-            auto* agg = std::get_if<SelectColumn::Agg>(&c.data);
-            if (!agg) continue;
-            const bool is_count = std::holds_alternative<AggFunc::CountCase>(agg->func.data);
-            if (!is_count && !std::holds_alternative<AggFunc::SumCase>(agg->func.data)) continue;
-            const int n = ++(is_count ? counted : summed);
-            agg->col = n == 1 ? "__case__" : "__case__" + std::to_string(n);
-        }
     }
 
     // SELECT ... INTO var [, var] (a procedure's variables, or @user variables)

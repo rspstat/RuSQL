@@ -61,6 +61,8 @@ public:
     // parse a standalone arithmetic expression / stringify one.
     ArithExpr parse_arith_expr();
     static std::string arith_to_string(const ArithExpr& expr);
+    /// The text of a condition, written so that it parses back to the same condition (throws ParseError for one with a subquery).
+    static std::string cond_to_string(const CondExpr& cond);
     static std::string aggregate_argument_text(const ArithExpr& arg);
     static ArithExpr str_to_arith(const std::string& s);
 
@@ -94,26 +96,41 @@ private:
     CondExpr parse_and_expr();
     CondExpr parse_not_expr();
     CondExpr parse_primary_cond();
-    Condition parse_single_pred();
+    /// one predicate: EXISTS, `expr OP value`, `expr IS NULL`, ..., or (no operator) an expression that is true when it is not NULL and not 0
+    CondExpr parse_pred_expr();
+    /// the operator and right side after an expression: `> 5`, `IS [NOT] NULL|TRUE|FALSE`, `[NOT] BETWEEN`, `[NOT] IN`, `[NOT] LIKE`, REGEXP
+    CondExpr parse_pred_cond(ArithExpr left);
     Condition parse_pred_tail(ArithExpr left);
     Statement parse_exists_subquery();
+    /// the next token starts a predicate operator (`>`, `IS`, `NOT IN`, `BETWEEN`, ...) / an operator that goes on with an expression (also `+`, `||`)
+    bool at_pred_operator() const;
+    bool at_value_continuation() const;
+    bool select_item_continues() const;
+
+    /// A value expression: arithmetic, functions, CASE, and conditions as values (`v > 5`, `a AND b`, `v IS NULL`; 1, 0 or NULL).
+    ArithExpr parse_value_expr();
+    ArithExpr parse_value_and();
+    ArithExpr parse_value_not();
+    ArithExpr parse_value_pred();
+    ArithExpr parse_case_expr();
+    ArithExpr parse_if_expr();
+    ArithExpr parse_cast_expr();
+    std::string parse_cast_type();
+
+    static std::string condition_text(const ArithExpr& when);
 
     ArithExpr parse_arith_factor();
     ArithExpr parse_arith_term();
 
     std::optional<WindowFrame> parse_window_frame();
-    std::pair<std::vector<CaseWhenBranch>, std::optional<std::string>> parse_case_when_inner();
-    SelectColumn parse_case_when();
 
     Statement parse_select();
     Statement parse_insert();
+    std::vector<std::vector<std::string>> parse_insert_values();
     Statement parse_replace();
     Statement parse_update();
     Statement parse_delete();
 
-    std::vector<std::string> parse_func_args();
-    std::vector<std::string> parse_cast_args();
-    std::vector<std::string> parse_date_add_args();
     std::string read_parenthesized_expr();
 
     DataType parse_data_type();

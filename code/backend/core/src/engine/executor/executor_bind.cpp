@@ -189,7 +189,11 @@ std::optional<std::string> Executor::bind_statement(SharedDatabase& s, Statement
             else if (auto* v = std::get_if<ArithExpr::Mul>(&e.data)) { arith(*v->lhs, clause); arith(*v->rhs, clause); }
             else if (auto* v = std::get_if<ArithExpr::Div>(&e.data)) { arith(*v->lhs, clause); arith(*v->rhs, clause); }
             else if (auto* v = std::get_if<ArithExpr::Cmp>(&e.data)) { arith(*v->lhs, clause); arith(*v->rhs, clause); }
-            // (the arguments of a function are not looked at: they may name a unit or a type as well as a column)
+            else if (auto* v = std::get_if<ArithExpr::Pred>(&e.data)) cond(*v->cond, clause);
+            else if (auto* v = std::get_if<ArithExpr::Func>(&e.data); v && v->name == "CASE") {
+                for (auto& a : v->args) arith(a, clause); // (its conditions and results are expressions)
+            }
+            // (the arguments of any other function are not looked at: they may name a unit or a type as well as a column)
         }
 
         // Binds a statement nested in this one (a subquery, a derived table): the columns of this query are in sight of it. Its output

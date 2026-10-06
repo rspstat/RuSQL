@@ -198,6 +198,7 @@ void to_json(nlohmann::json& j, const ArithExpr& expr) {
             else if constexpr (std::is_same_v<T, ArithExpr::Div>) obj["Div"] = nlohmann::json::array({*alt.lhs, *alt.rhs});
             else if constexpr (std::is_same_v<T, ArithExpr::Func>) obj["Func"] = nlohmann::json::array({alt.name, alt.args});
             else if constexpr (std::is_same_v<T, ArithExpr::Cmp>) obj["Cmp"] = nlohmann::json::array({*alt.lhs, alt.op, *alt.rhs});
+            else if constexpr (std::is_same_v<T, ArithExpr::Pred>) obj["Pred"] = *alt.cond;
             j = obj;
         },
         expr.data);
@@ -217,6 +218,7 @@ void from_json(const nlohmann::json& j, ArithExpr& expr) {
     else if (tag == "Div") expr = ArithExpr(ArithExpr::Div{std::make_unique<ArithExpr>(payload.at(0).get<ArithExpr>()), std::make_unique<ArithExpr>(payload.at(1).get<ArithExpr>())});
     else if (tag == "Func") expr = ArithExpr(ArithExpr::Func{payload.at(0).get<std::string>(), payload.at(1).get<std::vector<ArithExpr>>()});
     else if (tag == "Cmp") expr = ArithExpr(ArithExpr::Cmp{std::make_unique<ArithExpr>(payload.at(0).get<ArithExpr>()), payload.at(1).get<std::string>(), std::make_unique<ArithExpr>(payload.at(2).get<ArithExpr>())});
+    else if (tag == "Pred") expr = ArithExpr(ArithExpr::Pred{std::make_unique<CondExpr>(payload.get<CondExpr>())});
     else throw std::runtime_error("unknown ArithExpr tag: " + tag);
 }
 

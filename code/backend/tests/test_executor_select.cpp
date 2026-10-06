@@ -232,9 +232,12 @@ TEST_CASE("SUM/COUNT over a comparison expression", "[executor][select]") {
     REQUIRE(r1.is_ok());
     REQUIRE(r1.value().find("2") != std::string::npos); // ages 30 and 40 qualify
 
+    // COUNT(expression) counts the rows where the expression is not NULL, and a comparison is not NULL whether it is true or false (as in MySQL):
+    // every row counts
     auto r2 = ex.execute_sql("SELECT COUNT(age >= 30) AS cnt FROM emp");
     REQUIRE(r2.is_ok());
-    REQUIRE(r2.value().find("2") != std::string::npos);
+    REQUIRE(r2.value().find("3") != std::string::npos);
+    REQUIRE(r2.value().find("2") == std::string::npos);
 }
 
 TEST_CASE("SELECT with BIT_AND/BIT_OR aggregate functions", "[executor][select]") {

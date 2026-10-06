@@ -49,6 +49,7 @@ add_executable(engine_tests
     test_typed_comparison.cpp
     test_aggregate_arguments.cpp
     test_subquery_cardinality.cpp
+    test_value_expressions.cpp
 )
 
 target_link_libraries(engine_tests PRIVATE engine_core)

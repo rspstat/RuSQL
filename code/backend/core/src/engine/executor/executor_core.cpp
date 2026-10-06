@@ -913,6 +913,7 @@ StringResult Executor::execute(Statement stmt) {
     // relevant child table. Returns nullopt for anything that isn't Insert/Update/
     // Delete/Select against a partitioned table, in which case this falls through to the
     // unchanged dispatch below with zero extra cost beyond that one catalog lookup.
+    evaluate_insert_expressions(stmt); // (the routing reads the values)
     if (auto routed = try_route_partitioned(stmt)) return std::move(*routed);
 
     // Single structural-shared acquisition, reused for both the table-set classification
@@ -1105,7 +1106,7 @@ std::size_t count_occurrences(const std::string& haystack, const std::string& ne
 // literal -- otherwise two different sessions running the identical SQL text (e.g.
 // "SELECT USER()") could get back whichever user's result was cached first.
 bool contains_nondeterministic_func(const std::string& lower_sql) {
-    static const char* kFuncs[] = {"now",         "curdate",     "curtime",        "current_time", "current_timestamp",
+    static const char* kFuncs[] = {"now",         "curdate",     "curtime",        "current_time", "current_timestamp", "current_date", "sysdate",
                                    "localtime",   "localtimestamp", "unix_timestamp", "rand",      "uuid",
                                    "user",        "current_user", "session_user",   "system_user"};
     auto is_ident_char = [](char c) { return std::isalnum(static_cast<unsigned char>(c)) != 0 || c == '_'; };
@@ -1281,6 +1282,7 @@ StringResult Executor::execute_with_s_body(SharedDatabase& s, Statement stmt) {
     DepthGuard depth_guard(exec_depth_);
     sync_udf_context(s.user_functions, current_db, auth_user);
     substitute_variables(stmt); // a procedure's variables and the session's @variables, by their values
+    evaluate_insert_expressions(stmt);
 
     if (auto* v = std::get_if<Statement::Use>(&stmt.data)) return exec_use(s, v->database);
     if (auto* v = std::get_if<Statement::CreateDatabase>(&stmt.data)) return exec_create_database(s, v->name, v->if_not_exists);

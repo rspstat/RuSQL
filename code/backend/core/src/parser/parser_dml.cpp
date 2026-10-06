@@ -1,9 +1,73 @@
 #include <unordered_map>
 
+#include "engine/parser/ast_json.hpp"
 #include "engine/parser/parser.hpp"
 #include "parser_detail.hpp"
 
 namespace engine {
+
+/// VALUES (...), (...): each value is plain text (a literal, NULL, DEFAULT, `@var`, `NEW.x`) or, when it goes on as an expression (`1 + 2`,
+/// `UPPER('x')`, `NOW()`, `CASE ...`), "\x01" + the JSON of the expression, which the executor evaluates before the row is written.
+std::vector<std::vector<std::string>> Parser::parse_insert_values() {
+    std::vector<std::vector<std::string>> all_values;
+    for (;;) {
+        if (!peek_is(TokenKind::LParen)) throw ParseError("Expected '('");
+        advance();
+        std::vector<std::string> row_vals;
+        for (;;) {
+            std::string val;
+            if (peek_is(TokenKind::Comma) || peek_is(TokenKind::RParen)) {
+                val = INSERT_DEFAULT;
+            } else if (peek_is(TokenKind::Default)) {
+                advance();
+                val = INSERT_DEFAULT;
+            } else {
+                // how many tokens a plain value takes: a literal or NULL (1), a name (1, or `t.c`: 3), `@var` (2), `NEW.x` / `OLD.x` (3)
+                if (!peek()) throw ParseError("Expected value");
+                std::size_t plain_len = 0;
+                switch (peek()->kind) {
+                    case TokenKind::StringLit: case TokenKind::NumberLit: case TokenKind::Null: plain_len = 1; break;
+                    case TokenKind::Ident: plain_len = peek_at_is(1, TokenKind::Dot) ? 3 : 1; break;
+                    case TokenKind::At: plain_len = 2; break;
+                    case TokenKind::NewKw: case TokenKind::OldKw: plain_len = 3; break;
+                    default: break;
+                }
+                const bool plain = plain_len > 0 && (peek_at_is(plain_len, TokenKind::Comma) || peek_at_is(plain_len, TokenKind::RParen));
+                if (!plain) {
+                    ArithExpr expr = parse_value_expr();
+                    val = "\x01" + nlohmann::json(expr).dump();
+                } else {
+                    const Token* t = advance();
+                    switch (t->kind) {
+                        case TokenKind::StringLit: case TokenKind::NumberLit: val = t->text; break;
+                        case TokenKind::Ident:
+                            val = t->text;
+                            if (peek_is(TokenKind::Dot)) { // `NEW.id` in a trigger
+                                advance();
+                                val += "." + expect_ident();
+                            }
+                            break;
+                        case TokenKind::At: val = "@" + expect_ident(); break; // a user variable
+                        case TokenKind::NewKw: case TokenKind::OldKw: // a trigger's NEW.x / OLD.x
+                            val = t->kind == TokenKind::NewKw ? "NEW" : "OLD";
+                            if (!peek_is(TokenKind::Dot)) throw ParseError("Expected '.' after NEW / OLD");
+                            advance();
+                            val += "." + expect_ident();
+                            break;
+                        default: val = "NULL"; break; // NULL
+                    }
+                }
+            }
+            row_vals.push_back(val);
+            if (peek_is(TokenKind::Comma)) { advance(); }
+            else if (peek_is(TokenKind::RParen)) { advance(); break; }
+            else throw ParseError("Expected ',' or ')'");
+        }
+        all_values.push_back(std::move(row_vals));
+        if (peek_is(TokenKind::Comma)) advance(); else break;
+    }
+    return all_values;
+}
 
 Statement Parser::parse_insert() {
     // INSERT [IGNORE] INTO table [(col1, col2, ...)] VALUES (...) [ON DUPLICATE KEY UPDATE ...]
@@ -36,47 +100,7 @@ Statement Parser::parse_insert() {
     if (!peek_is(TokenKind::Values)) throw ParseError("Expected VALUES or SELECT");
     advance();
 
-    std::vector<std::vector<std::string>> all_values;
-    for (;;) {
-        if (!peek_is(TokenKind::LParen)) throw ParseError("Expected '('");
-        advance();
-        std::vector<std::string> row_vals;
-        for (;;) {
-            std::string val;
-            if (peek_is(TokenKind::Comma) || peek_is(TokenKind::RParen)) {
-                val = INSERT_DEFAULT;
-            } else {
-                const Token* t = advance();
-                if (!t) throw ParseError("Expected value");
-                switch (t->kind) {
-                    case TokenKind::StringLit: case TokenKind::NumberLit: val = t->text; break;
-                    case TokenKind::Ident:
-                        val = t->text;
-                        if (peek_is(TokenKind::Dot)) { // `NEW.id` in a trigger
-                            advance();
-                            val += "." + expect_ident();
-                        }
-                        break;
-                    case TokenKind::At: val = "@" + expect_ident(); break; // a user variable
-                    case TokenKind::NewKw: case TokenKind::OldKw: // a trigger's NEW.x / OLD.x
-                        val = t->kind == TokenKind::NewKw ? "NEW" : "OLD";
-                        if (!peek_is(TokenKind::Dot)) throw ParseError("Expected '.' after NEW / OLD");
-                        advance();
-                        val += "." + expect_ident();
-                        break;
-                    case TokenKind::Null: val = "NULL"; break;
-                    case TokenKind::Default: val = INSERT_DEFAULT; break;
-                    default: throw ParseError("Expected value");
-                }
-            }
-            row_vals.push_back(val);
-            if (peek_is(TokenKind::Comma)) { advance(); }
-            else if (peek_is(TokenKind::RParen)) { advance(); break; }
-            else throw ParseError("Expected ',' or ')'");
-        }
-        all_values.push_back(std::move(row_vals));
-        if (peek_is(TokenKind::Comma)) advance(); else break;
-    }
+    std::vector<std::vector<std::string>> all_values = parse_insert_values();
 
     InsertConflict on_conflict = [&]() -> InsertConflict {
         if (peek_is(TokenKind::On)) {
@@ -92,7 +116,7 @@ Statement Parser::parse_insert() {
                 std::string col = expect_ident();
                 if (!peek_is(TokenKind::Eq)) throw ParseError("Expected '=' in ON DUPLICATE KEY UPDATE");
                 advance();
-                ArithExpr expr = parse_arith_expr();
+                ArithExpr expr = parse_value_expr();
                 assignments.emplace_back(col, std::move(expr));
                 if (peek_is(TokenKind::Comma)) advance(); else break;
             }
@@ -138,47 +162,7 @@ Statement Parser::parse_replace() {
     if (!peek_is(TokenKind::Values)) throw ParseError("Expected VALUES or SELECT");
     advance();
 
-    std::vector<std::vector<std::string>> all_values;
-    for (;;) {
-        if (!peek_is(TokenKind::LParen)) throw ParseError("Expected '('");
-        advance();
-        std::vector<std::string> row_vals;
-        for (;;) {
-            std::string val;
-            if (peek_is(TokenKind::Comma) || peek_is(TokenKind::RParen)) {
-                val = INSERT_DEFAULT;
-            } else {
-                const Token* t = advance();
-                if (!t) throw ParseError("Expected value");
-                switch (t->kind) {
-                    case TokenKind::StringLit: case TokenKind::NumberLit: val = t->text; break;
-                    case TokenKind::Ident:
-                        val = t->text;
-                        if (peek_is(TokenKind::Dot)) {
-                            advance();
-                            val += "." + expect_ident();
-                        }
-                        break;
-                    case TokenKind::At: val = "@" + expect_ident(); break;
-                    case TokenKind::NewKw: case TokenKind::OldKw:
-                        val = t->kind == TokenKind::NewKw ? "NEW" : "OLD";
-                        if (!peek_is(TokenKind::Dot)) throw ParseError("Expected '.' after NEW / OLD");
-                        advance();
-                        val += "." + expect_ident();
-                        break;
-                    case TokenKind::Null: val = "NULL"; break;
-                    case TokenKind::Default: val = INSERT_DEFAULT; break;
-                    default: throw ParseError("Expected value");
-                }
-            }
-            row_vals.push_back(val);
-            if (peek_is(TokenKind::Comma)) { advance(); }
-            else if (peek_is(TokenKind::RParen)) { advance(); break; }
-            else throw ParseError("Expected ',' or ')'");
-        }
-        all_values.push_back(std::move(row_vals));
-        if (peek_is(TokenKind::Comma)) advance(); else break;
-    }
+    std::vector<std::vector<std::string>> all_values = parse_insert_values();
 
     auto returning = parse_returning();
     return Statement(Statement::Insert{table, columns, all_values, InsertConflict(InsertConflict::Replace{}), returning});
@@ -245,7 +229,7 @@ Statement Parser::parse_update() {
         col = detail::expand_alias_str(col, alias_map);
         if (!peek_is(TokenKind::Eq)) throw ParseError("Expected =");
         advance();
-        ArithExpr expr = parse_arith_expr();
+        ArithExpr expr = parse_value_expr();
         assignments.emplace_back(col, std::move(expr));
         if (peek_is(TokenKind::Comma)) advance(); else break;
     }
@@ -431,7 +415,7 @@ Statement Parser::parse_merge() {
                 std::string col = expect_col_ref();
                 if (!peek_is(TokenKind::Eq)) throw ParseError("Expected = in assignment");
                 advance();
-                ArithExpr expr = parse_arith_expr();
+                ArithExpr expr = parse_value_expr();
                 assignments.emplace_back(col, std::move(expr));
                 if (peek_is(TokenKind::Comma)) advance(); else break;
             }

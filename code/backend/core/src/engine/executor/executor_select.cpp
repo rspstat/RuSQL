@@ -364,6 +364,7 @@ std::string arith_to_str(const ArithExpr& expr) {
             else if constexpr (std::is_same_v<T, ArithExpr::Mul>) return arith_to_str(*alt.lhs) + "*" + arith_to_str(*alt.rhs);
             else if constexpr (std::is_same_v<T, ArithExpr::Div>) return arith_to_str(*alt.lhs) + "/" + arith_to_str(*alt.rhs);
             else if constexpr (std::is_same_v<T, ArithExpr::Func>) {
+                if (alt.name == "CASE") return "CASE";
                 std::string out = alt.name + "(";
                 for (std::size_t i = 0; i < alt.args.size(); i++) {
                     if (i) out += ",";
@@ -372,6 +373,12 @@ std::string arith_to_str(const ArithExpr& expr) {
                 return out + ")";
             } else if constexpr (std::is_same_v<T, ArithExpr::Cmp>) {
                 return arith_to_str(*alt.lhs) + alt.op + arith_to_str(*alt.rhs);
+            } else if constexpr (std::is_same_v<T, ArithExpr::Pred>) {
+                try {
+                    return Parser::cond_to_string(*alt.cond);
+                } catch (const ParseError&) {
+                    return "";
+                }
             } else {
                 return "";
             }
@@ -481,6 +488,8 @@ void Executor::collect_agg_refs_arith(const ArithExpr& expr, std::vector<std::st
     } else if (auto* v = std::get_if<ArithExpr::Cmp>(&expr.data)) {
         collect_agg_refs_arith(*v->lhs, out);
         collect_agg_refs_arith(*v->rhs, out);
+    } else if (auto* v = std::get_if<ArithExpr::Pred>(&expr.data)) {
+        collect_agg_refs_cond(*v->cond, out);
     }
 }
 
@@ -572,6 +581,8 @@ std::vector<std::string> Executor::extract_agg_refs_from_cond(const CondExpr& ex
 
 // What the `MIN(x)` / `MAX(x)` that a HAVING or a select-list expression names holds: the binder gave the reference (a column named "MAX(code)")
 // the class of its argument.
+void collect_aggregate_classes(const CondExpr& e, std::unordered_map<std::string, ValueClass>& out);
+
 void collect_aggregate_classes(const ArithExpr& e, std::unordered_map<std::string, ValueClass>& out) {
     if (auto* col = std::get_if<ArithExpr::Col>(&e.data)) {
         if (col->cls != ValueClass::Unknown && col->name.find('(') != std::string::npos) out[col->name] = col->cls;
@@ -580,6 +591,8 @@ void collect_aggregate_classes(const ArithExpr& e, std::unordered_map<std::strin
     else if (auto* v = std::get_if<ArithExpr::Mul>(&e.data)) { collect_aggregate_classes(*v->lhs, out); collect_aggregate_classes(*v->rhs, out); }
     else if (auto* v = std::get_if<ArithExpr::Div>(&e.data)) { collect_aggregate_classes(*v->lhs, out); collect_aggregate_classes(*v->rhs, out); }
     else if (auto* v = std::get_if<ArithExpr::Cmp>(&e.data)) { collect_aggregate_classes(*v->lhs, out); collect_aggregate_classes(*v->rhs, out); }
+    else if (auto* v = std::get_if<ArithExpr::Pred>(&e.data)) collect_aggregate_classes(*v->cond, out);
+    else if (auto* v = std::get_if<ArithExpr::Func>(&e.data)) { for (auto& a : v->args) collect_aggregate_classes(a, out); }
 }
 
 void collect_aggregate_classes(const CondExpr& e, std::unordered_map<std::string, ValueClass>& out) {

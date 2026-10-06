@@ -40,6 +40,8 @@ bool looks_like_qualified_col(const std::string& s) {
 // `p.lead_id = employee.id` can appear nested inside it (or, in the simple case with
 // no operators at all, be the whole tree) rather than as a bare Literal. Walk the tree
 // to preserve has_outer_ref's original Literal-based correlation heuristic.
+bool cond_has_qualified_col(const CondExpr& expr);
+
 bool arith_has_qualified_col(const ArithExpr& expr) {
     return std::visit(
         [](const auto& alt) -> bool {
@@ -50,6 +52,8 @@ bool arith_has_qualified_col(const ArithExpr& expr) {
                 return arith_has_qualified_col(*alt.lhs) || arith_has_qualified_col(*alt.rhs);
             else if constexpr (std::is_same_v<T, ArithExpr::Cmp>)
                 return arith_has_qualified_col(*alt.lhs) || arith_has_qualified_col(*alt.rhs);
+            else if constexpr (std::is_same_v<T, ArithExpr::Pred>)
+                return cond_has_qualified_col(*alt.cond);
             else if constexpr (std::is_same_v<T, ArithExpr::Func>) {
                 for (auto& a : alt.args) {
                     if (arith_has_qualified_col(a)) return true;
@@ -61,6 +65,20 @@ bool arith_has_qualified_col(const ArithExpr& expr) {
         expr.data);
 }
 
+bool cond_has_qualified_col(const CondExpr& expr) {
+    if (auto* v = std::get_if<CondExpr::And>(&expr.data)) return cond_has_qualified_col(*v->lhs) || cond_has_qualified_col(*v->rhs);
+    if (auto* v = std::get_if<CondExpr::Or>(&expr.data)) return cond_has_qualified_col(*v->lhs) || cond_has_qualified_col(*v->rhs);
+    if (auto* v = std::get_if<CondExpr::Not>(&expr.data)) return cond_has_qualified_col(*v->inner);
+    auto* leaf = std::get_if<CondExpr::Leaf>(&expr.data);
+    if (!leaf) return false;
+    if (arith_has_qualified_col(leaf->condition.left)) return true;
+    if (auto* lit = std::get_if<ConditionValue::Literal>(&leaf->condition.value.data)) return looks_like_qualified_col(lit->value);
+    if (auto* ar = std::get_if<ConditionValue::Arith>(&leaf->condition.value.data)) return arith_has_qualified_col(ar->expr);
+    return false;
+}
+
+bool cond_has_dotted_col(const CondExpr& expr);
+
 // Can substitute_correlated_condexpr change this condition for some outer row? It replaces a literal that contains a dot and
 // a column reference with a dot by the outer row's value, so a condition with neither is the same for every row and the
 // subquery that carries it has one answer per statement. (A number such as 1.5 contains a dot but never names a column.)
@@ -69,6 +87,7 @@ bool arith_has_dotted_col(const ArithExpr& expr) {
         [](const auto& alt) -> bool {
             using T = std::decay_t<decltype(alt)>;
             if constexpr (std::is_same_v<T, ArithExpr::Col>) return alt.name.find('.') != std::string::npos;
+            else if constexpr (std::is_same_v<T, ArithExpr::Pred>) return cond_has_dotted_col(*alt.cond);
             else if constexpr (std::is_same_v<T, ArithExpr::Add> || std::is_same_v<T, ArithExpr::Sub> || std::is_same_v<T, ArithExpr::Mul> ||
                                 std::is_same_v<T, ArithExpr::Div> || std::is_same_v<T, ArithExpr::Cmp>)
                 return arith_has_dotted_col(*alt.lhs) || arith_has_dotted_col(*alt.rhs);
@@ -81,6 +100,20 @@ bool arith_has_dotted_col(const ArithExpr& expr) {
                 return false;
         },
         expr.data);
+}
+
+bool cond_has_dotted_col(const CondExpr& expr) {
+    if (auto* v = std::get_if<CondExpr::And>(&expr.data)) return cond_has_dotted_col(*v->lhs) || cond_has_dotted_col(*v->rhs);
+    if (auto* v = std::get_if<CondExpr::Or>(&expr.data)) return cond_has_dotted_col(*v->lhs) || cond_has_dotted_col(*v->rhs);
+    if (auto* v = std::get_if<CondExpr::Not>(&expr.data)) return cond_has_dotted_col(*v->inner);
+    auto* leaf = std::get_if<CondExpr::Leaf>(&expr.data);
+    if (!leaf) return false;
+    if (arith_has_dotted_col(leaf->condition.left)) return true;
+    if (auto* lit = std::get_if<ConditionValue::Literal>(&leaf->condition.value.data)) {
+        return lit->value.find('.') != std::string::npos && !parse_f64(lit->value).has_value();
+    }
+    if (auto* ar = std::get_if<ConditionValue::Arith>(&leaf->condition.value.data)) return arith_has_dotted_col(ar->expr);
+    return false;
 }
 
 bool cond_may_be_substituted(const CondExpr& expr) {

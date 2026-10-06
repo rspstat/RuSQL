@@ -274,6 +274,8 @@ std::vector<Token> Lexer::tokenize() {
                     while (auto c = peek()) {
                         if (is_digit(*c) || *c == '.') { s.push_back(*c); advance(); } else break;
                     }
+                    // (-0 is 0: a zero has no sign)
+                    if (s.find_first_of("123456789") == std::string::npos) s.erase(0, 1);
                     tok = Token(TokenKind::NumberLit, std::move(s));
                 } else {
                     tok = Token(TokenKind::Minus);
