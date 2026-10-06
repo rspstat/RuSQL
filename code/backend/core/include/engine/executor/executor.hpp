@@ -269,6 +269,8 @@ public:
     // Number of UPDATE/DELETE statements whose rows were found through an index (diagnostic;
     // tests assert on it to prove an index path really ran -- or really did not).
     static std::atomic<std::uint64_t> dml_index_hits;
+    // The constant a value stands for in an expression: a number, a string, or NULL (what replaces a variable, or a column of an outer row).
+    static ArithExpr value_constant(const std::string& value);
 
 private:
     // Row-level-concurrency Stage 4/5 correctness fix (found via concurrent-reader
@@ -324,6 +326,41 @@ private:
     };
     std::unordered_map<const void*, SubqueryAnswer> subquery_scalar_cache_;
     std::unordered_map<const void*, bool> subquery_exists_cache_;
+    // Whether a subquery points out of itself (refers_outside), by its address like the three above.
+    std::unordered_map<const void*, bool> subquery_correlated_;
+    // A subquery that names a column of the query around it is run on a copy made for each row of that query. What the copy's own
+    // subqueries cache (by their address) belongs to that copy alone -- the next copy may be allocated where this one was -- so for as long
+    // as a copy runs the caches are a fresh set, and the statement's own come back after it.
+    class CopyScope {
+      public:
+        explicit CopyScope(Executor& ex)
+            : ex_(ex), in_(std::move(ex.subquery_cache_)), scalar_(std::move(ex.subquery_scalar_cache_)),
+              exists_(std::move(ex.subquery_exists_cache_)), correlated_(std::move(ex.subquery_correlated_)) {
+            ex.subquery_cache_.clear();
+            ex.subquery_scalar_cache_.clear();
+            ex.subquery_exists_cache_.clear();
+            ex.subquery_correlated_.clear();
+        }
+        ~CopyScope() {
+            ex_.subquery_cache_ = std::move(in_);
+            ex_.subquery_scalar_cache_ = std::move(scalar_);
+            ex_.subquery_exists_cache_ = std::move(exists_);
+            ex_.subquery_correlated_ = std::move(correlated_);
+        }
+        CopyScope(const CopyScope&) = delete;
+        CopyScope& operator=(const CopyScope&) = delete;
+
+      private:
+        Executor& ex_;
+        std::unordered_map<const void*, std::unordered_set<std::string>> in_;
+        std::unordered_map<const void*, SubqueryAnswer> scalar_;
+        std::unordered_map<const void*, bool> exists_;
+        std::unordered_map<const void*, bool> correlated_;
+    };
+    // Is this subquery correlated (answered per outer row), as the binder's marks say.
+    bool subquery_is_correlated(const Statement& sub);
+    // The output of a subquery for one outer row (a copy with the row's values in when it is correlated); throws StatementError when it fails.
+    std::string run_subquery(SharedDatabase& s, const Statement& original, const Row& row, bool correlated);
     // Hash indexes the statement builds for itself. A correlated subquery runs once per outer row, and when its WHERE has
     // `<column without an index> = <value>` every run scanned the whole inner table. The third time one statement looks
     // up the same column of the same table, the table's rows are bucketed by that column (numeric values by their
@@ -633,8 +670,10 @@ private:
     static bool eval_condexpr(const Row& row, const CondExpr& expr);
     static bool eval_single(const Row& row, const Condition& cond);
     static bool eval_check_expr(const std::string& expr, const Row& row);
-    static CondExpr substitute_correlated_condexpr(const CondExpr& expr, const Row& outer_row);
-    static ArithExpr substitute_arith_outer_refs(const ArithExpr& expr, const Row& outer_row);
+    // A subquery that names a column of the query around it (the binder marked those: ArithExpr::Col::outer ...): does `st` point out of itself,
+    // and `st` with the values of the outer row put in place of those columns (executor_outer.cpp).
+    static bool refers_outside(const Statement& st);
+    static void substitute_outer(Statement& st, const Row& outer_row);
     static std::string format_returning_rows(const std::vector<Row>& rows, const std::vector<SelectColumn>& cols);
     static void update_stat_rows(SharedDatabase& s, const std::string& table, std::int64_t delta);
     static std::pair<std::vector<std::string>, std::vector<Row>> parse_table_output(const std::string& output);
@@ -820,7 +859,6 @@ private:
     bool matches_condition_with_subquery(SharedDatabase& s, const Row& row, const std::optional<CondExpr>& condition);
     bool eval_condexpr_with_subquery(SharedDatabase& s, const Row& row, const CondExpr& expr);
     Tri eval_cond3_with_subquery(SharedDatabase& s, const Row& row, const CondExpr& expr);
-    static bool has_outer_ref(const CondExpr& expr);
     Tri eval_single_with_subquery(SharedDatabase& s, const Row& row, const Condition& cond);
     std::vector<std::string> extract_values_from_output(const std::string& output) const;
 

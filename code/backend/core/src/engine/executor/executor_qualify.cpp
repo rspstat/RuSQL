@@ -81,6 +81,8 @@ Statement Executor::qualify_stmt(const SharedDatabase& s, Statement stmt) const 
         out.for_update = v->for_update;
         out.for_share = v->for_share;
         out.sort_resolved = v->sort_resolved;
+        out.table_alias = v->table_alias;
+        out.table_aliases = v->table_aliases;
         return Statement(std::move(out));
     }
     if (auto* v = std::get_if<Statement::Insert>(&stmt.data)) {

@@ -42,6 +42,7 @@ struct BindScope {
     std::vector<BindTable> tables;
     std::unordered_set<std::string> aliases; // the names the select list gives, which GROUP BY / HAVING / ORDER BY may use
     std::unordered_map<std::string, ValueClass> alias_classes;
+    std::vector<std::pair<std::string, std::string>> table_aliases; // alias -> table name, as the parser expanded them (Select::table_aliases)
     // an UPDATE / DELETE keeps the aliases of its tables in the SET expressions (the parser expands them in the WHERE only), so a
     // qualifier that names no table may still be one of them
     bool lenient_qualifier = false;
@@ -178,10 +179,58 @@ std::optional<std::string> Executor::bind_statement(SharedDatabase& s, Statement
             if (check && !error && !known(n)) error = "Unknown column '" + n + "' in '" + clause + "'";
         }
 
+        // Where a column of an enclosing query lives: how many queries out, and the name that query's rows hold it under (the table it
+        // belongs to, then the column). Nothing for a column of this query's own tables -- they come first, as in MySQL -- or of no table.
+        // The alias of a table of an enclosing query is read through that query's table_aliases (the parser expands it only in the query
+        // that declares it).
+        std::optional<std::pair<int, std::string>> outer_column(const std::string& name) const {
+            if (chain.size() < 2 || !plain_reference(name)) return std::nullopt;
+            const std::size_t own = chain.size() - 1;
+            const std::size_t dot = name.rfind('.');
+            for (std::size_t i = chain.size(); i-- > 0;) {
+                const BindScope& scope = *chain[i];
+                if (dot != std::string::npos) {
+                    std::string qualifier = name.substr(0, dot);
+                    for (auto& [alias, table] : scope.table_aliases) {
+                        if (alias == qualifier) { qualifier = table; break; }
+                    }
+                    for (const BindTable& t : scope.tables) {
+                        if (t.full != qualifier && t.bare != qualifier) continue;
+                        if (i == own) return std::nullopt;
+                        return std::make_pair(static_cast<int>(own - i), t.full + "." + name.substr(dot + 1));
+                    }
+                } else {
+                    if (i == own && scope.aliases.count(name)) return std::nullopt;
+                    for (const BindTable& t : scope.tables) {
+                        if (!has_column(t, name)) continue;
+                        if (i == own || t.open) return std::nullopt; // (a table that takes any name cannot be told from a column of the query)
+                        return std::make_pair(static_cast<int>(own - i), t.full + "." + name);
+                    }
+                }
+            }
+            return std::nullopt;
+        }
+
+        // `name` is a column of an enclosing query: it is renamed as that query's rows have it and `outer` says how far out the query is.
+        void mark_outer(std::string& name, int& outer) const {
+            outer = 0;
+            if (auto o = outer_column(name)) {
+                outer = o->first;
+                name = o->second;
+            }
+        }
+
+        // The places that keep a column as text -- an aggregate's argument, a sort or group item -- have no way to hold the value of a column
+        // of an enclosing query, so a subquery that names one there is refused rather than answered wrongly.
+        void no_outer(const std::string& n, const char* clause) {
+            if (check && !error && outer_column(n)) error = "Outer reference '" + n + "' is not supported in '" + clause + "'";
+        }
+
         void arith(ArithExpr& e, const char* clause) {
             if (error) return;
             if (auto* col = std::get_if<ArithExpr::Col>(&e.data)) {
                 name(col->name, clause);
+                mark_outer(col->name, col->outer);
                 col->cls = class_of_name(col->name);
             }
             else if (auto* v = std::get_if<ArithExpr::Add>(&e.data)) { arith(*v->lhs, clause); arith(*v->rhs, clause); }
@@ -192,21 +241,46 @@ std::optional<std::string> Executor::bind_statement(SharedDatabase& s, Statement
             else if (auto* v = std::get_if<ArithExpr::Pred>(&e.data)) cond(*v->cond, clause);
             else if (auto* v = std::get_if<ArithExpr::Func>(&e.data); v && v->name == "CASE") {
                 for (auto& a : v->args) arith(a, clause); // (its conditions and results are expressions)
-            } else if (auto* f = std::get_if<ArithExpr::Func>(&e.data)) {
+            } else if (std::holds_alternative<ArithExpr::Func>(e.data)) {
                 // the arguments of any other function are not checked (they may name a unit or a type as well as a column), but a column in them
                 // still holds what its type says: IFNULL(y, w) over two number columns is a number
-                for (auto& a : f->args) annotate(a);
+                annotate(e);
             }
         }
 
         // what the columns in `e` hold, without asking for them to exist
         void annotate(ArithExpr& e) {
-            if (auto* col = std::get_if<ArithExpr::Col>(&e.data)) col->cls = class_of_name(col->name);
+            if (auto* col = std::get_if<ArithExpr::Col>(&e.data)) {
+                mark_outer(col->name, col->outer);
+                col->cls = class_of_name(col->name);
+            }
             else if (auto* v = std::get_if<ArithExpr::Add>(&e.data)) { annotate(*v->lhs); annotate(*v->rhs); }
             else if (auto* v = std::get_if<ArithExpr::Sub>(&e.data)) { annotate(*v->lhs); annotate(*v->rhs); }
             else if (auto* v = std::get_if<ArithExpr::Mul>(&e.data)) { annotate(*v->lhs); annotate(*v->rhs); }
             else if (auto* v = std::get_if<ArithExpr::Div>(&e.data)) { annotate(*v->lhs); annotate(*v->rhs); }
-            else if (auto* v = std::get_if<ArithExpr::Func>(&e.data)) { for (auto& a : v->args) annotate(a); }
+            else if (auto* v = std::get_if<ArithExpr::Func>(&e.data)) {
+                // (the unit of DATE_ADD(d, INTERVAL n DAY) is a word, not a column)
+                const bool unit_last = v->name == "DATE_ADD" || v->name == "DATE_SUB";
+                for (std::size_t i = 0; i < v->args.size(); i++) {
+                    if (unit_last && i + 1 == v->args.size()) continue;
+                    annotate(v->args[i]);
+                }
+            }
+        }
+
+        static bool has_outer(const ArithExpr& e) {
+            if (auto* col = std::get_if<ArithExpr::Col>(&e.data)) return col->outer != 0;
+            if (auto* v = std::get_if<ArithExpr::Add>(&e.data)) return has_outer(*v->lhs) || has_outer(*v->rhs);
+            if (auto* v = std::get_if<ArithExpr::Sub>(&e.data)) return has_outer(*v->lhs) || has_outer(*v->rhs);
+            if (auto* v = std::get_if<ArithExpr::Mul>(&e.data)) return has_outer(*v->lhs) || has_outer(*v->rhs);
+            if (auto* v = std::get_if<ArithExpr::Div>(&e.data)) return has_outer(*v->lhs) || has_outer(*v->rhs);
+            if (auto* v = std::get_if<ArithExpr::Cmp>(&e.data)) return has_outer(*v->lhs) || has_outer(*v->rhs);
+            if (auto* f = std::get_if<ArithExpr::Func>(&e.data)) {
+                for (auto& a : f->args) {
+                    if (has_outer(a)) return true;
+                }
+            }
+            return false; // (a condition inside the expression is not looked into: the executor says so when it reads the text)
         }
 
         // Binds a statement nested in this one (a subquery, a derived table): the columns of this query are in sight of it. Its output
@@ -230,6 +304,7 @@ std::optional<std::string> Executor::bind_statement(SharedDatabase& s, Statement
                 c.right_class = ValueClass::Unknown;
                 // `a.x = b.y`: the parser keeps the right side as text; a `table.column` of a table of the query is a column
                 if (auto* lit = std::get_if<ConditionValue::Literal>(&c.value.data)) {
+                    lit->outer = 0;
                     if (lit->quoted) {
                         c.right_class = ValueClass::Text;
                     } else if (parse_number(lit->value)) {
@@ -238,6 +313,7 @@ std::optional<std::string> Executor::bind_statement(SharedDatabase& s, Statement
                         if (check && !error && lit->value.find('.') != std::string::npos && !known(lit->value, false)) {
                             error = "Unknown column '" + lit->value + "' in '" + clause + "'";
                         }
+                        mark_outer(lit->value, lit->outer);
                         c.right_class = class_of_name(lit->value);
                     }
                 } else if (auto* value = std::get_if<ConditionValue::Arith>(&c.value.data)) {
@@ -292,6 +368,7 @@ std::optional<std::string> Executor::bind_statement(SharedDatabase& s, Statement
             ArithExpr e = Parser::str_to_arith(text);
             if (auto* col = std::get_if<ArithExpr::Col>(&e.data); col && col->name == text) return ValueClass::Unknown; // (not readable: the executor says so)
             arith(e, clause);
+            if (check && !error && has_outer(e)) error = std::string("An outer reference inside '") + text + "' is not supported in '" + clause + "'";
             return class_of_expr(e);
         }
 
@@ -308,6 +385,7 @@ std::optional<std::string> Executor::bind_statement(SharedDatabase& s, Statement
                 arg = expression_argument(column, "field list");
             } else {
                 name(column, "field list");
+                no_outer(column, "field list");
                 arg = class_of_name(column);
             }
             if (filter) cond(*filter, "field list");
@@ -334,8 +412,15 @@ std::optional<std::string> Executor::bind_statement(SharedDatabase& s, Statement
 
         void select_column(SelectColumn& c) {
             if (error) return;
-            if (auto* col = std::get_if<SelectColumn::Column>(&c.data)) { name(col->name, "field list"); col->cls = class_of_name(col->name); }
-            else if (auto* ca = std::get_if<SelectColumn::ColumnAlias>(&c.data)) { name(ca->name, "field list"); ca->cls = class_of_name(ca->name); }
+            if (auto* col = std::get_if<SelectColumn::Column>(&c.data)) {
+                name(col->name, "field list");
+                mark_outer(col->name, col->outer);
+                col->cls = class_of_name(col->name);
+            } else if (auto* ca = std::get_if<SelectColumn::ColumnAlias>(&c.data)) {
+                name(ca->name, "field list");
+                mark_outer(ca->name, ca->outer);
+                ca->cls = class_of_name(ca->name);
+            }
             else if (auto* agg = std::get_if<SelectColumn::Agg>(&c.data)) agg->arg_class = aggregate(agg->func, agg->source.empty() ? agg->col : agg->source, agg->filter);
             else if (auto* aa = std::get_if<SelectColumn::AggAlias>(&c.data)) aa->arg_class = aggregate(aa->func, aa->source.empty() ? aa->col : aa->source, aa->filter);
             else if (auto* ex_col = std::get_if<SelectColumn::Expr>(&c.data)) arith(ex_col->expr, "field list");
@@ -347,11 +432,12 @@ std::optional<std::string> Executor::bind_statement(SharedDatabase& s, Statement
                         wf->col_class = expression_argument(*wf->col, "field list");
                     } else {
                         name(*wf->col, "field list");
+                        no_outer(*wf->col, "field list");
                         wf->col_class = class_of_name(*wf->col);
                     }
                 }
-                for (auto& p : wf->partition_by) name(p, "field list");
-                for (auto& o : wf->order_by) { name(o.column, "field list"); o.cls = class_of_name(o.column); }
+                for (auto& p : wf->partition_by) { name(p, "field list"); no_outer(p, "field list"); }
+                for (auto& o : wf->order_by) { name(o.column, "field list"); no_outer(o.column, "field list"); o.cls = class_of_name(o.column); }
             } else if (auto* sq = std::get_if<SelectColumn::Subquery>(&c.data)) {
                 if (sq->query) {
                     auto out = nested(*sq->query);
@@ -374,6 +460,7 @@ std::optional<std::string> Executor::bind_statement(SharedDatabase& s, Statement
 
         void select(Statement::Select& sel) {
             BindScope scope;
+            scope.table_aliases = sel.table_aliases;
             // the FROM list
             if (sel.subquery) {
                 auto out = nested(*sel.subquery->first, false); // a derived table sees none of the columns around it
@@ -382,10 +469,15 @@ std::optional<std::string> Executor::bind_statement(SharedDatabase& s, Statement
             } else if (sel.table == "_dual_" || (sel.table.size() > 7 && sel.table.compare(sel.table.size() - 7, 7, "._dual_") == 0)) {
                 // no table
             } else {
-                scope.tables.push_back(table_of(sel.table, ""));
+                scope.tables.push_back(table_of(sel.table, sel.table_alias));
             }
             for (auto& j : sel.joins) {
                 if (j.subquery && j.lateral) {
+                    // (it sees the tables before it, as a subquery sees the query around it)
+                    chain.push_back(&scope);
+                    nested(*j.subquery->first);
+                    chain.pop_back();
+                    if (error) return;
                     BindTable open;
                     open.full = open.bare = j.table;
                     open.open = true;
@@ -442,7 +534,7 @@ std::optional<std::string> Executor::bind_statement(SharedDatabase& s, Statement
             }
             if (sel.group_by) {
                 for (auto& g : *sel.group_by) {
-                    if (plain_reference(g)) name(g, "group statement");
+                    if (plain_reference(g)) { name(g, "group statement"); no_outer(g, "group statement"); }
                     else expression_argument(g, "group statement");
                 }
             }
@@ -450,6 +542,7 @@ std::optional<std::string> Executor::bind_statement(SharedDatabase& s, Statement
             for (auto& o : sel.order_by) {
                 if (plain_reference(o.column)) {
                     name(o.column, "order clause");
+                    no_outer(o.column, "order clause");
                     o.cls = class_of_name(o.column);
                 } else {
                     o.cls = expression_argument(o.column, "order clause");

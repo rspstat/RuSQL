@@ -905,7 +905,7 @@ StringResult Executor::exec_drop_index(SharedDatabase& s, const std::string& ind
 
 StringResult Executor::exec_create_view(SharedDatabase& s, const std::string& name, Statement query, const std::string& raw_sql) {
     if (auto* sel = std::get_if<Statement::Select>(&query.data)) {
-        if (!s.tables.count(sel->table)) return StringResult::Err("Table '" + sel->table + "' not found");
+        if (!s.tables.count(sel->table) && !s.views.count(sel->table)) return StringResult::Err("Table '" + sel->table + "' not found"); // (a view may read a view)
     }
     s.views[name] = std::move(query);
     if (!raw_sql.empty()) s.view_raw_sql[name] = raw_sql;

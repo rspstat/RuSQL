@@ -50,12 +50,6 @@ bool plain_number(const std::string& v) {
     return digits > 0 && i == v.size();
 }
 
-ArithExpr constant(const std::string& value) {
-    if (value == EXECUTOR_NULL_VALUE) return ArithExpr(ArithExpr::Str{EXECUTOR_NULL_VALUE});
-    if (plain_number(value)) return ArithExpr(ArithExpr::Num{value});
-    return ArithExpr(ArithExpr::Str{value});
-}
-
 // the text of a literal, an INSERT value or a function argument: the variable's value when it names one
 std::string text_of(const Vars& v, const std::string& s) {
     if (auto value = v.value(s)) return *value;
@@ -118,7 +112,7 @@ void cond(const Vars& v, CondExpr& e);
 
 void arith(const Vars& v, ArithExpr& e) {
     if (auto* col = std::get_if<ArithExpr::Col>(&e.data)) {
-        if (auto value = v.value(col->name)) e = constant(*value);
+        if (auto value = v.value(col->name)) e = Executor::value_constant(*value);
     } else if (auto* a = std::get_if<ArithExpr::Add>(&e.data)) { arith(v, *a->lhs); arith(v, *a->rhs); }
     else if (auto* s = std::get_if<ArithExpr::Sub>(&e.data)) { arith(v, *s->lhs); arith(v, *s->rhs); }
     else if (auto* m = std::get_if<ArithExpr::Mul>(&e.data)) { arith(v, *m->lhs); arith(v, *m->rhs); }
@@ -181,9 +175,9 @@ void cond(const Vars& v, CondExpr& e) {
 void select_columns(const Vars& v, std::vector<SelectColumn>& columns) {
     for (auto& c : columns) {
         if (auto* col = std::get_if<SelectColumn::Column>(&c.data)) {
-            if (auto value = v.value(col->name)) c = SelectColumn(SelectColumn::Expr{constant(*value), col->name});
+            if (auto value = v.value(col->name)) c = SelectColumn(SelectColumn::Expr{Executor::value_constant(*value), col->name});
         } else if (auto* ca = std::get_if<SelectColumn::ColumnAlias>(&c.data)) {
-            if (auto value = v.value(ca->name)) c = SelectColumn(SelectColumn::Expr{constant(*value), ca->alias});
+            if (auto value = v.value(ca->name)) c = SelectColumn(SelectColumn::Expr{Executor::value_constant(*value), ca->alias});
         } else if (auto* ex = std::get_if<SelectColumn::Expr>(&c.data)) {
             arith(v, ex->expr);
         } else if (auto* fn = std::get_if<SelectColumn::Func>(&c.data)) {
@@ -276,6 +270,12 @@ void statement(const Vars& v, Statement& st) {
 }
 
 } // namespace
+
+ArithExpr Executor::value_constant(const std::string& value) {
+    if (value == EXECUTOR_NULL_VALUE) return ArithExpr(ArithExpr::Str{EXECUTOR_NULL_VALUE});
+    if (plain_number(value)) return ArithExpr(ArithExpr::Num{value});
+    return ArithExpr(ArithExpr::Str{value});
+}
 
 void Executor::substitute_variables(Statement& stmt, const std::unordered_map<std::string, std::string>* row) const {
     if (proc_vars.empty() && user_vars.empty() && !row) return;

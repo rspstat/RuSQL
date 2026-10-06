@@ -512,6 +512,85 @@ std::vector<std::string> Executor::select_tables(const Statement& stmt, const st
 }
 
 // ---------------------------------------------------------------------------
+// The result cache of SELECT statements is dropped for a table when the table is written. A SELECT of a view reads the tables of the view's body
+// (and of the subqueries in it), which are written without the view's name being named: the cached answer has to depend on those tables too.
+// ---------------------------------------------------------------------------
+namespace {
+bool statement_tables(const Statement& stmt, const std::string& db, std::vector<std::string>& out);
+
+bool cond_value_tables(const CondExpr& e, const std::string& db, std::vector<std::string>& out) {
+    if (auto* v = std::get_if<CondExpr::And>(&e.data)) return cond_value_tables(*v->lhs, db, out) && cond_value_tables(*v->rhs, db, out);
+    if (auto* v = std::get_if<CondExpr::Or>(&e.data)) return cond_value_tables(*v->lhs, db, out) && cond_value_tables(*v->rhs, db, out);
+    if (auto* v = std::get_if<CondExpr::Not>(&e.data)) return cond_value_tables(*v->inner, db, out);
+    if (auto* v = std::get_if<CondExpr::Leaf>(&e.data)) {
+        if (auto* sq = std::get_if<ConditionValue::Subquery>(&v->condition.value.data)) return !sq->query || statement_tables(*sq->query, db, out);
+        // (a subquery inside an expression is not looked into: the expression grammar has none)
+    }
+    return true;
+}
+
+// every table a statement reads, in the form invalidate_table() names them; false when the statement has a shape that is not looked into
+bool statement_tables(const Statement& stmt, const std::string& db, std::vector<std::string>& out) {
+    auto qualify = [&db](const std::string& name) { return name.find('.') != std::string::npos ? name : db + "." + name; };
+    if (auto* sel = std::get_if<Statement::Select>(&stmt.data)) {
+        if (sel->subquery) {
+            if (!statement_tables(*sel->subquery->first, db, out)) return false;
+        } else if (sel->table != "_dual_") {
+            out.push_back(qualify(sel->table));
+        }
+        for (auto& j : sel->joins) {
+            if (j.subquery) {
+                if (!statement_tables(*j.subquery->first, db, out)) return false;
+            } else {
+                out.push_back(qualify(j.table));
+            }
+            if (!cond_value_tables(j.on_expr, db, out)) return false;
+        }
+        if (sel->condition && !cond_value_tables(*sel->condition, db, out)) return false;
+        if (sel->having && !cond_value_tables(*sel->having, db, out)) return false;
+        for (auto& c : sel->columns) {
+            if (auto* sq = std::get_if<SelectColumn::Subquery>(&c.data)) {
+                if (sq->query && !statement_tables(*sq->query, db, out)) return false;
+            }
+        }
+        return true;
+    }
+    if (auto* u = std::get_if<Statement::Union>(&stmt.data)) return statement_tables(*u->left, db, out) && statement_tables(*u->right, db, out);
+    if (auto* i = std::get_if<Statement::Intersect>(&stmt.data)) return statement_tables(*i->left, db, out) && statement_tables(*i->right, db, out);
+    if (auto* x = std::get_if<Statement::Except>(&stmt.data)) return statement_tables(*x->left, db, out) && statement_tables(*x->right, db, out);
+    if (auto* w = std::get_if<Statement::With>(&stmt.data)) {
+        for (auto& cte : w->ctes) {
+            if (!statement_tables(*cte.second, db, out)) return false;
+        }
+        return !w->query || statement_tables(*w->query, db, out);
+    }
+    return false;
+}
+
+// The tables a cached SELECT depends on: `tables` as they are named, and for every view the tables of its body (and so on, for a view of a view).
+// False when that cannot be told.
+bool cache_dependencies(const SharedDatabase& s, std::vector<std::string>& tables) {
+    std::vector<std::string> result;
+    std::unordered_set<std::string> seen_views;
+    for (std::size_t i = 0; i < tables.size(); i++) {
+        auto view = s.views.find(tables[i]);
+        if (view == s.views.end()) {
+            result.push_back(tables[i]);
+            continue;
+        }
+        if (!seen_views.insert(tables[i]).second) continue;
+        result.push_back(tables[i]); // (the answer also goes when the view itself is made again)
+        const std::string db = tables[i].substr(0, tables[i].find('.'));
+        std::vector<std::string> body;
+        if (!statement_tables(view->second, db, body)) return false;
+        tables.insert(tables.end(), body.begin(), body.end());
+    }
+    tables = std::move(result);
+    return true;
+}
+} // namespace
+
+// ---------------------------------------------------------------------------
 // is_pure_read_only(): classifies a statement as safe to execute under
 // shared->read() (concurrently with other readers) instead of shared->write().
 //
@@ -870,6 +949,7 @@ StringResult Executor::execute(Statement stmt) {
     subquery_cache_.clear();
     subquery_scalar_cache_.clear();
     subquery_exists_cache_.clear();
+    subquery_correlated_.clear();
     // The statement-scoped point indexes hold pointers into table rows: they live for one pure-read statement only, and a
     // statement run from inside another (a procedure's body) must neither inherit nor leave behind the caller's.
     struct PointIndexScope {
@@ -1198,6 +1278,8 @@ StringResult Executor::execute_sql_inner(const std::string& sql) {
     else if (auto* v = std::get_if<Statement::Delete>(&stmt.data)) dml_table = qualify_static(v->table, current_db);
     else if (auto* v = std::get_if<Statement::TruncateTable>(&stmt.data)) dml_table = qualify_static(v->name, current_db);
     else if (auto* v = std::get_if<Statement::DropTable>(&stmt.data)) dml_table = qualify_static(v->name, current_db);
+    else if (auto* v = std::get_if<Statement::CreateView>(&stmt.data)) dml_table = qualify_static(v->name, current_db); // (the answers of the view's name)
+    else if (auto* v = std::get_if<Statement::DropView>(&stmt.data)) dml_table = qualify_static(v->name, current_db);
     else if (auto* v = std::get_if<Statement::MultiUpdate>(&stmt.data)) {
         if (!v->tables.empty()) dml_table = qualify_static(v->tables.front(), current_db);
     } else if (auto* v = std::get_if<Statement::MultiDelete>(&stmt.data)) {
@@ -1206,9 +1288,14 @@ StringResult Executor::execute_sql_inner(const std::string& sql) {
     else if (auto* v = std::get_if<Statement::AlterTable>(&stmt.data)) dml_table = qualify_static(v->table, current_db);
 
     std::vector<std::string> cache_tables;
-    if (looks_like_select && !in_txn) cache_tables = select_tables(stmt, current_db);
+    bool dependencies_known = true;
+    if (looks_like_select && !in_txn) {
+        cache_tables = select_tables(stmt, current_db);
+        auto s = shared->read();
+        dependencies_known = cache_dependencies(*s, cache_tables);
+    }
 
-    bool has_subquery = looks_like_select && count_occurrences(to_ascii_lower(trimmed), "select") > 1;
+    bool has_subquery = looks_like_select && (!dependencies_known || count_occurrences(to_ascii_lower(trimmed), "select") > 1);
     // (a SELECT that reads an @variable has no answer of its own: the same text asks for different rows after `SET @x = ...`)
     bool has_nondeterministic = looks_like_select && (contains_nondeterministic_func(to_ascii_lower(trimmed)) || trimmed.find('@') != std::string::npos);
     bool has_infoschema = looks_like_select && references_infoschema(to_ascii_lower(trimmed));

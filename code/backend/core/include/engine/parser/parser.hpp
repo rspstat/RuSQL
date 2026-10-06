@@ -16,6 +16,7 @@
 #include <stdexcept>
 #include <string>
 #include <tuple>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -69,6 +70,11 @@ public:
 private:
     std::vector<Token> tokens_;
     std::size_t pos_ = 0;
+    // The table names and aliases of the FROM list of each SELECT being parsed (the innermost last): a subquery that uses one of those tables
+    // under an alias keeps the alias, which would otherwise be replaced by the table name -- also what the query around it calls its table.
+    std::vector<std::unordered_set<std::string>> enclosing_from_;
+    /// The table names and aliases of the FROM list that follows (read ahead, from the position after SELECT)
+    std::unordered_set<std::string> scan_from_names() const;
 
     const Token* peek() const;
     const Token* peek_at(std::size_t offset) const;

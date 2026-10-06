@@ -1,7 +1,6 @@
 // Faithful port of the subquery-aware WHERE evaluation path from
 // rusql-core/src/engine/executor.rs (Phase 8c): matches_condition_with_subquery,
-// eval_condexpr_with_subquery, has_outer_ref, eval_single_with_subquery,
-// extract_values_from_output.
+// eval_condexpr_with_subquery, eval_single_with_subquery, extract_values_from_output.
 //
 // Cache-key deviation (documented, behavior-preserving): the Rust original keys its
 // uncorrelated IN/NOT IN subquery cache with `format!("{:?}", sub_stmt)` (Debug output).
@@ -10,6 +9,9 @@
 // possibly be looked up works equally well, and the address is dramatically cheaper
 // than formatting/serializing the whole AST on every row (see eval_single_with_subquery,
 // Row-level-concurrency Stage 4/5 perf fix).
+//
+// Which subqueries are correlated (answered once per outer row) is not guessed from the text: the binder marks the references to a column of
+// an enclosing query and executor_outer.cpp puts the outer row's values in.
 
 #include "engine/executor/executor.hpp"
 
@@ -18,117 +20,6 @@
 #include <chrono>
 
 namespace engine {
-
-namespace {
-std::optional<double> parse_f64(const std::string& s) { return parse_number(s); }
-
-bool looks_like_qualified_col(const std::string& s) {
-    auto dot = s.find('.');
-    if (dot == std::string::npos) return false;
-    std::string a = s.substr(0, dot);
-    std::string rest = s.substr(dot + 1);
-    auto is_ident = [](const std::string& p) {
-        if (p.empty()) return false;
-        if (!(std::isalpha(static_cast<unsigned char>(p[0])) || p[0] == '_')) return false;
-        return std::all_of(p.begin(), p.end(), [](unsigned char c) { return std::isalnum(c) || c == '_'; });
-    };
-    return is_ident(a) && is_ident(rest);
-}
-
-// PLAN.md P0 fix follow-up: ConditionValue::Arith's RHS is now a full expression tree
-// (see the WHERE-RHS-arithmetic fix), so a qualified outer-table reference like
-// `p.lead_id = employee.id` can appear nested inside it (or, in the simple case with
-// no operators at all, be the whole tree) rather than as a bare Literal. Walk the tree
-// to preserve has_outer_ref's original Literal-based correlation heuristic.
-bool cond_has_qualified_col(const CondExpr& expr);
-
-bool arith_has_qualified_col(const ArithExpr& expr) {
-    return std::visit(
-        [](const auto& alt) -> bool {
-            using T = std::decay_t<decltype(alt)>;
-            if constexpr (std::is_same_v<T, ArithExpr::Col>) return looks_like_qualified_col(alt.name);
-            else if constexpr (std::is_same_v<T, ArithExpr::Add> || std::is_same_v<T, ArithExpr::Sub> ||
-                                std::is_same_v<T, ArithExpr::Mul> || std::is_same_v<T, ArithExpr::Div>)
-                return arith_has_qualified_col(*alt.lhs) || arith_has_qualified_col(*alt.rhs);
-            else if constexpr (std::is_same_v<T, ArithExpr::Cmp>)
-                return arith_has_qualified_col(*alt.lhs) || arith_has_qualified_col(*alt.rhs);
-            else if constexpr (std::is_same_v<T, ArithExpr::Pred>)
-                return cond_has_qualified_col(*alt.cond);
-            else if constexpr (std::is_same_v<T, ArithExpr::Func>) {
-                for (auto& a : alt.args) {
-                    if (arith_has_qualified_col(a)) return true;
-                }
-                return false;
-            } else
-                return false;
-        },
-        expr.data);
-}
-
-bool cond_has_qualified_col(const CondExpr& expr) {
-    if (auto* v = std::get_if<CondExpr::And>(&expr.data)) return cond_has_qualified_col(*v->lhs) || cond_has_qualified_col(*v->rhs);
-    if (auto* v = std::get_if<CondExpr::Or>(&expr.data)) return cond_has_qualified_col(*v->lhs) || cond_has_qualified_col(*v->rhs);
-    if (auto* v = std::get_if<CondExpr::Not>(&expr.data)) return cond_has_qualified_col(*v->inner);
-    auto* leaf = std::get_if<CondExpr::Leaf>(&expr.data);
-    if (!leaf) return false;
-    if (arith_has_qualified_col(leaf->condition.left)) return true;
-    if (auto* lit = std::get_if<ConditionValue::Literal>(&leaf->condition.value.data)) return looks_like_qualified_col(lit->value);
-    if (auto* ar = std::get_if<ConditionValue::Arith>(&leaf->condition.value.data)) return arith_has_qualified_col(ar->expr);
-    return false;
-}
-
-bool cond_has_dotted_col(const CondExpr& expr);
-
-// Can substitute_correlated_condexpr change this condition for some outer row? It replaces a literal that contains a dot and
-// a column reference with a dot by the outer row's value, so a condition with neither is the same for every row and the
-// subquery that carries it has one answer per statement. (A number such as 1.5 contains a dot but never names a column.)
-bool arith_has_dotted_col(const ArithExpr& expr) {
-    return std::visit(
-        [](const auto& alt) -> bool {
-            using T = std::decay_t<decltype(alt)>;
-            if constexpr (std::is_same_v<T, ArithExpr::Col>) return alt.name.find('.') != std::string::npos;
-            else if constexpr (std::is_same_v<T, ArithExpr::Pred>) return cond_has_dotted_col(*alt.cond);
-            else if constexpr (std::is_same_v<T, ArithExpr::Add> || std::is_same_v<T, ArithExpr::Sub> || std::is_same_v<T, ArithExpr::Mul> ||
-                                std::is_same_v<T, ArithExpr::Div> || std::is_same_v<T, ArithExpr::Cmp>)
-                return arith_has_dotted_col(*alt.lhs) || arith_has_dotted_col(*alt.rhs);
-            else if constexpr (std::is_same_v<T, ArithExpr::Func>) {
-                for (auto& a : alt.args) {
-                    if (arith_has_dotted_col(a)) return true;
-                }
-                return false;
-            } else
-                return false;
-        },
-        expr.data);
-}
-
-bool cond_has_dotted_col(const CondExpr& expr) {
-    if (auto* v = std::get_if<CondExpr::And>(&expr.data)) return cond_has_dotted_col(*v->lhs) || cond_has_dotted_col(*v->rhs);
-    if (auto* v = std::get_if<CondExpr::Or>(&expr.data)) return cond_has_dotted_col(*v->lhs) || cond_has_dotted_col(*v->rhs);
-    if (auto* v = std::get_if<CondExpr::Not>(&expr.data)) return cond_has_dotted_col(*v->inner);
-    auto* leaf = std::get_if<CondExpr::Leaf>(&expr.data);
-    if (!leaf) return false;
-    if (arith_has_dotted_col(leaf->condition.left)) return true;
-    if (auto* lit = std::get_if<ConditionValue::Literal>(&leaf->condition.value.data)) {
-        return lit->value.find('.') != std::string::npos && !parse_f64(lit->value).has_value();
-    }
-    if (auto* ar = std::get_if<ConditionValue::Arith>(&leaf->condition.value.data)) return arith_has_dotted_col(ar->expr);
-    return false;
-}
-
-bool cond_may_be_substituted(const CondExpr& expr) {
-    if (auto* v = std::get_if<CondExpr::And>(&expr.data)) return cond_may_be_substituted(*v->lhs) || cond_may_be_substituted(*v->rhs);
-    if (auto* v = std::get_if<CondExpr::Or>(&expr.data)) return cond_may_be_substituted(*v->lhs) || cond_may_be_substituted(*v->rhs);
-    if (auto* v = std::get_if<CondExpr::Not>(&expr.data)) return cond_may_be_substituted(*v->inner);
-    auto* leaf = std::get_if<CondExpr::Leaf>(&expr.data);
-    if (!leaf) return false;
-    if (auto* lit = std::get_if<ConditionValue::Literal>(&leaf->condition.value.data)) {
-        return lit->value.find('.') != std::string::npos && !parse_f64(lit->value).has_value();
-    }
-    if (auto* ar = std::get_if<ConditionValue::Arith>(&leaf->condition.value.data)) return arith_has_dotted_col(ar->expr);
-    return false;
-}
-} // namespace
 
 bool Executor::matches_condition_with_subquery(SharedDatabase& s, const Row& row, const std::optional<CondExpr>& condition) {
     return !condition || eval_condexpr_with_subquery(s, row, *condition);
@@ -161,19 +52,26 @@ Executor::Tri Executor::eval_cond3_with_subquery(SharedDatabase& s, const Row& r
     return Tri::False;
 }
 
-bool Executor::has_outer_ref(const CondExpr& expr) {
-    if (auto* v = std::get_if<CondExpr::And>(&expr.data)) return has_outer_ref(*v->lhs) || has_outer_ref(*v->rhs);
-    if (auto* v = std::get_if<CondExpr::Or>(&expr.data)) return has_outer_ref(*v->lhs) || has_outer_ref(*v->rhs);
-    if (auto* v = std::get_if<CondExpr::Not>(&expr.data)) return has_outer_ref(*v->inner);
-    auto* leaf = std::get_if<CondExpr::Leaf>(&expr.data);
-    if (!leaf) return false;
-    if (auto* lit = std::get_if<ConditionValue::Literal>(&leaf->condition.value.data)) {
-        return looks_like_qualified_col(lit->value);
-    }
-    if (auto* ar = std::get_if<ConditionValue::Arith>(&leaf->condition.value.data)) {
-        return arith_has_qualified_col(ar->expr);
-    }
-    return false;
+bool Executor::subquery_is_correlated(const Statement& sub) {
+    if (auto it = subquery_correlated_.find(&sub); it != subquery_correlated_.end()) return it->second;
+    const bool correlated = refers_outside(sub);
+    subquery_correlated_[&sub] = correlated;
+    return correlated;
+}
+
+// Runs a subquery for one outer row: on a copy (the original stays as parsed, for the next row), with the row's values in place of the columns it
+// takes from the outer query. An error inside it is the statement's error, not "no row".
+std::string Executor::run_subquery(SharedDatabase& s, const Statement& original, const Row& row, bool correlated) {
+    Statement stmt = original;
+    if (correlated) substitute_outer(stmt, row);
+    CopyScope scope(*this);
+    auto* sel = std::get_if<Statement::Select>(&stmt.data);
+    StringResult result = sel ? exec_select(s, sel->table, std::move(sel->subquery), sel->distinct, std::move(sel->columns), std::move(sel->condition),
+                                             std::move(sel->joins), std::move(sel->order_by), std::move(sel->group_by), std::move(sel->having),
+                                             sel->limit, sel->offset, false, false)
+                              : execute_with_s(s, std::move(stmt)); // (a UNION / INTERSECT / EXCEPT / WITH)
+    if (result.is_err()) throw StatementError(result.error());
+    return result.value();
 }
 
 Executor::Tri Executor::eval_single_with_subquery(SharedDatabase& s, const Row& row, const Condition& cond) {
@@ -186,28 +84,20 @@ Executor::Tri Executor::eval_single_with_subquery(SharedDatabase& s, const Row& 
     auto* sub = std::get_if<ConditionValue::Subquery>(&cond.value.data);
     if (!sub) return Tri::False;
 
+    // One that names no column of the outer query has one answer for the whole statement.
+    const Statement& original = *sub->query;
+    const bool correlated = subquery_is_correlated(original);
+    const void* cache_key = sub->query.get();
+
     if (cond.op == Operator::Exists || cond.op == Operator::NotExists) {
-        // An EXISTS whose condition cannot depend on the outer row has one answer for the whole statement.
-        const void* exists_key = sub->query.get();
-        auto* peek = std::get_if<Statement::Select>(&sub->query->data);
-        if (peek && !(peek->condition && cond_may_be_substituted(*peek->condition))) {
-            if (auto it = subquery_exists_cache_.find(exists_key); it != subquery_exists_cache_.end()) {
+        if (!correlated) {
+            if (auto it = subquery_exists_cache_.find(cache_key); it != subquery_exists_cache_.end()) {
                 return tri(cond.op == Operator::Exists ? it->second : !it->second);
             }
         }
-        Statement sub_stmt = *sub->query;
-        if (auto* sel = std::get_if<Statement::Select>(&sub_stmt.data)) {
-            const bool cacheable = !(sel->condition && cond_may_be_substituted(*sel->condition));
-            auto sub_cond = sel->condition;
-            if (sub_cond) sub_cond = substitute_correlated_condexpr(*sub_cond, row);
-            auto result = exec_select(s, sel->table, std::move(sel->subquery), sel->distinct, sel->columns, sub_cond, sel->joins, sel->order_by,
-                                       sel->group_by, sel->having, sel->limit, sel->offset, false, false);
-            if (result.is_err()) throw StatementError(result.error()); // (an error inside the subquery is the statement's error, not "no row")
-            bool has_rows = result.value().find("0 rows returned") == std::string::npos;
-            if (cacheable) subquery_exists_cache_[exists_key] = has_rows;
-            return tri(cond.op == Operator::Exists ? has_rows : !has_rows);
-        }
-        return Tri::False;
+        const bool has_rows = run_subquery(s, original, row, correlated).find("0 rows returned") == std::string::npos;
+        if (!correlated) subquery_exists_cache_[cache_key] = has_rows;
+        return tri(cond.op == Operator::Exists ? has_rows : !has_rows);
     }
 
     std::string val = eval_arith(row, cond.left);
@@ -219,101 +109,66 @@ Executor::Tri Executor::eval_single_with_subquery(SharedDatabase& s, const Row& 
         return contains ? Tri::False : (has_null ? Tri::Unknown : Tri::True);
     };
 
-    if (cond.op == Operator::In || cond.op == Operator::NotIn) {
-        if (auto* sel_peek = std::get_if<Statement::Select>(&sub->query->data)) {
-            bool is_correlated = sel_peek->condition.has_value() && has_outer_ref(*sel_peek->condition);
-            if (!is_correlated) {
-                // Row-level-concurrency Stage 4/5 correctness/perf fix (found via
-                // concurrent-reader stress testing): check the cache BEFORE copying or
-                // serializing anything -- sub->query.get() is a stable identity for this
-                // subquery AST for as long as subquery_cache_ can possibly still hold an
-                // entry for it (the cache is cleared at the start of every new top-level
-                // statement, and this same condition/AST is reused unchanged across every
-                // row exec_select's caller scans). The OLD code did a full Statement copy
-                // + JSON serialization of the subquery AST on EVERY row regardless of hit
-                // or miss (the cache only ever saved the exec_select call itself) -- for a
-                // scan of N rows that's O(N) AST copies/serializations just to compute the
-                // key, dwarfing the O(1) hash lookup the cache was supposed to provide.
-                const void* cache_key = sub->query.get();
-                if (auto it = subquery_cache_.find(cache_key); it != subquery_cache_.end()) {
-                    return membership(it->second.count(val) > 0, it->second.count(EXECUTOR_NULL_VALUE) > 0);
-                }
-                // Cache miss: only now pay for a copy -- exec_select needs to move
-                // fields out of it (sel->subquery), and the original AST (still pointed
-                // to by `sub->query`, untouched) must survive for the next row's lookup.
-                Statement sub_stmt = *sub->query;
-                auto* sel = std::get_if<Statement::Select>(&sub_stmt.data);
-                auto result = exec_select(s, sel->table, std::move(sel->subquery), sel->distinct, sel->columns, sel->condition, sel->joins,
-                                           sel->order_by, sel->group_by, sel->having, sel->limit, sel->offset, false, false);
-                if (result.is_err()) throw StatementError(result.error());
-                auto vals = extract_values_from_output(result.value());
-                std::unordered_set<std::string> sub_vals(vals.begin(), vals.end());
-                Tri hit = membership(sub_vals.count(val) > 0, sub_vals.count(EXECUTOR_NULL_VALUE) > 0);
-                subquery_cache_[cache_key] = std::move(sub_vals);
-                return hit;
-            }
+    if ((cond.op == Operator::In || cond.op == Operator::NotIn) && !correlated) {
+        // Row-level-concurrency Stage 4/5 correctness/perf fix (found via concurrent-reader stress testing): check the cache BEFORE copying
+        // or serializing anything -- sub->query.get() is a stable identity for this subquery AST for as long as subquery_cache_ can possibly
+        // still hold an entry for it (the cache is cleared at the start of every new top-level statement, and this same condition/AST is
+        // reused unchanged across every row exec_select's caller scans). The OLD code did a full Statement copy + JSON serialization of the
+        // subquery AST on EVERY row regardless of hit or miss -- for a scan of N rows that's O(N) AST copies/serializations just to compute
+        // the key, dwarfing the O(1) hash lookup the cache was supposed to provide.
+        if (auto it = subquery_cache_.find(cache_key); it != subquery_cache_.end()) {
+            return membership(it->second.count(val) > 0, it->second.count(EXECUTOR_NULL_VALUE) > 0);
         }
+        // Cache miss: only now pay for a copy (run_subquery) -- the original AST (still pointed to by `sub->query`, untouched) must survive
+        // for the next row's lookup.
+        auto vals = extract_values_from_output(run_subquery(s, original, row, false));
+        std::unordered_set<std::string> sub_vals(vals.begin(), vals.end());
+        Tri hit = membership(sub_vals.count(val) > 0, sub_vals.count(EXECUTOR_NULL_VALUE) > 0);
+        subquery_cache_[cache_key] = std::move(sub_vals);
+        return hit;
     }
 
-    // Correlated IN/NOT IN, and every other (scalar Eq/Gt/Lt/Gte/Lte) operator, fall
-    // through here. A correlated subquery needs a fresh per-row copy, since
-    // substitute_correlated_condexpr's result varies per row and exec_select moves
-    // fields out of it. One whose condition cannot depend on the outer row (the scalar
-    // `val > (SELECT AVG(val) FROM t)`) runs once per statement and its values are kept.
+    // Correlated IN/NOT IN, and every other (scalar Eq/Gt/Lt/Gte/Lte) operator, fall through here. A correlated subquery runs once per outer
+    // row; one that names no column of the outer query (the scalar `val > (SELECT AVG(val) FROM t)`) runs once per statement and its
+    // values are kept.
     const SubqueryAnswer* cached_answer = nullptr;
-    auto* peek = std::get_if<Statement::Select>(&sub->query->data);
-    if (peek && !(peek->condition && cond_may_be_substituted(*peek->condition))) {
-        if (auto it = subquery_scalar_cache_.find(sub->query.get()); it != subquery_scalar_cache_.end()) cached_answer = &it->second;
+    if (!correlated) {
+        if (auto it = subquery_scalar_cache_.find(cache_key); it != subquery_scalar_cache_.end()) cached_answer = &it->second;
     }
-    Statement sub_stmt = cached_answer ? Statement() : *sub->query;
-    auto* sel = std::get_if<Statement::Select>(&sub_stmt.data);
-    if (cached_answer || sel) {
-        std::vector<std::string> fresh_vals;
-        const std::vector<std::string>* sub_vals_ptr = nullptr;
-        if (cached_answer) {
-            sub_vals_ptr = &cached_answer->values;
-        } else {
-            const bool cacheable = !(sel->condition && cond_may_be_substituted(*sel->condition));
-            auto sub_cond = sel->condition;
-            if (sub_cond) sub_cond = substitute_correlated_condexpr(*sub_cond, row);
-            auto result = exec_select(s, sel->table, std::move(sel->subquery), sel->distinct, sel->columns, sub_cond, sel->joins, sel->order_by,
-                                       sel->group_by, sel->having, sel->limit, sel->offset, false, false);
-            if (result.is_err()) throw StatementError(result.error());
-            fresh_vals = extract_values_from_output(result.value());
-            if (cacheable) subquery_scalar_cache_[sub->query.get()].values = fresh_vals;
-            sub_vals_ptr = &fresh_vals;
-        }
-        const std::vector<std::string>& sub_vals = *sub_vals_ptr;
-        switch (cond.op) {
-            case Operator::In:
-            case Operator::NotIn:
-                return membership(std::find(sub_vals.begin(), sub_vals.end(), val) != sub_vals.end(),
-                                  std::find(sub_vals.begin(), sub_vals.end(), EXECUTOR_NULL_VALUE) != sub_vals.end());
-            case Operator::Eq:
-            case Operator::Ne:
-            case Operator::Gt:
-            case Operator::Lt:
-            case Operator::Gte:
-            case Operator::Lte: {
-                // a scalar subquery that returns more than one row is an error (MySQL 1242); with no row, or a NULL, the comparison is UNKNOWN
-                if (sub_vals.size() > 1) throw StatementError("Subquery returns more than 1 row");
-                if (sub_vals.empty() || sub_vals.front() == EXECUTOR_NULL_VALUE) return Tri::Unknown;
-                const std::string& rhs = sub_vals.front();
-                const int c = compare_classed(cond.left_class != ValueClass::Unknown ? cond.left_class : class_of_expr(cond.left), cond.right_class, val, rhs);
-                switch (cond.op) {
-                    case Operator::Eq: return tri(c == 0);
-                    case Operator::Ne: return tri(c != 0);
-                    case Operator::Gt: return tri(c > 0);
-                    case Operator::Lt: return tri(c < 0);
-                    case Operator::Gte: return tri(c >= 0);
-                    default: return tri(c <= 0);
-                }
+    std::vector<std::string> fresh_vals;
+    if (!cached_answer) {
+        fresh_vals = extract_values_from_output(run_subquery(s, original, row, correlated));
+        if (!correlated) subquery_scalar_cache_[cache_key].values = fresh_vals;
+    }
+    const std::vector<std::string>& sub_vals = cached_answer ? cached_answer->values : fresh_vals;
+    switch (cond.op) {
+        case Operator::In:
+        case Operator::NotIn:
+            return membership(std::find(sub_vals.begin(), sub_vals.end(), val) != sub_vals.end(),
+                              std::find(sub_vals.begin(), sub_vals.end(), EXECUTOR_NULL_VALUE) != sub_vals.end());
+        case Operator::Eq:
+        case Operator::Ne:
+        case Operator::Gt:
+        case Operator::Lt:
+        case Operator::Gte:
+        case Operator::Lte: {
+            // a scalar subquery that returns more than one row is an error (MySQL 1242); with no row, or a NULL, the comparison is UNKNOWN
+            if (sub_vals.size() > 1) throw StatementError("Subquery returns more than 1 row");
+            if (sub_vals.empty() || sub_vals.front() == EXECUTOR_NULL_VALUE) return Tri::Unknown;
+            const std::string& rhs = sub_vals.front();
+            const int c = compare_classed(cond.left_class != ValueClass::Unknown ? cond.left_class : class_of_expr(cond.left), cond.right_class, val, rhs);
+            switch (cond.op) {
+                case Operator::Eq: return tri(c == 0);
+                case Operator::Ne: return tri(c != 0);
+                case Operator::Gt: return tri(c > 0);
+                case Operator::Lt: return tri(c < 0);
+                case Operator::Gte: return tri(c >= 0);
+                default: return tri(c <= 0);
             }
-            default:
-                return Tri::False;
         }
+        default:
+            return Tri::False;
     }
-    return Tri::False;
 }
 
 std::vector<std::string> Executor::extract_values_from_output(const std::string& output) const {

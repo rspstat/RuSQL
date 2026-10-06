@@ -1862,10 +1862,11 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
                 std::vector<std::string> right_cols_for_null;
                 for (auto& left_row : current) {
                     Statement sub(*j.subquery->first);
-                    if (auto* sel = std::get_if<Statement::Select>(&sub.data)) {
-                        if (sel->condition) sel->condition = substitute_correlated_condexpr(*sel->condition, left_row);
-                    }
-                    auto inner_result = execute_with_s(s, std::move(sub));
+                    substitute_outer(sub, left_row);
+                    auto inner_result = [&] {
+                        CopyScope scope(*this);
+                        return execute_with_s(s, std::move(sub));
+                    }();
                     if (inner_result.is_err()) return inner_result;
                     auto [inner_cols, inner_rows] = parse_table_output(inner_result.value());
                     if (!inner_cols.empty() && right_cols_for_null.empty()) right_cols_for_null = inner_cols;
@@ -2670,18 +2671,8 @@ StringResult Executor::format_result(SharedDatabase& s, std::vector<Row> result,
         if (!sq_queries.empty()) {
             std::unordered_map<std::size_t, std::string> uncorr_cache;
             for (auto& [idx, query_ptr] : sq_queries) {
-                auto* sel = std::get_if<Statement::Select>(&query_ptr->data);
-                if (!sel) continue;
-                bool is_correlated = sel->condition && has_outer_ref(*sel->condition);
-                if (is_correlated) continue;
-
-                Statement query_copy = *query_ptr;
-                auto* sc = std::get_if<Statement::Select>(&query_copy.data);
-                auto out = exec_select(s, sc->table, std::move(sc->subquery), sc->distinct, std::move(sc->columns), std::move(sc->condition),
-                                        std::move(sc->joins), std::move(sc->order_by), std::move(sc->group_by), std::move(sc->having), sc->limit,
-                                        sc->offset, false, false);
-                if (out.is_err()) throw StatementError(out.error());
-                auto vals = extract_values_from_output(out.value());
+                if (subquery_is_correlated(*query_ptr)) continue;
+                auto vals = extract_values_from_output(run_subquery(s, *query_ptr, Row{}, false));
                 if (vals.size() > 1) throw StatementError("Subquery returns more than 1 row");
                 uncorr_cache[idx] = vals.empty() ? std::string(EXECUTOR_NULL_VALUE) : vals.front();
             }
@@ -2693,22 +2684,9 @@ StringResult Executor::format_result(SharedDatabase& s, std::vector<Row> result,
                         row[key] = it->second;
                         continue;
                     }
-                    auto* sel = std::get_if<Statement::Select>(&query_ptr->data);
-                    std::string val = EXECUTOR_NULL_VALUE;
-                    if (sel) {
-                        Statement query_copy = *query_ptr;
-                        auto* sc = std::get_if<Statement::Select>(&query_copy.data);
-                        std::optional<CondExpr> sub_cond =
-                            sc->condition ? std::optional<CondExpr>(substitute_correlated_condexpr(*sc->condition, row)) : std::nullopt;
-                        auto out = exec_select(s, sc->table, std::move(sc->subquery), sc->distinct, std::move(sc->columns), std::move(sub_cond),
-                                                std::move(sc->joins), std::move(sc->order_by), std::move(sc->group_by), std::move(sc->having),
-                                                sc->limit, sc->offset, false, false);
-                        if (out.is_err()) throw StatementError(out.error());
-                        auto vals = extract_values_from_output(out.value());
-                        if (vals.size() > 1) throw StatementError("Subquery returns more than 1 row");
-                        if (!vals.empty()) val = vals.front();
-                    }
-                    row[key] = val;
+                    auto vals = extract_values_from_output(run_subquery(s, *query_ptr, row, true));
+                    if (vals.size() > 1) throw StatementError("Subquery returns more than 1 row");
+                    row[key] = vals.empty() ? std::string(EXECUTOR_NULL_VALUE) : vals.front();
                 }
             }
         }

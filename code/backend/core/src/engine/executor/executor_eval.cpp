@@ -1,8 +1,7 @@
 // Faithful port of the expression/condition evaluation helpers from
 // rusql-core/src/engine/executor.rs (Phase 8b): get_col, eval_arith,
 // format_arith_result, matches_condexpr/eval_condexpr/eval_single, eval_check_expr,
-// substitute_correlated_condexpr, format_returning_rows, update_stat_rows, and
-// parse_table_output. apply_scalar_func is implemented in executor_scalar_func.cpp.
+// format_returning_rows, update_stat_rows, and parse_table_output. apply_scalar_func is implemented in executor_scalar_func.cpp.
 
 #include "engine/executor/executor.hpp"
 
@@ -352,76 +351,6 @@ bool Executor::eval_check_expr(const std::string& expr, const Row& row) {
         }
     }
     return true;
-}
-
-// PLAN.md P0 fix follow-up: mirrors substitute_correlated_condexpr's Literal-based
-// outer-row substitution, but walks a full ArithExpr tree (needed now that a
-// ConditionValue::Arith RHS can embed an outer-table column reference anywhere
-// inside an expression, e.g. `WHERE d.id = e.dept_id + 0`, not just as the whole RHS).
-ArithExpr Executor::substitute_arith_outer_refs(const ArithExpr& expr, const Row& outer_row) {
-    return std::visit(
-        [&](const auto& alt) -> ArithExpr {
-            using T = std::decay_t<decltype(alt)>;
-            if constexpr (std::is_same_v<T, ArithExpr::Col>) {
-                if (alt.name.find('.') != std::string::npos) {
-                    if (const std::string* rv = get_col(outer_row, alt.name)) return ArithExpr(ArithExpr::Str{*rv});
-                }
-                return ArithExpr(alt);
-            } else if constexpr (std::is_same_v<T, ArithExpr::Add>) {
-                return ArithExpr(ArithExpr::Add{std::make_unique<ArithExpr>(substitute_arith_outer_refs(*alt.lhs, outer_row)),
-                                                 std::make_unique<ArithExpr>(substitute_arith_outer_refs(*alt.rhs, outer_row))});
-            } else if constexpr (std::is_same_v<T, ArithExpr::Sub>) {
-                return ArithExpr(ArithExpr::Sub{std::make_unique<ArithExpr>(substitute_arith_outer_refs(*alt.lhs, outer_row)),
-                                                 std::make_unique<ArithExpr>(substitute_arith_outer_refs(*alt.rhs, outer_row))});
-            } else if constexpr (std::is_same_v<T, ArithExpr::Mul>) {
-                return ArithExpr(ArithExpr::Mul{std::make_unique<ArithExpr>(substitute_arith_outer_refs(*alt.lhs, outer_row)),
-                                                 std::make_unique<ArithExpr>(substitute_arith_outer_refs(*alt.rhs, outer_row))});
-            } else if constexpr (std::is_same_v<T, ArithExpr::Div>) {
-                return ArithExpr(ArithExpr::Div{std::make_unique<ArithExpr>(substitute_arith_outer_refs(*alt.lhs, outer_row)),
-                                                 std::make_unique<ArithExpr>(substitute_arith_outer_refs(*alt.rhs, outer_row))});
-            } else if constexpr (std::is_same_v<T, ArithExpr::Cmp>) {
-                return ArithExpr(ArithExpr::Cmp{std::make_unique<ArithExpr>(substitute_arith_outer_refs(*alt.lhs, outer_row)), alt.op,
-                                                 std::make_unique<ArithExpr>(substitute_arith_outer_refs(*alt.rhs, outer_row))});
-            } else if constexpr (std::is_same_v<T, ArithExpr::Func>) {
-                std::vector<ArithExpr> args;
-                args.reserve(alt.args.size());
-                for (auto& a : alt.args) args.push_back(substitute_arith_outer_refs(a, outer_row));
-                return ArithExpr(ArithExpr::Func{alt.name, std::move(args)});
-            } else if constexpr (std::is_same_v<T, ArithExpr::Pred>) {
-                return ArithExpr(ArithExpr::Pred{std::make_unique<CondExpr>(substitute_correlated_condexpr(*alt.cond, outer_row))});
-            } else {
-                return ArithExpr(alt);
-            }
-        },
-        expr.data);
-}
-
-CondExpr Executor::substitute_correlated_condexpr(const CondExpr& expr, const Row& outer_row) {
-    if (auto* v = std::get_if<CondExpr::And>(&expr.data)) {
-        return CondExpr(CondExpr::And{std::make_unique<CondExpr>(substitute_correlated_condexpr(*v->lhs, outer_row)),
-                                       std::make_unique<CondExpr>(substitute_correlated_condexpr(*v->rhs, outer_row))});
-    }
-    if (auto* v = std::get_if<CondExpr::Or>(&expr.data)) {
-        return CondExpr(CondExpr::Or{std::make_unique<CondExpr>(substitute_correlated_condexpr(*v->lhs, outer_row)),
-                                      std::make_unique<CondExpr>(substitute_correlated_condexpr(*v->rhs, outer_row))});
-    }
-    if (auto* v = std::get_if<CondExpr::Not>(&expr.data)) {
-        return CondExpr(CondExpr::Not{std::make_unique<CondExpr>(substitute_correlated_condexpr(*v->inner, outer_row))});
-    }
-    if (auto* v = std::get_if<CondExpr::Leaf>(&expr.data)) {
-        Condition new_cond = v->condition;
-        if (auto* lit = std::get_if<ConditionValue::Literal>(&v->condition.value.data)) {
-            if (lit->value.find('.') != std::string::npos) {
-                if (const std::string* rv = get_col(outer_row, lit->value)) {
-                    new_cond.value = ConditionValue(ConditionValue::Literal{*rv});
-                }
-            }
-        } else if (auto* ar = std::get_if<ConditionValue::Arith>(&v->condition.value.data)) {
-            new_cond.value = ConditionValue(ConditionValue::Arith{substitute_arith_outer_refs(ar->expr, outer_row)});
-        }
-        return CondExpr(CondExpr::Leaf{std::move(new_cond)});
-    }
-    return expr;
 }
 
 std::string Executor::format_returning_rows(const std::vector<Row>& rows, const std::vector<SelectColumn>& cols) {

@@ -1244,6 +1244,38 @@ VS Code 스타일 탭 드래그 순서 변경(요청의 1번 항목)은 같은 �
 
 **Diagram 페이지**: 구성요소·흐름이 바뀐 것이 없어 변경 없음.
 
+### 10월 7일 (두 번째) — 서브쿼리의 바깥 참조: 비교의 왼쪽에 있으면 모든 행에 참이던 것(`DELETE … WHERE EXISTS (… a.id = b.a_id)`가 전부 지움), 함수·select 목록·HAVING·ON·바깥 별칭·테이블 없이 쓴 열·서브쿼리 안의 서브쿼리 — 그리고 이 점검에서 찾은 뷰 결과 캐시와 뷰의 뷰
+
+**왜 이 항목인가**: 사용자 결정("전부 고쳐")의 R10. 앞 항목들의 점검에서 **상관 서브쿼리의 바깥 열이 비교의 왼쪽에 있으면 조용히 틀린다**는 것을 찾았고(`WHERE EXISTS (SELECT 1 FROM b WHERE a.id = b.a_id)`가 모든 행에 참), 실제로 쓰는 문장에서 `DELETE FROM a WHERE EXISTS (SELECT 1 FROM b WHERE a.id = b.a_id)`가 **5행을 전부 지웠다**(데이터 손실). 같은 뿌리의 틀림을 모두 한 번에 고쳤다.
+
+**원인과 영향**:
+- **바깥 열을 글자 모양으로 짐작**: 서브쿼리가 바깥 행을 읽는다고 보는 것은 "비교의 오른쪽에 점이 든 이름이 있을 때"뿐이었다(`has_outer_ref`/`substitute_correlated_condexpr`/`cond_may_be_substituted`). 그래서 **왼쪽**(`a.id = b.a_id`), **함수 안**(`ABS(a.id) = b.a_id`, `COALESCE(a.w, 1)`), **식**(`a.id + 0 = b.a_id`), **서브쿼리의 select 목록**(`SELECT a.v + b.k`가 NULL, `SELECT a.v`가 빈 값), **HAVING**(`HAVING COUNT(*) >= a.w`가 모든 행에 참), **조인의 ON**, **바깥 테이블의 별칭**(`FROM a x … WHERE x.id = b.a_id`), **테이블 없이 쓴 열**(`WHERE b.k = w`), **서브쿼리 안의 서브쿼리**는 바깥 값이 들어가지 않았다. 오류 없이 틀린 답(스칼라 서브쿼리는 모든 행에 같은 값: `SELECT id, (SELECT COUNT(*) … WHERE a.id = b.a_id) FROM a`가 전부 2).
+- **안팎의 같은 열 이름 오인**: 값을 넣을 때 바깥 행에서 "점이 든 이름"을 이름 모양으로 찾았으므로(`get_col`의 맨 열 이름 대체 검색) 안쪽 테이블의 열도 바깥 행의 같은 이름 열로 읽힐 수 있었다.
+- **UNION이 든 서브쿼리**(`x IN (SELECT … UNION SELECT …)`, `EXISTS (… UNION …)`)는 늘 거짓, select 목록의 UNION 서브쿼리는 NULL(Select가 아니면 실행하지 않았음).
+- (이 점검에서 찾은 별개의 기존 버그) **뷰를 조회한 결과가 바탕 테이블이 바뀌어도 그대로**: SELECT 결과 캐시가 뷰의 이름만 의존했으므로 `INSERT INTO a …` 뒤에도 `SELECT * FROM 뷰`가 이전 답(실증: 단순 뷰·조인 뷰·서브쿼리 뷰 모두, `DROP VIEW`/다시 `CREATE VIEW` 뒤에도). 그리고 **뷰를 읽는 뷰를 만들 수 없음**(`CREATE VIEW v2 AS SELECT … FROM v1` → "Table 'v1' not found").
+
+**수정**:
+- **바인더가 이름을 정한다**(`executor_bind.cpp`): 스코프 체인에서 안쪽 테이블이 먼저(MySQL과 같음), 그다음 바깥. 바깥 열은 **몇 단계 밖인지**(`ArithExpr::Col::outer`, `ConditionValue::Literal::outer`, `SelectColumn::Column/ColumnAlias::outer`)를 적고 이름을 "테이블.열"로 바꾼다(테이블 없이 쓴 열도). 식의 열·비교의 오른쪽 이름·select 항목·함수 인자 안(날짜 함수의 단위 `INTERVAL 1 MONTH`는 제외)·HAVING·ON·LATERAL 서브쿼리를 본다. 바깥 값을 담을 수 없는 자리(집계 인자 식·`ORDER BY`·`GROUP BY`·윈도의 열)에 바깥 열을 쓰면 틀린 답 대신 오류(`Outer reference 'a.w' is not supported in 'field list'`).
+- **바깥 테이블의 별칭**: 파서는 별칭을 자기 질의 안에서만 풀었으므로 서브쿼리 안의 `x.id`를 풀 길이 없었다 → `Select::table_aliases`(별칭→테이블)를 AST에 남기고(JSON 저장) 바인더가 읽는다. 안쪽이 바깥과 같은 테이블을 별칭으로 쓰면(`FROM e WHERE sal > (SELECT AVG(sal) FROM e e2 WHERE e2.dept = e.dept)`) 파서가 `e2`를 `e`로 바꿔 바깥 `e`와 구별이 안 되므로, **바깥 질의의 FROM에 있는 테이블을 별칭으로 쓰는 서브쿼리는 별칭을 유지**한다(`Select::table_alias`, 조인은 기존 `Join::alias`). select 목록의 서브쿼리는 바깥 FROM보다 먼저 파싱되므로 FROM 목록을 미리 읽는다(`scan_from_names`).
+- **실행기가 표시된 참조만 바꾼다**(`executor_outer.cpp`, 새 파일): `substitute_outer`가 서브쿼리 문장의 표시된 참조를 바깥 행의 값으로 바꾼다(문장 안의 깊이를 세어 2·3단 중첩도: 한 단계 안쪽은 자기 행으로, 더 바깥은 이미 들어간 값으로). `refers_outside`가 서브쿼리가 바깥을 읽는지 알려 준다(상관이 아니면 문장당 한 번만 실행하고 캐시). 바꾼 값이 왼쪽이 되면 `열 op 값`으로 뒤집어(`a.id = b.a_id` → `b.a_id = <값>`) 인덱스·해시 경로가 그대로 쓰인다. 바깥 값이 문자열이면 따옴표 표시(열 이름과 같은 글자가 열로 읽히지 않음). 서브쿼리가 UNION/INTERSECT/EXCEPT/WITH여도 실행(`run_subquery`), select 목록·LATERAL도 같은 길.
+- **서브쿼리 복사본의 캐시 범위**(`CopyScope`): 바깥 행마다 서브쿼리를 복사해 실행하는데 캐시 키가 주소라서, 복사본 안의 서브쿼리 결과가 다음 복사본(같은 주소에 다시 할당될 수 있음)에 잘못 쓰일 수 있었다 → 복사본이 도는 동안은 캐시를 새로 쓰고 끝나면 문장의 캐시를 되돌린다.
+- **옛 짐작 코드 삭제**: `has_outer_ref`, `substitute_correlated_condexpr`, `substitute_arith_outer_refs`, `cond_may_be_substituted`와 그 도우미(약 160줄).
+- **뷰**: 결과 캐시가 읽은 테이블 목록에 뷰 본문의 테이블(뷰의 뷰·본문 안의 서브쿼리 포함)과 뷰 자신의 이름을 넣고, `CREATE VIEW`/`DROP VIEW`가 그 이름의 캐시를 지운다. `CREATE VIEW`가 뷰를 읽는 SELECT를 받아들인다.
+
+**검증**:
+- 신규 Catch2 11케이스(580 → 591, `test_outer_references.cpp`): ① 비교의 양쪽, ② 함수·식·CASE/IF·select 목록·HAVING·ON, ③ 이름(같은 열 이름, 테이블 없이 쓴 열, 바깥 별칭, 같은 테이블을 안팎에서 쓰는 모든 별칭 조합, 안쪽 이름이 가림), ④ select 목록의 서브쿼리와 날짜 단위가 바깥 열 이름과 같을 때, ⑤ 서브쿼리 안의 서브쿼리(2·3단, 바깥에만 상관인 것, 형제 서브쿼리), ⑥ UPDATE·DELETE(데이터 손실), ⑦ 다른 타입(`'007'` vs `'7'`, 열 이름 같은 글자의 값), ⑧ 값을 담을 수 없는 자리의 오류, ⑨ 뷰·LATERAL·UNION 서브쿼리·다시 시작 뒤, ⑩ 뷰 결과가 바탕 테이블을 따라감(뷰의 뷰·DROP/CREATE), ⑪ **무작위 상관 서브쿼리를 독립 참조(3값 논리)와 비교**(EXISTS/NOT EXISTS·COUNT·SUM·IN·안의 서브쿼리 × 바깥/안쪽 별칭 × 같은 테이블 × 양쪽 위치 × 함수/식).
+- **새 검증 도구 `verify_correlated.py`**(소수·문자열·NULL 열, 비교 1~3개와 OR, 별칭·같은 테이블, 2단 중첩, DELETE/UPDATE의 복사 테이블). 앞 빌드는 첫 시드에서 위반이라 도구가 버그를 본다는 것을 확인했다.
+- 심은 버그 44종(바인더 — 바깥 열 판정·별칭·스코프 순서·표시 위치 넷·날짜 단위·거절·LATERAL; 값 넣기 — 깊이·탈출 판정·뒤집기·따옴표·select 항목·조건식·UNION·HAVING·ON·왼쪽·오른쪽 식; 실행 — 캐시 둘(저장과 읽기를 같이 바꿔야 오답)·복사본 캐시 범위·값 넣기 끔; 뷰 — 본문 테이블·뷰 이름·만들기/지우기 무효화·뷰의 뷰; 파서 — 별칭 유지 둘·FROM 미리 읽기) 가운데 **처음에는 5종이 살아남았고**(날짜 단위 판정 — **진짜 버그**: 바깥 테이블에 `MONTH` 열이 있으면 `INTERVAL 1 MONTH`의 단위를 열로 읽음, CASE 조건 안의 바깥 열, 복사본 캐시 범위, 뷰 만들기·지우기 무효화 각각) 테스트를 보강하고 버그를 고쳐 모두 잡게 했다. 최종 39종을 테스트가 잡고, 5종은 결과가 같은 변이(바깥 값을 넣은 뒤 비교를 뒤집지 않기 — 인덱스·해시 경로의 성능만 다름; 캐시 저장만/읽기만 바꾸기 — 둘을 같이 바꿔야 달라져 합친 변이가 잡힘; 집합 연산의 다른 쪽을 바깥 FROM으로 보기 — 별칭만 더 남을 뿐 같은 답)이다.
+- Release/Debug **591 케이스/1,334,724 assertions**를 기본 설정과 `RUSQL_DML_INDEX_MIN_ROWS=0` 양쪽에서 통과(네 가지 모두). SELECT 차분 퍼저 150시드(1,819,528 assertions), DML 퍼저 80시드(1,950,808), 쓰기 퍼저 40시드(43,182), 조인 퍼저 60시드(7,178), `[aggregate]` 긴 캠페인(11케이스 317,627), `[aggregate_semantics][random]`(23,151), `[aggregate_arguments][random]`(4,560), `[subquery_cardinality][random]`(5,269), `[typed_comparison][random]`(68,100 / DML 인덱스 강제 227,000), `[value_expressions][random]`(34,700 / 강제 20,820), `[sort_group][random]`(7,800 / 강제 4,160), 새 `[outer_references][random]` 150시드(12,900 / 강제 80시드 6,880), 크래시 퍼저 90라운드·동시 퍼저 30라운드(확인한 확정 행 16,788) 불일치 0. 새 `verify_correlated.py` 12시드 × 150문장 위반 없음(앞 빌드는 첫 시드에서 위반), `verify_sort_group`·`verify_value_expressions`·`verify_subqueries`·`verify_agg_arguments`·`verify_compare`·`verify_joins`(큰 표 포함)·`verify_writes`·`verify_null_expressions`·`verify_agg_expressions`·`verify_aggregates`·`verify_orderby_distinct`도 위반 없음.
+- 빌드 간 차분(이전 빌드 = 앞 항목): 30시드 × 99질의(2,970질의) **차이 0건** — 이 말뭉치의 상관 서브쿼리는 바깥 열이 비교의 오른쪽에만 있어 앞 빌드도 맞았던 모양이라 의도한 변화는 나타나지 않는다(바깥 열이 왼쪽·함수·select 목록·별칭 등에 있는 경우는 `verify_correlated.py`와 새 테스트가 직접 검증한다).
+- 성능: 앞 항목 빌드와 번갈아 2라운드, 3,000행: 바깥 열이 비교의 **오른쪽**인 상관 서브쿼리는 거의 같다 — `EXISTS`(인덱스) 33.1 → 36.8 / 33.4 → 34.9ms(바깥 행마다 문장을 복사하고 값을 넣는 일이 조금 늘어 +4~11%), 스칼라 `AVG` 비교 22.3 → 22.7, select 목록의 `COUNT(*)` 20.0 → 21.1 / 19.5 → 21.0, `IN` 125.6 → 118.8, 인덱스 없는 열의 `EXISTS` 108.6 → 107.0, 비상관 스칼라 1.37 → 1.30ms. **바깥 열이 왼쪽이던 모양은 전에는 틀린 답을 2.4초(인덱스 있는 열)·1.96초(없는 열)에 냈고 이제 36.6ms·107.9ms에 맞는 답을 낸다**(값이 왼쪽이 되면 `열 op 값`으로 뒤집어 인덱스·해시 경로가 그대로 쓰임).
+
+**눈에 띄는 변화(의도한 것)**: 바깥 열이 어디에 있든 서브쿼리가 바깥 행의 값으로 답한다(전에는 비교의 오른쪽만); 바깥 열이 값을 담을 수 없는 자리(집계 인자 식 등)에 있으면 오류; 뷰 조회가 바탕 테이블의 변경을 바로 반영; 뷰를 읽는 뷰를 만들 수 있음; `x IN (SELECT … UNION SELECT …)`가 동작.
+
+**정직한 한계**: ① 집계 인자의 식·`ORDER BY`·`GROUP BY`·윈도의 열 안의 바깥 참조는 지원하지 않고 오류로 거절한다; ② 서브쿼리 안에서 어느 테이블의 것도 아닌 `x.열`은 여전히 오류 없이 받아들인다(다른 문장의 별칭일 수 있어서); ③ `MERGE`는 바인딩하지 않아 그 조건 안의 서브쿼리는 바깥 참조를 표시하지 못하고, (이 점검에서 찾은 기존 버그) `WHEN MATCHED AND 조건 THEN UPDATE`가 조건을 무시한다(조건은 DELETE에만 적용됨) — 둘 다 다음 항목에서 고침; ④ 함수·식 안의 서브쿼리(`(SELECT …) + 1`, `COALESCE((SELECT …), 0)`)·`IN (식 목록)`(`w IN (v, 3)`의 `v`는 글자로 읽힘)·`LIKE 식`은 파싱 오류거나 글자로 읽힘(R4c); ⑤ `CREATE OR REPLACE VIEW`는 파싱 오류(기존); ⑥ 열 이름은 대소문자를 구분한다(`SELECT MONTH FROM t`가 `month` 열을 못 찾음; MySQL은 구분 안 함, 기존); ⑦ `NOT IN (서브쿼리)`가 비어 있고 왼쪽이 NULL이면 MySQL은 참인데 이 엔진은 UNKNOWN(기존).
+
+**Diagram 페이지**: 구성요소·흐름이 바뀐 것이 없어 변경 없음.
+
 ## 요약: 1학기 대비 2학기에 달라진 것
 
 | 항목 | 1학기 (~2026년 6월) | 2학기 (2026년 7~8월) |

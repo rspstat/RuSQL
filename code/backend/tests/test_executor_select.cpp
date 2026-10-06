@@ -103,9 +103,8 @@ TEST_CASE("WHERE with a simple RHS still resolves to a PK index access path", "[
 }
 
 TEST_CASE("Correlated subquery outer reference works inside an arithmetic RHS expression", "[executor][subquery]") {
-    // PLAN.md P0 fix follow-up: substitute_correlated_condexpr must substitute an
-    // outer-row column reference wherever it appears inside a ConditionValue::Arith
-    // tree (e.g. `d.id = e.dept_id + 0`), not just when the whole RHS is a bare
+    // PLAN.md P0 fix follow-up: an outer-row column reference must be substituted
+    // wherever it appears inside a ConditionValue::Arith tree (e.g. `d.id = e.dept_id + 0`), not just when the whole RHS is a bare
     // outer-column reference.
     TempDataDir dir("exec_sel_data_correlated_arith");
     Executor ex(dir.path);

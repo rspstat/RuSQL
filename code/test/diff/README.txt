@@ -93,6 +93,12 @@ here from the rows with exact rational arithmetic.
 
   python verify_compare.py <engine_server.exe> [--statements N] [--seed S] [--rows R]
 
+verify_correlated.py checks subqueries that name a column of the query around them against a model: EXISTS / NOT EXISTS / COUNT / SUM / MIN / MAX / IN / a subquery inside the
+subquery, with the outer column on either side of a comparison, inside ABS / + k / * 2 / COALESCE, numbers and strings, NULLs, the outer table and the inner one under aliases or the
+same table; DELETE and UPDATE of a copy of the table.
+
+  python verify_correlated.py <engine_server.exe> [--queries N] [--seed S] [--rows R]
+
 verify_sort_group.py checks ORDER BY and GROUP BY against a model: rows sorted by a mix of columns, t.column, names the select list gives, positions and expressions (numbers
 and strings, ASC / DESC, ties by the next key and the id); groups by an expression (spelled out, by its name or by position) sorted by a count, a sum, a position or an
 expression of aggregates; a join sorted by an alias, a position or an expression; UNION [ALL] sorted by position or name.

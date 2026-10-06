@@ -69,7 +69,71 @@ std::optional<CondExpr> Parser::parse_optional_filter_clause() {
     return cond;
 }
 
+std::unordered_set<std::string> Parser::scan_from_names() const {
+    std::unordered_set<std::string> names;
+    int depth = 0;
+    std::size_t i = pos_;
+    for (; i < tokens_.size(); i++) { // (the FROM of this query: not one of a subquery in the select list)
+        const TokenKind k = tokens_[i].kind;
+        if (k == TokenKind::LParen) depth++;
+        else if (k == TokenKind::RParen) {
+            if (depth == 0) return names;
+            depth--;
+        } else if (depth == 0 && k == TokenKind::From) break;
+        else if (depth == 0 && k == TokenKind::Semicolon) return names;
+    }
+    bool table_next = true; // the next identifier names a table
+    for (i++; i < tokens_.size(); i++) {
+        const TokenKind k = tokens_[i].kind;
+        if (k == TokenKind::LParen) { depth++; table_next = false; continue; }
+        if (k == TokenKind::RParen) {
+            if (depth == 0) break;
+            depth--;
+            continue;
+        }
+        if (depth > 0) continue;
+        if (k == TokenKind::Where || k == TokenKind::Group || k == TokenKind::Order || k == TokenKind::Having || k == TokenKind::Limit ||
+            k == TokenKind::Union || k == TokenKind::Intersect || k == TokenKind::Except || k == TokenKind::Semicolon ||
+            k == TokenKind::Offset || k == TokenKind::Fetch || k == TokenKind::For) {
+            break;
+        }
+        if (k == TokenKind::Join || k == TokenKind::Comma) { table_next = true; continue; }
+        if (k == TokenKind::On || k == TokenKind::Using) { table_next = false; continue; }
+        if (k != TokenKind::Ident || !table_next) continue;
+        std::size_t last = i; // (`db.table`: the table is the last part)
+        while (last + 2 < tokens_.size() && tokens_[last + 1].kind == TokenKind::Dot && tokens_[last + 2].kind == TokenKind::Ident) last += 2;
+        names.insert(tokens_[last].text);
+        std::size_t alias = last + 1;
+        if (alias < tokens_.size() && tokens_[alias].kind == TokenKind::As) alias++;
+        if (alias < tokens_.size() && tokens_[alias].kind == TokenKind::Ident) {
+            names.insert(tokens_[alias].text);
+            last = alias;
+        }
+        i = last;
+        table_next = false;
+    }
+    return names;
+}
+
 Statement Parser::parse_select() {
+    // The FROM list of this query is the enclosing one for the subqueries in it (until the set operator's other side is parsed).
+    struct Enclosing {
+        std::vector<std::unordered_set<std::string>>* stack;
+        explicit Enclosing(std::vector<std::unordered_set<std::string>>& s, std::unordered_set<std::string> names) : stack(&s) { s.push_back(std::move(names)); }
+        void release() {
+            if (stack) stack->pop_back();
+            stack = nullptr;
+        }
+        ~Enclosing() { release(); }
+    } enclosing(enclosing_from_, scan_from_names());
+    // a table that a query around this one has in its FROM list
+    auto shadowed = [this](const std::string& table) {
+        for (std::size_t i = 0; i + 1 < enclosing_from_.size(); i++) {
+            if (enclosing_from_[i].count(table)) return true;
+        }
+        return false;
+    };
+
     // DISTINCT
     bool distinct = false;
     if (peek_is(TokenKind::Distinct)) { advance(); distinct = true; }
@@ -398,7 +462,7 @@ Statement Parser::parse_select() {
     auto bare_table = [](const std::string& t) { return t.substr(t.rfind('.') == std::string::npos ? 0 : t.rfind('.') + 1); };
     std::unordered_set<std::string> used_tables; // by their own (bare) names
 
-    std::string table;
+    std::string table, table_alias;
     std::optional<std::pair<StatementPtr, std::string>> subquery;
     if (peek_is(TokenKind::LParen)) {
         advance();
@@ -417,7 +481,12 @@ Statement Parser::parse_select() {
         std::optional<std::string> a = parse_table_alias();
         note_name(a ? *a : bare_table(table));
         used_tables.insert(bare_table(table));
-        if (a) alias_map[*a] = table;
+        if (a && shadowed(bare_table(table))) {
+            table_alias = *a;
+            alias_map[*a] = *a;
+        } else if (a) {
+            alias_map[*a] = table;
+        }
     }
 
     // JOIN / LEFT JOIN / RIGHT JOIN / CROSS JOIN / NATURAL JOIN (다중 반복)
@@ -496,6 +565,9 @@ Statement Parser::parse_select() {
                 // a second use of the table: the alias is what its columns are called in the joined rows (`m.name`), so it is
                 // kept as it is instead of being replaced by the table name, which the first use is known by
                 if (!a) throw ParseError("Not unique table/alias: '" + join_table + "'");
+                join_alias = *a;
+                alias_map[*a] = *a;
+            } else if (a && shadowed(join_table)) {
                 join_alias = *a;
                 alias_map[*a] = *a;
             } else if (a) {
@@ -629,7 +701,7 @@ Statement Parser::parse_select() {
 
     Statement select_stmt = with_into(Statement(Statement::Select{
         table, std::move(subquery), columns, distinct, condition, joins, order_by, group_by,
-        having, limit, offset, for_update, for_share}));
+        having, limit, offset, for_update, for_share, false, table_alias, {alias_map.begin(), alias_map.end()}}));
 
     // UNION / INTERSECT / EXCEPT [ALL]
     int set_op = 0;
@@ -642,6 +714,7 @@ Statement Parser::parse_select() {
         if (peek_is(TokenKind::All)) { advance(); all = true; }
         if (!peek_is(TokenKind::Select)) throw ParseError("Expected SELECT after set operator");
         advance();
+        enclosing.release(); // (the other side of a set operator is not inside this query)
         Statement right = parse_select();
 
         Statement right_clean = [&]() -> Statement {
@@ -649,7 +722,7 @@ Statement Parser::parse_select() {
                 auto& s = std::get<Statement::Select>(right.data);
                 return Statement(Statement::Select{
                     s.table, std::move(s.subquery), s.columns, s.distinct, s.condition, s.joins,
-                    {}, s.group_by, s.having, std::nullopt, std::nullopt, s.for_update, s.for_share});
+                    {}, s.group_by, s.having, std::nullopt, std::nullopt, s.for_update, s.for_share, false, s.table_alias, s.table_aliases});
             }
             return right;
         }();

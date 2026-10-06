@@ -146,7 +146,7 @@ Statement::Statement(const Statement& other)
               } else if constexpr (std::is_same_v<T, Select>) {
                   return Data(Select{alt.table, clone_subquery_pair(alt.subquery), alt.columns, alt.distinct,
                                       alt.condition, alt.joins, alt.order_by, alt.group_by, alt.having, alt.limit,
-                                      alt.offset, alt.for_update, alt.for_share, alt.sort_resolved});
+                                      alt.offset, alt.for_update, alt.for_share, alt.sort_resolved, alt.table_alias, alt.table_aliases});
               } else if constexpr (std::is_same_v<T, CreateView>) {
                   return Data(CreateView{alt.name, clone_ptr(alt.query), alt.raw_sql});
               } else if constexpr (std::is_same_v<T, Explain>) {

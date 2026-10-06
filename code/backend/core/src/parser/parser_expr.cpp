@@ -538,7 +538,7 @@ Condition Parser::parse_pred_tail(ArithExpr left) {
         // Simple terminals (bare column, number, or string — everything the old
         // single-token parse already handled) are reduced back to ConditionValue::Literal
         // rather than wrapped as Arith, so existing Literal-based logic (Planner's
-        // index-access-path selection, has_outer_ref's correlation heuristic, equi-join
+        // index-access-path selection, equi-join
         // column extraction, etc.) keeps matching exactly as before. Only a genuinely
         // compound expression (+,-,*,/, a function call, ...) becomes an Arith.
         return condition_value_of(parse_arith_expr());

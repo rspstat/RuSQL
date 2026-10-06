@@ -820,7 +820,9 @@ void to_json(nlohmann::json& j, const Statement& stmt) {
                                                               {"limit", alt.limit},
                                                               {"offset", alt.offset},
                                                               {"for_update", alt.for_update},
-                                                              {"for_share", alt.for_share}}}};
+                                                              {"for_share", alt.for_share},
+                                                              {"table_alias", alt.table_alias},
+                                                              {"table_aliases", alt.table_aliases}}}};
             } else if constexpr (std::is_same_v<T, Statement::Update>)
                 j = nlohmann::json{{"Update", nlohmann::json{{"table", alt.table},
                                                               {"assignments", alt.assignments},
@@ -1065,6 +1067,8 @@ void from_json(const nlohmann::json& j, Statement& stmt) {
         v.offset = p.at("offset").get<std::optional<std::size_t>>();
         v.for_update = p.at("for_update").get<bool>();
         v.for_share = p.at("for_share").get<bool>();
+        if (p.contains("table_alias")) v.table_alias = p.at("table_alias").get<std::string>();
+        if (p.contains("table_aliases")) v.table_aliases = p.at("table_aliases").get<std::vector<std::pair<std::string, std::string>>>();
         stmt = Statement(std::move(v));
     } else if (tag == "Update") {
         Statement::Update v;

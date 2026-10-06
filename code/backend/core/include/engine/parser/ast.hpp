@@ -41,7 +41,10 @@ struct CondExpr;
 struct ArithExpr {
     // `cls`: what kind of value the column holds (its declared type), set by Executor::bind_statement before a statement runs; a comparison
     // reads it (two text columns compare as text, a number column as numbers). Unknown for a column that has not been bound.
-    struct Col  { std::string name; ValueClass cls = ValueClass::Unknown; };
+    // `outer`: 0 for a column of the query the expression is in, otherwise how many queries out the column lives (1 = the query around a
+    // subquery); the binder sets it and rewrites `name` to the table-qualified name the outer row holds, and the subquery gets the outer row's
+    // value for it before it runs (see Executor::substitute_outer).
+    struct Col  { std::string name; ValueClass cls = ValueClass::Unknown; int outer = 0; };
     struct Num  { std::string value; };
     struct Str  { std::string value; };
     struct Add  { std::unique_ptr<ArithExpr> lhs, rhs; };
@@ -206,7 +209,8 @@ enum class Operator {
 struct ConditionValue {
     // `quoted`: the value was written as a string ('abc'), so it is a string and never the name of a column or a number. (A value is kept
     // without its quotes, which made `name = 'city'` read the column city.) LiteralList::quoted is empty when no item is quoted.
-    struct Literal { std::string value; bool quoted = false; };
+    // `outer`: as ArithExpr::Col::outer, for a value that is the name of a column of an enclosing query.
+    struct Literal { std::string value; bool quoted = false; int outer = 0; };
     struct Subquery { StatementPtr query; };
     struct Between { std::string lo, hi; bool lo_quoted = false, hi_quoted = false; };
     struct LiteralList { std::vector<std::string> values; std::vector<bool> quoted; };
@@ -397,8 +401,9 @@ struct InsertConflict {
 struct SelectColumn {
     struct All { std::string table; }; // `*`, or `table.*` (the table name or alias as typed)
     // `cls` / `arg_class` / `col_class`: what the column the select item reads holds (set by Executor::bind_statement)
-    struct Column { std::string name; ValueClass cls = ValueClass::Unknown; };
-    struct ColumnAlias { std::string name, alias; ValueClass cls = ValueClass::Unknown; };
+    // `outer`: as ArithExpr::Col::outer, for a select item that is a column of an enclosing query.
+    struct Column { std::string name; ValueClass cls = ValueClass::Unknown; int outer = 0; };
+    struct ColumnAlias { std::string name, alias; ValueClass cls = ValueClass::Unknown; int outer = 0; };
     // `filter`: PostgreSQL's `FILTER (WHERE ...)` clause on an aggregate -- no Rust
     // original, new C++-native addition. Restricts which rows THIS aggregate considers,
     // independent of the query's own WHERE/HAVING (e.g. `COUNT(*) FILTER (WHERE
@@ -530,6 +535,12 @@ struct Statement {
         bool for_share = false;
         // The binder replaced the positions and select-list names in ORDER BY / GROUP BY by what they stand for (done once per statement).
         bool sort_resolved = false;
+        // The alias the FROM table keeps as its name when a query around this one uses the same table (a join keeps it in Join::alias): `a2.g`
+        // must stay apart from the `a.g` of the outer query.
+        std::string table_alias;
+        // The aliases of the FROM list, as the parser expanded them (alias -> the table name the columns carry; a table used twice keeps its
+        // alias): the parser does not expand an alias of this query inside a subquery of it, so the binder reads `x.id` there through these.
+        std::vector<std::pair<std::string, std::string>> table_aliases;
     };
     struct Update {
         std::string table;
