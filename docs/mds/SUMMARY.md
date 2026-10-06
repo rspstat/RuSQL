@@ -9,7 +9,7 @@
 |---|---|
 | 무엇 | MySQL 호환 프로토콜을 쓰는 **자체 RDBMS 엔진**(C++20) + 데스크톱 클라이언트(Tauri/React) + Claude 연동(MCP) |
 | 1학기 → 2학기 | Rust 프로토타입 → **C++ 전면 재작성**, "기능 추가"에서 **정합성·동시성·성능을 실제로 파고드는 심화**로 |
-| 규모 | 테스트 **591 케이스 / 1,334,724 assertions** (2학기 초 218 케이스 / 3,080 assertions) |
+| 규모 | 테스트 **598 케이스 / 1,336,066 assertions** (2학기 초 218 케이스 / 3,080 assertions) |
 | 엔진 구성 | 파서 → 비용 기반 플래너 → 실행기, MVCC·행 단위 락·데드락 감지, redo 로그 기반 내구성, B+Tree·해시·복합 인덱스 |
 
 ## 2학기에 만든 것 (엔진)
@@ -96,12 +96,13 @@
 | `NULLIF(5, 5.00)`이 NULL이 아님(글자 비교), **5자리 이상 소수의 합이 4자리로 반올림**(`SUM(price * rate)`), 리터럴 `-0`이 `-0`으로 출력 | 작은 수치 오차·표시 오류 |
 | **`CURRENT_DATE`·`SYSDATE()`가 쿼리 캐시에 남음** | 자정이 지나도 어제 날짜 |
 | **서브쿼리의 바깥 열이 비교의 왼쪽(`a.id = b.a_id`)·함수·select 목록·HAVING·ON·바깥 별칭에 있으면 모든 행에 참/같은 값**(`DELETE … WHERE EXISTS (… a.id = b.a_id)`가 **전부 삭제**), UNION 서브쿼리는 늘 거짓/NULL | 오류 없이 틀린 답, **데이터 손실** |
+| **`MERGE … WHEN MATCHED AND 조건 THEN UPDATE`가 조건을 무시**(모든 매칭 행 갱신)하고 MERGE 조건 안의 서브쿼리는 늘 거짓 | 오류 없이 틀린 갱신 |
 | **뷰 조회 결과가 바탕 테이블이 바뀌어도 그대로**(SELECT 결과 캐시가 뷰 이름만 의존), 뷰를 읽는 뷰를 만들 수 없음 | 오래된 답 |
 | **`ORDER BY 별칭`이 정렬을 하지 않음** — `SELECT v AS val … ORDER BY val DESC`, `v + w AS k … ORDER BY k`가 테이블 순서 그대로(집계의 별칭만 정렬됨), `ORDER BY 2`·`ORDER BY a + b`·`ORDER BY COUNT(*)`·`GROUP BY 식`은 파싱 오류, UNION의 `ORDER BY 1`·없는 이름도 정렬 안 함 | 오류 없이 틀린 순서 |
 | `GROUP BY COALESCE(w, 0)`가 `0.00`과 `0`을 다른 그룹으로(`DISTINCT`도), `COALESCE(code, 'x') = '007'`이 숫자 비교, `SUM(CASE WHEN code = '007' …)`이 `'7'`도 셈(앞 항목의 회귀) | 그룹·중복·조건의 타입 규칙이 틀림 |
 | **UPDATE·DELETE의 기본키 단축 경로가 조건을 다시 보지 않음**: `DELETE FROM t WHERE a = b`가 `a = 'b'`인 행을 지움, 텍스트 키의 `WHERE code = 7`이 `'7'`만 처리, 정수 키의 `BETWEEN 5.0 AND 9`가 5번 행을 빠뜨림 | **엉뚱한 행 삭제**·일부 행만 처리 |
 
-성능·정합성 작업의 커밋들에서 찾은 기존 버그는 모두 84건입니다(전체 목록은 `DATE.md`).
+성능·정합성 작업의 커밋들에서 찾은 기존 버그는 모두 86건입니다(전체 목록은 `DATE.md`).
 
 ## 한계와 앞으로
 

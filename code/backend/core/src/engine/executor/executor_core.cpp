@@ -866,6 +866,7 @@ std::optional<std::vector<std::string>> Executor::table_lock_set_for(const Share
         add_fk_neighbors(s, qtarget, /*parents=*/true, /*children=*/true, out);
         if (!cond_tables_ok(v->on, current_db, s, out)) return std::nullopt;
         if (v->when_matched_delete_cond && !cond_tables_ok(*v->when_matched_delete_cond, current_db, s, out)) return std::nullopt;
+        if (v->when_matched_update_cond && !cond_tables_ok(*v->when_matched_update_cond, current_db, s, out)) return std::nullopt;
     } else {
         // Not a "candidate" type -- caller falls through to the unchanged
         // is_pure_read_only()-based dispatch (DDL/DCL/SHOW*/session-variable statements,
@@ -1477,7 +1478,8 @@ StringResult Executor::execute_with_s_body(SharedDatabase& s, Statement stmt) {
         return exec_multi_delete(s, v->delete_tables, v->from_table, v->joins, v->condition);
     if (auto* v = std::get_if<Statement::Merge>(&stmt.data))
         return exec_merge(s, v->target, v->target_alias, v->source, v->source_alias, v->on, v->when_matched_update, v->when_matched_delete,
-                           v->when_matched_delete_cond, v->when_not_matched_columns, v->when_not_matched_values);
+                           v->when_matched_delete_cond, v->when_matched_update_cond, v->when_matched_update_first, v->when_not_matched_columns,
+                           v->when_not_matched_values);
     if (auto* v = std::get_if<Statement::Insert>(&stmt.data))
         return exec_insert(s, v->table, v->columns, v->values, v->on_conflict, v->returning);
     if (auto* v = std::get_if<Statement::InsertSelect>(&stmt.data))

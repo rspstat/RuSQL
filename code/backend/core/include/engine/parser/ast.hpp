@@ -658,6 +658,10 @@ struct Statement {
         std::optional<CondExpr> when_matched_delete_cond;
         std::optional<std::vector<std::string>> when_not_matched_columns;
         std::vector<std::string> when_not_matched_values;
+        // WHEN MATCHED AND <condition> THEN UPDATE: the update is made only for the matched rows the condition holds for (it used to be read
+        // and thrown away); and which of the two WHEN MATCHED clauses was written first, since the first whose condition holds is the one used.
+        std::optional<CondExpr> when_matched_update_cond;
+        bool when_matched_update_first = false;
     };
     struct CreateProcedure {
         std::string name;

@@ -623,6 +623,22 @@ std::optional<std::string> Executor::bind_statement(SharedDatabase& s, Statement
             chain.pop_back();
         }
 
+        // MERGE: the target and the source are the one scope of its conditions and assignments, known by their aliases (else by their own names,
+        // which is how the merged row names their columns)
+        void merge(Statement::Merge& m) {
+            BindScope scope;
+            scope.tables.push_back(table_of(m.target, m.target_alias.value_or(last_part(m.target))));
+            scope.tables.push_back(table_of(m.source, m.source_alias.value_or(last_part(m.source))));
+            chain.push_back(&scope);
+            cond(m.on, "on clause");
+            if (m.when_matched_update_cond) cond(*m.when_matched_update_cond, "where clause");
+            if (m.when_matched_delete_cond) cond(*m.when_matched_delete_cond, "where clause");
+            if (m.when_matched_update) {
+                for (auto& [target, value] : *m.when_matched_update) arith(value, "field list");
+            }
+            chain.pop_back();
+        }
+
         void statement(Statement& st) {
             if (error) return;
             outputs.clear();
@@ -658,6 +674,7 @@ std::optional<std::string> Executor::bind_statement(SharedDatabase& s, Statement
             else if (auto* del = std::get_if<Statement::Delete>(&st.data)) write({del->table}, no_joins, del->condition, nullptr);
             else if (auto* mu = std::get_if<Statement::MultiUpdate>(&st.data)) write(mu->tables, mu->joins, mu->condition, &mu->assignments);
             else if (auto* md = std::get_if<Statement::MultiDelete>(&st.data)) write({md->from_table}, md->joins, md->condition, nullptr);
+            else if (auto* mg = std::get_if<Statement::Merge>(&st.data)) merge(*mg);
             else if (auto* is = std::get_if<Statement::InsertSelect>(&st.data)) {
                 if (is->query) statement(*is->query);
             } else if (auto* view = std::get_if<Statement::CreateView>(&st.data)) {

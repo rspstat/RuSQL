@@ -1276,6 +1276,34 @@ VS Code 스타일 탭 드래그 순서 변경(요청의 1번 항목)은 같은 �
 
 **Diagram 페이지**: 구성요소·흐름이 바뀐 것이 없어 변경 없음.
 
+### 10월 7일 (세 번째) — MERGE의 조건: `WHEN MATCHED AND 조건 THEN UPDATE`가 조건을 무시하던 것, MERGE 조건 안의 서브쿼리가 늘 거짓이던 것
+
+**왜 이 항목인가**: 앞 항목(서브쿼리의 바깥 참조)의 점검에서 MERGE의 조건 안에 상관 서브쿼리를 써 보다가 찾았다. `MERGE INTO tgt t USING src s ON t.id = s.id WHEN MATCHED AND t.id = 1 THEN UPDATE SET n = s.n`이 **모든 매칭 행을 갱신**했다(조건 무시, 오류 없음).
+
+**원인과 영향**:
+- **UPDATE 절의 조건을 버림**: 파서가 `WHEN MATCHED AND <조건>`의 조건을 읽고도 DELETE 절에만 넣었다(`when_matched_delete_cond`). UPDATE 절에는 조건을 둘 자리가 없어 `AND`가 있어도 모든 매칭 행에 UPDATE가 적용됐다.
+- **절의 순서를 보지 않음**: 같은 행이 두 절의 조건을 다 만족하면 먼저 쓴 절이 쓰여야 하는데 DELETE가 항상 먼저였다(`WHEN MATCHED AND … THEN UPDATE … WHEN MATCHED THEN DELETE`에서 DELETE가 UPDATE를 가림).
+- **조건 안의 서브쿼리는 거짓**: 조건을 서브쿼리를 모르는 평가 함수로 계산해 `EXISTS (SELECT …)`·`x > (SELECT …)`가 늘 거짓(ON도 같음).
+- **바인더가 MERGE를 보지 않음**: 조건의 열 타입(숫자/문자 비교)·없는 열 오류·서브쿼리의 바깥 참조 표시가 없었고, 조건 안 서브쿼리의 테이블 이름이 한정되지 않아 `Table 'b' not found`.
+
+**수정**:
+- AST: `Merge::when_matched_update_cond`, `when_matched_update_first`(JSON에 저장, 옛 JSON은 그대로 읽힘). 파서는 UPDATE 절의 조건을 저장하고 어느 절이 먼저인지 적는다.
+- 실행기: 매칭 행마다 먼저 쓴 절부터 조건이 참인 첫 절을 쓴다(조건이 거짓이거나 NULL이면 그 절은 건너뜀); ON·조건 모두 서브쿼리를 아는 평가(`eval_condexpr_with_subquery`/`matches_condition_with_subquery`)로 계산.
+- 바인더: `merge()` — 대상과 원본을 한 범위로(별칭, 없으면 자기 이름 — 합친 행이 열을 그렇게 부른다), ON·두 조건·UPDATE의 값 식을 묶는다(없는 열은 오류, 타입, 서브쿼리의 바깥 참조). 한정(qualify)이 조건 안 서브쿼리의 테이블도 한정한다. 테이블 잠금 목록에 UPDATE 조건의 테이블 포함.
+
+**검증**:
+- 신규 Catch2 7케이스(591 → 598, `test_merge_conditions.cpp`): ① UPDATE 절의 조건(대상·원본·둘 다·NULL은 거짓·아무도 만족 못 함·별칭 없이·NOT MATCHED는 그대로), ② 절 순서(둘 다 만족하는 행, 순서를 뒤집음, 조건이 행을 나눔), ③ 조건·ON 안의 서브쿼리(바깥 열이 양쪽·별칭·테이블 이름, 비상관), ④ 원본의 열을 별칭 없이 서브쿼리가 부름, ⑤ 저장 프로시저 안의 MERGE와 다시 시작 뒤, ⑥ 없는 열은 오류(아무것도 바뀌지 않음), ⑦ **무작위 MERGE(절 1~2개·순서·조건 0~2개와 AND/OR·별칭 유무·NOT MATCHED 삽입)를 독립 참조(3값 논리)와 비교**.
+- 심은 버그 13종(파서 둘·집행 다섯·바인더 둘·한정 둘·JSON 둘) 가운데 **처음에는 1종이 살아남았고**(JSON의 절 순서 — 프로시저 시험에 절이 하나뿐이었음) 시험을 보강해 잡았다. 최종 13종 모두 잡는다.
+- Release/Debug **598 케이스/1,336,066 assertions**를 기본 설정과 `RUSQL_DML_INDEX_MIN_ROWS=0` 양쪽에서 통과(네 가지 모두). SELECT 차분 퍼저 150시드(1,819,528 assertions), DML 퍼저 80시드(1,950,808), 쓰기 퍼저 40시드(43,182), 조인 퍼저 60시드(7,178), 집계·타입·식·정렬·서브쿼리 무작위 시험 긴 캠페인, 새 `[merge_conditions][random]` 150시드(22,800 / 강제 80시드 12,160), `[outer_references][random]`, 크래시 퍼저 90라운드·동시 퍼저 30라운드 불일치 0, 검증기(`verify_correlated`·`verify_sort_group`·`verify_value_expressions`·`verify_subqueries`·`verify_agg_arguments`·`verify_compare`·`verify_joins`·`verify_writes` 등) 위반 없음.
+- 빌드 간 차분(이전 빌드 = 앞 항목): 30시드 × 99질의(2,970질의) **차이 0건** — 이 말뭉치에는 MERGE가 없어 의도한 변화는 나타나지 않는다(MERGE는 새 테스트가 직접 검증한다).
+- 성능: 앞 항목 빌드와 번갈아 2라운드, 원본 600행 × 대상 600행: UPDATE + INSERT 524 → 508ms, 조건이 있는 UPDATE 607 → 583ms로 같다(MERGE는 원본 행 × 대상 행의 중첩 루프라 행이 늘면 제곱으로 느려지는 것은 그대로이며 성능 동결 항목으로 남김).
+
+**눈에 띄는 변화(의도한 것)**: `WHEN MATCHED AND 조건 THEN UPDATE`가 조건이 참인 행만 갱신; 두 절이 다 맞으면 먼저 쓴 절; MERGE 조건의 서브쿼리가 평가됨; MERGE 조건에 없는 열을 쓰면 오류.
+
+**정직한 한계**: ① `WHEN NOT MATCHED AND 조건`은 파싱하지 않는다(기존); ② 원본 행 하나는 ON을 만족하는 첫 대상 행에만 적용된다(기존); ③ `UPDATE SET 열 = (SELECT …)`처럼 값에 서브쿼리를 쓰는 것은 식 안의 서브쿼리(R4c)라 안 됨; ④ 별도의 출력 검증 도구는 만들지 않았고 독립 참조는 무작위 시험이 맡는다.
+
+**Diagram 페이지**: 구성요소·흐름이 바뀐 것이 없어 변경 없음.
+
 ## 요약: 1학기 대비 2학기에 달라진 것
 
 | 항목 | 1학기 (~2026년 6월) | 2학기 (2026년 7~8월) |

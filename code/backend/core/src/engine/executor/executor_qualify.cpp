@@ -211,6 +211,10 @@ Statement Executor::qualify_stmt(const SharedDatabase& s, Statement stmt) const 
     if (auto* v = std::get_if<Statement::Merge>(&stmt.data)) {
         v->target = qualify_name(v->target);
         v->source = qualify_name(v->source);
+        // (the tables of the subqueries in its conditions too)
+        v->on = qualify_condexpr(s, std::move(v->on));
+        if (v->when_matched_update_cond) v->when_matched_update_cond = qualify_condexpr(s, std::move(*v->when_matched_update_cond));
+        if (v->when_matched_delete_cond) v->when_matched_delete_cond = qualify_condexpr(s, std::move(*v->when_matched_delete_cond));
         return stmt;
     }
     if (auto* v = std::get_if<Statement::CreateTrigger>(&stmt.data)) {

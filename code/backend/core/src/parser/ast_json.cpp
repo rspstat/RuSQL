@@ -944,7 +944,9 @@ void to_json(nlohmann::json& j, const Statement& stmt) {
                                                              {"when_matched_delete", alt.when_matched_delete},
                                                              {"when_matched_delete_cond", alt.when_matched_delete_cond},
                                                              {"when_not_matched_columns", alt.when_not_matched_columns},
-                                                             {"when_not_matched_values", alt.when_not_matched_values}}}};
+                                                             {"when_not_matched_values", alt.when_not_matched_values},
+                                                             {"when_matched_update_cond", alt.when_matched_update_cond},
+                                                             {"when_matched_update_first", alt.when_matched_update_first}}}};
             else if constexpr (std::is_same_v<T, Statement::CreateProcedure>)
                 j = nlohmann::json{{"CreateProcedure", nlohmann::json{{"name", alt.name}, {"params", alt.params}, {"body", alt.body}}}};
             else if constexpr (std::is_same_v<T, Statement::CallProcedure>)
@@ -1197,6 +1199,8 @@ void from_json(const nlohmann::json& j, Statement& stmt) {
         v.when_matched_delete_cond = p.at("when_matched_delete_cond").get<std::optional<CondExpr>>();
         v.when_not_matched_columns = p.at("when_not_matched_columns").get<std::optional<std::vector<std::string>>>();
         v.when_not_matched_values = p.at("when_not_matched_values").get<std::vector<std::string>>();
+        if (p.contains("when_matched_update_cond")) v.when_matched_update_cond = p.at("when_matched_update_cond").get<std::optional<CondExpr>>();
+        if (p.contains("when_matched_update_first")) v.when_matched_update_first = p.at("when_matched_update_first").get<bool>();
         stmt = Statement(std::move(v));
     } else if (tag == "CreateProcedure") {
         Statement::CreateProcedure v;

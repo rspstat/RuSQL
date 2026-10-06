@@ -52,6 +52,7 @@ add_executable(engine_tests
     test_value_expressions.cpp
     test_sort_group.cpp
     test_outer_references.cpp
+    test_merge_conditions.cpp
 )
 
 target_link_libraries(engine_tests PRIVATE engine_core)

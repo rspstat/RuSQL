@@ -360,7 +360,8 @@ Statement Parser::parse_merge() {
 
     std::optional<std::vector<std::pair<std::string, ArithExpr>>> when_matched_update;
     bool when_matched_delete = false;
-    std::optional<CondExpr> when_matched_delete_cond;
+    std::optional<CondExpr> when_matched_delete_cond, when_matched_update_cond;
+    bool when_matched_update_first = false;
     std::optional<std::vector<std::string>> when_not_matched_columns;
     std::vector<std::string> when_not_matched_values;
 
@@ -420,6 +421,8 @@ Statement Parser::parse_merge() {
                 if (peek_is(TokenKind::Comma)) advance(); else break;
             }
             when_matched_update = std::move(assignments);
+            when_matched_update_cond = extra_cond;
+            when_matched_update_first = !when_matched_delete;
         } else if (peek_is(TokenKind::Delete)) {
             advance();
             when_matched_delete = true;
@@ -429,10 +432,12 @@ Statement Parser::parse_merge() {
         }
     }
 
-    return Statement(Statement::Merge{
-        target, target_alias, source, source_alias, std::move(on),
-        when_matched_update, when_matched_delete, when_matched_delete_cond,
-        when_not_matched_columns, when_not_matched_values});
+    Statement::Merge merge{target, target_alias, source, source_alias, std::move(on),
+                           when_matched_update, when_matched_delete, when_matched_delete_cond,
+                           when_not_matched_columns, when_not_matched_values};
+    merge.when_matched_update_cond = std::move(when_matched_update_cond);
+    merge.when_matched_update_first = when_matched_update_first;
+    return Statement(std::move(merge));
 }
 
 } // namespace engine

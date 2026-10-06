@@ -1053,7 +1053,8 @@ private:
     StringResult exec_merge(SharedDatabase& s, std::string target, std::optional<std::string> target_alias, std::string source,
                              std::optional<std::string> source_alias, CondExpr on,
                              std::optional<std::vector<std::pair<std::string, ArithExpr>>> when_matched_update, bool when_matched_delete,
-                             std::optional<CondExpr> when_matched_delete_cond, std::optional<std::vector<std::string>> when_not_matched_columns,
+                             std::optional<CondExpr> when_matched_delete_cond, std::optional<CondExpr> when_matched_update_cond,
+                             bool when_matched_update_first, std::optional<std::vector<std::string>> when_not_matched_columns,
                              std::vector<std::string> when_not_matched_values);
 
     // ── Phase 8f: INFORMATION_SCHEMA virtual tables ──────────────────────

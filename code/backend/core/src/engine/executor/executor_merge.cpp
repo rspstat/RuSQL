@@ -19,7 +19,8 @@ std::string trim_quotes(const std::string& v) {
 StringResult Executor::exec_merge(SharedDatabase& s, std::string target, std::optional<std::string> target_alias, std::string source,
                                    std::optional<std::string> source_alias, CondExpr on,
                                    std::optional<std::vector<std::pair<std::string, ArithExpr>>> when_matched_update, bool when_matched_delete,
-                                   std::optional<CondExpr> when_matched_delete_cond, std::optional<std::vector<std::string>> when_not_matched_columns,
+                                   std::optional<CondExpr> when_matched_delete_cond, std::optional<CondExpr> when_matched_update_cond,
+                                   bool when_matched_update_first, std::optional<std::vector<std::string>> when_not_matched_columns,
                                    std::vector<std::string> when_not_matched_values) {
     auto sit = s.tables.find(source);
     if (sit == s.tables.end()) return StringResult::Err("Table '" + source + "' not found");
@@ -83,13 +84,17 @@ StringResult Executor::exec_merge(SharedDatabase& s, std::string target, std::op
                 for (auto& [k, v] : src_row) merged[*source_alias + "." + k] = v;
             }
 
-            if (eval_condexpr(merged, on)) {
+            if (eval_condexpr_with_subquery(s, merged, on)) {
                 std::string pk = row_key(tgt_row);
                 found = true;
-                bool delete_cond_ok = when_matched_delete_cond ? eval_condexpr(merged, *when_matched_delete_cond) : true;
-                if (when_matched_delete && delete_cond_ok) {
+                // the first WHEN MATCHED clause, in the order they were written, whose condition holds is the one used
+                const bool delete_ok = when_matched_delete && matches_condition_with_subquery(s, merged, when_matched_delete_cond);
+                const bool update_ok = when_matched_update && matches_condition_with_subquery(s, merged, when_matched_update_cond);
+                const bool do_update = when_matched_update_first ? update_ok : (update_ok && !delete_ok);
+                const bool do_delete = when_matched_update_first ? (delete_ok && !update_ok) : delete_ok;
+                if (do_delete) {
                     delete_pks.push_back(pk);
-                } else if (when_matched_update) {
+                } else if (do_update) {
                     std::vector<std::pair<std::string, std::string>> resolved;
                     for (auto& [col, expr] : *when_matched_update) resolved.emplace_back(col, eval_arith(merged, expr));
                     update_rows.emplace_back(pk, std::move(resolved));
