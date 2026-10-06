@@ -15,10 +15,12 @@
 #include <numeric>
 #include <unordered_set>
 
+#include "engine/column_text.hpp"
 #include "engine/join.hpp"
 #include "engine/planner.hpp"
 #include "engine/parallel_util.hpp"
 #include "engine/numeric_text.hpp"
+#include "engine/parser/parser.hpp"
 #include "engine/storage/numeric_key.hpp"
 
 namespace engine {
@@ -61,12 +63,15 @@ std::string spread_text(const AggFunc& func, const std::vector<const std::string
     return format_4dp(std::holds_alternative<AggFunc::Stddev>(func.data) ? std::sqrt(variance) : variance);
 }
 
-// The values of `values` that differ, the first of each.
-std::vector<const std::string*> distinct_texts(const std::vector<const std::string*>& values) {
-    std::unordered_set<std::string_view> seen;
+// The values of `values` that differ, the first of each. Numbers differ by value (an expression holds "7" for one row and "7.00" for another, as
+// COALESCE(w, 7) does: one number), texts by their text ('7' and '07' are two strings); an argument that is not a text is read as numbers when all
+// of its values are, as MIN and MAX read it.
+std::vector<const std::string*> distinct_texts(const std::vector<const std::string*>& values, ValueClass cls) {
+    const bool by_value = cls != ValueClass::Text && std::all_of(values.begin(), values.end(), [](const std::string* v) { return parse_f64(*v).has_value(); });
+    std::unordered_set<std::string> seen;
     std::vector<const std::string*> out;
     for (const std::string* v : values) {
-        if (seen.insert(*v).second) out.push_back(v);
+        if (seen.insert(by_value ? normalize_numeric_key(*v) : *v).second) out.push_back(v);
     }
     return out;
 }
@@ -427,6 +432,8 @@ std::string Executor::window_func_default_label(WindowFunc func) {
 }
 
 std::string Executor::agg_label(const AggFunc& func, const std::string& col) {
+    // the conditional aggregates of one select list are told apart by the number the parser put behind their placeholder (`__case__2`)
+    const std::string case_number = col.rfind("__case__", 0) == 0 ? col.substr(8) : std::string();
     if (std::holds_alternative<AggFunc::Count>(func.data)) return "COUNT(" + col + ")";
     if (std::holds_alternative<AggFunc::CountDistinct>(func.data)) return "COUNT(DISTINCT " + col + ")";
     if (std::holds_alternative<AggFunc::Sum>(func.data)) return "SUM(" + col + ")";
@@ -438,8 +445,8 @@ std::string Executor::agg_label(const AggFunc& func, const std::string& col) {
     if (std::holds_alternative<AggFunc::Stddev>(func.data)) return "STDDEV(" + col + ")";
     if (std::holds_alternative<AggFunc::Variance>(func.data)) return "VARIANCE(" + col + ")";
     if (std::holds_alternative<AggFunc::GroupConcat>(func.data)) return "GROUP_CONCAT(" + col + ")";
-    if (std::holds_alternative<AggFunc::CountCase>(func.data)) return "COUNT(CASE)";
-    if (std::holds_alternative<AggFunc::SumCase>(func.data)) return "SUM(CASE)";
+    if (std::holds_alternative<AggFunc::CountCase>(func.data)) return "COUNT(CASE)" + case_number;
+    if (std::holds_alternative<AggFunc::SumCase>(func.data)) return "SUM(CASE)" + case_number;
     if (std::holds_alternative<AggFunc::BitAnd>(func.data)) return "BIT_AND(" + col + ")";
     if (std::holds_alternative<AggFunc::BitOr>(func.data)) return "BIT_OR(" + col + ")";
     if (std::holds_alternative<AggFunc::JsonAgg>(func.data)) return "JSON_AGG(" + col + ")";
@@ -624,7 +631,9 @@ std::string Executor::compute_agg_from_key(const std::string& key, const std::ve
         auto it = r_ptr->find(arg);
         if (it != r_ptr->end() && it->second != EXECUTOR_NULL_VALUE) present.push_back(&it->second);
     }
-    if (distinct) present = distinct_texts(present);
+    // (the class the binder gave this reference is the class of the aggregate's own value for COUNT / SUM / AVG, not of its argument: a column
+    // keeps its text, an expression is read as numbers when all of its values are)
+    if (distinct) present = distinct_texts(present, is_expression_argument(inner) ? ValueClass::Unknown : ValueClass::Text);
     if (is_count) return std::to_string(present.size());
 
     if (ku.rfind("SUM(", 0) == 0) return sum_of_texts(present, false).value_or(EXECUTOR_NULL_VALUE);
@@ -796,12 +805,12 @@ Row Executor::compute_aggregates(const std::vector<const Row*>& grp, const std::
             continue;
         }
         if (std::holds_alternative<AggFunc::CountDistinct>(func->data)) {
-            std::unordered_set<std::string_view> distinct;
+            std::vector<const std::string*> values;
             for (const Row* r_ptr : grp) {
                 auto it = r_ptr->find(col_name);
-                if (it != r_ptr->end() && it->second != EXECUTOR_NULL_VALUE) distinct.insert(it->second);
+                if (it != r_ptr->end() && it->second != EXECUTOR_NULL_VALUE) values.push_back(&it->second);
             }
-            out[label] = std::to_string(distinct.size());
+            out[label] = std::to_string(distinct_texts(values, arg_class).size());
             continue;
         }
 
@@ -829,9 +838,9 @@ Row Executor::compute_aggregates(const std::vector<const Row*>& grp, const std::
         }
 
         if (std::holds_alternative<AggFunc::Sum>(func->data)) out[label] = sum_of_texts(present, true).value_or(EXECUTOR_NULL_VALUE);
-        else if (std::holds_alternative<AggFunc::SumDistinct>(func->data)) out[label] = sum_of_texts(distinct_texts(present), true).value_or(EXECUTOR_NULL_VALUE);
+        else if (std::holds_alternative<AggFunc::SumDistinct>(func->data)) out[label] = sum_of_texts(distinct_texts(present, arg_class), true).value_or(EXECUTOR_NULL_VALUE);
         else if (std::holds_alternative<AggFunc::Avg>(func->data)) out[label] = average_of_texts(present).value_or(EXECUTOR_NULL_VALUE);
-        else if (std::holds_alternative<AggFunc::AvgDistinct>(func->data)) out[label] = average_of_texts(distinct_texts(present)).value_or(EXECUTOR_NULL_VALUE);
+        else if (std::holds_alternative<AggFunc::AvgDistinct>(func->data)) out[label] = average_of_texts(distinct_texts(present, arg_class)).value_or(EXECUTOR_NULL_VALUE);
         else out[label] = spread_text(*func, present); // STDDEV, VARIANCE, MEDIAN
     }
     return out;
@@ -1161,7 +1170,18 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
             }
             if (std::holds_alternative<SelectColumn::Agg>(col.data) || std::holds_alternative<SelectColumn::AggAlias>(col.data)) {
                 // a select without FROM is one row: the aggregate is over a group of one row (COUNT(*) is 1)
-                const Row aggregated = compute_aggregates({&eval_row}, {col});
+                Row with_argument = eval_row;
+                {
+                    const AggFunc* agg_func = nullptr;
+                    std::string argument;
+                    if (auto* a = std::get_if<SelectColumn::Agg>(&col.data)) { agg_func = &a->func; argument = a->source.empty() ? a->col : a->source; }
+                    else if (auto* aa = std::get_if<SelectColumn::AggAlias>(&col.data)) { agg_func = &aa->func; argument = aa->source.empty() ? aa->col : aa->source; }
+                    if (agg_func && is_expression_argument(argument)) {
+                        const ArithExpr e = Parser::str_to_arith(argument);
+                        with_argument[argument] = eval_arith(with_argument, e);
+                    }
+                }
+                const Row aggregated = compute_aggregates({&with_argument}, {col});
                 return aggregated.empty() ? std::string(EXECUTOR_NULL_VALUE) : aggregated.begin()->second;
             }
             if (auto* v = std::get_if<SelectColumn::Subquery>(&col.data)) {
@@ -2018,8 +2038,49 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
         }
     }
 
+    // The aggregates whose argument is an expression (`SUM(price * qty)`, `AVG(a + b)`, `COUNT(1)`, `SUM(COALESCE(x, 0))`): every row gets the value of the
+    // expression under the text of the argument, and the aggregates and window functions read it as they read a column.
+    std::vector<std::string> expression_arguments;
+    {
+        auto want = [&](const std::string& text) {
+            if (is_expression_argument(text) && std::find(expression_arguments.begin(), expression_arguments.end(), text) == expression_arguments.end()) {
+                expression_arguments.push_back(text);
+            }
+        };
+        for (auto& c : columns) {
+            if (auto* agg = std::get_if<SelectColumn::Agg>(&c.data)) {
+                want(agg->source.empty() ? agg->col : agg->source); // (a conditional aggregate has the placeholder `__case__`, which is not an expression)
+            } else if (auto* aa = std::get_if<SelectColumn::AggAlias>(&c.data)) {
+                want(aa->source.empty() ? aa->col : aa->source);
+            } else if (auto* wf = std::get_if<SelectColumn::WinFunc>(&c.data)) {
+                if (wf->col) want(*wf->col);
+            }
+        }
+        for (auto& ref : expr_agg_refs) want(aggregate_reference_argument(ref));
+        if (having) {
+            for (auto& ref : extract_agg_refs_from_cond(*having)) want(aggregate_reference_argument(ref));
+        }
+    }
+    if (!expression_arguments.empty()) {
+        std::vector<ArithExpr> arguments;
+        for (auto& text : expression_arguments) {
+            ArithExpr e = Parser::str_to_arith(text);
+            if (auto* col = std::get_if<ArithExpr::Col>(&e.data); col && col->name == text) {
+                return StringResult::Err("Cannot read the argument '" + text + "' of an aggregate");
+            }
+            arguments.push_back(std::move(e));
+        }
+        if (joins.empty() && !has_win) { // the rows are the table's own: they are copied to carry the values
+            result.reserve(rows_p.size());
+            for (const Row* r : rows_p) result.push_back(*r);
+            rows_p.clear();
+        }
+        for (Row& r : result) {
+            for (std::size_t i = 0; i < arguments.size(); i++) r[expression_arguments[i]] = eval_arith(r, arguments[i]);
+        }
+    }
     if (has_win) result = compute_window_functions(std::move(result), columns);
-    const bool rows_in_table = joins.empty() && !has_win; // else rows_p points into `result`
+    const bool rows_in_table = joins.empty() && !has_win && expression_arguments.empty(); // else rows_p points into `result`
     if (!rows_in_table) {
         rows_p.reserve(result.size());
         for (auto& r : result) rows_p.push_back(&r);

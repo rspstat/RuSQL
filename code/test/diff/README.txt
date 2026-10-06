@@ -93,5 +93,11 @@ here from the rows with exact rational arithmetic.
 
   python verify_compare.py <engine_server.exe> [--statements N] [--seed S] [--rows R]
 
+verify_agg_arguments.py checks aggregates whose argument is an EXPRESSION (SUM(x * y), AVG(COALESCE(w, 7) - y), COUNT(DISTINCT ...), MIN / MAX) with exact
+rational arithmetic: a table of integers, two-place decimals and strings with NULLs, and random expressions over + - * and parentheses, run as a whole-table
+aggregate, GROUP BY, HAVING, a window function (PARTITION BY) and through a JOIN with table aliases.
+
+  python verify_agg_arguments.py <engine_server.exe> [--queries N] [--seed S] [--rows R]
+
 To check that the comparison can see a bug, plant one on purpose in the new build (for instance read an unqualified column
 from the last table that has it instead of the first) and run the same seed: it has to report differences.

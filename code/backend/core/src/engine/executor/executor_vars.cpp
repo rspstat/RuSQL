@@ -8,7 +8,9 @@
 #include <algorithm>
 #include <cctype>
 
+#include "engine/column_text.hpp"
 #include "engine/executor/executor.hpp"
+#include "engine/parser/parser.hpp"
 
 namespace engine {
 
@@ -125,6 +127,18 @@ void arith(const Vars& v, ArithExpr& e) {
     }
 }
 
+// `SUM(price * @rate)`: a variable in the expression an aggregate takes as its argument is replaced by its value. `source` is what the rows
+// hold; the result column keeps the name as typed (`col`).
+void aggregate_argument(const Vars& v, const std::string& col, std::string& source) {
+    const std::string text = source.empty() ? col : source;
+    if (!is_expression_argument(text)) return;
+    ArithExpr e = Parser::str_to_arith(text);
+    if (auto* c = std::get_if<ArithExpr::Col>(&e.data); c && c->name == text) return; // (not readable: the executor says so)
+    arith(v, e);
+    const std::string replaced = Parser::aggregate_argument_text(e);
+    if (replaced != text) source = replaced;
+}
+
 void cond(const Vars& v, CondExpr& e) {
     if (auto* a = std::get_if<CondExpr::And>(&e.data)) { cond(v, *a->lhs); cond(v, *a->rhs); }
     else if (auto* o = std::get_if<CondExpr::Or>(&e.data)) { cond(v, *o->lhs); cond(v, *o->rhs); }
@@ -177,8 +191,10 @@ void select_columns(const Vars& v, std::vector<SelectColumn>& columns) {
             }
             if (cw->else_val) cw->else_val = text_of(v, *cw->else_val);
         } else if (auto* agg = std::get_if<SelectColumn::Agg>(&c.data)) {
+            aggregate_argument(v, agg->col, agg->source);
             if (agg->filter) cond(v, *agg->filter);
         } else if (auto* aa = std::get_if<SelectColumn::AggAlias>(&c.data)) {
+            aggregate_argument(v, aa->col, aa->source);
             if (aa->filter) cond(v, *aa->filter);
         } else if (auto* sq = std::get_if<SelectColumn::Subquery>(&c.data)) {
             if (sq->query) statement(v, *sq->query);

@@ -117,17 +117,18 @@ Statement Parser::parse_select() {
                         else return AggFunc(alt);
                     }, func.data);
                     agg_col = "__case__";
-                } else if (peek_is(TokenKind::Ident)) {
-                    std::string first = advance()->text;
-                    std::string col_name = first;
-                    // the qualifier stays: with `a.id` and `b.id` the bare name cannot say which table's column is meant
-                    if (peek_is(TokenKind::Dot)) { advance(); col_name = first + "." + expect_ident(); }
+                } else {
+                    // a column (its qualifier stays: with `a.id` and `b.id` the bare name cannot say which table's column is meant) or any
+                    // expression -- `price * qty`, `COALESCE(x, 0)`, `1` --, kept as the text of the expression: the executor computes it
+                    // for every row under that text
+                    ArithExpr arg = parse_arith_expr();
+                    const std::string col_name = aggregate_argument_text(arg);
                     // SUM(col > x) / SUM(col IS NULL) / SUM(col LIKE ..) / SUM(col BETWEEN ..) /
                     // SUM(col IN (..)) → SumCase/CountCase over a synthesized
                     // CASE WHEN <predicate> THEN 1 ELSE 0 END, reusing the same predicate-tail
                     // parser as a normal WHERE-clause condition instead of a narrower one-off.
                     if (!peek_is(TokenKind::RParen)) {
-                        Condition cond = parse_pred_tail(ArithExpr(ArithExpr::Col{col_name}));
+                        Condition cond = parse_pred_tail(std::move(arg));
                         CondExpr cond_expr = CondExpr(CondExpr::Leaf{std::move(cond)});
                         std::vector<CaseWhenBranch> branches;
                         branches.push_back(CaseWhenBranch{std::move(cond_expr), "1"});
@@ -141,8 +142,6 @@ Statement Parser::parse_select() {
                         }, func.data);
                     }
                     agg_col = col_name;
-                } else {
-                    throw ParseError("Expected column");
                 }
                 if (!rparen_consumed) {
                     if (!peek_is(TokenKind::RParen)) throw ParseError("Expected ')'");
@@ -226,14 +225,7 @@ Statement Parser::parse_select() {
                 advance();
                 if (!peek_is(TokenKind::LParen)) throw ParseError("Expected '(' after GROUP_CONCAT");
                 advance();
-                std::string agg_col;
-                {
-                    const Token* it = advance();
-                    if (!it || it->kind != TokenKind::Ident) throw ParseError("Expected column in GROUP_CONCAT");
-                    std::string first = it->text;
-                    if (peek_is(TokenKind::Dot)) { advance(); agg_col = first + "." + expect_ident(); }
-                    else agg_col = first;
-                }
+                const std::string agg_col = aggregate_argument_text(parse_arith_expr());
                 std::string separator = ",";
                 if (peek_is(TokenKind::Separator)) {
                     advance();
@@ -500,6 +492,20 @@ Statement Parser::parse_select() {
 
         columns.push_back(std::move(col));
         if (peek_is(TokenKind::Comma)) advance(); else break;
+    }
+
+    // Two conditional aggregates of one select list (`SUM(CASE WHEN a > 1 ...)`, `SUM(a > 4)`) were both the result column `SUM(CASE)`, so the value
+    // of the last was shown for every one of them: the later ones are numbered (`SUM(CASE)2`, through the placeholder `__case__2`)
+    {
+        int counted = 0, summed = 0;
+        for (auto& c : columns) {
+            auto* agg = std::get_if<SelectColumn::Agg>(&c.data);
+            if (!agg) continue;
+            const bool is_count = std::holds_alternative<AggFunc::CountCase>(agg->func.data);
+            if (!is_count && !std::holds_alternative<AggFunc::SumCase>(agg->func.data)) continue;
+            const int n = ++(is_count ? counted : summed);
+            agg->col = n == 1 ? "__case__" : "__case__" + std::to_string(n);
+        }
     }
 
     // SELECT ... INTO var [, var] (a procedure's variables, or @user variables)

@@ -47,6 +47,7 @@ add_executable(engine_tests
     test_stored_routines.cpp
     test_aggregate_semantics.cpp
     test_typed_comparison.cpp
+    test_aggregate_arguments.cpp
 )
 
 target_link_libraries(engine_tests PRIVATE engine_core)

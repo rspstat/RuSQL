@@ -1114,6 +1114,34 @@ VS Code 스타일 탭 드래그 순서 변경(요청의 1번 항목)은 같은 �
 
 **Diagram 페이지**: 구성요소·흐름이 바뀐 것이 없어(실행기에 단계 하나, B+Tree에 키 종류가 늘었을 뿐) 변경 없음.
 
+### 10월 6일 (여섯 번째) — 집계 함수의 인자에 식 쓰기(`SUM(price * qty)`·`AVG(a + b)`·`COUNT(1)`), 한 select의 조건부 집계가 서로의 값을 덮어쓰던 것, 식의 괄호가 사라져 함수 인자가 틀리게 계산되던 것
+
+**왜 이 항목인가**: 사용자 결정("전부 고쳐")의 집계 인자 항목(R3). 매출 합계 같은 흔한 질의 `SUM(price * qty)`가 파싱 오류(`Expected comparison operator`)였다 — 집계의 인자는 열 이름 하나뿐이었다. 구현하며 같은 곳의 **조용한 오답** 둘을 찾아 함께 고쳤다. 새 SQL 문법은 이 한 가지(집계 인자)뿐이고 나머지는 버그 수정이다.
+
+**원인과 영향**:
+- **집계 인자가 열 이름뿐**: `SUM(price * qty)`, `AVG(a + b)`, `SUM(COALESCE(x, 0))`, `COUNT(1)`, `SUM(2)`, `COUNT(DISTINCT a + b)`, `GROUP_CONCAT(CONCAT(a, b))`, `HAVING SUM(price * qty) > 100`, `SUM(a * b) OVER (…)`, `SUM(a * b > 5)`가 모두 파싱 오류였다. HAVING·식 안의 집계는 `SUM(x)`·`COUNT(*)` 같은 단순한 모양만 읽었다.
+- **(찾음) 한 select 목록의 조건부 집계 둘이 같은 결과 열 `SUM(CASE)`**: `SELECT SUM(CASE WHEN a > 1 THEN 1 ELSE 0 END), SUM(CASE WHEN a > 4 THEN 1 ELSE 0 END) FROM o`가 `3`과 `1`이 아니라 **둘 다 마지막 값 `1`**을 보여 줬다(별칭이 없을 때; `SUM(a > 1), SUM(a > 4)`·`COUNT(CASE …)`도). 같은 이름의 열이 서로를 덮어쓴 것 — 조건부 집계로 만드는 집계표에서 흔한 모양이라 조용한 오답이었다.
+- **(찾음) 식의 텍스트에서 괄호가 사라짐**: 함수 인자는 식을 글자로 적어 두었다가 다시 읽는데 `Parser::arith_to_string`이 우선순위를 몰라 `(a + b) * 2`를 `a + b * 2`로 적었다 — **`ROUND((a + b) * 2, 1)`이 `a + (b * 2)`로 계산됐다**(a=1, b=2에서 6이 아니라 5; `ABS((a - b) * 2)`, `COALESCE(NULL, (a + b) * 2)`도). 문자열 속 작은따옴표도 두 배로 적지 않았다.
+
+**수정**:
+- 파서: 집계의 인자(select 목록의 집계, `GROUP_CONCAT`, 윈도 집계, HAVING·식 안의 `SUM(…)`/`COUNT(DISTINCT …)`)를 식으로 읽고, 열이면 열 이름, 아니면 **식의 텍스트**(`price * qty`, `COALESCE(x, 0)`, `1`)를 `col`에 둔다. 결과 열 이름은 쓴 모양 그대로(`SUM(price * qty)`, 괄호 포함). `arith_to_string`은 우선순위에 맞게 괄호를 적고 문자열의 따옴표를 두 배로 적는다.
+- 실행기: 인자가 식인 집계가 있으면 행마다 그 식의 값을 계산해 식의 텍스트를 키로 행에 넣고, 집계·윈도 함수가 열처럼 읽는다(`SUM`/`AVG`/`MIN`/`MAX`/`COUNT`/`COUNT DISTINCT`/`GROUP_CONCAT`/`STDDEV`/`BIT_*`/`JSON_AGG`, `FILTER`, GROUP BY, HAVING, 식 안의 집계, 윈도, FROM 없는 SELECT, 서브쿼리 모두 같은 경로). 테이블 별칭(`SUM(x.price * c.rate)`)은 앞 항목들의 별칭 풀이를 그대로 쓰고, 변수(`SUM(price * @rate)`)는 값으로 바뀐다(결과 열 이름은 쓴 그대로). 바인더는 식 안의 열이 있는지 확인하고(`Unknown column 'nosuch' in 'field list'`) 식의 종류(숫자/글자)를 `MIN`/`MAX`의 비교에 쓴다. 식이 아닌 집계는 행을 복사하지 않고 전과 같이 포인터로 읽는다.
+- 한 select 목록의 조건부 집계는 번호를 매긴 열 이름을 받는다(`SUM(CASE)`, `SUM(CASE)2`, `COUNT(CASE)`, `COUNT(CASE)2`).
+
+**검증**:
+- 신규 Catch2 7케이스(548 → 555, `test_aggregate_arguments.cpp`): ① 식 인자(곱·합·`COALESCE`·괄호의 묶음·상수·`NULL`·`DISTINCT`), ② HAVING·식 안의 집계·윈도(분할/누적)·서브쿼리, ③ `NULL`·행 없음·`GROUP_CONCAT`·글자 식의 `MIN`/`MAX`·FROM 없는 SELECT·없는 열의 오류, ④ 테이블 별칭·변수·뷰(재시작 뒤에도), ⑤ 식의 텍스트가 괄호를 지킴(함수 인자 포함), ⑥ 조건부 집계의 열이 서로 다름, ⑦ **무작위 표와 무작위 식(+ − *, 괄호, `COALESCE`, `NULL`)을 독립 참조로 계산해 전체·그룹별·HAVING·`COUNT(DISTINCT)`·`AVG`(정확한 몫을 4자리로)를 비교**.
+- **새 검증 도구 `verify_agg_arguments.py`**(한 빌드를 정확한 분수 산술로 계산한 참조와 비교): 정수·소수 2자리·글자 열이 섞인 표에서 무작위 식의 `SUM`/`COUNT`/`MIN`/`MAX`/`AVG`/`COUNT(DISTINCT)`, GROUP BY, HAVING, 윈도, 조인의 한정된 열. 이전 빌드는 첫 질의에서 위반(파싱 오류)이라 도구가 버그를 본다는 것도 확인했다.
+- 심은 버그 44종(괄호 규칙 각각, 따옴표 두 배, HAVING의 DISTINCT, 집계 인자를 요청하는 여섯 곳, 행 복사·행 포인터, 식 계산, 읽지 못한 인자의 오류, FROM 없는 SELECT, 열 이름의 번호, 바인더의 열 확인·종류, 변수, 인자 텍스트 판별) 가운데 **처음에는 10종이 살아남았고**(`a / (b * c)`의 괄호, 문자열 따옴표, HAVING의 `DISTINCT`, 식의 종류, 결과 열 이름의 괄호 …) 테스트를 보강해 잡게 했다. 최종 40종을 테스트가 잡고, 3종은 중복이던 코드(조건부 집계의 `__case__` 걸러내기가 두 군데, DISTINCT의 숫자 열 검사)라 코드를 줄여 폐기, 1종은 도달할 수 없는 방어 코드(읽을 수 없는 인자는 오류로 알림)로 남김.
+- Release/Debug **556 케이스/1,330,024 assertions**를 기본 설정과 `RUSQL_DML_INDEX_MIN_ROWS=0` 양쪽에서 통과(Debug도 556케이스). SELECT 차분 퍼저 150시드(1,819,528 assertions), DML 퍼저 80시드(1,950,808), 쓰기 퍼저 40시드(43,182), 조인 퍼저 60시드(7,178), `[aggregate]` 긴 캠페인(11케이스 317,626), `[aggregate_semantics][random]` 60시드(23,151), 새 `[aggregate_arguments][random]` 60시드(4,560), `[typed_comparison][random]`(68,100 / DML 인덱스 강제 227,000), 크래시 퍼저 90라운드·동시 퍼저 30라운드(확인한 확정 행 16,503) 불일치 0. 새 `verify_agg_arguments.py` 8시드 × 300질의(시드마다 1,100번 검사), `verify_compare` 3시드, `verify_joins` 8시드 × 600문장 + 30행 3시드, `verify_writes` 3시드, `verify_null_expressions`·`verify_agg_expressions`·`verify_aggregates`·`verify_orderby_distinct` 각 2시드 위반 0. (같은 폴더에서 회귀 두 개를 동시에 돌리면 임시 폴더를 서로 지워 한 케이스가 실패한 적이 있어, 하나씩 따로 다시 돌려 통과를 확인했다.) 검증 도구가 찾은 것: `COUNT(DISTINCT COALESCE(w, 7))`이 `7.00`과 `7`을 다른 값으로 센 것 — DISTINCT를 숫자는 값으로 가르게 고쳤다(테스트·심은 버그 9종 추가).
+- 빌드 간 차분(이전 빌드 = 앞 항목): 30시드 × 99질의(2,970질의) 중 **0개가 달랐다** — 이 말뭉치에는 식 인자도 조건부 집계 둘도 없어 달라질 질의가 없다는 뜻이고, 새 동작은 `verify_agg_arguments.py`가 직접 검증한다.
+- 성능(앞 항목 빌드와 번갈아, 캐시를 피하려고 매번 다른 문장): 50,000행, 3라운드 중 가장 빠른 값(이전 → 이번): `COUNT(*)` 43.4 → 42.9ms, `SUM`/`AVG` 55.8 → 55.6, 소수 49.9 → 49.2, `MIN`/`MAX` 55.9 → 55.7, `GROUP BY` + 4집계 69.0 → 68.8, `HAVING AVG` 58.4 → 57.8, `COUNT(DISTINCT val)` 55.2 → 54.7, 글자 열 `COUNT(DISTINCT code)` 53.6 → 51.4, `SUM(DISTINCT val)` 53.7 → 54.6 — 식이 아닌 집계는 같다. 새로 되는 것: `SUM(price * val)` 153ms(행을 복사해 식을 계산하는 값이라 같은 5만 행 `SUM(val)`의 약 2.8배), `GROUP BY grp, SUM(price * val)` 163ms, `HAVING COUNT(DISTINCT val)` 187ms(전에는 파싱 오류).
+
+**눈에 띄는 변화(의도한 것)**: `SUM(price * qty)` 같은 식 인자가 된다; 한 select의 조건부 집계가 서로 다른 값을 보인다(열 이름은 `SUM(CASE)`, `SUM(CASE)2`); `ROUND((a + b) * 2, 1)` 같은 함수 인자의 괄호가 지켜진다; 식 안 집계 `SUM(a * b) / COUNT(*)`.
+
+**정직한 한계**: ① `SUM(CASE WHEN … END) * 100.0 / COUNT(*)`처럼 **CASE 집계를 식 안에 쓰면 NULL**(앞부터 그랬다)이고 `HAVING SUM(CASE …) >= 1`은 파싱 오류, 조건부 집계의 열 이름은 MySQL처럼 식 전체가 아니라 `SUM(CASE)` — CASE를 식으로 다루는 다음 항목(R4)에서 고친다; ② `ROUND(SUM(a * b), 2)`처럼 **함수 안의 집계**는 아직 파싱 오류(R4); ③ `COUNT(DISTINCT a, b)`(여러 열)는 아직; ④ `HAVING`·식 안의 집계에 쓴 변수(`HAVING SUM(price * @rate) > 1`)는 값으로 바뀌지 않음; ⑤ 산술의 결과는 끝자리 0 없이 출력(`10`, MySQL은 `10.00`).
+
+**Diagram 페이지**: 구성요소·흐름이 바뀐 것이 없어 변경 없음.
+
 ---
 
 ## 요약: 1학기 대비 2학기에 달라진 것

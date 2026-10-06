@@ -21,7 +21,9 @@
 #include <unordered_map>
 #include <unordered_set>
 
+#include "engine/column_text.hpp"
 #include "engine/executor/executor.hpp"
+#include "engine/parser/parser.hpp"
 
 namespace engine {
 
@@ -44,25 +46,6 @@ struct BindScope {
     // qualifier that names no table may still be one of them
     bool lenient_qualifier = false;
 };
-
-bool identifier_char(unsigned char c) { return std::isalnum(c) || c == '_' || c >= 0x80; }
-
-// A plain `name`, `table.name` or `db.table.name`; anything else (a call, a JSON path, `@variable`, `*`, a number) is not checked.
-bool plain_reference(const std::string& name) {
-    if (name.empty()) return false;
-    bool segment_start = true;
-    for (unsigned char c : name) {
-        if (c == '.') {
-            if (segment_start) return false;
-            segment_start = true;
-            continue;
-        }
-        if (!identifier_char(c)) return false;
-        if (segment_start && std::isdigit(c)) return false;
-        segment_start = false;
-    }
-    return !segment_start;
-}
 
 std::string last_part(const std::string& qualified) {
     auto cut = qualified.rfind('.');
@@ -284,7 +267,16 @@ std::optional<std::string> Executor::bind_statement(SharedDatabase& s, Statement
             return t;
         }
 
-        // The argument of an aggregate: a column, `*`, or for SUM / COUNT of a CASE (or of a condition: SUM(v > 1)) the conditions of
+        // The argument of an aggregate that is an expression (`price * qty`): the columns in it have to exist; what it holds is what its operators say
+        // (the executor reads the text again to compute it, so the expression bound here is a copy)
+        ValueClass expression_argument(const std::string& text, const char* clause) {
+            ArithExpr e = Parser::str_to_arith(text);
+            if (auto* col = std::get_if<ArithExpr::Col>(&e.data); col && col->name == text) return ValueClass::Unknown; // (not readable: the executor says so)
+            arith(e, clause);
+            return class_of_expr(e);
+        }
+
+        // The argument of an aggregate: a column, `*`, an expression, or for SUM / COUNT of a CASE (or of a condition: SUM(v > 1)) the conditions of
         // the CASE -- the parser leaves the placeholder "__case__" in the column then.
         ValueClass aggregate(AggFunc& func, const std::string& column, std::optional<CondExpr>& filter) {
             std::vector<CaseWhenBranch>* branches = nullptr;
@@ -293,6 +285,8 @@ std::optional<std::string> Executor::bind_statement(SharedDatabase& s, Statement
             ValueClass arg = ValueClass::Unknown;
             if (branches) {
                 for (auto& b : *branches) cond(b.condition, "field list");
+            } else if (is_expression_argument(column)) {
+                arg = expression_argument(column, "field list");
             } else {
                 name(column, "field list");
                 arg = class_of_name(column);
@@ -329,7 +323,14 @@ std::optional<std::string> Executor::bind_statement(SharedDatabase& s, Statement
             else if (auto* cw = std::get_if<SelectColumn::CaseWhen>(&c.data)) {
                 for (auto& b : cw->branches) cond(b.condition, "field list");
             } else if (auto* wf = std::get_if<SelectColumn::WinFunc>(&c.data)) {
-                if (wf->col) { name(*wf->col, "field list"); wf->col_class = class_of_name(*wf->col); }
+                if (wf->col) {
+                    if (is_expression_argument(*wf->col)) {
+                        wf->col_class = expression_argument(*wf->col, "field list");
+                    } else {
+                        name(*wf->col, "field list");
+                        wf->col_class = class_of_name(*wf->col);
+                    }
+                }
                 for (auto& p : wf->partition_by) name(p, "field list");
                 for (auto& o : wf->order_by) { name(o.column, "field list"); o.cls = class_of_name(o.column); }
             } else if (auto* sq = std::get_if<SelectColumn::Subquery>(&c.data)) {

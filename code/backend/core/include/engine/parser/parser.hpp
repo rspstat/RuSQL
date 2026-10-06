@@ -61,6 +61,7 @@ public:
     // parse a standalone arithmetic expression / stringify one.
     ArithExpr parse_arith_expr();
     static std::string arith_to_string(const ArithExpr& expr);
+    static std::string aggregate_argument_text(const ArithExpr& arg);
     static ArithExpr str_to_arith(const std::string& s);
 
 private:

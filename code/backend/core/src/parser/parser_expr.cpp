@@ -423,6 +423,13 @@ const char* scalar_func_name(TokenKind k) {
 }
 } // namespace
 
+/// The argument of an aggregate as text: a column as its name, any other expression (`price * qty`, `COALESCE(x, 0)`, `1`) as the text of the expression.
+/// The executor reads that text back (it computes the expression for every row under it), so it has to keep the grouping of the expression.
+std::string Parser::aggregate_argument_text(const ArithExpr& arg) {
+    if (auto* col = std::get_if<ArithExpr::Col>(&arg.data)) return col->name;
+    return arith_to_string(arg);
+}
+
 /// Arithmetic factor: number | string | column | agg_func | '(' expr ')'
 ArithExpr Parser::parse_arith_factor() {
     const Token* p = peek();
@@ -437,13 +444,9 @@ ArithExpr Parser::parse_arith_factor() {
         if (!peek_is(TokenKind::LParen)) throw ParseError("Expected '(' after aggregate");
         advance();
         std::string inner;
-        if (peek_is(TokenKind::Asterisk)) { advance(); inner = "*"; }
-        else {
-            const Token* it = advance();
-            if (!it || it->kind != TokenKind::Ident) throw ParseError("Expected column in aggregate");
-            inner = it->text;
-            if (peek_is(TokenKind::Dot)) { advance(); inner += "." + expect_ident(); }
-        }
+        if (peek_is(TokenKind::Distinct)) { advance(); inner = "DISTINCT "; }
+        if (peek_is(TokenKind::Asterisk)) { advance(); inner += "*"; }
+        else inner += aggregate_argument_text(parse_arith_expr());
         if (!peek_is(TokenKind::RParen)) throw ParseError("Expected ')' after aggregate");
         advance();
         return ArithExpr(ArithExpr::Col{std::string(label) + "(" + inner + ")"});
@@ -727,6 +730,21 @@ ArithExpr Parser::parse_arith_expr() {
     return left;
 }
 
+namespace {
+// How tightly the outermost operator of an expression binds: a comparison 0, + and - 1, * and / 2, a column, a number, a string or a call 3.
+int arith_strength(const ArithExpr& e) {
+    if (std::holds_alternative<ArithExpr::Add>(e.data) || std::holds_alternative<ArithExpr::Sub>(e.data)) return 1;
+    if (std::holds_alternative<ArithExpr::Mul>(e.data) || std::holds_alternative<ArithExpr::Div>(e.data)) return 2;
+    if (std::holds_alternative<ArithExpr::Cmp>(e.data)) return 0;
+    return 3;
+}
+// an operand is put in parentheses when it binds less tightly than the operator it belongs to needs: `(a + b) * c`, `a - (b - c)`
+std::string arith_operand(const ArithExpr& e, int needs) {
+    const std::string text = Parser::arith_to_string(e);
+    return arith_strength(e) < needs ? "(" + text + ")" : text;
+}
+} // namespace
+
 std::string Parser::arith_to_string(const ArithExpr& expr) {
     return std::visit(
         [](const auto& alt) -> std::string {
@@ -734,15 +752,20 @@ std::string Parser::arith_to_string(const ArithExpr& expr) {
             if constexpr (std::is_same_v<T, ArithExpr::Col> || std::is_same_v<T, ArithExpr::Num>) {
                 if constexpr (std::is_same_v<T, ArithExpr::Col>) return alt.name; else return alt.value;
             } else if constexpr (std::is_same_v<T, ArithExpr::Str>) {
-                return "'" + alt.value + "'";
+                std::string quoted = "'";
+                for (char c : alt.value) {
+                    if (c == '\'') quoted += '\'';
+                    quoted += c;
+                }
+                return quoted + "'";
             } else if constexpr (std::is_same_v<T, ArithExpr::Add>) {
-                return arith_to_string(*alt.lhs) + " + " + arith_to_string(*alt.rhs);
+                return arith_operand(*alt.lhs, 1) + " + " + arith_operand(*alt.rhs, 2);
             } else if constexpr (std::is_same_v<T, ArithExpr::Sub>) {
-                return arith_to_string(*alt.lhs) + " - " + arith_to_string(*alt.rhs);
+                return arith_operand(*alt.lhs, 1) + " - " + arith_operand(*alt.rhs, 2);
             } else if constexpr (std::is_same_v<T, ArithExpr::Mul>) {
-                return arith_to_string(*alt.lhs) + " * " + arith_to_string(*alt.rhs);
+                return arith_operand(*alt.lhs, 2) + " * " + arith_operand(*alt.rhs, 3);
             } else if constexpr (std::is_same_v<T, ArithExpr::Div>) {
-                return arith_to_string(*alt.lhs) + " / " + arith_to_string(*alt.rhs);
+                return arith_operand(*alt.lhs, 2) + " / " + arith_operand(*alt.rhs, 3);
             } else if constexpr (std::is_same_v<T, ArithExpr::Func>) {
                 std::string out = alt.name + "(";
                 for (std::size_t i = 0; i < alt.args.size(); i++) {
@@ -752,7 +775,7 @@ std::string Parser::arith_to_string(const ArithExpr& expr) {
                 out += ")";
                 return out;
             } else if constexpr (std::is_same_v<T, ArithExpr::Cmp>) {
-                return arith_to_string(*alt.lhs) + " " + alt.op + " " + arith_to_string(*alt.rhs);
+                return arith_operand(*alt.lhs, 1) + " " + alt.op + " " + arith_operand(*alt.rhs, 1);
             }
         },
         expr.data);
