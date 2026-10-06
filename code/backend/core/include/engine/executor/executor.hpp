@@ -23,6 +23,7 @@
 
 #include "engine/parser/ast.hpp"
 #include "engine/parser/ast_json.hpp"
+#include "engine/statement_error.hpp"
 #include "engine/storage/buffer_pool.hpp"
 #include "engine/storage/composite_index.hpp"
 #include "engine/storage/disk.hpp"
@@ -319,7 +320,6 @@ private:
     // and whether it ran at all) and uncorrelated EXISTS / NOT EXISTS (did it return a row). They used to run the whole
     // subquery again for every row of the outer statement.
     struct SubqueryAnswer {
-        bool ok = false;
         std::vector<std::string> values;
     };
     std::unordered_map<const void*, SubqueryAnswer> subquery_scalar_cache_;
@@ -523,6 +523,7 @@ private:
     std::optional<std::vector<std::string>> table_lock_set_for(const SharedDatabase& s, const Statement& stmt) const;
 
     StringResult execute_with_s(SharedDatabase& s, Statement stmt);
+    StringResult execute_with_s_body(SharedDatabase& s, Statement stmt); // (execute_with_s turns a StatementError thrown inside it into the statement's error)
 
     Statement qualify_stmt(const SharedDatabase& s, Statement stmt) const;
     CondExpr qualify_condexpr(const SharedDatabase& s, CondExpr expr) const;

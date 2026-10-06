@@ -229,6 +229,8 @@ std::optional<std::string> Executor::bind_statement(SharedDatabase& s, Statement
                 } else if (auto* sub = std::get_if<ConditionValue::Subquery>(&c.value.data)) {
                     if (sub->query) {
                         auto out = nested(*sub->query);
+                        // a subquery compared with a value or listed after IN gives one column (EXISTS does not care); MySQL 1241
+                        if (check && !error && out.size() > 1 && c.op != Operator::Exists && c.op != Operator::NotExists) error = "Operand should contain 1 column(s)";
                         if (!out.empty()) c.right_class = out.front().second;
                     }
                 }
@@ -334,7 +336,10 @@ std::optional<std::string> Executor::bind_statement(SharedDatabase& s, Statement
                 for (auto& p : wf->partition_by) name(p, "field list");
                 for (auto& o : wf->order_by) { name(o.column, "field list"); o.cls = class_of_name(o.column); }
             } else if (auto* sq = std::get_if<SelectColumn::Subquery>(&c.data)) {
-                if (sq->query) nested(*sq->query);
+                if (sq->query) {
+                    auto out = nested(*sq->query);
+                    if (check && !error && out.size() > 1) error = "Operand should contain 1 column(s)"; // a scalar subquery is one column (MySQL 1241)
+                }
             }
         }
 

@@ -1144,6 +1144,37 @@ VS Code 스타일 탭 드래그 순서 변경(요청의 1번 항목)은 같은 �
 
 ---
 
+### 10월 6일 (일곱 번째) — 서브쿼리: 여러 행·여러 열을 돌려줘도 오류가 없던 것(MySQL 1242/1241), 서브쿼리 안의 오류가 "행 없음"이 되던 것, HAVING의 서브쿼리 비교가 늘 거짓이던 것, GROUP BY 없는 집계의 HAVING
+
+**왜 이 항목인가**: 사용자 결정("전부 고쳐")의 서브쿼리 항목(R9; 앞 항목들의 점검에서 찾은 ⑯). 새 문법이 아니라 **틀린 답을 오류로** 바꾸고, 서브쿼리가 든 조건이 조용히 잘못 답하던 곳 둘을 고친 것이다.
+
+**원인과 영향**:
+- **여러 행을 돌려주는 스칼라 서브쿼리**: `WHERE v = (SELECT a FROM u)`가 `u`에 행이 셋이어도 첫 행의 값으로 비교하고 `1 row(s) returned`(MySQL: 오류 1242 `Subquery returns more than 1 row`). select 목록의 `(SELECT a FROM u)`, FROM 없는 SELECT, `UPDATE`/`DELETE`의 WHERE도 같았다 — **`UPDATE t SET v = 0 WHERE v = (SELECT a FROM u)`가 첫 행의 값이 가리키는 행을 조용히 바꿨다**.
+- **여러 열을 돌려주는 서브쿼리**: `v = (SELECT a, b FROM u)`, `v IN (SELECT a, b FROM u)`, select 목록의 `(SELECT a, b …)`가 첫 열만 읽었다(MySQL: 1241 `Operand should contain 1 column(s)`, 행이 없어도 실행 전에 오류).
+- **서브쿼리 안의 오류가 "행 없음"**: 없는 테이블(`v IN (SELECT a FROM nosuch)`)이나 안쪽의 서브쿼리가 두 행인 경우에 `IN`/`EXISTS`는 FALSE, 스칼라 비교는 UNKNOWN, select 목록은 NULL, `UPDATE`/`DELETE`는 "0 row(s)" — 오류가 어디에도 보이지 않았다.
+- **HAVING의 서브쿼리 비교가 늘 FALSE**: `HAVING SUM(v) > (SELECT AVG(a) FROM u)`가 어떤 값이든 그룹을 하나도 남기지 않았다(HAVING 평가기는 서브쿼리를 몰랐다).
+- **(찾음) GROUP BY 없는 집계의 HAVING**: `SELECT SUM(v) FROM t HAVING SUM(v) > 5`가 `NULL`, `SELECT COUNT(*) FROM t HAVING COUNT(*) = 3`이 `0`이었다 — HAVING을 집계하기 **전의 행마다** 평가해서 `SUM(v)`가 없는 값이라 모든 행이 떨어지고 집계는 행 없는 입력 위에서 계산됐다.
+
+**수정**:
+- 새 `StatementError`(`statement_error.hpp`): 비교 안에서 평가되는 식은 오류를 위로 돌려줄 길이 없어서 던지고, `execute_with_s`(와 `execute_sql`)가 그 문장의 오류로 바꾼다. 던지는 곳은 행을 고르는 단계라 문장은 아무것도 바꾸지 않은 채 실패한다(트랜잭션 안에서도 앞의 문장들은 그대로, 문장만 실패; 저장 프로시저의 CALL은 오류를 돌려주고 다음 호출은 정상).
+- 스칼라 비교(`= <> < <= > >=`)에서 서브쿼리가 두 행 이상이면 `Subquery returns more than 1 row`(행 없음·NULL은 UNKNOWN 그대로), select 목록과 FROM 없는 SELECT도 같다. 서브쿼리가 오류를 내면(`IN`·`NOT IN`·`EXISTS`·스칼라·select 목록) 그 오류가 문장의 오류.
+- 바인더: 비교·`IN`·`NOT IN`·select 목록의 서브쿼리가 두 열 이상이면 `Operand should contain 1 column(s)`(`EXISTS`는 열 수를 가리지 않음).
+- HAVING은 서브쿼리를 아는 평가기를 쓴다. GROUP BY 없는 집계의 HAVING은 한 줄의 집계 결과에 적용하고 거짓이면 빈 결과(`0 rows returned.`).
+
+**검증**:
+- 신규 Catch2 8케이스(556 → 564, `test_subquery_cardinality.cpp`): ① 두 행 서브쿼리가 연산자 여섯 개 × WHERE·HAVING·select 목록·FROM 없는 SELECT·UPDATE·DELETE에서 오류이고 UPDATE·DELETE는 아무것도 바꾸지 않음, 한 행·행 없음·NULL·`LIMIT 1`은 정상, 아무 행도 요구하지 않으면 실행되지 않음; ② 두 열(비교·`IN`·`NOT IN`·`*`·select 목록·중첩·UPDATE/DELETE), `EXISTS`는 정상; ③ 상관 서브쿼리는 **보는 행에** 두 건이 있을 때만 실패; ④ 안쪽 서브쿼리의 오류(`IN`·`NOT IN`·`EXISTS`·`NOT EXISTS`·스칼라); ⑤ HAVING의 서브쿼리 비교와 GROUP BY 없는 HAVING; ⑥ 트랜잭션·저장 프로시저에서 실패한 문장 뒤; ⑦ 없는 테이블; ⑧ **무작위 표의 서브쿼리를 독립 참조(행 수 규칙)와 비교**(비상관·상관·select 목록).
+- **새 검증 도구 `verify_subqueries.py`**(한 빌드를 모델과 비교): 스칼라·상관·select 목록·HAVING(GROUP BY 있음/없음)·`IN`/`NOT IN`(3값 논리)·두 열·UPDATE/DELETE(오류면 바뀐 것이 없음)를 무작위 표에서. 이전 빌드는 첫 시드에서 위반(HAVING)이라 도구가 버그를 본다는 것도 확인했다.
+- 심은 버그 19종(행 수 규칙·한계, 안쪽 오류를 숨기는 곳 넷, 캐시, select 목록의 행 수·오류·상관, FROM 없는 SELECT, HAVING의 평가기·GROUP BY 없는 적용·집계 계산, 바인더의 열 수 규칙 셋, 오류 메시지) 가운데 **처음에는 6종이 살아남았고**(안쪽 서브쿼리의 오류가 `Err`로 돌아오는 경로 — 없는 테이블 — 가 테스트에 없었다) 테스트를 보강해 잡게 했다. 최종 17종을 잡고, 1종은 속도만 다른 변이(답의 캐시), 1종은 중복이던 코드(서브쿼리를 아무 행도 요구하지 않을 때 건너뛰는 검사 — 그 경로에 닿지 않음)라 코드를 줄여 폐기.
+- Release/Debug **564 케이스/1,330,774 assertions**를 기본 설정과 `RUSQL_DML_INDEX_MIN_ROWS=0` 양쪽에서 통과(Debug도 564케이스). SELECT 차분 퍼저 150시드, DML 퍼저 80시드, 쓰기 퍼저 40시드, 조인 퍼저 60시드, `[aggregate]` 긴 캠페인 30시드, `[aggregate_semantics][random]` 60시드, 새 `[subquery_cardinality][random]` 80시드(5,269 assertions), 크래시 퍼저 90라운드·동시 퍼저 30라운드 불일치 0. 새 `verify_subqueries.py` 12시드 × 400문장 위반 없음, 앞 항목들의 검증 도구(`verify_agg_arguments`·`verify_compare`·`verify_joins`·`verify_writes`·`verify_null_expressions`·`verify_agg_expressions`·`verify_aggregates` 등)도 이전과 같이 위반 없음.
+- 빌드 간 차분(이전 빌드 = 앞 항목): 2,970질의 중 **28개가 달랐고, 28개 모두 두 행 이상을 돌려주는 스칼라 서브쿼리가 오류로 바뀐 것**(의도한 변화; 전에는 첫 행으로 답함). 그 밖의 달라진 질의는 없다.
+- 성능: 앞 항목 빌드와 번갈아 3라운드, 가장 빠른 값(이전 → 이번): 서브쿼리 5종(2만 행) `WHERE val > (SELECT AVG…)` 7.46 → 7.71ms, `WHERE val IN (SELECT …)` 3.09 → 3.31, 상관 `EXISTS`(50그룹) 272.3 → 273.3, `HAVING SUM(val) > (SELECT …)` 3.25 → 3.34, select 목록의 상관 스칼라 10.21 → 10.52; 집계 10종(5만 행) `COUNT(*)` 43.12 → 42.94, `GROUP BY` + 4집계 68.46 → 67.56, `HAVING AVG` 57.6 → 57.83, `SUM`/`AVG`(정수) 56.27 → 55.37 — 모두 측정 오차 안(서브쿼리 쪽이 최대 +0.3ms인 것은 행 수 검사가 서브쿼리 결과 한 번을 더 보는 값).
+
+**눈에 띄는 변화(의도한 것)**: 두 행을 돌려주는 `WHERE v = (SELECT …)`가 오류(전에는 첫 행); `IN (SELECT a, b …)`가 오류; 없는 테이블이 든 서브쿼리가 오류(전에는 빈 결과); `HAVING SUM(v) > (SELECT …)`가 값에 따라 그룹을 남긴다(전에는 늘 없음); `SELECT SUM(v) FROM t HAVING SUM(v) > 5`가 합계(전에는 NULL).
+
+**정직한 한계**: ① 서브쿼리의 행 수는 그 값을 쓰는 행이 있을 때 검사한다(바깥 결과가 비면 서브쿼리를 실행하지 않아 오류가 없다; MySQL은 비상관 서브쿼리를 미리 평가할 수 있어 이 경우 오류를 낼 수도 있다); ② `= ANY (…)`/`ALL`/`SOME`과 행 생성자 `(a, b) = (SELECT …)`는 아직 파싱 오류; ③ `(SELECT …) + 1`, `UPDATE … SET v = (SELECT …)`, `INSERT … VALUES (…, (SELECT …))`는 식 문법의 빈틈이라 파싱 오류(R4); ④ 없는 테이블의 오류 문구는 엔진의 것(`Table 'd.nosuch' not found`)이고 MySQL 1146의 문구가 아님.
+
+**Diagram 페이지**: 구성요소·흐름이 바뀐 것이 없어 변경 없음.
+
 ## 요약: 1학기 대비 2학기에 달라진 것
 
 | 항목 | 1학기 (~2026년 6월) | 2학기 (2026년 7~8월) |

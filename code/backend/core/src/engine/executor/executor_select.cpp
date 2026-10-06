@@ -1196,6 +1196,10 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
                     return "";
                 }
                 auto found = extract_values_from_output(out.value());
+                if (found.size() > 1) {
+                    dual_error = "Subquery returns more than 1 row";
+                    return "";
+                }
                 return found.empty() ? std::string(EXECUTOR_NULL_VALUE) : found.front();
             }
             dual_error = "This column needs a table to read from"; // `*`, a window function
@@ -2151,7 +2155,7 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
         if (having) {
             std::vector<Row> filtered;
             for (auto& row : group_rows) {
-                if (matches_condexpr(row, having)) filtered.push_back(std::move(row));
+                if (matches_condition_with_subquery(s, row, having)) filtered.push_back(std::move(row));
             }
             group_rows = std::move(filtered);
         }
@@ -2171,10 +2175,10 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
         return format_result(s, std::move(group_rows), columns, table, joins);
     }
 
-    if (having) {
+    if (having && !has_agg) { // (with aggregates and no GROUP BY, HAVING is about the one row of aggregates: below)
         std::vector<const Row*> kept;
         for (const Row* rp : rows_p) {
-            if (matches_condexpr(*rp, having)) kept.push_back(rp);
+            if (matches_condition_with_subquery(s, *rp, having)) kept.push_back(rp);
         }
         rows_p = std::move(kept);
     }
@@ -2283,6 +2287,14 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
         }
 
         Row agg_row = compute_aggregates(rows_p, columns, /*allow_parallel=*/true);
+        // HAVING without GROUP BY (`SELECT SUM(v) FROM t HAVING SUM(v) > 5`) keeps or drops the one row of aggregates; it used to be applied to the
+        // rows before they were aggregated, where `SUM(v)` is nothing, so the aggregates came out over no row at all
+        if (having) {
+            for (auto& agg_key : extract_agg_refs_from_cond(*having)) {
+                if (!agg_row.count(agg_key)) agg_row[agg_key] = compute_agg_from_key(agg_key, rows_p, aggregate_class(agg_key));
+            }
+            if (!matches_condition_with_subquery(s, agg_row, having)) return StringResult::Ok("0 rows returned.");
+        }
         if (!expr_agg_refs.empty()) {
             // `SUM(v) + 1`, `ROUND(AVG(v), 2)`, `CASE WHEN COUNT(*) > 1 ...`: the aggregates inside are computed as HAVING computes
             // them and the columns are evaluated on this one row of aggregates. The plain aggregates keep their place; a column
@@ -2562,12 +2574,10 @@ StringResult Executor::format_result(SharedDatabase& s, std::vector<Row> result,
                 auto out = exec_select(s, sc->table, std::move(sc->subquery), sc->distinct, std::move(sc->columns), std::move(sc->condition),
                                         std::move(sc->joins), std::move(sc->order_by), std::move(sc->group_by), std::move(sc->having), sc->limit,
                                         sc->offset, false, false);
-                std::string val = EXECUTOR_NULL_VALUE;
-                if (out.is_ok()) {
-                    auto vals = extract_values_from_output(out.value());
-                    if (!vals.empty()) val = vals.front();
-                }
-                uncorr_cache[idx] = val;
+                if (out.is_err()) throw StatementError(out.error());
+                auto vals = extract_values_from_output(out.value());
+                if (vals.size() > 1) throw StatementError("Subquery returns more than 1 row");
+                uncorr_cache[idx] = vals.empty() ? std::string(EXECUTOR_NULL_VALUE) : vals.front();
             }
 
             for (auto& row : result) {
@@ -2587,10 +2597,10 @@ StringResult Executor::format_result(SharedDatabase& s, std::vector<Row> result,
                         auto out = exec_select(s, sc->table, std::move(sc->subquery), sc->distinct, std::move(sc->columns), std::move(sub_cond),
                                                 std::move(sc->joins), std::move(sc->order_by), std::move(sc->group_by), std::move(sc->having),
                                                 sc->limit, sc->offset, false, false);
-                        if (out.is_ok()) {
-                            auto vals = extract_values_from_output(out.value());
-                            if (!vals.empty()) val = vals.front();
-                        }
+                        if (out.is_err()) throw StatementError(out.error());
+                        auto vals = extract_values_from_output(out.value());
+                        if (vals.size() > 1) throw StatementError("Subquery returns more than 1 row");
+                        if (!vals.empty()) val = vals.front();
                     }
                     row[key] = val;
                 }

@@ -93,6 +93,13 @@ here from the rows with exact rational arithmetic.
 
   python verify_compare.py <engine_server.exe> [--statements N] [--seed S] [--rows R]
 
+verify_subqueries.py checks scalar subqueries against a model of what SQL says: tables t(id, v, g) and u(id, a, b, g) with random rows (NULLs included), and
+random statements -- a scalar subquery in WHERE (uncorrelated and correlated), in the select list, in HAVING (with and without GROUP BY), IN / NOT IN
+with a NULL in the list (three-valued), a subquery of two columns, UPDATE / DELETE with a subquery (an error changes nothing). Two rows are an error
+("Subquery returns more than 1 row"), no row is NULL, two columns are an error ("Operand should contain 1 column(s)").
+
+  python verify_subqueries.py <engine_server.exe> [--statements N] [--seed S]
+
 verify_agg_arguments.py checks aggregates whose argument is an EXPRESSION (SUM(x * y), AVG(COALESCE(w, 7) - y), COUNT(DISTINCT ...), MIN / MAX) with exact
 rational arithmetic: a table of integers, two-place decimals and strings with NULLs, and random expressions over + - * and parentheses, run as a whole-table
 aggregate, GROUP BY, HAVING, a window function (PARTITION BY) and through a JOIN with table aliases.

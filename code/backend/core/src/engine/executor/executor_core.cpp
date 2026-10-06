@@ -1155,6 +1155,8 @@ StringResult Executor::execute_sql(const std::string& sql) {
     // std::terminate() and crash the whole process instead of returning a graceful Err.
     try {
         return execute_sql_inner(sql);
+    } catch (const StatementError& e) { // (an entry that does not go through execute_with_s)
+        return StringResult::Err(e.what());
     } catch (const std::exception& e) {
         return StringResult::Err(std::string("Internal error: ") + e.what());
     } catch (...) {
@@ -1262,6 +1264,14 @@ StringResult Executor::execute_sql_inner(const std::string& sql) {
 }
 
 StringResult Executor::execute_with_s(SharedDatabase& s, Statement stmt) {
+    try {
+        return execute_with_s_body(s, std::move(stmt));
+    } catch (const StatementError& e) {
+        return StringResult::Err(e.what());
+    }
+}
+
+StringResult Executor::execute_with_s_body(SharedDatabase& s, Statement stmt) {
     struct DepthGuard {
         std::size_t& depth;
         explicit DepthGuard(std::size_t& d) : depth(d) { ++depth; }

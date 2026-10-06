@@ -169,7 +169,8 @@ Executor::Tri Executor::eval_single_with_subquery(SharedDatabase& s, const Row& 
             if (sub_cond) sub_cond = substitute_correlated_condexpr(*sub_cond, row);
             auto result = exec_select(s, sel->table, std::move(sel->subquery), sel->distinct, sel->columns, sub_cond, sel->joins, sel->order_by,
                                        sel->group_by, sel->having, sel->limit, sel->offset, false, false);
-            bool has_rows = result.is_ok() && result.value().find("0 rows returned") == std::string::npos;
+            if (result.is_err()) throw StatementError(result.error()); // (an error inside the subquery is the statement's error, not "no row")
+            bool has_rows = result.value().find("0 rows returned") == std::string::npos;
             if (cacheable) subquery_exists_cache_[exists_key] = has_rows;
             return tri(cond.op == Operator::Exists ? has_rows : !has_rows);
         }
@@ -211,14 +212,12 @@ Executor::Tri Executor::eval_single_with_subquery(SharedDatabase& s, const Row& 
                 auto* sel = std::get_if<Statement::Select>(&sub_stmt.data);
                 auto result = exec_select(s, sel->table, std::move(sel->subquery), sel->distinct, sel->columns, sel->condition, sel->joins,
                                            sel->order_by, sel->group_by, sel->having, sel->limit, sel->offset, false, false);
-                if (result.is_ok()) {
-                    auto vals = extract_values_from_output(result.value());
-                    std::unordered_set<std::string> sub_vals(vals.begin(), vals.end());
-                    Tri hit = membership(sub_vals.count(val) > 0, sub_vals.count(EXECUTOR_NULL_VALUE) > 0);
-                    subquery_cache_[cache_key] = std::move(sub_vals);
-                    return hit;
-                }
-                return Tri::False;
+                if (result.is_err()) throw StatementError(result.error());
+                auto vals = extract_values_from_output(result.value());
+                std::unordered_set<std::string> sub_vals(vals.begin(), vals.end());
+                Tri hit = membership(sub_vals.count(val) > 0, sub_vals.count(EXECUTOR_NULL_VALUE) > 0);
+                subquery_cache_[cache_key] = std::move(sub_vals);
+                return hit;
             }
         }
     }
@@ -239,7 +238,6 @@ Executor::Tri Executor::eval_single_with_subquery(SharedDatabase& s, const Row& 
         std::vector<std::string> fresh_vals;
         const std::vector<std::string>* sub_vals_ptr = nullptr;
         if (cached_answer) {
-            if (!cached_answer->ok) return Tri::False;
             sub_vals_ptr = &cached_answer->values;
         } else {
             const bool cacheable = !(sel->condition && cond_may_be_substituted(*sel->condition));
@@ -247,13 +245,9 @@ Executor::Tri Executor::eval_single_with_subquery(SharedDatabase& s, const Row& 
             if (sub_cond) sub_cond = substitute_correlated_condexpr(*sub_cond, row);
             auto result = exec_select(s, sel->table, std::move(sel->subquery), sel->distinct, sel->columns, sub_cond, sel->joins, sel->order_by,
                                        sel->group_by, sel->having, sel->limit, sel->offset, false, false);
-            if (cacheable) {
-                SubqueryAnswer& slot = subquery_scalar_cache_[sub->query.get()];
-                slot.ok = result.is_ok();
-                if (slot.ok) slot.values = extract_values_from_output(result.value());
-            }
-            if (!result.is_ok()) return Tri::False;
+            if (result.is_err()) throw StatementError(result.error());
             fresh_vals = extract_values_from_output(result.value());
+            if (cacheable) subquery_scalar_cache_[sub->query.get()].values = fresh_vals;
             sub_vals_ptr = &fresh_vals;
         }
         const std::vector<std::string>& sub_vals = *sub_vals_ptr;
@@ -268,7 +262,8 @@ Executor::Tri Executor::eval_single_with_subquery(SharedDatabase& s, const Row& 
             case Operator::Lt:
             case Operator::Gte:
             case Operator::Lte: {
-                // a scalar subquery with no row, or a NULL, makes the comparison UNKNOWN
+                // a scalar subquery that returns more than one row is an error (MySQL 1242); with no row, or a NULL, the comparison is UNKNOWN
+                if (sub_vals.size() > 1) throw StatementError("Subquery returns more than 1 row");
                 if (sub_vals.empty() || sub_vals.front() == EXECUTOR_NULL_VALUE) return Tri::Unknown;
                 const std::string& rhs = sub_vals.front();
                 const int c = compare_classed(cond.left_class != ValueClass::Unknown ? cond.left_class : class_of_expr(cond.left), cond.right_class, val, rhs);
