@@ -548,8 +548,124 @@ std::optional<std::string> Executor::bind_statement(SharedDatabase& s, Statement
                     o.cls = expression_argument(o.column, "order clause");
                 }
             }
+            if (check && !error) only_full_group_by(sel, scope);
             chain.pop_back();
             outputs = std::move(out);
+        }
+
+        // The columns an expression names itself -- not the ones inside an aggregate (the parser keeps those as the text `SUM(v)`), a column of a query
+        // around it, or the unit of a date function.
+        void own_columns(const ArithExpr& e, std::vector<std::string>& out) const {
+            if (auto* col = std::get_if<ArithExpr::Col>(&e.data)) {
+                if (col->outer == 0 && plain_reference(col->name)) out.push_back(col->name);
+            } else if (auto* v = std::get_if<ArithExpr::Add>(&e.data)) { own_columns(*v->lhs, out); own_columns(*v->rhs, out); }
+            else if (auto* v = std::get_if<ArithExpr::Sub>(&e.data)) { own_columns(*v->lhs, out); own_columns(*v->rhs, out); }
+            else if (auto* v = std::get_if<ArithExpr::Mul>(&e.data)) { own_columns(*v->lhs, out); own_columns(*v->rhs, out); }
+            else if (auto* v = std::get_if<ArithExpr::Div>(&e.data)) { own_columns(*v->lhs, out); own_columns(*v->rhs, out); }
+            else if (auto* v = std::get_if<ArithExpr::Cmp>(&e.data)) { own_columns(*v->lhs, out); own_columns(*v->rhs, out); }
+            else if (auto* v = std::get_if<ArithExpr::Pred>(&e.data)) own_columns(*v->cond, out);
+            else if (auto* f = std::get_if<ArithExpr::Func>(&e.data)) {
+                const bool unit_last = f->name == "DATE_ADD" || f->name == "DATE_SUB";
+                for (std::size_t i = 0; i < f->args.size(); i++) {
+                    if (!(unit_last && i + 1 == f->args.size())) own_columns(f->args[i], out);
+                }
+            }
+        }
+
+        void own_columns(const CondExpr& e, std::vector<std::string>& out) const {
+            if (auto* a = std::get_if<CondExpr::And>(&e.data)) { own_columns(*a->lhs, out); own_columns(*a->rhs, out); }
+            else if (auto* o = std::get_if<CondExpr::Or>(&e.data)) { own_columns(*o->lhs, out); own_columns(*o->rhs, out); }
+            else if (auto* n = std::get_if<CondExpr::Not>(&e.data)) own_columns(*n->inner, out);
+            else if (auto* leaf = std::get_if<CondExpr::Leaf>(&e.data)) {
+                own_columns(leaf->condition.left, out);
+                if (auto* lit = std::get_if<ConditionValue::Literal>(&leaf->condition.value.data)) {
+                    // (an unquoted word on the right is a column only when a table of the query has it)
+                    if (!lit->quoted && lit->outer == 0 && plain_reference(lit->value) && !parse_number(lit->value) && table_column(lit->value)) out.push_back(lit->value);
+                } else if (auto* value = std::get_if<ConditionValue::Arith>(&leaf->condition.value.data)) {
+                    own_columns(value->expr, out);
+                }
+            }
+        }
+
+        // The table of this query that a column name (`v`, `t.v`) belongs to, and the column; nothing for a name no table of the query has.
+        std::optional<std::pair<const BindTable*, std::string>> table_column(const std::string& name) const {
+            if (chain.empty()) return std::nullopt;
+            const BindScope& scope = *chain.back();
+            const std::size_t dot = name.rfind('.');
+            for (const BindTable& t : scope.tables) {
+                if (dot != std::string::npos) {
+                    const std::string qualifier = name.substr(0, dot);
+                    if (t.full == qualifier || t.bare == qualifier) return std::make_pair(&t, name.substr(dot + 1));
+                } else if (!t.open && has_column(t, name)) {
+                    return std::make_pair(&t, name);
+                }
+            }
+            return std::nullopt;
+        }
+
+        // ONLY_FULL_GROUP_BY, MySQL's default: in a query that groups or aggregates, what is selected without an aggregate may name only the columns grouped
+        // by, columns that depend on them (the primary key of their table is grouped by) or none at all. The rest used to be left out of the answer (no
+        // GROUP BY) or come out empty (with one): a column of some row of the group is no answer.
+        void only_full_group_by(Statement::Select& sel, const BindScope& scope) {
+            const bool aggregated = sel.group_by.has_value() || sel.having.has_value() || Executor::columns_have_aggregate(sel.columns);
+            if (!aggregated) return;
+            // what is grouped by: the columns (table, column) and the texts of the expressions
+            std::vector<std::pair<const BindTable*, std::string>> grouped;
+            std::vector<std::string> grouped_texts;
+            if (sel.group_by) {
+                for (auto& item : *sel.group_by) {
+                    grouped_texts.push_back(item);
+                    if (auto tc = table_column(item)) grouped.push_back(*tc);
+                }
+            }
+            auto is_grouped = [&](const BindTable* t, const std::string& column) {
+                for (auto& [gt, gc] : grouped) {
+                    if (gt == t && gc == column) return true;
+                }
+                // (the primary key of the table is grouped by: every column of the table follows from it)
+                if (!t->schema) return false;
+                bool has_key = false;
+                for (auto& c : t->schema->columns) {
+                    if (!c.primary_key) continue;
+                    has_key = true;
+                    if (!std::any_of(grouped.begin(), grouped.end(), [&](auto& g) { return g.first == t && g.second == c.name; })) return false;
+                }
+                return has_key;
+            };
+            std::size_t position = 0;
+            for (auto& c : sel.columns) {
+                position++;
+                std::vector<std::string> names;
+                if (auto* col = std::get_if<SelectColumn::Column>(&c.data)) {
+                    if (col->outer == 0 && plain_reference(col->name)) names.push_back(col->name);
+                } else if (auto* ca = std::get_if<SelectColumn::ColumnAlias>(&c.data)) {
+                    if (ca->outer == 0 && plain_reference(ca->name)) names.push_back(ca->name);
+                } else if (auto* e = std::get_if<SelectColumn::Expr>(&c.data)) {
+                    // an expression that is itself what is grouped by (`id % 2`) names no column of its own
+                    try {
+                        const std::string text = Parser::aggregate_argument_text(e->expr);
+                        if (std::find(grouped_texts.begin(), grouped_texts.end(), text) != grouped_texts.end()) continue;
+                    } catch (const ParseError&) {
+                    }
+                    own_columns(e->expr, names);
+                } else if (auto* all = std::get_if<SelectColumn::All>(&c.data)) {
+                    for (const BindTable& t : scope.tables) {
+                        if (t.open || !t.schema || (!all->table.empty() && t.full != all->table && t.bare != all->table)) continue;
+                        for (auto& column : t.schema->columns) names.push_back(t.full + "." + column.name);
+                    }
+                }
+                for (auto& name : names) {
+                    auto tc = table_column(name);
+                    if (!tc) continue; // (a name of no table of the query: an unknown column is reported, or it is the name of something else)
+                    if (is_grouped(tc->first, tc->second)) continue;
+                    error = sel.group_by
+                                ? "Expression #" + std::to_string(position) + " of SELECT list is not in GROUP BY clause and contains nonaggregated column '" + name +
+                                      "' which is not functionally dependent on columns in GROUP BY clause; this is incompatible with sql_mode=only_full_group_by"
+                                : "In aggregated query without GROUP BY, expression #" + std::to_string(position) + " of SELECT list contains nonaggregated column '" + name +
+                                      "'; this is incompatible with sql_mode=only_full_group_by";
+                    return;
+                }
+            }
         }
 
         // The name an ORDER BY / GROUP BY item uses for a select-list column: a column by its name, an aggregate by its label, an expression by

@@ -62,9 +62,44 @@ Result<Statement, std::string> Parser::parse() {
     }
 }
 
+bool Parser::is_plain_word(TokenKind kind) {
+    switch (kind) {
+        // types
+        case TokenKind::Text: case TokenKind::Date: case TokenKind::Datetime: case TokenKind::Timestamp: case TokenKind::Time: case TokenKind::Year:
+        case TokenKind::Boolean: case TokenKind::Enum: case TokenKind::Json:
+        // aggregate functions
+        case TokenKind::Count: case TokenKind::Sum: case TokenKind::Avg: case TokenKind::Min: case TokenKind::Max: case TokenKind::Stddev:
+        case TokenKind::Variance: case TokenKind::Median: case TokenKind::BitAnd: case TokenKind::BitOr: case TokenKind::JsonAgg:
+        case TokenKind::ArrayAgg: case TokenKind::GroupConcat: case TokenKind::Filter:
+        // scalar functions
+        case TokenKind::Upper: case TokenKind::Lower: case TokenKind::Length: case TokenKind::Trim: case TokenKind::Concat: case TokenKind::Substr:
+        case TokenKind::Substring: case TokenKind::Now: case TokenKind::Curdate: case TokenKind::DateFormat: case TokenKind::Coalesce:
+        case TokenKind::Ifnull: case TokenKind::Round: case TokenKind::Abs: case TokenKind::Ceil: case TokenKind::Floor: case TokenKind::Nullif:
+        case TokenKind::Lpad: case TokenKind::Rpad: case TokenKind::Cast: case TokenKind::DateAdd: case TokenKind::DateSub: case TokenKind::DateDiff:
+        case TokenKind::Truncate:
+        // other words
+        case TokenKind::Level: case TokenKind::User: case TokenKind::Password: case TokenKind::Role: case TokenKind::Next: case TokenKind::Current:
+        case TokenKind::View: case TokenKind::Offset: case TokenKind::Full: case TokenKind::Merge: case TokenKind::Matched: case TokenKind::Following:
+        case TokenKind::Preceding: case TokenKind::Unbounded: case TokenKind::Savepoint: case TokenKind::Checkpoint: case TokenKind::Isolation:
+        case TokenKind::Uncommitted: case TokenKind::Committed: case TokenKind::Repeatable: case TokenKind::Serializable: case TokenKind::Vacuum:
+        case TokenKind::Locks: case TokenKind::Modify: case TokenKind::Duplicate: case TokenKind::Returning: case TokenKind::Prepare:
+        case TokenKind::Execute: case TokenKind::Deallocate: case TokenKind::Synonym: case TokenKind::Share: case TokenKind::Only: case TokenKind::After:
+        case TokenKind::Do: case TokenKind::Body: case TokenKind::Privileges: case TokenKind::Grants: case TokenKind::Identified: case TokenKind::End:
+        case TokenKind::Until: case TokenKind::Handler: case TokenKind::Tables:
+            return true;
+        default:
+            return false;
+    }
+}
+
+bool Parser::is_bare_function(const Token& t) {
+    return (t.kind == TokenKind::Now || t.kind == TokenKind::Curdate) && t.word != "now" && t.word != "curdate";
+}
+
 std::string Parser::expect_ident() {
     const Token* t = advance();
     if (t && t->kind == TokenKind::Ident) return t->text;
+    if (t && is_plain_word(t->kind) && !t->word.empty()) return t->word;
     throw ParseError("Expected identifier");
 }
 
@@ -117,7 +152,9 @@ std::string Parser::expect_alias_ident() {
         case TokenKind::Tables:   return "tables";
         case TokenKind::Column:   return "column";
         case TokenKind::Null:     return "null";
-        default: throw ParseError("Expected identifier (alias)");
+        default:
+            if (is_plain_word(t->kind) && !t->word.empty()) return t->word;
+            throw ParseError("Expected identifier (alias)");
     }
 }
 
@@ -167,7 +204,9 @@ std::string Parser::expect_any_name() {
         case TokenKind::Rank:     return "rank";
         case TokenKind::Check:    return "check";
         case TokenKind::Interval: return "interval";
-        default: throw ParseError("Expected identifier");
+        default:
+            if (is_plain_word(t->kind) && !t->word.empty()) return t->word;
+            throw ParseError("Expected identifier");
     }
 }
 
@@ -206,7 +245,9 @@ std::string Parser::expect_any_ident() {
         case TokenKind::Tables:   return "tables";
         case TokenKind::Column:   return "column";
         case TokenKind::Database: return "schema";
-        default: throw ParseError("Expected identifier");
+        default:
+            if (is_plain_word(t->kind) && !t->word.empty()) return t->word;
+            throw ParseError("Expected identifier");
     }
 }
 

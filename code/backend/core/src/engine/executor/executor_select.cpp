@@ -520,6 +520,55 @@ void collect_agg_refs_text(const std::string& text, std::vector<std::string>& ou
 }
 } // namespace
 
+// The names of the columns an expression reads (not an aggregate's text `SUM(v)`).
+static void arith_columns(const ArithExpr& e, std::vector<std::string>& out) {
+    if (auto* col = std::get_if<ArithExpr::Col>(&e.data)) {
+        if (plain_reference(col->name)) out.push_back(col->name);
+    } else if (auto* v = std::get_if<ArithExpr::Add>(&e.data)) { arith_columns(*v->lhs, out); arith_columns(*v->rhs, out); }
+    else if (auto* v = std::get_if<ArithExpr::Sub>(&e.data)) { arith_columns(*v->lhs, out); arith_columns(*v->rhs, out); }
+    else if (auto* v = std::get_if<ArithExpr::Mul>(&e.data)) { arith_columns(*v->lhs, out); arith_columns(*v->rhs, out); }
+    else if (auto* v = std::get_if<ArithExpr::Div>(&e.data)) { arith_columns(*v->lhs, out); arith_columns(*v->rhs, out); }
+    else if (auto* v = std::get_if<ArithExpr::Cmp>(&e.data)) { arith_columns(*v->lhs, out); arith_columns(*v->rhs, out); }
+    else if (auto* f = std::get_if<ArithExpr::Func>(&e.data)) {
+        for (auto& a : f->args) arith_columns(a, out);
+    }
+}
+
+static bool arith_mentions_column(const ArithExpr& e);
+
+// ... and does a condition (a CASE's WHEN)? A word on the right of a comparison, a subquery: it might.
+static bool cond_mentions_column(const CondExpr& e) {
+    if (auto* a = std::get_if<CondExpr::And>(&e.data)) return cond_mentions_column(*a->lhs) || cond_mentions_column(*a->rhs);
+    if (auto* o = std::get_if<CondExpr::Or>(&e.data)) return cond_mentions_column(*o->lhs) || cond_mentions_column(*o->rhs);
+    if (auto* n = std::get_if<CondExpr::Not>(&e.data)) return cond_mentions_column(*n->inner);
+    if (auto* leaf = std::get_if<CondExpr::Leaf>(&e.data)) {
+        const Condition& c = leaf->condition;
+        if (arith_mentions_column(c.left)) return true;
+        if (auto* lit = std::get_if<ConditionValue::Literal>(&c.value.data)) return !lit->quoted && !lit->value.empty() && !parse_number(lit->value) && lit->value != "__NULL__";
+        if (auto* value = std::get_if<ConditionValue::Arith>(&c.value.data)) return arith_mentions_column(value->expr);
+        return std::holds_alternative<ConditionValue::Subquery>(c.value.data);
+    }
+    return true;
+}
+
+// Does the expression name a column (an aggregate's text `SUM(v)` is one name too: it is not a constant)?
+static bool arith_mentions_column(const ArithExpr& e) {
+    if (std::holds_alternative<ArithExpr::Col>(e.data)) return true;
+    if (auto* v = std::get_if<ArithExpr::Add>(&e.data)) return arith_mentions_column(*v->lhs) || arith_mentions_column(*v->rhs);
+    if (auto* v = std::get_if<ArithExpr::Sub>(&e.data)) return arith_mentions_column(*v->lhs) || arith_mentions_column(*v->rhs);
+    if (auto* v = std::get_if<ArithExpr::Mul>(&e.data)) return arith_mentions_column(*v->lhs) || arith_mentions_column(*v->rhs);
+    if (auto* v = std::get_if<ArithExpr::Div>(&e.data)) return arith_mentions_column(*v->lhs) || arith_mentions_column(*v->rhs);
+    if (auto* v = std::get_if<ArithExpr::Cmp>(&e.data)) return arith_mentions_column(*v->lhs) || arith_mentions_column(*v->rhs);
+    if (auto* f = std::get_if<ArithExpr::Func>(&e.data)) {
+        for (auto& a : f->args) {
+            if (arith_mentions_column(a)) return true;
+        }
+        return false;
+    }
+    if (auto* p = std::get_if<ArithExpr::Pred>(&e.data)) return cond_mentions_column(*p->cond);
+    return false;
+}
+
 void Executor::column_agg_refs(const SelectColumn& column, std::vector<std::string>& out) {
     if (auto* e = std::get_if<SelectColumn::Expr>(&column.data)) {
         collect_agg_refs_arith(e->expr, out);
@@ -2218,6 +2267,23 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
             groups[it->second].rows.push_back(rp);
         }
 
+        // A select item that names a column that is not grouped by (`SELECT id, s, COUNT(*) ... GROUP BY id`: s depends on the key) is read from a row of
+        // the group: the group's rows are the same in it. Only then is a row of the group kept (it used to come out empty).
+        auto bare_name = [](const std::string& n) { return n.substr(n.rfind('.') == std::string::npos ? 0 : n.rfind('.') + 1); };
+        std::vector<std::string> grouped_names;
+        for (auto& item : *group_by) grouped_names.push_back(bare_name(item));
+        bool needs_group_row = false;
+        for (auto& col : columns) {
+            std::vector<std::string> names;
+            if (auto* c = std::get_if<SelectColumn::Column>(&col.data)) names.push_back(c->name);
+            else if (auto* ca = std::get_if<SelectColumn::ColumnAlias>(&col.data)) names.push_back(ca->name);
+            else if (auto* e = std::get_if<SelectColumn::Expr>(&col.data)) arith_columns(e->expr, names);
+            else if (std::holds_alternative<SelectColumn::All>(col.data)) needs_group_row = true;
+            for (auto& n : names) {
+                if (std::find(grouped_names.begin(), grouped_names.end(), bare_name(n)) == grouped_names.end()) needs_group_row = true;
+            }
+        }
+
         // 그룹별 집계 row 생성: parallel_enabled() 이면 스레드별 1그룹, 아니면 순차
         std::vector<Row> group_rows(groups.size());
         auto make_group_row = [&](std::size_t gi) {
@@ -2225,6 +2291,9 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
             auto& grp = groups[gi].rows;
             Row out;
             for (std::size_t i = 0; i < group_by->size(); i++) out[(*group_by)[i]] = key[i];
+            if (needs_group_row && !grp.empty()) {
+                for (auto& [k, v] : *grp.front()) out.try_emplace(k, v);
+            }
             Row agg_row = compute_aggregates(grp, columns);
             for (auto& [k, v] : agg_row) out[k] = v;
             for (auto& ref : expr_agg_refs) {
@@ -2402,7 +2471,14 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
             }
             if (!matches_condition_with_subquery(s, agg_row, having)) return StringResult::Ok("0 rows returned.");
         }
-        if (!expr_agg_refs.empty()) {
+        // `SELECT COUNT(*), 1`, `SELECT COUNT(*), UPPER('a')`: an item of no column and no aggregate is the same on the one row of aggregates (it used to
+        // be left out of the answer)
+        auto is_constant_item = [](const SelectColumn& col) {
+            auto* e = std::get_if<SelectColumn::Expr>(&col.data);
+            return e && !column_has_aggregate(col) && !arith_mentions_column(e->expr);
+        };
+        const bool constant_items = std::any_of(columns.begin(), columns.end(), is_constant_item);
+        if (!expr_agg_refs.empty() || constant_items) {
             // `SUM(v) + 1`, `ROUND(AVG(v), 2)`, `CASE WHEN COUNT(*) > 1 ...`: the aggregates inside are computed as HAVING computes
             // them and the columns are evaluated on this one row of aggregates. The plain aggregates keep their place; a column
             // with no aggregate in it is not part of an aggregate result (as before). Formatted like any result, minus the row
@@ -2412,7 +2488,7 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
             }
             std::vector<SelectColumn> shown;
             for (auto& col : columns) {
-                if (column_has_aggregate(col)) shown.push_back(col);
+                if (column_has_aggregate(col) || is_constant_item(col)) shown.push_back(col);
             }
             auto text = format_result(s, std::vector<Row>{agg_row}, shown, table, joins);
             if (text.is_err()) return text;

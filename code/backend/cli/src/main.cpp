@@ -17,6 +17,7 @@
 #include <vector>
 
 #include "engine/executor/executor.hpp"
+#include "engine/statement_split.hpp"
 
 namespace {
 
@@ -158,63 +159,6 @@ void run_query(engine::Executor& executor, const std::string& query) {
     }
 }
 
-// BEGIN...END depth=0 에서의 첫 번째 ';' 바이트 오프셋을 반환
-std::optional<std::size_t> find_stmt_end(const std::string& s) {
-    std::size_t len = s.size();
-    int begin_depth = 0;
-    std::size_t i = 0;
-    while (i < len) {
-        if (s[i] == '\'') {
-            i++;
-            while (i < len) {
-                char c = s[i];
-                i++;
-                if (c == '\'') break;
-            }
-            continue;
-        }
-        if (std::isalpha(static_cast<unsigned char>(s[i])) || s[i] == '_') {
-            std::size_t start = i;
-            while (i < len && (std::isalnum(static_cast<unsigned char>(s[i])) || s[i] == '_')) i++;
-            std::string word = s.substr(start, i - start);
-            std::transform(word.begin(), word.end(), word.begin(), [](unsigned char c) { return std::toupper(c); });
-            if (word == "BEGIN") {
-                std::size_t j = i;
-                while (j < len && std::isspace(static_cast<unsigned char>(s[j]))) j++;
-                bool is_transaction;
-                if (j >= len || s[j] == ';') {
-                    is_transaction = true;
-                } else if (std::isalpha(static_cast<unsigned char>(s[j]))) {
-                    std::size_t s2 = j, k = j;
-                    while (k < len && (std::isalnum(static_cast<unsigned char>(s[k])) || s[k] == '_')) k++;
-                    std::string nw = s.substr(s2, k - s2);
-                    std::transform(nw.begin(), nw.end(), nw.begin(), [](unsigned char c) { return std::toupper(c); });
-                    is_transaction = (nw == "WORK");
-                } else {
-                    is_transaction = false;
-                }
-                if (!is_transaction) begin_depth++;
-            } else if (word == "END") {
-                std::size_t j = i;
-                while (j < len && std::isspace(static_cast<unsigned char>(s[j]))) j++;
-                bool next_is_sub = false;
-                if (j < len && (std::isalpha(static_cast<unsigned char>(s[j])) || s[j] == '_')) {
-                    std::size_t s2 = j, k = j;
-                    while (k < len && (std::isalnum(static_cast<unsigned char>(s[k])) || s[k] == '_')) k++;
-                    std::string nw = s.substr(s2, k - s2);
-                    std::transform(nw.begin(), nw.end(), nw.begin(), [](unsigned char c) { return std::toupper(c); });
-                    next_is_sub = (nw == "IF" || nw == "WHILE" || nw == "LOOP" || nw == "REPEAT" || nw == "CASE");
-                }
-                if (!next_is_sub && begin_depth > 0) begin_depth--;
-            }
-            continue;
-        }
-        if (s[i] == ';' && begin_depth == 0) return i;
-        i++;
-    }
-    return std::nullopt;
-}
-
 std::string trim(const std::string& s) {
     auto start = s.find_first_not_of(" \t\r\n");
     if (start == std::string::npos) return "";
@@ -282,7 +226,7 @@ int main(int argc, char** argv) {
         buf += trimmed;
 
         for (;;) {
-            auto pos = find_stmt_end(buf);
+            auto pos = engine::find_statement_end(buf);
             if (!pos) break;
             std::string stmt_str = trim(buf.substr(0, *pos));
             buf = buf.substr(*pos + 1);

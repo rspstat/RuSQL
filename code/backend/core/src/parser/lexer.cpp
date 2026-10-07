@@ -235,7 +235,12 @@ Token Lexer::read_ident() {
 
     const auto& map = keyword_map();
     auto it = map.find(upper);
-    if (it != map.end()) return Token(it->second);
+    if (it != map.end()) {
+        Token keyword(it->second);
+        keyword.word = s;
+        for (char& c : keyword.word) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        return keyword;
+    }
     return Token(TokenKind::Ident, std::move(s));
 }
 

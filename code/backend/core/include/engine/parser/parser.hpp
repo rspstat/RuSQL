@@ -76,6 +76,12 @@ private:
     /// The table names and aliases of the FROM list that follows (read ahead, from the position after SELECT)
     std::unordered_set<std::string> scan_from_names() const;
 
+    /// A keyword that MySQL does not reserve (DATE, LEVEL, COUNT, USER, YEAR, TEXT ...): where a name is expected it is one (a column called `date`).
+    /// Its name is the word as typed, in lower case (Token::word).
+    static bool is_plain_word(TokenKind kind);
+    /// CURRENT_TIMESTAMP, SYSDATE, LOCALTIME, CURRENT_DATE ... are values without parentheses; `now` and `curdate` need them (without, they are columns)
+    static bool is_bare_function(const Token& t);
+
     const Token* peek() const;
     const Token* peek_at(std::size_t offset) const;
     const Token* advance();

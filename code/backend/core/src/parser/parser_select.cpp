@@ -157,12 +157,13 @@ Statement Parser::parse_select() {
 
             // a scalar function, CASE, IF and CAST are expressions (with whatever goes on after them); an aggregate is one when it goes on
             if (p) {
-                const bool aggregate = p->kind == TokenKind::Count || p->kind == TokenKind::Sum || p->kind == TokenKind::Avg ||
+                const bool call = peek_at_is(1, TokenKind::LParen); // (a word that names a function is a column without its parentheses)
+                const bool aggregate = call && (p->kind == TokenKind::Count || p->kind == TokenKind::Sum || p->kind == TokenKind::Avg ||
                                        p->kind == TokenKind::Min || p->kind == TokenKind::Max || p->kind == TokenKind::Stddev ||
                                        p->kind == TokenKind::Variance || p->kind == TokenKind::BitAnd || p->kind == TokenKind::BitOr ||
                                        p->kind == TokenKind::JsonAgg || p->kind == TokenKind::ArrayAgg || p->kind == TokenKind::Median ||
-                                       p->kind == TokenKind::GroupConcat;
-                const bool function = p->kind == TokenKind::DateAdd || p->kind == TokenKind::DateSub || p->kind == TokenKind::Upper ||
+                                       p->kind == TokenKind::GroupConcat);
+                const bool function = (call || is_bare_function(*p)) && (p->kind == TokenKind::DateAdd || p->kind == TokenKind::DateSub || p->kind == TokenKind::Upper ||
                                       p->kind == TokenKind::Lower || p->kind == TokenKind::Length || p->kind == TokenKind::Trim ||
                                       p->kind == TokenKind::Concat || p->kind == TokenKind::Substr || p->kind == TokenKind::Substring ||
                                       p->kind == TokenKind::Now || p->kind == TokenKind::Curdate || p->kind == TokenKind::DateFormat ||
@@ -170,7 +171,7 @@ Statement Parser::parse_select() {
                                       p->kind == TokenKind::Round || p->kind == TokenKind::Abs || p->kind == TokenKind::Ceil ||
                                       p->kind == TokenKind::Floor || p->kind == TokenKind::Mod || p->kind == TokenKind::Nullif ||
                                       p->kind == TokenKind::Lpad || p->kind == TokenKind::Rpad || p->kind == TokenKind::DateDiff ||
-                                      ((p->kind == TokenKind::Database || p->kind == TokenKind::User) && peek_at_is(1, TokenKind::LParen));
+                                      ((p->kind == TokenKind::Database || p->kind == TokenKind::User) && call));
                 const bool always = p->kind == TokenKind::Case || (p->kind == TokenKind::If && peek_at_is(1, TokenKind::LParen)) ||
                                     (p->kind == TokenKind::Cast && peek_at_is(1, TokenKind::LParen));
                 if (always || function || (aggregate && select_item_continues())) {
@@ -181,12 +182,13 @@ Statement Parser::parse_select() {
                 }
             }
 
-            if (p && (p->kind == TokenKind::Count || p->kind == TokenKind::Sum || p->kind == TokenKind::Avg ||
-                      p->kind == TokenKind::Min || p->kind == TokenKind::Max ||
-                      p->kind == TokenKind::Stddev || p->kind == TokenKind::Variance ||
-                      p->kind == TokenKind::BitAnd || p->kind == TokenKind::BitOr ||
-                      p->kind == TokenKind::JsonAgg || p->kind == TokenKind::ArrayAgg ||
-                      p->kind == TokenKind::Median)) {
+            if (p && peek_at_is(1, TokenKind::LParen) &&
+                (p->kind == TokenKind::Count || p->kind == TokenKind::Sum || p->kind == TokenKind::Avg ||
+                 p->kind == TokenKind::Min || p->kind == TokenKind::Max ||
+                 p->kind == TokenKind::Stddev || p->kind == TokenKind::Variance ||
+                 p->kind == TokenKind::BitAnd || p->kind == TokenKind::BitOr ||
+                 p->kind == TokenKind::JsonAgg || p->kind == TokenKind::ArrayAgg ||
+                 p->kind == TokenKind::Median)) {
                 const Token* ft = advance();
                 AggFunc func = [&]() -> AggFunc {
                     switch (ft->kind) {
@@ -285,7 +287,7 @@ Statement Parser::parse_select() {
             }
 
             // GROUP_CONCAT(col [SEPARATOR 'sep'])
-            if (p && p->kind == TokenKind::GroupConcat) {
+            if (p && p->kind == TokenKind::GroupConcat && peek_at_is(1, TokenKind::LParen)) {
                 advance();
                 if (!peek_is(TokenKind::LParen)) throw ParseError("Expected '(' after GROUP_CONCAT");
                 advance();
@@ -310,7 +312,7 @@ Statement Parser::parse_select() {
             }
 
             // 윈도우 함수
-            if (p && (p->kind == TokenKind::RowNumber || p->kind == TokenKind::Rank || p->kind == TokenKind::DenseRank ||
+            if (p && peek_at_is(1, TokenKind::LParen) && (p->kind == TokenKind::RowNumber || p->kind == TokenKind::Rank || p->kind == TokenKind::DenseRank ||
                       p->kind == TokenKind::Lag || p->kind == TokenKind::Lead || p->kind == TokenKind::FirstValue ||
                       p->kind == TokenKind::LastValue || p->kind == TokenKind::NthValue || p->kind == TokenKind::Ntile ||
                       p->kind == TokenKind::PercentRank || p->kind == TokenKind::CumeDist)) {

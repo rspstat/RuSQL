@@ -14,6 +14,8 @@
 #include <string>
 #include <vector>
 
+#include "engine/statement_split.hpp" // header only: the client still does not link the engine
+
 #include <sha1/sha1.hpp>
 
 #pragma comment(lib, "ws2_32.lib")
@@ -94,73 +96,6 @@ std::vector<std::string> read_response(LineReader& reader) {
         lines.push_back(std::move(line));
     }
     return lines;
-}
-
-// 입력에서 "최상위" 세미콜론 개수 카운트 (주석·문자열 안 제외 + BEGIN...END 안쪽도 제외).
-// BEGIN/END 깊이 추적 로직은 cli/src/main.cpp의 find_stmt_end와 동일한 패턴 -- 프로시저/트리거
-// 본문처럼 여러 줄에 걸친 BEGIN...END 안의 세미콜론을 별도 문장으로 잘못 세면, 서버가 보내는
-// 응답 개수(하나)와 클라이언트가 기다리는 개수(여러 개)가 어긋나 무한 대기(hang)로 이어진다.
-size_t count_semicolons(const std::string& input) {
-    size_t count = 0;
-    size_t i = 0;
-    const size_t n = input.size();
-    int begin_depth = 0;
-    while (i < n) {
-        char c = input[i];
-        if (c == '-' && i + 1 < n && input[i + 1] == '-') {
-            while (i < n && input[i] != '\n') i++;
-        } else if (c == '#') {
-            while (i < n && input[i] != '\n') i++;
-        } else if (c == '\'') {
-            i++;
-            while (i < n && input[i] != '\'') i++;
-            if (i < n) i++;
-        } else if (c == '/' && i + 1 < n && input[i + 1] == '*') {
-            i += 2;
-            while (i + 1 < n && !(input[i] == '*' && input[i + 1] == '/')) i++;
-            if (i + 1 < n) i += 2;
-        } else if (std::isalpha(static_cast<unsigned char>(c)) || c == '_') {
-            size_t start = i;
-            while (i < n && (std::isalnum(static_cast<unsigned char>(input[i])) || input[i] == '_')) i++;
-            std::string word = input.substr(start, i - start);
-            std::transform(word.begin(), word.end(), word.begin(), [](unsigned char ch) { return std::toupper(ch); });
-            if (word == "BEGIN") {
-                size_t j = i;
-                while (j < n && std::isspace(static_cast<unsigned char>(input[j]))) j++;
-                bool is_transaction;
-                if (j >= n || input[j] == ';') {
-                    is_transaction = true;
-                } else if (std::isalpha(static_cast<unsigned char>(input[j]))) {
-                    size_t s2 = j, k = j;
-                    while (k < n && (std::isalnum(static_cast<unsigned char>(input[k])) || input[k] == '_')) k++;
-                    std::string nw = input.substr(s2, k - s2);
-                    std::transform(nw.begin(), nw.end(), nw.begin(), [](unsigned char ch) { return std::toupper(ch); });
-                    is_transaction = (nw == "WORK");
-                } else {
-                    is_transaction = false;
-                }
-                if (!is_transaction) begin_depth++;
-            } else if (word == "END") {
-                size_t j = i;
-                while (j < n && std::isspace(static_cast<unsigned char>(input[j]))) j++;
-                bool next_is_sub = false;
-                if (j < n && (std::isalpha(static_cast<unsigned char>(input[j])) || input[j] == '_')) {
-                    size_t s2 = j, k = j;
-                    while (k < n && (std::isalnum(static_cast<unsigned char>(input[k])) || input[k] == '_')) k++;
-                    std::string nw = input.substr(s2, k - s2);
-                    std::transform(nw.begin(), nw.end(), nw.begin(), [](unsigned char ch) { return std::toupper(ch); });
-                    next_is_sub = (nw == "IF" || nw == "WHILE" || nw == "LOOP" || nw == "REPEAT" || nw == "CASE");
-                }
-                if (!next_is_sub && begin_depth > 0) begin_depth--;
-            }
-        } else if (c == ';') {
-            if (begin_depth == 0) count++;
-            i++;
-        } else {
-            i++;
-        }
-    }
-    return count;
 }
 
 // 서버 쿼리 응답 출력. 형식: [OK|ERR]\n<출력>\n(x.xxx sec)\n---END---
@@ -397,7 +332,7 @@ int main(int argc, char** argv) {
         // BEGIN...END 본문처럼 여러 줄에 걸쳐 있는 문장은 depth==0 세미콜론이 나올 때까지 계속
         // 버퍼에 모은다(예전엔 버퍼 안 아무 세미콜론이나 하나 있으면 바로 전송해, 트리거/프로시저
         // 본문을 다 안 쳤는데도 미완성 상태로 서버에 보내버렸음).
-        size_t n = count_semicolons(buf);
+        size_t n = engine::count_statement_ends(buf); // (the statements the server will answer: the same function it splits its input with)
         if (n == 0) continue;
 
         if (!send_line(sock, trim(buf))) {

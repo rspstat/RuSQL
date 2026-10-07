@@ -630,8 +630,8 @@ ArithExpr Parser::parse_arith_factor() {
     if (!p) throw ParseError("Expected expression term");
 
     // Aggregate functions → stored as Col("COUNT(*)")
-    if (p->kind == TokenKind::Count || p->kind == TokenKind::Sum || p->kind == TokenKind::Avg ||
-        p->kind == TokenKind::Min || p->kind == TokenKind::Max) {
+    if ((p->kind == TokenKind::Count || p->kind == TokenKind::Sum || p->kind == TokenKind::Avg ||
+         p->kind == TokenKind::Min || p->kind == TokenKind::Max) && peek_at_is(1, TokenKind::LParen)) {
         const Token* t = advance();
         const char* label = t->kind == TokenKind::Count ? "COUNT" : t->kind == TokenKind::Sum ? "SUM" :
                             t->kind == TokenKind::Avg ? "AVG" : t->kind == TokenKind::Min ? "MIN" : "MAX";
@@ -693,7 +693,7 @@ ArithExpr Parser::parse_arith_factor() {
     }
 
     // DATE_ADD(date, INTERVAL amount unit) / DATE_SUB: the function with its arguments (date, amount, unit); the unit is a word
-    if (p->kind == TokenKind::DateAdd || p->kind == TokenKind::DateSub) {
+    if ((p->kind == TokenKind::DateAdd || p->kind == TokenKind::DateSub) && peek_at_is(1, TokenKind::LParen)) {
         const std::string fname = p->kind == TokenKind::DateAdd ? "DATE_ADD" : "DATE_SUB";
         advance();
         if (!peek_is(TokenKind::LParen)) throw ParseError("Expected '(' after " + fname);
@@ -723,11 +723,12 @@ ArithExpr Parser::parse_arith_factor() {
         return ArithExpr(ArithExpr::Func{fname, {}});
     }
 
-    if (is_scalar_func_token(p->kind)) {
+    // (a word that is the name of a function is a call only with its parentheses -- NOW and CURDATE need none --; otherwise it is a column)
+    if (is_scalar_func_token(p->kind) && (peek_at_is(1, TokenKind::LParen) || is_bare_function(*p))) {
         const Token* t = advance();
         std::string fname = scalar_func_name(t->kind);
         if (!peek_is(TokenKind::LParen)) {
-            // NOW, CURDATE and their spellings CURRENT_DATE / CURRENT_TIMESTAMP need no parentheses
+            // CURRENT_DATE / CURRENT_TIMESTAMP (and the other spellings of NOW and CURDATE) need no parentheses
             if (t->kind == TokenKind::Now || t->kind == TokenKind::Curdate) return ArithExpr(ArithExpr::Func{fname, {}});
             throw ParseError("Expected '(' after " + fname);
         }
@@ -804,6 +805,13 @@ ArithExpr Parser::parse_arith_factor() {
                     if (peek_is(TokenKind::Comma)) advance(); else break;
                 }
                 if (peek_is(TokenKind::RParen)) break;
+                // the unit of TIMESTAMPDIFF(MONTH, a, b) is a word, not a column called month (it used to be read as a column: NULL, but for YEAR)
+                if (args.empty() && (peek_is(TokenKind::Year) || peek_is(TokenKind::Ident)) && peek_at_is(1, TokenKind::Comma) &&
+                    to_upper(fname).rfind("TIMESTAMP", 0) == 0) {
+                    const Token* unit = advance();
+                    args.push_back(ArithExpr(ArithExpr::Str{unit->kind == TokenKind::Year ? "YEAR" : to_upper(unit->text)}));
+                    continue;
+                }
                 args.push_back(parse_value_expr());
             }
             if (!peek_is(TokenKind::RParen)) throw ParseError("Expected ')' after " + fname + " args");
@@ -818,7 +826,7 @@ ArithExpr Parser::parse_arith_factor() {
         return ArithExpr(ArithExpr::Col{s});
     }
 
-    // YEAR: function call if followed by '(', else unit string literal
+    // YEAR: a function call when followed by '(' (otherwise a column called year, below)
     if (p->kind == TokenKind::Year) {
         if (peek_at_is(1, TokenKind::LParen)) {
             advance(); // consume YEAR
@@ -835,8 +843,6 @@ ArithExpr Parser::parse_arith_factor() {
             advance();
             return ArithExpr(ArithExpr::Func{"YEAR", std::move(args)});
         }
-        advance();
-        return ArithExpr(ArithExpr::Str{"YEAR"});
     }
 
     if (p->kind == TokenKind::At) {
@@ -876,6 +882,17 @@ ArithExpr Parser::parse_arith_factor() {
             }
             return ArithExpr(ArithExpr::Col{col_name});
         }
+    }
+
+    // a keyword that MySQL does not reserve (`date`, `level`, `count`, `year`, `text` ...) that is not a call: the name of a column
+    if (is_plain_word(p->kind) && !p->word.empty()) {
+        const std::string word = p->word;
+        advance();
+        if (peek_is(TokenKind::Dot)) {
+            advance();
+            return ArithExpr(ArithExpr::Col{word + "." + expect_any_name()});
+        }
+        return ArithExpr(ArithExpr::Col{word});
     }
 
     throw ParseError("Expected expression term");

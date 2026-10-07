@@ -1304,6 +1304,35 @@ VS Code 스타일 탭 드래그 순서 변경(요청의 1번 항목)은 같은 �
 
 **Diagram 페이지**: 구성요소·흐름이 바뀐 것이 없어 변경 없음.
 
+### 10월 7일 (네 번째) — 예약어가 아닌 키워드를 이름으로 쓰기(`date`·`year`·`count`·`level`·`user`·`text`…), `begin`/`end` 열이 서버를 멈추던 것과 프로시저 본문의 `CASE … END`가 문장을 자르던 것(문장 분리기를 하나로), 집계 질의의 select 항목(ONLY_FULL_GROUP_BY), `TIMESTAMPDIFF`의 단위
+
+**왜 이 항목인가**: 사용자 결정("전부 고쳐")의 R11. `CREATE TABLE t (id INT, date INT)`가 "Expected identifier"로 거절되었다 — MySQL에서 `date`·`time`·`year`·`count`·`text`·`level`·`user`·`timestamp`·`password`·`role`·`min`/`max`/`sum`/`avg` 같은 단어는 예약어가 아니라서 따옴표 없이 열 이름으로 쓰고, 실제 스키마(`created_date`뿐 아니라 `date`, `level`, `count`, `year`)에서 흔하다. 확인하는 과정에서 같은 뿌리의 문제 셋을 더 찾아 같이 고쳤다.
+
+**원인과 영향**:
+- **이름 자리에 키워드 토큰이 오면 거절**: 렉서는 `DATE`·`COUNT`·`LEVEL`… 을 키워드 토큰으로 만들고, 이름이 필요한 자리(`expect_ident`)는 식별자 토큰만 받았다. 식 안에서도 `COUNT`·`LENGTH`·`ABS` 같은 단어는 괄호가 없어도 함수로 읽으려다 `Expected '(' after aggregate`로 실패했고(`SELECT count FROM t`), 맨 `YEAR`는 열이 아니라 문자열 `'YEAR'`로 읽혔다(`SELECT year FROM t`가 모든 행에 `YEAR`). 이름을 받는 도우미 셋(`expect_any_name`/`expect_any_ident`/`expect_alias_ident`)은 서로 다른 단어 목록을 따로 갖고 있었다.
+- **`begin`/`end`라는 열이 서버를 멈춤**: 서버·CLI·클라이언트의 문장 분리기가 `BEGIN` 단어를 만나면 프로시저 본문의 시작으로 보고 `END`를 기다렸다 — `CREATE TABLE t (id INT, begin INT)`를 보내면 서버가 입력을 더 기다리며 **응답을 주지 않았다**(연결이 멈춘 것처럼 보임).
+- **본문 안의 `CASE … END`가 블록을 닫음**: `CREATE PROCEDURE … BEGIN … SET s = CASE WHEN … END; … END`에서 CASE의 `END`가 본문의 `BEGIN`을 닫은 것으로 세어져 첫 `;`에서 문장이 잘렸고, 이후 본문과 응답이 한 칸씩 어긋났다(분리기가 서버·CLI·클라이언트·테스트에 네 벌로 복사되어 있었다).
+- **집계 질의의 select 항목**: `SELECT COUNT(*), 1 FROM t`가 **한 열만** 돌려주고(상수·상수의 함수가 답에서 사라짐), `SELECT COUNT(*), v FROM t`도 `v`가 사라졌다. `GROUP BY`가 있는 질의에서 그룹에 없는 열(`SELECT g, v FROM t GROUP BY g`)은 **빈 값**이었다. MySQL(ONLY_FULL_GROUP_BY가 기본)은 오류 1140/1055이고, 기본키로 묶으면(`GROUP BY id`) 나머지 열을 쓸 수 있다 — 엔진은 그 열도 빈 값으로 냈다.
+- **`TIMESTAMPDIFF(MONTH, a, b)`가 NULL**: 단위가 열 이름으로 읽혀 NULL이 나왔다(우연히 `YEAR`만 됐다).
+
+**수정**:
+- **렉서가 키워드가 쓰인 단어를 남긴다**(`Token::word`, 소문자; 토큰의 동일성 비교에는 쓰지 않음). `Parser::is_plain_word`가 MySQL이 예약하지 않는 키워드 종류(타입 이름·집계 함수·스칼라 함수·`LEVEL`·`USER`·`END`·`OFFSET` …)를 정하고, 이름이 필요한 모든 자리(`expect_ident`·`expect_any_name`·`expect_any_ident`·`expect_alias_ident`)와 식의 마지막 대안이 그 단어를 이름으로 받는다. 함수 이름인 단어는 `(`가 따라올 때만 호출이고(`NOW`·`CURDATE`라고 쓴 것은 열; `CURRENT_TIMESTAMP`·`CURRENT_DATE`는 괄호 없이 값), 맨 `YEAR`는 열이다. 예약어(`SELECT`·`ORDER`·`NULL` …)는 그대로 거절(따옴표나 백틱으로 쓰면 이름). `TIMESTAMPDIFF`/`TIMESTAMPADD`의 첫 인자는 단위 단어.
+- **문장 분리기를 하나로**(`engine/statement_split.hpp`, 헤더만): 서버·CLI·클라이언트(응답 개수를 세는 쪽)가 같은 함수를 쓴다. `BEGIN`/`END`가 **이름으로 쓰였는지**(앞이 `,` `(` `.` 연산자 또는 `SELECT`/`WHERE`/`BY`/`AS` …, 뒤가 `,` `)` `.` 연산자 또는 `FROM`/`AS`/타입 이름 …)를 보고, `CASE`를 세어 CASE 식의 `END`는 블록을 닫지 않으며(`END CASE`는 문장 CASE를 닫음, `THEN`/`ELSE` 바로 뒤의 `END`는 이름), 문자열의 `\\'`, 큰따옴표·백틱 이름, `--`/`#`/`/* */` 주석 안의 `;`을 건너뛴다.
+- **집계 질의의 규칙**(바인더 `only_full_group_by`): 집계하거나 묶는 질의에서 집계 아닌 select 항목은 묶은 열, 묶은 식, 묶은 기본키에 종속된 열, 또는 열이 없는 식만 쓸 수 있고 아니면 MySQL과 같은 오류(`In aggregated query without GROUP BY, expression #2 of SELECT list contains nonaggregated column 'v'; this is incompatible with sql_mode=only_full_group_by` / `Expression #2 of SELECT list is not in GROUP BY clause and contains nonaggregated column …`). 저장된 뷰·프로시저 본문은 검사하지 않는다(만든 때 검사). 실행기는 `GROUP BY 기본키`의 종속 열을 그룹의 한 행에서 읽고(`SELECT * FROM a GROUP BY id`), 열이 없는 항목(`SELECT COUNT(*), 1`, `UPPER('a')`, `CASE WHEN 1 = 1 …`)을 집계 한 행의 답에 포함한다.
+
+**검증**:
+- 신규 Catch2 11케이스(598 → 609): `test_keyword_names.cpp` 3개 — ① **차분 시험**: 키워드 단어 102개(타입·집계·함수·`level`/`user`/`end`/`begin`/`month`/`name` …) × 문장 61가지(CREATE/INSERT/SELECT/별칭/WHERE/IN/BETWEEN/ORDER BY/GROUP BY/집계/식/함수 인자/CASE/IF/윈도/조인/서브쿼리/상관 서브쿼리/UNION/뷰/UPDATE/인덱스/ON DUPLICATE/DELETE/DESCRIBE/SHOW CREATE) — 같은 문장을 그 단어를 열 이름으로 쓴 표와 평범한 이름 `zz9`를 쓴 표에서 실행해 답이 같아야 한다(이름만 다름), ② 테이블·별칭·점 이름·`DATE_ADD` 단위·`TIMESTAMPDIFF`·`NOW`와 `CURRENT_TIMESTAMP`·백틱 이름, ③ 예약어는 이름이 될 수 없음; `test_server_stmt_split.cpp` 3개 — 이름으로 쓴 `begin`/`end`(이름 자리 20여 가지)·블록의 키워드·CASE 식의 `END`(프로시저·트리거 본문, `END CASE`/`END IF`/`END WHILE`/`END LOOP`/`END REPEAT`, 중첩 블록)·주석·문자열·백틱·트랜잭션 `BEGIN`; `test_group_by_rules.cpp` 5개 — 열 없는 항목, 오류들(번호·메시지), 허용되는 것들(묶은 열·식·위치·별칭·서브쿼리·윈도), 기본키 종속 열의 값, 저장된 뷰.
+- 심은 버그 44종(렉서·이름을 받는 자리·단어 목록·함수 이름의 괄호·식·select 목록·문장 분리기·집계 규칙) 가운데 **처음에는 4종이 살아남았고**(`DATE_ADD`/`DATE_SUB` 이름의 괄호 판정, 분리기가 앞 문맥만으로/뒤 문맥만으로 이름을 알아보는 두 경우, `THEN end`) 시험을 보강해 잡았다. 최종 41종을 테스트가 잡고, 3종은 결과가 같은 변이(select 목록에서 함수 이름 단어를 `Column`이 아니라 `Expr{Col}`로 읽는 경로 — 같은 답; 바깥 질의의 열 이름은 안쪽 범위에서 풀리지 않아 규칙이 어차피 건너뜀; 검사하는 문장에서는 닿지 않는 상수 항목의 조건 판정)이다.
+- Release/Debug **609 케이스/1,342,651 assertions**를 기본 설정과 `RUSQL_DML_INDEX_MIN_ROWS=0` 양쪽에서 통과(네 가지 모두). SELECT 차분 퍼저 150시드(1,819,528 assertions), DML 퍼저 80시드(1,950,808), 쓰기 퍼저 40시드(43,182), 조인 퍼저 60시드(7,178), 집계·타입·식·정렬·서브쿼리·MERGE·상관 서브쿼리 무작위 시험 긴 캠페인, 크래시 퍼저 90라운드·동시 퍼저 30라운드(확인한 확정 행 16,696) 불일치 0, 검증기(`verify_correlated`·`verify_sort_group`·`verify_value_expressions`·`verify_subqueries`·`verify_agg_arguments`·`verify_compare`·`verify_joins`·`verify_writes`·`verify_aggregates`·`verify_agg_expressions`·`verify_orderby_distinct` 등) 위반 없음. 기존 `test_full.sql`(319문장)·`test_full-ver2.sql`(360응답)를 서버에 스트림으로 보내 앞 빌드와 응답을 비교: 차이 없음(새 분리기와 집계 규칙이 이 스크립트들에는 영향 없음).
+- 빌드 간 차분(이전 빌드 = 앞 항목): 30시드 × 99질의(2,970질의) **차이 0건** — 이 말뭉치의 집계 질의는 모두 묶은 열만 고르므로 의도한 변화(그룹에 없는 열 오류 등)는 나타나지 않는다(새 테스트가 직접 검증한다).
+- 성능: 앞 항목 빌드와 번갈아 2라운드, 5만 행: `COUNT(*)` 43.4 → 42.9 / 43.4 → 45.0ms, `SUM`/`AVG` 56.9 → 56.1 / 56.1 → 60.9, `GROUP BY` + 4집계 69.7 → 70.0 / 70.7 → 73.3, `HAVING AVG` 58.0 → 59.7 / 65.0 → 62.6, `SUM(v) + 1` 53.0 → 53.0 / 56.3 → 55.9 — 두 빌드가 같다(±5% 안의 측정 잡음). 그룹마다 한 행을 복사하는 일은 select에 그룹에 없는 열(기본키로 묶은 질의의 종속 열)이 있을 때만 하고, 평범한 `GROUP BY`는 새 경로를 지나지 않는다.
+
+**눈에 띄는 변화(의도한 것)**: `date`·`year`·`count`·`level`·`text` … 를 따옴표 없이 열·테이블·별칭 이름으로 쓸 수 있다; `begin`/`end` 열이 서버를 멈추지 않는다; 프로시저·트리거 본문의 CASE 식이 본문을 자르지 않는다; `SELECT COUNT(*), 1` 같은 질의에 상수 항목이 나온다; **그룹에 없는 열을 select에 쓰면 오류**(전에는 빈 값/누락 — MySQL 8 기본과 같음; 기본키로 묶으면 나머지 열을 쓸 수 있음); `TIMESTAMPDIFF`가 모든 단위(`MONTH`/`DAY`/…)를 지원.
+
+**정직한 한계**: ① `FROM t date`처럼 `AS` 없는 별칭이 키워드인 것은 받지 않는다(`AS date`는 됨); ② MySQL 8이 예약하는 단어(`rank`·`row`·`rows`·`key`·`index`·`check`·`default`…)는 `CREATE TABLE`에서 열 이름으로 받지 않는다(MySQL과 같음; 식 안의 `rank`/`row`는 예전처럼 열로 읽힘); ③ 분리기는 SQL을 이해하는 것이 아니라 단어와 문맥으로 `BEGIN`/`END`가 이름인지 추정한다 — `THEN`/`ELSE` 바로 뒤의 `BEGIN`은 블록으로 읽고, 앞뒤에 단서가 전혀 없는 이름은 트랜잭션 `BEGIN;`과 구별할 수 없다; ④ 함수적 종속은 기본키 하나로만 판정한다(고유 키·`WHERE x = 상수`로 인한 종속은 오류로 본다); ⑤ ONLY_FULL_GROUP_BY는 select 항목만 본다(`ORDER BY`·`HAVING`의 묶이지 않은 열은 검사하지 않음); ⑥ 열 이름은 대소문자를 구분한다(기존).
+
+**Diagram 페이지**: 구성요소·흐름이 바뀐 것이 없어 변경 없음.
+
 ## 요약: 1학기 대비 2학기에 달라진 것
 
 | 항목 | 1학기 (~2026년 6월) | 2학기 (2026년 7~8월) |

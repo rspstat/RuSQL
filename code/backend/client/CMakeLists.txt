@@ -6,7 +6,8 @@
 # primitive, not a dependency on the engine itself.
 add_executable(engine_client src/main.cpp)
 target_compile_features(engine_client PRIVATE cxx_std_20)
-target_include_directories(engine_client PRIVATE ${CMAKE_SOURCE_DIR}/backend/third_party)
+target_include_directories(engine_client PRIVATE ${CMAKE_SOURCE_DIR}/backend/third_party ${CMAKE_SOURCE_DIR}/backend/core/include)
+# (core/include only for engine/statement_split.hpp, header-only: the client and the server must cut the input into statements the same way)
 
 if(WIN32)
     target_link_libraries(engine_client PRIVATE ws2_32)

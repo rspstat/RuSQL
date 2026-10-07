@@ -20,6 +20,7 @@
 #include <vector>
 
 #include "engine/executor/executor.hpp"
+#include "engine/statement_split.hpp"
 #include "mysql.hpp"
 
 #pragma comment(lib, "ws2_32.lib")
@@ -116,94 +117,6 @@ std::vector<std::uint8_t> make_nonce(unsigned short peer_port) {
         if (b == 0) b = 0x5a;
     }
     return n;
-}
-
-// Returns the byte offset of the first ';' at BEGIN...END depth 0, skipping
-// --/#/block comments and string literals. std::nullopt means the buffer so
-// far holds no complete top-level statement yet (e.g. an unclosed BEGIN body
-// spanning multiple lines) -- the caller must keep accumulating more input
-// before trying again, mirroring the CLI's find_stmt_end (cli/src/main.cpp).
-// Unlike a naive "does buf contain any ';'" check, this is depth-aware, so a
-// ';' inside an open BEGIN block never causes a premature, partial split.
-std::optional<std::size_t> find_stmt_end(const std::string& input) {
-    int begin_depth = 0;
-    std::size_t i = 0;
-    std::size_t len = input.size();
-
-    while (i < len) {
-        if (input[i] == '-' && i + 1 < len && input[i + 1] == '-') {
-            while (i < len && input[i] != '\n') i++;
-            continue;
-        }
-        if (input[i] == '#') {
-            while (i < len && input[i] != '\n') i++;
-            continue;
-        }
-        if (input[i] == '/' && i + 1 < len && input[i + 1] == '*') {
-            i += 2;
-            while (i + 1 < len) {
-                if (input[i] == '*' && input[i + 1] == '/') {
-                    i += 2;
-                    break;
-                }
-                i++;
-            }
-            continue;
-        }
-        if (input[i] == '\'') {
-            i++;
-            while (i < len) {
-                char c = input[i];
-                i++;
-                if (c == '\'') break;
-            }
-            continue;
-        }
-        if (std::isalpha(static_cast<unsigned char>(input[i])) || input[i] == '_') {
-            std::size_t start = i;
-            while (i < len && (std::isalnum(static_cast<unsigned char>(input[i])) || input[i] == '_')) i++;
-            std::string word = input.substr(start, i - start);
-            std::string upper = to_upper_str(word);
-            if (upper == "BEGIN") {
-                // A transaction `BEGIN;` / `BEGIN WORK;` has no matching END -- only a
-                // procedure/trigger body's BEGIN does. Without this check, a bare
-                // transaction BEGIN made begin_depth stick above 0 for the rest of the
-                // input, silently fusing every following statement into one chunk (this
-                // was masked for a long time by a separate parser bug that ignored
-                // trailing tokens after a valid statement; now that that's fixed, the
-                // fused chunk fails outright with "Unexpected token(s) after end of
-                // statement"). Mirrors the CLI's find_stmt_end (cli/src/main.cpp).
-                std::size_t j = i;
-                while (j < len && std::isspace(static_cast<unsigned char>(input[j]))) j++;
-                bool is_transaction;
-                if (j >= len || input[j] == ';') {
-                    is_transaction = true;
-                } else if (std::isalpha(static_cast<unsigned char>(input[j]))) {
-                    std::size_t s2 = j, k = j;
-                    while (k < len && (std::isalnum(static_cast<unsigned char>(input[k])) || input[k] == '_')) k++;
-                    is_transaction = to_upper_str(input.substr(s2, k - s2)) == "WORK";
-                } else {
-                    is_transaction = false;
-                }
-                if (!is_transaction) begin_depth++;
-            } else if (upper == "END") {
-                std::size_t j = i;
-                while (j < len && std::isspace(static_cast<unsigned char>(input[j]))) j++;
-                bool next_is_sub = false;
-                if (j < len && (std::isalpha(static_cast<unsigned char>(input[j])) || input[j] == '_')) {
-                    std::size_t s2 = j, k = j;
-                    while (k < len && (std::isalnum(static_cast<unsigned char>(input[k])) || input[k] == '_')) k++;
-                    std::string nw = to_upper_str(input.substr(s2, k - s2));
-                    next_is_sub = (nw == "IF" || nw == "WHILE" || nw == "LOOP" || nw == "REPEAT" || nw == "CASE");
-                }
-                if (!next_is_sub && begin_depth > 0) begin_depth--;
-            }
-            continue;
-        }
-        if (input[i] == ';' && begin_depth == 0) return i;
-        i++;
-    }
-    return std::nullopt;
 }
 
 std::optional<std::string> handle_builtin(const std::string& cmd, std::size_t client_count,
@@ -391,7 +304,7 @@ void handle_client(SOCKET sock, std::shared_ptr<RwLock<SharedDatabase>> shared, 
         // trigger/procedure body's own inner statements to leak out as separate
         // top-level queries on subsequent lines.
         for (;;) {
-            auto pos = find_stmt_end(buf);
+            auto pos = engine::find_statement_end(buf);
             if (!pos) break;
             std::string q = trim_copy(buf.substr(0, *pos));
             buf = buf.substr(*pos + 1);

@@ -199,6 +199,9 @@ enum class TokenKind {
 struct Token {
     TokenKind kind;
     std::string text; // populated only for Ident / StringLit / NumberLit
+    // The word a keyword was typed as, in lower case: a keyword that MySQL does not reserve may also be the name of a column, a table or an alias
+    // (`date`, `level`, `count`), and then this is the name. Not part of the token's identity (operator== looks at kind and text).
+    std::string word;
 
     Token(TokenKind k) : kind(k) {}
     Token(TokenKind k, std::string t) : kind(k), text(std::move(t)) {}
