@@ -421,6 +421,7 @@ std::string Executor::apply_scalar_func(const std::string& func_name, const std:
         auto& [params, body_json] = uf_it->second;
         try {
             ArithExpr expr = nlohmann::json::parse(body_json).get<ArithExpr>();
+            if (StatementContext* c = statement_context_) c->ex->bind_expression(*c->s, expr, false); // (a subquery in the body)
             Row bound_row = row;
             auto resolve_arg = [&](const std::string& arg) -> std::string {
                 if (arg.size() >= 2 && arg.front() == '\'' && arg.back() == '\'') return arg.substr(1, arg.size() - 2);
@@ -431,6 +432,8 @@ std::string Executor::apply_scalar_func(const std::string& func_name, const std:
                 bound_row[params[i]] = i < args.size() ? resolve_arg(args[i]) : std::string();
             }
             return eval_arith(bound_row, expr);
+        } catch (const StatementError&) {
+            throw; // (a subquery of the body that fails is the statement's error)
         } catch (...) {
         }
     }

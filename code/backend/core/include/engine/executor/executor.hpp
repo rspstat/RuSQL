@@ -328,6 +328,12 @@ private:
     std::unordered_map<const void*, bool> subquery_exists_cache_;
     // Whether a subquery points out of itself (refers_outside), by its address like the three above.
     std::unordered_map<const void*, bool> subquery_correlated_;
+    // What the four hold is good for the statement that was running when it was kept, until a statement that writes has finished: the next statement
+    // (a procedure's body in the next round of a loop, with other values in it) may be built where the last one was, and a subquery answers for the data
+    // as it is. sync_subquery_caches() throws them away when either has changed.
+    std::uint64_t cache_statement_ = 0;
+    std::uint64_t cache_writes_ = 0;
+    void sync_subquery_caches();
     // A subquery that names a column of the query around it is run on a copy made for each row of that query. What the copy's own
     // subqueries cache (by their address) belongs to that copy alone -- the next copy may be allocated where this one was -- so for as long
     // as a copy runs the caches are a fresh set, and the statement's own come back after it.
@@ -335,17 +341,22 @@ private:
       public:
         explicit CopyScope(Executor& ex)
             : ex_(ex), in_(std::move(ex.subquery_cache_)), scalar_(std::move(ex.subquery_scalar_cache_)),
-              exists_(std::move(ex.subquery_exists_cache_)), correlated_(std::move(ex.subquery_correlated_)) {
+              exists_(std::move(ex.subquery_exists_cache_)), correlated_(std::move(ex.subquery_correlated_)), statement_(ex.cache_statement_),
+              writes_(ex.cache_writes_) {
             ex.subquery_cache_.clear();
             ex.subquery_scalar_cache_.clear();
             ex.subquery_exists_cache_.clear();
             ex.subquery_correlated_.clear();
+            ex.cache_statement_ = 0;
+            ex.cache_writes_ = 0;
         }
         ~CopyScope() {
             ex_.subquery_cache_ = std::move(in_);
             ex_.subquery_scalar_cache_ = std::move(scalar_);
             ex_.subquery_exists_cache_ = std::move(exists_);
             ex_.subquery_correlated_ = std::move(correlated_);
+            ex_.cache_statement_ = statement_;
+            ex_.cache_writes_ = writes_;
         }
         CopyScope(const CopyScope&) = delete;
         CopyScope& operator=(const CopyScope&) = delete;
@@ -356,11 +367,37 @@ private:
         std::unordered_map<const void*, SubqueryAnswer> scalar_;
         std::unordered_map<const void*, bool> exists_;
         std::unordered_map<const void*, bool> correlated_;
+        std::uint64_t statement_, writes_;
     };
     // Is this subquery correlated (answered per outer row), as the binder's marks say.
     bool subquery_is_correlated(const Statement& sub);
     // The output of a subquery for one outer row (a copy with the row's values in when it is correlated); throws StatementError when it fails.
     std::string run_subquery(SharedDatabase& s, const Statement& original, const Row& row, bool correlated);
+    // The value of a scalar subquery used inside an expression (ArithExpr::Subquery): NULL when it gives no row, an error for several. One that names no
+    // column of the row is answered once per statement (and once more after a statement that writes), and the answer is kept in the node.
+    std::string scalar_subquery_value(SharedDatabase& s, const ArithExpr::Subquery& sq, const Row& row, std::uint64_t statement);
+    std::uint64_t statement_serial_ = 0; // numbers the statements that run (the nested ones too)
+    std::uint64_t write_serial_ = 0;     // how many statements that write have finished
+    // While a statement runs on a thread, the expressions in it may run subqueries (eval_arith is static: this is how it finds the executor).
+    struct StatementContext {
+        Executor* ex;
+        SharedDatabase* s;
+        std::uint64_t statement;
+    };
+    static thread_local StatementContext* statement_context_;
+    class StatementScope {
+      public:
+        StatementScope(Executor& ex, SharedDatabase& s, bool writes);
+        ~StatementScope();
+        StatementScope(const StatementScope&) = delete;
+        StatementScope& operator=(const StatementScope&) = delete;
+
+      private:
+        Executor& ex_;
+        StatementContext context_;
+        StatementContext* previous_;
+        bool writes_;
+    };
     // Hash indexes the statement builds for itself. A correlated subquery runs once per outer row, and when its WHERE has
     // `<column without an index> = <value>` every run scanned the whole inner table. The third time one statement looks
     // up the same column of the same table, the table's rows are bucketed by that column (numeric values by their
@@ -564,6 +601,8 @@ private:
 
     Statement qualify_stmt(const SharedDatabase& s, Statement stmt) const;
     CondExpr qualify_condexpr(const SharedDatabase& s, CondExpr expr) const;
+    // the tables of the scalar subqueries inside an expression
+    void qualify_arith_inplace(const SharedDatabase& s, ArithExpr& expr) const;
     Join qualify_join_(const SharedDatabase& s, const Join& j) const;
 
     // ── Phase 8a: DDL ────────────────────────────────────────────────────
@@ -910,7 +949,13 @@ private:
     // given, a trigger's `NEW.x` / `OLD.x` -- by its value (executor_vars.cpp).
     void substitute_variables(Statement& stmt, const std::unordered_map<std::string, std::string>* row = nullptr) const;
     void substitute_variables(ArithExpr& expr, const std::unordered_map<std::string, std::string>* row = nullptr) const;
-    void evaluate_insert_expressions(Statement& stmt) const;
+    // An expression or condition that is evaluated by itself (SET x = ..., IF / WHILE / UNTIL, SET NEW.x = ..., a CALL's argument, an INSERT's value, the
+    // body of a function) may hold subqueries: they get the database prefix and are bound as the item (or the WHERE) of a `SELECT ... FROM _dual_`
+    void bind_expression(SharedDatabase& s, ArithExpr& expr, bool check);
+    void bind_condition(SharedDatabase& s, CondExpr& cond, bool check);
+    // `s` given: the values that hold a subquery are computed too (they are left alone otherwise: the routing of a partitioned table reads the others
+    // first); `check`: an unknown column in such a subquery is an error
+    void evaluate_insert_expressions(Statement& stmt, SharedDatabase* s = nullptr, bool check = false);
     // Joins read the way SQL says: NATURAL / USING joins become an ON condition (`joined_using` keeps their columns, which `*` shows
     // once), a cross join that the WHERE pairs up becomes an inner join on that, and `*` / `t.*` over a join become the columns they stand
     // for (a plain `*` over one table too when `expand_plain_star`: next to other columns, or under DISTINCT, where the row's own

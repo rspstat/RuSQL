@@ -1333,6 +1333,37 @@ VS Code 스타일 탭 드래그 순서 변경(요청의 1번 항목)은 같은 �
 
 **Diagram 페이지**: 구성요소·흐름이 바뀐 것이 없어 변경 없음.
 
+### 10월 7일 (다섯 번째) — 식 안의 서브쿼리(`(SELECT …) + 1`, `COALESCE((SELECT …), 0)`, `UPDATE … SET v = (SELECT …)`, `INSERT … VALUES (…, (SELECT …))`), `IN (식 목록)`, `LIKE 식`, 값 자리의 조건이 서브쿼리를 답하지 못하던 것(`CASE WHEN EXISTS (…)`, `JOIN … ON x IN (SELECT …)`), 프로시저 반복문에서 서브쿼리 답이 묵은 채 남던 것
+
+**왜 이 항목인가**: 사용자 결정("전부 고쳐")의 R4c. `SELECT (SELECT MAX(k) FROM b) + 1`, `WHERE x > (SELECT AVG(v) FROM t) * 1.1`, `WHERE a IN (b, c + 1)`, `WHERE s LIKE CONCAT(prefix, '%')`, `UPDATE t SET v = (SELECT …)`이 파싱 오류였다. 확인하는 과정에서 **오류 없이 틀린 답**을 내는 같은 뿌리의 문제를 더 찾아 같이 고쳤다. (사용자가 크레딧 사정으로 "소규모 작업만 완료하고 문서·커밋"을 요청해, 아래 검증 목록은 이 항목의 것만 적었다 — 실행하지 않은 것은 맨 아래에 적는다.)
+
+**원인과 영향**:
+- **서브쿼리는 식의 항이 아니었다**: `(SELECT …)`는 select 항목의 전부이거나 비교의 오른쪽 전부일 때만 파서가 받았다. 산술의 피연산자·함수 인자·CASE 결과·BETWEEN 한계·`SET`/`VALUES`의 값에 쓰면 파싱 오류. `IN (a, b)`는 숫자·문자열·NULL·변수만 받았고, `LIKE`의 패턴은 문자열 하나만 받았다.
+- **값 자리의 조건이 서브쿼리를 답하지 못함 (오류 없이 틀림)**: WHERE·HAVING의 서브쿼리 조건은 서브쿼리용 경로로 평가되지만, 조건이 값으로만 쓰이는 자리 — `CASE WHEN EXISTS (…) THEN …`, `IF(x IN (SELECT …), 1, 0)`, select 항목 `x IN (SELECT …)`, **JOIN의 ON**(`ON b.a_id = a.id AND b.k > (SELECT AVG(k) FROM b)`), 다중 테이블 UPDATE/DELETE의 ON — 의 평가기는 서브쿼리 조건을 **그냥 거짓**으로 돌려주었다(`CASE WHEN EXISTS`는 늘 ELSE, 조인은 0행).
+- **프로시저의 `WHILE (SELECT …)`·`IF EXISTS (…)`·`SET v = (SELECT …) + 1`**: 같은 이유로 조건이 거짓/식이 오류.
+- **묵은 서브쿼리 답 (오류 없이 틀림)**: 서브쿼리 답의 캐시는 서브쿼리 노드의 **주소**를 열쇠로 하고 최상위 문장이 시작할 때만 지웠다. 프로시저 본문은 반복마다 문장을 복사해 같은 주소에 다시 만들 수 있어서, 반복 안의 `SELECT COUNT(*) INTO c FROM a WHERE id IN (SELECT a_id FROM b WHERE k >= i * 4)`가 `i`가 바뀌어도(또는 본문의 `INSERT INTO b`가 b를 바꿔도) **첫 반복의 답**을 읽었다(시험 프로시저: 기대 211/334가 222/333).
+- 부수로 찾은 것: 왼쪽이 서브쿼리이고 오른쪽이 `IN (SELECT …)`인 조건에서 왼쪽 서브쿼리의 테이블에 데이터베이스 접두어가 붙지 않아 `Table 'b' not found`; `INSERT … VALUES`의 서브쿼리는 열 개수/존재하지 않는 열을 검사하지 않음(`(SELECT k, id …)`가 첫 열로 들어가고 `nosuch`는 "Incorrect integer value"); 함수 본문(`CREATE FUNCTION f(x) … RETURN x + (SELECT …)`)은 오류를 삼키고 엉뚱한 값.
+
+**수정**:
+- **식의 항 `ArithExpr::Subquery`**: 파서가 `(SELECT …)`를 식의 항으로 받는다(뒤에 연산자가 이어지면 되감아 식으로 다시 읽음 — select 항목·비교의 오른쪽·`SET @x =`·프로시저의 `SET v =`). 바인더가 안쪽 질의를 중첩 질의로 묶고(바깥 참조 표시, 열 둘 이상 = 1241, 없는 열/테이블 오류) 그 한 열의 종류를 값의 종류로 삼는다. 값은 행이 없으면 NULL, 둘 이상이면 1242. 바깥 열을 쓰지 않는 서브쿼리는 **문장마다 한 번**(그리고 그 문장 사이에 쓰기 문장이 끝나면 다시) 답하고 노드에 보관, 바깥 열을 쓰면 행마다. 정적 평가기가 서브쿼리를 실행할 수 있도록 실행 중인 문장을 스레드-로컬 `StatementContext`로 알린다(`StatementScope`: 문장 번호·쓰기 번호).
+- **`IN (식 목록)`**: 목록에 숫자·문자열·NULL·변수 말고 다른 것이 있으면 `x = a OR x = b …`(`NOT IN`은 `x <> a AND x <> b …`)로 푼다 — NULL의 3값 논리가 같다. 값만 있는 목록은 전과 같다. `LIKE`·`NOT LIKE`·`REGEXP`의 패턴도 식(함수·열·서브쿼리)을 받는다(따옴표 문자열은 열 이름이 아니라 문자열로 유지).
+- **값 자리의 서브쿼리 조건**: 평가기가 서브쿼리 조건을 만나면 실행 중인 문장의 서브쿼리용 경로로 답한다(WHERE의 것과 같은 코드·캐시) — `CASE WHEN`·`IF()`·select 항목·JOIN의 ON(해시 조인의 검증 포함; 같은 평가기를 쓰는 다중 테이블 UPDATE/DELETE의 ON도 같은 경로이지만 따로 시험하지는 않았다). 컨텍스트가 없는 곳에서 만나면 거짓이 아니라 오류. 읽는 테이블을 잠금 집합·읽기 전용 판정·병렬 스캔 제외(`cond_has_any_subquery`)에 포함.
+- **독립적으로 평가되는 식**(프로시저의 `SET`/`IF`/`WHILE`/`UNTIL`, `SET @x = …`, 트리거의 `SET NEW.x = …`, `CALL p((SELECT …))`, `INSERT`의 값, 함수 본문): 데이터베이스 접두어를 붙이고 `SELECT <식> FROM _dual_`의 항목으로 묶어 같은 바인더를 거친다(`bind_expression`/`bind_condition`). 함수 본문에서 난 `StatementError`는 삼키지 않는다.
+- **묵은 답 막기**: 서브쿼리 답 캐시(IN 집합·스칼라·EXISTS·상관 여부)는 **그 답을 만든 문장 번호와 쓰기 번호**가 같을 때만 쓴다(`sync_subquery_caches`; 복사본 실행 `CopyScope`는 자기 번호를 보존). 문장이 바뀌거나 쓰기 문장이 끝나면 버린다.
+- **고치지 않고 오류로 거절하는 것**: 텍스트로 보관되는 자리 — `ORDER BY`·`GROUP BY` 식, 집계 인자 안(`SUM(v + (SELECT …))`) — 의 서브쿼리는 `A subquery inside this expression is not supported`(틀린 답 대신 오류).
+
+**검증**:
+- 신규 Catch2 10케이스(609 → 619, `test_expression_subqueries.cpp`, 1,481 assertions): 식 안 서브쿼리(산술·함수·비교 양쪽·BETWEEN·중첩·상관·집계/HAVING), 값 자리의 조건(`CASE WHEN EXISTS`/`IN`/비교, `IF`, select 항목, JOIN ON 3종과 LEFT JOIN), `IN (식 목록)`(NULL 3값 논리 포함), LIKE/REGEXP 식 패턴(따옴표 문자열은 문자열), INSERT/UPDATE/DELETE/트리거/`SET @x`, 오류들(1241·1242·없는 열·없는 테이블·원자성), 저장 루틴·뷰·재시작(루프의 묵은 답 3종: 쓰기가 있는 루프 334, 변수가 바뀌는 루프 411, `WHILE EXISTS`/`WHILE i < (SELECT COUNT(*) …)`), 12,000행 스캔(병렬 경로 제외), **무작위 시험**(독립 기준 모델: 8행 a, 0~5행 b, 깊이 2의 식 — `+ - *`·`COALESCE`·열·상수·서브쿼리 6종(상관 3종 포함); 값, 비교, `IN`/`NOT IN` 세 식, `UPDATE SET`을 기준과 비교; 기본 6시드, 80시드 캠페인 16,317 assertions 통과).
+- Release **619 케이스/1,344,132 assertions**(기본 설정 1,344,132, `RUSQL_DML_INDEX_MIN_ROWS=0` 1,344,132)를 통과 — 기존 609케이스도 그대로 통과(기존 시험은 한 줄도 바꾸지 않음). (Debug 회귀·심은 버그·차분·성능 비교는 이번 항목에서 하지 않았다.)
+
+**눈에 띄는 변화(의도한 것)**: 식 안의 서브쿼리, `IN (식)`, `LIKE 식`이 동작; `CASE WHEN EXISTS (…)`·`IF(x IN (SELECT …), …)`·`JOIN … ON x > (SELECT …)`가 맞는 답(전에는 늘 거짓/0행); 프로시저 반복문의 서브쿼리가 매 반복 현재 값으로 답; 프로시저의 `WHILE (SELECT …)`·`IF EXISTS`·`SET v = (SELECT …) + 1`; `INSERT … VALUES`의 서브쿼리가 열 개수·없는 열을 검사; 결과 열 이름은 `(subquery)+1`처럼 서브쿼리를 `(subquery)`로 표시(MySQL은 입력한 글자 그대로 — 기존의 "열 이름이 입력한 글자가 아님" 한계).
+
+**정직한 한계**: ① `ORDER BY`·`GROUP BY`·집계 인자 안의 서브쿼리는 거절(위). ② `SET @x = (SELECT …)`·프로시저의 `SET v = (SELECT …)`(뒤에 연산자가 없는 것)는 예전의 `SELECT … INTO` 경로라 행이 여럿이어도 오류 없이 첫 행(MySQL은 1242) — 남김. ③ 서브쿼리가 있는 `UPDATE`는 같은 테이블을 읽어도 바뀌기 전의 행을 읽는다(MySQL은 1093 오류). ④ 문장 하나 안에서 트리거가 쓰기를 하면 바깥 문장의 바깥 열을 쓰지 않는 서브쿼리는 그 뒤 행부터 새 데이터로 다시 답한다(MySQL은 한 번 답해 보관할 수 있어 다를 수 있음 — 정의되지 않은 경우). ⑤ `SELECT 1 UNION SELECT 2`(FROM 없는 SELECT에 UNION)는 파싱 오류(기존; 이번 점검에서 발견, 고치지 않음). ⑥ 이번 항목은 아래 "실행하지 않은 것"을 건너뛰었다.
+
+**실행하지 않은 것 (크레딧 사정)**: Debug 빌드 회귀, 심은 버그(mutant) 시험, 빌드 간 차분(`diff_builds.py`), 성능 비교, 크래시·동시 퍼저와 기존 검증기 재실행. 위 시험이 모두 통과해도 이 항목은 이전 항목들보다 **적게 검증**되었다.
+
+**Diagram 페이지**: 구성요소·흐름이 바뀐 것이 없어 변경 없음.
+
 ## 요약: 1학기 대비 2학기에 달라진 것
 
 | 항목 | 1학기 (~2026년 6월) | 2학기 (2026년 7~8월) |

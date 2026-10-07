@@ -37,6 +37,7 @@ enum class IsolationLevel { ReadUncommitted, ReadCommitted, RepeatableRead, Seri
 // ArithExpr (recursive arithmetic expression tree)
 // ---------------------------------------------------------------------------
 struct CondExpr;
+struct Statement;
 
 struct ArithExpr {
     // `cls`: what kind of value the column holds (its declared type), set by Executor::bind_statement before a statement runs; a comparison
@@ -56,8 +57,19 @@ struct ArithExpr {
     // A condition used as a value: 1 when it is true, 0 when false, NULL when unknown (`v > 5`, `v IS NULL`, `a AND b`). A CASE is the
     // function CASE whose arguments are (a Pred, its result) pairs and, when the count is odd, the ELSE result last.
     struct Pred { std::unique_ptr<CondExpr> cond; };
+    // A scalar subquery used as a value: `(SELECT MAX(k) FROM b) + 1`, `COALESCE((SELECT ...), 0)`, `SET v = (SELECT ...)`, `VALUES (1, (SELECT ...))`. No
+    // row: NULL; several: an error (MySQL 1242). `cls`: what the one column it gives holds (set by the binder). The rest is the answer kept while it
+    // cannot have changed (see Executor::scalar_subquery_value): a copy starts without it.
+    struct Subquery {
+        std::unique_ptr<Statement> query;
+        ValueClass cls = ValueClass::Unknown;
+        mutable std::uint64_t answered_in = 0;     // the statement the kept answer is of; 0: none
+        mutable std::uint64_t answered_after = 0;  // ... and how many statements that write had run by then
+        mutable std::string answer;
+        mutable signed char correlated = -1;   // -1: not looked at yet
+    };
 
-    using Data = std::variant<Col, Num, Str, Add, Sub, Mul, Div, Func, Cmp, Pred>;
+    using Data = std::variant<Col, Num, Str, Add, Sub, Mul, Div, Func, Cmp, Pred, Subquery>;
     Data data;
 
     ArithExpr() : data(Col{}) {}

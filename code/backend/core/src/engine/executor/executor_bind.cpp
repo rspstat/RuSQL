@@ -239,6 +239,7 @@ std::optional<std::string> Executor::bind_statement(SharedDatabase& s, Statement
             else if (auto* v = std::get_if<ArithExpr::Div>(&e.data)) { arith(*v->lhs, clause); arith(*v->rhs, clause); }
             else if (auto* v = std::get_if<ArithExpr::Cmp>(&e.data)) { arith(*v->lhs, clause); arith(*v->rhs, clause); }
             else if (auto* v = std::get_if<ArithExpr::Pred>(&e.data)) cond(*v->cond, clause);
+            else if (auto* v = std::get_if<ArithExpr::Subquery>(&e.data)) subquery_value(*v);
             else if (auto* v = std::get_if<ArithExpr::Func>(&e.data); v && v->name == "CASE") {
                 for (auto& a : v->args) arith(a, clause); // (its conditions and results are expressions)
             } else if (std::holds_alternative<ArithExpr::Func>(e.data)) {
@@ -258,6 +259,8 @@ std::optional<std::string> Executor::bind_statement(SharedDatabase& s, Statement
             else if (auto* v = std::get_if<ArithExpr::Sub>(&e.data)) { annotate(*v->lhs); annotate(*v->rhs); }
             else if (auto* v = std::get_if<ArithExpr::Mul>(&e.data)) { annotate(*v->lhs); annotate(*v->rhs); }
             else if (auto* v = std::get_if<ArithExpr::Div>(&e.data)) { annotate(*v->lhs); annotate(*v->rhs); }
+            else if (auto* v = std::get_if<ArithExpr::Subquery>(&e.data)) subquery_value(*v);
+            else if (auto* v = std::get_if<ArithExpr::Pred>(&e.data)) cond(*v->cond, "field list");
             else if (auto* v = std::get_if<ArithExpr::Func>(&e.data)) {
                 // (the unit of DATE_ADD(d, INTERVAL n DAY) is a word, not a column)
                 const bool unit_last = v->name == "DATE_ADD" || v->name == "DATE_SUB";
@@ -266,6 +269,15 @@ std::optional<std::string> Executor::bind_statement(SharedDatabase& s, Statement
                     annotate(v->args[i]);
                 }
             }
+        }
+
+        // A scalar subquery used as a value: bound as a statement nested in this one (its references to this query are marked); it gives one column
+        // (MySQL 1241), which is what the value holds.
+        void subquery_value(ArithExpr::Subquery& sq) {
+            if (!sq.query) return;
+            auto out = nested(*sq.query);
+            if (check && !error && out.size() > 1) error = "Operand should contain 1 column(s)";
+            sq.cls = out.empty() ? ValueClass::Unknown : out.front().second;
         }
 
         static bool has_outer(const ArithExpr& e) {

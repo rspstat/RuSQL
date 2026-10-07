@@ -8,6 +8,21 @@
 
 namespace engine {
 
+void Executor::qualify_arith_inplace(const SharedDatabase& s, ArithExpr& expr) const {
+    if (auto* sq = std::get_if<ArithExpr::Subquery>(&expr.data)) {
+        if (sq->query) *sq->query = qualify_stmt(s, std::move(*sq->query));
+    } else if (auto* v = std::get_if<ArithExpr::Add>(&expr.data)) { qualify_arith_inplace(s, *v->lhs); qualify_arith_inplace(s, *v->rhs); }
+    else if (auto* v = std::get_if<ArithExpr::Sub>(&expr.data)) { qualify_arith_inplace(s, *v->lhs); qualify_arith_inplace(s, *v->rhs); }
+    else if (auto* v = std::get_if<ArithExpr::Mul>(&expr.data)) { qualify_arith_inplace(s, *v->lhs); qualify_arith_inplace(s, *v->rhs); }
+    else if (auto* v = std::get_if<ArithExpr::Div>(&expr.data)) { qualify_arith_inplace(s, *v->lhs); qualify_arith_inplace(s, *v->rhs); }
+    else if (auto* v = std::get_if<ArithExpr::Cmp>(&expr.data)) { qualify_arith_inplace(s, *v->lhs); qualify_arith_inplace(s, *v->rhs); }
+    else if (auto* f = std::get_if<ArithExpr::Func>(&expr.data)) {
+        for (auto& a : f->args) qualify_arith_inplace(s, a);
+    } else if (auto* p = std::get_if<ArithExpr::Pred>(&expr.data)) {
+        *p->cond = qualify_condexpr(s, std::move(*p->cond));
+    }
+}
+
 CondExpr Executor::qualify_condexpr(const SharedDatabase& s, CondExpr expr) const {
     if (auto* v = std::get_if<CondExpr::And>(&expr.data)) {
         return CondExpr(CondExpr::And{std::make_unique<CondExpr>(qualify_condexpr(s, std::move(*v->lhs))),
@@ -24,8 +39,12 @@ CondExpr Executor::qualify_condexpr(const SharedDatabase& s, CondExpr expr) cons
         if (auto* sub = std::get_if<ConditionValue::Subquery>(&v->condition.value.data)) {
             Condition cond = v->condition;
             cond.value = ConditionValue(ConditionValue::Subquery{std::make_unique<Statement>(qualify_stmt(s, std::move(*sub->query)))});
+            qualify_arith_inplace(s, cond.left); // (`(SELECT MAX(k) FROM b) IN (SELECT k FROM b)`)
             return CondExpr(CondExpr::Leaf{std::move(cond)});
         }
+        // (a scalar subquery in either side's expression)
+        qualify_arith_inplace(s, v->condition.left);
+        if (auto* value = std::get_if<ConditionValue::Arith>(&v->condition.value.data)) qualify_arith_inplace(s, value->expr);
         return expr;
     }
     return expr;
@@ -67,6 +86,7 @@ Statement Executor::qualify_stmt(const SharedDatabase& s, Statement stmt) const 
                     SelectColumn(SelectColumn::Subquery{std::make_unique<Statement>(qualify_stmt(s, std::move(*sub->query))), sub->alias}));
             } else {
                 out.columns.push_back(c);
+                if (auto* e = std::get_if<SelectColumn::Expr>(&out.columns.back().data)) qualify_arith_inplace(s, e->expr);
             }
         }
         out.distinct = v->distinct;
@@ -96,6 +116,7 @@ Statement Executor::qualify_stmt(const SharedDatabase& s, Statement stmt) const 
     }
     if (auto* v = std::get_if<Statement::Update>(&stmt.data)) {
         v->table = qualify_name_with_synonyms(s, v->table);
+        for (auto& [column, value] : v->assignments) qualify_arith_inplace(s, value);
         if (v->condition) v->condition = qualify_condexpr(s, std::move(*v->condition));
         return stmt;
     }
@@ -196,6 +217,7 @@ Statement Executor::qualify_stmt(const SharedDatabase& s, Statement stmt) const 
         return stmt;
     }
     if (auto* v = std::get_if<Statement::MultiUpdate>(&stmt.data)) {
+        for (auto& [column, value] : v->assignments) qualify_arith_inplace(s, value);
         for (auto& t : v->tables) t = qualify_name(t);
         for (auto& j : v->joins) j = qualify_join_(s, j);
         if (v->condition) v->condition = qualify_condexpr(s, std::move(*v->condition));
@@ -213,6 +235,9 @@ Statement Executor::qualify_stmt(const SharedDatabase& s, Statement stmt) const 
         v->source = qualify_name(v->source);
         // (the tables of the subqueries in its conditions too)
         v->on = qualify_condexpr(s, std::move(v->on));
+        if (v->when_matched_update) {
+            for (auto& [column, value] : *v->when_matched_update) qualify_arith_inplace(s, value);
+        }
         if (v->when_matched_update_cond) v->when_matched_update_cond = qualify_condexpr(s, std::move(*v->when_matched_update_cond));
         if (v->when_matched_delete_cond) v->when_matched_delete_cond = qualify_condexpr(s, std::move(*v->when_matched_delete_cond));
         return stmt;

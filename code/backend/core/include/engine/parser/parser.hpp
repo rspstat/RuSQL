@@ -117,6 +117,10 @@ private:
     /// the next token starts a predicate operator (`>`, `IS`, `NOT IN`, `BETWEEN`, ...) / an operator that goes on with an expression (also `+`, `||`)
     bool at_pred_operator() const;
     bool at_value_continuation() const;
+    /// the token `offset` ahead goes on with an arithmetic expression (+ - * / % || -> ->>)
+    bool arith_continues_at(std::size_t offset) const;
+    /// the IN list that starts at token `from` holds only numbers, strings, NULL and @variables (one condition); anything else is an expression
+    bool in_list_is_literals(std::size_t from) const;
     bool select_item_continues() const;
     /// An item of ORDER BY / GROUP BY: a column (its name), a position (`2`), or an expression (the text of it: `a + b`, `COUNT(*)`, `YEAR(d)`)
     std::string parse_sort_item();

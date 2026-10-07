@@ -157,6 +157,7 @@ StringResult Executor::exec_call_procedure(SharedDatabase& s, std::string name, 
     for (auto& arg : args) {
         if (!arg.empty() && arg[0] == '\x01') {
             ArithExpr expr = nlohmann::json::parse(arg.substr(1)).get<ArithExpr>();
+            bind_expression(s, expr, false);
             arg_values.push_back(eval_arith(caller_vars, expr));
         } else if (!arg.empty() && arg[0] == '@') {
             auto it = user_vars.find(arg.substr(1));

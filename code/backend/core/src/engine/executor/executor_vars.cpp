@@ -12,6 +12,7 @@
 #include "engine/executor/executor.hpp"
 #include "engine/parser/ast_json.hpp"
 #include "engine/parser/parser.hpp"
+#include "engine/subquery_walk.hpp"
 
 namespace engine {
 
@@ -122,6 +123,10 @@ void arith(const Vars& v, ArithExpr& e) {
         for (auto& arg : f->args) arith(v, arg);
     } else if (auto* p = std::get_if<ArithExpr::Pred>(&e.data)) {
         cond(v, *p->cond);
+    } else if (auto* sq = std::get_if<ArithExpr::Subquery>(&e.data)) {
+        if (sq->query) statement(v, *sq->query);
+        sq->correlated = -1; // (its variables may have a new value)
+        sq->answered_in = 0;
     }
 }
 
@@ -286,16 +291,43 @@ void Executor::substitute_variables(ArithExpr& expr, const std::unordered_map<st
     arith(Vars{proc_vars, user_vars, row}, expr);
 }
 
+void Executor::bind_expression(SharedDatabase& s, ArithExpr& expr, bool check) {
+    std::vector<const Statement*> found;
+    collect_arith_subqueries(expr, found);
+    if (found.empty()) return;
+    // (bound as the one item of `SELECT <expression>`, like the expressions of every other statement)
+    qualify_arith_inplace(s, expr);
+    Statement::Select sel;
+    sel.table = "_dual_";
+    sel.columns.push_back(SelectColumn(SelectColumn::Expr{std::move(expr), std::nullopt}));
+    Statement wrapped(std::move(sel));
+    if (auto error = bind_statement(s, wrapped, check)) throw StatementError(*error);
+    expr = std::move(std::get<SelectColumn::Expr>(std::get<Statement::Select>(wrapped.data).columns[0].data).expr);
+}
+
+void Executor::bind_condition(SharedDatabase& s, CondExpr& cond, bool check) {
+    if (!cond_has_any_subquery(cond)) return;
+    Statement::Select sel;
+    sel.table = "_dual_";
+    sel.columns.push_back(SelectColumn(SelectColumn::Expr{ArithExpr(ArithExpr::Num{"1"}), std::nullopt}));
+    sel.condition = qualify_condexpr(s, std::move(cond));
+    Statement wrapped(std::move(sel));
+    if (auto error = bind_statement(s, wrapped, check)) throw StatementError(*error);
+    cond = std::move(*std::get<Statement::Select>(wrapped.data).condition);
+}
+
 // An INSERT value that was written as an expression (`1 + 2`, `UPPER('x')`, `NOW()`) is kept by the parser as "\x01" + the JSON of the expression:
 // it is computed here (after the variables in it have been replaced) and becomes the text of the value.
-void Executor::evaluate_insert_expressions(Statement& stmt) const {
+void Executor::evaluate_insert_expressions(Statement& stmt, SharedDatabase* s, bool check) {
     auto* ins = std::get_if<Statement::Insert>(&stmt.data);
     if (!ins) return;
     for (auto& row : ins->values) {
         for (auto& value : row) {
             if (value.empty() || value[0] != '\x01') continue;
+            if (!s && value.find("\"Subquery\"") != std::string::npos) continue; // (computed once the statement runs: it reads tables)
             ArithExpr expr = nlohmann::json::parse(value.substr(1)).get<ArithExpr>();
             substitute_variables(expr);
+            if (s) bind_expression(*s, expr, check);
             value = eval_arith(Row{}, expr);
         }
     }

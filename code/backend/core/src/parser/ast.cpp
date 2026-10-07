@@ -23,6 +23,7 @@ ArithExpr::ArithExpr(const ArithExpr& other)
               else if constexpr (std::is_same_v<T, Div>) return Data(Div{clone_ptr(alt.lhs), clone_ptr(alt.rhs)});
               else if constexpr (std::is_same_v<T, Cmp>) return Data(Cmp{clone_ptr(alt.lhs), alt.op, clone_ptr(alt.rhs)});
               else if constexpr (std::is_same_v<T, Pred>) return Data(Pred{clone_ptr(alt.cond)});
+              else if constexpr (std::is_same_v<T, Subquery>) return Data(Subquery{clone_ptr(alt.query), alt.cls});
               else return Data(alt); // Col/Num/Str copy trivially; Func's vector<ArithExpr> recurses via this ctor
           },
           other.data)) {}

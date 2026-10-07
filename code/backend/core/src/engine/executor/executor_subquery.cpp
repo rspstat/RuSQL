@@ -52,6 +52,17 @@ Executor::Tri Executor::eval_cond3_with_subquery(SharedDatabase& s, const Row& r
     return Tri::False;
 }
 
+void Executor::sync_subquery_caches() {
+    const std::uint64_t statement = statement_context_ ? statement_context_->statement : 0;
+    if (statement == cache_statement_ && write_serial_ == cache_writes_) return;
+    subquery_cache_.clear();
+    subquery_scalar_cache_.clear();
+    subquery_exists_cache_.clear();
+    subquery_correlated_.clear();
+    cache_statement_ = statement;
+    cache_writes_ = write_serial_;
+}
+
 bool Executor::subquery_is_correlated(const Statement& sub) {
     if (auto it = subquery_correlated_.find(&sub); it != subquery_correlated_.end()) return it->second;
     const bool correlated = refers_outside(sub);
@@ -83,6 +94,7 @@ Executor::Tri Executor::eval_single_with_subquery(SharedDatabase& s, const Row& 
 
     auto* sub = std::get_if<ConditionValue::Subquery>(&cond.value.data);
     if (!sub) return Tri::False;
+    sync_subquery_caches();
 
     // One that names no column of the outer query has one answer for the whole statement.
     const Statement& original = *sub->query;

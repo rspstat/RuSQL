@@ -55,6 +55,7 @@ add_executable(engine_tests
     test_merge_conditions.cpp
     test_keyword_names.cpp
     test_group_by_rules.cpp
+    test_expression_subqueries.cpp
 )
 
 target_link_libraries(engine_tests PRIVATE engine_core)

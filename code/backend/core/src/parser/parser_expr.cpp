@@ -78,6 +78,39 @@ bool Parser::at_pred_operator() const {
     }
 }
 
+bool Parser::arith_continues_at(std::size_t offset) const {
+    const Token* t = peek_at(offset);
+    if (!t) return false;
+    switch (t->kind) {
+        case TokenKind::Plus: case TokenKind::Minus: case TokenKind::Asterisk: case TokenKind::Slash: case TokenKind::Percent:
+        case TokenKind::PipePipe: case TokenKind::Arrow: case TokenKind::LongArrow:
+            return true;
+        default:
+            return false;
+    }
+}
+
+bool Parser::in_list_is_literals(std::size_t from) const {
+    std::size_t i = from;
+    for (;;) {
+        const Token* t = i < tokens_.size() ? &tokens_[i] : nullptr;
+        if (!t) return false;
+        if (t->kind == TokenKind::StringLit || t->kind == TokenKind::NumberLit || t->kind == TokenKind::Null) {
+            i++;
+        } else if (t->kind == TokenKind::At && i + 1 < tokens_.size() && tokens_[i + 1].kind == TokenKind::Ident) {
+            i += 2;
+        } else if (t->kind == TokenKind::Minus && i + 1 < tokens_.size() && tokens_[i + 1].kind == TokenKind::NumberLit) {
+            i += 2;
+        } else {
+            return false;
+        }
+        if (i >= tokens_.size()) return false;
+        if (tokens_[i].kind == TokenKind::RParen) return true;
+        if (tokens_[i].kind != TokenKind::Comma) return false;
+        i++;
+    }
+}
+
 bool Parser::at_value_continuation() const {
     if (at_pred_operator()) return true;
     const Token* t = peek();
@@ -176,6 +209,27 @@ CondExpr Parser::parse_pred_expr() {
 
 /// `left IS [NOT] TRUE|FALSE` is a test that never answers NULL; every other operator is one comparison (parse_pred_tail)
 CondExpr Parser::parse_pred_cond(ArithExpr left) {
+    // [NOT] IN (a, b + 1, col, (SELECT ...)): a list of numbers, strings, NULL and @variables is one condition; any other item makes the comparisons it
+    // stands for (`x IN (a, b)` is `x = a OR x = b`, `x NOT IN (a, b)` is `x <> a AND x <> b`: the same answers when a value is NULL)
+    const bool not_in = peek_is(TokenKind::Not) && peek_at_is(1, TokenKind::In);
+    if ((not_in || peek_is(TokenKind::In)) && peek_at_is(not_in ? 2 : 1, TokenKind::LParen) && !peek_at_is(not_in ? 3 : 2, TokenKind::Select) &&
+        !in_list_is_literals(pos_ + (not_in ? 3 : 2))) {
+        advance(); // NOT / IN
+        if (not_in) advance();
+        advance(); // (
+        std::optional<CondExpr> chain;
+        for (;;) {
+            ArithExpr item = parse_value_expr();
+            CondExpr one = leaf(left, not_in ? Operator::Ne : Operator::Eq, condition_value_of(std::move(item)));
+            chain = chain ? (not_in ? both(std::move(*chain), std::move(one)) : either(std::move(*chain), std::move(one))) : std::move(one);
+            if (peek_is(TokenKind::Comma)) { advance(); continue; }
+            if (!peek_is(TokenKind::RParen)) throw ParseError(not_in ? "Expected ',' or ')' in NOT IN list" : "Expected ',' or ')' in IN list");
+            advance();
+            break;
+        }
+        return std::move(*chain);
+    }
+
     // [NOT] BETWEEN lo AND hi: bounds that are a number, a string or an @variable make one Between condition; any other bound (a column, an
     // expression: `BETWEEN a AND a + 10`) makes the two comparisons it stands for
     const bool not_between = peek_is(TokenKind::Not) && peek_at_is(1, TokenKind::Between);
@@ -439,42 +493,41 @@ Condition Parser::parse_pred_tail(ArithExpr left) {
         return Condition{std::move(left), Operator::NotIn, ConditionValue(ConditionValue::LiteralList{std::move(values), std::move(quoted)})};
     }
 
+    // The pattern of LIKE / REGEXP: a string, a column, or any expression (`LIKE CONCAT(prefix, '%')`, `LIKE t.pattern`)
+    auto read_pattern = [this](const char* what) -> ConditionValue {
+        const Token* t = peek();
+        if (t && (t->kind == TokenKind::StringLit || t->kind == TokenKind::Ident) && !arith_continues_at(1) && !peek_at_is(1, TokenKind::Dot) && !peek_at_is(1, TokenKind::LParen)) {
+            advance();
+            return ConditionValue(ConditionValue::Literal{t->text, t->kind == TokenKind::StringLit}); // (a string is not the name of a column)
+        }
+        if (!t) throw ParseError(std::string("Expected pattern after ") + what);
+        return condition_value_of(parse_arith_expr());
+    };
+
     // NOT LIKE pattern
     if (peek_is(TokenKind::Not) && peek_at_is(1, TokenKind::Like)) {
         advance(); // NOT
         advance(); // LIKE
-        const Token* t = advance();
-        if (!t || (t->kind != TokenKind::StringLit && t->kind != TokenKind::Ident))
-            throw ParseError("Expected pattern after NOT LIKE");
-        return Condition{std::move(left), Operator::NotLike, ConditionValue(ConditionValue::Literal{t->text})};
+        return Condition{std::move(left), Operator::NotLike, read_pattern("NOT LIKE")};
     }
 
     // LIKE pattern
     if (peek_is(TokenKind::Like)) {
         advance();
-        const Token* t = advance();
-        if (!t || (t->kind != TokenKind::StringLit && t->kind != TokenKind::Ident))
-            throw ParseError("Expected pattern after LIKE");
-        return Condition{std::move(left), Operator::Like, ConditionValue(ConditionValue::Literal{t->text})};
+        return Condition{std::move(left), Operator::Like, read_pattern("LIKE")};
     }
 
     // NOT REGEXP / NOT RLIKE pattern
     if (peek_is(TokenKind::Not) && peek_at_is(1, TokenKind::Regexp)) {
         advance(); // NOT
         advance(); // REGEXP
-        const Token* t = advance();
-        if (!t || (t->kind != TokenKind::StringLit && t->kind != TokenKind::Ident))
-            throw ParseError("Expected pattern after NOT REGEXP");
-        return Condition{std::move(left), Operator::NotRegexp, ConditionValue(ConditionValue::Literal{t->text})};
+        return Condition{std::move(left), Operator::NotRegexp, read_pattern("NOT REGEXP")};
     }
 
     // REGEXP / RLIKE pattern
     if (peek_is(TokenKind::Regexp)) {
         advance();
-        const Token* t = advance();
-        if (!t || (t->kind != TokenKind::StringLit && t->kind != TokenKind::Ident))
-            throw ParseError("Expected pattern after REGEXP");
-        return Condition{std::move(left), Operator::Regexp, ConditionValue(ConditionValue::Literal{t->text})};
+        return Condition{std::move(left), Operator::Regexp, read_pattern("REGEXP")};
     }
 
     // IS NULL / IS NOT NULL
@@ -510,11 +563,17 @@ Condition Parser::parse_pred_tail(ArithExpr left) {
 
     ConditionValue value = [&]() -> ConditionValue {
         if (peek_is(TokenKind::LParen) && peek_at_is(1, TokenKind::Select)) {
+            const std::size_t start = pos_;
             advance(); // (
             advance(); // SELECT
             Statement sub_stmt = parse_select();
             if (!peek_is(TokenKind::RParen)) throw ParseError("Expected ')' after subquery");
             advance();
+            // `x > (SELECT AVG(v) FROM t) * 2`: the subquery goes on as a value in an expression
+            if (arith_continues_at(0)) {
+                pos_ = start;
+                return condition_value_of(parse_arith_expr());
+            }
             return ConditionValue(ConditionValue::Subquery{std::make_unique<Statement>(std::move(sub_stmt))});
         }
         // NULL is special-cased ahead of the general expression parse: it needs the
@@ -673,6 +732,13 @@ ArithExpr Parser::parse_arith_factor() {
 
     if (p->kind == TokenKind::LParen) {
         advance();
+        if (peek_is(TokenKind::Select)) { // a scalar subquery used as a value
+            advance();
+            Statement sub = parse_select();
+            if (!peek_is(TokenKind::RParen)) throw ParseError("Expected ')' after subquery");
+            advance();
+            return ArithExpr(ArithExpr::Subquery{std::make_unique<Statement>(std::move(sub))});
+        }
         ArithExpr inner = parse_value_expr();
         if (!peek_is(TokenKind::RParen)) throw ParseError("Expected ')' in expression");
         advance();
@@ -1072,6 +1138,8 @@ std::string Parser::arith_to_string(const ArithExpr& expr) {
                 return arith_operand(*alt.lhs, 1) + " " + alt.op + " " + arith_operand(*alt.rhs, 1);
             } else if constexpr (std::is_same_v<T, ArithExpr::Pred>) {
                 return cond_to_string(*alt.cond);
+            } else if constexpr (std::is_same_v<T, ArithExpr::Subquery>) {
+                throw ParseError("A subquery inside this expression is not supported");
             }
         },
         expr.data);

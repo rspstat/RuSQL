@@ -5,6 +5,7 @@
 // (the last with only the Phase 8a DDL cases wired up so far).
 
 #include "engine/executor/executor.hpp"
+#include "engine/subquery_walk.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -524,7 +525,6 @@ bool cond_value_tables(const CondExpr& e, const std::string& db, std::vector<std
     if (auto* v = std::get_if<CondExpr::Not>(&e.data)) return cond_value_tables(*v->inner, db, out);
     if (auto* v = std::get_if<CondExpr::Leaf>(&e.data)) {
         if (auto* sq = std::get_if<ConditionValue::Subquery>(&v->condition.value.data)) return !sq->query || statement_tables(*sq->query, db, out);
-        // (a subquery inside an expression is not looked into: the expression grammar has none)
     }
     return true;
 }
@@ -548,6 +548,9 @@ bool statement_tables(const Statement& stmt, const std::string& db, std::vector<
         }
         if (sel->condition && !cond_value_tables(*sel->condition, db, out)) return false;
         if (sel->having && !cond_value_tables(*sel->having, db, out)) return false;
+        for (const Statement* sq : select_expression_subqueries(*sel)) {
+            if (!statement_tables(*sq, db, out)) return false;
+        }
         for (auto& c : sel->columns) {
             if (auto* sq = std::get_if<SelectColumn::Subquery>(&c.data)) {
                 if (sq->query && !statement_tables(*sq->query, db, out)) return false;
@@ -619,6 +622,10 @@ bool opt_condexpr_is_read_only(const std::optional<CondExpr>& e) { return !e || 
 } // namespace
 
 bool Executor::is_pure_read_only(const Statement& stmt) {
+    // (a subquery used as a value in an expression can build a derived table of its own)
+    for (const Statement* sq : expression_subqueries(stmt)) {
+        if (!is_pure_read_only(*sq)) return false;
+    }
     return std::visit(
         [](const auto& v) -> bool {
             using T = std::decay_t<decltype(v)>;
@@ -673,6 +680,7 @@ std::string qualify_local(const std::string& name, const std::string& current_db
 }
 
 bool cond_tables_ok(const CondExpr& e, const std::string& current_db, const SharedDatabase& s, std::vector<std::string>& out);
+bool stmt_tables_ok(const Statement& stmt, const std::string& current_db, const SharedDatabase& s, std::vector<std::string>& out);
 
 bool select_tables_ok(const Statement::Select& sel, const std::string& current_db, const SharedDatabase& s,
                       std::vector<std::string>& out) {
@@ -693,6 +701,9 @@ bool select_tables_ok(const Statement::Select& sel, const std::string& current_d
     // itself, so it's exactly as safe under table_locks/table_data_locks SHARED as a
     // plain SELECT. Dispatch's is_select_family (execute(), executor_core.cpp) already
     // covers every Statement::Select regardless of these flags.
+    for (const Statement* sq : select_expression_subqueries(sel)) {
+        if (!stmt_tables_ok(*sq, current_db, s, out)) return false;
+    }
     std::string qtable = qualify_local(sel.table, current_db);
     if (s.views.count(qtable)) return false;
     out.push_back(qtable);
@@ -793,6 +804,8 @@ void add_fk_neighbors(const SharedDatabase& s, const std::string& qtable, bool p
 
 std::optional<std::vector<std::string>> Executor::table_lock_set_for(const SharedDatabase& s, const Statement& stmt) const {
     std::vector<std::string> out;
+    // (a statement that writes and reads other tables through a subquery in one of its expressions takes the whole database; a SELECT adds those tables)
+    if (!std::holds_alternative<Statement::Select>(stmt.data) && has_expression_subquery(stmt)) return std::nullopt;
 
     if (auto* v = std::get_if<Statement::Insert>(&stmt.data)) {
         std::string qtable = qualify_local(v->table, current_db);
@@ -1368,9 +1381,11 @@ StringResult Executor::execute_with_s_body(SharedDatabase& s, Statement stmt) {
     };
     const bool top_level = exec_depth_ == 0;
     DepthGuard depth_guard(exec_depth_);
+    // the expressions of this statement may run subqueries; what the statement writes changes what a subquery that was answered before would say
+    StatementScope statement_scope(*this, s, !is_pure_read_only(stmt));
     sync_udf_context(s.user_functions, current_db, auth_user);
     substitute_variables(stmt); // a procedure's variables and the session's @variables, by their values
-    evaluate_insert_expressions(stmt);
+    evaluate_insert_expressions(stmt, &s, top_level && proc_vars.empty());
 
     if (auto* v = std::get_if<Statement::Use>(&stmt.data)) return exec_use(s, v->database);
     if (auto* v = std::get_if<Statement::CreateDatabase>(&stmt.data)) return exec_create_database(s, v->name, v->if_not_exists);
@@ -1514,14 +1529,24 @@ StringResult Executor::execute_with_s_body(SharedDatabase& s, Statement stmt) {
         return StringResult::Ok("");
     }
     if (auto* v = std::get_if<Statement::ProcSet>(&stmt.data)) {
+        bind_expression(s, v->expr, false);
         proc_vars[v->name] = eval_arith(proc_vars, v->expr);
         return StringResult::Ok("");
     }
-    if (auto* v = std::get_if<Statement::ProcIf>(&stmt.data))
+    if (auto* v = std::get_if<Statement::ProcIf>(&stmt.data)) {
+        bind_condition(s, v->condition, false);
+        for (auto& branch : v->elseif_branches) bind_condition(s, branch.first, false);
         return exec_proc_if(s, v->condition, std::move(v->then_body), std::move(v->elseif_branches), std::move(v->else_body));
-    if (auto* v = std::get_if<Statement::ProcWhile>(&stmt.data)) return exec_proc_while(s, v->label, v->condition, std::move(v->body));
+    }
+    if (auto* v = std::get_if<Statement::ProcWhile>(&stmt.data)) {
+        bind_condition(s, v->condition, false);
+        return exec_proc_while(s, v->label, v->condition, std::move(v->body));
+    }
     if (auto* v = std::get_if<Statement::ProcLoop>(&stmt.data)) return exec_proc_loop(s, v->label, std::move(v->body));
-    if (auto* v = std::get_if<Statement::ProcRepeat>(&stmt.data)) return exec_proc_repeat(s, v->label, std::move(v->body), v->until);
+    if (auto* v = std::get_if<Statement::ProcRepeat>(&stmt.data)) {
+        bind_condition(s, v->until, false);
+        return exec_proc_repeat(s, v->label, std::move(v->body), v->until);
+    }
     if (auto* v = std::get_if<Statement::ProcLeave>(&stmt.data)) {
         proc_signal_ = ProcSignal{ProcSignal::Leave{v->label}};
         return StringResult::Ok("");
@@ -1565,6 +1590,7 @@ StringResult Executor::execute_with_s_body(SharedDatabase& s, Statement stmt) {
     if (auto* v = std::get_if<Statement::SetUserVar>(&stmt.data)) {
         Row vars = proc_vars;
         for (auto& [k, val] : user_vars) vars["@" + k] = val;
+        bind_expression(s, v->expr, top_level && proc_vars.empty());
         std::string result_val = eval_arith(vars, v->expr);
 
         std::string lower_name = v->name;

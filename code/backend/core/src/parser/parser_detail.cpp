@@ -92,6 +92,8 @@ ArithExpr expand_arith(const ArithExpr& expr, const std::unordered_map<std::stri
                                                 std::make_unique<ArithExpr>(expand_arith(*alt.rhs, map))});
             } else if constexpr (std::is_same_v<T, ArithExpr::Pred>) {
                 return ArithExpr(ArithExpr::Pred{std::make_unique<CondExpr>(expand_condexpr(*alt.cond, map))});
+            } else if constexpr (std::is_same_v<T, ArithExpr::Subquery>) {
+                return ArithExpr(ArithExpr::Subquery{std::make_unique<Statement>(*alt.query), alt.cls}); // (its aliases are its own)
             }
         },
         expr.data);

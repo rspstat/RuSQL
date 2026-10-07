@@ -398,14 +398,18 @@ Statement Parser::parse_select() {
 
             // 스칼라 서브쿼리: (SELECT ...) [AS alias]
             if (p && p->kind == TokenKind::LParen && peek_at_is(1, TokenKind::Select)) {
+                const std::size_t start = pos_;
                 advance(); // consume (
                 advance(); // consume SELECT
                 Statement inner = parse_select();
                 if (!peek_is(TokenKind::RParen)) throw ParseError("Expected ')' after scalar subquery");
                 advance();
-                std::optional<std::string> alias;
-                if (peek_is(TokenKind::As)) { advance(); alias = expect_alias_ident(); }
-                return SelectColumn(SelectColumn::Subquery{std::make_unique<Statement>(std::move(inner)), alias});
+                if (!at_value_continuation()) {
+                    std::optional<std::string> alias;
+                    if (peek_is(TokenKind::As)) { advance(); alias = expect_alias_ident(); }
+                    return SelectColumn(SelectColumn::Subquery{std::make_unique<Statement>(std::move(inner)), alias});
+                }
+                pos_ = start; // `(SELECT ...) + 1`, `(SELECT ...) > 3`: an expression (read below)
             }
 
             // default: arithmetic expression, possibly Column/ColumnAlias/Expr/Cmp

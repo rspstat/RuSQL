@@ -379,6 +379,8 @@ std::string arith_to_str(const ArithExpr& expr) {
                 } catch (const ParseError&) {
                     return "";
                 }
+            } else if constexpr (std::is_same_v<T, ArithExpr::Subquery>) {
+                return "(subquery)"; // (as the header of a subquery that is a column of its own)
             } else {
                 return "";
             }

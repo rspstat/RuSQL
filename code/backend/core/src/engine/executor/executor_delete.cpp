@@ -12,6 +12,7 @@
 // mixed behavior is preserved faithfully rather than "fixed" to be fully subquery-aware.
 
 #include "engine/executor/executor.hpp"
+#include "engine/subquery_walk.hpp"
 
 #include <algorithm>
 
@@ -36,16 +37,8 @@ const ColumnDef* column_def(const TableSchema* schema, const std::string& name) 
 } // namespace
 
 bool Executor::condition_has_subquery(const std::optional<CondExpr>& condition) {
-    struct Walker {
-        static bool check(const CondExpr& e) {
-            if (auto* v = std::get_if<CondExpr::And>(&e.data)) return check(*v->lhs) || check(*v->rhs);
-            if (auto* v = std::get_if<CondExpr::Or>(&e.data)) return check(*v->lhs) || check(*v->rhs);
-            if (auto* v = std::get_if<CondExpr::Not>(&e.data)) return check(*v->inner);
-            if (auto* v = std::get_if<CondExpr::Leaf>(&e.data)) return std::holds_alternative<ConditionValue::Subquery>(v->condition.value.data);
-            return false;
-        }
-    };
-    return condition && Walker::check(*condition);
+    // (a scalar subquery inside an expression of the condition is a subquery as well, so is one in a CASE's WHEN)
+    return condition && cond_has_any_subquery(*condition);
 }
 
 // The key of `pk = <literal>`, when that names ONE row exactly: a string (against a column of texts the equal text, against a column of numbers the

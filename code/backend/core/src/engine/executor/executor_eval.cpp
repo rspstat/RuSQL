@@ -49,6 +49,7 @@ bool like_match(std::string_view val, std::string_view pat) {
 
 ValueClass Executor::class_of_expr(const ArithExpr& expr) {
     if (auto* col = std::get_if<ArithExpr::Col>(&expr.data)) return col->cls;
+    if (auto* sq = std::get_if<ArithExpr::Subquery>(&expr.data)) return sq->cls;
     if (std::holds_alternative<ArithExpr::Str>(expr.data)) return ValueClass::Text;
     if (auto* f = std::get_if<ArithExpr::Func>(&expr.data)) {
         // what a function of several values holds is what all of them hold (a NULL says nothing); values of different kinds, or not known, are not known
@@ -76,6 +77,35 @@ ValueClass Executor::class_of_expr(const ArithExpr& expr) {
         return function_result_class(f->name);
     }
     return ValueClass::Number; // a number, + - * /, a comparison, a condition
+}
+
+thread_local Executor::StatementContext* Executor::statement_context_ = nullptr;
+
+Executor::StatementScope::StatementScope(Executor& ex, SharedDatabase& s, bool writes)
+    : ex_(ex), context_{&ex, &s, ++ex.statement_serial_}, previous_(statement_context_), writes_(writes) {
+    statement_context_ = &context_;
+}
+
+Executor::StatementScope::~StatementScope() {
+    statement_context_ = previous_;
+    if (writes_) ex_.write_serial_++; // (and what the subqueries answered before is thrown away by the next one that asks)
+}
+
+std::string Executor::scalar_subquery_value(SharedDatabase& s, const ArithExpr::Subquery& sq, const Row& row, std::uint64_t statement) {
+    if (!sq.query) return EXECUTOR_NULL_VALUE;
+    if (sq.correlated < 0) sq.correlated = refers_outside(*sq.query) ? 1 : 0;
+    const bool correlated = sq.correlated == 1;
+    // a subquery that names nothing of the row answers the same for every row of the statement -- until a statement that writes has run
+    if (!correlated && sq.answered_in == statement && sq.answered_after == write_serial_) return sq.answer;
+    const auto values = extract_values_from_output(run_subquery(s, *sq.query, row, correlated));
+    if (values.size() > 1) throw StatementError("Subquery returns more than 1 row");
+    std::string value = values.empty() ? std::string(EXECUTOR_NULL_VALUE) : values.front();
+    if (!correlated) {
+        sq.answer = value;
+        sq.answered_in = statement;
+        sq.answered_after = write_serial_;
+    }
+    return value;
 }
 
 const std::string* Executor::get_col(const Row& row, const std::string& col) {
@@ -175,6 +205,11 @@ std::string Executor::eval_arith(const Row& row, const ArithExpr& expr) {
         }
         return apply_scalar_func(v->name, str_args, row);
     }
+    if (auto* v = std::get_if<ArithExpr::Subquery>(&expr.data)) {
+        StatementContext* c = statement_context_;
+        if (!c) throw StatementError("A subquery is not allowed here");
+        return c->ex->scalar_subquery_value(*c->s, *v, row, c->statement);
+    }
     if (auto* v = std::get_if<ArithExpr::Pred>(&expr.data)) {
         // a condition as a value: 1, 0 or (unknown) NULL
         switch (eval_cond3(row, *v->cond)) {
@@ -235,11 +270,16 @@ bool Executor::eval_single(const Row& row, const Condition& cond) { return eval_
 // `x IN (1, NULL)` is TRUE or UNKNOWN, `x NOT IN (1, NULL)` FALSE or UNKNOWN.
 Executor::Tri Executor::eval_single3(const Row& row, const Condition& cond) {
     auto tri = [](bool b) { return b ? Tri::True : Tri::False; };
+    // `x IN (SELECT ...)`, `EXISTS (SELECT ...)`, `x > (SELECT ...)` where a condition is only a value or a test of a join (a CASE's WHEN, IF(), a
+    // select item, the ON of a JOIN): answered by the statement that is running (WHERE and HAVING go through eval_single_with_subquery themselves)
+    if (std::holds_alternative<ConditionValue::Subquery>(cond.value.data)) {
+        StatementContext* c = statement_context_;
+        if (!c) throw StatementError("A subquery is not allowed here");
+        return c->ex->eval_single_with_subquery(*c->s, row, cond);
+    }
     std::string val = eval_arith(row, cond.left);
     // how the two sides compare: what each is (set by the binder; an expression that was not bound tells itself)
     const ValueClass left_class = cond.left_class != ValueClass::Unknown ? cond.left_class : class_of_expr(cond.left);
-
-    if (std::holds_alternative<ConditionValue::Subquery>(cond.value.data)) return Tri::False;
 
     if (auto* bv = std::get_if<ConditionValue::Between>(&cond.value.data)) {
         if (val == EXECUTOR_NULL_VALUE) return Tri::Unknown;

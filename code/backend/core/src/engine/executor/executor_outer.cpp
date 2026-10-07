@@ -41,6 +41,10 @@ struct Outer {
             for (auto& arg : f->args) arith(arg, depth);
         } else if (auto* p = std::get_if<ArithExpr::Pred>(&e.data)) {
             cond(*p->cond, depth);
+        } else if (auto* sq = std::get_if<ArithExpr::Subquery>(&e.data)) {
+            if (sq->query) statement(*sq->query, depth + 1);
+            sq->correlated = -1; // (what is in it may have changed)
+            sq->answered_in = 0;
         }
     }
 

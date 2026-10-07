@@ -67,6 +67,7 @@ StringResult Executor::fire_triggers(SharedDatabase& s, const std::string& table
                     }
                     ArithExpr expr = set->expr;
                     substitute_variables(expr, &vars);
+                    bind_expression(s, expr, false);
                     const std::string column = set->name.substr(4);
                     const std::string value = eval_arith(Row{}, expr);
                     (*row.new_row)[column] = value;

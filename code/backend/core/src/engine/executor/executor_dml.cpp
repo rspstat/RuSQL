@@ -344,6 +344,8 @@ ArithExpr bind_insert_values(const ArithExpr& expr, const std::vector<std::strin
                 return ArithExpr(ArithExpr::Cmp{bind(alt.lhs), alt.op, bind(alt.rhs)});
             } else if constexpr (std::is_same_v<T, ArithExpr::Pred>) {
                 return ArithExpr(ArithExpr::Pred{std::make_unique<CondExpr>(*alt.cond)});
+            } else if constexpr (std::is_same_v<T, ArithExpr::Subquery>) {
+                return ArithExpr(ArithExpr::Subquery{std::make_unique<Statement>(*alt.query), alt.cls});
             } else {
                 return ArithExpr(alt);
             }
