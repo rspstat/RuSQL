@@ -117,6 +117,9 @@ private:
     /// the next token starts a predicate operator (`>`, `IS`, `NOT IN`, `BETWEEN`, ...) / an operator that goes on with an expression (also `+`, `||`)
     bool at_pred_operator() const;
     bool at_value_continuation() const;
+    ArithExpr parse_additive_expr();
+    Statement parse_create_unique_index();
+    void parse_order_limit(std::vector<OrderBy>& order_by, std::optional<std::size_t>& limit);
     /// the token `offset` ahead goes on with an arithmetic expression (+ - * / % || -> ->>)
     bool arith_continues_at(std::size_t offset) const;
     /// the IN list that starts at token `from` holds only numbers, strings, NULL and @variables (one condition); anything else is an expression

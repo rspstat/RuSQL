@@ -10,6 +10,7 @@
 
 #include "engine/executor/executor.hpp"
 
+#include <functional>
 #include <unordered_set>
 
 #include <algorithm>
@@ -210,6 +211,8 @@ StringResult Executor::exec_insert_select(SharedDatabase& s, std::string table, 
     // SELECT-list subqueries in `query` too, same as a top-level Select) for the
     // duration of running it, protecting the read scan from a concurrent writer
     // resizing the same vector -- then release before exec_insert_inner runs.
+    std::vector<std::string> col_names;
+    std::vector<Row> rows;
     {
         DataLockGuard src_data_guard;
         if (auto src_tables = table_lock_set_for(s, query)) {
@@ -217,23 +220,34 @@ StringResult Executor::exec_insert_select(SharedDatabase& s, std::string table, 
         }
         auto output = execute_with_s(s, std::move(query));
         if (output.is_err()) return output;
-        auto [col_names, rows] = parse_table_output(output.value());
-        if (rows.empty()) return StringResult::Ok("0 row(s) inserted.");
+        std::tie(col_names, rows) = parse_table_output(output.value());
+    } // (the shared lock on the source tables ends here: the insert takes the target exclusively, and the target may be the source)
+    if (rows.empty()) return StringResult::Ok("0 row(s) inserted.");
 
-        std::vector<std::vector<std::string>> all_values;
-        all_values.reserve(rows.size());
-        for (auto& row : rows) {
-            std::vector<std::string> vals;
-            vals.reserve(col_names.size());
-            for (auto& c : col_names) {
-                auto it = row.find(c);
-                vals.push_back(it != row.end() ? it->second : INSERT_DEFAULT);
-            }
-            all_values.push_back(std::move(vals));
+    std::vector<std::vector<std::string>> all_values;
+    all_values.reserve(rows.size());
+    for (auto& row : rows) {
+        std::vector<std::string> vals;
+        vals.reserve(col_names.size());
+        for (auto& c : col_names) {
+            auto it = row.find(c);
+            vals.push_back(it != row.end() ? it->second : INSERT_DEFAULT);
         }
-        auto insert_cols = columns ? columns : std::optional<std::vector<std::string>>(col_names);
-        return exec_insert(s, table, insert_cols, std::move(all_values), on_conflict, returning);
+        all_values.push_back(std::move(vals));
     }
+    // the columns of the SELECT go to the columns named, or (none named) to the table's own in order -- by position, never by the names the SELECT gives
+    std::optional<std::vector<std::string>> insert_cols = columns;
+    if (!insert_cols) {
+        if (const TableSchema* schema = s.catalog.get_table(table)) {
+            if (col_names.size() != schema->columns.size()) return StringResult::Err("Column count doesn't match value count at row 1");
+            std::vector<std::string> names;
+            for (auto& column : schema->columns) names.push_back(column.name);
+            insert_cols = std::move(names);
+        } else {
+            insert_cols = col_names;
+        }
+    }
+    return exec_insert(s, table, insert_cols, std::move(all_values), on_conflict, returning);
 }
 
 // REPLACE INTO: for each incoming row, delete any existing row that conflicts on a
@@ -309,11 +323,50 @@ StringResult Executor::replace_delete_conflicts(SharedDatabase& s, const std::st
                 if (del_result.is_err()) return del_result;
             }
         }
+        for (auto& key : schema->unique_keys) { // UNIQUE keys over several columns: the row that has the same combination goes (a NULL in it repeats nothing)
+            std::optional<CondExpr> cond;
+            bool all_present = true;
+            for (auto& column : key.columns) {
+                auto val = value_for(values, column);
+                if (!val || *val == INSERT_DEFAULT || *val == "NULL") { all_present = false; break; }
+                CondExpr leaf = eq_leaf(column, *val);
+                cond = cond ? CondExpr(CondExpr::And{std::make_unique<CondExpr>(std::move(*cond)), std::make_unique<CondExpr>(std::move(leaf))})
+                            : std::move(leaf);
+            }
+            if (all_present && cond) {
+                auto del_result = run_delete(std::move(*cond));
+                if (del_result.is_err()) return del_result;
+            }
+        }
     }
     return StringResult::Ok("");
 }
 
 namespace {
+ArithExpr bind_insert_values(const ArithExpr& expr, const std::vector<std::string>& col_names, const std::vector<std::string>& values);
+
+// ... inside a condition (a CASE's WHEN, IF(), a condition used as a value)
+CondExpr bind_insert_values_cond(const CondExpr& e, const std::vector<std::string>& col_names, const std::vector<std::string>& values) {
+    if (auto* a = std::get_if<CondExpr::And>(&e.data)) {
+        return CondExpr(CondExpr::And{std::make_unique<CondExpr>(bind_insert_values_cond(*a->lhs, col_names, values)),
+                                      std::make_unique<CondExpr>(bind_insert_values_cond(*a->rhs, col_names, values))});
+    }
+    if (auto* o = std::get_if<CondExpr::Or>(&e.data)) {
+        return CondExpr(CondExpr::Or{std::make_unique<CondExpr>(bind_insert_values_cond(*o->lhs, col_names, values)),
+                                     std::make_unique<CondExpr>(bind_insert_values_cond(*o->rhs, col_names, values))});
+    }
+    if (auto* n = std::get_if<CondExpr::Not>(&e.data)) {
+        return CondExpr(CondExpr::Not{std::make_unique<CondExpr>(bind_insert_values_cond(*n->inner, col_names, values))});
+    }
+    if (auto* leaf = std::get_if<CondExpr::Leaf>(&e.data)) {
+        Condition c = leaf->condition;
+        c.left = bind_insert_values(c.left, col_names, values);
+        if (auto* value = std::get_if<ConditionValue::Arith>(&c.value.data)) value->expr = bind_insert_values(value->expr, col_names, values);
+        return CondExpr(CondExpr::Leaf{std::move(c)});
+    }
+    return e;
+}
+
 // ON DUPLICATE KEY UPDATE: VALUES(col) is the value the statement was going to insert into `col`.
 ArithExpr bind_insert_values(const ArithExpr& expr, const std::vector<std::string>& col_names, const std::vector<std::string>& values) {
     return std::visit(
@@ -343,7 +396,7 @@ ArithExpr bind_insert_values(const ArithExpr& expr, const std::vector<std::strin
             } else if constexpr (std::is_same_v<T, ArithExpr::Cmp>) {
                 return ArithExpr(ArithExpr::Cmp{bind(alt.lhs), alt.op, bind(alt.rhs)});
             } else if constexpr (std::is_same_v<T, ArithExpr::Pred>) {
-                return ArithExpr(ArithExpr::Pred{std::make_unique<CondExpr>(*alt.cond)});
+                return ArithExpr(ArithExpr::Pred{std::make_unique<CondExpr>(bind_insert_values_cond(*alt.cond, col_names, values))});
             } else if constexpr (std::is_same_v<T, ArithExpr::Subquery>) {
                 return ArithExpr(ArithExpr::Subquery{std::make_unique<Statement>(*alt.query), alt.cls});
             } else {
@@ -390,6 +443,16 @@ std::vector<std::vector<std::string>> Executor::replace_supersede(SharedDatabase
                 auto v = value_for(values, pk);
                 if (!v) { all = false; break; }
                 tuple += '\x1f' + *v;
+            }
+            if (all) keys.push_back(tuple);
+        }
+        for (std::size_t k = 0; k < schema->unique_keys.size(); k++) { // UNIQUE keys over several columns (a NULL in one never repeats)
+            std::string tuple = "u" + std::to_string(k);
+            bool all = true;
+            for (auto& column : schema->unique_keys[k].columns) {
+                auto v = value_for(values, column);
+                if (!v) { all = false; break; }
+                tuple += '' + *v;
             }
             if (all) keys.push_back(tuple);
         }
@@ -541,6 +604,26 @@ StringResult Executor::exec_insert_inner(SharedDatabase& s, const std::string& t
     // the real Catalog entry, immediately, per row that actually needs one.
     TableSchema* schema_mut_for_ai = s.catalog.get_table_mut(table);
     bool any_auto_increment_allocated = false;
+    // The numbers this statement takes from the counters: if it fails (a value that is no good, a duplicate key ...) they go back, so a failed INSERT leaves no
+    // gap in the numbering (MySQL numbers only rows that pass the checks of their columns). `kept` is set when the statement has succeeded; a counter that
+    // another statement has moved on in the meantime is left alone.
+    struct CounterTake {
+        std::string column;
+        std::int64_t before, after;
+    };
+    std::vector<CounterTake> counter_takes;
+    struct CounterGuard {
+        TableSchema* schema;
+        std::vector<CounterTake>& takes;
+        bool kept = false;
+        ~CounterGuard() {
+            if (kept || !schema) return;
+            for (auto it = takes.rbegin(); it != takes.rend(); ++it) {
+                auto found = schema->auto_increment_counters.find(it->column);
+                if (found != schema->auto_increment_counters.end() && found->second == it->after) found->second = it->before;
+            }
+        }
+    } counter_guard{schema_mut_for_ai, counter_takes};
 
     // Duplicates WITHIN this statement: for every PRIMARY KEY / UNIQUE column the first row of the statement that carried
     // each value (and, for a composite primary key, the encoded tuples seen). This used to scan every earlier row of the
@@ -606,6 +689,41 @@ StringResult Executor::exec_insert_inner(SharedDatabase& s, const std::string& t
     }
     {
         auto insert_read_lock = acquire_table_data_locks(s, insert_read_tables, /*exclusive=*/false);
+
+    // UNIQUE keys over several columns: the live rows by key (one scan), and the keys this statement has used. A NULL in a key never conflicts.
+    struct CompositeUnique {
+        const UniqueKey* key;
+        std::string label;
+        std::unordered_map<std::string, const Row*> existing;
+        std::unordered_set<std::string> batch;
+    };
+    std::vector<CompositeUnique> composite_uniques;
+    auto composite_key = [](const std::vector<std::string>& columns, const std::function<std::string(const std::string&)>& value, std::string& shown) -> std::optional<std::string> {
+        std::string encoded;
+        shown.clear();
+        for (std::size_t k = 0; k < columns.size(); k++) {
+            const std::string v = value(columns[k]);
+            if (v == EXECUTOR_NULL_VALUE) return std::nullopt;
+            encoded += std::to_string(v.size()) + ":" + v;
+            shown += (k ? "-" : "") + v;
+        }
+        return encoded;
+    };
+    if (!schema.unique_keys.empty()) {
+        const std::string bare_table = table.substr(table.rfind('.') == std::string::npos ? 0 : table.rfind('.') + 1);
+        for (auto& key : schema.unique_keys) {
+            CompositeUnique cu{&key, bare_table + "." + key.name.value_or(key.columns.front()), {}, {}};
+            if (auto tit = s.tables.find(table); tit != s.tables.end()) {
+                for (auto& existing_row : tit->second) {
+                    if (!is_visible(existing_row)) continue;
+                    std::string shown;
+                    auto encoded = composite_key(key.columns, [&](const std::string& c) { auto it = existing_row.find(c); return it != existing_row.end() ? it->second : std::string(EXECUTOR_NULL_VALUE); }, shown);
+                    if (encoded) cu.existing.emplace(std::move(*encoded), &existing_row);
+                }
+            }
+            composite_uniques.push_back(std::move(cu));
+        }
+    }
 
     for (auto& values : all_values) {
         std::vector<std::string> positional;
@@ -673,9 +791,11 @@ StringResult Executor::exec_insert_inner(SharedDatabase& s, const std::string& t
                     continue;
                 }
                 auto& counter = counter_of(i);
+                const std::int64_t before = counter;
                 counter += 1;
                 final_values[i] = std::to_string(counter);
                 any_auto_increment_allocated = true;
+                counter_takes.push_back({col_names[i], before, counter});
             }
         }
 
@@ -700,6 +820,7 @@ StringResult Executor::exec_insert_inner(SharedDatabase& s, const std::string& t
                 if (res.ec != std::errc()) continue;
                 auto& counter = counter_of(i);
                 if (v > counter) {
+                    counter_takes.push_back({col_names[i], counter, v});
                     counter = v;
                     any_auto_increment_allocated = true; // the schema file keeps the counter
                 }
@@ -847,7 +968,38 @@ StringResult Executor::exec_insert_inner(SharedDatabase& s, const std::string& t
                     }
                 }
             }
+            if (!skip_row) {
+                for (auto& cu : composite_uniques) {
+                    std::string shown;
+                    auto encoded = composite_key(cu.key->columns, [&](const std::string& c) { auto pos = std::find(col_names.begin(), col_names.end(), c); return pos != col_names.end() ? final_values[static_cast<std::size_t>(pos - col_names.begin())] : std::string(EXECUTOR_NULL_VALUE); }, shown);
+                    if (!encoded) continue;
+                    auto hit = cu.existing.find(*encoded);
+                    if (hit == cu.existing.end()) continue;
+                    const Row& existing_row = *hit->second;
+                    if (std::holds_alternative<InsertConflict::Replace>(on_conflict.data)) { // the old row goes before the real insert
+                        if (replace_victims) replace_victims->push_back(existing_row);
+                        continue;
+                    }
+                    if (std::holds_alternative<InsertConflict::Abort>(on_conflict.data)) return StringResult::Err("Duplicate entry '" + shown + "' for key '" + cu.label + "'");
+                    if (std::holds_alternative<InsertConflict::Ignore>(on_conflict.data)) {
+                        skip_row = true;
+                    } else if (auto* upd = std::get_if<InsertConflict::Update>(&on_conflict.data)) {
+                        queue_update(existing_row, upd->assignments);
+                        skip_row = true;
+                    }
+                    break;
+                }
+            }
             if (skip_row) continue;
+        }
+
+        for (auto& cu : composite_uniques) { // ... and among the rows of this statement
+            std::string shown;
+            auto encoded = composite_key(cu.key->columns, [&](const std::string& c) { auto pos = std::find(col_names.begin(), col_names.end(), c); return pos != col_names.end() ? final_values[static_cast<std::size_t>(pos - col_names.begin())] : std::string(EXECUTOR_NULL_VALUE); }, shown);
+            if (!encoded) continue;
+            if (!cu.batch.insert(std::move(*encoded)).second && !(validate_only && std::holds_alternative<InsertConflict::Replace>(on_conflict.data))) {
+                return StringResult::Err("Duplicate entry '" + shown + "' for key '" + cu.label + "'");
+            }
         }
 
         {
@@ -1068,7 +1220,10 @@ StringResult Executor::exec_insert_inner(SharedDatabase& s, const std::string& t
         prepared.push_back(std::move(row));
     }
     } // insert_read_lock (SHARED) released here
-    if (validate_only) return StringResult::Ok("");
+    if (validate_only) {
+        counter_guard.kept = true;
+        return StringResult::Ok("");
+    }
 
     // Counters were already allocated directly against the real Catalog entry above (as
     // each row needed one); only the disk persistence is still batched once per
@@ -1167,6 +1322,7 @@ StringResult Executor::exec_insert_inner(SharedDatabase& s, const std::string& t
     }
 
     maybe_auto_checkpoint(s);
+    counter_guard.kept = true;
     if (returning) return StringResult::Ok(format_returning_rows(returning_rows, *returning));
     if (!pending_updates.empty()) return StringResult::Ok(std::to_string(inserted) + " row(s) inserted, " + std::to_string(updated) + " row(s) updated.");
     return StringResult::Ok(std::to_string(inserted) + " row(s) inserted.");

@@ -194,6 +194,8 @@ enum class TokenKind {
 
     // String concatenation (||)
     PipePipe,
+    // bit operators and the NULL-safe equals: & | ^ ~ << >> <=>
+    Ampersand, Pipe, Caret, Tilde, ShiftLeft, ShiftRight, NullSafeEq,
 };
 
 struct Token {
@@ -224,6 +226,8 @@ private:
     Token read_string();
     Token read_quoted_ident(char closing);
     Token read_number();
+    // `digits` is a number just read: when an exponent follows (e3, E-2) it is read too and `digits` becomes the number it spells
+    bool read_exponent(std::string& digits);
     Token read_ident();
 
     std::string input_;

@@ -1401,6 +1401,56 @@ VS Code 스타일 탭 드래그 순서 변경(요청의 1번 항목)은 같은 �
 
 **Diagram 페이지**: 구성요소·흐름이 바뀐 것이 없어 변경 없음.
 
+### 10월 12일 — 실제 MySQL 8.4와 같은 문장을 돌려 비교: 모르는 함수가 글자를 돌려주던 것, 함수 약 140종, DECIMAL/DOUBLE 산술, 복합 UNIQUE 키(첫 열만 보던 것·재시작하면 사라지던 것), 파티션 테이블이 재시작 뒤 0행이던 것
+
+**왜 이 항목인가**: 사용자 결정("일단 그럼 계속 수정하는 게 낫죠. 버그는 치명적인 거 아닌가요?")에 따라, 이번에는 지금까지의 "코드에서 의심되는 곳을 찾아 고치는" 방식 대신 **실제 MySQL 8.4.9에 같은 문장을 보내 답을 비교**했다(`vs_mysql.py`: 같은 스키마·데이터·문장을 RuSQL과 MySQL에 넣고 행 집합이 다른 문장을 목록으로 뽑음; 문장 약 350개). 코드를 읽어서는 보이지 않던 것이 한꺼번에 나왔다 — 아래가 그 가운데 "오류 없이 틀린 답"이거나 "MySQL이 받는데 여기서는 막히는" 것이다.
+
+**원인과 영향**:
+- **모르는 함수가 오류 없이 글자를 돌려줌**: `SELECT NOSUCH(1)`이 `NOSUCH(1)`이라는 글자를, `SELECT BIT_COUNT(7)`처럼 아직 없는 함수도 같은 식으로 "답"했다. MySQL은 1305 `FUNCTION db.nosuch does not exist`.
+- **빠진 함수·틀린 함수**: 약 140개를 MySQL 규칙대로 다시 만들거나 새로 만들었다(`builtin_functions.cpp`의 함수 표) — 문자열(`SUBSTRING`의 음수 위치, `LEFT`/`RIGHT`/`INSERT`/`FIELD`/`ELT`/`FIND_IN_SET`/`SUBSTRING_INDEX`/`CONV`/`TO_BASE64`…), 수학(`ROUND`/`TRUNCATE`/`MOD`/`POW`/`LOG(b, x)`/`ATAN2`/`COT`…, 정수·문자열 인자), 날짜(`DATE_ADD`가 월·년·시간 단위를 무시하거나 월말을 넘기던 것 — `2024-01-31 + 1 MONTH`는 `2024-02-29`; `HOUR`/`MINUTE`/`SECOND`; `TIMESTAMPDIFF(MONTH, …)`; `DATE_FORMAT`; `LAST_DAY`/`MAKEDATE`/`TO_DAYS`/`WEEK`/`EXTRACT`/`STR_TO_DATE`…), `CAST`(`CAST(3.9 AS SIGNED)`는 4, 문자열은 앞쪽 숫자까지), JSON(`JSON_OBJECT`/`ARRAY`/`SET`/`INSERT`/`REPLACE`/`REMOVE`/`CONTAINS`/`KEYS`/`LENGTH`/`TYPE`/`VALID`), 해시(`SHA1`/`SHA2`/`CRC32`/`SOUNDEX`), 연산자(`<=>`, `XOR`, `DIV`, `<<`, `>>`, `&`, `|`, `^`, `~`).
+- **산술이 double이던 것**: `10 / 3 * 3`이 `9.999999`, 큰 정수의 합·곱이 조용히 double로 넘어가 끝자리가 틀림, 문자열 `'12abc' + 1`의 규칙, BIGINT 넘침이 오류가 아님. MySQL은 정확한 DECIMAL 산술(몫은 피제수의 소수 자리 + 4자리, 계산 중에는 9자리까지 들고 가다 식 맨 위에서 한 번 반올림)이고 BIGINT 넘침은 오류(1690).
+- **DOUBLE/FLOAT 열은 부동소수점**: 정확한 십진수로 계산하면 `d / 3 * 3`이 `3.0001`, `ROUND(2.5)`가 3(MySQL은 DOUBLE이면 짝수쪽 반올림 2, DECIMAL이면 3), `STDDEV`·`VARIANCE`가 4자리로 잘림(MySQL은 DOUBLE 전체 자리).
+- **몫의 자리수**: `ROUND(8 / 59.27, 2)`가 0.14(몫이 보여 주는 `0.1350`을 다시 반올림). MySQL은 0.13 — 몫은 9자리(`0.134975535`)를 들고 있고 4자리는 보여 줄 때만. `FLOOR(10 / 3 * 3)`은 9, `8 / 59.27 >= 0.135`는 거짓, DECIMAL(10,2) 열에 넣으면 0.13, VARCHAR 열에는 `0.134975535`가 저장된다.
+- **복합 UNIQUE 키가 첫 열만 남음**: `UNIQUE (a, b)`·`CREATE UNIQUE INDEX … (a, b)`·`ALTER TABLE … ADD UNIQUE (a, b)`가 `a`만 유일하게 만들거나 아예 무시했다 → `(1, 1)`과 `(1, 2)`가 충돌하거나, 진짜 중복 `(1, 1)`이 들어갔다. UPDATE·REPLACE·ON DUPLICATE KEY도 복합 키는 보지 않았다.
+- **복합 UNIQUE 키·파티션 정보가 재시작하면 사라짐 (전부터)**: 카탈로그를 디스크에서 읽을 때 열·기본키·CHECK만 복원하고 나머지 스키마는 버렸다. UNIQUE 키는 재시작 뒤 아무도 지키지 않았고, **파티션 테이블은 재시작 뒤 `SELECT`가 0행**(행은 파티션 테이블에 있는데 그리로 가는 길이 없음), 새 행은 부모 테이블에 들어갔다.
+- **`ALTER TABLE … ADD UNIQUE (c)`가 중복이 있어도 성공 (한 열도)**, `ALTER TABLE … DROP INDEX name`이 파싱 오류.
+- **DROP TABLE이 외래키로 참조되는 테이블도 지움**(MySQL 3730), **UPDATE의 SET이 앞 배정을 보지 못함**(`SET a = a + 1, b = a`는 MySQL에서 새 a), 실패한 INSERT가 AUTO_INCREMENT를 쓰고 가기도 하고 안 하기도 함(→ 일관되게 돌려줌), `INSERT INTO t SELECT … FROM t`가 서버를 멈춤(읽기 락을 쥔 채 쓰기 락 승격), `INSERT … SELECT`의 열 매핑이 이름 기준(MySQL은 위치), `START TRANSACTION`·`UPDATE/DELETE … ORDER BY … LIMIT`·`SET col = DEFAULT`·`1e-7`·`-2.5e-7`·`3 * -2e2`가 파싱 오류.
+- **`VALUES(col)`이 CASE/IF 조건 안에서 치환되지 않음**(옛 시험이 우연히 통과하고 있었음).
+
+**수정**:
+- **함수 표**(`builtin_functions.hpp/.cpp`, 약 2,000줄): 이름 → 함수 포인터 표. 인자는 값과 "종류"(`S` 따옴표 문자열, `N` 쓴 숫자, `C` 열, `D` DOUBLE로 읽는 열·문자열 열·부동소수점 식, `E` 그 밖의 식)로 받는다 — 종류가 없으면 인자 글자의 따옴표로 짐작하던 옛 방식은 중첩 식(`GREATEST(x + y, y * y)`)을 문자열로 오해했다. 표에 없고 옛 디스패처에도 없는 이름은 오류 1305. 같은 이름의 저장 함수가 있어도 내장이 먼저(MySQL과 같음). `sql_value_util.hpp`: UTF-8·대소문자·`Decimal`·`Num` 산술·달력·`DateTime`·`add_interval`·MySQL이 DOUBLE을 쓰는 방식(`format_double`: 999999999999999까지·1e-15까지는 풀어서, 그 밖은 `1.5e16`/`1e-16`).
+- **산술**(`executor_eval.cpp`): `+ - * /` 식 전체를 정확한 십진수로 계산(`number_tree`/`combine`): 정수는 정수로(BIGINT 넘침 오류), 곱은 자리수 합, 몫은 `((피제수 자리 + 4 + 8) / 9) * 9`자리까지 **잘라서**(MySQL처럼 반올림 아님) 들고 가다 식 맨 위에서 한 번 반올림. DOUBLE/FLOAT 열·지수 표기 수·숫자가 아닌 글자가 한 번이라도 읽히면 그 위쪽 연산은 부동소수점(바인더가 `ArithExpr::Col::approx`를 달고, DECIMAL 아래쪽 식은 9자리 십진수를 double로 바꿔 넘김). `eval_arith_exact`: 식의 모든 자릿수를 그대로 내는 판 — 수학 함수(`ROUND`·`FLOOR`·`SQRT`·`MOD`…·`FORMAT`)의 인자, 비교의 양쪽, 열에 저장되는 값(UPDATE의 SET·INSERT의 VALUES)이 읽는다.
+- **`ROUND`/`FORMAT`**: DOUBLE로 읽는 인자(DOUBLE/FLOAT 열, 문자열, 부동소수점 식)는 짝수쪽 반올림(`rint`), DECIMAL·정수는 0에서 먼 쪽.
+- **`STDDEV`/`VARIANCE`**: MySQL과 같은 순환식(`m += (x - m) / n; s += (x - m_old) * (x - m)`)으로 DOUBLE 전체 자리(40시드 × 12 집계 변형을 실제 MySQL과 비교해 자리까지 일치).
+- **복합 UNIQUE 키**: 스키마(`unique_keys`)·파서(`UNIQUE KEY name (a, b)`, `CREATE UNIQUE INDEX`, `ALTER … ADD [CONSTRAINT n] UNIQUE (a, b)`, `DROP CONSTRAINT`·`DROP INDEX`·`DROP KEY`)·INSERT(`CompositeUnique`: 기존 행 + 같은 문장 안, NULL이 든 조합은 충돌 아님)·UPDATE(`update_unique_violation`)·REPLACE(대상 행 삭제 + 문장 안 뒤의 행이 앞의 행을 대체)·ON DUPLICATE KEY·`SHOW CREATE TABLE`·JSON 저장·**카탈로그 복원**. `ADD UNIQUE`는 이미 든 행이 같은 조합을 갖는지 한 열짜리도 검사.
+- **카탈로그 복원**: 디스크에서 읽을 때 `unique_keys`·`partition_info`도 되살린다.
+- 그 밖에: `DROP TABLE`의 외래키 참조 검사, UPDATE 배정을 쓴 순서대로(앞 배정 결과를 보게), UPDATE/DELETE의 `ORDER BY … LIMIT`(정렬 키로 행을 뽑아 대상 지정), `SET col = DEFAULT`, `START TRANSACTION [WORK]`, `INSERT … SELECT` 자기 테이블(읽기 락 해제 후 승격)·열 위치 매핑, 실패한 INSERT의 AUTO_INCREMENT 되돌림(`CounterGuard`), `VALUES(col)`의 CASE/IF 안 치환(`bind_insert_values_cond`), 음수 지수 표기 리터럴(`read_exponent`).
+
+**검증**:
+- **실제 MySQL과의 대조가 시험의 중심**: 신규 `test_mysql_conformance.cpp`는 MySQL 8.4.9가 돌려준 답이 든 문장 332개(함수·연산·형 변환 61, 표와 질의 143, 제약·쓰기·트랜잭션 128; `vs_mysql.py --emit`이 만들고 RuSQL이 같은 답을 내는 문장만 "답 비교", 알려진 차이(정렬 규칙·DOUBLE 집계·`||` …)는 "실행만"으로 표시해 표의 상태만 맞춘다. 숫자는 값으로, 행은 `ORDER BY`가 없으면 집합으로 비교). 신규 `test_mysql_semantics.cpp`(6케이스: DOUBLE 열 산술·몫의 9자리·DOUBLE 글자 표기·`ROUND`/`FORMAT`의 짝수쪽 반올림·정수 산술의 자리와 한계·윤년과 내장 함수 우선 — 값은 전부 MySQL에서 받아 옴), `test_composite_unique.cpp`(복합 키 시나리오 — 같은 문장 안 중복, NULL 조합, REPLACE와 외래키, ALTER/CREATE UNIQUE INDEX, 재시작 — 과 **무작위 모델**: UNIQUE (a, b) · UNIQUE (c) · 기본키 표에 220문장 × 시드마다 INSERT / INSERT IGNORE / REPLACE / UPDATE / DELETE를 섞어 모델과 **문장마다** 표를 비교하고 중간에 서버를 다시 열어 비교), `test_partitioning.cpp`에 재시작 후 파티션 1케이스. 기존 시험 몇 곳은 MySQL 값으로 고쳤다(`DATE_ADD('2024-01-31', INTERVAL 1 MONTH)` = 2024-02-29, `CAST(3.99 AS INT)` = 4, `LOG`·`SQRT`의 자리, `SET v = …, d = (v > 5)`는 새 v를 봄, 몫의 자리, DOUBLE 열의 `ROUND`, `STDDEV`의 자리).
+- 처음에 시험이 놓친 것들(MySQL과 비교하다 시험 자체가 찾아냄): 무작위 모델이 **REPLACE가 복합 키 충돌 행을 지우지 않고 오류를 내던 것**, **재시작하면 복합 UNIQUE 키·파티션 정보가 사라지던 것**, `ROUND(8/59.27, 2)`의 이중 반올림, `-2.5e-7`·`3 * -2e2` 파싱 오류, `ALTER TABLE … DROP INDEX` 파싱 오류를 찾았다.
+- 심은 버그 83종(복합 키의 INSERT·UPDATE·REPLACE·ALTER·로드 각 분기, 산술의 자리·몫 자름·DOUBLE 판정·정수 빠른 길, STDDEV 순환식, `ROUND`/`FORMAT` 분기, 함수 표, 날짜·윤년·DOUBLE 표기 경계, 렉서·파서) 가운데 **처음에는 22종이 살아남았고** 시험을 더해 18종을 잡았다. 남은 4종은 결과가 같은 것으로 판단: `cu_delete_null`(REPLACE의 삭제 조건에서 `'NULL'` 비교는 3값 논리로 UNKNOWN이라 어차피 지우지 않음 — 중복 방어), `sd_sample_null`(표본 분산이 값 하나면 0/0 = NaN이 "NULL"로 찍힘 — 중복 방어), `ex_cmp_node`(`ArithExpr::Cmp`는 파서가 더 이상 만들지 않고 옛 저장 JSON에서만 옴), `fp_div_branch`(정수 몫의 빠른 길을 끄면 느린 길이 같은 값을 냄 — 성능만).
+- Release/Debug **639 케이스/1,358,145 assertions**를 기본 설정과 `RUSQL_DML_INDEX_MIN_ROWS=0` 양쪽에서 통과(네 가지 모두). 무작위 시험 긴 캠페인(`[random]` 40시드 기본·강제 각 198,184 assertions, `[fuzz]` 30시드 1,531,973 assertions)도 통과.
+- 빌드 간 차분(이전 빌드 = 앞 항목): 30시드 × 99질의(2,970질의) 차이 160건 **전부 `STDDEV`·`VARIANCE`의 자리**(옛 빌드는 4자리로 잘랐고 이제 DOUBLE 전체 자리 — 값은 1e-3 안에서 같음); 그 밖의 차이 0건. 출력 검증 도구 12종(`verify_*.py`) 모두 위반 0건(4시드씩, `verify_writes` 3시드 × 1,500문장, `verify_null_expressions` 12시드 × 400질의). `verify_null_expressions.py`의 기준 모델은 매 연산을 6자리로 반올림하던 옛 규칙이라 MySQL의 십진수 규칙(몫의 9자리, 맨 위에서 한 번 반올림, DOUBLE 열은 부동소수점)과 어긋났다 — 값을 1e-4 안에서 비교하고(`WHERE`는 한계에서 1e-3 안의 행을 건너뜀, 몫 안의 몫은 값 비교를 건너뜀, `ROUND`는 십진수로) 정확한 글자는 MySQL 대조 시험이 맡도록 고침.
+- 저장소의 `test_full.sql`(319문장)·`test_full-ver2.sql`(359문장)을 이전 빌드와 새 빌드에 스트림으로 보내 비교: 차이는 모두 의도한 것이다 — `STDDEV`·`VARIANCE`의 자리, 수학 함수의 표기(`SQRT(256)` 16.000000 → 16, `LOG(8, 2)` → `0.33333333333333337` 등 MySQL과 글자까지 같음), `MONTH`·`DAY`가 `03` 대신 `3`, `CAST(4.7 AS DECIMAL)` → 5(MySQL의 `DECIMAL(10,0)`), 실패한 INSERT가 AUTO_INCREMENT 번호를 쓰지 않아 감사 로그 id가 한 칸씩 당겨짐, `SHOW CREATE TABLE`·`information_schema`에 UNIQUE 키 이름이 나옴, 그리고 `test_full-ver2.sql`의 `ALTER TABLE supplier ADD CONSTRAINT uq_supplier_name UNIQUE (name)`이 이미 같은 이름('Nordic Components')이 두 번 들어 있어 이제 오류(MySQL도 같음). **이 비교가 회귀 하나를 잡았다**: 새로 넣은 "외래키가 참조하는 테이블은 `DROP TABLE` 거부"가 `RESTORE`가 같은 데이터베이스 위에 덤프를 되돌릴 때(덤프는 `DROP TABLE IF EXISTS`를 표 하나씩 재생) 부모 표에서 막혀 `31 statement(s) OK, 0 error(s)`가 `9 OK, 22 error(s)`로 바뀌었다 → RESTORE는 이미 있던 `skip_fk_checks`(mysqldump 파일이 `FOREIGN_KEY_CHECKS = 0`을 쓰는 것과 같음)로 이 검사를 건너뛰게 하고, 부모·자식 표를 백업한 뒤 그 위에 복원하는 시험(`test_executor_misc.cpp`)을 더했다(검사를 지운 심은 버그 1종 잡힘).
+- 크래시 퍼저 60라운드 + 동시성 퍼저 20라운드(확인한 행 10,194): 불일치 0건.
+- 성능(이전 빌드와 번갈아 2라운드, 5만 행, 결과 캐시를 피하려고 질의마다 다른 상수): 점 조회 0.13 → 0.14 / 0.13 → 0.13 ms, 조인 43.4 → 46.1 / 43.9 → 41.7, `GROUP BY` 65.2 → 65.7 / 64.2 → 65.4, `HAVING` + `ORDER BY` 68.0 → 70.4 / 69.3 → 66.3, 스캔 36.2 → 37.2 / 37.7 → 36.4, 벌크 적재 521 → 484 / 503 → 507, **산술 `WHERE` 167.6 → 103.2 / 166.0 → 97.2**, 식의 `SUM(ROUND(…))` 244 → 199 / 239 → 201, `UPDATE … SET v = v * 3 / 3` 78.4 → 78.1 / 74.2 → 82.8, 함수 호출이 든 `WHERE` 84.3 → 92.2 / 85.5 → 90.7(함수 표 + 인자 종류, +8%). 정확한 십진수를 문자열로 계산한 첫 구현은 산술 `WHERE`가 +47%(169 → 246 ms)였는데, **정수 값은 십진수를 만들지 않고 64비트로** 계산하도록 고쳐(정수 읽기·정수끼리의 연산·정수 몫의 9자리) 이전 빌드보다 빨라졌다.
+- **죽은 코드 정리**: 새 함수 표가 먼저 불리기 때문에 옛 `apply_scalar_func`의 이름 분기 56개(389줄)가 도달할 수 없게 되어 지웠고(남은 것은 `NOW`·`COALESCE`·`IFNULL`·`IF`·`NULLIF`·`REGEXP*`·`RAND`·`MD5`·`UUID`·`JSON_EXTRACT`·`JSON_UNQUOTE`·`JSON_VALUE`·`DATABASE`·`USER` …), 그 분기들만 쓰던 보조 함수 17개(`fmt_double`·`add_months`·`trim_*` …)와 `is_number_literal`, 안 쓰는 `#include` 3개도 지웠다. 지운 뒤 Release 전체를 기본·강제 양쪽으로 다시 돌렸다.
+
+
+**눈에 띄는 변화(의도한 것)**: 모르는 함수가 오류; `10 / 3 * 3`이 `10`(9.9999가 아님); `ROUND(x / y, 2)`가 몫의 4자리가 아니라 전체 자리를 반올림; DOUBLE 열의 `ROUND(2.5)`가 2; `d * 1.1`이 `3.3000000000000003`(DOUBLE이면 MySQL도 그렇다); `STDDEV`가 `31.483874840940402`; 복합 UNIQUE가 실제로 복합 키; 재시작 뒤에도 UNIQUE 키·파티션이 남음; 같은 이름의 저장 함수보다 내장 함수가 먼저; `DROP TABLE`이 참조되는 테이블에서 오류; `UPDATE t SET a = a + 1, b = a`의 b가 새 a. `ALTER TABLE … ADD UNIQUE`는 이미 같은 값이 들어 있으면 오류(MySQL과 같음 — 전에는 받아들여 제약이 깨진 채로 있었다); `SHOW CREATE TABLE`이 열 옆의 `UNIQUE` 대신 `UNIQUE KEY `이름` (`열`)` 줄을 보여 주고 `information_schema`에도 제약 이름이 나옴; 오류로 실패한 INSERT가 AUTO_INCREMENT 번호를 쓰지 않음.
+
+**정직한 한계 (MySQL과 아직 다른 것)**:
+- ① **기본 정렬 규칙**: MySQL 기본(`utf8mb4_0900_ai_ci`)은 대소문자·악센트를 구분하지 않는다(`'a' = 'A'`, `LIKE 'A%'`, `GROUP BY`·`DISTINCT`·`UNIQUE`·`ORDER BY`·`MIN`/`MAX`도). 여기는 바이트 비교다. 비교·해시 키·인덱스·LIKE 전부에 걸친 큰 변경이라 이번에 하지 않았다 — **결정이 필요한 항목**(R15 후보).
+- ② `SUM`/`AVG`/`MIN`/`MAX` of DOUBLE 열은 아직 정확한 십진수로 계산한다(MySQL은 double: `AVG(d)` = `13.11111111111111`, 여기는 `13.1111`; 합은 부동소수점 잡음 `0.30000000000000004`까지 같음).
+- ③ 지수 표기 수는 `0.5e0`처럼 정수·소수로 펼쳐지면 정확한 십진수로 읽힌다(MySQL은 항상 DOUBLE); `DATE('2024-03-05') + 0`은 20240305(여기는 2024); `||`는 MySQL에서 OR(여기는 문자열 이음 — 일부러 둠); `WITH ROLLUP` 없음; `PI()` 표시는 6자리.
+- ④ AUTO_INCREMENT: MySQL(InnoDB)은 실패한 INSERT도 번호를 쓰고 가서 틈이 생긴다(`INSERT … VALUES (a), (b)`는 두 개를 미리 잡음). 여기는 오류로 실패하면 돌려준다(`INSERT IGNORE`가 건너뛴 행은 MySQL처럼 번호를 씀) — 틈 없는 쪽을 일부러 택함.
+- ⑤ `UPDATE u SET k = k + 1`(유일 키 이동)은 MySQL이 행마다 검사해 오류, 여기는 문장 끝에서 검사해 허용; `UPDATE t SET … WHERE id IN (SELECT … FROM t)`는 MySQL이 1093 오류, 여기는 실행.
+- ⑥ 함수 인자가 `SQRT(2)` 같은 함수 결과일 때 `ROUND(SQRT(2), 3)`은 DECIMAL처럼 반올림(MySQL은 DOUBLE이라 짝수쪽) — 부동소수점 식과 열만 DOUBLE로 취급.
+- ⑦ 알려진 함수 이름 검사는 평가할 때 한다(빈 테이블에 `SELECT nosuch(x)`는 MySQL과 달리 오류가 나지 않음).
+
+**Diagram 페이지**: 구성요소·흐름이 바뀐 것이 없어 변경 없음.
+
 ## 요약: 1학기 대비 2학기에 달라진 것
 
 | 항목 | 1학기 (~2026년 6월) | 2학기 (2026년 7~8월) |

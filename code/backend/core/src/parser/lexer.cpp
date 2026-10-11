@@ -81,8 +81,8 @@ const std::unordered_map<std::string, TokenKind>& keyword_map() {
         {"PRIVILEGES", TokenKind::Privileges}, {"GRANTS", TokenKind::Grants},
         {"OPTION", TokenKind::OptionKw}, {"PASSWORD", TokenKind::Password},
         {"DATABASES", TokenKind::Databases}, {"ANALYZE", TokenKind::Analyze},
-        {"STDDEV", TokenKind::Stddev}, {"STD", TokenKind::Stddev}, {"STDDEV_POP", TokenKind::Stddev},
-        {"VARIANCE", TokenKind::Variance}, {"VAR_POP", TokenKind::Variance},
+        {"STDDEV", TokenKind::Stddev}, {"STD", TokenKind::Stddev}, {"STDDEV_POP", TokenKind::Stddev}, {"STDDEV_SAMP", TokenKind::Stddev},
+        {"VARIANCE", TokenKind::Variance}, {"VAR_POP", TokenKind::Variance}, {"VAR_SAMP", TokenKind::Variance},
         {"BIT_AND", TokenKind::BitAnd}, {"BIT_OR", TokenKind::BitOr}, {"JSON_AGG", TokenKind::JsonAgg},
         {"ARRAY_AGG", TokenKind::ArrayAgg}, {"MEDIAN", TokenKind::Median}, {"FILTER", TokenKind::Filter},
         {"LATERAL", TokenKind::Lateral},
@@ -202,25 +202,28 @@ Token Lexer::read_quoted_ident(char closing) {
     return Token(TokenKind::Ident, std::move(s));
 }
 
+bool Lexer::read_exponent(std::string& s) {
+    // 1e3, 2.5E-2: a number with an exponent is the number it spells (written out, so that 1e3 shows as 1000)
+    if (s.empty() || s.back() == '.' || (peek() != 'e' && peek() != 'E')) return false;
+    std::size_t at = pos_ + 1;
+    if (at < input_.size() && (input_[at] == '+' || input_[at] == '-')) at++;
+    if (at >= input_.size() || !is_digit(input_[at])) return false;
+    std::string exponent = "e" + input_.substr(pos_ + 1, at - pos_ - 1);
+    while (at < input_.size() && is_digit(input_[at])) exponent.push_back(input_[at++]);
+    pos_ = at;
+    char buffer[64];
+    std::snprintf(buffer, sizeof buffer, "%.15g", std::strtod((s + exponent).c_str(), nullptr));
+    const std::string written = buffer;
+    s = written.find_first_of("en") == std::string::npos ? written : s + exponent;
+    return true;
+}
+
 Token Lexer::read_number() {
     std::string s;
     while (auto ch = peek()) {
         if (is_digit(*ch) || *ch == '.') { s.push_back(*ch); advance(); } else break;
     }
-    // 1e3, 2.5E-2: a number with an exponent is the number it spells (written out, so that 1e3 shows as 1000)
-    if (!s.empty() && s.back() != '.' && (peek() == 'e' || peek() == 'E')) {
-        std::size_t at = pos_ + 1;
-        if (at < input_.size() && (input_[at] == '+' || input_[at] == '-')) at++;
-        if (at < input_.size() && is_digit(input_[at])) {
-            std::string exponent = "e" + input_.substr(pos_ + 1, at - pos_ - 1);
-            while (at < input_.size() && is_digit(input_[at])) exponent.push_back(input_[at++]);
-            pos_ = at;
-            char buffer[64];
-            std::snprintf(buffer, sizeof buffer, "%.15g", std::strtod((s + exponent).c_str(), nullptr));
-            const std::string written = buffer;
-            return Token(TokenKind::NumberLit, written.find_first_of("en") == std::string::npos ? written : s + exponent);
-        }
-    }
+    if (read_exponent(s)) return Token(TokenKind::NumberLit, s);
     // 0x... hex literal → StringLit(hex_digits)
     if (s == "0") {
         if (auto x = peek()) {
@@ -295,6 +298,7 @@ std::vector<Token> Lexer::tokenize() {
                     while (auto c = peek()) {
                         if (is_digit(*c) || *c == '.') { s.push_back(*c); advance(); } else break;
                     }
+                    read_exponent(s); // (-2.5e-7)
                     // (-0 is 0: a zero has no sign)
                     if (s.find_first_of("123456789") == std::string::npos) s.erase(0, 1);
                     tok = Token(TokenKind::NumberLit, std::move(s));
@@ -337,13 +341,19 @@ std::vector<Token> Lexer::tokenize() {
             case '>': {
                 advance();
                 if (peek() == '=') { advance(); tok = Token(TokenKind::Gte); }
+                else if (peek() == '>') { advance(); tok = Token(TokenKind::ShiftRight); }
                 else tok = Token(TokenKind::Gt);
                 break;
             }
             case '<': {
                 advance();
-                if (peek() == '=') { advance(); tok = Token(TokenKind::Lte); }
+                if (peek() == '=') {
+                    advance();
+                    if (peek() == '>') { advance(); tok = Token(TokenKind::NullSafeEq); }
+                    else tok = Token(TokenKind::Lte);
+                }
                 else if (peek() == '>') { advance(); tok = Token(TokenKind::Ne); }
+                else if (peek() == '<') { advance(); tok = Token(TokenKind::ShiftLeft); }
                 else tok = Token(TokenKind::Lt);
                 break;
             }
@@ -357,9 +367,12 @@ std::vector<Token> Lexer::tokenize() {
             case '|': {
                 advance();
                 if (peek() == '|') { advance(); tok = Token(TokenKind::PipePipe); }
-                else continue;
+                else tok = Token(TokenKind::Pipe);
                 break;
             }
+            case '&': advance(); tok = Token(TokenKind::Ampersand); break;
+            case '^': advance(); tok = Token(TokenKind::Caret); break;
+            case '~': advance(); tok = Token(TokenKind::Tilde); break;
             case '`': tok = read_quoted_ident('`'); break;
             case '"': tok = read_quoted_ident('"'); break;
             case '\'': tok = read_string(); break;

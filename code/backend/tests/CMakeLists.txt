@@ -57,6 +57,9 @@ add_executable(engine_tests
     test_group_by_rules.cpp
     test_expression_subqueries.cpp
     test_name_resolution.cpp
+    test_composite_unique.cpp
+    test_mysql_conformance.cpp
+    test_mysql_semantics.cpp
 )
 
 target_link_libraries(engine_tests PRIVATE engine_core)

@@ -31,6 +31,8 @@ void to_json(nlohmann::json& j, const PartitionKind& kind);
 void from_json(const nlohmann::json& j, PartitionKind& kind);
 void to_json(nlohmann::json& j, const PartitionDef& def);
 void from_json(const nlohmann::json& j, PartitionDef& def);
+void to_json(nlohmann::json& j, const UniqueKey& key);
+void from_json(const nlohmann::json& j, UniqueKey& key);
 void to_json(nlohmann::json& j, const PartitionBy& pb);
 void from_json(const nlohmann::json& j, PartitionBy& pb);
 

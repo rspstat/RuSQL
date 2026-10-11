@@ -47,6 +47,7 @@ add_library(engine_core STATIC
     src/engine/executor/gap_lock.cpp
     src/engine/executor/executor_select.cpp
     src/engine/executor/executor_scalar_func.cpp
+    src/engine/executor/builtin_functions.cpp
     src/engine/executor/executor_subquery.cpp
     src/engine/executor/executor_cte.cpp
     src/engine/executor/executor_setops.cpp

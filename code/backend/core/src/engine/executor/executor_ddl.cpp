@@ -11,6 +11,7 @@
 #include <cctype>
 #include <charconv>
 #include <limits>
+#include <unordered_set>
 
 #include "engine/parser/parser.hpp"
 
@@ -172,8 +173,15 @@ bool value_matches_data_type(const DataType& dt, const std::string& val) {
 StringResult Executor::exec_create(SharedDatabase& s, std::string name, std::vector<ColumnDef> columns, bool if_not_exists,
                                     std::vector<std::string> primary_key_columns,
                                     std::vector<std::pair<std::optional<std::string>, std::string>> check_constraints,
-                                    std::optional<PartitionBy> partition_by) {
+                                    std::optional<PartitionBy> partition_by, std::vector<UniqueKey> unique_keys) {
     if (if_not_exists && s.tables.count(name)) return StringResult::Ok("Table '" + name + "' already exists, skipped.");
+    for (auto& key : unique_keys) {
+        for (auto& key_column : key.columns) {
+            if (std::none_of(columns.begin(), columns.end(), [&](const ColumnDef& c) { return c.name == key_column; })) {
+                return StringResult::Err("Key column '" + key_column + "' doesn't exist in table");
+            }
+        }
+    }
 
     // Table partitioning (V1): expand HASH into an explicit partition list and validate
     // RANGE's MAXVALUE placement BEFORE creating anything, so a bad PARTITION BY clause
@@ -231,6 +239,7 @@ StringResult Executor::exec_create(SharedDatabase& s, std::string name, std::vec
     // branch further down needs to reuse them unchanged, once per child table.
     auto res = s.catalog.create_table_full(name, columns, primary_key_columns, schema_checks);
     if (res.is_err()) return StringResult::Err(res.error());
+    s.catalog.get_table_mut(name)->unique_keys = unique_keys;
 
     s.tables[name] = {};
     {
@@ -267,7 +276,7 @@ StringResult Executor::exec_create(SharedDatabase& s, std::string name, std::vec
     // partitioning exists.
     if (partition_by) {
         for (auto& def : partition_by->partitions) {
-            auto child_res = exec_create(s, def.child_table, columns, /*if_not_exists=*/false, primary_key_columns, check_constraints);
+            auto child_res = exec_create(s, def.child_table, columns, /*if_not_exists=*/false, primary_key_columns, check_constraints, std::nullopt, unique_keys);
             if (child_res.is_err()) {
                 // Best-effort cleanup so a failed CREATE TABLE ... PARTITION BY doesn't
                 // leave a half-created table behind for this session to trip over later.
@@ -288,6 +297,19 @@ StringResult Executor::exec_create(SharedDatabase& s, std::string name, std::vec
 
 StringResult Executor::exec_drop(SharedDatabase& s, const std::string& name, bool if_exists) {
     if (if_exists && !s.tables.count(name)) return StringResult::Ok("Table '" + name + "' does not exist, skipped.");
+    // a table that another table's foreign key refers to cannot go (MySQL 3730) -- except while a RESTORE replays a dump, which drops and
+    // recreates the tables one after the other (a dump of mysqldump sets FOREIGN_KEY_CHECKS = 0 for the same reason)
+    for (auto& [other_name, other_schema] : s.catalog.tables) {
+        if (skip_fk_checks) break;
+        if (other_name == name) continue;
+        for (auto& col : other_schema.columns) {
+            if (col.foreign_key && col.foreign_key->ref_table == name) {
+                std::string bare = other_name.substr(other_name.rfind('.') == std::string::npos ? 0 : other_name.rfind('.') + 1);
+                std::string bare_name = name.substr(name.rfind('.') == std::string::npos ? 0 : name.rfind('.') + 1);
+                return StringResult::Err("Cannot drop table '" + bare_name + "' referenced by a foreign key constraint on table '" + bare + "'.");
+            }
+        }
+    }
     // Table partitioning: capture the child list BEFORE drop_table erases the catalog
     // entry (and so partition_info with it) below.
     std::optional<PartitionBy> partition_by;
@@ -372,7 +394,7 @@ StringResult Executor::exec_alter(SharedDatabase& s, const std::string& table, A
         raw_checks.reserve(schema->check_constraints.size());
         for (auto& c : schema->check_constraints) raw_checks.emplace_back(c.name, c.expression);
         auto create_res =
-            exec_create(s, new_def.child_table, schema->columns, /*if_not_exists=*/false, schema->primary_key_columns, raw_checks);
+            exec_create(s, new_def.child_table, schema->columns, /*if_not_exists=*/false, schema->primary_key_columns, raw_checks, std::nullopt, schema->unique_keys);
         if (create_res.is_err()) return create_res;
         schema = s.catalog.get_table_mut(table); // exec_create above may have invalidated schema (map rehash)
         schema->partition_info->partitions.push_back(new_def);
@@ -692,8 +714,41 @@ StringResult Executor::exec_alter(SharedDatabase& s, const std::string& table, A
     if (auto* v = std::get_if<AlterAction::AddUniqueConstraint>(&action.data)) {
         auto* schema = s.catalog.get_table_mut(table);
         if (!schema) return StringResult::Err("Table '" + table + "' not found");
+        // the rows the table holds already must not repeat the key (MySQL 1062); a NULL in it repeats nothing
+        auto repeated_key = [&](const std::vector<std::string>& key_columns) -> std::optional<std::string> {
+            auto tit = s.tables.find(table);
+            if (tit == s.tables.end()) return std::nullopt;
+            std::unordered_set<std::string> seen;
+            for (auto& row : tit->second) {
+                if (!is_visible(row)) continue;
+                std::string encoded, shown;
+                bool has_null = false;
+                for (std::size_t k = 0; k < key_columns.size(); k++) {
+                    auto it = row.find(key_columns[k]);
+                    const std::string value = it != row.end() ? it->second : std::string(EXECUTOR_NULL_VALUE);
+                    if (value == EXECUTOR_NULL_VALUE) has_null = true;
+                    encoded += std::to_string(value.size()) + ":" + value;
+                    shown += (k ? "-" : "") + value;
+                }
+                if (has_null) continue;
+                if (!seen.insert(encoded).second) return "Duplicate entry '" + shown + "' for key '" + v->name.value_or(key_columns.front()) + "'";
+            }
+            return std::nullopt;
+        };
+        if (v->columns.size() > 1) { // a key over several columns
+            for (auto& key_column : v->columns) {
+                if (std::none_of(schema->columns.begin(), schema->columns.end(), [&](const ColumnDef& c) { return c.name == key_column; })) {
+                    return StringResult::Err("Key column '" + key_column + "' doesn't exist in table");
+                }
+            }
+            if (auto repeated = repeated_key(v->columns)) return StringResult::Err(*repeated);
+            schema->unique_keys.push_back(UniqueKey{v->name, v->columns});
+            s.disk.save_schema(table, *s.catalog.get_table(table));
+            return StringResult::Ok("Unique constraint '" + v->name.value_or(v->columns.front()) + "' added to '" + table + "'.");
+        }
         auto col_it = std::find_if(schema->columns.begin(), schema->columns.end(), [&](const ColumnDef& c) { return c.name == v->column; });
         if (col_it == schema->columns.end()) return StringResult::Err("Column '" + v->column + "' not found in '" + table + "'");
+        if (auto repeated = repeated_key({v->column})) return StringResult::Err(*repeated);
         col_it->unique = true;
         col_it->unique_constraint_name = v->name;
         s.disk.save_schema(table, *s.catalog.get_table(table));
@@ -720,6 +775,13 @@ StringResult Executor::exec_alter(SharedDatabase& s, const std::string& table, A
                      checks.end());
         bool removed_check = checks.size() < before;
         if (!removed_check) {
+            auto& keys = schema->unique_keys;
+            const std::size_t keys_before = keys.size();
+            keys.erase(std::remove_if(keys.begin(), keys.end(), [&](const UniqueKey& k) { return k.name == std::optional<std::string>(v->name); }), keys.end());
+            if (keys.size() < keys_before) {
+                s.disk.save_schema(table, *s.catalog.get_table(table));
+                return StringResult::Ok("Constraint '" + v->name + "' dropped from '" + table + "'.");
+            }
             for (auto& col : schema->columns) {
                 if (col.unique_constraint_name == std::optional<std::string>(v->name)) {
                     col.unique = false;
@@ -728,6 +790,8 @@ StringResult Executor::exec_alter(SharedDatabase& s, const std::string& table, A
                     return StringResult::Ok("Constraint '" + v->name + "' dropped from '" + table + "'.");
                 }
             }
+            // (ALTER TABLE ... DROP INDEX name: an index of that name goes; DROP INDEX itself answers "skipped" for one that does not exist)
+            if (auto dropped = exec_drop_index(s, v->name); dropped.is_ok() && dropped.value().find(" dropped.") != std::string::npos) return dropped;
             return StringResult::Err("Constraint '" + v->name + "' not found in '" + table + "'");
         }
         s.disk.save_schema(table, *s.catalog.get_table(table));

@@ -112,7 +112,7 @@ Executor::Tri Executor::eval_single_with_subquery(SharedDatabase& s, const Row& 
         return tri(cond.op == Operator::Exists ? has_rows : !has_rows);
     }
 
-    std::string val = eval_arith(row, cond.left);
+    std::string val = eval_arith_exact(row, cond.left);
     const bool left_null = val == EXECUTOR_NULL_VALUE;
     const bool is_in = cond.op == Operator::In || cond.op == Operator::NotIn;
     if (left_null && !is_in) return Tri::Unknown;

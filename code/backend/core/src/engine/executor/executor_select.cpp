@@ -20,6 +20,7 @@
 #include "engine/planner.hpp"
 #include "engine/parallel_util.hpp"
 #include "engine/numeric_text.hpp"
+#include "engine/sql_value_util.hpp"
 #include "engine/parser/parser.hpp"
 #include "engine/storage/numeric_key.hpp"
 
@@ -45,7 +46,7 @@ std::string extreme_text(const std::vector<const std::string*>& values, bool sma
     return *best;
 }
 
-// STDDEV and VARIANCE (of the whole population, as MySQL's) and MEDIAN of the values, 4 places; NULL for no value.
+// STDDEV and VARIANCE (of the whole population, or of a sample: _SAMP) as a DOUBLE, and MEDIAN of the values (4 places); NULL for no value.
 std::string spread_text(const AggFunc& func, const std::vector<const std::string*>& values) {
     if (values.empty()) return EXECUTOR_NULL_VALUE;
     std::vector<double> nums;
@@ -56,11 +57,25 @@ std::string spread_text(const AggFunc& func, const std::vector<const std::string
         const std::size_t n = nums.size();
         return format_4dp(n % 2 ? nums[n / 2] : (nums[n / 2 - 1] + nums[n / 2]) / 2.0);
     }
-    const double mean = std::accumulate(nums.begin(), nums.end(), 0.0) / static_cast<double>(nums.size());
-    double variance = 0.0;
-    for (double v : nums) variance += (v - mean) * (v - mean);
-    variance /= static_cast<double>(nums.size());
-    return format_4dp(std::holds_alternative<AggFunc::Stddev>(func.data) ? std::sqrt(variance) : variance);
+    const bool sample = (std::holds_alternative<AggFunc::Stddev>(func.data) && std::get<AggFunc::Stddev>(func.data).sample) ||
+                        (std::holds_alternative<AggFunc::Variance>(func.data) && std::get<AggFunc::Variance>(func.data).sample);
+    if (sample && nums.size() < 2) return EXECUTOR_NULL_VALUE; // (the sample variance of one value is undefined)
+    // the running mean and sum of squares MySQL keeps (so the last digits of the DOUBLE are its)
+    double mean = 0.0, squares = 0.0;
+    double count = 0.0;
+    for (double v : nums) {
+        count += 1.0;
+        if (count == 1.0) {
+            mean = v;
+            squares = 0.0;
+        } else {
+            const double before = mean;
+            mean = before + (v - before) / count;
+            squares += (v - before) * (v - mean);
+        }
+    }
+    const double variance = squares / (sample ? count - 1.0 : count);
+    return sqlval::format_double(std::holds_alternative<AggFunc::Stddev>(func.data) ? std::sqrt(variance) : variance);
 }
 
 // The values of `values` that differ, the first of each. Numbers differ by value (an expression holds "7" for one row and "7.00" for another, as
@@ -451,8 +466,8 @@ std::string Executor::agg_label(const AggFunc& func, const std::string& col) {
     if (std::holds_alternative<AggFunc::AvgDistinct>(func.data)) return "AVG(DISTINCT " + col + ")";
     if (std::holds_alternative<AggFunc::Min>(func.data)) return "MIN(" + col + ")";
     if (std::holds_alternative<AggFunc::Max>(func.data)) return "MAX(" + col + ")";
-    if (std::holds_alternative<AggFunc::Stddev>(func.data)) return "STDDEV(" + col + ")";
-    if (std::holds_alternative<AggFunc::Variance>(func.data)) return "VARIANCE(" + col + ")";
+    if (auto* sd = std::get_if<AggFunc::Stddev>(&func.data)) return std::string(sd->sample ? "STDDEV_SAMP(" : "STDDEV(") + col + ")";
+    if (auto* var = std::get_if<AggFunc::Variance>(&func.data)) return std::string(var->sample ? "VAR_SAMP(" : "VARIANCE(") + col + ")";
     if (std::holds_alternative<AggFunc::GroupConcat>(func.data)) return "GROUP_CONCAT(" + col + ")";
     if (std::holds_alternative<AggFunc::CountCase>(func.data)) return "COUNT(CASE)" + case_number;
     if (std::holds_alternative<AggFunc::SumCase>(func.data)) return "SUM(CASE)" + case_number;
@@ -772,11 +787,29 @@ Row Executor::compute_aggregates(const std::vector<const Row*>& grp, const std::
         col_name = resolve_arg_key(grp, col_name);
 
         if (auto* gc = std::get_if<AggFunc::GroupConcat>(&func->data)) {
+            std::vector<const Row*> ordered(grp.begin(), grp.end());
+            if (!gc->order_by.empty()) {
+                // ORDER BY inside GROUP_CONCAT: numbers by value, texts by their bytes, NULL first when ascending
+                std::stable_sort(ordered.begin(), ordered.end(), [&](const Row* a, const Row* b) {
+                    for (auto& [key, ascending] : gc->order_by) {
+                        auto ia = a->find(key), ib = b->find(key);
+                        const bool null_a = ia == a->end() || ia->second == EXECUTOR_NULL_VALUE, null_b = ib == b->end() || ib->second == EXECUTOR_NULL_VALUE;
+                        int order;
+                        if (null_a || null_b) order = null_a == null_b ? 0 : (null_a ? -1 : 1);
+                        else order = compare_classed(ValueClass::Unknown, ValueClass::Unknown, ia->second, ib->second);
+                        if (order != 0) return ascending ? order < 0 : order > 0;
+                    }
+                    return false;
+                });
+            }
             std::vector<std::string> strs;
-            for (const Row* r_ptr : grp) {
+            std::unordered_set<std::string> seen_values;
+            for (const Row* r_ptr : ordered) {
                 const Row& r = *r_ptr;
                 auto it = r.find(col_name);
-                if (it != r.end() && it->second != EXECUTOR_NULL_VALUE) strs.push_back(it->second);
+                if (it == r.end() || it->second == EXECUTOR_NULL_VALUE) continue;
+                if (gc->distinct && !seen_values.insert(it->second).second) continue;
+                strs.push_back(it->second);
             }
             std::string joined;
             for (std::size_t i = 0; i < strs.size(); i++) {

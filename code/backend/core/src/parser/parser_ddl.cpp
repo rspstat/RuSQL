@@ -520,6 +520,7 @@ Statement Parser::parse_create() {
     std::vector<ColumnDef> columns;
     std::vector<std::string> primary_key_columns;
     std::vector<std::pair<std::optional<std::string>, std::string>> check_constraints;
+    std::vector<UniqueKey> unique_keys;
 
     for (;;) {
         if (peek_is(TokenKind::Primary)) {
@@ -547,16 +548,25 @@ Statement Parser::parse_create() {
             std::string constraint_name = expect_ident();
             if (peek_is(TokenKind::Unique)) {
                 advance();
-                if (peek_is(TokenKind::Key)) advance();
+                if (peek_is(TokenKind::Key) || peek_is(TokenKind::Index)) advance();
+                if (peek_is(TokenKind::Ident)) expect_ident(); // (the index name: the constraint's name is the one given)
                 if (!peek_is(TokenKind::LParen)) throw ParseError("Expected '(' after UNIQUE");
                 advance();
-                std::string col = expect_ident();
+                std::vector<std::string> key_columns;
+                key_columns.push_back(expect_ident());
+                while (peek_is(TokenKind::Comma)) { advance(); key_columns.push_back(expect_ident()); }
                 if (!peek_is(TokenKind::RParen)) throw ParseError("Expected ')' after column");
                 advance();
-                auto it = std::find_if(columns.begin(), columns.end(), [&](const ColumnDef& c) { return c.name == col; });
-                if (it == columns.end()) throw ParseError("CONSTRAINT: column '" + col + "' not defined");
-                it->unique = true;
-                it->unique_constraint_name = constraint_name;
+                for (auto& col : key_columns) {
+                    if (std::none_of(columns.begin(), columns.end(), [&](const ColumnDef& c) { return c.name == col; })) throw ParseError("CONSTRAINT: column '" + col + "' not defined");
+                }
+                if (key_columns.size() > 1) {
+                    unique_keys.push_back(UniqueKey{constraint_name, key_columns});
+                } else {
+                    auto it = std::find_if(columns.begin(), columns.end(), [&](const ColumnDef& c) { return c.name == key_columns[0]; });
+                    it->unique = true;
+                    it->unique_constraint_name = constraint_name;
+                }
             } else if (peek_is(TokenKind::Check)) {
                 advance();
                 std::string expr = read_parenthesized_expr();
@@ -587,16 +597,26 @@ Statement Parser::parse_create() {
             }
         } else if (peek_is(TokenKind::Unique)) {
             advance();
-            if (peek_is(TokenKind::Key)) advance();
-            if (peek_is(TokenKind::Ident)) expect_ident();
+            if (peek_is(TokenKind::Key) || peek_is(TokenKind::Index)) advance();
+            std::optional<std::string> key_name;
+            if (peek_is(TokenKind::Ident)) key_name = expect_ident();
             if (!peek_is(TokenKind::LParen)) throw ParseError("Expected '(' after UNIQUE KEY name");
             advance();
-            std::string col = expect_ident();
-            while (peek_is(TokenKind::Comma)) { advance(); expect_ident(); }
+            std::vector<std::string> key_columns;
+            key_columns.push_back(expect_ident());
+            while (peek_is(TokenKind::Comma)) { advance(); key_columns.push_back(expect_ident()); }
             if (!peek_is(TokenKind::RParen)) throw ParseError("Expected ')' after UNIQUE KEY columns");
             advance();
-            auto it = std::find_if(columns.begin(), columns.end(), [&](const ColumnDef& c) { return c.name == col; });
-            if (it != columns.end()) it->unique = true;
+            for (auto& col : key_columns) {
+                if (std::none_of(columns.begin(), columns.end(), [&](const ColumnDef& c) { return c.name == col; })) throw ParseError("Key column '" + col + "' doesn't exist in table");
+            }
+            if (key_columns.size() > 1) {
+                unique_keys.push_back(UniqueKey{key_name, key_columns});
+            } else {
+                auto it = std::find_if(columns.begin(), columns.end(), [&](const ColumnDef& c) { return c.name == key_columns[0]; });
+                it->unique = true;
+                if (key_name) it->unique_constraint_name = key_name;
+            }
         } else if (peek_is(TokenKind::Index) || peek_is(TokenKind::Key)) {
             advance(); // INDEX or KEY
             if (peek_is(TokenKind::Ident)) expect_ident();
@@ -640,7 +660,7 @@ Statement Parser::parse_create() {
         if (it == columns.end()) throw ParseError("PARTITION BY column '" + partition_by->column + "' not defined");
     }
 
-    return Statement(Statement::CreateTable{name, columns, if_not_exists, primary_key_columns, check_constraints, partition_by});
+    return Statement(Statement::CreateTable{name, columns, if_not_exists, primary_key_columns, check_constraints, partition_by, unique_keys});
 }
 
 Statement Parser::parse_drop() {
@@ -655,6 +675,22 @@ Statement Parser::parse_drop() {
     }
     std::string name = expect_ident();
     return Statement(Statement::DropTable{name, if_exists});
+}
+
+// CREATE UNIQUE INDEX name ON table (col, ...): a unique key of the table
+Statement Parser::parse_create_unique_index() {
+    const std::string index_name = expect_ident();
+    if (!peek_is(TokenKind::On)) throw ParseError("Expected ON after the index name");
+    advance();
+    const std::string table = expect_ident();
+    if (!peek_is(TokenKind::LParen)) throw ParseError("Expected '(' after the table name");
+    advance();
+    std::vector<std::string> key_columns;
+    key_columns.push_back(expect_ident());
+    while (peek_is(TokenKind::Comma)) { advance(); key_columns.push_back(expect_ident()); }
+    if (!peek_is(TokenKind::RParen)) throw ParseError("Expected ')' after the index columns");
+    advance();
+    return Statement(Statement::AlterTable{table, AlterAction(AlterAction::AddUniqueConstraint{index_name, key_columns.front(), key_columns})});
 }
 
 Statement Parser::parse_alter() {
@@ -701,12 +737,19 @@ Statement Parser::parse_alter() {
                     constraint_name, column, ref_table, ref_column, on_delete, on_update})});
             }
             if (kind && kind->kind == TokenKind::Unique) {
+                if (peek_is(TokenKind::Key) || peek_is(TokenKind::Index)) advance();
+                if (peek_is(TokenKind::Ident)) {
+                    const std::string key_name = expect_ident();
+                    if (!constraint_name) constraint_name = key_name;
+                }
                 if (!peek_is(TokenKind::LParen)) throw ParseError("Expected '(' after UNIQUE");
                 advance();
-                std::string column = expect_ident();
+                std::vector<std::string> key_columns;
+                key_columns.push_back(expect_ident());
+                while (peek_is(TokenKind::Comma)) { advance(); key_columns.push_back(expect_ident()); }
                 if (!peek_is(TokenKind::RParen)) throw ParseError("Expected ')' after column");
                 advance();
-                return Statement(Statement::AlterTable{table, AlterAction(AlterAction::AddUniqueConstraint{constraint_name, column})});
+                return Statement(Statement::AlterTable{table, AlterAction(AlterAction::AddUniqueConstraint{constraint_name, key_columns.front(), key_columns})});
             }
             if (kind && kind->kind == TokenKind::Check) {
                 if (!peek_is(TokenKind::LParen)) throw ParseError("Expected '(' after CHECK");
@@ -788,6 +831,11 @@ Statement Parser::parse_alter() {
             advance();
             std::string name = expect_ident();
             return Statement(Statement::AlterTable{table, AlterAction(AlterAction::DropForeignKey{name})});
+        }
+        if (peek_is(TokenKind::Index) || peek_is(TokenKind::Key)) { // DROP INDEX name / DROP KEY name: a UNIQUE key (or an index) of that name goes
+            advance();
+            std::string name = expect_ident();
+            return Statement(Statement::AlterTable{table, AlterAction(AlterAction::DropConstraint{name})});
         }
         if (peek_is(TokenKind::Column)) advance();
         std::string col_name = expect_ident();

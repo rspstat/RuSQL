@@ -125,7 +125,7 @@ TEST_CASE("a function, an aggregate or a CAST can start an expression", "[value_
     REQUIRE(q(ex, "SELECT id, LENGTH(s) >= 2, UPPER(s) = 'X', ABS(v) <= 7, MOD(v, 4) < 3 FROM a WHERE id <= 3 ORDER BY id") ==
             Rows{{"1", "0", "1", "0", "1"}, {"2", N, N, N, N}, {"3", "0", "0", "0", "1"}});
     REQUIRE(q(ex, "SELECT COUNT(*) > 4, SUM(v) <> 47, MAX(v) = 30, COUNT(*) >= 5, MIN(v) <= 0, SUM(v) < 40 FROM a") == Rows{{"1", "0", "1", "1", "1", "0"}});
-    REQUIRE(q(ex, "SELECT id, ROUND(d * 10) * 100 FROM a WHERE id = 5") == Rows{{"5", "3300"}});
+    REQUIRE(q(ex, "SELECT id, ROUND(d * 10) * 100 FROM a WHERE id = 5") == Rows{{"5", "3200"}}); // (d is a DOUBLE: ROUND(32.5) is 32)
     REQUIRE(q(ex, "SELECT ROUND(2.7) * 2, ABS(-3) + 1, LENGTH('abc') * LENGTH('de')") == Rows{{"6", "4", "6"}});
     // a function on the right of a comparison, a parenthesised value on the left
     REQUIRE(q(ex, "SELECT id FROM a WHERE (v + w) * 2 > 20 ORDER BY id") == Rows{{"1"}, {"5"}});
@@ -153,7 +153,7 @@ TEST_CASE("date functions, DATABASE() and USER() are expressions", "[value_expre
     ok(ex, "INSERT INTO ev VALUES (1, '2024-01-31', 1), (2, '2024-02-28', 30), (3, '2023-12-25', NULL)");
     REQUIRE(one(ex, "SELECT DATE_ADD('2024-01-31', INTERVAL 1 DAY)") == "2024-02-01");
     REQUIRE(one(ex, "SELECT DATE_SUB('2024-03-01', INTERVAL 1 DAY)") == "2024-02-29");
-    REQUIRE(one(ex, "SELECT DATE_ADD('2024-01-31', INTERVAL 1 MONTH)") == "2024-01-31"); // (a month with no 31st leaves the date as it is)
+    REQUIRE(one(ex, "SELECT DATE_ADD('2024-01-31', INTERVAL 1 MONTH)") == "2024-02-29"); // (a month with no 31st: its last day)
     REQUIRE(one(ex, "SELECT DATE_ADD('2023-02-28', INTERVAL 2 YEAR)") == "2025-02-28");
     REQUIRE(one(ex, "SELECT DATE_ADD('2024-01-01', INTERVAL -1 DAY)") == "2023-12-31");
     REQUIRE(one(ex, "SELECT DATEDIFF(DATE_ADD('2024-01-01', INTERVAL 10 DAY), '2024-01-01') * 2") == "20");
@@ -397,7 +397,8 @@ TEST_CASE("INSERT values and UPDATE assignments are expressions", "[value_expres
     ok(ex, "UPDATE c SET s = CONCAT(s, '!'), d = ROUND(d) WHERE id = 3");
     REQUIRE(q(ex, "SELECT s, d FROM c WHERE id = 3") == Rows{{"q!", "-2"}});
     ok(ex, "UPDATE c SET v = IF(v > 5, v - 5, 0), d = (v > 5) WHERE id >= 4 AND id <= 5");
-    REQUIRE(q(ex, "SELECT id, v, d FROM c WHERE id >= 4 AND id <= 5 ORDER BY id") == Rows{{"4", "1", "1"}, {"5", "2", "1"}});
+    // (the assignments run in the order written and each sees the ones before it, as MySQL does: d = (v > 5) reads the v that was just set)
+    REQUIRE(q(ex, "SELECT id, v, d FROM c WHERE id >= 4 AND id <= 5 ORDER BY id") == Rows{{"4", "1", "0"}, {"5", "2", "0"}});
     // ON DUPLICATE KEY UPDATE
     ok(ex, "INSERT INTO c VALUES (1, 0, 'x', 0) ON DUPLICATE KEY UPDATE v = CASE WHEN VALUES(v) = 0 THEN 100 ELSE 200 END, s = UPPER(s) || '?'");
     REQUIRE(q(ex, "SELECT v, s FROM c WHERE id = 1") == Rows{{"100", "R?"}});

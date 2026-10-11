@@ -10,15 +10,13 @@
 #include "engine/executor/executor.hpp"
 
 #include <algorithm>
-#include <charconv>
 #include <chrono>
-#include <cmath>
 #include <cstdio>
 #include <ctime>
 #include <regex>
-#include <sstream>
 #include <unordered_map>
 
+#include "engine/executor/builtin_functions.hpp"
 #include "engine/numeric_text.hpp"
 #include "engine/parser/parser.hpp"
 
@@ -27,8 +25,6 @@ namespace engine {
 namespace {
 
 using namespace std::chrono;
-
-constexpr double kPi = 3.14159265358979323846;
 
 thread_local std::unordered_map<std::string, UserFunctionDef> g_user_functions;
 thread_local std::string g_current_db_ctx;
@@ -39,8 +35,6 @@ std::string to_lower_str(const std::string& s) {
     std::transform(out.begin(), out.end(), out.begin(), [](unsigned char c) { return std::tolower(c); });
     return out;
 }
-
-std::optional<double> parse_f64(const std::string& s) { return parse_number(s); }
 
 std::optional<long long> parse_i64(const std::string& s) {
     if (s.empty()) return std::nullopt;
@@ -60,38 +54,6 @@ std::string to_upper(const std::string& s) {
     return out;
 }
 
-std::string to_lower(const std::string& s) {
-    std::string out = s;
-    std::transform(out.begin(), out.end(), out.begin(), [](unsigned char c) { return std::tolower(c); });
-    return out;
-}
-
-std::string trim_both(const std::string& s) {
-    auto a = s.find_first_not_of(" \t\r\n");
-    if (a == std::string::npos) return "";
-    auto b = s.find_last_not_of(" \t\r\n");
-    return s.substr(a, b - a + 1);
-}
-std::string trim_left(const std::string& s) {
-    auto a = s.find_first_not_of(" \t\r\n");
-    return a == std::string::npos ? "" : s.substr(a);
-}
-std::string trim_right(const std::string& s) {
-    auto b = s.find_last_not_of(" \t\r\n");
-    return b == std::string::npos ? "" : s.substr(0, b + 1);
-}
-
-// Matches Rust's `format!("{}", v)` / f64 Display: the shortest decimal (never
-// scientific-notation) representation that round-trips exactly, with no forced
-// trailing ".0" for whole numbers (e.g. 3.0 -> "3", matching Rust). The previous
-// `oss << v` used std::ostream's default precision (6 significant digits), which
-// silently truncated anything needing more precision to round-trip -- e.g. PI()
-// showed "3.14159" instead of the full "3.141592653589793".
-std::string fmt_double(double v) {
-    char buf[64];
-    auto res = std::to_chars(buf, buf + sizeof(buf), v, std::chars_format::fixed);
-    return std::string(buf, res.ptr);
-}
 std::string fmt_prec(double v, int prec) {
     char buf[64];
     std::snprintf(buf, sizeof(buf), "%.*f", prec, v);
@@ -115,12 +77,6 @@ std::optional<SimpleDate> parse_date(const std::string& v) {
     return SimpleDate{y, mo, d};
 }
 
-std::string format_date(const SimpleDate& sd) {
-    char buf[16];
-    std::snprintf(buf, sizeof(buf), "%04d-%02d-%02d", sd.y, sd.mo, sd.d);
-    return buf;
-}
-
 struct SimpleDateTime {
     int y = 1970, mo = 1, d = 1, h = 0, mi = 0, s = 0;
 };
@@ -134,57 +90,11 @@ std::optional<SimpleDateTime> parse_datetime(const std::string& v) {
     return std::nullopt;
 }
 
-std::string format_datetime(const SimpleDateTime& dt) {
-    char buf[24];
-    std::snprintf(buf, sizeof(buf), "%04d-%02d-%02d %02d:%02d:%02d", dt.y, dt.mo, dt.d, dt.h, dt.mi, dt.s);
-    return buf;
-}
-
 sys_days to_sys_days(const SimpleDate& sd) {
     return sys_days{year{sd.y} / month{static_cast<unsigned>(sd.mo)} / day{static_cast<unsigned>(sd.d)}};
 }
-SimpleDate from_sys_days(sys_days sd) {
-    year_month_day ymd{sd};
-    return SimpleDate{static_cast<int>(ymd.year()), static_cast<int>(static_cast<unsigned>(ymd.month())),
-                       static_cast<int>(static_cast<unsigned>(ymd.day()))};
-}
 sys_seconds to_sys_seconds(const SimpleDateTime& dt) {
     return sys_seconds{to_sys_days(SimpleDate{dt.y, dt.mo, dt.d}).time_since_epoch() + hours{dt.h} + minutes{dt.mi} + seconds{dt.s}};
-}
-
-long long floor_div(long long a, long long b) {
-    long long q = a / b;
-    if ((a % b != 0) && ((a < 0) != (b < 0))) q--;
-    return q;
-}
-long long rem_euclid(long long a, long long b) {
-    long long r = a % b;
-    if (r < 0) r += (b < 0 ? -b : b);
-    return r;
-}
-
-// Rust's from_ymd_opt(...).unwrap_or(d): if the shifted (year, month) + original day
-// isn't a valid calendar date, the date is returned unchanged rather than clamped.
-SimpleDate add_months(const SimpleDate& d, long long delta_months) {
-    long long months0 = static_cast<long long>(d.mo) - 1 + delta_months;
-    int year = d.y + static_cast<int>(floor_div(months0, 12));
-    int month = static_cast<int>(rem_euclid(months0, 12)) + 1;
-    if (date_ok(year, month, d.d)) return SimpleDate{year, month, d.d};
-    return d;
-}
-
-SimpleDate add_years(const SimpleDate& d, long long delta_years) {
-    int year = d.y + static_cast<int>(delta_years);
-    if (date_ok(year, d.mo, d.d)) return SimpleDate{year, d.mo, d.d};
-    return d;
-}
-
-int weekday_sunday1(sys_days sd) { return weekday{sd}.c_encoding() + 1; }
-int weekday_monday0(sys_days sd) { return weekday{sd}.iso_encoding() - 1; }
-int day_of_year(sys_days sd) {
-    year_month_day ymd{sd};
-    sys_days jan1 = sys_days{ymd.year() / January / 1};
-    return static_cast<int>((sd - jan1).count()) + 1;
 }
 
 // --- MD5 (from-scratch, matches the Rust original's own from-scratch implementation) ---
@@ -386,23 +296,12 @@ std::string json_extract(const std::string& json_str, const std::string& path_in
     return std::string(current);
 }
 
-// Functions whose result is NULL when one of their first N arguments is NULL (N = the number of value arguments: ROUND(v, d) has two,
-// DATE_ADD(d, n, unit) two plus a unit keyword; kAllArgs = every argument). The ones that deal with NULL themselves (COALESCE, IFNULL,
-// NULLIF, ISNULL, IF, CONCAT, CONCAT_WS, CHAR) and the ones without arguments are not listed.
-constexpr std::size_t kAllArgs = static_cast<std::size_t>(-1);
+// Functions of the older dispatcher whose result is NULL when one of their first N arguments is NULL. The functions
+// of builtin_functions.cpp deal with NULL themselves, so does COALESCE / IFNULL / NULLIF / ISNULL / IF, and the ones without arguments are not listed.
 const std::unordered_map<std::string, std::size_t>& null_propagating_functions() {
     static const std::unordered_map<std::string, std::size_t> table = {
-        {"UPPER", 1}, {"LOWER", 1}, {"LENGTH", 1}, {"CHAR_LENGTH", 1}, {"CHARACTER_LENGTH", 1}, {"BIT_LENGTH", 1}, {"TRIM", 1},
-        {"LTRIM", 1}, {"RTRIM", 1}, {"REVERSE", 1}, {"SPACE", 1}, {"ASCII", 1}, {"HEX", 1}, {"UNHEX", 1}, {"MD5", 1},
-        {"ABS", 1}, {"CEIL", 1}, {"FLOOR", 1}, {"SQRT", 1}, {"EXP", 1}, {"SIN", 1}, {"COS", 1}, {"TAN", 1}, {"SIGN", 1},
-        {"LOG2", 1}, {"LOG10", 1}, {"YEAR", 1}, {"MONTH", 1}, {"DAY", 1}, {"DAYOFMONTH", 1}, {"HOUR", 1}, {"MINUTE", 1},
-        {"SECOND", 1}, {"DAYOFWEEK", 1}, {"DAYOFYEAR", 1}, {"WEEKDAY", 1}, {"LAST_DAY", 1}, {"FROM_UNIXTIME", 1},
-        {"UNIX_TIMESTAMP", 1}, {"JSON_UNQUOTE", 1}, {"CAST", 1}, {"CONVERT", 1},
-        {"ROUND", 2}, {"TRUNCATE", 2}, {"MOD", 2}, {"POW", 2}, {"POWER", 2}, {"LOG", 2}, {"LEFT", 2}, {"RIGHT", 2}, {"REPEAT", 2},
-        {"INSTR", 2}, {"LOCATE", 3}, {"FORMAT", 2}, {"DATE_FORMAT", 2}, {"DATEDIFF", 2}, {"DATE_ADD", 2}, {"DATE_SUB", 2},
-        {"REGEXP_LIKE", 2}, {"REGEXP", 2}, {"REGEXP_MATCH", 2}, {"REGEXP_SUBSTR", 2}, {"JSON_EXTRACT", 2}, {"JSON_VALUE", 2},
-        {"SUBSTR", 3}, {"SUBSTRING", 3}, {"REPLACE", 3}, {"LPAD", 3}, {"RPAD", 3}, {"REGEXP_REPLACE", 3},
-        {"GREATEST", kAllArgs}, {"LEAST", kAllArgs},
+        {"MD5", 1}, {"FROM_UNIXTIME", 1}, {"UNIX_TIMESTAMP", 1}, {"JSON_UNQUOTE", 1}, {"JSON_EXTRACT", 2}, {"JSON_VALUE", 2},
+        {"REGEXP_LIKE", 2}, {"REGEXP", 2}, {"REGEXP_MATCH", 2}, {"REGEXP_SUBSTR", 2}, {"REGEXP_REPLACE", 3},
     };
     return table;
 }
@@ -416,8 +315,15 @@ void Executor::sync_udf_context(const std::unordered_map<std::string, UserFuncti
     g_current_user_ctx = current_user;
 }
 
-std::string Executor::apply_scalar_func(const std::string& func_name, const std::vector<std::string>& args, const Row& row) {
-    if (auto uf_it = g_user_functions.find(to_lower_str(func_name)); uf_it != g_user_functions.end()) {
+std::string Executor::call_builtin_with_values(const std::string& func_name, const std::vector<std::string>& raw, const std::vector<std::string>& values,
+                                               const std::vector<char>& kinds) {
+    return *call_builtin_function(BuiltinCall{func_name, raw, [&](std::size_t i) { return values[i]; }, g_current_db_ctx, kinds});
+}
+
+std::string Executor::apply_scalar_func(const std::string& typed_name, const std::vector<std::string>& args, const Row& row) {
+    const std::string func_name = to_upper(typed_name); // (the names below are upper case; a user function is found by its lower case name)
+    // (a stored function with the name of a built-in function is not called by it: MySQL calls the built-in one)
+    if (auto uf_it = g_user_functions.find(to_lower_str(typed_name)); uf_it != g_user_functions.end() && !is_known_function_name(func_name)) {
         auto& [params, body_json] = uf_it->second;
         try {
             ArithExpr expr = nlohmann::json::parse(body_json).get<ArithExpr>();
@@ -462,6 +368,9 @@ std::string Executor::apply_scalar_func(const std::string& func_name, const std:
     };
     auto arg_at = [&](std::size_t i) -> std::string { return i < args.size() ? resolve(args[i]) : std::string(); };
 
+    // the functions written to MySQL's rules come first
+    if (auto result = call_builtin_function(BuiltinCall{func_name, args, [&](std::size_t i) { return resolve(args[i]); }, g_current_db_ctx, {}})) return *result;
+
     if (auto it = null_propagating_functions().find(func_name); it != null_propagating_functions().end()) {
         const std::size_t value_args = std::min(it->second, args.size());
         checked.reserve(value_args);
@@ -471,43 +380,6 @@ std::string Executor::apply_scalar_func(const std::string& func_name, const std:
         }
     }
 
-    if (func_name == "UPPER") return to_upper(arg_at(0));
-    if (func_name == "LOWER") return to_lower(arg_at(0));
-    if (func_name == "LENGTH") return std::to_string(arg_at(0).size());
-    if (func_name == "TRIM") return trim_both(arg_at(0));
-    if (func_name == "CONCAT") {
-        std::vector<std::string> parts;
-        for (auto& a : args) parts.push_back(resolve(a));
-        if (std::any_of(parts.begin(), parts.end(), [](const std::string& p) { return p == EXECUTOR_NULL_VALUE; })) return EXECUTOR_NULL_VALUE;
-        std::string out;
-        for (auto& p : parts) out += p;
-        return out;
-    }
-    if (func_name == "CONCAT_WS") {
-        std::string sep = arg_at(0);
-        std::string out;
-        bool first = true;
-        for (std::size_t i = 1; i < args.size(); i++) {
-            std::string v = resolve(args[i]);
-            if (v == EXECUTOR_NULL_VALUE) continue;
-            if (!first) out += sep;
-            out += v;
-            first = false;
-        }
-        return out;
-    }
-    if (func_name == "SUBSTR" || func_name == "SUBSTRING") {
-        std::string v = arg_at(0);
-        long long n = args.size() > 1 ? parse_i64(resolve(args[1])).value_or(0) : 0;
-        std::size_t start = n > 0 ? static_cast<std::size_t>(n - 1) : 0;
-        std::optional<std::size_t> len_opt;
-        if (args.size() > 2) {
-            if (auto li = parse_i64(resolve(args[2])); li && *li >= 0) len_opt = static_cast<std::size_t>(*li);
-        }
-        if (start >= v.size()) return "";
-        std::size_t end = len_opt ? std::min(start + *len_opt, v.size()) : v.size();
-        return v.substr(start, end - start);
-    }
     if (func_name == "NOW") {
         auto now = std::chrono::system_clock::now();
         std::time_t t = std::chrono::system_clock::to_time_t(now);
@@ -526,31 +398,6 @@ std::string Executor::apply_scalar_func(const std::string& func_name, const std:
         std::strftime(buf, sizeof(buf), "%Y-%m-%d", &tm_buf);
         return buf;
     }
-    if (func_name == "DATE_FORMAT") {
-        std::string date_val = arg_at(0);
-        std::string fmt_arg = arg_at(1);
-        std::vector<std::string> parts;
-        std::size_t p = 0;
-        while (true) {
-            auto dash = date_val.find('-', p);
-            parts.push_back(date_val.substr(p, dash == std::string::npos ? std::string::npos : dash - p));
-            if (dash == std::string::npos) break;
-            p = dash + 1;
-        }
-        auto replace_all = [](std::string s, const std::string& from, const std::string& to) {
-            std::size_t pos = 0;
-            while ((pos = s.find(from, pos)) != std::string::npos) {
-                s.replace(pos, from.size(), to);
-                pos += to.size();
-            }
-            return s;
-        };
-        std::string out = fmt_arg;
-        out = replace_all(out, "%Y", parts.size() > 0 ? parts[0] : "");
-        out = replace_all(out, "%m", parts.size() > 1 ? parts[1] : "");
-        out = replace_all(out, "%d", parts.size() > 2 ? parts[2] : "");
-        return out;
-    }
     if (func_name == "COALESCE") {
         for (auto& a : args) {
             std::string v = resolve(a);
@@ -562,37 +409,6 @@ std::string Executor::apply_scalar_func(const std::string& func_name, const std:
         std::string v = arg_at(0);
         if (v == EXECUTOR_NULL_VALUE) return arg_at(1);
         return v;
-    }
-    if (func_name == "REPLACE") {
-        std::string v = arg_at(0), from = arg_at(1), to = arg_at(2);
-        if (from.empty()) return v;
-        std::string out;
-        std::size_t pos = 0;
-        while (true) {
-            auto next = v.find(from, pos);
-            if (next == std::string::npos) {
-                out += v.substr(pos);
-                break;
-            }
-            out += v.substr(pos, next - pos) + to;
-            pos = next + from.size();
-        }
-        return out;
-    }
-    if (func_name == "ROUND") {
-        double v = text_to_number(arg_at(0));
-        int decimals = args.size() > 1 ? static_cast<int>(parse_i64(arg_at(1)).value_or(0)) : 0;
-        double factor = std::pow(10.0, decimals);
-        return fmt_double(std::round(v * factor) / factor);
-    }
-    if (func_name == "ABS") return fmt_double(std::abs(text_to_number(arg_at(0))));
-    if (func_name == "CEIL") return fmt_double(std::ceil(text_to_number(arg_at(0))));
-    if (func_name == "FLOOR") return fmt_double(std::floor(text_to_number(arg_at(0))));
-    if (func_name == "MOD") {
-        double a = text_to_number(arg_at(0));
-        double b = args.size() > 1 ? text_to_number(arg_at(1)) : 1.0;
-        if (b == 0.0) return EXECUTOR_NULL_VALUE;
-        return fmt_double(std::fmod(a, b));
     }
     if (func_name == "IF") {
         std::string cond_val = arg_at(0);
@@ -607,69 +423,6 @@ std::string Executor::apply_scalar_func(const std::string& func_name, const std:
         const bool both_numbers = parse_number(a) && parse_number(b);
         const bool equal = both_numbers ? compare_numbers(a, b) == 0 : a == b;
         return equal ? EXECUTOR_NULL_VALUE : a;
-    }
-    if (func_name == "LPAD" || func_name == "RPAD") {
-        std::string s = arg_at(0);
-        std::size_t len = args.size() > 1 ? static_cast<std::size_t>(std::max<long long>(0, parse_i64(resolve(args[1])).value_or(0))) : 0;
-        std::string pad = args.size() > 2 ? resolve(args[2]) : " ";
-        if (s.size() >= len) return s.substr(0, len);
-        if (pad.empty()) return s;
-        std::size_t pad_needed = len - s.size();
-        std::string full_pad;
-        while (full_pad.size() < pad_needed) full_pad += pad;
-        full_pad = full_pad.substr(0, pad_needed);
-        return func_name == "LPAD" ? full_pad + s : s + full_pad;
-    }
-    if (func_name == "CAST" || func_name == "CONVERT") {
-        std::string val = arg_at(0);
-        std::string raw_type = args.size() > 1 ? args[1] : "TEXT";
-        std::string type_str = raw_type;
-        if (type_str.size() >= 2 && type_str.front() == '\'' && type_str.back() == '\'') type_str = type_str.substr(1, type_str.size() - 2);
-        if (type_str == "INT" || type_str == "INTEGER" || type_str == "SIGNED" || type_str == "TINYINT" || type_str == "SMALLINT" ||
-            type_str == "MEDIUMINT") {
-            if (auto n = parse_i64(val)) return std::to_string(*n);
-            return std::to_string(static_cast<long long>(text_to_number(val)));
-        }
-        if (type_str == "UNSIGNED" || type_str == "BIGINT") {
-            if (auto n = parse_i64(val); n && *n >= 0) return std::to_string(*n);
-            const double f = text_to_number(val);
-            return f >= 0 ? std::to_string(static_cast<unsigned long long>(f)) : "0";
-        }
-        if (type_str == "FLOAT" || type_str == "DOUBLE" || type_str == "DECIMAL" || type_str == "NUMERIC" || type_str == "REAL") {
-            return fmt_double(text_to_number(val));
-        }
-        if (type_str == "BOOLEAN" || type_str == "BOOL") {
-            bool b = !val.empty() && val != "0" && to_lower(val) != "false" && val != EXECUTOR_NULL_VALUE;
-            return b ? "1" : "0";
-        }
-        if (type_str == "DATE") {
-            if (auto dt = parse_datetime(val)) return format_date(SimpleDate{dt->y, dt->mo, dt->d});
-            return EXECUTOR_NULL_VALUE;
-        }
-        if (type_str == "DATETIME" || type_str == "TIMESTAMP") {
-            if (auto dt = parse_datetime(val)) return format_datetime(*dt);
-            return EXECUTOR_NULL_VALUE;
-        }
-        return val;
-    }
-    if (func_name == "DATEDIFF") {
-        auto d1 = parse_date(arg_at(0));
-        auto d2 = parse_date(arg_at(1));
-        if (d1 && d2) return std::to_string((to_sys_days(*d1) - to_sys_days(*d2)).count());
-        return EXECUTOR_NULL_VALUE;
-    }
-    if (func_name == "DATE_ADD" || func_name == "DATE_SUB") {
-        std::string date_str = arg_at(0);
-        long long amount = args.size() > 1 ? parse_i64(resolve(args[1])).value_or(0) : 0;
-        if (func_name == "DATE_SUB") amount = -amount;
-        std::string unit = args.size() > 2 ? args[2] : "DAY";
-        auto d = parse_date(date_str);
-        if (!d) return EXECUTOR_NULL_VALUE;
-        SimpleDate result = *d;
-        if (unit == "DAY") result = from_sys_days(to_sys_days(*d) + days{amount});
-        else if (unit == "MONTH") result = add_months(*d, amount);
-        else if (unit == "YEAR") result = add_years(*d, amount);
-        return format_date(result);
     }
     if (func_name == "REGEXP_LIKE" || func_name == "REGEXP") {
         std::string val = arg_at(0), pat = arg_at(1);
@@ -697,242 +450,10 @@ std::string Executor::apply_scalar_func(const std::string& func_name, const std:
         }
         return EXECUTOR_NULL_VALUE;
     }
-    if (func_name == "SQRT") {
-        double v = text_to_number(arg_at(0));
-        return v < 0.0 ? EXECUTOR_NULL_VALUE : fmt_prec(std::sqrt(v), 6);
-    }
-    if (func_name == "POW" || func_name == "POWER") {
-        double base = text_to_number(arg_at(0));
-        double exp = args.size() > 1 ? text_to_number(arg_at(1)) : 0.0;
-        return fmt_double(std::pow(base, exp));
-    }
-    if (func_name == "LOG") {
-        double v = text_to_number(arg_at(0));
-        if (args.size() >= 2) { // LOG(base, x)
-            const double base = v, x = text_to_number(arg_at(1));
-            if (x <= 0.0 || base <= 0.0 || base == 1.0) return EXECUTOR_NULL_VALUE;
-            return fmt_prec(std::log(x) / std::log(base), 6);
-        }
-        return v <= 0.0 ? EXECUTOR_NULL_VALUE : fmt_prec(std::log(v), 6);
-    }
-    if (func_name == "LOG2") {
-        double v = text_to_number(arg_at(0));
-        return v <= 0.0 ? EXECUTOR_NULL_VALUE : fmt_prec(std::log2(v), 6);
-    }
-    if (func_name == "LOG10") {
-        double v = text_to_number(arg_at(0));
-        return v <= 0.0 ? EXECUTOR_NULL_VALUE : fmt_prec(std::log10(v), 6);
-    }
-    if (func_name == "EXP") return fmt_prec(std::exp(text_to_number(arg_at(0))), 6);
-    if (func_name == "SIN") return fmt_prec(std::sin(text_to_number(arg_at(0))), 6);
-    if (func_name == "COS") return fmt_prec(std::cos(text_to_number(arg_at(0))), 6);
-    if (func_name == "TAN") return fmt_prec(std::tan(text_to_number(arg_at(0))), 6);
-    if (func_name == "PI") return fmt_double(kPi);
-    if (func_name == "SIGN") {
-        double v = text_to_number(arg_at(0));
-        return v > 0.0 ? "1" : (v < 0.0 ? "-1" : "0");
-    }
-    if (func_name == "TRUNCATE") {
-        double v = text_to_number(arg_at(0));
-        int d = args.size() > 1 ? static_cast<int>(parse_i64(arg_at(1)).value_or(0)) : 0;
-        double factor = std::pow(10.0, d);
-        return fmt_double(std::trunc(v * factor) / factor);
-    }
     if (func_name == "RAND") {
         auto now = std::chrono::system_clock::now().time_since_epoch();
         auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(now).count() % 1000000000;
         return fmt_prec(static_cast<double>(ns) / 1e9, 6);
-    }
-    if (func_name == "GREATEST" || func_name == "LEAST") {
-        std::vector<std::string> vals;
-        for (auto& a : args) vals.push_back(resolve(a));
-        if (vals.empty()) return "";
-        auto better = [&](const std::string& a, const std::string& b) {
-            auto fa = parse_f64(a), fb = parse_f64(b);
-            bool a_better = (fa && fb) ? (func_name == "GREATEST" ? *fa > *fb : *fa < *fb) : (func_name == "GREATEST" ? a > b : a < b);
-            return a_better;
-        };
-        std::string best = vals[0];
-        for (std::size_t i = 1; i < vals.size(); i++) {
-            if (better(vals[i], best)) best = vals[i];
-        }
-        return best;
-    }
-    if (func_name == "CHAR_LENGTH" || func_name == "CHARACTER_LENGTH") return std::to_string(arg_at(0).size());
-    if (func_name == "LEFT") {
-        std::string s = arg_at(0);
-        std::size_t n = static_cast<std::size_t>(std::max<long long>(0, args.size() > 1 ? parse_i64(resolve(args[1])).value_or(0) : 0));
-        return s.substr(0, std::min(n, s.size()));
-    }
-    if (func_name == "RIGHT") {
-        std::string s = arg_at(0);
-        std::size_t n = static_cast<std::size_t>(std::max<long long>(0, args.size() > 1 ? parse_i64(resolve(args[1])).value_or(0) : 0));
-        n = std::min(n, s.size());
-        return s.substr(s.size() - n);
-    }
-    if (func_name == "REVERSE") {
-        std::string v = arg_at(0);
-        std::reverse(v.begin(), v.end());
-        return v;
-    }
-    if (func_name == "REPEAT") {
-        std::string s = arg_at(0);
-        std::size_t n = static_cast<std::size_t>(std::max<long long>(0, args.size() > 1 ? parse_i64(resolve(args[1])).value_or(0) : 0));
-        std::string out;
-        out.reserve(s.size() * n);
-        for (std::size_t i = 0; i < n; i++) out += s;
-        return out;
-    }
-    if (func_name == "INSTR") {
-        std::string haystack = arg_at(0), needle = arg_at(1);
-        auto pos = haystack.find(needle);
-        return pos == std::string::npos ? "0" : std::to_string(pos + 1);
-    }
-    if (func_name == "LOCATE") {
-        std::string needle = arg_at(0), haystack = arg_at(1);
-        std::size_t start = args.size() > 2 ? static_cast<std::size_t>(std::max<long long>(0, parse_i64(resolve(args[2])).value_or(1) - 1)) : 0;
-        if (start >= haystack.size()) return "0";
-        auto pos = haystack.find(needle, start);
-        return pos == std::string::npos ? "0" : std::to_string(pos + 1);
-    }
-    if (func_name == "LTRIM") return trim_left(arg_at(0));
-    if (func_name == "RTRIM") return trim_right(arg_at(0));
-    if (func_name == "SPACE") {
-        std::size_t n = static_cast<std::size_t>(std::max<long long>(0, args.empty() ? 0 : parse_i64(resolve(args[0])).value_or(0)));
-        return std::string(n, ' ');
-    }
-    if (func_name == "ASCII") {
-        std::string v = arg_at(0);
-        return v.empty() ? "0" : std::to_string(static_cast<unsigned char>(v[0]));
-    }
-    if (func_name == "CHAR") {
-        std::string out;
-        for (auto& a : args) {
-            if (auto n = parse_i64(resolve(a)); n && *n >= 0 && *n <= 255) out += static_cast<char>(*n);
-        }
-        return out;
-    }
-    if (func_name == "HEX") {
-        std::string v = arg_at(0);
-        char buf[32];
-        if (auto n = parse_i64(v); n && *n >= 0) {
-            std::snprintf(buf, sizeof(buf), "%llX", static_cast<unsigned long long>(*n));
-            return buf;
-        }
-        std::string out;
-        for (unsigned char c : v) {
-            std::snprintf(buf, sizeof(buf), "%02X", c);
-            out += buf;
-        }
-        return out;
-    }
-    if (func_name == "UNHEX") {
-        std::string v = arg_at(0);
-        std::string out;
-        for (std::size_t i = 0; i + 1 < v.size(); i += 2) {
-            try {
-                out += static_cast<char>(std::stoul(v.substr(i, 2), nullptr, 16));
-            } catch (...) {
-                break;
-            }
-        }
-        return out;
-    }
-    if (func_name == "FORMAT") {
-        double v = text_to_number(arg_at(0));
-        int d = args.size() > 1 ? static_cast<int>(parse_i64(arg_at(1)).value_or(0)) : 0;
-        std::string s = fmt_prec(v, d);
-        auto dot = s.find('.');
-        std::string int_part = dot == std::string::npos ? s : s.substr(0, dot);
-        std::string dec_part = dot == std::string::npos ? "" : s.substr(dot);
-        bool is_neg = !int_part.empty() && int_part[0] == '-';
-        std::string digits = is_neg ? int_part.substr(1) : int_part;
-        std::string grouped;
-        int count = 0;
-        for (auto rit = digits.rbegin(); rit != digits.rend(); ++rit) {
-            if (count > 0 && count % 3 == 0) grouped += ',';
-            grouped += *rit;
-            count++;
-        }
-        std::reverse(grouped.begin(), grouped.end());
-        return (is_neg ? "-" : "") + grouped + dec_part;
-    }
-    if (func_name == "YEAR") {
-        std::string v = arg_at(0);
-        auto dash = v.find('-');
-        return dash == std::string::npos ? "" : v.substr(0, dash);
-    }
-    if (func_name == "MONTH") {
-        std::string v = arg_at(0);
-        auto d1 = v.find('-');
-        if (d1 == std::string::npos) return "";
-        auto d2 = v.find('-', d1 + 1);
-        return v.substr(d1 + 1, d2 == std::string::npos ? std::string::npos : d2 - d1 - 1);
-    }
-    if (func_name == "DAY" || func_name == "DAYOFMONTH") {
-        std::string v = arg_at(0);
-        auto d1 = v.find('-');
-        auto d2 = d1 == std::string::npos ? std::string::npos : v.find('-', d1 + 1);
-        if (d2 == std::string::npos) return "";
-        std::string rest = v.substr(d2 + 1);
-        auto sp = rest.find(' ');
-        return sp == std::string::npos ? rest : rest.substr(0, sp);
-    }
-    if (func_name == "HOUR" || func_name == "MINUTE" || func_name == "SECOND") {
-        std::string v = arg_at(0);
-        auto sp = v.find(' ');
-        if (sp == std::string::npos) return "0";
-        std::string t = v.substr(sp + 1);
-        auto c1 = t.find(':');
-        if (func_name == "HOUR") return c1 == std::string::npos ? "0" : t.substr(0, c1);
-        if (c1 == std::string::npos) return "0";
-        auto c2 = t.find(':', c1 + 1);
-        if (func_name == "MINUTE") return t.substr(c1 + 1, c2 == std::string::npos ? std::string::npos : c2 - c1 - 1);
-        return c2 == std::string::npos ? "0" : t.substr(c2 + 1);
-    }
-    if (func_name == "DAYOFWEEK") {
-        auto d = parse_date(arg_at(0));
-        return d ? std::to_string(weekday_sunday1(to_sys_days(*d))) : EXECUTOR_NULL_VALUE;
-    }
-    if (func_name == "DAYOFYEAR") {
-        auto d = parse_date(arg_at(0));
-        return d ? std::to_string(day_of_year(to_sys_days(*d))) : EXECUTOR_NULL_VALUE;
-    }
-    if (func_name == "WEEKDAY") {
-        auto d = parse_date(arg_at(0));
-        return d ? std::to_string(weekday_monday0(to_sys_days(*d))) : EXECUTOR_NULL_VALUE;
-    }
-    if (func_name == "LAST_DAY") {
-        auto d = parse_date(arg_at(0));
-        if (!d) return EXECUTOR_NULL_VALUE;
-        int y = d->mo == 12 ? d->y + 1 : d->y;
-        int m = d->mo == 12 ? 1 : d->mo + 1;
-        sys_days next = to_sys_days(SimpleDate{y, m, 1});
-        return format_date(from_sys_days(next - days{1}));
-    }
-    if (func_name == "TIMESTAMPDIFF") {
-        std::string unit = to_upper(arg_at(0));
-        auto dt1 = parse_datetime(arg_at(1));
-        auto dt2 = parse_datetime(arg_at(2));
-        if (!dt1 || !dt2) return EXECUTOR_NULL_VALUE;
-        auto s1 = to_sys_seconds(*dt1);
-        auto s2 = to_sys_seconds(*dt2);
-        auto diff_sec = (s2 - s1).count();
-        if (unit == "SECOND") return std::to_string(diff_sec);
-        if (unit == "MINUTE") return std::to_string(diff_sec / 60);
-        if (unit == "HOUR") return std::to_string(diff_sec / 3600);
-        if (unit == "DAY") return std::to_string(diff_sec / 86400);
-        if (unit == "WEEK") return std::to_string(diff_sec / 86400 / 7);
-        if (unit == "MONTH") {
-            long long months = (static_cast<long long>(dt2->y) - dt1->y) * 12 + dt2->mo - dt1->mo;
-            return std::to_string(months);
-        }
-        if (unit == "YEAR") {
-            long long years = static_cast<long long>(dt2->y) - dt1->y;
-            if (std::make_pair(dt2->mo, dt2->d) < std::make_pair(dt1->mo, dt1->d)) years -= 1;
-            return std::to_string(years);
-        }
-        return EXECUTOR_NULL_VALUE;
     }
     if (func_name == "CURTIME" || func_name == "CURRENT_TIME") {
         auto now = std::chrono::system_clock::now();
@@ -978,7 +499,6 @@ std::string Executor::apply_scalar_func(const std::string& func_name, const std:
         std::string v = arg_at(0);
         return v == EXECUTOR_NULL_VALUE ? "1" : "0";
     }
-    if (func_name == "BIT_LENGTH") return std::to_string(arg_at(0).size() * 8);
     if (func_name == "MD5") {
         auto hash = md5_hash(arg_at(0));
         std::string out;
@@ -1042,7 +562,7 @@ std::string Executor::apply_scalar_func(const std::string& func_name, const std:
     if (func_name == "CURRENT_USER" || func_name == "USER" || func_name == "SESSION_USER" || func_name == "SYSTEM_USER")
         return g_current_user_ctx + "@localhost";
 
-    return func_name + "()";
+    throw StatementError("FUNCTION " + g_current_db_ctx + "." + to_lower_str(typed_name) + " does not exist");
 }
 
 } // namespace engine

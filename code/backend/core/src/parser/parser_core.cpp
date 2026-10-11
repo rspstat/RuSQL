@@ -264,6 +264,7 @@ Statement Parser::parse_stmt() {
         case TokenKind::Update: return parse_update();
         case TokenKind::Delete: return parse_delete();
         case TokenKind::Create: {
+            if (peek_is(TokenKind::Unique) && peek_at_is(1, TokenKind::Index)) { advance(); advance(); return parse_create_unique_index(); }
             if (peek_is(TokenKind::Index))    { advance(); return parse_create_index(); }
             if (peek_is(TokenKind::View))     { advance(); return parse_create_view(); }
             if (peek_is(TokenKind::Database)) { advance(); return parse_create_database(); }
@@ -345,9 +346,26 @@ Statement Parser::parse_stmt() {
         case TokenKind::Grant:  return parse_grant();
         case TokenKind::Revoke: return parse_revoke();
         case TokenKind::Ident: {
-            if (t->text == "BEGIN") return Statement(Statement::Begin{});
-            if (t->text == "COMMIT") return Statement(Statement::Commit{});
-            if (t->text == "ROLLBACK") {
+            auto work_word = [&]() {
+                if (const Token* w = peek(); w && w->kind == TokenKind::Ident && to_upper(w->text) == "WORK") advance();
+            };
+            if (to_upper(t->text) == "BEGIN") {
+                work_word();
+                return Statement(Statement::Begin{});
+            }
+            if (to_upper(t->text) == "START") { // START TRANSACTION [READ WRITE | READ ONLY | WITH CONSISTENT SNAPSHOT ...]
+                const Token* w = peek();
+                if (!w || w->kind != TokenKind::Ident || to_upper(w->text) != "TRANSACTION") throw ParseError("Expected TRANSACTION after START");
+                advance();
+                while (peek() && !peek_is(TokenKind::Semicolon)) advance();
+                return Statement(Statement::Begin{});
+            }
+            if (to_upper(t->text) == "COMMIT") {
+                work_word();
+                return Statement(Statement::Commit{});
+            }
+            if (to_upper(t->text) == "ROLLBACK") {
+                work_word();
                 // ROLLBACK TO [SAVEPOINT] name
                 if (peek_is(TokenKind::To)) {
                     advance();

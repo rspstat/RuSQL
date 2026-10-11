@@ -368,3 +368,26 @@ TEST_CASE("Non-partitioned tables are completely unaffected by the partitioning 
     REQUIRE(final_sel.value().find("1 row(s) returned.") != std::string::npos);
     REQUIRE(final_sel.value().find("z") != std::string::npos);
 }
+
+// The catalog read back at start used to keep the columns, the primary key and the CHECKs of a table and forget the rest of its schema: a
+// partitioned table read 0 rows after a restart (its rows were in the partitions, which nothing led to any more) and took new rows in itself.
+TEST_CASE("A partitioned table is still partitioned after a restart", "[executor][partitioning][regression]") {
+    TempDataDir dir("part_restart");
+    {
+        Executor ex(dir.path);
+        REQUIRE(ex.execute_sql("CREATE DATABASE d").is_ok());
+        REQUIRE(ex.execute_sql("USE d").is_ok());
+        REQUIRE(ex.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, val INT) PARTITION BY RANGE (id) ("
+                               "  PARTITION p0 VALUES LESS THAN (10), PARTITION p1 VALUES LESS THAN (20))")
+                    .is_ok());
+        REQUIRE(ex.execute_sql("INSERT INTO t VALUES (1, 1), (15, 2)").is_ok());
+    }
+    Executor again(dir.path);
+    REQUIRE(again.execute_sql("USE d").is_ok());
+    auto all = again.execute_sql("SELECT id FROM t ORDER BY id");
+    REQUIRE(all.is_ok());
+    REQUIRE(all.value().find("2 row(s) returned.") != std::string::npos);
+    REQUIRE(again.execute_sql("INSERT INTO t VALUES (50, 3)").is_err()); // (no partition for it)
+    REQUIRE(again.execute_sql("INSERT INTO t VALUES (7, 3)").is_ok());
+    REQUIRE(raw_table_rows(again, "d.t__p0").size() == 2); // (it went to its partition)
+}

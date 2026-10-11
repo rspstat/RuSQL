@@ -606,12 +606,16 @@ private:
     Join qualify_join_(const SharedDatabase& s, const Join& j) const;
 
     // ── Phase 8a: DDL ────────────────────────────────────────────────────
+    // (the keys of several columns: UNIQUE (a, b))
     StringResult exec_create(SharedDatabase& s, std::string name, std::vector<ColumnDef> columns, bool if_not_exists,
                               std::vector<std::string> primary_key_columns,
                               std::vector<std::pair<std::optional<std::string>, std::string>> check_constraints,
-                              std::optional<PartitionBy> partition_by = std::nullopt);
+                              std::optional<PartitionBy> partition_by = std::nullopt, std::vector<UniqueKey> unique_keys = {});
     StringResult exec_drop(SharedDatabase& s, const std::string& name, bool if_exists);
     StringResult exec_truncate(SharedDatabase& s, const std::string& name);
+    // UPDATE / DELETE ... ORDER BY ... LIMIT n: the condition that picks exactly those rows (by their key); nullopt when there are none
+    Result<std::optional<CondExpr>, std::string> rows_of_limit(SharedDatabase& s, const std::string& table, const std::optional<CondExpr>& condition,
+                                                               const std::vector<OrderBy>& order_by, std::optional<std::size_t> limit);
     StringResult exec_alter(SharedDatabase& s, const std::string& table, AlterAction action);
     StringResult exec_create_database(SharedDatabase& s, const std::string& name, bool if_not_exists);
     StringResult exec_drop_database(SharedDatabase& s, const std::string& name, bool if_exists);
@@ -686,6 +690,10 @@ private:
     // "table.col" or "col" lookup with dotted-suffix/bare-column fallback.
     static const std::string* get_col(const Row& row, const std::string& col);
     static std::string eval_arith(const Row& row, const ArithExpr& expr);
+    // ... with all the digits an arithmetic expression worked with (a quotient keeps 9 fractional digits, eval_arith shows the dividend's scale plus 4):
+    // what MySQL's numeric functions, comparisons and the DECIMAL / INT column a value is stored into read
+    // (`approx`: told whether the expression is worked out in floating point)
+    static std::string eval_arith_exact(const Row& row, const ArithExpr& expr, bool* approx = nullptr);
     // What an expression gives, which says how it compares: a number for arithmetic, text for a string, what the column holds for a (bound)
     // column, a function's result class for a call (value_class.hpp).
     static ValueClass class_of_expr(const ArithExpr& expr);
@@ -697,6 +705,9 @@ private:
     // those thread_locals and is called at the top of execute_with_s, exactly where
     // the Rust original syncs them.
     static std::string apply_scalar_func(const std::string& func_name, const std::vector<std::string>& args, const Row& row);
+    // a function of the table of builtin_functions.cpp, called with the values of its arguments already worked out
+    static std::string call_builtin_with_values(const std::string& func_name, const std::vector<std::string>& raw, const std::vector<std::string>& values,
+                                                const std::vector<char>& kinds);
     static void sync_udf_context(const std::unordered_map<std::string, UserFunctionDef>& user_functions, const std::string& current_db,
                                   const std::string& current_user);
     static bool matches_condexpr(const Row& row, const std::optional<CondExpr>& condition);

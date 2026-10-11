@@ -83,7 +83,8 @@ bool Parser::arith_continues_at(std::size_t offset) const {
     if (!t) return false;
     switch (t->kind) {
         case TokenKind::Plus: case TokenKind::Minus: case TokenKind::Asterisk: case TokenKind::Slash: case TokenKind::Percent:
-        case TokenKind::PipePipe: case TokenKind::Arrow: case TokenKind::LongArrow:
+        case TokenKind::PipePipe: case TokenKind::Arrow: case TokenKind::LongArrow: case TokenKind::Ampersand: case TokenKind::Pipe:
+        case TokenKind::Caret: case TokenKind::ShiftLeft: case TokenKind::ShiftRight: case TokenKind::NullSafeEq:
             return true;
         default:
             return false;
@@ -117,7 +118,8 @@ bool Parser::at_value_continuation() const {
     if (!t) return false;
     switch (t->kind) {
         case TokenKind::Plus: case TokenKind::Minus: case TokenKind::Asterisk: case TokenKind::Slash: case TokenKind::Percent:
-        case TokenKind::PipePipe: case TokenKind::Arrow: case TokenKind::LongArrow:
+        case TokenKind::PipePipe: case TokenKind::Arrow: case TokenKind::LongArrow: case TokenKind::Ampersand: case TokenKind::Pipe:
+        case TokenKind::Caret: case TokenKind::ShiftLeft: case TokenKind::ShiftRight: case TokenKind::NullSafeEq:
             return true;
         default:
             return false;
@@ -379,17 +381,25 @@ std::string Parser::parse_cast_type() {
         case TokenKind::Datetime: type_str = "DATETIME"; break;
         case TokenKind::Decimal: type_str = "DECIMAL"; break;
         case TokenKind::Boolean: type_str = "BOOLEAN"; break;
+        case TokenKind::Json: type_str = "JSON"; break;
         default: throw ParseError("Expected type in CAST");
     }
     // CAST(x AS SIGNED INT) / CAST(x AS UNSIGNED INTEGER) -- the optional INT / INTEGER keyword is skipped
     if (type_str == "SIGNED" || type_str == "UNSIGNED") {
         if (peek_is(TokenKind::Int) || peek_is(TokenKind::BigInt)) advance();
+        else if (peek_is(TokenKind::Ident) && to_upper(peek()->text) == "INTEGER") advance();
     }
-    // optional (n) for VARCHAR(n)
+    // the length or the precision and scale: CHAR(10), DECIMAL(10, 2)
     if (peek_is(TokenKind::LParen)) {
         advance();
-        while (!peek_is(TokenKind::RParen) && peek() != nullptr) advance();
+        std::string inner;
+        while (!peek_is(TokenKind::RParen) && peek() != nullptr) {
+            const Token* part = advance();
+            if (part->kind != TokenKind::Comma) inner += part->text;
+            else inner += ",";
+        }
         advance(); // consume ')'
+        type_str += "(" + inner + ")";
     }
     return type_str;
 }
@@ -688,6 +698,17 @@ ArithExpr Parser::parse_arith_factor() {
     const Token* p = peek();
     if (!p) throw ParseError("Expected expression term");
 
+    if (p->kind == TokenKind::Plus) { // a unary plus
+        advance();
+        return parse_arith_factor();
+    }
+    if (p->kind == TokenKind::Tilde) {
+        advance();
+        std::vector<ArithExpr> args;
+        args.push_back(parse_arith_factor());
+        return ArithExpr(ArithExpr::Func{"OP_BIT_NOT", std::move(args)});
+    }
+
     // Aggregate functions → stored as Col("COUNT(*)")
     if ((p->kind == TokenKind::Count || p->kind == TokenKind::Sum || p->kind == TokenKind::Avg ||
          p->kind == TokenKind::Min || p->kind == TokenKind::Max) && peek_at_is(1, TokenKind::LParen)) {
@@ -779,6 +800,24 @@ ArithExpr Parser::parse_arith_factor() {
         return ArithExpr(ArithExpr::Func{fname, std::move(args)});
     }
 
+    // CHAR(n, ...) and INSERT(str, pos, len, newstr) are functions too (their names are keywords of other statements)
+    if ((p->kind == TokenKind::Varchar || p->kind == TokenKind::Insert) && peek_at_is(1, TokenKind::LParen)) {
+        const std::string fname = p->kind == TokenKind::Varchar ? "CHAR" : "INSERT";
+        advance();
+        advance(); // (
+        std::vector<ArithExpr> args;
+        while (!peek_is(TokenKind::RParen) && peek() != nullptr) {
+            if (!args.empty()) {
+                if (peek_is(TokenKind::Comma)) advance(); else break;
+            }
+            if (peek_is(TokenKind::RParen)) break;
+            args.push_back(parse_value_expr());
+        }
+        if (!peek_is(TokenKind::RParen)) throw ParseError("Expected ')' after " + fname + " args");
+        advance();
+        return ArithExpr(ArithExpr::Func{fname, std::move(args)});
+    }
+
     // DATABASE() and USER() (the words are also the names of columns)
     if ((p->kind == TokenKind::Database || p->kind == TokenKind::User) && peek_at_is(1, TokenKind::LParen)) {
         const std::string fname = p->kind == TokenKind::Database ? "DATABASE" : "USER";
@@ -787,6 +826,93 @@ ArithExpr Parser::parse_arith_factor() {
         if (!peek_is(TokenKind::RParen)) throw ParseError("Expected ')' after " + fname);
         advance();
         return ArithExpr(ArithExpr::Func{fname, {}});
+    }
+
+    // The calls whose arguments are separated by a keyword: TRIM([BOTH | LEADING | TRAILING] [remstr] FROM str), SUBSTRING(str FROM pos [FOR len]),
+    // POSITION(sub IN str), EXTRACT(unit FROM expr). Any other shape of these names is the ordinary call below.
+    if (peek_at_is(1, TokenKind::LParen)) {
+        const std::string head = p->kind == TokenKind::Trim ? "TRIM"
+                                 : (p->kind == TokenKind::Substring || p->kind == TokenKind::Substr) ? "SUBSTRING"
+                                 : p->kind == TokenKind::Ident ? to_upper(p->text) : std::string();
+        if (head == "TRIM" || head == "SUBSTRING" || head == "POSITION" || head == "EXTRACT") {
+            const std::size_t start = pos_;
+            advance(); // the name
+            advance(); // (
+            std::optional<ArithExpr> call;
+            if (head == "TRIM") {
+                std::string mode;
+                if (peek_is(TokenKind::Ident)) {
+                    const std::string w = to_upper(peek()->text);
+                    if ((w == "BOTH" || w == "LEADING" || w == "TRAILING") && !peek_at_is(1, TokenKind::Comma) && !peek_at_is(1, TokenKind::RParen)) {
+                        mode = w;
+                        advance();
+                    }
+                }
+                ArithExpr rem = ArithExpr(ArithExpr::Str{" "});
+                bool form = true;
+                if (!mode.empty() && peek_is(TokenKind::From)) {
+                    advance();
+                } else {
+                    ArithExpr first = parse_arith_expr();
+                    if (peek_is(TokenKind::From)) {
+                        advance();
+                        rem = std::move(first);
+                    } else {
+                        form = false;
+                    }
+                }
+                if (form) {
+                    ArithExpr str = parse_arith_expr();
+                    if (!peek_is(TokenKind::RParen)) throw ParseError("Expected ')' after TRIM");
+                    advance();
+                    std::vector<ArithExpr> args;
+                    args.push_back(std::move(rem));
+                    args.push_back(std::move(str));
+                    call = ArithExpr(ArithExpr::Func{mode.empty() ? "TRIM_BOTH" : "TRIM_" + mode, std::move(args)});
+                }
+            } else if (head == "SUBSTRING") {
+                ArithExpr str = parse_arith_expr();
+                if (peek_is(TokenKind::From)) {
+                    advance();
+                    std::vector<ArithExpr> args;
+                    args.push_back(std::move(str));
+                    args.push_back(parse_arith_expr());
+                    if (peek_is(TokenKind::For)) {
+                        advance();
+                        args.push_back(parse_arith_expr());
+                    }
+                    if (!peek_is(TokenKind::RParen)) throw ParseError("Expected ')' after SUBSTRING");
+                    advance();
+                    call = ArithExpr(ArithExpr::Func{"SUBSTRING", std::move(args)});
+                }
+            } else if (head == "POSITION") {
+                ArithExpr sub = parse_arith_expr();
+                if (peek_is(TokenKind::In)) {
+                    advance();
+                    std::vector<ArithExpr> args;
+                    args.push_back(std::move(sub));
+                    args.push_back(parse_arith_expr());
+                    if (!peek_is(TokenKind::RParen)) throw ParseError("Expected ')' after POSITION");
+                    advance();
+                    call = ArithExpr(ArithExpr::Func{"LOCATE", std::move(args)});
+                }
+            } else { // EXTRACT
+                const Token* unit = peek();
+                if (unit && (unit->kind == TokenKind::Ident || unit->kind == TokenKind::Year) && peek_at_is(1, TokenKind::From)) {
+                    const std::string unit_name = unit->kind == TokenKind::Year ? "YEAR" : to_upper(unit->text);
+                    advance();
+                    advance(); // FROM
+                    std::vector<ArithExpr> args;
+                    args.push_back(ArithExpr(ArithExpr::Str{unit_name}));
+                    args.push_back(parse_arith_expr());
+                    if (!peek_is(TokenKind::RParen)) throw ParseError("Expected ')' after EXTRACT");
+                    advance();
+                    call = ArithExpr(ArithExpr::Func{"EXTRACT", std::move(args)});
+                }
+            }
+            if (call) return std::move(*call);
+            pos_ = start; // (the ordinary call: SUBSTRING(str, 2, 3), TRIM(str), a column called position)
+        }
     }
 
     // (a word that is the name of a function is a call only with its parentheses -- NOW and CURDATE need none --; otherwise it is a column)
@@ -821,25 +947,7 @@ ArithExpr Parser::parse_arith_factor() {
         ArithExpr val_expr = parse_value_expr();
         if (!peek_is(TokenKind::Comma)) throw ParseError("Expected ',' in CONVERT");
         advance();
-        std::string type_str;
-        {
-            const Token* tt = advance();
-            if (!tt) throw ParseError("Expected type in CONVERT");
-            switch (tt->kind) {
-                case TokenKind::Ident: type_str = to_upper(tt->text); break;
-                case TokenKind::Int: type_str = "INT"; break;
-                case TokenKind::BigInt: type_str = "BIGINT"; break;
-                case TokenKind::Float: type_str = "FLOAT"; break;
-                case TokenKind::Double: type_str = "DOUBLE"; break;
-                case TokenKind::Text: type_str = "TEXT"; break;
-                case TokenKind::Varchar: type_str = "CHAR"; break;
-                case TokenKind::Date: type_str = "DATE"; break;
-                case TokenKind::Datetime: type_str = "DATETIME"; break;
-                case TokenKind::Decimal: type_str = "DECIMAL"; break;
-                case TokenKind::Boolean: type_str = "BOOLEAN"; break;
-                default: throw ParseError("Expected type in CONVERT");
-            }
-        }
+        const std::string type_str = parse_cast_type();
         if (!peek_is(TokenKind::RParen)) throw ParseError("Expected ')' after CONVERT");
         advance();
         std::vector<ArithExpr> args;
@@ -871,6 +979,15 @@ ArithExpr Parser::parse_arith_factor() {
                     if (peek_is(TokenKind::Comma)) advance(); else break;
                 }
                 if (peek_is(TokenKind::RParen)) break;
+                // ADDDATE(d, INTERVAL n UNIT) / SUBDATE: the function with its arguments (d, n, UNIT)
+                if (args.size() == 1 && peek_is(TokenKind::Interval) && (to_upper(fname) == "ADDDATE" || to_upper(fname) == "SUBDATE")) {
+                    advance();
+                    args.push_back(parse_arith_expr());
+                    const Token* unit = advance();
+                    if (!unit || (unit->kind != TokenKind::Ident && unit->kind != TokenKind::Year)) throw ParseError("Expected INTERVAL unit in " + fname);
+                    args.push_back(ArithExpr(ArithExpr::Col{unit->kind == TokenKind::Year ? "YEAR" : to_upper(unit->text)}));
+                    continue;
+                }
                 // the unit of TIMESTAMPDIFF(MONTH, a, b) is a word, not a column called month (it used to be read as a column: NULL, but for YEAR)
                 if (args.empty() && (peek_is(TokenKind::Year) || peek_is(TokenKind::Ident)) && peek_at_is(1, TokenKind::Comma) &&
                     to_upper(fname).rfind("TIMESTAMP", 0) == 0) {
@@ -950,6 +1067,24 @@ ArithExpr Parser::parse_arith_factor() {
         }
     }
 
+    // a keyword that MySQL does not reserve (`date`, `time`, `char`, ...) followed by '(' is a call of the function of that name
+    if (is_plain_word(p->kind) && !p->word.empty() && peek_at_is(1, TokenKind::LParen)) {
+        const std::string fname = to_upper(p->word);
+        advance();
+        advance(); // (
+        std::vector<ArithExpr> args;
+        while (!peek_is(TokenKind::RParen) && peek() != nullptr) {
+            if (!args.empty()) {
+                if (peek_is(TokenKind::Comma)) advance(); else break;
+            }
+            if (peek_is(TokenKind::RParen)) break;
+            args.push_back(parse_value_expr());
+        }
+        if (!peek_is(TokenKind::RParen)) throw ParseError("Expected ')' after " + fname + " args");
+        advance();
+        return ArithExpr(ArithExpr::Func{fname, std::move(args)});
+    }
+
     // a keyword that MySQL does not reserve (`date`, `level`, `count`, `year`, `text` ...) that is not a call: the name of a column
     if (is_plain_word(p->kind) && !p->word.empty()) {
         const std::string word = p->word;
@@ -976,6 +1111,13 @@ ArithExpr Parser::parse_arith_term() {
             advance();
             ArithExpr right = parse_arith_factor();
             left = ArithExpr(ArithExpr::Div{std::make_unique<ArithExpr>(std::move(left)), std::make_unique<ArithExpr>(std::move(right))});
+        } else if (peek_is(TokenKind::Caret)) {
+            advance();
+            ArithExpr right = parse_arith_factor();
+            std::vector<ArithExpr> args;
+            args.push_back(std::move(left));
+            args.push_back(std::move(right));
+            left = ArithExpr(ArithExpr::Func{"OP_BIT_XOR", std::move(args)});
         } else if (peek_is(TokenKind::Percent)) {
             advance();
             ArithExpr right = parse_arith_factor();
@@ -990,9 +1132,9 @@ ArithExpr Parser::parse_arith_term() {
             advance();
             ArithExpr right = parse_arith_factor();
             std::vector<ArithExpr> args;
-            args.push_back(ArithExpr(ArithExpr::Div{std::make_unique<ArithExpr>(std::move(left)), std::make_unique<ArithExpr>(std::move(right))}));
-            args.push_back(ArithExpr(ArithExpr::Num{"0"}));
-            left = ArithExpr(ArithExpr::Func{"TRUNCATE", std::move(args)});
+            args.push_back(std::move(left));
+            args.push_back(std::move(right));
+            left = ArithExpr(ArithExpr::Func{"OP_DIV", std::move(args)});
         } else {
             break;
         }
@@ -1000,11 +1142,72 @@ ArithExpr Parser::parse_arith_term() {
     return left;
 }
 
-/// Arithmetic expression: term (('+' | '-') term)*
+/// Arithmetic expression: the additive level, then << >>, &, |, and the lowest arithmetic operators <=> and XOR
 ArithExpr Parser::parse_arith_expr() {
+    auto binary = [](const char* name, ArithExpr l, ArithExpr r) {
+        std::vector<ArithExpr> args;
+        args.push_back(std::move(l));
+        args.push_back(std::move(r));
+        return ArithExpr(ArithExpr::Func{name, std::move(args)});
+    };
+    auto shift = [&]() {
+        ArithExpr l = parse_additive_expr();
+        while (peek_is(TokenKind::ShiftLeft) || peek_is(TokenKind::ShiftRight)) {
+            const bool left_shift = peek_is(TokenKind::ShiftLeft);
+            advance();
+            l = binary(left_shift ? "OP_SHL" : "OP_SHR", std::move(l), parse_additive_expr());
+        }
+        return l;
+    };
+    auto bit_and = [&]() {
+        ArithExpr l = shift();
+        while (peek_is(TokenKind::Ampersand)) {
+            advance();
+            l = binary("OP_BIT_AND", std::move(l), shift());
+        }
+        return l;
+    };
+    auto bit_or = [&]() {
+        ArithExpr l = bit_and();
+        while (peek_is(TokenKind::Pipe)) {
+            advance();
+            l = binary("OP_BIT_OR", std::move(l), bit_and());
+        }
+        return l;
+    };
+    ArithExpr result = bit_or();
+    for (;;) {
+        if (peek_is(TokenKind::NullSafeEq)) {
+            advance();
+            result = binary("OP_NULL_SAFE_EQ", std::move(result), bit_or());
+        } else if (peek_is(TokenKind::Ident) && to_upper(peek()->text) == "XOR" && peek_at(1) != nullptr && !peek_at_is(1, TokenKind::Comma) &&
+                   !peek_at_is(1, TokenKind::RParen) && !peek_at_is(1, TokenKind::From)) {
+            advance();
+            result = binary("OP_XOR", std::move(result), bit_or());
+        } else {
+            break;
+        }
+    }
+    return result;
+}
+
+/// Additive level: term (('+' | '-') term)*
+ArithExpr Parser::parse_additive_expr() {
     ArithExpr left = parse_arith_term();
     for (;;) {
-        if (peek_is(TokenKind::Plus)) {
+        if ((peek_is(TokenKind::Plus) || peek_is(TokenKind::Minus)) && peek_at_is(1, TokenKind::Interval)) {
+            // date + INTERVAL n unit / date - INTERVAL n unit
+            const bool minus = peek_is(TokenKind::Minus);
+            advance();
+            advance(); // INTERVAL
+            std::vector<ArithExpr> args;
+            args.push_back(std::move(left));
+            args.push_back(parse_arith_term());
+            const Token* unit = advance();
+            if (!unit || (unit->kind != TokenKind::Ident && unit->kind != TokenKind::Year)) throw ParseError("Expected INTERVAL unit");
+            args.push_back(ArithExpr(ArithExpr::Col{unit->kind == TokenKind::Year ? "YEAR" : to_upper(unit->text)}));
+            left = ArithExpr(ArithExpr::Func{minus ? "DATE_SUB" : "DATE_ADD", std::move(args)});
+        } else if (peek_is(TokenKind::Plus)) {
             advance();
             ArithExpr right = parse_arith_term();
             left = ArithExpr(ArithExpr::Add{std::make_unique<ArithExpr>(std::move(left)), std::make_unique<ArithExpr>(std::move(right))});

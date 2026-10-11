@@ -160,16 +160,16 @@ TEST_CASE("scalar functions return NULL for a NULL argument and keep their value
         {"TRIM", {"'  a '"}, 1, "a"}, {"LTRIM", {"'  a'"}, 1, "a"}, {"RTRIM", {"'a  '"}, 1, "a"}, {"REVERSE", {"'abc'"}, 1, "cba"},
         {"SPACE", {"3"}, 1, ""}, {"ASCII", {"'A'"}, 1, "65"}, {"HEX", {"255"}, 1, "FF"}, {"UNHEX", {"'41'"}, 1, "A"},
         {"MD5", {"'a'"}, 1, "0cc175b9c0f1b6a831c399e269772661"}, {"ABS", {"-5"}, 1, "5"}, {"CEIL", {"4.1"}, 1, "5"},
-        {"FLOOR", {"4.9"}, 1, "4"}, {"SQRT", {"16"}, 1, "4.000000"}, {"EXP", {"0"}, 1, "1.000000"}, {"SIN", {"0"}, 1, "0.000000"},
-        {"COS", {"0"}, 1, "1.000000"}, {"TAN", {"0"}, 1, "0.000000"}, {"SIGN", {"-3"}, 1, "-1"}, {"LOG2", {"8"}, 1, "3.000000"},
-        {"LOG10", {"100"}, 1, "2.000000"}, {"YEAR", {"'2026-03-04'"}, 1, "2026"}, {"MONTH", {"'2026-03-04'"}, 1, "03"},
-        {"DAY", {"'2026-03-04'"}, 1, "04"}, {"DAYOFMONTH", {"'2026-03-04'"}, 1, "04"}, {"HOUR", {"'2026-03-04 05:06:07'"}, 1, "05"},
-        {"MINUTE", {"'2026-03-04 05:06:07'"}, 1, "06"}, {"SECOND", {"'2026-03-04 05:06:07'"}, 1, "07"},
+        {"FLOOR", {"4.9"}, 1, "4"}, {"SQRT", {"16"}, 1, "4"}, {"EXP", {"0"}, 1, "1"}, {"SIN", {"0"}, 1, "0"},
+        {"COS", {"0"}, 1, "1"}, {"TAN", {"0"}, 1, "0"}, {"SIGN", {"-3"}, 1, "-1"}, {"LOG2", {"8"}, 1, "3"},
+        {"LOG10", {"100"}, 1, "2"}, {"YEAR", {"'2026-03-04'"}, 1, "2026"}, {"MONTH", {"'2026-03-04'"}, 1, "3"},
+        {"DAY", {"'2026-03-04'"}, 1, "4"}, {"DAYOFMONTH", {"'2026-03-04'"}, 1, "4"}, {"HOUR", {"'2026-03-04 05:06:07'"}, 1, "5"},
+        {"MINUTE", {"'2026-03-04 05:06:07'"}, 1, "6"}, {"SECOND", {"'2026-03-04 05:06:07'"}, 1, "7"},
         {"DAYOFWEEK", {"'2026-03-04'"}, 1, "4"}, {"DAYOFYEAR", {"'2026-03-04'"}, 1, "63"}, {"WEEKDAY", {"'2026-03-04'"}, 1, "2"},
         {"LAST_DAY", {"'2026-03-04'"}, 1, "2026-03-31"}, {"FROM_UNIXTIME", {"86400"}, 1, "1970-01-02 00:00:00"},
         {"UNIX_TIMESTAMP", {"'1970-01-02 00:00:00'"}, 1, "86400"}, {"JSON_UNQUOTE", {"'\"a\"'"}, 1, "a"},
         {"ROUND", {"3.14159", "2"}, 2, "3.14"}, {"TRUNCATE", {"3.14159", "2"}, 2, "3.14"}, {"MOD", {"10", "3"}, 2, "1"},
-        {"POW", {"2", "3"}, 2, "8"}, {"POWER", {"2", "10"}, 2, "1024"}, {"LOG", {"2", "8"}, 2, "3.000000"},
+        {"POW", {"2", "3"}, 2, "8"}, {"POWER", {"2", "10"}, 2, "1024"}, {"LOG", {"2", "8"}, 2, "3"},
         {"LEFT", {"'hello'", "3"}, 2, "hel"}, {"RIGHT", {"'hello'", "3"}, 2, "llo"}, {"REPEAT", {"'ab'", "2"}, 2, "abab"},
         {"INSTR", {"'hello'", "'l'"}, 2, "3"}, {"LOCATE", {"'l'", "'hello'", "1"}, 3, "3"}, {"FORMAT", {"1234.5", "1"}, 2, "1,234.5"},
         {"DATE_FORMAT", {"'2026-03-04'", "'%Y/%m/%d'"}, 2, "2026/03/04"}, {"DATEDIFF", {"'2026-03-04'", "'2026-03-01'"}, 2, "3"},
@@ -336,6 +336,7 @@ TEST_CASE("expressions over NULLable columns match a reference in SELECT, WHERE 
         REQUIRE(ex.execute_sql("INSERT INTO m VALUES " + mv).is_ok());
 
         std::vector<std::string> model(rows.size(), "x"); // m.r as the UPDATEs leave it
+        std::vector<bool> quotient(rows.size(), false); // the value was written by an expression with a division (its digits are the dividend's and 4 more)
         for (int q = 0; q < 70; q++) {
             auto operand = [&]() -> Operand {
                 int roll = static_cast<int>(rng() % 10);
@@ -390,7 +391,9 @@ TEST_CASE("expressions over NULLable columns match a reference in SELECT, WHERE 
                     expr = "ROUND(" + x.text + sp(o1) + y.text + ", 2)";
                     value = [=](const NRow& r) -> Val {
                         Val v = apply(o1, x.of(r), y.of(r));
-                        return v ? Val(std::round(*v * 100.0) / 100.0) : std::nullopt;
+                        // (c is a DOUBLE column, and ROUND of a DOUBLE rounds half to even: ROUND(-0.625, 2) is -0.62; a DECIMAL rounds half away)
+                        const bool double_operand = x.column == 2 || y.column == 2;
+                        return v ? Val((double_operand ? std::nearbyint(*v * 100.0) : std::round(*v * 100.0)) / 100.0) : std::nullopt;
                     };
                     numeric = false;
                     break;
@@ -416,7 +419,7 @@ TEST_CASE("expressions over NULLable columns match a reference in SELECT, WHERE 
                 if (cell == "NULL") return false;
                 char* end = nullptr;
                 double got = std::strtod(cell.c_str(), &end);
-                return end && *end == '\0' && std::abs(got - *want) <= 1e-5 * (1.0 + std::abs(*want));
+                return end && *end == '\0' && std::abs(got - *want) <= 1e-4 * (1.0 + std::abs(*want)); // (a quotient has the dividend's digits and 4 more)
             };
 
             // SELECT (half of them with the columns spelled `n.a`: the function shapes used to read the last column of `ABS(n.a - n.b)`)
@@ -439,14 +442,21 @@ TEST_CASE("expressions over NULLable columns match a reference in SELECT, WHERE 
             if (numeric && where_ok) {
                 int limit = static_cast<int>(rng() % 9) - 2;
                 const char* cmp = (rng() % 2) ? ">" : "<=";
-                Rows ids = table_cells(ok_text(ex, "SELECT id FROM n WHERE " + expr + " " + cmp + " " + std::to_string(limit) + " ORDER BY id"));
-                std::vector<std::string> want_ids;
+                const std::string where_sql = "SELECT id FROM n WHERE " + expr + " " + cmp + " " + std::to_string(limit) + " ORDER BY id";
+                INFO(where_sql);
+                Rows ids = table_cells(ok_text(ex, where_sql));
+                // A value within 1e-3 of the limit is not checked: a quotient has the dividend's digits and 4 more, and an expression that reads
+                // a DOUBLE column is done in floating point, so the two sides of `x / 3 * 3 > 5` may differ there.
                 for (const NRow& r : rows) {
                     Val v = value(r);
-                    if (v && (std::string(cmp) == ">" ? *v > limit : *v <= limit)) want_ids.push_back(std::to_string(r.id));
+                    const bool found = std::find_if(ids.begin(), ids.end(), [&](const std::vector<std::string>& row) { return row[0] == std::to_string(r.id); }) != ids.end();
+                    if (!v) {
+                        REQUIRE_FALSE(found);
+                    } else if (std::abs(*v - limit) >= 1e-3) {
+                        INFO("id " << r.id << " a=" << show(r.a) << " b=" << show(r.b) << " c=" << show(r.c) << " model " << *v);
+                        REQUIRE(found == (std::string(cmp) == ">" ? *v > limit : *v <= limit));
+                    }
                 }
-                REQUIRE(ids.size() == want_ids.size());
-                for (std::size_t i = 0; i < ids.size(); i++) REQUIRE(ids[i][0] == want_ids[i]);
                 wheres++;
             }
 
@@ -455,13 +465,20 @@ TEST_CASE("expressions over NULLable columns match a reference in SELECT, WHERE 
                 int mod = 2 + static_cast<int>(rng() % 3), rem = static_cast<int>(rng() % static_cast<unsigned>(mod));
                 REQUIRE(ex.execute_sql("UPDATE m SET r = " + expr + " WHERE id % " + std::to_string(mod) + " = " + std::to_string(rem)).is_ok());
                 for (std::size_t i = 0; i < rows.size(); i++) {
-                    if (rows[i].id % mod == rem) model[i] = show(value(rows[i]));
+                    if (rows[i].id % mod == rem) {
+                        model[i] = show(value(rows[i]));
+                        quotient[i] = expr.find('/') != std::string::npos;
+                    }
                 }
                 Rows back = table_cells(ok_text(ex, "SELECT id, r FROM m ORDER BY id"));
                 REQUIRE(back.size() == rows.size());
                 for (std::size_t i = 0; i < rows.size(); i++) {
                     INFO("row id " << rows[i].id);
-                    REQUIRE(back[i][1] == model[i]);
+                    if (quotient[i] && model[i] != "NULL" && back[i][1] != "NULL") {
+                        REQUIRE(std::abs(std::stod(back[i][1]) - std::stod(model[i])) <= 1e-4 * (1.0 + std::abs(std::stod(model[i]))));
+                    } else {
+                        REQUIRE(back[i][1] == model[i]);
+                    }
                 }
                 updates++;
             }

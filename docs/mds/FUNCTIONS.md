@@ -32,7 +32,8 @@
 - [x] ALTER TABLE (ADD / MODIFY / DROP / RENAME COLUMN)
 - [x] ALTER TABLE RENAME TO (테이블 이름 변경)
 - [x] ALTER TABLE ADD CONSTRAINT (FOREIGN KEY / UNIQUE / CHECK)
-- [x] ALTER TABLE DROP CONSTRAINT / DROP FOREIGN KEY
+- [x] ALTER TABLE DROP CONSTRAINT / DROP FOREIGN KEY / DROP INDEX name / DROP KEY name
+- [x] **DDL·DML 정합성 (2026-10-12)** — 다른 테이블의 외래키가 참조하는 테이블은 `DROP TABLE` 거부(MySQL 3730); UPDATE의 SET이 쓴 순서대로 앞 배정을 본다(`SET a = a + 1, b = a`); `UPDATE`/`DELETE … ORDER BY … LIMIT`; `SET col = DEFAULT`; `START TRANSACTION [WORK]`; `INSERT … SELECT`가 같은 테이블을 읽어도 멈추지 않고 열을 위치로 매핑; 오류로 실패한 INSERT가 AUTO_INCREMENT 번호를 쓰고 가지 않음(`INSERT IGNORE`가 건너뛴 행은 MySQL처럼 번호를 씀).
 - [x] CREATE INDEX / DROP INDEX (단일 / 복합) — 컬럼별 `ASC`/`DESC` 문법 수용(2026-09-29, 이전엔 파싱 에러; B+Tree는 항상 오름차순 구축이라 결과에 영향 없는 힌트일 뿐 실제 내림차순 저장은 아님)
 - [x] CREATE VIEW / DROP VIEW
 - [x] CREATE SYNONYM name FOR target — 테이블 별명 생성 (SELECT/INSERT/UPDATE/DELETE에서 실제 테이블처럼 사용)
@@ -126,7 +127,7 @@
 - [x] DISTINCT
 - [x] 산술 표현식 — SELECT / WHERE / UPDATE SET에서 `price * qty`, `salary + 100`, `salary % 12` (모듈로), `a || b` (문자열 연결 — CONCAT 동의어)
 - [x] 비교 표현식 — SELECT 컬럼에서 `expr > val AS alias` 형태 지원 (`LENGTH(UUID()) > 0 AS uuid_ok`, `RAND() >= 0` 등)
-- [x] 집계 함수 — COUNT / SUM / AVG / MIN / MAX / STDDEV / VARIANCE (모집단 기준) / BIT_AND / BIT_OR / MEDIAN(2026-09-29 신규, PERCENTILE_CONT(0.5) — 짝수 개면 가운데 두 값의 평균, NULL 무시, GROUP BY 지원) / JSON_AGG
+- [x] 집계 함수 — COUNT / SUM / AVG / MIN / MAX / STDDEV / VARIANCE (모집단 기준; `STDDEV_SAMP`·`VAR_SAMP`·`STDDEV_POP`·`VAR_POP`도 — 2026-10-12부터 MySQL과 같은 순환식으로 DOUBLE 전체 자리, 표본형은 값 하나면 NULL) / BIT_AND / BIT_OR / MEDIAN(2026-09-29 신규, PERCENTILE_CONT(0.5) — 짝수 개면 가운데 두 값의 평균, NULL 무시, GROUP BY 지원) / JSON_AGG
 - [x] DISTINCT 집계 — COUNT(DISTINCT) / SUM(DISTINCT) / AVG(DISTINCT)
 - [x] GROUP_CONCAT (SEPARATOR 옵션, GROUP BY 및 비집계 양쪽 지원)
 - [x] FILTER (WHERE ...) 절 — 집계 함수 하나만 다른 행 집합으로 좁힘, 같은 SELECT 절의 다른 (필터 없는) 집계와는 독립적 (`COUNT(*) FILTER (WHERE active = 1)`); GROUP_CONCAT 포함, OVER와는 결합 미지원(V1 범위)
@@ -135,6 +136,8 @@
 - [x] 집계 윈도우 함수 — SUM / AVG / COUNT / MIN / MAX OVER (PARTITION BY … ORDER BY … ROWS/RANGE …)
 - [x] 정규식 — REGEXP / RLIKE 연산자 (WHERE 조건), REGEXP_LIKE / REGEXP_REPLACE / REGEXP_MATCH 스칼라 함수
 - [x] CASE WHEN ... THEN ... ELSE ... END
+- [x] **MySQL 8.4와 맞춘 함수 약 140종 (2026-10-12, `builtin_functions.cpp`)** — 문자열(`SUBSTRING` 음수 위치, `LEFT`/`RIGHT`/`INSERT`/`FIELD`/`ELT`/`FIND_IN_SET`/`SUBSTRING_INDEX`/`FORMAT`/`BIN`/`OCT`/`CONV`/`TO_BASE64`/`FROM_BASE64`/`SOUNDEX`/`STRCMP`/`ORD` …), 수학(`ROUND`/`TRUNCATE`/`MOD`/`POW`/`LOG(b, x)`/`ATAN2`/`COT`/`DEGREES`/`RADIANS` …), 날짜(`DATE_ADD`/`SUBDATE`/`ADDDATE`의 모든 단위·월말 보정, `TIMESTAMPDIFF`/`TIMESTAMPADD`, `EXTRACT`, `WEEK`/`WEEKOFYEAR`, `QUARTER`, `MONTHNAME`/`DAYNAME`, `LAST_DAY`/`MAKEDATE`/`TO_DAYS`/`FROM_DAYS`/`TIME_TO_SEC`/`SEC_TO_TIME`/`STR_TO_DATE`/`DATE_FORMAT`), `CAST`/`CONVERT`(반올림·문자열은 앞쪽 숫자까지), 해시(`SHA1`/`SHA2`/`CRC32`), JSON(`JSON_OBJECT`/`ARRAY`/`SET`/`INSERT`/`REPLACE`/`REMOVE`/`CONTAINS`/`KEYS`/`LENGTH`/`TYPE`/`VALID`), 연산자(`<=>`, `XOR`, `DIV`, `<<`, `>>`, `&`, `|`, `^`, `~`). 이름을 모르는 함수는 오류 1305(`FUNCTION db.f does not exist`) — 전에는 글자를 그대로 돌려줬다. 같은 이름의 저장 함수가 있어도 내장 함수가 먼저(MySQL과 같음). 인자는 값과 종류(따옴표 문자열·쓴 숫자·열·DOUBLE로 읽는 값·그 밖의 식)로 받는다.
+- [x] **산술은 MySQL의 DECIMAL/DOUBLE 규칙 (2026-10-12, `executor_eval.cpp`)** — `+ - * /` 식 하나를 통째로 정확한 십진수로 계산: 정수는 정수(BIGINT 넘침은 오류 1690), 곱은 자리수 합, 몫은 피제수의 소수 자리 + 4자리를 보여 주되 안에서는 9자리를 **잘라서** 들고 가다 식 맨 위에서 한 번 반올림(`10 / 3 * 3` = 10, `FLOOR(10 / 3 * 3)` = 9). DOUBLE/FLOAT 열·지수 표기 수·숫자가 아닌 글자가 읽히면 그 위쪽은 부동소수점(`d / 3 * 3` = 3, `d * 1.1` = `3.3000000000000003`). 수학 함수(`ROUND`·`FLOOR`·`SQRT`·`MOD`·`FORMAT` …)의 인자, 비교의 양쪽, 열에 저장되는 값(UPDATE SET·INSERT VALUES)은 몫의 9자리를 그대로 읽는다(`ROUND(8 / 59.27, 2)` = 0.13, `8 / 59.27 >= 0.135`는 거짓). `ROUND`/`FORMAT`은 DOUBLE로 읽는 값(DOUBLE/FLOAT 열·문자열·부동소수점 식)을 짝수쪽으로(`ROUND(2.5)` = 2), DECIMAL·정수는 0에서 먼 쪽으로(3). DOUBLE의 글자 표기는 `999999999999999`·`1e-15`까지 풀어 쓰고 그 밖은 `1e15`/`1e-16`. 정수끼리의 연산은 십진수를 만들지 않고 64비트로 처리(성능).
 - [x] 스칼라 함수 — UPPER / LOWER / LENGTH / TRIM / CONCAT / **CONCAT_WS**(sep, v, ...) / SUBSTR / REPLACE / LPAD / RPAD / CHAR_LENGTH / LEFT / RIGHT / REVERSE / REPEAT / INSTR / LOCATE / LTRIM / RTRIM / SPACE / ASCII / CHAR / HEX / UNHEX / FORMAT
 - [x] 수학 함수 — ROUND / ABS / CEIL / FLOOR / MOD / `%` 연산자 / SQRT / POW(POWER) / LOG / LOG2 / LOG10 / EXP / SIN / COS / TAN / PI / SIGN / TRUNCATE / RAND
 - [x] 날짜 함수 — NOW / CURDATE / DATE_FORMAT / DATEDIFF / DATE_ADD / DATE_SUB / YEAR / MONTH / DAY / HOUR / MINUTE / SECOND / DAYOFWEEK / DAYOFYEAR / WEEKDAY / LAST_DAY / TIMESTAMPDIFF / CURTIME / CURRENT_TIMESTAMP / CURRENT_DATE / CURRENT_TIMESTAMP / SYSDATE / LOCALTIME / UNIX_TIMESTAMP / FROM_UNIXTIME; **CURDATE() / NOW() 는 SELECT 컬럼·UPDATE SET·WHERE 조건 우변에서 모두 사용 가능** (`WHERE due_date < CURDATE()`, `DATEDIFF(end_date, CURDATE())`)
@@ -196,6 +199,7 @@
 - [x] PRIMARY KEY (단일 / 복합)
 - [x] NOT NULL
 - [x] UNIQUE
+- [x] **복합 UNIQUE 키 (2026-10-12)** — `UNIQUE [KEY name] (a, b)`, `CREATE UNIQUE INDEX … (a, b)`, `ALTER TABLE … ADD [CONSTRAINT n] UNIQUE (a, b)`, `DROP CONSTRAINT`/`DROP INDEX`/`DROP KEY`: 열 조합이 같은 행을 막고(INSERT·같은 문장 안·UPDATE·REPLACE의 대상 행 삭제·ON DUPLICATE KEY), 조합에 NULL이 있으면 충돌이 아니다. `ALTER … ADD UNIQUE`는 이미 든 행의 중복을 검사한다(한 열짜리도). `SHOW CREATE TABLE`이 보여 주고, **재시작해도 남는다**(전에는 카탈로그를 읽을 때 버려졌다 — 파티션 정보도 같은 이유로 재시작 뒤 사라졌었다).
 - [x] AUTO INCREMENT
 - [x] DEFAULT
 - [x] CHECK (컬럼/테이블 레벨 표현식)

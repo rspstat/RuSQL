@@ -9,7 +9,7 @@
 |---|---|
 | 무엇 | MySQL 호환 프로토콜을 쓰는 **자체 RDBMS 엔진**(C++20) + 데스크톱 클라이언트(Tauri/React) + Claude 연동(MCP) |
 | 1학기 → 2학기 | Rust 프로토타입 → **C++ 전면 재작성**, "기능 추가"에서 **정합성·동시성·성능을 실제로 파고드는 심화**로 |
-| 규모 | 테스트 **626 케이스 / 1,344,384 assertions** (2학기 초 218 케이스 / 3,080 assertions) |
+| 규모 | 테스트 **639 케이스 / 1,358,145 assertions** (2학기 초 218 케이스 / 3,080 assertions) |
 | 엔진 구성 | 파서 → 비용 기반 플래너 → 실행기, MVCC·행 단위 락·데드락 감지, redo 로그 기반 내구성, B+Tree·해시·복합 인덱스 |
 
 ## 2학기에 만든 것 (엔진)
@@ -113,8 +113,14 @@
 | **`ORDER BY 별칭`이 정렬을 하지 않음** — `SELECT v AS val … ORDER BY val DESC`, `v + w AS k … ORDER BY k`가 테이블 순서 그대로(집계의 별칭만 정렬됨), `ORDER BY 2`·`ORDER BY a + b`·`ORDER BY COUNT(*)`·`GROUP BY 식`은 파싱 오류, UNION의 `ORDER BY 1`·없는 이름도 정렬 안 함 | 오류 없이 틀린 순서 |
 | `GROUP BY COALESCE(w, 0)`가 `0.00`과 `0`을 다른 그룹으로(`DISTINCT`도), `COALESCE(code, 'x') = '007'`이 숫자 비교, `SUM(CASE WHEN code = '007' …)`이 `'7'`도 셈(앞 항목의 회귀) | 그룹·중복·조건의 타입 규칙이 틀림 |
 | **UPDATE·DELETE의 기본키 단축 경로가 조건을 다시 보지 않음**: `DELETE FROM t WHERE a = b`가 `a = 'b'`인 행을 지움, 텍스트 키의 `WHERE code = 7`이 `'7'`만 처리, 정수 키의 `BETWEEN 5.0 AND 9`가 5번 행을 빠뜨림 | **엉뚱한 행 삭제**·일부 행만 처리 |
+| **실제 MySQL 8.4와 같은 문장을 돌려 비교한 점검(10월 12일)**: 모르는 함수가 오류 없이 자기 이름을 글자로 돌려줌, `DATE_ADD`의 월·년 단위와 월말, `CAST(3.9 AS SIGNED)`, `10 / 3 * 3`이 9.999999, 큰 정수가 조용히 double로 | 오류 없이 틀린 답 |
+| **복합 `UNIQUE (a, b)`가 첫 열만 지킴**(`CREATE UNIQUE INDEX`·`ALTER … ADD UNIQUE`도), UPDATE·REPLACE·ON DUPLICATE KEY는 아예 안 봄, `ADD UNIQUE`가 이미 있는 중복을 검사하지 않음 | 중복 키가 들어가거나 정상 행이 거절됨 |
+| **재시작하면 복합 UNIQUE 키와 파티션 정보가 사라짐**(카탈로그를 읽을 때 열·기본키·CHECK만 복원) — **파티션 테이블은 재시작 뒤 `SELECT`가 0행**, 새 행은 부모 테이블로 | **데이터가 보이지 않음**·제약이 조용히 풀림 |
+| DOUBLE/FLOAT 열을 십진수로 계산(`d / 3 * 3` = 3.0001, `STDDEV`가 4자리로 잘림), `ROUND(8 / 59.27, 2)`가 0.14(몫의 4자리를 다시 반올림), DOUBLE의 `ROUND(2.5)`가 3 | 오류 없이 틀린 답 |
+| `DROP TABLE`이 외래키로 참조되는 테이블도 지움, `UPDATE`의 `SET a = a + 1, b = a`가 옛 a를 봄, `INSERT INTO t SELECT … FROM t`가 서버를 멈춤(읽기 락을 쥔 채 승격) | 참조 깨짐·오답·멈춤 |
+| `START TRANSACTION`, `UPDATE`/`DELETE … ORDER BY … LIMIT`, `SET col = DEFAULT`, `ALTER TABLE … DROP INDEX`, `-2.5e-7`·`3 * -2e2`가 파싱 오류 | 요청 거절 |
 
-성능·정합성 작업의 커밋들에서 찾은 기존 버그는 모두 101건입니다(전체 목록은 `DATE.md`).
+성능·정합성 작업의 커밋들에서 찾은 기존 버그는 모두 117건입니다(전체 목록은 `DATE.md`).
 
 ## 한계와 앞으로
 

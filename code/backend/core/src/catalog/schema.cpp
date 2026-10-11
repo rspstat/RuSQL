@@ -18,6 +18,7 @@ void to_json(nlohmann::json& j, const TableSchema& s) {
         {"auto_increment_counters", s.auto_increment_counters},
         {"primary_key_columns", s.primary_key_columns},
         {"check_constraints", s.check_constraints},
+        {"unique_keys", s.unique_keys},
         {"partition_info", s.partition_info},
     };
 }
@@ -32,6 +33,8 @@ void from_json(const nlohmann::json& j, TableSchema& s) {
     else s.primary_key_columns.clear();
     if (j.contains("check_constraints")) j.at("check_constraints").get_to(s.check_constraints);
     else s.check_constraints.clear();
+    if (j.contains("unique_keys")) j.at("unique_keys").get_to(s.unique_keys);
+    else s.unique_keys.clear();
     if (j.contains("partition_info")) j.at("partition_info").get_to(s.partition_info);
     else s.partition_info = std::nullopt;
 }

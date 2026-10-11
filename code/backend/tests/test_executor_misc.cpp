@@ -99,6 +99,36 @@ TEST_CASE("BACKUP produces SQL text and RESTORE replays it into a fresh database
     REQUIRE(s->tables.at("company.t").size() == 2);
 }
 
+// A dump drops and recreates its tables one after the other, so restoring it over a database that still has them replays `DROP TABLE parent` while
+// a child table refers to it. DROP TABLE refuses that (MySQL 3730) except for a RESTORE, which runs with foreign key checks off, as a mysqldump file does.
+TEST_CASE("RESTORE over the same database replays DROP TABLE of tables that foreign keys refer to", "[executor][misc][regression]") {
+    TempDataDir dir("exec_misc_restore_over");
+    Executor ex(dir.path);
+    REQUIRE(ex.execute_sql("CREATE DATABASE company").is_ok());
+    REQUIRE(ex.execute_sql("USE company").is_ok());
+    REQUIRE(ex.execute_sql("CREATE TABLE dept (id INT PRIMARY KEY, name VARCHAR(20))").is_ok());
+    REQUIRE(ex.execute_sql("CREATE TABLE emp (id INT PRIMARY KEY, dept_id INT, FOREIGN KEY (dept_id) REFERENCES dept(id))").is_ok());
+    REQUIRE(ex.execute_sql("INSERT INTO dept VALUES (1, 'a'), (2, 'b')").is_ok());
+    REQUIRE(ex.execute_sql("INSERT INTO emp VALUES (10, 1), (11, 2)").is_ok());
+    // an ordinary DROP TABLE of the parent is refused ...
+    auto refused = ex.execute_sql("DROP TABLE dept");
+    REQUIRE(refused.is_err());
+    REQUIRE(refused.error().find("referenced by a foreign key") != std::string::npos);
+    REQUIRE(ex.execute_sql("BACKUP DATABASE company INTO 'over.sql'").is_ok());
+    REQUIRE(ex.execute_sql("DELETE FROM emp WHERE id = 11").is_ok());
+    // ... the RESTORE is not, and brings the dumped rows back
+    auto restore = ex.execute_sql("RESTORE FROM 'over.sql'");
+    REQUIRE(restore.is_ok());
+    REQUIRE(restore.value().find("0 error(s)") != std::string::npos);
+    {
+        auto s = ex.get_shared()->read();
+        REQUIRE(s->tables.at("company.dept").size() == 2);
+        REQUIRE(s->tables.at("company.emp").size() == 2);
+    }
+    // and the check is back afterwards
+    REQUIRE(ex.execute_sql("DROP TABLE dept").is_err());
+}
+
 TEST_CASE("BACKUP/RESTORE reject path traversal and absolute paths", "[executor][misc][regression]") {
     // Regression, faithfully preserved from Rust (code/legacy/rusql-core/src/engine/executor.rs
     // exec_backup/exec_restore): the output/source filename used to be passed straight to

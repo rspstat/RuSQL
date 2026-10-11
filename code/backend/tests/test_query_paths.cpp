@@ -1438,7 +1438,7 @@ TEST_CASE("aggregates inside expressions, functions and CASE in the select list"
     REQUIRE(ex.execute_sql("INSERT INTO f2 VALUES (1,1,1),(2,1,2),(3,1,2),(4,2,7)").is_ok());
     REQUIRE(table_cells(ok_text(ex, "SELECT g FROM f2 GROUP BY g HAVING AVG(v) = 1.6667")) == Rows{{"1"}});
     REQUIRE(table_cells(ok_text(ex, "SELECT g, AVG(v) FROM f2 GROUP BY g HAVING AVG(v) = 1.6667")) == Rows{{"1", "1.6667"}});
-    REQUIRE(table_cells(ok_text(ex, "SELECT SUM(v) / 3 AS t FROM f")) == Rows{{"1.666667"}});
+    REQUIRE(table_cells(ok_text(ex, "SELECT SUM(v) / 3 AS t FROM f")) == Rows{{"1.6667"}});
     REQUIRE(table_cells(ok_text(ex, "SELECT id FROM f GROUP BY id HAVING AVG(v) * 3 = 3 OR AVG(v) * 3 = 6 ORDER BY id")) == Rows{{"1"}, {"2"}, {"3"}});
 
     // nothing to aggregate: still one row, and the SUM of no value is NULL (NULL + 1 is NULL)
@@ -1608,7 +1608,7 @@ TEST_CASE("expressions over aggregates match a reference when both tables have t
                 auto cell_ok = [&](const std::string& got, double want, bool is_case) {
                     if (is_case) return got == (want > 0.5 ? "gt" : "le");
                     try {
-                        return std::abs(std::stod(got) - want) <= 1e-5 * (1 + std::abs(want));
+                        return std::abs(std::stod(got) - want) <= 1e-4 * (1 + std::abs(want)); // (a quotient has the dividend's digits and 4 more)
                     } catch (...) {
                         return false;
                     }

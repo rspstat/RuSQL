@@ -384,9 +384,12 @@ void to_json(nlohmann::json& j, const AggFunc& f) {
             else if constexpr (std::is_same_v<T, AggFunc::Max>) j = "Max";
             else if constexpr (std::is_same_v<T, AggFunc::SumDistinct>) j = "SumDistinct";
             else if constexpr (std::is_same_v<T, AggFunc::AvgDistinct>) j = "AvgDistinct";
-            else if constexpr (std::is_same_v<T, AggFunc::Stddev>) j = "Stddev";
-            else if constexpr (std::is_same_v<T, AggFunc::Variance>) j = "Variance";
-            else if constexpr (std::is_same_v<T, AggFunc::GroupConcat>) j = nlohmann::json{{"GroupConcat", alt.separator}};
+            else if constexpr (std::is_same_v<T, AggFunc::Stddev>) j = alt.sample ? "StddevSamp" : "Stddev";
+            else if constexpr (std::is_same_v<T, AggFunc::Variance>) j = alt.sample ? "VarianceSamp" : "Variance";
+            else if constexpr (std::is_same_v<T, AggFunc::GroupConcat>) {
+                if (!alt.distinct && alt.order_by.empty()) j = nlohmann::json{{"GroupConcat", alt.separator}};
+                else j = nlohmann::json{{"GroupConcat", nlohmann::json{{"separator", alt.separator}, {"distinct", alt.distinct}, {"order_by", alt.order_by}}}};
+            }
             else if constexpr (std::is_same_v<T, AggFunc::CountCase>)
                 j = nlohmann::json{{"CountCase", nlohmann::json{{"branches", alt.branches}, {"else_val", alt.else_val}}}};
             else if constexpr (std::is_same_v<T, AggFunc::SumCase>)
@@ -413,6 +416,8 @@ void from_json(const nlohmann::json& j, AggFunc& f) {
         else if (tag == "AvgDistinct") f = AggFunc::AvgDistinct{};
         else if (tag == "Stddev") f = AggFunc::Stddev{};
         else if (tag == "Variance") f = AggFunc::Variance{};
+        else if (tag == "StddevSamp") f = AggFunc::Stddev{true};
+        else if (tag == "VarianceSamp") f = AggFunc::Variance{true};
         else if (tag == "BitAnd") f = AggFunc::BitAnd{};
         else if (tag == "BitOr") f = AggFunc::BitOr{};
         else if (tag == "JsonAgg") f = AggFunc::JsonAgg{};
@@ -425,12 +430,26 @@ void from_json(const nlohmann::json& j, AggFunc& f) {
     auto it = j.begin();
     const std::string& tag = it.key();
     const auto& p = it.value();
-    if (tag == "GroupConcat") f = AggFunc::GroupConcat{p.get<std::string>()};
+    if (tag == "GroupConcat") {
+        if (p.is_string()) {
+            f = AggFunc::GroupConcat{p.get<std::string>()};
+        } else {
+            f = AggFunc::GroupConcat{p.at("separator").get<std::string>(), p.at("distinct").get<bool>(),
+                                     p.at("order_by").get<std::vector<std::pair<std::string, bool>>>()};
+        }
+    }
     else if (tag == "CountCase")
         f = AggFunc::CountCase{p.at("branches").get<std::vector<CaseWhenBranch>>(), p.at("else_val").get<std::optional<std::string>>()};
     else if (tag == "SumCase")
         f = AggFunc::SumCase{p.at("branches").get<std::vector<CaseWhenBranch>>(), p.at("else_val").get<std::optional<std::string>>()};
     else throw std::runtime_error("unknown AggFunc tag: " + tag);
+}
+
+void to_json(nlohmann::json& j, const UniqueKey& key) { j = nlohmann::json{{"name", key.name}, {"columns", key.columns}}; }
+
+void from_json(const nlohmann::json& j, UniqueKey& key) {
+    key.name = j.at("name").get<std::optional<std::string>>();
+    key.columns = j.at("columns").get<std::vector<std::string>>();
 }
 
 void to_json(nlohmann::json& j, const FrameBound& fb) {
@@ -732,7 +751,7 @@ void to_json(nlohmann::json& j, const AlterAction& action) {
                                                                      {"on_update", alt.on_update}}}};
             else if constexpr (std::is_same_v<T, AlterAction::DropForeignKey>) j = nlohmann::json{{"DropForeignKey", alt.name}};
             else if constexpr (std::is_same_v<T, AlterAction::AddUniqueConstraint>)
-                j = nlohmann::json{{"AddUniqueConstraint", nlohmann::json{{"name", alt.name}, {"column", alt.column}}}};
+                j = nlohmann::json{{"AddUniqueConstraint", nlohmann::json{{"name", alt.name}, {"column", alt.column}, {"columns", alt.columns}}}};
             else if constexpr (std::is_same_v<T, AlterAction::AddCheckConstraint>)
                 j = nlohmann::json{{"AddCheckConstraint", nlohmann::json{{"name", alt.name}, {"expr", alt.expr}}}};
             else if constexpr (std::is_same_v<T, AlterAction::DropConstraint>) j = nlohmann::json{{"DropConstraint", alt.name}};
@@ -758,7 +777,8 @@ void from_json(const nlohmann::json& j, AlterAction& action) {
                                                           p.at("on_delete").get<FkAction>(), p.at("on_update").get<FkAction>()});
     else if (tag == "DropForeignKey") action = AlterAction(AlterAction::DropForeignKey{p.get<std::string>()});
     else if (tag == "AddUniqueConstraint")
-        action = AlterAction(AlterAction::AddUniqueConstraint{p.at("name").get<std::optional<std::string>>(), p.at("column").get<std::string>()});
+        action = AlterAction(AlterAction::AddUniqueConstraint{p.at("name").get<std::optional<std::string>>(), p.at("column").get<std::string>(),
+                                                               p.contains("columns") ? p.at("columns").get<std::vector<std::string>>() : std::vector<std::string>{p.at("column").get<std::string>()}});
     else if (tag == "AddCheckConstraint")
         action = AlterAction(AlterAction::AddCheckConstraint{p.at("name").get<std::optional<std::string>>(), p.at("expr").get<std::string>()});
     else if (tag == "DropConstraint") action = AlterAction(AlterAction::DropConstraint{p.get<std::string>()});
@@ -790,7 +810,8 @@ void to_json(nlohmann::json& j, const Statement& stmt) {
                                                                    {"if_not_exists", alt.if_not_exists},
                                                                    {"primary_key_columns", alt.primary_key_columns},
                                                                    {"check_constraints", alt.check_constraints},
-                                                                   {"partition_by", alt.partition_by}}}};
+                                                                   {"partition_by", alt.partition_by},
+                                                                   {"unique_keys", alt.unique_keys}}}};
             else if constexpr (std::is_same_v<T, Statement::DropTable>)
                 j = nlohmann::json{{"DropTable", nlohmann::json{{"name", alt.name}, {"if_exists", alt.if_exists}}}};
             else if constexpr (std::is_same_v<T, Statement::TruncateTable>)
@@ -830,10 +851,12 @@ void to_json(nlohmann::json& j, const Statement& stmt) {
                                                               {"assignments", alt.assignments},
                                                               {"condition", alt.condition},
                                                               {"returning", alt.returning},
-                                                              {"table_aliases", alt.table_aliases}}}};
+                                                              {"table_aliases", alt.table_aliases},
+                                                              {"order_by", alt.order_by},
+                                                              {"limit", alt.limit}}}};
             else if constexpr (std::is_same_v<T, Statement::Delete>)
                 j = nlohmann::json{{"Delete", nlohmann::json{{"table", alt.table}, {"condition", alt.condition}, {"returning", alt.returning},
-                                                              {"table_aliases", alt.table_aliases}}}};
+                                                              {"table_aliases", alt.table_aliases}, {"order_by", alt.order_by}, {"limit", alt.limit}}}};
             else if constexpr (std::is_same_v<T, Statement::AlterTable>)
                 j = nlohmann::json{{"AlterTable", nlohmann::json{{"table", alt.table}, {"action", alt.action}}}};
             else if constexpr (std::is_same_v<T, Statement::CreateIndex>)
@@ -1036,6 +1059,7 @@ void from_json(const nlohmann::json& j, Statement& stmt) {
         v.primary_key_columns = p.at("primary_key_columns").get<std::vector<std::string>>();
         v.check_constraints = p.at("check_constraints").get<std::vector<std::pair<std::optional<std::string>, std::string>>>();
         if (p.contains("partition_by")) v.partition_by = p.at("partition_by").get<std::optional<PartitionBy>>();
+        if (p.contains("unique_keys")) v.unique_keys = p.at("unique_keys").get<std::vector<UniqueKey>>();
         stmt = Statement(std::move(v));
     } else if (tag == "DropTable") {
         stmt = Statement(Statement::DropTable{p.at("name").get<std::string>(), p.at("if_exists").get<bool>()});
@@ -1085,6 +1109,8 @@ void from_json(const nlohmann::json& j, Statement& stmt) {
         v.condition = p.at("condition").get<std::optional<CondExpr>>();
         v.returning = p.at("returning").get<std::optional<std::vector<SelectColumn>>>();
         if (p.contains("table_aliases")) v.table_aliases = p.at("table_aliases").get<std::vector<std::pair<std::string, std::string>>>();
+        if (p.contains("order_by")) v.order_by = p.at("order_by").get<std::vector<OrderBy>>();
+        if (p.contains("limit")) v.limit = p.at("limit").get<std::optional<std::size_t>>();
         stmt = Statement(std::move(v));
     } else if (tag == "Delete") {
         Statement::Delete v;
@@ -1092,6 +1118,8 @@ void from_json(const nlohmann::json& j, Statement& stmt) {
         v.condition = p.at("condition").get<std::optional<CondExpr>>();
         v.returning = p.at("returning").get<std::optional<std::vector<SelectColumn>>>();
         if (p.contains("table_aliases")) v.table_aliases = p.at("table_aliases").get<std::vector<std::pair<std::string, std::string>>>();
+        if (p.contains("order_by")) v.order_by = p.at("order_by").get<std::vector<OrderBy>>();
+        if (p.contains("limit")) v.limit = p.at("limit").get<std::optional<std::size_t>>();
         stmt = Statement(std::move(v));
     } else if (tag == "AlterTable") {
         stmt = Statement(Statement::AlterTable{p.at("table").get<std::string>(), p.at("action").get<AlterAction>()});

@@ -118,12 +118,12 @@ TEST_CASE("Date functions", "[executor][scalar_func]") {
     REQUIRE(ex.execute_sql("INSERT INTO t VALUES (1)").is_ok());
 
     REQUIRE(eval_expr(ex, "YEAR('2024-03-15')") == "2024");
-    REQUIRE(eval_expr(ex, "MONTH('2024-03-15')") == "03");
+    REQUIRE(eval_expr(ex, "MONTH('2024-03-15')") == "3");
     REQUIRE(eval_expr(ex, "DAY('2024-03-15')") == "15");
     REQUIRE(eval_expr(ex, "DATEDIFF('2024-03-15','2024-03-01')") == "14");
     // DATE_ADD/DATE_SUB use MySQL's DATE_ADD(date, INTERVAL n unit) grammar (a special
     // parse path, not a plain function-call arg list).
-    REQUIRE(eval_expr(ex, "DATE_ADD('2024-01-31', INTERVAL 1 MONTH)") == "2024-01-31"); // invalid Feb 31 -> falls back to original
+    REQUIRE(eval_expr(ex, "DATE_ADD('2024-01-31', INTERVAL 1 MONTH)") == "2024-02-29"); // invalid Feb 31 -> falls back to original
     REQUIRE(eval_expr(ex, "DATE_ADD('2024-01-15', INTERVAL 1 MONTH)") == "2024-02-15");
     REQUIRE(eval_expr(ex, "DATE_ADD('2024-03-10', INTERVAL 5 DAY)") == "2024-03-15");
     REQUIRE(eval_expr(ex, "DATE_SUB('2024-03-15', INTERVAL 5 DAY)") == "2024-03-10");
@@ -139,7 +139,7 @@ TEST_CASE("CAST converts between types", "[executor][scalar_func]") {
     REQUIRE(ex.execute_sql("INSERT INTO t VALUES (1)").is_ok());
 
     REQUIRE(eval_expr(ex, "CAST('42' AS INT)") == "42");
-    REQUIRE(eval_expr(ex, "CAST(3.99 AS INT)") == "3");
+    REQUIRE(eval_expr(ex, "CAST(3.99 AS INT)") == "4");
     REQUIRE(eval_expr(ex, "CAST('3.5' AS FLOAT)") == "3.5");
     REQUIRE(eval_expr(ex, "CAST(1 AS BOOLEAN)") == "1");
 }

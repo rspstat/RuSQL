@@ -173,6 +173,11 @@ StringResult Executor::exec_show_create_table(const SharedDatabase& s, const std
     for (auto& col : schema->columns) {
         if (col.unique_constraint_name) lines.push_back("  UNIQUE KEY `" + *col.unique_constraint_name + "` (`" + col.name + "`)");
     }
+    for (auto& key : schema->unique_keys) {
+        std::string cols_str;
+        for (std::size_t i = 0; i < key.columns.size(); i++) cols_str += (i ? ",`" : "`") + key.columns[i] + "`";
+        lines.push_back("  UNIQUE KEY `" + key.name.value_or(key.columns.front()) + "` (" + cols_str + ")");
+    }
 
     for (auto& col : schema->columns) {
         if (col.foreign_key) {

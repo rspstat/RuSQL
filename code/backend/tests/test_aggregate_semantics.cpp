@@ -119,13 +119,13 @@ TEST_CASE("aggregates of no value are NULL and COUNT is 0", "[aggregate_semantic
     REQUIRE(q(ex, "SELECT " + all + " FROM a WHERE id = 5") == Rows{{N, N, N, N, "0", "1", N, N, N, N, "[null]", N, N, "0"}});
     // a value is a value
     REQUIRE(q(ex, "SELECT SUM(v), AVG(v), STDDEV(v), VARIANCE(v), MEDIAN(v), GROUP_CONCAT(s) FROM a WHERE id = 1") ==
-            Rows{{"10", "10.0000", "0.0000", "0.0000", "10.0000", "x"}});
+            Rows{{"10", "10.0000", "0", "0", "10.0000", "x"}});
     REQUIRE(q(ex, "SELECT SUM(v), AVG(v), MIN(v), MAX(v) FROM a WHERE id = 4") == Rows{{"0", "0.0000", "0", "0"}});
 
     // per group: the group of only NULLs
     REQUIRE(q(ex, "SELECT g, SUM(v), AVG(v), MIN(v), COUNT(v), COUNT(*), STDDEV(v), MEDIAN(v), GROUP_CONCAT(s) FROM a GROUP BY g ORDER BY g") ==
-            Rows{{"1", "10", "10.0000", "10", "1", "2", "0.0000", "10.0000", "x"},
-                 {"2", "30", "15.0000", "0", "2", "2", "15.0000", "15.0000", "z,12"},
+            Rows{{"1", "10", "10.0000", "10", "1", "2", "0", "10.0000", "x"},
+                 {"2", "30", "15.0000", "0", "2", "2", "15", "15.0000", "z,12"},
                  {"3", N, N, N, "0", "1", N, N, N}});
     REQUIRE(q(ex, "SELECT g, SUM(w), AVG(w) FROM a WHERE id IN (3, 5) GROUP BY g ORDER BY g") == Rows{{"2", N, N}, {"3", N, N}});
 
@@ -216,9 +216,9 @@ TEST_CASE("a text operand is the number it starts with and + never joins strings
     REQUIRE(q(ex, "SELECT ABS('x'), ABS('-12abc'), ROUND('3.7x'), ROUND('x', 2), CEIL('2.1z'), FLOOR(' 2.9'), SIGN('-5q'), TRUNCATE('1.99z', 1)") ==
             Rows{{"0", "12", "4", "0", "3", "2", "-1", "1.9"}});
     REQUIRE(q(ex, "SELECT SQRT('16x'), POWER('2x', '3'), CAST('12abc' AS SIGNED), CAST('x' AS SIGNED), CAST(' 7' AS SIGNED), CAST('3.9z' AS DECIMAL)") ==
-            Rows{{"4.000000", "8", "12", "0", "7", "3.9"}});
+            Rows{{"4", "8", "12", "0", "7", "4"}});
     // LOG(base, x)
-    REQUIRE(q(ex, "SELECT LOG(2, 8), LOG(10, 100), LOG(8), LOG(1, 5), LOG(2, 0)") == Rows{{"3.000000", "2.000000", "2.079442", N, N}});
+    REQUIRE(q(ex, "SELECT LOG(2, 8), LOG(10, 100), LOG(8), LOG(1, 5), LOG(2, 0)") == Rows{{"3", "2", "2.0794415416798357", N, N}});
 }
 
 TEST_CASE("integers and decimals are exact", "[aggregate_semantics][exact]") {
@@ -243,10 +243,14 @@ TEST_CASE("integers and decimals are exact", "[aggregate_semantics][exact]") {
     REQUIRE(q(ex, "SELECT n + 1, n * 2, n - 1 FROM m WHERE id = 1") == Rows{{"9007199254740994", "18014398509481986", "9007199254740992"}});
     REQUIRE(q(ex, "SELECT 9007199254740993 + 1, 9223372036854775806 + 1, -9223372036854775807 - 1, 3037000499 * 3037000499") ==
             Rows{{"9007199254740994", "9223372036854775807", "-9223372036854775808", "9223372030926249001"}});
-    // beyond int64 it is a double, not a wrong integer
-    REQUIRE(same_number(one(ex, "SELECT 9223372036854775807 + 1"), 9223372036854775808.0));
-    REQUIRE(same_number(one(ex, "SELECT 4611686018427387904 * 4"), 18446744073709551616.0));
-    REQUIRE(same_number(one(ex, "SELECT -9223372036854775807 - 2"), -9223372036854775809.0));
+    // beyond int64 it is an error (BIGINT value is out of range), not a wrong integer; a number written beyond int64 is a decimal and exact
+    for (const char* overflow : {"SELECT 9223372036854775807 + 1", "SELECT 4611686018427387904 * 4", "SELECT -9223372036854775807 - 2"}) {
+        auto r = ex.execute_sql(overflow);
+        INFO(overflow);
+        REQUIRE(r.is_err());
+        REQUIRE(r.error().find("out of range") != std::string::npos);
+    }
+    REQUIRE(one(ex, "SELECT 9223372036854775808 + 1") == "9223372036854775809");
 
     // SUM of decimals of different scales, negatives, a sum that does not fit an int64 (the double path)
     ok(ex, "CREATE TABLE d (id INT PRIMARY KEY, v VARCHAR(30))");

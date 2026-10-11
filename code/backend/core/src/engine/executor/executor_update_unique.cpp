@@ -64,6 +64,49 @@ std::optional<std::string> Executor::update_unique_violation(SharedDatabase& s, 
             }
         }
     }
+
+    // the keys over several columns: the composite PRIMARY KEY (it was never checked here) and every UNIQUE (a, b)
+    struct KeySpec { std::vector<std::string> columns; std::string label; bool primary; };
+    std::vector<KeySpec> specs;
+    const std::string bare_table = table.substr(table.rfind('.') == std::string::npos ? 0 : table.rfind('.') + 1);
+    if (schema->primary_key_columns.size() > 1) specs.push_back({schema->primary_key_columns, "PRIMARY", true});
+    for (auto& key : schema->unique_keys) specs.push_back({key.columns, bare_table + "." + key.name.value_or(key.columns.front()), false});
+    for (auto& spec : specs) {
+        auto encode = [&](const Row& r, std::string& shown) -> std::optional<std::string> {
+            std::string encoded;
+            shown.clear();
+            for (std::size_t k = 0; k < spec.columns.size(); k++) {
+                const std::string v = get(r, spec.columns[k]);
+                if (v == EXECUTOR_NULL_VALUE && !spec.primary) return std::nullopt; // (a NULL in a UNIQUE key never conflicts)
+                encoded += std::to_string(v.size()) + ":" + v;
+                shown += (k ? "-" : "") + v;
+            }
+            return encoded;
+        };
+        std::string shown;
+        bool any_changed = false;
+        std::unordered_set<std::string> held_by_targets;
+        for (std::size_t i = 0; i < news.size(); i++) {
+            auto ok = encode(*olds[i], shown), nk = encode(news[i], shown);
+            if (ok) held_by_targets.insert(*ok);
+            if (ok != nk) any_changed = true;
+        }
+        if (!any_changed) continue;
+        std::unordered_set<std::string> final_keys, wanted;
+        for (std::size_t i = 0; i < news.size(); i++) { // 1) the statement's own result must not repeat a key
+            auto nk = encode(news[i], shown);
+            if (!nk) continue;
+            if (!final_keys.insert(*nk).second) return "Duplicate entry '" + shown + "' for key '" + spec.label + "'";
+            if (!held_by_targets.count(*nk)) wanted.insert(*nk);
+        }
+        if (wanted.empty()) continue;
+        std::unordered_set<const Row*> rewritten(olds.begin(), olds.end());
+        for (auto& live : tit->second) { // 2) a key that is new must not be held by a live row this statement does not rewrite
+            if (!is_visible(live) || rewritten.count(&live)) continue;
+            auto lk = encode(live, shown);
+            if (lk && wanted.count(*lk)) return "Duplicate entry '" + shown + "' for key '" + spec.label + "'";
+        }
+    }
     return std::nullopt;
 }
 

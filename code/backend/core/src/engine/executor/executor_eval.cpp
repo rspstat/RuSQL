@@ -9,27 +9,201 @@
 #include <charconv>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <iomanip>
 #include <regex>
 #include <sstream>
 #include <string_view>
+#include <unordered_set>
 
+#include "engine/executor/builtin_functions.hpp"
 #include "engine/numeric_text.hpp"
 #include "engine/parser/parser.hpp"
+#include "engine/sql_value_util.hpp"
 
 namespace engine {
 
 namespace {
 
-// `lv op rv` ('+', '-' or '*') when both texts are integers and the result fits: an integer, exact (a double would round above 2^53).
-std::optional<std::string> exact_int_text(char op, const std::string& lv, const std::string& rv) {
-    auto a = parse_int64_text(lv), b = parse_int64_text(rv);
-    if (!a || !b) return std::nullopt;
-    if (auto result = int64_arith(op, *a, *b)) return std::to_string(*result);
-    return std::nullopt;
+std::optional<double> parse_f64(const std::string& s) { return parse_number(s); }
+
+// ---- + - * / on exact decimals (MySQL's DECIMAL) --------------------------------------------------------------------------------------------
+// A tree of + - * / is evaluated as one: the values keep all their digits, and the result is rounded to the number of digits MySQL declares for it
+// (a quotient has the dividend's scale plus 4, a product the sum of the scales, a sum the larger one) when the tree is done, so 1 / 3 * 3 is 1.0000
+// and not 0.9999. Integers stay integers (BIGINT: overflow is an error), and a text that is no plain number makes the tree a DOUBLE.
+
+struct NumVal {
+    bool null = false;
+    bool approx = false; // a DOUBLE: the number is `dbl`
+    double dbl = 0;
+    sqlval::Num num;
+    int scale = 0; // the digits MySQL would show
+    bool is_int = false;
+    long long i = 0;
+    bool derived = false; // the result of an operation done on exact decimals: `num` is the value, `dbl` only its double arithmetic
+    bool has_num = false; // `num` holds the value (an integer is only `i` until an operation on decimals needs its digits)
+};
+
+// The number as a DOUBLE for an operation that is done in floating point: an exact result of an operation below it is converted from the
+// decimal it holds (a quotient has 9 digits there), not taken from the double arithmetic.
+double as_double(const NumVal& x) {
+    if (x.approx || !x.derived) return x.dbl;
+    if (x.is_int) return static_cast<double>(x.i);
+    return std::strtod(x.num.to_decimal().compact().c_str(), nullptr);
 }
 
-std::optional<double> parse_f64(const std::string& s) { return parse_number(s); }
+const sqlval::Num& num_of(const NumVal& x, sqlval::Num& scratch) {
+    if (x.has_num) return x.num;
+    scratch = sqlval::Num::from_int(x.i);
+    return scratch;
+}
+
+// An integer written out (at most 18 digits): the common value of a column or a literal, read without building a decimal.
+bool small_int(const std::string& s, long long& out) {
+    const std::size_t n = s.size();
+    std::size_t at = 0;
+    if (n > 0 && s[0] == '-') at = 1;
+    if (at == n || n - at > 18) return false;
+    long long v = 0;
+    for (; at < n; at++) {
+        if (s[at] < '0' || s[at] > '9') return false;
+        v = v * 10 + (s[at] - '0');
+    }
+    out = s[0] == '-' ? -v : v;
+    return true;
+}
+
+// a / b of two integers with 9 digits after the point, cut off (b is not zero); false when the digits would not fit a 64-bit remainder
+bool int_quotient(long long a, long long b, sqlval::Num& out) {
+    const unsigned long long ua = a < 0 ? 0ULL - static_cast<unsigned long long>(a) : static_cast<unsigned long long>(a);
+    const unsigned long long ub = b < 0 ? 0ULL - static_cast<unsigned long long>(b) : static_cast<unsigned long long>(b);
+    if (ub > 900000000000000000ULL) return false;
+    unsigned long long whole = ua / ub, rest = ua % ub, fraction = 0;
+    for (int k = 0; k < 9; k++) {
+        rest *= 10;
+        fraction = fraction * 10 + rest / ub;
+        rest %= ub;
+    }
+    char digits[48];
+    std::snprintf(digits, sizeof digits, "%llu%09llu", whole, fraction);
+    const std::string all = digits;
+    const std::size_t first = all.find_first_not_of('0');
+    out.digits = first == std::string::npos ? "0" : all.substr(first);
+    out.scale = 9;
+    out.negative = out.digits != "0" && ((a < 0) != (b < 0));
+    return true;
+}
+
+std::string op_text(char op) { return std::string(1, op); }
+
+NumVal combine(char op, const NumVal& l, const NumVal& r) {
+    NumVal v;
+    if (l.null || r.null) {
+        v.null = true;
+        return v;
+    }
+    v.approx = l.approx || r.approx;
+    const double ld = v.approx ? as_double(l) : l.dbl, rd = v.approx ? as_double(r) : r.dbl;
+    if (op == '/') {
+        const bool zero = v.approx ? rd == 0.0 : (r.is_int ? r.i == 0 : r.num.is_zero());
+        if (zero) {
+            v.null = true; // (x / 0 is NULL, as in MySQL)
+            return v;
+        }
+        v.dbl = ld / rd;
+    } else if (op == '+') {
+        v.dbl = ld + rd;
+    } else if (op == '-') {
+        v.dbl = ld - rd;
+    } else {
+        v.dbl = ld * rd;
+    }
+    if (v.approx) {
+        if (!std::isfinite(v.dbl)) v.null = true;
+        return v;
+    }
+    v.derived = true;
+    if (op != '/' && l.is_int && r.is_int) {
+        auto result = int64_arith(op, l.i, r.i);
+        if (!result) throw StatementError("BIGINT value is out of range in '(" + std::to_string(l.i) + " " + op_text(op) + " " + std::to_string(r.i) + ")'");
+        v.is_int = true;
+        v.i = *result;
+        return v;
+    }
+    v.has_num = true;
+    sqlval::Num left_scratch, right_scratch;
+    if (op == '+' || op == '-') {
+        v.num = sqlval::num_add(num_of(l, left_scratch), num_of(r, right_scratch), op == '-');
+        v.scale = std::max(l.scale, r.scale);
+    } else if (op == '*') {
+        v.num = sqlval::num_mul(num_of(l, left_scratch), num_of(r, right_scratch));
+        v.scale = std::min(30, l.scale + r.scale);
+    } else {
+        v.scale = std::min(30, l.scale + 4);
+        if (l.is_int && r.is_int && int_quotient(l.i, r.i, v.num)) return v;
+        const int internal = ((l.scale + 4 + 8) / 9) * 9;
+        v.num = sqlval::num_div(num_of(l, left_scratch), num_of(r, right_scratch), internal, /*cut=*/true); // (MySQL cuts the quotient off after those digits: 2 / 3 holds 0.666666666)
+    }
+    return v;
+}
+
+template <class Leaf>
+NumVal number_tree(const ArithExpr& e, Leaf& leaf) {
+    if (auto* a = std::get_if<ArithExpr::Add>(&e.data)) { NumVal l = number_tree(*a->lhs, leaf); NumVal r = number_tree(*a->rhs, leaf); return combine('+', l, r); }
+    if (auto* a = std::get_if<ArithExpr::Sub>(&e.data)) { NumVal l = number_tree(*a->lhs, leaf); NumVal r = number_tree(*a->rhs, leaf); return combine('-', l, r); }
+    if (auto* a = std::get_if<ArithExpr::Mul>(&e.data)) { NumVal l = number_tree(*a->lhs, leaf); NumVal r = number_tree(*a->rhs, leaf); return combine('*', l, r); }
+    if (auto* a = std::get_if<ArithExpr::Div>(&e.data)) { NumVal l = number_tree(*a->lhs, leaf); NumVal r = number_tree(*a->rhs, leaf); return combine('/', l, r); }
+    const std::string text = leaf(e);
+    NumVal v;
+    if (text == EXECUTOR_NULL_VALUE) {
+        v.null = true;
+        return v;
+    }
+    long long whole = 0;
+    if (small_int(text, whole)) {
+        v.is_int = true;
+        v.i = whole;
+        v.dbl = static_cast<double>(whole);
+    } else {
+        v.dbl = sqlval::leading_number(text);
+        if (auto d = text.find_first_of("eE") == std::string::npos ? sqlval::Decimal::parse(text) : std::nullopt) { // (a number written with an exponent is a DOUBLE)
+            v.num = sqlval::Num::from_decimal(*d);
+            v.has_num = true;
+            v.scale = v.num.scale;
+            if (v.scale == 0) {
+                if (auto i = d->to_int64()) {
+                    v.is_int = true;
+                    v.i = *i;
+                }
+            }
+        } else {
+            v.approx = true;
+        }
+    }
+    if (auto* col = std::get_if<ArithExpr::Col>(&e.data); col && col->approx) v.approx = true; // (a FLOAT / DOUBLE column: floating point, as in MySQL)
+    return v;
+}
+
+// `exact`: every digit the operations kept, not only the digits the result shows
+template <class Leaf>
+std::string arithmetic_text(const ArithExpr& e, Leaf leaf, bool exact = false, bool* approx = nullptr) {
+    NumVal v = number_tree(e, leaf);
+    if (approx) *approx = v.approx;
+    if (v.null) return EXECUTOR_NULL_VALUE;
+    if (v.approx) return sqlval::format_double(v.dbl);
+    if (v.is_int && !v.has_num) return std::to_string(v.i);
+    if (exact) return v.num.to_decimal().compact();
+    return sqlval::num_round(v.num, v.scale).to_decimal().compact();
+}
+
+// The functions that do arithmetic on a number they are given: FLOOR(10 / 3 * 3) is 9 in MySQL (the product holds 9.999999999), ROUND(8 / 59.27, 2) is 0.13
+// (not the 0.14 of the 0.1350 the quotient shows). The others (ABS, GREATEST, IFNULL, CAST ... AS CHAR) hand on the number as it shows.
+bool takes_exact_numbers(const std::string& upper) {
+    static const std::unordered_set<std::string> names = {"ROUND", "TRUNCATE", "FLOOR", "CEIL", "CEILING", "SQRT", "POW", "POWER", "EXP", "LN", "LOG",
+                                                          "LOG2", "LOG10", "SIN", "COS", "TAN", "ASIN", "ACOS", "ATAN", "ATAN2", "COT", "DEGREES",
+                                                          "RADIANS", "MOD", "SIGN", "FORMAT"};
+    return names.count(upper) > 0;
+}
 
 // What a value written without quotes in an IN list or after BETWEEN is: a number, or (a name, @variable) not told.
 ValueClass written_class(const std::string& value, bool quoted) { return quoted ? ValueClass::Text : (parse_number(value) ? ValueClass::Number : ValueClass::Unknown); }
@@ -149,6 +323,15 @@ std::string Executor::format_arith_result(double f) {
 
 // apply_scalar_func is implemented in executor_scalar_func.cpp.
 
+std::string Executor::eval_arith_exact(const Row& row, const ArithExpr& expr, bool* approx) {
+    if (approx) *approx = false;
+    if (std::holds_alternative<ArithExpr::Add>(expr.data) || std::holds_alternative<ArithExpr::Sub>(expr.data) ||
+        std::holds_alternative<ArithExpr::Mul>(expr.data) || std::holds_alternative<ArithExpr::Div>(expr.data)) {
+        return arithmetic_text(expr, [&](const ArithExpr& leaf) { return eval_arith(row, leaf); }, true, approx);
+    }
+    return eval_arith(row, expr);
+}
+
 std::string Executor::eval_arith(const Row& row, const ArithExpr& expr) {
     if (auto* v = std::get_if<ArithExpr::Col>(&expr.data)) {
         std::string lower = v->name;
@@ -161,30 +344,9 @@ std::string Executor::eval_arith(const Row& row, const ArithExpr& expr) {
     if (auto* v = std::get_if<ArithExpr::Num>(&expr.data)) return v->value;
     if (auto* v = std::get_if<ArithExpr::Str>(&expr.data)) return v->value;
     // NULL in, NULL out: `NULL + 1` is NULL (not the text "NULL1"), `NULL * 2` is NULL (not 0); x / 0 is NULL, as in MySQL.
-    if (auto* v = std::get_if<ArithExpr::Add>(&expr.data)) {
-        std::string lv = eval_arith(row, *v->lhs), rv = eval_arith(row, *v->rhs);
-        if (lv == EXECUTOR_NULL_VALUE || rv == EXECUTOR_NULL_VALUE) return EXECUTOR_NULL_VALUE;
-        if (auto exact = exact_int_text('+', lv, rv)) return *exact;
-        return format_arith_result(text_to_number(lv) + text_to_number(rv));
-    }
-    if (auto* v = std::get_if<ArithExpr::Sub>(&expr.data)) {
-        std::string lv = eval_arith(row, *v->lhs), rv = eval_arith(row, *v->rhs);
-        if (lv == EXECUTOR_NULL_VALUE || rv == EXECUTOR_NULL_VALUE) return EXECUTOR_NULL_VALUE;
-        if (auto exact = exact_int_text('-', lv, rv)) return *exact;
-        return format_arith_result(text_to_number(lv) - text_to_number(rv));
-    }
-    if (auto* v = std::get_if<ArithExpr::Mul>(&expr.data)) {
-        std::string lv = eval_arith(row, *v->lhs), rv = eval_arith(row, *v->rhs);
-        if (lv == EXECUTOR_NULL_VALUE || rv == EXECUTOR_NULL_VALUE) return EXECUTOR_NULL_VALUE;
-        if (auto exact = exact_int_text('*', lv, rv)) return *exact;
-        return format_arith_result(text_to_number(lv) * text_to_number(rv));
-    }
-    if (auto* v = std::get_if<ArithExpr::Div>(&expr.data)) {
-        std::string lv = eval_arith(row, *v->lhs), rv = eval_arith(row, *v->rhs);
-        if (lv == EXECUTOR_NULL_VALUE || rv == EXECUTOR_NULL_VALUE) return EXECUTOR_NULL_VALUE;
-        const double divisor = text_to_number(rv);
-        if (divisor == 0.0) return EXECUTOR_NULL_VALUE;
-        return format_arith_result(text_to_number(lv) / divisor);
+    if (std::holds_alternative<ArithExpr::Add>(expr.data) || std::holds_alternative<ArithExpr::Sub>(expr.data) ||
+        std::holds_alternative<ArithExpr::Mul>(expr.data) || std::holds_alternative<ArithExpr::Div>(expr.data)) {
+        return arithmetic_text(expr, [&](const ArithExpr& leaf) { return eval_arith(row, leaf); });
     }
     if (auto* v = std::get_if<ArithExpr::Func>(&expr.data)) {
         if (v->name == "CASE") {
@@ -194,6 +356,41 @@ std::string Executor::eval_arith(const Row& row, const ArithExpr& expr) {
                 if (eval_arith(row, v->args[2 * i]) == "1") return eval_arith(row, v->args[2 * i + 1]);
             }
             return v->args.size() % 2 == 1 ? eval_arith(row, v->args.back()) : std::string(EXECUTOR_NULL_VALUE);
+        }
+        {
+            std::string upper = v->name;
+            for (char& ch : upper) ch = static_cast<char>(std::toupper(static_cast<unsigned char>(ch)));
+            if (is_builtin_function(upper)) {
+                const bool exact_args = takes_exact_numbers(upper);
+                // the arguments are worked out once, as values (NULL is NULL, not the text of a string), and the function is told what each one is
+                std::vector<std::string> raw, values;
+                std::vector<char> kinds;
+                raw.reserve(v->args.size());
+                values.reserve(v->args.size());
+                kinds.reserve(v->args.size());
+                for (auto& a : v->args) {
+                    if (auto* c = std::get_if<ArithExpr::Col>(&a.data)) {
+                        raw.push_back(c->name);
+                        values.push_back(eval_arith(row, a));
+                        kinds.push_back(c->approx || c->cls == ValueClass::Text ? 'D' : 'C');
+                    } else if (auto* sv = std::get_if<ArithExpr::Str>(&a.data)) {
+                        raw.push_back("'" + sv->value + "'");
+                        values.push_back(sv->value);
+                        kinds.push_back('S');
+                    } else if (auto* n = std::get_if<ArithExpr::Num>(&a.data)) {
+                        raw.push_back(n->value);
+                        values.push_back(n->value);
+                        kinds.push_back('N');
+                    } else {
+                        bool approx = false;
+                        std::string value = exact_args ? eval_arith_exact(row, a, &approx) : eval_arith(row, a);
+                        raw.push_back("'" + value + "'");
+                        values.push_back(std::move(value));
+                        kinds.push_back(approx ? 'D' : 'E');
+                    }
+                }
+                return call_builtin_with_values(upper, raw, values, kinds);
+            }
         }
         std::vector<std::string> str_args;
         str_args.reserve(v->args.size());
@@ -220,7 +417,7 @@ std::string Executor::eval_arith(const Row& row, const ArithExpr& expr) {
         return EXECUTOR_NULL_VALUE;
     }
     if (auto* v = std::get_if<ArithExpr::Cmp>(&expr.data)) {
-        std::string lv = eval_arith(row, *v->lhs), rv = eval_arith(row, *v->rhs);
+        std::string lv = eval_arith_exact(row, *v->lhs), rv = eval_arith_exact(row, *v->rhs);
         if (lv == EXECUTOR_NULL_VALUE || rv == EXECUTOR_NULL_VALUE) return EXECUTOR_NULL_VALUE; // a comparison with NULL is NULL
         const int order = compare_classed(class_of_expr(*v->lhs), class_of_expr(*v->rhs), lv, rv);
         bool result;
@@ -277,7 +474,9 @@ Executor::Tri Executor::eval_single3(const Row& row, const Condition& cond) {
         if (!c) throw StatementError("A subquery is not allowed here");
         return c->ex->eval_single_with_subquery(*c->s, row, cond);
     }
-    std::string val = eval_arith(row, cond.left);
+    // (a comparison reads all the digits of an arithmetic expression: 8 / 59.27 >= 0.135 is false; LIKE and REGEXP read it as it shows)
+    const bool compares_numbers = cond.op != Operator::Like && cond.op != Operator::NotLike && cond.op != Operator::Regexp && cond.op != Operator::NotRegexp;
+    std::string val = compares_numbers ? eval_arith_exact(row, cond.left) : eval_arith(row, cond.left);
     // how the two sides compare: what each is (set by the binder; an expression that was not bound tells itself)
     const ValueClass left_class = cond.left_class != ValueClass::Unknown ? cond.left_class : class_of_expr(cond.left);
 
@@ -321,7 +520,7 @@ Executor::Tri Executor::eval_single3(const Row& row, const Condition& cond) {
     // the expression, so no separate column-lookup step is needed here (unlike
     // the Literal branch below, which still needs its own ident-vs-literal check).
     if (auto* av = std::get_if<ConditionValue::Arith>(&cond.value.data)) {
-        resolved = eval_arith(row, av->expr);
+        resolved = compares_numbers ? eval_arith_exact(row, av->expr) : eval_arith(row, av->expr);
         effective_lit = &resolved;
         if (right_class == ValueClass::Unknown) right_class = class_of_expr(av->expr);
     } else if (auto* lit_v = std::get_if<ConditionValue::Literal>(&cond.value.data)) {

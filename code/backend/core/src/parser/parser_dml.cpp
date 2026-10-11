@@ -168,6 +168,29 @@ Statement Parser::parse_replace() {
     return Statement(Statement::Insert{table, columns, all_values, InsertConflict(InsertConflict::Replace{}), returning});
 }
 
+// [ORDER BY item [ASC | DESC], ...] [LIMIT n] after the WHERE of an UPDATE / DELETE
+void Parser::parse_order_limit(std::vector<OrderBy>& order_by, std::optional<std::size_t>& limit) {
+    if (peek_is(TokenKind::Order)) {
+        advance();
+        if (!peek_is(TokenKind::By)) throw ParseError("Expected BY");
+        advance();
+        for (;;) {
+            std::string col = parse_sort_item();
+            bool asc = true;
+            if (peek_is(TokenKind::Desc)) { advance(); asc = false; }
+            else if (peek_is(TokenKind::Asc)) advance();
+            order_by.push_back(OrderBy{col, asc});
+            if (peek_is(TokenKind::Comma)) advance(); else break;
+        }
+    }
+    if (peek_is(TokenKind::Limit)) {
+        advance();
+        const Token* n = advance();
+        if (!n || n->kind != TokenKind::NumberLit) throw ParseError("Expected number after LIMIT");
+        limit = static_cast<std::size_t>(std::stoull(n->text));
+    }
+}
+
 Statement Parser::parse_update() {
     // UPDATE [t1 [alias1]] [, t2 [alias2]] | [JOIN t2 ON ...] SET col = val [WHERE ...]
     std::string first_table = expect_ident();
@@ -229,7 +252,7 @@ Statement Parser::parse_update() {
         col = detail::expand_alias_str(col, alias_map);
         if (!peek_is(TokenKind::Eq)) throw ParseError("Expected =");
         advance();
-        ArithExpr expr = parse_value_expr();
+        ArithExpr expr = peek_is(TokenKind::Default) ? (advance(), ArithExpr(ArithExpr::Func{"DEFAULT", {}})) : parse_value_expr(); // SET col = DEFAULT
         assignments.emplace_back(col, std::move(expr));
         if (peek_is(TokenKind::Comma)) advance(); else break;
     }
@@ -240,8 +263,12 @@ Statement Parser::parse_update() {
         condition = detail::expand_condexpr(parse_condexpr(), alias_map);
     }
 
+    std::vector<OrderBy> order_by;
+    std::optional<std::size_t> limit;
+    parse_order_limit(order_by, limit);
     auto returning = parse_returning();
     if (tables.size() > 1 || !joins.empty()) {
+        if (!order_by.empty() || limit) throw ParseError("Incorrect usage of UPDATE and ORDER BY / LIMIT");
         return Statement(Statement::MultiUpdate{tables, joins, assignments, condition, {alias_map.begin(), alias_map.end()}});
     }
     // the target of a one-table UPDATE is a column of that table: `SET t.v = 1` (t = the table or its alias) names the column v
@@ -249,7 +276,7 @@ Statement Parser::parse_update() {
         std::string& col = assignment.first;
         col = col.substr(col.rfind('.') == std::string::npos ? 0 : col.rfind('.') + 1);
     }
-    return Statement(Statement::Update{first_table, assignments, condition, returning, {alias_map.begin(), alias_map.end()}});
+    return Statement(Statement::Update{first_table, assignments, condition, returning, {alias_map.begin(), alias_map.end()}, std::move(order_by), limit});
 }
 
 Statement Parser::parse_delete() {
@@ -307,7 +334,11 @@ Statement Parser::parse_delete() {
         condition = detail::expand_condexpr(parse_condexpr(), alias_map);
     }
 
+    std::vector<OrderBy> order_by;
+    std::optional<std::size_t> limit;
+    parse_order_limit(order_by, limit);
     auto returning = parse_returning();
+    if ((delete_tables || !joins.empty()) && (!order_by.empty() || limit)) throw ParseError("Incorrect usage of DELETE and ORDER BY / LIMIT");
     if (delete_tables) {
         for (auto& t : *delete_tables) { // (`DELETE x FROM a x JOIN ...` names a table by its alias)
             if (auto it = alias_map.find(t); it != alias_map.end()) t = it->second;
@@ -317,7 +348,7 @@ Statement Parser::parse_delete() {
     if (!joins.empty()) {
         return Statement(Statement::MultiDelete{{from_table}, from_table, joins, condition, {alias_map.begin(), alias_map.end()}});
     }
-    return Statement(Statement::Delete{from_table, condition, returning, {alias_map.begin(), alias_map.end()}});
+    return Statement(Statement::Delete{from_table, condition, returning, {alias_map.begin(), alias_map.end()}, std::move(order_by), limit});
 }
 
 std::string Parser::parse_single_value() {

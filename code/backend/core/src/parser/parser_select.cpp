@@ -115,6 +115,13 @@ std::unordered_set<std::string> Parser::scan_from_names() const {
     return names;
 }
 
+namespace {
+std::string upper_word(std::string w) {
+    for (char& c : w) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+    return w;
+}
+} // namespace
+
 Statement Parser::parse_select() {
     // The FROM list of this query is the enclosing one for the subqueries in it (until the set operator's other side is parsed).
     struct Enclosing {
@@ -197,8 +204,8 @@ Statement Parser::parse_select() {
                         case TokenKind::Avg: return AggFunc(AggFunc::Avg{});
                         case TokenKind::Min: return AggFunc(AggFunc::Min{});
                         case TokenKind::Max: return AggFunc(AggFunc::Max{});
-                        case TokenKind::Stddev: return AggFunc(AggFunc::Stddev{});
-                        case TokenKind::Variance: return AggFunc(AggFunc::Variance{});
+                        case TokenKind::Stddev: return AggFunc(AggFunc::Stddev{upper_word(ft->word).find("SAMP") != std::string::npos});
+                        case TokenKind::Variance: return AggFunc(AggFunc::Variance{upper_word(ft->word).find("SAMP") != std::string::npos});
                         case TokenKind::BitAnd: return AggFunc(AggFunc::BitAnd{});
                         case TokenKind::BitOr: return AggFunc(AggFunc::BitOr{});
                         case TokenKind::ArrayAgg: return AggFunc(AggFunc::ArrayAgg{});
@@ -286,12 +293,32 @@ Statement Parser::parse_select() {
                 return SelectColumn(SelectColumn::Agg{func, agg_col, filter_cond});
             }
 
-            // GROUP_CONCAT(col [SEPARATOR 'sep'])
+            // GROUP_CONCAT([DISTINCT] col [ORDER BY col [ASC | DESC], ...] [SEPARATOR 'sep'])
             if (p && p->kind == TokenKind::GroupConcat && peek_at_is(1, TokenKind::LParen)) {
                 advance();
                 if (!peek_is(TokenKind::LParen)) throw ParseError("Expected '(' after GROUP_CONCAT");
                 advance();
+                bool concat_distinct = false;
+                if (peek_is(TokenKind::Distinct)) {
+                    advance();
+                    concat_distinct = true;
+                }
                 const std::string agg_col = aggregate_argument_text(parse_arith_expr());
+                std::vector<std::pair<std::string, bool>> concat_order;
+                if (peek_is(TokenKind::Order)) {
+                    advance();
+                    if (!peek_is(TokenKind::By)) throw ParseError("Expected BY after ORDER in GROUP_CONCAT");
+                    advance();
+                    for (;;) {
+                        std::string key = aggregate_argument_text(parse_arith_expr());
+                        bool ascending = true;
+                        if (peek_is(TokenKind::Desc)) { advance(); ascending = false; }
+                        else if (peek_is(TokenKind::Asc)) advance();
+                        concat_order.emplace_back(std::move(key), ascending);
+                        if (peek_is(TokenKind::Comma)) { advance(); continue; }
+                        break;
+                    }
+                }
                 std::string separator = ",";
                 if (peek_is(TokenKind::Separator)) {
                     advance();
@@ -301,7 +328,7 @@ Statement Parser::parse_select() {
                 }
                 if (!peek_is(TokenKind::RParen)) throw ParseError("Expected ')' after GROUP_CONCAT");
                 advance();
-                AggFunc func = AggFunc(AggFunc::GroupConcat{separator});
+                AggFunc func = AggFunc(AggFunc::GroupConcat{separator, concat_distinct, std::move(concat_order)});
                 std::optional<CondExpr> filter_cond = parse_optional_filter_clause();
                 if (peek_is(TokenKind::As)) {
                     advance();

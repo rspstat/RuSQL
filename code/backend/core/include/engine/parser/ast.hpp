@@ -45,7 +45,8 @@ struct ArithExpr {
     // `outer`: 0 for a column of the query the expression is in, otherwise how many queries out the column lives (1 = the query around a
     // subquery); the binder sets it and rewrites `name` to the table-qualified name the outer row holds, and the subquery gets the outer row's
     // value for it before it runs (see Executor::substitute_outer).
-    struct Col  { std::string name; ValueClass cls = ValueClass::Unknown; int outer = 0; };
+    // `approx`: the column is a FLOAT or DOUBLE (set by the binder with `cls`): arithmetic that reads it is done in floating point, as MySQL does
+    struct Col  { std::string name; ValueClass cls = ValueClass::Unknown; int outer = 0; bool approx = false; };
     struct Num  { std::string value; };
     struct Str  { std::string value; };
     struct Add  { std::unique_ptr<ArithExpr> lhs, rhs; };
@@ -147,6 +148,12 @@ struct ForeignKey {
     std::string ref_column;
     FkAction on_delete = FkAction::Restrict;
     FkAction on_update = FkAction::Restrict;
+};
+
+// A UNIQUE key over several columns (a single-column one is the `unique` flag of its ColumnDef).
+struct UniqueKey {
+    std::optional<std::string> name;
+    std::vector<std::string> columns;
 };
 
 struct ColumnDef {
@@ -326,9 +333,14 @@ struct AggFunc {
     struct Max {};
     struct SumDistinct {};
     struct AvgDistinct {};
-    struct Stddev {};
-    struct Variance {};
-    struct GroupConcat { std::string separator; };
+    struct Stddev { bool sample = false; };   // STDDEV_SAMP: n - 1 in the divisor
+    struct Variance { bool sample = false; };  // VAR_SAMP
+    // GROUP_CONCAT([DISTINCT] col [ORDER BY col [ASC | DESC], ...] [SEPARATOR 'sep'])
+    struct GroupConcat {
+        std::string separator;
+        bool distinct = false;
+        std::vector<std::pair<std::string, bool>> order_by; // (column, ascending)
+    };
     struct CountCase { std::vector<CaseWhenBranch> branches; std::optional<std::string> else_val; };
     struct SumCase { std::vector<CaseWhenBranch> branches; std::optional<std::string> else_val; };
     // No Rust/MySQL original for these -- new C++-native additions.
@@ -479,7 +491,7 @@ struct AlterAction {
         FkAction on_update;
     };
     struct DropForeignKey { std::string name; };
-    struct AddUniqueConstraint { std::optional<std::string> name; std::string column; };
+    struct AddUniqueConstraint { std::optional<std::string> name; std::string column; std::vector<std::string> columns; }; // columns: all of them (several: a composite key)
     struct AddCheckConstraint { std::optional<std::string> name; std::string expr; };
     struct DropConstraint { std::string name; };
     // Table partitioning (V1, no Rust original): RANGE/LIST only -- ADD PARTITION on a
@@ -514,6 +526,7 @@ struct Statement {
         std::vector<std::string> primary_key_columns;
         std::vector<std::pair<std::optional<std::string>, std::string>> check_constraints;
         std::optional<PartitionBy> partition_by;
+        std::vector<UniqueKey> unique_keys; // UNIQUE (a, b): the keys over several columns
     };
     struct DropTable { std::string name; bool if_exists = false; };
     struct TruncateTable { std::string name; };
@@ -561,6 +574,8 @@ struct Statement {
         std::optional<std::vector<SelectColumn>> returning;
     // alias -> table, as typed (the parser expands an alias in the WHERE only: a subquery that names the row by it is read through this)
     std::vector<std::pair<std::string, std::string>> table_aliases;
+        std::vector<OrderBy> order_by;      // UPDATE ... ORDER BY ... LIMIT n: the rows it takes
+        std::optional<std::size_t> limit;
     };
     struct Delete {
         std::string table;
@@ -568,6 +583,8 @@ struct Statement {
         std::optional<std::vector<SelectColumn>> returning;
     // alias -> table, as typed (the parser expands an alias in the WHERE only: a subquery that names the row by it is read through this)
     std::vector<std::pair<std::string, std::string>> table_aliases;
+        std::vector<OrderBy> order_by;      // DELETE ... ORDER BY ... LIMIT n
+        std::optional<std::size_t> limit;
     };
     struct AlterTable { std::string table; AlterAction action; };
     struct CreateIndex {

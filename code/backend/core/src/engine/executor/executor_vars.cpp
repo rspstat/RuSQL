@@ -340,7 +340,7 @@ void Executor::evaluate_insert_expressions(Statement& stmt, SharedDatabase* s, b
             ArithExpr expr = nlohmann::json::parse(value.substr(1)).get<ArithExpr>();
             substitute_variables(expr);
             if (s) bind_expression(*s, expr, check);
-            value = eval_arith(Row{}, expr);
+            value = eval_arith_exact(Row{}, expr); // (what the expression worked out; see the UPDATE)
         }
     }
 }

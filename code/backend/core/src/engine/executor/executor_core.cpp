@@ -197,7 +197,11 @@ Executor::Executor(const std::string& dir, std::size_t buffer_pool_capacity) {
 
         auto auto_inc_counters = schema.auto_increment_counters;
         catalog.create_table_full(qualified_key, schema.columns, schema.primary_key_columns, schema.check_constraints);
-        if (auto* ts = catalog.get_table_mut(qualified_key)) ts->auto_increment_counters = auto_inc_counters;
+        if (auto* ts = catalog.get_table_mut(qualified_key)) {
+            ts->auto_increment_counters = auto_inc_counters;
+            ts->unique_keys = schema.unique_keys; // (UNIQUE keys over several columns)
+            ts->partition_info = schema.partition_info; // (a partitioned table read 0 rows after a restart: its partitions were forgotten)
+        }
 
         auto rows = disk.load_table(qualified_key);
 
@@ -1467,7 +1471,7 @@ StringResult Executor::execute_with_s_body(SharedDatabase& s, Statement stmt) {
     if (std::holds_alternative<Statement::UnlockTables>(stmt.data)) return exec_unlock_tables(s);
 
     if (auto* v = std::get_if<Statement::CreateTable>(&stmt.data))
-        return exec_create(s, v->name, v->columns, v->if_not_exists, v->primary_key_columns, v->check_constraints, v->partition_by);
+        return exec_create(s, v->name, v->columns, v->if_not_exists, v->primary_key_columns, v->check_constraints, v->partition_by, v->unique_keys);
     if (auto* v = std::get_if<Statement::DropTable>(&stmt.data)) return exec_drop(s, v->name, v->if_exists);
     if (auto* v = std::get_if<Statement::TruncateTable>(&stmt.data)) return exec_truncate(s, v->name);
     if (auto* v = std::get_if<Statement::AlterTable>(&stmt.data)) return exec_alter(s, v->table, v->action);
@@ -1499,8 +1503,36 @@ StringResult Executor::execute_with_s_body(SharedDatabase& s, Statement stmt) {
         return exec_insert(s, v->table, v->columns, v->values, v->on_conflict, v->returning);
     if (auto* v = std::get_if<Statement::InsertSelect>(&stmt.data))
         return exec_insert_select(s, v->table, v->columns, std::move(*v->query), v->on_conflict, v->returning);
-    if (auto* v = std::get_if<Statement::Update>(&stmt.data)) return exec_update(s, v->table, v->assignments, v->condition, v->returning);
-    if (auto* v = std::get_if<Statement::Delete>(&stmt.data)) return exec_delete(s, v->table, v->condition, v->returning);
+    if (auto* v = std::get_if<Statement::Update>(&stmt.data)) {
+        // SET col = DEFAULT: the default of the column (NULL when it has none)
+        for (auto& [column, expr] : v->assignments) {
+            auto* call = std::get_if<ArithExpr::Func>(&expr.data);
+            if (!call || call->name != "DEFAULT" || !call->args.empty()) continue;
+            std::string value = EXECUTOR_NULL_VALUE;
+            if (const TableSchema* schema = s.catalog.get_table(v->table)) {
+                for (auto& c : schema->columns) {
+                    if (c.name == column && c.default_value && *c.default_value != NULL_DEFAULT) value = *c.default_value;
+                }
+            }
+            expr = ArithExpr(ArithExpr::Str{value});
+        }
+        if (!v->order_by.empty() || v->limit) {
+            auto rows = rows_of_limit(s, v->table, v->condition, v->order_by, v->limit);
+            if (rows.is_err()) return StringResult::Err(rows.error());
+            if (!rows.value()) return StringResult::Ok("0 row(s) updated.");
+            v->condition = std::move(*rows.value());
+        }
+        return exec_update(s, v->table, v->assignments, v->condition, v->returning);
+    }
+    if (auto* v = std::get_if<Statement::Delete>(&stmt.data)) {
+        if (!v->order_by.empty() || v->limit) {
+            auto rows = rows_of_limit(s, v->table, v->condition, v->order_by, v->limit);
+            if (rows.is_err()) return StringResult::Err(rows.error());
+            if (!rows.value()) return StringResult::Ok("0 row(s) deleted.");
+            v->condition = std::move(*rows.value());
+        }
+        return exec_delete(s, v->table, v->condition, v->returning);
+    }
     if (auto* v = std::get_if<Statement::Select>(&stmt.data)) {
         return exec_select(s, v->table, std::move(v->subquery), v->distinct, v->columns, v->condition, v->joins, v->order_by, v->group_by,
                             v->having, v->limit, v->offset, v->for_update, v->for_share);

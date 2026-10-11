@@ -21,6 +21,37 @@ std::string trim_ws(const std::string& s) {
 }
 } // namespace
 
+Result<std::optional<CondExpr>, std::string> Executor::rows_of_limit(SharedDatabase& s, const std::string& table, const std::optional<CondExpr>& condition,
+                                                                     const std::vector<OrderBy>& order_by, std::optional<std::size_t> limit) {
+    using R = Result<std::optional<CondExpr>, std::string>;
+    const TableSchema* schema = s.catalog.get_table(table);
+    if (!schema) return R::Err("Table '" + table + "' not found");
+    const std::vector<std::string> key = schema->identity_columns();
+    if (key.empty()) return R::Err("UPDATE / DELETE with ORDER BY or LIMIT needs a table with a PRIMARY KEY");
+    Statement::Select sel;
+    sel.table = table;
+    for (auto& column : key) sel.columns.push_back(SelectColumn(SelectColumn::Column{column}));
+    sel.condition = condition;
+    sel.order_by = order_by;
+    sel.limit = limit;
+    auto out = execute_with_s(s, Statement(std::move(sel)));
+    if (out.is_err()) return R::Err(out.error());
+    auto [names, rows] = parse_table_output(out.value());
+    if (rows.empty()) return R::Ok(std::nullopt);
+    std::optional<CondExpr> picked;
+    for (auto& row : rows) {
+        std::optional<CondExpr> one;
+        for (auto& column : key) {
+            auto it = row.find(column);
+            CondExpr leaf = CondExpr(CondExpr::Leaf{Condition{ArithExpr(ArithExpr::Col{column}), Operator::Eq,
+                                                              ConditionValue(ConditionValue::Literal{it != row.end() ? it->second : std::string(EXECUTOR_NULL_VALUE), true})}});
+            one = one ? CondExpr(CondExpr::And{std::make_unique<CondExpr>(std::move(*one)), std::make_unique<CondExpr>(std::move(leaf))}) : std::move(leaf);
+        }
+        picked = picked ? CondExpr(CondExpr::Or{std::make_unique<CondExpr>(std::move(*picked)), std::make_unique<CondExpr>(std::move(*one))}) : std::move(*one);
+    }
+    return R::Ok(std::move(picked));
+}
+
 StringResult Executor::exec_update(SharedDatabase& s, std::string table, std::vector<std::pair<std::string, ArithExpr>> assignments,
                                     std::optional<CondExpr> condition, std::optional<std::vector<SelectColumn>> returning,
                                     const PerRowValues* per_row) {
@@ -384,7 +415,15 @@ StringResult Executor::exec_update_inner(SharedDatabase& s, const std::string& t
                     if (per_row) {
                         for (auto& [col, v] : per_row->at(match_key(row))) new_vals.emplace_back(col, v);
                     } else {
-                        for (auto& [col, expr] : assignments) new_vals.emplace_back(col, eval_arith(row, expr));
+                        // the assignments run in the order written, each one seeing the columns the ones before it set (MySQL: SET a = a + 1, b = a)
+                        Row working = row;
+                        for (auto& [col, expr] : assignments) {
+                            // the column gets what the expression worked out (8 / 59.27 into a DECIMAL(10,2) is 0.13, not the 0.135 of the 0.1350 it shows; into a
+                            // VARCHAR it is 0.134975535)
+                            std::string value = eval_arith_exact(working, expr);
+                            working[col] = value;
+                            new_vals.emplace_back(col, std::move(value));
+                        }
                     }
 
                     if (auto* schema = s.catalog.get_table(table)) {
