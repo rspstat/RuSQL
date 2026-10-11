@@ -113,10 +113,14 @@ Executor::Tri Executor::eval_single_with_subquery(SharedDatabase& s, const Row& 
     }
 
     std::string val = eval_arith(row, cond.left);
-    if (val == EXECUTOR_NULL_VALUE) return Tri::Unknown;
+    const bool left_null = val == EXECUTOR_NULL_VALUE;
+    const bool is_in = cond.op == Operator::In || cond.op == Operator::NotIn;
+    if (left_null && !is_in) return Tri::Unknown;
 
-    // x IN (subquery): TRUE on a match, otherwise UNKNOWN when the subquery returned a NULL, else FALSE; NOT IN the other way round
-    auto membership = [&](bool contains, bool has_null) {
+    // x IN (subquery): TRUE on a match, otherwise UNKNOWN when the subquery returned a NULL, else FALSE; NOT IN the other way round. A subquery that
+    // gives no row decides it whatever x is (a NULL x is not IN nothing, and is NOT IN nothing); with rows a NULL x is UNKNOWN.
+    auto membership = [&](bool contains, bool has_null, bool empty) {
+        if (left_null) return empty ? (cond.op == Operator::In ? Tri::False : Tri::True) : Tri::Unknown;
         if (cond.op == Operator::In) return contains ? Tri::True : (has_null ? Tri::Unknown : Tri::False);
         return contains ? Tri::False : (has_null ? Tri::Unknown : Tri::True);
     };
@@ -129,13 +133,13 @@ Executor::Tri Executor::eval_single_with_subquery(SharedDatabase& s, const Row& 
         // subquery AST on EVERY row regardless of hit or miss -- for a scan of N rows that's O(N) AST copies/serializations just to compute
         // the key, dwarfing the O(1) hash lookup the cache was supposed to provide.
         if (auto it = subquery_cache_.find(cache_key); it != subquery_cache_.end()) {
-            return membership(it->second.count(val) > 0, it->second.count(EXECUTOR_NULL_VALUE) > 0);
+            return membership(it->second.count(val) > 0, it->second.count(EXECUTOR_NULL_VALUE) > 0, it->second.empty());
         }
         // Cache miss: only now pay for a copy (run_subquery) -- the original AST (still pointed to by `sub->query`, untouched) must survive
         // for the next row's lookup.
         auto vals = extract_values_from_output(run_subquery(s, original, row, false));
         std::unordered_set<std::string> sub_vals(vals.begin(), vals.end());
-        Tri hit = membership(sub_vals.count(val) > 0, sub_vals.count(EXECUTOR_NULL_VALUE) > 0);
+        Tri hit = membership(sub_vals.count(val) > 0, sub_vals.count(EXECUTOR_NULL_VALUE) > 0, sub_vals.empty());
         subquery_cache_[cache_key] = std::move(sub_vals);
         return hit;
     }
@@ -157,7 +161,7 @@ Executor::Tri Executor::eval_single_with_subquery(SharedDatabase& s, const Row& 
         case Operator::In:
         case Operator::NotIn:
             return membership(std::find(sub_vals.begin(), sub_vals.end(), val) != sub_vals.end(),
-                              std::find(sub_vals.begin(), sub_vals.end(), EXECUTOR_NULL_VALUE) != sub_vals.end());
+                              std::find(sub_vals.begin(), sub_vals.end(), EXECUTOR_NULL_VALUE) != sub_vals.end(), sub_vals.empty());
         case Operator::Eq:
         case Operator::Ne:
         case Operator::Gt:

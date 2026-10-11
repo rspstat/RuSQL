@@ -196,6 +196,7 @@ TEST_CASE("LIKE and REGEXP take an expression as the pattern", "[expression_subq
     REQUIRE(ids(ex, "SELECT id FROM a WHERE s LIKE CONCAT((SELECT s FROM a WHERE id = 5), '%') ORDER BY id") == Ids{"5"});
     // a quoted pattern is a string, never the column of that name (w is a column)
     REQUIRE(ids(ex, "SELECT id FROM a WHERE s LIKE 'w' ORDER BY id").empty());
+    REQUIRE(ids(ex, "SELECT id FROM a WHERE s LIKE 's' ORDER BY id").empty()); // ('s' is a string; s is the column)
     REQUIRE(ids(ex, "SELECT id FROM a WHERE s LIKE 'a%' ORDER BY id") == Ids{"5"});
 }
 
@@ -259,6 +260,8 @@ TEST_CASE("subqueries in stored routines, views and after a restart", "[expressi
         ok(ex, "DELETE FROM b WHERE id = 9");
         ok(ex, "CREATE FUNCTION plus_max(x) RETURNS INT RETURN x + (SELECT MAX(k) FROM b)");
         REQUIRE(q(ex, "SELECT id, plus_max(id) FROM a WHERE id < 3 ORDER BY id") == Rows{{"1", "9"}, {"2", "10"}});
+        ok(ex, "CREATE FUNCTION bad_fn(x) RETURNS INT RETURN x + (SELECT k FROM b)"); // (a subquery of the body that fails is the statement's error)
+        REQUIRE(error_of(ex, "SELECT bad_fn(1)").find("more than 1 row") != std::string::npos);
         // each round of a loop reads the data as it is, whatever the last round's statement left (the writes of the body, the values in it)
         ok(ex, "CREATE PROCEDURE grow() BEGIN DECLARE i INT DEFAULT 0; DECLARE c INT DEFAULT 0; DECLARE total INT DEFAULT 0; "
                "WHILE i < 3 DO INSERT INTO b VALUES (200 + i, 1, 2 + i); SELECT COUNT(*) INTO c FROM a WHERE id IN (SELECT a_id FROM b); "
@@ -276,6 +279,8 @@ TEST_CASE("subqueries in stored routines, views and after a restart", "[expressi
         ok(ex, "CREATE PROCEDURE pick() BEGIN DECLARE r VARCHAR(10) DEFAULT 'none'; IF (SELECT COUNT(*) FROM b) > 100 THEN SET r = 'big'; "
                "ELSEIF EXISTS (SELECT 1 FROM b WHERE k = 1) THEN SET r = 'one'; ELSE SET r = 'other'; END IF; SELECT r; END");
         REQUIRE(q(ex, "CALL pick()") == Rows{{"one"}});
+        ok(ex, "CREATE PROCEDURE echo(IN x INT) BEGIN SELECT x; END");
+        REQUIRE(q(ex, "CALL echo((SELECT MAX(k) FROM b) + 1)") == Rows{{"4"}}); // (an argument may hold a subquery)
         ok(ex, "CREATE PROCEDURE plus() BEGIN DECLARE m INT DEFAULT 0; SET m = (SELECT MAX(k) FROM b) + 10; SELECT m; END");
         REQUIRE(q(ex, "CALL plus()") == Rows{{"13"}});
     }

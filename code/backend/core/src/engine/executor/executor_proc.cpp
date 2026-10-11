@@ -42,9 +42,9 @@ StringResult Executor::exec_proc_stmts(SharedDatabase& s, std::vector<Statement>
 StringResult Executor::exec_proc_if(SharedDatabase& s, CondExpr condition, std::vector<Statement> then_body,
                                      std::vector<std::pair<CondExpr, std::vector<Statement>>> elseif_branches,
                                      std::optional<std::vector<Statement>> else_body) {
-    if (eval_condexpr(proc_vars, condition)) return exec_proc_stmts(s, std::move(then_body));
+    if (proc_condition(condition)) return exec_proc_stmts(s, std::move(then_body));
     for (auto& [cond, body] : elseif_branches) {
-        if (eval_condexpr(proc_vars, cond)) return exec_proc_stmts(s, std::move(body));
+        if (proc_condition(cond)) return exec_proc_stmts(s, std::move(body));
     }
     if (else_body) return exec_proc_stmts(s, std::move(*else_body));
     return StringResult::Ok("");
@@ -56,7 +56,7 @@ StringResult Executor::exec_proc_while(SharedDatabase& s, std::optional<std::str
         if (iter >= PROC_LOOP_MAX_ITERATIONS) {
             return StringResult::Err("WHILE loop exceeded maximum iteration count (" + std::to_string(PROC_LOOP_MAX_ITERATIONS) + ")");
         }
-        if (!eval_condexpr(proc_vars, condition)) break;
+        if (!proc_condition(condition)) break;
         auto res = exec_proc_stmts(s, body);
         if (res.is_err()) return res;
         last = res.value();
@@ -139,7 +139,7 @@ StringResult Executor::exec_proc_repeat(SharedDatabase& s, std::optional<std::st
             }
         }
         if (do_break) break;
-        if (eval_condexpr(proc_vars, until)) break;
+        if (proc_condition(until)) break;
     }
     return StringResult::Ok(last);
 }

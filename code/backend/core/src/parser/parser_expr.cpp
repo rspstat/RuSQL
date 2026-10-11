@@ -983,6 +983,16 @@ ArithExpr Parser::parse_arith_term() {
             args.push_back(std::move(left));
             args.push_back(std::move(right));
             left = ArithExpr(ArithExpr::Func{"MOD", std::move(args)});
+        } else if (peek_is(TokenKind::Ident) && to_upper(peek()->text) == "DIV" && peek_at(1) &&
+                   (peek_at(1)->kind == TokenKind::NumberLit || peek_at(1)->kind == TokenKind::StringLit || peek_at(1)->kind == TokenKind::Ident ||
+                    peek_at(1)->kind == TokenKind::LParen || peek_at(1)->kind == TokenKind::Minus || peek_at(1)->kind == TokenKind::At)) {
+            // a DIV b: the integer part of a / b (towards zero), NULL for a zero divisor
+            advance();
+            ArithExpr right = parse_arith_factor();
+            std::vector<ArithExpr> args;
+            args.push_back(ArithExpr(ArithExpr::Div{std::make_unique<ArithExpr>(std::move(left)), std::make_unique<ArithExpr>(std::move(right))}));
+            args.push_back(ArithExpr(ArithExpr::Num{"0"}));
+            left = ArithExpr(ArithExpr::Func{"TRUNCATE", std::move(args)});
         } else {
             break;
         }

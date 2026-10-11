@@ -949,6 +949,7 @@ private:
     // given, a trigger's `NEW.x` / `OLD.x` -- by its value (executor_vars.cpp).
     void substitute_variables(Statement& stmt, const std::unordered_map<std::string, std::string>* row = nullptr) const;
     void substitute_variables(ArithExpr& expr, const std::unordered_map<std::string, std::string>* row = nullptr) const;
+    bool proc_condition(const CondExpr& condition) const;
     // An expression or condition that is evaluated by itself (SET x = ..., IF / WHILE / UNTIL, SET NEW.x = ..., a CALL's argument, an INSERT's value, the
     // body of a function) may hold subqueries: they get the database prefix and are bound as the item (or the WHERE) of a `SELECT ... FROM _dual_`
     void bind_expression(SharedDatabase& s, ArithExpr& expr, bool check);

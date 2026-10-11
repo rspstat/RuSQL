@@ -265,6 +265,10 @@ void statement(const Vars& v, Statement& st) {
     } else if (auto* w = std::get_if<Statement::With>(&st.data)) {
         for (auto& cte : w->ctes) statement(v, *cte.second);
         if (w->query) statement(v, *w->query);
+    } else if (auto* set = std::get_if<Statement::SetUserVar>(&st.data)) {
+        arith(v, set->expr); // (the variables inside a subquery of it: the expression itself reads them when it is evaluated)
+    } else if (auto* proc_set = std::get_if<Statement::ProcSet>(&st.data)) {
+        arith(v, proc_set->expr);
     } else if (auto* call = std::get_if<Statement::CallProcedure>(&st.data)) {
         // (an @variable stays a name: CALL reads it, and writes an OUT parameter back to it)
         for (auto& arg : call->args) {
@@ -289,6 +293,14 @@ void Executor::substitute_variables(Statement& stmt, const std::unordered_map<st
 
 void Executor::substitute_variables(ArithExpr& expr, const std::unordered_map<std::string, std::string>* row) const {
     arith(Vars{proc_vars, user_vars, row}, expr);
+}
+
+// The condition of an IF / WHILE / UNTIL: its subqueries read the variables as they are now (the condition is evaluated again in every round of a loop).
+bool Executor::proc_condition(const CondExpr& condition) const {
+    if (!cond_has_any_subquery(condition)) return eval_condexpr(proc_vars, condition);
+    CondExpr copy = condition;
+    cond(Vars{proc_vars, user_vars, nullptr}, copy);
+    return eval_condexpr(proc_vars, copy);
 }
 
 void Executor::bind_expression(SharedDatabase& s, ArithExpr& expr, bool check) {

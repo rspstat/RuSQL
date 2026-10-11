@@ -9,7 +9,7 @@
 |---|---|
 | 무엇 | MySQL 호환 프로토콜을 쓰는 **자체 RDBMS 엔진**(C++20) + 데스크톱 클라이언트(Tauri/React) + Claude 연동(MCP) |
 | 1학기 → 2학기 | Rust 프로토타입 → **C++ 전면 재작성**, "기능 추가"에서 **정합성·동시성·성능을 실제로 파고드는 심화**로 |
-| 규모 | 테스트 **619 케이스 / 1,344,132 assertions** (2학기 초 218 케이스 / 3,080 assertions) |
+| 규모 | 테스트 **626 케이스 / 1,344,384 assertions** (2학기 초 218 케이스 / 3,080 assertions) |
 | 엔진 구성 | 파서 → 비용 기반 플래너 → 실행기, MVCC·행 단위 락·데드락 감지, redo 로그 기반 내구성, B+Tree·해시·복합 인덱스 |
 
 ## 2학기에 만든 것 (엔진)
@@ -96,6 +96,13 @@
 | `NULLIF(5, 5.00)`이 NULL이 아님(글자 비교), **5자리 이상 소수의 합이 4자리로 반올림**(`SUM(price * rate)`), 리터럴 `-0`이 `-0`으로 출력 | 작은 수치 오차·표시 오류 |
 | **`CURRENT_DATE`·`SYSDATE()`가 쿼리 캐시에 남음** | 자정이 지나도 어제 날짜 |
 | **서브쿼리의 바깥 열이 비교의 왼쪽(`a.id = b.a_id`)·함수·select 목록·HAVING·ON·바깥 별칭에 있으면 모든 행에 참/같은 값**(`DELETE … WHERE EXISTS (… a.id = b.a_id)`가 **전부 삭제**), UNION 서브쿼리는 늘 거짓/NULL | 오류 없이 틀린 답, **데이터 손실** |
+| **모호한 열 이름**(`SELECT id FROM a JOIN b …`, `WHERE id = 1`, `ORDER BY id`, `GROUP BY id`)이 오류 없이 첫 테이블 값(MySQL 1052) | 오류 없이 틀린 답 |
+| **하위 질의 안의 없는 한정자**(`EXISTS (SELECT 1 FROM b WHERE zz.id = 1)`)가 받아들여져 모든 행에 참 | 오류 없이 틀린 답 |
+| **`x IN / NOT IN (빈 서브쿼리)`가 왼쪽이 NULL이면 UNKNOWN**(`NOT IN`은 NULL 행을 빠뜨림, `DELETE … WHERE v NOT IN (빈 서브쿼리)`가 NULL 행을 남김) | 오류 없이 틀린 답 |
+| **집계 질의의 `HAVING v > 3`(v는 묶이지 않음)이 0행, `ORDER BY v`는 정렬 없이** | 오류 없이 틀린 답 |
+| **별칭을 쓴 `UPDATE a x … WHERE EXISTS (… x.id)`가 모든 행을 바꾸고, `DELETE FROM a x WHERE EXISTS (… x.id …)`가 0행을 지움**, `DELETE x FROM a x JOIN …`이 테이블 없음 | 오류 없이 틀린 갱신·삭제 |
+| **`SET @x = (SELECT …)`·프로시저 `SET v = (SELECT …)`가 여러 행/열을 오류 없이 첫 값으로**, 서브쿼리 안의 변수가 풀리지 않고, 프로시저 `WHILE (SELECT … k > i)` 조건의 변수도 | 오류 없이 틀린 답 |
+| **`CREATE OR REPLACE VIEW`, `SELECT 1 UNION SELECT 2`, `7 DIV 2`, `1e3`이 파싱 오류** | 요청 거절 |
 | **값 자리의 조건이 서브쿼리를 답하지 못하고 거짓**: `CASE WHEN EXISTS (…)`·`IF(x IN (SELECT …), …)`·select 항목 `x IN (SELECT …)`·`JOIN … ON x > (SELECT …)`(조인이 0행), 프로시저의 `WHILE (SELECT …)`·`IF EXISTS` | 오류 없이 틀린 답 |
 | **서브쿼리 답의 캐시가 프로시저 반복문에서 묵은 채 남음**(캐시가 노드 주소 열쇠; 반복마다 복사한 문장이 같은 주소에 만들어짐) | 오류 없이 틀린 답 |
 | **식 안의 서브쿼리**(`(SELECT …) + 1`, `IN (a, b + 1)`, `LIKE CONCAT(p, '%')`, `UPDATE … SET v = (SELECT …)`, `INSERT … VALUES (…, (SELECT …))`)가 파싱 오류, `INSERT`의 서브쿼리는 열 개수·없는 열 미검사 | 요청 거절 / 틀린 값 |
@@ -107,14 +114,14 @@
 | `GROUP BY COALESCE(w, 0)`가 `0.00`과 `0`을 다른 그룹으로(`DISTINCT`도), `COALESCE(code, 'x') = '007'`이 숫자 비교, `SUM(CASE WHEN code = '007' …)`이 `'7'`도 셈(앞 항목의 회귀) | 그룹·중복·조건의 타입 규칙이 틀림 |
 | **UPDATE·DELETE의 기본키 단축 경로가 조건을 다시 보지 않음**: `DELETE FROM t WHERE a = b`가 `a = 'b'`인 행을 지움, 텍스트 키의 `WHERE code = 7`이 `'7'`만 처리, 정수 키의 `BETWEEN 5.0 AND 9`가 5번 행을 빠뜨림 | **엉뚱한 행 삭제**·일부 행만 처리 |
 
-성능·정합성 작업의 커밋들에서 찾은 기존 버그는 모두 94건입니다(전체 목록은 `DATE.md`).
+성능·정합성 작업의 커밋들에서 찾은 기존 버그는 모두 101건입니다(전체 목록은 `DATE.md`).
 
 ## 한계와 앞으로
 
 - 이번 학기 성능 작업은 **의도적으로 여기서 동결**했습니다. 남은 것은 상수 배수 수준(100,000행에서 `ANALYZE`·`INSERT … SELECT`·`UNION ALL`이 1.5~1.7초)이며 `PLAN.md`에 후보로 기록했습니다.
 - 쓰는 문장 안의 상관 서브쿼리, `NATURAL`/`USING` 조인은 아직 중첩 루프입니다.
 - 설계상 범위 밖: XA 분산 트랜잭션, 페이지 단위 버퍼 풀, WAL 복제.
-- 알려진 한계(`PLAN.md`): `= ANY/ALL (서브쿼리)`·행 생성자 비교가 없는 것, 모호한 열 이름이 오류 없이 첫 테이블 값을 읽는 것, AFTER 트리거 실패가 쓴 행을 되돌리지 않는 것, `ORDER BY`·`GROUP BY` 식·집계 인자 안의 서브쿼리(오류로 거절), 타입을 모르는 식(`COALESCE`·`IF` 결과)·`IN (서브쿼리)`·`UNION`의 `ORDER BY` 같은 몇몇 비교는 예전 규칙, 대소문자 구분 비교(MySQL 기본은 구분 안 함).
+- 알려진 한계(`PLAN.md`): `= ANY/ALL (서브쿼리)`·행 생성자 비교가 없는 것, AFTER 트리거 실패가 쓴 행을 되돌리지 않는 것, `ORDER BY`·`GROUP BY` 식·집계 인자 안의 서브쿼리(오류로 거절), 타입을 모르는 식(`COALESCE`·`IF` 결과)·`IN (서브쿼리)`·`UNION`의 `ORDER BY` 같은 몇몇 비교는 예전 규칙, 대소문자 구분 비교(MySQL 기본은 구분 안 함).
 - AI는 사설 모델 대신 **Claude + MCP**로 일원화했습니다(`AI.md`).
 
 ## 직접 확인해 보기

@@ -242,14 +242,14 @@ Statement Parser::parse_update() {
 
     auto returning = parse_returning();
     if (tables.size() > 1 || !joins.empty()) {
-        return Statement(Statement::MultiUpdate{tables, joins, assignments, condition});
+        return Statement(Statement::MultiUpdate{tables, joins, assignments, condition, {alias_map.begin(), alias_map.end()}});
     }
     // the target of a one-table UPDATE is a column of that table: `SET t.v = 1` (t = the table or its alias) names the column v
     for (auto& assignment : assignments) {
         std::string& col = assignment.first;
         col = col.substr(col.rfind('.') == std::string::npos ? 0 : col.rfind('.') + 1);
     }
-    return Statement(Statement::Update{first_table, assignments, condition, returning});
+    return Statement(Statement::Update{first_table, assignments, condition, returning, {alias_map.begin(), alias_map.end()}});
 }
 
 Statement Parser::parse_delete() {
@@ -309,12 +309,15 @@ Statement Parser::parse_delete() {
 
     auto returning = parse_returning();
     if (delete_tables) {
-        return Statement(Statement::MultiDelete{*delete_tables, from_table, joins, condition});
+        for (auto& t : *delete_tables) { // (`DELETE x FROM a x JOIN ...` names a table by its alias)
+            if (auto it = alias_map.find(t); it != alias_map.end()) t = it->second;
+        }
+        return Statement(Statement::MultiDelete{*delete_tables, from_table, joins, condition, {alias_map.begin(), alias_map.end()}});
     }
     if (!joins.empty()) {
-        return Statement(Statement::MultiDelete{{from_table}, from_table, joins, condition});
+        return Statement(Statement::MultiDelete{{from_table}, from_table, joins, condition, {alias_map.begin(), alias_map.end()}});
     }
-    return Statement(Statement::Delete{from_table, condition, returning});
+    return Statement(Statement::Delete{from_table, condition, returning, {alias_map.begin(), alias_map.end()}});
 }
 
 std::string Parser::parse_single_value() {

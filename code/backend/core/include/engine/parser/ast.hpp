@@ -559,11 +559,15 @@ struct Statement {
         std::vector<std::pair<std::string, ArithExpr>> assignments;
         std::optional<CondExpr> condition;
         std::optional<std::vector<SelectColumn>> returning;
+    // alias -> table, as typed (the parser expands an alias in the WHERE only: a subquery that names the row by it is read through this)
+    std::vector<std::pair<std::string, std::string>> table_aliases;
     };
     struct Delete {
         std::string table;
         std::optional<CondExpr> condition;
         std::optional<std::vector<SelectColumn>> returning;
+    // alias -> table, as typed (the parser expands an alias in the WHERE only: a subquery that names the row by it is read through this)
+    std::vector<std::pair<std::string, std::string>> table_aliases;
     };
     struct AlterTable { std::string table; AlterAction action; };
     struct CreateIndex {
@@ -624,12 +628,16 @@ struct Statement {
         std::vector<Join> joins;
         std::vector<std::pair<std::string, ArithExpr>> assignments;
         std::optional<CondExpr> condition;
+    // alias -> table, as typed (the parser expands an alias in the WHERE only: a subquery that names the row by it is read through this)
+    std::vector<std::pair<std::string, std::string>> table_aliases;
     };
     struct MultiDelete {
         std::vector<std::string> delete_tables;
         std::string from_table;
         std::vector<Join> joins;
         std::optional<CondExpr> condition;
+    // alias -> table, as typed (the parser expands an alias in the WHERE only: a subquery that names the row by it is read through this)
+    std::vector<std::pair<std::string, std::string>> table_aliases;
     };
     struct CreateUser {
         std::string user, host;

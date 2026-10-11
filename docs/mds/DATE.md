@@ -1364,6 +1364,43 @@ VS Code 스타일 탭 드래그 순서 변경(요청의 1번 항목)은 같은 �
 
 **Diagram 페이지**: 구성요소·흐름이 바뀐 것이 없어 변경 없음.
 
+### 10월 11일 — 모호한 열 이름(1052), 하위 질의 안의 없는 한정자, `x IN (빈 서브쿼리)`, 집계 질의의 `HAVING`·`ORDER BY`(ONLY_FULL_GROUP_BY), 별칭을 쓴 UPDATE/DELETE의 상관 서브쿼리, `SET @x = (SELECT …)`의 행·열 수, 프로시저 `IF`/`WHILE` 조건 안의 변수, `CREATE OR REPLACE VIEW`·FROM 없는 SELECT의 UNION·`DIV`·지수 표기
+
+**왜 이 항목인가**: 사용자 결정("계속 이어서 고치고 같은 진행방식으로")에 따라 앞 항목들에서 남긴 목록 가운데 **오류 없이 틀린 답을 내는 것**을 먼저, 그 다음 파싱 오류로 막히는 것을 골랐다. 앞 항목의 점검에서 이미 찾아 둔 것들이다: `SELECT id FROM a JOIN b …`가 첫 테이블의 값을 조용히 돌려주고, 서브쿼리의 `zz.id`가 어느 테이블의 것도 아니어도 받아들여지고(`EXISTS (… zz.id = 1)`이 모든 행에 참), `v NOT IN (빈 서브쿼리)`가 NULL 행을 빼고, `HAVING v > 3`(v는 묶이지 않음)이 0행, `SET @x = (SELECT k FROM b)`가 여러 행이어도 첫 행.
+
+**원인과 영향**:
+- **모호한 열 이름**: 이름 하나를 둘 이상의 테이블이 가져도 엔진은 오류 없이 첫 테이블의 값을 읽었다(`SELECT id FROM a JOIN b …`, `WHERE id = 1`, `ORDER BY id`, `GROUP BY id`, `COUNT(id)`, ON의 `a_id = id`). MySQL은 1052 "Column 'id' in field list is ambiguous".
+- **하위 질의 안의 없는 한정자**: 하위 질의에서 어느 테이블·별칭도 아닌 `zz.id`는 "바깥 질의의 별칭일 수 있다"는 이유로 늘 받아들여졌다 → `EXISTS (SELECT 1 FROM b WHERE zz.id = 1)`이 모든 행에서 참.
+- **빈 서브쿼리의 IN**: `x IN (SELECT …)`·`NOT IN`은 왼쪽이 NULL이면 서브쿼리를 보기도 전에 UNKNOWN을 돌려줬다. SQL에서 `NULL IN (빈 집합)`은 거짓, `NULL NOT IN (빈 집합)`은 참(`DELETE … WHERE v NOT IN (빈 서브쿼리)`가 NULL 행을 남김).
+- **집계 질의의 `HAVING`·`ORDER BY`**: 앞 항목의 ONLY_FULL_GROUP_BY는 select 항목만 봤다. `GROUP BY g HAVING v > 3`은 0행, `GROUP BY g ORDER BY v`는 정렬 없이 답했다(MySQL 1463 / 1055).
+- **별칭을 쓴 UPDATE·DELETE의 상관 서브쿼리 (앞 항목 이전부터)**: UPDATE·DELETE는 테이블 별칭을 WHERE에서만 풀고 서브쿼리 안의 `x.id`는 남겨서, `UPDATE a x SET w = 99 WHERE EXISTS (SELECT 1 FROM b WHERE b.a_id = x.id)`가 **모든 행**을 바꾸고 `UPDATE a x SET w = (SELECT COUNT(*) … x.id)`는 모든 행에 같은 값, `DELETE FROM a x WHERE EXISTS (… x.id AND b.k > 5)`는 0행을 지웠다. `DELETE x FROM a x JOIN …`은 별칭 `x`를 테이블로 찾아 `Table 'd.x' not found`.
+- **`SET @x = (SELECT …)` / 프로시저의 `SET v = (SELECT …)`**: 예전 `SELECT … INTO` 경로라 여러 행이면 오류 없이 첫 행, 여러 열이어도 첫 열(MySQL 1242 / 1241); 서브쿼리 안의 `@c` 변수는 풀리지 않아 NULL(`SET @m = (SELECT MAX(v) FROM t WHERE id < @c)`).
+- **프로시저 `IF`/`WHILE`/`UNTIL` 조건 안의 서브쿼리에서 쓴 변수**: 조건은 반복마다 다시 평가되는데 서브쿼리 안의 변수가 풀리지 않아 `WHILE (SELECT COUNT(*) FROM b WHERE k > i) > 0`이 바로 끝났다.
+- **파싱 오류로 막히던 것**: `CREATE OR REPLACE VIEW`, `SELECT 1 UNION SELECT 2`(FROM 없는 SELECT에 집합 연산), `a DIV b`, `1e3`.
+
+**수정**:
+- **모호한 이름 검사**(바인더 `ambiguous`): 한정자 없는 열을 이름을 가진 테이블이 둘 이상인 가장 안쪽 질의에서 찾으면 오류 `Column 'id' in <절> is ambiguous`(field list / where clause / on clause / order clause / group statement / having clause; 비교 오른쪽의 맨 단어도). `USING`·`NATURAL JOIN`이 하나로 합친 열은 모호하지 않고, `ORDER BY`·`HAVING`은 select 목록이 부르는 이름(`SELECT a.id … ORDER BY id`, `AS id`)을 먼저 읽는다. 안쪽 질의의 자기 테이블이 바깥보다 먼저.
+- **없는 한정자**: 한정자가 어느 질의의 테이블·별칭도 아니면 서브쿼리 안에서도 `Unknown column`. 바깥 질의의 별칭은 그 질의의 `table_aliases`로 확인하고 그 별칭이 가리키는 테이블에 열이 있는지도 본다.
+- **빈 서브쿼리의 IN**: 서브쿼리를 먼저 보고, 행이 없으면 왼쪽이 NULL이어도 `IN`은 거짓·`NOT IN`은 참, 행이 있으면 NULL 왼쪽은 UNKNOWN.
+- **`HAVING`·`ORDER BY`의 묶기 규칙**: `Non-grouping field 'v' is used in HAVING clause`, `Expression #N of ORDER BY clause is not in GROUP BY clause and contains nonaggregated column …`(집계만 있고 `GROUP BY`가 없으면 `In aggregated query without GROUP BY, expression #N of ORDER BY contains …`). select 목록의 별칭, 묶은 열, 묶은 기본키에 딸린 열은 허용.
+- **별칭 보존**: `Statement::Update`/`Delete`/`MultiUpdate`/`MultiDelete`가 `table_aliases`(별칭 → 테이블)를 저장하고(JSON에도; 옛 저장본은 비어 있음) 바인더의 쓰기 범위가 읽어 서브쿼리의 `x.id`를 바깥 열로 표시한다 — `SELECT`에서 하던 방식 그대로. `DELETE x FROM a x JOIN …`의 대상 목록도 별칭을 테이블로 푼다.
+- **`SET @x = (SELECT …)`**: 파서가 `SelectInto` 특례를 없애고 일반 식으로 읽어 스칼라 서브쿼리(행 없음 NULL, 여럿 1242, 열 여럿 1241)가 된다. 변수 치환이 `SetUserVar`·`ProcSet`의 식 안 서브쿼리에도 들어가고, `IF`/`WHILE`/`UNTIL` 조건은 서브쿼리가 있으면 평가할 때마다 현재 변수 값으로 치환한 복사본을 쓴다(`proc_condition`).
+- **구문**: `CREATE OR REPLACE VIEW`(같은 이름의 뷰를 대체 — 평범한 `CREATE VIEW`도 전부터 그랬다); FROM 없는 SELECT 뒤의 `UNION`/`INTERSECT`/`EXCEPT`(집합 연산 처리를 람다로 빼서 두 경우가 같이 씀); `a DIV b` = `TRUNCATE(a / b, 0)`(0으로 나누면 NULL, 다음 토큰이 값을 시작할 때만 연산자라 `div`라는 열·별칭은 그대로); `1e3`·`2.5E-1`은 쓴 수 그대로 펼쳐 `1000`·`0.25`.
+
+**검증**:
+- 신규 Catch2 7케이스(`test_name_resolution.cpp`; 이전 항목의 `test_expression_subqueries.cpp`에 함수 본문의 실패·`CALL echo((SELECT …) + 1)`을 더함): 모호한 이름(모든 절, 비교 오른쪽, 자기 조인, USING/NATURAL, 안쪽 질의 우선, 안 모호한 것들), 하위 질의의 없는 한정자·바깥 별칭, **별칭을 쓴 UPDATE/DELETE**(WHERE·SET·다중 테이블·`DELETE x FROM a x JOIN`·안쪽 별칭 가림·프로시저 안), 빈 서브쿼리의 IN·NOT IN(캐시를 타는 경로와 안 타는 경로, 상관, DELETE), HAVING/ORDER BY 묶기 규칙, `SET @x`/프로시저 `SET`/`IF`/`WHILE`의 서브쿼리와 변수, 새 구문.
+- 기존 시험 두 곳이 새 규칙에 걸렸다: `test_query_paths.cpp`의 무작위 조인 질의가 `u`와 `t`가 둘 다 가진 `id`·`grp`를 한정자 없이 썼다(→ `t.id`·`t.grp`; 그 질의는 MySQL이면 오류); `test_stored_routines.cpp`의 `SET @m = (SELECT … WHERE id < @c)`는 서브쿼리 안 변수 치환이 빠져 있었다(→ 치환 추가). `verify_subqueries.py`의 기준 모델이 `NULL NOT IN (빈 집합)`을 UNKNOWN으로 두고 있었다(→ 참으로 고침).
+- 심은 버그 49종(모호한 이름 검사의 각 분기·USING/NATURAL·select 목록 이름·빈 서브쿼리 IN의 분기들·캐시 무효화·값 자리 조건의 평가·변수 치환·바인딩 호출들·별칭 보존·구문 파서) 가운데 **처음에는 4종이 살아남았고**(`amb_open`: LATERAL 같은 열을 알 수 없는 테이블을 모호함 판정에 세는 경우, `amb_aliases`: HAVING이 select 목록의 별칭을 먼저 읽는 것, `like_quoted`: LIKE의 따옴표 패턴이 열 이름으로 읽히지 않는 것, `sync_statement_only`) 앞의 셋은 시험을 보강해 잡았다. 최종 48종을 테스트가 잡고, 1종(`sync_statement_only`: 서브쿼리 답 캐시를 문장 번호로 버리는 검사를 빼도 같은 결과 — 프로시저의 `SET`·`SELECT … INTO`가 쓰기 문장으로 세어져 쓰기 번호가 먼저 캐시를 비우므로 지금의 시험 범위에서는 구별할 수 없다; 문장 번호 검사는 주소가 재사용되는 읽기 전용 반복에 대비해 남김)은 결과가 같은 변이다. (앞 항목에서 시험하지 못한 식 안의 서브쿼리 코드의 변이 중 이 캠페인이 닿는 것 — `IN (식 목록)`의 `=`/`<>`·AND/OR 선택, LIKE 따옴표, 값 자리 조건의 평가, 컨텍스트 바인딩, 변수 치환, 비교 오른쪽의 되감기 — 도 모두 잡혔다.)
+- Release/Debug **626 케이스/1,344,384 assertions**를 기본 설정과 `RUSQL_DML_INDEX_MIN_ROWS=0` 양쪽에서 통과(네 가지 모두). 시간에 민감한 갭 락 시험 한 건(`elapsed_ms >= 100`)이 Debug 빌드와 동시에 돌릴 때 한 번 96ms로 실패했고, 기계가 조용할 때 5회 연속 통과 + 강제 설정 전체 재실행 통과. 무작위 시험 긴 캠페인(`[random]` 40시드 기본·강제 각 100,022 assertions, `[fuzz]` 30시드 1,422,936 assertions) 통과, 크래시 퍼저 60라운드·동시 퍼저 20라운드(확인한 확정 행 11,151) 불일치 0, 검증기 12종(`verify_agg_arguments`·`verify_agg_expressions`·`verify_aggregates`·`verify_compare`·`verify_correlated`·`verify_joins`·`verify_null_expressions`·`verify_orderby_distinct`·`verify_sort_group`·`verify_subqueries`·`verify_value_expressions`·`verify_writes`) 위반 없음.
+- 빌드 간 차분(이전 빌드 = 앞 항목): 30시드 × 99질의(2,970질의) 차이 63건 **전부 의도한 새 오류**다 — 모호한 이름 39건(옛 빌드는 첫 테이블의 값으로 답함), 집계 질의의 `ORDER BY` 묶이지 않은 열 24건; 그 밖의 차이 0건. 저장소의 `test_full.sql`(319문장)·`test_full-ver2.sql`(359문장)을 두 빌드에 스트림으로 보내 비교: 시각·연결 번호 말고 차이 없음(새 규칙에 걸린 문장 없음).
+- 성능: 앞 항목 빌드와 번갈아 2라운드, 5만 행(결과 캐시를 피하려고 질의마다 다른 상수): 기본키 점 조회 0.10 → 0.10ms, 조인 33.8 → 33.3 / 33.6 → 33.6, `GROUP BY` + 3집계 41.7 → 35.6 / 40.8 → 48.0, `HAVING` + `ORDER BY` 40.3 → 38.3 / 46.2 → 40.6, 스캔 24.7 → 25.0 / 26.2 → 24.1, `IN (서브쿼리)` 19.3 → 24.3 / 18.3 → 18.3, 스칼라 서브쿼리 94.7 → 88.5 / 87.1 → 89.8, 별칭 UPDATE 46.8 → 46.7 / 46.6 → 47.2 — 두 빌드가 같다(±15% 안의 측정 잡음).
+
+**눈에 띄는 변화(의도한 것)**: 두 테이블이 같은 이름의 열을 가지면 한정자 없이 쓸 수 없다(MySQL과 같음 — 스크립트가 `SELECT id FROM a JOIN b …`를 쓰고 있었다면 오류가 난다); 서브쿼리에서 없는 한정자가 오류; `NOT IN (빈 서브쿼리)`가 NULL 행도 고름; 집계 질의의 `HAVING`/`ORDER BY`에 묶이지 않은 열이 오류; 별칭을 쓴 UPDATE/DELETE의 `EXISTS (… x.id)`가 맞는 행만 바꿈; `SET @x = (SELECT …)`가 여러 행/열이면 오류; `CREATE OR REPLACE VIEW`, `SELECT 1 UNION SELECT 2`, `7 DIV 2`, `1e3`이 동작.
+
+**정직한 한계**: ① ON의 모호한 이름 검사는 그 JOIN에 이어 나중에 붙는 테이블까지 한 범위로 본다(앞선 JOIN의 ON이 뒤의 테이블에만 있는 열을 쓰면 MySQL은 오류가 아닌데 여기서는 모호하다고 할 수 있음 — 드문 모양); ② 함수 인자 안의 열(`COUNT`·`SUM` 밖의 일반 함수)은 이전처럼 존재·모호성을 확인하지 않는다; ③ HAVING 메시지는 MySQL 8의 1463, 다른 메시지도 글자까지 같지는 않을 수 있다; ④ `CREATE VIEW`가 같은 이름이 있어도 오류 없이 대체한다(MySQL은 `CREATE VIEW`에서 1050) — `OR REPLACE`와 같은 동작으로 둠; ⑤ 괄호로 감싼 UNION 피연산자 `(SELECT …) UNION (SELECT …)`, `COUNT(DISTINCT a, b)`, `FROM t date`(AS 없는 키워드 별칭)는 여전히 파싱 오류; ⑥ 앞 항목의 한계(`ORDER BY`·`GROUP BY` 식·집계 인자 안의 서브쿼리 거절)는 그대로.
+
+**Diagram 페이지**: 구성요소·흐름이 바뀐 것이 없어 변경 없음.
+
 ## 요약: 1학기 대비 2학기에 달라진 것
 
 | 항목 | 1학기 (~2026년 6월) | 2학기 (2026년 7~8월) |

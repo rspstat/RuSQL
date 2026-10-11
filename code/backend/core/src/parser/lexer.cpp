@@ -1,6 +1,8 @@
 #include "engine/parser/lexer.hpp"
 
 #include <cctype>
+#include <cstdio>
+#include <cstdlib>
 #include <unordered_map>
 
 namespace engine {
@@ -204,6 +206,20 @@ Token Lexer::read_number() {
     std::string s;
     while (auto ch = peek()) {
         if (is_digit(*ch) || *ch == '.') { s.push_back(*ch); advance(); } else break;
+    }
+    // 1e3, 2.5E-2: a number with an exponent is the number it spells (written out, so that 1e3 shows as 1000)
+    if (!s.empty() && s.back() != '.' && (peek() == 'e' || peek() == 'E')) {
+        std::size_t at = pos_ + 1;
+        if (at < input_.size() && (input_[at] == '+' || input_[at] == '-')) at++;
+        if (at < input_.size() && is_digit(input_[at])) {
+            std::string exponent = "e" + input_.substr(pos_ + 1, at - pos_ - 1);
+            while (at < input_.size() && is_digit(input_[at])) exponent.push_back(input_[at++]);
+            pos_ = at;
+            char buffer[64];
+            std::snprintf(buffer, sizeof buffer, "%.15g", std::strtod((s + exponent).c_str(), nullptr));
+            const std::string written = buffer;
+            return Token(TokenKind::NumberLit, written.find_first_of("en") == std::string::npos ? written : s + exponent);
+        }
     }
     // 0x... hex literal → StringLit(hex_digits)
     if (s == "0") {

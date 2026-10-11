@@ -294,7 +294,8 @@ Statement Parser::parse_stmt() {
                 bool ok_replace = rep && (rep->kind == TokenKind::Replace ||
                                           (rep->kind == TokenKind::Ident && to_upper(rep->text) == "REPLACE"));
                 if (!ok_replace) throw ParseError("Expected REPLACE");
-                if (!peek_is(TokenKind::Synonym)) throw ParseError("Expected SYNONYM after CREATE OR REPLACE");
+                if (peek_is(TokenKind::View)) { advance(); return parse_create_view(); } // (a view of that name is replaced, as CREATE VIEW does)
+                if (!peek_is(TokenKind::Synonym)) throw ParseError("Expected SYNONYM or VIEW after CREATE OR REPLACE");
                 advance();
                 std::string name = expect_ident();
                 if (!peek_is(TokenKind::For)) throw ParseError("Expected FOR");

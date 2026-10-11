@@ -386,7 +386,7 @@ TEST_CASE("joins whose ON holds an equality (and WHERE conjuncts of one table) a
     const std::vector<std::string> on_w_after_u = {"w.k = u.id", "w.k = u.grp AND t.val = w.k"};
     auto leaf = [&](bool has_u, bool has_w) {
         std::vector<std::string> pool = {"t.val > " + std::to_string(rng() % 12), "t.grp = " + std::to_string(rng() % 7), "t.tag = 'red'", "t.tag IS NULL",
-                                          "val < " + std::to_string(rng() % 12), "id BETWEEN " + std::to_string(rng() % 60) + " AND 80", "grp IN (1, 2, 3)",
+                                          "val < " + std::to_string(rng() % 12), "t.id BETWEEN " + std::to_string(rng() % 60) + " AND 80", "t.grp IN (1, 2, 3)", // (u has an id and a grp too: unqualified, they are ambiguous)
                                           "t.code LIKE 'C%'", "t.tag = 'name'", "t.code = 'grp'", "t.id % " + std::to_string(2 + rng() % 4) + " = 0"};
         if (has_u) {
             for (auto& s : std::vector<std::string>{"u.name LIKE 'N1%'", "u.id < " + std::to_string(1 + rng() % 12), "u.grp = " + std::to_string(rng() % 7),

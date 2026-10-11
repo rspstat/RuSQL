@@ -829,9 +829,11 @@ void to_json(nlohmann::json& j, const Statement& stmt) {
                 j = nlohmann::json{{"Update", nlohmann::json{{"table", alt.table},
                                                               {"assignments", alt.assignments},
                                                               {"condition", alt.condition},
-                                                              {"returning", alt.returning}}}};
+                                                              {"returning", alt.returning},
+                                                              {"table_aliases", alt.table_aliases}}}};
             else if constexpr (std::is_same_v<T, Statement::Delete>)
-                j = nlohmann::json{{"Delete", nlohmann::json{{"table", alt.table}, {"condition", alt.condition}, {"returning", alt.returning}}}};
+                j = nlohmann::json{{"Delete", nlohmann::json{{"table", alt.table}, {"condition", alt.condition}, {"returning", alt.returning},
+                                                              {"table_aliases", alt.table_aliases}}}};
             else if constexpr (std::is_same_v<T, Statement::AlterTable>)
                 j = nlohmann::json{{"AlterTable", nlohmann::json{{"table", alt.table}, {"action", alt.action}}}};
             else if constexpr (std::is_same_v<T, Statement::CreateIndex>)
@@ -889,12 +891,14 @@ void to_json(nlohmann::json& j, const Statement& stmt) {
                 j = nlohmann::json{{"MultiUpdate", nlohmann::json{{"tables", alt.tables},
                                                                    {"joins", alt.joins},
                                                                    {"assignments", alt.assignments},
-                                                                   {"condition", alt.condition}}}};
+                                                                   {"condition", alt.condition},
+                                                                   {"table_aliases", alt.table_aliases}}}};
             else if constexpr (std::is_same_v<T, Statement::MultiDelete>)
                 j = nlohmann::json{{"MultiDelete", nlohmann::json{{"delete_tables", alt.delete_tables},
                                                                    {"from_table", alt.from_table},
                                                                    {"joins", alt.joins},
-                                                                   {"condition", alt.condition}}}};
+                                                                   {"condition", alt.condition},
+                                                                   {"table_aliases", alt.table_aliases}}}};
             else if constexpr (std::is_same_v<T, Statement::CreateUser>)
                 j = nlohmann::json{{"CreateUser", nlohmann::json{{"user", alt.user},
                                                                   {"host", alt.host},
@@ -1080,12 +1084,14 @@ void from_json(const nlohmann::json& j, Statement& stmt) {
         v.assignments = p.at("assignments").get<std::vector<std::pair<std::string, ArithExpr>>>();
         v.condition = p.at("condition").get<std::optional<CondExpr>>();
         v.returning = p.at("returning").get<std::optional<std::vector<SelectColumn>>>();
+        if (p.contains("table_aliases")) v.table_aliases = p.at("table_aliases").get<std::vector<std::pair<std::string, std::string>>>();
         stmt = Statement(std::move(v));
     } else if (tag == "Delete") {
         Statement::Delete v;
         v.table = p.at("table").get<std::string>();
         v.condition = p.at("condition").get<std::optional<CondExpr>>();
         v.returning = p.at("returning").get<std::optional<std::vector<SelectColumn>>>();
+        if (p.contains("table_aliases")) v.table_aliases = p.at("table_aliases").get<std::vector<std::pair<std::string, std::string>>>();
         stmt = Statement(std::move(v));
     } else if (tag == "AlterTable") {
         stmt = Statement(Statement::AlterTable{p.at("table").get<std::string>(), p.at("action").get<AlterAction>()});
@@ -1147,6 +1153,7 @@ void from_json(const nlohmann::json& j, Statement& stmt) {
         v.joins = p.at("joins").get<std::vector<Join>>();
         v.assignments = p.at("assignments").get<std::vector<std::pair<std::string, ArithExpr>>>();
         v.condition = p.at("condition").get<std::optional<CondExpr>>();
+        if (p.contains("table_aliases")) v.table_aliases = p.at("table_aliases").get<std::vector<std::pair<std::string, std::string>>>();
         stmt = Statement(std::move(v));
     } else if (tag == "MultiDelete") {
         Statement::MultiDelete v;
@@ -1154,6 +1161,7 @@ void from_json(const nlohmann::json& j, Statement& stmt) {
         v.from_table = p.at("from_table").get<std::string>();
         v.joins = p.at("joins").get<std::vector<Join>>();
         v.condition = p.at("condition").get<std::optional<CondExpr>>();
+        if (p.contains("table_aliases")) v.table_aliases = p.at("table_aliases").get<std::vector<std::pair<std::string, std::string>>>();
         stmt = Statement(std::move(v));
     } else if (tag == "CreateUser") {
         stmt = Statement(Statement::CreateUser{p.at("user").get<std::string>(), p.at("host").get<std::string>(),

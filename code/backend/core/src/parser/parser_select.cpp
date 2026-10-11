@@ -450,11 +450,63 @@ Statement Parser::parse_select() {
         return Statement(Statement::SelectInto{std::make_unique<Statement>(std::move(select)), into_vars});
     };
 
+    // UNION / INTERSECT / EXCEPT [ALL] after a select (with or without FROM)
+    auto set_operation = [&](Statement select_stmt) -> Statement {
+        int set_op = 0;
+        if (peek_is(TokenKind::Union)) { advance(); set_op = 1; }
+        else if (peek_is(TokenKind::Intersect)) { advance(); set_op = 2; }
+        else if (peek_is(TokenKind::Except)) { advance(); set_op = 3; }
+
+        if (set_op > 0) {
+            bool all = false;
+            if (peek_is(TokenKind::All)) { advance(); all = true; }
+            if (!peek_is(TokenKind::Select)) throw ParseError("Expected SELECT after set operator");
+            advance();
+            enclosing.release(); // (the other side of a set operator is not inside this query)
+            Statement right = parse_select();
+
+            Statement right_clean = [&]() -> Statement {
+                if (std::holds_alternative<Statement::Select>(right.data)) {
+                    auto& s = std::get<Statement::Select>(right.data);
+                    return Statement(Statement::Select{
+                        s.table, std::move(s.subquery), s.columns, s.distinct, s.condition, s.joins,
+                        {}, s.group_by, s.having, std::nullopt, std::nullopt, s.for_update, s.for_share, false, s.table_alias, s.table_aliases});
+                }
+                return right;
+            }();
+            std::vector<OrderBy> op_order_by;
+            std::optional<std::size_t> op_limit, op_offset;
+            if (std::holds_alternative<Statement::Select>(right.data)) {
+                auto& s = std::get<Statement::Select>(right.data);
+                op_order_by = s.order_by;
+                op_limit = s.limit;
+                op_offset = s.offset;
+            }
+
+            switch (set_op) {
+                case 1:
+                    return Statement(Statement::Union{std::make_unique<Statement>(std::move(select_stmt)),
+                                                       std::make_unique<Statement>(std::move(right_clean)),
+                                                       all, op_order_by, op_limit, op_offset});
+                case 2:
+                    return Statement(Statement::Intersect{std::make_unique<Statement>(std::move(select_stmt)),
+                                                            std::make_unique<Statement>(std::move(right_clean)),
+                                                            all, op_order_by, op_limit, op_offset});
+                default:
+                    return Statement(Statement::Except{std::make_unique<Statement>(std::move(select_stmt)),
+                                                         std::make_unique<Statement>(std::move(right_clean)),
+                                                         all, op_order_by, op_limit, op_offset});
+            }
+        }
+
+        return select_stmt;
+    };
+
     // FROM is optional: scalar SELECT (no FROM) is supported
     if (!peek_is(TokenKind::From)) {
-        return with_into(Statement(Statement::Select{
+        return set_operation(with_into(Statement(Statement::Select{
             "_dual_", std::nullopt, std::move(columns), distinct, std::nullopt, {}, {}, std::nullopt,
-            std::nullopt, std::nullopt, std::nullopt, false, false}));
+            std::nullopt, std::nullopt, std::nullopt, false, false})));
     }
     advance(); // consume FROM
 
@@ -709,55 +761,7 @@ Statement Parser::parse_select() {
         table, std::move(subquery), columns, distinct, condition, joins, order_by, group_by,
         having, limit, offset, for_update, for_share, false, table_alias, {alias_map.begin(), alias_map.end()}}));
 
-    // UNION / INTERSECT / EXCEPT [ALL]
-    int set_op = 0;
-    if (peek_is(TokenKind::Union)) { advance(); set_op = 1; }
-    else if (peek_is(TokenKind::Intersect)) { advance(); set_op = 2; }
-    else if (peek_is(TokenKind::Except)) { advance(); set_op = 3; }
-
-    if (set_op > 0) {
-        bool all = false;
-        if (peek_is(TokenKind::All)) { advance(); all = true; }
-        if (!peek_is(TokenKind::Select)) throw ParseError("Expected SELECT after set operator");
-        advance();
-        enclosing.release(); // (the other side of a set operator is not inside this query)
-        Statement right = parse_select();
-
-        Statement right_clean = [&]() -> Statement {
-            if (std::holds_alternative<Statement::Select>(right.data)) {
-                auto& s = std::get<Statement::Select>(right.data);
-                return Statement(Statement::Select{
-                    s.table, std::move(s.subquery), s.columns, s.distinct, s.condition, s.joins,
-                    {}, s.group_by, s.having, std::nullopt, std::nullopt, s.for_update, s.for_share, false, s.table_alias, s.table_aliases});
-            }
-            return right;
-        }();
-        std::vector<OrderBy> op_order_by;
-        std::optional<std::size_t> op_limit, op_offset;
-        if (std::holds_alternative<Statement::Select>(right.data)) {
-            auto& s = std::get<Statement::Select>(right.data);
-            op_order_by = s.order_by;
-            op_limit = s.limit;
-            op_offset = s.offset;
-        }
-
-        switch (set_op) {
-            case 1:
-                return Statement(Statement::Union{std::make_unique<Statement>(std::move(select_stmt)),
-                                                   std::make_unique<Statement>(std::move(right_clean)),
-                                                   all, op_order_by, op_limit, op_offset});
-            case 2:
-                return Statement(Statement::Intersect{std::make_unique<Statement>(std::move(select_stmt)),
-                                                        std::make_unique<Statement>(std::move(right_clean)),
-                                                        all, op_order_by, op_limit, op_offset});
-            default:
-                return Statement(Statement::Except{std::make_unique<Statement>(std::move(select_stmt)),
-                                                     std::make_unique<Statement>(std::move(right_clean)),
-                                                     all, op_order_by, op_limit, op_offset});
-        }
-    }
-
-    return select_stmt;
+    return set_operation(std::move(select_stmt));
 }
 
 std::optional<std::vector<SelectColumn>> Parser::parse_returning() {

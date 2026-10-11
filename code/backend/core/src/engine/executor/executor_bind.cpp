@@ -46,6 +46,8 @@ struct BindScope {
     // an UPDATE / DELETE keeps the aliases of its tables in the SET expressions (the parser expands them in the WHERE only), so a
     // qualifier that names no table may still be one of them
     bool lenient_qualifier = false;
+    std::unordered_set<std::string> merged;   // the columns a USING / NATURAL join makes one: a name two tables have, and not ambiguous
+    std::unordered_set<std::string> selected; // the names the select list gives its plain columns: ORDER BY / HAVING read them before the tables'
 };
 
 std::string last_part(const std::string& qualified) {
@@ -122,7 +124,18 @@ std::optional<std::string> Executor::bind_statement(SharedDatabase& s, Statement
                 }
                 // no table of that name: in a subquery it may be the alias of a table of the query around it (the parser does not
                 // expand an outer alias inside a subquery), in a write statement one of its own
-                if (!qualifier_is_table || chain.size() > 1) return true;
+                for (const BindScope* sc : chain) {
+                    for (auto& [alias, table] : sc->table_aliases) {
+                        if (alias != qualifier) continue;
+                        for (const BindScope* owner : chain) {
+                            for (const BindTable& t : owner->tables) {
+                                if (t.full == table || t.bare == table) return has_column(t, column);
+                            }
+                        }
+                        return true;
+                    }
+                }
+                if (!qualifier_is_table) return true;
                 return std::any_of(chain.begin(), chain.end(), [](const BindScope* sc) { return sc->lenient_qualifier; });
             }
             for (auto it = chain.rbegin(); it != chain.rend(); ++it) {
@@ -177,6 +190,27 @@ std::optional<std::string> Executor::bind_statement(SharedDatabase& s, Statement
 
         void name(const std::string& n, const char* clause) {
             if (check && !error && !known(n)) error = "Unknown column '" + n + "' in '" + clause + "'";
+            else if (check && !error && ambiguous(n, clause)) error = "Column '" + n + "' in " + clause + " is ambiguous";
+        }
+
+        // An unqualified column that two tables of the innermost query that has it both have (MySQL 1052: it used to be the first table's). The
+        // columns a USING / NATURAL join makes one are not; ORDER BY and HAVING read the names the select list gives first.
+        bool ambiguous(const std::string& n, const char* clause) const {
+            if (!plain_reference(n) || n.find('.') != std::string::npos) return false;
+            const std::string where = clause;
+            const bool reads_select_list = where == "order clause" || where == "having clause";
+            for (auto it = chain.rbegin(); it != chain.rend(); ++it) {
+                const BindScope& scope = **it;
+                std::size_t count = 0;
+                for (const BindTable& t : scope.tables) {
+                    if (!t.open && has_column(t, n)) count++;
+                }
+                if (count == 0) continue;
+                if (count < 2 || scope.merged.count(n)) return false;
+                if (reads_select_list && (scope.selected.count(n) || scope.aliases.count(n))) return false;
+                return true;
+            }
+            return false;
         }
 
         // Where a column of an enclosing query lives: how many queries out, and the name that query's rows hold it under (the table it
@@ -324,6 +358,8 @@ std::optional<std::string> Executor::bind_statement(SharedDatabase& s, Statement
                     } else {
                         if (check && !error && lit->value.find('.') != std::string::npos && !known(lit->value, false)) {
                             error = "Unknown column '" + lit->value + "' in '" + clause + "'";
+                        } else if (check && !error && lit->value.find('.') == std::string::npos && table_column(lit->value) && ambiguous(lit->value, clause)) {
+                            error = "Column '" + lit->value + "' in " + clause + " is ambiguous"; // (a bare word is a column only when a table has it)
                         }
                         mark_outer(lit->value, lit->outer);
                         c.right_class = class_of_name(lit->value);
@@ -502,8 +538,28 @@ std::optional<std::string> Executor::bind_statement(SharedDatabase& s, Statement
                     scope.tables.push_back(table_of(j.table, j.alias));
                 }
             }
+            // the columns a USING / NATURAL join makes one
+            const std::size_t base = scope.tables.size() - sel.joins.size(); // (a SELECT without FROM has no first table)
+            for (std::size_t ji = 0; ji < sel.joins.size(); ji++) {
+                const Join& j = sel.joins[ji];
+                for (auto& c : j.using_cols) scope.merged.insert(c);
+                if (j.join_type != JoinType::Natural) continue;
+                const BindTable& joined = scope.tables[base + ji];
+                std::vector<std::string> names;
+                if (joined.schema) {
+                    for (auto& c : joined.schema->columns) names.push_back(c.name);
+                } else {
+                    names = joined.own_columns;
+                }
+                for (auto& n : names) {
+                    for (std::size_t ti = 0; ti < base + ji; ti++) {
+                        if (!scope.tables[ti].open && has_column(scope.tables[ti], n)) scope.merged.insert(n);
+                    }
+                }
+            }
             // the names the select list gives
             for (auto& c : sel.columns) {
+                if (auto* col = std::get_if<SelectColumn::Column>(&c.data)) scope.selected.insert(last_part(col->name));
                 if (auto* ca = std::get_if<SelectColumn::ColumnAlias>(&c.data)) scope.aliases.insert(ca->alias);
                 else if (auto* aa = std::get_if<SelectColumn::AggAlias>(&c.data)) scope.aliases.insert(aa->alias);
                 else if (auto* fn = std::get_if<SelectColumn::Func>(&c.data); fn && fn->alias) scope.aliases.insert(*fn->alias);
@@ -678,6 +734,31 @@ std::optional<std::string> Executor::bind_statement(SharedDatabase& s, Statement
                     return;
                 }
             }
+            // HAVING and ORDER BY read the columns of the group the same way (a name the select list gives is the select list's)
+            if (sel.having) {
+                std::vector<std::string> names;
+                own_columns(*sel.having, names);
+                for (auto& name : names) {
+                    if (scope.aliases.count(name)) continue;
+                    auto tc = table_column(name);
+                    if (!tc || is_grouped(tc->first, tc->second)) continue;
+                    error = "Non-grouping field '" + name + "' is used in HAVING clause";
+                    return;
+                }
+            }
+            std::size_t item = 0;
+            for (auto& o : sel.order_by) {
+                item++;
+                if (!plain_reference(o.column) || scope.aliases.count(o.column)) continue;
+                auto tc = table_column(o.column);
+                if (!tc || is_grouped(tc->first, tc->second)) continue;
+                error = sel.group_by
+                            ? "Expression #" + std::to_string(item) + " of ORDER BY clause is not in GROUP BY clause and contains nonaggregated column '" + o.column +
+                                  "' which is not functionally dependent on columns in GROUP BY clause; this is incompatible with sql_mode=only_full_group_by"
+                            : "In aggregated query without GROUP BY, expression #" + std::to_string(item) + " of ORDER BY contains nonaggregated column '" + o.column +
+                                  "'; this is incompatible with sql_mode=only_full_group_by";
+                return;
+            }
         }
 
         // The name an ORDER BY / GROUP BY item uses for a select-list column: a column by its name, an aggregate by its label, an expression by
@@ -734,8 +815,9 @@ std::optional<std::string> Executor::bind_statement(SharedDatabase& s, Statement
 
         // an UPDATE / DELETE: the table (and the joined ones) as the one scope of its WHERE and SET expressions
         void write(const std::vector<std::string>& tables, std::vector<Join>& joins, std::optional<CondExpr>& where,
-                   std::vector<std::pair<std::string, ArithExpr>>* assignments) {
+                   std::vector<std::pair<std::string, ArithExpr>>* assignments, const std::vector<std::pair<std::string, std::string>>& aliases) {
             BindScope scope;
+            scope.table_aliases = aliases;
             for (auto& t : tables) scope.tables.push_back(table_of(t, ""));
             for (auto& j : joins) scope.tables.push_back(table_of(j.table, j.alias));
             scope.lenient_qualifier = true;
@@ -798,10 +880,10 @@ std::optional<std::string> Executor::bind_statement(SharedDatabase& s, Statement
                     ctes[cte.first] = std::move(t);
                 }
                 if (w->query) statement(*w->query);
-            } else if (auto* up = std::get_if<Statement::Update>(&st.data)) write({up->table}, no_joins, up->condition, &up->assignments);
-            else if (auto* del = std::get_if<Statement::Delete>(&st.data)) write({del->table}, no_joins, del->condition, nullptr);
-            else if (auto* mu = std::get_if<Statement::MultiUpdate>(&st.data)) write(mu->tables, mu->joins, mu->condition, &mu->assignments);
-            else if (auto* md = std::get_if<Statement::MultiDelete>(&st.data)) write({md->from_table}, md->joins, md->condition, nullptr);
+            } else if (auto* up = std::get_if<Statement::Update>(&st.data)) write({up->table}, no_joins, up->condition, &up->assignments, up->table_aliases);
+            else if (auto* del = std::get_if<Statement::Delete>(&st.data)) write({del->table}, no_joins, del->condition, nullptr, del->table_aliases);
+            else if (auto* mu = std::get_if<Statement::MultiUpdate>(&st.data)) write(mu->tables, mu->joins, mu->condition, &mu->assignments, mu->table_aliases);
+            else if (auto* md = std::get_if<Statement::MultiDelete>(&st.data)) write({md->from_table}, md->joins, md->condition, nullptr, md->table_aliases);
             else if (auto* mg = std::get_if<Statement::Merge>(&st.data)) merge(*mg);
             else if (auto* is = std::get_if<Statement::InsertSelect>(&st.data)) {
                 if (is->query) statement(*is->query);

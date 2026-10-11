@@ -127,6 +127,8 @@ def main():
                 keep = []
                 for r in t:
                     if r["v"] is None:
+                        if not values and negate:
+                            keep.append((str(r["id"]),))  # (a NULL is NOT IN nothing; it is not IN nothing either, and unknown against any value)
                         continue
                     if r["v"] in values:
                         hit = True
