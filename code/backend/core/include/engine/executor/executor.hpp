@@ -672,7 +672,17 @@ private:
         std::string comparable;  // what two rows hold in common when they hold the same key
         std::string message;     // the duplicate error for it
         std::vector<std::string> columns;
+        bool shared = false;     // a child's claim on its parent's value (any number of children), not the claim of one writer
     };
+    // The claim on the value of a foreign key's parent: a child row (INSERT / UPDATE) holds it shared until its statement is over, a parent row that is deleted or
+    // loses the value holds it exclusive before it looks for children. A child looks for its parent and then writes its row, a parent looks for children and then
+    // goes: without the claim both can pass, and the child is left without a parent.
+    static std::string fk_claim_table(const std::string& parent_table, const std::string& ref_column) { return parent_table + "#fk:" + ref_column; }
+    // The columns of `table` that a foreign key of some table refers to.
+    static std::vector<std::string> referenced_columns(const SharedDatabase& s, const std::string& table);
+    // What an UPDATE of `old_row` into `row` claims for foreign keys: the new values of its own foreign keys (shared) and the values it takes away from the
+    // columns that others refer to (exclusive).
+    static std::vector<KeyClaim> fk_claims(const SharedDatabase& s, const TableSchema& schema, const std::string& table, const Row& row, const Row& old_row);
     // The claims `row` needs: its UNIQUE columns that are not NULL, its UNIQUE (a, b) keys with no NULL in them, its composite PRIMARY KEY. With `old_row` only the
     // keys that differ from the ones of `old_row` (an UPDATE).
     static std::vector<KeyClaim> unique_key_claims(const TableSchema& schema, const std::string& table, const Row& row, const Row* old_row = nullptr);

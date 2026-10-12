@@ -491,6 +491,7 @@ StringResult Executor::exec_delete_inner(SharedDatabase& s, const std::string& t
     // claim-then-erase passes) is wrapped in try_cascade_once() so any conflict can
     // `return` straight out of every level via the lambda boundary -- see
     // exec_update_inner's identical pattern for the full reasoning.
+    const std::vector<std::string> referenced = referenced_columns(s, table);
     auto try_cascade_once = [&]() -> CascadeAttemptResult {
     auto neighbor_write_lock = acquire_table_data_locks(s, neighbor_tables, /*exclusive=*/true);
 
@@ -509,6 +510,23 @@ StringResult Executor::exec_delete_inner(SharedDatabase& s, const std::string& t
                     }
                 }
             }
+        }
+    }
+
+    // The values of the rows to delete that a foreign key refers to are claimed (exclusive), after the check above has found no child that is there to see: a child
+    // INSERT / UPDATE that has looked for its parent holds the value (shared) until its statement is over, so this DELETE waits for it, starts again and finds its row.
+    // One that comes later waits for this one and finds no parent.
+    for (auto& del_row : rows_to_delete) {
+        for (auto& ref_col : referenced) {
+            auto dit = del_row.find(ref_col);
+            if (dit == del_row.end() || dit->second == EXECUTOR_NULL_VALUE) continue;
+            LockResult lr = s.lock_mgr.acquire(fk_claim_table(table, ref_col), dit->second, claim_txn_id);
+            if (lr.kind == LockResult::Kind::Deadlock) {
+                return CascadeAttemptResult::hard_error(StringResult::Err("Deadlock detected: transaction " + std::to_string(claim_txn_id) + " waits for transaction " +
+                                                                           std::to_string(lr.holder) + " (DELETE on '" + table + "'). Transaction " +
+                                                                           std::to_string(claim_txn_id) + " aborted."));
+            }
+            if (lr.kind == LockResult::Kind::Conflict) return CascadeAttemptResult::needs_retry(fk_claim_table(table, ref_col), dit->second);
         }
     }
 

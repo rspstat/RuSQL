@@ -1,6 +1,7 @@
 #include <atomic>
 #include <chrono>
 #include <mutex>
+#include <cstdio>
 #include <cstdlib>
 #include <filesystem>
 #include <functional>
@@ -460,4 +461,385 @@ TEST_CASE("a wait for a claim ends with the lock wait timeout, in an INSERT and 
         REQUIRE(t.ms < 900);
     }
     REQUIRE(rows_of(f.ex, "SELECT email FROM t") == Rows{{"one"}});
+}
+
+// ---- foreign keys: a child that looks for its parent and then writes, a parent that looks for children and then goes
+
+namespace {
+struct FkFixture {
+    TempDataDir dir;
+    Executor ex;
+    std::shared_ptr<RwLock<SharedDatabase>> shared;
+    LockManager& lm;
+    int next = 0;
+    explicit FkFixture(const std::string& path)
+        : dir(path), ex(dir.path), shared((open(ex), ex.get_shared())), lm(const_cast<LockManager&>(shared->read()->lock_mgr)) {}
+    static void open(Executor& e) {
+        ok(e, "CREATE DATABASE d");
+        ok(e, "USE d");
+        ok(e, "CREATE TABLE par (id INT PRIMARY KEY, name VARCHAR(10) UNIQUE)");
+        ok(e, "CREATE TABLE kid (id INT PRIMARY KEY AUTO_INCREMENT, pid INT, FOREIGN KEY (pid) REFERENCES par (id))");
+        ok(e, "CREATE TABLE cas (id INT PRIMARY KEY AUTO_INCREMENT, pid INT, FOREIGN KEY (pid) REFERENCES par (id) ON DELETE CASCADE ON UPDATE CASCADE)");
+        std::string values;
+        for (int i = 0; i < 200; i++) values += std::string(i ? ", " : "") + "(" + std::to_string(i) + ", 'p" + std::to_string(i) + "')";
+        ok(e, "INSERT INTO par VALUES " + values);
+        // a foreign key to a UNIQUE column that is not the primary key (it may be NULL), and a parent that two tables refer to by two of its columns
+        ok(e, "CREATE TABLE par2 (id INT PRIMARY KEY, code VARCHAR(10) UNIQUE)");
+        ok(e, "CREATE TABLE kid2 (id INT PRIMARY KEY AUTO_INCREMENT, c VARCHAR(10), FOREIGN KEY (c) REFERENCES par2 (code))");
+        ok(e, "INSERT INTO par2 VALUES (1, 'a'), (2, NULL), (3, 'c')");
+        ok(e, "CREATE TABLE par3 (id INT PRIMARY KEY, code VARCHAR(10) UNIQUE)");
+        ok(e, "CREATE TABLE kid3a (id INT PRIMARY KEY AUTO_INCREMENT, pid INT, FOREIGN KEY (pid) REFERENCES par3 (id))");
+        ok(e, "CREATE TABLE kid3b (id INT PRIMARY KEY AUTO_INCREMENT, c VARCHAR(10), FOREIGN KEY (c) REFERENCES par3 (code))");
+        ok(e, "INSERT INTO par3 VALUES (1, 'a'), (2, 'b')");
+    }
+    // a session in the middle of a transaction: it has an id (the id its claims are made under)
+    std::uint64_t transaction_id(Executor& a) {
+        REQUIRE(a.execute_sql("USE d").is_ok());
+        REQUIRE(a.execute_sql("BEGIN").is_ok());
+        const std::string name = "x" + std::to_string(++next);
+        REQUIRE(a.execute_sql("INSERT INTO par VALUES (" + std::to_string(1000 + next) + ", '" + name + "')").is_ok());
+        std::uint64_t id = 0;
+        for (auto& [table, key, holder] : lm.lock_rows()) {
+            if (table == "d.par#uk:name" && key == name) id = holder;
+        }
+        REQUIRE(id != 0);
+        return id;
+    }
+};
+} // namespace
+
+TEST_CASE("sessions racing a child row against its parent leave no child without a parent", "[unique_claim][fk_claim][concurrency][random]") {
+    TempDataDir dir("fk_claims_race");
+    Executor ex(dir.path);
+    ok(ex, "CREATE DATABASE d");
+    ok(ex, "USE d");
+    ok(ex, "CREATE TABLE par (id INT PRIMARY KEY, name VARCHAR(10))");
+    ok(ex, "CREATE TABLE kid (id INT PRIMARY KEY AUTO_INCREMENT, pid INT, FOREIGN KEY (pid) REFERENCES par (id))");
+    ok(ex, "CREATE TABLE mov (id INT PRIMARY KEY AUTO_INCREMENT, pid INT, FOREIGN KEY (pid) REFERENCES par (id))");
+    ok(ex, "CREATE TABLE cas (id INT PRIMARY KEY AUTO_INCREMENT, pid INT, FOREIGN KEY (pid) REFERENCES par (id) ON DELETE CASCADE ON UPDATE CASCADE)");
+    auto shared = ex.get_shared();
+    unsigned seed_count = 3; // RUSQL_FUZZ_SEEDS=40 makes it a long campaign
+    if (const char* e = std::getenv("RUSQL_FUZZ_SEEDS")) seed_count = static_cast<unsigned>(std::strtoul(e, nullptr, 10));
+    constexpr int kThreads = 5, kSteps = 80;
+    std::atomic<int> arrived{0}, generation{0};
+    auto barrier = [&] {
+        const int gen = generation.load();
+        if (arrived.fetch_add(1) + 1 == kThreads) {
+            arrived = 0;
+            generation++;
+        } else {
+            while (generation.load() == gen) std::this_thread::yield();
+        }
+    };
+    std::atomic<int> orphans{0};
+    // a watchdog: sessions that wait for each other for ever are a failure that says what each one was doing, not a test that never ends
+    std::vector<std::string> doing(kThreads);
+    std::mutex doing_mutex;
+    std::atomic<bool> finished{false};
+    std::thread watchdog([&] {
+        int last = -1, still = 0;
+        while (!finished.load()) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(500));
+            const int now = generation.load();
+            still = now == last ? still + 1 : 0;
+            last = now;
+            if (still >= 60) { // 30 seconds without a step
+                std::lock_guard<std::mutex> g(doing_mutex);
+                std::string report = "no step for 30 s:";
+                for (int w = 0; w < kThreads; w++) report += "\n  session " + std::to_string(w) + ": " + doing[static_cast<std::size_t>(w)];
+                LockManager& lm = const_cast<LockManager&>(shared->read()->lock_mgr);
+                report += "\n  locks held:";
+                for (auto& [table, key, holder] : lm.lock_rows()) report += "\n    " + table + " [" + key + "] by " + std::to_string(holder);
+                report += "\n  waiting:";
+                for (auto& [waiter, holder] : lm.wait_for_rows()) report += "\n    " + std::to_string(waiter) + " waits for " + std::to_string(holder);
+                std::fprintf(stderr, "%s\n", report.c_str());
+                std::abort();
+            }
+        }
+    });
+    auto run_sql = [&](Executor& sess, int w, const std::string& sql) {
+        {
+            std::lock_guard<std::mutex> g(doing_mutex);
+            doing[static_cast<std::size_t>(w)] = sql;
+        }
+        (void)sess.execute_sql(sql);
+        std::lock_guard<std::mutex> g(doing_mutex);
+        doing[static_cast<std::size_t>(w)] = "(between statements)";
+    };
+    for (unsigned round = 0; round < seed_count; round++) {
+        ok(ex, "DELETE FROM kid");
+        ok(ex, "DELETE FROM mov");
+        ok(ex, "DELETE FROM cas");
+        ok(ex, "DELETE FROM par");
+        std::string values;
+        for (int i = 0; i < 3 * kSteps; i++) values += std::string(i ? ", " : "") + "(" + std::to_string(i) + ", 'p" + std::to_string(i) + "')";
+        ok(ex, "INSERT INTO par VALUES " + values);
+        ok(ex, "INSERT INTO mov (pid) VALUES (0)"); // a child that moves between parents
+        std::vector<std::thread> threads;
+        for (int w = 0; w < kThreads; w++) {
+            threads.emplace_back([&, w] {
+                Executor sess = Executor::new_session(shared);
+                const bool opened = sess.execute_sql("USE d").is_ok();
+                for (int i = 0; i < kSteps; i++) {
+                    barrier();
+                    if (opened) {
+                        const std::string a = std::to_string(i), b = std::to_string(kSteps + i), c = std::to_string(2 * kSteps + i);
+                        if (w == 0) run_sql(sess, w, "DELETE FROM par WHERE id = " + a);                                  // the parent goes ...
+                        if (w == 1) {
+                            run_sql(sess, w, "INSERT INTO kid (pid) VALUES (" + a + ")");                                 // ... while a child is written for it
+                            run_sql(sess, w, "INSERT INTO cas (pid) VALUES (" + b + ")");                                 // (one that goes with its parent, or must not be left)
+                        }
+                        if (w == 2) run_sql(sess, w, "INSERT INTO kid (pid) VALUES (" + b + ")");                         // a parent loses its id ...
+                        if (w == 3) run_sql(sess, w, "UPDATE par SET id = " + std::to_string(1000 + i) + " WHERE id = " + b); // ... while a child is written for it
+                        if (w == 4) {
+                            run_sql(sess, w, "UPDATE mov SET pid = " + c);                                                // a child moves to a parent ...
+                            run_sql(sess, w, "DELETE FROM par WHERE id = " + c);                                          // ... that goes
+                        }
+                    }
+                    barrier();
+                    if (opened && w == 0) {
+                        for (const char* t : {"kid", "mov", "cas"}) {
+                            auto r = sess.execute_sql(std::string("SELECT COUNT(*) FROM ") + t + " WHERE pid NOT IN (SELECT id FROM par)");
+                            if (r.is_ok() && table_cells(r.value()) != Rows{{"0"}}) orphans++;
+                        }
+                    }
+                    barrier();
+                }
+            });
+        }
+        for (auto& t : threads) t.join();
+    }
+    finished = true;
+    watchdog.join();
+    REQUIRE(orphans.load() == 0);
+}
+
+TEST_CASE("a child waits for a parent that is being deleted and then finds it gone; a parent waits for a child that is being written and then finds it", "[unique_claim][fk_claim]") {
+    FkFixture f("fk_claims_wait");
+    Executor a = Executor::new_session(f.shared);
+    auto run = [&](const std::string& sql, std::uint64_t holder, const std::function<void()>& meanwhile, int hold_ms = 250, const std::string& before = "") {
+        Timed out;
+        std::thread b([&] {
+            Executor sess = Executor::new_session(f.shared);
+            REQUIRE(sess.execute_sql("USE d").is_ok());
+            if (!before.empty()) REQUIRE(sess.execute_sql(before).is_ok());
+            const auto t0 = std::chrono::steady_clock::now();
+            auto r = sess.execute_sql(sql);
+            out.ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
+            out.ok = r.is_ok();
+            out.text = r.is_ok() ? r.value() : r.error();
+        });
+        std::this_thread::sleep_for(std::chrono::milliseconds(hold_ms));
+        if (meanwhile) meanwhile();
+        f.lm.release(holder);
+        b.join();
+        return out;
+    };
+
+    // 1. A is deleting parent 5 (its claim is on the value, the row is still there): B's INSERT of a child of 5 waits, and when A commits there is no parent
+    std::uint64_t a_id = f.transaction_id(a);
+    REQUIRE(f.lm.acquire("d.par#fk:id", "5", a_id).kind == LockResult::Kind::Granted);
+    Timed t = run("INSERT INTO kid (pid) VALUES (5)", a_id, [&] {
+        REQUIRE(a.execute_sql("DELETE FROM par WHERE id = 5").is_ok());
+        REQUIRE(a.execute_sql("COMMIT").is_ok());
+    });
+    REQUIRE(t.ms >= 150);
+    REQUIRE_FALSE(t.ok);
+    REQUIRE(t.text.find("Foreign key violation") != std::string::npos);
+    REQUIRE(rows_of(f.ex, "SELECT COUNT(*) FROM kid").front().front() == "0");
+
+    // 2. the same wait when nothing happens to the parent: the child is written
+    a_id = f.transaction_id(a);
+    REQUIRE(f.lm.acquire("d.par#fk:id", "6", a_id).kind == LockResult::Kind::Granted);
+    t = run("INSERT INTO kid (pid) VALUES (6)", a_id, [&] { REQUIRE(a.execute_sql("COMMIT").is_ok()); });
+    REQUIRE(t.ok);
+    REQUIRE(t.ms >= 150);
+
+    // 3. A is writing a child of 7 (its claim is on the value, the row is not there yet): B's DELETE of 7 waits, starts again and finds the child
+    a_id = f.transaction_id(a);
+    REQUIRE(f.lm.acquire_shared("d.par#fk:id", "7", a_id).kind == LockResult::Kind::Granted);
+    t = run("DELETE FROM par WHERE id = 7", a_id, [&] {
+        REQUIRE(a.execute_sql("INSERT INTO kid (pid) VALUES (7)").is_ok());
+        REQUIRE(a.execute_sql("COMMIT").is_ok());
+    });
+    REQUIRE(t.ms >= 150);
+    REQUIRE_FALSE(t.ok);
+    REQUIRE(t.text.find("Foreign key violation") != std::string::npos);
+    REQUIRE(rows_of(f.ex, "SELECT COUNT(*) FROM par WHERE id = 7").front().front() == "1");
+
+    // 4. the same with ON DELETE CASCADE: the DELETE takes the child that was written meanwhile with it
+    a_id = f.transaction_id(a);
+    REQUIRE(f.lm.acquire_shared("d.par#fk:id", "8", a_id).kind == LockResult::Kind::Granted);
+    t = run("DELETE FROM par WHERE id = 8", a_id, [&] {
+        REQUIRE(a.execute_sql("INSERT INTO cas (pid) VALUES (8)").is_ok());
+        REQUIRE(a.execute_sql("COMMIT").is_ok());
+    });
+    REQUIRE(t.ok);
+    REQUIRE(t.ms >= 150);
+    REQUIRE(rows_of(f.ex, "SELECT COUNT(*) FROM cas WHERE pid = 8").front().front() == "0");
+    REQUIRE(rows_of(f.ex, "SELECT COUNT(*) FROM par WHERE id = 8").front().front() == "0");
+
+    // 5. a parent that loses its id waits for a child being written, and finds it
+    a_id = f.transaction_id(a);
+    REQUIRE(f.lm.acquire_shared("d.par#fk:id", "9", a_id).kind == LockResult::Kind::Granted);
+    t = run("UPDATE par SET id = 900 WHERE id = 9", a_id, [&] {
+        REQUIRE(a.execute_sql("INSERT INTO kid (pid) VALUES (9)").is_ok());
+        REQUIRE(a.execute_sql("COMMIT").is_ok());
+    });
+    REQUIRE(t.ms >= 150);
+    REQUIRE_FALSE(t.ok);
+    REQUIRE(rows_of(f.ex, "SELECT COUNT(*) FROM par WHERE id = 9").front().front() == "1");
+
+    // 6. a child that moves to parent 10 waits for the DELETE of 10 and then finds no parent
+    ok(f.ex, "INSERT INTO kid (pid) VALUES (11)");
+    a_id = f.transaction_id(a);
+    REQUIRE(f.lm.acquire("d.par#fk:id", "10", a_id).kind == LockResult::Kind::Granted);
+    t = run("UPDATE kid SET pid = 10 WHERE pid = 11", a_id, [&] {
+        REQUIRE(a.execute_sql("DELETE FROM par WHERE id = 10").is_ok());
+        REQUIRE(a.execute_sql("COMMIT").is_ok());
+    });
+    REQUIRE(t.ms >= 150);
+    REQUIRE_FALSE(t.ok);
+    REQUIRE(rows_of(f.ex, "SELECT pid FROM kid WHERE pid >= 10 ORDER BY pid").front().front() == "11");
+
+    // 7. a parent that is deleted while a child is already there (its row is visible, the transaction is open) is refused at once, not after a wait
+    REQUIRE(a.execute_sql("USE d").is_ok());
+    REQUIRE(a.execute_sql("BEGIN").is_ok());
+    REQUIRE(a.execute_sql("INSERT INTO kid (pid) VALUES (12)").is_ok());
+    t = run("DELETE FROM par WHERE id = 12", 0, nullptr, 0);
+    REQUIRE_FALSE(t.ok);
+    REQUIRE(t.ms < 150);
+    REQUIRE(a.execute_sql("ROLLBACK").is_ok());
+
+    // 8. children do not wait for each other (the claim of a child is shared), a NULL refers to nothing, a parent row whose referenced column is NULL claims nothing
+    a_id = f.transaction_id(a);
+    REQUIRE(f.lm.acquire_shared("d.par#fk:id", "14", a_id).kind == LockResult::Kind::Granted);
+    t = run("INSERT INTO kid (pid) VALUES (14)", a_id, nullptr);
+    REQUIRE(t.ok);
+    REQUIRE(t.ms < 150);
+    REQUIRE(f.lm.acquire_shared("d.par#fk:id", "15", a_id).kind == LockResult::Kind::Granted);
+    t = run("UPDATE kid SET pid = 15 WHERE pid = 14", a_id, nullptr);
+    REQUIRE(t.ok);
+    REQUIRE(t.ms < 150);
+    REQUIRE(f.lm.acquire("d.par#fk:id", "NULL", a_id).kind == LockResult::Kind::Granted);
+    t = run("INSERT INTO kid (pid) VALUES (NULL)", a_id, nullptr);
+    REQUIRE(t.ok);
+    REQUIRE(t.ms < 150);
+    REQUIRE(f.lm.acquire("d.par2#fk:code", "NULL", a_id).kind == LockResult::Kind::Granted);
+    t = run("DELETE FROM par2 WHERE id = 2", a_id, nullptr);
+    REQUIRE(t.ok);
+    REQUIRE(t.ms < 150);
+    // a parent that two tables refer to by two columns claims both values
+    REQUIRE(f.lm.acquire_shared("d.par3#fk:code", "b", a_id).kind == LockResult::Kind::Granted);
+    t = run("DELETE FROM par3 WHERE id = 2", a_id, nullptr);
+    REQUIRE(t.ok);
+    REQUIRE(t.ms >= 150);
+    REQUIRE(a.execute_sql("ROLLBACK").is_ok());
+
+    // 9. the wait ends with the lock wait timeout
+    a_id = f.transaction_id(a);
+    REQUIRE(f.lm.acquire("d.par#fk:id", "13", a_id).kind == LockResult::Kind::Granted);
+    t = run("INSERT INTO kid (pid) VALUES (13)", a_id, nullptr, 1000, "SET @lock_wait_timeout = 300");
+    REQUIRE_FALSE(t.ok);
+    REQUIRE(t.text.find("1205") != std::string::npos);
+    REQUIRE(t.ms >= 250);
+    REQUIRE(t.ms < 900);
+    REQUIRE(a.execute_sql("ROLLBACK").is_ok());
+}
+
+TEST_CASE("children of one parent do not wait for each other, and a statement claims only what it changes", "[unique_claim][fk_claim]") {
+    FkFixture f("fk_claims_shared");
+    Executor b = Executor::new_session(f.shared), c = Executor::new_session(f.shared), a = Executor::new_session(f.shared);
+    REQUIRE(b.execute_sql("USE d").is_ok());
+    REQUIRE(c.execute_sql("USE d").is_ok());
+    auto timed = [](Executor& sess, const std::string& sql) {
+        const auto t0 = std::chrono::steady_clock::now();
+        auto r = sess.execute_sql(sql);
+        Timed out;
+        out.ok = r.is_ok();
+        out.text = r.is_ok() ? r.value() : r.error();
+        out.ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
+        return out;
+    };
+    auto release_later = [&](std::uint64_t holder, int ms) {
+        return std::thread([&f, holder, ms] {
+            std::this_thread::sleep_for(std::chrono::milliseconds(ms));
+            f.lm.release(holder);
+        });
+    };
+    ok(f.ex, "ALTER TABLE kid ADD COLUMN note VARCHAR(10)");
+
+    // a child that is written in a transaction holds its claim shared: another child of the same parent does not wait for the transaction
+    REQUIRE(b.execute_sql("BEGIN").is_ok());
+    REQUIRE(b.execute_sql("INSERT INTO kid (pid) VALUES (16)").is_ok());
+    Timed t = timed(c, "INSERT INTO kid (pid) VALUES (16)");
+    REQUIRE(t.ok);
+    REQUIRE(t.ms < 150);
+    REQUIRE(b.execute_sql("COMMIT").is_ok());
+
+    // ... also after it has had to wait for the parent's DELETE (the wait takes the claim shared, too)
+    std::uint64_t a_id = f.transaction_id(a);
+    REQUIRE(f.lm.acquire("d.par#fk:id", "17", a_id).kind == LockResult::Kind::Granted);
+    REQUIRE(b.execute_sql("BEGIN").is_ok());
+    auto releaser = release_later(a_id, 250);
+    t = timed(b, "INSERT INTO kid (pid) VALUES (17)");
+    releaser.join();
+    REQUIRE(t.ok);
+    REQUIRE(t.ms >= 150);
+    t = timed(c, "INSERT INTO kid (pid) VALUES (17)");
+    REQUIRE(t.ok);
+    REQUIRE(t.ms < 150);
+    REQUIRE(b.execute_sql("COMMIT").is_ok());
+    REQUIRE(a.execute_sql("ROLLBACK").is_ok());
+
+    // ... and a child that moves to another parent after such a wait
+    a_id = f.transaction_id(a);
+    REQUIRE(f.lm.acquire("d.par#fk:id", "18", a_id).kind == LockResult::Kind::Granted);
+    REQUIRE(b.execute_sql("BEGIN").is_ok());
+    releaser = release_later(a_id, 250);
+    t = timed(b, "UPDATE kid SET pid = 18 WHERE pid = 16");
+    releaser.join();
+    REQUIRE(t.ok);
+    REQUIRE(t.ms >= 150);
+    t = timed(c, "INSERT INTO kid (pid) VALUES (18)");
+    REQUIRE(t.ok);
+    REQUIRE(t.ms < 150);
+    REQUIRE(b.execute_sql("COMMIT").is_ok());
+    REQUIRE(a.execute_sql("ROLLBACK").is_ok());
+
+    // a child UPDATE that leaves the parent value alone claims nothing (a parent being deleted does not hold it up) ...
+    a_id = f.transaction_id(a);
+    REQUIRE(f.lm.acquire("d.par#fk:id", "17", a_id).kind == LockResult::Kind::Granted);
+    t = timed(c, "UPDATE kid SET note = 'x' WHERE pid = 17");
+    REQUIRE(t.ok);
+    REQUIRE(t.ms < 150);
+    // ... nor does a parent UPDATE that leaves the referenced column alone (children being written do not hold it up)
+    REQUIRE(f.lm.acquire_shared("d.par#fk:id", "20", a_id).kind == LockResult::Kind::Granted);
+    t = timed(c, "UPDATE par SET name = 'renamed' WHERE id = 20");
+    REQUIRE(t.ok);
+    REQUIRE(t.ms < 150);
+    // a column that no foreign key refers to is not claimed (par.name: only par5.name is referred to)
+    ok(f.ex, "CREATE TABLE par5 (id INT PRIMARY KEY, name VARCHAR(10) UNIQUE)");
+    ok(f.ex, "CREATE TABLE kid5 (id INT PRIMARY KEY AUTO_INCREMENT, n VARCHAR(10), FOREIGN KEY (n) REFERENCES par5 (name))");
+    REQUIRE(f.lm.acquire_shared("d.par#fk:name", "p21", a_id).kind == LockResult::Kind::Granted);
+    t = timed(c, "DELETE FROM par WHERE id = 21");
+    REQUIRE(t.ok);
+    REQUIRE(t.ms < 150);
+    REQUIRE(a.execute_sql("ROLLBACK").is_ok());
+
+    // a parent whose two columns are referred to claims the value of each
+    for (const char* held : {"d.par3#fk:id|1", "d.par3#fk:code|a"}) {
+        const std::string spec = held;
+        const std::string table = spec.substr(0, spec.find('|')), key = spec.substr(spec.find('|') + 1);
+        INFO(spec);
+        a_id = f.transaction_id(a);
+        REQUIRE(f.lm.acquire_shared(table, key, a_id).kind == LockResult::Kind::Granted);
+        releaser = release_later(a_id, 250);
+        t = timed(c, "DELETE FROM par3 WHERE id = 1");
+        releaser.join();
+        REQUIRE(t.ok);
+        REQUIRE(t.ms >= 150);
+        REQUIRE(a.execute_sql("ROLLBACK").is_ok());
+        ok(f.ex, "INSERT INTO par3 VALUES (1, 'a')");
+    }
 }

@@ -1052,20 +1052,24 @@ StringResult Executor::exec_insert_inner(SharedDatabase& s, const std::string& t
         row["_xmin"] = std::to_string(tagging_txn_id(s));
         row["_xmax"] = "0";
 
+        // the error for a foreign key whose parent is not there (nullopt: it is), also for a self-referencing table where the row names itself or an earlier row of
+        // this very statement; a partitioned parent is read through its children, a deleted parent row is no parent
+        auto fk_parent_missing = [&](const ColumnDef& col, const std::string& val) -> std::optional<std::string> {
+            auto violation = fk_child_violation(s, col, val);
+            if (!violation) return std::nullopt;
+            const std::string& ref_col = col.foreign_key->ref_column;
+            auto names_val = [&](const Row& r) { auto rit = r.find(ref_col); return rit != r.end() && collation::equal(rit->second, val); };
+            const bool in_statement = col.foreign_key->ref_table == table && (names_val(row) || std::any_of(prepared.begin(), prepared.end(), names_val));
+            return in_statement ? std::nullopt : violation;
+        };
+
         for (auto& col : schema.columns) {
             if (skip_fk_checks) break; // exec_restore()만 사용 -- executor.hpp의 필드 주석 참고
             if (!col.foreign_key) continue;
             auto it = row.find(col.name);
             std::string val = it != row.end() ? it->second : std::string();
             if (val == EXECUTOR_NULL_VALUE) continue;
-            // (a partitioned parent is read through its children; a deleted parent row is no parent)
-            if (auto violation = fk_child_violation(s, col, val)) {
-                // ... unless it names the row itself or an earlier row of this very statement (a self-referencing table)
-                const std::string& ref_col = col.foreign_key->ref_column;
-                auto names_val = [&](const Row& r) { auto rit = r.find(ref_col); return rit != r.end() && collation::equal(rit->second, val); };
-                const bool in_statement = col.foreign_key->ref_table == table && (names_val(row) || std::any_of(prepared.begin(), prepared.end(), names_val));
-                if (!in_statement) return StringResult::Err(*violation);
-            }
+            if (auto violation = fk_parent_missing(col, val)) return StringResult::Err(*violation);
         }
 
         for (auto& col : schema.columns) {
@@ -1247,6 +1251,42 @@ StringResult Executor::exec_insert_inner(SharedDatabase& s, const std::string& t
             break;
         }
         if (skip_after_claims) continue;
+
+        // The parent of each foreign key: the value the row refers to is claimed (shared: any number of children may), so that a DELETE / UPDATE of the parent row --
+        // which claims the value exclusively before it looks for children -- and this INSERT meet; the one that comes second waits. After a wait the parent is looked
+        // for again: the row may be gone.
+        if (!skip_fk_checks) {
+            for (auto& col : schema.columns) {
+                if (!col.foreign_key) continue;
+                auto it = row.find(col.name);
+                if (it == row.end() || it->second == EXECUTOR_NULL_VALUE) continue;
+                const std::string claim_table = fk_claim_table(col.foreign_key->ref_table, col.foreign_key->ref_column);
+                LockResult lr = s.lock_mgr.acquire_shared(claim_table, it->second, claim_txn_id);
+                if (lr.kind == LockResult::Kind::Deadlock) {
+                    return StringResult::Err("Deadlock detected: transaction " + std::to_string(claim_txn_id) + " waits for transaction " +
+                                              std::to_string(lr.holder) + " (INSERT '" + table + "'). Transaction " + std::to_string(claim_txn_id) + " aborted.");
+                }
+                if (lr.kind == LockResult::Kind::Conflict) {
+                    insert_read_lock = DataLockGuard{};
+                    release_table_locks_for_block();
+                    lr = block_on_row(s.lock_mgr, claim_table, it->second, claim_txn_id, /*exclusive=*/false, lock_deadline);
+                    reacquire_table_locks_after_block();
+                    insert_read_lock = acquire_table_data_locks(s, insert_read_tables, /*exclusive=*/false);
+                    dropped_shared = true;
+                    if (lr.kind == LockResult::Kind::Deadlock) {
+                        return StringResult::Err("Deadlock detected: transaction " + std::to_string(claim_txn_id) + " waits for transaction " +
+                                                  std::to_string(lr.holder) + " (INSERT '" + table + "'). Transaction " + std::to_string(claim_txn_id) + " aborted.");
+                    }
+                    if (lr.kind != LockResult::Kind::Granted) {
+                        return StringResult::Err("ERROR 1205 (HY000): Lock wait timeout exceeded; the parent value '" + it->second + "' in '" + col.foreign_key->ref_table +
+                                                  "' is being deleted or changed by transaction " + std::to_string(lr.holder) + ".");
+                    }
+                }
+                if (dropped_shared) {
+                    if (auto violation = fk_parent_missing(col, it->second)) return StringResult::Err(*violation);
+                }
+            }
+        }
 
         // Predicate lock conflict check (SSI phantom detection): unlike the gap-lock loop
         // above, this never blocks the INSERT -- it just flags the *reading* transaction (a

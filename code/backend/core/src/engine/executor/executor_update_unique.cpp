@@ -8,6 +8,8 @@
 
 #include <unordered_set>
 
+#include <algorithm>
+
 #include "engine/executor/executor.hpp"
 #include "engine/storage/numeric_key.hpp"
 
@@ -158,6 +160,41 @@ std::vector<Executor::KeyClaim> Executor::unique_key_claims(const TableSchema& s
     for (std::size_t k = 0; k < schema.unique_keys.size(); k++) {
         auto& key = schema.unique_keys[k];
         add(table + "#ck:u" + std::to_string(k), key.columns, true, bare_table + "." + key.name.value_or(key.columns.front()));
+    }
+    return claims;
+}
+
+std::vector<std::string> Executor::referenced_columns(const SharedDatabase& s, const std::string& table) {
+    std::vector<std::string> out;
+    for (auto& [name, schema] : s.catalog.tables) {
+        for (auto& col : schema.columns) {
+            if (col.foreign_key && col.foreign_key->ref_table == table && std::find(out.begin(), out.end(), col.foreign_key->ref_column) == out.end()) {
+                out.push_back(col.foreign_key->ref_column);
+            }
+        }
+    }
+    return out;
+}
+
+std::vector<Executor::KeyClaim> Executor::fk_claims(const SharedDatabase& s, const TableSchema& schema, const std::string& table, const Row& row, const Row& old_row) {
+    std::vector<KeyClaim> claims;
+    for (auto& col : schema.columns) {
+        if (!col.foreign_key) continue;
+        const std::string v = text_of(row, col.name);
+        if (v == EXECUTOR_NULL_VALUE || collation::equal(v, text_of(old_row, col.name))) continue;
+        KeyClaim claim;
+        claim.lock_table = fk_claim_table(col.foreign_key->ref_table, col.foreign_key->ref_column);
+        claim.lock_key = v;
+        claim.shared = true;
+        claims.push_back(std::move(claim));
+    }
+    for (auto& column : referenced_columns(s, table)) {
+        const std::string before = text_of(old_row, column);
+        if (before == EXECUTOR_NULL_VALUE || collation::equal(before, text_of(row, column))) continue;
+        KeyClaim claim;
+        claim.lock_table = fk_claim_table(table, column);
+        claim.lock_key = before;
+        claims.push_back(std::move(claim));
     }
     return claims;
 }

@@ -153,7 +153,7 @@ const TXN: Item[] = [
   },
   {
     t: L("Lock manager", "락 매니저"),
-    s: L("row locks and claims on unique values, FOR UPDATE / SHARE, blocking wait, deadlock detection", "행 락·UNIQUE 값 클레임, FOR UPDATE / SHARE, 블로킹 대기, 데드락 감지"),
+    s: L("row locks and claims on unique and foreign-key values, FOR UPDATE / SHARE, blocking wait, deadlock detection", "행 락·UNIQUE·외래키 값 클레임, FOR UPDATE / SHARE, 블로킹 대기, 데드락 감지"),
   },
   { t: L("Gap lock + SSI", "Gap 락 + SSI"), s: L("phantom prevention; non-blocking predicate locks", "팬텀 방지, 비블로킹 predicate 락") },
   {

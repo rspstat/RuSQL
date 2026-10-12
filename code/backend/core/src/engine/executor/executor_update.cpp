@@ -242,8 +242,11 @@ StringResult Executor::exec_update_inner(SharedDatabase& s, const std::string& t
         // matches_condition_with_subquery is the only thing here that could touch one of
         // those tables.
         {
-            auto table_lock = acquire_table_data_locks(s, {table}, /*exclusive=*/false);
-            auto neighbor_lock = acquire_table_data_locks(s, neighbor_tables, /*exclusive=*/false);
+            // (one acquisition for both: every statement takes its data locks in the order of the table names, in one call -- a table first and then its
+            // neighbours, which may sort before it, let two statements wait for each other, with a writer waiting for the first of them in between)
+            std::vector<std::string> read_tables = neighbor_tables;
+            read_tables.push_back(table);
+            auto table_lock = acquire_table_data_locks(s, read_tables, /*exclusive=*/false);
             // Cloned first (not iterated in place): matches_condition_with_subquery can
             // invoke exec_select, which for FROM-subqueries/views temporarily inserts/
             // erases entries in s.tables — holding a live reference into s.tables across
@@ -343,6 +346,7 @@ StringResult Executor::exec_update_inner(SharedDatabase& s, const std::string& t
         bool stale_positions = false;
         std::string conflict_key;
         std::string conflict_table = table; // (the lock a conflict is about: the row of this table, or a claim on a unique value)
+        bool conflict_shared = false;       // (a claim of a child on its parent's value is shared: so is the wait for it)
         {
             auto table_lock = acquire_table_data_locks_mixed(s, {table}, fk_parents);
             auto& rows = tit0->second;
@@ -512,8 +516,10 @@ StringResult Executor::exec_update_inner(SharedDatabase& s, const std::string& t
                         pk_claim.lock_key = new_version_pks[i];
                         claims.push_back(std::move(pk_claim));
                     }
+                    for (auto& extra : fk_claims(s, *schema0, table, new_versions[i], *targets[i])) claims.push_back(std::move(extra));
                     for (auto& claim : claims) {
-                        LockResult lr = s.lock_mgr.acquire(claim.lock_table, claim.lock_key, claim_txn_id);
+                        LockResult lr = claim.shared ? s.lock_mgr.acquire_shared(claim.lock_table, claim.lock_key, claim_txn_id)
+                                                     : s.lock_mgr.acquire(claim.lock_table, claim.lock_key, claim_txn_id);
                         if (lr.kind == LockResult::Kind::Deadlock) {
                             return StringResult::Err("Deadlock detected: transaction " + std::to_string(claim_txn_id) + " waits for transaction " +
                                                       std::to_string(lr.holder) + " (UPDATE '" + table + "'. Transaction " + std::to_string(claim_txn_id) +
@@ -523,6 +529,7 @@ StringResult Executor::exec_update_inner(SharedDatabase& s, const std::string& t
                             conflict = true;
                             conflict_table = claim.lock_table;
                             conflict_key = claim.lock_key;
+                            conflict_shared = claim.shared;
                             break;
                         }
                     }
@@ -596,7 +603,7 @@ StringResult Executor::exec_update_inner(SharedDatabase& s, const std::string& t
         // same table can never proceed, and this statement never gets unblocked either
         // (see release_table_locks_for_block's doc comment in executor.hpp).
         release_table_locks_for_block();
-        auto lr2 = block_on_row(s.lock_mgr, conflict_table, conflict_key, claim_txn_id, /*exclusive=*/true, lock_deadline);
+        auto lr2 = block_on_row(s.lock_mgr, conflict_table, conflict_key, claim_txn_id, /*exclusive=*/!conflict_shared, lock_deadline);
         reacquire_table_locks_after_block();
         if (lr2.kind == LockResult::Kind::Deadlock) {
             return StringResult::Err("Deadlock detected: transaction " + std::to_string(claim_txn_id) + " waits for transaction " +
