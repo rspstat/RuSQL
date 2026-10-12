@@ -621,7 +621,18 @@ std::string box_table(const std::vector<std::string>& cols, const std::vector<st
         std::string s;
         for (std::size_t i = 0; i < widths.size(); i++) {
             std::string cell = i < cells.size() ? cells[i] : std::string();
-            s += "| " + cell + std::string(widths[i] - cell.size(), ' ') + " ";
+            const std::size_t shown = cell.size();
+            if (cell.find_first_of("\\\n|") != std::string::npos) { // (written the way the engine writes a cell, which parse_table reads back)
+                std::string escaped;
+                for (char c : cell) {
+                    if (c == '\\') escaped += "\\\\";
+                    else if (c == '\n') escaped += "\\n";
+                    else if (c == '|') escaped += "\\|";
+                    else escaped += c;
+                }
+                cell = std::move(escaped);
+            }
+            s += "| " + cell + std::string(widths[i] - shown, ' ') + " ";
         }
         return s + "|";
     };

@@ -127,6 +127,19 @@ TEST_CASE("SET takes a list, server variables and the connection's character set
     ok(ex, "SET NAMES utf8mb4 COLLATE utf8mb4_0900_ai_ci");
     ok(ex, "SET CHARACTER SET utf8mb4");
     ok(ex, "SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED");
+    ok(ex, "SET TRANSACTION ISOLATION LEVEL SERIALIZABLE");
+    // an assignment of the list that fails stops it (the ones before it were made)
+    REQUIRE(error_of(ex, "SET @e1 = 1, @e2 = (SELECT 1 UNION ALL SELECT 2), @e3 = 3").size() > 0);
+    REQUIRE(cell(ex, "SELECT @e1") == "1");
+    REQUIRE(cell(ex, "SELECT @e3") == "NULL");
+    // a server variable is read inside a statement, too
+    ok(ex, "CREATE DATABASE d");
+    ok(ex, "USE d");
+    ok(ex, "CREATE TABLE sv (id INT PRIMARY KEY, v INT)");
+    ok(ex, "INSERT INTO sv VALUES (1, 1), (2, 0)");
+    REQUIRE(rows_of(ex, "SELECT id FROM sv WHERE v = @@foreign_key_checks") == Rows{{"1"}});
+    ok(ex, "SET @@foreign_key_checks = 0");
+    REQUIRE(rows_of(ex, "SELECT id FROM sv WHERE v = @@session.foreign_key_checks") == Rows{{"2"}});
     REQUIRE(error_of(ex, "SET FOREIGN_KEY_CHECKS = 'maybe'").find("can't be set") != std::string::npos);
     REQUIRE(cell(ex, "SELECT @a") == "1"); // (a user variable is not a server variable)
 }
@@ -245,4 +258,22 @@ TEST_CASE("DEFINER and ALGORITHM attributes, parenthesized joins of a view, DISA
     ok(ex, "ALTER TABLE o ADD COLUMN x INT NOT NULL DEFAULT 7");
     REQUIRE(rows_of(ex, "SELECT id, x FROM o ORDER BY id") == Rows{{"1", "7"}, {"2", "7"}, {"3", "7"}});
     REQUIRE(error_of(ex, "INSERT INTO o (id, c, x) VALUES (4, 1, NULL)").size() > 0);
+}
+
+TEST_CASE("a CTE may name its columns: WITH r (n) AS (...)", "[dump_syntax][cte]") {
+    TempDataDir dir("dump_syntax_cte");
+    Executor ex(dir.path);
+    ok(ex, "CREATE DATABASE d");
+    ok(ex, "USE d");
+    ok(ex, "CREATE TABLE sv (id INT PRIMARY KEY, v INT)");
+    ok(ex, "INSERT INTO sv VALUES (1, 10), (2, 20), (3, 30)");
+    REQUIRE(rows_of(ex, "WITH RECURSIVE r (n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM r WHERE n < 5) SELECT n FROM r ORDER BY n") ==
+            Rows{{"1"}, {"2"}, {"3"}, {"4"}, {"5"}});
+    REQUIRE(rows_of(ex, "WITH t (a, b) AS (SELECT id, v FROM sv) SELECT a, b FROM t ORDER BY a") == Rows{{"1", "10"}, {"2", "20"}, {"3", "30"}});
+    REQUIRE(rows_of(ex, "WITH t (x, y) AS (SELECT id + 1, UPPER('q') FROM sv WHERE id = 1) SELECT y, x FROM t") == Rows{{"Q", "2"}});
+    REQUIRE(rows_of(ex, "WITH t (total) AS (SELECT SUM(v) FROM sv), u (k) AS (SELECT COUNT(*) FROM sv) SELECT total, k FROM t, u") == Rows{{"60", "3"}});
+    REQUIRE(error_of(ex, "WITH t (a) AS (SELECT id, v FROM sv) SELECT * FROM t").find("1353") != std::string::npos);
+    REQUIRE(error_of(ex, "WITH t (a, b) AS (SELECT * FROM sv) SELECT a FROM t").find("*") != std::string::npos);
+    // without a list the CTE keeps the names of its query
+    REQUIRE(rows_of(ex, "WITH t AS (SELECT id AS k FROM sv WHERE id = 2) SELECT k FROM t") == Rows{{"2"}});
 }

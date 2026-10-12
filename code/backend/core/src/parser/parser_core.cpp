@@ -429,6 +429,36 @@ Statement Parser::parse_stmt() {
     }
 }
 
+namespace {
+// WITH r (a, b) AS (SELECT ...): the list names the columns of the CTE, so the select list of its query (the first one of a UNION) is given those names
+void name_select_columns(Statement& stmt, const std::vector<std::string>& names) {
+    if (auto* u = std::get_if<Statement::Union>(&stmt.data)) return name_select_columns(*u->left, names);
+    if (auto* i = std::get_if<Statement::Intersect>(&stmt.data)) return name_select_columns(*i->left, names);
+    if (auto* x = std::get_if<Statement::Except>(&stmt.data)) return name_select_columns(*x->left, names);
+    auto* sel = std::get_if<Statement::Select>(&stmt.data);
+    if (!sel) throw ParseError("A column list needs a SELECT");
+    for (auto& col : sel->columns) {
+        if (std::holds_alternative<SelectColumn::All>(col.data)) throw ParseError("A column list on a query that selects * is not supported (name the columns)");
+    }
+    if (sel->columns.size() != names.size()) {
+        throw ParseError("ERROR 1353 (HY000): In definition of view, derived table or common table expression, SELECT list and column list have different column counts");
+    }
+    for (std::size_t k = 0; k < names.size(); k++) {
+        const std::string& n = names[k];
+        std::optional<SelectColumn> renamed; // (an item that has no alias slot is replaced by its aliased twin once the visit is over)
+        std::visit(
+            [&](auto& c) {
+                using T = std::decay_t<decltype(c)>;
+                if constexpr (std::is_same_v<T, SelectColumn::Column>) renamed = SelectColumn(SelectColumn::ColumnAlias{c.name, n, c.cls, c.outer});
+                else if constexpr (std::is_same_v<T, SelectColumn::Agg>) renamed = SelectColumn(SelectColumn::AggAlias{c.func, c.col, n, c.filter, c.source, c.arg_class});
+                else if constexpr (!std::is_same_v<T, SelectColumn::All>) c.alias = n; // (ColumnAlias, AggAlias, Func, Expr, CaseWhen, WinFunc, Subquery)
+            },
+            sel->columns[k].data);
+        if (renamed) sel->columns[k] = std::move(*renamed);
+    }
+}
+} // namespace
+
 void Parser::skip_create_attributes() {
     auto word = [&](std::size_t at, const char* w) {
         const Token* t = peek_at(at);
@@ -475,6 +505,17 @@ Statement Parser::parse_with() {
     std::vector<std::pair<std::string, StatementPtr>> ctes;
     for (;;) {
         std::string name = expect_ident();
+        std::vector<std::string> column_list; // WITH r (a, b) AS (...)
+        if (peek_is(TokenKind::LParen)) {
+            advance();
+            for (;;) {
+                column_list.push_back(expect_ident());
+                if (peek_is(TokenKind::Comma)) { advance(); continue; }
+                break;
+            }
+            if (!peek_is(TokenKind::RParen)) throw ParseError("Expected ')' after the CTE column list");
+            advance();
+        }
         if (!peek_is(TokenKind::As)) throw ParseError("Expected AS in CTE");
         advance();
         if (!peek_is(TokenKind::LParen)) throw ParseError("Expected '(' in CTE");
@@ -482,6 +523,7 @@ Statement Parser::parse_with() {
         if (!peek_is(TokenKind::Select)) throw ParseError("Expected SELECT in CTE body");
         advance();
         Statement base = parse_select();
+        if (!column_list.empty()) name_select_columns(base, column_list);
         // 재귀 CTE: body 내 UNION [ALL] 처리
         Statement body = [&]() -> Statement {
             if (peek_is(TokenKind::Union)) {
