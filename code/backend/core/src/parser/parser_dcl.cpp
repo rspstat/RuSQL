@@ -143,16 +143,33 @@ Statement Parser::parse_lock_tables() {
 }
 
 Statement Parser::parse_set() {
-    const Token* t = advance();
+    // SET @user = expr | [SESSION|GLOBAL] variable = expr | @@variable = expr, ... (several, separated by commas) | NAMES x | CHARACTER SET x |
+    // [SESSION] TRANSACTION ISOLATION LEVEL x | ISOLATION LEVEL x
+    const Token* t = peek();
     if (!t) throw ParseError("Expected ISOLATION");
-    if (t->kind == TokenKind::At) {
-        std::string name = expect_ident();
-        if (!peek_is(TokenKind::Eq)) throw ParseError("Expected '=' after @" + name);
+    auto is_word = [&](const Token* tok, const char* w) { return tok && tok->kind == TokenKind::Ident && to_upper(tok->text) == w; };
+    auto is_scope = [&](const Token* tok) {
+        return tok && tok->kind == TokenKind::Ident &&
+               (to_upper(tok->text) == "SESSION" || to_upper(tok->text) == "GLOBAL" || to_upper(tok->text) == "LOCAL" || to_upper(tok->text) == "PERSIST" ||
+                to_upper(tok->text) == "PERSIST_ONLY");
+    };
+    if (is_scope(t) && is_word(peek_at(1), "TRANSACTION") && peek_at_is(2, TokenKind::Isolation)) { advance(); advance(); }
+    else if (is_word(t, "TRANSACTION") && peek_at_is(1, TokenKind::Isolation)) advance();
+
+    if (is_word(t, "NAMES") || (is_word(t, "CHARACTER") && peek_at_is(1, TokenKind::Set))) {
+        // the character set of the connection: everything is utf8mb4 here
         advance();
-        ArithExpr expr = parse_value_expr(); // (a `(SELECT ...)` is a scalar subquery: no row is NULL, several rows an error)
-        return Statement(Statement::SetUserVar{name, std::move(expr)});
+        if (peek_is(TokenKind::Set)) advance();
+        if (peek()) advance(); // the name (or DEFAULT)
+        if (const Token* c = peek(); is_word(c, "COLLATE")) {
+            advance();
+            if (peek()) advance();
+        }
+        return Statement(Statement::SetVars{});
     }
-    if (t->kind == TokenKind::Isolation) {
+
+    if (peek_is(TokenKind::Isolation)) {
+        advance();
         if (!peek_is(TokenKind::Level)) throw ParseError("Expected LEVEL");
         advance();
         const Token* lt = advance();
@@ -173,7 +190,45 @@ Statement Parser::parse_set() {
         }
         return Statement(Statement::SetIsolationLevel{level});
     }
-    throw ParseError("Expected ISOLATION");
+
+    std::vector<Statement::SetUserVar> items;
+    for (;;) {
+        std::string name;
+        bool server_variable = false;
+        if (peek_is(TokenKind::At)) {
+            advance();
+            name = expect_ident(); // (`@x`: x; `@@x`: @x, as the lexer reads it)
+            server_variable = !name.empty() && name[0] == '@';
+        } else {
+            if (is_scope(peek()) && peek_at(1) && peek_at(1)->kind != TokenKind::Eq) advance(); // SESSION x = ...
+            const Token* v = advance();
+            if (!v) throw ParseError("Expected ISOLATION");
+            std::string word = !v->text.empty() ? v->text : v->word;
+            if (word.empty()) throw ParseError("Expected a variable name after SET");
+            for (char& c : word) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+            name = "@" + word;
+            server_variable = true;
+        }
+        if (!peek_is(TokenKind::Eq)) throw ParseError("Expected '=' after " + (server_variable ? name.substr(1) : "@" + name));
+        advance();
+        ArithExpr expr;
+        const Token* val = peek();
+        const bool bare_word = server_variable && val && val->kind != TokenKind::Null && val->kind != TokenKind::StringLit && val->kind != TokenKind::NumberLit &&
+                               val->kind != TokenKind::LParen && val->kind != TokenKind::At && val->kind != TokenKind::Minus &&
+                               (!val->text.empty() || !val->word.empty()) &&
+                               (!peek_at(1) || peek_at(1)->kind == TokenKind::Comma || peek_at(1)->kind == TokenKind::Semicolon);
+        if (bare_word) { // SET sql_mode = ANSI, autocommit = ON, time_zone = SYSTEM: the word is the value
+            advance();
+            expr = ArithExpr(ArithExpr::Str{!val->text.empty() ? val->text : val->word});
+        } else {
+            expr = parse_value_expr(); // (a `(SELECT ...)` is a scalar subquery: no row is NULL, several rows an error)
+        }
+        items.push_back(Statement::SetUserVar{std::move(name), std::move(expr)});
+        if (peek_is(TokenKind::Comma)) { advance(); continue; }
+        break;
+    }
+    if (items.size() == 1) return Statement(std::move(items.front()));
+    return Statement(Statement::SetVars{std::move(items)});
 }
 
 Statement Parser::parse_prepare() {

@@ -212,6 +212,10 @@ struct Token {
     bool operator!=(const Token& other) const { return !(*this == other); }
 };
 
+// The text of the `/*!NNNNN ... */` comments of `sql` that this server runs (version 8.4.9 or older) put in their place, the others dropped; a text
+// with no such comment is returned as it is. (A dump is written in them.)
+std::string expand_executable_comments(const std::string& sql);
+
 class Lexer {
 public:
     explicit Lexer(const std::string& input);

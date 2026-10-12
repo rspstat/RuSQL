@@ -118,6 +118,7 @@ void to_json(nlohmann::json& j, const ColumnDef& col) {
         {"default", col.default_value}, // Rust field name is `default`
         {"foreign_key", col.foreign_key},
         {"check_expr", col.check_expr},
+        {"on_update_now", col.on_update_now},
     };
 }
 
@@ -133,6 +134,7 @@ void from_json(const nlohmann::json& j, ColumnDef& col) {
     j.at("foreign_key").get_to(col.foreign_key);
     if (j.contains("check_expr")) j.at("check_expr").get_to(col.check_expr);
     else col.check_expr = std::nullopt;
+    col.on_update_now = j.contains("on_update_now") && j.at("on_update_now").get<bool>();
 }
 
 void to_json(nlohmann::json& j, const PartitionKind& kind) {
@@ -757,6 +759,7 @@ void to_json(nlohmann::json& j, const AlterAction& action) {
             else if constexpr (std::is_same_v<T, AlterAction::DropConstraint>) j = nlohmann::json{{"DropConstraint", alt.name}};
             else if constexpr (std::is_same_v<T, AlterAction::AddPartition>) j = nlohmann::json{{"AddPartition", alt.def}};
             else if constexpr (std::is_same_v<T, AlterAction::DropPartition>) j = nlohmann::json{{"DropPartition", alt.name}};
+            else if constexpr (std::is_same_v<T, AlterAction::NoOp>) j = nlohmann::json{{"NoOp", nullptr}};
         },
         action.data);
 }
@@ -784,6 +787,7 @@ void from_json(const nlohmann::json& j, AlterAction& action) {
     else if (tag == "DropConstraint") action = AlterAction(AlterAction::DropConstraint{p.get<std::string>()});
     else if (tag == "AddPartition") action = AlterAction(AlterAction::AddPartition{p.get<PartitionDef>()});
     else if (tag == "DropPartition") action = AlterAction(AlterAction::DropPartition{p.get<std::string>()});
+    else if (tag == "NoOp") action = AlterAction(AlterAction::NoOp{});
     else throw std::runtime_error("unknown AlterAction tag: " + tag);
 }
 
@@ -811,7 +815,9 @@ void to_json(nlohmann::json& j, const Statement& stmt) {
                                                                    {"primary_key_columns", alt.primary_key_columns},
                                                                    {"check_constraints", alt.check_constraints},
                                                                    {"partition_by", alt.partition_by},
-                                                                   {"unique_keys", alt.unique_keys}}}};
+                                                                   {"unique_keys", alt.unique_keys},
+                                                                   {"auto_increment_start", alt.auto_increment_start},
+                                                                   {"indexes", alt.indexes}}}};
             else if constexpr (std::is_same_v<T, Statement::DropTable>)
                 j = nlohmann::json{{"DropTable", nlohmann::json{{"name", alt.name}, {"if_exists", alt.if_exists}}}};
             else if constexpr (std::is_same_v<T, Statement::TruncateTable>)
@@ -1023,6 +1029,11 @@ void to_json(nlohmann::json& j, const Statement& stmt) {
                 j = nlohmann::json{{"DeallocatePrepare", nlohmann::json{{"name", alt.name}}}};
             else if constexpr (std::is_same_v<T, Statement::SetUserVar>)
                 j = nlohmann::json{{"SetUserVar", nlohmann::json{{"name", alt.name}, {"expr", alt.expr}}}};
+            else if constexpr (std::is_same_v<T, Statement::SetVars>) {
+                nlohmann::json items = nlohmann::json::array();
+                for (auto& item : alt.items) items.push_back(nlohmann::json{{"name", item.name}, {"expr", item.expr}});
+                j = nlohmann::json{{"SetVars", items}};
+            }
         },
         stmt.data);
 }
@@ -1060,6 +1071,8 @@ void from_json(const nlohmann::json& j, Statement& stmt) {
         v.check_constraints = p.at("check_constraints").get<std::vector<std::pair<std::optional<std::string>, std::string>>>();
         if (p.contains("partition_by")) v.partition_by = p.at("partition_by").get<std::optional<PartitionBy>>();
         if (p.contains("unique_keys")) v.unique_keys = p.at("unique_keys").get<std::vector<UniqueKey>>();
+        if (p.contains("auto_increment_start")) v.auto_increment_start = p.at("auto_increment_start").get<std::optional<std::int64_t>>();
+        if (p.contains("indexes")) v.indexes = p.at("indexes").get<std::vector<UniqueKey>>();
         stmt = Statement(std::move(v));
     } else if (tag == "DropTable") {
         stmt = Statement(Statement::DropTable{p.at("name").get<std::string>(), p.at("if_exists").get<bool>()});
@@ -1312,6 +1325,10 @@ void from_json(const nlohmann::json& j, Statement& stmt) {
         stmt = Statement(Statement::DeallocatePrepare{p.at("name").get<std::string>()});
     } else if (tag == "SetUserVar") {
         stmt = Statement(Statement::SetUserVar{p.at("name").get<std::string>(), p.at("expr").get<ArithExpr>()});
+    } else if (tag == "SetVars") {
+        Statement::SetVars v;
+        for (auto& item : p) v.items.push_back(Statement::SetUserVar{item.at("name").get<std::string>(), item.at("expr").get<ArithExpr>()});
+        stmt = Statement(std::move(v));
     } else {
         throw std::runtime_error("unknown Statement tag: " + tag);
     }

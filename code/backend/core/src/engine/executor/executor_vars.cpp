@@ -16,6 +16,18 @@
 
 namespace engine {
 
+std::unordered_map<std::string, std::string> default_system_variables() {
+    return {
+        {"@foreign_key_checks", "1"}, {"@unique_checks", "1"}, {"@autocommit", "1"}, {"@sql_notes", "1"}, {"@sql_warnings", "0"},
+        {"@sql_safe_updates", "0"}, {"@sql_auto_is_null", "0"}, {"@time_zone", "SYSTEM"},
+        {"@sql_mode", "ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION"},
+        {"@character_set_client", "utf8mb4"}, {"@character_set_connection", "utf8mb4"}, {"@character_set_results", "utf8mb4"},
+        {"@character_set_server", "utf8mb4"}, {"@character_set_database", "utf8mb4"},
+        {"@collation_connection", "utf8mb4_0900_ai_ci"}, {"@collation_server", "utf8mb4_0900_ai_ci"}, {"@collation_database", "utf8mb4_0900_ai_ci"},
+        {"@max_allowed_packet", "67108864"}, {"@innodb_lock_wait_timeout", "50"}, {"@wait_timeout", "28800"},
+    };
+}
+
 namespace {
 
 struct Vars {
@@ -26,8 +38,9 @@ struct Vars {
     std::optional<std::string> value(const std::string& name) const {
         if (name.empty()) return std::nullopt;
         if (name[0] == '@') {
-            // (text that merely starts with @ -- `@n + 1`, the argument of a function -- is not a variable's name)
-            if (name.size() < 2 || !std::all_of(name.begin() + 1, name.end(), [](unsigned char c) { return std::isalnum(c) || c == '_'; })) return std::nullopt;
+            // (text that merely starts with @ -- `@n + 1`, the argument of a function -- is not a variable's name; `@@x`, a server variable, is)
+            const std::size_t from = name.size() > 2 && name[1] == '@' ? 2 : 1;
+            if (name.size() < 2 || !std::all_of(name.begin() + static_cast<std::ptrdiff_t>(from), name.end(), [](unsigned char c) { return std::isalnum(c) || c == '_'; })) return std::nullopt;
             auto it = user.find(name.substr(1));
             return it != user.end() ? it->second : std::string(EXECUTOR_NULL_VALUE); // an unset @variable is NULL
         }

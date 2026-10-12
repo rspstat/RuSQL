@@ -49,6 +49,7 @@ struct ColConstraints {
     std::optional<std::string> default_value;
     std::optional<ForeignKey> foreign_key;
     std::optional<std::string> check_expr;
+    bool on_update_now = false;
 };
 
 class Parser {
@@ -57,6 +58,9 @@ public:
 
     // Public API: mirrors `pub fn parse(&mut self) -> Result<Statement, String>`.
     Result<Statement, std::string> parse();
+
+    /// The text had no token at all (it was empty, or only comments): there is no statement to run.
+    bool has_tokens() const { return !tokens_.empty(); }
 
     // pub(crate) in the Rust original; used by other modules (e.g. the executor) to
     // parse a standalone arithmetic expression / stringify one.
@@ -102,6 +106,13 @@ private:
 
     Statement parse_use();
     Statement parse_with();
+    /// `ALGORITHM = x`, `DEFINER = user@host`, `SQL SECURITY DEFINER|INVOKER` between CREATE and VIEW / PROCEDURE / FUNCTION / TRIGGER (a dump writes them; no effect here)
+    void skip_create_attributes();
+    /// `[DEFAULT] CHARACTER SET|CHARSET [=] x` / `[DEFAULT] COLLATE [=] x` after a table, a database or a column: accepted when x is a character set / collation
+    /// this engine's own comparison stands for (utf8mb4_0900_ai_ci), refused for the others, which would compare differently
+    bool parse_charset_option();
+    /// the table options after CREATE TABLE (...): ENGINE, AUTO_INCREMENT, charset, collation, COMMENT, ROW_FORMAT ...; the AUTO_INCREMENT start, if there is one
+    std::optional<std::int64_t> parse_table_options();
 
     CondExpr parse_condexpr();
     CondExpr parse_or_expr();
