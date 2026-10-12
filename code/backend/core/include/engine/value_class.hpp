@@ -2,8 +2,8 @@
 
 // What kind of value an operand of a comparison is, and how two of them compare.
 //
-// MySQL compares by the TYPE of the operands, not by what the text looks like: two strings compare as strings (so '10' < '9', and '007' and
-// '7' are different), a number and anything else compare as numbers (a string is read by the number it starts with: 'abc' = 0, '12abc' = 12).
+// MySQL compares by the TYPE of the operands, not by what the text looks like: two strings compare as strings by the default collation (so '10' < '9',
+// '007' and '7' are different, 'a' = 'A'), a number and anything else compare as numbers (a string is read by the number it starts with: 'abc' = 0, '12abc' = 12).
 // Values are stored as text, so the type has to come from outside: a column's declared type, a literal's quotes, an expression's operators.
 // ValueClass::Unknown is an operand whose type cannot be told (a derived column, a function with no fixed result type): two such operands
 // compare the way the engine always did -- as numbers when both are numbers, else as text.
@@ -14,6 +14,7 @@
 #include <string_view>
 #include <unordered_set>
 
+#include "engine/collation.hpp"
 #include "engine/numeric_text.hpp"
 
 namespace engine {
@@ -43,8 +44,7 @@ inline ValueClass function_result_class(std::string_view name) {
 inline int compare_classed(ValueClass a, ValueClass b, std::string_view x, std::string_view y) {
     if (a == ValueClass::Number || b == ValueClass::Number) return compare_numbers(x, y);
     if (!(a == ValueClass::Text && b == ValueClass::Text) && parse_number(x) && parse_number(y)) return compare_numbers(x, y);
-    const int c = x.compare(y);
-    return c < 0 ? -1 : (c > 0 ? 1 : 0);
+    return collation::compare(x, y); // (two texts: MySQL's default collation, which does not tell 'a' from 'A' or 'e' from 'é')
 }
 
 } // namespace engine

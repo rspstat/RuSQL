@@ -165,10 +165,10 @@ const TXN: Item[] = [
 const STORAGE: Item[] = [
   {
     t: L("B+Tree indexes", "B+Tree 인덱스"),
-    s: L("single, composite, clustered; keys compare as numbers (7 = 7.00); maintained incrementally, one bucket write per statement",
-         "단일·복합·클러스터드, 키를 숫자로 비교(7 = 7.00), 증분 갱신(문장당 버킷 1회 기록)"),
+    s: L("single, composite, clustered; numbers compare as numbers (7 = 7.00), texts by MySQL's default collation (A = a = Á); maintained incrementally, one bucket write per statement",
+         "단일·복합·클러스터드, 숫자는 값으로(7 = 7.00)·글자는 MySQL 기본 정렬 규칙으로 비교(A = a = Á), 증분 갱신(문장당 버킷 1회 기록)"),
   },
-  { t: L("Hash index", "해시 인덱스"), s: L("USING HASH, O(1) equality lookups, bucketed by numeric value", "USING HASH, 등호 조회 O(1), 숫자 값 기준 버킷") },
+  { t: L("Hash index", "해시 인덱스"), s: L("USING HASH, O(1) equality lookups, bucketed by numeric value / collation key", "USING HASH, 등호 조회 O(1), 숫자 값·정렬 키 기준 버킷") },
   {
     t: L("Table data", "테이블 데이터"),
     s: L("in-memory MVCC row versions + the pk-to-position cache that turns an index hit into its row", "메모리 상의 MVCC 행 버전 + 인덱스 결과를 실제 행으로 연결하는 PK→위치 캐시"),

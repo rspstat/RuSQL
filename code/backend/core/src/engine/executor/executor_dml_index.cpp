@@ -22,6 +22,7 @@
 #include <cstdlib>
 #include <unordered_map>
 
+#include "engine/collation.hpp"
 #include "engine/executor/executor.hpp"
 #include "engine/planner.hpp"
 #include "engine/storage/numeric_key.hpp"
@@ -161,7 +162,7 @@ Gather gather(SharedDatabase& s, const std::string& table, const AccessPath& ap,
                 char c0 = a.prefix[0];
                 if (std::isdigit(static_cast<unsigned char>(c0)) || c0 == '-' || c0 == '+' || c0 == '.') return Gather::Unsupported;
                 for (auto& kv : it->second.scan_from(a.prefix, true)) {
-                    if (kv.first.compare(0, a.prefix.size(), a.prefix) != 0) break;
+                    if (!collation::like(kv.first, a.prefix + "%")) break; // (the keys are in the collation's order: 'ABC' starts with 'ab')
                     if (!append_json(kv.second, true, pk_col, out, cap)) return Gather::TooMany;
                 }
                 return Gather::Ok;

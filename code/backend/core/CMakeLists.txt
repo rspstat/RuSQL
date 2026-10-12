@@ -1,5 +1,6 @@
 add_library(engine_core STATIC
     src/catalog/schema.cpp
+    src/collation.cpp
     src/parser/ast.cpp
     src/parser/ast_json.cpp
     src/parser/lexer.cpp

@@ -66,7 +66,7 @@ std::vector<std::string> row_key(const Row& row, const std::vector<std::string>&
     key.reserve(cols.size());
     for (auto& c : cols) {
         auto it = row.find(c);
-        key.push_back(it != row.end() ? it->second : std::string());
+        key.push_back(it != row.end() ? collation::key(it->second) : std::string());
     }
     return key;
 }
@@ -218,7 +218,7 @@ StringResult Executor::exec_intersect(SharedDatabase& s, Statement left, Stateme
                 auto it = rr.find(cols[i]);
                 if (it != rr.end()) val = it->second;
             }
-            key.push_back(std::move(val));
+            key.push_back(collation::key(val));
         }
         right_keys.push_back(std::move(key));
     }
@@ -274,7 +274,7 @@ StringResult Executor::exec_except(SharedDatabase& s, Statement left, Statement 
                 auto it = rr.find(cols[i]);
                 if (it != rr.end()) val = it->second;
             }
-            key.push_back(std::move(val));
+            key.push_back(collation::key(val));
         }
         right_keys.push_back(std::move(key));
     }

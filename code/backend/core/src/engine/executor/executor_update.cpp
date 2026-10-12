@@ -5,6 +5,7 @@
 // original exactly — UPDATE, unlike DELETE, always uses the subquery-aware matcher
 // with no fast-path/slow-path split.
 
+#include "engine/collation.hpp"
 #include "engine/executor/executor.hpp"
 
 #include <algorithm>
@@ -723,7 +724,7 @@ StringResult Executor::exec_update_inner(SharedDatabase& s, const std::string& t
     // releases table_locks (try_cascade_once's own neighbor_write_lock is already
     // released too, by ordinary C++ scope rules, since it's a local inside the lambda)
     // and blocks on just the one contested row, then calls try_cascade_once() again --
-    // safe/idempotent to fully restart because the `it->second == old_val` match check
+    // safe/idempotent to fully restart because the `collation::equal(it->second, old_val)` match check
     // naturally excludes any row already mutated by an earlier attempt (its value is now
     // `new_val`, not `old_val`), exactly like DELETE's is_visible()-based idempotency.
     struct CascadeClaim {
@@ -795,7 +796,7 @@ StringResult Executor::exec_update_inner(SharedDatabase& s, const std::string& t
                                 for (auto& row : oit2->second) {
                                     if (!is_visible(row)) continue;
                                     auto it = row.find(col.name);
-                                    if (it != row.end() && it->second == old_val) {
+                                    if (it != row.end() && collation::equal(it->second, old_val)) {
                                         if (auto claim = claim_cascade_row(other_table, row)) {
                                             if (claim->result.kind == LockResult::Kind::Deadlock) {
                                                 return CascadeAttemptResult::hard_error(StringResult::Err(
@@ -824,7 +825,7 @@ StringResult Executor::exec_update_inner(SharedDatabase& s, const std::string& t
                                 for (auto& row : oit2->second) {
                                     if (!is_visible(row)) continue;
                                     auto it = row.find(col.name);
-                                    if (it != row.end() && it->second == old_val) {
+                                    if (it != row.end() && collation::equal(it->second, old_val)) {
                                         if (auto claim = claim_cascade_row(other_table, row)) {
                                             if (claim->result.kind == LockResult::Kind::Deadlock) {
                                                 return CascadeAttemptResult::hard_error(StringResult::Err(
@@ -859,7 +860,7 @@ StringResult Executor::exec_update_inner(SharedDatabase& s, const std::string& t
                                 for (auto& row : oit2->second) {
                                     if (!is_visible(row)) continue;
                                     auto it = row.find(col.name);
-                                    if (it != row.end() && it->second == old_val) {
+                                    if (it != row.end() && collation::equal(it->second, old_val)) {
                                         if (auto claim = claim_cascade_row(other_table, row)) {
                                             if (claim->result.kind == LockResult::Kind::Deadlock) {
                                                 return CascadeAttemptResult::hard_error(StringResult::Err(

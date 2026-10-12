@@ -12,21 +12,24 @@ a few rows per g. The statements
     SELECT t.id, u.k, t.x + u.k AS tk FROM t JOIN u ON t.g = u.g ORDER BY <keys>, t.id
     SELECT g FROM t UNION SELECT k FROM u ORDER BY 1 [DESC]
 
-are run and the order of the answer is compared with the one computed here (NULL before every value, numbers by value, strings bytewise; the ties of a key are
+are run and the order of the answer is compared with the one computed here (NULL before every value, numbers by value, strings by the default collation; the ties of a key are
 broken by the keys after it, then by id). Exit code 1 and the statement on the first violation.
 """
 import argparse, os, random, sys
 from fractions import Fraction
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import collation_model as C
 import diff_builds as D
 import verify_value_expressions as V
 
 
 def cmp_value(a, b):
-    """NULL (None) is smaller than every value; numbers by value, strings bytewise."""
+    """NULL (None) is smaller than every value; numbers by value, strings by the default collation (collation_model.py)."""
     if a is None or b is None:
         return 0 if a is b else (-1 if a is None else 1)
+    if isinstance(a, str) and isinstance(b, str):
+        return C.compare(a, b)
     return -1 if a < b else (1 if a > b else 0)
 
 

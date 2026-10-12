@@ -60,6 +60,8 @@ add_executable(engine_tests
     test_composite_unique.cpp
     test_mysql_conformance.cpp
     test_mysql_semantics.cpp
+    test_collation.cpp
+    test_collation_sql.cpp
 )
 
 target_link_libraries(engine_tests PRIVATE engine_core)

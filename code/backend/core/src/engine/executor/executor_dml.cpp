@@ -116,7 +116,7 @@ bool Executor::index_or_scan_exists(const SharedDatabase& s, const std::string& 
     // No index covers this column -- linear scan, exactly the pre-existing behavior.
     for (auto& r : table_rows) {
         auto it = r.find(column);
-        if (it != r.end() && it->second == val && accept(r)) return true;
+        if (it != r.end() && collation::equal(it->second, val) && accept(r)) return true;
     }
     return false;
 }
@@ -433,7 +433,7 @@ std::vector<std::vector<std::string>> Executor::replace_supersede(SharedDatabase
         std::vector<std::string> keys;
         for (auto& col : schema->columns) {
             if ((col.primary_key && !composite) || col.unique) {
-                if (auto v = value_for(values, col.name)) keys.push_back(col.name + '\x1f' + *v);
+                if (auto v = value_for(values, col.name)) keys.push_back(col.name + '\x1f' + collation::key(*v));
             }
         }
         if (composite) {
@@ -442,17 +442,17 @@ std::vector<std::vector<std::string>> Executor::replace_supersede(SharedDatabase
             for (auto& pk : schema->primary_key_columns) {
                 auto v = value_for(values, pk);
                 if (!v) { all = false; break; }
-                tuple += '\x1f' + *v;
+                tuple += '\x1f' + collation::key(*v);
             }
             if (all) keys.push_back(tuple);
         }
         for (std::size_t k = 0; k < schema->unique_keys.size(); k++) { // UNIQUE keys over several columns (a NULL in one never repeats)
-            std::string tuple = "u" + std::to_string(k);
+            std::string tuple = "\x1eu" + std::to_string(k);
             bool all = true;
             for (auto& column : schema->unique_keys[k].columns) {
                 auto v = value_for(values, column);
                 if (!v) { all = false; break; }
-                tuple += '' + *v;
+                tuple += '\x1f' + collation::key(*v);
             }
             if (all) keys.push_back(tuple);
         }
@@ -704,7 +704,8 @@ StringResult Executor::exec_insert_inner(SharedDatabase& s, const std::string& t
         for (std::size_t k = 0; k < columns.size(); k++) {
             const std::string v = value(columns[k]);
             if (v == EXECUTOR_NULL_VALUE) return std::nullopt;
-            encoded += std::to_string(v.size()) + ":" + v;
+            const std::string part = collation::key(v);
+            encoded += std::to_string(part.size()) + ":" + part;
             shown += (k ? "-" : "") + v;
         }
         return encoded;
@@ -944,7 +945,7 @@ StringResult Executor::exec_insert_inner(SharedDatabase& s, const std::string& t
                                 for (auto& r : rows) {
                                     if (!is_visible(r)) continue;
                                     auto it = r.find(col_names[i]);
-                                    if (it != r.end() && it->second == val) {
+                                    if (it != r.end() && collation::equal(it->second, val)) {
                                         existing = r;
                                         break;
                                     }
@@ -1013,9 +1014,10 @@ StringResult Executor::exec_insert_inner(SharedDatabase& s, const std::string& t
                 }
                 std::string encoded; // length-prefixed, so no two different tuples encode alike
                 for (auto& v : new_pk_tuple) {
-                    encoded += std::to_string(v.size());
+                    const std::string part = collation::key(v);
+                    encoded += std::to_string(part.size());
                     encoded += ':';
-                    encoded += v;
+                    encoded += part;
                 }
                 if (!seen_composite_pk.insert(std::move(encoded)).second && !(validate_only && std::holds_alternative<InsertConflict::Replace>(on_conflict.data))) {
                     return StringResult::Err("Duplicate composite primary key (" + join_quoted(new_pk_tuple) + ")");
@@ -1027,7 +1029,7 @@ StringResult Executor::exec_insert_inner(SharedDatabase& s, const std::string& t
                 bool found = false;
                 for (std::size_t i = 0; i < constraints.size(); i++) {
                     if (!constraints[i].primary_key && !constraints[i].unique) continue;
-                    auto it = seen_unique_first[i].find(final_values[i]); // (a NULL is never recorded below)
+                    auto it = seen_unique_first[i].find(collation::key(final_values[i])); // (a NULL is never recorded below)
                     if (it != seen_unique_first[i].end() && (!found || it->second < best_row)) {
                         found = true;
                         best_row = it->second;
@@ -1039,7 +1041,7 @@ StringResult Executor::exec_insert_inner(SharedDatabase& s, const std::string& t
                 }
                 for (std::size_t i = 0; i < constraints.size(); i++) {
                     if (!constraints[i].primary_key && final_values[i] == EXECUTOR_NULL_VALUE) continue;
-                    if (constraints[i].primary_key || constraints[i].unique) seen_unique_first[i].emplace(final_values[i], batch_rows_recorded);
+                    if (constraints[i].primary_key || constraints[i].unique) seen_unique_first[i].emplace(collation::key(final_values[i]), batch_rows_recorded);
                 }
                 batch_rows_recorded++;
             }
@@ -1060,7 +1062,7 @@ StringResult Executor::exec_insert_inner(SharedDatabase& s, const std::string& t
             if (auto violation = fk_child_violation(s, col, val)) {
                 // ... unless it names the row itself or an earlier row of this very statement (a self-referencing table)
                 const std::string& ref_col = col.foreign_key->ref_column;
-                auto names_val = [&](const Row& r) { auto rit = r.find(ref_col); return rit != r.end() && rit->second == val; };
+                auto names_val = [&](const Row& r) { auto rit = r.find(ref_col); return rit != r.end() && collation::equal(rit->second, val); };
                 const bool in_statement = col.foreign_key->ref_table == table && (names_val(row) || std::any_of(prepared.begin(), prepared.end(), names_val));
                 if (!in_statement) return StringResult::Err(*violation);
             }
@@ -1179,7 +1181,7 @@ StringResult Executor::exec_insert_inner(SharedDatabase& s, const std::string& t
                         for (auto& r : tit->second) {
                             if (!is_visible(r)) continue;
                             auto rit = r.find(gap_pk_col);
-                            if (rit != r.end() && rit->second == pk_it->second) {
+                            if (rit != r.end() && collation::equal(rit->second, pk_it->second)) {
                                 return StringResult::Err("Duplicate value '" + pk_it->second + "' for column '" + gap_pk_col + "'");
                             }
                         }

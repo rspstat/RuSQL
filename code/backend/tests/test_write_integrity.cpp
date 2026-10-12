@@ -468,10 +468,10 @@ TEST_CASE("NULL sorts first in ASC and last in DESC", "[write_integrity][order]"
     };
     REQUIRE(ids("ORDER BY n") == "2,3,1,5,4");          // NULL, -3, 5, 7, 10
     REQUIRE(ids("ORDER BY n DESC") == "4,5,1,3,2");
-    REQUIRE(ids("ORDER BY s") == "2,5,1,3,4");          // NULL, '', 'Alice', 'Zed', 'bob' (byte order: this engine has no case-insensitive collation)
-    REQUIRE(ids("ORDER BY s DESC") == "4,3,1,5,2");
+    REQUIRE(ids("ORDER BY s") == "2,5,1,4,3");          // NULL, '', 'Alice', 'bob', 'Zed' (the default collation does not tell upper from lower case)
+    REQUIRE(ids("ORDER BY s DESC") == "3,4,1,5,2");
     REQUIRE(ids("ORDER BY n, s DESC") == "2,3,1,5,4");
-    REQUIRE(q(ex, "SELECT DISTINCT s FROM o ORDER BY s") == Rows{{N}, {""}, {"Alice"}, {"Zed"}, {"bob"}});
+    REQUIRE(q(ex, "SELECT DISTINCT s FROM o ORDER BY s") == Rows{{N}, {""}, {"Alice"}, {"bob"}, {"Zed"}});
     REQUIRE(q(ex, "SELECT s, COUNT(*) FROM o GROUP BY s ORDER BY s LIMIT 2") == Rows{{N, "1"}, {"", "1"}});
     REQUIRE(q(ex, "SELECT id, ROW_NUMBER() OVER (ORDER BY n) FROM o ORDER BY id") ==
             Rows{{"1", "3"}, {"2", "1"}, {"3", "2"}, {"4", "5"}, {"5", "4"}});

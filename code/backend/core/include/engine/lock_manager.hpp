@@ -23,6 +23,7 @@ struct LockEntry {
     struct Exclusive { std::uint64_t holder; };
     struct Shared { std::unordered_set<std::uint64_t> holders; };
     std::variant<Exclusive, Shared> data;
+    std::string shown; // the PK as the first locker wrote it (the lock itself is by the PK's collation key: 'Bob' and 'bob' are one row)
 };
 
 struct LockResult {
@@ -156,8 +157,8 @@ private:
     // granted the lock (row_locks_ already updated to reflect it); otherwise returns the
     // txn_id of a representative blocking holder (for Exclusive: the sole holder; for
     // Shared: any one holder other than txn_id itself).
-    std::optional<std::uint64_t> try_grant_exclusive_locked(const std::pair<std::string, std::string>& key, std::uint64_t txn_id);
-    std::optional<std::uint64_t> try_grant_shared_locked(const std::pair<std::string, std::string>& key, std::uint64_t txn_id);
+    std::optional<std::uint64_t> try_grant_exclusive_locked(const std::pair<std::string, std::string>& key, const std::string& shown, std::uint64_t txn_id);
+    std::optional<std::uint64_t> try_grant_shared_locked(const std::pair<std::string, std::string>& key, const std::string& shown, std::uint64_t txn_id);
 
     // Internal, called only while mutex_ is already held.
     bool creates_cycle(std::uint64_t from, std::uint64_t to) const;

@@ -16,6 +16,7 @@
 #include <regex>
 #include <unordered_map>
 
+#include "engine/collation.hpp"
 #include "engine/executor/builtin_functions.hpp"
 #include "engine/numeric_text.hpp"
 #include "engine/parser/parser.hpp"
@@ -421,13 +422,13 @@ std::string Executor::apply_scalar_func(const std::string& typed_name, const std
         // NULL when the two are equal as `=` says: numbers by value (5 and 5.00 are equal), anything else as text
         std::string a = arg_at(0), b = arg_at(1);
         const bool both_numbers = parse_number(a) && parse_number(b);
-        const bool equal = both_numbers ? compare_numbers(a, b) == 0 : a == b;
+        const bool equal = both_numbers ? compare_numbers(a, b) == 0 : collation::equal(a, b);
         return equal ? EXECUTOR_NULL_VALUE : a;
     }
     if (func_name == "REGEXP_LIKE" || func_name == "REGEXP") {
         std::string val = arg_at(0), pat = arg_at(1);
         try {
-            return std::regex_search(val, std::regex(pat)) ? "1" : "0";
+            return std::regex_search(val, std::regex(pat, std::regex::ECMAScript | std::regex::icase)) ? "1" : "0";
         } catch (...) {
             return "0";
         }
@@ -435,7 +436,7 @@ std::string Executor::apply_scalar_func(const std::string& typed_name, const std
     if (func_name == "REGEXP_REPLACE") {
         std::string val = arg_at(0), pat = arg_at(1), rep = arg_at(2);
         try {
-            return std::regex_replace(val, std::regex(pat), rep);
+            return std::regex_replace(val, std::regex(pat, std::regex::ECMAScript | std::regex::icase), rep);
         } catch (...) {
             return val;
         }
@@ -444,7 +445,7 @@ std::string Executor::apply_scalar_func(const std::string& typed_name, const std
         std::string val = arg_at(0), pat = arg_at(1);
         try {
             std::smatch m;
-            std::regex re(pat);
+            std::regex re(pat, std::regex::ECMAScript | std::regex::icase);
             if (std::regex_search(val, m, re)) return m.str();
         } catch (...) {
         }

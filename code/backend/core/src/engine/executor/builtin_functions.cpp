@@ -1,3 +1,4 @@
+#include "engine/collation.hpp"
 #include "engine/executor/builtin_functions.hpp"
 
 #include <algorithm>
@@ -314,9 +315,10 @@ std::string fn_lpad(const BuiltinCall& c) { return pad(c, true); }
 std::string fn_rpad(const BuiltinCall& c) { return pad(c, false); }
 
 // 1-based character position of `sub` in `s` at or after character `from` (1-based); 0 when it is not there
+// INSTR / LOCATE / POSITION do not tell upper from lower case but DO tell accents (INSTR('Hello', 'h') is 1, INSTR('h\303\251llo', 'e') is 0).
 long long locate_chars(const std::string& sub, const std::string& s, long long from) {
-    const auto hay = utf8_chars(s);
-    const auto needle = utf8_chars(sub);
+    const auto hay = utf8_chars(map_case(s, false));
+    const auto needle = utf8_chars(map_case(sub, false));
     const long long n = static_cast<long long>(hay.size()), m = static_cast<long long>(needle.size());
     if (from < 1 || from > n + 1) return 0;
     for (long long i = from - 1; i + m <= n; i++) {
@@ -376,7 +378,7 @@ std::string fn_char(const BuiltinCall& c) {
 std::string fn_strcmp(const BuiltinCall& c) {
     if (argc(c) != 2) wrong_count(c);
     if (any_null(c)) return kNull;
-    const int r = c.value(0).compare(c.value(1));
+    const int r = collation::compare(c.value(0), c.value(1));
     return r < 0 ? "-1" : (r > 0 ? "1" : "0");
 }
 
@@ -385,7 +387,7 @@ std::string fn_field(const BuiltinCall& c) {
     const std::string v = c.value(0);
     if (is_null(v)) return "0";
     for (std::size_t i = 1; i < argc(c); i++) {
-        if (c.value(i) == v) return int_text(static_cast<long long>(i));
+        if (collation::equal(c.value(i), v)) return int_text(static_cast<long long>(i));
     }
     return "0";
 }
@@ -409,7 +411,7 @@ std::string fn_find_in_set(const BuiltinCall& c) {
     for (;;) {
         const std::size_t comma = list.find(',', pos);
         const std::string item = list.substr(pos, comma == std::string::npos ? std::string::npos : comma - pos);
-        if (item == needle) return int_text(index);
+        if (collation::equal(item, needle)) return int_text(index);
         if (comma == std::string::npos) break;
         pos = comma + 1;
         index++;
@@ -747,7 +749,7 @@ std::string extreme(const BuiltinCall& c, bool greatest) {
     std::size_t best = 0;
     for (std::size_t i = 1; i < argc(c); i++) {
         const std::string a = c.value(i), b = c.value(best);
-        const bool better = all_numbers ? (greatest ? double_of(a) > double_of(b) : double_of(a) < double_of(b)) : (greatest ? a > b : a < b);
+        const bool better = all_numbers ? (greatest ? double_of(a) > double_of(b) : double_of(a) < double_of(b)) : (greatest ? collation::compare(a, b) > 0 : collation::compare(a, b) < 0);
         if (better) best = i;
     }
     return c.value(best);

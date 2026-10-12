@@ -40,7 +40,7 @@ std::string extreme_text(const std::vector<const std::string*>& values, bool sma
                          (cls != ValueClass::Text && std::all_of(values.begin(), values.end(), [](const std::string* v) { return parse_f64(*v).has_value(); }));
     const std::string* best = values.front();
     for (const std::string* v : values) {
-        const int order = numeric ? compare_numbers(*v, *best) : v->compare(*best);
+        const int order = numeric ? compare_numbers(*v, *best) : collation::compare(*v, *best);
         if (smallest ? order < 0 : order > 0) best = v;
     }
     return *best;
@@ -86,7 +86,7 @@ std::vector<const std::string*> distinct_texts(const std::vector<const std::stri
     std::unordered_set<std::string> seen;
     std::vector<const std::string*> out;
     for (const std::string* v : values) {
-        if (seen.insert(by_value ? normalize_numeric_key(*v) : *v).second) out.push_back(v);
+        if (seen.insert(by_value ? normalize_numeric_key(*v) : collation::key(*v)).second) out.push_back(v);
     }
     return out;
 }
@@ -102,7 +102,7 @@ int cmp_key(const std::string& a, const std::string& b, ValueClass cls) {
 // What WHERE's `=` says: equal as numbers when both sides parse as numbers, else equal as text.
 bool same_value(const std::string& a, const std::string& b) {
     auto pa = parse_f64(a), pb = parse_f64(b);
-    return pa && pb ? compare_numbers(a, b) == 0 : a == b; // (integers exactly)
+    return pa && pb ? compare_numbers(a, b) == 0 : collation::equal(a, b); // (integers exactly; texts by the default collation)
 }
 
 // Values of the B+Tree entries whose key is `key` the way WHERE sees it: a probe for "7" finds the entries "7", "7.0"
@@ -315,6 +315,8 @@ std::vector<std::size_t> order_rows(const std::vector<const Row*>& rows, const s
         std::int64_t whole = 0;
         double num = 0;
         const std::string* text = nullptr;
+        std::string text_key; // the weights of the text in the default collation, made when two texts are compared
+        bool keyed = false;
     };
     static const std::string empty;
     const std::size_t ncols = order_by.size();
@@ -344,14 +346,24 @@ std::vector<std::size_t> order_rows(const std::vector<const Row*>& rows, const s
     }
     std::vector<std::size_t> order(rows.size());
     for (std::size_t i = 0; i < order.size(); i++) order[i] = i;
+    auto weights_of = [](Cell& cell) -> const std::string& {
+        if (!cell.keyed) {
+            cell.text_key = collation::sort_key(*cell.text);
+            cell.keyed = true;
+        }
+        return cell.text_key;
+    };
     std::stable_sort(order.begin(), order.end(), [&](std::size_t a, std::size_t b) {
         for (std::size_t c = 0; c < ncols; c++) {
-            const Cell& x = cells[a * ncols + c];
-            const Cell& y = cells[b * ncols + c];
+            Cell& x = cells[a * ncols + c];
+            Cell& y = cells[b * ncols + c];
             int cmp;
             if (x.null || y.null) cmp = x.null == y.null ? 0 : (x.null ? -1 : 1); // same as cmp_key
             else if (x.numeric && y.numeric) cmp = x.is_int && y.is_int ? (x.whole < y.whole ? -1 : (x.whole > y.whole ? 1 : 0)) : (x.num < y.num ? -1 : (x.num > y.num ? 1 : 0));
-            else cmp = *x.text < *y.text ? -1 : (*x.text > *y.text ? 1 : 0);
+            else {
+                const int k = weights_of(x).compare(weights_of(y));
+                cmp = k < 0 ? -1 : (k > 0 ? 1 : 0);
+            }
             if (!order_by[c].ascending) cmp = -cmp;
             if (cmp != 0) return cmp < 0;
         }
@@ -808,7 +820,7 @@ Row Executor::compute_aggregates(const std::vector<const Row*>& grp, const std::
                 const Row& r = *r_ptr;
                 auto it = r.find(col_name);
                 if (it == r.end() || it->second == EXECUTOR_NULL_VALUE) continue;
-                if (gc->distinct && !seen_values.insert(it->second).second) continue;
+                if (gc->distinct && !seen_values.insert(collation::key(it->second)).second) continue;
                 strs.push_back(it->second);
             }
             std::string joined;
@@ -1658,7 +1670,7 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
             if (auto it = s.indexes.find(ap->index_key); it != s.indexes.end() && like_prefix_scannable(ap->prefix)) {
                 std::vector<Row> rows;
                 for (auto& kv : it->second.scan_from(ap->prefix, true)) {
-                    if (kv.first.compare(0, ap->prefix.size(), ap->prefix) != 0) break;
+                    if (!collation::like(kv.first, ap->prefix + "%")) break;
                     add_bucket(kv.second, rows);
                 }
                 return format_result(s, std::move(rows), columns, table, {});
@@ -1743,7 +1755,7 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
             if (auto it = s.indexes.find(ap->index_key); it != s.indexes.end() && like_prefix_scannable(ap->prefix)) {
                 matched = true;
                 for (auto& kv : it->second.scan_from(ap->prefix, true)) {
-                    if (kv.first.compare(0, ap->prefix.size(), ap->prefix) != 0) break;
+                    if (!collation::like(kv.first, ap->prefix + "%")) break;
                     add_bucket(kv.second, topk_rows);
                 }
             }
@@ -2290,7 +2302,7 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
                 const std::string* v = get_col(*rp, (*group_by)[i]);
                 vals[i] = v ? v : &missing;
                 if (group_classes[i] == ValueClass::Number) append_key_part(encoded, normalize_numeric_key(*vals[i]));
-                else append_key_part(encoded, *vals[i]);
+                else append_key_part(encoded, collation::key(*vals[i])); // ('Apple' and 'apple' are one group)
             }
             auto [it, fresh] = group_of.try_emplace(encoded, groups.size());
             if (fresh) {
@@ -2460,7 +2472,7 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
                     // for display purposes only).
                     val.clear();
                 }
-                append_key_part(encoded, distinct_classes[column_index] == ValueClass::Number ? normalize_numeric_key(val) : val);
+                append_key_part(encoded, distinct_classes[column_index] == ValueClass::Number ? normalize_numeric_key(val) : collation::key(val));
             }
             if (seen.insert(encoded).second) kept.push_back(rp);
         }

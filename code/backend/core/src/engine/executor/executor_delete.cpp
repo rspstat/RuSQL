@@ -11,6 +11,7 @@
 // (transaction MVCC mark, or the non-transaction retain) even along the slow path; this
 // mixed behavior is preserved faithfully rather than "fixed" to be fully subquery-aware.
 
+#include "engine/collation.hpp"
 #include "engine/executor/executor.hpp"
 #include "engine/subquery_walk.hpp"
 
@@ -194,7 +195,7 @@ StringResult Executor::exec_delete_inner(SharedDatabase& s, const std::string& t
     // (timeout=0) and reports the outcome. See exec_update_inner's identical CascadeClaim/
     // CascadeAttemptResult/try_cascade_once pattern (executor_update.cpp) for the full
     // reasoning -- restarting the whole cascade computation from scratch after a blocked
-    // retry is safe/idempotent here too: the `it->second == del_val` match check
+    // retry is safe/idempotent here too: the `collation::equal(it->second, del_val)` match check
     // naturally excludes rows already soft-deleted (is_visible() now false) or physically
     // erased (no longer present) by an earlier attempt.
     struct CascadeClaim {
@@ -528,7 +529,7 @@ StringResult Executor::exec_delete_inner(SharedDatabase& s, const std::string& t
                                 for (auto& row : oit->second) {
                                     if (!is_visible(row)) continue;
                                     auto it = row.find(col.name);
-                                    if (it != row.end() && it->second == del_val) {
+                                    if (it != row.end() && collation::equal(it->second, del_val)) {
                                         if (auto sig = claim_or_signal(other_table, row, "Cascade")) return *sig;
                                         Row cascade_old_row = row;
                                         row["_xmax"] = txn_id_str;
@@ -542,7 +543,7 @@ StringResult Executor::exec_delete_inner(SharedDatabase& s, const std::string& t
                             for (auto& r : rows) {
                                 if (!is_visible(r)) continue;
                                 auto it = r.find(col.name);
-                                if (it != r.end() && it->second == del_val) {
+                                if (it != r.end() && collation::equal(it->second, del_val)) {
                                     if (auto sig = claim_or_signal(other_table, r, "Cascade")) return *sig;
                                     cascade_erased.push_back(r);
                                 }
@@ -551,7 +552,7 @@ StringResult Executor::exec_delete_inner(SharedDatabase& s, const std::string& t
                                                        [&](const Row& r) {
                                                            if (!is_visible(r)) return false;
                                                            auto it = r.find(col.name);
-                                                           return it != r.end() && it->second == del_val;
+                                                           return it != r.end() && collation::equal(it->second, del_val);
                                                        }),
                                        rows.end());
                             if (auto opc = single_pk_col(other_table)) {
@@ -580,7 +581,7 @@ StringResult Executor::exec_delete_inner(SharedDatabase& s, const std::string& t
                             for (auto& row : oit->second) {
                                 if (!is_visible(row)) continue;
                                 auto it = row.find(col.name);
-                                if (it != row.end() && it->second == del_val) {
+                                if (it != row.end() && collation::equal(it->second, del_val)) {
                                     if (auto sig = claim_or_signal(other_table, row, "SetNull")) return *sig;
                                     Row cascade_old_row = row;
                                     row[col.name] = EXECUTOR_NULL_VALUE;
@@ -604,7 +605,7 @@ StringResult Executor::exec_delete_inner(SharedDatabase& s, const std::string& t
                             for (auto& row : oit->second) {
                                 if (!is_visible(row)) continue;
                                 auto it = row.find(col.name);
-                                if (it != row.end() && it->second == del_val) {
+                                if (it != row.end() && collation::equal(it->second, del_val)) {
                                     if (auto sig = claim_or_signal(other_table, row, "SetDefault")) return *sig;
                                     Row cascade_old_row = row;
                                     row[col.name] = default_val;

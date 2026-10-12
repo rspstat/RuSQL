@@ -42,14 +42,18 @@ std::unique_ptr<Node> clone_node(const std::unique_ptr<Node>& p) {
     return p ? std::make_unique<Node>(*p) : nullptr;
 }
 
+// The order of two texts' bytes: the tie-break between spellings of one number ("7" and "7.0", "1e3" and "1E3"), which a tree keeps as separate keys.
 int bytes_order(std::string_view a, std::string_view b) {
     const int c = a.compare(b);
     return c < 0 ? -1 : (c > 0 ? 1 : 0);
 }
 
+// The order of two texts: MySQL's default collation (engine/collation.hpp). Texts that are equal in it are ONE key of a tree ('Alice' and 'alice' share an entry).
+int text_order(std::string_view a, std::string_view b) { return collation::compare(a, b); }
+
 int cmp_key_segment(std::string_view a, std::string_view b, KeyKind kind) {
     if (a == b) return 0;
-    if (kind == KeyKind::Text) return bytes_order(a, b);
+    if (kind == KeyKind::Text) return text_order(a, b);
     if (plain_uint(a) && plain_uint(b)) {
         if (a.size() != b.size()) return a.size() < b.size() ? -1 : 1;
         return a.compare(b) < 0 ? -1 : 1;
@@ -73,7 +77,7 @@ int cmp_key_segment(std::string_view a, std::string_view b, KeyKind kind) {
     }
     if (x) return -1;
     if (y) return 1;
-    return bytes_order(a, b);
+    return text_order(a, b);
 }
 } // namespace
 

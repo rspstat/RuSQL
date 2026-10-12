@@ -2,7 +2,14 @@
 
 #include <algorithm>
 
+#include "engine/collation.hpp"
+
 namespace engine {
+
+namespace {
+// A row is locked by its PK's key in the default collation: two INSERTs of 'Bob' and 'bob' (one PK value to the table) must meet on one lock.
+std::pair<std::string, std::string> row_key(const std::string& table, const std::string& pk) { return {table, collation::key(pk)}; }
+} // namespace
 
 LockManager::LockManager(LockManager&& other) noexcept {
     std::lock_guard<std::mutex> g(other.mutex_);
@@ -26,11 +33,11 @@ LockManager& LockManager::operator=(LockManager&& other) noexcept {
     return *this;
 }
 
-std::optional<std::uint64_t> LockManager::try_grant_exclusive_locked(const std::pair<std::string, std::string>& key,
+std::optional<std::uint64_t> LockManager::try_grant_exclusive_locked(const std::pair<std::string, std::string>& key, const std::string& shown,
                                                                        std::uint64_t txn_id) {
     auto it = row_locks_.find(key);
     if (it == row_locks_.end()) {
-        row_locks_[key] = LockEntry{LockEntry::Exclusive{txn_id}};
+        row_locks_[key] = LockEntry{LockEntry::Exclusive{txn_id}, shown};
         return std::nullopt;
     }
 
@@ -44,7 +51,7 @@ std::optional<std::uint64_t> LockManager::try_grant_exclusive_locked(const std::
     // Shared
     auto& holders = std::get<LockEntry::Shared>(entry.data).holders;
     if (holders.size() == 1 && holders.count(txn_id)) {
-        row_locks_[key] = LockEntry{LockEntry::Exclusive{txn_id}};
+        row_locks_[key] = LockEntry{LockEntry::Exclusive{txn_id}, std::string(entry.shown)};
         return std::nullopt;
     }
     for (auto h : holders) {
@@ -53,13 +60,13 @@ std::optional<std::uint64_t> LockManager::try_grant_exclusive_locked(const std::
     return std::nullopt; // unreachable: holders is non-empty and not solely {txn_id}
 }
 
-std::optional<std::uint64_t> LockManager::try_grant_shared_locked(const std::pair<std::string, std::string>& key,
+std::optional<std::uint64_t> LockManager::try_grant_shared_locked(const std::pair<std::string, std::string>& key, const std::string& shown,
                                                                     std::uint64_t txn_id) {
     auto it = row_locks_.find(key);
     if (it == row_locks_.end()) {
         LockEntry::Shared s;
         s.holders.insert(txn_id);
-        row_locks_[key] = LockEntry{std::move(s)};
+        row_locks_[key] = LockEntry{std::move(s), shown};
         return std::nullopt;
     }
 
@@ -98,9 +105,9 @@ std::optional<std::uint64_t> LockManager::try_grant_shared_locked(const std::pai
 LockResult LockManager::acquire(const std::string& table, const std::string& pk, std::uint64_t txn_id,
                                  std::chrono::milliseconds timeout) {
     std::unique_lock<std::mutex> lk(mutex_);
-    auto key = std::make_pair(table, pk);
+    auto key = row_key(table, pk);
 
-    auto conflict_holder = try_grant_exclusive_locked(key, txn_id);
+    auto conflict_holder = try_grant_exclusive_locked(key, pk, txn_id);
     if (!conflict_holder) return LockResult::granted();
 
     if (creates_cycle(txn_id, *conflict_holder)) {
@@ -114,7 +121,7 @@ LockResult LockManager::acquire(const std::string& table, const std::string& pk,
     auto deadline = std::chrono::steady_clock::now() + timeout;
     for (;;) {
         cv_.wait_until(lk, deadline);
-        auto retry_holder = try_grant_exclusive_locked(key, txn_id);
+        auto retry_holder = try_grant_exclusive_locked(key, pk, txn_id);
         if (!retry_holder) {
             wait_for_.erase(txn_id);
             return LockResult::granted();
@@ -130,9 +137,9 @@ LockResult LockManager::acquire(const std::string& table, const std::string& pk,
 LockResult LockManager::acquire_shared(const std::string& table, const std::string& pk, std::uint64_t txn_id,
                                         std::chrono::milliseconds timeout) {
     std::unique_lock<std::mutex> lk(mutex_);
-    auto key = std::make_pair(table, pk);
+    auto key = row_key(table, pk);
 
-    auto conflict_holder = try_grant_shared_locked(key, txn_id);
+    auto conflict_holder = try_grant_shared_locked(key, pk, txn_id);
     if (!conflict_holder) return LockResult::granted();
 
     if (creates_cycle(txn_id, *conflict_holder)) {
@@ -146,7 +153,7 @@ LockResult LockManager::acquire_shared(const std::string& table, const std::stri
     auto deadline = std::chrono::steady_clock::now() + timeout;
     for (;;) {
         cv_.wait_until(lk, deadline);
-        auto retry_holder = try_grant_shared_locked(key, txn_id);
+        auto retry_holder = try_grant_shared_locked(key, pk, txn_id);
         if (!retry_holder) {
             wait_for_.erase(txn_id);
             return LockResult::granted();
@@ -200,7 +207,7 @@ void LockManager::release(std::uint64_t txn_id) {
 
 std::optional<std::uint64_t> LockManager::holder(const std::string& table, const std::string& pk) const {
     std::lock_guard<std::mutex> g(mutex_);
-    auto it = row_locks_.find(std::make_pair(table, pk));
+    auto it = row_locks_.find(row_key(table, pk));
     if (it == row_locks_.end()) return std::nullopt;
     if (std::holds_alternative<LockEntry::Exclusive>(it->second.data)) return std::get<LockEntry::Exclusive>(it->second.data).holder;
     return std::nullopt;
@@ -214,9 +221,9 @@ std::vector<std::tuple<std::string, std::string, std::uint64_t>> LockManager::lo
             [&](const auto& alt) {
                 using T = std::decay_t<decltype(alt)>;
                 if constexpr (std::is_same_v<T, LockEntry::Exclusive>) {
-                    v.emplace_back(key.first, key.second, alt.holder);
+                    v.emplace_back(key.first, entry.shown, alt.holder);
                 } else {
-                    for (auto h : alt.holders) v.emplace_back(key.first, key.second, h);
+                    for (auto h : alt.holders) v.emplace_back(key.first, entry.shown, h);
                 }
             },
             entry.data);

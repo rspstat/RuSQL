@@ -9,7 +9,7 @@
 |---|---|
 | 무엇 | MySQL 호환 프로토콜을 쓰는 **자체 RDBMS 엔진**(C++20) + 데스크톱 클라이언트(Tauri/React) + Claude 연동(MCP) |
 | 1학기 → 2학기 | Rust 프로토타입 → **C++ 전면 재작성**, "기능 추가"에서 **정합성·동시성·성능을 실제로 파고드는 심화**로 |
-| 규모 | 테스트 **639 케이스 / 1,358,145 assertions** (2학기 초 218 케이스 / 3,080 assertions) |
+| 규모 | 테스트 **661 케이스 / 1,435,333 assertions** (2학기 초 218 케이스 / 3,080 assertions) |
 | 엔진 구성 | 파서 → 비용 기반 플래너 → 실행기, MVCC·행 단위 락·데드락 감지, redo 로그 기반 내구성, B+Tree·해시·복합 인덱스 |
 
 ## 2학기에 만든 것 (엔진)
@@ -119,15 +119,17 @@
 | DOUBLE/FLOAT 열을 십진수로 계산(`d / 3 * 3` = 3.0001, `STDDEV`가 4자리로 잘림), `ROUND(8 / 59.27, 2)`가 0.14(몫의 4자리를 다시 반올림), DOUBLE의 `ROUND(2.5)`가 3 | 오류 없이 틀린 답 |
 | `DROP TABLE`이 외래키로 참조되는 테이블도 지움, `UPDATE`의 `SET a = a + 1, b = a`가 옛 a를 봄, `INSERT INTO t SELECT … FROM t`가 서버를 멈춤(읽기 락을 쥔 채 승격) | 참조 깨짐·오답·멈춤 |
 | `START TRANSACTION`, `UPDATE`/`DELETE … ORDER BY … LIMIT`, `SET col = DEFAULT`, `ALTER TABLE … DROP INDEX`, `-2.5e-7`·`3 * -2e2`가 파싱 오류 | 요청 거절 |
+| **모든 글자 비교가 바이트 비교**(MySQL 기본 정렬 규칙 `utf8mb4_0900_ai_ci`는 대소문자·악센트를 구분하지 않음): `WHERE name = 'alice'`가 `'Alice'`를 놓침, `GROUP BY`·`DISTINCT`가 대소문자별로 갈라짐, `UNIQUE`·`PRIMARY KEY`가 `'Alice'`와 `'alice'`를 둘 다 받음, `ORDER BY`가 대문자를 모두 앞에, `LIKE 'a%'`가 `'Apple'`을 놓침 | 오류 없이 틀린 답·제약 |
+| 정렬 규칙을 따르지 않던 곳(R15 시험이 찾음): 인덱스를 거친 `LIKE 'ab%' ORDER BY id`가 빈 결과, 외래키 `CASCADE`/`SET NULL`이 자식 행을 바이트로 찾아 **고아 행**이 남음, 행 락이 철자 그대로라 `'Bob'`/`'bob'` 동시 INSERT가 둘 다 들어감, 갭 락 범위 판정이 바이트, `RANGE` 파티션의 글자 키가 `'Zed'`/`'zed'`를 갈라 `WHERE name = 'zed'`가 한 행만 돌려줌 | 오류 없이 틀린 답·무결성 |
 
-성능·정합성 작업의 커밋들에서 찾은 기존 버그는 모두 117건입니다(전체 목록은 `DATE.md`).
+성능·정합성 작업의 커밋들에서 찾은 기존 버그는 모두 122건입니다(전체 목록은 `DATE.md`).
 
 ## 한계와 앞으로
 
 - 이번 학기 성능 작업은 **의도적으로 여기서 동결**했습니다. 남은 것은 상수 배수 수준(100,000행에서 `ANALYZE`·`INSERT … SELECT`·`UNION ALL`이 1.5~1.7초)이며 `PLAN.md`에 후보로 기록했습니다.
 - 쓰는 문장 안의 상관 서브쿼리, `NATURAL`/`USING` 조인은 아직 중첩 루프입니다.
 - 설계상 범위 밖: XA 분산 트랜잭션, 페이지 단위 버퍼 풀, WAL 복제.
-- 알려진 한계(`PLAN.md`): `= ANY/ALL (서브쿼리)`·행 생성자 비교가 없는 것, AFTER 트리거 실패가 쓴 행을 되돌리지 않는 것, `ORDER BY`·`GROUP BY` 식·집계 인자 안의 서브쿼리(오류로 거절), 타입을 모르는 식(`COALESCE`·`IF` 결과)·`IN (서브쿼리)`·`UNION`의 `ORDER BY` 같은 몇몇 비교는 예전 규칙, 대소문자 구분 비교(MySQL 기본은 구분 안 함).
+- 알려진 한계(`PLAN.md`): `= ANY/ALL (서브쿼리)`·행 생성자 비교가 없는 것, AFTER 트리거 실패가 쓴 행을 되돌리지 않는 것, `ORDER BY`·`GROUP BY` 식·집계 인자 안의 서브쿼리(오류로 거절), 타입을 모르는 식(`COALESCE`·`IF` 결과)·`IN (서브쿼리)`·`UNION`의 `ORDER BY` 같은 몇몇 비교는 예전 규칙, 열 단위 `COLLATE`/`BINARY`가 없는 것(대소문자를 구분하는 열을 만들 수 없음; 파싱 오류로 거절됨), 결과 표를 글자로 다시 읽는 경로(`UNION`·`INSERT … SELECT`·CTE·파생 테이블·`IN (서브쿼리)`)가 값의 앞뒤 공백을 잃는 것.
 - AI는 사설 모델 대신 **Claude + MCP**로 일원화했습니다(`AI.md`).
 
 ## 직접 확인해 보기

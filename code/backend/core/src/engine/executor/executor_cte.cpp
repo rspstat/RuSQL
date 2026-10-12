@@ -72,7 +72,7 @@ StringResult Executor::exec_with(SharedDatabase& s, std::vector<std::pair<std::s
                 std::string key;
                 for (auto& c : cols) {
                     auto it = r.find(c);
-                    key += it != r.end() ? it->second : std::string();
+                    key += it != r.end() ? collation::key(it->second) : std::string();
                     key += '\x01';
                 }
                 return key;

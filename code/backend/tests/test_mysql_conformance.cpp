@@ -15,8 +15,8 @@ namespace fs = std::filesystem;
 
 // Statements whose answers were taken from a real MySQL 8.4 (code/test/diff/vs_mysql.py --emit): functions, operators and casts, queries over a table with
 // NULLs, constraints and writes. Each case is {kind, statement, expected rows}: kind 0 is a setup statement, 1 a query with the rows MySQL gave, 2 a statement
-// that succeeds, 3 one that fails, 4 one that is only run (RuSQL is known to differ from MySQL on it: the case-insensitive collation of MySQL's default, the
-// difference between DOUBLE and DECIMAL arithmetic, ...; it is run so that the tables stay as they were in MySQL's run). Numbers compare by value, rows as a
+// that succeeds, 3 one that fails, 4 one that is only run (RuSQL is known to differ from MySQL on it: DOUBLE aggregates, `||`, WITH ROLLUP, a text with a space at its
+// end that goes through the text of a result (UNION, INSERT ... SELECT, IN (subquery)) ...; it is run so that the tables stay as they were in MySQL's run). Numbers compare by value, rows as a
 // set unless the statement has an ORDER BY.
 
 namespace {
@@ -34,6 +34,9 @@ const Case kTables[] = {
 };
 const Case kConstraints[] = {
 #include "mysql_conformance_constraints.inc"
+};
+const Case kCollation[] = {
+#include "mysql_conformance_collation.inc"
 };
 
 struct TempDataDir {
@@ -190,4 +193,8 @@ TEST_CASE("queries over a table with NULLs give MySQL's answers", "[mysql_confor
 
 TEST_CASE("constraints, defaults, writes and transactions give MySQL's answers", "[mysql_conformance]") {
     run_cases("mc_constraints", kConstraints, sizeof kConstraints / sizeof kConstraints[0]);
+}
+
+TEST_CASE("texts compare, sort, group, join and stay unique by MySQL's default collation", "[mysql_conformance][collation]") {
+    run_cases("mc_collation", kCollation, sizeof kCollation / sizeof kCollation[0]);
 }

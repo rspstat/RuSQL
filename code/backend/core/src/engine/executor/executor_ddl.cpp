@@ -13,6 +13,7 @@
 #include <limits>
 #include <unordered_set>
 
+#include "engine/storage/numeric_key.hpp"
 #include "engine/parser/parser.hpp"
 
 namespace engine {
@@ -727,7 +728,8 @@ StringResult Executor::exec_alter(SharedDatabase& s, const std::string& table, A
                     auto it = row.find(key_columns[k]);
                     const std::string value = it != row.end() ? it->second : std::string(EXECUTOR_NULL_VALUE);
                     if (value == EXECUTOR_NULL_VALUE) has_null = true;
-                    encoded += std::to_string(value.size()) + ":" + value;
+                    const std::string part = collation::key(value);
+                    encoded += std::to_string(part.size()) + ":" + part;
                     shown += (k ? "-" : "") + value;
                 }
                 if (has_null) continue;
@@ -902,16 +904,14 @@ StringResult Executor::exec_create_index(SharedDatabase& s, const std::string& i
 
     if (columns.size() == 1) {
         const std::string& column = columns.front();
-        std::unordered_map<std::string, std::vector<Row>> bucket;
+        BPlusTree tree(key_kinds_of(s.catalog.get_table(table), {column}));
+        IndexBuckets bucket(tree.kinds());
         if (auto it = s.tables.find(table); it != s.tables.end()) {
             for (auto& row : it->second) {
-                if (auto vit = row.find(column); vit != row.end()) bucket[vit->second].push_back(row);
+                if (auto vit = row.find(column); vit != row.end()) bucket.add(vit->second, row);
             }
         }
-        BPlusTree tree(key_kinds_of(s.catalog.get_table(table), {column}));
-        for (auto& [key, rows] : bucket) {
-            tree.insert(key, rows_to_json(rows));
-        }
+        bucket.fill(tree);
         std::string idx_key = table + "_" + index_name;
         s.indexes.insert({idx_key, std::move(tree)});
         s.index_meta.insert({idx_key, {table, column}});
@@ -1219,14 +1219,12 @@ void Executor::rebuild_secondary_indexes(SharedDatabase& s, const std::string& t
         if (meta.first == table) sec.emplace_back(name, meta.second);
     }
     for (auto& [idx_name, col] : sec) {
-        std::unordered_map<std::string, std::vector<Row>> bucket;
-        for (auto& row : rows) {
-            if (auto vit = row.find(col); vit != row.end()) bucket[vit->second].push_back(row);
-        }
         BPlusTree tree(key_kinds_of(s.catalog.get_table(table), {col}));
-        for (auto& [key, bucket_rows] : bucket) {
-            tree.insert(key, rows_to_json(bucket_rows));
+        IndexBuckets bucket(tree.kinds());
+        for (auto& row : rows) {
+            if (auto vit = row.find(col); vit != row.end()) bucket.add(vit->second, row);
         }
+        bucket.fill(tree);
         s.indexes.insert_or_assign(idx_name, std::move(tree));
     }
 

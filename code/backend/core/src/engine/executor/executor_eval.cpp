@@ -16,6 +16,7 @@
 #include <string_view>
 #include <unordered_set>
 
+#include "engine/collation.hpp"
 #include "engine/executor/builtin_functions.hpp"
 #include "engine/numeric_text.hpp"
 #include "engine/parser/parser.hpp"
@@ -208,16 +209,11 @@ bool takes_exact_numbers(const std::string& upper) {
 // What a value written without quotes in an IN list or after BETWEEN is: a number, or (a name, @variable) not told.
 ValueClass written_class(const std::string& value, bool quoted) { return quoted ? ValueClass::Text : (parse_number(value) ? ValueClass::Number : ValueClass::Unknown); }
 
-bool like_match(std::string_view val, std::string_view pat) {
-    if (pat.empty()) return val.empty();
-    if (val.empty()) {
-        if (pat.front() == '%') return like_match(val, pat.substr(1));
-        return false;
-    }
-    if (pat.front() == '%') return like_match(val.substr(1), pat) || like_match(val, pat.substr(1));
-    if (pat.front() == '_') return like_match(val.substr(1), pat.substr(1));
-    return val.front() == pat.front() && like_match(val.substr(1), pat.substr(1));
-}
+// LIKE: `%` any run of characters, `_` one character, the characters compared by the default collation ('A' matches 'a', 'e' matches 'é').
+bool like_match(std::string_view val, std::string_view pat) { return collation::like(val, pat); }
+
+// REGEXP does not tell upper case from lower case either (MySQL 8 matches by the collation of the text)
+constexpr auto kRegexFlags = std::regex::ECMAScript | std::regex::icase;
 
 } // namespace
 
@@ -558,13 +554,13 @@ Executor::Tri Executor::eval_single3(const Row& row, const Condition& cond) {
             return tri(!like_match(val, *effective_lit));
         case Operator::Regexp:
             try {
-                return tri(std::regex_search(val, std::regex(*effective_lit)));
+                return tri(std::regex_search(val, std::regex(*effective_lit, kRegexFlags)));
             } catch (...) {
                 return Tri::False;
             }
         case Operator::NotRegexp:
             try {
-                return tri(!std::regex_search(val, std::regex(*effective_lit)));
+                return tri(!std::regex_search(val, std::regex(*effective_lit, kRegexFlags)));
             } catch (...) {
                 return Tri::True;
             }

@@ -252,7 +252,8 @@ bool ref_number(const std::string& s, double& out) {
 int ref_cmp(const std::string& a, const std::string& b, bool text) {
     double x, y;
     if (!text && ref_number(a, x) && ref_number(b, y)) return x < y ? -1 : (x > y ? 1 : 0);
-    return a < b ? -1 : (a > b ? 1 : 0);
+    const int c = collation::compare(a, b); // (texts: the default collation, 'abc' = 'ABC')
+    return c < 0 ? -1 : (c > 0 ? 1 : 0);
 }
 } // namespace
 

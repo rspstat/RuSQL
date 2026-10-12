@@ -54,7 +54,7 @@ bool Executor::win_order_eq(const Row& a, const Row& b, const std::vector<OrderB
         const std::string* bv = get_col(b, ord.column);
         std::string as = av ? *av : std::string();
         std::string bs = bv ? *bv : std::string();
-        return as == bs;
+        return cmp_key(as, bs, ord.cls) == 0; // (peers: equal by the comparison -- 'Alice' and 'alice' are one rank)
     });
 }
 
@@ -74,7 +74,7 @@ std::vector<Row> Executor::compute_window_functions(std::vector<Row> rows, const
             std::vector<std::string> pk;
             for (auto& c : wf->partition_by) {
                 const std::string* v = get_col(rows[i], c);
-                pk.push_back(v ? *v : std::string());
+                pk.push_back(v ? collation::key(*v) : std::string());
             }
             if (partition_map.find(pk) == partition_map.end()) partition_order.push_back(pk);
             partition_map[pk].push_back(i);

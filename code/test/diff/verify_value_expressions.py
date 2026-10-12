@@ -21,6 +21,7 @@ import argparse, os, random, sys
 from fractions import Fraction
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import collation_model as C
 import diff_builds as D
 
 
@@ -198,7 +199,7 @@ def like(value, pattern):
         return any(like(value[i:], pattern[1:]) for i in range(len(value) + 1))
     if not value:
         return False
-    if pattern[0] == "_" or pattern[0] == value[0]:
+    if pattern[0] == "_" or C.key(pattern[0]) == C.key(value[0]):
         return like(value[1:], pattern[1:])
     return False
 
@@ -214,7 +215,8 @@ def gen_bool(rng, depth, cols=True):
                 p, q = a.ev(row), b.ev(row)
                 if p is None or q is None:
                     return None
-                return {"=": p == q, "<>": p != q, "<": p < q, ">=": p >= q}[op]
+                c = C.compare(p, q)  # (texts compare by the default collation: 'a' = 'A')
+                return {"=": c == 0, "<>": c != 0, "<": c < 0, ">=": c >= 0}[op]
 
             return X(f"{a.sql} {op} {b.sql}", 4, ev_s)
         left, right = gen_num(rng, depth - 1, cols), gen_num(rng, depth - 1, cols)

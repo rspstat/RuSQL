@@ -106,7 +106,7 @@ enum class Cls { Number, Text };
 
 // a column's value against a written value: -1, 0 or 1
 int ref_compare(Cls column, const std::string& value, bool quoted, const std::string& written) {
-    if (column == Cls::Text && quoted) return sign(value.compare(written)); // two strings: as strings
+    if (column == Cls::Text && quoted) return sign(collation::compare(value, written)); // two strings: as strings, by the default collation
     const double x = mysql_number(value), y = mysql_number(written);
     return x < y ? -1 : (x > y ? 1 : 0);
 }
@@ -145,7 +145,13 @@ TEST_CASE("every key of a VARCHAR column is found through every kind of index an
             default: distinct.insert(std::string(1, static_cast<char>('a' + rng() % 26)) + std::to_string(rng() % 50)); break;
         }
     }
-    std::vector<std::string> keys(distinct.begin(), distinct.end());
+    std::vector<std::string> keys;
+    {
+        std::set<std::string> same; // ('A5' and 'a5' are one key of a VARCHAR column: keep the first of each)
+        for (auto& k : distinct) {
+            if (same.insert(collation::key(k)).second) keys.push_back(k);
+        }
+    }
     std::shuffle(keys.begin(), keys.end(), rng);
     std::string pk_values, other_values;
     for (std::size_t i = 0; i < keys.size(); i++) {
@@ -162,15 +168,16 @@ TEST_CASE("every key of a VARCHAR column is found through every kind of index an
             REQUIRE(first_column(ex, std::string("SELECT n FROM ") + t + " WHERE code = '" + keys[i] + "'") == std::vector<std::string>{n});
         }
     }
-    // byte order, however the keys look
+    // the order of the collation, however the keys look
+    auto by_collation = [](const std::string& x, const std::string& y) { return collation::compare(x, y) < 0; };
     std::vector<std::string> sorted = keys;
-    std::sort(sorted.begin(), sorted.end());
+    std::sort(sorted.begin(), sorted.end(), by_collation);
     REQUIRE(first_column(ex, "SELECT code FROM pk ORDER BY code") == sorted);
     REQUIRE(first_column(ex, "SELECT code FROM sec ORDER BY code") == sorted);
-    // a range of texts is a range of bytes: '10' < '9' < '9a'
+    // a range of texts is a range of the collation: '10' < '9' < '9a'
     std::vector<std::string> in_range;
     for (auto& k : sorted) {
-        if (k > "10" && k <= "9") in_range.push_back(k);
+        if (collation::compare(k, "10") > 0 && collation::compare(k, "9") <= 0) in_range.push_back(k);
     }
     REQUIRE(first_column(ex, "SELECT code FROM pk WHERE code > '10' AND code <= '9' ORDER BY code") == in_range);
     REQUIRE(first_column(ex, "SELECT code FROM sec WHERE code > '10' AND code <= '9' ORDER BY code") == in_range);
@@ -181,14 +188,14 @@ TEST_CASE("every key of a VARCHAR column is found through every kind of index an
             const std::string where = "code " + op + " '" + bound + "'";
             std::vector<std::string> expected;
             for (auto& k : sorted) {
-                const int c = k.compare(bound);
+                const int c = collation::compare(k, bound);
                 if (op == ">" ? c > 0 : op == ">=" ? c >= 0 : op == "<" ? c < 0 : c <= 0) expected.push_back(k);
             }
             INFO(where);
             // (without ORDER BY the statement takes the index paths; the rows come in the order of the index, so they are compared sorted)
             for (const char* t : {"pk", "sec", "hsh", "plain"}) {
                 auto got = first_column(ex, std::string("SELECT code FROM ") + t + " WHERE " + where);
-                std::sort(got.begin(), got.end());
+                std::sort(got.begin(), got.end(), by_collation);
                 REQUIRE(got == expected);
                 auto ordered = first_column(ex, std::string("SELECT code FROM ") + t + " WHERE " + where + " ORDER BY code");
                 REQUIRE(ordered == expected);
@@ -354,7 +361,7 @@ TEST_CASE("every comparison of a random table matches the reference with and wit
             const std::string row_sql = "(" + std::to_string(i) + ", " + (r.s_null ? "NULL" : "'" + r.s + "'") + ", " + (r.n_null ? "NULL" : std::to_string(r.n)) + ", " +
                                         (r.p_null ? "NULL" : r.p) + ")";
             values += (i > 1 ? ", " : "") + row_sql;
-            if (!r.s_null && keyed_seen.insert(r.s).second) {
+            if (!r.s_null && keyed_seen.insert(collation::key(r.s)).second) {
                 keyed_values += std::string(keyed_values.empty() ? "" : ", ") + "('" + r.s + "', " + std::to_string(i) + ", " + (r.n_null ? "NULL" : std::to_string(r.n)) + ", " +
                                 (r.p_null ? "NULL" : r.p) + ")";
             }
@@ -443,7 +450,7 @@ TEST_CASE("every comparison of a random table matches the reference with and wit
             std::vector<int> expected_keyed;
             std::set<std::string> first_seen;
             for (auto& r : rows) {
-                if (!r.s_null && first_seen.insert(r.s).second && holds(r)) expected_keyed.push_back(r.id);
+                if (!r.s_null && first_seen.insert(collation::key(r.s)).second && holds(r)) expected_keyed.push_back(r.id);
             }
             REQUIRE(ids(ex, "SELECT id FROM keyed WHERE " + sql_cond + " ORDER BY id") == expected_keyed);
         }

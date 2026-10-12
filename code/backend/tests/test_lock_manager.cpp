@@ -1,7 +1,10 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <optional>
+#include <string>
 #include <thread>
+#include <vector>
 
 #include "catch.hpp"
 #include "engine/lock_manager.hpp"
@@ -361,4 +364,31 @@ TEST_CASE("a sleeping waiter's wait_for_ edge tracks the current holder after it
     lm.release(remaining_holder);
     waiter.join();
     REQUIRE(lm.holder("t", "1") == 1u);
+}
+
+TEST_CASE("a row is locked by its key in the default collation, and listed as it was written", "[lock_manager][collation]") {
+    LockManager lm;
+    // 'Bob' and 'bob' (and 'BOB') are one primary key value, so one row to lock; 'bob ' (a space at the end) is another
+    REQUIRE(lm.acquire("t", "Bob", 1).kind == LockResult::Kind::Granted);
+    auto r = lm.acquire("t", "bob", 2);
+    REQUIRE(r.kind == LockResult::Kind::Conflict);
+    REQUIRE(r.holder == 1);
+    REQUIRE(lm.acquire("t", "BOB", 1).kind == LockResult::Kind::Granted); // (the holder meets itself)
+    REQUIRE(lm.acquire("t", "bob ", 2).kind == LockResult::Kind::Granted);
+    REQUIRE(lm.acquire("t", "\303\211mile", 1).kind == LockResult::Kind::Granted);
+    REQUIRE(lm.acquire("t", "emile", 2).kind == LockResult::Kind::Conflict); // (accents do not count either)
+    REQUIRE(lm.holder("t", "bOb") == std::optional<std::uint64_t>(1));
+    REQUIRE(lm.holder("t", "other").has_value() == false);
+    // shared locks too
+    REQUIRE(lm.acquire_shared("t", "Carol", 3).kind == LockResult::Kind::Granted);
+    REQUIRE(lm.acquire_shared("t", "CAROL", 4).kind == LockResult::Kind::Granted);
+    REQUIRE(lm.acquire("t", "carol", 5).kind == LockResult::Kind::Conflict);
+    // the list shows the spelling of the first locker, not the key
+    std::vector<std::string> shown;
+    for (auto& [table, pk, holder] : lm.lock_rows()) shown.push_back(pk + ":" + std::to_string(holder));
+    std::sort(shown.begin(), shown.end());
+    const std::vector<std::string> expected = {"Bob:1", "Carol:3", "Carol:4", "bob :2", "\303\211mile:1"};
+    REQUIRE(shown == expected);
+    lm.release(1);
+    REQUIRE(lm.acquire("t", "bOB", 2).kind == LockResult::Kind::Granted);
 }

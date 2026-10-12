@@ -5,6 +5,7 @@
 // (the last with only the Phase 8a DDL cases wired up so far).
 
 #include "engine/executor/executor.hpp"
+#include "engine/storage/numeric_key.hpp"
 #include "engine/subquery_walk.hpp"
 
 #include <algorithm>
@@ -296,14 +297,12 @@ Executor::Executor(const std::string& dir, std::size_t buffer_pool_capacity) {
         std::vector<BPlusTree> built(sec_rebuild_work.size());
         ThreadPool::global().parallel_for(sec_rebuild_work.size(), [&](std::size_t i) {
             auto& work = sec_rebuild_work[i];
-            std::unordered_map<std::string, std::vector<Row>> bucket;
-            for (auto& row : work.rows) {
-                if (auto vit = row.find(work.column); vit != row.end()) bucket[vit->second].push_back(row);
-            }
             BPlusTree t(work.kinds);
-            for (auto& [k, bucket_rows] : bucket) {
-                t.insert(k, rows_to_json(bucket_rows));
+            IndexBuckets bucket(t.kinds());
+            for (auto& row : work.rows) {
+                if (auto vit = row.find(work.column); vit != row.end()) bucket.add(vit->second, row);
             }
+            bucket.fill(t);
             built[i] = std::move(t);
         });
         for (std::size_t i = 0; i < sec_rebuild_work.size(); i++) {

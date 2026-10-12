@@ -2,7 +2,8 @@
 
   python verify_compare.py <engine_server.exe> [--statements N] [--seed S] [--rows R]
 
-MySQL compares by type, not by what a text looks like: two strings compare as strings ('10' < '9', '007' and '7' are different), a number and anything
+MySQL compares by type, not by what a text looks like: two strings compare as strings by the default collation utf8mb4_0900_ai_ci ('10' < '9', '007' and '7'
+are different, 'abc' and 'ABC' are equal; collation_model.py), a number and anything
 else compare as numbers (a string by the number it starts with: 'abc' is 0, '12abc' is 12). Four tables hold the same random rows -- a VARCHAR column
 `s`, an INT `n`, a DECIMAL `p` and a BIGINT `b` (values around 2^53) -- with no index, with an index on every column, with hash indexes, and with `s` as
 the PRIMARY KEY. Every random statement is run on each and compared with a reference computed here from the rows (exact rational arithmetic, so
@@ -19,6 +20,7 @@ import argparse, os, random, re, sys
 from fractions import Fraction
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import collation_model as C
 import diff_builds as D
 
 NUMBER = re.compile(r"^[ \t\n\r\v\f]*([+-]?(?:[0-9]+\.?[0-9]*|\.[0-9]+)(?:[eE][+-]?[0-9]+)?)")
@@ -38,7 +40,7 @@ def number_of(text):
 def compare(column_class, value, quoted, written):
     """-1, 0 or 1: the value of a column against a literal written as a string (quoted) or as a number."""
     if column_class == "text" and quoted:
-        return (value > written) - (value < written)
+        return C.compare(value, written)
     x, y = number_of(value), number_of(written)
     return (x > y) - (x < y)
 
@@ -97,8 +99,8 @@ def main():
         db.execute("CREATE TABLE keyed (s VARCHAR(20) PRIMARY KEY, id INT, n INT, p DECIMAL(10, 2), b BIGINT)")
         keyed_rows = []
         for r in rows:
-            if r["s"] is not None and r["s"] not in seen:
-                seen.add(r["s"])
+            if r["s"] is not None and C.key(r["s"]) not in seen:
+                seen.add(C.key(r["s"]))
                 keyed_rows.append(r)
         out = db.execute("INSERT INTO keyed VALUES " + ", ".join("(" + ", ".join(sql_value(r, c) for c in ("s", "id", "n", "p", "b")) + ")" for r in keyed_rows))
         if out.startswith("ERR"):
@@ -153,7 +155,7 @@ def main():
 
         def sort_key(column):
             if COLUMNS[column] == "text":
-                return lambda r: (r[column] is not None, r[column] or "", r["id"])
+                return lambda r: (r[column] is not None, C.key(r[column] or ""), r["id"])
             return lambda r: (r[column] is not None, number_of(r[column]) if r[column] is not None else Fraction(0), r["id"])
 
         checked = {"where": 0, "order": 0, "extreme": 0, "join": 0}
@@ -186,7 +188,7 @@ def main():
                 if desc:
                     # DESC reverses the column order; the ties keep the ascending id order
                     ordered = sorted(rows_t, key=lambda r: r["id"])
-                    ordered = sorted(ordered, key=lambda r: ((r[column] is not None), (r[column] or "") if COLUMNS[column] == "text" else (number_of(r[column]) if r[column] is not None else Fraction(0))), reverse=True)
+                    ordered = sorted(ordered, key=lambda r: ((r[column] is not None), C.key(r[column] or "") if COLUMNS[column] == "text" else (number_of(r[column]) if r[column] is not None else Fraction(0))), reverse=True)
                 want = [(str(r["id"]),) for r in ordered]
                 if limit:
                     want = want[:limit]
@@ -201,13 +203,13 @@ def main():
                 if not present:
                     want = [("NULL", "NULL")]
                 elif COLUMNS[column] == "text":
-                    want = [(min(present), max(present))]
+                    want = [(min(present, key=C.key), max(present, key=C.key))]  # (equal texts: either one)
                 else:
                     smallest = min(present, key=number_of)
                     largest = max(present, key=number_of)
                     want = [(smallest, largest)]
                 checked["extreme"] += 1
-                if got is None or len(got) != 1 or (COLUMNS[column] == "text" and got != want) or (
+                if got is None or len(got) != 1 or (COLUMNS[column] == "text" and tuple(C.key(c) for c in got[0]) != tuple(C.key(c.strip(" ")) for c in want[0])) or (
                         COLUMNS[column] == "number" and tuple(number_of(c) for c in got[0]) != tuple(number_of(c) for c in want[0])):
                     print("MIN/MAX:", column, table, "got", got, "expected", want)
                     return 1
@@ -222,7 +224,7 @@ def main():
                         if a[left] is None or b[right] is None:
                             continue
                         if COLUMNS[left] == "text" and COLUMNS[right] == "text":
-                            equal = a[left] == b[right]
+                            equal = C.compare(a[left], b[right]) == 0
                         else:
                             equal = number_of(a[left]) == number_of(b[right])
                         if equal:

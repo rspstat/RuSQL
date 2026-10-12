@@ -21,7 +21,7 @@ bool try_parse_f64(const std::string& s, double& out) {
 int sort_cmp(const std::string& a, const std::string& b) {
     double af, bf;
     if (try_parse_f64(a, af) && try_parse_f64(b, bf)) return compare_numbers(a, b); // (integers exactly)
-    return a.compare(b) < 0 ? -1 : (a.compare(b) > 0 ? 1 : 0);
+    return collation::compare(a, b);
 }
 
 std::vector<std::string> non_qualified_keys(const Row* r) {
@@ -295,7 +295,7 @@ std::optional<std::vector<Row>> hashed_join_verified(const std::vector<Row>& lef
     if (join_type != JoinType::Inner && join_type != JoinType::Left && join_type != JoinType::Right && join_type != JoinType::FullOuter) {
         return std::nullopt;
     }
-    auto norm = [exact_keys](const std::string& key) { return exact_keys ? key : normalize_numeric_key(key); };
+    auto norm = [exact_keys](const std::string& key) { return exact_keys ? collation::key(key) : normalize_numeric_key(key); };
     std::vector<const std::string*> right_keys, left_keys;
     right_keys.reserve(right.size());
     left_keys.reserve(left.size());

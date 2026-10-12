@@ -358,7 +358,7 @@ int ref_segment(const std::string& a, const std::string& b) {
     }
     if (na) return -1;
     if (nb) return 1;
-    return sign(a.compare(b));
+    return sign(collation::compare(a, b)); // (text: MySQL's default collation)
 }
 int ref_cmp_keys(const std::string& a, const std::string& b) {
     std::size_t pa = 0, pb = 0;
@@ -444,9 +444,17 @@ std::vector<std::string> mixed_keys(unsigned seed, std::size_t count) {
     return std::vector<std::string>(keys.begin(), keys.end());
 }
 
-TEST_CASE("a tree of text keys is ordered by bytes and finds every key", "[btree][key_kinds]") {
+TEST_CASE("a tree of text keys is ordered by the collation and finds every key", "[btree][key_kinds]") {
     for (unsigned seed = 1; seed <= 4; seed++) {
         auto keys = mixed_keys(seed, 1500);
+        { // ('A5' and 'a5' are one key of a text tree: keep the first of each)
+            std::set<std::string> seen;
+            std::vector<std::string> unique;
+            for (auto& k : keys) {
+                if (seen.insert(collation::key(k)).second) unique.push_back(k);
+            }
+            keys = std::move(unique);
+        }
         std::mt19937 rng(seed);
         std::shuffle(keys.begin(), keys.end(), rng);
         BPlusTree tree(std::vector<KeyKind>{KeyKind::Text});
@@ -460,18 +468,37 @@ TEST_CASE("a tree of text keys is ordered by bytes and finds every key", "[btree
         auto all = tree.collect_all_kv();
         REQUIRE(all.size() == keys.size());
         std::vector<std::string> sorted = keys;
-        std::sort(sorted.begin(), sorted.end()); // bytes
+        std::sort(sorted.begin(), sorted.end(), [](const std::string& x, const std::string& y) { return collation::compare(x, y) < 0; });
         for (std::size_t i = 0; i < sorted.size(); i++) REQUIRE(all[i].first == sorted[i]);
-        // a range is a range of bytes ('10' < '9' < '9a')
+        // a range is a range of the collation ('10' < '9' < '9a')
         std::vector<std::string> in_range;
         for (auto& k : sorted) {
-            if (k >= "10" && k <= "9") in_range.push_back(k);
+            if (collation::compare(k, "10") >= 0 && collation::compare(k, "9") <= 0) in_range.push_back(k);
         }
         REQUIRE(tree.range_keys("10", "9") == in_range);
         // deleting every other key leaves the others findable
         for (std::size_t i = 0; i < keys.size(); i += 2) tree.remove(keys[i]);
         for (std::size_t i = 0; i < keys.size(); i++) REQUIRE(tree.search(keys[i]).has_value() == (i % 2 == 1));
     }
+}
+
+TEST_CASE("texts that are equal in the collation are one key of a text tree", "[btree][key_kinds][collation]") {
+    BPlusTree tree(std::vector<KeyKind>{KeyKind::Text});
+    tree.insert("Alice", "v1");
+    tree.insert("alice", "v2"); // (the same key: the value is replaced, the first text stays)
+    tree.insert("ALICE ", "v3"); // (a trailing space counts)
+    tree.insert("Bob", "v4");
+    REQUIRE(tree.collect_all_kv().size() == 3);
+    REQUIRE(*tree.search("ALICE") == "v2");
+    REQUIRE(*tree.search("aLiCe ") == "v3");
+    REQUIRE_FALSE(tree.search("carol").has_value());
+    std::vector<std::string> keys;
+    for (auto& [k, v] : tree.collect_all_kv()) keys.push_back(k);
+    REQUIRE(keys == std::vector<std::string>{"Alice", "ALICE ", "Bob"});
+    // a range from the collation's point of view
+    REQUIRE(tree.range_keys("a", "b").size() == 2);
+    tree.remove("alice");
+    REQUIRE_FALSE(tree.search("Alice").has_value());
 }
 
 TEST_CASE("a tree of number keys is ordered by value, integers exactly", "[btree][key_kinds]") {

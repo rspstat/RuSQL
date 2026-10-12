@@ -31,6 +31,7 @@
 #include <cctype>
 #include <charconv>
 
+#include "engine/collation.hpp"
 #include "engine/planner.hpp"
 
 namespace engine {
@@ -47,7 +48,7 @@ int cmp_val(const std::string& a, const std::string& b) {
     auto da = parse_f64(a);
     auto db = parse_f64(b);
     if (da && db) return (*da < *db) ? -1 : (*da > *db ? 1 : 0);
-    return (a < b) ? -1 : (a > b ? 1 : 0);
+    return collation::compare(a, b); // (texts: the default collation, so 'Zed' and 'zed' are one value and go to one partition)
 }
 
 // Duplicated from executor_core.cpp's anonymous-namespace qualify_local (different TU).
@@ -105,7 +106,7 @@ std::string Executor::partition_child_for_value(const PartitionBy& info, const s
             return ""; // exceeds every bound, no MAXVALUE catch-all -- caller must error
         case PartitionKind::List:
             for (auto& def : info.partitions) {
-                if (std::find(def.list_values.begin(), def.list_values.end(), value) != def.list_values.end()) return def.child_table;
+                if (std::any_of(def.list_values.begin(), def.list_values.end(), [&](const std::string& v) { return collation::equal(v, value); })) return def.child_table;
             }
             return "";
         case PartitionKind::Hash: {
@@ -168,7 +169,7 @@ std::vector<std::string> Executor::prune_partition_children(const PartitionBy& i
             std::vector<std::string> pruned;
             for (auto& def : info.partitions) {
                 bool any = std::any_of(values->begin(), values->end(), [&](const std::string& v) {
-                    return std::find(def.list_values.begin(), def.list_values.end(), v) != def.list_values.end();
+                    return std::any_of(def.list_values.begin(), def.list_values.end(), [&](const std::string& listed) { return collation::equal(listed, v); });
                 });
                 if (any) pruned.push_back(def.child_table);
             }

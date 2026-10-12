@@ -39,8 +39,8 @@ std::optional<std::string> Executor::update_unique_violation(SharedDatabase& s, 
         std::unordered_set<std::string> held_by_targets; // the values the rows being rewritten hold right now
         for (std::size_t i = 0; i < news.size(); i++) {
             std::string ov = get(*olds[i], col.name), nv = get(news[i], col.name);
-            held_by_targets.insert(ov);
-            if (ov != nv) any_changed = true;
+            held_by_targets.insert(collation::key(ov));
+            if (!collation::equal(ov, nv)) any_changed = true;
         }
         if (!any_changed) continue;
 
@@ -51,14 +51,14 @@ std::optional<std::string> Executor::update_unique_violation(SharedDatabase& s, 
         for (std::size_t i = 0; i < news.size(); i++) {
             std::string nv = get(news[i], col.name);
             if (skipped(nv)) continue;
-            if (!final_values.insert(nv).second) return dup(nv, col.name);
+            if (!final_values.insert(collation::key(nv)).second) return dup(nv, col.name);
         }
         // 2) a changed value must not be held by a live row this statement does not rewrite. A value
         //    that one of the rewritten rows holds right now is fine (that holder is being replaced);
         //    otherwise any live holder is, by construction, a different row.
         for (std::size_t i = 0; i < news.size(); i++) {
             std::string ov = get(*olds[i], col.name), nv = get(news[i], col.name);
-            if (ov == nv || skipped(nv) || held_by_targets.count(nv)) continue;
+            if (collation::equal(ov, nv) || skipped(nv) || held_by_targets.count(collation::key(nv))) continue;
             if (index_or_scan_exists(s, table, tit->second, col.name, nv, [](const Row& r) { return Executor::is_visible(r); })) {
                 return dup(nv, col.name);
             }
@@ -78,7 +78,8 @@ std::optional<std::string> Executor::update_unique_violation(SharedDatabase& s, 
             for (std::size_t k = 0; k < spec.columns.size(); k++) {
                 const std::string v = get(r, spec.columns[k]);
                 if (v == EXECUTOR_NULL_VALUE && !spec.primary) return std::nullopt; // (a NULL in a UNIQUE key never conflicts)
-                encoded += std::to_string(v.size()) + ":" + v;
+                const std::string part = collation::key(v);
+                encoded += std::to_string(part.size()) + ":" + part;
                 shown += (k ? "-" : "") + v;
             }
             return encoded;

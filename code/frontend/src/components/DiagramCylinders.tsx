@@ -69,8 +69,8 @@ const NODES: Node[] = [
   },
   {
     id: "storage", x: 1085, y: 600, w: 130, h: 104, c: C.storage, name: L("Storage", "스토리지"),
-    desc: L("B+Tree and hash indexes (keys compare as numbers, so 7 = 7.00; a statement rewrites each secondary-index bucket once), in-memory MVCC row versions with a pk-to-position cache, buffer pool (LRU, 64 pages x 16 KB), binary .rdb files with LZ4 compression.",
-            "B+Tree·해시 인덱스(키를 숫자로 비교해 7 = 7.00, 문장당 보조 인덱스 버킷을 한 번만 다시 기록), PK→위치 캐시가 있는 메모리 상의 MVCC 행 버전, 버퍼 풀(LRU, 16KB 페이지 64개), LZ4 압축 바이너리 .rdb 파일."),
+    desc: L("B+Tree and hash indexes (numbers compare as numbers, so 7 = 7.00, and texts by MySQL's default collation, so 'Alice' = 'alice'; a statement rewrites each secondary-index bucket once), in-memory MVCC row versions with a pk-to-position cache, buffer pool (LRU, 64 pages x 16 KB), binary .rdb files with LZ4 compression.",
+            "B+Tree·해시 인덱스(숫자는 값으로 비교해 7 = 7.00, 글자는 MySQL 기본 정렬 규칙으로 비교해 'Alice' = 'alice', 문장당 보조 인덱스 버킷을 한 번만 다시 기록), PK→위치 캐시가 있는 메모리 상의 MVCC 행 버전, 버퍼 풀(LRU, 16KB 페이지 64개), LZ4 압축 바이너리 .rdb 파일."),
   },
   {
     id: "durability", x: 825, y: 600, w: 130, h: 104, c: C.disk, name: L("Durability", "내구성"),

@@ -128,3 +128,19 @@ TEST_CASE("merge_right sets both qualified and bare keys without overwriting exi
     REQUIRE(merged.at("id") == "1");
     REQUIRE(merged.at("name") == "Eng");
 }
+
+TEST_CASE("the join algorithms join texts that are equal in the default collation", "[join][collation]") {
+    // 'Alice' = 'alice', 'bob' = 'BOB', 'Émile' = 'emile' (case and accents do not count); 'bob ' (a space at the end) is another text
+    std::vector<Row> left = {row({{"id", "1"}, {"k", "Alice"}}), row({{"id", "2"}, {"k", "bob"}}), row({{"id", "3"}, {"k", "\303\211mile"}}),
+                             row({{"id", "4"}, {"k", "bob "}}), row({{"id", "5"}, {"k", "zed"}}), row({{"id", "6"}, {"k", "NULL"}})};
+    std::vector<Row> right = {row({{"rid", "carol"}, {"k", "carol"}}), row({{"rid", "e"}, {"k", "emile"}}), row({{"rid", "b"}, {"k", "BOB"}}),
+                              row({{"rid", "a"}, {"k", "alice"}}), row({{"rid", "n"}, {"k", "NULL"}})};
+    auto pairs = [](const std::vector<Row>& out) {
+        std::multiset<std::string> p;
+        for (auto& r : out) p.insert(r.at("id") + ":" + r.at("rid"));
+        return p;
+    };
+    const std::multiset<std::string> expected = {"1:a", "2:b", "3:e"};
+    REQUIRE(pairs(hash_join(left, right, JoinType::Inner, "r", "k", "k", {"rid", "k"})) == expected);
+    REQUIRE(pairs(sort_merge_join(left, right, JoinType::Inner, "r", "k", "k", {"rid", "k"})) == expected);
+}

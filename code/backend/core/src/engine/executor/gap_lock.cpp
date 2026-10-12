@@ -7,6 +7,7 @@
 
 #include <charconv>
 
+#include "engine/collation.hpp"
 #include "engine/planner.hpp"
 
 namespace engine {
@@ -25,7 +26,7 @@ int cmp_val(const std::string& a, const std::string& b) {
     auto da = parse_f64(a);
     auto db = parse_f64(b);
     if (da && db) return (*da < *db) ? -1 : (*da > *db ? 1 : 0);
-    return (a < b) ? -1 : (a > b ? 1 : 0);
+    return collation::compare(a, b); // (texts: the default collation, like the WHERE that took the lock)
 }
 
 void narrow_lo(GapRange& range, const std::string& v, bool inclusive) {

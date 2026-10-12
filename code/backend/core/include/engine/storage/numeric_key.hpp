@@ -1,6 +1,6 @@
 #pragma once
 
-// Numeric equivalence of index keys.
+// Numeric equivalence of index keys (and, for a text that is no number, equivalence under MySQL's default collation: 'Alice' and 'alice' share a bucket).
 //
 // A WHERE clause (executor_eval.cpp: eval_single/cmp_num) treats two values as equal when both parse
 // as numbers and are equal as doubles -- `price = 7` matches "7", "7.0", "7.00" and "007" alike -- and
@@ -15,8 +15,14 @@
 #include <cstdio>
 #include <optional>
 #include <string>
+#include <unordered_map>
+#include <utility>
+#include <vector>
 
+#include "engine/collation.hpp"
 #include "engine/numeric_text.hpp"
+#include "engine/row.hpp"
+#include "engine/row_json.hpp"
 #include "engine/storage/btree.hpp"
 
 namespace engine {
@@ -29,12 +35,13 @@ inline bool parse_number_key(const std::string& s, double& out) {
 }
 
 // Numerically equal texts ("7", "7.0", "007", "7e0") map to the same string; anything that is not a number
-// is returned unchanged. NaN is never equal to anything, so it keeps its own text. An integer is its own exact
+// maps to its collation key (collation::key: the same string for texts that are equal in the default collation). NaN is never equal to anything, so it keeps its own text. An integer is its own exact
 // text, so 2^53 + 1 stays apart from 2^53 (as doubles they are one number).
 inline std::string normalize_numeric_key(const std::string& s) {
     if (auto whole = parse_int64_text(s)) return std::to_string(*whole);
     double v;
-    if (!parse_number_key(s, v) || std::isnan(v)) return s;
+    if (!parse_number_key(s, v)) return collation::key(s);
+    if (std::isnan(v)) return s;
     if (std::isinf(v)) return v > 0 ? "inf" : "-inf";
     if (v == std::trunc(v) && std::fabs(v) < 9.2e18) return std::to_string(static_cast<long long>(v)); // "7.0" and "7e0" are "7", "-0" is "0"
     char buf[40];
@@ -74,5 +81,26 @@ inline std::optional<std::string> index_bound(const IndexMap& indexes, const std
     auto it = indexes.find(index_key);
     return it != indexes.end() ? tree_bound(it->second, key, lower) : widen_numeric_bound(key, lower);
 }
+
+// The rows of a secondary index being built: the rows of values the tree takes for one key (equal numbers, or equal texts in the default collation: 'Alice' and
+// 'alice') go to one entry, under the text of the first of them.
+class IndexBuckets {
+public:
+    explicit IndexBuckets(const std::vector<KeyKind>& kinds) : by_number_(!kinds.empty() && kinds.front() == KeyKind::Number) {}
+
+    void add(const std::string& value, const Row& row) {
+        auto& entry = entries_[by_number_ ? value : collation::key(value)];
+        if (entry.second.empty()) entry.first = value;
+        entry.second.push_back(row);
+    }
+
+    void fill(BPlusTree& tree) const {
+        for (auto& [bucket_key, entry] : entries_) tree.insert(entry.first, rows_to_json(entry.second));
+    }
+
+private:
+    bool by_number_;
+    std::unordered_map<std::string, std::pair<std::string, std::vector<Row>>> entries_;
+};
 
 } // namespace engine
