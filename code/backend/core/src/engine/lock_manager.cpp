@@ -7,8 +7,11 @@
 namespace engine {
 
 namespace {
-// A row is locked by its PK's key in the default collation: two INSERTs of 'Bob' and 'bob' (one PK value to the table) must meet on one lock.
-std::pair<std::string, std::string> row_key(const std::string& table, const std::string& pk) { return {table, collation::key(pk)}; }
+// A row is locked by its PK's key in the default collation: two INSERTs of 'Bob' and 'bob' (one PK value to the table) must meet on one lock. The claim on a
+// key over several columns ("d.t#ck:u0", see Executor::unique_key_claims) is a tuple that has been through the collation already.
+std::pair<std::string, std::string> row_key(const std::string& table, const std::string& pk) {
+    return {table, table.find("#ck:") != std::string::npos ? pk : collation::key(pk)};
+}
 } // namespace
 
 LockManager::LockManager(LockManager&& other) noexcept {

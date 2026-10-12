@@ -227,3 +227,24 @@ SELECT COUNT(*) FROM bp2
 UPDATE cu SET email = 'ALICE@X.COM'
 SELECT id FROM ci WHERE name IN (SELECT who FROM cj WHERE cj.id <= ci.n) ORDER BY id
 SELECT id FROM ci WHERE name NOT IN (SELECT who FROM cj WHERE cj.id <= ci.n) ORDER BY id
+# NULL is no text: the strings 'null' and 'Null' are values of their own (the engine writes its NULL as the text NULL)
+--CREATE TABLE nn (id INT PRIMARY KEY, s VARCHAR(10))
+--INSERT INTO nn VALUES (1, NULL), (2, 'null'), (3, 'Null'), (4, 'x'), (5, NULL)
+SELECT s, COUNT(*) FROM nn GROUP BY s ORDER BY s
+SELECT DISTINCT s FROM nn ORDER BY s
+SELECT COUNT(DISTINCT s) FROM nn
+SELECT id FROM nn WHERE s = 'null' ORDER BY id
+SELECT id FROM nn WHERE s IN ('null', 'x') ORDER BY id
+SELECT id FROM nn WHERE s IS NULL ORDER BY id
+SELECT a.id, b.id FROM nn a JOIN nn b ON a.s = b.s WHERE a.id < b.id ORDER BY 1, 2
+SELECT id FROM nn WHERE s LIKE '%' ORDER BY id
+SELECT id FROM nn WHERE s LIKE 'nu%' ORDER BY id
+SELECT id, s FROM nn ORDER BY s, id
+SELECT MIN(s), MAX(s) FROM nn
+SELECT COUNT(*) FROM nn WHERE s <> 'null'
+--CREATE TABLE nu (id INT PRIMARY KEY, s VARCHAR(10) UNIQUE)
+INSERT INTO nu VALUES (1, NULL), (2, NULL), (3, 'null')
+INSERT INTO nu VALUES (4, 'Null')
+SELECT id, s FROM nu ORDER BY id
+UPDATE nu SET s = 'null' WHERE id = 1
+SELECT id, s FROM nu ORDER BY id

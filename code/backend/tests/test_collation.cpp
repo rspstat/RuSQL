@@ -247,3 +247,26 @@ TEST_CASE("LIKE on ASCII texts (the fast path) is the definition of LIKE", "[col
         REQUIRE(collation::like(value, pattern) == reference_like(value, 0, pattern, 0));
     }
 }
+
+TEST_CASE("the text NULL is the engine's NULL: a value of its own, never the word", "[collation]") {
+    REQUIRE(collation::equal("NULL", "NULL"));
+    REQUIRE_FALSE(collation::equal("NULL", "null"));
+    REQUIRE_FALSE(collation::equal("NULL", "Null"));
+    REQUIRE_FALSE(collation::equal("null", "NULL"));
+    REQUIRE(collation::compare("NULL", "null") < 0); // (NULL first)
+    REQUIRE(collation::compare("null", "NULL") > 0);
+    REQUIRE(collation::compare("NULL", "") < 0);
+    REQUIRE(collation::compare("", "NULL") > 0);
+    REQUIRE(collation::compare("NULL", "NULL") == 0);
+    REQUIRE(collation::key("NULL") != collation::key("null"));
+    REQUIRE(collation::key("NULL") != collation::key("Null"));
+    REQUIRE(collation::key("NULL") != collation::key(""));
+    REQUIRE(collation::key("null") == collation::key("Null")); // (the words are the same word)
+    REQUIRE_FALSE(collation::like("NULL", "%"));
+    REQUIRE_FALSE(collation::like("NULL", "nu%"));
+    REQUIRE(collation::like("null", "NU%"));
+    // a text that only contains it is a text
+    REQUIRE(collation::equal("NULLS", "nulls"));
+    REQUIRE(collation::equal(" NULL", " null"));
+    REQUIRE(collation::compare("NULL ", "null ") == 0);
+}

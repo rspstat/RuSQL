@@ -663,6 +663,21 @@ private:
     static std::optional<std::string> coerce_column_value(const ColumnDef& col, std::string& value, std::size_t row);
     static std::optional<std::string> update_unique_violation(SharedDatabase& s, const std::string& table,
                                                               const std::vector<const Row*>& olds, const std::vector<Row>& news);
+    // executor_update_unique.cpp: a claim on a unique value. The duplicate check of an INSERT / UPDATE reads the table, where the row another session is about to
+    // write is not yet, so two sessions writing the same value could both pass it; a claim on the value in the lock manager (like the one on a PRIMARY KEY value)
+    // makes the second wait for the first and look again.
+    struct KeyClaim {
+        std::string lock_table;  // the lock manager's name for the key: "d.t#uk:email" (a UNIQUE column), "d.t#ck:pk" / "d.t#ck:u0" (a key over several columns)
+        std::string lock_key;    // what is locked: the text of the column (the lock manager compares it by the collation), the encoded tuple of a composite key
+        std::string comparable;  // what two rows hold in common when they hold the same key
+        std::string message;     // the duplicate error for it
+        std::vector<std::string> columns;
+    };
+    // The claims `row` needs: its UNIQUE columns that are not NULL, its UNIQUE (a, b) keys with no NULL in them, its composite PRIMARY KEY. With `old_row` only the
+    // keys that differ from the ones of `old_row` (an UPDATE).
+    static std::vector<KeyClaim> unique_key_claims(const TableSchema& schema, const std::string& table, const Row& row, const Row* old_row = nullptr);
+    // Whether `row` holds the key of `claim`.
+    static bool row_holds_claim(const KeyClaim& claim, const Row& row);
     // executor_row_check.cpp: what a rewritten row must satisfy besides PRIMARY KEY / UNIQUE. `changed_cols` are the columns the
     // statement assigned: NOT NULL (also PRIMARY KEY / AUTO_INCREMENT) and the child side of a FOREIGN KEY (not for a value equal
     // to the one in `old_row`, when that is given). nullopt = fine.

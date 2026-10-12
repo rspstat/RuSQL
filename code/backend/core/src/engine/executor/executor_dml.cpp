@@ -1084,6 +1084,10 @@ StringResult Executor::exec_insert_inner(SharedDatabase& s, const std::string& t
             continue;
         }
 
+        // Whenever this row lets go of the data lock to wait (for a gap lock, for a claim), the duplicate checks it has made are out of date: another
+        // session may have written the very value in the meantime. A key is claimed AFTER its check, so a claim granted after such a wait is looked at again.
+        bool dropped_shared = false;
+
         // Gap lock conflict check (InnoDB-style phantom-read prevention): applies
         // regardless of THIS transaction's own isolation level/state -- a gap lock
         // protects its holder, not the inserter (see gap_lock.cpp).
@@ -1125,6 +1129,7 @@ StringResult Executor::exec_insert_inner(SharedDatabase& s, const std::string& t
                     LockResult lr2 = s.lock_mgr.register_gap_conflict(table, my_txn_id, conflict_holder, remaining);
                     reacquire_table_locks_after_block();
                     insert_read_lock = acquire_table_data_locks(s, insert_read_tables, /*exclusive=*/false);
+                    dropped_shared = true;
                     if (lr2.kind == LockResult::Kind::Deadlock) {
                         return StringResult::Err("Deadlock detected: transaction " + std::to_string(my_txn_id) + " waits for transaction " +
                                                   std::to_string(lr2.holder) + " (INSERT '" + table + "'). Transaction " +
@@ -1167,6 +1172,7 @@ StringResult Executor::exec_insert_inner(SharedDatabase& s, const std::string& t
                     lr = block_on_row(s.lock_mgr, table, pk_it->second, claim_txn_id, /*exclusive=*/true, lock_deadline);
                     reacquire_table_locks_after_block();
                     insert_read_lock = acquire_table_data_locks(s, insert_read_tables, /*exclusive=*/false);
+                    dropped_shared = true;
                     if (lr.kind == LockResult::Kind::Deadlock) {
                         return StringResult::Err("Deadlock detected: transaction " + std::to_string(claim_txn_id) + " waits for transaction " +
                                                   std::to_string(lr.holder) + " (INSERT '" + table + "'). Transaction " +
@@ -1177,6 +1183,8 @@ StringResult Executor::exec_insert_inner(SharedDatabase& s, const std::string& t
                                                   "'.'" + gap_pk_col + "' is being concurrently inserted/updated by transaction " +
                                                   std::to_string(lr.holder) + ".");
                     }
+                }
+                if (dropped_shared) { // (this wait, or an earlier one of the row: the value may be there now)
                     if (auto tit = s.tables.find(table); tit != s.tables.end()) {
                         for (auto& r : tit->second) {
                             if (!is_visible(r)) continue;
@@ -1189,6 +1197,56 @@ StringResult Executor::exec_insert_inner(SharedDatabase& s, const std::string& t
                 }
             }
         }
+
+        // The claim of the PRIMARY KEY value above, for the other keys of the row: a UNIQUE column, a UNIQUE (a, b) key, a composite PRIMARY KEY
+        // (Executor::unique_key_claims). Two INSERTs of one value both pass the duplicate check -- neither row is in the table yet -- so they meet here:
+        // the second waits for the first to finish (its row is there then) and looks for the value again. A statement with a unique value of its own
+        // claims it without waiting; the claims are let go at the end of the statement (a transaction's at its COMMIT), like the PRIMARY KEY's.
+        bool skip_after_claims = false;
+        for (auto& claim : unique_key_claims(schema, table, row)) {
+            LockResult lr = s.lock_mgr.acquire(claim.lock_table, claim.lock_key, claim_txn_id);
+            if (lr.kind == LockResult::Kind::Deadlock) {
+                return StringResult::Err("Deadlock detected: transaction " + std::to_string(claim_txn_id) + " waits for transaction " +
+                                          std::to_string(lr.holder) + " (INSERT '" + table + "'). Transaction " + std::to_string(claim_txn_id) + " aborted.");
+            }
+            if (lr.kind == LockResult::Kind::Conflict) {
+                insert_read_lock = DataLockGuard{}; // (never block while holding the data lock, nor the table lock: as for the PRIMARY KEY above)
+                release_table_locks_for_block();
+                lr = block_on_row(s.lock_mgr, claim.lock_table, claim.lock_key, claim_txn_id, /*exclusive=*/true, lock_deadline);
+                reacquire_table_locks_after_block();
+                insert_read_lock = acquire_table_data_locks(s, insert_read_tables, /*exclusive=*/false);
+                dropped_shared = true;
+                if (lr.kind == LockResult::Kind::Deadlock) {
+                    return StringResult::Err("Deadlock detected: transaction " + std::to_string(claim_txn_id) + " waits for transaction " +
+                                              std::to_string(lr.holder) + " (INSERT '" + table + "'). Transaction " + std::to_string(claim_txn_id) + " aborted.");
+                }
+                if (lr.kind != LockResult::Kind::Granted) {
+                    return StringResult::Err("ERROR 1205 (HY000): Lock wait timeout exceeded; " + claim.message + " is being concurrently inserted/updated by transaction " +
+                                              std::to_string(lr.holder) + ".");
+                }
+            }
+            if (!dropped_shared) continue; // (the data lock was never let go: nobody could have written the value since the check)
+            const Row* holder = nullptr; // whoever we waited for (or whoever wrote while we waited for something else) may have written the very value
+            if (auto tit = s.tables.find(table); tit != s.tables.end()) {
+                for (auto& r : tit->second) {
+                    if (is_visible(r) && row_holds_claim(claim, r)) {
+                        holder = &r;
+                        break;
+                    }
+                }
+            }
+            if (!holder) continue;
+            if (std::holds_alternative<InsertConflict::Ignore>(on_conflict.data)) {
+                skip_after_claims = true;
+            } else if (auto* upd = std::get_if<InsertConflict::Update>(&on_conflict.data)) {
+                queue_update(*holder, upd->assignments);
+                skip_after_claims = true;
+            } else {
+                return StringResult::Err(claim.message);
+            }
+            break;
+        }
+        if (skip_after_claims) continue;
 
         // Predicate lock conflict check (SSI phantom detection): unlike the gap-lock loop
         // above, this never blocks the INSERT -- it just flags the *reading* transaction (a

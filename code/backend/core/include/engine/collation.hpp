@@ -9,6 +9,8 @@
 // gives (src/collation_data.inc, made by code/test/collation/); the Hangul syllables, the ideographs and the code points nobody has assigned get theirs by the
 // rules of the algorithm.
 //
+// The text "NULL" is the engine's NULL, not a word: it is the same value as itself only, it sorts before every text, and 'null' / 'Null' are texts like any other.
+//
 // Everything that decides whether two values are the same value -- a comparison, ORDER BY, MIN / MAX, GROUP BY, DISTINCT, IN, a join key, UNIQUE / PRIMARY KEY, an
 // index -- goes through the four functions here.
 
@@ -26,7 +28,7 @@ bool equal(std::string_view a, std::string_view b);
 /// the keys of a grouping. It does NOT keep the order.
 std::string key(std::string_view s);
 
-/// The weights of the text as big-endian 16-bit numbers: the byte order of two sort keys is `compare`.
+/// The weights of the text as big-endian 16-bit numbers: the byte order of two sort keys is `compare`. (NULL is not given a place: ORDER BY puts it first itself.)
 std::string sort_key(std::string_view s);
 
 /// `value LIKE pattern`: `%` is any run of characters and `_` one character; two characters match when they have the same weights ('é' matches 'E').

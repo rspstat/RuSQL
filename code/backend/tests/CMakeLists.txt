@@ -62,6 +62,7 @@ add_executable(engine_tests
     test_mysql_semantics.cpp
     test_collation.cpp
     test_collation_sql.cpp
+    test_unique_claims.cpp
 )
 
 target_link_libraries(engine_tests PRIVATE engine_core)

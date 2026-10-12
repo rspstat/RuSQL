@@ -342,6 +342,7 @@ StringResult Executor::exec_update_inner(SharedDatabase& s, const std::string& t
         bool conflict = false;
         bool stale_positions = false;
         std::string conflict_key;
+        std::string conflict_table = table; // (the lock a conflict is about: the row of this table, or a claim on a unique value)
         {
             auto table_lock = acquire_table_data_locks_mixed(s, {table}, fk_parents);
             auto& rows = tit0->second;
@@ -500,6 +501,41 @@ StringResult Executor::exec_update_inner(SharedDatabase& s, const std::string& t
                 // row returned with the earlier rows already dead and their new versions thrown away --
                 // `UPDATE t SET v = v + 8` failing a CHECK on row 2 silently deleted row 1.
                 // (Targets point into `rows`, so this must stay before the insert below.)
+                // The values the new versions take in a UNIQUE column / key (and in a PRIMARY KEY that changes) are claimed in the lock manager, as an INSERT claims
+                // them: a session that is writing the same value (an INSERT between its duplicate check and its row, another UPDATE) holds the claim, and this
+                // statement then waits for it and starts again -- the check below finds its row. Nothing has been stamped yet, so giving up an attempt costs nothing.
+                for (std::size_t i = 0; i < new_versions.size() && !conflict; i++) {
+                    auto claims = unique_key_claims(*schema0, table, new_versions[i], targets[i]);
+                    if (pk_cols.size() == 1 && new_version_pks[i] != attempt_undo_entries[i].key) {
+                        KeyClaim pk_claim;
+                        pk_claim.lock_table = table;
+                        pk_claim.lock_key = new_version_pks[i];
+                        claims.push_back(std::move(pk_claim));
+                    }
+                    for (auto& claim : claims) {
+                        LockResult lr = s.lock_mgr.acquire(claim.lock_table, claim.lock_key, claim_txn_id);
+                        if (lr.kind == LockResult::Kind::Deadlock) {
+                            return StringResult::Err("Deadlock detected: transaction " + std::to_string(claim_txn_id) + " waits for transaction " +
+                                                      std::to_string(lr.holder) + " (UPDATE '" + table + "'. Transaction " + std::to_string(claim_txn_id) +
+                                                      " aborted.");
+                        }
+                        if (lr.kind == LockResult::Kind::Conflict) {
+                            conflict = true;
+                            conflict_table = claim.lock_table;
+                            conflict_key = claim.lock_key;
+                            break;
+                        }
+                    }
+                }
+                if (conflict) { // (what the tail of this block does with nothing to do is nothing: no stamp, no insert)
+                    targets.clear();
+                    new_versions.clear();
+                    attempt_undo_entries.clear();
+                    attempt_old_images.clear();
+                    attempt_new_images.clear();
+                    new_version_pks.clear();
+                    new_version_pk_found.clear();
+                }
                 {
                     std::vector<const Row*> olds(targets.begin(), targets.end());
                     if (auto violation = update_unique_violation(s, table, olds, new_versions)) return StringResult::Err(*violation);
@@ -560,7 +596,7 @@ StringResult Executor::exec_update_inner(SharedDatabase& s, const std::string& t
         // same table can never proceed, and this statement never gets unblocked either
         // (see release_table_locks_for_block's doc comment in executor.hpp).
         release_table_locks_for_block();
-        auto lr2 = block_on_row(s.lock_mgr, table, conflict_key, claim_txn_id, /*exclusive=*/true, lock_deadline);
+        auto lr2 = block_on_row(s.lock_mgr, conflict_table, conflict_key, claim_txn_id, /*exclusive=*/true, lock_deadline);
         reacquire_table_locks_after_block();
         if (lr2.kind == LockResult::Kind::Deadlock) {
             return StringResult::Err("Deadlock detected: transaction " + std::to_string(claim_txn_id) + " waits for transaction " +
@@ -568,7 +604,7 @@ StringResult Executor::exec_update_inner(SharedDatabase& s, const std::string& t
                                       " aborted.");
         }
         if (lr2.kind != LockResult::Kind::Granted) {
-            return StringResult::Err("ERROR 1205 (HY000): Lock wait timeout exceeded; row '" + conflict_key + "' in '" + table +
+            return StringResult::Err("ERROR 1205 (HY000): Lock wait timeout exceeded; row '" + conflict_key + "' in '" + conflict_table +
                                       "' is held by transaction " + std::to_string(lr2.holder) + ". Cannot UPDATE.");
         }
         // else: granted -- loop back, redo the candidate scan and probe+mutate afresh.

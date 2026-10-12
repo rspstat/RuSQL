@@ -9,6 +9,7 @@
 #include <unordered_set>
 
 #include "engine/executor/executor.hpp"
+#include "engine/storage/numeric_key.hpp"
 
 namespace engine {
 
@@ -109,6 +110,67 @@ std::optional<std::string> Executor::update_unique_violation(SharedDatabase& s, 
         }
     }
     return std::nullopt;
+}
+
+namespace {
+std::string text_of(const Row& r, const std::string& column) {
+    auto it = r.find(column);
+    return it != r.end() ? it->second : std::string(EXECUTOR_NULL_VALUE);
+}
+} // namespace
+
+std::vector<Executor::KeyClaim> Executor::unique_key_claims(const TableSchema& schema, const std::string& table, const Row& row, const Row* old_row) {
+    std::vector<KeyClaim> claims;
+    const std::string bare_table = table.substr(table.rfind('.') == std::string::npos ? 0 : table.rfind('.') + 1);
+    // the key of `columns` in `r` as the lock manager and the comparison see it; nullopt when a column is NULL (a NULL never repeats)
+    auto key_of = [](const Row& r, const std::vector<std::string>& columns, std::string& shown) -> std::optional<std::string> {
+        std::string encoded;
+        shown.clear();
+        for (std::size_t k = 0; k < columns.size(); k++) {
+            const std::string v = text_of(r, columns[k]);
+            if (v == EXECUTOR_NULL_VALUE) return std::nullopt;
+            const std::string part = normalize_numeric_key(v);
+            encoded += std::to_string(part.size()) + ":" + part;
+            shown += (k ? "-" : "") + v;
+        }
+        return encoded;
+    };
+    auto add = [&](std::string lock_table, const std::vector<std::string>& columns, bool composite, std::string label) {
+        std::string shown, old_shown;
+        auto now = key_of(row, columns, shown);
+        if (!now) return;
+        if (old_row) {
+            auto before = key_of(*old_row, columns, old_shown);
+            if (before && *before == *now) return; // the key is not new
+        }
+        KeyClaim claim;
+        claim.lock_table = std::move(lock_table);
+        claim.lock_key = composite ? *now : text_of(row, columns.front());
+        claim.comparable = *now;
+        claim.message = composite ? "Duplicate entry '" + shown + "' for key '" + label + "'" : "Duplicate value '" + shown + "' for column '" + label + "'";
+        claim.columns = columns;
+        claims.push_back(std::move(claim));
+    };
+    for (auto& col : schema.columns) {
+        if (col.unique && !col.primary_key) add(table + "#uk:" + col.name, {col.name}, false, col.name);
+    }
+    if (schema.primary_key_columns.size() > 1) add(table + "#ck:pk", schema.primary_key_columns, true, "PRIMARY");
+    for (std::size_t k = 0; k < schema.unique_keys.size(); k++) {
+        auto& key = schema.unique_keys[k];
+        add(table + "#ck:u" + std::to_string(k), key.columns, true, bare_table + "." + key.name.value_or(key.columns.front()));
+    }
+    return claims;
+}
+
+bool Executor::row_holds_claim(const KeyClaim& claim, const Row& row) {
+    std::string encoded;
+    for (auto& column : claim.columns) {
+        const std::string v = text_of(row, column);
+        if (v == EXECUTOR_NULL_VALUE) return false;
+        const std::string part = normalize_numeric_key(v);
+        encoded += std::to_string(part.size()) + ":" + part;
+    }
+    return encoded == claim.comparable;
 }
 
 } // namespace engine

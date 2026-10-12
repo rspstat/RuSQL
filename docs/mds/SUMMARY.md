@@ -9,7 +9,7 @@
 |---|---|
 | 무엇 | MySQL 호환 프로토콜을 쓰는 **자체 RDBMS 엔진**(C++20) + 데스크톱 클라이언트(Tauri/React) + Claude 연동(MCP) |
 | 1학기 → 2학기 | Rust 프로토타입 → **C++ 전면 재작성**, "기능 추가"에서 **정합성·동시성·성능을 실제로 파고드는 심화**로 |
-| 규모 | 테스트 **661 케이스 / 1,435,333 assertions** (2학기 초 218 케이스 / 3,080 assertions) |
+| 규모 | 테스트 **670 케이스 / 1,435,661 assertions** (2학기 초 218 케이스 / 3,080 assertions) |
 | 엔진 구성 | 파서 → 비용 기반 플래너 → 실행기, MVCC·행 단위 락·데드락 감지, redo 로그 기반 내구성, B+Tree·해시·복합 인덱스 |
 
 ## 2학기에 만든 것 (엔진)
@@ -121,8 +121,10 @@
 | `START TRANSACTION`, `UPDATE`/`DELETE … ORDER BY … LIMIT`, `SET col = DEFAULT`, `ALTER TABLE … DROP INDEX`, `-2.5e-7`·`3 * -2e2`가 파싱 오류 | 요청 거절 |
 | **모든 글자 비교가 바이트 비교**(MySQL 기본 정렬 규칙 `utf8mb4_0900_ai_ci`는 대소문자·악센트를 구분하지 않음): `WHERE name = 'alice'`가 `'Alice'`를 놓침, `GROUP BY`·`DISTINCT`가 대소문자별로 갈라짐, `UNIQUE`·`PRIMARY KEY`가 `'Alice'`와 `'alice'`를 둘 다 받음, `ORDER BY`가 대문자를 모두 앞에, `LIKE 'a%'`가 `'Apple'`을 놓침 | 오류 없이 틀린 답·제약 |
 | 정렬 규칙을 따르지 않던 곳(R15 시험이 찾음): 인덱스를 거친 `LIKE 'ab%' ORDER BY id`가 빈 결과, 외래키 `CASCADE`/`SET NULL`이 자식 행을 바이트로 찾아 **고아 행**이 남음, 행 락이 철자 그대로라 `'Bob'`/`'bob'` 동시 INSERT가 둘 다 들어감, 갭 락 범위 판정이 바이트, `RANGE` 파티션의 글자 키가 `'Zed'`/`'zed'`를 갈라 `WHERE name = 'zed'`가 한 행만 돌려줌 | 오류 없이 틀린 답·무결성 |
+| **같은 `UNIQUE` 값을 두 세션이 동시에 INSERT하면 둘 다 들어감**(UNIQUE 열·`UNIQUE (a, b)`·복합 기본키·기본키 없는 표; 기본키 열만 클레임이 있었음), UPDATE도 같음 | 중복 키가 조용히 들어감 |
+| 행이 무엇이든 기다린 뒤에는 앞서 한 중복 검사가 낡았는데 다시 보지 않음(`AUTO_INCREMENT` 번호 충돌·갭 락 대기 뒤) | 기본키·UNIQUE 중복 |
 
-성능·정합성 작업의 커밋들에서 찾은 기존 버그는 모두 122건입니다(전체 목록은 `DATE.md`).
+성능·정합성 작업의 커밋들에서 찾은 기존 버그는 모두 124건입니다(전체 목록은 `DATE.md`).
 
 ## 한계와 앞으로
 

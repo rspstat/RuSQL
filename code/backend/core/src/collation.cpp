@@ -11,6 +11,10 @@ namespace engine::collation {
 
 namespace {
 
+// The engine's NULL is the text "NULL" (EXECUTOR_NULL_VALUE). It is not the word: 'null' and 'Null' are values and NULL is none, so NULL is never the same value as a
+// text -- in a GROUP BY it is a group of its own, in a UNIQUE column it repeats and 'null' does not collide with it.
+bool is_null_text(std::string_view s) { return s.size() == 4 && s == "NULL"; }
+
 struct Run {
     std::uint32_t start;
     std::uint16_t count;
@@ -231,6 +235,7 @@ std::vector<std::uint32_t> code_points(std::string_view s) {
 } // namespace
 
 int compare(std::string_view a, std::string_view b) {
+    if (is_null_text(a) || is_null_text(b)) return is_null_text(a) ? (is_null_text(b) ? 0 : -1) : 1; // (NULL first)
     Cursor ca(a), cb(b);
     for (;;) {
         std::uint16_t wa = 0, wb = 0;
@@ -255,6 +260,7 @@ std::string sort_key(std::string_view s) {
 }
 
 std::string key(std::string_view s) {
+    if (is_null_text(s)) return "\x02N"; // (the key of a text is printable or starts with \x01)
     if (std::all_of(s.begin(), s.end(), [](char ch) { return ch >= 0x20 && ch <= 0x7E; })) {
         std::string out(s);
         for (char& ch : out) {
@@ -288,6 +294,7 @@ std::string key(std::string_view s) {
 }
 
 bool like(std::string_view value, std::string_view pattern) {
+    if (is_null_text(value)) return false; // (NULL LIKE anything is not true)
     if (all_ascii(value) && all_ascii(pattern)) return like_ascii(value, pattern);
     const std::vector<std::uint32_t> v = code_points(value), p = code_points(pattern);
     constexpr std::size_t none = static_cast<std::size_t>(-1);
