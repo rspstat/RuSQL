@@ -1,5 +1,8 @@
+#include <algorithm>
+#include <cctype>
 #include <cstdlib>
 #include <filesystem>
+#include <random>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -276,4 +279,137 @@ TEST_CASE("a CTE may name its columns: WITH r (n) AS (...)", "[dump_syntax][cte]
     REQUIRE(error_of(ex, "WITH t (a, b) AS (SELECT * FROM sv) SELECT a FROM t").find("*") != std::string::npos);
     // without a list the CTE keeps the names of its query
     REQUIRE(rows_of(ex, "WITH t AS (SELECT id AS k FROM sv WHERE id = 2) SELECT k FROM t") == Rows{{"2"}});
+}
+
+// A statement of several rows finds the rows the table already holds through a hash built once; a one-row statement scans. Both have to give one answer:
+// the same rows written by one statement into a table and one by one into its twin leave the two tables alike, for every way a row can clash (the primary key, a
+// UNIQUE column that has NULLs and capitals, a composite key) and every way of handling it (error, IGNORE, ON DUPLICATE KEY UPDATE, REPLACE).
+TEST_CASE("a statement of several rows and the same rows one by one leave the same table", "[bulk_unique][random]") {
+    TempDataDir dir("bulk_unique");
+    Executor ex(dir.path);
+    ok(ex, "CREATE DATABASE d");
+    ok(ex, "USE d");
+    unsigned seed_count = 3; // RUSQL_FUZZ_SEEDS=40 makes it a long campaign
+    if (const char* e = std::getenv("RUSQL_FUZZ_SEEDS")) seed_count = static_cast<unsigned>(std::strtoul(e, nullptr, 10));
+    for (unsigned seed = 1; seed <= seed_count; seed++) {
+        INFO("seed " << seed);
+        for (const char* suffix : {"a", "b"}) {
+            ok(ex, std::string("DROP TABLE IF EXISTS u_") + suffix);
+            ok(ex, std::string("DROP TABLE IF EXISTS c_") + suffix);
+            ok(ex, std::string("CREATE TABLE u_") + suffix + " (id INT PRIMARY KEY, u VARCHAR(8) UNIQUE, v INT)");
+            ok(ex, std::string("CREATE TABLE c_") + suffix + " (a VARCHAR(4), b INT, v INT, PRIMARY KEY (a, b))");
+        }
+        std::mt19937 rng(seed * 7919u);
+        auto pick = [&](std::size_t n) { return static_cast<std::size_t>(rng() % n); };
+        const std::vector<std::string> words = {"a", "A", "b", "B", "c", "ab", "Ab", "x", "X"};
+        for (int step = 0; step < 150; step++) {
+            const bool composite = pick(2) == 0;
+            const std::size_t mode = pick(4); // 0: plain, 1: IGNORE, 2: ON DUPLICATE KEY UPDATE, 3: REPLACE
+            const std::size_t rows = 2 + pick(5);
+            // distinct keys inside the statement (by the collation): the statement itself holds no clash
+            std::vector<std::string> tuples, seen;
+            std::vector<std::vector<std::string>> parts; // the key columns and v of each row, for the checks that need no twin
+            for (std::size_t r = 0; r < rows; r++) {
+                for (int attempt = 0; attempt < 20; attempt++) {
+                    std::string tuple, key_id;
+                    std::vector<std::string> current_part;
+                    if (composite) {
+                        const std::string a = std::string(1, "xXyY"[pick(4)]);
+                        const int b = static_cast<int>(pick(3));
+                        tuple = "('" + a + "', " + std::to_string(b) + ", " + std::to_string(step * 10 + static_cast<int>(r)) + ")";
+                        key_id = std::string(1, static_cast<char>(std::tolower(static_cast<unsigned char>(a[0])))) + std::to_string(b);
+                        current_part = {a, std::to_string(b), std::to_string(step * 10 + static_cast<int>(r))};
+                    } else {
+                        const int id = 1 + static_cast<int>(pick(14));
+                        const std::string w = pick(5) == 0 ? "NULL" : "'" + words[pick(words.size())] + "'";
+                        std::string lower = w;
+                        for (char& ch : lower) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+                        tuple = "(" + std::to_string(id) + ", " + w + ", " + std::to_string(step * 10 + static_cast<int>(r)) + ")";
+                        key_id = "id" + std::to_string(id) + (w == "NULL" ? "|null" + std::to_string(r) : "|" + lower);
+                        // (two rows clash when they share the id or the lower-cased word)
+                        bool clash = false;
+                        for (auto& other : seen) {
+                            const std::string other_id = other.substr(0, other.find('|')), other_w = other.substr(other.find('|') + 1);
+                            if (other_id == "id" + std::to_string(id) || (w != "NULL" && other_w == lower)) clash = true;
+                        }
+                        if (clash) continue;
+                        current_part = {std::to_string(id), w, std::to_string(step * 10 + static_cast<int>(r))};
+                    }
+                    if (composite && std::find(seen.begin(), seen.end(), key_id) != seen.end()) continue;
+                    seen.push_back(key_id);
+                    parts.push_back(current_part);
+                    tuples.push_back(tuple);
+                    break;
+                }
+            }
+            if (tuples.size() < 2) continue;
+            const std::string table = composite ? "c_" : "u_";
+            std::string values;
+            for (std::size_t k = 0; k < tuples.size(); k++) values += (k ? ", " : "") + tuples[k];
+            const char* verbs[] = {"INSERT INTO ", "INSERT IGNORE INTO ", "INSERT INTO ", "REPLACE INTO "};
+            const std::string tail = mode == 2 ? " ON DUPLICATE KEY UPDATE v = VALUES(v)" : "";
+            INFO("step " << step << ": " << table << " mode " << mode << ": " << values);
+            auto whole = ex.execute_sql(verbs[mode] + table + "a VALUES " + values + tail);
+            if (mode == 0 && whole.is_err()) {
+                // an error leaves the table as it was, and the rows one by one must hit the same clash
+                bool clashed = false;
+                for (auto& tuple : tuples) clashed = ex.execute_sql(std::string(verbs[mode]) + table + "b VALUES " + tuple).is_err() || clashed;
+                REQUIRE(clashed);
+                // the twin kept the rows that went in before the clash: bring it back to the other table's state
+                const std::string cols = composite ? "a, b, v" : "id, u, v";
+                ok(ex, "DELETE FROM " + table + "b");
+                ok(ex, "INSERT INTO " + table + "b SELECT " + cols + " FROM " + table + "a");
+                continue;
+            }
+            REQUIRE(whole.is_ok());
+            for (auto& tuple : tuples) ok(ex, std::string(verbs[mode]) + table + "b VALUES " + tuple + tail);
+            const std::string order = composite ? "SELECT a, b, v FROM c_X ORDER BY a, b" : "SELECT id, u, v FROM u_X ORDER BY id";
+            std::string qa = order, qb = order;
+            qa.replace(qa.find("X"), 1, "a");
+            qb.replace(qb.find("X"), 1, "b");
+            REQUIRE(rows_of(ex, qa) == rows_of(ex, qb));
+            // what the twin cannot tell: no two rows hold one key (by the collation), and a REPLACE leaves the row it wrote
+            for (const char* suffix : {"a", "b"}) {
+                if (composite) {
+                    REQUIRE(cell(ex, std::string("SELECT COUNT(*) FROM c_") + suffix) == cell(ex, std::string("SELECT COUNT(*) FROM (SELECT DISTINCT a, b FROM c_") + suffix + ") d"));
+                } else {
+                    REQUIRE(cell(ex, std::string("SELECT COUNT(u) FROM u_") + suffix) == cell(ex, std::string("SELECT COUNT(DISTINCT u) FROM u_") + suffix));
+                }
+            }
+            if (mode == 3) {
+                for (auto& part : parts) {
+                    const std::string where = composite ? "a = '" + part[0] + "' AND b = " + part[1] : "id = " + part[0];
+                    REQUIRE(cell(ex, "SELECT v FROM " + table + "a WHERE " + where) == part[2]);
+                }
+            }
+        }
+    }
+    // a composite primary key is compared by the table's collation, whether one row is written or several
+    ok(ex, "DROP TABLE IF EXISTS cc");
+    ok(ex, "CREATE TABLE cc (a VARCHAR(10), b INT, PRIMARY KEY (a, b))");
+    ok(ex, "INSERT INTO cc VALUES ('Alice', 1)");
+    REQUIRE(error_of(ex, "INSERT INTO cc VALUES ('alice', 1)").find("Duplicate") != std::string::npos);
+    REQUIRE(error_of(ex, "INSERT INTO cc VALUES ('bob', 1), ('ALICE', 1)").find("Duplicate") != std::string::npos);
+    ok(ex, "INSERT INTO cc VALUES ('alice', 2), ('Bob', 1)");
+    REQUIRE(rows_of(ex, "SELECT COUNT(*) FROM cc") == Rows{{"3"}});
+}
+
+TEST_CASE("REPLACE over a composite primary key is refused as a whole when a replaced row is referenced", "[bulk_unique]") {
+    TempDataDir dir("bulk_unique_replace");
+    Executor ex(dir.path);
+    ok(ex, "CREATE DATABASE d");
+    ok(ex, "USE d");
+    ok(ex, "CREATE TABLE rp (a INT, b INT, v INT, PRIMARY KEY (a, b))");
+    ok(ex, "CREATE TABLE rk (id INT PRIMARY KEY, pa INT, FOREIGN KEY (pa) REFERENCES rp (a))");
+    ok(ex, "INSERT INTO rp VALUES (1, 1, 10), (2, 1, 20), (3, 1, 30)");
+    ok(ex, "INSERT INTO rk VALUES (1, 1)");
+    // several rows: the second one is referenced, so nothing is replaced (the first one too stays)
+    REQUIRE(error_of(ex, "REPLACE INTO rp VALUES (2, 1, 99), (1, 1, 99)").size() > 0);
+    REQUIRE(rows_of(ex, "SELECT a, b, v FROM rp ORDER BY a") == Rows{{"1", "1", "10"}, {"2", "1", "20"}, {"3", "1", "30"}});
+    // one row
+    REQUIRE(error_of(ex, "REPLACE INTO rp VALUES (1, 1, 99)").size() > 0);
+    REQUIRE(rows_of(ex, "SELECT v FROM rp WHERE a = 1") == Rows{{"10"}});
+    // rows that nothing refers to are replaced
+    ok(ex, "REPLACE INTO rp VALUES (2, 1, 98), (3, 1, 97)");
+    REQUIRE(rows_of(ex, "SELECT a, b, v FROM rp ORDER BY a") == Rows{{"1", "1", "10"}, {"2", "1", "98"}, {"3", "1", "97"}});
 }

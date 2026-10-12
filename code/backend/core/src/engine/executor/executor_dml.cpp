@@ -726,6 +726,25 @@ StringResult Executor::exec_insert_inner(SharedDatabase& s, const std::string& t
         }
     }
 
+    // A statement of several rows finds the rows the table already holds with a hash built once -- by the key tuple of a composite primary key, by the
+    // value of each UNIQUE column that has no index of its own -- instead of scanning the table for every row (20,000 rows: 9 s for a UNIQUE column, 23 s for
+    // a composite key, against 0.1 s for a table with neither). A one-row statement keeps the scan: building the hash would cost as much.
+    const bool several_rows = all_values.size() > 1;
+    auto tuple_key = [](const std::vector<std::string>& tuple) { // length-prefixed, so no two different tuples encode alike
+        std::string encoded;
+        for (auto& v : tuple) {
+            const std::string part = collation::key(v);
+            encoded += std::to_string(part.size());
+            encoded += ':';
+            encoded += part;
+        }
+        return encoded;
+    };
+    std::unordered_map<std::string, const Row*> existing_by_pk_tuple;
+    bool existing_by_pk_tuple_built = false;
+    std::vector<std::unordered_map<std::string, const Row*>> existing_by_unique(constraints.size());
+    std::vector<char> existing_by_unique_built(constraints.size(), 0);
+
     for (auto& values : all_values) {
         std::vector<std::string> positional;
         if (!col_list) {
@@ -887,29 +906,48 @@ StringResult Executor::exec_insert_inner(SharedDatabase& s, const std::string& t
                         new_pk_tuple.push_back(pos != col_names.end() ? final_values[static_cast<std::size_t>(pos - col_names.begin())]
                                                                        : std::string());
                     }
-                    for (auto& existing : rows) {
-                        if (!is_visible(existing)) continue;
-                        std::vector<std::string> existing_tuple;
-                        for (auto& pk : pk_cols) {
-                            auto it = existing.find(pk);
-                            existing_tuple.push_back(it != existing.end() ? it->second : std::string());
+                    // the first visible row of the table with this key (by the table's collation: 'Alice' and 'alice' are one key)
+                    const Row* clash = nullptr;
+                    if (several_rows) {
+                        if (!existing_by_pk_tuple_built) {
+                            for (auto& existing : rows) {
+                                if (!is_visible(existing)) continue;
+                                std::vector<std::string> existing_tuple;
+                                for (auto& pk : pk_cols) {
+                                    auto it = existing.find(pk);
+                                    existing_tuple.push_back(it != existing.end() ? it->second : std::string());
+                                }
+                                existing_by_pk_tuple.emplace(tuple_key(existing_tuple), &existing);
+                            }
+                            existing_by_pk_tuple_built = true;
                         }
-                        if (existing_tuple != new_pk_tuple) continue;
+                        if (auto hit = existing_by_pk_tuple.find(tuple_key(new_pk_tuple)); hit != existing_by_pk_tuple.end()) clash = hit->second;
+                    } else {
+                        for (auto& existing : rows) {
+                            if (!is_visible(existing)) continue;
+                            bool same = true;
+                            for (std::size_t k = 0; k < pk_cols.size() && same; k++) {
+                                auto it = existing.find(pk_cols[k]);
+                                same = collation::equal(it != existing.end() ? it->second : std::string(), new_pk_tuple[k]);
+                            }
+                            if (same) {
+                                clash = &existing;
+                                break;
+                            }
+                        }
+                    }
+                    if (clash) {
+                        const Row& existing = *clash;
                         if (std::holds_alternative<InsertConflict::Abort>(on_conflict.data)) {
                             return StringResult::Err("Duplicate composite primary key (" + join_quoted(new_pk_tuple) + ")");
                         }
                         if (std::holds_alternative<InsertConflict::Ignore>(on_conflict.data)) {
                             skip_row = true;
-                            break;
-                        }
-                        if (auto* upd = std::get_if<InsertConflict::Update>(&on_conflict.data)) {
+                        } else if (auto* upd = std::get_if<InsertConflict::Update>(&on_conflict.data)) {
                             queue_update(existing, upd->assignments);
                             skip_row = true;
-                            break;
-                        }
-                        if (std::holds_alternative<InsertConflict::Replace>(on_conflict.data)) { // the old row goes before the real insert
+                        } else if (std::holds_alternative<InsertConflict::Replace>(on_conflict.data)) { // the old row goes before the real insert
                             if (replace_victims) replace_victims->push_back(existing);
-                            break;
                         }
                     }
                 } else {
@@ -941,6 +979,16 @@ StringResult Executor::exec_insert_inner(SharedDatabase& s, const std::string& t
                                     const auto& bucket = hit->second.get(val);
                                     if (!bucket.empty() && is_visible(bucket.front())) existing = bucket.front();
                                 }
+                            } else if (several_rows) {
+                                if (!existing_by_unique_built[i]) {
+                                    for (auto& r : rows) {
+                                        if (!is_visible(r)) continue;
+                                        auto it = r.find(col_names[i]);
+                                        if (it != r.end() && it->second != EXECUTOR_NULL_VALUE) existing_by_unique[i].emplace(collation::key(it->second), &r);
+                                    }
+                                    existing_by_unique_built[i] = 1;
+                                }
+                                if (auto hit = existing_by_unique[i].find(collation::key(val)); hit != existing_by_unique[i].end()) existing = *hit->second;
                             } else {
                                 for (auto& r : rows) {
                                     if (!is_visible(r)) continue;
@@ -1012,13 +1060,7 @@ StringResult Executor::exec_insert_inner(SharedDatabase& s, const std::string& t
                     new_pk_tuple.push_back(pos != col_names.end() ? final_values[static_cast<std::size_t>(pos - col_names.begin())]
                                                                    : std::string());
                 }
-                std::string encoded; // length-prefixed, so no two different tuples encode alike
-                for (auto& v : new_pk_tuple) {
-                    const std::string part = collation::key(v);
-                    encoded += std::to_string(part.size());
-                    encoded += ':';
-                    encoded += part;
-                }
+                std::string encoded = tuple_key(new_pk_tuple);
                 if (!seen_composite_pk.insert(std::move(encoded)).second && !(validate_only && std::holds_alternative<InsertConflict::Replace>(on_conflict.data))) {
                     return StringResult::Err("Duplicate composite primary key (" + join_quoted(new_pk_tuple) + ")");
                 }
