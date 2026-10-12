@@ -1618,6 +1618,13 @@ StringResult Executor::execute_with_s_body(SharedDatabase& s, Statement stmt) {
         }
         return StringResult::Ok("");
     }
+    if (auto* v = std::get_if<Statement::SetVars>(&stmt.data)) { // SET @a = 1, b = 2: one after the other, each seeing the ones before
+        for (auto& item : v->items) {
+            auto done = execute_with_s(s, Statement(std::move(item)));
+            if (done.is_err()) return done;
+        }
+        return StringResult::Ok("");
+    }
     if (auto* v = std::get_if<Statement::SetUserVar>(&stmt.data)) {
         Row vars = proc_vars;
         for (auto& [k, val] : user_vars) vars["@" + k] = val;
@@ -1633,6 +1640,22 @@ StringResult Executor::execute_with_s_body(SharedDatabase& s, Statement stmt) {
             try {
                 lock_wait_timeout_ms = std::stoull(result_val);
             } catch (...) {
+            }
+        }
+        if (!v->name.empty() && v->name[0] == '@') { // a server variable
+            // (the yes/no ones read ON / OFF / TRUE / FALSE as 1 and 0; FOREIGN_KEY_CHECKS = 0 lets a table refer to one that is not there yet, as a dump needs)
+            static const std::unordered_set<std::string> kSwitches = {"@foreign_key_checks", "@unique_checks", "@autocommit", "@sql_notes",
+                                                                      "@sql_warnings", "@sql_safe_updates", "@sql_auto_is_null"};
+            if (kSwitches.count(lower_name)) {
+                std::string word = result_val;
+                std::transform(word.begin(), word.end(), word.begin(), [](unsigned char c) { return std::tolower(c); });
+                if (word == "on" || word == "true") result_val = "1";
+                else if (word == "off" || word == "false") result_val = "0";
+                else if (word == "default") result_val = lower_name == "@sql_warnings" || lower_name == "@sql_safe_updates" || lower_name == "@sql_auto_is_null" ? "0" : "1";
+                else if (result_val == EXECUTOR_NULL_VALUE || word.empty() || word.find_first_not_of("0123456789") != std::string::npos) {
+                    return StringResult::Err("ERROR 1231 (42000): Variable '" + lower_name.substr(1) + "' can't be set to the value of '" + result_val + "'");
+                }
+                if (lower_name == "@foreign_key_checks") skip_fk_checks = result_val == "0";
             }
         }
         user_vars[v->name] = result_val;

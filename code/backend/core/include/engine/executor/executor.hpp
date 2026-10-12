@@ -211,13 +211,17 @@ struct GapRange {
     bool hi_inclusive = true;
 };
 
+// The server variables a session starts with (`SET @@x = ...` changes them, `@@x` reads them): kept in the session's user variables under the name
+// "@x" (a user variable `@x` is "x"), which is how the lexer reads `@@x`.
+std::unordered_map<std::string, std::string> default_system_variables();
+
 class Executor {
 public:
     std::shared_ptr<RwLock<SharedDatabase>> shared;
     TransactionManager txn;
     std::string current_db;
     std::unordered_map<std::string, std::string> proc_vars;
-    std::unordered_map<std::string, std::string> user_vars;
+    std::unordered_map<std::string, std::string> user_vars = default_system_variables();
     std::unordered_map<std::string, std::string> prepared_stmts;
     std::size_t session_id = 0;
     std::uint64_t lock_wait_timeout_ms = 50000;
@@ -225,8 +229,8 @@ public:
     // this after a successful AUTH handshake; defaults to "root" for the CLI/in-process
     // embedding, which has no network auth step of its own). Read by USER()/CURRENT_USER().
     std::string auth_user = "root";
-    // exec_restore()-only escape hatch (executor_backup.cpp) -- NOT a general SQL feature
-    // (there's no SET FOREIGN_KEY_CHECKS statement). A backup dumps tables alphabetically
+    // SET FOREIGN_KEY_CHECKS = 0 / 1 sets it, and exec_restore() (executor_backup.cpp) sets it for the length of a restore. A backup (and a
+    // mysqldump file, which brackets itself the same way) dumps tables alphabetically
     // and rows in physical vector order, neither of which is guaranteed to respect
     // FK/self-referential-FK dependency order; replaying INSERTs with FK checks on can
     // therefore reject rows whose referenced row simply hasn't been replayed yet, even

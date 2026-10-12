@@ -1,5 +1,6 @@
 #include "engine/parser/lexer.hpp"
 
+#include <algorithm>
 #include <cctype>
 #include <cstdio>
 #include <cstdlib>
@@ -135,7 +136,57 @@ bool is_value_or_close_paren(const Token& t) {
 
 } // namespace
 
-Lexer::Lexer(const std::string& input) : input_(input), pos_(0) {}
+std::string expand_executable_comments(const std::string& sql) {
+    if (sql.find("/*!") == std::string::npos && sql.find("/*M!") == std::string::npos) return sql;
+    // MySQL runs the text of a `/*!NNNNN ... */` comment as SQL when the server is at least version NNNNN (a dump is written in them:
+    // `/*!40101 SET NAMES utf8mb4 */`, `/*!50001 CREATE VIEW ... */`); a `/*M!NNNNN ... */` comment is MariaDB's. This server counts as 8.4.9.
+    constexpr long kVersion = 80409;
+    std::string out;
+    out.reserve(sql.size());
+    const std::size_t n = sql.size();
+    std::size_t i = 0;
+    while (i < n) {
+        const char c = sql[i];
+        if (c == '\'' || c == '"' || c == '`') { // a literal or a quoted name is copied as it is
+            std::size_t j = i + 1;
+            while (j < n && sql[j] != c) j += (sql[j] == '\\' && c != '`' && j + 1 < n) ? 2 : 1;
+            out.append(sql, i, std::min(n, j + 1) - i);
+            i = j + 1;
+            continue;
+        }
+        if (c == '#' || (c == '-' && i + 1 < n && sql[i + 1] == '-')) { // a line comment
+            std::size_t j = sql.find('\n', i);
+            if (j == std::string::npos) j = n;
+            out.append(sql, i, j - i);
+            i = j;
+            continue;
+        }
+        if (c == '/' && i + 1 < n && sql[i + 1] == '*') {
+            const std::size_t end = sql.find("*/", i + 2);
+            const std::size_t stop = end == std::string::npos ? n : end + 2;
+            if (i + 2 < n && sql[i + 2] == '!') {
+                std::size_t at = i + 3;
+                long version = 0;
+                std::size_t digits = 0;
+                while (at < n && digits < 5 && is_digit(sql[at])) version = version * 10 + (sql[at++] - '0'), digits++;
+                if (digits == 0 || version <= kVersion) {
+                    out.push_back(' ');
+                    out.append(sql, at, (end == std::string::npos ? n : end) - at);
+                    out.push_back(' ');
+                }
+            } else if (sql.compare(i, 4, "/*M!") != 0) {
+                out.append(sql, i, stop - i); // an ordinary comment (the lexer skips it)
+            }
+            i = stop;
+            continue;
+        }
+        out.push_back(c);
+        i++;
+    }
+    return out;
+}
+
+Lexer::Lexer(const std::string& input) : input_(expand_executable_comments(input)), pos_(0) {}
 
 std::optional<char> Lexer::peek() const {
     if (pos_ < input_.size()) return input_[pos_];
@@ -177,6 +228,8 @@ Token Lexer::read_string() {
                 case 'r':  advance(); s.push_back('\r'); break;
                 case 't':  advance(); s.push_back('\t'); break;
                 case '0':  advance(); s.push_back('\0'); break;
+                case 'b':  advance(); s.push_back('\b'); break;
+                case 'Z':  advance(); s.push_back('\x1a'); break;
                 default:   advance(); s.push_back(*esc); break;
             }
         } else {
@@ -308,7 +361,31 @@ std::vector<Token> Lexer::tokenize() {
                 break;
             }
             case '+': advance(); tok = Token(TokenKind::Plus); break;
-            case '@': advance(); tok = Token(TokenKind::At); break;
+            case '@': {
+                advance();
+                tok = Token(TokenKind::At);
+                // `@@name` / `@@session.name` / `@@global.name`: a server variable. It is read as the pair every @variable is -- At and a name -- whose
+                // name begins with the second @ (the session's variable of that name is kept under it)
+                if (peek() == '@') {
+                    advance();
+                    std::string name = "@";
+                    while (auto c = peek()) {
+                        if (is_alnum(*c) || *c == '_') { name.push_back(*c); advance(); } else break;
+                    }
+                    std::string scope = to_upper_str(name.substr(1));
+                    if (peek() == '.' && (scope == "SESSION" || scope == "GLOBAL" || scope == "LOCAL" || scope == "PERSIST")) {
+                        advance();
+                        name = "@";
+                        while (auto c = peek()) {
+                            if (is_alnum(*c) || *c == '_') { name.push_back(*c); advance(); } else break;
+                        }
+                    }
+                    for (char& ch2 : name) ch2 = static_cast<char>(std::tolower(static_cast<unsigned char>(ch2)));
+                    tokens.push_back(std::move(*tok));
+                    tok = Token(TokenKind::Ident, std::move(name));
+                }
+                break;
+            }
             case '#': {
                 while (auto c = peek()) {
                     advance();

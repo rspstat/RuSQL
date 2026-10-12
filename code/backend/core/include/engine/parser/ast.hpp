@@ -167,6 +167,7 @@ struct ColumnDef {
     std::optional<std::string> default_value; // Rust field name: `default`
     std::optional<ForeignKey> foreign_key;
     std::optional<std::string> check_expr;
+    bool on_update_now = false; // ON UPDATE CURRENT_TIMESTAMP: an UPDATE that changes the row sets the column to the time of the statement
 };
 
 // ---------------------------------------------------------------------------
@@ -498,10 +499,12 @@ struct AlterAction {
     // HASH-partitioned table would need rehashing every existing row, out of scope.
     struct AddPartition { PartitionDef def; };
     struct DropPartition { std::string name; };
+    // ALTER TABLE ... DISABLE KEYS / ENABLE KEYS (a dump wraps its INSERTs in them): nothing to do here, the indexes are always kept
+    struct NoOp {};
 
     using Data = std::variant<AddColumn, DropColumn, RenameColumn, ModifyColumn, RenameTable,
                                AddForeignKey, DropForeignKey, AddUniqueConstraint,
-                               AddCheckConstraint, DropConstraint, AddPartition, DropPartition>;
+                               AddCheckConstraint, DropConstraint, AddPartition, DropPartition, NoOp>;
     Data data;
 
     AlterAction() : data(DropColumn{}) {}
@@ -527,6 +530,8 @@ struct Statement {
         std::vector<std::pair<std::optional<std::string>, std::string>> check_constraints;
         std::optional<PartitionBy> partition_by;
         std::vector<UniqueKey> unique_keys; // UNIQUE (a, b): the keys over several columns
+        std::optional<std::int64_t> auto_increment_start; // the table option AUTO_INCREMENT = n: the next number of the AUTO_INCREMENT column
+        std::vector<UniqueKey> indexes; // KEY name (a, b) / INDEX ...: the (not unique) indexes of the table
     };
     struct DropTable { std::string name; bool if_exists = false; };
     struct TruncateTable { std::string name; };
@@ -737,7 +742,9 @@ struct Statement {
     struct PrepareStmt { std::string name, query; };
     struct ExecuteStmt { std::string name; std::vector<std::string> using_vars; };
     struct DeallocatePrepare { std::string name; };
-    struct SetUserVar { std::string name; ArithExpr expr; };
+    struct SetUserVar { std::string name; ArithExpr expr; }; // (a name that begins with @ is a server variable: SET @@sql_mode = ...)
+    // SET @a = 1, b = 2, ...: several assignments of one statement, made in order
+    struct SetVars { std::vector<SetUserVar> items; };
     // LOCK TABLES / UNLOCK TABLES -- no Rust/MySQL-parity original, new C++-native
     // addition (V1 scope: session-to-session LOCK TABLES cooperation only -- see
     // executor_dcl.cpp's exec_lock_tables design note). `tables` pairs a table name with
@@ -762,7 +769,7 @@ struct Statement {
         CreateProcedure, CallProcedure, CreateTrigger, DropTrigger, DropProcedure, Backup,
         Restore, ShowProcessList, CreateFunction, DropFunction, ProcDeclare, ProcSet, ProcIf,
         ProcWhile, ProcLoop, ProcRepeat, ProcLeave, ProcIterate, PrepareStmt, ExecuteStmt,
-        DeallocatePrepare, SetUserVar, LockTables, UnlockTables, SelectInto>;
+        DeallocatePrepare, SetUserVar, LockTables, UnlockTables, SelectInto, SetVars>;
     Data data;
 
     Statement() : data(Begin{}) {}
