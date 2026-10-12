@@ -106,6 +106,9 @@ private:
 
     Statement parse_use();
     Statement parse_with();
+    /// DETERMINISTIC, NOT DETERMINISTIC, NO SQL, CONTAINS SQL, READS SQL DATA, MODIFIES SQL DATA, LANGUAGE SQL, COMMENT 'x', SQL SECURITY x between a
+    /// routine's parameters (or return type) and its body: no effect here
+    void skip_routine_characteristics();
     /// `ALGORITHM = x`, `DEFINER = user@host`, `SQL SECURITY DEFINER|INVOKER` between CREATE and VIEW / PROCEDURE / FUNCTION / TRIGGER (a dump writes them; no effect here)
     void skip_create_attributes();
     /// `[DEFAULT] CHARACTER SET|CHARSET [=] x` / `[DEFAULT] COLLATE [=] x` after a table, a database or a column: accepted when x is a character set / collation

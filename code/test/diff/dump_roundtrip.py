@@ -142,6 +142,7 @@ def main():
         bad += refused
 
         rc = pymysql.connect(autocommit=True, charset="utf8mb4", database=DB, **REAL).cursor()
+        rc.execute("SET time_zone = '+00:00'")  # (the dump is in UTC; RuSQL keeps a TIMESTAMP as the text it was given, without a time zone)
         rc.execute("SHOW TABLES")
         tables = [r[0] for r in rc.fetchall()]
         for t in tables:

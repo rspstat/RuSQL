@@ -50,6 +50,23 @@ Statement Parser::parse_call() {
 }
 
 // ── CREATE PROCEDURE ────────────────────────────────────────
+void Parser::skip_routine_characteristics() {
+    auto word = [&](std::size_t at, const char* w) {
+        const Token* t = peek_at(at);
+        return t && t->kind == TokenKind::Ident && to_upper(t->text) == w;
+    };
+    for (;;) {
+        if (word(0, "DETERMINISTIC")) advance();
+        else if (peek_is(TokenKind::Not) && word(1, "DETERMINISTIC")) { advance(); advance(); }
+        else if ((word(0, "NO") || word(0, "CONTAINS")) && word(1, "SQL")) { advance(); advance(); }
+        else if ((word(0, "READS") || word(0, "MODIFIES")) && word(1, "SQL") && word(2, "DATA")) { advance(); advance(); advance(); }
+        else if (word(0, "LANGUAGE") && word(1, "SQL")) { advance(); advance(); }
+        else if (word(0, "COMMENT") && peek_at_is(1, TokenKind::StringLit)) { advance(); advance(); }
+        else if (word(0, "SQL") && word(1, "SECURITY")) { advance(); advance(); if (peek()) advance(); }
+        else return;
+    }
+}
+
 Statement Parser::parse_create_procedure() {
     std::string name = expect_ident();
     std::vector<std::tuple<std::string, std::string, std::string>> params;
@@ -86,7 +103,16 @@ Statement Parser::parse_create_procedure() {
                     case TokenKind::Datetime: ptype = "DATETIME"; break;
                     case TokenKind::Boolean: ptype = "BOOLEAN"; break;
                     case TokenKind::Ident: ptype = t->text; break;
-                    default: throw ParseError("Expected type in procedure param");
+                    default: { // any other type (BIGINT, DECIMAL(10,2), DOUBLE, TIMESTAMP ...): the value is text here, so its name is all that is kept
+                        const std::string typed = !t->word.empty() ? t->word : t->text;
+                        if (typed.empty()) throw ParseError("Expected type in procedure param");
+                        ptype = to_upper(typed);
+                        if (peek_is(TokenKind::LParen)) {
+                            advance();
+                            while (!peek_is(TokenKind::RParen) && peek() != nullptr) advance();
+                            if (peek_is(TokenKind::RParen)) advance();
+                        }
+                    }
                 }
             }
             params.emplace_back(dir, pname, ptype);
@@ -95,6 +121,7 @@ Statement Parser::parse_create_procedure() {
         if (!peek_is(TokenKind::RParen)) throw ParseError("Expected ')' after params");
         advance();
     }
+    skip_routine_characteristics();
     std::vector<Statement> body = parse_proc_body();
     return Statement(Statement::CreateProcedure{name, params, std::move(body)});
 }
@@ -130,11 +157,22 @@ Statement Parser::parse_create_function() {
             if (peek_is(TokenKind::RParen)) advance();
         }
     }
-    // RETURN <expr>
+    skip_routine_characteristics();
+    // RETURN <expr>, or the same inside BEGIN ... END (the form a dump holds)
+    bool block = false;
+    if (const Token* p = peek(); p && p->kind == TokenKind::Ident && to_upper(p->text) == "BEGIN") {
+        advance();
+        block = true;
+    }
     if (const Token* p = peek(); p && p->kind == TokenKind::Ident && to_upper(p->text) == "RETURN") {
         advance();
     }
     ArithExpr expr = parse_value_expr();
+    if (block) {
+        if (peek_is(TokenKind::Semicolon)) advance();
+        if (!peek_is(TokenKind::End)) throw ParseError("A function with more than one statement is not supported (RETURN <expression> only)");
+        advance();
+    }
     nlohmann::json j = expr;
     std::string body = j.dump();
     return Statement(Statement::CreateFunction{name, params, body});

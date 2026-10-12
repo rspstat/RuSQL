@@ -285,6 +285,59 @@ done:
     return out;
 }
 
+bool Parser::parse_charset_option() {
+    auto word = [&](std::size_t at, const char* w) { // (CHARACTER is lexed as a type, like CHAR: its word is what was typed)
+        const Token* t = peek_at(at);
+        return t && ((t->kind == TokenKind::Ident && to_upper(t->text) == w) || (t->kind == TokenKind::Varchar && to_upper(t->word) == w));
+    };
+    const std::size_t at = peek_is(TokenKind::Default) ? 1 : 0;
+    const bool charset = word(at, "CHARSET") || (word(at, "CHARACTER") && peek_at_is(at + 1, TokenKind::Set));
+    const bool collate = word(at, "COLLATE");
+    if (!charset && !collate) return false;
+    for (std::size_t i = 0; i < at; i++) advance();
+    advance();
+    if (charset && peek_is(TokenKind::Set)) advance();
+    if (peek_is(TokenKind::Eq)) advance();
+    const Token* v = advance();
+    std::string name = v ? (!v->text.empty() ? v->text : v->word) : std::string();
+    for (char& c : name) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    if (name.empty()) throw ParseError(charset ? "Expected a character set name" : "Expected a collation name");
+    // This engine compares texts by utf8mb4_0900_ai_ci. The case-insensitive collations stand for it (a dump written by another MySQL
+    // version names its own); the others (_bin, _cs, binary) would compare differently, so they are refused rather than ignored.
+    if (charset) {
+        if (name != "utf8mb4" && name != "utf8mb3" && name != "utf8" && name != "ascii" && name != "latin1")
+            throw ParseError("Character set '" + name + "' is not supported (texts are kept as utf8mb4 and compared by utf8mb4_0900_ai_ci)");
+    } else if (name.size() < 3 || name.compare(name.size() - 3, 3, "_ci") != 0) {
+        throw ParseError("Collation '" + name + "' is not supported (texts are compared by utf8mb4_0900_ai_ci, which ignores case and accents)");
+    }
+    return true;
+}
+
+std::optional<std::int64_t> Parser::parse_table_options() {
+    static const char* const kOptions[] = {"ENGINE", "AUTO_INCREMENT", "COMMENT", "ROW_FORMAT", "KEY_BLOCK_SIZE", "STATS_PERSISTENT", "STATS_AUTO_RECALC",
+                                           "STATS_SAMPLE_PAGES", "MAX_ROWS", "MIN_ROWS", "AVG_ROW_LENGTH", "CHECKSUM", "DELAY_KEY_WRITE", "PACK_KEYS",
+                                           "COMPRESSION", "ENCRYPTION", "INSERT_METHOD", "TABLESPACE"};
+    std::optional<std::int64_t> auto_increment_start;
+    for (;;) {
+        if (peek_is(TokenKind::Comma)) { advance(); continue; }
+        if (parse_charset_option()) continue;
+        const Token* t = peek();
+        if (peek_is(TokenKind::Default) && peek_at(1)) t = peek_at(1); // (DEFAULT ENCRYPTION = 'N')
+        if (!t) break;
+        std::string name = to_upper(!t->text.empty() ? t->text : t->word);
+        if (std::none_of(std::begin(kOptions), std::end(kOptions), [&](const char* o) { return name == o; })) break;
+        if (peek_is(TokenKind::Default)) advance();
+        advance();
+        if (peek_is(TokenKind::Eq)) advance();
+        const Token* v = advance();
+        if (!v) throw ParseError("Expected a value for the table option " + name);
+        if (name == "AUTO_INCREMENT") {
+            try { auto_increment_start = std::stoll(v->text); } catch (...) { throw ParseError("Expected a number after AUTO_INCREMENT ="); }
+        }
+    }
+    return auto_increment_start;
+}
+
 /// 컬럼 제약 공통 파서
 ColConstraints Parser::parse_col_constraints(const std::string& col_name) {
     ColConstraints c;
@@ -316,14 +369,50 @@ ColConstraints Parser::parse_col_constraints(const std::string& col_name) {
             if (!peek_is(TokenKind::Increment)) throw ParseError("Expected INCREMENT");
             advance();
             c.auto_increment = true;
+        } else if ((p->kind == TokenKind::Varchar && to_upper(p->word) == "CHARACTER") ||
+                   (p->kind == TokenKind::Ident && (to_upper(p->text) == "CHARSET" || to_upper(p->text) == "COLLATE"))) {
+            parse_charset_option();
+        } else if (p->kind == TokenKind::Ident && to_upper(p->text) == "COMMENT") { // COMMENT 'text'
+            advance();
+            if (!peek_is(TokenKind::StringLit)) throw ParseError("Expected a string after COMMENT");
+            advance();
+        } else if (p->kind == TokenKind::Null) { // an explicit NULL: the column may hold NULL (as it does when nothing is said)
+            advance();
+        } else if (p->kind == TokenKind::On && peek_at_is(1, TokenKind::Update) && peek_at_is(2, TokenKind::Now)) { // ON UPDATE CURRENT_TIMESTAMP[(n)]
+            advance();
+            advance();
+            advance();
+            if (peek_is(TokenKind::LParen)) {
+                advance();
+                while (peek() && !peek_is(TokenKind::RParen)) advance();
+                if (peek_is(TokenKind::RParen)) advance();
+            }
+            c.on_update_now = true;
         } else if (p->kind == TokenKind::Default) {
             advance();
+            // DEFAULT (0), DEFAULT ('x'): the parentheses of an expression default around one literal
+            const bool parenthesized = peek_is(TokenKind::LParen) && peek_at(1) && peek_at_is(2, TokenKind::RParen) &&
+                                       (peek_at(1)->kind == TokenKind::StringLit || peek_at(1)->kind == TokenKind::NumberLit || peek_at(1)->kind == TokenKind::Null ||
+                                        peek_at(1)->kind == TokenKind::Ident || peek_at(1)->kind == TokenKind::Now);
+            if (parenthesized) advance();
             const Token* t = advance();
             if (!t) throw ParseError("Expected default value");
             switch (t->kind) {
                 case TokenKind::StringLit: case TokenKind::NumberLit: case TokenKind::Ident: c.default_value = t->text; break;
                 case TokenKind::Null: c.default_value = NULL_DEFAULT; break;
+                case TokenKind::Now: // CURRENT_TIMESTAMP, CURRENT_TIMESTAMP(6), NOW(): the time of the INSERT
+                    c.default_value = "CURRENT_TIMESTAMP";
+                    if (peek_is(TokenKind::LParen)) {
+                        advance();
+                        while (peek() && !peek_is(TokenKind::RParen)) advance();
+                        if (peek_is(TokenKind::RParen)) advance();
+                    }
+                    break;
                 default: throw ParseError("Expected default value");
+            }
+            if (parenthesized) {
+                if (!peek_is(TokenKind::RParen)) throw ParseError("Expected ')' after the default value");
+                advance();
             }
         } else if (p->kind == TokenKind::References) {
             advance();
@@ -354,7 +443,8 @@ void Parser::parse_fk_table_level(std::vector<ColumnDef>& columns) {
     if (!peek_is(TokenKind::LParen)) throw ParseError("Expected '(' after FOREIGN KEY");
     advance();
     std::string fk_col = expect_ident();
-    while (peek_is(TokenKind::Comma)) { advance(); expect_ident(); }
+    // (a key over several columns used to keep the first one only, which checked less than the table says it does)
+    if (peek_is(TokenKind::Comma)) throw ParseError("A FOREIGN KEY over several columns is not supported (one column per foreign key)");
     if (!peek_is(TokenKind::RParen)) throw ParseError("Expected ')' after FK columns");
     advance();
     if (!peek_is(TokenKind::References)) throw ParseError("Expected REFERENCES");
@@ -622,10 +712,20 @@ Statement Parser::parse_create() {
             if (peek_is(TokenKind::Ident)) expect_ident();
             if (!peek_is(TokenKind::LParen)) throw ParseError("Expected '(' after INDEX/KEY name");
             advance();
-            expect_ident();
-            while (peek_is(TokenKind::Comma)) { advance(); expect_ident(); }
+            auto key_part = [&]() { // `col`, `col`(10), `col` DESC
+                expect_ident();
+                if (peek_is(TokenKind::LParen)) {
+                    advance();
+                    while (peek() && !peek_is(TokenKind::RParen)) advance();
+                    if (peek_is(TokenKind::RParen)) advance();
+                }
+                if (peek_is(TokenKind::Asc) || peek_is(TokenKind::Desc)) advance();
+            };
+            key_part();
+            while (peek_is(TokenKind::Comma)) { advance(); key_part(); }
             if (!peek_is(TokenKind::RParen)) throw ParseError("Expected ')' after INDEX columns");
             advance();
+            if (peek_is(TokenKind::Using)) { advance(); if (peek()) advance(); } // USING BTREE
         } else if (peek_is(TokenKind::Foreign)) {
             advance();
             if (!peek_is(TokenKind::Key)) throw ParseError("Expected KEY after FOREIGN");
@@ -646,6 +746,7 @@ Statement Parser::parse_create() {
             col.default_value = cc.default_value;
             col.foreign_key = cc.foreign_key;
             col.check_expr = cc.check_expr;
+            col.on_update_now = cc.on_update_now;
             columns.push_back(std::move(col));
         }
 
@@ -654,13 +755,14 @@ Statement Parser::parse_create() {
         else throw ParseError("Expected ',' or ')'");
     }
 
+    const std::optional<std::int64_t> auto_increment_start = parse_table_options();
     std::optional<PartitionBy> partition_by = parse_partition_by();
     if (partition_by) {
         auto it = std::find_if(columns.begin(), columns.end(), [&](const ColumnDef& c) { return c.name == partition_by->column; });
         if (it == columns.end()) throw ParseError("PARTITION BY column '" + partition_by->column + "' not defined");
     }
 
-    return Statement(Statement::CreateTable{name, columns, if_not_exists, primary_key_columns, check_constraints, partition_by, unique_keys});
+    return Statement(Statement::CreateTable{name, columns, if_not_exists, primary_key_columns, check_constraints, partition_by, unique_keys, auto_increment_start, {}});
 }
 
 Statement Parser::parse_drop() {
@@ -700,6 +802,12 @@ Statement Parser::parse_alter() {
 
     const Token* t = advance();
     if (!t) throw ParseError("Expected ADD, DROP, RENAME, or MODIFY");
+
+    if (t->kind == TokenKind::Ident && (to_upper(t->text) == "DISABLE" || to_upper(t->text) == "ENABLE")) { // a dump brackets its INSERTs with them
+        const Token* k = advance();
+        if (!k || k->kind != TokenKind::Ident || to_upper(k->text) != "KEYS") throw ParseError("Expected KEYS after " + to_upper(t->text));
+        return Statement(Statement::AlterTable{table, AlterAction(AlterAction::NoOp{})});
+    }
 
     if (t->kind == TokenKind::Add) {
         if (peek_is(TokenKind::Constraint) || peek_is(TokenKind::Foreign) || peek_is(TokenKind::Unique) || peek_is(TokenKind::Check)) {
@@ -808,9 +916,19 @@ Statement Parser::parse_alter() {
         if (peek_is(TokenKind::Column)) advance();
         std::string col_name = expect_ident();
         DataType data_type = parse_data_type();
+        ColConstraints cc = parse_col_constraints(col_name);
         ColumnDef col;
         col.name = col_name;
         col.data_type = data_type;
+        col.not_null = cc.not_null;
+        col.default_value = cc.default_value;
+        col.auto_increment = cc.auto_increment;
+        col.check_expr = cc.check_expr;
+        col.on_update_now = cc.on_update_now;
+        col.foreign_key = cc.foreign_key;
+        col.unique = cc.unique;
+        col.unique_constraint_name = cc.unique_constraint_name;
+        col.primary_key = cc.primary_key;
         return Statement(Statement::AlterTable{table, AlterAction(AlterAction::AddColumn{col})});
     }
 
@@ -879,6 +997,7 @@ Statement Parser::parse_alter() {
         col.default_value = cc.default_value;
         col.foreign_key = cc.foreign_key;
         col.check_expr = cc.check_expr;
+        col.on_update_now = cc.on_update_now;
         return Statement(Statement::AlterTable{table, AlterAction(AlterAction::ModifyColumn{col})});
     }
 
@@ -957,6 +1076,7 @@ Statement Parser::parse_create_database() {
         if_not_exists = true;
     }
     std::string name = expect_ident();
+    parse_table_options(); // DEFAULT CHARACTER SET x COLLATE y, DEFAULT ENCRYPTION = 'N': the same options as a table's
     return Statement(Statement::CreateDatabase{name, if_not_exists});
 }
 

@@ -156,7 +156,8 @@ Statement Parser::parse_set() {
     if (is_scope(t) && is_word(peek_at(1), "TRANSACTION") && peek_at_is(2, TokenKind::Isolation)) { advance(); advance(); }
     else if (is_word(t, "TRANSACTION") && peek_at_is(1, TokenKind::Isolation)) advance();
 
-    if (is_word(t, "NAMES") || (is_word(t, "CHARACTER") && peek_at_is(1, TokenKind::Set))) {
+    const bool character_set = t->kind == TokenKind::Varchar && to_upper(t->word) == "CHARACTER" && peek_at_is(1, TokenKind::Set); // (CHARACTER is lexed as a type)
+    if (is_word(t, "NAMES") || character_set) {
         // the character set of the connection: everything is utf8mb4 here
         advance();
         if (peek_is(TokenKind::Set)) advance();

@@ -1,3 +1,5 @@
+#include <algorithm>
+#include <functional>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -536,6 +538,30 @@ Statement Parser::parse_select() {
             std::nullopt, std::nullopt, std::nullopt, false, false})));
     }
     advance(); // consume FROM
+
+    // `FROM ((a x JOIN b y ON (...)) JOIN c z ON (...))`: the parentheses MySQL writes around the left-deep join groups of a view's query (and a
+    // dump holds that text) change nothing; the '(' that begin the FROM list and their ')' are dropped. (`FROM (SELECT ...) d` is a derived table.)
+    {
+        std::size_t lead = 0;
+        while (peek_at_is(lead, TokenKind::LParen)) lead++;
+        if (lead > 0 && !peek_at_is(lead, TokenKind::Select)) {
+            std::vector<std::size_t> closers;
+            std::vector<std::size_t> open;
+            for (std::size_t i = pos_; i < tokens_.size() && closers.size() < lead; i++) {
+                if (tokens_[i].kind == TokenKind::LParen) open.push_back(i);
+                else if (tokens_[i].kind == TokenKind::RParen) {
+                    if (open.empty()) break;
+                    if (open.back() < pos_ + lead) closers.push_back(i);
+                    open.pop_back();
+                }
+            }
+            if (closers.size() == lead) {
+                std::sort(closers.begin(), closers.end(), std::greater<std::size_t>());
+                for (std::size_t c : closers) tokens_.erase(tokens_.begin() + static_cast<std::ptrdiff_t>(c));
+                tokens_.erase(tokens_.begin() + static_cast<std::ptrdiff_t>(pos_), tokens_.begin() + static_cast<std::ptrdiff_t>(pos_ + lead));
+            }
+        }
+    }
 
     std::unordered_map<std::string, std::string> alias_map;
     // The name each table of the FROM list is known by (its alias, else its own name) is unique within the list, and a table used

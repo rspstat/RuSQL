@@ -10,10 +10,23 @@
 
 #include <algorithm>
 #include <chrono>
+#include <ctime>
+#include <iomanip>
+#include <sstream>
 
 namespace engine {
 
 namespace {
+// the time of the statement as a TIMESTAMP column holds it (ON UPDATE CURRENT_TIMESTAMP)
+std::string now_text() {
+    const std::time_t t = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
+    std::tm tm_buf{};
+    localtime_s(&tm_buf, &t);
+    std::ostringstream oss;
+    oss << std::put_time(&tm_buf, "%Y-%m-%d %H:%M:%S");
+    return oss.str();
+}
+
 std::string trim_ws(const std::string& s) {
     auto start = s.find_first_not_of(" \t");
     if (start == std::string::npos) return "";
@@ -469,6 +482,22 @@ StringResult Executor::exec_update_inner(SharedDatabase& s, const std::string& t
                     }
 
                     for (auto& [col, val] : new_vals) new_row[col] = val;
+
+                    // ON UPDATE CURRENT_TIMESTAMP: a column that this statement does not set itself takes the time of the statement when the row changed
+                    if (auto* schema = s.catalog.get_table(table)) {
+                        bool changed = false;
+                        for (auto& [col, val] : new_vals) {
+                            auto old_value = row.find(col);
+                            if (old_value == row.end() || old_value->second != val) { changed = true; break; }
+                        }
+                        if (changed) {
+                            for (auto& col : schema->columns) {
+                                if (!col.on_update_now) continue;
+                                if (std::any_of(new_vals.begin(), new_vals.end(), [&](const auto& nv) { return nv.first == col.name; })) continue;
+                                new_row[col.name] = now_text();
+                            }
+                        }
+                    }
 
                     if (auto* schema = s.catalog.get_table(table)) {
                         if (auto violation = rewritten_row_violation(s, *schema, new_row, assigned_cols, &row)) return StringResult::Err(*violation);

@@ -1,6 +1,7 @@
 // Faithful port of rusql-server/src/mysql.rs — see mysql.hpp.
 
 #include "mysql.hpp"
+#include "engine/parser/lexer.hpp"
 
 #define NOMINMAX
 #include <winsock2.h>
@@ -500,9 +501,24 @@ std::optional<std::pair<std::vector<std::string>, std::vector<std::vector<std::s
                 std::vector<std::string> cells;
                 std::size_t start = 0;
                 for (;;) {
-                    auto pipe = line.find('|', start);
+                    // (the engine writes a cell with \\ for a backslash, \n for a newline and \| for a bar: a bar in a value is no cell boundary)
+                    std::size_t pipe = start;
+                    while (pipe < line.size() && line[pipe] != '|') pipe += (line[pipe] == '\\' && pipe + 1 < line.size()) ? 2 : 1;
+                    if (pipe >= line.size()) pipe = std::string::npos;
                     std::string cell = line.substr(start, pipe == std::string::npos ? std::string::npos : pipe - start);
-                    if (!cell.empty()) cells.push_back(trim_copy(cell));
+                    if (!cell.empty()) {
+                        cell = trim_copy(cell);
+                        std::string plain;
+                        for (std::size_t k = 0; k < cell.size(); k++) {
+                            if (cell[k] == '\\' && k + 1 < cell.size() && (cell[k + 1] == '\\' || cell[k + 1] == 'n' || cell[k + 1] == '|')) {
+                                plain += cell[k + 1] == 'n' ? '\n' : cell[k + 1];
+                                k++;
+                            } else {
+                                plain += cell[k];
+                            }
+                        }
+                        cells.push_back(std::move(plain));
+                    }
                     if (pipe == std::string::npos) break;
                     start = pipe + 1;
                 }
@@ -627,7 +643,7 @@ std::string to_lower_str(const std::string& s) {
     return out;
 }
 
-std::string handle_select_atvars(const std::string& q) {
+std::string handle_select_atvars(const std::string& q, const Executor& exec) {
     static const std::vector<std::pair<std::string, std::string>> known = {
         {"auto_increment_increment", "1"},
         {"autocommit", "ON"},
@@ -683,6 +699,10 @@ std::string handle_select_atvars(const std::string& q) {
                     value = v;
                     break;
                 }
+            }
+            // the value this session has set (SET @@foreign_key_checks = 0), or its default (the engine keeps the server variables as "@name")
+            if (var_name != "autocommit") {
+                if (auto session = exec.user_vars.find("@" + var_name); session != exec.user_vars.end()) value = session->second;
             }
             cols.push_back(alias);
             vals.push_back(value);
@@ -794,9 +814,13 @@ std::optional<StringResult> mysql_compat(const std::string& q, Executor& exec) {
         // engine actually implements through real execution so they actually take
         // effect via this protocol too (previously silently no-op'd exactly like every
         // other SET variant), reflecting genuine success/failure instead of a fake OK.
-        if (up.rfind("SET @", 0) == 0 || up.rfind("SET ISOLATION LEVEL", 0) == 0) {
+        if ((up.rfind("SET @", 0) == 0 && up.rfind("SET @@", 0) != 0) || up.rfind("SET ISOLATION LEVEL", 0) == 0) {
             return exec_inner(exec, q);
         }
+        // The other forms (a server variable, a list, NAMES, TRANSACTION ISOLATION LEVEL) run when the engine understands them -- SET FOREIGN_KEY_CHECKS = 0
+        // really switches the check off -- and the rest stay the client boilerplate that is answered OK.
+        auto done = exec_inner(exec, q);
+        if (done.is_ok()) return done;
         return StringResult::Ok("");
     }
 
@@ -822,7 +846,7 @@ std::optional<StringResult> mysql_compat(const std::string& q, Executor& exec) {
     }
 
     if (up.rfind("SELECT @@", 0) == 0 || (up.rfind("SELECT", 0) == 0 && up.find("@@") != std::string::npos && up.find(" FROM ") == std::string::npos)) {
-        return StringResult::Ok(handle_select_atvars(q));
+        return StringResult::Ok(handle_select_atvars(q, exec));
     }
 
     if (up.rfind("SHOW VARIABLES", 0) == 0 || up.rfind("SHOW SESSION VARIABLES", 0) == 0 || up.rfind("SHOW GLOBAL VARIABLES", 0) == 0) {
@@ -992,7 +1016,8 @@ std::optional<StringResult> mysql_compat(const std::string& q, Executor& exec) {
 // ── Query execution ────────────────────────────────────────────
 
 StringResult exec_query(Executor& exec, const std::string& raw) {
-    std::string q = trim_copy(raw);
+    // (a dump is written in /*!40101 SET ... */ comments, which MySQL runs: they are put in their place before anything looks at the text)
+    std::string q = trim_copy(engine::expand_executable_comments(raw));
     while (!q.empty() && q.back() == ';') q.pop_back();
     q = trim_copy(q);
     if (q.empty()) return StringResult::Ok("");

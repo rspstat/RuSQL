@@ -369,6 +369,11 @@ StringResult Executor::exec_alter(SharedDatabase& s, const std::string& table, A
         }
     }
 
+    if (std::holds_alternative<AlterAction::NoOp>(action.data)) { // DISABLE KEYS / ENABLE KEYS
+        if (!s.catalog.get_table(table)) return StringResult::Err("Table '" + table + "' doesn't exist");
+        return StringResult::Ok("Table '" + table + "' altered.");
+    }
+
     if (auto* v = std::get_if<AlterAction::AddPartition>(&action.data)) {
         auto* schema = s.catalog.get_table_mut(table);
         if (!schema) return StringResult::Err("Table '" + table + "' not found");
@@ -969,7 +974,9 @@ StringResult Executor::exec_drop_index(SharedDatabase& s, const std::string& ind
 
 StringResult Executor::exec_create_view(SharedDatabase& s, const std::string& name, Statement query, const std::string& raw_sql) {
     if (auto* sel = std::get_if<Statement::Select>(&query.data)) {
-        if (!s.tables.count(sel->table) && !s.views.count(sel->table)) return StringResult::Err("Table '" + sel->table + "' not found"); // (a view may read a view)
+        // (a SELECT with no FROM, `SELECT 1 AS a`, reads the one-row table _dual_; a derived table is no table either: a dump makes each view first as `SELECT 1 AS a, 1 AS b`)
+        const bool no_table = sel->subquery || sel->table == "_dual_" || (sel->table.size() > 7 && sel->table.compare(sel->table.size() - 7, 7, "._dual_") == 0);
+        if (!no_table && !s.tables.count(sel->table) && !s.views.count(sel->table)) return StringResult::Err("Table '" + sel->table + "' not found"); // (a view may read a view)
     }
     s.views[name] = std::move(query);
     if (!raw_sql.empty()) s.view_raw_sql[name] = raw_sql;

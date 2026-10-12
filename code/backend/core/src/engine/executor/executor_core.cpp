@@ -1284,6 +1284,7 @@ StringResult Executor::execute_sql_inner(const std::string& sql) {
     }
 
     Parser parser(trimmed);
+    if (!parser.has_tokens()) return StringResult::Ok(""); // nothing but comments (a dump has such lines): there is nothing to run
     auto parsed = parser.parse();
     if (parsed.is_err()) return StringResult::Err(parsed.error());
     Statement stmt = std::move(parsed).value();
@@ -1469,8 +1470,21 @@ StringResult Executor::execute_with_s_body(SharedDatabase& s, Statement stmt) {
     if (auto* v = std::get_if<Statement::LockTables>(&stmt.data)) return exec_lock_tables(s, v->tables);
     if (std::holds_alternative<Statement::UnlockTables>(stmt.data)) return exec_unlock_tables(s);
 
-    if (auto* v = std::get_if<Statement::CreateTable>(&stmt.data))
-        return exec_create(s, v->name, v->columns, v->if_not_exists, v->primary_key_columns, v->check_constraints, v->partition_by, v->unique_keys);
+    if (auto* v = std::get_if<Statement::CreateTable>(&stmt.data)) {
+        auto created = exec_create(s, v->name, v->columns, v->if_not_exists, v->primary_key_columns, v->check_constraints, v->partition_by, v->unique_keys);
+        // the table option AUTO_INCREMENT = n: the next number is n (the counter holds the last one given)
+        if (created.is_ok() && v->auto_increment_start && !v->partition_by) {
+            if (auto* schema = s.catalog.get_table_mut(v->name)) {
+                for (auto& col : schema->columns) {
+                    if (!col.auto_increment) continue;
+                    schema->auto_increment_counters[col.name] = std::max<std::int64_t>(*v->auto_increment_start, 1) - 1;
+                    s.disk.save_schema(v->name, *schema);
+                    break;
+                }
+            }
+        }
+        return created;
+    }
     if (auto* v = std::get_if<Statement::DropTable>(&stmt.data)) return exec_drop(s, v->name, v->if_exists);
     if (auto* v = std::get_if<Statement::TruncateTable>(&stmt.data)) return exec_truncate(s, v->name);
     if (auto* v = std::get_if<Statement::AlterTable>(&stmt.data)) return exec_alter(s, v->table, v->action);

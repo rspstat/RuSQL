@@ -264,6 +264,7 @@ Statement Parser::parse_stmt() {
         case TokenKind::Update: return parse_update();
         case TokenKind::Delete: return parse_delete();
         case TokenKind::Create: {
+            skip_create_attributes();
             if (peek_is(TokenKind::Unique) && peek_at_is(1, TokenKind::Index)) { advance(); advance(); return parse_create_unique_index(); }
             if (peek_is(TokenKind::Index))    { advance(); return parse_create_index(); }
             if (peek_is(TokenKind::View))     { advance(); return parse_create_view(); }
@@ -295,6 +296,7 @@ Statement Parser::parse_stmt() {
                 bool ok_replace = rep && (rep->kind == TokenKind::Replace ||
                                           (rep->kind == TokenKind::Ident && to_upper(rep->text) == "REPLACE"));
                 if (!ok_replace) throw ParseError("Expected REPLACE");
+                skip_create_attributes();
                 if (peek_is(TokenKind::View)) { advance(); return parse_create_view(); } // (a view of that name is replaced, as CREATE VIEW does)
                 if (!peek_is(TokenKind::Synonym)) throw ParseError("Expected SYNONYM or VIEW after CREATE OR REPLACE");
                 advance();
@@ -424,6 +426,37 @@ Statement Parser::parse_stmt() {
         case TokenKind::Execute:  return parse_execute();
         case TokenKind::Deallocate: return parse_deallocate();
         default: throw ParseError("Unknown statement");
+    }
+}
+
+void Parser::skip_create_attributes() {
+    auto word = [&](std::size_t at, const char* w) {
+        const Token* t = peek_at(at);
+        return t && t->kind == TokenKind::Ident && to_upper(t->text) == w;
+    };
+    for (;;) {
+        if (word(0, "ALGORITHM")) { // ALGORITHM = UNDEFINED | MERGE | TEMPTABLE
+            advance();
+            if (peek_is(TokenKind::Eq)) advance();
+            if (peek()) advance();
+        } else if (word(0, "DEFINER")) { // DEFINER = user@host | CURRENT_USER[()]
+            advance();
+            if (peek_is(TokenKind::Eq)) advance();
+            if (peek()) advance();
+            if (peek_is(TokenKind::At)) {
+                advance();
+                if (peek()) advance();
+            } else if (peek_is(TokenKind::LParen) && peek_at_is(1, TokenKind::RParen)) {
+                advance();
+                advance();
+            }
+        } else if (word(0, "SQL") && word(1, "SECURITY")) { // SQL SECURITY DEFINER | INVOKER
+            advance();
+            advance();
+            if (peek()) advance();
+        } else {
+            return;
+        }
     }
 }
 

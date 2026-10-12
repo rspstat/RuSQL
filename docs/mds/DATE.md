@@ -1535,6 +1535,29 @@ VS Code 스타일 탭 드래그 순서 변경(요청의 1번 항목)은 같은 �
 
 **한계**: 아래 R18 후보. `REPLACE`가 지우는 부모 행·`MERGE`의 DELETE·`TRUNCATE`는 클레임을 잡지 않는다(그 경로는 `delete_restrict_violation`만 본다). 외래키 클레임도 명령문(트랜잭션이면 COMMIT)이 끝날 때까지 잡힌다 — 열린 트랜잭션이 어떤 부모의 자식을 쓰면 그 부모의 DELETE는 그 트랜잭션이 끝날 때까지 기다린다(InnoDB와 비슷하지만, 자식 행이 이미 보이면 기다리지 않고 바로 거절).
 
+### 10월 13일 — 실제 `mysqldump` 파일이 읽힘: 102문장 중 92문장이 거절되고 표가 하나도 안 만들어지던 것 (R18)
+
+**왜 이 항목인가**: 사용자 지시("일단 급한 것만 수정", 문서·커밋·푸시까지). 시연에서 가장 먼저 부딪힐 일이 "MySQL에서 뜬 덤프를 읽히는 것"인데, 실제 MySQL 8.4에서 만든 상점 스키마(표 4개, 뷰·프로시저·트리거·외래키·한글)의 덤프를 R17 빌드에 읽히니 **표가 하나도 만들어지지 않았다**. 그 점검 도구(`code/test/diff/dump_roundtrip.py`)가 이 라운드의 합격 기준이다: 실제 MySQL에서 덤프를 뜨고 → RuSQL에 MySQL 프로토콜로 읽히고 → 모든 표의 행을 MySQL과 비교 → 실제 `mysql` 클라이언트(`--force`)로도 읽혀 오류 수를 센다.
+
+**원인과 수정** (한 가지가 아니었다):
+- **실행되는 주석** `/*!40101 SET … */`, `/*!50001 CREATE … */`: 실행하지 않고 빈 문장으로 거절했다 → 렉서가 `/*!NNNNN … */`를 서버 버전(8.4.9)이 같거나 새로우면 안의 글을 SQL로, 아니면 버린다(`expand_executable_comments`; 문자열 안은 건드리지 않음). 주석만 있는 문장은 오류가 아니라 빈 OK.
+- **`SET`**: `SET @a = 1, @b = @a + 1`(목록), 서버 변수 `SET sql_mode = …`·`SET @@session.x = …`·`SET GLOBAL x = …`, `@@변수` 읽기, `SET NAMES`·`SET CHARACTER SET`, `SET SESSION TRANSACTION ISOLATION LEVEL`을 받는다. 서버 변수는 세션의 `user_vars`에 `@이름`으로 두고(기본값 표 `default_system_variables`), `SELECT @@x`는 세션 값을 돌려준다. **`SET FOREIGN_KEY_CHECKS = 0`이 실제로 외래키 검사를 끈다**(덤프는 표를 알파벳순으로 만들어 아직 없는 표를 가리킨다). ON/OFF/TRUE/FALSE는 1/0.
+- **`CREATE TABLE`**: `DEFAULT CURRENT_TIMESTAMP[(n)]`, `DEFAULT (0)`, 명시적 `NULL`, 열의 `CHARACTER SET`·`COLLATE`·`COMMENT`, **`ON UPDATE CURRENT_TIMESTAMP`(UPDATE가 행을 바꾸면 그 열이 문장 시각이 됨 — 열이 직접 대입되면 그 값, 바뀐 게 없으면 그대로)**, 표 옵션 `ENGINE`·`AUTO_INCREMENT = n`(다음 번호가 n)·`[DEFAULT] CHARSET`·`COLLATE`·`COMMENT`·`ROW_FORMAT` 등, `KEY 이름 (열(길이) DESC) USING BTREE`. 데이터베이스의 `DEFAULT CHARACTER SET …`·`DEFAULT ENCRYPTION = 'N'`도.
+- **정렬 규칙 정책**: `_ci`로 끝나는 정렬 규칙과 문자 집합 utf8mb4/utf8/utf8mb3/ascii/latin1은 엔진의 기본 비교(`utf8mb4_0900_ai_ci`)로 받아들이고, **`_bin`·`_cs`·`binary`는 거절**한다(받아들이고 무시하면 대소문자 구분이 조용히 뒤집힌다).
+- **`CREATE ALGORITHM=… DEFINER=… SQL SECURITY … VIEW|PROCEDURE|FUNCTION|TRIGGER`**: 속성절을 건너뛴다. 프로시저·함수의 특성(`DETERMINISTIC`, `READS SQL DATA`, `COMMENT`, `SQL SECURITY` …)도, 프로시저 매개변수의 아무 타입(`BIGINT`, `DECIMAL(10,2)` …)도. 함수는 `BEGIN RETURN 식; END` 모양을 받는다(문장이 여럿이면 오류).
+- **뷰 본문의 괄호 친 조인** `from ((a x join b y on(…)) join c z on(…))`: 왼쪽으로 깊은 조인 묶음의 괄호를 걷어 낸다. 덤프가 처음 만드는 자리표시 뷰 `SELECT 1 AS a`(FROM 없음)도 만들어진다.
+- **`ALTER TABLE … DISABLE|ENABLE KEYS`**(없는 표면 오류), **`ADD COLUMN x INT NOT NULL DEFAULT 0`**(제약절을 받아 적용; 전에는 파싱 오류).
+- **MySQL 프로토콜 결과 읽기**: 값에 줄바꿈이 있으면 `\n` 두 글자로, `|`가 있으면 칸이 쪼개져 돌아왔다(JDBC·DBeaver·mysql 클라이언트 모두) → 서버가 `\n`·`\|`·`\\`를 풀고 이스케이프된 `|`에서 칸을 나누지 않는다. 문자열 이스케이프 `\b`·`\Z`도.
+- **조용히 틀리던 것 하나**: 복합 `FOREIGN KEY (a, b)`가 **첫 열만** 남기고 받아들여졌다 → 이제 "한 열짜리 외래키만 지원"이라는 오류로 거절(전에는 검사가 표가 말하는 것보다 약했다).
+
+**검증**:
+- `dump_roundtrip.py`: 상점 덤프 **102문장 중 0문장 거절**, 5개 표 행 모두 MySQL과 같음, 실제 `mysql` 클라이언트 오류 0. 열 종류 덤프(`dump_schemas/types.sql`: `bigint unsigned`, `tinyint(1)`, `double`, `decimal(12,4)`, `char`, `longtext`, `blob`, `enum`, `date`/`datetime`/`timestamp ON UPDATE`, `json`, 복합 PK·복합 UNIQUE, 자기 참조 외래키 `ON DELETE CASCADE`, 트리거, 함수; 값에 `|`·줄바꿈·`\`·따옴표·2^53 넘는 수) 85문장 0 거절, 4개 표 모두 같음. 비교는 UTC 세션에서(아래 한계).
+- 신규 시험 `test_dump_syntax.cpp`(6 케이스, 196 assertions): 실행 주석, SET 목록·서버 변수·검사 스위치, 외래키 검사 끄기, 표/열 옵션·정렬 규칙 정책, 시각 기본값·ON UPDATE, 속성절·괄호 조인·DISABLE KEYS·ADD COLUMN·함수·프로시저.
+- Release 전체 **679 케이스 / 1,436,091 assertions**을 기본·강제(`RUSQL_DML_INDEX_MIN_ROWS=0`) 양쪽으로 통과. 빌드 간 차분(R17 대비) 10시드 × 99질의 차이 0건; `test_full.sql`·`test_full-ver2.sql` 스트림은 시각·포트·실행 시간만 다름.
+- **이번 라운드에서 하지 않은 것**(사용자가 급한 것만 요청): 심은 버그(mutant) 시험, Debug 빌드, 긴 `[random]`/`[fuzz]` 캠페인, 출력 검증 도구 12종, 크래시/동시성 퍼저, 성능 번갈아 측정. 렉서·SET·CREATE TABLE 파서를 건드렸지만 평소 절차의 나머지는 다음 라운드로 미뤘다.
+
+**한계(남긴 것)**: ① `CREATE TABLE` 안의 `KEY 이름 (열)`은 읽고도 색인을 만들지 않는다(답은 같고 느릴 수 있음; 덤프의 `SHOW INDEX`도 비어 있음). ② `TIMESTAMP`는 시간대 변환 없이 받은 글자 그대로 저장한다(MySQL은 UTC로 저장해 세션 시간대로 보여 줌): UTC 덤프를 읽혀도 값은 같지만 다른 시간대의 세션에서 읽은 MySQL과는 다르게 보인다. ③ 외래키 부모 표가 없어도 `CREATE TABLE`이 성공(MySQL은 검사가 켜져 있으면 오류). ④ `FOREIGN_KEY_CHECKS = 0`은 `CREATE TABLE`·`INSERT`·`DROP TABLE`에만 적용(`DELETE`/`UPDATE`의 RESTRICT·CASCADE는 그대로 검사). ⑤ 끝 공백 있는 글자 값은 MySQL 프로토콜 결과에서 앞뒤 공백을 잃는다(NO PAD 한계와 같은 뿌리). ⑥ 함수는 `RETURN 식` 하나만. ⑦ `LIKE '\%'` 이스케이프, 열 `BINARY`, `FULLTEXT KEY`, 생성 열은 지원하지 않는다.
+
 ## 요약: 1학기 대비 2학기에 달라진 것
 
 | 항목 | 1학기 (~2026년 6월) | 2학기 (2026년 7~8월) |
