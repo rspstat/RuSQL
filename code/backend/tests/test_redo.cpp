@@ -418,3 +418,89 @@ TEST_CASE("Redo: replaying a log whose effects are already in the table files ch
         fs::copy_file(dir.path + "/redo.saved", redo, fs::copy_options::overwrite_existing);
     }
 }
+
+// An INSERT into a table with a foreign key reads the parent table (its lock set holds two tables) but writes its own table only, which the redo ops describe. It
+// used to take the legacy path for that reason -- both table files rewritten and a marker fsynced after every statement (~7 ms against 0.7 ms for a table without a
+// foreign key). Now it is logged like any INSERT, and a COMMIT of such rows appends to the log too. What the parent holds is read at insert time and not touched.
+TEST_CASE("Redo: an INSERT into a child table is logged, not flushed, and survives a crash", "[redo][durability]") {
+    TempDataDir dir("redo_child_insert");
+    auto count_rdb = [&] {
+        int n = 0;
+        for (auto& e : fs::recursive_directory_iterator(dir.path)) if (e.path().extension() == ".rdb") n++;
+        return n;
+    };
+    {
+        Executor ex(dir.path);
+        REQUIRE(ex.execute_sql("CREATE DATABASE d").is_ok());
+        REQUIRE(ex.execute_sql("USE d").is_ok());
+        REQUIRE(ex.execute_sql("CREATE TABLE p (id INT PRIMARY KEY, n INT)").is_ok());
+        REQUIRE(ex.execute_sql("CREATE TABLE c (id INT PRIMARY KEY, pid INT, FOREIGN KEY (pid) REFERENCES p(id) ON DELETE CASCADE)").is_ok());
+        REQUIRE(ex.execute_sql("INSERT INTO p VALUES (1,0),(2,0),(3,0)").is_ok());
+        REQUIRE(ex.execute_sql("INSERT INTO c VALUES (10,1)").is_ok());
+        REQUIRE(ex.execute_sql("INSERT INTO c VALUES (11,2), (12,2)").is_ok());
+        REQUIRE(count_rdb() == 0); // no table file was written for them
+        REQUIRE(ex.execute_sql("INSERT INTO c VALUES (13,99)").is_err()); // the parent is still looked for
+        REQUIRE(ex.execute_sql("BEGIN").is_ok());
+        REQUIRE(ex.execute_sql("INSERT INTO c VALUES (20,3)").is_ok());
+        REQUIRE(ex.execute_sql("INSERT INTO c VALUES (21,3)").is_ok());
+        REQUIRE(ex.execute_sql("COMMIT").is_ok());
+        REQUIRE(count_rdb() == 0);
+        REQUIRE(ex.execute_sql("BEGIN").is_ok());
+        REQUIRE(ex.execute_sql("INSERT INTO c VALUES (30,1)").is_ok());
+        REQUIRE(ex.execute_sql("ROLLBACK").is_ok());
+        REQUIRE(ex.execute_sql("BEGIN").is_ok());
+        REQUIRE(ex.execute_sql("INSERT INTO c VALUES (31,1)").is_ok()); // never committed
+        REQUIRE(count_rdb() == 0);
+    } // crash
+    Executor ex(dir.path);
+    REQUIRE(ex.execute_sql("USE d").is_ok());
+    REQUIRE(count_rows(ex, "p") == 3);
+    REQUIRE(count_rows(ex, "c") == 5); // 10, 11, 12, 20, 21
+    REQUIRE(rows_of(ex, "SELECT * FROM c WHERE id = 30").find("0 rows") != std::string::npos);
+    REQUIRE(rows_of(ex, "SELECT * FROM c WHERE id = 31").find("0 rows") != std::string::npos);
+    REQUIRE(rows_of(ex, "SELECT * FROM c WHERE id = 21").find("1 row(s)") != std::string::npos);
+    // the recovered child still has its parent's key: the cascade and the check work
+    REQUIRE(ex.execute_sql("INSERT INTO c VALUES (40,99)").is_err());
+    REQUIRE(ex.execute_sql("DELETE FROM p WHERE id = 2").is_ok());
+    REQUIRE(count_rows(ex, "c") == 3);
+}
+
+// ... but only an INSERT is logged although its lock set holds two tables. An UPDATE or DELETE of a parent cascades into the children, and a cascade is not in the redo
+// ops: it must still be made durable the old way, whatever else is in the lock set. And so must an UPDATE of a child (a foreign key of it is read, its parent is locked).
+// Each case ends on the statement under test, so that no later flush can hide it.
+TEST_CASE("Redo: a cascade and an UPDATE of a child survive a crash right after logged child INSERTs", "[redo][durability]") {
+    const std::vector<std::string> last = {"UPDATE p SET id = 20 WHERE id = 1",  // ON UPDATE CASCADE: c 10 follows
+                                           "DELETE FROM p WHERE id = 2",        // ON DELETE CASCADE: c 11 goes
+                                           "UPDATE c SET pid = 4 WHERE id = 12"}; // a child moves to another parent
+    for (std::size_t which = 0; which < last.size(); which++) {
+        INFO(last[which]);
+        TempDataDir dir("redo_child_cascade");
+        {
+            Executor ex(dir.path);
+            REQUIRE(ex.execute_sql("CREATE DATABASE d").is_ok());
+            REQUIRE(ex.execute_sql("USE d").is_ok());
+            REQUIRE(ex.execute_sql("CREATE TABLE p (id INT PRIMARY KEY, n INT)").is_ok());
+            REQUIRE(ex.execute_sql("CREATE TABLE c (id INT PRIMARY KEY, pid INT, FOREIGN KEY (pid) REFERENCES p(id) ON UPDATE CASCADE ON DELETE CASCADE)").is_ok());
+            REQUIRE(ex.execute_sql("INSERT INTO p VALUES (1,0),(2,0),(3,0),(4,0)").is_ok());
+            REQUIRE(ex.execute_sql("INSERT INTO c VALUES (10,1),(11,2),(12,3),(13,4)").is_ok()); // logged
+            REQUIRE(ex.execute_sql("INSERT INTO c VALUES (14,3)").is_ok());                      // logged
+            REQUIRE(ex.execute_sql(last[which]).is_ok());
+        } // crash
+        Executor ex(dir.path);
+        REQUIRE(ex.execute_sql("USE d").is_ok());
+        if (which == 0) {
+            REQUIRE(count_rows(ex, "p") == 4);
+            REQUIRE(rows_of(ex, "SELECT id FROM c WHERE pid = 20").find("1 row(s)") != std::string::npos);
+            REQUIRE(rows_of(ex, "SELECT id FROM c WHERE pid = 1").find("0 rows") != std::string::npos);
+            REQUIRE(count_rows(ex, "c") == 5);
+        } else if (which == 1) {
+            REQUIRE(count_rows(ex, "p") == 3);
+            REQUIRE(rows_of(ex, "SELECT * FROM c WHERE id = 11").find("0 rows") != std::string::npos);
+            REQUIRE(count_rows(ex, "c") == 4);
+        } else {
+            REQUIRE(rows_of(ex, "SELECT id FROM c WHERE pid = 4").find("2 row(s)") != std::string::npos); // 12 and 13
+            REQUIRE(rows_of(ex, "SELECT id FROM c WHERE pid = 3").find("1 row(s)") != std::string::npos); // 14
+            REQUIRE(count_rows(ex, "c") == 5);
+        }
+    }
+}

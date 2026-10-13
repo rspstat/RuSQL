@@ -1034,7 +1034,10 @@ StringResult Executor::execute(Statement stmt) {
                                       std::holds_alternative<Statement::Explain>(stmt.data) ||
                                       std::holds_alternative<Statement::ExplainAnalyze>(stmt.data);
             const bool mutating = !select_like && !is_pure_read_only(stmt);
-            const bool covered = mutating && tables->size() == 1 && is_redo_covered_kind(stmt);
+            // (an INSERT only READS the parents of its foreign keys -- they are in the lock set for the existence check -- and writes its own table, which the
+            // redo ops describe; UPDATE and DELETE lock the children they may cascade into, and a cascade is not logged)
+            const bool writes_one_table = tables->size() == 1 || std::holds_alternative<Statement::Insert>(stmt.data);
+            const bool covered = mutating && writes_one_table && is_redo_covered_kind(stmt);
             // Row-level-concurrency Stage 4: table_locks[table] is no longer held
             // exclusive for the whole duration of an ordinary single-table
             // Insert/InsertSelect/Update/Delete/Select (FOR UPDATE/FOR SHARE included
