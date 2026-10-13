@@ -690,11 +690,12 @@ StringResult Executor::exec_insert_inner(SharedDatabase& s, const std::string& t
     {
         auto insert_read_lock = acquire_table_data_locks(s, insert_read_tables, /*exclusive=*/false);
 
-    // UNIQUE keys over several columns: the live rows by key (one scan), and the keys this statement has used. A NULL in a key never conflicts.
+    // UNIQUE keys over several columns: the live rows by key (one scan, made when it is first needed), and the keys this statement has used. A NULL in a key never conflicts.
     struct CompositeUnique {
         const UniqueKey* key;
         std::string label;
         std::unordered_map<std::string, const Row*> existing;
+        bool existing_built = false;
         std::unordered_set<std::string> batch;
     };
     std::vector<CompositeUnique> composite_uniques;
@@ -710,26 +711,32 @@ StringResult Executor::exec_insert_inner(SharedDatabase& s, const std::string& t
         }
         return encoded;
     };
+    // (the rows the table holds by each of these keys are put in a hash when they are first looked for: a statement of several rows needs them for every row, a
+    // one-row statement only when the cache of UNIQUE values cannot say that no row holds the key -- see unique_probe_proves_absent)
+    auto fill_existing = [&](CompositeUnique& cu) {
+        if (cu.existing_built) return;
+        cu.existing_built = true;
+        if (auto tit = s.tables.find(table); tit != s.tables.end()) {
+            for (auto& existing_row : tit->second) {
+                if (!is_visible(existing_row)) continue;
+                std::string shown;
+                auto encoded = composite_key(cu.key->columns, [&](const std::string& c) { auto it = existing_row.find(c); return it != existing_row.end() ? it->second : std::string(EXECUTOR_NULL_VALUE); }, shown);
+                if (encoded) cu.existing.emplace(std::move(*encoded), &existing_row);
+            }
+        }
+    };
+    const bool several_rows = all_values.size() > 1;
     if (!schema.unique_keys.empty()) {
         const std::string bare_table = table.substr(table.rfind('.') == std::string::npos ? 0 : table.rfind('.') + 1);
         for (auto& key : schema.unique_keys) {
-            CompositeUnique cu{&key, bare_table + "." + key.name.value_or(key.columns.front()), {}, {}};
-            if (auto tit = s.tables.find(table); tit != s.tables.end()) {
-                for (auto& existing_row : tit->second) {
-                    if (!is_visible(existing_row)) continue;
-                    std::string shown;
-                    auto encoded = composite_key(key.columns, [&](const std::string& c) { auto it = existing_row.find(c); return it != existing_row.end() ? it->second : std::string(EXECUTOR_NULL_VALUE); }, shown);
-                    if (encoded) cu.existing.emplace(std::move(*encoded), &existing_row);
-                }
-            }
-            composite_uniques.push_back(std::move(cu));
+            composite_uniques.push_back(CompositeUnique{&key, bare_table + "." + key.name.value_or(key.columns.front()), {}, false, {}});
+            if (several_rows) fill_existing(composite_uniques.back());
         }
     }
 
     // A statement of several rows finds the rows the table already holds with a hash built once -- by the key tuple of a composite primary key, by the
     // value of each UNIQUE column that has no index of its own -- instead of scanning the table for every row (20,000 rows: 9 s for a UNIQUE column, 23 s for
     // a composite key, against 0.1 s for a table with neither). A one-row statement keeps the scan: building the hash would cost as much.
-    const bool several_rows = all_values.size() > 1;
     auto tuple_key = [](const std::vector<std::string>& tuple) { // length-prefixed, so no two different tuples encode alike
         std::string encoded;
         for (auto& v : tuple) {
@@ -892,6 +899,12 @@ StringResult Executor::exec_insert_inner(SharedDatabase& s, const std::string& t
             pending_updates.emplace_back(std::move(*cond), std::move(bound));
         };
 
+        // the values of this row by column name, for the cache of UNIQUE values (a one-row statement asks it before it scans the table)
+        const auto row_value_of = [&](const std::string& c) -> const std::string* {
+            auto pos = std::find(col_names.begin(), col_names.end(), c);
+            return pos == col_names.end() ? nullptr : &final_values[static_cast<std::size_t>(pos - col_names.begin())];
+        };
+
         {
             const std::vector<std::string>& pk_cols = schema.primary_key_columns;
             bool is_composite_pk = pk_cols.size() > 1;
@@ -922,7 +935,7 @@ StringResult Executor::exec_insert_inner(SharedDatabase& s, const std::string& t
                             existing_by_pk_tuple_built = true;
                         }
                         if (auto hit = existing_by_pk_tuple.find(tuple_key(new_pk_tuple)); hit != existing_by_pk_tuple.end()) clash = hit->second;
-                    } else {
+                    } else if (!unique_probe_proves_absent(s, table, schema, pk_cols, /*tuple=*/true, /*skip_null=*/false, row_value_of)) {
                         for (auto& existing : rows) {
                             if (!is_visible(existing)) continue;
                             bool same = true;
@@ -989,7 +1002,7 @@ StringResult Executor::exec_insert_inner(SharedDatabase& s, const std::string& t
                                     existing_by_unique_built[i] = 1;
                                 }
                                 if (auto hit = existing_by_unique[i].find(collation::key(val)); hit != existing_by_unique[i].end()) existing = *hit->second;
-                            } else {
+                            } else if (!unique_probe_proves_absent(s, table, schema, {col_names[i]}, /*tuple=*/false, /*skip_null=*/true, row_value_of)) {
                                 for (auto& r : rows) {
                                     if (!is_visible(r)) continue;
                                     auto it = r.find(col_names[i]);
@@ -1022,6 +1035,8 @@ StringResult Executor::exec_insert_inner(SharedDatabase& s, const std::string& t
                     std::string shown;
                     auto encoded = composite_key(cu.key->columns, [&](const std::string& c) { auto pos = std::find(col_names.begin(), col_names.end(), c); return pos != col_names.end() ? final_values[static_cast<std::size_t>(pos - col_names.begin())] : std::string(EXECUTOR_NULL_VALUE); }, shown);
                     if (!encoded) continue;
+                    if (!several_rows && unique_probe_proves_absent(s, table, schema, cu.key->columns, /*tuple=*/true, /*skip_null=*/true, row_value_of)) continue;
+                    fill_existing(cu);
                     auto hit = cu.existing.find(*encoded);
                     if (hit == cu.existing.end()) continue;
                     const Row& existing_row = *hit->second;
@@ -1407,6 +1422,7 @@ StringResult Executor::exec_insert_inner(SharedDatabase& s, const std::string& t
         // (one JSON array of rows per key), instead of once per row -- quadratic for an index on a column with few
         // distinct values. Same helper UPDATE and DELETE use.
         index_replace_rows(s, table, std::vector<Row>{}, prepared, key_col);
+        unique_probe_inserted(s, table, schema, prepared); // (before the rows are moved into the table)
 
         // autocommit only: pk -> position cache, filled while the rows are appended
         std::string pos_col;

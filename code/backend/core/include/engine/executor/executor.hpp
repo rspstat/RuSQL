@@ -40,6 +40,7 @@
 #include "engine/sync.hpp"
 #include "engine/table_stats.hpp"
 #include "engine/transaction/txn_manager.hpp"
+#include "engine/unique_probe.hpp"
 
 namespace engine {
 
@@ -191,6 +192,9 @@ struct SharedDatabase {
     std::shared_ptr<RedoLog> redo_log;
     std::shared_ptr<GroupCommitCoordinator> redo_commit_coord;
     std::shared_ptr<Mutex<std::unordered_set<std::string>>> redo_dirty;
+
+    // The cache of the UNIQUE values the live rows of each table hold (engine/unique_probe.hpp): a one-row INSERT asks it before it scans the table for a duplicate.
+    std::shared_ptr<UniqueProbes> unique_probes = std::make_shared<UniqueProbes>();
 
     // mysql_native_password challenge-response verification (nonce is a 20-byte challenge)
     // -- used by both the MySQL wire protocol listener and the native TCP protocol's own
@@ -879,6 +883,14 @@ public:
     // change -- only how fast the matching candidate is located.
     static bool index_or_scan_exists(const SharedDatabase& s, const std::string& table, const std::vector<Row>& table_rows,
                                        const std::string& column, const std::string& val, const std::function<bool(const Row&)>& accept);
+
+    // The cache of UNIQUE values (engine/unique_probe.hpp, executor_unique_probe.cpp). `unique_probe_proves_absent` is true only when the cache is current and no live row
+    // of `table` holds the key made of `columns` from `value_of` (a one-row INSERT then skips its scan); false means "maybe": scan. The caller holds the table's data lock.
+    // `unique_probe_inserted` is called by an INSERT that holds the table's data lock exclusively, with the rows it is about to append.
+    bool unique_probe_proves_absent(SharedDatabase& s, const std::string& table, const TableSchema& schema, const std::vector<std::string>& columns, bool tuple, bool skip_null,
+                                    const std::function<const std::string*(const std::string&)>& value_of);
+    void unique_probe_inserted(SharedDatabase& s, const std::string& table, const TableSchema& schema, const std::vector<Row>& rows);
+    bool unique_probe_stamp(SharedDatabase& s, const std::string& table, std::uint64_t& locks_id, std::uint64_t& data_id, std::uint64_t& sum) const;
 
     // ── Table partitioning (PARTITION BY RANGE/LIST/HASH, V1 -- executor_partition.cpp)
     // A partitioned table's catalog entry (TableSchema::partition_info) is the single

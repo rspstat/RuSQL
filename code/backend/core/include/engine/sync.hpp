@@ -9,6 +9,7 @@
 
 #include <atomic>
 #include <condition_variable>
+#include <cstdint>
 #include <mutex>
 #include <shared_mutex>
 
@@ -81,7 +82,12 @@ public:
         cv_.wait(lk, [this] { return !writer_active_ && readers_active_ == 0; });
         writers_waiting_--;
         writer_active_ = true;
+        exclusive_count_.fetch_add(1, std::memory_order_release);
     }
+    // How many times this mutex has been taken exclusively, and which mutex it is (never reused by another one). Whoever holds it (shared or exclusive) sees a
+    // count nobody can move; a cache of what the mutex protects is current while the count is the one it was made at (see Executor::unique_probe_*).
+    std::uint64_t exclusive_count() const { return exclusive_count_.load(std::memory_order_acquire); }
+    std::uint64_t instance_id() const { return instance_id_; }
     void unlock() {
         std::unique_lock<std::mutex> lk(mutex_);
         writer_active_ = false;
@@ -99,11 +105,17 @@ public:
     }
 
 private:
+    static std::uint64_t next_instance_id() {
+        static std::atomic<std::uint64_t> next{1};
+        return next.fetch_add(1);
+    }
     std::mutex mutex_;
     std::condition_variable cv_;
     int readers_active_ = 0;
     int writers_waiting_ = 0;
     bool writer_active_ = false;
+    std::atomic<std::uint64_t> exclusive_count_{0};
+    const std::uint64_t instance_id_ = next_instance_id();
 };
 
 template <typename T>
@@ -136,6 +148,7 @@ public:
 
     ReadGuard read() const { return ReadGuard(mutex_, value_); }
     WriteGuard write() const { return WriteGuard(mutex_, value_); }
+    std::uint64_t exclusive_count() const { return mutex_.exclusive_count(); }
 
 private:
     mutable FairSharedMutex mutex_;

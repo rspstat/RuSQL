@@ -357,6 +357,10 @@ StringResult Executor::exec_drop(SharedDatabase& s, const std::string& name, boo
         dropped_index = true;
     }
     if (dropped_index) persist_index_meta(s);
+    {
+        std::lock_guard<std::mutex> guard(s.unique_probes->mutex);
+        s.unique_probes->by_table.erase(name);
+    }
     if (partition_by) {
         for (auto& def : partition_by->partitions) exec_drop(s, def.child_table, /*if_exists=*/true);
     }
@@ -894,6 +898,13 @@ StringResult Executor::exec_drop_database(SharedDatabase& s, const std::string& 
     }
     for (auto& k : hash_keys) s.hash_indexes.erase(k);
 
+    {
+        std::lock_guard<std::mutex> guard(s.unique_probes->mutex);
+        for (auto it = s.unique_probes->by_table.begin(); it != s.unique_probes->by_table.end();) {
+            if (it->first.compare(0, prefix.size(), prefix) == 0) it = s.unique_probes->by_table.erase(it);
+            else ++it;
+        }
+    }
     for (auto it = s.hash_index_meta.begin(); it != s.hash_index_meta.end();) {
         if (it->second.first.compare(0, prefix.size(), prefix) == 0) it = s.hash_index_meta.erase(it);
         else ++it;
