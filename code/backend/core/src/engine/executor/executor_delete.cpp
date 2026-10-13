@@ -157,34 +157,6 @@ StringResult Executor::exec_delete_inner(SharedDatabase& s, const std::string& t
         }
         return cnt == 1 ? std::optional<std::string>(col) : std::nullopt;
     };
-    // Pre-existing bug (predates the real-blocking-wait stage, found while testing it):
-    // FK cascade mutated/erased s.tables[other_table] rows but never touched that table's
-    // PK B+Tree (s.indexes[other_table], keyed by bare table name), secondary/hash indexes
-    // (index_insert_row/index_remove_row), or composite indexes -- a PK-indexed point
-    // lookup on the cascaded table kept serving stale data indefinitely. Mirrors the
-    // refresh pattern this same function's own refresh_indexes_for_soft_deletes uses below
-    // for the primary table, generalized to take table/pk_col as parameters since cascade
-    // operates on `other_table`. A cascade never changes the cascaded row's OWN pk_col
-    // value (SetNull/SetDefault only ever touch the FK column pointing at `table`), so the
-    // PK B+Tree side only ever needs the single-insert overwrite path.
-    auto refresh_cascade_indexes = [&](const std::string& tbl, const std::string& pk_col, const Row& old_row, const Row& new_row) {
-        auto key_it = new_row.find(pk_col);
-        std::string key = key_it != new_row.end() ? key_it->second : std::string();
-        if (auto idx_it = s.indexes.find(tbl); idx_it != s.indexes.end()) {
-            idx_it->second.insert(key, row_to_json(new_row));
-        }
-        index_remove_row(s, tbl, old_row, pk_col);
-        index_insert_row(s, tbl, new_row);
-        for (auto& [k, ci] : s.composite_indexes) {
-            if (ci.table != tbl) continue;
-            if (ci.key_from_row(old_row) == ci.key_from_row(new_row)) {
-                ci.insert_row(new_row);
-                continue;
-            }
-            ci.remove_row(old_row);
-            ci.insert_row(new_row);
-        }
-    };
     // Row-level-concurrency Stage 4: FK cascade previously took no LockManager claim on
     // the child table's affected rows at all (safe only because the whole child table
     // was held exclusively via table_locks for the statement's duration) -- claim each
@@ -224,18 +196,28 @@ StringResult Executor::exec_delete_inner(SharedDatabase& s, const std::string& t
     // claim the row, translate a Deadlock/Conflict LockResult into the matching
     // CascadeAttemptResult, or fall through (nullopt) to let the caller proceed with the
     // actual mutation. `action_desc` only affects the error message text.
-    auto claim_or_signal = [&](const std::string& other_table, const Row& row,
-                                const char* action_desc) -> std::optional<CascadeAttemptResult> {
-        auto claim = claim_cascade_row(other_table, row);
-        if (!claim) return std::nullopt;
-        if (claim->result.kind == LockResult::Kind::Deadlock) {
+    // `frees_unique`: the cascade removes the row. In a transaction the UNIQUE values it holds are claimed too, and kept to the end of the transaction: another session may
+    // not take such a value while this one could still bring the row back (see unique_key_claims). (SET NULL / SET DEFAULT keep the row; the value they free belongs to
+    // a parent that is gone, and no child can name that parent.)
+    auto claim_or_signal = [&](const std::string& other_table, const Row& row, const char* action_desc,
+                                bool frees_unique = false) -> std::optional<CascadeAttemptResult> {
+        auto deadlock = [&](std::uint64_t holder) {
             return CascadeAttemptResult::hard_error(StringResult::Err(
-                "Deadlock detected: transaction " + std::to_string(claim_txn_id) + " waits for transaction " +
-                std::to_string(claim->result.holder) + " (DELETE cascade " + action_desc + " on '" + other_table + "'). Transaction " +
-                std::to_string(claim_txn_id) + " aborted."));
+                "Deadlock detected: transaction " + std::to_string(claim_txn_id) + " waits for transaction " + std::to_string(holder) + " (DELETE cascade " +
+                action_desc + " on '" + other_table + "'). Transaction " + std::to_string(claim_txn_id) + " aborted."));
+        };
+        if (auto claim = claim_cascade_row(other_table, row)) {
+            if (claim->result.kind == LockResult::Kind::Deadlock) return deadlock(claim->result.holder);
+            if (claim->result.kind == LockResult::Kind::Conflict) return CascadeAttemptResult::needs_retry(other_table, claim->pk_val);
         }
-        if (claim->result.kind == LockResult::Kind::Conflict) {
-            return CascadeAttemptResult::needs_retry(other_table, claim->pk_val);
+        if (frees_unique && txn.is_active()) {
+            if (const TableSchema* other_schema = s.catalog.get_table(other_table)) {
+                for (auto& freed : unique_key_claims(*other_schema, other_table, row)) {
+                    LockResult lr = s.lock_mgr.acquire(freed.lock_table, freed.lock_key, claim_txn_id);
+                    if (lr.kind == LockResult::Kind::Deadlock) return deadlock(lr.holder);
+                    if (lr.kind == LockResult::Kind::Conflict) return CascadeAttemptResult::needs_retry(freed.lock_table, freed.lock_key);
+                }
+            }
         }
         return std::nullopt;
     };
@@ -492,6 +474,27 @@ StringResult Executor::exec_delete_inner(SharedDatabase& s, const std::string& t
     // `return` straight out of every level via the lambda boundary -- see
     // exec_update_inner's identical pattern for the full reasoning.
     const std::vector<std::string> referenced = referenced_columns(s, table);
+    // The id the child versions of this statement carry: the transaction's, or a one-off id for a statement outside one.
+    const std::uint64_t cascade_id = tagging_txn_id(s);
+    // The live rows of `other_table` whose `column` equals `value`, claimed one by one (a claim that cannot be had ends the attempt before anything is written); their positions
+    // are left in child_hits for cascade_write.
+    std::vector<std::size_t> child_hits;
+    auto collect_children = [&](const std::string& other_table, const std::string& column, const std::string& value, const char* action_desc,
+                                bool frees_unique) -> std::optional<CascadeAttemptResult> {
+        child_hits.clear();
+        auto oit = s.tables.find(other_table);
+        if (oit == s.tables.end()) return std::nullopt;
+        auto& child_rows = oit->second;
+        for (std::size_t i = 0; i < child_rows.size(); i++) {
+            const Row& row = child_rows[i];
+            if (!is_visible(row)) continue;
+            auto it = row.find(column);
+            if (it == row.end() || !collation::equal(it->second, value)) continue;
+            if (auto sig = claim_or_signal(other_table, row, action_desc, frees_unique)) return sig;
+            child_hits.push_back(i);
+        }
+        return std::nullopt;
+    };
     auto try_cascade_once = [&]() -> CascadeAttemptResult {
     auto neighbor_write_lock = acquire_table_data_locks(s, neighbor_tables, /*exclusive=*/true);
 
@@ -541,76 +544,13 @@ StringResult Executor::exec_delete_inner(SharedDatabase& s, const std::string& t
                     case FkAction::Restrict:
                         break; // already checked above
                     case FkAction::Cascade: {
-                        if (txn.is_active()) {
-                            std::string txn_id_str = std::to_string(txn.current_txn_id());
-                            if (auto oit = s.tables.find(other_table); oit != s.tables.end()) {
-                                for (auto& row : oit->second) {
-                                    if (!is_visible(row)) continue;
-                                    auto it = row.find(col.name);
-                                    if (it != row.end() && collation::equal(it->second, del_val)) {
-                                        if (auto sig = claim_or_signal(other_table, row, "Cascade")) return *sig;
-                                        Row cascade_old_row = row;
-                                        row["_xmax"] = txn_id_str;
-                                        if (auto opc = single_pk_col(other_table)) refresh_cascade_indexes(other_table, *opc, cascade_old_row, row);
-                                    }
-                                }
-                            }
-                        } else if (auto oit = s.tables.find(other_table); oit != s.tables.end()) {
-                            auto& rows = oit->second;
-                            std::vector<Row> cascade_erased;
-                            for (auto& r : rows) {
-                                if (!is_visible(r)) continue;
-                                auto it = r.find(col.name);
-                                if (it != r.end() && collation::equal(it->second, del_val)) {
-                                    if (auto sig = claim_or_signal(other_table, r, "Cascade")) return *sig;
-                                    cascade_erased.push_back(r);
-                                }
-                            }
-                            rows.erase(std::remove_if(rows.begin(), rows.end(),
-                                                       [&](const Row& r) {
-                                                           if (!is_visible(r)) return false;
-                                                           auto it = r.find(col.name);
-                                                           return it != r.end() && collation::equal(it->second, del_val);
-                                                       }),
-                                       rows.end());
-                            if (auto opc = single_pk_col(other_table)) {
-                                auto idx_it = s.indexes.find(other_table);
-                                for (auto& er : cascade_erased) {
-                                    index_remove_row(s, other_table, er, *opc);
-                                    if (idx_it != s.indexes.end()) {
-                                        auto pkv = er.find(*opc);
-                                        idx_it->second.remove(pkv != er.end() ? pkv->second : std::string());
-                                    }
-                                }
-                                for (auto& [k, ci] : s.composite_indexes) {
-                                    if (ci.table != other_table) continue;
-                                    for (auto& er : cascade_erased) ci.remove_row(er);
-                                }
-                            }
-                        }
-                        if (!txn.is_active()) {
-                            std::vector<Row> rc = s.tables.at(other_table);
-                            s.buffer_pool.write_through(other_table, rc, s.disk);
-                        }
+                        if (auto sig = collect_children(other_table, col.name, del_val, "Cascade", /*frees_unique=*/true)) return *sig;
+                        cascade_write(s, other_table, child_hits, nullptr, cascade_id);
                         break;
                     }
                     case FkAction::SetNull: {
-                        if (auto oit = s.tables.find(other_table); oit != s.tables.end()) {
-                            for (auto& row : oit->second) {
-                                if (!is_visible(row)) continue;
-                                auto it = row.find(col.name);
-                                if (it != row.end() && collation::equal(it->second, del_val)) {
-                                    if (auto sig = claim_or_signal(other_table, row, "SetNull")) return *sig;
-                                    Row cascade_old_row = row;
-                                    row[col.name] = EXECUTOR_NULL_VALUE;
-                                    if (auto opc = single_pk_col(other_table)) refresh_cascade_indexes(other_table, *opc, cascade_old_row, row);
-                                }
-                            }
-                        }
-                        if (!txn.is_active()) {
-                            std::vector<Row> rc = s.tables.at(other_table);
-                            s.buffer_pool.write_through(other_table, rc, s.disk);
-                        }
+                        if (auto sig = collect_children(other_table, col.name, del_val, "SetNull", /*frees_unique=*/false)) return *sig;
+                        cascade_write(s, other_table, child_hits, [&](Row& r) { r[col.name] = EXECUTOR_NULL_VALUE; }, cascade_id);
                         break;
                     }
                     case FkAction::SetDefault: {
@@ -619,24 +559,15 @@ StringResult Executor::exec_delete_inner(SharedDatabase& s, const std::string& t
                             auto cit = std::find_if(osc->columns.begin(), osc->columns.end(), [&](const ColumnDef& c2) { return c2.name == col.name; });
                             if (cit != osc->columns.end() && cit->default_value) default_val = *cit->default_value;
                         }
-                        if (auto oit = s.tables.find(other_table); oit != s.tables.end()) {
-                            for (auto& row : oit->second) {
-                                if (!is_visible(row)) continue;
-                                auto it = row.find(col.name);
-                                if (it != row.end() && collation::equal(it->second, del_val)) {
-                                    if (auto sig = claim_or_signal(other_table, row, "SetDefault")) return *sig;
-                                    Row cascade_old_row = row;
-                                    row[col.name] = default_val;
-                                    if (auto opc = single_pk_col(other_table)) refresh_cascade_indexes(other_table, *opc, cascade_old_row, row);
-                                }
-                            }
-                        }
-                        if (!txn.is_active()) {
-                            std::vector<Row> rc = s.tables.at(other_table);
-                            s.buffer_pool.write_through(other_table, rc, s.disk);
-                        }
+                        if (auto sig = collect_children(other_table, col.name, del_val, "SetDefault", /*frees_unique=*/false)) return *sig;
+                        cascade_write(s, other_table, child_hits, [&](Row& r) { r[col.name] = default_val; }, cascade_id);
                         break;
                     }
+                }
+                // (a statement that the redo log does not cover persists the child table itself)
+                if (!txn.is_active() && !redo_covered_stmt_ && col.foreign_key->on_delete != FkAction::Restrict) {
+                    std::vector<Row> rc = s.tables.at(other_table);
+                    s.buffer_pool.write_through(other_table, rc, s.disk);
                 }
             }
         }
@@ -735,10 +666,11 @@ StringResult Executor::exec_delete_inner(SharedDatabase& s, const std::string& t
         // _xmax -- including one this same loop already stamped in an earlier attempt --
         // as invisible, so already-soft-deleted rows are silently skipped on retry, and
         // LockManager grants a re-request for an already-held claim for free (re-entrant).
+        const TableSchema* delete_schema = s.catalog.get_table(table);
         for (;;) {
             auto table_lock = acquire_table_data_locks(s, {table}, /*exclusive=*/true);
             bool conflict = false;
-            std::string conflict_key;
+            std::string conflict_table = table, conflict_key;
             auto& rows = s.tables.at(table);
             // Index-assisted targets (see executor_dml_index.cpp), recomputed on every attempt under
             // the exclusive lock so the positions can never be stale. Not usable -> every row.
@@ -779,6 +711,25 @@ StringResult Executor::exec_delete_inner(SharedDatabase& s, const std::string& t
                     conflict_key = key;
                     break;
                 }
+                // The UNIQUE values the row holds are held to the end of the transaction too, like its primary key: the row comes back if the transaction rolls back,
+                // so another session that took one of them in the meantime would leave two rows with it (InnoDB makes that INSERT wait for the DELETE as well).
+                if (delete_schema) {
+                    for (auto& freed : unique_key_claims(*delete_schema, table, row)) {
+                        LockResult ul = s.lock_mgr.acquire(freed.lock_table, freed.lock_key, txn_id);
+                        if (ul.kind == LockResult::Kind::Deadlock) {
+                            return StringResult::Err("Deadlock detected: transaction " + std::to_string(txn_id) + " waits for transaction " +
+                                                      std::to_string(ul.holder) + " (DELETE '" + table + "'. Transaction " + std::to_string(txn_id) +
+                                                      " aborted.");
+                        }
+                        if (ul.kind == LockResult::Kind::Conflict) {
+                            conflict = true;
+                            conflict_table = freed.lock_table;
+                            conflict_key = freed.lock_key;
+                            break;
+                        }
+                    }
+                    if (conflict) break;
+                }
 
                 nlohmann::json old_j = row;
                 txn.log_delete(table, key, old_j.dump());
@@ -800,7 +751,7 @@ StringResult Executor::exec_delete_inner(SharedDatabase& s, const std::string& t
             // table_locks[table] before blocking -- see release_table_locks_for_block's
             // doc comment in executor.hpp.
             release_table_locks_for_block();
-            auto lr2 = block_on_row(s.lock_mgr, table, conflict_key, txn_id, /*exclusive=*/true, lock_deadline);
+            auto lr2 = block_on_row(s.lock_mgr, conflict_table, conflict_key, txn_id, /*exclusive=*/true, lock_deadline);
             reacquire_table_locks_after_block();
             if (lr2.kind == LockResult::Kind::Deadlock) {
                 return StringResult::Err("Deadlock detected: transaction " + std::to_string(txn_id) + " waits for transaction " +

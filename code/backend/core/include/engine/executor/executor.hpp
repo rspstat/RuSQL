@@ -612,6 +612,10 @@ private:
     // the tables of the scalar subqueries inside an expression
     void qualify_arith_inplace(const SharedDatabase& s, ArithExpr& expr) const;
     Join qualify_join_(const SharedDatabase& s, const Join& j) const;
+    // The child rows a foreign-key action changes, written as versions and logged like an UPDATE / DELETE of the child table (executor_cascade.cpp): `positions` are the live
+    // rows of `table` to change, `change` edits the new version of each (empty: the rows are deleted), `version_id` is the id of the transaction or statement.
+    void cascade_write(SharedDatabase& s, const std::string& table, const std::vector<std::size_t>& positions, const std::function<void(Row&)>& change,
+                       std::uint64_t version_id);
 
     // ── Phase 8a: DDL ────────────────────────────────────────────────────
     // (the keys of several columns: UNIQUE (a, b))

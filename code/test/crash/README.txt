@@ -10,9 +10,11 @@ acknowledged.
   python fuzz_concurrent.py [rounds] [base_seed]  4 concurrent clients on one table; in-flight statement may
                                                   land or not, explicit transactions must be all-or-nothing
 
-  python fuzz_crash_fk.py [rounds] [base_seed]    the same for a parent table p and a child table c with a FOREIGN KEY: child/parent INSERT, UPDATE,
-                                                  DELETE, COMMIT/ROLLBACK; after recovery a child of a missing parent and the delete of a parent that
-                                                  has a child must still be refused (an INSERT into a child is logged in the redo log like any INSERT)
+  python fuzz_crash_fk.py [rounds] [base_seed]    the same for a parent table p and a child table c with a FOREIGN KEY whose ON DELETE / ON UPDATE actions
+                                                  (RESTRICT, CASCADE, SET NULL) the seed picks: child/parent INSERT, REPLACE, IGNORE, ON DUPLICATE KEY UPDATE,
+                                                  UPDATE, DELETE, transactions and savepoints, checked against a model of the actions; after recovery a child
+                                                  of a missing parent and (RESTRICT) the delete of a parent that has a child must still be refused.
+                                                  FUZZ_TRACE=1 prints every statement.
 
 After recovery fuzz_crash.py also checks the INDEXES against the recovered rows (a lookup through the secondary index
 g and through the primary key must return what the oracle says) -- a table scan alone cannot see a stale index.

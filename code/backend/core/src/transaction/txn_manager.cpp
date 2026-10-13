@@ -519,13 +519,13 @@ void TransactionManager::log_insert(const std::string& table, const std::string&
 }
 
 void TransactionManager::log_update(const std::string& table, const std::string& key, const std::string& old_data,
-                                     const std::string& new_data) {
+                                     const std::string& new_data, const std::string& new_key) {
     redo_ops_.push_back({RedoOp::Kind::SetXmax, table, old_data, xmin_of_image(new_data)});
     redo_ops_.push_back({RedoOp::Kind::InsertVersion, table, new_data, ""});
     if (active_) redo_marks_.push_back(redo_ops_.size());
     if (!active_) return;
     wal_.log_update(txn_id_, table, key, new_data);
-    UndoEntry entry{txn_id_, "UPDATE", table, key, old_data};
+    UndoEntry entry{txn_id_, "UPDATE", table, key, old_data, new_key.empty() || new_key == key ? std::nullopt : std::optional<std::string>(new_key)};
     undo_log_file_.append(entry);
     undo_log_.push_back(entry);
 }

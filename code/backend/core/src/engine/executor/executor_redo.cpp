@@ -22,16 +22,14 @@ std::string version_identity(Row row) {
 } // namespace
 
 // Statement kinds whose every mutation goes through TransactionManager::log_insert/update/
-// delete: plain single-table INSERT/UPDATE/DELETE. (Cascades, MERGE, multi-table forms,
-// ON DUPLICATE KEY/REPLACE and INSERT..SELECT mutate rows without logging, so they keep the
-// legacy "flush the table" persistence.) The dispatcher additionally requires that the
-// statement's table lock set be exactly one table -- i.e. no FK neighbours that could be
-// cascaded into.
+// delete: INSERT (also IGNORE, ON DUPLICATE KEY UPDATE -- its updates are UPDATE statements --
+// and REPLACE -- its deletes are DELETE statements), INSERT ... SELECT, UPDATE and DELETE. The
+// rows a foreign-key action changes in the child tables are logged too (cascade_write), so the
+// tables in the lock set besides the target no longer matter. MERGE and the multi-table forms
+// still keep the legacy "flush the tables" persistence.
 bool Executor::is_redo_covered_kind(const Statement& stmt) {
-    if (auto* ins = std::get_if<Statement::Insert>(&stmt.data)) {
-        return std::holds_alternative<InsertConflict::Abort>(ins->on_conflict.data);
-    }
-    return std::holds_alternative<Statement::Update>(stmt.data) || std::holds_alternative<Statement::Delete>(stmt.data);
+    return std::holds_alternative<Statement::Insert>(stmt.data) || std::holds_alternative<Statement::InsertSelect>(stmt.data) ||
+           std::holds_alternative<Statement::Update>(stmt.data) || std::holds_alternative<Statement::Delete>(stmt.data);
 }
 
 void Executor::write_redo_batch(SharedDatabase& s, std::vector<RedoOp> ops) {

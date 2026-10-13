@@ -539,6 +539,11 @@ StringResult Executor::exec_update_inner(SharedDatabase& s, const std::string& t
                 // statement then waits for it and starts again -- the check below finds its row. Nothing has been stamped yet, so giving up an attempt costs nothing.
                 for (std::size_t i = 0; i < new_versions.size() && !conflict; i++) {
                     auto claims = unique_key_claims(*schema0, table, new_versions[i], targets[i]);
+                    // In a transaction the UNIQUE values the row stops holding are held to its end as well (the row comes back if the transaction rolls back): see
+                    // exec_delete_inner, which does the same for the values of a row it removes.
+                    if (txn.is_active()) {
+                        for (auto& freed : unique_key_claims(*schema0, table, *targets[i], &new_versions[i])) claims.push_back(std::move(freed));
+                    }
                     if (pk_cols.size() == 1 && new_version_pks[i] != attempt_undo_entries[i].key) {
                         KeyClaim pk_claim;
                         pk_claim.lock_table = table;
@@ -646,7 +651,10 @@ StringResult Executor::exec_update_inner(SharedDatabase& s, const std::string& t
         // else: granted -- loop back, redo the candidate scan and probe+mutate afresh.
     }
 
-    for (auto& u : undo_entries) txn.log_update(table, u.key, u.old_json, u.new_json);
+    for (std::size_t i = 0; i < undo_entries.size(); i++) {
+        auto& u = undo_entries[i];
+        txn.log_update(table, u.key, u.old_json, u.new_json, final_new_pk_found[i] ? final_new_pks[i] : u.key);
+    }
 
     // Incremental index maintenance (PK B+Tree + composite indexes): previously this
     // cloned the whole table and fully rebuilt both from scratch on every UPDATE,
@@ -768,24 +776,6 @@ StringResult Executor::exec_update_inner(SharedDatabase& s, const std::string& t
     // A cascade never changes the cascaded row's OWN pk_col value (it only ever touches the
     // FK column pointing at `table`'s pk), so the PK B+Tree side only ever needs the
     // single-insert overwrite path, never remove()+insert() for a changed key.
-    auto refresh_cascade_indexes = [&](const std::string& tbl, const std::string& pk_col, const Row& old_row, const Row& new_row) {
-        auto key_it = new_row.find(pk_col);
-        std::string key = key_it != new_row.end() ? key_it->second : std::string();
-        if (auto idx_it = s.indexes.find(tbl); idx_it != s.indexes.end()) {
-            idx_it->second.insert(key, row_to_json(new_row));
-        }
-        index_remove_row(s, tbl, old_row, pk_col);
-        index_insert_row(s, tbl, new_row);
-        for (auto& [k, ci] : s.composite_indexes) {
-            if (ci.table != tbl) continue;
-            if (ci.key_from_row(old_row) == ci.key_from_row(new_row)) {
-                ci.insert_row(new_row);
-                continue;
-            }
-            ci.remove_row(old_row);
-            ci.insert_row(new_row);
-        }
-    };
     // Real-blocking-wait stage: claim_cascade_row() itself never blocks -- it only probes
     // (timeout=0) and reports the outcome. The nested loop below (undo_entries ->
     // changed_cols -> other_tables -> cols -> per-FkAction row scan, 5 levels deep) is
@@ -820,6 +810,32 @@ StringResult Executor::exec_update_inner(SharedDatabase& s, const std::string& t
             return {Outcome::NeedsRetry, std::move(t), std::move(k), StringResult::Ok("")};
         }
         static CascadeAttemptResult hard_error(StringResult e) { return {Outcome::HardError, "", "", std::move(e)}; }
+    };
+
+    // The live rows of `other_table` whose `column` equals `value`, claimed one by one (a claim that cannot be had ends the attempt before anything is written); their positions
+    // are left in child_hits for cascade_write.
+    std::vector<std::size_t> child_hits;
+    auto collect_children = [&](const std::string& other_table, const std::string& column, const std::string& value) -> std::optional<CascadeAttemptResult> {
+        child_hits.clear();
+        auto oit = s.tables.find(other_table);
+        if (oit == s.tables.end()) return std::nullopt;
+        auto& child_rows = oit->second;
+        for (std::size_t i = 0; i < child_rows.size(); i++) {
+            const Row& row = child_rows[i];
+            if (!is_visible(row)) continue;
+            auto it = row.find(column);
+            if (it == row.end() || !collation::equal(it->second, value)) continue;
+            if (auto claim = claim_cascade_row(other_table, row)) {
+                if (claim->result.kind == LockResult::Kind::Deadlock) {
+                    return CascadeAttemptResult::hard_error(StringResult::Err("Deadlock detected: transaction " + std::to_string(claim_txn_id) + " waits for transaction " +
+                                                                               std::to_string(claim->result.holder) + " (UPDATE cascade on '" + other_table +
+                                                                               "'). Transaction " + std::to_string(claim_txn_id) + " aborted."));
+                }
+                if (claim->result.kind == LockResult::Kind::Conflict) return CascadeAttemptResult::needs_retry(other_table, claim->pk_val);
+            }
+            child_hits.push_back(i);
+        }
+        return std::nullopt;
     };
 
     auto try_cascade_once = [&]() -> CascadeAttemptResult {
@@ -864,61 +880,13 @@ StringResult Executor::exec_update_inner(SharedDatabase& s, const std::string& t
                             break;
                         }
                         case FkAction::Cascade: {
-                            if (auto oit2 = s.tables.find(other_table); oit2 != s.tables.end()) {
-                                for (auto& row : oit2->second) {
-                                    if (!is_visible(row)) continue;
-                                    auto it = row.find(col.name);
-                                    if (it != row.end() && collation::equal(it->second, old_val)) {
-                                        if (auto claim = claim_cascade_row(other_table, row)) {
-                                            if (claim->result.kind == LockResult::Kind::Deadlock) {
-                                                return CascadeAttemptResult::hard_error(StringResult::Err(
-                                                    "Deadlock detected: transaction " + std::to_string(claim_txn_id) + " waits for transaction " +
-                                                    std::to_string(claim->result.holder) + " (UPDATE cascade on '" + other_table +
-                                                    "'). Transaction " + std::to_string(claim_txn_id) + " aborted."));
-                                            }
-                                            if (claim->result.kind == LockResult::Kind::Conflict) {
-                                                return CascadeAttemptResult::needs_retry(other_table, claim->pk_val);
-                                            }
-                                        }
-                                        Row cascade_old_row = row;
-                                        row[col.name] = new_val;
-                                        if (auto opc = single_pk_col(other_table)) refresh_cascade_indexes(other_table, *opc, cascade_old_row, row);
-                                    }
-                                }
-                            }
-                            if (!txn.is_active()) {
-                                std::vector<Row> rc = s.tables.at(other_table);
-                                s.buffer_pool.write_through(other_table, rc, s.disk);
-                            }
+                            if (auto sig = collect_children(other_table, col.name, old_val)) return *sig;
+                            cascade_write(s, other_table, child_hits, [&](Row& r) { r[col.name] = new_val; }, my_id);
                             break;
                         }
                         case FkAction::SetNull: {
-                            if (auto oit2 = s.tables.find(other_table); oit2 != s.tables.end()) {
-                                for (auto& row : oit2->second) {
-                                    if (!is_visible(row)) continue;
-                                    auto it = row.find(col.name);
-                                    if (it != row.end() && collation::equal(it->second, old_val)) {
-                                        if (auto claim = claim_cascade_row(other_table, row)) {
-                                            if (claim->result.kind == LockResult::Kind::Deadlock) {
-                                                return CascadeAttemptResult::hard_error(StringResult::Err(
-                                                    "Deadlock detected: transaction " + std::to_string(claim_txn_id) + " waits for transaction " +
-                                                    std::to_string(claim->result.holder) + " (UPDATE cascade on '" + other_table +
-                                                    "'). Transaction " + std::to_string(claim_txn_id) + " aborted."));
-                                            }
-                                            if (claim->result.kind == LockResult::Kind::Conflict) {
-                                                return CascadeAttemptResult::needs_retry(other_table, claim->pk_val);
-                                            }
-                                        }
-                                        Row cascade_old_row = row;
-                                        row[col.name] = EXECUTOR_NULL_VALUE;
-                                        if (auto opc = single_pk_col(other_table)) refresh_cascade_indexes(other_table, *opc, cascade_old_row, row);
-                                    }
-                                }
-                            }
-                            if (!txn.is_active()) {
-                                std::vector<Row> rc = s.tables.at(other_table);
-                                s.buffer_pool.write_through(other_table, rc, s.disk);
-                            }
+                            if (auto sig = collect_children(other_table, col.name, old_val)) return *sig;
+                            cascade_write(s, other_table, child_hits, [&](Row& r) { r[col.name] = EXECUTOR_NULL_VALUE; }, my_id);
                             break;
                         }
                         case FkAction::SetDefault: {
@@ -928,34 +896,15 @@ StringResult Executor::exec_update_inner(SharedDatabase& s, const std::string& t
                                     std::find_if(osc->columns.begin(), osc->columns.end(), [&](const ColumnDef& c2) { return c2.name == col.name; });
                                 if (cit != osc->columns.end() && cit->default_value) default_val = *cit->default_value;
                             }
-                            if (auto oit2 = s.tables.find(other_table); oit2 != s.tables.end()) {
-                                for (auto& row : oit2->second) {
-                                    if (!is_visible(row)) continue;
-                                    auto it = row.find(col.name);
-                                    if (it != row.end() && collation::equal(it->second, old_val)) {
-                                        if (auto claim = claim_cascade_row(other_table, row)) {
-                                            if (claim->result.kind == LockResult::Kind::Deadlock) {
-                                                return CascadeAttemptResult::hard_error(StringResult::Err(
-                                                    "Deadlock detected: transaction " + std::to_string(claim_txn_id) + " waits for transaction " +
-                                                    std::to_string(claim->result.holder) + " (UPDATE cascade on '" + other_table +
-                                                    "'). Transaction " + std::to_string(claim_txn_id) + " aborted."));
-                                            }
-                                            if (claim->result.kind == LockResult::Kind::Conflict) {
-                                                return CascadeAttemptResult::needs_retry(other_table, claim->pk_val);
-                                            }
-                                        }
-                                        Row cascade_old_row = row;
-                                        row[col.name] = default_val;
-                                        if (auto opc = single_pk_col(other_table)) refresh_cascade_indexes(other_table, *opc, cascade_old_row, row);
-                                    }
-                                }
-                            }
-                            if (!txn.is_active()) {
-                                std::vector<Row> rc = s.tables.at(other_table);
-                                s.buffer_pool.write_through(other_table, rc, s.disk);
-                            }
+                            if (auto sig = collect_children(other_table, col.name, old_val)) return *sig;
+                            cascade_write(s, other_table, child_hits, [&](Row& r) { r[col.name] = default_val; }, my_id);
                             break;
                         }
+                    }
+                    // (a statement that the redo log does not cover persists the child table itself)
+                    if (!txn.is_active() && !redo_covered_stmt_ && col.foreign_key->on_update != FkAction::Restrict) {
+                        std::vector<Row> rc = s.tables.at(other_table);
+                        s.buffer_pool.write_through(other_table, rc, s.disk);
                     }
                 }
             }

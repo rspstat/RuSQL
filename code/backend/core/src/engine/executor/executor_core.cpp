@@ -1020,10 +1020,10 @@ StringResult Executor::execute(Statement stmt) {
     {
         auto s = shared->read();
         if (auto tables = table_lock_set_for(*s, stmt)) {
-            // Redo-log durability: a plain single-table INSERT/UPDATE/DELETE whose lock set is
-            // exactly its own table has no FK neighbours to cascade into, so everything it
-            // changes is described by TransactionManager's redo ops. Anything else mutating
-            // keeps the legacy "flush the tables" persistence (see persist_autocommit).
+            // Redo-log durability: INSERT/UPDATE/DELETE (see is_redo_covered_kind) change nothing
+            // that TransactionManager's redo ops do not describe -- the child rows a foreign-key
+            // action changes included. Anything else mutating keeps the legacy "flush the tables"
+            // persistence (see persist_autocommit).
             // SELECT ... FOR UPDATE/SHARE isn't "pure read-only" (it takes row locks) but it
             // changes no data -- nothing to persist (and the select family already holds
             // table_data_locks SHARED for the whole statement, so persisting would self-deadlock).
@@ -1034,10 +1034,8 @@ StringResult Executor::execute(Statement stmt) {
                                       std::holds_alternative<Statement::Explain>(stmt.data) ||
                                       std::holds_alternative<Statement::ExplainAnalyze>(stmt.data);
             const bool mutating = !select_like && !is_pure_read_only(stmt);
-            // (an INSERT only READS the parents of its foreign keys -- they are in the lock set for the existence check -- and writes its own table, which the
-            // redo ops describe; UPDATE and DELETE lock the children they may cascade into, and a cascade is not logged)
-            const bool writes_one_table = tables->size() == 1 || std::holds_alternative<Statement::Insert>(stmt.data);
-            const bool covered = mutating && writes_one_table && is_redo_covered_kind(stmt);
+            // (the other tables of the lock set are the parents it reads and the children a foreign-key action may change; those changes are logged like the rest)
+            const bool covered = mutating && is_redo_covered_kind(stmt);
             // Row-level-concurrency Stage 4: table_locks[table] is no longer held
             // exclusive for the whole duration of an ordinary single-table
             // Insert/InsertSelect/Update/Delete/Select (FOR UPDATE/FOR SHARE included

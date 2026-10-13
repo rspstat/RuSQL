@@ -504,3 +504,51 @@ TEST_CASE("Redo: a cascade and an UPDATE of a child survive a crash right after 
         }
     }
 }
+
+// REPLACE, INSERT IGNORE, ON DUPLICATE KEY UPDATE, INSERT ... SELECT, and an UPDATE / DELETE with a foreign key on either side are all logged now (their cascades included):
+// none of them writes a table file, and every one of them survives a crash -- also when it is the last statement before the crash.
+TEST_CASE("Redo: REPLACE, IGNORE, ON DUPLICATE KEY UPDATE, INSERT ... SELECT and statements with foreign keys are logged, not flushed", "[redo][durability]") {
+    TempDataDir dir("redo_more_kinds");
+    auto count_rdb = [&] {
+        int n = 0;
+        for (auto& e : fs::recursive_directory_iterator(dir.path)) if (e.path().extension() == ".rdb") n++;
+        return n;
+    };
+    const std::vector<std::string> statements = {
+        "REPLACE INTO c VALUES (10, 2, 'r')",
+        "INSERT IGNORE INTO c VALUES (11, 3, 'i'), (13, 3, 'j')",
+        "INSERT INTO c VALUES (11, 3, 'o') ON DUPLICATE KEY UPDATE tag = 'updated'",
+        "INSERT INTO c SELECT id + 100, pid, tag FROM c WHERE id < 13",
+        "UPDATE c SET pid = 3 WHERE id = 12",
+        "DELETE FROM c WHERE id = 12",
+        "UPDATE p SET n = 7 WHERE id = 1",
+        "UPDATE p SET id = 21 WHERE id = 2",   // ON UPDATE CASCADE
+        "DELETE FROM p WHERE id = 3",          // ON DELETE CASCADE
+    };
+    for (std::size_t last = 0; last < statements.size(); last++) {
+        INFO("last statement: " << statements[last]);
+        fs::remove_all(dir.path);
+        std::string before_p, before_c;
+        {
+            Executor ex(dir.path);
+            REQUIRE(ex.execute_sql("CREATE DATABASE d").is_ok());
+            REQUIRE(ex.execute_sql("USE d").is_ok());
+            REQUIRE(ex.execute_sql("CREATE TABLE p (id INT PRIMARY KEY, n INT)").is_ok());
+            REQUIRE(ex.execute_sql("CREATE TABLE c (id INT PRIMARY KEY, pid INT, tag VARCHAR(8), FOREIGN KEY (pid) REFERENCES p(id) ON DELETE CASCADE ON UPDATE CASCADE)").is_ok());
+            REQUIRE(ex.execute_sql("INSERT INTO p VALUES (1,0),(2,0),(3,0)").is_ok());
+            REQUIRE(ex.execute_sql("INSERT INTO c VALUES (10,1,'a'),(11,2,'b'),(12,3,'c')").is_ok());
+            for (std::size_t i = 0; i <= last; i++) REQUIRE(ex.execute_sql(statements[i]).is_ok());
+            REQUIRE(count_rdb() == 0); // nothing was written to a table file
+            before_p = rows_of(ex, "SELECT * FROM p ORDER BY id");
+            before_c = rows_of(ex, "SELECT * FROM c ORDER BY id");
+        } // crash
+        Executor ex(dir.path);
+        REQUIRE(ex.execute_sql("USE d").is_ok());
+        auto strip_time = [](std::string t) {
+            auto p = t.rfind("row(s)");
+            return p == std::string::npos ? t : t.substr(0, p);
+        };
+        REQUIRE(strip_time(rows_of(ex, "SELECT * FROM p ORDER BY id")) == strip_time(before_p));
+        REQUIRE(strip_time(rows_of(ex, "SELECT * FROM c ORDER BY id")) == strip_time(before_c));
+    }
+}

@@ -1647,6 +1647,27 @@ VS Code 스타일 탭 드래그 순서 변경(요청의 1번 항목)은 같은 �
 
 **한계**: 여러 행 문장(R19의 문장당 해시)과 UPDATE의 키 검사는 캐시를 쓰지 않는다. 캐시는 메모리에 키마다 문자열 하나를 더 쓴다(2만 행 · 키 3개에서 수 MB 이하). INSERT 연속이 끊기면 다시 만들 때까지(최대 INSERT 두 번) 스캔한다. `INSERT IGNORE`·`ON DUPLICATE KEY UPDATE`·`REPLACE`·`INSERT … SELECT`는 문장 뒤 옛 방식 저장이 표 잠금을 독점으로 잡아(문장당 약 14 ms는 그 저장 비용) 캐시가 매번 낡으므로 캐시를 만들지 않고 전처럼 스캔한다.
 
+### 10월 13일 (일곱 번째) — 되돌려야 할 변경이 되돌려지지 않던 것: 연쇄(CASCADE)의 ROLLBACK, 미커밋 DELETE가 푼 UNIQUE 값, 세이브포인트 되돌리기, 그리고 연쇄·IGNORE·REPLACE·UPDATE의 저장 비용 (R23)
+
+**왜 이 항목인가**: 사용자 "고치지 않은 거 고쳐주세요". 앞 항목들에서 "고치지 않음/범위 밖"으로 적은 것은 두 덩어리였다 — ① 정합성: 미커밋 DELETE가 UNIQUE 값을 풀어 다른 세션이 같은 값을 넣고 ROLLBACK 뒤 같은 값의 행이 둘이 되는 것; ② 속도: 자식 UPDATE(약 22 ms)·부모 UPDATE/DELETE(약 40/32 ms)·`REPLACE`/`INSERT IGNORE`/`ON DUPLICATE KEY UPDATE`/`INSERT … SELECT`(5~11 ms)가 문장마다 표 파일을 다시 쓰는 옛 방식을 탐. ①을 시험하다가 더 큰 정합성 문제 셋을 찾아 같이 고쳤다.
+
+**고친 것 (정합성)**
+1. **미커밋 DELETE/UPDATE가 푼 UNIQUE 값** — 트랜잭션 안의 `DELETE`와 키를 옮기는 `UPDATE`(그리고 `ON DELETE CASCADE`로 지워지는 자식 행)가 지우거나 비우는 UNIQUE 값(UNIQUE 열·`UNIQUE (a, b)`·복합 기본키)의 클레임을 **트랜잭션이 끝날 때까지 쥔다**(기본키는 원래 그랬다). 같은 값을 INSERT/UPDATE하는 세션은 기다리고, 끝나면 다시 보아 ROLLBACK이면 중복 오류, COMMIT이면 들어간다(InnoDB와 같음). 바꾸지 않은 키는 쥐지 않아 기다리지 않는다. 서로 기다리면 교착으로 알려 준다.
+2. **연쇄(CASCADE/SET NULL/SET DEFAULT)가 트랜잭션의 일부가 아니었음** — 자식 행을 제자리에서 고치고 지웠을 뿐 트랜잭션 관리자에 알리지 않아서: `BEGIN; DELETE FROM p …; ROLLBACK`이 부모만 돌려주고 **자식은 사라진 채**, `SET NULL`은 NULL인 채, `ON UPDATE CASCADE`는 **부모에 없는 키를 가리키는 고아 자식**을 남겼다(`ROLLBACK TO SAVEPOINT`도 같음). 이미 시작된 REPEATABLE READ 스냅샷도 자식의 제자리 수정을 그대로 봤고, 크래시 뒤 redo가 연쇄를 다시 만들 수도 없었다. 이제 `Executor::cascade_write`(`executor_cascade.cpp`)가 자식 표의 UPDATE/DELETE처럼 쓴다: 옛 버전은 `_xmax`로 끝내고 새 버전을 붙이고(지우는 행은 끝내기만, 아무도 못 보는 자동 커밋 삭제는 진짜 삭제), `log_update`/`log_delete`로 되돌리기 로그·redo에 남기고, PK 트리·보조·해시·복합 색인과 위치 캐시를 맞춘다.
+3. **`ROLLBACK TO SAVEPOINT`가 행을 둘로 만들던 두 경우**(연쇄 시험 중 발견, 외래키와 무관) — 기본키를 바꾼 `UPDATE`를 되돌릴 때 새 버전을 옛 키로 찾아 못 지움(`UndoEntry::new_key` 추가), 같은 트랜잭션에서 `UPDATE` 뒤 `DELETE`한 행의 DELETE를 되돌릴 때 같은 키·같은 `_xmax`의 버전을 전부 되살림(이제 지운 버전만).
+
+**고친 것 (속도)** — `is_redo_covered_kind`/`covered`: 연쇄까지 로그에 남으므로 잠금 집합이 한 표인지는 더 묻지 않는다. `INSERT`(IGNORE·ON DUPLICATE KEY UPDATE·REPLACE 포함)·`INSERT … SELECT`·`UPDATE`·`DELETE`는 전부 redo 한 배치. (MERGE와 다중 표 UPDATE/DELETE는 옛 방식 그대로.) 연쇄가 대는 `write_through`는 로그가 덮지 않는 문장에서만 남음.
+
+**속도**(구 빌드 → 새 빌드, 번갈아 3번; 2만 행 부모, 5,000행 자식, 문장 하나): 자식 `UPDATE` **22.7 → 0.7 ms**, 부모 `UPDATE v`(자식 있음) **38.9 → 0.7**, 부모 `UPDATE id`(연쇄) **45.1 → 0.9**, 부모 `DELETE`(연쇄) **32.0 → 5.1**, `REPLACE` 5.3 → 1.8, `INSERT IGNORE` 4.8 → 0.7, `ON DUPLICATE KEY UPDATE` 10.8 → 1.2, `INSERT … SELECT`(10행) 5.4 → 1.5. 다른 경로는 변화 없음(일반 표 INSERT 197 → 200 ms·UPDATE 20.3 → 20.2·DELETE 136 → 139, UNIQUE 표 INSERT/UPDATE 같음; GROUP BY·스캔은 ±잡음). 연쇄 삭제 뒤 위치 캐시를 지워 버려 이후 자식 DELETE가 0.66 → 1.1 ms로 느려지던 것을 시험 중 찾아, 캐시를 비우기만 하도록 고쳤다(0.66).
+
+**검증**:
+- 신규 시험: `test_uncommitted_unique.cpp`(UNIQUE 열·`UNIQUE (a, b)`·복합 기본키 × DELETE/키 옮기는 UPDATE × ROLLBACK/COMMIT × INSERT/INSERT IGNORE, 바꾸지 않은 키는 기다리지 않음, 교착은 알림, 연쇄 삭제의 자식 값), `test_cascade_rollback.cpp`(연쇄 6가지 × ROLLBACK/ROLLBACK TO/COMMIT/트랜잭션 없음, 모든 색인으로 본 자식 행, 이미 시작한 스냅샷은 옛 자식 행을 봄, 부모·자식 임의 문장 220단계를 RESTRICT/CASCADE/SET NULL 9조합의 모델과 비교하는 임의 시험 80시드 243,777 assertions, 세이브포인트 두 경우), `test_redo.cpp`(IGNORE·ODKU·REPLACE·INSERT…SELECT·UPDATE/DELETE·연쇄가 표 파일을 쓰지 않고 마지막 문장이어도 크래시에 살아남음). 옛 시험 하나(`test_unique_claims.cpp`)가 "트랜잭션이 지운 행의 값은 바로 쓸 수 있다"는 바로 이 버그를 기대하고 있어 "지우고 커밋한 행의 값"으로 바꿨다.
+- `fuzz_crash_fk.py`를 키운 크래시 퍼저: 외래키 동작 9조합(RESTRICT/CASCADE/SET NULL × 둘)을 시드로 돌리고 자식·부모 INSERT/REPLACE/IGNORE/ODKU/UPDATE/DELETE, 트랜잭션·세이브포인트, kill -9 뒤 모델과 비교 — 새 빌드 90라운드 불일치 0(옛 빌드는 ROLLBACK TO 뒤 RESTRICT가 깨지는 시드가 있음).
+- 심은 버그 24종: 21종 잡힘. 살아남은 3종은 결과가 같다 — 삭제 클레임 충돌 무시(PK 클레임이 먼저 막아 닿지 않음), `ROLLBACK TO`의 `break`(같은 내용의 행이 둘일 때뿐), MERGE를 로그 대상으로(MERGE도 로그되는 문장으로만 쓰여 시험이 같은 결과 — 속도만의 문제라 건드리지 않음).
+- Release 전체 **700 케이스 / 1,479,621 assertions**을 기본·강제 양쪽으로 통과, `[random]` 40시드(554,672)·`[unique_claim]` 25시드·`[unique_probe]` 60시드 통과, 캐시 점검 모드 전체 통과; 빌드 간 차분(R22 대비) 10시드 × 99질의 차이 0건; `verify_writes.py` 시드 1~8 위반 0; 크래시 퍼저 20라운드 + 동시성 퍼저 10라운드(확인한 행 5,700) 불일치 0.
+
+**한계**: 연쇄가 자식에게 만드는 새 버전은 `UPDATE`처럼 죽은 옛 버전을 남기고 자동 VACUUM이 치운다(연쇄만 받는 자식 표는 자기 DML이 없으면 VACUUM 횟수가 늘지 않음). 자기 자신을 가리키는 외래키의 연쇄는 전부터 없다. `SET NULL`/`SET DEFAULT`가 비우는 값은 새 클레임을 쥐지 않는다(그 값의 부모가 없어서 어떤 자식도 그 값을 쓸 수 없음).
+
 ## 요약: 1학기 대비 2학기에 달라진 것
 
 | 항목 | 1학기 (~2026년 6월) | 2학기 (2026년 7~8월) |

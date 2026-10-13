@@ -433,15 +433,12 @@ TEST_CASE("a NULL, a row that is gone and a claim that nobody lets go of are not
     Timed t = run_while_claimed(f, "INSERT INTO t (email, tag) VALUES ('null', 'x')", kHolder, nullptr);
     REQUIRE(t.ok);
     REQUIRE(t.ms >= 150);
-    // a row that a transaction has deleted (it is still there for that transaction's sake) does not hold its value
+    // a row that has been deleted does not hold its value (it is still in the table for a while, ended). While the transaction that deleted it is open it does hold the claim
+    // on the value, and an INSERT of the value waits for it: see test_uncommitted_unique.cpp
     ok(f.ex, "INSERT INTO t (email, tag) VALUES ('gone', 'g')");
-    Executor a = Executor::new_session(f.shared);
-    REQUIRE(a.execute_sql("USE d").is_ok());
-    REQUIRE(a.execute_sql("BEGIN").is_ok());
-    REQUIRE(a.execute_sql("DELETE FROM t WHERE email = 'gone'").is_ok());
+    ok(f.ex, "DELETE FROM t WHERE email = 'gone'");
     REQUIRE(f.lm.acquire("d.t#uk:email", "gone", kHolder).kind == LockResult::Kind::Granted);
     t = run_while_claimed(f, "INSERT INTO t (email, tag) VALUES ('gone', 'again')", kHolder, nullptr);
-    REQUIRE(a.execute_sql("ROLLBACK").is_ok());
     REQUIRE(t.ok);
     REQUIRE(t.ms >= 150);
 }

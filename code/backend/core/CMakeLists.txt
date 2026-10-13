@@ -45,6 +45,7 @@ add_library(engine_core STATIC
     src/engine/executor/executor_types.cpp
     src/engine/executor/executor_redo.cpp
     src/engine/executor/executor_delete.cpp
+    src/engine/executor/executor_cascade.cpp
     src/engine/executor/executor_partition.cpp
     src/engine/executor/gap_lock.cpp
     src/engine/executor/executor_select.cpp

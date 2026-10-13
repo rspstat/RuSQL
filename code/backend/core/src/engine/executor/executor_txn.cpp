@@ -280,10 +280,11 @@ StringResult Executor::exec_rollback_to(SharedDatabase& s, const std::string& na
                     // old_data (more than one row can carry _xmax == this txn's id if the
                     // same key was updated more than once in this transaction, so a bare
                     // key+_xmax match would be ambiguous).
+                    const std::string& tip_key = entry.new_key ? *entry.new_key : entry.key; // (a primary key that the UPDATE changed)
                     rows.erase(std::remove_if(rows.begin(), rows.end(),
                                                [&](const Row& r) {
                                                    auto pit = r.find(pk_col);
-                                                   if (pit == r.end() || pit->second != entry.key) return false;
+                                                   if (pit == r.end() || pit->second != tip_key) return false;
                                                    auto xnit = r.find("_xmin");
                                                    auto xxit = r.find("_xmax");
                                                    return xnit != r.end() && xnit->second == txn_id_str && xxit != r.end() &&
@@ -309,12 +310,28 @@ StringResult Executor::exec_rollback_to(SharedDatabase& s, const std::string& na
                 }
             }
         } else if (entry.operation == "DELETE") {
+            // Only the version this DELETE ended comes back: an earlier UPDATE of the same row in the transaction has ended another one (it carries the same key and the same
+            // _xmax), and reviving that one too left the row twice.
+            std::optional<Row> deleted;
+            if (entry.old_data) {
+                try {
+                    deleted = row_from_json(*entry.old_data);
+                } catch (...) {
+                }
+            }
             for (auto& row : rows) {
                 auto pit = row.find(pk_col);
                 auto xxit = row.find("_xmax");
-                if (pit != row.end() && pit->second == entry.key && xxit != row.end() && xxit->second == txn_id_str) {
-                    row["_xmax"] = "0";
+                if (pit == row.end() || pit->second != entry.key || xxit == row.end() || xxit->second != txn_id_str) continue;
+                if (deleted && !std::all_of(deleted->begin(), deleted->end(), [&](auto& kv) {
+                        if (kv.first == "_xmax") return true;
+                        auto it2 = row.find(kv.first);
+                        return it2 != row.end() && it2->second == kv.second;
+                    })) {
+                    continue;
                 }
+                row["_xmax"] = "0";
+                break;
             }
         }
     }

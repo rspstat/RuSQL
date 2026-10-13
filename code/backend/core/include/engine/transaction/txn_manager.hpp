@@ -36,6 +36,9 @@ struct UndoEntry {
     std::string table;
     std::string key;
     std::optional<std::string> old_data;
+    // An UPDATE that changes the primary key leaves its new version under another key than `key`: rolling back to a savepoint has to find that version. (Not written to
+    // the undo log file; the rows of a transaction that was open at a crash are undone by their transaction ids, not by key.)
+    std::optional<std::string> new_key;
 };
 
 /// 미완료 트랜잭션의 Undo Log를 디스크에 영속화하는 관리자 (크래시 복구용).
@@ -115,7 +118,7 @@ public:
     bool redo_incomplete() const { return redo_incomplete_; }
 
     void log_insert(const std::string& table, const std::string& key, const std::string& data);
-    void log_update(const std::string& table, const std::string& key, const std::string& old_data, const std::string& new_data);
+    void log_update(const std::string& table, const std::string& key, const std::string& old_data, const std::string& new_data, const std::string& new_key = std::string());
     void log_delete(const std::string& table, const std::string& key, const std::string& old_data);
 
     bool is_active() const { return active_; }
