@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <filesystem>
+#include <sstream>
 
 #include "catch.hpp"
 #include "engine/executor/executor.hpp"
@@ -616,5 +617,79 @@ TEST_CASE("A fresh Executor pointed at the same directory reloads persisted sche
         REQUIRE(s->databases.count("company") == 1);
         REQUIRE(s->catalog.tables.count("company.department") == 1);
         REQUIRE(s->index_meta.count("company.department_idx_dept_name") == 1);
+    }
+}
+
+// A table made under the name of a dropped one was read through the indexes of the dropped table: a query found rows that were never in it, and an INSERT of
+// a UNIQUE value the old table had held was refused. (DROP DATABASE removed the indexes; DROP TABLE did not.)
+TEST_CASE("DROP TABLE takes the indexes of the table with it", "[executor][ddl]") {
+    TempDataDir dir("exec_ddl_data_drop_indexes");
+    auto count = [](Executor& ex, const std::string& sql) {
+        INFO(sql);
+        auto r = ex.execute_sql(sql);
+        REQUIRE(r.is_ok());
+        std::size_t rows = 0;
+        std::istringstream in(r.value());
+        std::string line;
+        int bars = 0;
+        while (std::getline(in, line)) {
+            if (line.empty() || line[0] != '|') continue;
+            if (++bars > 1) rows++;
+        }
+        return rows;
+    };
+    {
+        Executor ex(dir.path);
+        REQUIRE(ex.execute_sql("CREATE DATABASE d").is_ok());
+        REQUIRE(ex.execute_sql("USE d").is_ok());
+        REQUIRE(ex.execute_sql("CREATE TABLE keep (id INT PRIMARY KEY, u VARCHAR(8))").is_ok());
+        REQUIRE(ex.execute_sql("CREATE INDEX keep_u ON keep (u) USING HASH").is_ok());
+        REQUIRE(ex.execute_sql("CREATE INDEX keep_b ON keep (u, id)").is_ok());
+        REQUIRE(ex.execute_sql("CREATE INDEX keep_i ON keep (u)").is_ok());
+        REQUIRE(ex.execute_sql("INSERT INTO keep VALUES (1, 'k')").is_ok());
+        for (const char* ddl : {"CREATE INDEX ix ON t (u) USING HASH", "CREATE INDEX ix ON t (u)", "CREATE INDEX ix ON t (u, v)"}) {
+            INFO(ddl);
+            REQUIRE(ex.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, u VARCHAR(8) UNIQUE, v INT)").is_ok());
+            REQUIRE(ex.execute_sql(ddl).is_ok());
+            REQUIRE(ex.execute_sql("INSERT INTO t VALUES (1, 'y', 10), (2, 'x', 20)").is_ok());
+            REQUIRE(ex.execute_sql("DROP TABLE t").is_ok());
+            {
+                auto s = ex.get_shared()->read();
+                REQUIRE(s->index_meta.count("d.t_ix") == 0);
+                REQUIRE(s->indexes.count("d.t_ix") == 0);
+                REQUIRE(s->hash_index_meta.count("d.t_ix") == 0);
+                REQUIRE(s->hash_indexes.count("d.t_ix") == 0);
+                REQUIRE(s->composite_indexes.count("d.t_ix") == 0);
+            }
+            REQUIRE(ex.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, u VARCHAR(8) UNIQUE, v INT)").is_ok());
+            REQUIRE(ex.execute_sql("INSERT INTO t VALUES (7, 'z', 70)").is_ok());
+            REQUIRE(count(ex, "SELECT id FROM t WHERE u = 'y'") == 0);
+            REQUIRE(count(ex, "SELECT id FROM t WHERE u = 'z'") == 1);
+            REQUIRE(count(ex, "SELECT id FROM t WHERE u = 'y' AND v = 10") == 0);
+            REQUIRE(ex.execute_sql("INSERT INTO t VALUES (8, 'y', 80)").is_ok()); // 'y' was the old table's
+            REQUIRE(ex.execute_sql("DROP TABLE t").is_ok());
+        }
+        // the indexes of another table stay
+        REQUIRE(count(ex, "SELECT id FROM keep WHERE u = 'k'") == 1);
+        {
+            auto s = ex.get_shared()->read();
+            REQUIRE(s->hash_index_meta.count("d.keep_keep_u") == 1);
+            REQUIRE(s->hash_indexes.count("d.keep_keep_u") == 1);
+            REQUIRE(s->composite_indexes.count("d.keep_keep_b") == 1);
+            REQUIRE(s->index_meta.count("d.keep_keep_i") == 1);
+            REQUIRE(s->indexes.count("d.keep_keep_i") == 1);
+        }
+        REQUIRE(ex.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, u VARCHAR(8), v INT)").is_ok());
+    }
+    {
+        // after a restart the new table has no index of the old one's name, and the other table keeps its own
+        Executor ex(dir.path);
+        auto s = ex.get_shared()->read();
+        REQUIRE(s->index_meta.count("d.t_ix") == 0);
+        REQUIRE(s->hash_index_meta.count("d.t_ix") == 0);
+        REQUIRE(s->composite_indexes.count("d.t_ix") == 0);
+        REQUIRE(s->hash_index_meta.count("d.keep_keep_u") == 1);
+        REQUIRE(s->composite_indexes.count("d.keep_keep_b") == 1);
+        REQUIRE(s->index_meta.count("d.keep_keep_i") == 1);
     }
 }

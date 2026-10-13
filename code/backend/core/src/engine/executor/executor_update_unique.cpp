@@ -15,6 +15,27 @@
 
 namespace engine {
 
+namespace {
+// Whether Executor::index_or_scan_exists answers "no" for a value of `column` by scanning the table. Only a single-column primary key with its tree and a
+// column with a hash index know every holder of a value (a secondary B+Tree keeps one row per key: it can confirm a value, not rule it out).
+bool lookup_scans(const SharedDatabase& s, const std::string& table, const std::string& column) {
+    std::string pk_column;
+    std::size_t pk_count = 0;
+    if (const auto* schema = s.catalog.get_table(table)) {
+        for (auto& c : schema->columns) {
+            if (!c.primary_key) continue;
+            if (pk_count == 0) pk_column = c.name;
+            pk_count++;
+        }
+    }
+    if (pk_count == 1 && pk_column == column && s.indexes.count(table)) return false;
+    for (auto& [index_key, meta] : s.hash_index_meta) {
+        if (meta.first == table && meta.second == column && s.hash_indexes.count(index_key)) return false;
+    }
+    return true;
+}
+} // namespace
+
 std::optional<std::string> Executor::update_unique_violation(SharedDatabase& s, const std::string& table, const std::vector<const Row*>& olds,
                                                              const std::vector<Row>& news) {
     const TableSchema* schema = s.catalog.get_table(table);
@@ -59,9 +80,31 @@ std::optional<std::string> Executor::update_unique_violation(SharedDatabase& s, 
         // 2) a changed value must not be held by a live row this statement does not rewrite. A value
         //    that one of the rewritten rows holds right now is fine (that holder is being replaced);
         //    otherwise any live holder is, by construction, a different row.
+        std::vector<std::size_t> wanted_rows; // the rows whose new value has to be looked for in the table
         for (std::size_t i = 0; i < news.size(); i++) {
             std::string ov = get(*olds[i], col.name), nv = get(news[i], col.name);
             if (collation::equal(ov, nv) || skipped(nv) || held_by_targets.count(collation::key(nv))) continue;
+            wanted_rows.push_back(i);
+        }
+        if (wanted_rows.size() > 1 && lookup_scans(s, table, col.name)) {
+            // no index answers "is this value there": one pass over the table for all the values (a lookup each scanned the table once per row)
+            std::unordered_set<std::string> wanted_keys, held;
+            for (std::size_t i : wanted_rows) wanted_keys.insert(collation::key(get(news[i], col.name)));
+            for (auto& live : tit->second) {
+                if (!is_visible(live)) continue;
+                auto it = live.find(col.name);
+                if (it == live.end()) continue;
+                std::string key = collation::key(it->second);
+                if (wanted_keys.count(key)) held.insert(std::move(key));
+            }
+            for (std::size_t i : wanted_rows) {
+                const std::string nv = get(news[i], col.name);
+                if (held.count(collation::key(nv))) return dup(nv, col.name);
+            }
+            continue;
+        }
+        for (std::size_t i : wanted_rows) {
+            const std::string nv = get(news[i], col.name);
             if (index_or_scan_exists(s, table, tit->second, col.name, nv, [](const Row& r) { return Executor::is_visible(r); })) {
                 return dup(nv, col.name);
             }

@@ -327,6 +327,36 @@ StringResult Executor::exec_drop(SharedDatabase& s, const std::string& name, boo
     s.row_pk_pos.erase(name);
     s.buffer_pool.invalidate(name);
     s.disk.delete_table(name);
+    // The indexes of the table go with it. They stayed, and a table made later under the same name was read through them: a query found rows of the dropped table,
+    // and an INSERT was refused as a duplicate of a value the old table had held.
+    bool dropped_index = false;
+    for (auto it = s.index_meta.begin(); it != s.index_meta.end();) {
+        if (it->second.first != name) {
+            ++it;
+            continue;
+        }
+        s.indexes.erase(it->first);
+        it = s.index_meta.erase(it);
+        dropped_index = true;
+    }
+    for (auto it = s.hash_index_meta.begin(); it != s.hash_index_meta.end();) {
+        if (it->second.first != name) {
+            ++it;
+            continue;
+        }
+        s.hash_indexes.erase(it->first);
+        it = s.hash_index_meta.erase(it);
+        dropped_index = true;
+    }
+    for (auto it = s.composite_indexes.begin(); it != s.composite_indexes.end();) {
+        if (it->second.table != name) {
+            ++it;
+            continue;
+        }
+        it = s.composite_indexes.erase(it);
+        dropped_index = true;
+    }
+    if (dropped_index) persist_index_meta(s);
     if (partition_by) {
         for (auto& def : partition_by->partitions) exec_drop(s, def.child_table, /*if_exists=*/true);
     }
