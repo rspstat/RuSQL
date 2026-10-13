@@ -144,6 +144,16 @@ StringResult Executor::exec_delete_inner(SharedDatabase& s, const std::string& t
     // exec_insert_inner's identical field for the rationale.
     auto lock_deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(lock_wait_timeout_ms);
 
+    // The rows this statement ends (images, in the exclusive section that ends them) leave the cache of UNIQUE values.
+    auto cache_forgets = [&](const std::vector<Row>& gone) {
+        if (const TableSchema* sch = s.catalog.get_table(table)) {
+            std::vector<const Row*> removed;
+            removed.reserve(gone.size());
+            for (auto& r : gone) removed.push_back(&r);
+            unique_probe_apply(s, table, *sch, removed, {});
+        }
+    };
+
     auto single_pk_col = [&](const std::string& tbl) -> std::optional<std::string> {
         auto* sc = s.catalog.get_table(tbl);
         if (!sc) return std::nullopt;
@@ -398,6 +408,7 @@ StringResult Executor::exec_delete_inner(SharedDatabase& s, const std::string& t
             txn.log_delete(table, kit != del_row.end() ? kit->second : std::string(), row_to_json(del_row));
         }
         index_replace_rows(s, table, rows_to_delete, std::vector<Row>{}, pk_col); // once per bucket, not once per row
+        cache_forgets(rows_to_delete);
         if (auto idx_it = s.indexes.find(table); idx_it != s.indexes.end()) {
             for (auto& del_row : rows_to_delete) {
                 auto it = del_row.find(pk_col);
@@ -739,6 +750,7 @@ StringResult Executor::exec_delete_inner(SharedDatabase& s, const std::string& t
                 deleted++;
             }
             refresh_indexes_for_soft_deletes(soft_olds, soft_news);
+            cache_forgets(soft_olds);
             if (!conflict) {
                 // Row-level-concurrency Stage 4/5 correctness fix: invalidate the cache
                 // HERE, still holding table_lock EXCLUSIVE -- see exec_insert_inner's
@@ -857,6 +869,7 @@ StringResult Executor::exec_delete_inner(SharedDatabase& s, const std::string& t
                 deleted++;
             }
             refresh_indexes_for_soft_deletes(soft_olds, soft_news);
+            cache_forgets(soft_olds);
             if (!conflict) {
                 // Row-level-concurrency Stage 4/5 correctness fix: invalidate the cache
                 // HERE, still holding table_lock EXCLUSIVE -- see exec_insert_inner's

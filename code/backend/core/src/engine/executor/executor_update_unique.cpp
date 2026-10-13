@@ -86,6 +86,23 @@ std::optional<std::string> Executor::update_unique_violation(SharedDatabase& s, 
             if (collation::equal(ov, nv) || skipped(nv) || held_by_targets.count(collation::key(nv))) continue;
             wanted_rows.push_back(i);
         }
+        // The cache of UNIQUE values (it is current when no other statement has locked the table since it was made): when it says that no live row holds any of the new
+        // values, there is nothing to look for.
+        if (!wanted_rows.empty()) {
+            bool all_absent = true;
+            for (std::size_t i : wanted_rows) {
+                const Row& new_row = news[i];
+                const auto value_of = [&new_row](const std::string& c) -> const std::string* {
+                    auto it = new_row.find(c);
+                    return it == new_row.end() ? nullptr : &it->second;
+                };
+                if (!unique_probe_proves_absent(s, table, *schema, {col.name}, /*tuple=*/false, /*skip_null=*/true, value_of, ProbeUse::InsideExclusive)) {
+                    all_absent = false;
+                    break;
+                }
+            }
+            if (all_absent) continue;
+        }
         if (wanted_rows.size() > 1 && lookup_scans(s, table, col.name)) {
             // no index answers "is this value there": one pass over the table for all the values (a lookup each scanned the table once per row)
             std::unordered_set<std::string> wanted_keys, held;
@@ -140,13 +157,32 @@ std::optional<std::string> Executor::update_unique_violation(SharedDatabase& s, 
         }
         if (!any_changed) continue;
         std::unordered_set<std::string> final_keys, wanted;
+        std::vector<std::size_t> wanted_rows; // the rows whose new key has to be looked for
         for (std::size_t i = 0; i < news.size(); i++) { // 1) the statement's own result must not repeat a key
             auto nk = encode(news[i], shown);
             if (!nk) continue;
             if (!final_keys.insert(*nk).second) return "Duplicate entry '" + shown + "' for key '" + spec.label + "'";
-            if (!held_by_targets.count(*nk)) wanted.insert(*nk);
+            if (!held_by_targets.count(*nk)) {
+                wanted.insert(*nk);
+                wanted_rows.push_back(i);
+            }
         }
         if (wanted.empty()) continue;
+        {   // the cache of UNIQUE values: no live row holds any of these keys
+            bool all_absent = true;
+            for (std::size_t i : wanted_rows) {
+                const Row& new_row = news[i];
+                const auto value_of = [&new_row](const std::string& c) -> const std::string* {
+                    auto it = new_row.find(c);
+                    return it == new_row.end() ? nullptr : &it->second;
+                };
+                if (!unique_probe_proves_absent(s, table, *schema, spec.columns, /*tuple=*/true, /*skip_null=*/!spec.primary, value_of, ProbeUse::InsideExclusive)) {
+                    all_absent = false;
+                    break;
+                }
+            }
+            if (all_absent) continue;
+        }
         std::unordered_set<const Row*> rewritten(olds.begin(), olds.end());
         for (auto& live : tit->second) { // 2) a key that is new must not be held by a live row this statement does not rewrite
             if (!is_visible(live) || rewritten.count(&live)) continue;

@@ -1,6 +1,9 @@
+#include <cctype>
 #include <filesystem>
 #include <fstream>
 #include <memory>
+#include <sstream>
+#include <vector>
 
 #include "catch.hpp"
 #include "engine/executor/executor.hpp"
@@ -550,5 +553,73 @@ TEST_CASE("Redo: REPLACE, IGNORE, ON DUPLICATE KEY UPDATE, INSERT ... SELECT and
         };
         REQUIRE(strip_time(rows_of(ex, "SELECT * FROM p ORDER BY id")) == strip_time(before_p));
         REQUIRE(strip_time(rows_of(ex, "SELECT * FROM c ORDER BY id")) == strip_time(before_c));
+    }
+}
+
+// A table file is rewritten in the middle of an open transaction by a checkpoint, by another session's statement that flushes the tables, or by ROLLBACK TO
+// SAVEPOINT of the transaction itself. The file must hold committed work only: a ROLLBACK changes the rows in memory and nothing else, so the versions the
+// transaction had made (rows it inserted, rows it updated or deleted) would stay in the file and come back after a crash.
+TEST_CASE("Redo: a table flushed in the middle of an open transaction does not keep its rows after ROLLBACK", "[redo][durability]") {
+    // the table as "id=v;" in id order
+    auto dump = [](Executor& ex) {
+        auto r = ex.execute_sql("SELECT id, v FROM t ORDER BY id");
+        REQUIRE(r.is_ok());
+        std::string out, line;
+        std::istringstream in(r.value());
+        while (std::getline(in, line)) {
+            if (line.empty() || line[0] != '|') continue;
+            std::vector<std::string> cells;
+            std::istringstream cs(line);
+            std::string cell;
+            while (std::getline(cs, cell, '|')) {
+                cell.erase(0, cell.find_first_not_of(" \t\r"));
+                cell.erase(cell.find_last_not_of(" \t\r") + 1);
+                if (!cell.empty()) cells.push_back(cell);
+            }
+            if (cells.size() == 2 && std::isdigit(static_cast<unsigned char>(cells[0][0]))) out += cells[0] + "=" + cells[1] + ";";
+        }
+        return out;
+    };
+    enum Flush { OwnRollbackTo, OtherSessionDdl };
+    enum End { Rollback, Commit, StayOpen };
+    const char* flush_name[] = {"ROLLBACK TO SAVEPOINT of the transaction", "DDL of another session"};
+    const char* end_name[] = {"ROLLBACK", "COMMIT", "crash with the transaction open"};
+    const char* work_name[] = {"INSERT + UPDATE + DELETE", "DELETE of a committed row only"};
+    for (int f = 0; f < 2; f++) {
+        for (int e = 0; e < 3; e++) {
+            for (int w = 0; w < 2; w++) {
+                INFO("flushed by " << flush_name[f] << ", ended by " << end_name[e] << ", work: " << work_name[w]);
+                TempDataDir dir("redo_mid_txn_flush");
+                // (the INSERT of the other session, id 4, is committed in every case)
+                const std::string want = e != Commit ? "1=10;2=20;3=30;4=40;" : w == 0 ? "1=100;3=30;4=40;10=10;" : "1=10;3=30;4=40;";
+                {
+                    Executor a(dir.path);
+                    setup(a);
+                    for (int i = 1; i <= 3; i++) REQUIRE(a.execute_sql("INSERT INTO t VALUES (" + std::to_string(i) + "," + std::to_string(i * 10) + ")").is_ok());
+                    Executor b = Executor::new_session(a.get_shared());
+                    REQUIRE(b.execute_sql("USE d").is_ok());
+                    REQUIRE(a.execute_sql("BEGIN").is_ok());
+                    if (w == 0) {
+                        REQUIRE(a.execute_sql("INSERT INTO t VALUES (10,10)").is_ok());
+                        REQUIRE(a.execute_sql("UPDATE t SET v = 100 WHERE id = 1").is_ok());
+                    }
+                    REQUIRE(a.execute_sql("DELETE FROM t WHERE id = 2").is_ok());
+                    // (the other session's INSERT leaves a table with changes only the redo log holds, which is what makes the next statement that
+                    // flushes the tables write the file -- and nothing may follow the end of the transaction, or a later flush would hide the fault)
+                    REQUIRE(b.execute_sql("INSERT INTO t VALUES (4,40)").is_ok());
+                    if (f == OwnRollbackTo) {
+                        REQUIRE(a.execute_sql("SAVEPOINT s").is_ok());
+                        REQUIRE(a.execute_sql("ROLLBACK TO s").is_ok());
+                    } else {
+                        REQUIRE(b.execute_sql("CREATE TABLE u (id INT PRIMARY KEY)").is_ok());
+                    }
+                    if (e == Rollback) REQUIRE(a.execute_sql("ROLLBACK").is_ok());
+                    if (e == Commit) REQUIRE(a.execute_sql("COMMIT").is_ok());
+                } // crash
+                Executor ex(dir.path);
+                REQUIRE(ex.execute_sql("USE d").is_ok());
+                REQUIRE(dump(ex) == want);
+            }
+        }
     }
 }

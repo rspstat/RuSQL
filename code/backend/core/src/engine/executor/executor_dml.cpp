@@ -730,7 +730,6 @@ StringResult Executor::exec_insert_inner(SharedDatabase& s, const std::string& t
         const std::string bare_table = table.substr(table.rfind('.') == std::string::npos ? 0 : table.rfind('.') + 1);
         for (auto& key : schema.unique_keys) {
             composite_uniques.push_back(CompositeUnique{&key, bare_table + "." + key.name.value_or(key.columns.front()), {}, false, {}});
-            if (several_rows) fill_existing(composite_uniques.back());
         }
     }
 
@@ -922,6 +921,9 @@ StringResult Executor::exec_insert_inner(SharedDatabase& s, const std::string& t
                     // the first visible row of the table with this key (by the table's collation: 'Alice' and 'alice' are one key)
                     const Row* clash = nullptr;
                     if (several_rows) {
+                        if (unique_probe_proves_absent(s, table, schema, pk_cols, /*tuple=*/true, /*skip_null=*/false, row_value_of, ProbeUse::NoBuild)) {
+                            // (no live row holds the key: nothing to look up, and the hash of the rows the table holds is not made for this row)
+                        } else {
                         if (!existing_by_pk_tuple_built) {
                             for (auto& existing : rows) {
                                 if (!is_visible(existing)) continue;
@@ -935,6 +937,7 @@ StringResult Executor::exec_insert_inner(SharedDatabase& s, const std::string& t
                             existing_by_pk_tuple_built = true;
                         }
                         if (auto hit = existing_by_pk_tuple.find(tuple_key(new_pk_tuple)); hit != existing_by_pk_tuple.end()) clash = hit->second;
+                        }
                     } else if (!unique_probe_proves_absent(s, table, schema, pk_cols, /*tuple=*/true, /*skip_null=*/false, row_value_of)) {
                         for (auto& existing : rows) {
                             if (!is_visible(existing)) continue;
@@ -993,6 +996,9 @@ StringResult Executor::exec_insert_inner(SharedDatabase& s, const std::string& t
                                     if (!bucket.empty() && is_visible(bucket.front())) existing = bucket.front();
                                 }
                             } else if (several_rows) {
+                                if (unique_probe_proves_absent(s, table, schema, {col_names[i]}, /*tuple=*/false, /*skip_null=*/true, row_value_of, ProbeUse::NoBuild)) {
+                                    // (no live row holds the value)
+                                } else {
                                 if (!existing_by_unique_built[i]) {
                                     for (auto& r : rows) {
                                         if (!is_visible(r)) continue;
@@ -1002,6 +1008,7 @@ StringResult Executor::exec_insert_inner(SharedDatabase& s, const std::string& t
                                     existing_by_unique_built[i] = 1;
                                 }
                                 if (auto hit = existing_by_unique[i].find(collation::key(val)); hit != existing_by_unique[i].end()) existing = *hit->second;
+                                }
                             } else if (!unique_probe_proves_absent(s, table, schema, {col_names[i]}, /*tuple=*/false, /*skip_null=*/true, row_value_of)) {
                                 for (auto& r : rows) {
                                     if (!is_visible(r)) continue;
@@ -1035,7 +1042,7 @@ StringResult Executor::exec_insert_inner(SharedDatabase& s, const std::string& t
                     std::string shown;
                     auto encoded = composite_key(cu.key->columns, [&](const std::string& c) { auto pos = std::find(col_names.begin(), col_names.end(), c); return pos != col_names.end() ? final_values[static_cast<std::size_t>(pos - col_names.begin())] : std::string(EXECUTOR_NULL_VALUE); }, shown);
                     if (!encoded) continue;
-                    if (!several_rows && unique_probe_proves_absent(s, table, schema, cu.key->columns, /*tuple=*/true, /*skip_null=*/true, row_value_of)) continue;
+                    if (unique_probe_proves_absent(s, table, schema, cu.key->columns, /*tuple=*/true, /*skip_null=*/true, row_value_of, several_rows ? ProbeUse::NoBuild : ProbeUse::Lookup)) continue;
                     fill_existing(cu);
                     auto hit = cu.existing.find(*encoded);
                     if (hit == cu.existing.end()) continue;

@@ -122,6 +122,14 @@ void Executor::cascade_write(SharedDatabase& s, const std::string& table, const 
             for (std::size_t i = 0; i < news.size(); i++) pit->second[key_of(news[i])] = first_new + i;
         }
     }
+
+    // the cache of UNIQUE values of the child table: the versions that ended leave it, the new ones join it
+    if (schema) {
+        std::vector<const Row*> removed, added;
+        for (auto& old : olds) removed.push_back(&old);
+        for (auto& fresh : news) added.push_back(&fresh);
+        unique_probe_apply(s, table, *schema, removed, added);
+    }
 }
 
 } // namespace engine

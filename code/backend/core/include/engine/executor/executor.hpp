@@ -673,8 +673,7 @@ private:
     // 5 in a DECIMAL(5,2) -> '5.00', '2024-1-5' in a DATE -> '2024-01-05'). NULL passes. `row` is the 1-based row of the statement
     // for the message. Returns the error message, or nullopt.
     static std::optional<std::string> coerce_column_value(const ColumnDef& col, std::string& value, std::size_t row);
-    static std::optional<std::string> update_unique_violation(SharedDatabase& s, const std::string& table,
-                                                              const std::vector<const Row*>& olds, const std::vector<Row>& news);
+    std::optional<std::string> update_unique_violation(SharedDatabase& s, const std::string& table, const std::vector<const Row*>& olds, const std::vector<Row>& news);
     // executor_update_unique.cpp: a claim on a unique value. The duplicate check of an INSERT / UPDATE reads the table, where the row another session is about to
     // write is not yet, so two sessions writing the same value could both pass it; a claim on the value in the lock manager (like the one on a PRIMARY KEY value)
     // makes the second wait for the first and look again.
@@ -891,9 +890,15 @@ public:
     // The cache of UNIQUE values (engine/unique_probe.hpp, executor_unique_probe.cpp). `unique_probe_proves_absent` is true only when the cache is current and no live row
     // of `table` holds the key made of `columns` from `value_of` (a one-row INSERT then skips its scan); false means "maybe": scan. The caller holds the table's data lock.
     // `unique_probe_inserted` is called by an INSERT that holds the table's data lock exclusively, with the rows it is about to append.
+    // Lookup: under a shared data lock, may make the cache; NoBuild: the same for a statement of several rows, which only uses a cache that is current; InsideExclusive: the
+    // statement holds the table's data lock exclusively already and asks before it changes the rows (the cache is current when only this statement has taken a lock since).
+    enum class ProbeUse { Lookup, NoBuild, InsideExclusive };
     bool unique_probe_proves_absent(SharedDatabase& s, const std::string& table, const TableSchema& schema, const std::vector<std::string>& columns, bool tuple, bool skip_null,
-                                    const std::function<const std::string*(const std::string&)>& value_of);
+                                    const std::function<const std::string*(const std::string&)>& value_of, ProbeUse use = ProbeUse::Lookup);
+    // A statement that holds the table's data lock exclusively ends the live rows `removed` and makes the rows `added` live (the cache takes the change in or is dropped).
+    void unique_probe_apply(SharedDatabase& s, const std::string& table, const TableSchema& schema, const std::vector<const Row*>& removed, const std::vector<const Row*>& added);
     void unique_probe_inserted(SharedDatabase& s, const std::string& table, const TableSchema& schema, const std::vector<Row>& rows);
+    void unique_probe_commit(SharedDatabase& s, const std::string& table); // (a COMMIT changes no live row)
     bool unique_probe_stamp(SharedDatabase& s, const std::string& table, std::uint64_t& locks_id, std::uint64_t& data_id, std::uint64_t& sum) const;
 
     // ── Table partitioning (PARTITION BY RANGE/LIST/HASH, V1 -- executor_partition.cpp)

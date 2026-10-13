@@ -579,7 +579,15 @@ StringResult Executor::exec_update_inner(SharedDatabase& s, const std::string& t
                 }
                 {
                     std::vector<const Row*> olds(targets.begin(), targets.end());
-                    if (auto violation = update_unique_violation(s, table, olds, new_versions)) return StringResult::Err(*violation);
+                    if (auto violation = update_unique_violation(s, table, olds, new_versions)) {
+                        unique_probe_apply(s, table, *schema0, {}, {}); // (nothing changes: the cache stays current)
+                        return StringResult::Err(*violation);
+                    }
+                    // the cache of UNIQUE values takes in what this statement changes (the old versions end, the new ones are live)
+                    std::vector<const Row*> added;
+                    added.reserve(new_versions.size());
+                    for (auto& version : new_versions) added.push_back(&version);
+                    unique_probe_apply(s, table, *schema0, olds, added);
                 }
                 for (Row* rowp : targets) (*rowp)["_xmax"] = std::to_string(my_id);
                 const std::size_t first_new_pos = rows.size();
@@ -946,6 +954,7 @@ StringResult Executor::exec_update_inner(SharedDatabase& s, const std::string& t
         // (shape-changing), so this whole tail (including the buffer_pool snapshot
         // copy) needs `table`'s table_data_locks exclusive, matching exec_insert_inner.
         auto table_lock = acquire_table_data_locks(s, {table}, /*exclusive=*/true);
+        unique_probe_apply(s, table, *schema0, {}, {}); // (this section changes no live row: the cache of UNIQUE values stays current)
         // Redo-covered statement: persistence is the redo batch written by execute()'s
         // epilogue, not a whole-table rewrite here.
         if (!redo_covered_stmt_) {

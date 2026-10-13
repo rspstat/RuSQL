@@ -92,9 +92,13 @@ bool Executor::unique_probe_stamp(SharedDatabase& s, const std::string& table, s
 }
 
 namespace {
-UniqueProbe* probe_for(UniqueProbes& all, const std::string& table, const TableSchema& schema) {
+// The entry of `table`. A cache that is built is returned as it is: after any DDL (a changed schema included) its stamp no longer fits, so the keys it was made for cannot be
+// out of date while it is used. An entry that is not built looks at the schema again (`create`: and makes the entry when the table has keys to probe).
+UniqueProbe* probe_for(UniqueProbes& all, const std::string& table, const TableSchema& schema, bool create = true) {
+    if (auto it = all.by_table.find(table); it != all.by_table.end() && it->second.built) return &it->second;
     auto specs = specs_of(schema);
     if (specs.empty()) return nullptr;
+    if (!create && !all.by_table.count(table)) return nullptr;
     UniqueProbe& p = all.by_table[table];
     std::string signature = signature_of(specs);
     if (p.signature != signature) { // new table, or the keys of the table have changed
@@ -113,14 +117,14 @@ void check_against_rows(UniqueProbe& p, const std::vector<Row>* rows, const std:
 } // namespace
 
 bool Executor::unique_probe_proves_absent(SharedDatabase& s, const std::string& table, const TableSchema& schema, const std::vector<std::string>& columns, bool tuple,
-                                          bool skip_null, const std::function<const std::string*(const std::string&)>& value_of) {
+                                          bool skip_null, const std::function<const std::string*(const std::string&)>& value_of, ProbeUse use) {
     UniqueProbes& all = *s.unique_probes;
     if (!all.enabled) return false;
     std::uint64_t locks_id = 0, data_id = 0, sum = 0;
     if (!unique_probe_stamp(s, table, locks_id, data_id, sum)) return false;
     std::lock_guard<std::mutex> guard(all.mutex);
-    UniqueProbe* p = probe_for(all, table, schema);
-    if (!p) return false;
+    UniqueProbe* p = probe_for(all, table, schema, /*create=*/use == ProbeUse::Lookup);
+    if (!p || (use != ProbeUse::Lookup && !p->built)) return false;
     std::size_t which = p->specs.size();
     for (std::size_t i = 0; i < p->specs.size(); i++) {
         auto& spec = p->specs[i];
@@ -129,8 +133,10 @@ bool Executor::unique_probe_proves_absent(SharedDatabase& s, const std::string& 
     if (which == p->specs.size()) return false;
     const auto rows_it = s.tables.find(table);
     const std::vector<Row>* rows = rows_it == s.tables.end() ? nullptr : &rows_it->second;
-    const bool current = p->built && p->locks_id == locks_id && p->data_id == data_id && p->sum == sum;
+    // (inside the statement's own exclusive section the lock has been taken once already: the cache is current when nothing else has moved since)
+    const bool current = p->built && p->locks_id == locks_id && p->data_id == data_id && (p->sum == sum || (use == ProbeUse::InsideExclusive && p->sum + 1 == sum));
     if (!current) {
+        if (use != ProbeUse::Lookup) return false; // (a statement of several rows, or one that holds the table exclusively, does not make the cache)
         // Only INSERTs since the last look (the stamp moved once for each statement that wrote): they are on their way to a table worth probing.
         const bool only_inserts = p->seen && p->seen_locks_id == locks_id && p->seen_data_id == data_id && sum - p->seen_sum == p->insert_tails - p->seen_insert_tails;
         p->streak = only_inserts ? p->streak + 1 : 0;
@@ -140,6 +146,20 @@ bool Executor::unique_probe_proves_absent(SharedDatabase& s, const std::string& 
         p->seen_sum = sum;
         p->seen_insert_tails = p->insert_tails;
         if (p->streak < all.streak_needed) return false;
+        // (the keys the cache is made for are the schema's of now: after a DDL they may be others)
+        if (auto fresh = specs_of(schema); signature_of(fresh) != p->signature) {
+            const auto tails = p->insert_tails;
+            *p = UniqueProbe{};
+            p->signature = signature_of(fresh);
+            p->specs = std::move(fresh);
+            p->insert_tails = tails;
+            which = p->specs.size();
+            for (std::size_t i = 0; i < p->specs.size(); i++) {
+                auto& spec = p->specs[i];
+                if (spec.tuple == tuple && spec.skip_null == skip_null && spec.columns == columns) which = i;
+            }
+            if (which == p->specs.size()) return false;
+        }
         count_rows(*p, rows ? *rows : kNoRows, p->counts, &Executor::is_visible);
         p->built = true;
         p->locks_id = locks_id;
@@ -147,7 +167,7 @@ bool Executor::unique_probe_proves_absent(SharedDatabase& s, const std::string& 
         p->sum = sum;
         p->streak = 0;
         all.builds++;
-    } else if (all.check) {
+    } else if (all.check && use != ProbeUse::InsideExclusive) {
         check_against_rows(*p, rows, table, &Executor::is_visible);
     }
     auto key = key_of(p->specs[which], value_of);
@@ -156,35 +176,82 @@ bool Executor::unique_probe_proves_absent(SharedDatabase& s, const std::string& 
     return absent;
 }
 
-// The INSERT has the table's data lock exclusive and is about to append `rows` (every row it appends, none that it skipped). The cache that was current before this
-// statement took the lock takes the rows in; any other cache is dropped.
-void Executor::unique_probe_inserted(SharedDatabase& s, const std::string& table, const TableSchema& schema, const std::vector<Row>& rows) {
+// A statement that holds the table's data lock exclusively changes the live rows: `removed` stop being live (a DELETE, the old versions of an UPDATE), `added` become live (an
+// INSERT, the new versions). The cache that was current before this statement took the lock takes the change in, so that it stays current; any other cache is dropped. The rows
+// must still hold the values they had (a pointer into the table is fine: the key columns are not what a statement ends a version with).
+void Executor::unique_probe_apply(SharedDatabase& s, const std::string& table, const TableSchema& schema, const std::vector<const Row*>& removed,
+                                  const std::vector<const Row*>& added) {
     UniqueProbes& all = *s.unique_probes;
     if (!all.enabled) return;
     std::uint64_t locks_id = 0, data_id = 0, sum = 0;
     if (!unique_probe_stamp(s, table, locks_id, data_id, sum)) return;
     std::lock_guard<std::mutex> guard(all.mutex);
-    UniqueProbe* p = probe_for(all, table, schema);
-    if (!p) return;
-    p->insert_tails++;
-    if (!p->built) return;
-    if (p->locks_id == locks_id && p->data_id == data_id && p->sum + 1 == sum) { // nobody but this statement has taken a lock since the cache was current
-        for (auto& row : rows) {
+    UniqueProbe* p = probe_for(all, table, schema, /*create=*/false);
+    if (!p || !p->built) return;
+    // (nobody but this statement has taken a lock since the cache was current: once for the statement's own section, or already updated by an earlier change of the section)
+    if (p->locks_id == locks_id && p->data_id == data_id && (p->sum + 1 == sum || p->sum == sum)) {
+        for (const Row* row : removed) {
             for (std::size_t i = 0; i < p->specs.size(); i++) {
-                if (auto key = key_of(p->specs[i], row_values(row))) p->counts[i][*key]++;
+                auto key = key_of(p->specs[i], row_values(*row));
+                if (!key) continue;
+                auto it = p->counts[i].find(*key);
+                if (it == p->counts[i].end()) continue;
+                if (--it->second == 0) p->counts[i].erase(it);
+            }
+        }
+        for (const Row* row : added) {
+            for (std::size_t i = 0; i < p->specs.size(); i++) {
+                if (auto key = key_of(p->specs[i], row_values(*row))) p->counts[i][*key]++;
             }
         }
         p->sum = sum;
-        if (all.check) {
-            // (the rows are not in the table yet: count them in a copy of what it holds)
-            const auto rows_it = s.tables.find(table);
-            std::vector<Row> everything = rows_it == s.tables.end() ? std::vector<Row>{} : rows_it->second;
-            everything.insert(everything.end(), rows.begin(), rows.end());
-            check_against_rows(*p, &everything, table, &Executor::is_visible);
-        }
     } else {
         p->built = false;
         p->counts.clear();
+    }
+}
+
+// The INSERT has the table's data lock exclusive and is about to append `rows` (every row it appends, none that it skipped).
+void Executor::unique_probe_inserted(SharedDatabase& s, const std::string& table, const TableSchema& schema, const std::vector<Row>& rows) {
+    UniqueProbes& all = *s.unique_probes;
+    if (!all.enabled) return;
+    {
+        std::lock_guard<std::mutex> guard(all.mutex);
+        if (UniqueProbe* p = probe_for(all, table, schema)) p->insert_tails++;
+    }
+    std::vector<const Row*> added;
+    added.reserve(rows.size());
+    for (auto& row : rows) added.push_back(&row);
+    unique_probe_apply(s, table, schema, {}, added);
+    if (all.check) {
+        // (the rows are not in the table yet: count them in a copy of what it holds)
+        std::uint64_t locks_id = 0, data_id = 0, sum = 0;
+        if (!unique_probe_stamp(s, table, locks_id, data_id, sum)) return;
+        std::lock_guard<std::mutex> guard(all.mutex);
+        UniqueProbe* p = probe_for(all, table, schema);
+        if (!p || !p->built || p->sum != sum) return;
+        const auto rows_it = s.tables.find(table);
+        std::vector<Row> everything = rows_it == s.tables.end() ? std::vector<Row>{} : rows_it->second;
+        everything.insert(everything.end(), rows.begin(), rows.end());
+        check_against_rows(*p, &everything, table, &Executor::is_visible);
+    }
+}
+
+// A COMMIT (which holds the table's lock exclusively) changes no row that is live, so the cache that was current before it stays current.
+void Executor::unique_probe_commit(SharedDatabase& s, const std::string& table) {
+    UniqueProbes& all = *s.unique_probes;
+    if (!all.enabled) return;
+    std::uint64_t locks_id = 0, data_id = 0, sum = 0;
+    if (!unique_probe_stamp(s, table, locks_id, data_id, sum)) return;
+    std::lock_guard<std::mutex> guard(all.mutex);
+    auto it = all.by_table.find(table);
+    if (it == all.by_table.end() || !it->second.built) return;
+    UniqueProbe& p = it->second;
+    if (p.locks_id == locks_id && p.data_id == data_id && p.sum + 1 == sum) {
+        p.sum = sum;
+    } else {
+        p.built = false;
+        p.counts.clear();
     }
 }
 

@@ -74,8 +74,8 @@ const NODES: Node[] = [
   },
   {
     id: "durability", x: 825, y: 600, w: 130, h: 104, c: C.disk, name: L("Durability", "내구성"),
-    desc: L("Redo log (one checksummed batch per commit, group-commit fsync), WAL and undo log (which transactions a log file holds is tracked in memory, so COMMIT and ROLLBACK never re-read it). Checkpoints rewrite the table files once the redo log outgrows a limit that scales with the table size; on boot, unfinished transactions are undone, the redo log is replayed (identical rows of one table all survive) and every index is rebuilt from the rows.",
-            "Redo 로그(커밋마다 체크섬 배치 1개, 그룹 커밋 fsync), WAL, undo 로그(로그 파일에 어떤 트랜잭션이 들어 있는지 메모리에서 추적해 COMMIT·ROLLBACK이 파일을 다시 읽지 않음). redo 로그가 테이블 크기에 비례하는 한도를 넘으면 체크포인트가 테이블 파일을 재기록하고, 부팅 시 미완료 트랜잭션을 undo하고 redo를 재생(한 테이블의 동일한 행도 모두 보존)한 뒤 모든 인덱스를 행에서 재구성."),
+    desc: L("Redo log (one checksummed batch per commit, group-commit fsync), WAL and undo log (which transactions a log file holds is tracked in memory, so COMMIT and ROLLBACK never re-read it). Checkpoints rewrite the table files (committed rows only: the rows of a transaction that is still open never reach a file) once the redo log outgrows a limit that scales with the table size; on boot, unfinished transactions are undone, the redo log is replayed (identical rows of one table all survive) and every index is rebuilt from the rows.",
+            "Redo 로그(커밋마다 체크섬 배치 1개, 그룹 커밋 fsync), WAL, undo 로그(로그 파일에 어떤 트랜잭션이 들어 있는지 메모리에서 추적해 COMMIT·ROLLBACK이 파일을 다시 읽지 않음). redo 로그가 테이블 크기에 비례하는 한도를 넘으면 체크포인트가 테이블 파일을(열려 있는 트랜잭션의 미커밋 행은 빼고) 재기록하고, 부팅 시 미완료 트랜잭션을 undo하고 redo를 재생(한 테이블의 동일한 행도 모두 보존)한 뒤 모든 인덱스를 행에서 재구성."),
   },
   {
     id: "disk", x: 565, y: 600, w: 130, h: 104, c: C.disk, name: L("Disk files", "디스크 파일"),

@@ -11,7 +11,7 @@ the expression is computed here from those cells and every row of the answer has
   * WHERE <expression> <op> k keeps exactly the rows whose value is not NULL and passes;
   * UPDATE <scratch table> SET r = <expression> stores the same value (or NULL) that SELECT shows.
 
-The model computes in floating point and rounds each operation to six decimals; the engine does MySQL's arithmetic (exact decimals, a quotient
+The model computes in exact decimals (a quotient keeps nine digits) and rounds once at the end; the engine does MySQL's arithmetic (exact decimals, a quotient
 with the dividend's digits and 4 more, rounded once at the end of the expression, DOUBLE columns in floating point), so a number is accepted
 when it is within 1e-4 (relative) of the model's, a WHERE is not checked for a row whose value lies within 1e-3 of the limit, and the exact
 text of MySQL's answers is checked by the conformance cases of the Catch2 suite (mysql_conformance_*.inc) instead.
@@ -35,16 +35,25 @@ def reread(f):
     return float(fmt(f))
 
 
+def dec(v):
+    """A float read from a cell as the exact decimal it was written as (the shortest text that reads back to it)."""
+    return v if isinstance(v, decimal.Decimal) else decimal.Decimal(repr(float(v)))
+
+
 def apply(op, a, b):
+    # Exact decimals like the engine and MySQL: + - * are exact, a quotient keeps nine digits (cut), and the number is rounded once, where it is shown or ROUNDed. A model
+    # that rounded every operation to six decimals was 0.11016 for `id * (price / id)` where MySQL and the engine say 0.11, and one that used floats had 0.225 as
+    # 0.22499999999999998 (ROUND(5.85 / 26, 2) is 0.23).
     if a is None or b is None:
         return None
+    a, b = dec(a), dec(b)
     if op == "+":
-        return reread(a + b)
+        return a + b
     if op == "-":
-        return reread(a - b)
+        return a - b
     if op == "*":
-        return reread(a * b)
-    return None if b == 0 else reread(a / b)
+        return a * b
+    return None if b == 0 else (a / b).quantize(decimal.Decimal("1e-9"), rounding=decimal.ROUND_DOWN)
 
 
 def show(v):
@@ -101,7 +110,7 @@ def build_expression(rng, operands):
     if shape == 6:
         def v6(cs):
             v = apply(o1, xv(cs), yv(cs))
-            return None if v is None else float(decimal.Decimal(repr(v)).quantize(decimal.Decimal("0.01"), rounding=decimal.ROUND_HALF_UP))  # (half away from zero on the digits, not on the binary fraction)
+            return None if v is None else float(dec(v).quantize(decimal.Decimal("0.01"), rounding=decimal.ROUND_HALF_UP))  # (half away from zero on the digits, not on the binary fraction)
         return f"ROUND({x} {o1} {y}, 2)", v6, "fn"
     cmp = rng.choice([">", "<", ">=", "<=", "=", "<>"])
 
@@ -179,6 +188,8 @@ def main():
                     expected.append("skip")
                     continue
                 want = value(cs)
+                if isinstance(want, decimal.Decimal):
+                    want = float(want)
                 expected.append(want)
                 if not matches(g[ks], want, kind, text.count("/") > 1):
                     print("WRONG VALUE:", sql, "| row", g[:ks], "| cells", dict(zip(names, r[ks:])), "| got", g[ks], "expected", show(want))
@@ -235,7 +246,8 @@ def main():
                     if int(rid) % mod == rem:
                         # columns of the scratch table: id, a (grp), b (val), c (price) in the order of NUMERIC["t"]
                         cs2 = {"id": float(rid), "grp": cs[1], "val": cs[2], "price": cs[3]}
-                        scratch_model[rid] = show(value([cs2[c.split('.')[1]] for c in names]))
+                        modelled = value([cs2[c.split('.')[1]] for c in names])
+                        scratch_model[rid] = show(float(modelled) if isinstance(modelled, decimal.Decimal) else modelled)
                 back = read(db, "SELECT id, r FROM s ORDER BY id")[1]
                 for rid, cell in back:
                     both = num(cell), num(scratch_model[rid])

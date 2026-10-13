@@ -366,6 +366,8 @@ Executor::Executor(const std::string& dir, std::size_t buffer_pool_capacity) {
         .redo_dirty = std::make_shared<Mutex<std::unordered_set<std::string>>>(),
     };
     redo_log_ = db_value.redo_log;
+    // (a table file holds committed work only: see BufferPool::write_through)
+    db_value.buffer_pool.set_open_transactions([ids = db_value.active_txn_ids] { return *ids->lock(); });
 
     shared = std::make_shared<RwLock<SharedDatabase>>(std::move(db_value));
     txn = TransactionManager(dir, txn_io);

@@ -58,7 +58,7 @@ StringResult Executor::exec_commit(SharedDatabase& s) {
     auto dirty_tables = txn.dirty_tables();
     for (auto& table : dirty_tables) {
         if (auto it = s.tables.find(table); it != s.tables.end()) {
-            s.buffer_pool.write_through(table, it->second, s.disk);
+            s.buffer_pool.write_through(table, it->second, s.disk, txn.current_txn_id());
         }
     }
 
@@ -88,7 +88,7 @@ StringResult Executor::exec_commit_phase1(SharedDatabase& s, bool use_redo) {
             // Redo mode: the table file is NOT rewritten here -- the commit's redo batch
             // (written by execute_commit_grouped) is what makes it durable.
             if (!use_redo) {
-                s.buffer_pool.write_through(table, it->second, s.disk);
+                s.buffer_pool.write_through(table, it->second, s.disk, txn.current_txn_id());
                 redo_mark_flushed(s, table); // table_locks are held EXCLUSIVE for dirty tables here
             }
             s.query_cache.invalidate_table(table);
@@ -151,6 +151,7 @@ StringResult Executor::execute_commit_grouped() {
     const bool use_redo = !txn.redo_incomplete();
     auto phase1 = exec_commit_phase1(const_cast<SharedDatabase&>(*guard.structural), use_redo);
     if (phase1.is_err()) return phase1;
+    for (auto& table : dirty_tables) unique_probe_commit(const_cast<SharedDatabase&>(*guard.structural), table); // (the rows that are live do not change at COMMIT)
     auto coord = guard.structural->group_commit_coord;
     auto active_txn_ids = guard.structural->active_txn_ids;
 

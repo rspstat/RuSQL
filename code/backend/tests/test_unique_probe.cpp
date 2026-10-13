@@ -87,7 +87,7 @@ std::uint64_t builds(Executor& ex) { return ex.get_shared()->read()->unique_prob
 std::uint64_t skipped(Executor& ex) { return ex.get_shared()->read()->unique_probes->skipped.load(); }
 } // namespace
 
-TEST_CASE("the cache of UNIQUE values is made once the INSERTs come in a row, and any other change makes it wait again", "[unique_probe]") {
+TEST_CASE("the cache of UNIQUE values is made once the INSERTs come in a row, follows UPDATE / DELETE / COMMIT, and a change it cannot follow makes it wait again", "[unique_probe]") {
     TempDataDir dir("unique_probe_counters");
     Executor ex(dir.path);
     ok(ex, "CREATE DATABASE d");
@@ -101,20 +101,66 @@ TEST_CASE("the cache of UNIQUE values is made once the INSERTs come in a row, an
     fails(ex, "INSERT INTO t VALUES (20, 'w3', 0)"); // a value the table holds is "maybe": the scan runs and refuses it
     fails(ex, "INSERT INTO t VALUES (21, 'W3', 0)"); // ... also in another case
     REQUIRE(skipped(ex) == before);
-    // INSERT and DELETE in turn never make it again
+    // INSERT, DELETE, UPDATE and COMMIT each take what they change into the cache (or, a COMMIT, change nothing): it stays current and is not made again
     const std::uint64_t made = builds(ex);
     for (int i = 0; i < 10; i++) {
         ok(ex, "INSERT INTO t VALUES (" + std::to_string(100 + i) + ", 'x" + std::to_string(i) + "', 0)");
         ok(ex, "DELETE FROM t WHERE id = " + std::to_string(100 + i));
+        ok(ex, "INSERT INTO t VALUES (" + std::to_string(150 + i) + ", 'z" + std::to_string(i) + "', 0)");
+        ok(ex, "UPDATE t SET u = 'zz" + std::to_string(i) + "' WHERE id = " + std::to_string(150 + i));
+        ok(ex, "BEGIN");
+        ok(ex, "INSERT INTO t VALUES (" + std::to_string(170 + i) + ", 'q" + std::to_string(i) + "', 0)");
+        ok(ex, "COMMIT");
     }
     REQUIRE(builds(ex) == made);
-    // INSERTs again: it is made again, and a value deleted in the meantime is free
+    {   // ... and it was current after the COMMIT of the last round: the next INSERT does not scan
+        const std::uint64_t before_next = skipped(ex);
+        ok(ex, "INSERT INTO t VALUES (399, 'ac', 0)");
+        REQUIRE(skipped(ex) == before_next + 1);
+        ok(ex, "DELETE FROM t WHERE id = 399");
+    }
+    fails(ex, "INSERT INTO t VALUES (400, 'zz3', 0)"); // (the value an UPDATE moved a row to is held)
+    ok(ex, "INSERT INTO t VALUES (401, 'z3', 0)");     // (the value it left is free)
+    ok(ex, "DELETE FROM t WHERE id = 401");
+    // a ROLLBACK does not say what it changed: the cache is dropped, and made again after INSERTs in a row. A value deleted in the meantime is free
+    ok(ex, "BEGIN");
+    ok(ex, "INSERT INTO t VALUES (250, 'r', 0)");
+    ok(ex, "ROLLBACK");
+    ok(ex, "INSERT INTO t VALUES (260, 'n1', 0), (261, 'n2', 0), (262, 'n3', 0), (263, 'n4', 0)"); // (a statement of several rows does not make the cache)
+    REQUIRE(builds(ex) == made);
     for (int i = 0; i < 5; i++) ok(ex, "INSERT INTO t VALUES (" + std::to_string(200 + i) + ", 'y" + std::to_string(i) + "', 0)");
     REQUIRE(builds(ex) == made + 1);
     const std::uint64_t before_dead = skipped(ex);
     ok(ex, "INSERT INTO t VALUES (300, 'x3', 0)"); // 'x3' was held by a row that is gone: the cache does not count dead rows, so this INSERT skips its scan
     REQUIRE(skipped(ex) == before_dead + 1);
     fails(ex, "INSERT INTO t VALUES (301, 'x3', 0)");
+    // an UPDATE that moves a UNIQUE value and an INSERT of several rows ask the cache as well (and a value that is held still refuses)
+    const std::uint64_t before_more = skipped(ex);
+    ok(ex, "UPDATE t SET u = 'moved1' WHERE id = 5");
+    REQUIRE(skipped(ex) == before_more + 1);
+    ok(ex, "INSERT INTO t VALUES (500, 'm1', 0), (501, 'm2', 0), (502, 'm3', 0)");
+    REQUIRE(skipped(ex) == before_more + 4);
+    fails(ex, "UPDATE t SET u = 'M1' WHERE id = 6");
+    fails(ex, "INSERT INTO t VALUES (503, 'MOVED1', 0), (504, 'fresh', 0)");
+    REQUIRE(rows_of(ex, "SELECT COUNT(*) FROM t WHERE u = 'fresh'") == Rows{{"0"}});
+    {   // a refused UPDATE changes nothing and the cache stays current
+        const std::uint64_t before_refused = skipped(ex);
+        ok(ex, "INSERT INTO t VALUES (510, 'fresh2', 0)");
+        REQUIRE(skipped(ex) == before_refused + 1);
+        // a DELETE takes the value out of the cache at once, outside a transaction and in one
+        ok(ex, "INSERT INTO t VALUES (520, 'gone1', 0)");
+        ok(ex, "DELETE FROM t WHERE id = 520");
+        const std::uint64_t before_gone = skipped(ex);
+        ok(ex, "INSERT INTO t VALUES (521, 'gone1', 0)");
+        REQUIRE(skipped(ex) == before_gone + 1);
+        ok(ex, "BEGIN");
+        ok(ex, "INSERT INTO t VALUES (522, 'gone2', 0)");
+        ok(ex, "DELETE FROM t WHERE id = 522");
+        const std::uint64_t before_gone2 = skipped(ex);
+        ok(ex, "INSERT INTO t VALUES (523, 'gone2', 0)");
+        REQUIRE(skipped(ex) == before_gone2 + 1);
+        ok(ex, "COMMIT");
+    }
     // the same for a composite primary key and for UNIQUE (a, b)
     ok(ex, "CREATE TABLE cp (a VARCHAR(4), b INT, v INT, PRIMARY KEY (a, b), UNIQUE (b, v))");
     const std::uint64_t before_cp = skipped(ex);
@@ -122,6 +168,29 @@ TEST_CASE("the cache of UNIQUE values is made once the INSERTs come in a row, an
     REQUIRE(skipped(ex) >= before_cp + 2 * 5); // (two keys per INSERT, from the third INSERT on)
     fails(ex, "INSERT INTO cp VALUES ('K', 3, 99)");
     fails(ex, "INSERT INTO cp VALUES ('z', 4, 4)");
+    {   // several rows ask for both keys of the table as well
+        const std::uint64_t before_multi = skipped(ex);
+        ok(ex, "INSERT INTO cp VALUES ('m', 1, 101), ('m', 2, 102), ('m', 3, 103)");
+        REQUIRE(skipped(ex) == before_multi + 6);
+    }
+    {   // a table whose cache has not been made is not asked for one by a statement of several rows, and a new key added by ALTER TABLE is in the cache once it is made again
+        ok(ex, "CREATE TABLE fresh_table (id INT PRIMARY KEY, u INT UNIQUE)");
+        const std::uint64_t made_before = builds(ex);
+        ok(ex, "INSERT INTO fresh_table VALUES (1, 1)"); // (one row: the table gets an entry, no cache yet)
+        ok(ex, "INSERT INTO fresh_table VALUES (2, 2), (3, 3), (4, 4), (5, 5), (6, 6)");
+        ok(ex, "INSERT INTO fresh_table VALUES (7, 7), (8, 8), (9, 9)");
+        REQUIRE(builds(ex) == made_before);
+        ok(ex, "CREATE TABLE two_keys (id INT PRIMARY KEY, a INT UNIQUE, b INT)");
+        for (int i = 1; i <= 5; i++) ok(ex, "INSERT INTO two_keys VALUES (" + std::to_string(i) + ", " + std::to_string(i) + ", " + std::to_string(i * 10) + ")");
+        ok(ex, "ALTER TABLE two_keys ADD UNIQUE (b)");
+        // (INSERTs that are refused look at the cache and never reach the point where they would change it: the cache that was made for the old keys is made again, for the new ones)
+        for (int i = 0; i < 3; i++) fails(ex, "INSERT INTO two_keys VALUES (" + std::to_string(20 + i) + ", 1, 99)");
+        for (int i = 6; i <= 8; i++) ok(ex, "INSERT INTO two_keys VALUES (" + std::to_string(i) + ", " + std::to_string(i) + ", " + std::to_string(i * 10) + ")");
+        const std::uint64_t before_two = skipped(ex);
+        ok(ex, "INSERT INTO two_keys VALUES (9, 9, 90)");
+        REQUIRE(skipped(ex) == before_two + 2); // (a and b)
+        fails(ex, "INSERT INTO two_keys VALUES (10, 10, 40)");
+    }
     // a row that a transaction has deleted is still in the table until it ends, but it holds no key: the cache does not count it
     ok(ex, "BEGIN");
     ok(ex, "DELETE FROM t WHERE u = 'w1'");
@@ -181,7 +250,18 @@ TEST_CASE("the cache of UNIQUE values is not believed after the rows change behi
         ok(ex, "INSERT INTO t VALUES " + row(60));
         ok(ex, "INSERT INTO t VALUES " + row(61));
         ok(ex, "ROLLBACK");
+        const char* move_to_3[] = {"UPDATE t SET k = 'K3' WHERE id = 1", "UPDATE t SET a = 'A0', b = 3 WHERE id = 1", "UPDATE t SET a = 'A0', b = 3 WHERE a = 'a1' AND b = 1"};
+        fails(ex, move_to_3[mode]); // (an UPDATE asks the cache too, before anything made it again: it must not believe a cache that the ROLLBACK made out of date)
         fails(ex, "INSERT INTO t VALUES " + clash(3, 89));
+        // a savepoint rolled back, then a COMMIT of a transaction that wrote the table: the COMMIT does not make the cache current again
+        ok(ex, "BEGIN");
+        ok(ex, "INSERT INTO t VALUES " + row(70));
+        ok(ex, "SAVEPOINT s9");
+        ok(ex, "DELETE FROM t WHERE " + key_filter);
+        ok(ex, "ROLLBACK TO s9");
+        ok(ex, "COMMIT");
+        fails(ex, "INSERT INTO t VALUES " + clash(3, 88));
+        fails(ex, move_to_3[mode]);
         // the same through a savepoint
         ok(ex, "BEGIN");
         ok(ex, "SAVEPOINT s1");
@@ -259,6 +339,7 @@ TEST_CASE("a table with the cache of UNIQUE values and one without it give the s
         auto t2_row = [&]() { return "('" + std::string(1, "xXyY"[pick(4)]) + "', " + std::to_string(pick(4)) + ", " + std::to_string(pick(100)) + ")"; };
         bool in_txn = false;
         int savepoints = 0;
+        std::uint64_t cache_uses = 0; // (a restart starts the counters again)
         for (int step = 0; step < 260; step++) {
             std::string sql;
             const std::size_t kind = pick(100);
@@ -301,6 +382,7 @@ TEST_CASE("a table with the cache of UNIQUE values and one without it give the s
             } else if (kind < 98) {
                 if (in_txn) sql = "SELECT 1";
                 else { // a restart: nothing the cache knew is kept
+                    cache_uses += builds(*with) + skipped(*with);
                     open(with, dir_with.path, true);
                     open(without, dir_without.path, false);
                     sql = "SELECT 1";
@@ -322,7 +404,7 @@ TEST_CASE("a table with the cache of UNIQUE values and one without it give the s
         if (in_txn) { ok(*with, "ROLLBACK"); ok(*without, "ROLLBACK"); }
         REQUIRE(rows_of(*with, "SELECT id, u, w, a, b, v FROM t1 ORDER BY id") == rows_of(*without, "SELECT id, u, w, a, b, v FROM t1 ORDER BY id"));
         REQUIRE(rows_of(*with, "SELECT a, b, v FROM t2 ORDER BY a, b") == rows_of(*without, "SELECT a, b, v FROM t2 ORDER BY a, b"));
-        REQUIRE(builds(*with) + skipped(*with) > 0); // (the cache was really used)
+        REQUIRE(cache_uses + builds(*with) + skipped(*with) > 0); // (the cache was really used)
     }
 }
 

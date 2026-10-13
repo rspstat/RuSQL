@@ -1,5 +1,8 @@
 #include "engine/storage/buffer_pool.hpp"
 
+#include <algorithm>
+#include <cstdlib>
+
 namespace engine {
 
 BufferPool::BufferPool(BufferPool&& other) noexcept
@@ -7,7 +10,8 @@ BufferPool::BufferPool(BufferPool&& other) noexcept
       hit_count(other.hit_count.load()),
       miss_count(other.miss_count.load()),
       cache_(std::move(other.cache_)),
-      tick_(other.tick_) {}
+      tick_(other.tick_),
+      open_transactions_(std::move(other.open_transactions_)) {}
 
 BufferPool& BufferPool::operator=(BufferPool&& other) noexcept {
     if (this == &other) return *this;
@@ -16,6 +20,7 @@ BufferPool& BufferPool::operator=(BufferPool&& other) noexcept {
     miss_count.store(other.miss_count.load());
     cache_ = std::move(other.cache_);
     tick_ = other.tick_;
+    open_transactions_ = std::move(other.open_transactions_);
     return *this;
 }
 
@@ -48,9 +53,35 @@ void BufferPool::write_page(const std::string& table_name, std::vector<Row> rows
     }
 }
 
-void BufferPool::write_through(const std::string& table_name, const std::vector<Row>& rows, const DiskManager& disk) {
+namespace {
+// The transaction id a row's _xmin / _xmax names (0: none -- "0" is the live sentinel of _xmax).
+std::uint64_t txn_id_of(const Row& row, const char* field) {
+    auto it = row.find(field);
+    if (it == row.end() || it->second == "0") return 0;
+    return std::strtoull(it->second.c_str(), nullptr, 10);
+}
+} // namespace
+
+void BufferPool::write_through(const std::string& table_name, const std::vector<Row>& rows, const DiskManager& disk, std::uint64_t keep_txn) {
+    std::unordered_set<std::uint64_t> open;
+    if (open_transactions_) open = open_transactions_();
+    open.erase(keep_txn);
     std::lock_guard<std::mutex> lock(mutex_);
-    disk.save_table(table_name, rows);
+    const bool affected = !open.empty() && std::any_of(rows.begin(), rows.end(), [&](const Row& r) {
+        return open.count(txn_id_of(r, "_xmin")) || open.count(txn_id_of(r, "_xmax"));
+    });
+    if (affected) {
+        std::vector<Row> committed;
+        committed.reserve(rows.size());
+        for (const Row& r : rows) {
+            if (open.count(txn_id_of(r, "_xmin"))) continue; // created by a transaction that has not committed
+            committed.push_back(r);
+            if (open.count(txn_id_of(r, "_xmax"))) committed.back()["_xmax"] = "0"; // ended by one
+        }
+        disk.save_table(table_name, committed);
+    } else {
+        disk.save_table(table_name, rows);
+    }
     cache_.erase(table_name);
 }
 
