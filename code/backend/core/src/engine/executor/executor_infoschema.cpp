@@ -166,7 +166,7 @@ std::vector<Row> Executor::info_schema_rows(const SharedDatabase& s, const std::
                 r["DATETIME_PRECISION"] = EXECUTOR_NULL_VALUE;
                 r["CHARACTER_SET_NAME"] = has_charset ? "utf8mb4" : EXECUTOR_NULL_VALUE;
                 r["COLLATION_NAME"] = has_charset ? "utf8mb4_0900_ai_ci" : EXECUTOR_NULL_VALUE;
-                r["COLUMN_TYPE"] = dt_full(col.data_type);
+                r["COLUMN_TYPE"] = dt_full(col.data_type) + (col.is_unsigned ? " unsigned" : "");
                 r["COLUMN_KEY"] = col.primary_key ? "PRI" : (col.unique ? "UNI" : "");
                 r["EXTRA"] = col.auto_increment ? "auto_increment" : "";
                 r["PRIVILEGES"] = "select,insert,update,references";

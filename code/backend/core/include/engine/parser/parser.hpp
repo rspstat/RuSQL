@@ -74,6 +74,7 @@ public:
 private:
     std::vector<Token> tokens_;
     std::size_t pos_ = 0;
+    bool last_type_unsigned_ = false; // whether the integer type parse_data_type() read last had UNSIGNED after it
     // The table names and aliases of the FROM list of each SELECT being parsed (the innermost last): a subquery that uses one of those tables
     // under an alias keeps the alias, which would otherwise be replaced by the table name -- also what the query around it calls its table.
     std::vector<std::unordered_set<std::string>> enclosing_from_;

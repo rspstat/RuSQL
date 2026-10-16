@@ -119,6 +119,7 @@ void to_json(nlohmann::json& j, const ColumnDef& col) {
         {"foreign_key", col.foreign_key},
         {"check_expr", col.check_expr},
         {"on_update_now", col.on_update_now},
+        {"unsigned", col.is_unsigned},
     };
 }
 
@@ -135,6 +136,7 @@ void from_json(const nlohmann::json& j, ColumnDef& col) {
     if (j.contains("check_expr")) j.at("check_expr").get_to(col.check_expr);
     else col.check_expr = std::nullopt;
     col.on_update_now = j.contains("on_update_now") && j.at("on_update_now").get<bool>();
+    col.is_unsigned = j.contains("unsigned") && j.at("unsigned").get<bool>();
 }
 
 void to_json(nlohmann::json& j, const PartitionKind& kind) {

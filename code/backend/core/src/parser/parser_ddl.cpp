@@ -136,8 +136,12 @@ DataType Parser::parse_data_type() {
             advance();
         }
     };
+    last_type_unsigned_ = false;
     auto skip_unsigned = [this]() {
-        if (const Token* p = peek(); p && p->kind == TokenKind::Ident && to_upper(p->text) == "UNSIGNED") advance();
+        if (const Token* p = peek(); p && p->kind == TokenKind::Ident && to_upper(p->text) == "UNSIGNED") {
+            advance();
+            last_type_unsigned_ = true;
+        }
     };
 
     const Token* t = advance();
@@ -734,10 +738,12 @@ Statement Parser::parse_create() {
         } else {
             std::string col_name = expect_ident();
             DataType data_type = parse_data_type();
+            const bool is_unsigned = last_type_unsigned_;
             ColConstraints cc = parse_col_constraints(col_name);
             ColumnDef col;
             col.name = col_name;
             col.data_type = data_type;
+            col.is_unsigned = is_unsigned;
             col.primary_key = cc.primary_key;
             col.not_null = cc.not_null;
             col.unique = cc.unique;
@@ -916,10 +922,12 @@ Statement Parser::parse_alter() {
         if (peek_is(TokenKind::Column)) advance();
         std::string col_name = expect_ident();
         DataType data_type = parse_data_type();
+        const bool is_unsigned = last_type_unsigned_;
         ColConstraints cc = parse_col_constraints(col_name);
         ColumnDef col;
         col.name = col_name;
         col.data_type = data_type;
+        col.is_unsigned = is_unsigned;
         col.not_null = cc.not_null;
         col.default_value = cc.default_value;
         col.auto_increment = cc.auto_increment;
@@ -985,10 +993,12 @@ Statement Parser::parse_alter() {
         if (peek_is(TokenKind::Column)) advance();
         std::string col_name = expect_ident();
         DataType data_type = parse_data_type();
+        const bool is_unsigned = last_type_unsigned_;
         ColConstraints cc = parse_col_constraints(col_name);
         ColumnDef col;
         col.name = col_name;
         col.data_type = data_type;
+        col.is_unsigned = is_unsigned;
         col.primary_key = cc.primary_key;
         col.not_null = cc.not_null;
         col.unique = cc.unique;

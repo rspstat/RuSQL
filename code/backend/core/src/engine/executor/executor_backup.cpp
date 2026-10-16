@@ -142,7 +142,7 @@ std::string Executor::build_create_table_ddl(const SharedDatabase& s, const std:
     for (auto& col : schema->columns) {
         std::vector<std::string> parts;
         parts.push_back("`" + col.name + "`");
-        parts.push_back(backup_type_str(col.data_type));
+        parts.push_back(backup_type_str(col.data_type) + (col.is_unsigned ? " UNSIGNED" : ""));
         if (col.not_null || col.primary_key) parts.push_back("NOT NULL");
         if (col.auto_increment) parts.push_back("AUTO_INCREMENT");
         if (col.default_value && *col.default_value != NULL_DEFAULT) parts.push_back("DEFAULT '" + *col.default_value + "'");

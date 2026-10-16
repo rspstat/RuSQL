@@ -1743,6 +1743,28 @@ VS Code 스타일 탭 드래그 순서 변경(요청의 1번 항목)은 같은 �
 
 **한계**: `INSERT … SET`의 `VALUES(col)`·`DEFAULT(col)` 같은 함수는 VALUES 형식과 같은 규칙을 따른다(새로 만든 것 없음). 대소문자 문제는 위.
 
+### 10월 17일 — `UNSIGNED` 정수 열이 부호 있는 정수처럼 검사되던 것, 2^63 이상의 정수 비교 (R28)
+
+**왜 이 항목인가**: 사용자 "그 다음 후보도 해주세요". R26·R27의 진짜 MySQL 비교가 남긴 후보를 위에서부터 (열 이름 대소문자 문제는 아직 답이 없어 건드리지 않았다).
+
+**증상**: 파서가 `INT UNSIGNED`의 `UNSIGNED`를 읽고 버려서 어느 정수 열이든 부호 있는 범위로 검사했다 — `INT UNSIGNED`에 `-1`이 들어가고 최댓값 `4294967295`는 "Out of range"로 거절됐고, `UPDATE … SET u = u - 5`가 음수를 만들었다. mysqldump가 쓰는 `int unsigned`·`bigint unsigned` 열이 그대로 이런 범위였다. 같은 비교에서 찾은 짝: 가장 작은 `BIGINT`(`-9223372036854775808`)도 거절됐고, `9223372036854775808 > 9223372036854775807`이 0이었다(int64 밖은 double로 비교).
+
+**고친 것**
+- **스키마**: `ColumnDef::is_unsigned`(저장 이름 `unsigned`, 없던 옛 스키마는 거짓). 파서가 `TINYINT/SMALLINT/INT/BIGINT … UNSIGNED`를 읽은 것을 `CREATE TABLE`, `ALTER … ADD COLUMN`, `ALTER … MODIFY COLUMN` 세 곳에서 열에 넣는다.
+- **범위**(`coerce_column_value`): 부호 없는 `TINYINT` 0..255, `SMALLINT` 0..65535, `INT` 0..4294967295, `BIGINT` 0..18446744073709551615; 음수는 "Out of range value" 오류(0으로 반올림되는 `-0.4`도 MySQL처럼 거절). 검사가 부호와 크기를 따로 들고 가서 부호 있는 `BIGINT`의 최솟값도 이제 들어간다.
+- **표시**: `SHOW CREATE TABLE`·`DESCRIBE`에 `INT UNSIGNED`, `information_schema.columns.COLUMN_TYPE`에 `int unsigned`, `BACKUP`의 `CREATE TABLE`에 `UNSIGNED`.
+- **`MODIFY COLUMN … UNSIGNED`**는 음수 값이 이미 있으면 거절하고 플래그를 바꾼다.
+- **비교**: `compare_numbers`가 int64 밖의 정수도 부호+크기로 정확히 비교한다(2^64 − 1까지; 그 밖은 전처럼 double).
+
+**한계**: `SELECT u - 5`처럼 식 안에서 부호 없는 피연산자의 뺄셈이 음수가 되면 MySQL은 1690 오류를 내지만 RuSQL의 식에는 열 타입이 없어 음수를 돌려준다(`UPDATE … SET u = u - 5`는 대입할 때의 범위 검사로 오류 — 번호만 1264). `FLOAT/DOUBLE/DECIMAL … UNSIGNED`는 읽지 않는다. 2^63 이상의 값은 저장·표시·비교·정렬·`MAX`/`MIN`은 정확하지만 `SUM`/`AVG`는 int64를 넘으면 double로 더한다.
+
+**검증**:
+- 신규 시험 `test_unsigned.cpp`: 네 정수형의 경계에 닿는 행 3개(부호 있는 열의 경계 포함)와 거절해야 할 16문장(경계를 하나 넘음·음수·`-0.4`·식의 결과·숫자가 아닌 값), 2^63 이상 값의 비교·`MAX`, 범위를 벗어나는 `UPDATE` 세 가지가 행을 바꾸지 않음, `SHOW CREATE TABLE`/`DESCRIBE`/`information_schema`, `ALTER ADD/MODIFY`, `BACKUP`, 재시작 뒤에도 부호 없음.
+- MySQL 비교 코퍼스 `corpus/constraints.sql`에 38줄을 더하고 `mysql_conformance_constraints.inc`를 다시 만들었다(MySQL 8.4의 답 기록; 기존 case는 그대로) — 새 문장 모두 MySQL과 같은 답, `[mysql_conformance]` 통과. UNSIGNED 비교 코퍼스(38문장)의 차이는 8곳 → 1곳(위 식 안의 뺄셈).
+- 심은 버그 18종 중 17종 잡힘(남은 1종은 결과가 같다 — 하한이 0이면 음수 검사가 두 군데에서 겹침).
+- 전체 시험 **706 케이스 / 1,480,400 assertions**을 Release 기본으로, 강제로(1,480,399) 통과; 빌드 간 차분(앞 빌드 대비) 10시드 × 99질의 차이 0건; 기존 MySQL 코퍼스 4개는 앞 빌드와 같은 결과(차이 5/7/6/8곳 그대로); `dump_roundtrip.py`(진짜 `mysqldump`로 뜬 두 덤프, 그중 하나는 `unsigned` 열 포함) 행이 모두 같고 mysql 클라이언트 오류 0; 크래시 퍼저(외래키 45·일반 30·동시성 20라운드) 불일치 0, `verify_writes.py` 시드 1~4 위반 0.
+- 하지 않은 것: Debug 전체 시험·속도 비교(범위 검사 한 줄과 파서만 바뀜).
+
 ## 요약: 1학기 대비 2학기에 달라진 것
 
 | 항목 | 1학기 (~2026년 6월) | 2학기 (2026년 7~8월) |

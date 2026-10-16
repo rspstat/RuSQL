@@ -168,6 +168,7 @@ struct ColumnDef {
     std::optional<ForeignKey> foreign_key;
     std::optional<std::string> check_expr;
     bool on_update_now = false; // ON UPDATE CURRENT_TIMESTAMP: an UPDATE that changes the row sets the column to the time of the statement
+    bool is_unsigned = false;   // INT / BIGINT / SMALLINT / TINYINT UNSIGNED: 0 .. 2*max+1, no negative values
 };
 
 // ---------------------------------------------------------------------------

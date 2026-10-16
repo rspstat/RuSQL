@@ -464,6 +464,7 @@ StringResult Executor::exec_alter(SharedDatabase& s, const std::string& table, A
         ColumnDef new_col;
         new_col.name = v->column.name;
         new_col.data_type = v->column.data_type;
+        new_col.is_unsigned = v->column.is_unsigned;
         new_col.primary_key = false;
         new_col.not_null = v->column.not_null;
         new_col.unique = v->column.unique;
@@ -572,6 +573,9 @@ StringResult Executor::exec_alter(SharedDatabase& s, const std::string& table, A
                     return StringResult::Err("Cannot convert value '" + val + "' in column '" + v->column.name + "' to " +
                                               debug_data_type(v->column.data_type));
                 }
+                if (v->column.is_unsigned && val.size() > 1 && val.front() == '-') {
+                    return StringResult::Err("Out of range value for column '" + v->column.name + "': '" + val + "' is negative");
+                }
             }
         }
 
@@ -579,6 +583,7 @@ StringResult Executor::exec_alter(SharedDatabase& s, const std::string& table, A
         for (auto& c : schema->columns) {
             if (c.name == v->column.name) {
                 c.data_type = v->column.data_type;
+                c.is_unsigned = v->column.is_unsigned;
                 c.not_null = v->column.not_null;
                 c.unique = v->column.unique;
                 c.unique_constraint_name = v->column.unique_constraint_name;

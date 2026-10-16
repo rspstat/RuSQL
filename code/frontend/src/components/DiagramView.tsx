@@ -296,8 +296,8 @@ function LayersView() {
           <div className="dg-pipeline">
             <div className="dg-stage" style={tint(C.core)}>
               <div className="dg-stage-head"><Num n={3} c={C.core} /><b>{t(L("Lexer + Parser", "렉서 + 파서"))}</b></div>
-              <span>{t(L("Tokens, then a recursive-descent parser builds the AST: DDL, DML, DCL, TCL, procedures. A mysqldump file loads too (/*!40101 */ executable comments, SET lists and server variables, table and column options); a select item may name its column with or without AS (COUNT(*) c); INSERT / REPLACE also take SET col = value",
-                         "토큰화 후 재귀 하향 파서가 AST 생성: DDL, DML, DCL, TCL, 프로시저. mysqldump 파일도 읽음(/*!40101 */ 실행 주석, SET 목록·서버 변수, 표·열 옵션); select 항목의 열 이름은 AS 없이도 붙일 수 있고(COUNT(*) c) INSERT / REPLACE는 SET col = 값 형식도 받음"))}</span>
+              <span>{t(L("Tokens, then a recursive-descent parser builds the AST: DDL, DML, DCL, TCL, procedures. A mysqldump file loads too (/*!40101 */ executable comments, SET lists and server variables, table and column options); a select item may name its column with or without AS (COUNT(*) c); INSERT / REPLACE also take SET col = value; UNSIGNED integers keep their range",
+                         "토큰화 후 재귀 하향 파서가 AST 생성: DDL, DML, DCL, TCL, 프로시저. mysqldump 파일도 읽음(/*!40101 */ 실행 주석, SET 목록·서버 변수, 표·열 옵션); select 항목의 열 이름은 AS 없이도 붙일 수 있고(COUNT(*) c) INSERT / REPLACE는 SET col = 값 형식도 받고 UNSIGNED 정수는 자기 범위를 지킴"))}</span>
             </div>
             <HArrow c={C.core} phase={1} />
             <div className="dg-stage" style={tint(C.core)}>

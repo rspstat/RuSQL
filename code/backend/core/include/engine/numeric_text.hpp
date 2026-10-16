@@ -86,11 +86,37 @@ inline std::optional<std::int64_t> parse_int64_text(std::string_view s) {
     return value;
 }
 
+// An integer text beyond int64 up to the largest BIGINT UNSIGNED, as a sign and a magnitude ("18446744073709551615", "-5").
+struct SignedMagnitude {
+    bool negative = false;
+    std::uint64_t magnitude = 0;
+};
+inline std::optional<SignedMagnitude> parse_wide_integer_text(std::string_view s) {
+    SignedMagnitude out;
+    if (!s.empty() && (s.front() == '+' || s.front() == '-')) {
+        out.negative = s.front() == '-';
+        s.remove_prefix(1);
+    }
+    if (s.empty()) return std::nullopt;
+    auto result = std::from_chars(s.data(), s.data() + s.size(), out.magnitude);
+    if (result.ec != std::errc() || result.ptr != s.data() + s.size()) return std::nullopt;
+    if (out.magnitude == 0) out.negative = false;
+    return out;
+}
+
 // Which of two values is bigger as numbers (a text by the number it starts with, see text_to_number): -1, 0 or 1. Integers are compared as
-// integers, so 9007199254740993 and 9007199254740992 differ; anything else as doubles.
+// integers (up to 2^64 - 1, the largest BIGINT UNSIGNED), so 9007199254740993 and 9007199254740992 differ, and so do 9223372036854775807
+// and 9223372036854775808; anything else as doubles.
 inline int compare_numbers(std::string_view a, std::string_view b) {
     auto x = parse_int64_text(a), y = parse_int64_text(b);
     if (x && y) return *x < *y ? -1 : (*x > *y ? 1 : 0);
+    if (auto u = parse_wide_integer_text(a)) {
+        if (auto v = parse_wide_integer_text(b)) {
+            if (u->negative != v->negative) return u->negative ? -1 : 1;
+            const int by_magnitude = u->magnitude < v->magnitude ? -1 : (u->magnitude > v->magnitude ? 1 : 0);
+            return u->negative ? -by_magnitude : by_magnitude;
+        }
+    }
     const double u = text_to_number(a), v = text_to_number(b);
     return u < v ? -1 : (u > v ? 1 : 0);
 }

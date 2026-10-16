@@ -114,7 +114,7 @@ StringResult Executor::exec_describe(const SharedDatabase& s, const std::string&
     out += "| Field            | Type    | PK  | NN  | Auto Increment | Default         |\n";
     out += sep + "\n";
     for (auto& col : schema->columns) {
-        std::string type_str = sql_type_str(col.data_type);
+        std::string type_str = sql_type_str(col.data_type) + (col.is_unsigned ? " UNSIGNED" : "");
         std::string def_str = "NULL";
         if (col.default_value && *col.default_value != NULL_DEFAULT) def_str = *col.default_value;
 
@@ -137,7 +137,7 @@ StringResult Executor::exec_show_create_table(const SharedDatabase& s, const std
     for (auto& col : schema->columns) {
         std::vector<std::string> parts;
         parts.push_back("`" + col.name + "`");
-        parts.push_back(sql_type_str_ddl(col.data_type));
+        parts.push_back(sql_type_str_ddl(col.data_type) + (col.is_unsigned ? " UNSIGNED" : ""));
         if (col.not_null || col.primary_key) parts.push_back("NOT NULL");
         if (col.auto_increment) parts.push_back("AUTO_INCREMENT");
         if (col.default_value && *col.default_value != NULL_DEFAULT) {

@@ -128,7 +128,7 @@ std::string shown(const std::string& v) { return v.size() > 64 ? v.substr(0, 64)
 
 std::string at_row(std::size_t row) { return " at row " + std::to_string(row); }
 
-std::optional<std::string> check_integer(const ColumnDef& col, std::string& value, std::size_t row, long long lo, long long hi) {
+std::optional<std::string> check_integer(const ColumnDef& col, std::string& value, std::size_t row, long long lo, unsigned long long hi) {
     // already canonical and small (-?[1-9][0-9]{0,8} or 0): the usual case
     if (!value.empty() && value.size() < 10) {
         const std::size_t i = value.front() == '-' ? 1 : 0;
@@ -136,7 +136,7 @@ std::optional<std::string> check_integer(const ColumnDef& col, std::string& valu
         for (std::size_t k = i; k < value.size() && canonical; k++) canonical = value[k] >= '0' && value[k] <= '9';
         if (canonical) {
             const long long n = std::stoll(value);
-            if (n >= lo && n <= hi) return std::nullopt;
+            if (n < 0 ? n >= lo : static_cast<unsigned long long>(n) <= hi) return std::nullopt;
         }
     }
     std::string lower = value;
@@ -145,16 +145,22 @@ std::optional<std::string> check_integer(const ColumnDef& col, std::string& valu
     if (lower == "false") { value = "0"; return std::nullopt; }
     auto d = parse_decimal(value);
     if (!d) return "Incorrect integer value: '" + shown(value) + "' for column '" + col.name + "'" + at_row(row);
+    const bool below_zero = d->negative && (d->integer.find_first_not_of('0') != std::string::npos || d->fraction.find_first_not_of('0') != std::string::npos);
     round_to_scale(*d, 0);
-    if (d->integer.size() > 19) return "Out of range value for column '" + col.name + "'" + at_row(row);
-    long long n = 0;
+    if (d->integer.size() > 20) return "Out of range value for column '" + col.name + "'" + at_row(row);
+    if (lo >= 0 && below_zero) return "Out of range value for column '" + col.name + "'" + at_row(row); // (MySQL: -0.4 is not 0 in an unsigned column)
+    unsigned long long magnitude = 0; // the digits; the sign is kept apart so that -2^63 and 2^64 - 1 both fit
     if (!d->integer.empty()) {
-        auto res = std::from_chars(d->integer.data(), d->integer.data() + d->integer.size(), n);
+        auto res = std::from_chars(d->integer.data(), d->integer.data() + d->integer.size(), magnitude);
         if (res.ec != std::errc()) return "Out of range value for column '" + col.name + "'" + at_row(row);
     }
-    if (d->negative) n = -n;
-    if (n < lo || n > hi) return "Out of range value for column '" + col.name + "'" + at_row(row);
-    value = std::to_string(n);
+    if (d->negative && magnitude != 0) {
+        if (lo >= 0 || magnitude > 0ULL - static_cast<unsigned long long>(lo)) return "Out of range value for column '" + col.name + "'" + at_row(row);
+        value = "-" + std::to_string(magnitude);
+    } else {
+        if (magnitude > hi) return "Out of range value for column '" + col.name + "'" + at_row(row);
+        value = std::to_string(magnitude);
+    }
     return std::nullopt;
 }
 
@@ -234,12 +240,15 @@ std::string two(int n) { return (n < 10 ? "0" : "") + std::to_string(n); }
 std::optional<std::string> Executor::coerce_column_value(const ColumnDef& col, std::string& value, std::size_t row) {
     if (value == EXECUTOR_NULL_VALUE) return std::nullopt;
     const DataType& dt = col.data_type;
-    if (std::holds_alternative<DataType::Int>(dt.data)) return check_integer(col, value, row, -2147483648LL, 2147483647LL);
-    if (std::holds_alternative<DataType::BigInt>(dt.data)) return check_integer(col, value, row, std::numeric_limits<long long>::min(), std::numeric_limits<long long>::max());
-    if (std::holds_alternative<DataType::SmallInt>(dt.data)) return check_integer(col, value, row, -32768, 32767);
-    if (std::holds_alternative<DataType::TinyInt>(dt.data) || std::holds_alternative<DataType::Boolean>(dt.data)) {
-        return check_integer(col, value, row, -128, 127);
+    const bool u = col.is_unsigned; // UNSIGNED: from 0 up to twice the signed maximum plus one
+    if (std::holds_alternative<DataType::Int>(dt.data)) return u ? check_integer(col, value, row, 0, 4294967295ULL) : check_integer(col, value, row, -2147483648LL, 2147483647ULL);
+    if (std::holds_alternative<DataType::BigInt>(dt.data)) {
+        return u ? check_integer(col, value, row, 0, std::numeric_limits<unsigned long long>::max())
+                 : check_integer(col, value, row, std::numeric_limits<long long>::min(), static_cast<unsigned long long>(std::numeric_limits<long long>::max()));
     }
+    if (std::holds_alternative<DataType::SmallInt>(dt.data)) return u ? check_integer(col, value, row, 0, 65535ULL) : check_integer(col, value, row, -32768, 32767ULL);
+    if (std::holds_alternative<DataType::TinyInt>(dt.data)) return u ? check_integer(col, value, row, 0, 255ULL) : check_integer(col, value, row, -128, 127ULL);
+    if (std::holds_alternative<DataType::Boolean>(dt.data)) return check_integer(col, value, row, -128, 127ULL);
     if (std::holds_alternative<DataType::Float>(dt.data) || std::holds_alternative<DataType::Double>(dt.data)) {
         std::string lower = value;
         std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });

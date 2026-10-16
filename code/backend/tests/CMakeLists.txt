@@ -70,6 +70,7 @@ add_executable(engine_tests
     test_cascade_rollback.cpp
     test_implicit_alias.cpp
     test_insert_set.cpp
+    test_unsigned.cpp
 )
 
 target_link_libraries(engine_tests PRIVATE engine_core)
