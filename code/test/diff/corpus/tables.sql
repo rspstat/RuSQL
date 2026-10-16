@@ -149,3 +149,25 @@ INSERT IGNORE INTO w (id, s, u) VALUES (7, 'y', 99), (9, 'i', 90)
 SELECT * FROM w ORDER BY id
 TRUNCATE TABLE w
 SELECT COUNT(*) FROM w
+# INSERT / REPLACE ... SET col = value is (cols) VALUES (values): conflicts (IGNORE, ON DUPLICATE KEY UPDATE, REPLACE), expressions and a column named twice
+--CREATE TABLE si (id INT PRIMARY KEY AUTO_INCREMENT, n INT DEFAULT 7, s VARCHAR(20), v INT UNIQUE)
+INSERT INTO si SET id = 1, n = 5, s = 'one', v = 10
+INSERT INTO si SET s = 'auto'
+INSERT INTO si SET id = 5, n = DEFAULT, s = NULL, v = 50
+INSERT INTO si SET id = 6, n = 1 + 2 * 3, s = CONCAT('a', 'b'), v = 60 + 1
+INSERT INTO si SET id = 7, s = 'it''s', v = -3
+INSERT IGNORE INTO si SET id = 1, s = 'dup'
+INSERT INTO si SET id = 1, s = 'upd', v = 10 ON DUPLICATE KEY UPDATE s = 'changed', n = n + 1
+INSERT INTO si SET id = 9, s = 'nine' ON DUPLICATE KEY UPDATE n = 0
+REPLACE INTO si SET id = 5, s = 'replaced', v = 55
+REPLACE si SET id = 12, s = 'twelve'
+SELECT id, n, s, v FROM si ORDER BY id
+INSERT INTO si SET id = 1, v = 999
+INSERT INTO si SET id = 20, v = 10
+INSERT INTO si (s) SET id = 1
+INSERT INTO si SET
+INSERT INTO si SET id 1
+INSERT INTO si SET id = 1,
+INSERT INTO si SET id = 21, id = 22
+INSERT INTO si (id, id) VALUES (30, 31)
+SELECT id, n, s, v FROM si ORDER BY id

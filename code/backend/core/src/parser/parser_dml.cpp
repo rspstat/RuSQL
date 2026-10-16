@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <unordered_map>
 
 #include "engine/parser/ast_json.hpp"
@@ -5,6 +6,17 @@
 #include "parser_detail.hpp"
 
 namespace engine {
+
+namespace {
+// INSERT / REPLACE name each column once (MySQL: error 1110, "Column 'x' specified twice")
+void ensure_distinct_columns(const std::vector<std::string>& cols) {
+    std::vector<std::string> seen;
+    for (const std::string& c : cols) {
+        if (std::find(seen.begin(), seen.end(), c) != seen.end()) throw ParseError("Column '" + c + "' specified twice");
+        seen.push_back(c);
+    }
+}
+} // namespace
 
 /// VALUES (...), (...): each value is plain text (a literal, NULL, DEFAULT, `@var`, `NEW.x`) or, when it goes on as an expression (`1 + 2`,
 /// `UPPER('x')`, `NOW()`, `CASE ...`), "\x01" + the JSON of the expression, which the executor evaluates before the row is written.
@@ -18,45 +30,8 @@ std::vector<std::vector<std::string>> Parser::parse_insert_values() {
             std::string val;
             if (peek_is(TokenKind::Comma) || peek_is(TokenKind::RParen)) {
                 val = INSERT_DEFAULT;
-            } else if (peek_is(TokenKind::Default)) {
-                advance();
-                val = INSERT_DEFAULT;
             } else {
-                // how many tokens a plain value takes: a literal or NULL (1), a name (1, or `t.c`: 3), `@var` (2), `NEW.x` / `OLD.x` (3)
-                if (!peek()) throw ParseError("Expected value");
-                std::size_t plain_len = 0;
-                switch (peek()->kind) {
-                    case TokenKind::StringLit: case TokenKind::NumberLit: case TokenKind::Null: plain_len = 1; break;
-                    case TokenKind::Ident: plain_len = peek_at_is(1, TokenKind::Dot) ? 3 : 1; break;
-                    case TokenKind::At: plain_len = 2; break;
-                    case TokenKind::NewKw: case TokenKind::OldKw: plain_len = 3; break;
-                    default: break;
-                }
-                const bool plain = plain_len > 0 && (peek_at_is(plain_len, TokenKind::Comma) || peek_at_is(plain_len, TokenKind::RParen));
-                if (!plain) {
-                    ArithExpr expr = parse_value_expr();
-                    val = "\x01" + nlohmann::json(expr).dump();
-                } else {
-                    const Token* t = advance();
-                    switch (t->kind) {
-                        case TokenKind::StringLit: case TokenKind::NumberLit: val = t->text; break;
-                        case TokenKind::Ident:
-                            val = t->text;
-                            if (peek_is(TokenKind::Dot)) { // `NEW.id` in a trigger
-                                advance();
-                                val += "." + expect_ident();
-                            }
-                            break;
-                        case TokenKind::At: val = "@" + expect_ident(); break; // a user variable
-                        case TokenKind::NewKw: case TokenKind::OldKw: // a trigger's NEW.x / OLD.x
-                            val = t->kind == TokenKind::NewKw ? "NEW" : "OLD";
-                            if (!peek_is(TokenKind::Dot)) throw ParseError("Expected '.' after NEW / OLD");
-                            advance();
-                            val += "." + expect_ident();
-                            break;
-                        default: val = "NULL"; break; // NULL
-                    }
-                }
+                val = parse_insert_value(false);
             }
             row_vals.push_back(val);
             if (peek_is(TokenKind::Comma)) { advance(); }
@@ -67,6 +42,71 @@ std::vector<std::vector<std::string>> Parser::parse_insert_values() {
         if (peek_is(TokenKind::Comma)) advance(); else break;
     }
     return all_values;
+}
+
+std::string Parser::parse_insert_value(bool set_form) {
+    if (peek_is(TokenKind::Default)) {
+        advance();
+        return INSERT_DEFAULT;
+    }
+    // how many tokens a plain value takes: a literal or NULL (1), a name (1, or `t.c`: 3), `@var` (2), `NEW.x` / `OLD.x` (3)
+    if (!peek()) throw ParseError("Expected value");
+    std::size_t plain_len = 0;
+    switch (peek()->kind) {
+        case TokenKind::StringLit: case TokenKind::NumberLit: case TokenKind::Null: plain_len = 1; break;
+        case TokenKind::Ident: plain_len = peek_at_is(1, TokenKind::Dot) ? 3 : 1; break;
+        case TokenKind::At: plain_len = 2; break;
+        case TokenKind::NewKw: case TokenKind::OldKw: plain_len = 3; break;
+        default: break;
+    }
+    bool plain = false;
+    if (plain_len > 0) {
+        const Token* after = peek_at(plain_len);
+        plain = peek_at_is(plain_len, TokenKind::Comma) ||
+                (set_form ? (after == nullptr || after->kind == TokenKind::Semicolon || after->kind == TokenKind::On || after->kind == TokenKind::Returning)
+                          : peek_at_is(plain_len, TokenKind::RParen));
+    }
+    if (!plain) {
+        ArithExpr expr = parse_value_expr();
+        return "\x01" + nlohmann::json(expr).dump();
+    }
+    std::string val;
+    const Token* t = advance();
+    switch (t->kind) {
+        case TokenKind::StringLit: case TokenKind::NumberLit: val = t->text; break;
+        case TokenKind::Ident:
+            val = t->text;
+            if (peek_is(TokenKind::Dot)) { // `NEW.id` in a trigger
+                advance();
+                val += "." + expect_ident();
+            }
+            break;
+        case TokenKind::At: val = "@" + expect_ident(); break; // a user variable
+        case TokenKind::NewKw: case TokenKind::OldKw: // a trigger's NEW.x / OLD.x
+            val = t->kind == TokenKind::NewKw ? "NEW" : "OLD";
+            if (!peek_is(TokenKind::Dot)) throw ParseError("Expected '.' after NEW / OLD");
+            advance();
+            val += "." + expect_ident();
+            break;
+        default: val = "NULL"; break; // NULL
+    }
+    return val;
+}
+
+void Parser::parse_insert_set(std::optional<std::vector<std::string>>& columns, std::vector<std::vector<std::string>>& all_values) {
+    if (columns) throw ParseError("A column list and SET cannot be combined");
+    advance(); // SET
+    std::vector<std::string> cols, row;
+    for (;;) {
+        cols.push_back(expect_ident());
+        if (!peek_is(TokenKind::Eq)) throw ParseError("Expected '=' after the column in SET");
+        advance();
+        row.push_back(parse_insert_value(true));
+        if (peek_is(TokenKind::Comma)) advance(); else break;
+    }
+    ensure_distinct_columns(cols);
+    columns = std::move(cols);
+    all_values.push_back(std::move(row));
 }
 
 Statement Parser::parse_insert() {
@@ -85,6 +125,7 @@ Statement Parser::parse_insert() {
         while (peek_is(TokenKind::Comma)) { advance(); cols.push_back(expect_ident()); }
         if (!peek_is(TokenKind::RParen)) throw ParseError("Expected ')' after column list");
         advance();
+        ensure_distinct_columns(cols);
         columns = cols;
     }
 
@@ -97,10 +138,14 @@ Statement Parser::parse_insert() {
         return Statement(Statement::InsertSelect{table, columns, std::make_unique<Statement>(std::move(query)), on_conflict, returning});
     }
 
-    if (!peek_is(TokenKind::Values)) throw ParseError("Expected VALUES or SELECT");
-    advance();
-
-    std::vector<std::vector<std::string>> all_values = parse_insert_values();
+    std::vector<std::vector<std::string>> all_values;
+    if (peek_is(TokenKind::Set)) {
+        parse_insert_set(columns, all_values); // INSERT INTO table SET col = value, ...
+    } else {
+        if (!peek_is(TokenKind::Values)) throw ParseError("Expected VALUES, SET or SELECT");
+        advance();
+        all_values = parse_insert_values();
+    }
 
     InsertConflict on_conflict = [&]() -> InsertConflict {
         if (peek_is(TokenKind::On)) {
@@ -148,6 +193,7 @@ Statement Parser::parse_replace() {
         while (peek_is(TokenKind::Comma)) { advance(); cols.push_back(expect_ident()); }
         if (!peek_is(TokenKind::RParen)) throw ParseError("Expected ')' after column list");
         advance();
+        ensure_distinct_columns(cols);
         columns = cols;
     }
 
@@ -159,10 +205,14 @@ Statement Parser::parse_replace() {
                                                    InsertConflict(InsertConflict::Replace{}), returning});
     }
 
-    if (!peek_is(TokenKind::Values)) throw ParseError("Expected VALUES or SELECT");
-    advance();
-
-    std::vector<std::vector<std::string>> all_values = parse_insert_values();
+    std::vector<std::vector<std::string>> all_values;
+    if (peek_is(TokenKind::Set)) {
+        parse_insert_set(columns, all_values); // REPLACE INTO table SET col = value, ...
+    } else {
+        if (!peek_is(TokenKind::Values)) throw ParseError("Expected VALUES, SET or SELECT");
+        advance();
+        all_values = parse_insert_values();
+    }
 
     auto returning = parse_returning();
     return Statement(Statement::Insert{table, columns, all_values, InsertConflict(InsertConflict::Replace{}), returning});

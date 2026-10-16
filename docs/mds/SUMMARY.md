@@ -9,7 +9,7 @@
 |---|---|
 | 무엇 | MySQL 호환 프로토콜을 쓰는 **자체 RDBMS 엔진**(C++20) + 데스크톱 클라이언트(Tauri/React) + Claude 연동(MCP) |
 | 1학기 → 2학기 | Rust 프로토타입 → **C++ 전면 재작성**, "기능 추가"에서 **정합성·동시성·성능을 실제로 파고드는 심화**로 |
-| 규모 | 테스트 **704 케이스 / 1,480,170 assertions** (2학기 초 218 케이스 / 3,080 assertions) |
+| 규모 | 테스트 **705 케이스 / 1,480,266 assertions** (2학기 초 218 케이스 / 3,080 assertions) |
 | 엔진 구성 | 파서 → 비용 기반 플래너 → 실행기, MVCC·행 단위 락·데드락 감지, redo 로그 기반 내구성, B+Tree·해시·복합 인덱스 |
 
 ## 2학기에 만든 것 (엔진)
@@ -139,15 +139,16 @@
 | 자식 `UPDATE`·부모 `UPDATE/DELETE`·`REPLACE`·`INSERT IGNORE`·`ON DUPLICATE KEY UPDATE`·`INSERT … SELECT`가 문장마다 표 파일을 다시 쓰는 옛 방식(5~45 ms) | 해당 문장이 느림 |
 | **트랜잭션이 열려 있는 동안 표 파일이 쓰이면(체크포인트·다른 세션의 MERGE·DDL·자기 `ROLLBACK TO SAVEPOINT`) 미커밋 행이 파일에 적히고, ROLLBACK 뒤 크래시하면 되돌린 INSERT/UPDATE/DELETE가 되살아남**(외래키 크래시 퍼저 시드 6007이 찾음; 이제 파일에는 커밋된 것만 씀 — `ALTER TABLE`과 버퍼 풀의 flush·교체 경로도 같음) | 크래시 뒤 ROLLBACK한 변경이 보임 |
 | **select 항목의 별칭을 `AS` 없이 쓰면 파싱 오류**(`SELECT COUNT(*) c`, `SELECT a x`, `ROW_NUMBER() OVER (…) r`; 진짜 MySQL과 73문장을 비교하다 찾음) | 흔한 SQL 문체가 거절됨 |
+| **`INSERT … SET`·`REPLACE … SET`가 없고, 같은 열을 두 번 쓴 INSERT가 받아들여짐**(뒤의 값이 이김; MySQL은 1110 오류) | 흔한 INSERT 문체가 거절되고 잘못된 문장이 조용히 통과함 |
 
-성능·정합성 작업의 커밋들에서 찾은 기존 버그는 모두 140건입니다(전체 목록은 `DATE.md`).
+성능·정합성 작업의 커밋들에서 찾은 기존 버그는 모두 141건입니다(전체 목록은 `DATE.md`).
 
 ## 한계와 앞으로
 
 - 이번 학기 성능 작업은 **의도적으로 여기서 동결**했습니다. 남은 것은 상수 배수 수준(100,000행에서 `ANALYZE`·`INSERT … SELECT`·`UNION ALL`이 1.5~1.7초)이며 `PLAN.md`에 후보로 기록했습니다.
 - 쓰는 문장 안의 상관 서브쿼리, `NATURAL`/`USING` 조인은 아직 중첩 루프입니다.
 - 설계상 범위 밖: XA 분산 트랜잭션, 페이지 단위 버퍼 풀, WAL 복제.
-- 알려진 한계(`PLAN.md`): `= ANY/ALL (서브쿼리)`·행 생성자 비교가 없는 것, AFTER 트리거 실패가 쓴 행을 되돌리지 않는 것, `ORDER BY`·`GROUP BY` 식·집계 인자 안의 서브쿼리(오류로 거절), 타입을 모르는 식(`COALESCE`·`IF` 결과)·`IN (서브쿼리)`·`UNION`의 `ORDER BY` 같은 몇몇 비교는 예전 규칙, 열 단위 `COLLATE`/`BINARY`가 없는 것(대소문자를 구분하는 열을 만들 수 없음; 파싱 오류로 거절됨), 결과 표를 글자로 다시 읽는 경로(`UNION`·`INSERT … SELECT`·CTE·파생 테이블·`IN (서브쿼리)`)가 값의 앞뒤 공백을 잃는 것.
+- 알려진 한계(`PLAN.md`): **열 이름·표 이름이 대소문자를 구분하는 것**(`SELECT NAME`이 열 `name`을 못 찾음; MySQL은 열 이름을 구분하지 않음 — 사용자 결정 대기), `= ANY/ALL (서브쿼리)`·행 생성자 비교가 없는 것, AFTER 트리거 실패가 쓴 행을 되돌리지 않는 것, `ORDER BY`·`GROUP BY` 식·집계 인자 안의 서브쿼리(오류로 거절), 타입을 모르는 식(`COALESCE`·`IF` 결과)·`IN (서브쿼리)`·`UNION`의 `ORDER BY` 같은 몇몇 비교는 예전 규칙, 열 단위 `COLLATE`/`BINARY`가 없는 것(대소문자를 구분하는 열을 만들 수 없음; 파싱 오류로 거절됨), 결과 표를 글자로 다시 읽는 경로(`UNION`·`INSERT … SELECT`·CTE·파생 테이블·`IN (서브쿼리)`)가 값의 앞뒤 공백을 잃는 것.
 - AI는 사설 모델 대신 **Claude + MCP**로 일원화했습니다(`AI.md`).
 
 ## 직접 확인해 보기

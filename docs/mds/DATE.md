@@ -1724,6 +1724,25 @@ VS Code 스타일 탭 드래그 순서 변경(요청의 1번 항목)은 같은 �
 
 **한계**: `SELECT a 'x'`처럼 문자열 낱말을 별칭으로 쓰는 것과, 이름이 키워드인 낱말(`date`, `count` 같은 비예약어)을 `AS` 없이 별칭으로 쓰는 것은 받지 않는다(MySQL은 받음). `RETURNING` 목록과 `UPDATE … SET`은 그대로다.
 
+### 10월 16일 (세 번째) — `INSERT … SET`·`REPLACE … SET`가 없던 것, 같은 열을 두 번 쓴 INSERT가 받아들여지던 것 (R27)
+
+**왜 이 항목인가**: 사용자 "계속 진행해주세요". R26의 진짜 MySQL 비교가 남긴 후보 중 첫째(`PLAN.md`).
+
+**고친 것**
+- **`INSERT [IGNORE] INTO t SET a = 1, b = 'x'`, `REPLACE [INTO] t SET …`**: `(a, b) VALUES (1, 'x')`와 같은 한 행이다. `ON DUPLICATE KEY UPDATE`·`IGNORE`·`RETURNING`·`REPLACE`가 VALUES 형식과 같은 길을 탄다(문장만 다르고 실행기는 그대로). 값을 읽는 코드를 `Parser::parse_insert_value(set_form)`로 뽑아 두 형식이 함께 쓴다 — SET 형식에서는 값이 `,`뿐 아니라 `ON`·`RETURNING`·`;`·문장 끝에서도 끝난다. 열 목록과 SET을 같이 쓰면(`INSERT INTO t (a) SET b = 1`) 오류다.
+- **같은 열을 두 번 쓴 INSERT/REPLACE**(`SET id = 21, id = 22`, `(id, id) VALUES …`, `INSERT … SELECT`의 열 목록)는 MySQL의 1110 "Column 'id' specified twice" 오류로 거절한다 — 전에는 VALUES 형식도 받아들여 뒤의 값이 이겼다.
+
+**이 비교가 새로 찾은 것 — 크다, 고치지 않음, 사용자 결정 대기**: **열 이름·표 이름이 대소문자를 구분한다.** `INSERT INTO ci2 (ID, NAME) VALUES …`, `SELECT NAME FROM ci2`, `WHERE ID = 1`, `UPDATE … SET NAME = …`, `SELECT Ci2.Id`가 "Column 'ID' not found"·"Unknown column"으로 거절되고 `FROM CI2`는 "Table 'v.CI2' not found"다(비교한 9문장 중 8문장이 다름). MySQL은 열 이름·별칭을 어느 플랫폼에서나 구분하지 않고(표·데이터베이스 이름은 Windows에서 구분하지 않고 Linux에서 구분), 결과 열 이름은 쓴 글자 그대로 돌려준다. `SELECT NAME FROM users`처럼 열을 대문자로 쓰는 흔한 문체가 통하지 않는다는 뜻이다. 이름을 찾는 곳 전부(파서가 만든 이름, 실행기의 열 조회, 인덱스·제약·뷰·트리거·프로시저 본문)에 걸친 변경이라 범위가 크다 — `PLAN.md`에 적고 방향을 묻는다.
+
+**검증**:
+- 신규 시험 `test_insert_set.cpp`: SET 형식과 VALUES 형식 11쌍(자동 증가·`DEFAULT`·NULL·산술·함수·사용자 변수·따옴표·`IGNORE`·`ON DUPLICATE KEY UPDATE`·`REPLACE`·`REPLACE` INTO 없이)이 같은 표를 만들고, 거절해야 할 문장 10개(열 목록+SET, 빈 SET, `=` 빠짐, 끝의 쉼표, 같은 열 두 번 네 형식)와 중복 기본키 오류 메시지가 VALUES 형식과 같다.
+- MySQL 비교 코퍼스 `corpus/tables.sql`에 21문장을 더하고 `mysql_conformance_tables.inc`를 다시 만들었다(진짜 MySQL 8.4의 답이 기록된다; 기존 case는 변하지 않고 21줄만 늘어남) — 새 문장 모두 MySQL과 같은 답이고 `[mysql_conformance]` 4 케이스 921 assertions 통과.
+- 심은 버그 8종 중 5종 잡힘: 남은 3종 중 2종은 결과가 같다(SET 형식의 값 하나를 "일반 값"으로 읽든 식으로 읽든 같은 행이 나옴), 1종은 대소문자를 접는 비교였는데 열 이름이 대소문자를 구분하는 지금은 `ID`와 `id`가 다른 열이라 접을 일이 없어서 그 코드를 지웠다.
+- 전체 시험 **705 케이스 / 1,480,266 assertions**을 Release 기본으로, 강제로(1,480,265) 통과; 빌드 간 차분(앞 빌드 대비) 10시드 × 99질의 차이 0건; 기존 MySQL 코퍼스 4개는 앞 빌드와 같은 결과(차이 5/7/6/8곳 그대로); 비교 코퍼스 73문장의 달랐던 곳 20 → 16곳.
+- 하지 않은 것: Debug 전체 시험·크래시 퍼저·속도 비교(파서만 바뀜).
+
+**한계**: `INSERT … SET`의 `VALUES(col)`·`DEFAULT(col)` 같은 함수는 VALUES 형식과 같은 규칙을 따른다(새로 만든 것 없음). 대소문자 문제는 위.
+
 ## 요약: 1학기 대비 2학기에 달라진 것
 
 | 항목 | 1학기 (~2026년 6월) | 2학기 (2026년 7~8월) |

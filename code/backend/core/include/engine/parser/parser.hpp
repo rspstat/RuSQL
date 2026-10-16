@@ -164,6 +164,10 @@ private:
     Statement parse_select();
     Statement parse_insert();
     std::vector<std::vector<std::string>> parse_insert_values();
+    /// one value of VALUES (...) or of INSERT ... SET col = value (`set_form`: the value also ends at ON, RETURNING, `;` or the end of the statement)
+    std::string parse_insert_value(bool set_form);
+    /// `SET col = value, ...` of INSERT / REPLACE: the same as `(cols) VALUES (values)`
+    void parse_insert_set(std::optional<std::vector<std::string>>& columns, std::vector<std::vector<std::string>>& all_values);
     Statement parse_replace();
     Statement parse_update();
     Statement parse_delete();
