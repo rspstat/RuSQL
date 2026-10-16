@@ -255,6 +255,9 @@ struct ConditionValue {
     ~ConditionValue() = default;
 };
 
+// `x > ANY (SELECT ...)` / `x <= ALL (SELECT ...)` (SOME is ANY): the comparison holds for some / for every value the subquery gives
+enum class Quantifier { None, Any, All };
+
 // Leaf predicate (single comparison). `operator` renamed to `op` (C++ keyword).
 struct Condition {
     ArithExpr left;
@@ -263,6 +266,7 @@ struct Condition {
     // What each side of the comparison is (set by Executor::bind_statement): how the two compare (see value_class.hpp).
     ValueClass left_class = ValueClass::Unknown;
     ValueClass right_class = ValueClass::Unknown;
+    Quantifier quantifier = Quantifier::None; // ANY / ALL: only with a comparison (Eq .. Lte) against a subquery
 };
 
 // Boolean expression tree with proper AND > OR precedence.

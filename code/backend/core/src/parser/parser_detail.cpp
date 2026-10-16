@@ -169,7 +169,9 @@ Condition expand_leaf(const Condition& cond, const std::unordered_map<std::strin
             }
         },
         cond.value.data);
-    return Condition{expand_arith(cond.left, map), cond.op, std::move(value)};
+    Condition expanded{expand_arith(cond.left, map), cond.op, std::move(value)};
+    expanded.quantifier = cond.quantifier;
+    return expanded;
 }
 
 CondExpr expand_condexpr(const CondExpr& expr, const std::unordered_map<std::string, std::string>& map) {

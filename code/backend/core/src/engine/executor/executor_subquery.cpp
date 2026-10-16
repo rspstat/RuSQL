@@ -116,7 +116,8 @@ Executor::Tri Executor::eval_single_with_subquery(SharedDatabase& s, const Row& 
     std::string val = eval_arith_exact(row, cond.left);
     const bool left_null = val == EXECUTOR_NULL_VALUE;
     const bool is_in = cond.op == Operator::In || cond.op == Operator::NotIn;
-    if (left_null && !is_in) return Tri::Unknown;
+    const bool quantified = cond.quantifier != Quantifier::None; // x op ANY / ALL (subquery): an empty answer decides it even for a NULL x
+    if (left_null && !is_in && !quantified) return Tri::Unknown;
 
     // x IN (subquery): TRUE on a match, otherwise UNKNOWN when the subquery returned a NULL, else FALSE; NOT IN the other way round. A subquery that
     // gives no row decides it whatever x is (a NULL x is not IN nothing, and is NOT IN nothing); with rows a NULL x is UNKNOWN.
@@ -178,19 +179,36 @@ Executor::Tri Executor::eval_single_with_subquery(SharedDatabase& s, const Row& 
         case Operator::Lt:
         case Operator::Gte:
         case Operator::Lte: {
+            const ValueClass left_class = cond.left_class != ValueClass::Unknown ? cond.left_class : class_of_expr(cond.left);
+            auto holds = [&](int c) {
+                switch (cond.op) {
+                    case Operator::Eq: return tri(c == 0);
+                    case Operator::Ne: return tri(c != 0);
+                    case Operator::Gt: return tri(c > 0);
+                    case Operator::Lt: return tri(c < 0);
+                    case Operator::Gte: return tri(c >= 0);
+                    default: return tri(c <= 0);
+                }
+            };
+            if (quantified) {
+                // ANY: TRUE when some value satisfies it, else UNKNOWN when a NULL (of x or of the subquery) kept it open, else FALSE; ALL: the
+                // other way round. Nothing at all is FALSE for ANY and TRUE for ALL, whatever x is.
+                const bool any = cond.quantifier == Quantifier::Any;
+                if (sub_vals.empty()) return tri(!any);
+                bool open = false;
+                for (const std::string& v : sub_vals) {
+                    Tri t = Tri::Unknown;
+                    if (!left_null && v != EXECUTOR_NULL_VALUE) t = holds(compare_classed(left_class, cond.right_class, val, v));
+                    if (any && t == Tri::True) return Tri::True;
+                    if (!any && t == Tri::False) return Tri::False;
+                    if (t == Tri::Unknown) open = true;
+                }
+                return open ? Tri::Unknown : tri(!any);
+            }
             // a scalar subquery that returns more than one row is an error (MySQL 1242); with no row, or a NULL, the comparison is UNKNOWN
             if (sub_vals.size() > 1) throw StatementError("Subquery returns more than 1 row");
             if (sub_vals.empty() || sub_vals.front() == EXECUTOR_NULL_VALUE) return Tri::Unknown;
-            const std::string& rhs = sub_vals.front();
-            const int c = compare_classed(cond.left_class != ValueClass::Unknown ? cond.left_class : class_of_expr(cond.left), cond.right_class, val, rhs);
-            switch (cond.op) {
-                case Operator::Eq: return tri(c == 0);
-                case Operator::Ne: return tri(c != 0);
-                case Operator::Gt: return tri(c > 0);
-                case Operator::Lt: return tri(c < 0);
-                case Operator::Gte: return tri(c >= 0);
-                default: return tri(c <= 0);
-            }
+            return holds(compare_classed(left_class, cond.right_class, val, sub_vals.front()));
         }
         default:
             return Tri::False;

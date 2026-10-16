@@ -171,3 +171,48 @@ INSERT INTO si SET id = 1,
 INSERT INTO si SET id = 21, id = 22
 INSERT INTO si (id, id) VALUES (30, 31)
 SELECT id, n, s, v FROM si ORDER BY id
+# x op ANY / SOME / ALL (subquery): some / every value, NULLs leave the answer open, an empty subquery is FALSE for ANY and TRUE for ALL
+--CREATE TABLE qt (id INT PRIMARY KEY, a INT, name VARCHAR(10))
+--CREATE TABLE qs (k INT PRIMARY KEY, grp INT, c INT, nm VARCHAR(10))
+--INSERT INTO qt VALUES (1, 1, 'Alice'), (2, 2, 'bob'), (3, 3, 'carol'), (4, NULL, 'dave')
+--INSERT INTO qs VALUES (1, 1, 2, 'ALICE'), (2, 1, 3, 'zed'), (3, 2, 2, 'x'), (4, 2, NULL, 'y')
+SELECT id FROM qt WHERE a > ANY (SELECT c FROM qs WHERE grp = 1) ORDER BY id
+SELECT id FROM qt WHERE a >= ANY (SELECT c FROM qs WHERE grp = 1) ORDER BY id
+SELECT id FROM qt WHERE a < ANY (SELECT c FROM qs WHERE grp = 1) ORDER BY id
+SELECT id FROM qt WHERE a = ANY (SELECT c FROM qs WHERE grp = 1) ORDER BY id
+SELECT id FROM qt WHERE a = SOME (SELECT c FROM qs WHERE grp = 1) ORDER BY id
+SELECT id FROM qt WHERE a <> ANY (SELECT c FROM qs WHERE grp = 1) ORDER BY id
+SELECT id FROM qt WHERE a < ALL (SELECT c FROM qs WHERE grp = 1) ORDER BY id
+SELECT id FROM qt WHERE a <= ALL (SELECT c FROM qs WHERE grp = 1) ORDER BY id
+SELECT id FROM qt WHERE a > ALL (SELECT c FROM qs WHERE grp = 1) ORDER BY id
+SELECT id FROM qt WHERE a = ALL (SELECT c FROM qs WHERE grp = 1) ORDER BY id
+SELECT id FROM qt WHERE a <> ALL (SELECT c FROM qs WHERE grp = 1) ORDER BY id
+SELECT id FROM qt WHERE a = ANY (SELECT c FROM qs WHERE grp = 2) ORDER BY id
+SELECT id FROM qt WHERE a <> ALL (SELECT c FROM qs WHERE grp = 2) ORDER BY id
+SELECT id FROM qt WHERE a > ALL (SELECT c FROM qs WHERE grp = 2) ORDER BY id
+SELECT id FROM qt WHERE a < ALL (SELECT c FROM qs WHERE grp = 2) ORDER BY id
+SELECT id FROM qt WHERE a >= ANY (SELECT c FROM qs WHERE grp = 2) ORDER BY id
+SELECT id FROM qt WHERE NOT (a = ANY (SELECT c FROM qs WHERE grp = 2)) ORDER BY id
+SELECT id FROM qt WHERE a > ANY (SELECT c FROM qs WHERE grp = 9) ORDER BY id
+SELECT id FROM qt WHERE a > ALL (SELECT c FROM qs WHERE grp = 9) ORDER BY id
+SELECT id FROM qt WHERE a = ALL (SELECT c FROM qs WHERE grp = 9) ORDER BY id
+SELECT id FROM qt WHERE NOT (a > ANY (SELECT c FROM qs WHERE grp = 9)) ORDER BY id
+SELECT id FROM qt WHERE NOT (a > ANY (SELECT c FROM qs WHERE grp = 1)) ORDER BY id
+SELECT id FROM qt WHERE a = ANY (SELECT c FROM qs) ORDER BY id
+SELECT id FROM qt WHERE a <> ALL (SELECT c FROM qs WHERE c IS NOT NULL) ORDER BY id
+SELECT id FROM qt WHERE name = ANY (SELECT nm FROM qs) ORDER BY id
+SELECT id FROM qt WHERE name <> ALL (SELECT nm FROM qs) ORDER BY id
+SELECT id FROM qt WHERE a <= ANY (SELECT c FROM qs WHERE qs.grp = qt.id) ORDER BY id
+SELECT id FROM qt WHERE a <= ALL (SELECT c FROM qs WHERE qs.grp = qt.id) ORDER BY id
+SELECT id FROM qt WHERE a > ANY (SELECT c FROM qs WHERE grp = 1) OR id = 1 ORDER BY id
+SELECT id FROM qt WHERE a >= ALL (SELECT c FROM qs WHERE grp = 1) AND id < 4 ORDER BY id
+SELECT id, a > ALL (SELECT c FROM qs WHERE grp = 1) FROM qt ORDER BY id
+SELECT grp FROM qs GROUP BY grp HAVING grp < ALL (SELECT id FROM qt WHERE id > 1) ORDER BY grp
+UPDATE qt SET name = 'big' WHERE a >= ALL (SELECT c FROM qs WHERE grp = 1)
+SELECT id, name FROM qt ORDER BY id
+DELETE FROM qt WHERE a < ANY (SELECT c FROM qs WHERE grp = 1)
+SELECT id FROM qt ORDER BY id
+SELECT id FROM qt WHERE a > ANY (1, 2)
+SELECT id FROM qt WHERE a > ALL
+SELECT id FROM qt WHERE a IS ANY (SELECT c FROM qs)
+SELECT id FROM qt WHERE a > ANY (SELECT c FROM qs WHERE k = 1) + 1

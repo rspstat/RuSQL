@@ -571,6 +571,19 @@ Condition Parser::parse_pred_tail(ArithExpr left) {
         }
     }
 
+    // `x > ANY (SELECT ...)`, `x <> ALL (SELECT ...)`, `x = SOME (SELECT ...)`: the word only counts as a quantifier before a parenthesised SELECT
+    Quantifier quantifier = Quantifier::None;
+    if (const Token* q = peek(); q && peek_at_is(1, TokenKind::LParen) && peek_at_is(2, TokenKind::Select)) {
+        if (q->kind == TokenKind::All) {
+            quantifier = Quantifier::All;
+        } else if (q->kind == TokenKind::Ident) {
+            std::string word = q->text;
+            for (char& ch : word) ch = static_cast<char>(std::toupper(static_cast<unsigned char>(ch)));
+            if (word == "ANY" || word == "SOME") quantifier = Quantifier::Any;
+        }
+        if (quantifier != Quantifier::None) advance();
+    }
+
     ConditionValue value = [&]() -> ConditionValue {
         if (peek_is(TokenKind::LParen) && peek_at_is(1, TokenKind::Select)) {
             const std::size_t start = pos_;
@@ -580,7 +593,7 @@ Condition Parser::parse_pred_tail(ArithExpr left) {
             if (!peek_is(TokenKind::RParen)) throw ParseError("Expected ')' after subquery");
             advance();
             // `x > (SELECT AVG(v) FROM t) * 2`: the subquery goes on as a value in an expression
-            if (arith_continues_at(0)) {
+            if (quantifier == Quantifier::None && arith_continues_at(0)) {
                 pos_ = start;
                 return condition_value_of(parse_arith_expr());
             }
@@ -613,7 +626,9 @@ Condition Parser::parse_pred_tail(ArithExpr left) {
         return condition_value_of(parse_arith_expr());
     }();
 
-    return Condition{std::move(left), op, std::move(value)};
+    Condition result{std::move(left), op, std::move(value)};
+    result.quantifier = quantifier;
+    return result;
 }
 
 /// EXISTS / NOT EXISTS 뒤의 (SELECT ...) 파싱

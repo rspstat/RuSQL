@@ -576,12 +576,15 @@ void from_json(const nlohmann::json& j, InsertConflict& ic) {
 
 void to_json(nlohmann::json& j, const Condition& c) {
     j = nlohmann::json{{"left", c.left}, {"op", c.op}, {"value", c.value}};
+    if (c.quantifier != Quantifier::None) j["quantifier"] = c.quantifier == Quantifier::Any ? "Any" : "All";
 }
 
 void from_json(const nlohmann::json& j, Condition& c) {
     j.at("left").get_to(c.left);
     j.at("op").get_to(c.op);
     j.at("value").get_to(c.value);
+    c.quantifier = Quantifier::None;
+    if (j.contains("quantifier")) c.quantifier = j.at("quantifier").get<std::string>() == "Any" ? Quantifier::Any : Quantifier::All;
 }
 
 void to_json(nlohmann::json& j, const ConditionValue& cv) {
