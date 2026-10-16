@@ -112,6 +112,15 @@ std::optional<std::string> Parser::parse_table_alias() {
     return std::nullopt;
 }
 
+std::optional<std::string> Parser::parse_column_alias() {
+    if (peek_is(TokenKind::As)) {
+        advance();
+        return expect_alias_ident();
+    }
+    if (peek_is(TokenKind::Ident)) return expect_ident();
+    return std::nullopt;
+}
+
 /// 키워드도 식별자로 허용 (AS alias 위치에서 사용)
 std::string Parser::expect_alias_ident() {
     const Token* t = advance();

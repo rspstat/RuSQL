@@ -185,8 +185,7 @@ Statement Parser::parse_select() {
                                     (p->kind == TokenKind::Cast && peek_at_is(1, TokenKind::LParen));
                 if (always || function || (aggregate && select_item_continues())) {
                     ArithExpr expr = parse_value_expr();
-                    std::optional<std::string> alias;
-                    if (peek_is(TokenKind::As)) { advance(); alias = expect_alias_ident(); }
+                    std::optional<std::string> alias = parse_column_alias();
                     return SelectColumn(SelectColumn::Expr{std::move(expr), alias});
                 }
             }
@@ -276,8 +275,7 @@ Statement Parser::parse_select() {
                         else if constexpr (std::is_same_v<T, AggFunc::Max>) return WindowFunc::Max;
                         else return WindowFunc::Sum;
                     }, func.data);
-                    std::optional<std::string> alias;
-                    if (peek_is(TokenKind::As)) { advance(); alias = expect_alias_ident(); }
+                    std::optional<std::string> alias = parse_column_alias();
                     return SelectColumn(SelectColumn::WinFunc{win_func, std::optional<std::string>(agg_col), 0,
                                                               partition_by, win_order_by, alias, frame});
                 }
@@ -286,11 +284,9 @@ Statement Parser::parse_select() {
                 // returned); deliberately not supported combined with OVER (aggregate
                 // window functions), out of scope for this addition.
                 std::optional<CondExpr> filter_cond = parse_optional_filter_clause();
-                // AS 별칭
-                if (peek_is(TokenKind::As)) {
-                    advance();
-                    std::string alias = expect_alias_ident();
-                    return SelectColumn(SelectColumn::AggAlias{func, agg_col, alias, filter_cond});
+                // [AS] 별칭
+                if (auto alias = parse_column_alias()) {
+                    return SelectColumn(SelectColumn::AggAlias{func, agg_col, *alias, filter_cond});
                 }
                 return SelectColumn(SelectColumn::Agg{func, agg_col, filter_cond});
             }
@@ -332,10 +328,8 @@ Statement Parser::parse_select() {
                 advance();
                 AggFunc func = AggFunc(AggFunc::GroupConcat{separator, concat_distinct, std::move(concat_order)});
                 std::optional<CondExpr> filter_cond = parse_optional_filter_clause();
-                if (peek_is(TokenKind::As)) {
-                    advance();
-                    std::string alias = expect_alias_ident();
-                    return SelectColumn(SelectColumn::AggAlias{func, agg_col, alias, filter_cond});
+                if (auto alias = parse_column_alias()) {
+                    return SelectColumn(SelectColumn::AggAlias{func, agg_col, *alias, filter_cond});
                 }
                 return SelectColumn(SelectColumn::Agg{func, agg_col, filter_cond});
             }
@@ -420,8 +414,7 @@ Statement Parser::parse_select() {
                 std::optional<WindowFrame> frame = parse_window_frame();
                 if (!peek_is(TokenKind::RParen)) throw ParseError("Expected ')' after OVER clause");
                 advance();
-                std::optional<std::string> alias;
-                if (peek_is(TokenKind::As)) { advance(); alias = expect_alias_ident(); }
+                std::optional<std::string> alias = parse_column_alias();
                 return SelectColumn(SelectColumn::WinFunc{func, wf_col, wf_offset, partition_by, win_order_by, alias, frame});
             }
 
@@ -434,8 +427,7 @@ Statement Parser::parse_select() {
                 if (!peek_is(TokenKind::RParen)) throw ParseError("Expected ')' after scalar subquery");
                 advance();
                 if (!at_value_continuation()) {
-                    std::optional<std::string> alias;
-                    if (peek_is(TokenKind::As)) { advance(); alias = expect_alias_ident(); }
+                    std::optional<std::string> alias = parse_column_alias();
                     return SelectColumn(SelectColumn::Subquery{std::make_unique<Statement>(std::move(inner)), alias});
                 }
                 pos_ = start; // `(SELECT ...) + 1`, `(SELECT ...) > 3`: an expression (read below)
@@ -444,8 +436,7 @@ Statement Parser::parse_select() {
             // default: arithmetic expression, possibly Column/ColumnAlias/Expr/Cmp
             {
                 ArithExpr expr = parse_value_expr();
-                std::optional<std::string> alias;
-                if (peek_is(TokenKind::As)) { advance(); alias = expect_alias_ident(); }
+                std::optional<std::string> alias = parse_column_alias();
                 if (std::holds_alternative<ArithExpr::Col>(expr.data) && !alias) {
                     return SelectColumn(SelectColumn::Column{std::get<ArithExpr::Col>(expr.data).name});
                 }

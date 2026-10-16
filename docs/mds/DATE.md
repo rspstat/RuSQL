@@ -1710,6 +1710,20 @@ VS Code 스타일 탭 드래그 순서 변경(요청의 1번 항목)은 같은 �
 
 **한계**: `CREATE TABLE`·`TRUNCATE`·`DROP`은 빈 표를 쓰거나 파일을 지우므로 해당 없다. 복구 때(`recover_from_wal`)와 부팅 때 쓰는 `save_table`은 열린 트랜잭션이 없는 시점이다. `MERGE`와 다중 표 `UPDATE/DELETE`는 여전히 표 파일을 통째로 다시 쓰는 옛 방식이다.
 
+### 10월 16일 (두 번째) — select 항목의 별칭을 `AS` 없이 쓰면 파싱 오류이던 것 (R26)
+
+**왜 이 항목인가**: 사용자 "계속 고치기". 남은 한계를 옛 메모에서 고르는 대신, 새로 띄운 진짜 MySQL 8.4.9(임시 폴더, 3391 포트)와 DML 의미·범위 검사·산술 한계·다중 표 UPDATE/DELETE·INSERT 형태·부질의 형태 73문장을 비교했다(임시 코퍼스 `probe_dml.sql`). 20곳이 달랐고(둘 다 오류인 13곳은 제외), 원인별로 묶으면 다음과 같다: ① **select 항목의 별칭을 `AS` 없이 씀**(`COUNT(*) c`, `a x`, `ROW_NUMBER() OVER (…) r` — 이번 항목), ② `INSERT … SET col = 값` 없음, ③ **UNSIGNED 정수 범위**를 부호 있는 정수처럼 검사(`INT UNSIGNED`에 `-1`이 들어가고 `4294967295`는 거절되며 `u - 5`가 음수가 됨; MySQL은 1264/1690 오류), ④ `= ANY / ALL / SOME (서브쿼리)` 파싱 오류, ⑤ 행 생성자 `(a, b) IN (서브쿼리)`·`(1, 2) = (1, 2)` 파싱 오류, ⑥ `COUNT(DISTINCT a, b)` 파싱 오류, ⑦ `||`는 MySQL 기본 모드에서 OR인데 RuSQL은 문자열 연결, ⑧ UPDATE가 행을 표 끝으로 옮겨서 `ORDER BY` 없는 SELECT·윈도 함수의 출력 순서가 InnoDB의 기본키 순서와 다름(표준 SQL상 정해진 순서는 아님). ①이 가장 흔한 문체라 먼저 고쳤고 나머지는 `PLAN.md`에 후보로 적었다.
+
+**고친 것**: 파서에 `Parser::parse_column_alias()`를 두어 `[AS] 별칭`을 읽는다 — `AS`가 없으면 키워드가 아닌 일반 식별자만 별칭으로 본다. select 항목을 읽는 모든 길(스칼라 함수·`CASE`·`CAST`·집계·`FILTER`·`GROUP_CONCAT`·윈도 함수·스칼라 서브쿼리·산술식·열)이 같은 함수를 부르도록 일곱 곳을 바꿨다(앞에서는 `AS`만 받았다). 항목을 끝내는 낱말(`FROM`, `INTO`, `WHERE`, `UNION`, `LIMIT`, `FOR` …)은 키워드라 그대로 항목을 끝내고, 낱말이 둘 연달아 오면(`SELECT a b c`) 여전히 오류다.
+
+**검증**:
+- 신규 시험 `test_implicit_alias.cpp`: `AS`가 있는 문장과 없는 문장 19쌍(집계·GROUP BY/HAVING의 별칭·`COUNT(DISTINCT …)`·`GROUP_CONCAT`·열·`표.열`·산술식·함수·`CASE`·`CAST`·`ROW_NUMBER()`/`SUM() OVER`·스칼라 서브쿼리·FROM 없는 SELECT·파생 표·`UNION`)의 출력이 글자까지 같다, 열 이름이 실제로 별칭이다, 뷰·`INSERT … SELECT`에서도 되고, `SELECT a b c`와 `COUNT(*) c d`는 오류다.
+- 심은 버그 8종(일곱 군데를 `AS`만 받도록 되돌리기, 일반 식별자를 별칭으로 받는 줄 지우기) 8종 모두 잡힘.
+- 전체 시험 **704 케이스 / 1,480,170 assertions**을 Release 기본·강제(1,480,169) 양쪽으로 통과; 빌드 간 차분(앞 빌드 대비) 10시드 × 99질의 차이 0건; 기존 MySQL 비교 코퍼스 4개(collation·constraints·functions·tables)는 앞 빌드와 같은 결과(차이 5/7/6/8곳 그대로); 비교 코퍼스 73문장은 달랐던 곳이 21 → 20곳(`HAVING c > 1` 일치).
+- 하지 않은 것: Debug 전체 시험·크래시 퍼저·속도 비교(파서만 바뀌었고 실행 경로는 그대로).
+
+**한계**: `SELECT a 'x'`처럼 문자열 낱말을 별칭으로 쓰는 것과, 이름이 키워드인 낱말(`date`, `count` 같은 비예약어)을 `AS` 없이 별칭으로 쓰는 것은 받지 않는다(MySQL은 받음). `RETURNING` 목록과 `UPDATE … SET`은 그대로다.
+
 ## 요약: 1학기 대비 2학기에 달라진 것
 
 | 항목 | 1학기 (~2026년 6월) | 2학기 (2026년 7~8월) |

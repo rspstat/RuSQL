@@ -68,6 +68,7 @@ add_executable(engine_tests
     test_unique_probe.cpp
     test_uncommitted_unique.cpp
     test_cascade_rollback.cpp
+    test_implicit_alias.cpp
 )
 
 target_link_libraries(engine_tests PRIVATE engine_core)

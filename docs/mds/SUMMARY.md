@@ -9,7 +9,7 @@
 |---|---|
 | 무엇 | MySQL 호환 프로토콜을 쓰는 **자체 RDBMS 엔진**(C++20) + 데스크톱 클라이언트(Tauri/React) + Claude 연동(MCP) |
 | 1학기 → 2학기 | Rust 프로토타입 → **C++ 전면 재작성**, "기능 추가"에서 **정합성·동시성·성능을 실제로 파고드는 심화**로 |
-| 규모 | 테스트 **703 케이스 / 1,480,092 assertions** (2학기 초 218 케이스 / 3,080 assertions) |
+| 규모 | 테스트 **704 케이스 / 1,480,170 assertions** (2학기 초 218 케이스 / 3,080 assertions) |
 | 엔진 구성 | 파서 → 비용 기반 플래너 → 실행기, MVCC·행 단위 락·데드락 감지, redo 로그 기반 내구성, B+Tree·해시·복합 인덱스 |
 
 ## 2학기에 만든 것 (엔진)
@@ -138,8 +138,9 @@
 | `ROLLBACK TO SAVEPOINT`가 행을 둘로 만듦: 기본키를 바꾼 `UPDATE`를 되돌릴 때(새 버전을 옛 키로 찾음), 같은 행을 `UPDATE`한 뒤 `DELETE`한 것을 되돌릴 때(두 버전을 다 되살림) | 같은 기본키의 행이 둘 |
 | 자식 `UPDATE`·부모 `UPDATE/DELETE`·`REPLACE`·`INSERT IGNORE`·`ON DUPLICATE KEY UPDATE`·`INSERT … SELECT`가 문장마다 표 파일을 다시 쓰는 옛 방식(5~45 ms) | 해당 문장이 느림 |
 | **트랜잭션이 열려 있는 동안 표 파일이 쓰이면(체크포인트·다른 세션의 MERGE·DDL·자기 `ROLLBACK TO SAVEPOINT`) 미커밋 행이 파일에 적히고, ROLLBACK 뒤 크래시하면 되돌린 INSERT/UPDATE/DELETE가 되살아남**(외래키 크래시 퍼저 시드 6007이 찾음; 이제 파일에는 커밋된 것만 씀 — `ALTER TABLE`과 버퍼 풀의 flush·교체 경로도 같음) | 크래시 뒤 ROLLBACK한 변경이 보임 |
+| **select 항목의 별칭을 `AS` 없이 쓰면 파싱 오류**(`SELECT COUNT(*) c`, `SELECT a x`, `ROW_NUMBER() OVER (…) r`; 진짜 MySQL과 73문장을 비교하다 찾음) | 흔한 SQL 문체가 거절됨 |
 
-성능·정합성 작업의 커밋들에서 찾은 기존 버그는 모두 139건입니다(전체 목록은 `DATE.md`).
+성능·정합성 작업의 커밋들에서 찾은 기존 버그는 모두 140건입니다(전체 목록은 `DATE.md`).
 
 ## 한계와 앞으로
 

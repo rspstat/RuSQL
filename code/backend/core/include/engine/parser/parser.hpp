@@ -100,6 +100,8 @@ private:
     std::string expect_alias_ident();
     /// `[AS] alias` after a table name, if there is one
     std::optional<std::string> parse_table_alias();
+    /// `[AS] alias` after a select item (`COUNT(*) c`, `a x`, `UPPER(s) AS u`), if there is one: without AS only a plain identifier is an alias
+    std::optional<std::string> parse_column_alias();
     std::string expect_col_ref();
     std::string expect_any_name();
     std::string expect_any_ident();
