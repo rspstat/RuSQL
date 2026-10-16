@@ -480,7 +480,7 @@ StringResult Executor::exec_alter(SharedDatabase& s, const std::string& table, A
             for (auto& row : it->second) row[new_col.name] = fill_val;
         }
         s.disk.save_schema(table, *s.catalog.get_table(table));
-        s.disk.save_table(table, s.tables.at(table));
+        s.buffer_pool.write_through(table, s.tables.at(table), s.disk); // (committed rows only: see BufferPool::write_through)
         return StringResult::Ok("Column '" + new_col.name + "' added to '" + table + "'.");
     }
 
@@ -493,7 +493,7 @@ StringResult Executor::exec_alter(SharedDatabase& s, const std::string& table, A
             for (auto& row : it->second) row.erase(v->name);
         }
         s.disk.save_schema(table, *s.catalog.get_table(table));
-        s.disk.save_table(table, s.tables.at(table));
+        s.buffer_pool.write_through(table, s.tables.at(table), s.disk); // (committed rows only: see BufferPool::write_through)
         return StringResult::Ok("Column '" + v->name + "' dropped from '" + table + "'.");
     }
 
@@ -549,7 +549,7 @@ StringResult Executor::exec_alter(SharedDatabase& s, const std::string& table, A
         }
 
         s.disk.save_schema(table, *s.catalog.get_table(table));
-        s.disk.save_table(table, s.tables.at(table));
+        s.buffer_pool.write_through(table, s.tables.at(table), s.disk); // (committed rows only: see BufferPool::write_through)
         s.buffer_pool.write_page(table, s.tables.at(table));
         return StringResult::Ok("Column '" + v->from + "' renamed to '" + v->to + "' in '" + table + "'.");
     }
@@ -709,7 +709,7 @@ StringResult Executor::exec_alter(SharedDatabase& s, const std::string& table, A
         persist_index_meta(s);
 
         s.disk.save_schema(v->to, *s.catalog.get_table(v->to));
-        if (auto it = s.tables.find(v->to); it != s.tables.end()) s.disk.save_table(v->to, it->second);
+        if (auto it = s.tables.find(v->to); it != s.tables.end()) s.buffer_pool.write_through(v->to, it->second, s.disk);
         s.disk.delete_table(table);
 
         return StringResult::Ok("Table '" + table + "' renamed to '" + v->to + "'.");

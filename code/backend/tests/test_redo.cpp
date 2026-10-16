@@ -623,3 +623,61 @@ TEST_CASE("Redo: a table flushed in the middle of an open transaction does not k
         }
     }
 }
+
+// ALTER TABLE rewrites the table file itself (the columns changed in every row). Another session's transaction that is still open must not get its rows into that file:
+// after its ROLLBACK and a crash the file would bring them back.
+TEST_CASE("Redo: an ALTER TABLE in the middle of another session's transaction does not put its rows in the file", "[redo][durability]") {
+    struct Alter {
+        const char* name;
+        std::vector<std::string> statements;
+        std::string table, column;
+    };
+    const std::vector<Alter> alters = {
+        {"ADD COLUMN", {"ALTER TABLE t ADD COLUMN c INT"}, "t", "v"},
+        {"DROP COLUMN", {"ALTER TABLE t ADD COLUMN c INT", "ALTER TABLE t DROP COLUMN c"}, "t", "v"},
+        {"RENAME COLUMN", {"ALTER TABLE t RENAME COLUMN v TO w"}, "t", "w"},
+        {"RENAME TO", {"ALTER TABLE t RENAME TO t2"}, "t2", "v"},
+    };
+    for (auto& alter : alters) {
+        for (int open_at_crash = 0; open_at_crash < 2; open_at_crash++) {
+            INFO(alter.name << (open_at_crash ? ", transaction open at the crash" : ", transaction rolled back"));
+            TempDataDir dir("redo_alter_mid_txn");
+            auto dump = [&](Executor& ex) {
+                auto r = ex.execute_sql("SELECT id, " + alter.column + " FROM " + alter.table + " ORDER BY id");
+                REQUIRE(r.is_ok());
+                std::string out, line;
+                std::istringstream in(r.value());
+                while (std::getline(in, line)) {
+                    if (line.empty() || line[0] != '|') continue;
+                    std::istringstream cs(line);
+                    std::string cell, joined;
+                    int cells = 0;
+                    while (std::getline(cs, cell, '|')) {
+                        cell.erase(0, cell.find_first_not_of(" \t\r"));
+                        cell.erase(cell.find_last_not_of(" \t\r") + 1);
+                        if (cell.empty()) continue;
+                        joined += (cells++ ? "=" : "") + cell;
+                    }
+                    if (cells == 2 && std::isdigit(static_cast<unsigned char>(joined[0]))) out += joined + ";";
+                }
+                return out;
+            };
+            {
+                Executor a(dir.path);
+                setup(a);
+                for (int i = 1; i <= 3; i++) REQUIRE(a.execute_sql("INSERT INTO t VALUES (" + std::to_string(i) + "," + std::to_string(i * 10) + ")").is_ok());
+                Executor b = Executor::new_session(a.get_shared());
+                REQUIRE(b.execute_sql("USE d").is_ok());
+                REQUIRE(a.execute_sql("BEGIN").is_ok());
+                REQUIRE(a.execute_sql("INSERT INTO t VALUES (10,10)").is_ok());
+                REQUIRE(a.execute_sql("UPDATE t SET v = 100 WHERE id = 1").is_ok());
+                REQUIRE(a.execute_sql("DELETE FROM t WHERE id = 2").is_ok());
+                for (auto& sql : alter.statements) REQUIRE(b.execute_sql(sql).is_ok());
+                if (!open_at_crash) REQUIRE(a.execute_sql("ROLLBACK").is_ok()); // (nothing may follow: a later flush would hide the fault)
+            } // crash
+            Executor ex(dir.path);
+            REQUIRE(ex.execute_sql("USE d").is_ok());
+            REQUIRE(dump(ex) == "1=10;2=20;3=30;");
+        }
+    }
+}

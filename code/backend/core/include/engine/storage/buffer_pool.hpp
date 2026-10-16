@@ -68,6 +68,7 @@ private:
     std::function<std::unordered_set<std::uint64_t>()> open_transactions_;
 
     void insert_page(std::string table_name, std::vector<Row> rows, bool is_dirty, const DiskManager* disk);
+    void save_committed(const DiskManager& disk, const std::string& table_name, const std::vector<Row>& rows, std::uint64_t keep_txn);
 };
 
 } // namespace engine

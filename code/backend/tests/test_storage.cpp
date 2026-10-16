@@ -1,6 +1,7 @@
 #include <filesystem>
 #include <fstream>
 #include <thread>
+#include <unordered_set>
 #include <vector>
 
 #include "catch.hpp"
@@ -266,4 +267,41 @@ TEST_CASE("DiskManager generic sys-json save/load round trip and legacy-path mig
     REQUIRE_FALSE(fs::exists("disk_test_data3/_roles.json"));
 
     fs::remove_all("disk_test_data3");
+}
+
+// The file holds what the transactions that are still open have not done: the versions they made are left out and the ones they ended are written as live. Every way the
+// pool writes a table -- write_through, flush_all of a cached page, the eviction of a dirty page -- goes through the same filter; the committing transaction keeps its own rows.
+TEST_CASE("BufferPool writes committed rows only while transactions are open", "[storage][buffer_pool]") {
+    fs::remove_all("bp_committed_data");
+    DiskManager disk("bp_committed_data");
+    BufferPool pool(1); // capacity 1: the second cached page evicts the first
+    pool.set_open_transactions([] { return std::unordered_set<std::uint64_t>{5, 7}; });
+    auto rows = [] {
+        return std::vector<Row>{
+            make_row({{"id", "1"}, {"_xmin", "2"}, {"_xmax", "0"}}),  // committed, live
+            make_row({{"id", "2"}, {"_xmin", "2"}, {"_xmax", "5"}}),  // ended by open transaction 5
+            make_row({{"id", "3"}, {"_xmin", "5"}, {"_xmax", "0"}}),  // made by open transaction 5
+            make_row({{"id", "4"}, {"_xmin", "5"}, {"_xmax", "5"}}),  // made and ended by it
+            make_row({{"id", "5"}, {"_xmin", "3"}, {"_xmax", "4"}}),  // ended by a committed transaction
+            make_row({{"id", "6"}, {"_xmin", "7"}, {"_xmax", "0"}}),  // made by open transaction 7
+        };
+    };
+    auto ids_and_xmax = [&](const std::string& table) {
+        std::string out;
+        for (auto& r : disk.load_table(table)) out += r.at("id") + ":" + r.at("_xmax") + " ";
+        return out;
+    };
+    const std::string want = "1:0 2:0 5:4 ";
+    pool.write_through("w", rows(), disk);
+    REQUIRE(ids_and_xmax("w") == want);
+    pool.write_through("k", rows(), disk, 5); // the transaction being committed keeps its own rows
+    REQUIRE(ids_and_xmax("k") == "1:0 2:5 3:0 4:5 5:4 "); // (transaction 7, still open, has its row left out)
+    pool.write_page("f", rows());
+    pool.flush_all(disk);
+    REQUIRE(ids_and_xmax("f") == want);
+    pool.write_page("e1", rows());
+    disk.save_table("g", {make_row({{"id", "9"}})});
+    pool.get_page("g", disk); // a miss: evicts the dirty page e1 and writes it (write_page itself drops a dirty page without writing it)
+    REQUIRE(ids_and_xmax("e1") == want);
+    fs::remove_all("bp_committed_data");
 }

@@ -62,26 +62,31 @@ std::uint64_t txn_id_of(const Row& row, const char* field) {
 }
 } // namespace
 
-void BufferPool::write_through(const std::string& table_name, const std::vector<Row>& rows, const DiskManager& disk, std::uint64_t keep_txn) {
+// Writes `rows` as the table's file, leaving out what the transactions that are still open have done to them. Called with mutex_ held.
+void BufferPool::save_committed(const DiskManager& disk, const std::string& table_name, const std::vector<Row>& rows, std::uint64_t keep_txn) {
     std::unordered_set<std::uint64_t> open;
     if (open_transactions_) open = open_transactions_();
     open.erase(keep_txn);
-    std::lock_guard<std::mutex> lock(mutex_);
     const bool affected = !open.empty() && std::any_of(rows.begin(), rows.end(), [&](const Row& r) {
         return open.count(txn_id_of(r, "_xmin")) || open.count(txn_id_of(r, "_xmax"));
     });
-    if (affected) {
-        std::vector<Row> committed;
-        committed.reserve(rows.size());
-        for (const Row& r : rows) {
-            if (open.count(txn_id_of(r, "_xmin"))) continue; // created by a transaction that has not committed
-            committed.push_back(r);
-            if (open.count(txn_id_of(r, "_xmax"))) committed.back()["_xmax"] = "0"; // ended by one
-        }
-        disk.save_table(table_name, committed);
-    } else {
+    if (!affected) {
         disk.save_table(table_name, rows);
+        return;
     }
+    std::vector<Row> committed;
+    committed.reserve(rows.size());
+    for (const Row& r : rows) {
+        if (open.count(txn_id_of(r, "_xmin"))) continue; // created by a transaction that has not committed
+        committed.push_back(r);
+        if (open.count(txn_id_of(r, "_xmax"))) committed.back()["_xmax"] = "0"; // ended by one
+    }
+    disk.save_table(table_name, committed);
+}
+
+void BufferPool::write_through(const std::string& table_name, const std::vector<Row>& rows, const DiskManager& disk, std::uint64_t keep_txn) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    save_committed(disk, table_name, rows, keep_txn);
     cache_.erase(table_name);
 }
 
@@ -94,7 +99,7 @@ void BufferPool::flush_all(const DiskManager& disk) {
     for (auto& name : dirty) {
         auto it = cache_.find(name);
         if (it != cache_.end()) {
-            disk.save_table(name, it->second.first.rows);
+            save_committed(disk, name, it->second.first.rows, 0);
             it->second.first.is_dirty = false;
         }
     }
@@ -135,7 +140,7 @@ void BufferPool::insert_page(std::string table_name, std::vector<Row> rows, bool
             auto it = cache_.find(evict_key);
             if (it != cache_.end()) {
                 if (it->second.first.is_dirty && disk) {
-                    disk->save_table(evict_key, it->second.first.rows);
+                    save_committed(*disk, evict_key, it->second.first.rows, 0);
                 }
                 cache_.erase(it);
             }

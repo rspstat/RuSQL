@@ -1692,6 +1692,24 @@ VS Code 스타일 탭 드래그 순서 변경(요청의 1번 항목)은 같은 �
 
 **한계**: 위 DDL 경로. 캐시는 메모리에 키마다 문자열 하나씩을 두는 파생 캐시라 큰 표에서는 메모리를 쓴다(R22와 같음). MERGE와 다중 표 UPDATE/DELETE는 여전히 표 파일을 통째로 다시 쓰는 옛 방식이다.
 
+### 10월 16일 — `ALTER TABLE`과 버퍼 풀의 flush·교체도 열린 트랜잭션의 행을 표 파일에 적던 것 (R25)
+
+**왜 이 항목인가**: 사용자 "계속 같은 진행방식으로". R24가 "남은 한계"로 적어 둔 것 — 표 파일을 `BufferPool::write_through`가 아니라 `DiskManager::save_table`로 직접 쓰는 곳 — 을 닫는다. R24는 체크포인트·다른 세션의 flush 문장·자기 `ROLLBACK TO SAVEPOINT` 앞 체크포인트가 쓰는 파일에서 열린 트랜잭션의 미커밋 버전을 걸렀지만, 같은 일이 두 군데에서 남아 있었다.
+
+**고친 것 (정합성)**
+- **`ALTER TABLE`** 네 가지(`ADD COLUMN`, `DROP COLUMN`, `RENAME COLUMN`, `RENAME TO`)가 열의 모양이 바뀐 표 전체를 `save_table`로 직접 적었다. 다른 세션의 트랜잭션이 열려 있으면 그 트랜잭션의 미커밋 행이 파일에 들어가고, 그 트랜잭션이 ROLLBACK한 뒤 크래시하면 되살아났다(R24 이전부터 있던 기존 문제, 같은 원인). 네 곳 모두 `write_through`를 거치게 했다.
+- **버퍼 풀의 다른 쓰기 두 길** — `flush_all`(`CHECKPOINT` 문장·자동 체크포인트)과 더러운 쪽 교체(`get_page`가 밀어내는 더러운 쪽)도 `save_table`을 직접 불렀다. 이제 세 길(`write_through`, `flush_all`, 교체)이 한 함수 `BufferPool::save_committed`를 거친다.
+- 참고로 발견만 한 것(고치지 않음): `BufferPool::write_page`가 새 쪽을 넣으며 더러운 옛 쪽을 밀어낼 때는 디스크를 받지 못해(`insert_page(…, nullptr)`) 그 쪽을 쓰지 않고 버린다. 이 길은 CTE·별칭 같은 가상 표 쪽을 주로 다루고, 실제 표(`RENAME COLUMN`)는 바로 앞에서 파일을 이미 썼으므로 잃는 데이터는 없다.
+
+**검증**:
+- 신규 시험: `test_storage.cpp` "BufferPool writes committed rows only while transactions are open"(`write_through`·커밋하는 트랜잭션의 `keep_txn`·`flush_all`·더러운 쪽 교체를, 열린 트랜잭션 5와 7이 만들거나 끝낸 행·둘 다 한 행·커밋된 트랜잭션이 끝낸 행으로), `test_redo.cpp` "an ALTER TABLE in the middle of another session's transaction …"(`ALTER` 네 가지 × 트랜잭션이 ROLLBACK됨/크래시 때 열려 있음, 끝 문장 뒤에는 아무것도 하지 않음).
+- 심은 버그 6종(네 `ALTER` 곳, `flush_all`, 교체를 각각 원래대로 되돌림) 6종 모두 잡힘.
+- 전체 시험 **703 케이스 / 1,480,092 assertions**을 Release 기본·강제 양쪽과 **Debug 기본(캐시 점검 모드)·강제 양쪽**으로 통과(Debug는 1,480,092 / 1,480,093); `[random]` 40시드·`[unique_claim]`·`[unique_probe]`·`[cascade_rollback]`을 캐시 점검 모드로 34 케이스 556,351 assertions 통과. Release 기본은 처음 한 번 `test_unique_claims.cpp`의 시간 재는 단언 두 개(`t.ms >= 150`이 141, 아무것도 기다리지 않는 INSERT가 150 ms 미만이어야 하는데 315)가 Debug 빌드·퍼저와 함께 돌아 CPU가 바쁠 때 어긋났고, 그 시험만 다시 돌리면 통과, 조용한 기계에서 전체를 다시 돌려 통과(코드 경로와 무관한 부하 탓).
+- 크래시 퍼저: 외래키 퍼저 90라운드(시드 6000~6089, 캐시 점검 모드)·일반 퍼저 60라운드·동시성 퍼저 40라운드(확인한 행 14,271) 불일치 0, `verify_writes.py` 시드 1~8 위반 0.
+- 하지 않은 것: 빌드 간 차분(비교할 이전 빌드가 임시 폴더 정리로 사라짐; 이 변경은 읽기 경로를 건드리지 않음)·속도 비교(`ALTER`와 flush 경로만 닿는 변경).
+
+**한계**: `CREATE TABLE`·`TRUNCATE`·`DROP`은 빈 표를 쓰거나 파일을 지우므로 해당 없다. 복구 때(`recover_from_wal`)와 부팅 때 쓰는 `save_table`은 열린 트랜잭션이 없는 시점이다. `MERGE`와 다중 표 `UPDATE/DELETE`는 여전히 표 파일을 통째로 다시 쓰는 옛 방식이다.
+
 ## 요약: 1학기 대비 2학기에 달라진 것
 
 | 항목 | 1학기 (~2026년 6월) | 2학기 (2026년 7~8월) |
