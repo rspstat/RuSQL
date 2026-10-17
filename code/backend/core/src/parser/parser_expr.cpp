@@ -166,7 +166,121 @@ CondExpr Parser::parse_not_expr() {
 }
 
 /// Handles parenthesized sub-expressions or single predicates
+bool Parser::row_constructor_ahead() const {
+    if (!peek_is(TokenKind::LParen) || peek_at_is(1, TokenKind::Select)) return false;
+    int depth = 0;
+    bool comma = false;
+    std::size_t i = pos_;
+    for (; i < tokens_.size(); i++) {
+        const TokenKind k = tokens_[i].kind;
+        if (k == TokenKind::LParen) depth++;
+        else if (k == TokenKind::RParen && --depth == 0) break;
+        else if (k == TokenKind::Comma && depth == 1) comma = true;
+    }
+    if (!comma || i + 1 >= tokens_.size()) return false;
+    const Token& after = tokens_[i + 1];
+    switch (after.kind) {
+        case TokenKind::Eq: case TokenKind::Ne: case TokenKind::Gt: case TokenKind::Lt: case TokenKind::Gte: case TokenKind::Lte: case TokenKind::In:
+            return true;
+        case TokenKind::Not:
+            return i + 2 < tokens_.size() && tokens_[i + 2].kind == TokenKind::In;
+        default:
+            return false;
+    }
+}
+
+/// `(v1, v2, ...)`
+std::vector<ArithExpr> Parser::parse_row() {
+    if (!peek_is(TokenKind::LParen)) throw ParseError("Expected '(' to start a row");
+    advance();
+    std::vector<ArithExpr> items;
+    for (;;) {
+        items.push_back(parse_arith_expr());
+        if (peek_is(TokenKind::Comma)) { advance(); continue; }
+        if (!peek_is(TokenKind::RParen)) throw ParseError("Expected ',' or ')' in a row");
+        advance();
+        return items;
+    }
+}
+
+/// A row compared with a row: `(a, b) = (1, 2)` is `a = 1 AND b = 2`, `<>` is `a <> 1 OR b <> 2`, `<` goes by the first values that differ
+/// (`a < 1 OR (a = 1 AND b < 2)`) -- the same answers as MySQL's, NULLs included (a NULL only matters when the values before it do not decide).
+/// `IN` a list of rows is an OR of row equalities; `IN (SELECT ...)` stays one condition on a ROW(...) the executor reads.
+CondExpr Parser::parse_row_condition() {
+    std::vector<ArithExpr> lhs = parse_row();
+    const bool negated = peek_is(TokenKind::Not);
+    if (negated) advance();
+    auto equal_rows = [&](const std::vector<ArithExpr>& rhs) {
+        std::optional<CondExpr> all;
+        for (std::size_t i = 0; i < lhs.size(); i++) {
+            CondExpr one = leaf(lhs[i], Operator::Eq, condition_value_of(rhs[i]));
+            all = all ? both(std::move(*all), std::move(one)) : std::move(one);
+        }
+        return std::move(*all);
+    };
+    if (peek_is(TokenKind::In)) {
+        advance();
+        if (!peek_is(TokenKind::LParen)) throw ParseError("Expected '(' after IN");
+        if (peek_at_is(1, TokenKind::Select)) {
+            advance(); // (
+            advance(); // SELECT
+            Statement sub = parse_select();
+            if (!peek_is(TokenKind::RParen)) throw ParseError("Expected ')' after subquery");
+            advance();
+            return leaf(ArithExpr(ArithExpr::Func{"ROW", std::move(lhs)}), negated ? Operator::NotIn : Operator::In,
+                        ConditionValue(ConditionValue::Subquery{std::make_unique<Statement>(std::move(sub))}));
+        }
+        advance(); // (
+        std::optional<CondExpr> any;
+        for (;;) {
+            std::vector<ArithExpr> rhs = parse_row();
+            if (rhs.size() != lhs.size()) throw ParseError("Operand should contain " + std::to_string(lhs.size()) + " column(s)");
+            CondExpr one = equal_rows(rhs);
+            any = any ? either(std::move(*any), std::move(one)) : std::move(one);
+            if (peek_is(TokenKind::Comma)) { advance(); continue; }
+            if (!peek_is(TokenKind::RParen)) throw ParseError("Expected ',' or ')' in IN list of rows");
+            advance();
+            break;
+        }
+        return negated ? negation(std::move(*any)) : std::move(*any);
+    }
+    if (negated) throw ParseError("Expected IN after NOT");
+    const Token* t = advance();
+    if (!t) throw ParseError("Expected comparison operator");
+    Operator op;
+    switch (t->kind) {
+        case TokenKind::Eq:  op = Operator::Eq; break;
+        case TokenKind::Ne:  op = Operator::Ne; break;
+        case TokenKind::Gt:  op = Operator::Gt; break;
+        case TokenKind::Lt:  op = Operator::Lt; break;
+        case TokenKind::Gte: op = Operator::Gte; break;
+        case TokenKind::Lte: op = Operator::Lte; break;
+        default: throw ParseError("Expected comparison operator");
+    }
+    if (!peek_is(TokenKind::LParen)) throw ParseError("Expected '(' to start the row to compare with");
+    if (peek_at_is(1, TokenKind::Select)) throw ParseError("A row compared with a subquery is not supported; use IN (SELECT ...)");
+    std::vector<ArithExpr> rhs = parse_row();
+    if (rhs.size() != lhs.size()) throw ParseError("Operand should contain " + std::to_string(lhs.size()) + " column(s)");
+    if (op == Operator::Eq) return equal_rows(rhs);
+    const std::size_t n = lhs.size();
+    if (op == Operator::Ne) {
+        std::optional<CondExpr> any;
+        for (std::size_t i = 0; i < n; i++) {
+            CondExpr one = leaf(lhs[i], Operator::Ne, condition_value_of(rhs[i]));
+            any = any ? either(std::move(*any), std::move(one)) : std::move(one);
+        }
+        return std::move(*any);
+    }
+    const Operator strict = (op == Operator::Lt || op == Operator::Lte) ? Operator::Lt : Operator::Gt;
+    CondExpr result = leaf(lhs[n - 1], op, condition_value_of(rhs[n - 1]));
+    for (std::size_t i = n - 1; i-- > 0;) {
+        result = either(leaf(lhs[i], strict, condition_value_of(rhs[i])), both(leaf(lhs[i], Operator::Eq, condition_value_of(rhs[i])), std::move(result)));
+    }
+    return result;
+}
+
 CondExpr Parser::parse_primary_cond() {
+    if (row_constructor_ahead()) return parse_row_condition();
     if (peek_is(TokenKind::LParen) && !peek_at_is(1, TokenKind::Select)) {
         // `(a = 1 OR b = 2)` groups conditions, but `(a + b) * 2 > 10` starts with a parenthesised VALUE: the group is tried first and, when
         // what follows it goes on with an expression (or it is not a group of conditions at all), the whole is read as one predicate

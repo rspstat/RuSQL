@@ -125,6 +125,10 @@ private:
     CondExpr parse_and_expr();
     CondExpr parse_not_expr();
     CondExpr parse_primary_cond();
+    /// `(a, b) = (1, 2)`, `(a, b) IN ((1, 2), (3, 4))`, `(a, b) NOT IN (SELECT x, y ...)`: a parenthesised list of two or more values followed by a comparison or IN
+    bool row_constructor_ahead() const;
+    std::vector<ArithExpr> parse_row();
+    CondExpr parse_row_condition();
     /// one predicate: EXISTS, `expr OP value`, `expr IS NULL`, ..., or (no operator) an expression that is true when it is not NULL and not 0
     CondExpr parse_pred_expr();
     /// the operator and right side after an expression: `> 5`, `IS [NOT] NULL|TRUE|FALSE`, `[NOT] BETWEEN`, `[NOT] IN`, `[NOT] LIKE`, REGEXP

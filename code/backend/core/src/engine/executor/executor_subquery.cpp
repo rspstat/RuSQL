@@ -113,6 +113,41 @@ Executor::Tri Executor::eval_single_with_subquery(SharedDatabase& s, const Row& 
         return tri(cond.op == Operator::Exists ? has_rows : !has_rows);
     }
 
+    // (a, b) [NOT] IN (SELECT x, y ...): a row is in when every pair of its values is equal; a NULL pair is UNKNOWN unless another pair is FALSE, and
+    // IN is TRUE for some row that is, else UNKNOWN when one was open, else FALSE (NOT IN the other way round; no row at all: IN FALSE, NOT IN TRUE)
+    if (auto* row_left = std::get_if<ArithExpr::Func>(&cond.left.data); row_left && row_left->name == "ROW" && (cond.op == Operator::In || cond.op == Operator::NotIn)) {
+        const std::size_t width = row_left->args.size();
+        std::vector<std::string> mine;
+        std::vector<ValueClass> classes;
+        for (const ArithExpr& arg : row_left->args) {
+            mine.push_back(eval_arith_exact(row, arg));
+            classes.push_back(class_of_expr(arg));
+        }
+        const std::vector<std::string>* cells = nullptr;
+        std::vector<std::string> fresh_cells;
+        if (!correlated) {
+            if (auto it = subquery_scalar_cache_.find(cache_key); it != subquery_scalar_cache_.end()) cells = &it->second.values;
+        }
+        if (!cells) {
+            fresh_cells = extract_cells_from_output(run_subquery(s, original, row, correlated), width);
+            if (!correlated) subquery_scalar_cache_[cache_key].values = fresh_cells;
+            cells = &fresh_cells;
+        }
+        Tri in = Tri::False;
+        for (std::size_t r = 0; r + width <= cells->size() && in != Tri::True; r += width) {
+            Tri same = Tri::True;
+            for (std::size_t i = 0; i < width && same != Tri::False; i++) {
+                const std::string& other = (*cells)[r + i];
+                if (mine[i] == EXECUTOR_NULL_VALUE || other == EXECUTOR_NULL_VALUE) same = Tri::Unknown;
+                else if (compare_classed(classes[i], classes[i], mine[i], other) != 0) same = Tri::False;
+            }
+            if (same == Tri::True) in = Tri::True;
+            else if (same == Tri::Unknown) in = Tri::Unknown;
+        }
+        if (cond.op == Operator::In) return in;
+        return in == Tri::True ? Tri::False : (in == Tri::False ? Tri::True : Tri::Unknown);
+    }
+
     std::string val = eval_arith_exact(row, cond.left);
     const bool left_null = val == EXECUTOR_NULL_VALUE;
     const bool is_in = cond.op == Operator::In || cond.op == Operator::NotIn;
@@ -213,6 +248,37 @@ Executor::Tri Executor::eval_single_with_subquery(SharedDatabase& s, const Row& 
         default:
             return Tri::False;
     }
+}
+
+// The cells of every row of a result table, row after row, `width` to a row (a subquery that gives another number of columns is an error, MySQL 1241).
+std::vector<std::string> Executor::extract_cells_from_output(const std::string& output, std::size_t width) const {
+    std::vector<std::string> cells;
+    int separators = 0;
+    std::size_t pos = 0;
+    while (pos <= output.size()) {
+        const auto nl = output.find('\n', pos);
+        const std::string line = nl == std::string::npos ? output.substr(pos) : output.substr(pos, nl - pos);
+        if (!line.empty() && line[0] == '+') {
+            separators++;
+        } else if (!line.empty() && line[0] == '|' && separators >= 2) {
+            std::vector<std::string> row;
+            std::size_t start = 1;
+            while (start <= line.size()) {
+                const auto bar = line.find('|', start);
+                if (bar == std::string::npos) break;
+                std::string cell = line.substr(start, bar - start);
+                const auto a = cell.find_first_not_of(' ');
+                cell = a == std::string::npos ? std::string() : cell.substr(a, cell.find_last_not_of(' ') - a + 1);
+                row.push_back(std::move(cell));
+                start = bar + 1;
+            }
+            if (row.size() != width) throw StatementError("Operand should contain " + std::to_string(width) + " column(s)");
+            for (auto& cell : row) cells.push_back(std::move(cell));
+        }
+        if (nl == std::string::npos) break;
+        pos = nl + 1;
+    }
+    return cells;
 }
 
 std::vector<std::string> Executor::extract_values_from_output(const std::string& output) const {

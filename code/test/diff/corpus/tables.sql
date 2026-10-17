@@ -216,3 +216,38 @@ SELECT id FROM qt WHERE a > ANY (1, 2)
 SELECT id FROM qt WHERE a > ALL
 SELECT id FROM qt WHERE a IS ANY (SELECT c FROM qs)
 SELECT id FROM qt WHERE a > ANY (SELECT c FROM qs WHERE k = 1) + 1
+# row constructors: (a, b) = (1, 2), < <= > >= <> by the first values that differ, IN a list of rows or a subquery of rows, NULLs
+--CREATE TABLE rt (id INT PRIMARY KEY, a INT, b INT, n VARCHAR(5))
+--CREATE TABLE rs (k INT PRIMARY KEY, x INT, y INT, m VARCHAR(5))
+--INSERT INTO rt VALUES (1, 1, 1, 'A'), (2, 1, 2, 'b'), (3, 2, 1, 'C'), (4, 2, 2, 'd'), (5, NULL, 1, 'e'), (6, 1, NULL, 'f')
+--INSERT INTO rs VALUES (1, 1, 1, 'a'), (2, 2, 2, 'B'), (3, NULL, 3, 'z')
+SELECT id FROM rt WHERE (a, b) = (1, 2) ORDER BY id
+SELECT id FROM rt WHERE (a, b) <> (1, 2) ORDER BY id
+SELECT id FROM rt WHERE (a, b) < (2, 1) ORDER BY id
+SELECT id FROM rt WHERE (a, b) <= (2, 1) ORDER BY id
+SELECT id FROM rt WHERE (a, b) > (1, 1) ORDER BY id
+SELECT id FROM rt WHERE (a, b) >= (1, 1) ORDER BY id
+SELECT id FROM rt WHERE (a, b, id) = (2, 2, 4) ORDER BY id
+SELECT id FROM rt WHERE (a, b, id) < (2, 2, 4) ORDER BY id
+SELECT id FROM rt WHERE (a, b) = (1 + 1, 4 / 2) ORDER BY id
+SELECT id FROM rt WHERE (a, b) IN ((1, 1), (2, 2)) ORDER BY id
+SELECT id FROM rt WHERE (a, b) NOT IN ((1, 1), (2, 2)) ORDER BY id
+SELECT id FROM rt WHERE (a, b) IN ((1, NULL)) ORDER BY id
+SELECT id FROM rt WHERE (a, b) NOT IN ((1, NULL)) ORDER BY id
+SELECT id FROM rt WHERE id > 1 AND (a, b) = (2, 2) ORDER BY id
+SELECT id FROM rt WHERE (a, b) = (1, 2) OR id = 6 ORDER BY id
+SELECT id FROM rt WHERE NOT ((a, b) = (1, 2)) ORDER BY id
+SELECT id FROM rt WHERE (a, b) IN (SELECT x, y FROM rs) ORDER BY id
+SELECT id FROM rt WHERE (a, b) NOT IN (SELECT x, y FROM rs) ORDER BY id
+SELECT id FROM rt WHERE (a, b) IN (SELECT x, y FROM rs WHERE x > 9) ORDER BY id
+SELECT id FROM rt WHERE (a, b) NOT IN (SELECT x, y FROM rs WHERE x > 9) ORDER BY id
+SELECT id FROM rt WHERE (a, b) IN (SELECT x, y FROM rs WHERE rs.x = rt.a) ORDER BY id
+SELECT id FROM rt WHERE (n, a) IN (SELECT m, x FROM rs) ORDER BY id
+SELECT id FROM rt WHERE (a, b) IN (SELECT x, y FROM rs WHERE k < 3) OR id = 5 ORDER BY id
+SELECT id FROM rt WHERE (a, b) IN (SELECT x FROM rs)
+SELECT id FROM rt WHERE (a, b) = (1, 2, 3)
+SELECT id FROM rt WHERE (a, b) IN ((1, 2), (3))
+UPDATE rt SET n = 'hit' WHERE (a, b) IN (SELECT x, y FROM rs)
+SELECT id FROM rt WHERE n = 'hit' ORDER BY id
+DELETE FROM rt WHERE (a, b) IN ((1, 1), (2, 2))
+SELECT id FROM rt ORDER BY id

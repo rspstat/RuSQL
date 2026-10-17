@@ -961,6 +961,7 @@ private:
     Tri eval_cond3_with_subquery(SharedDatabase& s, const Row& row, const CondExpr& expr);
     Tri eval_single_with_subquery(SharedDatabase& s, const Row& row, const Condition& cond);
     std::vector<std::string> extract_values_from_output(const std::string& output) const;
+    std::vector<std::string> extract_cells_from_output(const std::string& output, std::size_t width) const;
 
     // ── Phase 8c: CTE (WITH ... [RECURSIVE]) ────────────────────────────
     StringResult exec_with(SharedDatabase& s, std::vector<std::pair<std::string, std::unique_ptr<Statement>>> ctes, Statement query,
