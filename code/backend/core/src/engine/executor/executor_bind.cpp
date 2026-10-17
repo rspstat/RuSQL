@@ -66,6 +66,36 @@ bool has_column(const BindTable& t, const std::string& column) {
     return std::find(t.own_columns.begin(), t.own_columns.end(), column) != t.own_columns.end();
 }
 
+bool ieq(const std::string& a, const std::string& b) {
+    if (a.size() != b.size()) return false;
+    for (std::size_t i = 0; i < a.size(); i++) {
+        if (std::tolower(static_cast<unsigned char>(a[i])) != std::tolower(static_cast<unsigned char>(b[i]))) return false;
+    }
+    return true;
+}
+
+// The spelling the table has for a column that is called `column` apart from case; nothing when it has none or two that differ.
+std::optional<std::string> column_ci(const BindTable& t, const std::string& column) {
+    if (t.open) return std::nullopt;
+    std::optional<std::string> found;
+    auto consider = [&](const std::string& name) {
+        if (!ieq(name, column)) return true;
+        if (found && *found != name) return false;
+        found = name;
+        return true;
+    };
+    if (t.schema) {
+        for (const ColumnDef& c : t.schema->columns) {
+            if (!consider(c.name)) return std::nullopt;
+        }
+    } else {
+        for (const std::string& name : t.own_columns) {
+            if (!consider(name)) return std::nullopt;
+        }
+    }
+    return found;
+}
+
 ValueClass column_class(const BindTable& t, const std::string& column, bool* approx = nullptr) {
     if (t.schema) {
         for (auto& c : t.schema->columns) {
@@ -149,6 +179,80 @@ std::optional<std::string> Executor::bind_statement(SharedDatabase& s, Statement
             return false;
         }
 
+        // A column reference spelled in another case than the table has it (`NAME` for `name`, `E.Id` for `e.id`, a select-list alias in capitals): the
+        // spelling the tables and the select list give, or `n` itself when it is right as it is or cannot be told (no column of that name, or two that differ
+        // only in case). MySQL does not tell the cases apart for a column, an alias or a table alias.
+        // (is `n` a column of a table in sight, a table alias's column or a name the select list gives, exactly as it is spelled)
+        bool exact(const std::string& n) const {
+            const std::size_t dot = n.rfind('.');
+            if (dot != std::string::npos) {
+                const std::string qualifier = n.substr(0, dot), column = n.substr(dot + 1);
+                for (const BindScope* sc : chain) {
+                    for (const BindTable& t : sc->tables) {
+                        if ((t.full == qualifier || t.bare == qualifier) && has_column(t, column)) return true;
+                    }
+                    for (auto& [alias, table] : sc->table_aliases) {
+                        if (alias != qualifier) continue;
+                        for (const BindScope* owner : chain) {
+                            for (const BindTable& t : owner->tables) {
+                                if ((t.full == table || t.bare == table) && has_column(t, column)) return true;
+                            }
+                        }
+                    }
+                }
+                return false;
+            }
+            for (const BindScope* sc : chain) {
+                if (sc->aliases.count(n)) return true;
+                for (const BindTable& t : sc->tables) {
+                    if (has_column(t, n)) return true;
+                }
+            }
+            return false;
+        }
+
+        std::string canonical(const std::string& n) const {
+            if (!plain_reference(n) || exact(n)) return n;
+            const std::size_t dot = n.rfind('.');
+            if (dot != std::string::npos) {
+                const std::string qualifier = n.substr(0, dot), column = n.substr(dot + 1);
+                for (auto it = chain.rbegin(); it != chain.rend(); ++it) {
+                    for (const BindTable& t : (*it)->tables) {
+                        std::string spelled;
+                        if (ieq(t.full, qualifier)) spelled = t.full;
+                        else if (ieq(t.bare, qualifier)) spelled = t.bare;
+                        else continue;
+                        if (auto c = column_ci(t, column)) return spelled + "." + *c;
+                    }
+                    for (auto& [alias, table] : (*it)->table_aliases) {
+                        if (!ieq(alias, qualifier)) continue;
+                        for (const BindScope* owner : chain) {
+                            for (const BindTable& t : owner->tables) {
+                                if (!ieq(t.full, table) && !ieq(t.bare, table)) continue;
+                                if (auto c = column_ci(t, column)) return alias + "." + *c;
+                            }
+                        }
+                    }
+                }
+                return n;
+            }
+            for (auto it = chain.rbegin(); it != chain.rend(); ++it) {
+                std::optional<std::string> found;
+                bool two = false;
+                for (const BindTable& t : (*it)->tables) {
+                    if (auto c = column_ci(t, n)) {
+                        if (found && *found != *c) two = true;
+                        found = c;
+                    }
+                }
+                if (found && !two) return *found;
+                for (const std::string& alias : (*it)->aliases) {
+                    if (ieq(alias, n)) return alias;
+                }
+            }
+            return n;
+        }
+
         // What `AGG(arg)` -- the text a HAVING or a select-list expression uses for an aggregate -- gives; nullopt when `name` is not one.
         std::optional<ValueClass> aggregate_reference_class(const std::string& name) const {
             const std::size_t lp = name.find('('), rp = name.rfind(')');
@@ -192,7 +296,20 @@ std::optional<std::string> Executor::bind_statement(SharedDatabase& s, Statement
             return ValueClass::Unknown;
         }
 
-        void name(const std::string& n, const char* clause) {
+        // `SUM(SAL)` / `COUNT(DISTINCT dept)` as a HAVING or an expression names an aggregate: a plain column in it spelled as the tables have it (the
+        // aggregate of an expression keeps the spelling it was typed in)
+        std::string canonical_aggregate(const std::string& ref) const {
+            const std::size_t lp = ref.find('('), rp = ref.rfind(')');
+            if (lp == std::string::npos || lp == 0 || rp != ref.size() - 1) return ref;
+            std::string arg = ref.substr(lp + 1, rp - lp - 1), distinct;
+            if (arg.rfind("DISTINCT ", 0) == 0) { distinct = "DISTINCT "; arg.erase(0, 9); }
+            if (arg.empty() || !plain_reference(arg)) return ref;
+            const std::string spelled = canonical(arg);
+            return spelled == arg ? ref : ref.substr(0, lp + 1) + distinct + spelled + ")";
+        }
+
+        void name(std::string& n, const char* clause) {
+            n = canonical(n);
             if (check && !error && !known(n)) error = "Unknown column '" + n + "' in '" + clause + "'";
             else if (check && !error && ambiguous(n, clause)) error = "Column '" + n + "' in " + clause + " is ambiguous";
         }
@@ -211,7 +328,8 @@ std::optional<std::string> Executor::bind_statement(SharedDatabase& s, Statement
                 }
                 if (count == 0) continue;
                 if (count < 2 || scope.merged.count(n)) return false;
-                if (reads_select_list && (scope.selected.count(n) || scope.aliases.count(n))) return false;
+                if (reads_select_list && (scope.selected.count(n) || scope.aliases.count(n) ||
+                                          std::any_of(scope.selected.begin(), scope.selected.end(), [&](const std::string& x) { return ieq(x, n); }))) return false;
                 return true;
             }
             return false;
@@ -267,6 +385,7 @@ std::optional<std::string> Executor::bind_statement(SharedDatabase& s, Statement
         void arith(ArithExpr& e, const char* clause) {
             if (error) return;
             if (auto* col = std::get_if<ArithExpr::Col>(&e.data)) {
+                if (col->name.find('(') != std::string::npos) col->name = canonical_aggregate(col->name);
                 name(col->name, clause);
                 mark_outer(col->name, col->outer);
                 col->cls = class_of_name(col->name, &col->approx);
@@ -290,6 +409,7 @@ std::optional<std::string> Executor::bind_statement(SharedDatabase& s, Statement
         // what the columns in `e` hold, without asking for them to exist
         void annotate(ArithExpr& e) {
             if (auto* col = std::get_if<ArithExpr::Col>(&e.data)) {
+                col->name = canonical(col->name);
                 mark_outer(col->name, col->outer);
                 col->cls = class_of_name(col->name, &col->approx);
             }
@@ -360,6 +480,7 @@ std::optional<std::string> Executor::bind_statement(SharedDatabase& s, Statement
                     } else if (parse_number(lit->value)) {
                         c.right_class = ValueClass::Number;
                     } else {
+                        lit->value = canonical(lit->value);
                         if (check && !error && lit->value.find('.') != std::string::npos && !known(lit->value, false)) {
                             error = "Unknown column '" + lit->value + "' in '" + clause + "'";
                         } else if (check && !error && lit->value.find('.') == std::string::npos && table_column(lit->value) && ambiguous(lit->value, clause)) {
@@ -421,17 +542,29 @@ std::optional<std::string> Executor::bind_statement(SharedDatabase& s, Statement
 
         // The argument of an aggregate that is an expression (`price * qty`): the columns in it have to exist; what it holds is what its operators say
         // (the executor reads the text again to compute it, so the expression bound here is a copy)
-        ValueClass expression_argument(const std::string& text, const char* clause) {
+        // `canonical_text`, when given, is told the text of the expression with its columns spelled as the tables have them (what the executor reads).
+        ValueClass expression_argument(const std::string& text, const char* clause, std::string* canonical_text = nullptr) {
             ArithExpr e = Parser::str_to_arith(text);
             if (auto* col = std::get_if<ArithExpr::Col>(&e.data); col && col->name == text) return ValueClass::Unknown; // (not readable: the executor says so)
+            std::string before;
+            try { before = Parser::arith_to_string(e); } catch (const ParseError&) {}
             arith(e, clause);
             if (check && !error && has_outer(e)) error = std::string("An outer reference inside '") + text + "' is not supported in '" + clause + "'";
+            if (canonical_text && !before.empty()) {
+                try {
+                    const std::string after = Parser::arith_to_string(e);
+                    if (after != before) *canonical_text = after;
+                } catch (const ParseError&) {}
+            }
             return class_of_expr(e);
         }
 
         // The argument of an aggregate: a column, `*`, an expression, or for SUM / COUNT of a CASE (or of a condition: SUM(v > 1)) the conditions of
         // the CASE -- the parser leaves the placeholder "__case__" in the column then.
-        ValueClass aggregate(AggFunc& func, const std::string& column, std::optional<CondExpr>& filter) {
+        // `label` is the argument as the query spells it (it names the result column and stays as typed); `source` is where a row holds it, which is
+        // set here when that is another spelling.
+        ValueClass aggregate(AggFunc& func, const std::string& label, std::string& source, std::optional<CondExpr>& filter) {
+            std::string column = source.empty() ? label : source;
             std::vector<CaseWhenBranch>* branches = nullptr;
             if (auto* counted = std::get_if<AggFunc::CountCase>(&func.data)) branches = &counted->branches;
             else if (auto* summed = std::get_if<AggFunc::SumCase>(&func.data)) branches = &summed->branches;
@@ -439,11 +572,15 @@ std::optional<std::string> Executor::bind_statement(SharedDatabase& s, Statement
             if (branches) {
                 for (auto& b : *branches) cond(b.condition, "field list");
             } else if (is_expression_argument(column)) {
-                arg = expression_argument(column, "field list");
+                std::string spelled;
+                arg = expression_argument(column, "field list", &spelled);
+                if (!spelled.empty()) source = spelled;
             } else {
+                const std::string typed = column;
                 name(column, "field list");
                 no_outer(column, "field list");
                 arg = class_of_name(column);
+                if (column != typed) source = column;
             }
             if (filter) cond(*filter, "field list");
             return arg;
@@ -469,24 +606,59 @@ std::optional<std::string> Executor::bind_statement(SharedDatabase& s, Statement
 
         void select_column(SelectColumn& c) {
             if (error) return;
-            if (auto* col = std::get_if<SelectColumn::Column>(&c.data)) {
+            if (auto* all = std::get_if<SelectColumn::All>(&c.data)) {
+                // `T.*`: the table or alias apart from case
+                if (!all->table.empty()) {
+                    for (auto it = chain.rbegin(); it != chain.rend(); ++it) {
+                        for (const BindTable& t : (*it)->tables) {
+                            if (t.full == all->table || t.bare == all->table) return;
+                        }
+                    }
+                    for (auto it = chain.rbegin(); it != chain.rend(); ++it) {
+                        for (const BindTable& t : (*it)->tables) {
+                            if (ieq(t.full, all->table)) { all->table = t.full; return; }
+                            if (ieq(t.bare, all->table)) { all->table = t.bare; return; }
+                        }
+                    }
+                }
+            } else if (auto* col = std::get_if<SelectColumn::Column>(&c.data)) {
+                const std::string typed = col->name;
                 name(col->name, "field list");
                 mark_outer(col->name, col->outer);
                 col->cls = class_of_name(col->name);
+                if (col->name != typed && col->outer == 0 && plain_reference(typed)) {
+                    // (the result column keeps the name as it was typed, as in MySQL)
+                    SelectColumn::ColumnAlias renamed{col->name, last_part(typed), col->cls, col->outer};
+                    c.data = std::move(renamed);
+                }
             } else if (auto* ca = std::get_if<SelectColumn::ColumnAlias>(&c.data)) {
                 name(ca->name, "field list");
                 mark_outer(ca->name, ca->outer);
                 ca->cls = class_of_name(ca->name);
             }
-            else if (auto* agg = std::get_if<SelectColumn::Agg>(&c.data)) agg->arg_class = aggregate(agg->func, agg->source.empty() ? agg->col : agg->source, agg->filter);
-            else if (auto* aa = std::get_if<SelectColumn::AggAlias>(&c.data)) aa->arg_class = aggregate(aa->func, aa->source.empty() ? aa->col : aa->source, aa->filter);
-            else if (auto* ex_col = std::get_if<SelectColumn::Expr>(&c.data)) arith(ex_col->expr, "field list");
+            else if (auto* agg = std::get_if<SelectColumn::Agg>(&c.data)) agg->arg_class = aggregate(agg->func, agg->col, agg->source, agg->filter);
+            else if (auto* aa = std::get_if<SelectColumn::AggAlias>(&c.data)) aa->arg_class = aggregate(aa->func, aa->col, aa->source, aa->filter);
+            else if (auto* ex_col = std::get_if<SelectColumn::Expr>(&c.data)) {
+                // (the result column is named by the expression as it was typed, unless it has an alias)
+                std::string typed;
+                if (!ex_col->alias) {
+                    try { typed = Parser::arith_to_string(ex_col->expr); } catch (const ParseError&) {}
+                }
+                arith(ex_col->expr, "field list");
+                if (!typed.empty()) {
+                    try {
+                        if (Parser::arith_to_string(ex_col->expr) != typed) ex_col->alias = typed;
+                    } catch (const ParseError&) {}
+                }
+            }
             else if (auto* cw = std::get_if<SelectColumn::CaseWhen>(&c.data)) {
                 for (auto& b : cw->branches) cond(b.condition, "field list");
             } else if (auto* wf = std::get_if<SelectColumn::WinFunc>(&c.data)) {
                 if (wf->col) {
                     if (is_expression_argument(*wf->col)) {
-                        wf->col_class = expression_argument(*wf->col, "field list");
+                        std::string spelled;
+                        wf->col_class = expression_argument(*wf->col, "field list", &spelled);
+                        if (!spelled.empty()) *wf->col = spelled;
                     } else {
                         name(*wf->col, "field list");
                         no_outer(*wf->col, "field list");
@@ -581,6 +753,7 @@ std::optional<std::string> Executor::bind_statement(SharedDatabase& s, Statement
             std::vector<std::pair<std::string, ValueClass>> out;
             std::vector<std::string> positions; // what each output column is called as an ORDER BY / GROUP BY item ("" when it cannot be one)
             std::unordered_map<std::string, std::string> given; // the names the select list gives, and what each stands for
+            std::vector<std::string> ambiguous; // the names two different items give
             for (auto& c : sel.columns) {
                 select_column(c);
                 if (error) break;
@@ -597,22 +770,32 @@ std::optional<std::string> Executor::bind_statement(SharedDatabase& s, Statement
                 } else {
                     out.emplace_back(std::string(), k);
                     positions.push_back(sort_key(c));
-                    if (const std::string alias = alias_of(c); !alias.empty() && !positions.back().empty()) given.emplace(alias, positions.back());
+                    if (const std::string alias = alias_of(c); !alias.empty() && !positions.back().empty()) {
+                        // (two items that stand for different things under one name -- apart from case -- make an ORDER BY / GROUP BY by that name ambiguous)
+                        for (const auto& [other, target] : given) {
+                            if (ieq(other, alias) && target != positions.back()) ambiguous.push_back(alias);
+                        }
+                        given.emplace(alias, positions.back());
+                    }
                 }
             }
             for (auto& j : sel.joins) cond(j.on_expr, "on clause");
             if (sel.condition) cond(*sel.condition, "where clause");
             if (!sel.sort_resolved && !error) {
-                for (auto& o : sel.order_by) resolve_sort_item(o.column, "order clause", positions, given);
+                for (auto& o : sel.order_by) resolve_sort_item(o.column, "order clause", positions, given, ambiguous);
                 if (sel.group_by) {
-                    for (auto& g : *sel.group_by) resolve_sort_item(g, "group statement", positions, given);
+                    for (auto& g : *sel.group_by) resolve_sort_item(g, "group statement", positions, given, ambiguous);
                 }
                 sel.sort_resolved = true;
             }
             if (sel.group_by) {
                 for (auto& g : *sel.group_by) {
                     if (plain_reference(g)) { name(g, "group statement"); no_outer(g, "group statement"); }
-                    else expression_argument(g, "group statement");
+                    else {
+                        std::string spelled;
+                        expression_argument(g, "group statement", &spelled);
+                        if (!spelled.empty()) g = spelled;
+                    }
                 }
             }
             if (sel.having) cond(*sel.having, "having clause");
@@ -622,7 +805,9 @@ std::optional<std::string> Executor::bind_statement(SharedDatabase& s, Statement
                     no_outer(o.column, "order clause");
                     o.cls = class_of_name(o.column);
                 } else {
-                    o.cls = expression_argument(o.column, "order clause");
+                    std::string spelled;
+                    o.cls = expression_argument(o.column, "order clause", &spelled);
+                    if (!spelled.empty()) o.column = spelled;
                 }
             }
             if (check && !error) only_full_group_by(sel, scope);
@@ -802,7 +987,7 @@ std::optional<std::string> Executor::bind_statement(SharedDatabase& s, Statement
         // gives wins over a column of the same name, as in MySQL): either becomes what it stands for, the name of a column or the text of an
         // expression, which is all the executor has to know how to sort / group by.
         void resolve_sort_item(std::string& item, const char* clause, const std::vector<std::string>& positions,
-                               const std::unordered_map<std::string, std::string>& given) {
+                               const std::unordered_map<std::string, std::string>& given, const std::vector<std::string>& ambiguous) {
             if (item.empty()) return;
             if (item.find_first_not_of("0123456789") == std::string::npos) {
                 const std::size_t n = item.size() > 9 ? 0 : static_cast<std::size_t>(std::stoul(item));
@@ -818,7 +1003,19 @@ std::optional<std::string> Executor::bind_statement(SharedDatabase& s, Statement
                 return;
             }
             if (item.find('.') == std::string::npos) {
-                if (auto it = given.find(item); it != given.end()) item = it->second;
+                for (const std::string& name : ambiguous) {
+                    if (ieq(name, item)) {
+                        if (check && !error) error = "Column '" + item + "' in " + clause + " is ambiguous";
+                        return;
+                    }
+                }
+                if (auto it = given.find(item); it != given.end()) {
+                    item = it->second;
+                } else {
+                    for (const auto& [alias, target] : given) {
+                        if (ieq(alias, item)) { item = target; break; }
+                    }
+                }
             }
         }
 

@@ -10,10 +10,12 @@ namespace engine {
 namespace {
 // INSERT / REPLACE name each column once (MySQL: error 1110, "Column 'x' specified twice")
 void ensure_distinct_columns(const std::vector<std::string>& cols) {
-    std::vector<std::string> seen;
+    std::vector<std::string> seen; // (a column is named by its name apart from case)
     for (const std::string& c : cols) {
-        if (std::find(seen.begin(), seen.end(), c) != seen.end()) throw ParseError("Column '" + c + "' specified twice");
-        seen.push_back(c);
+        std::string lowered = c;
+        for (char& ch : lowered) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+        if (std::find(seen.begin(), seen.end(), lowered) != seen.end()) throw ParseError("Column '" + c + "' specified twice");
+        seen.push_back(std::move(lowered));
     }
 }
 } // namespace
@@ -115,7 +117,7 @@ Statement Parser::parse_insert() {
     if (peek_is(TokenKind::Ignore)) { advance(); ignore = true; }
     if (!peek_is(TokenKind::Into)) throw ParseError("Expected INTO");
     advance();
-    std::string table = expect_ident();
+    std::string table = expect_table_name();
 
     std::optional<std::vector<std::string>> columns;
     if (peek_is(TokenKind::LParen)) {
@@ -183,7 +185,7 @@ Statement Parser::parse_replace() {
     // replace_delete_conflicts for the actual delete-then-insert execution). Unlike
     // INSERT, REPLACE has no IGNORE keyword and no ON DUPLICATE KEY UPDATE clause.
     if (peek_is(TokenKind::Into)) advance(); // INTO is optional in real MySQL REPLACE syntax
-    std::string table = expect_ident();
+    std::string table = expect_table_name();
 
     std::optional<std::vector<std::string>> columns;
     if (peek_is(TokenKind::LParen)) {
@@ -243,7 +245,7 @@ void Parser::parse_order_limit(std::vector<OrderBy>& order_by, std::optional<std
 
 Statement Parser::parse_update() {
     // UPDATE [t1 [alias1]] [, t2 [alias2]] | [JOIN t2 ON ...] SET col = val [WHERE ...]
-    std::string first_table = expect_ident();
+    std::string first_table = expect_table_name();
     std::unordered_map<std::string, std::string> alias_map;
 
     if (auto a = parse_table_alias()) alias_map[*a] = first_table;
@@ -285,7 +287,7 @@ Statement Parser::parse_update() {
         } else {
             break;
         }
-        std::string join_table = expect_ident();
+        std::string join_table = expect_table_name();
         if (auto a = parse_table_alias()) alias_map[*a] = join_table;
         if (!peek_is(TokenKind::On)) throw ParseError("Expected ON");
         advance();
@@ -344,7 +346,7 @@ Statement Parser::parse_delete() {
         advance(); // FROM
     }
 
-    std::string from_table = expect_ident();
+    std::string from_table = expect_table_name();
     std::unordered_map<std::string, std::string> alias_map;
     if (auto a = parse_table_alias()) alias_map[*a] = from_table;
 
@@ -370,7 +372,7 @@ Statement Parser::parse_delete() {
         } else {
             break;
         }
-        std::string join_table = expect_ident();
+        std::string join_table = expect_table_name();
         if (auto a = parse_table_alias()) alias_map[*a] = join_table;
         if (!peek_is(TokenKind::On)) throw ParseError("Expected ON");
         advance();

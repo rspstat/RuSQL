@@ -169,6 +169,11 @@ bool value_matches_data_type(const DataType& dt, const std::string& val) {
         dt.data);
 }
 
+// two names are one when they differ in case only (a column, an index)
+bool same_name(const std::string& a, const std::string& b) {
+    return a.size() == b.size() && std::equal(a.begin(), a.end(), b.begin(), [](unsigned char x, unsigned char y) { return std::tolower(x) == std::tolower(y); });
+}
+
 } // namespace
 
 StringResult Executor::exec_create(SharedDatabase& s, std::string name, std::vector<ColumnDef> columns, bool if_not_exists,
@@ -176,6 +181,11 @@ StringResult Executor::exec_create(SharedDatabase& s, std::string name, std::vec
                                     std::vector<std::pair<std::optional<std::string>, std::string>> check_constraints,
                                     std::optional<PartitionBy> partition_by, std::vector<UniqueKey> unique_keys) {
     if (if_not_exists && s.tables.count(name)) return StringResult::Ok("Table '" + name + "' already exists, skipped.");
+    for (std::size_t i = 0; i < columns.size(); i++) {
+        for (std::size_t j = 0; j < i; j++) {
+            if (same_name(columns[i].name, columns[j].name)) return StringResult::Err("Duplicate column name '" + columns[i].name + "'");
+        }
+    }
     for (auto& key : unique_keys) {
         for (auto& key_column : key.columns) {
             if (std::none_of(columns.begin(), columns.end(), [&](const ColumnDef& c) { return c.name == key_column; })) {
@@ -460,6 +470,9 @@ StringResult Executor::exec_alter(SharedDatabase& s, const std::string& table, A
     if (auto* v = std::get_if<AlterAction::AddColumn>(&action.data)) {
         auto* schema = s.catalog.get_table_mut(table);
         if (!schema) return StringResult::Err("Table '" + table + "' not found");
+        for (const ColumnDef& c : schema->columns) {
+            if (same_name(c.name, v->column.name)) return StringResult::Err("Duplicate column name '" + v->column.name + "'");
+        }
 
         ColumnDef new_col;
         new_col.name = v->column.name;
@@ -501,6 +514,9 @@ StringResult Executor::exec_alter(SharedDatabase& s, const std::string& table, A
     if (auto* v = std::get_if<AlterAction::RenameColumn>(&action.data)) {
         auto* schema = s.catalog.get_table_mut(table);
         if (!schema) return StringResult::Err("Table '" + table + "' not found");
+        for (const ColumnDef& c : schema->columns) {
+            if (c.name != v->from && same_name(c.name, v->to)) return StringResult::Err("Duplicate column name '" + v->to + "'");
+        }
         for (auto& col : schema->columns) {
             if (col.name == v->from) col.name = v->to;
         }
@@ -941,6 +957,17 @@ StringResult Executor::exec_drop_database(SharedDatabase& s, const std::string& 
 StringResult Executor::exec_create_index(SharedDatabase& s, const std::string& index_name, const std::string& table,
                                           const std::vector<std::string>& columns, bool using_hash) {
     if (!s.tables.count(table)) return StringResult::Err("Table '" + table + "' not found");
+    {
+        // an index name is used once on a table, whatever the case (MySQL error 1061)
+        const std::string wanted = table + "_" + index_name;
+        auto taken = [&](const auto& indexes, auto table_of) {
+            return std::any_of(indexes.begin(), indexes.end(), [&](const auto& entry) { return table_of(entry.second) == table && same_name(entry.first, wanted); });
+        };
+        if (taken(s.index_meta, [](const auto& meta) { return meta.first; }) || taken(s.hash_index_meta, [](const auto& meta) { return meta.first; }) ||
+            taken(s.composite_indexes, [](const auto& index) { return index.table; })) {
+            return StringResult::Err("Duplicate key name '" + index_name + "'");
+        }
+    }
 
     if (using_hash) {
         if (columns.size() != 1) return StringResult::Err("Hash index supports only single-column indexes.");
@@ -983,13 +1010,25 @@ StringResult Executor::exec_create_index(SharedDatabase& s, const std::string& i
     return StringResult::Ok("Composite index '" + index_name + "' created on '" + table + "' (" + cols_joined + ").");
 }
 
-StringResult Executor::exec_drop_index(SharedDatabase& s, const std::string& index_name) {
+StringResult Executor::exec_drop_index(SharedDatabase& s, const std::string& index_name, const std::optional<std::string>& table) {
     // Index names are stored as "<table>_<index_name>" (to allow the same index name to be
-    // reused across different tables/databases), but DROP INDEX has no "ON table" clause to
-    // disambiguate -- so we match by suffix and drop the first match found.
+    // reused across different tables/databases). DROP INDEX name ON table says which table;
+    // without it we match by suffix and drop the first match found. An index name does not
+    // depend on case (MySQL), so the match ignores it.
     std::string suffix = "_" + index_name;
+    auto same_case_free = [](const std::string& a, const std::string& b) {
+        if (a.size() != b.size()) return false;
+        for (std::size_t i = 0; i < a.size(); i++) {
+            if (std::tolower(static_cast<unsigned char>(a[i])) != std::tolower(static_cast<unsigned char>(b[i]))) return false;
+        }
+        return true;
+    };
     auto has_suffix = [&](const std::string& key) {
-        return key.size() >= suffix.size() && key.compare(key.size() - suffix.size(), suffix.size(), suffix) == 0;
+        if (key.size() < suffix.size()) return false;
+        if (!same_case_free(key.substr(key.size() - suffix.size()), suffix)) return false;
+        if (!table) return true;
+        const std::string wanted = *table + "_" + index_name;
+        return same_case_free(key, wanted);
     };
 
     for (auto it = s.index_meta.begin(); it != s.index_meta.end(); ++it) {

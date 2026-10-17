@@ -5,6 +5,20 @@
 
 namespace engine::detail {
 
+namespace {
+// (the alias a table is given and the qualifier a column is written with are the same name when they differ only in case)
+const std::string* find_alias(const std::unordered_map<std::string, std::string>& map, const std::string& qualifier) {
+    if (auto it = map.find(qualifier); it != map.end()) return &it->second;
+    for (const auto& [alias, table] : map) {
+        if (alias.size() != qualifier.size()) continue;
+        bool same = true;
+        for (std::size_t i = 0; i < alias.size() && same; i++) same = std::tolower(static_cast<unsigned char>(alias[i])) == std::tolower(static_cast<unsigned char>(qualifier[i]));
+        if (same) return &table;
+    }
+    return nullptr;
+}
+} // namespace
+
 std::string expand_alias_str(const std::string& s, const std::unordered_map<std::string, std::string>& map) {
     // an aggregate call inside a name or a function's argument text -- a condition keeps `SUM(o.amount)` as one name, and an
     // argument such as `SUM(o.v)/COUNT(*)` is text: the alias in each call's argument becomes its table
@@ -48,8 +62,8 @@ std::string expand_alias_str(const std::string& s, const std::unordered_map<std:
             std::size_t end = i;
             while (end < s.size() && (std::isalnum(static_cast<unsigned char>(s[end])) || s[end] == '_')) end++;
             if (end < s.size() && s[end] == '.') {
-                if (auto it = map.find(s.substr(i, end - i)); it != map.end()) {
-                    out += it->second;
+                if (const std::string* table = find_alias(map, s.substr(i, end - i))) {
+                    out += *table;
                     i = end - 1;
                     continue;
                 }
@@ -139,8 +153,8 @@ SelectColumn expand_select_column(const SelectColumn& col, const std::unordered_
             } else if constexpr (std::is_same_v<T, SelectColumn::All>) {
                 // `alias.*` names the table
                 if (alt.table.empty()) return col;
-                auto it = map.find(alt.table);
-                return SelectColumn(SelectColumn::All{it != map.end() ? it->second : alt.table});
+                const std::string* table = find_alias(map, alt.table);
+                return SelectColumn(SelectColumn::All{table ? *table : alt.table});
             } else {
                 // Subquery passes through unchanged — copy via
                 // SelectColumn's own deep-copy constructor (Subquery holds a

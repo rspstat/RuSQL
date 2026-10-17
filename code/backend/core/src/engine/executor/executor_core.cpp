@@ -1272,7 +1272,7 @@ StringResult Executor::execute_sql_inner(const std::string& sql) {
     bool in_txn = txn.current_txn_id() != 0;
 
     if (looks_like_select && !in_txn) {
-        std::string cache_key = current_db + "::" + trimmed;
+        std::string cache_key = current_db + "::" + trimmed + (pipes_as_concat() ? "\x01pipes" : ""); // (what || means changes the answer)
         auto s = shared->read();
         // MVCC regression guard: once any transaction is open anywhere, the identical
         // SQL text can legitimately produce different results for different sessions
@@ -1286,11 +1286,12 @@ StringResult Executor::execute_sql_inner(const std::string& sql) {
         }
     }
 
-    Parser parser(trimmed);
+    Parser parser(trimmed, pipes_as_concat());
     if (!parser.has_tokens()) return StringResult::Ok(""); // nothing but comments (a dump has such lines): there is nothing to run
     auto parsed = parser.parse();
     if (parsed.is_err()) return StringResult::Err(parsed.error());
     Statement stmt = std::move(parsed).value();
+    resolve_names(stmt); // (`SELECT * FROM USERS` is the table `users`: the rest of this function and everything after it read the one spelling)
 
     std::optional<std::string> dml_table;
     if (auto* v = std::get_if<Statement::Insert>(&stmt.data)) dml_table = qualify_static(v->table, current_db);
@@ -1356,7 +1357,7 @@ StringResult Executor::execute_sql_inner(const std::string& sql) {
                 }
             }
             if (unchanged) {
-                std::string cache_key = current_db + "::" + trimmed;
+                std::string cache_key = current_db + "::" + trimmed + (pipes_as_concat() ? "\x01pipes" : "");
                 s->query_cache.put(cache_key, result.value(), cache_gens_before);
             }
         }
@@ -1379,6 +1380,25 @@ StringResult Executor::execute_with_s(SharedDatabase& s, Statement stmt) {
         return StringResult::Err(e.what());
     }
 }
+
+namespace {
+std::string lower_variable_name(std::string name) {
+    for (char& c : name) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    return name;
+}
+
+// The variable of a procedure that `name` stands for: one that has the name apart from case (DECLARE n ... SET N = 1), else `name` itself.
+std::string proc_var_key(const std::unordered_map<std::string, std::string>& vars, const std::string& name) {
+    if (vars.count(name)) return name;
+    for (const auto& entry : vars) {
+        if (entry.first.size() == name.size() &&
+            std::equal(entry.first.begin(), entry.first.end(), name.begin(), [](unsigned char a, unsigned char b) { return std::tolower(a) == std::tolower(b); })) {
+            return entry.first;
+        }
+    }
+    return name;
+}
+} // namespace
 
 StringResult Executor::execute_with_s_body(SharedDatabase& s, Statement stmt) {
     struct DepthGuard {
@@ -1493,7 +1513,7 @@ StringResult Executor::execute_with_s_body(SharedDatabase& s, Statement stmt) {
     if (auto* v = std::get_if<Statement::AlterTable>(&stmt.data)) return exec_alter(s, v->table, v->action);
     if (auto* v = std::get_if<Statement::CreateIndex>(&stmt.data))
         return exec_create_index(s, v->index_name, v->table, v->columns, v->using_hash);
-    if (auto* v = std::get_if<Statement::DropIndex>(&stmt.data)) return exec_drop_index(s, v->index_name);
+    if (auto* v = std::get_if<Statement::DropIndex>(&stmt.data)) return exec_drop_index(s, v->index_name, v->table);
     if (auto* v = std::get_if<Statement::CreateView>(&stmt.data)) return exec_create_view(s, v->name, *v->query, v->raw_sql);
     if (auto* v = std::get_if<Statement::DropView>(&stmt.data)) return exec_drop_view(s, v->name);
     if (std::holds_alternative<Statement::ShowTables>(stmt.data)) return exec_show_tables(s);
@@ -1573,12 +1593,12 @@ StringResult Executor::execute_with_s_body(SharedDatabase& s, Statement stmt) {
 
     // 저장 프로시저 제어문
     if (auto* v = std::get_if<Statement::ProcDeclare>(&stmt.data)) {
-        proc_vars[v->name] = v->default_value.value_or("NULL");
+        proc_vars[proc_var_key(proc_vars, v->name)] = v->default_value.value_or("NULL");
         return StringResult::Ok("");
     }
     if (auto* v = std::get_if<Statement::ProcSet>(&stmt.data)) {
         bind_expression(s, v->expr, false);
-        proc_vars[v->name] = eval_arith(proc_vars, v->expr);
+        proc_vars[proc_var_key(proc_vars, v->name)] = eval_arith(proc_vars, v->expr);
         return StringResult::Ok("");
     }
     if (auto* v = std::get_if<Statement::ProcIf>(&stmt.data)) {
@@ -1630,8 +1650,8 @@ StringResult Executor::execute_with_s_body(SharedDatabase& s, Statement stmt) {
                 if (auto it = rows.front().find(cols[i]); it != rows.front().end()) value = it->second;
             }
             const std::string& var = v->vars[i];
-            if (!var.empty() && var[0] == '@') user_vars[var.substr(1)] = value;
-            else proc_vars[var] = value;
+            if (!var.empty() && var[0] == '@') user_vars[lower_variable_name(var.substr(1))] = value;
+            else proc_vars[proc_var_key(proc_vars, var)] = value;
         }
         return StringResult::Ok("");
     }
@@ -1675,7 +1695,7 @@ StringResult Executor::execute_with_s_body(SharedDatabase& s, Statement stmt) {
                 if (lower_name == "@foreign_key_checks") skip_fk_checks = result_val == "0";
             }
         }
-        user_vars[v->name] = result_val;
+        user_vars[lower_name] = result_val; // (@V and @v are one variable: it is kept under its lower case name)
         return StringResult::Ok("");
     }
 

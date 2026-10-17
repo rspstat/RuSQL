@@ -54,7 +54,8 @@ struct ColConstraints {
 
 class Parser {
 public:
-    explicit Parser(const std::string& input);
+    // `||` is the logical OR in MySQL's default mode and the concatenation only when sql_mode has PIPES_AS_CONCAT (or ANSI): `pipes_as_concat`.
+    explicit Parser(const std::string& input, bool pipes_as_concat = false);
 
     // Public API: mirrors `pub fn parse(&mut self) -> Result<Statement, String>`.
     Result<Statement, std::string> parse();
@@ -98,6 +99,7 @@ private:
     Statement parse_stmt();
 
     std::string expect_ident();
+    std::string expect_table_name(); // name or db.name
     std::string expect_alias_ident();
     /// `[AS] alias` after a table name, if there is one
     std::optional<std::string> parse_table_alias();

@@ -311,7 +311,8 @@ const std::unordered_map<std::string, std::size_t>& null_propagating_functions()
 
 void Executor::sync_udf_context(const std::unordered_map<std::string, UserFunctionDef>& user_functions, const std::string& current_db,
                                  const std::string& current_user) {
-    g_user_functions = user_functions;
+    g_user_functions.clear();
+    for (const auto& [name, def] : user_functions) g_user_functions[to_lower_str(name)] = def; // (a function is called by its name apart from case)
     g_current_db_ctx = current_db;
     g_current_user_ctx = current_user;
 }
@@ -335,9 +336,12 @@ std::string Executor::apply_scalar_func(const std::string& typed_name, const std
                 if (auto it = row.find(arg); it != row.end()) return it->second;
                 return arg;
             };
+            Row parameters;
             for (std::size_t i = 0; i < params.size(); i++) {
                 bound_row[params[i]] = i < args.size() ? resolve_arg(args[i]) : std::string();
+                parameters[params[i]] = bound_row[params[i]];
             }
+            substitute_parameters(expr, parameters);
             return eval_arith(bound_row, expr);
         } catch (const StatementError&) {
             throw; // (a subquery of the body that fails is the statement's error)

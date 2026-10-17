@@ -168,7 +168,7 @@ SELECT emp_type, COUNT(*) AS n, SUM(salary) AS total FROM employee GROUP BY emp_
 
 -- Parser Compatibility
 SELECT id, first_name, emp_type FROM employee WHERE emp_type <> 'contract' AND department_id <> 3 ORDER BY id LIMIT 4;
-SELECT first_name || ' ' || last_name AS full_name FROM employee ORDER BY id LIMIT 4;
+SELECT CONCAT(first_name, ' ', last_name) AS full_name FROM employee ORDER BY id LIMIT 4;
 SELECT first_name, salary, salary % 10000 AS mod_val FROM employee ORDER BY id LIMIT 4;
 SELECT id, first_name, salary FROM employee ORDER BY salary DESC LIMIT 3, 3;
 SELECT first_name, is_manager FROM employee WHERE is_manager = TRUE ORDER BY id;

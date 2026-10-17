@@ -12,17 +12,32 @@
 namespace engine {
 
 namespace {
+std::string to_lower_str(std::string s) {
+    for (char& c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    return s;
+}
+
 // WHILE/LOOP/REPEAT have no natural termination guarantee (unlike recursive CTEs, which
 // are already capped at 1000 iterations in executor_cte.cpp) -- a runaway loop in a
 // procedure holds SharedDatabase's exclusive shared->write() lock for its entire body
 // execution (see Executor::execute()), so it would otherwise freeze the whole server for
 // every connected client, forever. Set generously high so no realistic loop hits it.
 constexpr std::size_t PROC_LOOP_MAX_ITERATIONS = 100000;
+
+// The procedure, trigger or function called `name` -- its name does not depend on case (MySQL), so CALL raise finds Raise: the exact spelling first,
+// else the one that differs from it in case only.
+template <typename Map>
+typename Map::iterator find_named(Map& named, const std::string& name) {
+    if (auto it = named.find(name); it != named.end()) return it;
+    const std::string wanted = to_lower_str(name);
+    return std::find_if(named.begin(), named.end(), [&](const auto& entry) { return to_lower_str(entry.first) == wanted; });
+}
 } // namespace
 
 StringResult Executor::exec_create_procedure(SharedDatabase& s, std::string name,
                                               std::vector<std::tuple<std::string, std::string, std::string>> params,
                                               std::vector<Statement> body) {
+    if (auto same = find_named(s.procedures, name); same != s.procedures.end()) s.procedures.erase(same); // (CREATE OR REPLACE keeps one)
     s.procedures[name] = ProcedureDef{std::move(params), std::move(body)};
     s.disk.save_procedures(s.procedures);
     return StringResult::Ok("Procedure '" + name + "' created.");
@@ -32,6 +47,7 @@ StringResult Executor::exec_proc_stmts(SharedDatabase& s, std::vector<Statement>
     std::string last;
     for (auto& stmt : stmts) {
         if (proc_signal_) break;
+        resolve_names(s, stmt); // (the tables and columns a body names are read in the spelling they were created with)
         auto res = execute_with_s(s, std::move(stmt));
         if (res.is_err()) return res;
         last = res.value();
@@ -145,7 +161,7 @@ StringResult Executor::exec_proc_repeat(SharedDatabase& s, std::optional<std::st
 }
 
 StringResult Executor::exec_call_procedure(SharedDatabase& s, std::string name, std::vector<std::string> args) {
-    auto it = s.procedures.find(name);
+    auto it = find_named(s.procedures, name);
     if (it == s.procedures.end()) return StringResult::Err("Procedure '" + name + "' not found");
     auto [params, body] = it->second;
 
@@ -160,7 +176,7 @@ StringResult Executor::exec_call_procedure(SharedDatabase& s, std::string name, 
             bind_expression(s, expr, false);
             arg_values.push_back(eval_arith(caller_vars, expr));
         } else if (!arg.empty() && arg[0] == '@') {
-            auto it = user_vars.find(arg.substr(1));
+            auto it = user_vars.find(to_lower_str(arg.substr(1)));
             arg_values.push_back(it != user_vars.end() ? it->second : EXECUTOR_NULL_VALUE);
         } else if (arg.size() >= 2 && arg.front() == '\'' && arg.back() == '\'') {
             std::string unquoted = arg.substr(1, arg.size() - 2);
@@ -194,7 +210,7 @@ StringResult Executor::exec_call_procedure(SharedDatabase& s, std::string name, 
         auto& [dir, pname, ptype] = params[i];
         (void)ptype;
         if ((dir == "OUT" || dir == "INOUT") && !args[i].empty() && args[i][0] == '@') {
-            if (auto it = proc_vars.find(pname); it != proc_vars.end()) user_vars[args[i].substr(1)] = it->second;
+            if (auto it = proc_vars.find(pname); it != proc_vars.end()) user_vars[to_lower_str(args[i].substr(1))] = it->second;
         }
     }
     proc_vars = std::move(saved_vars);
@@ -205,19 +221,30 @@ StringResult Executor::exec_call_procedure(SharedDatabase& s, std::string name, 
 }
 
 StringResult Executor::exec_drop_procedure(SharedDatabase& s, std::string name, bool if_exists) {
-    if (s.procedures.erase(name) == 0 && !if_exists) return StringResult::Err("Procedure '" + name + "' does not exist");
+    auto it = find_named(s.procedures, name);
+    if (it == s.procedures.end()) {
+        if (!if_exists) return StringResult::Err("Procedure '" + name + "' does not exist");
+    } else {
+        s.procedures.erase(it);
+    }
     s.disk.save_procedures(s.procedures);
     return StringResult::Ok("Procedure '" + name + "' dropped.");
 }
 
 StringResult Executor::exec_create_function(SharedDatabase& s, std::string name, std::vector<std::string> params, std::string body) {
+    if (auto same = find_named(s.user_functions, name); same != s.user_functions.end()) s.user_functions.erase(same);
     s.user_functions[name] = UserFunctionDef{std::move(params), std::move(body)};
     s.disk.save_functions(s.user_functions);
     return StringResult::Ok("Function '" + name + "' created.");
 }
 
 StringResult Executor::exec_drop_function(SharedDatabase& s, std::string name, bool if_exists) {
-    if (s.user_functions.erase(name) == 0 && !if_exists) return StringResult::Err("Function '" + name + "' does not exist");
+    auto it = find_named(s.user_functions, name);
+    if (it == s.user_functions.end()) {
+        if (!if_exists) return StringResult::Err("Function '" + name + "' does not exist");
+    } else {
+        s.user_functions.erase(it);
+    }
     s.disk.save_functions(s.user_functions);
     return StringResult::Ok("Function '" + name + "' dropped.");
 }
@@ -226,13 +253,19 @@ StringResult Executor::exec_create_trigger(SharedDatabase& s, std::string name, 
                                             std::vector<Statement> body) {
     std::string timing_str = timing == TriggerTiming::Before ? "BEFORE" : "AFTER";
     std::string event_str = event == TriggerEvent::Insert ? "INSERT" : (event == TriggerEvent::Update ? "UPDATE" : "DELETE");
+    if (auto same = find_named(s.triggers, name); same != s.triggers.end()) s.triggers.erase(same);
     s.triggers[name] = TriggerDef{table, timing_str, event_str, std::move(body)};
     s.disk.save_triggers(s.triggers);
     return StringResult::Ok("Trigger '" + name + "' created.");
 }
 
 StringResult Executor::exec_drop_trigger(SharedDatabase& s, std::string name, bool if_exists) {
-    if (s.triggers.erase(name) == 0 && !if_exists) return StringResult::Err("Trigger '" + name + "' does not exist");
+    auto it = find_named(s.triggers, name);
+    if (it == s.triggers.end()) {
+        if (!if_exists) return StringResult::Err("Trigger '" + name + "' does not exist");
+    } else {
+        s.triggers.erase(it);
+    }
     s.disk.save_triggers(s.triggers);
     return StringResult::Ok("Trigger '" + name + "' dropped.");
 }
@@ -243,13 +276,13 @@ StringResult Executor::exec_execute(SharedDatabase& s, const std::string& name, 
     std::string query = it->second;
 
     for (auto& var : using_vars) {
-        auto vit = user_vars.find(var);
+        auto vit = user_vars.find(to_lower_str(var));
         std::string val = vit != user_vars.end() ? vit->second : "NULL";
         auto pos = query.find('?');
         if (pos != std::string::npos) query.replace(pos, 1, val);
     }
 
-    Parser parser(query);
+    Parser parser(query, pipes_as_concat());
     auto parsed = parser.parse();
     if (parsed.is_err()) return StringResult::Err("EXECUTE parse error: " + parsed.error());
     return execute_with_s(s, std::move(parsed).value());

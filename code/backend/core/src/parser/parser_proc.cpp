@@ -210,7 +210,7 @@ Statement Parser::parse_create_trigger() {
     }
     if (!peek_is(TokenKind::On)) throw ParseError("Expected ON");
     advance();
-    std::string table = expect_ident();
+    std::string table = expect_table_name();
     if (peek_is(TokenKind::For)) advance();
     if (peek_is(TokenKind::Each)) advance();
     if (peek_is(TokenKind::Row)) advance();

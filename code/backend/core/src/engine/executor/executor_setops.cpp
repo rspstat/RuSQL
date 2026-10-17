@@ -16,6 +16,14 @@ namespace {
 
 std::optional<double> parse_f64(const std::string& s) { return parse_number(s); }
 
+bool ieq(const std::string& a, const std::string& b) {
+    if (a.size() != b.size()) return false;
+    for (std::size_t i = 0; i < a.size(); i++) {
+        if (std::tolower(static_cast<unsigned char>(a[i])) != std::tolower(static_cast<unsigned char>(b[i]))) return false;
+    }
+    return true;
+}
+
 int cmp_key(const std::string& a, const std::string& b) {
     const bool a_null = a == "NULL", b_null = b == "NULL"; // NULL sorts before every value
     if (a_null || b_null) return a_null == b_null ? 0 : (a_null ? -1 : 1);
@@ -25,9 +33,7 @@ int cmp_key(const std::string& a, const std::string& b) {
         if (*pa > *pb) return 1;
         return 0;
     }
-    if (a < b) return -1;
-    if (a > b) return 1;
-    return 0;
+    return collation::compare(a, b); // (two texts: MySQL's default collation, which does not tell 'a' from 'A')
 }
 
 bool row_order_less(const Row& a, const Row& b, const std::vector<OrderBy>& order_by) {
@@ -55,8 +61,10 @@ std::optional<std::string> resolve_set_order(std::vector<OrderBy>& order_by, con
         }
         if (std::find(cols.begin(), cols.end(), ord.column) != cols.end()) continue;
         const std::string bare = ord.column.substr(ord.column.rfind('.') == std::string::npos ? 0 : ord.column.rfind('.') + 1);
-        if (std::find(cols.begin(), cols.end(), bare) == cols.end()) return "Unknown column '" + ord.column + "' in 'order clause'";
-        ord.column = bare;
+        // (a column of the answer is called by its name apart from case)
+        auto spelled = std::find_if(cols.begin(), cols.end(), [&](const std::string& c) { return ieq(c, bare); });
+        if (spelled == cols.end()) return "Unknown column '" + ord.column + "' in 'order clause'";
+        ord.column = *spelled;
     }
     return std::nullopt;
 }

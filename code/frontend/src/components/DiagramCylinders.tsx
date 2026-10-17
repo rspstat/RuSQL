@@ -49,8 +49,8 @@ const NODES: Node[] = [
   },
   {
     id: "parser", x: 525, y: 350, w: 120, h: 98, c: C.core, name: L("Parser", "파서"),
-    desc: L("Lexer + recursive-descent parser: SQL text becomes an AST (DDL, DML, DCL, TCL, procedures); a select item may name its column with or without AS; INSERT / REPLACE also take SET col = value; UNSIGNED integers keep their range; x op ANY / SOME / ALL (subquery); row constructors (a, b) IN (…); COUNT(DISTINCT a, b).",
-            "렉서 + 재귀 하향 파서: SQL 텍스트를 AST로 변환(DDL, DML, DCL, TCL, 프로시저); select 항목의 열 이름은 AS 없이도 붙일 수 있고 INSERT / REPLACE는 SET col = 값 형식도 받고 UNSIGNED 정수는 자기 범위를 지키고 x op ANY / SOME / ALL (서브쿼리)와 행 생성자 (a, b) IN (…)와 COUNT(DISTINCT a, b)도 읽음."),
+    desc: L("Lexer + recursive-descent parser: SQL text becomes an AST (DDL, DML, DCL, TCL, procedures); a select item may name its column with or without AS; INSERT / REPLACE also take SET col = value; UNSIGNED integers keep their range; x op ANY / SOME / ALL (subquery); row constructors (a, b) IN (…) and as a value; COUNT(DISTINCT a, b); names without regard to case (tables, columns, aliases, indexes, routines, @variables) and db.table in every statement; || is OR unless PIPES_AS_CONCAT.",
+            "렉서 + 재귀 하향 파서: SQL 텍스트를 AST로 변환(DDL, DML, DCL, TCL, 프로시저); select 항목의 열 이름은 AS 없이도 붙일 수 있고 INSERT / REPLACE는 SET col = 값 형식도 받고 UNSIGNED 정수는 자기 범위를 지키고 x op ANY / SOME / ALL (서브쿼리)와 행 생성자 (a, b) IN (…)(값 자리 포함)와 COUNT(DISTINCT a, b)도 읽고, 이름은 대소문자를 구분하지 않으며(표·열·별칭·색인·루틴·@변수) db.표를 모든 문장에서 받고, ||는 PIPES_AS_CONCAT이 없으면 OR."),
   },
   {
     id: "planner", x: 705, y: 350, w: 120, h: 98, c: C.core, name: L("Planner", "플래너"),

@@ -149,7 +149,8 @@ Statement Executor::qualify_stmt(const SharedDatabase& s, Statement stmt) const 
         v->table = qualify_name(v->table);
         return stmt;
     }
-    if (std::holds_alternative<Statement::DropIndex>(stmt.data)) {
+    if (auto* v = std::get_if<Statement::DropIndex>(&stmt.data)) {
+        if (v->table) v->table = qualify_name(*v->table);
         return stmt;
     }
     if (auto* v = std::get_if<Statement::CreateView>(&stmt.data)) {

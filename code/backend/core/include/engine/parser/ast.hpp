@@ -603,7 +603,7 @@ struct Statement {
         std::vector<std::string> columns;
         bool using_hash = false;
     };
-    struct DropIndex { std::string index_name; };
+    struct DropIndex { std::string index_name; std::optional<std::string> table; }; // DROP INDEX name [ON table]
     struct CreateView { std::string name; StatementPtr query; std::string raw_sql; };
     struct DropView { std::string name; };
     struct ShowTables {};

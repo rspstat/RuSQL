@@ -875,7 +875,7 @@ void to_json(nlohmann::json& j, const Statement& stmt) {
                                                                    {"table", alt.table},
                                                                    {"columns", alt.columns},
                                                                    {"using_hash", alt.using_hash}}}};
-            else if constexpr (std::is_same_v<T, Statement::DropIndex>) j = nlohmann::json{{"DropIndex", nlohmann::json{{"index_name", alt.index_name}}}};
+            else if constexpr (std::is_same_v<T, Statement::DropIndex>) { j = nlohmann::json{{"DropIndex", nlohmann::json{{"index_name", alt.index_name}}}}; if (alt.table) j["DropIndex"]["table"] = *alt.table; }
             else if constexpr (std::is_same_v<T, Statement::CreateView>)
                 j = nlohmann::json{{"CreateView", nlohmann::json{{"name", alt.name}, {"query", *alt.query}, {"raw_sql", alt.raw_sql}}}};
             else if constexpr (std::is_same_v<T, Statement::DropView>) j = nlohmann::json{{"DropView", nlohmann::json{{"name", alt.name}}}};
@@ -1145,7 +1145,7 @@ void from_json(const nlohmann::json& j, Statement& stmt) {
         stmt = Statement(Statement::CreateIndex{p.at("index_name").get<std::string>(), p.at("table").get<std::string>(),
                                                   p.at("columns").get<std::vector<std::string>>(), p.at("using_hash").get<bool>()});
     } else if (tag == "DropIndex") {
-        stmt = Statement(Statement::DropIndex{p.at("index_name").get<std::string>()});
+        stmt = Statement(Statement::DropIndex{p.at("index_name").get<std::string>(), p.contains("table") ? std::optional<std::string>(p.at("table").get<std::string>()) : std::nullopt});
     } else if (tag == "CreateView") {
         stmt = Statement(Statement::CreateView{p.at("name").get<std::string>(), std::make_unique<Statement>(p.at("query").get<Statement>()),
                                                 p.at("raw_sql").get<std::string>()});

@@ -41,6 +41,7 @@
 #include "engine/table_stats.hpp"
 #include "engine/transaction/txn_manager.hpp"
 #include "engine/unique_probe.hpp"
+#include "engine/scan_order.hpp"
 
 namespace engine {
 
@@ -195,6 +196,8 @@ struct SharedDatabase {
 
     // The cache of the UNIQUE values the live rows of each table hold (engine/unique_probe.hpp): a one-row INSERT asks it before it scans the table for a duplicate.
     std::shared_ptr<UniqueProbes> unique_probes = std::make_shared<UniqueProbes>();
+    // The order a scan reads each table that has a PRIMARY KEY in (engine/scan_order.hpp)
+    std::shared_ptr<ScanOrders> scan_orders = std::make_shared<ScanOrders>();
 
     // mysql_native_password challenge-response verification (nonce is a 20-byte challenge)
     // -- used by both the MySQL wire protocol listener and the native TCP protocol's own
@@ -242,6 +245,8 @@ public:
     // restore's replay loop via an RAII guard, exactly like mysql.exe's dump format
     // bracketing itself with SET FOREIGN_KEY_CHECKS=0/1.
     bool skip_fk_checks = false;
+    // sql_mode has PIPES_AS_CONCAT (or ANSI, which includes it): `a || b` joins texts instead of being the logical OR
+    bool pipes_as_concat() const;
     // Tables this session currently holds via LOCK TABLES (V1 scope, see
     // executor_dcl.cpp's exec_lock_tables) -- released by UNLOCK TABLES or
     // release_explicit_table_locks() at connection teardown.
@@ -431,6 +436,9 @@ private:
 
     static std::pair<std::string, std::string> split_key(const std::string& key);
     std::string qualify_name(const std::string& name) const;
+    // Rewrites the table, database and column names a statement spells in another case to the spelling the catalog has (executor_names.cpp).
+    void resolve_names(Statement& stmt) const;
+    void resolve_names(const SharedDatabase& s, Statement& stmt) const; // (the lock is already held: a statement of a procedure or a trigger)
     std::string qualify_name_with_synonyms(const SharedDatabase& s, const std::string& name) const;
     static std::string strip_db_prefix(const std::string& name);
     static std::optional<CondExpr> merge_conditions(std::optional<CondExpr> a, std::optional<CondExpr> b);
@@ -633,7 +641,7 @@ private:
     StringResult exec_drop_database(SharedDatabase& s, const std::string& name, bool if_exists);
     StringResult exec_create_index(SharedDatabase& s, const std::string& index_name, const std::string& table,
                                     const std::vector<std::string>& columns, bool using_hash);
-    StringResult exec_drop_index(SharedDatabase& s, const std::string& index_name);
+    StringResult exec_drop_index(SharedDatabase& s, const std::string& index_name, const std::optional<std::string>& table = std::nullopt);
     StringResult exec_create_view(SharedDatabase& s, const std::string& name, Statement query, const std::string& raw_sql);
     StringResult exec_drop_view(SharedDatabase& s, const std::string& name);
     void persist_views_for_db(const SharedDatabase& s, const std::string& db) const;
@@ -900,6 +908,9 @@ public:
     void unique_probe_inserted(SharedDatabase& s, const std::string& table, const TableSchema& schema, const std::vector<Row>& rows);
     void unique_probe_commit(SharedDatabase& s, const std::string& table); // (a COMMIT changes no live row)
     bool unique_probe_stamp(SharedDatabase& s, const std::string& table, std::uint64_t& locks_id, std::uint64_t& data_id, std::uint64_t& sum) const;
+    // The positions of the row versions of `table` (`rows`) in the order of its PRIMARY KEY, which is the order a scan with no ORDER BY reads them in; null when they
+    // already lie in it (or the table has no primary key). Kept per table until a writer touches it (engine/scan_order.hpp).
+    std::shared_ptr<const std::vector<std::uint32_t>> scan_key_order(SharedDatabase& s, const std::string& table, const std::vector<Row>& rows) const;
 
     // ── Table partitioning (PARTITION BY RANGE/LIST/HASH, V1 -- executor_partition.cpp)
     // A partitioned table's catalog entry (TableSchema::partition_info) is the single
@@ -1011,6 +1022,7 @@ private:
     // given, a trigger's `NEW.x` / `OLD.x` -- by its value (executor_vars.cpp).
     void substitute_variables(Statement& stmt, const std::unordered_map<std::string, std::string>* row = nullptr) const;
     void substitute_variables(ArithExpr& expr, const std::unordered_map<std::string, std::string>* row = nullptr) const;
+    static void substitute_parameters(ArithExpr& expr, const std::unordered_map<std::string, std::string>& values);
     bool proc_condition(const CondExpr& condition) const;
     // An expression or condition that is evaluated by itself (SET x = ..., IF / WHILE / UNTIL, SET NEW.x = ..., a CALL's argument, an INSERT's value, the
     // body of a function) may hold subqueries: they get the database prefix and are bound as the item (or the WHERE) of a `SELECT ... FROM _dual_`

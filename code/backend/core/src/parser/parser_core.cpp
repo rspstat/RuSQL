@@ -16,9 +16,14 @@ std::string to_upper(const std::string& s) {
 }
 } // namespace
 
-Parser::Parser(const std::string& input) {
+Parser::Parser(const std::string& input, bool pipes_as_concat) {
     Lexer lexer(input);
     tokens_ = lexer.tokenize();
+    if (!pipes_as_concat) {
+        for (Token& t : tokens_) {
+            if (t.kind == TokenKind::PipePipe) t.kind = TokenKind::Or; // a || b is a OR b
+        }
+    }
 }
 
 const Token* Parser::peek() const {
@@ -101,6 +106,16 @@ std::string Parser::expect_ident() {
     if (t && t->kind == TokenKind::Ident) return t->text;
     if (t && is_plain_word(t->kind) && !t->word.empty()) return t->word;
     throw ParseError("Expected identifier");
+}
+
+// A table (or view) name, with the database in front of it when it has one: `db.t`
+std::string Parser::expect_table_name() {
+    std::string name = expect_ident();
+    if (peek_is(TokenKind::Dot)) {
+        advance();
+        name += "." + expect_any_name();
+    }
+    return name;
 }
 
 std::optional<std::string> Parser::parse_table_alias() {

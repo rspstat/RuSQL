@@ -113,7 +113,7 @@ TEST_CASE("a function, an aggregate or a CAST can start an expression", "[value_
     table_a(ex);
     REQUIRE(q(ex, "SELECT id, COALESCE(v, 0) + COALESCE(w, 0) FROM a ORDER BY id") == Rows{{"1", "12"}, {"2", "3"}, {"3", "30"}, {"4", "0"}, {"5", "14"}});
     REQUIRE(q(ex, "SELECT id, LENGTH(s) + 1 FROM a ORDER BY id") == Rows{{"1", "2"}, {"2", N}, {"3", "2"}, {"4", "3"}, {"5", "4"}});
-    REQUIRE(q(ex, "SELECT id, UPPER(s) || '!' FROM a ORDER BY id") == Rows{{"1", "X!"}, {"2", N}, {"3", "Z!"}, {"4", "12!"}, {"5", "ABC!"}});
+    REQUIRE(q(ex, "SELECT id, CONCAT(UPPER(s), '!') FROM a ORDER BY id") == Rows{{"1", "X!"}, {"2", N}, {"3", "Z!"}, {"4", "12!"}, {"5", "ABC!"}});
     REQUIRE(q(ex, "SELECT id, CAST(v AS SIGNED) + 1 FROM a ORDER BY id") == Rows{{"1", "11"}, {"2", N}, {"3", "31"}, {"4", "1"}, {"5", "8"}});
     REQUIRE(q(ex, "SELECT id, ABS(v - 20) * 2 FROM a ORDER BY id") == Rows{{"1", "20"}, {"2", N}, {"3", "20"}, {"4", "40"}, {"5", "26"}});
     REQUIRE(q(ex, "SELECT id, 2 * ABS(v - 20) FROM a ORDER BY id") == Rows{{"1", "20"}, {"2", N}, {"3", "20"}, {"4", "40"}, {"5", "26"}});
@@ -400,10 +400,10 @@ TEST_CASE("INSERT values and UPDATE assignments are expressions", "[value_expres
     // (the assignments run in the order written and each sees the ones before it, as MySQL does: d = (v > 5) reads the v that was just set)
     REQUIRE(q(ex, "SELECT id, v, d FROM c WHERE id >= 4 AND id <= 5 ORDER BY id") == Rows{{"4", "1", "0"}, {"5", "2", "0"}});
     // ON DUPLICATE KEY UPDATE
-    ok(ex, "INSERT INTO c VALUES (1, 0, 'x', 0) ON DUPLICATE KEY UPDATE v = CASE WHEN VALUES(v) = 0 THEN 100 ELSE 200 END, s = UPPER(s) || '?'");
+    ok(ex, "INSERT INTO c VALUES (1, 0, 'x', 0) ON DUPLICATE KEY UPDATE v = CASE WHEN VALUES(v) = 0 THEN 100 ELSE 200 END, s = CONCAT(UPPER(s), '?')");
     REQUIRE(q(ex, "SELECT v, s FROM c WHERE id = 1") == Rows{{"100", "R?"}});
     // an expression that cannot be a value of the column is refused like any other value, and nothing is inserted
-    const std::string refused = error_of(ex, "INSERT INTO c VALUES (9, 'abc' || 'def', 'x', 0)");
+    const std::string refused = error_of(ex, "INSERT INTO c VALUES (9, CONCAT('abc', 'def'), 'x', 0)");
     REQUIRE(!refused.empty());
     REQUIRE(one(ex, "SELECT COUNT(*) FROM c WHERE id = 9") == "0");
 }

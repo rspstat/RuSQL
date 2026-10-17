@@ -314,7 +314,7 @@ SELECT category_id, SUM(warehouse_id IS NULL) AS no_warehouse_flagged, COUNT(sup
 /* SECTION 8 : parser-compatibility grab bag                      */
 /* ============================================================ */
 SELECT id, name, status FROM product WHERE status <> 'discontinued' AND category_id <> 8 ORDER BY id LIMIT 4;
-SELECT name || ' (' || sku || ')' AS label FROM product ORDER BY id LIMIT 4;
+SELECT CONCAT(name, ' (', sku, ')') AS label FROM product ORDER BY id LIMIT 4;
 SELECT name, stock_qty, stock_qty % 10 AS remainder_10 FROM product ORDER BY id LIMIT 4;
 SELECT id, name, unit_price FROM product ORDER BY unit_price DESC LIMIT 2 OFFSET 2;
 SELECT name, is_taxable FROM product WHERE is_taxable = TRUE ORDER BY id LIMIT 4;

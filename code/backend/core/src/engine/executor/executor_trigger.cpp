@@ -7,6 +7,11 @@
 namespace engine {
 
 namespace {
+std::string to_lower_str(std::string s) {
+    for (char& c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    return s;
+}
+
 // A trigger body's own DML can fire further triggers (directly, or via a chain through
 // another table) with no natural termination guarantee -- cap the depth so a runaway
 // trigger chain fails loudly instead of recursing until stack overflow while holding
@@ -49,12 +54,12 @@ StringResult Executor::fire_triggers(SharedDatabase& s, const std::string& table
             std::unordered_map<std::string, std::string> vars;
             if (row.old_row) {
                 for (auto& [column, value] : *row.old_row) {
-                    if (!column.empty() && column[0] != '_') vars["OLD." + column] = value;
+                    if (!column.empty() && column[0] != '_') vars["OLD." + to_lower_str(column)] = value; // (NEW.x and OLD.x are read apart from case)
                 }
             }
             if (row.new_row) {
                 for (auto& [column, value] : *row.new_row) {
-                    if (!column.empty() && column[0] != '_') vars["NEW." + column] = value;
+                    if (!column.empty() && column[0] != '_') vars["NEW." + to_lower_str(column)] = value;
                 }
             }
             for (const Statement& original : body) {
@@ -68,13 +73,18 @@ StringResult Executor::fire_triggers(SharedDatabase& s, const std::string& table
                     ArithExpr expr = set->expr;
                     substitute_variables(expr, &vars);
                     bind_expression(s, expr, false);
-                    const std::string column = set->name.substr(4);
+                    std::string column = set->name.substr(4);
+                    for (const auto& [stored, unused] : *row.new_row) { // (the column is the one of the table whatever case it is written in)
+                        (void)unused;
+                        if (to_lower_str(stored) == to_lower_str(column)) { column = stored; break; }
+                    }
                     const std::string value = eval_arith(Row{}, expr);
                     (*row.new_row)[column] = value;
-                    vars["NEW." + column] = value;
+                    vars["NEW." + to_lower_str(column)] = value;
                     continue;
                 }
                 Statement stmt = original;
+                resolve_names(s, stmt);
                 substitute_variables(stmt, &vars);
                 auto result = execute_with_s(s, std::move(stmt));
                 if (result.is_err()) {

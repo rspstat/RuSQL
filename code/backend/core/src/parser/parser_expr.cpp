@@ -421,6 +421,7 @@ ArithExpr Parser::parse_value_not() {
 }
 
 ArithExpr Parser::parse_value_pred() {
+    if (row_constructor_ahead()) return value_of_cond(parse_row_condition()); // SELECT (1, 2) = (1, 2)
     if (peek_is(TokenKind::Exists) || (peek_is(TokenKind::Not) && peek_at_is(1, TokenKind::Exists))) return value_of_cond(parse_pred_expr());
     ArithExpr left = parse_arith_expr();
     if (!at_pred_operator()) return left;

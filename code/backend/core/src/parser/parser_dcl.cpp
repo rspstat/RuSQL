@@ -87,11 +87,11 @@ Statement Parser::parse_show() {
     if (t->kind == TokenKind::Create) {
         const Token* n = advance();
         if (n && n->kind == TokenKind::Table) {
-            std::string table = expect_ident();
+            std::string table = expect_table_name();
             return Statement(Statement::ShowCreateTable{table});
         }
         if (n && n->kind == TokenKind::View) {
-            std::string view = expect_ident();
+            std::string view = expect_table_name();
             return Statement(Statement::ShowCreateView{view});
         }
         throw ParseError("Expected TABLE or VIEW after SHOW CREATE");
@@ -100,7 +100,7 @@ Statement Parser::parse_show() {
         const Token* n = advance();
         bool ok = n && (n->kind == TokenKind::From || (n->kind == TokenKind::Ident && to_upper(n->text) == "IN"));
         if (!ok) throw ParseError("Expected FROM after SHOW INDEX");
-        std::string table = expect_ident();
+        std::string table = expect_table_name();
         return Statement(Statement::ShowIndex{table});
     }
     if (t->kind == TokenKind::Ident && to_upper(t->text) == "PROCESSLIST") return Statement(Statement::ShowProcessList{});
@@ -269,14 +269,14 @@ Statement Parser::parse_deallocate() {
 }
 
 Statement Parser::parse_describe() {
-    std::string table = expect_ident();
+    std::string table = expect_table_name();
     return Statement(Statement::Describe{table});
 }
 
 Statement Parser::parse_truncate() {
     if (!peek_is(TokenKind::Table)) throw ParseError("Expected TABLE");
     advance();
-    std::string name = expect_ident();
+    std::string name = expect_table_name();
     return Statement(Statement::TruncateTable{name});
 }
 

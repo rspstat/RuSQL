@@ -41,13 +41,25 @@ struct Vars {
             // (text that merely starts with @ -- `@n + 1`, the argument of a function -- is not a variable's name; `@@x`, a server variable, is)
             const std::size_t from = name.size() > 2 && name[1] == '@' ? 2 : 1;
             if (name.size() < 2 || !std::all_of(name.begin() + static_cast<std::ptrdiff_t>(from), name.end(), [](unsigned char c) { return std::isalnum(c) || c == '_'; })) return std::nullopt;
-            auto it = user.find(name.substr(1));
+            std::string key = name.substr(1); // (@V and @v are one variable: the names are kept in lower case)
+            for (char& c : key) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+            auto it = user.find(key);
             return it != user.end() ? it->second : std::string(EXECUTOR_NULL_VALUE); // an unset @variable is NULL
         }
         if (row) {
-            if (auto it = row->find(name); it != row->end()) return it->second; // (the parser writes NEW.x / OLD.x in capitals)
+            if (name.size() > 4 && name[3] == '.') { // (the parser writes NEW.x / OLD.x with the prefix in capitals; the column is kept in lower case)
+                std::string key = name;
+                for (std::size_t i = 4; i < key.size(); i++) key[i] = static_cast<char>(std::tolower(static_cast<unsigned char>(key[i])));
+                if (auto it = row->find(key); it != row->end()) return it->second;
+            }
+            if (auto it = row->find(name); it != row->end()) return it->second;
         }
         if (auto it = proc.find(name); it != proc.end()) return it->second;
+        // (a procedure's variable is called by its name apart from case)
+        for (const auto& [variable, value] : proc) {
+            if (variable.size() != name.size()) continue;
+            if (std::equal(variable.begin(), variable.end(), name.begin(), [](unsigned char a, unsigned char b) { return std::tolower(a) == std::tolower(b); })) return value;
+        }
         return std::nullopt;
     }
 };
@@ -299,6 +311,14 @@ ArithExpr Executor::value_constant(const std::string& value) {
     return ArithExpr(ArithExpr::Str{value});
 }
 
+bool Executor::pipes_as_concat() const {
+    auto it = user_vars.find("@sql_mode");
+    if (it == user_vars.end()) return false;
+    std::string mode = it->second;
+    for (char& c : mode) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+    return mode.find("PIPES_AS_CONCAT") != std::string::npos || mode.find("ANSI") != std::string::npos;
+}
+
 void Executor::substitute_variables(Statement& stmt, const std::unordered_map<std::string, std::string>* row) const {
     if (proc_vars.empty() && user_vars.empty() && !row) return;
     statement(Vars{proc_vars, user_vars, row}, stmt);
@@ -306,6 +326,12 @@ void Executor::substitute_variables(Statement& stmt, const std::unordered_map<st
 
 void Executor::substitute_variables(ArithExpr& expr, const std::unordered_map<std::string, std::string>* row) const {
     arith(Vars{proc_vars, user_vars, row}, expr);
+}
+
+// The parameters of a stored function are read in its body by their names apart from case (`RETURN X * 2` for a parameter x).
+void Executor::substitute_parameters(ArithExpr& expr, const std::unordered_map<std::string, std::string>& values) {
+    static const std::unordered_map<std::string, std::string> none;
+    arith(Vars{values, none, nullptr}, expr);
 }
 
 // The condition of an IF / WHILE / UNTIL: its subqueries read the variables as they are now (the condition is evaluated again in every round of a loop).

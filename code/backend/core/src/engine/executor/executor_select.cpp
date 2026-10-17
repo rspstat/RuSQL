@@ -372,6 +372,100 @@ std::vector<std::size_t> order_rows(const std::vector<const Row*>& rows, const s
     return order;
 }
 
+// MySQL reads a table that has a PRIMARY KEY in the order of the key (InnoDB keeps its rows in the clustered index). Here the rows lie in the order they were
+// written and an UPDATE puts the new version of a row at the end, so a scan with no ORDER BY showed the updated rows last (and rows inserted out of order as
+// they came). The rows of a scan are put in key order when they are not in it already: one pass over the neighbours finds that out, the sort runs only then.
+// The key as the sort wants it: the PRIMARY KEY columns and what each holds (none for a table without one).
+std::vector<OrderBy> primary_key_parts(const TableSchema* schema) {
+    std::vector<OrderBy> key;
+    if (!schema) return key;
+    for (const std::string& name : schema->identity_columns()) {
+        OrderBy part;
+        part.column = name;
+        for (const ColumnDef& c : schema->columns) {
+            if (c.name == name) part.cls = class_of_type(c.data_type);
+        }
+        key.push_back(std::move(part));
+    }
+    return key;
+}
+
+// do the rows lie in key order (one pass over the neighbours)
+bool lie_in_key_order(const std::vector<const Row*>& rows, const std::vector<OrderBy>& key, RowLookup lookup) {
+    auto before_or_equal = [&](const Row& a, const Row& b) {
+        for (const OrderBy& part : key) {
+            const std::string* x = lookup(a, part.column);
+            const std::string* y = lookup(b, part.column);
+            if (!x || !y) return true; // (no key to compare: leave the rows as they are)
+            int cmp;
+            std::optional<std::int64_t> xi, yi;
+            if (part.cls != ValueClass::Text && (xi = parse_int64_text(*x)) && (yi = parse_int64_text(*y))) {
+                cmp = *xi < *yi ? -1 : (*xi > *yi ? 1 : 0);
+            } else if (part.cls != ValueClass::Text && parse_f64(*x) && parse_f64(*y)) {
+                const double xf = *parse_f64(*x), yf = *parse_f64(*y);
+                cmp = xf < yf ? -1 : (xf > yf ? 1 : 0);
+            } else {
+                cmp = collation::compare(*x, *y);
+            }
+            if (cmp != 0) return cmp < 0;
+        }
+        return true;
+    };
+    for (std::size_t i = 1; i < rows.size(); i++) {
+        if (!before_or_equal(*rows[i - 1], *rows[i])) return false;
+    }
+    return true;
+}
+
+// the rows of a scan that did not read the whole table (an index lookup, a bucket): put in key order when they are not in it
+void in_primary_key_order(const TableSchema* schema, std::vector<const Row*>& rows, RowLookup lookup) {
+    if (!schema || rows.size() < 2) return;
+    const std::vector<OrderBy> key = primary_key_parts(schema);
+    if (key.empty() || lie_in_key_order(rows, key, lookup)) return;
+    const std::vector<std::size_t> order = order_rows(rows, key, lookup);
+    std::vector<const Row*> sorted;
+    sorted.reserve(rows.size());
+    for (std::size_t i : order) sorted.push_back(rows[i]);
+    rows = std::move(sorted);
+}
+
+// all the row versions of a table: their positions in key order, or null when they lie in it already. A table with one integer key (the usual one) does it with
+// one read of the key per row; any other key goes through the sort ORDER BY uses.
+std::shared_ptr<const std::vector<std::uint32_t>> key_order_of_rows(const TableSchema* schema, const std::vector<Row>& rows, RowLookup lookup) {
+    const std::vector<OrderBy> key = primary_key_parts(schema);
+    if (key.empty()) return nullptr;
+    const std::size_t n = rows.size();
+    if (key.size() == 1 && key[0].cls != ValueClass::Text) {
+        std::vector<std::pair<std::int64_t, std::uint32_t>> keys;
+        keys.reserve(n);
+        bool whole_numbers = true, sorted = true;
+        for (std::size_t i = 0; i < n && whole_numbers; i++) {
+            const std::string* v = lookup(rows[i], key[0].column);
+            std::optional<std::int64_t> number = v ? parse_int64_text(*v) : std::nullopt;
+            if (!number) {
+                whole_numbers = false;
+                break;
+            }
+            if (!keys.empty() && *number < keys.back().first) sorted = false;
+            keys.emplace_back(*number, static_cast<std::uint32_t>(i));
+        }
+        if (whole_numbers) {
+            if (sorted) return nullptr;
+            std::sort(keys.begin(), keys.end()); // (equal keys -- an old and a new version of a row -- stay in the order they lie in)
+            auto order = std::make_shared<std::vector<std::uint32_t>>();
+            order->reserve(n);
+            for (const auto& entry : keys) order->push_back(entry.second);
+            return order;
+        }
+    }
+    std::vector<const Row*> pointers;
+    pointers.reserve(n);
+    for (const Row& r : rows) pointers.push_back(&r);
+    if (lie_in_key_order(pointers, key, lookup)) return nullptr;
+    const std::vector<std::size_t> order = order_rows(pointers, key, lookup);
+    return std::make_shared<std::vector<std::uint32_t>>(order.begin(), order.end());
+}
+
 // Faithful port of executor.rs's own free-standing `arith_to_str` — a SEPARATE,
 // differently-formatted function from Parser::arith_to_string (which joins Func args
 // with ", " and puts spaces around binary operators). This one (used for default
@@ -444,6 +538,27 @@ std::string debug_agg_func_dual(const AggFunc& func) {
     return "";
 }
 } // namespace
+
+std::shared_ptr<const std::vector<std::uint32_t>> Executor::scan_key_order(SharedDatabase& s, const std::string& table, const std::vector<Row>& rows) const {
+    const TableSchema* schema = s.catalog.get_table(table);
+    if (!schema || schema->partition_info || rows.size() < 2) return nullptr;
+    std::uint64_t locks_id = 0, data_id = 0, sum = 0;
+    const bool stamped = unique_probe_stamp(s, table, locks_id, data_id, sum);
+    ScanOrders& all = *s.scan_orders;
+    if (stamped) {
+        std::lock_guard<std::mutex> guard(all.mutex);
+        auto it = all.by_table.find(table);
+        if (it != all.by_table.end() && it->second.locks_id == locks_id && it->second.data_id == data_id && it->second.sum == sum && it->second.rows == rows.size()) {
+            return it->second.order;
+        }
+    }
+    auto order = key_order_of_rows(schema, rows, &Executor::get_col);
+    if (stamped) {
+        std::lock_guard<std::mutex> guard(all.mutex);
+        all.by_table[table] = ScanOrder{locks_id, data_id, sum, rows.size(), order};
+    }
+    return order;
+}
 
 std::string Executor::window_func_default_label(WindowFunc func) {
     switch (func) {
@@ -1886,22 +2001,34 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
         for (std::size_t pos : index_hit.positions) visible_ptrs.push_back(&(*base_rows)[pos]);
     } else if (joins.empty()) {
         visible_ptrs.reserve(base_rows->size());
-        for (auto& r : *base_rows) {
-            if (is_visible_for_read(r, read_ctx)) visible_ptrs.push_back(&r);
+        if (auto key_order = scan_key_order(s, table, *base_rows)) { // (the rows are read in the order of the primary key)
+            for (std::uint32_t i : *key_order) {
+                if (is_visible_for_read((*base_rows)[i], read_ctx)) visible_ptrs.push_back(&(*base_rows)[i]);
+            }
+        } else {
+            for (auto& r : *base_rows) {
+                if (is_visible_for_read(r, read_ctx)) visible_ptrs.push_back(&r);
+            }
         }
     } else {
-        visible_rows.reserve(base_rows->size());
-        for (auto& r : *base_rows) {
-            if (!is_visible_for_read(r, read_ctx)) continue;
-            bool keep = true;
+        // the rows of the first table, in the order of its key
+        auto take = [&](const Row& r) {
+            if (!is_visible_for_read(r, read_ctx)) return;
             for (const CondExpr* f : pushed[0]) {
-                if (!eval_condexpr(r, *f)) {
-                    keep = false;
-                    break;
-                }
+                if (!eval_condexpr(r, *f)) return;
             }
-            if (keep) visible_rows.push_back(r);
+            visible_rows.push_back(r);
+        };
+        visible_rows.reserve(base_rows->size());
+        if (auto key_order = scan_key_order(s, table, *base_rows)) {
+            for (std::uint32_t i : *key_order) take((*base_rows)[i]);
+        } else {
+            for (auto& r : *base_rows) take(r);
         }
+    }
+
+    if (joins.empty() && (bucket || index_hit.usable)) { // (a scan of the whole table was read in key order above)
+        if (const TableSchema* schema = s.catalog.get_table(table); schema && !schema->partition_info) in_primary_key_order(schema, visible_ptrs, &Executor::get_col);
     }
 
     // From here the statement works on `rows_p`, pointers to the rows still in the running. A single-table scan points into
