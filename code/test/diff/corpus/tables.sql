@@ -251,3 +251,30 @@ UPDATE rt SET n = 'hit' WHERE (a, b) IN (SELECT x, y FROM rs)
 SELECT id FROM rt WHERE n = 'hit' ORDER BY id
 DELETE FROM rt WHERE (a, b) IN ((1, 1), (2, 2))
 SELECT id FROM rt ORDER BY id
+# COUNT(DISTINCT a, b): the different pairs; a row with a NULL in the pair is not counted
+--CREATE TABLE cdt (id INT PRIMARY KEY, a INT, b INT, s VARCHAR(5))
+--INSERT INTO cdt VALUES (1, 1, 1, 'x'), (2, 1, 1, 'X'), (3, 1, 2, 'x'), (4, 2, 1, NULL), (5, NULL, 1, 'y'), (6, 1, NULL, 'y'), (7, 1, 1, 'x')
+--CREATE TABLE cdu (p INT, q INT)
+--INSERT INTO cdu VALUES (1, 11), (11, 1), (1, 11)
+--CREATE TABLE cde (a INT, b INT)
+SELECT COUNT(DISTINCT a, b) FROM cdt
+SELECT COUNT(DISTINCT a, s) FROM cdt
+SELECT COUNT(DISTINCT a, b, s) FROM cdt
+SELECT COUNT(DISTINCT a + b, a) FROM cdt
+SELECT COUNT(DISTINCT p, q) FROM cdu
+SELECT COUNT(DISTINCT a, b) FROM cde
+SELECT COUNT(DISTINCT a) FROM cdt
+SELECT COUNT(DISTINCT a, b) AS pairs FROM cdt
+SELECT COUNT(DISTINCT a, b) + 1 FROM cdt
+SELECT s, COUNT(DISTINCT a, b) FROM cdt GROUP BY s ORDER BY s
+SELECT s FROM cdt GROUP BY s HAVING COUNT(DISTINCT a, b) > 1 ORDER BY s
+SELECT SUM(DISTINCT a, b) FROM cdt
+SELECT COUNT(a, b) FROM cdt
+SELECT COUNT(DISTINCT a,) FROM cdt
+--CREATE TABLE cdv (x VARCHAR(8), y VARCHAR(8))
+--INSERT INTO cdv VALUES ('a,b', 'c'), ('a', 'b,c'), ('a:1', '2'), ('a', '1:2')
+--CREATE TABLE cdw (x VARCHAR(8), y VARCHAR(8))
+--INSERT INTO cdw VALUES ('e', 'x'), ('é', 'x'), ('E', 'X')
+SELECT COUNT(DISTINCT x, y) FROM cdv
+SELECT COUNT(DISTINCT x, y) FROM cdw
+SELECT SUM(DISTINCT a, b) + 1 FROM cdt

@@ -73,6 +73,7 @@ add_executable(engine_tests
     test_unsigned.cpp
     test_quantified.cpp
     test_row_constructors.cpp
+    test_count_distinct_columns.cpp
 )
 
 target_link_libraries(engine_tests PRIVATE engine_core)

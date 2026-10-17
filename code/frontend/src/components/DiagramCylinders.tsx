@@ -49,8 +49,8 @@ const NODES: Node[] = [
   },
   {
     id: "parser", x: 525, y: 350, w: 120, h: 98, c: C.core, name: L("Parser", "파서"),
-    desc: L("Lexer + recursive-descent parser: SQL text becomes an AST (DDL, DML, DCL, TCL, procedures); a select item may name its column with or without AS; INSERT / REPLACE also take SET col = value; UNSIGNED integers keep their range; x op ANY / SOME / ALL (subquery); row constructors (a, b) IN (…).",
-            "렉서 + 재귀 하향 파서: SQL 텍스트를 AST로 변환(DDL, DML, DCL, TCL, 프로시저); select 항목의 열 이름은 AS 없이도 붙일 수 있고 INSERT / REPLACE는 SET col = 값 형식도 받고 UNSIGNED 정수는 자기 범위를 지키고 x op ANY / SOME / ALL (서브쿼리)와 행 생성자 (a, b) IN (…)도 읽음."),
+    desc: L("Lexer + recursive-descent parser: SQL text becomes an AST (DDL, DML, DCL, TCL, procedures); a select item may name its column with or without AS; INSERT / REPLACE also take SET col = value; UNSIGNED integers keep their range; x op ANY / SOME / ALL (subquery); row constructors (a, b) IN (…); COUNT(DISTINCT a, b).",
+            "렉서 + 재귀 하향 파서: SQL 텍스트를 AST로 변환(DDL, DML, DCL, TCL, 프로시저); select 항목의 열 이름은 AS 없이도 붙일 수 있고 INSERT / REPLACE는 SET col = 값 형식도 받고 UNSIGNED 정수는 자기 범위를 지키고 x op ANY / SOME / ALL (서브쿼리)와 행 생성자 (a, b) IN (…)와 COUNT(DISTINCT a, b)도 읽음."),
   },
   {
     id: "planner", x: 705, y: 350, w: 120, h: 98, c: C.core, name: L("Planner", "플래너"),

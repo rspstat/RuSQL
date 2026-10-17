@@ -233,6 +233,13 @@ Statement Parser::parse_select() {
                     // expression -- `price * qty`, `COALESCE(x, 0)`, `1`, `CASE WHEN .. END`, `v > 5` --, kept as the text of the expression:
                     // the executor computes it for every row under that text
                     agg_col = aggregate_argument_text(parse_value_expr());
+                    // COUNT(DISTINCT a, b): the rows with a different pair of values (the executor reads the text back as one value per row)
+                    if (std::holds_alternative<AggFunc::CountDistinct>(func.data)) {
+                        while (peek_is(TokenKind::Comma)) {
+                            advance();
+                            agg_col += ", " + aggregate_argument_text(parse_value_expr());
+                        }
+                    }
                 }
                 if (!peek_is(TokenKind::RParen)) throw ParseError("Expected ')'");
                 advance();

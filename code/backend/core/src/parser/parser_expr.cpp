@@ -850,6 +850,12 @@ ArithExpr Parser::parse_arith_factor() {
         if (peek_is(TokenKind::Distinct)) { advance(); inner = "DISTINCT "; }
         if (peek_is(TokenKind::Asterisk)) { advance(); inner += "*"; }
         else inner += aggregate_argument_text(parse_value_expr());
+        if (t->kind == TokenKind::Count && inner.rfind("DISTINCT ", 0) == 0) { // COUNT(DISTINCT a, b)
+            while (peek_is(TokenKind::Comma)) {
+                advance();
+                inner += ", " + aggregate_argument_text(parse_value_expr());
+            }
+        }
         if (!peek_is(TokenKind::RParen)) throw ParseError("Expected ')' after aggregate");
         advance();
         return ArithExpr(ArithExpr::Col{std::string(label) + "(" + inner + ")"});
@@ -1526,9 +1532,24 @@ std::string Parser::cond_to_string(const CondExpr& cond) {
 ArithExpr Parser::str_to_arith(const std::string& s) {
     Parser p(s);
     try {
-        ArithExpr expr = p.parse_value_expr();
+        std::vector<ArithExpr> parts;
+        parts.push_back(p.parse_value_expr());
+        while (p.peek_is(TokenKind::Comma)) { // `a, b` (COUNT(DISTINCT a, b)): one value for the pair, see below
+            p.advance();
+            parts.push_back(p.parse_value_expr());
+        }
         if (p.peek() != nullptr) return ArithExpr(ArithExpr::Col{s}); // (something is left over: not an expression)
-        return expr;
+        if (parts.size() == 1) return std::move(parts.front());
+        // The length (in characters) and the text of each part, joined: the pair is read back without a separator, so ('1', '11') and ('11', '1') differ,
+        // and two pairs are equal when their parts are equal as texts are (the default collation: 'é' is 'e'). A NULL part makes the whole NULL (CONCAT),
+        // and a row with a NULL in the pair is not counted.
+        std::vector<ArithExpr> pieces;
+        for (ArithExpr& part : parts) {
+            pieces.push_back(ArithExpr(ArithExpr::Func{"CHAR_LENGTH", {part}}));
+            pieces.push_back(ArithExpr(ArithExpr::Str{":"}));
+            pieces.push_back(std::move(part));
+        }
+        return ArithExpr(ArithExpr::Func{"CONCAT", std::move(pieces)});
     } catch (const ParseError&) {
         return ArithExpr(ArithExpr::Col{s});
     }
