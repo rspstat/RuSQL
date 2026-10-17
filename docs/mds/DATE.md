@@ -1817,6 +1817,8 @@ VS Code 스타일 탭 드래그 순서 변경(요청의 1번 항목)은 같은 �
 
 **한계**: `COUNT(DISTINCT …)` 안에 쉼표 목록을 쓰는 `OVER (…)` 창 집계는 읽지 않는다.
 
+**R26~R31 묶음 검증 (10월 17일, 마지막 커밋 `00fdb9f`의 빌드)**: Debug 전체 시험 **711 케이스를 기본(캐시 점검 모드, 1,480,804 assertions)·강제(1,480,803) 양쪽으로 통과**; 크래시 퍼저 — 외래키 90라운드(시드 6000~6089, 캐시 점검 모드)·일반 60라운드·동시성 40라운드(확인한 행 16,017) 불일치 0; `verify_writes.py` 시드 1~8 위반 0; 모델 검증기 열한 가지(`verify_agg_arguments`·`agg_expressions`·`aggregates`·`compare`·`correlated`·`joins`·`null_expressions`·`orderby_distinct`·`sort_group`·`subqueries`·`value_expressions`) 위반 0; `dump_roundtrip.py`(진짜 `mysqldump` 파일 둘) 행이 모두 같고 mysql 클라이언트 오류 0. 이 여섯 항목(R26 AS 없는 별칭 · R27 `INSERT … SET` · R28 `UNSIGNED` · R29 `ANY`/`ALL` · R30 행 생성자 · R31 `COUNT(DISTINCT a, b)`)에서 "Debug·크래시 퍼저는 따로"라고 적은 것을 이것으로 채운다. 속도 비교는 하지 않았다(파서와 서브쿼리 평가, 범위 검사 한 줄만 바뀜).
+
 ## 요약: 1학기 대비 2학기에 달라진 것
 
 | 항목 | 1학기 (~2026년 6월) | 2학기 (2026년 7~8월) |
