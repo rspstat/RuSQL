@@ -44,8 +44,8 @@ const NODES: Node[] = [
   },
   {
     id: "server", x: 335, y: 350, w: 150, h: 112, c: C.server, name: "engine_server",
-    desc: L("TCP front-end: native :7878 and MySQL wire :3306, challenge-response auth (no plaintext password), one session per connection over the shared database; the metadata statements MySQL clients send (SHOW COLUMNS / INDEX / CREATE TABLE / TABLE STATUS, system variables) are answered in MySQL's form.",
-            "TCP 프런트엔드: 네이티브 :7878과 MySQL 와이어 :3306, 챌린지-응답 인증(평문 비밀번호 없음), 공유 데이터베이스 위에서 연결당 세션 1개이고, MySQL 클라이언트가 보내는 메타데이터 문장(SHOW COLUMNS / INDEX / CREATE TABLE / TABLE STATUS, 시스템 변수)을 MySQL 형식으로 답함."),
+    desc: L("TCP front-end: native :7878 and MySQL wire :3306, challenge-response auth (no plaintext password), one session per connection over the shared database; the metadata statements MySQL clients send (SHOW COLUMNS / INDEX / CREATE TABLE / TABLE STATUS, system variables) are answered in MySQL's form and result columns carry their types (INT, DECIMAL, DATE, …).",
+            "TCP 프런트엔드: 네이티브 :7878과 MySQL 와이어 :3306, 챌린지-응답 인증(평문 비밀번호 없음), 공유 데이터베이스 위에서 연결당 세션 1개이고, MySQL 클라이언트가 보내는 메타데이터 문장(SHOW COLUMNS / INDEX / CREATE TABLE / TABLE STATUS, 시스템 변수)을 MySQL 형식으로 답하고 결과 열에 타입(INT, DECIMAL, DATE, …)을 실어 보냄."),
   },
   {
     id: "parser", x: 525, y: 350, w: 120, h: 98, c: C.core, name: L("Parser", "파서"),

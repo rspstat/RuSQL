@@ -66,6 +66,7 @@ add_library(engine_core STATIC
     src/engine/executor/executor_multi.cpp
     src/engine/executor/executor_merge.cpp
     src/engine/executor/executor_infoschema.cpp
+    src/engine/executor/executor_result_types.cpp
     ${CMAKE_SOURCE_DIR}/backend/third_party/lz4/lz4.c
 )
 

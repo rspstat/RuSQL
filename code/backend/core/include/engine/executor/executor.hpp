@@ -225,6 +225,13 @@ std::unordered_map<std::string, std::string> default_system_variables();
 // A column of an information_schema table: its name and whether it holds numbers (everything else is text).
 struct InfoSchemaColumn { const char* name; bool numeric; };
 
+// What a client is told about one column of an answer (the column types of the MySQL protocol): `column` is the table column it shows, or a made-up one
+// for COUNT / SUM / ...; `by_value` marks an arithmetic result, which is a number if its values are. Neither: text.
+struct ResultColumnType {
+    std::optional<ColumnDef> column;
+    bool by_value = false;
+};
+
 class Executor {
 public:
     std::shared_ptr<RwLock<SharedDatabase>> shared;
@@ -302,6 +309,8 @@ public:
     static const std::vector<InfoSchemaColumn>* info_schema_columns(const std::string& which);
     // `information_schema.COLUMNS` (any case) -> "columns"; nullopt for any other name
     static std::optional<std::string> info_schema_bare(const std::string& qualified_name);
+    // The types of the columns the SELECT `sql` answers with, one per column (empty: not a SELECT, or the columns cannot be matched with the select list).
+    std::vector<ResultColumnType> result_columns(const std::string& sql) const;
 
 private:
     // Row-level-concurrency Stage 4/5 correctness fix (found via concurrent-reader

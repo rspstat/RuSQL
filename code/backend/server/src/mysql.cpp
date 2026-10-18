@@ -194,8 +194,21 @@ std::vector<std::uint8_t> err_pkt(const std::string& msg) {
 
 std::vector<std::uint8_t> eof_pkt() { return {0xfe, 0x00, 0x00, 0x02, 0x00}; }
 
-// `binary`: the column holds bytes that are no text (UNHEX('FF')): the client is told so, or it fails decoding them as UTF-8
-std::vector<std::uint8_t> col_def_pkt(const std::string& name, bool binary = false) {
+// How a column that is not text goes out: the protocol's type code, its flags, scale and display length, and what its cells must look like for the
+// client to be told so (a client handed `INT` converts every cell, and fails on one that is no integer).
+struct WireType {
+    enum class Check { Integer, Number, Date, DateTime, Time };
+    std::uint8_t code = 0xfd; // 0xfd: VARSTRING, the text every column used to be
+    std::uint16_t flags = 0;
+    std::uint8_t decimals = 0;
+    std::uint32_t length = 0xffffffff;
+    Check check = Check::Integer;
+};
+
+// `binary`: the column holds bytes that are no text (UNHEX('FF')): the client is told so, or it fails decoding them as UTF-8.
+// `wire`: a number or a date, which MySQL sends with the binary character set and the BINARY flag.
+std::vector<std::uint8_t> col_def_pkt(const std::string& name, bool binary = false, const WireType* wire = nullptr) {
+    const bool typed = wire && wire->code != 0xfd;
     std::vector<std::uint8_t> p;
     lenstr(p, "def");
     lenstr(p, "");
@@ -204,16 +217,130 @@ std::vector<std::uint8_t> col_def_pkt(const std::string& name, bool binary = fal
     lenstr(p, name);
     lenstr(p, name);
     p.push_back(0x0c);
-    p.push_back(binary ? 0x3f : 0x21);
+    p.push_back(binary || typed ? 0x3f : 0x21);
     p.push_back(0x00); // charset: utf8 (33), binary (63)
-    for (int i = 0; i < 4; i++) p.push_back(0xff); // max column length
-    p.push_back(binary ? 0xfc : 0xfd);             // type: BLOB, VARSTRING
-    p.push_back(binary ? 0x80 : 0x00);
-    p.push_back(0x00); // flags (BINARY)
-    p.push_back(0x00); // decimals
+    const std::uint32_t length = typed ? wire->length : 0xffffffffu;
+    for (int i = 0; i < 4; i++) p.push_back(static_cast<std::uint8_t>((length >> (8 * i)) & 0xff)); // max column length
+    p.push_back(typed ? wire->code : binary ? 0xfc : 0xfd);                                        // type: BLOB, VARSTRING
+    const std::uint16_t flags = static_cast<std::uint16_t>((binary || typed ? 0x80 : 0) | (typed ? wire->flags : 0));
+    p.push_back(static_cast<std::uint8_t>(flags & 0xff));
+    p.push_back(static_cast<std::uint8_t>(flags >> 8)); // flags (BINARY 0x80, UNSIGNED 0x20)
+    p.push_back(typed ? wire->decimals : 0);            // decimals
     p.push_back(0x00);
     p.push_back(0x00); // filler
     return p;
+}
+
+bool digits_only(const std::string& v, std::size_t from, std::size_t to) {
+    if (from >= to) return false;
+    for (std::size_t i = from; i < to; i++) {
+        if (v[i] < '0' || v[i] > '9') return false;
+    }
+    return true;
+}
+
+bool integer_cell(const std::string& v) { return digits_only(v, !v.empty() && v[0] == '-' ? 1 : 0, v.size()); }
+
+// -12, 3.50, 1e-7
+bool number_cell(const std::string& v) {
+    std::size_t i = !v.empty() && v[0] == '-' ? 1 : 0, digits = i;
+    while (i < v.size() && v[i] >= '0' && v[i] <= '9') i++;
+    if (i == digits) return false;
+    if (i < v.size() && v[i] == '.') {
+        const std::size_t from = ++i;
+        while (i < v.size() && v[i] >= '0' && v[i] <= '9') i++;
+        if (i == from) return false;
+    }
+    if (i < v.size() && (v[i] == 'e' || v[i] == 'E')) {
+        i++;
+        if (i < v.size() && (v[i] == '+' || v[i] == '-')) i++;
+        const std::size_t from = i;
+        while (i < v.size() && v[i] >= '0' && v[i] <= '9') i++;
+        if (i == from) return false;
+    }
+    return i == v.size();
+}
+
+bool date_cell(const std::string& v) {
+    return v.size() == 10 && digits_only(v, 0, 4) && v[4] == '-' && digits_only(v, 5, 7) && v[7] == '-' && digits_only(v, 8, 10);
+}
+
+bool fraction_ok(const std::string& v, std::size_t at) { return at == v.size() || (v[at] == '.' && digits_only(v, at + 1, v.size())); }
+
+bool datetime_cell(const std::string& v) {
+    return v.size() >= 19 && date_cell(v.substr(0, 10)) && v[10] == ' ' && digits_only(v, 11, 13) && v[13] == ':' && digits_only(v, 14, 16) && v[16] == ':' &&
+           digits_only(v, 17, 19) && fraction_ok(v, 19);
+}
+
+bool time_cell(const std::string& v) {
+    const std::size_t from = !v.empty() && v[0] == '-' ? 1 : 0, colon = v.find(':', from);
+    return colon != std::string::npos && colon - from >= 1 && colon - from <= 3 && digits_only(v, from, colon) && v.size() >= colon + 6 &&
+           digits_only(v, colon + 1, colon + 3) && v[colon + 3] == ':' && digits_only(v, colon + 4, colon + 6) && fraction_ok(v, colon + 6);
+}
+
+// The wire type of column `col` of an answer, from what the statement says the column holds; text (the default type) when the statement says nothing,
+// or a cell is not what the type needs.
+WireType wire_type_for(const ResultColumnType& type, const std::vector<std::vector<std::string>>& rows, std::size_t col) {
+    using Check = WireType::Check;
+    WireType w;
+    auto fits = [&](bool (*cell)(const std::string&)) {
+        for (auto& row : rows) {
+            if (col >= row.size() || row[col] == "NULL") continue;
+            if (!cell(row[col])) return false;
+        }
+        return true;
+    };
+    auto make = [&](std::uint8_t code, std::uint32_t length, std::uint8_t decimals, Check check, std::uint16_t flags = 0) {
+        WireType t;
+        t.code = code;
+        t.length = length;
+        t.decimals = decimals;
+        t.check = check;
+        t.flags = flags;
+        bool (*cell)(const std::string&) = check == Check::Integer ? integer_cell : check == Check::Number ? number_cell : check == Check::Date ? date_cell
+                                              : check == Check::DateTime ? datetime_cell : time_cell;
+        return fits(cell) ? t : WireType();
+    };
+    if (type.column) {
+        const ColumnDef& c = *type.column;
+        const std::uint16_t un = c.is_unsigned ? 0x20 : 0;
+        return std::visit(
+            [&](const auto& alt) -> WireType {
+                using T = std::decay_t<decltype(alt)>;
+                if constexpr (std::is_same_v<T, DataType::TinyInt>) return make(1, 4, 0, Check::Integer, un);
+                else if constexpr (std::is_same_v<T, DataType::Boolean>) return make(1, 1, 0, Check::Integer);
+                else if constexpr (std::is_same_v<T, DataType::SmallInt>) return make(2, 6, 0, Check::Integer, un);
+                else if constexpr (std::is_same_v<T, DataType::Int>) return make(3, 11, 0, Check::Integer, un);
+                else if constexpr (std::is_same_v<T, DataType::BigInt>) return make(8, 20, 0, Check::Integer, un);
+                else if constexpr (std::is_same_v<T, DataType::Year>) return make(13, 4, 0, Check::Integer);
+                else if constexpr (std::is_same_v<T, DataType::Float>) return make(4, 12, 31, Check::Number);
+                else if constexpr (std::is_same_v<T, DataType::Double>) return make(5, 22, 31, Check::Number);
+                else if constexpr (std::is_same_v<T, DataType::Decimal>) return make(246, static_cast<std::uint32_t>(alt.precision) + (alt.scale ? 2 : 1), alt.scale, Check::Number);
+                else if constexpr (std::is_same_v<T, DataType::Date>) return make(10, 10, 0, Check::Date);
+                else if constexpr (std::is_same_v<T, DataType::DateTime>) return make(12, 19, 0, Check::DateTime);
+                else if constexpr (std::is_same_v<T, DataType::Timestamp>) return make(7, 19, 0, Check::DateTime);
+                else if constexpr (std::is_same_v<T, DataType::Time>) return make(11, 10, 0, Check::Time);
+                else return WireType();
+            },
+            c.data_type.data);
+    }
+    if (!type.by_value) return w;
+    // an arithmetic result: a number if every cell is one
+    bool any = false, whole = true, exponent = false;
+    std::size_t scale = 0;
+    for (auto& row : rows) {
+        if (col >= row.size() || row[col] == "NULL") continue;
+        any = true;
+        const std::string& v = row[col];
+        if (!number_cell(v)) return w;
+        if (!integer_cell(v)) whole = false;
+        if (v.find_first_of("eE") != std::string::npos) exponent = true;
+        else if (auto dot = v.find('.'); dot != std::string::npos) scale = std::max(scale, v.size() - dot - 1);
+    }
+    if (!any) return w;
+    if (whole) return make(8, 20, 0, Check::Integer);
+    if (exponent) return make(5, 22, 31, Check::Number);
+    return make(246, 40, static_cast<std::uint8_t>(std::min<std::size_t>(scale, 30)), Check::Number);
 }
 
 // ── Prepared statement support ─────────────────────────────────
@@ -581,7 +708,7 @@ std::optional<std::pair<std::vector<std::string>, std::vector<std::vector<std::s
 }
 
 bool send_resultset(SOCKET sock, const std::vector<std::string>& cols, const std::vector<std::vector<std::string>>& rows,
-                     std::uint8_t start_seq) {
+                     std::uint8_t start_seq, const std::vector<ResultColumnType>* types = nullptr) {
     std::uint8_t seq = start_seq;
 
     std::vector<std::uint8_t> cnt;
@@ -607,8 +734,11 @@ bool send_resultset(SOCKET sock, const std::vector<std::string>& cols, const std
             if (!binary[i] && row[i] != "NULL" && !valid_utf8(row[i])) binary[i] = true;
         }
     }
+    // the column types the statement gives, when it gives one for every column of the answer
+    const bool typed = types && types->size() == cols.size();
     for (std::size_t i = 0; i < cols.size(); i++) {
-        if (!write_packet(sock, seq++, col_def_pkt(cols[i], binary[i]))) return false;
+        const WireType wire = typed && !binary[i] ? wire_type_for((*types)[i], rows, i) : WireType();
+        if (!write_packet(sock, seq++, col_def_pkt(cols[i], binary[i], &wire))) return false;
     }
 
     if (!write_packet(sock, seq++, eof_pkt())) return false;
@@ -1255,7 +1385,8 @@ std::optional<StringResult> mysql_compat(const std::string& q, Executor& exec) {
 
 // ── Query execution ────────────────────────────────────────────
 
-StringResult exec_query(Executor& exec, const std::string& raw) {
+// `ran`: set to the statement the engine ran (not for the answers the compatibility layer makes), to ask it what its columns are
+StringResult exec_query(Executor& exec, const std::string& raw, std::string* ran = nullptr) {
     // (a dump is written in /*!40101 SET ... */ comments, which MySQL runs: they are put in their place before anything looks at the text)
     std::string q = trim_copy(engine::expand_executable_comments(raw));
     while (!q.empty() && q.back() == ';') q.pop_back();
@@ -1264,6 +1395,7 @@ StringResult exec_query(Executor& exec, const std::string& raw) {
 
     if (auto r = mysql_compat(q, exec)) return *r;
 
+    if (ran) *ran = q;
     return exec.execute_sql(q);
 }
 
@@ -1397,7 +1529,8 @@ void handle_mysql_client(SOCKET sock, std::shared_ptr<RwLock<SharedDatabase>> sh
                 query = trim_copy(query);
                 while (!query.empty() && query.back() == ';') query.pop_back();
                 query = trim_copy(query);
-                auto res = exec_query(exec, query);
+                std::string ran;
+                auto res = exec_query(exec, query, &ran);
                 if (res.is_err()) {
                     write_packet(sock, 1, err_pkt(res.error()));
                 } else {
@@ -1405,7 +1538,8 @@ void handle_mysql_client(SOCKET sock, std::shared_ptr<RwLock<SharedDatabase>> sh
                     if (out.empty()) {
                         write_packet(sock, 1, ok_pkt(0));
                     } else if (auto parsed = parse_table(out)) {
-                        send_resultset(sock, parsed->first, parsed->second, 1);
+                        const std::vector<ResultColumnType> types = ran.empty() ? std::vector<ResultColumnType>() : exec.result_columns(ran);
+                        send_resultset(sock, parsed->first, parsed->second, 1, &types);
                     } else {
                         write_packet(sock, 1, ok_pkt(affected_rows(out), exec.statement_insert_id()));
                     }

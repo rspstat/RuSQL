@@ -114,7 +114,7 @@ const SERVER: Item[] = [
   { t: L("Native protocol :7878", "네이티브 프로토콜 :7878"), s: L("UI, MCP and engine_client", "UI, MCP, engine_client") },
   {
     t: L("MySQL wire protocol :3306", "MySQL 와이어 프로토콜 :3306"),
-    s: L("mysql CLI, DBeaver, JDBC; COM_CHANGE_USER for pool drivers", "mysql CLI, DBeaver, JDBC, 풀 드라이버용 COM_CHANGE_USER"),
+    s: L("mysql CLI, DBeaver, JDBC; COM_CHANGE_USER for pool drivers; typed result columns (INT, DECIMAL, DATE, …)", "mysql CLI, DBeaver, JDBC, 풀 드라이버용 COM_CHANGE_USER, 열 타입(INT, DECIMAL, DATE, …)을 실어 보냄"),
   },
   {
     t: L("Challenge-response auth", "챌린지-응답 인증"),

@@ -1,4 +1,4 @@
-"""vs_mysql.py <rusql.exe> <corpus.sql> [--split] [--emit cases.inc] [--trace] [--proto]
+"""vs_mysql.py <rusql.exe> <corpus.sql> [--split] [--emit cases.inc] [--trace] [--proto [--types]]
 
 Runs the same statements on RuSQL and on a real MySQL (127.0.0.1:3391) and lists what differs.
 
@@ -45,11 +45,17 @@ def cell(v):
     return str(v)
 
 
+TYPE_CLASS = {1: "int", 2: "int", 3: "int", 8: "int", 9: "int", 13: "int", 0: "decimal", 246: "decimal", 4: "float", 5: "float", 10: "date", 7: "datetime", 12: "datetime", 11: "time"}
+LAST_TYPES = {}  # id(cursor) -> the type classes of the columns of its last answer (--types)
+
+
 def mysql_run(cur, sql):
     try:
         cur.execute(sql)
         if cur.description is None:
+            LAST_TYPES.pop(id(cur), None)
             return ("ok", None)
+        LAST_TYPES[id(cur)] = [TYPE_CLASS.get(d[1], "text") for d in cur.description]
         return ("rows", [[cell(v) for v in row] for row in cur.fetchall()])
     except Exception as e:  # noqa
         return ("err", str(e)[:100])
@@ -236,6 +242,8 @@ def main():
                 if m[0] == "err" and r[0] == "err":
                     both_err += 1
                 why = first_difference(stmt, m, r)
+                if why is None and proto and "--types" in args and m[0] == "rows" and r[0] == "rows" and LAST_TYPES.get(id(cur)) != LAST_TYPES.get(id(rcur)):
+                    why = "column types mysql=%s / rusql=%s" % (LAST_TYPES.get(id(cur)), LAST_TYPES.get(id(rcur)))
                 if why is not None:
                     diff += 1
                     if shown < show:
