@@ -14,6 +14,7 @@
 
 #include "catch.hpp"
 #include "engine/executor/executor.hpp"
+#include "engine/result_text.hpp"
 
 using namespace engine;
 namespace fs = std::filesystem;
@@ -55,18 +56,7 @@ Rows table_cells(const std::string& text) {
     while (std::getline(in, line)) {
         if (line.empty() || line[0] != '|') continue;
         if (++bars <= 1) continue;
-        std::vector<std::string> row;
-        std::size_t pos = 1;
-        while (pos < line.size()) {
-            std::size_t bar = line.find('|', pos);
-            if (bar == std::string::npos) break;
-            std::string v = line.substr(pos, bar - pos);
-            v.erase(0, v.find_first_not_of(' '));
-            v.erase(v.find_last_not_of(' ') + 1);
-            row.push_back(v);
-            pos = bar + 1;
-        }
-        rows.push_back(std::move(row));
+        rows.push_back(result_text::split_row(line)); // (a value keeps the spaces at its ends: they are written \s)
     }
     return rows;
 }
@@ -162,7 +152,7 @@ TEST_CASE("scalar functions return NULL for a NULL argument and keep their value
         {"UPPER", {"'abc'"}, 1, "ABC"}, {"LOWER", {"'ABC'"}, 1, "abc"}, {"LENGTH", {"'abcd'"}, 1, "4"},
         {"CHAR_LENGTH", {"'abcd'"}, 1, "4"}, {"CHARACTER_LENGTH", {"'abcd'"}, 1, "4"}, {"BIT_LENGTH", {"'ab'"}, 1, "16"},
         {"TRIM", {"'  a '"}, 1, "a"}, {"LTRIM", {"'  a'"}, 1, "a"}, {"RTRIM", {"'a  '"}, 1, "a"}, {"REVERSE", {"'abc'"}, 1, "cba"},
-        {"SPACE", {"3"}, 1, ""}, {"ASCII", {"'A'"}, 1, "65"}, {"HEX", {"255"}, 1, "FF"}, {"UNHEX", {"'41'"}, 1, "A"},
+        {"SPACE", {"3"}, 1, "   "}, {"ASCII", {"'A'"}, 1, "65"}, {"HEX", {"255"}, 1, "FF"}, {"UNHEX", {"'41'"}, 1, "A"},
         {"MD5", {"'a'"}, 1, "0cc175b9c0f1b6a831c399e269772661"}, {"ABS", {"-5"}, 1, "5"}, {"CEIL", {"4.1"}, 1, "5"},
         {"FLOOR", {"4.9"}, 1, "4"}, {"SQRT", {"16"}, 1, "4"}, {"EXP", {"0"}, 1, "1"}, {"SIN", {"0"}, 1, "0"},
         {"COS", {"0"}, 1, "1"}, {"TAN", {"0"}, 1, "0"}, {"SIGN", {"-3"}, 1, "-1"}, {"LOG2", {"8"}, 1, "3"},

@@ -20,6 +20,7 @@
 #include "engine/executor/builtin_functions.hpp"
 #include "engine/numeric_text.hpp"
 #include "engine/parser/parser.hpp"
+#include "engine/result_text.hpp"
 #include "engine/sql_value_util.hpp"
 
 namespace engine {
@@ -612,11 +613,12 @@ std::string Executor::format_returning_rows(const std::vector<Row>& rows, const 
         vals.reserve(headers.size());
         for (auto& [_, key] : headers) {
             auto it = row.find(key);
-            vals.push_back(it != row.end() ? it->second : EXECUTOR_NULL_VALUE);
+            vals.push_back(it != row.end() ? escape_cell(it->second) : EXECUTOR_NULL_VALUE);
         }
         data.push_back(std::move(vals));
     }
 
+    for (auto& header : headers) header.first = escape_cell(header.first); // (the cells are written escaped; the widths below count the escaped text)
     std::vector<std::size_t> widths(headers.size());
     for (std::size_t i = 0; i < headers.size(); i++) {
         std::size_t mv = 0;
@@ -649,49 +651,8 @@ void Executor::update_stat_rows(SharedDatabase& s, const std::string& table, std
     stats.total_rows = static_cast<std::size_t>(std::max<std::int64_t>(updated, 0));
 }
 
-std::string Executor::escape_cell(const std::string& v) {
-    std::string out;
-    out.reserve(v.size());
-    for (char c : v) {
-        if (c == '\\') out += "\\\\";
-        else if (c == '\n') out += "\\n";
-        else if (c == '|') out += "\\|";
-        else out += c;
-    }
-    return out;
-}
-
-namespace {
-// Reverses Executor::escape_cell() on a cell substring already extracted (and
-// whitespace-trimmed) by parse_table_output(). A lone unescaped '\' should never occur
-// in properly-escaped input (escape_cell() always escapes '\' itself first), so the
-// fallback below is defensive only.
-std::string unescape_cell(const std::string& v) {
-    std::string out;
-    out.reserve(v.size());
-    for (std::size_t i = 0; i < v.size(); i++) {
-        if (v[i] == '\\' && i + 1 < v.size()) {
-            char n = v[i + 1];
-            if (n == '\\') { out += '\\'; i++; }
-            else if (n == 'n') { out += '\n'; i++; }
-            else if (n == '|') { out += '|'; i++; }
-            else out += v[i];
-        } else {
-            out += v[i];
-        }
-    }
-    return out;
-}
-// Finds the next delimiter in `line` starting at `start`, skipping any escaped '\X'
-// pair (so an escaped '\|' is never mistaken for a real cell boundary).
-std::size_t find_unescaped_bar(const std::string& line, std::size_t start) {
-    for (std::size_t i = start; i < line.size(); i++) {
-        if (line[i] == '\\' && i + 1 < line.size()) { i++; continue; }
-        if (line[i] == '|') return i;
-    }
-    return std::string::npos;
-}
-}
+// (how a cell is written and read back, with its spaces at either end: engine/result_text.hpp)
+std::string Executor::escape_cell(const std::string& v) { return result_text::escape_cell(v); }
 
 std::pair<std::vector<std::string>, std::vector<Row>> Executor::parse_table_output(const std::string& output) {
     std::vector<std::string> col_names;
@@ -712,28 +673,9 @@ std::pair<std::vector<std::string>, std::vector<Row>> Executor::parse_table_outp
         if (line.empty()) continue;
         if (line[0] == '+') continue;
         if (line[0] == '|') {
-            // Matches Rust's `line.split('|').filter(|s| !s.is_empty())`: split on EVERY
-            // '|' (including the line's own leading/trailing ones, which produce
-            // zero-length boundary segments to be filtered out), keeping any segment
-            // with length > 0 -- including a whitespace-only segment (an empty cell's
-            // padding), which survives the filter and only becomes "" after the
-            // subsequent trim. The previous version filtered out whitespace-only
-            // segments too (checking for a non-whitespace char rather than length > 0),
-            // silently dropping empty cells and shifting every later column in the row
-            // one position left.
-            std::vector<std::string> cells;
-            std::size_t start = 0;
-            for (;;) {
-                auto bar = find_unescaped_bar(line, start);
-                std::string cell = line.substr(start, bar == std::string::npos ? std::string::npos : bar - start);
-                if (!cell.empty()) {
-                    auto ws0 = cell.find_first_not_of(" \t");
-                    if (ws0 == std::string::npos) cells.push_back("");
-                    else cells.push_back(unescape_cell(cell.substr(ws0, cell.find_last_not_of(" \t") - ws0 + 1)));
-                }
-                if (bar == std::string::npos) break;
-                start = bar + 1;
-            }
+            // A whitespace-only piece between two bars is an empty cell (dropping it would shift every later column one position left); the
+            // text of a cell is read back with result_text::split_row (padding off, escapes undone).
+            std::vector<std::string> cells = result_text::split_row(line);
             if (!header_parsed) {
                 col_names = cells;
                 header_parsed = true;

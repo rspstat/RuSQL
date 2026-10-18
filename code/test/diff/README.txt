@@ -136,6 +136,8 @@ Comparison with a real MySQL (needs pymysql and a MySQL 8.4 on 127.0.0.1:3391; u
       statement run on both). --emit writes the cases of the C++ conformance tests code/backend/tests/mysql_conformance_<name>.inc: MySQL's answer is the
       expected one for every statement RuSQL answers the same; a statement it answers differently is only run, so the tables stay as MySQL had them.
       The corpora: functions, tables, constraints, collation (the default collation utf8mb4_0900_ai_ci), decimals (--exact, see below).
+      The cells of RuSQL's answer are read the way the engine itself reads a result table (\\ \n \| and \s \t for a space or tab at either end of a value,
+      see engine/result_text.hpp), so a value such as ' x ' or 'a|b' is compared as it is; corpus/tables.sql has probes for them (R40) and for CTE columns.
   --exact
       the cells must be the same TEXT, not only the same number (30.7500 is not 30.75, 21 is not 21.00). With --emit the rows are written as kind 5, which
       test_mysql_conformance.cpp compares so (mysql_conformance_decimals.inc, from corpus/decimals.sql: DECIMAL and integer results only -- a DOUBLE comes to a

@@ -14,6 +14,7 @@
 // an enclosing query and executor_outer.cpp puts the outer row's values in.
 
 #include "engine/executor/executor.hpp"
+#include "engine/result_text.hpp"
 #include "engine/storage/numeric_key.hpp"
 
 #include <algorithm>
@@ -261,17 +262,7 @@ std::vector<std::string> Executor::extract_cells_from_output(const std::string& 
         if (!line.empty() && line[0] == '+') {
             separators++;
         } else if (!line.empty() && line[0] == '|' && separators >= 2) {
-            std::vector<std::string> row;
-            std::size_t start = 1;
-            while (start <= line.size()) {
-                const auto bar = line.find('|', start);
-                if (bar == std::string::npos) break;
-                std::string cell = line.substr(start, bar - start);
-                const auto a = cell.find_first_not_of(' ');
-                cell = a == std::string::npos ? std::string() : cell.substr(a, cell.find_last_not_of(' ') - a + 1);
-                row.push_back(std::move(cell));
-                start = bar + 1;
-            }
+            std::vector<std::string> row = result_text::split_row(line);
             if (row.size() != width) throw StatementError("Operand should contain " + std::to_string(width) + " column(s)");
             for (auto& cell : row) cells.push_back(std::move(cell));
         }
@@ -294,16 +285,8 @@ std::vector<std::string> Executor::extract_values_from_output(const std::string&
             separator_count++;
             if (separator_count == 2) header_passed = true;
         } else if (!line.empty() && line[0] == '|' && header_passed) {
-            std::size_t start = 1;
-            auto bar = line.find('|', start);
-            std::string first_cell = line.substr(start, bar == std::string::npos ? std::string::npos : bar - start);
-            auto a = first_cell.find_first_not_of(' ');
-            if (a != std::string::npos) {
-                auto b = first_cell.find_last_not_of(' ');
-                vals.push_back(first_cell.substr(a, b - a + 1));
-            } else {
-                vals.push_back(""); // an empty string is a value (it used to be dropped)
-            }
+            std::vector<std::string> row = result_text::split_row(line);
+            vals.push_back(row.empty() ? std::string() : std::move(row.front())); // (an empty string is a value too)
         }
         if (nl == std::string::npos) break;
         pos = nl + 1;

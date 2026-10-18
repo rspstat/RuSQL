@@ -696,3 +696,119 @@ SET autocommit = 1
 SELECT PERCENT_RANK() OVER (ORDER BY id) FROM wf WHERE id = 1
 SELECT YEARWEEK('2024-01-01'), YEARWEEK('2023-01-01'), YEARWEEK('2021-01-03', 3), YEARWEEK('2020-12-31', 1)
 SELECT YEARWEEK('2024-12-30'), YEARWEEK('2024-12-30', 3), YEARWEEK('2022-01-01', 0)
+# values with a space at either end, a bar, a backslash, a newline: through derived tables, CTEs, UNION, INSERT ... SELECT, CREATE TABLE ... AS SELECT, IN (subquery) (R40)
+--CREATE TABLE sp (id INT PRIMARY KEY, s VARCHAR(20))
+--INSERT INTO sp VALUES (1, ' x '), (2, 'a|b'), (3, '  '), (4, ''), (5, CONCAT('tab', CHAR(9))), (6, 'bob'), (7, 'bob '), (8, CONCAT('multi', CHAR(10), 'line')), (9, CONCAT('back', CHAR(92), 'slash')), (10, ' lead'), (11, 'x\ y')
+SELECT id, s FROM sp ORDER BY id
+SELECT id, LENGTH(s), CHAR_LENGTH(s) FROM sp ORDER BY id
+SELECT d.s FROM (SELECT id, s FROM sp) d ORDER BY d.id
+SELECT COUNT(DISTINCT s) FROM (SELECT s FROM sp) d
+SELECT COUNT(DISTINCT s) FROM sp
+SELECT id FROM sp WHERE s IN (SELECT s FROM sp WHERE id IN (1, 7)) ORDER BY id
+SELECT s FROM sp WHERE id IN (1, 2, 3, 9) UNION SELECT s FROM sp WHERE id = 7 ORDER BY 1
+CREATE TABLE sp_copy AS SELECT * FROM sp
+SELECT id, s FROM sp_copy ORDER BY id
+INSERT INTO sp (id, s) SELECT id + 100, s FROM sp WHERE id <= 3 OR id IN (5, 7, 10)
+SELECT id, s, LENGTH(s) FROM sp WHERE id > 100 ORDER BY id
+WITH c AS (SELECT s FROM sp WHERE id = 1) SELECT s, LENGTH(s) FROM c
+SELECT (SELECT s FROM sp WHERE id = 1) = ' x ', (SELECT s FROM sp WHERE id = 7) = 'bob', (SELECT s FROM sp WHERE id = 7) = 'bob '
+SELECT s, COUNT(*) FROM (SELECT s FROM sp UNION ALL SELECT s FROM sp_copy) u WHERE s LIKE 'bob%' GROUP BY s ORDER BY s
+SELECT TRIM(s), CONCAT('[', s, ']'), UPPER(s) FROM sp WHERE id IN (1, 7, 10) ORDER BY id
+# a CTE's columns keep the type of what they show: numbers order, compare and take MAX as numbers (R40)
+--CREATE TABLE nn (id INT PRIMARY KEY, v VARCHAR(5), amt DECIMAL(8,2), d DATE)
+--INSERT INTO nn VALUES (1, 'a', 9.50, '2024-01-09'), (2, 'b', 10.25, '2024-01-10'), (3, 'c', 100.00, '2024-01-11'), (10, 'd', 2.00, '2024-01-02'), (11, 'e', 11.00, '2024-01-12')
+WITH c AS (SELECT id, v FROM nn) SELECT id, v FROM c ORDER BY id
+WITH c AS (SELECT id, amt FROM nn) SELECT id, amt FROM c ORDER BY amt
+WITH c AS (SELECT id, amt FROM nn) SELECT MAX(id), MIN(id), MAX(amt), MIN(amt) FROM c
+WITH c AS (SELECT id, amt FROM nn) SELECT id FROM c WHERE amt > 9.6 ORDER BY id
+WITH c AS (SELECT id * 2 AS dbl, amt FROM nn) SELECT dbl FROM c ORDER BY dbl
+WITH c AS (SELECT id, amt FROM nn) SELECT id FROM c ORDER BY amt DESC
+WITH c AS (SELECT id, d FROM nn) SELECT id FROM c ORDER BY d
+WITH c AS (SELECT id FROM nn) SELECT id FROM c ORDER BY id DESC LIMIT 2
+SELECT x.id FROM (SELECT id, amt FROM nn) x ORDER BY x.id
+SELECT MAX(x.id), MAX(x.amt) FROM (SELECT id, amt FROM nn) x
+SELECT x.id FROM (SELECT id FROM nn) x JOIN (SELECT id FROM nn) y ON x.id = y.id ORDER BY x.id
+SELECT id FROM nn WHERE id IN (SELECT id FROM nn WHERE amt > 9) ORDER BY id
+SELECT id FROM nn UNION SELECT id FROM nn ORDER BY id
+SELECT id FROM (SELECT id FROM nn UNION SELECT id + 100 FROM nn) u ORDER BY id
+WITH RECURSIVE r(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM r WHERE n < 12) SELECT n FROM r ORDER BY n
+WITH RECURSIVE r(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM r WHERE n < 12) SELECT MAX(n), SUM(n), COUNT(*) FROM r
+CREATE VIEW nvv AS SELECT id, amt FROM nn
+SELECT id FROM nvv ORDER BY id
+SELECT MAX(id), MAX(amt) FROM nvv
+CREATE TABLE nn2 AS SELECT id, amt FROM nn
+SELECT MAX(id), MAX(amt) FROM nn2
+SELECT id FROM nn2 ORDER BY id
+WITH a AS (SELECT id, amt FROM nn), b AS (SELECT id, amt * 2 AS dbl FROM a) SELECT id, dbl FROM b ORDER BY dbl
+WITH c AS (SELECT g, SUM(amt) AS total, COUNT(*) AS n FROM (SELECT id % 2 AS g, amt FROM nn) x GROUP BY g) SELECT g, total, n FROM c ORDER BY total DESC
+WITH c AS (SELECT id, d FROM nn WHERE id < 100) SELECT id FROM c WHERE d > '2024-01-09' ORDER BY id
+WITH c AS (SELECT v, id FROM nn) SELECT v FROM c ORDER BY id DESC
+WITH c AS (SELECT id, amt FROM nn) SELECT SUM(amt), AVG(amt), MAX(amt) FROM c
+WITH c AS (SELECT id, amt FROM nn) SELECT c.id, nn.v FROM c JOIN nn ON nn.id = c.id ORDER BY c.id
+WITH c AS (SELECT CAST(id AS CHAR) AS txt FROM nn) SELECT txt FROM c ORDER BY txt
+WITH c AS (SELECT id + 0.5 AS half FROM nn) SELECT MAX(half), MIN(half) FROM c
+WITH c AS (SELECT COUNT(*) AS n, MAX(id) AS top FROM nn) SELECT n + 1, top FROM c
+WITH c AS (SELECT id FROM nn) SELECT id FROM c WHERE id > 9 ORDER BY id
+WITH c AS (SELECT id FROM nn) SELECT id FROM c WHERE id BETWEEN 2 AND 10 ORDER BY id
+WITH c AS (SELECT id FROM nn) SELECT id FROM c WHERE id IN (3, 10) ORDER BY id
+# ... and so do COALESCE / IFNULL / NULLIF / GREATEST / LEAST / IF / CASE out of numbers; out of text they stay text (R40)
+--CREATE TABLE cq (id INT PRIMARY KEY, price DECIMAL(10,2), name VARCHAR(10), score DOUBLE)
+--INSERT INTO cq VALUES (9, 1.5, 'nine', 2.5), (10, 20.25, 'ten', NULL), (2, NULL, 'two', 7.125), (100, 3, NULL, 0.5)
+WITH c AS (SELECT COALESCE(id, 0) AS v FROM cq) SELECT v FROM c ORDER BY v DESC
+WITH c AS (SELECT COALESCE(id, 0) AS v FROM cq) SELECT MAX(v), MIN(v), SUM(v) FROM c
+WITH c AS (SELECT IFNULL(price, 0) AS v FROM cq) SELECT v FROM c ORDER BY v DESC
+WITH c AS (SELECT IFNULL(price, 0) AS v FROM cq) SELECT MAX(v), SUM(v) FROM c
+WITH c AS (SELECT CASE WHEN id > 5 THEN id ELSE 0 END AS v FROM cq) SELECT v FROM c ORDER BY v DESC
+WITH c AS (SELECT CASE WHEN id > 5 THEN id END AS v FROM cq) SELECT MAX(v), COUNT(v) FROM c
+WITH c AS (SELECT IF(id > 5, id, 0) AS v FROM cq) SELECT v FROM c ORDER BY v DESC
+WITH c AS (SELECT NULLIF(id, 9) AS v FROM cq) SELECT v FROM c ORDER BY v DESC
+WITH c AS (SELECT GREATEST(id, 50) AS v FROM cq) SELECT v FROM c ORDER BY v DESC
+WITH c AS (SELECT LEAST(id, 50) AS v FROM cq) SELECT MAX(v) FROM c
+WITH c AS (SELECT COALESCE(name, 'zz') AS v FROM cq) SELECT v FROM c ORDER BY v
+WITH c AS (SELECT COALESCE(CAST(id AS CHAR), 'z') AS v FROM cq) SELECT v FROM c ORDER BY v
+WITH c AS (SELECT CASE WHEN id > 5 THEN 'big' ELSE 'small' END AS v FROM cq) SELECT v, COUNT(*) FROM c GROUP BY v ORDER BY v
+WITH c AS (SELECT COALESCE(score, 0) AS v FROM cq) SELECT v FROM c ORDER BY v DESC
+WITH c AS (SELECT id, COALESCE(price, 0) AS p FROM cq) SELECT id FROM c WHERE p > 2 ORDER BY id
+WITH a AS (SELECT COALESCE(id, 0) AS v FROM cq), b AS (SELECT v FROM a WHERE v > 5) SELECT v FROM b ORDER BY v DESC
+SELECT v FROM (SELECT COALESCE(id, 0) AS v FROM cq) x ORDER BY v DESC
+CREATE TABLE cq_copy AS SELECT COALESCE(id, 0) AS v FROM cq
+SELECT v FROM cq_copy ORDER BY v DESC
+# ... and a CAST, an aggregate inside a COALESCE, a subquery in the select list (R40)
+--CREATE TABLE cr (id INT PRIMARY KEY, g INT, n VARCHAR(10), d DATE, amt DECIMAL(8,2))
+--INSERT INTO cr VALUES (9, 1, '9', '2024-01-09', 1.50), (10, 1, '10', '2024-01-10', 20.25), (2, 2, '2', '2024-02-02', 3.00), (30, 3, 'x', NULL, NULL), (100, 3, '100', '2024-03-03', 7.75)
+WITH c AS (SELECT g, COALESCE(SUM(id), 0) AS v FROM cr GROUP BY g) SELECT v FROM c ORDER BY v DESC
+WITH c AS (SELECT g, SUM(id) AS v, COUNT(*) AS k FROM cr GROUP BY g) SELECT v, k FROM c ORDER BY v DESC
+WITH c AS (SELECT g, IFNULL(MAX(amt), 0) AS v FROM cr GROUP BY g) SELECT g, v FROM c ORDER BY v DESC
+WITH c AS (SELECT g, COALESCE(MIN(id), 0) + 1 AS v FROM cr GROUP BY g) SELECT v FROM c ORDER BY v DESC
+WITH c AS (SELECT (SELECT MAX(id) FROM cr) AS v UNION ALL SELECT 5) SELECT v FROM c ORDER BY v DESC
+WITH c AS (SELECT id, (SELECT COUNT(*) FROM cr x WHERE x.g = cr.g) AS k FROM cr) SELECT id, k FROM c ORDER BY k DESC, id
+WITH c AS (SELECT CAST(n AS SIGNED) AS v FROM cr WHERE n <> 'x') SELECT v FROM c ORDER BY v DESC
+WITH c AS (SELECT CAST(id AS CHAR) AS v FROM cr) SELECT v FROM c ORDER BY v DESC
+WITH c AS (SELECT CAST(amt AS DECIMAL(10,1)) AS v FROM cr) SELECT v FROM c ORDER BY v DESC
+WITH c AS (SELECT CAST(id AS UNSIGNED) AS v FROM cr) SELECT MAX(v), MIN(v) FROM c
+WITH c AS (SELECT CONVERT(n, SIGNED) AS v FROM cr WHERE n <> 'x') SELECT MAX(v) FROM c
+WITH c AS (SELECT CAST(d AS DATE) AS v FROM cr) SELECT v FROM c ORDER BY v DESC
+WITH c AS (SELECT MAX(id) AS v FROM cr GROUP BY g) SELECT v FROM c ORDER BY v DESC
+WITH c AS (SELECT MAX(n) AS v FROM cr GROUP BY g) SELECT v FROM c ORDER BY v DESC
+WITH c AS (SELECT g, COALESCE(MAX(n), 'z') AS v FROM cr GROUP BY g) SELECT v FROM c ORDER BY v DESC
+SELECT v FROM (SELECT g, COALESCE(SUM(id), 0) AS v FROM cr GROUP BY g) x ORDER BY v DESC
+SELECT v FROM (SELECT CAST(n AS SIGNED) AS v FROM cr WHERE n <> 'x') x ORDER BY v DESC
+# ... what a pass-through gives out of a mixed list stays text (R40)
+--CREATE TABLE ctm (id INT PRIMARY KEY, price DECIMAL(10,2), name VARCHAR(10))
+--INSERT INTO ctm VALUES (9, 1.5, 'nine'), (10, 20.25, 'ten'), (2, NULL, 'two')
+WITH c AS (SELECT IF(id > 1, id, 'none') AS v FROM ctm) SELECT v FROM c ORDER BY v DESC
+WITH c AS (SELECT CASE WHEN id > 5 THEN id ELSE 'small' END AS v FROM ctm) SELECT v FROM c ORDER BY v DESC
+WITH c AS (SELECT IF(id > 100, 'none', id) AS v FROM ctm) SELECT v FROM c ORDER BY v DESC
+WITH c AS (SELECT CASE WHEN id > 100 THEN 'big' WHEN id > 5 THEN id END AS v FROM ctm) SELECT v FROM c ORDER BY v DESC
+--CREATE TABLE ct (id INT PRIMARY KEY, g INT, code VARCHAR(5), name VARCHAR(10))
+--INSERT INTO ct VALUES (1, 1, '9', 'a'), (2, 1, '10', 'b'), (3, 1, '2', 'c'), (4, 1, '1', 'd'), (5, 1, '3', 'e'), (6, 1, '4', 'f'), (7, 1, '5', 'g'), (8, 1, '6', 'h'), (9, 1, '7', 'i'), (10, 1, '8', 'j'), (11, 1, '11', 'k'), (12, 1, '12', 'l'), (13, 2, '13', 'm'), (14, 2, '14', 'n'), (15, 2, '15', 'o')
+WITH c AS (SELECT g, COALESCE(COUNT(*), 0) AS k FROM ct GROUP BY g) SELECT g, k FROM c ORDER BY k DESC
+WITH c AS (SELECT id, COALESCE(MAX(DISTINCT id), 0) AS v FROM ct GROUP BY id) SELECT v FROM c ORDER BY v DESC LIMIT 3
+WITH c AS (SELECT g, NULLIF(MAX(code), '') AS v FROM ct GROUP BY g) SELECT g, v FROM c ORDER BY v DESC
+WITH c AS (SELECT id, NULLIF(code, 'x') AS v FROM ct WHERE id < 4) SELECT v FROM c ORDER BY v DESC
+WITH c AS (SELECT id, COALESCE(code, NULL) AS v FROM ct WHERE id < 4) SELECT v FROM c ORDER BY v DESC
+WITH c AS (SELECT id, IF(id > 1, id, 'none') AS v FROM ct WHERE id IN (2, 3, 10)) SELECT v FROM c ORDER BY v DESC
+WITH c AS (SELECT id, CASE WHEN id > 1 THEN id ELSE 'small' END AS v FROM ct WHERE id IN (2, 3, 10)) SELECT v FROM c ORDER BY v DESC
+WITH c AS (SELECT id, CASE WHEN id > 100 THEN 'big' WHEN id > 1 THEN id END AS v FROM ct WHERE id IN (2, 3, 10)) SELECT v FROM c ORDER BY v DESC
+WITH c AS (SELECT id, IF(id > 100, 'none', id) AS v FROM ct WHERE id IN (2, 3, 10)) SELECT v FROM c ORDER BY v DESC
+WITH c AS (SELECT id, IF(id > 1, id, 'none') AS v FROM ct WHERE id < 4) SELECT v FROM c ORDER BY v DESC

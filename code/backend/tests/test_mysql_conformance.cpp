@@ -9,6 +9,7 @@
 
 #include "catch.hpp"
 #include "engine/executor/executor.hpp"
+#include "engine/result_text.hpp"
 
 using namespace engine;
 namespace fs = std::filesystem;
@@ -78,18 +79,7 @@ Rows cells(const std::string& output) {
     while (std::getline(in, line)) {
         if (line.empty() || line[0] != '|') continue;
         if (++bars <= 1) continue;
-        std::vector<std::string> row;
-        std::size_t pos = 1;
-        while (pos < line.size()) {
-            std::size_t bar = line.find('|', pos);
-            if (bar == std::string::npos) break;
-            std::string v = line.substr(pos, bar - pos);
-            v.erase(0, v.find_first_not_of(' '));
-            v.erase(v.find_last_not_of(' ') + 1);
-            row.push_back(v);
-            pos = bar + 1;
-        }
-        rows.push_back(std::move(row));
+        rows.push_back(result_text::split_row(line)); // (the values as they are: a space at either end is written as an escape)
     }
     return rows;
 }

@@ -31,6 +31,7 @@ StringResult Executor::exec_with(SharedDatabase& s, std::vector<std::pair<std::s
 
         auto* union_stmt = std::get_if<Statement::Union>(&body->data);
         if (recursive && union_stmt) {
+            const Statement left_copy = *union_stmt->left; // (the base query types the columns of the table)
             Statement left = std::move(*union_stmt->left);
             Statement right = std::move(*union_stmt->right);
 
@@ -46,13 +47,7 @@ StringResult Executor::exec_with(SharedDatabase& s, std::vector<std::pair<std::s
             }
             auto [cols, accumulated] = parse_table_output(base_out.value());
 
-            std::vector<ColumnDef> schema_cols;
-            for (auto& c : cols) {
-                ColumnDef cd;
-                cd.name = c;
-                cd.data_type = DataType(DataType::Text{});
-                schema_cols.push_back(cd);
-            }
+            const std::vector<ColumnDef> schema_cols = derived_column_defs(s, left_copy, cols, accumulated);
             s.catalog.create_table(name, schema_cols);
             s.tables[name] = accumulated;
             s.buffer_pool.write_page(name, accumulated);
@@ -233,6 +228,7 @@ StringResult Executor::exec_with(SharedDatabase& s, std::vector<std::pair<std::s
             return result;
         }
 
+        const Statement body_copy = *body; // (it types the columns of the table)
         auto output = execute_with_s(s, std::move(*body));
         if (output.is_err()) {
             for (auto& n : cte_names) {
@@ -245,13 +241,7 @@ StringResult Executor::exec_with(SharedDatabase& s, std::vector<std::pair<std::s
         }
         std::tie(col_names, rows) = parse_table_output(output.value());
 
-        std::vector<ColumnDef> schema_cols;
-        for (auto& c : col_names) {
-            ColumnDef cd;
-            cd.name = c;
-            cd.data_type = DataType(DataType::Text{});
-            schema_cols.push_back(cd);
-        }
+        const std::vector<ColumnDef> schema_cols = derived_column_defs(s, body_copy, col_names, rows);
         s.catalog.create_table(name, schema_cols);
         s.tables[name] = rows;
         s.buffer_pool.write_page(name, rows);

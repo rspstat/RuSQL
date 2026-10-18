@@ -1,6 +1,6 @@
 // The column types of an answer, for the MySQL protocol: a client that is told `INT` hands its application a number, one that is told nothing hands it
 // the text. The types are read from the SELECT, not from the answer: a column of a table has the table's type, COUNT(*) is a BIGINT, SUM / AVG follow
-// their argument; anything else (a CASE, a string function, a subquery) is left as text. The caller checks the cells against the type before it
+// their argument; anything else (a string function, a subquery) is left as text. The caller checks the cells against the type before it
 // trusts it (a column typed INT whose cells are no integers goes out as text), and the whole answer is trusted only when the number of columns found
 // is the number of columns answered.
 
@@ -204,21 +204,77 @@ private:
             func.data);
     }
 
-    // Is the expression a number? Arithmetic, a comparison and the functions that give numbers are; a string function, a CASE, an IF, a COALESCE
-    // (it gives what its arguments are) and a subquery are left as text.
+    // Is the expression a number? Arithmetic, a comparison, the functions that give numbers and a COALESCE / IF / CASE ... out of numbers are; a string
+    // function and a subquery are left as text.
     bool numeric_expression(const ArithExpr& e, const Statement::Select& sel, const std::vector<Source>& sources) const {
         if (std::holds_alternative<ArithExpr::Num>(e.data)) return true;
         if (std::holds_alternative<ArithExpr::Add>(e.data) || std::holds_alternative<ArithExpr::Sub>(e.data) || std::holds_alternative<ArithExpr::Mul>(e.data) ||
             std::holds_alternative<ArithExpr::Div>(e.data) || std::holds_alternative<ArithExpr::Cmp>(e.data) || std::holds_alternative<ArithExpr::Pred>(e.data))
             return true;
-        if (auto* f = std::get_if<ArithExpr::Func>(&e.data)) return numeric_function(f->name);
+        if (auto* f = std::get_if<ArithExpr::Func>(&e.data)) return numeric_function(f->name) || cast_to_number(*f) || gives_numbers(*f, sel, sources);
         if (auto* c = std::get_if<ArithExpr::Col>(&e.data)) {
+            if (auto aggregate = aggregate_is_number(c->name, sel, sources)) return *aggregate;
             const NamedType* column = c->outer == 0 && plain_reference(c->name) ? find(sel, sources, c->name) : nullptr;
             if (!column || !column->type.column) return column && column->type.by_value;
             const DataType& t = column->type.column->data_type;
             return integer_type(t) || approximate_type(t) || std::holds_alternative<DataType::Decimal>(t.data) || std::holds_alternative<DataType::Boolean>(t.data);
         }
         return false; // a string, a subquery
+    }
+
+    // CAST(x AS SIGNED / UNSIGNED / INT / DECIMAL(10,2) / DOUBLE ...) gives a number
+    static bool cast_to_number(const ArithExpr::Func& f) {
+        const std::string name = upper(f.name);
+        if ((name != "CAST" && name != "CONVERT") || f.args.size() != 2) return false;
+        auto* type = std::get_if<ArithExpr::Str>(&f.args[1].data);
+        if (!type) return false;
+        static const std::unordered_set<std::string> numbers = {"SIGNED", "UNSIGNED", "INT", "INTEGER", "BIGINT", "SMALLINT", "TINYINT", "MEDIUMINT", "DECIMAL",
+                                                                "NUMERIC", "DOUBLE", "FLOAT", "REAL"};
+        return numbers.count(upper(type->value.substr(0, type->value.find('(')))) > 0;
+    }
+
+    // An aggregate inside an expression is kept as a column called "SUM(id)": COUNT / SUM / AVG give numbers, MIN / MAX what their argument is. Nothing
+    // when `name` is no aggregate.
+    std::optional<bool> aggregate_is_number(const std::string& name, const Statement::Select& sel, const std::vector<Source>& sources) const {
+        const std::size_t open = name.find('(');
+        if (open == std::string::npos || name.back() != ')') return std::nullopt;
+        const std::string function = upper(name.substr(0, open));
+        if (function == "COUNT" || function == "SUM" || function == "AVG") return true;
+        if (function != "MIN" && function != "MAX") return std::nullopt;
+        std::string argument = name.substr(open + 1, name.size() - open - 2);
+        if (argument.rfind("DISTINCT ", 0) == 0) argument.erase(0, 9);
+        try {
+            return numeric_expression(Parser::str_to_arith(argument), sel, sources);
+        } catch (const ParseError&) {
+            return false;
+        }
+    }
+
+    // Do the expressions a COALESCE / IF / CASE can give out all give numbers? (a NULL among them says nothing)
+    bool numeric_results(const std::vector<const ArithExpr*>& results, const Statement::Select& sel, const std::vector<Source>& sources) const {
+        bool any = false;
+        for (const ArithExpr* r : results) {
+            if (auto* str = std::get_if<ArithExpr::Str>(&r->data); str && str->value == EXECUTOR_NULL_VALUE) continue;
+            if (!numeric_expression(*r, sel, sources)) return false;
+            any = true;
+        }
+        return any;
+    }
+
+    // COALESCE, IFNULL, NULLIF, GREATEST, LEAST and CASE give one of their arguments (a CASE: the results of its (condition, result) pairs and its ELSE,
+    // which comes last when the count is odd): a number when those are
+    bool gives_numbers(const ArithExpr::Func& f, const Statement::Select& sel, const std::vector<Source>& sources) const {
+        const std::string name = upper(f.name);
+        std::vector<const ArithExpr*> results;
+        if (name == "COALESCE" || name == "IFNULL" || name == "GREATEST" || name == "LEAST") {
+            for (const ArithExpr& a : f.args) results.push_back(&a);
+        } else if (name == "NULLIF" && !f.args.empty()) {
+            results.push_back(&f.args[0]);
+        } else if (name == "CASE") { // (an IF(c, a, b) is parsed as the CASE (c, a, b))
+            for (std::size_t i = 1; i < f.args.size(); i += 2) results.push_back(&f.args[i]);
+            if (f.args.size() % 2 == 1) results.push_back(&f.args.back());
+        }
+        return numeric_results(results, sel, sources);
     }
 
     // Is the expression done in floating point? An operand that is a FLOAT / DOUBLE column, a text (a string or a text column) or a function that works in
@@ -326,7 +382,8 @@ private:
             } else if (auto* cw = std::get_if<SelectColumn::CaseWhen>(&item.data)) {
                 out.push_back({cw->alias.value_or(std::string()), ResultColumnType{}});
             } else if (auto* sq = std::get_if<SelectColumn::Subquery>(&item.data)) {
-                out.push_back({sq->alias.value_or(std::string()), ResultColumnType{}});
+                std::vector<NamedType> inner; // (the one column the subquery gives)
+                out.push_back({sq->alias.value_or(std::string()), sq->query && columns_of(*sq->query, depth + 1, inner) && inner.size() == 1 ? inner[0].type : ResultColumnType{}});
             } else {
                 return false;
             }
@@ -336,6 +393,47 @@ private:
 };
 
 } // namespace
+
+std::vector<ColumnDef> Executor::derived_column_defs(const SharedDatabase& s, const Statement& body, const std::vector<std::string>& names, const std::vector<Row>& rows) const {
+    std::vector<NamedType> found;
+    const bool known = Resolver(s, current_db).columns_of(body, 0, found) && found.size() == names.size(); // (when the select list and the answer disagree, nothing is told)
+    std::vector<ColumnDef> out;
+    out.reserve(names.size());
+    for (std::size_t i = 0; i < names.size(); i++) {
+        ColumnDef def;
+        def.data_type = DataType(DataType::Text{});
+        if (known) {
+            const ResultColumnType& type = found[i].type;
+            if (type.column) {
+                def.data_type = type.column->data_type; // the type of the column it shows (its keys and constraints belong to its table)
+            } else if (type.by_value) { // arithmetic: a number if its values are
+                bool any = false, whole = true, exponent = false, numbers = true;
+                std::size_t scale = 0;
+                for (const Row& r : rows) {
+                    auto cell = r.find(names[i]);
+                    if (cell == r.end() || cell->second == EXECUTOR_NULL_VALUE) continue;
+                    any = true;
+                    const std::string& text = cell->second;
+                    if (!parse_number(text)) {
+                        numbers = false;
+                        break;
+                    }
+                    if (text.find_first_of(".eE") != std::string::npos) whole = false;
+                    if (text.find_first_of("eE") != std::string::npos) exponent = true;
+                    else if (auto dot = text.find('.'); dot != std::string::npos) scale = std::max(scale, text.size() - dot - 1);
+                }
+                if (any && numbers) {
+                    if (whole) def.data_type = DataType(DataType::BigInt{});
+                    else if (exponent) def.data_type = DataType(DataType::Double{});
+                    else def.data_type = DataType(DataType::Decimal{30, static_cast<std::uint8_t>(std::min<std::size_t>(scale, 30))});
+                }
+            }
+        }
+        def.name = names[i];
+        out.push_back(std::move(def));
+    }
+    return out;
+}
 
 std::vector<ResultColumnType> Executor::result_columns(const std::string& sql) const {
     Parser parser(sql, pipes_as_concat());

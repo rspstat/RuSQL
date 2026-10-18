@@ -302,6 +302,66 @@ fn track_use_statement(conn: &mut EngineConn, query: &str) {
     }
 }
 
+// 결과 표의 셀 하나에서 이스케이프를 푼다: 엔진은 값의 역슬래시를 \\, 줄바꿈을 \n, 막대를 \|, 값 양 끝의 공백/탭(패딩과 구별되지 않는)을 \s, \t 로 쓴다.
+fn unescape_cell(cell: &str) -> String {
+    let mut out = String::with_capacity(cell.len());
+    let mut it = cell.chars().peekable();
+    while let Some(c) = it.next() {
+        if c == '\\' {
+            match it.peek() {
+                Some('\\') => { out.push('\\'); it.next(); }
+                Some('|') => { out.push('|'); it.next(); }
+                Some('n') => { out.push('\n'); it.next(); }
+                Some('s') => { out.push(' '); it.next(); }
+                Some('t') => { out.push('\t'); it.next(); }
+                _ => out.push(c),
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+fn push_cell(piece: &str, cells: &mut Vec<String>) {
+    if !piece.is_empty() {
+        cells.push(unescape_cell(piece.trim_matches(|c| c == ' ' || c == '\t')));
+    }
+}
+
+// 행 한 줄("| a   | b |")의 셀들. 이스케이프된 막대(\|)는 셀 경계가 아니고, 첫 막대 앞·마지막 막대 뒤 조각은 셀이 아니다.
+fn split_row(line: &str) -> Vec<String> {
+    let mut cells = Vec::new();
+    let mut piece = String::new();
+    let mut it = line.chars();
+    while let Some(c) = it.next() {
+        if c == '\\' {
+            piece.push(c);
+            if let Some(n) = it.next() { piece.push(n); }
+        } else if c == '|' {
+            push_cell(&piece, &mut cells);
+            piece.clear();
+        } else {
+            piece.push(c);
+        }
+    }
+    push_cell(&piece, &mut cells);
+    cells
+}
+
+#[cfg(test)]
+mod cell_tests {
+    use super::split_row;
+
+    #[test]
+    fn cells_keep_their_spaces_and_special_characters() {
+        assert_eq!(split_row("| 1  | \\sx\\s | a\\|b |"), vec!["1", " x ", "a|b"]);
+        assert_eq!(split_row("| \\\\n |"), vec!["\\n"]);
+        assert_eq!(split_row("|   | x |"), vec!["", "x"]);
+        assert_eq!(split_row("| a\\nb | \\t\\tz |"), vec!["a\nb", "\t\tz"]);
+    }
+}
+
 // 표준 박스(+---+) 테이블 응답을 (헤더, 행목록)으로 파싱한다.
 fn parse_box_table(body: &str) -> (Vec<String>, Vec<Vec<String>>) {
     let lines: Vec<&str> = body.lines().collect();
@@ -310,7 +370,7 @@ fn parse_box_table(body: &str) -> (Vec<String>, Vec<Vec<String>>) {
     for (i, line) in lines.iter().enumerate() {
         if line.starts_with('+') { continue; }
         if line.starts_with('|') {
-            let cells: Vec<String> = line.split('|').filter(|s| !s.is_empty()).map(|s| s.trim().to_string()).collect();
+            let cells: Vec<String> = split_row(line);
             if i == 1 { columns = cells; } else { rows.push(cells); }
         }
     }

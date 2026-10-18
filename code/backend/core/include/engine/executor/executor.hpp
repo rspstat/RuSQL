@@ -311,6 +311,9 @@ public:
     static std::optional<std::string> info_schema_bare(const std::string& qualified_name);
     // The types of the columns the SELECT `sql` answers with, one per column (empty: not a SELECT, or the columns cannot be matched with the select list).
     std::vector<ResultColumnType> result_columns(const std::string& sql) const;
+    // The columns of the temporary table a CTE becomes: `names` are the columns of its answer `rows`, typed by the select list `body` (a table column keeps its type, an
+    // arithmetic one is a number by its values, the rest text), so that the query that reads the CTE orders, compares and takes MAX of them as numbers where they are.
+    std::vector<ColumnDef> derived_column_defs(const SharedDatabase& s, const Statement& body, const std::vector<std::string>& names, const std::vector<Row>& rows) const;
 
 private:
     // Row-level-concurrency Stage 4/5 correctness fix (found via concurrent-reader

@@ -93,11 +93,13 @@ TEST_CASE("result_columns types the columns of a SELECT", "[result_types]") {
     REQUIRE(types_of(ex, "SELECT price, id FROM ty_v") == "dec(10,2),int");
     REQUIRE(types_of(ex, "SELECT id FROM ty UNION SELECT id FROM ty2") == "int");
     REQUIRE(types_of(ex, "SELECT table_name, table_rows FROM information_schema.tables") == "text,bigint");
-    // expressions: numbers by value, text (a CASE, a string function) left as text
+    // expressions: numbers by value (a COALESCE / IF / CASE out of numbers too), text (a string function, a CASE out of strings) left as text
     REQUIRE(types_of(ex, "SELECT id * 2, 1, 'a', LENGTH(vc), ROUND(d, 1), LAST_INSERT_ID(), UPPER(vc), CONCAT(vc, 'x') FROM ty") ==
             "value,value,text,value,double,value,text,text");
     REQUIRE(types_of(ex, "SELECT 1 + 1, 2.5") == "value,value");
-    REQUIRE(types_of(ex, "SELECT '12', id + t, dt, UPPER(tx), IF(id > 1, 1, 2), COALESCE(t, 0) FROM ty") == "text,value,date,text,text,text"); // (a quoted number is text)
+    REQUIRE(types_of(ex, "SELECT '12', id + t, dt, UPPER(tx), IF(id > 1, 1, 2), COALESCE(t, 0) FROM ty") == "text,value,date,text,value,value"); // (a quoted number is text)
+    REQUIRE(types_of(ex, "SELECT IF(id > 1, 'a', 'b'), COALESCE(vc, 'x'), CASE WHEN id > 1 THEN 1 ELSE 0 END, CASE WHEN id > 1 THEN 'a' END, NULLIF(id, 3), COALESCE(NULL, NULL) FROM ty") ==
+            "text,text,value,text,value,text");
     // nothing to tell: something that is not a SELECT, a table that is not there, a CTE
     REQUIRE(types_of(ex, "INSERT INTO ty2 VALUES (1, 'a')") == "");
     REQUIRE(types_of(ex, "SELECT * FROM no_such_table") == "");

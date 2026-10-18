@@ -62,6 +62,40 @@ def mysql_run(cur, sql):
         return ("err", str(e)[:100])
 
 
+def unescape_cell(cell: str) -> str:
+    r"""결과 표의 셀 하나에서 이스케이프를 푼다: 엔진은 값의 역슬래시를 \\, 줄바꿈을 \n, 막대를 \|,
+    값 양 끝의 공백/탭(패딩과 구별되지 않는)을 \s, \t 로 쓴다."""
+    out, i = [], 0
+    while i < len(cell):
+        c = cell[i]
+        if c == "\\" and i + 1 < len(cell) and cell[i + 1] in "\\|nst":
+            out.append({"n": "\n", "s": " ", "t": "\t"}.get(cell[i + 1], cell[i + 1]))
+            i += 2
+        else:
+            out.append(c)
+            i += 1
+    return "".join(out)
+
+
+def split_row(line: str) -> list[str]:
+    r"""행 한 줄("| a   | b |")의 셀들. 이스케이프된 막대(\|)는 셀 경계가 아니고, 첫 막대 앞·마지막 막대 뒤 조각은 셀이 아니다."""
+    pieces, cur, i = [], [], 0
+    while i < len(line):
+        c = line[i]
+        if c == "\\" and i + 1 < len(line):
+            cur.append(line[i:i + 2])
+            i += 2
+            continue
+        if c == "|":
+            pieces.append("".join(cur))
+            cur = []
+        else:
+            cur.append(c)
+        i += 1
+    pieces.append("".join(cur))
+    return [unescape_cell(p.strip(" \t")) for p in pieces if p]
+
+
 def rusql_run(db, sql):
     out = db.execute(sql).split("---END---")[0].strip().splitlines()
     if not out:
@@ -71,7 +105,7 @@ def rusql_run(db, sql):
     rows, seen_header = [], False
     for line in out:
         if line.startswith("|"):
-            cells = [c.strip() for c in line.strip().strip("|").split("|")]
+            cells = split_row(line.strip())
             if not seen_header:
                 seen_header = True
                 continue

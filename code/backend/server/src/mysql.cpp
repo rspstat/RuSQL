@@ -2,6 +2,7 @@
 
 #include "mysql.hpp"
 #include "engine/parser/lexer.hpp"
+#include "engine/result_text.hpp"
 
 #define NOMINMAX
 #include <winsock2.h>
@@ -626,30 +627,8 @@ std::optional<std::pair<std::vector<std::string>, std::vector<std::vector<std::s
         for (auto& line : split_lines(trimmed)) {
             if (!line.empty() && line.front() == '+') continue;
             if (!line.empty() && line.front() == '|') {
-                std::vector<std::string> cells;
-                std::size_t start = 0;
-                for (;;) {
-                    // (the engine writes a cell with \\ for a backslash, \n for a newline and \| for a bar: a bar in a value is no cell boundary)
-                    std::size_t pipe = start;
-                    while (pipe < line.size() && line[pipe] != '|') pipe += (line[pipe] == '\\' && pipe + 1 < line.size()) ? 2 : 1;
-                    if (pipe >= line.size()) pipe = std::string::npos;
-                    std::string cell = line.substr(start, pipe == std::string::npos ? std::string::npos : pipe - start);
-                    if (!cell.empty()) {
-                        cell = trim_copy(cell);
-                        std::string plain;
-                        for (std::size_t k = 0; k < cell.size(); k++) {
-                            if (cell[k] == '\\' && k + 1 < cell.size() && (cell[k + 1] == '\\' || cell[k + 1] == 'n' || cell[k + 1] == '|')) {
-                                plain += cell[k + 1] == 'n' ? '\n' : cell[k + 1];
-                                k++;
-                            } else {
-                                plain += cell[k];
-                            }
-                        }
-                        cells.push_back(std::move(plain));
-                    }
-                    if (pipe == std::string::npos) break;
-                    start = pipe + 1;
-                }
+                // (the cells as the engine writes them: \\ for a backslash, \n for a newline, \| for a bar, \s and \t for a space or tab at either end of the value)
+                std::vector<std::string> cells = engine::result_text::split_row(line);
                 if (!header) {
                     cols = cells;
                     header = true;
@@ -760,9 +739,9 @@ bool send_resultset(SOCKET sock, const std::vector<std::string>& cols, const std
 
 std::string box_table(const std::vector<std::string>& cols, const std::vector<std::vector<std::string>>& rows) {
     std::vector<std::size_t> widths;
-    for (auto& c : cols) widths.push_back(c.size());
+    for (auto& c : cols) widths.push_back(engine::result_text::escape_cell(c).size());
     for (auto& row : rows) {
-        for (std::size_t i = 0; i < row.size() && i < widths.size(); i++) widths[i] = std::max(widths[i], row[i].size());
+        for (std::size_t i = 0; i < row.size() && i < widths.size(); i++) widths[i] = std::max(widths[i], engine::result_text::escape_cell(row[i]).size());
     }
     std::string sep;
     for (auto w : widths) sep += "+" + std::string(w + 2, '-');
@@ -770,19 +749,8 @@ std::string box_table(const std::vector<std::string>& cols, const std::vector<st
     auto make_row = [&](const std::vector<std::string>& cells) {
         std::string s;
         for (std::size_t i = 0; i < widths.size(); i++) {
-            std::string cell = i < cells.size() ? cells[i] : std::string();
-            const std::size_t shown = cell.size();
-            if (cell.find_first_of("\\\n|") != std::string::npos) { // (written the way the engine writes a cell, which parse_table reads back)
-                std::string escaped;
-                for (char c : cell) {
-                    if (c == '\\') escaped += "\\\\";
-                    else if (c == '\n') escaped += "\\n";
-                    else if (c == '|') escaped += "\\|";
-                    else escaped += c;
-                }
-                cell = std::move(escaped);
-            }
-            s += "| " + cell + std::string(widths[i] - shown, ' ') + " ";
+            const std::string cell = engine::result_text::escape_cell(i < cells.size() ? cells[i] : std::string()); // (written the way the engine writes a cell, which parse_table reads back)
+            s += "| " + cell + std::string(widths[i] > cell.size() ? widths[i] - cell.size() : 0, ' ') + " ";
         }
         return s + "|";
     };

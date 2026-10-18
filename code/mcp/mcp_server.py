@@ -119,6 +119,40 @@ def _run(sql: str, db: str = "") -> str:
         return msg
 
 
+def _unescape_cell(cell: str) -> str:
+    r"""결과 표의 셀 하나에서 이스케이프를 푼다: 엔진은 값의 역슬래시를 \\, 줄바꿈을 \n, 막대를 \|,
+    값 양 끝의 공백/탭(패딩과 구별되지 않는)을 \s, \t 로 쓴다."""
+    out, i = [], 0
+    while i < len(cell):
+        c = cell[i]
+        if c == "\\" and i + 1 < len(cell) and cell[i + 1] in "\\|nst":
+            out.append({"n": "\n", "s": " ", "t": "\t"}.get(cell[i + 1], cell[i + 1]))
+            i += 2
+        else:
+            out.append(c)
+            i += 1
+    return "".join(out)
+
+
+def _split_row(line: str) -> list[str]:
+    r"""행 한 줄("| a   | b |")의 셀들. 이스케이프된 막대(\|)는 셀 경계가 아니고, 첫 막대 앞·마지막 막대 뒤 조각은 셀이 아니다."""
+    pieces, cur, i = [], [], 0
+    while i < len(line):
+        c = line[i]
+        if c == "\\" and i + 1 < len(line):
+            cur.append(line[i:i + 2])
+            i += 2
+            continue
+        if c == "|":
+            pieces.append("".join(cur))
+            cur = []
+        else:
+            cur.append(c)
+        i += 1
+    pieces.append("".join(cur))
+    return [_unescape_cell(p.strip(" \t")) for p in pieces if p]
+
+
 def _parse_table_output(text: str) -> list[dict]:
     """RuSQL native 프로토콜 출력을 JSON 배열로 변환. 두 형식을 지원:
     박스 그림 표(SHOW DATABASES/TABLES, SELECT 등 — "+---+"/"| a | b |") 및 탭 구분
@@ -150,10 +184,10 @@ def _parse_table_output(text: str) -> list[dict]:
         content_lines = [l for l in body if l.startswith("|") and l.endswith("|")]
         if not content_lines:
             return [{"result": text}]
-        headers = [c.strip() for c in content_lines[0].strip("|").split("|")]
+        headers = _split_row(content_lines[0])
         rows = []
         for line in content_lines[1:]:
-            cells = [c.strip() for c in line.strip("|").split("|")]
+            cells = _split_row(line)
             if len(cells) == len(headers):
                 rows.append(dict(zip(headers, cells)))
         return rows
