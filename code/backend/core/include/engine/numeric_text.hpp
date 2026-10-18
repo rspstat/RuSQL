@@ -145,6 +145,7 @@ inline std::optional<std::int64_t> int64_arith(char op, std::int64_t a, std::int
 struct DecimalSum {
     std::int64_t units = 0;
     int scale = 0;
+    int max_places = 0;    // the most places any value was written with ("10.50" is 2), whatever zeros it ended in: what a DECIMAL column of that scale shows
     std::size_t count = 0; // the values added
     bool exact = true;
 
@@ -189,6 +190,7 @@ struct DecimalSum {
             exact = false;
             return;
         }
+        max_places = std::max(max_places, places);
         while (places > 0 && mantissa % 10 == 0) mantissa /= 10, places--; // "100.10" is 100.1: the scale stays as small as it can
         if (negative) mantissa = -mantissa;
         if (places > scale && !widen(places)) {
@@ -228,17 +230,27 @@ struct DecimalSum {
         return (units < 0 ? "-" : "") + digits;
     }
 
-    // The sum divided by `divisor` (a count of values), rounded half away from zero to 4 decimal places, as decimal text with all 4
-    // places ("1.6667"); nullopt when the arithmetic does not fit in an int64.
-    std::optional<std::string> average_text(std::int64_t divisor) const {
-        // result in units of 10^-4: units * 10^(4 - scale) / divisor
+    // The sum with every place the values showed ("10.50" + "5.00" is "15.50"): what the SUM of a DECIMAL shows
+    std::string text_with_places() const {
+        std::string t = text();
+        if (max_places > scale) {
+            if (scale == 0) t.push_back('.');
+            t.append(static_cast<std::size_t>(max_places - scale), '0');
+        }
+        return t;
+    }
+
+    // The sum divided by `divisor` (a count of values), rounded half away from zero to `places` decimal places, as decimal text with all of
+    // them ("1.6667"); nullopt when the arithmetic does not fit in an int64.
+    std::optional<std::string> average_text(std::int64_t divisor, int places = 4) const {
+        // result in units of 10^-places: units * 10^(places - scale) / divisor
         std::int64_t numerator = units, denominator = divisor;
-        if (scale <= 4) {
-            auto scaled = int64_arith('*', numerator, pow10(4 - scale));
+        if (scale <= places) {
+            auto scaled = int64_arith('*', numerator, pow10(places - scale));
             if (!scaled) return std::nullopt;
             numerator = *scaled;
         } else {
-            auto scaled = int64_arith('*', denominator, pow10(scale - 4));
+            auto scaled = int64_arith('*', denominator, pow10(scale - places));
             if (!scaled) return std::nullopt;
             denominator = *scaled;
         }
@@ -246,8 +258,9 @@ struct DecimalSum {
         const std::int64_t abs_remainder = remainder < 0 ? -remainder : remainder;
         if (abs_remainder >= denominator - abs_remainder) quotient += numerator < 0 ? -1 : 1;
         std::string digits = std::to_string(magnitude(quotient));
-        if (digits.size() <= 4) digits.insert(0, 5 - digits.size(), '0');
-        digits.insert(digits.size() - 4, ".");
+        const std::size_t p = static_cast<std::size_t>(places);
+        if (digits.size() <= p) digits.insert(0, p + 1 - digits.size(), '0');
+        digits.insert(digits.size() - p, ".");
         return (quotient < 0 ? "-" : "") + digits;
     }
 };
@@ -270,32 +283,40 @@ inline std::string format_shortest(double v) {
 // SUM of the values of an aggregate's argument (the texts of the rows where it is not NULL), each read by the number it starts with
 // ('12abc' is 12, 'x' is 0). Integers and decimals are added exactly (0.1 ten times is 1); anything else (an exponent, a sum beyond
 // int64) as doubles. No value at all -- an empty group, only NULLs -- has no sum: nullopt. `display` is the form a result column
-// shows (an integer, else 4 places), otherwise the exact text a HAVING or an expression goes on with.
-inline std::optional<std::string> sum_of_texts(const std::vector<const std::string*>& values, bool display) {
+// shows, otherwise the exact text a HAVING or an expression goes on with.
+// `approx`: the values are a DOUBLE / FLOAT (or text, which MySQL reads as a double): added as doubles and written the shortest way, as MySQL does
+// (0.1 + 0.2 is 0.30000000000000004). Otherwise they are DECIMALs or integers: the sum has every place the values were written with ("10.50" and
+// "5.00" make "15.50", a DECIMAL(10,2) column's sum shows 2 places).
+inline std::optional<std::string> sum_of_texts(const std::vector<const std::string*>& values, bool display, bool approx = false) {
     if (values.empty()) return std::nullopt;
+    if (approx) {
+        double total = 0.0;
+        for (const std::string* v : values) total += text_to_number(*v);
+        return format_shortest(total);
+    }
     DecimalSum sum;
     for (const std::string* v : values) sum.add(*v);
-    sum.normalize();
-    if (sum.exact) {
-        // (a result column shows at least 4 places for a sum that is not an integer, and every place it has when it has more)
-        std::string text = sum.text();
-        if (display && sum.scale > 0 && sum.scale < 4) text.append(static_cast<std::size_t>(4 - sum.scale), '0');
-        return text;
-    }
+    if (sum.exact) return sum.text_with_places();
     double total = 0.0;
     for (const std::string* v : values) total += text_to_number(*v);
     if (display && total != std::trunc(total)) return format_places(total, 4);
     return format_shortest(total);
 }
 
-// AVG: the exact quotient rounded to 4 places -- what a result column shows -- so that a HAVING or an expression goes on with the same
-// value (AVG(v) * 3 over 1, 2, 2 is 1.6667 * 3, as in MySQL). nullopt for no value.
-inline std::optional<std::string> average_of_texts(const std::vector<const std::string*>& values) {
+// AVG: the exact quotient rounded to 4 places more than the values have -- what a result column shows (AVG of a DECIMAL(10,2) has 6) -- so that a
+// HAVING or an expression goes on with the same value (AVG(v) * 3 over 1, 2, 2 is 1.6667 * 3, as in MySQL). nullopt for no value.
+// `approx`: a DOUBLE / FLOAT (or text): the sum and the quotient are doubles, written the shortest way (1.4166666666666667).
+inline std::optional<std::string> average_of_texts(const std::vector<const std::string*>& values, bool approx = false) {
     if (values.empty()) return std::nullopt;
+    if (approx) {
+        double total = 0.0;
+        for (const std::string* v : values) total += text_to_number(*v);
+        return format_shortest(total / static_cast<double>(values.size()));
+    }
     DecimalSum sum;
     for (const std::string* v : values) sum.add(*v);
     if (sum.exact) {
-        if (auto text = sum.average_text(static_cast<std::int64_t>(values.size()))) return text;
+        if (auto text = sum.average_text(static_cast<std::int64_t>(values.size()), std::min(sum.max_places + 4, 30))) return text;
     }
     double total = 0.0;
     for (const std::string* v : values) total += text_to_number(*v);

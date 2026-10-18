@@ -77,6 +77,7 @@ add_executable(engine_tests
     test_count_distinct_columns.cpp
     test_ddl_session_forms.cpp
     test_result_types.cpp
+    test_decimal_display.cpp
 )
 
 target_link_libraries(engine_tests PRIVATE engine_core)

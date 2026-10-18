@@ -229,11 +229,11 @@ TEST_CASE("integers and decimals are exact", "[aggregate_semantics][exact]") {
     ok(ex, "INSERT INTO m VALUES (1, 1, 0.10, 9007199254740993), (2, 1, 0.10, 9007199254740993), (3, 1, 0.10, 1), (4, 2, 0.10, 1), (5, 2, 0.10, 1), "
            "(6, 2, 0.10, 1), (7, 3, 0.10, 1), (8, 3, 0.10, 1), (9, 3, 0.10, 1), (10, 3, 0.10, 1)");
     // ten times 0.10 is 1, not 0.9999999999999999: what a HAVING compares with is what the decimal text says
-    REQUIRE(one(ex, "SELECT SUM(x) FROM m") == "1");
+    REQUIRE(one(ex, "SELECT SUM(x) FROM m") == "1.00");
     REQUIRE(q(ex, "SELECT g FROM m GROUP BY g HAVING SUM(x) = 0.3 ORDER BY g") == Rows{{"1"}, {"2"}});
     REQUIRE(q(ex, "SELECT g FROM m GROUP BY g HAVING SUM(x) = 0.4 ORDER BY g") == Rows{{"3"}});
-    REQUIRE(q(ex, "SELECT g, SUM(x) FROM m GROUP BY g HAVING SUM(x) = 0.4") == Rows{{"3", "0.4000"}});
-    REQUIRE(one(ex, "SELECT SUM(x) * 10 FROM m") == "10");
+    REQUIRE(q(ex, "SELECT g, SUM(x) FROM m GROUP BY g HAVING SUM(x) = 0.4") == Rows{{"3", "0.40"}});
+    REQUIRE(one(ex, "SELECT SUM(x) * 10 FROM m") == "10.00");
     // integers beyond 2^53
     REQUIRE(q(ex, "SELECT SUM(n), SUM(n) + 1, MAX(n), MIN(n) FROM m WHERE id <= 2") == Rows{{"18014398509481986", "18014398509481987", "9007199254740993", "9007199254740993"}});
     REQUIRE(q(ex, "SELECT MAX(n), MIN(n) FROM m WHERE id <= 3") == Rows{{"9007199254740993", "1"}});
@@ -255,7 +255,7 @@ TEST_CASE("integers and decimals are exact", "[aggregate_semantics][exact]") {
     // SUM of decimals of different scales, negatives, a sum that does not fit an int64 (the double path)
     ok(ex, "CREATE TABLE d (id INT PRIMARY KEY, v VARCHAR(30))");
     ok(ex, "INSERT INTO d VALUES (1, '100.10'), (2, '-0.05'), (3, '7'), (4, '0.005'), (5, NULL)");
-    REQUIRE(one(ex, "SELECT SUM(v) FROM d") == "107.0550");
+    REQUIRE(one(ex, "SELECT SUM(v) FROM d") == "107.05499999999999"); // (a text is a DOUBLE: MySQL gives the same digits)
     REQUIRE(q(ex, "SELECT id FROM d GROUP BY id HAVING SUM(v) = 100.1") == Rows{{"1"}});
     ok(ex, "INSERT INTO d VALUES (6, '0.12345')");
     REQUIRE(q(ex, "SELECT id FROM d GROUP BY id HAVING SUM(v) = 0.12345") == Rows{{"6"}});
@@ -270,7 +270,7 @@ TEST_CASE("AVG is rounded to 4 places and a HAVING or an expression computes wit
     open_db(ex);
     ok(ex, "CREATE TABLE f (id INT PRIMARY KEY, g INT, v INT)");
     ok(ex, "INSERT INTO f VALUES (1, 1, 1), (2, 1, 2), (3, 1, 2), (4, 2, -1), (5, 2, -2), (6, 2, -2), (7, 3, 1), (8, 3, 2)");
-    REQUIRE(q(ex, "SELECT g, AVG(v), AVG(v) * 3 FROM f GROUP BY g ORDER BY g") == Rows{{"1", "1.6667", "5.0001"}, {"2", "-1.6667", "-5.0001"}, {"3", "1.5000", "4.5"}});
+    REQUIRE(q(ex, "SELECT g, AVG(v), AVG(v) * 3 FROM f GROUP BY g ORDER BY g") == Rows{{"1", "1.6667", "5.0001"}, {"2", "-1.6667", "-5.0001"}, {"3", "1.5000", "4.5000"}});
     REQUIRE(q(ex, "SELECT g FROM f GROUP BY g HAVING AVG(v) = 1.6667") == Rows{{"1"}});
     REQUIRE(q(ex, "SELECT g, AVG(v) FROM f GROUP BY g HAVING AVG(v) = -1.6667") == Rows{{"2", "-1.6667"}});
     REQUIRE(q(ex, "SELECT g FROM f GROUP BY g HAVING AVG(v) * 3 > 5 ORDER BY g") == Rows{{"1"}});
@@ -366,14 +366,14 @@ TEST_CASE("SUM, AVG, MIN, MAX, COUNT match a reference over random values", "[ag
                 REQUIRE(got[0][2] == N);
                 REQUIRE(got[0][3] == N);
             } else {
-                // SUM: an integer when the sum has no fraction, else 4 places; AVG: the exact quotient rounded half away from zero to 4 places
-                REQUIRE(got[0][0] == (total % 1000 == 0 ? std::to_string(total / 1000) : thousandths_text(total, 4)));
-                long long numerator = total * 10, quotient = numerator / n_count;
+                // SUM of a DECIMAL(12,3): its 3 places; AVG: the exact quotient rounded half away from zero to 3 + 4 places
+                REQUIRE(got[0][0] == thousandths_text(total, 3));
+                long long numerator = total * 10000, quotient = numerator / n_count;
                 const long long remainder = numerator % n_count;
                 if (2 * (remainder < 0 ? -remainder : remainder) >= n_count) quotient += numerator < 0 ? -1 : 1;
                 const long long a = quotient < 0 ? -quotient : quotient;
-                std::string frac = std::to_string(a % 10000);
-                REQUIRE(got[0][1] == std::string(quotient < 0 ? "-" : "") + std::to_string(a / 10000) + "." + std::string(4 - frac.size(), '0') + frac);
+                std::string frac = std::to_string(a % 10000000);
+                REQUIRE(got[0][1] == std::string(quotient < 0 ? "-" : "") + std::to_string(a / 10000000) + "." + std::string(7 - frac.size(), '0') + frac);
                 REQUIRE(same_number(got[0][2], static_cast<double>(lo) / 1000.0));
                 REQUIRE(same_number(got[0][3], static_cast<double>(hi) / 1000.0));
             }
@@ -409,7 +409,7 @@ TEST_CASE("SUM, AVG, MIN, MAX, COUNT match a reference over random values", "[ag
                     REQUIRE(grouped[at][1] == N);
                     REQUIRE(grouped[at][3] == N);
                 } else {
-                    REQUIRE(grouped[at][1] == (gt % 1000 == 0 ? std::to_string(gt / 1000) : thousandths_text(gt, 4)));
+                    REQUIRE(grouped[at][1] == thousandths_text(gt, 3));
                 }
                 at++;
             }

@@ -796,27 +796,29 @@ void replace_expression(ArithExpr& expr, const std::string& text) {
 
 // What the `MIN(x)` / `MAX(x)` that a HAVING or a select-list expression names holds: the binder gave the reference (a column named "MAX(code)")
 // the class of its argument.
-void collect_aggregate_classes(const CondExpr& e, std::unordered_map<std::string, ValueClass>& out);
+// `approx` collects the references whose value is a DOUBLE (SUM / AVG of them are added as doubles)
+void collect_aggregate_classes(const CondExpr& e, std::unordered_map<std::string, ValueClass>& out, std::unordered_set<std::string>& approx);
 
-void collect_aggregate_classes(const ArithExpr& e, std::unordered_map<std::string, ValueClass>& out) {
+void collect_aggregate_classes(const ArithExpr& e, std::unordered_map<std::string, ValueClass>& out, std::unordered_set<std::string>& approx) {
     if (auto* col = std::get_if<ArithExpr::Col>(&e.data)) {
         if (col->cls != ValueClass::Unknown && col->name.find('(') != std::string::npos) out[col->name] = col->cls;
-    } else if (auto* v = std::get_if<ArithExpr::Add>(&e.data)) { collect_aggregate_classes(*v->lhs, out); collect_aggregate_classes(*v->rhs, out); }
-    else if (auto* v = std::get_if<ArithExpr::Sub>(&e.data)) { collect_aggregate_classes(*v->lhs, out); collect_aggregate_classes(*v->rhs, out); }
-    else if (auto* v = std::get_if<ArithExpr::Mul>(&e.data)) { collect_aggregate_classes(*v->lhs, out); collect_aggregate_classes(*v->rhs, out); }
-    else if (auto* v = std::get_if<ArithExpr::Div>(&e.data)) { collect_aggregate_classes(*v->lhs, out); collect_aggregate_classes(*v->rhs, out); }
-    else if (auto* v = std::get_if<ArithExpr::Cmp>(&e.data)) { collect_aggregate_classes(*v->lhs, out); collect_aggregate_classes(*v->rhs, out); }
-    else if (auto* v = std::get_if<ArithExpr::Pred>(&e.data)) collect_aggregate_classes(*v->cond, out);
-    else if (auto* v = std::get_if<ArithExpr::Func>(&e.data)) { for (auto& a : v->args) collect_aggregate_classes(a, out); }
+        if (col->approx && col->name.find('(') != std::string::npos) approx.insert(col->name);
+    } else if (auto* v = std::get_if<ArithExpr::Add>(&e.data)) { collect_aggregate_classes(*v->lhs, out, approx); collect_aggregate_classes(*v->rhs, out, approx); }
+    else if (auto* v = std::get_if<ArithExpr::Sub>(&e.data)) { collect_aggregate_classes(*v->lhs, out, approx); collect_aggregate_classes(*v->rhs, out, approx); }
+    else if (auto* v = std::get_if<ArithExpr::Mul>(&e.data)) { collect_aggregate_classes(*v->lhs, out, approx); collect_aggregate_classes(*v->rhs, out, approx); }
+    else if (auto* v = std::get_if<ArithExpr::Div>(&e.data)) { collect_aggregate_classes(*v->lhs, out, approx); collect_aggregate_classes(*v->rhs, out, approx); }
+    else if (auto* v = std::get_if<ArithExpr::Cmp>(&e.data)) { collect_aggregate_classes(*v->lhs, out, approx); collect_aggregate_classes(*v->rhs, out, approx); }
+    else if (auto* v = std::get_if<ArithExpr::Pred>(&e.data)) collect_aggregate_classes(*v->cond, out, approx);
+    else if (auto* v = std::get_if<ArithExpr::Func>(&e.data)) { for (auto& a : v->args) collect_aggregate_classes(a, out, approx); }
 }
 
-void collect_aggregate_classes(const CondExpr& e, std::unordered_map<std::string, ValueClass>& out) {
-    if (auto* a = std::get_if<CondExpr::And>(&e.data)) { collect_aggregate_classes(*a->lhs, out); collect_aggregate_classes(*a->rhs, out); }
-    else if (auto* o = std::get_if<CondExpr::Or>(&e.data)) { collect_aggregate_classes(*o->lhs, out); collect_aggregate_classes(*o->rhs, out); }
-    else if (auto* n = std::get_if<CondExpr::Not>(&e.data)) collect_aggregate_classes(*n->inner, out);
+void collect_aggregate_classes(const CondExpr& e, std::unordered_map<std::string, ValueClass>& out, std::unordered_set<std::string>& approx) {
+    if (auto* a = std::get_if<CondExpr::And>(&e.data)) { collect_aggregate_classes(*a->lhs, out, approx); collect_aggregate_classes(*a->rhs, out, approx); }
+    else if (auto* o = std::get_if<CondExpr::Or>(&e.data)) { collect_aggregate_classes(*o->lhs, out, approx); collect_aggregate_classes(*o->rhs, out, approx); }
+    else if (auto* n = std::get_if<CondExpr::Not>(&e.data)) collect_aggregate_classes(*n->inner, out, approx);
     else if (auto* leaf = std::get_if<CondExpr::Leaf>(&e.data)) {
-        collect_aggregate_classes(leaf->condition.left, out);
-        if (auto* value = std::get_if<ConditionValue::Arith>(&leaf->condition.value.data)) collect_aggregate_classes(value->expr, out);
+        collect_aggregate_classes(leaf->condition.left, out, approx);
+        if (auto* value = std::get_if<ConditionValue::Arith>(&leaf->condition.value.data)) collect_aggregate_classes(value->expr, out, approx);
     }
 }
 
@@ -839,7 +841,7 @@ std::string Executor::resolve_arg_key(const std::vector<const Row*>& rows, const
 // over the rows of one group with the rules of the select list: NULLs are skipped, COUNT(*) counts rows, SUM/AVG read the numeric
 // values, MIN/MAX compare numbers when every value is one and text otherwise, and MIN/MAX, SUM and AVG of nothing are NULL. The answer
 // is the one the select list shows (AVG with 4 places) except that a SUM keeps all its decimals.
-std::string Executor::compute_agg_from_key(const std::string& key, const std::vector<const Row*>& grp, ValueClass arg_class) {
+std::string Executor::compute_agg_from_key(const std::string& key, const std::vector<const Row*>& grp, ValueClass arg_class, bool approx) {
     std::string ku = key;
     std::transform(ku.begin(), ku.end(), ku.begin(), [](unsigned char c) { return std::toupper(c); });
     const auto lp = key.find('(');
@@ -864,8 +866,8 @@ std::string Executor::compute_agg_from_key(const std::string& key, const std::ve
     if (distinct) present = distinct_texts(present, is_expression_argument(inner) ? ValueClass::Unknown : ValueClass::Text);
     if (is_count) return std::to_string(present.size());
 
-    if (ku.rfind("SUM(", 0) == 0) return sum_of_texts(present, false).value_or(EXECUTOR_NULL_VALUE);
-    if (ku.rfind("AVG(", 0) == 0) return average_of_texts(present).value_or(EXECUTOR_NULL_VALUE);
+    if (ku.rfind("SUM(", 0) == 0) return sum_of_texts(present, false, approx).value_or(EXECUTOR_NULL_VALUE);
+    if (ku.rfind("AVG(", 0) == 0) return average_of_texts(present, approx).value_or(EXECUTOR_NULL_VALUE);
     const bool is_min = ku.rfind("MIN(", 0) == 0;
     if (!is_min && ku.rfind("MAX(", 0) != 0) return "0";
     return extreme_text(present, is_min, arg_class);
@@ -878,17 +880,20 @@ Row Executor::compute_aggregates(const std::vector<const Row*>& grp, const std::
         std::string col_name, label;
         const CondExpr* filter = nullptr;
         ValueClass arg_class = ValueClass::Unknown; // what the argument holds: how MIN / MAX compare
+        bool arg_approx = false;                    // ... and whether it is a DOUBLE: SUM / AVG are done and shown as doubles
         if (auto* agg = std::get_if<SelectColumn::Agg>(&col.data)) {
             func = &agg->func;
             col_name = agg->source.empty() ? agg->col : agg->source;
             label = agg_label(*func, agg->col);
             arg_class = agg->arg_class;
+            arg_approx = agg->arg_approx;
             if (agg->filter) filter = &*agg->filter;
         } else if (auto* agg_a = std::get_if<SelectColumn::AggAlias>(&col.data)) {
             func = &agg_a->func;
             col_name = agg_a->source.empty() ? agg_a->col : agg_a->source;
             label = agg_a->alias;
             arg_class = agg_a->arg_class;
+            arg_approx = agg_a->arg_approx;
             if (agg_a->filter) filter = &*agg_a->filter;
         } else {
             continue;
@@ -1083,10 +1088,10 @@ Row Executor::compute_aggregates(const std::vector<const Row*>& grp, const std::
             }
         }
 
-        if (std::holds_alternative<AggFunc::Sum>(func->data)) out[label] = sum_of_texts(present, true).value_or(EXECUTOR_NULL_VALUE);
-        else if (std::holds_alternative<AggFunc::SumDistinct>(func->data)) out[label] = sum_of_texts(distinct_texts(present, arg_class), true).value_or(EXECUTOR_NULL_VALUE);
-        else if (std::holds_alternative<AggFunc::Avg>(func->data)) out[label] = average_of_texts(present).value_or(EXECUTOR_NULL_VALUE);
-        else if (std::holds_alternative<AggFunc::AvgDistinct>(func->data)) out[label] = average_of_texts(distinct_texts(present, arg_class)).value_or(EXECUTOR_NULL_VALUE);
+        if (std::holds_alternative<AggFunc::Sum>(func->data)) out[label] = sum_of_texts(present, true, arg_approx).value_or(EXECUTOR_NULL_VALUE);
+        else if (std::holds_alternative<AggFunc::SumDistinct>(func->data)) out[label] = sum_of_texts(distinct_texts(present, arg_class), true, arg_approx).value_or(EXECUTOR_NULL_VALUE);
+        else if (std::holds_alternative<AggFunc::Avg>(func->data)) out[label] = average_of_texts(present, arg_approx).value_or(EXECUTOR_NULL_VALUE);
+        else if (std::holds_alternative<AggFunc::AvgDistinct>(func->data)) out[label] = average_of_texts(distinct_texts(present, arg_class), arg_approx).value_or(EXECUTOR_NULL_VALUE);
         else out[label] = spread_text(*func, present); // STDDEV, VARIANCE, MEDIAN
     }
     return out;
@@ -1572,17 +1577,19 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
     // such a statement used to run row by row, with 0 or NULL where the aggregate was
     const std::vector<std::string> expr_agg_refs = select_agg_refs(columns);
     std::unordered_map<std::string, ValueClass> aggregate_classes;
+    std::unordered_set<std::string> aggregate_approx_refs;
     for (auto& c : columns) {
-        if (auto* e = std::get_if<SelectColumn::Expr>(&c.data)) collect_aggregate_classes(e->expr, aggregate_classes);
+        if (auto* e = std::get_if<SelectColumn::Expr>(&c.data)) collect_aggregate_classes(e->expr, aggregate_classes, aggregate_approx_refs);
         else if (auto* cw = std::get_if<SelectColumn::CaseWhen>(&c.data)) {
-            for (auto& b : cw->branches) collect_aggregate_classes(b.condition, aggregate_classes);
+            for (auto& b : cw->branches) collect_aggregate_classes(b.condition, aggregate_classes, aggregate_approx_refs);
         }
     }
-    if (having) collect_aggregate_classes(*having, aggregate_classes);
+    if (having) collect_aggregate_classes(*having, aggregate_classes, aggregate_approx_refs);
     auto aggregate_class = [&](const std::string& ref) {
         auto it = aggregate_classes.find(ref);
         return it == aggregate_classes.end() ? ValueClass::Unknown : it->second;
     };
+    auto aggregate_approx = [&](const std::string& ref) { return aggregate_approx_refs.count(ref) > 0; };
     bool has_agg = columns_have_aggregate(columns);
     bool has_win = std::any_of(columns.begin(), columns.end(), [](const SelectColumn& c) {
         return std::holds_alternative<SelectColumn::WinFunc>(c.data);
@@ -1620,7 +1627,7 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
             if (group_by) {
                 if (std::any_of(group_sorts.begin(), group_sorts.end(), [&](const SortExpression& x) { return x.text == o.column; })) continue;
                 for (auto& g : group_expressions) replace_expression(e, g);
-                collect_aggregate_classes(e, aggregate_classes);
+                collect_aggregate_classes(e, aggregate_classes, aggregate_approx_refs);
                 group_sorts.push_back(SortExpression{o.column, std::move(e), std::move(refs)});
             } else if (refs.empty()) {
                 if (std::find(row_sort_texts.begin(), row_sort_texts.end(), o.column) == row_sort_texts.end()) row_sort_texts.push_back(o.column);
@@ -2510,16 +2517,16 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
             Row agg_row = compute_aggregates(grp, columns);
             for (auto& [k, v] : agg_row) out[k] = v;
             for (auto& ref : expr_agg_refs) {
-                if (!out.count(ref)) out[ref] = compute_agg_from_key(ref, grp, aggregate_class(ref));
+                if (!out.count(ref)) out[ref] = compute_agg_from_key(ref, grp, aggregate_class(ref), aggregate_approx(ref));
             }
             if (having) {
                 for (auto& agg_key : extract_agg_refs_from_cond(*having)) {
-                    if (!out.count(agg_key)) out[agg_key] = compute_agg_from_key(agg_key, grp, aggregate_class(agg_key));
+                    if (!out.count(agg_key)) out[agg_key] = compute_agg_from_key(agg_key, grp, aggregate_class(agg_key), aggregate_approx(agg_key));
                 }
             }
             for (auto& sort : group_sorts) {
                 for (auto& ref : sort.aggregates) {
-                    if (!out.count(ref)) out[ref] = compute_agg_from_key(ref, grp, aggregate_class(ref));
+                    if (!out.count(ref)) out[ref] = compute_agg_from_key(ref, grp, aggregate_class(ref), aggregate_approx(ref));
                 }
                 if (!out.count(sort.text)) out[sort.text] = eval_arith(out, sort.expr);
             }
@@ -2680,7 +2687,7 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
         // rows before they were aggregated, where `SUM(v)` is nothing, so the aggregates came out over no row at all
         if (having) {
             for (auto& agg_key : extract_agg_refs_from_cond(*having)) {
-                if (!agg_row.count(agg_key)) agg_row[agg_key] = compute_agg_from_key(agg_key, rows_p, aggregate_class(agg_key));
+                if (!agg_row.count(agg_key)) agg_row[agg_key] = compute_agg_from_key(agg_key, rows_p, aggregate_class(agg_key), aggregate_approx(agg_key));
             }
             if (!matches_condition_with_subquery(s, agg_row, having)) return StringResult::Ok("0 rows returned.");
         }
@@ -2697,7 +2704,7 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
             // with no aggregate in it is not part of an aggregate result (as before). Formatted like any result, minus the row
             // count line a plain aggregate result does not carry.
             for (auto& ref : expr_agg_refs) {
-                if (!agg_row.count(ref)) agg_row[ref] = compute_agg_from_key(ref, rows_p, aggregate_class(ref));
+                if (!agg_row.count(ref)) agg_row[ref] = compute_agg_from_key(ref, rows_p, aggregate_class(ref), aggregate_approx(ref));
             }
             std::vector<SelectColumn> shown;
             for (auto& col : columns) {

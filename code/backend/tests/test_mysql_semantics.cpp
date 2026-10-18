@@ -91,7 +91,7 @@ TEST_CASE("a numeric function, a comparison and a stored value read all the digi
     REQUIRE(rows_of(ex, "SELECT ROUND(8/59.27, 2), 8/59.27 >= 0.135, 8/59.27 > 0.13497, FLOOR(10/3*3), CEIL(2/3*3), TRUNCATE(8/59.27, 3), SQRT(8/59.27)") ==
             Rows{{"0.13", "0", "1", "9", "2", "0.134", "0.3673901672609108"}});
     // ... while the number itself shows the dividend's scale plus 4 places (RuSQL leaves the trailing zeros out)
-    REQUIRE(rows_of(ex, "SELECT 10/3*3, 2/3*3, 10/4, 1/3, 8/59.27") == Rows{{"10", "2", "2.5", "0.3333", "0.135"}});
+    REQUIRE(rows_of(ex, "SELECT 10/3*3, 2/3*3, 10/4, 1/3, 8/59.27") == Rows{{"10.0000", "2.0000", "2.5000", "0.3333", "0.1350"}});
     ok(ex, "CREATE TABLE dd (id INT PRIMARY KEY, p DECIMAL(10,2), n INT, v VARCHAR(20))");
     ok(ex, "INSERT INTO dd VALUES (1, 8/59.27, 7/2, 8/59.27), (2, 0, 0, 'x')");
     REQUIRE(rows_of(ex, "SELECT id, p, n, v FROM dd ORDER BY id") == Rows{{"1", "0.13", "4", "0.134975535"}, {"2", "0.00", "0", "x"}});
@@ -118,11 +118,11 @@ TEST_CASE("ROUND and FORMAT round a DOUBLE half to even and a DECIMAL half away 
     ok(ex, "INSERT INTO rr VALUES (1, 2.5, 2.5, '2.5'), (2, 3.25, 3.25, '3.25'), (3, 0.5, 0.5, '0.5'), (4, 1.5, 1.5, '1.5'), (5, -2.5, -2.5, '-2.5'), "
            "(6, 2.675, 2.675, '2.675'), (7, 1234567.125, 1234567.125, '1234567.125')");
     REQUIRE(rows_of(ex, "SELECT id, ROUND(d), ROUND(n), ROUND(s), ROUND(d, 1), ROUND(n, 1), ROUND(d, 2), ROUND(n, 2) FROM rr ORDER BY id") ==
-            Rows{{"1", "2", "3", "2", "2.5", "2.5", "2.5", "2.5"},
+            Rows{{"1", "2", "3", "2", "2.5", "2.5", "2.5", "2.50"},
                  {"2", "3", "3", "3", "3.2", "3.3", "3.25", "3.25"},
-                 {"3", "0", "1", "0", "0.5", "0.5", "0.5", "0.5"},
-                 {"4", "2", "2", "2", "1.5", "1.5", "1.5", "1.5"},
-                 {"5", "-2", "-3", "-2", "-2.5", "-2.5", "-2.5", "-2.5"},
+                 {"3", "0", "1", "0", "0.5", "0.5", "0.5", "0.50"},
+                 {"4", "2", "2", "2", "1.5", "1.5", "1.5", "1.50"},
+                 {"5", "-2", "-3", "-2", "-2.5", "-2.5", "-2.5", "-2.50"},
                  {"6", "3", "3", "3", "2.7", "2.7", "2.68", "2.68"},
                  {"7", "1234567", "1234567", "1234567", "1234567.1", "1234567.1", "1234567.12", "1234567.13"}});
     // a string is a DOUBLE too (ROUND('2.5') is 2), and the places beyond 2 are rounded the same way
@@ -150,12 +150,12 @@ TEST_CASE("integer arithmetic gives MySQL's digits, signs and limits", "[mysql_s
     ok(ex, "USE d");
     // quotients of integers: 9 digits are kept (cut off, not rounded), 4 are shown; the divisor may be as big as an integer gets
     REQUIRE(rows_of(ex, "SELECT 1000000000000000000 / 999999999999999999, 7 / 900000000000000001, 123456789 / 987654321012345678, -7 / 2, 7 / -2, -7 / -2, 0 / 5, 0 / -5") ==
-            Rows{{"1", "0", "0", "-3.5", "-3.5", "3.5", "0", "0"}});
+            Rows{{"1.0000", "0.0000", "0.0000", "-3.5000", "-3.5000", "3.5000", "0.0000", "0.0000"}});
     REQUIRE(rows_of(ex, "SELECT 1 / 3 * 3, 2 / 3 * 3, -1 / 3, 100 / 7, 9223372036854775807 / 2, 123456789012345678 / 7") ==
-            Rows{{"1", "2", "-0.3333", "14.2857", "4611686018427387903.5", "17636684144620811.1429"}});
+            Rows{{"1.0000", "2.0000", "-0.3333", "14.2857", "4611686018427387903.5000", "17636684144620811.1429"}});
     // ... and the numbers that are too big for the quick way (a 19 digit integer, a remainder that cannot be multiplied by 10 in 64 bits)
     REQUIRE(rows_of(ex, "SELECT 5000000000000000000 / 9000000000000000000, 9999999999999999999 + 1, 9000000000000000000 / 4000000000000000000, "
-                        "9223372036854775807 / 9223372036854775806") == Rows{{"0.5556", "10000000000000000000", "2.25", "1"}});
+                        "9223372036854775807 / 9223372036854775806") == Rows{{"0.5556", "10000000000000000000", "2.2500", "1.0000"}});
     // texts read as numbers: leading zeros, a sign, spaces, a number followed by letters
     REQUIRE(rows_of(ex, "SELECT '007' + 1, '-12' * 2, ' 5' + 1, '+5' + 1, '12abc' + 1, -0 + 0") == Rows{{"8", "-24", "6", "6", "13", "0"}});
 }

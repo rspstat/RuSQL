@@ -12,7 +12,7 @@ row per g. For every random expression E over x, y, w and constants (+ - * and p
     SELECT SUM(a.E) FROM t a JOIN u b ON a.g = b.g          (E written over a.x, a.y, b.k)
 
 are run, and the answers are compared with the ones computed here with exact rational arithmetic (NULL when an operand is NULL, an aggregate
-of nothing is NULL, AVG is the exact quotient rounded half away from zero to 4 places).
+of nothing is NULL, AVG is the exact quotient rounded half away from zero to the places of its values plus 4: here it must be within half a unit of the 4th place).
 Exit code 1 and the statement on the first violation.
 """
 import argparse, os, random, re, sys
@@ -35,11 +35,12 @@ def frac(text):
     return Fraction(text)
 
 
+class Avg(Fraction):
+    """The exact quotient of an AVG: the engine writes it with the places of the values plus 4 (6 for a DECIMAL(10,2)), so it is right when it is within half a unit of the 4th place."""
+
+
 def round4(q):
-    """q rounded half away from zero to 4 places, as a Fraction."""
-    scaled = q * 10000
-    n = int(abs(scaled) + Fraction(1, 2))
-    return Fraction(n if scaled >= 0 else -n, 10000)
+    return Avg(q)
 
 
 class E:
@@ -86,6 +87,8 @@ def same(got, want):
     if want is None:
         return got == "NULL"
     try:
+        if isinstance(want, Avg):
+            return got != "NULL" and abs(Fraction(got) - want) <= Fraction(5, 10 ** 5)
         return got != "NULL" and Fraction(got) == want
     except ValueError:
         return False

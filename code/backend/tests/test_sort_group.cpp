@@ -239,7 +239,7 @@ TEST_CASE("an expression in ORDER BY, GROUP BY and an aggregate compares by the 
     REQUIRE(q(ex, "SELECT COALESCE(w, 0) AS k, COUNT(*) AS c FROM m GROUP BY k ORDER BY c DESC") == Rows{{"0.00", "3"}, {"1.50", "2"}});
     REQUIRE(first_column(ex, "SELECT COUNT(*) FROM m GROUP BY COALESCE(w, 0) ORDER BY 1") == V{"2", "3"});
     REQUIRE(first_column(ex, "SELECT DISTINCT COALESCE(w, 0) FROM m ORDER BY 1") == V{"0.00", "1.50"});
-    REQUIRE(first_column(ex, "SELECT DISTINCT w + 0 FROM m WHERE w IS NOT NULL ORDER BY 1") == V{"0", "1.5"});
+    REQUIRE(first_column(ex, "SELECT DISTINCT w + 0 FROM m WHERE w IS NOT NULL ORDER BY 1") == V{"0.00", "1.50"});
     REQUIRE(first_column(ex, "SELECT COUNT(*) FROM m GROUP BY IFNULL(w, 0), n > 10 ORDER BY 1") == V{"2", "3"});
     // a text column is sorted as text, whatever its values look like
     REQUIRE(first_column(ex, "SELECT code AS c FROM ct ORDER BY c") == V{"007", "7", "7.0", "abc"});

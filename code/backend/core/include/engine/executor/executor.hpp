@@ -1093,7 +1093,7 @@ private:
     static std::vector<std::string> extract_agg_refs_from_cond(const CondExpr& expr);
     static void collect_agg_refs_cond(const CondExpr& expr, std::vector<std::string>& out);
     static void collect_agg_refs_arith(const ArithExpr& expr, std::vector<std::string>& out);
-    static std::string compute_agg_from_key(const std::string& key, const std::vector<const Row*>& grp, ValueClass arg_class = ValueClass::Unknown);
+    static std::string compute_agg_from_key(const std::string& key, const std::vector<const Row*>& grp, ValueClass arg_class = ValueClass::Unknown, bool approx = false);
     // Computes every Agg/AggAlias column in `columns` over `grp` (pointers into the rows being aggregated -- a group never
     // owns copies of its rows), keyed by each column's display label — shared by the GROUP BY path (one call per group) and
     // the whole-result aggregate path (one call over all rows), exactly as the two

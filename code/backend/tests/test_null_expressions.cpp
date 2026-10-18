@@ -91,10 +91,10 @@ TEST_CASE("arithmetic with a NULL operand is NULL, in the select list, WHERE, CA
     const std::string N = "NULL";
 
     REQUIRE(table_cells(ok_text(ex, "SELECT id, v + 1, v - 1, v * 2, v / 2 FROM a ORDER BY id")) ==
-            Rows{{"1", "11", "9", "20", "5"}, {"2", N, N, N, N}, {"3", "31", "29", "60", "15"}, {"4", "1", "-1", "0", "0"}, {"5", N, N, N, N}});
+            Rows{{"1", "11", "9", "20", "5.0000"}, {"2", N, N, N, N}, {"3", "31", "29", "60", "15.0000"}, {"4", "1", "-1", "0", "0.0000"}, {"5", N, N, N, N}});
     // two columns: NULL when either is, and 0 / 0 is NULL
     REQUIRE(table_cells(ok_text(ex, "SELECT id, v + w, v - w, v * w, v / w FROM a ORDER BY id")) ==
-            Rows{{"1", "12", "8", "20", "5"}, {"2", N, N, N, N}, {"3", N, N, N, N}, {"4", "0", "0", "0", N}, {"5", N, N, N, N}});
+            Rows{{"1", "12", "8", "20", "5.0000"}, {"2", N, N, N, N}, {"3", N, N, N, N}, {"4", "0", "0", "0", N}, {"5", N, N, N, N}});
     // a literal on the left, a DOUBLE column, division by a zero value
     REQUIRE(table_cells(ok_text(ex, "SELECT id, 1 + v, 100 - v, 3 * d, 9 / d FROM a ORDER BY id")) ==
             Rows{{"1", "11", "90", "4.5", "6"}, {"2", N, N, N, N}, {"3", "31", "70", "7.5", "3.6"}, {"4", "1", "100", "0", N}, {"5", N, N, N, N}});
@@ -239,7 +239,7 @@ TEST_CASE("a function argument that is an expression over qualified columns is e
     REQUIRE(ex.execute_sql("INSERT INTO q VALUES (1, 3), (2, 8), (3, 1)").is_ok());
     // ABS(p.id * p.w) used to read `w` (what follows the last dot) instead of multiplying
     REQUIRE(table_cells(ok_text(ex, "SELECT p.id, ABS(p.id * p.w), ROUND(p.v / p.w, 1), ABS(p.v - p.w) FROM p ORDER BY p.id")) ==
-            Rows{{"1", "2", "5", "8"}, {"2", "6", "2.3", "4"}, {"3", "15", "0.8", "1"}});
+            Rows{{"1", "2", "5.0", "8"}, {"2", "6", "2.3", "4"}, {"3", "15", "0.8", "1"}});
     const Rows joined = {{"1", "30", "7", "13", "3"}, {"2", "56", "1", "15", "6"}, {"3", "4", "3", "5", "1"}};
     REQUIRE(table_cells(ok_text(ex, "SELECT p.id, ROUND(p.v * q.k, 1), ABS(p.v - q.k), GREATEST(p.v + q.k, 0), LEAST(p.w * 2, q.k) "
                                     "FROM p JOIN q ON q.id = p.id ORDER BY p.id")) == joined);

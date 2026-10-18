@@ -159,7 +159,7 @@ TEST_CASE("an aggregate takes an expression as its argument", "[aggregate_argume
     // the result column is named as the statement wrote the expression (grouping included)
     REQUIRE(headers(ex, "SELECT SUM(a + (b - 1)), SUM(a * (b * 2)), SUM(a - (b - 1)), SUM((a + b) * 2), SUM(a + b * 2), SUM(a / (b / 2)) FROM o") ==
             std::vector<std::string>{"SUM(a + (b - 1))", "SUM(a * (b * 2))", "SUM(a - (b - 1))", "SUM((a + b) * 2)", "SUM(a + b * 2)", "SUM(a / (b / 2))"});
-    REQUIRE(one(ex, "SELECT SUM(12 / (2 * 3)) FROM o") == "10");  // 12 / 6 for each of the 5 rows, not 12 / 2 * 3
+    REQUIRE(one(ex, "SELECT SUM(12 / (2 * 3)) FROM o") == "10.0000");  // 12 / 6 for each of the 5 rows, not 12 / 2 * 3
     // constants and NULL
     Rows constants = q(ex, "SELECT COUNT(1), COUNT(*), SUM(2), COUNT('x'), COUNT(NULL), SUM(2 * 3) FROM o");
     REQUIRE(constants == Rows{{"5", "5", "10", "5", "0", "30"}});

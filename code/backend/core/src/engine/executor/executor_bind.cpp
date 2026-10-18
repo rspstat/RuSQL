@@ -253,11 +253,51 @@ std::optional<std::string> Executor::bind_statement(SharedDatabase& s, Statement
             return n;
         }
 
+        // Does an expression give a DOUBLE? A FLOAT / DOUBLE column does, a text (MySQL reads it as a double), a function that works in floating point;
+        // arithmetic gives one when an operand does.
+        bool expression_is_approx(const ArithExpr& e) const {
+            if (auto* col = std::get_if<ArithExpr::Col>(&e.data)) {
+                if (col->outer != 0 || !plain_reference(col->name)) return false;
+                bool approx = false;
+                const ValueClass k = class_of_name(col->name, &approx);
+                return approx || k == ValueClass::Text;
+            }
+            if (auto* str = std::get_if<ArithExpr::Str>(&e.data)) return str->value != "NULL";
+            if (auto* v = std::get_if<ArithExpr::Add>(&e.data)) return expression_is_approx(*v->lhs) || expression_is_approx(*v->rhs);
+            if (auto* v = std::get_if<ArithExpr::Sub>(&e.data)) return expression_is_approx(*v->lhs) || expression_is_approx(*v->rhs);
+            if (auto* v = std::get_if<ArithExpr::Mul>(&e.data)) return expression_is_approx(*v->lhs) || expression_is_approx(*v->rhs);
+            if (auto* v = std::get_if<ArithExpr::Div>(&e.data)) return expression_is_approx(*v->lhs) || expression_is_approx(*v->rhs);
+            if (auto* f = std::get_if<ArithExpr::Func>(&e.data)) {
+                static const std::unordered_set<std::string> floating = {"SQRT", "POW", "POWER", "EXP", "LN", "LOG", "LOG2", "LOG10", "SIN", "COS", "TAN", "ASIN",
+                                                                         "ACOS", "ATAN", "ATAN2", "COT", "DEGREES", "RADIANS", "RAND", "PI"};
+                if (floating.count(upper(f->name))) return true;
+                for (const ArithExpr& a : f->args) {
+                    if (expression_is_approx(a)) return true;
+                }
+            }
+            return false;
+        }
+
+        // The argument of an aggregate as the query spells it (`d`, `t.d`, `DISTINCT d`, `price * qty`): is it a DOUBLE? Then SUM and AVG of it are doubles.
+        bool argument_is_approx(const std::string& argument) const {
+            std::string arg = argument;
+            if (arg.rfind("DISTINCT ", 0) == 0) arg.erase(0, 9);
+            if (arg.empty() || arg == "*") return false;
+            try {
+                return expression_is_approx(Parser::str_to_arith(arg));
+            } catch (const ParseError&) {
+                return false;
+            }
+        }
+
         // What `AGG(arg)` -- the text a HAVING or a select-list expression uses for an aggregate -- gives; nullopt when `name` is not one.
-        std::optional<ValueClass> aggregate_reference_class(const std::string& name) const {
+        // `approx`, when given, is told whether the aggregate's value is a DOUBLE (its argument is, or it is STDDEV / VARIANCE).
+        std::optional<ValueClass> aggregate_reference_class(const std::string& name, bool* approx = nullptr) const {
             const std::size_t lp = name.find('('), rp = name.rfind(')');
             if (lp == std::string::npos || rp == std::string::npos || rp != name.size() - 1 || lp == 0) return std::nullopt;
             const std::string function = upper(name.substr(0, lp));
+            if (approx && (function == "MIN" || function == "MAX" || function == "SUM" || function == "AVG")) *approx = argument_is_approx(name.substr(lp + 1, rp - lp - 1));
+            if (approx && (function == "STDDEV" || function == "VARIANCE")) *approx = true;
             if (function == "MIN" || function == "MAX") {
                 std::string arg = name.substr(lp + 1, rp - lp - 1);
                 if (arg.rfind("DISTINCT ", 0) == 0) arg.erase(0, 9);
@@ -275,7 +315,7 @@ std::optional<std::string> Executor::bind_statement(SharedDatabase& s, Statement
         // `approx`: told whether it is a FLOAT / DOUBLE column
         ValueClass class_of_name(const std::string& name, bool* approx = nullptr) const {
             if (approx) *approx = false;
-            if (auto agg = aggregate_reference_class(name)) return *agg;
+            if (auto agg = aggregate_reference_class(name, approx)) return *agg;
             if (!plain_reference(name)) return ValueClass::Unknown;
             const std::size_t dot = name.rfind('.');
             if (dot != std::string::npos) {
@@ -568,7 +608,7 @@ std::optional<std::string> Executor::bind_statement(SharedDatabase& s, Statement
         // the CASE -- the parser leaves the placeholder "__case__" in the column then.
         // `label` is the argument as the query spells it (it names the result column and stays as typed); `source` is where a row holds it, which is
         // set here when that is another spelling.
-        ValueClass aggregate(AggFunc& func, const std::string& label, std::string& source, std::optional<CondExpr>& filter) {
+        ValueClass aggregate(AggFunc& func, const std::string& label, std::string& source, std::optional<CondExpr>& filter, bool* approx = nullptr) {
             std::string column = source.empty() ? label : source;
             std::vector<CaseWhenBranch>* branches = nullptr;
             if (auto* counted = std::get_if<AggFunc::CountCase>(&func.data)) branches = &counted->branches;
@@ -588,6 +628,7 @@ std::optional<std::string> Executor::bind_statement(SharedDatabase& s, Statement
                 if (column != typed) source = column;
             }
             if (filter) cond(*filter, "field list");
+            if (approx) *approx = !branches && argument_is_approx(column);
             return arg;
         }
 
@@ -641,8 +682,8 @@ std::optional<std::string> Executor::bind_statement(SharedDatabase& s, Statement
                 mark_outer(ca->name, ca->outer);
                 ca->cls = class_of_name(ca->name);
             }
-            else if (auto* agg = std::get_if<SelectColumn::Agg>(&c.data)) agg->arg_class = aggregate(agg->func, agg->col, agg->source, agg->filter);
-            else if (auto* aa = std::get_if<SelectColumn::AggAlias>(&c.data)) aa->arg_class = aggregate(aa->func, aa->col, aa->source, aa->filter);
+            else if (auto* agg = std::get_if<SelectColumn::Agg>(&c.data)) agg->arg_class = aggregate(agg->func, agg->col, agg->source, agg->filter, &agg->arg_approx);
+            else if (auto* aa = std::get_if<SelectColumn::AggAlias>(&c.data)) aa->arg_class = aggregate(aa->func, aa->col, aa->source, aa->filter, &aa->arg_approx);
             else if (auto* ex_col = std::get_if<SelectColumn::Expr>(&c.data)) {
                 // (the result column is named by the expression as it was typed, unless it has an alias)
                 std::string typed;
@@ -669,6 +710,7 @@ std::optional<std::string> Executor::bind_statement(SharedDatabase& s, Statement
                         no_outer(*wf->col, "field list");
                         wf->col_class = class_of_name(*wf->col);
                     }
+                    wf->col_approx = argument_is_approx(*wf->col);
                 }
                 for (auto& p : wf->partition_by) { name(p, "field list"); no_outer(p, "field list"); }
                 for (auto& o : wf->order_by) { name(o.column, "field list"); no_outer(o.column, "field list"); o.cls = class_of_name(o.column); }

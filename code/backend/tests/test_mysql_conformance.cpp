@@ -16,8 +16,8 @@ namespace fs = std::filesystem;
 // Statements whose answers were taken from a real MySQL 8.4 (code/test/diff/vs_mysql.py --emit): functions, operators and casts, queries over a table with
 // NULLs, constraints and writes. Each case is {kind, statement, expected rows}: kind 0 is a setup statement, 1 a query with the rows MySQL gave, 2 a statement
 // that succeeds, 3 one that fails, 4 one that is only run (RuSQL is known to differ from MySQL on it: DOUBLE aggregates, `||`, WITH ROLLUP, a text with a space at its
-// end that goes through the text of a result (UNION, INSERT ... SELECT, IN (subquery)) ...; it is run so that the tables stay as they were in MySQL's run). Numbers compare by value, rows as a
-// set unless the statement has an ORDER BY.
+// end that goes through the text of a result (UNION, INSERT ... SELECT, IN (subquery)) ...; it is run so that the tables stay as they were in MySQL's run), 5 a query whose
+// cells must also be the same TEXT (30.75 is not 30.7500: the DECIMAL corpus). Numbers compare by value (kind 1), rows as a set unless the statement has an ORDER BY.
 
 namespace {
 struct Case {
@@ -37,6 +37,9 @@ const Case kConstraints[] = {
 };
 const Case kCollation[] = {
 #include "mysql_conformance_collation.inc"
+};
+const Case kDecimals[] = {
+#include "mysql_conformance_decimals.inc"
 };
 
 struct TempDataDir {
@@ -156,7 +159,8 @@ void run_cases(const char* dir, const Case* cases, std::size_t count) {
                 REQUIRE(result.is_err());
                 break;
             }
-            case 1: {
+            case 1:
+            case 5: {
                 INFO("error: " << (result.is_err() ? result.error() : std::string()));
                 REQUIRE(result.is_ok());
                 Rows got = cells(result.value()), want = decode(c.expected);
@@ -172,7 +176,15 @@ void run_cases(const char* dir, const Case* cases, std::size_t count) {
                     shown << "] ";
                 }
                 INFO("got " << shown.str());
-                REQUIRE(same_rows(got, want, true));
+                if (c.kind == 5) {
+                    if (!ordered) {
+                        std::sort(got.begin(), got.end());
+                        std::sort(want.begin(), want.end());
+                    }
+                    REQUIRE(got == want); // (the same texts)
+                } else {
+                    REQUIRE(same_rows(got, want, true));
+                }
                 break;
             }
             default: {
@@ -193,6 +205,10 @@ TEST_CASE("queries over a table with NULLs give MySQL's answers", "[mysql_confor
 
 TEST_CASE("constraints, defaults, writes and transactions give MySQL's answers", "[mysql_conformance]") {
     run_cases("mc_constraints", kConstraints, sizeof kConstraints / sizeof kConstraints[0]);
+}
+
+TEST_CASE("DECIMAL and integer results are written with MySQL's places", "[mysql_conformance][decimals]") {
+    run_cases("mc_decimals", kDecimals, sizeof kDecimals / sizeof kDecimals[0]);
 }
 
 TEST_CASE("texts compare, sort, group, join and stay unique by MySQL's default collation", "[mysql_conformance][collation]") {

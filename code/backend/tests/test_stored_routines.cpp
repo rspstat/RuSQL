@@ -208,7 +208,7 @@ TEST_CASE("a user-defined function takes typed or untyped parameters", "[routine
     ok(ex, "CREATE FUNCTION add_ratio(a DECIMAL(10, 2), b VARCHAR(5)) RETURNS DECIMAL(10, 2) RETURN a + b");
     REQUIRE(q(ex, "SELECT add_ratio(1.5, 2)") == Rows{{"3.5"}});
     ok(ex, "CREATE FUNCTION half(x) RETURNS DECIMAL RETURN x / 2"); // the older spelling without types
-    REQUIRE(q(ex, "SELECT half(9)") == Rows{{"4.5"}});
+    REQUIRE(q(ex, "SELECT half(9)") == Rows{{"4.5000"}});
 }
 
 TEST_CASE("a trigger runs once for each row, with the row's NEW and OLD", "[routines][trigger]") {

@@ -65,14 +65,29 @@ def start(exe, port, data, parallel, log=None):
     return p, Client()
 
 
+IGNORE_NUMBER_FORM = False  # --number-form
 IGNORE_HEADER = False  # --ignore-header
 EMPTY_STRING = "''"  # --no-empty-strings: the corpus writes NULL where it would write an empty string (builds before 2026-10-05 stored '' as NULL)
 NOT_NULL_UPDATES = ""  # --no-null-arithmetic: "val IS NOT NULL AND " in front of the WHERE of every `SET val = val + 1`
 
 
+NUMBER_FORM = re.compile(r"-?\d+(\.\d+)?")
+
+
+def by_value(cell):
+    """30.7500 and 30.75 are one number (--number-form)."""
+    if NUMBER_FORM.fullmatch(cell) and "." in cell:
+        cell = cell.rstrip("0").rstrip(".")
+        return "0" if cell in ("", "-0") else cell
+    return cell
+
+
 def norm(out, unordered):
     out = TIMING.sub("", out)
     lines = [l.rstrip() for l in out.splitlines() if l.strip()]
+    if IGNORE_NUMBER_FORM:
+        # the cells with the number in its shortest form, no separator lines, no padding: for a change of how a DECIMAL is written (places)
+        lines = ["|".join(by_value(c.strip()) for c in l.strip().strip("|").split("|")) if l.startswith("|") else l for l in lines if not l.startswith("+")]
     if IGNORE_HEADER:
         # the rows only: no result-column names, no separator lines, cells compared without their padding (which follows the
         # width of the header)
@@ -400,6 +415,7 @@ def main():
     ap.add_argument("--parallel", action="store_true", help="thread pool on for both servers; answers compared as sets of lines")
     ap.add_argument("--modes", default="seq,seq", help="'seq' or 'par' for the old and the new server, e.g. seq,par")
     ap.add_argument("--exact", action="store_true", help="with --parallel or --modes: compare the text itself, not sets of lines")
+    ap.add_argument("--number-form", action="store_true", help="compare numbers by value (30.7500 is 30.75) and ignore the padding: for a change of the places a DECIMAL is written with")
     ap.add_argument("--ignore-header", action="store_true", help="compare the rows only: not the result-column names, separator lines or padding (for a change of how columns are named)")
     ap.add_argument("--no-null-arithmetic", action="store_true",
                     help='the corpus\'s `SET val = val + 1` skips NULL rows: builds before the NULL fix stored "NULL1" there, so the two builds\' tables would differ')
@@ -414,8 +430,9 @@ def main():
     ap.add_argument("--log-new", help="write the new server's stderr to this file (for builds with debug output)")
     ap.add_argument("--show", type=int, default=0, help="print the first N queries with the first lines of the old build's answer")
     args = ap.parse_args()
-    global IGNORE_HEADER, NOT_NULL_UPDATES, EMPTY_STRING
+    global IGNORE_HEADER, IGNORE_NUMBER_FORM, NOT_NULL_UPDATES, EMPTY_STRING
     IGNORE_HEADER = args.ignore_header
+    IGNORE_NUMBER_FORM = args.number_form
     EMPTY_STRING = "NULL" if args.no_empty_strings else "''"
     NOT_NULL_UPDATES = "val IS NOT NULL AND " if args.no_null_arithmetic else ""
     modes = ["par", "par"] if args.parallel else args.modes.split(",")

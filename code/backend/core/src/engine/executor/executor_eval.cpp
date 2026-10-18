@@ -181,7 +181,8 @@ NumVal number_tree(const ArithExpr& e, Leaf& leaf) {
             v.approx = true;
         }
     }
-    if (auto* col = std::get_if<ArithExpr::Col>(&e.data); col && col->approx) v.approx = true; // (a FLOAT / DOUBLE column: floating point, as in MySQL)
+    if (auto* col = std::get_if<ArithExpr::Col>(&e.data); col && (col->approx || col->cls == ValueClass::Text)) v.approx = true; // (a FLOAT / DOUBLE column or a text column: floating point, as in MySQL)
+    if (std::holds_alternative<ArithExpr::Str>(e.data)) v.approx = true; // ('2.5' * 2 is 5, not 5.0: a string is read as a DOUBLE)
     return v;
 }
 
@@ -193,8 +194,8 @@ std::string arithmetic_text(const ArithExpr& e, Leaf leaf, bool exact = false, b
     if (v.null) return EXECUTOR_NULL_VALUE;
     if (v.approx) return sqlval::format_double(v.dbl);
     if (v.is_int && !v.has_num) return std::to_string(v.i);
-    if (exact) return v.num.to_decimal().compact();
-    return sqlval::num_round(v.num, v.scale).to_decimal().compact();
+    if (exact) return v.num.to_decimal().str(static_cast<std::size_t>(v.num.scale)); // (all the digits it holds, zeros too: ROUND(10.50 / 3, 2) is 3.50)
+    return sqlval::num_round(v.num, v.scale).to_decimal().str(static_cast<std::size_t>(v.scale)); // (every digit MySQL shows: 10.50 * 2 is 21.00)
 }
 
 // The functions that do arithmetic on a number they are given: FLOOR(10 / 3 * 3) is 9 in MySQL (the product holds 9.999999999), ROUND(8 / 59.27, 2) is 0.13

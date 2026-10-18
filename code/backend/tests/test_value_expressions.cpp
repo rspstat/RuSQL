@@ -193,10 +193,10 @@ TEST_CASE("small things an expression needs", "[value_expressions]") {
     REQUIRE(q(ex, "SELECT id FROM a WHERE v < NULL + 3").empty());
     REQUIRE(q(ex, "SELECT id FROM a WHERE v IS NULL OR v < NULL + 3") == Rows{{"2"}});
     REQUIRE(q(ex, "SELECT id FROM a WHERE v > 5 - NULL OR id = 5") == Rows{{"5"}});
-    // a sum shows every place it has (at least 4 for a fraction)
+    // a sum shows the places its DECIMAL has
     ok(ex, "CREATE TABLE m (id INT PRIMARY KEY, p DECIMAL(10,2), r DECIMAL(10,4))");
     ok(ex, "INSERT INTO m VALUES (1, 10.25, 1.0825), (2, 3.10, 1.0825)");
-    REQUIRE(one(ex, "SELECT SUM(p) FROM m") == "13.3500");
+    REQUIRE(one(ex, "SELECT SUM(p) FROM m") == "13.35");
     REQUIRE(one(ex, "SELECT SUM(p * r) FROM m") == "14.451375");
     REQUIRE(one(ex, "SELECT SUM(id) FROM m") == "3");
     REQUIRE(one(ex, "SELECT SUM(p) + 0 FROM m") == "13.35");

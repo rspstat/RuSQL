@@ -47,6 +47,8 @@ def same_number(got, want):
         value = Fraction(got)
     except (ValueError, ZeroDivisionError):
         return False
+    if isinstance(want, Avg):
+        return abs(value - want) <= Fraction(5, 10 ** 5)
     if value == want:
         return True
     # a product of several decimals has more places than the 6 an arithmetic result is printed with: the number is right to those 6 places
@@ -57,10 +59,12 @@ def truth_text(t):
     return "NULL" if t is None else ("1" if t else "0")
 
 
+class Avg(Fraction):
+    """The exact quotient of an AVG: the engine writes it with the places of the values plus 4, so it is right when it is within half a unit of the 4th place."""
+
+
 def round4(q):
-    scaled = q * 10000
-    n = int(abs(scaled) + Fraction(1, 2))
-    return Fraction(n if scaled >= 0 else -n, 10000)
+    return Avg(q)
 
 
 # ---------------------------------------------------------------------------------------------------------------------------------------------

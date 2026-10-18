@@ -1385,14 +1385,14 @@ TEST_CASE("aggregates inside expressions, functions and CASE in the select list"
     };
     for (auto& c : std::vector<Case>{
              {"SELECT MAX(v) - MIN(v) AS spread FROM a", {{"40"}}},
-             {"SELECT SUM(v) / COUNT(*) AS m FROM a", {{"25"}}},
-             {"SELECT SUM(v) / COUNT(v) AS m FROM a", {{"30"}}},
-             {"SELECT ROUND(AVG(v), 2) FROM a", {{"30"}}},
+             {"SELECT SUM(v) / COUNT(*) AS m FROM a", {{"25.0000"}}},
+             {"SELECT SUM(v) / COUNT(v) AS m FROM a", {{"30.0000"}}},
+             {"SELECT ROUND(AVG(v), 2) FROM a", {{"30.00"}}},
              {"SELECT COALESCE(SUM(v), 0) FROM a", {{"150"}}},
              {"SELECT SUM(v) + 1 FROM a", {{"151"}}},
              {"SELECT 1 + SUM(v) AS t FROM a", {{"151"}}},
-             {"SELECT 100 * SUM(v) / COUNT(*) FROM a", {{"2500"}}},
-             {"SELECT (MAX(v) - MIN(v)) / 2 AS h FROM a", {{"20"}}},
+             {"SELECT 100 * SUM(v) / COUNT(*) FROM a", {{"2500.0000"}}},
+             {"SELECT (MAX(v) - MIN(v)) / 2 AS h FROM a", {{"20.0000"}}},
              {"SELECT CASE WHEN COUNT(*) > 5 THEN 'many' ELSE 'few' END AS size FROM a", {{"many"}}},
              {"SELECT CASE WHEN COUNT(*) > 6 THEN 'many' ELSE 'few' END AS size FROM a", {{"few"}}},
              {"SELECT UPPER(MAX(g)) FROM a", {{"3"}}},
@@ -1400,7 +1400,7 @@ TEST_CASE("aggregates inside expressions, functions and CASE in the select list"
              {"SELECT COUNT(*) + COUNT(v) AS c FROM a", {{"11"}}},
              {"SELECT ABS(MIN(v) - MAX(v)) AS r FROM a", {{"40"}}},
              {"SELECT SUM(v), SUM(v) + 1 AS t, COUNT(*) FROM a", {{"150", "151", "6"}}},
-             {"SELECT AVG(v), AVG(v) * 3 AS t FROM a", {{"30.0000", "90"}}},
+             {"SELECT AVG(v), AVG(v) * 3 AS t FROM a", {{"30.0000", "90.0000"}}},
          }) {
         INFO(c.sql);
         auto text = ok_text(ex, c.sql);
@@ -1412,8 +1412,8 @@ TEST_CASE("aggregates inside expressions, functions and CASE in the select list"
     for (auto& c : std::vector<Case>{
              {"SELECT g, MAX(v) - MIN(v) AS spread, SUM(v) * 2 AS dbl, COUNT(*) FROM a GROUP BY g ORDER BY g",
               {{"1", "20", "120", "2"}, {"2", "20", "160", "3"}, {"3", "0", "20", "1"}}},
-             {"SELECT g, ROUND(SUM(v) / COUNT(*), 1) AS m FROM a GROUP BY g ORDER BY g", {{"1", "30"}, {"2", "26.7"}, {"3", "10"}}},
-             {"SELECT g, SUM(v) / COUNT(v) AS m FROM a GROUP BY g ORDER BY g", {{"1", "30"}, {"2", "40"}, {"3", "10"}}},
+             {"SELECT g, ROUND(SUM(v) / COUNT(*), 1) AS m FROM a GROUP BY g ORDER BY g", {{"1", "30.0"}, {"2", "26.7"}, {"3", "10.0"}}},
+             {"SELECT g, SUM(v) / COUNT(v) AS m FROM a GROUP BY g ORDER BY g", {{"1", "30.0000"}, {"2", "40.0000"}, {"3", "10.0000"}}},
              {"SELECT g, CASE WHEN COUNT(*) > 2 THEN 'big' ELSE 'small' END AS size FROM a GROUP BY g ORDER BY g",
               {{"1", "small"}, {"2", "big"}, {"3", "small"}}},
              {"SELECT g FROM a GROUP BY g HAVING ROUND(AVG(v), 0) >= 30 ORDER BY g", {{"1"}, {"2"}}},
@@ -1427,8 +1427,8 @@ TEST_CASE("aggregates inside expressions, functions and CASE in the select list"
     // text that merely reads like an aggregate is text: the statement is not an aggregate query
     REQUIRE(table_cells(ok_text(ex, "SELECT UPPER('max(v)') AS u FROM a ORDER BY aid")) == Rows(6, {"MAX(V)"}));
 
-    // a calculation goes on from the AVG the select list shows (4 places, rounded half away from zero), as in MySQL: 1, 2, 2 is 1.6667
-    // and 1.6667 * 3 is 5.0001
+    // a calculation goes on from the AVG the select list shows (4 places, rounded half away from zero): 1, 2, 2 is 1.6667 and 1.6667 * 3 is 5.0001.
+    // (MySQL 8.4 goes on from the 9 digits it holds -- 1.666666666 -- and gives 5.0000: a known difference, see PLAN.md)
     REQUIRE(ex.execute_sql("CREATE TABLE f (id INT PRIMARY KEY, v INT)").is_ok());
     REQUIRE(ex.execute_sql("INSERT INTO f VALUES (1,1),(2,2),(3,2)").is_ok());
     REQUIRE(table_cells(ok_text(ex, "SELECT AVG(v) * 3 AS t FROM f")) == Rows{{"5.0001"}});
@@ -1459,11 +1459,11 @@ TEST_CASE("aggregates inside expressions, functions and CASE in the select list"
     REQUIRE(ex.execute_sql("INSERT INTO c VALUES (1,'a'),(2,'b'),(3,'c'),(4,'d')").is_ok());
     REQUIRE(ex.execute_sql("INSERT INTO o VALUES (10,1,5),(11,1,7),(12,2,9)").is_ok());
     REQUIRE(table_cells(ok_text(ex, "SELECT x.name, SUM(y.amt) / COUNT(y.id) AS m FROM c x JOIN o y ON y.cid = x.id GROUP BY x.name ORDER BY x.name")) ==
-            Rows{{"a", "6"}, {"b", "9"}});
+            Rows{{"a", "6.0000"}, {"b", "9.0000"}});
     REQUIRE(table_cells(ok_text(ex, "SELECT x.name, SUM(y.id) * 2 AS d FROM c x JOIN o y ON y.cid = x.id GROUP BY x.name ORDER BY x.name")) ==
             Rows{{"a", "42"}, {"b", "24"}});
     REQUIRE(table_cells(ok_text(ex, "SELECT x.name, ROUND(SUM(y.id) / COUNT(*), 1) AS m FROM c x JOIN o y ON y.cid = x.id GROUP BY x.name ORDER BY x.name")) ==
-            Rows{{"a", "10.5"}, {"b", "12"}});
+            Rows{{"a", "10.5"}, {"b", "12.0"}});
     REQUIRE(table_cells(ok_text(ex, "SELECT x.name, CASE WHEN SUM(y.id) > 20 THEN 'high' ELSE 'low' END AS lvl FROM c x JOIN o y ON y.cid = x.id GROUP BY x.name ORDER BY x.name")) ==
             Rows{{"a", "high"}, {"b", "low"}});
     REQUIRE(table_cells(ok_text(ex, "SELECT x.name, COUNT(y.id) * 10 AS n10, SUM(y.amt) + 0 AS s FROM c x LEFT JOIN o y ON y.cid = x.id GROUP BY x.name ORDER BY x.name")) ==

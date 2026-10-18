@@ -65,6 +65,13 @@ bool numeric_function(const std::string& name) {
     return function_result_class(name) == ValueClass::Number || more.count(upper(name)) > 0;
 }
 
+// a function that works in floating point (MySQL gives a DOUBLE whatever it is given)
+bool floating_function(const std::string& name) {
+    static const std::unordered_set<std::string> names = {"SQRT", "POW", "POWER", "EXP", "LN", "LOG", "LOG2", "LOG10", "SIN", "COS", "TAN", "ASIN", "ACOS",
+                                                          "ATAN", "ATAN2", "COT", "DEGREES", "RADIANS", "RAND", "PI"};
+    return names.count(upper(name)) > 0;
+}
+
 bool approximate_type(const DataType& t) { return std::holds_alternative<DataType::Float>(t.data) || std::holds_alternative<DataType::Double>(t.data); }
 
 struct Source {
@@ -170,7 +177,9 @@ private:
                                                            static_cast<std::uint8_t>(scale)}));
             }
             if (integer_type(def->data_type)) return made_up(DataType(DataType::Decimal{static_cast<std::uint8_t>(average ? 14 : 32), static_cast<std::uint8_t>(average ? 4 : 0)}));
-            return ResultColumnType{}; // (text and dates: MySQL converts them to numbers; left as text here)
+            if (std::holds_alternative<DataType::Varchar>(def->data_type.data) || std::holds_alternative<DataType::Text>(def->data_type.data))
+                return made_up(DataType(DataType::Double{})); // (a text is read as a double)
+            return ResultColumnType{}; // (dates: MySQL converts them to numbers; left as text here)
         };
         return std::visit(
             [&](const auto& f) -> ResultColumnType {
@@ -210,6 +219,38 @@ private:
             return integer_type(t) || approximate_type(t) || std::holds_alternative<DataType::Decimal>(t.data) || std::holds_alternative<DataType::Boolean>(t.data);
         }
         return false; // a string, a subquery
+    }
+
+    // Is the expression done in floating point? An operand that is a FLOAT / DOUBLE column, a text (a string or a text column) or a function that works in
+    // floating point makes it a DOUBLE; otherwise it is DECIMAL or integer arithmetic.
+    bool double_expression(const ArithExpr& e, const Statement::Select& sel, const std::vector<Source>& sources) const {
+        if (std::holds_alternative<ArithExpr::Str>(e.data)) return true;
+        if (auto* c = std::get_if<ArithExpr::Col>(&e.data)) {
+            const NamedType* column = c->outer == 0 && plain_reference(c->name) ? find(sel, sources, c->name) : nullptr;
+            if (!column || !column->type.column) return column && column->type.column == std::nullopt && false;
+            const DataType& t = column->type.column->data_type;
+            return approximate_type(t) || std::holds_alternative<DataType::Varchar>(t.data) || std::holds_alternative<DataType::Text>(t.data);
+        }
+        if (auto* v = std::get_if<ArithExpr::Add>(&e.data)) return double_expression(*v->lhs, sel, sources) || double_expression(*v->rhs, sel, sources);
+        if (auto* v = std::get_if<ArithExpr::Sub>(&e.data)) return double_expression(*v->lhs, sel, sources) || double_expression(*v->rhs, sel, sources);
+        if (auto* v = std::get_if<ArithExpr::Mul>(&e.data)) return double_expression(*v->lhs, sel, sources) || double_expression(*v->rhs, sel, sources);
+        if (auto* v = std::get_if<ArithExpr::Div>(&e.data)) return double_expression(*v->lhs, sel, sources) || double_expression(*v->rhs, sel, sources);
+        if (auto* f = std::get_if<ArithExpr::Func>(&e.data)) {
+            if (floating_function(f->name)) return true;
+            // (the functions that give what they are given; LENGTH of a text is an integer)
+            static const std::unordered_set<std::string> passes = {"ROUND", "TRUNCATE", "ABS", "MOD", "GREATEST", "LEAST", "COALESCE", "IFNULL", "NULLIF", "IF", "CEIL", "CEILING", "FLOOR", "SIGN"};
+            if (!passes.count(upper(f->name))) return false;
+            for (const ArithExpr& a : f->args) {
+                if (double_expression(a, sel, sources)) return true;
+            }
+        }
+        return false;
+    }
+
+    ResultColumnType expression_type(const ArithExpr& e, const Statement::Select& sel, const std::vector<Source>& sources) const {
+        if (!numeric_expression(e, sel, sources)) return ResultColumnType{};
+        if (double_expression(e, sel, sources)) return made_up(DataType(DataType::Double{}));
+        return ResultColumnType{std::nullopt, true};
     }
 
     ResultColumnType window(const SelectColumn::WinFunc& w, const Statement::Select& sel, const std::vector<Source>& sources) const {
@@ -268,9 +309,18 @@ private:
             } else if (auto* aa = std::get_if<SelectColumn::AggAlias>(&item.data)) {
                 out.push_back({aa->alias, aggregate(aa->func, aa->source.empty() ? aa->col : aa->source, sel, sources)});
             } else if (auto* fn = std::get_if<SelectColumn::Func>(&item.data)) {
-                out.push_back({fn->alias.value_or(std::string()), ResultColumnType{std::nullopt, numeric_function(fn->name)}});
+                bool floating = floating_function(fn->name);
+                static const std::unordered_set<std::string> passes = {"ROUND", "TRUNCATE", "ABS", "MOD", "GREATEST", "LEAST", "CEIL", "CEILING", "FLOOR", "SIGN"};
+                for (const std::string& a : fn->args) {
+                    if (floating || !passes.count(upper(fn->name))) break;
+                    try {
+                        floating = double_expression(Parser::str_to_arith(a), sel, sources);
+                    } catch (const ParseError&) {}
+                }
+                out.push_back({fn->alias.value_or(std::string()),
+                               floating && numeric_function(fn->name) ? made_up(DataType(DataType::Double{})) : ResultColumnType{std::nullopt, numeric_function(fn->name)}});
             } else if (auto* e = std::get_if<SelectColumn::Expr>(&item.data)) {
-                out.push_back({e->alias.value_or(std::string()), ResultColumnType{std::nullopt, numeric_expression(e->expr, sel, sources)}});
+                out.push_back({e->alias.value_or(std::string()), expression_type(e->expr, sel, sources)});
             } else if (auto* w = std::get_if<SelectColumn::WinFunc>(&item.data)) {
                 out.push_back({w->alias.value_or(std::string()), window(*w, sel, sources)});
             } else if (auto* cw = std::get_if<SelectColumn::CaseWhen>(&item.data)) {

@@ -4,7 +4,7 @@ For a change that must not alter any result (a faster aggregate / GROUP BY / DIS
 format, ...): run the same random SELECT corpus on two engine_server builds and compare what they print.
 
   python diff_builds.py <old engine_server.exe> <new engine_server.exe> [--queries N] [--seed S] [--rows R]
-                        [--parallel | --modes seq,par] [--exact] [--skip-chain-refs] [--max-report K] [--diff-lines L] [--show N] [--log-new FILE]
+                        [--parallel | --modes seq,par] [--exact] [--number-form] [--skip-chain-refs] [--max-report K] [--diff-lines L] [--show N] [--log-new FILE]
 
 Both servers get the same schema (4 tables: t, u, v, w), data (NULLs, numeric-looking text such as '7' / '007' / '7.0',
 empty strings), mutations and queries, and every answer is compared as text (the "(0.001 sec)" timing line is ignored).
@@ -30,6 +30,7 @@ A statement that fails must fail with the same message on both builds.
   --skip-chain-refs  no ON clause that reads a table joined earlier: builds before b3ca102 answered `t JOIN u ON u.id = t.grp
                      JOIN w ON w.k = u.id` wrongly (the left column of the second join was read by its bare name from the
                      FROM table), so such queries differ from the fixed build by design
+  --number-form      compare numbers by value (30.7500 is 30.75) and ignore the padding: for a change of the places a DECIMAL is written with
   --ignore-header    compare the rows only (not the result-column names, separator lines or cell padding): for a change
                      of how columns are NAMED, to show that no value moved
   --diff-lines L     how many lines only one of the two answers has are listed for a difference (default 3; all of them when many
@@ -134,7 +135,12 @@ Comparison with a real MySQL (needs pymysql and a MySQL 8.4 on 127.0.0.1:3391; u
       runs the statements of a corpus on RuSQL and on MySQL and lists the ones whose answers differ (a line is a statement, '#' a comment, '--' a setup
       statement run on both). --emit writes the cases of the C++ conformance tests code/backend/tests/mysql_conformance_<name>.inc: MySQL's answer is the
       expected one for every statement RuSQL answers the same; a statement it answers differently is only run, so the tables stay as MySQL had them.
-      The corpora: functions, tables, constraints, collation (the default collation utf8mb4_0900_ai_ci).
+      The corpora: functions, tables, constraints, collation (the default collation utf8mb4_0900_ai_ci), decimals (--exact, see below).
+  --exact
+      the cells must be the same TEXT, not only the same number (30.7500 is not 30.75, 21 is not 21.00). With --emit the rows are written as kind 5, which
+      test_mysql_conformance.cpp compares so (mysql_conformance_decimals.inc, from corpus/decimals.sql: DECIMAL and integer results only -- a DOUBLE comes to a
+      client as a float, so its text is not the engine's). Together with --proto the client's values are compared (Decimal('30.75'), 6.75), which is how
+      probe files for the places of a number are checked.
   python vs_mysql.py <engine_server.exe> corpus/protocol.sql --proto
       the same comparison, but RuSQL is asked over its MySQL protocol (pymysql, port 13399) instead of the native port, so what the protocol layer of
       server/src/mysql.cpp makes of a statement is compared too (SHOW COLUMNS / INDEX / CREATE TABLE / TABLE STATUS, SHOW VARIABLES, the OK packet's

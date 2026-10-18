@@ -441,8 +441,9 @@ struct SelectColumn {
     // `col` is the argument as the query spells it (`b.id`, `o.amount`): it names the result column (`SUM(o.amount)`), like the
     // text the user typed. `source` is where a row holds that value when `col` goes through a table ALIAS: the same name with the
     // table in place of the alias (`orders.amount`); empty when `col` already names the table (or none).
-    struct Agg { AggFunc func; std::string col; std::optional<CondExpr> filter; std::string source; ValueClass arg_class = ValueClass::Unknown; };
-    struct AggAlias { AggFunc func; std::string col; std::string alias; std::optional<CondExpr> filter; std::string source; ValueClass arg_class = ValueClass::Unknown; };
+    // `arg_approx`: the argument is a FLOAT / DOUBLE (or text, which MySQL reads as a double): SUM / AVG are done and shown as doubles (set by the binder)
+    struct Agg { AggFunc func; std::string col; std::optional<CondExpr> filter; std::string source; ValueClass arg_class = ValueClass::Unknown; bool arg_approx = false; };
+    struct AggAlias { AggFunc func; std::string col; std::string alias; std::optional<CondExpr> filter; std::string source; ValueClass arg_class = ValueClass::Unknown; bool arg_approx = false; };
     struct Func { std::string name; std::vector<std::string> args; std::optional<std::string> alias; };
     struct Expr { ArithExpr expr; std::optional<std::string> alias; };
     struct CaseWhen {
@@ -460,6 +461,7 @@ struct SelectColumn {
         std::optional<WindowFrame> frame;
         ValueClass col_class = ValueClass::Unknown;
         std::optional<std::string> default_value; // LAG(c, n, default) / LEAD(c, n, default): what a row too near the end gets (none: NULL)
+        bool col_approx = false; // the column is a FLOAT / DOUBLE (or text): SUM / AVG OVER are doubles
     };
     struct Subquery {
         StatementPtr query;

@@ -95,7 +95,7 @@ TEST_CASE("result_columns types the columns of a SELECT", "[result_types]") {
     REQUIRE(types_of(ex, "SELECT table_name, table_rows FROM information_schema.tables") == "text,bigint");
     // expressions: numbers by value, text (a CASE, a string function) left as text
     REQUIRE(types_of(ex, "SELECT id * 2, 1, 'a', LENGTH(vc), ROUND(d, 1), LAST_INSERT_ID(), UPPER(vc), CONCAT(vc, 'x') FROM ty") ==
-            "value,value,text,value,value,value,text,text");
+            "value,value,text,value,double,value,text,text");
     REQUIRE(types_of(ex, "SELECT 1 + 1, 2.5") == "value,value");
     REQUIRE(types_of(ex, "SELECT '12', id + t, dt, UPPER(tx), IF(id > 1, 1, 2), COALESCE(t, 0) FROM ty") == "text,value,date,text,text,text"); // (a quoted number is text)
     // nothing to tell: something that is not a SELECT, a table that is not there, a CTE

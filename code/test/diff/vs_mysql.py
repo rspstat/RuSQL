@@ -1,10 +1,11 @@
-"""vs_mysql.py <rusql.exe> <corpus.sql> [--split] [--emit cases.inc] [--trace] [--proto [--types]]
+"""vs_mysql.py <rusql.exe> <corpus.sql> [--split] [--emit cases.inc] [--trace] [--proto [--types]] [--exact]
 
 Runs the same statements on RuSQL and on a real MySQL (127.0.0.1:3391) and lists what differs.
 
 Corpus: one statement per line; '#' comment; '--' prefix = setup run on both silently. Rows are compared as multisets unless the statement has
 ORDER BY; numbers compare by value ('1' == '1.0000'); NULL is the text NULL. --split runs each item of a FROM-less `SELECT a, b, c` as a statement of its own.
 
+--exact: the cells must be the same TEXT, not only the same number (30.7500 is not 30.75); with --emit the rows are written as kind 5, which the test compares so.
 --emit writes the statements as the cases of a C++ conformance test (code/backend/tests/mysql_conformance_{functions,tables,constraints,collation}.inc, from corpus/{functions,tables,constraints,collation}.sql): MySQL's answer is the expected
 one for every statement RuSQL answers the same; a statement RuSQL answers differently is only run (so the state of the tables stays the same).
 """
@@ -23,7 +24,7 @@ SETUP = [
     "INSERT INTO u VALUES (1, 10, 'one'), (2, 20, 'Two'), (3, NULL, 'three'), (4, 10, NULL)",
 ]
 
-K_SETUP, K_ROWS, K_OK, K_ERR, K_RUN = 0, 1, 2, 3, 4
+K_SETUP, K_ROWS, K_OK, K_ERR, K_RUN, K_EXACT = 0, 1, 2, 3, 4, 5  # K_EXACT: the rows, and the texts of the cells must be the same (--exact)
 
 
 def cell(v):
@@ -87,9 +88,14 @@ def num(x):
         return None
 
 
+EXACT = "--exact" in sys.argv  # the cells must be the same text (what a client sees: 30.75 is not 30.7500)
+
+
 def same_cell(a, b):
     if a == b:
         return True
+    if EXACT:
+        return False
     na, nb = num(a), num(b)
     if na is not None and nb is not None:
         try:
@@ -252,7 +258,7 @@ def main():
                         print("   " + str(why) + (" | mysql=" + str(m[1]) if m[0] == "err" else "") + (" | rusql=" + str(r[1]) if r[0] == "err" else ""))
                     emitted.append(case(K_RUN, stmt))
                 elif m[0] == "rows":
-                    emitted.append(case(K_ROWS, stmt, encode_rows(m[1]) if m[1] else ""))
+                    emitted.append(case(K_EXACT if EXACT else K_ROWS, stmt, encode_rows(m[1]) if m[1] else ""))
                 elif m[0] == "ok":
                     emitted.append(case(K_OK, stmt))
                 else:

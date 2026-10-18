@@ -192,7 +192,7 @@ std::vector<Row> Executor::compute_window_functions(std::vector<Row> rows, const
                             const std::string* v = get_col(rows[sorted[i]], col_name);
                             if (v && *v != EXECUTOR_NULL_VALUE) frame_values.push_back(v);
                         }
-                        values[sorted[pos]] = sum_of_texts(frame_values, false).value_or(EXECUTOR_NULL_VALUE);
+                        values[sorted[pos]] = sum_of_texts(frame_values, false, wf->col_approx).value_or(EXECUTOR_NULL_VALUE);
                     }
                     break;
                 }
@@ -205,7 +205,7 @@ std::vector<Row> Executor::compute_window_functions(std::vector<Row> rows, const
                             const std::string* v = get_col(rows[sorted[i]], col_name);
                             if (v && *v != EXECUTOR_NULL_VALUE) frame_values.push_back(v);
                         }
-                        values[sorted[pos]] = average_of_texts(frame_values).value_or(EXECUTOR_NULL_VALUE);
+                        values[sorted[pos]] = average_of_texts(frame_values, wf->col_approx).value_or(EXECUTOR_NULL_VALUE);
                     }
                     break;
                 }

@@ -682,7 +682,14 @@ std::string fn_abs(const BuiltinCall& c) {
     if (is_null(v)) return kNull;
     Decimal d = decimal_of(v);
     d.negative = false;
-    return d.compact();
+    return d.str(d.fraction.size()); // (the places the value was written with: ABS(-10.50) is 10.50)
+}
+
+// ROUND / TRUNCATE of a DECIMAL: it keeps the places it has up to the places asked for, never more (ROUND(10.50, 4) is 10.50, ROUND(12.00, 1) is 12.0,
+// ROUND(3.5000, 2) is 3.50), and none for a negative number of places
+std::string rounded_decimal(const Decimal& in, long long places, bool cut) {
+    const Decimal r = in.rounded(places, cut);
+    return r.str(std::min<std::size_t>(in.fraction.size(), static_cast<std::size_t>(std::max<long long>(places, 0))));
 }
 
 std::string fn_round(const BuiltinCall& c) {
@@ -690,13 +697,13 @@ std::string fn_round(const BuiltinCall& c) {
     if (any_null(c)) return kNull;
     const long long places = argc(c) == 2 ? int_of(c.value(1)) : 0;
     if (double_arg(c, 0)) return format_double(round_double(double_of(c.value(0)), places));
-    return decimal_of(c.value(0)).rounded(places, false).compact();
+    return rounded_decimal(decimal_of(c.value(0)), places, false);
 }
 
 std::string fn_truncate(const BuiltinCall& c) {
     if (argc(c) != 2) wrong_count(c);
     if (any_null(c)) return kNull;
-    return decimal_of(c.value(0)).rounded(int_of(c.value(1)), true).compact();
+    return rounded_decimal(decimal_of(c.value(0)), int_of(c.value(1)), true);
 }
 
 std::string fn_floor(const BuiltinCall& c) {
@@ -724,13 +731,23 @@ std::string fn_mod(const BuiltinCall& c) {
     if (any_null(c)) return kNull;
     const Decimal a = decimal_of(c.value(0)), b = decimal_of(c.value(1));
     if (b.is_zero()) return kNull;
-    if (a.fraction.find_first_not_of('0') == std::string::npos && b.fraction.find_first_not_of('0') == std::string::npos) {
+    if (a.fraction.empty() && b.fraction.empty()) {
         if (auto x = a.to_int64()) {
             if (auto y = b.to_int64()) {
                 if (*y == -1) return "0";
                 return int_text(*x % *y); // (the sign of the dividend, as in MySQL)
             }
         }
+    }
+    if (!double_arg(c, 0) && !double_arg(c, 1)) {
+        // DECIMALs: the remainder of the digits at the larger of the two scales, which it keeps (MOD(10.50, 3) is 1.50), with the sign of the dividend
+        const sqlval::Num x = sqlval::align_scale(sqlval::Num::from_decimal(a), std::max<int>(static_cast<int>(a.fraction.size()), static_cast<int>(b.fraction.size())));
+        const sqlval::Num y = sqlval::align_scale(sqlval::Num::from_decimal(b), x.scale);
+        sqlval::Num r;
+        r.scale = x.scale;
+        r.digits = sqlval::sub_abs_digits(x.digits, sqlval::mul_abs_digits(sqlval::div_abs_digits(x.digits, y.digits), y.digits));
+        r.negative = a.negative && r.digits != "0";
+        return r.to_decimal().str(static_cast<std::size_t>(r.scale));
     }
     const double r = std::fmod(double_of(c.value(0)), double_of(c.value(1)));
     return format_double(r);
