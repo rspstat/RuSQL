@@ -50,6 +50,10 @@ std::string dt_full(const DataType& dt) {
     if (auto* v = std::get_if<DataType::Decimal>(&dt.data))
         return "decimal(" + std::to_string(v->precision) + "," + std::to_string(v->scale) + ")";
     if (std::holds_alternative<DataType::Boolean>(dt.data)) return "tinyint(1)";
+    auto fraction = [&](std::uint8_t fsp) { return fsp ? dt_base(dt) + "(" + std::to_string(fsp) + ")" : dt_base(dt); };
+    if (auto* v = std::get_if<DataType::DateTime>(&dt.data)) return fraction(v->fsp);
+    if (auto* v = std::get_if<DataType::Timestamp>(&dt.data)) return fraction(v->fsp);
+    if (auto* v = std::get_if<DataType::Time>(&dt.data)) return fraction(v->fsp);
     return dt_base(dt);
 }
 
@@ -151,7 +155,15 @@ std::vector<Row> Executor::info_schema_rows(const SharedDatabase& s, const std::
             r["MAX_DATA_LENGTH"] = "0";
             r["INDEX_LENGTH"] = "0";
             r["DATA_FREE"] = "0";
-            r["AUTO_INCREMENT"] = EXECUTOR_NULL_VALUE;
+            r["AUTO_INCREMENT"] = EXECUTOR_NULL_VALUE; // (the number the next row gets, for a table that has an AUTO_INCREMENT column)
+            if (const TableSchema* schema = s.catalog.get_table(name)) {
+                for (const ColumnDef& col : schema->columns) {
+                    if (!col.auto_increment) continue;
+                    auto counter = schema->auto_increment_counters.find(col.name);
+                    r["AUTO_INCREMENT"] = std::to_string((counter == schema->auto_increment_counters.end() ? 0 : counter->second) + 1);
+                    break;
+                }
+            }
             r["CREATE_TIME"] = EXECUTOR_NULL_VALUE;
             r["UPDATE_TIME"] = EXECUTOR_NULL_VALUE;
             r["CHECK_TIME"] = EXECUTOR_NULL_VALUE;
@@ -191,11 +203,17 @@ std::vector<Row> Executor::info_schema_rows(const SharedDatabase& s, const std::
                     char_max = "65535";
 
                 std::string num_prec = EXECUTOR_NULL_VALUE;
-                if (std::holds_alternative<DataType::Int>(col.data_type.data) || std::holds_alternative<DataType::SmallInt>(col.data_type.data) ||
-                    std::holds_alternative<DataType::TinyInt>(col.data_type.data))
+                const bool integer_column = std::holds_alternative<DataType::Int>(col.data_type.data) || std::holds_alternative<DataType::SmallInt>(col.data_type.data) ||
+                                            std::holds_alternative<DataType::TinyInt>(col.data_type.data) || std::holds_alternative<DataType::BigInt>(col.data_type.data) ||
+                                            std::holds_alternative<DataType::Boolean>(col.data_type.data);
+                if (std::holds_alternative<DataType::Int>(col.data_type.data))
                     num_prec = "10";
+                else if (std::holds_alternative<DataType::SmallInt>(col.data_type.data))
+                    num_prec = "5";
+                else if (std::holds_alternative<DataType::TinyInt>(col.data_type.data) || std::holds_alternative<DataType::Boolean>(col.data_type.data))
+                    num_prec = "3";
                 else if (std::holds_alternative<DataType::BigInt>(col.data_type.data))
-                    num_prec = "19";
+                    num_prec = col.is_unsigned ? "20" : "19";
                 else if (std::holds_alternative<DataType::Float>(col.data_type.data))
                     num_prec = "12";
                 else if (std::holds_alternative<DataType::Double>(col.data_type.data))
@@ -205,6 +223,7 @@ std::vector<Row> Executor::info_schema_rows(const SharedDatabase& s, const std::
 
                 std::string num_scale = EXECUTOR_NULL_VALUE;
                 if (auto* v = std::get_if<DataType::Decimal>(&col.data_type.data)) num_scale = std::to_string(v->scale);
+                else if (integer_column) num_scale = "0";
 
                 bool has_charset = std::holds_alternative<DataType::Varchar>(col.data_type.data) ||
                                     std::holds_alternative<DataType::Text>(col.data_type.data) ||
@@ -225,7 +244,10 @@ std::vector<Row> Executor::info_schema_rows(const SharedDatabase& s, const std::
                 r["CHARACTER_OCTET_LENGTH"] = EXECUTOR_NULL_VALUE;
                 r["NUMERIC_PRECISION"] = num_prec;
                 r["NUMERIC_SCALE"] = num_scale;
-                r["DATETIME_PRECISION"] = EXECUTOR_NULL_VALUE;
+                r["DATETIME_PRECISION"] = std::holds_alternative<DataType::DateTime>(col.data_type.data) || std::holds_alternative<DataType::Timestamp>(col.data_type.data) ||
+                                                  std::holds_alternative<DataType::Time>(col.data_type.data)
+                                              ? std::to_string(fraction_digits_of(col.data_type)) // (the places of the fraction of a second)
+                                              : EXECUTOR_NULL_VALUE;
                 r["CHARACTER_SET_NAME"] = has_charset ? "utf8mb4" : EXECUTOR_NULL_VALUE;
                 r["COLLATION_NAME"] = has_charset ? "utf8mb4_0900_ai_ci" : EXECUTOR_NULL_VALUE;
                 r["COLUMN_TYPE"] = dt_full(col.data_type) + (col.is_unsigned ? " unsigned" : "");

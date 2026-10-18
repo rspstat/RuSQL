@@ -9,7 +9,7 @@
 |---|---|
 | 무엇 | MySQL 호환 프로토콜을 쓰는 **자체 RDBMS 엔진**(C++20) + 데스크톱 클라이언트(Tauri/React) + Claude 연동(MCP) |
 | 1학기 → 2학기 | Rust 프로토타입 → **C++ 전면 재작성**, "기능 추가"에서 **정합성·동시성·성능을 실제로 파고드는 심화**로 |
-| 규모 | 테스트 **736 케이스 / 1,502,403 assertions** (2학기 초 218 케이스 / 3,080 assertions) |
+| 규모 | 테스트 **745 케이스 / 1,502,724 assertions** (2학기 초 218 케이스 / 3,080 assertions) |
 | 엔진 구성 | 파서 → 비용 기반 플래너 → 실행기, MVCC·행 단위 락·데드락 감지, redo 로그 기반 내구성, B+Tree·해시·복합 인덱스 |
 
 ## 2학기에 만든 것 (엔진)
@@ -162,8 +162,13 @@
 | **`SUM`/`AVG`가 FLOAT/DOUBLE·문자열 열도 정확한 십진수로 더함**(MySQL은 DOUBLE로 더해 `0.1 + 0.2` = `0.30000000000000004`) | 같은 데이터의 합계 글자가 MySQL과 다름 |
 | **결과 표를 글자로 다시 읽는 경로가 값 양 끝의 공백을 지움**(`INSERT … SELECT`·`CREATE TABLE … AS SELECT`·파생 테이블·CTE·`UNION`·`IN (서브쿼리)`가 `' x '`를 `'x'`로, `'bob '`을 `'bob'`과 같게 봄; MySQL 프로토콜·데스크톱 클라이언트·MCP도 같음) | 문장 하나로 저장된 값이 조용히 바뀜(데이터 손상) |
 | **CTE 임시 테이블의 열이 모두 글자 타입**(`WITH c AS (SELECT id FROM t) SELECT id FROM c ORDER BY id`가 `1, 10, 2, 9`(`id`가 1, 2, 9, 10일 때), `MAX(id)`가 `9`; `COALESCE`/`CASE`/`IF`/`CAST`/집계/서브쿼리 열도 같음) | CTE를 거친 정렬·`MAX`·비교가 숫자가 아니라 글자로 됨 |
+| **`DATETIME(3)`·`TIMESTAMP(6)`·`TIME(2)`를 받지 못하고, 날짜·시간 값의 소수초를 반올림하지 않고 버림**(`'13:45:10.678'`이 `DATETIME`에서 `13:45:10`; MySQL은 `13:45:11`) | 시각 비교·정렬이 어긋나고 소수초 열이 있는 스키마를 못 읽음 |
+| **날짜·시간 값의 흔한 꼴을 거절**(`'20240229134510'`, `20240229`, `'24-02-29'`, `'134510'`, `'1 02'`, 두 자리 `YEAR`) | 다른 도구가 쓴 문장·덤프가 "Incorrect datetime value"로 실패 |
+| **`CURRENT_TIME`이 시각이 아니라 날짜를 돌려줌**, `REAL`이 단정밀 `FLOAT`, `DECIMAL`이 `(10,2)` | 값·자릿수가 MySQL과 다름 |
+| **`ALTER TABLE … AUTO_INCREMENT = n`이 아무 일도 안 하고**, `information_schema.tables.AUTO_INCREMENT`가 NULL | 다음 번호를 지정할 수 없음 |
+| **실제 스키마의 문법을 거절**(`DEC(4,1)`, `DOUBLE PRECISION`, `KEY … USING BTREE COMMENT '…'`, `CHECK … NOT ENFORCED`, `UNSIGNED DECIMAL`, 합성 `INTERVAL` 단위, `CAST AS TIME|YEAR`) | 스키마 한 줄 때문에 파일 전체가 실패 |
 
-성능·정합성 작업의 커밋들에서 찾은 기존 버그는 모두 163건입니다(전체 목록은 `DATE.md`).
+성능·정합성 작업의 커밋들에서 찾은 기존 버그는 모두 168건입니다(전체 목록은 `DATE.md`).
 
 ## 한계와 앞으로
 

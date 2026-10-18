@@ -16,14 +16,14 @@ void to_json(nlohmann::json& j, const DataType& dt) {
             else if constexpr (std::is_same_v<T, DataType::Varchar>) {
                 nlohmann::json obj; obj["Varchar"] = alt.length; j = obj;
             } else if constexpr (std::is_same_v<T, DataType::Date>) j = "Date";
-            else if constexpr (std::is_same_v<T, DataType::DateTime>) j = "DateTime";
-            else if constexpr (std::is_same_v<T, DataType::Timestamp>) j = "Timestamp";
+            else if constexpr (std::is_same_v<T, DataType::DateTime>) { if (alt.fsp) j = nlohmann::json{{"DateTime", alt.fsp}}; else j = "DateTime"; }
+            else if constexpr (std::is_same_v<T, DataType::Timestamp>) { if (alt.fsp) j = nlohmann::json{{"Timestamp", alt.fsp}}; else j = "Timestamp"; }
             else if constexpr (std::is_same_v<T, DataType::Decimal>) {
                 nlohmann::json obj;
                 obj["Decimal"] = nlohmann::json::array({alt.precision, alt.scale});
                 j = obj;
             } else if constexpr (std::is_same_v<T, DataType::Double>) j = "Double";
-            else if constexpr (std::is_same_v<T, DataType::Time>) j = "Time";
+            else if constexpr (std::is_same_v<T, DataType::Time>) { if (alt.fsp) j = nlohmann::json{{"Time", alt.fsp}}; else j = "Time"; }
             else if constexpr (std::is_same_v<T, DataType::Year>) j = "Year";
             else if constexpr (std::is_same_v<T, DataType::Enum>) {
                 nlohmann::json obj; obj["Enum"] = alt.values; j = obj;
@@ -61,6 +61,9 @@ void from_json(const nlohmann::json& j, DataType& dt) {
         const auto& payload = it.value();
         if (tag == "Varchar") dt = DataType::Varchar{payload.get<std::uint32_t>()};
         else if (tag == "Decimal") dt = DataType::Decimal{payload.at(0).get<std::uint8_t>(), payload.at(1).get<std::uint8_t>()};
+        else if (tag == "DateTime") dt = DataType::DateTime{payload.get<std::uint8_t>()};
+        else if (tag == "Timestamp") dt = DataType::Timestamp{payload.get<std::uint8_t>()};
+        else if (tag == "Time") dt = DataType::Time{payload.get<std::uint8_t>()};
         else if (tag == "Enum") dt = DataType::Enum{payload.get<std::vector<std::string>>()};
         else if (tag == "Set") dt = DataType::Set{payload.get<std::vector<std::string>>()};
         else dt = DataType::Unknown{};
@@ -779,6 +782,7 @@ void to_json(nlohmann::json& j, const AlterAction& action) {
             else if constexpr (std::is_same_v<T, AlterAction::AddPartition>) j = nlohmann::json{{"AddPartition", alt.def}};
             else if constexpr (std::is_same_v<T, AlterAction::DropPartition>) j = nlohmann::json{{"DropPartition", alt.name}};
             else if constexpr (std::is_same_v<T, AlterAction::NoOp>) j = nlohmann::json{{"NoOp", nullptr}};
+            else if constexpr (std::is_same_v<T, AlterAction::SetAutoIncrement>) j = nlohmann::json{{"SetAutoIncrement", alt.next}};
         },
         action.data);
 }
@@ -820,6 +824,7 @@ void from_json(const nlohmann::json& j, AlterAction& action) {
     else if (tag == "AddPartition") action = AlterAction(AlterAction::AddPartition{p.get<PartitionDef>()});
     else if (tag == "DropPartition") action = AlterAction(AlterAction::DropPartition{p.get<std::string>()});
     else if (tag == "NoOp") action = AlterAction(AlterAction::NoOp{});
+    else if (tag == "SetAutoIncrement") action = AlterAction(AlterAction::SetAutoIncrement{p.get<std::int64_t>()});
     else throw std::runtime_error("unknown AlterAction tag: " + tag);
 }
 

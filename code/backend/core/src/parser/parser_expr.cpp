@@ -493,6 +493,8 @@ std::string Parser::parse_cast_type() {
         case TokenKind::Text: type_str = "TEXT"; break;
         case TokenKind::Varchar: type_str = "CHAR"; break;
         case TokenKind::Date: type_str = "DATE"; break;
+        case TokenKind::Time: type_str = "TIME"; break;
+        case TokenKind::Year: type_str = "YEAR"; break;
         case TokenKind::Datetime: type_str = "DATETIME"; break;
         case TokenKind::Decimal: type_str = "DECIMAL"; break;
         case TokenKind::Boolean: type_str = "BOOLEAN"; break;
@@ -1049,6 +1051,12 @@ ArithExpr Parser::parse_arith_factor() {
             if (call) return std::move(*call);
             pos_ = start; // (the ordinary call: SUBSTRING(str, 2, 3), TRIM(str), a column called position)
         }
+    }
+
+    // CURRENT_TIME needs no parentheses, like CURRENT_DATE and CURRENT_TIMESTAMP (with them it is the function of that name)
+    if (p->kind == TokenKind::Ident && to_upper(p->text) == "CURRENT_TIME" && !peek_at_is(1, TokenKind::LParen)) {
+        advance();
+        return ArithExpr(ArithExpr::Func{"CURTIME", {}});
     }
 
     // (a word that is the name of a function is a call only with its parentheses -- NOW and CURDATE need none --; otherwise it is a column)

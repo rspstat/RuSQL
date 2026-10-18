@@ -19,21 +19,15 @@
 #include <iomanip>
 #include <sstream>
 
+#include "engine/now_text.hpp"
 #include "engine/parser/parser.hpp"
 
 namespace engine {
 
 namespace {
 
-std::string current_timestamp_string() {
-    auto now = std::chrono::system_clock::now();
-    std::time_t t = std::chrono::system_clock::to_time_t(now);
-    std::tm tm_buf{};
-    localtime_s(&tm_buf, &t);
-    std::ostringstream oss;
-    oss << std::put_time(&tm_buf, "%Y-%m-%d %H:%M:%S");
-    return oss.str();
-}
+// the time of the INSERT as a column with `digits` places of a fraction of a second holds it
+std::string current_timestamp_string(int digits) { return time_now_text(digits, false, true); }
 
 std::string join_quoted(const std::vector<std::string>& values) {
     std::string out;
@@ -783,10 +777,10 @@ StringResult Executor::exec_insert_inner(SharedDatabase& s, const std::string& t
                 } else {
                     std::string upper = *col.default_value;
                     std::transform(upper.begin(), upper.end(), upper.begin(), [](unsigned char c) { return std::toupper(c); });
-                    final_values[i] = (upper == "NOW()" || upper == "CURRENT_TIMESTAMP") ? current_timestamp_string() : *col.default_value;
+                    final_values[i] = (upper == "NOW()" || upper == "CURRENT_TIMESTAMP") ? current_timestamp_string(fraction_digits_of(col.data_type)) : *col.default_value;
                 }
             } else if (std::holds_alternative<DataType::Timestamp>(col.data_type.data)) {
-                final_values[i] = current_timestamp_string();
+                final_values[i] = current_timestamp_string(fraction_digits_of(col.data_type));
             }
         }
 

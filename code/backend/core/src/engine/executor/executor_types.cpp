@@ -180,10 +180,28 @@ int days_in(int y, int m) {
 
 struct DateParts {
     int y = 0, mo = 0, d = 0, h = 0, mi = 0, s = 0;
+    int micro = 0; // the fraction of the second in millionths (digits beyond the sixth are rounded away)
     bool has_time = false;
 };
 
-// 'YYYY-MM-DD', 'YYYY-M-D', 'YYYY/MM/DD', 'YYYYMMDD', each optionally followed by ' HH:MM:SS[.ffffff]' (or 'T')
+// The digits of a fraction of a second at s[i..] (after the '.'): millionths, the seventh digit rounds
+int parse_micro(std::string_view s, std::size_t& i) {
+    int micro = 0, digits = 0;
+    bool round_up = false;
+    while (i < s.size() && s[i] >= '0' && s[i] <= '9') {
+        if (digits < 6) micro = micro * 10 + (s[i] - '0');
+        else if (digits == 6) round_up = s[i] >= '5';
+        digits++;
+        i++;
+    }
+    for (; digits < 6; digits++) micro *= 10;
+    return micro + (round_up ? 1 : 0);
+}
+
+int year_of(int two_digits) { return two_digits < 70 ? 2000 + two_digits : 1900 + two_digits; }
+
+// 'YYYY-MM-DD', 'YY-MM-DD', 'YYYY-M-D', 'YYYY/MM/DD', and the digits alone: YYYYMMDD, YYMMDD, YYYYMMDDhhmmss, YYMMDDhhmmss; each optionally followed by
+// ' HH:MM[:SS[.ffffff]]' (or 'T') -- the digits of a whole datetime also by .ffffff
 std::optional<DateParts> parse_date_text(std::string_view text) {
     std::string_view s = trimmed(text);
     DateParts p;
@@ -194,14 +212,38 @@ std::optional<DateParts> parse_date_text(std::string_view text) {
         out = n;
         return count;
     };
-    // YYYYMMDD
-    if (s.size() >= 8 && std::all_of(s.begin(), s.begin() + 8, [](char c) { return c >= '0' && c <= '9'; }) && (s.size() == 8 || s[8] == ' ' || s[8] == 'T')) {
-        p.y = std::stoi(std::string(s.substr(0, 4)));
-        p.mo = std::stoi(std::string(s.substr(4, 2)));
-        p.d = std::stoi(std::string(s.substr(6, 2)));
-        i = 8;
+    std::size_t run = 0; // the digits the text starts with
+    while (run < s.size() && s[run] >= '0' && s[run] <= '9') run++;
+    const bool only_digits = run > 0 && (run == s.size() || s[run] == '.' || s[run] == ' ' || s[run] == 'T');
+    if (only_digits && (run == 6 || run == 8 || run == 12 || run == 14)) {
+        auto two_digits = [&](std::size_t at) { return (s[at] - '0') * 10 + (s[at + 1] - '0'); };
+        std::size_t at = 0;
+        if (run == 8 || run == 14) {
+            p.y = two_digits(0) * 100 + two_digits(2);
+            at = 4;
+        } else {
+            p.y = year_of(two_digits(0));
+            at = 2;
+        }
+        p.mo = two_digits(at);
+        p.d = two_digits(at + 2);
+        at += 4;
+        i = run;
+        if (run >= 12) {
+            p.has_time = true;
+            p.h = two_digits(at);
+            p.mi = two_digits(at + 2);
+            p.s = two_digits(at + 4);
+            if (i < s.size() && s[i] == '.') {
+                i++;
+                p.micro = parse_micro(s, i);
+            }
+            if (i != s.size()) return std::nullopt;
+        }
     } else {
-        if (number(4, p.y) != 4) return std::nullopt;
+        const int year_digits = number(4, p.y);
+        if (year_digits != 4 && year_digits != 2) return std::nullopt;
+        if (year_digits == 2) p.y = year_of(p.y);
         if (i >= s.size() || (s[i] != '-' && s[i] != '/' && s[i] != '.')) return std::nullopt;
         i++;
         int c = number(2, p.mo);
@@ -211,7 +253,7 @@ std::optional<DateParts> parse_date_text(std::string_view text) {
         c = number(2, p.d);
         if (c == 0) return std::nullopt;
     }
-    if (i < s.size()) {
+    if (i < s.size() && !p.has_time) {
         if (s[i] != ' ' && s[i] != 'T') return std::nullopt;
         i++;
         p.has_time = true;
@@ -223,7 +265,7 @@ std::optional<DateParts> parse_date_text(std::string_view text) {
             if (number(2, p.s) == 0) return std::nullopt;
             if (i < s.size() && s[i] == '.') {
                 i++;
-                while (i < s.size() && s[i] >= '0' && s[i] <= '9') i++;
+                p.micro = parse_micro(s, i);
             }
         }
         if (i != s.size()) return std::nullopt;
@@ -231,6 +273,108 @@ std::optional<DateParts> parse_date_text(std::string_view text) {
     if (p.y < 1 || p.mo < 1 || p.mo > 12 || p.d < 1 || p.d > days_in(p.y, p.mo)) return std::nullopt;
     if (p.h > 23 || p.mi > 59 || p.s > 59) return std::nullopt;
     return p;
+}
+
+// Rounds the fraction of a second to `digits` places (half up); the number of seconds the rounding carried
+int round_micro(int& micro, int digits) {
+    int unit = 1;
+    for (int k = digits; k < 6; k++) unit *= 10;
+    micro = (micro + unit / 2) / unit * unit;
+    if (micro < 1000000) return 0;
+    micro -= 1000000;
+    return 1;
+}
+
+// A datetime one second later; false: past the year 9999
+bool next_second(DateParts& p) {
+    if (++p.s < 60) return true;
+    p.s = 0;
+    if (++p.mi < 60) return true;
+    p.mi = 0;
+    if (++p.h < 24) return true;
+    p.h = 0;
+    if (++p.d <= days_in(p.y, p.mo)) return true;
+    p.d = 1;
+    if (++p.mo <= 12) return true;
+    p.mo = 1;
+    return ++p.y <= 9999;
+}
+
+// ".fff": the first `digits` places of the millionths, nothing when the column keeps no fraction
+std::string micro_text(int micro, int digits) {
+    if (digits <= 0) return "";
+    std::string all = std::to_string(micro);
+    all.insert(0, 6 - all.size(), '0');
+    return "." + all.substr(0, static_cast<std::size_t>(digits));
+}
+
+// A time of day or duration: [-]HH:MM:SS[.ffffff] with the hours up to 838 -- read from the forms [D ]HH:MM[:SS[.f]], [D ]HH, and the digits alone
+// (HHMMSS, MMSS, SS: the last two are the seconds, the two before them the minutes, the rest the hours)
+struct TimeParts {
+    bool negative = false;
+    long long hours = 0;
+    int minutes = 0, seconds = 0, micro = 0;
+};
+
+std::optional<TimeParts> parse_time_text(std::string_view text) {
+    std::string_view t = trimmed(text);
+    TimeParts r;
+    if (!t.empty() && t.front() == '-') {
+        r.negative = true;
+        t.remove_prefix(1);
+    }
+    if (t.empty()) return std::nullopt;
+    std::size_t i = 0;
+    auto number = [&](long long& out) {
+        long long v = 0;
+        std::size_t count = 0;
+        while (i < t.size() && t[i] >= '0' && t[i] <= '9') {
+            if (v < 1000000000000LL) v = v * 10 + (t[i] - '0');
+            i++;
+            count++;
+        }
+        out = v;
+        return count;
+    };
+    auto fraction = [&]() {
+        if (i < t.size() && t[i] == '.') {
+            i++;
+            r.micro = parse_micro(t, i);
+        }
+    };
+    long long first = 0;
+    if (number(first) == 0) return std::nullopt;
+    long long days = 0;
+    bool with_days = false;
+    if (i < t.size() && t[i] == ' ') { // 'D HH...'
+        days = first;
+        with_days = true;
+        i++;
+        if (number(first) == 0) return std::nullopt;
+    }
+    if (i < t.size() && t[i] == ':') {
+        long long minutes = 0, seconds = 0;
+        i++;
+        if (number(minutes) == 0) return std::nullopt;
+        if (i < t.size() && t[i] == ':') {
+            i++;
+            if (number(seconds) == 0) return std::nullopt;
+            fraction();
+        }
+        r.hours = days * 24 + first;
+        r.minutes = static_cast<int>(std::min<long long>(minutes, 99));
+        r.seconds = static_cast<int>(std::min<long long>(seconds, 99));
+    } else if (with_days) {
+        if (r.negative) return std::nullopt; // ('-1 1' is no time; '-1 01:00:00' is)
+        r.hours = days * 24 + first; // 'D HH'
+    } else {
+        r.seconds = static_cast<int>(first % 100);
+        r.minutes = static_cast<int>(first / 100 % 100);
+        r.hours = first / 10000;
+        fraction();
+    }
+    if (i != t.size() || r.minutes > 59 || r.seconds > 59) return std::nullopt;
+    return r;
 }
 
 std::string two(int n) { return (n < 10 ? "0" : "") + std::to_string(n); }
@@ -256,6 +400,7 @@ std::optional<std::string> Executor::coerce_column_value(const ColumnDef& col, s
         if (lower == "false") { value = "0"; return std::nullopt; }
         auto d = parse_decimal(value);
         if (!d) return "Incorrect double value: '" + shown(value) + "' for column '" + col.name + "'" + at_row(row);
+        if (u && d->negative && !is_zero(*d)) return "Out of range value for column '" + col.name + "'" + at_row(row); // (FLOAT / DOUBLE UNSIGNED)
         std::string_view t = trimmed(value);
         double x = 0;
         auto res = std::from_chars(t.data() + (t.front() == '+' ? 1 : 0), t.data() + t.size(), x);
@@ -273,6 +418,7 @@ std::optional<std::string> Executor::coerce_column_value(const ColumnDef& col, s
         if (!d) return "Incorrect decimal value: '" + shown(value) + "' for column '" + col.name + "'" + at_row(row);
         round_to_scale(*d, dec->scale);
         if (d->integer.size() + dec->scale > dec->precision) return "Out of range value for column '" + col.name + "'" + at_row(row);
+        if (u && d->negative && !is_zero(*d)) return "Out of range value for column '" + col.name + "'" + at_row(row); // (DECIMAL UNSIGNED)
         value = decimal_text(*d, dec->scale);
         return std::nullopt;
     }
@@ -299,42 +445,36 @@ std::optional<std::string> Executor::coerce_column_value(const ColumnDef& col, s
         return std::nullopt;
     }
     if (std::holds_alternative<DataType::DateTime>(dt.data) || std::holds_alternative<DataType::Timestamp>(dt.data)) {
+        const int digits = std::holds_alternative<DataType::DateTime>(dt.data) ? std::get<DataType::DateTime>(dt.data).fsp : std::get<DataType::Timestamp>(dt.data).fsp;
         auto p = parse_date_text(value);
+        if (p && round_micro(p->micro, digits) == 1 && !next_second(*p)) p.reset();
         if (!p) return "Incorrect datetime value: '" + shown(value) + "' for column '" + col.name + "'" + at_row(row);
         std::string y = std::to_string(p->y);
         y.insert(0, 4 - std::min<std::size_t>(4, y.size()), '0');
-        value = y + "-" + two(p->mo) + "-" + two(p->d) + " " + two(p->h) + ":" + two(p->mi) + ":" + two(p->s);
+        value = y + "-" + two(p->mo) + "-" + two(p->d) + " " + two(p->h) + ":" + two(p->mi) + ":" + two(p->s) + micro_text(p->micro, digits);
         return std::nullopt;
     }
     if (std::holds_alternative<DataType::Time>(dt.data)) {
-        std::string_view t = trimmed(value);
-        bool negative = !t.empty() && t.front() == '-';
-        if (negative) t.remove_prefix(1);
-        int parts[3] = {0, 0, 0};
-        int n = 0;
-        std::size_t i = 0;
-        bool ok = !t.empty();
-        while (ok && n < 3) {
-            int v = 0, count = 0;
-            while (i < t.size() && t[i] >= '0' && t[i] <= '9') { v = v * 10 + (t[i++] - '0'); count++; }
-            if (count == 0) { ok = false; break; }
-            parts[n++] = v;
-            if (i < t.size() && t[i] == ':') i++; else break;
+        const int digits = std::get<DataType::Time>(dt.data).fsp;
+        auto p = parse_time_text(value);
+        if (p) { // the fraction rounds to the digits the column keeps, and the carry runs into the seconds
+            long long total = p->hours * 3600 + p->minutes * 60 + p->seconds + round_micro(p->micro, digits);
+            p->hours = total / 3600;
+            p->minutes = static_cast<int>(total / 60 % 60);
+            p->seconds = static_cast<int>(total % 60);
         }
-        if (ok && i < t.size() && t[i] == '.') { // fractional seconds are dropped
-            i++;
-            while (i < t.size() && t[i] >= '0' && t[i] <= '9') i++;
-        }
-        if (!ok || i != t.size() || n < 2 || parts[1] > 59 || parts[2] > 59 || parts[0] > 838) {
-            return "Incorrect time value: '" + shown(value) + "' for column '" + col.name + "'" + at_row(row);
-        }
-        value = std::string(negative ? "-" : "") + two(parts[0]) + ":" + two(parts[1]) + ":" + two(parts[2]);
+        if (!p || p->hours > 838) return "Incorrect time value: '" + shown(value) + "' for column '" + col.name + "'" + at_row(row);
+        std::string hours = std::to_string(p->hours);
+        if (hours.size() < 2) hours.insert(0, 1, '0');
+        const bool zero = p->hours == 0 && p->minutes == 0 && p->seconds == 0 && p->micro == 0;
+        value = std::string(p->negative && !zero ? "-" : "") + hours + ":" + two(p->minutes) + ":" + two(p->seconds) + micro_text(p->micro, digits);
         return std::nullopt;
     }
     if (std::holds_alternative<DataType::Year>(dt.data)) {
         auto d = parse_decimal(value);
         if (!d || !d->fraction.empty() || d->negative) return "Incorrect integer value: '" + shown(value) + "' for column '" + col.name + "'" + at_row(row);
         long y = d->integer.empty() ? 0 : std::stol(d->integer.size() > 6 ? "999999" : d->integer);
+        if (y >= 1 && y <= 99) y = year_of(static_cast<int>(y)); // two digits: 70-99 are 1970-1999, 1-69 are 2001-2069
         if (y != 0 && (y < 1901 || y > 2155)) return "Out of range value for column '" + col.name + "'" + at_row(row);
         value = y == 0 ? "0000" : std::to_string(y);
         return std::nullopt;

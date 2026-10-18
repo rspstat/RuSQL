@@ -42,6 +42,9 @@ const Case kCollation[] = {
 const Case kDecimals[] = {
 #include "mysql_conformance_decimals.inc"
 };
+const Case kTemporal[] = {
+#include "mysql_conformance_temporal.inc"
+};
 
 struct TempDataDir {
     std::string path;
@@ -199,6 +202,10 @@ TEST_CASE("constraints, defaults, writes and transactions give MySQL's answers",
 
 TEST_CASE("DECIMAL and integer results are written with MySQL's places", "[mysql_conformance][decimals]") {
     run_cases("mc_decimals", kDecimals, sizeof kDecimals / sizeof kDecimals[0]);
+}
+
+TEST_CASE("fractional seconds, the forms of a date and a time, INTERVAL units and column types give MySQL's answers", "[mysql_conformance][temporal]") {
+    run_cases("mc_temporal", kTemporal, sizeof kTemporal / sizeof kTemporal[0]);
 }
 
 TEST_CASE("texts compare, sort, group, join and stay unique by MySQL's default collation", "[mysql_conformance][collation]") {

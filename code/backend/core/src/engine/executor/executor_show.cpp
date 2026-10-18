@@ -30,13 +30,13 @@ std::string sql_type_str(const DataType& dt) {
             else if constexpr (std::is_same_v<T, DataType::Float>) return "FLOAT";
             else if constexpr (std::is_same_v<T, DataType::Boolean>) return "BOOLEAN";
             else if constexpr (std::is_same_v<T, DataType::Date>) return "DATE";
-            else if constexpr (std::is_same_v<T, DataType::DateTime>) return "DATETIME";
-            else if constexpr (std::is_same_v<T, DataType::Timestamp>) return "TIMESTAMP";
+            else if constexpr (std::is_same_v<T, DataType::DateTime>) return alt.fsp ? "DATETIME(" + std::to_string(alt.fsp) + ")" : "DATETIME";
+            else if constexpr (std::is_same_v<T, DataType::Timestamp>) return alt.fsp ? "TIMESTAMP(" + std::to_string(alt.fsp) + ")" : "TIMESTAMP";
             else if constexpr (std::is_same_v<T, DataType::Varchar>) return "VARCHAR(" + std::to_string(alt.length) + ")";
             else if constexpr (std::is_same_v<T, DataType::Decimal>)
                 return "DECIMAL(" + std::to_string(alt.precision) + "," + std::to_string(alt.scale) + ")";
             else if constexpr (std::is_same_v<T, DataType::Double>) return "DOUBLE";
-            else if constexpr (std::is_same_v<T, DataType::Time>) return "TIME";
+            else if constexpr (std::is_same_v<T, DataType::Time>) return alt.fsp ? "TIME(" + std::to_string(alt.fsp) + ")" : "TIME";
             else if constexpr (std::is_same_v<T, DataType::Year>) return "YEAR";
             else if constexpr (std::is_same_v<T, DataType::Enum>) {
                 std::string out = "ENUM(";
@@ -143,9 +143,9 @@ std::string mysql_type_text(const DataType& dt, bool is_unsigned) {
             else if constexpr (std::is_same_v<T, DataType::Varchar>) return "varchar(" + std::to_string(alt.length) + ")";
             else if constexpr (std::is_same_v<T, DataType::Decimal>) return "decimal(" + std::to_string(alt.precision) + "," + std::to_string(alt.scale) + ")";
             else if constexpr (std::is_same_v<T, DataType::Date>) return "date";
-            else if constexpr (std::is_same_v<T, DataType::DateTime>) return "datetime";
-            else if constexpr (std::is_same_v<T, DataType::Timestamp>) return "timestamp";
-            else if constexpr (std::is_same_v<T, DataType::Time>) return "time";
+            else if constexpr (std::is_same_v<T, DataType::DateTime>) return alt.fsp ? "datetime(" + std::to_string(alt.fsp) + ")" : "datetime";
+            else if constexpr (std::is_same_v<T, DataType::Timestamp>) return alt.fsp ? "timestamp(" + std::to_string(alt.fsp) + ")" : "timestamp";
+            else if constexpr (std::is_same_v<T, DataType::Time>) return alt.fsp ? "time(" + std::to_string(alt.fsp) + ")" : "time";
             else if constexpr (std::is_same_v<T, DataType::Year>) return "year";
             else if constexpr (std::is_same_v<T, DataType::Blob>) return "blob";
             else if constexpr (std::is_same_v<T, DataType::Json>) return "json";

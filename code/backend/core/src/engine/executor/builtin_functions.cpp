@@ -935,18 +935,16 @@ std::string fn_date(const BuiltinCall& c) {
     return t ? t->date_str() : kNull;
 }
 
+int fraction_places(const std::string& text);
+std::optional<long long> time_in_micro(const std::string& text);
+std::string micro_to_time(long long micro, int places);
+
 std::string fn_time(const BuiltinCall& c) {
     if (argc(c) != 1) wrong_count(c);
     if (is_null(c.value(0))) return kNull;
-    long long micro = 0;
-    auto secs = parse_time_seconds(c.value(0), &micro);
-    if (!secs) return kNull;
-    DateTime t;
-    const long long s = *secs < 0 ? -*secs : *secs;
-    char b[48];
-    if (micro) std::snprintf(b, sizeof b, "%s%02lld:%02lld:%02lld.%06lld", *secs < 0 ? "-" : "", s / 3600, s / 60 % 60, s % 60, micro);
-    else std::snprintf(b, sizeof b, "%s%02lld:%02lld:%02lld", *secs < 0 ? "-" : "", s / 3600, s / 60 % 60, s % 60);
-    return b;
+    auto micro = time_in_micro(c.value(0));
+    if (!micro) return kNull;
+    return micro_to_time(*micro, fraction_places(c.value(0))); // (as many places of the fraction as the argument is written with)
 }
 
 std::string fn_datediff(const BuiltinCall& c) {
@@ -987,6 +985,52 @@ std::string seconds_to_time(long long s) {
     return b;
 }
 
+// How many places the fraction of a second is written with in a time, a datetime or a number ("01:00:00.50" has 2); at most 6
+int fraction_places(const std::string& text) {
+    const std::size_t dot = text.rfind('.');
+    if (dot == std::string::npos) return 0;
+    int places = 0;
+    for (std::size_t i = dot + 1; i < text.size() && text[i] >= '0' && text[i] <= '9'; i++) places++;
+    return std::min(places, 6);
+}
+
+// A time as signed millionths of a second; nullopt when the text is no time
+std::optional<long long> time_in_micro(const std::string& text) {
+    long long micro = 0;
+    auto seconds = parse_time_seconds(text, &micro);
+    if (!seconds) return std::nullopt;
+    const std::size_t first = text.find_first_not_of(' ');
+    const bool negative = first != std::string::npos && text[first] == '-';
+    const long long total = (*seconds < 0 ? -*seconds : *seconds) * 1000000 + micro;
+    return negative ? -total : total;
+}
+
+// Millionths of a second rounded (half away from zero) to `places` places
+long long round_to_places(long long micro, int places) {
+    long long unit = 1;
+    for (int k = places; k < 6; k++) unit *= 10;
+    const long long magnitude = micro < 0 ? -micro : micro;
+    const long long rounded = (magnitude + unit / 2) / unit * unit;
+    return micro < 0 ? -rounded : rounded;
+}
+
+// "[-]HH:MM:SS[.ffffff]" for signed millionths of a second, with exactly `places` places of the fraction (rounded)
+std::string micro_to_time(long long micro, int places) {
+    micro = round_to_places(micro, places);
+    const bool negative = micro < 0;
+    const long long a = negative ? -micro : micro;
+    const long long seconds = a / 1000000, fraction = a % 1000000;
+    char b[64];
+    std::snprintf(b, sizeof b, "%s%02lld:%02lld:%02lld", negative ? "-" : "", seconds / 3600, seconds / 60 % 60, seconds % 60);
+    std::string out = b;
+    if (places > 0) {
+        char f[16];
+        std::snprintf(f, sizeof f, "%06lld", fraction);
+        out += "." + std::string(f).substr(0, static_cast<std::size_t>(places));
+    }
+    return out;
+}
+
 std::string fn_time_to_sec(const BuiltinCall& c) {
     if (argc(c) != 1) wrong_count(c);
     if (is_null(c.value(0))) return kNull;
@@ -997,7 +1041,14 @@ std::string fn_time_to_sec(const BuiltinCall& c) {
 std::string fn_sec_to_time(const BuiltinCall& c) {
     if (argc(c) != 1) wrong_count(c);
     if (is_null(c.value(0))) return kNull;
-    return seconds_to_time(int_of(c.value(0)));
+    const int places = fraction_places(c.value(0));
+    if (places == 0) return seconds_to_time(int_of(c.value(0)));
+    // the seconds with their fraction, exactly: 3725.5 is 3725500000 millionths
+    const Decimal d = decimal_of(c.value(0));
+    std::string fraction = d.fraction.substr(0, 6);
+    fraction.resize(6, '0');
+    long long micro = std::atoll(d.integer.c_str()) * 1000000 + std::atoll(fraction.c_str());
+    return micro_to_time(d.negative ? -micro : micro, places);
 }
 
 // TIME_FORMAT is DATE_FORMAT of a time
@@ -1007,15 +1058,20 @@ std::string fn_time_format(const BuiltinCall& c);
 std::string shift_time(const BuiltinCall& c, long long sign) {
     if (argc(c) != 2) wrong_count(c);
     if (any_null(c)) return kNull;
-    auto amount = parse_time_seconds(c.value(1));
+    auto amount = time_in_micro(c.value(1));
     if (!amount) return kNull;
+    const int places = std::max(fraction_places(c.value(0)), fraction_places(c.value(1)));
     if (auto t = parse_datetime(c.value(0)); t && t->has_date && t->valid_date()) {
-        const DateTime moved = DateTime::from_epoch_seconds(t->epoch_seconds() + sign * *amount, t->micro);
-        return moved.date_str() + " " + moved.time_str();
+        const long long total = round_to_places(t->micro + sign * *amount, 6);
+        long long seconds = total / 1000000, micro = total % 1000000;
+        if (micro < 0) { micro += 1000000; seconds--; }
+        const DateTime moved = DateTime::from_epoch_seconds(t->epoch_seconds() + seconds, micro);
+        if (moved.year < 0 || moved.year > 9999) return kNull;
+        return moved.date_str() + " " + micro_to_time(((moved.hour * 60LL + moved.minute) * 60 + moved.second) * 1000000 + moved.micro, places);
     }
-    auto base = parse_time_seconds(c.value(0));
+    auto base = time_in_micro(c.value(0));
     if (!base) return kNull;
-    return seconds_to_time(*base + sign * *amount);
+    return micro_to_time(*base + sign * *amount, places);
 }
 
 std::string fn_addtime(const BuiltinCall& c) { return shift_time(c, 1); }
@@ -1027,11 +1083,12 @@ std::string fn_timediff(const BuiltinCall& c) {
     if (any_null(c)) return kNull;
     auto a = parse_datetime(c.value(0)), b = parse_datetime(c.value(1));
     const bool dated_a = a && a->has_date && a->valid_date(), dated_b = b && b->has_date && b->valid_date();
-    if (dated_a && dated_b) return seconds_to_time(a->epoch_seconds() - b->epoch_seconds());
+    const int places = std::max(fraction_places(c.value(0)), fraction_places(c.value(1)));
+    if (dated_a && dated_b) return micro_to_time((a->epoch_seconds() - b->epoch_seconds()) * 1000000 + (a->micro - b->micro), places);
     if (dated_a != dated_b) return kNull;
-    auto x = parse_time_seconds(c.value(0)), y = parse_time_seconds(c.value(1));
+    auto x = time_in_micro(c.value(0)), y = time_in_micro(c.value(1));
     if (!x || !y) return kNull;
-    return seconds_to_time(*x - *y);
+    return micro_to_time(*x - *y, places);
 }
 
 // PERIOD_ADD(P, N) / PERIOD_DIFF(P1, P2): P is YYMM or YYYYMM
@@ -1150,22 +1207,98 @@ std::string add_to_date(const BuiltinCall& c, const std::string& date_text, long
     return (t->has_time || time_unit) ? r->datetime_str() : r->date_str();
 }
 
+// The units made of two or more of the plain ones: the plain unit each counts in, and how many of it each part of the text stands for, left to right
+// (in months for YEAR_MONTH, in the smallest unit of the compound otherwise; the last part of a *_MICROSECOND unit is a fraction of a second)
+struct CompoundUnit {
+    const char* name;
+    const char* plain;
+    std::vector<long long> weights;
+};
+
+const CompoundUnit* compound_unit(const std::string& unit) {
+    static const std::vector<CompoundUnit> units = {
+        {"YEAR_MONTH", "MONTH", {12, 1}},
+        {"DAY_HOUR", "HOUR", {24, 1}},
+        {"DAY_MINUTE", "MINUTE", {1440, 60, 1}},
+        {"DAY_SECOND", "SECOND", {86400, 3600, 60, 1}},
+        {"DAY_MICROSECOND", "MICROSECOND", {86400000000LL, 3600000000LL, 60000000LL, 1000000LL, 1}},
+        {"HOUR_MINUTE", "MINUTE", {60, 1}},
+        {"HOUR_SECOND", "SECOND", {3600, 60, 1}},
+        {"HOUR_MICROSECOND", "MICROSECOND", {3600000000LL, 60000000LL, 1000000LL, 1}},
+        {"MINUTE_SECOND", "SECOND", {60, 1}},
+        {"MINUTE_MICROSECOND", "MICROSECOND", {60000000LL, 1000000LL, 1}},
+        {"SECOND_MICROSECOND", "MICROSECOND", {1000000LL, 1}},
+    };
+    for (const CompoundUnit& u : units) {
+        if (unit == u.name) return &u;
+    }
+    return nullptr;
+}
+
+// '1:30' HOUR_MINUTE, '1 12:30' DAY_MINUTE, '2-3' YEAR_MONTH, '1.5' SECOND_MICROSECOND: the amount in the plain unit; fewer numbers than the unit has parts are the
+// last parts ('30' HOUR_MINUTE is thirty minutes); a minus in front makes all of it negative. nullopt: no number in the text.
+std::optional<long long> compound_amount(const CompoundUnit& unit, const std::string& text) {
+    std::vector<std::string> parts;
+    std::string current;
+    bool negative = false;
+    for (std::size_t i = 0; i < text.size(); i++) {
+        const char ch = text[i];
+        if (ch >= '0' && ch <= '9') {
+            current.push_back(ch);
+        } else {
+            if (!current.empty()) parts.push_back(current);
+            current.clear();
+            if (ch == '-' && parts.empty() && current.empty()) negative = true;
+        }
+    }
+    if (!current.empty()) parts.push_back(current);
+    if (parts.empty()) return 0; // (a text with no number in it is 0)
+    if (parts.size() > unit.weights.size()) return std::nullopt;
+    const bool ends_in_fraction = std::string(unit.name).find("MICROSECOND") != std::string::npos;
+    long long total = 0;
+    const std::size_t offset = unit.weights.size() - parts.size(); // (the parts that were left out are the leftmost)
+    for (std::size_t i = 0; i < parts.size(); i++) {
+        std::string digits = parts[i];
+        if (ends_in_fraction && offset + i + 1 == unit.weights.size()) { // the fraction of a second: .5 is 500000 millionths
+            digits.resize(6, '0');
+        }
+        if (digits.size() > 12) return std::nullopt;
+        total += std::atoll(digits.c_str()) * unit.weights[offset + i];
+    }
+    return negative ? -total : total;
+}
+
+// The unit and the amount an INTERVAL gives to DATE_ADD / DATE_SUB: the plain unit and the number of it
+void interval_of(const BuiltinCall& c, std::size_t amount_at, std::size_t unit_at, std::string& unit, std::optional<long long>& amount) {
+    unit = unit_word(c, unit_at);
+    if (const CompoundUnit* compound = compound_unit(unit)) {
+        amount = compound_amount(*compound, c.value(amount_at));
+        unit = compound->plain;
+        return;
+    }
+    static const std::unordered_set<std::string> units = {"MICROSECOND", "SECOND", "MINUTE", "HOUR", "DAY", "WEEK", "MONTH", "QUARTER", "YEAR"};
+    if (!units.count(unit)) throw StatementError("You have an error in your SQL syntax; unknown INTERVAL unit '" + unit + "'");
+    amount = int_of(c.value(amount_at));
+}
+
 std::string fn_date_add(const BuiltinCall& c) {
     if (argc(c) != 3) wrong_count(c);
     if (is_null(c.value(0)) || is_null(c.value(1))) return kNull;
-    const std::string unit = unit_word(c, 2);
-    static const std::unordered_set<std::string> units = {"MICROSECOND", "SECOND", "MINUTE", "HOUR", "DAY", "WEEK", "MONTH", "QUARTER", "YEAR"};
-    if (!units.count(unit)) throw StatementError("You have an error in your SQL syntax; unknown INTERVAL unit '" + unit + "'");
-    return add_to_date(c, c.value(0), int_of(c.value(1)), unit);
+    std::string unit;
+    std::optional<long long> amount;
+    interval_of(c, 1, 2, unit, amount);
+    if (!amount) return kNull;
+    return add_to_date(c, c.value(0), *amount, unit);
 }
 
 std::string fn_date_sub(const BuiltinCall& c) {
     if (argc(c) != 3) wrong_count(c);
     if (is_null(c.value(0)) || is_null(c.value(1))) return kNull;
-    const std::string unit = unit_word(c, 2);
-    static const std::unordered_set<std::string> units = {"MICROSECOND", "SECOND", "MINUTE", "HOUR", "DAY", "WEEK", "MONTH", "QUARTER", "YEAR"};
-    if (!units.count(unit)) throw StatementError("You have an error in your SQL syntax; unknown INTERVAL unit '" + unit + "'");
-    return add_to_date(c, c.value(0), -int_of(c.value(1)), unit);
+    std::string unit;
+    std::optional<long long> amount;
+    interval_of(c, 1, 2, unit, amount);
+    if (!amount) return kNull;
+    return add_to_date(c, c.value(0), -*amount, unit);
 }
 
 std::string fn_adddate(const BuiltinCall& c) {
@@ -1219,6 +1352,38 @@ std::string fn_extract(const BuiltinCall& c) {
     if (argc(c) != 2) wrong_count(c);
     const std::string unit = unit_word(c, 0);
     auto t = parse_datetime(c.value(1));
+    if (const CompoundUnit* compound = compound_unit(unit); compound && std::string(compound->name) != "YEAR_MONTH") {
+        // DAY_HOUR ... SECOND_MICROSECOND: the parts from the first to the last written one after the other, two digits each (the fraction of a second in six)
+        if (is_null(c.value(1))) return kNull;
+        long long micro = 0;
+        bool negative_time = false;
+        long long parts[5] = {0, 0, 0, 0, 0}; // day, hour, minute, second, microsecond
+        if (t && t->has_date && t->valid_date()) {
+            parts[0] = t->day;
+            parts[1] = t->hour;
+            parts[2] = t->minute;
+            parts[3] = t->second;
+            micro = t->micro;
+        } else if (auto s = parse_time_seconds(c.value(1), &micro)) {
+            const long long a = *s < 0 ? -*s : *s;
+            parts[1] = a / 3600;
+            parts[2] = a / 60 % 60;
+            parts[3] = a % 60;
+            const std::size_t first_character = c.value(1).find_first_not_of(' ');
+            negative_time = first_character != std::string::npos && c.value(1)[first_character] == '-';
+        } else {
+            return kNull;
+        }
+        parts[4] = micro;
+        static const long long scales[5] = {1, 100, 100, 100, 1000000};
+        auto index_of = [](const std::string& word) { return word == "DAY" ? 0 : word == "HOUR" ? 1 : word == "MINUTE" ? 2 : word == "SECOND" ? 3 : 4; };
+        const std::string name = compound->name;
+        const std::size_t underscore = name.find('_');
+        const int first = index_of(name.substr(0, underscore)), last = index_of(name.substr(underscore + 1));
+        long long value = parts[first];
+        for (int i = first + 1; i <= last; i++) value = value * scales[i] + parts[i];
+        return int_text(negative_time ? -value : value);
+    }
     if (unit == "HOUR" || unit == "MINUTE" || unit == "SECOND" || unit == "MICROSECOND") {
         if (is_null(c.value(1))) return kNull;
         long long micro = 0;
@@ -1244,6 +1409,77 @@ std::string two(long long n) {
     char b[16];
     std::snprintf(b, sizeof b, "%02lld", n);
     return b;
+}
+
+// GET_FORMAT(DATE | TIME | DATETIME, 'USA' | 'JIS' | 'ISO' | 'EUR' | 'INTERNAL'): the DATE_FORMAT / TIME_FORMAT string MySQL uses for that locale
+std::string fn_get_format(const BuiltinCall& c) {
+    if (argc(c) != 2) wrong_count(c);
+    if (is_null(c.value(1))) return kNull;
+    std::string kind = unit_word(c, 0);
+    if (kind == "TIMESTAMP") kind = "DATETIME";
+    const std::string locale = upper_ascii(c.value(1));
+    static const std::unordered_map<std::string, const char*> formats = {
+        {"DATE/USA", "%m.%d.%Y"}, {"DATE/JIS", "%Y-%m-%d"}, {"DATE/ISO", "%Y-%m-%d"}, {"DATE/EUR", "%d.%m.%Y"}, {"DATE/INTERNAL", "%Y%m%d"},
+        {"DATETIME/USA", "%Y-%m-%d %H.%i.%s"}, {"DATETIME/JIS", "%Y-%m-%d %H:%i:%s"}, {"DATETIME/ISO", "%Y-%m-%d %H:%i:%s"},
+        {"DATETIME/EUR", "%Y-%m-%d %H.%i.%s"}, {"DATETIME/INTERNAL", "%Y%m%d%H%i%s"},
+        {"TIME/USA", "%h:%i:%s %p"}, {"TIME/JIS", "%H:%i:%s"}, {"TIME/ISO", "%H:%i:%s"}, {"TIME/EUR", "%H.%i.%s"}, {"TIME/INTERNAL", "%H%i%s"},
+    };
+    auto it = formats.find(kind + "/" + locale);
+    return it == formats.end() ? kNull : std::string(it->second);
+}
+
+// MAKETIME(hour, minute, second): [-]HH:MM:SS[.f]; NULL for a minute past 59 or a second of 60 or more; the hours stop at 838
+std::string fn_maketime(const BuiltinCall& c) {
+    if (argc(c) != 3) wrong_count(c);
+    if (any_null(c)) return kNull;
+    const long long hour = int_of(c.value(0)), minute = int_of(c.value(1));
+    Decimal seconds = decimal_of(c.value(2));
+    const bool negative_seconds = seconds.negative;
+    if (minute < 0 || minute > 59 || negative_seconds) return kNull;
+    const std::string whole = seconds.integer.empty() ? "0" : seconds.integer;
+    if (whole.size() > 2 || std::stoi(whole) > 59) return kNull;
+    std::string fraction = seconds.fraction.substr(0, 6);
+    long long h = hour < 0 ? -hour : hour;
+    std::string second_text = (whole.size() < 2 ? "0" : "") + whole;
+    if (h > 838) {
+        h = 838;
+        return std::string(hour < 0 ? "-" : "") + "838:59:59";
+    }
+    char buf[32];
+    std::snprintf(buf, sizeof buf, "%s%02lld:%02lld:", hour < 0 ? "-" : "", h, minute);
+    return std::string(buf) + second_text + (fraction.empty() ? "" : "." + fraction);
+}
+
+// MICROSECOND(time or datetime): the fraction of the second in millionths
+std::string fn_microsecond(const BuiltinCall& c) {
+    if (argc(c) != 1) wrong_count(c);
+    if (is_null(c.value(0))) return kNull;
+    long long micro = 0;
+    if (!parse_time_seconds(c.value(0), &micro)) return kNull;
+    return int_text(micro);
+}
+
+// TIMESTAMP(date or datetime [, time]): the datetime, with the time added when it is given
+std::string fn_timestamp(const BuiltinCall& c) {
+    if (argc(c) < 1 || argc(c) > 2) wrong_count(c);
+    if (any_null(c)) return kNull;
+    auto t = date_arg(c.value(0));
+    if (!t) return kNull;
+    DateTime moved = *t;
+    if (argc(c) == 2) {
+        long long micro = 0;
+        auto amount = parse_time_seconds(c.value(1), &micro);
+        if (!amount) return kNull;
+        const bool negative = c.value(1).find('-') != std::string::npos;
+        moved = DateTime::from_epoch_seconds(t->epoch_seconds() + *amount, t->micro);
+        if (micro) {
+            const auto stepped = add_interval(moved, "MICROSECOND", negative ? -micro : micro);
+            if (!stepped) return kNull;
+            moved = *stepped;
+        }
+    }
+    const int places = std::max(fraction_places(c.value(0)), argc(c) == 2 ? fraction_places(c.value(1)) : 0);
+    return moved.date_str() + " " + micro_to_time(((moved.hour * 60LL + moved.minute) * 60 + moved.second) * 1000000 + moved.micro, places);
 }
 
 std::string ordinal_day(int d) {
@@ -1481,12 +1717,27 @@ std::string fn_cast(const BuiltinCall& c) {
     if (base == "DATETIME" || base == "TIMESTAMP") {
         auto t = date_arg(val);
         if (!t) return kNull;
-        t->has_time = true;
-        return t->datetime_str();
+        const int places = params.empty() ? 0 : static_cast<int>(std::clamp<long long>(params[0], 0, 6));
+        // the fraction of the second rounds to the places asked for, and a carry moves the date on
+        const long long total = round_to_places(t->micro, places);
+        DateTime moved = DateTime::from_epoch_seconds(t->epoch_seconds() + total / 1000000, total % 1000000);
+        if (moved.year < 0 || moved.year > 9999) return kNull;
+        return moved.date_str() + " " + micro_to_time(((moved.hour * 60LL + moved.minute) * 60 + moved.second) * 1000000 + moved.micro, places);
     }
     if (base == "TIME") {
-        auto s = parse_time_seconds(val);
-        return s ? seconds_to_time(*s) : kNull;
+        auto micro = time_in_micro(val);
+        if (!micro) return kNull;
+        return micro_to_time(*micro, params.empty() ? 0 : static_cast<int>(std::clamp<long long>(params[0], 0, 6)));
+    }
+    if (base == "YEAR") { // 1-69 are 2001-2069, 70-99 are 1970-1999, the number 0 is 0000 (the string '0' is 2000); outside 1901-2155 is NULL
+        const bool quoted = string_literal(c, 0);
+        if (quoted && !std::any_of(val.begin(), val.end(), [](unsigned char ch) { return std::isdigit(ch); })) return kNull; // ('abc')
+        auto v = decimal_of(val).rounded(0, false).to_int64();
+        if (!v) return kNull;
+        long long year = *v;
+        if (year >= 1 && year <= 99) year += year < 70 ? 2000 : 1900;
+        if (year == 0) return quoted ? "2000" : "0000";
+        return year < 1901 || year > 2155 ? kNull : int_text(year);
     }
     if (base == "BOOLEAN" || base == "BOOL") {
         const bool b = !val.empty() && val != "0" && lower_ascii(val) != "false";
@@ -2155,6 +2406,7 @@ const std::unordered_map<std::string, Handler>& table() {
         {"BIT_COUNT", fn_bit_count}, {"QUOTE", fn_quote}, {"EXPORT_SET", fn_export_set}, {"MAKE_SET", fn_make_set},
         {"DATE_ADD", fn_date_add}, {"DATE_SUB", fn_date_sub}, {"ADDDATE", fn_adddate}, {"SUBDATE", fn_subdate},
         {"TIMESTAMPADD", fn_timestampadd}, {"TIMESTAMPDIFF", fn_timestampdiff}, {"EXTRACT", fn_extract},
+        {"GET_FORMAT", fn_get_format}, {"MAKETIME", fn_maketime}, {"MICROSECOND", fn_microsecond}, {"TIMESTAMP", fn_timestamp},
         {"DATE_FORMAT", fn_date_format}, {"STR_TO_DATE", fn_str_to_date}, {"CAST", fn_cast}, {"CONVERT", fn_cast},
         {"OP_BIT_AND", fn_bit_and}, {"OP_BIT_OR", fn_bit_or}, {"OP_BIT_XOR", fn_bit_xor}, {"OP_BIT_NOT", fn_bit_not}, {"OP_SHL", fn_shl}, {"OP_SHR", fn_shr},
         {"OP_NULL_SAFE_EQ", fn_null_safe_eq}, {"OP_XOR", fn_xor}, {"OP_DIV", fn_int_div},

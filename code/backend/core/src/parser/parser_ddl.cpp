@@ -146,26 +146,66 @@ DataType Parser::parse_data_type() {
         }
     };
     last_type_unsigned_ = false;
-    auto skip_unsigned = [this]() {
-        if (const Token* p = peek(); p && p->kind == TokenKind::Ident && to_upper(p->text) == "UNSIGNED") {
-            advance();
-            last_type_unsigned_ = true;
+    auto skip_signedness = [this]() { // UNSIGNED (which the column keeps) or SIGNED (which is what it is anyway)
+        if (const Token* p = peek(); p && p->kind == TokenKind::Ident) {
+            const std::string word = to_upper(p->text);
+            if (word == "UNSIGNED") {
+                advance();
+                last_type_unsigned_ = true;
+            } else if (word == "SIGNED") {
+                advance();
+            }
         }
+    };
+    auto skip_word = [this](const char* word) { // the second word of DOUBLE PRECISION, CHARACTER VARYING
+        if (const Token* p = peek(); p && p->kind == TokenKind::Ident && to_upper(p->text) == word) advance();
+    };
+    // TIME(n), DATETIME(n), TIMESTAMP(n): the digits of the fraction of a second the column keeps (0 when nothing is said)
+    auto fraction_digits = [this]() -> std::uint8_t {
+        if (!peek_is(TokenKind::LParen)) return 0;
+        advance();
+        const Token* n = advance();
+        if (!n || n->kind != TokenKind::NumberLit) throw ParseError("Expected the number of digits of the fraction of a second");
+        int digits = 0;
+        try { digits = std::stoi(n->text); } catch (...) { digits = 99; }
+        if (digits > 6) throw ParseError("Too-big precision " + n->text + " specified. Maximum is 6.");
+        if (!peek_is(TokenKind::RParen)) throw ParseError("Expected ')' after the number of digits");
+        advance();
+        return static_cast<std::uint8_t>(digits);
+    };
+    // DECIMAL, DECIMAL(p), DECIMAL(p, s), as DECIMAL / DEC / FIXED / NUMERIC are written
+    auto decimal_type = [&]() -> DataType {
+        if (!peek_is(TokenKind::LParen)) { skip_signedness(); return DataType(DataType::Decimal{10, 0}); }
+        advance();
+        const Token* pt = advance();
+        std::uint8_t p = 10;
+        if (pt && pt->kind == TokenKind::NumberLit) { try { p = static_cast<std::uint8_t>(std::stoul(pt->text)); } catch (...) { p = 10; } }
+        else return DataType(DataType::Decimal{10, 2});
+        std::uint8_t s = 0;
+        if (peek_is(TokenKind::Comma)) {
+            advance();
+            const Token* st = advance();
+            if (st && st->kind == TokenKind::NumberLit) { try { s = static_cast<std::uint8_t>(std::stoul(st->text)); } catch (...) { s = 2; } }
+            else s = 2;
+        }
+        if (peek_is(TokenKind::RParen)) advance();
+        skip_signedness();
+        return DataType(DataType::Decimal{p, s});
     };
 
     const Token* t = advance();
     if (!t) throw ParseError("Expected data type");
     switch (t->kind) {
-        case TokenKind::Int: skip_parenthesized(); skip_unsigned(); return DataType(DataType::Int{});
-        case TokenKind::BigInt: skip_parenthesized(); skip_unsigned(); return DataType(DataType::BigInt{});
-        case TokenKind::SmallInt: skip_parenthesized(); skip_unsigned(); return DataType(DataType::SmallInt{});
-        case TokenKind::TinyInt: skip_parenthesized(); skip_unsigned(); return DataType(DataType::TinyInt{});
-        case TokenKind::Text: return DataType(DataType::Text{});
-        case TokenKind::Float: skip_parenthesized(); return DataType(DataType::Float{});
+        case TokenKind::Int: skip_parenthesized(); skip_signedness(); return DataType(DataType::Int{});
+        case TokenKind::BigInt: skip_parenthesized(); skip_signedness(); return DataType(DataType::BigInt{});
+        case TokenKind::SmallInt: skip_parenthesized(); skip_signedness(); return DataType(DataType::SmallInt{});
+        case TokenKind::TinyInt: skip_parenthesized(); skip_signedness(); return DataType(DataType::TinyInt{});
+        case TokenKind::Text: skip_parenthesized(); return DataType(DataType::Text{});
+        case TokenKind::Float: skip_parenthesized(); skip_signedness(); return DataType(DataType::Float{});
         case TokenKind::Boolean: return DataType(DataType::Boolean{});
-        case TokenKind::Double: skip_parenthesized(); return DataType(DataType::Double{});
-        case TokenKind::Time: return DataType(DataType::Time{});
-        case TokenKind::Year: return DataType(DataType::Year{});
+        case TokenKind::Double: skip_word("PRECISION"); skip_parenthesized(); skip_signedness(); return DataType(DataType::Double{});
+        case TokenKind::Time: return DataType(DataType::Time{fraction_digits()});
+        case TokenKind::Year: skip_parenthesized(); return DataType(DataType::Year{});
         case TokenKind::Blob: return DataType(DataType::Blob{});
         case TokenKind::Json: return DataType(DataType::Json{});
         case TokenKind::Enum: {
@@ -200,6 +240,7 @@ DataType Parser::parse_data_type() {
         }
         case TokenKind::Varchar: {
             std::uint32_t n = 255;
+            skip_word("VARYING"); // CHARACTER VARYING(n)
             if (peek_is(TokenKind::LParen)) {
                 advance();
                 const Token* sz = advance();
@@ -211,24 +252,13 @@ DataType Parser::parse_data_type() {
             return DataType(DataType::Varchar{n});
         }
         case TokenKind::Date: return DataType(DataType::Date{});
-        case TokenKind::Datetime: return DataType(DataType::DateTime{});
-        case TokenKind::Timestamp: return DataType(DataType::Timestamp{});
-        case TokenKind::Decimal: {
-            if (!peek_is(TokenKind::LParen)) return DataType(DataType::Decimal{10, 2});
-            advance();
-            const Token* pt = advance();
-            std::uint8_t p = 10;
-            if (pt && pt->kind == TokenKind::NumberLit) { try { p = static_cast<std::uint8_t>(std::stoul(pt->text)); } catch (...) { p = 10; } }
-            else return DataType(DataType::Decimal{10, 2});
-            std::uint8_t s = 0;
-            if (peek_is(TokenKind::Comma)) {
-                advance();
-                const Token* st = advance();
-                if (st && st->kind == TokenKind::NumberLit) { try { s = static_cast<std::uint8_t>(std::stoul(st->text)); } catch (...) { s = 2; } }
-                else s = 2;
-            }
-            if (peek_is(TokenKind::RParen)) advance();
-            return DataType(DataType::Decimal{p, s});
+        case TokenKind::Datetime: return DataType(DataType::DateTime{fraction_digits()});
+        case TokenKind::Timestamp: return DataType(DataType::Timestamp{fraction_digits()});
+        case TokenKind::Decimal: return decimal_type();
+        case TokenKind::Ident: {
+            const std::string word = to_upper(t->text);
+            if (word == "DEC" || word == "FIXED") return decimal_type();
+            throw ParseError("Expected data type");
         }
         default: throw ParseError("Expected data type");
     }
@@ -331,8 +361,20 @@ std::optional<std::int64_t> Parser::parse_table_options() {
                                            "STATS_SAMPLE_PAGES", "MAX_ROWS", "MIN_ROWS", "AVG_ROW_LENGTH", "CHECKSUM", "DELAY_KEY_WRITE", "PACK_KEYS",
                                            "COMPRESSION", "ENCRYPTION", "INSERT_METHOD", "TABLESPACE"};
     std::optional<std::int64_t> auto_increment_start;
+    auto is_option_word = [&](std::size_t at) { // a table option (or the start of a charset / collation one) at the token `at` ahead
+        const Token* w = peek_at(at);
+        if (!w) return false;
+        const std::string word = to_upper(!w->text.empty() ? w->text : w->word);
+        if (word == "DEFAULT" || word == "CHARSET" || word == "CHARACTER" || word == "COLLATE") return true;
+        return std::any_of(std::begin(kOptions), std::end(kOptions), [&](const char* o) { return word == o; });
+    };
     for (;;) {
-        if (peek_is(TokenKind::Comma)) { advance(); continue; }
+        // (options may be separated by commas; a comma before the next action of an ALTER TABLE belongs to the caller)
+        if (peek_is(TokenKind::Comma)) {
+            if (!is_option_word(1)) break;
+            advance();
+            continue;
+        }
         if (parse_charset_option()) continue;
         const Token* t = peek();
         if (peek_is(TokenKind::Default) && peek_at(1)) t = peek_at(1); // (DEFAULT ENCRYPTION = 'N')
@@ -351,6 +393,46 @@ std::optional<std::int64_t> Parser::parse_table_options() {
     return auto_increment_start;
 }
 
+bool Parser::skip_index_options() {
+    bool hash = false;
+    for (;;) {
+        const Token* p = peek();
+        if (!p) return hash;
+        if (p->kind == TokenKind::Using) {
+            advance();
+            const Token* type = advance();
+            hash = type && type->kind == TokenKind::Ident && to_upper(type->text) == "HASH";
+        } else if (p->kind == TokenKind::Ident) {
+            const std::string word = to_upper(p->text);
+            if (word == "COMMENT") {
+                advance();
+                if (!peek_is(TokenKind::StringLit)) throw ParseError("Expected a string after COMMENT");
+                advance();
+            } else if (word == "VISIBLE" || word == "INVISIBLE") {
+                advance();
+            } else if (word == "KEY_BLOCK_SIZE") {
+                advance();
+                if (peek_is(TokenKind::Eq)) advance();
+                advance();
+            } else {
+                return hash;
+            }
+        } else {
+            return hash;
+        }
+    }
+}
+
+bool Parser::check_is_enforced() {
+    bool enforced = true;
+    if (peek_is(TokenKind::Not) && peek_at(1) && peek_at(1)->kind == TokenKind::Ident && to_upper(peek_at(1)->text) == "ENFORCED") {
+        advance();
+        enforced = false;
+    }
+    if (const Token* p = peek(); p && p->kind == TokenKind::Ident && to_upper(p->text) == "ENFORCED") advance();
+    return enforced;
+}
+
 /// 컬럼 제약 공통 파서
 ColConstraints Parser::parse_col_constraints(const std::string& col_name) {
     ColConstraints c;
@@ -359,7 +441,8 @@ ColConstraints Parser::parse_col_constraints(const std::string& col_name) {
         if (!p) break;
         if (p->kind == TokenKind::Check) {
             advance();
-            c.check_expr = read_parenthesized_expr();
+            std::string check = read_parenthesized_expr();
+            if (check_is_enforced()) c.check_expr = std::move(check);
         } else if (p->kind == TokenKind::Primary) {
             advance();
             if (!peek_is(TokenKind::Key)) throw ParseError("Expected KEY");
@@ -658,6 +741,7 @@ Statement Parser::parse_create() {
             while (peek_is(TokenKind::Comma)) { advance(); pk_cols.push_back(expect_ident()); }
             if (!peek_is(TokenKind::RParen)) throw ParseError("Expected ')' after PK columns");
             advance();
+            skip_index_options();
             for (auto& pk_col : pk_cols) {
                 auto it = std::find_if(columns.begin(), columns.end(), [&](const ColumnDef& c) { return same_name(c.name, pk_col); });
                 if (it != columns.end()) { it->primary_key = true; it->not_null = true; }
@@ -666,7 +750,7 @@ Statement Parser::parse_create() {
         } else if (peek_is(TokenKind::Check)) {
             advance();
             std::string expr = read_parenthesized_expr();
-            check_constraints.emplace_back(std::nullopt, expr);
+            if (check_is_enforced()) check_constraints.emplace_back(std::nullopt, expr);
         } else if (peek_is(TokenKind::Constraint)) {
             advance();
             std::string constraint_name = expect_ident();
@@ -674,6 +758,7 @@ Statement Parser::parse_create() {
                 advance();
                 if (peek_is(TokenKind::Key) || peek_is(TokenKind::Index)) advance();
                 if (peek_is(TokenKind::Ident)) expect_ident(); // (the index name: the constraint's name is the one given)
+                skip_index_options();
                 if (!peek_is(TokenKind::LParen)) throw ParseError("Expected '(' after UNIQUE");
                 advance();
                 std::vector<std::string> key_columns;
@@ -681,6 +766,7 @@ Statement Parser::parse_create() {
                 while (peek_is(TokenKind::Comma)) { advance(); key_columns.push_back(expect_ident()); }
                 if (!peek_is(TokenKind::RParen)) throw ParseError("Expected ')' after column");
                 advance();
+                skip_index_options();
                 for (auto& col : key_columns) {
                     if (std::none_of(columns.begin(), columns.end(), [&](const ColumnDef& c) { return same_name(c.name, col); })) throw ParseError("CONSTRAINT: column '" + col + "' not defined");
                 }
@@ -694,7 +780,7 @@ Statement Parser::parse_create() {
             } else if (peek_is(TokenKind::Check)) {
                 advance();
                 std::string expr = read_parenthesized_expr();
-                check_constraints.emplace_back(constraint_name, expr);
+                if (check_is_enforced()) check_constraints.emplace_back(constraint_name, expr);
             } else if (peek_is(TokenKind::Primary)) {
                 advance();
                 if (!peek_is(TokenKind::Key)) throw ParseError("Expected KEY after PRIMARY");
@@ -706,6 +792,7 @@ Statement Parser::parse_create() {
                 while (peek_is(TokenKind::Comma)) { advance(); pk_cols.push_back(expect_ident()); }
                 if (!peek_is(TokenKind::RParen)) throw ParseError("Expected ')' after PK columns");
                 advance();
+                skip_index_options();
                 for (auto& pk_col : pk_cols) {
                     auto it = std::find_if(columns.begin(), columns.end(), [&](const ColumnDef& c) { return same_name(c.name, pk_col); });
                     if (it != columns.end()) { it->primary_key = true; it->not_null = true; }
@@ -724,6 +811,7 @@ Statement Parser::parse_create() {
             if (peek_is(TokenKind::Key) || peek_is(TokenKind::Index)) advance();
             std::optional<std::string> key_name;
             if (peek_is(TokenKind::Ident)) key_name = expect_ident();
+            skip_index_options();
             if (!peek_is(TokenKind::LParen)) throw ParseError("Expected '(' after UNIQUE KEY name");
             advance();
             std::vector<std::string> key_columns;
@@ -731,6 +819,7 @@ Statement Parser::parse_create() {
             while (peek_is(TokenKind::Comma)) { advance(); key_columns.push_back(expect_ident()); }
             if (!peek_is(TokenKind::RParen)) throw ParseError("Expected ')' after UNIQUE KEY columns");
             advance();
+            skip_index_options();
             for (auto& col : key_columns) {
                 if (std::none_of(columns.begin(), columns.end(), [&](const ColumnDef& c) { return same_name(c.name, col); })) throw ParseError("Key column '" + col + "' doesn't exist in table");
             }
@@ -745,6 +834,7 @@ Statement Parser::parse_create() {
             advance(); // INDEX or KEY
             std::optional<std::string> index_name;
             if (peek_is(TokenKind::Ident)) index_name = expect_ident();
+            skip_index_options();
             if (!peek_is(TokenKind::LParen)) throw ParseError("Expected '(' after INDEX/KEY name");
             advance();
             std::vector<std::string> index_columns;
@@ -761,7 +851,7 @@ Statement Parser::parse_create() {
             while (peek_is(TokenKind::Comma)) { advance(); key_part(); }
             if (!peek_is(TokenKind::RParen)) throw ParseError("Expected ')' after INDEX columns");
             advance();
-            if (peek_is(TokenKind::Using)) { advance(); if (peek()) advance(); } // USING BTREE
+            skip_index_options(); // USING BTREE, COMMENT 'x'
             for (auto& col : index_columns) {
                 if (std::none_of(columns.begin(), columns.end(), [&](const ColumnDef& c) { return same_name(c.name, col); })) throw ParseError("Key column '" + col + "' doesn't exist in table");
             }
@@ -889,7 +979,7 @@ Statement Parser::parse_alter_action(const std::string& table) {
                                         to_upper(t->text) == "CHARSET" || to_upper(t->text) == "ROW_FORMAT" || to_upper(t->text) == "CHARACTER" ||
                                         to_upper(t->text) == "COLLATE")) {
         --pos_;
-        parse_table_options();
+        if (const auto next = parse_table_options()) return Statement(Statement::AlterTable{table, AlterAction(AlterAction::SetAutoIncrement{*next})});
         return Statement(Statement::AlterTable{table, AlterAction(AlterAction::NoOp{})});
     }
 
@@ -984,6 +1074,7 @@ Statement Parser::parse_alter_action(const std::string& table) {
                     const std::string key_name = expect_ident();
                     if (!constraint_name) constraint_name = key_name;
                 }
+                skip_index_options();
                 if (!peek_is(TokenKind::LParen)) throw ParseError("Expected '(' after UNIQUE");
                 advance();
                 std::vector<std::string> key_columns;
@@ -991,6 +1082,7 @@ Statement Parser::parse_alter_action(const std::string& table) {
                 while (peek_is(TokenKind::Comma)) { advance(); key_columns.push_back(expect_ident()); }
                 if (!peek_is(TokenKind::RParen)) throw ParseError("Expected ')' after column");
                 advance();
+                skip_index_options();
                 return Statement(Statement::AlterTable{table, AlterAction(AlterAction::AddUniqueConstraint{constraint_name, key_columns.front(), key_columns})});
             }
             if (kind && kind->kind == TokenKind::Check) {
@@ -1050,7 +1142,8 @@ Statement Parser::parse_alter_action(const std::string& table) {
         if (peek_is(TokenKind::Index) || peek_is(TokenKind::Key)) { // ADD INDEX|KEY [name] (a, b)
             advance();
             std::optional<std::string> index_name;
-            if (!peek_is(TokenKind::LParen)) index_name = expect_ident();
+            if (!peek_is(TokenKind::LParen) && !peek_is(TokenKind::Using)) index_name = expect_ident();
+            skip_index_options();
             if (!peek_is(TokenKind::LParen)) throw ParseError("Expected '(' after the index name");
             advance();
             std::vector<std::string> key_columns;
@@ -1058,6 +1151,7 @@ Statement Parser::parse_alter_action(const std::string& table) {
             while (peek_is(TokenKind::Comma)) { advance(); key_columns.push_back(expect_ident()); }
             if (!peek_is(TokenKind::RParen)) throw ParseError("Expected ')' after column");
             advance();
+            skip_index_options();
             return Statement(Statement::AlterTable{table, AlterAction(AlterAction::AddIndex{index_name, key_columns})});
         }
         if (peek_is(TokenKind::Primary)) throw ParseError("ALTER TABLE ... ADD PRIMARY KEY is not supported: declare the PRIMARY KEY in CREATE TABLE");
@@ -1175,6 +1269,7 @@ Statement Parser::parse_rename() {
 
 Statement Parser::parse_create_index() {
     std::string index_name = expect_ident();
+    bool using_hash = skip_index_options(); // (CREATE INDEX name USING HASH ON t (c): the index type may come before ON)
     if (!peek_is(TokenKind::On)) throw ParseError("Expected ON");
     advance();
     std::string table = expect_table_name();
@@ -1190,12 +1285,7 @@ Statement Parser::parse_create_index() {
     while (peek_is(TokenKind::Comma)) { advance(); columns.push_back(expect_ident()); skip_direction(); }
     if (!peek_is(TokenKind::RParen)) throw ParseError("Expected ')'");
     advance();
-    bool using_hash = false;
-    if (peek_is(TokenKind::Using)) {
-        advance();
-        const Token* t = advance();
-        using_hash = t && t->kind == TokenKind::Ident && to_upper(t->text) == "HASH";
-    }
+    using_hash = skip_index_options() || using_hash;
     return Statement(Statement::CreateIndex{index_name, table, columns, using_hash});
 }
 

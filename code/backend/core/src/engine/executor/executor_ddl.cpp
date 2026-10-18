@@ -624,6 +624,29 @@ StringResult Executor::exec_alter(SharedDatabase& s, const std::string& table, A
         return StringResult::Ok("Table '" + table + "' altered.");
     }
 
+    // AUTO_INCREMENT = n: the next number is n, or the one after the largest the table holds when that is more (the counter holds the last number given)
+    if (auto* v = std::get_if<AlterAction::SetAutoIncrement>(&action.data)) {
+        auto* schema = s.catalog.get_table_mut(table);
+        if (!schema) return StringResult::Err("Table '" + table + "' doesn't exist");
+        for (const ColumnDef& col : schema->columns) {
+            if (!col.auto_increment) continue;
+            std::int64_t largest = 0;
+            if (auto rows = s.tables.find(table); rows != s.tables.end()) {
+                for (const Row& r : rows->second) {
+                    auto cell = r.find(col.name);
+                    if (cell == r.end() || !is_visible(r)) continue;
+                    std::int64_t number = 0;
+                    const char* end = cell->second.data() + cell->second.size();
+                    if (std::from_chars(cell->second.data(), end, number).ptr == end) largest = std::max(largest, number);
+                }
+            }
+            schema->auto_increment_counters[col.name] = std::max<std::int64_t>(v->next - 1, largest);
+            s.disk.save_schema(table, *schema);
+            break;
+        }
+        return StringResult::Ok("Table '" + table + "' altered.");
+    }
+
     if (auto* v = std::get_if<AlterAction::AddPartition>(&action.data)) {
         auto* schema = s.catalog.get_table_mut(table);
         if (!schema) return StringResult::Err("Table '" + table + "' not found");

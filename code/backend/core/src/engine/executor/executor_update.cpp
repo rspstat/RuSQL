@@ -7,6 +7,7 @@
 
 #include "engine/collation.hpp"
 #include "engine/executor/executor.hpp"
+#include "engine/now_text.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -18,14 +19,7 @@ namespace engine {
 
 namespace {
 // the time of the statement as a TIMESTAMP column holds it (ON UPDATE CURRENT_TIMESTAMP)
-std::string now_text() {
-    const std::time_t t = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
-    std::tm tm_buf{};
-    localtime_s(&tm_buf, &t);
-    std::ostringstream oss;
-    oss << std::put_time(&tm_buf, "%Y-%m-%d %H:%M:%S");
-    return oss.str();
-}
+std::string now_text(int digits) { return time_now_text(digits, false, true); }
 
 std::string trim_ws(const std::string& s) {
     auto start = s.find_first_not_of(" \t");
@@ -494,7 +488,7 @@ StringResult Executor::exec_update_inner(SharedDatabase& s, const std::string& t
                             for (auto& col : schema->columns) {
                                 if (!col.on_update_now) continue;
                                 if (std::any_of(new_vals.begin(), new_vals.end(), [&](const auto& nv) { return nv.first == col.name; })) continue;
-                                new_row[col.name] = now_text();
+                                new_row[col.name] = now_text(fraction_digits_of(col.data_type));
                             }
                         }
                     }

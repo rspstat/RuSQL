@@ -79,6 +79,7 @@ add_executable(engine_tests
     test_result_types.cpp
     test_decimal_display.cpp
     test_result_text.cpp
+    test_temporal.cpp
 )
 
 target_link_libraries(engine_tests PRIVATE engine_core)

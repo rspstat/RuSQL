@@ -97,11 +97,11 @@ struct DataType {
     struct Boolean {};
     struct Varchar { std::uint32_t length; };
     struct Date {};
-    struct DateTime {};
-    struct Timestamp {};
+    struct DateTime { std::uint8_t fsp = 0; };  // fsp: the digits of the fraction of a second the column keeps, DATETIME(3)
+    struct Timestamp { std::uint8_t fsp = 0; };
     struct Decimal { std::uint8_t precision; std::uint8_t scale; };
     struct Double {};
-    struct Time {};
+    struct Time { std::uint8_t fsp = 0; };
     struct Year {};
     struct Enum { std::vector<std::string> values; };
     struct Set { std::vector<std::string> values; };
@@ -118,6 +118,14 @@ struct DataType {
     template <typename Alt, typename = std::enable_if_t<!std::is_same_v<std::decay_t<Alt>, DataType>>>
     DataType(Alt alt) : data(std::move(alt)) {}
 };
+
+// The digits of the fraction of a second a DATETIME(n) / TIMESTAMP(n) / TIME(n) column keeps; 0 for every other type
+inline int fraction_digits_of(const DataType& type) {
+    if (auto* v = std::get_if<DataType::DateTime>(&type.data)) return v->fsp;
+    if (auto* v = std::get_if<DataType::Timestamp>(&type.data)) return v->fsp;
+    if (auto* v = std::get_if<DataType::Time>(&type.data)) return v->fsp;
+    return 0;
+}
 
 // What a column of this declared type holds: numbers, or text (dates and times are kept as text in their canonical form, which compares right as text).
 inline ValueClass class_of_type(const DataType& type) {
@@ -517,12 +525,13 @@ struct AlterAction {
     struct NoOp {};
     struct AddIndex { std::optional<std::string> name; std::vector<std::string> columns; };               // ADD INDEX|KEY [name] (a, b)
     struct ChangeColumn { std::string from; ColumnDef column; std::optional<ColumnPosition> position; };   // CHANGE [COLUMN] old new definition
+    struct SetAutoIncrement { std::int64_t next = 1; };                                                    // AUTO_INCREMENT = n: the next number of the AUTO_INCREMENT column
     struct SetDefault { std::string column; std::optional<std::string> value; };                            // ALTER COLUMN c SET DEFAULT v / DROP DEFAULT (no value)
 
     using Data = std::variant<AddColumn, DropColumn, RenameColumn, ModifyColumn, RenameTable,
                                AddForeignKey, DropForeignKey, AddUniqueConstraint,
                                AddCheckConstraint, DropConstraint, AddPartition, DropPartition, NoOp,
-                               AddIndex, ChangeColumn, SetDefault>;
+                               AddIndex, ChangeColumn, SetDefault, SetAutoIncrement>;
     Data data;
 
     AlterAction() : data(DropColumn{}) {}

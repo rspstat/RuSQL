@@ -27,18 +27,19 @@ SETUP = [
 K_SETUP, K_ROWS, K_OK, K_ERR, K_RUN, K_EXACT = 0, 1, 2, 3, 4, 5  # K_EXACT: the rows, and the texts of the cells must be the same (--exact)
 
 
-def cell(v):
+def cell(v, places=0):
+    """A value of MySQL's answer as text; `places`: the digits of the fraction of a second the column has (a DATETIME(3) value is written with three)."""
     if v is None:
         return "NULL"
     if isinstance(v, (bytes, bytearray)):
         return v.decode("utf-8", "replace")
     if isinstance(v, datetime.datetime):
-        return v.strftime("%Y-%m-%d %H:%M:%S")
+        return v.strftime("%Y-%m-%d %H:%M:%S") + ("." + "%06d" % v.microsecond)[:places + 1 if places else 0]
     if isinstance(v, datetime.timedelta):
-        total = int(v.total_seconds())
-        sign = "-" if total < 0 else ""
-        total = abs(total)
-        return "%s%02d:%02d:%02d" % (sign, total // 3600, total // 60 % 60, total % 60)
+        micro = abs(v.days * 86400 * 1000000 + v.seconds * 1000000 + v.microseconds)
+        sign = "-" if v < datetime.timedelta(0) else ""
+        total, micro = divmod(micro, 1000000)
+        return "%s%02d:%02d:%02d%s" % (sign, total // 3600, total // 60 % 60, total % 60, ("." + "%06d" % micro)[:places + 1] if places else "")
     if isinstance(v, (datetime.date, datetime.time)):
         return str(v)
     if isinstance(v, bool):
@@ -57,7 +58,8 @@ def mysql_run(cur, sql):
             LAST_TYPES.pop(id(cur), None)
             return ("ok", None)
         LAST_TYPES[id(cur)] = [TYPE_CLASS.get(d[1], "text") for d in cur.description]
-        return ("rows", [[cell(v) for v in row] for row in cur.fetchall()])
+        places = [d[5] if d[1] in (7, 11, 12) and d[5] else 0 for d in cur.description] # (the fraction of a second of a DATETIME / TIME / TIMESTAMP column)
+        return ("rows", [[cell(v, places[i]) for i, v in enumerate(row)] for row in cur.fetchall()])
     except Exception as e:  # noqa
         return ("err", str(e)[:100])
 

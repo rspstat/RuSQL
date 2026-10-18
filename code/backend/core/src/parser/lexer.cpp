@@ -119,10 +119,10 @@ const std::unordered_map<std::string, TokenKind>& keyword_map() {
         {"TINYBLOB", TokenKind::Text},
         {"NVARCHAR", TokenKind::Varchar}, {"NCHAR", TokenKind::Varchar},
         {"CHARACTER", TokenKind::Varchar}, {"CHAR", TokenKind::Varchar},
-        {"NUMERIC", TokenKind::Decimal}, {"REAL", TokenKind::Float}, {"BOOL", TokenKind::Boolean},
+        {"NUMERIC", TokenKind::Decimal}, {"REAL", TokenKind::Double}, {"BOOL", TokenKind::Boolean},
         {"UNKNOWN", TokenKind::Null},
         // Additional aliases
-        {"CURRENT_DATE", TokenKind::Curdate}, {"CURRENT_TIME", TokenKind::Curdate},
+        {"CURRENT_DATE", TokenKind::Curdate},
         {"CURRENT_TIMESTAMP", TokenKind::Now}, {"SYSDATE", TokenKind::Now},
         {"LOCALTIME", TokenKind::Now}, {"LOCALTIMESTAMP", TokenKind::Now},
     };

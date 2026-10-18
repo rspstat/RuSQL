@@ -18,6 +18,7 @@
 
 #include "engine/collation.hpp"
 #include "engine/executor/builtin_functions.hpp"
+#include "engine/now_text.hpp"
 #include "engine/numeric_text.hpp"
 #include "engine/parser/parser.hpp"
 
@@ -397,15 +398,18 @@ std::string Executor::apply_scalar_func(const std::string& typed_name, const std
         }
     }
 
-    if (func_name == "NOW") {
-        auto now = std::chrono::system_clock::now();
-        std::time_t t = std::chrono::system_clock::to_time_t(now);
-        std::tm tm_buf{};
-        localtime_s(&tm_buf, &t);
-        char buf[32];
-        std::strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", &tm_buf);
-        return buf;
-    }
+    // NOW(3), CURTIME(6), UTC_TIMESTAMP(2): the digits of the fraction of a second (none: 0)
+    auto fraction_arg = [&]() -> int {
+        if (args.empty()) return 0;
+        const auto digits = parse_i64(arg_at(0));
+        if (digits && *digits > 6) {
+            std::string name = func_name;
+            for (char& ch : name) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+            throw StatementError("Too-big precision " + std::to_string(*digits) + " specified for '" + name + "'. Maximum is 6.");
+        }
+        return digits ? static_cast<int>(std::max<long long>(*digits, 0)) : 0;
+    };
+    if (func_name == "NOW") return time_now_text(fraction_arg(), false, true);
     if (func_name == "CURDATE") {
         auto now = std::chrono::system_clock::now();
         std::time_t t = std::chrono::system_clock::to_time_t(now);
@@ -491,11 +495,13 @@ std::string Executor::apply_scalar_func(const std::string& typed_name, const std
     if (func_name == "FOUND_ROWS") return std::to_string(g_found_rows);
     if (func_name == "SLEEP") return "0"; // (it does not wait: the server answers every connection from one lock)
     if (func_name == "UTC_DATE" || func_name == "UTC_TIME" || func_name == "UTC_TIMESTAMP") {
+        if (func_name == "UTC_TIME") return time_now_text(fraction_arg(), true, false);
+        if (func_name == "UTC_TIMESTAMP") return time_now_text(fraction_arg(), true, true);
         std::time_t t = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
         std::tm tm_buf{};
         gmtime_s(&tm_buf, &t);
         char buf[32];
-        std::strftime(buf, sizeof(buf), func_name == "UTC_DATE" ? "%Y-%m-%d" : (func_name == "UTC_TIME" ? "%H:%M:%S" : "%Y-%m-%d %H:%M:%S"), &tm_buf);
+        std::strftime(buf, sizeof(buf), "%Y-%m-%d", &tm_buf);
         return buf;
     }
     if (func_name == "RAND") {
@@ -503,24 +509,8 @@ std::string Executor::apply_scalar_func(const std::string& typed_name, const std
         auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(now).count() % 1000000000;
         return fmt_prec(static_cast<double>(ns) / 1e9, 6);
     }
-    if (func_name == "CURTIME" || func_name == "CURRENT_TIME") {
-        auto now = std::chrono::system_clock::now();
-        std::time_t t = std::chrono::system_clock::to_time_t(now);
-        std::tm tm_buf{};
-        localtime_s(&tm_buf, &t);
-        char buf[16];
-        std::strftime(buf, sizeof(buf), "%H:%M:%S", &tm_buf);
-        return buf;
-    }
-    if (func_name == "CURRENT_TIMESTAMP" || func_name == "LOCALTIME" || func_name == "LOCALTIMESTAMP") {
-        auto now = std::chrono::system_clock::now();
-        std::time_t t = std::chrono::system_clock::to_time_t(now);
-        std::tm tm_buf{};
-        localtime_s(&tm_buf, &t);
-        char buf[32];
-        std::strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", &tm_buf);
-        return buf;
-    }
+    if (func_name == "CURTIME" || func_name == "CURRENT_TIME") return time_now_text(fraction_arg(), false, false);
+    if (func_name == "CURRENT_TIMESTAMP" || func_name == "LOCALTIME" || func_name == "LOCALTIMESTAMP") return time_now_text(fraction_arg(), false, true);
     if (func_name == "UNIX_TIMESTAMP") {
         if (args.empty()) {
             auto now = std::chrono::system_clock::now().time_since_epoch();

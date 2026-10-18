@@ -123,7 +123,7 @@ TEST_CASE("type alias keywords normalize to the canonical TokenKind", "[lexer]")
     for (auto& t : toks) kinds.push_back(t.kind);
     std::vector<TokenKind> expected = {
         TokenKind::Int, TokenKind::Int, TokenKind::BigInt, TokenKind::Varchar,
-        TokenKind::Decimal, TokenKind::Float, TokenKind::Boolean,
+        TokenKind::Decimal, TokenKind::Double, TokenKind::Boolean, // (REAL is a DOUBLE in MySQL)
     };
     REQUIRE(kinds == expected);
 }

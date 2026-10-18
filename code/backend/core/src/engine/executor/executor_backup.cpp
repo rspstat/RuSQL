@@ -104,15 +104,15 @@ std::string backup_type_str(const DataType& dt) {
             else if constexpr (std::is_same_v<T, DataType::Json>)
                 return "JSON";
             else if constexpr (std::is_same_v<T, DataType::DateTime>)
-                return "DATETIME";
+                return alt.fsp ? "DATETIME(" + std::to_string(alt.fsp) + ")" : "DATETIME";
             else if constexpr (std::is_same_v<T, DataType::Timestamp>)
-                return "TIMESTAMP";
+                return alt.fsp ? "TIMESTAMP(" + std::to_string(alt.fsp) + ")" : "TIMESTAMP";
             else if constexpr (std::is_same_v<T, DataType::Decimal>)
                 return "DECIMAL(" + std::to_string(alt.precision) + "," + std::to_string(alt.scale) + ")";
             else if constexpr (std::is_same_v<T, DataType::Double>)
                 return "DOUBLE";
             else if constexpr (std::is_same_v<T, DataType::Time>)
-                return "TIME";
+                return alt.fsp ? "TIME(" + std::to_string(alt.fsp) + ")" : "TIME";
             else if constexpr (std::is_same_v<T, DataType::Year>)
                 return "YEAR";
             else

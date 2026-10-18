@@ -124,6 +124,10 @@ private:
     bool parse_charset_option();
     /// the table options after CREATE TABLE (...): ENGINE, AUTO_INCREMENT, charset, collation, COMMENT, ROW_FORMAT ...; the AUTO_INCREMENT start, if there is one
     std::optional<std::int64_t> parse_table_options();
+    /// `USING BTREE|HASH`, `COMMENT 'text'`, `VISIBLE|INVISIBLE`, `KEY_BLOCK_SIZE [=] n` before or after the columns of an index; true when the index type was HASH
+    bool skip_index_options();
+    /// `[NOT] ENFORCED` after a CHECK; false for NOT ENFORCED (the check is written in the definition but never applied)
+    bool check_is_enforced();
 
     CondExpr parse_condexpr();
     CondExpr parse_or_expr();

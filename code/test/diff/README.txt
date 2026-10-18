@@ -135,7 +135,8 @@ Comparison with a real MySQL (needs pymysql and a MySQL 8.4 on 127.0.0.1:3391; u
       runs the statements of a corpus on RuSQL and on MySQL and lists the ones whose answers differ (a line is a statement, '#' a comment, '--' a setup
       statement run on both). --emit writes the cases of the C++ conformance tests code/backend/tests/mysql_conformance_<name>.inc: MySQL's answer is the
       expected one for every statement RuSQL answers the same; a statement it answers differently is only run, so the tables stay as MySQL had them.
-      The corpora: functions, tables, constraints, collation (the default collation utf8mb4_0900_ai_ci), decimals (--exact, see below).
+      The corpora: functions, tables, constraints, collation (the default collation utf8mb4_0900_ai_ci), decimals (--exact, see below), temporal (fractional seconds,
+      the forms of a date and a time, INTERVAL / EXTRACT units, column types and index options; a DATETIME(3) value is read with the three places the column has).
       The cells of RuSQL's answer are read the way the engine itself reads a result table (\\ \n \| and \s \t for a space or tab at either end of a value,
       see engine/result_text.hpp), so a value such as ' x ' or 'a|b' is compared as it is; corpus/tables.sql has probes for them (R40) and for CTE columns.
   --exact

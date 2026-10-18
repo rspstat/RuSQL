@@ -635,6 +635,14 @@ inline std::optional<DateTime> parse_datetime(const std::string& text) {
                     while (j < s.size() && s[j] >= '0' && s[j] <= '9' && frac.size() < 6) frac.push_back(s[j++]);
                     frac.resize(6, '0');
                     t.micro = frac.empty() ? 0 : std::atoll(frac.c_str());
+                    if (j < s.size() && s[j] >= '5' && s[j] <= '9') { // the seventh place rounds the sixth; a carry out of the last millionth is a second
+                        if (++t.micro == 1000000) {
+                            t.micro = 0;
+                            const DateTime next = DateTime::from_epoch_seconds(t.epoch_seconds() + 1);
+                            t.year = next.year; t.month = next.month; t.day = next.day;
+                            t.hour = next.hour; t.minute = next.minute; t.second = next.second;
+                        }
+                    }
                 }
             }
         }
@@ -667,12 +675,19 @@ inline std::optional<long long> parse_time_seconds(const std::string& text, long
     }
     if (!any && v.empty()) return std::nullopt;
     v.push_back(cur);
-    if (micro) {
+    long long carry = 0; // (a seventh place of 5 or more rounds the sixth; all nines carry into the seconds)
+    long long ignored_micro = 0;
+    if (!micro) micro = &ignored_micro;
+    {
         *micro = 0;
         if (i < s.size() && s[i] == '.') {
             std::string frac = s.substr(i + 1, 6);
             frac.resize(6, '0');
             *micro = std::atoll(frac.c_str());
+            if (i + 7 < s.size() && s[i + 7] >= '5' && s[i + 7] <= '9' && ++*micro == 1000000) {
+                *micro = 0;
+                carry = 1;
+            }
         }
     }
     if (v.size() == 1) { // HHMMSS
@@ -682,7 +697,7 @@ inline std::optional<long long> parse_time_seconds(const std::string& text, long
     else if (v.size() == 3) { parts[0] = v[0]; parts[1] = v[1]; parts[2] = v[2]; }
     else return std::nullopt;
     if (parts[1] > 59 || parts[2] > 59) return std::nullopt;
-    const long long total = parts[0] * 3600 + parts[1] * 60 + parts[2];
+    const long long total = parts[0] * 3600 + parts[1] * 60 + parts[2] + carry;
     return negative ? -total : total;
 }
 
