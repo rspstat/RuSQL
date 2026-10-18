@@ -544,3 +544,155 @@ SELECT GROUP_CONCAT(id) FROM px WHERE v = 1
 SELECT id FROM px WHERE v = 1 AND w = 1 LIMIT 1
 SELECT DISTINCT w FROM px WHERE v = 1
 SELECT id, ROW_NUMBER() OVER () FROM px WHERE v = 1
+# CREATE TABLE ... LIKE / AS SELECT, RENAME TABLE, DROP TABLE a, b, TRUNCATE t (R37)
+--CREATE TABLE ds (id INT PRIMARY KEY AUTO_INCREMENT, name VARCHAR(20) NOT NULL, pay DECIMAL(8,2) DEFAULT 1.50, grp INT, UNIQUE KEY uq_name (name), KEY idx_grp (grp))
+--INSERT INTO ds (name, pay, grp) VALUES ('a', 10.25, 1), ('b', 20.50, 1), ('c', 30.75, 2)
+CREATE TABLE ds_like LIKE ds
+SELECT COUNT(*) FROM ds_like
+INSERT INTO ds_like (name, grp) VALUES ('x', 1)
+INSERT INTO ds_like (name, grp) VALUES ('x', 2)
+SELECT id, name, pay, grp FROM ds_like
+CREATE TABLE ds_copy AS SELECT id, name, pay * 2 AS double_pay FROM ds WHERE grp = 1
+SELECT id, name, double_pay FROM ds_copy ORDER BY id
+CREATE TABLE ds_sum AS SELECT grp, COUNT(*) AS n, SUM(pay) AS total FROM ds GROUP BY grp
+SELECT grp, n, total FROM ds_sum ORDER BY grp
+CREATE TABLE ds_empty AS SELECT id, name FROM ds WHERE 1 = 0
+SELECT COUNT(*) FROM ds_empty
+CREATE TABLE ds_copy AS SELECT 1
+CREATE TABLE IF NOT EXISTS ds_copy AS SELECT 1
+CREATE TABLE ds_expl (id INT PRIMARY KEY, name VARCHAR(5)) AS SELECT id, name FROM ds
+SELECT id, name FROM ds_expl ORDER BY id
+RENAME TABLE ds_empty TO ds_none
+SELECT COUNT(*) FROM ds_none
+SELECT COUNT(*) FROM ds_empty
+RENAME TABLE ds_none TO ds_empty, ds_sum TO ds_totals
+SELECT COUNT(*) FROM ds_totals
+DROP TABLE ds_empty, ds_totals
+DROP TABLE ds_copy, nosuch_table
+SELECT COUNT(*) FROM ds_copy
+DROP TABLE IF EXISTS ds_copy, nosuch_table
+TRUNCATE ds_like
+SELECT COUNT(*) FROM ds_like
+# ALTER TABLE with several actions, FIRST / AFTER, CHANGE, ADD INDEX, SET DEFAULT, table options (R37)
+ALTER TABLE ds ADD COLUMN extra INT DEFAULT 7 AFTER name, ADD COLUMN first_c INT FIRST
+SELECT * FROM ds ORDER BY id
+ALTER TABLE ds CHANGE COLUMN extra bonus BIGINT NOT NULL DEFAULT 3, MODIFY COLUMN pay DECIMAL(10,2)
+SELECT bonus, pay FROM ds ORDER BY id
+ALTER TABLE ds ADD INDEX idx_pay (pay), ADD KEY (bonus)
+ALTER TABLE ds ALTER COLUMN bonus SET DEFAULT 9
+INSERT INTO ds (name, grp) VALUES ('d', 3)
+SELECT bonus FROM ds WHERE name = 'd'
+ALTER TABLE ds ALTER COLUMN bonus DROP DEFAULT
+INSERT INTO ds (name, grp) VALUES ('e', 3)
+ALTER TABLE ds MODIFY COLUMN grp INT AFTER id
+SELECT * FROM ds WHERE id = 1
+ALTER TABLE ds DROP COLUMN first_c, DROP INDEX idx_pay
+ALTER TABLE ds ENGINE=InnoDB
+ALTER TABLE ds ADD COLUMN dup_col INT, ADD COLUMN DUP_COL INT
+SELECT * FROM ds WHERE id = 1
+ALTER TABLE ds DROP COLUMN no_such_col
+ALTER TABLE ds ADD COLUMN ok_col INT, DROP COLUMN no_such_col
+ALTER TABLE ds ADD COLUMN ok_col INT, ADD COLUMN after_missing INT AFTER no_such_col
+ALTER TABLE ds RENAME COLUMN no_such_col TO zzz
+ALTER TABLE ds ADD COLUMN ok_col INT, ALTER COLUMN ok_col SET DEFAULT 4
+ALTER TABLE ds ADD COLUMN ok_col INT, DROP COLUMN ok_col
+ALTER TABLE ds ADD COLUMN ok_col INT, ADD INDEX idx_ok (ok_col)
+ALTER TABLE ds DROP INDEX idx_ok, DROP COLUMN ok_col
+SELECT * FROM ds WHERE id = 1
+ALTER TABLE ds CHANGE COLUMN name name2 VARCHAR(30) NOT NULL, ALTER COLUMN pay SET DEFAULT 4
+INSERT INTO ds (name2, grp) VALUES ('a', 1)
+ALTER TABLE ds MODIFY COLUMN name2 VARCHAR(40) NOT NULL
+INSERT INTO ds (name2, grp) VALUES ('A', 1)
+SELECT * FROM ds WHERE id = 1
+ALTER TABLE ds ADD COLUMN ok_col2 INT, MODIFY COLUMN no_such_col INT
+SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'ds'
+# parenthesised operands of a set operation, KEY lines of CREATE TABLE, locking reads, db.table.column (R37)
+(SELECT id FROM ds WHERE id < 2) UNION (SELECT id FROM ds WHERE id > 3) ORDER BY id
+(SELECT id FROM ds WHERE id < 2) UNION ALL (SELECT id FROM ds WHERE id < 2)
+(SELECT id FROM ds WHERE id < 3) EXCEPT (SELECT id FROM ds WHERE id < 2)
+CREATE TABLE ds_k (a INT, b INT, KEY idx_ab (a, b), KEY (b))
+INSERT INTO ds_k VALUES (1, 2), (1, 3)
+SELECT a, b FROM ds_k WHERE a = 1 AND b = 3
+SELECT id FROM ds WHERE id = 1 FOR UPDATE
+SELECT id FROM ds WHERE id = 1 LOCK IN SHARE MODE
+SELECT id FROM ds WHERE id = 1 FOR UPDATE NOWAIT
+SELECT id FROM ds WHERE id = 1 FOR SHARE SKIP LOCKED
+SELECT v.ds.id FROM v.ds WHERE v.ds.id = 1
+SELECT x.id, k.b FROM v.ds x JOIN v.ds_k k ON k.a = x.grp ORDER BY x.id, k.b
+SELECT x.id, k.b FROM ds AS x LEFT JOIN v.ds_k AS k ON k.a = x.grp ORDER BY x.id, k.b
+SELECT ds.id, ds_k.b FROM v.ds JOIN v.ds_k ON ds_k.a = ds.grp ORDER BY ds.id, ds_k.b
+# SHOW TABLES FROM / LIKE, information_schema read as tables (R37)
+SHOW TABLES LIKE 'ds%'
+SHOW TABLES FROM v LIKE 'ds\_%'
+SHOW TABLES LIKE 'nomatch%'
+SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name LIKE 'ds%'
+SELECT table_name FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name LIKE 'ds%' ORDER BY table_name
+SELECT column_name, column_type, is_nullable, column_key FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'ds' ORDER BY ordinal_position
+SELECT index_name, non_unique, seq_in_index, column_name FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = 'ds' ORDER BY index_name, seq_in_index
+SELECT table_name, COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name IN ('ds', 'ds_k') GROUP BY table_name ORDER BY table_name
+SELECT COUNT(DISTINCT table_name) FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name LIKE 'ds%'
+SELECT t.table_name, COUNT(c.column_name) FROM information_schema.tables t JOIN information_schema.columns c ON c.table_schema = t.table_schema AND c.table_name = t.table_name WHERE t.table_schema = DATABASE() AND t.table_name LIKE 'ds_k' GROUP BY t.table_name
+# LAST_INSERT_ID(), ROW_COUNT(), FOUND_ROWS(), SQL_CALC_FOUND_ROWS (R37)
+--CREATE TABLE sess (id INT PRIMARY KEY AUTO_INCREMENT, v INT)
+INSERT INTO sess (v) VALUES (10), (20), (30)
+SELECT LAST_INSERT_ID()
+SELECT ROW_COUNT()
+UPDATE sess SET v = v + 1 WHERE id < 3
+SELECT ROW_COUNT()
+DELETE FROM sess WHERE id = 3
+SELECT ROW_COUNT()
+SELECT id FROM sess ORDER BY id LIMIT 1
+SELECT FOUND_ROWS()
+SELECT SQL_CALC_FOUND_ROWS id FROM sess LIMIT 1
+SELECT FOUND_ROWS()
+INSERT INTO sess (id, v) VALUES (50, 1)
+SELECT LAST_INSERT_ID()
+INSERT INTO sess (v) VALUES (2)
+SELECT LAST_INSERT_ID()
+SELECT LAST_INSERT_ID(99)
+SELECT LAST_INSERT_ID()
+# window functions: COUNT(*) OVER next to COUNT(col) OVER, LAG / LEAD with a default, PERCENT_RANK as a double (R37)
+--CREATE TABLE wf (id INT PRIMARY KEY, g VARCHAR(3), v INT)
+--INSERT INTO wf VALUES (1, 'a', 10), (2, 'a', NULL), (3, 'b', 30), (4, 'b', 40)
+SELECT id, COUNT(*) OVER (), COUNT(v) OVER () FROM wf ORDER BY id
+SELECT id, LAG(v, 2, 0) OVER (ORDER BY id), LEAD(v, 1, -1) OVER (ORDER BY id) FROM wf ORDER BY id
+SELECT id, PERCENT_RANK() OVER (ORDER BY id), CUME_DIST() OVER (ORDER BY id) FROM wf ORDER BY id
+SELECT id, SUM(v) OVER (ORDER BY id), SUM(v) OVER (PARTITION BY g) FROM wf ORDER BY id
+SELECT g, GROUP_CONCAT(v ORDER BY v SEPARATOR ';'), GROUP_CONCAT(DISTINCT g) FROM wf GROUP BY g ORDER BY g
+# TIME_FORMAT, ADDTIME, SUBTIME, TIMEDIFF, PERIOD_ADD, PERIOD_DIFF, YEARWEEK, TO_SECONDS, BIT_COUNT, QUOTE, EXPORT_SET, MAKE_SET, REGEXP_INSTR (R37)
+SELECT TIME_FORMAT('10:20:30', '%H.%i.%s'), ADDTIME('10:00:00', '02:30:00'), SUBTIME('10:00:00', '00:30:00'), TIMEDIFF('12:00:00', '10:30:00')
+SELECT ADDTIME('2024-01-01 10:00:00', '36:00:00'), SUBTIME('2024-01-01 10:00:00', '11:00:00'), TIMEDIFF('2024-01-02 10:00:00', '2024-01-01 08:30:00')
+SELECT PERIOD_ADD(202401, 3), PERIOD_ADD(2401, 12), PERIOD_DIFF(202403, 202401), YEARWEEK('2024-03-05'), YEARWEEK('2024-01-01', 1), TO_SECONDS('2024-03-05')
+SELECT BIT_COUNT(7), BIT_COUNT(255), BIT_COUNT(0), EXPORT_SET(5, 'Y', 'N', ',', 4), MAKE_SET(3, 'a', 'b', 'c'), MAKE_SET(5, 'x', 'y', 'z')
+SELECT QUOTE(12), QUOTE(NULL), QUOTE('a b')
+SELECT REGEXP_INSTR('abc123', '[0-9]'), REGEXP_INSTR('abc', '[0-9]'), UTC_DATE() >= '2024-01-01', SLEEP(0)
+# a trigger sees NEW.col as the column writes it; autocommit = 0 (R37)
+--CREATE TABLE tg (id INT PRIMARY KEY, bal DECIMAL(10,2))
+--CREATE TABLE tg_log (note VARCHAR(40))
+--INSERT INTO tg VALUES (1, 100)
+--CREATE TRIGGER tg_upd AFTER UPDATE ON tg FOR EACH ROW INSERT INTO tg_log VALUES (CONCAT(OLD.bal, '->', NEW.bal))
+UPDATE tg SET bal = bal + 1
+SELECT note FROM tg_log
+--CREATE TABLE ac (id INT PRIMARY KEY, v INT)
+SET autocommit = 0
+INSERT INTO ac VALUES (1, 1)
+ROLLBACK
+SELECT COUNT(*) FROM ac
+INSERT INTO ac VALUES (2, 2)
+COMMIT
+SELECT COUNT(*) FROM ac
+INSERT INTO ac VALUES (3, 3)
+SET autocommit = 1
+SELECT COUNT(*) FROM ac
+ROLLBACK
+SELECT COUNT(*) FROM ac
+SELECT @@autocommit
+SET autocommit = 0
+INSERT INTO ac VALUES (4, 4)
+CREATE TABLE ac2 (x INT)
+ROLLBACK
+SELECT COUNT(*) FROM ac
+SET autocommit = 1
+SELECT PERCENT_RANK() OVER (ORDER BY id) FROM wf WHERE id = 1
+SELECT YEARWEEK('2024-01-01'), YEARWEEK('2023-01-01'), YEARWEEK('2021-01-03', 3), YEARWEEK('2020-12-31', 1)
+SELECT YEARWEEK('2024-12-30'), YEARWEEK('2024-12-30', 3), YEARWEEK('2022-01-01', 0)

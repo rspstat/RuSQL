@@ -561,7 +561,7 @@ TEST_CASE("SELECT against a view executes the view's stored query", "[executor][
     REQUIRE(r.value().find("Old") == std::string::npos);
 }
 
-TEST_CASE("SELECT FOR UPDATE requires an active transaction", "[executor][select]") {
+TEST_CASE("SELECT FOR UPDATE outside a transaction reads the rows (autocommit), inside one it locks them", "[executor][select]") {
     TempDataDir dir("exec_sel_data_11");
     Executor ex(dir.path);
     REQUIRE(ex.execute_sql("CREATE DATABASE company").is_ok());
@@ -569,9 +569,15 @@ TEST_CASE("SELECT FOR UPDATE requires an active transaction", "[executor][select
     REQUIRE(ex.execute_sql("CREATE TABLE t (id INT PRIMARY KEY)").is_ok());
     REQUIRE(ex.execute_sql("INSERT INTO t VALUES (1)").is_ok());
 
+    // (outside a transaction its locks would be gone at once: the statement is a plain read, as in MySQL with autocommit)
     auto r = ex.execute_sql("SELECT * FROM t FOR UPDATE");
-    REQUIRE(r.is_err());
-    REQUIRE(r.error().find("active transaction") != std::string::npos);
+    REQUIRE(r.is_ok());
+    REQUIRE(r.value().find("1 row(s) returned") != std::string::npos);
+    REQUIRE(ex.execute_sql("SELECT * FROM t LOCK IN SHARE MODE").is_ok());
+    REQUIRE(ex.execute_sql("SELECT * FROM t FOR UPDATE NOWAIT").is_ok());
+    REQUIRE(ex.execute_sql("BEGIN").is_ok());
+    REQUIRE(ex.execute_sql("SELECT * FROM t FOR UPDATE").is_ok());
+    REQUIRE(ex.execute_sql("COMMIT").is_ok());
 }
 
 TEST_CASE("Query cache serves repeated identical SELECTs and is invalidated by DML", "[executor][select]") {

@@ -222,6 +222,9 @@ struct GapRange {
 // "@x" (a user variable `@x` is "x"), which is how the lexer reads `@@x`.
 std::unordered_map<std::string, std::string> default_system_variables();
 
+// A column of an information_schema table: its name and whether it holds numbers (everything else is text).
+struct InfoSchemaColumn { const char* name; bool numeric; };
+
 class Executor {
 public:
     std::shared_ptr<RwLock<SharedDatabase>> shared;
@@ -236,6 +239,17 @@ public:
     // this after a successful AUTH handshake; defaults to "root" for the CLI/in-process
     // embedding, which has no network auth step of its own). Read by USER()/CURRENT_USER().
     std::string auth_user = "root";
+    // LAST_INSERT_ID(), ROW_COUNT(), FOUND_ROWS(): what the last statements of this session left. The functions read them through sync_session_counters.
+    std::uint64_t last_insert_id_ = 0;       // the first AUTO_INCREMENT number the last INSERT that gave one out
+    std::uint64_t statement_insert_id_ = 0;  // the same for the statement that is running (the MySQL protocol's OK packet reports it)
+    bool insert_id_unset_ = false;           // an INSERT has started and has not given a number out yet
+    std::int64_t row_count_ = -1;            // the rows the last statement changed (-1: it was a SELECT)
+    std::uint64_t found_rows_ = 0;           // the rows the last SELECT returned (or would have without its LIMIT, after SQL_CALC_FOUND_ROWS)
+    std::uint64_t statement_insert_id() const { return statement_insert_id_; }
+    // SHOW CREATE TABLE / VIEW in MySQL's own form (the text of the CREATE statement; the MySQL protocol layer makes the row of it): the error when the table is not there
+    StringResult show_create_table_mysql(const std::string& table);
+    StringResult show_create_view_mysql(const std::string& view);
+    bool implicit_txn_ = false;              // the transaction that is open was begun by a statement of a session with autocommit = 0
     // SET FOREIGN_KEY_CHECKS = 0 / 1 sets it, and exec_restore() (executor_backup.cpp) sets it for the length of a restore. A backup (and a
     // mysqldump file, which brackets itself the same way) dumps tables alphabetically
     // and rows in physical vector order, neither of which is guaranteed to respect
@@ -284,6 +298,10 @@ public:
     static std::atomic<std::uint64_t> dml_index_hits;
     // The constant a value stands for in an expression: a number, a string, or NULL (what replaces a variable, or a column of an outer row).
     static ArithExpr value_constant(const std::string& value);
+    // The columns of an information_schema table in MySQL's order (null: no such table).
+    static const std::vector<InfoSchemaColumn>* info_schema_columns(const std::string& which);
+    // `information_schema.COLUMNS` (any case) -> "columns"; nullopt for any other name
+    static std::optional<std::string> info_schema_bare(const std::string& qualified_name);
 
 private:
     // Row-level-concurrency Stage 4/5 correctness fix (found via concurrent-reader
@@ -632,6 +650,9 @@ private:
                               std::vector<std::pair<std::optional<std::string>, std::string>> check_constraints,
                               std::optional<PartitionBy> partition_by = std::nullopt, std::vector<UniqueKey> unique_keys = {});
     StringResult exec_drop(SharedDatabase& s, const std::string& name, bool if_exists);
+    // CREATE TABLE t LIKE s / CREATE TABLE t [(columns)] [AS] SELECT ... (executor_ddl.cpp)
+    StringResult exec_create_like(SharedDatabase& s, const std::string& name, const std::string& source, bool if_not_exists);
+    StringResult exec_create_as(SharedDatabase& s, const std::string& name, bool if_not_exists, std::vector<ColumnDef> columns, Statement query);
     StringResult exec_truncate(SharedDatabase& s, const std::string& name);
     // UPDATE / DELETE ... ORDER BY ... LIMIT n: the condition that picks exactly those rows (by their key); nullopt when there are none
     Result<std::optional<CondExpr>, std::string> rows_of_limit(SharedDatabase& s, const std::string& table, const std::optional<CondExpr>& condition,
@@ -728,7 +749,7 @@ private:
     static std::vector<std::string> fk_parent_tables(const SharedDatabase& s, const TableSchema& schema, const std::vector<std::string>& cols);
     void persist_index_meta(const SharedDatabase& s) const;
     StringResult exec_use(SharedDatabase& s, const std::string& database);
-    StringResult exec_show_tables(const SharedDatabase& s) const;
+    StringResult exec_show_tables(const SharedDatabase& s, const std::optional<std::string>& database = std::nullopt, const std::optional<std::string>& like = std::nullopt) const;
 
     // ── Phase 8b: expression/condition evaluation ───────────────────────
     // "table.col" or "col" lookup with dotted-suffix/bare-column fallback.
@@ -754,6 +775,9 @@ private:
                                                 const std::vector<char>& kinds);
     static void sync_udf_context(const std::unordered_map<std::string, UserFunctionDef>& user_functions, const std::string& current_db,
                                   const std::string& current_user);
+    static void sync_session_counters(std::uint64_t last_insert_id, std::int64_t row_count, std::uint64_t found_rows);
+    // after a statement: ROW_COUNT() and FOUND_ROWS() follow what it did
+    void note_statement_outcome(const std::string& sql, const StringResult& result);
     static bool matches_condexpr(const Row& row, const std::optional<CondExpr>& condition);
     // Three-valued logic (SQL's TRUE / FALSE / UNKNOWN): a comparison with a NULL operand is UNKNOWN, NOT UNKNOWN is UNKNOWN, AND / OR
     // as in Kleene logic. WHERE / HAVING / ON keep a row only when the condition is TRUE (eval_condexpr / eval_single); a CHECK
@@ -1179,10 +1203,6 @@ private:
 
     // ── Phase 8f: INFORMATION_SCHEMA virtual tables ──────────────────────
     static std::vector<Row> info_schema_rows(const SharedDatabase& s, const std::string& which);
-    StringResult exec_information_schema(SharedDatabase& s, const std::string& which, std::vector<SelectColumn> columns,
-                                          std::optional<CondExpr> condition, std::vector<OrderBy> order_by, std::optional<std::size_t> limit,
-                                          std::optional<std::size_t> offset) const;
-
     // ── Phase 8c: window functions ───────────────────────────────────────
     static std::pair<std::size_t, std::size_t> frame_bounds(std::size_t pos, std::size_t len, const std::optional<WindowFrame>& frame,
                                                               bool has_order);

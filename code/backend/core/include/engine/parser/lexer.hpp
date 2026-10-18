@@ -204,6 +204,8 @@ struct Token {
     // The word a keyword was typed as, in lower case: a keyword that MySQL does not reserve may also be the name of a column, a table or an alias
     // (`date`, `level`, `count`), and then this is the name. Not part of the token's identity (operator== looks at kind and text).
     std::string word;
+    // where the token stands in the text it was read from ([begin, end)): a result column that is an expression is called by the text as it was typed
+    std::size_t begin = 0, end = 0;
 
     Token(TokenKind k) : kind(k) {}
     Token(TokenKind k, std::string t) : kind(k), text(std::move(t)) {}

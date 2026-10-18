@@ -25,11 +25,8 @@ int cmp_key(const std::string& a, const std::string& b, ValueClass cls) {
     return compare_classed(cls, cls, a, b);
 }
 
-std::string fmt4(double v) {
-    char buf[32];
-    std::snprintf(buf, sizeof(buf), "%.4f", v);
-    return buf;
-}
+// PERCENT_RANK and CUME_DIST are DOUBLEs: the shortest text that reads back as the number (0.14285714285714285)
+std::string fmt4(double v) { return format_shortest(v); }
 } // namespace
 
 std::pair<std::size_t, std::size_t> Executor::frame_bounds(std::size_t pos, std::size_t len, const std::optional<WindowFrame>& frame,
@@ -134,7 +131,7 @@ std::vector<Row> Executor::compute_window_functions(std::vector<Row> rows, const
                             const std::string* v = get_col(rows[sorted[pos - off]], col_name);
                             values[sorted[pos]] = v ? *v : "NULL";
                         } else {
-                            values[sorted[pos]] = "NULL";
+                            values[sorted[pos]] = wf->default_value.value_or("NULL");
                         }
                     }
                     break;
@@ -147,7 +144,7 @@ std::vector<Row> Executor::compute_window_functions(std::vector<Row> rows, const
                             const std::string* v = get_col(rows[sorted[pos + off]], col_name);
                             values[sorted[pos]] = v ? *v : "NULL";
                         } else {
-                            values[sorted[pos]] = "NULL";
+                            values[sorted[pos]] = wf->default_value.value_or("NULL");
                         }
                     }
                     break;
@@ -268,7 +265,7 @@ std::vector<Row> Executor::compute_window_functions(std::vector<Row> rows, const
                 }
                 case WindowFunc::PercentRank: {
                     if (total <= 1) {
-                        for (auto idx : sorted) values[idx] = "0.0000";
+                        for (auto idx : sorted) values[idx] = "0";
                     } else {
                         std::vector<std::size_t> ranks(total, 1);
                         std::size_t i = 0;

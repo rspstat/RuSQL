@@ -682,7 +682,8 @@ void to_json(nlohmann::json& j, const SelectColumn& col) {
                                                                {"partition_by", alt.partition_by},
                                                                {"order_by", alt.order_by},
                                                                {"alias", alt.alias},
-                                                               {"frame", alt.frame}}}};
+                                                               {"frame", alt.frame},
+                                                               {"default_value", alt.default_value}}}};
             else if constexpr (std::is_same_v<T, SelectColumn::Subquery>)
                 j = nlohmann::json{{"Subquery", nlohmann::json{{"query", *alt.query}, {"alias", alt.alias}}}};
         },
@@ -730,6 +731,7 @@ void from_json(const nlohmann::json& j, SelectColumn& col) {
         wf.order_by = p.at("order_by").get<std::vector<OrderBy>>();
         wf.alias = p.at("alias").get<std::optional<std::string>>();
         wf.frame = p.at("frame").get<std::optional<WindowFrame>>();
+        if (p.contains("default_value")) wf.default_value = p.at("default_value").get<std::optional<std::string>>();
         col = SelectColumn(std::move(wf));
     } else if (tag == "Subquery") {
         col = SelectColumn(SelectColumn::Subquery{std::make_unique<Statement>(p.at("query").get<Statement>()),
@@ -743,11 +745,23 @@ void to_json(nlohmann::json& j, const AlterAction& action) {
     std::visit(
         [&j](const auto& alt) {
             using T = std::decay_t<decltype(alt)>;
-            if constexpr (std::is_same_v<T, AlterAction::AddColumn>) j = nlohmann::json{{"AddColumn", alt.column}};
+            if constexpr (std::is_same_v<T, AlterAction::AddColumn>) {
+                if (!alt.position) j = nlohmann::json{{"AddColumn", alt.column}};
+                else j = nlohmann::json{{"AddColumn", nlohmann::json{{"column", alt.column}, {"position", nlohmann::json{{"first", alt.position->first}, {"after", alt.position->after}}}}}};
+            }
             else if constexpr (std::is_same_v<T, AlterAction::DropColumn>) j = nlohmann::json{{"DropColumn", alt.name}};
             else if constexpr (std::is_same_v<T, AlterAction::RenameColumn>)
                 j = nlohmann::json{{"RenameColumn", nlohmann::json{{"from", alt.from}, {"to", alt.to}}}};
-            else if constexpr (std::is_same_v<T, AlterAction::ModifyColumn>) j = nlohmann::json{{"ModifyColumn", alt.column}};
+            else if constexpr (std::is_same_v<T, AlterAction::ModifyColumn>) {
+                if (!alt.position) j = nlohmann::json{{"ModifyColumn", alt.column}};
+                else j = nlohmann::json{{"ModifyColumn", nlohmann::json{{"column", alt.column}, {"position", nlohmann::json{{"first", alt.position->first}, {"after", alt.position->after}}}}}};
+            }
+            else if constexpr (std::is_same_v<T, AlterAction::ChangeColumn>) {
+                j = nlohmann::json{{"ChangeColumn", nlohmann::json{{"from", alt.from}, {"column", alt.column}}}};
+                if (alt.position) j["ChangeColumn"]["position"] = nlohmann::json{{"first", alt.position->first}, {"after", alt.position->after}};
+            }
+            else if constexpr (std::is_same_v<T, AlterAction::AddIndex>) j = nlohmann::json{{"AddIndex", nlohmann::json{{"name", alt.name}, {"columns", alt.columns}}}};
+            else if constexpr (std::is_same_v<T, AlterAction::SetDefault>) j = nlohmann::json{{"SetDefault", nlohmann::json{{"column", alt.column}, {"value", alt.value}}}};
             else if constexpr (std::is_same_v<T, AlterAction::RenameTable>) j = nlohmann::json{{"RenameTable", alt.to}};
             else if constexpr (std::is_same_v<T, AlterAction::AddForeignKey>)
                 j = nlohmann::json{{"AddForeignKey", nlohmann::json{{"name", alt.name},
@@ -774,10 +788,23 @@ void from_json(const nlohmann::json& j, AlterAction& action) {
     auto it = j.begin();
     const std::string& tag = it.key();
     const auto& p = it.value();
-    if (tag == "AddColumn") action = AlterAction(AlterAction::AddColumn{p.get<ColumnDef>()});
+    auto position_of = [](const nlohmann::json& holder) -> std::optional<ColumnPosition> {
+        if (!holder.contains("position")) return std::nullopt;
+        return ColumnPosition{holder.at("position").at("first").get<bool>(), holder.at("position").at("after").get<std::optional<std::string>>()};
+    };
+    if (tag == "AddColumn") {
+        if (p.contains("position")) action = AlterAction(AlterAction::AddColumn{p.at("column").get<ColumnDef>(), position_of(p)});
+        else action = AlterAction(AlterAction::AddColumn{p.get<ColumnDef>()});
+    }
     else if (tag == "DropColumn") action = AlterAction(AlterAction::DropColumn{p.get<std::string>()});
     else if (tag == "RenameColumn") action = AlterAction(AlterAction::RenameColumn{p.at("from").get<std::string>(), p.at("to").get<std::string>()});
-    else if (tag == "ModifyColumn") action = AlterAction(AlterAction::ModifyColumn{p.get<ColumnDef>()});
+    else if (tag == "ModifyColumn") {
+        if (p.contains("position")) action = AlterAction(AlterAction::ModifyColumn{p.at("column").get<ColumnDef>(), position_of(p)});
+        else action = AlterAction(AlterAction::ModifyColumn{p.get<ColumnDef>()});
+    }
+    else if (tag == "ChangeColumn") action = AlterAction(AlterAction::ChangeColumn{p.at("from").get<std::string>(), p.at("column").get<ColumnDef>(), position_of(p)});
+    else if (tag == "AddIndex") action = AlterAction(AlterAction::AddIndex{p.at("name").get<std::optional<std::string>>(), p.at("columns").get<std::vector<std::string>>()});
+    else if (tag == "SetDefault") action = AlterAction(AlterAction::SetDefault{p.at("column").get<std::string>(), p.at("value").get<std::optional<std::string>>()});
     else if (tag == "RenameTable") action = AlterAction(AlterAction::RenameTable{p.get<std::string>()});
     else if (tag == "AddForeignKey")
         action = AlterAction(AlterAction::AddForeignKey{p.at("name").get<std::optional<std::string>>(), p.at("column").get<std::string>(),
@@ -803,7 +830,10 @@ void to_json(nlohmann::json& j, const Statement& stmt) {
             if constexpr (std::is_same_v<T, Statement::Begin>) j = "Begin";
             else if constexpr (std::is_same_v<T, Statement::Commit>) j = "Commit";
             else if constexpr (std::is_same_v<T, Statement::Rollback>) j = "Rollback";
-            else if constexpr (std::is_same_v<T, Statement::ShowTables>) j = "ShowTables";
+            else if constexpr (std::is_same_v<T, Statement::ShowTables>) {
+                if (!alt.database && !alt.like) j = "ShowTables";
+                else j = nlohmann::json{{"ShowTables", nlohmann::json{{"database", alt.database}, {"like", alt.like}}}};
+            }
             else if constexpr (std::is_same_v<T, Statement::ShowBufferPool>) j = "ShowBufferPool";
             else if constexpr (std::is_same_v<T, Statement::ShowWal>) j = "ShowWal";
             else if constexpr (std::is_same_v<T, Statement::Checkpoint>) j = "Checkpoint";
@@ -823,8 +853,16 @@ void to_json(nlohmann::json& j, const Statement& stmt) {
                                                                    {"unique_keys", alt.unique_keys},
                                                                    {"auto_increment_start", alt.auto_increment_start},
                                                                    {"indexes", alt.indexes}}}};
-            else if constexpr (std::is_same_v<T, Statement::DropTable>)
+            else if constexpr (std::is_same_v<T, Statement::DropTable>) {
                 j = nlohmann::json{{"DropTable", nlohmann::json{{"name", alt.name}, {"if_exists", alt.if_exists}}}};
+                if (!alt.more.empty()) j["DropTable"]["more"] = alt.more;
+            }
+            else if constexpr (std::is_same_v<T, Statement::CreateTableLike>)
+                j = nlohmann::json{{"CreateTableLike", nlohmann::json{{"name", alt.name}, {"source", alt.source}, {"if_not_exists", alt.if_not_exists}}}};
+            else if constexpr (std::is_same_v<T, Statement::CreateTableAs>)
+                j = nlohmann::json{{"CreateTableAs", nlohmann::json{{"name", alt.name}, {"if_not_exists", alt.if_not_exists}, {"columns", alt.columns}, {"query", *alt.query}}}};
+            else if constexpr (std::is_same_v<T, Statement::RenameTable>)
+                j = nlohmann::json{{"RenameTable", nlohmann::json{{"pairs", alt.pairs}}}};
             else if constexpr (std::is_same_v<T, Statement::TruncateTable>)
                 j = nlohmann::json{{"TruncateTable", nlohmann::json{{"name", alt.name}}}};
             else if constexpr (std::is_same_v<T, Statement::Insert>)
@@ -869,7 +907,10 @@ void to_json(nlohmann::json& j, const Statement& stmt) {
                 j = nlohmann::json{{"Delete", nlohmann::json{{"table", alt.table}, {"condition", alt.condition}, {"returning", alt.returning},
                                                               {"table_aliases", alt.table_aliases}, {"order_by", alt.order_by}, {"limit", alt.limit}}}};
             else if constexpr (std::is_same_v<T, Statement::AlterTable>)
+            {
                 j = nlohmann::json{{"AlterTable", nlohmann::json{{"table", alt.table}, {"action", alt.action}}}};
+                if (!alt.more.empty()) j["AlterTable"]["more"] = alt.more;
+            }
             else if constexpr (std::is_same_v<T, Statement::CreateIndex>)
                 j = nlohmann::json{{"CreateIndex", nlohmann::json{{"index_name", alt.index_name},
                                                                    {"table", alt.table},
@@ -1080,7 +1121,15 @@ void from_json(const nlohmann::json& j, Statement& stmt) {
         if (p.contains("indexes")) v.indexes = p.at("indexes").get<std::vector<UniqueKey>>();
         stmt = Statement(std::move(v));
     } else if (tag == "DropTable") {
-        stmt = Statement(Statement::DropTable{p.at("name").get<std::string>(), p.at("if_exists").get<bool>()});
+        stmt = Statement(Statement::DropTable{p.at("name").get<std::string>(), p.at("if_exists").get<bool>(),
+                                              p.contains("more") ? p.at("more").get<std::vector<std::string>>() : std::vector<std::string>{}});
+    } else if (tag == "CreateTableLike") {
+        stmt = Statement(Statement::CreateTableLike{p.at("name").get<std::string>(), p.at("source").get<std::string>(), p.at("if_not_exists").get<bool>()});
+    } else if (tag == "CreateTableAs") {
+        stmt = Statement(Statement::CreateTableAs{p.at("name").get<std::string>(), p.at("if_not_exists").get<bool>(), p.at("columns").get<std::vector<ColumnDef>>(),
+                                                  std::make_unique<Statement>(p.at("query").get<Statement>())});
+    } else if (tag == "RenameTable") {
+        stmt = Statement(Statement::RenameTable{p.at("pairs").get<std::vector<std::pair<std::string, std::string>>>()});
     } else if (tag == "TruncateTable") {
         stmt = Statement(Statement::TruncateTable{p.at("name").get<std::string>()});
     } else if (tag == "Insert") {
@@ -1140,7 +1189,8 @@ void from_json(const nlohmann::json& j, Statement& stmt) {
         if (p.contains("limit")) v.limit = p.at("limit").get<std::optional<std::size_t>>();
         stmt = Statement(std::move(v));
     } else if (tag == "AlterTable") {
-        stmt = Statement(Statement::AlterTable{p.at("table").get<std::string>(), p.at("action").get<AlterAction>()});
+        stmt = Statement(Statement::AlterTable{p.at("table").get<std::string>(), p.at("action").get<AlterAction>(),
+                                               p.contains("more") ? p.at("more").get<std::vector<AlterAction>>() : std::vector<AlterAction>{}});
     } else if (tag == "CreateIndex") {
         stmt = Statement(Statement::CreateIndex{p.at("index_name").get<std::string>(), p.at("table").get<std::string>(),
                                                   p.at("columns").get<std::vector<std::string>>(), p.at("using_hash").get<bool>()});
@@ -1151,6 +1201,8 @@ void from_json(const nlohmann::json& j, Statement& stmt) {
                                                 p.at("raw_sql").get<std::string>()});
     } else if (tag == "DropView") {
         stmt = Statement(Statement::DropView{p.at("name").get<std::string>()});
+    } else if (tag == "ShowTables") {
+        stmt = Statement(Statement::ShowTables{p.at("database").get<std::optional<std::string>>(), p.at("like").get<std::optional<std::string>>()});
     } else if (tag == "Describe") {
         stmt = Statement(Statement::Describe{p.at("table").get<std::string>()});
     } else if (tag == "SetIsolationLevel") {

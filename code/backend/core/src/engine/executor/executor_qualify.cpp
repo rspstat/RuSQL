@@ -134,6 +134,27 @@ Statement Executor::qualify_stmt(const SharedDatabase& s, Statement stmt) const 
     }
     if (auto* v = std::get_if<Statement::DropTable>(&stmt.data)) {
         v->name = qualify_name(v->name);
+        for (auto& more : v->more) more = qualify_name(more);
+        return stmt;
+    }
+    if (auto* v = std::get_if<Statement::CreateTableLike>(&stmt.data)) {
+        v->name = qualify_name(v->name);
+        v->source = qualify_name(v->source);
+        return stmt;
+    }
+    if (auto* v = std::get_if<Statement::CreateTableAs>(&stmt.data)) {
+        v->name = qualify_name(v->name);
+        for (auto& col : v->columns) {
+            if (col.foreign_key) col.foreign_key->ref_table = qualify_name(col.foreign_key->ref_table);
+        }
+        *v->query = qualify_stmt(s, std::move(*v->query));
+        return stmt;
+    }
+    if (auto* v = std::get_if<Statement::RenameTable>(&stmt.data)) {
+        for (auto& [from, to] : v->pairs) {
+            from = qualify_name(from);
+            to = qualify_name(to);
+        }
         return stmt;
     }
     if (auto* v = std::get_if<Statement::TruncateTable>(&stmt.data)) {
@@ -142,6 +163,9 @@ Statement Executor::qualify_stmt(const SharedDatabase& s, Statement stmt) const 
     }
     if (auto* v = std::get_if<Statement::AlterTable>(&stmt.data)) {
         if (auto* rn = std::get_if<AlterAction::RenameTable>(&v->action.data)) rn->to = qualify_name(rn->to);
+        for (auto& action : v->more) {
+            if (auto* rn = std::get_if<AlterAction::RenameTable>(&action.data)) rn->to = qualify_name(rn->to);
+        }
         v->table = qualify_name(v->table);
         return stmt;
     }

@@ -112,6 +112,18 @@ std::vector<Executor::TriggerRow> Executor::trigger_rows_for(SharedDatabase& s, 
         }
         if (key_columns.empty()) key_columns.push_back("id");
     }
+    // NEW.col is the value the column will hold: the value an assignment gives, as the column writes it (a DECIMAL(10,2) says 109.00, not 109)
+    const TableSchema* table_schema = s.catalog.get_table(table);
+    auto typed = [&](const std::string& column, std::string value) {
+        if (!table_schema) return value;
+        for (const ColumnDef& c : table_schema->columns) {
+            if (c.name != column) continue;
+            std::string coerced = value;
+            if (!coerce_column_value(c, coerced, 1)) return coerced; // (a value the column refuses stays as it is: the statement reports it)
+            break;
+        }
+        return value;
+    };
     for (auto& r : it->second) {
         if (!is_visible_for_read(r, ctx)) continue;
         TriggerRow row;
@@ -125,13 +137,13 @@ std::vector<Executor::TriggerRow> Executor::trigger_rows_for(SharedDatabase& s, 
             auto changed = per_row->find(key);
             if (changed == per_row->end()) continue;
             Row updated = r;
-            for (auto& [column, value] : changed->second) updated[column] = value;
+            for (auto& [column, value] : changed->second) updated[column] = typed(column, value);
             row.new_row = std::move(updated);
         } else {
             if (!matches_condition_with_subquery(s, r, condition)) continue;
             if (assignments) {
                 Row updated = r;
-                for (auto& [column, expr] : *assignments) updated[column] = eval_arith(r, expr);
+                for (auto& [column, expr] : *assignments) updated[column] = typed(column, eval_arith(r, expr));
                 row.new_row = std::move(updated);
             }
         }

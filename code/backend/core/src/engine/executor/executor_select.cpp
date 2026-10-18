@@ -1486,13 +1486,52 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
         return StringResult::Ok(sep + "\n" + hdr + "\n" + sep + "\n" + row_str + "\n" + sep + "\n1 row(s) returned.");
     }
 
-    // INFORMATION_SCHEMA virtual tables
+    // INFORMATION_SCHEMA virtual tables: each one the statement reads becomes a temporary table of the rows it has now, and the select then runs like
+    // one on any other table (aggregates, GROUP BY, DISTINCT, joins, expressions, subqueries ...)
     {
-        std::string lower_table = table;
-        std::transform(lower_table.begin(), lower_table.end(), lower_table.begin(), [](unsigned char c) { return std::tolower(c); });
-        if (auto pos = lower_table.find("information_schema."); pos != std::string::npos) {
-            std::string which = table.substr(pos + 19);
-            return exec_information_schema(s, which, columns, condition, order_by, limit, offset);
+        std::vector<std::string> wanted; // "information_schema.columns", ...
+        auto note = [&](std::string& name) {
+            if (auto bare = info_schema_bare(name)) {
+                name = "information_schema." + *bare;
+                if (!s.tables.count(name) && std::find(wanted.begin(), wanted.end(), name) == wanted.end()) wanted.push_back(name);
+            }
+        };
+        note(table);
+        for (Join& j : joins) note(j.table);
+        if (!wanted.empty()) {
+            std::vector<std::pair<std::vector<ColumnDef>, std::vector<Row>>> made; // (all the rows first: a table of this statement is not a table of a database)
+            for (const std::string& name : wanted) {
+                const std::string bare = name.substr(std::string("information_schema.").size());
+                std::vector<ColumnDef> schema_columns;
+                std::vector<std::string> keys;
+                for (const InfoSchemaColumn& c : *info_schema_columns(bare)) {
+                    ColumnDef def;
+                    def.name = c.name;
+                    def.data_type = c.numeric ? DataType(DataType::BigInt{}) : DataType(DataType::Text{});
+                    schema_columns.push_back(std::move(def));
+                    keys.push_back(c.name);
+                }
+                std::vector<Row> rows = info_schema_rows(s, bare);
+                for (Row& r : rows) {
+                    for (const std::string& key : keys) r.emplace(key, EXECUTOR_NULL_VALUE); // (a column this row has no value for)
+                }
+                made.emplace_back(std::move(schema_columns), std::move(rows));
+            }
+            for (std::size_t i = 0; i < wanted.size(); i++) {
+                s.tables[wanted[i]] = made[i].second;
+                temporary_tables_.insert(wanted[i]);
+                s.buffer_pool.write_page(wanted[i], made[i].second);
+                s.catalog.create_table(wanted[i], made[i].first);
+            }
+            auto result = exec_select(s, table, std::nullopt, distinct, std::move(columns), std::move(condition), std::move(joins), std::move(order_by),
+                                      std::move(group_by), std::move(having), limit, offset, for_update, for_share);
+            for (const std::string& name : wanted) {
+                temporary_tables_.erase(name);
+                s.tables.erase(name);
+                s.buffer_pool.invalidate(name);
+                s.catalog.drop_table(name);
+            }
+            return result;
         }
     }
 
@@ -2713,8 +2752,7 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
         }
     }
 
-    if (for_update) {
-        if (!txn.is_active()) return StringResult::Err("SELECT FOR UPDATE requires an active transaction (BEGIN first).");
+    if (for_update && txn.is_active()) { // (outside a transaction -- autocommit -- its locks would be gone at once: it reads the rows, as MySQL's does)
         std::uint64_t txn_id = txn.current_txn_id();
         std::string pk_col = "id";
         std::size_t pk_col_count = 0;
@@ -2772,8 +2810,7 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
         }
     }
 
-    if (for_share) {
-        if (!txn.is_active()) return StringResult::Err("SELECT FOR SHARE requires an active transaction (BEGIN first).");
+    if (for_share && txn.is_active()) {
         std::uint64_t txn_id = txn.current_txn_id();
         std::string pk_col = "id";
         std::size_t pk_col_count = 0;

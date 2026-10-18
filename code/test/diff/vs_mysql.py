@@ -1,4 +1,4 @@
-"""vs_mysql.py <rusql.exe> <corpus.sql> [--split] [--emit cases.inc] [--trace]
+"""vs_mysql.py <rusql.exe> <corpus.sql> [--split] [--emit cases.inc] [--trace] [--proto]
 
 Runs the same statements on RuSQL and on a real MySQL (127.0.0.1:3391) and lists what differs.
 
@@ -182,7 +182,28 @@ def main():
     emit_path = args[args.index("--emit") + 1] if "--emit" in args else None
     show = int(args[args.index("--show") + 1]) if "--show" in args else 10 ** 9
     emitted = []
-    proc, db = D.start(exe, 17990, os.path.join(os.environ.get("TEMP", "/tmp"), "vs_mysql_rusql"), False)
+    proto = "--proto" in args
+    if proto:
+        import shutil, socket, subprocess, time
+        data = os.path.join(os.environ.get("TEMP", "/tmp"), "vs_mysql_rusql")
+        shutil.rmtree(data, ignore_errors=True)
+        env = dict(os.environ, RUSTDB_PARALLEL="0")
+        proc = subprocess.Popen([exe, "--port", "17991", "--mysql-port", "13399", "--data-dir", data], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env)
+        for _ in range(400):
+            try:
+                socket.create_connection(("127.0.0.1", 13399), timeout=0.2).close()
+                break
+            except OSError:
+                time.sleep(0.05)
+        rconn = pymysql.connect(host="127.0.0.1", port=13399, user="root", password="root", autocommit=True, charset="utf8mb4")
+        rcur = rconn.cursor()
+
+        class ProtoDb:
+            def execute(self, sql):
+                return rcur.execute(sql)
+        db = ProtoDb()
+    else:
+        proc, db = D.start(exe, 17990, os.path.join(os.environ.get("TEMP", "/tmp"), "vs_mysql_rusql"), False)
     conn = pymysql.connect(host="127.0.0.1", port=3391, user="root", password="", autocommit=True, charset="utf8mb4")
     cur = conn.cursor()
     try:
@@ -203,7 +224,7 @@ def main():
             if line.startswith("--"):
                 stmt = line[2:].strip()
                 mysql_run(cur, stmt)
-                rusql_run(db, stmt)
+                (mysql_run(rcur, stmt) if proto else rusql_run(db, stmt))
                 emitted.append(case(K_SETUP, stmt))
                 continue
             items = split_items(line) if line.upper().startswith("SELECT ") and " FROM " not in line.upper() and "--split" in args else [line]
@@ -211,7 +232,7 @@ def main():
                 total += 1
                 if "--trace" in args:
                     print("RUN: " + stmt, file=sys.stderr, flush=True)
-                m, r = mysql_run(cur, stmt), rusql_run(db, stmt)
+                m, r = mysql_run(cur, stmt), (mysql_run(rcur, stmt) if proto else rusql_run(db, stmt))
                 if m[0] == "err" and r[0] == "err":
                     both_err += 1
                 why = first_difference(stmt, m, r)

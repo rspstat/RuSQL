@@ -983,6 +983,138 @@ std::string fn_sec_to_time(const BuiltinCall& c) {
     return seconds_to_time(int_of(c.value(0)));
 }
 
+// TIME_FORMAT is DATE_FORMAT of a time
+std::string fn_time_format(const BuiltinCall& c);
+
+// ADDTIME / SUBTIME(a time or a datetime, a time)
+std::string shift_time(const BuiltinCall& c, long long sign) {
+    if (argc(c) != 2) wrong_count(c);
+    if (any_null(c)) return kNull;
+    auto amount = parse_time_seconds(c.value(1));
+    if (!amount) return kNull;
+    if (auto t = parse_datetime(c.value(0)); t && t->has_date && t->valid_date()) {
+        const DateTime moved = DateTime::from_epoch_seconds(t->epoch_seconds() + sign * *amount, t->micro);
+        return moved.date_str() + " " + moved.time_str();
+    }
+    auto base = parse_time_seconds(c.value(0));
+    if (!base) return kNull;
+    return seconds_to_time(*base + sign * *amount);
+}
+
+std::string fn_addtime(const BuiltinCall& c) { return shift_time(c, 1); }
+std::string fn_subtime(const BuiltinCall& c) { return shift_time(c, -1); }
+
+// TIMEDIFF(a, b): two datetimes or two times (a mix is NULL)
+std::string fn_timediff(const BuiltinCall& c) {
+    if (argc(c) != 2) wrong_count(c);
+    if (any_null(c)) return kNull;
+    auto a = parse_datetime(c.value(0)), b = parse_datetime(c.value(1));
+    const bool dated_a = a && a->has_date && a->valid_date(), dated_b = b && b->has_date && b->valid_date();
+    if (dated_a && dated_b) return seconds_to_time(a->epoch_seconds() - b->epoch_seconds());
+    if (dated_a != dated_b) return kNull;
+    auto x = parse_time_seconds(c.value(0)), y = parse_time_seconds(c.value(1));
+    if (!x || !y) return kNull;
+    return seconds_to_time(*x - *y);
+}
+
+// PERIOD_ADD(P, N) / PERIOD_DIFF(P1, P2): P is YYMM or YYYYMM
+long long period_to_months(long long p) {
+    long long year = p / 100;
+    const long long month = p % 100;
+    if (year < 70) year += 2000;
+    else if (year < 100) year += 1900;
+    return year * 12 + month - 1;
+}
+
+std::string fn_period_add(const BuiltinCall& c) {
+    if (argc(c) != 2) wrong_count(c);
+    if (any_null(c)) return kNull;
+    const long long p = int_of(c.value(0));
+    if (p == 0) return "0";
+    const long long total = period_to_months(p) + int_of(c.value(1));
+    return int_text(total / 12 * 100 + total % 12 + 1);
+}
+
+std::string fn_period_diff(const BuiltinCall& c) {
+    if (argc(c) != 2) wrong_count(c);
+    if (any_null(c)) return kNull;
+    return int_text(period_to_months(int_of(c.value(0))) - period_to_months(int_of(c.value(1))));
+}
+
+std::string fn_yearweek(const BuiltinCall& c) {
+    if (argc(c) < 1 || argc(c) > 2) wrong_count(c);
+    auto t = date_arg(c.value(0));
+    if (!t) return kNull;
+    const unsigned mode = argc(c) == 2 ? static_cast<unsigned>(int_of(c.value(1))) : 0;
+    long long year = 0;
+    const unsigned week = calc_week(*t, week_behaviour(mode) | 2, &year);
+    return int_text(year * 100 + week);
+}
+
+std::string fn_to_seconds(const BuiltinCall& c) {
+    if (argc(c) != 1) wrong_count(c);
+    auto t = date_arg(c.value(0));
+    if (!t) return kNull;
+    return int_text((t->epoch_days() + 719528) * 86400 + t->hour * 3600LL + t->minute * 60LL + t->second);
+}
+
+std::string fn_bit_count(const BuiltinCall& c) {
+    if (argc(c) != 1) wrong_count(c);
+    if (is_null(c.value(0))) return kNull;
+    unsigned long long bits = static_cast<unsigned long long>(int_of(c.value(0)));
+    int n = 0;
+    for (; bits; bits &= bits - 1) n++;
+    return int_text(n);
+}
+
+// QUOTE(str): the string as a literal (backslash, quote, NUL and Ctrl-Z escaped); NULL is the word NULL
+std::string fn_quote(const BuiltinCall& c) {
+    if (argc(c) != 1) wrong_count(c);
+    const std::string v = c.value(0);
+    if (is_null(v)) return "NULL";
+    std::string out = "'";
+    for (char ch : v) {
+        if (ch == '\\' || ch == '\'') { out.push_back('\\'); out.push_back(ch); }
+        else if (ch == '\0') out += "\\0";
+        else if (ch == '\x1a') out += "\\Z";
+        else out.push_back(ch);
+    }
+    return out + "'";
+}
+
+// EXPORT_SET(bits, on, off [, separator [, number_of_bits]])
+std::string fn_export_set(const BuiltinCall& c) {
+    if (argc(c) < 3 || argc(c) > 5) wrong_count(c);
+    if (is_null(c.value(0)) || is_null(c.value(1)) || is_null(c.value(2))) return kNull;
+    const unsigned long long bits = static_cast<unsigned long long>(int_of(c.value(0)));
+    const std::string on = c.value(1), off = c.value(2);
+    const std::string separator = argc(c) >= 4 && !is_null(c.value(3)) ? c.value(3) : ",";
+    long long count = argc(c) == 5 && !is_null(c.value(4)) ? int_of(c.value(4)) : 64;
+    if (count < 0 || count > 64) count = 64;
+    std::string out;
+    for (long long i = 0; i < count; i++) {
+        if (i) out += separator;
+        out += (bits >> i) & 1 ? on : off;
+    }
+    return out;
+}
+
+// MAKE_SET(bits, s1, s2, ...): the strings whose bit is set, joined by commas (a NULL string is left out)
+std::string fn_make_set(const BuiltinCall& c) {
+    if (argc(c) < 2) wrong_count(c);
+    if (is_null(c.value(0))) return kNull;
+    const unsigned long long bits = static_cast<unsigned long long>(int_of(c.value(0)));
+    std::string out;
+    bool first = true;
+    for (std::size_t i = 1; i < argc(c) && i - 1 < 64; i++) {
+        if (!((bits >> (i - 1)) & 1) || is_null(c.value(i))) continue;
+        if (!first) out.push_back(',');
+        out += c.value(i);
+        first = false;
+    }
+    return out;
+}
+
 std::string unit_word(const BuiltinCall& c, std::size_t i) {
     std::string u = c.raw[i];
     if (u.size() >= 2 && u.front() == '\'' && u.back() == '\'') u = u.substr(1, u.size() - 2);
@@ -1163,6 +1295,8 @@ std::string fn_date_format(const BuiltinCall& c) {
     }
     return out;
 }
+
+std::string fn_time_format(const BuiltinCall& c) { return fn_date_format(c); }
 
 std::string fn_str_to_date(const BuiltinCall& c) {
     if (argc(c) != 2) wrong_count(c);
@@ -1999,7 +2133,9 @@ const std::unordered_map<std::string, Handler>& table() {
         {"DAYOFWEEK", fn_dayofweek}, {"WEEKDAY", fn_weekday}, {"DAYOFYEAR", fn_dayofyear}, {"WEEK", fn_week}, {"WEEKOFYEAR", fn_weekofyear},
         {"MONTHNAME", fn_monthname}, {"DAYNAME", fn_dayname}, {"LAST_DAY", fn_last_day}, {"DATE", fn_date}, {"TIME", fn_time},
         {"DATEDIFF", fn_datediff}, {"TO_DAYS", fn_to_days}, {"FROM_DAYS", fn_from_days}, {"MAKEDATE", fn_makedate},
-        {"TIME_TO_SEC", fn_time_to_sec}, {"SEC_TO_TIME", fn_sec_to_time},
+        {"TIME_TO_SEC", fn_time_to_sec}, {"SEC_TO_TIME", fn_sec_to_time}, {"TIME_FORMAT", fn_time_format}, {"ADDTIME", fn_addtime}, {"SUBTIME", fn_subtime},
+        {"TIMEDIFF", fn_timediff}, {"PERIOD_ADD", fn_period_add}, {"PERIOD_DIFF", fn_period_diff}, {"YEARWEEK", fn_yearweek}, {"TO_SECONDS", fn_to_seconds},
+        {"BIT_COUNT", fn_bit_count}, {"QUOTE", fn_quote}, {"EXPORT_SET", fn_export_set}, {"MAKE_SET", fn_make_set},
         {"DATE_ADD", fn_date_add}, {"DATE_SUB", fn_date_sub}, {"ADDDATE", fn_adddate}, {"SUBDATE", fn_subdate},
         {"TIMESTAMPADD", fn_timestampadd}, {"TIMESTAMPDIFF", fn_timestampdiff}, {"EXTRACT", fn_extract},
         {"DATE_FORMAT", fn_date_format}, {"STR_TO_DATE", fn_str_to_date}, {"CAST", fn_cast}, {"CONVERT", fn_cast},
@@ -2019,7 +2155,8 @@ const std::unordered_set<std::string>& legacy_names() {
         "NOW", "CURDATE", "COALESCE", "IFNULL", "IF", "NULLIF", "CAST", "CONVERT", "REGEXP_LIKE", "REGEXP", "REGEXP_REPLACE", "REGEXP_MATCH",
         "REGEXP_SUBSTR", "RAND", "CURTIME", "CURRENT_TIME", "CURRENT_TIMESTAMP", "CURRENT_DATE", "LOCALTIME", "LOCALTIMESTAMP", "UNIX_TIMESTAMP",
         "FROM_UNIXTIME", "ISNULL", "MD5", "UUID", "JSON_EXTRACT", "JSON_UNQUOTE", "JSON_VALUE", "DATABASE", "SCHEMA", "VERSION", "CURRENT_USER",
-        "USER", "SESSION_USER", "SYSTEM_USER", "VALUES", "CASE",
+        "USER", "SESSION_USER", "SYSTEM_USER", "VALUES", "CASE", "REGEXP_INSTR", "LAST_INSERT_ID", "ROW_COUNT", "FOUND_ROWS", "SLEEP", "UTC_DATE", "UTC_TIME",
+        "UTC_TIMESTAMP",
     };
     return s;
 }

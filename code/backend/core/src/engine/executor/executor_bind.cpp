@@ -525,8 +525,13 @@ std::optional<std::string> Executor::bind_statement(SharedDatabase& s, Statement
                 t.open = t.own_columns.empty() || t.own_columns.size() != t.own_classes.size();
             } else if (const TableSchema* schema = s.catalog.get_table(qualified_name)) {
                 t.schema = schema;
+            } else if (auto info = Executor::info_schema_bare(qualified_name)) {
+                for (const InfoSchemaColumn& c : *Executor::info_schema_columns(*info)) { // (an information_schema table: its columns are known)
+                    t.own_columns.push_back(c.name);
+                    t.own_classes.push_back(c.numeric ? ValueClass::Number : ValueClass::Text);
+                }
             } else {
-                t.open = true; // a temporary table, information_schema, ...
+                t.open = true; // a temporary table, ...
             }
             return t;
         }

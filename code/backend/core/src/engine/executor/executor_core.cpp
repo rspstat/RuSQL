@@ -21,6 +21,8 @@
 
 namespace engine {
 
+std::string alter_actions_error(const TableSchema& schema, const std::string& table, const std::vector<const AlterAction*>& actions); // (executor_ddl.cpp)
+
 // ---------------------------------------------------------------------------
 // Password hashing helpers (native TCP auth: SHA-256; MySQL wire protocol: SHA1)
 // ---------------------------------------------------------------------------
@@ -636,6 +638,10 @@ bool Executor::is_pure_read_only(const Statement& stmt) {
             using T = std::decay_t<decltype(v)>;
             if constexpr (std::is_same_v<T, Statement::Select>) {
                 if (v.for_update || v.for_share || v.subquery.has_value()) return false;
+                if (info_schema_bare(v.table)) return false; // (the rows of an information_schema table are put in a temporary table)
+                for (auto& j : v.joins) {
+                    if (info_schema_bare(j.table)) return false;
+                }
                 if (!opt_condexpr_is_read_only(v.condition) || !opt_condexpr_is_read_only(v.having)) return false;
                 for (auto& j : v.joins) {
                     if (!condexpr_is_read_only(j.on_expr)) return false;
@@ -1208,7 +1214,8 @@ std::size_t count_occurrences(const std::string& haystack, const std::string& ne
 bool contains_nondeterministic_func(const std::string& lower_sql) {
     static const char* kFuncs[] = {"now",         "curdate",     "curtime",        "current_time", "current_timestamp", "current_date", "sysdate",
                                    "localtime",   "localtimestamp", "unix_timestamp", "rand",      "uuid",
-                                   "user",        "current_user", "session_user",   "system_user"};
+                                   "user",        "current_user", "session_user",   "system_user", "last_insert_id", "row_count", "found_rows",
+                                   "utc_date",    "utc_time",    "utc_timestamp",  "sleep"};
     auto is_ident_char = [](char c) { return std::isalnum(static_cast<unsigned char>(c)) != 0 || c == '_'; };
     for (const char* name_c : kFuncs) {
         std::string name = name_c;
@@ -1249,13 +1256,109 @@ bool references_infoschema(const std::string& lower_sql) {
 }
 } // namespace
 
-StringResult Executor::execute_sql(const std::string& sql) {
+namespace {
+std::string first_word_upper(const std::string& sql) {
+    std::size_t i = 0;
+    while (i < sql.size() && (std::isspace(static_cast<unsigned char>(sql[i])) || sql[i] == '(')) i++;
+    std::string word;
+    while (i < sql.size() && (std::isalpha(static_cast<unsigned char>(sql[i])) || sql[i] == '_')) word += static_cast<char>(std::toupper(static_cast<unsigned char>(sql[i++])));
+    return word;
+}
+
+// the integer a message starts with ("3 row(s) updated.": 3; none: 0)
+std::uint64_t leading_count(const std::string& text) {
+    std::uint64_t n = 0;
+    for (std::size_t i = 0; i < text.size() && std::isdigit(static_cast<unsigned char>(text[i])); i++) n = n * 10 + static_cast<std::uint64_t>(text[i] - '0');
+    return n;
+}
+
+// the rows a SELECT's text says it returned ("N row(s) returned." at its end, "0 rows returned." alone)
+std::uint64_t returned_rows(const std::string& out) {
+    if (out.rfind("0 rows returned", 0) == 0) return 0;
+    const std::size_t at = out.rfind(" row(s) returned");
+    if (at == std::string::npos) return 0;
+    std::size_t start = at;
+    while (start > 0 && std::isdigit(static_cast<unsigned char>(out[start - 1]))) start--;
+    return leading_count(out.substr(start));
+}
+} // namespace
+
+void Executor::note_statement_outcome(const std::string& sql, const StringResult& result) {
+    if (result.is_err()) return;
+    const std::string word = first_word_upper(sql);
+    if (word == "SELECT" || word == "WITH" || word == "SHOW" || word == "VALUES" || word == "TABLE" || word.empty()) {
+        found_rows_ = returned_rows(result.value());
+        row_count_ = -1;
+    } else if (word == "INSERT" || word == "REPLACE" || word == "UPDATE" || word == "DELETE" || word == "MERGE") {
+        row_count_ = static_cast<std::int64_t>(leading_count(result.value()));
+    } else {
+        row_count_ = 0;
+    }
+}
+
+StringResult Executor::execute_sql(const std::string& sql_text) {
+    // SELECT SQL_CALC_FOUND_ROWS ...: the keyword goes, and FOUND_ROWS() afterwards says how many rows the query has without its LIMIT
+    std::string sql = sql_text;
+    bool calc_found_rows = false;
+    const std::string word = first_word_upper(sql);
+    statement_insert_id_ = 0;
+    insert_id_unset_ = word == "INSERT" || word == "REPLACE";
+    // SET autocommit = 0: the first statement that writes begins a transaction, which COMMIT / ROLLBACK (or the end of the connection) ends; a statement
+    // that defines a table commits it first, as MySQL's do
+    if (!txn.is_active()) implicit_txn_ = false;
+    if (auto autocommit = user_vars.find("@autocommit"); autocommit != user_vars.end() && autocommit->second == "0") {
+        const bool defines = word == "CREATE" || word == "DROP" || word == "ALTER" || word == "TRUNCATE" || word == "RENAME";
+        if (implicit_txn_ && defines && txn.is_active()) {
+            execute_sql_inner("COMMIT");
+            implicit_txn_ = false;
+        }
+        std::string upper_sql = sql;
+        for (char& c : upper_sql) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+        const bool locking_read = word == "SELECT" && (upper_sql.find(" FOR UPDATE") != std::string::npos || upper_sql.find(" FOR SHARE") != std::string::npos ||
+                                                      upper_sql.find("LOCK IN SHARE MODE") != std::string::npos);
+        const bool writes = word == "INSERT" || word == "UPDATE" || word == "DELETE" || word == "REPLACE" || word == "MERGE" || word == "CALL";
+        if (!txn.is_active() && (writes || locking_read)) {
+            if (execute_sql_inner("BEGIN").is_ok()) implicit_txn_ = true;
+        }
+    }
+    if (word == "SELECT") {
+        std::string upper = sql;
+        for (char& c : upper) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+        if (auto at = upper.find("SQL_CALC_FOUND_ROWS"); at != std::string::npos) {
+            sql.erase(at, std::string("SQL_CALC_FOUND_ROWS").size());
+            calc_found_rows = true;
+        }
+    }
     // See execute_sql_inner's doc comment (executor.hpp) for why this catch-all exists:
     // an exception escaping this function on a spawned std::thread (several of this
     // codebase's own concurrency tests call execute_sql directly from one) would call
     // std::terminate() and crash the whole process instead of returning a graceful Err.
     try {
-        return execute_sql_inner(sql);
+        StringResult result = execute_sql_inner(sql);
+        note_statement_outcome(sql, result);
+        // SET autocommit = 1 commits what the implicit transaction holds
+        if (word == "SET" && result.is_ok() && implicit_txn_ && txn.is_active()) {
+            if (auto autocommit = user_vars.find("@autocommit"); autocommit == user_vars.end() || autocommit->second != "0") {
+                execute_sql_inner("COMMIT");
+                implicit_txn_ = false;
+            }
+        }
+        if (calc_found_rows && result.is_ok()) {
+            Parser counting(trim(sql), pipes_as_concat());
+            if (counting.has_tokens()) {
+                if (auto parsed = counting.parse(); parsed.is_ok()) {
+                    Statement stmt = std::move(parsed).value();
+                    if (auto* select = std::get_if<Statement::Select>(&stmt.data)) {
+                        select->limit = std::nullopt;
+                        select->offset = std::nullopt;
+                        resolve_names(stmt);
+                        auto all = execute(std::move(stmt));
+                        if (all.is_ok()) found_rows_ = returned_rows(all.value());
+                    }
+                }
+            }
+        }
+        return result;
     } catch (const StatementError& e) { // (an entry that does not go through execute_with_s)
         return StringResult::Err(e.what());
     } catch (const std::exception& e) {
@@ -1308,6 +1411,26 @@ StringResult Executor::execute_sql_inner(const std::string& sql) {
         if (!v->delete_tables.empty()) dml_table = qualify_static(v->delete_tables.front(), current_db);
     } else if (auto* v = std::get_if<Statement::Merge>(&stmt.data)) dml_table = qualify_static(v->target, current_db);
     else if (auto* v = std::get_if<Statement::AlterTable>(&stmt.data)) dml_table = qualify_static(v->table, current_db);
+    else if (auto* v = std::get_if<Statement::CreateTableLike>(&stmt.data)) dml_table = qualify_static(v->name, current_db);
+    else if (auto* v = std::get_if<Statement::CreateTableAs>(&stmt.data)) dml_table = qualify_static(v->name, current_db);
+    else if (auto* v = std::get_if<Statement::RenameTable>(&stmt.data)) {
+        if (!v->pairs.empty()) dml_table = qualify_static(v->pairs.front().first, current_db);
+    }
+    // (the other tables a statement that changes tables names: DROP TABLE a, b -- RENAME TABLE a TO b, c TO d -- ALTER TABLE a RENAME TO b)
+    std::vector<std::string> other_dml_tables;
+    if (auto* v = std::get_if<Statement::DropTable>(&stmt.data)) {
+        for (auto& more : v->more) other_dml_tables.push_back(qualify_static(more, current_db));
+    } else if (auto* v = std::get_if<Statement::RenameTable>(&stmt.data)) {
+        for (std::size_t i = 0; i < v->pairs.size(); i++) {
+            if (i > 0) other_dml_tables.push_back(qualify_static(v->pairs[i].first, current_db));
+            other_dml_tables.push_back(qualify_static(v->pairs[i].second, current_db));
+        }
+    } else if (auto* v = std::get_if<Statement::AlterTable>(&stmt.data)) {
+        if (auto* rename = std::get_if<AlterAction::RenameTable>(&v->action.data)) other_dml_tables.push_back(qualify_static(rename->to, current_db));
+        for (auto& action : v->more) {
+            if (auto* rename = std::get_if<AlterAction::RenameTable>(&action.data)) other_dml_tables.push_back(qualify_static(rename->to, current_db));
+        }
+    }
 
     std::vector<std::string> cache_tables;
     bool dependencies_known = true;
@@ -1369,6 +1492,7 @@ StringResult Executor::execute_sql_inner(const std::string& sql) {
         // table, undermining Stage 4's per-table concurrency for no reason).
         auto s = shared->read();
         s->query_cache.invalidate_table(*dml_table);
+        for (const std::string& other : other_dml_tables) s->query_cache.invalidate_table(other);
     }
     return result;
 }
@@ -1411,6 +1535,7 @@ StringResult Executor::execute_with_s_body(SharedDatabase& s, Statement stmt) {
     // the expressions of this statement may run subqueries; what the statement writes changes what a subquery that was answered before would say
     StatementScope statement_scope(*this, s, !is_pure_read_only(stmt));
     sync_udf_context(s.user_functions, current_db, auth_user);
+    sync_session_counters(last_insert_id_, row_count_, found_rows_);
     substitute_variables(stmt); // a procedure's variables and the session's @variables, by their values
     evaluate_insert_expressions(stmt, &s, top_level && proc_vars.empty());
 
@@ -1506,17 +1631,68 @@ StringResult Executor::execute_with_s_body(SharedDatabase& s, Statement stmt) {
                 }
             }
         }
+        // the KEY / INDEX lines of the statement
+        if (created.is_ok() && !v->partition_by) {
+            for (auto& index : v->indexes) {
+                if (index.columns.empty()) continue;
+                auto made = exec_create_index(s, index.name.value_or(index.columns.front()), v->name, index.columns, false);
+                if (made.is_err()) return made;
+            }
+        }
         return created;
     }
-    if (auto* v = std::get_if<Statement::DropTable>(&stmt.data)) return exec_drop(s, v->name, v->if_exists);
+    if (auto* v = std::get_if<Statement::DropTable>(&stmt.data)) {
+        if (v->more.empty()) return exec_drop(s, v->name, v->if_exists);
+        // DROP TABLE a, b: none goes when one of them is not there (unless IF EXISTS)
+        std::vector<std::string> names{v->name};
+        names.insert(names.end(), v->more.begin(), v->more.end());
+        if (!v->if_exists) {
+            for (const std::string& n : names) {
+                if (!s.catalog.tables.count(n)) return StringResult::Err("Unknown table '" + n + "'");
+            }
+        }
+        StringResult last = StringResult::Ok("");
+        for (const std::string& n : names) {
+            last = exec_drop(s, n, v->if_exists);
+            if (last.is_err()) return last;
+        }
+        return last;
+    }
+    if (auto* v = std::get_if<Statement::CreateTableLike>(&stmt.data)) return exec_create_like(s, v->name, v->source, v->if_not_exists);
+    if (auto* v = std::get_if<Statement::CreateTableAs>(&stmt.data)) return exec_create_as(s, v->name, v->if_not_exists, v->columns, std::move(*v->query));
+    if (auto* v = std::get_if<Statement::RenameTable>(&stmt.data)) {
+        StringResult last = StringResult::Ok("");
+        for (auto& [from, to] : v->pairs) {
+            last = exec_alter(s, from, AlterAction(AlterAction::RenameTable{to}));
+            if (last.is_err()) return last;
+        }
+        return last;
+    }
     if (auto* v = std::get_if<Statement::TruncateTable>(&stmt.data)) return exec_truncate(s, v->name);
-    if (auto* v = std::get_if<Statement::AlterTable>(&stmt.data)) return exec_alter(s, v->table, v->action);
+    if (auto* v = std::get_if<Statement::AlterTable>(&stmt.data)) {
+        if (!v->more.empty()) { // all or nothing
+            std::vector<const AlterAction*> actions{&v->action};
+            for (const AlterAction& action : v->more) actions.push_back(&action);
+            if (const TableSchema* schema = s.catalog.get_table(v->table)) {
+                if (auto error = alter_actions_error(*schema, v->table, actions); !error.empty()) return StringResult::Err(error);
+            }
+        }
+        auto done = exec_alter(s, v->table, v->action);
+        std::string table = v->table; // (an action that renames the table: the ones after it name the new one)
+        if (auto* rename = std::get_if<AlterAction::RenameTable>(&v->action.data); rename && done.is_ok()) table = rename->to;
+        for (auto& action : v->more) {
+            if (done.is_err()) break;
+            done = exec_alter(s, table, action);
+            if (auto* rename = std::get_if<AlterAction::RenameTable>(&action.data); rename && done.is_ok()) table = rename->to;
+        }
+        return done;
+    }
     if (auto* v = std::get_if<Statement::CreateIndex>(&stmt.data))
         return exec_create_index(s, v->index_name, v->table, v->columns, v->using_hash);
     if (auto* v = std::get_if<Statement::DropIndex>(&stmt.data)) return exec_drop_index(s, v->index_name, v->table);
     if (auto* v = std::get_if<Statement::CreateView>(&stmt.data)) return exec_create_view(s, v->name, *v->query, v->raw_sql);
     if (auto* v = std::get_if<Statement::DropView>(&stmt.data)) return exec_drop_view(s, v->name);
-    if (std::holds_alternative<Statement::ShowTables>(stmt.data)) return exec_show_tables(s);
+    if (auto* v = std::get_if<Statement::ShowTables>(&stmt.data)) return exec_show_tables(s, v->database, v->like);
     if (auto* v = std::get_if<Statement::Describe>(&stmt.data)) return exec_describe(s, v->table);
     if (auto* v = std::get_if<Statement::ShowCreateTable>(&stmt.data)) return exec_show_create_table(s, v->table);
     if (auto* v = std::get_if<Statement::ShowCreateView>(&stmt.data)) return exec_show_create_view(s, v->view);

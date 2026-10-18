@@ -169,12 +169,78 @@ bool value_matches_data_type(const DataType& dt, const std::string& val) {
         dt.data);
 }
 
+// FIRST / AFTER c: the column `column` of the schema goes there ("" when it does; the message of the error when `after` names no column)
+std::string place_column(TableSchema& schema, const std::string& column, const ColumnPosition& position) {
+    auto find = [&](const std::string& name) {
+        return std::find_if(schema.columns.begin(), schema.columns.end(), [&](const ColumnDef& c) { return c.name == name; });
+    };
+    auto moving = find(column);
+    if (moving == schema.columns.end()) return "Column '" + column + "' not found";
+    if (position.after && *position.after == column) return "";
+    if (position.after && find(*position.after) == schema.columns.end()) return "Unknown column '" + *position.after + "' in '" + schema.name + "'";
+    ColumnDef def = std::move(*moving);
+    schema.columns.erase(moving);
+    if (position.first) schema.columns.insert(schema.columns.begin(), std::move(def));
+    else if (position.after) schema.columns.insert(find(*position.after) + 1, std::move(def));
+    else schema.columns.push_back(std::move(def));
+    return "";
+}
+
 // two names are one when they differ in case only (a column, an index)
 bool same_name(const std::string& a, const std::string& b) {
     return a.size() == b.size() && std::equal(a.begin(), a.end(), b.begin(), [](unsigned char x, unsigned char y) { return std::tolower(x) == std::tolower(y); });
 }
 
 } // namespace
+
+// ALTER TABLE with several actions is all or nothing: the columns the actions name are followed through a copy of the names, so the error of a
+// later action is found before an earlier one has changed the table ("" when the actions can be done). As in MySQL, DROP / CHANGE / MODIFY /
+// RENAME COLUMN and ALTER COLUMN name a column of the table as it was before the statement (one that an earlier action added is not there for them),
+// while the new names must not meet a name that is taken by then and an index may name a column that was just added.
+std::string alter_actions_error(const TableSchema& schema, const std::string& table, const std::vector<const AlterAction*>& actions) {
+    std::vector<std::string> columns;
+    for (const ColumnDef& c : schema.columns) columns.push_back(c.name);
+    const std::vector<std::string> original = columns;
+    auto find = [&](const std::string& name) {
+        return std::find_if(columns.begin(), columns.end(), [&](const std::string& c) { return same_name(c, name); });
+    };
+    auto existing = [&](const std::string& name) { // a column of the table as it was, still there
+        return find(name) != columns.end() &&
+               std::any_of(original.begin(), original.end(), [&](const std::string& c) { return same_name(c, name); });
+    };
+    auto missing_after = [&](const std::optional<ColumnPosition>& position) {
+        return position && position->after && find(*position->after) == columns.end();
+    };
+    for (const AlterAction* action : actions) {
+        if (auto* v = std::get_if<AlterAction::AddColumn>(&action->data)) {
+            if (find(v->column.name) != columns.end()) return "Duplicate column name '" + v->column.name + "'";
+            if (missing_after(v->position)) return "Unknown column '" + *v->position->after + "' in '" + schema.name + "'";
+            columns.push_back(v->column.name);
+        } else if (auto* v = std::get_if<AlterAction::DropColumn>(&action->data)) {
+            if (!existing(v->name)) return "Can't DROP '" + v->name + "'; check that column/key exists";
+            columns.erase(find(v->name));
+        } else if (auto* v = std::get_if<AlterAction::RenameColumn>(&action->data)) {
+            if (!existing(v->from)) return "Unknown column '" + v->from + "' in '" + table + "'";
+            if (!same_name(v->from, v->to) && find(v->to) != columns.end()) return "Duplicate column name '" + v->to + "'";
+            *find(v->from) = v->to;
+        } else if (auto* v = std::get_if<AlterAction::ChangeColumn>(&action->data)) {
+            if (!existing(v->from)) return "Unknown column '" + v->from + "' in '" + table + "'";
+            if (!same_name(v->from, v->column.name) && find(v->column.name) != columns.end()) return "Duplicate column name '" + v->column.name + "'";
+            if (missing_after(v->position)) return "Unknown column '" + *v->position->after + "' in '" + schema.name + "'";
+            *find(v->from) = v->column.name;
+        } else if (auto* v = std::get_if<AlterAction::ModifyColumn>(&action->data)) {
+            if (!existing(v->column.name)) return "Column '" + v->column.name + "' not found in '" + table + "'";
+            if (missing_after(v->position)) return "Unknown column '" + *v->position->after + "' in '" + schema.name + "'";
+        } else if (auto* v = std::get_if<AlterAction::SetDefault>(&action->data)) {
+            if (!existing(v->column)) return "Unknown column '" + v->column + "' in '" + table + "'";
+        } else if (auto* v = std::get_if<AlterAction::AddIndex>(&action->data)) {
+            for (const std::string& column : v->columns) {
+                if (find(column) == columns.end()) return "Key column '" + column + "' doesn't exist in table";
+            }
+        }
+    }
+    return "";
+}
 
 StringResult Executor::exec_create(SharedDatabase& s, std::string name, std::vector<ColumnDef> columns, bool if_not_exists,
                                     std::vector<std::string> primary_key_columns,
@@ -399,6 +465,146 @@ StringResult Executor::exec_truncate(SharedDatabase& s, const std::string& name)
     return StringResult::Ok("Table '" + name + "' truncated.");
 }
 
+// CREATE TABLE t LIKE s: the columns, keys, checks and indexes of s, no rows (and no foreign keys)
+StringResult Executor::exec_create_like(SharedDatabase& s, const std::string& name, const std::string& source, bool if_not_exists) {
+    const TableSchema* from = s.catalog.get_table(source);
+    if (!from) return StringResult::Err("Table '" + source + "' not found");
+    if (if_not_exists && s.catalog.tables.count(name)) return StringResult::Ok("Table '" + name + "' already exists, skipped.");
+    std::vector<ColumnDef> columns = from->columns;
+    for (ColumnDef& c : columns) c.foreign_key = std::nullopt;
+    std::vector<std::pair<std::optional<std::string>, std::string>> checks;
+    for (const CheckConstraint& c : from->check_constraints) checks.emplace_back(c.name, c.expression);
+    const std::vector<std::string> primary_key_columns = from->primary_key_columns;
+    const std::vector<UniqueKey> unique_keys = from->unique_keys;
+    // (the indexes made by CREATE INDEX are kept as "<table>_<name>")
+    struct Secondary { std::string name; std::vector<std::string> columns; bool hashed; };
+    std::vector<Secondary> secondary;
+    const std::string key_prefix = source + "_";
+    auto bare = [&](const std::string& key) { return key.compare(0, key_prefix.size(), key_prefix) == 0 ? key.substr(key_prefix.size()) : key; };
+    for (auto& [key, meta] : s.index_meta) {
+        if (meta.first == source) secondary.push_back({bare(key), {meta.second}, false});
+    }
+    for (auto& [key, meta] : s.hash_index_meta) {
+        if (meta.first == source) secondary.push_back({bare(key), {meta.second}, true});
+    }
+    for (auto& [key, comp] : s.composite_indexes) {
+        if (comp.table == source) secondary.push_back({bare(key), comp.columns, false});
+    }
+    auto created = exec_create(s, name, std::move(columns), false, primary_key_columns, std::move(checks), std::nullopt, unique_keys);
+    if (created.is_err()) return created;
+    for (const Secondary& index : secondary) {
+        auto made = exec_create_index(s, index.name, name, index.columns, index.hashed);
+        if (made.is_err()) return made;
+    }
+    return created;
+}
+
+// CREATE TABLE t [(columns)] [AS] SELECT ...: the table is made from the columns of the query (a column of a table the query reads keeps its type; any other gets
+// one from the values it holds), and the rows of the query go in
+StringResult Executor::exec_create_as(SharedDatabase& s, const std::string& name, bool if_not_exists, std::vector<ColumnDef> columns, Statement query) {
+    if (s.catalog.tables.count(name) || s.views.count(name)) {
+        if (if_not_exists) return StringResult::Ok("Table '" + name + "' already exists, skipped.");
+        return StringResult::Err("Table '" + name + "' already exists");
+    }
+    const Statement query_copy = query; // (the names of an empty answer's columns come from the statement)
+    auto out = execute_with_s(s, std::move(query));
+    if (out.is_err()) return out;
+    auto [names, rows] = parse_table_output(out.value());
+    if (names.empty()) names = derived_column_names(s, query_copy);
+    if (names.empty()) return StringResult::Err("The query of CREATE TABLE ... SELECT has no columns");
+
+    // the tables the query reads, for the types of its plain columns
+    std::vector<const TableSchema*> sources;
+    {
+        const Statement* q = &query_copy;
+        while (q) { // (a set operation: the left side names the columns)
+            if (auto* u = std::get_if<Statement::Union>(&q->data)) q = u->left.get();
+            else if (auto* i = std::get_if<Statement::Intersect>(&q->data)) q = i->left.get();
+            else if (auto* e = std::get_if<Statement::Except>(&q->data)) q = e->left.get();
+            else break;
+        }
+        if (q) {
+            if (auto* sel = std::get_if<Statement::Select>(&q->data)) {
+                if (auto* t = s.catalog.get_table(sel->table)) sources.push_back(t);
+                for (const Join& j : sel->joins) {
+                    if (auto* t = s.catalog.get_table(j.table)) sources.push_back(t);
+                }
+            }
+        }
+    }
+    auto same = [](const std::string& a, const std::string& b) {
+        return a.size() == b.size() && std::equal(a.begin(), a.end(), b.begin(), [](unsigned char x, unsigned char y) { return std::tolower(x) == std::tolower(y); });
+    };
+    auto type_of_values = [&](const std::string& column) {
+        bool any = false, whole = true, number = true;
+        std::size_t scale = 0;
+        for (const Row& r : rows) {
+            auto v = r.find(column);
+            if (v == r.end() || v->second == EXECUTOR_NULL_VALUE) continue;
+            any = true;
+            const std::string& text = v->second;
+            if (!parse_number(text)) {
+                number = false;
+                break;
+            }
+            if (text.find_first_of(".eE") != std::string::npos) {
+                whole = false;
+                auto dot = text.find('.');
+                if (dot != std::string::npos && text.find_first_of("eE") == std::string::npos) scale = std::max(scale, text.size() - dot - 1);
+            }
+        }
+        ColumnDef def;
+        def.name = column;
+        def.data_type = DataType(DataType::Text{});
+        if (!any) return def;
+        if (number && whole) def.data_type = DataType(DataType::BigInt{});
+        else if (number) def.data_type = DataType(DataType::Decimal{30, static_cast<std::uint8_t>(std::min<std::size_t>(scale, 30))});
+        return def;
+    };
+
+    std::vector<ColumnDef> made = columns; // (the columns the statement declares come first)
+    for (const std::string& column : names) {
+        auto declared = std::find_if(made.begin(), made.end(), [&](const ColumnDef& c) { return same(c.name, column); });
+        if (declared != made.end()) continue;
+        ColumnDef def;
+        bool found = false;
+        for (const TableSchema* t : sources) {
+            auto source_column = std::find_if(t->columns.begin(), t->columns.end(), [&](const ColumnDef& c) { return same(c.name, column); });
+            if (source_column == t->columns.end()) continue;
+            def.name = column;
+            def.data_type = source_column->data_type;
+            def.is_unsigned = source_column->is_unsigned;
+            def.not_null = source_column->not_null && !source_column->primary_key;
+            found = true;
+            break;
+        }
+        made.push_back(found ? def : type_of_values(column));
+    }
+
+    auto created = exec_create(s, name, made, false, {}, {}, std::nullopt, {});
+    if (created.is_err()) return created;
+    if (rows.empty()) return created;
+
+    Statement::Insert insert;
+    insert.table = name;
+    insert.columns = names;
+    insert.on_conflict = InsertConflict(InsertConflict::Abort{});
+    for (const Row& r : rows) {
+        std::vector<std::string> values;
+        for (const std::string& column : names) {
+            auto v = r.find(column);
+            values.push_back(v == r.end() ? EXECUTOR_NULL_VALUE : v->second);
+        }
+        insert.values.push_back(std::move(values));
+    }
+    auto inserted = execute_with_s(s, Statement(std::move(insert)));
+    if (inserted.is_err()) {
+        exec_drop(s, name, true); // (nothing half-made)
+        return inserted;
+    }
+    return StringResult::Ok("Table '" + name + "' created with " + std::to_string(rows.size()) + " row(s).");
+}
+
 StringResult Executor::exec_alter(SharedDatabase& s, const std::string& table, AlterAction action) {
     // Table partitioning (V1): every action except ADD/DROP PARTITION is blocked on a
     // partitioned table -- a schema change (ADD/DROP/MODIFY/RENAME COLUMN, FK/constraint
@@ -487,6 +693,12 @@ StringResult Executor::exec_alter(SharedDatabase& s, const std::string& table, A
         new_col.foreign_key = std::nullopt;
         new_col.check_expr = v->column.check_expr;
         schema->columns.push_back(new_col);
+        if (v->position) {
+            if (auto error = place_column(*schema, new_col.name, *v->position); !error.empty()) {
+                schema->columns.pop_back();
+                return StringResult::Err(error);
+            }
+        }
 
         std::string fill_val = (v->column.default_value && *v->column.default_value != NULL_DEFAULT) ? *v->column.default_value
                                                                                                        : EXECUTOR_NULL_VALUE;
@@ -502,6 +714,9 @@ StringResult Executor::exec_alter(SharedDatabase& s, const std::string& table, A
         auto* schema = s.catalog.get_table_mut(table);
         if (!schema) return StringResult::Err("Table '" + table + "' not found");
         auto& cols = schema->columns;
+        if (std::none_of(cols.begin(), cols.end(), [&](const ColumnDef& c) { return c.name == v->name; })) {
+            return StringResult::Err("Can't DROP '" + v->name + "'; check that column/key exists");
+        }
         cols.erase(std::remove_if(cols.begin(), cols.end(), [&](const ColumnDef& c) { return c.name == v->name; }), cols.end());
         if (auto it = s.tables.find(table); it != s.tables.end()) {
             for (auto& row : it->second) row.erase(v->name);
@@ -514,6 +729,9 @@ StringResult Executor::exec_alter(SharedDatabase& s, const std::string& table, A
     if (auto* v = std::get_if<AlterAction::RenameColumn>(&action.data)) {
         auto* schema = s.catalog.get_table_mut(table);
         if (!schema) return StringResult::Err("Table '" + table + "' not found");
+        if (std::none_of(schema->columns.begin(), schema->columns.end(), [&](const ColumnDef& c) { return c.name == v->from; })) {
+            return StringResult::Err("Unknown column '" + v->from + "' in '" + table + "'");
+        }
         for (const ColumnDef& c : schema->columns) {
             if (c.name != v->from && same_name(c.name, v->to)) return StringResult::Err("Duplicate column name '" + v->to + "'");
         }
@@ -577,6 +795,10 @@ StringResult Executor::exec_alter(SharedDatabase& s, const std::string& table, A
         bool exists = std::any_of(schema_check->columns.begin(), schema_check->columns.end(),
                                    [&](const ColumnDef& c) { return c.name == v->column.name; });
         if (!exists) return StringResult::Err("Column '" + v->column.name + "' not found in '" + table + "'");
+        if (v->position && v->position->after && v->position->after != v->column.name &&
+            std::none_of(schema_check->columns.begin(), schema_check->columns.end(), [&](const ColumnDef& c) { return c.name == *v->position->after; })) {
+            return StringResult::Err("Unknown column '" + *v->position->after + "' in '" + schema_check->name + "'"); // (before anything is changed)
+        }
 
         if (auto it = s.tables.find(table); it != s.tables.end()) {
             for (auto& row : it->second) {
@@ -601,16 +823,48 @@ StringResult Executor::exec_alter(SharedDatabase& s, const std::string& table, A
                 c.data_type = v->column.data_type;
                 c.is_unsigned = v->column.is_unsigned;
                 c.not_null = v->column.not_null;
-                c.unique = v->column.unique;
-                c.unique_constraint_name = v->column.unique_constraint_name;
+                if (v->column.unique) { // (a UNIQUE KEY the column has is an index, which the new definition does not remove)
+                    c.unique = true;
+                    c.unique_constraint_name = v->column.unique_constraint_name;
+                }
                 c.auto_increment = v->column.auto_increment;
                 c.default_value = v->column.default_value;
                 // primary_key cannot be changed via MODIFY (ignored, matching Rust).
                 break;
             }
         }
+        if (v->position) {
+            if (auto error = place_column(*schema, v->column.name, *v->position); !error.empty()) return StringResult::Err(error);
+        }
         s.disk.save_schema(table, *s.catalog.get_table(table));
         return StringResult::Ok("Column '" + v->column.name + "' in '" + table + "' modified.");
+    }
+
+    // CHANGE [COLUMN] old new definition: the column is renamed, then given the definition
+    if (auto* v = std::get_if<AlterAction::ChangeColumn>(&action.data)) {
+        if (!s.catalog.get_table(table)) return StringResult::Err("Table '" + table + "' not found");
+        if (v->from != v->column.name) {
+            auto renamed = exec_alter(s, table, AlterAction(AlterAction::RenameColumn{v->from, v->column.name}));
+            if (renamed.is_err()) return renamed;
+        }
+        return exec_alter(s, table, AlterAction(AlterAction::ModifyColumn{v->column, v->position}));
+    }
+
+    // ADD INDEX|KEY [name] (a, b)
+    if (auto* v = std::get_if<AlterAction::AddIndex>(&action.data)) {
+        if (v->columns.empty()) return StringResult::Err("An index needs at least one column");
+        return exec_create_index(s, v->name.value_or(v->columns.front()), table, v->columns, false);
+    }
+
+    // ALTER COLUMN c SET DEFAULT v / DROP DEFAULT
+    if (auto* v = std::get_if<AlterAction::SetDefault>(&action.data)) {
+        auto* schema = s.catalog.get_table_mut(table);
+        if (!schema) return StringResult::Err("Table '" + table + "' not found");
+        auto column = std::find_if(schema->columns.begin(), schema->columns.end(), [&](const ColumnDef& c) { return c.name == v->column; });
+        if (column == schema->columns.end()) return StringResult::Err("Unknown column '" + v->column + "' in '" + table + "'");
+        column->default_value = v->value;
+        s.disk.save_schema(table, *schema);
+        return StringResult::Ok("Default of column '" + v->column + "' in '" + table + "' changed.");
     }
 
     if (auto* v = std::get_if<AlterAction::RenameTable>(&action.data)) {
@@ -1368,13 +1622,17 @@ StringResult Executor::exec_use(SharedDatabase& s, const std::string& database) 
     return StringResult::Ok("Database changed to '" + key + "'.");
 }
 
-StringResult Executor::exec_show_tables(const SharedDatabase& s) const {
-    std::string prefix = current_db + ".";
+StringResult Executor::exec_show_tables(const SharedDatabase& s, const std::optional<std::string>& database, const std::optional<std::string>& like) const {
+    const std::string db = database.value_or(current_db);
+    std::string prefix = db + ".";
     std::vector<std::string> tables;
     for (auto& [k, _] : s.catalog.tables) {
-        if (k.compare(0, prefix.size(), prefix) == 0) tables.push_back(k.substr(prefix.size()));
+        if (k.compare(0, prefix.size(), prefix) != 0) continue;
+        std::string name = k.substr(prefix.size());
+        if (like && !collation::like(name, *like)) continue;
+        tables.push_back(std::move(name));
     }
-    if (tables.empty()) return StringResult::Ok("No tables found in database '" + current_db + "'.");
+    if (tables.empty() && !like) return StringResult::Ok("No tables found in database '" + db + "'.");
     std::sort(tables.begin(), tables.end());
 
     // Matches Rust's `{:width$}` semantics: a MINIMUM width, not a fixed/max one — if
@@ -1383,7 +1641,8 @@ StringResult Executor::exec_show_tables(const SharedDatabase& s) const {
     // The naive `width - text.size()` here previously underflowed (both are unsigned)
     // whenever text.size() > width, which is exactly what "Tables" being the longest
     // cell triggers when every actual table name is shorter than 5 chars.
-    std::size_t max_len = 5;
+    const std::string header = "Tables_in_" + db;
+    std::size_t max_len = header.size();
     for (auto& t : tables) max_len = std::max(max_len, t.size());
     std::string sep = "+" + std::string(max_len + 2, '-') + "+\n";
 
@@ -1392,7 +1651,7 @@ StringResult Executor::exec_show_tables(const SharedDatabase& s) const {
         return "| " + text + std::string(pad, ' ') + " |\n";
     };
 
-    std::string output = sep + pad_line("Tables") + sep;
+    std::string output = sep + pad_line(header) + sep;
     for (auto& t : tables) output += pad_line(t);
     output += sep.substr(0, sep.size() - 1); // no trailing newline after the final separator, matching Rust's output.push_str(&sep)
     return StringResult::Ok(output);

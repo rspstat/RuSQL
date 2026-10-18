@@ -74,6 +74,9 @@ public:
 
 private:
     std::vector<Token> tokens_;
+    std::string source_; // the text the tokens were read from
+    // the text of the tokens [from, to) as it was typed (a result column that is an expression is called by it)
+    std::string source_between(std::size_t from, std::size_t to) const;
     std::size_t pos_ = 0;
     bool last_type_unsigned_ = false; // whether the integer type parse_data_type() read last had UNSIGNED after it
     // The table names and aliases of the FROM list of each SELECT being parsed (the innermost last): a subquery that uses one of those tables
@@ -199,6 +202,9 @@ private:
     Statement parse_create();
     Statement parse_drop();
     Statement parse_alter();
+    Statement parse_alter_action(const std::string& table); // one action of ALTER TABLE (the actions are separated by commas)
+    Statement parse_rename();
+    std::optional<ColumnPosition> parse_column_position(); // [FIRST | AFTER column]
     Statement parse_create_index();
     Statement parse_drop_index();
     Statement parse_create_view();

@@ -1,10 +1,11 @@
 // Faithful port of the INFORMATION_SCHEMA virtual tables from
-// rusql-core/src/engine/executor.rs (Phase 8f): info_schema_rows, exec_information_schema.
+// rusql-core/src/engine/executor.rs (Phase 8f): info_schema_rows (a select on one of these tables runs on a temporary table of the rows: see exec_select).
 
 #include "engine/executor/executor.hpp"
 
 #include <algorithm>
 #include <cmath>
+#include <unordered_set>
 
 namespace engine {
 
@@ -54,6 +55,65 @@ std::string dt_full(const DataType& dt) {
 
 } // namespace
 
+namespace {
+using IC = InfoSchemaColumn;
+// The columns of each information_schema table in the order MySQL has them; `true`: a number (everything else is text).
+const std::vector<IC> kSchemata = {{"CATALOG_NAME", false}, {"SCHEMA_NAME", false}, {"DEFAULT_CHARACTER_SET_NAME", false}, {"DEFAULT_COLLATION_NAME", false}, {"SQL_PATH", false}};
+const std::vector<IC> kTables = {
+    {"TABLE_CATALOG", false}, {"TABLE_SCHEMA", false}, {"TABLE_NAME", false}, {"TABLE_TYPE", false}, {"ENGINE", false}, {"VERSION", true},
+    {"ROW_FORMAT", false}, {"TABLE_ROWS", true}, {"AVG_ROW_LENGTH", true}, {"DATA_LENGTH", true}, {"MAX_DATA_LENGTH", true}, {"INDEX_LENGTH", true},
+    {"DATA_FREE", true}, {"AUTO_INCREMENT", true}, {"CREATE_TIME", false}, {"UPDATE_TIME", false}, {"CHECK_TIME", false}, {"TABLE_COLLATION", false},
+    {"CHECKSUM", true}, {"CREATE_OPTIONS", false}, {"TABLE_COMMENT", false}};
+const std::vector<IC> kColumns = {
+    {"TABLE_CATALOG", false}, {"TABLE_SCHEMA", false}, {"TABLE_NAME", false}, {"COLUMN_NAME", false}, {"ORDINAL_POSITION", true}, {"COLUMN_DEFAULT", false},
+    {"IS_NULLABLE", false}, {"DATA_TYPE", false}, {"CHARACTER_MAXIMUM_LENGTH", true}, {"CHARACTER_OCTET_LENGTH", true}, {"NUMERIC_PRECISION", true},
+    {"NUMERIC_SCALE", true}, {"DATETIME_PRECISION", true}, {"CHARACTER_SET_NAME", false}, {"COLLATION_NAME", false}, {"COLUMN_TYPE", false},
+    {"COLUMN_KEY", false}, {"EXTRA", false}, {"PRIVILEGES", false}, {"COLUMN_COMMENT", false}, {"GENERATION_EXPRESSION", false}};
+const std::vector<IC> kKeyColumnUsage = {
+    {"CONSTRAINT_CATALOG", false}, {"CONSTRAINT_SCHEMA", false}, {"CONSTRAINT_NAME", false}, {"TABLE_CATALOG", false}, {"TABLE_SCHEMA", false},
+    {"TABLE_NAME", false}, {"COLUMN_NAME", false}, {"ORDINAL_POSITION", true}, {"POSITION_IN_UNIQUE_CONSTRAINT", true}, {"REFERENCED_TABLE_SCHEMA", false},
+    {"REFERENCED_TABLE_NAME", false}, {"REFERENCED_COLUMN_NAME", false}};
+const std::vector<IC> kTableConstraints = {{"CONSTRAINT_CATALOG", false}, {"CONSTRAINT_SCHEMA", false}, {"CONSTRAINT_NAME", false}, {"TABLE_SCHEMA", false},
+                                           {"TABLE_NAME", false}, {"CONSTRAINT_TYPE", false}, {"ENFORCED", false}};
+const std::vector<IC> kStatistics = {
+    {"TABLE_CATALOG", false}, {"TABLE_SCHEMA", false}, {"TABLE_NAME", false}, {"NON_UNIQUE", true}, {"INDEX_SCHEMA", false}, {"INDEX_NAME", false},
+    {"SEQ_IN_INDEX", true}, {"COLUMN_NAME", false}, {"COLLATION", false}, {"CARDINALITY", true}, {"SUB_PART", true}, {"PACKED", false}, {"NULLABLE", false},
+    {"INDEX_TYPE", false}, {"COMMENT", false}, {"INDEX_COMMENT", false}, {"IS_VISIBLE", false}};
+const std::vector<IC> kViews = {{"TABLE_CATALOG", false}, {"TABLE_SCHEMA", false}, {"TABLE_NAME", false}, {"VIEW_DEFINITION", false}, {"CHECK_OPTION", false},
+                                {"IS_UPDATABLE", false}, {"DEFINER", false}, {"SECURITY_TYPE", false}, {"CHARACTER_SET_CLIENT", false}, {"COLLATION_CONNECTION", false}};
+const std::vector<IC> kCharacterSets = {{"CHARACTER_SET_NAME", false}, {"DEFAULT_COLLATE_NAME", false}, {"DESCRIPTION", false}, {"MAXLEN", true}};
+const std::vector<IC> kCollations = {{"COLLATION_NAME", false}, {"CHARACTER_SET_NAME", false}, {"ID", true}, {"IS_DEFAULT", false}, {"IS_COMPILED", false},
+                                     {"SORTLEN", true}, {"PAD_ATTRIBUTE", false}};
+const std::vector<IC> kEngines = {{"ENGINE", false}, {"SUPPORT", false}, {"COMMENT", false}, {"TRANSACTIONS", false}, {"XA", false}, {"SAVEPOINTS", false}};
+} // namespace
+
+const std::vector<InfoSchemaColumn>* Executor::info_schema_columns(const std::string& which) {
+    std::string lower = which;
+    std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char c) { return std::tolower(c); });
+    if (lower == "schemata" || lower == "schemas") return &kSchemata;
+    if (lower == "tables") return &kTables;
+    if (lower == "columns") return &kColumns;
+    if (lower == "key_column_usage") return &kKeyColumnUsage;
+    if (lower == "table_constraints") return &kTableConstraints;
+    if (lower == "statistics") return &kStatistics;
+    if (lower == "views") return &kViews;
+    if (lower == "character_sets") return &kCharacterSets;
+    if (lower == "collations") return &kCollations;
+    if (lower == "engines") return &kEngines;
+    return nullptr;
+}
+
+std::optional<std::string> Executor::info_schema_bare(const std::string& qualified_name) {
+    static const std::string prefix = "information_schema.";
+    if (qualified_name.size() <= prefix.size()) return std::nullopt;
+    std::string lower = qualified_name;
+    std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char c) { return std::tolower(c); });
+    if (lower.compare(0, prefix.size(), prefix) != 0) return std::nullopt;
+    lower.erase(0, prefix.size());
+    if (!info_schema_columns(lower)) return std::nullopt;
+    return lower;
+}
+
 std::vector<Row> Executor::info_schema_rows(const SharedDatabase& s, const std::string& which) {
     std::string lower = which;
     std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char c) { return std::tolower(c); });
@@ -76,12 +136,13 @@ std::vector<Row> Executor::info_schema_rows(const SharedDatabase& s, const std::
     if (lower == "tables") {
         for (auto& [name, data] : s.tables) {
             auto [db, tbl] = split_name(name);
+            if (db.empty() || db == "information_schema") continue; // (a temporary table of the statement that is running)
             Row r;
             r["TABLE_CATALOG"] = "def";
             r["TABLE_SCHEMA"] = db;
             r["TABLE_NAME"] = tbl;
             r["TABLE_TYPE"] = "BASE TABLE";
-            r["ENGINE"] = "RuSQL";
+            r["ENGINE"] = "InnoDB";
             r["VERSION"] = "10";
             r["ROW_FORMAT"] = "Dynamic";
             r["TABLE_ROWS"] = std::to_string(data.size());
@@ -120,6 +181,7 @@ std::vector<Row> Executor::info_schema_rows(const SharedDatabase& s, const std::
     if (lower == "columns") {
         for (auto& [_, schema] : s.catalog.tables) {
             auto [db, tbl] = split_name(schema.name);
+            if (db.empty() || db == "information_schema") continue;
             for (std::size_t i = 0; i < schema.columns.size(); i++) {
                 auto& col = schema.columns[i];
                 std::string char_max = EXECUTOR_NULL_VALUE;
@@ -167,7 +229,12 @@ std::vector<Row> Executor::info_schema_rows(const SharedDatabase& s, const std::
                 r["CHARACTER_SET_NAME"] = has_charset ? "utf8mb4" : EXECUTOR_NULL_VALUE;
                 r["COLLATION_NAME"] = has_charset ? "utf8mb4_0900_ai_ci" : EXECUTOR_NULL_VALUE;
                 r["COLUMN_TYPE"] = dt_full(col.data_type) + (col.is_unsigned ? " unsigned" : "");
-                r["COLUMN_KEY"] = col.primary_key ? "PRI" : (col.unique ? "UNI" : "");
+                const bool in_composite_key = std::find(schema.primary_key_columns.begin(), schema.primary_key_columns.end(), col.name) != schema.primary_key_columns.end();
+                bool first_of_index = false;
+                for (auto& [unused, meta] : s.index_meta) first_of_index = first_of_index || (meta.first == schema.name && meta.second == col.name);
+                for (auto& [unused, meta] : s.hash_index_meta) first_of_index = first_of_index || (meta.first == schema.name && meta.second == col.name);
+                for (auto& [unused, index] : s.composite_indexes) first_of_index = first_of_index || (index.table == schema.name && !index.columns.empty() && index.columns.front() == col.name);
+                r["COLUMN_KEY"] = (col.primary_key || in_composite_key) ? "PRI" : (col.unique ? "UNI" : (first_of_index ? "MUL" : ""));
                 r["EXTRA"] = col.auto_increment ? "auto_increment" : "";
                 r["PRIVILEGES"] = "select,insert,update,references";
                 r["COLUMN_COMMENT"] = "";
@@ -181,6 +248,7 @@ std::vector<Row> Executor::info_schema_rows(const SharedDatabase& s, const std::
     if (lower == "key_column_usage") {
         for (auto& [_, schema] : s.catalog.tables) {
             auto [db, tbl] = split_name(schema.name);
+            if (db.empty() || db == "information_schema") continue;
             std::vector<std::string> pk_cols = schema.primary_key_columns;
             if (pk_cols.empty()) {
                 for (auto& c : schema.columns) {
@@ -231,6 +299,7 @@ std::vector<Row> Executor::info_schema_rows(const SharedDatabase& s, const std::
     if (lower == "table_constraints") {
         for (auto& [_, schema] : s.catalog.tables) {
             auto [db, tbl] = split_name(schema.name);
+            if (db.empty() || db == "information_schema") continue;
             bool has_pk =
                 std::any_of(schema.columns.begin(), schema.columns.end(), [](const ColumnDef& c) { return c.primary_key; }) ||
                 !schema.primary_key_columns.empty();
@@ -285,27 +354,96 @@ std::vector<Row> Executor::info_schema_rows(const SharedDatabase& s, const std::
     }
 
     if (lower == "statistics") {
-        for (auto& [idx_name, meta] : s.index_meta) {
-            auto [db, tbl] = split_name(meta.first);
-            Row r;
-            r["TABLE_CATALOG"] = "def";
-            r["TABLE_SCHEMA"] = db;
-            r["TABLE_NAME"] = tbl;
-            r["NON_UNIQUE"] = "1";
-            r["INDEX_SCHEMA"] = db;
-            r["INDEX_NAME"] = idx_name;
-            r["SEQ_IN_INDEX"] = "1";
-            r["COLUMN_NAME"] = meta.second;
-            r["COLLATION"] = "A";
-            r["CARDINALITY"] = EXECUTOR_NULL_VALUE;
-            r["SUB_PART"] = EXECUTOR_NULL_VALUE;
-            r["PACKED"] = EXECUTOR_NULL_VALUE;
-            r["NULLABLE"] = "YES";
-            r["INDEX_TYPE"] = "BTREE";
-            r["COMMENT"] = "";
-            r["INDEX_COMMENT"] = "";
-            r["IS_VISIBLE"] = "YES";
-            rows.push_back(std::move(r));
+        // every index of every table, one row per column of it: the PRIMARY KEY, the UNIQUE columns and keys, then the ones CREATE INDEX made
+        for (auto& [_, schema] : s.catalog.tables) {
+            auto [db, tbl] = split_name(schema.name);
+            if (db.empty() || db == "information_schema") continue;
+            auto nullable = [&](const std::string& column) {
+                for (auto& c : schema.columns) {
+                    if (c.name == column) return !(c.not_null || c.primary_key);
+                }
+                return true;
+            };
+            // how many different values the first `count` columns of an index hold (a NULL is one value), over the rows nobody has deleted
+            std::vector<std::string> index_columns;
+            auto cardinality = [&](std::size_t count) {
+                auto data = s.tables.find(schema.name);
+                std::size_t distinct = 0;
+                if (data != s.tables.end()) {
+                    std::unordered_set<std::string> seen;
+                    for (auto& row : data->second) {
+                        if (auto x = row.find("_xmax"); x != row.end() && x->second != "0") continue;
+                        std::string key;
+                        for (std::size_t c = 0; c < count && c < index_columns.size(); c++) {
+                            auto v = row.find(index_columns[c]);
+                            key += collation::key(v != row.end() ? v->second : std::string(EXECUTOR_NULL_VALUE));
+                            key += '';
+                        }
+                        seen.insert(std::move(key));
+                    }
+                    distinct = seen.size();
+                }
+                return std::to_string(distinct);
+            };
+            auto add = [&](const std::string& index_name, bool non_unique, std::size_t seq, const std::string& column, const char* type) {
+                Row r;
+                r["TABLE_CATALOG"] = "def";
+                r["TABLE_SCHEMA"] = db;
+                r["TABLE_NAME"] = tbl;
+                r["NON_UNIQUE"] = non_unique ? "1" : "0";
+                r["INDEX_SCHEMA"] = db;
+                r["INDEX_NAME"] = index_name;
+                r["SEQ_IN_INDEX"] = std::to_string(seq);
+                r["COLUMN_NAME"] = column;
+                r["COLLATION"] = "A";
+                r["CARDINALITY"] = cardinality(seq);
+                r["SUB_PART"] = EXECUTOR_NULL_VALUE;
+                r["PACKED"] = EXECUTOR_NULL_VALUE;
+                r["NULLABLE"] = nullable(column) ? "YES" : "";
+                r["INDEX_TYPE"] = type;
+                r["COMMENT"] = "";
+                r["INDEX_COMMENT"] = "";
+                r["IS_VISIBLE"] = "YES";
+                rows.push_back(std::move(r));
+            };
+            std::vector<std::string> pk_cols = schema.primary_key_columns;
+            if (pk_cols.empty()) {
+                for (auto& c : schema.columns) {
+                    if (c.primary_key) pk_cols.push_back(c.name);
+                }
+            }
+            index_columns = pk_cols;
+            for (std::size_t k = 0; k < pk_cols.size(); k++) add("PRIMARY", false, k + 1, pk_cols[k], "BTREE");
+            for (auto& c : schema.columns) {
+                if (!c.unique || c.primary_key) continue;
+                index_columns = {c.name};
+                add(c.unique_constraint_name.value_or(c.name), false, 1, c.name, "BTREE");
+            }
+            for (auto& key : schema.unique_keys) {
+                index_columns = key.columns;
+                for (std::size_t k = 0; k < key.columns.size(); k++) add(key.name.value_or(key.columns.front()), false, k + 1, key.columns[k], "BTREE");
+            }
+            // (the indexes made by CREATE INDEX are kept as "<table>_<name>")
+            const std::string key_prefix = schema.name + "_";
+            auto bare_index_name = [&](const std::string& key) { return key.compare(0, key_prefix.size(), key_prefix) == 0 ? key.substr(key_prefix.size()) : key; };
+            std::vector<std::pair<std::string, std::vector<std::string>>> secondary; // (name, columns), by name
+            std::vector<bool> hashed;
+            for (auto& [key, meta] : s.index_meta) {
+                if (meta.first == schema.name) { secondary.push_back({bare_index_name(key), {meta.second}}); hashed.push_back(false); }
+            }
+            for (auto& [key, meta] : s.hash_index_meta) {
+                if (meta.first == schema.name) { secondary.push_back({bare_index_name(key), {meta.second}}); hashed.push_back(true); }
+            }
+            for (auto& [key, comp] : s.composite_indexes) {
+                if (comp.table == schema.name) { secondary.push_back({bare_index_name(key), comp.columns}); hashed.push_back(false); }
+            }
+            std::vector<std::size_t> order(secondary.size());
+            for (std::size_t k = 0; k < order.size(); k++) order[k] = k;
+            std::sort(order.begin(), order.end(), [&](std::size_t a, std::size_t b) { return secondary[a].first < secondary[b].first; });
+            for (std::size_t k : order) {
+                index_columns = secondary[k].second;
+                for (std::size_t c = 0; c < secondary[k].second.size(); c++) add(secondary[k].first, true, c + 1, secondary[k].second[c], hashed[k] ? "HASH" : "BTREE");
+            }
         }
         return rows;
     }
@@ -345,7 +483,7 @@ std::vector<Row> Executor::info_schema_rows(const SharedDatabase& s, const std::
             r["SORTLEN"] = "0";
             r["PAD_ATTRIBUTE"] = "NO PAD";
         } else {
-            r["ENGINE"] = "RuSQL";
+            r["ENGINE"] = "InnoDB";
             r["SUPPORT"] = "DEFAULT";
             r["COMMENT"] = "Custom Rust RDBMS";
             r["TRANSACTIONS"] = "YES";
@@ -357,113 +495,6 @@ std::vector<Row> Executor::info_schema_rows(const SharedDatabase& s, const std::
     }
 
     return rows; // unknown IS table -> empty result
-}
-
-StringResult Executor::exec_information_schema(SharedDatabase& s, const std::string& which, std::vector<SelectColumn> columns,
-                                                 std::optional<CondExpr> condition, std::vector<OrderBy> order_by,
-                                                 std::optional<std::size_t> limit, std::optional<std::size_t> offset) const {
-    std::vector<Row> rows;
-    for (auto& r0 : info_schema_rows(s, which)) {
-        Row r;
-        for (auto& [k, v] : r0) {
-            std::string lk = k;
-            std::transform(lk.begin(), lk.end(), lk.begin(), [](unsigned char c) { return std::tolower(c); });
-            r[lk] = v;
-        }
-        rows.push_back(std::move(r));
-    }
-
-    rows.erase(std::remove_if(rows.begin(), rows.end(), [&](const Row& r) { return !matches_condexpr(r, condition); }), rows.end());
-
-    if (!order_by.empty()) {
-        std::stable_sort(rows.begin(), rows.end(), [&](const Row& a, const Row& b) {
-            for (auto& ord : order_by) {
-                const std::string* av_p = get_col(a, ord.column);
-                const std::string* bv_p = get_col(b, ord.column);
-                std::string av = av_p ? *av_p : std::string();
-                std::string bv = bv_p ? *bv_p : std::string();
-                int cmp;
-                try {
-                    std::size_t pa, pb;
-                    double af = std::stod(av, &pa);
-                    double bf = std::stod(bv, &pb);
-                    if (pa != av.size() || pb != bv.size()) throw std::invalid_argument("");
-                    cmp = af < bf ? -1 : (af > bf ? 1 : 0);
-                } catch (...) {
-                    cmp = av < bv ? -1 : (av > bv ? 1 : 0);
-                }
-                if (!ord.ascending) cmp = -cmp;
-                if (cmp != 0) return cmp < 0;
-            }
-            return false;
-        });
-    }
-
-    std::size_t off = offset.value_or(0);
-    if (off > rows.size()) rows.clear();
-    else rows.erase(rows.begin(), rows.begin() + static_cast<std::ptrdiff_t>(off));
-    std::size_t lim = limit.value_or(rows.size());
-    if (rows.size() > lim) rows.resize(lim);
-
-    if (rows.empty()) return StringResult::Ok("0 rows returned.");
-
-    bool has_all = std::any_of(columns.begin(), columns.end(), [](const SelectColumn& c) { return std::holds_alternative<SelectColumn::All>(c.data); });
-    std::vector<std::string> col_names;
-    if (has_all) {
-        for (auto& [k, _] : rows[0]) col_names.push_back(k);
-        std::sort(col_names.begin(), col_names.end());
-    } else {
-        for (auto& c : columns) {
-            if (auto* v = std::get_if<SelectColumn::Column>(&c.data)) {
-                auto dot = v->name.rfind('.');
-                col_names.push_back(dot == std::string::npos ? v->name : v->name.substr(dot + 1));
-            } else if (auto* v = std::get_if<SelectColumn::ColumnAlias>(&c.data)) {
-                col_names.push_back(v->alias);
-            }
-        }
-    }
-
-    if (col_names.empty()) return StringResult::Ok("0 rows returned.");
-
-    // Escape headers/cells up front (widths below are computed on the escaped form,
-    // matching the visual padding actually written) -- see Executor::escape_cell.
-    std::vector<std::string> headers(col_names.size());
-    for (std::size_t i = 0; i < col_names.size(); i++) headers[i] = escape_cell(col_names[i]);
-
-    std::vector<std::size_t> col_widths;
-    for (std::size_t i = 0; i < col_names.size(); i++) {
-        std::size_t w = headers[i].size();
-        for (auto& r : rows) {
-            const std::string* v = get_col(r, col_names[i]);
-            if (v) w = std::max(w, escape_cell(*v).size());
-        }
-        col_widths.push_back(w);
-    }
-
-    std::string sep;
-    for (auto w : col_widths) sep += "+" + std::string(w + 2, '-');
-    sep += "+";
-
-    std::string hdr;
-    for (std::size_t i = 0; i < headers.size(); i++) {
-        hdr += "| " + headers[i] + std::string(col_widths[i] - headers[i].size(), ' ') + " ";
-    }
-    hdr += "|";
-
-    std::string out = sep + "\n" + hdr + "\n" + sep + "\n";
-    for (auto& row : rows) {
-        std::string line;
-        for (std::size_t i = 0; i < col_names.size(); i++) {
-            const std::string* v = get_col(row, col_names[i]);
-            std::string val = v ? escape_cell(*v) : std::string();
-            line += "| " + val + std::string(col_widths[i] - val.size(), ' ') + " ";
-        }
-        line += "|";
-        out += line + "\n";
-    }
-    out += sep;
-    out += "\n" + std::to_string(rows.size()) + " row(s) returned.";
-    return StringResult::Ok(out);
 }
 
 } // namespace engine

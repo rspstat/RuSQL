@@ -171,10 +171,10 @@ std::vector<std::uint8_t> handshake_pkt(std::uint32_t conn_id, const std::array<
     return p;
 }
 
-std::vector<std::uint8_t> ok_pkt(std::uint64_t affected) {
+std::vector<std::uint8_t> ok_pkt(std::uint64_t affected, std::uint64_t last_insert_id = 0) {
     std::vector<std::uint8_t> p{0x00};
     lenenc(p, affected);
-    lenenc(p, 0);
+    lenenc(p, last_insert_id);
     p.push_back(0x02);
     p.push_back(0x00); // status: AUTOCOMMIT
     p.push_back(0x00);
@@ -194,7 +194,8 @@ std::vector<std::uint8_t> err_pkt(const std::string& msg) {
 
 std::vector<std::uint8_t> eof_pkt() { return {0xfe, 0x00, 0x00, 0x02, 0x00}; }
 
-std::vector<std::uint8_t> col_def_pkt(const std::string& name) {
+// `binary`: the column holds bytes that are no text (UNHEX('FF')): the client is told so, or it fails decoding them as UTF-8
+std::vector<std::uint8_t> col_def_pkt(const std::string& name, bool binary = false) {
     std::vector<std::uint8_t> p;
     lenstr(p, "def");
     lenstr(p, "");
@@ -203,12 +204,12 @@ std::vector<std::uint8_t> col_def_pkt(const std::string& name) {
     lenstr(p, name);
     lenstr(p, name);
     p.push_back(0x0c);
-    p.push_back(0x21);
-    p.push_back(0x00); // charset: utf8 (33)
+    p.push_back(binary ? 0x3f : 0x21);
+    p.push_back(0x00); // charset: utf8 (33), binary (63)
     for (int i = 0; i < 4; i++) p.push_back(0xff); // max column length
-    p.push_back(0xfd);                             // type: VARSTRING
-    p.push_back(0x00);
-    p.push_back(0x00); // flags
+    p.push_back(binary ? 0xfc : 0xfd);             // type: BLOB, VARSTRING
+    p.push_back(binary ? 0x80 : 0x00);
+    p.push_back(0x00); // flags (BINARY)
     p.push_back(0x00); // decimals
     p.push_back(0x00);
     p.push_back(0x00); // filler
@@ -587,8 +588,27 @@ bool send_resultset(SOCKET sock, const std::vector<std::string>& cols, const std
     lenenc(cnt, cols.size());
     if (!write_packet(sock, seq++, cnt)) return false;
 
-    for (auto& col : cols) {
-        if (!write_packet(sock, seq++, col_def_pkt(col))) return false;
+    // a column with a value that is not valid UTF-8 is a binary column
+    auto valid_utf8 = [](const std::string& v) {
+        for (std::size_t i = 0; i < v.size();) {
+            const unsigned char c = static_cast<unsigned char>(v[i]);
+            std::size_t n = c < 0x80 ? 1 : (c >> 5) == 0x6 ? 2 : (c >> 4) == 0xe ? 3 : (c >> 3) == 0x1e ? 4 : 0;
+            if (n == 0 || i + n > v.size()) return false;
+            for (std::size_t k = 1; k < n; k++) {
+                if ((static_cast<unsigned char>(v[i + k]) & 0xc0) != 0x80) return false;
+            }
+            i += n;
+        }
+        return true;
+    };
+    std::vector<bool> binary(cols.size(), false);
+    for (auto& row : rows) {
+        for (std::size_t i = 0; i < cols.size() && i < row.size(); i++) {
+            if (!binary[i] && row[i] != "NULL" && !valid_utf8(row[i])) binary[i] = true;
+        }
+    }
+    for (std::size_t i = 0; i < cols.size(); i++) {
+        if (!write_packet(sock, seq++, col_def_pkt(cols[i], binary[i]))) return false;
     }
 
     if (!write_packet(sock, seq++, eof_pkt())) return false;
@@ -654,10 +674,46 @@ std::string to_lower_str(const std::string& s) {
     return out;
 }
 
+// is the select list nothing but `@@var [AS alias]` items (the shim below answers those; an expression with a variable in it is the engine's)
+bool only_system_variables(const std::string& q) {
+    std::string list = trim_copy(q.substr(6)); // after SELECT
+    std::size_t i = 0;
+    while (i < list.size()) {
+        // one item up to the next comma
+        std::size_t end = list.find(',', i);
+        std::string item = trim_copy(list.substr(i, end == std::string::npos ? std::string::npos : end - i));
+        if (item.size() < 3 || item[0] != '@' || item[1] != '@') return false;
+        std::size_t k = 2;
+        while (k < item.size() && (std::isalnum(static_cast<unsigned char>(item[k])) || item[k] == '_' || item[k] == '.')) k++;
+        std::string rest = trim_copy(item.substr(k));
+        if (!rest.empty()) {
+            std::string up_rest = to_upper_str(rest);
+            if (up_rest.rfind("AS ", 0) != 0) return false;
+            std::string alias = trim_copy(rest.substr(3));
+            if (alias.empty() || alias.find(' ') != std::string::npos) return false;
+        }
+        if (end == std::string::npos) break;
+        i = end + 1;
+    }
+    return !list.empty();
+}
+
+// the pattern of `... LIKE 'pattern'`
+std::optional<std::string> like_pattern_of(const std::string& q) {
+    const std::string up = to_upper_str(q);
+    auto at = up.find(" LIKE ");
+    if (at == std::string::npos) return std::nullopt;
+    auto open = q.find('\'', at);
+    if (open == std::string::npos) return std::nullopt;
+    auto close = q.find('\'', open + 1);
+    if (close == std::string::npos) return std::nullopt;
+    return q.substr(open + 1, close - open - 1);
+}
+
 std::string handle_select_atvars(const std::string& q, const Executor& exec) {
     static const std::vector<std::pair<std::string, std::string>> known = {
         {"auto_increment_increment", "1"},
-        {"autocommit", "ON"},
+        {"autocommit", "1"},
         {"character_set_client", "utf8mb4"},
         {"character_set_connection", "utf8mb4"},
         {"character_set_results", "utf8mb4"},
@@ -712,9 +768,7 @@ std::string handle_select_atvars(const std::string& q, const Executor& exec) {
                 }
             }
             // the value this session has set (SET @@foreign_key_checks = 0), or its default (the engine keeps the server variables as "@name")
-            if (var_name != "autocommit") {
-                if (auto session = exec.user_vars.find("@" + var_name); session != exec.user_vars.end()) value = session->second;
-            }
+            if (auto session = exec.user_vars.find("@" + var_name); session != exec.user_vars.end()) value = session->second;
             cols.push_back(alias);
             vals.push_back(value);
         } else {
@@ -735,7 +789,7 @@ bool like_match_inner(const std::string& s, std::size_t si, const std::string& p
 }
 bool like_match(const std::string& s, const std::string& pat) { return like_match_inner(s, 0, pat, 0); }
 
-std::string show_variables_result(const std::string& up) {
+std::string show_variables_result(const std::string& up, const Executor& exec) {
     static const std::vector<std::pair<std::string, std::string>> vars = {
         {"autocommit", "ON"},
         {"character_set_client", "utf8mb4"},
@@ -770,7 +824,10 @@ std::string show_variables_result(const std::string& up) {
     }
     std::vector<std::vector<std::string>> rows;
     for (auto& [k, v] : vars) {
-        if (!like_pat || like_match(k, *like_pat)) rows.push_back({k, v});
+        if (like_pat && !like_match(k, *like_pat)) continue;
+        std::string value = v; // (what this session has set: SET autocommit = 0, SET sql_mode = ...)
+        if (auto session = exec.user_vars.find("@" + k); session != exec.user_vars.end()) value = k == "autocommit" ? (session->second == "0" ? "OFF" : "ON") : session->second;
+        rows.push_back({k, value});
     }
     return box_table({"Variable_name", "Value"}, rows);
 }
@@ -809,6 +866,90 @@ std::optional<std::string> extract_second_from(const std::string& q) {
 
 StringResult exec_inner(Executor& exec, const std::string& q) { return exec.execute_sql(trim_copy(q)); }
 
+// `[db.]table` read from the start of `text` (names may be in backticks); `rest` is what follows it
+struct TableRef {
+    std::optional<std::string> db;
+    std::string table;
+    std::string rest;
+};
+
+std::optional<TableRef> read_table_ref(const std::string& text) {
+    auto read_name = [&](std::size_t& pos) -> std::optional<std::string> {
+        if (pos < text.size() && text[pos] == '`') {
+            auto end = text.find('`', pos + 1);
+            if (end == std::string::npos) return std::nullopt;
+            std::string name = text.substr(pos + 1, end - pos - 1);
+            pos = end + 1;
+            return name;
+        }
+        std::size_t start = pos;
+        while (pos < text.size() && (std::isalnum(static_cast<unsigned char>(text[pos])) || text[pos] == '_' || text[pos] == '$')) pos++;
+        if (pos == start) return std::nullopt;
+        return text.substr(start, pos - start);
+    };
+    std::size_t pos = text.find_first_not_of(" \t\r\n");
+    if (pos == std::string::npos) return std::nullopt;
+    auto first = read_name(pos);
+    if (!first) return std::nullopt;
+    TableRef ref;
+    if (pos < text.size() && text[pos] == '.') {
+        pos++;
+        auto second = read_name(pos);
+        if (!second) return std::nullopt;
+        ref.db = *first;
+        ref.table = *second;
+    } else {
+        ref.table = *first;
+    }
+    ref.rest = trim_copy(text.substr(pos));
+    return ref;
+}
+
+std::string sql_quoted(const std::string& text) {
+    std::string out = "'";
+    for (char c : text) out += c == '\'' ? std::string("''") : std::string(1, c);
+    return out + "'";
+}
+
+// SHOW [FULL] COLUMNS FROM t [FROM db] [LIKE 'pattern'] and DESCRIBE t [column]: what the engine knows about the columns, in MySQL's shape (Field, Type,
+// [Collation,] Null, Key, Default, Extra [, Privileges, Comment]), read from information_schema.columns
+StringResult show_columns(Executor& exec, TableRef ref, bool full) {
+    std::optional<std::string> like;
+    std::string rest = ref.rest;
+    for (int round = 0; round < 2 && !rest.empty(); round++) {
+        const std::string up = to_upper_str(rest);
+        if (up.rfind("FROM ", 0) == 0 || up.rfind("IN ", 0) == 0) {
+            if (auto db = read_table_ref(rest.substr(rest.find(' ') + 1))) {
+                ref.db = db->table;
+                rest = db->rest;
+            } else {
+                break;
+            }
+        } else if (up.rfind("LIKE ", 0) == 0) {
+            auto quoted = rest.find('\'');
+            auto end = quoted == std::string::npos ? std::string::npos : rest.find('\'', quoted + 1);
+            if (end != std::string::npos) like = rest.substr(quoted + 1, end - quoted - 1);
+            break;
+        } else if (rest.find(' ') == std::string::npos) {
+            like = rest; // DESCRIBE t column
+            break;
+        } else {
+            break;
+        }
+    }
+    std::string sql = std::string("SELECT COLUMN_NAME AS Field, COLUMN_TYPE AS Type, ") + (full ? "COLLATION_NAME AS Collation, " : "") +
+                      "IS_NULLABLE AS `Null`, COLUMN_KEY AS `Key`, COLUMN_DEFAULT AS `Default`, EXTRA AS Extra" +
+                      (full ? ", PRIVILEGES AS Privileges, COLUMN_COMMENT AS Comment" : "") + " FROM information_schema.columns WHERE table_schema = " +
+                      (ref.db ? sql_quoted(*ref.db) : std::string("DATABASE()")) + " AND table_name = " + sql_quoted(ref.table) +
+                      (like ? " AND column_name LIKE " + sql_quoted(*like) : std::string()) + " ORDER BY ORDINAL_POSITION";
+    auto out = exec_inner(exec, sql);
+    if (out.is_ok() && out.value().rfind("0 rows returned", 0) == 0) {
+        if (like) return out;
+        return StringResult::Err("Table '" + (ref.db ? *ref.db + "." : std::string()) + ref.table + "' doesn't exist");
+    }
+    return out;
+}
+
 // ── MySQL-specific compatibility shims ─────────────────────────
 
 std::optional<StringResult> mysql_compat(const std::string& q, Executor& exec) {
@@ -835,8 +976,8 @@ std::optional<StringResult> mysql_compat(const std::string& q, Executor& exec) {
         return StringResult::Ok("");
     }
 
-    if (up == "SELECT VERSION()" || up.rfind("SELECT VERSION() ", 0) == 0 || up == "SELECT @@VERSION" ||
-        up.rfind("SELECT @@VERSION ", 0) == 0) {
+    if (up == "SELECT VERSION()" || up.rfind("SELECT VERSION() AS ", 0) == 0 || up == "SELECT @@VERSION" ||
+        up.rfind("SELECT @@VERSION AS ", 0) == 0) {
         return StringResult::Ok(box_table({"version"}, {{"5.7.0-rusql"}}));
     }
 
@@ -856,40 +997,60 @@ std::optional<StringResult> mysql_compat(const std::string& q, Executor& exec) {
         return StringResult::Ok(box_table({"DATABASE()"}, {{""}}));
     }
 
-    if (up.rfind("SELECT @@", 0) == 0 || (up.rfind("SELECT", 0) == 0 && up.find("@@") != std::string::npos && up.find(" FROM ") == std::string::npos)) {
+    if ((up.rfind("SELECT @@", 0) == 0 || (up.rfind("SELECT", 0) == 0 && up.find("@@") != std::string::npos && up.find(" FROM ") == std::string::npos)) &&
+        only_system_variables(q)) {
         return StringResult::Ok(handle_select_atvars(q, exec));
     }
 
     if (up.rfind("SHOW VARIABLES", 0) == 0 || up.rfind("SHOW SESSION VARIABLES", 0) == 0 || up.rfind("SHOW GLOBAL VARIABLES", 0) == 0) {
-        return StringResult::Ok(show_variables_result(up));
+        return StringResult::Ok(show_variables_result(up, exec));
     }
 
     if (up.rfind("SHOW STATUS", 0) == 0 || up.rfind("SHOW SESSION STATUS", 0) == 0 || up.rfind("SHOW GLOBAL STATUS", 0) == 0) {
-        return StringResult::Ok(box_table({"Variable_name", "Value"}, {}));
+        static const std::vector<std::pair<std::string, std::string>> status = {
+            {"Connections", "1"}, {"Questions", "0"}, {"Threads_connected", "1"}, {"Threads_running", "1"}, {"Uptime", "0"}, {"Queries", "0"},
+        };
+        const auto pattern = like_pattern_of(q);
+        std::vector<std::vector<std::string>> rows;
+        for (auto& [name, value] : status) {
+            if (!pattern || like_match(name, *pattern)) rows.push_back({name, value});
+        }
+        return StringResult::Ok(box_table({"Variable_name", "Value"}, rows));
     }
 
     if (up.rfind("SHOW COLLATION", 0) == 0) {
         std::vector<std::vector<std::string>> rows = {
             {"utf8_general_ci", "utf8", "33", "Yes", "Yes", "1"},
-            {"utf8mb4_general_ci", "utf8mb4", "45", "Yes", "Yes", "1"},
+            {"utf8mb4_general_ci", "utf8mb4", "45", "", "Yes", "1"},
+            {"utf8mb4_0900_ai_ci", "utf8mb4", "255", "Yes", "Yes", "0"},
             {"utf8mb4_unicode_ci", "utf8mb4", "224", "", "Yes", "8"},
             {"latin1_swedish_ci", "latin1", "8", "Yes", "Yes", "1"},
         };
-        return StringResult::Ok(box_table({"Collation", "Charset", "Id", "Default", "Compiled", "Sortlen"}, rows));
+        const auto pattern = like_pattern_of(q);
+        std::vector<std::vector<std::string>> shown;
+        for (auto& row : rows) {
+            if (!pattern || like_match(row[0], *pattern)) shown.push_back(row);
+        }
+        return StringResult::Ok(box_table({"Collation", "Charset", "Id", "Default", "Compiled", "Sortlen"}, shown));
     }
 
     if (up.rfind("SHOW CHARSET", 0) == 0 || up.rfind("SHOW CHARACTER SET", 0) == 0) {
         std::vector<std::vector<std::string>> rows = {
             {"utf8", "UTF-8 Unicode", "utf8_general_ci", "3"},
-            {"utf8mb4", "UTF-8 Unicode", "utf8mb4_general_ci", "4"},
+            {"utf8mb4", "UTF-8 Unicode", "utf8mb4_0900_ai_ci", "4"},
             {"latin1", "cp1252 West European", "latin1_swedish_ci", "1"},
         };
-        return StringResult::Ok(box_table({"Charset", "Description", "Default collation", "Maxlen"}, rows));
+        const auto pattern = like_pattern_of(q);
+        std::vector<std::vector<std::string>> shown;
+        for (auto& row : rows) {
+            if (!pattern || like_match(row[0], *pattern)) shown.push_back(row);
+        }
+        return StringResult::Ok(box_table({"Charset", "Description", "Default collation", "Maxlen"}, shown));
     }
 
     if (up.rfind("SHOW ENGINES", 0) == 0) {
         std::vector<std::vector<std::string>> rows = {
-            {"RuSQL", "DEFAULT", "RuSQL B+Tree Storage Engine", "YES", "YES", "YES"},
+            {"InnoDB", "DEFAULT", "Supports transactions, row-level locking, foreign keys (RuSQL's engine)", "YES", "NO", "YES"},
         };
         return StringResult::Ok(box_table({"Engine", "Support", "Comment", "Transactions", "XA", "Savepoints"}, rows));
     }
@@ -908,10 +1069,81 @@ std::optional<StringResult> mysql_compat(const std::string& q, Executor& exec) {
     }
 
     if (up.rfind("SHOW TABLE STATUS", 0) == 0) {
-        return StringResult::Ok(box_table({"Name", "Engine", "Version", "Row_format", "Rows", "Avg_row_length", "Data_length",
-                                            "Max_data_length", "Index_length", "Data_free", "Auto_increment", "Create_time", "Update_time",
-                                            "Check_time", "Collation", "Checksum", "Create_options", "Comment"},
-                                           {}));
+        // [FROM db] [LIKE 'pattern']: read from information_schema.tables
+        std::optional<std::string> db;
+        if (auto from = up.find(" FROM "); from != std::string::npos) {
+            if (auto ref = read_table_ref(trim_copy(q.substr(from + 6)))) db = ref->table;
+        } else if (auto in = up.find(" IN "); in != std::string::npos) {
+            if (auto ref = read_table_ref(trim_copy(q.substr(in + 4)))) db = ref->table;
+        }
+        const auto pattern = like_pattern_of(q);
+        std::string sql = "SELECT TABLE_NAME AS Name, ENGINE AS Engine, VERSION AS Version, ROW_FORMAT AS Row_format, TABLE_ROWS AS `Rows`, "
+                          "AVG_ROW_LENGTH AS Avg_row_length, DATA_LENGTH AS Data_length, MAX_DATA_LENGTH AS Max_data_length, INDEX_LENGTH AS Index_length, "
+                          "DATA_FREE AS Data_free, AUTO_INCREMENT AS Auto_increment, CREATE_TIME AS Create_time, UPDATE_TIME AS Update_time, "
+                          "CHECK_TIME AS Check_time, TABLE_COLLATION AS Collation, CHECKSUM AS Checksum, CREATE_OPTIONS AS Create_options, "
+                          "TABLE_COMMENT AS Comment FROM information_schema.tables WHERE table_schema = " +
+                          (db ? sql_quoted(*db) : std::string("DATABASE()")) + " AND table_type = 'BASE TABLE'" +
+                          (pattern ? " AND table_name LIKE " + sql_quoted(*pattern) : std::string());
+        auto out = exec_inner(exec, sql);
+        if (out.is_ok() && out.value().rfind("0 rows returned", 0) == 0) {
+            return StringResult::Ok(box_table({"Name", "Engine", "Version", "Row_format", "Rows", "Avg_row_length", "Data_length", "Max_data_length",
+                                                "Index_length", "Data_free", "Auto_increment", "Create_time", "Update_time", "Check_time", "Collation",
+                                                "Checksum", "Create_options", "Comment"},
+                                               {}));
+        }
+        return out;
+    }
+
+    // SHOW CREATE TABLE t / VIEW v: the text of the CREATE statement in one row, as MySQL writes it
+    if (up.rfind("SHOW CREATE TABLE ", 0) == 0) {
+        if (auto ref = read_table_ref(trim_copy(q.substr(std::string("SHOW CREATE TABLE ").size())))) {
+            auto text = exec.show_create_table_mysql(ref->db ? *ref->db + "." + ref->table : ref->table);
+            if (text.is_err()) return text;
+            std::string created = ref->table; // (the name the table has: the text names it)
+            if (auto open = text.value().find('`'); open != std::string::npos) {
+                if (auto close = text.value().find('`', open + 1); close != std::string::npos) created = text.value().substr(open + 1, close - open - 1);
+            }
+            return StringResult::Ok(box_table({"Table", "Create Table"}, {{created, text.value()}}));
+        }
+    }
+    if (up.rfind("SHOW CREATE VIEW ", 0) == 0) {
+        if (auto ref = read_table_ref(trim_copy(q.substr(std::string("SHOW CREATE VIEW ").size())))) {
+            auto text = exec.show_create_view_mysql(ref->db ? *ref->db + "." + ref->table : ref->table);
+            if (text.is_err()) return text;
+            return StringResult::Ok(box_table({"View", "Create View", "character_set_client", "collation_connection"},
+                                               {{ref->table, text.value(), "utf8mb4", "utf8mb4_0900_ai_ci"}}));
+        }
+    }
+
+    // ANALYZE | CHECK | OPTIMIZE TABLE t: the engine does the work and the answer has MySQL's shape (Table, Op, Msg_type, Msg_text)
+    for (const char* verb : {"ANALYZE", "CHECK", "OPTIMIZE"}) {
+        const std::string prefix = std::string(verb) + " TABLE ";
+        if (up.rfind(prefix, 0) != 0 && up.rfind(std::string(verb) + " LOCAL TABLE ", 0) != 0 && up.rfind(std::string(verb) + " NO_WRITE_TO_BINLOG TABLE ", 0) != 0) continue;
+        const std::string tail = trim_copy(q.substr(up.find("TABLE ") + 6));
+        auto ref = read_table_ref(tail);
+        if (!ref) break;
+        const std::string target = ref->db ? *ref->db + "." + ref->table : ref->table;
+        // the table must be there
+        auto there = show_columns(exec, *ref, false);
+        std::string database = ref->db ? *ref->db : std::string();
+        if (database.empty()) {
+            auto current = exec_inner(exec, "SELECT DATABASE()");
+            if (current.is_ok()) {
+                if (auto parsed = parse_table(current.value()); parsed && !parsed->second.empty() && !parsed->second[0].empty()) database = parsed->second[0][0];
+            }
+        }
+        const std::string shown = database + "." + ref->table;
+        const std::string op = to_lower_str(verb);
+        if (there.is_err()) {
+            return StringResult::Ok(box_table({"Table", "Op", "Msg_type", "Msg_text"}, {{shown, op, "Error", "Table '" + shown + "' doesn't exist"}, {shown, op, "status", "Operation failed"}}));
+        }
+        if (std::string(verb) == "ANALYZE") exec_inner(exec, "ANALYZE TABLE " + target);
+        if (std::string(verb) == "OPTIMIZE") {
+            exec_inner(exec, "VACUUM " + target);
+            return StringResult::Ok(box_table({"Table", "Op", "Msg_type", "Msg_text"},
+                                               {{shown, op, "note", "Table does not support optimize, doing recreate + analyze instead"}, {shown, op, "status", "OK"}}));
+        }
+        return StringResult::Ok(box_table({"Table", "Op", "Msg_type", "Msg_text"}, {{shown, op, "status", "OK"}}));
     }
 
     if (up.rfind("SHOW TRIGGERS", 0) == 0) {
@@ -920,64 +1152,58 @@ std::optional<StringResult> mysql_compat(const std::string& q, Executor& exec) {
                                            {}));
     }
 
-    if (up.rfind("SHOW INDEX FROM", 0) == 0 || up.rfind("SHOW INDEXES FROM", 0) == 0 || up.rfind("SHOW KEYS FROM", 0) == 0) {
-        auto tbl_opt = extract_first_from(q);
-        std::vector<std::vector<std::string>> rows;
-        if (tbl_opt) {
-            auto out = exec_inner(exec, "SHOW INDEX FROM " + *tbl_opt);
-            // exec_show_index's native TSV is Table/Key_name/Column_name/Index_type, with a
-            // composite index's columns crammed into one comma-joined Column_name -- expand
-            // that into one row per column (with an incrementing Seq_in_index) to match what
-            // real MySQL's SHOW INDEX returns for a multi-column index.
-            if (out.is_ok()) {
-                if (auto parsed = parse_table(out.value())) {
-                    for (auto& r : parsed->second) {
-                        std::string table_name = r.size() > 0 ? r[0] : *tbl_opt;
-                        std::string key_name = r.size() > 1 ? r[1] : "";
-                        std::string col_list = r.size() > 2 ? r[2] : "";
-                        std::string idx_type = r.size() > 3 ? r[3] : "BTREE";
-                        std::string non_unique = key_name == "PRIMARY" ? "0" : "1";
-                        int seq = 1;
-                        std::size_t start = 0;
-                        for (;;) {
-                            auto comma = col_list.find(", ", start);
-                            std::string col = trim_copy(col_list.substr(start, comma == std::string::npos ? std::string::npos : comma - start));
-                            if (!col.empty()) {
-                                rows.push_back({table_name, non_unique, key_name, std::to_string(seq++), col, "A", "NULL", "NULL",
-                                                 "NULL", "", idx_type, "", ""});
-                            }
-                            if (comma == std::string::npos) break;
-                            start = comma + 2;
-                        }
-                    }
+    if (up.rfind("SHOW INDEX ", 0) == 0 || up.rfind("SHOW INDEXES ", 0) == 0 || up.rfind("SHOW KEYS ", 0) == 0 || up.rfind("SHOW EXTENDED INDEX ", 0) == 0) {
+        // SHOW INDEX FROM t [FROM db]: read from information_schema.statistics (PRIMARY KEY, UNIQUE keys and CREATE INDEX ones, one row per column)
+        std::size_t from = up.find(" FROM ");
+        if (from == std::string::npos) from = up.find(" IN ");
+        if (from != std::string::npos) {
+            if (auto ref = read_table_ref(trim_copy(q.substr(up.find(' ', from + 1) + 1)))) {
+                std::string rest = ref->rest;
+                if (!rest.empty() && (to_upper_str(rest).rfind("FROM ", 0) == 0 || to_upper_str(rest).rfind("IN ", 0) == 0)) {
+                    if (auto db = read_table_ref(rest.substr(rest.find(' ') + 1))) ref->db = db->table;
                 }
+                std::string sql = "SELECT TABLE_NAME AS `Table`, NON_UNIQUE AS Non_unique, INDEX_NAME AS Key_name, SEQ_IN_INDEX AS Seq_in_index, "
+                                  "COLUMN_NAME AS Column_name, COLLATION AS Collation, CARDINALITY AS Cardinality, SUB_PART AS Sub_part, PACKED AS Packed, "
+                                  "NULLABLE AS `Null`, INDEX_TYPE AS Index_type, COMMENT AS Comment, INDEX_COMMENT AS Index_comment, IS_VISIBLE AS Visible, NULL AS Expression "
+                                  "FROM information_schema.statistics WHERE table_schema = " +
+                                  (ref->db ? sql_quoted(*ref->db) : std::string("DATABASE()")) + " AND table_name = " + sql_quoted(ref->table);
+                auto out = exec_inner(exec, sql);
+                if (out.is_ok() && out.value().rfind("0 rows returned", 0) == 0) {
+                    // (no index, or no such table)
+                    auto columns = show_columns(exec, *ref, false);
+                    if (columns.is_err()) return StringResult::Err("Table '" + (ref->db ? *ref->db + "." : std::string()) + ref->table + "' doesn't exist");
+                    return StringResult::Ok(box_table({"Table", "Non_unique", "Key_name", "Seq_in_index", "Column_name", "Collation", "Cardinality",
+                                                        "Sub_part", "Packed", "Null", "Index_type", "Comment", "Index_comment", "Visible", "Expression"},
+                                                       {}));
+                }
+                return out;
             }
         }
-        return StringResult::Ok(box_table({"Table", "Non_unique", "Key_name", "Seq_in_index", "Column_name", "Collation", "Cardinality",
-                                            "Sub_part", "Packed", "Null", "Index_type", "Comment", "Index_comment"},
-                                           rows));
     }
 
     if (up.rfind("SHOW FULL TABLES", 0) == 0) {
-        auto db_opt = extract_first_from(q);
         std::optional<std::string> type_filter;
         if (up.find("'VIEW'") != std::string::npos) type_filter = "VIEW";
         else if (up.find("'BASE TABLE'") != std::string::npos) type_filter = "BASE TABLE";
 
-        std::string tbl_q = db_opt ? "SHOW TABLES FROM " + *db_opt : "SHOW TABLES";
+        // (the engine's SHOW TABLES takes FROM db and LIKE 'pattern' itself)
+        std::string tail = trim_copy(q.substr(std::string("SHOW FULL TABLES").size()));
+        if (auto where = to_upper_str(tail).find("WHERE "); where != std::string::npos) tail = trim_copy(tail.substr(0, where)); // (Table_type is applied below)
+        std::string full_col = "Tables_in_";
         std::vector<std::string> tbl_names;
         {
-            auto out = exec_inner(exec, tbl_q);
+            auto out = exec_inner(exec, tail.empty() ? std::string("SHOW TABLES") : "SHOW TABLES " + tail);
             if (out.is_ok()) {
                 if (auto parsed = parse_table(out.value())) {
+                    if (!parsed->first.empty()) full_col = parsed->first.front();
                     for (auto& row : parsed->second) {
                         if (!row.empty()) tbl_names.push_back(row.front());
                     }
                 }
+            } else {
+                return out;
             }
         }
-
-        std::string full_col = "Tables_in_" + db_opt.value_or("");
 
         std::vector<std::vector<std::string>> rows;
         for (auto& name : tbl_names) {
@@ -987,38 +1213,41 @@ std::optional<StringResult> mysql_compat(const std::string& q, Executor& exec) {
         return StringResult::Ok(box_table({full_col, "Table_type"}, rows));
     }
 
-    if (up.rfind("SHOW FULL COLUMNS", 0) == 0 || up.rfind("SHOW COLUMNS", 0) == 0) {
-        auto tbl_opt = extract_first_from(q);
-        auto db_opt = extract_second_from(q);
-        if (!tbl_opt) {
-            return StringResult::Ok(
-                box_table({"Field", "Type", "Collation", "Null", "Key", "Default", "Extra", "Privileges", "Comment"}, {}));
-        }
-        std::string desc_q = db_opt ? "DESCRIBE " + *db_opt + "." + *tbl_opt : "DESCRIBE " + *tbl_opt;
-        std::vector<std::string> cols;
-        std::vector<std::vector<std::string>> rows;
-        {
-            auto out = exec_inner(exec, desc_q);
-            if (out.is_ok()) {
-                if (auto parsed = parse_table(out.value())) {
-                    cols = parsed->first;
-                    rows = parsed->second;
-                }
-            }
-        }
-        auto get = [&](const std::vector<std::string>& row, const std::string& name) -> std::string {
-            for (std::size_t i = 0; i < cols.size(); i++) {
-                if (to_lower_str(cols[i]) == to_lower_str(name)) return i < row.size() ? row[i] : std::string();
-            }
-            return "";
+    // SHOW [FULL] COLUMNS|FIELDS FROM t [FROM db], DESCRIBE|DESC|EXPLAIN t [column]: MySQL's shape of the columns of a table
+    {
+        auto after = [&](std::size_t n) { return trim_copy(q.substr(n)); };
+        const auto not_a_statement = [](const std::string& word) {
+            return word == "SELECT" || word == "INSERT" || word == "UPDATE" || word == "DELETE" || word == "REPLACE" || word == "WITH" ||
+                   word == "ANALYZE" || word == "FORMAT" || word == "EXTENDED" || word == "PARTITIONS" || word == "TABLE" || word == "(";
         };
-        std::vector<std::vector<std::string>> new_rows;
-        for (auto& row : rows) {
-            new_rows.push_back({get(row, "Field"), get(row, "Type"), "utf8mb4_general_ci", get(row, "Null"), get(row, "Key"),
-                                 get(row, "Default"), get(row, "Extra"), "select,insert,update,references", ""});
+        auto first_word = [](const std::string& text) {
+            std::size_t end = text.find_first_of(" \t\r\n(");
+            return to_upper_str(text.substr(0, end == std::string::npos ? text.size() : end == 0 ? 1 : end));
+        };
+        std::size_t consumed = 0;
+        bool full = false;
+        bool match = false;
+        for (const char* prefix : {"SHOW FULL COLUMNS ", "SHOW FULL FIELDS ", "SHOW COLUMNS ", "SHOW FIELDS "}) {
+            if (up.rfind(prefix, 0) == 0) {
+                const std::string tail = after(std::string(prefix).size());
+                const std::string keyword = first_word(tail);
+                if (keyword == "FROM" || keyword == "IN") {
+                    consumed = std::string(prefix).size() + keyword.size();
+                    full = std::string(prefix).find("FULL") != std::string::npos;
+                    match = true;
+                }
+                break;
+            }
         }
-        return StringResult::Ok(
-            box_table({"Field", "Type", "Collation", "Null", "Key", "Default", "Extra", "Privileges", "Comment"}, new_rows));
+        for (const char* prefix : {"DESCRIBE ", "DESC ", "EXPLAIN "}) {
+            if (!match && up.rfind(prefix, 0) == 0 && !not_a_statement(first_word(after(std::string(prefix).size())))) {
+                consumed = std::string(prefix).size();
+                match = true;
+            }
+        }
+        if (match) {
+            if (auto ref = read_table_ref(after(consumed))) return show_columns(exec, *ref, full);
+        }
     }
 
     return std::nullopt;
@@ -1178,7 +1407,7 @@ void handle_mysql_client(SOCKET sock, std::shared_ptr<RwLock<SharedDatabase>> sh
                     } else if (auto parsed = parse_table(out)) {
                         send_resultset(sock, parsed->first, parsed->second, 1);
                     } else {
-                        write_packet(sock, 1, ok_pkt(affected_rows(out)));
+                        write_packet(sock, 1, ok_pkt(affected_rows(out), exec.statement_insert_id()));
                     }
                 }
                 break;
@@ -1225,7 +1454,7 @@ void handle_mysql_client(SOCKET sock, std::shared_ptr<RwLock<SharedDatabase>> sh
                     } else if (auto parsed = parse_table(out)) {
                         send_resultset(sock, parsed->first, parsed->second, 1);
                     } else {
-                        write_packet(sock, 1, ok_pkt(affected_rows(out)));
+                        write_packet(sock, 1, ok_pkt(affected_rows(out), exec.statement_insert_id()));
                     }
                 }
                 break;

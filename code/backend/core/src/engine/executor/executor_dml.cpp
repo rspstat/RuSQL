@@ -821,6 +821,10 @@ StringResult Executor::exec_insert_inner(SharedDatabase& s, const std::string& t
                 counter += 1;
                 final_values[i] = std::to_string(counter);
                 any_auto_increment_allocated = true;
+                if (insert_id_unset_) { // the first number this INSERT gave out is what LAST_INSERT_ID() says
+                    last_insert_id_ = statement_insert_id_ = static_cast<std::uint64_t>(counter);
+                    insert_id_unset_ = false;
+                }
                 counter_takes.push_back({col_names[i], before, counter});
             }
         }

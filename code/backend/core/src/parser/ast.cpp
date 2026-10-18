@@ -164,6 +164,8 @@ Statement::Statement(const Statement& other)
                   return Data(Except{clone_ptr(alt.left), clone_ptr(alt.right), alt.all, alt.order_by, alt.limit, alt.offset});
               } else if constexpr (std::is_same_v<T, SelectInto>) {
                   return Data(SelectInto{clone_ptr(alt.query), alt.vars});
+              } else if constexpr (std::is_same_v<T, CreateTableAs>) {
+                  return Data(CreateTableAs{alt.name, alt.if_not_exists, alt.columns, clone_ptr(alt.query)});
               } else {
                   // Remaining ~71 variants contain no direct unique_ptr<Statement> field (Vec<Statement>
                   // body fields copy fine via std::vector's own copy ctor, which recurses into this one).

@@ -1848,6 +1848,40 @@ VS Code 스타일 탭 드래그 순서 변경(요청의 1번 항목)은 같은 �
 
 **한계**: ① 기본키 없는 표는 `UPDATE` 뒤에 갱신한 행이 끝에 나온다(InnoDB는 숨은 행 번호로 제자리); 조인의 둘째 표 이하와 플래너가 구동 표를 바꾼 내부 조인의 순서는 MySQL과 다를 수 있다. ② 세 부분 열 이름 `db.t.col`, `SHOW TABLES LIKE`/`FROM db`, `SELECT @x := 식`(select 안의 대입), `information_schema`에 대한 `COUNT(*)`(0행이 나옴), 윈도 함수·`GROUP_CONCAT(… ORDER BY …)`·행 비교·`||` 식의 결과 열 머리글(MySQL은 쓴 글자 그대로, 여기는 풀어쓴 글자 — 값은 같음)은 이 항목 밖이다. ③ 저장 프로시저·트리거 본문 안의 `IF`/`WHILE` 조건에 든 서브쿼리의 표 이름은 실행할 때 고치지 않는다.
 
+### 10월 18일 (두 번째) — 진짜 MySQL 클라이언트가 보내는 문장들: DDL 여러 형태, 여러 동작의 `ALTER`, 세션 함수, `autocommit = 0`, `information_schema`, MySQL 프로토콜 계층 (R37)
+
+**왜 이 항목인가**: 사용자 "계속 버그 수정 진행합니다". R32~R36을 닫은 뒤, DBeaver·`mysql` CLI·ORM·mysqldump가 실제로 보내는 문장 형태를 진짜 MySQL 8.4.9와 나란히 돌려(탐색 질의 `probe_x1`~`probe_x3`, `probe_b1`) 차이를 찾았다. 차이가 나오는 대로 닫고, 같은 문장을 `corpus/tables.sql`에 142줄(setup 10 + 비교 132) 더해 MySQL의 답을 `mysql_conformance_tables.inc`에 기록했다(기존 줄의 답은 한 글자도 바뀌지 않음 — 새 파일이 옛 파일로 시작함을 확인).
+
+**DDL 형태** (전부 전에는 파싱 오류였다)
+- `CREATE TABLE t LIKE s`(열·기본값·키를 복사, 행은 없음), `CREATE TABLE [IF NOT EXISTS] t [(열 정의 …)] AS SELECT …`(원본 열이 있으면 그 타입 그대로, 계산 열은 값에서 정수 → `BIGINT`, 소수 → `DECIMAL(30, 자릿수)`, 그 밖 → `TEXT`), `RENAME TABLE a TO b, c TO d`, `DROP TABLE a, b`(하나라도 없으면 아무것도 지우지 않음; `IF EXISTS`면 있는 것만), `TRUNCATE t`(`TABLE` 생략).
+- `ALTER TABLE`의 **여러 동작을 쉼표로**: `ADD COLUMN … FIRST | AFTER c`, `MODIFY`/`CHANGE [COLUMN] … FIRST | AFTER c`, `ALTER COLUMN c SET DEFAULT v | DROP DEFAULT`, `ADD INDEX | KEY [이름] (열, …)`, 표 옵션 `ENGINE=…`; `ALTER VIEW v AS SELECT …`.
+- `CREATE TABLE` 안의 `KEY | INDEX [이름] (열, …)` 줄이 색인으로 만들어진다(`information_schema.statistics`·`SHOW CREATE TABLE`에 나옴). 괄호 친 집합 연산 `(SELECT …) UNION (SELECT …) ORDER BY …`(`Parser::drop_parentheses_around_operands`), `JOIN db.표 [별칭]`, 세 부분 열 이름 `db.t.col`.
+- **여러 동작의 `ALTER`는 전부 되거나 전혀 안 된다**: 처음 만든 판은 동작을 차례로 적용해 `ADD COLUMN a, ADD COLUMN A`가 "Duplicate column name"으로 실패해도 앞의 `a`가 남았다(비교 코퍼스의 `SELECT *`가 열 하나 더 가진 것으로 발견). 이제 `alter_actions_error`(`executor_ddl.cpp`)가 MySQL의 규칙대로 먼저 검사한다: `DROP`/`CHANGE`/`MODIFY`/`RENAME COLUMN`/`ALTER COLUMN`은 **문장 앞의 표**에 있던 열만 가리킬 수 있고(같은 문장에서 방금 더한 열은 오류, 진짜 MySQL이 `ADD COLUMN c INT, ALTER COLUMN c SET DEFAULT 4`를 거절하는 것을 확인), 새 이름은 그때까지의 이름과 겹치면 안 되며, 색인은 방금 더한 열도 가리킬 수 있다.
+- **함께 찾아 고친 기존 버그**: ① `ALTER TABLE t DROP COLUMN 없는열`이 오류 없이 "dropped"라고 답함(MySQL 1091 "Can't DROP"), `RENAME COLUMN 없는열 TO x`도 같음; ② **`MODIFY`/`CHANGE COLUMN`이 그 열의 `UNIQUE KEY`를 지웠다**(새 정의에 `UNIQUE`가 없다고 열의 `unique`를 덮어씀 — MySQL에서 UNIQUE KEY는 열 정의와 별개의 색인이라 남는다) → 같은 값이 다시 들어가는 무결성 구멍; ③ `MODIFY … AFTER 없는열`이 타입을 바꾼 **뒤에** 오류를 냄.
+
+**세션 기능**
+- `LAST_INSERT_ID()`(문장이 만든 첫 번호; 값을 직접 준 INSERT는 바꾸지 않음), `LAST_INSERT_ID(식)`, `ROW_COUNT()`(마지막 쓰기 문장의 행 수, 읽기 뒤에는 -1), `FOUND_ROWS()`와 `SELECT SQL_CALC_FOUND_ROWS …`(LIMIT 없이 한 번 더 세어 기록). 질의 캐시가 이 함수들의 답을 저장하지 않게 비결정 함수 목록에 더함.
+- **`SET autocommit = 0`**: 첫 쓰기 문장(또는 잠그는 읽기)이 트랜잭션을 시작하고 `COMMIT`/`ROLLBACK`/`SET autocommit = 1`이 끝낸다; `CREATE`/`DROP`/`ALTER`/`TRUNCATE`/`RENAME`은 열린 트랜잭션을 먼저 커밋한다(MySQL의 암묵 커밋). 전에는 설정만 기억하고 모든 문장이 즉시 커밋되었다.
+- `SELECT … FOR UPDATE | FOR SHARE | LOCK IN SHARE MODE`가 트랜잭션 밖에서는 오류 대신 일반 읽기(autocommit에서는 잠금이 곧 풀리므로 MySQL과 같은 결과), `NOWAIT`·`SKIP LOCKED`는 받아서 무시. 기본 시스템 변수를 더 채움.
+
+**`information_schema`를 표처럼 읽는다**: `TABLES`·`COLUMNS`·`STATISTICS` 등이 MySQL의 열 순서로 임시 표(파생 테이블과 같은 방식)가 되어 `WHERE`·`GROUP BY`·집계·`COUNT(*)`(전에는 0행)·`JOIN`(두 `information_schema` 표끼리 포함)이 그냥 된다. `COLUMN_KEY`는 `PRI`/`UNI`/`MUL`, `STATISTICS`는 기본키·UNIQUE·보조·해시·복합 색인과 카디널리티(살아 있는 서로 다른 값 수, 기본 정렬 규칙으로), `ENGINE`은 InnoDB. `SHOW TABLES [FROM db] [LIKE '패턴']`.
+
+**윈도 함수와 머리글**: `COUNT(*) OVER ()`(옆의 `COUNT(col) OVER ()`와 함께), `LAG`/`LEAD(c, n, 기본값)`, `PERCENT_RANK`/`CUME_DIST`는 DOUBLE의 최단 표기(`0.3333333333333333`, 한 행이면 `0`); 별칭 없는 윈도 함수와 `ORDER BY`/`SEPARATOR`가 있는 `GROUP_CONCAT`의 결과 열 머리글이 쓴 글자 그대로(`Token::begin`/`end`로 원문 조각을 잘라 씀; R36의 한계 ②).
+
+**함수**: `TIME_FORMAT`, `ADDTIME`, `SUBTIME`, `TIMEDIFF`, `PERIOD_ADD`, `PERIOD_DIFF`, `YEARWEEK`, `TO_SECONDS`, `BIT_COUNT`, `QUOTE`, `EXPORT_SET`, `MAKE_SET`, `REGEXP_INSTR`, `UTC_DATE`/`UTC_TIME`/`UTC_TIMESTAMP`, `SLEEP`; `UNIX_TIMESTAMP`/`FROM_UNIXTIME`은 시스템 시간대를 쓴다. 트리거의 `NEW.col`이 열 타입으로 맞춰진 값이 된다(`DECIMAL(10,2)`에서 `100 → 101`이 아니라 `100.00 → 101.00`).
+
+**MySQL 프로토콜 계층(`server/src/mysql.cpp`)**: 클라이언트가 접속하며 보내는 문장을 엔진의 `information_schema` 질의와 새 `show_create_table_mysql`/`show_create_view_mysql` 위에 올렸다 — `SHOW COLUMNS | FIELDS`, `SHOW INDEX | KEYS`, `SHOW TABLE STATUS`, `SHOW CREATE TABLE | VIEW`(MySQL 8.4 형식: 백틱, `CONSTRAINT 표_ibfk_N`, `ENGINE=InnoDB AUTO_INCREMENT=n DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci`), `SHOW VARIABLES`의 값들, OK 패킷의 affected rows와 last insert id, `UNHEX('FF')` 같은 이진 값을 가진 열을 이진 열로 표시(전에는 연결이 어긋남). 비교 도구에 `vs_mysql.py --proto`(pymysql로 RuSQL의 MySQL 포트를 직접 두드림)와 코퍼스 `corpus/protocol.sql`(86문장)을 더했다.
+
+**검증**
+- 신규 시험 `test_ddl_session_forms.cpp`(10 케이스 · 214 assertions: DDL 형태, 여러 동작 ALTER의 원자성, `MODIFY`가 UNIQUE를 지키는지, `JOIN db.표`, 세션 함수, autocommit, `information_schema`, 윈도, 함수, 트리거); `test_executor_select.cpp`(트랜잭션 밖의 `FOR UPDATE`가 이제 성공)와 `test_null_expressions.cpp`(`FROM_UNIXTIME` 시험의 시간대를 UTC로 고정) 두 곳을 고침.
+- **진짜 MySQL 8.4.9와 비교**: 새 코퍼스 142줄 — 표 코퍼스 전체(696줄)에서 남은 차이 8곳은 모두 이 항목 밖의 옛 것뿐(값 앞뒤 공백을 잃는 상자 출력, DOUBLE 열의 `SUM`/`AVG`가 정확한 십진수라 `118` 대 `118.0`, `WITH ROLLUP`). 기존 코퍼스 4개는 앞 빌드와 같은 결과(표 8 · 제약 7 · 함수 5 · 정렬 5곳); `--proto`로 `protocol.sql` 86문장은 4곳(아래 한계 ⑤).
+- 심은 버그 25종(DDL 검사기 8 · autocommit·세션 카운터 5 · 함수 6 · 윈도·트리거·`information_schema`·`FOR UPDATE`·`JOIN db.표` 6): 처음 23종이 잡혔고 나머지 둘은 시험을 더해 잡음 — `YEARWEEK`의 연초·연말 주(`| 2` 플래그: 진짜 MySQL이 `YEARWEEK('2024-01-01')`에 `202353`을 주는 것)와, 트랜잭션 밖의 `FOR UPDATE`가 잠금을 남기는 것(두 세션 시험을 더함: 다른 세션의 `UPDATE`가 기다리다 실패했을 것).
+- 전체 시험 **729 케이스 / 1,481,940 assertions**을 Release 기본으로, 강제로(1,481,940) 통과; Debug 전체 기본(캐시 점검 모드 1,481,941)·강제(1,481,941) 통과; 빌드 간 차분(앞 빌드 = R32~R36의 `c9dfed6`) 10시드 × 99질의 차이 0건.
+- 같은 빌드로: 모델 검증기 열한 가지(`verify_agg_arguments`·`agg_expressions`·`aggregates`·`compare`·`correlated`·`joins`·`null_expressions`·`orderby_distinct`·`sort_group`·`subqueries`·`value_expressions`) 위반 0; `verify_writes.py` 시드 1~8 위반 0; `dump_roundtrip.py`(진짜 `mysqldump` 파일 둘, 102문장과 85문장) 거절 0·행이 모두 같고 mysql 클라이언트 오류 0; 크래시 퍼저 — 외래키 90라운드(시드 6000~6089, 캐시 점검 모드)·일반 60라운드·동시성 40라운드(확인한 행 21,723) 불일치 0.
+- **속도** (`code/test/perf`, 5만 행·앞 빌드와 번갈아 두 번씩): 스캔·집계·`GROUP BY`·`DISTINCT`·`ORDER BY`·조인 15가지의 중앙값이 앞 빌드와 같다(앞 빌드 → 이 빌드, 두 번씩: `COUNT(*)` 23.2 / 23.0 → 23.3 / 23.0 ms, `GROUP BY` 38.1 / 39.8 → 36.3 / 36.9 ms, 조인 5만 행 출력 280 / 251 → 251 / 255 ms — 오차 안); 단건 INSERT/DELETE 1만 건(7.4~7.6 s)·bulk 10만 건(0.82~0.84 s)·점 조회(색인 0.12 ms)·트랜잭션 처리량도 그대로.
+
+**한계**: ① **MySQL 프로토콜이 모든 열을 문자열(VARSTRING)로 보낸다** — 파이썬 클라이언트는 `1`을 정수가 아니라 `'1'`로 받는다(다음 후보: 열 타입을 알려 주기). ② `SUM`/`AVG`의 DECIMAL 자릿수(`SUM(pay)`가 `30.7500`, MySQL은 `30.75`; `pay * 2`가 `20.5`, MySQL은 `20.50`). ③ `SELECT @x := 식`(select 안의 대입), `SUM(SUM(x)) OVER ()`, `INTERVAL()`, `GET_FORMAT`, `ALTER … ADD/DROP PRIMARY KEY`, `WITH ROLLUP`. ④ 상자 표 출력이 값 앞뒤의 공백을 잃는다(`' x '` → `x`; 그 값을 `UPPER`·`SUBSTRING`·`TRIM` 등에 넣은 결과가 달라짐). ⑤ `SHOW TABLE STATUS`의 이름·엔진·행 수 말고 다른 값, `SHOW ENGINES`(엔진 하나), `SHOW COLLATION`의 `Pad_attribute` 열, `@@version`(핸드셰이크와 같게 `5.7.0-rusql`, 일부러), `tinyint(1)` 표시 폭. ⑥ 기본키 없는 표의 `UPDATE` 뒤 행 순서(R34의 한계 ①)는 그대로.
+
 ## 요약: 1학기 대비 2학기에 달라진 것
 
 | 항목 | 1학기 (~2026년 6월) | 2학기 (2026년 7~8월) |

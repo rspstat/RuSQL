@@ -459,6 +459,7 @@ struct SelectColumn {
         std::optional<std::string> alias;
         std::optional<WindowFrame> frame;
         ValueClass col_class = ValueClass::Unknown;
+        std::optional<std::string> default_value; // LAG(c, n, default) / LEAD(c, n, default): what a row too near the end gets (none: NULL)
     };
     struct Subquery {
         StatementPtr query;
@@ -482,11 +483,17 @@ struct SelectColumn {
 // ---------------------------------------------------------------------------
 // AlterAction
 // ---------------------------------------------------------------------------
+// where ADD / MODIFY / CHANGE COLUMN puts a column: FIRST, or AFTER another column (none: at the end for ADD, where it is for MODIFY / CHANGE)
+struct ColumnPosition {
+    bool first = false;
+    std::optional<std::string> after;
+};
+
 struct AlterAction {
-    struct AddColumn { ColumnDef column; };
+    struct AddColumn { ColumnDef column; std::optional<ColumnPosition> position; };
     struct DropColumn { std::string name; };
     struct RenameColumn { std::string from, to; };
-    struct ModifyColumn { ColumnDef column; };
+    struct ModifyColumn { ColumnDef column; std::optional<ColumnPosition> position; };
     struct RenameTable { std::string to; };
     struct AddForeignKey {
         std::optional<std::string> name;
@@ -506,10 +513,14 @@ struct AlterAction {
     struct DropPartition { std::string name; };
     // ALTER TABLE ... DISABLE KEYS / ENABLE KEYS (a dump wraps its INSERTs in them): nothing to do here, the indexes are always kept
     struct NoOp {};
+    struct AddIndex { std::optional<std::string> name; std::vector<std::string> columns; };               // ADD INDEX|KEY [name] (a, b)
+    struct ChangeColumn { std::string from; ColumnDef column; std::optional<ColumnPosition> position; };   // CHANGE [COLUMN] old new definition
+    struct SetDefault { std::string column; std::optional<std::string> value; };                            // ALTER COLUMN c SET DEFAULT v / DROP DEFAULT (no value)
 
     using Data = std::variant<AddColumn, DropColumn, RenameColumn, ModifyColumn, RenameTable,
                                AddForeignKey, DropForeignKey, AddUniqueConstraint,
-                               AddCheckConstraint, DropConstraint, AddPartition, DropPartition, NoOp>;
+                               AddCheckConstraint, DropConstraint, AddPartition, DropPartition, NoOp,
+                               AddIndex, ChangeColumn, SetDefault>;
     Data data;
 
     AlterAction() : data(DropColumn{}) {}
@@ -538,7 +549,10 @@ struct Statement {
         std::optional<std::int64_t> auto_increment_start; // the table option AUTO_INCREMENT = n: the next number of the AUTO_INCREMENT column
         std::vector<UniqueKey> indexes; // KEY name (a, b) / INDEX ...: the (not unique) indexes of the table
     };
-    struct DropTable { std::string name; bool if_exists = false; };
+    struct DropTable { std::string name; bool if_exists = false; std::vector<std::string> more; }; // DROP TABLE a, b, c: `more` are the tables after the first
+    struct CreateTableLike { std::string name; std::string source; bool if_not_exists = false; };      // CREATE TABLE t LIKE s
+    struct CreateTableAs { std::string name; bool if_not_exists = false; std::vector<ColumnDef> columns; StatementPtr query; }; // CREATE TABLE t [(columns)] [AS] SELECT ...
+    struct RenameTable { std::vector<std::pair<std::string, std::string>> pairs; };                    // RENAME TABLE a TO b [, c TO d]
     struct TruncateTable { std::string name; };
     struct Insert {
         std::string table;
@@ -596,7 +610,7 @@ struct Statement {
         std::vector<OrderBy> order_by;      // DELETE ... ORDER BY ... LIMIT n
         std::optional<std::size_t> limit;
     };
-    struct AlterTable { std::string table; AlterAction action; };
+    struct AlterTable { std::string table; AlterAction action; std::vector<AlterAction> more; }; // ALTER TABLE t a1, a2: `more` are the actions after the first
     struct CreateIndex {
         std::string index_name;
         std::string table;
@@ -606,7 +620,7 @@ struct Statement {
     struct DropIndex { std::string index_name; std::optional<std::string> table; }; // DROP INDEX name [ON table]
     struct CreateView { std::string name; StatementPtr query; std::string raw_sql; };
     struct DropView { std::string name; };
-    struct ShowTables {};
+    struct ShowTables { std::optional<std::string> database; std::optional<std::string> like; }; // SHOW TABLES [FROM db] [LIKE 'pattern']
     struct Describe { std::string table; };
     struct ShowBufferPool {};
     struct ShowWal {};
@@ -774,7 +788,8 @@ struct Statement {
         CreateProcedure, CallProcedure, CreateTrigger, DropTrigger, DropProcedure, Backup,
         Restore, ShowProcessList, CreateFunction, DropFunction, ProcDeclare, ProcSet, ProcIf,
         ProcWhile, ProcLoop, ProcRepeat, ProcLeave, ProcIterate, PrepareStmt, ExecuteStmt,
-        DeallocatePrepare, SetUserVar, LockTables, UnlockTables, SelectInto, SetVars>;
+        DeallocatePrepare, SetUserVar, LockTables, UnlockTables, SelectInto, SetVars,
+        CreateTableLike, CreateTableAs, RenameTable>;
     Data data;
 
     Statement() : data(Begin{}) {}

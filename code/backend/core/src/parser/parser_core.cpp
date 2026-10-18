@@ -16,9 +16,50 @@ std::string to_upper(const std::string& s) {
 }
 } // namespace
 
-Parser::Parser(const std::string& input, bool pipes_as_concat) {
+// (SELECT ...) UNION (SELECT ...): the parentheses around an operand of a set operation (or around the whole query) change nothing unless the operand has its
+// own ORDER BY / LIMIT, so they are taken out; a group that does have one is left, and is refused as it always was
+static void drop_parentheses_around_operands(std::vector<Token>& tokens) {
+    auto is_set_operator = [](TokenKind k) { return k == TokenKind::Union || k == TokenKind::Intersect || k == TokenKind::Except; };
+    std::size_t i = 0;
+    while (i < tokens.size()) {
+        const bool after_operator = i == 0 || is_set_operator(tokens[i - 1].kind) || (tokens[i - 1].kind == TokenKind::All && i >= 2 && is_set_operator(tokens[i - 2].kind));
+        if (tokens[i].kind != TokenKind::LParen || !after_operator || i + 1 >= tokens.size() || tokens[i + 1].kind != TokenKind::Select) {
+            i++;
+            continue;
+        }
+        // the matching ')', and whether the group has an ORDER BY / LIMIT / OFFSET of its own at its top level
+        int depth = 0;
+        std::size_t close = i;
+        bool own_order = false;
+        for (std::size_t k = i; k < tokens.size(); k++) {
+            if (tokens[k].kind == TokenKind::LParen) depth++;
+            else if (tokens[k].kind == TokenKind::RParen && --depth == 0) { close = k; break; }
+            else if (depth == 1 && (tokens[k].kind == TokenKind::Order || tokens[k].kind == TokenKind::Limit || tokens[k].kind == TokenKind::Offset)) own_order = true;
+        }
+        const bool closed = close > i && tokens[close].kind == TokenKind::RParen;
+        const bool followed_by_more = close + 1 >= tokens.size() || is_set_operator(tokens[close + 1].kind) || tokens[close + 1].kind == TokenKind::Order ||
+                                      tokens[close + 1].kind == TokenKind::Limit || tokens[close + 1].kind == TokenKind::Semicolon || tokens[close + 1].kind == TokenKind::RParen;
+        if (!closed || own_order || !followed_by_more) {
+            i++;
+            continue;
+        }
+        tokens.erase(tokens.begin() + static_cast<std::ptrdiff_t>(close));
+        tokens.erase(tokens.begin() + static_cast<std::ptrdiff_t>(i));
+        // (stay at i: the token that is there now may open another group)
+    }
+}
+
+std::string Parser::source_between(std::size_t from, std::size_t to) const {
+    if (from >= to || to > tokens_.size()) return "";
+    const std::size_t begin = tokens_[from].begin, end = tokens_[to - 1].end;
+    if (end <= begin || end > source_.size()) return "";
+    return source_.substr(begin, end - begin);
+}
+
+Parser::Parser(const std::string& input, bool pipes_as_concat) : source_(input) {
     Lexer lexer(input);
     tokens_ = lexer.tokenize();
+    drop_parentheses_around_operands(tokens_);
     if (!pipes_as_concat) {
         for (Token& t : tokens_) {
             if (t.kind == TokenKind::PipePipe) t.kind = TokenKind::Or; // a || b is a OR b
@@ -123,7 +164,11 @@ std::optional<std::string> Parser::parse_table_alias() {
         advance();
         return expect_alias_ident();
     }
-    if (peek_is(TokenKind::Ident)) return expect_ident();
+    if (peek_is(TokenKind::Ident)) {
+        // (`t LOCK IN SHARE MODE` is no alias called LOCK)
+        if (to_upper(peek()->text) == "LOCK" && peek_at_is(1, TokenKind::In)) return std::nullopt;
+        return expect_ident();
+    }
     return std::nullopt;
 }
 
@@ -188,7 +233,13 @@ std::string Parser::expect_col_ref() {
     if (peek_is(TokenKind::Dot)) {
         advance();
         std::string col = expect_any_name();
-        return first + "." + col; // table.column 전체 보존
+        std::string name = first + "." + col; // table.column 전체 보존
+        // database.table.column
+        if (peek_is(TokenKind::Dot) && peek_at(1) && peek_at(1)->kind != TokenKind::Asterisk && peek_at(1)->kind != TokenKind::LParen) {
+            advance();
+            name += "." + expect_any_name();
+        }
+        return name;
     }
     return first;
 }
@@ -435,10 +486,13 @@ Statement Parser::parse_stmt() {
             Statement inner = parse_stmt();
             return Statement(Statement::Explain{std::make_unique<Statement>(std::move(inner))});
         }
-        case TokenKind::Alter:    return parse_alter();
+        case TokenKind::Alter:
+            if (peek_is(TokenKind::View)) { advance(); return parse_create_view(); } // ALTER VIEW v AS SELECT ... (a view is made again)
+            return parse_alter();
         case TokenKind::Show:     return parse_show();
         case TokenKind::Describe: return parse_describe();
         case TokenKind::Truncate: return parse_truncate();
+        case TokenKind::Rename: return parse_rename();
         case TokenKind::Checkpoint: return Statement(Statement::Checkpoint{});
         case TokenKind::Set:      return parse_set();
         case TokenKind::Vacuum:   return parse_vacuum();

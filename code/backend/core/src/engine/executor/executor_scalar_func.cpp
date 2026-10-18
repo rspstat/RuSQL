@@ -302,12 +302,24 @@ std::string json_extract(const std::string& json_str, const std::string& path_in
 const std::unordered_map<std::string, std::size_t>& null_propagating_functions() {
     static const std::unordered_map<std::string, std::size_t> table = {
         {"MD5", 1}, {"FROM_UNIXTIME", 1}, {"UNIX_TIMESTAMP", 1}, {"JSON_UNQUOTE", 1}, {"JSON_EXTRACT", 2}, {"JSON_VALUE", 2},
-        {"REGEXP_LIKE", 2}, {"REGEXP", 2}, {"REGEXP_MATCH", 2}, {"REGEXP_SUBSTR", 2}, {"REGEXP_REPLACE", 3},
+        {"REGEXP_LIKE", 2}, {"REGEXP", 2}, {"REGEXP_MATCH", 2}, {"REGEXP_SUBSTR", 2}, {"REGEXP_INSTR", 2}, {"REGEXP_REPLACE", 3},
     };
     return table;
 }
 
 } // namespace
+
+namespace {
+thread_local std::uint64_t g_last_insert_id = 0;
+thread_local std::int64_t g_row_count = -1;
+thread_local std::uint64_t g_found_rows = 0;
+} // namespace
+
+void Executor::sync_session_counters(std::uint64_t last_insert_id, std::int64_t row_count, std::uint64_t found_rows) {
+    g_last_insert_id = last_insert_id;
+    g_row_count = row_count;
+    g_found_rows = found_rows;
+}
 
 void Executor::sync_udf_context(const std::unordered_map<std::string, UserFunctionDef>& user_functions, const std::string& current_db,
                                  const std::string& current_user) {
@@ -455,6 +467,37 @@ std::string Executor::apply_scalar_func(const std::string& typed_name, const std
         }
         return EXECUTOR_NULL_VALUE;
     }
+    if (func_name == "REGEXP_INSTR") { // the position (1 for the first character) where the pattern matches, 0 when it does not
+        std::string val = arg_at(0), pat = arg_at(1);
+        try {
+            std::smatch m;
+            std::regex re(pat, std::regex::ECMAScript | std::regex::icase);
+            if (std::regex_search(val, m, re)) return std::to_string(m.position(0) + 1);
+        } catch (...) {
+        }
+        return "0";
+    }
+    if (func_name == "LAST_INSERT_ID") {
+        if (args.empty()) return std::to_string(g_last_insert_id);
+        // LAST_INSERT_ID(expr): the value of expr, which LAST_INSERT_ID() then says
+        const std::string value = arg_at(0);
+        if (value == EXECUTOR_NULL_VALUE) return value;
+        if (StatementContext* c = statement_context_) {
+            if (auto number = parse_i64(value)) c->ex->last_insert_id_ = static_cast<std::uint64_t>(*number);
+        }
+        return value;
+    }
+    if (func_name == "ROW_COUNT") return std::to_string(g_row_count);
+    if (func_name == "FOUND_ROWS") return std::to_string(g_found_rows);
+    if (func_name == "SLEEP") return "0"; // (it does not wait: the server answers every connection from one lock)
+    if (func_name == "UTC_DATE" || func_name == "UTC_TIME" || func_name == "UTC_TIMESTAMP") {
+        std::time_t t = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
+        std::tm tm_buf{};
+        gmtime_s(&tm_buf, &t);
+        char buf[32];
+        std::strftime(buf, sizeof(buf), func_name == "UTC_DATE" ? "%Y-%m-%d" : (func_name == "UTC_TIME" ? "%H:%M:%S" : "%Y-%m-%d %H:%M:%S"), &tm_buf);
+        return buf;
+    }
     if (func_name == "RAND") {
         auto now = std::chrono::system_clock::now().time_since_epoch();
         auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(now).count() % 1000000000;
@@ -485,19 +528,26 @@ std::string Executor::apply_scalar_func(const std::string& typed_name, const std
         }
         auto dt = parse_datetime(arg_at(0));
         if (!dt) return EXECUTOR_NULL_VALUE;
-        return std::to_string(to_sys_seconds(*dt).time_since_epoch().count());
+        // the session's time zone is the system's (@@time_zone = SYSTEM): the date is local time
+        std::tm local{};
+        local.tm_year = dt->y - 1900;
+        local.tm_mon = dt->mo - 1;
+        local.tm_mday = dt->d;
+        local.tm_hour = dt->h;
+        local.tm_min = dt->mi;
+        local.tm_sec = dt->s;
+        local.tm_isdst = -1;
+        const std::time_t t = std::mktime(&local);
+        if (t == static_cast<std::time_t>(-1)) return std::to_string(to_sys_seconds(*dt).time_since_epoch().count());
+        return std::to_string(static_cast<long long>(t));
     }
     if (func_name == "FROM_UNIXTIME") {
         long long ts = args.empty() ? 0 : parse_i64(resolve(args[0])).value_or(0);
-        sys_seconds sec{seconds{ts}};
-        auto days_part = std::chrono::floor<days>(sec);
-        auto time_part = sec - days_part;
-        year_month_day ymd{days_part};
-        auto hms = std::chrono::hh_mm_ss{time_part};
+        std::time_t t = static_cast<std::time_t>(ts); // (shown in the system's time zone, the session's)
+        std::tm local{};
+        if (localtime_s(&local, &t) != 0) return EXECUTOR_NULL_VALUE;
         char buf[32];
-        std::snprintf(buf, sizeof(buf), "%04d-%02u-%02u %02lld:%02lld:%02lld", static_cast<int>(ymd.year()),
-                      static_cast<unsigned>(ymd.month()), static_cast<unsigned>(ymd.day()), static_cast<long long>(hms.hours().count()),
-                      static_cast<long long>(hms.minutes().count()), static_cast<long long>(hms.seconds().count()));
+        std::snprintf(buf, sizeof(buf), "%04d-%02d-%02d %02d:%02d:%02d", local.tm_year + 1900, local.tm_mon + 1, local.tm_mday, local.tm_hour, local.tm_min, local.tm_sec);
         return buf;
     }
     if (func_name == "ISNULL") {

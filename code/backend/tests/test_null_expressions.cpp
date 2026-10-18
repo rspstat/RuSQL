@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <ctime>
 #include <filesystem>
 #include <functional>
 #include <optional>
@@ -22,6 +23,9 @@ namespace fs = std::filesystem;
 // and an UPDATE stored that into the table. Every answer is compared with something computed in the test.
 
 namespace {
+// UNIX_TIMESTAMP and FROM_UNIXTIME work in the system's time zone (the session's time_zone is SYSTEM, as MySQL's): the expected values below are for UTC
+const bool kUtcForTheTable = (_putenv_s("TZ", "UTC") == 0, _tzset(), true);
+
 struct TempDataDir {
     std::string path;
     explicit TempDataDir(std::string p) : path(std::move(p)) { fs::remove_all(path); }

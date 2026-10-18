@@ -126,6 +126,160 @@ StringResult Executor::exec_describe(const SharedDatabase& s, const std::string&
     return StringResult::Ok(out);
 }
 
+namespace {
+// the type as MySQL writes it in SHOW CREATE TABLE
+std::string mysql_type_text(const DataType& dt, bool is_unsigned) {
+    std::string out = std::visit(
+        [](const auto& alt) -> std::string {
+            using T = std::decay_t<decltype(alt)>;
+            if constexpr (std::is_same_v<T, DataType::Int>) return "int";
+            else if constexpr (std::is_same_v<T, DataType::BigInt>) return "bigint";
+            else if constexpr (std::is_same_v<T, DataType::SmallInt>) return "smallint";
+            else if constexpr (std::is_same_v<T, DataType::TinyInt>) return "tinyint";
+            else if constexpr (std::is_same_v<T, DataType::Text>) return "text";
+            else if constexpr (std::is_same_v<T, DataType::Float>) return "float";
+            else if constexpr (std::is_same_v<T, DataType::Double>) return "double";
+            else if constexpr (std::is_same_v<T, DataType::Boolean>) return "tinyint(1)";
+            else if constexpr (std::is_same_v<T, DataType::Varchar>) return "varchar(" + std::to_string(alt.length) + ")";
+            else if constexpr (std::is_same_v<T, DataType::Decimal>) return "decimal(" + std::to_string(alt.precision) + "," + std::to_string(alt.scale) + ")";
+            else if constexpr (std::is_same_v<T, DataType::Date>) return "date";
+            else if constexpr (std::is_same_v<T, DataType::DateTime>) return "datetime";
+            else if constexpr (std::is_same_v<T, DataType::Timestamp>) return "timestamp";
+            else if constexpr (std::is_same_v<T, DataType::Time>) return "time";
+            else if constexpr (std::is_same_v<T, DataType::Year>) return "year";
+            else if constexpr (std::is_same_v<T, DataType::Blob>) return "blob";
+            else if constexpr (std::is_same_v<T, DataType::Json>) return "json";
+            else if constexpr (std::is_same_v<T, DataType::Enum> || std::is_same_v<T, DataType::Set>) {
+                std::string list = std::is_same_v<T, DataType::Enum> ? "enum(" : "set(";
+                for (std::size_t i = 0; i < alt.values.size(); i++) list += (i ? ",'" : "'") + alt.values[i] + "'";
+                return list + ")";
+            } else return "varchar(255)";
+        },
+        dt.data);
+    return is_unsigned ? out + " unsigned" : out;
+}
+
+std::string mysql_quoted(const std::string& text) {
+    std::string out = "'";
+    for (char c : text) out += c == '\'' ? std::string("''") : std::string(1, c);
+    return out + "'";
+}
+} // namespace
+
+StringResult Executor::show_create_table_mysql(const std::string& name) {
+    Statement named = Statement(Statement::ShowCreateTable{name});
+    resolve_names(named);
+    const std::string table = qualify_name(std::get<Statement::ShowCreateTable>(named.data).table);
+    auto s = shared->read();
+    const TableSchema* schema = s->catalog.get_table(table);
+    if (!schema) return StringResult::Err("Table '" + table + "' doesn't exist");
+    const std::string bare = bare_name(table);
+    std::vector<std::string> lines;
+    std::vector<std::string> pk = schema->primary_key_columns;
+    if (pk.empty()) {
+        for (auto& c : schema->columns) {
+            if (c.primary_key) pk.push_back(c.name);
+        }
+    }
+    auto in_pk = [&](const std::string& column) { return std::find(pk.begin(), pk.end(), column) != pk.end(); };
+    bool has_auto_increment = false;
+    for (const ColumnDef& col : schema->columns) {
+        const bool is_timestamp = std::holds_alternative<DataType::Timestamp>(col.data_type.data);
+        const bool no_default_clause = std::holds_alternative<DataType::Text>(col.data_type.data) || std::holds_alternative<DataType::Blob>(col.data_type.data);
+        const bool not_null = col.not_null || in_pk(col.name);
+        std::string line = "  `" + col.name + "` " + mysql_type_text(col.data_type, col.is_unsigned);
+        if (not_null) line += " NOT NULL";
+        else if (is_timestamp) line += " NULL";
+        if (col.auto_increment) {
+            line += " AUTO_INCREMENT";
+            has_auto_increment = true;
+        }
+        if (col.default_value && *col.default_value != NULL_DEFAULT) {
+            std::string upper = *col.default_value;
+            std::transform(upper.begin(), upper.end(), upper.begin(), [](unsigned char c) { return std::toupper(c); });
+            if (upper == "NOW()" || upper == "CURRENT_TIMESTAMP" || upper == "CURRENT_TIMESTAMP()") line += " DEFAULT CURRENT_TIMESTAMP";
+            else if (upper == "TRUE" && std::holds_alternative<DataType::Boolean>(col.data_type.data)) line += " DEFAULT '1'";
+            else if (upper == "FALSE" && std::holds_alternative<DataType::Boolean>(col.data_type.data)) line += " DEFAULT '0'";
+            else {
+                std::string value = *col.default_value;
+                if (value.size() >= 2 && value.front() == '\'' && value.back() == '\'') value = value.substr(1, value.size() - 2);
+                line += " DEFAULT " + mysql_quoted(value);
+            }
+        } else if (!not_null && !no_default_clause) {
+            line += " DEFAULT NULL";
+        }
+        if (col.on_update_now) line += " ON UPDATE CURRENT_TIMESTAMP";
+        lines.push_back(std::move(line));
+    }
+    auto column_list = [](const std::vector<std::string>& columns) {
+        std::string out;
+        for (std::size_t i = 0; i < columns.size(); i++) out += (i ? ",`" : "`") + columns[i] + "`";
+        return out;
+    };
+    if (!pk.empty()) lines.push_back("  PRIMARY KEY (" + column_list(pk) + ")");
+    // the UNIQUE keys, then the others (by name)
+    std::vector<std::pair<std::string, std::string>> unique_keys, other_keys;
+    for (auto& c : schema->columns) {
+        if (c.unique && !c.primary_key) unique_keys.emplace_back(c.unique_constraint_name.value_or(c.name), "  UNIQUE KEY `" + c.unique_constraint_name.value_or(c.name) + "` (`" + c.name + "`)");
+    }
+    for (auto& key : schema->unique_keys) {
+        const std::string key_name = key.name.value_or(key.columns.front());
+        unique_keys.emplace_back(key_name, "  UNIQUE KEY `" + key_name + "` (" + column_list(key.columns) + ")");
+    }
+    const std::string key_prefix = table + "_";
+    auto bare_index_name = [&](const std::string& key) { return key.compare(0, key_prefix.size(), key_prefix) == 0 ? key.substr(key_prefix.size()) : key; };
+    for (auto& [key, meta] : s->index_meta) {
+        if (meta.first == table) other_keys.emplace_back(bare_index_name(key), "  KEY `" + bare_index_name(key) + "` (`" + meta.second + "`)");
+    }
+    for (auto& [key, meta] : s->hash_index_meta) {
+        if (meta.first == table) other_keys.emplace_back(bare_index_name(key), "  KEY `" + bare_index_name(key) + "` (`" + meta.second + "`) USING HASH");
+    }
+    for (auto& [key, comp] : s->composite_indexes) {
+        if (comp.table == table) other_keys.emplace_back(bare_index_name(key), "  KEY `" + bare_index_name(key) + "` (" + column_list(comp.columns) + ")");
+    }
+    std::sort(unique_keys.begin(), unique_keys.end());
+    std::sort(other_keys.begin(), other_keys.end());
+    for (auto& k : unique_keys) lines.push_back(k.second);
+    for (auto& k : other_keys) lines.push_back(k.second);
+    for (std::size_t i = 0; i < schema->columns.size(); i++) {
+        const ColumnDef& col = schema->columns[i];
+        if (!col.foreign_key) continue;
+        const ForeignKey& fk = *col.foreign_key;
+        std::string line = "  CONSTRAINT `" + bare + "_ibfk_" + std::to_string(i + 1) + "` FOREIGN KEY (`" + fk.column + "`) REFERENCES `" + bare_name(fk.ref_table) + "` (`" + fk.ref_column + "`)";
+        if (fk.on_delete != FkAction::Restrict) line += " ON DELETE " + fk_action_str(fk.on_delete);
+        if (fk.on_update != FkAction::Restrict) line += " ON UPDATE " + fk_action_str(fk.on_update);
+        lines.push_back(std::move(line));
+    }
+    std::size_t check_number = 0;
+    for (auto& cc : schema->check_constraints) {
+        check_number++;
+        lines.push_back("  CONSTRAINT `" + cc.name.value_or(bare + "_chk_" + std::to_string(check_number)) + "` CHECK ((" + cc.expression + "))");
+    }
+    std::string ddl = "CREATE TABLE `" + bare + "` (\n";
+    for (std::size_t i = 0; i < lines.size(); i++) ddl += lines[i] + (i + 1 < lines.size() ? ",\n" : "\n");
+    ddl += ") ENGINE=InnoDB";
+    if (has_auto_increment) {
+        std::int64_t next = 1;
+        for (auto& [column, counter] : schema->auto_increment_counters) next = std::max(next, counter + 1);
+        ddl += " AUTO_INCREMENT=" + std::to_string(next);
+    }
+    ddl += " DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci";
+    return StringResult::Ok(ddl);
+}
+
+StringResult Executor::show_create_view_mysql(const std::string& name) {
+    Statement named = Statement(Statement::ShowCreateView{name});
+    resolve_names(named);
+    const std::string view = qualify_name(std::get<Statement::ShowCreateView>(named.data).view);
+    auto s = shared->read();
+    if (!s->views.count(view)) return StringResult::Err("Table '" + view + "' doesn't exist");
+    std::string select_text;
+    if (auto raw = s->view_raw_sql.find(view); raw != s->view_raw_sql.end()) select_text = raw->second;
+    std::string body = select_text;
+    // (the stored text may start with SELECT or already with the whole CREATE)
+    return StringResult::Ok("CREATE ALGORITHM=UNDEFINED DEFINER=`root`@`localhost` SQL SECURITY DEFINER VIEW `" + bare_name(view) + "` AS " + body);
+}
+
 StringResult Executor::exec_show_create_table(const SharedDatabase& s, const std::string& table) const {
     const TableSchema* schema = s.catalog.get_table(table);
     if (!schema) return StringResult::Err("Table '" + table + "' not found");

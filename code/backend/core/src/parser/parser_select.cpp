@@ -207,6 +207,7 @@ Statement Parser::parse_select() {
                  p->kind == TokenKind::BitAnd || p->kind == TokenKind::BitOr ||
                  p->kind == TokenKind::JsonAgg || p->kind == TokenKind::ArrayAgg ||
                  p->kind == TokenKind::Median)) {
+                const std::size_t item_start = pos_;
                 const Token* ft = advance();
                 AggFunc func = [&]() -> AggFunc {
                     switch (ft->kind) {
@@ -292,7 +293,9 @@ Statement Parser::parse_select() {
                         else if constexpr (std::is_same_v<T, AggFunc::Max>) return WindowFunc::Max;
                         else return WindowFunc::Sum;
                     }, func.data);
+                    const std::string typed = source_between(item_start, pos_); // (a window function with no alias is called by its text, as MySQL does)
                     std::optional<std::string> alias = parse_column_alias();
+                    if (!alias && !typed.empty()) alias = typed;
                     return SelectColumn(SelectColumn::WinFunc{win_func, std::optional<std::string>(agg_col), 0,
                                                               partition_by, win_order_by, alias, frame});
                 }
@@ -310,6 +313,7 @@ Statement Parser::parse_select() {
 
             // GROUP_CONCAT([DISTINCT] col [ORDER BY col [ASC | DESC], ...] [SEPARATOR 'sep'])
             if (p && p->kind == TokenKind::GroupConcat && peek_at_is(1, TokenKind::LParen)) {
+                const std::size_t group_concat_start = pos_;
                 advance();
                 if (!peek_is(TokenKind::LParen)) throw ParseError("Expected '(' after GROUP_CONCAT");
                 advance();
@@ -345,8 +349,12 @@ Statement Parser::parse_select() {
                 advance();
                 AggFunc func = AggFunc(AggFunc::GroupConcat{separator, concat_distinct, std::move(concat_order)});
                 std::optional<CondExpr> filter_cond = parse_optional_filter_clause();
+                const std::string typed = source_between(group_concat_start, pos_); // (called by its text, as MySQL does: two GROUP_CONCATs of a column differ)
                 if (auto alias = parse_column_alias()) {
                     return SelectColumn(SelectColumn::AggAlias{func, agg_col, *alias, filter_cond});
+                }
+                if (!typed.empty() && (!std::get<AggFunc::GroupConcat>(func.data).order_by.empty() || std::get<AggFunc::GroupConcat>(func.data).separator != ",")) {
+                    return SelectColumn(SelectColumn::AggAlias{func, agg_col, typed, filter_cond});
                 }
                 return SelectColumn(SelectColumn::Agg{func, agg_col, filter_cond});
             }
@@ -356,6 +364,7 @@ Statement Parser::parse_select() {
                       p->kind == TokenKind::Lag || p->kind == TokenKind::Lead || p->kind == TokenKind::FirstValue ||
                       p->kind == TokenKind::LastValue || p->kind == TokenKind::NthValue || p->kind == TokenKind::Ntile ||
                       p->kind == TokenKind::PercentRank || p->kind == TokenKind::CumeDist)) {
+                const std::size_t item_start = pos_;
                 const Token* ft = advance();
                 WindowFunc func;
                 switch (ft->kind) {
@@ -374,6 +383,7 @@ Statement Parser::parse_select() {
                 if (!peek_is(TokenKind::LParen)) throw ParseError("Expected '(' after window function");
                 advance();
                 std::optional<std::string> wf_col;
+                std::optional<std::string> wf_default;
                 std::int64_t wf_offset = 0;
                 if (func == WindowFunc::Lag || func == WindowFunc::Lead) {
                     wf_col = expect_col_ref();
@@ -382,6 +392,14 @@ Statement Parser::parse_select() {
                         const Token* n = advance();
                         if (!n || n->kind != TokenKind::NumberLit) throw ParseError("Expected offset number in LAG/LEAD");
                         try { wf_offset = std::stoll(n->text); } catch (...) { wf_offset = 1; }
+                        if (peek_is(TokenKind::Comma)) { // LAG(c, n, default)
+                            advance();
+                            const Token* d = advance();
+                            if (!d) throw ParseError("Expected the default value in LAG/LEAD");
+                            if (d->kind == TokenKind::NumberLit || d->kind == TokenKind::StringLit) wf_default = d->text;
+                            else if (d->kind == TokenKind::Null) wf_default = "NULL";
+                            else throw ParseError("Expected a number, a string or NULL as the default value in LAG/LEAD");
+                        }
                     } else {
                         wf_offset = 1;
                     }
@@ -431,8 +449,10 @@ Statement Parser::parse_select() {
                 std::optional<WindowFrame> frame = parse_window_frame();
                 if (!peek_is(TokenKind::RParen)) throw ParseError("Expected ')' after OVER clause");
                 advance();
+                const std::string typed = source_between(item_start, pos_); // (a window function with no alias is called by its text, as MySQL does)
                 std::optional<std::string> alias = parse_column_alias();
-                return SelectColumn(SelectColumn::WinFunc{func, wf_col, wf_offset, partition_by, win_order_by, alias, frame});
+                if (!alias && !typed.empty()) alias = typed;
+                return SelectColumn(SelectColumn::WinFunc{func, wf_col, wf_offset, partition_by, win_order_by, alias, frame, ValueClass::Unknown, wf_default});
             }
 
             // 스칼라 서브쿼리: (SELECT ...) [AS alias]
@@ -678,22 +698,22 @@ Statement Parser::parse_select() {
             note_name(join_table);
             join_subquery = std::make_pair(std::make_unique<Statement>(std::move(inner)), join_table);
         } else {
-            join_table = expect_ident();
+            join_table = expect_col_ref(); // (db.table too)
             std::optional<std::string> a = parse_table_alias();
-            if (used_tables.count(lowered(join_table))) {
+            if (used_tables.count(lowered(bare_table(join_table)))) {
                 // a second use of the table: the alias is what its columns are called in the joined rows (`m.name`), so it is
                 // kept as it is instead of being replaced by the table name, which the first use is known by
                 if (!a) throw ParseError("Not unique table/alias: '" + join_table + "'");
                 join_alias = *a;
                 alias_map[*a] = *a;
-            } else if (a && shadowed(join_table)) {
+            } else if (a && shadowed(bare_table(join_table))) {
                 join_alias = *a;
                 alias_map[*a] = *a;
             } else if (a) {
                 alias_map[*a] = join_table;
             }
-            note_name(a ? *a : join_table);
-            used_tables.insert(lowered(join_table));
+            note_name(a ? *a : bare_table(join_table));
+            used_tables.insert(lowered(bare_table(join_table)));
         }
         auto dummy_true = []() {
             return CondExpr(CondExpr::Leaf{
@@ -806,6 +826,13 @@ Statement Parser::parse_select() {
         if (peek_is(TokenKind::Update)) { advance(); for_update = true; }
         else if (peek_is(TokenKind::Share)) { advance(); for_share = true; }
         else throw ParseError("Expected UPDATE or SHARE after FOR");
+        // FOR UPDATE NOWAIT / SKIP LOCKED: the locks are taken as without them
+        if (peek_is(TokenKind::Ident) && (upper_word(peek()->text) == "NOWAIT")) advance();
+        else if (peek_is(TokenKind::Ident) && upper_word(peek()->text) == "SKIP" && peek_at_is(1, TokenKind::Ident) && upper_word(peek_at(1)->text) == "LOCKED") { advance(); advance(); }
+    } else if (peek_is(TokenKind::Ident) && upper_word(peek()->text) == "LOCK" && peek_at_is(1, TokenKind::In) && peek_at_is(2, TokenKind::Share) &&
+               peek_at(3) && peek_at(3)->kind == TokenKind::Ident && upper_word(peek_at(3)->text) == "MODE") { // LOCK IN SHARE MODE
+        advance(); advance(); advance(); advance();
+        for_share = true;
     }
 
     // 별칭 확장 적용

@@ -51,6 +51,7 @@ struct NameResolver {
     // a table or a view, in the form it was written (`t` stays `t`, `db.t` stays `db.t`)
     std::string table(const std::string& name) const {
         if (name.empty()) return name;
+        if (auto info = Executor::info_schema_bare(name)) return "information_schema." + *info; // (its names are in lower case here)
         if (std::find(ctes.begin(), ctes.end(), name) != ctes.end()) return name;
         for (const std::string& cte : ctes) {
             if (ieq(cte, name)) return cte;
@@ -190,7 +191,16 @@ struct NameResolver {
         const TableSchema* schema = schema_of(table_name);
         if (auto* v = std::get_if<AlterAction::DropColumn>(&action.data)) column_in_place(schema, v->name);
         else if (auto* v = std::get_if<AlterAction::RenameColumn>(&action.data)) column_in_place(schema, v->from);
-        else if (auto* v = std::get_if<AlterAction::ModifyColumn>(&action.data)) column_in_place(schema, v->column.name);
+        else if (auto* v = std::get_if<AlterAction::ModifyColumn>(&action.data)) {
+            column_in_place(schema, v->column.name);
+            if (v->position && v->position->after) column_in_place(schema, *v->position->after);
+        } else if (auto* v = std::get_if<AlterAction::ChangeColumn>(&action.data)) {
+            column_in_place(schema, v->from);
+            if (v->position && v->position->after) column_in_place(schema, *v->position->after);
+        } else if (auto* v = std::get_if<AlterAction::AddColumn>(&action.data)) {
+            if (v->position && v->position->after) column_in_place(schema, *v->position->after);
+        } else if (auto* v = std::get_if<AlterAction::AddIndex>(&action.data)) columns_in_place(schema, v->columns);
+        else if (auto* v = std::get_if<AlterAction::SetDefault>(&action.data)) column_in_place(schema, v->column);
         else if (auto* v = std::get_if<AlterAction::RenameTable>(&action.data)) v->to = table(v->to);
         else if (auto* v = std::get_if<AlterAction::AddForeignKey>(&action.data)) {
             column_in_place(schema, v->column);
@@ -300,10 +310,25 @@ struct NameResolver {
         } else if (auto* v = std::get_if<Statement::AlterTable>(&st.data)) {
             table_in_place(v->table);
             alter(v->table, v->action);
+            for (auto& action : v->more) alter(v->table, action);
+        } else if (auto* v = std::get_if<Statement::CreateTableLike>(&st.data)) {
+            table_in_place(v->name);
+            table_in_place(v->source);
+        } else if (auto* v = std::get_if<Statement::CreateTableAs>(&st.data)) {
+            table_in_place(v->name);
+            if (v->query) statement(*v->query);
+        } else if (auto* v = std::get_if<Statement::RenameTable>(&st.data)) {
+            for (auto& pair : v->pairs) {
+                table_in_place(pair.first);
+                table_in_place(pair.second);
+            }
         } else if (auto* v = std::get_if<Statement::CreateView>(&st.data)) {
             table_in_place(v->name);
             if (v->query) statement(*v->query);
-        } else if (auto* v = std::get_if<Statement::DropTable>(&st.data)) table_in_place(v->name);
+        } else if (auto* v = std::get_if<Statement::DropTable>(&st.data)) {
+            table_in_place(v->name);
+            for (auto& more : v->more) table_in_place(more);
+        }
         else if (auto* v = std::get_if<Statement::TruncateTable>(&st.data)) table_in_place(v->name);
         else if (auto* v = std::get_if<Statement::DropView>(&st.data)) table_in_place(v->name);
         else if (auto* v = std::get_if<Statement::DropIndex>(&st.data)) { if (v->table) table_in_place(*v->table); }
@@ -311,6 +336,7 @@ struct NameResolver {
         else if (auto* v = std::get_if<Statement::ShowCreateTable>(&st.data)) table_in_place(v->table);
         else if (auto* v = std::get_if<Statement::ShowCreateView>(&st.data)) table_in_place(v->view);
         else if (auto* v = std::get_if<Statement::ShowIndex>(&st.data)) table_in_place(v->table);
+        else if (auto* v = std::get_if<Statement::ShowTables>(&st.data)) { if (v->database) *v->database = database(*v->database); }
         else if (auto* v = std::get_if<Statement::AnalyzeTable>(&st.data)) table_in_place(v->table);
         else if (auto* v = std::get_if<Statement::Vacuum>(&st.data)) { if (v->table) table_in_place(*v->table); }
         else if (auto* v = std::get_if<Statement::LockTables>(&st.data)) {

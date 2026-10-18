@@ -323,6 +323,7 @@ std::vector<Token> Lexer::tokenize() {
         auto chOpt = peek();
         if (!chOpt) break;
         char ch = *chOpt;
+        const std::size_t token_begin = pos_;
 
         std::optional<Token> tok;
 
@@ -381,6 +382,8 @@ std::vector<Token> Lexer::tokenize() {
                         }
                     }
                     for (char& ch2 : name) ch2 = static_cast<char>(std::tolower(static_cast<unsigned char>(ch2)));
+                    tok->begin = token_begin;
+                    tok->end = token_begin + 2;
                     tokens.push_back(std::move(*tok));
                     tok = Token(TokenKind::Ident, std::move(name));
                 }
@@ -460,6 +463,8 @@ std::vector<Token> Lexer::tokenize() {
                 continue;
         }
 
+        tok->begin = token_begin;
+        tok->end = pos_;
         tokens.push_back(std::move(*tok));
     }
     return tokens;

@@ -617,6 +617,26 @@ Statement Parser::parse_create() {
     }
 
     std::string name = expect_table_name();
+
+    // CREATE TABLE t LIKE s / (LIKE s)
+    if (peek_is(TokenKind::Like) || (peek_is(TokenKind::LParen) && peek_at_is(1, TokenKind::Like))) {
+        const bool parenthesized = peek_is(TokenKind::LParen);
+        if (parenthesized) advance();
+        advance(); // LIKE
+        std::string source = expect_table_name();
+        if (parenthesized) {
+            if (!peek_is(TokenKind::RParen)) throw ParseError("Expected ')' after LIKE table");
+            advance();
+        }
+        return Statement(Statement::CreateTableLike{name, source, if_not_exists});
+    }
+    // CREATE TABLE t [AS] SELECT ...
+    if (peek_is(TokenKind::Select) || (peek_is(TokenKind::As) && peek_at_is(1, TokenKind::Select))) {
+        if (peek_is(TokenKind::As)) advance();
+        advance(); // SELECT
+        Statement query = parse_select();
+        return Statement(Statement::CreateTableAs{name, if_not_exists, {}, std::make_unique<Statement>(std::move(query))});
+    }
     if (!peek_is(TokenKind::LParen)) throw ParseError("Expected '('");
     advance();
 
@@ -624,6 +644,7 @@ Statement Parser::parse_create() {
     std::vector<std::string> primary_key_columns;
     std::vector<std::pair<std::optional<std::string>, std::string>> check_constraints;
     std::vector<UniqueKey> unique_keys;
+    std::vector<UniqueKey> indexes; // KEY name (a, b) / INDEX ...
 
     for (;;) {
         if (peek_is(TokenKind::Primary)) {
@@ -722,11 +743,13 @@ Statement Parser::parse_create() {
             }
         } else if (peek_is(TokenKind::Index) || peek_is(TokenKind::Key)) {
             advance(); // INDEX or KEY
-            if (peek_is(TokenKind::Ident)) expect_ident();
+            std::optional<std::string> index_name;
+            if (peek_is(TokenKind::Ident)) index_name = expect_ident();
             if (!peek_is(TokenKind::LParen)) throw ParseError("Expected '(' after INDEX/KEY name");
             advance();
+            std::vector<std::string> index_columns;
             auto key_part = [&]() { // `col`, `col`(10), `col` DESC
-                expect_ident();
+                index_columns.push_back(expect_ident());
                 if (peek_is(TokenKind::LParen)) {
                     advance();
                     while (peek() && !peek_is(TokenKind::RParen)) advance();
@@ -739,6 +762,10 @@ Statement Parser::parse_create() {
             if (!peek_is(TokenKind::RParen)) throw ParseError("Expected ')' after INDEX columns");
             advance();
             if (peek_is(TokenKind::Using)) { advance(); if (peek()) advance(); } // USING BTREE
+            for (auto& col : index_columns) {
+                if (std::none_of(columns.begin(), columns.end(), [&](const ColumnDef& c) { return same_name(c.name, col); })) throw ParseError("Key column '" + col + "' doesn't exist in table");
+            }
+            indexes.push_back(UniqueKey{index_name, index_columns});
         } else if (peek_is(TokenKind::Foreign)) {
             advance();
             if (!peek_is(TokenKind::Key)) throw ParseError("Expected KEY after FOREIGN");
@@ -777,7 +804,15 @@ Statement Parser::parse_create() {
         if (it == columns.end()) throw ParseError("PARTITION BY column '" + partition_by->column + "' not defined");
     }
 
-    return Statement(Statement::CreateTable{name, columns, if_not_exists, primary_key_columns, check_constraints, partition_by, unique_keys, auto_increment_start, {}});
+    // CREATE TABLE t (columns) [AS] SELECT ...: the rows of the query are inserted
+    if (peek_is(TokenKind::Select) || (peek_is(TokenKind::As) && peek_at_is(1, TokenKind::Select))) {
+        if (peek_is(TokenKind::As)) advance();
+        advance(); // SELECT
+        Statement query = parse_select();
+        return Statement(Statement::CreateTableAs{name, if_not_exists, columns, std::make_unique<Statement>(std::move(query))});
+    }
+
+    return Statement(Statement::CreateTable{name, columns, if_not_exists, primary_key_columns, check_constraints, partition_by, unique_keys, auto_increment_start, indexes});
 }
 
 Statement Parser::parse_drop() {
@@ -791,7 +826,12 @@ Statement Parser::parse_drop() {
         if_exists = true;
     }
     std::string name = expect_table_name();
-    return Statement(Statement::DropTable{name, if_exists});
+    Statement::DropTable drop{name, if_exists, {}};
+    while (peek_is(TokenKind::Comma)) { // DROP TABLE a, b, c
+        advance();
+        drop.more.push_back(expect_table_name());
+    }
+    return Statement(std::move(drop));
 }
 
 // CREATE UNIQUE INDEX name ON table (col, ...): a unique key of the table
@@ -810,13 +850,92 @@ Statement Parser::parse_create_unique_index() {
     return Statement(Statement::AlterTable{table, AlterAction(AlterAction::AddUniqueConstraint{index_name, key_columns.front(), key_columns})});
 }
 
+// [FIRST | AFTER column] after an ADD / MODIFY / CHANGE COLUMN
+std::optional<ColumnPosition> Parser::parse_column_position() {
+    const Token* t = peek();
+    if (!t) return std::nullopt;
+    if (t->kind == TokenKind::Ident && to_upper(t->text) == "FIRST") {
+        advance();
+        return ColumnPosition{true, std::nullopt};
+    }
+    if (t->kind == TokenKind::After || (t->kind == TokenKind::Ident && to_upper(t->text) == "AFTER")) {
+        advance();
+        return ColumnPosition{false, expect_ident()};
+    }
+    return std::nullopt;
+}
+
+// ALTER TABLE t action [, action ...]
 Statement Parser::parse_alter() {
     if (!peek_is(TokenKind::Table)) throw ParseError("Expected TABLE");
     advance();
     std::string table = expect_table_name();
 
+    Statement first = parse_alter_action(table);
+    while (peek_is(TokenKind::Comma)) {
+        advance();
+        Statement next = parse_alter_action(table);
+        std::get<Statement::AlterTable>(first.data).more.push_back(std::move(std::get<Statement::AlterTable>(next.data).action));
+    }
+    return first;
+}
+
+Statement Parser::parse_alter_action(const std::string& table) {
     const Token* t = advance();
-    if (!t) throw ParseError("Expected ADD, DROP, RENAME, or MODIFY");
+    if (!t) throw ParseError("Expected ADD, DROP, RENAME, MODIFY, CHANGE, or ALTER");
+
+    // table options: ENGINE = InnoDB, AUTO_INCREMENT = 5, COMMENT = '...', DEFAULT CHARSET = ... (nothing to do for the ones the engine has no use for)
+    if (t->kind == TokenKind::Ident && (to_upper(t->text) == "ENGINE" || to_upper(t->text) == "AUTO_INCREMENT" || to_upper(t->text) == "COMMENT" ||
+                                        to_upper(t->text) == "CHARSET" || to_upper(t->text) == "ROW_FORMAT" || to_upper(t->text) == "CHARACTER" ||
+                                        to_upper(t->text) == "COLLATE")) {
+        --pos_;
+        parse_table_options();
+        return Statement(Statement::AlterTable{table, AlterAction(AlterAction::NoOp{})});
+    }
+
+    // ALTER [COLUMN] c SET DEFAULT v | DROP DEFAULT
+    if (t->kind == TokenKind::Alter) {
+        if (peek_is(TokenKind::Column)) advance();
+        const std::string column = expect_ident();
+        if (peek_is(TokenKind::Set)) {
+            advance();
+            if (!peek_is(TokenKind::Default)) throw ParseError("Expected DEFAULT after SET");
+            ColConstraints cc = parse_col_constraints(column);
+            if (!cc.default_value) throw ParseError("Expected a value after DEFAULT");
+            return Statement(Statement::AlterTable{table, AlterAction(AlterAction::SetDefault{column, cc.default_value})});
+        }
+        if (peek_is(TokenKind::Drop)) {
+            advance();
+            if (!peek_is(TokenKind::Default)) throw ParseError("Expected DEFAULT after DROP");
+            advance();
+            return Statement(Statement::AlterTable{table, AlterAction(AlterAction::SetDefault{column, std::nullopt})});
+        }
+        throw ParseError("Expected SET DEFAULT or DROP DEFAULT after ALTER COLUMN");
+    }
+
+    // CHANGE [COLUMN] old new definition [FIRST | AFTER c]
+    if (t->kind == TokenKind::Ident && to_upper(t->text) == "CHANGE") {
+        if (peek_is(TokenKind::Column)) advance();
+        const std::string from = expect_ident();
+        const std::string col_name = expect_ident();
+        DataType data_type = parse_data_type();
+        const bool is_unsigned = last_type_unsigned_;
+        ColConstraints cc = parse_col_constraints(col_name);
+        ColumnDef col;
+        col.name = col_name;
+        col.data_type = data_type;
+        col.is_unsigned = is_unsigned;
+        col.primary_key = cc.primary_key;
+        col.not_null = cc.not_null;
+        col.unique = cc.unique;
+        col.unique_constraint_name = cc.unique_constraint_name;
+        col.auto_increment = cc.auto_increment;
+        col.default_value = cc.default_value;
+        col.foreign_key = cc.foreign_key;
+        col.check_expr = cc.check_expr;
+        col.on_update_now = cc.on_update_now;
+        return Statement(Statement::AlterTable{table, AlterAction(AlterAction::ChangeColumn{from, col, parse_column_position()})});
+    }
 
     if (t->kind == TokenKind::Ident && (to_upper(t->text) == "DISABLE" || to_upper(t->text) == "ENABLE")) { // a dump brackets its INSERTs with them
         const Token* k = advance();
@@ -928,6 +1047,20 @@ Statement Parser::parse_alter() {
             advance();
             return Statement(Statement::AlterTable{table, AlterAction(AlterAction::AddPartition{def})});
         }
+        if (peek_is(TokenKind::Index) || peek_is(TokenKind::Key)) { // ADD INDEX|KEY [name] (a, b)
+            advance();
+            std::optional<std::string> index_name;
+            if (!peek_is(TokenKind::LParen)) index_name = expect_ident();
+            if (!peek_is(TokenKind::LParen)) throw ParseError("Expected '(' after the index name");
+            advance();
+            std::vector<std::string> key_columns;
+            key_columns.push_back(expect_ident());
+            while (peek_is(TokenKind::Comma)) { advance(); key_columns.push_back(expect_ident()); }
+            if (!peek_is(TokenKind::RParen)) throw ParseError("Expected ')' after column");
+            advance();
+            return Statement(Statement::AlterTable{table, AlterAction(AlterAction::AddIndex{index_name, key_columns})});
+        }
+        if (peek_is(TokenKind::Primary)) throw ParseError("ALTER TABLE ... ADD PRIMARY KEY is not supported: declare the PRIMARY KEY in CREATE TABLE");
         if (peek_is(TokenKind::Column)) advance();
         std::string col_name = expect_ident();
         DataType data_type = parse_data_type();
@@ -946,7 +1079,7 @@ Statement Parser::parse_alter() {
         col.unique = cc.unique;
         col.unique_constraint_name = cc.unique_constraint_name;
         col.primary_key = cc.primary_key;
-        return Statement(Statement::AlterTable{table, AlterAction(AlterAction::AddColumn{col})});
+        return Statement(Statement::AlterTable{table, AlterAction(AlterAction::AddColumn{col, parse_column_position()})});
     }
 
     if (t->kind == TokenKind::Drop) {
@@ -967,6 +1100,7 @@ Statement Parser::parse_alter() {
             std::string name = expect_ident();
             return Statement(Statement::AlterTable{table, AlterAction(AlterAction::DropForeignKey{name})});
         }
+        if (peek_is(TokenKind::Primary)) throw ParseError("ALTER TABLE ... DROP PRIMARY KEY is not supported");
         if (peek_is(TokenKind::Index) || peek_is(TokenKind::Key)) { // DROP INDEX name / DROP KEY name: a UNIQUE key (or an index) of that name goes
             advance();
             std::string name = expect_ident();
@@ -986,9 +1120,9 @@ Statement Parser::parse_alter() {
             std::string to = expect_ident();
             return Statement(Statement::AlterTable{table, AlterAction(AlterAction::RenameColumn{from, to})});
         }
-        if (peek_is(TokenKind::To)) {
+        if (peek_is(TokenKind::To) || peek_is(TokenKind::As)) {
             advance();
-            std::string to = expect_ident();
+            std::string to = expect_table_name();
             return Statement(Statement::AlterTable{table, AlterAction(AlterAction::RenameTable{to})});
         }
         if (peek_is(TokenKind::Ident)) {
@@ -1017,10 +1151,26 @@ Statement Parser::parse_alter() {
         col.foreign_key = cc.foreign_key;
         col.check_expr = cc.check_expr;
         col.on_update_now = cc.on_update_now;
-        return Statement(Statement::AlterTable{table, AlterAction(AlterAction::ModifyColumn{col})});
+        return Statement(Statement::AlterTable{table, AlterAction(AlterAction::ModifyColumn{col, parse_column_position()})});
     }
 
-    throw ParseError("Expected ADD, DROP, RENAME, or MODIFY");
+    throw ParseError("Expected ADD, DROP, RENAME, MODIFY, CHANGE, or ALTER");
+}
+
+// RENAME TABLE a TO b [, c TO d ...]
+Statement Parser::parse_rename() {
+    if (!peek_is(TokenKind::Table)) throw ParseError("Expected TABLE after RENAME");
+    advance();
+    Statement::RenameTable rename;
+    for (;;) {
+        std::string from = expect_table_name();
+        if (!peek_is(TokenKind::To)) throw ParseError("Expected TO in RENAME TABLE");
+        advance();
+        rename.pairs.emplace_back(std::move(from), expect_table_name());
+        if (!peek_is(TokenKind::Comma)) break;
+        advance();
+    }
+    return Statement(std::move(rename));
 }
 
 Statement Parser::parse_create_index() {

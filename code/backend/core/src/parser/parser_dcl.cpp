@@ -60,7 +60,20 @@ Statement Parser::parse_show() {
     const Token* t = advance();
     if (!t) throw ParseError("Expected TABLES, BUFFER, WAL, ISOLATION, LOCKS, DATABASES, GRANTS, CREATE, INDEX, or PROCESSLIST");
 
-    if (t->kind == TokenKind::Tables) return Statement(Statement::ShowTables{});
+    if (t->kind == TokenKind::Tables) { // SHOW TABLES [FROM db] [LIKE 'pattern']
+        Statement::ShowTables show;
+        if (peek_is(TokenKind::From) || (peek_is(TokenKind::Ident) && to_upper(peek()->text) == "IN")) {
+            advance();
+            show.database = expect_ident();
+        }
+        if (peek_is(TokenKind::Like)) {
+            advance();
+            const Token* pattern = advance();
+            if (!pattern || pattern->kind != TokenKind::StringLit) throw ParseError("Expected a quoted pattern after LIKE");
+            show.like = pattern->text;
+        }
+        return Statement(std::move(show));
+    }
     if (t->kind == TokenKind::Ident && t->text == "BUFFER") {
         const Token* n = advance();
         if (n && n->kind == TokenKind::Ident && n->text == "POOL") return Statement(Statement::ShowBufferPool{});
@@ -274,8 +287,7 @@ Statement Parser::parse_describe() {
 }
 
 Statement Parser::parse_truncate() {
-    if (!peek_is(TokenKind::Table)) throw ParseError("Expected TABLE");
-    advance();
+    if (peek_is(TokenKind::Table)) advance(); // (TRUNCATE t is TRUNCATE TABLE t)
     std::string name = expect_table_name();
     return Statement(Statement::TruncateTable{name});
 }
