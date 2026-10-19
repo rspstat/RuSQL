@@ -123,13 +123,18 @@ TEST_CASE("arithmetic with a NULL operand is NULL, in the select list, WHERE, CA
     REQUIRE(table_cells(ok_text(ex, "SELECT id, s + 1, s * 2 FROM a WHERE id IN (1, 3, 4) ORDER BY id")) ==
             Rows{{"1", "1", "0"}, {"3", "1", "0"}, {"4", "13", "24"}});
 
-    // UPDATE: a NULL stays NULL (it became "NULL1" / 0), x / 0 is NULL (it became 0)
+    // UPDATE: a NULL stays NULL (it became "NULL1" / 0), x / NULL is NULL (it became 0); x / 0 is an error that writes nothing, as in MySQL (it wrote NULL)
     REQUIRE(ex.execute_sql("UPDATE a SET v = v + 1").is_ok());
     REQUIRE(table_cells(ok_text(ex, "SELECT id, v FROM a ORDER BY id")) == Rows{{"1", "11"}, {"2", N}, {"3", "31"}, {"4", "1"}, {"5", N}});
     REQUIRE(table_cells(ok_text(ex, "SELECT COUNT(*) FROM a WHERE v IS NULL")) == Rows{{"2"}});
     REQUIRE(ex.execute_sql("UPDATE a SET w = w * 2").is_ok());
     REQUIRE(table_cells(ok_text(ex, "SELECT id, w FROM a ORDER BY id")) == Rows{{"1", "4"}, {"2", "6"}, {"3", N}, {"4", "0"}, {"5", N}});
-    REQUIRE(ex.execute_sql("UPDATE a SET d = d / w").is_ok());
+    const Rows d_before = table_cells(ok_text(ex, "SELECT id, d FROM a ORDER BY id"));
+    auto by_zero = ex.execute_sql("UPDATE a SET d = d / w");
+    REQUIRE(by_zero.is_err());
+    REQUIRE(by_zero.error() == "Division by 0");
+    REQUIRE(table_cells(ok_text(ex, "SELECT id, d FROM a ORDER BY id")) == d_before); // (nothing was written)
+    REQUIRE(ex.execute_sql("UPDATE a SET d = d / NULLIF(w, 0)").is_ok());
     REQUIRE(table_cells(ok_text(ex, "SELECT id, d FROM a ORDER BY id")) == Rows{{"1", "0.375"}, {"2", N}, {"3", N}, {"4", N}, {"5", N}});
     // an UPDATE that sets NULL where the column is read again: arithmetic on it stays NULL
     REQUIRE(table_cells(ok_text(ex, "SELECT id, d + 1 FROM a ORDER BY id")) == Rows{{"1", "1.375"}, {"2", N}, {"3", N}, {"4", N}, {"5", N}});
@@ -457,11 +462,16 @@ TEST_CASE("expressions over NULLable columns match a reference in SELECT, WHERE 
             // UPDATE ... SET r = <expr> on part of the rows, read back through the VARCHAR column
             if (q % 3 == 0 && numeric) {
                 int mod = 2 + static_cast<int>(rng() % 3), rem = static_cast<int>(rng() % static_cast<unsigned>(mod));
-                REQUIRE(ex.execute_sql("UPDATE m SET r = " + expr + " WHERE id % " + std::to_string(mod) + " = " + std::to_string(rem)).is_ok());
-                for (std::size_t i = 0; i < rows.size(); i++) {
-                    if (rows[i].id % mod == rem) {
-                        model[i] = show(value(rows[i]));
-                        quotient[i] = expr.find('/') != std::string::npos;
+                auto update = ex.execute_sql("UPDATE m SET r = " + expr + " WHERE id % " + std::to_string(mod) + " = " + std::to_string(rem));
+                if (update.is_err()) { // (a division by zero in a row it takes is an error that writes nothing, as in MySQL)
+                    REQUIRE(expr.find('/') != std::string::npos);
+                    REQUIRE(update.error() == "Division by 0");
+                } else {
+                    for (std::size_t i = 0; i < rows.size(); i++) {
+                        if (rows[i].id % mod == rem) {
+                            model[i] = show(value(rows[i]));
+                            quotient[i] = expr.find('/') != std::string::npos;
+                        }
                     }
                 }
                 Rows back = table_cells(ok_text(ex, "SELECT id, r FROM m ORDER BY id"));

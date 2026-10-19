@@ -21,6 +21,7 @@
 
 #include "engine/now_text.hpp"
 #include "engine/parser/parser.hpp"
+#include "engine/sql_value_util.hpp"
 
 namespace engine {
 
@@ -212,8 +213,10 @@ StringResult Executor::exec_insert_select(SharedDatabase& s, std::string table, 
         if (auto src_tables = table_lock_set_for(s, query)) {
             src_data_guard = acquire_table_data_locks(s, *src_tables, /*exclusive=*/false);
         }
+        const auto zeros = sqlval::division_by_zero_count;
         auto output = execute_with_s(s, std::move(query));
         if (output.is_err()) return output;
+        if (sqlval::division_by_zero_count != zeros && !std::holds_alternative<InsertConflict::Ignore>(on_conflict.data)) return StringResult::Err("Division by 0");
         std::tie(col_names, rows) = parse_table_output(output.value());
     } // (the shared lock on the source tables ends here: the insert takes the target exclusively, and the target may be the source)
     if (rows.empty()) return StringResult::Ok("0 row(s) inserted.");
@@ -502,11 +505,20 @@ StringResult Executor::exec_insert(SharedDatabase& s, std::string table, std::op
         else if (const TableSchema* schema = s.catalog.get_table(table)) {
             for (auto& c : schema->columns) names.push_back(c.name);
         }
+        // ... as the columns will hold them (1.005 into a DECIMAL(8,2) is 1.01 in NEW.price); one that does not fit stays as written, for the INSERT to refuse
+        const TableSchema* new_schema = s.catalog.get_table(table);
         std::vector<TriggerRow> new_rows;
         for (auto& values : all_values) {
             Row row;
             for (std::size_t i = 0; i < names.size() && i < values.size(); i++) {
-                if (values[i] != INSERT_DEFAULT) row[names[i]] = values[i];
+                if (values[i] == INSERT_DEFAULT) continue;
+                std::string value = values[i];
+                if (new_schema) {
+                    auto column = std::find_if(new_schema->columns.begin(), new_schema->columns.end(), [&](const ColumnDef& c) { return c.name == names[i]; });
+                    std::string fitted = value;
+                    if (column != new_schema->columns.end() && !coerce_column_value(*column, fitted, 1)) value = std::move(fitted);
+                }
+                row[names[i]] = std::move(value);
             }
             new_rows.push_back(TriggerRow{std::nullopt, std::move(row)});
         }

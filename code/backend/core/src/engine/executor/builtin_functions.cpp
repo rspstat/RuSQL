@@ -730,7 +730,10 @@ std::string fn_mod(const BuiltinCall& c) {
     if (argc(c) != 2) wrong_count(c);
     if (any_null(c)) return kNull;
     const Decimal a = decimal_of(c.value(0)), b = decimal_of(c.value(1));
-    if (b.is_zero()) return kNull;
+    if (b.is_zero()) {
+        ++sqlval::division_by_zero_count;
+        return kNull;
+    }
     if (a.fraction.empty() && b.fraction.empty()) {
         if (auto x = a.to_int64()) {
             if (auto y = b.to_int64()) {
@@ -1686,7 +1689,8 @@ std::string fn_cast(const BuiltinCall& c) {
         if (d.integer.size() > 20) return d.negative ? "0" : "18446744073709551615";
         unsigned long long v = 0;
         for (char ch : d.integer) {
-            if (v > (std::numeric_limits<unsigned long long>::max() - 9) / 10) return d.negative ? "0" : "18446744073709551615";
+            constexpr unsigned long long largest = std::numeric_limits<unsigned long long>::max();
+            if (v > largest / 10 || (v == largest / 10 && static_cast<unsigned>(ch - '0') > largest % 10)) return d.negative ? "0" : "18446744073709551615";
             v = v * 10 + static_cast<unsigned>(ch - '0');
         }
         if (d.negative && v != 0) v = 0ULL - v; // (a negative number wraps round, as in MySQL)
@@ -1754,7 +1758,8 @@ unsigned long long unsigned_of(const std::string& text) {
     if (d.integer.size() > 20) return d.negative ? 0ULL : std::numeric_limits<unsigned long long>::max();
     unsigned long long v = 0;
     for (char ch : d.integer) {
-        if (v > (std::numeric_limits<unsigned long long>::max() - 9) / 10) return std::numeric_limits<unsigned long long>::max();
+        constexpr unsigned long long largest = std::numeric_limits<unsigned long long>::max();
+        if (v > largest / 10 || (v == largest / 10 && static_cast<unsigned>(ch - '0') > largest % 10)) return largest; // (the digits past the largest 64-bit number)
         v = v * 10 + static_cast<unsigned>(ch - '0');
     }
     return d.negative ? 0ULL - v : v;
@@ -1790,7 +1795,10 @@ std::string fn_int_div(const BuiltinCall& c) {
     if (argc(c) != 2) wrong_count(c);
     if (any_null(c)) return kNull;
     const Decimal a = decimal_of(c.value(0)), b = decimal_of(c.value(1));
-    if (b.is_zero()) return kNull;
+    if (b.is_zero()) {
+        ++sqlval::division_by_zero_count;
+        return kNull;
+    }
     const Num q = num_div(Num::from_decimal(a), Num::from_decimal(b), 0, true); // (cut toward zero)
     const Decimal d = q.to_decimal();
     if (!d.to_int64()) throw StatementError("BIGINT value is out of range in '(" + c.value(0) + " DIV " + c.value(1) + ")'");

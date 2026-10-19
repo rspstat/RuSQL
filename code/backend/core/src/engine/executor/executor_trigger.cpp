@@ -49,6 +49,18 @@ StringResult Executor::fire_triggers(SharedDatabase& s, const std::string& table
     if (bodies.empty() || rows.empty()) return StringResult::Ok("");
 
     TriggerDepthGuard guard(trigger_depth_);
+    // What a trigger's own INSERT numbers (an AUTO_INCREMENT column of the table it writes) is not what LAST_INSERT_ID() says afterwards: MySQL restores it when the
+    // trigger ends
+    struct InsertIdRestore {
+        Executor& ex;
+        std::uint64_t last = ex.last_insert_id_, statement = ex.statement_insert_id_;
+        bool unset = ex.insert_id_unset_;
+        ~InsertIdRestore() {
+            ex.last_insert_id_ = last;
+            ex.statement_insert_id_ = statement;
+            ex.insert_id_unset_ = unset;
+        }
+    } restore_insert_id{*this};
     for (auto& [name, body] : bodies) {
         for (auto& row : rows) {
             std::unordered_map<std::string, std::string> vars;

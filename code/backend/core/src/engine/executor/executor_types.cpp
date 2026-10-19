@@ -22,6 +22,8 @@
 #include <nlohmann/json.hpp>
 
 #include "engine/executor/executor.hpp"
+#include "engine/parser/parser.hpp"
+#include "engine/sql_value_util.hpp"
 
 namespace engine {
 
@@ -405,12 +407,8 @@ std::optional<std::string> Executor::coerce_column_value(const ColumnDef& col, s
         double x = 0;
         auto res = std::from_chars(t.data() + (t.front() == '+' ? 1 : 0), t.data() + t.size(), x);
         if (res.ec != std::errc() || !std::isfinite(x)) return "Out of range value for column '" + col.name + "'" + at_row(row);
-        char buf[64];
-        std::to_chars_result out = std::holds_alternative<DataType::Float>(dt.data) ? std::to_chars(buf, buf + sizeof(buf), static_cast<float>(x))
-                                                                                  : std::to_chars(buf, buf + sizeof(buf), x);
-        std::string text(buf, out.ptr);
-        if (text == "-0") text = "0";
-        value = text;
+        // written the way MySQL writes a DOUBLE / FLOAT: 1000000 and 10000000000 as they are (not 1e+06), 1e15 and 1.5e-16 with an exponent
+        value = sqlval::format_double(x, std::holds_alternative<DataType::Float>(dt.data));
         return std::nullopt;
     }
     if (auto* dec = std::get_if<DataType::Decimal>(&dt.data)) {
@@ -484,6 +482,17 @@ std::optional<std::string> Executor::coerce_column_value(const ColumnDef& col, s
         return std::nullopt;
     }
     return std::nullopt; // TEXT, BLOB, ENUM, SET (checked elsewhere), Unknown
+}
+
+std::optional<std::string> Executor::coerce_declared(const std::string& name, const std::string& type_text, std::string& value) {
+    if (type_text.empty()) return std::nullopt;
+    thread_local std::unordered_map<std::string, std::optional<ColumnDef>> columns; // (the few types of the routines, read again on every call)
+    auto it = columns.find(type_text);
+    if (it == columns.end()) it = columns.emplace(type_text, Parser::declared_column("", type_text)).first;
+    if (!it->second) return std::nullopt;
+    ColumnDef col = *it->second;
+    col.name = name;
+    return coerce_column_value(col, value, 1);
 }
 
 } // namespace engine

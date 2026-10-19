@@ -17,6 +17,7 @@
 #include <sha1/sha1.hpp>
 
 #include "engine/parser/parser.hpp"
+#include "engine/sql_value_util.hpp"
 #include "engine/thread_pool.hpp"
 
 namespace engine {
@@ -1764,17 +1765,28 @@ StringResult Executor::execute_with_s_body(SharedDatabase& s, Statement stmt) {
         return exec_create_trigger(s, v->name, v->timing, v->event, v->table, std::move(v->body));
     if (auto* v = std::get_if<Statement::DropTrigger>(&stmt.data)) return exec_drop_trigger(s, v->name, v->if_exists);
     if (auto* v = std::get_if<Statement::DropProcedure>(&stmt.data)) return exec_drop_procedure(s, v->name, v->if_exists);
-    if (auto* v = std::get_if<Statement::CreateFunction>(&stmt.data)) return exec_create_function(s, v->name, v->params, v->body);
+    if (auto* v = std::get_if<Statement::CreateFunction>(&stmt.data)) return exec_create_function(s, v->name, v->params, v->body, v->param_types, v->return_type);
     if (auto* v = std::get_if<Statement::DropFunction>(&stmt.data)) return exec_drop_function(s, v->name, v->if_exists);
 
     // 저장 프로시저 제어문
     if (auto* v = std::get_if<Statement::ProcDeclare>(&stmt.data)) {
-        proc_vars[proc_var_key(proc_vars, v->name)] = v->default_value.value_or("NULL");
+        const std::string key = proc_var_key(proc_vars, v->name);
+        std::string value = v->default_value.value_or("NULL");
+        if (auto error = coerce_declared(v->name, v->typ, value)) return StringResult::Err(*error);
+        proc_vars[key] = std::move(value);
+        proc_var_types[key] = v->typ;
         return StringResult::Ok("");
     }
     if (auto* v = std::get_if<Statement::ProcSet>(&stmt.data)) {
         bind_expression(s, v->expr, false);
-        proc_vars[proc_var_key(proc_vars, v->name)] = eval_arith(proc_vars, v->expr);
+        const std::string key = proc_var_key(proc_vars, v->name);
+        const auto zeros = sqlval::division_by_zero_count;
+        std::string value = eval_arith(proc_vars, v->expr);
+        if (sqlval::division_by_zero_count != zeros && proc_vars.count(key)) return StringResult::Err("Division by 0"); // (a variable of the routine; @x takes NULL)
+        if (auto type = proc_var_types.find(key); type != proc_var_types.end()) { // (made to fit the type it was declared with)
+            if (auto error = coerce_declared(v->name, type->second, value)) return StringResult::Err(*error);
+        }
+        proc_vars[key] = std::move(value);
         return StringResult::Ok("");
     }
     if (auto* v = std::get_if<Statement::ProcIf>(&stmt.data)) {
@@ -1817,8 +1829,14 @@ StringResult Executor::execute_with_s_body(SharedDatabase& s, Statement stmt) {
         return StringResult::Err("Unknown prepared statement: " + v->name);
     }
     if (auto* v = std::get_if<Statement::SelectInto>(&stmt.data)) {
+        const auto zeros = sqlval::division_by_zero_count;
         auto out = execute_with_s(s, std::move(*v->query));
         if (out.is_err()) return out;
+        if (sqlval::division_by_zero_count != zeros) { // (into a variable of the routine it is an error, into @x a NULL)
+            for (const std::string& var : v->vars) {
+                if (!var.empty() && var[0] != '@' && proc_vars.count(proc_var_key(proc_vars, var))) return StringResult::Err("Division by 0");
+            }
+        }
         auto [cols, rows] = parse_table_output(out.value());
         for (std::size_t i = 0; i < v->vars.size(); i++) {
             std::string value = EXECUTOR_NULL_VALUE; // no row, or fewer columns than variables: NULL
@@ -1826,8 +1844,15 @@ StringResult Executor::execute_with_s_body(SharedDatabase& s, Statement stmt) {
                 if (auto it = rows.front().find(cols[i]); it != rows.front().end()) value = it->second;
             }
             const std::string& var = v->vars[i];
-            if (!var.empty() && var[0] == '@') user_vars[lower_variable_name(var.substr(1))] = value;
-            else proc_vars[proc_var_key(proc_vars, var)] = value;
+            if (!var.empty() && var[0] == '@') {
+                user_vars[lower_variable_name(var.substr(1))] = value;
+            } else {
+                const std::string key = proc_var_key(proc_vars, var);
+                if (auto type = proc_var_types.find(key); type != proc_var_types.end()) {
+                    if (auto error = coerce_declared(var, type->second, value)) return StringResult::Err(*error);
+                }
+                proc_vars[key] = value;
+            }
         }
         return StringResult::Ok("");
     }

@@ -127,3 +127,13 @@ TEST_CASE("type alias keywords normalize to the canonical TokenKind", "[lexer]")
     };
     REQUIRE(kinds == expected);
 }
+
+TEST_CASE("a lone ! is NOT (it was dropped) and != is not-equal", "[lexer]") {
+    auto toks = lex("!a != b ! (c)");
+    std::vector<TokenKind> kinds;
+    for (auto& t : toks) kinds.push_back(t.kind);
+    std::vector<TokenKind> expected = {
+        TokenKind::Not, TokenKind::Ident, TokenKind::Ne, TokenKind::Ident, TokenKind::Not, TokenKind::LParen, TokenKind::Ident, TokenKind::RParen,
+    };
+    REQUIRE(kinds == expected);
+}

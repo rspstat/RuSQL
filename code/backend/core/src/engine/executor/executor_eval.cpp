@@ -110,6 +110,7 @@ NumVal combine(char op, const NumVal& l, const NumVal& r) {
         const bool zero = v.approx ? rd == 0.0 : (r.is_int ? r.i == 0 : r.num.is_zero());
         if (zero) {
             v.null = true; // (x / 0 is NULL, as in MySQL)
+            ++sqlval::division_by_zero_count;
             return v;
         }
         v.dbl = ld / rd;
@@ -392,11 +393,28 @@ std::string Executor::eval_arith(const Row& row, const ArithExpr& expr) {
         }
         std::vector<std::string> str_args;
         str_args.reserve(v->args.size());
+        // COALESCE and IFNULL work out only the arguments up to the first that is not NULL (a division by zero in one after it is not an error)
+        const bool lazy = v->name == "COALESCE" || v->name == "IFNULL";
+        bool found = false;
         for (auto& a : v->args) {
-            if (auto* c = std::get_if<ArithExpr::Col>(&a.data)) str_args.push_back(c->name);
-            else if (auto* sv = std::get_if<ArithExpr::Str>(&a.data)) str_args.push_back("'" + sv->value + "'");
-            else if (auto* n = std::get_if<ArithExpr::Num>(&a.data)) str_args.push_back(n->value);
-            else str_args.push_back("'" + eval_arith(row, a) + "'");
+            if (lazy && found) {
+                str_args.push_back("NULL");
+                continue;
+            }
+            if (auto* c = std::get_if<ArithExpr::Col>(&a.data)) {
+                str_args.push_back(c->name);
+                if (lazy) found = get_col(row, c->name) && *get_col(row, c->name) != EXECUTOR_NULL_VALUE;
+            } else if (auto* sv = std::get_if<ArithExpr::Str>(&a.data)) {
+                str_args.push_back("'" + sv->value + "'");
+                found = lazy && sv->value != EXECUTOR_NULL_VALUE;
+            } else if (auto* n = std::get_if<ArithExpr::Num>(&a.data)) {
+                str_args.push_back(n->value);
+                found = lazy;
+            } else {
+                std::string value = eval_arith(row, a);
+                if (lazy) found = value != EXECUTOR_NULL_VALUE;
+                str_args.push_back("'" + value + "'");
+            }
         }
         return apply_scalar_func(v->name, str_args, row);
     }

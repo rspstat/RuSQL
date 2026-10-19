@@ -208,10 +208,12 @@ TEST_CASE("UPDATE checks NOT NULL and both sides of a foreign key, and a failed 
 
     // NOT NULL: NULL itself, and an expression that is NULL (x / 0, NULL arithmetic)
     REQUIRE(fails(ex, "UPDATE p SET a = NULL WHERE id = 1").find("cannot be NULL") != std::string::npos);
-    REQUIRE(fails(ex, "UPDATE p SET a = a / 0 WHERE id = 1").find("cannot be NULL") != std::string::npos);
+    REQUIRE(fails(ex, "UPDATE p SET a = a / NULLIF(0, 0) WHERE id = 1").find("cannot be NULL") != std::string::npos);
+    REQUIRE(fails(ex, "UPDATE p SET a = a / 0 WHERE id = 1") == "Division by 0"); // (x / 0 itself is an error where a value is written)
     REQUIRE(fails(ex, "UPDATE p SET id = NULL WHERE id = 1").find("cannot be NULL") != std::string::npos);
     // a statement over several rows is all or nothing: the first row would pass, the second does not
-    REQUIRE(fails(ex, "UPDATE p SET a = 100 / (id - 2) WHERE id <= 3").find("cannot be NULL") != std::string::npos);
+    REQUIRE(fails(ex, "UPDATE p SET a = 100 / NULLIF(id - 2, 0) WHERE id <= 3").find("cannot be NULL") != std::string::npos);
+    REQUIRE(fails(ex, "UPDATE p SET a = 100 / (id - 2) WHERE id <= 3") == "Division by 0");
     REQUIRE(q(ex, "SELECT id, a, u FROM p ORDER BY id") == p_before);
     // UNIQUE over the statement's whole result: a chain may shift, a repeat may not
     ok(ex, "UPDATE p SET u = u + 100");

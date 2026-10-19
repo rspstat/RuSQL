@@ -753,7 +753,9 @@ struct Statement {
     struct Backup { std::optional<std::string> database; std::optional<std::string> output_file; };
     struct Restore { std::string source_file; std::optional<std::string> database; };
     struct ShowProcessList {};
-    struct CreateFunction { std::string name; std::vector<std::string> params; std::string body; };
+    // param_types / return_type: the types as they were written ("DECIMAL(8,2)"), empty for a type that is not read; the values given to the parameters and the
+    // value returned are made to fit them
+    struct CreateFunction { std::string name; std::vector<std::string> params; std::string body; std::vector<std::string> param_types; std::string return_type; };
     struct DropFunction { std::string name; bool if_exists = false; };
     // 저장 프로시저 제어문
     struct ProcDeclare { std::string name, typ; std::optional<std::string> default_value; };

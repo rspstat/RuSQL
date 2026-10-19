@@ -1052,7 +1052,8 @@ void to_json(nlohmann::json& j, const Statement& stmt) {
             else if constexpr (std::is_same_v<T, Statement::Restore>)
                 j = nlohmann::json{{"Restore", nlohmann::json{{"source_file", alt.source_file}, {"database", alt.database}}}};
             else if constexpr (std::is_same_v<T, Statement::CreateFunction>)
-                j = nlohmann::json{{"CreateFunction", nlohmann::json{{"name", alt.name}, {"params", alt.params}, {"body", alt.body}}}};
+                j = nlohmann::json{{"CreateFunction", nlohmann::json{{"name", alt.name}, {"params", alt.params}, {"body", alt.body},
+                                                                     {"param_types", alt.param_types}, {"return_type", alt.return_type}}}};
             else if constexpr (std::is_same_v<T, Statement::DropFunction>)
                 j = nlohmann::json{{"DropFunction", nlohmann::json{{"name", alt.name}, {"if_exists", alt.if_exists}}}};
             else if constexpr (std::is_same_v<T, Statement::ProcDeclare>)
@@ -1343,7 +1344,9 @@ void from_json(const nlohmann::json& j, Statement& stmt) {
         stmt = Statement(Statement::Restore{p.at("source_file").get<std::string>(), p.at("database").get<std::optional<std::string>>()});
     } else if (tag == "CreateFunction") {
         stmt = Statement(Statement::CreateFunction{p.at("name").get<std::string>(), p.at("params").get<std::vector<std::string>>(),
-                                                     p.at("body").get<std::string>()});
+                                                     p.at("body").get<std::string>(),
+                                                     p.contains("param_types") ? p.at("param_types").get<std::vector<std::string>>() : std::vector<std::string>(),
+                                                     p.contains("return_type") ? p.at("return_type").get<std::string>() : std::string()});
     } else if (tag == "DropFunction") {
         stmt = Statement(Statement::DropFunction{p.at("name").get<std::string>(), p.at("if_exists").get<bool>()});
     } else if (tag == "ProcDeclare") {

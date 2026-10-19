@@ -6,6 +6,8 @@
 
 #include "engine/executor/executor.hpp"
 
+#include <cctype>
+
 #include "engine/parser/ast_json.hpp"
 #include "engine/parser/parser.hpp"
 
@@ -48,9 +50,12 @@ StringResult Executor::exec_proc_stmts(SharedDatabase& s, std::vector<Statement>
     for (auto& stmt : stmts) {
         if (proc_signal_) break;
         resolve_names(s, stmt); // (the tables and columns a body names are read in the spelling they were created with)
+        // an INSERT in the body numbers its rows like any other: LAST_INSERT_ID() says the first number (CALL, the statement that runs, is not an INSERT)
+        if (std::holds_alternative<Statement::Insert>(stmt.data) || std::holds_alternative<Statement::InsertSelect>(stmt.data)) insert_id_unset_ = true;
         auto res = execute_with_s(s, std::move(stmt));
         if (res.is_err()) return res;
-        last = res.value();
+        // what the call answers is the last result table of the body (a SELECT before a SET still answers), else the last message
+        if (res.value().rfind('+', 0) == 0 || last.rfind('+', 0) != 0) last = res.value();
     }
     return StringResult::Ok(last);
 }
@@ -164,6 +169,10 @@ StringResult Executor::exec_call_procedure(SharedDatabase& s, std::string name, 
     auto it = find_named(s.procedures, name);
     if (it == s.procedures.end()) return StringResult::Err("Procedure '" + name + "' not found");
     auto [params, body] = it->second;
+    if (args.size() != params.size()) {
+        return StringResult::Err("Incorrect number of arguments for PROCEDURE " + current_db + "." + name + "; expected " + std::to_string(params.size()) + ", got " +
+                                 std::to_string(args.size()));
+    }
 
     // The value of each argument: text as typed (quotes taken off), an @variable's value, or an expression (kept as "\x01" + JSON by the
     // parser) evaluated with the variables of the caller.
@@ -187,11 +196,20 @@ StringResult Executor::exec_call_procedure(SharedDatabase& s, std::string name, 
         }
     }
 
-    auto saved_vars = std::move(proc_vars);
-    proc_vars.clear();
+    // the value given to a parameter is made to fit its type (DECIMAL(8,2): 1.005 is 1.01; INT: '7.6' is 8; a value that does not fit is an error)
     for (std::size_t i = 0; i < params.size(); i++) {
         auto& [dir, pname, ptype] = params[i];
-        (void)ptype;
+        if (dir == "OUT") continue;
+        if (auto error = coerce_declared(pname, ptype, arg_values[i])) return StringResult::Err(*error);
+    }
+
+    auto saved_vars = std::move(proc_vars);
+    auto saved_types = std::move(proc_var_types);
+    proc_vars.clear();
+    proc_var_types.clear();
+    for (std::size_t i = 0; i < params.size(); i++) {
+        auto& [dir, pname, ptype] = params[i];
+        proc_var_types[pname] = ptype;
         if (dir == "IN" || dir == "INOUT") {
             proc_vars[pname] = i < arg_values.size() ? arg_values[i] : std::string();
         } else {
@@ -199,12 +217,15 @@ StringResult Executor::exec_call_procedure(SharedDatabase& s, std::string name, 
         }
     }
 
-    // Matches the Rust original's `?` early-return: on error, proc_vars/proc_signal_
-    // are deliberately NOT restored here (the caller's scope is left clobbered by the
-    // callee's), since that's what the `?` operator does when it propagates before
-    // reaching the `self.proc_vars = saved_vars;` line below it.
+    // On an error the caller's variables come back too: the Rust original's `?` left the callee's in place, where a later statement read them in place of
+    // the columns of the same names (after a failed CALL p(12.5), `SELECT a FROM t` was 12.50 for every row)
     auto res = exec_proc_stmts(s, std::move(body));
-    if (res.is_err()) return res;
+    if (res.is_err()) {
+        proc_vars = std::move(saved_vars);
+        proc_var_types = std::move(saved_types);
+        proc_signal_.reset();
+        return res;
+    }
     // OUT and INOUT parameters called with an @variable give it their value
     for (std::size_t i = 0; i < params.size() && i < args.size(); i++) {
         auto& [dir, pname, ptype] = params[i];
@@ -214,6 +235,7 @@ StringResult Executor::exec_call_procedure(SharedDatabase& s, std::string name, 
         }
     }
     proc_vars = std::move(saved_vars);
+    proc_var_types = std::move(saved_types);
     proc_signal_.reset(); // clear any signal that escaped the body
 
     std::string last = res.value();
@@ -231,7 +253,13 @@ StringResult Executor::exec_drop_procedure(SharedDatabase& s, std::string name, 
     return StringResult::Ok("Procedure '" + name + "' dropped.");
 }
 
-StringResult Executor::exec_create_function(SharedDatabase& s, std::string name, std::vector<std::string> params, std::string body) {
+StringResult Executor::exec_create_function(SharedDatabase& s, std::string name, std::vector<std::string> params, std::string body,
+                                            const std::vector<std::string>& param_types, const std::string& return_type) {
+    // with the types of the parameters and of the result (the values are made to fit them when it is called), the body is kept in a frame that holds them
+    const bool typed = !return_type.empty() || std::any_of(param_types.begin(), param_types.end(), [](const std::string& t) { return !t.empty(); });
+    if (typed) {
+        body = nlohmann::json{{"routine_expr", nlohmann::json::parse(body)}, {"param_types", param_types}, {"return_type", return_type}}.dump();
+    }
     if (auto same = find_named(s.user_functions, name); same != s.user_functions.end()) s.user_functions.erase(same);
     s.user_functions[name] = UserFunctionDef{std::move(params), std::move(body)};
     s.disk.save_functions(s.user_functions);
@@ -273,18 +301,61 @@ StringResult Executor::exec_drop_trigger(SharedDatabase& s, std::string name, bo
 StringResult Executor::exec_execute(SharedDatabase& s, const std::string& name, const std::vector<std::string>& using_vars) {
     auto it = prepared_stmts.find(name);
     if (it == prepared_stmts.end()) return StringResult::Err("Unknown prepared statement: " + name);
-    std::string query = it->second;
+    const std::string& prepared = it->second;
 
-    for (auto& var : using_vars) {
-        auto vit = user_vars.find(to_lower_str(var));
-        std::string val = vit != user_vars.end() ? vit->second : "NULL";
-        auto pos = query.find('?');
-        if (pos != std::string::npos) query.replace(pos, 1, val);
+    // Each ? outside a quoted string or a quoted name is replaced by the value of the next variable of USING, written as a literal: a number as it is, NULL, any
+    // other text in quotes with its quotes and backslashes doubled (a value that holds a ? or a quote is a value, not part of the statement)
+    std::string query;
+    std::size_t used = 0;
+    for (std::size_t i = 0; i < prepared.size(); i++) {
+        const char c = prepared[i];
+        if (c == '\'' || c == '"' || c == '`') {
+            const std::size_t start = i;
+            for (i++; i < prepared.size(); i++) {
+                if (prepared[i] == '\\' && c != '`' && i + 1 < prepared.size()) { i++; continue; }
+                if (prepared[i] == c) {
+                    if (i + 1 < prepared.size() && prepared[i + 1] == c) { i++; continue; } // (a doubled quote)
+                    break;
+                }
+            }
+            query.append(prepared, start, i - start + 1);
+            continue;
+        }
+        if (c != '?') {
+            query.push_back(c);
+            continue;
+        }
+        if (used >= using_vars.size()) return StringResult::Err("Incorrect arguments to EXECUTE");
+        auto vit = user_vars.find(to_lower_str(using_vars[used++]));
+        const std::string value = vit != user_vars.end() ? vit->second : "NULL";
+        bool number = !value.empty();
+        std::size_t digits = 0;
+        for (std::size_t k = 0; k < value.size() && number; k++) {
+            const unsigned char d = static_cast<unsigned char>(value[k]);
+            if (std::isdigit(d)) digits++;
+            else if (!((d == '-' || d == '+') && k == 0) && !(d == '.' && k > 0)) number = false;
+        }
+        if (value == "NULL" || (number && digits > 0)) {
+            query += value;
+        } else {
+            query.push_back('\'');
+            for (char ch : value) {
+                if (ch == '\'' || ch == '\\') query.push_back(ch);
+                query.push_back(ch);
+            }
+            query.push_back('\'');
+        }
     }
+    if (used != using_vars.size()) return StringResult::Err("Incorrect arguments to EXECUTE");
 
     Parser parser(query, pipes_as_concat());
     auto parsed = parser.parse();
     if (parsed.is_err()) return StringResult::Err("EXECUTE parse error: " + parsed.error());
+    std::string word;
+    for (std::size_t i = query.find_first_not_of(" \t\r\n"); i != std::string::npos && i < query.size() && std::isalpha(static_cast<unsigned char>(query[i])); i++) {
+        word.push_back(static_cast<char>(std::toupper(static_cast<unsigned char>(query[i]))));
+    }
+    insert_id_unset_ = word == "INSERT" || word == "REPLACE"; // (an INSERT that is prepared numbers its rows like any other: LAST_INSERT_ID() says the first number)
     return execute_with_s(s, std::move(parsed).value());
 }
 

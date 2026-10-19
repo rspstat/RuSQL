@@ -238,6 +238,7 @@ public:
     TransactionManager txn;
     std::string current_db;
     std::unordered_map<std::string, std::string> proc_vars;
+    std::unordered_map<std::string, std::string> proc_var_types; // the declared type of each of proc_vars ("INT"): what is given to it is made to fit
     std::unordered_map<std::string, std::string> user_vars = default_system_variables();
     std::unordered_map<std::string, std::string> prepared_stmts;
     std::size_t session_id = 0;
@@ -714,6 +715,8 @@ private:
     // 5 in a DECIMAL(5,2) -> '5.00', '2024-1-5' in a DATE -> '2024-01-05'). NULL passes. `row` is the 1-based row of the statement
     // for the message. Returns the error message, or nullopt.
     static std::optional<std::string> coerce_column_value(const ColumnDef& col, std::string& value, std::size_t row);
+    // The same for a value given to a parameter or a variable of a routine, whose type is kept as it was written ("DECIMAL(8,2)"); nothing for a type that is not read.
+    static std::optional<std::string> coerce_declared(const std::string& name, const std::string& type_text, std::string& value);
     std::optional<std::string> update_unique_violation(SharedDatabase& s, const std::string& table, const std::vector<const Row*>& olds, const std::vector<Row>& news);
     // executor_update_unique.cpp: a claim on a unique value. The duplicate check of an INSERT / UPDATE reads the table, where the row another session is about to
     // write is not yet, so two sessions writing the same value could both pass it; a claim on the value in the lock manager (like the one on a PRIMARY KEY value)
@@ -1153,7 +1156,8 @@ private:
     StringResult exec_proc_repeat(SharedDatabase& s, std::optional<std::string> label, std::vector<Statement> body, CondExpr until);
     StringResult exec_call_procedure(SharedDatabase& s, std::string name, std::vector<std::string> args);
     StringResult exec_drop_procedure(SharedDatabase& s, std::string name, bool if_exists);
-    StringResult exec_create_function(SharedDatabase& s, std::string name, std::vector<std::string> params, std::string body);
+    StringResult exec_create_function(SharedDatabase& s, std::string name, std::vector<std::string> params, std::string body,
+                                      const std::vector<std::string>& param_types, const std::string& return_type);
     StringResult exec_drop_function(SharedDatabase& s, std::string name, bool if_exists);
     StringResult exec_create_trigger(SharedDatabase& s, std::string name, TriggerTiming timing, TriggerEvent event, std::string table,
                                       std::vector<Statement> body);

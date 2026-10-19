@@ -206,9 +206,9 @@ TEST_CASE("a user-defined function takes typed or untyped parameters", "[routine
     ok(ex, "UPDATE t SET v = dbl(v) WHERE id = 1");
     REQUIRE(q(ex, "SELECT v FROM t WHERE id = 1") == Rows{{"20"}});
     ok(ex, "CREATE FUNCTION add_ratio(a DECIMAL(10, 2), b VARCHAR(5)) RETURNS DECIMAL(10, 2) RETURN a + b");
-    REQUIRE(q(ex, "SELECT add_ratio(1.5, 2)") == Rows{{"3.5"}});
+    REQUIRE(q(ex, "SELECT add_ratio(1.5, 2)") == Rows{{"3.50"}}); // (the result has the places of DECIMAL(10, 2))
     ok(ex, "CREATE FUNCTION half(x) RETURNS DECIMAL RETURN x / 2"); // the older spelling without types
-    REQUIRE(q(ex, "SELECT half(9)") == Rows{{"4.5000"}});
+    REQUIRE(q(ex, "SELECT half(9)") == Rows{{"5"}}); // (a DECIMAL with no places is DECIMAL(10, 0): 4.5 is 5)
 }
 
 TEST_CASE("a trigger runs once for each row, with the row's NEW and OLD", "[routines][trigger]") {

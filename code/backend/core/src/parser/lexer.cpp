@@ -440,7 +440,7 @@ std::vector<Token> Lexer::tokenize() {
             case '!': {
                 advance();
                 if (peek() == '=') { advance(); tok = Token(TokenKind::Ne); }
-                else continue;
+                else tok = Token(TokenKind::Not); // (a lone ! is NOT; it used to be dropped, so WHERE !(a > 1) selected the rows it should leave out)
                 break;
             }
             case '%': advance(); tok = Token(TokenKind::Percent); break;

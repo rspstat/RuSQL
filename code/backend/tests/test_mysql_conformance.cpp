@@ -45,6 +45,12 @@ const Case kDecimals[] = {
 const Case kTemporal[] = {
 #include "mysql_conformance_temporal.inc"
 };
+const Case kRoutines[] = {
+#include "mysql_conformance_routines.inc"
+};
+const Case kSchemaChange[] = {
+#include "mysql_conformance_schema_change.inc"
+};
 
 struct TempDataDir {
     std::string path;
@@ -210,4 +216,12 @@ TEST_CASE("fractional seconds, the forms of a date and a time, INTERVAL units an
 
 TEST_CASE("texts compare, sort, group, join and stay unique by MySQL's default collation", "[mysql_conformance][collation]") {
     run_cases("mc_collation", kCollation, sizeof kCollation / sizeof kCollation[0]);
+}
+
+TEST_CASE("stored routines, prepared statements and division by zero give MySQL's answers", "[mysql_conformance][routines]") {
+    run_cases("mc_routines", kRoutines, sizeof kRoutines / sizeof kRoutines[0]);
+}
+
+TEST_CASE("ALTER TABLE converts the values and keeps the indexes right as MySQL does", "[mysql_conformance][schema_change]") {
+    run_cases("mc_schema_change", kSchemaChange, sizeof kSchemaChange / sizeof kSchemaChange[0]);
 }

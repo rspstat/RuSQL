@@ -83,8 +83,8 @@ Statement Parser::parse_create_procedure() {
                 dir = "IN";
             }
             std::string pname = expect_ident();
-            std::string ptype;
-            {
+            std::string ptype = read_declared_type(); // (the type as written, with its length or places)
+            if (ptype.empty()) {
                 const Token* t = advance();
                 if (!t) throw ParseError("Expected type in procedure param");
                 switch (t->kind) {
@@ -127,15 +127,46 @@ Statement Parser::parse_create_procedure() {
 }
 
 // ── CREATE FUNCTION ─────────────────────────────────────────
+std::string Parser::read_declared_type() {
+    const std::size_t at = pos_;
+    std::optional<DataType> type;
+    try {
+        type = parse_data_type();
+    } catch (const ParseError&) {
+        pos_ = at;
+        return "";
+    }
+    // a DECIMAL with no places is DECIMAL(10,0); written so, a type kept with no brackets is known to be from before the types were kept
+    if (std::holds_alternative<DataType::Decimal>(type->data) && source_between(at, pos_).find('(') == std::string::npos) {
+        return last_type_unsigned_ ? "DECIMAL(10,0) UNSIGNED" : "DECIMAL(10,0)";
+    }
+    return source_between(at, pos_);
+}
+
+std::optional<ColumnDef> Parser::declared_column(const std::string& name, const std::string& type_text) {
+    try {
+        Parser p(type_text);
+        const DataType type = p.parse_data_type();
+        if (std::holds_alternative<DataType::Decimal>(type.data) && type_text.find('(') == std::string::npos) return std::nullopt; // (one kept without its places)
+        ColumnDef col{name, type};
+        col.is_unsigned = p.last_type_unsigned_;
+        return col;
+    } catch (const ParseError&) {
+        return std::nullopt;
+    }
+}
+
 Statement Parser::parse_create_function() {
     // CREATE FUNCTION name(p1, p2, ...) RETURNS type RETURN <expr>
     std::string name = to_lower(expect_ident());
-    std::vector<std::string> params;
+    std::vector<std::string> params, param_types;
+    std::string return_type;
     if (peek_is(TokenKind::LParen)) {
         advance();
         while (!peek_is(TokenKind::RParen) && peek() != nullptr) {
             params.push_back(expect_ident());
-            // the type of the parameter (`x INT`, `s VARCHAR(20)`, `d DECIMAL(10, 2)`) is not used: the value is text, as everywhere in the engine
+            // the type of the parameter (`x INT`, `s VARCHAR(20)`, `d DECIMAL(10, 2)`) is kept: the value given is made to fit it
+            param_types.push_back(read_declared_type());
             int depth = 0;
             while (peek() != nullptr && !(depth == 0 && (peek_is(TokenKind::Comma) || peek_is(TokenKind::RParen)))) {
                 if (peek_is(TokenKind::LParen)) depth++;
@@ -147,14 +178,17 @@ Statement Parser::parse_create_function() {
         if (!peek_is(TokenKind::RParen)) throw ParseError("Expected ')' after params");
         advance();
     }
-    // skip optional RETURNS type (e.g. RETURNS VARCHAR(50))
+    // RETURNS type (e.g. RETURNS VARCHAR(50)): the value returned is made to fit it
     if (const Token* p = peek(); p && p->kind == TokenKind::Ident && to_upper(p->text) == "RETURNS") {
         advance(); // RETURNS
-        advance(); // type token
-        if (peek_is(TokenKind::LParen)) {
-            advance();
-            while (!peek_is(TokenKind::RParen) && peek() != nullptr) advance();
-            if (peek_is(TokenKind::RParen)) advance();
+        return_type = read_declared_type();
+        if (return_type.empty()) {
+            advance(); // type token
+            if (peek_is(TokenKind::LParen)) {
+                advance();
+                while (!peek_is(TokenKind::RParen) && peek() != nullptr) advance();
+                if (peek_is(TokenKind::RParen)) advance();
+            }
         }
     }
     skip_routine_characteristics();
@@ -175,7 +209,7 @@ Statement Parser::parse_create_function() {
     }
     nlohmann::json j = expr;
     std::string body = j.dump();
-    return Statement(Statement::CreateFunction{name, params, body});
+    return Statement(Statement::CreateFunction{name, params, body, param_types, return_type});
 }
 
 Statement Parser::parse_drop_function() {
@@ -293,8 +327,8 @@ std::optional<std::string> Parser::try_expect_ident() {
 
 Statement Parser::parse_proc_declare() {
     std::string name = expect_ident();
-    std::string typ;
-    {
+    std::string typ = read_declared_type(); // (the type as written, with its length or places)
+    if (typ.empty()) {
         const Token* t = advance();
         if (!t) throw ParseError("Expected type in DECLARE");
         switch (t->kind) {

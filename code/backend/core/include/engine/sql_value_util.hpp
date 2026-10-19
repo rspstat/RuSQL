@@ -16,6 +16,10 @@
 
 namespace engine::sqlval {
 
+// x / 0, x DIV 0 and x % 0 work out to NULL, which a SELECT shows; what writes (INSERT, UPDATE, a stored function) counts them, before and after it works its
+// values out, to refuse them as MySQL does (error 1365 "Division by 0"). Per thread: a statement is evaluated on the thread that runs it.
+inline thread_local unsigned long long division_by_zero_count = 0;
+
 // ---------------------------------------------------------------------------------------------------------------------------------------------
 // UTF-8
 // ---------------------------------------------------------------------------------------------------------------------------------------------
@@ -164,13 +168,15 @@ inline double leading_number(const std::string& s, bool* whole = nullptr) {
 }
 
 // The shortest text that reads back as the same double, written the way MySQL writes a DOUBLE (1e20, 1.5e-7; whole numbers without a fraction).
-inline std::string format_double(double v) {
+// `single`: the shortest digits that read back as the FLOAT (single precision) nearest `v`, not as the double
+inline std::string format_double(double v, bool single = false) {
     if (std::isnan(v)) return "NULL";
     if (std::isinf(v)) return v > 0 ? "inf" : "-inf";
     if (v == 0.0) return "0";
     // the shortest digits that read back as `v`, and where the point goes: d.ddd e power
     char buf[64];
-    auto r = std::to_chars(buf, buf + sizeof buf, v, std::chars_format::scientific);
+    auto r = single ? std::to_chars(buf, buf + sizeof buf, static_cast<float>(v), std::chars_format::scientific)
+                    : std::to_chars(buf, buf + sizeof buf, v, std::chars_format::scientific);
     std::string s(buf, r.ptr);
     const bool minus = s[0] == '-';
     if (minus) s.erase(0, 1);

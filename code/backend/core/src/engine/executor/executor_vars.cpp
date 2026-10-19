@@ -12,6 +12,7 @@
 #include "engine/executor/executor.hpp"
 #include "engine/parser/ast_json.hpp"
 #include "engine/parser/parser.hpp"
+#include "engine/sql_value_util.hpp"
 #include "engine/subquery_walk.hpp"
 
 namespace engine {
@@ -381,7 +382,9 @@ void Executor::evaluate_insert_expressions(Statement& stmt, SharedDatabase* s, b
             ArithExpr expr = nlohmann::json::parse(value.substr(1)).get<ArithExpr>();
             substitute_variables(expr);
             if (s) bind_expression(*s, expr, check);
+            const auto zeros = sqlval::division_by_zero_count;
             value = eval_arith_exact(Row{}, expr); // (what the expression worked out; see the UPDATE)
+            if (sqlval::division_by_zero_count != zeros && !std::holds_alternative<InsertConflict::Ignore>(ins->on_conflict.data)) throw StatementError("Division by 0");
         }
     }
 }

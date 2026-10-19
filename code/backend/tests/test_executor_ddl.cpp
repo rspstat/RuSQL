@@ -202,7 +202,7 @@ TEST_CASE("ALTER TABLE MODIFY COLUMN rejects incompatible existing data", "[exec
 
     auto modify = ex.execute_sql("ALTER TABLE t MODIFY COLUMN val INT");
     REQUIRE(modify.is_err());
-    REQUIRE(modify.error().find("Cannot convert value") != std::string::npos);
+    REQUIRE(modify.error().find("Incorrect integer value: 'not_a_number' for column 'val' at row 1") != std::string::npos);
 }
 
 TEST_CASE("ALTER TABLE RENAME TABLE moves schema, rows, and indexes to the new key", "[executor][ddl]") {

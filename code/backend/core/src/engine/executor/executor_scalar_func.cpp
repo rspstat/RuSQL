@@ -21,6 +21,7 @@
 #include "engine/now_text.hpp"
 #include "engine/numeric_text.hpp"
 #include "engine/parser/parser.hpp"
+#include "engine/sql_value_util.hpp"
 
 namespace engine {
 
@@ -341,7 +342,16 @@ std::string Executor::apply_scalar_func(const std::string& typed_name, const std
     if (auto uf_it = g_user_functions.find(to_lower_str(typed_name)); uf_it != g_user_functions.end() && !is_known_function_name(func_name)) {
         auto& [params, body_json] = uf_it->second;
         try {
-            ArithExpr expr = nlohmann::json::parse(body_json).get<ArithExpr>();
+            nlohmann::json body = nlohmann::json::parse(body_json);
+            std::vector<std::string> param_types; // (a function made with its types: the values given and the result are made to fit them)
+            std::string return_type;
+            if (body.is_object() && body.contains("routine_expr")) {
+                param_types = body.at("param_types").get<std::vector<std::string>>();
+                return_type = body.at("return_type").get<std::string>();
+                const nlohmann::json inner = body.at("routine_expr");
+                body = inner;
+            }
+            ArithExpr expr = body.get<ArithExpr>();
             if (StatementContext* c = statement_context_) c->ex->bind_expression(*c->s, expr, false); // (a subquery in the body)
             Row bound_row = row;
             auto resolve_arg = [&](const std::string& arg) -> std::string {
@@ -351,11 +361,19 @@ std::string Executor::apply_scalar_func(const std::string& typed_name, const std
             };
             Row parameters;
             for (std::size_t i = 0; i < params.size(); i++) {
-                bound_row[params[i]] = i < args.size() ? resolve_arg(args[i]) : std::string();
-                parameters[params[i]] = bound_row[params[i]];
+                std::string value = i < args.size() ? resolve_arg(args[i]) : std::string();
+                if (i < param_types.size()) {
+                    if (auto error = coerce_declared(params[i], param_types[i], value)) throw StatementError(*error);
+                }
+                bound_row[params[i]] = value;
+                parameters[params[i]] = std::move(value);
             }
             substitute_parameters(expr, parameters);
-            return eval_arith(bound_row, expr);
+            const auto zeros = sqlval::division_by_zero_count;
+            std::string result = eval_arith(bound_row, expr);
+            if (sqlval::division_by_zero_count != zeros) throw StatementError("Division by 0"); // (a function refuses it, where a SELECT shows NULL)
+            if (auto error = coerce_declared(typed_name, return_type, result)) throw StatementError(*error);
+            return result;
         } catch (const StatementError&) {
             throw; // (a subquery of the body that fails is the statement's error)
         } catch (...) {

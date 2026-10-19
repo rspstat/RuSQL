@@ -624,6 +624,27 @@ StringResult Executor::exec_alter(SharedDatabase& s, const std::string& table, A
         return StringResult::Ok("Table '" + table + "' altered.");
     }
 
+    // Every index keeps a copy of the rows it points to (a lookup by key hands that copy back), so after the columns of the rows changed -- a column added with
+    // its default, one dropped, the values of one converted -- the indexes have to be built again, or a lookup shows the row as it was (the new column empty).
+    auto rebuild_indexes = [&]() {
+        const TableSchema* schema = s.catalog.get_table(table);
+        auto rows_it = s.tables.find(table);
+        if (!schema || rows_it == s.tables.end()) return;
+        const std::vector<Row>& rows = rows_it->second;
+        if (auto idx_it = s.indexes.find(table); idx_it != s.indexes.end()) {
+            std::string pk_col_name;
+            for (auto& c : schema->columns) {
+                if (c.primary_key) { pk_col_name = c.name; break; }
+            }
+            if (pk_col_name.empty() && !schema->columns.empty()) pk_col_name = schema->columns.front().name;
+            idx_it->second = build_pk_tree(rows, pk_col_name, key_kinds_of(schema, {pk_col_name})); // (the column may have a new type, and so a new kind of key)
+        }
+        rebuild_secondary_indexes(s, table, rows);
+        for (auto& [key, ci] : s.composite_indexes) {
+            if (ci.table == table) ci.rebuild(rows);
+        }
+    };
+
     // AUTO_INCREMENT = n: the next number is n, or the one after the largest the table holds when that is more (the counter holds the last number given)
     if (auto* v = std::get_if<AlterAction::SetAutoIncrement>(&action.data)) {
         auto* schema = s.catalog.get_table_mut(table);
@@ -728,6 +749,7 @@ StringResult Executor::exec_alter(SharedDatabase& s, const std::string& table, A
         if (auto it = s.tables.find(table); it != s.tables.end()) {
             for (auto& row : it->second) row[new_col.name] = fill_val;
         }
+        rebuild_indexes();
         s.disk.save_schema(table, *s.catalog.get_table(table));
         s.buffer_pool.write_through(table, s.tables.at(table), s.disk); // (committed rows only: see BufferPool::write_through)
         return StringResult::Ok("Column '" + new_col.name + "' added to '" + table + "'.");
@@ -744,6 +766,7 @@ StringResult Executor::exec_alter(SharedDatabase& s, const std::string& table, A
         if (auto it = s.tables.find(table); it != s.tables.end()) {
             for (auto& row : it->second) row.erase(v->name);
         }
+        rebuild_indexes();
         s.disk.save_schema(table, *s.catalog.get_table(table));
         s.buffer_pool.write_through(table, s.tables.at(table), s.disk); // (committed rows only: see BufferPool::write_through)
         return StringResult::Ok("Column '" + v->name + "' dropped from '" + table + "'.");
@@ -823,20 +846,33 @@ StringResult Executor::exec_alter(SharedDatabase& s, const std::string& table, A
             return StringResult::Err("Unknown column '" + *v->position->after + "' in '" + schema_check->name + "'"); // (before anything is changed)
         }
 
+        // The values the column holds are converted to the new definition, or the statement fails and nothing changes (MySQL strict mode: 300 does not fit a
+        // TINYINT, 99999.99 a DECIMAL(5,1), 'long text' a VARCHAR(5); a DECIMAL(10,4) writes 1.5 as 1.5000, a DATETIME a date with 00:00:00).
+        std::vector<std::pair<Row*, std::string>> converted;
         if (auto it = s.tables.find(table); it != s.tables.end()) {
+            ColumnDef target = *std::find_if(schema_check->columns.begin(), schema_check->columns.end(), [&](const ColumnDef& c) { return c.name == v->column.name; });
+            target.data_type = v->column.data_type;
+            target.is_unsigned = v->column.is_unsigned;
+            std::size_t row_number = 0;
             for (auto& row : it->second) {
-                if (!is_visible(row)) continue;
+                const bool visible = is_visible(row);
+                if (visible) row_number++;
                 auto vit = row.find(v->column.name);
                 if (vit == row.end()) continue;
-                const std::string& val = vit->second;
-                if (val == EXECUTOR_NULL_VALUE) continue;
-                if (!value_matches_data_type(v->column.data_type, val)) {
+                std::string val = vit->second;
+                if (val == EXECUTOR_NULL_VALUE) {
+                    if (visible && v->column.not_null) return StringResult::Err("Invalid use of NULL value");
+                    continue;
+                }
+                if (auto error = coerce_column_value(target, val, row_number)) {
+                    if (visible) return StringResult::Err(*error);
+                    continue; // (an older version of a row that is gone: left as it is)
+                }
+                if (visible && !value_matches_data_type(v->column.data_type, val)) { // (an ENUM or SET the value is not one of)
                     return StringResult::Err("Cannot convert value '" + val + "' in column '" + v->column.name + "' to " +
                                               debug_data_type(v->column.data_type));
                 }
-                if (v->column.is_unsigned && val.size() > 1 && val.front() == '-') {
-                    return StringResult::Err("Out of range value for column '" + v->column.name + "': '" + val + "' is negative");
-                }
+                if (val != vit->second) converted.emplace_back(&row, std::move(val));
             }
         }
 
@@ -858,6 +894,12 @@ StringResult Executor::exec_alter(SharedDatabase& s, const std::string& table, A
         }
         if (v->position) {
             if (auto error = place_column(*schema, v->column.name, *v->position); !error.empty()) return StringResult::Err(error);
+        }
+        if (!converted.empty()) {
+            for (auto& [row, text] : converted) (*row)[v->column.name] = std::move(text);
+            rebuild_indexes();
+            s.buffer_pool.write_through(table, s.tables.at(table), s.disk); // (committed rows only: see BufferPool::write_through)
+            s.buffer_pool.write_page(table, s.tables.at(table));
         }
         s.disk.save_schema(table, *s.catalog.get_table(table));
         return StringResult::Ok("Column '" + v->column.name + "' in '" + table + "' modified.");

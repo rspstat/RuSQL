@@ -71,6 +71,9 @@ public:
     static std::string cond_to_string(const CondExpr& cond);
     static std::string aggregate_argument_text(const ArithExpr& arg);
     static ArithExpr str_to_arith(const std::string& s);
+    /// The column that the type a routine declares ("DECIMAL(8,2)", "INT UNSIGNED") stands for, to make the values of a parameter or a variable fit it
+    /// (nullopt for a type that is not read)
+    static std::optional<ColumnDef> declared_column(const std::string& name, const std::string& type_text);
 
 private:
     std::vector<Token> tokens_;
@@ -250,6 +253,8 @@ private:
     std::optional<std::string> try_parse_label();
     std::optional<std::string> try_expect_ident();
     Statement parse_proc_declare();
+    /// a data type of a parameter or a DECLARE as it is written ("DECIMAL(8,2)", "VARCHAR(20)"); empty (and nothing read) when what follows is no type
+    std::string read_declared_type();
     Statement parse_proc_set_var();
     Statement parse_proc_if();
     std::vector<Statement> parse_proc_stmts_until_elseif_or_else_or_end();
