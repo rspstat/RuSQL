@@ -1780,9 +1780,11 @@ StringResult Executor::execute_with_s_body(SharedDatabase& s, Statement stmt) {
     if (auto* v = std::get_if<Statement::ProcSet>(&stmt.data)) {
         bind_expression(s, v->expr, false);
         const std::string key = proc_var_key(proc_vars, v->name);
-        const auto zeros = sqlval::division_by_zero_count;
+        const sqlval::StrictWrite strict;
         std::string value = eval_arith(proc_vars, v->expr);
-        if (sqlval::division_by_zero_count != zeros && proc_vars.count(key)) return StringResult::Err("Division by 0"); // (a variable of the routine; @x takes NULL)
+        if (proc_vars.count(key)) { // (a variable of the routine refuses a division by zero and a text that is not a number; @x takes NULL)
+            if (auto refused = strict.error()) return StringResult::Err(*refused);
+        }
         if (auto type = proc_var_types.find(key); type != proc_var_types.end()) { // (made to fit the type it was declared with)
             if (auto error = coerce_declared(v->name, type->second, value)) return StringResult::Err(*error);
         }
@@ -1829,12 +1831,12 @@ StringResult Executor::execute_with_s_body(SharedDatabase& s, Statement stmt) {
         return StringResult::Err("Unknown prepared statement: " + v->name);
     }
     if (auto* v = std::get_if<Statement::SelectInto>(&stmt.data)) {
-        const auto zeros = sqlval::division_by_zero_count;
+        const sqlval::StrictWrite strict;
         auto out = execute_with_s(s, std::move(*v->query));
         if (out.is_err()) return out;
-        if (sqlval::division_by_zero_count != zeros) { // (into a variable of the routine it is an error, into @x a NULL)
+        if (auto refused = strict.error()) { // (into a variable of the routine it is an error, into @x a NULL)
             for (const std::string& var : v->vars) {
-                if (!var.empty() && var[0] != '@' && proc_vars.count(proc_var_key(proc_vars, var))) return StringResult::Err("Division by 0");
+                if (!var.empty() && var[0] != '@' && proc_vars.count(proc_var_key(proc_vars, var))) return StringResult::Err(*refused);
             }
         }
         auto [cols, rows] = parse_table_output(out.value());

@@ -250,3 +250,27 @@ SET @e1 = 1, @e2 = 2
 EXECUTE pe USING @e1, @e2
 EXECUTE pe
 EXECUTE pe USING @e1
+
+# a function or a procedure refuses a text that is not a number, too (R43)
+--CREATE FUNCTION tn_f1(t VARCHAR(10)) RETURNS DOUBLE DETERMINISTIC RETURN t + 1
+SELECT tn_f1('5'), tn_f1('')
+SELECT tn_f1('abc')
+--CREATE FUNCTION tn_f2() RETURNS DOUBLE DETERMINISTIC RETURN 'abc' + 1
+SELECT tn_f2()
+--CREATE TABLE tn_t (id INT PRIMARY KEY, s VARCHAR(10))
+--INSERT INTO tn_t VALUES (1, 'abc')
+--CREATE PROCEDURE tn_p1() BEGIN DECLARE v DOUBLE; SET v = 'abc' + 1; SELECT v; END
+CALL tn_p1()
+--CREATE PROCEDURE tn_p2() BEGIN DECLARE v DOUBLE; SELECT s + 1 INTO v FROM tn_t WHERE id = 1; SELECT v; END
+CALL tn_p2()
+--CREATE PROCEDURE tn_p3() BEGIN SELECT s + 1 FROM tn_t WHERE id = 1; END
+CALL tn_p3()
+--CREATE PROCEDURE tn_lab(IN n INT) BEGIN DECLARE i INT DEFAULT 0; lp: WHILE i < n DO SET i := i + 1; IF i > 5 THEN LEAVE lp; END IF; END WHILE; SELECT i; END
+CALL tn_lab(3)
+CALL tn_lab(9)
+
+# SELECT ... INTO @x takes the number the text starts with and NULL for a division by zero (no error; into a variable of the routine it is one)
+--CREATE PROCEDURE tn_pu() BEGIN SELECT s + 1 INTO @uy FROM tn_t WHERE id = 1; SELECT @uy; END
+CALL tn_pu()
+--CREATE PROCEDURE tn_pv() BEGIN SELECT 1 / 0 INTO @ux; SELECT @ux; END
+CALL tn_pv()

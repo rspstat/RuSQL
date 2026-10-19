@@ -431,7 +431,7 @@ StringResult Executor::exec_update_inner(SharedDatabase& s, const std::string& t
                     } else {
                         // the assignments run in the order written, each one seeing the columns the ones before it set (MySQL: SET a = a + 1, b = a)
                         Row working = row;
-                        const auto zeros = sqlval::division_by_zero_count;
+                        const sqlval::StrictWrite strict;
                         for (auto& [col, expr] : assignments) {
                             // the column gets what the expression worked out (8 / 59.27 into a DECIMAL(10,2) is 0.13, not the 0.135 of the 0.1350 it shows; into a
                             // VARCHAR it is 0.134975535)
@@ -439,7 +439,7 @@ StringResult Executor::exec_update_inner(SharedDatabase& s, const std::string& t
                             working[col] = value;
                             new_vals.emplace_back(col, std::move(value));
                         }
-                        if (sqlval::division_by_zero_count != zeros) return StringResult::Err("Division by 0");
+                        if (auto refused = strict.error()) return StringResult::Err(*refused);
                     }
 
                     if (auto* schema = s.catalog.get_table(table)) {

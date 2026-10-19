@@ -140,7 +140,7 @@ def main():
     args = ap.parse_args()
     proc, db = D.start(args.exe, 17973, os.path.join(os.environ.get("TEMP", "/tmp"), "verify_null_expressions"), False)
     rng = random.Random(args.seed)
-    selects = wheres = updates = nulls = dirt = 0
+    selects = wheres = updates = nulls = dirt = refused = 0
     try:
         for sql in D.load(rng, args.rows):
             db.execute(sql)
@@ -239,6 +239,13 @@ def main():
                 mod = rng.randint(2, 4)
                 rem = rng.randrange(mod)
                 res = db.execute(f"UPDATE s SET r = {rewrite} WHERE id % {mod} = {rem}")
+                if "Division by 0" in res and "/" in rewrite:
+                    # a division by zero in a row the UPDATE takes is error 1365 and nothing is written (SELECT shows NULL for it)
+                    if any(cell != "x" for _, cell in read(db, "SELECT id, r FROM s ORDER BY id")[1]):
+                        print("WRONG UPDATE: the refused", f"UPDATE s SET r = {rewrite} WHERE id % {mod} = {rem}", "wrote")
+                        return 1
+                    refused += 1
+                    continue
                 if not res.startswith("OK"):
                     print("ERROR:", f"UPDATE s SET r = {rewrite}", res.split("---END---")[0][:200])
                     return 1
@@ -258,7 +265,7 @@ def main():
     finally:
         proc.kill()
         proc.wait()
-    print(f"queries={args.queries} selects={selects} NULL answers={nulls} with WHERE={wheres} with UPDATE={updates} skipped (text in a column)={dirt} -- no violation")
+    print(f"queries={args.queries} selects={selects} NULL answers={nulls} with WHERE={wheres} with UPDATE={updates} refused for a division by zero={refused} skipped (text in a column)={dirt} -- no violation")
     return 0
 
 

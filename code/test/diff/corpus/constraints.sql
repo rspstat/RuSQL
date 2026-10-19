@@ -172,3 +172,59 @@ UPDATE un SET n = 7 WHERE id = 1
 ALTER TABLE un MODIFY COLUMN n INT UNSIGNED
 INSERT INTO un (id, n) VALUES (21, -1)
 SELECT id, n, x FROM un ORDER BY id
+
+# a text read as a number without being wholly one ('abc', '12abc', '0x10', '--5') is the number it starts with in a SELECT and error 1292 where a value is written
+# (INSERT, UPDATE, REPLACE); blanks are 0, a number may have blanks around it, a sign, a fraction, an exponent (R43)
+--CREATE TABLE tn_src (id INT PRIMARY KEY, s VARCHAR(20), n INT)
+--INSERT INTO tn_src VALUES (1,'abc',1),(2,'12',2),(3,'12abc',3),(4,'',4),(5,' 7',5),(6,'7 ',6),(7,'1e3',7),(8,'.5',8),(9,'5.',9),(10,'0x10',10),(11,'+5',11),(12,'--5',12),(13,'   ',13)
+--CREATE TABLE tn_dst (id INT PRIMARY KEY, v DOUBLE)
+SELECT id, s + 0 FROM tn_src ORDER BY id
+INSERT INTO tn_dst SELECT id, s + 1 FROM tn_src WHERE id = 1
+INSERT INTO tn_dst SELECT id, s + 1 FROM tn_src WHERE id = 2
+INSERT INTO tn_dst SELECT id, s + 1 FROM tn_src WHERE id = 3
+INSERT INTO tn_dst SELECT id, s + 1 FROM tn_src WHERE id = 4
+INSERT INTO tn_dst SELECT id, s + 1 FROM tn_src WHERE id = 5
+INSERT INTO tn_dst SELECT id, s + 1 FROM tn_src WHERE id = 6
+INSERT INTO tn_dst SELECT id, s + 1 FROM tn_src WHERE id = 7
+INSERT INTO tn_dst SELECT id, s + 1 FROM tn_src WHERE id = 8
+INSERT INTO tn_dst SELECT id, s + 1 FROM tn_src WHERE id = 9
+INSERT INTO tn_dst SELECT id, s + 1 FROM tn_src WHERE id = 10
+INSERT INTO tn_dst SELECT id, s + 1 FROM tn_src WHERE id = 11
+INSERT INTO tn_dst SELECT id, s + 1 FROM tn_src WHERE id = 12
+INSERT INTO tn_dst SELECT id, s + 1 FROM tn_src WHERE id = 13
+INSERT INTO tn_dst VALUES (20, 'abc' + 1)
+INSERT INTO tn_dst VALUES (21, '3' + 1)
+INSERT IGNORE INTO tn_dst VALUES (22, 'abc' + 1)
+INSERT IGNORE INTO tn_dst SELECT 50, 'abc' + 1
+INSERT IGNORE INTO tn_dst SELECT 51, 1 / 0
+INSERT INTO tn_dst VALUES (31, 'abc' * 1)
+INSERT INTO tn_dst VALUES (32, 5 - 'abc')
+INSERT INTO tn_dst VALUES (33, '' + 1)
+UPDATE tn_src SET n = s + 1 WHERE id = 1
+UPDATE tn_src SET n = s * 2 WHERE id = 3
+UPDATE tn_src SET n = s + 1 WHERE id = 2
+SELECT id, v FROM tn_dst ORDER BY id
+SELECT id, n FROM tn_src WHERE id <= 3 ORDER BY id
+SELECT s + 1 FROM tn_src WHERE id = 1
+REPLACE INTO tn_src VALUES (14, 'r', 'abc' + 1)
+--CREATE TABLE tn_dt (d DATE)
+INSERT INTO tn_dt VALUES ('2024-01-31' + INTERVAL 1 DAY)
+SELECT * FROM tn_dt
+# a date or a time read as a number is not refused (MySQL turns it into 20240305; the number here is the one it starts with)
+--CREATE TABLE tn_tm (id INT PRIMARY KEY, d DATE, t TIME, dt DATETIME)
+--INSERT INTO tn_tm VALUES (1, '2024-03-05', '12:30:00', '2024-03-05 12:30:00')
+INSERT INTO tn_dst SELECT 60, d + 0 FROM tn_tm
+INSERT INTO tn_dst SELECT 61, t + 0 FROM tn_tm
+INSERT INTO tn_dst SELECT 62, dt + 0 FROM tn_tm
+
+# := where a value is assigned (SET, UPDATE ... SET, INSERT ... SET, ON DUPLICATE KEY UPDATE)
+SET @tn_a := 5
+SELECT @tn_a
+UPDATE tn_src SET n := 9 WHERE id = 2
+SELECT n FROM tn_src WHERE id = 2
+UPDATE tn_src JOIN tn_dst ON tn_dst.id = tn_src.id SET tn_src.n := 77
+SELECT id, n FROM tn_src WHERE n = 77 ORDER BY id
+INSERT INTO tn_dst SET id = 40, v := 2
+SELECT v FROM tn_dst WHERE id = 40
+INSERT INTO tn_dst VALUES (40, 1) ON DUPLICATE KEY UPDATE v := 5
+SELECT v FROM tn_dst WHERE id = 40

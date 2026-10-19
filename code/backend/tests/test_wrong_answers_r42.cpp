@@ -256,3 +256,65 @@ TEST_CASE("the numbers a trigger gives out are not what the statement that fired
     REQUIRE(ex.statement_insert_id() == 0);
     REQUIRE(q(ex, "SELECT LAST_INSERT_ID()") == Rows{{"3"}});
 }
+
+TEST_CASE(":= assigns where a value is assigned and is an error anywhere else", "[r43][lexer]") {
+    TempDataDir dir("r43_colon_eq");
+    Executor ex(dir.path);
+    ok(ex, "CREATE DATABASE d");
+    ok(ex, "USE d");
+    ok(ex, "CREATE TABLE x (id INT PRIMARY KEY, n INT)");
+    ok(ex, "INSERT INTO x VALUES (1, 1), (2, 2)");
+    ok(ex, "SET @a := 5");
+    REQUIRE(q(ex, "SELECT @a") == Rows{{"5"}});
+    ok(ex, "UPDATE x SET n := 9 WHERE id = 2");
+    ok(ex, "INSERT INTO x SET id = 3, n := 4");
+    ok(ex, "INSERT INTO x VALUES (3, 1) ON DUPLICATE KEY UPDATE n := 7");
+    REQUIRE(q(ex, "SELECT id, n FROM x ORDER BY id") == Rows{{"1", "1"}, {"2", "9"}, {"3", "7"}});
+    ok(ex, "CREATE TABLE y (id INT PRIMARY KEY)");
+    ok(ex, "INSERT INTO y VALUES (1), (3)");
+    ok(ex, "UPDATE x JOIN y ON y.id = x.id SET x.n := 100");
+    REQUIRE(q(ex, "SELECT id, n FROM x ORDER BY id") == Rows{{"1", "100"}, {"2", "9"}, {"3", "100"}});
+    ok(ex, "MERGE INTO x t USING y s ON t.id = s.id WHEN MATCHED THEN UPDATE SET n := 5");
+    REQUIRE(q(ex, "SELECT id, n FROM x ORDER BY id") == Rows{{"1", "5"}, {"2", "9"}, {"3", "5"}});
+    // as an operator inside an expression it is not supported -- and said so, where it used to be read as a comparison (NULL) with the colon dropped
+    REQUIRE_FALSE(fails(ex, "SELECT @b := 7").empty());
+    REQUIRE_FALSE(fails(ex, "SELECT @i := @i + 1").empty());
+    REQUIRE(q(ex, "SELECT @b") == Rows{{"NULL"}});
+    // a label (`lp:`) still is a label
+    ok(ex, "CREATE PROCEDURE lab(IN n INT) BEGIN DECLARE i INT DEFAULT 0; lp: WHILE i < n DO SET i := i + 1; IF i > 5 THEN LEAVE lp; END IF; END WHILE; SELECT i; END");
+    REQUIRE(q(ex, "CALL lab(3)") == Rows{{"3"}});
+    REQUIRE(q(ex, "CALL lab(9)") == Rows{{"6"}});
+}
+
+TEST_CASE("a text that is not a number is refused where a value is written", "[r43][strict]") {
+    TempDataDir dir("r43_text_number");
+    Executor ex(dir.path);
+    ok(ex, "CREATE DATABASE d");
+    ok(ex, "USE d");
+    ok(ex, "CREATE TABLE src (id INT PRIMARY KEY, s VARCHAR(20), n INT)");
+    ok(ex, "INSERT INTO src VALUES (1, 'abc', 1), (2, '12', 2), (3, '12abc', 3), (4, '', 4), (5, '0x10', 5), (6, ' 7 ', 6)");
+    ok(ex, "CREATE TABLE dst (id INT PRIMARY KEY, v DOUBLE)");
+    // a SELECT reads the number the text starts with
+    REQUIRE(q(ex, "SELECT id, s + 1 FROM src ORDER BY id") == Rows{{"1", "1"}, {"2", "13"}, {"3", "13"}, {"4", "1"}, {"5", "1"}, {"6", "8"}});
+    // what writes refuses the ones that are not wholly a number (a blank text is 0, a number may have blanks around it)
+    REQUIRE(fails(ex, "INSERT INTO dst SELECT id, s + 1 FROM src WHERE id = 1") == "Truncated incorrect DOUBLE value: 'abc'");
+    REQUIRE(fails(ex, "INSERT INTO dst SELECT id, s * 2 FROM src WHERE id = 3") == "Truncated incorrect DOUBLE value: '12abc'");
+    REQUIRE(fails(ex, "INSERT INTO dst VALUES (7, 5 - 'abc')") == "Truncated incorrect DOUBLE value: 'abc'");
+    REQUIRE(fails(ex, "UPDATE src SET n = s + 1 WHERE id = 5") == "Truncated incorrect DOUBLE value: '0x10'");
+    ok(ex, "INSERT INTO dst SELECT id, s + 1 FROM src WHERE id IN (2, 4, 6)");
+    ok(ex, "INSERT IGNORE INTO dst VALUES (8, 'abc' + 1)"); // (a warning there)
+    REQUIRE(q(ex, "SELECT id, v FROM dst ORDER BY id") == Rows{{"2", "13"}, {"4", "1"}, {"6", "8"}, {"8", "1"}});
+    REQUIRE(q(ex, "SELECT id, n FROM src WHERE id = 5") == Rows{{"5", "5"}}); // (the failed UPDATE changed nothing)
+    // a date plus an interval is not a text read as a number
+    ok(ex, "CREATE TABLE dt (d DATE)");
+    ok(ex, "INSERT INTO dt VALUES ('2024-01-31' + INTERVAL 1 DAY)");
+    REQUIRE(q(ex, "SELECT d FROM dt") == Rows{{"2024-02-01"}});
+    // nor is a date or a time read as a number (MySQL turns it into 20240305; the number here is the one it starts with)
+    ok(ex, "CREATE TABLE tm (id INT PRIMARY KEY, d DATE, t TIME, dt DATETIME)");
+    ok(ex, "INSERT INTO tm VALUES (1, '2024-03-05', '12:30:00', '2024-03-05 12:30:00')");
+    ok(ex, "INSERT INTO dst SELECT id + 100, d + 0 FROM tm");
+    ok(ex, "INSERT INTO dst SELECT id + 101, t + 0 FROM tm");
+    ok(ex, "INSERT INTO dst SELECT id + 102, dt + 0 FROM tm");
+    ok(ex, "UPDATE src SET n = 1 + 1 WHERE id = 2");
+    REQUIRE(q(ex, "SELECT COUNT(*) FROM dst WHERE id >= 100") == Rows{{"3"}});
+}

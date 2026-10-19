@@ -444,6 +444,10 @@ std::vector<Token> Lexer::tokenize() {
                 break;
             }
             case '%': advance(); tok = Token(TokenKind::Percent); break;
+            case ':':
+                advance();
+                if (peek() == '=') { advance(); tok = Token(TokenKind::ColonEq); break; } // (the assignment operator; SELECT @a := 1 is not supported and is an error)
+                continue; // (a lone : ends a label -- `lp: WHILE` -- and is not a token)
             case '|': {
                 advance();
                 if (peek() == '|') { advance(); tok = Token(TokenKind::PipePipe); }

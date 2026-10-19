@@ -19,6 +19,21 @@ namespace engine::sqlval {
 // x / 0, x DIV 0 and x % 0 work out to NULL, which a SELECT shows; what writes (INSERT, UPDATE, a stored function) counts them, before and after it works its
 // values out, to refuse them as MySQL does (error 1365 "Division by 0"). Per thread: a statement is evaluated on the thread that runs it.
 inline thread_local unsigned long long division_by_zero_count = 0;
+// The same for a text that is read as a number without being wholly one ('abc' + 1, '12abc' * 2): a SELECT reads the number it starts with, what writes
+// refuses it (error 1292 "Truncated incorrect DOUBLE value: 'abc'"). A text of blanks is 0, as in MySQL.
+inline thread_local unsigned long long truncated_number_count = 0;
+inline thread_local std::string truncated_number_text;
+
+// What a statement that writes asks before it keeps the values it worked out: the error MySQL gives for a division by zero or a text read as a number, if the
+// evaluation since this was made had one.
+struct StrictWrite {
+    unsigned long long zeros = division_by_zero_count, cuts = truncated_number_count;
+    std::optional<std::string> error() const {
+        if (division_by_zero_count != zeros) return "Division by 0";
+        if (truncated_number_count != cuts) return "Truncated incorrect DOUBLE value: '" + truncated_number_text + "'";
+        return std::nullopt;
+    }
+};
 
 // ---------------------------------------------------------------------------------------------------------------------------------------------
 // UTF-8

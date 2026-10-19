@@ -213,10 +213,10 @@ StringResult Executor::exec_insert_select(SharedDatabase& s, std::string table, 
         if (auto src_tables = table_lock_set_for(s, query)) {
             src_data_guard = acquire_table_data_locks(s, *src_tables, /*exclusive=*/false);
         }
-        const auto zeros = sqlval::division_by_zero_count;
+        const sqlval::StrictWrite strict;
         auto output = execute_with_s(s, std::move(query));
         if (output.is_err()) return output;
-        if (sqlval::division_by_zero_count != zeros && !std::holds_alternative<InsertConflict::Ignore>(on_conflict.data)) return StringResult::Err("Division by 0");
+        if (auto refused = strict.error(); refused && !std::holds_alternative<InsertConflict::Ignore>(on_conflict.data)) return StringResult::Err(*refused);
         std::tie(col_names, rows) = parse_table_output(output.value());
     } // (the shared lock on the source tables ends here: the insert takes the target exclusively, and the target may be the source)
     if (rows.empty()) return StringResult::Ok("0 row(s) inserted.");

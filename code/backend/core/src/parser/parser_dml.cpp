@@ -101,7 +101,7 @@ void Parser::parse_insert_set(std::optional<std::vector<std::string>>& columns, 
     std::vector<std::string> cols, row;
     for (;;) {
         cols.push_back(expect_ident());
-        if (!peek_is(TokenKind::Eq)) throw ParseError("Expected '=' after the column in SET");
+        if (!peek_is_assign()) throw ParseError("Expected '=' after the column in SET");
         advance();
         row.push_back(parse_insert_value(true));
         if (peek_is(TokenKind::Comma)) advance(); else break;
@@ -161,7 +161,7 @@ Statement Parser::parse_insert() {
             std::vector<std::pair<std::string, ArithExpr>> assignments;
             for (;;) {
                 std::string col = expect_ident();
-                if (!peek_is(TokenKind::Eq)) throw ParseError("Expected '=' in ON DUPLICATE KEY UPDATE");
+                if (!peek_is_assign()) throw ParseError("Expected '=' in ON DUPLICATE KEY UPDATE");
                 advance();
                 ArithExpr expr = parse_value_expr();
                 assignments.emplace_back(col, std::move(expr));
@@ -302,7 +302,7 @@ Statement Parser::parse_update() {
     for (;;) {
         std::string col = expect_col_ref();
         col = detail::expand_alias_str(col, alias_map);
-        if (!peek_is(TokenKind::Eq)) throw ParseError("Expected =");
+        if (!peek_is_assign()) throw ParseError("Expected =");
         advance();
         ArithExpr expr = peek_is(TokenKind::Default) ? (advance(), ArithExpr(ArithExpr::Func{"DEFAULT", {}})) : parse_value_expr(); // SET col = DEFAULT
         assignments.emplace_back(col, std::move(expr));
@@ -500,7 +500,7 @@ Statement Parser::parse_merge() {
             std::vector<std::pair<std::string, ArithExpr>> assignments;
             for (;;) {
                 std::string col = expect_col_ref();
-                if (!peek_is(TokenKind::Eq)) throw ParseError("Expected = in assignment");
+                if (!peek_is_assign()) throw ParseError("Expected = in assignment");
                 advance();
                 ArithExpr expr = parse_value_expr();
                 assignments.emplace_back(col, std::move(expr));

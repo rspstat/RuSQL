@@ -387,7 +387,7 @@ Statement Parser::parse_proc_set_var() {
     } else {
         name = expect_ident();
     }
-    if (!peek_is(TokenKind::Eq)) throw ParseError("Expected '=' in SET");
+    if (!peek_is_assign()) throw ParseError("Expected '=' in SET");
     advance();
     ArithExpr expr = parse_value_expr(); // (a `(SELECT ...)` is a scalar subquery: no row is NULL, several rows an error)
     return Statement(Statement::ProcSet{name, std::move(expr)});

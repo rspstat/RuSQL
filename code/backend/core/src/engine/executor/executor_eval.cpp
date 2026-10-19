@@ -162,6 +162,16 @@ NumVal number_tree(const ArithExpr& e, Leaf& leaf) {
         v.null = true;
         return v;
     }
+    // a text read as a number without being wholly one ('abc', '12abc', '0x10'; blanks are 0): counted, so what writes can refuse it as MySQL does. A date or a
+    // time (the value of a DATE / TIME / DATETIME column is text here, and MySQL turns it into a number) is not one.
+    if (std::holds_alternative<ArithExpr::Str>(e.data) || (std::holds_alternative<ArithExpr::Col>(e.data) && std::get<ArithExpr::Col>(e.data).cls == ValueClass::Text)) {
+        bool all = false;
+        sqlval::leading_number(text, &all);
+        if (!all && text.find_first_not_of(" \t\r\n") != std::string::npos && !sqlval::parse_datetime(text) && !sqlval::parse_time_seconds(text)) {
+            ++sqlval::truncated_number_count;
+            sqlval::truncated_number_text = text;
+        }
+    }
     long long whole = 0;
     if (small_int(text, whole)) {
         v.is_int = true;

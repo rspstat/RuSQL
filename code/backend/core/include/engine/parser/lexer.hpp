@@ -196,6 +196,8 @@ enum class TokenKind {
     PipePipe,
     // bit operators and the NULL-safe equals: & | ^ ~ << >> <=>
     Ampersand, Pipe, Caret, Tilde, ShiftLeft, ShiftRight, NullSafeEq,
+    // the assignment operator :=
+    ColonEq,
 };
 
 struct Token {

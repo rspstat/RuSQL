@@ -382,9 +382,9 @@ void Executor::evaluate_insert_expressions(Statement& stmt, SharedDatabase* s, b
             ArithExpr expr = nlohmann::json::parse(value.substr(1)).get<ArithExpr>();
             substitute_variables(expr);
             if (s) bind_expression(*s, expr, check);
-            const auto zeros = sqlval::division_by_zero_count;
+            const sqlval::StrictWrite strict;
             value = eval_arith_exact(Row{}, expr); // (what the expression worked out; see the UPDATE)
-            if (sqlval::division_by_zero_count != zeros && !std::holds_alternative<InsertConflict::Ignore>(ins->on_conflict.data)) throw StatementError("Division by 0");
+            if (auto refused = strict.error(); refused && !std::holds_alternative<InsertConflict::Ignore>(ins->on_conflict.data)) throw StatementError(*refused);
         }
     }
 }

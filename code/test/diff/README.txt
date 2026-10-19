@@ -66,7 +66,8 @@ here from the un-aggregated rows of the same FROM, and a scalar statement has to
 verify_null_expressions.py checks arithmetic, comparisons and scalar functions over NULL values: `val + 1`, `val * price`, `grp / val`,
 `(x - y) * z`, `ABS(x - y)`, `ROUND(x / y, 2)`, `x > y` over single tables and INNER / LEFT / RIGHT / FULL joins (the join padding is NULL),
 aliased or not. The expression is computed here from the plain columns of the same FROM / WHERE (NULL operand -> NULL, x / 0 -> NULL),
-and the SELECT answer, a WHERE on the expression and an UPDATE ... SET r = <expression> read back must all agree.
+and the SELECT answer, a WHERE on the expression and an UPDATE ... SET r = <expression> read back must all agree (an UPDATE over a row that divides by zero
+is refused with error 1365 and writes nothing, as in MySQL: the tool checks that instead).
 
   python verify_null_expressions.py <engine_server.exe> [--queries N] [--seed S] [--rows R]
 

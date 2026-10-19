@@ -99,6 +99,8 @@ private:
     const Token* advance();
 
     bool peek_is(TokenKind k) const;
+    /// `=` or `:=`, where a value is assigned (SET, UPDATE ... SET, INSERT ... SET, ON DUPLICATE KEY UPDATE)
+    bool peek_is_assign() const { return peek_is(TokenKind::Eq) || peek_is(TokenKind::ColonEq); }
     bool peek_at_is(std::size_t offset, TokenKind k) const;
 
     // The internal (exception-throwing) statement dispatcher. `parse()` wraps this.

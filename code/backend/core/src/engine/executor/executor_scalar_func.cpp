@@ -369,9 +369,9 @@ std::string Executor::apply_scalar_func(const std::string& typed_name, const std
                 parameters[params[i]] = std::move(value);
             }
             substitute_parameters(expr, parameters);
-            const auto zeros = sqlval::division_by_zero_count;
+            const sqlval::StrictWrite strict;
             std::string result = eval_arith(bound_row, expr);
-            if (sqlval::division_by_zero_count != zeros) throw StatementError("Division by 0"); // (a function refuses it, where a SELECT shows NULL)
+            if (auto refused = strict.error()) throw StatementError(*refused); // (a function refuses a division by zero and a text that is not a number, where a SELECT shows NULL / the number it starts with)
             if (auto error = coerce_declared(typed_name, return_type, result)) throw StatementError(*error);
             return result;
         } catch (const StatementError&) {

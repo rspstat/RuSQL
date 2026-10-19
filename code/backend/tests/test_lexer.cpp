@@ -137,3 +137,13 @@ TEST_CASE("a lone ! is NOT (it was dropped) and != is not-equal", "[lexer]") {
     };
     REQUIRE(kinds == expected);
 }
+
+TEST_CASE(":= is one token, and a lone colon (the end of a label) is none", "[lexer]") {
+    auto toks = lex("SET @a := 1; lp: WHILE");
+    std::vector<TokenKind> kinds;
+    for (auto& t : toks) kinds.push_back(t.kind);
+    std::vector<TokenKind> expected = {
+        TokenKind::Set, TokenKind::At, TokenKind::Ident, TokenKind::ColonEq, TokenKind::NumberLit, TokenKind::Semicolon, TokenKind::Ident, TokenKind::While,
+    };
+    REQUIRE(kinds == expected);
+}

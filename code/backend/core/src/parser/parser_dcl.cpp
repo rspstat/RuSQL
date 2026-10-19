@@ -223,7 +223,7 @@ Statement Parser::parse_set() {
             name = "@" + word;
             server_variable = true;
         }
-        if (!peek_is(TokenKind::Eq)) throw ParseError("Expected '=' after " + (server_variable ? name.substr(1) : "@" + name));
+        if (!peek_is_assign()) throw ParseError("Expected '=' after " + (server_variable ? name.substr(1) : "@" + name));
         advance();
         ArithExpr expr;
         const Token* val = peek();
