@@ -251,6 +251,7 @@ public:
     std::uint64_t last_insert_id_ = 0;       // the first AUTO_INCREMENT number the last INSERT that gave one out
     std::uint64_t statement_insert_id_ = 0;  // the same for the statement that is running (the MySQL protocol's OK packet reports it)
     bool insert_id_unset_ = false;           // an INSERT has started and has not given a number out yet
+    bool insert_from_select_ = false;        // the INSERT that exec_insert_select hands to exec_insert numbers its rows in growing batches (read and cleared there)
     std::int64_t row_count_ = -1;            // the rows the last statement changed (-1: it was a SELECT)
     std::uint64_t found_rows_ = 0;           // the rows the last SELECT returned (or would have without its LIMIT, after SQL_CALC_FOUND_ROWS)
     std::uint64_t statement_insert_id() const { return statement_insert_id_; }
@@ -871,7 +872,7 @@ private:
     StringResult exec_insert_inner(SharedDatabase& s, const std::string& table, const std::optional<std::vector<std::string>>& col_list,
                                     std::vector<std::vector<std::string>> all_values, const InsertConflict& on_conflict,
                                     const std::optional<std::vector<SelectColumn>>& returning, bool validate_only = false,
-                                    std::vector<Row>* replace_victims = nullptr, std::vector<Row>* inserted_rows = nullptr);
+                                    std::vector<Row>* replace_victims = nullptr, std::vector<Row>* inserted_rows = nullptr, bool from_select = false);
     // REPLACE INTO: the rows of the statement that no later row of it replaces (see executor_dml.cpp).
     static std::vector<std::vector<std::string>> replace_supersede(SharedDatabase& s, const std::string& table,
                                                                    const std::optional<std::vector<std::string>>& col_list,

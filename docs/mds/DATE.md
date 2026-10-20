@@ -2017,6 +2017,22 @@ VS Code 스타일 탭 드래그 순서 변경(요청의 1번 항목)은 같은 �
 
 **검증**: `corpus/functions.sql`에 두 문장(CAST 열 가지, 비트 연산 열두 가지)을 더해 진짜 MySQL 8.4.9와 차이 없음. 숫자를 double로 견주는 조건 시험은 `…807`과 `…808`을 구별하지 못해 글자까지 견주는 시험 `[r44]`를 따로 더했다. 심은 버그 8종 모두 잡힘(처음 6종, 나머지 둘은 이 정확한 시험으로). 전체 시험 **762 케이스 / 1,503,493 assertions**을 Release 기본과 `RUSQL_DML_INDEX_MIN_ROWS=0`으로 통과.
 
+### 10월 21일 — AUTO_INCREMENT 번호를 문장이 잡았다가 쓰지 않는 방식, 같은 문장 안의 키 겹침 (R44 ②)
+
+**왜 이 항목인가**: R44 둘째 항목("INSERT IGNORE로 건너뛴 행이 번호를 쓰지 않아 다음 번호가 다르다"). 진짜 MySQL에서 스물 가지가 넘는 경우를 돌려 보니 번호의 규칙이 한 줄이 아니었다.
+
+**고친 것**
+- **번호 예약**(InnoDB와 같게): `INSERT … VALUES`가 N행이면 첫 행이 표에 닿을 때 번호 N개를 예약하고 행이 차례로 하나씩 가져간다; `IGNORE`·`ON DUPLICATE KEY UPDATE`로 건너뛴 행은 번호를 가져가지 않고(돌려주고), 예약에서 남은 것은 문장이 끝나면 버려진다. `INSERT … SELECT`는 1개, 2개, 4개, 8개 … 묶음으로 예약한다(행 4개면 7개를 쓴다). 직접 쓴 번호는 예약을 끝낸다. 문장이 실패해도 첫 행이 열 검사를 통과해 표에 닿았다면 예약한 번호는 소진된다(중복 키·부모 없음: 다음 번호가 N 건너뜀); 첫 행이 열 검사(`NOT NULL`·길이·`CHECK`)에서 걸리면 아무것도 쓰지 않는다. 전에는 건너뛴 행이 번호를 먹어 `INSERT IGNORE … VALUES ('x',50),('y',1),('w',52)`에서 `w`가 5번(MySQL 4번)이었고, 실패한 문장은 번호를 모두 돌려놓았다(MySQL은 건너뛴다). `LAST_INSERT_ID()`는 건너뛰지 않은 첫 행의 번호.
+- **`CHECK`가 외래키보다 먼저**(MySQL의 순서): 둘 다 어긋나는 행의 오류가 `CHECK`이고, 외래키만 어긋나는 행은 번호를 태운다.
+- **같은 문장 안에서 앞 행과 키가 겹치는 행**: 전에는 "Duplicate value" 오류였다. `INSERT IGNORE`는 그 행을 건너뛰고, `ON DUPLICATE KEY UPDATE`는 앞 행(아직 표에 없는 행)에 대입을 적용한다(`VALUES(n)`는 이 행의 값; 열 타입에 맞추어 `DECIMAL(5,2)`의 `1 / 3`은 `0.33`). 복합 기본키·복합 UNIQUE는 `IGNORE`만.
+
+**검증**
+- 신규 코퍼스 `corpus/autoinc.sql`(219문장: 서른네 가지 경우 — 단일·다중 행, `IGNORE`, `ON DUPLICATE KEY UPDATE`, `REPLACE`, `NOT NULL`·길이·`CHECK`·외래키 오류, `INSERT … SELECT`의 묶음, 직접 쓴 번호, `ROLLBACK`, 같은 문장 안의 겹침, 뷰를 거친 `INSERT … SELECT`, `LAST_INSERT_ID()`)를 진짜 MySQL 8.4.9와 견주어 차이 0; `--emit`이 `mysql_conformance_autoinc.inc`를 만들고 `test_mysql_conformance.cpp`가 새 사례 묶음으로 돈다.
+- 심은 버그 23종 가운데 22종이 잡혔다(처음 19종 + 열 `CHECK` 둘과 `ON DUPLICATE KEY UPDATE`의 열 타입 맞춤을 코퍼스에 더해 3종); 남은 하나는 같은 동작이다(번호를 돌려주기 전에 "마지막으로 가져간 번호"인지 보는 검사: 표에 `AUTO_INCREMENT` 열이 하나뿐이라 늘 참).
+- 전체 시험 **763 케이스 / 1,503,970 assertions**을 Release 기본과 `RUSQL_DML_INDEX_MIN_ROWS=0`으로 통과; `verify_writes.py` 시드 1~8 위반 없음, `mysqldump` 왕복 둘(102문장과 85문장, 거절 0, 행이 모두 같음).
+
+**한계**: 다시 시작한 뒤에는 소진된 번호를 저장하지 않는다(MySQL 8은 저장). 복합 키가 같은 문장 안에서 겹치는 `ON DUPLICATE KEY UPDATE`는 아직 오류. `INSERT … SELECT`가 가져오는 행의 순서가 MySQL과 다르면(조인 순서) 어느 행이 번호를 태우는지가 다를 수 있다.
+
 ## 요약: 1학기 대비 2학기에 달라진 것
 
 

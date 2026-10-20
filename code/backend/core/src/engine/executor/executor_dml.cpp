@@ -18,6 +18,7 @@
 #include <ctime>
 #include <iomanip>
 #include <sstream>
+#include <utility>
 
 #include "engine/now_text.hpp"
 #include "engine/parser/parser.hpp"
@@ -244,6 +245,7 @@ StringResult Executor::exec_insert_select(SharedDatabase& s, std::string table, 
             insert_cols = col_names;
         }
     }
+    insert_from_select_ = true; // (its rows are numbered in batches of 1, 2, 4 ... as they ask, not all at once)
     return exec_insert(s, table, insert_cols, std::move(all_values), on_conflict, returning);
 }
 
@@ -471,8 +473,10 @@ std::vector<std::vector<std::string>> Executor::replace_supersede(SharedDatabase
 StringResult Executor::exec_insert(SharedDatabase& s, std::string table, std::optional<std::vector<std::string>> col_list,
                                     std::vector<std::vector<std::string>> all_values, InsertConflict on_conflict,
                                     std::optional<std::vector<SelectColumn>> returning) {
+    const bool from_select = std::exchange(insert_from_select_, false);
     if (s.views.count(table)) {
         if (auto resolved = resolve_updatable_view(s, table)) {
+            insert_from_select_ = from_select;
             return exec_insert(s, resolved->first, col_list, std::move(all_values), on_conflict, returning);
         }
         return StringResult::Err("View '" + strip_db_prefix(table) + "' is not updatable (has JOINs, DISTINCT, GROUP BY, or subquery)");
@@ -558,7 +562,7 @@ StringResult Executor::exec_insert(SharedDatabase& s, std::string table, std::op
     const bool after_trigger = has_trigger(s, table, "AFTER", "INSERT");
     std::vector<Row> inserted;
     auto result = exec_insert_inner(s, table, col_list, std::move(all_values), on_conflict, returning, false, nullptr,
-                                    after_trigger ? &inserted : nullptr);
+                                    after_trigger ? &inserted : nullptr, from_select);
 
     if (result.is_ok() && after_trigger) {
         std::vector<TriggerRow> new_rows;
@@ -571,7 +575,7 @@ StringResult Executor::exec_insert(SharedDatabase& s, std::string table, std::op
 StringResult Executor::exec_insert_inner(SharedDatabase& s, const std::string& table, const std::optional<std::vector<std::string>>& col_list,
                                           std::vector<std::vector<std::string>> all_values, const InsertConflict& on_conflict,
                                           const std::optional<std::vector<SelectColumn>>& returning, bool validate_only,
-                                          std::vector<Row>* replace_victims, std::vector<Row>* inserted_rows) {
+                                          std::vector<Row>* replace_victims, std::vector<Row>* inserted_rows, bool from_select) {
     const TableSchema* schema_ptr = s.catalog.get_table(table);
     if (!schema_ptr) return StringResult::Err("Table '" + table + "' not found");
     TableSchema schema = *schema_ptr;
@@ -610,26 +614,39 @@ StringResult Executor::exec_insert_inner(SharedDatabase& s, const std::string& t
     // the real Catalog entry, immediately, per row that actually needs one.
     TableSchema* schema_mut_for_ai = s.catalog.get_table_mut(table);
     bool any_auto_increment_allocated = false;
-    // The numbers this statement takes from the counters: if it fails (a value that is no good, a duplicate key ...) they go back, so a failed INSERT leaves no
-    // gap in the numbering (MySQL numbers only rows that pass the checks of their columns). `kept` is set when the statement has succeeded; a counter that
-    // another statement has moved on in the meantime is left alone.
+    // The numbers this statement takes from the counters: if it fails before a row has reached the table (a value that is no good for its column) they go back, so
+    // such an INSERT leaves no gap in the numbering. `kept` is set when the statement has succeeded; a counter that another statement has moved on in the meantime is
+    // left alone. What a statement RESERVES is another matter, as in InnoDB: an INSERT ... VALUES of N rows reserves N numbers when its first row is written (an
+    // INSERT ... SELECT reserves 1, then 2, 4, 8 ... as its rows ask for more), a row takes the next of them, a row that is skipped (IGNORE, ON DUPLICATE KEY UPDATE)
+    // gives its number back to the reservation, and what is left of it is lost when the statement ends -- also when the statement fails, once a row has reached the table
+    // (`burn_reservation`): a duplicate key or a missing parent burns the numbers, a first row that fails the checks of its columns does not.
     struct CounterTake {
         std::string column;
         std::int64_t before, after;
+        bool reserved = false;
     };
     std::vector<CounterTake> counter_takes;
+    bool burn_reservation = false;
     struct CounterGuard {
         TableSchema* schema;
         std::vector<CounterTake>& takes;
+        const bool& burn;
         bool kept = false;
         ~CounterGuard() {
             if (kept || !schema) return;
             for (auto it = takes.rbegin(); it != takes.rend(); ++it) {
+                if (it->reserved && burn) continue;
                 auto found = schema->auto_increment_counters.find(it->column);
                 if (found != schema->auto_increment_counters.end() && found->second == it->after) found->second = it->before;
             }
         }
-    } counter_guard{schema_mut_for_ai, counter_takes};
+    } counter_guard{schema_mut_for_ai, counter_takes, burn_reservation};
+    struct AutoWindow {
+        bool active = false;
+        std::int64_t next = 0, end = 0;
+    } window;
+    std::int64_t next_batch = 1;
+    bool reserved_before = false; // (the first reservation of a VALUES statement is as large as the statement)
 
     // Duplicates WITHIN this statement: for every PRIMARY KEY / UNIQUE column the first row of the statement that carried
     // each value (and, for a composite primary key, the encoded tuples seen). This used to scan every earlier row of the
@@ -816,6 +833,19 @@ StringResult Executor::exec_insert_inner(SharedDatabase& s, const std::string& t
             }
             return it->second;
         };
+        std::int64_t taken_id = 0; // the number this row took from the reservation (0: none), and what LAST_INSERT_ID() said before it
+        bool row_set_insert_id = false;
+        std::uint64_t id_before_row = last_insert_id_, statement_id_before_row = statement_insert_id_;
+        bool explicit_auto_value = false;
+        // the row is not inserted (IGNORE, ON DUPLICATE KEY UPDATE): its number goes back to the reservation, and is not the one LAST_INSERT_ID() says
+        auto give_back_row_id = [&]() {
+            if (taken_id != 0 && window.active && window.next == taken_id + 1) window.next = taken_id;
+            if (row_set_insert_id) {
+                last_insert_id_ = id_before_row;
+                statement_insert_id_ = statement_id_before_row;
+                insert_id_unset_ = true;
+            }
+        };
         for (std::size_t i = 0; i < constraints.size(); i++) {
             if (constraints[i].auto_increment && (final_values[i] == INSERT_DEFAULT || final_values[i] == EXECUTOR_NULL_VALUE || final_values[i] == "0")) {
                 if (validate_only) { // the real insert numbers the row: here a number no other row of the statement has
@@ -823,15 +853,29 @@ StringResult Executor::exec_insert_inner(SharedDatabase& s, const std::string& t
                     continue;
                 }
                 auto& counter = counter_of(i);
-                const std::int64_t before = counter;
-                counter += 1;
-                final_values[i] = std::to_string(counter);
+                if (!window.active || window.next > window.end) { // a new reservation: the whole statement's rows the first time, then 1, 2, 4 ...
+                    std::int64_t size = next_batch;
+                    if (!reserved_before && !from_select) {
+                        size = static_cast<std::int64_t>(all_values.size());
+                    } else {
+                        next_batch *= 2;
+                    }
+                    reserved_before = true;
+                    const std::int64_t before = counter;
+                    window = {true, before + 1, before + size};
+                    counter = before + size;
+                    counter_takes.push_back({col_names[i], before, counter, /*reserved=*/true});
+                }
+                taken_id = window.next++;
+                final_values[i] = std::to_string(taken_id);
                 any_auto_increment_allocated = true;
                 if (insert_id_unset_) { // the first number this INSERT gave out is what LAST_INSERT_ID() says
-                    last_insert_id_ = statement_insert_id_ = static_cast<std::uint64_t>(counter);
+                    last_insert_id_ = statement_insert_id_ = static_cast<std::uint64_t>(taken_id);
                     insert_id_unset_ = false;
+                    row_set_insert_id = true;
                 }
-                counter_takes.push_back({col_names[i], before, counter});
+            } else if (constraints[i].auto_increment && final_values[i] != EXECUTOR_NULL_VALUE) {
+                explicit_auto_value = true;
             }
         }
 
@@ -849,6 +893,7 @@ StringResult Executor::exec_insert_inner(SharedDatabase& s, const std::string& t
             if (auto err = coerce_column_value(schema.columns[i], final_values[i], row_no)) return StringResult::Err(*err);
         }
         if (!validate_only) {
+            if (explicit_auto_value) window.active = false; // (a number given by hand ends the reservation: what is left of it is lost)
             for (std::size_t i = 0; i < constraints.size(); i++) {
                 if (!constraints[i].auto_increment || final_values[i] == EXECUTOR_NULL_VALUE) continue;
                 std::int64_t v = 0;
@@ -892,6 +937,8 @@ StringResult Executor::exec_insert_inner(SharedDatabase& s, const std::string& t
                 }
             }
         }
+
+        burn_reservation = true; // (the row has passed the checks of its columns: it reaches the table, and a failure from here on keeps the numbers spent)
 
         // identifies `existing` by its primary key (all of a composite one) and queues the assignments for it
         auto queue_update = [&](const Row& existing, const std::vector<std::pair<std::string, ArithExpr>>& assigns) {
@@ -1071,16 +1118,28 @@ StringResult Executor::exec_insert_inner(SharedDatabase& s, const std::string& t
                     break;
                 }
             }
-            if (skip_row) continue;
+            if (skip_row) {
+                give_back_row_id();
+                continue;
+            }
         }
 
+        bool repeats_earlier_row = false; // (IGNORE: a row that repeats a key of an earlier row of the statement is skipped)
         for (auto& cu : composite_uniques) { // ... and among the rows of this statement
             std::string shown;
             auto encoded = composite_key(cu.key->columns, [&](const std::string& c) { auto pos = std::find(col_names.begin(), col_names.end(), c); return pos != col_names.end() ? final_values[static_cast<std::size_t>(pos - col_names.begin())] : std::string(EXECUTOR_NULL_VALUE); }, shown);
             if (!encoded) continue;
             if (!cu.batch.insert(std::move(*encoded)).second && !(validate_only && std::holds_alternative<InsertConflict::Replace>(on_conflict.data))) {
+                if (std::holds_alternative<InsertConflict::Ignore>(on_conflict.data)) {
+                    repeats_earlier_row = true;
+                    break;
+                }
                 return StringResult::Err("Duplicate entry '" + shown + "' for key '" + cu.label + "'");
             }
+        }
+        if (repeats_earlier_row) {
+            give_back_row_id();
+            continue;
         }
 
         {
@@ -1094,6 +1153,10 @@ StringResult Executor::exec_insert_inner(SharedDatabase& s, const std::string& t
                 }
                 std::string encoded = tuple_key(new_pk_tuple);
                 if (!seen_composite_pk.insert(std::move(encoded)).second && !(validate_only && std::holds_alternative<InsertConflict::Replace>(on_conflict.data))) {
+                    if (std::holds_alternative<InsertConflict::Ignore>(on_conflict.data)) {
+                        give_back_row_id();
+                        continue;
+                    }
                     return StringResult::Err("Duplicate composite primary key (" + join_quoted(new_pk_tuple) + ")");
                 }
             } else {
@@ -1111,6 +1174,25 @@ StringResult Executor::exec_insert_inner(SharedDatabase& s, const std::string& t
                     }
                 }
                 if (found && !(validate_only && std::holds_alternative<InsertConflict::Replace>(on_conflict.data))) {
+                    // a row that repeats a value of an earlier row of the same statement: IGNORE skips it, ON DUPLICATE KEY UPDATE updates that earlier row
+                    if (std::holds_alternative<InsertConflict::Ignore>(on_conflict.data)) {
+                        give_back_row_id();
+                        continue;
+                    }
+                    if (auto* upd = std::get_if<InsertConflict::Update>(&on_conflict.data); upd && best_row < prepared.size() && !validate_only) {
+                        // (that row is not in the table yet: the assignments change the row that is about to be inserted, each seeing the ones before it)
+                        Row& target = prepared[best_row];
+                        for (auto& [column, expr] : upd->assignments) {
+                            std::string value = eval_arith_exact(target, bind_insert_values(expr, col_names, final_values));
+                            if (auto column_def = std::find_if(schema.columns.begin(), schema.columns.end(), [&](const ColumnDef& c) { return c.name == column; });
+                                column_def != schema.columns.end()) {
+                                if (auto err = coerce_column_value(*column_def, value, row_no)) return StringResult::Err(*err);
+                            }
+                            target[column] = std::move(value);
+                        }
+                        give_back_row_id();
+                        continue;
+                    }
                     return StringResult::Err("Duplicate value '" + final_values[best_col] + "' for column '" + col_names[best_col] + "'");
                 }
                 for (std::size_t i = 0; i < constraints.size(); i++) {
@@ -1137,6 +1219,20 @@ StringResult Executor::exec_insert_inner(SharedDatabase& s, const std::string& t
             return in_statement ? std::nullopt : violation;
         };
 
+        // (the checks of the columns come before the foreign key, as in MySQL: a row that fails one of them never reaches the table, so it burns no AUTO_INCREMENT number)
+        for (auto& col : schema.columns) {
+            if (col.check_expr && !eval_check_expr(*col.check_expr, row)) {
+                if (row_no == 1) burn_reservation = false; // (a check of the columns is made before the row is written: a first row that fails it burns nothing)
+                return StringResult::Err("CHECK constraint violated on column '" + col.name + "': " + *col.check_expr);
+            }
+        }
+        for (auto& check : schema.check_constraints) {
+            if (!eval_check_expr(check.expression, row)) {
+                if (row_no == 1) burn_reservation = false;
+                return StringResult::Err("CHECK constraint '" + check.name.value_or(check.expression) + "' violated");
+            }
+        }
+
         for (auto& col : schema.columns) {
             if (skip_fk_checks) break; // exec_restore()만 사용 -- executor.hpp의 필드 주석 참고
             if (!col.foreign_key) continue;
@@ -1144,17 +1240,6 @@ StringResult Executor::exec_insert_inner(SharedDatabase& s, const std::string& t
             std::string val = it != row.end() ? it->second : std::string();
             if (val == EXECUTOR_NULL_VALUE) continue;
             if (auto violation = fk_parent_missing(col, val)) return StringResult::Err(*violation);
-        }
-
-        for (auto& col : schema.columns) {
-            if (col.check_expr && !eval_check_expr(*col.check_expr, row)) {
-                return StringResult::Err("CHECK constraint violated on column '" + col.name + "': " + *col.check_expr);
-            }
-        }
-        for (auto& check : schema.check_constraints) {
-            if (!eval_check_expr(check.expression, row)) {
-                return StringResult::Err("CHECK constraint '" + check.name.value_or(check.expression) + "' violated");
-            }
         }
 
         if (validate_only) { // REPLACE's pass over the rows before it deletes anything: the checks above, no locks, no writes

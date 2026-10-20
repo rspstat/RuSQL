@@ -51,6 +51,9 @@ const Case kRoutines[] = {
 const Case kSchemaChange[] = {
 #include "mysql_conformance_schema_change.inc"
 };
+const Case kAutoinc[] = {
+#include "mysql_conformance_autoinc.inc"
+};
 
 struct TempDataDir {
     std::string path;
@@ -224,4 +227,8 @@ TEST_CASE("stored routines, prepared statements and division by zero give MySQL'
 
 TEST_CASE("ALTER TABLE converts the values and keeps the indexes right as MySQL does", "[mysql_conformance][schema_change]") {
     run_cases("mc_schema_change", kSchemaChange, sizeof kSchemaChange / sizeof kSchemaChange[0]);
+}
+
+TEST_CASE("the AUTO_INCREMENT numbers a statement reserves, skips and loses are InnoDB's", "[mysql_conformance][autoinc]") {
+    run_cases("mc_autoinc", kAutoinc, sizeof kAutoinc / sizeof kAutoinc[0]);
 }
