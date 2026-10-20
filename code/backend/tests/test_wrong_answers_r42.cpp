@@ -318,3 +318,20 @@ TEST_CASE("a text that is not a number is refused where a value is written", "[r
     ok(ex, "UPDATE src SET n = 1 + 1 WHERE id = 2");
     REQUIRE(q(ex, "SELECT COUNT(*) FROM dst WHERE id >= 100") == Rows{{"3"}});
 }
+
+TEST_CASE("a negative number made unsigned: below the smallest BIGINT it is 2^63, the rest wraps round (exact text)", "[r44][unsigned]") {
+    TempDataDir dir("r44_unsigned_negative");
+    Executor ex(dir.path);
+    ok(ex, "CREATE DATABASE d");
+    ok(ex, "USE d");
+    // (the conformance corpus compares numbers as doubles, which cannot tell 9223372036854775807 from 9223372036854775808)
+    REQUIRE(q(ex, "SELECT CAST('-18446744073709551615' AS UNSIGNED), CAST('-9223372036854775809' AS UNSIGNED), CAST('-9223372036854775808' AS UNSIGNED),"
+                  " CAST('-9223372036854775807' AS UNSIGNED), CAST('-1' AS UNSIGNED), CAST('-1.5' AS UNSIGNED), CAST('-0.4' AS UNSIGNED),"
+                  " CAST('-999999999999999999999' AS UNSIGNED)") ==
+            Rows{{"9223372036854775808", "9223372036854775808", "9223372036854775808", "9223372036854775809", "18446744073709551615", "18446744073709551615", "0",
+                  "9223372036854775808"}});
+    REQUIRE(q(ex, "SELECT -9223372036854775809 | 0, -18446744073709551615 | 0, -9223372036854775808 | 0, -1 | 0, -2 & 255, ~-9223372036854775809,"
+                  " -9223372036854775809 >> 1, -9223372036854775809 ^ 1, -999999999999999999999 | 0, '-999999999999999999999' | 0") ==
+            Rows{{"9223372036854775808", "9223372036854775808", "9223372036854775808", "18446744073709551615", "254", "9223372036854775807", "4611686018427387904",
+                  "9223372036854775809", "9223372036854775808", "9223372036854775808"}});
+}

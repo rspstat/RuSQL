@@ -1659,6 +1659,12 @@ Decimal cast_number(const BuiltinCall& c, const std::string& value) {
     return string_prefix_decimal(value);
 }
 
+// A negative number as an unsigned one: MySQL makes it a BIGINT first, so what is below the smallest BIGINT is the smallest (2^63), the rest wraps round
+unsigned long long negative_as_unsigned(unsigned long long magnitude) {
+    constexpr unsigned long long smallest = 1ULL << 63;
+    return magnitude > smallest ? smallest : 0ULL - magnitude;
+}
+
 std::string fn_cast(const BuiltinCall& c) {
     if (argc(c) != 2) wrong_count(c);
     const std::string val = c.value(0);
@@ -1686,14 +1692,14 @@ std::string fn_cast(const BuiltinCall& c) {
     }
     if (base == "UNSIGNED") {
         const Decimal d = cast_number(c, val).rounded(0, string_literal(c, 0));
-        if (d.integer.size() > 20) return d.negative ? "0" : "18446744073709551615";
+        if (d.integer.size() > 20) return d.negative ? "9223372036854775808" : "18446744073709551615";
         unsigned long long v = 0;
         for (char ch : d.integer) {
             constexpr unsigned long long largest = std::numeric_limits<unsigned long long>::max();
-            if (v > largest / 10 || (v == largest / 10 && static_cast<unsigned>(ch - '0') > largest % 10)) return d.negative ? "0" : "18446744073709551615";
+            if (v > largest / 10 || (v == largest / 10 && static_cast<unsigned>(ch - '0') > largest % 10)) return d.negative ? "9223372036854775808" : "18446744073709551615";
             v = v * 10 + static_cast<unsigned>(ch - '0');
         }
-        if (d.negative && v != 0) v = 0ULL - v; // (a negative number wraps round, as in MySQL)
+        if (d.negative && v != 0) v = negative_as_unsigned(v); // (a negative number wraps round, as in MySQL)
         return std::to_string(v);
     }
     if (base == "DECIMAL" || base == "NUMERIC" || base == "DEC" || base == "FIXED") {
@@ -1755,14 +1761,14 @@ std::string fn_cast(const BuiltinCall& c) {
 
 unsigned long long unsigned_of(const std::string& text) {
     const Decimal d = decimal_of(text).rounded(0, false);
-    if (d.integer.size() > 20) return d.negative ? 0ULL : std::numeric_limits<unsigned long long>::max();
+    if (d.integer.size() > 20) return d.negative ? 1ULL << 63 : std::numeric_limits<unsigned long long>::max();
     unsigned long long v = 0;
     for (char ch : d.integer) {
         constexpr unsigned long long largest = std::numeric_limits<unsigned long long>::max();
-        if (v > largest / 10 || (v == largest / 10 && static_cast<unsigned>(ch - '0') > largest % 10)) return largest; // (the digits past the largest 64-bit number)
+        if (v > largest / 10 || (v == largest / 10 && static_cast<unsigned>(ch - '0') > largest % 10)) return d.negative ? 1ULL << 63 : largest; // (the digits past the largest 64-bit number)
         v = v * 10 + static_cast<unsigned>(ch - '0');
     }
-    return d.negative ? 0ULL - v : v;
+    return d.negative ? negative_as_unsigned(v) : v;
 }
 
 std::string fn_bit_and(const BuiltinCall& c) { if (argc(c) != 2) wrong_count(c); if (any_null(c)) return kNull; return std::to_string(unsigned_of(c.value(0)) & unsigned_of(c.value(1))); }
