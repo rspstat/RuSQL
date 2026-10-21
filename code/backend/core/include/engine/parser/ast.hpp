@@ -48,8 +48,10 @@ struct ArithExpr {
     // subquery); the binder sets it and rewrites `name` to the table-qualified name the outer row holds, and the subquery gets the outer row's
     // value for it before it runs (see Executor::substitute_outer).
     // `approx`: the column is a FLOAT or DOUBLE (set by the binder with `cls`): arithmetic that reads it is done in floating point, as MySQL does
-    // `kind`: a column that holds a date, a time, an ENUM or a SET is text here but a number where one is asked of it (set by the binder with `cls`)
-    struct Col  { std::string name; ValueClass cls = ValueClass::Unknown; int outer = 0; bool approx = false; ColKind kind = ColKind::Plain; };
+    // `kind`: a column that holds a date, a time, an ENUM or a SET is text here but a number where one is asked of it (set by the binder with `cls`);
+    // `members`: the values of the ENUM / SET, `fsp`: the places of the fraction of a second of a DATETIME / TIMESTAMP / TIME column
+    struct Col  { std::string name; ValueClass cls = ValueClass::Unknown; int outer = 0; bool approx = false; ColKind kind = ColKind::Plain;
+                  std::shared_ptr<const std::vector<std::string>> members; std::uint8_t fsp = 0; };
     struct Num  { std::string value; };
     struct Str  { std::string value; };
     struct Add  { std::unique_ptr<ArithExpr> lhs, rhs; };

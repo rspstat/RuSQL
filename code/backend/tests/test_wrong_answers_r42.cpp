@@ -444,3 +444,17 @@ TEST_CASE("the WHERE of UPDATE and DELETE fails on a division by zero or a text 
     ok(ex, "DELETE FROM wk WHERE e = 5 OR st = 7 OR d = 20990101");
     ok(ex, "UPDATE wk SET f = f + 1 WHERE 2 = e OR f = e OR f = (e) OR f + 0 = (st) OR 20240102 = d OR f = d");
 }
+
+TEST_CASE("a date, a time, an ENUM and a SET are read as the numbers MySQL reads them as, to the last digit", "[r44][arith]") {
+    TempDataDir dir("r44_arith");
+    Executor ex(dir.path);
+    ok(ex, "CREATE DATABASE d");
+    ok(ex, "USE d");
+    ok(ex, "CREATE TABLE t (id INT PRIMARY KEY, d DATE, dt3 DATETIME(3), tm2 TIME(2), e ENUM('red', 'green', 'blue'), st SET('a', 'b', 'c'))");
+    ok(ex, "INSERT INTO t VALUES (1, '2024-01-02', '2024-01-02 03:04:05.678', '10:20:30.45', 'green', 'a,c')");
+    // (a date and a time are exact numbers, with the places of the fraction of a second the column keeps; an ENUM and a SET are read as a DOUBLE)
+    REQUIRE(q(ex, "SELECT d + 0, dt3 + 0, tm2 + 0, d / 3, e / 3, st / 4, dt3 * 1, -tm2 FROM t") ==
+            Rows{{"20240102", "20240102030405.678", "102030.45", "6746700.6667", "0.6666666666666666", "1.25", "20240102030405.678", "-102030.45"}});
+    REQUIRE(q(ex, "SELECT e + 0, st + 1, e * 2, d + 0.5, CAST(dt3 AS DECIMAL(20,3)), ABS(tm2), e DIV 2, st & 4, ROUND(dt3) FROM t") ==
+            Rows{{"2", "6", "4", "20240102.5", "20240102030405.678", "102030.45", "1", "4", "20240102030406"}});
+}

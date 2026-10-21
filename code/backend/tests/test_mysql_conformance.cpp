@@ -60,6 +60,9 @@ const Case kShift[] = {
 const Case kWhereErrors[] = {
 #include "mysql_conformance_where_errors.inc"
 };
+const Case kArithTypes[] = {
+#include "mysql_conformance_arith_types.inc"
+};
 
 struct TempDataDir {
     std::string path;
@@ -245,4 +248,8 @@ TEST_CASE("an UPDATE that shifts a UNIQUE or PRIMARY KEY value fits or fails as 
 
 TEST_CASE("the WHERE of an UPDATE or a DELETE fails on a division by zero or a text that is no number, as a write does", "[mysql_conformance][where_errors]") {
     run_cases("mc_where_errors", kWhereErrors, sizeof kWhereErrors / sizeof kWhereErrors[0]);
+}
+
+TEST_CASE("a date, a time, an ENUM and a SET are the numbers MySQL reads them as in arithmetic, comparisons and numeric functions", "[mysql_conformance][arith_types]") {
+    run_cases("mc_arith_types", kArithTypes, sizeof kArithTypes / sizeof kArithTypes[0]);
 }

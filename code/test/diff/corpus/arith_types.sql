@@ -1,0 +1,147 @@
+# dates, times, years, ENUM and SET read as numbers (R44): a DATE is 20240102, a DATETIME 20240102030405, a TIME 102030, an ENUM its place, a SET its bits
+--CREATE TABLE t_ar (id INT PRIMARY KEY, d DATE, dt DATETIME, dt3 DATETIME(3), ts TIMESTAMP NULL, tm TIME, tm2 TIME(2), yr YEAR, e ENUM('red','green','blue'), st SET('a','b','c'))
+--INSERT INTO t_ar VALUES (1,'2024-01-02','2024-01-02 03:04:05','2024-01-02 03:04:05.678','2024-01-02 03:04:05','10:20:30','10:20:30.45',2024,'green','a,c'),(2,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL)
+SELECT d + 0 FROM t_ar ORDER BY id
+SELECT d + 1 FROM t_ar ORDER BY id
+SELECT d - 1 FROM t_ar ORDER BY id
+SELECT d * 2 FROM t_ar ORDER BY id
+SELECT d / 2 FROM t_ar ORDER BY id
+SELECT -d FROM t_ar ORDER BY id
+SELECT d + d FROM t_ar ORDER BY id
+SELECT d + 0.5 FROM t_ar ORDER BY id
+SELECT dt + 0 FROM t_ar ORDER BY id
+SELECT dt + 1 FROM t_ar ORDER BY id
+SELECT dt3 + 0 FROM t_ar ORDER BY id
+SELECT ts + 0 FROM t_ar ORDER BY id
+SELECT tm + 0 FROM t_ar ORDER BY id
+SELECT tm - 1 FROM t_ar ORDER BY id
+SELECT tm2 + 0 FROM t_ar ORDER BY id
+SELECT tm * 2 FROM t_ar ORDER BY id
+SELECT yr + 0 FROM t_ar ORDER BY id
+SELECT yr + 1 FROM t_ar ORDER BY id
+SELECT e + 0 FROM t_ar ORDER BY id
+SELECT e + 1 FROM t_ar ORDER BY id
+SELECT e * 2 FROM t_ar ORDER BY id
+SELECT st + 0 FROM t_ar ORDER BY id
+SELECT st + 1 FROM t_ar ORDER BY id
+SELECT st * 2 FROM t_ar ORDER BY id
+SELECT e = 2 FROM t_ar ORDER BY id
+SELECT e > 1 FROM t_ar ORDER BY id
+SELECT e = 'green' FROM t_ar ORDER BY id
+SELECT e < 'h' FROM t_ar ORDER BY id
+SELECT st = 5 FROM t_ar ORDER BY id
+SELECT st = 'a,c' FROM t_ar ORDER BY id
+SELECT st > 4 FROM t_ar ORDER BY id
+SELECT d > 20240101 FROM t_ar ORDER BY id
+SELECT d = 20240102 FROM t_ar ORDER BY id
+SELECT d < 20240103 FROM t_ar ORDER BY id
+SELECT dt = 20240102030405 FROM t_ar ORDER BY id
+SELECT tm = 102030 FROM t_ar ORDER BY id
+SELECT tm > 102029 FROM t_ar ORDER BY id
+SELECT yr = 2024 FROM t_ar ORDER BY id
+SELECT d = '2024-01-02' FROM t_ar ORDER BY id
+SELECT d BETWEEN 20240101 AND 20240103 FROM t_ar ORDER BY id
+SELECT d IN (20240102) FROM t_ar ORDER BY id
+SELECT e IN (2,3) FROM t_ar ORDER BY id
+SELECT e BETWEEN 1 AND 2 FROM t_ar ORDER BY id
+SELECT CAST(d AS SIGNED) FROM t_ar ORDER BY id
+SELECT CAST(dt AS SIGNED) FROM t_ar ORDER BY id
+SELECT CAST(tm AS SIGNED) FROM t_ar ORDER BY id
+SELECT CAST(e AS SIGNED) FROM t_ar ORDER BY id
+SELECT CAST(st AS SIGNED) FROM t_ar ORDER BY id
+SELECT CAST(d AS UNSIGNED) FROM t_ar ORDER BY id
+SELECT d % 7 FROM t_ar ORDER BY id
+SELECT e % 2 FROM t_ar ORDER BY id
+SELECT d DIV 3 FROM t_ar ORDER BY id
+SELECT st DIV 2 FROM t_ar ORDER BY id
+SELECT ABS(d) FROM t_ar ORDER BY id
+SELECT FLOOR(d) FROM t_ar ORDER BY id
+SELECT ROUND(dt) FROM t_ar ORDER BY id
+SELECT ROUND(tm) FROM t_ar ORDER BY id
+SELECT IF(d, 1, 0) FROM t_ar ORDER BY id
+SELECT COALESCE(d + 0, 5) FROM t_ar ORDER BY id
+SELECT d + 0 IS NULL FROM t_ar ORDER BY id
+SELECT e + 0 IS NULL FROM t_ar ORDER BY id
+SELECT d + INTERVAL 1 DAY FROM t_ar ORDER BY id
+SELECT d - INTERVAL 1 MONTH FROM t_ar ORDER BY id
+SELECT AVG(yr) FROM t_ar
+# in a WHERE
+SELECT id FROM t_ar WHERE d > 20240101
+SELECT id FROM t_ar WHERE e = 2
+SELECT id FROM t_ar WHERE e > 1
+SELECT id FROM t_ar WHERE st = 5
+SELECT id FROM t_ar WHERE st & 4
+SELECT id FROM t_ar WHERE tm > 102029
+SELECT id FROM t_ar WHERE yr = 2024
+# the same columns with an index on them
+--CREATE TABLE t_ix (id INT PRIMARY KEY, d DATE, dt DATETIME, tm TIME, e ENUM('red','green','blue'), st SET('a','b','c'), INDEX (d), INDEX (dt), INDEX (tm), INDEX (e), INDEX (st))
+--INSERT INTO t_ix VALUES (1,'2024-01-02','2024-01-02 03:04:05','10:20:30','green','a,c'),(2,'2024-02-03','2024-02-03 00:00:00','-01:00:00','blue','b'),(3,'2023-12-31','2023-12-31 23:59:59','838:59:59','red','c'),(4,NULL,NULL,NULL,NULL,NULL)
+SELECT id FROM t_ix WHERE d > 20240101 ORDER BY id
+SELECT id FROM t_ix WHERE d = 20240102 ORDER BY id
+SELECT id FROM t_ix WHERE d BETWEEN 20231231 AND 20240102 ORDER BY id
+SELECT id FROM t_ix WHERE d IN (20240102, 20231231) ORDER BY id
+SELECT id FROM t_ix WHERE dt > 20240101000000 ORDER BY id
+SELECT id FROM t_ix WHERE tm < 0 ORDER BY id
+SELECT id FROM t_ix WHERE tm > 100000 ORDER BY id
+SELECT id FROM t_ix WHERE e = 2 ORDER BY id
+SELECT id FROM t_ix WHERE e > 1 ORDER BY id
+SELECT id FROM t_ix WHERE e IN (1, 3) ORDER BY id
+SELECT id FROM t_ix WHERE e BETWEEN 2 AND 3 ORDER BY id
+SELECT id FROM t_ix WHERE st = 5 ORDER BY id
+SELECT id FROM t_ix WHERE st > 2 ORDER BY id
+SELECT id FROM t_ix WHERE st & 4 ORDER BY id
+SELECT id FROM t_ix WHERE e = 'green' ORDER BY id
+SELECT id FROM t_ix WHERE st = 'a,c' ORDER BY id
+SELECT id FROM t_ix WHERE d = '2024-01-02' ORDER BY id
+UPDATE t_ix SET id = id WHERE d = 20240102
+UPDATE t_ix SET id = id WHERE e > 1
+DELETE FROM t_ix WHERE st = 6
+SELECT id FROM t_ix ORDER BY id
+# more expressions over a table with dates, times, an ENUM and a SET (R44)
+--CREATE TABLE t_ar2 (id INT PRIMARY KEY, d DATE, dt DATETIME, dt3 DATETIME(3), tm TIME, tm2 TIME(2), yr YEAR, e ENUM('red','green','blue'), st SET('a','b','c'), n INT)
+--INSERT INTO t_ar2 VALUES (1,'2024-01-02','2024-01-02 03:04:05','2024-01-02 03:04:05.678','10:20:30','10:20:30.45',2024,'green','a,c',5),(2,'2023-12-31','2023-12-31 23:59:59','2023-12-31 23:59:59.499','-01:30:00','00:00:00.50',1999,'blue','b',7),(3,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,9)
+SELECT id, d + 0, dt + 0, tm + 0 FROM t_ar2 ORDER BY id
+SELECT id, d + n FROM t_ar2 ORDER BY id
+SELECT id, n + d FROM t_ar2 ORDER BY id
+SELECT id, d - dt FROM t_ar2 ORDER BY id
+SELECT id, d * 1 FROM t_ar2 ORDER BY id
+SELECT id, dt3 * 1, tm2 * 1 FROM t_ar2 ORDER BY id
+SELECT id, e + n, st * n FROM t_ar2 ORDER BY id
+SELECT id, (d + 0) / 3 FROM t_ar2 ORDER BY id
+SELECT id, MOD(d, 100), d % 100 FROM t_ar2 ORDER BY id
+SELECT id, SQRT(e), POW(e, 2), ABS(tm), SIGN(tm) FROM t_ar2 ORDER BY id
+SELECT id, FLOOR(dt3), CEIL(dt3), ROUND(dt3), TRUNCATE(dt3, 1) FROM t_ar2 ORDER BY id
+SELECT id, CAST(dt3 AS SIGNED), CAST(dt3 AS DECIMAL(20,3)), CAST(tm2 AS DECIMAL(10,2)), CAST(e AS DECIMAL(5,1)), CAST(d AS DOUBLE) FROM t_ar2 ORDER BY id
+SELECT id, CAST(d AS CHAR), CAST(dt AS DATE), CAST(d AS DATETIME), CAST(e AS CHAR) FROM t_ar2 ORDER BY id
+SELECT id, d & 255, st | 8, e ^ 1, ~e, d << 1, d >> 1 FROM t_ar2 ORDER BY id
+SELECT id, d DIV 7, e DIV 2, tm DIV 100 FROM t_ar2 ORDER BY id
+SELECT id FROM t_ar2 ORDER BY d + 0 DESC, id
+SELECT id FROM t_ar2 ORDER BY e + 0, id
+SELECT e + 0, COUNT(*) FROM t_ar2 GROUP BY e + 0 ORDER BY 1
+SELECT id FROM t_ar2 WHERE d + 0 > 20240101
+SELECT id FROM t_ar2 WHERE tm + 0 < 0
+SELECT id FROM t_ar2 WHERE e + 0 = 3
+SELECT id FROM t_ar2 WHERE st + 0 = 2
+SELECT id FROM t_ar2 WHERE d > n
+SELECT id FROM t_ar2 WHERE n < d
+SELECT id FROM t_ar2 WHERE e = n - 2
+SELECT id FROM t_ar2 WHERE e < n
+SELECT id FROM t_ar2 WHERE yr > 2000
+SELECT id FROM t_ar2 WHERE yr + 1 = 2025
+SELECT id FROM t_ar2 WHERE CASE WHEN d > 20240101 THEN 1 ELSE 0 END = 1
+SELECT id, IF(d > 20240101, 'new', 'old') FROM t_ar2 ORDER BY id
+SELECT id, IF(d, 'has', 'none') FROM t_ar2 ORDER BY id
+SELECT id, COALESCE(d + 0, -1), IFNULL(e + 0, -1) FROM t_ar2 ORDER BY id
+SELECT id, CONCAT(d, '|', e, '|', st, '|', tm) FROM t_ar2 ORDER BY id
+SELECT id, d + INTERVAL 1 DAY, DATE_ADD(d, INTERVAL 1 MONTH) FROM t_ar2 ORDER BY id
+SELECT id, YEAR(d), MONTH(d), DAY(d), HOUR(tm), MINUTE(tm) FROM t_ar2 ORDER BY id
+SELECT id, DATEDIFF(d, '2024-01-01'), TIMESTAMPDIFF(DAY, d, '2024-03-01') FROM t_ar2 ORDER BY id
+SELECT MAX(d), MIN(d), MAX(e), MIN(st), MAX(tm) FROM t_ar2
+SELECT SUM(d + 0), AVG(tm + 0), SUM(e + 0), SUM(st + 0), MAX(d + 0), MIN(tm + 0) FROM t_ar2
+UPDATE t_ar2 SET n = d + 0 WHERE id = 1
+UPDATE t_ar2 SET n = e + st WHERE id = 2
+SELECT id, n FROM t_ar2 ORDER BY id
+INSERT INTO t_ar2 (id, n) SELECT id + 10, d + 0 FROM t_ar2 WHERE d IS NOT NULL
+SELECT id, n FROM t_ar2 ORDER BY id
+SELECT a.id, b.id FROM t_ar2 a JOIN t_ar2 b ON a.d + 0 = b.n ORDER BY 1, 2
+SELECT a.id, b.id FROM t_ar2 a JOIN t_ar2 b ON a.e = b.st ORDER BY 1, 2

@@ -2085,6 +2085,23 @@ VS Code 스타일 탭 드래그 순서 변경(요청의 1번 항목)은 같은 �
 
 **한계**: 인덱스 열을 비교하는 `WHERE`는 MySQL이 오류를 내도(`id = 3 AND s = 7`에서 `'7x'`) 여기는 통과시킨다(너그러운 쪽). `CASE`·`IF` 안의 글자(`CASE WHEN … THEN s ELSE 1 END = 5`)와 `CAST(s AS SIGNED)`의 글자는 아직 세지 않는다. 날짜·ENUM·SET 열을 수와 견주는 것(`e = 2`, `d > 20240101`)은 오류는 없지만 결과 행이 MySQL과 다르다(R44 ⑥).
 
+### 10월 21일 — 날짜·시간·ENUM·SET 열을 수로 읽을 때 (R44 ⑥)
+
+**왜 이 항목인가**: R44 여섯째 항목(R41 한계 ①). 값이 글자로 저장되는 이 엔진에서 날짜·시간·ENUM·SET 열을 수가 필요한 자리에 쓰면 글자의 앞부분을 수로 읽어 `d + 0`이 `2024`, `e + 1`이 `1`이었다. MySQL은 `DATE '2024-01-02'`를 `20240102`, `DATETIME`을 `20240102030405`, `TIME '10:20:30'`을 `102030`, ENUM을 목록에서의 자리(`'green'` → 2), SET을 비트(`'a,c'` → 5)로 읽는다. 진짜 MySQL에서 예순 가지 남짓을 돌려 규칙을 확인했다(ENUM·SET은 DOUBLE, 날짜·시간은 정수, 소수초 열은 그 자릿수의 DECIMAL).
+
+**고친 것**
+- 바인더가 열마다 **종류**(`ColKind`: 날짜, 날짜시간, 시간, ENUM, SET)와 ENUM·SET의 값 목록, 소수초 자릿수를 단다. 수로 읽는 자리는 이것으로 열의 "수 보기"(`column_number`)를 쓴다: `DATE` 20240102, `DATETIME(3)` 20240102030405.678, `TIME` 부호와 함께 102030(838:59:59는 8385959), ENUM의 자리(없으면 0), SET의 비트.
+- 쓰이는 곳: 산술(`+ - * /`, 단항 `-`, `d + n`, `d + d`), 숫자 함수(`ABS FLOOR CEIL ROUND TRUNCATE SIGN SQRT POW MOD EXP LN LOG*` 삼각함수 `DEGREES RADIANS BIT_COUNT`), 비트 연산자와 `DIV`·`%`, `CAST(… AS SIGNED / UNSIGNED / DECIMAL / DOUBLE / FLOAT)`, 그리고 **수와의 비교**(`=`, `<>`, `<`, `>`, `BETWEEN`, `IN`: `d > 20240101`, `e = 2`, `e IN (1, 3)`, `st & 4`) — 인덱스가 있는 열도 같다. 글자와의 비교는 글자대로(`e = 'green'`, `d = '2024-01-02'`, `st = 'a,c'`), `YEAR(d)`·`DATEDIFF(d, …)`·`CONCAT(d, …)`처럼 날짜로 읽는 함수는 그대로다.
+- R44 ⑤의 `UPDATE … WHERE e = 2`·`d > 20240101`은 오류는 없었지만 행이 틀렸는데 이제 같다.
+
+**검증**
+- 신규 코퍼스 `corpus/arith_types.sql`(137문장: 산술 서른여 가지, 비교·BETWEEN·IN, 숫자 함수, 비트 연산, CAST 열 가지, `ORDER BY`·`GROUP BY` 식, `UPDATE … SET n = d + 0`, `INSERT … SELECT`, 인덱스 있는 열, JOIN 조건) 진짜 MySQL 8.4.9와 차이 0 — 이전 빌드는 앞 74문장 중 57문장이 달랐다. `--emit`이 `mysql_conformance_arith_types.inc`를 만들고 `test_mysql_conformance.cpp`가 새 사례 묶음으로 돈다; `corpus/where_errors.sql`에 날짜·ENUM·SET 다섯 문장이 돌아왔다.
+- 다른 코퍼스(함수, 표, 제약, 정렬 규칙, 날짜·시간, 루틴, 스키마 변경, 자동 번호)는 전과 같은 차이 수.
+- 심은 버그 15종 모두 잡힘.
+- 전체 시험 **769 케이스 / 1,505,102 assertions**을 Release 기본과 `RUSQL_DML_INDEX_MIN_ROWS=0`으로 통과.
+
+**한계**: 집계 `SUM`·`AVG`는 열 그대로를 받으면 앞부분의 수로 읽는다(`SUM(d)`는 2024, MySQL 20240102; `SUM(d + 0)`은 맞다). `CAST(DATETIME(3) AS SIGNED)`는 소수초를 수로 반올림해(…59.999 → …60) MySQL처럼 달력으로 올리지 않는다. 열과 열을 견줄 때(`WHERE f = e`) 오른쪽이 날짜·ENUM·SET 열이면 아직 글자로 읽는다. `GREATEST(d, 20240101)`처럼 날짜와 수를 섞는 함수는 그대로.
+
 ## 요약: 1학기 대비 2학기에 달라진 것
 
 

@@ -96,12 +96,25 @@ std::optional<std::string> column_ci(const BindTable& t, const std::string& colu
     return found;
 }
 
-ValueClass column_class(const BindTable& t, const std::string& column, bool* approx = nullptr, ColKind* kind = nullptr) {
+// what a column of a table is besides text or number: a date, a time, an ENUM or a SET (see ArithExpr::Col)
+void describe_column(ArithExpr::Col& col, const ColumnDef* def) {
+    col.kind = def ? kind_of_type(def->data_type) : ColKind::Plain;
+    col.members.reset();
+    col.fsp = 0;
+    if (!def) return;
+    if (auto* e = std::get_if<DataType::Enum>(&def->data_type.data)) col.members = std::make_shared<const std::vector<std::string>>(e->values);
+    else if (auto* s = std::get_if<DataType::Set>(&def->data_type.data)) col.members = std::make_shared<const std::vector<std::string>>(s->values);
+    else if (auto* dt = std::get_if<DataType::DateTime>(&def->data_type.data)) col.fsp = dt->fsp;
+    else if (auto* ts = std::get_if<DataType::Timestamp>(&def->data_type.data)) col.fsp = ts->fsp;
+    else if (auto* tm = std::get_if<DataType::Time>(&def->data_type.data)) col.fsp = tm->fsp;
+}
+
+ValueClass column_class(const BindTable& t, const std::string& column, bool* approx = nullptr, const ColumnDef** def = nullptr) {
     if (t.schema) {
         for (auto& c : t.schema->columns) {
             if (c.name != column) continue;
             if (approx) *approx = std::holds_alternative<DataType::Float>(c.data_type.data) || std::holds_alternative<DataType::Double>(c.data_type.data);
-            if (kind) *kind = kind_of_type(c.data_type);
+            if (def) *def = &c;
             return class_of_type(c.data_type);
         }
         return ValueClass::Unknown;
@@ -314,9 +327,9 @@ std::optional<std::string> Executor::bind_statement(SharedDatabase& s, Statement
 
         // What the column `name` (`name`, `t.name`, `db.t.name`), a name the select list gives, or an aggregate reference holds.
         // `approx`: told whether it is a FLOAT / DOUBLE column
-        ValueClass class_of_name(const std::string& name, bool* approx = nullptr, ColKind* kind = nullptr) const {
+        ValueClass class_of_name(const std::string& name, bool* approx = nullptr, const ColumnDef** def = nullptr) const {
             if (approx) *approx = false;
-            if (kind) *kind = ColKind::Plain;
+            if (def) *def = nullptr;
             if (auto agg = aggregate_reference_class(name, approx)) return *agg;
             if (!plain_reference(name)) return ValueClass::Unknown;
             const std::size_t dot = name.rfind('.');
@@ -324,7 +337,7 @@ std::optional<std::string> Executor::bind_statement(SharedDatabase& s, Statement
                 const std::string qualifier = name.substr(0, dot), column = name.substr(dot + 1);
                 for (auto it = chain.rbegin(); it != chain.rend(); ++it) {
                     for (const BindTable& t : (*it)->tables) {
-                        if (t.full == qualifier || t.bare == qualifier) return column_class(t, column, approx, kind);
+                        if (t.full == qualifier || t.bare == qualifier) return column_class(t, column, approx, def);
                     }
                 }
                 return ValueClass::Unknown;
@@ -332,7 +345,7 @@ std::optional<std::string> Executor::bind_statement(SharedDatabase& s, Statement
             for (auto it = chain.rbegin(); it != chain.rend(); ++it) {
                 if (auto alias = (*it)->alias_classes.find(name); alias != (*it)->alias_classes.end()) return alias->second;
                 for (const BindTable& t : (*it)->tables) {
-                    if (!t.open && has_column(t, name)) return column_class(t, name, approx, kind);
+                    if (!t.open && has_column(t, name)) return column_class(t, name, approx, def);
                 }
             }
             return ValueClass::Unknown;
@@ -430,7 +443,9 @@ std::optional<std::string> Executor::bind_statement(SharedDatabase& s, Statement
                 if (col->name.find('(') != std::string::npos) col->name = canonical_aggregate(col->name);
                 name(col->name, clause);
                 mark_outer(col->name, col->outer);
-                col->cls = class_of_name(col->name, &col->approx, &col->kind);
+                const ColumnDef* def = nullptr;
+                col->cls = class_of_name(col->name, &col->approx, &def);
+                describe_column(*col, def);
             }
             else if (auto* v = std::get_if<ArithExpr::Add>(&e.data)) { arith(*v->lhs, clause); arith(*v->rhs, clause); }
             else if (auto* v = std::get_if<ArithExpr::Sub>(&e.data)) { arith(*v->lhs, clause); arith(*v->rhs, clause); }
@@ -453,7 +468,9 @@ std::optional<std::string> Executor::bind_statement(SharedDatabase& s, Statement
             if (auto* col = std::get_if<ArithExpr::Col>(&e.data)) {
                 col->name = canonical(col->name);
                 mark_outer(col->name, col->outer);
-                col->cls = class_of_name(col->name, &col->approx, &col->kind);
+                const ColumnDef* def = nullptr;
+                col->cls = class_of_name(col->name, &col->approx, &def);
+                describe_column(*col, def);
             }
             else if (auto* v = std::get_if<ArithExpr::Add>(&e.data)) { annotate(*v->lhs); annotate(*v->rhs); }
             else if (auto* v = std::get_if<ArithExpr::Sub>(&e.data)) { annotate(*v->lhs); annotate(*v->rhs); }
