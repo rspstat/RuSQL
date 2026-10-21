@@ -2168,6 +2168,25 @@ VS Code 스타일 탭 드래그 순서 변경(요청의 1번 항목)은 같은 �
 
 **한계**: `MAX_EXECUTION_TIME`은 SELECT만(MySQL도 같다)이고 병렬 스캔의 작업 스레드는 확인하지 않는다. 한 열에는 외래키 하나만 둘 수 있어(여러 열 FK도 없음) 같은 열에 다른 이름으로 더하면 앞의 것을 덮어쓴다 — 편집기는 이미 FK가 있는 열을 경고한다. 집계 위의 윈도(`SUM(i) OVER (ORDER BY g) … GROUP BY g, i`)는 오류가 아니라 **빈 값**을 돌려주는 알려진 오답이다(`SUM(SUM(i)) OVER ()`는 오류) — 윈도 단축형과는 별개라 손대지 않았다. `run_script`의 미리보기는 DML만 된다(DDL은 엔진에서 트랜잭션을 끝낸다). `TRACE`의 Rows 열은 SELECT의 단계에만 있고 DML에는 없다.
 
+### 10월 21일 — R47: 집계·그룹 위의 윈도(조용히 빈 값을 돌려주던 오답), 식 안의 윈도, 같은 값(피어)을 함께 잡는 프레임
+
+**왜 이 항목인가**: R46 뒤 추천 목록에서 사용자가 "집계 위 윈도 (지금은 빈 값을 돌려주는 오답)"를 골랐다. 진행 순서는 개발 → 시험 → 죽은 코드 정리 → 문서 → 커밋·푸시 → 보고.
+
+**고친 것**
+- **집계·그룹 위의 윈도**: `SELECT g, SUM(i) OVER (ORDER BY g) FROM t GROUP BY g, i`의 윈도 열은 비어 있었고, `SUM(SUM(i)) OVER ()`는 "Cannot read the argument", `RANK() OVER (ORDER BY SUM(i) DESC)`는 문법 오류였다. 원인은 윈도를 GROUP BY **앞에서** 원래 행 위에서 계산했고, `PARTITION BY`·`ORDER BY` 항목과 인자가 열 이름만 받았다는 것. 이제 (1) 파서가 OVER의 항목과 `LAG`·`LEAD`·`FIRST_VALUE`·`LAST_VALUE`·`NTH_VALUE`의 인자를 식·집계로 읽고(`parse_sort_item`), (2) 그룹·집계 질의의 윈도는 GROUP BY·HAVING **뒤**, DISTINCT·ORDER BY·LIMIT **앞**에서 그룹 행 위에서 계산하며(`windows_over_groups`, 항목의 식·집계는 그룹마다 한 번 계산하는 `window_sorts`), (3) 바인더가 윈도 항목을 검증하고 ONLY_FULL_GROUP_BY가 윈도가 읽는 열도 본다(MySQL 1055), (4) 집계가 두 겹인 `SUM(SUM(SUM(v))) OVER ()`는 1111 "Invalid use of group function".
+- **식 안의 윈도**: `SUM(i) / SUM(SUM(i)) OVER ()`(전체 대비 비율), `i - LAG(i) OVER (ORDER BY id)`, `CASE WHEN ROW_NUMBER() OVER (…) = 1 …`, `ORDER BY RANK() OVER (…)`. 파서가 호출을 질의의 **숨은 윈도 열** `__win<n>`으로 바꾸고 식이 그 열을 읽는다(`hidden_window_name`, `engine/column_text.hpp`). 결과, 뷰, 파생 표, 결과 타입, 서브쿼리의 열 수에 숨은 열은 나오지 않고, 이름 없는 항목의 열 이름은 MySQL처럼 쓴 글자 그대로다. 그 식을 읽는 ORDER BY는 윈도를 계산한 뒤에 값을 구한다.
+- **식을 윈도 항목으로**: `OVER (ORDER BY i + id)`, `PARTITION BY g % 2`, 열이 아닌 인자 `SUM(i * 2) OVER (…)`도 받는다(집계 없는 질의에서는 행마다 값을 계산; 전에는 말없이 틀렸다).
+- **윈도 프레임의 오답 (이 작업을 하다 찾음)**: ORDER BY에서 같은 값인 행(피어)을 프레임에 넣지 않았다 — `SUM(v) OVER (ORDER BY g)`가 같은 g의 행마다 다르게 누적되고, `COUNT(*) OVER (ORDER BY g)`, `LAST_VALUE`, `RANGE BETWEEN … CURRENT ROW`도 틀렸다. 이제 기본 프레임(`RANGE UNBOUNDED PRECEDING … CURRENT ROW`)과 명시적 RANGE 프레임은 피어를 함께 잡고, ROWS 프레임은 그대로다.
+- **그룹 질의의 DISTINCT (이 작업을 하다 찾음)**: `SELECT DISTINCT … GROUP BY`가 DISTINCT를 무시했다(`SELECT DISTINCT SUM(v) FROM t GROUP BY g`가 같은 합을 여러 번 냈다). 이제 윈도 뒤, ORDER BY 앞에서 적용한다.
+
+**검증**
+- 신규 코퍼스 `window_agg.sql` 70문장(집계 위 윈도 37, 식 안의 윈도·키 식·뷰·파생 표·DISTINCT·오류 33)이 진짜 MySQL 8.4.9와 차이 0, `windows.sql`에 피어 11문장을 더해 37문장 차이 0; `--emit`이 `mysql_conformance_window_agg.inc`(와 갱신된 `…_windows.inc`)를 만든다. 열 이름도 MySQL과 대조했다(`SUM(i) / SUM(SUM(i)) OVER ()` 그대로).
+- `[r47]` 시험: 집계 위 윈도, HAVING 뒤의 윈도, 식 안의 윈도, DISTINCT, ORDER BY의 윈도, 숨은 열이 결과·뷰에 안 나옴, 오류 셋, 피어 프레임.
+- 심은 버그 15종을 모두 잡았다.
+- 전체 시험 **783 케이스 / 1,505,711 assertions**을 Release 기본과 `RUSQL_DML_INDEX_MIN_ROWS=0`으로 통과.
+
+**한계**: `RANGE BETWEEN 5 PRECEDING AND …`처럼 값을 기준으로 한 오프셋은 여전히 행 수로 읽는다(피어만 고쳤다). 윈도 함수를 `WHERE`·`GROUP BY`·`HAVING`에 쓰면 오류다(MySQL도 3593). 결과 열이 하나도 안 보이는 숨은 윈도의 이름 `__win…`으로 시작하는 열 이름을 사용자가 직접 쓰면 숨은 열과 겹칠 수 있다.
+
 ## 요약: 1학기 대비 2학기에 달라진 것
 
 

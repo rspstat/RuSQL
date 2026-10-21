@@ -334,6 +334,12 @@ SELECT id, salary,
     CUME_DIST()    OVER (ORDER BY salary)  AS cume_d
 FROM employee ORDER BY id;
 
+-- Windows over groups and aggregates, and inside expressions (rows that tie in ORDER BY are peers)
+SELECT department_id, SUM(salary) AS payroll,
+    RANK() OVER (ORDER BY SUM(salary) DESC)  AS payroll_rank,
+    SUM(salary) / SUM(SUM(salary)) OVER ()   AS share_of_total
+FROM employee GROUP BY department_id ORDER BY payroll_rank;
+
 SELECT department_id,
     SUM(budget)     OVER (PARTITION BY department_id) AS dept_budget_total,
     COUNT(*)        OVER (PARTITION BY department_id) AS dept_proj_count,

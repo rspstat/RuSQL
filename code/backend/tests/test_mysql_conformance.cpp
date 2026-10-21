@@ -81,6 +81,9 @@ const Case kMaxExecutionTime[] = {
 const Case kFkNames[] = {
 #include "mysql_conformance_fk_names.inc"
 };
+const Case kWindowAgg[] = {
+#include "mysql_conformance_window_agg.inc"
+};
 
 struct TempDataDir {
     std::string path;
@@ -294,4 +297,8 @@ TEST_CASE("a SELECT that runs longer than MAX_EXECUTION_TIME fails with error 30
 
 TEST_CASE("a foreign key keeps its name, DROP FOREIGN KEY takes it, referential_constraints lists the rules", "[mysql_conformance][fk_names]") {
     run_cases("mc_fk_names", kFkNames, sizeof kFkNames / sizeof kFkNames[0]);
+}
+
+TEST_CASE("window functions run on the groups: over aggregates, inside expressions, with DISTINCT and ORDER BY", "[mysql_conformance][window_agg]") {
+    run_cases("mc_window_agg", kWindowAgg, sizeof kWindowAgg / sizeof kWindowAgg[0]);
 }

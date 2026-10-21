@@ -731,8 +731,23 @@ std::optional<std::string> Executor::bind_statement(SharedDatabase& s, Statement
                     }
                     wf->col_approx = argument_is_approx(*wf->col);
                 }
-                for (auto& p : wf->partition_by) { name(p, "field list"); no_outer(p, "field list"); }
-                for (auto& o : wf->order_by) { name(o.column, "field list"); no_outer(o.column, "field list"); o.cls = class_of_name(o.column); }
+                // (the items are columns, or expressions and aggregates of a query that groups: `OVER (ORDER BY SUM(v) DESC)`)
+                for (auto& p : wf->partition_by) {
+                    if (plain_reference(p)) { name(p, "field list"); no_outer(p, "field list"); }
+                    else {
+                        std::string spelled;
+                        expression_argument(p, "field list", &spelled);
+                        if (!spelled.empty()) p = spelled;
+                    }
+                }
+                for (auto& o : wf->order_by) {
+                    if (plain_reference(o.column)) { name(o.column, "field list"); no_outer(o.column, "field list"); o.cls = class_of_name(o.column); }
+                    else {
+                        std::string spelled;
+                        o.cls = expression_argument(o.column, "field list", &spelled);
+                        if (!spelled.empty()) o.column = spelled;
+                    }
+                }
             } else if (auto* sq = std::get_if<SelectColumn::Subquery>(&c.data)) {
                 if (sq->query) {
                     auto out = nested(*sq->query);
@@ -820,7 +835,20 @@ std::optional<std::string> Executor::bind_statement(SharedDatabase& s, Statement
             std::vector<std::string> positions; // what each output column is called as an ORDER BY / GROUP BY item ("" when it cannot be one)
             std::unordered_map<std::string, std::string> given; // the names the select list gives, and what each stands for
             std::vector<std::string> ambiguous; // the names two different items give
+            // the window functions inside expressions (`SUM(v) / SUM(SUM(v)) OVER ()`) are columns of their own that no result shows: bound first, the
+            // expressions that read them need their types
+            auto hidden_window = [](const SelectColumn& c) {
+                auto* wf = std::get_if<SelectColumn::WinFunc>(&c.data);
+                return wf && wf->alias && hidden_window_name(*wf->alias);
+            };
             for (auto& c : sel.columns) {
+                if (!hidden_window(c)) continue;
+                select_column(c);
+                if (error) break;
+                scope.alias_classes[*std::get<SelectColumn::WinFunc>(c.data).alias] = class_of_item(c);
+            }
+            for (auto& c : sel.columns) {
+                if (hidden_window(c)) continue;
                 select_column(c);
                 if (error) break;
                 const ValueClass k = class_of_item(c);
@@ -885,7 +913,7 @@ std::optional<std::string> Executor::bind_statement(SharedDatabase& s, Statement
         // around it, or the unit of a date function.
         void own_columns(const ArithExpr& e, std::vector<std::string>& out) const {
             if (auto* col = std::get_if<ArithExpr::Col>(&e.data)) {
-                if (col->outer == 0 && plain_reference(col->name)) out.push_back(col->name);
+                if (col->outer == 0 && plain_reference(col->name) && !hidden_window_name(col->name)) out.push_back(col->name);
             } else if (auto* v = std::get_if<ArithExpr::Add>(&e.data)) { own_columns(*v->lhs, out); own_columns(*v->rhs, out); }
             else if (auto* v = std::get_if<ArithExpr::Sub>(&e.data)) { own_columns(*v->lhs, out); own_columns(*v->rhs, out); }
             else if (auto* v = std::get_if<ArithExpr::Mul>(&e.data)) { own_columns(*v->lhs, out); own_columns(*v->rhs, out); }
@@ -982,6 +1010,19 @@ std::optional<std::string> Executor::bind_statement(SharedDatabase& s, Statement
                         if (t.open || !t.schema || (!all->table.empty() && t.full != all->table && t.bare != all->table)) continue;
                         for (auto& column : t.schema->columns) names.push_back(t.full + "." + column.name);
                     }
+                } else if (auto* wf = std::get_if<SelectColumn::WinFunc>(&c.data)) {
+                    // a window function reads the groups: the columns in its argument and its PARTITION BY / ORDER BY items have to be grouped by too
+                    auto note = [&](const std::string& text) {
+                        if (plain_reference(text)) { names.push_back(text); return; }
+                        if (!is_expression_argument(text)) return;
+                        try {
+                            own_columns(Parser::str_to_arith(text), names);
+                        } catch (const ParseError&) {
+                        }
+                    };
+                    if (wf->col) note(*wf->col);
+                    for (auto& p : wf->partition_by) note(p);
+                    for (auto& o : wf->order_by) note(o.column);
                 }
                 for (auto& name : names) {
                     auto tc = table_column(name);

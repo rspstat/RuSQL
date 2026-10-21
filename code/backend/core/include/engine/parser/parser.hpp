@@ -185,6 +185,15 @@ private:
     std::vector<std::map<std::string, std::vector<Token>>> window_defs_;
     std::map<std::string, std::vector<Token>> take_window_clause();
     void expand_window_name();
+    // A window function inside an expression (`SUM(v) / SUM(SUM(v)) OVER ()`, `RANK() OVER (...) + 1`, `ORDER BY RANK() OVER (...)`): in the select list and in ORDER BY
+    // the call becomes a hidden window-function column of the query (`__win<n>`, see hidden_window_name) and the expression reads that as a column.
+    bool allow_window_expr_ = false;
+    std::vector<SelectColumn> hidden_windows_;
+    std::size_t next_hidden_window_ = 0;
+    ArithExpr hide_window(SelectColumn::WinFunc wf);
+    void parse_over_clause(SelectColumn::WinFunc& wf);   // OVER (...) | OVER w, after the call
+    SelectColumn::WinFunc parse_ranking_window();        // ROW_NUMBER() / RANK() / LAG(c) / NTILE(n) ... OVER (...)
+    static bool is_window_function_token(TokenKind kind);
 
     Statement parse_select();
     Statement parse_insert();

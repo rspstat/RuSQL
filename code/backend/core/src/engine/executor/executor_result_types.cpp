@@ -8,6 +8,7 @@
 #include <cctype>
 #include <unordered_set>
 
+#include "engine/column_text.hpp"
 #include "engine/executor/executor.hpp"
 #include "engine/parser/parser.hpp"
 #include "engine/value_class.hpp"
@@ -378,7 +379,7 @@ private:
             } else if (auto* e = std::get_if<SelectColumn::Expr>(&item.data)) {
                 out.push_back({e->alias.value_or(std::string()), expression_type(e->expr, sel, sources)});
             } else if (auto* w = std::get_if<SelectColumn::WinFunc>(&item.data)) {
-                out.push_back({w->alias.value_or(std::string()), window(*w, sel, sources)});
+                if (!(w->alias && hidden_window_name(*w->alias))) out.push_back({w->alias.value_or(std::string()), window(*w, sel, sources)}); // (a hidden window is no column)
             } else if (auto* cw = std::get_if<SelectColumn::CaseWhen>(&item.data)) {
                 out.push_back({cw->alias.value_or(std::string()), ResultColumnType{}});
             } else if (auto* sq = std::get_if<SelectColumn::Subquery>(&item.data)) {

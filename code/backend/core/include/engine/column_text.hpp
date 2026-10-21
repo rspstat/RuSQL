@@ -26,6 +26,10 @@ inline bool plain_reference(const std::string& name) {
     return !segment_start;
 }
 
+// A window function inside an expression (`SUM(v) / SUM(SUM(v)) OVER ()`, `ORDER BY RANK() OVER (...)`) is a window-function column of its own that no result
+// shows, named `__win<n>`: the expression (or the ORDER BY) reads its value as it reads a column.
+inline bool hidden_window_name(const std::string& name) { return name.rfind("__win", 0) == 0; }
+
 // The argument of an aggregate -- the text the parser keeps in `Agg::col` and inside `SUM(...)` -- is a column (`v`, `t.v`), `*`, the placeholder of a CASE
 // (`__case__`, a name like any other), or an expression (`price * qty`, `COALESCE(x, 0)`, `1`) that the executor computes for every row under that text.
 inline bool is_expression_argument(const std::string& arg) { return !arg.empty() && arg != "*" && !plain_reference(arg); }

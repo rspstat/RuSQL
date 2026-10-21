@@ -23,7 +23,7 @@ bool Parser::select_item_continues() const {
             case TokenKind::Comma: case TokenKind::From: case TokenKind::As: case TokenKind::Semicolon: case TokenKind::Into:
             case TokenKind::Where: case TokenKind::Group: case TokenKind::Having: case TokenKind::Order: case TokenKind::Limit:
             case TokenKind::Union: case TokenKind::Intersect: case TokenKind::Except: case TokenKind::Offset: case TokenKind::For:
-            case TokenKind::Fetch: case TokenKind::Over: case TokenKind::Filter:
+            case TokenKind::Fetch: case TokenKind::Filter:
                 if (depth == 0) return false;
                 break;
             case TokenKind::Plus: case TokenKind::Minus: case TokenKind::Asterisk: case TokenKind::Slash: case TokenKind::Percent:
@@ -37,6 +37,118 @@ bool Parser::select_item_continues() const {
         }
     }
     return false;
+}
+
+bool Parser::is_window_function_token(TokenKind kind) {
+    return kind == TokenKind::RowNumber || kind == TokenKind::Rank || kind == TokenKind::DenseRank || kind == TokenKind::Lag || kind == TokenKind::Lead ||
+           kind == TokenKind::FirstValue || kind == TokenKind::LastValue || kind == TokenKind::NthValue || kind == TokenKind::Ntile ||
+           kind == TokenKind::PercentRank || kind == TokenKind::CumeDist;
+}
+
+/// OVER (PARTITION BY ... ORDER BY ... frame) | OVER w, right after a window function's call; the items are columns, or expressions and aggregates of a query that groups.
+void Parser::parse_over_clause(SelectColumn::WinFunc& wf) {
+    if (!peek_is(TokenKind::Over)) throw ParseError("Expected OVER");
+    advance();
+    expand_window_name();
+    if (!peek_is(TokenKind::LParen)) throw ParseError("Expected '(' after OVER");
+    advance();
+    if (peek_is(TokenKind::Partition)) {
+        advance();
+        if (!peek_is(TokenKind::By)) throw ParseError("Expected BY after PARTITION");
+        advance();
+        wf.partition_by.push_back(parse_sort_item());
+        while (peek_is(TokenKind::Comma)) { advance(); wf.partition_by.push_back(parse_sort_item()); }
+    }
+    if (peek_is(TokenKind::Order)) {
+        advance();
+        if (!peek_is(TokenKind::By)) throw ParseError("Expected BY after ORDER");
+        advance();
+        for (;;) {
+            std::string c = parse_sort_item();
+            bool asc = true;
+            if (peek_is(TokenKind::Desc)) { advance(); asc = false; }
+            else if (peek_is(TokenKind::Asc)) { advance(); asc = true; }
+            wf.order_by.push_back(OrderBy{c, asc});
+            if (peek_is(TokenKind::Comma)) advance(); else break;
+        }
+    }
+    wf.frame = parse_window_frame();
+    if (!peek_is(TokenKind::RParen)) throw ParseError("Expected ')' after OVER clause");
+    advance();
+}
+
+/// ROW_NUMBER() / RANK() / DENSE_RANK() / LAG(c [, n [, d]]) / LEAD(...) / FIRST_VALUE(c) / LAST_VALUE(c) / NTH_VALUE(c, n) / NTILE(n) / PERCENT_RANK() / CUME_DIST() OVER (...)
+SelectColumn::WinFunc Parser::parse_ranking_window() {
+    const Token* ft = advance();
+    WindowFunc func;
+    switch (ft->kind) {
+        case TokenKind::RowNumber: func = WindowFunc::RowNumber; break;
+        case TokenKind::Rank: func = WindowFunc::Rank; break;
+        case TokenKind::DenseRank: func = WindowFunc::DenseRank; break;
+        case TokenKind::Lag: func = WindowFunc::Lag; break;
+        case TokenKind::Lead: func = WindowFunc::Lead; break;
+        case TokenKind::FirstValue: func = WindowFunc::FirstValue; break;
+        case TokenKind::LastValue: func = WindowFunc::LastValue; break;
+        case TokenKind::NthValue: func = WindowFunc::NthValue; break;
+        case TokenKind::Ntile: func = WindowFunc::Ntile; break;
+        case TokenKind::PercentRank: func = WindowFunc::PercentRank; break;
+        default: func = WindowFunc::CumeDist; break;
+    }
+    if (!peek_is(TokenKind::LParen)) throw ParseError("Expected '(' after window function");
+    advance();
+    std::optional<std::string> wf_col;
+    std::optional<std::string> wf_default;
+    std::int64_t wf_offset = 0;
+    if (func == WindowFunc::Lag || func == WindowFunc::Lead) {
+        wf_col = parse_sort_item(); // (a column, or an expression / aggregate: LAG(SUM(v)))
+        if (peek_is(TokenKind::Comma)) {
+            advance();
+            const Token* n = advance();
+            if (!n || n->kind != TokenKind::NumberLit) throw ParseError("Expected offset number in LAG/LEAD");
+            try { wf_offset = std::stoll(n->text); } catch (...) { wf_offset = 1; }
+            if (peek_is(TokenKind::Comma)) { // LAG(c, n, default)
+                advance();
+                const Token* d = advance();
+                if (!d) throw ParseError("Expected the default value in LAG/LEAD");
+                if (d->kind == TokenKind::NumberLit || d->kind == TokenKind::StringLit) wf_default = d->text;
+                else if (d->kind == TokenKind::Null) wf_default = "NULL";
+                else throw ParseError("Expected a number, a string or NULL as the default value in LAG/LEAD");
+            }
+        } else {
+            wf_offset = 1;
+        }
+    } else if (func == WindowFunc::FirstValue || func == WindowFunc::LastValue) {
+        wf_col = parse_sort_item();
+        wf_offset = 0;
+    } else if (func == WindowFunc::NthValue) {
+        wf_col = parse_sort_item();
+        if (!peek_is(TokenKind::Comma)) throw ParseError("Expected ',' in NTH_VALUE");
+        advance();
+        const Token* n = advance();
+        if (!n || n->kind != TokenKind::NumberLit) throw ParseError("Expected N in NTH_VALUE");
+        try { wf_offset = std::stoll(n->text); } catch (...) { wf_offset = 1; }
+    } else if (func == WindowFunc::Ntile) {
+        const Token* n = advance();
+        if (!n || n->kind != TokenKind::NumberLit) throw ParseError("Expected N in NTILE");
+        try { wf_offset = std::stoll(n->text); } catch (...) { wf_offset = 1; }
+    }
+    if (!peek_is(TokenKind::RParen)) throw ParseError("Expected ')' after window function args");
+    advance();
+    SelectColumn::WinFunc wf;
+    wf.func = func;
+    wf.col = wf_col;
+    wf.offset = wf_offset;
+    wf.default_value = wf_default;
+    parse_over_clause(wf);
+    return wf;
+}
+
+/// The call becomes a hidden window-function column of the query and its value is read as a column (see hidden_window_name).
+ArithExpr Parser::hide_window(SelectColumn::WinFunc wf) {
+    const std::string name = "__win" + std::to_string(next_hidden_window_++);
+    wf.alias = name;
+    hidden_windows_.push_back(SelectColumn(std::move(wf)));
+    return ArithExpr(ArithExpr::Col{name});
 }
 
 std::string Parser::parse_sort_item() {
@@ -163,8 +275,24 @@ Statement Parser::parse_select() {
     bool distinct = false;
     if (peek_is(TokenKind::Distinct)) { advance(); distinct = true; }
 
+    // the hidden window-function columns of this query (a window function inside an expression); a query inside it has its own
+    struct HiddenWindows {
+        Parser& p;
+        std::vector<SelectColumn> saved;
+        bool allowed;
+        explicit HiddenWindows(Parser& parser) : p(parser), saved(std::move(parser.hidden_windows_)), allowed(parser.allow_window_expr_) {
+            p.hidden_windows_.clear();
+            p.allow_window_expr_ = false;
+        }
+        ~HiddenWindows() {
+            p.hidden_windows_ = std::move(saved);
+            p.allow_window_expr_ = allowed;
+        }
+    } hidden_windows_guard(*this);
+
     // 컬럼 목록 (AS 별칭 포함)
     std::vector<SelectColumn> columns;
+    allow_window_expr_ = true;
     for (;;) {
         SelectColumn col = [&]() -> SelectColumn {
             const Token* p = peek();
@@ -197,11 +325,17 @@ Statement Parser::parse_select() {
                                       p->kind == TokenKind::Floor || p->kind == TokenKind::Mod || p->kind == TokenKind::Nullif ||
                                       p->kind == TokenKind::Lpad || p->kind == TokenKind::Rpad || p->kind == TokenKind::DateDiff ||
                                       ((p->kind == TokenKind::Database || p->kind == TokenKind::User) && call));
+                const bool window_call = call && is_window_function_token(p->kind);
                 const bool always = p->kind == TokenKind::Case || (p->kind == TokenKind::If && peek_at_is(1, TokenKind::LParen)) ||
                                     (p->kind == TokenKind::Cast && peek_at_is(1, TokenKind::LParen));
-                if (always || function || (aggregate && select_item_continues())) {
+                if (always || function || ((aggregate || window_call) && select_item_continues())) {
+                    const std::size_t item_start = pos_;
+                    const std::size_t hidden_before = next_hidden_window_;
                     ArithExpr expr = parse_value_expr();
+                    // (an item with a window function in it is called by its text, as MySQL does)
+                    const std::string typed = next_hidden_window_ > hidden_before ? source_between(item_start, pos_) : std::string();
                     std::optional<std::string> alias = parse_column_alias();
+                    if (!alias && !typed.empty()) alias = typed;
                     return SelectColumn(SelectColumn::Expr{std::move(expr), alias});
                 }
             }
@@ -262,36 +396,10 @@ Statement Parser::parse_select() {
                 advance();
                 // 집계함수 + OVER → aggregate window function
                 if (peek_is(TokenKind::Over)) {
-                    advance(); // consume OVER
-                    expand_window_name();
-                    if (!peek_is(TokenKind::LParen)) throw ParseError("Expected '(' after OVER");
-                    advance();
-                    std::vector<std::string> partition_by;
-                    if (peek_is(TokenKind::Partition)) {
-                        advance();
-                        if (!peek_is(TokenKind::By)) throw ParseError("Expected BY after PARTITION");
-                        advance();
-                        partition_by.push_back(expect_col_ref());
-                        while (peek_is(TokenKind::Comma)) { advance(); partition_by.push_back(expect_col_ref()); }
-                    }
-                    std::vector<OrderBy> win_order_by;
-                    if (peek_is(TokenKind::Order)) {
-                        advance();
-                        if (!peek_is(TokenKind::By)) throw ParseError("Expected BY after ORDER");
-                        advance();
-                        for (;;) {
-                            std::string c = expect_col_ref();
-                            bool asc = true;
-                            if (peek_is(TokenKind::Desc)) { advance(); asc = false; }
-                            else if (peek_is(TokenKind::Asc)) { advance(); asc = true; }
-                            win_order_by.push_back(OrderBy{c, asc});
-                            if (peek_is(TokenKind::Comma)) advance(); else break;
-                        }
-                    }
-                    std::optional<WindowFrame> frame = parse_window_frame();
-                    if (!peek_is(TokenKind::RParen)) throw ParseError("Expected ')' after OVER clause");
-                    advance();
-                    WindowFunc win_func = std::visit([](const auto& alt) -> WindowFunc {
+                    SelectColumn::WinFunc wf;
+                    wf.col = agg_col;
+                    parse_over_clause(wf);
+                    wf.func = std::visit([](const auto& alt) -> WindowFunc {
                         using T = std::decay_t<decltype(alt)>;
                         if constexpr (std::is_same_v<T, AggFunc::Sum> || std::is_same_v<T, AggFunc::SumDistinct>) return WindowFunc::Sum;
                         else if constexpr (std::is_same_v<T, AggFunc::Avg> || std::is_same_v<T, AggFunc::AvgDistinct>) return WindowFunc::Avg;
@@ -303,8 +411,8 @@ Statement Parser::parse_select() {
                     const std::string typed = source_between(item_start, pos_); // (a window function with no alias is called by its text, as MySQL does)
                     std::optional<std::string> alias = parse_column_alias();
                     if (!alias && !typed.empty()) alias = typed;
-                    return SelectColumn(SelectColumn::WinFunc{win_func, std::optional<std::string>(agg_col), 0,
-                                                              partition_by, win_order_by, alias, frame});
+                    wf.alias = alias;
+                    return SelectColumn(std::move(wf));
                 }
                 // FILTER (WHERE ...) -- only meaningful for the plain aggregate case
                 // reached here (OVER and the expression case above both already
@@ -367,100 +475,14 @@ Statement Parser::parse_select() {
             }
 
             // 윈도우 함수
-            if (p && peek_at_is(1, TokenKind::LParen) && (p->kind == TokenKind::RowNumber || p->kind == TokenKind::Rank || p->kind == TokenKind::DenseRank ||
-                      p->kind == TokenKind::Lag || p->kind == TokenKind::Lead || p->kind == TokenKind::FirstValue ||
-                      p->kind == TokenKind::LastValue || p->kind == TokenKind::NthValue || p->kind == TokenKind::Ntile ||
-                      p->kind == TokenKind::PercentRank || p->kind == TokenKind::CumeDist)) {
+            if (p && peek_at_is(1, TokenKind::LParen) && is_window_function_token(p->kind) && !select_item_continues()) {
                 const std::size_t item_start = pos_;
-                const Token* ft = advance();
-                WindowFunc func;
-                switch (ft->kind) {
-                    case TokenKind::RowNumber: func = WindowFunc::RowNumber; break;
-                    case TokenKind::Rank: func = WindowFunc::Rank; break;
-                    case TokenKind::DenseRank: func = WindowFunc::DenseRank; break;
-                    case TokenKind::Lag: func = WindowFunc::Lag; break;
-                    case TokenKind::Lead: func = WindowFunc::Lead; break;
-                    case TokenKind::FirstValue: func = WindowFunc::FirstValue; break;
-                    case TokenKind::LastValue: func = WindowFunc::LastValue; break;
-                    case TokenKind::NthValue: func = WindowFunc::NthValue; break;
-                    case TokenKind::Ntile: func = WindowFunc::Ntile; break;
-                    case TokenKind::PercentRank: func = WindowFunc::PercentRank; break;
-                    default: func = WindowFunc::CumeDist; break;
-                }
-                if (!peek_is(TokenKind::LParen)) throw ParseError("Expected '(' after window function");
-                advance();
-                std::optional<std::string> wf_col;
-                std::optional<std::string> wf_default;
-                std::int64_t wf_offset = 0;
-                if (func == WindowFunc::Lag || func == WindowFunc::Lead) {
-                    wf_col = expect_col_ref();
-                    if (peek_is(TokenKind::Comma)) {
-                        advance();
-                        const Token* n = advance();
-                        if (!n || n->kind != TokenKind::NumberLit) throw ParseError("Expected offset number in LAG/LEAD");
-                        try { wf_offset = std::stoll(n->text); } catch (...) { wf_offset = 1; }
-                        if (peek_is(TokenKind::Comma)) { // LAG(c, n, default)
-                            advance();
-                            const Token* d = advance();
-                            if (!d) throw ParseError("Expected the default value in LAG/LEAD");
-                            if (d->kind == TokenKind::NumberLit || d->kind == TokenKind::StringLit) wf_default = d->text;
-                            else if (d->kind == TokenKind::Null) wf_default = "NULL";
-                            else throw ParseError("Expected a number, a string or NULL as the default value in LAG/LEAD");
-                        }
-                    } else {
-                        wf_offset = 1;
-                    }
-                } else if (func == WindowFunc::FirstValue || func == WindowFunc::LastValue) {
-                    wf_col = expect_col_ref();
-                    wf_offset = 0;
-                } else if (func == WindowFunc::NthValue) {
-                    wf_col = expect_col_ref();
-                    if (!peek_is(TokenKind::Comma)) throw ParseError("Expected ',' in NTH_VALUE");
-                    advance();
-                    const Token* n = advance();
-                    if (!n || n->kind != TokenKind::NumberLit) throw ParseError("Expected N in NTH_VALUE");
-                    try { wf_offset = std::stoll(n->text); } catch (...) { wf_offset = 1; }
-                } else if (func == WindowFunc::Ntile) {
-                    const Token* n = advance();
-                    if (!n || n->kind != TokenKind::NumberLit) throw ParseError("Expected N in NTILE");
-                    try { wf_offset = std::stoll(n->text); } catch (...) { wf_offset = 1; }
-                }
-                if (!peek_is(TokenKind::RParen)) throw ParseError("Expected ')' after window function args");
-                advance();
-                if (!peek_is(TokenKind::Over)) throw ParseError("Expected OVER");
-                advance();
-                expand_window_name();
-                if (!peek_is(TokenKind::LParen)) throw ParseError("Expected '(' after OVER");
-                advance();
-                std::vector<std::string> partition_by;
-                if (peek_is(TokenKind::Partition)) {
-                    advance();
-                    if (!peek_is(TokenKind::By)) throw ParseError("Expected BY after PARTITION");
-                    advance();
-                    partition_by.push_back(expect_col_ref());
-                    while (peek_is(TokenKind::Comma)) { advance(); partition_by.push_back(expect_col_ref()); }
-                }
-                std::vector<OrderBy> win_order_by;
-                if (peek_is(TokenKind::Order)) {
-                    advance();
-                    if (!peek_is(TokenKind::By)) throw ParseError("Expected BY after ORDER");
-                    advance();
-                    for (;;) {
-                        std::string c = expect_col_ref();
-                        bool asc = true;
-                        if (peek_is(TokenKind::Desc)) { advance(); asc = false; }
-                        else if (peek_is(TokenKind::Asc)) { advance(); asc = true; }
-                        win_order_by.push_back(OrderBy{c, asc});
-                        if (peek_is(TokenKind::Comma)) advance(); else break;
-                    }
-                }
-                std::optional<WindowFrame> frame = parse_window_frame();
-                if (!peek_is(TokenKind::RParen)) throw ParseError("Expected ')' after OVER clause");
-                advance();
+                SelectColumn::WinFunc wf = parse_ranking_window();
                 const std::string typed = source_between(item_start, pos_); // (a window function with no alias is called by its text, as MySQL does)
                 std::optional<std::string> alias = parse_column_alias();
                 if (!alias && !typed.empty()) alias = typed;
-                return SelectColumn(SelectColumn::WinFunc{func, wf_col, wf_offset, partition_by, win_order_by, alias, frame, ValueClass::Unknown, wf_default});
+                wf.alias = alias;
+                return SelectColumn(std::move(wf));
             }
 
             // 스칼라 서브쿼리: (SELECT ...) [AS alias]
@@ -480,8 +502,12 @@ Statement Parser::parse_select() {
 
             // default: arithmetic expression, possibly Column/ColumnAlias/Expr/Cmp
             {
+                const std::size_t item_start = pos_;
+                const std::size_t hidden_before = next_hidden_window_;
                 ArithExpr expr = parse_value_expr();
+                const std::string typed = next_hidden_window_ > hidden_before ? source_between(item_start, pos_) : std::string();
                 std::optional<std::string> alias = parse_column_alias();
+                if (!alias && !typed.empty()) alias = typed;
                 if (std::holds_alternative<ArithExpr::Col>(expr.data) && !alias) {
                     return SelectColumn(SelectColumn::Column{std::get<ArithExpr::Col>(expr.data).name});
                 }
@@ -495,6 +521,9 @@ Statement Parser::parse_select() {
         columns.push_back(std::move(col));
         if (peek_is(TokenKind::Comma)) advance(); else break;
     }
+    allow_window_expr_ = false;
+    for (auto& hidden : hidden_windows_) columns.push_back(std::move(hidden));
+    hidden_windows_.clear();
 
     // SELECT ... INTO var [, var] (a procedure's variables, or @user variables)
     std::vector<std::string> into_vars;
@@ -778,6 +807,7 @@ Statement Parser::parse_select() {
         advance();
         if (!peek_is(TokenKind::By)) throw ParseError("Expected BY");
         advance();
+        allow_window_expr_ = true; // (`ORDER BY RANK() OVER (...)`: the window function becomes a hidden column the sort reads)
         for (;;) {
             std::string col = parse_sort_item();
             bool asc = true;
@@ -786,6 +816,9 @@ Statement Parser::parse_select() {
             order_by.push_back(OrderBy{col, asc});
             if (peek_is(TokenKind::Comma)) advance(); else break;
         }
+        allow_window_expr_ = false;
+        for (auto& hidden : hidden_windows_) columns.push_back(std::move(hidden));
+        hidden_windows_.clear();
     }
 
     // LIMIT [OFFSET] / FETCH (FIRST|NEXT) n ROWS ONLY

@@ -1,5 +1,5 @@
 {
-  "generated": "2026-10-21",
+  "generated": "2026-10-22",
   "mysql": "8.4.9",
   "corpora": [
     {
@@ -126,9 +126,17 @@
       "name": "windows",
       "en": "Window frames: short form, named windows (WINDOW w AS (...))",
       "ko": "윈도 프레임 단축형·이름 있는 윈도 (WINDOW w AS (...))",
-      "statements": 26,
+      "statements": 37,
       "different": 0,
       "bothFail": 5
+    },
+    {
+      "name": "window_agg",
+      "en": "Window functions over groups and aggregates, inside expressions",
+      "ko": "집계·그룹 위의 윈도, 식 안의 윈도",
+      "statements": 70,
+      "different": 0,
+      "bothFail": 7
     },
     {
       "name": "max_execution_time",
@@ -163,10 +171,10 @@
       "bothFail": 0
     }
   ],
-  "conformanceCases": 2876,
+  "conformanceCases": 2958,
   "tests": {
-    "cases": 781,
-    "assertions": 1505497
+    "cases": 783,
+    "assertions": 1505711
   },
-  "bugsFound": 191
+  "bugsFound": 194
 }

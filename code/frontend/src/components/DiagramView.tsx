@@ -111,51 +111,30 @@ const RIBBON: { n: number; label: Text; c: string }[] = [
 ];
 
 const SERVER: Item[] = [
-  { t: L("Native protocol :7878", "네이티브 프로토콜 :7878"), s: L("UI, MCP and engine_client", "UI, MCP, engine_client") },
+  { t: L("Native protocol :7878", "네이티브 프로토콜 :7878"), s: L("UI, MCP, engine_client", "UI, MCP, engine_client") },
   {
     t: L("MySQL wire protocol :3306", "MySQL 와이어 프로토콜 :3306"),
-    s: L("mysql CLI, DBeaver, JDBC; COM_CHANGE_USER for pool drivers; typed result columns (INT, DECIMAL, DATE, …)", "mysql CLI, DBeaver, JDBC, 풀 드라이버용 COM_CHANGE_USER, 열 타입(INT, DECIMAL, DATE, …)을 실어 보냄"),
+    s: L("mysql CLI, DBeaver, JDBC; results carry column types", "mysql CLI, DBeaver, JDBC, 결과에 열 타입 포함"),
   },
-  {
-    t: L("Challenge-response auth", "챌린지-응답 인증"),
-    s: L("mysql_native_password style, password never sent in plaintext", "mysql_native_password 방식, 비밀번호를 평문으로 보내지 않음"),
-  },
-  {
-    t: L("One session per connection", "연결당 세션 1개"),
-    s: L("own Executor over the shared database (RwLock)", "공유 데이터베이스(RwLock) 위에서 세션마다 독립 Executor"),
-  },
+  { t: L("Challenge-response auth", "챌린지-응답 인증"), s: L("no plaintext password", "비밀번호를 평문으로 보내지 않음") },
+  { t: L("One session per connection", "연결당 세션 1개"), s: L("own Executor, shared database", "연결마다 독립 Executor, 데이터베이스는 공유") },
 ];
 
 const SIDE_MODULES: Item[] = [
-  { t: L("Query result cache", "쿼리 결과 캐시"), s: L("LRU-512, invalidated on DML and COMMIT", "LRU 512개, DML·COMMIT 시 무효화") },
-  {
-    t: L("Thread pool", "스레드 풀"),
-    s: L("parallel scan, GROUP BY, ORDER BY, hash-join probe", "병렬 스캔, GROUP BY, ORDER BY, 해시 조인 probe"),
-  },
-  {
-    t: L("Statistics", "통계"),
-    s: L("ANALYZE: equi-depth histogram + most-common values", "ANALYZE: 등깊이 히스토그램 + 최빈값(MCV)"),
-  },
-  {
-    t: L("Catalog", "카탈로그"),
-    s: L("schemas, views, users / roles / grants, procedures, triggers", "스키마, 뷰, 사용자·역할·권한, 프로시저, 트리거"),
-  },
+  { t: L("Query result cache", "쿼리 결과 캐시"), s: L("LRU-512, cleared on DML / COMMIT", "LRU 512개, DML·COMMIT 시 비움") },
+  { t: L("Thread pool", "스레드 풀"), s: L("parallel scan, GROUP BY, ORDER BY, join probe", "스캔·GROUP BY·ORDER BY·조인 병렬화") },
+  { t: L("Statistics", "통계"), s: L("ANALYZE: histogram + most-common values", "ANALYZE: 히스토그램 + 최빈값") },
+  { t: L("Catalog", "카탈로그"), s: L("schemas, views, users, procedures, triggers", "스키마, 뷰, 사용자, 프로시저, 트리거") },
 ];
 
 const TXN: Item[] = [
-  {
-    t: L("Row-level MVCC", "행 단위 MVCC"),
-    s: L("_xmin / _xmax version chains, snapshot visibility, GC-horizon VACUUM", "_xmin / _xmax 버전 체인, 스냅샷 가시성, GC 호라이즌 VACUUM"),
-  },
-  {
-    t: L("4 isolation levels", "격리 수준 4단계"),
-    s: L("READ UNCOMMITTED to SERIALIZABLE, genuinely distinct", "READ UNCOMMITTED ~ SERIALIZABLE, 실제로 서로 다르게 동작"),
-  },
+  { t: L("Row-level MVCC", "행 단위 MVCC"), s: L("version chains, snapshot reads, VACUUM", "버전 체인, 스냅샷 읽기, VACUUM") },
+  { t: L("4 isolation levels", "격리 수준 4단계"), s: L("READ UNCOMMITTED to SERIALIZABLE", "READ UNCOMMITTED ~ SERIALIZABLE") },
   {
     t: L("Lock manager", "락 매니저"),
-    s: L("row locks and claims on unique and foreign-key values, FOR UPDATE / SHARE, blocking wait, deadlock detection", "행 락·UNIQUE·외래키 값 클레임, FOR UPDATE / SHARE, 블로킹 대기, 데드락 감지"),
+    s: L("row locks, UNIQUE / FK value claims, FOR UPDATE, deadlock detection", "행 락, UNIQUE·FK 값 클레임, FOR UPDATE, 데드락 감지"),
   },
-  { t: L("Gap lock + SSI", "Gap 락 + SSI"), s: L("phantom prevention; non-blocking predicate locks", "팬텀 방지, 비블로킹 predicate 락") },
+  { t: L("Gap lock + SSI", "Gap 락 + SSI"), s: L("phantom prevention", "팬텀 방지") },
   {
     t: L("Transaction manager", "트랜잭션 매니저"),
     s: L("BEGIN / COMMIT / ROLLBACK, SAVEPOINT, group commit", "BEGIN / COMMIT / ROLLBACK, SAVEPOINT, 그룹 커밋"),
@@ -165,60 +144,69 @@ const TXN: Item[] = [
 const STORAGE: Item[] = [
   {
     t: L("B+Tree indexes", "B+Tree 인덱스"),
-    s: L("single, composite, clustered; numbers compare as numbers (7 = 7.00), texts by MySQL's default collation (A = a = Á); maintained incrementally, one bucket write per statement",
-         "단일·복합·클러스터드, 숫자는 값으로(7 = 7.00)·글자는 MySQL 기본 정렬 규칙으로 비교(A = a = Á), 증분 갱신(문장당 버킷 1회 기록)"),
+    s: L("single, composite, clustered; compared like MySQL (7 = 7.00, A = a)", "단일·복합·클러스터드, MySQL처럼 비교(7 = 7.00, A = a)"),
   },
-  { t: L("Hash index", "해시 인덱스"), s: L("USING HASH, O(1) equality lookups, bucketed by numeric value / collation key", "USING HASH, 등호 조회 O(1), 숫자 값·정렬 키 기준 버킷") },
-  {
-    t: L("Table data", "테이블 데이터"),
-    s: L("in-memory MVCC row versions + the pk-to-position cache that turns an index hit into its row", "메모리 상의 MVCC 행 버전 + 인덱스 결과를 실제 행으로 연결하는 PK→위치 캐시"),
-  },
+  { t: L("Hash index", "해시 인덱스"), s: L("USING HASH, O(1) equality lookup", "USING HASH, 등호 조회 O(1)") },
+  { t: L("Table data", "테이블 데이터"), s: L("in-memory MVCC row versions", "메모리 상의 MVCC 행 버전") },
   { t: L("Buffer pool", "버퍼 풀"), s: L("LRU, 64 pages x 16 KB", "LRU, 16KB 페이지 64개") },
-  { t: L("Table files", "테이블 파일"), s: L("binary .rdb with LZ4 compression", "LZ4 압축 바이너리 .rdb") },
+  { t: L("Table files", "테이블 파일"), s: L("binary .rdb, LZ4, committed rows only", "LZ4 압축 .rdb, 커밋된 행만 저장") },
 ];
 
 const DURABILITY: Item[] = [
-  {
-    t: L("Redo log", "Redo 로그"),
-    s: L("a commit appends one checksummed batch, group-commit fsync", "커밋 = 체크섬 붙은 배치 1개 추가 + 그룹 커밋 fsync"),
-  },
-  {
-    t: "WAL",
-    s: L("binary write-ahead log, FNV-1a record checksums; COMMIT never re-reads it (which transactions are in the file is tracked in memory)",
-         "바이너리 선행 기록 로그, FNV-1a 레코드 체크섬, 어떤 트랜잭션이 들어 있는지 메모리에서 추적해 COMMIT이 다시 읽지 않음"),
-  },
-  { t: L("Undo log", "Undo 로그"), s: L("per-transaction undo records for rollback", "롤백용 트랜잭션별 undo 레코드") },
+  { t: L("Redo log", "Redo 로그"), s: L("one checksummed batch per commit, group-commit fsync", "커밋마다 체크섬 배치 1개, 그룹 커밋 fsync") },
+  { t: "WAL", s: L("binary write-ahead log with record checksums", "레코드 체크섬이 있는 바이너리 선행 기록 로그") },
+  { t: L("Undo log", "Undo 로그"), s: L("per-transaction records for rollback", "롤백용 트랜잭션별 기록") },
   {
     t: L("Checkpoint", "체크포인트"),
-    s: L("redo past a limit that grows with the table (min 4 MB), before DDL, after recovery: rewrite table files (committed rows only)", "redo가 테이블 크기에 비례하는 한도(최소 4MB)를 넘을 때·DDL 직전·복구 직후에 테이블 파일 재기록(커밋된 행만)"),
+    s: L("rewrites table files when redo grows, before DDL, after recovery", "redo가 커졌을 때·DDL 전·복구 후 테이블 파일 재기록"),
   },
   {
     t: L("Crash recovery", "크래시 복구"),
-    s: L("on boot: undo unfinished transactions, replay the redo log, rebuild every index from the rows",
-         "부팅 시 미완료 트랜잭션 undo, redo 로그 재생, 모든 인덱스를 행에서 재구성"),
+    s: L("on boot: undo unfinished, replay redo, rebuild indexes", "부팅 시 미완료 undo → redo 재생 → 인덱스 재구성"),
   },
 ];
 
 const AI: Item[] = [
   {
     t: L("Natural language to SQL", "자연어 → SQL"),
-    s: L("done by Claude on the client side; RuSQL only ever receives plain SQL", "클라이언트 쪽 Claude가 수행, RuSQL은 항상 평범한 SQL만 받음"),
+    s: L("done by Claude on the client side; RuSQL receives plain SQL", "클라이언트 쪽 Claude가 수행, RuSQL은 평범한 SQL만 받음"),
   },
   {
     t: L("MCP tools", "MCP 도구"),
     s: L(
-      "execute_sql with a dangerous-SQL guard, run_script (a previewed, all-or-nothing script), schema and index introspection, editor and server control",
-      "위험 SQL 안전장치가 있는 execute_sql, run_script(미리보기가 있는 전부-아니면-전무 스크립트), 스키마·인덱스 조회, 에디터·서버 제어",
+      "26 tools: execute_sql (dangerous-SQL guard), run_script (preview, all-or-nothing), schema and index lookup, editor and server control",
+      "도구 26개: execute_sql(위험 SQL 차단), run_script(미리보기, 전부 또는 전무), 스키마·인덱스 조회, 에디터·서버 제어",
     ),
   },
   {
     t: L("No private model", "사설 모델 없음"),
-    s: L(
-      "a small fine-tuned NL-to-SQL model would duplicate MCP and be less capable than Claude, so it is not part of RuSQL",
-      "소형 파인튜닝 NL→SQL 모델은 MCP와 중복되고 Claude보다 성능이 낮아 RuSQL에 포함하지 않음",
-    ),
+    s: L("a small NL-to-SQL model would duplicate MCP, so RuSQL has none", "소형 NL→SQL 모델은 MCP와 중복이라 두지 않음"),
   },
 ];
+
+// The three engine_core stages: a few short points each.
+const PARSER: Text[] = [
+  L("SQL text → AST (DDL, DML, DCL, TCL, procedures)", "SQL 텍스트 → AST (DDL, DML, DCL, TCL, 프로시저)"),
+  L("reads mysqldump files and the statements real clients send (SET lists, LIKE / AS SELECT, multi-action ALTER)", "mysqldump 파일과 실제 클라이언트가 보내는 문장(SET 목록, LIKE / AS SELECT, 여러 동작 ALTER)을 읽음"),
+  L("window frames and WINDOW w, named foreign keys, TRACE", "윈도 프레임·WINDOW w, 이름 있는 외래키, TRACE"),
+  L("names ignore case; db.table works everywhere", "이름은 대소문자 무시, db.표는 모든 문장에서 가능"),
+];
+const PLANNER: Text[] = [
+  L("cost-based, from histogram + most-common-value statistics", "히스토그램 + 최빈값 통계로 비용 계산"),
+  L("picks the access path per table, the join algorithm and the join order (System-R DP)", "테이블별 접근 경로, 조인 알고리즘, 조인 순서(System-R DP)를 선택"),
+  L("indexes also start UPDATE / DELETE, AND conditions, GROUP BY, ORDER BY … LIMIT", "UPDATE·DELETE, AND 조건, GROUP BY, ORDER BY … LIMIT도 인덱스로 시작"),
+];
+const EXECUTOR: Text[] = [
+  L("joins (NL, hash, sort-merge, index NL), subqueries, CTE, window functions (over groups too)", "조인(NL, 해시, 소트-머지, 인덱스 NL), 서브쿼리, CTE, 윈도 함수(그룹 위에서도)"),
+  L("works on row pointers; subqueries and INSERT checks run once per statement", "행 포인터로 처리, 서브쿼리·INSERT 검사는 문장당 한 번"),
+  L("MySQL-exact results: DECIMAL places, strict errors (division by zero, text read as a number)", "MySQL과 같은 결과: DECIMAL 자릿수, 엄격한 오류(0으로 나누기, 글자를 수로 읽기)"),
+  L("MAX_EXECUTION_TIME stops long SELECTs (3024); TRACE shows a statement's steps", "MAX_EXECUTION_TIME이 긴 SELECT를 멈춤(3024), TRACE가 문장의 단계를 보여 줌"),
+];
+
+function Bullets({ items }: { items: Text[] }) {
+  const t = useT();
+  return <ul className="dg-bullets">{items.map((i, k) => <li key={k}>{t(i)}</li>)}</ul>;
+}
 
 export default function DiagramView() {
   const [lang, setLang] = useState<Lang>(loadLang);
@@ -266,9 +254,9 @@ function LayersView() {
         <Card style={at("1", "1")} c={C.client} title="engine_cli" sub={L("Terminal REPL", "터미널 REPL")}
           note={L("runs the engine in-process", "엔진을 프로세스 안에서 직접 실행")} />
         <Card style={at("2", "1")} c={C.client} title={L("Desktop UI", "데스크톱 UI")} sub="Tauri + React + Monaco"
-          note={L("SQL editor + autocomplete, statement Journey, ERD with a relationship editor, Server Manager (sessions / locks), Compat page", "SQL 에디터 + 자동완성, 한 문장의 여행, 관계 편집기가 있는 ERD, 서버 매니저(세션·락), 호환성 페이지")} />
+          note={L("SQL editor, Journey, ERD editor, Server Manager, Compat page", "SQL 에디터, 한 문장의 여행, ERD 편집기, 서버 매니저, 호환성 페이지")} />
         <Card style={at("3", "1")} c={C.client} title="Claude Desktop + MCP" sub="Python FastMCP, stdio JSON-RPC"
-          note={L("25 tools; drives the UI via ui_commands.json", "도구 25개, ui_commands.json으로 UI 제어")} />
+          note={L("26 tools; drives the UI via ui_commands.json", "도구 26개, ui_commands.json으로 UI 제어")} />
         <Card style={at("4", "1")} c={C.client} title="engine_client" sub={L("TCP client CLI", "TCP 클라이언트 CLI")} note="-u -p -h -P" />
         <Card style={at("5", "1")} c={C.client} title={L("MySQL clients", "MySQL 클라이언트")} sub="mysql CLI, DBeaver, JDBC"
           note={L("HikariCP and other pools", "HikariCP 등 커넥션 풀")} />
@@ -296,20 +284,17 @@ function LayersView() {
           <div className="dg-pipeline">
             <div className="dg-stage" style={tint(C.core)}>
               <div className="dg-stage-head"><Num n={3} c={C.core} /><b>{t(L("Lexer + Parser", "렉서 + 파서"))}</b></div>
-              <span>{t(L("Tokens, then a recursive-descent parser builds the AST: DDL, DML, DCL, TCL, procedures. A mysqldump file loads too (/*!40101 */ executable comments, SET lists and server variables, table and column options); a select item may name its column with or without AS (COUNT(*) c); INSERT / REPLACE also take SET col = value; UNSIGNED integers keep their range; x op ANY / SOME / ALL (subquery); row constructors (a, b) IN (…) and as a value; COUNT(DISTINCT a, b); names without regard to case (tables, columns, aliases, indexes, routines, @variables) and db.table in every statement; || is OR unless sql_mode has PIPES_AS_CONCAT; CREATE TABLE … LIKE / AS SELECT, RENAME TABLE, DROP TABLE a, b, ALTER TABLE with several actions (FIRST / AFTER, CHANGE, ADD INDEX), (SELECT …) UNION (SELECT …), JOIN db.table; ROWS UNBOUNDED PRECEDING and WINDOW w AS (…) / OVER w; CONSTRAINT <name> FOREIGN KEY and DROP FOREIGN KEY <name>; TRACE <statement>",
-                         "토큰화 후 재귀 하향 파서가 AST 생성: DDL, DML, DCL, TCL, 프로시저. mysqldump 파일도 읽음(/*!40101 */ 실행 주석, SET 목록·서버 변수, 표·열 옵션); select 항목의 열 이름은 AS 없이도 붙일 수 있고(COUNT(*) c) INSERT / REPLACE는 SET col = 값 형식도 받고 UNSIGNED 정수는 자기 범위를 지키고 x op ANY / SOME / ALL (서브쿼리)와 행 생성자 (a, b) IN (…)(값 자리 포함)와 COUNT(DISTINCT a, b)도 읽고, 이름은 대소문자를 구분하지 않으며(표·열·별칭·색인·루틴·@변수) db.표를 모든 문장에서 받고, ||는 sql_mode에 PIPES_AS_CONCAT이 없으면 OR이고, CREATE TABLE … LIKE / AS SELECT, RENAME TABLE, DROP TABLE a, b, 여러 동작의 ALTER TABLE(FIRST / AFTER, CHANGE, ADD INDEX), (SELECT …) UNION (SELECT …), JOIN db.표도 읽고, ROWS UNBOUNDED PRECEDING과 WINDOW w AS (…) / OVER w, CONSTRAINT <이름> FOREIGN KEY와 DROP FOREIGN KEY <이름>, TRACE <문장>도 읽음"))}</span>
+              <Bullets items={PARSER} />
             </div>
             <HArrow c={C.core} phase={1} />
             <div className="dg-stage" style={tint(C.core)}>
               <div className="dg-stage-head"><Num n={4} c={C.core} /><b>{t(L("Query planner", "쿼리 플래너"))}</b></div>
-              <span>{t(L("Cost-based: access path per table (also used to find the rows of UPDATE / DELETE; an AND with an indexed equality starts from that index, and so do aggregates, GROUP BY, DISTINCT and ORDER BY ... LIMIT), join algorithm (counts the rows a probe of a non-unique index returns), System-R DP join order",
-                         "비용 기반: 테이블별 접근 경로(UPDATE·DELETE의 대상 행 탐색에도 사용, 인덱스 등호가 든 AND와 집계·GROUP BY·DISTINCT·ORDER BY … LIMIT도 그 인덱스로 시작), 조인 알고리즘(비유일 인덱스를 한 번 찾을 때 나오는 행 수까지 비용에 반영), System-R DP 조인 순서"))}</span>
+              <Bullets items={PLANNER} />
             </div>
             <HArrow c={C.core} phase={2} />
             <div className="dg-stage" style={tint(C.core)}>
               <div className="dg-stage-head"><Num n={5} c={C.core} /><b>{t(L("Executor", "실행기"))}</b></div>
-              <span>{t(L("Runs the plan: joins (NL, hash, sort-merge, index NL), subqueries, CTE, window functions. Scans, aggregates, GROUP BY, DISTINCT and ORDER BY work on pointers to the table's rows (no copies); joins apply single-table WHERE parts before joining and hash LEFT / RIGHT / FULL JOINs and multi-condition ONs on their equality; a read statement that keeps looking up one unindexed column builds a temporary hash index for itself; uncorrelated subqueries (scalar, EXISTS, IN) run once per statement; a multi-row INSERT finds the rows that already hold a UNIQUE value or a composite key through a hash built once per statement, and updates indexes once per statement; an INSERT into a table with a foreign key reads the parent and is made durable through the redo log like any INSERT; an INSERT (one row or several) and a key-changing UPDATE skip their duplicate scan when a per-table cache of the live UNIQUE keys, which follows UPDATE, DELETE and COMMIT, proves the key absent; foreign-key actions write the child rows as versions and log them, so a ROLLBACK undoes them with the parent and INSERT / UPDATE / DELETE (cascades included) are made durable through the redo log. UPDATE checks PRIMARY KEY / UNIQUE (the new values of an unindexed UNIQUE column are looked up in one pass over the table) and applies fully or not at all; ALTER TABLE with several actions is all or nothing; information_schema is read as ordinary tables; LAST_INSERT_ID / ROW_COUNT / FOUND_ROWS and SET autocommit = 0 per session; DECIMAL results carry MySQL's places (10.50 * 2 = 21.00, SUM / AVG / ROUND), FLOAT / DOUBLE sums are doubles; a result table is written so that a value's edge spaces survive being read again (\\s, \\t), and a CTE's columns are typed like the columns and numbers they show; DATETIME(3) / TIME(2) columns keep and round fractions of a second, and the many written forms of a date and a time are read; stored functions and procedures make the values of their parameters, variables and RETURNS fit the declared type, and a division by zero is an error where a value is written (INSERT, UPDATE, a function) and NULL where it is shown; a text that is not a number read as one ('abc' + 1) is an error there too; a SELECT that runs longer than MAX_EXECUTION_TIME (hint or session variable) is stopped with error 3024 (checked every 1024 rows on the statement's own thread); TRACE runs a statement and lists its steps (parse, locks, scan, sort, group, redo log) with rows and time",
-                         "계획 실행: 조인(NL, 해시, 소트-머지, 인덱스 NL), 서브쿼리, CTE, 윈도우 함수. 스캔·집계·GROUP BY·DISTINCT·ORDER BY는 테이블 행을 복사하지 않고 포인터로 처리하고, 조인은 한 테이블만 읽는 WHERE 조건을 조인 전에 적용하며 LEFT·RIGHT·FULL JOIN과 여러 조건 ON을 등호로 해시 처리하고, 읽기 문장이 인덱스 없는 열을 반복 조회하면 그 문장 동안만 임시 해시 인덱스를 만들고, 상관 없는 서브쿼리(스칼라·EXISTS·IN)는 문장당 한 번만 실행하고, 여러 행 INSERT는 UNIQUE 값·복합 키를 이미 가진 행을 문장당 한 번 만든 해시로 찾고 인덱스 갱신을 문장당 한 번만 하고, 외래키가 있는 표의 INSERT는 부모를 읽기만 하므로 일반 INSERT처럼 redo 로그로 내구성을 확보하고, INSERT(한 행이든 여러 행이든)와 키를 바꾸는 UPDATE는 표마다 둔 “살아 있는 UNIQUE 키” 캐시(UPDATE·DELETE·COMMIT을 따라감)가 그 키가 없음을 증명하면 중복 스캔을 건너뛰고, 외래키 동작은 자식 행을 새 버전으로 쓰고 로그에 남겨 ROLLBACK이 부모와 함께 되돌리며 INSERT·UPDATE·DELETE(연쇄 포함)는 redo 로그로 내구성을 확보함. UPDATE는 PRIMARY KEY·UNIQUE를 검사하고(색인 없는 UNIQUE 열의 새 값들은 표를 한 번만 훑어 찾음) 전부 적용되거나 전혀 적용되지 않으며, 여러 동작의 ALTER TABLE도 전부 되거나 전혀 안 되고, information_schema를 일반 표처럼 읽고, 세션마다 LAST_INSERT_ID·ROW_COUNT·FOUND_ROWS와 SET autocommit = 0을 지원하고, DECIMAL 결과를 MySQL의 자릿수로(10.50 * 2 = 21.00, SUM·AVG·ROUND) 쓰며 FLOAT·DOUBLE 합은 실수로 더하고, 결과 표를 값 양 끝의 공백이 다시 읽어도 남도록 쓰며(\\s, \\t) CTE의 열을 보여 주는 열·숫자의 타입으로 만들고, DATETIME(3)·TIME(2) 열이 소수초를 반올림해 간직하며 날짜·시간의 여러 꼴을 읽음, 저장 함수·프로시저가 매개변수·변수·RETURNS의 값을 선언한 타입에 맞추며 0으로 나누기는 값을 쓰는 곳(INSERT·UPDATE·함수)에서는 오류, 보여 줄 때는 NULL, 숫자가 아닌 글자를 수로 읽는 것('abc' + 1)도 마찬가지, MAX_EXECUTION_TIME(힌트·세션 변수)을 넘는 SELECT는 오류 3024로 멈추고(문장을 실행하는 스레드가 1024행마다 확인), TRACE는 문장을 실행하고 지나온 단계(파싱·락·스캔·정렬·그룹·redo 로그)를 행 수·시간과 함께 보여 줌"))}</span>
+              <Bullets items={EXECUTOR} />
             </div>
           </div>
           <Chips items={SIDE_MODULES} />

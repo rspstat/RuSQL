@@ -1172,7 +1172,9 @@ std::vector<std::string> Executor::derived_column_names(SharedDatabase& s, const
         else if (auto* fn = std::get_if<SelectColumn::Func>(&c.data)) names.push_back(fn->alias.value_or(fn->name + "()"));
         else if (auto* cw = std::get_if<SelectColumn::CaseWhen>(&c.data)) names.push_back(cw->alias.value_or("CASE"));
         else if (auto* ex = std::get_if<SelectColumn::Expr>(&c.data)) names.push_back(ex->alias.value_or(arith_to_str(ex->expr)));
-        else if (auto* wf = std::get_if<SelectColumn::WinFunc>(&c.data)) names.push_back(wf->alias.value_or(window_func_default_label(wf->func)));
+        else if (auto* wf = std::get_if<SelectColumn::WinFunc>(&c.data)) {
+            if (!(wf->alias && hidden_window_name(*wf->alias))) names.push_back(wf->alias.value_or(window_func_default_label(wf->func))); // (a hidden window is no column)
+        }
         else if (auto* sq = std::get_if<SelectColumn::Subquery>(&c.data)) names.push_back(sq->alias.value_or("(subquery)"));
         else if (auto* all = std::get_if<SelectColumn::All>(&c.data)) {
             if (all->table.empty()) {
@@ -1411,6 +1413,7 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
         };
         std::vector<ColDef> col_defs;
         for (auto& col : columns) {
+            if (auto* hidden = std::get_if<SelectColumn::WinFunc>(&col.data); hidden && hidden->alias && hidden_window_name(*hidden->alias)) continue;
             std::string header;
             if (auto* v = std::get_if<SelectColumn::ColumnAlias>(&col.data)) header = v->alias;
             else if (auto* v = std::get_if<SelectColumn::Func>(&col.data)) header = v->alias.value_or(v->name);
@@ -1623,9 +1626,55 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
     };
     auto aggregate_approx = [&](const std::string& ref) { return aggregate_approx_refs.count(ref) > 0; };
     bool has_agg = columns_have_aggregate(columns);
-    bool has_win = std::any_of(columns.begin(), columns.end(), [](const SelectColumn& c) {
+    // The window functions inside expressions (`SUM(v) / SUM(SUM(v)) OVER ()`, `ORDER BY RANK() OVER (...)`) are columns of the query that no result shows: they are
+    // taken out of the select list and computed with the others; the expression or the sort reads the value as it reads a column.
+    std::vector<SelectColumn> hidden_windows;
+    for (auto it = columns.begin(); it != columns.end();) {
+        auto* hidden = std::get_if<SelectColumn::WinFunc>(&it->data);
+        if (hidden && hidden->alias && hidden_window_name(*hidden->alias)) {
+            hidden_windows.push_back(std::move(*it));
+            it = columns.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    bool has_win = !hidden_windows.empty() || std::any_of(columns.begin(), columns.end(), [](const SelectColumn& c) {
         return std::holds_alternative<SelectColumn::WinFunc>(c.data);
     });
+    std::vector<SelectColumn> window_columns; // every window function of the query, the ones the select list shows and the hidden ones
+    if (has_win) {
+        window_columns = columns;
+        for (auto& hidden : hidden_windows) window_columns.push_back(hidden);
+    }
+    // The window functions of a query that groups or aggregates are evaluated on the groups, after HAVING: their arguments and PARTITION BY / ORDER BY
+    // items may be aggregates (`RANK() OVER (ORDER BY SUM(v) DESC)`, `SUM(SUM(v)) OVER ()`) or columns the groups keep. `window_texts`: those items
+    // that are not plain columns (an expression, an aggregate), each is computed on every group (or on every row when the query does not group).
+    std::vector<std::string> window_texts;
+    if (has_win) {
+        auto add = [&](const std::string& text) {
+            if (is_expression_argument(text) && std::find(window_texts.begin(), window_texts.end(), text) == window_texts.end()) window_texts.push_back(text);
+        };
+        for (auto& c : window_columns) {
+            auto* wf = std::get_if<SelectColumn::WinFunc>(&c.data);
+            if (!wf) continue;
+            if (wf->col) add(*wf->col);
+            for (auto& p : wf->partition_by) add(p);
+            for (auto& o : wf->order_by) add(o.column);
+        }
+        for (auto& text : window_texts) { // (`SELECT RANK() OVER (ORDER BY COUNT(*)) FROM t` is an aggregate query too)
+            std::vector<std::string> refs;
+            collect_agg_refs_arith(parse_bound_expression(s, text, table, joins), refs);
+            has_agg = has_agg || !refs.empty();
+            for (auto& ref : refs) { // `SUM(SUM(SUM(v))) OVER ()`: an aggregate may take the value of one level of aggregates, not two
+                const std::string argument = aggregate_reference_argument(ref);
+                if (!is_expression_argument(argument)) continue;
+                std::vector<std::string> nested;
+                collect_agg_refs_arith(parse_bound_expression(s, argument, table, joins), nested);
+                if (!nested.empty()) return StringResult::Err("Invalid use of group function");
+            }
+        }
+    }
+    const bool windows_over_groups = has_win && (group_by.has_value() || has_agg);
 
     // ORDER BY / GROUP BY items. The binder has replaced a position or a select-list name by the column or the expression it stands for; an item that
     // is not a plain column is an expression, and its text is the name its value is kept under. For a GROUP BY expression every row gets the value
@@ -1670,6 +1719,17 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
             for (auto& c : columns) {
                 if (auto* ex = std::get_if<SelectColumn::Expr>(&c.data)) replace_expression(ex->expr, g);
             }
+        }
+    }
+    std::vector<SortExpression> window_sorts; // the window items that are expressions or aggregates, computed on every group
+    if (windows_over_groups) {
+        for (auto& text : window_texts) {
+            ArithExpr e = parse_bound_expression(s, text, table, joins);
+            std::vector<std::string> refs;
+            collect_agg_refs_arith(e, refs);
+            for (auto& g : group_expressions) replace_expression(e, g);
+            collect_aggregate_classes(e, aggregate_classes, aggregate_approx_refs);
+            window_sorts.push_back(SortExpression{text, std::move(e), std::move(refs)});
         }
     }
     Planner planner(s.tables, s.indexes, s.index_meta, s.composite_indexes, s.hash_indexes, s.hash_index_meta, s.catalog, s.table_stats);
@@ -2439,9 +2499,14 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
                 want(agg->source.empty() ? agg->col : agg->source); // (a conditional aggregate has the placeholder `__case__`, which is not an expression)
             } else if (auto* aa = std::get_if<SelectColumn::AggAlias>(&c.data)) {
                 want(aa->source.empty() ? aa->col : aa->source);
-            } else if (auto* wf = std::get_if<SelectColumn::WinFunc>(&c.data)) {
-                if (wf->col) want(*wf->col);
             }
+        }
+        for (auto& c : window_columns) {
+            auto* wf = std::get_if<SelectColumn::WinFunc>(&c.data);
+            if (!wf || windows_over_groups) continue; // (a grouped query has no such value on its rows: its window items are computed on the groups)
+            if (wf->col) want(*wf->col);
+            for (auto& p : wf->partition_by) want(p);
+            for (auto& o : wf->order_by) want(o.column);
         }
         for (auto& ref : expr_agg_refs) want(aggregate_reference_argument(ref));
         if (having) {
@@ -2453,8 +2518,8 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
             for (auto& ref : sort.aggregates) want(aggregate_reference_argument(ref));
         }
     }
+    std::vector<ArithExpr> arguments;
     if (!expression_arguments.empty()) {
-        std::vector<ArithExpr> arguments;
         for (auto& text : expression_arguments) {
             ArithExpr e = parse_bound_expression(s, text, table, joins);
             if (auto* col = std::get_if<ArithExpr::Col>(&e.data); col && col->name == text) {
@@ -2468,10 +2533,18 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
             rows_p.clear();
         }
         for (Row& r : result) {
-            for (std::size_t i = 0; i < arguments.size(); i++) r[expression_arguments[i]] = eval_arith(r, arguments[i]);
+            for (std::size_t i = 0; i < arguments.size(); i++) {
+                if (expression_arguments[i].find("__win") == std::string::npos) r[expression_arguments[i]] = eval_arith(r, arguments[i]);
+            }
         }
     }
-    if (has_win) result = compute_window_functions(std::move(result), columns);
+    if (has_win && !windows_over_groups) {
+        result = compute_window_functions(std::move(result), window_columns);
+        for (std::size_t i = 0; i < arguments.size(); i++) { // (what reads the value of a window function is computed once the windows are)
+            if (expression_arguments[i].find("__win") == std::string::npos) continue;
+            for (Row& r : result) r[expression_arguments[i]] = eval_arith(r, arguments[i]);
+        }
+    }
     const bool rows_in_table = joins.empty() && !has_win && expression_arguments.empty(); // else rows_p points into `result`
     if (!rows_in_table) {
         rows_p.reserve(result.size());
@@ -2492,6 +2565,86 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
         rows_p = std::move(sorted);
         explain_trace::mark("Sort", rows_p.size());
     }
+
+    // DISTINCT: the first row of each set of rows that show the same values (numbers by value, text by its characters)
+    auto dedupe = [&](std::vector<const Row*>& input) {
+        std::unordered_set<std::string> seen;
+        std::vector<const Row*> kept;
+        std::string encoded;
+        // numbers are distinct by value (`0` and `0.00` are one), text by its characters
+        std::vector<ValueClass> distinct_classes;
+        for (auto& c : columns) {
+            ValueClass k = ValueClass::Unknown;
+            if (auto* col = std::get_if<SelectColumn::Column>(&c.data)) k = col->cls;
+            else if (auto* ca = std::get_if<SelectColumn::ColumnAlias>(&c.data)) k = ca->cls;
+            else if (auto* ex = std::get_if<SelectColumn::Expr>(&c.data)) k = class_of_expr(ex->expr);
+            distinct_classes.push_back(k);
+        }
+        for (const Row* rp : input) {
+            const Row& row = *rp;
+            encoded.clear();
+            for (std::size_t column_index = 0; column_index < columns.size(); column_index++) {
+                auto& c = columns[column_index];
+                std::string val;
+                if (std::holds_alternative<SelectColumn::All>(c.data)) {
+                    std::string joined;
+                    bool first = true;
+                    for (auto& [k, v] : row) {
+                        (void)k;
+                        if (!first) joined += ",";
+                        joined += v;
+                        first = false;
+                    }
+                    val = joined;
+                } else if (auto* col = std::get_if<SelectColumn::Column>(&c.data)) {
+                    // the same name resolution as the select list: `SELECT DISTINCT t.col` named a key the row does not have
+                    // (it holds the bare name), so every row's key was empty and a single row survived
+                    const std::string* v = get_col(row, col->name);
+                    val = v ? *v : std::string();
+                } else if (auto* ca = std::get_if<SelectColumn::ColumnAlias>(&c.data)) {
+                    const std::string* v = get_col(row, ca->name);
+                    val = v ? *v : std::string();
+                } else if (auto* agg = std::get_if<SelectColumn::Agg>(&c.data)) {
+                    auto it = row.find(agg_label(agg->func, agg->col)); // (a group row keeps an aggregate under its label)
+                    if (it == row.end()) it = row.find(agg->col);
+                    val = it != row.end() ? it->second : std::string();
+                } else if (auto* agg_a = std::get_if<SelectColumn::AggAlias>(&c.data)) {
+                    auto it = row.find(agg_a->alias);
+                    if (it == row.end()) it = row.find(agg_a->col);
+                    val = it != row.end() ? it->second : std::string();
+                } else if (auto* f = std::get_if<SelectColumn::Func>(&c.data)) {
+                    val = apply_scalar_func(f->name, f->args, row);
+                } else if (auto* cw = std::get_if<SelectColumn::CaseWhen>(&c.data)) {
+                    auto resolve = [&](const std::string& sv) -> std::string {
+                        const std::string* v = get_col(row, sv);
+                        return v ? *v : sv;
+                    };
+                    val = cw->else_val ? resolve(*cw->else_val) : std::string();
+                    for (auto& b : cw->branches) {
+                        if (eval_condexpr(row, b.condition)) {
+                            val = resolve(b.result);
+                            break;
+                        }
+                    }
+                } else if (auto* ex = std::get_if<SelectColumn::Expr>(&c.data)) {
+                    val = eval_arith(row, ex->expr);
+                } else if (auto* wf = std::get_if<SelectColumn::WinFunc>(&c.data)) {
+                    std::string key_name = wf->alias.value_or(window_func_default_label(wf->func));
+                    auto it = row.find(key_name);
+                    val = it != row.end() ? it->second : std::string();
+                } else {
+                    // SelectColumn::Subquery: matches Rust's exact `String::new()` here —
+                    // this DISTINCT/GROUP-BY dedup key computation deliberately doesn't
+                    // evaluate the subquery (format_result's separate pre-pass does that
+                    // for display purposes only).
+                    val.clear();
+                }
+                append_key_part(encoded, distinct_classes[column_index] == ValueClass::Number ? normalize_numeric_key(val) : collation::key(val));
+            }
+            if (seen.insert(encoded).second) kept.push_back(rp);
+        }
+        input = std::move(kept);
+    };
 
     if (group_by) {
         // Groups in order of first appearance, found through a hash table of the encoded key values (a group never owns
@@ -2539,6 +2692,19 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
             else if (auto* e = std::get_if<SelectColumn::Expr>(&col.data)) arith_columns(e->expr, names);
             else if (std::holds_alternative<SelectColumn::All>(col.data)) needs_group_row = true;
             for (auto& n : names) {
+                if (hidden_window_name(n)) continue;
+                if (std::find(grouped_names.begin(), grouped_names.end(), bare_name(n)) == grouped_names.end()) needs_group_row = true;
+            }
+        }
+
+        for (auto& col : window_columns) { // (a window item that is a plain column the groups do not key by)
+            auto* wf = std::get_if<SelectColumn::WinFunc>(&col.data);
+            if (!wf) continue;
+            std::vector<std::string> names;
+            if (wf->col && plain_reference(*wf->col)) names.push_back(*wf->col);
+            for (auto& p : wf->partition_by) { if (plain_reference(p)) names.push_back(p); }
+            for (auto& o : wf->order_by) { if (plain_reference(o.column)) names.push_back(o.column); }
+            for (auto& n : names) {
                 if (std::find(grouped_names.begin(), grouped_names.end(), bare_name(n)) == grouped_names.end()) needs_group_row = true;
             }
         }
@@ -2567,7 +2733,13 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
                 for (auto& ref : sort.aggregates) {
                     if (!out.count(ref)) out[ref] = compute_agg_from_key(ref, grp, aggregate_class(ref), aggregate_approx(ref));
                 }
-                if (!out.count(sort.text)) out[sort.text] = eval_arith(out, sort.expr);
+                if (!out.count(sort.text) && sort.text.find("__win") == std::string::npos) out[sort.text] = eval_arith(out, sort.expr);
+            }
+            for (auto& w : window_sorts) {
+                for (auto& ref : w.aggregates) {
+                    if (!out.count(ref)) out[ref] = compute_agg_from_key(ref, grp, aggregate_class(ref), aggregate_approx(ref));
+                }
+                if (!out.count(w.text)) out[w.text] = eval_arith(out, w.expr);
             }
             group_rows[gi] = std::move(out);
         };
@@ -2586,6 +2758,26 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
             }
             group_rows = std::move(filtered);
             explain_trace::mark("Having", group_rows.size());
+        }
+        if (has_win) { // (the window functions see the groups, as they stand after HAVING; ORDER BY and LIMIT come after them)
+            group_rows = compute_window_functions(std::move(group_rows), window_columns);
+            for (auto& sort : group_sorts) { // (an ORDER BY expression that reads the value of a window function)
+                if (sort.text.find("__win") == std::string::npos) continue;
+                for (auto& row : group_rows) {
+                    if (!row.count(sort.text)) row[sort.text] = eval_arith(row, sort.expr);
+                }
+            }
+            explain_trace::mark("Window", group_rows.size());
+        }
+        if (distinct) { // (DISTINCT drops the groups that show the same row)
+            std::vector<const Row*> pointers;
+            for (auto& row : group_rows) pointers.push_back(&row);
+            dedupe(pointers);
+            std::vector<Row> kept;
+            kept.reserve(pointers.size());
+            for (const Row* kept_row : pointers) kept.push_back(std::move(group_rows[static_cast<std::size_t>(kept_row - group_rows.data())]));
+            group_rows = std::move(kept);
+            explain_trace::mark("Distinct", group_rows.size());
         }
         if (!order_by.empty()) {
             auto less = [&](const Row& a, const Row& b) { return row_order_less(a, b, order_by, &Executor::get_col); };
@@ -2618,82 +2810,7 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
     }
     if (limit && rows_p.size() > *limit) rows_p.resize(*limit);
 
-    if (distinct) {
-        std::unordered_set<std::string> seen;
-        std::vector<const Row*> kept;
-        std::string encoded;
-        // numbers are distinct by value (`0` and `0.00` are one), text by its characters
-        std::vector<ValueClass> distinct_classes;
-        for (auto& c : columns) {
-            ValueClass k = ValueClass::Unknown;
-            if (auto* col = std::get_if<SelectColumn::Column>(&c.data)) k = col->cls;
-            else if (auto* ca = std::get_if<SelectColumn::ColumnAlias>(&c.data)) k = ca->cls;
-            else if (auto* ex = std::get_if<SelectColumn::Expr>(&c.data)) k = class_of_expr(ex->expr);
-            distinct_classes.push_back(k);
-        }
-        for (const Row* rp : rows_p) {
-            const Row& row = *rp;
-            encoded.clear();
-            for (std::size_t column_index = 0; column_index < columns.size(); column_index++) {
-                auto& c = columns[column_index];
-                std::string val;
-                if (std::holds_alternative<SelectColumn::All>(c.data)) {
-                    std::string joined;
-                    bool first = true;
-                    for (auto& [k, v] : row) {
-                        (void)k;
-                        if (!first) joined += ",";
-                        joined += v;
-                        first = false;
-                    }
-                    val = joined;
-                } else if (auto* col = std::get_if<SelectColumn::Column>(&c.data)) {
-                    // the same name resolution as the select list: `SELECT DISTINCT t.col` named a key the row does not have
-                    // (it holds the bare name), so every row's key was empty and a single row survived
-                    const std::string* v = get_col(row, col->name);
-                    val = v ? *v : std::string();
-                } else if (auto* ca = std::get_if<SelectColumn::ColumnAlias>(&c.data)) {
-                    const std::string* v = get_col(row, ca->name);
-                    val = v ? *v : std::string();
-                } else if (auto* agg = std::get_if<SelectColumn::Agg>(&c.data)) {
-                    auto it = row.find(agg->col);
-                    val = it != row.end() ? it->second : std::string();
-                } else if (auto* agg_a = std::get_if<SelectColumn::AggAlias>(&c.data)) {
-                    auto it = row.find(agg_a->col);
-                    val = it != row.end() ? it->second : std::string();
-                } else if (auto* f = std::get_if<SelectColumn::Func>(&c.data)) {
-                    val = apply_scalar_func(f->name, f->args, row);
-                } else if (auto* cw = std::get_if<SelectColumn::CaseWhen>(&c.data)) {
-                    auto resolve = [&](const std::string& sv) -> std::string {
-                        const std::string* v = get_col(row, sv);
-                        return v ? *v : sv;
-                    };
-                    val = cw->else_val ? resolve(*cw->else_val) : std::string();
-                    for (auto& b : cw->branches) {
-                        if (eval_condexpr(row, b.condition)) {
-                            val = resolve(b.result);
-                            break;
-                        }
-                    }
-                } else if (auto* ex = std::get_if<SelectColumn::Expr>(&c.data)) {
-                    val = eval_arith(row, ex->expr);
-                } else if (auto* wf = std::get_if<SelectColumn::WinFunc>(&c.data)) {
-                    std::string key_name = wf->alias.value_or(window_func_default_label(wf->func));
-                    auto it = row.find(key_name);
-                    val = it != row.end() ? it->second : std::string();
-                } else {
-                    // SelectColumn::Subquery: matches Rust's exact `String::new()` here —
-                    // this DISTINCT/GROUP-BY dedup key computation deliberately doesn't
-                    // evaluate the subquery (format_result's separate pre-pass does that
-                    // for display purposes only).
-                    val.clear();
-                }
-                append_key_part(encoded, distinct_classes[column_index] == ValueClass::Number ? normalize_numeric_key(val) : collation::key(val));
-            }
-            if (seen.insert(encoded).second) kept.push_back(rp);
-        }
-        rows_p = std::move(kept);
-    }
+    if (distinct) dedupe(rows_p);
 
     if (has_agg) {
         // Predicate lock (SSI phantom detection): an aggregate's result depends on every
@@ -2748,7 +2865,7 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
             return e && arith_has_any_value(e->expr);
         };
         const bool any_value_items = std::any_of(columns.begin(), columns.end(), is_any_value_item);
-        if (!expr_agg_refs.empty() || constant_items || any_value_items) {
+        if (!expr_agg_refs.empty() || constant_items || any_value_items || has_win) {
             // `SUM(v) + 1`, `ROUND(AVG(v), 2)`, `CASE WHEN COUNT(*) > 1 ...`: the aggregates inside are computed as HAVING computes
             // them and the columns are evaluated on this one row of aggregates. The plain aggregates keep their place; a column
             // with no aggregate in it is not part of an aggregate result (as before). Formatted like any result, minus the row
@@ -2759,11 +2876,27 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
             if (any_value_items && !rows_p.empty()) {
                 for (auto& [k, v] : *rows_p.front()) agg_row.try_emplace(k, v);
             }
+            std::vector<Row> one_row{agg_row};
+            if (has_win) { // `SELECT SUM(v), SUM(SUM(v)) OVER () FROM t`: the windows see the one row of aggregates
+                for (auto& w : window_sorts) {
+                    for (auto& ref : w.aggregates) {
+                        if (!one_row[0].count(ref)) one_row[0][ref] = compute_agg_from_key(ref, rows_p, aggregate_class(ref), aggregate_approx(ref));
+                    }
+                    if (!one_row[0].count(w.text)) one_row[0][w.text] = eval_arith(one_row[0], w.expr);
+                }
+                one_row = compute_window_functions(std::move(one_row), window_columns);
+            }
             std::vector<SelectColumn> shown;
             for (auto& col : columns) {
-                if (column_has_aggregate(col) || is_constant_item(col) || is_any_value_item(col)) shown.push_back(col);
+                bool reads_window = false;
+                if (auto* e = std::get_if<SelectColumn::Expr>(&col.data)) {
+                    std::vector<std::string> names;
+                    arith_columns(e->expr, names);
+                    reads_window = std::any_of(names.begin(), names.end(), [](const std::string& n) { return hidden_window_name(n); });
+                }
+                if (column_has_aggregate(col) || is_constant_item(col) || is_any_value_item(col) || reads_window || std::holds_alternative<SelectColumn::WinFunc>(col.data)) shown.push_back(col);
             }
-            auto text = format_result(s, std::vector<Row>{agg_row}, shown, table, joins);
+            auto text = format_result(s, std::move(one_row), shown, table, joins);
             if (text.is_err()) return text;
             std::string out = text.value();
             static const std::string footer = "\n1 row(s) returned.";

@@ -611,3 +611,44 @@ TEST_CASE("a foreign key keeps its name: DROP FOREIGN KEY by name, a drop and an
     ok(ex, "ALTER TABLE f DROP FOREIGN KEY f_ibfk_1");
     REQUIRE(q(ex, "SELECT COUNT(*) FROM information_schema.referential_constraints") == Rows{{"0"}});
 }
+
+TEST_CASE("window functions run on the groups: over aggregates, inside expressions, with DISTINCT and ORDER BY, and rows that tie are peers", "[r47][window_agg]") {
+    TempDataDir dir("r47_window_agg");
+    Executor ex(dir.path);
+    ok(ex, "CREATE DATABASE d");
+    ok(ex, "USE d");
+    ok(ex, "CREATE TABLE s (id INT PRIMARY KEY, g INT, v INT)");
+    ok(ex, "INSERT INTO s VALUES (1, 1, 10), (2, 1, 20), (3, 2, 30), (4, 2, NULL), (5, 3, 5)");
+    // the window sees the groups: an aggregate as its argument or as what it orders by
+    REQUIRE(q(ex, "SELECT g, SUM(v), SUM(SUM(v)) OVER (ORDER BY g) FROM s GROUP BY g ORDER BY g") == Rows{{"1", "30", "30"}, {"2", "30", "60"}, {"3", "5", "65"}});
+    REQUIRE(q(ex, "SELECT g, RANK() OVER (ORDER BY SUM(v) DESC) FROM s GROUP BY g ORDER BY g") == Rows{{"1", "1"}, {"2", "1"}, {"3", "3"}});
+    REQUIRE(q(ex, "SELECT g, LAG(SUM(v)) OVER (ORDER BY g) FROM s GROUP BY g ORDER BY g") == Rows{{"1", "NULL"}, {"2", "30"}, {"3", "30"}});
+    REQUIRE(q(ex, "SELECT g, SUM(v) OVER (ORDER BY g) FROM s GROUP BY g, id ORDER BY g, id") == Rows{{"1", "30"}, {"1", "30"}, {"2", "60"}, {"2", "60"}, {"3", "65"}}); // (the blank this used to give)
+    REQUIRE(q(ex, "SELECT SUM(v), SUM(SUM(v)) OVER () FROM s") == Rows{{"65", "65"}});
+    REQUIRE(q(ex, "SELECT COUNT(*), SUM(SUM(v) + 1) OVER () FROM s") == Rows{{"5", "66"}}); // (an expression of aggregates that only the window reads)
+    REQUIRE(q(ex, "SELECT g, SUM(v) FROM s GROUP BY g HAVING SUM(v) > 10 ORDER BY g") == Rows{{"1", "30"}, {"2", "30"}}); // (HAVING comes before the window)
+    REQUIRE(q(ex, "SELECT g, RANK() OVER (ORDER BY SUM(v) DESC) FROM s GROUP BY g HAVING SUM(v) < 30 ORDER BY g") == Rows{{"3", "1"}});
+    // a window function inside an expression, in DISTINCT and in ORDER BY
+    REQUIRE(q(ex, "SELECT g, ROUND(SUM(v) / SUM(SUM(v)) OVER (), 2) FROM s GROUP BY g ORDER BY g") == Rows{{"1", "0.46"}, {"2", "0.46"}, {"3", "0.08"}});
+    REQUIRE(q(ex, "SELECT DISTINCT SUM(SUM(v)) OVER () FROM s GROUP BY g") == Rows{{"65"}});
+    REQUIRE(q(ex, "SELECT DISTINCT SUM(v) AS total FROM s GROUP BY g ORDER BY total") == Rows{{"5"}, {"30"}}); // (a grouped query takes DISTINCT too)
+    REQUIRE(q(ex, "SELECT g FROM s GROUP BY g ORDER BY RANK() OVER (ORDER BY SUM(v) DESC), g DESC") == Rows{{"2"}, {"1"}, {"3"}});
+    REQUIRE(q(ex, "SELECT id, v - LAG(v) OVER (ORDER BY id) FROM s ORDER BY id") == Rows{{"1", "NULL"}, {"2", "10"}, {"3", "10"}, {"4", "NULL"}, {"5", "NULL"}});
+    REQUIRE(q(ex, "SELECT id, ROW_NUMBER() OVER (ORDER BY id % 2, id) FROM s ORDER BY id") == Rows{{"1", "3"}, {"2", "1"}, {"3", "4"}, {"4", "2"}, {"5", "5"}}); // (an expression as a window item)
+    // the hidden column of the window shows in no result, and the item is called by its text
+    auto shown = ex.execute_sql("SELECT g, SUM(v) / SUM(SUM(v)) OVER () FROM s GROUP BY g");
+    REQUIRE(shown.is_ok());
+    REQUIRE(shown.value().find("__win") == std::string::npos);
+    REQUIRE(shown.value().find("SUM(v) / SUM(SUM(v)) OVER ()") != std::string::npos);
+    ok(ex, "CREATE VIEW sv AS SELECT g, SUM(v) / SUM(SUM(v)) OVER () AS share FROM s GROUP BY g");
+    REQUIRE(q(ex, "SELECT * FROM sv ORDER BY g")[0].size() == 2);
+    REQUIRE(q(ex, "SELECT COUNT(*) FROM sv") == Rows{{"3"}});
+    // errors as MySQL gives them
+    REQUIRE(fails(ex, "SELECT g, SUM(v) OVER (ORDER BY g) FROM s GROUP BY g").find("only_full_group_by") != std::string::npos);
+    REQUIRE(fails(ex, "SELECT g, SUM(SUM(SUM(v))) OVER () FROM s GROUP BY g").find("Invalid use of group function") != std::string::npos);
+    REQUIRE(fails(ex, "SELECT id FROM s WHERE RANK() OVER (ORDER BY id) = 1").size() > 0);
+    // rows that tie in the ORDER BY are peers: the default frame and RANGE frames take them along, ROWS frames do not
+    REQUIRE(q(ex, "SELECT id, SUM(v) OVER (ORDER BY g) FROM s ORDER BY id") == Rows{{"1", "30"}, {"2", "30"}, {"3", "60"}, {"4", "60"}, {"5", "65"}});
+    REQUIRE(q(ex, "SELECT id, SUM(v) OVER (ORDER BY g ROWS UNBOUNDED PRECEDING) FROM s ORDER BY id") == Rows{{"1", "10"}, {"2", "30"}, {"3", "60"}, {"4", "60"}, {"5", "65"}});
+    REQUIRE(q(ex, "SELECT id, COUNT(*) OVER (ORDER BY g RANGE BETWEEN CURRENT ROW AND CURRENT ROW) FROM s ORDER BY id") == Rows{{"1", "2"}, {"2", "2"}, {"3", "2"}, {"4", "2"}, {"5", "1"}});
+}

@@ -861,8 +861,17 @@ ArithExpr Parser::parse_arith_factor() {
         }
         if (!peek_is(TokenKind::RParen)) throw ParseError("Expected ')' after aggregate");
         advance();
+        if (allow_window_expr_ && peek_is(TokenKind::Over)) { // an aggregate used as a window function inside an expression
+            SelectColumn::WinFunc wf;
+            wf.func = t->kind == TokenKind::Count ? WindowFunc::Count : t->kind == TokenKind::Sum ? WindowFunc::Sum : t->kind == TokenKind::Avg ? WindowFunc::Avg :
+                      t->kind == TokenKind::Min ? WindowFunc::Min : WindowFunc::Max;
+            wf.col = inner.rfind("DISTINCT ", 0) == 0 ? inner.substr(9) : inner;
+            parse_over_clause(wf);
+            return hide_window(std::move(wf));
+        }
         return ArithExpr(ArithExpr::Col{std::string(label) + "(" + inner + ")"});
     }
+    if (allow_window_expr_ && peek_at_is(1, TokenKind::LParen) && is_window_function_token(p->kind)) return hide_window(parse_ranking_window());
 
     if (p->kind == TokenKind::NumberLit) {
         const Token* t = advance();

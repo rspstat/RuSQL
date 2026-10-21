@@ -97,6 +97,30 @@ std::vector<Row> Executor::compute_window_functions(std::vector<Row> rows, const
             bool has_order = !wf->order_by.empty();
             std::size_t total = sorted.size();
 
+            // The rows that tie in the ORDER BY are peers (with no ORDER BY every row is a peer of every other). A RANGE frame -- and the default frame, which is
+            // RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW -- takes the peers of the current row with it: `SUM(v) OVER (ORDER BY g)` is the same for the rows of one g.
+            std::vector<std::size_t> peer_first(total), peer_last(total);
+            for (std::size_t i = 0; i < total;) {
+                std::size_t j = i;
+                if (has_order) {
+                    while (j + 1 < total && win_order_eq(rows[sorted[i]], rows[sorted[j + 1]], wf->order_by)) j++;
+                } else {
+                    j = total - 1;
+                }
+                for (std::size_t k = i; k <= j; k++) { peer_first[k] = i; peer_last[k] = j; }
+                i = j + 1;
+            }
+            auto frame_of = [&](std::size_t pos) {
+                auto [start, end] = frame_bounds(pos, total, wf->frame, has_order);
+                if (!wf->frame) {
+                    if (has_order) end = peer_last[pos];
+                } else if (wf->frame->unit == FrameUnit::Range) {
+                    if (std::holds_alternative<FrameBound::CurrentRow>(wf->frame->start.data)) start = peer_first[pos];
+                    if (std::holds_alternative<FrameBound::CurrentRow>(wf->frame->end.data)) end = peer_last[pos];
+                }
+                return std::make_pair(start, end);
+            };
+
             switch (wf->func) {
                 case WindowFunc::RowNumber:
                     for (std::size_t pos = 0; pos < sorted.size(); pos++) values[sorted[pos]] = std::to_string(pos + 1);
@@ -152,7 +176,7 @@ std::vector<Row> Executor::compute_window_functions(std::vector<Row> rows, const
                 case WindowFunc::FirstValue: {
                     std::string col_name = wf->col.value_or("");
                     for (std::size_t pos = 0; pos < sorted.size(); pos++) {
-                        auto [start, end] = frame_bounds(pos, total, wf->frame, has_order);
+                        auto [start, end] = frame_of(pos);
                         (void)end;
                         const std::string* v = get_col(rows[sorted[start]], col_name);
                         values[sorted[pos]] = v ? *v : "NULL";
@@ -162,7 +186,7 @@ std::vector<Row> Executor::compute_window_functions(std::vector<Row> rows, const
                 case WindowFunc::LastValue: {
                     std::string col_name = wf->col.value_or("");
                     for (std::size_t pos = 0; pos < sorted.size(); pos++) {
-                        auto [start, end] = frame_bounds(pos, total, wf->frame, has_order);
+                        auto [start, end] = frame_of(pos);
                         (void)start;
                         const std::string* v = get_col(rows[sorted[end]], col_name);
                         values[sorted[pos]] = v ? *v : "NULL";
@@ -173,7 +197,7 @@ std::vector<Row> Executor::compute_window_functions(std::vector<Row> rows, const
                     std::string col_name = wf->col.value_or("");
                     std::size_t nth = static_cast<std::size_t>(std::max<long long>(wf->offset, 1)) - 1;
                     for (std::size_t pos = 0; pos < sorted.size(); pos++) {
-                        auto [start, end] = frame_bounds(pos, total, wf->frame, has_order);
+                        auto [start, end] = frame_of(pos);
                         std::string val = "NULL";
                         if (start + nth <= end && start + nth < sorted.size()) {
                             const std::string* v = get_col(rows[sorted[start + nth]], col_name);
@@ -186,7 +210,7 @@ std::vector<Row> Executor::compute_window_functions(std::vector<Row> rows, const
                 case WindowFunc::Sum: {
                     std::string col_name = wf->col.value_or("");
                     for (std::size_t pos = 0; pos < sorted.size(); pos++) {
-                        auto [start, end] = frame_bounds(pos, total, wf->frame, has_order);
+                        auto [start, end] = frame_of(pos);
                         std::vector<const std::string*> frame_values; // the values in the frame that are not NULL
                         for (std::size_t i = start; i <= end; i++) {
                             const std::string* v = get_col(rows[sorted[i]], col_name);
@@ -199,7 +223,7 @@ std::vector<Row> Executor::compute_window_functions(std::vector<Row> rows, const
                 case WindowFunc::Avg: {
                     std::string col_name = wf->col.value_or("");
                     for (std::size_t pos = 0; pos < sorted.size(); pos++) {
-                        auto [start, end] = frame_bounds(pos, total, wf->frame, has_order);
+                        auto [start, end] = frame_of(pos);
                         std::vector<const std::string*> frame_values; // the values in the frame that are not NULL
                         for (std::size_t i = start; i <= end; i++) {
                             const std::string* v = get_col(rows[sorted[i]], col_name);
@@ -212,7 +236,7 @@ std::vector<Row> Executor::compute_window_functions(std::vector<Row> rows, const
                 case WindowFunc::Count: {
                     std::string col_name = wf->col.value_or("");
                     for (std::size_t pos = 0; pos < sorted.size(); pos++) {
-                        auto [start, end] = frame_bounds(pos, total, wf->frame, has_order);
+                        auto [start, end] = frame_of(pos);
                         std::size_t count;
                         if (col_name == "*") {
                             count = end - start + 1;
@@ -230,7 +254,7 @@ std::vector<Row> Executor::compute_window_functions(std::vector<Row> rows, const
                 case WindowFunc::Min: {
                     std::string col_name = wf->col.value_or("");
                     for (std::size_t pos = 0; pos < sorted.size(); pos++) {
-                        auto [start, end] = frame_bounds(pos, total, wf->frame, has_order);
+                        auto [start, end] = frame_of(pos);
                         std::optional<std::string> best;
                         for (std::size_t i = start; i <= end; i++) {
                             const std::string* v = get_col(rows[sorted[i]], col_name);
@@ -244,7 +268,7 @@ std::vector<Row> Executor::compute_window_functions(std::vector<Row> rows, const
                 case WindowFunc::Max: {
                     std::string col_name = wf->col.value_or("");
                     for (std::size_t pos = 0; pos < sorted.size(); pos++) {
-                        auto [start, end] = frame_bounds(pos, total, wf->frame, has_order);
+                        auto [start, end] = frame_of(pos);
                         std::optional<std::string> best;
                         for (std::size_t i = start; i <= end; i++) {
                             const std::string* v = get_col(rows[sorted[i]], col_name);
