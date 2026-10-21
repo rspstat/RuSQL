@@ -2033,6 +2033,23 @@ VS Code 스타일 탭 드래그 순서 변경(요청의 1번 항목)은 같은 �
 
 **한계**: 다시 시작한 뒤에는 소진된 번호를 저장하지 않는다(MySQL 8은 저장). 복합 키가 같은 문장 안에서 겹치는 `ON DUPLICATE KEY UPDATE`는 아직 오류. `INSERT … SELECT`가 가져오는 행의 순서가 MySQL과 다르면(조인 순서) 어느 행이 번호를 태우는지가 다를 수 있다.
 
+### 10월 21일 — 바뀐 행 수: UPDATE·ON DUPLICATE KEY UPDATE·REPLACE의 `ROW_COUNT()`와 OK 패킷 (R44 ③)
+
+**왜 이 항목인가**: R44 셋째 항목. `UPDATE`가 "찾은 행"을 세어 같은 값으로 다시 쓴 행도 셌고(MySQL은 바뀐 행만), `ON DUPLICATE KEY UPDATE`·`REPLACE`는 삽입한 행 수만 말했다. `ROW_COUNT()`와 MySQL 프로토콜의 OK 패킷(`cursor.rowcount`, JDBC `executeUpdate`)이 그 수를 그대로 쓴다.
+
+**고친 것**
+- **`UPDATE`**: 값이 실제로 바뀐 행만 센다(`UPDATE t SET n = 5`를 두 번 하면 3, 0). 클라이언트가 `CLIENT_FOUND_ROWS`(0x2: Connector/J·MySQLdb 기본)를 켜고 접속하면 찾은 행(3, 3)을 센다 — 접속 인사의 능력에 이 비트를 더해 알리고 `Executor::client_found_rows`로 받는다.
+- **`ON DUPLICATE KEY UPDATE`**: 삽입한 행 1, 바뀐 행 2, 같은 값으로 둔 행 0(`CLIENT_FOUND_ROWS`면 1); 같은 문장 안에서 앞 행과 겹쳐 그 행을 고친 경우도 같다. **`REPLACE`**: 대체한 행은 지우고 넣으니 2, 새 행은 1.
+- **트리거**: 문장이 일으킨 `AFTER` 트리거의 문장(`UPDATE lg SET k = k + 1`)이 바깥 문장의 수를 덮어쓰던 것을 고침 — `DELETE`·`UPDATE`의 `AFTER` 트리거 뒤에 바깥 문장의 수를 되돌려 놓는다(`INSERT`는 이미 그랬다).
+- 그 수를 만드는 곳이 하나(`Executor::statement_affected_rows`)라 `ROW_COUNT()`·`SELECT ROW_COUNT()`와 MySQL 프로토콜이 같은 값을 말한다.
+
+**검증**
+- `vs_mysql.py --proto`가 OK 패킷의 바뀐 행 수를 견주도록 했다(전에는 오류 여부만); `corpus/protocol.sql`·`corpus/constraints.sql`에 UPDATE·ODKU·REPLACE·IGNORE·트리거 경우를 더해 진짜 MySQL 8.4.9와 바뀐 행 수 차이 0. `CLIENT_FOUND_ROWS` 쪽은 ODKU 여섯 문장을 진짜 MySQL 두 모드(기본·`FOUND_ROWS`)에서 돌려 얻은 값을 `[r44][affected]` 시험에 넣었다.
+- 심은 버그 21종 모두 잡힘(바뀐 행 대신 찾은 행 세기, ODKU 1/2/0 값, `REPLACE`의 2, 트리거가 덮어쓰는 수 ...). 시험 몇 곳이 "찾은 행" 수를 기대하고 있어(`UPDATE … SET v = v`가 1) MySQL 규칙으로 고쳤다.
+- 전체 시험 **764 케이스 / 1,504,095 assertions**을 Release 기본과 `RUSQL_DML_INDEX_MIN_ROWS=0`으로 통과.
+
+**한계**: 이미 같은 값인 행을 `REPLACE`하면 MySQL은 1(제자리 갱신이 아무것도 바꾸지 않음; 키가 하나뿐인 표만, 외래키가 가리키지 않고 삭제 트리거가 없을 때), 여기는 2(지우고 넣음). 멀티 표 `UPDATE`(`UPDATE a JOIN b …`, `UPDATE a, b SET …`)의 두 모드 수는 진짜 MySQL과 같음을 확인했다.
+
 ## 요약: 1학기 대비 2학기에 달라진 것
 
 

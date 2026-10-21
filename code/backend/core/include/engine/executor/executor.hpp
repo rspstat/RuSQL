@@ -254,7 +254,15 @@ public:
     bool insert_from_select_ = false;        // the INSERT that exec_insert_select hands to exec_insert numbers its rows in growing batches (read and cleared there)
     std::int64_t row_count_ = -1;            // the rows the last statement changed (-1: it was a SELECT)
     std::uint64_t found_rows_ = 0;           // the rows the last SELECT returned (or would have without its LIMIT, after SQL_CALC_FOUND_ROWS)
+    std::int64_t affected_rows_ = -1;        // the rows the last statement affected when its message does not say it (ON DUPLICATE KEY UPDATE, REPLACE); -1: the message's number
+    std::int64_t matched_rows_ = -1;         // the rows the last UPDATE found (its message counts the rows it changed); -1: not an UPDATE
+    std::size_t replace_deleted_rows_ = 0;   // the rows the REPLACE that is running deleted before its inserts
     std::uint64_t statement_insert_id() const { return statement_insert_id_; }
+    // The client asked for the rows an UPDATE FOUND (CLIENT_FOUND_ROWS: Connector/J and MySQLdb do) instead of the rows it changed.
+    bool client_found_rows = false;
+    // The rows the statement that ran last affected, as MySQL counts them (what the OK packet reports and ROW_COUNT() says): rows inserted, rows changed by an UPDATE
+    // (found, for a client that asked), rows deleted; ON DUPLICATE KEY UPDATE counts 1 for a row inserted and 2 for a row it changed, REPLACE 2 for a row it replaced.
+    std::uint64_t statement_affected_rows(const std::string& message) const;
     // SHOW CREATE TABLE / VIEW in MySQL's own form (the text of the CREATE statement; the MySQL protocol layer makes the row of it): the error when the table is not there
     StringResult show_create_table_mysql(const std::string& table);
     StringResult show_create_view_mysql(const std::string& view);

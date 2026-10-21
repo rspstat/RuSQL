@@ -42,6 +42,7 @@ constexpr std::uint8_t COM_RESET_CONNECTION = 0x1f;
 
 // Server capability flags advertised to clients
 constexpr std::uint32_t CAPS = 0x0001 |       // CLIENT_LONG_PASSWORD
+                                0x0002 |       // CLIENT_FOUND_ROWS (a client that asks for it gets the rows an UPDATE found, not the rows it changed)
                                 0x0004 |       // CLIENT_LONG_FLAG
                                 0x0200 |       // CLIENT_PROTOCOL_41
                                 0x2000 |       // CLIENT_TRANSACTIONS
@@ -1367,18 +1368,6 @@ StringResult exec_query(Executor& exec, const std::string& raw, std::string* ran
     return exec.execute_sql(q);
 }
 
-std::uint64_t affected_rows(const std::string& msg) {
-    std::size_t start = msg.find_first_not_of(" \t");
-    if (start == std::string::npos) return 0;
-    std::size_t end = msg.find_first_of(" \t", start);
-    std::string first_tok = msg.substr(start, end == std::string::npos ? std::string::npos : end - start);
-    try {
-        return std::stoull(first_tok);
-    } catch (...) {
-        return 0;
-    }
-}
-
 // ── Client handler ─────────────────────────────────────────────
 
 void handle_mysql_client(SOCKET sock, std::shared_ptr<RwLock<SharedDatabase>> shared, std::uint32_t conn_id) {
@@ -1458,6 +1447,7 @@ void handle_mysql_client(SOCKET sock, std::shared_ptr<RwLock<SharedDatabase>> sh
     // 5. Query loop
     Executor exec = Executor::new_session(shared);
     exec.auth_user = username;
+    exec.client_found_rows = (client_caps & 0x0002) != 0;
     exec.register_process(username, peer);
     StmtMap stmts;
     std::uint32_t next_stmt_id = 1;
@@ -1509,7 +1499,7 @@ void handle_mysql_client(SOCKET sock, std::shared_ptr<RwLock<SharedDatabase>> sh
                         const std::vector<ResultColumnType> types = ran.empty() ? std::vector<ResultColumnType>() : exec.result_columns(ran);
                         send_resultset(sock, parsed->first, parsed->second, 1, &types);
                     } else {
-                        write_packet(sock, 1, ok_pkt(affected_rows(out), exec.statement_insert_id()));
+                        write_packet(sock, 1, ok_pkt(exec.statement_affected_rows(out), exec.statement_insert_id()));
                     }
                 }
                 break;
@@ -1556,7 +1546,7 @@ void handle_mysql_client(SOCKET sock, std::shared_ptr<RwLock<SharedDatabase>> sh
                     } else if (auto parsed = parse_table(out)) {
                         send_resultset(sock, parsed->first, parsed->second, 1);
                     } else {
-                        write_packet(sock, 1, ok_pkt(affected_rows(out), exec.statement_insert_id()));
+                        write_packet(sock, 1, ok_pkt(exec.statement_affected_rows(out), exec.statement_insert_id()));
                     }
                 }
                 break;

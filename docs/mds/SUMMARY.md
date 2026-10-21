@@ -9,7 +9,7 @@
 |---|---|
 | 무엇 | MySQL 호환 프로토콜을 쓰는 **자체 RDBMS 엔진**(C++20) + 데스크톱 클라이언트(Tauri/React) + Claude 연동(MCP) |
 | 1학기 → 2학기 | Rust 프로토타입 → **C++ 전면 재작성**, "기능 추가"에서 **정합성·동시성·성능을 실제로 파고드는 심화**로 |
-| 규모 | 테스트 **763 케이스 / 1,503,970 assertions** (2학기 초 218 케이스 / 3,080 assertions) |
+| 규모 | 테스트 **764 케이스 / 1,504,095 assertions** (2학기 초 218 케이스 / 3,080 assertions) |
 | 엔진 구성 | 파서 → 비용 기반 플래너 → 실행기, MVCC·행 단위 락·데드락 감지, redo 로그 기반 내구성, B+Tree·해시·복합 인덱스 |
 
 ## 2학기에 만든 것 (엔진)
@@ -183,8 +183,9 @@
 | **BIGINT 최솟값보다 작은 음수를 `UNSIGNED`로 바꾸면 2^64에서 그대로 빼 `1`·`0` 같은 값**(`CAST('-18446744073709551615' AS UNSIGNED)`, `-9223372036854775809 | 0`; MySQL은 `9223372036854775808`) | 비트 연산·형 변환 결과가 틀림 |
 | **`INSERT IGNORE`·`ON DUPLICATE KEY UPDATE`로 건너뛴 행이 AUTO_INCREMENT 번호를 가져가고, 실패한 문장은 번호를 모두 돌려놓음**(`INSERT IGNORE … VALUES ('x',50),('y',1),('w',52)`에서 `w`가 5번; MySQL은 4번에 남은 번호를 버림) | 같은 문장이 같은 번호를 매기지 않아 id를 기대하는 곳이 어긋남 |
 | **같은 문장 안에서 앞 행과 키가 겹치는 행이 `IGNORE`·`ON DUPLICATE KEY UPDATE`에서도 "Duplicate value" 오류** | 한 문장으로 같은 키를 누적하는 배치(`VALUES ('a',1),('a',1) ON DUPLICATE KEY UPDATE n = n + VALUES(n)`)가 실패 |
+| **`UPDATE`가 같은 값으로 다시 쓴 행도 센다(MySQL은 바뀐 행만), `ON DUPLICATE KEY UPDATE`·`REPLACE`는 삽입한 행 수만 말하고, `DELETE`·`UPDATE`의 `AFTER` 트리거 문장이 바깥 문장의 수를 덮어씀** | `ROW_COUNT()`와 클라이언트의 `rowcount`·`executeUpdate`가 MySQL과 다름 (`CLIENT_FOUND_ROWS`를 켠 Connector/J·MySQLdb는 찾은 행) |
 
-성능·정합성 작업의 커밋들에서 찾은 기존 버그는 모두 184건입니다(전체 목록은 `DATE.md`).
+성능·정합성 작업의 커밋들에서 찾은 기존 버그는 모두 185건입니다(전체 목록은 `DATE.md`).
 
 ## 한계와 앞으로
 

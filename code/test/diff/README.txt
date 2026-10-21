@@ -151,7 +151,8 @@ Comparison with a real MySQL (needs pymysql and a MySQL 8.4 on 127.0.0.1:3391; u
   python vs_mysql.py <engine_server.exe> corpus/protocol.sql --proto
       the same comparison, but RuSQL is asked over its MySQL protocol (pymysql, port 13399) instead of the native port, so what the protocol layer of
       server/src/mysql.cpp makes of a statement is compared too (SHOW COLUMNS / INDEX / CREATE TABLE / TABLE STATUS, SHOW VARIABLES, the OK packet's
-      affected rows and last insert id, binary values). Four differences are left: the values of SHOW TABLE STATUS other than the name / engine / row
+      affected rows (a number now compared, R44: the rows an UPDATE changed, ON DUPLICATE KEY UPDATE 1 / 2 / 0, REPLACE 2, a trigger's statements not counted; the
+      CLIENT_FOUND_ROWS mode is the unit test [r44][affected]) and last insert id, binary values). Four differences are left: the values of SHOW TABLE STATUS other than the name / engine / row
       count, SHOW ENGINES lists one engine, SHOW COLLATION has no Pad_attribute column, and @@version is 5.7.0-rusql (on purpose, the handshake's).
   python vs_mysql.py <engine_server.exe> corpus/protocol_types.sql --proto --types
       also compares the kind of every result column the client is told (integer, decimal, float, date, datetime, time, text -- what pymysql turns

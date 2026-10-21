@@ -56,7 +56,7 @@ def mysql_run(cur, sql):
         cur.execute(sql)
         if cur.description is None:
             LAST_TYPES.pop(id(cur), None)
-            return ("ok", None)
+            return ("ok", cur.rowcount) # (the affected rows of the OK packet; the native protocol says none: rusql_run gives None)
         LAST_TYPES[id(cur)] = [TYPE_CLASS.get(d[1], "text") for d in cur.description]
         places = [d[5] if d[1] in (7, 11, 12) and d[5] else 0 for d in cur.description] # (the fraction of a second of a DATETIME / TIME / TIMESTAMP column)
         return ("rows", [[cell(v, places[i]) for i, v in enumerate(row)] for row in cur.fetchall()])
@@ -147,6 +147,8 @@ def first_difference(sql, a, b):
     empty_b = b[0] == "ok" or (b[0] == "rows" and not b[1])
     if a[0] != b[0] and not (empty_a and empty_b):
         return "kind " + a[0] + " / " + b[0]
+    if a[0] == "ok" and b[0] == "ok" and a[1] is not None and b[1] is not None and a[1] != b[1]:
+        return "affected rows mysql=%s / rusql=%s" % (a[1], b[1]) # (--proto: the OK packet's affected rows)
     if a[0] == "err" or a[0] == "ok" or (empty_a and empty_b):
         return None
     ra, rb = list(a[1]), list(b[1])

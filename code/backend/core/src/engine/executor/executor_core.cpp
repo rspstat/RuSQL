@@ -1291,10 +1291,16 @@ void Executor::note_statement_outcome(const std::string& sql, const StringResult
         found_rows_ = returned_rows(result.value());
         row_count_ = -1;
     } else if (word == "INSERT" || word == "REPLACE" || word == "UPDATE" || word == "DELETE" || word == "MERGE") {
-        row_count_ = static_cast<std::int64_t>(leading_count(result.value()));
+        row_count_ = static_cast<std::int64_t>(statement_affected_rows(result.value()));
     } else {
         row_count_ = 0;
     }
+}
+
+std::uint64_t Executor::statement_affected_rows(const std::string& message) const {
+    if (client_found_rows && matched_rows_ >= 0) return static_cast<std::uint64_t>(matched_rows_);
+    if (affected_rows_ >= 0) return static_cast<std::uint64_t>(affected_rows_);
+    return leading_count(message);
 }
 
 StringResult Executor::execute_sql(const std::string& sql_text) {
@@ -1303,6 +1309,7 @@ StringResult Executor::execute_sql(const std::string& sql_text) {
     bool calc_found_rows = false;
     const std::string word = first_word_upper(sql);
     statement_insert_id_ = 0;
+    affected_rows_ = matched_rows_ = -1;
     insert_id_unset_ = word == "INSERT" || word == "REPLACE";
     // SET autocommit = 0: the first statement that writes begins a transaction, which COMMIT / ROLLBACK (or the end of the connection) ends; a statement
     // that defines a table commits it first, as MySQL's do

@@ -100,7 +100,10 @@ StringResult Executor::exec_delete(SharedDatabase& s, const std::string& table, 
     }
     auto result = exec_delete_inner(s, table, condition, returning);
     if (result.is_ok() && after_trigger) {
+        const std::int64_t matched = matched_rows_, affected = affected_rows_; // (the statements of the trigger set these too)
         if (auto tr = fire_triggers(s, table, "AFTER", "DELETE", trigger_rows); tr.is_err()) return tr;
+        matched_rows_ = matched;
+        affected_rows_ = affected;
     }
     return result;
 }
@@ -431,6 +434,7 @@ StringResult Executor::exec_delete_inner(SharedDatabase& s, const std::string& t
         maybe_auto_checkpoint(s);
 
         if (returning) return StringResult::Ok(format_returning_rows(rows_to_delete, *returning));
+        matched_rows_ = affected_rows_ = -1;
         return StringResult::Ok(std::to_string(deleted) + " row(s) deleted.");
     }
 
@@ -926,6 +930,7 @@ StringResult Executor::exec_delete_inner(SharedDatabase& s, const std::string& t
 
     maybe_auto_checkpoint(s);
     if (returning) return StringResult::Ok(format_returning_rows(rows_to_delete, *returning));
+    matched_rows_ = affected_rows_ = -1;
     return StringResult::Ok(std::to_string(deleted) + " row(s) deleted.");
 }
 

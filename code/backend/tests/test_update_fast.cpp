@@ -106,8 +106,9 @@ TEST_CASE("UPDATE by primary key: repeated, changing the key, no match, extra co
     REQUIRE(ex.execute_sql("SELECT v FROM t WHERE id = 500").value().find("77") != std::string::npos);
     REQUIRE(updated(ex.execute_sql("UPDATE t SET v = 78 WHERE id = 9"), 0));
 
-    // updating to the identical value is still a real (counted) update
-    REQUIRE(updated(ex.execute_sql("UPDATE t SET v = 77 WHERE id = 500"), 1));
+    // updating to the identical value changes nothing: the row is found, not counted (MySQL's affected rows; the value and the cache are as before)
+    REQUIRE(updated(ex.execute_sql("UPDATE t SET v = 77 WHERE id = 500"), 0));
+    REQUIRE(ex.execute_sql("SELECT v FROM t WHERE id = 500").value().find("77") != std::string::npos);
     // a PK change that collides must not corrupt anything
     auto dup = ex.execute_sql("UPDATE t SET id = 10 WHERE id = 500");
     (void)dup; // may be accepted or rejected by the engine; either way the table must stay consistent:
@@ -133,8 +134,8 @@ TEST_CASE("UPDATE ... RETURNING and non-pk / range / full-table forms still matc
     REQUIRE(updated(ex.execute_sql("UPDATE t SET v = v + 1"), 40));                // no WHERE
     REQUIRE(updated(ex.execute_sql("UPDATE t SET v = 0 WHERE id > 35 OR id < 3"), 7));
     REQUIRE(updated(ex.execute_sql("UPDATE t SET v = 42 WHERE id IN (1, 2, 3)"), 3));
-    REQUIRE(updated(ex.execute_sql("UPDATE t SET v = 1 WHERE id IN (SELECT id FROM t WHERE g = 1)"), 10)); // subquery -> legacy path
-    REQUIRE(ex.execute_sql("SELECT v FROM t WHERE id = 1").value().find("1") != std::string::npos);
+    REQUIRE(updated(ex.execute_sql("UPDATE t SET v = 1001 WHERE id IN (SELECT id FROM t WHERE g = 1)"), 10)); // subquery -> legacy path
+    REQUIRE(ex.execute_sql("SELECT v FROM t WHERE id = 1").value().find("1001") != std::string::npos);
 }
 
 TEST_CASE("UPDATE stays correct after DELETE, ROLLBACK and auto-VACUUM shift row positions", "[update][fast]") {
@@ -211,7 +212,7 @@ TEST_CASE("UPDATE: randomized differential test against a model (autocommit + tr
             } else if (op < 60) { // update by pk (cache path), existing or not
                 int v = R(0, 999);
                 auto r = ex.execute_sql("UPDATE t SET v = " + std::to_string(v) + " WHERE id = " + std::to_string(id));
-                REQUIRE(updated(r, cur().count(id) ? 1 : 0));
+                REQUIRE(updated(r, cur().count(id) && cur()[id].first != v ? 1 : 0)); // (a row set to the value it holds is found, not changed)
                 if (cur().count(id)) cur()[id].first = v;
             } else if (op < 68) { // update the primary key itself
                 int nid = R(41, 80);

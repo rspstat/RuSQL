@@ -80,7 +80,10 @@ StringResult Executor::exec_update(SharedDatabase& s, std::string table, std::ve
     }
     auto result = exec_update_inner(s, table, assignments, condition, returning, per_row);
     if (result.is_ok() && after_trigger) {
+        const std::int64_t matched = matched_rows_, affected = affected_rows_; // (the statements of the trigger set these too)
         if (auto tr = fire_triggers(s, table, "AFTER", "UPDATE", trigger_rows); tr.is_err()) return tr;
+        matched_rows_ = matched;
+        affected_rows_ = affected;
     }
     return result;
 }
@@ -192,6 +195,7 @@ StringResult Executor::exec_update_inner(SharedDatabase& s, const std::string& t
     }
 
     std::size_t count = 0;
+    std::size_t changed_count = 0; // the rows whose values the statement changed (MySQL's affected rows: a row set to what it holds is found, not changed)
     struct UndoEntry {
         std::string key, old_json, new_json;
     };
@@ -350,6 +354,7 @@ StringResult Executor::exec_update_inner(SharedDatabase& s, const std::string& t
         std::vector<std::string> new_version_pks;
         std::vector<char> new_version_pk_found;
         std::vector<UndoEntry> attempt_undo_entries;
+        std::size_t attempt_changed = 0;
         bool conflict = false;
         bool stale_positions = false;
         std::string conflict_key;
@@ -487,6 +492,7 @@ StringResult Executor::exec_update_inner(SharedDatabase& s, const std::string& t
                             auto old_value = row.find(col);
                             if (old_value == row.end() || old_value->second != val) { changed = true; break; }
                         }
+                        if (changed) attempt_changed++;
                         if (changed) {
                             for (auto& col : schema->columns) {
                                 if (!col.on_update_now) continue;
@@ -627,6 +633,7 @@ StringResult Executor::exec_update_inner(SharedDatabase& s, const std::string& t
 
         if (!conflict) {
             count = attempt_undo_entries.size();
+            changed_count = attempt_changed;
             undo_entries = std::move(attempt_undo_entries);
             old_rows_all = std::move(attempt_old_images);
             new_rows_all = std::move(attempt_new_images);
@@ -973,7 +980,9 @@ StringResult Executor::exec_update_inner(SharedDatabase& s, const std::string& t
         }
         return StringResult::Ok(format_returning_rows(updated_rows, *returning));
     }
-    return StringResult::Ok(std::to_string(count) + " row(s) updated.");
+    matched_rows_ = static_cast<std::int64_t>(count);
+    affected_rows_ = -1;
+    return StringResult::Ok(std::to_string(changed_count) + " row(s) updated.");
 }
 
 } // namespace engine

@@ -91,3 +91,25 @@ SHOW COLLATION LIKE 'utf8mb4_0900_ai_ci'
 SELECT @@version LIKE '8%', @@global.sql_mode IS NOT NULL, @@session.autocommit
 USE v
 SELECT DATABASE()
+
+# the OK packet's affected rows (R44): the rows an UPDATE changed, ON DUPLICATE KEY UPDATE 1 / 2 / 0, REPLACE 2 for a replaced row
+--CREATE TABLE ar (id INT PRIMARY KEY AUTO_INCREMENT, v VARCHAR(10), u INT UNIQUE, n INT DEFAULT 0)
+INSERT INTO ar (v, u) VALUES ('a', 1), ('b', 2), ('c', 3)
+UPDATE ar SET n = 5 WHERE u <= 3
+UPDATE ar SET n = 5 WHERE u <= 3
+UPDATE ar SET n = 6 WHERE u <= 2
+INSERT INTO ar (v, u) VALUES ('p', 2), ('q', 20), ('r', 3) ON DUPLICATE KEY UPDATE v = CONCAT(v, '!')
+INSERT INTO ar (v, u) VALUES ('p', 2), ('q', 20) ON DUPLICATE KEY UPDATE v = v
+REPLACE INTO ar (v, u) VALUES ('r1', 1), ('r2', 30)
+INSERT INTO ar (v, u) VALUES ('t1', 500), ('t1', 500), ('t2', 501) ON DUPLICATE KEY UPDATE n = n + 1
+DELETE FROM ar WHERE u >= 500
+INSERT IGNORE INTO ar (v, u) VALUES ('d', 2), ('e', 90)
+# the statements of a trigger do not change what the statement that fired it affected
+--CREATE TABLE lgp (id INT PRIMARY KEY AUTO_INCREMENT, k INT)
+INSERT INTO lgp (k) VALUES (1), (1), (1)
+CREATE TRIGGER ar_au_p AFTER UPDATE ON ar FOR EACH ROW UPDATE lgp SET k = k + 1
+CREATE TRIGGER ar_ad_p AFTER DELETE ON ar FOR EACH ROW UPDATE lgp SET k = k + 1
+INSERT INTO ar (v, u) VALUES ('g1', 800), ('g2', 801)
+UPDATE ar SET n = 77 WHERE u >= 800
+UPDATE ar SET n = 77 WHERE u >= 800
+DELETE FROM ar WHERE u >= 800

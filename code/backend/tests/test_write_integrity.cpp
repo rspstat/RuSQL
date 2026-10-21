@@ -496,7 +496,7 @@ TEST_CASE("multi-table UPDATE / DELETE and MERGE are as strict as the one-table 
     // UNIQUE over the whole result: u moves to 20, 5, 30 -- a chain, fine
     auto moved = ex.execute_sql("UPDATE t JOIN src ON t.id = src.id SET t.u = src.u");
     REQUIRE(moved.is_ok());
-    REQUIRE(moved.value() == "3 row(s) updated.");
+    REQUIRE(moved.value() == "2 row(s) updated."); // (row 3 keeps its 30: found, not changed)
     REQUIRE(q(ex, "SELECT id, u FROM t ORDER BY id") == Rows{{"1", "20"}, {"2", "5"}, {"3", "30"}});
     REQUIRE(fails(ex, "UPDATE t JOIN src ON t.id = src.id SET t.u = 7").find("Duplicate value") != std::string::npos); // all three get 7
     REQUIRE(q(ex, "SELECT id, u FROM t ORDER BY id") == Rows{{"1", "20"}, {"2", "5"}, {"3", "30"}});

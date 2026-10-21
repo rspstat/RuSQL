@@ -284,7 +284,9 @@ StringResult Executor::replace_delete_conflicts(SharedDatabase& s, const std::st
     };
     auto run_delete = [&](CondExpr cond) -> StringResult {
         Statement del(Statement::Delete{table, std::move(cond), std::nullopt});
-        return execute_with_s(s, std::move(del));
+        auto deleted = execute_with_s(s, std::move(del));
+        if (deleted.is_ok()) replace_deleted_rows_ += static_cast<std::size_t>(std::strtoull(deleted.value().c_str(), nullptr, 10));
+        return deleted;
     };
 
     for (auto& values : all_values) {
@@ -483,6 +485,7 @@ StringResult Executor::exec_insert(SharedDatabase& s, std::string table, std::op
     }
 
     const bool replacing = std::holds_alternative<InsertConflict::Replace>(on_conflict.data);
+    replace_deleted_rows_ = 0;
     std::vector<std::vector<std::string>> replace_rows; // every row of a REPLACE: each one deletes what it conflicts with
     if (replacing) {
         // A REPLACE that fails must leave the table as it was (it used to delete the old rows first and then fail on the new one:
@@ -563,11 +566,18 @@ StringResult Executor::exec_insert(SharedDatabase& s, std::string table, std::op
     std::vector<Row> inserted;
     auto result = exec_insert_inner(s, table, col_list, std::move(all_values), on_conflict, returning, false, nullptr,
                                     after_trigger ? &inserted : nullptr, from_select);
+    // what the statement affected, kept across the AFTER triggers (their statements set these too): a REPLACE counts a row it replaced twice (the old one goes, the new one comes)
+    std::int64_t affected = affected_rows_, matched = matched_rows_;
+    if (replacing && result.is_ok() && !returning) affected = static_cast<std::int64_t>(std::strtoull(result.value().c_str(), nullptr, 10) + replace_deleted_rows_);
 
     if (result.is_ok() && after_trigger) {
         std::vector<TriggerRow> new_rows;
         for (auto& row : inserted) new_rows.push_back(TriggerRow{std::nullopt, std::move(row)});
         if (auto tr = fire_triggers(s, table, "AFTER", "INSERT", new_rows); tr.is_err()) return tr;
+    }
+    if (result.is_ok()) {
+        affected_rows_ = affected;
+        matched_rows_ = matched;
     }
     return result;
 }
@@ -661,6 +671,8 @@ StringResult Executor::exec_insert_inner(SharedDatabase& s, const std::string& t
     // with VALUES(col) already replaced by the value this statement was going to insert. They run as ordinary UPDATE statements
     // after the insert (own MVCC version, undo log, constraints, indexes, triggers) -- the old code rewrote the row in place.
     std::vector<std::pair<CondExpr, std::vector<std::pair<std::string, ArithExpr>>>> pending_updates;
+    std::size_t intra_updates_changed = 0; // (the rows of this statement that a later row of it changed through ON DUPLICATE KEY UPDATE)
+    std::size_t intra_updates_found = 0;   // (... and those it only found, the changed ones included)
     std::size_t row_no = 0; // 1-based row of the statement, for type error messages
 
     // Gap lock conflict check needs the single-column PK's name (V1 scope, matching the
@@ -1182,14 +1194,18 @@ StringResult Executor::exec_insert_inner(SharedDatabase& s, const std::string& t
                     if (auto* upd = std::get_if<InsertConflict::Update>(&on_conflict.data); upd && best_row < prepared.size() && !validate_only) {
                         // (that row is not in the table yet: the assignments change the row that is about to be inserted, each seeing the ones before it)
                         Row& target = prepared[best_row];
+                        bool target_changed = false;
                         for (auto& [column, expr] : upd->assignments) {
                             std::string value = eval_arith_exact(target, bind_insert_values(expr, col_names, final_values));
                             if (auto column_def = std::find_if(schema.columns.begin(), schema.columns.end(), [&](const ColumnDef& c) { return c.name == column; });
                                 column_def != schema.columns.end()) {
                                 if (auto err = coerce_column_value(*column_def, value, row_no)) return StringResult::Err(*err);
                             }
+                            if (target[column] != value) target_changed = true;
                             target[column] = std::move(value);
                         }
+                        intra_updates_found++;
+                        if (target_changed) intra_updates_changed++;
                         give_back_row_id();
                         continue;
                     }
@@ -1574,15 +1590,20 @@ StringResult Executor::exec_insert_inner(SharedDatabase& s, const std::string& t
         s.query_cache.invalidate_table(table);
     }
 
-    std::size_t updated = 0;
+    std::size_t updated = 0, found = 0;
     for (auto& [cond, assigns] : pending_updates) {
         auto r = exec_update(s, table, assigns, cond, std::nullopt);
         if (r.is_err()) return r;
         updated += static_cast<std::size_t>(std::strtoull(r.value().c_str(), nullptr, 10));
+        found += matched_rows_ > 0 ? static_cast<std::size_t>(matched_rows_) : 0;
     }
 
     maybe_auto_checkpoint(s);
     counter_guard.kept = true;
+    // ON DUPLICATE KEY UPDATE affects 1 for a row it inserted and 2 for a row it changed (0 for one it set to what it holds, 1 with CLIENT_FOUND_ROWS)
+    const bool odku = !pending_updates.empty() || intra_updates_found != 0;
+    affected_rows_ = odku ? static_cast<std::int64_t>(inserted + 2 * (updated + intra_updates_changed)) : -1;
+    matched_rows_ = odku ? static_cast<std::int64_t>(inserted + updated + intra_updates_changed + found + intra_updates_found) : -1;
     if (returning) return StringResult::Ok(format_returning_rows(returning_rows, *returning));
     if (!pending_updates.empty()) return StringResult::Ok(std::to_string(inserted) + " row(s) inserted, " + std::to_string(updated) + " row(s) updated.");
     return StringResult::Ok(std::to_string(inserted) + " row(s) inserted.");

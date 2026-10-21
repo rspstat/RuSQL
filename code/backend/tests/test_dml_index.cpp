@@ -361,7 +361,7 @@ TEST_CASE("DML index: numerically equal spellings are found, exactly like the sc
     REQUIRE(changed(ex.execute_sql("UPDATE d SET qty = 5 WHERE code = 7"), 3, "updated"));
     REQUIRE(hits() == h);
     h = hits();
-    REQUIRE(changed(ex.execute_sql("UPDATE d SET qty = 5 WHERE code = '7'"), 1, "updated"));
+    REQUIRE(changed(ex.execute_sql("UPDATE d SET qty = 5 WHERE code = '7'"), 0, "updated")); // (row 2 holds 5 since the statement above: found, not changed)
     REQUIRE(hits() == h + 1);
 
     // inclusive bounds reach every spelling of the boundary value
@@ -469,7 +469,8 @@ TEST_CASE("DML index: another open transaction forces the scan until it ends", "
     REQUIRE(changed(b.execute_sql("UPDATE t SET d = 100 WHERE a = 7"), 10, "updated")); // B's uncommitted versions
 
     auto h = hits();
-    REQUIRE(changed(a.execute_sql("UPDATE t SET d = 5 WHERE a = 3"), 10, "updated"));
+    const auto not_five = count_of(a, "FROM t WHERE a = 3 AND d <> 5"); // (a row that holds 5 already is found, not changed)
+    REQUIRE(changed(a.execute_sql("UPDATE t SET d = 5 WHERE a = 3"), not_five, "updated"));
     REQUIRE(changed(a.execute_sql("DELETE FROM t WHERE a = 3 AND id > 5"), 5, "deleted"));
     REQUIRE(hits() == h); // an open transaction elsewhere: no index path, and the answers are still right
 
@@ -849,7 +850,7 @@ TEST_CASE("UPDATE rejects duplicate PRIMARY KEY / UNIQUE values and never half-a
         REQUIRE(count_of(ex, "FROM u WHERE id + 0 = 1") == 1); // the failed statement left row 1 alone
 
         REQUIRE(ex.execute_sql("UPDATE u SET email = 'b@x' WHERE id = 3").is_err());
-        REQUIRE(changed(ex.execute_sql("UPDATE u SET email = 'c@x' WHERE id = 3"), 1, "updated")); // unchanged value: fine
+        REQUIRE(changed(ex.execute_sql("UPDATE u SET email = 'c@x' WHERE id = 3"), 0, "updated")); // unchanged value: fine (found, not changed)
         REQUIRE(ex.execute_sql("UPDATE u SET id = 9 WHERE id >= 2").is_err()); // two rows, one new key
         REQUIRE(count_of(ex, "FROM u") == 3);
 

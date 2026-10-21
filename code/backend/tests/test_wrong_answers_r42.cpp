@@ -335,3 +335,67 @@ TEST_CASE("a negative number made unsigned: below the smallest BIGINT it is 2^63
             Rows{{"9223372036854775808", "9223372036854775808", "9223372036854775808", "18446744073709551615", "254", "9223372036854775807", "4611686018427387904",
                   "9223372036854775809", "9223372036854775808", "9223372036854775808"}});
 }
+
+TEST_CASE("the rows a statement affects are the rows it changed; a client that asks for found rows gets them", "[r44][affected]") {
+    TempDataDir dir("r44_affected");
+    Executor ex(dir.path);
+    ok(ex, "CREATE DATABASE d");
+    ok(ex, "USE d");
+    ok(ex, "CREATE TABLE ar (id INT PRIMARY KEY AUTO_INCREMENT, v VARCHAR(10), u INT UNIQUE, n INT DEFAULT 0)");
+    ok(ex, "INSERT INTO ar (v, u) VALUES ('a', 1), ('b', 2), ('c', 3)");
+    auto affected = [&](const std::string& sql) { // (what the OK packet of the MySQL protocol and ROW_COUNT() say)
+        auto r = ex.execute_sql(sql);
+        INFO(sql);
+        REQUIRE(r.is_ok());
+        return ex.statement_affected_rows(r.value());
+    };
+    REQUIRE(affected("UPDATE ar SET n = 5 WHERE u <= 3") == 3);
+    REQUIRE(affected("UPDATE ar SET n = 5 WHERE u <= 3") == 0); // (found, not changed)
+    REQUIRE(q(ex, "SELECT ROW_COUNT()") == Rows{{"0"}});
+    ex.client_found_rows = true; // CLIENT_FOUND_ROWS: Connector/J, MySQLdb
+    REQUIRE(affected("UPDATE ar SET n = 5 WHERE u <= 3") == 3);
+    REQUIRE(affected("UPDATE ar SET n = 6 WHERE u <= 2") == 2);
+    ex.client_found_rows = false;
+    REQUIRE(affected("INSERT INTO ar (v, u) VALUES ('p', 2), ('q', 20), ('r', 3) ON DUPLICATE KEY UPDATE v = CONCAT(v, '!')") == 5); // 2 + 1 + 2
+    REQUIRE(affected("INSERT INTO ar (v, u) VALUES ('p', 2), ('q', 20) ON DUPLICATE KEY UPDATE v = v") == 0);
+    REQUIRE(affected("INSERT INTO ar (v, u) VALUES ('a2', 1) ON DUPLICATE KEY UPDATE v = 'changed'") == 2);
+    REQUIRE(affected("INSERT INTO ar (v, u) VALUES ('a3', 1) ON DUPLICATE KEY UPDATE v = 'changed'") == 0);
+    REQUIRE(affected("INSERT INTO ar (v, u) VALUES ('x', 1), ('x', 1), ('y', 77) ON DUPLICATE KEY UPDATE n = n + 1") == 5); // 2 + 2 + 1
+    REQUIRE(affected("REPLACE INTO ar (v, u) VALUES ('r1', 1), ('r2', 30)") == 3); // 2 + 1
+    REQUIRE(affected("INSERT INTO ar (v, u) VALUES ('m1', 40), ('m2', 41)") == 2);
+    REQUIRE(affected("DELETE FROM ar WHERE u >= 40") == 3); // (the row 'y' with 77 too)
+    REQUIRE(affected("INSERT IGNORE INTO ar (v, u) VALUES ('d', 2), ('e', 90)") == 1);
+    REQUIRE(affected("INSERT INTO ar (v, u) VALUES ('t1', 500), ('t1', 500), ('t2', 501) ON DUPLICATE KEY UPDATE n = n + 1") == 4); // 1 + (the 2nd row changes the 1st) 2 + 1
+    REQUIRE(affected("INSERT INTO ar (v, u) VALUES ('t3', 600), ('t3', 600) ON DUPLICATE KEY UPDATE n = n") == 1);
+    // the statements of a trigger do not change what the statement that fired it affected
+    ok(ex, "CREATE TABLE lg2 (id INT PRIMARY KEY AUTO_INCREMENT, k INT)");
+    ok(ex, "INSERT INTO lg2 (k) VALUES (1), (1), (1)");
+    ok(ex, "CREATE TRIGGER ar_ai AFTER INSERT ON ar FOR EACH ROW UPDATE lg2 SET k = k + 1");
+    ok(ex, "CREATE TRIGGER ar_ad AFTER DELETE ON ar FOR EACH ROW UPDATE lg2 SET k = k + 1");
+    ex.client_found_rows = true;
+    REQUIRE(affected("INSERT INTO ar (v, u) VALUES ('tr', 700)") == 1);
+    REQUIRE(affected("INSERT INTO ar (v, u) VALUES ('tr2', 701) ON DUPLICATE KEY UPDATE v = 'x'") == 1);
+    REQUIRE(affected("INSERT INTO ar (v, u) VALUES ('tr2', 701) ON DUPLICATE KEY UPDATE v = 'y'") == 2);
+    ok(ex, "CREATE TRIGGER ar_au AFTER UPDATE ON ar FOR EACH ROW UPDATE lg2 SET k = k + 1");
+    REQUIRE(affected("UPDATE ar SET n = 9 WHERE u >= 700") == 2);
+    ex.client_found_rows = false;
+    REQUIRE(affected("UPDATE ar SET n = 9 WHERE u >= 700") == 0);
+    REQUIRE(affected("UPDATE ar SET n = 10 WHERE u >= 700") == 2);
+    ex.client_found_rows = true;
+    REQUIRE(affected("DELETE FROM ar WHERE u >= 700") == 2);
+    // ON DUPLICATE KEY UPDATE: a row it sets to what it holds is 0 changed rows, 1 found row
+    for (const bool found_rows : {false, true}) {
+        const std::string name = found_rows ? "afr_found" : "afr_changed";
+        ex.client_found_rows = found_rows;
+        ok(ex, "CREATE TABLE " + name + " (id INT PRIMARY KEY, n INT)");
+        ok(ex, "INSERT INTO " + name + " VALUES (1, 0), (2, 0), (3, 0)");
+        const std::string odku = "INSERT INTO " + name + " VALUES ";
+        REQUIRE(affected(odku + "(1, 9) ON DUPLICATE KEY UPDATE n = 9") == 2);
+        REQUIRE(affected(odku + "(1, 9) ON DUPLICATE KEY UPDATE n = 9") == (found_rows ? 1 : 0));
+        REQUIRE(affected(odku + "(1, 9), (2, 9), (4, 9) ON DUPLICATE KEY UPDATE n = 9") == (found_rows ? 4 : 3));
+        REQUIRE(affected(odku + "(5, 1), (5, 1) ON DUPLICATE KEY UPDATE n = n") == (found_rows ? 2 : 1));
+        REQUIRE(affected(odku + "(6, 1), (6, 2) ON DUPLICATE KEY UPDATE n = VALUES(n)") == 3);
+        REQUIRE(affected("REPLACE INTO " + name + " VALUES (1, 8), (7, 1)") == 3); // (2 for the row it replaces, 1 for the new one)
+    }
+    ex.client_found_rows = false;
+}

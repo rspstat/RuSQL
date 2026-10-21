@@ -228,3 +228,32 @@ INSERT INTO tn_dst SET id = 40, v := 2
 SELECT v FROM tn_dst WHERE id = 40
 INSERT INTO tn_dst VALUES (40, 1) ON DUPLICATE KEY UPDATE v := 5
 SELECT v FROM tn_dst WHERE id = 40
+
+# the rows a statement affects, as MySQL counts them (R44): an UPDATE counts the rows it changed, ON DUPLICATE KEY UPDATE 1 for a row inserted and 2 for a row it changed (0 for one it
+# set to what it holds), REPLACE 2 for a row it replaced
+--CREATE TABLE ar (id INT PRIMARY KEY AUTO_INCREMENT, v VARCHAR(10), u INT UNIQUE, n INT DEFAULT 0)
+INSERT INTO ar (v, u) VALUES ('a', 1), ('b', 2), ('c', 3)
+SELECT ROW_COUNT() AS ar_1
+INSERT IGNORE INTO ar (v, u) VALUES ('x', 1), ('y', 10)
+SELECT ROW_COUNT() AS ar_2
+INSERT INTO ar (v, u) VALUES ('a2', 1) ON DUPLICATE KEY UPDATE v = 'changed'
+SELECT ROW_COUNT() AS ar_3
+INSERT INTO ar (v, u) VALUES ('a3', 1) ON DUPLICATE KEY UPDATE v = 'changed'
+SELECT ROW_COUNT() AS ar_4
+INSERT INTO ar (v, u) VALUES ('p', 2), ('q', 20), ('r', 3) ON DUPLICATE KEY UPDATE v = CONCAT(v, '!')
+SELECT ROW_COUNT() AS ar_5
+INSERT INTO ar (v, u) VALUES ('p', 2), ('q', 20) ON DUPLICATE KEY UPDATE v = v
+SELECT ROW_COUNT() AS ar_6
+REPLACE INTO ar (v, u) VALUES ('r1', 1), ('r2', 30)
+SELECT ROW_COUNT() AS ar_7
+UPDATE ar SET n = 5 WHERE u <= 3
+SELECT ROW_COUNT() AS ar_8
+UPDATE ar SET n = 5 WHERE u <= 3
+SELECT ROW_COUNT() AS ar_9
+DELETE FROM ar WHERE u > 20
+SELECT ROW_COUNT() AS ar_10
+SELECT ROW_COUNT() AS ar_11
+INSERT INTO ar (v, u) SELECT v, u + 100 FROM ar
+SELECT ROW_COUNT() AS ar_12
+INSERT IGNORE INTO ar (v, u) SELECT v, u FROM ar WHERE u < 10
+SELECT ROW_COUNT() AS ar_13

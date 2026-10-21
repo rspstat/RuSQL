@@ -87,6 +87,7 @@ StringResult Executor::exec_multi_update(SharedDatabase& s, std::vector<std::str
     };
 
     std::size_t total_count = 0;
+    std::int64_t matched_total = 0;
 
     std::vector<std::string> assignment_tables;
     for (auto& [col_expr, _] : assignments) {
@@ -160,9 +161,12 @@ StringResult Executor::exec_multi_update(SharedDatabase& s, std::vector<std::str
         auto updated = exec_update(s, tgt, std::move(columns), std::nullopt, std::nullopt, &per_row);
         if (updated.is_err()) return updated;
         total_count += static_cast<std::size_t>(std::strtoull(updated.value().c_str(), nullptr, 10));
+        matched_total += matched_rows_ > 0 ? matched_rows_ : 0;
     }
 
     maybe_auto_checkpoint(s);
+    matched_rows_ = matched_total;
+    affected_rows_ = -1;
     return StringResult::Ok(std::to_string(total_count) + " row(s) updated.");
 }
 
@@ -352,6 +356,7 @@ StringResult Executor::exec_multi_delete(SharedDatabase& s, std::vector<std::str
     }
 
     maybe_auto_checkpoint(s);
+    matched_rows_ = affected_rows_ = -1;
     return StringResult::Ok(std::to_string(total_count) + " row(s) deleted.");
 }
 
