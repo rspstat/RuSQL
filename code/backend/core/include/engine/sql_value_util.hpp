@@ -228,6 +228,17 @@ inline std::string format_double(double v, bool single = false) {
     return minus ? "-" + out : out;
 }
 
+// A FLOAT holds a single-precision number and MySQL shows it with six significant digits: 1.2345679 is 1.23457, 123456790 is 123457000, 16777217 is 16777200.
+// `text` is the number as it is stored (or any number); anything that is no finite number comes back as it is.
+inline std::string format_float_display(const std::string& text) {
+    char* end = nullptr;
+    const double v = std::strtod(text.c_str(), &end);
+    if (end == text.c_str() || *end != '\0' || !std::isfinite(v)) return text;
+    char buf[48];
+    std::snprintf(buf, sizeof buf, "%.5e", v);
+    return format_double(std::strtod(buf, nullptr));
+}
+
 // An exact decimal: sign, the digits of the integer and fraction parts. Rounding and truncation work on the digits, so ROUND(1.255, 2) is 1.26
 // (a double holds 1.25499999...).
 struct Decimal {

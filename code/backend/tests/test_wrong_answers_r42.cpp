@@ -64,13 +64,13 @@ TEST_CASE("a DOUBLE and a FLOAT column are written the way MySQL writes them", "
     ok(ex, "INSERT INTO dd VALUES (1, 1000000, 1000000), (2, 1e10, 1e10), (3, 123456789012, 16777216), (4, 1e15, 1e15), (5, 1e16, 1e16), (6, 0.0001, 0.0001),"
            " (7, 0.00001, 0.00001), (8, 1234567.891, 1234567.891), (9, 100, 100), (10, 1e-7, 1e-7), (11, 2000000.5, 2000000.5), (12, -1500000, -1500000),"
            " (13, 0.1, 0.1), (14, 3.14159265358979, 3.14159265358979)");
-    // (a DOUBLE is written as MySQL writes it: a number from 1e15 on has an exponent. A FLOAT keeps what a single-precision number holds, in the fewest digits that
-    // read back as it: 3.14159265358979 is 3.1415927 -- MySQL shows six digits, 3.14159, but the text here is the value, so arithmetic on it is as exact as the float)
+    // (a DOUBLE is written as MySQL writes it: a number from 1e15 on has an exponent. A FLOAT holds a single-precision number, in the fewest digits that read back as
+    // it -- 3.14159265358979 is 3.1415927 -- and is shown with six digits as MySQL shows it, 3.14159 (R44 7); the stored value keeps all of them)
     REQUIRE(q(ex, "SELECT id, d, f FROM dd ORDER BY id") ==
-            Rows{{"1", "1000000", "1000000"},        {"2", "10000000000", "10000000000"}, {"3", "123456789012", "16777216"}, {"4", "1e15", "1e15"},
-                 {"5", "1e16", "1e16"},              {"6", "0.0001", "0.0001"},           {"7", "0.00001", "0.00001"},      {"8", "1234567.891", "1234567.9"},
-                 {"9", "100", "100"},                {"10", "0.0000001", "0.0000001"},    {"11", "2000000.5", "2000000.5"}, {"12", "-1500000", "-1500000"},
-                 {"13", "0.1", "0.1"},               {"14", "3.14159265358979", "3.1415927"}});
+            Rows{{"1", "1000000", "1000000"},        {"2", "10000000000", "10000000000"}, {"3", "123456789012", "16777200"}, {"4", "1e15", "1e15"},
+                 {"5", "1e16", "1e16"},              {"6", "0.0001", "0.0001"},           {"7", "0.00001", "0.00001"},      {"8", "1234567.891", "1234570"},
+                 {"9", "100", "100"},                {"10", "0.0000001", "0.0000001"},    {"11", "2000000.5", "2000000"},   {"12", "-1500000", "-1500000"},
+                 {"13", "0.1", "0.1"},               {"14", "3.14159265358979", "3.14159"}});
 }
 
 TEST_CASE("a lone ! is NOT", "[r42][lexer]") {
@@ -457,4 +457,21 @@ TEST_CASE("a date, a time, an ENUM and a SET are read as the numbers MySQL reads
             Rows{{"20240102", "20240102030405.678", "102030.45", "6746700.6667", "0.6666666666666666", "1.25", "20240102030405.678", "-102030.45"}});
     REQUIRE(q(ex, "SELECT e + 0, st + 1, e * 2, d + 0.5, CAST(dt3 AS DECIMAL(20,3)), ABS(tm2), e DIV 2, st & 4, ROUND(dt3) FROM t") ==
             Rows{{"2", "6", "4", "20240102.5", "20240102030405.678", "102030.45", "1", "4", "20240102030406"}});
+}
+
+TEST_CASE("a FLOAT column is shown with six significant digits, to the last character", "[r44][float]") {
+    TempDataDir dir("r44_float");
+    Executor ex(dir.path);
+    ok(ex, "CREATE DATABASE d");
+    ok(ex, "USE d");
+    ok(ex, "CREATE TABLE fl (id INT PRIMARY KEY AUTO_INCREMENT, f FLOAT, d DOUBLE)");
+    ok(ex, "INSERT INTO fl (f, d) VALUES (1.23456789, 1.23456789), (0.1, 0.1), (1e10, 1e10), (123456789, 123456789), (1234567.891, 1234567.891), (0.000012345678, 0.000012345678), "
+           "(3.14159265358979, 3.14159265358979), (100, 100), (1.5, 1.5), (16777217, 16777217), (-2.5e-5, -2.5e-5), (99999.999, 99999.999), (1e-10, 1e-10), (123.456, 123.456)");
+    // (the texts MySQL 8.4 gives; a DOUBLE keeps all its digits)
+    REQUIRE(q(ex, "SELECT f FROM fl ORDER BY id") == Rows{{"1.23457"}, {"0.1"}, {"10000000000"}, {"123457000"}, {"1234570"}, {"0.0000123457"}, {"3.14159"}, {"100"}, {"1.5"},
+                                                         {"16777200"}, {"-0.000025"}, {"100000"}, {"0.0000000001"}, {"123.456"}});
+    REQUIRE(q(ex, "SELECT d FROM fl WHERE id IN (1, 4, 5) ORDER BY id") == Rows{{"1.23456789"}, {"123456789"}, {"1234567.891"}});
+    REQUIRE(q(ex, "SELECT CAST(1.23456789 AS FLOAT), CAST(16777217 AS FLOAT), CAST(100 AS FLOAT), CAST(1.23456789 AS DOUBLE)") == Rows{{"1.23457", "16777200", "100", "1.23456789"}});
+    // the stored number is the single-precision one: comparisons and arithmetic read it, not the six digits
+    REQUIRE(q(ex, "SELECT id FROM fl WHERE f > 1.23456 AND f < 1.23458 ORDER BY id") == Rows{{"1"}});
 }

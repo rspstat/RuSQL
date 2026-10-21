@@ -3133,6 +3133,30 @@ StringResult Executor::format_rows(SharedDatabase& s, const std::vector<const Ro
         }
     }
 
+    // A FLOAT column is shown with six significant digits (it holds a single-precision number: 1.2345679 shows as 1.23457): which of the columns are those
+    std::vector<char> single(col_defs.size(), 0);
+    {
+        std::vector<const TableSchema*> schemas;
+        if (const TableSchema* sc = s.catalog.get_table(table)) schemas.push_back(sc);
+        for (auto& j : joins) {
+            if (const TableSchema* sc = s.catalog.get_table(j.table)) schemas.push_back(sc);
+        }
+        for (std::size_t i = 0; i < col_defs.size(); i++) {
+            const ColSource& src = col_defs[i].second;
+            if (src.kind != ColSource::Kind::Key) continue;
+            const std::string bare = src.key.substr(src.key.rfind('.') == std::string::npos ? 0 : src.key.rfind('.') + 1);
+            bool found = false, all_single = true;
+            for (const TableSchema* sc : schemas) {
+                for (const ColumnDef& c : sc->columns) {
+                    if (c.name != bare) continue;
+                    found = true;
+                    all_single = all_single && std::holds_alternative<DataType::Float>(c.data_type.data);
+                }
+            }
+            single[i] = found && all_single;
+        }
+    }
+
     std::vector<std::vector<std::string>> resolved_rows;
     resolved_rows.reserve(rows.size());
     for (const Row* row_ptr : rows) {
@@ -3146,6 +3170,7 @@ StringResult Executor::format_rows(SharedDatabase& s, const std::vector<const Ro
                 case ColSource::Kind::Key: {
                     const std::string* v = get_col(row, src.key);
                     raw = v ? *v : std::string();
+                    if (single[vals.size()] && v && raw != EXECUTOR_NULL_VALUE) raw = sqlval::format_float_display(raw);
                     break;
                 }
                 case ColSource::Kind::Func:

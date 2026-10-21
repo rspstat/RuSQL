@@ -63,6 +63,9 @@ const Case kWhereErrors[] = {
 const Case kArithTypes[] = {
 #include "mysql_conformance_arith_types.inc"
 };
+const Case kFloat[] = {
+#include "mysql_conformance_float.inc"
+};
 
 struct TempDataDir {
     std::string path;
@@ -252,4 +255,8 @@ TEST_CASE("the WHERE of an UPDATE or a DELETE fails on a division by zero or a t
 
 TEST_CASE("a date, a time, an ENUM and a SET are the numbers MySQL reads them as in arithmetic, comparisons and numeric functions", "[mysql_conformance][arith_types]") {
     run_cases("mc_arith_types", kArithTypes, sizeof kArithTypes / sizeof kArithTypes[0]);
+}
+
+TEST_CASE("a FLOAT column is shown with six significant digits", "[mysql_conformance][float]") {
+    run_cases("mc_float", kFloat, sizeof kFloat / sizeof kFloat[0]);
 }

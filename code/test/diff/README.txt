@@ -143,7 +143,8 @@ Comparison with a real MySQL (needs pymysql and a MySQL 8.4 on 127.0.0.1:3391; u
       autoinc (the AUTO_INCREMENT numbers a statement reserves, skips and loses: VALUES, IGNORE, ON DUPLICATE KEY UPDATE, REPLACE, INSERT ... SELECT, failures),
       shift (an UPDATE that moves a UNIQUE / PRIMARY KEY value onto the value another row of the statement still holds: written row by row in key or ORDER BY order),
       where_errors (the WHERE of an UPDATE / DELETE: a division by zero, a text that is no number compared with a number; a WHERE that compares an indexed column is left out),
-      arith_types (a DATE, DATETIME, TIME, ENUM and SET column read as the number it stands for: arithmetic, numeric functions, CAST, comparisons with numbers).
+      arith_types (a DATE, DATETIME, TIME, ENUM and SET column read as the number it stands for: arithmetic, numeric functions, CAST, comparisons with numbers),
+      float (FLOAT columns shown with six significant digits; CAST(x AS FLOAT)).
       The cells of RuSQL's answer are read the way the engine itself reads a result table (\\ \n \| and \s \t for a space or tab at either end of a value,
       see engine/result_text.hpp), so a value such as ' x ' or 'a|b' is compared as it is; corpus/tables.sql has probes for them (R40) and for CTE columns.
   --exact

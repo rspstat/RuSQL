@@ -1715,7 +1715,8 @@ std::string fn_cast(const BuiltinCall& c) {
         }
         return d.str(static_cast<std::size_t>(scale));
     }
-    if (base == "DOUBLE" || base == "FLOAT" || base == "REAL") return format_double(double_of(val));
+    if (base == "FLOAT") return format_float_display(format_double(static_cast<double>(static_cast<float>(double_of(val))))); // (single precision, shown with six digits)
+    if (base == "DOUBLE" || base == "REAL") return format_double(double_of(val));
     if (base == "CHAR" || base == "VARCHAR" || base == "NCHAR" || base == "TEXT" || base == "BINARY" || base == "JSON") {
         if (!params.empty() && base != "JSON" && params[0] >= 0) return substring_chars(utf8_chars(val), 1, params[0]);
         return val;
