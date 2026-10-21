@@ -123,6 +123,30 @@
       "bothFail": 1
     },
     {
+      "name": "windows",
+      "en": "Window frames: short form, named windows (WINDOW w AS (...))",
+      "ko": "윈도 프레임 단축형·이름 있는 윈도 (WINDOW w AS (...))",
+      "statements": 26,
+      "different": 0,
+      "bothFail": 5
+    },
+    {
+      "name": "max_execution_time",
+      "en": "MAX_EXECUTION_TIME: hint, variable, error 3024",
+      "ko": "MAX_EXECUTION_TIME: 힌트·변수·오류 3024",
+      "statements": 17,
+      "different": 0,
+      "bothFail": 5
+    },
+    {
+      "name": "fk_names",
+      "en": "Foreign key names, DROP FOREIGN KEY, referential_constraints",
+      "ko": "외래키 이름·DROP FOREIGN KEY·referential_constraints",
+      "statements": 22,
+      "different": 0,
+      "bothFail": 3
+    },
+    {
       "name": "protocol",
       "en": "MySQL wire protocol: SHOW, OK packets, affected rows",
       "ko": "MySQL 프로토콜: SHOW·OK 패킷·영향 행 수",
@@ -139,10 +163,10 @@
       "bothFail": 0
     }
   ],
-  "conformanceCases": 2806,
+  "conformanceCases": 2876,
   "tests": {
-    "cases": 776,
-    "assertions": 1505297
+    "cases": 781,
+    "assertions": 1505497
   },
-  "bugsFound": 189
+  "bugsFound": 191
 }

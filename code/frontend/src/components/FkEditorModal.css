@@ -1,0 +1,22 @@
+.fk-modal { background: #252526; border: 1px solid #454545; border-radius: 8px; width: min(640px, 94vw); max-height: 90vh; display: flex; flex-direction: column; overflow: hidden; color: #d4d4d4; font-size: 12px; }
+.fk-header { display: flex; align-items: center; justify-content: space-between; padding: 12px 16px; border-bottom: 1px solid #3c3c3c; font-size: 13px; }
+.fk-close { background: none; border: none; color: #858585; font-size: 15px; cursor: pointer; }
+.fk-close:hover { color: #ccc; }
+.fk-body { padding: 14px 16px; overflow: auto; }
+.fk-grid { display: grid; grid-template-columns: 110px 1fr; gap: 8px 12px; align-items: center; margin-bottom: 12px; }
+.fk-grid label { color: #9b9b9b; }
+.fk-grid select, .fk-grid input { background: #1e1e1e; color: #d4d4d4; border: 1px solid #3c3c3c; border-radius: 4px; padding: 5px 8px; font-size: 12px; min-width: 0; }
+.fk-grid select:disabled, .fk-grid input:disabled { opacity: 0.55; }
+.fk-warn { margin: 4px 0; padding: 6px 10px; background: #3a3320; border: 1px solid #6b5a2a; border-radius: 4px; color: #e5c97b; }
+.fk-ddl-title { margin: 12px 0 4px; color: #9cdcfe; }
+.fk-dim { color: #858585; }
+.fk-ddl { margin: 0; padding: 10px 12px; background: #1e1e1e; border: 1px solid #3c3c3c; border-radius: 4px; font: 12px Consolas, "Courier New", monospace; color: #ce9178; white-space: pre-wrap; }
+.fk-error { margin-top: 10px; padding: 8px 10px; background: #3a2323; border: 1px solid #6b3a3a; border-radius: 4px; color: #f48771; }
+.fk-footer { display: flex; align-items: center; gap: 8px; padding: 10px 16px; border-top: 1px solid #3c3c3c; }
+.fk-btn { background: #333; color: #d4d4d4; border: 1px solid #454545; border-radius: 4px; padding: 5px 14px; font-size: 12px; cursor: pointer; }
+.fk-btn:hover:not(:disabled) { background: #3d3d3d; }
+.fk-btn:disabled { opacity: 0.4; cursor: default; }
+.fk-btn.fk-primary { background: #0e639c; border-color: #0e639c; color: #fff; }
+.fk-btn.fk-primary:hover:not(:disabled) { background: #1177bb; }
+.fk-btn.fk-danger { color: #f48771; border-color: #6b3a3a; }
+.erd-edge-hit { cursor: pointer; }

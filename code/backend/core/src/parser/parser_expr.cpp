@@ -1564,14 +1564,92 @@ ArithExpr Parser::str_to_arith(const std::string& s) {
     }
 }
 
+// `WINDOW w AS (...), v AS (...)` after HAVING: found at the top level of the SELECT that starts here and cut out of the tokens (the definitions are kept by name)
+std::map<std::string, std::vector<Token>> Parser::take_window_clause() {
+    std::map<std::string, std::vector<Token>> defs;
+    int depth = 0;
+    for (std::size_t i = pos_; i < tokens_.size(); i++) {
+        const Token& t = tokens_[i];
+        if (t.kind == TokenKind::LParen) {
+            depth++;
+        } else if (t.kind == TokenKind::RParen) {
+            if (depth == 0) break;
+            depth--;
+        } else if (depth == 0 && (t.kind == TokenKind::Semicolon || t.kind == TokenKind::Union || t.kind == TokenKind::Intersect || t.kind == TokenKind::Except)) {
+            break;
+        } else if (depth == 0 && t.kind == TokenKind::Ident && to_upper(t.text) == "WINDOW" && i + 3 < tokens_.size() && tokens_[i + 1].kind == TokenKind::Ident &&
+                   tokens_[i + 2].kind == TokenKind::As && tokens_[i + 3].kind == TokenKind::LParen) {
+            std::size_t j = i + 1;
+            for (;;) {
+                if (!(j + 2 < tokens_.size() && tokens_[j].kind == TokenKind::Ident && tokens_[j + 1].kind == TokenKind::As && tokens_[j + 2].kind == TokenKind::LParen))
+                    throw ParseError("Expected window name AS ( after WINDOW");
+                std::string name = to_upper(tokens_[j].text);
+                const std::size_t open = j + 2;
+                std::size_t close = open;
+                int d = 0;
+                for (; close < tokens_.size(); close++) {
+                    if (tokens_[close].kind == TokenKind::LParen) d++;
+                    else if (tokens_[close].kind == TokenKind::RParen && --d == 0) break;
+                }
+                if (close >= tokens_.size()) throw ParseError("Expected ')' after the definition of a window");
+                defs[name] = std::vector<Token>(tokens_.begin() + static_cast<std::ptrdiff_t>(open + 1), tokens_.begin() + static_cast<std::ptrdiff_t>(close));
+                j = close + 1;
+                if (j < tokens_.size() && tokens_[j].kind == TokenKind::Comma) {
+                    j++;
+                    continue;
+                }
+                break;
+            }
+            tokens_.erase(tokens_.begin() + static_cast<std::ptrdiff_t>(i), tokens_.begin() + static_cast<std::ptrdiff_t>(j));
+            break;
+        }
+    }
+    return defs;
+}
+
+// Right after OVER: `w` becomes `(<what w is>)`, and a name that begins the parentheses (`(w ORDER BY x)`) becomes what it is. The tokens put in take the place in the
+// text of the name they replace, so a result column with no alias is still called by the text as it was typed (`SUM(v) OVER w`).
+void Parser::expand_window_name() {
+    if (window_defs_.empty()) return;
+    const auto& defs = window_defs_.back();
+    auto known = [&](std::size_t at) -> const std::vector<Token>* {
+        if (at >= tokens_.size() || tokens_[at].kind != TokenKind::Ident) return nullptr;
+        auto it = defs.find(to_upper(tokens_[at].text));
+        return it == defs.end() ? nullptr : &it->second;
+    };
+    auto stamped = [](Token t, const Token& place) {
+        t.begin = place.begin;
+        t.end = place.end;
+        return t;
+    };
+    auto splice = [&](std::size_t at, const std::vector<Token>& body, bool wrap) {
+        const Token place = tokens_[at];
+        std::vector<Token> made;
+        if (wrap) made.push_back(stamped(Token(TokenKind::LParen), place));
+        for (const Token& t : body) made.push_back(stamped(t, place));
+        if (wrap) made.push_back(stamped(Token(TokenKind::RParen), place));
+        tokens_.erase(tokens_.begin() + static_cast<std::ptrdiff_t>(at));
+        tokens_.insert(tokens_.begin() + static_cast<std::ptrdiff_t>(at), made.begin(), made.end());
+    };
+    if (pos_ < tokens_.size() && tokens_[pos_].kind == TokenKind::Ident) {
+        const std::vector<Token>* body = known(pos_);
+        if (!body) throw ParseError("Window name '" + tokens_[pos_].text + "' is not defined.");
+        const std::vector<Token> copy = *body;
+        splice(pos_, copy, true);
+    }
+    for (int nesting = 0; nesting < 16 && pos_ + 1 < tokens_.size() && tokens_[pos_].kind == TokenKind::LParen; nesting++) {
+        const std::vector<Token>* body = known(pos_ + 1);
+        if (!body) break;
+        const std::vector<Token> copy = *body;
+        splice(pos_ + 1, copy, false);
+    }
+}
+
 std::optional<WindowFrame> Parser::parse_window_frame() {
     FrameUnit unit;
     if (peek_is(TokenKind::Rows)) { advance(); unit = FrameUnit::Rows; }
     else if (peek_is(TokenKind::Range)) { advance(); unit = FrameUnit::Range; }
     else return std::nullopt;
-
-    if (!peek_is(TokenKind::Between)) throw ParseError("Expected BETWEEN after ROWS/RANGE");
-    advance();
 
     auto parse_bound = [this]() -> FrameBound {
         const Token* p = peek();
@@ -1602,6 +1680,14 @@ std::optional<WindowFrame> Parser::parse_window_frame() {
         throw ParseError("Expected frame bound");
     };
 
+    // ROWS UNBOUNDED PRECEDING / ROWS 2 PRECEDING / ROWS CURRENT ROW: the short form is the frame that ends at the current row
+    if (!peek_is(TokenKind::Between)) {
+        FrameBound start = parse_bound();
+        if (std::holds_alternative<FrameBound::UnboundedFollowing>(start.data) || std::holds_alternative<FrameBound::Following>(start.data))
+            throw ParseError("A frame that begins after the current row needs BETWEEN ... AND ...");
+        return WindowFrame{unit, std::move(start), FrameBound(FrameBound::CurrentRow{})};
+    }
+    advance(); // BETWEEN
     FrameBound start = parse_bound();
     if (!peek_is(TokenKind::And)) throw ParseError("Expected AND in frame");
     advance();

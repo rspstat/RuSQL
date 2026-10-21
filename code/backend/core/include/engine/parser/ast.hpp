@@ -172,6 +172,7 @@ struct ForeignKey {
     std::string ref_column;
     FkAction on_delete = FkAction::Restrict;
     FkAction on_update = FkAction::Restrict;
+    std::string name; // CONSTRAINT <name> FOREIGN KEY ...; empty: not named (it is reported as <table>_ibfk_<n>, see engine/fk_name.hpp)
 };
 
 // A UNIQUE key over several columns (a single-column one is the `unique` flag of its ColumnDef).

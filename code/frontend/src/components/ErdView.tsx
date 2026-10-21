@@ -7,10 +7,12 @@
 // by App.tsx (the drag mousemove/mouseup effect that mutates erdPositions/erdPan/
 // erdDataHeight during a drag remains in App.tsx since it isn't part of this render).
 
+import { useState } from "react";
 import type { Dispatch, RefObject, SetStateAction } from "react";
 import type { ColumnDetail, QueryResult } from "../types";
 import { ERD_CARD_W, ERD_COL_H, ERD_HEADER_H, erdOrthPath, parseRef, unqualify, type ErdPos } from "../lib/erd";
 import { measureTextPx } from "../lib/measureText";
+import FkEditorModal, { type FkTarget } from "./FkEditorModal";
 
 interface CardDrag { table: string; startMX: number; startMY: number; startCX: number; startCY: number; zoom: number; }
 interface CanvasDrag { startMX: number; startMY: number; startPX: number; startPY: number; }
@@ -58,6 +60,8 @@ export default function ErdView(props: Props) {
     erdDataHeight, setErdDataHeight, erdTableData, setErdTableData, erdTableLoading,
     loadErdTableData, erdFilter, setErdFilter,
   } = props;
+  // the foreign key being added or edited (the modal builds the ALTER TABLE and shows it before it is sent)
+  const [fkTarget, setFkTarget] = useState<FkTarget | null>(null);
 
   return (
     <div className="erd-view">
@@ -85,6 +89,7 @@ export default function ErdView(props: Props) {
             />
             <span className="erd-zoom-label">{Math.round(erdZoom * 100)}%</span>
           </div>
+          <button className="erd-tool-btn" onClick={() => setFkTarget({ kind: "add", table: erdSelectedTable || undefined })} disabled={Object.keys(erdColumns).length < 1} title="Add a foreign key between two tables (click a relationship line to edit it)">＋ Relationship</button>
           <button className="erd-tool-btn" onClick={autoLayoutErd} title={isAutoLayout ? "Restore original positions" : "Auto arrange by FK"}>
             {isAutoLayout ? "↩ Reset Layout" : "⊞ Auto Layout"}
           </button>
@@ -214,6 +219,18 @@ export default function ErdView(props: Props) {
                         markerEnd={isHovered ? "url(#erd-one-hi)" : "url(#erd-one)"}
                         className={isHovered ? "erd-edge-active" : isDimmed ? "erd-edge-dim" : "erd-edge"}
                       />
+                      <path
+                        d={pathD}
+                        fill="none"
+                        stroke="transparent"
+                        strokeWidth={14}
+                        pointerEvents="stroke"
+                        className="erd-edge-hit"
+                        onMouseDown={e => e.stopPropagation()}
+                        onClick={e => { e.stopPropagation(); setFkTarget({ kind: "edit", table: tableName, column: col.name }); }}
+                      >
+                        <title>{`${tableName}.${col.name} → ${col.fk_ref} (click to edit)`}</title>
+                      </path>
                       {isHovered && (
                         <>
                           <circle cx={px1} cy={py1} r="4" fill="#4ec9b0" opacity="0.9"/>
@@ -360,6 +377,10 @@ export default function ErdView(props: Props) {
             </div>
           </div>
         </>
+      )}
+
+      {fkTarget && (
+        <FkEditorModal target={fkTarget} db={currentDb} columns={erdColumns} onClose={() => setFkTarget(null)} onApplied={loadErd} />
       )}
 
       <div className="status-bar">

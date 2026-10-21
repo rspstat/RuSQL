@@ -145,7 +145,10 @@ Comparison with a real MySQL (needs pymysql and a MySQL 8.4 on 127.0.0.1:3391; u
       where_errors (the WHERE of an UPDATE / DELETE: a division by zero, a text that is no number compared with a number; a WHERE that compares an indexed column is left out),
       arith_types (a DATE, DATETIME, TIME, ENUM and SET column read as the number it stands for: arithmetic, numeric functions, CAST, comparisons with numbers),
       float (FLOAT columns shown with six significant digits; CAST(x AS FLOAT)),
-      any_value (ANY_VALUE under ONLY_FULL_GROUP_BY), view_order (UPDATE / DELETE through a view with ORDER BY and LIMIT).
+      any_value (ANY_VALUE under ONLY_FULL_GROUP_BY), view_order (UPDATE / DELETE through a view with ORDER BY and LIMIT),
+      windows (ROWS UNBOUNDED PRECEDING / ROWS n PRECEDING, WINDOW w AS (...), OVER w, OVER (w ORDER BY ...)),
+      max_execution_time (the hint and SET max_execution_time stop a SELECT with error 3024; COUNT(*) over a cross join is left out: MySQL counts it in a join buffer within the limit),
+      fk_names (CONSTRAINT <name>, ALTER TABLE ... DROP FOREIGN KEY <name>, a drop and an add in one ALTER, information_schema.referential_constraints).
   python make_scoreboard.py <engine_server.exe> [--tests CASES ASSERTIONS]
       runs every corpus (the protocol ones with --proto) and writes the numbers the app's Compat page shows to code/frontend/src/lib/compatSnapshot.json.
       The cells of RuSQL's answer are read the way the engine itself reads a result table (\\ \n \| and \s \t for a space or tab at either end of a value,

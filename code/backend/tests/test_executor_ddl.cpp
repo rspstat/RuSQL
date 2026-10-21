@@ -245,13 +245,11 @@ TEST_CASE("ALTER TABLE foreign key / unique / check constraints", "[executor][dd
         auto col = std::find_if(schema->columns.begin(), schema->columns.end(), [](auto& c) { return c.name == "department_id"; });
         REQUIRE(col != schema->columns.end());
         REQUIRE(col->foreign_key.has_value());
-        REQUIRE(col->foreign_key->ref_table == "department");
+        REQUIRE(col->foreign_key->ref_table == "company.department"); // (the parent is kept under its database, as CREATE TABLE keeps it)
+        REQUIRE(col->foreign_key->name == "fk_proj_dept");
     }
 
-    // DropForeignKey matches by column name or by the auto-derived "fk_{column}" label —
-    // the custom constraint name given to ADD is only ever used for the success message,
-    // never stored (ForeignKey has no `name` field), so it can't be used to target DROP.
-    // This is a faithfully-ported quirk of the Rust original, not a C++ port bug.
+    // DropForeignKey matches the name the key was given (see the [r46][fk_names] test), the column name or the older "fk_{column}" label.
     Statement drop_fk = Statement::AlterTable{"project", AlterAction::DropForeignKey{"department_id"}};
     REQUIRE(ex.execute(drop_fk).is_ok());
 

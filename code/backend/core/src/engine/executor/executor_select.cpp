@@ -17,6 +17,7 @@
 
 #include "engine/column_text.hpp"
 #include "engine/explain_trace.hpp"
+#include "engine/statement_deadline.hpp"
 #include "engine/join.hpp"
 #include "engine/planner.hpp"
 #include "engine/parallel_util.hpp"
@@ -2477,6 +2478,7 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
         for (auto& r : result) rows_p.push_back(&r);
     }
 
+    deadline::check_now(); // (MAX_EXECUTION_TIME: the rows are read and joined)
     if (explain_trace::active) {
         std::string label = "Scan " + table;
         for (const Join& j : joins) label += " + JOIN " + j.table;
@@ -2575,6 +2577,7 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
             for (std::size_t gi = 0; gi < groups.size(); gi++) make_group_row(gi);
         }
 
+        deadline::check_now();
         explain_trace::mark("Group / aggregate", group_rows.size());
         if (having) {
             std::vector<Row> filtered;
@@ -3194,6 +3197,7 @@ StringResult Executor::format_rows(SharedDatabase& s, const std::vector<const Ro
     std::vector<std::vector<std::string>> resolved_rows;
     resolved_rows.reserve(rows.size());
     for (const Row* row_ptr : rows) {
+        deadline::tick();
         const Row& row = *row_ptr;
         std::vector<std::string> vals;
         vals.reserve(col_defs.size());

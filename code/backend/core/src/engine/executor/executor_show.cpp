@@ -2,6 +2,7 @@
 // SHOW PROCESSLIST from rusql-core/src/engine/executor.rs (Phase 8f).
 
 #include "engine/executor/executor.hpp"
+#include "engine/fk_name.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -245,7 +246,7 @@ StringResult Executor::show_create_table_mysql(const std::string& name) {
         const ColumnDef& col = schema->columns[i];
         if (!col.foreign_key) continue;
         const ForeignKey& fk = *col.foreign_key;
-        std::string line = "  CONSTRAINT `" + bare + "_ibfk_" + std::to_string(i + 1) + "` FOREIGN KEY (`" + fk.column + "`) REFERENCES `" + bare_name(fk.ref_table) + "` (`" + fk.ref_column + "`)";
+        std::string line = "  CONSTRAINT `" + fk_constraint_name(*schema, bare, i) + "` FOREIGN KEY (`" + fk.column + "`) REFERENCES `" + bare_name(fk.ref_table) + "` (`" + fk.ref_column + "`)";
         if (fk.on_delete != FkAction::Restrict) line += " ON DELETE " + fk_action_str(fk.on_delete);
         if (fk.on_update != FkAction::Restrict) line += " ON UPDATE " + fk_action_str(fk.on_update);
         lines.push_back(std::move(line));
@@ -337,7 +338,7 @@ StringResult Executor::exec_show_create_table(const SharedDatabase& s, const std
         if (col.foreign_key) {
             auto& fk = *col.foreign_key;
             std::string ref_bare = bare_name(fk.ref_table);
-            lines.push_back("  FOREIGN KEY (`" + fk.column + "`) REFERENCES `" + ref_bare + "`(`" + fk.ref_column + "`) ON DELETE " +
+            lines.push_back(std::string("  ") + (fk.name.empty() ? "" : "CONSTRAINT `" + fk.name + "` ") + "FOREIGN KEY (`" + fk.column + "`) REFERENCES `" + ref_bare + "`(`" + fk.ref_column + "`) ON DELETE " +
                              fk_action_str(fk.on_delete) + " ON UPDATE " + fk_action_str(fk.on_update));
         }
     }

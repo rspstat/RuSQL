@@ -72,6 +72,15 @@ const Case kAnyValue[] = {
 const Case kViewOrder[] = {
 #include "mysql_conformance_view_order.inc"
 };
+const Case kWindows[] = {
+#include "mysql_conformance_windows.inc"
+};
+const Case kMaxExecutionTime[] = {
+#include "mysql_conformance_max_execution_time.inc"
+};
+const Case kFkNames[] = {
+#include "mysql_conformance_fk_names.inc"
+};
 
 struct TempDataDir {
     std::string path;
@@ -273,4 +282,16 @@ TEST_CASE("ANY_VALUE is a function that lets ONLY_FULL_GROUP_BY pass a column th
 
 TEST_CASE("UPDATE and DELETE through a view take ORDER BY and LIMIT", "[mysql_conformance][view_order]") {
     run_cases("mc_view_order", kViewOrder, sizeof kViewOrder / sizeof kViewOrder[0]);
+}
+
+TEST_CASE("window frames have a short form and a window can be named in WINDOW and used with OVER w", "[mysql_conformance][windows]") {
+    run_cases("mc_windows", kWindows, sizeof kWindows / sizeof kWindows[0]);
+}
+
+TEST_CASE("a SELECT that runs longer than MAX_EXECUTION_TIME fails with error 3024", "[mysql_conformance][max_execution_time]") {
+    run_cases("mc_max_execution_time", kMaxExecutionTime, sizeof kMaxExecutionTime / sizeof kMaxExecutionTime[0]);
+}
+
+TEST_CASE("a foreign key keeps its name, DROP FOREIGN KEY takes it, referential_constraints lists the rules", "[mysql_conformance][fk_names]") {
+    run_cases("mc_fk_names", kFkNames, sizeof kFkNames / sizeof kFkNames[0]);
 }

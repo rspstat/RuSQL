@@ -535,7 +535,7 @@ ColConstraints Parser::parse_col_constraints(const std::string& col_name) {
 }
 
 /// FOREIGN KEY (col[, col2...]) REFERENCES ref_table(ref_col) [ON DELETE ...] [ON UPDATE ...]
-void Parser::parse_fk_table_level(std::vector<ColumnDef>& columns) {
+void Parser::parse_fk_table_level(std::vector<ColumnDef>& columns, const std::string& constraint_name) {
     if (!peek_is(TokenKind::LParen)) throw ParseError("Expected '(' after FOREIGN KEY");
     advance();
     std::string fk_col = expect_ident();
@@ -562,7 +562,7 @@ void Parser::parse_fk_table_level(std::vector<ColumnDef>& columns) {
     }
     auto it = std::find_if(columns.begin(), columns.end(), [&](const ColumnDef& c) { return same_name(c.name, fk_col); });
     if (it == columns.end()) throw ParseError("FOREIGN KEY: column '" + fk_col + "' not defined");
-    it->foreign_key = ForeignKey{fk_col, ref_table, ref_column, on_delete, on_update};
+    it->foreign_key = ForeignKey{fk_col, ref_table, ref_column, on_delete, on_update, constraint_name};
 }
 
 /// Parses the tail of a single partition definition after "PARTITION name VALUES" has
@@ -802,7 +802,7 @@ Statement Parser::parse_create() {
                 advance();
                 if (!peek_is(TokenKind::Key)) throw ParseError("Expected KEY");
                 advance();
-                parse_fk_table_level(columns);
+                parse_fk_table_level(columns, constraint_name);
             } else {
                 throw ParseError("Expected PRIMARY KEY, UNIQUE, CHECK, or FOREIGN KEY after CONSTRAINT name");
             }

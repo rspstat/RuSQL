@@ -277,6 +277,109 @@ def confirm_dangerous_sql(sql: str, database: str = "", via_editor: bool = False
     return _exec_and_format(sql, database)
 
 
+# run_script: DDL, transaction control and locking commit (or end) the open transaction on the engine, as in MySQL, so a preview that ends with ROLLBACK cannot undo them.
+_IMPLICIT_COMMIT_RE = re.compile(
+    r"^\s*(CREATE|ALTER|DROP|TRUNCATE|RENAME|BEGIN|START|COMMIT|ROLLBACK|SAVEPOINT|RELEASE|LOCK|UNLOCK|SET\s+(?:SESSION\s+)?AUTOCOMMIT)\b", re.IGNORECASE)
+_SCRIPT_ROW_LIMIT = 20  # rows of a SELECT shown per statement of a script
+
+
+def _script_step(n: int, sql: str, raw: str) -> dict:
+    """One statement of a script: whether it worked, and what it answered (the rows of a SELECT, or the status line without its timing)."""
+    text = raw.strip()
+    ok = not text.upper().startswith("ERR")
+    body = [l for l in text.splitlines() if l.strip()]
+    if body and body[0].strip().upper() in ("OK", "ERR"):
+        body = body[1:]
+    if body and re.match(r"^\(\d+(\.\d+)? sec\)$", body[-1].strip()):
+        body.pop()
+    step = {"n": n, "sql": sql, "ok": ok}
+    if ok:
+        rows = _parse_table_output(text)
+        if rows and not (len(rows) == 1 and ("result" in rows[0] or "error" in rows[0])):
+            step["rows"] = rows[:_SCRIPT_ROW_LIMIT]
+            if len(rows) > _SCRIPT_ROW_LIMIT:
+                step["rows_not_shown"] = len(rows) - _SCRIPT_ROW_LIMIT
+            return step
+        step["result"] = " ".join(body)
+    else:
+        step["error"] = " ".join(body) or text
+    return step
+
+
+@mcp.tool()
+def run_script(statements: list[str], database: str = "", commit: bool = False, confirmed_dangerous: bool = False) -> str:
+    """Run several SQL statements in order on ONE connection, inside one transaction, and report what each did
+    (rows of a SELECT, "N row(s) updated", or the error). Use it for a change that has to happen as a whole.
+
+    Two modes:
+    - commit=False (the default) is a PREVIEW: the statements run for real inside a transaction, the answer shows what
+      each one would do (including how many rows it touches), and then everything is rolled back - nothing is saved.
+      Show the user the preview, and call again with commit=True once they agree.
+    - commit=True runs the script and saves it, all or nothing: the first statement that fails rolls everything back
+      and the statements after it are not run.
+
+    A preview needs statements that a transaction can undo (INSERT/UPDATE/DELETE/SELECT). DDL (CREATE/ALTER/DROP/
+    TRUNCATE/RENAME) and BEGIN/COMMIT/ROLLBACK end the transaction on the engine as in MySQL, so a script that holds
+    one is refused as a preview; run it with commit=True after the user agreed. DROP/TRUNCATE and UPDATE/DELETE
+    without a WHERE clause are refused as in execute_sql: ask the user, then pass confirmed_dangerous=True.
+    Returns JSON: {mode, committed, failed_at, results: [...]}."""
+    if not statements:
+        return "Refused: statements is empty."
+    statements = [s.strip().rstrip(";").strip() for s in statements]
+    statements = [s for s in statements if s]
+    if not commit:
+        for i, sql in enumerate(statements, 1):
+            if _IMPLICIT_COMMIT_RE.match(sql):
+                return (f"Refused: statement {i} ({sql[:60]!r}) commits or ends the transaction on the engine, so a preview could not undo it. "
+                        f"Run the script with commit=True once the user agreed, or preview only its INSERT/UPDATE/DELETE/SELECT statements.")
+    if not confirmed_dangerous:
+        for i, sql in enumerate(statements, 1):
+            reason = _dangerous_sql_reason(sql)
+            if reason:
+                return (f"Refused: statement {i} ({sql[:60]!r}): {reason} Ask the user to explicitly confirm this is intended, "
+                        f"then call run_script again with confirmed_dangerous=True.")
+    mode = "commit" if commit else "preview"
+    results: list[dict] = []
+    failed_at = None
+    committed = False
+    try:
+        c = _Conn()
+        try:
+            if database:
+                used = c._raw(f"USE {database};")
+                if used.strip().upper().startswith("ERR"):
+                    return f"Error: {used.strip()}"
+            began = c._raw("BEGIN;")
+            if began.strip().upper().startswith("ERR"):
+                return f"Error: could not start a transaction: {began.strip()}"
+            for n, sql in enumerate(statements, 1):
+                step = _script_step(n, sql, c._raw(sql + ";"))
+                results.append(step)
+                if not step["ok"]:
+                    failed_at = n
+                    break
+            if failed_at is None and commit:
+                done = c._raw("COMMIT;")
+                committed = not done.strip().upper().startswith("ERR")
+                if not committed:
+                    results.append({"n": len(statements) + 1, "sql": "COMMIT", "ok": False, "error": done.strip()})
+                    failed_at = len(statements) + 1
+            if not committed:
+                c._raw("ROLLBACK;")
+        finally:
+            c.close()
+    except ConnectionRefusedError:
+        return f"Error: RuSQL is not running on {RUSQL_HOST}:{RUSQL_PORT}. Start the server first."
+    except Exception as e:
+        return f"Error: {e}"
+    out = {"mode": mode, "committed": committed, "failed_at": failed_at, "results": results}
+    if failed_at is not None:
+        out["note"] = "The statement above failed, so the whole script was rolled back and nothing was saved."
+    elif not commit:
+        out["note"] = "PREVIEW: everything was rolled back, nothing was saved. Call again with commit=True to apply it."
+    return json.dumps(out, ensure_ascii=False)
+
+
 @mcp.tool()
 def list_databases() -> str:
     """List all databases available in RuSQL. Returns a JSON array."""

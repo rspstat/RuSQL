@@ -12,6 +12,7 @@ import ActivityPanel from "./components/ActivityPanel";
 import ErdView from "./components/ErdView";
 import ConfirmDialog from "./components/ConfirmDialog";
 import EditTableModal from "./components/EditTableModal";
+import JourneyModal from "./components/JourneyModal";
 import { DbContextMenu, TableContextMenu, ViewContextMenu, IndexContextMenu } from "./components/ContextMenus";
 import type {
   QueryResult, MultiQueryResult, ServerStatus, IndexInfo, TriggerInfo, ColumnDetail, DbData,
@@ -153,6 +154,7 @@ function App() {
   const cellEditCommittedRef = useRef(false);
   const [editTableModal, setEditTableModal] = useState<{ table: string; cols: ColumnDetail[] } | null>(null);
   const [editTableNewCol, setEditTableNewCol] = useState({ name: "", type: "VARCHAR(50)", notNull: false, defaultVal: "" });
+  const [journeySql, setJourneySql] = useState<string | null>(null);
   const [sidebarSearch, setSidebarSearch] = useState("");
   const [bookmarks, setBookmarks] = useState<{ id: string; name: string; sql: string }[]>(() => {
     try { return JSON.parse(localStorage.getItem("rusql_bookmarks") ?? "[]"); } catch { return []; }
@@ -705,6 +707,26 @@ function App() {
 
 
   // ─── 쿼리 실행 ──────────────────────────────────────────────
+  // The statement the journey shows: the selection, else the statement the cursor is in (statements end at a `;` outside quotes)
+  const openJourney = () => {
+    const ed = editorRef.current;
+    const sel = ed?.getSelection() ? ed.getModel()?.getValueInRange(ed.getSelection()!) : "";
+    if (sel?.trim()) { setJourneySql(sel.trim()); return; }
+    const text = ed?.getValue() ?? queryRef.current;
+    const at = ed?.getPosition() && ed.getModel() ? ed.getModel()!.getOffsetAt(ed.getPosition()!) : 0;
+    const parts: { from: number; to: number }[] = [];
+    let from = 0, quote = "";
+    for (let i = 0; i < text.length; i++) {
+      const ch = text[i];
+      if (quote) { if (ch === quote) quote = ""; }
+      else if (ch === "'" || ch === '"' || ch === "`") quote = ch;
+      else if (ch === ";") { parts.push({ from, to: i }); from = i + 1; }
+    }
+    parts.push({ from, to: text.length });
+    const hit = parts.find(p => at >= p.from && at <= p.to && text.slice(p.from, p.to).trim()) ?? [...parts].reverse().find(p => text.slice(p.from, p.to).trim());
+    if (hit) setJourneySql(text.slice(hit.from, hit.to).trim());
+  };
+
   const runQuery = async (forceAll = false) => {
     const sel = !forceAll && editorRef.current?.getSelection()
       ? editorRef.current?.getModel()?.getValueInRange(editorRef.current.getSelection()!)
@@ -2274,6 +2296,8 @@ function App() {
             />
           )}
 
+          {journeySql !== null && <JourneyModal sql={journeySql} onClose={() => setJourneySql(null)} />}
+
           <div className="main">
             <div className="tabs-row">
             <div className="tab-bar" style={splitTabId ? { width: `${splitLeftPct}%`, flex: 'none' } : {}}>
@@ -2450,6 +2474,15 @@ function App() {
                         <span style={{ position: "absolute", bottom: -2, right: -3, fontSize: 8, fontWeight: 700, lineHeight: 1 }}>A</span>
                       </span>
                   }
+                </button>
+              </div>
+              <div className="editor-toolbar-sep"/>
+              <div className="editor-toolbar-group">
+                <button className="editor-toolbar-btn" onClick={openJourney} disabled={isRunning} title="Journey of the statement (runs it with TRACE and replays its steps)">
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+                    <circle cx="5" cy="18" r="2"/><circle cx="19" cy="6" r="2"/>
+                    <path d="M7 18h6a3 3 0 000-6h-2a3 3 0 010-6h6" strokeDasharray="2.5 2.5"/>
+                  </svg>
                 </button>
               </div>
             </div>

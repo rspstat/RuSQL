@@ -6,6 +6,7 @@
 // plus exec_use/exec_show_tables.
 
 #include "engine/executor/executor.hpp"
+#include "engine/fk_name.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -1063,9 +1064,17 @@ StringResult Executor::exec_alter(SharedDatabase& s, const std::string& table, A
         ForeignKey fk;
         fk.column = v->column;
         fk.ref_table = v->ref_table;
+        // (CREATE TABLE keeps the parent under its database too: an unqualified name is the parent in the database of this table)
+        if (fk.ref_table.find('.') == std::string::npos && table.find('.') != std::string::npos) fk.ref_table = table.substr(0, table.find('.')) + "." + fk.ref_table;
         fk.ref_column = v->ref_column;
         fk.on_delete = v->on_delete;
         fk.on_update = v->on_update;
+        fk.name = v->name.value_or("");
+        if (!fk.name.empty()) {
+            for (auto& other : schema->columns) {
+                if (other.foreign_key && same_name(other.foreign_key->name, fk.name)) return StringResult::Err("Duplicate foreign key constraint name '" + fk.name + "'");
+            }
+        }
         col_it->foreign_key = fk;
         s.disk.save_schema(table, *s.catalog.get_table(table));
         std::string constraint_label = v->name.value_or("fk_" + v->column);
@@ -1076,9 +1085,12 @@ StringResult Executor::exec_alter(SharedDatabase& s, const std::string& table, A
         auto* schema = s.catalog.get_table_mut(table);
         if (!schema) return StringResult::Err("Table '" + table + "' not found");
         bool found = false;
-        for (auto& col : schema->columns) {
+        const std::string bare_table = table.substr(table.rfind('.') == std::string::npos ? 0 : table.rfind('.') + 1);
+        for (std::size_t i = 0; i < schema->columns.size(); i++) {
+            auto& col = schema->columns[i];
             if (col.foreign_key) {
-                bool matches = col.foreign_key->column == v->name || ("fk_" + col.foreign_key->column) == v->name;
+                // by its name (the one it was given, or the <table>_ibfk_<n> it is reported under); the column name and fk_<column> are the older spellings
+                bool matches = same_name(fk_constraint_name(*schema, bare_table, i), v->name) || col.foreign_key->column == v->name || ("fk_" + col.foreign_key->column) == v->name;
                 if (matches) {
                     col.foreign_key = std::nullopt;
                     found = true;

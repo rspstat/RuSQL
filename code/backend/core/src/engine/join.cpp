@@ -1,4 +1,5 @@
 #include "engine/join.hpp"
+#include "engine/statement_deadline.hpp"
 
 #include "engine/storage/numeric_key.hpp"
 #include "engine/thread_pool.hpp"
@@ -49,6 +50,7 @@ std::vector<Row> probe_parallel(const std::vector<Row>& left, F&& per_row) {
     if (n_chunks < 2) {
         std::vector<Row> out;
         for (auto& l : left) {
+            deadline::tick();
             for (auto& r : per_row(l)) out.push_back(std::move(r));
         }
         return out;
@@ -394,6 +396,7 @@ std::vector<Row> nested_loop_join(const std::vector<Row>& left, const std::vecto
     if (!using_cols.empty()) {
         for (auto& l : left) {
             for (auto& r : right) {
+                deadline::tick();
                 bool matches = std::all_of(using_cols.begin(), using_cols.end(), [&](const std::string& col) {
                     auto lit = l.find(col);
                     auto rit = r.find(col);
@@ -415,6 +418,7 @@ std::vector<Row> nested_loop_join(const std::vector<Row>& left, const std::vecto
         case JoinType::Inner:
             for (auto& l : left) {
                 for (auto& r : right) {
+                    deadline::tick();
                     Row merged = l;
                     merge_right(merged, r, table);
                     if (on_match(merged)) out.push_back(std::move(merged));
@@ -463,6 +467,7 @@ std::vector<Row> nested_loop_join(const std::vector<Row>& left, const std::vecto
         case JoinType::Cross:
             for (auto& l : left) {
                 for (auto& r : right) {
+                    deadline::tick();
                     Row merged = l;
                     merge_right(merged, r, table);
                     out.push_back(std::move(merged));
@@ -477,6 +482,7 @@ std::vector<Row> nested_loop_join(const std::vector<Row>& left, const std::vecto
             }
             for (auto& l : left) {
                 for (auto& r : right) {
+                    deadline::tick();
                     Row merged = l;
                     merge_right(merged, r, table);
                     bool matches = std::all_of(common_cols.begin(), common_cols.end(), [&](const std::string& col) {

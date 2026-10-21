@@ -2,6 +2,7 @@
 // rusql-core/src/engine/executor.rs (Phase 8f): info_schema_rows (a select on one of these tables runs on a temporary table of the rows: see exec_select).
 
 #include "engine/executor/executor.hpp"
+#include "engine/fk_name.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -79,6 +80,9 @@ const std::vector<IC> kKeyColumnUsage = {
     {"REFERENCED_TABLE_NAME", false}, {"REFERENCED_COLUMN_NAME", false}};
 const std::vector<IC> kTableConstraints = {{"CONSTRAINT_CATALOG", false}, {"CONSTRAINT_SCHEMA", false}, {"CONSTRAINT_NAME", false}, {"TABLE_SCHEMA", false},
                                            {"TABLE_NAME", false}, {"CONSTRAINT_TYPE", false}, {"ENFORCED", false}};
+const std::vector<IC> kReferentialConstraints = {
+    {"CONSTRAINT_CATALOG", false}, {"CONSTRAINT_SCHEMA", false}, {"CONSTRAINT_NAME", false}, {"UNIQUE_CONSTRAINT_CATALOG", false}, {"UNIQUE_CONSTRAINT_SCHEMA", false},
+    {"UNIQUE_CONSTRAINT_NAME", false}, {"MATCH_OPTION", false}, {"UPDATE_RULE", false}, {"DELETE_RULE", false}, {"TABLE_NAME", false}, {"REFERENCED_TABLE_NAME", false}};
 const std::vector<IC> kStatistics = {
     {"TABLE_CATALOG", false}, {"TABLE_SCHEMA", false}, {"TABLE_NAME", false}, {"NON_UNIQUE", true}, {"INDEX_SCHEMA", false}, {"INDEX_NAME", false},
     {"SEQ_IN_INDEX", true}, {"COLUMN_NAME", false}, {"COLLATION", false}, {"CARDINALITY", true}, {"SUB_PART", true}, {"PACKED", false}, {"NULLABLE", false},
@@ -105,6 +109,7 @@ const std::vector<InfoSchemaColumn>* Executor::info_schema_columns(const std::st
     if (lower == "columns") return &kColumns;
     if (lower == "key_column_usage") return &kKeyColumnUsage;
     if (lower == "table_constraints") return &kTableConstraints;
+    if (lower == "referential_constraints") return &kReferentialConstraints;
     if (lower == "statistics") return &kStatistics;
     if (lower == "views") return &kViews;
     if (lower == "character_sets") return &kCharacterSets;
@@ -313,7 +318,7 @@ std::vector<Row> Executor::info_schema_rows(const SharedDatabase& s, const std::
                 Row r;
                 r["CONSTRAINT_CATALOG"] = "def";
                 r["CONSTRAINT_SCHEMA"] = db;
-                r["CONSTRAINT_NAME"] = tbl + "_ibfk_" + std::to_string(i + 1);
+                r["CONSTRAINT_NAME"] = fk_constraint_name(schema, tbl, i);
                 r["TABLE_CATALOG"] = "def";
                 r["TABLE_SCHEMA"] = db;
                 r["TABLE_NAME"] = tbl;
@@ -323,6 +328,38 @@ std::vector<Row> Executor::info_schema_rows(const SharedDatabase& s, const std::
                 r["REFERENCED_TABLE_SCHEMA"] = ref_db;
                 r["REFERENCED_TABLE_NAME"] = ref_tbl;
                 r["REFERENCED_COLUMN_NAME"] = fk.ref_column;
+                rows.push_back(std::move(r));
+            }
+        }
+        return rows;
+    }
+
+    if (lower == "referential_constraints") {
+        for (auto& [_, schema] : s.catalog.tables) {
+            auto [db, tbl] = split_name(schema.name);
+            if (db.empty() || db == "information_schema") continue;
+            for (std::size_t i = 0; i < schema.columns.size(); i++) {
+                if (!schema.columns[i].foreign_key) continue;
+                const ForeignKey& fk = *schema.columns[i].foreign_key;
+                auto [ref_db0, ref_tbl] = split_name(fk.ref_table);
+                auto rule = [](FkAction a) { return a == FkAction::Cascade ? "CASCADE" : a == FkAction::SetNull ? "SET NULL" : a == FkAction::SetDefault ? "SET DEFAULT" : "RESTRICT"; };
+                const TableSchema* parent = s.catalog.get_table(fk.ref_table);
+                bool parent_pk = false;
+                if (parent) {
+                    for (auto& pc : parent->columns) parent_pk = parent_pk || (pc.primary_key && pc.name == fk.ref_column);
+                }
+                Row r;
+                r["CONSTRAINT_CATALOG"] = "def";
+                r["CONSTRAINT_SCHEMA"] = db;
+                r["CONSTRAINT_NAME"] = fk_constraint_name(schema, tbl, i);
+                r["UNIQUE_CONSTRAINT_CATALOG"] = "def";
+                r["UNIQUE_CONSTRAINT_SCHEMA"] = ref_db0.empty() ? db : ref_db0;
+                r["UNIQUE_CONSTRAINT_NAME"] = parent_pk ? "PRIMARY" : fk.ref_column;
+                r["MATCH_OPTION"] = "NONE";
+                r["UPDATE_RULE"] = rule(fk.on_update);
+                r["DELETE_RULE"] = rule(fk.on_delete);
+                r["TABLE_NAME"] = tbl;
+                r["REFERENCED_TABLE_NAME"] = ref_tbl;
                 rows.push_back(std::move(r));
             }
         }
@@ -363,7 +400,7 @@ std::vector<Row> Executor::info_schema_rows(const SharedDatabase& s, const std::
                     Row r;
                     r["CONSTRAINT_CATALOG"] = "def";
                     r["CONSTRAINT_SCHEMA"] = db;
-                    r["CONSTRAINT_NAME"] = tbl + "_ibfk_" + col.name;
+                    r["CONSTRAINT_NAME"] = fk_constraint_name(schema, tbl, static_cast<std::size_t>(&col - schema.columns.data()));
                     r["TABLE_SCHEMA"] = db;
                     r["TABLE_NAME"] = tbl;
                     r["CONSTRAINT_TYPE"] = "FOREIGN KEY";

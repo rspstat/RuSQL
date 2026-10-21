@@ -142,6 +142,12 @@ Statement Parser::parse_select() {
         }
         ~Enclosing() { release(); }
     } enclosing(enclosing_from_, scan_from_names());
+    // the named windows of this query (WINDOW w AS (...)) are known from here on; the clause itself is out of the tokens
+    window_defs_.push_back(take_window_clause());
+    struct WindowScope {
+        std::vector<std::map<std::string, std::vector<Token>>>* defs;
+        ~WindowScope() { defs->pop_back(); }
+    } window_scope{&window_defs_};
     // a table that a query around this one has in its FROM list
     auto shadowed = [this](const std::string& table) {
         for (std::size_t i = 0; i + 1 < enclosing_from_.size(); i++) {
@@ -257,6 +263,7 @@ Statement Parser::parse_select() {
                 // 집계함수 + OVER → aggregate window function
                 if (peek_is(TokenKind::Over)) {
                     advance(); // consume OVER
+                    expand_window_name();
                     if (!peek_is(TokenKind::LParen)) throw ParseError("Expected '(' after OVER");
                     advance();
                     std::vector<std::string> partition_by;
@@ -422,6 +429,7 @@ Statement Parser::parse_select() {
                 advance();
                 if (!peek_is(TokenKind::Over)) throw ParseError("Expected OVER");
                 advance();
+                expand_window_name();
                 if (!peek_is(TokenKind::LParen)) throw ParseError("Expected '(' after OVER");
                 advance();
                 std::vector<std::string> partition_by;

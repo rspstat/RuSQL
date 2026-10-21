@@ -12,6 +12,7 @@
 // catches ParseError and converts it to a Result<Statement,std::string>, matching the
 // Rust function's public signature `pub fn parse(&mut self) -> Result<Statement, String>`.
 
+#include <map>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -179,6 +180,11 @@ private:
     ArithExpr parse_arith_term();
 
     std::optional<WindowFrame> parse_window_frame();
+    // WINDOW w AS (...): the definitions (their tokens, by lower-case name) of the named windows of the SELECT being parsed, taken out of the token stream when
+    // that SELECT starts; `OVER w` and `OVER (w ...)` then have the name replaced by the tokens it stands for (expand_window_name)
+    std::vector<std::map<std::string, std::vector<Token>>> window_defs_;
+    std::map<std::string, std::vector<Token>> take_window_clause();
+    void expand_window_name();
 
     Statement parse_select();
     Statement parse_insert();
@@ -195,7 +201,7 @@ private:
 
     DataType parse_data_type();
     ColConstraints parse_col_constraints(const std::string& col_name);
-    void parse_fk_table_level(std::vector<ColumnDef>& columns);
+    void parse_fk_table_level(std::vector<ColumnDef>& columns, const std::string& constraint_name = "");
     FkAction parse_fk_action();
     std::optional<PartitionBy> parse_partition_by();
     // PostgreSQL's `FILTER (WHERE cond)` clause on an aggregate -- no Rust original.

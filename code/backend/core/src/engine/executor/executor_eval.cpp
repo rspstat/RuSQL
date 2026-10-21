@@ -22,6 +22,7 @@
 #include "engine/parser/parser.hpp"
 #include "engine/result_text.hpp"
 #include "engine/sql_value_util.hpp"
+#include "engine/statement_deadline.hpp"
 
 namespace engine {
 
@@ -576,6 +577,7 @@ bool Executor::eval_single(const Row& row, const Condition& cond) { return eval_
 // A comparison with a NULL operand is UNKNOWN (so is NOT of it); IS NULL / IS NOT NULL are the only predicates that answer for NULL;
 // `x IN (1, NULL)` is TRUE or UNKNOWN, `x NOT IN (1, NULL)` FALSE or UNKNOWN.
 Executor::Tri Executor::eval_single3(const Row& row, const Condition& cond) {
+    deadline::tick(); // (MAX_EXECUTION_TIME: the loop over the rows is here, whoever runs it)
     auto tri = [](bool b) { return b ? Tri::True : Tri::False; };
     // `x IN (SELECT ...)`, `EXISTS (SELECT ...)`, `x > (SELECT ...)` where a condition is only a value or a test of a join (a CASE's WHEN, IF(), a
     // select item, the ON of a JOIN): answered by the statement that is running (WHERE and HAVING go through eval_single_with_subquery themselves)

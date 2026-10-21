@@ -96,6 +96,7 @@ void to_json(nlohmann::json& j, const ForeignKey& fk) {
         {"ref_column", fk.ref_column},
         {"on_delete", fk.on_delete},
         {"on_update", fk.on_update},
+        {"name", fk.name},
     };
 }
 
@@ -107,6 +108,7 @@ void from_json(const nlohmann::json& j, ForeignKey& fk) {
     // #[serde(default)] on ForeignKey::on_update in the schema-persisted variant
     if (j.contains("on_update")) j.at("on_update").get_to(fk.on_update);
     else fk.on_update = FkAction::Restrict;
+    fk.name = j.value("name", std::string()); // (schemas written before the names were kept have none)
 }
 
 void to_json(nlohmann::json& j, const ColumnDef& col) {

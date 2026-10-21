@@ -1,0 +1,28 @@
+# Foreign keys with names (R46): CONSTRAINT <name>, ALTER TABLE ... DROP FOREIGN KEY <name>, a drop and an add in one ALTER, information_schema.referential_constraints.
+--CREATE TABLE fk_p (id INT PRIMARY KEY, name VARCHAR(10))
+--INSERT INTO fk_p VALUES (1,'a'),(2,'b'),(3,'c')
+--CREATE TABLE fk_c (id INT PRIMARY KEY, pid INT, note VARCHAR(10))
+--INSERT INTO fk_c VALUES (1,1,'x')
+ALTER TABLE fk_c ADD CONSTRAINT fk_c_p FOREIGN KEY (pid) REFERENCES fk_p (id) ON DELETE CASCADE ON UPDATE RESTRICT
+INSERT INTO fk_c VALUES (2, 9, 'bad')
+INSERT INTO fk_c VALUES (2, 2, 'ok')
+SELECT CONSTRAINT_NAME, UPDATE_RULE, DELETE_RULE, TABLE_NAME, REFERENCED_TABLE_NAME FROM information_schema.referential_constraints WHERE TABLE_NAME = 'fk_c'
+SELECT CONSTRAINT_NAME, COLUMN_NAME, REFERENCED_TABLE_NAME, REFERENCED_COLUMN_NAME FROM information_schema.key_column_usage WHERE TABLE_NAME = 'fk_c' AND REFERENCED_TABLE_NAME IS NOT NULL
+SELECT CONSTRAINT_NAME, CONSTRAINT_TYPE FROM information_schema.table_constraints WHERE TABLE_NAME = 'fk_c' ORDER BY CONSTRAINT_TYPE
+DELETE FROM fk_p WHERE id = 1
+SELECT id FROM fk_c ORDER BY id
+ALTER TABLE fk_c DROP FOREIGN KEY nosuch
+ALTER TABLE fk_c ADD CONSTRAINT fk_c_p FOREIGN KEY (pid) REFERENCES fk_p (id)
+ALTER TABLE fk_c DROP FOREIGN KEY fk_c_p, ADD CONSTRAINT fk_c_p2 FOREIGN KEY (pid) REFERENCES fk_p (id) ON DELETE SET NULL ON UPDATE CASCADE
+SELECT CONSTRAINT_NAME, UPDATE_RULE, DELETE_RULE FROM information_schema.referential_constraints WHERE TABLE_NAME = 'fk_c'
+UPDATE fk_p SET id = 20 WHERE id = 2
+SELECT id, pid FROM fk_c ORDER BY id
+DELETE FROM fk_p WHERE id = 20
+SELECT id, pid FROM fk_c ORDER BY id
+ALTER TABLE fk_c DROP FOREIGN KEY fk_c_p2
+INSERT INTO fk_c VALUES (3, 99, 'free now')
+SELECT COUNT(*) FROM information_schema.referential_constraints WHERE TABLE_NAME = 'fk_c'
+--CREATE TABLE fk_d (id INT PRIMARY KEY, pid INT, CONSTRAINT my_fk FOREIGN KEY (pid) REFERENCES fk_p (id) ON DELETE SET NULL)
+SELECT CONSTRAINT_NAME, DELETE_RULE FROM information_schema.referential_constraints WHERE TABLE_NAME = 'fk_d'
+ALTER TABLE fk_d DROP FOREIGN KEY my_fk
+SELECT COUNT(*) FROM information_schema.referential_constraints WHERE TABLE_NAME = 'fk_d'

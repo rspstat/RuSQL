@@ -1,0 +1,45 @@
+.jn-modal { background: #252526; border: 1px solid #454545; border-radius: 8px; width: min(920px, 94vw); max-height: 88vh; display: flex; flex-direction: column; overflow: hidden; color: #d4d4d4; }
+.jn-header { display: flex; align-items: center; justify-content: space-between; padding: 12px 16px; border-bottom: 1px solid #3c3c3c; font-size: 13px; }
+.jn-close { background: none; border: none; color: #858585; font-size: 15px; cursor: pointer; }
+.jn-close:hover { color: #ccc; }
+.jn-sql { margin: 0; padding: 10px 16px; font: 12px Consolas, "Courier New", monospace; background: #1e1e1e; color: #9cdcfe; border-bottom: 1px solid #3c3c3c; white-space: pre-wrap; max-height: 110px; overflow: auto; }
+.jn-body { padding: 16px; overflow: auto; font-size: 12px; }
+.jn-dim { color: #858585; }
+.jn-err { color: #f48771; }
+.jn-warn { margin: 0 0 12px; color: #ddb05d; }
+
+.jn-track { display: flex; align-items: flex-start; flex-wrap: wrap; row-gap: 14px; margin-bottom: 14px; }
+.jn-track-item { display: flex; align-items: center; }
+.jn-node { width: 92px; padding: 8px 4px; text-align: center; border: 1px solid #3c3c3c; border-radius: 8px; background: #2d2d2d; cursor: pointer; opacity: 0.55; transition: all 0.35s ease; }
+.jn-node.jn-past { opacity: 0.9; border-color: #4a6b63; }
+.jn-node.jn-now { opacity: 1; border-color: #4ec9b0; background: #1f3a35; box-shadow: 0 0 0 2px rgba(78, 201, 176, 0.25), 0 0 14px rgba(78, 201, 176, 0.35); transform: translateY(-3px) scale(1.05); }
+.jn-icon { font-size: 18px; line-height: 22px; height: 22px; }
+.jn-node-name { margin-top: 4px; font-size: 10px; line-height: 12px; color: #bbb; min-height: 24px; overflow: hidden; }
+.jn-link { width: 18px; height: 2px; background: #3c3c3c; transition: background 0.35s ease; }
+.jn-link.jn-link-on { background: #4ec9b0; }
+
+.jn-detail { min-height: 74px; padding: 10px 12px; background: #1e1e1e; border: 1px solid #3c3c3c; border-radius: 6px; margin-bottom: 12px; }
+.jn-detail-title { font-size: 13px; color: #4ec9b0; margin-bottom: 4px; }
+.jn-detail-text { color: #bbb; line-height: 1.5; }
+.jn-facts { margin-top: 6px; display: flex; gap: 18px; color: #9cdcfe; }
+.jn-facts b { color: #d4d4d4; font-weight: 600; }
+
+.jn-bars { display: flex; flex-direction: column; gap: 4px; margin-bottom: 12px; }
+.jn-bar-row { display: flex; align-items: center; gap: 8px; }
+.jn-bar-row.jn-bar-now .jn-bar-name { color: #4ec9b0; }
+.jn-bar-name { width: 170px; flex-shrink: 0; color: #999; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.jn-bar-track { flex: 1; height: 8px; background: #2d2d2d; border-radius: 4px; overflow: hidden; }
+.jn-bar-fill { display: block; height: 100%; min-width: 2px; background: linear-gradient(90deg, #4ec9b0, #569cd6); border-radius: 4px; transition: opacity 0.35s ease; }
+.jn-bar-ms { width: 76px; text-align: right; color: #858585; font-variant-numeric: tabular-nums; }
+
+.jn-outcome { padding: 8px 12px; margin-bottom: 12px; background: #1f2d24; border: 1px solid #355a43; border-radius: 6px; color: #8fd6a4; }
+.jn-outcome.jn-err { background: #3a2323; border-color: #6b3a3a; color: #f48771; }
+
+.jn-controls { display: flex; align-items: center; gap: 8px; }
+.jn-btn { background: #333; color: #d4d4d4; border: 1px solid #454545; border-radius: 4px; padding: 5px 12px; font-size: 12px; cursor: pointer; }
+.jn-btn:hover:not(:disabled) { background: #3d3d3d; }
+.jn-btn:disabled { opacity: 0.4; cursor: default; }
+.jn-btn.jn-primary { background: #0e639c; border-color: #0e639c; color: #fff; }
+.jn-btn.jn-primary:hover { background: #1177bb; }
+.jn-speed { background: #333; color: #d4d4d4; border: 1px solid #454545; border-radius: 4px; padding: 4px 6px; font-size: 12px; }
+.jn-note { margin-left: auto; font-size: 11px; }

@@ -537,3 +537,77 @@ TEST_CASE("ANY_VALUE lets a column the group does not fix be selected, and UPDAT
     ok(ex, "DELETE FROM avv ORDER BY id LIMIT 1");
     REQUIRE(q(ex, "SELECT id FROM av ORDER BY id") == Rows{{"2"}, {"3"}});
 }
+
+TEST_CASE("TRACE runs a statement and lists the steps of its path, and MAX_EXECUTION_TIME stops a SELECT that runs too long", "[r46][trace][deadline]") {
+    TempDataDir dir("r46_trace");
+    Executor ex(dir.path);
+    ok(ex, "CREATE DATABASE d");
+    ok(ex, "USE d");
+    ok(ex, "CREATE TABLE t (id INT PRIMARY KEY, g INT, v INT)");
+    ok(ex, "INSERT INTO t VALUES (1, 1, 10), (2, 1, 20), (3, 2, 30), (4, 2, 40), (5, 3, 50)");
+    auto trace = [&](const std::string& sql) {
+        auto r = ex.execute_sql("TRACE " + sql);
+        INFO(sql);
+        REQUIRE(r.is_ok());
+        return r.value();
+    };
+    const std::string select_path = trace("SELECT g, SUM(v) FROM t WHERE v > 10 GROUP BY g ORDER BY g");
+    for (const char* step : {"Parse", "Prepare (cache, locks)", "Table locks", "Scan d.t", "Group / aggregate", "Return the answer", "Total", "Statement: 3 row(s) returned."})
+        REQUIRE(select_path.find(step) != std::string::npos);
+    // a TRACE of a write writes, and its path ends with the redo log
+    const std::string update_path = trace("UPDATE t SET v = v + 1 WHERE g = 1");
+    REQUIRE(update_path.find("Commit (redo log, fsync)") != std::string::npos);
+    REQUIRE(update_path.find("Statement: 2 row(s) updated.") != std::string::npos);
+    REQUIRE(q(ex, "SELECT v FROM t WHERE g = 1 ORDER BY id") == Rows{{"11"}, {"21"}});
+    REQUIRE(trace("SELECT nosuch FROM t").find("Statement failed: Unknown column 'nosuch'") != std::string::npos);
+
+    // MAX_EXECUTION_TIME: the hint and the variable, SELECT only; the session goes on
+    const std::string heavy = "SELECT a.id FROM t a, t b, t c, t d, t e, t f, t g, t h, t i, t j ORDER BY a.id LIMIT 3";
+    REQUIRE(fails(ex, "SELECT /*+ MAX_EXECUTION_TIME(30) */ " + heavy.substr(7)).find("3024") != std::string::npos);
+    REQUIRE(q(ex, "SELECT /*+ MAX_EXECUTION_TIME(60000) */ COUNT(*) FROM t a, t b") == Rows{{"25"}});
+    ok(ex, "SET max_execution_time = 30");
+    REQUIRE(q(ex, "SELECT @@max_execution_time") == Rows{{"30"}});
+    REQUIRE(fails(ex, heavy).find("maximum statement execution time exceeded") != std::string::npos);
+    ok(ex, "UPDATE t SET v = v + 1 WHERE id = 5"); // (a write is not timed)
+    ok(ex, "SET max_execution_time = 0");
+    REQUIRE(q(ex, "SELECT COUNT(*) FROM t a, t b, t c") == Rows{{"125"}});
+}
+
+TEST_CASE("a foreign key keeps its name: DROP FOREIGN KEY by name, a drop and an add in one ALTER, referential_constraints, a parent named without its database", "[r46][fk_names]") {
+    TempDataDir dir("r46_fk_names");
+    Executor ex(dir.path);
+    ok(ex, "CREATE DATABASE d");
+    ok(ex, "USE d");
+    ok(ex, "CREATE TABLE p (id INT PRIMARY KEY, name VARCHAR(10))");
+    ok(ex, "CREATE TABLE c (id INT PRIMARY KEY, pid INT, note VARCHAR(10))");
+    ok(ex, "INSERT INTO p VALUES (1, 'a'), (2, 'b')");
+    ok(ex, "INSERT INTO c VALUES (1, 1, 'x')");
+    ok(ex, "ALTER TABLE c ADD CONSTRAINT fk_c_p FOREIGN KEY (pid) REFERENCES p (id) ON DELETE CASCADE"); // (the parent is `p`, not `d.p`)
+    REQUIRE(fails(ex, "INSERT INTO c VALUES (2, 9, 'bad')").find("Foreign key violation") != std::string::npos);
+    ok(ex, "INSERT INTO c VALUES (2, 2, 'ok')");
+    REQUIRE(q(ex, "SELECT CONSTRAINT_NAME, UPDATE_RULE, DELETE_RULE, REFERENCED_TABLE_NAME FROM information_schema.referential_constraints WHERE TABLE_NAME = 'c'") ==
+            Rows{{"fk_c_p", "RESTRICT", "CASCADE", "p"}});
+    REQUIRE(q(ex, "SELECT CONSTRAINT_NAME FROM information_schema.key_column_usage WHERE TABLE_NAME = 'c' AND REFERENCED_TABLE_NAME IS NOT NULL") == Rows{{"fk_c_p"}});
+    REQUIRE(fails(ex, "ALTER TABLE c ADD CONSTRAINT fk_c_p FOREIGN KEY (pid) REFERENCES p (id)").find("Duplicate foreign key constraint name") != std::string::npos);
+    REQUIRE(fails(ex, "ALTER TABLE c DROP FOREIGN KEY nosuch").find("not found") != std::string::npos);
+    // a change is one ALTER: the old key goes and the new one comes, or nothing happens
+    ok(ex, "ALTER TABLE c DROP FOREIGN KEY fk_c_p, ADD CONSTRAINT fk_c_p2 FOREIGN KEY (pid) REFERENCES p (id) ON DELETE SET NULL ON UPDATE CASCADE");
+    REQUIRE(q(ex, "SELECT CONSTRAINT_NAME, UPDATE_RULE, DELETE_RULE FROM information_schema.referential_constraints WHERE TABLE_NAME = 'c'") == Rows{{"fk_c_p2", "CASCADE", "SET NULL"}});
+    ok(ex, "UPDATE p SET id = 20 WHERE id = 2");
+    REQUIRE(q(ex, "SELECT id, pid FROM c ORDER BY id") == Rows{{"1", "1"}, {"2", "20"}});
+    ok(ex, "DELETE FROM p WHERE id = 20");
+    REQUIRE(q(ex, "SELECT id, pid FROM c WHERE id = 2") == Rows{{"2", "NULL"}});
+    // the name survives a restart and is written by SHOW CREATE TABLE
+    auto shown = ex.execute_sql("SHOW CREATE TABLE c");
+    REQUIRE(shown.is_ok());
+    REQUIRE(shown.value().find("CONSTRAINT `fk_c_p2` FOREIGN KEY (`pid`) REFERENCES `p`(`id`) ON DELETE SET NULL ON UPDATE CASCADE") != std::string::npos);
+    ok(ex, "ALTER TABLE c DROP FOREIGN KEY fk_c_p2");
+    ok(ex, "INSERT INTO c VALUES (3, 99, 'free now')");
+    // a table created with a named constraint, and one with none (reported as <table>_ibfk_<n>)
+    ok(ex, "CREATE TABLE e (id INT PRIMARY KEY, pid INT, CONSTRAINT my_fk FOREIGN KEY (pid) REFERENCES p (id))");
+    ok(ex, "CREATE TABLE f (id INT PRIMARY KEY, pid INT, FOREIGN KEY (pid) REFERENCES p (id))");
+    REQUIRE(q(ex, "SELECT TABLE_NAME, CONSTRAINT_NAME FROM information_schema.referential_constraints ORDER BY TABLE_NAME") == Rows{{"e", "my_fk"}, {"f", "f_ibfk_1"}});
+    ok(ex, "ALTER TABLE e DROP FOREIGN KEY my_fk");
+    ok(ex, "ALTER TABLE f DROP FOREIGN KEY f_ibfk_1");
+    REQUIRE(q(ex, "SELECT COUNT(*) FROM information_schema.referential_constraints") == Rows{{"0"}});
+}

@@ -2141,6 +2141,33 @@ VS Code 스타일 탭 드래그 순서 변경(요청의 1번 항목)은 같은 �
 
 **한계**: `ANY_VALUE`를 `HAVING`에서 쓰면 MySQL은 "Unknown column" 오류인데 여기는 받는다. `EXPLAIN ANALYZE`는 가장 바깥 `SELECT`의 단계만 나누고 조인 안의 알고리즘별 시간·하위 질의별 시간은 없다. 락 대기·교착 표는 두 세션이 필요해 C++ 시험이 아니라 손으로 확인했다. 자동완성은 파생 표의 별칭·CTE 열은 모른다.
 
+### 10월 21일 — R46: 윈도 단축형·이름 있는 윈도, MAX_EXECUTION_TIME, 외래키 이름과 ERD 관계 편집기, MCP run_script, SQL 한 문장의 여행(TRACE)
+
+**왜 이 항목인가**: R45 뒤 추천 목록(`docs/mds/RECOMMAND.md`)에서 다섯 개를 골랐다 — 윈도 단축형, `MAX_EXECUTION_TIME`, ERD에서 FK 편집 + DDL 미리보기, MCP `run_script`, SQL 한 문장의 여행. 항목마다 시험하고 끝에 문서를 한꺼번에 갱신하는 방식으로 진행했다.
+
+**엔진**
+- **윈도 프레임 단축형·이름 있는 윈도**: `ROWS UNBOUNDED PRECEDING`/`ROWS 2 PRECEDING`/`ROWS CURRENT ROW`(RANGE도)는 `BETWEEN … AND CURRENT ROW`와 같다. 뒤로 시작하는 단축형(`ROWS 2 FOLLOWING`)은 MySQL처럼 오류. `WINDOW w AS (…)`, `OVER w`, `OVER (w ORDER BY …)`, `OVER (w ROWS …)`는 **파서가 토큰 단계에서** 풀어 쓴다 — `WINDOW` 절을 토큰에서 잘라 이름별로 보관하고 `OVER` 뒤의 이름을 그 토큰으로 바꾸며, 바꿔 넣은 토큰은 이름이 있던 자리의 위치를 물려받아 이름 없는 결과 열이 쓴 글자(`SUM(v) OVER w`) 그대로 나온다. AST·JSON·실행기는 건드리지 않았다. 이름은 대소문자를 구분하지 않고 없는 이름은 오류.
+- **`MAX_EXECUTION_TIME`** (`statement_deadline.hpp`, 새 파일): `SELECT /*+ MAX_EXECUTION_TIME(ms) */ …` 힌트나 `SET [SESSION] max_execution_time = ms`. 넘으면 오류 3024 `Query execution was interrupted, maximum statement execution time exceeded`(SELECT만, 세션은 그대로). 문장을 **밖에서 끊지 않고** 실행하는 스레드의 시계를 루프가 확인한다 — WHERE 평가, 조인 반복, 결과 쓰기에서 1024번에 한 번, `exec_select`의 단계 경계마다. 병렬 스캔의 작업 스레드는 확인하지 않는다(시작한 스레드가 다음 단계에서 멈춘다). `SLEEP`은 기다리지 않아 시험에 못 쓴다.
+- **`TRACE <문장>`** (`explain_trace.hpp` 확장, `run_trace`): 문장을 **실제로 실행**하고 지나온 길을 표로 준다 — Parse → Prepare(캐시·락) → Table locks → (SELECT의 스캔·정렬·그룹 단계) → Execute → Commit(redo 로그 fsync) → Return the answer, 단계마다 남은 행·시간·비율과 마지막 `Total` 줄(문장의 답, 또는 오류). MySQL에 없는 RuSQL 문법. 한 문장의 여행 재생기가 이것을 쓴다.
+- **외래키 이름과 두 버그** (ERD 편집기를 만들다 찾았다): ① `ALTER TABLE c ADD FOREIGN KEY (pid) REFERENCES p (id)`처럼 부모를 데이터베이스 없이 쓰면 부모를 `p`로만 저장해, **그 뒤 `c`의 모든 INSERT가 "Referenced table 'p' not found"로 실패**했다(CREATE TABLE은 `db.p`로 저장). ② 제약 이름이 저장되지 않아 `ALTER TABLE … DROP FOREIGN KEY <이름>`이 듣지 않았고(열 이름·`fk_<열>`만 먹었다) SHOW CREATE TABLE에도 이름이 없었으며 `information_schema`의 이름이 두 표에서 서로 달랐다. 이제 `ForeignKey.name`을 저장(스키마 JSON `name`, 예전 파일은 이름 없음)하고 `fk_constraint_name()`(`fk_name.hpp`) 한 곳에서 보고 이름을 만든다 — 준 이름, 없으면 MySQL처럼 `<표>_ibfk_<n>`. DROP은 그 이름(또는 옛 철자)으로 지우고, 한 ALTER의 `DROP FOREIGN KEY a, ADD CONSTRAINT b …`는 전부 되거나 전혀 안 되며, 같은 이름을 다시 쓰면 오류. SHOW CREATE TABLE·BACKUP이 이름을 쓰고 `information_schema.referential_constraints`(UPDATE_RULE·DELETE_RULE·REFERENCED_TABLE_NAME …)가 새로 생겼다.
+
+**앱**
+- **ERD 관계 편집기**(`components/FkEditorModal.tsx`, `ErdView.tsx`): 관계선을 누르거나 `＋ Relationship`을 누르면 자식·부모 표와 열, 이름, ON DELETE/UPDATE를 고르는 창이 열리고, 아래에 `ALTER TABLE …` DDL이 **그대로 미리 보인다**(고를 때마다 갱신, `Apply`를 누르기 전에는 아무것도 실행하지 않는다). 수정은 DROP+ADD가 한 ALTER, 삭제는 `DROP FOREIGN KEY`. 타입 불일치, 부모가 PK·UNIQUE가 아님, NOT NULL 열의 SET NULL, 이미 FK가 있는 열은 경고. 현재 이름·규칙은 `information_schema.referential_constraints`에서 읽는다.
+- **한 문장의 여행**(`components/JourneyModal.tsx`, 에디터 도구 막대의 점선 경로 버튼): 선택한(없으면 커서가 있는) 문장을 `TRACE`로 한 번 돌린 뒤 기록된 단계를 사람이 따라갈 속도로 다시 보여 준다 — 단계 상자가 차례로 켜지고, 아래에 설명 한 줄과 단계별 시간 막대. 재생·일시정지·한 단계씩·0.5~4x. **실시간 점등이 아니라 기록 재생인 이유**: 문장이 밀리초에 끝나서 실시간은 눈에 안 보인다. 막대와 시간은 실제 값. SELECT가 아니면 실제로 실행된다고 먼저 알리고 눌러야 돈다.
+
+**MCP**
+- **`run_script(statements, database, commit, confirmed_dangerous)`**: 한 연결·한 트랜잭션에서 문장 여러 개를 실행하고 문장마다 결과(SELECT 행 20개까지, "N row(s) updated", 오류)를 JSON으로 준다. `commit=False`(기본)는 **미리보기**(끝에서 ROLLBACK), `commit=True`는 전부 되거나 전혀 안 된다(실패한 문장에서 멈추고 되돌림). DDL·BEGIN/COMMIT 같은 트랜잭션을 끝내는 문장은 미리보기로 거절하고, DROP/TRUNCATE·WHERE 없는 UPDATE/DELETE는 `confirmed_dangerous=True` 없이는 거절한다. 도구는 26개가 되었다.
+
+**검증**
+- 신규 코퍼스 `windows.sql`(26문장)·`max_execution_time.sql`(17)·`fk_names.sql`(22)가 진짜 MySQL 8.4.9와 차이 0; `--emit`이 `mysql_conformance_{windows,max_execution_time,fk_names}.inc`를 만든다. `max_execution_time`에서 `COUNT(*)`만 있는 교차 조인은 뺐다 — MySQL은 조인 버퍼로 한도 안에 세어 버리지만 RuSQL은 멈춘다(한도가 목적).
+- `[r46]` 시험 두 개(TRACE와 한도, 외래키 이름), 옛 시험 `ALTER TABLE foreign key / unique / check constraints`는 "이름은 저장하지 않는 옛 이식 버그"를 못 박고 있어서 새 동작으로 고쳤다(부모는 `company.department`로 저장, 이름은 `fk_proj_dept`).
+- MCP `run_script`는 살아 있는 서버로 17가지(미리보기가 저장하지 않음, 실패 시 전부 되돌림, DDL·위험 문장 거절 …)를 확인했다.
+- 프론트: `tsc` 통과, 두 모달은 `invoke`를 모형으로 바꾼 헤드리스 Chrome 화면으로 확인(여정 재생, 관계 편집·추가 창). **실제 Tauri 앱에서 눌러 본 것은 아니다.**
+- 심은 버그 12종(윈도 프레임 끝, `OVER w` 괄호, 윈도 이름 대소문자, 한도 판정, TRACE 단계, FK 이름 저장, 부모 한정, DROP 이름 일치, `_ibfk_` 번호, 규칙 이름, 중복 이름, SHOW CREATE 이름)을 모두 잡았다.
+- 전체 시험 **781 케이스 / 1,505,497 assertions**을 Release 기본과 `RUSQL_DML_INDEX_MIN_ROWS=0`으로 통과.
+
+**한계**: `MAX_EXECUTION_TIME`은 SELECT만(MySQL도 같다)이고 병렬 스캔의 작업 스레드는 확인하지 않는다. 한 열에는 외래키 하나만 둘 수 있어(여러 열 FK도 없음) 같은 열에 다른 이름으로 더하면 앞의 것을 덮어쓴다 — 편집기는 이미 FK가 있는 열을 경고한다. 집계 위의 윈도(`SUM(i) OVER (ORDER BY g) … GROUP BY g, i`)는 오류가 아니라 **빈 값**을 돌려주는 알려진 오답이다(`SUM(SUM(i)) OVER ()`는 오류) — 윈도 단축형과는 별개라 손대지 않았다. `run_script`의 미리보기는 DML만 된다(DDL은 엔진에서 트랜잭션을 끝낸다). `TRACE`의 Rows 열은 SELECT의 단계에만 있고 DML에는 없다.
+
 ## 요약: 1학기 대비 2학기에 달라진 것
 
 

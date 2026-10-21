@@ -5,6 +5,9 @@
 // (the last with only the Phase 8a DDL cases wired up so far).
 
 #include "engine/executor/executor.hpp"
+#include "engine/explain_trace.hpp"
+#include "engine/result_text.hpp"
+#include "engine/statement_deadline.hpp"
 #include "engine/storage/numeric_key.hpp"
 #include "engine/subquery_walk.hpp"
 
@@ -1117,16 +1120,19 @@ StringResult Executor::execute(Statement stmt) {
             active_table_data_lock_tables_ = *tables;
             active_table_data_lock_exclusive_ = false;
             redo_covered_stmt_ = covered && !txn.is_active();
+            explain_trace::stage("Table locks");
             auto result = execute_with_s(const_cast<SharedDatabase&>(*guard->structural), std::move(stmt));
             redo_covered_stmt_ = false;
             active_table_lock_guard_ = nullptr;
             active_table_data_lock_guard_ = nullptr;
+            explain_trace::stage("Execute");
             if (mutating) {
                 if (txn.is_active()) {
                     if (!covered) txn.mark_redo_incomplete();
                 } else {
                     // Still holding this statement's table locks: persist before they drop.
                     persist_autocommit(const_cast<SharedDatabase&>(*guard->structural), *tables, covered, true);
+                    explain_trace::stage("Commit (redo log, fsync)");
                 }
             }
             return result;
@@ -1138,7 +1144,10 @@ StringResult Executor::execute(Statement stmt) {
             // reachable from here. Multiple sessions may hold shared->read() at the same
             // time — re-audit is_pure_read_only() whenever execute_with_s's dispatch
             // changes.
-            return execute_with_s(const_cast<SharedDatabase&>(*s), std::move(stmt));
+            explain_trace::stage("Table locks");
+            auto read_result = execute_with_s(const_cast<SharedDatabase&>(*s), std::move(stmt));
+            explain_trace::stage("Execute");
+            return read_result;
         }
         // `s` (structural shared) released here, at the end of this block -- must happen
         // before acquiring shared->write() below (a shared_mutex has no upgrade, and a
@@ -1158,7 +1167,9 @@ StringResult Executor::execute(Statement stmt) {
         }
         if (has_dirty) checkpoint_redo_locked(*s);
     }
+    explain_trace::stage("Exclusive lock");
     auto result = execute_with_s(*s, std::move(stmt));
+    explain_trace::stage("Execute");
     if (mutating) {
         if (txn.is_active()) {
             txn.mark_redo_incomplete();
@@ -1166,12 +1177,32 @@ StringResult Executor::execute(Statement stmt) {
             // Whatever this statement logged (e.g. a trigger body's INSERTs) is committed
             // work: make it durable rather than letting the ops pile up.
             write_redo_batch(*s, txn.take_redo_ops(std::to_string(s->txn_io->next_id())));
+            explain_trace::stage("Commit (redo log, fsync)");
         }
     }
     return result;
 }
 
 namespace {
+// SELECT /*+ MAX_EXECUTION_TIME(1000) */ ...: the time in milliseconds the hint after SELECT gives (0: there is none)
+std::uint64_t hinted_time_limit(const std::string& sql) {
+    std::size_t i = sql.find_first_not_of(" \t\r\n");
+    if (i == std::string::npos || sql.size() < i + 6) return 0;
+    i = sql.find_first_not_of(" \t\r\n", i + 6);
+    if (i == std::string::npos || sql.compare(i, 3, "/*+") != 0) return 0;
+    const std::size_t end = sql.find("*/", i);
+    std::string hint = sql.substr(i, end == std::string::npos ? std::string::npos : end - i);
+    for (char& c : hint) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+    const std::size_t at = hint.find("MAX_EXECUTION_TIME");
+    if (at == std::string::npos) return 0;
+    std::size_t p = hint.find('(', at);
+    if (p == std::string::npos) return 0;
+    p = hint.find_first_not_of(" \t", p + 1);
+    std::uint64_t ms = 0;
+    for (; p != std::string::npos && p < hint.size() && std::isdigit(static_cast<unsigned char>(hint[p])); p++) ms = ms * 10 + static_cast<std::uint64_t>(hint[p] - '0');
+    return ms;
+}
+
 bool ieq_ascii(const std::string& a, const std::string& b) {
     if (a.size() != b.size()) return false;
     for (std::size_t i = 0; i < a.size(); i++) {
@@ -1303,11 +1334,76 @@ std::uint64_t Executor::statement_affected_rows(const std::string& message) cons
     return leading_count(message);
 }
 
+namespace {
+// TRACE <statement>: runs the statement and answers with the path it took -- parse, prepare (the locks), execute (a SELECT's own steps), commit (the redo log) -- with
+// the rows each step left, the time it took and its share of the whole; the statement does what it does (a TRACE of an UPDATE updates).
+StringResult run_trace(Executor& ex, const std::string& inner) {
+    explain_trace::Trace trace;
+    const auto start = std::chrono::steady_clock::now();
+    trace.last = start;
+    explain_trace::active = &trace;
+    StringResult result = ex.execute_sql(inner);
+    explain_trace::active = nullptr;
+    const double total = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+    double marked = 0;
+    for (auto& st : trace.steps) marked += st.ms;
+    if (total - marked > 0.0005) trace.steps.push_back({"Return the answer", 0, total - marked});
+    std::string message = result.is_ok() ? result.value() : result.error();
+    while (!message.empty() && (message.back() == '\n' || message.back() == '\r')) message.pop_back();
+    const std::size_t last_line = message.rfind('\n'); // (a SELECT's answer ends with its "N row(s) returned.")
+    if (last_line != std::string::npos) message = message.substr(last_line + 1);
+    std::vector<std::vector<std::string>> rows;
+    for (std::size_t i = 0; i < trace.steps.size(); i++) {
+        char share[16], ms[32];
+        std::snprintf(ms, sizeof ms, "%.3f", trace.steps[i].ms);
+        std::snprintf(share, sizeof share, "%.0f", trace.steps[i].ms / std::max(total, 1e-9) * 100.0);
+        rows.push_back({std::to_string(i + 1), trace.steps[i].label, std::to_string(trace.steps[i].rows), ms, share});
+    }
+    // the last row: the whole time, and what the statement answered (its message, or its error)
+    char total_ms[32];
+    std::snprintf(total_ms, sizeof total_ms, "%.3f", total);
+    rows.push_back({"Total", (result.is_ok() ? "Statement: " : "Statement failed: ") + result_text::escape_cell(message), "", total_ms, "100"});
+    const std::vector<std::string> header = {"Step", "What", "Rows", "ms", "Share %"};
+    std::vector<std::size_t> width;
+    for (auto& h : header) width.push_back(h.size());
+    for (auto& r : rows) {
+        for (std::size_t c = 0; c < r.size(); c++) width[c] = std::max(width[c], r[c].size());
+    }
+    auto line = [&](const std::vector<std::string>& cells) {
+        std::string out = "|";
+        for (std::size_t c = 0; c < cells.size(); c++) out += " " + cells[c] + std::string(width[c] - cells[c].size(), ' ') + " |";
+        return out + "\n";
+    };
+    std::string sep = "+";
+    for (auto w : width) sep += std::string(w + 2, '-') + "+";
+    std::string out = sep + "\n" + line(header) + sep + "\n";
+    for (auto& r : rows) out += line(r);
+    out += sep;
+    return StringResult::Ok(out);
+}
+} // namespace
+
 StringResult Executor::execute_sql(const std::string& sql_text) {
     // SELECT SQL_CALC_FOUND_ROWS ...: the keyword goes, and FOUND_ROWS() afterwards says how many rows the query has without its LIMIT
     std::string sql = sql_text;
     bool calc_found_rows = false;
     const std::string word = first_word_upper(sql);
+    if (word == "TRACE") {
+        const std::string rest = trim(sql);
+        if (rest.size() > 5) return run_trace(*this, rest.substr(5));
+    }
+    // MAX_EXECUTION_TIME: a SELECT that runs longer than the hint or SET max_execution_time says is stopped with error 3024 (other statements are not timed)
+    std::optional<deadline::Scope> time_limit;
+    if (word == "SELECT" || word == "WITH") {
+        std::uint64_t limit_ms = hinted_time_limit(sql);
+        if (limit_ms == 0) {
+            for (const char* key : {"max_execution_time", "@max_execution_time"}) {
+                if (auto it = user_vars.find(key); it != user_vars.end() && !it->second.empty() && it->second.find_first_not_of("0123456789") == std::string::npos)
+                    limit_ms = std::stoull(it->second);
+            }
+        }
+        if (limit_ms > 0) time_limit.emplace(limit_ms);
+    }
     statement_insert_id_ = 0;
     affected_rows_ = matched_rows_ = -1;
     insert_id_unset_ = word == "INSERT" || word == "REPLACE";
@@ -1397,12 +1493,14 @@ StringResult Executor::execute_sql_inner(const std::string& sql) {
         }
     }
 
+    explain_trace::SqlScope sql_scope; // (TRACE reports the statement that is run, not the ones it runs inside)
     Parser parser(trimmed, pipes_as_concat());
     if (!parser.has_tokens()) return StringResult::Ok(""); // nothing but comments (a dump has such lines): there is nothing to run
     auto parsed = parser.parse();
     if (parsed.is_err()) return StringResult::Err(parsed.error());
     Statement stmt = std::move(parsed).value();
     resolve_names(stmt); // (`SELECT * FROM USERS` is the table `users`: the rest of this function and everything after it read the one spelling)
+    explain_trace::stage("Parse");
 
     std::optional<std::string> dml_table;
     if (auto* v = std::get_if<Statement::Insert>(&stmt.data)) dml_table = qualify_static(v->table, current_db);
@@ -1470,6 +1568,7 @@ StringResult Executor::execute_sql_inner(const std::string& sql) {
         for (auto& t : cache_tables) cache_gens_before.emplace_back(t, s0->query_cache.table_generation(t));
     }
 
+    explain_trace::stage("Prepare (cache, locks)");
     StringResult result = execute(std::move(stmt));
 
     if (looks_like_select && !in_txn && !has_subquery && !has_nondeterministic && !has_infoschema && result.is_ok()) {
@@ -1920,6 +2019,14 @@ StringResult Executor::execute_with_s_body(SharedDatabase& s, Statement stmt) {
             }
         }
         user_vars[lower_name] = result_val; // (@V and @v are one variable: it is kept under its lower case name)
+        {   // SET max_execution_time = ms / SET @@session.max_execution_time = ms: one variable, read by SELECT @@max_execution_time and by execute_sql
+            std::string bare = lower_name;
+            while (!bare.empty() && bare[0] == '@') bare.erase(0, 1);
+            for (const char* scope : {"session.", "global.", "local."}) {
+                if (bare.rfind(scope, 0) == 0) bare.erase(0, std::string(scope).size());
+            }
+            if (bare == "max_execution_time") user_vars["max_execution_time"] = user_vars["@max_execution_time"] = result_val;
+        }
         return StringResult::Ok("");
     }
 
