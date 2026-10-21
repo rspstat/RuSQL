@@ -539,6 +539,22 @@ std::string debug_agg_func_dual(const AggFunc& func) {
 }
 } // namespace
 
+std::vector<std::size_t> Executor::rows_in_key_order(const TableSchema* schema, const std::vector<const Row*>& rows, const std::vector<std::string>& leading) {
+    std::vector<OrderBy> key;
+    for (const std::string& name : leading) {
+        OrderBy part;
+        part.column = name;
+        if (schema) {
+            for (const ColumnDef& c : schema->columns) {
+                if (c.name == name) part.cls = class_of_type(c.data_type);
+            }
+        }
+        key.push_back(std::move(part));
+    }
+    for (OrderBy& part : primary_key_parts(schema)) key.push_back(std::move(part));
+    return order_rows(rows, key, &Executor::get_col);
+}
+
 std::shared_ptr<const std::vector<std::uint32_t>> Executor::scan_key_order(SharedDatabase& s, const std::string& table, const std::vector<Row>& rows) const {
     const TableSchema* schema = s.catalog.get_table(table);
     if (!schema || schema->partition_info || rows.size() < 2) return nullptr;

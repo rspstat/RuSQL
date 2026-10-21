@@ -6,9 +6,11 @@
 // rows. A table with two live rows for one key breaks every "one row per pk" assumption
 // downstream (the pk -> position cache, PK B+Tree, index-assisted UPDATE/DELETE).
 
+#include <unordered_map>
 #include <unordered_set>
 
 #include <algorithm>
+#include <numeric>
 
 #include "engine/executor/executor.hpp"
 #include "engine/storage/numeric_key.hpp"
@@ -34,10 +36,28 @@ bool lookup_scans(const SharedDatabase& s, const std::string& table, const std::
     }
     return true;
 }
+
+// Whether rewriting the rows one after the other, in `order`, ever gives a row a key that another row still holds. InnoDB checks every row as it writes it, so
+// `SET u = u + 1` over u = 1, 2, 3 fails on the first row, and over u = 3, 2, 1 (or with ORDER BY u DESC) it does not. `old_keys` / `new_keys` are the key of every row
+// before and after (nullopt: a NULL in a UNIQUE key, which never clashes). Returns the row that clashes.
+std::optional<std::size_t> first_clash(const std::vector<std::optional<std::string>>& old_keys, const std::vector<std::optional<std::string>>& new_keys,
+                                       const std::vector<std::size_t>& order) {
+    std::unordered_map<std::string, std::size_t> held;
+    held.reserve(order.size() * 2);
+    for (std::size_t i = 0; i < old_keys.size(); i++) {
+        if (old_keys[i]) held.emplace(*old_keys[i], i);
+    }
+    for (std::size_t i : order) {
+        if (old_keys[i]) held.erase(*old_keys[i]);
+        if (new_keys[i] && !held.emplace(*new_keys[i], i).second) return i;
+    }
+    return std::nullopt;
+}
 } // namespace
 
 std::optional<std::string> Executor::update_unique_violation(SharedDatabase& s, const std::string& table, const std::vector<const Row*>& olds,
-                                                             const std::vector<Row>& news) {
+                                                             const std::vector<Row>& news, const std::vector<std::string>* by_order,
+                                                             const std::vector<std::string>& where_columns) {
     const TableSchema* schema = s.catalog.get_table(table);
     auto tit = s.tables.find(table);
     if (!schema || tit == s.tables.end() || olds.size() != news.size()) return std::nullopt;
@@ -52,6 +72,48 @@ std::optional<std::string> Executor::update_unique_violation(SharedDatabase& s, 
         return it != r.end() ? it->second : std::string();
     };
     auto dup = [&](const std::string& val, const std::string& col) { return "Duplicate value '" + val + "' for column '" + col + "'"; };
+
+    // The orders the rows may be written in: the one ORDER BY gave; else the order of the PRIMARY KEY (how InnoDB reads the table), or, when the WHERE compares a
+    // column that has an index to a value, the order of that index (the key, then the primary key). Which one MySQL's plan takes is not told here, so a clash is
+    // reported only when it happens in all of them: a shift that fits in one of them is let through, never refused wrongly.
+    std::vector<std::vector<std::size_t>> orders;
+    bool orders_made = false;
+    auto plausible_orders = [&]() -> const std::vector<std::vector<std::size_t>>& {
+        if (orders_made) return orders;
+        orders_made = true;
+        if (by_order && !by_order->empty()) {
+            std::unordered_map<std::string, std::size_t> rank;
+            for (std::size_t k = 0; k < by_order->size(); k++) rank.emplace((*by_order)[k], k);
+            const std::vector<std::string> identity = schema->identity_columns();
+            std::vector<std::size_t> rank_of(olds.size(), by_order->size());
+            for (std::size_t i = 0; i < olds.size(); i++) {
+                std::string key;
+                for (std::size_t c = 0; c < identity.size(); c++) key += (c ? std::string(1, '\x00') : std::string()) + get(*olds[i], identity[c]);
+                if (auto it = rank.find(key); it != rank.end()) rank_of[i] = it->second;
+            }
+            std::vector<std::size_t> given(olds.size());
+            std::iota(given.begin(), given.end(), std::size_t{0});
+            std::stable_sort(given.begin(), given.end(), [&](std::size_t a, std::size_t b) { return rank_of[a] < rank_of[b]; });
+            orders.push_back(std::move(given));
+            return orders;
+        }
+        orders.push_back(rows_in_key_order(schema, olds, {}));
+        std::vector<std::string> tried;
+        for (const std::string& column : where_columns) {
+            if (std::find(tried.begin(), tried.end(), column) != tried.end()) continue;
+            tried.push_back(column);
+            bool indexed = false;
+            for (auto& c : schema->columns) {
+                if (c.name == column) indexed = c.unique && !c.primary_key; // (the primary key is the order the rows are read in anyway)
+            }
+            for (auto& [name, meta] : s.index_meta) indexed = indexed || (meta.first == table && meta.second == column);
+            for (auto& [name, meta] : s.hash_index_meta) indexed = indexed || (meta.first == table && meta.second == column);
+            for (auto& [name, index] : s.composite_indexes) indexed = indexed || (index.table == table && !index.columns.empty() && index.columns.front() == column);
+            for (auto& key : schema->unique_keys) indexed = indexed || (!key.columns.empty() && key.columns.front() == column);
+            if (indexed) orders.push_back(rows_in_key_order(schema, olds, {column}));
+        }
+        return orders;
+    };
 
     for (auto& col : schema->columns) {
         // a single-column PRIMARY KEY, or a single-column UNIQUE; composite keys were never checked here
@@ -76,6 +138,31 @@ std::optional<std::string> Executor::update_unique_violation(SharedDatabase& s, 
             std::string nv = get(news[i], col.name);
             if (skipped(nv)) continue;
             if (!final_values.insert(collation::key(nv)).second) return dup(nv, col.name);
+        }
+        // 1b) the rows are written one after the other: a row that takes the value another row still holds clashes (a shift: SET u = u + 1)
+        bool chained = false;
+        for (std::size_t i = 0; i < news.size() && !chained; i++) {
+            const std::string ov = get(*olds[i], col.name), nv = get(news[i], col.name);
+            chained = !collation::equal(ov, nv) && !skipped(nv) && held_by_targets.count(collation::key(nv)) > 0;
+        }
+        if (chained) {
+            std::vector<std::optional<std::string>> old_keys(news.size()), new_keys(news.size());
+            for (std::size_t i = 0; i < news.size(); i++) {
+                const std::string ov = get(*olds[i], col.name), nv = get(news[i], col.name);
+                if (!skipped(ov)) old_keys[i] = collation::key(ov);
+                if (!skipped(nv)) new_keys[i] = collation::key(nv);
+            }
+            std::optional<std::size_t> clash;
+            bool every_order = true;
+            for (const auto& order : plausible_orders()) {
+                auto found = first_clash(old_keys, new_keys, order);
+                if (!found) {
+                    every_order = false;
+                    break;
+                }
+                if (!clash) clash = found;
+            }
+            if (every_order && clash) return dup(get(news[*clash], col.name), col.name);
         }
         // 2) a changed value must not be held by a live row this statement does not rewrite. A value
         //    that one of the rewritten rows holds right now is fine (that holder is being replaced);
@@ -158,6 +245,7 @@ std::optional<std::string> Executor::update_unique_violation(SharedDatabase& s, 
         if (!any_changed) continue;
         std::unordered_set<std::string> final_keys, wanted;
         std::vector<std::size_t> wanted_rows; // the rows whose new key has to be looked for
+        bool chained = false;                 // a row takes the key another row holds (a shift: SET b = b + 1)
         for (std::size_t i = 0; i < news.size(); i++) { // 1) the statement's own result must not repeat a key
             auto nk = encode(news[i], shown);
             if (!nk) continue;
@@ -165,6 +253,30 @@ std::optional<std::string> Executor::update_unique_violation(SharedDatabase& s, 
             if (!held_by_targets.count(*nk)) {
                 wanted.insert(*nk);
                 wanted_rows.push_back(i);
+            } else if (!chained) {
+                std::string before_shown;
+                chained = encode(*olds[i], before_shown) != nk;
+            }
+        }
+        if (chained) { // 1b) the rows are written one after the other
+            std::vector<std::optional<std::string>> old_keys(news.size()), new_keys(news.size());
+            for (std::size_t i = 0; i < news.size(); i++) {
+                old_keys[i] = encode(*olds[i], shown);
+                new_keys[i] = encode(news[i], shown);
+            }
+            std::optional<std::size_t> clash;
+            bool every_order = true;
+            for (const auto& order : plausible_orders()) {
+                auto found = first_clash(old_keys, new_keys, order);
+                if (!found) {
+                    every_order = false;
+                    break;
+                }
+                if (!clash) clash = found;
+            }
+            if (every_order && clash) {
+                encode(news[*clash], shown);
+                return "Duplicate entry '" + shown + "' for key '" + spec.label + "'";
             }
         }
         if (wanted.empty()) continue;

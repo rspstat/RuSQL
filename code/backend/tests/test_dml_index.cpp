@@ -854,8 +854,10 @@ TEST_CASE("UPDATE rejects duplicate PRIMARY KEY / UNIQUE values and never half-a
         REQUIRE(ex.execute_sql("UPDATE u SET id = 9 WHERE id >= 2").is_err()); // two rows, one new key
         REQUIRE(count_of(ex, "FROM u") == 3);
 
-        // moving into slots that the same statement vacates is fine
-        REQUIRE(changed(ex.execute_sql("UPDATE u SET id = id + 1 WHERE id >= 2"), 2, "updated"));
+        // the rows are written one after the other: moving up onto a slot the next row still holds fails, from the end of the chain it is fine
+        REQUIRE(ex.execute_sql("UPDATE u SET id = id + 1 WHERE id >= 2").is_err());
+        REQUIRE(count_of(ex, "FROM u WHERE id + 0 = 2") == 1);
+        REQUIRE(changed(ex.execute_sql("UPDATE u SET id = id + 1 WHERE id >= 2 ORDER BY id DESC"), 2, "updated"));
         REQUIRE(count_of(ex, "FROM u WHERE id + 0 = 1") == 1);
         REQUIRE(count_of(ex, "FROM u WHERE id + 0 = 3") == 1);
         REQUIRE(count_of(ex, "FROM u WHERE id + 0 = 4") == 1);

@@ -215,8 +215,10 @@ TEST_CASE("UPDATE checks NOT NULL and both sides of a foreign key, and a failed 
     REQUIRE(fails(ex, "UPDATE p SET a = 100 / NULLIF(id - 2, 0) WHERE id <= 3").find("cannot be NULL") != std::string::npos);
     REQUIRE(fails(ex, "UPDATE p SET a = 100 / (id - 2) WHERE id <= 3") == "Division by 0");
     REQUIRE(q(ex, "SELECT id, a, u FROM p ORDER BY id") == p_before);
-    // UNIQUE over the statement's whole result: a chain may shift, a repeat may not
-    ok(ex, "UPDATE p SET u = u + 100");
+    // UNIQUE: the rows are written one after the other (in key order, or the order ORDER BY gives): a chain shifts from its end, a repeat never fits
+    REQUIRE(fails(ex, "UPDATE p SET u = u + 100").find("Duplicate value") != std::string::npos);
+    REQUIRE(q(ex, "SELECT id, a, u FROM p ORDER BY id") == p_before);
+    ok(ex, "UPDATE p SET u = u + 100 ORDER BY id DESC");
     REQUIRE(q(ex, "SELECT u FROM p ORDER BY id") == Rows{{"200"}, {"300"}, {"400"}});
     REQUIRE(fails(ex, "UPDATE p SET u = 5 WHERE id <= 2").find("Duplicate value") != std::string::npos);
     REQUIRE(q(ex, "SELECT u FROM p ORDER BY id") == Rows{{"200"}, {"300"}, {"400"}});
@@ -490,16 +492,20 @@ TEST_CASE("multi-table UPDATE / DELETE and MERGE are as strict as the one-table 
     ok(ex, "INSERT INTO src VALUES (1, 100, 20), (2, NULL, 5), (3, 300, 30)");
     ok(ex, "INSERT INTO ch VALUES (1, 2)");
     const Rows t_before = q(ex, "SELECT id, a, u FROM t ORDER BY id");
+    const Rows t_before_u = q(ex, "SELECT id, u FROM t ORDER BY id");
 
     // UPDATE ... JOIN: NOT NULL, as a whole
     REQUIRE(fails(ex, "UPDATE t JOIN src ON t.id = src.id SET t.a = src.a").find("cannot be NULL") != std::string::npos);
-    // UNIQUE over the whole result: u moves to 20, 5, 30 -- a chain, fine
+    // UNIQUE: the rows are written in key order, so row 1 taking the 20 that row 2 still holds fails, as a whole
+    REQUIRE(fails(ex, "UPDATE t JOIN src ON t.id = src.id SET t.u = src.u").find("Duplicate value '20'") != std::string::npos);
+    REQUIRE(q(ex, "SELECT id, u FROM t ORDER BY id") == t_before_u);
+    ok(ex, "UPDATE src SET u = 25 WHERE id = 1");
     auto moved = ex.execute_sql("UPDATE t JOIN src ON t.id = src.id SET t.u = src.u");
     REQUIRE(moved.is_ok());
     REQUIRE(moved.value() == "2 row(s) updated."); // (row 3 keeps its 30: found, not changed)
-    REQUIRE(q(ex, "SELECT id, u FROM t ORDER BY id") == Rows{{"1", "20"}, {"2", "5"}, {"3", "30"}});
+    REQUIRE(q(ex, "SELECT id, u FROM t ORDER BY id") == Rows{{"1", "25"}, {"2", "5"}, {"3", "30"}});
     REQUIRE(fails(ex, "UPDATE t JOIN src ON t.id = src.id SET t.u = 7").find("Duplicate value") != std::string::npos); // all three get 7
-    REQUIRE(q(ex, "SELECT id, u FROM t ORDER BY id") == Rows{{"1", "20"}, {"2", "5"}, {"3", "30"}});
+    REQUIRE(q(ex, "SELECT id, u FROM t ORDER BY id") == Rows{{"1", "25"}, {"2", "5"}, {"3", "30"}});
     ok(ex, "UPDATE t JOIN src ON t.id = src.id SET t.u = 10 + t.id");
     // ROLLBACK undoes it (it used to rewrite the rows in place)
     ok(ex, "BEGIN");
@@ -773,7 +779,15 @@ TEST_CASE("random writes behave like the model: constraints, atomic statements, 
                         switch (form) {
                             case 0: r.a += 2; break;
                             case 1: good = false; break;
-                            case 2: if (r.u) r.u = *r.u + 1; break;
+                            case 2: // (the rows are written in key order: a row that takes a value another row holds right now clashes)
+                                if (r.u) {
+                                    const long long moved_to = *r.u + 1;
+                                    for (auto& other : m.t) {
+                                        if (&other.second != &r && other.second.u && *other.second.u == moved_to) good = false;
+                                    }
+                                    r.u = moved_to;
+                                }
+                                break;
                             case 3: {
                                 IntResult iv = as_int(v);
                                 if (iv.error) good = false; else r.u = iv.value;

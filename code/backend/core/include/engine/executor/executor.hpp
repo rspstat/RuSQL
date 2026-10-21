@@ -257,6 +257,7 @@ public:
     std::int64_t affected_rows_ = -1;        // the rows the last statement affected when its message does not say it (ON DUPLICATE KEY UPDATE, REPLACE); -1: the message's number
     std::int64_t matched_rows_ = -1;         // the rows the last UPDATE found (its message counts the rows it changed); -1: not an UPDATE
     std::size_t replace_deleted_rows_ = 0;   // the rows the REPLACE that is running deleted before its inserts
+    std::vector<std::string> update_row_order_; // the identity keys of the rows of an UPDATE ... ORDER BY in the order it gave them (exec_update takes them)
     std::uint64_t statement_insert_id() const { return statement_insert_id_; }
     // The client asked for the rows an UPDATE FOUND (CLIENT_FOUND_ROWS: Connector/J and MySQLdb do) instead of the rows it changed.
     bool client_found_rows = false;
@@ -677,8 +678,10 @@ private:
     StringResult exec_create_as(SharedDatabase& s, const std::string& name, bool if_not_exists, std::vector<ColumnDef> columns, Statement query);
     StringResult exec_truncate(SharedDatabase& s, const std::string& name);
     // UPDATE / DELETE ... ORDER BY ... LIMIT n: the condition that picks exactly those rows (by their key); nullopt when there are none
+    // `order_out`: the identity key of every row it picked, in the order they came (a key's columns joined by \x00)
     Result<std::optional<CondExpr>, std::string> rows_of_limit(SharedDatabase& s, const std::string& table, const std::optional<CondExpr>& condition,
-                                                               const std::vector<OrderBy>& order_by, std::optional<std::size_t> limit);
+                                                               const std::vector<OrderBy>& order_by, std::optional<std::size_t> limit,
+                                                               std::vector<std::string>* order_out = nullptr);
     StringResult exec_alter(SharedDatabase& s, const std::string& table, AlterAction action);
     StringResult exec_create_database(SharedDatabase& s, const std::string& name, bool if_not_exists);
     StringResult exec_drop_database(SharedDatabase& s, const std::string& name, bool if_exists);
@@ -726,7 +729,13 @@ private:
     static std::optional<std::string> coerce_column_value(const ColumnDef& col, std::string& value, std::size_t row);
     // The same for a value given to a parameter or a variable of a routine, whose type is kept as it was written ("DECIMAL(8,2)"); nothing for a type that is not read.
     static std::optional<std::string> coerce_declared(const std::string& name, const std::string& type_text, std::string& value);
-    std::optional<std::string> update_unique_violation(SharedDatabase& s, const std::string& table, const std::vector<const Row*>& olds, const std::vector<Row>& news);
+    // `by_order`: the identity keys of the rows in the order UPDATE ... ORDER BY gives them; `where_columns`: the columns the WHERE compares to a value (an index on
+    // one may decide the order the rows are read in). InnoDB checks each row as it writes it, so which rows a statement changes first decides whether a shift of a
+    // UNIQUE key (SET u = u + 1) fits: update_unique_violation reports a clash only when it happens in every order the rows may be read in.
+    std::optional<std::string> update_unique_violation(SharedDatabase& s, const std::string& table, const std::vector<const Row*>& olds, const std::vector<Row>& news,
+                                                       const std::vector<std::string>* by_order = nullptr, const std::vector<std::string>& where_columns = {});
+    // The positions of `rows` in the order of the key of the table (its PRIMARY KEY), after `leading` columns when given: how InnoDB reads a table, or an index on those.
+    static std::vector<std::size_t> rows_in_key_order(const TableSchema* schema, const std::vector<const Row*>& rows, const std::vector<std::string>& leading);
     // executor_update_unique.cpp: a claim on a unique value. The duplicate check of an INSERT / UPDATE reads the table, where the row another session is about to
     // write is not yet, so two sessions writing the same value could both pass it; a claim on the value in the lock manager (like the one on a PRIMARY KEY value)
     // makes the second wait for the first and look again.
@@ -904,7 +913,7 @@ private:
                               const PerRowValues* per_row = nullptr);
     StringResult exec_update_inner(SharedDatabase& s, const std::string& table, const std::vector<std::pair<std::string, ArithExpr>>& assignments,
                                     const std::optional<CondExpr>& condition, const std::optional<std::vector<SelectColumn>>& returning,
-                                    const PerRowValues* per_row = nullptr);
+                                    const PerRowValues* per_row = nullptr, const std::vector<std::string>* row_order = nullptr);
 
     // ── Phase 8b: DELETE ─────────────────────────────────────────────────
     static bool condition_has_subquery(const std::optional<CondExpr>& condition);

@@ -335,16 +335,17 @@ TEST_CASE("UNIQUE and PRIMARY KEY follow the collation, in INSERT, UPDATE, REPLA
     ok(ex, "REPLACE INTO rq VALUES (1, 'x', 'y'), (2, 'X', 'Y')");
     REQUIRE(rows_of(ex, "SELECT id FROM rq") == Rows{{"2"}});
 
-    // UPDATE of a UNIQUE column: the values the statement leaves behind must differ, and the ones the rows being rewritten hold are free (RuSQL checks at the end of
-    // the statement, like for numbers)
+    // UPDATE of a UNIQUE column: the values the statement leaves behind must differ, and the rows are written one after the other (in key order, or the order
+    // ORDER BY gives): a row takes a value another row holds right now, in any case, and it fails
     ok(ex, "CREATE TABLE up (id INT PRIMARY KEY, s VARCHAR(10) UNIQUE)");
     ok(ex, "INSERT INTO up VALUES (1, 'x'), (2, 'Y')");
     REQUIRE(ex.execute_sql("UPDATE up SET s = IF(id = 1, 'Zed', 'zed')").is_err());
-    ok(ex, "UPDATE up SET s = IF(id = 1, 'y', 'z')");
+    REQUIRE(ex.execute_sql("UPDATE up SET s = IF(id = 1, 'y', 'z')").is_err());
+    ok(ex, "UPDATE up SET s = IF(id = 1, 'y', 'z') ORDER BY id DESC");
     REQUIRE(rows_of(ex, "SELECT id, s FROM up ORDER BY id") == Rows({{"1", "y"}, {"2", "z"}}));
     ok(ex, "CREATE TABLE up2 (id INT PRIMARY KEY, s VARCHAR(10) UNIQUE)");
     ok(ex, "INSERT INTO up2 VALUES (1, 'x'), (2, 'y')");
-    ok(ex, "UPDATE up2 SET s = IF(id = 1, 'Y', 'z')");
+    ok(ex, "UPDATE up2 SET s = IF(id = 1, 'Y', 'z') ORDER BY id DESC");
     REQUIRE(rows_of(ex, "SELECT id, s FROM up2 ORDER BY id") == Rows({{"1", "Y"}, {"2", "z"}}));
     ok(ex, "INSERT INTO up2 VALUES (3, 'W')");
     REQUIRE(ex.execute_sql("UPDATE up2 SET s = 'w' WHERE id = 1").is_err());

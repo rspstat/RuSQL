@@ -54,6 +54,9 @@ const Case kSchemaChange[] = {
 const Case kAutoinc[] = {
 #include "mysql_conformance_autoinc.inc"
 };
+const Case kShift[] = {
+#include "mysql_conformance_shift.inc"
+};
 
 struct TempDataDir {
     std::string path;
@@ -231,4 +234,8 @@ TEST_CASE("ALTER TABLE converts the values and keeps the indexes right as MySQL 
 
 TEST_CASE("the AUTO_INCREMENT numbers a statement reserves, skips and loses are InnoDB's", "[mysql_conformance][autoinc]") {
     run_cases("mc_autoinc", kAutoinc, sizeof kAutoinc / sizeof kAutoinc[0]);
+}
+
+TEST_CASE("an UPDATE that shifts a UNIQUE or PRIMARY KEY value fits or fails as InnoDB's row by row writing does", "[mysql_conformance][shift]") {
+    run_cases("mc_shift", kShift, sizeof kShift / sizeof kShift[0]);
 }

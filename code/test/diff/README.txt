@@ -140,7 +140,8 @@ Comparison with a real MySQL (needs pymysql and a MySQL 8.4 on 127.0.0.1:3391; u
       the forms of a date and a time, INTERVAL / EXTRACT units, column types and index options; a DATETIME(3) value is read with the three places the column has),
       routines (stored functions and procedures with typed parameters / variables / RETURNS, division by zero, prepared statements, triggers and LAST_INSERT_ID),
       schema_change (ALTER TABLE MODIFY / ADD / DROP COLUMN: the values converted, the indexes after them),
-      autoinc (the AUTO_INCREMENT numbers a statement reserves, skips and loses: VALUES, IGNORE, ON DUPLICATE KEY UPDATE, REPLACE, INSERT ... SELECT, failures).
+      autoinc (the AUTO_INCREMENT numbers a statement reserves, skips and loses: VALUES, IGNORE, ON DUPLICATE KEY UPDATE, REPLACE, INSERT ... SELECT, failures),
+      shift (an UPDATE that moves a UNIQUE / PRIMARY KEY value onto the value another row of the statement still holds: written row by row in key or ORDER BY order).
       The cells of RuSQL's answer are read the way the engine itself reads a result table (\\ \n \| and \s \t for a space or tab at either end of a value,
       see engine/result_text.hpp), so a value such as ' x ' or 'a|b' is compared as it is; corpus/tables.sql has probes for them (R40) and for CTE columns.
   --exact

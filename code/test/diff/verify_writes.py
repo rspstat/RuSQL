@@ -15,7 +15,8 @@ model below says which of the two it is and what the tables then hold, and after
   * REPLACE deletes every row it conflicts with, but only if the whole statement is valid (it used to delete first and lose the rows
     when the insert then failed) and no deleted row is referenced by a child;
   * ON DUPLICATE KEY UPDATE rewrites the conflicting row like an UPDATE: the same constraints, VALUES(col), a failure changes nothing;
-  * an UPDATE of several rows is checked as a whole (`SET u = u + 1` shifts a chain; `SET u = 3` over two rows is a duplicate);
+  * an UPDATE of several rows writes them one after the other, in the order of the key, each checked as it goes (`SET u = u + 1` over u = 1, 2 fails on the first
+    row; `SET u = 3` over two rows is a duplicate); a statement that fails changes nothing;
   * UPDATE ... JOIN, DELETE ... JOIN and MERGE against a source table `sr` are as strict as the one-table statements, and fail as a whole.
 
 Exit code 1 and the statement on the first difference.
@@ -158,7 +159,7 @@ class Model:
 
     def update(self, kind, arg, where_max):
         m = self.copy()
-        for k, r in m.t.items():
+        for k, r in sorted(m.t.items()):  # (the rows are written one after the other, in the order of the key)
             if k > where_max:
                 continue
             if kind == "a+k":
@@ -167,6 +168,8 @@ class Model:
                 r[0] = None
             elif kind == "u+1":
                 r[1] = None if r[1] is None else r[1] + 1
+                if r[1] is not None and any(o[1] == r[1] for kk, o in m.t.items() if kk != k):
+                    return False  # (the value another row holds right now)
             elif kind == "u=v":
                 r[1] = coerce_int(arg)
             elif kind == "s=v":
@@ -182,7 +185,7 @@ class Model:
 
     def multi_update(self, sets, where_min):
         m = self.copy()
-        for k, r in m.t.items():
+        for k, r in sorted(m.t.items()):  # (one after the other, in the order of the key)
             if k not in SR:
                 continue
             sa, su = SR[k]
@@ -192,6 +195,8 @@ class Model:
                 r[0] = sa
             if "u" in sets:
                 r[1] = su
+                if su is not None and any(o[1] == su for kk, o in m.t.items() if kk != k):
+                    return False  # (the value another row holds right now)
             if r[0] is None:
                 return False
         if not m.unique_ok(m.t):

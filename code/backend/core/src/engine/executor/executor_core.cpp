@@ -1737,10 +1737,12 @@ StringResult Executor::execute_with_s_body(SharedDatabase& s, Statement stmt) {
             expr = ArithExpr(ArithExpr::Str{value});
         }
         if (!v->order_by.empty() || v->limit) {
-            auto rows = rows_of_limit(s, v->table, v->condition, v->order_by, v->limit);
+            std::vector<std::string> order;
+            auto rows = rows_of_limit(s, v->table, v->condition, v->order_by, v->limit, &order);
             if (rows.is_err()) return StringResult::Err(rows.error());
             if (!rows.value()) return StringResult::Ok("0 row(s) updated.");
             v->condition = std::move(*rows.value());
+            if (!v->order_by.empty()) update_row_order_ = std::move(order);
         }
         return exec_update(s, v->table, v->assignments, v->condition, v->returning);
     }

@@ -22,6 +22,19 @@ namespace {
 // the time of the statement as a TIMESTAMP column holds it (ON UPDATE CURRENT_TIMESTAMP)
 std::string now_text(int digits) { return time_now_text(digits, false, true); }
 
+// the columns a condition compares to a value (`col = 3`, `col > 3`, `col IN (..)`, `col BETWEEN ..`), along its ANDs and ORs
+void compared_columns(const CondExpr& e, std::vector<std::string>& out) {
+    if (auto* a = std::get_if<CondExpr::And>(&e.data)) {
+        compared_columns(*a->lhs, out);
+        compared_columns(*a->rhs, out);
+    } else if (auto* o = std::get_if<CondExpr::Or>(&e.data)) {
+        compared_columns(*o->lhs, out);
+        compared_columns(*o->rhs, out);
+    } else if (auto* leaf = std::get_if<CondExpr::Leaf>(&e.data)) {
+        if (auto* c = std::get_if<ArithExpr::Col>(&leaf->condition.left.data)) out.push_back(c->name.substr(c->name.rfind('.') == std::string::npos ? 0 : c->name.rfind('.') + 1));
+    }
+}
+
 std::string trim_ws(const std::string& s) {
     auto start = s.find_first_not_of(" \t");
     if (start == std::string::npos) return "";
@@ -31,7 +44,8 @@ std::string trim_ws(const std::string& s) {
 } // namespace
 
 Result<std::optional<CondExpr>, std::string> Executor::rows_of_limit(SharedDatabase& s, const std::string& table, const std::optional<CondExpr>& condition,
-                                                                     const std::vector<OrderBy>& order_by, std::optional<std::size_t> limit) {
+                                                                     const std::vector<OrderBy>& order_by, std::optional<std::size_t> limit,
+                                                                     std::vector<std::string>* order_out) {
     using R = Result<std::optional<CondExpr>, std::string>;
     const TableSchema* schema = s.catalog.get_table(table);
     if (!schema) return R::Err("Table '" + table + "' not found");
@@ -47,6 +61,17 @@ Result<std::optional<CondExpr>, std::string> Executor::rows_of_limit(SharedDatab
     if (out.is_err()) return R::Err(out.error());
     auto [names, rows] = parse_table_output(out.value());
     if (rows.empty()) return R::Ok(std::nullopt);
+    if (order_out) { // (the order the rows came in: an UPDATE writes them in it)
+        order_out->clear();
+        for (auto& row : rows) {
+            std::string identity;
+            for (std::size_t i = 0; i < key.size(); i++) {
+                auto it = row.find(key[i]);
+                identity += (i ? std::string(1, '\x00') : std::string()) + (it != row.end() ? it->second : std::string());
+            }
+            order_out->push_back(std::move(identity));
+        }
+    }
     std::optional<CondExpr> picked;
     for (auto& row : rows) {
         std::optional<CondExpr> one;
@@ -64,6 +89,8 @@ Result<std::optional<CondExpr>, std::string> Executor::rows_of_limit(SharedDatab
 StringResult Executor::exec_update(SharedDatabase& s, std::string table, std::vector<std::pair<std::string, ArithExpr>> assignments,
                                     std::optional<CondExpr> condition, std::optional<std::vector<SelectColumn>> returning,
                                     const PerRowValues* per_row) {
+    std::vector<std::string> row_order; // (set by UPDATE ... ORDER BY: the order the rows are written in)
+    row_order.swap(update_row_order_);
     if (s.views.count(table)) {
         if (auto resolved = resolve_updatable_view(s, table)) {
             auto merged_cond = merge_conditions(resolved->second, condition);
@@ -78,7 +105,7 @@ StringResult Executor::exec_update(SharedDatabase& s, std::string table, std::ve
     if (before_trigger) {
         if (auto tr = fire_triggers(s, table, "BEFORE", "UPDATE", trigger_rows); tr.is_err()) return tr;
     }
-    auto result = exec_update_inner(s, table, assignments, condition, returning, per_row);
+    auto result = exec_update_inner(s, table, assignments, condition, returning, per_row, row_order.empty() ? nullptr : &row_order);
     if (result.is_ok() && after_trigger) {
         const std::int64_t matched = matched_rows_, affected = affected_rows_; // (the statements of the trigger set these too)
         if (auto tr = fire_triggers(s, table, "AFTER", "UPDATE", trigger_rows); tr.is_err()) return tr;
@@ -91,7 +118,8 @@ StringResult Executor::exec_update(SharedDatabase& s, std::string table, std::ve
 StringResult Executor::exec_update_inner(SharedDatabase& s, const std::string& table,
                                           const std::vector<std::pair<std::string, ArithExpr>>& assignments,
                                           const std::optional<CondExpr>& condition,
-                                          const std::optional<std::vector<SelectColumn>>& returning, const PerRowValues* per_row) {
+                                          const std::optional<std::vector<SelectColumn>>& returning, const PerRowValues* per_row,
+                                          const std::vector<std::string>* row_order) {
     const TableSchema* schema0 = s.catalog.get_table(table);
     if (!schema0) return StringResult::Err("Table '" + table + "' not found");
     std::string pk_col = "id";
@@ -107,6 +135,8 @@ StringResult Executor::exec_update_inner(SharedDatabase& s, const std::string& t
             return StringResult::Err("Unknown column '" + c + "' in 'field list'");
         }
     }
+    std::vector<std::string> where_columns; // the columns the WHERE compares to a value: an index on one may decide the order the rows are written in
+    if (condition) compared_columns(*condition, where_columns);
     std::vector<std::string> assigned_cols; // the columns this statement sets
     for (auto& [c, _] : assignments) assigned_cols.push_back(c);
     // the parent rows of the foreign keys among them are read while the rows are rewritten
@@ -582,7 +612,7 @@ StringResult Executor::exec_update_inner(SharedDatabase& s, const std::string& t
                 }
                 {
                     std::vector<const Row*> olds(targets.begin(), targets.end());
-                    if (auto violation = update_unique_violation(s, table, olds, new_versions)) {
+                    if (auto violation = update_unique_violation(s, table, olds, new_versions, row_order, where_columns)) {
                         unique_probe_apply(s, table, *schema0, {}, {}); // (nothing changes: the cache stays current)
                         return StringResult::Err(*violation);
                     }

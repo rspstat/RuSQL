@@ -168,11 +168,16 @@ TEST_CASE("UPDATE of a UNIQUE column is checked as a whole, with an index and wi
                     if (row.id <= std::stoi(where.substr(6))) row.v++;
                 }
             }
-            // the model: a statement is valid when no two rows end with one word (by case; NULLs repeat nothing)
+            // the model: the rows are written one after the other, in key order (the ids ascend): a statement is valid when no row ever takes a word (by case; NULLs
+            // repeat nothing) that another row holds at that moment
             bool valid = true;
-            for (std::size_t i = 0; i < next.size() && valid; i++) {
-                for (std::size_t j = i + 1; j < next.size() && valid; j++) {
-                    if (next[i].u && next[j].u && lower(*next[i].u) == lower(*next[j].u)) valid = false;
+            {
+                std::vector<ModelRow> now = model;
+                for (std::size_t i = 0; i < next.size() && valid; i++) {
+                    now[i].u = next[i].u;
+                    for (std::size_t j = 0; j < now.size() && valid; j++) {
+                        if (j != i && now[i].u && now[j].u && lower(*now[i].u) == lower(*now[j].u)) valid = false;
+                    }
                 }
             }
             const std::string statement_tail = " SET " + set_clause + " WHERE " + where;
@@ -216,7 +221,7 @@ TEST_CASE("UPDATE of a UNIQUE column over many rows names the first clashing row
     // the first row of the statement that clashes is named, however many later rows clash too
     r = ex.execute_sql("UPDATE big SET n = n + 300 WHERE id > 100 AND id <= 400");
     REQUIRE(r.is_err());
-    REQUIRE(r.error() == "Duplicate value '902' for column 'n'"); // (row 301 moves to 902, which row 451 holds; the odd values 503 ... 901 are free)
+    REQUIRE(r.error() == "Duplicate value '503' for column 'n'"); // (row 101 moves to 503, which row 251 still holds: the rows are written in key order)
     REQUIRE(rows_of(ex, "SELECT COUNT(*), COUNT(DISTINCT n) FROM big") == Rows{{"600", "600"}});
     // a shift to values nobody holds is fine
     ok(ex, "UPDATE big SET n = n + 10000 WHERE id > 300");
