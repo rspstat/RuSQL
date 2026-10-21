@@ -1737,6 +1737,12 @@ StringResult Executor::execute_with_s_body(SharedDatabase& s, Statement stmt) {
             expr = ArithExpr(ArithExpr::Str{value});
         }
         if (!v->order_by.empty() || v->limit) {
+            if (s.views.count(v->table)) { // (the rows are picked, in the order asked for, from the table the view reads)
+                if (auto resolved = resolve_updatable_view(s, v->table)) {
+                    v->condition = merge_conditions(resolved->second, v->condition);
+                    v->table = resolved->first;
+                }
+            }
             std::vector<std::string> order;
             auto rows = rows_of_limit(s, v->table, v->condition, v->order_by, v->limit, &order);
             if (rows.is_err()) return StringResult::Err(rows.error());
@@ -1748,6 +1754,12 @@ StringResult Executor::execute_with_s_body(SharedDatabase& s, Statement stmt) {
     }
     if (auto* v = std::get_if<Statement::Delete>(&stmt.data)) {
         if (!v->order_by.empty() || v->limit) {
+            if (s.views.count(v->table)) {
+                if (auto resolved = resolve_updatable_view(s, v->table)) {
+                    v->condition = merge_conditions(resolved->second, v->condition);
+                    v->table = resolved->first;
+                }
+            }
             auto rows = rows_of_limit(s, v->table, v->condition, v->order_by, v->limit);
             if (rows.is_err()) return StringResult::Err(rows.error());
             if (!rows.value()) return StringResult::Ok("0 row(s) deleted.");

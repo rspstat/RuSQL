@@ -266,7 +266,7 @@ function LayersView() {
         <Card style={at("1", "1")} c={C.client} title="engine_cli" sub={L("Terminal REPL", "터미널 REPL")}
           note={L("runs the engine in-process", "엔진을 프로세스 안에서 직접 실행")} />
         <Card style={at("2", "1")} c={C.client} title={L("Desktop UI", "데스크톱 UI")} sub="Tauri + React + Monaco"
-          note={L("SQL editor, ERD, Server Manager", "SQL 에디터, ERD, 서버 매니저")} />
+          note={L("SQL editor + autocomplete, ERD, Server Manager (sessions / locks), Compat page", "SQL 에디터 + 자동완성, ERD, 서버 매니저(세션·락), 호환성 페이지")} />
         <Card style={at("3", "1")} c={C.client} title="Claude Desktop + MCP" sub="Python FastMCP, stdio JSON-RPC"
           note={L("25 tools; drives the UI via ui_commands.json", "도구 25개, ui_commands.json으로 UI 제어")} />
         <Card style={at("4", "1")} c={C.client} title="engine_client" sub={L("TCP client CLI", "TCP 클라이언트 CLI")} note="-u -p -h -P" />

@@ -929,6 +929,48 @@ fn query_processlist(conn: &mut EngineConn) -> Vec<SessionInfo> {
     }).collect()
 }
 
+// What the server is doing right now (the Sessions panel): the rows of the engine's information_schema tables processlist, innodb_trx, innodb_locks,
+// innodb_lock_waits and innodb_deadlocks, as column names and rows of text.
+#[derive(serde::Serialize, Default, Clone)]
+struct ActivityTable {
+    columns: Vec<String>,
+    rows:    Vec<Vec<String>>,
+}
+
+#[derive(serde::Serialize, Default, Clone)]
+struct Activity {
+    sessions:     ActivityTable,
+    transactions: ActivityTable,
+    locks:        ActivityTable,
+    waits:        ActivityTable,
+    deadlocks:    ActivityTable,
+}
+
+fn activity_table(conn: &mut EngineConn, sql: &str) -> ActivityTable {
+    match send_one(conn, sql) {
+        Ok((true, body, _)) => {
+            let (columns, rows) = parse_box_table(&body);
+            ActivityTable { columns, rows }
+        }
+        _ => ActivityTable::default(),
+    }
+}
+
+#[tauri::command]
+fn get_activity(state: State<AppState>) -> Activity {
+    let mut guard = state.db.lock().unwrap_or_else(|e| e.into_inner());
+    match guard.as_mut() {
+        Some(conn) => Activity {
+            sessions:     activity_table(conn, "SELECT ID, USER, HOST, DB, COMMAND, TIME, INFO FROM information_schema.processlist ORDER BY ID;"),
+            transactions: activity_table(conn, "SELECT TRX_ID, TRX_STATE, TRX_ROWS_LOCKED, TRX_WAITING_FOR FROM information_schema.innodb_trx;"),
+            locks:        activity_table(conn, "SELECT LOCK_TRX_ID, LOCK_TABLE, LOCK_DATA FROM information_schema.innodb_locks;"),
+            waits:        activity_table(conn, "SELECT REQUESTING_TRX_ID, BLOCKING_TRX_ID FROM information_schema.innodb_lock_waits;"),
+            deadlocks:    activity_table(conn, "SELECT REQUESTING_TRX_ID, BLOCKING_TRX_ID FROM information_schema.innodb_deadlocks;"),
+        },
+        None => Activity::default(),
+    }
+}
+
 #[tauri::command]
 fn stop_server(conn_id: String, state: State<AppState>) -> Result<String, String> {
     let mut guard = state.db.lock().unwrap_or_else(|e| e.into_inner());
@@ -1541,6 +1583,7 @@ fn main() {
             start_server,
             stop_server,
             get_server_status,
+            get_activity,
             clear_server_log,
             import_csv,
             open_terminal,

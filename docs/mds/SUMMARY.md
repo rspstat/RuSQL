@@ -9,7 +9,7 @@
 |---|---|
 | 무엇 | MySQL 호환 프로토콜을 쓰는 **자체 RDBMS 엔진**(C++20) + 데스크톱 클라이언트(Tauri/React) + Claude 연동(MCP) |
 | 1학기 → 2학기 | Rust 프로토타입 → **C++ 전면 재작성**, "기능 추가"에서 **정합성·동시성·성능을 실제로 파고드는 심화**로 |
-| 규모 | 테스트 **771 케이스 / 1,505,171 assertions** (2학기 초 218 케이스 / 3,080 assertions) |
+| 규모 | 테스트 **776 케이스 / 1,505,297 assertions** (2학기 초 218 케이스 / 3,080 assertions) |
 | 엔진 구성 | 파서 → 비용 기반 플래너 → 실행기, MVCC·행 단위 락·데드락 감지, redo 로그 기반 내구성, B+Tree·해시·복합 인덱스 |
 
 ## 2학기에 만든 것 (엔진)
@@ -183,13 +183,14 @@
 | **BIGINT 최솟값보다 작은 음수를 `UNSIGNED`로 바꾸면 2^64에서 그대로 빼 `1`·`0` 같은 값**(`CAST('-18446744073709551615' AS UNSIGNED)`, `-9223372036854775809 | 0`; MySQL은 `9223372036854775808`) | 비트 연산·형 변환 결과가 틀림 |
 | **`INSERT IGNORE`·`ON DUPLICATE KEY UPDATE`로 건너뛴 행이 AUTO_INCREMENT 번호를 가져가고, 실패한 문장은 번호를 모두 돌려놓음**(`INSERT IGNORE … VALUES ('x',50),('y',1),('w',52)`에서 `w`가 5번; MySQL은 4번에 남은 번호를 버림) | 같은 문장이 같은 번호를 매기지 않아 id를 기대하는 곳이 어긋남 |
 | **같은 문장 안에서 앞 행과 키가 겹치는 행이 `IGNORE`·`ON DUPLICATE KEY UPDATE`에서도 "Duplicate value" 오류** | 한 문장으로 같은 키를 누적하는 배치(`VALUES ('a',1),('a',1) ON DUPLICATE KEY UPDATE n = n + VALUES(n)`)가 실패 |
+| **뷰를 거친 `UPDATE`·`DELETE … ORDER BY`/`LIMIT`가 "Table not found" 오류**(`UPDATE v SET … ORDER BY id DESC LIMIT 1`) | 있는 문법이 뷰에서만 막힘 |
 | **`FLOAT` 열을 일곱 자리 넘게 보임**(`1.23456789`가 `1.2345679`·MySQL `1.23457`; `CAST(x AS FLOAT)`는 글자 그대로) | 같은 값이 MySQL과 다르게 보임 |
 | **날짜·시간·ENUM·SET 열을 수로 쓰면 글자 앞부분을 수로 읽음**(`d + 0`이 `2024`·MySQL `20240102`, `e + 1`이 1·MySQL 3, `WHERE e = 2`·`d > 20240101`이 행을 못 고름) | 날짜 산술·비교가 틀린 결과 |
 | **`UPDATE`·`DELETE`의 `WHERE` 안 0 나누기(`n / b`)와 숫자와 견준 수 아닌 글자(`s = 5`)를 조용히 건너뜀**(MySQL은 문장 전체가 오류 1365·1292) | 잘못된 데이터가 있어도 문장이 "성공"해 다른 DB에서 깨지거나 오류를 놓침 |
 | **`UPDATE t SET u = u + 1`처럼 UNIQUE·PRIMARY KEY 값을 한 칸씩 밀면 MySQL은 행마다 검사해 오류(1062)인데 여기는 문장이 끝난 뒤의 값만 봐 통과**(`ORDER BY u DESC`를 붙이면 MySQL도 통과) | 같은 문장이 MySQL에서는 실패하는데 여기서는 성공해 다른 DB로 옮길 때 깨짐 |
 | **`UPDATE`가 같은 값으로 다시 쓴 행도 센다(MySQL은 바뀐 행만), `ON DUPLICATE KEY UPDATE`·`REPLACE`는 삽입한 행 수만 말하고, `DELETE`·`UPDATE`의 `AFTER` 트리거 문장이 바깥 문장의 수를 덮어씀** | `ROW_COUNT()`와 클라이언트의 `rowcount`·`executeUpdate`가 MySQL과 다름 (`CLIENT_FOUND_ROWS`를 켠 Connector/J·MySQLdb는 찾은 행) |
 
-성능·정합성 작업의 커밋들에서 찾은 기존 버그는 모두 189건입니다(전체 목록은 `DATE.md`).
+성능·정합성 작업의 커밋들에서 찾은 기존 버그는 모두 190건입니다(전체 목록은 `DATE.md`).
 
 ## 한계와 앞으로
 

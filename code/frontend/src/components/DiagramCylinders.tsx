@@ -24,8 +24,8 @@ const NODES: Node[] = [
   },
   {
     id: "ui", x: 95, y: 225, w: 140, h: 84, c: C.client, name: L("Desktop UI", "데스크톱 UI"),
-    desc: L("Tauri + React + Monaco (SQL editor, ERD, Server Manager). Its Rust backend spawns engine_server and talks to it over TCP :7878.",
-            "Tauri + React + Monaco(SQL 에디터, ERD, 서버 매니저). Rust 백엔드가 engine_server를 띄우고 TCP :7878로 통신."),
+    desc: L("Tauri + React + Monaco (SQL editor with schema-aware autocomplete, ERD, Server Manager with a live sessions / transactions / locks panel, MySQL compatibility page). Its Rust backend spawns engine_server and talks to it over TCP :7878.",
+            "Tauri + React + Monaco(스키마를 아는 자동완성이 있는 SQL 에디터, ERD, 세션·트랜잭션·락 패널이 있는 서버 매니저, MySQL 호환성 페이지). Rust 백엔드가 engine_server를 띄우고 TCP :7878로 통신."),
   },
   {
     id: "mcp", x: 95, y: 350, w: 140, h: 84, c: C.client, name: "Claude + MCP",

@@ -89,6 +89,12 @@ const std::vector<IC> kCharacterSets = {{"CHARACTER_SET_NAME", false}, {"DEFAULT
 const std::vector<IC> kCollations = {{"COLLATION_NAME", false}, {"CHARACTER_SET_NAME", false}, {"ID", true}, {"IS_DEFAULT", false}, {"IS_COMPILED", false},
                                      {"SORTLEN", true}, {"PAD_ATTRIBUTE", false}};
 const std::vector<IC> kEngines = {{"ENGINE", false}, {"SUPPORT", false}, {"COMMENT", false}, {"TRANSACTIONS", false}, {"XA", false}, {"SAVEPOINTS", false}};
+// What the server is doing right now: the sessions, the open transactions, the row locks they hold and who waits for whom (R45)
+const std::vector<IC> kProcesslist = {{"ID", true}, {"USER", false}, {"HOST", false}, {"DB", false}, {"COMMAND", false}, {"TIME", true}, {"STATE", false}, {"INFO", false}};
+const std::vector<IC> kInnodbTrx = {{"TRX_ID", true}, {"TRX_STATE", false}, {"TRX_ROWS_LOCKED", true}, {"TRX_WAITING_FOR", true}};
+const std::vector<IC> kInnodbLocks = {{"LOCK_TRX_ID", true}, {"LOCK_MODE", false}, {"LOCK_TABLE", false}, {"LOCK_DATA", false}};
+const std::vector<IC> kInnodbLockWaits = {{"REQUESTING_TRX_ID", true}, {"BLOCKING_TRX_ID", true}};
+const std::vector<IC> kInnodbDeadlocks = {{"REQUESTING_TRX_ID", true}, {"BLOCKING_TRX_ID", true}};
 } // namespace
 
 const std::vector<InfoSchemaColumn>* Executor::info_schema_columns(const std::string& which) {
@@ -104,6 +110,11 @@ const std::vector<InfoSchemaColumn>* Executor::info_schema_columns(const std::st
     if (lower == "character_sets") return &kCharacterSets;
     if (lower == "collations") return &kCollations;
     if (lower == "engines") return &kEngines;
+    if (lower == "processlist") return &kProcesslist;
+    if (lower == "innodb_trx") return &kInnodbTrx;
+    if (lower == "innodb_locks") return &kInnodbLocks;
+    if (lower == "innodb_lock_waits") return &kInnodbLockWaits;
+    if (lower == "innodb_deadlocks") return &kInnodbDeadlocks;
     return nullptr;
 }
 
@@ -513,6 +524,74 @@ std::vector<Row> Executor::info_schema_rows(const SharedDatabase& s, const std::
             r["SAVEPOINTS"] = "YES";
         }
         rows.push_back(std::move(r));
+        return rows;
+    }
+
+    if (lower == "processlist") {
+        auto list = s.process_list->lock();
+        const auto now = std::chrono::steady_clock::now();
+        for (auto& [id, p] : *list) {
+            Row r;
+            r["ID"] = std::to_string(p.id);
+            r["USER"] = p.user;
+            r["HOST"] = p.host;
+            r["DB"] = p.db.empty() ? EXECUTOR_NULL_VALUE : p.db;
+            r["COMMAND"] = p.command;
+            r["TIME"] = std::to_string(std::chrono::duration_cast<std::chrono::seconds>(now - p.state_since).count());
+            r["STATE"] = EXECUTOR_NULL_VALUE;
+            r["INFO"] = p.info.empty() ? EXECUTOR_NULL_VALUE : p.info;
+            rows.push_back(std::move(r));
+        }
+        std::sort(rows.begin(), rows.end(), [](const Row& a, const Row& b) { return std::stoull(a.at("ID")) < std::stoull(b.at("ID")); });
+        return rows;
+    }
+
+    if (lower == "innodb_trx") {
+        std::vector<std::uint64_t> open;
+        {
+            auto ids = s.active_txn_ids->lock();
+            open.assign(ids->begin(), ids->end());
+        }
+        std::sort(open.begin(), open.end());
+        const auto locks = s.lock_mgr.lock_rows();
+        const auto waits = s.lock_mgr.wait_for_rows();
+        for (std::uint64_t id : open) {
+            std::size_t held = 0;
+            for (auto& [table, key, holder] : locks) held += holder == id ? 1 : 0;
+            std::optional<std::uint64_t> blocker;
+            for (auto& [waiter, holder] : waits) {
+                if (waiter == id) blocker = holder;
+            }
+            Row r;
+            r["TRX_ID"] = std::to_string(id);
+            r["TRX_STATE"] = blocker ? "LOCK WAIT" : "RUNNING";
+            r["TRX_ROWS_LOCKED"] = std::to_string(held);
+            r["TRX_WAITING_FOR"] = blocker ? std::to_string(*blocker) : EXECUTOR_NULL_VALUE;
+            rows.push_back(std::move(r));
+        }
+        return rows;
+    }
+
+    if (lower == "innodb_locks") {
+        for (auto& [table, key, holder] : s.lock_mgr.lock_rows()) {
+            Row r;
+            r["LOCK_TRX_ID"] = std::to_string(holder);
+            r["LOCK_MODE"] = "X,REC_NOT_GAP";
+            r["LOCK_TABLE"] = table;
+            r["LOCK_DATA"] = key;
+            rows.push_back(std::move(r));
+        }
+        return rows;
+    }
+
+    if (lower == "innodb_lock_waits" || lower == "innodb_deadlocks") {
+        const auto pairs = lower == "innodb_deadlocks" ? s.lock_mgr.deadlock_history() : s.lock_mgr.wait_for_rows();
+        for (auto& [requesting, blocking] : pairs) {
+            Row r;
+            r["REQUESTING_TRX_ID"] = std::to_string(requesting);
+            r["BLOCKING_TRX_ID"] = std::to_string(blocking);
+            rows.push_back(std::move(r));
+        }
         return rows;
     }
 

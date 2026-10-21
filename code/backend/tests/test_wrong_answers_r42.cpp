@@ -475,3 +475,65 @@ TEST_CASE("a FLOAT column is shown with six significant digits, to the last char
     // the stored number is the single-precision one: comparisons and arithmetic read it, not the six digits
     REQUIRE(q(ex, "SELECT id FROM fl WHERE f > 1.23456 AND f < 1.23458 ORDER BY id") == Rows{{"1"}});
 }
+
+TEST_CASE("EXPLAIN ANALYZE reports the steps of the statement with their rows and share of the time", "[r45][explain]") {
+    TempDataDir dir("r45_explain");
+    Executor ex(dir.path);
+    ok(ex, "CREATE DATABASE d");
+    ok(ex, "USE d");
+    ok(ex, "CREATE TABLE c (id INT PRIMARY KEY, city VARCHAR(5))");
+    ok(ex, "CREATE TABLE o (id INT PRIMARY KEY, cid INT, amount INT)");
+    ok(ex, "INSERT INTO c VALUES (1, 'x'), (2, 'y')");
+    ok(ex, "INSERT INTO o VALUES (1, 1, 10), (2, 1, 20), (3, 2, 30), (4, 2, 40)");
+    auto plan = [&](const std::string& sql) {
+        auto r = ex.execute_sql("EXPLAIN ANALYZE " + sql);
+        INFO(sql);
+        REQUIRE(r.is_ok());
+        return r.value();
+    };
+    const std::string joined = plan("SELECT c.city, SUM(o.amount) FROM o JOIN c ON o.cid = c.id GROUP BY c.city ORDER BY c.city");
+    REQUIRE(joined.find("Step 1 Scan d.o + JOIN d.c : 4 rows") != std::string::npos);
+    REQUIRE(joined.find("Group / aggregate : 2 rows") != std::string::npos);
+    REQUIRE(joined.find("Sort groups : 2 rows") != std::string::npos);
+    REQUIRE(plan("SELECT COUNT(*) FROM o").find("Aggregate : 1 rows") != std::string::npos);
+    REQUIRE(plan("SELECT * FROM o WHERE id = 3").find("Step 1 Execute : 1 rows") != std::string::npos); // (an index answer is one step)
+    // a subquery's own steps are part of the step that ran it
+    const std::string with_subquery = plan("SELECT * FROM o WHERE cid IN (SELECT id FROM c WHERE city = 'x') ORDER BY amount DESC");
+    REQUIRE(with_subquery.find("Step 1 Scan d.o : 2 rows") != std::string::npos);
+    REQUIRE(with_subquery.find("Scan d.c") == std::string::npos);
+}
+
+TEST_CASE("information_schema shows the sessions, open transactions and row locks", "[r45][infoschema]") {
+    TempDataDir dir("r45_infoschema");
+    Executor ex(dir.path);
+    ok(ex, "CREATE DATABASE d");
+    ok(ex, "USE d");
+    ok(ex, "CREATE TABLE t (id INT PRIMARY KEY, v INT)");
+    ok(ex, "INSERT INTO t VALUES (1, 0), (2, 0)");
+    REQUIRE(q(ex, "SELECT COUNT(*) FROM information_schema.innodb_trx") == Rows{{"0"}});
+    ok(ex, "BEGIN");
+    ok(ex, "UPDATE t SET v = 1 WHERE id = 2");
+    REQUIRE(q(ex, "SELECT TRX_STATE, TRX_ROWS_LOCKED, TRX_WAITING_FOR FROM information_schema.innodb_trx") == Rows{{"RUNNING", "1", "NULL"}});
+    REQUIRE(q(ex, "SELECT LOCK_TABLE, LOCK_DATA FROM information_schema.innodb_locks") == Rows{{"d.t", "2"}});
+    REQUIRE(q(ex, "SELECT COUNT(*) FROM information_schema.innodb_lock_waits") == Rows{{"0"}});
+    ok(ex, "COMMIT");
+    REQUIRE(q(ex, "SELECT COUNT(*) FROM information_schema.innodb_locks") == Rows{{"0"}});
+}
+
+TEST_CASE("ANY_VALUE lets a column the group does not fix be selected, and UPDATE / DELETE take ORDER BY through a view", "[r45][any_value]") {
+    TempDataDir dir("r45_any_value");
+    Executor ex(dir.path);
+    ok(ex, "CREATE DATABASE d");
+    ok(ex, "USE d");
+    ok(ex, "CREATE TABLE av (id INT PRIMARY KEY, grp INT, name VARCHAR(5), val INT)");
+    ok(ex, "INSERT INTO av VALUES (1, 1, 'a', 10), (2, 1, 'a', 10), (3, 2, 'b', 20)");
+    REQUIRE(q(ex, "SELECT grp, ANY_VALUE(name), ANY_VALUE(val) + 1 FROM av GROUP BY grp ORDER BY grp") == Rows{{"1", "a", "11"}, {"2", "b", "21"}});
+    REQUIRE(q(ex, "SELECT COUNT(*), ANY_VALUE(grp) FROM av WHERE grp = 2") == Rows{{"1", "2"}});
+    REQUIRE(q(ex, "SELECT ANY_VALUE(name) FROM av WHERE grp = 1") == Rows{{"a"}, {"a"}}); // (not an aggregate: one row per row)
+    REQUIRE(fails(ex, "SELECT grp, name FROM av GROUP BY grp").find("only_full_group_by") != std::string::npos);
+    ok(ex, "CREATE VIEW avv AS SELECT id, grp, val FROM av WHERE grp = 1");
+    ok(ex, "UPDATE avv SET val = val + 1 ORDER BY id DESC LIMIT 1");
+    REQUIRE(q(ex, "SELECT id, val FROM av ORDER BY id") == Rows{{"1", "10"}, {"2", "11"}, {"3", "20"}});
+    ok(ex, "DELETE FROM avv ORDER BY id LIMIT 1");
+    REQUIRE(q(ex, "SELECT id FROM av ORDER BY id") == Rows{{"2"}, {"3"}});
+}

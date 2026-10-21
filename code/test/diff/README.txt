@@ -144,7 +144,10 @@ Comparison with a real MySQL (needs pymysql and a MySQL 8.4 on 127.0.0.1:3391; u
       shift (an UPDATE that moves a UNIQUE / PRIMARY KEY value onto the value another row of the statement still holds: written row by row in key or ORDER BY order),
       where_errors (the WHERE of an UPDATE / DELETE: a division by zero, a text that is no number compared with a number; a WHERE that compares an indexed column is left out),
       arith_types (a DATE, DATETIME, TIME, ENUM and SET column read as the number it stands for: arithmetic, numeric functions, CAST, comparisons with numbers),
-      float (FLOAT columns shown with six significant digits; CAST(x AS FLOAT)).
+      float (FLOAT columns shown with six significant digits; CAST(x AS FLOAT)),
+      any_value (ANY_VALUE under ONLY_FULL_GROUP_BY), view_order (UPDATE / DELETE through a view with ORDER BY and LIMIT).
+  python make_scoreboard.py <engine_server.exe> [--tests CASES ASSERTIONS]
+      runs every corpus (the protocol ones with --proto) and writes the numbers the app's Compat page shows to code/frontend/src/lib/compatSnapshot.json.
       The cells of RuSQL's answer are read the way the engine itself reads a result table (\\ \n \| and \s \t for a space or tab at either end of a value,
       see engine/result_text.hpp), so a value such as ' x ' or 'a|b' is compared as it is; corpus/tables.sql has probes for them (R40) and for CTE columns.
   --exact

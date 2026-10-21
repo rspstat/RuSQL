@@ -1,0 +1,77 @@
+/* CompatView -- "Compat" page: how many statements RuSQL answers like MySQL. */
+
+.cp-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 24px 32px 56px;
+  position: relative;
+}
+
+.cp-lang {
+  position: absolute;
+  top: 18px;
+  right: 32px;
+  display: inline-flex;
+  background: #252526;
+  border: 1px solid #3a3d41;
+  border-radius: 6px;
+  overflow: hidden;
+}
+.cp-lang button {
+  background: transparent;
+  color: #9d9d9d;
+  border: 0;
+  padding: 4px 12px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.cp-lang button.on { background: #094771; color: #fff; }
+
+.cp-page {
+  max-width: 1080px;
+  margin: 0 auto;
+  color: #d4d4d4;
+  font-family: 'Segoe UI', sans-serif;
+  word-break: keep-all;
+  overflow-wrap: break-word;
+}
+.cp-page h1 { font-size: 24px; margin: 0 0 6px; color: #fff; }
+.cp-page h2 { font-size: 15px; margin: 28px 0 10px; color: #4ec9b0; font-weight: 600; letter-spacing: 0.02em; }
+.cp-sub { color: #9d9d9d; font-size: 13px; line-height: 1.6; margin: 0 0 18px; max-width: 760px; }
+
+.cp-stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  gap: 12px;
+}
+.cp-stat {
+  background: #252526;
+  border: 1px solid #3a3d41;
+  border-radius: 8px;
+  padding: 14px 16px;
+}
+.cp-num { font-size: 26px; font-weight: 700; color: #4ec9b0; line-height: 1.1; }
+.cp-label { font-size: 12px; color: #9d9d9d; margin-top: 6px; }
+
+.cp-rows { display: flex; flex-direction: column; gap: 6px; }
+.cp-row {
+  display: grid;
+  grid-template-columns: 130px minmax(200px, 1.1fr) minmax(160px, 1fr) 80px;
+  align-items: center;
+  gap: 12px;
+  background: #1e1e1e;
+  border: 1px solid #2d2d2d;
+  border-radius: 6px;
+  padding: 8px 12px;
+  font-size: 13px;
+}
+.cp-name { font-family: Consolas, monospace; color: #9cdcfe; }
+.cp-what { color: #b5b5b5; }
+.cp-bar { display: flex; height: 10px; background: #3a3d41; border-radius: 5px; overflow: hidden; }
+.cp-same { background: #4ec9b0; }
+.cp-diff { background: #e06c75; }
+.cp-count { text-align: right; font-variant-numeric: tabular-nums; color: #d4d4d4; }
+
+.cp-known { margin: 0; padding-left: 20px; line-height: 1.9; font-size: 13px; color: #b5b5b5; }
+.cp-foot { margin-top: 26px; font-size: 11px; color: #6a6a6a; font-family: Consolas, monospace; }

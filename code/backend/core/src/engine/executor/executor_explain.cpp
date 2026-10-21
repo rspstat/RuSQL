@@ -6,6 +6,7 @@
 #include <chrono>
 #include <sstream>
 
+#include "engine/explain_trace.hpp"
 #include "engine/planner.hpp"
 
 namespace engine {
@@ -91,8 +92,12 @@ StringResult Executor::exec_explain_analyze(SharedDatabase& s, Statement stmt) {
         }
     }
 
+    explain_trace::Trace trace;
     auto start = std::chrono::steady_clock::now();
+    trace.last = start;
+    explain_trace::active = &trace;
     auto result = execute_with_s(s, std::move(stmt));
+    explain_trace::active = nullptr;
     auto elapsed = std::chrono::steady_clock::now() - start;
     if (result.is_err()) return result;
     std::string result_str = result.value();
@@ -157,6 +162,27 @@ StringResult Executor::exec_explain_analyze(SharedDatabase& s, Statement stmt) {
                              pad_right(std::to_string(actual_rows), 8) + " Accuracy : " + accuracy_str;
     std::string time_stat = "Execution time : " + time_str;
 
+    // The steps the statement went through, with the rows each left and the share of the time it took. A statement that took a shortcut (an index answer, a
+    // cached result, a derived table) has none of its own marks: it is one step. What comes after the last mark (limit, distinct, writing the answer) is the last step.
+    std::vector<std::string> step_lines;
+    {
+        auto steps = trace.steps;
+        double marked = 0;
+        for (auto& st : steps) marked += st.ms;
+        if (steps.empty()) {
+            steps.push_back({"Execute", actual_rows, elapsed_ms});
+        } else if (elapsed_ms - marked > 0.0005) {
+            steps.push_back({"Limit / distinct / result", actual_rows, elapsed_ms - marked});
+        }
+        const double total = std::max(elapsed_ms, 1e-9);
+        for (std::size_t i = 0; i < steps.size(); i++) {
+            char buf[160];
+            std::snprintf(buf, sizeof buf, "Step %zu %s : %zu rows, %.3f ms, %.0f%%", i + 1, steps[i].label.c_str(), steps[i].rows, steps[i].ms,
+                          steps[i].ms / total * 100.0);
+            step_lines.push_back(buf);
+        }
+    }
+
     std::string out;
     out += std::string(SEP) + "\n";
     out += hdr + "\n";
@@ -165,6 +191,8 @@ StringResult Executor::exec_explain_analyze(SharedDatabase& s, Statement stmt) {
     out += blank + "\n";
     out += fmt_stat(rows_stat);
     out += fmt_stat(time_stat);
+    out += blank + "\n";
+    for (auto& line : step_lines) out += fmt_stat(line);
     out += SEP;
     return StringResult::Ok(out);
 }

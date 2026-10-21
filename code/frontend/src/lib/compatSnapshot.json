@@ -1,0 +1,148 @@
+{
+  "generated": "2026-10-21",
+  "mysql": "8.4.9",
+  "corpora": [
+    {
+      "name": "tables",
+      "en": "Tables, joins, subqueries, windows, CTEs, views",
+      "ko": "표·조인·서브쿼리·윈도·CTE·뷰",
+      "statements": 699,
+      "different": 1,
+      "bothFail": 68
+    },
+    {
+      "name": "functions",
+      "en": "Built-in functions (strings, math, dates, JSON)",
+      "ko": "내장 함수 (문자열·수학·날짜·JSON)",
+      "statements": 67,
+      "different": 3,
+      "bothFail": 3
+    },
+    {
+      "name": "constraints",
+      "en": "Types, NOT NULL, UNIQUE, CHECK, foreign keys, strict mode",
+      "ko": "타입·NOT NULL·UNIQUE·CHECK·외래키·엄격 모드",
+      "statements": 222,
+      "different": 5,
+      "bothFail": 61
+    },
+    {
+      "name": "collation",
+      "en": "Default collation utf8mb4_0900_ai_ci",
+      "ko": "기본 정렬 규칙 utf8mb4_0900_ai_ci",
+      "statements": 197,
+      "different": 0,
+      "bothFail": 25
+    },
+    {
+      "name": "decimals",
+      "en": "DECIMAL arithmetic, to the last digit",
+      "ko": "DECIMAL 산술, 마지막 자리까지",
+      "statements": 32,
+      "different": 0,
+      "bothFail": 0
+    },
+    {
+      "name": "temporal",
+      "en": "Dates, times, fractional seconds",
+      "ko": "날짜·시간·소수초",
+      "statements": 103,
+      "different": 0,
+      "bothFail": 14
+    },
+    {
+      "name": "routines",
+      "en": "Stored procedures, functions, triggers, prepared statements",
+      "ko": "저장 프로시저·함수·트리거·준비된 문장",
+      "statements": 203,
+      "different": 0,
+      "bothFail": 36
+    },
+    {
+      "name": "schema_change",
+      "en": "ALTER TABLE and the indexes after it",
+      "ko": "ALTER TABLE과 그 뒤의 인덱스",
+      "statements": 69,
+      "different": 0,
+      "bothFail": 5
+    },
+    {
+      "name": "autoinc",
+      "en": "AUTO_INCREMENT numbers a statement takes and loses",
+      "ko": "문장이 쓰고 잃는 AUTO_INCREMENT 번호",
+      "statements": 219,
+      "different": 0,
+      "bothFail": 21
+    },
+    {
+      "name": "shift",
+      "en": "UPDATE that shifts UNIQUE / PRIMARY KEY values",
+      "ko": "UNIQUE·PRIMARY KEY 값을 밀어 옮기는 UPDATE",
+      "statements": 106,
+      "different": 0,
+      "bothFail": 28
+    },
+    {
+      "name": "where_errors",
+      "en": "Division by zero / text-vs-number in UPDATE and DELETE",
+      "ko": "UPDATE·DELETE의 0 나누기·글자-수 비교",
+      "statements": 108,
+      "different": 0,
+      "bothFail": 27
+    },
+    {
+      "name": "arith_types",
+      "en": "Dates, ENUM, SET read as numbers",
+      "ko": "날짜·ENUM·SET을 수로 읽기",
+      "statements": 137,
+      "different": 0,
+      "bothFail": 0
+    },
+    {
+      "name": "float",
+      "en": "FLOAT columns shown with six digits",
+      "ko": "FLOAT 열 6자리 표시",
+      "statements": 37,
+      "different": 0,
+      "bothFail": 0
+    },
+    {
+      "name": "any_value",
+      "en": "ANY_VALUE under ONLY_FULL_GROUP_BY",
+      "ko": "ONLY_FULL_GROUP_BY 아래의 ANY_VALUE",
+      "statements": 15,
+      "different": 0,
+      "bothFail": 1
+    },
+    {
+      "name": "view_order",
+      "en": "UPDATE / DELETE through a view with ORDER BY",
+      "ko": "ORDER BY가 붙은 뷰 경유 UPDATE·DELETE",
+      "statements": 18,
+      "different": 0,
+      "bothFail": 1
+    },
+    {
+      "name": "protocol",
+      "en": "MySQL wire protocol: SHOW, OK packets, affected rows",
+      "ko": "MySQL 프로토콜: SHOW·OK 패킷·영향 행 수",
+      "statements": 103,
+      "different": 4,
+      "bothFail": 1
+    },
+    {
+      "name": "protocol_types",
+      "en": "MySQL wire protocol: typed result columns",
+      "ko": "MySQL 프로토콜: 열 타입",
+      "statements": 30,
+      "different": 2,
+      "bothFail": 0
+    }
+  ],
+  "conformanceCases": 2806,
+  "tests": {
+    "cases": 776,
+    "assertions": 1505297
+  },
+  "bugsFound": 189
+}

@@ -6,7 +6,9 @@ import type * as Monaco from "monaco-editor";
 import "./App.css";
 import { format as sqlFormat } from "sql-formatter";
 import DiagramView from "./components/DiagramView";
+import CompatView from "./components/CompatView";
 import Sidebar from "./components/Sidebar";
+import ActivityPanel from "./components/ActivityPanel";
 import ErdView from "./components/ErdView";
 import ConfirmDialog from "./components/ConfirmDialog";
 import EditTableModal from "./components/EditTableModal";
@@ -16,6 +18,7 @@ import type {
 } from "./types";
 import { computeErdLayout, type ErdPos } from "./lib/erd";
 import { measureTextPx } from "./lib/measureText";
+import { registerSqlCompletion, clearSqlCompletionCache } from "./lib/sqlCompletion";
 
 // ─── 타입 ─────────────────────────────────────────────────────
 interface HistoryEntry {
@@ -25,7 +28,7 @@ interface HistoryEntry {
   success: boolean;
   elapsed: number;
 }
-type ActiveView = "editor" | "erd" | "server" | "diagram";
+type ActiveView = "editor" | "erd" | "server" | "diagram" | "compat";
 const PAGE_SIZE = 100;
 
 // 셀 편집 시 PK WHERE절 값 이스케이프용 — 컬럼의 실제 data_type을 보고 숫자 리터럴로 둘지
@@ -718,6 +721,7 @@ function App() {
     const startTs = Date.now();
     try {
       const res = await invoke<MultiQueryResult>("execute_query", { query: q, ts: startTs });
+      clearSqlCompletionCache(); // (the statement may have created or changed a table)
       setTabResults(p => ({ ...p, [activeTabId]: res.results }));
       const entry: HistoryEntry = {
         id: startTs.toString(),
@@ -2078,6 +2082,17 @@ function App() {
           </svg>
         </div>
 
+        {/* Compat: how closely RuSQL answers like MySQL */}
+        <div
+          className={`activity-icon ${activeView === "compat" ? "active" : ""}`}
+          title="MySQL Compatibility"
+          onClick={() => setActiveView("compat")}
+        >
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M12 3v18M5 7h14M5 7l-3 7a3.5 3.5 0 0 0 6 0L5 7zM19 7l-3 7a3.5 3.5 0 0 0 6 0L19 7zM8 21h8"/>
+          </svg>
+        </div>
+
         <div className="activity-bar-bottom">
           <div className="activity-icon" title="Account">
             <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor">
@@ -2470,11 +2485,12 @@ function App() {
                   renderLineHighlight: "all",
                   automaticLayout: true,
                   padding: { top: 12 },
-                  quickSuggestions: false,
-                  suggestOnTriggerCharacters: false,
+                  quickSuggestions: { other: true, comments: false, strings: false },
+                  suggestOnTriggerCharacters: true,
                   wordBasedSuggestions: "off",
                 }}
                 beforeMount={monaco => {
+                  registerSqlCompletion(monaco);
                   monaco.editor.defineTheme("rusql-dark", {
                     base: "vs-dark",
                     inherit: true,
@@ -2653,8 +2669,8 @@ function App() {
                           renderLineHighlight: "all",
                           automaticLayout: true,
                           padding: { top: 12 },
-                          quickSuggestions: false,
-                          suggestOnTriggerCharacters: false,
+                          quickSuggestions: { other: true, comments: false, strings: false },
+                          suggestOnTriggerCharacters: true,
                           wordBasedSuggestions: "off",
                         }}
                         onMount={(editor) => {
@@ -3275,6 +3291,7 @@ function App() {
                             <div style={{ fontSize: 11, color: "#858585", paddingLeft: 14, marginTop: 2 }}>{s.query_count} queries</div>
                           </div>
                         ))}
+                        <ActivityPanel />
                         <div style={{ marginTop: 6, fontSize: 11, color: "#555", textAlign: "center" }}>Auto-refresh every 1.5s</div>
                       </>
                     );
@@ -3548,6 +3565,7 @@ function App() {
       )}
 
       {activeView === "diagram" && <DiagramView />}
+      {activeView === "compat" && <CompatView />}
 
       </div> {/* app-body */}
     </div>

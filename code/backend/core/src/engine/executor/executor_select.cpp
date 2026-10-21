@@ -16,6 +16,7 @@
 #include <unordered_set>
 
 #include "engine/column_text.hpp"
+#include "engine/explain_trace.hpp"
 #include "engine/join.hpp"
 #include "engine/planner.hpp"
 #include "engine/parallel_util.hpp"
@@ -711,6 +712,19 @@ static bool cond_mentions_column(const CondExpr& e) {
     return true;
 }
 
+// Is there an ANY_VALUE(...) in the expression? (the column inside it is read from the first row of the group)
+static bool arith_has_any_value(const ArithExpr& e) {
+    if (auto* v = std::get_if<ArithExpr::Add>(&e.data)) return arith_has_any_value(*v->lhs) || arith_has_any_value(*v->rhs);
+    if (auto* v = std::get_if<ArithExpr::Sub>(&e.data)) return arith_has_any_value(*v->lhs) || arith_has_any_value(*v->rhs);
+    if (auto* v = std::get_if<ArithExpr::Mul>(&e.data)) return arith_has_any_value(*v->lhs) || arith_has_any_value(*v->rhs);
+    if (auto* v = std::get_if<ArithExpr::Div>(&e.data)) return arith_has_any_value(*v->lhs) || arith_has_any_value(*v->rhs);
+    if (auto* f = std::get_if<ArithExpr::Func>(&e.data)) {
+        if (f->name == "ANY_VALUE") return true;
+        return std::any_of(f->args.begin(), f->args.end(), [](const ArithExpr& a) { return arith_has_any_value(a); });
+    }
+    return false;
+}
+
 // Does the expression name a column (an aggregate's text `SUM(v)` is one name too: it is not a constant)?
 static bool arith_mentions_column(const ArithExpr& e) {
     if (std::holds_alternative<ArithExpr::Col>(e.data)) return true;
@@ -1332,6 +1346,7 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
                                     std::vector<OrderBy> order_by, std::optional<std::vector<std::string>> group_by,
                                     std::optional<CondExpr> having, std::optional<std::size_t> limit, std::optional<std::size_t> offset,
                                     bool for_update, bool for_share) {
+    explain_trace::Scope trace_scope; // (EXPLAIN ANALYZE counts the steps of the outermost SELECT)
     if (subquery) {
         return exec_select_with_subquery(s, std::move(*subquery->first), subquery->second, distinct, std::move(columns), std::move(condition),
                                           std::move(joins), std::move(order_by), std::move(group_by), std::move(having), limit, offset, for_update,
@@ -2462,12 +2477,18 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
         for (auto& r : result) rows_p.push_back(&r);
     }
 
+    if (explain_trace::active) {
+        std::string label = "Scan " + table;
+        for (const Join& j : joins) label += " + JOIN " + j.table;
+        explain_trace::mark(label, rows_p.size());
+    }
     if (!order_by.empty() && rows_p.size() > 1) { // stable, same order as comparing the rows pairwise with cmp_key
         std::vector<std::size_t> order = order_rows(rows_p, order_by, &Executor::get_col);
         std::vector<const Row*> sorted;
         sorted.reserve(rows_p.size());
         for (std::size_t i : order) sorted.push_back(rows_p[i]);
         rows_p = std::move(sorted);
+        explain_trace::mark("Sort", rows_p.size());
     }
 
     if (group_by) {
@@ -2554,12 +2575,14 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
             for (std::size_t gi = 0; gi < groups.size(); gi++) make_group_row(gi);
         }
 
+        explain_trace::mark("Group / aggregate", group_rows.size());
         if (having) {
             std::vector<Row> filtered;
             for (auto& row : group_rows) {
                 if (matches_condition_with_subquery(s, row, having)) filtered.push_back(std::move(row));
             }
             group_rows = std::move(filtered);
+            explain_trace::mark("Having", group_rows.size());
         }
         if (!order_by.empty()) {
             auto less = [&](const Row& a, const Row& b) { return row_order_less(a, b, order_by, &Executor::get_col); };
@@ -2568,6 +2591,7 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
             } else {
                 std::stable_sort(group_rows.begin(), group_rows.end(), less);
             }
+            explain_trace::mark("Sort groups", group_rows.size());
         }
         if (offset) {
             std::size_t skip = std::min(*offset, group_rows.size());
@@ -2699,6 +2723,7 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
         }
 
         Row agg_row = compute_aggregates(rows_p, columns, /*allow_parallel=*/true);
+        explain_trace::mark("Aggregate", 1);
         // HAVING without GROUP BY (`SELECT SUM(v) FROM t HAVING SUM(v) > 5`) keeps or drops the one row of aggregates; it used to be applied to the
         // rows before they were aggregated, where `SUM(v)` is nothing, so the aggregates came out over no row at all
         if (having) {
@@ -2714,7 +2739,13 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
             return e && !column_has_aggregate(col) && !arith_mentions_column(e->expr);
         };
         const bool constant_items = std::any_of(columns.begin(), columns.end(), is_constant_item);
-        if (!expr_agg_refs.empty() || constant_items) {
+        // `SELECT COUNT(*), ANY_VALUE(v)`: the value of the column on the first row of the one group
+        auto is_any_value_item = [](const SelectColumn& col) {
+            auto* e = std::get_if<SelectColumn::Expr>(&col.data);
+            return e && arith_has_any_value(e->expr);
+        };
+        const bool any_value_items = std::any_of(columns.begin(), columns.end(), is_any_value_item);
+        if (!expr_agg_refs.empty() || constant_items || any_value_items) {
             // `SUM(v) + 1`, `ROUND(AVG(v), 2)`, `CASE WHEN COUNT(*) > 1 ...`: the aggregates inside are computed as HAVING computes
             // them and the columns are evaluated on this one row of aggregates. The plain aggregates keep their place; a column
             // with no aggregate in it is not part of an aggregate result (as before). Formatted like any result, minus the row
@@ -2722,9 +2753,12 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
             for (auto& ref : expr_agg_refs) {
                 if (!agg_row.count(ref)) agg_row[ref] = compute_agg_from_key(ref, rows_p, aggregate_class(ref), aggregate_approx(ref));
             }
+            if (any_value_items && !rows_p.empty()) {
+                for (auto& [k, v] : *rows_p.front()) agg_row.try_emplace(k, v);
+            }
             std::vector<SelectColumn> shown;
             for (auto& col : columns) {
-                if (column_has_aggregate(col) || is_constant_item(col)) shown.push_back(col);
+                if (column_has_aggregate(col) || is_constant_item(col) || is_any_value_item(col)) shown.push_back(col);
             }
             auto text = format_result(s, std::vector<Row>{agg_row}, shown, table, joins);
             if (text.is_err()) return text;

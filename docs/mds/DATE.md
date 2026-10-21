@@ -2117,6 +2117,30 @@ VS Code 스타일 탭 드래그 순서 변경(요청의 1번 항목)은 같은 �
 
 **한계**(고치지 않음): 산술이 단정밀도 값의 정확한 크기를 읽는 것(`f + 0`은 MySQL에서 `1.2345678806304932`, 여기는 `1.2345679`), `f = 0.1`이 MySQL에서 거짓인 것(단정밀도 0.1은 배정밀도 0.1과 다름 — MySQL의 잘 알려진 함정이라 따라 하지 않음), `CAST(f AS CHAR)`·`CONCAT(f, '')`가 여섯 자리를 쓰지 않는 것, `MAX(f)`·`SUM(f)`의 보이는 모양, `FLOAT(7,3)`의 자릿수 지정(받기만 하고 무시).
 
+### 10월 21일 — R45: ANY_VALUE, 뷰 경유 UPDATE/DELETE의 ORDER BY, EXPLAIN ANALYZE 단계, 실행 상태 표, 앱 기능 셋
+
+**왜 이 항목인가**: R44를 끝내고 낸 추천 목록(`docs/mds/RECOMMAND.md`)에서 사용자가 여섯 개를 골랐다 — `ANY_VALUE`, `UPDATE 뷰 … ORDER BY`, `EXPLAIN ANALYZE` 확장, 스키마를 아는 자동완성, 세션·트랜잭션·락 패널, 앱 안의 MySQL 호환 점수판. 항목마다 시험하고 끝에 문서를 한꺼번에 갱신하는 방식으로 진행했다.
+
+**엔진**
+- **`ANY_VALUE(x)`**: MySQL처럼 **함수**(집계가 아님)다. `ONLY_FULL_GROUP_BY` 검사가 그 안쪽 열을 면제하고(`SELECT grp, ANY_VALUE(name) FROM av GROUP BY grp`), 그룹은 첫 행의 값으로 보인다. 산술 안에서도(`ANY_VALUE(val) + 1`), `GROUP BY` 없는 질의에서는 행마다(집계가 아니라 한 행으로 모이지 않는다), 집계만 있는 질의(`SELECT COUNT(*), ANY_VALUE(grp)`)에서는 그 한 그룹의 첫 행으로 나온다. 처음에 집계로 만들었다가 MySQL과 비교해 함수가 맞다는 것을 알고 고쳤다.
+- **뷰를 거친 `UPDATE`·`DELETE … ORDER BY`/`LIMIT`**: 전에는 "Table not found" 오류였다(이전부터 있던 버그). 이제 문장 처리기가 뷰를 먼저 풀어 기본 표와 뷰의 조건으로 행을 고른다(R44 ④의 `ORDER BY` 순서 규칙도 그대로 쓴다).
+- **`EXPLAIN ANALYZE`의 단계**: 계획과 추정/실제 행 수 아래에 문장이 지난 단계를 보여 준다 — `Step 1 Scan d.o + JOIN d.c : 4 rows, 0.105 ms, 72%`처럼 단계별 남은 행 수, 시간, 전체 대비 비율(스캔·조인·필터, 정렬, 그룹/집계, HAVING, 그룹 정렬, 나머지(LIMIT·DISTINCT·결과 쓰기)). 가장 바깥 `SELECT`만 세고 하위 질의는 그것을 실행한 단계에 포함되며, 인덱스·캐시 지름길과 파생 표는 `Execute` 한 단계다(`engine/explain_trace.hpp`: 실행 중인 문장에만 `thread_local` 기록기를 두므로 `EXPLAIN ANALYZE`가 아닌 문장의 비용은 없다).
+- **`information_schema`의 실행 상태 표 다섯 개**: `processlist`(세션과 실행 중인 문장), `innodb_trx`(열린 트랜잭션: 상태 `RUNNING`/`LOCK WAIT`, 잠근 행 수, 기다리는 상대), `innodb_locks`(행 락), `innodb_lock_waits`(누가 누구를 기다리는지), `innodb_deadlocks`(교착으로 되돌려진 요청). 이름과 열은 MySQL 8의 것을 따랐고 데이터는 락 관리자·세션 목록·열린 트랜잭션 집합에서 읽는다.
+
+**앱**
+- **스키마를 아는 자동완성**(`lib/sqlCompletion.ts`): `FROM`·`JOIN`·`INTO`·`UPDATE` 뒤에는 현재 데이터베이스의 표, `별칭.`/`표.` 뒤에는 그 표의 열(PK·타입·FK 표시), 그 밖에는 문장이 쓰는 표의 열 + 표 + 함수 + 키워드. 표·열은 엔진에서 읽어 8초 보관하고 문장을 실행할 때마다 비운다. 에디터 두 개에 `quickSuggestions`를 켰다(전에는 일부러 꺼 둠).
+- **세션·트랜잭션·락 패널**(`components/ActivityPanel.tsx` + Tauri 명령 `get_activity`): Server Manager의 Sessions 패널 아래에 열린 트랜잭션(잠근 행, `LOCK WAIT`은 빨간 테두리와 "waits for txn N"), 기다리는 쌍, 세션별 실행 중인 문장, 최근 교착을 1.5초마다 새로 고쳐 보여 준다.
+- **Compat 페이지**(`components/CompatView.tsx`, 활동 표시줄의 저울 아이콘): 코퍼스마다 RuSQL과 진짜 MySQL에서 돌려 같은 답을 낸 문장 수를 막대로 보여 준다(총 비교 문장, 일치율, 둘 다 같은 오류로 거절한 수, C++ 시험의 MySQL 대조 사례, 시험 규모, 찾아 고친 버그, 알려진 차이). 숫자는 `code/test/diff/make_scoreboard.py`가 코퍼스 17종을 실제로 돌려 `lib/compatSnapshot.json`에 쓴다(EN/KO 토글은 Diagram 페이지와 같은 키).
+
+**검증**
+- 신규 코퍼스 `corpus/any_value.sql`(15문장)·`corpus/view_order.sql`(18문장) 진짜 MySQL 8.4.9와 차이 0; `--emit`이 `mysql_conformance_any_value.inc`·`…_view_order.inc`를 만든다. `[r45]` 시험: `EXPLAIN ANALYZE` 단계(조인·그룹·정렬·집계·지름길·하위 질의), `information_schema` 상태 표(한 세션), `ANY_VALUE`와 뷰 `ORDER BY`.
+- 두 세션을 실제로 돌려 확인: 한 트랜잭션이 잡은 행을 다른 세션이 기다릴 때 `innodb_trx`가 `LOCK WAIT`/`waiting for 10`, `innodb_lock_waits`가 `11 → 10`을 보였고, 교착을 만들면 `innodb_deadlocks`에 `13 → 12`가 남았다.
+- 프론트: `tsc`, `vite build`, `cargo check` 통과. 자동완성의 제안 공급자는 모형 Monaco로 아홉 가지 위치(`FROM`, `JOIN`, `별칭.`, 쉼표 목록, `WHERE`, 문장 둘, `UPDATE`, 파생 표 …)를 돌려 확인했고, Compat 페이지와 활동 패널은 헤드리스 Chrome으로 그려 화면을 확인했다. **실제 Tauri 앱에서 눌러 본 것은 아니다.**
+- 심은 버그 17종(`ANY_VALUE`의 면제·값·집계 행, 뷰 `ORDER BY`의 표·조건, `EXPLAIN ANALYZE`의 단계 표시·깊이·범위, 상태 표의 열)을 모두 잡았다.
+- 전체 시험 **776 케이스 / 1,505,297 assertions**을 Release 기본과 `RUSQL_DML_INDEX_MIN_ROWS=0`으로 통과.
+
+**한계**: `ANY_VALUE`를 `HAVING`에서 쓰면 MySQL은 "Unknown column" 오류인데 여기는 받는다. `EXPLAIN ANALYZE`는 가장 바깥 `SELECT`의 단계만 나누고 조인 안의 알고리즘별 시간·하위 질의별 시간은 없다. 락 대기·교착 표는 두 세션이 필요해 C++ 시험이 아니라 손으로 확인했다. 자동완성은 파생 표의 별칭·CTE 열은 모른다.
+
 ## 요약: 1학기 대비 2학기에 달라진 것
 
 

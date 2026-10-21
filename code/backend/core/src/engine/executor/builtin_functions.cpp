@@ -1812,6 +1812,13 @@ std::string fn_int_div(const BuiltinCall& c) {
     return d.compact();
 }
 
+// ANY_VALUE(x) is x: a function, not an aggregate (a query without GROUP BY gives one row per row). What it does is tell ONLY_FULL_GROUP_BY that x may be any value of the
+// group, and the row a group is shown with is its first.
+std::string fn_any_value(const BuiltinCall& c) {
+    if (argc(c) != 1) wrong_count(c);
+    return c.value(0);
+}
+
 std::string fn_xor(const BuiltinCall& c) {
     if (argc(c) != 2) wrong_count(c);
     if (any_null(c)) return kNull;
@@ -2424,7 +2431,7 @@ const std::unordered_map<std::string, Handler>& table() {
         {"GET_FORMAT", fn_get_format}, {"MAKETIME", fn_maketime}, {"MICROSECOND", fn_microsecond}, {"TIMESTAMP", fn_timestamp},
         {"DATE_FORMAT", fn_date_format}, {"STR_TO_DATE", fn_str_to_date}, {"CAST", fn_cast}, {"CONVERT", fn_cast},
         {"OP_BIT_AND", fn_bit_and}, {"OP_BIT_OR", fn_bit_or}, {"OP_BIT_XOR", fn_bit_xor}, {"OP_BIT_NOT", fn_bit_not}, {"OP_SHL", fn_shl}, {"OP_SHR", fn_shr},
-        {"OP_NULL_SAFE_EQ", fn_null_safe_eq}, {"OP_XOR", fn_xor}, {"OP_DIV", fn_int_div},
+        {"OP_NULL_SAFE_EQ", fn_null_safe_eq}, {"OP_XOR", fn_xor}, {"OP_DIV", fn_int_div}, {"ANY_VALUE", fn_any_value},
         {"SHA1", fn_sha1}, {"SHA", fn_sha1}, {"SHA2", fn_sha2}, {"CRC32", fn_crc32}, {"SOUNDEX", fn_soundex},
         {"JSON_VALID", fn_json_valid}, {"JSON_TYPE", fn_json_type}, {"JSON_LENGTH", fn_json_length}, {"JSON_KEYS", fn_json_keys},
         {"JSON_ARRAY", fn_json_array}, {"JSON_OBJECT", fn_json_object}, {"JSON_CONTAINS", fn_json_contains}, {"JSON_SET", fn_json_set},

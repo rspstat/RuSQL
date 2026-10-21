@@ -893,6 +893,7 @@ std::optional<std::string> Executor::bind_statement(SharedDatabase& s, Statement
             else if (auto* v = std::get_if<ArithExpr::Cmp>(&e.data)) { own_columns(*v->lhs, out); own_columns(*v->rhs, out); }
             else if (auto* v = std::get_if<ArithExpr::Pred>(&e.data)) own_columns(*v->cond, out);
             else if (auto* f = std::get_if<ArithExpr::Func>(&e.data)) {
+                if (f->name == "ANY_VALUE") return; // (the group is not asked to fix what is inside)
                 const bool unit_last = f->name == "DATE_ADD" || f->name == "DATE_SUB";
                 for (std::size_t i = 0; i < f->args.size(); i++) {
                     if (!(unit_last && i + 1 == f->args.size())) own_columns(f->args[i], out);

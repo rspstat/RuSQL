@@ -66,6 +66,12 @@ const Case kArithTypes[] = {
 const Case kFloat[] = {
 #include "mysql_conformance_float.inc"
 };
+const Case kAnyValue[] = {
+#include "mysql_conformance_any_value.inc"
+};
+const Case kViewOrder[] = {
+#include "mysql_conformance_view_order.inc"
+};
 
 struct TempDataDir {
     std::string path;
@@ -259,4 +265,12 @@ TEST_CASE("a date, a time, an ENUM and a SET are the numbers MySQL reads them as
 
 TEST_CASE("a FLOAT column is shown with six significant digits", "[mysql_conformance][float]") {
     run_cases("mc_float", kFloat, sizeof kFloat / sizeof kFloat[0]);
+}
+
+TEST_CASE("ANY_VALUE is a function that lets ONLY_FULL_GROUP_BY pass a column the group does not fix", "[mysql_conformance][any_value]") {
+    run_cases("mc_any_value", kAnyValue, sizeof kAnyValue / sizeof kAnyValue[0]);
+}
+
+TEST_CASE("UPDATE and DELETE through a view take ORDER BY and LIMIT", "[mysql_conformance][view_order]") {
+    run_cases("mc_view_order", kViewOrder, sizeof kViewOrder / sizeof kViewOrder[0]);
 }
