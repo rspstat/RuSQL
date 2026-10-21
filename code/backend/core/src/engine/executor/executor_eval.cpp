@@ -165,12 +165,7 @@ NumVal number_tree(const ArithExpr& e, Leaf& leaf) {
     // a text read as a number without being wholly one ('abc', '12abc', '0x10'; blanks are 0): counted, so what writes can refuse it as MySQL does. A date or a
     // time (the value of a DATE / TIME / DATETIME column is text here, and MySQL turns it into a number) is not one.
     if (std::holds_alternative<ArithExpr::Str>(e.data) || (std::holds_alternative<ArithExpr::Col>(e.data) && std::get<ArithExpr::Col>(e.data).cls == ValueClass::Text)) {
-        bool all = false;
-        sqlval::leading_number(text, &all);
-        if (!all && text.find_first_not_of(" \t\r\n") != std::string::npos && !sqlval::parse_datetime(text) && !sqlval::parse_time_seconds(text)) {
-            ++sqlval::truncated_number_count;
-            sqlval::truncated_number_text = text;
-        }
+        sqlval::note_truncated_number(text);
     }
     long long whole = 0;
     if (small_int(text, whole)) {
@@ -505,6 +500,17 @@ Executor::Tri Executor::eval_single3(const Row& row, const Condition& cond) {
     std::string val = compares_numbers ? eval_arith_exact(row, cond.left) : eval_arith(row, cond.left);
     // how the two sides compare: what each is (set by the binder; an expression that was not bound tells itself)
     const ValueClass left_class = cond.left_class != ValueClass::Unknown ? cond.left_class : class_of_expr(cond.left);
+    // A text compared with a number is read as a number; UPDATE and DELETE (StrictComparison) refuse one that is not wholly a number. Only a string counts: what the
+    // statement spells out in quotes, a string column or a function's text -- not a date, an ENUM or a SET column, whose number is not its text.
+    const auto* left_column = std::get_if<ArithExpr::Col>(&cond.left.data);
+    const bool left_sure = !left_column || left_column->kind == ColKind::Plain;
+    auto compare = [&](ValueClass lc, ValueClass rc, const std::string& lv, const std::string& rv, bool right_sure) {
+        if (sqlval::strict_comparison_depth > 0 && (lc == ValueClass::Number || rc == ValueClass::Number)) {
+            if (lc == ValueClass::Text && left_sure) sqlval::note_truncated_number(lv);
+            if (rc == ValueClass::Text && right_sure) sqlval::note_truncated_number(rv);
+        }
+        return compare_classed(lc, rc, lv, rv);
+    };
 
     if (auto* bv = std::get_if<ConditionValue::Between>(&cond.value.data)) {
         if (val == EXECUTOR_NULL_VALUE) return Tri::Unknown;
@@ -512,7 +518,7 @@ Executor::Tri Executor::eval_single3(const Row& row, const Condition& cond) {
         // still say FALSE (so BETWEEN never selects and NOT BETWEEN selects what the other bound rules out)
         auto side = [&](const std::string& bound, bool quoted, bool lower) {
             if (bound == EXECUTOR_NULL_VALUE) return Tri::Unknown;
-            const int order = compare_classed(left_class, written_class(bound, quoted), val, bound);
+            const int order = compare(left_class, written_class(bound, quoted), val, bound, quoted);
             return tri(lower ? order >= 0 : order <= 0);
         };
         const Tri low = side(bv->lo, bv->lo_quoted, true), high = side(bv->hi, bv->hi_quoted, false);
@@ -528,7 +534,7 @@ Executor::Tri Executor::eval_single3(const Row& row, const Condition& cond) {
             for (std::size_t i = 0; i < ll->values.size(); i++) {
                 if (ll->values[i] == EXECUTOR_NULL_VALUE) continue; // (a NULL in the list is UNKNOWN below, never equal)
                 const bool quoted = i < ll->quoted.size() && ll->quoted[i];
-                if (compare_classed(left_class, written_class(ll->values[i], quoted), val, ll->values[i]) == 0) return tri(cond.op == Operator::In);
+                if (compare(left_class, written_class(ll->values[i], quoted), val, ll->values[i], quoted) == 0) return tri(cond.op == Operator::In);
             }
             return has_null ? Tri::Unknown : tri(cond.op == Operator::NotIn);
         }
@@ -538,6 +544,7 @@ Executor::Tri Executor::eval_single3(const Row& row, const Condition& cond) {
     std::string resolved;
     const std::string* effective_lit = nullptr;
     ValueClass right_class = cond.right_class;
+    bool right_sure = false; // (see `compare`)
 
     // PLAN.md P0 fix: the RHS of a comparison is now a full arithmetic expression
     // (ConditionValue::Arith) rather than always a single-token Literal, so
@@ -548,12 +555,15 @@ Executor::Tri Executor::eval_single3(const Row& row, const Condition& cond) {
     if (auto* av = std::get_if<ConditionValue::Arith>(&cond.value.data)) {
         resolved = compares_numbers ? eval_arith_exact(row, av->expr) : eval_arith(row, av->expr);
         effective_lit = &resolved;
+        const auto* right_column = std::get_if<ArithExpr::Col>(&av->expr.data);
+        right_sure = !right_column || right_column->kind == ColKind::Plain;
         if (right_class == ValueClass::Unknown) right_class = class_of_expr(av->expr);
     } else if (auto* lit_v = std::get_if<ConditionValue::Literal>(&cond.value.data)) {
         const std::string& lit = lit_v->value;
         // a quoted value is a string, never the name of a column
         bool is_ident_like = !lit_v->quoted && !lit.empty() && (std::isalpha(static_cast<unsigned char>(lit[0])) || lit[0] == '_') && !parse_f64(lit).has_value();
         effective_lit = &lit;
+        right_sure = lit_v->quoted;
         if (is_ident_like) {
             if (const std::string* v = get_col(row, lit)) {
                 resolved = *v;
@@ -571,8 +581,8 @@ Executor::Tri Executor::eval_single3(const Row& row, const Condition& cond) {
     if (*effective_lit == "__NULL__" || *effective_lit == EXECUTOR_NULL_VALUE) return Tri::Unknown;
 
     switch (cond.op) {
-        case Operator::Eq: return tri(compare_classed(left_class, right_class, val, *effective_lit) == 0);
-        case Operator::Ne: return tri(compare_classed(left_class, right_class, val, *effective_lit) != 0);
+        case Operator::Eq: return tri(compare(left_class, right_class, val, *effective_lit, right_sure) == 0);
+        case Operator::Ne: return tri(compare(left_class, right_class, val, *effective_lit, right_sure) != 0);
         case Operator::In:
         case Operator::NotIn:
         case Operator::Exists:
@@ -597,10 +607,10 @@ Executor::Tri Executor::eval_single3(const Row& row, const Condition& cond) {
         case Operator::Between:
         case Operator::NotBetween:
             return Tri::False;
-        case Operator::Gt: return tri(compare_classed(left_class, right_class, val, *effective_lit) > 0);
-        case Operator::Lt: return tri(compare_classed(left_class, right_class, val, *effective_lit) < 0);
-        case Operator::Gte: return tri(compare_classed(left_class, right_class, val, *effective_lit) >= 0);
-        case Operator::Lte: return tri(compare_classed(left_class, right_class, val, *effective_lit) <= 0);
+        case Operator::Gt: return tri(compare(left_class, right_class, val, *effective_lit, right_sure) > 0);
+        case Operator::Lt: return tri(compare(left_class, right_class, val, *effective_lit, right_sure) < 0);
+        case Operator::Gte: return tri(compare(left_class, right_class, val, *effective_lit, right_sure) >= 0);
+        case Operator::Lte: return tri(compare(left_class, right_class, val, *effective_lit, right_sure) <= 0);
         default:
             return Tri::False;
     }

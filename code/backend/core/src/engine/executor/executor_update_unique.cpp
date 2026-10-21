@@ -55,6 +55,37 @@ std::optional<std::size_t> first_clash(const std::vector<std::optional<std::stri
 }
 } // namespace
 
+bool Executor::column_is_indexed(const SharedDatabase& s, const std::string& table, const TableSchema& schema, const std::string& column, bool primary_key) {
+    for (auto& c : schema.columns) {
+        if (c.name == column && ((c.unique && !c.primary_key) || (primary_key && c.primary_key))) return true;
+    }
+    for (auto& [name, meta] : s.index_meta) {
+        if (meta.first == table && meta.second == column) return true;
+    }
+    for (auto& [name, meta] : s.hash_index_meta) {
+        if (meta.first == table && meta.second == column) return true;
+    }
+    for (auto& [name, index] : s.composite_indexes) {
+        if (index.table == table && !index.columns.empty() && index.columns.front() == column) return true;
+    }
+    for (auto& key : schema.unique_keys) {
+        if (!key.columns.empty() && key.columns.front() == column) return true;
+    }
+    return false;
+}
+
+bool Executor::where_may_narrow(const SharedDatabase& s, const std::string& table, const std::optional<CondExpr>& condition) {
+    if (!condition) return false;
+    const TableSchema* schema = s.catalog.get_table(table);
+    if (!schema) return true;
+    std::vector<std::string> columns;
+    compared_columns(*condition, columns);
+    for (const std::string& column : columns) {
+        if (column_is_indexed(s, table, *schema, column, /*primary_key=*/true)) return true;
+    }
+    return false;
+}
+
 std::optional<std::string> Executor::update_unique_violation(SharedDatabase& s, const std::string& table, const std::vector<const Row*>& olds,
                                                              const std::vector<Row>& news, const std::vector<std::string>* by_order,
                                                              const std::vector<std::string>& where_columns) {
@@ -102,15 +133,8 @@ std::optional<std::string> Executor::update_unique_violation(SharedDatabase& s, 
         for (const std::string& column : where_columns) {
             if (std::find(tried.begin(), tried.end(), column) != tried.end()) continue;
             tried.push_back(column);
-            bool indexed = false;
-            for (auto& c : schema->columns) {
-                if (c.name == column) indexed = c.unique && !c.primary_key; // (the primary key is the order the rows are read in anyway)
-            }
-            for (auto& [name, meta] : s.index_meta) indexed = indexed || (meta.first == table && meta.second == column);
-            for (auto& [name, meta] : s.hash_index_meta) indexed = indexed || (meta.first == table && meta.second == column);
-            for (auto& [name, index] : s.composite_indexes) indexed = indexed || (index.table == table && !index.columns.empty() && index.columns.front() == column);
-            for (auto& key : schema->unique_keys) indexed = indexed || (!key.columns.empty() && key.columns.front() == column);
-            if (indexed) orders.push_back(rows_in_key_order(schema, olds, {column}));
+            // (the primary key is the order the rows are read in anyway)
+            if (column_is_indexed(s, table, *schema, column, /*primary_key=*/false)) orders.push_back(rows_in_key_order(schema, olds, {column}));
         }
         return orders;
     };

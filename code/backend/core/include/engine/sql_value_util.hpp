@@ -24,6 +24,17 @@ inline thread_local unsigned long long division_by_zero_count = 0;
 inline thread_local unsigned long long truncated_number_count = 0;
 inline thread_local std::string truncated_number_text;
 
+// UPDATE and DELETE read their WHERE as strictly as the values they write: a text compared with a number is read as a number, and when it is not wholly one the
+// statement fails (error 1292 "Truncated incorrect DOUBLE value"), where a SELECT reads the number it starts with. Raised while one of them evaluates its WHERE
+// (StrictComparison); the comparison notes such a text in `truncated_number_count` then, and nothing otherwise.
+inline thread_local int strict_comparison_depth = 0;
+struct StrictComparison {
+    StrictComparison() { ++strict_comparison_depth; }
+    ~StrictComparison() { --strict_comparison_depth; }
+    StrictComparison(const StrictComparison&) = delete;
+    StrictComparison& operator=(const StrictComparison&) = delete;
+};
+
 // What a statement that writes asks before it keeps the values it worked out: the error MySQL gives for a division by zero or a text read as a number, if the
 // evaluation since this was made had one.
 struct StrictWrite {
@@ -720,6 +731,17 @@ inline std::optional<long long> parse_time_seconds(const std::string& text, long
     if (parts[1] > 59 || parts[2] > 59) return std::nullopt;
     const long long total = parts[0] * 3600 + parts[1] * 60 + parts[2] + carry;
     return negative ? -total : total;
+}
+
+// A text that is read as a number without being wholly one ('abc', '12abc', '0x10'; blanks are 0) is counted, so what writes can refuse it as MySQL does. A date or
+// a time (the value of a DATE / TIME / DATETIME column is text here, and MySQL turns it into a number) is not one.
+inline void note_truncated_number(const std::string& text) {
+    bool all = false;
+    leading_number(text, &all);
+    if (!all && text.find_first_not_of(" \t\r\n") != std::string::npos && !parse_datetime(text) && !parse_time_seconds(text)) {
+        ++truncated_number_count;
+        truncated_number_text = text;
+    }
 }
 
 // 0 = Monday ... 6 = Sunday (MySQL's WEEKDAY)

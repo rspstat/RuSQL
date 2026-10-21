@@ -399,3 +399,48 @@ TEST_CASE("the rows a statement affects are the rows it changed; a client that a
     }
     ex.client_found_rows = false;
 }
+
+TEST_CASE("the WHERE of UPDATE and DELETE fails on a division by zero or a text that is no number, whichever way the rows are read", "[r44][where_errors]") {
+    TempDataDir dir("r44_where_errors");
+    Executor ex(dir.path);
+    ok(ex, "CREATE DATABASE d");
+    ok(ex, "USE d");
+    ok(ex, "CREATE TABLE w (id INT PRIMARY KEY, n INT, s VARCHAR(5), b INT)");
+    ok(ex, "CREATE TABLE wc (id INT PRIMARY KEY, w_id INT, FOREIGN KEY (w_id) REFERENCES w(id))"); // (a table a foreign key points at is deleted from another way)
+    ok(ex, "INSERT INTO w VALUES (1, 10, 'abc', 2), (2, 20, '12', 0), (3, 30, '7', 5)");
+    const Rows before = q(ex, "SELECT id, n, s, b FROM w ORDER BY id");
+    const auto refused = [&](const std::string& sql, const std::string& text) {
+        const std::string error = fails(ex, sql);
+        INFO(error);
+        REQUIRE(error.find(text) != std::string::npos);
+        REQUIRE(q(ex, "SELECT id, n, s, b FROM w ORDER BY id") == before); // (nothing was written, nothing removed)
+    };
+    for (const bool transaction : {false, true}) {
+        if (transaction) ok(ex, "BEGIN");
+        refused("DELETE FROM w WHERE n / b > 100", "Division by 0");
+        refused("DELETE FROM w WHERE s = 5", "Truncated incorrect DOUBLE value: 'abc'");
+        refused("DELETE FROM w WHERE s IN (1, 2)", "Truncated incorrect DOUBLE value: 'abc'");
+        refused("DELETE FROM w WHERE n > (SELECT 1 / 0)", "Division by 0");
+        refused("UPDATE w SET n = n + 1 WHERE n / b > 3", "Division by 0");
+        refused("UPDATE w SET n = n + 1 WHERE s > 0", "Truncated incorrect DOUBLE value: 'abc'");
+        refused("UPDATE w SET n = n + 1 WHERE n = 'x'", "Truncated incorrect DOUBLE value: 'x'");
+        // a guard in front of the division keeps the zero out; a SELECT reads the number a text starts with and gives NULL for a division by zero
+        ok(ex, "UPDATE w SET n = n + 1 WHERE b > 0 AND n / b > 3");
+        REQUIRE(q(ex, "SELECT id, n FROM w WHERE n / b > 3 OR s = 5 ORDER BY id").size() >= 1);
+        ok(ex, "UPDATE w SET n = n - 1 WHERE b > 0 AND n / b > 3");
+        if (transaction) ok(ex, "ROLLBACK");
+    }
+    // a table that a foreign key points at is deleted from the long way round
+    ok(ex, "INSERT INTO wc VALUES (1, 3)");
+    refused("DELETE FROM w WHERE n / b > 100", "Division by 0");
+    refused("DELETE FROM w WHERE s = 5", "Truncated incorrect DOUBLE value: 'abc'");
+    // a condition on an indexed column may read fewer rows in MySQL: no error is raised for what the other terms do to the rows left out
+    ok(ex, "DELETE FROM w WHERE id = 99 AND s = 5");
+    ok(ex, "UPDATE w SET n = n WHERE id > 0 OR s = 5");
+    // a date, an ENUM and a SET column compared with a number: its number is not its text, so nothing is truncated
+    ok(ex, "CREATE TABLE wk (id INT PRIMARY KEY, d DATE, e ENUM('red', 'green'), st SET('a', 'b'), f DOUBLE)");
+    ok(ex, "INSERT INTO wk VALUES (1, '2024-01-02', 'green', 'a,b', 1.5)");
+    ok(ex, "UPDATE wk SET f = f + 1 WHERE e = 2 OR st = 3 OR d = 20240102 OR d > 20240101 OR e > 0");
+    ok(ex, "DELETE FROM wk WHERE e = 5 OR st = 7 OR d = 20990101");
+    ok(ex, "UPDATE wk SET f = f + 1 WHERE 2 = e OR f = e OR f = (e) OR f + 0 = (st) OR 20240102 = d OR f = d");
+}

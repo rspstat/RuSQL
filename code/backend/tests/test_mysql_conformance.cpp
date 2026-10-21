@@ -57,6 +57,9 @@ const Case kAutoinc[] = {
 const Case kShift[] = {
 #include "mysql_conformance_shift.inc"
 };
+const Case kWhereErrors[] = {
+#include "mysql_conformance_where_errors.inc"
+};
 
 struct TempDataDir {
     std::string path;
@@ -238,4 +241,8 @@ TEST_CASE("the AUTO_INCREMENT numbers a statement reserves, skips and loses are 
 
 TEST_CASE("an UPDATE that shifts a UNIQUE or PRIMARY KEY value fits or fails as InnoDB's row by row writing does", "[mysql_conformance][shift]") {
     run_cases("mc_shift", kShift, sizeof kShift / sizeof kShift[0]);
+}
+
+TEST_CASE("the WHERE of an UPDATE or a DELETE fails on a division by zero or a text that is no number, as a write does", "[mysql_conformance][where_errors]") {
+    run_cases("mc_where_errors", kWhereErrors, sizeof kWhereErrors / sizeof kWhereErrors[0]);
 }

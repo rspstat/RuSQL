@@ -13,6 +13,7 @@
 
 #include "engine/collation.hpp"
 #include "engine/executor/executor.hpp"
+#include "engine/sql_value_util.hpp"
 #include "engine/subquery_walk.hpp"
 
 #include <algorithm>
@@ -121,6 +122,8 @@ StringResult Executor::exec_delete_inner(SharedDatabase& s, const std::string& t
     // in-progress transaction's own DELETE already does below, or another session's
     // still-open REPEATABLE READ/SERIALIZABLE snapshot would lose a row it's entitled to see.
     bool globally_quiescent = s.active_txn_ids->lock()->empty();
+    // DELETE reads its WHERE as strictly as the values UPDATE writes (a division by zero or a text that is no number in it is an error), unless an index may narrow the rows
+    const bool strict_where_wanted = !where_may_narrow(s, table, condition);
 
     // Row-level-concurrency Stage 4: reconstruct the equivalent Statement::Delete to
     // reuse table_lock_set_for's table-closure computation (FK child neighbors + any
@@ -344,15 +347,30 @@ StringResult Executor::exec_delete_inner(SharedDatabase& s, const std::string& t
                 if (tit == s.tables.end()) return StringResult::Err("Table '" + table + "' not found");
                 auto& rows = tit->second;
                 std::size_t before = rows.size();
-                rows.erase(std::remove_if(rows.begin(), rows.end(),
-                                           [&](Row& r) {
-                                               if (is_visible(r) && matches_condexpr(r, condition)) {
-                                                   rows_to_delete.push_back(r);
-                                                   return true;
-                                               }
-                                               return false;
-                                           }),
-                           rows.end());
+                {
+                    // (as strictly as the values a statement writes: nothing is removed before every row has been read)
+                    std::optional<sqlval::StrictComparison> strict_comparison;
+                    std::optional<sqlval::StrictWrite> strict_where;
+                    if (strict_where_wanted) {
+                        strict_comparison.emplace();
+                        strict_where.emplace();
+                    }
+                    std::vector<char> hit_row(rows.size());
+                    for (std::size_t i = 0; i < rows.size(); i++) hit_row[i] = is_visible(rows[i]) && matches_condexpr(rows[i], condition);
+                    if (strict_where) {
+                        if (auto refused = strict_where->error()) return StringResult::Err(*refused);
+                    }
+                    std::size_t kept = 0;
+                    for (std::size_t i = 0; i < rows.size(); i++) {
+                        if (hit_row[i]) {
+                            rows_to_delete.push_back(std::move(rows[i]));
+                            continue;
+                        }
+                        if (kept != i) rows[kept] = std::move(rows[i]);
+                        kept++;
+                    }
+                    rows.erase(rows.begin() + static_cast<std::ptrdiff_t>(kept), rows.end());
+                }
                 deleted = before - rows.size();
                 if (auto it = s.row_pk_pos.find(table); it != s.row_pk_pos.end()) it->second.clear();
             }
@@ -391,15 +409,30 @@ StringResult Executor::exec_delete_inner(SharedDatabase& s, const std::string& t
                 deleted = rows_to_delete.size();
             } else {
                 std::size_t before = rows.size();
-                rows.erase(std::remove_if(rows.begin(), rows.end(),
-                                           [&](Row& r) {
-                                               if (is_visible(r) && matches_condexpr(r, condition)) {
-                                                   rows_to_delete.push_back(r);
-                                                   return true;
-                                               }
-                                               return false;
-                                           }),
-                           rows.end());
+                {
+                    // (as strictly as the values a statement writes: nothing is removed before every row has been read)
+                    std::optional<sqlval::StrictComparison> strict_comparison;
+                    std::optional<sqlval::StrictWrite> strict_where;
+                    if (strict_where_wanted) {
+                        strict_comparison.emplace();
+                        strict_where.emplace();
+                    }
+                    std::vector<char> hit_row(rows.size());
+                    for (std::size_t i = 0; i < rows.size(); i++) hit_row[i] = is_visible(rows[i]) && matches_condexpr(rows[i], condition);
+                    if (strict_where) {
+                        if (auto refused = strict_where->error()) return StringResult::Err(*refused);
+                    }
+                    std::size_t kept = 0;
+                    for (std::size_t i = 0; i < rows.size(); i++) {
+                        if (hit_row[i]) {
+                            rows_to_delete.push_back(std::move(rows[i]));
+                            continue;
+                        }
+                        if (kept != i) rows[kept] = std::move(rows[i]);
+                        kept++;
+                    }
+                    rows.erase(rows.begin() + static_cast<std::ptrdiff_t>(kept), rows.end());
+                }
                 deleted = before - rows.size();
                 if (auto it = s.row_pk_pos.find(table); it != s.row_pk_pos.end()) it->second.clear();
             }
@@ -448,6 +481,12 @@ StringResult Executor::exec_delete_inner(SharedDatabase& s, const std::string& t
         auto table_lock = acquire_table_data_locks(s, {table}, /*exclusive=*/false);
         auto tit = s.tables.find(table);
         if (tit == s.tables.end()) return StringResult::Err("Table '" + table + "' not found");
+        std::optional<sqlval::StrictComparison> strict_comparison;
+        std::optional<sqlval::StrictWrite> strict_where;
+        if (strict_where_wanted) {
+            strict_comparison.emplace();
+            strict_where.emplace();
+        }
         if (condition_has_subquery(condition)) {
             std::vector<Row> candidates;
             for (auto& r : tit->second) {
@@ -469,6 +508,9 @@ StringResult Executor::exec_delete_inner(SharedDatabase& s, const std::string& t
                     if (is_visible(r) && matches_condexpr(r, condition)) rows_to_delete.push_back(r);
                 }
             }
+        }
+        if (strict_where) {
+            if (auto refused = strict_where->error()) return StringResult::Err(*refused);
         }
     }
 

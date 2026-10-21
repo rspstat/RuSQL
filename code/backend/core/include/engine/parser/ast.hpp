@@ -39,6 +39,8 @@ enum class IsolationLevel { ReadUncommitted, ReadCommitted, RepeatableRead, Seri
 struct CondExpr;
 struct Statement;
 
+enum class ColKind : std::uint8_t { Plain = 0, Date, DateTime, Time, Enum, Set };
+
 struct ArithExpr {
     // `cls`: what kind of value the column holds (its declared type), set by Executor::bind_statement before a statement runs; a comparison
     // reads it (two text columns compare as text, a number column as numbers). Unknown for a column that has not been bound.
@@ -46,7 +48,8 @@ struct ArithExpr {
     // subquery); the binder sets it and rewrites `name` to the table-qualified name the outer row holds, and the subquery gets the outer row's
     // value for it before it runs (see Executor::substitute_outer).
     // `approx`: the column is a FLOAT or DOUBLE (set by the binder with `cls`): arithmetic that reads it is done in floating point, as MySQL does
-    struct Col  { std::string name; ValueClass cls = ValueClass::Unknown; int outer = 0; bool approx = false; };
+    // `kind`: a column that holds a date, a time, an ENUM or a SET is text here but a number where one is asked of it (set by the binder with `cls`)
+    struct Col  { std::string name; ValueClass cls = ValueClass::Unknown; int outer = 0; bool approx = false; ColKind kind = ColKind::Plain; };
     struct Num  { std::string value; };
     struct Str  { std::string value; };
     struct Add  { std::unique_ptr<ArithExpr> lhs, rhs; };
@@ -143,6 +146,17 @@ inline ValueClass class_of_type(const DataType& type) {
             }
         },
         type.data);
+}
+
+// What a column holds that is text here and a number when a number is asked of it: DATE 20240102, DATETIME 20240102030405, TIME 102030, an ENUM its place in the
+// list, a SET its bits. Plain: anything else (a number, a string, ...).
+inline ColKind kind_of_type(const DataType& type) {
+    if (std::holds_alternative<DataType::Date>(type.data)) return ColKind::Date;
+    if (std::holds_alternative<DataType::DateTime>(type.data) || std::holds_alternative<DataType::Timestamp>(type.data)) return ColKind::DateTime;
+    if (std::holds_alternative<DataType::Time>(type.data)) return ColKind::Time;
+    if (std::holds_alternative<DataType::Enum>(type.data)) return ColKind::Enum;
+    if (std::holds_alternative<DataType::Set>(type.data)) return ColKind::Set;
+    return ColKind::Plain;
 }
 
 // ---------------------------------------------------------------------------

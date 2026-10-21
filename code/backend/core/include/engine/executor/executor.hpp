@@ -729,6 +729,13 @@ private:
     static std::optional<std::string> coerce_column_value(const ColumnDef& col, std::string& value, std::size_t row);
     // The same for a value given to a parameter or a variable of a routine, whose type is kept as it was written ("DECIMAL(8,2)"); nothing for a type that is not read.
     static std::optional<std::string> coerce_declared(const std::string& name, const std::string& type_text, std::string& value);
+    // The columns a condition compares to a value, along its ANDs and ORs.
+    static void compared_columns(const CondExpr& e, std::vector<std::string>& out);
+    // Whether `column` leads an index of the table: a UNIQUE column, a secondary / hash / composite index, a UNIQUE (a, b), and with `primary_key` its PRIMARY KEY.
+    static bool column_is_indexed(const SharedDatabase& s, const std::string& table, const TableSchema& schema, const std::string& column, bool primary_key);
+    // Whether the WHERE compares an indexed column to a value: MySQL may then read only some of the rows, so an error that evaluating the condition on another row
+    // raises (a division by zero, a text that is no number) is not certain to be raised there, and UPDATE / DELETE do not raise it.
+    static bool where_may_narrow(const SharedDatabase& s, const std::string& table, const std::optional<CondExpr>& condition);
     // `by_order`: the identity keys of the rows in the order UPDATE ... ORDER BY gives them; `where_columns`: the columns the WHERE compares to a value (an index on
     // one may decide the order the rows are read in). InnoDB checks each row as it writes it, so which rows a statement changes first decides whether a shift of a
     // UNIQUE key (SET u = u + 1) fits: update_unique_violation reports a clash only when it happens in every order the rows may be read in.

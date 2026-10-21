@@ -22,8 +22,16 @@ namespace {
 // the time of the statement as a TIMESTAMP column holds it (ON UPDATE CURRENT_TIMESTAMP)
 std::string now_text(int digits) { return time_now_text(digits, false, true); }
 
+std::string trim_ws(const std::string& s) {
+    auto start = s.find_first_not_of(" \t");
+    if (start == std::string::npos) return "";
+    auto end = s.find_last_not_of(" \t");
+    return s.substr(start, end - start + 1);
+}
+} // namespace
+
 // the columns a condition compares to a value (`col = 3`, `col > 3`, `col IN (..)`, `col BETWEEN ..`), along its ANDs and ORs
-void compared_columns(const CondExpr& e, std::vector<std::string>& out) {
+void Executor::compared_columns(const CondExpr& e, std::vector<std::string>& out) {
     if (auto* a = std::get_if<CondExpr::And>(&e.data)) {
         compared_columns(*a->lhs, out);
         compared_columns(*a->rhs, out);
@@ -34,14 +42,6 @@ void compared_columns(const CondExpr& e, std::vector<std::string>& out) {
         if (auto* c = std::get_if<ArithExpr::Col>(&leaf->condition.left.data)) out.push_back(c->name.substr(c->name.rfind('.') == std::string::npos ? 0 : c->name.rfind('.') + 1));
     }
 }
-
-std::string trim_ws(const std::string& s) {
-    auto start = s.find_first_not_of(" \t");
-    if (start == std::string::npos) return "";
-    auto end = s.find_last_not_of(" \t");
-    return s.substr(start, end - start + 1);
-}
-} // namespace
 
 Result<std::optional<CondExpr>, std::string> Executor::rows_of_limit(SharedDatabase& s, const std::string& table, const std::optional<CondExpr>& condition,
                                                                      const std::vector<OrderBy>& order_by, std::optional<std::size_t> limit,
@@ -270,6 +270,8 @@ StringResult Executor::exec_update_inner(SharedDatabase& s, const std::string& t
         (positions_ok && pk_cols.size() == 1) ? extract_pk_eq_value(condition, pk_col, schema0) : std::nullopt;
     bool bypass_pk_cache = false;  // set after a stale-position retry so the retry really rescans
     bool rebuild_pk_cache = false; // pk-equality missed the cache although the row exists -> repopulate it once
+    // UPDATE reads its WHERE as strictly as the values it writes (a division by zero or a text that is no number in it is an error), unless an index may narrow the rows
+    const bool strict_where_wanted = !where_may_narrow(s, table, condition);
 
     for (;;) {
         std::vector<Row> candidate_rows;
@@ -289,6 +291,12 @@ StringResult Executor::exec_update_inner(SharedDatabase& s, const std::string& t
             std::vector<std::string> read_tables = neighbor_tables;
             read_tables.push_back(table);
             auto table_lock = acquire_table_data_locks(s, read_tables, /*exclusive=*/false);
+            std::optional<sqlval::StrictComparison> strict_comparison;
+            std::optional<sqlval::StrictWrite> strict_where;
+            if (strict_where_wanted) {
+                strict_comparison.emplace();
+                strict_where.emplace();
+            }
             // Cloned first (not iterated in place): matches_condition_with_subquery can
             // invoke exec_select, which for FROM-subqueries/views temporarily inserts/
             // erases entries in s.tables — holding a live reference into s.tables across
@@ -355,6 +363,9 @@ StringResult Executor::exec_update_inner(SharedDatabase& s, const std::string& t
                         matching_pks.insert(match_key(r));
                     }
                 }
+            }
+            if (strict_where) {
+                if (auto refused = strict_where->error()) return StringResult::Err(*refused);
             }
         } // table_lock (SHARED) released here -- candidate scan + condition matching only.
 

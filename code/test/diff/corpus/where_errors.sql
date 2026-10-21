@@ -1,0 +1,248 @@
+# The WHERE of an UPDATE or a DELETE is read as strictly as the values they write (R44): a division by zero (error 1365) or a text that is no number compared with a
+# number (error 1292) is an error, where a SELECT gives NULL / the number the text starts with. MySQL evaluates the rows its plan reads, so a WHERE that compares an indexed
+# column is left out here (RuSQL does not raise the error then). Each statement has a table of its own; a line is a statement, '--' a setup statement.
+# UPDATE: division by zero in a row
+--CREATE TABLE we_1 (id INT PRIMARY KEY, n INT, s VARCHAR(10), d DATE, e ENUM('red','green','blue'), st SET('a','b','c'), f DOUBLE, x DECIMAL(5,2), b INT)
+--INSERT INTO we_1 VALUES (1,10,'abc','2024-01-02','green','a,c',1.5,2.50,2),(2,20,'12',NULL,'blue','b',2.5,3.00,0),(3,30,'7x','2024-02-03','red','c',3.5,4.00,5)
+UPDATE we_1 SET f = f + 1 WHERE n / b > 3
+SELECT id, n, s, f FROM we_1 ORDER BY id
+# UPDATE: a guard before the division
+--CREATE TABLE we_2 (id INT PRIMARY KEY, n INT, s VARCHAR(10), d DATE, e ENUM('red','green','blue'), st SET('a','b','c'), f DOUBLE, x DECIMAL(5,2), b INT)
+--INSERT INTO we_2 VALUES (1,10,'abc','2024-01-02','green','a,c',1.5,2.50,2),(2,20,'12',NULL,'blue','b',2.5,3.00,0),(3,30,'7x','2024-02-03','red','c',3.5,4.00,5)
+UPDATE we_2 SET f = f + 1 WHERE b > 0 AND n / b > 3
+SELECT id, n, s, f FROM we_2 ORDER BY id
+# UPDATE: a guard after the division
+--CREATE TABLE we_3 (id INT PRIMARY KEY, n INT, s VARCHAR(10), d DATE, e ENUM('red','green','blue'), st SET('a','b','c'), f DOUBLE, x DECIMAL(5,2), b INT)
+--INSERT INTO we_3 VALUES (1,10,'abc','2024-01-02','green','a,c',1.5,2.50,2),(2,20,'12',NULL,'blue','b',2.5,3.00,0),(3,30,'7x','2024-02-03','red','c',3.5,4.00,5)
+UPDATE we_3 SET f = f + 1 WHERE n / b > 3 AND b > 0
+SELECT id, n, s, f FROM we_3 ORDER BY id
+# UPDATE: the division is not reached
+--CREATE TABLE we_4 (id INT PRIMARY KEY, n INT, s VARCHAR(10), d DATE, e ENUM('red','green','blue'), st SET('a','b','c'), f DOUBLE, x DECIMAL(5,2), b INT)
+--INSERT INTO we_4 VALUES (1,10,'abc','2024-01-02','green','a,c',1.5,2.50,2),(2,20,'12',NULL,'blue','b',2.5,3.00,0),(3,30,'7x','2024-02-03','red','c',3.5,4.00,5)
+UPDATE we_4 SET f = f + 1 WHERE b = 0 OR n / b > 3
+SELECT id, n, s, f FROM we_4 ORDER BY id
+# UPDATE: MOD by zero
+--CREATE TABLE we_5 (id INT PRIMARY KEY, n INT, s VARCHAR(10), d DATE, e ENUM('red','green','blue'), st SET('a','b','c'), f DOUBLE, x DECIMAL(5,2), b INT)
+--INSERT INTO we_5 VALUES (1,10,'abc','2024-01-02','green','a,c',1.5,2.50,2),(2,20,'12',NULL,'blue','b',2.5,3.00,0),(3,30,'7x','2024-02-03','red','c',3.5,4.00,5)
+UPDATE we_5 SET f = f + 1 WHERE n MOD b = 0
+SELECT id, n, s, f FROM we_5 ORDER BY id
+# UPDATE: DIV by zero
+--CREATE TABLE we_6 (id INT PRIMARY KEY, n INT, s VARCHAR(10), d DATE, e ENUM('red','green','blue'), st SET('a','b','c'), f DOUBLE, x DECIMAL(5,2), b INT)
+--INSERT INTO we_6 VALUES (1,10,'abc','2024-01-02','green','a,c',1.5,2.50,2),(2,20,'12',NULL,'blue','b',2.5,3.00,0),(3,30,'7x','2024-02-03','red','c',3.5,4.00,5)
+UPDATE we_6 SET f = f + 1 WHERE n DIV b = 5
+SELECT id, n, s, f FROM we_6 ORDER BY id
+# UPDATE: a constant division by zero
+--CREATE TABLE we_7 (id INT PRIMARY KEY, n INT, s VARCHAR(10), d DATE, e ENUM('red','green','blue'), st SET('a','b','c'), f DOUBLE, x DECIMAL(5,2), b INT)
+--INSERT INTO we_7 VALUES (1,10,'abc','2024-01-02','green','a,c',1.5,2.50,2),(2,20,'12',NULL,'blue','b',2.5,3.00,0),(3,30,'7x','2024-02-03','red','c',3.5,4.00,5)
+UPDATE we_7 SET f = f + 1 WHERE 1 / 0 = 1
+SELECT id, n, s, f FROM we_7 ORDER BY id
+# UPDATE: in a subquery
+--CREATE TABLE we_8 (id INT PRIMARY KEY, n INT, s VARCHAR(10), d DATE, e ENUM('red','green','blue'), st SET('a','b','c'), f DOUBLE, x DECIMAL(5,2), b INT)
+--INSERT INTO we_8 VALUES (1,10,'abc','2024-01-02','green','a,c',1.5,2.50,2),(2,20,'12',NULL,'blue','b',2.5,3.00,0),(3,30,'7x','2024-02-03','red','c',3.5,4.00,5)
+UPDATE we_8 SET f = f + 1 WHERE n > (SELECT 1 / 0)
+SELECT id, n, s, f FROM we_8 ORDER BY id
+# UPDATE: IF does not evaluate the branch it does not take
+--CREATE TABLE we_9 (id INT PRIMARY KEY, n INT, s VARCHAR(10), d DATE, e ENUM('red','green','blue'), st SET('a','b','c'), f DOUBLE, x DECIMAL(5,2), b INT)
+--INSERT INTO we_9 VALUES (1,10,'abc','2024-01-02','green','a,c',1.5,2.50,2),(2,20,'12',NULL,'blue','b',2.5,3.00,0),(3,30,'7x','2024-02-03','red','c',3.5,4.00,5)
+UPDATE we_9 SET f = f + 1 WHERE IF(b = 0, 0, n / b) > 1
+SELECT id, n, s, f FROM we_9 ORDER BY id
+# UPDATE: COALESCE of a NULLIF
+--CREATE TABLE we_10 (id INT PRIMARY KEY, n INT, s VARCHAR(10), d DATE, e ENUM('red','green','blue'), st SET('a','b','c'), f DOUBLE, x DECIMAL(5,2), b INT)
+--INSERT INTO we_10 VALUES (1,10,'abc','2024-01-02','green','a,c',1.5,2.50,2),(2,20,'12',NULL,'blue','b',2.5,3.00,0),(3,30,'7x','2024-02-03','red','c',3.5,4.00,5)
+UPDATE we_10 SET f = f + 1 WHERE COALESCE(n / NULLIF(b, 0), 0) > 1
+SELECT id, n, s, f FROM we_10 ORDER BY id
+# UPDATE: CASE does not evaluate the branch it does not take
+--CREATE TABLE we_11 (id INT PRIMARY KEY, n INT, s VARCHAR(10), d DATE, e ENUM('red','green','blue'), st SET('a','b','c'), f DOUBLE, x DECIMAL(5,2), b INT)
+--INSERT INTO we_11 VALUES (1,10,'abc','2024-01-02','green','a,c',1.5,2.50,2),(2,20,'12',NULL,'blue','b',2.5,3.00,0),(3,30,'7x','2024-02-03','red','c',3.5,4.00,5)
+UPDATE we_11 SET f = f + 1 WHERE CASE WHEN b = 0 THEN 0 ELSE n / b END > 1
+SELECT id, n, s, f FROM we_11 ORDER BY id
+# DELETE: division by zero in a row
+--CREATE TABLE we_12 (id INT PRIMARY KEY, n INT, s VARCHAR(10), d DATE, e ENUM('red','green','blue'), st SET('a','b','c'), f DOUBLE, x DECIMAL(5,2), b INT)
+--INSERT INTO we_12 VALUES (1,10,'abc','2024-01-02','green','a,c',1.5,2.50,2),(2,20,'12',NULL,'blue','b',2.5,3.00,0),(3,30,'7x','2024-02-03','red','c',3.5,4.00,5)
+DELETE FROM we_12 WHERE n / b > 100
+SELECT id, n, s, f FROM we_12 ORDER BY id
+# DELETE: a guard before the division
+--CREATE TABLE we_13 (id INT PRIMARY KEY, n INT, s VARCHAR(10), d DATE, e ENUM('red','green','blue'), st SET('a','b','c'), f DOUBLE, x DECIMAL(5,2), b INT)
+--INSERT INTO we_13 VALUES (1,10,'abc','2024-01-02','green','a,c',1.5,2.50,2),(2,20,'12',NULL,'blue','b',2.5,3.00,0),(3,30,'7x','2024-02-03','red','c',3.5,4.00,5)
+DELETE FROM we_13 WHERE b <> 0 AND n / b > 100
+SELECT id, n, s, f FROM we_13 ORDER BY id
+# DELETE: a constant division by zero
+--CREATE TABLE we_14 (id INT PRIMARY KEY, n INT, s VARCHAR(10), d DATE, e ENUM('red','green','blue'), st SET('a','b','c'), f DOUBLE, x DECIMAL(5,2), b INT)
+--INSERT INTO we_14 VALUES (1,10,'abc','2024-01-02','green','a,c',1.5,2.50,2),(2,20,'12',NULL,'blue','b',2.5,3.00,0),(3,30,'7x','2024-02-03','red','c',3.5,4.00,5)
+DELETE FROM we_14 WHERE n / 0 > 1
+SELECT id, n, s, f FROM we_14 ORDER BY id
+# UPDATE: a number column and a string that is no number
+--CREATE TABLE we_15 (id INT PRIMARY KEY, n INT, s VARCHAR(10), d DATE, e ENUM('red','green','blue'), st SET('a','b','c'), f DOUBLE, x DECIMAL(5,2), b INT)
+--INSERT INTO we_15 VALUES (1,10,'abc','2024-01-02','green','a,c',1.5,2.50,2),(2,20,'12',NULL,'blue','b',2.5,3.00,0),(3,30,'7x','2024-02-03','red','c',3.5,4.00,5)
+UPDATE we_15 SET f = f + 1 WHERE n = 'abc'
+SELECT id, n, s, f FROM we_15 ORDER BY id
+# UPDATE: ... that starts with a number
+--CREATE TABLE we_16 (id INT PRIMARY KEY, n INT, s VARCHAR(10), d DATE, e ENUM('red','green','blue'), st SET('a','b','c'), f DOUBLE, x DECIMAL(5,2), b INT)
+--INSERT INTO we_16 VALUES (1,10,'abc','2024-01-02','green','a,c',1.5,2.50,2),(2,20,'12',NULL,'blue','b',2.5,3.00,0),(3,30,'7x','2024-02-03','red','c',3.5,4.00,5)
+UPDATE we_16 SET f = f + 1 WHERE n = '5x'
+SELECT id, n, s, f FROM we_16 ORDER BY id
+# UPDATE: IN
+--CREATE TABLE we_17 (id INT PRIMARY KEY, n INT, s VARCHAR(10), d DATE, e ENUM('red','green','blue'), st SET('a','b','c'), f DOUBLE, x DECIMAL(5,2), b INT)
+--INSERT INTO we_17 VALUES (1,10,'abc','2024-01-02','green','a,c',1.5,2.50,2),(2,20,'12',NULL,'blue','b',2.5,3.00,0),(3,30,'7x','2024-02-03','red','c',3.5,4.00,5)
+UPDATE we_17 SET f = f + 1 WHERE n IN ('a', 'b')
+SELECT id, n, s, f FROM we_17 ORDER BY id
+# UPDATE: BETWEEN
+--CREATE TABLE we_18 (id INT PRIMARY KEY, n INT, s VARCHAR(10), d DATE, e ENUM('red','green','blue'), st SET('a','b','c'), f DOUBLE, x DECIMAL(5,2), b INT)
+--INSERT INTO we_18 VALUES (1,10,'abc','2024-01-02','green','a,c',1.5,2.50,2),(2,20,'12',NULL,'blue','b',2.5,3.00,0),(3,30,'7x','2024-02-03','red','c',3.5,4.00,5)
+UPDATE we_18 SET f = f + 1 WHERE n BETWEEN 'a' AND 'b'
+SELECT id, n, s, f FROM we_18 ORDER BY id
+# UPDATE: a string column and a number
+--CREATE TABLE we_19 (id INT PRIMARY KEY, n INT, s VARCHAR(10), d DATE, e ENUM('red','green','blue'), st SET('a','b','c'), f DOUBLE, x DECIMAL(5,2), b INT)
+--INSERT INTO we_19 VALUES (1,10,'abc','2024-01-02','green','a,c',1.5,2.50,2),(2,20,'12',NULL,'blue','b',2.5,3.00,0),(3,30,'7x','2024-02-03','red','c',3.5,4.00,5)
+UPDATE we_19 SET f = f + 1 WHERE s = 5
+SELECT id, n, s, f FROM we_19 ORDER BY id
+# UPDATE: ... another number
+--CREATE TABLE we_20 (id INT PRIMARY KEY, n INT, s VARCHAR(10), d DATE, e ENUM('red','green','blue'), st SET('a','b','c'), f DOUBLE, x DECIMAL(5,2), b INT)
+--INSERT INTO we_20 VALUES (1,10,'abc','2024-01-02','green','a,c',1.5,2.50,2),(2,20,'12',NULL,'blue','b',2.5,3.00,0),(3,30,'7x','2024-02-03','red','c',3.5,4.00,5)
+UPDATE we_20 SET f = f + 1 WHERE s = 12
+SELECT id, n, s, f FROM we_20 ORDER BY id
+# UPDATE: ... greater than
+--CREATE TABLE we_21 (id INT PRIMARY KEY, n INT, s VARCHAR(10), d DATE, e ENUM('red','green','blue'), st SET('a','b','c'), f DOUBLE, x DECIMAL(5,2), b INT)
+--INSERT INTO we_21 VALUES (1,10,'abc','2024-01-02','green','a,c',1.5,2.50,2),(2,20,'12',NULL,'blue','b',2.5,3.00,0),(3,30,'7x','2024-02-03','red','c',3.5,4.00,5)
+UPDATE we_21 SET f = f + 1 WHERE s > 0
+SELECT id, n, s, f FROM we_21 ORDER BY id
+# UPDATE: ... in arithmetic
+--CREATE TABLE we_22 (id INT PRIMARY KEY, n INT, s VARCHAR(10), d DATE, e ENUM('red','green','blue'), st SET('a','b','c'), f DOUBLE, x DECIMAL(5,2), b INT)
+--INSERT INTO we_22 VALUES (1,10,'abc','2024-01-02','green','a,c',1.5,2.50,2),(2,20,'12',NULL,'blue','b',2.5,3.00,0),(3,30,'7x','2024-02-03','red','c',3.5,4.00,5)
+UPDATE we_22 SET f = f + 1 WHERE s + 0 > 5
+SELECT id, n, s, f FROM we_22 ORDER BY id
+# UPDATE: ... BETWEEN
+--CREATE TABLE we_23 (id INT PRIMARY KEY, n INT, s VARCHAR(10), d DATE, e ENUM('red','green','blue'), st SET('a','b','c'), f DOUBLE, x DECIMAL(5,2), b INT)
+--INSERT INTO we_23 VALUES (1,10,'abc','2024-01-02','green','a,c',1.5,2.50,2),(2,20,'12',NULL,'blue','b',2.5,3.00,0),(3,30,'7x','2024-02-03','red','c',3.5,4.00,5)
+UPDATE we_23 SET f = f + 1 WHERE s BETWEEN 1 AND 5
+SELECT id, n, s, f FROM we_23 ORDER BY id
+# UPDATE: ... not equal
+--CREATE TABLE we_24 (id INT PRIMARY KEY, n INT, s VARCHAR(10), d DATE, e ENUM('red','green','blue'), st SET('a','b','c'), f DOUBLE, x DECIMAL(5,2), b INT)
+--INSERT INTO we_24 VALUES (1,10,'abc','2024-01-02','green','a,c',1.5,2.50,2),(2,20,'12',NULL,'blue','b',2.5,3.00,0),(3,30,'7x','2024-02-03','red','c',3.5,4.00,5)
+UPDATE we_24 SET f = f + 1 WHERE s <> 5
+SELECT id, n, s, f FROM we_24 ORDER BY id
+# UPDATE: ... NOT IN
+--CREATE TABLE we_25 (id INT PRIMARY KEY, n INT, s VARCHAR(10), d DATE, e ENUM('red','green','blue'), st SET('a','b','c'), f DOUBLE, x DECIMAL(5,2), b INT)
+--INSERT INTO we_25 VALUES (1,10,'abc','2024-01-02','green','a,c',1.5,2.50,2),(2,20,'12',NULL,'blue','b',2.5,3.00,0),(3,30,'7x','2024-02-03','red','c',3.5,4.00,5)
+UPDATE we_25 SET f = f + 1 WHERE s NOT IN (1, 2)
+SELECT id, n, s, f FROM we_25 ORDER BY id
+# UPDATE: ... NOT
+--CREATE TABLE we_26 (id INT PRIMARY KEY, n INT, s VARCHAR(10), d DATE, e ENUM('red','green','blue'), st SET('a','b','c'), f DOUBLE, x DECIMAL(5,2), b INT)
+--INSERT INTO we_26 VALUES (1,10,'abc','2024-01-02','green','a,c',1.5,2.50,2),(2,20,'12',NULL,'blue','b',2.5,3.00,0),(3,30,'7x','2024-02-03','red','c',3.5,4.00,5)
+UPDATE we_26 SET f = f + 1 WHERE NOT s = 5
+SELECT id, n, s, f FROM we_26 ORDER BY id
+# UPDATE: a string column and a DECIMAL column
+--CREATE TABLE we_27 (id INT PRIMARY KEY, n INT, s VARCHAR(10), d DATE, e ENUM('red','green','blue'), st SET('a','b','c'), f DOUBLE, x DECIMAL(5,2), b INT)
+--INSERT INTO we_27 VALUES (1,10,'abc','2024-01-02','green','a,c',1.5,2.50,2),(2,20,'12',NULL,'blue','b',2.5,3.00,0),(3,30,'7x','2024-02-03','red','c',3.5,4.00,5)
+UPDATE we_27 SET f = f + 1 WHERE s = x
+SELECT id, n, s, f FROM we_27 ORDER BY id
+# UPDATE: a string column and an INT column
+--CREATE TABLE we_28 (id INT PRIMARY KEY, n INT, s VARCHAR(10), d DATE, e ENUM('red','green','blue'), st SET('a','b','c'), f DOUBLE, x DECIMAL(5,2), b INT)
+--INSERT INTO we_28 VALUES (1,10,'abc','2024-01-02','green','a,c',1.5,2.50,2),(2,20,'12',NULL,'blue','b',2.5,3.00,0),(3,30,'7x','2024-02-03','red','c',3.5,4.00,5)
+UPDATE we_28 SET f = f + 1 WHERE s = n
+SELECT id, n, s, f FROM we_28 ORDER BY id
+# UPDATE: a function's text and a number
+--CREATE TABLE we_29 (id INT PRIMARY KEY, n INT, s VARCHAR(10), d DATE, e ENUM('red','green','blue'), st SET('a','b','c'), f DOUBLE, x DECIMAL(5,2), b INT)
+--INSERT INTO we_29 VALUES (1,10,'abc','2024-01-02','green','a,c',1.5,2.50,2),(2,20,'12',NULL,'blue','b',2.5,3.00,0),(3,30,'7x','2024-02-03','red','c',3.5,4.00,5)
+UPDATE we_29 SET f = f + 1 WHERE UPPER(s) = 5
+SELECT id, n, s, f FROM we_29 ORDER BY id
+# UPDATE: a DECIMAL column and a string that is no number
+--CREATE TABLE we_30 (id INT PRIMARY KEY, n INT, s VARCHAR(10), d DATE, e ENUM('red','green','blue'), st SET('a','b','c'), f DOUBLE, x DECIMAL(5,2), b INT)
+--INSERT INTO we_30 VALUES (1,10,'abc','2024-01-02','green','a,c',1.5,2.50,2),(2,20,'12',NULL,'blue','b',2.5,3.00,0),(3,30,'7x','2024-02-03','red','c',3.5,4.00,5)
+UPDATE we_30 SET f = f + 1 WHERE x = 'abc'
+SELECT id, n, s, f FROM we_30 ORDER BY id
+# UPDATE: a DOUBLE column and a string that is no number
+--CREATE TABLE we_31 (id INT PRIMARY KEY, n INT, s VARCHAR(10), d DATE, e ENUM('red','green','blue'), st SET('a','b','c'), f DOUBLE, x DECIMAL(5,2), b INT)
+--INSERT INTO we_31 VALUES (1,10,'abc','2024-01-02','green','a,c',1.5,2.50,2),(2,20,'12',NULL,'blue','b',2.5,3.00,0),(3,30,'7x','2024-02-03','red','c',3.5,4.00,5)
+UPDATE we_31 SET f = f + 1 WHERE f = 'abc'
+SELECT id, n, s, f FROM we_31 ORDER BY id
+# UPDATE: a DECIMAL column and a string that is a number
+--CREATE TABLE we_32 (id INT PRIMARY KEY, n INT, s VARCHAR(10), d DATE, e ENUM('red','green','blue'), st SET('a','b','c'), f DOUBLE, x DECIMAL(5,2), b INT)
+--INSERT INTO we_32 VALUES (1,10,'abc','2024-01-02','green','a,c',1.5,2.50,2),(2,20,'12',NULL,'blue','b',2.5,3.00,0),(3,30,'7x','2024-02-03','red','c',3.5,4.00,5)
+UPDATE we_32 SET f = f + 1 WHERE x = '2.50'
+SELECT id, n, s, f FROM we_32 ORDER BY id
+# UPDATE: a string column and a string
+--CREATE TABLE we_33 (id INT PRIMARY KEY, n INT, s VARCHAR(10), d DATE, e ENUM('red','green','blue'), st SET('a','b','c'), f DOUBLE, x DECIMAL(5,2), b INT)
+--INSERT INTO we_33 VALUES (1,10,'abc','2024-01-02','green','a,c',1.5,2.50,2),(2,20,'12',NULL,'blue','b',2.5,3.00,0),(3,30,'7x','2024-02-03','red','c',3.5,4.00,5)
+UPDATE we_33 SET f = f + 1 WHERE s = '12'
+SELECT id, n, s, f FROM we_33 ORDER BY id
+# UPDATE: IS NULL
+--CREATE TABLE we_34 (id INT PRIMARY KEY, n INT, s VARCHAR(10), d DATE, e ENUM('red','green','blue'), st SET('a','b','c'), f DOUBLE, x DECIMAL(5,2), b INT)
+--INSERT INTO we_34 VALUES (1,10,'abc','2024-01-02','green','a,c',1.5,2.50,2),(2,20,'12',NULL,'blue','b',2.5,3.00,0),(3,30,'7x','2024-02-03','red','c',3.5,4.00,5)
+UPDATE we_34 SET f = f + 1 WHERE s IS NULL
+SELECT id, n, s, f FROM we_34 ORDER BY id
+# UPDATE: the empty string
+--CREATE TABLE we_35 (id INT PRIMARY KEY, n INT, s VARCHAR(10), d DATE, e ENUM('red','green','blue'), st SET('a','b','c'), f DOUBLE, x DECIMAL(5,2), b INT)
+--INSERT INTO we_35 VALUES (1,10,'abc','2024-01-02','green','a,c',1.5,2.50,2),(2,20,'12',NULL,'blue','b',2.5,3.00,0),(3,30,'7x','2024-02-03','red','c',3.5,4.00,5)
+UPDATE we_35 SET f = f + 1 WHERE s = ''
+SELECT id, n, s, f FROM we_35 ORDER BY id
+# UPDATE: LIKE
+--CREATE TABLE we_36 (id INT PRIMARY KEY, n INT, s VARCHAR(10), d DATE, e ENUM('red','green','blue'), st SET('a','b','c'), f DOUBLE, x DECIMAL(5,2), b INT)
+--INSERT INTO we_36 VALUES (1,10,'abc','2024-01-02','green','a,c',1.5,2.50,2),(2,20,'12',NULL,'blue','b',2.5,3.00,0),(3,30,'7x','2024-02-03','red','c',3.5,4.00,5)
+UPDATE we_36 SET f = f + 1 WHERE s LIKE 'a%'
+SELECT id, n, s, f FROM we_36 ORDER BY id
+# UPDATE: a date and a date written as a string
+--CREATE TABLE we_37 (id INT PRIMARY KEY, n INT, s VARCHAR(10), d DATE, e ENUM('red','green','blue'), st SET('a','b','c'), f DOUBLE, x DECIMAL(5,2), b INT)
+--INSERT INTO we_37 VALUES (1,10,'abc','2024-01-02','green','a,c',1.5,2.50,2),(2,20,'12',NULL,'blue','b',2.5,3.00,0),(3,30,'7x','2024-02-03','red','c',3.5,4.00,5)
+UPDATE we_37 SET f = f + 1 WHERE d = '2024-01-02'
+SELECT id, n, s, f FROM we_37 ORDER BY id
+# UPDATE: an ENUM and a string
+--CREATE TABLE we_38 (id INT PRIMARY KEY, n INT, s VARCHAR(10), d DATE, e ENUM('red','green','blue'), st SET('a','b','c'), f DOUBLE, x DECIMAL(5,2), b INT)
+--INSERT INTO we_38 VALUES (1,10,'abc','2024-01-02','green','a,c',1.5,2.50,2),(2,20,'12',NULL,'blue','b',2.5,3.00,0),(3,30,'7x','2024-02-03','red','c',3.5,4.00,5)
+UPDATE we_38 SET f = f + 1 WHERE e = 'green'
+SELECT id, n, s, f FROM we_38 ORDER BY id
+# DELETE: a string column and a number
+--CREATE TABLE we_39 (id INT PRIMARY KEY, n INT, s VARCHAR(10), d DATE, e ENUM('red','green','blue'), st SET('a','b','c'), f DOUBLE, x DECIMAL(5,2), b INT)
+--INSERT INTO we_39 VALUES (1,10,'abc','2024-01-02','green','a,c',1.5,2.50,2),(2,20,'12',NULL,'blue','b',2.5,3.00,0),(3,30,'7x','2024-02-03','red','c',3.5,4.00,5)
+DELETE FROM we_39 WHERE s = 5
+SELECT id, n, s, f FROM we_39 ORDER BY id
+# DELETE: IN
+--CREATE TABLE we_40 (id INT PRIMARY KEY, n INT, s VARCHAR(10), d DATE, e ENUM('red','green','blue'), st SET('a','b','c'), f DOUBLE, x DECIMAL(5,2), b INT)
+--INSERT INTO we_40 VALUES (1,10,'abc','2024-01-02','green','a,c',1.5,2.50,2),(2,20,'12',NULL,'blue','b',2.5,3.00,0),(3,30,'7x','2024-02-03','red','c',3.5,4.00,5)
+DELETE FROM we_40 WHERE s IN (1, 2)
+SELECT id, n, s, f FROM we_40 ORDER BY id
+# DELETE: a string column and a string
+--CREATE TABLE we_41 (id INT PRIMARY KEY, n INT, s VARCHAR(10), d DATE, e ENUM('red','green','blue'), st SET('a','b','c'), f DOUBLE, x DECIMAL(5,2), b INT)
+--INSERT INTO we_41 VALUES (1,10,'abc','2024-01-02','green','a,c',1.5,2.50,2),(2,20,'12',NULL,'blue','b',2.5,3.00,0),(3,30,'7x','2024-02-03','red','c',3.5,4.00,5)
+DELETE FROM we_41 WHERE s = '12'
+SELECT id, n, s, f FROM we_41 ORDER BY id
+# UPDATE: the primary key finds no row
+--CREATE TABLE we_42 (id INT PRIMARY KEY, n INT, s VARCHAR(10), d DATE, e ENUM('red','green','blue'), st SET('a','b','c'), f DOUBLE, x DECIMAL(5,2), b INT)
+--INSERT INTO we_42 VALUES (1,10,'abc','2024-01-02','green','a,c',1.5,2.50,2),(2,20,'12',NULL,'blue','b',2.5,3.00,0),(3,30,'7x','2024-02-03','red','c',3.5,4.00,5)
+UPDATE we_42 SET f = f + 1 WHERE id = 99 AND s = 5
+SELECT id, n, s, f FROM we_42 ORDER BY id
+# UPDATE: a primary key range finds no row
+--CREATE TABLE we_43 (id INT PRIMARY KEY, n INT, s VARCHAR(10), d DATE, e ENUM('red','green','blue'), st SET('a','b','c'), f DOUBLE, x DECIMAL(5,2), b INT)
+--INSERT INTO we_43 VALUES (1,10,'abc','2024-01-02','green','a,c',1.5,2.50,2),(2,20,'12',NULL,'blue','b',2.5,3.00,0),(3,30,'7x','2024-02-03','red','c',3.5,4.00,5)
+UPDATE we_43 SET f = f + 1 WHERE id < 0 AND s = 5
+SELECT id, n, s, f FROM we_43 ORDER BY id
+# UPDATE: the primary key finds the row with a good value
+--CREATE TABLE we_44 (id INT PRIMARY KEY, n INT, s VARCHAR(10), d DATE, e ENUM('red','green','blue'), st SET('a','b','c'), f DOUBLE, x DECIMAL(5,2), b INT)
+--INSERT INTO we_44 VALUES (1,10,'abc','2024-01-02','green','a,c',1.5,2.50,2),(2,20,'12',NULL,'blue','b',2.5,3.00,0),(3,30,'7x','2024-02-03','red','c',3.5,4.00,5)
+UPDATE we_44 SET f = f + 1 WHERE id = 2 AND s = 12
+SELECT id, n, s, f FROM we_44 ORDER BY id
+# UPDATE: the second term is not reached
+--CREATE TABLE we_45 (id INT PRIMARY KEY, n INT, s VARCHAR(10), d DATE, e ENUM('red','green','blue'), st SET('a','b','c'), f DOUBLE, x DECIMAL(5,2), b INT)
+--INSERT INTO we_45 VALUES (1,10,'abc','2024-01-02','green','a,c',1.5,2.50,2),(2,20,'12',NULL,'blue','b',2.5,3.00,0),(3,30,'7x','2024-02-03','red','c',3.5,4.00,5)
+UPDATE we_45 SET f = f + 1 WHERE id > 0 OR s = 5
+SELECT id, n, s, f FROM we_45 ORDER BY id
+# UPDATE: the primary key leaves the zero out
+--CREATE TABLE we_46 (id INT PRIMARY KEY, n INT, s VARCHAR(10), d DATE, e ENUM('red','green','blue'), st SET('a','b','c'), f DOUBLE, x DECIMAL(5,2), b INT)
+--INSERT INTO we_46 VALUES (1,10,'abc','2024-01-02','green','a,c',1.5,2.50,2),(2,20,'12',NULL,'blue','b',2.5,3.00,0),(3,30,'7x','2024-02-03','red','c',3.5,4.00,5)
+UPDATE we_46 SET f = f + 1 WHERE id <> 2 AND n / (id - 2) > 1
+SELECT id, n, s, f FROM we_46 ORDER BY id
+# UPDATE: the primary key leaves the zero out, the division is written first
+--CREATE TABLE we_47 (id INT PRIMARY KEY, n INT, s VARCHAR(10), d DATE, e ENUM('red','green','blue'), st SET('a','b','c'), f DOUBLE, x DECIMAL(5,2), b INT)
+--INSERT INTO we_47 VALUES (1,10,'abc','2024-01-02','green','a,c',1.5,2.50,2),(2,20,'12',NULL,'blue','b',2.5,3.00,0),(3,30,'7x','2024-02-03','red','c',3.5,4.00,5)
+UPDATE we_47 SET f = f + 1 WHERE n / (id - 2) > 1 AND id <> 2
+SELECT id, n, s, f FROM we_47 ORDER BY id
+# DELETE: the primary key leaves the zero out, the division is written first
+--CREATE TABLE we_48 (id INT PRIMARY KEY, n INT, s VARCHAR(10), d DATE, e ENUM('red','green','blue'), st SET('a','b','c'), f DOUBLE, x DECIMAL(5,2), b INT)
+--INSERT INTO we_48 VALUES (1,10,'abc','2024-01-02','green','a,c',1.5,2.50,2),(2,20,'12',NULL,'blue','b',2.5,3.00,0),(3,30,'7x','2024-02-03','red','c',3.5,4.00,5)
+DELETE FROM we_48 WHERE n / (id - 2) > 1 AND id <> 2
+SELECT id, n, s, f FROM we_48 ORDER BY id
+# DELETE: the primary key finds the row with a good value
+--CREATE TABLE we_49 (id INT PRIMARY KEY, n INT, s VARCHAR(10), d DATE, e ENUM('red','green','blue'), st SET('a','b','c'), f DOUBLE, x DECIMAL(5,2), b INT)
+--INSERT INTO we_49 VALUES (1,10,'abc','2024-01-02','green','a,c',1.5,2.50,2),(2,20,'12',NULL,'blue','b',2.5,3.00,0),(3,30,'7x','2024-02-03','red','c',3.5,4.00,5)
+DELETE FROM we_49 WHERE s > 100 AND id = 2
+SELECT id, n, s, f FROM we_49 ORDER BY id
