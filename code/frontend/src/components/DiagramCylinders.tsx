@@ -24,8 +24,8 @@ const NODES: Node[] = [
   },
   {
     id: "ui", x: 95, y: 225, w: 140, h: 84, c: C.client, name: L("Desktop UI", "데스크톱 UI"),
-    desc: L("Tauri + React + Monaco: SQL editor (autocomplete, statement Journey), ERD with a relationship editor, Server Manager (sessions / locks), Compat page. Talks to engine_server over TCP :7878.",
-            "Tauri + React + Monaco: SQL 에디터(자동완성, 한 문장의 여행), 관계 편집기가 있는 ERD, 서버 매니저(세션·락), 호환성 페이지. TCP :7878로 engine_server와 통신."),
+    desc: L("Tauri + React + Monaco: SQL editor (autocomplete, statement Journey), ERD with a relationship editor, B+Tree page, Server Manager (sessions / locks), Compat page. Talks to engine_server over TCP :7878.",
+            "Tauri + React + Monaco: SQL 에디터(자동완성, 한 문장의 여행), 관계 편집기가 있는 ERD, B+Tree 페이지, 서버 매니저(세션·락), 호환성 페이지. TCP :7878로 engine_server와 통신."),
   },
   {
     id: "mcp", x: 95, y: 350, w: 140, h: 84, c: C.client, name: "Claude + MCP",

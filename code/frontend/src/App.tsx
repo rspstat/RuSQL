@@ -7,6 +7,7 @@ import "./App.css";
 import { format as sqlFormat } from "sql-formatter";
 import DiagramView from "./components/DiagramView";
 import CompatView from "./components/CompatView";
+import BTreeView from "./components/BTreeView";
 import Sidebar from "./components/Sidebar";
 import ActivityPanel from "./components/ActivityPanel";
 import ErdView from "./components/ErdView";
@@ -29,7 +30,7 @@ interface HistoryEntry {
   success: boolean;
   elapsed: number;
 }
-type ActiveView = "editor" | "erd" | "server" | "diagram" | "compat";
+type ActiveView = "editor" | "erd" | "server" | "diagram" | "compat" | "btree";
 const PAGE_SIZE = 100;
 
 // 셀 편집 시 PK WHERE절 값 이스케이프용 — 컬럼의 실제 data_type을 보고 숫자 리터럴로 둘지
@@ -2115,6 +2116,21 @@ function App() {
           </svg>
         </div>
 
+        {/* B+Tree: a teaching B+Tree that splits and rebalances step by step */}
+        <div
+          className={`activity-icon ${activeView === "btree" ? "active" : ""}`}
+          title="B+Tree"
+          onClick={() => setActiveView("btree")}
+        >
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+            <rect x="8.5" y="2" width="7" height="5" rx="1.2"/>
+            <rect x="1.5" y="16" width="6" height="5" rx="1.2"/>
+            <rect x="9" y="16" width="6" height="5" rx="1.2"/>
+            <rect x="16.5" y="16" width="6" height="5" rx="1.2"/>
+            <path d="M12 7v4M4.5 16v-5h15v5M12 11v5"/>
+          </svg>
+        </div>
+
         <div className="activity-bar-bottom">
           <div className="activity-icon" title="Account">
             <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor">
@@ -3599,6 +3615,7 @@ function App() {
 
       {activeView === "diagram" && <DiagramView />}
       {activeView === "compat" && <CompatView />}
+      {activeView === "btree" && <BTreeView />}
 
       </div> {/* app-body */}
     </div>

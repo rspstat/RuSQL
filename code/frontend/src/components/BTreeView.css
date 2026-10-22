@@ -1,0 +1,54 @@
+/* BTreeView -- "B+Tree" page: a teaching B+Tree drawn and replayed step by step. */
+
+.bt-scroll { flex: 1; min-height: 0; overflow: auto; padding: 24px 32px 48px; position: relative; }
+.bt-lang { position: absolute; top: 18px; right: 32px; display: inline-flex; background: #252526; border: 1px solid #3a3d41; border-radius: 6px; overflow: hidden; }
+.bt-lang button { background: transparent; color: #9d9d9d; border: 0; padding: 4px 12px; font-size: 12px; cursor: pointer; }
+.bt-lang button.on { background: #094771; color: #fff; }
+
+.bt-page { max-width: 1180px; margin: 0 auto; color: #d4d4d4; font-family: 'Segoe UI', sans-serif; word-break: keep-all; overflow-wrap: break-word; }
+.bt-page h1 { font-size: 24px; margin: 0 0 6px; color: #fff; }
+.bt-sub { color: #9d9d9d; font-size: 13px; line-height: 1.6; margin: 0 0 16px; max-width: 820px; }
+
+.bt-controls, .bt-play { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 12px; }
+.bt-input { width: 78px; background: #1e1e1e; color: #d4d4d4; border: 1px solid #3a3d41; border-radius: 4px; padding: 5px 8px; font-size: 13px; }
+.bt-btn { background: #333; color: #d4d4d4; border: 1px solid #454545; border-radius: 4px; padding: 5px 12px; font-size: 12px; cursor: pointer; }
+.bt-btn:hover:not(:disabled) { background: #3d3d3d; }
+.bt-btn:disabled { opacity: 0.4; cursor: default; }
+.bt-btn.bt-primary { background: #0e639c; border-color: #0e639c; color: #fff; }
+.bt-btn.bt-primary:hover:not(:disabled) { background: #1177bb; }
+.bt-sep { width: 1px; height: 22px; background: #3a3d41; margin: 0 4px; }
+.bt-label { font-size: 12px; color: #9d9d9d; display: inline-flex; align-items: center; gap: 6px; }
+.bt-select { background: #333; color: #d4d4d4; border: 1px solid #454545; border-radius: 4px; padding: 4px 6px; font-size: 12px; }
+.bt-slider { flex: 1; min-width: 160px; max-width: 420px; accent-color: #4ec9b0; }
+.bt-count { font-size: 12px; color: #858585; font-variant-numeric: tabular-nums; min-width: 52px; }
+
+.bt-stage { background: #1e1e1e; border: 1px solid #3a3d41; border-radius: 8px; margin-bottom: 12px; overflow: hidden; }
+.bt-canvas { padding: 8px 12px; overflow-x: auto; min-height: 170px; }
+.bt-svg { display: block; width: 100%; min-width: 320px; }
+
+.bt-msg { display: flex; align-items: center; gap: 10px; padding: 9px 14px; border-top: 1px solid #3a3d41; background: #252526; font-size: 13px; }
+.bt-badge { padding: 1px 8px; border-radius: 10px; font-size: 11px; background: #3a3d41; color: #fff; white-space: nowrap; }
+.bt-stats { margin-left: auto; color: #858585; font-size: 12px; white-space: nowrap; }
+
+.bt-node { transition: transform 0.5s ease; }
+.bt-box { fill: #2b2b2f; stroke: #5a5d63; stroke-width: 1.4; transition: fill 0.3s ease, stroke 0.3s ease; }
+.bt-leaf .bt-box { fill: #26322f; stroke: #4a7a6d; }
+.bt-key { fill: #e6e6e6; font-size: 14px; font-weight: 600; }
+.bt-empty { fill: #6b6b6b; font-size: 15px; }
+.bt-div { stroke: #5a5d63; stroke-width: 1; }
+.bt-edge { fill: none; stroke: #6c6f75; stroke-width: 1.4; transition: d 0.5s ease; }
+.bt-link { stroke: #4ec9b0; stroke-width: 1.4; stroke-dasharray: 4 3; opacity: 0.85; }
+.bt-new { animation: bt-pop 0.6s ease; }
+@keyframes bt-pop { from { opacity: 0; } to { opacity: 1; } }
+
+/* the colour of a step: the nodes it is about and its badge */
+.bt-k-visit { --k: #569cd6; } .bt-k-insert { --k: #4ec9b0; } .bt-k-overflow { --k: #f48771; } .bt-k-split { --k: #c586c0; }
+.bt-k-delete { --k: #ddb05d; } .bt-k-underflow { --k: #e5a14a; } .bt-k-borrow { --k: #9cdcfe; } .bt-k-merge { --k: #b48ead; }
+.bt-k-root { --k: #c586c0; } .bt-k-found { --k: #e2c86b; } .bt-k-miss { --k: #f48771; } .bt-k-ready { --k: #6b6b6b; }
+.bt-hi .bt-box { stroke: var(--k); stroke-width: 2.6; fill: color-mix(in srgb, var(--k) 22%, #2b2b2f); }
+.bt-msg .bt-badge { background: var(--k); color: #1e1e1e; font-weight: 600; }
+
+.bt-legend { display: flex; flex-wrap: wrap; gap: 14px; font-size: 12px; color: #9d9d9d; }
+.bt-leg { display: inline-flex; align-items: center; gap: 6px; }
+.bt-dot { width: 10px; height: 10px; border-radius: 50%; background: var(--k); display: inline-block; }
+.bt-link-dot { background: #4ec9b0; border-radius: 2px; height: 3px; width: 14px; }
