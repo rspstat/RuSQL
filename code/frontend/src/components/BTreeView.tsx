@@ -60,7 +60,7 @@ function TreeSvg({ frame, previous }: { frame: Frame; previous: Frame | null }) 
   const hi = new Set(frame.hi);
   const ids = Object.keys(snap.nodes).map(Number);
   return (
-    <svg className="bt-svg" viewBox={`0 0 ${Math.max(laid.width, 320)} ${laid.height}`} preserveAspectRatio="xMidYMin meet" style={{ height: Math.max(laid.height, 150) }}>
+    <svg className="bt-svg" viewBox={`0 0 ${Math.max(laid.width, 320)} ${laid.height}`} preserveAspectRatio="xMidYMin meet" style={{ width: Math.max(laid.width, 320), height: Math.max(laid.height, 150) }}>
       <defs>
         <marker id="bt-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0 L10 5 L0 10 z" fill="#4ec9b0" /></marker>
       </defs>

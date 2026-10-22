@@ -24,7 +24,7 @@
 
 .bt-stage { background: #1e1e1e; border: 1px solid #3a3d41; border-radius: 8px; margin-bottom: 12px; overflow: hidden; }
 .bt-canvas { padding: 8px 12px; overflow-x: auto; min-height: 170px; }
-.bt-svg { display: block; width: 100%; min-width: 320px; }
+.bt-svg { display: block; margin: 0 auto; } /* (drawn at its own size, so a node is the same size in a small tree and a big one; a wide tree scrolls) */
 
 .bt-msg { display: flex; align-items: center; gap: 10px; padding: 9px 14px; border-top: 1px solid #3a3d41; background: #252526; font-size: 13px; }
 .bt-badge { padding: 1px 8px; border-radius: 10px; font-size: 11px; background: #3a3d41; color: #fff; white-space: nowrap; }
