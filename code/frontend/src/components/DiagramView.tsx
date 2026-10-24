@@ -2,8 +2,8 @@
 // "Diagram" activity-bar page: one picture of the whole system -- who talks to RuSQL, the
 // path a SQL statement takes through engine_server -> engine_core -> transactions ->
 // storage -> durability, and where AI fits (Claude via MCP; no private NL-to-SQL model, see
-// docs/mds/AI.md). Content mirrors README.md "Architecture" and docs/mds (FUNCTIONS.md,
-// architecture-diagram.md). Every visible string is an English/Korean pair; the EN/KO
+// docs/mds/AI.md). Content mirrors README.md "Architecture" and docs/mds (FUNCTIONS.md).
+// Every visible string is an English/Korean pair; the EN/KO
 // toggle at the top switches them all at once and is remembered across visits. A second
 // toggle next to it flips between this layered picture and the cylinder-and-arrow picture
 // (DiagramCylinders.tsx).
