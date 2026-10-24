@@ -64,7 +64,7 @@
 │                            semi-naive 평가 — 안전 조건 충족 시 직전 반복분만 재조인)             │
 │    =/!=/<>/>/</>=/<= )  UNION / UNION ALL / INTERSECT / EXCEPT                                  │
 │    AND / OR / NOT       Updatable VIEW                                                          │
-│    IN / NOT IN          INFORMATION_SCHEMA (가상 뷰 10개)                                       │
+│    IN / NOT IN          INFORMATION_SCHEMA (가상 뷰 17개)                                       │
 │    BETWEEN / NOT BETWEEN  PREPARE / EXECUTE / DEALLOCATE                                        │
 │    LIKE / NOT LIKE      SET @var / 사용자 변수                                                  │
 │    IS NULL / IS NOT NULL  병렬 쿼리 (rayon, 10k행+ 자동 적용)                                   │

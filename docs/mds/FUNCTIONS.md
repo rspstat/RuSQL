@@ -171,7 +171,7 @@
 - [x] PREPARE / EXECUTE / DEALLOCATE — `PREPARE name FROM 'sql'`, `SET @v = expr`, `EXECUTE name USING @v`, `DEALLOCATE PREPARE name`
 - [x] 사용자 변수 (@var) — `SET @v = expr`, `SELECT @v`, EXECUTE USING 바인딩
 - [x] SHOW TABLES / DESCRIBE
-- [x] INFORMATION_SCHEMA 가상 테이블 — `SELECT * FROM information_schema.tables` 등 10개 가상 뷰 (schemata / tables / columns / key_column_usage / table_constraints / statistics / views / character_sets / collations / engines)
+- [x] INFORMATION_SCHEMA 가상 테이블 — `SELECT * FROM information_schema.tables` 등 17개 가상 뷰 (schemata / tables / columns / key_column_usage / table_constraints / statistics / views / character_sets / collations / engines에 R45의 processlist / innodb_trx / innodb_locks / innodb_lock_waits / innodb_deadlocks, R46의 referential_constraints, R49의 row_versions를 더함)
 
 ### 데이터 타입
 - [x] INT — `INTEGER` / `INT4` 키워드 별칭 허용
@@ -316,6 +316,7 @@
 - [x] **실행 상태 표 (2026-10-21, R45)** — `information_schema.processlist`·`innodb_trx`·`innodb_locks`·`innodb_lock_waits`·`innodb_deadlocks`: 세션, 열린 트랜잭션(`RUNNING`/`LOCK WAIT`), 행 락, 누가 누구를 기다리는지, 교착.
 - [x] **앱: 스키마를 아는 자동완성, 세션·트랜잭션·락 패널, Compat 페이지 (2026-10-21, R45)** — 표·열·함수·키워드 제안(별칭 해석), Server Manager의 트랜잭션·락·대기 패널(`get_activity`), 코퍼스별 MySQL 일치율 페이지(`make_scoreboard.py`).
 - [x] **앱: MVCC 페이지 (2026-10-22, R49, `MvccView.tsx`, Tauri `mvcc_exec`·`mvcc_reset`)** — 서버에 거는 두 연결(세션 A·B)과 그 사이의 버전 표를 나란히 보여 준다: 버전마다 xmin·xmax·상태(LIVE / UNCOMMITTED / ENDING / DEAD)와 각 세션에게 보이는가. 시나리오 넷(UPDATE는 버전을 더함, 같은 질문 다른 답, 더티 리드, 기다리는 쓰기)을 한 단계씩.
+- [x] **활동 표시줄 순서와 페이지 제목 (2026-10-22, R49 뒤 손질)** — 위에서부터 SQL 에디터 · ERD 편집기 · 서버 매니저 · Diagram · **B+Tree 애니메이션** · **MVCC 시뮬레이션** · MySQL 호환성, 맨 아래에 계정·설정. 두 페이지의 한국어 제목은 이 이름이다(영어는 "B+Tree: how an index splits and rebalances"·"MVCC: two sessions and the versions between them").
 - [x] **`information_schema.row_versions` (2026-10-22, R49, 엔진)** — 모든 행 버전을 한 행씩: `ROW_KEY`, `ROW_DATA`, `XMIN`, `XMAX`, `STATE`(`LIVE`·`UNCOMMITTED`·`ENDING`·`DEAD`), `VISIBLE_TO_ME`(읽는 세션 자신의 스냅샷). RuSQL만의 표.
 - [x] **연결이 끊기면 열린 트랜잭션을 롤백 (2026-10-22, R49, `server/src/main.cpp`·`mysql.cpp`)** — 전에는 `COMMIT`·`ROLLBACK` 없이 닫은 연결의 행 락과 미커밋 버전이 서버가 꺼질 때까지 남았다.
 - [x] **앱: B+Tree 페이지 (2026-10-22, R48, `BTreeView.tsx`·`lib/bplusTree.ts`)** — 교육용 B+Tree에 키를 넣고 지우고 찾는 과정(잎까지 내려가기, 넘침·분할과 위로 올라가는 키, 새 루트, 모자람·빌려오기·병합, 루트 낮아짐)을 한 단계씩 재생한다(재생·일시정지·한 단계씩·슬라이더·0.5~4x, 노드당 최대 키 3·4·5, `1–12 넣기`, `무작위 ×8`). 무작위 삽입·삭제 약 78,000번으로 불변식을 검사했다.
@@ -446,7 +447,7 @@
 - [x] 사이드바 너비 조절 (드래그)
 - [x] 테이블 우클릭 컨텍스트 메뉴 (MySQL 스타일) — Select Rows / Describe Table / Show Create Table / Copy Table Name / Copy as INSERT / Truncate / DROP
 - [x] ERD Editor 뷰 — 테이블 카드 + FK 관계선(직각 꺾임, 라운드 코너), 카드 드래그 / 캔버스 팬 / 휠 줌, 카드 클릭 시 하단 데이터 패널 (데이터 그리드 + 필터)
-- [x] **Diagram 뷰 (2026-10-01)** — 액티비티 바 맨 아래 아이콘의 페이지. 시스템 전체 아키텍처·흐름을 한 장의 그림으로 표시: 클라이언트 5종(engine_cli·데스크톱 UI·Claude+MCP·engine_client·MySQL 클라이언트) → engine_server(:7878/:3306, 인증, 세션) → engine_core(파서·플래너·실행기) → 트랜잭션·동시성 → 스토리지 → 내구성·복구 순으로 번호(1~8)를 붙인 계층 + 연결 화살표, 맨 아래 "AI 연동"(Claude via MCP, 사설 NL→SQL 모델 없음) 패널. 상단 **한국어 / EN 토글**(왼쪽 한국어가 기본)로 모든 문구를 즉시 전환(선택은 `rusql_diagram_lang`으로 localStorage에 기억). 새 라이브러리 없이 HTML/CSS 그리드로 구현(`DiagramView.tsx`/`DiagramView.css`). 인터랙션: 박스에 마우스를 올리면 테두리가 해당 레이어 색으로 바뀌고 살짝 커지며(카드·칩·단계 1.03배, 큰 패널은 1.008배), 화살표는 두 그림이 **같은 스타일**(옅은 base 선 + 방향으로 흐르는 점선 + 빛나며 달리는 패킷 점 + 레이어 색 화살촉, 점선 우회 경로는 점선 base — `diagramShared.tsx`의 `FlowArrow`/`ArrowDefs`와 `.dg-aline`/`.dg-aflow`/`.dg-apacket` 한 벌을 공유), 로드 시 위에서 아래로 차례로 나타나는 진입 애니메이션, 같은 번호의 배지(리본·패널·단계)가 1→8 순서로 함께 깜빡임. **보기 전환 토글**(언어 토글 오른쪽의 아이콘 2개, 선택은 `rusql_diagram_view`로 기억): 왼쪽 = **원통형 그림**(`DiagramCylinders.tsx`, 기본), 오른쪽 = 위의 계층형 그림 — 컴포넌트 13개를 DB 원통 모양으로 그리고 화살표로 연결(요청 경로는 왼쪽→오른쪽, 아래 행은 스토리지→내구성→디스크 파일). 원통에는 이름만 적혀 있고 설명은 마우스를 올리거나 키보드 포커스를 줄 때만 툴팁으로 표시(EN/한국어 모두), 화살표 위로 패킷 점이 흐르고 점선이 미끄러지며, 원통 뚜껑이 흐름 순서대로 차례로 빛남
+- [x] **Diagram 뷰 (2026-10-01)** — 액티비티 바의 아이콘 페이지(처음엔 맨 아래, 2026-10-22부터 위에서 네 번째). 시스템 전체 아키텍처·흐름을 한 장의 그림으로 표시: 클라이언트 5종(engine_cli·데스크톱 UI·Claude+MCP·engine_client·MySQL 클라이언트) → engine_server(:7878/:3306, 인증, 세션) → engine_core(파서·플래너·실행기) → 트랜잭션·동시성 → 스토리지 → 내구성·복구 순으로 번호(1~8)를 붙인 계층 + 연결 화살표, 맨 아래 "AI 연동"(Claude via MCP, 사설 NL→SQL 모델 없음) 패널. 상단 **한국어 / EN 토글**(왼쪽 한국어가 기본)로 모든 문구를 즉시 전환(선택은 `rusql_diagram_lang`으로 localStorage에 기억). 새 라이브러리 없이 HTML/CSS 그리드로 구현(`DiagramView.tsx`/`DiagramView.css`). 인터랙션: 박스에 마우스를 올리면 테두리가 해당 레이어 색으로 바뀌고 살짝 커지며(카드·칩·단계 1.03배, 큰 패널은 1.008배), 화살표는 두 그림이 **같은 스타일**(옅은 base 선 + 방향으로 흐르는 점선 + 빛나며 달리는 패킷 점 + 레이어 색 화살촉, 점선 우회 경로는 점선 base — `diagramShared.tsx`의 `FlowArrow`/`ArrowDefs`와 `.dg-aline`/`.dg-aflow`/`.dg-apacket` 한 벌을 공유), 로드 시 위에서 아래로 차례로 나타나는 진입 애니메이션, 같은 번호의 배지(리본·패널·단계)가 1→8 순서로 함께 깜빡임. **보기 전환 토글**(언어 토글 오른쪽의 아이콘 2개, 선택은 `rusql_diagram_view`로 기억): 왼쪽 = **원통형 그림**(`DiagramCylinders.tsx`, 기본), 오른쪽 = 위의 계층형 그림 — 컴포넌트 13개를 DB 원통 모양으로 그리고 화살표로 연결(요청 경로는 왼쪽→오른쪽, 아래 행은 스토리지→내구성→디스크 파일). 원통에는 이름만 적혀 있고 설명은 마우스를 올리거나 키보드 포커스를 줄 때만 툴팁으로 표시(EN/한국어 모두), 화살표 위로 패킷 점이 흐르고 점선이 미끄러지며, 원통 뚜껑이 흐름 순서대로 차례로 빛남
 - [x] TCP 서버 관리 뷰 — DBeaver 스타일 연결 구성 폼 (호스트·포트 ±·사용자·비밀번호 토글), 메인/CLI 가이드 탭, 서버 랙 SVG 아이콘, 활동 로그, 연결 사이드바 너비 조절 (드래그, 140~400px)
 
 - [x] 멀티 쿼리 결과 표시
