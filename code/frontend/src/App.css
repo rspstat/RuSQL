@@ -533,8 +533,8 @@ body {
   color: #666666;
 }
 
-/* 메인 */
-.main {
+/* 메인 (Monaco의 제안 목록 행도 `.main` 클래스를 쓰므로 이름을 겹치지 않게 함) */
+.app-main {
   flex: 1;
   display: flex;
   flex-direction: column;

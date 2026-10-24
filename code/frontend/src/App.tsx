@@ -569,7 +569,7 @@ function App() {
   useEffect(() => {
     const onMove = (e: MouseEvent) => {
       if (isDragging.current) {
-        const el = document.querySelector(".main") as HTMLElement;
+        const el = document.querySelector(".app-main") as HTMLElement;
         if (!el) return;
         const rect = el.getBoundingClientRect();
         setResultHeight(Math.max(100, Math.min(rect.bottom - e.clientY, rect.height - 100)));
@@ -2328,7 +2328,7 @@ function App() {
 
           {journeySql !== null && <JourneyModal sql={journeySql} onClose={() => setJourneySql(null)} />}
 
-          <div className="main">
+          <div className="app-main">
             <div className="tabs-row">
             <div className="tab-bar" style={splitTabId ? { width: `${splitLeftPct}%`, flex: 'none' } : {}}>
               <div className="tab-list">
