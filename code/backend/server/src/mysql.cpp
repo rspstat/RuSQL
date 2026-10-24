@@ -1119,18 +1119,18 @@ std::optional<StringResult> mysql_compat(const std::string& q, Executor& exec) {
 
     if (up.rfind("SHOW COLLATION", 0) == 0) {
         std::vector<std::vector<std::string>> rows = {
-            {"utf8_general_ci", "utf8", "33", "Yes", "Yes", "1"},
-            {"utf8mb4_general_ci", "utf8mb4", "45", "", "Yes", "1"},
-            {"utf8mb4_0900_ai_ci", "utf8mb4", "255", "Yes", "Yes", "0"},
-            {"utf8mb4_unicode_ci", "utf8mb4", "224", "", "Yes", "8"},
-            {"latin1_swedish_ci", "latin1", "8", "Yes", "Yes", "1"},
+            {"utf8_general_ci", "utf8", "33", "Yes", "Yes", "1", "PAD SPACE"},
+            {"utf8mb4_general_ci", "utf8mb4", "45", "", "Yes", "1", "PAD SPACE"},
+            {"utf8mb4_0900_ai_ci", "utf8mb4", "255", "Yes", "Yes", "0", "NO PAD"},
+            {"utf8mb4_unicode_ci", "utf8mb4", "224", "", "Yes", "8", "PAD SPACE"},
+            {"latin1_swedish_ci", "latin1", "8", "Yes", "Yes", "1", "PAD SPACE"},
         };
         const auto pattern = like_pattern_of(q);
         std::vector<std::vector<std::string>> shown;
         for (auto& row : rows) {
             if (!pattern || like_match(row[0], *pattern)) shown.push_back(row);
         }
-        return StringResult::Ok(box_table({"Collation", "Charset", "Id", "Default", "Compiled", "Sortlen"}, shown));
+        return StringResult::Ok(box_table({"Collation", "Charset", "Id", "Default", "Compiled", "Sortlen", "Pad_attribute"}, shown));
     }
 
     if (up.rfind("SHOW CHARSET", 0) == 0 || up.rfind("SHOW CHARACTER SET", 0) == 0) {

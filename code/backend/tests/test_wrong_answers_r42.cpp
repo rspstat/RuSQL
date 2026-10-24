@@ -686,3 +686,76 @@ TEST_CASE("information_schema.row_versions lists every stored version of a row a
     ok(a, "VACUUM acct");
     REQUIRE(q(a, "SELECT COUNT(*) FROM information_schema.row_versions WHERE TABLE_NAME = 'acct' AND ROW_KEY = '1'") == Rows{{"1"}});
 }
+
+TEST_CASE("R50: RANGE offsets, frames that hold no row, dates as numbers, FLOAT as single precision, error 1093, VERSION()", "[r50]") {
+    TempDataDir dir("r50_misc");
+    Executor ex(dir.path);
+    ok(ex, "CREATE DATABASE d");
+    ok(ex, "USE d");
+    ok(ex, "CREATE TABLE rf (id INT PRIMARY KEY, v INT, dt DATE)");
+    ok(ex, "INSERT INTO rf VALUES (1,10,'2024-01-01'),(2,15,'2024-01-03'),(3,30,'2024-01-08'),(4,NULL,NULL),(5,15,'2024-02-01')");
+    // RANGE n PRECEDING is a range of VALUES (10 and 15 are within 10 of 15), not the 10 rows before; the NULL row has only the NULL rows
+    REQUIRE(q(ex, "SELECT id, SUM(v) OVER (ORDER BY v RANGE BETWEEN 10 PRECEDING AND CURRENT ROW) FROM rf ORDER BY id") ==
+            Rows{{"1", "10"}, {"2", "40"}, {"3", "30"}, {"4", "NULL"}, {"5", "40"}});
+    REQUIRE(q(ex, "SELECT id, COUNT(*) OVER (ORDER BY v RANGE BETWEEN 5 PRECEDING AND 5 FOLLOWING) FROM rf ORDER BY id") ==
+            Rows{{"1", "3"}, {"2", "3"}, {"3", "1"}, {"4", "1"}, {"5", "3"}});
+    // a DESC order runs the offsets the other way, a date takes an INTERVAL (a month is a calendar month)
+    REQUIRE(q(ex, "SELECT id, SUM(v) OVER (ORDER BY v DESC RANGE BETWEEN 10 PRECEDING AND CURRENT ROW) FROM rf ORDER BY id") ==
+            Rows{{"1", "40"}, {"2", "30"}, {"3", "30"}, {"4", "NULL"}, {"5", "30"}});
+    REQUIRE(q(ex, "SELECT id, COUNT(*) OVER (ORDER BY dt RANGE BETWEEN INTERVAL 1 MONTH PRECEDING AND CURRENT ROW) FROM rf ORDER BY id") ==
+            Rows{{"1", "1"}, {"2", "2"}, {"3", "3"}, {"4", "1"}, {"5", "4"}});
+    REQUIRE(fails(ex, "SELECT SUM(v) OVER (ORDER BY v, id RANGE BETWEEN 5 PRECEDING AND CURRENT ROW) FROM rf").find("exactly one ORDER BY expression") != std::string::npos);
+    REQUIRE(fails(ex, "SELECT SUM(v) OVER (ORDER BY v RANGE BETWEEN INTERVAL 1 DAY PRECEDING AND CURRENT ROW) FROM rf").find("INTERVAL bound value not allowed") != std::string::npos);
+    REQUIRE(fails(ex, "SELECT SUM(v) OVER (ORDER BY dt RANGE BETWEEN 1 PRECEDING AND CURRENT ROW) FROM rf").find("Only INTERVAL bound value allowed") != std::string::npos);
+    REQUIRE(fails(ex, "SELECT SUM(v) OVER (ORDER BY id ROWS BETWEEN 1 FOLLOWING AND CURRENT ROW) FROM rf").find("negative, NULL or of non-integral type") != std::string::npos);
+    REQUIRE(fails(ex, "SELECT SUM(v) OVER (ORDER BY id ROWS BETWEEN UNBOUNDED FOLLOWING AND CURRENT ROW) FROM rf").find("cannot be UNBOUNDED FOLLOWING") != std::string::npos);
+    // a frame that holds no row: COUNT 0, the others NULL (it used to be clamped onto the last row)
+    REQUIRE(q(ex, "SELECT id, COUNT(*) OVER (ORDER BY id ROWS BETWEEN 1 FOLLOWING AND 2 FOLLOWING) FROM rf ORDER BY id") ==
+            Rows{{"1", "2"}, {"2", "2"}, {"3", "2"}, {"4", "1"}, {"5", "0"}});
+    REQUIRE(q(ex, "SELECT id, SUM(v) OVER (ORDER BY id ROWS BETWEEN 2 PRECEDING AND 1 PRECEDING) FROM rf ORDER BY id") ==
+            Rows{{"1", "NULL"}, {"2", "10"}, {"3", "25"}, {"4", "45"}, {"5", "30"}});
+    // what a date stands for as a number: a function's result too (the column of it was R44), and SUM / AVG of dates
+    REQUIRE(q(ex, "SELECT DATE('2024-03-05') + 0, CAST('2024-03-05 12:30:45' AS DATETIME) + 0, TIME('12:30:45') * 2") == Rows{{"20240305", "20240305123045", "246090"}});
+    REQUIRE(q(ex, "SELECT SUM(dt), AVG(dt), MAX(dt) + 0 FROM rf") == Rows{{"80960513", "20240128.2500", "20240201"}});
+    REQUIRE(q(ex, "SELECT DATE('2024-03-05') > 20240101, DATE('2024-03-05') = '2024-03-05'") == Rows{{"1", "1"}});
+    // a FLOAT column is its single-precision number: 0.1 is not the 0.1 of a DOUBLE or of a literal
+    ok(ex, "CREATE TABLE fl (id INT PRIMARY KEY, f FLOAT, d DOUBLE)");
+    ok(ex, "INSERT INTO fl VALUES (1, 0.1, 0.1), (2, 0.5, 0.5)");
+    REQUIRE(q(ex, "SELECT id FROM fl WHERE f = d ORDER BY id") == Rows{{"2"}});
+    REQUIRE(q(ex, "SELECT id FROM fl WHERE f = 0.1").empty());
+    REQUIRE(q(ex, "SELECT f + 0 FROM fl WHERE id = 1") == Rows{{"0.10000000149011612"}});
+    REQUIRE(q(ex, "SELECT f FROM fl WHERE id = 1") == Rows{{"0.1"}}); // (what a FLOAT column shows is unchanged)
+    // the table an UPDATE or DELETE changes cannot be read by a subquery of it; a derived table may
+    ok(ex, "CREATE TABLE tt (id INT PRIMARY KEY, v INT)");
+    ok(ex, "INSERT INTO tt VALUES (1, 10), (2, 20)");
+    REQUIRE(fails(ex, "UPDATE tt SET v = 1 WHERE id IN (SELECT id FROM tt WHERE v > 5)") == "You can't specify target table 'tt' for update in FROM clause");
+    REQUIRE(fails(ex, "UPDATE tt a SET v = 1 WHERE id IN (SELECT id FROM tt)") == "You can't specify target table 'a' for update in FROM clause");
+    REQUIRE(fails(ex, "INSERT INTO tt (id, v) VALUES (3, (SELECT MAX(v) FROM tt))") == "You can't specify target table 'tt' for update in FROM clause");
+    ok(ex, "UPDATE tt SET v = 1 WHERE id IN (SELECT id FROM (SELECT id FROM tt WHERE v > 15) x)");
+    REQUIRE(q(ex, "SELECT v FROM tt ORDER BY id") == Rows{{"10"}, {"1"}});
+    // ON DUPLICATE KEY UPDATE may read another table (its tables used to be looked up without the database)
+    ok(ex, "CREATE TABLE other (id INT PRIMARY KEY, v INT)");
+    ok(ex, "INSERT INTO other VALUES (1, 99)");
+    ok(ex, "INSERT INTO tt (id, v) VALUES (1, 0) ON DUPLICATE KEY UPDATE v = (SELECT MAX(v) FROM other)");
+    REQUIRE(q(ex, "SELECT v FROM tt WHERE id = 1") == Rows{{"99"}});
+    // a month offset is a calendar month: 2024-03-31 less a month is 2024-02-29, not the 31st of a month with 29 days
+    ok(ex, "CREATE TABLE ends (dt DATE)");
+    ok(ex, "INSERT INTO ends VALUES ('2024-02-29'), ('2024-03-31')");
+    REQUIRE(q(ex, "SELECT dt, COUNT(*) OVER (ORDER BY dt RANGE BETWEEN INTERVAL 1 MONTH PRECEDING AND CURRENT ROW) FROM ends ORDER BY dt") ==
+            Rows{{"2024-02-29", "1"}, {"2024-03-31", "2"}});
+    REQUIRE(q(ex, "SELECT dt, COUNT(*) OVER (ORDER BY dt DESC RANGE BETWEEN INTERVAL 1 MONTH PRECEDING AND CURRENT ROW) FROM ends ORDER BY dt") ==
+            Rows{{"2024-02-29", "1"}, {"2024-03-31", "1"}}); // (DESC: the rows before are the later dates, up to a month on)
+    // HAVING reads ANY_VALUE(x) as a plain x: a column of the select list
+    ok(ex, "CREATE TABLE av (id INT PRIMARY KEY, g INT, v INT)");
+    ok(ex, "INSERT INTO av VALUES (1, 1, 10), (2, 1, 10), (3, 2, 20)");
+    REQUIRE(fails(ex, "SELECT g FROM av GROUP BY g HAVING ANY_VALUE(v) > 5") == "Unknown column 'v' in 'having clause'");
+    REQUIRE(q(ex, "SELECT g, v FROM av GROUP BY g, v HAVING ANY_VALUE(v) > 15") == Rows{{"2", "20"}});
+    // a routine's SELECT names its column by the expression as written, not by the values the variables held
+    ok(ex, "CREATE PROCEDURE add_two() BEGIN DECLARE a INT DEFAULT 2; DECLARE b INT DEFAULT 6; SELECT a + b; END");
+    auto called = ex.execute_sql("CALL add_two()");
+    REQUIRE(called.is_ok());
+    REQUIRE(called.value().find("| a + b") != std::string::npos);
+    REQUIRE(called.value().find("2+6") == std::string::npos);
+    // VERSION() is what @@version and the handshake say
+    REQUIRE(q(ex, "SELECT VERSION() = @@version") == Rows{{"1"}});
+}

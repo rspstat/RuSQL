@@ -158,7 +158,7 @@
 | NTH_VALUE | ✓ | ✓ | ✓ | ✓ |
 | NTILE | ✓ | ✓ | ✓ | ✓ |
 | CUME_DIST / PERCENT_RANK | ✓ | ✓ | ✓ | ✓ |
-| ROWS / RANGE 프레임 절 | ✓ | ✓ | ✓ | ✓ (`ROWS/RANGE BETWEEN ... AND ...`) |
+| ROWS / RANGE 프레임 절 | ✓ | ✓ | ✓ | ✓ (`ROWS/RANGE BETWEEN ... AND ...`, RANGE는 값 오프셋과 `INTERVAL n unit`까지, 행이 없는 프레임과 MySQL이 거절하는 프레임도 MySQL처럼) |
 | GROUPS 프레임 | ✗ | ✓ | ✗ | ✗ |
 | 집계 함수를 윈도우로 사용 | ✓ | ✓ | ✓ | ✓ (SUM/AVG/COUNT/MIN/MAX OVER) |
 | PARTITION BY / ORDER BY | ✓ | ✓ | ✓ | ✓ |

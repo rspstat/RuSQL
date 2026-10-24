@@ -13,11 +13,59 @@
 #include <numeric>
 
 #include "engine/numeric_text.hpp"
+#include "engine/sql_value_util.hpp"
 
 namespace engine {
 
 namespace {
 std::optional<double> parse_f64(const std::string& s) { return parse_number(s); }
+
+// ---- RANGE frames with an offset: the frame is a range of ORDER BY VALUES ------------------------------------------------------------------------------
+// `RANGE BETWEEN 10 PRECEDING AND CURRENT ROW` reaches the rows whose ORDER BY value is at most 10 below the current row's (not the 10 rows before it);
+// `RANGE BETWEEN INTERVAL 7 DAY PRECEDING AND CURRENT ROW` does the same for a date. The window orders by exactly one numeric or temporal value. A row whose value
+// is NULL has the other NULL rows for a frame that ends at an offset, and the NULL rows are not in the frame of any other row.
+
+bool is_offset_bound(const FrameBound& b) { return std::holds_alternative<FrameBound::Preceding>(b.data) || std::holds_alternative<FrameBound::Following>(b.data); }
+
+// the INTERVAL unit of an offset bound ("" for a plain number); nothing for a bound that has no offset
+const std::string* bound_unit(const FrameBound& b) {
+    if (auto* p = std::get_if<FrameBound::Preceding>(&b.data)) return &p->unit;
+    if (auto* f = std::get_if<FrameBound::Following>(&b.data)) return &f->unit;
+    return nullptr;
+}
+
+// the date and time as microseconds since 1970-01-01 (as if UTC)
+long double temporal_micro(const sqlval::DateTime& t) { return static_cast<long double>(t.epoch_seconds()) * 1000000.0L + static_cast<long double>(t.micro); }
+
+// the date `months` later (or earlier): the day is cut back to the last day of a shorter month (2024-01-31 + 1 MONTH is 2024-02-29)
+sqlval::DateTime add_months(sqlval::DateTime t, long long months) {
+    long long index = t.year * 12 + (t.month - 1) + months;
+    t.year = index >= 0 ? index / 12 : -((-index + 11) / 12);
+    t.month = static_cast<int>(index - t.year * 12) + 1;
+    t.day = std::min(t.day, sqlval::days_in_month(t.year, t.month));
+    return t;
+}
+
+// The microseconds of an INTERVAL unit that has a fixed length (MONTH, QUARTER and YEAR have none: they are counted on the calendar)
+std::optional<long double> unit_micro(const std::string& unit) {
+    if (unit == "MICROSECOND") return 1.0L;
+    if (unit == "SECOND") return 1e6L;
+    if (unit == "MINUTE") return 60e6L;
+    if (unit == "HOUR") return 3600e6L;
+    if (unit == "DAY") return 86400e6L;
+    if (unit == "WEEK") return 7 * 86400e6L;
+    return std::nullopt;
+}
+
+// The ORDER BY values of one partition, in the order of the partition, as a position on one number line that grows along the order (a DESC order flips the
+// sign, a date is its microseconds): the rows with a value are `first` to `last`, the NULL rows come before or after them.
+struct RangeAxis {
+    bool temporal = false;
+    std::size_t first = 0, last = 0;
+    bool any = false;
+    std::vector<long double> position; // of the rows first..last
+    std::vector<std::string> text;     // their ORDER BY values as written (a month offset is worked out on the date)
+};
 
 int cmp_key(const std::string& a, const std::string& b, ValueClass cls) {
     const bool a_null = a == "NULL", b_null = b == "NULL"; // NULL sorts before every value
@@ -32,14 +80,24 @@ std::string fmt4(double v) { return format_shortest(v); }
 std::pair<std::size_t, std::size_t> Executor::frame_bounds(std::size_t pos, std::size_t len, const std::optional<WindowFrame>& frame,
                                                              bool has_order) {
     if (frame) {
-        auto resolve = [&](const FrameBound& b) -> std::size_t {
-            if (std::holds_alternative<FrameBound::UnboundedPreceding>(b.data)) return 0;
-            if (auto* p = std::get_if<FrameBound::Preceding>(&b.data)) return pos >= p->n ? pos - p->n : 0;
-            if (std::holds_alternative<FrameBound::CurrentRow>(b.data)) return pos;
-            if (auto* f = std::get_if<FrameBound::Following>(&b.data)) return std::min(pos + f->n, len == 0 ? 0 : len - 1);
-            return len == 0 ? 0 : len - 1; // UnboundedFollowing
+        // A frame is the rows from its start to its end, cut to the partition. One that holds no row (`ROWS BETWEEN 1 FOLLOWING AND 2 FOLLOWING` on the last row,
+        // `ROWS BETWEEN 2 PRECEDING AND 1 PRECEDING` on the first) is (1, 0): the start is after the end.
+        const long long here = static_cast<long long>(pos), last = static_cast<long long>(len) - 1;
+        auto first_row = [&](const FrameBound& b) -> long long {
+            if (auto* p = std::get_if<FrameBound::Preceding>(&b.data)) return here - static_cast<long long>(p->n);
+            if (auto* f = std::get_if<FrameBound::Following>(&b.data)) return here + static_cast<long long>(f->n);
+            if (std::holds_alternative<FrameBound::CurrentRow>(b.data)) return here;
+            return std::holds_alternative<FrameBound::UnboundedPreceding>(b.data) ? 0 : last;
         };
-        return {resolve(frame->start), resolve(frame->end)};
+        auto last_row = [&](const FrameBound& b) -> long long {
+            if (auto* p = std::get_if<FrameBound::Preceding>(&b.data)) return here - static_cast<long long>(p->n);
+            if (auto* f = std::get_if<FrameBound::Following>(&b.data)) return here + static_cast<long long>(f->n);
+            if (std::holds_alternative<FrameBound::CurrentRow>(b.data)) return here;
+            return std::holds_alternative<FrameBound::UnboundedFollowing>(b.data) ? last : -1;
+        };
+        const long long start = std::max<long long>(first_row(frame->start), 0), end = std::min(last_row(frame->end), last);
+        if (start > end) return {1, 0};
+        return {static_cast<std::size_t>(start), static_cast<std::size_t>(end)};
     }
     if (has_order) return {0, pos};
     return {0, len == 0 ? 0 : len - 1};
@@ -110,7 +168,77 @@ std::vector<Row> Executor::compute_window_functions(std::vector<Row> rows, const
                 for (std::size_t k = i; k <= j; k++) { peer_first[k] = i; peer_last[k] = j; }
                 i = j + 1;
             }
+            // RANGE with an offset: the ORDER BY values of the partition on a number line (see RangeAxis)
+            const bool range_offsets = wf->frame && wf->frame->unit == FrameUnit::Range && (is_offset_bound(wf->frame->start) || is_offset_bound(wf->frame->end));
+            RangeAxis axis;
+            if (range_offsets) {
+                const char* const needs_one = "Window '<unnamed window>' with RANGE N PRECEDING/FOLLOWING frame requires exactly one ORDER BY expression, of numeric or temporal type";
+                if (wf->order_by.size() != 1) throw StatementError(needs_one);
+                const std::string* start_unit = bound_unit(wf->frame->start);
+                const std::string* end_unit = bound_unit(wf->frame->end);
+                const bool interval = (start_unit && !start_unit->empty()) || (end_unit && !end_unit->empty());
+                const bool plain_number = (start_unit && start_unit->empty()) || (end_unit && end_unit->empty());
+                const double sign = wf->order_by[0].ascending ? 1.0 : -1.0;
+                for (std::size_t i = 0; i < total; i++) {
+                    const std::string* v = get_col(rows[sorted[i]], wf->order_by[0].column);
+                    if (!v || *v == EXECUTOR_NULL_VALUE) continue;
+                    std::optional<sqlval::DateTime> when;
+                    if (!axis.any) {
+                        axis.any = true;
+                        axis.first = i;
+                        when = parse_number(*v) ? std::nullopt : sqlval::parse_datetime(*v);
+                        axis.temporal = when && when->has_date;
+                        if (!axis.temporal && !parse_number(*v)) throw StatementError(needs_one);
+                        if (axis.temporal && plain_number) throw StatementError("Window '<unnamed window>' with RANGE frame has ORDER BY expression of datetime type. Only INTERVAL bound value allowed.");
+                        if (!axis.temporal && interval) throw StatementError("Window '<unnamed window>' with RANGE frame has ORDER BY expression of numeric type, INTERVAL bound value not allowed.");
+                    }
+                    axis.last = i;
+                    long double position;
+                    if (axis.temporal) {
+                        if (!when) when = sqlval::parse_datetime(*v);
+                        position = when ? temporal_micro(*when) : 0.0L;
+                    } else {
+                        position = static_cast<long double>(parse_number(*v).value_or(0.0));
+                    }
+                    axis.position.push_back(position * static_cast<long double>(sign));
+                    axis.text.push_back(*v);
+                }
+            }
+            // where the offset of `b` puts the row `pos` (a row with a value), as a position on the number line of the axis
+            auto offset_target = [&](const FrameBound& b, std::size_t pos) -> long double {
+                const bool before = std::holds_alternative<FrameBound::Preceding>(b.data);
+                const double amount = before ? std::get<FrameBound::Preceding>(b.data).amount : std::get<FrameBound::Following>(b.data).amount;
+                const std::string& unit = *bound_unit(b);
+                const long double sign = wf->order_by[0].ascending ? 1.0L : -1.0L;
+                const long double here = axis.position[pos - axis.first]; // (already times the sign)
+                const long double step = before ? -1.0L : 1.0L;           // along the order of the rows
+                if (!axis.temporal) return here + step * static_cast<long double>(amount);
+                if (auto micro = unit_micro(unit)) return here + step * static_cast<long double>(amount) * *micro;
+                // MONTH, QUARTER, YEAR: on the calendar, in the direction of the values (a DESC order runs them backwards)
+                const long long months = static_cast<long long>(std::llround(amount)) * (unit == "YEAR" ? 12 : unit == "QUARTER" ? 3 : 1);
+                auto when = sqlval::parse_datetime(axis.text[pos - axis.first]);
+                if (!when) return here;
+                return temporal_micro(add_months(*when, static_cast<long long>(step * sign) * months)) * sign;
+            };
             auto frame_of = [&](std::size_t pos) {
+                if (range_offsets) {
+                    const bool has_value = axis.any && pos >= axis.first && pos <= axis.last;
+                    auto index_of = [&](const FrameBound& b, bool is_start) -> long long {
+                        if (std::holds_alternative<FrameBound::UnboundedPreceding>(b.data)) return 0;
+                        if (std::holds_alternative<FrameBound::UnboundedFollowing>(b.data)) return static_cast<long long>(total) - 1;
+                        if (std::holds_alternative<FrameBound::CurrentRow>(b.data) || !has_value) return static_cast<long long>(is_start ? peer_first[pos] : peer_last[pos]);
+                        const long double target = offset_target(b, pos);
+                        if (is_start) { // the first row whose value reaches the target
+                            const auto at = std::lower_bound(axis.position.begin(), axis.position.end(), target);
+                            return static_cast<long long>(axis.first) + (at - axis.position.begin());
+                        }
+                        const auto at = std::upper_bound(axis.position.begin(), axis.position.end(), target); // the last row whose value does not pass it
+                        return static_cast<long long>(axis.first) + (at - axis.position.begin()) - 1;
+                    };
+                    const long long start = index_of(wf->frame->start, true), end = index_of(wf->frame->end, false);
+                    if (start > end || start >= static_cast<long long>(total) || end < 0) return std::make_pair(std::size_t{1}, std::size_t{0});
+                    return std::make_pair(static_cast<std::size_t>(std::max<long long>(start, 0)), static_cast<std::size_t>(end));
+                }
                 auto [start, end] = frame_bounds(pos, total, wf->frame, has_order);
                 if (!wf->frame) {
                     if (has_order) end = peer_last[pos];
@@ -177,7 +305,7 @@ std::vector<Row> Executor::compute_window_functions(std::vector<Row> rows, const
                     std::string col_name = wf->col.value_or("");
                     for (std::size_t pos = 0; pos < sorted.size(); pos++) {
                         auto [start, end] = frame_of(pos);
-                        (void)end;
+                        if (start > end) { values[sorted[pos]] = "NULL"; continue; } // (a frame with no row)
                         const std::string* v = get_col(rows[sorted[start]], col_name);
                         values[sorted[pos]] = v ? *v : "NULL";
                     }
@@ -187,7 +315,7 @@ std::vector<Row> Executor::compute_window_functions(std::vector<Row> rows, const
                     std::string col_name = wf->col.value_or("");
                     for (std::size_t pos = 0; pos < sorted.size(); pos++) {
                         auto [start, end] = frame_of(pos);
-                        (void)start;
+                        if (start > end) { values[sorted[pos]] = "NULL"; continue; }
                         const std::string* v = get_col(rows[sorted[end]], col_name);
                         values[sorted[pos]] = v ? *v : "NULL";
                     }
@@ -239,7 +367,7 @@ std::vector<Row> Executor::compute_window_functions(std::vector<Row> rows, const
                         auto [start, end] = frame_of(pos);
                         std::size_t count;
                         if (col_name == "*") {
-                            count = end - start + 1;
+                            count = end - start + 1; // (a frame with no row is (1, 0): the count wraps round to 0)
                         } else {
                             count = 0;
                             for (std::size_t i = start; i <= end; i++) {

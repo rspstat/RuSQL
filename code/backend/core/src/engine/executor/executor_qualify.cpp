@@ -107,11 +107,17 @@ Statement Executor::qualify_stmt(const SharedDatabase& s, Statement stmt) const 
     }
     if (auto* v = std::get_if<Statement::Insert>(&stmt.data)) {
         v->table = qualify_name_with_synonyms(s, v->table);
+        if (auto* update = std::get_if<InsertConflict::Update>(&v->on_conflict.data)) {
+            for (auto& [column, value] : update->assignments) qualify_arith_inplace(s, value); // (ON DUPLICATE KEY UPDATE v = (SELECT ... FROM other))
+        }
         return stmt;
     }
     if (auto* v = std::get_if<Statement::InsertSelect>(&stmt.data)) {
         v->table = qualify_name_with_synonyms(s, v->table);
         *v->query = qualify_stmt(s, std::move(*v->query));
+        if (auto* update = std::get_if<InsertConflict::Update>(&v->on_conflict.data)) {
+            for (auto& [column, value] : update->assignments) qualify_arith_inplace(s, value);
+        }
         return stmt;
     }
     if (auto* v = std::get_if<Statement::Update>(&stmt.data)) {

@@ -1,5 +1,5 @@
 {
-  "generated": "2026-10-22",
+  "generated": "2026-10-24",
   "mysql": "8.4.9",
   "corpora": [
     {
@@ -15,7 +15,7 @@
       "en": "Built-in functions (strings, math, dates, JSON)",
       "ko": "내장 함수 (문자열·수학·날짜·JSON)",
       "statements": 67,
-      "different": 3,
+      "different": 2,
       "bothFail": 3
     },
     {
@@ -23,8 +23,8 @@
       "en": "Types, NOT NULL, UNIQUE, CHECK, foreign keys, strict mode",
       "ko": "타입·NOT NULL·UNIQUE·CHECK·외래키·엄격 모드",
       "statements": 222,
-      "different": 5,
-      "bothFail": 61
+      "different": 3,
+      "bothFail": 62
     },
     {
       "name": "collation",
@@ -110,9 +110,9 @@
       "name": "any_value",
       "en": "ANY_VALUE under ONLY_FULL_GROUP_BY",
       "ko": "ONLY_FULL_GROUP_BY 아래의 ANY_VALUE",
-      "statements": 15,
+      "statements": 19,
       "different": 0,
-      "bothFail": 1
+      "bothFail": 4
     },
     {
       "name": "view_order",
@@ -155,11 +155,43 @@
       "bothFail": 3
     },
     {
+      "name": "range_frames",
+      "en": "RANGE frames with an offset (numbers, INTERVAL), frames that hold no row",
+      "ko": "RANGE 프레임 오프셋(수·INTERVAL), 행이 없는 프레임",
+      "statements": 44,
+      "different": 0,
+      "bothFail": 15
+    },
+    {
+      "name": "temporal_values",
+      "en": "Date functions and SUM / AVG of dates read as numbers",
+      "ko": "날짜 함수와 날짜의 SUM·AVG를 수로 읽기",
+      "statements": 32,
+      "different": 0,
+      "bothFail": 0
+    },
+    {
+      "name": "float_single",
+      "en": "FLOAT columns as single precision in arithmetic and comparisons",
+      "ko": "FLOAT 열을 단정밀도로 읽는 산술·비교",
+      "statements": 28,
+      "different": 0,
+      "bothFail": 0
+    },
+    {
+      "name": "target_table",
+      "en": "Error 1093: a subquery that reads the table an UPDATE / DELETE / INSERT writes",
+      "ko": "오류 1093: 쓰는 표를 읽는 하위 질의",
+      "statements": 28,
+      "different": 0,
+      "bothFail": 16
+    },
+    {
       "name": "protocol",
       "en": "MySQL wire protocol: SHOW, OK packets, affected rows",
       "ko": "MySQL 프로토콜: SHOW·OK 패킷·영향 행 수",
       "statements": 103,
-      "different": 4,
+      "different": 3,
       "bothFail": 1
     },
     {
@@ -171,10 +203,10 @@
       "bothFail": 0
     }
   ],
-  "conformanceCases": 2958,
+  "conformanceCases": 3104,
   "tests": {
-    "cases": 783,
-    "assertions": 1505711
+    "cases": 789,
+    "assertions": 1506079
   },
-  "bugsFound": 194
+  "bugsFound": 206
 }

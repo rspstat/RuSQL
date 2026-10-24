@@ -40,7 +40,12 @@ std::optional<double> parse_f64(const std::string& s) { return parse_number(s); 
 std::string column_number(const ArithExpr::Col& col, const std::string& text) {
     auto fraction = [&](long long micro) {
         std::string places = std::to_string(1000000 + micro).substr(1);
-        return col.fsp > 0 ? "." + places.substr(0, col.fsp) : std::string();
+        std::size_t digits = col.fsp;
+        if (col.fsp == 255) { // (what a date function gives: the places the value is written with)
+            const std::size_t point = text.rfind('.');
+            digits = point == std::string::npos ? 0 : std::min<std::size_t>(text.size() - point - 1, 6);
+        }
+        return digits > 0 ? "." + places.substr(0, digits) : std::string();
     };
     switch (col.kind) {
         case ColKind::Date: {
@@ -85,6 +90,37 @@ std::string column_number(const ArithExpr::Col& col, const std::string& text) {
         default:
             return text;
     }
+}
+
+// The value of a FLOAT column as MySQL's arithmetic and comparisons have it: the single-precision number widened to a DOUBLE (the text of the column is the shortest
+// that reads back as that float, 0.1; the DOUBLE is 0.10000000149011612). `text` is not NULL.
+std::string widen_single(const std::string& text) {
+    const auto number = parse_number(text);
+    if (!number) return text;
+    const double widened = static_cast<double>(static_cast<float>(*number));
+    if (widened == *number) return text; // (a number a single-precision float holds exactly -- 0.5, 100 -- reads the same)
+    char digits[40];
+    return std::string(digits, std::to_chars(digits, digits + sizeof digits, widened).ptr);
+}
+
+// What a value is when a number is asked of it: nothing special (Plain), or a date, a time, an ENUM or a SET -- the column itself, or (a date function) only its kind
+struct View {
+    ColKind kind = ColKind::Plain;
+    const ArithExpr::Col* column = nullptr;
+};
+
+View view_of(const ArithExpr& e) {
+    if (auto* c = std::get_if<ArithExpr::Col>(&e.data)) return c->kind != ColKind::Plain ? View{c->kind, c} : View{};
+    return View{kind_of_expr(e), nullptr};
+}
+
+// the number the value `text` of the view stands for (`text` is not NULL)
+std::string view_number(const View& view, const std::string& text) {
+    if (view.column) return column_number(*view.column, text);
+    ArithExpr::Col scratch; // (what a date function gives: the places of its fraction are the ones the text has)
+    scratch.kind = view.kind;
+    scratch.fsp = 255;
+    return column_number(scratch, text);
 }
 
 // Whether a function reads its arguments as numbers (a date, a time, an ENUM or a SET column given to it is then the number it stands for): the numeric functions,
@@ -240,9 +276,10 @@ NumVal number_tree(const ArithExpr& e, Leaf& leaf) {
     // time (the value of a DATE / TIME / DATETIME column is text here, and MySQL turns it into a number) is not one.
     // a date, a time, an ENUM or a SET column is the number it stands for, not the number its text starts with
     const auto* column = std::get_if<ArithExpr::Col>(&e.data);
-    const bool viewed = column && column->kind != ColKind::Plain;
+    const View view = view_of(e); // (a column of that type, or what DATE(x), NOW(), CAST(x AS DATE) ... give)
+    const bool viewed = view.kind != ColKind::Plain;
     std::string number;
-    if (viewed) number = column_number(*column, text);
+    if (viewed) number = view_number(view, text);
     const std::string& value = viewed ? number : text;
     if (!viewed && (std::holds_alternative<ArithExpr::Str>(e.data) || (column && column->cls == ValueClass::Text))) {
         sqlval::note_truncated_number(text);
@@ -269,10 +306,11 @@ NumVal number_tree(const ArithExpr& e, Leaf& leaf) {
         }
     }
     if (viewed) { // (a date or a time is a whole number or a decimal; an ENUM and a SET are read as a DOUBLE)
-        v.approx = column->kind == ColKind::Enum || column->kind == ColKind::Set;
+        v.approx = view.kind == ColKind::Enum || view.kind == ColKind::Set;
         return v;
     }
     if (column && (column->approx || column->cls == ValueClass::Text)) v.approx = true; // (a FLOAT / DOUBLE column or a text column: floating point, as in MySQL)
+    if (column && column->single) v.dbl = static_cast<double>(static_cast<float>(v.dbl)); // (a FLOAT is the single-precision number: 0.1 is 0.10000000149011612)
     if (std::holds_alternative<ArithExpr::Str>(e.data)) v.approx = true; // ('2.5' * 2 is 5, not 5.0: a string is read as a DOUBLE)
     return v;
 }
@@ -465,6 +503,8 @@ std::string Executor::eval_arith(const Row& row, const ArithExpr& expr) {
                         if (numbers && c->kind != ColKind::Plain && values.back() != EXECUTOR_NULL_VALUE) { // (a date is 20240102, an ENUM its place: a DOUBLE)
                             values.back() = column_number(*c, values.back());
                             kind = c->kind == ColKind::Enum || c->kind == ColKind::Set ? 'D' : 'C';
+                        } else if (numbers && c->single && values.back() != EXECUTOR_NULL_VALUE) {
+                            values.back() = widen_single(values.back()); // (SQRT of a FLOAT column reads the single-precision number)
                         }
                         kinds.push_back(kind);
                     } else if (auto* sv = std::get_if<ArithExpr::Str>(&a.data)) {
@@ -478,6 +518,9 @@ std::string Executor::eval_arith(const Row& row, const ArithExpr& expr) {
                     } else {
                         bool approx = false;
                         std::string value = exact_args ? eval_arith_exact(row, a, &approx) : eval_arith(row, a);
+                        if (numbers && value != EXECUTOR_NULL_VALUE && !std::holds_alternative<ArithExpr::Col>(a.data)) {
+                            if (const View view = view_of(a); view.kind != ColKind::Plain) value = view_number(view, value); // (DATE(x) is 20240102)
+                        }
                         raw.push_back("'" + value + "'");
                         values.push_back(std::move(value));
                         kinds.push_back(approx ? 'D' : 'E');
@@ -593,10 +636,12 @@ Executor::Tri Executor::eval_single3(const Row& row, const Condition& cond) {
     const ValueClass left_class = cond.left_class != ValueClass::Unknown ? cond.left_class : class_of_expr(cond.left);
     // A text compared with a number is read as a number; UPDATE and DELETE (StrictComparison) refuse one that is not wholly a number. Only a string counts: what the
     // statement spells out in quotes, a string column or a function's text -- not a date, an ENUM or a SET column, whose number is not its text.
+    const View left_view = view_of(cond.left); // (a column of that type, or what DATE(x), NOW() ... give)
+    const bool left_viewed = left_view.kind != ColKind::Plain;
+    const bool left_sure = !left_viewed;
+    // a FLOAT column is compared as the single-precision number widened to a DOUBLE (0.1 in a FLOAT column is not 0.1)
     const auto* left_column = std::get_if<ArithExpr::Col>(&cond.left.data);
-    const bool left_sure = !left_column || left_column->kind == ColKind::Plain;
-    // a date, a time, an ENUM or a SET column compared with a number is compared as the number it stands for
-    const bool left_viewed = !left_sure;
+    const bool left_single = left_column && left_column->single;
     auto compare = [&](ValueClass lc, ValueClass rc, const std::string& lv, const std::string& rv, bool right_sure) {
         if (sqlval::strict_comparison_depth > 0 && (lc == ValueClass::Number || rc == ValueClass::Number)) {
             if (lc == ValueClass::Text && left_sure) sqlval::note_truncated_number(lv);
@@ -609,7 +654,8 @@ Executor::Tri Executor::eval_single3(const Row& row, const Condition& cond) {
         if (val == EXECUTOR_NULL_VALUE) return Tri::Unknown;
         // `x BETWEEN lo AND hi` is `x >= lo AND x <= hi`: a NULL bound (a variable that holds NULL) makes its side UNKNOWN, and the other side can
         // still say FALSE (so BETWEEN never selects and NOT BETWEEN selects what the other bound rules out)
-        const std::string between_val = left_viewed && (!bv->lo_quoted || !bv->hi_quoted) ? column_number(*left_column, val) : val;
+        std::string between_val = left_viewed && (!bv->lo_quoted || !bv->hi_quoted) ? view_number(left_view, val) : val;
+        if (left_single) between_val = widen_single(between_val);
         auto side = [&](const std::string& bound, bool quoted, bool lower) {
             if (bound == EXECUTOR_NULL_VALUE) return Tri::Unknown;
             const int order = compare(left_class, written_class(bound, quoted), between_val, bound, quoted);
@@ -625,11 +671,11 @@ Executor::Tri Executor::eval_single3(const Row& row, const Condition& cond) {
         if (val == EXECUTOR_NULL_VALUE) return Tri::Unknown;
         const bool has_null = std::any_of(ll->values.begin(), ll->values.end(), [](const std::string& v) { return v == EXECUTOR_NULL_VALUE; });
         if (cond.op == Operator::In || cond.op == Operator::NotIn) {
-            const std::string number_val = left_viewed ? column_number(*left_column, val) : std::string();
+            const std::string number_val = left_viewed ? view_number(left_view, val) : left_single ? widen_single(val) : std::string();
             for (std::size_t i = 0; i < ll->values.size(); i++) {
                 if (ll->values[i] == EXECUTOR_NULL_VALUE) continue; // (a NULL in the list is UNKNOWN below, never equal)
                 const bool quoted = i < ll->quoted.size() && ll->quoted[i];
-                if (compare(left_class, written_class(ll->values[i], quoted), left_viewed && !quoted ? number_val : val, ll->values[i], quoted) == 0) return tri(cond.op == Operator::In);
+                if (compare(left_class, written_class(ll->values[i], quoted), (left_viewed || left_single) && !quoted ? number_val : val, ll->values[i], quoted) == 0) return tri(cond.op == Operator::In);
             }
             return has_null ? Tri::Unknown : tri(cond.op == Operator::NotIn);
         }
@@ -640,7 +686,8 @@ Executor::Tri Executor::eval_single3(const Row& row, const Condition& cond) {
     const std::string* effective_lit = nullptr;
     ValueClass right_class = cond.right_class;
     bool right_sure = false; // (see `compare`)
-    const ArithExpr::Col* right_column = nullptr;
+    View right_view;
+    bool right_viewed = false, right_single = false;
 
     // PLAN.md P0 fix: the RHS of a comparison is now a full arithmetic expression
     // (ConditionValue::Arith) rather than always a single-token Literal, so
@@ -651,8 +698,10 @@ Executor::Tri Executor::eval_single3(const Row& row, const Condition& cond) {
     if (auto* av = std::get_if<ConditionValue::Arith>(&cond.value.data)) {
         resolved = compares_numbers ? eval_arith_exact(row, av->expr) : eval_arith(row, av->expr);
         effective_lit = &resolved;
-        right_column = std::get_if<ArithExpr::Col>(&av->expr.data);
-        right_sure = !right_column || right_column->kind == ColKind::Plain;
+        right_view = view_of(av->expr);
+        right_viewed = right_view.kind != ColKind::Plain;
+        right_single = std::holds_alternative<ArithExpr::Col>(av->expr.data) && std::get<ArithExpr::Col>(av->expr.data).single;
+        right_sure = !right_viewed;
         if (right_class == ValueClass::Unknown) right_class = class_of_expr(av->expr);
     } else if (auto* lit_v = std::get_if<ConditionValue::Literal>(&cond.value.data)) {
         const std::string& lit = lit_v->value;
@@ -676,8 +725,10 @@ Executor::Tri Executor::eval_single3(const Row& row, const Condition& cond) {
     if (val == EXECUTOR_NULL_VALUE) return Tri::Unknown;
     if (*effective_lit == "__NULL__" || *effective_lit == EXECUTOR_NULL_VALUE) return Tri::Unknown;
 
-    if (left_viewed && right_class == ValueClass::Number) val = column_number(*left_column, val);
-    else if (right_column && right_column->kind != ColKind::Plain && left_class == ValueClass::Number) resolved = column_number(*right_column, resolved);
+    if (left_viewed && right_class == ValueClass::Number) val = view_number(left_view, val);
+    else if (right_viewed && left_class == ValueClass::Number) resolved = view_number(right_view, resolved);
+    if (left_single && !left_viewed) val = widen_single(val);
+    if (right_single && !right_viewed) resolved = widen_single(resolved);
 
     switch (cond.op) {
         case Operator::Eq: return tri(compare(left_class, right_class, val, *effective_lit, right_sure) == 0);

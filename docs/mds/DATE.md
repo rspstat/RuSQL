@@ -2233,6 +2233,35 @@ VS Code 스타일 탭 드래그 순서 변경(요청의 1번 항목)은 같은 �
 - **확인**: 앱을 다시 빌드해 띄운 뒤(Rust 구조체 변경) 별을 켜고 끄면 `connections.json`에 바로 반영되고, `local-dev`(자동 로그인)로 실제 로그인하면 `lastUsed`가 기록되어 `RECENT`에 맨 위로 오는 것을 확인했다. 한 번에 별 두 개를 같은 틱에 누르면 나중 것만 남는 것은 시험 스크립트가 만든 상황이고, 사람의 클릭은 다시 그려진 뒤에 들어온다.
 - **한계**: 사진용 예시 연결 8개(`prod-orders` 등)는 `connections.json`에만 있고 저장소에는 올라가지 않는다. `RECENT`는 3개 고정이다.
 
+### 10월 25일 — R50: RANGE 값 오프셋, 날짜 함수와 SUM(날짜)의 수 값, FLOAT 단정밀도, 오류 1093 외 (추천표 1순위)
+
+**왜 이 항목인가**: 추천표 1순위(오류도 없이 틀린 값을 돌려주는 것)를 사용자가 골랐다("1순위 진행합니다"). 진짜 MySQL 8.4.9에 같은 문장을 돌려 차이를 하나씩 확인하고 고쳤다. 새 코퍼스 넷(`range_frames`, `temporal_values`, `float_single`, `target_table`)이 이 라운드의 증거다.
+
+**고친 것 (엔진)**
+- **`RANGE BETWEEN n PRECEDING AND m FOLLOWING`이 값 범위로 동작**: 오프셋을 행 수로 읽던 오답을 고쳤다. `ORDER BY v RANGE BETWEEN 10 PRECEDING AND CURRENT ROW`는 v가 현재 행보다 10 이하로 작은 행까지(10, 15, 30이면 10·25·30; 전엔 10·25·55). 소수 오프셋(`1.5`), 날짜·날짜시간 키의 `INTERVAL n unit`(MICROSECOND~WEEK은 고정 길이, MONTH·QUARTER·YEAR는 달력 — 2024-03-31에서 한 달 전은 2024-02-29), ASC와 DESC(DESC는 PRECEDING이 더 큰 값 쪽), NULL 키(자기들끼리 한 무리: 오프셋 끝은 NULL 행만, 다른 행의 틀에는 NULL 행이 없음)를 MySQL처럼 처리하고, 정렬 식이 하나가 아니거나 수·시간 형이 아니면 3587, 수 키에 INTERVAL이면 3589, 날짜 키에 수 오프셋이면 3588 (`executor_window.cpp`의 `RangeAxis`).
+- **행이 하나도 없는 프레임**: `ROWS BETWEEN 1 FOLLOWING AND 2 FOLLOWING`의 마지막 행, `ROWS BETWEEN 2 PRECEDING AND 1 PRECEDING`의 첫 행은 전엔 마지막(첫) 행 하나로 잘려 들어갔다(`COUNT`가 1, `SUM`이 그 행 값). 이제 `COUNT` 0, 나머지 NULL, `FIRST_VALUE`·`LAST_VALUE` NULL. MySQL이 거절하는 프레임도 거절한다: 시작이 `UNBOUNDED FOLLOWING`(3584), 끝이 `UNBOUNDED PRECEDING`(3585), `CURRENT ROW .. n PRECEDING`·`n FOLLOWING .. CURRENT ROW`·`n FOLLOWING .. m PRECEDING`(3586), `ROWS`의 소수·INTERVAL 오프셋(3586).
+- **날짜 함수의 결과와 `SUM`·`AVG`(날짜)가 수로 읽힘**: `DATE('2024-03-05') + 0`이 `2024`였다(MySQL 20240305). 날짜·시간 **열**은 R44에서 되었지만 함수 결과는 아니었다. 이제 `DATE`·`CURDATE`·`LAST_DAY`·`STR_TO_DATE`·`NOW`·`TIMESTAMP`·`TIME`·`CURTIME`·`CAST(x AS DATE / DATETIME / TIME)`·`DATE_ADD(날짜, INTERVAL …)` 같은 함수의 결과가 산술·수 함수·수와의 비교(`=`, `<`, `BETWEEN`, `IN`)에서 20240305 / 123045 / 20240305123045로 읽힌다(`ast.hpp`의 `kind_of_expr`). `MIN(d)`·`MAX(d)`도 날짜의 종류를 가진 채 식에 들어간다(`MAX(d) + 0`). `SUM`·`AVG`는 날짜·시간·DATETIME 열과 날짜 함수 인자를 `(인자) + 0`으로 읽어 더한다(`SUM(날짜 열)`이 `4048`이었고 MySQL은 `40480406`; `AVG`는 `20240203.0000`) — 바인더가 집계의 `source`를 바꾸고(결과 열 이름은 그대로), 윈도 `SUM/AVG … OVER`도 같다.
+- **FLOAT 열은 단정밀도 수**: `f = d`(FLOAT 0.1 = DOUBLE 0.1)가 같다고 나왔다(MySQL은 다름: FLOAT 0.1은 DOUBLE로 넓히면 0.10000000149011612). `f = 0.1`도 MySQL은 거짓. 이제 FLOAT 열은 산술(`f + 0` = 0.10000000149011612, `SUM(f)`·`AVG(f)`)과 비교(왼쪽·오른쪽, `BETWEEN`, `IN`, 수 함수 인자)에서 단정밀도 수를 DOUBLE로 넓힌 값으로 읽는다(`ArithExpr::Col::single`). 열이 보여 주는 글자는 그대로(`0.1`). 인덱스가 있는 FLOAT 열의 `f = 0.1`도 MySQL처럼 비어 있고 `f > 0.1`은 두 행(확인).
+- **오류 1093** "You can't specify target table 'x' for update in FROM clause": `UPDATE`·`DELETE`(여러 표 형태 포함)의 `WHERE`·`SET` 안 하위 질의, `INSERT … VALUES (…, (SELECT … FROM 같은 표))`와 `ON DUPLICATE KEY UPDATE`, `REPLACE`가 자기가 쓰는 표를 읽으면 거절한다(전엔 받아들여 실행했다). 표를 바꾼 별칭이 있으면 그 별칭이 오류에 나온다(`UPDATE t a … (SELECT … FROM t)`는 'a'). 파생 표(`FROM (SELECT … FROM t) x`), 자기 자신과의 JOIN, `INSERT … SELECT`는 MySQL도 허락하므로 그대로다.
+- **하는 김에 찾은 버그**: `INSERT … ON DUPLICATE KEY UPDATE v = (SELECT … FROM 다른표)`가 "Table 'other' not found" — 그 하위 질의의 표 이름에 현재 데이터베이스를 붙이지 않았다(`qualify_stmt`).
+- **`HAVING ANY_VALUE(x)`의 x는 select 목록의 열이어야 함**: 아니면 1054 `Unknown column 'x' in 'having clause'`(MySQL처럼; 전엔 받아들임).
+- **저장 프로시저 안 `SELECT a + b`의 열 이름**: 변수를 값으로 바꾸기 전의 식 `a + b`(전엔 `2+6`).
+- **`VERSION()`**이 `@@version`·MySQL 프로토콜 인사와 같은 `5.7.0-rusql`(전엔 `2.3.0`이라 `SELECT @@version = VERSION()`이 거짓). **알리는 버전 자체(5.7)는 일부러 안 바꿨다**: `@@version LIKE '8%'`는 계속 거짓이다. 8.x로 알리면 JDBC 같은 드라이버가 8.x 전용 문장을 보낼 수 있어 확인 없이 바꾸지 않았다(사용자 결정 거리).
+- **`SHOW COLLATION`에 `Pad_attribute` 열**(MySQL 8의 7번째 열). `SHOW ENGINES`(MySQL은 9행: 이 엔진이 없는 것들을 "지원"한다고 적어야 해서)와 `SHOW TABLE STATUS`의 크기 값은 일부러 그대로다.
+
+**검증**
+- 새 코퍼스 넷을 진짜 MySQL 8.4.9와 비교해 차이 0: `range_frames` 44문장, `temporal_values` 32, `float_single` 28, `target_table` 28 — `--emit`으로 만든 사례가 `test_mysql_conformance.cpp`에서 돈다(`any_value` 코퍼스도 `HAVING ANY_VALUE` 사례를 더해 다시 만듦). 처음 `float_single`은 표 설정이 양쪽에서 조용히 실패해(`DECIMAL(8,2)`에 16777216) 빈 표를 비교하고 있었다 — 설정을 고치자 진짜 차이 넷이 보였고(`d = f` 오른쪽 FLOAT, 집계 표시, `SET d = f`) 그중 하나를 고쳤다.
+- 기존 코퍼스 21개는 어느 것도 늘지 않았고 오히려 줄었다: 차이 15개 → 11개(함수 3 → 2, 제약 5 → 3, 프로토콜 4 → 3; 표·protocol_types는 그대로). (`SHOW COLLATION`의 `Pad_attribute`는 확실히 이 라운드의 몫이고, 나머지 줄어든 문장은 1093과 날짜·FLOAT의 수 값이 고친 것으로 보이나 하나씩 가려내지는 않았다.) 무작위 대조 12종(`verify_compare`, `verify_aggregates`, `verify_agg_expressions`, `verify_agg_arguments`, `verify_null_expressions`, `verify_value_expressions`, `verify_sort_group`, `verify_orderby_distinct`, `verify_joins`, `verify_subqueries`, `verify_correlated`, `verify_writes`) 위반 0.
+- `[r50]` 시험(RANGE·빈 프레임·날짜 수·FLOAT·1093·ON DUPLICATE·ANY_VALUE·프로시저 열 이름·VERSION)과 위 사례들. **심은 버그 21종 모두 잡힘**(처음엔 DESC 심기가 효과가 없어 살아남았고, 달 오프셋의 DESC 시험을 더해 잡았다).
+- 전체 시험 **789 케이스 / 1,506,079 assertions**을 Release 기본과 `RUSQL_DML_INDEX_MIN_ROWS=0`으로 통과. 호환성 점수판: 코퍼스 25개, 문장 2,647개 중 차이 11개.
+- 성능(바로 앞 커밋의 서버를 따로 빌드해 번갈아 2라운드, 5만 행, 가장 빠른 값; 앞 → 이번): 날짜·FLOAT와 상관없는 문장은 그대로다 — `COUNT(*) WHERE a + k > c` 29.7·29.9 → 29.4·32.7ms, `SUM(a + b + k)` 135.8·135.5 → 133.6·135.6, `GROUP BY` + 집계 4개 41.9·42.6 → 41.4·41.8, `SUM(a)`·`AVG(b)` 26.2·25.6 → 25.6·26.1, DOUBLE 열 비교 34.3·32.9 → 32.4·31.6. 바뀌는 것은 하나다: **FLOAT 열을 비교하면 행마다 단정밀도로 넓히므로** `WHERE f > c`가 32~34 → 45~46ms (이 값이 MySQL과 같아지는 값이다; 처음엔 52ms였고 글자 변환을 줄여 45ms로 내렸다). `SUM(f)`·`SUM(날짜)`는 23~25 → 23~26ms, `WHERE DATE(dt) + 0 > c`는 70 → 60ms(답이 달라져 비교 자체가 다르다).
+- **하지 않은 것**: Debug 빌드, 크래시 라운드.
+
+**한계 (새로 찾은 것 포함)**
+- `ORDER BY ANY_VALUE(x)`에서 x가 select 목록에 없으면 정렬이 무시되고, select 항목 `ANY_VALUE(x) AS a`를 `HAVING a > 5`로 거르면 0행이 나온다(둘 다 이전부터; MySQL은 바르게 동작).
+- `MIN(f)`·`MAX(f)`의 FLOAT 결과가 여섯 자리가 아니라 저장된 글자 그대로 나온다(16777216 → MySQL 16777200). `UPDATE … SET d = f`(FLOAT를 DOUBLE 열에)는 짧은 글자를 그대로 복사한다(MySQL 0.10000000149011612).
+- 1093은 저장 루틴 안의 문장에서는 확인하지 않는다(바인더의 `check`가 꺼져 있음). 날짜로 읽는 함수는 위 목록이 전부다(`IFNULL`·`COALESCE`·`IF`가 감싼 날짜, 문자열 `DATE_ADD('2024-03-05', INTERVAL 1 DAY)`는 아님). `HAVING SUM(날짜 열)`의 집계 참조와 시간(TIME) 키의 RANGE 오프셋은 안 된다.
+
 ## 요약: 1학기 대비 2학기에 달라진 것
 
 

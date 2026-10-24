@@ -17,3 +17,7 @@ SELECT ANY_VALUE(name), ANY_VALUE(val) FROM av WHERE grp = 2
 SELECT grp, name FROM av GROUP BY grp
 SELECT grp, ANY_VALUE(name) FROM av
 SELECT COUNT(*), ANY_VALUE(grp) FROM av WHERE grp = 2
+SELECT grp FROM av GROUP BY grp HAVING ANY_VALUE(val) > 5
+SELECT grp, val FROM av GROUP BY grp, val HAVING ANY_VALUE(val) > 5 ORDER BY grp
+SELECT grp, ANY_VALUE(val) FROM av GROUP BY grp HAVING ANY_VALUE(val) > 5
+SELECT grp, SUM(val) FROM av GROUP BY grp HAVING SUM(val) > 5 AND ANY_VALUE(val) > 1

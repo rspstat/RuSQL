@@ -84,6 +84,18 @@ const Case kFkNames[] = {
 const Case kWindowAgg[] = {
 #include "mysql_conformance_window_agg.inc"
 };
+const Case kRangeFrames[] = {
+#include "mysql_conformance_range_frames.inc"
+};
+const Case kTemporalValues[] = {
+#include "mysql_conformance_temporal_values.inc"
+};
+const Case kFloatSingle[] = {
+#include "mysql_conformance_float_single.inc"
+};
+const Case kTargetTable[] = {
+#include "mysql_conformance_target_table.inc"
+};
 
 struct TempDataDir {
     std::string path;
@@ -301,4 +313,20 @@ TEST_CASE("a foreign key keeps its name, DROP FOREIGN KEY takes it, referential_
 
 TEST_CASE("window functions run on the groups: over aggregates, inside expressions, with DISTINCT and ORDER BY", "[mysql_conformance][window_agg]") {
     run_cases("mc_window_agg", kWindowAgg, sizeof kWindowAgg / sizeof kWindowAgg[0]);
+}
+
+TEST_CASE("RANGE frames with an offset reach the rows within n (or an INTERVAL) of the current row's ORDER BY value; a frame can hold no row", "[mysql_conformance][range_frames]") {
+    run_cases("mc_range_frames", kRangeFrames, sizeof kRangeFrames / sizeof kRangeFrames[0]);
+}
+
+TEST_CASE("the result of a date function and a SUM of dates are the numbers MySQL reads them as", "[mysql_conformance][temporal_values]") {
+    run_cases("mc_temporal_values", kTemporalValues, sizeof kTemporalValues / sizeof kTemporalValues[0]);
+}
+
+TEST_CASE("a FLOAT column is the single-precision number in arithmetic and comparisons", "[mysql_conformance][float_single]") {
+    run_cases("mc_float_single", kFloatSingle, sizeof kFloatSingle / sizeof kFloatSingle[0]);
+}
+
+TEST_CASE("an UPDATE, DELETE or INSERT cannot read the table it writes in a subquery (1093)", "[mysql_conformance][target_table]") {
+    run_cases("mc_target_table", kTargetTable, sizeof kTargetTable / sizeof kTargetTable[0]);
 }

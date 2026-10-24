@@ -466,9 +466,15 @@ void to_json(nlohmann::json& j, const FrameBound& fb) {
         [&j](const auto& alt) {
             using T = std::decay_t<decltype(alt)>;
             if constexpr (std::is_same_v<T, FrameBound::UnboundedPreceding>) j = "UnboundedPreceding";
-            else if constexpr (std::is_same_v<T, FrameBound::Preceding>) j = nlohmann::json{{"Preceding", alt.n}};
+            else if constexpr (std::is_same_v<T, FrameBound::Preceding>) {
+                if (alt.unit.empty() && alt.amount == static_cast<double>(alt.n)) j = nlohmann::json{{"Preceding", alt.n}};
+                else j = nlohmann::json{{"Preceding", nlohmann::json{{"n", alt.n}, {"amount", alt.amount}, {"unit", alt.unit}}}};
+            }
             else if constexpr (std::is_same_v<T, FrameBound::CurrentRow>) j = "CurrentRow";
-            else if constexpr (std::is_same_v<T, FrameBound::Following>) j = nlohmann::json{{"Following", alt.n}};
+            else if constexpr (std::is_same_v<T, FrameBound::Following>) {
+                if (alt.unit.empty() && alt.amount == static_cast<double>(alt.n)) j = nlohmann::json{{"Following", alt.n}};
+                else j = nlohmann::json{{"Following", nlohmann::json{{"n", alt.n}, {"amount", alt.amount}, {"unit", alt.unit}}}};
+            }
             else if constexpr (std::is_same_v<T, FrameBound::UnboundedFollowing>) j = "UnboundedFollowing";
         },
         fb.data);
@@ -487,8 +493,12 @@ void from_json(const nlohmann::json& j, FrameBound& fb) {
     auto it = j.begin();
     const std::string& tag = it.key();
     const auto& p = it.value();
-    if (tag == "Preceding") fb = FrameBound::Preceding{p.get<std::size_t>()};
-    else if (tag == "Following") fb = FrameBound::Following{p.get<std::size_t>()};
+    // (a number: the rows of a ROWS frame; an object: a RANGE offset with places or an INTERVAL)
+    auto rows = [&p]() { return p.is_object() ? p.at("n").get<std::size_t>() : p.get<std::size_t>(); };
+    auto amount = [&p](std::size_t n) { return p.is_object() ? p.at("amount").get<double>() : static_cast<double>(n); };
+    auto unit = [&p]() { return p.is_object() ? p.at("unit").get<std::string>() : std::string(); };
+    if (tag == "Preceding") { const std::size_t n = rows(); fb = FrameBound::Preceding{n, amount(n), unit()}; }
+    else if (tag == "Following") { const std::size_t n = rows(); fb = FrameBound::Following{n, amount(n), unit()}; }
     else throw std::runtime_error("unknown FrameBound tag: " + tag);
 }
 

@@ -16,3 +16,7 @@
     {3, "SELECT grp, name FROM av GROUP BY grp", ""},
     {1, "SELECT grp, ANY_VALUE(name) FROM av", "\061\037a\036\061\037a\036\062\037b\036\063\037NULL\036"},
     {1, "SELECT COUNT(*), ANY_VALUE(grp) FROM av WHERE grp = 2", "\061\037\062\036"},
+    {3, "SELECT grp FROM av GROUP BY grp HAVING ANY_VALUE(val) > 5", ""},
+    {1, "SELECT grp, val FROM av GROUP BY grp, val HAVING ANY_VALUE(val) > 5 ORDER BY grp", "\061\037\061\060\036\062\037\062\060\036"},
+    {3, "SELECT grp, ANY_VALUE(val) FROM av GROUP BY grp HAVING ANY_VALUE(val) > 5", ""},
+    {3, "SELECT grp, SUM(val) FROM av GROUP BY grp HAVING SUM(val) > 5 AND ANY_VALUE(val) > 1", ""},

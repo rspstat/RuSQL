@@ -49,9 +49,11 @@ struct ArithExpr {
     // value for it before it runs (see Executor::substitute_outer).
     // `approx`: the column is a FLOAT or DOUBLE (set by the binder with `cls`): arithmetic that reads it is done in floating point, as MySQL does
     // `kind`: a column that holds a date, a time, an ENUM or a SET is text here but a number where one is asked of it (set by the binder with `cls`);
-    // `members`: the values of the ENUM / SET, `fsp`: the places of the fraction of a second of a DATETIME / TIMESTAMP / TIME column
+    // `members`: the values of the ENUM / SET, `fsp`: the places of the fraction of a second of a DATETIME / TIMESTAMP / TIME column (255: as many as the value
+    // written out has -- what a date function gives), `single`: the column is a FLOAT (single precision): its text is the shortest that reads back as the float
+    // number, and arithmetic and comparisons use that number widened to a DOUBLE, as MySQL does (0.1 in a FLOAT column is not the 0.1 of a DOUBLE)
     struct Col  { std::string name; ValueClass cls = ValueClass::Unknown; int outer = 0; bool approx = false; ColKind kind = ColKind::Plain;
-                  std::shared_ptr<const std::vector<std::string>> members; std::uint8_t fsp = 0; };
+                  std::shared_ptr<const std::vector<std::string>> members; std::uint8_t fsp = 0; bool single = false; };
     struct Num  { std::string value; };
     struct Str  { std::string value; };
     struct Add  { std::unique_ptr<ArithExpr> lhs, rhs; };
@@ -88,6 +90,50 @@ struct ArithExpr {
     ArithExpr& operator=(ArithExpr&&) noexcept;
     ~ArithExpr();
 };
+
+// What an expression stands for as a number when a number is asked of it: the kind of a date / time / ENUM / SET column, and of what a date or time function gives
+// (DATE(x), NOW(), TIME(x), LAST_DAY(x), STR_TO_DATE(...), CAST(x AS DATE), DATE_ADD(a date, INTERVAL ...)): DATE 20240102, DATETIME 20240102030405, TIME 102030.
+// Plain for anything else (a number, a string, a function of text ...).
+inline ColKind kind_of_expr(const ArithExpr& e) {
+    if (auto* c = std::get_if<ArithExpr::Col>(&e.data)) return c->kind;
+    auto* f = std::get_if<ArithExpr::Func>(&e.data);
+    if (!f) return ColKind::Plain;
+    std::string n = f->name;
+    for (char& ch : n) ch = static_cast<char>(std::toupper(static_cast<unsigned char>(ch)));
+    auto word_of = [](const ArithExpr& a) {
+        std::string w;
+        if (auto* s = std::get_if<ArithExpr::Str>(&a.data)) w = s->value;
+        else if (auto* c = std::get_if<ArithExpr::Col>(&a.data)) w = c->name;
+        for (char& ch : w) ch = static_cast<char>(std::toupper(static_cast<unsigned char>(ch)));
+        return w;
+    };
+    if (n == "DATE" || n == "CURDATE" || n == "CURRENT_DATE" || n == "LAST_DAY" || n == "FROM_DAYS" || n == "MAKEDATE") return ColKind::Date;
+    if (n == "NOW" || n == "CURRENT_TIMESTAMP" || n == "LOCALTIME" || n == "LOCALTIMESTAMP" || n == "SYSDATE" || n == "TIMESTAMP" || n == "FROM_UNIXTIME" ||
+        n == "CONVERT_TZ") return ColKind::DateTime;
+    if (n == "TIME" || n == "CURTIME" || n == "CURRENT_TIME" || n == "SEC_TO_TIME" || n == "MAKETIME" || n == "TIMEDIFF") return ColKind::Time;
+    if (n == "STR_TO_DATE" && f->args.size() == 2) {
+        const auto* text = std::get_if<ArithExpr::Str>(&f->args[1].data);
+        const std::string format = text ? text->value : std::string();
+        return format.find_first_of("HhIiSsTrklfp") != std::string::npos && format.find('%') != std::string::npos ? ColKind::DateTime : ColKind::Date;
+    }
+    if ((n == "DATE_ADD" || n == "DATE_SUB") && f->args.size() == 3) {
+        const ColKind base = kind_of_expr(f->args[0]);
+        const std::string unit = word_of(f->args[2]);
+        const bool date_unit = unit == "DAY" || unit == "WEEK" || unit == "MONTH" || unit == "QUARTER" || unit == "YEAR";
+        if (base == ColKind::Date) return date_unit ? ColKind::Date : ColKind::DateTime;
+        if (base == ColKind::DateTime) return ColKind::DateTime;
+        if (base == ColKind::Time) return date_unit ? ColKind::Plain : ColKind::Time;
+        return ColKind::Plain;
+    }
+    if ((n == "CAST" || n == "CONVERT") && f->args.size() == 2) {
+        std::string type = word_of(f->args[1]);
+        type = type.substr(0, type.find('('));
+        if (type == "DATE") return ColKind::Date;
+        if (type == "DATETIME") return ColKind::DateTime;
+        if (type == "TIME") return ColKind::Time;
+    }
+    return ColKind::Plain;
+}
 
 // ---------------------------------------------------------------------------
 // DataType
@@ -401,9 +447,11 @@ struct AggFunc {
 // ---------------------------------------------------------------------------
 struct FrameBound {
     struct UnboundedPreceding {};
-    struct Preceding { std::size_t n; };
+    // `n`: the rows of a ROWS frame. `amount`: the offset of a RANGE frame, a number that may have places (1.5), and `unit` (DAY, MONTH, HOUR ...) when it is an
+    // INTERVAL (RANGE BETWEEN INTERVAL 7 DAY PRECEDING AND CURRENT ROW): a RANGE frame reaches the rows whose ORDER BY value is that far from the current row's.
+    struct Preceding { std::size_t n; double amount = 0; std::string unit; };
     struct CurrentRow {};
-    struct Following { std::size_t n; };
+    struct Following { std::size_t n; double amount = 0; std::string unit; };
     struct UnboundedFollowing {};
 
     using Data = std::variant<UnboundedPreceding, Preceding, CurrentRow, Following, UnboundedFollowing>;

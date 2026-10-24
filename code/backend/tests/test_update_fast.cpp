@@ -134,7 +134,7 @@ TEST_CASE("UPDATE ... RETURNING and non-pk / range / full-table forms still matc
     REQUIRE(updated(ex.execute_sql("UPDATE t SET v = v + 1"), 40));                // no WHERE
     REQUIRE(updated(ex.execute_sql("UPDATE t SET v = 0 WHERE id > 35 OR id < 3"), 7));
     REQUIRE(updated(ex.execute_sql("UPDATE t SET v = 42 WHERE id IN (1, 2, 3)"), 3));
-    REQUIRE(updated(ex.execute_sql("UPDATE t SET v = 1001 WHERE id IN (SELECT id FROM t WHERE g = 1)"), 10)); // subquery -> legacy path
+    REQUIRE(updated(ex.execute_sql("UPDATE t SET v = 1001 WHERE id IN (SELECT id FROM (SELECT id FROM t WHERE g = 1) x)"), 10)); // subquery -> legacy path (a derived table: MySQL refuses the table itself, 1093)
     REQUIRE(ex.execute_sql("SELECT v FROM t WHERE id = 1").value().find("1001") != std::string::npos);
 }
 

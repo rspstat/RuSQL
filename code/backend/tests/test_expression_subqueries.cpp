@@ -208,13 +208,13 @@ TEST_CASE("subqueries in the values of INSERT, UPDATE, SET and DELETE", "[expres
     ok(ex, "CREATE TABLE t (id INT PRIMARY KEY, n INT, m INT)");
     ok(ex, "INSERT INTO t VALUES (1, (SELECT MAX(k) FROM b), 2)");
     ok(ex, "INSERT INTO t VALUES (2, (SELECT MAX(k) FROM b) + 1, (SELECT COUNT(*) FROM b)), (3, COALESCE((SELECT k FROM b WHERE id = 99), -1), 0)");
-    ok(ex, "INSERT INTO t VALUES (4, (SELECT MAX(n) FROM t) + 1, 0)"); // (reads the table it writes)
+    ok(ex, "INSERT INTO t VALUES (4, (SELECT MAX(x.n) FROM (SELECT n FROM t) x) + 1, 0)"); // (reads the table it writes through a derived table: MySQL refuses the table itself, 1093)
     REQUIRE(q(ex, "SELECT id, n, m FROM t ORDER BY id") == Rows{{"1", "8", "2"}, {"2", "9", "4"}, {"3", "-1", "0"}, {"4", "10", "0"}});
     // the same value for every row, and the row's own
     ok(ex, "UPDATE t SET n = (SELECT MAX(k) FROM b) + id WHERE id < 3");
     ok(ex, "UPDATE t SET m = (SELECT COUNT(*) FROM b WHERE b.a_id = t.id)");
     REQUIRE(q(ex, "SELECT id, n, m FROM t ORDER BY id") == Rows{{"1", "9", "2"}, {"2", "10", "0"}, {"3", "-1", "1"}, {"4", "10", "0"}});
-    ok(ex, "UPDATE t SET n = (SELECT MAX(n) FROM t) + 1"); // (every row reads the rows as they were)
+    ok(ex, "UPDATE t SET n = (SELECT MAX(x.n) FROM (SELECT n FROM t) x) + 1"); // (every row reads the rows as they were; a derived table, see above)
     REQUIRE(q(ex, "SELECT id, n FROM t ORDER BY id") == Rows{{"1", "11"}, {"2", "11"}, {"3", "11"}, {"4", "11"}});
     ok(ex, "DELETE FROM t WHERE (SELECT COUNT(*) FROM b WHERE b.a_id = t.id) > 0");
     REQUIRE(ids(ex, "SELECT id FROM t ORDER BY id") == Ids{"2", "4"});

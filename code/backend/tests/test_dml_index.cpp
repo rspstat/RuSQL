@@ -409,8 +409,8 @@ TEST_CASE("DML index: which statements use an index and which fall back to the s
         REQUIRE(hits() == h);
         // a subquery condition keeps the old path
         h = hits();
-        REQUIRE(a.execute_sql("DELETE FROM t WHERE a IN (SELECT a FROM t WHERE d > 1000)").is_ok());
-        REQUIRE(a.execute_sql("UPDATE t SET d = 4 WHERE a IN (SELECT a FROM t WHERE d > 1000)").is_ok());
+        REQUIRE(a.execute_sql("DELETE FROM t WHERE a IN (SELECT a FROM (SELECT a FROM t WHERE d > 1000) x)").is_ok()); // (a derived table: MySQL refuses the table itself, 1093)
+        REQUIRE(a.execute_sql("UPDATE t SET d = 4 WHERE a IN (SELECT a FROM (SELECT a FROM t WHERE d > 1000) x)").is_ok());
         REQUIRE(hits() == h);
         // a predicate matching a large share of the table is cheaper to scan than to parse out of JSON
         h = hits();

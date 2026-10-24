@@ -1,6 +1,9 @@
+#include <algorithm>
 #include <cctype>
 #include <charconv>
+#include <cmath>
 #include <cstdlib>
+#include <iterator>
 
 #include "engine/parser/parser.hpp"
 
@@ -1660,7 +1663,7 @@ std::optional<WindowFrame> Parser::parse_window_frame() {
     else if (peek_is(TokenKind::Range)) { advance(); unit = FrameUnit::Range; }
     else return std::nullopt;
 
-    auto parse_bound = [this]() -> FrameBound {
+    auto parse_bound = [this, unit]() -> FrameBound {
         const Token* p = peek();
         if (!p) throw ParseError("Expected frame bound");
         if (p->kind == TokenKind::Unbounded) {
@@ -1677,13 +1680,32 @@ std::optional<WindowFrame> Parser::parse_window_frame() {
                 return FrameBound(FrameBound::CurrentRow{});
             throw ParseError("Expected ROW after CURRENT");
         }
-        if (p->kind == TokenKind::NumberLit) {
-            const Token* n = advance();
-            std::size_t val = 0;
-            try { val = static_cast<std::size_t>(std::stoull(n->text)); } catch (...) { val = 0; }
+        if (p->kind == TokenKind::NumberLit || p->kind == TokenKind::Interval) {
+            // ROWS n PRECEDING: n rows (a whole number). RANGE n PRECEDING: the rows whose ORDER BY value is up to n below the current row's (n may have places),
+            // RANGE INTERVAL n unit PRECEDING for a date or a time
+            std::string interval_unit;
+            if (p->kind == TokenKind::Interval) {
+                advance();
+                if (!peek_is(TokenKind::NumberLit)) throw ParseError("Expected a number after INTERVAL in a frame");
+                const Token* count = advance();
+                const Token* word = advance();
+                if (!word || (word->kind != TokenKind::Ident && word->kind != TokenKind::Year)) throw ParseError("Expected INTERVAL unit in a frame");
+                interval_unit = word->kind == TokenKind::Year ? "YEAR" : to_upper(word->text);
+                static const char* const units[] = {"MICROSECOND", "SECOND", "MINUTE", "HOUR", "DAY", "WEEK", "MONTH", "QUARTER", "YEAR"};
+                if (std::find_if(std::begin(units), std::end(units), [&](const char* u) { return interval_unit == u; }) == std::end(units))
+                    throw ParseError("Unknown INTERVAL unit '" + interval_unit + "' in a frame");
+                p = count;
+            } else {
+                advance();
+            }
+            double amount = 0;
+            try { amount = std::stod(p->text); } catch (...) { amount = 0; }
+            if (unit == FrameUnit::Rows && (!interval_unit.empty() || amount != std::floor(amount)))
+                throw ParseError("Window '<unnamed window>': frame start or end is negative, NULL or of non-integral type");
+            const std::size_t val = static_cast<std::size_t>(amount);
             const Token* t = advance();
-            if (t && t->kind == TokenKind::Preceding) return FrameBound(FrameBound::Preceding{val});
-            if (t && t->kind == TokenKind::Following) return FrameBound(FrameBound::Following{val});
+            if (t && t->kind == TokenKind::Preceding) return FrameBound(FrameBound::Preceding{val, amount, interval_unit});
+            if (t && t->kind == TokenKind::Following) return FrameBound(FrameBound::Following{val, amount, interval_unit});
             throw ParseError("Expected PRECEDING/FOLLOWING after N");
         }
         throw ParseError("Expected frame bound");
@@ -1701,6 +1723,15 @@ std::optional<WindowFrame> Parser::parse_window_frame() {
     if (!peek_is(TokenKind::And)) throw ParseError("Expected AND in frame");
     advance();
     FrameBound end = parse_bound();
+    // the frames MySQL refuses: the start cannot be UNBOUNDED FOLLOWING, the end cannot be UNBOUNDED PRECEDING, and a frame cannot end before it starts at the
+    // current row (CURRENT ROW .. n PRECEDING, n FOLLOWING .. CURRENT ROW or n PRECEDING); n FOLLOWING .. m FOLLOWING and n PRECEDING .. m PRECEDING are fine, they just may hold no row
+    const bool start_following = std::holds_alternative<FrameBound::Following>(start.data);
+    const bool end_preceding = std::holds_alternative<FrameBound::Preceding>(end.data);
+    const bool end_current = std::holds_alternative<FrameBound::CurrentRow>(end.data);
+    if (std::holds_alternative<FrameBound::UnboundedFollowing>(start.data)) throw ParseError("Window '<unnamed window>': frame start cannot be UNBOUNDED FOLLOWING.");
+    if (std::holds_alternative<FrameBound::UnboundedPreceding>(end.data)) throw ParseError("Window '<unnamed window>': frame end cannot be UNBOUNDED PRECEDING.");
+    if ((start_following && (end_current || end_preceding)) || (std::holds_alternative<FrameBound::CurrentRow>(start.data) && end_preceding))
+        throw ParseError("Window '<unnamed window>': frame start or end is negative, NULL or of non-integral type");
     return WindowFrame{unit, std::move(start), std::move(end)};
 }
 

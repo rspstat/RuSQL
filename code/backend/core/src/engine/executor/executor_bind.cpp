@@ -101,6 +101,7 @@ void describe_column(ArithExpr::Col& col, const ColumnDef* def) {
     col.kind = def ? kind_of_type(def->data_type) : ColKind::Plain;
     col.members.reset();
     col.fsp = 0;
+    col.single = def && std::holds_alternative<DataType::Float>(def->data_type.data);
     if (!def) return;
     if (auto* e = std::get_if<DataType::Enum>(&def->data_type.data)) col.members = std::make_shared<const std::vector<std::string>>(e->values);
     else if (auto* s = std::get_if<DataType::Set>(&def->data_type.data)) col.members = std::make_shared<const std::vector<std::string>>(s->values);
@@ -446,6 +447,9 @@ std::optional<std::string> Executor::bind_statement(SharedDatabase& s, Statement
                 const ColumnDef* def = nullptr;
                 col->cls = class_of_name(col->name, &col->approx, &def);
                 describe_column(*col, def);
+                if (col->kind == ColKind::Plain && col->name.find('(') != std::string::npos) {
+                    if (const ColKind k = aggregate_reference_kind(col->name); k != ColKind::Plain) { col->kind = k; col->fsp = 255; }
+                }
             }
             else if (auto* v = std::get_if<ArithExpr::Add>(&e.data)) { arith(*v->lhs, clause); arith(*v->rhs, clause); }
             else if (auto* v = std::get_if<ArithExpr::Sub>(&e.data)) { arith(*v->lhs, clause); arith(*v->rhs, clause); }
@@ -516,6 +520,7 @@ std::optional<std::string> Executor::bind_statement(SharedDatabase& s, Statement
         // columns are returned.
         std::vector<std::pair<std::string, ValueClass>> nested(Statement& inner, bool sees_outer = true) {
             Binder sub{ex, s, check, sees_outer ? chain : std::vector<const BindScope*>{}, std::nullopt, ctes, {}};
+            if (sees_outer) sub.write_targets = write_targets; // (a derived table is made before the statement writes: it may read the table)
             sub.statement(inner);
             if (sub.error && !error) error = sub.error;
             return std::move(sub.outputs);
@@ -546,7 +551,18 @@ std::optional<std::string> Executor::bind_statement(SharedDatabase& s, Statement
                             error = "Column '" + lit->value + "' in " + clause + " is ambiguous"; // (a bare word is a column only when a table has it)
                         }
                         mark_outer(lit->value, lit->outer);
-                        c.right_class = class_of_name(lit->value);
+                        bool right_approx = false;
+                        const ColumnDef* right_def = nullptr;
+                        c.right_class = class_of_name(lit->value, &right_approx, &right_def);
+                        // a FLOAT column on the right is compared as the single-precision number: it is kept as an expression, which knows that (a name in the
+                        // text of the condition does not)
+                        if (lit->outer == 0 && right_def && std::holds_alternative<DataType::Float>(right_def->data_type.data)) {
+                            ArithExpr::Col right{lit->value};
+                            right.cls = c.right_class;
+                            right.approx = right_approx;
+                            describe_column(right, right_def);
+                            c.value = ConditionValue(ConditionValue::Arith{ArithExpr(std::move(right))});
+                        }
                     }
                 } else if (auto* value = std::get_if<ConditionValue::Arith>(&c.value.data)) {
                     arith(value->expr, clause);
@@ -623,6 +639,45 @@ std::optional<std::string> Executor::bind_statement(SharedDatabase& s, Statement
             return class_of_expr(e);
         }
 
+        // `MIN(d)` / `MAX(DATE(ts))` in an expression (the parser keeps it as a column of that name) is the date it gives: MAX(d) + 0 is 20240305
+        ColKind aggregate_reference_kind(const std::string& name) {
+            const std::size_t lp = name.find('('), rp = name.rfind(')');
+            if (lp == std::string::npos || lp == 0 || rp != name.size() - 1) return ColKind::Plain;
+            const std::string function = upper(name.substr(0, lp));
+            if (function != "MIN" && function != "MAX") return ColKind::Plain;
+            std::string arg = name.substr(lp + 1, rp - lp - 1);
+            if (arg.rfind("DISTINCT ", 0) == 0) arg.erase(0, 9);
+            if (arg.empty() || arg == "*") return ColKind::Plain;
+            try {
+                ArithExpr e = Parser::str_to_arith(arg);
+                annotate(e);
+                return kind_of_expr(e);
+            } catch (const ParseError&) {
+                return ColKind::Plain;
+            }
+        }
+
+        // SUM and AVG of a date, a time, an ENUM, a SET or a date function add up the numbers they stand for (MySQL: SUM of the DATEs 2024-03-05 and 2024-01-01 is
+        // 40480406), and of a FLOAT column the single-precision numbers widened to DOUBLEs. True when the argument `text` is one of those.
+        // `approx`: whether the number they stand for is a DOUBLE (an ENUM, a SET, a FLOAT); a date or a time is a whole number (or a decimal with a fraction of a second)
+        bool reads_number_view(const std::string& text, bool* approx) {
+            if (text.empty() || text == "*" || text.rfind("DISTINCT ", 0) == 0 || text.rfind("__", 0) == 0) return false;
+            try {
+                ArithExpr e = Parser::str_to_arith(text);
+                annotate(e);
+                const ColKind kind = kind_of_expr(e);
+                if (kind != ColKind::Plain) {
+                    *approx = kind == ColKind::Enum || kind == ColKind::Set;
+                    return true;
+                }
+                const auto* col = std::get_if<ArithExpr::Col>(&e.data);
+                *approx = true;
+                return col && col->single;
+            } catch (const ParseError&) {
+                return false;
+            }
+        }
+
         // The argument of an aggregate: a column, `*`, an expression, or for SUM / COUNT of a CASE (or of a condition: SUM(v > 1)) the conditions of
         // the CASE -- the parser leaves the placeholder "__case__" in the column then.
         // `label` is the argument as the query spells it (it names the result column and stays as typed); `source` is where a row holds it, which is
@@ -648,6 +703,16 @@ std::optional<std::string> Executor::bind_statement(SharedDatabase& s, Statement
             }
             if (filter) cond(*filter, "field list");
             if (approx) *approx = !branches && argument_is_approx(column);
+            const bool adds = std::holds_alternative<AggFunc::Sum>(func.data) || std::holds_alternative<AggFunc::Avg>(func.data) ||
+                              std::holds_alternative<AggFunc::SumDistinct>(func.data) || std::holds_alternative<AggFunc::AvgDistinct>(func.data);
+            if (!branches && adds) {
+                const std::string text = source.empty() ? label : source;
+                bool number_is_double = false;
+                if (reads_number_view(text, &number_is_double)) {
+                    source = "(" + text + ") + 0"; // (the rows hold `arg + 0` under that text; the result column keeps the name as typed)
+                    if (approx) *approx = number_is_double;
+                }
+            }
             return arg;
         }
 
@@ -730,6 +795,11 @@ std::optional<std::string> Executor::bind_statement(SharedDatabase& s, Statement
                         wf->col_class = class_of_name(*wf->col);
                     }
                     wf->col_approx = argument_is_approx(*wf->col);
+                    bool number_is_double = false;
+                    if ((wf->func == WindowFunc::Sum || wf->func == WindowFunc::Avg) && reads_number_view(*wf->col, &number_is_double)) {
+                        *wf->col = "(" + *wf->col + ") + 0";
+                        wf->col_approx = number_is_double;
+                    }
                 }
                 // (the items are columns, or expressions and aggregates of a query that groups: `OVER (ORDER BY SUM(v) DESC)`)
                 for (auto& p : wf->partition_by) {
@@ -768,6 +838,58 @@ std::optional<std::string> Executor::bind_statement(SharedDatabase& s, Statement
             }
         }
 
+        // HAVING reads ANY_VALUE(x) as it reads a plain `x`: a column of the select list (MySQL 1054 for one that is only in the table or in GROUP BY)
+        void any_value_columns(const ArithExpr& e, std::vector<std::string>& out) const {
+            if (auto* v = std::get_if<ArithExpr::Add>(&e.data)) { any_value_columns(*v->lhs, out); any_value_columns(*v->rhs, out); }
+            else if (auto* v = std::get_if<ArithExpr::Sub>(&e.data)) { any_value_columns(*v->lhs, out); any_value_columns(*v->rhs, out); }
+            else if (auto* v = std::get_if<ArithExpr::Mul>(&e.data)) { any_value_columns(*v->lhs, out); any_value_columns(*v->rhs, out); }
+            else if (auto* v = std::get_if<ArithExpr::Div>(&e.data)) { any_value_columns(*v->lhs, out); any_value_columns(*v->rhs, out); }
+            else if (auto* v = std::get_if<ArithExpr::Cmp>(&e.data)) { any_value_columns(*v->lhs, out); any_value_columns(*v->rhs, out); }
+            else if (auto* f = std::get_if<ArithExpr::Func>(&e.data)) {
+                if (f->name == "ANY_VALUE" && f->args.size() == 1) {
+                    if (auto* col = std::get_if<ArithExpr::Col>(&f->args[0].data); col && col->outer == 0 && plain_reference(col->name)) out.push_back(col->name);
+                } else {
+                    for (auto& a : f->args) any_value_columns(a, out);
+                }
+            }
+        }
+
+        void any_value_columns(const CondExpr& e, std::vector<std::string>& out) const {
+            if (auto* a = std::get_if<CondExpr::And>(&e.data)) { any_value_columns(*a->lhs, out); any_value_columns(*a->rhs, out); }
+            else if (auto* o = std::get_if<CondExpr::Or>(&e.data)) { any_value_columns(*o->lhs, out); any_value_columns(*o->rhs, out); }
+            else if (auto* n = std::get_if<CondExpr::Not>(&e.data)) any_value_columns(*n->inner, out);
+            else if (auto* leaf = std::get_if<CondExpr::Leaf>(&e.data)) {
+                any_value_columns(leaf->condition.left, out);
+                if (auto* value = std::get_if<ConditionValue::Arith>(&leaf->condition.value.data)) any_value_columns(value->expr, out);
+            }
+        }
+
+        void having_any_value(const Statement::Select& sel, const CondExpr& having) {
+            std::vector<std::string> names;
+            any_value_columns(having, names);
+            for (const std::string& name : names) {
+                bool selected = false;
+                for (const SelectColumn& c : sel.columns) {
+                    const std::string* selected_name = nullptr;
+                    if (auto* col = std::get_if<SelectColumn::Column>(&c.data)) selected_name = &col->name;
+                    else if (auto* ca = std::get_if<SelectColumn::ColumnAlias>(&c.data)) selected_name = &ca->name;
+                    else if (std::holds_alternative<SelectColumn::All>(c.data)) selected = true; // (`SELECT *` lists every column)
+                    if (selected_name && ieq(last_part(*selected_name), last_part(name))) selected = true;
+                }
+                if (!selected) {
+                    error = "Unknown column '" + name + "' in 'having clause'";
+                    return;
+                }
+            }
+        }
+
+        void forbid_target(const BindTable& t) {
+            if (!check || error || t.open) return;
+            for (const auto& [target, shown] : write_targets) {
+                if (ieq(target, t.full)) error = "You can't specify target table '" + shown + "' for update in FROM clause";
+            }
+        }
+
         void select(Statement::Select& sel) {
             BindScope scope;
             scope.table_aliases = sel.table_aliases;
@@ -780,6 +902,7 @@ std::optional<std::string> Executor::bind_statement(SharedDatabase& s, Statement
                 // no table
             } else {
                 scope.tables.push_back(table_of(sel.table, sel.table_alias));
+                forbid_target(scope.tables.back());
             }
             for (auto& j : sel.joins) {
                 if (j.subquery && j.lateral) {
@@ -798,6 +921,7 @@ std::optional<std::string> Executor::bind_statement(SharedDatabase& s, Statement
                     scope.tables.push_back(derived_of(*j.subquery->first, j.subquery->second, out));
                 } else {
                     scope.tables.push_back(table_of(j.table, j.alias));
+                    forbid_target(scope.tables.back());
                 }
             }
             // the columns a USING / NATURAL join makes one
@@ -893,6 +1017,7 @@ std::optional<std::string> Executor::bind_statement(SharedDatabase& s, Statement
                 }
             }
             if (sel.having) cond(*sel.having, "having clause");
+            if (sel.having && check && !error) having_any_value(sel, *sel.having);
             for (auto& o : sel.order_by) {
                 if (plain_reference(o.column)) {
                     name(o.column, "order clause");
@@ -1135,6 +1260,13 @@ std::optional<std::string> Executor::bind_statement(SharedDatabase& s, Statement
             for (auto& t : tables) scope.tables.push_back(table_of(t, ""));
             for (auto& j : joins) scope.tables.push_back(table_of(j.table, j.alias));
             scope.lenient_qualifier = true;
+            for (std::size_t i = 0; i < tables.size() && i < scope.tables.size(); i++) {
+                std::string shown = scope.tables[i].bare;
+                for (const auto& [alias, table] : aliases) {
+                    if (ieq(table, tables[i]) || ieq(table, scope.tables[i].bare) || ieq(table, scope.tables[i].full)) { shown = alias; break; }
+                }
+                write_targets.emplace_back(scope.tables[i].full, shown);
+            }
             chain.push_back(&scope);
             if (assignments) {
                 for (auto& [target, value] : *assignments) {
@@ -1145,6 +1277,7 @@ std::optional<std::string> Executor::bind_statement(SharedDatabase& s, Statement
             for (auto& j : joins) cond(j.on_expr, "on clause");
             if (where) cond(*where, "where clause");
             chain.pop_back();
+            write_targets.clear();
         }
 
         // MERGE: the target and the source are the one scope of its conditions and assignments, known by their aliases (else by their own names,
@@ -1207,6 +1340,9 @@ std::optional<std::string> Executor::bind_statement(SharedDatabase& s, Statement
         }
 
         std::vector<Join> no_joins;
+        // the tables an UPDATE / DELETE / INSERT is changing -- as the tables of a query name them, and as MySQL calls them in its error (the alias the statement gave
+        // the table, else its name): a subquery of it (not a derived table) that reads one is refused (MySQL 1093)
+        std::vector<std::pair<std::string, std::string>> write_targets;
     };
 
     Binder binder{*this, s, check, {}, std::nullopt, {}, {}, {}};

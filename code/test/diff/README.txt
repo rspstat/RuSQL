@@ -149,7 +149,11 @@ Comparison with a real MySQL (needs pymysql and a MySQL 8.4 on 127.0.0.1:3391; u
       windows (ROWS UNBOUNDED PRECEDING / ROWS n PRECEDING, WINDOW w AS (...), OVER w, OVER (w ORDER BY ...); rows that tie in ORDER BY are peers),
       window_agg (window functions over GROUP BY / aggregates: SUM(SUM(v)) OVER, RANK() OVER (ORDER BY SUM(v)), inside expressions, ORDER BY RANK() OVER, DISTINCT, views, derived tables, errors),
       max_execution_time (the hint and SET max_execution_time stop a SELECT with error 3024; COUNT(*) over a cross join is left out: MySQL counts it in a join buffer within the limit),
-      fk_names (CONSTRAINT <name>, ALTER TABLE ... DROP FOREIGN KEY <name>, a drop and an add in one ALTER, information_schema.referential_constraints).
+      fk_names (CONSTRAINT <name>, ALTER TABLE ... DROP FOREIGN KEY <name>, a drop and an add in one ALTER, information_schema.referential_constraints),
+      range_frames (R50: RANGE BETWEEN n PRECEDING AND m FOLLOWING and INTERVAL n unit frames, ASC and DESC, NULL keys, frames that hold no row, the frames MySQL refuses),
+      temporal_values (R50: the number a date function gives -- DATE(x) + 0, TIME(x), NOW(), CAST(x AS DATE) -- and SUM / AVG of a date, time or DATETIME column),
+      float_single (R50: a FLOAT column as the single-precision number: f = d, f = 0.1, f + 0, SUM(f)),
+      target_table (R50: error 1093 for an UPDATE / DELETE / INSERT whose subquery reads the table it writes).
   python make_scoreboard.py <engine_server.exe> [--tests CASES ASSERTIONS]
       runs every corpus (the protocol ones with --proto) and writes the numbers the app's Compat page shows to code/frontend/src/lib/compatSnapshot.json.
       The cells of RuSQL's answer are read the way the engine itself reads a result table (\\ \n \| and \s \t for a space or tab at either end of a value,
@@ -163,8 +167,8 @@ Comparison with a real MySQL (needs pymysql and a MySQL 8.4 on 127.0.0.1:3391; u
       the same comparison, but RuSQL is asked over its MySQL protocol (pymysql, port 13399) instead of the native port, so what the protocol layer of
       server/src/mysql.cpp makes of a statement is compared too (SHOW COLUMNS / INDEX / CREATE TABLE / TABLE STATUS, SHOW VARIABLES, the OK packet's
       affected rows (a number now compared, R44: the rows an UPDATE changed, ON DUPLICATE KEY UPDATE 1 / 2 / 0, REPLACE 2, a trigger's statements not counted; the
-      CLIENT_FOUND_ROWS mode is the unit test [r44][affected]) and last insert id, binary values). Four differences are left: the values of SHOW TABLE STATUS other than the name / engine / row
-      count, SHOW ENGINES lists one engine, SHOW COLLATION has no Pad_attribute column, and @@version is 5.7.0-rusql (on purpose, the handshake's).
+      CLIENT_FOUND_ROWS mode is the unit test [r44][affected]) and last insert id, binary values). Three differences are left: the values of SHOW TABLE STATUS other than the name / engine / row
+      count, SHOW ENGINES lists one engine, and @@version is 5.7.0-rusql (on purpose, the handshake's; VERSION() says the same since R50).
   python vs_mysql.py <engine_server.exe> corpus/protocol_types.sql --proto --types
       also compares the kind of every result column the client is told (integer, decimal, float, date, datetime, time, text -- what pymysql turns
       it into) with MySQL's. Four differences are left: ROUND(double column, 1) is told as a decimal, `2 * 3.5` = 7.0 reads as an integer,

@@ -316,6 +316,11 @@ SELECT id, salary,
     RANK()      OVER (w ORDER BY salary DESC)               AS dept_rank
 FROM employee WINDOW w AS (PARTITION BY department_id) ORDER BY id;
 
+-- RANGE frames reach the rows whose ORDER BY value is within n of the current row's (INTERVAL n DAY for dates)
+SELECT id, salary,
+    COUNT(*) OVER (ORDER BY salary RANGE BETWEEN 500 PRECEDING AND 500 FOLLOWING) AS similar_pay
+FROM employee ORDER BY id;
+
 SELECT first_name, salary,
     ROW_NUMBER()   OVER (ORDER BY salary DESC)                                 AS overall_rank,
     RANK()         OVER (PARTITION BY department_id ORDER BY salary DESC)      AS dept_rank,

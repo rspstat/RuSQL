@@ -9,7 +9,7 @@
 |---|---|
 | 무엇 | MySQL 호환 프로토콜을 쓰는 **자체 RDBMS 엔진**(C++20) + 데스크톱 클라이언트(Tauri/React) + Claude 연동(MCP) |
 | 1학기 → 2학기 | Rust 프로토타입 → **C++ 전면 재작성**, "기능 추가"에서 **정합성·동시성·성능을 실제로 파고드는 심화**로 |
-| 규모 | 테스트 **784 케이스 / 1,505,745 assertions** (2학기 초 218 케이스 / 3,080 assertions) |
+| 규모 | 테스트 **789 케이스 / 1,506,079 assertions** (2학기 초 218 케이스 / 3,080 assertions) |
 | 엔진 구성 | 파서 → 비용 기반 플래너 → 실행기, MVCC·행 단위 락·데드락 감지, redo 로그 기반 내구성, B+Tree·해시·복합 인덱스 |
 
 ## 2학기에 만든 것 (엔진)
@@ -177,6 +177,10 @@
 | **오류로 끝난 `CALL`이 피호출자의 변수를 남겨** 그 뒤 문장의 같은 이름 열을 대신함(`SELECT a FROM t`가 모든 행에서 같은 값) | 한 번의 실패한 호출 뒤 모든 조회가 틀린 답 |
 | **0으로 나누기가 `INSERT`·`UPDATE`·저장 함수에서 NULL을 조용히 씀**(MySQL은 오류 1365) | 틀린 값(NULL)이 오류 없이 저장됨 |
 | **연결이 `COMMIT`·`ROLLBACK` 없이 끊겨도 열린 트랜잭션이 롤백되지 않음** | 행 락과 커밋되지 않은 버전이 서버가 꺼질 때까지 남아, 그 행을 고치려는 다른 세션이 50초 뒤 락 대기 시간 초과 |
+| **`RANGE n PRECEDING`이 값 범위가 아니라 행 수**(10·15·30에서 `RANGE BETWEEN 10 PRECEDING AND CURRENT ROW`가 10·25·55, MySQL은 10·25·30), **행이 없는 프레임이 마지막 행으로 잘려 들어감**(`ROWS BETWEEN 1 FOLLOWING AND 2 FOLLOWING`의 마지막 행이 `COUNT` 1) | 조용히 틀린 이동 합계·평균 |
+| **`DATE(x) + 0`이 `2024`, `SUM(날짜 열)`이 `4048`**(MySQL은 20240305, 40480406) | 날짜 함수·합계가 틀린 값을 오류 없이 돌려줌 |
+| **FLOAT 0.1 = DOUBLE 0.1이 같다고 나옴**(MySQL은 다름) | 단정밀도 열의 비교가 달라짐 |
+| **자기 표를 읽는 하위 질의가 든 `UPDATE`·`DELETE`·`INSERT … VALUES`를 받아들여 실행**(MySQL은 1093), **`ON DUPLICATE KEY UPDATE`의 하위 질의가 현재 데이터베이스를 못 찾음** | 거절해야 할 문장이 실행되거나 멀쩡한 문장이 "Table not found" |
 | **윈도 프레임이 ORDER BY에서 같은 값인 행(피어)을 빼고 누적**(`SUM(v) OVER (ORDER BY g)`가 같은 g의 행마다 다름), **그룹·집계 위의 윈도가 빈 값**(`SUM(i) OVER (…) … GROUP BY g, i`), `SELECT DISTINCT … GROUP BY`가 DISTINCT를 무시 | 윈도 누적·순위 보고서와 그룹별 DISTINCT가 조용히 틀림 |
 | **`ALTER TABLE … ADD FOREIGN KEY … REFERENCES p (id)`가 부모를 `p`로만 저장**(데이터베이스 없이), 제약 이름은 저장하지 않아 `DROP FOREIGN KEY <이름>`이 듣지 않음 | 그 뒤 자식 표의 **모든 INSERT가 "Referenced table 'p' not found"로 실패**, 이름으로 못 지움 |
 | **`ALTER TABLE … MODIFY`가 값은 그대로 두고 정의만 바꾸고**(`'007'`이 `INT` 열에 `007`로 남고, 안 맞는 값도 거절하지 않음), **`ADD`·`DROP`·`MODIFY COLUMN` 뒤 인덱스가 옛 행 사본을 가짐** | 인덱스로 찾은 행이 바뀐 열 정의와 달라 조회가 틀림 |

@@ -32,6 +32,10 @@ CORPORA = [
     ("window_agg", [], "Window functions over groups and aggregates, inside expressions", "집계·그룹 위의 윈도, 식 안의 윈도"),
     ("max_execution_time", [], "MAX_EXECUTION_TIME: hint, variable, error 3024", "MAX_EXECUTION_TIME: 힌트·변수·오류 3024"),
     ("fk_names", [], "Foreign key names, DROP FOREIGN KEY, referential_constraints", "외래키 이름·DROP FOREIGN KEY·referential_constraints"),
+    ("range_frames", [], "RANGE frames with an offset (numbers, INTERVAL), frames that hold no row", "RANGE 프레임 오프셋(수·INTERVAL), 행이 없는 프레임"),
+    ("temporal_values", [], "Date functions and SUM / AVG of dates read as numbers", "날짜 함수와 날짜의 SUM·AVG를 수로 읽기"),
+    ("float_single", [], "FLOAT columns as single precision in arithmetic and comparisons", "FLOAT 열을 단정밀도로 읽는 산술·비교"),
+    ("target_table", [], "Error 1093: a subquery that reads the table an UPDATE / DELETE / INSERT writes", "오류 1093: 쓰는 표를 읽는 하위 질의"),
     ("protocol", ["--proto"], "MySQL wire protocol: SHOW, OK packets, affected rows", "MySQL 프로토콜: SHOW·OK 패킷·영향 행 수"),
     ("protocol_types", ["--proto", "--types"], "MySQL wire protocol: typed result columns", "MySQL 프로토콜: 열 타입"),
 ]
@@ -65,7 +69,7 @@ def main():
         "corpora": rows,
         "conformanceCases": cases,
         "tests": tests,
-        "bugsFound": 194,
+        "bugsFound": 206,
     }
     os.makedirs(os.path.dirname(OUT), exist_ok=True)
     with open(OUT, "w", encoding="utf-8", newline="\n") as f:

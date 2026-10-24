@@ -212,6 +212,10 @@ void select_columns(const Vars& v, std::vector<SelectColumn>& columns) {
         } else if (auto* ca = std::get_if<SelectColumn::ColumnAlias>(&c.data)) {
             if (auto value = v.value(ca->name)) c = SelectColumn(SelectColumn::Expr{Executor::value_constant(*value), ca->alias});
         } else if (auto* ex = std::get_if<SelectColumn::Expr>(&c.data)) {
+            // the result column is named by the expression as it was written (`a + b`), not by the values the variables hold (`2+6`)
+            if (!ex->alias) {
+                try { ex->alias = Parser::arith_to_string(ex->expr); } catch (const ParseError&) {}
+            }
             arith(v, ex->expr);
         } else if (auto* fn = std::get_if<SelectColumn::Func>(&c.data)) {
             for (auto& arg : fn->args) arg = argument_of(v, arg);
@@ -370,16 +374,59 @@ void Executor::bind_condition(SharedDatabase& s, CondExpr& cond, bool check) {
     cond = std::move(*std::get<Statement::Select>(wrapped.data).condition);
 }
 
+namespace {
+// Does a subquery read the table `bare` (a name apart from case and from the database before it) in its FROM list or a join, or in a subquery of its own?
+// A derived table does not count: it is made before the statement writes, MySQL lets it read the table.
+bool subquery_reads_table(const Statement& st, const std::string& bare) {
+    auto same = [&](const std::string& name) {
+        const std::string last = name.substr(name.rfind('.') == std::string::npos ? 0 : name.rfind('.') + 1);
+        return last.size() == bare.size() && std::equal(last.begin(), last.end(), bare.begin(), [](char a, char b) { return std::tolower(static_cast<unsigned char>(a)) == std::tolower(static_cast<unsigned char>(b)); });
+    };
+    if (auto* sel = std::get_if<Statement::Select>(&st.data)) {
+        if (!sel->subquery && same(sel->table)) return true;
+        for (const Join& j : sel->joins) {
+            if (!j.subquery && same(j.table)) return true;
+        }
+        std::vector<const Statement*> inner = select_expression_subqueries(*sel);
+        if (sel->having) collect_cond_subqueries(*sel->having, inner, true);
+        if (sel->condition) collect_cond_subqueries(*sel->condition, inner, true);
+        for (const Statement* q : inner) {
+            if (subquery_reads_table(*q, bare)) return true;
+        }
+        return false;
+    }
+    if (auto* u = std::get_if<Statement::Union>(&st.data)) return subquery_reads_table(*u->left, bare) || subquery_reads_table(*u->right, bare);
+    if (auto* i = std::get_if<Statement::Intersect>(&st.data)) return subquery_reads_table(*i->left, bare) || subquery_reads_table(*i->right, bare);
+    if (auto* x = std::get_if<Statement::Except>(&st.data)) return subquery_reads_table(*x->left, bare) || subquery_reads_table(*x->right, bare);
+    return false;
+}
+
+void refuse_reading_target(const ArithExpr& expr, const std::string& table) {
+    std::vector<const Statement*> found;
+    collect_arith_subqueries(expr, found);
+    const std::string bare = table.substr(table.rfind('.') == std::string::npos ? 0 : table.rfind('.') + 1);
+    for (const Statement* q : found) {
+        if (subquery_reads_table(*q, bare)) throw StatementError("You can't specify target table '" + bare + "' for update in FROM clause");
+    }
+}
+} // namespace
+
 // An INSERT value that was written as an expression (`1 + 2`, `UPPER('x')`, `NOW()`) is kept by the parser as "\x01" + the JSON of the expression:
 // it is computed here (after the variables in it have been replaced) and becomes the text of the value.
 void Executor::evaluate_insert_expressions(Statement& stmt, SharedDatabase* s, bool check) {
     auto* ins = std::get_if<Statement::Insert>(&stmt.data);
     if (!ins) return;
+    if (s && check) { // (MySQL 1093: the values and ON DUPLICATE KEY UPDATE of an INSERT cannot read the table they write)
+        if (auto* update = std::get_if<InsertConflict::Update>(&ins->on_conflict.data)) {
+            for (auto& [column, value] : update->assignments) refuse_reading_target(value, ins->table);
+        }
+    }
     for (auto& row : ins->values) {
         for (auto& value : row) {
             if (value.empty() || value[0] != '\x01') continue;
             if (!s && value.find("\"Subquery\"") != std::string::npos) continue; // (computed once the statement runs: it reads tables)
             ArithExpr expr = nlohmann::json::parse(value.substr(1)).get<ArithExpr>();
+            if (s && check) refuse_reading_target(expr, ins->table);
             substitute_variables(expr);
             if (s) bind_expression(*s, expr, check);
             const sqlval::StrictWrite strict;
