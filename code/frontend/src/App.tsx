@@ -234,6 +234,7 @@ function App() {
   interface Connection {
     id: string; name: string; host: string; port: number;
     user: string; password: string; autoLogin: boolean; dataDir: string;
+    favorite?: boolean; lastUsed?: number;
   }
   const loadConnections = (): Connection[] => {
     try {
@@ -251,9 +252,26 @@ function App() {
     return [{ id: "1", name: "RuSQL Local", host: "localhost", port: 7878, user: "root", password: "root", autoLogin: false, dataDir: "local" }];
   };
   const [connections, setConnections] = useState<Connection[]>(loadConnections);
+  // 홈 화면 연결 검색: 이름·사용자·호스트·데이터 폴더 이름에서 찾음 (사이드바 목록과 카드 그리드가 같이 걸러짐)
+  const [connFilter, setConnFilter] = useState("");
+  const connQuery = connFilter.trim().toLowerCase();
+  const visibleConnections = connQuery
+    ? connections.filter(c => [c.name, c.user, c.host, c.dataDir.split(/[\\/]/).pop() ?? ""].some(v => v.toLowerCase().includes(connQuery)))
+    : connections;
   const saveConnections = (c: Connection[]) => {
     setConnections(c);
     invoke("save_connections", { connections: c }).catch(() => {});
+  };
+  // 즐겨찾기(★)와 최근 연결(마지막으로 연결한 순서 3개) — 사이드바 맨 위에 바로가기로 보임
+  const favoriteConns = visibleConnections.filter(c => c.favorite);
+  const recentConns = visibleConnections.filter(c => c.lastUsed).sort((a, b) => (b.lastUsed ?? 0) - (a.lastUsed ?? 0)).slice(0, 3);
+  const toggleFavorite = (id: string) => saveConnections(connections.map(c => (c.id === id ? { ...c, favorite: !c.favorite } : c)));
+  const agoText = (ts: number) => {
+    const min = Math.floor((Date.now() - ts) / 60000);
+    if (min < 1) return "just now";
+    if (min < 60) return `${min}m ago`;
+    if (min < 60 * 24) return `${Math.floor(min / 60)}h ago`;
+    return `${Math.floor(min / 60 / 24)}d ago`;
   };
   // Connections 드래그 재정렬 (홈 화면 사이드바 목록 + 카드 그리드 둘 다 같은 connections
   // 배열을 그리므로 재정렬 로직도 하나만 공유 — startReorderDrag는 어느 쪽에서 드래그를
@@ -342,6 +360,7 @@ function App() {
   // 연결 성공 시 해당 연결의 저장 데이터를 로드하고 메인 앱으로 전환
   const doLogin = (conn: Connection) => {
     const id = conn.id;
+    saveConnections(connections.map(c => (c.id === id ? { ...c, lastUsed: Date.now() } : c)));
     const newTabs = loadTabs(id);
     const newActiveId = loadActiveTabId(id);
     const newHistory = loadHistory(id);
@@ -378,6 +397,12 @@ function App() {
     setLoggedIn(true);
     setConnectingTo(null);
     setDlgPass("");
+  };
+
+  // 즐겨찾기·최근 바로가기에서 연결 (카드·목록 항목과 같은 동작)
+  const openConn = (conn: Connection) => {
+    if (conn.autoLogin && conn.password) { handleAutoLogin(conn); }
+    else { setConnectingTo(conn); setDlgPass(conn.password ?? ""); setDlgError(""); }
   };
 
   const saveBookmarkList = (bks: { id: string; name: string; sql: string }[]) => {
@@ -1653,8 +1678,33 @@ function App() {
           <div className="home-right">
           <div className="home-right-inner">
           <div className="home-sidebar" style={{ width: homeSidebarWidth }}>
+            <input
+              className="home-sidebar-search"
+              placeholder="Search connections..."
+              value={connFilter}
+              onChange={e => setConnFilter(e.target.value)}
+            />
+            {favoriteConns.length > 0 && <div className="home-sidebar-header">Favorites</div>}
+            {favoriteConns.map(conn => (
+              <div key={`fav-${conn.id}`} className="home-sidebar-item home-sidebar-shortcut" title={conn.name} onClick={() => openConn(conn)}>
+                <span
+                  className="home-sidebar-star on"
+                  title="Remove from favorites"
+                  onClick={e => { e.stopPropagation(); toggleFavorite(conn.id); }}
+                >★</span>
+                <span className="home-sidebar-name">{conn.name}</span>
+              </div>
+            ))}
+            {recentConns.length > 0 && <div className="home-sidebar-header">Recent</div>}
+            {recentConns.map(conn => (
+              <div key={`recent-${conn.id}`} className="home-sidebar-item home-sidebar-shortcut" title={conn.name} onClick={() => openConn(conn)}>
+                <span className="home-sidebar-name">{conn.name}</span>
+                <span className="home-sidebar-ago">{agoText(conn.lastUsed ?? 0)}</span>
+              </div>
+            ))}
             <div className="home-sidebar-header">Connections</div>
-            {connections.map(conn => (
+            {connQuery && visibleConnections.length === 0 && <div className="home-sidebar-empty">No matching connections</div>}
+            {visibleConnections.map(conn => (
               <div
                 key={conn.id}
                 data-drag-id={conn.id}
@@ -1681,6 +1731,12 @@ function App() {
                   <path d="M5 11v6c0 1.66 3.13 3 7 3s7-1.34 7-3v-6" stroke="url(#dbGradSidebar)" strokeWidth="1.2" fill="none" vectorEffect="non-scaling-stroke"/>
                 </svg>
                 <span className="home-sidebar-name">{conn.name}</span>
+                <span
+                  className={`home-sidebar-star${conn.favorite ? " on" : ""}`}
+                  title={conn.favorite ? "Remove from favorites" : "Add to favorites"}
+                  onMouseDown={e => e.stopPropagation()}
+                  onClick={e => { e.stopPropagation(); toggleFavorite(conn.id); }}
+                >{conn.favorite ? "★" : "☆"}</span>
                 {conn.autoLogin && <span className="home-sidebar-badge">Auto</span>}
               </div>
             ))}
@@ -1769,7 +1825,8 @@ function App() {
 
             {/* 연결 카드 그리드 */}
             <div className="home-conn-grid">
-              {connections.map(conn => (
+              {connQuery && visibleConnections.length === 0 && <div className="home-conn-empty">No matching connections</div>}
+              {visibleConnections.map(conn => (
                 <div
                   key={conn.id}
                   data-drag-id={conn.id}
@@ -1780,7 +1837,7 @@ function App() {
                     else { setConnectingTo(conn); setDlgPass(conn.password ?? ""); setDlgError(""); }
                   }}
                   onMouseDown={e => {
-                    if ((e.target as HTMLElement).closest(".home-conn-del")) return;
+                    if ((e.target as HTMLElement).closest(".home-conn-del, .home-conn-star")) return;
                     startReorderDrag(
                       e, conn.id, ".home-conn-card[data-drag-id]",
                       (d, o) => { setDraggedConnId(d); setDragOverConnId(o); },
@@ -1812,6 +1869,11 @@ function App() {
                       {conn.autoLogin && <span className="home-conn-chip" style={{ color: "#4ec9b0" }}>Auto Login</span>}
                     </div>
                   </div>
+                  <button
+                    className={`home-conn-star${conn.favorite ? " on" : ""}`}
+                    title={conn.favorite ? "Remove from favorites" : "Add to favorites"}
+                    onClick={e => { e.stopPropagation(); toggleFavorite(conn.id); }}
+                  >{conn.favorite ? "★" : "☆"}</button>
                   <button
                     className="home-conn-del"
                     title="Delete"

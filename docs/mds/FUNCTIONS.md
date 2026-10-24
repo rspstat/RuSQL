@@ -317,6 +317,8 @@
 - [x] **앱: 스키마를 아는 자동완성, 세션·트랜잭션·락 패널, Compat 페이지 (2026-10-21, R45)** — 표·열·함수·키워드 제안(별칭 해석), Server Manager의 트랜잭션·락·대기 패널(`get_activity`), 코퍼스별 MySQL 일치율 페이지(`make_scoreboard.py`).
 - [x] **앱: MVCC 페이지 (2026-10-22, R49, `MvccView.tsx`, Tauri `mvcc_exec`·`mvcc_reset`)** — 서버에 거는 두 연결(세션 A·B)과 그 사이의 버전 표를 나란히 보여 준다: 버전마다 xmin·xmax·상태(LIVE / UNCOMMITTED / ENDING / DEAD)와 각 세션에게 보이는가. 시나리오 넷(UPDATE는 버전을 더함, 같은 질문 다른 답, 더티 리드, 기다리는 쓰기)을 한 단계씩.
 - [x] **활동 표시줄 순서와 페이지 제목 (2026-10-22, R49 뒤 손질)** — 위에서부터 SQL 에디터 · ERD 편집기 · 서버 매니저 · Diagram · **B+Tree 애니메이션** · **MVCC 시뮬레이션** · MySQL 호환성, 맨 아래에 계정·설정. 두 페이지의 한국어 제목은 이 이름이다(영어는 "B+Tree: how an index splits and rebalances"·"MVCC: two sessions and the versions between them").
+- [x] **홈 화면: 연결 검색·즐겨찾기·최근 연결 (2026-10-24)** — 사이드바 맨 위 검색창(이름·사용자·호스트·폴더, 사이드바와 카드 그리드를 같이 거름), `FAVORITES`(★)와 `RECENT`(마지막 연결 순 3개 + 경과 시간) 바로가기. `connections.json` 항목에 `favorite`·`lastUsed` 필드 추가(Rust `ConnectionEntry`는 `#[serde(default)]`).
+- [x] **버그: 자동완성 목록 글자 안 보임 (2026-10-24, `App.css`)** — 앱의 `.main` 클래스가 Monaco 제안 행의 `.main`과 겹쳐 글자가 둘째 줄로 밀려 잘렸다. 앱 쪽을 `app-main`으로 바꿔 해결.
 - [x] **`information_schema.row_versions` (2026-10-22, R49, 엔진)** — 모든 행 버전을 한 행씩: `ROW_KEY`, `ROW_DATA`, `XMIN`, `XMAX`, `STATE`(`LIVE`·`UNCOMMITTED`·`ENDING`·`DEAD`), `VISIBLE_TO_ME`(읽는 세션 자신의 스냅샷). RuSQL만의 표.
 - [x] **연결이 끊기면 열린 트랜잭션을 롤백 (2026-10-22, R49, `server/src/main.cpp`·`mysql.cpp`)** — 전에는 `COMMIT`·`ROLLBACK` 없이 닫은 연결의 행 락과 미커밋 버전이 서버가 꺼질 때까지 남았다.
 - [x] **앱: B+Tree 페이지 (2026-10-22, R48, `BTreeView.tsx`·`lib/bplusTree.ts`)** — 교육용 B+Tree에 키를 넣고 지우고 찾는 과정(잎까지 내려가기, 넘침·분할과 위로 올라가는 키, 새 루트, 모자람·빌려오기·병합, 루트 낮아짐)을 한 단계씩 재생한다(재생·일시정지·한 단계씩·슬라이더·0.5~4x, 노드당 최대 키 3·4·5, `1–12 넣기`, `무작위 ×8`). 무작위 삽입·삭제 약 78,000번으로 불변식을 검사했다.

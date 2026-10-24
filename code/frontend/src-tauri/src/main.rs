@@ -895,6 +895,11 @@ struct ConnectionEntry {
     auto_login: bool,
     #[serde(rename = "dataDir")]
     data_dir: String,
+    // 즐겨찾기 표시와 마지막으로 연결한 시각(epoch ms) — 이 필드가 없는 예전 파일·MCP가 쓴 항목은 기본값으로 읽힘
+    #[serde(default)]
+    favorite: bool,
+    #[serde(default, rename = "lastUsed")]
+    last_used: u64,
 }
 
 fn connections_file_path() -> std::path::PathBuf {
