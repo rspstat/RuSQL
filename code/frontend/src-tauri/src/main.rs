@@ -57,8 +57,16 @@ impl Drop for EngineConn {
     }
 }
 
+// An extra connection to the same engine server (the MVCC page runs two sessions side by side): its own session, its own transaction. It is a Mutex of its own so
+// that a session that waits for a lock does not keep the other from running.
+struct PeerSession {
+    writer: TcpStream,
+    reader: BufReader<TcpStream>,
+}
+
 struct AppState {
     db:          Arc<Mutex<Option<EngineConn>>>,
+    peers:       Mutex<HashMap<String, Arc<Mutex<PeerSession>>>>,
     servers:     Mutex<HashMap<String, ServerEntry>>,
     ui:          Arc<UiStore>,
     instance_id: String, // 이 프로세스의 수명 동안 고정 — 다중 인스턴스 레지스트리/타깃팅용
@@ -276,12 +284,16 @@ fn spawn_and_connect(
 
 // 하나의 SQL 문(세미콜론 자동 보정)을 보내고 (성공여부, 본문, 경과초)를 반환한다.
 fn send_one(conn: &mut EngineConn, stmt: &str) -> Result<(bool, String, f64), String> {
+    exchange(&mut conn.writer, &mut conn.reader, stmt)
+}
+
+fn exchange(writer: &mut TcpStream, reader: &mut BufReader<TcpStream>, stmt: &str) -> Result<(bool, String, f64), String> {
     let mut s = stmt.trim().to_string();
     if s.is_empty() { return Ok((true, String::new(), 0.0)); }
     if !s.ends_with(';') { s.push(';'); }
-    writeln!(conn.writer, "{}", s).map_err(|e| e.to_string())?;
-    conn.writer.flush().map_err(|e| e.to_string())?;
-    let block = read_block(&mut conn.reader);
+    writeln!(writer, "{}", s).map_err(|e| e.to_string())?;
+    writer.flush().map_err(|e| e.to_string())?;
+    let block = read_block(reader);
     if block.len() < 2 {
         return Err("서버와의 연결이 끊어졌습니다.".to_string());
     }
@@ -291,6 +303,62 @@ fn send_one(conn: &mut EngineConn, stmt: &str) -> Result<(bool, String, f64), St
         .and_then(|l| l.trim_start_matches('(').trim_end_matches(" sec)").parse::<f64>().ok())
         .unwrap_or(0.0);
     Ok((ok, body, elapsed))
+}
+
+// A second session on the server the app is connected to, signed in as the same user and in the same database.
+fn open_peer(state: &State<AppState>) -> Result<PeerSession, String> {
+    let (port, user, password, db) = {
+        let guard = state.db.lock().unwrap_or_else(|e| e.into_inner());
+        let c = guard.as_ref().ok_or("연결된 데이터베이스가 없습니다.")?;
+        (c.port, c.user.clone(), c.password.clone(), c.current_db.clone())
+    };
+    let stream = TcpStream::connect(format!("127.0.0.1:{}", port)).map_err(|e| e.to_string())?;
+    stream.set_nodelay(true).ok();
+    let mut writer = stream.try_clone().map_err(|e| e.to_string())?;
+    let mut reader = BufReader::new(stream);
+    let nonce = extract_nonce(&read_block(&mut reader)).ok_or_else(|| "서버가 인증 challenge(NONCE)를 보내지 않았습니다.".to_string())?;
+    writeln!(writer, "AUTH {} {}", user, compute_native_password_token(&password, &nonce)).map_err(|e| e.to_string())?;
+    writer.flush().map_err(|e| e.to_string())?;
+    if !read_block(&mut reader).first().map(|s| s.starts_with("OK")).unwrap_or(false) {
+        return Err("인증 실패".to_string());
+    }
+    if !db.is_empty() {
+        exchange(&mut writer, &mut reader, &format!("USE {};", db))?;
+    }
+    Ok(PeerSession { writer, reader })
+}
+
+// One statement on one of the MVCC page's sessions ("A", "B"); the session is opened the first time it is used. A statement that waits for a lock keeps this
+// call waiting, so it runs off the main thread.
+#[tauri::command(async)]
+fn mvcc_exec(session: String, query: String, state: State<AppState>) -> QueryResult {
+    let peer = {
+        let existing = state.peers.lock().unwrap_or_else(|e| e.into_inner()).get(&session).cloned();
+        match existing {
+            Some(p) => Ok(p),
+            None => open_peer(&state).map(|p| {
+                let p = Arc::new(Mutex::new(p));
+                state.peers.lock().unwrap_or_else(|e| e.into_inner()).insert(session.clone(), p.clone());
+                p
+            }),
+        }
+    };
+    let start = Instant::now();
+    let fail = |message: String| QueryResult { columns: vec![], rows: vec![], message, elapsed: start.elapsed().as_secs_f64(), success: false };
+    let peer = match peer { Ok(p) => p, Err(e) => return fail(e) };
+    let mut guard = peer.lock().unwrap_or_else(|e| e.into_inner());
+    let PeerSession { writer, reader } = &mut *guard;
+    match exchange(writer, reader, &query) {
+        Ok((true, body, elapsed)) => parse_output(&body, elapsed),
+        Ok((false, body, _)) => fail(body),
+        Err(e) => fail(e),
+    }
+}
+
+// Closes the MVCC page's sessions (a transaction one of them left open is rolled back by the server when its connection goes).
+#[tauri::command]
+fn mvcc_reset(state: State<AppState>) {
+    state.peers.lock().unwrap_or_else(|e| e.into_inner()).clear();
 }
 
 // USE 문 실행 성공 시 conn.current_db를 갱신한다.
@@ -1514,6 +1582,7 @@ fn main() {
     tauri::Builder::default()
         .manage(AppState {
             db: Arc::new(Mutex::new(None)),
+            peers: Mutex::new(HashMap::new()),
             servers: Mutex::new(HashMap::new()),
             ui: Arc::new(UiStore {
                 tab_content: Arc::new(Mutex::new(HashMap::new())),
@@ -1584,6 +1653,8 @@ fn main() {
             stop_server,
             get_server_status,
             get_activity,
+            mvcc_exec,
+            mvcc_reset,
             clear_server_log,
             import_csv,
             open_terminal,

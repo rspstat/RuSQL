@@ -1,0 +1,58 @@
+/* MvccView -- "MVCC" page: two sessions side by side and the versions of the rows between them. */
+
+.mv-scroll { flex: 1; min-height: 0; overflow: auto; padding: 24px 32px 48px; position: relative; }
+.mv-lang { position: absolute; top: 18px; right: 32px; display: inline-flex; background: #252526; border: 1px solid #3a3d41; border-radius: 6px; overflow: hidden; }
+.mv-lang button { background: transparent; color: #9d9d9d; border: 0; padding: 4px 12px; font-size: 12px; cursor: pointer; }
+.mv-lang button.on { background: #094771; color: #fff; }
+
+.mv-page { max-width: 1400px; margin: 0 auto; color: #d4d4d4; font-family: 'Segoe UI', sans-serif; word-break: keep-all; overflow-wrap: break-word; }
+.mv-page h1 { font-size: 24px; margin: 0 0 6px; color: #fff; }
+.mv-sub { color: #9d9d9d; font-size: 13px; line-height: 1.6; margin: 0 0 14px; max-width: 900px; }
+.mv-about { color: #b0b0b0; font-size: 13px; margin: 6px 0 10px; }
+.mv-dim { color: #858585; font-size: 12px; }
+
+.mv-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.mv-label { font-size: 12px; color: #9d9d9d; display: inline-flex; align-items: center; gap: 6px; }
+.mv-select, .mv-input { background: #1e1e1e; color: #d4d4d4; border: 1px solid #3a3d41; border-radius: 4px; padding: 5px 8px; font-size: 12px; }
+.mv-btn { background: #333; color: #d4d4d4; border: 1px solid #454545; border-radius: 4px; padding: 5px 12px; font-size: 12px; cursor: pointer; }
+.mv-btn:hover:not(:disabled) { background: #3d3d3d; }
+.mv-btn:disabled { opacity: 0.4; cursor: default; }
+.mv-btn.mv-primary { background: #0e639c; border-color: #0e639c; color: #fff; }
+.mv-btn.mv-primary:hover:not(:disabled) { background: #1177bb; }
+.mv-btn.mv-small { padding: 3px 9px; font-size: 11px; }
+
+.mv-error { margin: 8px 0; padding: 8px 12px; background: #3a2323; border: 1px solid #6b3a3a; border-radius: 6px; color: #f48771; font-size: 12px; }
+.mv-note { margin: 8px 0; padding: 9px 14px; background: #1f2f2c; border: 1px solid #2f5a50; border-left: 3px solid #4ec9b0; border-radius: 6px; font-size: 13px; line-height: 1.5; }
+.mv-next { margin: 4px 0 10px; font-size: 12px; color: #9d9d9d; }
+.mv-next code, .mv-entry code { font: 12px Consolas, "Courier New", monospace; color: #9cdcfe; }
+
+.mv-grid { display: grid; grid-template-columns: minmax(250px, 1fr) minmax(430px, 1.5fr) minmax(250px, 1fr); gap: 14px; align-items: start; }
+.mv-session, .mv-store { background: #252526; border: 1px solid #3a3d41; border-radius: 8px; padding: 12px; min-width: 0; }
+.mv-session-head { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; flex-wrap: wrap; }
+.mv-session-head b { font-size: 14px; color: #fff; }
+.mv-chip { font-size: 11px; padding: 1px 8px; border-radius: 10px; background: #333; color: #aaa; }
+.mv-chip.mv-on { background: #0e4f7a; color: #fff; }
+.mv-chip.mv-wait { background: #6b4a12; color: #ffd88a; }
+.mv-run { display: flex; gap: 6px; }
+.mv-input { flex: 1; min-width: 0; font-family: Consolas, "Courier New", monospace; }
+.mv-quick { display: flex; gap: 6px; margin: 8px 0; }
+.mv-log { display: flex; flex-direction: column; gap: 6px; }
+.mv-entry { background: #1e1e1e; border: 1px solid #333; border-radius: 5px; padding: 6px 8px; font-size: 11px; display: flex; flex-direction: column; gap: 3px; }
+.mv-entry.mv-bad { border-color: #6b3a3a; }
+.mv-entry > span { color: #8f8f8f; }
+.mv-mini { border-collapse: collapse; font-size: 11px; margin-top: 2px; }
+.mv-mini th, .mv-mini td { border: 1px solid #333; padding: 1px 6px; text-align: left; }
+.mv-mini th { background: #2d2d2d; color: #9cdcfe; font-weight: 500; }
+
+.mv-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.mv-table th { text-align: left; color: #9cdcfe; font-weight: 500; padding: 4px 8px; border-bottom: 1px solid #3a3d41; }
+.mv-table td { padding: 5px 8px; border-bottom: 1px solid #2f2f2f; font-variant-numeric: tabular-nums; }
+.mv-table .mv-data { font-family: Consolas, "Courier New", monospace; }
+.mv-table tr.mv-st-DEAD td { opacity: 0.55; }
+.mv-yes { color: #4ec9b0; text-align: center; }
+.mv-no { color: #555; text-align: center; }
+.mv-state { display: inline-block; font-size: 10.5px; padding: 1px 8px; border-radius: 10px; font-weight: 600; }
+i.mv-state { width: 9px; height: 9px; padding: 0; border-radius: 50%; margin-right: 6px; }
+.mv-LIVE { background: #2d6a4f; color: #d8f3dc; } .mv-UNCOMMITTED { background: #7a5c12; color: #ffe8a3; }
+.mv-ENDING { background: #7a3d12; color: #ffd2a8; } .mv-DEAD { background: #444; color: #bbb; }
+.mv-legend { display: flex; flex-direction: column; gap: 4px; margin-top: 12px; font-size: 11px; color: #858585; }

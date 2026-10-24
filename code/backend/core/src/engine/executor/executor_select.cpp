@@ -1552,6 +1552,15 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
                     keys.push_back(c.name);
                 }
                 std::vector<Row> rows = info_schema_rows(s, bare);
+                if (bare == "row_versions") { // (which versions this reader sees: its own snapshot decides)
+                    const SnapshotCtx reader = current_read_ctx(s);
+                    for (Row& r : rows) {
+                        Row version;
+                        version["_xmin"] = r["XMIN"];
+                        version["_xmax"] = r["XMAX"];
+                        r["VISIBLE_TO_ME"] = is_visible_for_read(version, reader) ? "YES" : "NO";
+                    }
+                }
                 for (Row& r : rows) {
                     for (const std::string& key : keys) r.emplace(key, EXECUTOR_NULL_VALUE); // (a column this row has no value for)
                 }

@@ -8,6 +8,7 @@ import { format as sqlFormat } from "sql-formatter";
 import DiagramView from "./components/DiagramView";
 import CompatView from "./components/CompatView";
 import BTreeView from "./components/BTreeView";
+import MvccView from "./components/MvccView";
 import Sidebar from "./components/Sidebar";
 import ActivityPanel from "./components/ActivityPanel";
 import ErdView from "./components/ErdView";
@@ -30,7 +31,7 @@ interface HistoryEntry {
   success: boolean;
   elapsed: number;
 }
-type ActiveView = "editor" | "erd" | "server" | "diagram" | "compat" | "btree";
+type ActiveView = "editor" | "erd" | "server" | "diagram" | "compat" | "btree" | "mvcc";
 const PAGE_SIZE = 100;
 
 // 셀 편집 시 PK WHERE절 값 이스케이프용 — 컬럼의 실제 data_type을 보고 숫자 리터럴로 둘지
@@ -2131,6 +2132,19 @@ function App() {
           </svg>
         </div>
 
+        {/* MVCC: two sessions side by side and the versions of the rows between them */}
+        <div
+          className={`activity-icon ${activeView === "mvcc" ? "active" : ""}`}
+          title="MVCC"
+          onClick={() => setActiveView("mvcc")}
+        >
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+            <rect x="3" y="3" width="11" height="8" rx="1.5"/>
+            <rect x="10" y="13" width="11" height="8" rx="1.5"/>
+            <path d="M6 11v3a1.5 1.5 0 0 0 1.5 1.5H10"/>
+          </svg>
+        </div>
+
         <div className="activity-bar-bottom">
           <div className="activity-icon" title="Account">
             <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor">
@@ -3616,6 +3630,7 @@ function App() {
       {activeView === "diagram" && <DiagramView />}
       {activeView === "compat" && <CompatView />}
       {activeView === "btree" && <BTreeView />}
+      {activeView === "mvcc" && <MvccView />}
 
       </div> {/* app-body */}
     </div>

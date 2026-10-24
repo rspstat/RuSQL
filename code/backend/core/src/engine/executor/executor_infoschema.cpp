@@ -99,6 +99,9 @@ const std::vector<IC> kInnodbTrx = {{"TRX_ID", true}, {"TRX_STATE", false}, {"TR
 const std::vector<IC> kInnodbLocks = {{"LOCK_TRX_ID", true}, {"LOCK_MODE", false}, {"LOCK_TABLE", false}, {"LOCK_DATA", false}};
 const std::vector<IC> kInnodbLockWaits = {{"REQUESTING_TRX_ID", true}, {"BLOCKING_TRX_ID", true}};
 const std::vector<IC> kInnodbDeadlocks = {{"REQUESTING_TRX_ID", true}, {"BLOCKING_TRX_ID", true}};
+// RuSQL's own (MySQL has none): every stored version of every row, the way MVCC keeps them (R49)
+const std::vector<IC> kRowVersions = {{"TABLE_SCHEMA", false}, {"TABLE_NAME", false}, {"ROW_KEY", false}, {"ROW_DATA", false},
+                                      {"XMIN", true}, {"XMAX", true}, {"STATE", false}, {"VISIBLE_TO_ME", false}};
 } // namespace
 
 const std::vector<InfoSchemaColumn>* Executor::info_schema_columns(const std::string& which) {
@@ -120,6 +123,7 @@ const std::vector<InfoSchemaColumn>* Executor::info_schema_columns(const std::st
     if (lower == "innodb_locks") return &kInnodbLocks;
     if (lower == "innodb_lock_waits") return &kInnodbLockWaits;
     if (lower == "innodb_deadlocks") return &kInnodbDeadlocks;
+    if (lower == "row_versions") return &kRowVersions;
     return nullptr;
 }
 
@@ -580,6 +584,74 @@ std::vector<Row> Executor::info_schema_rows(const SharedDatabase& s, const std::
             rows.push_back(std::move(r));
         }
         std::sort(rows.begin(), rows.end(), [](const Row& a, const Row& b) { return std::stoull(a.at("ID")) < std::stoull(b.at("ID")); });
+        return rows;
+    }
+
+    if (lower == "row_versions") {
+        // Every version a row has in its table: who made it (XMIN), who ended it (XMAX, 0 while it is the newest), and what that makes it. A version that an open
+        // transaction made or is ending is not final yet. VISIBLE_TO_ME is put in by the statement that reads this table: it is the reader's own snapshot that
+        // decides. A table of more than 2000 versions shows only the versions that are not plain live ones.
+        std::unordered_set<std::uint64_t> open;
+        {
+            auto ids = s.active_txn_ids->lock();
+            open.insert(ids->begin(), ids->end());
+        }
+        auto id_of = [](const Row& row, const char* key) -> std::uint64_t {
+            auto it = row.find(key);
+            if (it == row.end()) return 0;
+            try {
+                return std::stoull(it->second);
+            } catch (...) {
+                return 0;
+            }
+        };
+        for (auto& [_, schema] : s.catalog.tables) {
+            auto [db, tbl] = split_name(schema.name);
+            if (db.empty() || db == "information_schema") continue;
+            auto data = s.tables.find(schema.name);
+            if (data == s.tables.end()) continue;
+            const bool everything = data->second.size() <= 2000;
+            const std::vector<std::string> identity = schema.identity_columns();
+            std::vector<Row> versions;
+            std::size_t ordinal = 0;
+            for (const Row& row : data->second) {
+                ordinal++;
+                const std::uint64_t xmin = id_of(row, "_xmin"), xmax = id_of(row, "_xmax");
+                const char* state = xmax == 0 ? (open.count(xmin) ? "UNCOMMITTED" : "LIVE") : (open.count(xmax) ? "ENDING" : "DEAD");
+                if (!everything && std::string(state) == "LIVE") continue;
+                std::string key, shown;
+                for (const std::string& c : identity) {
+                    auto it = row.find(c);
+                    key += (key.empty() ? "" : ",") + (it == row.end() ? std::string(EXECUTOR_NULL_VALUE) : it->second);
+                }
+                if (identity.empty()) key = std::to_string(ordinal);
+                for (const ColumnDef& c : schema.columns) {
+                    auto it = row.find(c.name);
+                    shown += (shown.empty() ? "" : ", ") + c.name + "=" + (it == row.end() ? std::string(EXECUTOR_NULL_VALUE) : it->second);
+                }
+                Row r;
+                r["TABLE_SCHEMA"] = db;
+                r["TABLE_NAME"] = tbl;
+                r["ROW_KEY"] = key;
+                r["ROW_DATA"] = shown;
+                r["XMIN"] = std::to_string(xmin);
+                r["XMAX"] = std::to_string(xmax);
+                r["STATE"] = state;
+                versions.push_back(std::move(r));
+            }
+            // the versions of one row together, oldest first
+            std::stable_sort(versions.begin(), versions.end(), [](const Row& a, const Row& b) {
+                const std::string &ka = a.at("ROW_KEY"), &kb = b.at("ROW_KEY");
+                if (ka != kb) {
+                    char *ea = nullptr, *eb = nullptr;
+                    const double x = std::strtod(ka.c_str(), &ea), y = std::strtod(kb.c_str(), &eb);
+                    if (!ka.empty() && !kb.empty() && *ea == '\0' && *eb == '\0' && x != y) return x < y;
+                    return ka < kb;
+                }
+                return std::stoull(a.at("XMIN")) < std::stoull(b.at("XMIN"));
+            });
+            for (Row& r : versions) rows.push_back(std::move(r));
+        }
         return rows;
     }
 

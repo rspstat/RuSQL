@@ -652,3 +652,37 @@ TEST_CASE("window functions run on the groups: over aggregates, inside expressio
     REQUIRE(q(ex, "SELECT id, SUM(v) OVER (ORDER BY g ROWS UNBOUNDED PRECEDING) FROM s ORDER BY id") == Rows{{"1", "10"}, {"2", "30"}, {"3", "60"}, {"4", "60"}, {"5", "65"}});
     REQUIRE(q(ex, "SELECT id, COUNT(*) OVER (ORDER BY g RANGE BETWEEN CURRENT ROW AND CURRENT ROW) FROM s ORDER BY id") == Rows{{"1", "2"}, {"2", "2"}, {"3", "2"}, {"4", "2"}, {"5", "1"}});
 }
+
+TEST_CASE("information_schema.row_versions lists every stored version of a row and which of them a session sees", "[r49][mvcc]") {
+    TempDataDir dir("r49_row_versions");
+    Executor a(dir.path);
+    ok(a, "CREATE DATABASE d");
+    ok(a, "USE d");
+    ok(a, "CREATE TABLE acct (id INT PRIMARY KEY, bal INT)");
+    ok(a, "INSERT INTO acct VALUES (1, 100), (2, 200)");
+    Executor b = Executor::new_session(a.get_shared());
+    ok(b, "USE d");
+    const std::string versions = "SELECT ROW_KEY, ROW_DATA, STATE, VISIBLE_TO_ME FROM information_schema.row_versions WHERE TABLE_NAME = 'acct' ORDER BY ROW_KEY, XMIN";
+    REQUIRE(q(a, versions) == Rows{{"1", "id=1, bal=100", "LIVE", "YES"}, {"2", "id=2, bal=200", "LIVE", "YES"}});
+    // A updates row 1 and has not committed: the old version is being ended, the new one is not final; A sees the new, B the old
+    ok(a, "BEGIN");
+    ok(a, "UPDATE acct SET bal = 150 WHERE id = 1");
+    REQUIRE(q(a, versions) == Rows{{"1", "id=1, bal=100", "ENDING", "NO"}, {"1", "id=1, bal=150", "UNCOMMITTED", "YES"}, {"2", "id=2, bal=200", "LIVE", "YES"}});
+    REQUIRE(q(b, versions) == Rows{{"1", "id=1, bal=100", "ENDING", "YES"}, {"1", "id=1, bal=150", "UNCOMMITTED", "NO"}, {"2", "id=2, bal=200", "LIVE", "YES"}});
+    // B under READ UNCOMMITTED sees the new version too: a dirty read
+    ok(b, "SET ISOLATION LEVEL READ UNCOMMITTED");
+    REQUIRE(q(b, "SELECT bal FROM acct WHERE id = 1") == Rows{{"150"}});
+    ok(b, "SET ISOLATION LEVEL READ COMMITTED");
+    ok(a, "COMMIT");
+    REQUIRE(q(b, versions) == Rows{{"1", "id=1, bal=100", "DEAD", "NO"}, {"1", "id=1, bal=150", "LIVE", "YES"}, {"2", "id=2, bal=200", "LIVE", "YES"}});
+    // a snapshot keeps the dead version in sight until its transaction ends, and VACUUM then removes it
+    ok(b, "SET ISOLATION LEVEL REPEATABLE READ");
+    ok(b, "BEGIN");
+    REQUIRE(q(b, "SELECT bal FROM acct WHERE id = 1") == Rows{{"150"}});
+    ok(a, "UPDATE acct SET bal = 175 WHERE id = 1");
+    REQUIRE(q(b, "SELECT bal FROM acct WHERE id = 1") == Rows{{"150"}}); // (the snapshot from BEGIN)
+    REQUIRE(q(b, "SELECT COUNT(*) FROM information_schema.row_versions WHERE TABLE_NAME = 'acct' AND ROW_KEY = '1'") == Rows{{"3"}});
+    ok(b, "COMMIT");
+    ok(a, "VACUUM acct");
+    REQUIRE(q(a, "SELECT COUNT(*) FROM information_schema.row_versions WHERE TABLE_NAME = 'acct' AND ROW_KEY = '1'") == Rows{{"1"}});
+}

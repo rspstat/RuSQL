@@ -1647,6 +1647,7 @@ void handle_mysql_client(SOCKET sock, std::shared_ptr<RwLock<SharedDatabase>> sh
     }
 
     exec.deregister_process();
+    if (exec.txn.is_active()) { auto abandoned = exec_query(exec, "ROLLBACK"); (void)abandoned; } // (a connection that ends with a transaction open)
     exec.release_explicit_table_locks(); // LOCK TABLES V1 -- release on disconnect
 }
 
