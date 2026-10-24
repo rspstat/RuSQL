@@ -152,7 +152,7 @@ function Body() {
 
   return (
     <div className="bt-page">
-      <h1>{t(L("B+Tree: how an index splits and rebalances", "B+Tree: 인덱스가 쪼개지고 균형을 맞추는 모습"))}</h1>
+      <h1>{t(L("B+Tree: how an index splits and rebalances", "B+Tree 애니메이션"))}</h1>
       <p className="bt-sub">
         {t(L("Every key lives in a leaf and the leaves are linked, so a range scan walks along them. A node that grows past its limit splits and sends a key up; a node that shrinks below its minimum borrows from a sibling or merges with it. Try inserting 1 to 12 in order, then deleting keys.",
              "모든 키는 잎에 있고 잎끼리 이어져 있어서 범위 조회는 잎을 따라 걷습니다. 한도를 넘긴 노드는 쪼개져 키 하나를 위로 올리고, 최소에 못 미치는 노드는 형제에게서 빌리거나 합쳐집니다. 1부터 12까지 차례로 넣은 뒤 키를 지워 보세요."))}

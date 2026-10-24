@@ -244,7 +244,7 @@ function Body() {
 
   return (
     <div className="mv-page">
-      <h1>{t(L("MVCC: two sessions and the versions between them", "MVCC: 두 세션과 그 사이의 행 버전"))}</h1>
+      <h1>{t(L("MVCC: two sessions and the versions between them", "MVCC 시뮬레이션"))}</h1>
       <p className="mv-sub">{t(L("Every change makes a new version of a row instead of overwriting it. Each version knows who made it (xmin) and who ended it (xmax); what a session sees is decided by its snapshot. Reset creates the table mvcc_demo in the database you are using, then step through a scenario or type SQL in either session.", "변경은 행을 덮어쓰지 않고 새 버전을 만듭니다. 버전마다 누가 만들었는지(xmin)와 누가 끝냈는지(xmax)가 적혀 있고, 세션에게 무엇이 보이는지는 그 세션의 스냅샷이 정합니다. 초기화는 지금 쓰는 데이터베이스에 mvcc_demo 표를 만듭니다. 시나리오를 한 단계씩 따라가거나 두 세션에 직접 SQL을 입력해 보세요."))}</p>
 
       <div className="mv-bar">

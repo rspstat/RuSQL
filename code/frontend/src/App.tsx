@@ -2106,17 +2106,6 @@ function App() {
           </svg>
         </div>
 
-        {/* Compat: how closely RuSQL answers like MySQL */}
-        <div
-          className={`activity-icon ${activeView === "compat" ? "active" : ""}`}
-          title="MySQL Compatibility"
-          onClick={() => setActiveView("compat")}
-        >
-          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
-            <path d="M12 3v18M5 7h14M5 7l-3 7a3.5 3.5 0 0 0 6 0L5 7zM19 7l-3 7a3.5 3.5 0 0 0 6 0L19 7zM8 21h8"/>
-          </svg>
-        </div>
-
         {/* B+Tree: a teaching B+Tree that splits and rebalances step by step */}
         <div
           className={`activity-icon ${activeView === "btree" ? "active" : ""}`}
@@ -2142,6 +2131,17 @@ function App() {
             <rect x="3" y="3" width="11" height="8" rx="1.5"/>
             <rect x="10" y="13" width="11" height="8" rx="1.5"/>
             <path d="M6 11v3a1.5 1.5 0 0 0 1.5 1.5H10"/>
+          </svg>
+        </div>
+
+        {/* Compat: how closely RuSQL answers like MySQL */}
+        <div
+          className={`activity-icon ${activeView === "compat" ? "active" : ""}`}
+          title="MySQL Compatibility"
+          onClick={() => setActiveView("compat")}
+        >
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M12 3v18M5 7h14M5 7l-3 7a3.5 3.5 0 0 0 6 0L5 7zM19 7l-3 7a3.5 3.5 0 0 0 6 0L19 7zM8 21h8"/>
           </svg>
         </div>
 
