@@ -117,7 +117,7 @@ const SERVER: Item[] = [
     s: L("mysql CLI, DBeaver, JDBC; results carry column types", "mysql CLI, DBeaver, JDBC, 결과에 열 타입 포함"),
   },
   { t: L("Challenge-response auth", "챌린지-응답 인증"), s: L("no plaintext password", "비밀번호를 평문으로 보내지 않음") },
-  { t: L("One session per connection", "연결당 세션 1개"), s: L("own Executor, shared database", "연결마다 독립 Executor, 데이터베이스는 공유") },
+  { t: L("One session per connection", "연결당 세션 1개"), s: L("own Executor, shared database; KILL n stops its query", "연결마다 독립 Executor, 데이터베이스는 공유, KILL n으로 문장 중단") },
 ];
 
 const SIDE_MODULES: Item[] = [

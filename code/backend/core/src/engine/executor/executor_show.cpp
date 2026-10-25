@@ -1,11 +1,14 @@
 // Faithful port of DESCRIBE / SHOW CREATE TABLE / SHOW CREATE VIEW / SHOW INDEX /
 // SHOW PROCESSLIST from rusql-core/src/engine/executor.rs (Phase 8f).
 
+#include "engine/collation.hpp"
 #include "engine/executor/executor.hpp"
 #include "engine/fk_name.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <chrono>
+#include <sstream>
 
 #include "engine/parser/parser.hpp"
 
@@ -446,6 +449,128 @@ StringResult Executor::exec_show_index(const SharedDatabase& s, const std::strin
         out += rows[i];
     }
     return StringResult::Ok(out);
+}
+
+// The rows of SHOW STATUS: the statement counters, the connections, the time the server has been up, the buffer pool and the row locks, by name.
+std::vector<std::pair<std::string, std::string>> server_status_values(const ServerCounters& c, std::size_t threads_connected, std::size_t threads_running,
+                                                                      std::uint64_t redo_log_bytes, const std::array<std::uint64_t, kStatCount>* session) {
+    std::vector<std::pair<std::string, std::string>> rows;
+    auto add = [&](const std::string& name, std::uint64_t value) { rows.emplace_back(name, std::to_string(value)); };
+    add("Aborted_connects", c.aborted_connects.load());
+    for (int i = 0; i < kStatCount; i++) {
+        const std::uint64_t value = session ? (*session)[static_cast<std::size_t>(i)] : c.statements[static_cast<std::size_t>(i)].load();
+        add(stat_name(static_cast<Stat>(i)), value);
+        if (static_cast<Stat>(i) == Stat::Questions) add("Queries", value);
+    }
+    add("Connections", c.connections.load());
+    if (c.buffer_pool) {
+        const std::uint64_t hits = c.buffer_pool->hit_count.load(), misses = c.buffer_pool->miss_count.load();
+        add("Innodb_buffer_pool_pages_data", c.buffer_pool->usage());
+        add("Innodb_buffer_pool_pages_total", c.buffer_pool->capacity);
+        add("Innodb_buffer_pool_read_requests", hits + misses);
+        add("Innodb_buffer_pool_reads", misses);
+    }
+    if (c.lock_mgr) {
+        add("Innodb_deadlocks", c.lock_mgr->deadlock_history().size());
+        add("Innodb_row_lock_current_waits", c.lock_mgr->wait_for_rows().size());
+        add("Innodb_row_lock_waits", c.lock_mgr->waits_total());
+    }
+    add("Innodb_redo_log_bytes", redo_log_bytes); // (the size of the redo log now: a checkpoint empties it)
+    add("Max_used_connections", c.max_used_connections.load());
+    add("Threads_connected", threads_connected);
+    add("Threads_running", threads_running);
+    add("Uptime", static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - c.started).count()));
+    std::sort(rows.begin(), rows.end());
+    return rows;
+}
+
+// SHOW [GLOBAL | SESSION] STATUS [LIKE 'pattern']
+StringResult Executor::exec_show_status(const std::string& sql) {
+    std::string upper = sql;
+    for (char& ch : upper) ch = static_cast<char>(std::toupper(static_cast<unsigned char>(ch)));
+    std::istringstream words(upper);
+    std::string show, scope, status;
+    words >> show >> scope;
+    const bool global = scope == "GLOBAL";
+    std::optional<std::string> pattern;
+    if (const auto like = upper.find(" LIKE "); like != std::string::npos) {
+        const auto open = sql.find('\'', like), close = open == std::string::npos ? std::string::npos : sql.find('\'', open + 1);
+        if (close == std::string::npos) return StringResult::Err("ERROR 1064 (42000): You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the right syntax to use near '" + sql.substr(like) + "'");
+        pattern = sql.substr(open + 1, close - open - 1);
+    }
+    std::size_t connected, running = 0;
+    {
+        auto list = process_list()->lock();
+        connected = list->size();
+        for (auto& [id, p] : *list) {
+            if (p.command == "Query") running++;
+        }
+    }
+    if (running == 0) running = 1; // (this statement)
+    auto rows = server_status_values(*counters(), connected, running, redo_log_ ? redo_log_->bytes() : 0, global ? nullptr : &session_statements_);
+    std::vector<std::vector<std::string>> shown;
+    for (auto& [name, value] : rows) {
+        if (!pattern || collation::like(name, *pattern)) shown.push_back({name, value});
+    }
+    std::vector<std::size_t> width = {13, 5};
+    for (auto& r : shown) {
+        width[0] = std::max(width[0], r[0].size());
+        width[1] = std::max(width[1], r[1].size());
+    }
+    const std::string sep = "+" + std::string(width[0] + 2, '-') + "+" + std::string(width[1] + 2, '-') + "+";
+    auto line = [&](const std::string& a, const std::string& b) { return "| " + a + std::string(width[0] - a.size(), ' ') + " | " + b + std::string(width[1] - b.size(), ' ') + " |"; };
+    std::string out = sep + "\n" + line("Variable_name", "Value") + "\n" + sep + "\n";
+    for (auto& r : shown) out += line(r[0], r[1]) + "\n";
+    out += sep + "\n" + std::to_string(shown.size()) + " row(s) returned.";
+    return StringResult::Ok(out);
+}
+
+// KILL [CONNECTION | QUERY] <id>
+StringResult Executor::exec_kill(const std::string& sql) {
+    std::string text = sql;
+    while (!text.empty() && (text.back() == ';' || std::isspace(static_cast<unsigned char>(text.back())))) text.pop_back();
+    std::istringstream words(text);
+    std::string kill_word, first, id_text, extra;
+    words >> kill_word >> first;
+    bool query_only = false;
+    auto same_word = [](std::string a, const char* b) {
+        for (char& ch : a) ch = static_cast<char>(std::toupper(static_cast<unsigned char>(ch)));
+        return a == b;
+    };
+    if (same_word(first, "CONNECTION") || same_word(first, "QUERY")) {
+        query_only = same_word(first, "QUERY");
+        words >> id_text;
+    } else {
+        id_text = first;
+    }
+    words >> extra;
+    if (id_text.empty() || id_text.find_first_not_of("0123456789") != std::string::npos || id_text.size() > 18 || !extra.empty()) {
+        return StringResult::Err("ERROR 1064 (42000): You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the right syntax to use near '" +
+                                  text + "'");
+    }
+    const std::size_t id = static_cast<std::size_t>(std::stoull(id_text));
+    auto list = process_list()->lock();
+    auto it = list->find(id);
+    if (it == list->end()) return StringResult::Err("ERROR 1094 (HY000): Unknown thread id: " + id_text);
+    ProcessInfo& target = it->second;
+    if (target.user != auth_user && auth_user != "root") return StringResult::Err("ERROR 1095 (HY000): You are not owner of thread " + id_text);
+    affected_rows_ = 0;
+    if (id == session_id) { // a session that kills itself: the query ends with the error, the connection with the answer
+        if (query_only) return StringResult::Err("ERROR 1317 (70100): Query execution was interrupted");
+        kill_state_->store(2);
+        return StringResult::Ok("Connection " + id_text + " killed.");
+    }
+    if (query_only) {
+        // only a session that is running a statement is asked to stop (one that is asleep has nothing to stop: MySQL does nothing either)
+        if (target.command == "Query" && target.kill_state) {
+            int none = 0;
+            target.kill_state->compare_exchange_strong(none, 1);
+        }
+        return StringResult::Ok("Query " + id_text + " interrupted.");
+    }
+    if (target.kill_state) target.kill_state->store(2);
+    if (target.close_connection) target.close_connection(); // (a session that waits for its next statement is woken by its connection closing)
+    return StringResult::Ok("Connection " + id_text + " killed.");
 }
 
 StringResult Executor::exec_show_processlist(const SharedDatabase& s) const {

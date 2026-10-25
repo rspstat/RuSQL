@@ -1,6 +1,9 @@
+#include <atomic>
+#include <chrono>
 #include <filesystem>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "catch.hpp"
@@ -492,7 +495,8 @@ TEST_CASE("EXPLAIN ANALYZE reports the steps of the statement with their rows an
         return r.value();
     };
     const std::string joined = plan("SELECT c.city, SUM(o.amount) FROM o JOIN c ON o.cid = c.id GROUP BY c.city ORDER BY c.city");
-    REQUIRE(joined.find("Step 1 Scan d.o + JOIN d.c : 4 rows") != std::string::npos);
+    REQUIRE(joined.find("Step 1 Scan d.o : 4 rows") != std::string::npos); // (R53: the join is a step of its own, with its algorithm)
+    REQUIRE(joined.find("Step 2 Join d.c (inner, ") != std::string::npos);
     REQUIRE(joined.find("Group / aggregate : 2 rows") != std::string::npos);
     REQUIRE(joined.find("Sort groups : 2 rows") != std::string::npos);
     REQUIRE(plan("SELECT COUNT(*) FROM o").find("Aggregate : 1 rows") != std::string::npos);
@@ -849,4 +853,245 @@ TEST_CASE("R52: a table joined with itself in UPDATE / DELETE, the SET value tha
             Rows{{"Fay", "0"}, {"Eve", "1"}, {"Ann", "2"}, {"Bob", "2"}, {"Cid", "2"}, {"Dee", "2"}});
     // DISTINCT over a scalar subquery of the select list collapsed every row into one
     REQUIRE(q(ex, "SELECT DISTINCT (SELECT COUNT(*) FROM ee x WHERE x.dept = e.dept) AS n FROM ee e ORDER BY n") == Rows{{"0"}, {"1"}, {"2"}});
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// R53: KILL [QUERY] n, SHOW STATUS with real counters, EXPLAIN ANALYZE that names the join algorithm and the subquery time.
+
+namespace {
+long long status_value(Executor& ex, const std::string& scope, const std::string& name) {
+    auto rows = q(ex, "SHOW " + scope + " STATUS LIKE '" + name + "'");
+    REQUIRE(rows.size() == 1);
+    return std::stoll(rows[0][1]);
+}
+
+// the id of the session of a user (the processlist is read without the lock of the database)
+std::string session_of(Executor& ex, const std::string& user) {
+    auto rows = q(ex, "SELECT ID FROM information_schema.processlist WHERE USER = '" + user + "'");
+    REQUIRE(rows.size() == 1);
+    return rows[0][0];
+}
+
+// waits (at most a few seconds) until a session shows the command in the processlist
+void wait_for_command(Executor& ex, const std::string& user, const std::string& command) {
+    for (int i = 0; i < 300; i++) {
+        if (q(ex, "SELECT ID FROM information_schema.processlist WHERE USER = '" + user + "' AND COMMAND = '" + command + "'").size() == 1) return;
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    FAIL("the session of " << user << " never showed the command " << command);
+}
+
+std::size_t characters(const std::string& text) {
+    std::size_t n = 0;
+    for (unsigned char c : text) n += (c & 0xC0) != 0x80;
+    return n;
+}
+} // namespace
+
+TEST_CASE("R53: SHOW STATUS counts the statements by kind, per session and for the server, and the sessions", "[r53][status]") {
+    TempDataDir dir("r53_status");
+    Executor ex(dir.path);
+    ex.register_process("root", "localhost");
+    ok(ex, "CREATE DATABASE d");
+    ok(ex, "USE d");
+    ok(ex, "CREATE TABLE s (id INT PRIMARY KEY, v INT)");
+    const long long inserts0 = status_value(ex, "GLOBAL", "Com_insert");
+    const long long questions0 = status_value(ex, "SESSION", "Questions");
+    ok(ex, "INSERT INTO s VALUES (1, 10)");
+    ok(ex, "INSERT INTO s VALUES (2, 20)");
+    ok(ex, "INSERT INTO s VALUES (3, 30)");
+    ok(ex, "UPDATE s SET v = v + 1 WHERE id = 1");
+    ok(ex, "DELETE FROM s WHERE id = 3");
+    q(ex, "SELECT * FROM s");
+    q(ex, "SELECT * FROM s WHERE id = 1");
+    // the kinds are counted for the session and the server alike
+    REQUIRE(status_value(ex, "SESSION", "Com_insert") == 3);
+    REQUIRE(status_value(ex, "SESSION", "Com_update") == 1);
+    REQUIRE(status_value(ex, "SESSION", "Com_delete") == 1);
+    REQUIRE(status_value(ex, "SESSION", "Com_select") == 2);
+    REQUIRE(status_value(ex, "SESSION", "Com_create_table") == 1);
+    REQUIRE(status_value(ex, "GLOBAL", "Com_insert") == inserts0 + 3);
+    REQUIRE(status_value(ex, "SESSION", "Questions") >= questions0 + 7); // (every statement the client sent, the SHOW ones too)
+    // SHOW STATUS without a scope is the session's, and a failed statement is still a statement that was sent
+    REQUIRE(q(ex, "SHOW STATUS LIKE 'Com_insert'") == Rows{{"Com_insert", "3"}});
+    REQUIRE(ex.execute_sql("INSERT INTO s VALUES (1, 99)").is_err());
+    REQUIRE(status_value(ex, "SESSION", "Com_insert") == 4);
+    // LIKE: the names that match, with % and _
+    auto com = q(ex, "SHOW STATUS LIKE 'Com_%'");
+    REQUIRE(com.size() >= 10);
+    for (auto& row : com) REQUIRE(row[0].rfind("Com_", 0) == 0);
+    REQUIRE(q(ex, "SHOW STATUS LIKE 'no_such_counter'").empty());
+    // another session: its own statements are its own, the server's are everybody's, and the sessions are counted
+    auto shared = ex.get_shared();
+    Executor other = Executor::new_session(shared);
+    other.auth_user = "bob";
+    other.register_process("bob", "localhost");
+    ok(other, "USE d");
+    REQUIRE(status_value(other, "SESSION", "Com_insert") == 0);
+    REQUIRE(status_value(other, "GLOBAL", "Com_insert") == inserts0 + 4);
+    ok(other, "INSERT INTO s VALUES (10, 1)");
+    REQUIRE(status_value(other, "SESSION", "Com_insert") == 1);
+    REQUIRE(status_value(ex, "SESSION", "Com_insert") == 4);
+    REQUIRE(status_value(ex, "GLOBAL", "Com_insert") == inserts0 + 5);
+    REQUIRE(status_value(ex, "GLOBAL", "Threads_connected") == 2);
+    REQUIRE(status_value(ex, "GLOBAL", "Connections") >= 2);
+    REQUIRE(status_value(ex, "GLOBAL", "Max_used_connections") >= 2);
+    other.deregister_process();
+    REQUIRE(status_value(ex, "GLOBAL", "Threads_connected") == 1);
+    REQUIRE(status_value(ex, "GLOBAL", "Max_used_connections") >= 2); // (the most there were, not the number now)
+    // the buffer pool: the size it was made with; the redo log: what the committed inserts above wrote and no checkpoint has emptied
+    REQUIRE(status_value(ex, "GLOBAL", "Innodb_buffer_pool_pages_total") == 64);
+    REQUIRE(status_value(ex, "GLOBAL", "Innodb_redo_log_bytes") > 0);
+    REQUIRE(status_value(ex, "GLOBAL", "Uptime") >= 0);
+    // the same numbers as a table, to query
+    REQUIRE(q(ex, "SELECT VARIABLE_VALUE FROM information_schema.global_status WHERE VARIABLE_NAME = 'Com_insert'") == Rows{{std::to_string(inserts0 + 5)}});
+    REQUIRE(q(ex, "SELECT COUNT(*) FROM information_schema.global_status WHERE VARIABLE_NAME LIKE 'Innodb%'") == Rows{{"8"}});
+}
+
+TEST_CASE("R53: KILL QUERY stops a SELECT that is running and a wait for a row lock; KILL CONNECTION ends the session", "[r53][kill]") {
+    TempDataDir dir("r53_kill");
+    Executor ex(dir.path);
+    ex.register_process("root", "localhost");
+    ok(ex, "CREATE DATABASE d");
+    ok(ex, "USE d");
+    ok(ex, "CREATE TABLE big (id INT PRIMARY KEY, g INT, v INT)");
+    for (int start = 1; start <= 40000; start += 1000) {
+        std::string sql = "INSERT INTO big VALUES ";
+        for (int i = start; i < start + 1000; i++) sql += std::string(i == start ? "" : ",") + "(" + std::to_string(i) + "," + std::to_string(i % 100) + "," + std::to_string(i % 7) + ")";
+        ok(ex, sql);
+    }
+    ok(ex, "CREATE TABLE acct (id INT PRIMARY KEY, bal INT)");
+    ok(ex, "INSERT INTO acct VALUES (1, 100), (2, 200)");
+
+    auto shared = ex.get_shared();
+    Executor victim = Executor::new_session(shared);
+    victim.auth_user = "bob";
+    victim.register_process("bob", "localhost");
+    ok(victim, "USE d");
+    const std::string victim_id = session_of(ex, "bob");
+
+    // a SELECT that would run for a long time (a correlated subquery for every row) is stopped at the next row, and the session goes on
+    {
+        std::string answer;
+        bool failed = false;
+        std::thread runner([&] {
+            auto r = victim.execute_sql("SELECT COUNT(*) FROM big a WHERE EXISTS (SELECT 1 FROM big b WHERE b.v = a.v AND b.g = a.g + 1000)");
+            failed = r.is_err();
+            answer = failed ? r.error() : r.value();
+        });
+        wait_for_command(ex, "bob", "Query");
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        REQUIRE(q(ex, "SELECT COMMAND FROM information_schema.processlist WHERE USER = 'bob'") == Rows{{"Query"}});
+        const auto killed_at = std::chrono::steady_clock::now();
+        REQUIRE(ex.execute_sql("KILL QUERY " + victim_id).value() == "Query " + victim_id + " interrupted.");
+        runner.join();
+        REQUIRE(std::chrono::steady_clock::now() - killed_at < std::chrono::seconds(5)); // (it stops at the next row, it does not run on to its end)
+        REQUIRE(failed);
+        REQUIRE(answer.find("ERROR 1317 (70100): Query execution was interrupted") != std::string::npos);
+        REQUIRE(q(ex, "SELECT COMMAND FROM information_schema.processlist WHERE USER = 'bob'") == Rows{{"Sleep"}});
+        REQUIRE(q(victim, "SELECT COUNT(*) FROM acct") == Rows{{"2"}}); // (the session is whole, and the request to stop does not wait for its next statement)
+        REQUIRE_FALSE(victim.connection_killed());
+    }
+
+    // KILL QUERY of a session that is asleep does nothing to its next statement
+    REQUIRE(ex.execute_sql("KILL QUERY " + victim_id).is_ok());
+    REQUIRE(q(victim, "SELECT COUNT(*) FROM acct") == Rows{{"2"}});
+
+    // a wait for a row lock ends when its statement is killed; the row is the holder's again and nothing was written
+    {
+        Executor holder = Executor::new_session(shared);
+        holder.auth_user = "carl";
+        holder.register_process("carl", "localhost");
+        ok(holder, "USE d");
+        ok(holder, "BEGIN");
+        ok(holder, "UPDATE acct SET bal = bal + 1 WHERE id = 1");
+        const long long waits0 = status_value(ex, "GLOBAL", "Innodb_row_lock_waits");
+        std::string answer;
+        bool failed = false;
+        std::thread waiter([&] {
+            auto r = victim.execute_sql("UPDATE acct SET bal = bal + 5 WHERE id = 1");
+            failed = r.is_err();
+            answer = failed ? r.error() : r.value();
+        });
+        wait_for_command(ex, "bob", "Query");
+        for (int i = 0; i < 300 && status_value(ex, "GLOBAL", "Innodb_row_lock_current_waits") == 0; i++) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        REQUIRE(status_value(ex, "GLOBAL", "Innodb_row_lock_current_waits") == 1);
+        REQUIRE(status_value(ex, "GLOBAL", "Innodb_row_lock_waits") == waits0 + 1);
+        const auto killed_at = std::chrono::steady_clock::now();
+        REQUIRE(ex.execute_sql("KILL QUERY " + victim_id).is_ok());
+        waiter.join();
+        REQUIRE(std::chrono::steady_clock::now() - killed_at < std::chrono::seconds(5)); // (the wait ends at once, not when the lock wait times out after 50 seconds)
+        REQUIRE(failed);
+        REQUIRE(answer.find("ERROR 1317 (70100): Query execution was interrupted") != std::string::npos);
+        REQUIRE(status_value(ex, "GLOBAL", "Innodb_row_lock_current_waits") == 0);
+        ok(holder, "ROLLBACK");
+        REQUIRE(q(ex, "SELECT bal FROM acct WHERE id = 1") == Rows{{"100"}});
+
+        // KILL CONNECTION: the session is marked as killed (the server closes its connection), and only the owner or root may do it
+        const std::string holder_id = session_of(ex, "carl");
+        REQUIRE(fails(victim, "KILL " + holder_id).find("ERROR 1095 (HY000): You are not owner of thread " + holder_id) != std::string::npos);
+        REQUIRE_FALSE(holder.connection_killed());
+        REQUIRE(ex.execute_sql("KILL CONNECTION " + holder_id).value() == "Connection " + holder_id + " killed.");
+        REQUIRE(holder.connection_killed());
+        holder.deregister_process();
+    }
+
+    // the errors
+    REQUIRE(fails(ex, "KILL 999999").find("ERROR 1094 (HY000): Unknown thread id: 999999") != std::string::npos);
+    REQUIRE(fails(ex, "KILL QUERY abc").find("ERROR 1064 (42000)") != std::string::npos);
+    REQUIRE(fails(ex, "KILL").find("ERROR 1064 (42000)") != std::string::npos);
+    REQUIRE(fails(ex, "KILL QUERY " + std::to_string(ex.session_id)).find("ERROR 1317 (70100)") != std::string::npos); // (a session that kills its own query)
+    REQUIRE(status_value(ex, "GLOBAL", "Com_kill") >= 4);
+    REQUIRE(ex.execute_sql("KILL " + std::to_string(ex.session_id)).value() == "Connection " + std::to_string(ex.session_id) + " killed.");
+    REQUIRE(ex.connection_killed());
+}
+
+TEST_CASE("R53: EXPLAIN ANALYZE names the way each join was done and tells the time of the subqueries apart from the steps", "[r53][explain]") {
+    TempDataDir dir("r53_explain");
+    Executor ex(dir.path);
+    ok(ex, "CREATE DATABASE d");
+    ok(ex, "USE d");
+    ok(ex, "CREATE TABLE ea (id INT PRIMARY KEY, g INT, v INT)");
+    ok(ex, "CREATE TABLE eb (id INT PRIMARY KEY, a_id INT, w INT)");
+    ok(ex, "INSERT INTO ea VALUES (1,1,10),(2,1,20),(3,2,30),(4,2,40)");
+    ok(ex, "INSERT INTO eb VALUES (1,1,5),(2,2,6),(3,3,7),(4,3,8),(5,4,9)");
+    auto text = [&](const std::string& sql) {
+        auto r = ex.execute_sql(sql);
+        REQUIRE(r.is_ok());
+        return r.value();
+    };
+    // a join is a step of its own, with its kind and the algorithm that did it
+    std::string inner = text("EXPLAIN ANALYZE SELECT * FROM ea JOIN eb ON eb.a_id = ea.id WHERE ea.v > 10");
+    REQUIRE(inner.find("Step 1 Scan d.ea : ") != std::string::npos);
+    REQUIRE(inner.find("Step 2 Join d.eb (inner, ") != std::string::npos);
+    REQUIRE(inner.find("Step 3 Filter (WHERE) and expressions : 4 rows") != std::string::npos);
+    std::string left = text("EXPLAIN ANALYZE SELECT * FROM ea LEFT JOIN eb ON eb.a_id = ea.id");
+    REQUIRE(left.find("Join d.eb (left, ") != std::string::npos);
+    REQUIRE((left.find("hash join)") != std::string::npos || left.find("nested loop)") != std::string::npos || left.find("sort-merge join)") != std::string::npos));
+    REQUIRE(text("EXPLAIN ANALYZE SELECT * FROM ea CROSS JOIN eb").find("Join d.eb (cross, ") != std::string::npos);
+    // one table: a scan
+    REQUIRE(text("EXPLAIN ANALYZE SELECT * FROM ea WHERE v > 10").find("Step 1 Scan d.ea : 3 rows") != std::string::npos);
+    // a subquery that names nothing of the outer query runs once; one that does, for every row. Their time is told apart, as it is inside the steps
+    std::string once = text("EXPLAIN ANALYZE SELECT * FROM ea WHERE v > (SELECT AVG(v) FROM ea)");
+    REQUIRE(once.find("Subqueries not correlated, run once : 1 run(s), ") != std::string::npos);
+    REQUIRE(once.find("(inside the steps below)") != std::string::npos);
+    REQUIRE(once.find("Subqueries correlated") == std::string::npos);
+    std::string per_row = text("EXPLAIN ANALYZE SELECT id, (SELECT COUNT(*) FROM eb WHERE eb.a_id = ea.id) FROM ea");
+    REQUIRE(per_row.find("Subqueries correlated, run per row : 4 run(s), ") != std::string::npos);
+    REQUIRE(per_row.find("Subqueries not correlated") == std::string::npos);
+    REQUIRE(text("EXPLAIN ANALYZE SELECT * FROM ea").find("Subqueries") == std::string::npos);
+    // a long label widens the box: every line has the width of the top line, whatever its length
+    for (const std::string& sql : {std::string("EXPLAIN ANALYZE SELECT * FROM ea JOIN eb ON eb.a_id = ea.id WHERE ea.v > 10"),
+                                   std::string("EXPLAIN ANALYZE SELECT id, (SELECT COUNT(*) FROM eb WHERE eb.a_id = ea.id) FROM ea")}) {
+        std::istringstream in(text(sql));
+        std::string line;
+        std::size_t width = 0;
+        while (std::getline(in, line)) {
+            if (line.empty()) continue;
+            if (width == 0) width = characters(line);
+            INFO(line);
+            REQUIRE(characters(line) == width);
+        }
+        REQUIRE(width > 70);
+    }
 }

@@ -2312,6 +2312,36 @@ VS Code 스타일 탭 드래그 순서 변경(요청의 1번 항목)은 같은 �
 - FLOAT 열 값이 유효숫자 여섯 자리를 넘으면 `MIN`/`MAX`/`GREATEST`/`COALESCE`가 저장된 글자를 보여 주고(MySQL은 여섯 자리) `UPDATE … SET d = f`·`INSERT … SELECT`(FLOAT → DOUBLE 열)는 짧은 글자를 복사한다. 드물어서 남겼다.
 - `PI()`는 MySQL이 화면에 `3.141593`으로 보여 주는데 RuSQL은 전체 자릿수를 낸다(식에 쓰면 RuSQL 쪽이 정확해서 일부러 그대로).
 
+### 10월 25일 — R53: `KILL [QUERY] n`, 실제 상태 카운터 `SHOW STATUS`, `EXPLAIN ANALYZE` 확장, 그리고 `SQL.md`(지원 문법 전체 목록)
+
+**왜 이 항목인가**: 추천표에서 사용자가 "KILL [QUERY] n, 실제 상태 카운터(SHOW STATUS), EXPLAIN ANALYZE 확장"을 고르고, 지원하는 SQL 문법을 하나도 빠짐없이 한 줄씩 정리한 `docs/mds/SQL.md`를 만들라고 했다. 처리 순서는 늘 하던 대로: 코드 먼저 → 항목마다 시험 → 문서 → 커밋·푸시.
+
+**만든 것 (엔진·서버)**
+- **`KILL [QUERY | CONNECTION] n`**: 세션 목록(`SharedDatabase::process_list`)은 데이터베이스 락(`FairSharedMutex`: 쓰는 쪽이 기다리면 새 읽기도 막힘)과 따로 뮤텍스를 가지고 있어, `KILL`은 `execute_sql` 맨 앞(락을 잡기 전)에서 처리한다. 대상 세션이 락을 쥐고 있어도 닿는다. `KILL QUERY`는 대상이 문장을 실행 중일 때만(`command == "Query"`) 세션의 `kill_state`를 1로 올리고(자는 세션은 아무 일 없음), 그 상태는 세션이 "Sleep"으로 돌아갈 때 지워진다. 중단 지점은 두 곳이다: ① SELECT의 행 루프(`statement_deadline.hpp`의 `tick()`/`check_now()`가 `kill_read_flag`를 읽음, 문장 시계와 같은 자리), ② 행 잠금 대기(`LockManager::acquire/acquire_shared`가 `cv_.wait_until`을 100ms마다 깨워 `kill_flag`를 확인). 중단된 문장은 `ERROR 1317 (70100): Query execution was interrupted`로 끝난다. 실행 중인 쓰기 문장은 반쯤 쓰다 멈추면 되돌릴 길이 없어 일부러 끝까지 돌게 했다(`kill_flag`는 잠금 대기에서만 읽고 쓰기 루프는 읽지 않음). `KILL [CONNECTION] n`은 `kill_state`를 2(끊김, 지워지지 않음)로 올리고 세션이 등록할 때 맡긴 `close_connection`(서버: `shutdown` + `CancelIoEx`로 소켓 읽기를 깨움; Windows에서 `shutdown`만으로는 막힌 `recv`가 안 깨어난다)을 부른다. 서버 루프가 답을 보낸 뒤 빠져나가며 세션을 정리해 열린 트랜잭션을 되돌리고 락을 푼다. 권한은 같은 사용자 또는 root, 오류는 없는 번호 1094·남의 세션 1095·문법 1064, 자기 문장을 `KILL QUERY`하면 1317, 자기 연결을 `KILL`하면 응답 뒤에 끊긴다.
+- **MySQL 핸드셰이크의 연결 번호 = 세션 번호**: MySQL 클라이언트가 읽는 번호(`mysql_thread_id`)는 리스너의 별도 카운터였고 프로세스 목록의 Id와 달라, 클라이언트가 읽은 번호로 `KILL`하면 "Unknown thread id"였다. 세션을 핸드셰이크 전에 만들어 그 번호를 보낸다(`mysql.cpp`).
+- **`SHOW [GLOBAL | SESSION] STATUS [LIKE]`와 `information_schema.global_status`** (`server_status.hpp`, `executor_show.cpp`): MySQL 프로토콜에는 고정값(Questions 0, Uptime 0, Threads 1)뿐이었고 네이티브에는 없었다. 이제 두 프로토콜 모두 실제 카운터: `Com_select/insert/update/delete/replace/begin/commit/rollback/call/create_table/drop_table/alter_table/create_index/drop_index/kill`, `Questions`·`Queries`, `Connections`, `Max_used_connections`, `Aborted_connects`(인증 실패), `Threads_connected`·`Threads_running`, `Uptime`, `Innodb_buffer_pool_pages_data/total`·`read_requests`·`reads`, `Innodb_deadlocks`, `Innodb_row_lock_current_waits`·`Innodb_row_lock_waits`, `Innodb_redo_log_bytes`. `GLOBAL`은 서버 전체(원자 변수, 세션이 `SharedDatabase`에서 한 번 받아 둠), `SESSION`(기본)은 그 세션이 보낸 문장 수. 데이터베이스 락을 잡지 않아서 쓰기 문장이 락을 쥐고 있어도 막히지 않는다. 실패한 문장도 "보낸 문장"으로 센다. 일반 SHOW 경로로 보내면 읽기 락을 잡아 쓰는 문장 뒤에 줄을 서므로, `execute_sql` 앞쪽에서 가로채 락 없이 답한다.
+- **`EXPLAIN ANALYZE` 확장** (`executor_select.cpp`, `executor_explain.cpp`, `explain_trace.hpp`): 조인이 단계가 되었다. 전에는 `Scan a + JOIN b` 한 줄이던 것이 `Scan a` / `Join b (inner|left|right|full outer|cross|natural, hash join|sort-merge join|index nested loop|reverse index nested loop|nested loop)` / `Join b (lateral, subquery for every row)` / `Filter (WHERE) and expressions`로 나뉘고, 플래너가 고른 알고리즘이 실행에서 다른 것으로 바뀌면(트랜잭션 안에서 인덱스 NL이 해시로 폴백 등) 실제로 쓴 이름을 말한다. 하위 질의는 단계로 만들지 않았다(시간이 그것을 부른 단계 안에 들어 있어 단계로 세면 비율의 합이 100%를 넘는다): 별도 줄로 "Subqueries not correlated, run once : N run(s), X ms (inside the steps below)", "Subqueries correlated, run per row : …"를 보여 준다(가장 바깥 하위 질의만 센다). 긴 단계 이름이 오른쪽 변을 넘어 상자가 어긋나서, 가장 긴 줄에 맞춰 상자 전체를 넓힌다(문자 수 기준이라 `→`·`≈` 같은 여러 바이트 글자가 있는 옛 줄의 어긋남도 같이 고쳐졌다).
+
+**문서·앱**
+- **`docs/mds/SQL.md` (새 문서)**: 지원 문법 전체를 한 줄씩(`SELECT : 데이터 조회` 식). 16개 장 — 데이터베이스, CREATE TABLE(컬럼·제약·파티션), ALTER/DROP/RENAME/TRUNCATE, 인덱스·뷰·별칭, INSERT·REPLACE·UPDATE·DELETE·MERGE, SELECT(절·조인·집합·CTE·잠금 읽기·윈도), 표현식·연산자·리터럴, 타입, 함수 204개(집계·윈도·문자열·정규식·숫자·날짜·조건·JSON·시스템 — 이름 205개를 불러 보아 `BIT_XOR`만 없음), 트랜잭션·SET·PREPARE, 조회·관리·모니터링(`information_schema` 19개 표 포함), 사용자·권한·역할, 프로시저·함수·트리거와 제어문, MySQL 프로토콜 전용 문법, 주석 형식, 지원하지 않는 문법. 쓰는 방법: 문법 하나하나를 `$TEMP/mcp_it/sql_probe.py` 등으로 실행 중인 엔진에 넣어 받아들여지는 것만 적고(459문장 + 추가 탐침 약 120문장), 함수 이름은 호출해 보아 "does not exist"가 아닌 것만 남겼다. MySQL 프로토콜에서만 되는 문법은 따로 모았다(`pymysql`로 확인).
+- **앱**: `EXPLAIN ANALYZE`의 단계 이름이 길어져 단계 막대의 이름 칸(190px 고정)이 "2. Join d.eb (inner,…"에서 잘렸다. 단계 목록을 하나의 격자로 만들어(이름 칸 = 가장 긴 이름의 너비, 최대 60%) 이름이 다 보이고 막대가 줄 맞춰 있다(헤드리스 Edge로 실제 CSS 전후를 그려 확인; 좁은 칸에서는 이전처럼 말줄임). Diagram 페이지의 서버 문구에 KILL·SHOW STATUS를 더했다.
+- 문서: README, `FUNCTIONS.md`(R53 네 항목, information_schema 19개), `DIFF.md`(KILL·SHOW STATUS·EXPLAIN 행), `SUMMARY.md`, `DEMO.md`(락 대기를 `KILL QUERY`로 푸는 장면), `RECOMMAND.md`(세 항목 제거, 새 항목 추가).
+
+**검증**
+- 새 C++ 시험 `[r53]` 3 케이스(SHOW STATUS의 문장 종류별·세션별·서버 전체 카운터·연결 수·redo·information_schema, KILL의 SELECT 중단·락 대기 중단·권한·오류·연결 끊기·자는 세션, EXPLAIN ANALYZE의 조인 단계·하위 질의 줄·상자 너비). **심은 버그 9종 모두 잡힘**: 락 대기가 KILL을 무시, 소유자 검사 제거, SESSION이 서버 값을 보임, 상자 넓히기 제거, 하위 질의 종류 뒤바꿈, 조인 단계 표시 제거, SELECT가 중단되지 않음(시험이 끝나지 않아 100초 제한에 걸림), `KILL QUERY`가 연결까지 끊음, `Com_kill` 미집계. **처음에는 락 대기 mutant가 살아남았다**: 잠금 대기가 KILL을 못 봐도 50초 뒤 락 대기 시간 초과로 문장이 끝나고, 중단 요청이 있으면 그 오류를 1317로 바꾸기 때문에 시험이 51초 걸려 통과했다. 중단 뒤 5초 안에 끝나야 한다는 단언을 넣고 같은 mutant가 잡힘(SELECT 쪽에도 같은 단언).
+- 옛 시험 하나 고침: R45의 EXPLAIN ANALYZE 시험이 단계 이름 `Scan d.o + JOIN d.c`를 찾던 것을 `Scan d.o` + `Join d.c (inner, `로.
+- 실서버 확인: 네이티브(`kill_test.py`: 긴 SELECT 1.5초에 중단→1317·세션 계속 사용, 락 대기 중단, 연결 끊김→트랜잭션 되돌려져 행이 풀림, 오류 1094·1064·자기 자신)와 MySQL 프로토콜(`pymysql`: 핸드셰이크 번호로 `KILL QUERY`, `SHOW STATUS`, `KILL CONNECTION`). `SHOW STATUS`는 쓰기가 락을 쥔 동안에도 바로 답했다.
+- 무작위 대조 12종 위반 0. 전체 시험 **799 케이스 / 1,506,715 assertions**을 Release 기본으로, 1,506,714를 `RUSQL_DML_INDEX_MIN_ROWS=0`으로 통과(첫 바퀴에서 옛 R45 시험 하나가 실패해 위처럼 고친 뒤 두 설정 모두 처음부터 다시 돌림). 호환성 점수판은 R52와 같다: 코퍼스 28개, 문장 2,759개 중 차이 8개(스냅샷은 시험 수만 바뀜).
+- 성능(SELECT의 행 루프에 중단 요청 읽기 하나, 문장마다 세션 상태 기록과 카운터가 늘었다): 10만 행·5만 그룹의 GROUP BY·HAVING 7문장을 **HEAD(R52) 빌드와 새 빌드로 번갈아 두 바퀴**(각 문장 가장 빠른 값) 재서 둘이 ±3% 안에서 같았다 — 예: `no HAVING` 새 206·202ms / HEAD 199·205ms, `HAVING SUM(v) > 100` 새 242·231 / HEAD 236·234. (R52 기록의 161ms는 그때 기계 상태의 값이라 이번 기계에서는 두 빌드 모두 200ms 안팎이다.)
+- **하지 않은 것**: Debug 빌드, 크래시 퍼저, MySQL 코퍼스(카운터 값은 MySQL과 같을 수 없어 비교 대상이 아님).
+
+**조사하다 알게 된 것 (고치지 않음)**
+- **`LIKE`가 `\%`·`\_`를 모른다**: 렉서가 문자열 안의 `\%`·`\_`에서 역슬래시를 지워(`'axb' LIKE 'a\_b'`가 1, MySQL은 0, MySQL은 두 글자를 그대로 남긴다) 와일드카드가 되고, `LIKE … ESCAPE '!'`는 문법 오류. `LIKE` 비교기(`collation::like`)가 이스케이프를 읽지 않는다. 진짜 MySQL과 비교되는 조용한 오답이라 다음 오답 라운드의 후보(`SHOW STATUS LIKE 'Com\_%'` 시험을 쓰다 발견).
+- **`USE`가 redo 로그를 비운다**: `USE db`는 읽기 전용으로 분류되지 않아 쌓인 redo 로그를 체크포인트(테이블 파일 재작성)한 뒤 실행한다(`INSERT` 뒤 `Innodb_redo_log_bytes` 84 → `USE` 뒤 0). 앱과 MCP(`execute_sql(database=…)`)는 문장마다 `USE`를 먼저 보내서 redo의 이점(커밋 = 작은 배치 + fsync 1번)이 없어질 수 있다. 성능 동결 중이라 하지 않고 여쭙기로 했다.
+- **MySQL 프로토콜의 오류 번호는 전부 1064**다(진짜 번호는 메시지 글자 `ERROR 1317 (70100): …` 안에만). 드라이버는 번호로 재시도·중단을 정한다.
+- `Innodb_buffer_pool_read_requests`·`reads`는 SQL을 아무리 돌려도 0이다: 읽기는 메모리의 표에서 하고 버퍼 풀은 쓰기(write-through)와 CTE만 지난다. 카운터가 거짓이라기보다 구조의 정직한 표시다.
+- `DELIMITER`는 이 엔진이 모르고(앱은 `;`로 나눔) `DESC`·`SHOW COLUMNS` 같은 몇몇 문장은 MySQL 프로토콜에서만 된다(`SQL.md` 14장).
+
 ## 요약: 1학기 대비 2학기에 달라진 것
 
 

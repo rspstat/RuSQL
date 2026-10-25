@@ -128,7 +128,7 @@
 | CTE (WITH) | ✓ | ✓ | ✓ | ✓ |
 | 재귀 CTE (WITH RECURSIVE) | ✓ | ✓ | ✓ (CONNECT BY로도 가능) | ✓ |
 | CASE WHEN | ✓ | ✓ | ✓ | ✓ |
-| EXPLAIN / EXPLAIN ANALYZE | ✓ | ✓ | ✓ (EXPLAIN PLAN FOR + DBMS_XPLAN) | ✓ (ANALYZE는 단계별 행 수·시간·비율을 주고 앱이 단계 막대로 그림) |
+| EXPLAIN / EXPLAIN ANALYZE | ✓ | ✓ | ✓ (EXPLAIN PLAN FOR + DBMS_XPLAN) | ✓ (ANALYZE는 단계별 행 수·시간·비율을 주고, 조인 단계마다 종류와 알고리즘(해시·정렬 병합·인덱스 NL·중첩 루프)을, 하위 질의는 한 번 도는 것과 행마다 도는 것의 실행 수·시간을 따로 말해 주며, 앱이 단계 막대로 그림) |
 
 ---
 
@@ -281,10 +281,12 @@
 | 항목 | MySQL | PostgreSQL | Oracle | RuSQL |
 |------|-------|------------|--------|--------|
 | SHOW TABLES / DESCRIBE | ✓ | 유사 (\\d, information_schema) | 유사 (ALL_TABLES, DESC) | ✓ |
-| INFORMATION_SCHEMA | ✓ (전체) | ✓ (전체) | ✓ (ALL_*/DBA_*/USER_* 딕셔너리 뷰) | ✓ (18개 가상 뷰 — 세션·트랜잭션·락·참조 제약 표 포함, `row_versions`(모든 행 버전과 세션별 가시성)와 `recovery`(마지막 시작의 복구 내용)는 RuSQL 전용) |
+| INFORMATION_SCHEMA | ✓ (전체) | ✓ (전체) | ✓ (ALL_*/DBA_*/USER_* 딕셔너리 뷰) | ✓ (19개 가상 뷰 — 세션·트랜잭션·락·참조 제약 표 포함, `row_versions`(모든 행 버전과 세션별 가시성)와 `recovery`(마지막 시작의 복구 내용)는 RuSQL 전용, `global_status`는 SHOW GLOBAL STATUS와 같은 값) |
 | SHOW DATABASES | ✓ | ✓ (\\l) | △ (SELECT FROM V$DATABASE) | ✓ |
 | SHOW CREATE TABLE | ✓ | ✓ (pg_dump) | ✓ (DBMS_METADATA) | ✓ |
 | SHOW PROCESSLIST | ✓ | pg_stat_activity | V$SESSION | ✓ (현재 세션 정보) |
+| KILL [QUERY \| CONNECTION] n | ✓ | pg_cancel_backend / pg_terminate_backend | ALTER SYSTEM KILL SESSION | ✓ (SELECT의 행 읽기와 행 잠금 대기를 멈춤, 쓰기 문장은 끝까지 돌고, 연결을 끊으면 그 세션의 트랜잭션을 되돌림. 소유자 또는 root만, 오류 1094·1095·1317) |
+| SHOW STATUS | ✓ (GLOBAL · SESSION) | pg_stat_* 뷰 | V$SYSSTAT | ✓ (GLOBAL · SESSION, 문장 종류별 `Com_*`·`Questions`·`Connections`·`Threads_*`·`Uptime`·`Innodb_*` 버퍼 풀·redo·행 잠금 대기, 잠금 없이 읽음; 표로는 `information_schema.global_status`) |
 | SHOW LOCKS | ✓ | pg_locks | V$LOCK | ✓ |
 | CHECKPOINT | ✓ | ✓ | ✓ (ALTER SYSTEM CHECKPOINT) | ✓ |
 | VACUUM | ✓ (자동 Purge) | ✓ (AUTOVACUUM) | ✓ (자동 Undo 관리) | ✓ (수동 + DML 200회 AUTO) |

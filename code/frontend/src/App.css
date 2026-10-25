@@ -3083,23 +3083,26 @@ th.result-rownum { background: #252526 !important; font-weight: 400 !important; 
   margin-top: 10px;
   padding-top: 8px;
   border-top: 1px solid #3c3c3c;
+  /* one grid for all the steps: the label column is as wide as the longest label (a join step names its algorithm: "Join d.eb (inner, reverse index nested loop)"), up to 60% of the width, so the bars line up */
+  display: grid;
+  grid-template-columns: fit-content(60%) minmax(80px, 1fr) max-content;
+  column-gap: 10px;
+  row-gap: 6px;
+  align-items: center;
+  font-size: 12px;
 }
 .explain-steps-title {
+  grid-column: 1 / -1;
   color: #4ec9b0;
   font-size: 11px;
   font-weight: 700;
   letter-spacing: 0.5px;
-  margin-bottom: 6px;
 }
 .explain-step {
-  display: grid;
-  grid-template-columns: 190px 1fr 200px;
-  align-items: center;
-  gap: 10px;
-  padding: 3px 0;
-  font-size: 12px;
+  display: contents;
 }
 .explain-step-label {
+  min-width: 190px;
   color: #9cdcfe;
   overflow: hidden;
   text-overflow: ellipsis;

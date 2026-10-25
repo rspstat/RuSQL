@@ -105,6 +105,8 @@ const std::vector<IC> kRowVersions = {{"TABLE_SCHEMA", false}, {"TABLE_NAME", fa
 // RuSQL's own: what the last start of the engine did to open the data (R51)
 const std::vector<IC> kRecovery = {{"OPEN_MS", true}, {"UNDO_MS", true}, {"REDO_MS", true}, {"WAL_TXNS_REPLAYED", true}, {"WAL_TXNS_UNDONE", true},
                                    {"REDO_OPS", true}, {"REDO_TABLES", true}, {"CRASH_DETECTED", false}};
+// the counters SHOW GLOBAL STATUS shows, as a table (R53)
+const std::vector<IC> kGlobalStatus = {{"VARIABLE_NAME", false}, {"VARIABLE_VALUE", false}};
 } // namespace
 
 const std::vector<InfoSchemaColumn>* Executor::info_schema_columns(const std::string& which) {
@@ -128,6 +130,7 @@ const std::vector<InfoSchemaColumn>* Executor::info_schema_columns(const std::st
     if (lower == "innodb_deadlocks") return &kInnodbDeadlocks;
     if (lower == "row_versions") return &kRowVersions;
     if (lower == "recovery") return &kRecovery;
+    if (lower == "global_status") return &kGlobalStatus;
     return nullptr;
 }
 
@@ -588,6 +591,24 @@ std::vector<Row> Executor::info_schema_rows(const SharedDatabase& s, const std::
             rows.push_back(std::move(r));
         }
         std::sort(rows.begin(), rows.end(), [](const Row& a, const Row& b) { return std::stoull(a.at("ID")) < std::stoull(b.at("ID")); });
+        return rows;
+    }
+
+    if (lower == "global_status") {
+        std::size_t connected, running = 0;
+        {
+            auto list = s.process_list->lock();
+            connected = list->size();
+            for (auto& [id, p] : *list) {
+                if (p.command == "Query") running++;
+            }
+        }
+        for (auto& [name, value] : server_status_values(*s.counters, connected, running ? running : 1, s.redo_log ? s.redo_log->bytes() : 0, nullptr)) {
+            Row r;
+            r["VARIABLE_NAME"] = name;
+            r["VARIABLE_VALUE"] = value;
+            rows.push_back(std::move(r));
+        }
         return rows;
     }
 

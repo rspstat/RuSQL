@@ -23,6 +23,7 @@
 
 #include "engine/parser/ast.hpp"
 #include "engine/parser/ast_json.hpp"
+#include "engine/server_status.hpp"
 #include "engine/statement_error.hpp"
 #include "engine/storage/buffer_pool.hpp"
 #include "engine/storage/composite_index.hpp"
@@ -98,6 +99,9 @@ struct ProcessInfo {
     std::string info;
     std::chrono::steady_clock::time_point connected_at;
     std::chrono::steady_clock::time_point state_since;
+    // KILL: the session's kill state (1: the statement that runs was asked to stop, 2: the connection was killed) and what closes its connection
+    std::shared_ptr<std::atomic<int>> kill_state;
+    std::function<void()> close_connection;
 };
 
 // Procedure: (params: [(IN/OUT/INOUT, name, type)], body statements).
@@ -157,6 +161,7 @@ struct SharedDatabase {
     // SHOW PROCESS LIST state, guarded by its own lock (matches Rust's separate
     // `Arc<Mutex<HashMap<...>>>`, independent of the outer SharedDatabase RwLock).
     std::shared_ptr<Mutex<std::unordered_map<std::size_t, ProcessInfo>>> process_list;
+    std::shared_ptr<ServerCounters> counters = std::make_shared<ServerCounters>(); // what SHOW STATUS counts
     std::shared_ptr<std::atomic<std::size_t>> next_session_id;
     // PK value -> Vec position index: O(1) single-row DELETE optimization outside txns.
     std::unordered_map<std::string, std::unordered_map<std::string, std::size_t>> row_pk_pos;
@@ -305,9 +310,25 @@ public:
 
     static Executor new_session(std::shared_ptr<RwLock<SharedDatabase>> shared);
 
-    void register_process(const std::string& user, const std::string& host) const;
+    void register_process(const std::string& user, const std::string& host, std::function<void()> close_connection = {}) const;
     void update_process_command(const std::string& command, const std::string& info) const;
     void deregister_process() const;
+    // KILL [CONNECTION | QUERY] n (R53): worked out before the statement takes any lock, so that it gets through to a session that holds one. A SELECT stops at the
+    // next row it reads, a wait for a row lock ends; a write that is running is not stopped half done (it finishes). KILL of a connection also closes it.
+    StringResult exec_kill(const std::string& sql);
+    // SHOW [GLOBAL | SESSION] STATUS [LIKE 'pattern'] (R53): the counters of the server, worked out without taking the lock of the database
+    StringResult exec_show_status(const std::string& sql);
+    // counts a statement the client sent (Questions and its own kind), for the server and for this session
+    void count_statement(const std::string& sql);
+    std::shared_ptr<ServerCounters> counters() const;
+    mutable std::shared_ptr<ServerCounters> counters_;
+    std::array<std::uint64_t, kStatCount> session_statements_{};
+    // this session's connection was killed (by itself or another session): the server closes it once the answer is sent
+    bool connection_killed() const { return kill_state_->load() == 2; }
+    std::shared_ptr<std::atomic<int>> kill_state_ = std::make_shared<std::atomic<int>>(0);
+    int statement_depth_ = 0; // execute_sql inside execute_sql (TRACE): only the outer one shows in the process list
+    mutable std::shared_ptr<Mutex<std::unordered_map<std::size_t, ProcessInfo>>> process_list_; // (the list of sessions, taken from the database the first time)
+    std::shared_ptr<Mutex<std::unordered_map<std::size_t, ProcessInfo>>> process_list() const;
     std::shared_ptr<RwLock<SharedDatabase>> get_shared() const { return shared; }
     // Releases this session's LOCK TABLES holds (V1 scope) without an explicit UNLOCK
     // TABLES statement -- call at connection teardown, alongside deregister_process()

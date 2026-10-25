@@ -44,8 +44,8 @@ const NODES: Node[] = [
   },
   {
     id: "server", x: 335, y: 350, w: 150, h: 112, c: C.server, name: "engine_server",
-    desc: L("TCP front-end: native :7878 + MySQL wire :3306, challenge-response auth, one session per connection. Answers the metadata statements MySQL clients send; result columns carry types.",
-            "TCP 프런트엔드: 네이티브 :7878 + MySQL 와이어 :3306, 챌린지-응답 인증, 연결당 세션 1개. MySQL 클라이언트의 메타데이터 문장에 답하고 결과 열에 타입을 실어 보냄."),
+    desc: L("TCP front-end: native :7878 + MySQL wire :3306, challenge-response auth, one session per connection. Answers the metadata statements MySQL clients send; result columns carry types. KILL n ends a session's query or closes its connection; SHOW STATUS reads real counters without the database lock.",
+            "TCP 프런트엔드: 네이티브 :7878 + MySQL 와이어 :3306, 챌린지-응답 인증, 연결당 세션 1개. MySQL 클라이언트의 메타데이터 문장에 답하고 결과 열에 타입을 실어 보냄. KILL n은 세션의 문장을 멈추거나 연결을 닫고, SHOW STATUS는 실제 카운터를 데이터베이스 락 없이 읽음."),
   },
   {
     id: "parser", x: 525, y: 350, w: 120, h: 98, c: C.core, name: L("Parser", "파서"),

@@ -2234,6 +2234,7 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
             rows_p = std::move(matched);
         }
     } else {
+        explain_trace::mark("Scan " + table, visible_rows.size());
         std::vector<Row> current = std::move(visible_rows);
         for (std::size_t ji = 0; ji < joins.size(); ji++) {
             auto& j = joins[ji];
@@ -2273,6 +2274,7 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
                     // Inner/Cross에서 any_match == false면 표준 join 의미론대로 그 행은 드롭.
                 }
                 current = std::move(new_current);
+                explain_trace::mark("Join " + j.table + " (lateral, subquery for every row)", current.size());
                 continue;
             }
 
@@ -2378,19 +2380,25 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
                 }
             }
 
+            std::string algo_name = "nested loop"; // (what EXPLAIN ANALYZE says the join was done with)
             if (hashed) {
                 current = std::move(*hashed);
+                algo_name = "hash join";
             } else if (algo && std::get_if<JoinAlgo::SortMerge>(algo)) {
+                algo_name = "sort-merge join";
                 auto* a = std::get_if<JoinAlgo::SortMerge>(algo);
                 current = sort_merge_join(current, right_rows, j.join_type, jq, a->probe_col, a->build_col, right_schema_cols);
             } else if (algo && std::get_if<JoinAlgo::Hash>(algo)) {
+                algo_name = "hash join";
                 auto* a = std::get_if<JoinAlgo::Hash>(algo);
                 current = hash_join(current, right_rows, j.join_type, jq, a->probe_col, a->build_col, right_schema_cols);
             } else if (algo && std::get_if<JoinAlgo::IndexNL>(algo)) {
                 auto* a = std::get_if<JoinAlgo::IndexNL>(algo);
+                algo_name = "index nested loop";
                 // Index Nested Loop: probe right table's PK B+Tree per left row.
                 // Only applies outside transactions (session_rows path already loaded above).
                 if (txn.is_active()) {
+                    algo_name = "hash join";
                     current = hash_join(current, right_rows, j.join_type, jq, a->probe_col, a->right_pk_col, right_schema_cols);
                 } else if (auto rit = s.indexes.find(j.table); rit != s.indexes.end()) {
                     std::vector<Row> out;
@@ -2417,10 +2425,12 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
                     }
                     current = std::move(out);
                 } else {
+                    algo_name = "hash join";
                     current = hash_join(current, right_rows, j.join_type, jq, a->probe_col, a->right_pk_col, right_schema_cols);
                 }
             } else if (algo && std::get_if<JoinAlgo::ReverseIndexNL>(algo)) {
                 auto* a = std::get_if<JoinAlgo::ReverseIndexNL>(algo);
+                algo_name = "reverse index nested loop";
                 // Mirror image of IndexNL above: iterate the (small) RIGHT table, probe an
                 // index on the LEFT/base table per right row. Only ever planned for the
                 // base<->first-join step (Planner::plan_join's is_first_join gate), where
@@ -2429,6 +2439,7 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
                 // no single backing index. Falls back to hash_join whenever a transaction is
                 // active or the expected index is missing, exactly like IndexNL does.
                 auto reverse_fallback = [&] {
+                    algo_name = "hash join";
                     current = hash_join(current, right_rows, j.join_type, jq, a->left_col, a->right_extract_col, right_schema_cols);
                 };
                 if (txn.is_active()) {
@@ -2499,6 +2510,11 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
                         if (own != row.end() && right_value != row.end() && own->second == JOIN_NULL_VALUE) own->second = right_value->second;
                     }
                 }
+            }
+            if (explain_trace::active) {
+                const char* type = j.join_type == JoinType::Left ? "left" : j.join_type == JoinType::Right ? "right" : j.join_type == JoinType::FullOuter ? "full outer"
+                                   : j.join_type == JoinType::Cross ? "cross" : j.join_type == JoinType::Natural ? "natural" : "inner";
+                explain_trace::mark("Join " + j.table + " (" + type + ", " + algo_name + ")", current.size());
             }
         }
         if (!condition) {
@@ -2603,9 +2619,7 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
 
     deadline::check_now(); // (MAX_EXECUTION_TIME: the rows are read and joined)
     if (explain_trace::active) {
-        std::string label = "Scan " + table;
-        for (const Join& j : joins) label += " + JOIN " + j.table;
-        explain_trace::mark(label, rows_p.size());
+        explain_trace::mark(joins.empty() ? (index_hit.usable ? "Index scan " + table : "Scan " + table) : std::string("Filter (WHERE) and expressions"), rows_p.size());
     }
     if (!order_by.empty() && rows_p.size() > 1) { // stable, same order as comparing the rows pairwise with cmp_key
         std::vector<std::size_t> order = order_rows(rows_p, order_by, &Executor::get_col);

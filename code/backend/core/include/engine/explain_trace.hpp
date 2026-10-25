@@ -19,9 +19,18 @@ struct Step {
     double ms = 0;
 };
 
+// What the statement spent on its subqueries: runs and time. The time is inside the steps (the scan that asked, the select list that asked), so it is shown next
+// to them and is not a step of its own.
+struct SubqueryTime {
+    std::size_t runs = 0;
+    double ms = 0;
+};
+
 struct Trace {
     std::vector<Step> steps;
     std::chrono::steady_clock::time_point last = std::chrono::steady_clock::now();
+    SubqueryTime subquery_once;    // subqueries that name no column of the outer query: one run answers every row
+    SubqueryTime subquery_per_row; // correlated ones: a run for every row
 };
 
 inline thread_local Trace* active = nullptr;
@@ -42,6 +51,28 @@ struct SqlScope {
     ~SqlScope() { --sql_depth; }
     SqlScope(const SqlScope&) = delete;
     SqlScope& operator=(const SqlScope&) = delete;
+};
+
+inline thread_local int subquery_depth = 0;
+
+// One per subquery that runs (Executor::run_subquery): only the outermost counts, a subquery inside a subquery is part of the time of the one that ran it.
+struct SubqueryScope {
+    bool counted;
+    bool correlated;
+    std::chrono::steady_clock::time_point started{};
+    explicit SubqueryScope(bool is_correlated) : counted(active && select_depth >= 1 && sql_depth <= 1 && subquery_depth == 0), correlated(is_correlated) {
+        if (counted) started = std::chrono::steady_clock::now();
+        ++subquery_depth;
+    }
+    ~SubqueryScope() {
+        --subquery_depth;
+        if (!counted || !active) return;
+        SubqueryTime& t = correlated ? active->subquery_per_row : active->subquery_once;
+        t.runs++;
+        t.ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
+    }
+    SubqueryScope(const SubqueryScope&) = delete;
+    SubqueryScope& operator=(const SubqueryScope&) = delete;
 };
 
 inline void add(const std::string& label, std::size_t rows) {

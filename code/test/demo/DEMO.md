@@ -101,6 +101,16 @@ SELECT * FROM information_schema.innodb_trx;          -- 열린 트랜잭션, RU
 SELECT * FROM information_schema.innodb_lock_waits;   -- 누가 누구를 기다리는지
 ```
 
+기다리는 세션을 풀어 주는 것도 보여 줄 수 있습니다(R53). 세션 B가 기다리는 동안 세 번째 창(또는 세션 A)에서 번호를 찾아 `KILL QUERY`를 보냅니다. B의 `UPDATE`는 곧바로 `ERROR 1317 (70100): Query execution was interrupted`로 돌아오고, 락을 쥔 A는 그대로입니다. 접속 자체를 끊으려면 `KILL CONNECTION n`입니다(그 세션의 열린 트랜잭션은 되돌려지고 락이 풀립니다).
+
+```sql
+SHOW PROCESSLIST;                      -- 각 세션의 Id와 지금 하는 일 (B는 Query, A는 Sleep)
+KILL QUERY 12;                         -- 12는 B의 Id
+SHOW GLOBAL STATUS LIKE 'Innodb_row_lock%';   -- 락을 기다린 횟수(Innodb_row_lock_waits)와 지금 기다리는 수
+```
+
+`SHOW STATUS`는 실제 카운터입니다(`Com_*` 문장 종류별 수, `Questions`, `Connections`, `Threads_running`, `Uptime`, `Innodb_*`). 락을 잡지 않고 읽어서 쓰기 문장이 락을 쥐고 있어도 바로 답합니다.
+
 ## 6. B+Tree 애니메이션 (선택, 30초)
 
 앱 왼쪽 활동 표시줄의 **B+Tree 아이콘**. 노드당 최대 키를 3으로 두고 `1–12 넣기`를 누르면 잎이 쪼개지며 키가 위로 올라가고 트리가 한 층씩 높아지는 모습이 재생됩니다. 이어서 키 하나를 `삭제`하면 노드가 모자라 형제에게서 빌리거나 합쳐지는 것을 볼 수 있습니다. (교육용 모형이며 엔진 인덱스와 같은 원리입니다.)

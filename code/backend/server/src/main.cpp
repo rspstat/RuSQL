@@ -22,6 +22,7 @@
 #include "engine/executor/executor.hpp"
 #include "engine/statement_split.hpp"
 #include "mysql.hpp"
+#include "wake_connection.hpp"
 
 #pragma comment(lib, "ws2_32.lib")
 
@@ -261,6 +262,7 @@ void handle_client(SOCKET sock, std::shared_ptr<RwLock<SharedDatabase>> shared, 
     bool ok = shared->read()->verify_mysql_native_password(auth_user, nonce, hex_decode(auth_token_hex));
     if (!ok) {
         log("[" + peer + "] AUTH failed: '" + auth_user + "'");
+        shared->read()->counters->aborted_connects.fetch_add(1);
         send_line_raw(sock, "ERR Access denied for user '" + auth_user + "'\n---END---\n");
         cleanup_and_return();
         return;
@@ -272,7 +274,7 @@ void handle_client(SOCKET sock, std::shared_ptr<RwLock<SharedDatabase>> shared, 
     // 3. query session
     Executor exec = Executor::new_session(shared);
     exec.auth_user = auth_user;
-    exec.register_process(auth_user, peer);
+    exec.register_process(auth_user, peer, [sock] { wake_connection(sock); }); // (KILL of this connection wakes the read below)
     std::string buf;
 
     std::string line;
@@ -316,7 +318,6 @@ void handle_client(SOCKET sock, std::shared_ptr<RwLock<SharedDatabase>> shared, 
             std::string preview = q.size() > 60 ? q.substr(0, 60) + "..." : q;
             log("[" + auth_user + "@" + peer + "] " + preview);
 
-            exec.update_process_command("Query", q);
             auto t0 = std::chrono::steady_clock::now();
             std::string status, output;
             // An uncaught exception here would propagate out of this connection's thread
@@ -338,7 +339,6 @@ void handle_client(SOCKET sock, std::shared_ptr<RwLock<SharedDatabase>> shared, 
                 status = "ERR";
                 output = "Internal error: unknown exception";
             }
-            exec.update_process_command("Sleep", "");
             double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
             if (!send_response(sock, status, output, elapsed)) {
                 exec.deregister_process();
@@ -347,7 +347,9 @@ void handle_client(SOCKET sock, std::shared_ptr<RwLock<SharedDatabase>> shared, 
                 cleanup_and_return();
                 return;
             }
+            if (exec.connection_killed()) break; // (KILL: the answer is sent, the connection ends)
         }
+        if (exec.connection_killed()) break;
     }
 
     exec.deregister_process();

@@ -1,6 +1,7 @@
 // Faithful port of rusql-server/src/mysql.rs — see mysql.hpp.
 
 #include "mysql.hpp"
+#include "wake_connection.hpp"
 #include "engine/parser/lexer.hpp"
 #include "engine/result_text.hpp"
 
@@ -1106,15 +1107,7 @@ std::optional<StringResult> mysql_compat(const std::string& q, Executor& exec) {
     }
 
     if (up.rfind("SHOW STATUS", 0) == 0 || up.rfind("SHOW SESSION STATUS", 0) == 0 || up.rfind("SHOW GLOBAL STATUS", 0) == 0) {
-        static const std::vector<std::pair<std::string, std::string>> status = {
-            {"Connections", "1"}, {"Questions", "0"}, {"Threads_connected", "1"}, {"Threads_running", "1"}, {"Uptime", "0"}, {"Queries", "0"},
-        };
-        const auto pattern = like_pattern_of(q);
-        std::vector<std::vector<std::string>> rows;
-        for (auto& [name, value] : status) {
-            if (!pattern || like_match(name, *pattern)) rows.push_back({name, value});
-        }
-        return StringResult::Ok(box_table({"Variable_name", "Value"}, rows));
+        return exec.execute_sql(q); // (the engine counts the statements, the connections, the buffer pool and the row locks: R53)
     }
 
     if (up.rfind("SHOW COLLATION", 0) == 0) {
@@ -1370,7 +1363,7 @@ StringResult exec_query(Executor& exec, const std::string& raw, std::string* ran
 
 // ── Client handler ─────────────────────────────────────────────
 
-void handle_mysql_client(SOCKET sock, std::shared_ptr<RwLock<SharedDatabase>> shared, std::uint32_t conn_id) {
+void handle_mysql_client(SOCKET sock, std::shared_ptr<RwLock<SharedDatabase>> shared, std::uint32_t /*listener_count*/) {
     struct SocketGuard {
         SOCKET s;
         ~SocketGuard() { closesocket(s); }
@@ -1388,7 +1381,9 @@ void handle_mysql_client(SOCKET sock, std::shared_ptr<RwLock<SharedDatabase>> sh
         }
     }
 
-    // 1. Server sends Handshake
+    // 1. Server sends Handshake. The connection id the client reads there (mysql_thread_id) is the id of the session in the process list: it is what KILL takes (R53)
+    Executor exec = Executor::new_session(shared);
+    const std::uint32_t conn_id = static_cast<std::uint32_t>(exec.session_id);
     auto nonce = make_nonce(conn_id);
     if (!write_packet(sock, 0, handshake_pkt(conn_id, nonce))) return;
 
@@ -1436,6 +1431,7 @@ void handle_mysql_client(SOCKET sock, std::shared_ptr<RwLock<SharedDatabase>> sh
     // 3. Verify auth
     bool auth_ok = shared->read()->verify_mysql_native_password(username, std::vector<std::uint8_t>(nonce.begin(), nonce.end()), auth_response);
     if (!auth_ok) {
+        shared->read()->counters->aborted_connects.fetch_add(1);
         std::string msg = "Access denied for user '" + username + "' (using password: " + (auth_response.empty() ? "NO" : "YES") + ")";
         write_packet(sock, 2, err_pkt(msg));
         return;
@@ -1445,10 +1441,9 @@ void handle_mysql_client(SOCKET sock, std::shared_ptr<RwLock<SharedDatabase>> sh
     if (!write_packet(sock, 2, ok_pkt(0))) return;
 
     // 5. Query loop
-    Executor exec = Executor::new_session(shared);
     exec.auth_user = username;
     exec.client_found_rows = (client_caps & 0x0002) != 0;
-    exec.register_process(username, peer);
+    exec.register_process(username, peer, [sock] { wake_connection(sock); }); // (KILL of this connection wakes the read of the next command)
     StmtMap stmts;
     std::uint32_t next_stmt_id = 1;
 
@@ -1617,7 +1612,7 @@ void handle_mysql_client(SOCKET sock, std::shared_ptr<RwLock<SharedDatabase>> sh
                 exec.deregister_process();
                 exec.release_explicit_table_locks(); // LOCK TABLES V1 -- release on disconnect
                 exec.auth_user = new_user;
-                exec.register_process(new_user, peer);
+                exec.register_process(new_user, peer, [sock] { wake_connection(sock); });
                 if (!new_db.empty()) {
                     auto ignore_ = exec_query(exec, "USE " + new_db);
                     (void)ignore_;
@@ -1644,6 +1639,7 @@ void handle_mysql_client(SOCKET sock, std::shared_ptr<RwLock<SharedDatabase>> sh
                 break;
             }
         }
+        if (exec.connection_killed()) break; // (KILL: the answer is sent, the connection ends)
     }
 
     exec.deregister_process();

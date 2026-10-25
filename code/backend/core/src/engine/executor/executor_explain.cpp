@@ -56,6 +56,42 @@ std::string pad_right(const std::string& v, std::size_t width) {
     return v + std::string(width - v.size(), ' ');
 }
 
+// A line longer than the box (a long step label) widens the whole box instead of sticking out of its right edge. Widths count characters, not bytes.
+std::string widen_box(const std::string& box, std::size_t min_inner) {
+    auto columns = [](const std::string& v) {
+        std::size_t n = 0;
+        for (unsigned char c : v) n += (c & 0xC0) != 0x80;
+        return n;
+    };
+    auto trimmed = [](std::string v) {
+        while (!v.empty() && v.back() == ' ') v.pop_back();
+        while (!v.empty() && v.front() == ' ') v.erase(v.begin());
+        return v;
+    };
+    std::vector<std::string> lines = split_lines(box);
+    std::vector<std::string> text(lines.size());
+    std::size_t inner = min_inner;
+    for (std::size_t i = 0; i < lines.size(); i++) {
+        if (lines[i].size() < 2 || lines[i][0] != '|') continue;
+        text[i] = i == 1 ? trimmed(lines[i].substr(1, lines[i].size() - 2)) : lines[i].substr(2, lines[i].size() - 4);
+        while (!text[i].empty() && text[i].back() == ' ') text[i].pop_back();
+        inner = std::max(inner, columns(text[i]));
+    }
+    std::string out;
+    for (std::size_t i = 0; i < lines.size(); i++) {
+        if (i) out += "\n";
+        if (lines[i].empty() || lines[i][0] != '|') {
+            out += "+" + std::string(inner + 2, '-') + "+";
+        } else if (i == 1) {
+            const std::size_t gap = inner + 2 - columns(text[i]);
+            out += "|" + std::string(gap / 2, ' ') + text[i] + std::string(gap - gap / 2, ' ') + "|";
+        } else {
+            out += "| " + text[i] + std::string(inner - columns(text[i]), ' ') + " |";
+        }
+    }
+    return out;
+}
+
 } // namespace
 
 StringResult Executor::exec_explain(const SharedDatabase& s, Statement stmt) const {
@@ -191,10 +227,19 @@ StringResult Executor::exec_explain_analyze(SharedDatabase& s, Statement stmt) {
     out += blank + "\n";
     out += fmt_stat(rows_stat);
     out += fmt_stat(time_stat);
+    // the subqueries: their time is inside the steps below, so it is told here, apart from them
+    auto subquery_line = [&](const char* label, const explain_trace::SubqueryTime& t) {
+        if (t.runs == 0) return;
+        char buf[160];
+        std::snprintf(buf, sizeof buf, "%s : %zu run(s), %.3f ms (inside the steps below)", label, t.runs, t.ms);
+        out += fmt_stat(buf);
+    };
+    subquery_line("Subqueries not correlated, run once", trace.subquery_once);
+    subquery_line("Subqueries correlated, run per row", trace.subquery_per_row);
     out += blank + "\n";
     for (auto& line : step_lines) out += fmt_stat(line);
     out += SEP;
-    return StringResult::Ok(out);
+    return StringResult::Ok(widen_box(out, W));
 }
 
 } // namespace engine

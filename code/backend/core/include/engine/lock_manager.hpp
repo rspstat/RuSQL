@@ -97,6 +97,8 @@ public:
     std::vector<std::tuple<std::string, std::string, std::uint64_t>> lock_rows() const;
     std::vector<std::pair<std::uint64_t, std::uint64_t>> wait_for_rows() const;
     std::vector<std::pair<std::uint64_t, std::uint64_t>> deadlock_history() const;
+    // how many times a statement had to wait for a row lock since the server started (SHOW STATUS: Innodb_row_lock_waits)
+    std::uint64_t waits_total() const { return waits_.load(std::memory_order_relaxed); }
     bool is_empty() const;
 
     // Gap locks: always granted immediately (gap-vs-gap never conflicts). The executor
@@ -152,6 +154,7 @@ private:
     std::unordered_map<std::string, std::vector<GapLockRow>> gap_locks_;
     std::unordered_map<std::string, std::vector<GapLockRow>> predicate_reads_;
     std::unordered_set<std::uint64_t> predicate_violations_;
+    std::atomic<std::uint64_t> waits_{0};
 
     // Internal, called only while mutex_ is already held. Returns nullopt if `txn_id` was
     // granted the lock (row_locks_ already updated to reflect it); otherwise returns the

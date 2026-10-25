@@ -14,6 +14,7 @@
 // an enclosing query and executor_outer.cpp puts the outer row's values in.
 
 #include "engine/executor/executor.hpp"
+#include "engine/explain_trace.hpp"
 #include "engine/result_text.hpp"
 #include "engine/storage/numeric_key.hpp"
 
@@ -75,6 +76,7 @@ bool Executor::subquery_is_correlated(const Statement& sub) {
 // Runs a subquery for one outer row: on a copy (the original stays as parsed, for the next row), with the row's values in place of the columns it
 // takes from the outer query. An error inside it is the statement's error, not "no row".
 std::string Executor::run_subquery(SharedDatabase& s, const Statement& original, const Row& row, bool correlated) {
+    explain_trace::SubqueryScope timing(correlated); // (EXPLAIN ANALYZE: the runs and the time of the subqueries)
     Statement stmt = original;
     if (correlated) substitute_outer(stmt, row);
     CopyScope scope(*this);

@@ -423,6 +423,8 @@ Executor::Executor(const std::string& dir, std::size_t buffer_pool_capacity) {
         sw->recovery.undo_ms = milliseconds(redo_started - undo_started);
         sw->recovery.redo_ms = milliseconds(recovered - redo_started);
         sw->recovery.open_ms = milliseconds(std::chrono::steady_clock::now() - open_started);
+        sw->counters->buffer_pool = &sw->buffer_pool; // (SHOW STATUS reads these without the lock of the database)
+        sw->counters->lock_mgr = &sw->lock_mgr;
     }
 }
 
@@ -450,9 +452,15 @@ Executor Executor::new_session(std::shared_ptr<RwLock<SharedDatabase>> shared_db
     return ex;
 }
 
-void Executor::register_process(const std::string& user, const std::string& host) const {
+// The list of the sessions lives apart from the database's lock: SHOW PROCESSLIST is not held up by a statement that writes, and KILL gets through to one.
+std::shared_ptr<Mutex<std::unordered_map<std::size_t, ProcessInfo>>> Executor::process_list() const {
+    if (!process_list_) process_list_ = shared->read()->process_list;
+    return process_list_;
+}
+
+void Executor::register_process(const std::string& user, const std::string& host, std::function<void()> close_connection) const {
     auto now = std::chrono::steady_clock::now();
-    auto s = shared->read();
+    auto list = process_list();
     ProcessInfo info;
     info.id = session_id;
     info.user = user;
@@ -461,12 +469,52 @@ void Executor::register_process(const std::string& user, const std::string& host
     info.command = "Sleep";
     info.connected_at = now;
     info.state_since = now;
-    (*s->process_list->lock())[session_id] = std::move(info);
+    info.kill_state = kill_state_;
+    info.close_connection = std::move(close_connection);
+    std::size_t connected;
+    {
+        auto guard = list->lock();
+        (*guard)[session_id] = std::move(info);
+        connected = guard->size();
+    }
+    auto c = counters();
+    c->connections.fetch_add(1, std::memory_order_relaxed);
+    std::uint64_t most = c->max_used_connections.load(std::memory_order_relaxed);
+    while (most < connected && !c->max_used_connections.compare_exchange_weak(most, connected)) {
+    }
+}
+
+std::shared_ptr<ServerCounters> Executor::counters() const {
+    if (!counters_) counters_ = shared->read()->counters;
+    return counters_;
+}
+
+// Questions and the kind of the statement (its first word, and the second for CREATE / DROP / ALTER), for the server and for this session.
+void Executor::count_statement(const std::string& sql) {
+    auto word_at = [&](std::size_t& at) {
+        while (at < sql.size() && !std::isalpha(static_cast<unsigned char>(sql[at]))) {
+            if (sql[at] == '(' || sql[at] == ';') { at++; continue; }
+            if (std::isspace(static_cast<unsigned char>(sql[at]))) { at++; continue; }
+            break;
+        }
+        std::string w;
+        while (at < sql.size() && std::isalpha(static_cast<unsigned char>(sql[at]))) w += static_cast<char>(std::toupper(static_cast<unsigned char>(sql[at++])));
+        return w;
+    };
+    std::size_t at = 0;
+    const std::string first = word_at(at);
+    const std::string second = word_at(at);
+    auto c = counters();
+    auto bump = [&](Stat s) {
+        c->statements[static_cast<int>(s)].fetch_add(1, std::memory_order_relaxed);
+        session_statements_[static_cast<int>(s)]++;
+    };
+    bump(Stat::Questions);
+    if (auto kind = stat_of_statement(first, second)) bump(*kind);
 }
 
 void Executor::update_process_command(const std::string& command, const std::string& info) const {
-    auto s = shared->read();
-    auto list = s->process_list->lock();
+    auto list = process_list()->lock();
     auto it = list->find(session_id);
     if (it != list->end()) {
         it->second.command = command;
@@ -474,11 +522,15 @@ void Executor::update_process_command(const std::string& command, const std::str
         it->second.state_since = std::chrono::steady_clock::now();
         it->second.db = current_db;
     }
+    // a KILL QUERY that came after the statement was over (or that found no statement to stop) must not stop the next one; a killed connection stays killed
+    if (command == "Sleep") {
+        int asked = 1;
+        kill_state_->compare_exchange_strong(asked, 0);
+    }
 }
 
 void Executor::deregister_process() const {
-    auto s = shared->read();
-    s->process_list->lock()->erase(session_id);
+    process_list()->lock()->erase(session_id);
 }
 
 // ---------------------------------------------------------------------------
@@ -1394,11 +1446,43 @@ StringResult run_trace(Executor& ex, const std::string& inner) {
 }
 } // namespace
 
+namespace {
+// The session shows as running the statement in SHOW PROCESSLIST (Command Query, Info the text) and as asleep again when it is over; a TRACE inside a statement
+// does not show twice.
+struct ProcessScope {
+    Executor& ex;
+    ProcessScope(Executor& e, const std::string& sql) : ex(e) {
+        if (ex.statement_depth_++ == 0) {
+            ex.update_process_command("Query", sql);
+            ex.count_statement(sql);
+        }
+    }
+    ~ProcessScope() {
+        if (--ex.statement_depth_ == 0) ex.update_process_command("Sleep", "");
+    }
+};
+} // namespace
+
 StringResult Executor::execute_sql(const std::string& sql_text) {
     // SELECT SQL_CALC_FOUND_ROWS ...: the keyword goes, and FOUND_ROWS() afterwards says how many rows the query has without its LIMIT
     std::string sql = sql_text;
     bool calc_found_rows = false;
     const std::string word = first_word_upper(sql);
+    if (word == "KILL") { // (before anything takes a lock)
+        count_statement(sql_text);
+        return exec_kill(sql_text);
+    }
+    ProcessScope process_scope(*this, sql_text);
+    deadline::KillScope kill_scope(kill_state_.get(), word == "SELECT" || word == "WITH");
+    if (word == "SHOW") {
+        std::string upper = sql_text;
+        for (char& c : upper) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+        std::istringstream words(upper);
+        std::string show, scope, status;
+        words >> show >> scope;
+        if (scope == "GLOBAL" || scope == "SESSION") words >> status; else status = scope;
+        if (status == "STATUS") return exec_show_status(sql_text); // (the counters need no lock of the database)
+    }
     if (word == "TRACE") {
         const std::string rest = trim(sql);
         if (rest.size() > 5) return run_trace(*this, rest.substr(5));
@@ -1450,6 +1534,8 @@ StringResult Executor::execute_sql(const std::string& sql_text) {
     // std::terminate() and crash the whole process instead of returning a graceful Err.
     try {
         StringResult result = execute_sql_inner(sql);
+        // a statement that failed after KILL asked it to stop was stopped by it (a wait for a row lock that it cut short ends as a timeout)
+        if (result.is_err() && kill_state_->load(std::memory_order_relaxed) != 0) result = StringResult::Err("ERROR 1317 (70100): Query execution was interrupted");
         note_statement_outcome(sql, result);
         // SET autocommit = 1 commits what the implicit transaction holds
         if (word == "SET" && result.is_ok() && implicit_txn_ && txn.is_active()) {

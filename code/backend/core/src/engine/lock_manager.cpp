@@ -3,6 +3,7 @@
 #include <algorithm>
 
 #include "engine/collation.hpp"
+#include "engine/statement_deadline.hpp"
 
 namespace engine {
 
@@ -22,6 +23,7 @@ LockManager::LockManager(LockManager&& other) noexcept {
     gap_locks_ = std::move(other.gap_locks_);
     predicate_reads_ = std::move(other.predicate_reads_);
     predicate_violations_ = std::move(other.predicate_violations_);
+    waits_.store(other.waits_.load());
 }
 
 LockManager& LockManager::operator=(LockManager&& other) noexcept {
@@ -33,6 +35,7 @@ LockManager& LockManager::operator=(LockManager&& other) noexcept {
     gap_locks_ = std::move(other.gap_locks_);
     predicate_reads_ = std::move(other.predicate_reads_);
     predicate_violations_ = std::move(other.predicate_violations_);
+    waits_.store(other.waits_.load());
     return *this;
 }
 
@@ -120,16 +123,18 @@ LockResult LockManager::acquire(const std::string& table, const std::string& pk,
     wait_for_[txn_id] = *conflict_holder;
 
     if (timeout.count() <= 0) return LockResult::conflict(*conflict_holder);
+    waits_.fetch_add(1, std::memory_order_relaxed);
 
     auto deadline = std::chrono::steady_clock::now() + timeout;
     for (;;) {
-        cv_.wait_until(lk, deadline);
+        // (woken every 100 ms to see whether KILL asked this statement to stop: the wait ends as a timeout, which execute_sql answers as the interruption)
+        cv_.wait_until(lk, std::min(deadline, std::chrono::steady_clock::now() + std::chrono::milliseconds(100)));
         auto retry_holder = try_grant_exclusive_locked(key, pk, txn_id);
         if (!retry_holder) {
             wait_for_.erase(txn_id);
             return LockResult::granted();
         }
-        if (std::chrono::steady_clock::now() >= deadline) {
+        if (std::chrono::steady_clock::now() >= deadline || engine::deadline::kill_asked(engine::deadline::kill_flag)) {
             wait_for_.erase(txn_id);
             return LockResult::timed_out(*retry_holder);
         }
@@ -152,16 +157,18 @@ LockResult LockManager::acquire_shared(const std::string& table, const std::stri
     wait_for_[txn_id] = *conflict_holder;
 
     if (timeout.count() <= 0) return LockResult::conflict(*conflict_holder);
+    waits_.fetch_add(1, std::memory_order_relaxed);
 
     auto deadline = std::chrono::steady_clock::now() + timeout;
     for (;;) {
-        cv_.wait_until(lk, deadline);
+        // (woken every 100 ms to see whether KILL asked this statement to stop: the wait ends as a timeout, which execute_sql answers as the interruption)
+        cv_.wait_until(lk, std::min(deadline, std::chrono::steady_clock::now() + std::chrono::milliseconds(100)));
         auto retry_holder = try_grant_shared_locked(key, pk, txn_id);
         if (!retry_holder) {
             wait_for_.erase(txn_id);
             return LockResult::granted();
         }
-        if (std::chrono::steady_clock::now() >= deadline) {
+        if (std::chrono::steady_clock::now() >= deadline || engine::deadline::kill_asked(engine::deadline::kill_flag)) {
             wait_for_.erase(txn_id);
             return LockResult::timed_out(*retry_holder);
         }
