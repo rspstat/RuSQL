@@ -126,6 +126,54 @@ function startReorderDrag(
   document.addEventListener("mouseup", onUp);
 }
 
+// EXPLAIN / EXPLAIN ANALYZE의 계획 줄들을 "이름: 값" 행으로, ANALYZE의 "Step N …" 줄들은 단계 막대(워터폴)로 그린다
+function ExplainPlan({ lines, elapsed }: { lines: string[]; elapsed: number }) {
+  // EXPLAIN ANALYZE의 "Step N 이름 : 행, ms, %" 줄들은 표 대신 단계 막대(워터폴)로 그린다
+  const steps = lines.flatMap(line => {
+    const m = line.match(/^Step (\d+) (.+?) : (\d+) rows, ([\d.]+) ms, (\d+)%$/);
+    return m ? [{ n: Number(m[1]), label: m[2], rows: Number(m[3]), ms: Number(m[4]) }] : [];
+  });
+  const infoLines = lines.filter(line => !/^Step \d+ /.test(line));
+  const stepsMs = steps.reduce((sum, s) => sum + s.ms, 0) || 1;
+  const slowest = steps.reduce((best, s) => (s.ms > best ? s.ms : best), 0);
+  let before = 0;
+  return (
+    <div className="explain-tree">
+      <div className="explain-tree-header">
+        <span className="explain-tree-icon">⟳</span> QUERY PLAN · {elapsed.toFixed(3)}s
+      </div>
+      {infoLines.map((line, li) => {
+        const [label, ...rest] = line.split(":");
+        const value = rest.join(":").trim();
+        return (
+          <div key={li} className="explain-tree-row">
+            <span className="explain-tree-label">{label.trim()}</span>
+            {value && <span className="explain-tree-value">{value}</span>}
+          </div>
+        );
+      })}
+      {steps.length > 0 && (
+        <div className="explain-steps">
+          <div className="explain-steps-title">TIME PER STEP</div>
+          {steps.map(s => {
+            const left = (before / stepsMs) * 100;
+            before += s.ms;
+            return (
+              <div key={s.n} className={"explain-step" + (steps.length > 1 && s.ms === slowest ? " slowest" : "")}>
+                <span className="explain-step-label" title={s.label}>{s.n}. {s.label}</span>
+                <span className="explain-step-track">
+                  <span className="explain-step-bar" style={{ left: `${left}%`, width: `${Math.max((s.ms / stepsMs) * 100, 1.5)}%` }} />
+                </span>
+                <span className="explain-step-stat">{s.rows.toLocaleString()} rows · {s.ms.toFixed(3)} ms · {Math.round((s.ms / stepsMs) * 100)}%</span>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ─── 메인 컴포넌트 ────────────────────────────────────────────
 function App() {
   // 현재 연결 ID (localStorage 키 네임스페이스용, ref는 클로저에서 안전하게 참조)
@@ -386,7 +434,7 @@ function App() {
     setErdSelectedTable("");
     setErdTableData(null);
     // 서버 상태 초기화 (연결마다 독립)
-    setServerStatus({ running: false, port: conn.port, client_count: 0, log: [], sessions: [] });
+    setServerStatus({ running: false, port: conn.port, client_count: 0, log: [], sessions: [], recovery: { columns: [], rows: [] }, ready_ms: 0 });
     setPortInput(conn.port.toString());
     setSrvConnName(conn.name);
     setServerMsg("");
@@ -510,7 +558,7 @@ function App() {
 
   // 서버 상태
 
-  const serverStatus_init: ServerStatus = { running: false, port: 7878, client_count: 0, log: [], sessions: [] };
+  const serverStatus_init: ServerStatus = { running: false, port: 7878, client_count: 0, log: [], sessions: [], recovery: { columns: [], rows: [] }, ready_ms: 0 };
   const [serverStatus, setServerStatus] = useState<ServerStatus>(serverStatus_init);
   const [portInput, setPortInput] = useState("7878");
   const [mysqlPortInput, setMysqlPortInput] = useState("13306");
@@ -2904,6 +2952,8 @@ function App() {
                       <div className="result-error">
                         <div>❌ {r.message}</div>
                       </div>
+                    ) : r.columns.length === 1 && /^QUERY PLAN/.test(r.columns[0]) ? (
+                      <ExplainPlan lines={r.rows.map(row => (row[0] ?? "").trim()).filter(Boolean)} elapsed={r.elapsed} />
                     ) : r.columns.length === 0 ? (() => {
                       // EXPLAIN 트리 시각화
                       if (r.message.includes("QUERY PLAN")) {
@@ -2911,23 +2961,7 @@ function App() {
                           .filter(l => l.startsWith("|") && !l.includes("QUERY PLAN"))
                           .map(l => l.replace(/^\|\s*/, "").replace(/\s*\|$/, "").trim())
                           .filter(Boolean);
-                        return (
-                          <div className="explain-tree">
-                            <div className="explain-tree-header">
-                              <span className="explain-tree-icon">⟳</span> QUERY PLAN · {r.elapsed.toFixed(3)}s
-                            </div>
-                            {planLines.map((line, li) => {
-                              const [label, ...rest] = line.split(":");
-                              const value = rest.join(":").trim();
-                              return (
-                                <div key={li} className="explain-tree-row">
-                                  <span className="explain-tree-label">{label.trim()}</span>
-                                  {value && <span className="explain-tree-value">{value}</span>}
-                                </div>
-                              );
-                            })}
-                          </div>
-                        );
+                        return <ExplainPlan lines={planLines} elapsed={r.elapsed} />;
                       }
                       return <div className="result-msg">✅ {r.message} · {r.elapsed.toFixed(3)}s</div>;
                     })() : (() => {
@@ -3306,6 +3340,26 @@ function App() {
                         {serverStatus.running ? `RUNNING · 127.0.0.1:${serverStatus.port} · ${serverStatus.client_count} client(s)` : "STOPPED"}
                       </span>
                     </div>
+
+                    {/* 시작 시 복구: information_schema.recovery (Stop은 엔진을 강제 종료하고 같은 데이터로 다시 여는 것이라, 누른 뒤의 값이 크래시 복구 시간) */}
+                    {serverStatus.recovery.rows.length > 0 && (() => {
+                      const row = serverStatus.recovery.rows[0];
+                      const get = (name: string) => row[serverStatus.recovery.columns.findIndex(c => c.toUpperCase() === name)] ?? "";
+                      const crashed = get("CRASH_DETECTED") === "YES";
+                      return (
+                        <div className={"srv-recovery" + (crashed ? " crashed" : "")}>
+                          <div className="srv-recovery-title">{crashed ? "RECOVERED AFTER AN UNCLEAN STOP" : "CLEAN START · NOTHING TO RECOVER"}</div>
+                          <div className="srv-recovery-grid">
+                            <span>Ready to sign in</span><b>{serverStatus.ready_ms.toFixed(0)} ms</b>
+                            <span>Engine opened the data</span><b>{get("OPEN_MS")} ms</b>
+                            {crashed && <>
+                              <span>Redo log replayed</span><b>{get("REDO_OPS")} changes in {get("REDO_TABLES")} table(s) · {get("REDO_MS")} ms</b>
+                              <span>WAL</span><b>{get("WAL_TXNS_REPLAYED")} replayed · {get("WAL_TXNS_UNDONE")} undone · {get("UNDO_MS")} ms</b>
+                            </>}
+                          </div>
+                        </div>
+                      );
+                    })()}
 
                     {serverMsg && <div className="srv-feedback">{serverMsg}</div>}
 

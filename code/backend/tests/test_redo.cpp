@@ -681,3 +681,31 @@ TEST_CASE("Redo: an ALTER TABLE in the middle of another session's transaction d
         }
     }
 }
+
+// R51: information_schema.recovery -- one row about the last start of the engine: how long it took to open the data and what the crash recovery replayed.
+TEST_CASE("R51: information_schema.recovery reports what the last start did", "[r51][redo][durability]") {
+    TempDataDir dir("r51_recovery");
+    auto crash_detected = [](Executor& ex) {
+        auto v = rows_of(ex, "SELECT CRASH_DETECTED FROM information_schema.recovery");
+        return v.find("YES") != std::string::npos ? std::string("YES") : v.find("NO") != std::string::npos ? std::string("NO") : v;
+    };
+    {
+        Executor ex(dir.path);
+        REQUIRE(crash_detected(ex) == "NO"); // a fresh directory has nothing to recover
+        setup(ex);
+        for (int i = 1; i <= 5; i++) REQUIRE(ex.execute_sql("INSERT INTO t VALUES (" + std::to_string(i) + "," + std::to_string(i * 10) + ")").is_ok());
+        REQUIRE(ex.execute_sql("BEGIN").is_ok());
+        REQUIRE(ex.execute_sql("INSERT INTO t VALUES (6,60)").is_ok()); // still open at the crash
+    } // crash
+    {
+        Executor ex(dir.path);
+        REQUIRE(crash_detected(ex) == "YES");
+        REQUIRE(ex.execute_sql("USE d").is_ok());
+        REQUIRE(count_rows(ex, "t") == 5);
+        // the numbers are there: the redo log replayed the five inserts, the WAL undid the transaction that was open, and the start took some time
+        REQUIRE(rows_of(ex, "SELECT COUNT(*) FROM information_schema.recovery WHERE REDO_OPS >= 5 AND REDO_TABLES >= 1 AND WAL_TXNS_UNDONE >= 1 AND OPEN_MS > 0").find("| 1 ") != std::string::npos);
+    } // (no crash this time: the recovery cleaned the log)
+    Executor ex(dir.path);
+    REQUIRE(crash_detected(ex) == "NO");
+    REQUIRE(rows_of(ex, "SELECT COUNT(*) FROM information_schema.recovery WHERE REDO_OPS = 0 AND WAL_TXNS_REPLAYED = 0 AND WAL_TXNS_UNDONE = 0").find("| 1 ") != std::string::npos);
+}

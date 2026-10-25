@@ -2258,9 +2258,36 @@ VS Code 스타일 탭 드래그 순서 변경(요청의 1번 항목)은 같은 �
 - **하지 않은 것**: Debug 빌드, 크래시 라운드.
 
 **한계 (새로 찾은 것 포함)**
-- `ORDER BY ANY_VALUE(x)`에서 x가 select 목록에 없으면 정렬이 무시되고, select 항목 `ANY_VALUE(x) AS a`를 `HAVING a > 5`로 거르면 0행이 나온다(둘 다 이전부터; MySQL은 바르게 동작).
+- (R51에서 고침) `ORDER BY ANY_VALUE(x)`에서 x가 select 목록에 없으면 정렬이 무시되고, select 항목 `ANY_VALUE(x) AS a`를 `HAVING a > 5`로 거르면 0행이 나왔다.
 - `MIN(f)`·`MAX(f)`의 FLOAT 결과가 여섯 자리가 아니라 저장된 글자 그대로 나온다(16777216 → MySQL 16777200). `UPDATE … SET d = f`(FLOAT를 DOUBLE 열에)는 짧은 글자를 그대로 복사한다(MySQL 0.10000000149011612).
 - 1093은 저장 루틴 안의 문장에서는 확인하지 않는다(바인더의 `check`가 꺼져 있음). 날짜로 읽는 함수는 위 목록이 전부다(`IFNULL`·`COALESCE`·`IF`가 감싼 날짜, 문자열 `DATE_ADD('2024-03-05', INTERVAL 1 DAY)`는 아님). `HAVING SUM(날짜 열)`의 집계 참조와 시간(TIME) 키의 RANGE 오프셋은 안 된다.
+
+### 10월 25일 — R51: EXPLAIN 단계 막대·복구 시간 표시, `ORDER BY ANY_VALUE`·HAVING 별칭, MCP `suggest_indexes`
+
+**왜 이 항목인가**: 추천표에서 사용자가 "EXPLAIN 단계 막대와 크래시 복구 시간 표시 / ORDER BY ANY_VALUE와 HAVING 별칭 / suggest_indexes"를 골라 한꺼번에 진행하라고 했다("시작"). SQL 문법 추가는 같은 날 정한 대로 보류(`RECOMMAND.md` 6번)했다.
+
+**고친 것·만든 것 (엔진·서버)**
+- **`ORDER BY ANY_VALUE(x)`와 HAVING 별칭**: 두 오답을 고쳤다. ① x가 select 목록에 없는 `ORDER BY ANY_VALUE(x)`는 정렬이 NULL로 되어 그룹이 g 순서로 나왔다(그룹이 첫 행의 열을 들고 있어야 하는 조건 `needs_group_row`가 select 목록만 봤다) → ORDER BY·HAVING의 식이 키가 아닌 열을 읽어도 그 행을 들게 했다. ② `SELECT g, ANY_VALUE(v) AS a … HAVING a > 5`가 0행이었다(식 항목의 별칭은 출력할 때에야 계산했다) → HAVING이 부르는 별칭의 식 항목은 HAVING 전에 그룹에서 계산한다(`cond_columns`, `make_group_row`).
+- **`information_schema.recovery`** (RuSQL만의 표, 한 행): 엔진이 마지막으로 시작할 때 `OPEN_MS`(데이터를 열기까지)·`UNDO_MS`/`WAL_TXNS_REPLAYED`/`WAL_TXNS_UNDONE`(WAL)·`REDO_MS`/`REDO_OPS`/`REDO_TABLES`(redo 로그)·`CRASH_DETECTED`. 값은 `SharedDatabase::recovery`(`RecoveryStats`)에 `Executor(dir)` 생성자가 `recover_from_wal`·`recover_from_redo` 둘레의 시계와 두 복구가 세는 수로 채운다. 서버는 시작하면서 "Opened the data in … ms (no recovery needed)" 또는 "Recovered after an unclean stop in … ms: N redo operations in M tables replayed (… ms), K WAL transactions replayed and L undone (… ms)" 한 줄을 남긴다.
+
+**앱·MCP**
+- **EXPLAIN 단계 막대**: `EXPLAIN ANALYZE`의 `Step N` 줄을 시작 위치(앞 단계들이 쓴 시간)와 길이(그 단계의 시간)가 있는 막대로 그린다(가장 오래 걸린 단계는 노란색, 행 수·ms·비율 표시). **하다가 발견한 것**: 엔진의 `EXPLAIN` 결과는 `+---`로 시작해 Tauri의 `parse_output`이 한 열짜리 표("QUERY PLAN (ANALYZE)")로 만들기 때문에, 코드에 있던 "계획 트리" 화면(`r.columns.length === 0`일 때만)은 **한 번도 뜨지 않고 있었다**. 트리를 `ExplainPlan` 컴포넌트로 빼서 한 열짜리 `QUERY PLAN` 표도 이 화면으로 그리게 했다(기존 메시지 쪽 분기는 그대로 두고 같은 컴포넌트를 부른다).
+- **Server Manager 복구 카드**: 상태 줄 아래에 `information_schema.recovery`와 "접속 가능해질 때까지"(프로세스 시작→로그인 성공) 시간을 보여 준다. `get_server_status`(Tauri)가 `recovery`·`ready_ms`를 더 주고, Start/Stop 뒤 ACTIVITY LOG에 한 줄("비정상 종료에서 복구: redo N건(M개 테이블, … ms), WAL 커밋 … 재적용·미완료 … 되돌림(… ms), 엔진 열기 … ms")을 남긴다. Start·Stop은 엔진 프로세스를 강제 종료하고 같은 데이터 폴더로 다시 여는 것이라 그 자체가 크래시 복구 시연이다.
+- **MCP `suggest_indexes`** (도구 27개): SELECT·UPDATE·DELETE 문장을 정규식으로 읽어(주석·문자열 제거, FROM·JOIN·별칭, WHERE의 AND 조각, 같음·IN·범위·BETWEEN·LIKE 접두사·OR·함수로 감싼 열) 표의 열·인덱스(`information_schema`)·`ANALYZE TABLE`의 열별 서로 다른 값 수·(SELECT는) `EXPLAIN ANALYZE`의 계획과 가장 오래 걸린 단계를 모아 `CREATE INDEX` 제안(같음 열 → 범위 열 하나 → 같음 검색일 때의 ORDER BY 열)을 JSON으로 돌려준다. 제안마다 이유와 "인덱스가 있으면 읽을 행 수" 추정(같음 열의 서로 다른 값 수만 쓰고 범위는 추정에 넣지 않는다), 이미 있는 인덱스는 `already_indexed`, 효과가 없는 경우는 `notes`에 이유와 함께 남긴다(100행 미만 표, 20% 넘게 읽게 되는 열, 열을 함수로 감쌈, 앞이 `%`인 LIKE, OR, LIMIT 없는 ORDER BY만). UPDATE·DELETE는 `EXPLAIN ANALYZE`가 실제로 실행되므로 계획을 돌리지 않는다. **아무것도 만들지 않는다.** `ANALYZE TABLE`의 열 이름이 12자로 잘려 나오는 것(`region_manager_id`가 `region_manag`)도 처리했다.
+
+**검증**
+- 새 C++ 시험 `[r51]` 2 케이스(ANY_VALUE ORDER BY·HAVING 별칭 9문장, `information_schema.recovery`의 크래시 → YES·정상 → NO). **심은 버그 4종 모두 잡힘**: 그룹 행 조건 제거(ORDER BY가 g 순서), HAVING 별칭 계산 제거(0행), redo 개수 0, WAL 개수 제거.
+- `any_value` 코퍼스에 7문장을 더해 진짜 MySQL 8.4.9와 비교: 26문장 차이 0 (`--emit`으로 `mysql_conformance_any_value.inc` 다시 만듦). 처음에는 별칭 `d`가 표의 열 `d`(DATE)와 겹쳐 한 문장이 달랐다 — 이건 이번 변경과 무관한 기존 한계(`SUM(v) * 2 AS d`도 같음)라 코퍼스의 별칭을 바꾸고 한계로 적었다. 호환성 점수판: 코퍼스 25개, 문장 2,654개 중 차이 11개(R50은 2,647개 중 11개).
+- 무작위 대조 12종(`verify_compare` … `verify_writes`) 위반 0.
+- MCP: 가짜 엔진으로 단위 시험 18개(`code/test/mcp/test_suggest_indexes.py`: 같음·범위·이미 있는 인덱스·작은 표·안 좁히는 열·함수·LIKE·OR·ORDER BY·조인·UPDATE/DELETE·12자 열 이름·주석과 문자열), 진짜 엔진(5천 행)으로도 확인: `customer_id = 42`는 인덱스 제안(읽을 행 10) 뒤 `Seq Scan` 2.7ms → 만든 뒤 `Index Scan` 0.2ms, `status = 'open'`(2값)은 "2500/5000행을 읽게 되어 제안 안 함".
+- 앱(`npm run tauri dev` + WebView2 디버그 포트, 페이지 안에서 DOM으로 조작 — 마우스는 쓰지 않음; 임시 연결을 더했다가 `connections.json`을 원래대로 되돌림): 2만 행 표에서 `EXPLAIN ANALYZE … GROUP BY … ORDER BY … LIMIT`이 계획 트리 + 막대 다섯 개(Scan 60%·Sort 27%·Group 12%…, 가장 긴 막대 노란색)로 뜸. 커밋한 2행과 열어 둔 트랜잭션 1건을 만든 뒤 Start Server로 강제 종료·재시작하니 복구 카드가 "RECOVERED AFTER AN UNCLEAN STOP: 접속 558ms, 엔진 열기 235ms, redo 2건 1테이블 80ms, WAL 0 재적용·1 되돌림 48ms"로 바뀌고 ACTIVITY LOG에 같은 줄이 남음; 커밋한 2행은 살아 있고 열어 둔 행은 없음(표 20,002행). Stop 쪽도 확인(redo 1건).
+- 전체 시험 **791 케이스 / 1,506,139 assertions**을 Release 기본으로, 1,506,140을 `RUSQL_DML_INDEX_MIN_ROWS=0`으로 통과. `tsc --noEmit`·`cargo check` 통과.
+- **하지 않은 것**: Debug 빌드, 크래시 퍼저 라운드, 성능 측정(변경은 HAVING이 있는 GROUP BY의 그룹당 식 항목 계산과 시작 시계 둘뿐), 빌드 간 차분. 앱 화면은 사람이 눌러 본 것이 아니다(아이콘·폰트·전체 모양).
+
+**한계 (새로 찾은 것 포함)**
+- HAVING이 부르는 별칭이 같은 이름의 실제 열과 겹치면(`SUM(v) * 2 AS d`인데 표에 열 `d`) 별칭이 아니라 열을 읽어 0행이다(MySQL은 별칭). 이전부터 있었고 별칭 이름 공간을 열과 따로 둬야 해서 고치지 않았다.
+- `suggest_indexes`는 정규식 해석이라 하위 질의·CTE·여러 범위 열·방향이 섞인 ORDER BY는 읽지 않고, 추정은 열이 독립이라고 가정한다. 제안한 인덱스의 효과는 사용자가 만든 뒤 `EXPLAIN`으로 다시 재야 한다.
+- 복구 카드의 값은 Start/Stop 뒤에만 바뀐다(앱이 켤 때 연 엔진의 값은 그대로 보임). "접속 가능해질 때까지"에는 프로세스 시작 뒤 접속 재시도 간격(최대 100ms 단위)이 들어 있다.
 
 ## 요약: 1학기 대비 2학기에 달라진 것
 

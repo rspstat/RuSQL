@@ -1,5 +1,5 @@
 {
-  "generated": "2026-10-24",
+  "generated": "2026-10-25",
   "mysql": "8.4.9",
   "corpora": [
     {
@@ -110,7 +110,7 @@
       "name": "any_value",
       "en": "ANY_VALUE under ONLY_FULL_GROUP_BY",
       "ko": "ONLY_FULL_GROUP_BY 아래의 ANY_VALUE",
-      "statements": 19,
+      "statements": 26,
       "different": 0,
       "bothFail": 4
     },
@@ -203,10 +203,10 @@
       "bothFail": 0
     }
   ],
-  "conformanceCases": 3104,
+  "conformanceCases": 3111,
   "tests": {
-    "cases": 789,
-    "assertions": 1506079
+    "cases": 791,
+    "assertions": 1506139
   },
   "bugsFound": 206
 }

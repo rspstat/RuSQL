@@ -399,6 +399,7 @@ void Executor::recover_from_wal() {
     }
     std::sort(order.begin(), order.end());
     order.erase(std::unique(order.begin(), order.end()), order.end());
+    for (auto txn_id : order) (committed.count(txn_id) ? sw->recovery.wal_committed : sw->recovery.wal_undone)++;
 
     std::unordered_map<std::uint64_t, std::vector<UndoEntry>> undo_by_txn;
     for (auto& e : txn.read_undo_log_file()) undo_by_txn[e.txn_id].push_back(e);

@@ -21,3 +21,11 @@ SELECT grp FROM av GROUP BY grp HAVING ANY_VALUE(val) > 5
 SELECT grp, val FROM av GROUP BY grp, val HAVING ANY_VALUE(val) > 5 ORDER BY grp
 SELECT grp, ANY_VALUE(val) FROM av GROUP BY grp HAVING ANY_VALUE(val) > 5
 SELECT grp, SUM(val) FROM av GROUP BY grp HAVING SUM(val) > 5 AND ANY_VALUE(val) > 1
+# R51: ORDER BY ANY_VALUE(x) of a column the select list does not hold, and a HAVING that names the alias of ANY_VALUE(x) (both used to be silently wrong)
+SELECT grp, COUNT(*) FROM av GROUP BY grp ORDER BY ANY_VALUE(val) DESC, grp
+SELECT grp, COUNT(*) FROM av GROUP BY grp ORDER BY ANY_VALUE(name), grp
+SELECT grp FROM av GROUP BY grp ORDER BY ANY_VALUE(val) + grp
+SELECT grp, ANY_VALUE(val) AS a FROM av GROUP BY grp HAVING a > 5 ORDER BY grp
+SELECT grp, ANY_VALUE(val) * 2 AS dbl FROM av GROUP BY grp HAVING dbl = 40
+SELECT grp, ANY_VALUE(val) AS a FROM av GROUP BY grp HAVING a IS NULL
+SELECT grp, SUM(val) AS s, ANY_VALUE(val) AS a FROM av GROUP BY grp HAVING s > 5 AND a > 5 ORDER BY ANY_VALUE(val) DESC, grp

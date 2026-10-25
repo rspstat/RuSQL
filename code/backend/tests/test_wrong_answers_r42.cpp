@@ -759,3 +759,23 @@ TEST_CASE("R50: RANGE offsets, frames that hold no row, dates as numbers, FLOAT 
     // VERSION() is what @@version and the handshake say
     REQUIRE(q(ex, "SELECT VERSION() = @@version") == Rows{{"1"}});
 }
+
+TEST_CASE("R51: ORDER BY and HAVING read ANY_VALUE of a column the groups do not key by", "[r51]") {
+    TempDataDir dir("r51_any_value");
+    Executor ex(dir.path);
+    ok(ex, "CREATE DATABASE d");
+    ok(ex, "USE d");
+    ok(ex, "CREATE TABLE av (id INT PRIMARY KEY, g INT, v INT)");
+    ok(ex, "INSERT INTO av VALUES (1, 1, 30), (2, 1, 30), (3, 2, 10), (4, 3, 20), (5, 3, 20)");
+    // ORDER BY ANY_VALUE(v) sorts the groups by the v of a row of each (it used to sort by NULL: the groups came out in the order of g)
+    REQUIRE(q(ex, "SELECT g, COUNT(*) FROM av GROUP BY g ORDER BY ANY_VALUE(v)") == Rows{{"2", "1"}, {"3", "2"}, {"1", "2"}});
+    REQUIRE(q(ex, "SELECT g, COUNT(*) FROM av GROUP BY g ORDER BY ANY_VALUE(v) DESC, g") == Rows{{"1", "2"}, {"3", "2"}, {"2", "1"}});
+    REQUIRE(q(ex, "SELECT g FROM av GROUP BY g ORDER BY ANY_VALUE(v) + g") == Rows{{"2"}, {"3"}, {"1"}});
+    // HAVING names the alias of an expression of the select list: it used to see no column of that name and keep every group or none
+    REQUIRE(q(ex, "SELECT g, ANY_VALUE(v) AS a FROM av GROUP BY g HAVING a > 15 ORDER BY g") == Rows{{"1", "30"}, {"3", "20"}});
+    REQUIRE(q(ex, "SELECT g, ANY_VALUE(v) * 2 AS d FROM av GROUP BY g HAVING d = 20") == Rows{{"2", "20"}});
+    REQUIRE(q(ex, "SELECT g, ANY_VALUE(v) AS a FROM av GROUP BY g HAVING a > 15 AND g > 1") == Rows{{"3", "20"}});
+    // the aggregate beside it still works, and a plain select list is unchanged
+    REQUIRE(q(ex, "SELECT g, SUM(v) AS s, ANY_VALUE(v) AS a FROM av GROUP BY g HAVING s > 20 ORDER BY ANY_VALUE(v) DESC, g") == Rows{{"1", "60", "30"}, {"3", "40", "20"}});
+    REQUIRE(q(ex, "SELECT g, COUNT(*) FROM av GROUP BY g ORDER BY g DESC") == Rows{{"3", "2"}, {"2", "1"}, {"1", "2"}});
+}

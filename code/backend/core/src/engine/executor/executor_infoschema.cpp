@@ -102,6 +102,9 @@ const std::vector<IC> kInnodbDeadlocks = {{"REQUESTING_TRX_ID", true}, {"BLOCKIN
 // RuSQL's own (MySQL has none): every stored version of every row, the way MVCC keeps them (R49)
 const std::vector<IC> kRowVersions = {{"TABLE_SCHEMA", false}, {"TABLE_NAME", false}, {"ROW_KEY", false}, {"ROW_DATA", false},
                                       {"XMIN", true}, {"XMAX", true}, {"STATE", false}, {"VISIBLE_TO_ME", false}};
+// RuSQL's own: what the last start of the engine did to open the data (R51)
+const std::vector<IC> kRecovery = {{"OPEN_MS", true}, {"UNDO_MS", true}, {"REDO_MS", true}, {"WAL_TXNS_REPLAYED", true}, {"WAL_TXNS_UNDONE", true},
+                                   {"REDO_OPS", true}, {"REDO_TABLES", true}, {"CRASH_DETECTED", false}};
 } // namespace
 
 const std::vector<InfoSchemaColumn>* Executor::info_schema_columns(const std::string& which) {
@@ -124,6 +127,7 @@ const std::vector<InfoSchemaColumn>* Executor::info_schema_columns(const std::st
     if (lower == "innodb_lock_waits") return &kInnodbLockWaits;
     if (lower == "innodb_deadlocks") return &kInnodbDeadlocks;
     if (lower == "row_versions") return &kRowVersions;
+    if (lower == "recovery") return &kRecovery;
     return nullptr;
 }
 
@@ -584,6 +588,23 @@ std::vector<Row> Executor::info_schema_rows(const SharedDatabase& s, const std::
             rows.push_back(std::move(r));
         }
         std::sort(rows.begin(), rows.end(), [](const Row& a, const Row& b) { return std::stoull(a.at("ID")) < std::stoull(b.at("ID")); });
+        return rows;
+    }
+
+    if (lower == "recovery") {
+        // One row: how long the start took, and what the crash recovery had to do (nothing after a clean stop)
+        auto text = [](double ms) { char b[32]; std::snprintf(b, sizeof b, "%.3f", ms); return std::string(b); };
+        const RecoveryStats& r = s.recovery;
+        Row row;
+        row["OPEN_MS"] = text(r.open_ms);
+        row["UNDO_MS"] = text(r.undo_ms);
+        row["REDO_MS"] = text(r.redo_ms);
+        row["WAL_TXNS_REPLAYED"] = std::to_string(r.wal_committed);
+        row["WAL_TXNS_UNDONE"] = std::to_string(r.wal_undone);
+        row["REDO_OPS"] = std::to_string(r.redo_ops);
+        row["REDO_TABLES"] = std::to_string(r.redo_tables);
+        row["CRASH_DETECTED"] = r.crashed() ? "YES" : "NO";
+        rows.push_back(std::move(row));
         return rows;
     }
 

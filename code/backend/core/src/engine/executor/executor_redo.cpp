@@ -174,6 +174,7 @@ void Executor::recover_from_redo() {
         }
         ops = std::move(kept);
     }
+    sw->recovery.redo_ops = ops.size();
 
     std::unordered_set<std::string> touched;
     // Identical row images are NOT one version: a table without a primary key can hold several rows with the very same
@@ -252,6 +253,7 @@ void Executor::recover_from_redo() {
         }
     }
 
+    sw->recovery.redo_tables = touched.size();
     // Same index repair the WAL-undo recovery does for every table it touched: secondary/
     // hash/composite/PK indexes were loaded from the pre-crash state.
     for (auto& table : touched) {

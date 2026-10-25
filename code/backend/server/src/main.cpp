@@ -452,6 +452,21 @@ int main(int argc, char** argv) {
 
     Executor boot(data_dir, buffer_pool_size);
     auto shared = boot.get_shared();
+    {
+        const RecoveryStats r = shared->read()->recovery;
+        char open[32];
+        std::snprintf(open, sizeof open, "%.1f", r.open_ms);
+        if (r.crashed()) {
+            char redo[32], undo[32];
+            std::snprintf(redo, sizeof redo, "%.1f", r.redo_ms);
+            std::snprintf(undo, sizeof undo, "%.1f", r.undo_ms);
+            log(std::string("Recovered after an unclean stop in ") + open + " ms: " + std::to_string(r.redo_ops) + " redo operations in " + std::to_string(r.redo_tables) +
+                " tables replayed (" + redo + " ms), " + std::to_string(r.wal_committed) + " WAL transactions replayed and " + std::to_string(r.wal_undone) +
+                " undone (" + undo + " ms).");
+        } else {
+            log(std::string("Opened the data in ") + open + " ms (no recovery needed).");
+        }
+    }
 
     if (shared->write()->ensure_default_user()) {
         log("No users found. Created default user 'root'@'%' with password 'root'.");

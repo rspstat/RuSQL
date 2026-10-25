@@ -162,7 +162,7 @@ const DURABILITY: Item[] = [
   },
   {
     t: L("Crash recovery", "크래시 복구"),
-    s: L("on boot: undo unfinished, replay redo, rebuild indexes", "부팅 시 미완료 undo → redo 재생 → 인덱스 재구성"),
+    s: L("on boot: undo unfinished, replay redo, rebuild indexes; timed in information_schema.recovery", "부팅 시 미완료 undo → redo 재생 → 인덱스 재구성, 걸린 시간은 information_schema.recovery에 기록"),
   },
 ];
 
@@ -174,8 +174,8 @@ const AI: Item[] = [
   {
     t: L("MCP tools", "MCP 도구"),
     s: L(
-      "26 tools: execute_sql (dangerous-SQL guard), run_script (preview, all-or-nothing), schema and index lookup, editor and server control",
-      "도구 26개: execute_sql(위험 SQL 차단), run_script(미리보기, 전부 또는 전무), 스키마·인덱스 조회, 에디터·서버 제어",
+      "27 tools: execute_sql (dangerous-SQL guard), run_script (preview, all-or-nothing), suggest_indexes, schema and index lookup, editor and server control",
+      "도구 27개: execute_sql(위험 SQL 차단), run_script(미리보기, 전부 또는 전무), suggest_indexes, 스키마·인덱스 조회, 에디터·서버 제어",
     ),
   },
   {
@@ -254,9 +254,9 @@ function LayersView() {
         <Card style={at("1", "1")} c={C.client} title="engine_cli" sub={L("Terminal REPL", "터미널 REPL")}
           note={L("runs the engine in-process", "엔진을 프로세스 안에서 직접 실행")} />
         <Card style={at("2", "1")} c={C.client} title={L("Desktop UI", "데스크톱 UI")} sub="Tauri + React + Monaco"
-          note={L("SQL editor, Journey, ERD editor, B+Tree and MVCC pages, Server Manager, Compat page", "SQL 에디터, 한 문장의 여행, ERD 편집기, B+Tree·MVCC 페이지, 서버 매니저, 호환성 페이지")} />
+          note={L("SQL editor (EXPLAIN step bars), Journey, ERD editor, B+Tree and MVCC pages, Server Manager (recovery card), Compat page", "SQL 에디터(EXPLAIN 단계 막대), 한 문장의 여행, ERD 편집기, B+Tree·MVCC 페이지, 서버 매니저(복구 카드), 호환성 페이지")} />
         <Card style={at("3", "1")} c={C.client} title="Claude Desktop + MCP" sub="Python FastMCP, stdio JSON-RPC"
-          note={L("26 tools; drives the UI via ui_commands.json", "도구 26개, ui_commands.json으로 UI 제어")} />
+          note={L("27 tools; drives the UI via ui_commands.json", "도구 27개, ui_commands.json으로 UI 제어")} />
         <Card style={at("4", "1")} c={C.client} title="engine_client" sub={L("TCP client CLI", "TCP 클라이언트 CLI")} note="-u -p -h -P" />
         <Card style={at("5", "1")} c={C.client} title={L("MySQL clients", "MySQL 클라이언트")} sub="mysql CLI, DBeaver, JDBC"
           note={L("HikariCP and other pools", "HikariCP 등 커넥션 풀")} />

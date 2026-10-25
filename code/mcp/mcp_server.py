@@ -421,6 +421,325 @@ def get_indexes(table: str, database: str = "") -> str:
     return json.dumps(rows, ensure_ascii=False)
 
 
+# ─── suggest_indexes ────────────────────────────────────────────────
+# Reads the query (a heuristic reading with regular expressions, there is no SQL parser in this process), the columns and indexes of its tables (information_schema),
+# the shape of the data (ANALYZE TABLE: how many distinct values each column has) and, for a SELECT, the plan the engine runs (EXPLAIN ANALYZE), and says which
+# index would let the query stop scanning. It never creates anything: the answer holds the CREATE INDEX statements for the user to run.
+_SQL_WORDS = {"WHERE", "ON", "JOIN", "LEFT", "RIGHT", "INNER", "OUTER", "CROSS", "FULL", "NATURAL", "GROUP", "ORDER", "LIMIT", "HAVING", "UNION", "SET", "USING",
+              "VALUES", "SELECT", "FROM", "AS", "AND", "OR", "NOT", "NULL", "TRUE", "FALSE", "DISTINCT", "OFFSET", "FOR", "WINDOW", "LATERAL", "STRAIGHT_JOIN"}
+_CLAUSE_END = r"(?=\bWHERE\b|\bGROUP\s+BY\b|\bORDER\s+BY\b|\bHAVING\b|\bLIMIT\b|\bUNION\b|\bFOR\s+UPDATE\b|\bWINDOW\b|$)"
+_IDENT = r"`?[A-Za-z_][\w$]*`?(?:\.`?[A-Za-z_][\w$]*`?){0,2}"
+_SMALL_TABLE_ROWS = 100       # a scan of fewer rows is cheap: no index suggested
+_NOT_NARROWING = 0.2          # an index that leaves more than this share of the table to read does not help
+
+
+def _strip_sql(sql: str) -> tuple[str, list[str]]:
+    """The statement without comments, strings and extra blanks; and the LIKE patterns, which are strings the answer depends on."""
+    like_patterns = re.findall(r"\bLIKE\s+'((?:[^']|'')*)'", sql, flags=re.IGNORECASE)
+    s = re.sub(r"/\*.*?\*/", " ", sql, flags=re.S)
+    s = re.sub(r"--[^\n]*", " ", s)
+    s = re.sub(r"'(?:[^']|'')*'", "''", s)
+    s = re.sub(r'"(?:[^"]|"")*"', '""', s)
+    return re.sub(r"\s+", " ", s).strip().rstrip(";").strip(), like_patterns
+
+
+def _bare(name: str) -> str:
+    return name.replace("`", "").split(".")[-1]
+
+
+def _query_tables(stripped: str) -> list[tuple[str, str]]:
+    """(table, alias) of every table the statement names (FROM, JOIN, comma lists, UPDATE, DELETE FROM); the alias is the table's own name when it has none."""
+    found: list[tuple[str, str]] = []
+
+    def add(table: str, alias: str | None):
+        alias = alias if alias and alias.upper() not in _SQL_WORDS else None
+        entry = (_bare(table), _bare(alias) if alias else _bare(table))
+        if entry not in found:
+            found.append(entry)
+
+    for m in re.finditer(rf"\b(?:JOIN|UPDATE|DELETE\s+FROM)\s+({_IDENT})(?:\s+(?:AS\s+)?([A-Za-z_]\w*))?", stripped, flags=re.IGNORECASE):
+        add(m.group(1), m.group(2))
+    for m in re.finditer(rf"\bFROM\s+(.+?){_CLAUSE_END}", stripped, flags=re.IGNORECASE):
+        listing = re.split(r"\b(?:INNER|LEFT|RIGHT|FULL|CROSS|NATURAL)?\s*(?:OUTER\s+)?JOIN\b", m.group(1), flags=re.IGNORECASE)
+        for k, part in enumerate(listing):
+            part = re.sub(r"\bON\b.*$", "", part, flags=re.IGNORECASE).strip()
+            for piece in part.split(","):
+                piece = piece.strip().strip("()")
+                if piece.upper().startswith("SELECT"):
+                    continue
+                pm = re.match(rf"({_IDENT})(?:\s+(?:AS\s+)?([A-Za-z_]\w*))?$", piece)
+                if pm:
+                    add(pm.group(1), pm.group(2))
+    return found
+
+
+def _clause(stripped: str, keyword: str) -> str:
+    m = re.search(rf"\b{keyword}\b\s+(.+?){_CLAUSE_END}", stripped, flags=re.IGNORECASE)
+    return m.group(1).strip() if m else ""
+
+
+def _join_conditions(stripped: str) -> list[str]:
+    return [m.group(1).strip() for m in re.finditer(r"\bON\b\s+(.+?)(?=\b(?:INNER|LEFT|RIGHT|FULL|CROSS|NATURAL)?\s*(?:OUTER\s+)?JOIN\b|\bWHERE\b|\bGROUP\s+BY\b|\bORDER\s+BY\b|\bHAVING\b|\bLIMIT\b|$)", stripped, flags=re.IGNORECASE)]
+
+
+def _conjuncts(clause: str) -> list[str]:
+    """The AND-ed tests of a WHERE / ON (an AND inside BETWEEN or inside parentheses is not a split)."""
+    text = re.sub(r"(\bBETWEEN\s+\S+)\s+AND\s+", r"\1 __AND__ ", clause, flags=re.IGNORECASE)
+    parts, depth, cur = [], 0, ""
+    for token in re.split(r"(\s+AND\s+|\(|\))", text, flags=re.IGNORECASE):
+        if token == "(":
+            depth += 1
+        elif token == ")":
+            depth -= 1
+        if depth == 0 and re.fullmatch(r"\s+AND\s+", token, flags=re.IGNORECASE):
+            parts.append(cur.strip())
+            cur = ""
+        else:
+            cur += token
+    parts.append(cur.strip())
+    return [p.replace("__AND__", "AND") for p in parts if p]
+
+
+def _read_predicate(test: str, like_patterns: list[str]) -> dict:
+    """One test of a WHERE: {"kind": eq | in | range | like_prefix | like_any | func | or | other, "columns": [names as written]}."""
+    t = test.strip()
+    while t.startswith("(") and t.endswith(")") and t.count("(") == t.count(")"):
+        t = t[1:-1].strip()
+    columns = [c for c in re.findall(_IDENT, t) if c.upper() not in _SQL_WORDS]
+    if re.search(r"\bOR\b", t, flags=re.IGNORECASE):
+        return {"kind": "or", "columns": columns}
+    m = re.match(rf"^({_IDENT})\s*(<=>|<>|!=|>=|<=|=|>|<)\s*(.+)$", t)
+    if m:
+        left, op, right = m.group(1), m.group(2), m.group(3).strip()
+        right_is_column = re.fullmatch(_IDENT, right) is not None and right.upper() not in _SQL_WORDS
+        if right_is_column and op == "=":
+            return {"kind": "join", "columns": [left, right]}
+        if op in ("<>", "!="):
+            return {"kind": "other", "columns": [left]}
+        return {"kind": "eq" if op in ("=", "<=>") else "range", "columns": [left]}
+    m = re.match(rf"^({_IDENT})\s+(NOT\s+)?(IN|BETWEEN|LIKE|IS)\b(.*)$", t, flags=re.IGNORECASE)
+    if m:
+        left, negated, word, rest = m.group(1), bool(m.group(2)), m.group(3).upper(), m.group(4).strip()
+        if negated:
+            return {"kind": "other", "columns": [left]}
+        if word == "IN":
+            return {"kind": "in", "columns": [left]}
+        if word == "BETWEEN":
+            return {"kind": "range", "columns": [left]}
+        if word == "IS":
+            return {"kind": "eq" if re.match(r"^NULL\b", rest, flags=re.IGNORECASE) else "other", "columns": [left]}
+        pattern = like_patterns.pop(0) if like_patterns else ""
+        return {"kind": "like_prefix" if pattern and pattern[0] not in "%_" else "like_any", "columns": [left]}
+    return {"kind": "func" if columns else "other", "columns": columns}
+
+
+def _order_items(stripped: str, keyword: str) -> list[tuple[str, str]]:
+    items = []
+    for piece in _clause(stripped, keyword).split(","):
+        m = re.match(rf"^\s*({_IDENT})(?:\s+(ASC|DESC))?\s*$", piece, flags=re.IGNORECASE)
+        if m:
+            items.append((m.group(1), (m.group(2) or "ASC").upper()))
+        else:
+            break  # an expression or a position ends what an index can serve
+    return items
+
+
+def _table_facts(table: str, database: str) -> dict:
+    """Columns, indexes (each a list of columns, PRIMARY too), the row count and the distinct values per column of a table."""
+    facts: dict = {"columns": [], "indexes": {}, "rows": None, "distinct": {}}
+    where = f"TABLE_NAME = '{table}' AND TABLE_SCHEMA = DATABASE()"
+    for r in _parse_table_output(_run(f"SELECT COLUMN_NAME FROM information_schema.columns WHERE {where} ORDER BY ORDINAL_POSITION", database)):
+        if "COLUMN_NAME" in r:
+            facts["columns"].append(r["COLUMN_NAME"])
+    stats = _parse_table_output(_run(f"SELECT INDEX_NAME, SEQ_IN_INDEX, COLUMN_NAME FROM information_schema.statistics WHERE {where} ORDER BY INDEX_NAME, SEQ_IN_INDEX", database))
+    for r in stats:
+        if "INDEX_NAME" in r:
+            facts["indexes"].setdefault(r["INDEX_NAME"], []).append(r["COLUMN_NAME"])
+    raw = _run(f"ANALYZE TABLE {table}", database)
+    m = re.search(r"ANALYZE: \S+ \((\d+) rows\)", raw)
+    if m:
+        facts["rows"] = int(m.group(1))
+    shown = [c[:12] for c in facts["columns"]]  # ANALYZE TABLE cuts column names to 12 characters
+    for line in raw.splitlines():
+        cells = [c.strip() for c in line.strip().strip("|").split("|")]
+        if len(cells) >= 3 and cells[0] in shown and shown.count(cells[0]) == 1 and cells[1].isdigit():
+            facts["distinct"][facts["columns"][shown.index(cells[0])]] = int(cells[1])
+    return facts
+
+
+def _plan_summary(sql: str, database: str) -> dict:
+    raw = _run(f"EXPLAIN ANALYZE {sql}", database)
+    if raw.strip().upper().startswith(("ERR", "ERROR")):
+        return {"error": " ".join(l for l in raw.splitlines() if l.strip() and l.strip() not in ("ERR", "---END---"))[:300]}
+    plan: dict = {"access": [], "steps": []}
+    for line in raw.splitlines():
+        text = line.strip().strip("|").strip()
+        if text.startswith(("Access:", "Join:")):
+            plan["access"].append(re.sub(r"\s+", " ", text))
+        m = re.match(r"Estimated rows\s*:\s*(\d+)\s+Actual rows\s*:\s*(\d+)", text)
+        if m:
+            plan["estimated_rows"], plan["actual_rows"] = int(m.group(1)), int(m.group(2))
+        m = re.match(r"Execution time\s*:\s*([\d.]+) (ms|sec)", text)
+        if m:
+            plan["execution_ms"] = float(m.group(1)) * (1000 if m.group(2) == "sec" else 1)
+        m = re.match(r"Step (\d+) (.+?) : (\d+) rows, ([\d.]+) ms, (\d+)%", text)
+        if m:
+            plan["steps"].append({"step": int(m.group(1)), "what": m.group(2), "rows": int(m.group(3)), "ms": float(m.group(4)), "share_percent": int(m.group(5))})
+    return plan
+
+
+def _covered(columns: list[str], indexes: dict[str, list[str]], rows: int | None, distinct: dict[str, int]) -> str | None:
+    """The index that already serves a search on `columns` (its leading columns are those columns), or one on the first column that leaves only a few rows."""
+    for name, index in indexes.items():
+        k = len(columns)
+        if index[:k] == columns or set(index[:k]) == set(columns):
+            return name
+    if rows:
+        for name, index in indexes.items():
+            if index and index[0] in columns and distinct.get(index[0]) and rows / distinct[index[0]] <= 50:
+                return name
+    return None
+
+
+def suggest_indexes_for(sql: str, database: str = "") -> dict:
+    stripped, like_patterns = _strip_sql(sql)
+    kind = (stripped.split(" ", 1)[0] if stripped else "").upper()
+    if kind not in ("SELECT", "UPDATE", "DELETE", "WITH"):
+        return {"error": "suggest_indexes reads a SELECT, UPDATE or DELETE statement."}
+    tables = _query_tables(stripped)
+    if not tables:
+        return {"error": "No table found in the statement."}
+    facts = {t: _table_facts(t, database) for t in dict.fromkeys(t for t, _ in tables)}
+    alias_to_table = {a: t for t, a in tables}
+    for t, _ in tables:
+        alias_to_table.setdefault(t, t)
+
+    def resolve(name: str) -> tuple[str, str] | None:
+        parts = name.replace("`", "").split(".")
+        column = parts[-1]
+        if len(parts) >= 2:
+            table = alias_to_table.get(parts[-2])
+            return (table, column) if table and column in facts[table]["columns"] else None
+        owners = [t for t in facts if column in facts[t]["columns"]]
+        return (owners[0], column) if len(owners) == 1 else None
+
+    # what each table is searched, joined, grouped and sorted by
+    eq: dict[str, list[str]] = {t: [] for t in facts}
+    rng: dict[str, list[str]] = {t: [] for t in facts}
+    joins: dict[str, list[str]] = {t: [] for t in facts}
+    notes: list[str] = []
+    tests = _conjuncts(_clause(stripped, "WHERE")) + [c for on in _join_conditions(stripped) for c in _conjuncts(on)]
+    for test in tests:
+        p = _read_predicate(test, like_patterns)
+        resolved = [r for r in (resolve(c) for c in p["columns"]) if r]
+        if p["kind"] in ("eq", "in"):
+            for t, c in resolved:
+                if c not in eq[t]:
+                    eq[t].append(c)
+        elif p["kind"] in ("range", "like_prefix"):
+            for t, c in resolved:
+                if c not in rng[t]:
+                    rng[t].append(c)
+        elif p["kind"] == "join":
+            for t, c in resolved:
+                if c not in joins[t]:
+                    joins[t].append(c)
+        elif p["kind"] == "func" and resolved:
+            notes.append(f"`{test}` wraps a column in an expression or function, so no index can serve it as written (compare the bare column instead).")
+        elif p["kind"] == "like_any" and resolved:
+            notes.append(f"`{test}` starts with a wildcard, so an index cannot be used for it.")
+        elif p["kind"] == "or" and resolved:
+            notes.append(f"`{test}` combines columns with OR: one index cannot serve it, a separate index per OR branch may.")
+    sorted_by = [(resolve(c), d) for c, d in _order_items(stripped, "ORDER BY")]
+    sorted_by = [(r, d) for r, d in sorted_by if r]
+    grouped_by = [resolve(c) for c, _ in _order_items(stripped, "GROUP BY")]
+    grouped_by = [r for r in grouped_by if r]
+
+    suggestions: list[dict] = []
+    already: list[dict] = []
+
+    def consider(table: str, narrowing: list[str], order_columns: list[str], why: str):
+        """An index on the columns the statement searches by (`narrowing`) followed by the ones it sorts by (`order_columns`)."""
+        f = facts[table]
+        rows = f["rows"]
+        columns = narrowing + order_columns
+        if not columns:
+            return
+        if rows is not None and rows < _SMALL_TABLE_ROWS:
+            notes.append(f"{table} has only {rows} rows: a scan is cheap, no index suggested.")
+            return
+        have = _covered(columns, f["indexes"], rows, f["distinct"])
+        if have:
+            already.append({"table": table, "columns": columns, "index": have})
+            return
+        # how many rows a search reads is only known for equality columns: how much a range keeps is not, so a range column adds no estimate and is never a reason to refuse
+        ranged = [c for c in narrowing if c in rng[table] and c not in eq[table]]
+        counted = [c for c in narrowing if c not in ranged]
+        estimate = None
+        if rows and counted and all(c in f["distinct"] for c in counted):
+            combined = 1
+            for c in counted:
+                combined *= max(1, f["distinct"][c])
+            estimate = max(1, rows // combined) if combined else rows
+            if estimate > rows * _NOT_NARROWING and not ranged:
+                notes.append(f"An index on {table}({', '.join(counted)}) would still leave about {estimate} of {rows} rows to read: not suggested.")
+                return
+        name = "idx_" + table + "_" + "_".join(columns)
+        entry = {"table": table, "columns": columns, "create_index": f"CREATE INDEX {name} ON {table} ({', '.join(columns)});", "why": why}
+        if estimate is not None:
+            entry["rows_read_with_index_estimate"] = estimate
+            entry["rows_in_table"] = rows
+        suggestions.append(entry)
+
+    single_table = len(facts) == 1
+    has_limit = re.search(r"\bLIMIT\b", stripped, flags=re.IGNORECASE) is not None
+    for t, f in facts.items():
+        narrowing = sorted(eq[t], key=lambda c: -f["distinct"].get(c, 0)) + rng[t][:1]
+        order_columns: list[str] = []
+        # the rows come out of the index in the order of the ORDER BY when the index is searched by equality only and the whole sort goes one way
+        if single_table and not rng[t] and sorted_by and all(r[0] == t for r, _ in sorted_by) and len({d for _, d in sorted_by}) == 1:
+            order_columns = [r[1] for r, _ in sorted_by if r[1] not in narrowing]
+        parts = []
+        if narrowing:
+            parts.append("searched by " + ", ".join(f"{c} ({'=' if c in eq[t] else 'range'})" for c in narrowing))
+        if order_columns:
+            parts.append("sorted by " + ", ".join(order_columns) + " (the rows then come out of the index in order)")
+        if narrowing or (order_columns and has_limit):
+            consider(t, narrowing, order_columns, " and ".join(parts))
+        elif order_columns:
+            notes.append(f"An index on {t}({', '.join(order_columns)}) would spare the sort, but without a LIMIT the statement reads every row anyway.")
+        if joins[t]:
+            consider(t, joins[t][:1], [], f"joined on {joins[t][0]}: the engine looks up matching rows through it")
+    if grouped_by and single_table:
+        t = next(iter(facts))
+        group_columns = [c for r, c in grouped_by if r == t]
+        if group_columns and not eq[t] and not rng[t]:
+            consider(t, group_columns, [], "grouped by " + ", ".join(group_columns))
+    result: dict = {"statement": kind, "tables": {t: {"rows": f["rows"], "indexes": f["indexes"]} for t, f in facts.items()}, "suggestions": suggestions}
+    if already:
+        result["already_indexed"] = already
+    if notes:
+        result["notes"] = list(dict.fromkeys(notes))
+    if kind in ("SELECT", "WITH"):
+        result["plan"] = _plan_summary(sql.strip().rstrip(";"), database)
+        slow = max(result["plan"].get("steps", []), key=lambda s: s["share_percent"], default=None)
+        if slow and slow["share_percent"] >= 50:
+            result["slowest_step"] = f"Step {slow['step']} ({slow['what']}) takes {slow['share_percent']}% of the time"
+    else:
+        result.setdefault("notes", []).append("The plan was not run: EXPLAIN ANALYZE would execute an UPDATE or DELETE.")
+    result["caveat"] = "A heuristic reading of the statement; the row estimates assume the columns are independent. Nothing was created: run a CREATE INDEX yourself and EXPLAIN again to see the plan change."
+    return result
+
+
+@mcp.tool()
+def suggest_indexes(sql: str, database: str = "") -> str:
+    """Suggest indexes for a SELECT, UPDATE or DELETE: reads the statement, the columns and indexes of its tables, how many distinct values each column has
+    (ANALYZE TABLE) and, for a SELECT, the plan the engine runs (EXPLAIN ANALYZE), and returns a JSON object with the CREATE INDEX statements that would let the
+    statement stop scanning (equality columns first, then one range column, then ORDER BY), why, how many rows it would read with them, the indexes the tables already
+    have, and the reasons an index would not help (a function around a column, a leading wildcard, an OR, a small table). It does not create anything."""
+    return json.dumps(suggest_indexes_for(sql, database), ensure_ascii=False)
+
+
 @mcp.tool()
 def sample_data(table: str, n: int = 10, database: str = "") -> str:
     """Return up to N sample rows from a table as a JSON array.

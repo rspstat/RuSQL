@@ -152,6 +152,7 @@ bool SharedDatabase::ensure_default_user() {
 // ---------------------------------------------------------------------------
 
 Executor::Executor(const std::string& dir, std::size_t buffer_pool_capacity) {
+    const auto open_started = std::chrono::steady_clock::now();
     DiskManager disk(dir);
     Catalog catalog;
     std::unordered_map<std::string, std::vector<Row>> tables;
@@ -381,10 +382,13 @@ Executor::Executor(const std::string& dir, std::size_t buffer_pool_capacity) {
     session_id = 0;
     lock_wait_timeout_ms = 50000;
 
+    const auto undo_started = std::chrono::steady_clock::now();
     recover_from_wal();
     // After undo recovery (so a crash between a commit's redo fsync and its WAL cleanup
     // reverts the half-cleaned transaction first and the redo batch then re-applies it).
+    const auto redo_started = std::chrono::steady_clock::now();
     recover_from_redo();
+    const auto recovered = std::chrono::steady_clock::now();
 
     // MVCC: _xmin/_xmax bake real transaction ids into rows persisted on disk, but
     // TxnIoShared's counter always restarts at 1 on a fresh process -- without this, a
@@ -412,6 +416,13 @@ Executor::Executor(const std::string& dir, std::size_t buffer_pool_capacity) {
             }
         }
         if (max_id > 0) txn_io->ensure_next_id_at_least(max_id + 1);
+    }
+    {
+        auto milliseconds = [](std::chrono::steady_clock::duration d) { return std::chrono::duration<double, std::milli>(d).count(); };
+        auto sw = shared->write();
+        sw->recovery.undo_ms = milliseconds(redo_started - undo_started);
+        sw->recovery.redo_ms = milliseconds(recovered - redo_started);
+        sw->recovery.open_ms = milliseconds(std::chrono::steady_clock::now() - open_started);
     }
 }
 

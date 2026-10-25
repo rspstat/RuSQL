@@ -112,6 +112,18 @@ using UserFunctionDef = std::pair<std::vector<std::string>, std::string>;
 // exec_lock_tables design note: session-to-session LOCK TABLES cooperation only).
 struct ExplicitTableLockHolder { std::size_t session_id; bool exclusive; };
 
+// What the start of the engine did to open its data directory (R51): shown by information_schema.recovery and by the line the server prints on start-up.
+// After a crash (a process killed with transactions that were committed since the last checkpoint, or still open) the WAL and the redo log are not empty:
+// the committed work is replayed and the rest is undone before the first statement runs.
+struct RecoveryStats {
+    double open_ms = 0;                              // from the start of Executor(dir) until the data is usable: the table files, both recoveries, the id counter
+    double undo_ms = 0;                              // the WAL: its committed transactions replayed, the others undone (recover_from_wal)
+    double redo_ms = 0;                              // the redo log: the committed changes since the last checkpoint replayed (recover_from_redo)
+    std::uint64_t wal_committed = 0, wal_undone = 0; // transactions the WAL held
+    std::uint64_t redo_ops = 0, redo_tables = 0;     // row changes the redo log replayed, and the tables they were in
+    bool crashed() const { return wal_committed + wal_undone + redo_ops > 0; }
+};
+
 struct SharedDatabase {
     Catalog catalog;
     std::unordered_map<std::string, std::vector<Row>> tables;
@@ -198,6 +210,8 @@ struct SharedDatabase {
     std::shared_ptr<UniqueProbes> unique_probes = std::make_shared<UniqueProbes>();
     // The order a scan reads each table that has a PRIMARY KEY in (engine/scan_order.hpp)
     std::shared_ptr<ScanOrders> scan_orders = std::make_shared<ScanOrders>();
+    // how the engine opened the data (see RecoveryStats)
+    RecoveryStats recovery;
 
     // mysql_native_password challenge-response verification (nonce is a 20-byte challenge)
     // -- used by both the MySQL wire protocol listener and the native TCP protocol's own

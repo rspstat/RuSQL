@@ -698,6 +698,21 @@ static void arith_columns(const ArithExpr& e, std::vector<std::string>& out) {
 
 static bool arith_mentions_column(const ArithExpr& e);
 
+// the columns a condition names itself: the ones in its expressions and an unquoted word on the right of a comparison that is no number
+static void cond_columns(const CondExpr& e, std::vector<std::string>& out) {
+    if (auto* a = std::get_if<CondExpr::And>(&e.data)) { cond_columns(*a->lhs, out); cond_columns(*a->rhs, out); }
+    else if (auto* o = std::get_if<CondExpr::Or>(&e.data)) { cond_columns(*o->lhs, out); cond_columns(*o->rhs, out); }
+    else if (auto* n = std::get_if<CondExpr::Not>(&e.data)) cond_columns(*n->inner, out);
+    else if (auto* leaf = std::get_if<CondExpr::Leaf>(&e.data)) {
+        arith_columns(leaf->condition.left, out);
+        if (auto* lit = std::get_if<ConditionValue::Literal>(&leaf->condition.value.data)) {
+            if (!lit->quoted && plain_reference(lit->value) && !parse_number(lit->value)) out.push_back(lit->value);
+        } else if (auto* value = std::get_if<ConditionValue::Arith>(&leaf->condition.value.data)) {
+            arith_columns(value->expr, out);
+        }
+    }
+}
+
 // ... and does a condition (a CASE's WHEN)? A word on the right of a comparison, a subquery: it might.
 static bool cond_mentions_column(const CondExpr& e) {
     if (auto* a = std::get_if<CondExpr::And>(&e.data)) return cond_mentions_column(*a->lhs) || cond_mentions_column(*a->rhs);
@@ -2706,6 +2721,21 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
             }
         }
 
+        // the ORDER BY and HAVING expressions of a grouped query read what a group has; one that names a column the groups do not key by is `ANY_VALUE(x)`
+        // (the binder refuses a bare one), which is read from a row of the group as the select list's is
+        std::vector<std::string> having_names;
+        if (having) cond_columns(*having, having_names);
+        for (auto& sort : group_sorts) {
+            std::vector<std::string> names;
+            arith_columns(sort.expr, names);
+            for (auto& n : names) {
+                if (!hidden_window_name(n) && std::find(grouped_names.begin(), grouped_names.end(), bare_name(n)) == grouped_names.end()) needs_group_row = true;
+            }
+        }
+        for (auto& n : having_names) {
+            if (!hidden_window_name(n) && std::find(grouped_names.begin(), grouped_names.end(), bare_name(n)) == grouped_names.end()) needs_group_row = true;
+        }
+
         for (auto& col : window_columns) { // (a window item that is a plain column the groups do not key by)
             auto* wf = std::get_if<SelectColumn::WinFunc>(&col.data);
             if (!wf) continue;
@@ -2736,6 +2766,12 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
             if (having) {
                 for (auto& agg_key : extract_agg_refs_from_cond(*having)) {
                     if (!out.count(agg_key)) out[agg_key] = compute_agg_from_key(agg_key, grp, aggregate_class(agg_key), aggregate_approx(agg_key));
+                }
+                for (auto& col : columns) { // `SELECT g, ANY_VALUE(v) AS a ... HAVING a > 5`: the item the alias names is worked out before HAVING reads it
+                    auto* item = std::get_if<SelectColumn::Expr>(&col.data);
+                    if (item && item->alias && !out.count(*item->alias) && std::find(having_names.begin(), having_names.end(), *item->alias) != having_names.end()) {
+                        out[*item->alias] = eval_arith(out, item->expr);
+                    }
                 }
             }
             for (auto& sort : group_sorts) {

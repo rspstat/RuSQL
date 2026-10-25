@@ -20,6 +20,9 @@ export interface ServerStatus {
   client_count: number;
   log: string[];
   sessions: { addr: string; user: string; connected_at: number; query_count: number }[];
+  // information_schema.recovery: what the engine did to open its data the last time it started (one row), and how long the whole start took until it accepted the sign-in
+  recovery: { columns: string[]; rows: string[][] };
+  ready_ms: number;
 }
 export interface IndexInfo {
   name: string;

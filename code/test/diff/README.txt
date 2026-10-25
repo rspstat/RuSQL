@@ -145,7 +145,7 @@ Comparison with a real MySQL (needs pymysql and a MySQL 8.4 on 127.0.0.1:3391; u
       where_errors (the WHERE of an UPDATE / DELETE: a division by zero, a text that is no number compared with a number; a WHERE that compares an indexed column is left out),
       arith_types (a DATE, DATETIME, TIME, ENUM and SET column read as the number it stands for: arithmetic, numeric functions, CAST, comparisons with numbers),
       float (FLOAT columns shown with six significant digits; CAST(x AS FLOAT)),
-      any_value (ANY_VALUE under ONLY_FULL_GROUP_BY), view_order (UPDATE / DELETE through a view with ORDER BY and LIMIT),
+      any_value (ANY_VALUE under ONLY_FULL_GROUP_BY; R51: ORDER BY ANY_VALUE(x) of a column the select list does not hold, HAVING on the alias of ANY_VALUE(x)), view_order (UPDATE / DELETE through a view with ORDER BY and LIMIT),
       windows (ROWS UNBOUNDED PRECEDING / ROWS n PRECEDING, WINDOW w AS (...), OVER w, OVER (w ORDER BY ...); rows that tie in ORDER BY are peers),
       window_agg (window functions over GROUP BY / aggregates: SUM(SUM(v)) OVER, RANK() OVER (ORDER BY SUM(v)), inside expressions, ORDER BY RANK() OVER, DISTINCT, views, derived tables, errors),
       max_execution_time (the hint and SET max_execution_time stop a SELECT with error 3024; COUNT(*) over a cross join is left out: MySQL counts it in a join buffer within the limit),

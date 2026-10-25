@@ -15,7 +15,7 @@
 | 클러스터드 인덱스 | ✓ (PK 기준 물리 정렬) | ✗ (CLUSTER 명령으로 수동) | ✓ (IOT: Index-Organized Table) | ✓ (INSERT 후 PK 기준 물리 정렬 유지) |
 | 압축 | Transparent Page Compression | TOAST (가변 길이 컬럼) | Advanced Compression (유료) | LZ4 전체 테이블 |
 | WAL | InnoDB Redo Log | WAL (pg_wal/) | Redo Log + Archive Log | ✓ (바이너리, 자동 체크포인트 512 KB) + **커밋 redo 로그(`rusql.redo`, 2026-10-01)** — 커밋 = 작은 배치 1개 + fsync 1번, 테이블 파일은 체크포인트(max(4MB, 행당 128B × 변경된 테이블의 행 수))에서만 재작성. 멱등·순서 무관 재생(같은 행의 개수도 보존) |
-| 크래시 복구 | ✓ Redo/Undo | ✓ Redo + MVCC 정리 | ✓ Redo + Undo tablespace | ✓ WAL Replay + Undo log (txn_id 그룹 단위 redo/undo — 여러 트랜잭션 레코드가 섞여 있어도 커밋된 것만 정확히 분리 복구) |
+| 크래시 복구 | ✓ Redo/Undo | ✓ Redo + MVCC 정리 | ✓ Redo + Undo tablespace | ✓ WAL Replay + Undo log (txn_id 그룹 단위 redo/undo — 여러 트랜잭션 레코드가 섞여 있어도 커밋된 것만 정확히 분리 복구; 시작할 때 복구에 쓴 시간과 되살린 변경·되돌린 트랜잭션 수를 `information_schema.recovery`·서버 로그·앱의 복구 카드로 보여 줌) |
 
 ---
 
@@ -128,7 +128,7 @@
 | CTE (WITH) | ✓ | ✓ | ✓ | ✓ |
 | 재귀 CTE (WITH RECURSIVE) | ✓ | ✓ | ✓ (CONNECT BY로도 가능) | ✓ |
 | CASE WHEN | ✓ | ✓ | ✓ | ✓ |
-| EXPLAIN / EXPLAIN ANALYZE | ✓ | ✓ | ✓ (EXPLAIN PLAN FOR + DBMS_XPLAN) | ✓ |
+| EXPLAIN / EXPLAIN ANALYZE | ✓ | ✓ | ✓ (EXPLAIN PLAN FOR + DBMS_XPLAN) | ✓ (ANALYZE는 단계별 행 수·시간·비율을 주고 앱이 단계 막대로 그림) |
 
 ---
 
@@ -281,7 +281,7 @@
 | 항목 | MySQL | PostgreSQL | Oracle | RuSQL |
 |------|-------|------------|--------|--------|
 | SHOW TABLES / DESCRIBE | ✓ | 유사 (\\d, information_schema) | 유사 (ALL_TABLES, DESC) | ✓ |
-| INFORMATION_SCHEMA | ✓ (전체) | ✓ (전체) | ✓ (ALL_*/DBA_*/USER_* 딕셔너리 뷰) | ✓ (17개 가상 뷰 — 세션·트랜잭션·락·참조 제약 표 포함, `row_versions`(모든 행 버전과 세션별 가시성)는 RuSQL 전용) |
+| INFORMATION_SCHEMA | ✓ (전체) | ✓ (전체) | ✓ (ALL_*/DBA_*/USER_* 딕셔너리 뷰) | ✓ (18개 가상 뷰 — 세션·트랜잭션·락·참조 제약 표 포함, `row_versions`(모든 행 버전과 세션별 가시성)와 `recovery`(마지막 시작의 복구 내용)는 RuSQL 전용) |
 | SHOW DATABASES | ✓ | ✓ (\\l) | △ (SELECT FROM V$DATABASE) | ✓ |
 | SHOW CREATE TABLE | ✓ | ✓ (pg_dump) | ✓ (DBMS_METADATA) | ✓ |
 | SHOW PROCESSLIST | ✓ | pg_stat_activity | V$SESSION | ✓ (현재 세션 정보) |

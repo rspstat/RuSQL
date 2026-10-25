@@ -36,6 +36,7 @@ EXPLAIN SELECT COUNT(*), SUM(amount) FROM orders WHERE customer_id = 1234;     -
 SELECT COUNT(*), SUM(amount) FROM orders WHERE customer_id = 2345;             -- 22행, 1ms 미만
 ```
 
+- `EXPLAIN ANALYZE SELECT …`를 치면 결과 창에 **단계별 시간 막대(워터폴)**가 나옵니다: 스캔·조인·정렬·"Limit / distinct / result" 단계마다 행 수·ms·비율이 있고, 가장 오래 걸린 단계가 노란색입니다. 인덱스 전·후 두 번을 보여 주면 "Scan"의 막대가 줄어드는 것이 보입니다.
 - 같은 질의를 두 번 치면 결과 캐시 때문에 0ms가 나옵니다. "인덱스 후" 시간은 **다른 고객 번호**(2345)로 보여 주고, 근거는 EXPLAIN의 계획 변화로 설명합니다.
 - 인덱스를 만든 뒤에 1번의 조인을 다시 돌려도 느려지지 않습니다(약 1초 그대로).
 
@@ -50,7 +51,7 @@ INSERT INTO orders VALUES (100002, 1234, 'PAID', 7000, '2026-10-04');   -- 커�
 SELECT id FROM orders WHERE id >= 100001;                -- 지금 세션에서는 둘 다 보임
 ```
 
-이 상태에서 서버를 강제 종료합니다. **앱의 Server Manager에서 Stop을 누르면 서버 프로세스를 그대로 죽입니다**(정상 종료 절차가 없는 강제 종료이고, 같은 데이터 폴더로 곧바로 다시 띄웁니다). 터미널에서 하려면 `taskkill /F /IM engine_server.exe`. 다시 띄우면(같은 데이터 폴더) 복구에 몇 초 걸립니다(10만 행 기준).
+이 상태에서 서버를 강제 종료합니다. **앱의 Server Manager에서 Stop을 누르면 서버 프로세스를 그대로 죽입니다**(정상 종료 절차가 없는 강제 종료이고, 같은 데이터 폴더로 곧바로 다시 띄웁니다). 터미널에서 하려면 `taskkill /F /IM engine_server.exe`. 다시 띄우면(같은 데이터 폴더) 복구에 몇 초 걸립니다(10만 행 기준). **Server Manager의 "복구 카드"(상태 줄 아래)**가 바로 그 숫자를 보여 줍니다: "RECOVERED AFTER AN UNCLEAN STOP", 접속 가능해질 때까지 걸린 시간, 엔진이 데이터를 연 시간, redo 로그로 되살린 변경 수·테이블 수와 걸린 시간, WAL에서 되돌린 미완료 트랜잭션 수. ACTIVITY LOG에도 같은 내용이 한 줄로 남습니다. SQL로 보려면 `SELECT * FROM information_schema.recovery;`(엔진이 마지막으로 시작할 때의 값 한 행, 정상 종료 뒤에는 `CRASH_DETECTED = NO`).
 
 ```sql
 USE demo;
@@ -58,6 +59,7 @@ SELECT id, customer_id, amount FROM orders WHERE id >= 100001;   -- 100001만 �
 SELECT COUNT(*) FROM orders;                                      -- 100001
 ```
 
+- 위 문장에서 커밋한 100001은 redo 로그에서 되살아난 것이고, 커밋하지 않은 100002는 복구 카드의 "WAL … undone" 쪽입니다.
 - 재시작 직후에는 인덱스는 살아 있지만(`EXPLAIN`은 Index Scan), `COUNT`·`SUM` 같은 **집계 질의는 전체를 읽습니다(약 36ms)**. 행 위치 캐시가 비어 있어서 그렇습니다.
 
 ## 4. 한 문장의 여행 (선택, 30초)
@@ -120,6 +122,8 @@ Claude Desktop에 MCP가 연결되어 있다면 "demo 데이터베이스에서 �
 > "demo의 orders에서 status가 CANCELLED이고 amount가 90000 이상인 주문을 PAID로 바꾸는 UPDATE를 run_script로 먼저 미리보기해 줘."
 
 미리보기는 문장을 실제로 실행해 영향 행 수를 보여 준 다음 되돌립니다(저장 안 됨). 사용자가 동의한 뒤 `commit=True`로 다시 부르면 저장됩니다. `DROP`·`TRUNCATE`·`WHERE` 없는 `UPDATE/DELETE`는 확인 없이는 막힙니다.
+**인덱스 제안:** "demo의 orders에서 customer_id로 찾는 질의가 느려. suggest_indexes로 어떤 인덱스가 좋을지 봐 줘." 도구는 문장·열·인덱스·`ANALYZE TABLE`의 서로 다른 값 수·`EXPLAIN ANALYZE` 계획을 읽고 `CREATE INDEX` 문장, 이유, 인덱스가 있으면 읽을 행 수(추정), 이미 있는 인덱스, 효과가 없는 이유(열을 함수로 감쌈, 앞이 `%`인 LIKE, OR, 작은 표)를 돌려줍니다. **아무것도 만들지 않으므로** 만들지는 `run_script`로 미리보기 → 확인합니다. (5천 행 시험: 인덱스 전 `Seq Scan` 2.7ms → 만든 뒤 `Index Scan` 0.2ms.)
+
 `run_script` 자체는 살아 있는 서버로 확인했지만 **Claude Desktop과의 연결은 자동으로 검증하지 못했으니 발표 전에 한 번 미리 돌려 보세요.**
 
 ## 알려진 한계 (이 시연에서는 피하세요)

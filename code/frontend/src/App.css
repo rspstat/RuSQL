@@ -2142,6 +2142,34 @@ body {
   50%       { box-shadow: 0 0 12px #4ec9b0, 0 0 20px rgba(78,201,176,0.38); }
 }
 
+/* 시작 시 복구 카드 (information_schema.recovery) */
+.srv-recovery {
+  border: 1px solid #3c3c3c;
+  border-left: 3px solid #4ec9b0;
+  border-radius: 3px;
+  background: #1e1e1e;
+  padding: 8px 12px;
+  margin-bottom: 12px;
+  font-family: Consolas, monospace;
+  font-size: 12px;
+}
+.srv-recovery.crashed { border-left-color: #d7ba7d; }
+.srv-recovery-title {
+  color: #4ec9b0;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  margin-bottom: 6px;
+}
+.srv-recovery.crashed .srv-recovery-title { color: #d7ba7d; }
+.srv-recovery-grid {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 3px 16px;
+}
+.srv-recovery-grid span { color: #9cdcfe; }
+.srv-recovery-grid b { color: #ce9178; font-weight: 400; }
+
 .srv-feedback {
   font-size: 12px;
   color: #9cdcfe;
@@ -3023,7 +3051,7 @@ th.result-rownum { background: #252526 !important; font-weight: 400 !important; 
   padding: 12px 16px;
   font-family: 'Consolas', monospace;
   font-size: 13px;
-  max-width: 600px;
+  max-width: 720px;
 }
 .explain-tree-header {
   color: #4ec9b0;
@@ -3049,4 +3077,51 @@ th.result-rownum { background: #252526 !important; font-weight: 400 !important; 
 .explain-tree-value {
   color: #ce9178;
   font-size: 12px;
+}
+/* EXPLAIN ANALYZE 단계 막대(워터폴): 막대의 시작은 앞 단계들이 쓴 시간, 길이는 그 단계의 시간 */
+.explain-steps {
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px solid #3c3c3c;
+}
+.explain-steps-title {
+  color: #4ec9b0;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  margin-bottom: 6px;
+}
+.explain-step {
+  display: grid;
+  grid-template-columns: 190px 1fr 200px;
+  align-items: center;
+  gap: 10px;
+  padding: 3px 0;
+  font-size: 12px;
+}
+.explain-step-label {
+  color: #9cdcfe;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.explain-step-track {
+  position: relative;
+  height: 10px;
+  background: #2a2a2a;
+  border-radius: 3px;
+}
+.explain-step-bar {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  background: #569cd6;
+  border-radius: 3px;
+}
+.explain-step.slowest .explain-step-bar { background: #d7ba7d; }
+.explain-step.slowest .explain-step-label { color: #d7ba7d; }
+.explain-step-stat {
+  color: #ce9178;
+  text-align: right;
+  white-space: nowrap;
 }

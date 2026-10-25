@@ -48,6 +48,7 @@ struct EngineConn {
     password:         String,
     current_db:       String,
     log:              Vec<String>,
+    ready_ms:         f64, // from starting the process until it accepted the sign-in: the engine opening its data, a crash recovery included
 }
 
 impl Drop for EngineConn {
@@ -105,6 +106,8 @@ struct ServerStatus {
     client_count: usize,
     log:          Vec<String>,
     sessions:     Vec<SessionInfo>,
+    recovery:     ActivityTable, // information_schema.recovery: what the engine did to open its data the last time it started
+    ready_ms:     f64,
 }
 
 // ─── code/ 디렉터리 위치 헬퍼 ─────────────────────────────────
@@ -227,6 +230,7 @@ fn spawn_and_connect(
     data_dir: &str, buffer_pool_size: usize, user: &str, password: &str,
     port: u16, mysql_port: Option<u16>,
 ) -> Result<EngineConn, String> {
+    let started = Instant::now();
     let exe = engine_server_path();
     let mut args = vec![
         "--port".to_string(), port.to_string(),
@@ -268,7 +272,7 @@ fn spawn_and_connect(
         child, writer, reader, port,
         data_dir: data_dir.to_string(), buffer_pool_size,
         user: user.to_string(), password: password.to_string(),
-        current_db: String::new(), log: Vec::new(),
+        current_db: String::new(), log: Vec::new(), ready_ms: 0.0,
     };
 
     let token = compute_native_password_token(password, &nonce);
@@ -279,6 +283,7 @@ fn spawn_and_connect(
     if !resp.first().map(|s| s.starts_with("OK")).unwrap_or(false) {
         return Err(resp.into_iter().next().unwrap_or_else(|| "인증 실패".to_string()));
     }
+    conn.ready_ms = started.elapsed().as_secs_f64() * 1000.0;
     Ok(conn)
 }
 
@@ -866,6 +871,7 @@ fn start_server(conn_id: String, port: u16, mysql_port: u16, state: State<AppSta
         "서버 시작: 127.0.0.1:{}{}", port,
         mp.map(|m| format!(" / MySQL 0.0.0.0:{}", m)).unwrap_or_default()
     ));
+    log_recovery(&mut conn);
     *guard = Some(conn);
 
     state.servers.lock().unwrap_or_else(|e| e.into_inner()).insert(conn_id, ServerEntry { running: true, port });
@@ -1029,6 +1035,26 @@ fn activity_table(conn: &mut EngineConn, sql: &str) -> ActivityTable {
     }
 }
 
+// What the engine did to open its data (information_schema.recovery, one row): the Server Manager's recovery card and the log line after a restart.
+fn query_recovery(conn: &mut EngineConn) -> ActivityTable {
+    activity_table(conn, "SELECT OPEN_MS, UNDO_MS, REDO_MS, WAL_TXNS_REPLAYED, WAL_TXNS_UNDONE, REDO_OPS, REDO_TABLES, CRASH_DETECTED FROM information_schema.recovery;")
+}
+
+fn log_recovery(conn: &mut EngineConn) {
+    let t = query_recovery(conn);
+    let Some(row) = t.rows.first() else { return };
+    let get = |name: &str| t.columns.iter().position(|c| c.eq_ignore_ascii_case(name)).and_then(|i| row.get(i)).cloned().unwrap_or_default();
+    let line = if get("CRASH_DETECTED") == "YES" {
+        format!(
+            "비정상 종료에서 복구: redo {}건({}개 테이블, {} ms), WAL 커밋 {}건 재적용·미완료 {}건 되돌림({} ms), 엔진 열기 {} ms (프로세스 시작부터 {:.0} ms)",
+            get("REDO_OPS"), get("REDO_TABLES"), get("REDO_MS"), get("WAL_TXNS_REPLAYED"), get("WAL_TXNS_UNDONE"), get("UNDO_MS"), get("OPEN_MS"), conn.ready_ms
+        )
+    } else {
+        format!("엔진 열기 {} ms, 복구할 것 없음 (프로세스 시작부터 {:.0} ms)", get("OPEN_MS"), conn.ready_ms)
+    };
+    add_conn_log(conn, &line);
+}
+
 #[tauri::command]
 fn get_activity(state: State<AppState>) -> Activity {
     let mut guard = state.db.lock().unwrap_or_else(|e| e.into_inner());
@@ -1058,6 +1084,8 @@ fn stop_server(conn_id: String, state: State<AppState>) -> Result<String, String
         let _ = send_one(&mut conn, &format!("USE {};", current_db));
         conn.current_db = current_db;
     }
+    add_conn_log(&mut conn, "서버 중지 (엔진 프로세스를 강제 종료하고 같은 데이터 폴더로 다시 열었습니다)");
+    log_recovery(&mut conn);
     *guard = Some(conn);
 
     if let Some(e) = state.servers.lock().unwrap_or_else(|e| e.into_inner()).get_mut(&conn_id) {
@@ -1070,12 +1098,12 @@ fn stop_server(conn_id: String, state: State<AppState>) -> Result<String, String
 fn get_server_status(conn_id: String, state: State<AppState>) -> ServerStatus {
     let entry = state.servers.lock().unwrap_or_else(|e| e.into_inner()).get(&conn_id).map(|e| (e.running, e.port));
     let mut guard = state.db.lock().unwrap_or_else(|e| e.into_inner());
-    let (sessions, log, fallback_port) = match guard.as_mut() {
-        Some(conn) => (query_processlist(conn), conn.log.clone(), conn.port),
-        None => (Vec::new(), Vec::new(), 7878),
+    let (sessions, log, fallback_port, recovery, ready_ms) = match guard.as_mut() {
+        Some(conn) => (query_processlist(conn), conn.log.clone(), conn.port, query_recovery(conn), conn.ready_ms),
+        None => (Vec::new(), Vec::new(), 7878, ActivityTable::default(), 0.0),
     };
     let (running, port) = entry.unwrap_or((false, fallback_port));
-    ServerStatus { running, port, client_count: sessions.len(), log, sessions }
+    ServerStatus { running, port, client_count: sessions.len(), log, sessions, recovery, ready_ms }
 }
 
 #[tauri::command]
