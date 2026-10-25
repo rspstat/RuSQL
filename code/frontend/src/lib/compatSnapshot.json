@@ -23,7 +23,7 @@
       "en": "Types, NOT NULL, UNIQUE, CHECK, foreign keys, strict mode",
       "ko": "타입·NOT NULL·UNIQUE·CHECK·외래키·엄격 모드",
       "statements": 222,
-      "different": 3,
+      "different": 0,
       "bothFail": 62
     },
     {
@@ -187,6 +187,30 @@
       "bothFail": 16
     },
     {
+      "name": "having_alias",
+      "en": "HAVING reads a select-list alias before a column of the same name",
+      "ko": "HAVING이 같은 이름의 열보다 select 별칭을 먼저 읽기",
+      "statements": 36,
+      "different": 0,
+      "bothFail": 1
+    },
+    {
+      "name": "self_join_write",
+      "en": "UPDATE / DELETE joining a table with itself, SET values naming a table by its alias",
+      "ko": "자기 자신과 조인하는 UPDATE·DELETE, 별칭으로 다른 표를 읽는 SET 값",
+      "statements": 50,
+      "different": 0,
+      "bothFail": 2
+    },
+    {
+      "name": "subquery_item_order",
+      "en": "ORDER BY / DISTINCT on a scalar subquery of the select list",
+      "ko": "select 목록 하위 질의의 ORDER BY·DISTINCT",
+      "statements": 19,
+      "different": 0,
+      "bothFail": 0
+    },
+    {
       "name": "protocol",
       "en": "MySQL wire protocol: SHOW, OK packets, affected rows",
       "ko": "MySQL 프로토콜: SHOW·OK 패킷·영향 행 수",
@@ -203,10 +227,10 @@
       "bothFail": 0
     }
   ],
-  "conformanceCases": 3111,
+  "conformanceCases": 3230,
   "tests": {
-    "cases": 791,
-    "assertions": 1506139
+    "cases": 796,
+    "assertions": 1506430
   },
   "bugsFound": 206
 }

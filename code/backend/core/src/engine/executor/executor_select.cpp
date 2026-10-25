@@ -1716,6 +1716,7 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
         auto position = [](const std::string& text) { return !text.empty() && text.find_first_not_of("0123456789") == std::string::npos; };
         for (auto& o : order_by) {
             if (position(o.column)) return StringResult::Err("Unknown column '" + o.column + "' in 'order clause'");
+            if (group_by && subquery_item_name(o.column)) return StringResult::Err("Sorting a grouped query by a scalar subquery of its select list is not supported");
         }
         if (group_by) {
             for (auto& g : *group_by) {
@@ -2537,6 +2538,20 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
             for (auto& ref : extract_agg_refs_from_cond(*having)) want(aggregate_reference_argument(ref));
         }
         for (auto& text : row_sort_texts) want(text);
+        if (!group_by) { // an ORDER BY by a scalar subquery of the select list, and a DISTINCT over one: its value is worked out on every row first
+            auto add = [&](const std::string& name) {
+                if (std::find(expression_arguments.begin(), expression_arguments.end(), name) == expression_arguments.end()) expression_arguments.push_back(name);
+            };
+            for (auto& o : order_by) {
+                if (subquery_item_name(o.column)) add(o.column);
+            }
+            if (distinct) {
+                std::size_t k = 0;
+                for (auto& c : columns) {
+                    if (std::holds_alternative<SelectColumn::Subquery>(c.data)) add("__sq_" + std::to_string(k++) + "__");
+                }
+            }
+        }
         for (auto& text : group_expressions) want(text);
         for (auto& sort : group_sorts) {
             for (auto& ref : sort.aggregates) want(aggregate_reference_argument(ref));
@@ -2545,6 +2560,17 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
     std::vector<ArithExpr> arguments;
     if (!expression_arguments.empty()) {
         for (auto& text : expression_arguments) {
+            if (subquery_item_name(text)) { // `__sq_<k>__`: the k-th scalar subquery of the select list, as a value on every row
+                const std::size_t wanted = static_cast<std::size_t>(std::strtoull(text.c_str() + 5, nullptr, 10));
+                std::size_t seen = 0;
+                const SelectColumn::Subquery* found = nullptr;
+                for (auto& c : columns) {
+                    if (auto* sq = std::get_if<SelectColumn::Subquery>(&c.data); sq && seen++ == wanted) { found = sq; break; }
+                }
+                if (!found || !found->query) return StringResult::Err("Unknown column '" + text + "' in 'order clause'");
+                arguments.push_back(ArithExpr(ArithExpr::Subquery{std::make_unique<Statement>(*found->query), ValueClass::Unknown}));
+                continue;
+            }
             ArithExpr e = parse_bound_expression(s, text, table, joins);
             if (auto* col = std::get_if<ArithExpr::Col>(&e.data); col && col->name == text) {
                 return StringResult::Err("Cannot read the argument '" + text + "' of an aggregate");
@@ -2597,7 +2623,9 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
         std::string encoded;
         // numbers are distinct by value (`0` and `0.00` are one), text by its characters
         std::vector<ValueClass> distinct_classes;
+        std::vector<std::string> subquery_names; // a scalar subquery of the select list is read as the value worked out for the row (`__sq_<k>__`)
         for (auto& c : columns) {
+            subquery_names.push_back(std::holds_alternative<SelectColumn::Subquery>(c.data) ? "__sq_" + std::to_string(std::count_if(subquery_names.begin(), subquery_names.end(), [](const std::string& n) { return !n.empty(); })) + "__" : std::string());
             ValueClass k = ValueClass::Unknown;
             if (auto* col = std::get_if<SelectColumn::Column>(&c.data)) k = col->cls;
             else if (auto* ca = std::get_if<SelectColumn::ColumnAlias>(&c.data)) k = ca->cls;
@@ -2657,17 +2685,43 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
                     auto it = row.find(key_name);
                     val = it != row.end() ? it->second : std::string();
                 } else {
-                    // SelectColumn::Subquery: matches Rust's exact `String::new()` here —
-                    // this DISTINCT/GROUP-BY dedup key computation deliberately doesn't
-                    // evaluate the subquery (format_result's separate pre-pass does that
-                    // for display purposes only).
-                    val.clear();
+                    // SelectColumn::Subquery: the value worked out for the row before the dedup (a query that groups has none: they were the same
+                    // empty text, as they were before the value was worked out)
+                    auto it = row.find(subquery_names[column_index]);
+                    val = it != row.end() ? it->second : std::string();
                 }
                 append_key_part(encoded, distinct_classes[column_index] == ValueClass::Number ? normalize_numeric_key(val) : collation::key(val));
             }
             if (seen.insert(encoded).second) kept.push_back(rp);
         }
         input = std::move(kept);
+    };
+
+    // HAVING may name the alias of a select-list item (`SELECT g, SUM(v) * 2 AS d ... HAVING d > 5`, `SELECT name AS n ... HAVING n = 'a'`); MySQL reads the alias
+    // before a column of the same name. The items that give their value under an alias this way (an expression, a column): worked out for HAVING on the group.
+    std::vector<std::string> having_names;
+    if (having) cond_columns(*having, having_names);
+    struct HavingAlias {
+        std::string name;
+        const SelectColumn* item;
+    };
+    std::vector<HavingAlias> having_aliases;
+    std::vector<std::string> item_aliases; // every alias the select list gives: a name HAVING reads from the select list is no column the group must keep
+    for (auto& col : columns) {
+        std::optional<std::string> alias;
+        if (auto* e = std::get_if<SelectColumn::Expr>(&col.data)) alias = e->alias;
+        else if (auto* ca = std::get_if<SelectColumn::ColumnAlias>(&col.data)) alias = ca->alias;
+        else if (auto* aa = std::get_if<SelectColumn::AggAlias>(&col.data)) alias = aa->alias;
+        if (!alias) continue;
+        item_aliases.push_back(*alias);
+        if (!std::holds_alternative<SelectColumn::AggAlias>(col.data) && std::find(having_names.begin(), having_names.end(), *alias) != having_names.end()) {
+            having_aliases.push_back({*alias, &col});
+        }
+    }
+    auto having_alias_value = [&](const HavingAlias& a, const Row& row) -> std::string {
+        if (auto* e = std::get_if<SelectColumn::Expr>(&a.item->data)) return eval_arith(row, e->expr);
+        const std::string* v = get_col(row, std::get<SelectColumn::ColumnAlias>(a.item->data).name);
+        return v ? *v : EXECUTOR_NULL_VALUE;
     };
 
     if (group_by) {
@@ -2723,8 +2777,6 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
 
         // the ORDER BY and HAVING expressions of a grouped query read what a group has; one that names a column the groups do not key by is `ANY_VALUE(x)`
         // (the binder refuses a bare one), which is read from a row of the group as the select list's is
-        std::vector<std::string> having_names;
-        if (having) cond_columns(*having, having_names);
         for (auto& sort : group_sorts) {
             std::vector<std::string> names;
             arith_columns(sort.expr, names);
@@ -2733,7 +2785,8 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
             }
         }
         for (auto& n : having_names) {
-            if (!hidden_window_name(n) && std::find(grouped_names.begin(), grouped_names.end(), bare_name(n)) == grouped_names.end()) needs_group_row = true;
+            if (hidden_window_name(n) || std::find(item_aliases.begin(), item_aliases.end(), n) != item_aliases.end()) continue; // (read from the select list)
+            if (std::find(grouped_names.begin(), grouped_names.end(), bare_name(n)) == grouped_names.end()) needs_group_row = true;
         }
 
         for (auto& col : window_columns) { // (a window item that is a plain column the groups do not key by)
@@ -2750,6 +2803,7 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
 
         // 그룹별 집계 row 생성: parallel_enabled() 이면 스레드별 1그룹, 아니면 순차
         std::vector<Row> group_rows(groups.size());
+        std::vector<std::vector<std::pair<std::string, std::string>>> shadowed(groups.size()); // an alias HAVING reads that is also a column the group row keeps
         auto make_group_row = [&](std::size_t gi) {
             auto& key = groups[gi].key;
             auto& grp = groups[gi].rows;
@@ -2767,11 +2821,10 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
                 for (auto& agg_key : extract_agg_refs_from_cond(*having)) {
                     if (!out.count(agg_key)) out[agg_key] = compute_agg_from_key(agg_key, grp, aggregate_class(agg_key), aggregate_approx(agg_key));
                 }
-                for (auto& col : columns) { // `SELECT g, ANY_VALUE(v) AS a ... HAVING a > 5`: the item the alias names is worked out before HAVING reads it
-                    auto* item = std::get_if<SelectColumn::Expr>(&col.data);
-                    if (item && item->alias && !out.count(*item->alias) && std::find(having_names.begin(), having_names.end(), *item->alias) != having_names.end()) {
-                        out[*item->alias] = eval_arith(out, item->expr);
-                    }
+                for (auto& a : having_aliases) { // `SELECT g, ANY_VALUE(v) AS a ... HAVING a > 5`: the item the alias names is worked out before HAVING reads it
+                    const std::string value = having_alias_value(a, out);
+                    if (out.count(a.name)) shadowed[gi].emplace_back(a.name, value); // (a column of that name stays what the select list reads: HAVING gets the alias from a copy)
+                    else out[a.name] = value;
                 }
             }
             for (auto& sort : group_sorts) {
@@ -2798,8 +2851,17 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
         explain_trace::mark("Group / aggregate", group_rows.size());
         if (having) {
             std::vector<Row> filtered;
-            for (auto& row : group_rows) {
-                if (matches_condition_with_subquery(s, row, having)) filtered.push_back(std::move(row));
+            for (std::size_t gi = 0; gi < group_rows.size(); gi++) {
+                Row& row = group_rows[gi];
+                bool keep;
+                if (shadowed[gi].empty()) {
+                    keep = matches_condition_with_subquery(s, row, having);
+                } else {
+                    Row probe = row;
+                    for (auto& [alias, value] : shadowed[gi]) probe[alias] = value;
+                    keep = matches_condition_with_subquery(s, probe, having);
+                }
+                if (keep) filtered.push_back(std::move(row));
             }
             group_rows = std::move(filtered);
             explain_trace::mark("Having", group_rows.size());
@@ -2895,7 +2957,22 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
             for (auto& agg_key : extract_agg_refs_from_cond(*having)) {
                 if (!agg_row.count(agg_key)) agg_row[agg_key] = compute_agg_from_key(agg_key, rows_p, aggregate_class(agg_key), aggregate_approx(agg_key));
             }
-            if (!matches_condition_with_subquery(s, agg_row, having)) return StringResult::Ok("0 rows returned.");
+            Row probe;
+            const Row* having_row = &agg_row;
+            if (!having_aliases.empty()) { // `SELECT SUM(v) * 2 AS d FROM t HAVING d > 5`: the alias of an item, read before a column of the same name
+                probe = agg_row;
+                for (auto& ref : expr_agg_refs) {
+                    if (!probe.count(ref)) probe[ref] = compute_agg_from_key(ref, rows_p, aggregate_class(ref), aggregate_approx(ref));
+                }
+                if (!rows_p.empty()) {
+                    for (auto& [k, v] : *rows_p.front()) probe.try_emplace(k, v);
+                }
+                Row values;
+                for (auto& a : having_aliases) values[a.name] = having_alias_value(a, probe);
+                for (auto& [k, v] : values) probe[k] = v;
+                having_row = &probe;
+            }
+            if (!matches_condition_with_subquery(s, *having_row, having)) return StringResult::Ok("0 rows returned.");
         }
         // `SELECT COUNT(*), 1`, `SELECT COUNT(*), UPPER('a')`: an item of no column and no aggregate is the same on the one row of aggregates (it used to
         // be left out of the answer)

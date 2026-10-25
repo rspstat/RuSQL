@@ -18,6 +18,18 @@ void ensure_distinct_columns(const std::vector<std::string>& cols) {
         seen.push_back(std::move(lowered));
     }
 }
+
+// the name a table is counted by when a statement names it again (a self-join): the table without its database, apart from case
+std::string used_table_key(const std::string& table) {
+    std::string bare = table.substr(table.rfind('.') == std::string::npos ? 0 : table.rfind('.') + 1);
+    for (char& ch : bare) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+    return bare;
+}
+
+// the ON of a join that has none (`UPDATE t a, t b ...`)
+CondExpr always_true() {
+    return CondExpr(CondExpr::Leaf{Condition{ArithExpr(ArithExpr::Num{"1"}), Operator::Eq, ConditionValue(ConditionValue::Literal{"1"})}});
+}
 } // namespace
 
 /// VALUES (...), (...): each value is plain text (a literal, NULL, DEFAULT, `@var`, `NEW.x`) or, when it goes on as an expression (`1 + 2`,
@@ -252,13 +264,22 @@ Statement Parser::parse_update() {
 
     std::vector<std::string> tables = {first_table};
     std::vector<Join> joins;
+    std::vector<std::string> used = {used_table_key(first_table)}; // a table the statement names again (a self-join) is known by its alias, which keeps its columns apart
 
     // 쉼표로 구분된 멀티 테이블: UPDATE t1, t2 SET ...
     while (peek_is(TokenKind::Comma)) {
         advance();
         std::string t = expect_ident();
-        if (auto a = parse_table_alias()) alias_map[*a] = t;
-        tables.push_back(t);
+        std::optional<std::string> a = parse_table_alias();
+        if (std::find(used.begin(), used.end(), used_table_key(t)) != used.end()) {
+            if (!a) throw ParseError("Not unique table/alias: '" + t + "'");
+            alias_map[*a] = *a;
+            joins.push_back(Join{t, always_true(), JoinType::Cross, {}, std::nullopt, false, *a});
+        } else {
+            if (a) alias_map[*a] = t;
+            tables.push_back(t);
+        }
+        used.push_back(used_table_key(t));
     }
 
     // JOIN 절: UPDATE t1 JOIN t2 ON ...
@@ -288,11 +309,20 @@ Statement Parser::parse_update() {
             break;
         }
         std::string join_table = expect_table_name();
-        if (auto a = parse_table_alias()) alias_map[*a] = join_table;
+        std::string join_alias; // only for a table used again
+        std::optional<std::string> a = parse_table_alias();
+        if (std::find(used.begin(), used.end(), used_table_key(join_table)) != used.end()) {
+            if (!a) throw ParseError("Not unique table/alias: '" + join_table + "'");
+            join_alias = *a;
+            alias_map[*a] = *a;
+        } else if (a) {
+            alias_map[*a] = join_table;
+        }
+        used.push_back(used_table_key(join_table));
         if (!peek_is(TokenKind::On)) throw ParseError("Expected ON");
         advance();
         CondExpr on_expr = detail::expand_condexpr(parse_condexpr(), alias_map);
-        joins.push_back(Join{join_table, std::move(on_expr), *jt, {}});
+        joins.push_back(Join{join_table, std::move(on_expr), *jt, {}, std::nullopt, false, std::move(join_alias)});
     }
 
     if (!peek_is(TokenKind::Set)) throw ParseError("Expected SET");
@@ -321,6 +351,8 @@ Statement Parser::parse_update() {
     auto returning = parse_returning();
     if (tables.size() > 1 || !joins.empty()) {
         if (!order_by.empty() || limit) throw ParseError("Incorrect usage of UPDATE and ORDER BY / LIMIT");
+        // the value of an assignment names the columns of the other tables by their aliases too (`SET x.b = y.a`): the rows know the tables by name
+        for (auto& assignment : assignments) assignment.second = detail::expand_arith(assignment.second, alias_map);
         return Statement(Statement::MultiUpdate{tables, joins, assignments, condition, {alias_map.begin(), alias_map.end()}});
     }
     // the target of a one-table UPDATE is a column of that table: `SET t.v = 1` (t = the table or its alias) names the column v
@@ -351,6 +383,7 @@ Statement Parser::parse_delete() {
     if (auto a = parse_table_alias()) alias_map[*a] = from_table;
 
     std::vector<Join> joins;
+    std::vector<std::string> used = {used_table_key(from_table)}; // (a table named again is known by its alias, as in UPDATE)
     for (;;) {
         std::optional<JoinType> jt;
         if (peek_is(TokenKind::Join)) { advance(); jt = JoinType::Inner; }
@@ -373,11 +406,20 @@ Statement Parser::parse_delete() {
             break;
         }
         std::string join_table = expect_table_name();
-        if (auto a = parse_table_alias()) alias_map[*a] = join_table;
+        std::string join_alias; // only for a table used again
+        std::optional<std::string> a = parse_table_alias();
+        if (std::find(used.begin(), used.end(), used_table_key(join_table)) != used.end()) {
+            if (!a) throw ParseError("Not unique table/alias: '" + join_table + "'");
+            join_alias = *a;
+            alias_map[*a] = *a;
+        } else if (a) {
+            alias_map[*a] = join_table;
+        }
+        used.push_back(used_table_key(join_table));
         if (!peek_is(TokenKind::On)) throw ParseError("Expected ON");
         advance();
         CondExpr on_expr = detail::expand_condexpr(parse_condexpr(), alias_map);
-        joins.push_back(Join{join_table, std::move(on_expr), *jt, {}});
+        joins.push_back(Join{join_table, std::move(on_expr), *jt, {}, std::nullopt, false, std::move(join_alias)});
     }
 
     std::optional<CondExpr> condition;

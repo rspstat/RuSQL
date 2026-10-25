@@ -2289,6 +2289,29 @@ VS Code 스타일 탭 드래그 순서 변경(요청의 1번 항목)은 같은 �
 - `suggest_indexes`는 정규식 해석이라 하위 질의·CTE·여러 범위 열·방향이 섞인 ORDER BY는 읽지 않고, 추정은 열이 독립이라고 가정한다. 제안한 인덱스의 효과는 사용자가 만든 뒤 `EXPLAIN`으로 다시 재야 한다.
 - 복구 카드의 값은 Start/Stop 뒤에만 바뀐다(앱이 켤 때 연 엔진의 값은 그대로 보임). "접속 가능해질 때까지"에는 프로세스 시작 뒤 접속 재시도 간격(최대 100ms 단위)이 들어 있다.
 
+### 10월 25일 — R52: HAVING 별칭이 열과 겹칠 때, 자기 자신과 조인하는 UPDATE·DELETE, select 하위 질의의 ORDER BY·DISTINCT (조용한 오답 연속 수정)
+
+**왜 이 항목인가**: R51 마지막 보고에서 "남은 문제"로 적은 HAVING 별칭 충돌을 사용자가 "오답은 같은 진행방식으로 계속 고칩니다"로 이어 가라고 했다. 같은 방식(진짜 MySQL 8.4.9와 견주기 → 고치기 → 시험·코퍼스 → 심은 버그 → 전체 시험)으로 점수판에 이미 있던 차이 11개와 새로 훑은 문장 62개에서 조용한 오답을 찾았다. 새 코퍼스 셋(`having_alias` 36문장, `self_join_write` 50, `subquery_item_order` 19)이 증거다.
+
+**고친 것 (엔진·파서)**
+- **HAVING의 별칭이 같은 이름의 열보다 먼저 읽힘**: `SELECT g, SUM(v) * 2 AS d … HAVING d = 40`인데 표에 열 `d`(DATE)가 있으면 0행이었다(MySQL은 별칭을 읽는다). 원인은 R51에서 넣은 "HAVING이 부르는 이름이면 그룹이 첫 행을 들게" 조건이 **별칭 이름까지** 세어 열 값을 그룹 행에 복사했고 그 값이 별칭 계산을 막은 것. 지금은 ① 별칭인 이름은 그 조건에서 빼서(R51이 별칭만 쓰는 흔한 `HAVING s > 5`마다 그룹당 한 행을 복사하던 것도 같이 없어짐) ② HAVING이 부르는 식·열 항목의 별칭을 그룹에서 계산하고 ③ 같은 이름의 열을 select 목록이 따로 읽어야 하면 HAVING이 볼 복사본에만 별칭을 넣는다. 같이 고쳐진 것: **열의 별칭**(`SELECT g, name AS n … HAVING n = 'a'`)은 어느 그룹도 찾지 못해 0행이었다, **GROUP BY 없는 집계**의 `HAVING d = 90`도 같은 문제였다.
+- **자기 자신과 조인하는 UPDATE·DELETE가 아무 행도 안 바꿈**: `UPDATE up u1 JOIN up u2 ON u1.id = u2.id - 1 SET u1.b = u2.a`, 직원-관리자 `UPDATE up e JOIN up m ON e.mgr = m.id SET e.b = m.a`, 쉼표 형태 `UPDATE up a, up b SET …`, `DELETE u2 FROM up u1 JOIN up u2 …`가 오류도 없이 "0 row(s) updated"였다(점수판의 `constraints` 차이 3개가 이것). 파서가 별칭을 모두 표 이름으로 바꿔 두 사용이 하나가 되던 것을, SELECT의 자기 조인처럼 **두 번째 사용은 별칭을 이름으로 유지**하게 했고(`Join::alias`), 실행기는 조인된 행의 열을 그 별칭으로 구분하며 대상 표(`SET u2.a`, `DELETE u2`)도 별칭에서 실제 표를 찾는다. 별칭 없이 두 번 쓰면 "Not unique table/alias".
+- **다중 표 UPDATE의 SET 값이 다른 표를 별칭으로 부름**: `UPDATE t1 x JOIN t2 y ON … SET x.b = y.a`의 오른쪽 `y.a`는 별칭을 풀지 않아, 두 표에 같은 이름의 열 `a`가 있으면 **첫 표의 값이 들어갔다**(이름이 다르면 우연히 맞았음).
+- **select 목록 하위 질의의 별칭·위치로 ORDER BY, 그것에 대한 DISTINCT**: `SELECT name, (SELECT COUNT(*) FROM … WHERE … = e.id) AS reports FROM e ORDER BY reports DESC`가 정렬을 무시(표 순서)했고 `ORDER BY 2`는 오류였으며 별칭이 정렬 키로 인정되지 않는데도 오류조차 없었다. `SELECT DISTINCT (SELECT …) AS n`은 모든 행을 한 행으로 합쳤다. 바인더가 하위 질의 항목을 `__sq_<k>__`로 불러 주고 실행기가 정렬·DISTINCT 전에 행마다 그 값을 계산한다(묶는 질의의 정렬은 오류로 거절). (처음에는 이 항목을 파서에서 다른 식 항목과 같은 경로로 바꿔 보았으나 CTE의 `ORDER BY`가 깨져 되돌렸다.)
+
+**검증**
+- 새 C++ 시험 `[r52]` 2 케이스. **심은 버그 8종 모두 잡힘**: 충돌하는 별칭 복사본 제거, 열 별칭 계산 제거, GROUP BY 없는 경로의 별칭 제거, 자기 조인 별칭 유지 제거, SET 값의 별칭 풀기 제거, DELETE의 별칭 대상 찾기 제거, 하위 질의 정렬 제거, DISTINCT의 하위 질의 값 제거.
+- 새 코퍼스 셋을 진짜 MySQL 8.4.9와 비교해 차이 0(`--emit`으로 `mysql_conformance_having_alias/self_join_write/subquery_item_order.inc`). 호환성 점수판: 코퍼스 28개, 문장 2,759개 중 차이 **8개**(R51은 2,654개 중 11개: `constraints`의 3개가 사라짐).
+- 무작위 대조 12종 위반 0. 전체 시험 **796 케이스 / 1,506,430 assertions**을 Release 기본으로, 1,506,431을 `RUSQL_DML_INDEX_MIN_ROWS=0`으로 통과.
+- 성능(새 빌드에서 10만 행·5만 그룹, 가장 빠른 값): `HAVING SUM(v) > 100` 213ms, 별칭 `HAVING s > 100` 181ms, 식 별칭 249ms vs 식 직접 232ms, HAVING 없음 161ms — 별칭을 쓴다고 느려지지 않는다. 앞 빌드와의 직접 비교는 하지 않았다.
+- **하지 않은 것**: Debug 빌드, 크래시 퍼저, 빌드 간 차분(`diff_builds`), 앞 빌드와의 성능 비교.
+
+**조사하다 알게 된 것 (고치지 않음)**
+- 다중 표 UPDATE에서 한 문장의 대입끼리 서로의 새 값을 읽는 순서는 MySQL도 계획에 따라 달라(문서도 "보장 없음") 한 번 순차 읽기로 만들어 봤다가 MySQL과 3문장이 달라져 되돌렸다. RuSQL은 모든 대입이 옛 값을 읽는다.
+- `UPDATE … JOIN (SELECT …) d ON …`(파생 표)는 오류로 거절한다(오답은 아님 — `RECOMMAND.md` 보류 목록). 첫 사용에만 별칭을 붙인 `UPDATE t u1 JOIN t ON …`, `ORDER BY (SELECT …)`를 식으로 직접 쓰는 것도 오류로 거절한다.
+- FLOAT 열 값이 유효숫자 여섯 자리를 넘으면 `MIN`/`MAX`/`GREATEST`/`COALESCE`가 저장된 글자를 보여 주고(MySQL은 여섯 자리) `UPDATE … SET d = f`·`INSERT … SELECT`(FLOAT → DOUBLE 열)는 짧은 글자를 복사한다. 드물어서 남겼다.
+- `PI()`는 MySQL이 화면에 `3.141593`으로 보여 주는데 RuSQL은 전체 자릿수를 낸다(식에 쓰면 RuSQL 쪽이 정확해서 일부러 그대로).
+
 ## 요약: 1학기 대비 2학기에 달라진 것
 
 

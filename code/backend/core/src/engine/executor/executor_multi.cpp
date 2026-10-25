@@ -66,7 +66,7 @@ StringResult Executor::exec_multi_update(SharedDatabase& s, std::vector<std::str
             for (auto& c : sc->columns) right_schema_cols.push_back(c.name);
         }
         const CondExpr& on_expr = j.on_expr;
-        current = nested_loop_join(current, right_rows, j.join_type, j.table, j.using_cols, right_schema_cols,
+        current = nested_loop_join(current, right_rows, j.join_type, j.alias.empty() ? j.table : j.alias, j.using_cols, right_schema_cols,
                                     [&](const Row& merged) { return eval_condexpr(merged, on_expr); });
     }
 
@@ -75,8 +75,15 @@ StringResult Executor::exec_multi_update(SharedDatabase& s, std::vector<std::str
         if (matches_condition_with_subquery(s, r, condition)) matched.push_back(std::move(r));
     }
 
+    // the names the rows know the tables by (a table used again goes by its alias) and the table each stands for
     std::vector<std::string> target_tables = tables;
-    for (auto& j : joins) target_tables.push_back(j.table);
+    std::unordered_map<std::string, std::string> table_of;
+    for (auto& t : tables) table_of[t] = t;
+    for (auto& j : joins) {
+        const std::string& name = j.alias.empty() ? j.table : j.alias;
+        target_tables.push_back(name);
+        table_of[name] = j.table;
+    }
 
     auto resolve_tbl = [&](const std::string& name) -> std::string {
         std::string suffix = "." + name;
@@ -98,8 +105,9 @@ StringResult Executor::exec_multi_update(SharedDatabase& s, std::vector<std::str
     }
 
     for (auto& tgt : assignment_tables) {
-        const TableSchema* schema = s.catalog.get_table(tgt);
-        if (!schema) return StringResult::Err("Table '" + tgt + "' not found");
+        const std::string real_table = table_of.count(tgt) ? table_of[tgt] : tgt;
+        const TableSchema* schema = s.catalog.get_table(real_table);
+        if (!schema) return StringResult::Err("Table '" + real_table + "' not found");
         std::vector<std::string> pk_cols;
         for (auto& c : schema->columns) {
             if (c.primary_key) pk_cols.push_back(c.name);
@@ -158,7 +166,7 @@ StringResult Executor::exec_multi_update(SharedDatabase& s, std::vector<std::str
             }
         }
         PerRowValues per_row(pk_updates.begin(), pk_updates.end());
-        auto updated = exec_update(s, tgt, std::move(columns), std::nullopt, std::nullopt, &per_row);
+        auto updated = exec_update(s, real_table, std::move(columns), std::nullopt, std::nullopt, &per_row);
         if (updated.is_err()) return updated;
         total_count += static_cast<std::size_t>(std::strtoull(updated.value().c_str(), nullptr, 10));
         matched_total += matched_rows_ > 0 ? matched_rows_ : 0;
@@ -189,7 +197,7 @@ StringResult Executor::exec_multi_delete(SharedDatabase& s, std::vector<std::str
         for (auto& r : tit->second) {
             if (is_visible(r)) right_rows.push_back(r);
         }
-        std::string tbl = j.table;
+        std::string tbl = j.alias.empty() ? j.table : j.alias; // (a table used again goes by its alias)
         std::vector<Row> out;
 
         if (!j.using_cols.empty()) {
@@ -303,9 +311,17 @@ StringResult Executor::exec_multi_delete(SharedDatabase& s, std::vector<std::str
 
     std::size_t total_count = 0;
 
-    for (auto& tgt : delete_tables) {
-        const TableSchema* schema = s.catalog.get_table(tgt);
-        if (!schema) return StringResult::Err("Table '" + tgt + "' not found");
+    std::unordered_map<std::string, std::string> table_of; // the name the rows know a table by (its alias when it is used again) -> the table
+    for (auto& j : joins) {
+        if (!j.alias.empty()) table_of[j.alias] = j.table;
+    }
+    for (auto& target : delete_tables) {
+        // (the database is put in front of the name of the table to delete from, also when that name is an alias)
+        std::string tgt = target;
+        if (auto dot = target.rfind('.'); dot != std::string::npos && table_of.count(target.substr(dot + 1))) tgt = target.substr(dot + 1);
+        const std::string real_table = table_of.count(tgt) ? table_of[tgt] : tgt;
+        const TableSchema* schema = s.catalog.get_table(real_table);
+        if (!schema) return StringResult::Err("Table '" + real_table + "' not found");
         std::vector<std::string> pk_cols;
         for (auto& c : schema->columns) {
             if (c.primary_key) pk_cols.push_back(c.name);
@@ -350,7 +366,7 @@ StringResult Executor::exec_multi_delete(SharedDatabase& s, std::vector<std::str
                 cond = cond ? CondExpr(CondExpr::Or{std::make_unique<CondExpr>(std::move(*cond)), std::make_unique<CondExpr>(std::move(*one))}) : std::move(*one);
             }
         }
-        auto deleted = exec_delete(s, tgt, std::move(cond), std::nullopt);
+        auto deleted = exec_delete(s, real_table, std::move(cond), std::nullopt);
         if (deleted.is_err()) return deleted;
         total_count += static_cast<std::size_t>(std::strtoull(deleted.value().c_str(), nullptr, 10));
     }

@@ -96,6 +96,15 @@ const Case kFloatSingle[] = {
 const Case kTargetTable[] = {
 #include "mysql_conformance_target_table.inc"
 };
+const Case kHavingAlias[] = {
+#include "mysql_conformance_having_alias.inc"
+};
+const Case kSelfJoinWrite[] = {
+#include "mysql_conformance_self_join_write.inc"
+};
+const Case kSubqueryItemOrder[] = {
+#include "mysql_conformance_subquery_item_order.inc"
+};
 
 struct TempDataDir {
     std::string path;
@@ -329,4 +338,16 @@ TEST_CASE("a FLOAT column is the single-precision number in arithmetic and compa
 
 TEST_CASE("an UPDATE, DELETE or INSERT cannot read the table it writes in a subquery (1093)", "[mysql_conformance][target_table]") {
     run_cases("mc_target_table", kTargetTable, sizeof kTargetTable / sizeof kTargetTable[0]);
+}
+
+TEST_CASE("HAVING reads a select-list alias before a column of the same name", "[mysql_conformance][having_alias]") {
+    run_cases("mc_having_alias", kHavingAlias, sizeof kHavingAlias / sizeof kHavingAlias[0]);
+}
+
+TEST_CASE("UPDATE and DELETE that join a table with itself, and the SET value that names a table by its alias", "[mysql_conformance][self_join_write]") {
+    run_cases("mc_self_join_write", kSelfJoinWrite, sizeof kSelfJoinWrite / sizeof kSelfJoinWrite[0]);
+}
+
+TEST_CASE("ORDER BY and DISTINCT on a scalar subquery of the select list", "[mysql_conformance][subquery_item_order]") {
+    run_cases("mc_subquery_item_order", kSubqueryItemOrder, sizeof kSubqueryItemOrder / sizeof kSubqueryItemOrder[0]);
 }

@@ -30,6 +30,10 @@ inline bool plain_reference(const std::string& name) {
 // shows, named `__win<n>`: the expression (or the ORDER BY) reads its value as it reads a column.
 inline bool hidden_window_name(const std::string& name) { return name.rfind("__win", 0) == 0; }
 
+// A scalar subquery of the select list (`(SELECT COUNT(*) FROM ...) AS n`) that an ORDER BY names by its alias or its position is `__sq_<k>__`, k counting
+// the subquery items of the select list: the executor works its value out on every row before it sorts (the result of the query shows it as it does).
+inline bool subquery_item_name(const std::string& name) { return name.rfind("__sq_", 0) == 0 && name.size() > 7 && name.compare(name.size() - 2, 2, "__") == 0; }
+
 // The argument of an aggregate -- the text the parser keeps in `Agg::col` and inside `SUM(...)` -- is a column (`v`, `t.v`), `*`, the placeholder of a CASE
 // (`__case__`, a name like any other), or an expression (`price * qty`, `COALESCE(x, 0)`, `1`) that the executor computes for every row under that text.
 inline bool is_expression_argument(const std::string& arg) { return !arg.empty() && arg != "*" && !plain_reference(arg); }

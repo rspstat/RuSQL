@@ -959,6 +959,7 @@ std::optional<std::string> Executor::bind_statement(SharedDatabase& s, Statement
             std::vector<std::string> positions; // what each output column is called as an ORDER BY / GROUP BY item ("" when it cannot be one)
             std::unordered_map<std::string, std::string> given; // the names the select list gives, and what each stands for
             std::vector<std::string> ambiguous; // the names two different items give
+            std::size_t subquery_items = 0;     // the scalar subqueries of the select list seen so far
             // the window functions inside expressions (`SUM(v) / SUM(SUM(v)) OVER ()`) are columns of their own that no result shows: bound first, the
             // expressions that read them need their types
             auto hidden_window = [](const SelectColumn& c) {
@@ -987,7 +988,10 @@ std::optional<std::string> Executor::bind_statement(SharedDatabase& s, Statement
                     for (std::size_t i = before; i < out.size(); i++) positions.push_back(out[i].first);
                 } else {
                     out.emplace_back(std::string(), k);
-                    positions.push_back(sort_key(c));
+                    std::string key = sort_key(c);
+                    if (key.empty() && std::holds_alternative<SelectColumn::Subquery>(c.data)) key = "__sq_" + std::to_string(subquery_items) + "__"; // (the executor sorts by its value)
+                    if (std::holds_alternative<SelectColumn::Subquery>(c.data)) subquery_items++;
+                    positions.push_back(key);
                     if (const std::string alias = alias_of(c); !alias.empty() && !positions.back().empty()) {
                         // (two items that stand for different things under one name -- apart from case -- make an ORDER BY / GROUP BY by that name ambiguous)
                         for (const auto& [other, target] : given) {
@@ -1019,6 +1023,7 @@ std::optional<std::string> Executor::bind_statement(SharedDatabase& s, Statement
             if (sel.having) cond(*sel.having, "having clause");
             if (sel.having && check && !error) having_any_value(sel, *sel.having);
             for (auto& o : sel.order_by) {
+                if (subquery_item_name(o.column)) continue; // (a scalar subquery of the select list, by its alias or position)
                 if (plain_reference(o.column)) {
                     name(o.column, "order clause");
                     no_outer(o.column, "order clause");
@@ -1213,6 +1218,7 @@ std::optional<std::string> Executor::bind_statement(SharedDatabase& s, Statement
             if (auto* aa = std::get_if<SelectColumn::AggAlias>(&c.data)) return aa->alias;
             if (auto* e = std::get_if<SelectColumn::Expr>(&c.data)) return e->alias.value_or(std::string());
             if (auto* wf = std::get_if<SelectColumn::WinFunc>(&c.data)) return wf->alias.value_or(std::string());
+            if (auto* sq = std::get_if<SelectColumn::Subquery>(&c.data)) return sq->alias.value_or(std::string());
             return std::string();
         }
 

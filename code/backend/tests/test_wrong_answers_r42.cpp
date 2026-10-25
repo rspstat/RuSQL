@@ -779,3 +779,74 @@ TEST_CASE("R51: ORDER BY and HAVING read ANY_VALUE of a column the groups do not
     REQUIRE(q(ex, "SELECT g, SUM(v) AS s, ANY_VALUE(v) AS a FROM av GROUP BY g HAVING s > 20 ORDER BY ANY_VALUE(v) DESC, g") == Rows{{"1", "60", "30"}, {"3", "40", "20"}});
     REQUIRE(q(ex, "SELECT g, COUNT(*) FROM av GROUP BY g ORDER BY g DESC") == Rows{{"3", "2"}, {"2", "1"}, {"1", "2"}});
 }
+
+TEST_CASE("R52: HAVING reads a select-list alias before a column of the same name", "[r52]") {
+    TempDataDir dir("r52_having_alias");
+    Executor ex(dir.path);
+    ok(ex, "CREATE DATABASE d");
+    ok(ex, "USE d");
+    ok(ex, "CREATE TABLE ha (id INT PRIMARY KEY, g INT, name VARCHAR(10), v INT, d DATE)");
+    ok(ex, "INSERT INTO ha VALUES (1,1,'a',10,'2024-01-01'),(2,1,'a',10,'2024-01-01'),(3,2,'b',20,'2024-02-02'),(4,3,'c',NULL,NULL),(5,3,'c',5,'2024-03-03')");
+    // an alias that is also a column of the table (d is a DATE column here): HAVING reads the alias, the select list keeps reading the column
+    REQUIRE(q(ex, "SELECT g, SUM(v) * 2 AS d FROM ha GROUP BY g HAVING d = 40 ORDER BY g") == Rows{{"1", "40"}, {"2", "40"}});
+    REQUIRE(q(ex, "SELECT g, COUNT(*) * 2 AS name FROM ha GROUP BY g HAVING name = 4 ORDER BY g") == Rows{{"1", "4"}, {"3", "4"}});
+    REQUIRE(q(ex, "SELECT g, SUM(v) * 2 AS d FROM ha GROUP BY g HAVING d IS NULL").empty());
+    REQUIRE(q(ex, "SELECT g, ANY_VALUE(d) AS first_d, SUM(v) * 2 AS d FROM ha GROUP BY g HAVING d = 40 ORDER BY g") ==
+            Rows{{"1", "2024-01-01", "40"}, {"2", "2024-02-02", "40"}});
+    // the alias of a plain column (it was never looked up: no group passed)
+    REQUIRE(q(ex, "SELECT g, name AS n FROM ha GROUP BY g, name HAVING n = 'a'") == Rows{{"1", "a"}});
+    REQUIRE(q(ex, "SELECT g, name AS d FROM ha GROUP BY g, name HAVING d = 'b'") == Rows{{"2", "b"}});
+    REQUIRE(q(ex, "SELECT g AS grp_id, COUNT(*) AS c FROM ha GROUP BY g HAVING grp_id = 1") == Rows{{"1", "2"}});
+    // HAVING without GROUP BY
+    REQUIRE(q(ex, "SELECT SUM(v) * 2 AS d FROM ha HAVING d = 90") == Rows{{"90"}});
+    REQUIRE(q(ex, "SELECT SUM(v) * 2 AS d FROM ha HAVING d = 91").empty());
+    REQUIRE(q(ex, "SELECT COUNT(*) AS c FROM ha HAVING c > 3") == Rows{{"5"}});
+    // the aliases that never collided, and a name that is not an alias of the select list but a column
+    REQUIRE(q(ex, "SELECT g, SUM(v) AS s FROM ha GROUP BY g HAVING s * 2 > 30 ORDER BY g") == Rows{{"1", "20"}, {"2", "20"}});
+    REQUIRE(q(ex, "SELECT g, SUM(v) * 2 AS dbl FROM ha GROUP BY g HAVING DBL = 40 ORDER BY g") == Rows{{"1", "40"}, {"2", "40"}});
+    REQUIRE(q(ex, "SELECT g, SUM(v) AS s FROM ha GROUP BY g HAVING g = 2") == Rows{{"2", "20"}});
+}
+
+TEST_CASE("R52: a table joined with itself in UPDATE / DELETE, the SET value that names a table by its alias, ORDER BY and DISTINCT on a scalar subquery", "[r52]") {
+    TempDataDir dir("r52_self_join");
+    Executor ex(dir.path);
+    ok(ex, "CREATE DATABASE d");
+    ok(ex, "USE d");
+    ok(ex, "CREATE TABLE up (id INT PRIMARY KEY, mgr INT, a INT, b INT, g INT)");
+    ok(ex, "INSERT INTO up VALUES (1,NULL,11,11,1),(2,1,22,22,1),(3,1,30,3,2),(4,2,40,4,2),(5,2,50,5,3)");
+    // the second use of the table goes by its alias: these used to change no row (and say so: 0 row(s) updated)
+    REQUIRE(ex.execute_sql("UPDATE up u1 JOIN up u2 ON u1.id = u2.id - 1 SET u1.b = u2.a").value().find("4 row(s) updated") != std::string::npos);
+    REQUIRE(q(ex, "SELECT id, b FROM up ORDER BY id") == Rows{{"1", "22"}, {"2", "30"}, {"3", "40"}, {"4", "50"}, {"5", "5"}});
+    ok(ex, "UPDATE up e JOIN up m ON e.mgr = m.id SET e.b = m.a");
+    REQUIRE(q(ex, "SELECT id, b FROM up ORDER BY id") == Rows{{"1", "22"}, {"2", "11"}, {"3", "11"}, {"4", "22"}, {"5", "22"}});
+    ok(ex, "UPDATE up u1 JOIN up u2 ON u1.id = u2.id - 1 SET u2.a = u1.a + 100 WHERE u1.id > 1"); // (the target is the second use)
+    REQUIRE(q(ex, "SELECT id, a FROM up ORDER BY id") == Rows{{"1", "11"}, {"2", "22"}, {"3", "122"}, {"4", "130"}, {"5", "140"}});
+    ok(ex, "UPDATE up a, up b SET a.b = b.a WHERE a.id = b.id - 1"); // (the comma form)
+    REQUIRE(q(ex, "SELECT id, b FROM up ORDER BY id") == Rows{{"1", "22"}, {"2", "122"}, {"3", "130"}, {"4", "140"}, {"5", "22"}});
+    REQUIRE(fails(ex, "UPDATE up JOIN up ON up.id = up.id SET up.b = 0").find("Not unique table/alias") != std::string::npos);
+    ok(ex, "DELETE u2 FROM up u1 JOIN up u2 ON u1.id = u2.id - 1 WHERE u1.id = 1"); // (the alias of the table to delete from is named with the database in front of it)
+    REQUIRE(q(ex, "SELECT id FROM up ORDER BY id") == Rows{{"1"}, {"3"}, {"4"}, {"5"}});
+    ok(ex, "DELETE e FROM up e JOIN up m ON e.mgr = m.id WHERE m.id = 1");
+    REQUIRE(q(ex, "SELECT id FROM up ORDER BY id") == Rows{{"1"}, {"4"}, {"5"}});
+    // the SET value reads the column of the other table by its alias (two tables with a column of the same name: it read the first table's)
+    ok(ex, "CREATE TABLE t1 (id INT PRIMARY KEY, v INT, w INT)");
+    ok(ex, "CREATE TABLE t2 (id INT PRIMARY KEY, v INT, k INT)");
+    ok(ex, "INSERT INTO t1 VALUES (1,10,100),(2,20,200)");
+    ok(ex, "INSERT INTO t2 VALUES (1,111,1),(2,222,2)");
+    ok(ex, "UPDATE t1 x JOIN t2 y ON x.id = y.id SET x.w = y.v + x.v WHERE y.k = 1");
+    REQUIRE(q(ex, "SELECT id, v, w FROM t1 ORDER BY id") == Rows{{"1", "10", "121"}, {"2", "20", "200"}});
+    ok(ex, "UPDATE t1 x LEFT JOIN t2 y ON x.id = y.id SET x.v = y.v");
+    REQUIRE(q(ex, "SELECT id, v FROM t1 ORDER BY id") == Rows{{"1", "111"}, {"2", "222"}});
+    // ORDER BY the alias or the position of a scalar subquery of the select list: the rows came out in table order
+    ok(ex, "CREATE TABLE ee (id INT PRIMARY KEY, name VARCHAR(10), mgr INT, dept INT)");
+    ok(ex, "INSERT INTO ee VALUES (1,'Ann',NULL,1),(2,'Bob',1,1),(3,'Cid',1,2),(4,'Dee',2,2),(5,'Eve',3,3),(6,'Fay',3,NULL)");
+    REQUIRE(q(ex, "SELECT e.name, (SELECT COUNT(*) FROM ee x WHERE x.mgr = e.id) AS reports FROM ee e ORDER BY reports DESC, e.name") ==
+            Rows{{"Ann", "2"}, {"Cid", "2"}, {"Bob", "1"}, {"Dee", "0"}, {"Eve", "0"}, {"Fay", "0"}});
+    REQUIRE(q(ex, "SELECT e.name, (SELECT COUNT(*) FROM ee x WHERE x.mgr = e.id) AS reports FROM ee e ORDER BY 2 DESC, 1") ==
+            Rows{{"Ann", "2"}, {"Cid", "2"}, {"Bob", "1"}, {"Dee", "0"}, {"Eve", "0"}, {"Fay", "0"}});
+    REQUIRE(q(ex, "SELECT e.name, (SELECT COUNT(*) FROM ee x WHERE x.mgr = e.id) r FROM ee e ORDER BY r, e.name LIMIT 2") == Rows{{"Dee", "0"}, {"Eve", "0"}});
+    REQUIRE(q(ex, "SELECT name, (SELECT COUNT(*) FROM ee x WHERE x.dept = ee.dept) AS cnt FROM ee ORDER BY cnt, name") ==
+            Rows{{"Fay", "0"}, {"Eve", "1"}, {"Ann", "2"}, {"Bob", "2"}, {"Cid", "2"}, {"Dee", "2"}});
+    // DISTINCT over a scalar subquery of the select list collapsed every row into one
+    REQUIRE(q(ex, "SELECT DISTINCT (SELECT COUNT(*) FROM ee x WHERE x.dept = e.dept) AS n FROM ee e ORDER BY n") == Rows{{"0"}, {"1"}, {"2"}});
+}

@@ -153,7 +153,10 @@ Comparison with a real MySQL (needs pymysql and a MySQL 8.4 on 127.0.0.1:3391; u
       range_frames (R50: RANGE BETWEEN n PRECEDING AND m FOLLOWING and INTERVAL n unit frames, ASC and DESC, NULL keys, frames that hold no row, the frames MySQL refuses),
       temporal_values (R50: the number a date function gives -- DATE(x) + 0, TIME(x), NOW(), CAST(x AS DATE) -- and SUM / AVG of a date, time or DATETIME column),
       float_single (R50: a FLOAT column as the single-precision number: f = d, f = 0.1, f + 0, SUM(f)),
-      target_table (R50: error 1093 for an UPDATE / DELETE / INSERT whose subquery reads the table it writes).
+      target_table (R50: error 1093 for an UPDATE / DELETE / INSERT whose subquery reads the table it writes),
+      having_alias (R52: HAVING names the alias of a select-list expression, aggregate or column, also one that is the name of a column of the table),
+      self_join_write (R52: UPDATE / DELETE that join a table with itself, the comma form, and the SET value that names another table by its alias),
+      subquery_item_order (R52: ORDER BY the alias or position of a scalar subquery of the select list, DISTINCT over one).
   python make_scoreboard.py <engine_server.exe> [--tests CASES ASSERTIONS]
       runs every corpus (the protocol ones with --proto) and writes the numbers the app's Compat page shows to code/frontend/src/lib/compatSnapshot.json.
       The cells of RuSQL's answer are read the way the engine itself reads a result table (\\ \n \| and \s \t for a space or tab at either end of a value,
