@@ -541,6 +541,7 @@ StringResult Executor::exec_delete_inner(SharedDatabase& s, const std::string& t
         child_hits.clear();
         auto oit = s.tables.find(other_table);
         if (oit == s.tables.end()) return std::nullopt;
+        if (fk_children_absent(s, other_table, column, value)) return std::nullopt; // (no live row refers to the value: nothing to claim or change)
         auto& child_rows = oit->second;
         for (std::size_t i = 0; i < child_rows.size(); i++) {
             const Row& row = child_rows[i];
@@ -554,6 +555,18 @@ StringResult Executor::exec_delete_inner(SharedDatabase& s, const std::string& t
     };
     auto try_cascade_once = [&]() -> CascadeAttemptResult {
     auto neighbor_write_lock = acquire_table_data_locks(s, neighbor_tables, /*exclusive=*/true);
+    // (however this attempt ends, the cache of the values the child tables hold has taken in every row the cascades changed -- each one is reported to it -- and this section
+    // changes no other live row, so the cache is current again for the next statement)
+    struct KeepProbesCurrent {
+        Executor& ex;
+        SharedDatabase& s;
+        const std::vector<std::string>& tables;
+        ~KeepProbesCurrent() {
+            for (auto& t : tables) {
+                if (const TableSchema* sch = s.catalog.get_table(t)) ex.unique_probe_apply(s, t, *sch, {}, {});
+            }
+        }
+    } keep_probes_current{*this, s, neighbor_tables};
 
     for (auto& del_row : rows_to_delete) {
         for (auto& [other_table, cols] : other_tables) {
@@ -562,7 +575,8 @@ StringResult Executor::exec_delete_inner(SharedDatabase& s, const std::string& t
                     auto dit = del_row.find(col.foreign_key->ref_column);
                     std::string del_val = dit != del_row.end() ? dit->second : std::string();
                     if (auto oit = s.tables.find(other_table); oit != s.tables.end()) {
-                        bool referenced = index_or_scan_exists(s, other_table, oit->second, col.name, del_val, is_visible);
+                        // (R54: the cache of the child's foreign key values says at once that no live row refers to the value; a NULL refers to nothing)
+                        bool referenced = !fk_children_absent(s, other_table, col.name, del_val) && index_or_scan_exists(s, other_table, oit->second, col.name, del_val, is_visible);
                         if (referenced) {
                             return CascadeAttemptResult::hard_error(StringResult::Err(
                                 "Foreign key violation: row in '" + table + "' is referenced by '" + other_table + "'.'" + col.name + "'"));

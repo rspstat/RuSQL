@@ -1063,8 +1063,24 @@ StringResult Executor::execute(Statement stmt) {
 
     // BEGIN/SAVEPOINT/RELEASE SAVEPOINT touch only TransactionManager's own session-local
     // state, never any table data -- structural shared is enough, no table locks needed.
+    // USE only reads the list of databases and sets this session's current database; SET changes this session's variables (a SET whose value reads a table through
+    // a subquery is not one of them). They used to take the exclusive path, which waits out every running statement and checkpoints the redo log (the app and
+    // the MCP send USE before every statement).
+    auto session_state_only = [&]() {
+        if (std::holds_alternative<Statement::Use>(stmt.data) || std::holds_alternative<Statement::SetIsolationLevel>(stmt.data)) return true;
+        std::vector<const Statement*> reads;
+        if (auto* one = std::get_if<Statement::SetUserVar>(&stmt.data)) {
+            collect_arith_subqueries(one->expr, reads);
+            return reads.empty();
+        }
+        if (auto* many = std::get_if<Statement::SetVars>(&stmt.data)) {
+            for (auto& item : many->items) collect_arith_subqueries(item.expr, reads);
+            return reads.empty();
+        }
+        return false;
+    };
     if (std::holds_alternative<Statement::Begin>(stmt.data) || std::holds_alternative<Statement::Savepoint>(stmt.data) ||
-        std::holds_alternative<Statement::ReleaseSavepoint>(stmt.data)) {
+        std::holds_alternative<Statement::ReleaseSavepoint>(stmt.data) || session_state_only()) {
         auto s = shared->read();
         return execute_with_s(const_cast<SharedDatabase&>(*s), std::move(stmt));
     }

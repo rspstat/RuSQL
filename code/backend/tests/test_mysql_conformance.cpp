@@ -105,6 +105,12 @@ const Case kSelfJoinWrite[] = {
 const Case kSubqueryItemOrder[] = {
 #include "mysql_conformance_subquery_item_order.inc"
 };
+const Case kLikeEscape[] = {
+#include "mysql_conformance_like_escape.inc"
+};
+const Case kFkParent[] = {
+#include "mysql_conformance_fk_parent.inc"
+};
 
 struct TempDataDir {
     std::string path;
@@ -350,4 +356,12 @@ TEST_CASE("UPDATE and DELETE that join a table with itself, and the SET value th
 
 TEST_CASE("ORDER BY and DISTINCT on a scalar subquery of the select list", "[mysql_conformance][subquery_item_order]") {
     run_cases("mc_subquery_item_order", kSubqueryItemOrder, sizeof kSubqueryItemOrder / sizeof kSubqueryItemOrder[0]);
+}
+
+TEST_CASE("LIKE and its escape character: the backslash and ESCAPE", "[mysql_conformance][like_escape]") {
+    run_cases("mc_like_escape", kLikeEscape, sizeof kLikeEscape / sizeof kLikeEscape[0]);
+}
+
+TEST_CASE("The parent side of a foreign key: DELETE / UPDATE of a parent row, a NULL parent key", "[mysql_conformance][fk_parent]") {
+    run_cases("mc_fk_parent", kFkParent, sizeof kFkParent / sizeof kFkParent[0]);
 }

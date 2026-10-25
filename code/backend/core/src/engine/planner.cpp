@@ -268,7 +268,7 @@ namespace {
 std::optional<std::string> like_prefix(const std::string& pat) {
     if (pat.empty() || pat.back() != '%') return std::nullopt;
     std::string prefix = pat.substr(0, pat.size() - 1);
-    if (prefix.find('%') != std::string::npos || prefix.find('_') != std::string::npos || prefix.empty()) return std::nullopt;
+    if (prefix.find('%') != std::string::npos || prefix.find('_') != std::string::npos || prefix.find('\\') != std::string::npos || prefix.empty()) return std::nullopt;
     return prefix;
 }
 } // namespace

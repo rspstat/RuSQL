@@ -1,0 +1,70 @@
+# The parent side of a foreign key (R54): a DELETE / UPDATE of a parent row looks for the rows of the child table that hold its value. The child tables here are large enough
+# (over a thousand rows) for RuSQL to answer from the cache of the values they hold; MySQL reads an index. A NULL in the referenced column of a parent is referred to by nothing.
+--CREATE TABLE dg (n INT PRIMARY KEY)
+--INSERT INTO dg VALUES (0),(1),(2),(3),(4),(5),(6),(7),(8),(9)
+--CREATE TABLE fp (id INT PRIMARY KEY, code VARCHAR(8) UNIQUE)
+--INSERT INTO fp SELECT a.n + 10 * b.n + 100 * c.n + 1000 * d.n + 1, CONCAT('c', a.n + 10 * b.n + 100 * c.n + 1000 * d.n + 1) FROM dg a, dg b, dg c, dg d
+--CREATE TABLE fc (id INT PRIMARY KEY, pid INT, FOREIGN KEY (pid) REFERENCES fp(id))
+--INSERT INTO fc SELECT id, id FROM fp WHERE id <= 1500
+--INSERT INTO fc SELECT id + 5000, id FROM fp WHERE id <= 100
+--CREATE TABLE fc2 (id INT PRIMARY KEY, pcode VARCHAR(8), FOREIGN KEY (pcode) REFERENCES fp(code))
+--INSERT INTO fc2 SELECT id, code FROM fp WHERE id BETWEEN 2001 AND 3300
+--INSERT INTO fc2 VALUES (9001, NULL), (9002, NULL)
+--INSERT INTO fp VALUES (30001, NULL), (30002, NULL)
+DELETE FROM fp WHERE id = 10000
+DELETE FROM fp WHERE id = 9999
+DELETE FROM fp WHERE id = 9998
+DELETE FROM fp WHERE id = 5
+DELETE FROM fp WHERE id = 1500
+DELETE FROM fp WHERE id BETWEEN 1495 AND 1505
+DELETE FROM fp WHERE id = 2001
+DELETE FROM fp WHERE id = 30001
+DELETE FROM fp WHERE id IN (30002, 9997, 9996)
+SELECT COUNT(*) FROM fp
+SELECT COUNT(*) FROM fp WHERE id > 9990
+INSERT INTO fc VALUES (7001, 9000)
+DELETE FROM fp WHERE id = 9000
+DELETE FROM fc WHERE id = 7001
+DELETE FROM fp WHERE id = 9000
+UPDATE fc SET pid = 9001 WHERE id = 7
+DELETE FROM fp WHERE id = 9001
+DELETE FROM fp WHERE id = 7
+UPDATE fc SET pid = 9001 WHERE id = 5007
+DELETE FROM fp WHERE id = 7
+UPDATE fp SET id = 20001 WHERE id = 9002
+UPDATE fp SET id = 20002 WHERE id = 6
+UPDATE fp SET id = 20003 WHERE id = 3500
+UPDATE fp SET code = 'moved' WHERE id = 3501
+UPDATE fp SET code = 'moved2' WHERE id = 2002
+SELECT COUNT(*) FROM fp WHERE id > 20000
+SELECT id, pcode FROM fc2 WHERE id IN (2002, 9001) ORDER BY id
+SELECT COUNT(*) FROM fc
+SELECT COUNT(*) FROM fc2
+# a parent whose child rows are cascaded, set to NULL
+--CREATE TABLE cp (id INT PRIMARY KEY)
+--INSERT INTO cp SELECT id FROM fp WHERE id <= 3000
+--CREATE TABLE cc (id INT PRIMARY KEY, pid INT, FOREIGN KEY (pid) REFERENCES cp(id) ON DELETE CASCADE ON UPDATE CASCADE)
+--INSERT INTO cc SELECT id, id FROM fp WHERE id <= 1200
+--INSERT INTO cc SELECT id + 5000, id FROM fp WHERE id <= 100
+--CREATE TABLE np (id INT PRIMARY KEY)
+--INSERT INTO np SELECT id FROM fp WHERE id <= 3000
+--CREATE TABLE nc (id INT PRIMARY KEY, pid INT, FOREIGN KEY (pid) REFERENCES np(id) ON DELETE SET NULL)
+--INSERT INTO nc SELECT id, id FROM fp WHERE id <= 1200
+DELETE FROM cp WHERE id = 3000
+DELETE FROM cp WHERE id = 2999
+DELETE FROM cp WHERE id = 5
+DELETE FROM cp WHERE id BETWEEN 6 AND 8
+DELETE FROM cp WHERE id = 2998
+UPDATE cp SET id = 70001 WHERE id = 9
+UPDATE cp SET id = 70002 WHERE id = 2900
+UPDATE cp SET id = 70003 WHERE id = 2901
+SELECT COUNT(*) FROM cc
+SELECT COUNT(*) FROM cc WHERE pid IN (5, 6, 7, 8)
+SELECT COUNT(*) FROM cc WHERE pid = 70001
+DELETE FROM np WHERE id = 3000
+DELETE FROM np WHERE id = 2999
+DELETE FROM np WHERE id = 10
+DELETE FROM np WHERE id = 11
+DELETE FROM np WHERE id BETWEEN 12 AND 13
+SELECT COUNT(*) FROM nc
+SELECT COUNT(*) FROM nc WHERE pid IS NULL

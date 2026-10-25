@@ -1070,6 +1070,16 @@ fn get_activity(state: State<AppState>) -> Activity {
     }
 }
 
+// The counters of SHOW GLOBAL STATUS (statements by kind, sessions, buffer pool, redo log, row-lock waits ...): the Metrics panel of the Server Manager draws their trend.
+#[tauri::command]
+fn get_status_counters(state: State<AppState>) -> ActivityTable {
+    let mut guard = state.db.lock().unwrap_or_else(|e| e.into_inner());
+    match guard.as_mut() {
+        Some(conn) => activity_table(conn, "SHOW GLOBAL STATUS;"),
+        None => ActivityTable::default(),
+    }
+}
+
 #[tauri::command]
 fn stop_server(conn_id: String, state: State<AppState>) -> Result<String, String> {
     let mut guard = state.db.lock().unwrap_or_else(|e| e.into_inner());
@@ -1245,6 +1255,7 @@ fn setup_mcp_config(host: String, port: u16, user: String, password: String) -> 
         "alwaysAllow": [
             "execute_sql", "list_databases", "list_tables", "get_table_schema",
             "explain_query", "get_indexes", "sample_data",
+            "health_report", "list_locks", "get_table_stats", "get_fk_graph",
             "list_connections", "add_connection",
             "write_to_editor", "new_editor_tab", "close_editor_tab", "switch_editor_tab",
             "list_editor_tabs", "get_editor_tab_content", "execute_in_editor",
@@ -1686,6 +1697,7 @@ fn main() {
             stop_server,
             get_server_status,
             get_activity,
+            get_status_counters,
             mvcc_exec,
             mvcc_reset,
             clear_server_log,

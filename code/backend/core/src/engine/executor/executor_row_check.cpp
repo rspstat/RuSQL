@@ -75,6 +75,7 @@ std::optional<std::string> Executor::delete_restrict_violation(SharedDatabase& s
             if (!col.foreign_key || col.foreign_key->ref_table != table || col.foreign_key->on_delete != FkAction::Restrict) continue;
             auto dit = row.find(col.foreign_key->ref_column);
             const std::string del_val = dit != row.end() ? dit->second : std::string();
+            if (del_val == EXECUTOR_NULL_VALUE) continue; // (a NULL is referred to by nothing)
             if (auto oit = s.tables.find(other_table); oit != s.tables.end()) {
                 if (index_or_scan_exists(s, other_table, oit->second, col.name, del_val, [](const Row& r) { return Executor::is_visible(r); })) {
                     return "Foreign key violation: row in '" + table + "' is referenced by '" + other_table + "'.'" + col.name + "'";
@@ -110,7 +111,7 @@ std::optional<std::string> Executor::update_restrict_violation(SharedDatabase& s
             auto nit = new_row.find(ref_col);
             const std::string old_val = oit != old_row.end() ? oit->second : std::string();
             const std::string new_val = nit != new_row.end() ? nit->second : std::string();
-            if (old_val == new_val) continue;
+            if (old_val == new_val || old_val == EXECUTOR_NULL_VALUE) continue; // (a NULL is referred to by nothing)
             if (auto tit = s.tables.find(other_table); tit != s.tables.end()) {
                 if (index_or_scan_exists(s, other_table, tit->second, col.name, old_val, [](const Row& r) { return Executor::is_visible(r); })) {
                     return "Foreign key violation (ON UPDATE RESTRICT): '" + ref_col + "' is referenced by '" + other_table + "'.'" + col.name + "'";

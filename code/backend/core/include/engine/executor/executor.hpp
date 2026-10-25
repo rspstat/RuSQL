@@ -1006,6 +1006,10 @@ public:
     void unique_probe_apply(SharedDatabase& s, const std::string& table, const TableSchema& schema, const std::vector<const Row*>& removed, const std::vector<const Row*>& added);
     void unique_probe_inserted(SharedDatabase& s, const std::string& table, const TableSchema& schema, const std::vector<Row>& rows);
     void unique_probe_commit(SharedDatabase& s, const std::string& table); // (a COMMIT changes no live row)
+    // The parent side of a foreign key (R54): a DELETE / UPDATE of a parent row looks for the rows of `child_table` that hold its value in `column`. True only when the cache of the
+    // child table (which counts the values of its foreign key columns beside its UNIQUE keys) is current -- or can be made now, the caller holds the child's data lock exclusive
+    // -- and no live row holds `value` (a NULL refers to nothing); false means "maybe": scan.
+    bool fk_children_absent(SharedDatabase& s, const std::string& child_table, const std::string& column, const std::string& value);
     bool unique_probe_stamp(SharedDatabase& s, const std::string& table, std::uint64_t& locks_id, std::uint64_t& data_id, std::uint64_t& sum) const;
     // The positions of the row versions of `table` (`rows`) in the order of its PRIMARY KEY, which is the order a scan with no ORDER BY reads them in; null when they
     // already lie in it (or the table has no primary key). Kept per table until a writer touches it (engine/scan_order.hpp).

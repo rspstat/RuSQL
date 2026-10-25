@@ -11,6 +11,7 @@ import BTreeView from "./components/BTreeView";
 import MvccView from "./components/MvccView";
 import Sidebar from "./components/Sidebar";
 import ActivityPanel from "./components/ActivityPanel";
+import MetricsPanel from "./components/MetricsPanel";
 import ErdView from "./components/ErdView";
 import ConfirmDialog from "./components/ConfirmDialog";
 import EditTableModal from "./components/EditTableModal";
@@ -568,7 +569,7 @@ function App() {
   const [srvConnName, setSrvConnName] = useState("RuSQL Local");
   const [srvUser, setSrvUser] = useState("root");
   const [srvPass, setSrvPass] = useState("root");
-  const [srvRightPanel, setSrvRightPanel] = useState<"none" | "cli" | "mysql" | "bench" | "sessions" | "mcp">("none");
+  const [srvRightPanel, setSrvRightPanel] = useState<"none" | "cli" | "mysql" | "bench" | "sessions" | "metrics" | "mcp">("none");
   const [mcpSetupMsg, setMcpSetupMsg] = useState<{ ok: boolean; text: string } | null>(null);
   const [benchResult, setBenchResult] = useState<Record<string, unknown> | null | undefined>(undefined);
   const [benchLoading, setBenchLoading] = useState(false);
@@ -3413,7 +3414,7 @@ function App() {
             {srvRightPanel !== "none" && (
               <div className="srv-slide-panel">
                 <div className="srv-slide-header">
-                  {srvRightPanel === "cli" ? "CLI Guide" : srvRightPanel === "bench" ? "Benchmark" : srvRightPanel === "sessions" ? "Sessions" : srvRightPanel === "mcp" ? "MCP Agent" : "MySQL Connection"}
+                  {srvRightPanel === "cli" ? "CLI Guide" : srvRightPanel === "bench" ? "Benchmark" : srvRightPanel === "sessions" ? "Sessions" : srvRightPanel === "metrics" ? "Metrics" : srvRightPanel === "mcp" ? "MCP Agent" : "MySQL Connection"}
                   <button className="srv-slide-close" onClick={() => setSrvRightPanel("none")}>✕</button>
                 </div>
                 <div className="srv-slide-body">
@@ -3475,6 +3476,8 @@ function App() {
                       </>
                     );
                   })()}
+
+                  {srvRightPanel === "metrics" && <MetricsPanel />}
 
                   {srvRightPanel === "bench" && (<>
                     <div className="srv-slide-section">Performance Benchmark</div>
@@ -3711,6 +3714,16 @@ function App() {
                   <circle cx="19" cy="7" r="2"/><path d="M23 21v-1a3 3 0 00-2-2.83"/>
                 </svg>
                 <span>Session</span>
+              </button>
+              <button
+                className={`srv-rbar-btn ${srvRightPanel === "metrics" ? "active" : ""}`}
+                onClick={() => setSrvRightPanel(p => p === "metrics" ? "none" : "metrics")}
+                title="Metrics"
+              >
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+                  <polyline points="3 17 8 11 12 14 17 6 21 9"/><line x1="3" y1="21" x2="21" y2="21"/>
+                </svg>
+                <span>Metrics</span>
               </button>
               <button
                 className={`srv-rbar-btn ${srvRightPanel === "mcp" ? "active" : ""}`}

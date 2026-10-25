@@ -1,6 +1,8 @@
 #include <atomic>
 #include <chrono>
+#include <cstdlib>
 #include <filesystem>
+#include <functional>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -1094,4 +1096,298 @@ TEST_CASE("R53: EXPLAIN ANALYZE names the way each join was done and tells the t
         }
         REQUIRE(width > 70);
     }
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// R54: LIKE's escape character, USE that leaves the redo log alone, the parent side of a foreign key that does not scan the child table.
+
+namespace {
+// RUSQL_PROBE_CHECK=1 for the engines made while it lives: every use of the cache of values counts the rows again and compares (the engine throws when they differ)
+struct ProbeCheck {
+    ProbeCheck() { _putenv_s("RUSQL_PROBE_CHECK", "1"); }
+    ~ProbeCheck() { _putenv_s("RUSQL_PROBE_CHECK", ""); }
+};
+
+std::uint64_t probe_skipped(Executor& ex) { return ex.get_shared()->read()->unique_probes->skipped.load(); }
+std::uint64_t probe_builds(Executor& ex) { return ex.get_shared()->read()->unique_probes->builds.load(); }
+
+std::string multi_insert(const std::string& table, int from, int to, const std::function<std::string(int)>& values) {
+    std::string sql = "INSERT INTO " + table + " VALUES ";
+    for (int i = from; i <= to; i++) sql += std::string(i == from ? "" : ",") + "(" + values(i) + ")";
+    return sql;
+}
+} // namespace
+
+TEST_CASE("R54: LIKE reads \\% and \\_ as the characters themselves, ESCAPE names another escape character", "[r54][like]") {
+    TempDataDir dir("r54_like");
+    Executor ex(dir.path);
+    ok(ex, "CREATE DATABASE d");
+    ok(ex, "USE d");
+    // `\%` and `\_` stay two characters in a string, as in MySQL (any other `\x` is x)
+    REQUIRE(q(ex, "SELECT LENGTH('a\\_b'), LENGTH('a\\%'), LENGTH('a\\qb'), 'a\\qb'") == Rows{{"4", "3", "3", "aqb"}});
+    REQUIRE(q(ex, "SELECT 'a%b' LIKE 'a\\%b', 'axb' LIKE 'a\\%b', 'a_b' LIKE 'a\\_b', 'axb' LIKE 'a\\_b', '%' LIKE '\\%', 'x' LIKE '\\%', 'a%' LIKE 'a%\\%', 'ab' LIKE 'a%\\%'") ==
+            Rows{{"1", "0", "1", "0", "1", "0", "1", "0"}});
+    // the escaped backslash, and a backslash that ends the pattern is a backslash
+    REQUIRE(q(ex, "SELECT 'a\\\\' LIKE 'a\\\\\\\\', 'a\\\\' LIKE 'a\\\\', 'a' LIKE 'a\\\\', 'a\\\\b' LIKE 'a\\\\\\\\b', 'ab' LIKE 'a\\\\b'") == Rows{{"1", "1", "0", "1", "1"}}); // (the last: the backslash escapes the b)
+    // ESCAPE 'c': c + x is x; a backslash is an ordinary character; an escape character that ends the pattern is itself
+    REQUIRE(q(ex, "SELECT 'a%b' LIKE 'a!%b' ESCAPE '!', 'axb' LIKE 'a!%b' ESCAPE '!', 'a!b' LIKE 'a!!b' ESCAPE '!', 'a_b' LIKE 'a!_b' ESCAPE '!', 'axb' LIKE 'a!_b' ESCAPE '!'") ==
+            Rows{{"1", "0", "1", "1", "0"}});
+    REQUIRE(q(ex, "SELECT 'a\\\\b' LIKE 'a\\\\b' ESCAPE '!', 'a\\\\%b' LIKE 'a\\%b' ESCAPE '!', 'axb' LIKE 'a\\%b' ESCAPE '!', 'a%b' LIKE 'a\\%b' ESCAPE '!'") == Rows{{"1", "1", "0", "0"}});
+    REQUIRE(q(ex, "SELECT 'a!' LIKE 'a!' ESCAPE '!', 'a' LIKE 'a!' ESCAPE '!', 'a#' LIKE 'a##' ESCAPE '#', 'a#b' LIKE 'a#%b' ESCAPE '#'") == Rows{{"1", "0", "1", "0"}});
+    REQUIRE(q(ex, "SELECT 'a\\\\b' LIKE 'a\\\\b' ESCAPE '', 'ab' LIKE 'a\\\\b' ESCAPE '', 'a%b' LIKE 'a\\\\%b' ESCAPE '\\\\'") == Rows{{"1", "0", "1"}});
+    REQUIRE(q(ex, "SELECT 'axb' NOT LIKE 'a!%b' ESCAPE '!', 'a%b' NOT LIKE 'a!%b' ESCAPE '!'") == Rows{{"1", "0"}});
+    REQUIRE(q(ex, "SELECT 'a_' LIKE 'a\xE2\x86\x92_' ESCAPE '\xE2\x86\x92', 'ab' LIKE 'a\xE2\x86\x92_' ESCAPE '\xE2\x86\x92'") == Rows{{"1", "0"}}); // (an escape character of several bytes)
+    // the same next to a character that is no ASCII (another walk over the text)
+    REQUIRE(q(ex, "SELECT '\xC3\xA9_' LIKE '\xC3\xA9\\_', '\xC3\xA9x' LIKE '\xC3\xA9\\_', '\xC3\xA9%' LIKE '\xC3\xA9\\%', '\xC3\x89_' LIKE '\xC3\xA9\\_', '\xC3\xA9_x' LIKE '\xC3\xA9\\_%'") ==
+            Rows{{"1", "0", "1", "1", "1"}});
+    // what the engine cannot do is said
+    REQUIRE(fails(ex, "SELECT 'a' LIKE 'a' ESCAPE '!!'").find("Incorrect arguments to ESCAPE") != std::string::npos);
+    ok(ex, "CREATE TABLE pat (id INT PRIMARY KEY, p VARCHAR(10))");
+    ok(ex, "INSERT INTO pat VALUES (1, 'a!_')");
+    // a pattern read from a column has its escapes too, and ESCAPE works on it
+    ok(ex, "INSERT INTO pat VALUES (2, 'a\\_')");
+    REQUIRE(q(ex, "SELECT id FROM pat WHERE 'a_' LIKE p AND 'ab' NOT LIKE p ORDER BY id") == Rows{{"2"}});
+    REQUIRE(q(ex, "SELECT id, 'a_' LIKE p ESCAPE '!' FROM pat ORDER BY id") == Rows{{"1", "1"}, {"2", "0"}});
+    REQUIRE(q(ex, "SELECT id FROM pat WHERE 'a_' LIKE CONCAT('a', '!', '_') ESCAPE '!'") == Rows{{"1"}, {"2"}});
+    ok(ex, "INSERT INTO pat VALUES (3, NULL)");
+    REQUIRE(q(ex, "SELECT id, 'a_' LIKE p ESCAPE '!' FROM pat WHERE id = 3") == Rows{{"3", "NULL"}});
+    // the same matcher everywhere a pattern is read: SHOW ... LIKE and the rows of a table
+    ok(ex, "CREATE TABLE xak (a INT)");
+    ok(ex, "CREATE TABLE x_k (a INT)");
+    REQUIRE(q(ex, "SHOW TABLES LIKE 'x\\_k'") == Rows{{"x_k"}});
+    REQUIRE(q(ex, "SHOW TABLES LIKE 'x_k'") == Rows{{"x_k"}, {"xak"}});
+    REQUIRE(q(ex, "SHOW STATUS LIKE 'Com\\_sel%'").size() == 1);
+    ok(ex, "CREATE TABLE lk (id INT PRIMARY KEY, name VARCHAR(20))");
+    ok(ex, "CREATE INDEX ix_name ON lk (name)");
+    ok(ex, "INSERT INTO lk VALUES (1,'a_1'),(2,'ab1'),(3,'a_2'),(4,'a%x'),(5,'axx'),(6,'b_1'),(7,'a\\\\b')");
+    REQUIRE(q(ex, "SELECT id FROM lk WHERE name LIKE 'a\\_%' ORDER BY id") == Rows{{"1"}, {"3"}});
+    REQUIRE(q(ex, "SELECT id FROM lk WHERE name LIKE 'a\\%%' ORDER BY id") == Rows{{"4"}});
+    REQUIRE(q(ex, "SELECT id FROM lk WHERE name LIKE 'a!_%' ESCAPE '!' ORDER BY id") == Rows{{"1"}, {"3"}});
+    REQUIRE(q(ex, "SELECT id FROM lk WHERE name LIKE 'a%' AND name NOT LIKE 'a\\_%' ORDER BY id") == Rows{{"2"}, {"4"}, {"5"}, {"7"}});
+    REQUIRE(q(ex, "SELECT id FROM lk WHERE name LIKE 'a%' ORDER BY id") == Rows{{"1"}, {"2"}, {"3"}, {"4"}, {"5"}, {"7"}}); // (a plain prefix still reads the index)
+    REQUIRE(q(ex, "SELECT id FROM lk WHERE name LIKE 'a\\\\\\\\b'") == Rows{{"7"}});
+    // a pattern with a backslash and a % at its end is no plain prefix: the index may not be searched for it as it is written ('a\\b%' reads as 'ab%')
+    REQUIRE(q(ex, "SELECT id FROM lk WHERE name LIKE 'a\\\\b%'") == Rows{{"2"}});
+    REQUIRE(q(ex, "SELECT id FROM lk WHERE name LIKE 'a\\\\\\\\b%'") == Rows{{"7"}});
+    REQUIRE(q(ex, "SELECT id FROM lk WHERE name LIKE 'ab\\\\%'").empty());
+    ok(ex, "UPDATE lk SET name = 'z' WHERE name LIKE 'a\\_1'");
+    ok(ex, "DELETE FROM lk WHERE name LIKE 'b\\_%'");
+    REQUIRE(q(ex, "SELECT id, name FROM lk ORDER BY id") == Rows{{"1", "z"}, {"2", "ab1"}, {"3", "a_2"}, {"4", "a%x"}, {"5", "axx"}, {"7", "a\\b"}});
+}
+
+TEST_CASE("R54: USE changes the current database and leaves the redo log (and every running statement) alone", "[r54][use]") {
+    TempDataDir dir("r54_use");
+    {
+        Executor ex(dir.path);
+        ok(ex, "CREATE DATABASE d");
+        ok(ex, "CREATE DATABASE e");
+        ok(ex, "USE d");
+        ok(ex, "CREATE TABLE t (id INT PRIMARY KEY, v INT)");
+        ok(ex, "INSERT INTO t VALUES (1, 10)");
+        ok(ex, "INSERT INTO t VALUES (2, 20)");
+        auto redo_bytes = [&] { return std::stoll(q(ex, "SHOW GLOBAL STATUS LIKE 'Innodb_redo_log_bytes'")[0][1]); };
+        const long long before = redo_bytes();
+        REQUIRE(before > 0);
+        ok(ex, "USE e");
+        ok(ex, "USE d");
+        REQUIRE(redo_bytes() == before); // (a USE used to checkpoint it: the table files were rewritten and the log emptied)
+        // the SET statements that change only this session's variables are the same
+        ok(ex, "SET @x = 5");
+        ok(ex, "SET autocommit = 1");
+        ok(ex, "SET sql_mode = 'ANSI', @y = @x + 1");
+        ok(ex, "SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED");
+        ok(ex, "SET NAMES utf8mb4");
+        REQUIRE(redo_bytes() == before);
+        REQUIRE(q(ex, "SELECT @x, @y") == Rows{{"5", "6"}});
+        REQUIRE(fails(ex, "USE nowhere").find("Unknown database") != std::string::npos);
+        REQUIRE(q(ex, "SELECT DATABASE()") == Rows{{"d"}});
+        ok(ex, "USE e");
+        REQUIRE(q(ex, "SELECT DATABASE()") == Rows{{"e"}});
+        // inside a transaction too, and the transaction goes on
+        ok(ex, "USE d");
+        ok(ex, "BEGIN");
+        ok(ex, "INSERT INTO t VALUES (3, 30)");
+        ok(ex, "USE e");
+        ok(ex, "USE d");
+        ok(ex, "COMMIT");
+        ok(ex, "INSERT INTO t VALUES (4, 40)");
+        ok(ex, "USE e");
+        REQUIRE(redo_bytes() > before);
+        // another session's USE does not wait for this one's statements and does not touch its database
+        Executor other = Executor::new_session(ex.get_shared());
+        ok(other, "USE e");
+        REQUIRE(q(ex, "SELECT DATABASE()") == Rows{{"e"}});
+        ok(ex, "USE d");
+        REQUIRE(q(other, "SELECT DATABASE()") == Rows{{"e"}});
+    } // (a crash: nothing was checkpointed, the redo log is what holds the rows)
+    Executor again(dir.path);
+    ok(again, "USE d");
+    REQUIRE(q(again, "SELECT id, v FROM t ORDER BY id") == Rows{{"1", "10"}, {"2", "20"}, {"3", "30"}, {"4", "40"}});
+    REQUIRE(q(again, "SELECT REDO_OPS > 0 FROM information_schema.recovery") == Rows{{"1"}});
+    // a SET whose value reads a table through a subquery still works (it keeps the exclusive path)
+    ok(again, "SET @n = (SELECT COUNT(*) FROM t)");
+    REQUIRE(q(again, "SELECT @n") == Rows{{"4"}});
+}
+
+TEST_CASE("R54: a parent row that nothing refers to is deleted without scanning the child table", "[r54][fk]") {
+    ProbeCheck check;
+    TempDataDir dir("r54_fk");
+    Executor ex(dir.path);
+    ok(ex, "CREATE DATABASE d");
+    ok(ex, "USE d");
+    ok(ex, "CREATE TABLE p (id INT PRIMARY KEY, name VARCHAR(10))");
+    ok(ex, "CREATE TABLE c (id INT PRIMARY KEY, pid INT, FOREIGN KEY (pid) REFERENCES p(id))");
+    ok(ex, "CREATE TABLE pc (id INT PRIMARY KEY)");
+    ok(ex, "CREATE TABLE cc (id INT PRIMARY KEY, pid INT, FOREIGN KEY (pid) REFERENCES pc(id) ON DELETE CASCADE ON UPDATE CASCADE)");
+    ok(ex, "CREATE TABLE pn (id INT PRIMARY KEY)");
+    ok(ex, "CREATE TABLE cn (id INT PRIMARY KEY, pid INT, FOREIGN KEY (pid) REFERENCES pn(id) ON DELETE SET NULL)");
+    // 3000 parents; the first 1500 are each referred to by two children (ids i and i + 1500)
+    const auto parents = [](int i) { return std::to_string(i) + ",'n" + std::to_string(i) + "'"; };
+    const auto children = [](int i) { return std::to_string(i) + "," + std::to_string((i - 1) % 1500 + 1); };
+    const auto ids = [](int i) { return std::to_string(i); };
+    for (int from = 1; from <= 3000; from += 500) {
+        ok(ex, multi_insert("p", from, from + 499, parents));
+        ok(ex, multi_insert("c", from, from + 499, children));
+        ok(ex, multi_insert("pc", from, from + 499, ids));
+        ok(ex, multi_insert("cc", from, from + 499, children));
+        ok(ex, multi_insert("pn", from, from + 499, ids));
+        ok(ex, multi_insert("cn", from, from + 499, children));
+    }
+    auto count = [&](const std::string& table) { return std::stoll(q(ex, "SELECT COUNT(*) FROM " + table)[0][0]); };
+
+    // restrict: the first statement scans, the second makes the cache, then the child table is not read for a parent that nothing refers to
+    ok(ex, "DELETE FROM p WHERE id = 3000");
+    const auto builds0 = probe_builds(ex);
+    ok(ex, "DELETE FROM p WHERE id = 2999");
+    REQUIRE(probe_builds(ex) > builds0);
+    const auto skipped0 = probe_skipped(ex);
+    for (int id = 2998; id >= 2900; id--) ok(ex, "DELETE FROM p WHERE id = " + std::to_string(id));
+    REQUIRE(probe_skipped(ex) >= skipped0 + 99);
+    REQUIRE(count("p") == 2899);
+    // a parent that a child refers to is still refused, by every way of finding it
+    REQUIRE(fails(ex, "DELETE FROM p WHERE id = 5").find("Foreign key violation") != std::string::npos);
+    REQUIRE(fails(ex, "DELETE FROM p WHERE id = 1500").find("Foreign key violation") != std::string::npos);
+    REQUIRE(fails(ex, "DELETE FROM p WHERE id BETWEEN 1495 AND 1505").find("Foreign key violation") != std::string::npos);
+    REQUIRE(count("p") == 2899);
+    // a child written after the cache was made counts: INSERT, UPDATE, DELETE, a transaction that is rolled back
+    ok(ex, "INSERT INTO c VALUES (10001, 2000)");
+    REQUIRE(fails(ex, "DELETE FROM p WHERE id = 2000").find("Foreign key violation") != std::string::npos);
+    ok(ex, "DELETE FROM c WHERE id = 10001");
+    ok(ex, "DELETE FROM p WHERE id = 2000");
+    ok(ex, "UPDATE c SET pid = 2001 WHERE id = 7"); // (parent 7 keeps its second child, 1507; 2001 gets one)
+    REQUIRE(fails(ex, "DELETE FROM p WHERE id = 2001").find("Foreign key violation") != std::string::npos);
+    REQUIRE(fails(ex, "DELETE FROM p WHERE id = 7").find("Foreign key violation") != std::string::npos);
+    ok(ex, "UPDATE c SET pid = 2001 WHERE id = 1507");
+    ok(ex, "DELETE FROM p WHERE id = 7"); // (no child is left on it)
+    REQUIRE(fails(ex, "DELETE FROM p WHERE id = 2001").find("Foreign key violation") != std::string::npos);
+    ok(ex, "BEGIN");
+    ok(ex, "INSERT INTO c VALUES (10002, 2002)");
+    ok(ex, "ROLLBACK");
+    ok(ex, "DELETE FROM p WHERE id = 2002"); // (the child that was rolled back refers to nothing)
+    ok(ex, "BEGIN");
+    ok(ex, "DELETE FROM c WHERE id = 8"); // (parent 8's other child, 1508, stays)
+    ok(ex, "DELETE FROM c WHERE id = 1508");
+    ok(ex, "ROLLBACK");
+    REQUIRE(fails(ex, "DELETE FROM p WHERE id = 8").find("Foreign key violation") != std::string::npos);
+    // a TRUNCATE, a restart of the counters by DDL: the cache is made again
+    ok(ex, "ALTER TABLE c ADD COLUMN note INT");
+    REQUIRE(fails(ex, "DELETE FROM p WHERE id = 9").find("Foreign key violation") != std::string::npos);
+    ok(ex, "DELETE FROM p WHERE id = 2003");
+    ok(ex, "DELETE FROM p WHERE id = 2004");
+    ok(ex, "DELETE FROM p WHERE id = 2005");
+    // the same for a change of the key of the parent (ON UPDATE RESTRICT)
+    ok(ex, "UPDATE p SET id = 90001 WHERE id = 2500");
+    ok(ex, "UPDATE p SET id = 90002 WHERE id = 2501");
+    REQUIRE(fails(ex, "UPDATE p SET id = 90003 WHERE id = 6").find("Foreign key violation") != std::string::npos);
+    REQUIRE(q(ex, "SELECT COUNT(*) FROM p WHERE id = 6") == Rows{{"1"}});
+    // (a statement that only looks at the child table leaves the cache current: the next one does not scan either, and the cache is not made again)
+    ok(ex, "DELETE FROM p WHERE id = 2504");
+    ok(ex, "DELETE FROM p WHERE id = 2505");
+    const auto builds1 = probe_builds(ex), skipped1 = probe_skipped(ex);
+    for (int id = 2510; id < 2515; id++) ok(ex, "UPDATE p SET id = " + std::to_string(id + 80000) + " WHERE id = " + std::to_string(id));
+    ok(ex, "DELETE FROM p WHERE id = 2503");
+    REQUIRE(probe_builds(ex) == builds1);
+    REQUIRE(probe_skipped(ex) >= skipped1 + 6);
+
+    // cascade: the unreferenced parents go without a scan, a referenced one takes its children with it, and the next parent finds the cache current
+    ok(ex, "DELETE FROM pc WHERE id = 3000");
+    const auto skipped2 = probe_skipped(ex);
+    ok(ex, "DELETE FROM pc WHERE id = 2999"); // (the second statement makes the cache, and a parent that nothing refers to has no child to find)
+    REQUIRE(probe_skipped(ex) > skipped2);
+    ok(ex, "DELETE FROM pc WHERE id = 5"); // (children 5 and 1505 go)
+    REQUIRE(count("cc") == 2998);
+    REQUIRE(q(ex, "SELECT COUNT(*) FROM cc WHERE pid = 5") == Rows{{"0"}});
+    ok(ex, "DELETE FROM pc WHERE id = 2998");
+    ok(ex, "DELETE FROM pc WHERE id BETWEEN 6 AND 8"); // (six children)
+    REQUIRE(count("cc") == 2992);
+    ok(ex, "UPDATE pc SET id = 70001 WHERE id = 9"); // (children 9 and 1509 follow)
+    REQUIRE(q(ex, "SELECT COUNT(*) FROM cc WHERE pid = 70001") == Rows{{"2"}});
+    const auto skipped3 = probe_skipped(ex);
+    ok(ex, "UPDATE pc SET id = 70002 WHERE id = 2900"); // (no child to follow, and the cache that the cascades kept current says so)
+    REQUIRE(probe_skipped(ex) > skipped3);
+    REQUIRE(count("cc") == 2992);
+    // set null
+    ok(ex, "DELETE FROM pn WHERE id = 3000");
+    ok(ex, "DELETE FROM pn WHERE id = 2999");
+    ok(ex, "DELETE FROM pn WHERE id = 10");
+    REQUIRE(q(ex, "SELECT COUNT(*) FROM cn WHERE pid IS NULL") == Rows{{"2"}});
+    ok(ex, "DELETE FROM pn WHERE id = 11");
+    REQUIRE(q(ex, "SELECT COUNT(*) FROM cn WHERE pid IS NULL") == Rows{{"4"}});
+    REQUIRE(count("cn") == 3000);
+}
+
+TEST_CASE("R54: a NULL in the referenced column of a parent is referred to by nothing", "[r54][fk]") {
+    TempDataDir dir("r54_fk_null");
+    Executor ex(dir.path);
+    ok(ex, "CREATE DATABASE d");
+    ok(ex, "USE d");
+    ok(ex, "CREATE TABLE par (id INT PRIMARY KEY, code VARCHAR(5) UNIQUE)");
+    ok(ex, "CREATE TABLE chi (id INT PRIMARY KEY, pcode VARCHAR(5), FOREIGN KEY (pcode) REFERENCES par(code))");
+    ok(ex, "INSERT INTO par VALUES (1, NULL), (2, 'a'), (3, NULL)");
+    ok(ex, "INSERT INTO chi VALUES (1, NULL), (2, 'a')");
+    ok(ex, "DELETE FROM par WHERE id = 1"); // (the child with a NULL refers to no parent; MySQL deletes the row too)
+    REQUIRE(fails(ex, "DELETE FROM par WHERE id = 2").find("Foreign key violation") != std::string::npos);
+    ok(ex, "UPDATE par SET code = 'z' WHERE id = 3"); // (the value that changes is a NULL)
+    REQUIRE(q(ex, "SELECT id FROM par ORDER BY id") == Rows{{"2"}, {"3"}});
+}
+
+TEST_CASE("R54: parents are deleted while children are written", "[r54][fk][concurrency]") {
+    ProbeCheck check;
+    TempDataDir dir("r54_fk_threads");
+    Executor ex(dir.path);
+    ok(ex, "CREATE DATABASE d");
+    ok(ex, "USE d");
+    ok(ex, "CREATE TABLE p (id INT PRIMARY KEY)");
+    ok(ex, "CREATE TABLE c (id INT PRIMARY KEY, pid INT, FOREIGN KEY (pid) REFERENCES p(id))");
+    const auto ids = [](int i) { return std::to_string(i); };
+    for (int from = 1; from <= 2000; from += 500) ok(ex, multi_insert("p", from, from + 499, ids));
+    ok(ex, multi_insert("c", 1, 1500, [](int i) { return std::to_string(i) + "," + std::to_string(i); })); // (parents 1..1500 have a child each)
+    auto shared = ex.get_shared();
+    std::atomic<bool> failed{false};
+    std::atomic<int> deleted{0};
+    std::thread deleter([&] {
+        Executor s = Executor::new_session(shared);
+        if (!s.execute_sql("USE d").is_ok()) { failed = true; return; }
+        for (int id = 2000; id > 1500; id--) {
+            auto r = s.execute_sql("DELETE FROM p WHERE id = " + std::to_string(id));
+            if (r.is_ok()) deleted++;
+            else if (r.error().find("Foreign key violation") == std::string::npos) failed = true; // (a parent a child has just taken is refused: that is right)
+        }
+    });
+    std::thread writer([&] {
+        Executor s = Executor::new_session(shared);
+        if (!s.execute_sql("USE d").is_ok()) { failed = true; return; }
+        int next = 10000;
+        for (int id = 1501; id <= 2000; id += 3) {
+            auto r = s.execute_sql("INSERT INTO c VALUES (" + std::to_string(next++) + ", " + std::to_string(id) + ")");
+            if (r.is_err() && r.error().find("Foreign key violation") == std::string::npos) failed = true; // (the parent may be gone already)
+            if (id % 9 == 0) s.execute_sql("DELETE FROM c WHERE id = " + std::to_string(next - 1));
+        }
+    });
+    deleter.join();
+    writer.join();
+    REQUIRE_FALSE(failed);
+    REQUIRE(deleted > 0);
+    // no child is left without its parent
+    REQUIRE(q(ex, "SELECT COUNT(*) FROM c LEFT JOIN p ON p.id = c.pid WHERE p.id IS NULL") == Rows{{"0"}});
 }

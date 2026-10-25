@@ -230,6 +230,7 @@ Token Lexer::read_string() {
                 case '0':  advance(); s.push_back('\0'); break;
                 case 'b':  advance(); s.push_back('\b'); break;
                 case 'Z':  advance(); s.push_back('\x1a'); break;
+                case '%': case '_': advance(); s.push_back('\\'); s.push_back(*esc); break; // (MySQL keeps both characters: LIKE reads `\%` and `\_` as the literal ones)
                 default:   advance(); s.push_back(*esc); break;
             }
         } else {

@@ -207,10 +207,15 @@ bool like_ascii(std::string_view v, std::string_view p) {
     constexpr std::size_t none = static_cast<std::size_t>(-1);
     std::size_t vi = 0, pi = 0, star = none, mark = 0;
     while (vi < v.size()) {
+        // `\x` in a pattern is the character x itself (`\%`, `\_`, `\\`); a backslash that ends the pattern is a backslash
+        const bool escaped = pi + 1 < p.size() && p[pi] == '\\';
         if (pi < p.size() && p[pi] == '%') {
             star = pi++;
             mark = vi;
-        } else if (pi < p.size() && (p[pi] == '_' || same(static_cast<unsigned char>(p[pi]), static_cast<unsigned char>(v[vi])))) {
+        } else if (escaped && same(static_cast<unsigned char>(p[pi + 1]), static_cast<unsigned char>(v[vi]))) {
+            pi += 2;
+            vi++;
+        } else if (!escaped && pi < p.size() && (p[pi] == '_' || same(static_cast<unsigned char>(p[pi]), static_cast<unsigned char>(v[vi])))) {
             pi++;
             vi++;
         } else if (star != none) {
@@ -300,10 +305,14 @@ bool like(std::string_view value, std::string_view pattern) {
     constexpr std::size_t none = static_cast<std::size_t>(-1);
     std::size_t vi = 0, pi = 0, star = none, mark = 0;
     while (vi < v.size()) {
+        const bool escaped = pi + 1 < p.size() && p[pi] == '\\'; // (see like_ascii)
         if (pi < p.size() && p[pi] == '%') {
             star = pi++;
             mark = vi;
-        } else if (pi < p.size() && (p[pi] == '_' || same_weights(p[pi], v[vi]))) {
+        } else if (escaped && same_weights(p[pi + 1], v[vi])) {
+            pi += 2;
+            vi++;
+        } else if (!escaped && pi < p.size() && (p[pi] == '_' || same_weights(p[pi], v[vi]))) {
             pi++;
             vi++;
         } else if (star != none) {

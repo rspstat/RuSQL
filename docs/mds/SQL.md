@@ -153,7 +153,7 @@ RuSQL이 실제로 받아서 실행하는 SQL 문법을 한 줄씩 정리한 문
 - 조건 연산 : `AND` `OR` `NOT` `XOR` `=` `<>` `!=` `<` `<=` `>` `>=` `<=>` — 비교 · 논리 연결
 - [NOT] IN (값, ... | 서브쿼리) : 목록 · 서브쿼리에 포함 여부
 - [NOT] BETWEEN a AND b : 범위 안 여부
-- [NOT] LIKE 'pattern' : 문자열 패턴(`%` `_`) 일치 여부
+- [NOT] LIKE 'pattern' [ESCAPE 'c'] : 문자열 패턴(`%` `_`) 일치 여부(`\%` · `\_`는 그 글자 자체, ESCAPE로 다른 이스케이프 문자를 지정, 패턴은 열 · 식에서 읽어도 됨)
 - [NOT] REGEXP / RLIKE 'pattern' : 정규식 일치 여부
 - IS [NOT] NULL / IS [NOT] TRUE / IS [NOT] FALSE / IS [NOT] UNKNOWN : NULL · 참 · 거짓 · 알 수 없음 검사
 - [NOT] EXISTS (서브쿼리) : 서브쿼리 결과 존재 여부
@@ -222,7 +222,7 @@ RuSQL이 실제로 받아서 실행하는 SQL 문법을 한 줄씩 정리한 문
 - SUBSTRING(문자열 FROM n [FOR m]) : 문자열 일부(쉼표 형식도 가능)
 - POSITION(부분 IN 문자열) : 위치 찾기
 - 식 -> '$.경로' / 식 ->> '$.경로' : JSON 값 꺼내기 / 따옴표 없는 문자열로 꺼내기
-- 'text' / "text" : 문자열 리터럴(`''` 따옴표 두 번, `\n` `\t` `\\` `\'` 이스케이프; 큰따옴표는 컬럼 이름으로 읽음)
+- 'text' / "text" : 문자열 리터럴(`''` 따옴표 두 번, `\n` `\t` `\\` `\'` 이스케이프, `\%` · `\_`는 두 글자 그대로 남아 LIKE가 읽음; 큰따옴표는 컬럼 이름으로 읽음)
 - 123 / 1.5 / 1e3 / 0x41 : 숫자 · 지수 · 16진수 리터럴
 - TRUE / FALSE / NULL : 참 · 거짓 · 값 없음
 - @변수 / @@서버변수 / @@global.변수 / @@session.변수 : 사용자 변수 · 서버 변수 읽기
@@ -520,7 +520,7 @@ mysql 클라이언트 · 드라이버 · 도구가 보내는 문장을 받아주
 - **뷰** : `CREATE VIEW v (컬럼 목록) AS ...`, `WITH CHECK OPTION`
 - **데이터 쓰기** : `INSERT ... VALUES ()`(빈 값), `INSERT ... DEFAULT VALUES`, `INSERT ... AS 별칭`, `INSERT/UPDATE/DELETE LOW_PRIORITY · QUICK`, `UPDATE IGNORE`, `UPDATE ... JOIN (파생 테이블)`, `DELETE FROM ... USING`, `LOAD DATA`, `SELECT ... INTO OUTFILE`
 - **조회** : `GROUP BY ... WITH ROLLUP`, `TABLE t`, `VALUES ROW(...)`, `USE | FORCE | IGNORE INDEX` 힌트, `PARTITION (p)` 선택, `STRAIGHT_JOIN`, `SELECT ALL | HIGH_PRIORITY`, `FROM DUAL`, `NULLS FIRST | LAST`, `OFFSET n ROWS`, `FOR UPDATE OF 테이블`, 괄호로 감싼 `(SELECT ..) UNION (SELECT ..) ORDER BY`, `NATURAL LEFT JOIN`, `IN (SELECT ... UNION SELECT ...)`, `INSERT ... SELECT ... ON DUPLICATE KEY UPDATE`
-- **식 · 리터럴** : `LIKE ... ESCAPE`, `IS [NOT] DISTINCT FROM`, `BETWEEN SYMMETRIC`, 문자열 안의 `\%` · `\_`(역슬래시가 사라져 와일드카드로 읽힘), `.5`, `b'101'`, `DATE '2024-01-01'`, `_utf8mb4'x'`, `COLLATE` 연산자, `BINARY` 연산자, `MATCH ... AGAINST`, `SOUNDS LIKE`, `SELECT @a := 식`, `CONVERT(식 USING 문자집합)`, `DEFAULT(col)`, `GROUPING()`
+- **식 · 리터럴** : `IS [NOT] DISTINCT FROM`, `BETWEEN SYMMETRIC`, `.5`, `b'101'`, `DATE '2024-01-01'`, `_utf8mb4'x'`, `COLLATE` 연산자, `BINARY` 연산자, `MATCH ... AGAINST`, `SOUNDS LIKE`, `SELECT @a := 식`, `CONVERT(식 USING 문자집합)`, `DEFAULT(col)`, `GROUPING()`
 - **함수** : `PERCENTILE_CONT ... WITHIN GROUP`, `BIT_XOR`, `CONNECTION_ID`, `GET_LOCK`, `INET_ATON`, `BENCHMARK`, `JSON_MERGE_PATCH` 등 위 9장에 없는 함수
 - **프로시저** : `SIGNAL`, `DECLARE ... HANDLER`, 커서(`DECLARE CURSOR`), 본문의 `CASE ... END CASE`, 반복문 끝의 라벨(`END WHILE lp`), `CREATE PROCEDURE IF NOT EXISTS`, `CREATE OR REPLACE PROCEDURE`, `CREATE TRIGGER IF NOT EXISTS`, 여러 문장 함수 본문(`BEGIN ... RETURN ... END`)
 - **권한 · 사용자** : `ALTER USER`, 컬럼 단위 `GRANT SELECT (col)`, 역할을 `GRANT 역할 TO 사용자` 형식으로 부여

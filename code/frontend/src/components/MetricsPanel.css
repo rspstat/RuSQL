@@ -1,0 +1,20 @@
+/* The Metrics panel of the Server Manager (MetricsPanel.tsx) */
+.mt-panel { display: flex; flex-direction: column; gap: 10px; }
+.mt-tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 6px; }
+.mt-tiles > div { background: #2d2d2d; border: 1px solid #3a3d41; border-radius: 5px; padding: 5px 8px; display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.mt-tiles span { font-size: 10px; color: #858585; text-transform: uppercase; letter-spacing: 0.4px; white-space: nowrap; }
+.mt-tiles b { font-size: 14px; color: #d4d4d4; font-weight: 600; white-space: nowrap; }
+
+.mt-chart { background: #2d2d2d; border: 1px solid #3a3d41; border-radius: 5px; padding: 6px 8px 4px; }
+.mt-chart-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
+.mt-chart-title { font-size: 11px; font-weight: 700; color: #4ec9b0; letter-spacing: 0.4px; text-transform: uppercase; }
+.mt-chart-values { display: flex; gap: 10px; flex-wrap: wrap; font-size: 11px; color: #858585; }
+.mt-value { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
+.mt-value i { display: inline-block; width: 8px; height: 3px; border-radius: 2px; }
+.mt-value b { color: #d4d4d4; font-weight: 600; }
+.mt-svg { width: 100%; height: auto; display: block; margin-top: 2px; }
+.mt-grid { stroke: #3c3c3c; stroke-width: 1; stroke-dasharray: 2 3; }
+.mt-axis { fill: #6e6e6e; font-size: 8px; font-family: inherit; }
+.mt-note { font-size: 10px; color: #858585; margin-top: 2px; line-height: 1.35; }
+.mt-bar { height: 10px; background: #1e1e1e; border-radius: 3px; overflow: hidden; margin: 6px 0 2px; }
+.mt-bar > div { height: 100%; background: #569cd6; border-radius: 3px; transition: width 0.3s; }

@@ -37,6 +37,9 @@ struct UniqueProbe {
     bool seen = false;
     std::uint64_t seen_locks_id = 0, seen_data_id = 0, seen_sum = 0, seen_insert_tails = 0;
     unsigned streak = 0;
+
+    // the parent side of a foreign key (Executor::fk_children_absent): DELETE / UPDATE statements of a parent table that found no current cache here; the cache is made on the second
+    unsigned child_streak = 0;
 };
 
 struct UniqueProbes {

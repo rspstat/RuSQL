@@ -156,7 +156,9 @@ Comparison with a real MySQL (needs pymysql and a MySQL 8.4 on 127.0.0.1:3391; u
       target_table (R50: error 1093 for an UPDATE / DELETE / INSERT whose subquery reads the table it writes),
       having_alias (R52: HAVING names the alias of a select-list expression, aggregate or column, also one that is the name of a column of the table),
       self_join_write (R52: UPDATE / DELETE that join a table with itself, the comma form, and the SET value that names another table by its alias),
-      subquery_item_order (R52: ORDER BY the alias or position of a scalar subquery of the select list, DISTINCT over one).
+      subquery_item_order (R52: ORDER BY the alias or position of a scalar subquery of the select list, DISTINCT over one),
+      like_escape (R54: the backslash in a pattern and in a string, LIKE ... ESCAPE 'c' on a string, a column and an expression, the prefix path of an index, SHOW TABLES LIKE; 41 statements),
+      fk_parent (R54: DELETE / UPDATE of a parent row whose child table is large enough for the cache of foreign key values, RESTRICT / CASCADE / SET NULL, a NULL parent key; the setup builds its rows from a table of ten digits; 47 statements).
   python make_scoreboard.py <engine_server.exe> [--tests CASES ASSERTIONS]
       runs every corpus (the protocol ones with --proto) and writes the numbers the app's Compat page shows to code/frontend/src/lib/compatSnapshot.json.
       The cells of RuSQL's answer are read the way the engine itself reads a result table (\\ \n \| and \s \t for a space or tab at either end of a value,

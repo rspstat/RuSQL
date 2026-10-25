@@ -5,6 +5,7 @@
 #include <cstdlib>
 #include <iterator>
 
+#include "engine/like_escape.hpp"
 #include "engine/parser/parser.hpp"
 
 namespace engine {
@@ -634,17 +635,46 @@ Condition Parser::parse_pred_tail(ArithExpr left) {
         return condition_value_of(parse_arith_expr());
     };
 
+    // LIKE pattern [ESCAPE 'c']: the matcher knows one escape character, the backslash (engine/like_escape.hpp): a pattern written as a string is rewritten here, once; a pattern
+    // that comes from a column or an expression is rewritten for every row by the function __LIKE_ESCAPE
+    auto read_like_pattern = [this, &read_pattern](const char* what) -> ConditionValue {
+        ConditionValue value = read_pattern(what);
+        const Token* e = peek();
+        if (!e || e->kind != TokenKind::Ident) return value;
+        std::string word = e->text;
+        for (char& ch : word) ch = static_cast<char>(std::toupper(static_cast<unsigned char>(ch)));
+        if (word != "ESCAPE") return value;
+        advance();
+        const Token* c = advance();
+        if (!c || c->kind != TokenKind::StringLit) throw ParseError("Expected a string after ESCAPE");
+        const std::string& escape = c->text;
+        if (!escape.empty() && like_utf8_length(escape, 0) != escape.size()) throw ParseError("ERROR 1210 (HY000): Incorrect arguments to ESCAPE");
+        if (auto* literal = std::get_if<ConditionValue::Literal>(&value.data); literal && literal->quoted) {
+            return ConditionValue(ConditionValue::Literal{like_pattern_with_escape(literal->value, escape), true});
+        }
+        ArithExpr pattern = [&]() -> ArithExpr {
+            if (auto* arith = std::get_if<ConditionValue::Arith>(&value.data)) return std::move(arith->expr);
+            const std::string& text = std::get<ConditionValue::Literal>(value.data).value; // (a column, or a number written out)
+            const bool number = !text.empty() && (std::isdigit(static_cast<unsigned char>(text[0])) || text[0] == '-' || text[0] == '.');
+            return number ? ArithExpr(ArithExpr::Num{text}) : ArithExpr(ArithExpr::Col{text});
+        }();
+        std::vector<ArithExpr> args;
+        args.push_back(std::move(pattern));
+        args.push_back(ArithExpr(ArithExpr::Str{escape}));
+        return ConditionValue(ConditionValue::Arith{ArithExpr(ArithExpr::Func{"__LIKE_ESCAPE", std::move(args)})});
+    };
+
     // NOT LIKE pattern
     if (peek_is(TokenKind::Not) && peek_at_is(1, TokenKind::Like)) {
         advance(); // NOT
         advance(); // LIKE
-        return Condition{std::move(left), Operator::NotLike, read_pattern("NOT LIKE")};
+        return Condition{std::move(left), Operator::NotLike, read_like_pattern("NOT LIKE")};
     }
 
     // LIKE pattern
     if (peek_is(TokenKind::Like)) {
         advance();
-        return Condition{std::move(left), Operator::Like, read_pattern("LIKE")};
+        return Condition{std::move(left), Operator::Like, read_like_pattern("LIKE")};
     }
 
     // NOT REGEXP / NOT RLIKE pattern

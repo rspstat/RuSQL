@@ -2342,6 +2342,34 @@ VS Code 스타일 탭 드래그 순서 변경(요청의 1번 항목)은 같은 �
 - `Innodb_buffer_pool_read_requests`·`reads`는 SQL을 아무리 돌려도 0이다: 읽기는 메모리의 표에서 하고 버퍼 풀은 쓰기(write-through)와 CTE만 지난다. 카운터가 거짓이라기보다 구조의 정직한 표시다.
 - `DELIMITER`는 이 엔진이 모르고(앱은 `;`로 나눔) `DESC`·`SHOW COLUMNS` 같은 몇몇 문장은 MySQL 프로토콜에서만 된다(`SQL.md` 14장).
 
+### 10월 26일 — R54: LIKE 이스케이프, `USE`가 redo 로그를 비우지 않게, 부모 행 DELETE의 자식 검사, 서버 지표 패널(Metrics), MCP 도구 다섯 개
+
+**왜 이 항목인가**: R53 끝에 드린 추천표에서 사용자가 "LIKE의 `\%`·ESCAPE, 서버 지표 패널(추세 그래프), health_report, list_locks, get_table_stats, FK 관계 그래프, trace_query, USE가 redo 로그를 비움, 부모 행 DELETE의 자식 검사 O(자식 수)"를 골라 "같은 진행 방식으로" 하라고 했다(코드 먼저 → 항목마다 시험 → 문서 → 커밋·푸시). 성능 동결 중이라 "먼저 여쭙겠다"고 적어 둔 두 항목(`USE`, 부모 DELETE)도 이 선택으로 승인된 것이다.
+
+**고친 것·만든 것 (엔진)**
+- **`LIKE`의 이스케이프** (조용한 오답 + 없던 문법): 문자열 안의 `\%`·`\_`가 역슬래시를 잃어 와일드카드가 되었다(`'axb' LIKE 'a\_b'`가 1, MySQL은 0). 렉서가 두 글자를 그대로 남기고, 일치 검사(`collation::like`의 ASCII 길과 일반 길)가 `\x`를 글자 x 자체로, 끝의 역슬래시를 역슬래시로 읽는다. `LIKE … ESCAPE 'c'`가 새로 된다: 문자열 패턴은 파서가 한 번 다시 쓰고(`c`+x → `\x`, 이스케이프 아닌 역슬래시 → `\\`, 끝의 `c`는 자기 자신, `ESCAPE ''`는 이스케이프 없음), 열·식에서 읽은 패턴은 숨은 함수 `__LIKE_ESCAPE`가 행마다 같은 변환을 한다(`like_escape.hpp` 한 곳). 여러 글자 ESCAPE는 오류 1210. 접두 인덱스 길은 역슬래시가 든 접두를 인덱스에서 찾지 않는다. `SHOW … LIKE`(`SHOW TABLES`·`SHOW STATUS`, MySQL 프로토콜의 `SHOW VARIABLES`·`SHOW COLLATION` …)도 같은 일치 검사를 쓴다(서버에 따로 있던 ASCII 일치 함수를 없앰). 진짜 MySQL의 답으로 모든 기대값을 먼저 확인했다.
+- **`USE`와 세션 변수만 바꾸는 `SET`이 redo 로그를 비우지 않음**: 이 문장들은 읽기 전용으로 분류되지 않아 구조 쓰기 락(실행 중인 모든 문장을 기다림)을 잡고, 쌓인 redo 로그를 체크포인트(테이블 파일 재작성)한 뒤 실행했다. R53에서 `INSERT` 뒤 `Innodb_redo_log_bytes` 84 → `USE` 뒤 0으로 드러났다. 앱과 MCP(`execute_sql(database=…)`)는 문장마다 `USE`를 먼저 보낸다. `USE`·`SET @x = …`(하위 질의 없는)·`SET autocommit`·`SET NAMES`·`SET … ISOLATION LEVEL`은 `BEGIN`·`SAVEPOINT`처럼 구조 읽기 락만 잡는다(하위 질의가 든 `SET`은 표를 읽으니 예전 길 그대로).
+- **부모 행 DELETE·UPDATE가 자식 표를 훑지 않음**: 지우는 부모 값을 가진 자식 행을 찾으려고 자식 표 전체를 읽었다(참조되지 않은 부모여도, 자식 FK 열에 인덱스가 있어도 — 보조 인덱스는 한 값에 한 행만 담아 "없다"를 증명하지 못하므로). R20~22의 UNIQUE 값 캐시(`UniqueProbes`: 잠금 도장이 맞을 때만 쓰고, 쓰는 쪽이 아는 만큼만 갱신)가 이제 외래키 열의 값도 센다(`specs_of`에 FK 열). 새 `fk_children_absent`가 부모 DELETE·UPDATE의 RESTRICT 검사와 CASCADE/SET NULL의 자식 찾기에서 "이 값을 가진 살아 있는 자식이 없다"를 O(1)로 답한다. 캐시는 둘째 부모 문장이 만들고(행 1,024개 미만의 표는 훑는 쪽이 싸서 만들지 않음), 자식에 INSERT·UPDATE·DELETE·CASCADE가 일어나면 따라가고, ROLLBACK·DDL·VACUUM은 도장이 어긋나 다시 만든다. 부모 문장이 어떻게 끝나든(오류·재시도 포함) 자식 캐시를 현재로 되돌리는 RAII 보호자가 `try_cascade_once` 안에 있다. 정확성은 시험 전체를 `RUSQL_PROBE_CHECK=1 RUSQL_PROBE_STREAK=0`(캐시를 쓸 때마다 행을 다시 세어 비교, 다르면 예외)로도 돌려 확인.
+- **NULL인 부모 키는 아무도 참조하지 않음** (조용한 오답, 위를 고치다 발견): UNIQUE 열은 NULL을 여럿 가질 수 있는데, 그 열을 가리키는 FK의 자식에 NULL이 있으면 부모의 NULL 행을 지울 때 "Foreign key violation"이 났다(NULL끼리 같다고 본 것; MySQL은 지움). RESTRICT 검사 네 곳과 자식 찾기가 NULL을 참조 없음으로 본다.
+
+**앱·MCP**
+- **Server Manager의 Metrics 패널**: 오른쪽 막대의 새 버튼. `SHOW GLOBAL STATUS`(새 Tauri 명령 `get_status_counters`)를 1초마다 읽어 최근 2분의 추세를 SVG 선 그래프로 그린다: 초당 문장 수(전체·읽기·쓰기; 패널 자신의 읽기 1건은 뺌), 세션(연결·실행 중), 행 락(지금 기다림·초당 대기·교착), redo 로그 크기(체크포인트에서 0으로 떨어지는 톱니), 버퍼 풀(페이지 사용·적중률). 읽은 값은 앱이 도는 동안 남아 패널을 닫았다 열어도 이어지고, 엔진이 다시 시작되면(Uptime이 줄어듦) 새로 시작하며, 5초 넘게 읽지 못한 구간은 선을 이어 그리지 않는다.
+- **MCP 도구 다섯 개(27 → 32개)**: `list_locks`(열린 트랜잭션·잠근 행·기다리는 쌍·뿌리 차단자·교착, `KILL` 안내), `health_report`(연결·문장·버퍼 풀·redo·락·세션·마지막 시작의 복구·DB별 크기와 `findings`, 전체 상태 `ok`/`attention`), `get_table_stats`(행 수, 열별 distinct·NULL·선택도·min·max·사분위·덮는 인덱스; 엔진이 12자로 자르는 열 이름 처리), `get_fk_graph`(외래키 변과 ON DELETE/UPDATE 규칙, 바로 쓸 `JOIN` 조건, 두 표 사이의 가장 짧은 사슬과 `FROM … JOIN … ON …`), `trace_query`(`TRACE`의 단계표를 JSON으로; 쓰기 문장은 `BEGIN … ROLLBACK` 안에서, DDL은 거절). 읽기 전용 넷은 Claude Desktop 자동 설정의 `alwaysAllow`에 더함.
+- 문서: `SQL.md`(LIKE ESCAPE 줄, 문자열의 `\%`), README, `FUNCTIONS.md`, `DIFF.md`, `SUMMARY.md`, `DEMO.md`(락 대기 장면의 Metrics 그래프, MCP 질문), Diagram 문구(도구 32개, Metrics), `RECOMMAND.md`.
+
+**검증**
+- 새 C++ 시험 `[r54]` 5 케이스(LIKE 이스케이프 — MySQL 8.4.9로 먼저 확인한 기대값, ASCII·비ASCII 길, 접두 인덱스 길, UPDATE·DELETE, 열 패턴·ESCAPE; `USE`·`SET`이 redo를 지키고 크래시 뒤에도 복구; 큰 자식 표에서 부모 DELETE·UPDATE의 모든 경로(RESTRICT·CASCADE·SET NULL, INSERT·UPDATE·DELETE·ROLLBACK·DDL 뒤, 캐시 건수·만든 횟수 단언 포함); NULL 부모 키; 부모 삭제와 자식 쓰기의 스레드 시험). **심은 버그 18종 중 17종이 잡힘**: 일치 검사의 이스케이프 무시(ASCII·일반 길), 렉서가 `\%` 역슬래시를 지움, ESCAPE 다시 쓰기 제거·끝의 이스케이프 문자가 사라짐·역슬래시를 두 번 쓰지 않음, 플래너가 역슬래시 접두를 인덱스에서 찾음, `USE`·`SET`이 다시 배타 길, 캐시가 절대 없다고 안 함·모두 없다고 함, NULL 먼저 처리 제거, FK 열을 세지 않음, DELETE·UPDATE가 캐시를 현재로 돌려놓지 않음, 캐시가 자식 찾기를 건너뜀, 트랜잭션이 끝낸 행을 살아 있다고 셈. **처음에 3종이 살아남아** 시험을 보강했다(비ASCII 이스케이프, UPDATE 뒤 캐시 재작성 횟수, CASCADE의 자식 찾기 건너뜀). 마지막 하나(하위 질의가 든 `SET`이 가벼운 길로 감)는 혼자 도는 시험으로는 보이지 않는다 — 다른 세션의 쓰기와 겹칠 때만 의미 있는 안전장치다. MCP: 가짜 엔진 단위 시험 20개, 심은 버그 10종 모두 잡힘.
+- 새 코퍼스 `like_escape`(41문장)와 `fk_parent`(47문장, 1,000행 넘는 자식 표)를 진짜 MySQL 8.4.9와 비교해 **차이 0**(두 프로토콜 모두; R53 빌드는 각각 32문장·5문장이 달랐다). `--emit`으로 `mysql_conformance_like_escape.inc`·`mysql_conformance_fk_parent.inc`를 만들어 C++ 시험에 넣고 점수판에 더함.
+- 실서버에서 A/B(R53 빌드 대 새 빌드, 같은 작업): 20,000행 자식 표에서 **참조되지 않은 부모 한 행 DELETE 중앙값 4.5~5.5 ms → 0.82~0.88 ms**(문장 하나의 바닥 비용), 자식 INSERT 사이사이에서도 같고, **`USE` + `INSERT` 한 쌍 4.9~5.6 ms → 0.84~0.91 ms**(6배). MySQL 프로토콜의 `SHOW VARIABLES LIKE 'sql\_mode'`·`SHOW STATUS LIKE 'Com\_sel%'`·`SELECT 'a%b' LIKE 'a!%b' ESCAPE '!'`도 확인.
+- 무작위 대조 12종 위반 0. 크래시 퍼저 3종(`fuzz_crash` 15라운드, `fuzz_crash_fk` 15라운드 — FK 캐시와 자식 표 복구, `fuzz_concurrent` 8라운드) 불일치 0. 전체 시험 **806 케이스 / 1,507,268 assertions**(Release 기본), 1,507,269(`RUSQL_DML_INDEX_MIN_ROWS=0`), 1,507,268(`RUSQL_PROBE_CHECK=1 RUSQL_PROBE_STREAK=0`: 캐시를 쓸 때마다 행을 다시 세어 비교)을 모두 통과. 호환성 점수판: 코퍼스 30개, 문장 2,847개 중 차이 8개(앞과 같은 8개이고 새 코퍼스 둘은 0).
+- 앱(`npm run tauri dev` + WebView2 디버그 포트, 페이지 안에서 DOM으로 조작 — 마우스·키보드는 쓰지 않음; 임시 연결과 임시 데이터 폴더를 쓰고 `connections.json`·`app_instances.json`·`ui_state.json`·`ui_commands.json`을 끝나고 원래대로 되돌려 바이트 단위로 확인): Metrics 패널을 엔진에 일부러 만든 부하(삽입 반복·4초짜리 락 대기·삭제)로 보니 추세 선이 모양대로 그려지고(락 대기 때 빨간 선이 1로 솟았다 내려오고 redo가 KB 단위로 늘어남) 타일 이름이 잘려서 2열로 넘기게 고쳤다(Vite 핫 리로드로 바로 확인). `EXPLAIN ANALYZE`의 단계 막대에서는 "2. Join r54app.lk (inner, hash join)"처럼 이름이 다 보이고 막대가 줄 맞춰 있다(R53의 격자 CSS 확인, 가장 느린 단계가 노란색).
+- **하지 않은 것**: Debug 빌드, 앱의 다른 화면 점검, `SET`에 하위 질의가 든 경우의 동시 실행 시험.
+
+**조사하다 알게 된 것 (고치지 않음)**
+- **자기 자신을 가리키는 외래키(`emp.mgr → emp.id`)의 부모 쪽은 검사되지 않는다**: `DELETE FROM emp WHERE id = 1`이 `id = 2`가 가리키는 행을 오류 없이 지운다(MySQL은 1451). `ON DELETE CASCADE`·`SET NULL`도 적용되지 않아 매달린 행이 남는다. 부모 문장이 "다른 표"만 자식으로 세기 때문(`other_tables`가 자기 표를 뺌). 이전부터 있던 무결성 구멍(R53 빌드도 같음). `RECOMMAND.md` 맨 위 항목.
+- **읽기만 하는 다른 문장도 redo 로그를 비운다**: `WITH`(CTE) SELECT(임시 표를 `s.tables`에 만드는 쓰기 길), `PREPARE`·`EXECUTE`·`DEALLOCATE`, `LOCK`·`UNLOCK TABLES`, `ANALYZE TABLE`, 하위 질의가 든 `SET`, `CALL`. 문장마다 `USE`를 보내던 것만큼 흔하지는 않아 이번에는 `USE`·`SET`만 했다.
+- `DELETE t1 FROM t1 JOIN …`·`MERGE`의 부모 검사와 참조되는 부모의 CASCADE가 자식을 **찾는** 일은 아직 자식 표를 훑는다(참조되지 않은 부모만 O(1)).
+
 ## 요약: 1학기 대비 2학기에 달라진 것
 
 

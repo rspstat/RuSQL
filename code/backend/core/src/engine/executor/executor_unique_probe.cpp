@@ -1,5 +1,6 @@
 // The cache of UNIQUE values (engine/unique_probe.hpp): lets a one-row INSERT skip the scan that looks for a row already holding its UNIQUE value or composite key.
 
+#include <algorithm>
 #include <cstdlib>
 #include <stdexcept>
 
@@ -18,7 +19,8 @@ namespace {
 using ValueOf = std::function<const std::string*(const std::string&)>;
 const std::vector<Row> kNoRows;
 
-// The keys a table is probed by: every UNIQUE column that is not the primary key (that has its tree), a composite primary key, every UNIQUE (a, b).
+// The keys a table is probed by: every UNIQUE column that is not the primary key (that has its tree), a composite primary key, every UNIQUE (a, b), and -- for the parent
+// side of a foreign key (fk_children_absent) -- every column that refers to another table (a value that may repeat: the cache counts the rows).
 std::vector<UniqueProbeKeySpec> specs_of(const TableSchema& schema) {
     std::vector<UniqueProbeKeySpec> specs;
     for (auto& col : schema.columns) {
@@ -26,6 +28,11 @@ std::vector<UniqueProbeKeySpec> specs_of(const TableSchema& schema) {
     }
     if (schema.primary_key_columns.size() > 1) specs.push_back({schema.primary_key_columns, true, false});
     for (auto& key : schema.unique_keys) specs.push_back({key.columns, true, true});
+    for (auto& col : schema.columns) {
+        if (!col.foreign_key) continue;
+        const bool listed = std::any_of(specs.begin(), specs.end(), [&](const UniqueProbeKeySpec& s) { return !s.tuple && s.skip_null && s.columns.size() == 1 && s.columns[0] == col.name; });
+        if (!listed) specs.push_back({{col.name}, false, true});
+    }
     return specs;
 }
 
@@ -172,6 +179,50 @@ bool Executor::unique_probe_proves_absent(SharedDatabase& s, const std::string& 
     }
     auto key = key_of(p->specs[which], value_of);
     const bool absent = !key || p->counts[which].find(*key) == p->counts[which].end(); // (a NULL in the key: nothing can repeat it)
+    if (absent) all.skipped++;
+    return absent;
+}
+
+// The parent side of a foreign key: a DELETE / UPDATE of a parent row asks (holding the child's data lock exclusively, the statement's own section) whether any live row of the
+// child table holds the value. A child table is scanned once for each parent row otherwise: O(rows of the child) even for a parent that nothing refers to, and an index on the
+// column cannot rule a value out. The cache is the one of the UNIQUE values (stamped by the locks, kept by the writers that know what they change), made on the second parent
+// statement that finds none current, and only for a table large enough for a scan to cost something.
+bool Executor::fk_children_absent(SharedDatabase& s, const std::string& child_table, const std::string& column, const std::string& value) {
+    if (value == EXECUTOR_NULL_VALUE) return true; // (a NULL refers to nothing)
+    UniqueProbes& all = *s.unique_probes;
+    if (!all.enabled) return false;
+    const TableSchema* schema = s.catalog.get_table(child_table);
+    const auto rows_it = s.tables.find(child_table);
+    if (!schema || rows_it == s.tables.end()) return false;
+    std::uint64_t locks_id = 0, data_id = 0, sum = 0;
+    if (!unique_probe_stamp(s, child_table, locks_id, data_id, sum)) return false;
+    std::lock_guard<std::mutex> guard(all.mutex);
+    UniqueProbe* p = probe_for(all, child_table, *schema);
+    if (!p) return false;
+    std::size_t which = p->specs.size();
+    for (std::size_t i = 0; i < p->specs.size(); i++) {
+        auto& spec = p->specs[i];
+        if (!spec.tuple && spec.skip_null && spec.columns.size() == 1 && spec.columns[0] == column) which = i;
+    }
+    if (which == p->specs.size()) return false;
+    // (this statement holds the child's data lock exclusive: it has been counted once)
+    const bool current = p->built && p->locks_id == locks_id && p->data_id == data_id && (p->sum == sum || p->sum + 1 == sum);
+    if (!current) {
+        constexpr std::size_t kMinRows = 1024; // (a scan of fewer rows costs less than counting them)
+        if (rows_it->second.size() < kMinRows || ++p->child_streak < 2) return false;
+        count_rows(*p, rows_it->second, p->counts, &Executor::is_visible);
+        p->built = true;
+        p->locks_id = locks_id;
+        p->data_id = data_id;
+        p->sum = sum;
+        p->child_streak = 0;
+        all.builds++;
+    } else if (all.check) {
+        check_against_rows(*p, &rows_it->second, child_table, &Executor::is_visible);
+    }
+    ValueOf of = [&](const std::string&) -> const std::string* { return &value; };
+    auto key = key_of(p->specs[which], of);
+    const bool absent = !key || p->counts[which].find(*key) == p->counts[which].end(); // (a NULL refers to nothing)
     if (absent) all.skipped++;
     return absent;
 }

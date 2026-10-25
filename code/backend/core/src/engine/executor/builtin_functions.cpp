@@ -1,5 +1,6 @@
 #include "engine/collation.hpp"
 #include "engine/executor/builtin_functions.hpp"
+#include "engine/like_escape.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -202,6 +203,14 @@ std::string fn_reverse(const BuiltinCall& c) {
     std::string out;
     for (auto it = chars.rbegin(); it != chars.rend(); ++it) out += *it;
     return out;
+}
+
+// the pattern of `LIKE p ESCAPE 'c'` where p is no string written in the statement (a column, an expression): the form the matcher reads, see engine/like_escape.hpp
+std::string fn_like_escape(const BuiltinCall& c) {
+    if (argc(c) != 2) wrong_count(c);
+    const std::string v = c.value(0);
+    if (is_null(v)) return kNull;
+    return like_pattern_with_escape(v, c.value(1));
 }
 
 std::string fn_repeat(const BuiltinCall& c) {
@@ -2405,7 +2414,7 @@ const std::unordered_map<std::string, Handler>& table() {
         {"LENGTH", fn_length}, {"OCTET_LENGTH", fn_length}, {"CHAR_LENGTH", fn_char_length}, {"CHARACTER_LENGTH", fn_char_length}, {"BIT_LENGTH", fn_bit_length},
         {"CONCAT", fn_concat}, {"CONCAT_WS", fn_concat_ws},
         {"SUBSTRING", fn_substring}, {"SUBSTR", fn_substring}, {"MID", fn_substring},
-        {"LEFT", fn_left}, {"RIGHT", fn_right}, {"REVERSE", fn_reverse}, {"REPEAT", fn_repeat}, {"SPACE", fn_space}, {"REPLACE", fn_replace},
+        {"__LIKE_ESCAPE", fn_like_escape}, {"LEFT", fn_left}, {"RIGHT", fn_right}, {"REVERSE", fn_reverse}, {"REPEAT", fn_repeat}, {"SPACE", fn_space}, {"REPLACE", fn_replace},
         {"TRIM", fn_trim}, {"TRIM_BOTH", fn_trim_both}, {"TRIM_LEADING", fn_trim_leading}, {"TRIM_TRAILING", fn_trim_trailing},
         {"LTRIM", fn_ltrim}, {"RTRIM", fn_rtrim}, {"LPAD", fn_lpad}, {"RPAD", fn_rpad},
         {"INSTR", fn_instr}, {"LOCATE", fn_locate},

@@ -740,6 +740,354 @@ def suggest_indexes(sql: str, database: str = "") -> str:
     return json.dumps(suggest_indexes_for(sql, database), ensure_ascii=False)
 
 
+# ─── Monitoring and structure tools (R54): list_locks, health_report, get_table_stats, get_fk_graph, trace_query ───────────────────────────────────────────
+# Thin readers over what the engine already answers (information_schema, SHOW GLOBAL STATUS, ANALYZE TABLE, TRACE): they gather the answers of several statements into one
+# JSON object, so that an AI client does not have to know which tables to ask or how to read a box-drawn table. None of them changes data (trace_query runs the statement
+# inside a transaction that it rolls back).
+def _rows(sql: str, database: str = "") -> list[dict]:
+    """The rows a SELECT / SHOW answers, as dicts (no row: an empty list). An error answer raises RuntimeError with the engine's words."""
+    raw = _run(sql, database).strip()
+    if raw.upper().startswith(("ERR", "ERROR")):
+        raise RuntimeError(" ".join(l.strip() for l in raw.splitlines() if l.strip() and l.strip().upper() != "ERR")[:300])
+    rows = _parse_table_output(raw)
+    if len(rows) == 1 and ("result" in rows[0] or "error" in rows[0]):
+        return []
+    return rows
+
+
+def _num(value, default=None):
+    """A number from a cell of text (the engine writes every value as text); `default` when it is not one."""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return default
+
+
+def _fail(e: Exception) -> str:
+    return json.dumps({"error": str(e)}, ensure_ascii=False)
+
+
+def list_locks_report() -> dict:
+    """Open transactions, the row locks they hold, who waits for whom and the recent deadlocks, in one object."""
+    trx = _rows("SELECT * FROM information_schema.innodb_trx")
+    locks = _rows("SELECT * FROM information_schema.innodb_locks")
+    waits = _rows("SELECT * FROM information_schema.innodb_lock_waits")
+    deadlocks = _rows("SELECT * FROM information_schema.innodb_deadlocks")
+    held: dict[str, list[dict]] = {}
+    for lock in locks:
+        held.setdefault(lock.get("LOCK_TRX_ID", ""), []).append({"table": lock.get("LOCK_TABLE"), "key": lock.get("LOCK_DATA"), "mode": lock.get("LOCK_MODE")})
+    waiting = {w.get("REQUESTING_TRX_ID") for w in waits}
+    chains = [{"waiting_trx": w.get("REQUESTING_TRX_ID"), "blocked_by_trx": w.get("BLOCKING_TRX_ID"), "blocker_holds": held.get(w.get("BLOCKING_TRX_ID", ""), [])} for w in waits]
+    # the transactions that block others and wait for nobody themselves: ending one of them frees the rest
+    root_blockers = sorted({w.get("BLOCKING_TRX_ID") for w in waits if w.get("BLOCKING_TRX_ID") not in waiting})
+    out = {
+        "summary": {"open_transactions": len(trx), "row_locks_held": len(locks), "waiting_transactions": len(waiting), "recent_deadlocks": len(deadlocks)},
+        "transactions": [{"trx_id": t.get("TRX_ID"), "state": t.get("TRX_STATE"), "rows_locked": _num(t.get("TRX_ROWS_LOCKED")),
+                          "waiting_for_trx": None if t.get("TRX_WAITING_FOR") in (None, "NULL", "") else t.get("TRX_WAITING_FOR"),
+                          "locks": held.get(t.get("TRX_ID", ""), [])} for t in trx],
+        "waits": chains,
+        "root_blockers": root_blockers,
+        "deadlocks": [{"requesting_trx": d.get("REQUESTING_TRX_ID"), "blocking_trx": d.get("BLOCKING_TRX_ID")} for d in deadlocks],
+    }
+    if root_blockers:
+        out["advice"] = (f"Transaction(s) {', '.join(root_blockers)} hold row locks that other transactions wait for. They end by COMMIT or ROLLBACK from their own session; "
+                         f"from here the session can be ended with KILL CONNECTION <id> (ids: SELECT * FROM information_schema.processlist; KILL rolls the transaction back). "
+                         f"KILL QUERY <id> only stops the waiting statement.")
+    elif trx and not waits:
+        out["advice"] = "Transactions are open but nobody is waiting for a lock."
+    elif not trx:
+        out["advice"] = "No transaction is open: no row is locked."
+    return out
+
+
+@mcp.tool()
+def list_locks() -> str:
+    """Show the row locks of the server: the open transactions (state, how many rows each has locked, what it waits for), every row lock held (table, key, mode), who waits
+    for whom, the transactions that block the others and wait for nobody (ending one of them frees the rest), and the recent deadlocks, as one JSON object with advice. Reads
+    SHOW LOCKS' source tables (information_schema.innodb_trx / innodb_locks / innodb_lock_waits / innodb_deadlocks); it changes nothing."""
+    try:
+        return json.dumps(list_locks_report(), ensure_ascii=False)
+    except (RuntimeError, OSError) as e:
+        return _fail(e)
+
+
+def health_report_data() -> dict:
+    """The state of the server in one object: counters (SHOW GLOBAL STATUS), sessions, open transactions and waits, the last start's recovery, and a list of findings."""
+    status = {r.get("Variable_name"): r.get("Value") for r in _rows("SHOW GLOBAL STATUS")}
+    n = lambda key: _num(status.get(key), 0)
+    uptime = n("Uptime")
+    sessions = _rows("SELECT * FROM information_schema.processlist")
+    locks = list_locks_report()
+    recovery = (_rows("SELECT * FROM information_schema.recovery") or [{}])[0]
+    try:
+        databases = [{"name": r.get("TABLE_SCHEMA"), "tables": _num(r.get("n"), 0), "rows": _num(r.get("r"), 0)}
+                     for r in _rows("SELECT TABLE_SCHEMA, COUNT(*) AS n, SUM(TABLE_ROWS) AS r FROM information_schema.tables GROUP BY TABLE_SCHEMA ORDER BY TABLE_SCHEMA")]
+    except RuntimeError:
+        databases = []
+    kinds = {k[4:].lower(): _num(v, 0) for k, v in status.items() if k.startswith("Com_") and _num(v, 0)}
+    requests, reads = n("Innodb_buffer_pool_read_requests"), n("Innodb_buffer_pool_reads")
+    running = [s for s in sessions if s.get("COMMAND") not in ("Sleep", None)]
+    long_running = [s for s in running if (_num(s.get("TIME"), 0) or 0) >= 5 and "processlist" not in (s.get("INFO") or "").lower()]
+    report = {
+        "server": {"uptime_seconds": uptime, "connections_total": n("Connections"), "connections_now": n("Threads_connected"), "connections_max": n("Max_used_connections"),
+                   "running_now": n("Threads_running"), "failed_logins": n("Aborted_connects")},
+        "statements": {"total": n("Questions"), "per_second": round(n("Questions") / uptime, 2) if uptime else None, "by_kind": kinds},
+        "buffer_pool": {"pages_used": n("Innodb_buffer_pool_pages_data"), "pages_total": n("Innodb_buffer_pool_pages_total"), "read_requests": requests, "disk_reads": reads,
+                        "hit_ratio": round(1 - reads / requests, 4) if requests else None},
+        "redo_log_bytes": n("Innodb_redo_log_bytes"),
+        "locks": {"row_lock_waits_total": n("Innodb_row_lock_waits"), "waiting_now": n("Innodb_row_lock_current_waits"), "deadlocks_total": n("Innodb_deadlocks"),
+                  "open_transactions": locks["summary"]["open_transactions"], "row_locks_held": locks["summary"]["row_locks_held"], "root_blockers": locks["root_blockers"]},
+        "sessions": [{"id": _num(s.get("ID")), "user": s.get("USER"), "host": s.get("HOST"), "db": None if s.get("DB") in (None, "NULL") else s.get("DB"), "command": s.get("COMMAND"),
+                      "seconds": _num(s.get("TIME"), 0), "info": (s.get("INFO") or "")[:120] if s.get("INFO") not in (None, "NULL") else None} for s in sessions],
+        "last_start": {"open_ms": _num(recovery.get("OPEN_MS")), "undo_ms": _num(recovery.get("UNDO_MS")), "redo_ms": _num(recovery.get("REDO_MS")),
+                       "wal_transactions_replayed": _num(recovery.get("WAL_TXNS_REPLAYED")), "wal_transactions_undone": _num(recovery.get("WAL_TXNS_UNDONE")),
+                       "redo_operations": _num(recovery.get("REDO_OPS")), "crash_detected": recovery.get("CRASH_DETECTED") == "YES"},
+        "databases": databases,
+    }
+    findings = []
+    if report["last_start"]["crash_detected"]:
+        findings.append({"level": "info", "what": f"The last start recovered from a crash: {report['last_start']['wal_transactions_undone']} unfinished transaction(s) undone, "
+                                                  f"{report['last_start']['redo_operations']} redo operation(s) replayed."})
+    if locks["root_blockers"]:
+        findings.append({"level": "warn", "what": f"Transaction(s) {', '.join(locks['root_blockers'])} block {len(locks['waits'])} other(s) that wait for a row lock (see list_locks)."})
+    if n("Innodb_deadlocks"):
+        findings.append({"level": "warn", "what": f"{n('Innodb_deadlocks')} deadlock(s) since the start: a transaction was rolled back to break each."})
+    if long_running:
+        findings.append({"level": "warn", "what": "Statement(s) running for 5 seconds or more: " + ", ".join(f"session {s.get('ID')} ({s.get('TIME')} s)" for s in long_running)})
+    if n("Aborted_connects"):
+        findings.append({"level": "info", "what": f"{n('Aborted_connects')} login(s) failed since the start."})
+    if report["redo_log_bytes"] > 4 * 1024 * 1024:
+        findings.append({"level": "info", "what": f"The redo log holds {report['redo_log_bytes']} bytes: a checkpoint is due."})
+    report["findings"] = findings
+    report["status"] = "attention" if any(f["level"] == "warn" for f in findings) else "ok"
+    return report
+
+
+@mcp.tool()
+def health_report() -> str:
+    """One-call summary of the server's health, for "how is the server doing?": uptime, connections (now / most / total / failed logins), statements (total, per second, by
+    kind), buffer pool (pages, hit ratio), redo log size, row-lock waits and deadlocks, open transactions and who blocks whom, every session and what it runs, what the last
+    start did to recover (crash detected, transactions undone, redo replayed, how many ms), the databases with their table and row counts, and a list of findings
+    (level info / warn) with an overall status "ok" or "attention". Reads SHOW GLOBAL STATUS and information_schema; it changes nothing."""
+    try:
+        return json.dumps(health_report_data(), ensure_ascii=False)
+    except (RuntimeError, OSError) as e:
+        return _fail(e)
+
+
+def table_stats_for(table: str, database: str = "") -> dict:
+    """Row count, the shape of each column (distinct values, NULLs, min / max / quartiles) and the indexes of a table. Runs ANALYZE TABLE, which refreshes the planner's statistics."""
+    where = f"TABLE_NAME = '{table}' AND TABLE_SCHEMA = DATABASE()"
+    columns = _rows(f"SELECT COLUMN_NAME, COLUMN_TYPE, IS_NULLABLE, COLUMN_KEY FROM information_schema.columns WHERE {where} ORDER BY ORDINAL_POSITION", database)
+    if not columns:
+        raise RuntimeError(f"Table '{table}' not found" + (f" in database '{database}'" if database else ""))
+    index_rows = _rows(f"SELECT INDEX_NAME, SEQ_IN_INDEX, COLUMN_NAME, NON_UNIQUE FROM information_schema.statistics WHERE {where} ORDER BY INDEX_NAME, SEQ_IN_INDEX", database)
+    indexes: dict[str, dict] = {}
+    for r in index_rows:
+        entry = indexes.setdefault(r["INDEX_NAME"], {"columns": [], "unique": r.get("NON_UNIQUE") == "0"})
+        entry["columns"].append(r["COLUMN_NAME"])
+    raw = _run(f"ANALYZE TABLE {table}", database)
+    if raw.strip().upper().startswith(("ERR", "ERROR")):
+        raise RuntimeError(" ".join(l.strip() for l in raw.splitlines() if l.strip() and l.strip().upper() != "ERR")[:300])
+    rows = None
+    m = re.search(r"ANALYZE: \S+ \((\d+) rows\)", raw)
+    if m:
+        rows = int(m.group(1))
+    # the table of numbers: a header line ("column | distinct | nulls | min | ...") and one line per column, whose names the engine cuts to 12 characters
+    stats: dict[str, dict] = {}
+    header: list[str] = []
+    for line in raw.splitlines():
+        cells = [c.strip() for c in line.strip().strip("|").split("|")]
+        if cells and cells[0] == "column":
+            header = cells
+        elif header and len(cells) == len(header) and not line.lstrip().startswith("+"):
+            stats[cells[0]] = dict(zip(header[1:], cells[1:]))
+    names = [c["COLUMN_NAME"] for c in columns]
+    shown = [n[:12] for n in names]
+    result_columns = []
+    for c in columns:
+        name = c["COLUMN_NAME"]
+        cut = name[:12]
+        s = stats.get(cut) if shown.count(cut) == 1 else None
+        entry = {"name": name, "type": c.get("COLUMN_TYPE"), "nullable": c.get("IS_NULLABLE") == "YES", "key": c.get("COLUMN_KEY") or None,
+                 "indexes": [i for i, d in indexes.items() if name in d["columns"]]}
+        if s:
+            distinct, nulls = _num(s.get("distinct")), _num(s.get("nulls"))
+            entry.update({"distinct": distinct, "nulls": nulls,
+                          "null_fraction": round(nulls / rows, 4) if rows and nulls is not None else None,
+                          "selectivity": round(distinct / rows, 4) if rows and distinct is not None else None,
+                          "min": s.get("min"), "max": s.get("max"), "p25": s.get("p25"), "p50": s.get("p50"), "p75": s.get("p75")})
+        result_columns.append(entry)
+    return {"table": table, "database": database or None, "rows": rows, "columns": result_columns, "indexes": indexes,
+            "note": "ANALYZE TABLE was run to get these numbers; it refreshes the planner's statistics and changes no data."}
+
+
+@mcp.tool()
+def get_table_stats(table: str, database: str = "") -> str:
+    """Statistics of a table as one JSON object: the row count; for every column its type, whether it may be NULL, the distinct values, how many NULLs (and the fraction),
+    the selectivity (distinct / rows: 1 means every row differs), min, max and the quartiles, and which indexes cover it; and the indexes with their columns and whether
+    they are unique. Runs ANALYZE TABLE (it refreshes the planner's statistics, no data changes). Use it before writing a query or choosing an index."""
+    try:
+        return json.dumps(table_stats_for(table, database), ensure_ascii=False)
+    except (RuntimeError, OSError) as e:
+        return _fail(e)
+
+
+def fk_graph_for(database: str = "", table: str = "", to_table: str = "") -> dict:
+    """The foreign keys of a database as edges (child column -> parent column, with the ON DELETE / ON UPDATE rules and a ready JOIN condition), per table what it refers
+    to and what refers to it, and -- with table and to_table -- the shortest chain of JOINs between two tables."""
+    keys = _rows("SELECT CONSTRAINT_NAME, TABLE_NAME, COLUMN_NAME, REFERENCED_TABLE_NAME, REFERENCED_COLUMN_NAME FROM information_schema.key_column_usage "
+                 "WHERE TABLE_SCHEMA = DATABASE() AND REFERENCED_TABLE_NAME IS NOT NULL ORDER BY TABLE_NAME, CONSTRAINT_NAME, ORDINAL_POSITION", database)
+    rules = {(r["CONSTRAINT_NAME"], r["TABLE_NAME"]): r for r in _rows(
+        "SELECT CONSTRAINT_NAME, TABLE_NAME, UPDATE_RULE, DELETE_RULE FROM information_schema.referential_constraints WHERE CONSTRAINT_SCHEMA = DATABASE()", database)}
+    tables = sorted(r["TABLE_NAME"] for r in _rows("SELECT TABLE_NAME FROM information_schema.tables WHERE TABLE_SCHEMA = DATABASE()", database))
+    if not tables:
+        raise RuntimeError("No tables" + (f" in database '{database}'" if database else " (give the database)"))
+    edges = []
+    for k in keys:
+        rule = rules.get((k["CONSTRAINT_NAME"], k["TABLE_NAME"]), {})
+        edges.append({"constraint": k["CONSTRAINT_NAME"], "child": k["TABLE_NAME"], "child_column": k["COLUMN_NAME"],
+                      "parent": k["REFERENCED_TABLE_NAME"], "parent_column": k["REFERENCED_COLUMN_NAME"],
+                      "on_delete": rule.get("DELETE_RULE"), "on_update": rule.get("UPDATE_RULE"),
+                      "join": f"{k['TABLE_NAME']}.{k['COLUMN_NAME']} = {k['REFERENCED_TABLE_NAME']}.{k['REFERENCED_COLUMN_NAME']}"})
+    detail = {t: {"references": [], "referenced_by": []} for t in tables}
+    for e in edges:
+        if e["child"] in detail:
+            detail[e["child"]]["references"].append({"table": e["parent"], "via": e["join"], "on_delete": e["on_delete"], "on_update": e["on_update"]})
+        if e["parent"] in detail:
+            detail[e["parent"]]["referenced_by"].append({"table": e["child"], "via": e["join"], "on_delete": e["on_delete"], "on_update": e["on_update"]})
+    out: dict = {"database": database or None, "tables": tables, "edges": edges,
+                 "root_tables": [t for t in tables if not detail[t]["references"]],
+                 "unconnected_tables": [t for t in tables if not detail[t]["references"] and not detail[t]["referenced_by"]]}
+    if table:
+        if table not in detail:
+            raise RuntimeError(f"Table '{table}' not found")
+        out["table"] = {"name": table, **detail[table]}
+        out["edges"] = [e for e in edges if table in (e["child"], e["parent"])]
+        if to_table:
+            if to_table not in detail:
+                raise RuntimeError(f"Table '{to_table}' not found")
+            path = _fk_join_path(edges, table, to_table)
+            out["join_path"] = None  # (no chain of foreign keys connects the two tables)
+            if path is not None:
+                chain, here = [table], table
+                for e in path:
+                    here = e["parent"] if e["child"] == here else e["child"]
+                    chain.append(here)
+                out["join_path"] = {"tables": chain, "edges": path,
+                                    "sql": f"FROM {table}" + "".join(f" JOIN {chain[i + 1]} ON {e['join']}" for i, e in enumerate(path))}
+    elif to_table:
+        raise RuntimeError("to_table needs table")
+    return out
+
+
+def _fk_join_path(edges: list[dict], start: str, goal: str) -> list[dict] | None:
+    """The shortest chain of foreign keys (either direction) from one table to another, by breadth-first search; [] when they are the same table, None when none connects them."""
+    if start == goal:
+        return []
+    seen = {start}
+    queue = [(start, [])]
+    while queue:
+        here, path = queue.pop(0)
+        for e in edges:
+            if here not in (e["child"], e["parent"]):
+                continue
+            there = e["parent"] if e["child"] == here else e["child"]
+            if there in seen:
+                continue
+            if there == goal:
+                return path + [e]
+            seen.add(there)
+            queue.append((there, path + [e]))
+    return None
+
+
+@mcp.tool()
+def get_fk_graph(database: str = "", table: str = "", to_table: str = "") -> str:
+    """The foreign key relationships of a database, for writing correct JOINs. Returns JSON: every foreign key as an edge (child table.column -> parent table.column, the
+    constraint name, ON DELETE / ON UPDATE rules such as CASCADE and a ready JOIN condition "child.col = parent.col"), for each table what it refers to and what refers to
+    it, the root tables (no foreign key out) and the tables with no relationships. With `table` only the edges that touch it are returned; with `table` and `to_table` also
+    `join_path`: the shortest chain of foreign keys between the two tables (either direction) and the FROM ... JOIN ... ON text for it. Reads information_schema."""
+    try:
+        return json.dumps(fk_graph_for(database, table, to_table), ensure_ascii=False)
+    except (RuntimeError, OSError) as e:
+        return _fail(e)
+
+
+_TRACE_WRITES_RE = re.compile(r"^\s*(INSERT|UPDATE|DELETE|REPLACE|MERGE)\b", re.IGNORECASE)
+_TRACE_READS_RE = re.compile(r"^\s*(SELECT|WITH|TABLE|VALUES)\b|^\s*\(\s*SELECT\b", re.IGNORECASE)
+
+
+def trace_query_for(sql: str, database: str = "") -> dict:
+    """TRACE a statement: the table of the stages it went through (parse, locks, scan, joins, filter, execute, answer) with rows, ms and share. A SELECT runs as it is; an
+    INSERT / UPDATE / DELETE / REPLACE / MERGE runs inside a transaction that is rolled back, so nothing is saved."""
+    stmt = sql.strip().rstrip(";").strip()
+    if not stmt:
+        raise RuntimeError("sql is empty")
+    if re.match(r"^\s*TRACE\b", stmt, re.IGNORECASE):
+        stmt = re.sub(r"^\s*TRACE\s+", "", stmt, flags=re.IGNORECASE)
+    writes = bool(_TRACE_WRITES_RE.match(stmt))
+    if not writes and not _TRACE_READS_RE.match(stmt):
+        raise RuntimeError("trace_query traces SELECT, WITH, INSERT, UPDATE, DELETE, REPLACE and MERGE statements (a DDL statement cannot be undone, so it is not traced)")
+    raw = ""
+    try:
+        c = _Conn()
+        try:
+            if database:
+                used = c._raw(f"USE {database};")
+                if used.strip().upper().startswith("ERR"):
+                    raise RuntimeError(" ".join(l for l in used.splitlines() if l.strip() and l.strip().upper() != "ERR"))
+            if writes:
+                began = c._raw("BEGIN;")
+                if began.strip().upper().startswith("ERR"):
+                    raise RuntimeError(f"could not start a transaction: {began.strip()}")
+            try:
+                raw = c._raw(f"TRACE {stmt};")
+            finally:
+                if writes:
+                    c._raw("ROLLBACK;")
+        finally:
+            c.close()
+    except ConnectionRefusedError:
+        raise RuntimeError(f"RuSQL is not running on {RUSQL_HOST}:{RUSQL_PORT}. Start the server first.")
+    text = raw.strip()
+    if text.upper().startswith("ERR"):
+        raise RuntimeError(" ".join(l.strip() for l in text.splitlines() if l.strip() and l.strip().upper() != "ERR")[:300])
+    steps, total = [], None
+    for row in _parse_table_output(text):
+        if "Step" not in row:
+            continue
+        entry = {"what": row.get("What"), "rows": _num(row.get("Rows")), "ms": _num(row.get("ms")), "share_percent": _num(row.get("Share %"))}
+        if row["Step"] == "Total":
+            total = {"ms": entry["ms"], "result": entry["what"]}
+        else:
+            entry["step"] = _num(row["Step"])
+            steps.append(entry)
+    out = {"statement": stmt, "rolled_back": writes, "steps": steps, "total": total}
+    timed = [s for s in steps if s["ms"] is not None]
+    if timed:
+        slow = max(timed, key=lambda s: s["ms"])
+        out["slowest"] = f"Step {slow['step']} ({slow['what']}) takes {slow['share_percent']}% of the time"
+    if writes:
+        out["note"] = "The statement ran inside a transaction that was rolled back: nothing was saved."
+    return out
+
+
+@mcp.tool()
+def trace_query(sql: str, database: str = "") -> str:
+    """Trace a statement through the engine's stages and return the time of each as JSON: parse, prepare (cache, locks), table locks, every scan / join / filter step with
+    its rows and share of the time, execute and return the answer, a total, and which step is the slowest. Use it to find out WHERE a slow statement spends its time (explain_query
+    shows the plan, this shows the stages). A SELECT runs as it is; an INSERT / UPDATE / DELETE / REPLACE / MERGE runs inside a transaction that is rolled back, so nothing is saved.
+    DDL is refused (it cannot be undone)."""
+    try:
+        return json.dumps(trace_query_for(sql, database), ensure_ascii=False)
+    except (RuntimeError, OSError) as e:
+        return _fail(e)
+
+
 @mcp.tool()
 def sample_data(table: str, n: int = 10, database: str = "") -> str:
     """Return up to N sample rows from a table as a JSON array.

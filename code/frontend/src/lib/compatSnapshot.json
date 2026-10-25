@@ -1,5 +1,5 @@
 {
-  "generated": "2026-10-25",
+  "generated": "2026-10-26",
   "mysql": "8.4.9",
   "corpora": [
     {
@@ -211,6 +211,22 @@
       "bothFail": 0
     },
     {
+      "name": "like_escape",
+      "en": "LIKE: the backslash as escape character, ESCAPE 'c' (also on a pattern from a column)",
+      "ko": "LIKE: 역슬래시 이스케이프, ESCAPE 'c' (열에서 읽은 패턴도)",
+      "statements": 41,
+      "different": 0,
+      "bothFail": 1
+    },
+    {
+      "name": "fk_parent",
+      "en": "Parent side of a foreign key: DELETE / UPDATE of a parent row, NULL parent keys, cascades",
+      "ko": "외래키의 부모 쪽: 부모 행 DELETE·UPDATE, NULL 부모 키, 연쇄",
+      "statements": 47,
+      "different": 0,
+      "bothFail": 9
+    },
+    {
       "name": "protocol",
       "en": "MySQL wire protocol: SHOW, OK packets, affected rows",
       "ko": "MySQL 프로토콜: SHOW·OK 패킷·영향 행 수",
@@ -227,10 +243,10 @@
       "bothFail": 0
     }
   ],
-  "conformanceCases": 3230,
+  "conformanceCases": 3345,
   "tests": {
-    "cases": 799,
-    "assertions": 1506715
+    "cases": 806,
+    "assertions": 1507268
   },
   "bugsFound": 206
 }

@@ -2,6 +2,7 @@
 
 #include "mysql.hpp"
 #include "wake_connection.hpp"
+#include "engine/collation.hpp"
 #include "engine/parser/lexer.hpp"
 #include "engine/result_text.hpp"
 
@@ -879,15 +880,8 @@ std::string handle_select_atvars(const std::string& q, const Executor& exec) {
     return box_table(cols, {vals});
 }
 
-bool like_match_inner(const std::string& s, std::size_t si, const std::string& p, std::size_t pi) {
-    if (pi == p.size()) return si == s.size();
-    if (p[pi] == '%') return like_match_inner(s, si, p, pi + 1) || (si < s.size() && like_match_inner(s, si + 1, p, pi));
-    if (si == s.size()) return false;
-    if (p[pi] == '_' || std::tolower(static_cast<unsigned char>(p[pi])) == std::tolower(static_cast<unsigned char>(s[si])))
-        return like_match_inner(s, si + 1, p, pi + 1);
-    return false;
-}
-bool like_match(const std::string& s, const std::string& pat) { return like_match_inner(s, 0, pat, 0); }
+// (the matcher of the engine: `\%` and `\_` are the literal characters, as MySQL reads a SHOW ... LIKE pattern)
+bool like_match(const std::string& s, const std::string& pat) { return engine::collation::like(s, pat); }
 
 std::string show_variables_result(const std::string& up, const Executor& exec) {
     static const std::vector<std::pair<std::string, std::string>> vars = {

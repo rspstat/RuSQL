@@ -24,13 +24,13 @@ const NODES: Node[] = [
   },
   {
     id: "ui", x: 95, y: 225, w: 140, h: 84, c: C.client, name: L("Desktop UI", "데스크톱 UI"),
-    desc: L("Tauri + React + Monaco: SQL editor (autocomplete, EXPLAIN step bars, statement Journey), ERD with a relationship editor, B+Tree and MVCC pages, Server Manager (sessions / locks, recovery card), Compat page. Talks to engine_server over TCP :7878.",
-            "Tauri + React + Monaco: SQL 에디터(자동완성, EXPLAIN 단계 막대, 한 문장의 여행), 관계 편집기가 있는 ERD, B+Tree·MVCC 페이지, 서버 매니저(세션·락, 복구 카드), 호환성 페이지. TCP :7878로 engine_server와 통신."),
+    desc: L("Tauri + React + Monaco: SQL editor (autocomplete, EXPLAIN step bars, statement Journey), ERD with a relationship editor, B+Tree and MVCC pages, Server Manager (sessions / locks, recovery card, Metrics charts), Compat page. Talks to engine_server over TCP :7878.",
+            "Tauri + React + Monaco: SQL 에디터(자동완성, EXPLAIN 단계 막대, 한 문장의 여행), 관계 편집기가 있는 ERD, B+Tree·MVCC 페이지, 서버 매니저(세션·락, 복구 카드, 지표 그래프), 호환성 페이지. TCP :7878로 engine_server와 통신."),
   },
   {
     id: "mcp", x: 95, y: 350, w: 140, h: 84, c: C.client, name: "Claude + MCP",
-    desc: L("Claude Desktop drives RuSQL through a Python MCP server (27 tools, TCP :7878). Claude writes the SQL; RuSQL has no private NL-to-SQL model.",
-            "Claude Desktop이 Python MCP 서버(도구 27개, TCP :7878)로 RuSQL을 조작. SQL은 Claude가 작성하며 사설 NL→SQL 모델은 없음."),
+    desc: L("Claude Desktop drives RuSQL through a Python MCP server (32 tools, TCP :7878). Claude writes the SQL; RuSQL has no private NL-to-SQL model.",
+            "Claude Desktop이 Python MCP 서버(도구 32개, TCP :7878)로 RuSQL을 조작. SQL은 Claude가 작성하며 사설 NL→SQL 모델은 없음."),
   },
   {
     id: "client", x: 95, y: 475, w: 140, h: 84, c: C.client, name: "engine_client",

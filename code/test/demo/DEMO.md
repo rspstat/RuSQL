@@ -111,6 +111,8 @@ SHOW GLOBAL STATUS LIKE 'Innodb_row_lock%';   -- 락을 기다린 횟수(Innodb_
 
 `SHOW STATUS`는 실제 카운터입니다(`Com_*` 문장 종류별 수, `Questions`, `Connections`, `Threads_running`, `Uptime`, `Innodb_*`). 락을 잡지 않고 읽어서 쓰기 문장이 락을 쥐고 있어도 바로 답합니다.
 
+앱에서는 **Server Manager → 오른쪽 막대의 Metrics**가 같은 카운터를 1초마다 읽어 최근 2분의 추세(초당 문장 수, 세션, 행 락 대기, redo 로그 크기, 버퍼 풀)를 그립니다. 락 대기 시연을 하는 동안 "Row locks" 그래프의 빨간 선이 1로 올라갔다가 `KILL QUERY`나 `COMMIT` 뒤에 내려오는 것이 보입니다. 쓰기 문장을 계속 보내 두고(예: 터미널에서 `INSERT`를 반복) 초당 문장 수와 redo 크기의 톱니(체크포인트에서 0으로)를 보여 주면 "살아 있는 DB" 장면이 됩니다.
+
 ## 6. B+Tree 애니메이션 (선택, 30초)
 
 앱 왼쪽 활동 표시줄의 **B+Tree 아이콘**. 노드당 최대 키를 3으로 두고 `1–12 넣기`를 누르면 잎이 쪼개지며 키가 위로 올라가고 트리가 한 층씩 높아지는 모습이 재생됩니다. 이어서 키 하나를 `삭제`하면 노드가 모자라 형제에게서 빌리거나 합쳐지는 것을 볼 수 있습니다. (교육용 모형이며 엔진 인덱스와 같은 원리입니다.)
@@ -132,6 +134,7 @@ Claude Desktop에 MCP가 연결되어 있다면 "demo 데이터베이스에서 �
 > "demo의 orders에서 status가 CANCELLED이고 amount가 90000 이상인 주문을 PAID로 바꾸는 UPDATE를 run_script로 먼저 미리보기해 줘."
 
 미리보기는 문장을 실제로 실행해 영향 행 수를 보여 준 다음 되돌립니다(저장 안 됨). 사용자가 동의한 뒤 `commit=True`로 다시 부르면 저장됩니다. `DROP`·`TRUNCATE`·`WHERE` 없는 `UPDATE/DELETE`는 확인 없이는 막힙니다.
+**서버 상태·락·통계:** "서버 상태 어때?"(`health_report`: 연결·문장·락·교착·복구와 주의할 점), "지금 누가 누구를 막고 있어?"(`list_locks`: 뿌리 차단자와 `KILL` 안내), "orders 표 통계 보여 줘"(`get_table_stats`), "order_items에서 customers까지 조인 경로가 뭐야?"(`get_fk_graph`: 외래키 사슬과 `JOIN … ON …` 문장), "이 문장이 어느 단계에서 느려?"(`trace_query`: 단계별 시간, 쓰기 문장은 롤백되는 트랜잭션 안에서 돌림)를 물어볼 수 있습니다. 락 대기 시연(5번)을 켜 둔 채 `health_report`를 부르면 `attention`과 차단자 번호가 나옵니다.
 **인덱스 제안:** "demo의 orders에서 customer_id로 찾는 질의가 느려. suggest_indexes로 어떤 인덱스가 좋을지 봐 줘." 도구는 문장·열·인덱스·`ANALYZE TABLE`의 서로 다른 값 수·`EXPLAIN ANALYZE` 계획을 읽고 `CREATE INDEX` 문장, 이유, 인덱스가 있으면 읽을 행 수(추정), 이미 있는 인덱스, 효과가 없는 이유(열을 함수로 감쌈, 앞이 `%`인 LIKE, OR, 작은 표)를 돌려줍니다. **아무것도 만들지 않으므로** 만들지는 `run_script`로 미리보기 → 확인합니다. (5천 행 시험: 인덱스 전 `Seq Scan` 2.7ms → 만든 뒤 `Index Scan` 0.2ms.)
 
 `run_script` 자체는 살아 있는 서버로 확인했지만 **Claude Desktop과의 연결은 자동으로 검증하지 못했으니 발표 전에 한 번 미리 돌려 보세요.**
