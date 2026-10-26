@@ -764,6 +764,12 @@ std::string box_table(const std::vector<std::string>& cols, const std::vector<st
     return out;
 }
 
+// The text of a SELECT that found no rows: "0 rows returned.", or the header of its columns with that line under it
+bool no_rows(const std::string& out) {
+    static const std::string line = "0 rows returned.";
+    return out.rfind("0 rows returned", 0) == 0 || (out.size() > line.size() && out.compare(out.size() - line.size(), line.size(), line) == 0 && out[out.size() - line.size() - 1] == '\n');
+}
+
 std::string to_upper_str(const std::string& s) {
     std::string out = s;
     std::transform(out.begin(), out.end(), out.begin(), [](unsigned char c) { return std::toupper(c); });
@@ -1037,7 +1043,7 @@ StringResult show_columns(Executor& exec, TableRef ref, bool full) {
                       (ref.db ? sql_quoted(*ref.db) : std::string("DATABASE()")) + " AND table_name = " + sql_quoted(ref.table) +
                       (like ? " AND column_name LIKE " + sql_quoted(*like) : std::string()) + " ORDER BY ORDINAL_POSITION";
     auto out = exec_inner(exec, sql);
-    if (out.is_ok() && out.value().rfind("0 rows returned", 0) == 0) {
+    if (out.is_ok() && no_rows(out.value())) {
         if (like) return out;
         return StringResult::Err("Table '" + (ref.db ? *ref.db + "." : std::string()) + ref.table + "' doesn't exist");
     }
@@ -1171,7 +1177,7 @@ std::optional<StringResult> mysql_compat(const std::string& q, Executor& exec) {
                           (db ? sql_quoted(*db) : std::string("DATABASE()")) + " AND table_type = 'BASE TABLE'" +
                           (pattern ? " AND table_name LIKE " + sql_quoted(*pattern) : std::string());
         auto out = exec_inner(exec, sql);
-        if (out.is_ok() && out.value().rfind("0 rows returned", 0) == 0) {
+        if (out.is_ok() && no_rows(out.value())) {
             return StringResult::Ok(box_table({"Name", "Engine", "Version", "Row_format", "Rows", "Avg_row_length", "Data_length", "Max_data_length",
                                                 "Index_length", "Data_free", "Auto_increment", "Create_time", "Update_time", "Check_time", "Collation",
                                                 "Checksum", "Create_options", "Comment"},
@@ -1254,7 +1260,7 @@ std::optional<StringResult> mysql_compat(const std::string& q, Executor& exec) {
                                   "FROM information_schema.statistics WHERE table_schema = " +
                                   (ref->db ? sql_quoted(*ref->db) : std::string("DATABASE()")) + " AND table_name = " + sql_quoted(ref->table);
                 auto out = exec_inner(exec, sql);
-                if (out.is_ok() && out.value().rfind("0 rows returned", 0) == 0) {
+                if (out.is_ok() && no_rows(out.value())) {
                     // (no index, or no such table)
                     auto columns = show_columns(exec, *ref, false);
                     if (columns.is_err()) return StringResult::Err("Table '" + (ref->db ? *ref->db + "." : std::string()) + ref->table + "' doesn't exist");

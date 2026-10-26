@@ -100,10 +100,10 @@ TEST_CASE("result_columns types the columns of a SELECT", "[result_types]") {
     REQUIRE(types_of(ex, "SELECT '12', id + t, dt, UPPER(tx), IF(id > 1, 1, 2), COALESCE(t, 0) FROM ty") == "text,value,date,text,value,value"); // (a quoted number is text)
     REQUIRE(types_of(ex, "SELECT IF(id > 1, 'a', 'b'), COALESCE(vc, 'x'), CASE WHEN id > 1 THEN 1 ELSE 0 END, CASE WHEN id > 1 THEN 'a' END, NULLIF(id, 3), COALESCE(NULL, NULL) FROM ty") ==
             "text,text,value,text,value,text");
-    // nothing to tell: something that is not a SELECT, a table that is not there, a CTE
+    // nothing to tell: something that is not a SELECT, a table that is not there
     REQUIRE(types_of(ex, "INSERT INTO ty2 VALUES (1, 'a')") == "");
     REQUIRE(types_of(ex, "SELECT * FROM no_such_table") == "");
     REQUIRE(types_of(ex, "SELECT this is not sql") == "");
-    REQUIRE(types_of(ex, "WITH c AS (SELECT id FROM ty) SELECT * FROM c") == "");
+    REQUIRE(types_of(ex, "WITH c AS (SELECT id FROM ty) SELECT * FROM c") == "int"); // (a CTE is a table of the columns its query gives)
     REQUIRE(types_of(ex, "SHOW TABLES") == "");
 }

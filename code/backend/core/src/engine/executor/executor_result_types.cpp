@@ -20,6 +20,7 @@ namespace {
 struct NamedType {
     std::string name; // "" when the column is not called anything a query can name
     ResultColumnType type;
+    std::string header = std::string(); // what a SELECT prints over a select-list item (also for the ones that have no name: `COUNT(*)`, `a+b`); "" for the others: `name` is it
 };
 
 bool ieq(const std::string& a, const std::string& b) {
@@ -86,6 +87,15 @@ public:
 
     // The types of the columns `sel` gives; false when they cannot be told (a table that is not there, a USING join, a CTE ...)
     bool columns_of(const Statement& stmt, int depth, std::vector<NamedType>& out) const {
+        if (auto* with = std::get_if<Statement::With>(&stmt.data)) { // (each query of the WITH list is a table of the ones after it, and of the query)
+            if (!with->query || depth > 4) return false;
+            for (auto& cte : with->ctes) {
+                std::vector<NamedType> columns;
+                if (!cte.second || !columns_of(*cte.second, depth + 1, columns)) return false;
+                ctes_[lower(cte.first)] = std::move(columns);
+            }
+            return columns_of(*with->query, depth, out);
+        }
         const Statement* q = &stmt;
         while (q) { // (a set operation: the left side names the columns and types them)
             if (auto* u = std::get_if<Statement::Union>(&q->data)) q = u->left.get();
@@ -101,6 +111,12 @@ public:
 private:
     const SharedDatabase& db_;
     std::string current_db_; // the database an unqualified table name belongs to
+    mutable std::map<std::string, std::vector<NamedType>> ctes_; // the queries of the WITH list that is being read, by lower-case name
+
+    static std::string lower(std::string s) {
+        for (char& c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        return s;
+    }
 
     bool derived(const Statement& inner, const std::string& alias, int depth, std::vector<Source>& sources) const {
         Source src;
@@ -111,6 +127,16 @@ private:
     }
 
     bool add_table(const std::string& name, const std::string& alias, int depth, std::vector<Source>& sources) const {
+        if (name.find('.') == std::string::npos) {
+            if (auto cte = ctes_.find(lower(name)); cte != ctes_.end()) {
+                Source src;
+                src.full = src.bare = name;
+                src.alias = alias;
+                src.columns = cte->second;
+                sources.push_back(std::move(src));
+                return true;
+            }
+        }
         const std::string table = name.find('.') != std::string::npos ? name : current_db_ + "." + name;
         Source src;
         src.full = table;
@@ -347,14 +373,23 @@ private:
             }
         }
         for (const SelectColumn& item : sel.columns) {
+            const std::size_t before = out.size();
             if (auto* all = std::get_if<SelectColumn::All>(&item.data)) {
-                bool matched = all->table.empty();
+                std::vector<const Source*> matches;
                 for (const Source& src : sources) {
-                    if (!all->table.empty() && !(ieq(src.full, all->table) || ieq(src.bare, all->table) || (!src.alias.empty() && ieq(src.alias, all->table)))) continue;
-                    matched = true;
-                    out.insert(out.end(), src.columns.begin(), src.columns.end());
+                    if (all->table.empty() || ieq(src.full, all->table) || ieq(src.bare, all->table) || (!src.alias.empty() && ieq(src.alias, all->table))) matches.push_back(&src);
                 }
-                if (!matched) return false;
+                if (!all->table.empty() && matches.size() > 1) {
+                    // (`r0.*` of a table that is joined with itself reaches here as `r.*`: the one that has no alias of its own is the FROM table, which the name stands for)
+                    std::vector<const Source*> plain;
+                    for (const Source* src : matches) {
+                        if (src->alias.empty()) plain.push_back(src);
+                    }
+                    if (plain.size() != 1) return false;
+                    matches = plain;
+                }
+                if (matches.empty()) return false;
+                for (const Source* src : matches) out.insert(out.end(), src->columns.begin(), src->columns.end());
             } else if (auto* col = std::get_if<SelectColumn::Column>(&item.data)) {
                 const NamedType* found = col->outer == 0 && plain_reference(col->name) ? find(sel, sources, col->name) : nullptr;
                 out.push_back({last_part(col->name), found ? found->type : ResultColumnType{}});
@@ -387,6 +422,9 @@ private:
                 out.push_back({sq->alias.value_or(std::string()), sq->query && columns_of(*sq->query, depth + 1, inner) && inner.size() == 1 ? inner[0].type : ResultColumnType{}});
             } else {
                 return false;
+            }
+            if (out.size() == before + 1 && !std::holds_alternative<SelectColumn::All>(item.data)) {
+                if (auto header = Executor::column_header(item)) out.back().header = *header;
             }
         }
         return true;
@@ -432,6 +470,29 @@ std::vector<ColumnDef> Executor::derived_column_defs(const SharedDatabase& s, co
         }
         def.name = names[i];
         out.push_back(std::move(def));
+    }
+    return out;
+}
+
+std::vector<std::string> Executor::result_column_names(const std::string& sql) const {
+    Parser parser(sql, pipes_as_concat());
+    if (!parser.has_tokens()) return {};
+    auto parsed = parser.parse();
+    if (parsed.is_err()) return {};
+    return result_column_names(std::move(parsed).value());
+}
+
+std::vector<std::string> Executor::result_column_names(Statement stmt) const {
+    auto s = shared->read();
+    resolve_names(*s, stmt);
+    std::vector<NamedType> found;
+    if (!Resolver(*s, current_db).columns_of(stmt, 0, found)) return {};
+    std::vector<std::string> out;
+    out.reserve(found.size());
+    for (const NamedType& c : found) {
+        const std::string& header = c.header.empty() ? c.name : c.header;
+        if (header.empty()) return {}; // (a column that has no name to print)
+        out.push_back(header);
     }
     return out;
 }

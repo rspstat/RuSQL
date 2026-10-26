@@ -21,6 +21,11 @@ acknowledged.
                                                   savepoints, checked against a model of InnoDB's row-by-row work (a refused statement changes nothing, a cascade follows the children, at most
                                                   14 levels); after recovery a row under a missing row and (RESTRICT) the delete of a manager with a report must still be refused.
 
+  python fuzz_crash_chain.py [rounds] [base_seed]    the same for a chain of three tables a <- b <- c whose two foreign keys have the ON DELETE actions the seed picks (RESTRICT, CASCADE,
+                                                  SET NULL): INSERT of b / c rows under another row or none, UPDATE of v and of the foreign key columns, DELETE of one row or several of a, b and c, transactions
+                                                  and savepoints, checked against a model of the cascade (the grandchildren go with the children, a RESTRICT anywhere below refuses the statement whole);
+                                                  after recovery a row under a missing row and (RESTRICT) the delete of a row that a child refers to must still be refused.
+
 After recovery fuzz_crash.py also checks the INDEXES against the recovered rows (a lookup through the secondary index
 g and through the primary key must return what the oracle says) -- a table scan alone cannot see a stale index.
 

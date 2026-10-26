@@ -201,7 +201,7 @@ const EXECUTOR: Text[] = [
   L("works on row pointers; subqueries and INSERT checks run once per statement", "행 포인터로 처리, 서브쿼리·INSERT 검사는 문장당 한 번"),
   L("MySQL-exact results: DECIMAL places, strict errors (division by zero, text read as a number)", "MySQL과 같은 결과: DECIMAL 자릿수, 엄격한 오류(0으로 나누기, 글자를 수로 읽기)"),
   L("MAX_EXECUTION_TIME stops long SELECTs (3024); TRACE shows a statement's steps", "MAX_EXECUTION_TIME이 긴 SELECT를 멈춤(3024), TRACE가 문장의 단계를 보여 줌"),
-  L("a foreign key to its own table works row by row like InnoDB: RESTRICT, CASCADE (14 levels), SET NULL", "자기 표를 가리키는 외래키도 InnoDB처럼 행 단위로: RESTRICT, CASCADE(14단계), SET NULL"),
+  L("foreign key actions work row by row like InnoDB, down the whole chain of tables (a <- b <- c, a table that is its own child too): RESTRICT, CASCADE (14 levels), SET NULL, ON UPDATE", "외래키 동작은 InnoDB처럼 행 단위로, 표를 건너는 사슬 끝까지(a ← b ← c, 자기 표도): RESTRICT, CASCADE(14단계), SET NULL, ON UPDATE"),
 ];
 
 function Bullets({ items }: { items: Text[] }) {

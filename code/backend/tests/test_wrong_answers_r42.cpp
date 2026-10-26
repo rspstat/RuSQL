@@ -1689,3 +1689,471 @@ TEST_CASE("R55: a statement that only reads (WITH, a derived table, a prepared S
     ok(again, "USE d");
     REQUIRE(q(again, "SELECT id, v FROM t ORDER BY id") == (Rows{{"1", "10"}, {"2", "20"}, {"3", "30"}, {"4", "40"}, {"99", "1"}}));
 }
+
+namespace {
+// the rows of a table in key order, as text: "id|a_id|..." joined by "," (NULL as the word)
+std::string dump(Executor& ex, const std::string& table) {
+    std::string out;
+    for (auto& row : q(ex, "SELECT * FROM " + table + " ORDER BY id")) {
+        if (!out.empty()) out += ",";
+        for (std::size_t i = 0; i < row.size(); i++) out += (i ? "|" : "") + row[i];
+    }
+    return out;
+}
+
+// three tables a <- b <- c with the actions the caller gives for b's and c's foreign key
+void chain(Executor& ex, const std::string& suffix, const std::string& b_action, const std::string& c_action) {
+    ok(ex, "CREATE TABLE a" + suffix + " (id INT PRIMARY KEY)");
+    ok(ex, "CREATE TABLE b" + suffix + " (id INT PRIMARY KEY, p INT, FOREIGN KEY (p) REFERENCES a" + suffix + "(id) ON DELETE " + b_action + ")");
+    ok(ex, "CREATE TABLE c" + suffix + " (id INT PRIMARY KEY, q INT, FOREIGN KEY (q) REFERENCES b" + suffix + "(id) ON DELETE " + c_action + ")");
+    ok(ex, "INSERT INTO a" + suffix + " VALUES (1), (2)");
+    ok(ex, "INSERT INTO b" + suffix + " VALUES (10, 1), (20, 2), (11, 1)");
+    ok(ex, "INSERT INTO c" + suffix + " VALUES (100, 10), (200, 20), (101, 11), (102, 10)");
+}
+} // namespace
+
+TEST_CASE("R56: a cascade goes down the whole chain of tables (a <- b <- c) and a RESTRICT anywhere below refuses the statement", "[r56][chain]") {
+    TempDataDir dir("r56_chain");
+    {
+        Executor ex(dir.path);
+        ok(ex, "CREATE DATABASE d");
+        ok(ex, "USE d");
+        // CASCADE all the way: the grandchildren go with the children
+        chain(ex, "1", "CASCADE", "CASCADE");
+        REQUIRE(answer(ex, "DELETE FROM a1 WHERE id = 1") == "1 row(s) deleted.");
+        REQUIRE(dump(ex, "a1") == "2");
+        REQUIRE(dump(ex, "b1") == "20|2");
+        REQUIRE(dump(ex, "c1") == "200|20");
+        // RESTRICT below a CASCADE: nothing of the statement happens, for either row of a
+        chain(ex, "2", "CASCADE", "RESTRICT");
+        REQUIRE(fails(ex, "DELETE FROM a2 WHERE id = 1").find("Foreign key violation") != std::string::npos);
+        REQUIRE_FALSE(ex.execute_sql("DELETE FROM a2 WHERE id = 2").is_ok());
+        REQUIRE(dump(ex, "a2") == "1,2");
+        REQUIRE(dump(ex, "b2") == "10|1,11|1,20|2");
+        REQUIRE(dump(ex, "c2") == "100|10,101|11,102|10,200|20");
+        // SET NULL one level further down, and SET NULL above a CASCADE (the children stay, the grandchildren with them)
+        chain(ex, "3", "CASCADE", "SET NULL");
+        ok(ex, "DELETE FROM a3 WHERE id = 1");
+        REQUIRE(dump(ex, "c3") == "100|NULL,101|NULL,102|NULL,200|20");
+        chain(ex, "4", "SET NULL", "CASCADE");
+        ok(ex, "DELETE FROM a4 WHERE id = 1");
+        REQUIRE(dump(ex, "b4") == "10|NULL,11|NULL,20|2");
+        REQUIRE(dump(ex, "c4") == "100|10,101|11,102|10,200|20");
+        // four levels
+        chain(ex, "5", "CASCADE", "CASCADE");
+        ok(ex, "CREATE TABLE d5 (id INT PRIMARY KEY, r INT, FOREIGN KEY (r) REFERENCES c5(id) ON DELETE CASCADE)");
+        ok(ex, "INSERT INTO d5 VALUES (1000, 100), (2000, 200)");
+        ok(ex, "DELETE FROM a5 WHERE id = 1");
+        REQUIRE(dump(ex, "d5") == "2000|200");
+        // one row of a with children in two tables, one of them RESTRICT, and a grandchild: refused
+        ok(ex, "CREATE TABLE a6 (id INT PRIMARY KEY)");
+        ok(ex, "CREATE TABLE b6 (id INT PRIMARY KEY, p INT, FOREIGN KEY (p) REFERENCES a6(id) ON DELETE CASCADE)");
+        ok(ex, "CREATE TABLE b6r (id INT PRIMARY KEY, p INT, FOREIGN KEY (p) REFERENCES a6(id) ON DELETE RESTRICT)");
+        ok(ex, "CREATE TABLE c6 (id INT PRIMARY KEY, q INT, FOREIGN KEY (q) REFERENCES b6(id) ON DELETE CASCADE)");
+        ok(ex, "INSERT INTO a6 VALUES (1)");
+        ok(ex, "INSERT INTO b6 VALUES (10, 1)");
+        ok(ex, "INSERT INTO b6r VALUES (30, 1)");
+        ok(ex, "INSERT INTO c6 VALUES (100, 10)");
+        REQUIRE_FALSE(ex.execute_sql("DELETE FROM a6 WHERE id = 1").is_ok());
+        REQUIRE(dump(ex, "b6") == "10|1");
+        REQUIRE(dump(ex, "c6") == "100|10");
+        // a diamond: c refers to a (CASCADE) and to b (RESTRICT): the b row goes first (tables are asked in the order of their names), and c is still there to see
+        ok(ex, "CREATE TABLE a7 (id INT PRIMARY KEY)");
+        ok(ex, "CREATE TABLE b7 (id INT PRIMARY KEY, p INT, FOREIGN KEY (p) REFERENCES a7(id) ON DELETE CASCADE)");
+        ok(ex, "CREATE TABLE c7 (id INT PRIMARY KEY, ap INT, bp INT, FOREIGN KEY (ap) REFERENCES a7(id) ON DELETE CASCADE, FOREIGN KEY (bp) REFERENCES b7(id) ON DELETE RESTRICT)");
+        ok(ex, "INSERT INTO a7 VALUES (1)");
+        ok(ex, "INSERT INTO b7 VALUES (10, 1)");
+        ok(ex, "INSERT INTO c7 VALUES (100, 1, 10)");
+        REQUIRE_FALSE(ex.execute_sql("DELETE FROM a7 WHERE id = 1").is_ok());
+        REQUIRE(dump(ex, "c7") == "100|1|10");
+        // the whole table: the first row of a (id 1) has b 10 with a RESTRICT grandchild, whatever the order the rows are read in
+        chain(ex, "8", "CASCADE", "RESTRICT");
+        REQUIRE_FALSE(ex.execute_sql("DELETE FROM a8").is_ok());
+        REQUIRE_FALSE(ex.execute_sql("DELETE FROM a8 ORDER BY id DESC").is_ok());
+        REQUIRE(dump(ex, "a8") == "1,2");
+        // a cycle across two tables
+        ok(ex, "CREATE TABLE a9 (id INT PRIMARY KEY, bp INT)");
+        ok(ex, "CREATE TABLE b9 (id INT PRIMARY KEY, ap INT)");
+        ok(ex, "INSERT INTO a9 VALUES (1, NULL), (2, NULL)");
+        ok(ex, "INSERT INTO b9 VALUES (10, 1), (20, 2)");
+        ok(ex, "UPDATE a9 SET bp = 10 WHERE id = 1");
+        ok(ex, "ALTER TABLE b9 ADD FOREIGN KEY (ap) REFERENCES a9(id) ON DELETE CASCADE");
+        ok(ex, "ALTER TABLE a9 ADD FOREIGN KEY (bp) REFERENCES b9(id) ON DELETE CASCADE");
+        REQUIRE(answer(ex, "DELETE FROM a9 WHERE id = 1") == "1 row(s) deleted.");
+        REQUIRE(dump(ex, "a9") == "2|NULL");
+        REQUIRE(dump(ex, "b9") == "20|2");
+        // SET NULL on a column that grandchildren refer to: they follow it (ON UPDATE CASCADE) to NULL
+        ok(ex, "CREATE TABLE a10 (id INT PRIMARY KEY)");
+        ok(ex, "CREATE TABLE b10 (id INT PRIMARY KEY, p INT UNIQUE, FOREIGN KEY (p) REFERENCES a10(id) ON DELETE SET NULL)");
+        ok(ex, "CREATE TABLE c10 (id INT PRIMARY KEY, q INT, FOREIGN KEY (q) REFERENCES b10(p) ON UPDATE CASCADE ON DELETE CASCADE)");
+        ok(ex, "INSERT INTO a10 VALUES (1)");
+        ok(ex, "INSERT INTO b10 VALUES (10, 1)");
+        ok(ex, "INSERT INTO c10 VALUES (100, 1)");
+        ok(ex, "DELETE FROM a10 WHERE id = 1");
+        REQUIRE(dump(ex, "b10") == "10|NULL");
+        REQUIRE(dump(ex, "c10") == "100|NULL");
+        // a transaction that rolls the chain back gets every row of every table back, with the index
+        chain(ex, "11", "CASCADE", "CASCADE");
+        ok(ex, "BEGIN");
+        ok(ex, "DELETE FROM a11 WHERE id = 1");
+        REQUIRE(dump(ex, "c11") == "200|20");
+        ok(ex, "ROLLBACK");
+        REQUIRE(dump(ex, "c11") == "100|10,101|11,102|10,200|20");
+        REQUIRE(q(ex, "SELECT q FROM c11 WHERE id = 102") == Rows{{"10"}});
+        ok(ex, "BEGIN");
+        ok(ex, "SAVEPOINT s1");
+        ok(ex, "DELETE FROM a11 WHERE id = 2");
+        ok(ex, "ROLLBACK TO SAVEPOINT s1");
+        ok(ex, "DELETE FROM a11 WHERE id = 1");
+        ok(ex, "COMMIT");
+        REQUIRE(dump(ex, "b11") == "20|2");
+        REQUIRE(dump(ex, "c11") == "200|20");
+    } // (no checkpoint: the redo log holds what the chains did)
+    Executor again(dir.path);
+    ok(again, "USE d");
+    REQUIRE(dump(again, "c1") == "200|20");
+    REQUIRE(dump(again, "c3") == "100|NULL,101|NULL,102|NULL,200|20");
+    REQUIRE(dump(again, "d5") == "2000|200");
+    REQUIRE(dump(again, "c10") == "100|NULL");
+    REQUIRE(dump(again, "c11") == "200|20");
+    REQUIRE(dump(again, "b9") == "20|2");
+}
+
+TEST_CASE("R56: a key that changes goes down the chain too (ON UPDATE CASCADE through a column another table refers to), and a RESTRICT below refuses", "[r56][chain]") {
+    TempDataDir dir("r56_update_chain");
+    {
+        Executor ex(dir.path);
+        ok(ex, "CREATE DATABASE d");
+        ok(ex, "USE d");
+        ok(ex, "CREATE TABLE a (id INT PRIMARY KEY)");
+        ok(ex, "CREATE TABLE b (id INT PRIMARY KEY, p INT UNIQUE, FOREIGN KEY (p) REFERENCES a(id) ON UPDATE CASCADE)");
+        ok(ex, "CREATE TABLE c (id INT PRIMARY KEY, q INT, FOREIGN KEY (q) REFERENCES b(p) ON UPDATE CASCADE)");
+        ok(ex, "INSERT INTO a VALUES (1), (2)");
+        ok(ex, "INSERT INTO b VALUES (10, 1), (20, 2)");
+        ok(ex, "INSERT INTO c VALUES (100, 1), (200, 2)");
+        ok(ex, "UPDATE a SET id = 7 WHERE id = 1");
+        REQUIRE(dump(ex, "a") == "2,7");
+        REQUIRE(dump(ex, "b") == "10|7,20|2");
+        REQUIRE(dump(ex, "c") == "100|7,200|2");
+        // the new values are found through the primary key and the foreign key columns
+        REQUIRE(q(ex, "SELECT id FROM b WHERE p = 7") == Rows{{"10"}});
+        REQUIRE(fails(ex, "INSERT INTO c VALUES (300, 1)").find("Foreign key violation") != std::string::npos);
+        ok(ex, "INSERT INTO c VALUES (300, 7)");
+        // ... and a RESTRICT two levels down refuses the statement, which changes nothing (the other row of a can move)
+        ok(ex, "CREATE TABLE a2 (id INT PRIMARY KEY)");
+        ok(ex, "CREATE TABLE b2 (id INT PRIMARY KEY, p INT UNIQUE, FOREIGN KEY (p) REFERENCES a2(id) ON UPDATE CASCADE)");
+        ok(ex, "CREATE TABLE c2 (id INT PRIMARY KEY, q INT, FOREIGN KEY (q) REFERENCES b2(p) ON UPDATE RESTRICT)");
+        ok(ex, "INSERT INTO a2 VALUES (1), (2)");
+        ok(ex, "INSERT INTO b2 VALUES (10, 1), (20, 2)");
+        ok(ex, "INSERT INTO c2 VALUES (100, 1)");
+        REQUIRE_FALSE(ex.execute_sql("UPDATE a2 SET id = 7 WHERE id = 1").is_ok());
+        REQUIRE(dump(ex, "a2") == "1,2");
+        REQUIRE(dump(ex, "b2") == "10|1,20|2");
+        ok(ex, "UPDATE a2 SET id = 8 WHERE id = 2");
+        REQUIRE(dump(ex, "a2") == "1,8");
+        REQUIRE(dump(ex, "b2") == "10|1,20|8");
+        REQUIRE(dump(ex, "c2") == "100|1");
+        // a cascade that comes back to the table it started in acts as RESTRICT: b.p follows a.id, and a.bk refers to b.p
+        ok(ex, "CREATE TABLE a3 (id INT PRIMARY KEY, bk INT UNIQUE)");
+        ok(ex, "CREATE TABLE b3 (id INT PRIMARY KEY, ap INT UNIQUE, FOREIGN KEY (ap) REFERENCES a3(id) ON UPDATE CASCADE)");
+        ok(ex, "INSERT INTO a3 VALUES (1, NULL), (2, NULL)");
+        ok(ex, "INSERT INTO b3 VALUES (10, 1), (20, 2)");
+        ok(ex, "ALTER TABLE a3 ADD FOREIGN KEY (bk) REFERENCES b3(ap) ON UPDATE CASCADE");
+        ok(ex, "UPDATE a3 SET bk = 1 WHERE id = 2");
+        REQUIRE_FALSE(ex.execute_sql("UPDATE a3 SET id = 7 WHERE id = 1").is_ok());
+        REQUIRE(dump(ex, "a3") == "1|NULL,2|1");
+        REQUIRE(dump(ex, "b3") == "10|1,20|2");
+        ok(ex, "UPDATE a3 SET id = 8 WHERE id = 2");
+        REQUIRE(dump(ex, "a3") == "1|NULL,8|1");
+        REQUIRE(dump(ex, "b3") == "10|1,20|8");
+        // ROLLBACK gives the rows of every table back
+        ok(ex, "BEGIN");
+        ok(ex, "UPDATE a SET id = 9 WHERE id = 7");
+        REQUIRE(dump(ex, "c") == "100|9,200|2,300|9");
+        ok(ex, "ROLLBACK");
+        REQUIRE(dump(ex, "c") == "100|7,200|2,300|7");
+    }
+    Executor again(dir.path);
+    ok(again, "USE d");
+    REQUIRE(dump(again, "b") == "10|7,20|2");
+    REQUIRE(dump(again, "c") == "100|7,200|2,300|7");
+    REQUIRE(dump(again, "b2") == "10|1,20|8");
+}
+
+TEST_CASE("R56: a cascade down the chain waits for a row of a grandchild table that another transaction holds", "[r56][chain][concurrency]") {
+    TempDataDir dir("r56_chain_claims");
+    Executor ex(dir.path);
+    ok(ex, "CREATE DATABASE d");
+    ok(ex, "USE d");
+    ok(ex, "CREATE TABLE a (id INT PRIMARY KEY)");
+    ok(ex, "CREATE TABLE b (id INT PRIMARY KEY, p INT, FOREIGN KEY (p) REFERENCES a(id) ON DELETE CASCADE)");
+    ok(ex, "CREATE TABLE c (id INT PRIMARY KEY, q INT, v INT, FOREIGN KEY (q) REFERENCES b(id) ON DELETE CASCADE)");
+    ok(ex, "INSERT INTO a VALUES (1)");
+    ok(ex, "INSERT INTO b VALUES (10, 1)");
+    ok(ex, "INSERT INTO c VALUES (100, 10, 0)");
+    ok(ex, "BEGIN");
+    ok(ex, "UPDATE c SET v = 1 WHERE id = 100"); // (this transaction holds row 100 of the grandchild table)
+    std::atomic<bool> finished{false}, failed{false};
+    auto shared = ex.get_shared();
+    std::thread deleter([&] {
+        Executor s = Executor::new_session(shared);
+        if (!s.execute_sql("USE d").is_ok() || !s.execute_sql("DELETE FROM a WHERE id = 1").is_ok()) failed = true;
+        finished = true;
+    });
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    REQUIRE_FALSE(finished);
+    ok(ex, "COMMIT");
+    deleter.join();
+    REQUIRE_FALSE(failed);
+    REQUIRE(dump(ex, "c") == "");
+}
+
+TEST_CASE("R56: a cascade waits for a session that has just looked for a parent below the row it deletes, and so does a key that changes", "[r56][chain][concurrency]") {
+    TempDataDir dir("r56_value_claims");
+    Executor ex(dir.path);
+    ok(ex, "CREATE DATABASE d");
+    ok(ex, "USE d");
+    ok(ex, "CREATE TABLE a (id INT PRIMARY KEY)");
+    ok(ex, "CREATE TABLE b (id INT PRIMARY KEY, p INT UNIQUE, FOREIGN KEY (p) REFERENCES a(id) ON DELETE CASCADE ON UPDATE CASCADE)");
+    ok(ex, "CREATE TABLE c (id INT PRIMARY KEY, q INT, FOREIGN KEY (q) REFERENCES b(p) ON DELETE CASCADE ON UPDATE CASCADE)");
+    ok(ex, "INSERT INTO a VALUES (1), (2)");
+    ok(ex, "INSERT INTO b VALUES (10, 1), (20, 2)");
+    ok(ex, "INSERT INTO c VALUES (100, 1), (200, 2)");
+    auto shared = ex.get_shared();
+    // a child INSERT that has looked for its parent holds the value of the parent's column shared until its statement is over (here: b.p = 1, and b.id = 10 for a table below b.id)
+    auto locks = [&]() -> LockManager& { return const_cast<SharedDatabase&>(*shared->read()).lock_mgr; }; // (the lock manager answers to every session at once)
+    auto holds = [&](const std::string& claim, const std::string& value, std::uint64_t who) {
+        REQUIRE(locks().acquire_shared(claim, value, who).kind == LockResult::Kind::Granted);
+    };
+    auto waits_for = [&](const std::string& statement, const std::function<void()>& release) {
+        std::atomic<bool> finished{false}, failed{false};
+        std::thread runner([&] {
+            Executor session = Executor::new_session(shared);
+            if (!session.execute_sql("USE d").is_ok() || !session.execute_sql(statement).is_ok()) failed = true;
+            finished = true;
+        });
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        const bool waited = !finished;
+        release();
+        runner.join();
+        REQUIRE_FALSE(failed);
+        return waited;
+    };
+    // the DELETE of a row of a goes down to b (whose column p is what c refers to): the claim on b.p = 1 holds it
+    holds("d.b#fk:p", "1", 424242);
+    REQUIRE(waits_for("DELETE FROM a WHERE id = 1", [&] { locks().release(424242); }));
+    REQUIRE(dump(ex, "b") == "20|2");
+    REQUIRE(dump(ex, "c") == "200|2");
+    // the same for a key that changes: a.id = 2 becomes 7, b.p follows, and c.q below it
+    holds("d.b#fk:p", "2", 424243);
+    REQUIRE(waits_for("UPDATE a SET id = 7 WHERE id = 2", [&] { locks().release(424243); }));
+    REQUIRE(dump(ex, "b") == "20|7");
+    REQUIRE(dump(ex, "c") == "200|7");
+}
+
+TEST_CASE("R56: parents are deleted down a chain while grandchildren are written", "[r56][chain][concurrency]") {
+    TempDataDir dir("r56_chain_threads");
+    Executor ex(dir.path);
+    ok(ex, "CREATE DATABASE d");
+    ok(ex, "USE d");
+    ok(ex, "CREATE TABLE a (id INT PRIMARY KEY)");
+    ok(ex, "CREATE TABLE b (id INT PRIMARY KEY, p INT, FOREIGN KEY (p) REFERENCES a(id) ON DELETE CASCADE)");
+    ok(ex, "CREATE TABLE c (id INT PRIMARY KEY, q INT, FOREIGN KEY (q) REFERENCES b(id) ON DELETE CASCADE)");
+    ok(ex, multi_insert("a", 1, 400, [](int i) { return std::to_string(i); }));
+    ok(ex, multi_insert("b", 1, 400, [](int i) { return std::to_string(i) + "," + std::to_string(i); }));
+    auto shared = ex.get_shared();
+    std::atomic<bool> failed{false};
+    std::atomic<int> deleted{0};
+    std::thread deleter([&] {
+        Executor s = Executor::new_session(shared);
+        if (!s.execute_sql("USE d").is_ok()) { failed = true; return; }
+        for (int id = 400; id >= 1; id -= 2) {
+            auto r = s.execute_sql("DELETE FROM a WHERE id = " + std::to_string(id));
+            if (r.is_ok()) deleted++;
+            else failed = true;
+        }
+    });
+    std::thread writer([&] {
+        Executor s = Executor::new_session(shared);
+        if (!s.execute_sql("USE d").is_ok()) { failed = true; return; }
+        int next = 10000;
+        for (int id = 1; id <= 400; id += 2) {
+            auto r = s.execute_sql("INSERT INTO c VALUES (" + std::to_string(next++) + ", " + std::to_string(id) + ")");
+            if (r.is_err() && r.error().find("Foreign key violation") == std::string::npos) failed = true; // (the b row may be gone already)
+        }
+    });
+    deleter.join();
+    writer.join();
+    REQUIRE_FALSE(failed);
+    REQUIRE(deleted == 200);
+    // no grandchild is left without its child, no child without its parent
+    REQUIRE(q(ex, "SELECT COUNT(*) FROM c LEFT JOIN b ON b.id = c.q WHERE b.id IS NULL") == Rows{{"0"}});
+    REQUIRE(q(ex, "SELECT COUNT(*) FROM b LEFT JOIN a ON a.id = b.p WHERE a.id IS NULL") == Rows{{"0"}});
+    REQUIRE(q(ex, "SELECT COUNT(*) FROM a WHERE id % 2 = 0") == Rows{{"0"}});
+}
+
+namespace {
+// the names of the columns an answer prints ("id|name"), "" when it prints none
+std::string header_of(Executor& ex, const std::string& sql) {
+    INFO(sql);
+    auto r = ex.execute_sql(sql);
+    if (r.is_err()) INFO("error: " << r.error());
+    REQUIRE(r.is_ok());
+    std::istringstream in(r.value());
+    std::string line;
+    while (std::getline(in, line)) {
+        if (line.empty() || line[0] != '|') continue;
+        std::string names;
+        for (const std::string& cell : result_text::split_row(line)) names += (names.empty() ? "" : "|") + cell;
+        return names;
+    }
+    return std::string();
+}
+} // namespace
+
+TEST_CASE("R56: a SELECT that finds no rows still says its columns", "[r56][empty]") {
+    TempDataDir dir("r56_empty");
+    Executor ex(dir.path);
+    ok(ex, "CREATE DATABASE d");
+    ok(ex, "USE d");
+    ok(ex, "CREATE TABLE p (id INT PRIMARY KEY, name VARCHAR(10), v INT)");
+    ok(ex, "CREATE TABLE c (id INT PRIMARY KEY, pid INT, note VARCHAR(10), FOREIGN KEY (pid) REFERENCES p(id))");
+    ok(ex, "INSERT INTO p VALUES (1, 'a', 10), (2, 'b', 20)");
+    ok(ex, "INSERT INTO c VALUES (1, 1, 'x'), (2, 2, 'y')");
+    ok(ex, "CREATE VIEW vw AS SELECT id, name FROM p");
+    // the answer of no rows is the header with nothing under it (and the line every empty answer ends with)
+    REQUIRE(answer(ex, "SELECT * FROM p WHERE id < 0") == "+----+------+---+\n| id | name | v |\n+----+------+---+\n+----+------+---+\n0 rows returned.");
+    // ... and it names the columns as the answer of the same query that finds rows does, whatever is in the select list and the FROM
+    const std::vector<std::string> queries = {
+        "SELECT * FROM p",
+        "SELECT id, name FROM p",
+        "SELECT name, id FROM p",
+        "SELECT id AS ident, name AS label FROM p",
+        "SELECT p.id, p.name FROM p",
+        "SELECT x.id FROM p x",
+        "SELECT p.* FROM p",
+        "SELECT p.*, c.note FROM p JOIN c ON c.pid = p.id",
+        "SELECT * FROM p JOIN c ON c.pid = p.id",
+        "SELECT p.id, c.id FROM p LEFT JOIN c ON c.pid = p.id",
+        "SELECT name, COUNT(*) FROM p GROUP BY name",
+        "SELECT name, SUM(v) AS total FROM p GROUP BY name",
+        "SELECT name, MAX(v), MIN(v), AVG(v) FROM p GROUP BY name",
+        "SELECT DISTINCT name FROM p",
+        "SELECT id, name FROM p ORDER BY name DESC",
+        "SELECT d.id, d.name FROM (SELECT id, name FROM p) d",
+        "SELECT * FROM (SELECT id, v AS value FROM p) d",
+        "SELECT * FROM vw",
+        "SELECT id FROM vw",
+        "WITH w AS (SELECT id, name FROM p) SELECT * FROM w",
+        "WITH w (a, b) AS (SELECT id, name FROM p) SELECT a, b FROM w",
+        "WITH RECURSIVE r (n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM r WHERE n < 3) SELECT n FROM r",
+        "SELECT id FROM p UNION SELECT pid FROM c",
+        "SELECT id AS first_column FROM p UNION ALL SELECT pid FROM c",
+        "SELECT id, (SELECT COUNT(*) FROM c WHERE c.pid = p.id) AS kids FROM p",
+        "SELECT id, ROW_NUMBER() OVER (ORDER BY id) AS rn FROM p",
+        "SELECT id, CASE WHEN v > 10 THEN 'big' ELSE 'small' END AS size FROM p",
+        "SELECT id, UPPER(name) AS up FROM p",
+        "SELECT id, v + 1 AS next FROM p",
+        "SELECT v + 1 FROM p",
+        "SELECT UPPER(name), LENGTH(name) FROM p",
+        "SELECT COUNT(*), SUM(v) FROM p GROUP BY name",
+        "SELECT `id`, `name` FROM p",
+        "SELECT id * 2, v - 1 FROM p",
+        "SELECT CONCAT(name, 'x') FROM p",
+        "SELECT ROUND(v / 3, 1) FROM p",
+        "SELECT COALESCE(name, 'z') FROM p",
+        "SELECT CASE WHEN v > 10 THEN 1 END FROM p",
+        "SELECT COUNT(DISTINCT name) FROM p GROUP BY v",
+        "SELECT 1, 'a' FROM p",
+        "SELECT NOW() FROM p",
+        "SELECT x.* FROM p x JOIN p y ON y.id = x.id", // (a table joined with itself: x.* is the columns of one of them)
+        "SELECT y.* FROM p x JOIN p y ON y.id = x.id",
+        "SELECT x.id, y.name FROM p x LEFT JOIN p y ON y.id <> x.id",
+    };
+    for (const std::string& query : queries) {
+        const std::string with_rows = header_of(ex, query);
+        REQUIRE_FALSE(with_rows.empty());
+        REQUIRE(header_of(ex, query + " LIMIT 0") == with_rows);
+    }
+    // a query the columns of which cannot be told from the statement (a USING join) still answers "0 rows returned."
+    REQUIRE(answer(ex, "SELECT * FROM p JOIN c USING (id) WHERE p.id < 0") == "0 rows returned.");
+    // a SELECT that is prepared and executed says them too
+    ok(ex, "PREPARE st FROM 'SELECT id, name FROM p WHERE id < ?'");
+    ok(ex, "SET @zero = 0");
+    REQUIRE(answer(ex, "EXECUTE st USING @zero") == "+----+------+\n| id | name |\n+----+------+\n+----+------+\n0 rows returned.");
+    // SHOW TABLES LIKE names its column with the pattern, as MySQL does
+    REQUIRE(header_of(ex, "SHOW TABLES LIKE 'nomatch%'").find("Tables_in_d (nomatch%)") != std::string::npos);
+    REQUIRE(header_of(ex, "SHOW TABLES LIKE 'p%'").find("Tables_in_d (p%)") != std::string::npos);
+    // the headers are read back as the table of no rows they are: a table written from one has its columns, a derived table too
+    REQUIRE(q(ex, "SELECT * FROM (SELECT id, name FROM p WHERE id < 0) e").empty());
+    ok(ex, "CREATE TABLE copy AS SELECT id, name FROM p WHERE id < 0");
+    REQUIRE(q(ex, "SELECT id, name FROM copy").empty());
+}
+
+TEST_CASE("R56: a statement that deletes many parents looks the children up by an index of its own, and by the collation of the key", "[r56][chain]") {
+    TempDataDir dir("r56_many");
+    Executor ex(dir.path);
+    ok(ex, "CREATE DATABASE d");
+    ok(ex, "USE d");
+    ok(ex, "CREATE TABLE a (id VARCHAR(8) PRIMARY KEY)");
+    ok(ex, "CREATE TABLE b (id INT PRIMARY KEY, p VARCHAR(8), FOREIGN KEY (p) REFERENCES a(id) ON DELETE CASCADE)");
+    ok(ex, "CREATE TABLE c (id INT PRIMARY KEY, q INT, FOREIGN KEY (q) REFERENCES b(id) ON DELETE CASCADE)");
+    // the children name their parent with the other letter case: k1 is K1, K2 is k2 ...
+    ok(ex, multi_insert("a", 1, 40, [](int i) { return std::string(i % 2 ? "'k" : "'K") + std::to_string(i) + "'"; }));
+    ok(ex, multi_insert("b", 1, 80, [](int i) {
+        const int parent = (i - 1) % 40 + 1;
+        return std::to_string(i) + "," + (parent % 2 ? "'K" : "'k") + std::to_string(parent) + "'";
+    }));
+    ok(ex, multi_insert("c", 1, 160, [](int i) { return std::to_string(i) + "," + std::to_string((i - 1) % 80 + 1); }));
+    REQUIRE(answer(ex, "DELETE FROM a WHERE id IN ('k1', 'k2', 'k3', 'k4', 'k5', 'k6', 'k7', 'k8', 'k9', 'k10', 'k11', 'k12', 'k13', 'k14', 'k15', 'k16', 'k17', 'k18', 'k19', 'k20')") ==
+            "20 row(s) deleted.");
+    REQUIRE(q(ex, "SELECT COUNT(*) FROM a") == Rows{{"20"}});
+    REQUIRE(q(ex, "SELECT COUNT(*) FROM b") == Rows{{"40"}});
+    REQUIRE(q(ex, "SELECT COUNT(*) FROM c") == Rows{{"80"}});
+    // what is left refers to what is left
+    REQUIRE(q(ex, "SELECT COUNT(*) FROM b LEFT JOIN a ON a.id = b.p WHERE a.id IS NULL") == Rows{{"0"}});
+    REQUIRE(q(ex, "SELECT COUNT(*) FROM c LEFT JOIN b ON b.id = c.q WHERE b.id IS NULL") == Rows{{"0"}});
+    // every row of the whole chain at once
+    REQUIRE(answer(ex, "DELETE FROM a") == "20 row(s) deleted.");
+    REQUIRE(q(ex, "SELECT COUNT(*) FROM b") == Rows{{"0"}});
+    REQUIRE(q(ex, "SELECT COUNT(*) FROM c") == Rows{{"0"}});
+}
+
+TEST_CASE("R56: keys are changed down a chain while grandchildren are written", "[r56][chain][concurrency]") {
+    TempDataDir dir("r56_update_threads");
+    Executor ex(dir.path);
+    ok(ex, "CREATE DATABASE d");
+    ok(ex, "USE d");
+    ok(ex, "CREATE TABLE a (id INT PRIMARY KEY)");
+    ok(ex, "CREATE TABLE b (id INT PRIMARY KEY, p INT UNIQUE, FOREIGN KEY (p) REFERENCES a(id) ON UPDATE CASCADE)");
+    ok(ex, "CREATE TABLE c (id INT PRIMARY KEY, q INT, FOREIGN KEY (q) REFERENCES b(p) ON UPDATE CASCADE)");
+    ok(ex, multi_insert("a", 1, 300, [](int i) { return std::to_string(i); }));
+    ok(ex, multi_insert("b", 1, 300, [](int i) { return std::to_string(i) + "," + std::to_string(i); }));
+    auto shared = ex.get_shared();
+    std::atomic<bool> failed{false};
+    std::thread updater([&] {
+        Executor s = Executor::new_session(shared);
+        if (!s.execute_sql("USE d").is_ok()) { failed = true; return; }
+        for (int id = 1; id <= 300; id += 2) {
+            auto r = s.execute_sql("UPDATE a SET id = " + std::to_string(id + 1000) + " WHERE id = " + std::to_string(id));
+            if (r.is_err()) failed = true;
+        }
+    });
+    std::thread writer([&] {
+        Executor s = Executor::new_session(shared);
+        if (!s.execute_sql("USE d").is_ok()) { failed = true; return; }
+        int next = 10000;
+        for (int id = 1; id <= 300; id += 2) {
+            // (the key may have moved already: the value is then no parent, and the INSERT is refused)
+            auto r = s.execute_sql("INSERT INTO c VALUES (" + std::to_string(next++) + ", " + std::to_string(id) + ")");
+            if (r.is_err() && r.error().find("Foreign key violation") == std::string::npos) failed = true;
+        }
+    });
+    updater.join();
+    writer.join();
+    REQUIRE_FALSE(failed);
+    // no row of the chain refers to a key that is no more
+    REQUIRE(q(ex, "SELECT COUNT(*) FROM b LEFT JOIN a ON a.id = b.p WHERE a.id IS NULL") == Rows{{"0"}});
+    REQUIRE(q(ex, "SELECT COUNT(*) FROM c LEFT JOIN b ON b.p = c.q WHERE b.p IS NULL") == Rows{{"0"}});
+    REQUIRE(q(ex, "SELECT COUNT(*) FROM a WHERE id <= 300 AND id % 2 = 1") == Rows{{"0"}});
+}

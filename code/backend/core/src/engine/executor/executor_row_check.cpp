@@ -86,20 +86,6 @@ std::optional<std::string> Executor::delete_restrict_violation(SharedDatabase& s
     return std::nullopt;
 }
 
-std::vector<std::string> Executor::fk_restrict_children(const SharedDatabase& s, const std::string& table, const std::vector<std::string>& changed_cols) {
-    std::vector<std::string> out;
-    for (auto& [other_table, schema] : s.catalog.tables) {
-        for (auto& col : schema.columns) {
-            if (!col.foreign_key || col.foreign_key->ref_table != table || col.foreign_key->on_update != FkAction::Restrict) continue;
-            if (std::find(changed_cols.begin(), changed_cols.end(), col.foreign_key->ref_column) != changed_cols.end()) {
-                out.push_back(other_table);
-                break;
-            }
-        }
-    }
-    return out;
-}
-
 std::optional<std::string> Executor::update_restrict_violation(SharedDatabase& s, const std::string& table, const Row& old_row, const Row& new_row,
                                                                const std::vector<std::string>& changed_cols) {
     for (auto& [other_table, schema] : s.catalog.tables) {
@@ -122,6 +108,24 @@ std::optional<std::string> Executor::update_restrict_violation(SharedDatabase& s
         }
     }
     return std::nullopt;
+}
+
+std::vector<std::string> Executor::fk_children_closure(const SharedDatabase& s, const std::string& table) {
+    std::vector<std::string> out;
+    std::unordered_set<std::string> seen;
+    std::vector<std::string> todo{table};
+    while (!todo.empty()) {
+        const std::string current = std::move(todo.back());
+        todo.pop_back();
+        for (auto& [name, schema] : s.catalog.tables) {
+            const bool refers = std::any_of(schema.columns.begin(), schema.columns.end(), [&](const ColumnDef& c) { return c.foreign_key && c.foreign_key->ref_table == current; });
+            if (refers && seen.insert(name).second) {
+                out.push_back(name);
+                todo.push_back(name);
+            }
+        }
+    }
+    return out;
 }
 
 std::vector<std::string> Executor::fk_child_tables(const SharedDatabase& s, const std::string& table) {

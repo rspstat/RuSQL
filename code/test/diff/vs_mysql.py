@@ -59,7 +59,7 @@ def mysql_run(cur, sql):
             return ("ok", cur.rowcount) # (the affected rows of the OK packet; the native protocol says none: rusql_run gives None)
         LAST_TYPES[id(cur)] = [TYPE_CLASS.get(d[1], "text") for d in cur.description]
         places = [d[5] if d[1] in (7, 11, 12) and d[5] else 0 for d in cur.description] # (the fraction of a second of a DATETIME / TIME / TIMESTAMP column)
-        return ("rows", [[cell(v, places[i]) for i, v in enumerate(row)] for row in cur.fetchall()])
+        return ("rows", [[cell(v, places[i]) for i, v in enumerate(row)] for row in cur.fetchall()], [d[0] for d in cur.description])
     except Exception as e:  # noqa
         return ("err", str(e)[:100])
 
@@ -104,16 +104,17 @@ def rusql_run(db, sql):
         return ("err", "?")
     if out[0] == "ERR":
         return ("err", out[1] if len(out) > 1 else "")
-    rows, seen_header = [], False
+    rows, seen_header, header_cells = [], False, []
     for line in out:
         if line.startswith("|"):
             cells = split_row(line.strip())
             if not seen_header:
                 seen_header = True
+                header_cells = cells
                 continue
             rows.append(cells)
     if seen_header:
-        return ("rows", rows)
+        return ("rows", rows, header_cells)
     return ("ok", None) if not any(l.startswith("|") for l in out) else ("rows", [])
 
 
@@ -149,6 +150,10 @@ def first_difference(sql, a, b):
         return "kind " + a[0] + " / " + b[0]
     if a[0] == "ok" and b[0] == "ok" and a[1] is not None and b[1] is not None and a[1] != b[1]:
         return "affected rows mysql=%s / rusql=%s" % (a[1], b[1]) # (--proto: the OK packet's affected rows)
+    if a[0] == "rows" and not a[1] and len(a) > 2 and (b[0] == "ok" or (b[0] == "rows" and len(b) < 3)):
+        return "an answer of no rows has columns %s in mysql and none in rusql" % (a[2],)
+    if a[0] == "rows" and b[0] == "rows" and not a[1] and not b[1] and len(a) > 2 and len(b) > 2 and [x.lower() for x in a[2]] != [x.lower() for x in b[2]]:
+        return "an answer of no rows: columns mysql %s / rusql %s" % (a[2], b[2])
     if a[0] == "err" or a[0] == "ok" or (empty_a and empty_b):
         return None
     ra, rb = list(a[1]), list(b[1])

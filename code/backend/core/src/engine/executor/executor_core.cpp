@@ -858,9 +858,9 @@ bool has_firing_trigger(const SharedDatabase& s, const std::string& qtable, cons
 }
 
 // FK parents of `qtable` (its own schema's foreign_key->ref_table -- INSERT's existence
-// check reads these) and/or FK children (other tables whose foreign_key->ref_table ==
-// qtable -- UPDATE/DELETE cascade reads/writes these). Both are exactly one hop, matching
-// this codebase's actual cascade behavior (confirmed non-recursive, non-trigger-firing).
+// check reads these) -- one hop -- and/or FK children (the tables whose foreign_key->ref_table
+// is qtable, and those whose is one of them, and so on -- UPDATE/DELETE cascade reads/writes
+// these). The cascade is not trigger-firing.
 void add_fk_neighbors(const SharedDatabase& s, const std::string& qtable, bool parents, bool children, std::vector<std::string>& out) {
     if (parents) {
         if (auto* schema = s.catalog.get_table(qtable)) {
@@ -870,11 +870,8 @@ void add_fk_neighbors(const SharedDatabase& s, const std::string& qtable, bool p
         }
     }
     if (children) {
-        for (auto& [tname, tschema] : s.catalog.tables) {
-            for (auto& c : tschema.columns) {
-                if (c.foreign_key && c.foreign_key->ref_table == qtable) out.push_back(tname);
-            }
-        }
+        // (a child that goes with its parent has children of its own, and a child that is rewritten may hold a value that a third table refers to: all of them are written)
+        for (auto& tname : Executor::fk_children_closure(s, qtable)) out.push_back(tname);
     }
 }
 
@@ -1696,8 +1693,25 @@ StringResult Executor::execute_sql_inner(const std::string& sql) {
         for (auto& t : cache_tables) cache_gens_before.emplace_back(t, s0->query_cache.table_generation(t));
     }
 
+    // (a query that finds no rows still has columns: its text says them, as the text of a query that finds some does)
+    const bool query_statement = std::holds_alternative<Statement::Select>(stmt.data) || std::holds_alternative<Statement::Union>(stmt.data) ||
+                                 std::holds_alternative<Statement::Intersect>(stmt.data) || std::holds_alternative<Statement::Except>(stmt.data) ||
+                                 std::holds_alternative<Statement::With>(stmt.data);
+    std::optional<Statement::ExecuteStmt> prepared_call; // (EXECUTE of a SELECT: the columns are the prepared statement's)
+    if (auto* call = std::get_if<Statement::ExecuteStmt>(&stmt.data)) prepared_call = *call;
     explain_trace::stage("Prepare (cache, locks)");
     StringResult result = execute(std::move(stmt));
+    if ((query_statement || prepared_call) && result.is_ok() && result.value().rfind("0 rows returned", 0) == 0) {
+        std::vector<std::string> names;
+        if (prepared_call) {
+            std::string upper = prepared_call->name;
+            std::transform(upper.begin(), upper.end(), upper.begin(), [](unsigned char c) { return static_cast<char>(std::toupper(c)); });
+            if (auto prepared = prepared_statement(upper, prepared_call->using_vars); prepared.is_ok()) names = result_column_names(std::move(prepared).value());
+        } else {
+            names = result_column_names(trimmed);
+        }
+        if (!names.empty()) result = StringResult::Ok(result_text::empty_table(names));
+    }
 
     if (looks_like_select && !in_txn && !has_subquery && !has_nondeterministic && !has_infoschema && result.is_ok()) {
         // shared->read() is enough here -- QueryResultCache is fully self-synchronized

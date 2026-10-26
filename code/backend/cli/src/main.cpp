@@ -120,7 +120,7 @@ void colorize_table(const std::string& output) {
                 if (i < parts.size() - 2) std::cout << "|";
             }
             std::cout << COLOR_DARK_CYAN << "|" << RESET << "\n";
-        } else if (line.find("row(s) returned") != std::string::npos) {
+        } else if (line.find("row(s) returned") != std::string::npos || line.find("rows returned") != std::string::npos) {
             std::cout << COLOR_GREEN << line << RESET << "\n";
         } else {
             std::cout << RESET << line << "\n";

@@ -142,9 +142,10 @@ TEST_CASE("SELECT with no matching rows returns 0 rows returned", "[executor][se
     REQUIRE(ex.execute_sql("CREATE TABLE emp (id INT PRIMARY KEY)").is_ok());
     REQUIRE(ex.execute_sql("INSERT INTO emp VALUES (1)").is_ok());
 
+    // no row, and the header of the columns the query asked for
     auto r = ex.execute_sql("SELECT * FROM emp WHERE id = 999");
     REQUIRE(r.is_ok());
-    REQUIRE(r.value() == "0 rows returned.");
+    REQUIRE(r.value() == "+----+\n| id |\n+----+\n+----+\n0 rows returned.");
 }
 
 TEST_CASE("SELECT ORDER BY / LIMIT / OFFSET", "[executor][select]") {

@@ -54,6 +54,7 @@ RuSQL이 실제로 받아서 실행하는 SQL 문법을 한 줄씩 정리한 문
 - CONSTRAINT 이름 PRIMARY KEY / UNIQUE / CHECK / FOREIGN KEY ... : 이름 붙인 제약
 - [CONSTRAINT 이름] FOREIGN KEY (col) REFERENCES t(col) [ON DELETE 동작] [ON UPDATE 동작] : 외래 키(컬럼 하나짜리만)
 - 외래 키 동작 : CASCADE / SET NULL / SET DEFAULT / RESTRICT / NO ACTION
+- 표를 건너는 외래 키 사슬 : `a ← b ← c`에서 `DELETE`·키를 바꾸는 `UPDATE`의 연쇄는 사슬 끝까지 간다(R56) — CASCADE는 손자까지, 아래쪽 RESTRICT는 문장 전체를 거절하고 아무것도 바꾸지 않고, 순환은 끝나며, 이미 바꾸고 있는 표로 되돌아오는 `ON UPDATE` 연쇄는 RESTRICT처럼 동작한다(MySQL과 같음)
 - 자기 표를 가리키는 외래 키 : `REFERENCES emp(id)`를 `emp` 자신에게(R55) — `DELETE`는 InnoDB처럼 행을 하나씩 읽는 순서(키 순서, `ORDER BY`가 있으면 그 순서)로 처리한다: RESTRICT는 아직 있는 자식이 있으면 문장 전체를 거절하고, CASCADE는 자식을 되풀이해서 지우되 14단계까지(15번째 단계는 오류 3008), SET NULL은 자식을 NULL로 바꾼다. 같은 문장이 먼저 연쇄로 지운 행은 스캔이 도달하지 않아 세지 않는다. `ON UPDATE CASCADE`·`SET NULL`은 자기 표에는 쓸 수 없어 RESTRICT처럼 동작한다(MySQL과 같음)
 
 ## 3. 테이블 변경 · 삭제 · 이름 변경

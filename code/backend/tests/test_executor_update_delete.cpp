@@ -245,7 +245,7 @@ TEST_CASE("DELETE with FK CASCADE removes dependent rows", "[executor][delete]")
     // employee (id=1) would keep returning it as if it still existed.
     auto pk_check = ex.execute_sql("SELECT id FROM employee WHERE id = 1");
     REQUIRE(pk_check.is_ok());
-    REQUIRE(pk_check.value() == "0 rows returned.");
+    REQUIRE(pk_check.value() == "+----+\n| id |\n+----+\n+----+\n0 rows returned."); // (no row, and the header of the column the query asked for)
 }
 
 TEST_CASE("DELETE with FK SET NULL clears the referencing column", "[executor][delete]") {
@@ -316,7 +316,7 @@ TEST_CASE("DELETE with FK CASCADE inside an explicit transaction keeps the casca
 
     auto pk_check = ex.execute_sql("SELECT id FROM employee WHERE id = 1");
     REQUIRE(pk_check.is_ok());
-    REQUIRE(pk_check.value() == "0 rows returned.");
+    REQUIRE(pk_check.value() == "+----+\n| id |\n+----+\n+----+\n0 rows returned."); // (no row, and the header of the column the query asked for)
 }
 
 TEST_CASE("UPDATE and DELETE against an updatable view redirect to the base table", "[executor][update][delete]") {

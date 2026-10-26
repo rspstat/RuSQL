@@ -114,6 +114,12 @@ const Case kFkParent[] = {
 const Case kSelfFk[] = {
 #include "mysql_conformance_self_fk.inc"
 };
+const Case kFkChain[] = {
+#include "mysql_conformance_fk_chain.inc"
+};
+const Case kEmptyColumns[] = {
+#include "mysql_conformance_empty_columns.inc"
+};
 
 struct TempDataDir {
     std::string path;
@@ -371,4 +377,12 @@ TEST_CASE("The parent side of a foreign key: DELETE / UPDATE of a parent row, a 
 
 TEST_CASE("A foreign key of a table to itself: DELETE (RESTRICT / CASCADE / SET NULL), UPDATE of the key, other tables below the rows that go", "[mysql_conformance][self_fk]") {
     run_cases("mc_self_fk", kSelfFk, sizeof kSelfFk / sizeof kSelfFk[0]);
+}
+
+TEST_CASE("Foreign keys over several tables: cascades down the chain, RESTRICT below, cycles, ON UPDATE through a chain", "[mysql_conformance][fk_chain]") {
+    run_cases("mc_fk_chain", kFkChain, sizeof kFkChain / sizeof kFkChain[0]);
+}
+
+TEST_CASE("An answer of no rows: the statements that find nothing", "[mysql_conformance][empty_columns]") {
+    run_cases("mc_empty_columns", kEmptyColumns, sizeof kEmptyColumns / sizeof kEmptyColumns[0]);
 }

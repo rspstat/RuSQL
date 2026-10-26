@@ -475,9 +475,11 @@ StringResult Executor::exec_delete_inner(SharedDatabase& s, const std::string& t
 
     // Slow path: FK references, subquery condition, or an active transaction.
     std::vector<Row> rows_to_delete;
+    std::vector<std::size_t> target_positions; // where the rows to delete were when they were read (empty when that is not known): the cascade looks there first
     // (a table that is its own child reads them a second time, after the cascades that deleted or rewrote some of them)
     auto collect_targets = [&]() -> std::optional<StringResult> {
         rows_to_delete.clear();
+        target_positions.clear();
         // Row-level-concurrency Stage 4: SHARED -- this block only ever reads
         // s.tables[table] (candidate collection, possibly via matches_condition_with_
         // subquery's exec_select recursion, which is itself lock-free by design -- see
@@ -499,6 +501,7 @@ StringResult Executor::exec_delete_inner(SharedDatabase& s, const std::string& t
             for (auto& r : candidates) {
                 if (matches_condition_with_subquery(s, r, condition)) rows_to_delete.push_back(r);
             }
+            // (the rows were copied: where they were is not known)
         } else {
             DmlIndexHit hit;
             if (auto pkc = single_pk_col(table)) {
@@ -506,10 +509,17 @@ StringResult Executor::exec_delete_inner(SharedDatabase& s, const std::string& t
                                           txn.current_txn_id());
             }
             if (hit.usable) {
-                for (auto pos : hit.positions) rows_to_delete.push_back(tit->second[pos]);
+                for (auto pos : hit.positions) {
+                    rows_to_delete.push_back(tit->second[pos]);
+                    target_positions.push_back(pos);
+                }
             } else {
-                for (auto& r : tit->second) {
-                    if (is_visible(r) && matches_condexpr(r, condition)) rows_to_delete.push_back(r);
+                for (std::size_t pos = 0; pos < tit->second.size(); pos++) {
+                    const Row& r = tit->second[pos];
+                    if (is_visible(r) && matches_condexpr(r, condition)) {
+                        rows_to_delete.push_back(r);
+                        target_positions.push_back(pos);
+                    }
                 }
             }
         }
@@ -520,54 +530,21 @@ StringResult Executor::exec_delete_inner(SharedDatabase& s, const std::string& t
     };
     if (auto refused = collect_targets()) return *refused;
 
-    std::vector<std::pair<std::string, std::vector<ColumnDef>>> other_tables;
-    for (auto& [name, schema] : s.catalog.tables) {
-        if (name != table) other_tables.emplace_back(name, schema.columns);
-    }
-
-    // Row-level-concurrency Stage 4: EXCLUSIVE on every FK-child table touched below --
-    // Cascade's non-txn branch does a real erase (shape change) on `other_table`, so
-    // EXCLUSIVE (not SHARED) is required there; applying it uniformly for the whole
-    // Restrict-check + Cascade/SetNull/SetDefault section (rather than conditionally per
-    // txn-state/action) keeps this tractable and is always a safe superset of what a
-    // read or in-place mutation alone would need.
-    // Real-blocking-wait stage: the nested loop below (rows_to_delete -> other_tables ->
-    // cols -> per-FkAction row scan, 4 levels deep, plus a 5th for Cascade's separate
-    // claim-then-erase passes) is wrapped in try_cascade_once() so any conflict can
-    // `return` straight out of every level via the lambda boundary -- see
+    // Row-level-concurrency Stage 4: EXCLUSIVE on every table the cascade can touch -- the tables that refer to this one, and those that refer to them: Cascade's non-txn
+    // branch does a real erase (shape change) on a child, so EXCLUSIVE (not SHARED) is required there; applying it uniformly for the whole check + write section (rather than
+    // conditionally per txn-state/action) keeps this tractable and is always a safe superset of what a read or in-place mutation alone would need. This table too when it is
+    // one of them (its own child, or a child of a child of its own).
+    // Real-blocking-wait stage: the section is wrapped in try_cascade_once() so any conflict can `return` straight out of every level via the lambda boundary -- see
     // exec_update_inner's identical pattern for the full reasoning.
     const std::vector<std::string> referenced = referenced_columns(s, table);
-    // A foreign key of the table to itself: a row that goes may have children among the rows of the table, which are looked for and acted on here (plan_self_delete)
-    // before the other tables' children are, and which the other tables' foreign keys are then asked about too.
-    const TableSchema* own_schema = s.catalog.get_table(table);
-    const bool self_referencing = own_schema && std::any_of(own_schema->columns.begin(), own_schema->columns.end(),
-                                                            [&](const ColumnDef& c) { return c.foreign_key && c.foreign_key->ref_table == table; });
-    SelfDeletePlan self_plan;
+    const std::vector<std::string> closure = fk_children_closure(s, table);
+    const bool reaches_itself = std::find(closure.begin(), closure.end(), table) != closure.end();
+    CascadePlan plan;
     // The id the child versions of this statement carry: the transaction's, or a one-off id for a statement outside one.
     const std::uint64_t cascade_id = tagging_txn_id(s);
-    // The live rows of `other_table` whose `column` equals `value`, claimed one by one (a claim that cannot be had ends the attempt before anything is written); their positions
-    // are left in child_hits for cascade_write.
-    std::vector<std::size_t> child_hits;
-    auto collect_children = [&](const std::string& other_table, const std::string& column, const std::string& value, const char* action_desc,
-                                bool frees_unique) -> std::optional<CascadeAttemptResult> {
-        child_hits.clear();
-        auto oit = s.tables.find(other_table);
-        if (oit == s.tables.end()) return std::nullopt;
-        if (fk_children_absent(s, other_table, column, value)) return std::nullopt; // (no live row refers to the value: nothing to claim or change)
-        auto& child_rows = oit->second;
-        for (std::size_t i = 0; i < child_rows.size(); i++) {
-            const Row& row = child_rows[i];
-            if (!is_visible(row)) continue;
-            auto it = row.find(column);
-            if (it == row.end() || !collation::equal(it->second, value)) continue;
-            if (auto sig = claim_or_signal(other_table, row, action_desc, frees_unique)) return sig;
-            child_hits.push_back(i);
-        }
-        return std::nullopt;
-    };
     auto try_cascade_once = [&]() -> CascadeAttemptResult {
-    std::vector<std::string> locked_tables = neighbor_tables; // (a table that is its own child is written here too)
-    if (self_referencing) locked_tables.push_back(table);
+    std::vector<std::string> locked_tables = neighbor_tables;
+    if (reaches_itself) locked_tables.push_back(table);
     auto neighbor_write_lock = acquire_table_data_locks(s, locked_tables, /*exclusive=*/true);
     // (however this attempt ends, the cache of the values the child tables hold has taken in every row the cascades changed -- each one is reported to it -- and this section
     // changes no other live row, so the cache is current again for the next statement)
@@ -582,107 +559,62 @@ StringResult Executor::exec_delete_inner(SharedDatabase& s, const std::string& t
         }
     } keep_probes_current{*this, s, locked_tables};
 
-    // The rows of the table that go because of a foreign key to the table itself are known before anything is written (and claimed like the children of other tables are).
-    self_plan = SelfDeletePlan{};
-    if (self_referencing) {
-        if (auto refused = plan_self_delete(s, table, rows_to_delete, row_order, condition, self_plan)) return CascadeAttemptResult::hard_error(StringResult::Err(*refused));
-        if (self_plan.active) {
-            const std::vector<Row>& own_rows = s.tables.at(table);
-            for (std::size_t pos : self_plan.cascaded) {
-                if (auto sig = claim_or_signal(table, own_rows[pos], "Cascade", /*frees_unique=*/true)) return *sig;
+    // What the foreign keys do to the rows that go -- their children, the children of those, the other tables that refer to them -- is worked out before anything is written:
+    // a statement that a RESTRICT refuses anywhere down the chain changes nothing. The rows that only a cascade deletes or rewrites are claimed like any row of a table.
+    plan = CascadePlan{};
+    if (auto refused = plan_cascade_delete(s, table, rows_to_delete, target_positions.size() == rows_to_delete.size() ? &target_positions : nullptr, row_order, condition, plan))
+        return CascadeAttemptResult::hard_error(StringResult::Err(*refused));
+    if (plan.active) {
+        for (auto& [name, planned] : plan.tables) {
+            const std::vector<Row>& rows = s.tables.at(name);
+            for (std::size_t pos : planned.deleted) {
+                if (auto sig = claim_or_signal(name, rows[pos], "Cascade", /*frees_unique=*/true)) return *sig;
             }
-            for (auto& rewrite : self_plan.rewrites) {
+            for (auto& rewrite : planned.rewrites) {
                 for (std::size_t pos : rewrite.second) {
-                    if (auto sig = claim_or_signal(table, own_rows[pos], "SetNull", /*frees_unique=*/false)) return *sig;
-                }
-            }
-        }
-    }
-    // (the rows whose children the other tables' foreign keys look for: the ones the statement names and, below them, the ones that cascades delete)
-    const std::vector<Row>& doomed = self_plan.active ? self_plan.doomed : rows_to_delete;
-
-    for (auto& del_row : doomed) {
-        for (auto& [other_table, cols] : other_tables) {
-            for (auto& col : cols) {
-                if (col.foreign_key && col.foreign_key->ref_table == table && col.foreign_key->on_delete == FkAction::Restrict) {
-                    auto dit = del_row.find(col.foreign_key->ref_column);
-                    std::string del_val = dit != del_row.end() ? dit->second : std::string();
-                    if (auto oit = s.tables.find(other_table); oit != s.tables.end()) {
-                        // (R54: the cache of the child's foreign key values says at once that no live row refers to the value; a NULL refers to nothing)
-                        bool referenced = !fk_children_absent(s, other_table, col.name, del_val) && index_or_scan_exists(s, other_table, oit->second, col.name, del_val, is_visible);
-                        if (referenced) {
-                            return CascadeAttemptResult::hard_error(StringResult::Err(
-                                "Foreign key violation: row in '" + table + "' is referenced by '" + other_table + "'.'" + col.name + "'"));
-                        }
-                    }
+                    if (auto sig = claim_or_signal(name, rows[pos], "SetNull", /*frees_unique=*/false)) return *sig;
                 }
             }
         }
     }
 
-    // The values of the rows to delete that a foreign key refers to are claimed (exclusive), after the check above has found no child that is there to see: a child
+    // The values of the rows that go that a foreign key refers to are claimed (exclusive), after the check above has found no child that is there to see: a child
     // INSERT / UPDATE that has looked for its parent holds the value (shared) until its statement is over, so this DELETE waits for it, starts again and finds its row.
     // One that comes later waits for this one and finds no parent.
-    for (auto& del_row : doomed) {
-        for (auto& ref_col : referenced) {
-            auto dit = del_row.find(ref_col);
-            if (dit == del_row.end() || dit->second == EXECUTOR_NULL_VALUE) continue;
-            LockResult lr = s.lock_mgr.acquire(fk_claim_table(table, ref_col), dit->second, claim_txn_id);
-            if (lr.kind == LockResult::Kind::Deadlock) {
-                return CascadeAttemptResult::hard_error(StringResult::Err("Deadlock detected: transaction " + std::to_string(claim_txn_id) + " waits for transaction " +
-                                                                           std::to_string(lr.holder) + " (DELETE on '" + table + "'). Transaction " +
-                                                                           std::to_string(claim_txn_id) + " aborted."));
-            }
-            if (lr.kind == LockResult::Kind::Conflict) return CascadeAttemptResult::needs_retry(fk_claim_table(table, ref_col), dit->second);
-        }
-    }
-
-    for (auto& del_row : doomed) {
-        for (auto& [other_table, cols] : other_tables) {
-            for (auto& col : cols) {
-                if (!col.foreign_key || col.foreign_key->ref_table != table) continue;
-                auto dit = del_row.find(col.foreign_key->ref_column);
-                std::string del_val = dit != del_row.end() ? dit->second : std::string();
-
-                switch (col.foreign_key->on_delete) {
-                    case FkAction::Restrict:
-                        break; // already checked above
-                    case FkAction::Cascade: {
-                        if (auto sig = collect_children(other_table, col.name, del_val, "Cascade", /*frees_unique=*/true)) return *sig;
-                        cascade_write(s, other_table, child_hits, nullptr, cascade_id);
-                        break;
-                    }
-                    case FkAction::SetNull: {
-                        if (auto sig = collect_children(other_table, col.name, del_val, "SetNull", /*frees_unique=*/false)) return *sig;
-                        cascade_write(s, other_table, child_hits, [&](Row& r) { r[col.name] = EXECUTOR_NULL_VALUE; }, cascade_id);
-                        break;
-                    }
-                    case FkAction::SetDefault: {
-                        std::string default_val = EXECUTOR_NULL_VALUE;
-                        if (auto* osc = s.catalog.get_table(other_table)) {
-                            auto cit = std::find_if(osc->columns.begin(), osc->columns.end(), [&](const ColumnDef& c2) { return c2.name == col.name; });
-                            if (cit != osc->columns.end() && cit->default_value) default_val = *cit->default_value;
-                        }
-                        if (auto sig = collect_children(other_table, col.name, del_val, "SetDefault", /*frees_unique=*/false)) return *sig;
-                        cascade_write(s, other_table, child_hits, [&](Row& r) { r[col.name] = default_val; }, cascade_id);
-                        break;
-                    }
+    for (auto& [name, planned] : plan.tables) {
+        const std::vector<std::string> refs = name == table ? referenced : referenced_columns(s, name);
+        for (auto& del_row : planned.doomed) {
+            for (auto& ref_col : refs) {
+                auto dit = del_row.find(ref_col);
+                if (dit == del_row.end() || dit->second == EXECUTOR_NULL_VALUE) continue;
+                LockResult lr = s.lock_mgr.acquire(fk_claim_table(name, ref_col), dit->second, claim_txn_id);
+                if (lr.kind == LockResult::Kind::Deadlock) {
+                    return CascadeAttemptResult::hard_error(StringResult::Err("Deadlock detected: transaction " + std::to_string(claim_txn_id) + " waits for transaction " +
+                                                                               std::to_string(lr.holder) + " (DELETE on '" + table + "'). Transaction " +
+                                                                               std::to_string(claim_txn_id) + " aborted."));
                 }
-                // (a statement that the redo log does not cover persists the child table itself)
-                if (!txn.is_active() && !redo_covered_stmt_ && col.foreign_key->on_delete != FkAction::Restrict) {
-                    std::vector<Row> rc = s.tables.at(other_table);
-                    s.buffer_pool.write_through(other_table, rc, s.disk);
-                }
+                if (lr.kind == LockResult::Kind::Conflict) return CascadeAttemptResult::needs_retry(fk_claim_table(name, ref_col), dit->second);
             }
         }
     }
-    if (self_plan.active) {
-        // The rows of the table that stay but are rewritten first: their new versions go to the end of the table, so the positions of the rows to delete do not move.
-        for (auto& rewrite : self_plan.rewrites) {
-            const auto& changes = rewrite.first;
-            cascade_write(s, table, rewrite.second, [&](Row& r) { for (auto& [column, value] : changes) r[column] = value; }, cascade_id);
+
+    if (plan.active) {
+        // The rows that are rewritten go first: their new versions go to the end of their table, so the positions of the rows to delete do not move.
+        for (auto& [name, planned] : plan.tables) {
+            for (auto& rewrite : planned.rewrites) {
+                const auto& changes = rewrite.first;
+                cascade_write(s, name, rewrite.second, [&](Row& r) { for (auto& [column, value] : changes) r[column] = value; }, cascade_id);
+            }
         }
-        cascade_write(s, table, self_plan.cascaded, nullptr, cascade_id);
+        for (auto& [name, planned] : plan.tables) cascade_write(s, name, planned.deleted, nullptr, cascade_id);
+        // (a statement that the redo log does not cover persists the child tables themselves)
+        if (!txn.is_active() && !redo_covered_stmt_) {
+            for (auto& [name, planned] : plan.tables) {
+                if (name == table || (planned.deleted.empty() && planned.rewrites.empty())) continue;
+                std::vector<Row> rc = s.tables.at(name);
+                s.buffer_pool.write_through(name, rc, s.disk);
+            }
+        }
     }
     // Row-level-concurrency Stage 4/5 correctness fix: invalidate the cache for every
     // FK-cascade-touched table HERE, still holding neighbor_write_lock EXCLUSIVE.
@@ -713,7 +645,7 @@ StringResult Executor::exec_delete_inner(SharedDatabase& s, const std::string& t
         // else: granted -- loop back and retry try_cascade_once() from scratch.
     }
     // (the rows that a cascade deleted are gone and the ones it rewrote read differently now: what is left to delete is what the statement finds)
-    if (self_plan.active) {
+    if (plan.active) {
         if (auto refused = collect_targets()) return *refused;
     }
 

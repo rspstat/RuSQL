@@ -44,8 +44,8 @@ const NODES: Node[] = [
   },
   {
     id: "server", x: 335, y: 350, w: 150, h: 112, c: C.server, name: "engine_server",
-    desc: L("TCP front-end: native :7878 + MySQL wire :3306, challenge-response auth, one session per connection. Answers the metadata statements MySQL clients send; result columns carry types. KILL n ends a session's query or closes its connection; SHOW STATUS reads real counters without the database lock.",
-            "TCP 프런트엔드: 네이티브 :7878 + MySQL 와이어 :3306, 챌린지-응답 인증, 연결당 세션 1개. MySQL 클라이언트의 메타데이터 문장에 답하고 결과 열에 타입을 실어 보냄. KILL n은 세션의 문장을 멈추거나 연결을 닫고, SHOW STATUS는 실제 카운터를 데이터베이스 락 없이 읽음."),
+    desc: L("TCP front-end: native :7878 + MySQL wire :3306, challenge-response auth, one session per connection. Answers the metadata statements MySQL clients send; result columns carry types, also when there are no rows. KILL n ends a session's query or closes its connection; SHOW STATUS reads real counters without the database lock.",
+            "TCP 프런트엔드: 네이티브 :7878 + MySQL 와이어 :3306, 챌린지-응답 인증, 연결당 세션 1개. MySQL 클라이언트의 메타데이터 문장에 답하고 결과 열에 타입을 실어 보냄(행이 없을 때도 열을 보냄). KILL n은 세션의 문장을 멈추거나 연결을 닫고, SHOW STATUS는 실제 카운터를 데이터베이스 락 없이 읽음."),
   },
   {
     id: "parser", x: 525, y: 350, w: 120, h: 98, c: C.core, name: L("Parser", "파서"),
@@ -59,8 +59,8 @@ const NODES: Node[] = [
   },
   {
     id: "executor", x: 885, y: 350, w: 120, h: 98, c: C.core, name: L("Executor", "실행기"),
-    desc: L("Runs the plan: NL / hash / sort-merge / index joins, subqueries, CTE, window functions (over groups too). Result cache (LRU-512) + thread pool. MySQL-exact results (DECIMAL places, strict errors); MAX_EXECUTION_TIME (3024); TRACE. A foreign key to its own table is worked out row by row like InnoDB (RESTRICT, CASCADE, SET NULL).",
-            "계획 실행: NL·해시·소트-머지·인덱스 조인, 서브쿼리, CTE, 윈도 함수(그룹 위에서도). 결과 캐시(LRU 512) + 스레드 풀. MySQL과 같은 결과(DECIMAL 자릿수, 엄격한 오류), MAX_EXECUTION_TIME(3024), TRACE. 자기 표를 가리키는 외래키는 InnoDB처럼 행 단위로 처리(RESTRICT·CASCADE·SET NULL)."),
+    desc: L("Runs the plan: NL / hash / sort-merge / index joins, subqueries, CTE, window functions (over groups too). Result cache (LRU-512) + thread pool. MySQL-exact results (DECIMAL places, strict errors); MAX_EXECUTION_TIME (3024); TRACE. Foreign key actions are worked out row by row like InnoDB, down the whole chain of tables (RESTRICT, CASCADE, SET NULL, ON UPDATE), a table that is its own child included.",
+            "계획 실행: NL·해시·소트-머지·인덱스 조인, 서브쿼리, CTE, 윈도 함수(그룹 위에서도). 결과 캐시(LRU 512) + 스레드 풀. MySQL과 같은 결과(DECIMAL 자릿수, 엄격한 오류), MAX_EXECUTION_TIME(3024), TRACE. 외래키 동작은 InnoDB처럼 행 단위로, 표를 건너는 사슬 끝까지(RESTRICT·CASCADE·SET NULL·ON UPDATE) 처리하고 자기 표를 가리키는 외래키도 포함."),
   },
   {
     id: "txn", x: 1085, y: 350, w: 130, h: 104, c: C.txn, name: L("Transactions", "트랜잭션"),

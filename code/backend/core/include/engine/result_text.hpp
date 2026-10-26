@@ -36,6 +36,20 @@ inline std::string escape_cell(const std::string& value) {
     return out;
 }
 
+// The text of a SELECT that has columns but no rows: the header between its bars, nothing under it, and the line every empty answer ends with. (The readers of a table
+// take it for a table of no rows: the desktop client shows the headers, the MySQL protocol sends the columns of an empty result set.)
+inline std::string empty_table(const std::vector<std::string>& columns) {
+    std::string bar, header;
+    for (const std::string& column : columns) {
+        const std::string cell = escape_cell(column);
+        bar += "+" + std::string(cell.size() + 2, '-');
+        header += "| " + cell + " ";
+    }
+    bar += "+";
+    header += "|";
+    return bar + "\n" + header + "\n" + bar + "\n" + bar + "\n0 rows returned.";
+}
+
 // Reverses escape_cell on one cell (already cut out of its row, padding removed). A lone backslash cannot come from escape_cell and stands for itself.
 inline std::string unescape_cell(const std::string& cell) {
     std::string out;

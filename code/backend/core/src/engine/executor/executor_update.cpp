@@ -141,8 +141,26 @@ StringResult Executor::exec_update_inner(SharedDatabase& s, const std::string& t
     for (auto& [c, _] : assignments) assigned_cols.push_back(c);
     // the parent rows of the foreign keys among them are read while the rows are rewritten
     std::vector<std::string> fk_parents = fk_parent_tables(s, *schema0, assigned_cols);
-    // ... and the child rows that reference a column it changes (ON UPDATE RESTRICT)
-    for (auto& t : fk_restrict_children(s, table, assigned_cols)) fk_parents.push_back(t);
+    // ... and the child rows that reference a column it changes (ON UPDATE RESTRICT, CASCADE, SET NULL), and theirs: what a key becomes is asked of the whole chain before a row is written
+    const std::vector<std::string> referenced_here = referenced_columns(s, table);
+    const bool changes_a_referenced_column =
+        std::any_of(assigned_cols.begin(), assigned_cols.end(), [&](const std::string& c) { return std::find(referenced_here.begin(), referenced_here.end(), c) != referenced_here.end(); });
+    // A cascade goes further than the children only where a column of a child that follows the key is referenced by something else: only then is the early look at the whole
+    // chain below needed (the children alone are looked at by update_restrict_violation, for every row, before it is written).
+    bool chain_possible = false;
+    if (changes_a_referenced_column) {
+        for (auto& t : fk_children_closure(s, table)) {
+            fk_parents.push_back(t);
+            const TableSchema* child = s.catalog.get_table(t);
+            if (!child) continue;
+            const std::vector<std::string> referenced_there = referenced_columns(s, t);
+            for (auto& col : child->columns) {
+                if (col.foreign_key && col.foreign_key->on_update != FkAction::Restrict &&
+                    std::find(referenced_there.begin(), referenced_there.end(), col.name) != referenced_there.end())
+                    chain_possible = true;
+            }
+        }
+    }
 
     // Row-level-concurrency Stage 4: reconstruct the equivalent Statement::Update to
     // reuse table_lock_set_for's exact table-closure computation (target + FK parent/
@@ -578,6 +596,15 @@ StringResult Executor::exec_update_inner(SharedDatabase& s, const std::string& t
                 // row returned with the earlier rows already dead and their new versions thrown away --
                 // `UPDATE t SET v = v + 8` failing a CHECK on row 2 silently deleted row 1.
                 // (Targets point into `rows`, so this must stay before the insert below.)
+                // What a key that changes does to the rows that refer to its old value -- the children, and theirs -- is asked before any row is written: a RESTRICT
+                // anywhere down the chain refuses the statement, which then changes nothing. (The cascade itself is worked out again where it is written, below.)
+                if (chain_possible && !conflict) {
+                    std::vector<std::pair<const Row*, const Row*>> pairs;
+                    pairs.reserve(new_versions.size());
+                    for (std::size_t i = 0; i < new_versions.size(); i++) pairs.emplace_back(targets[i], &new_versions[i]);
+                    CascadePlan dry_run;
+                    if (auto refused = plan_cascade_update(s, table, pairs, assigned_cols, dry_run)) return StringResult::Err(*refused);
+                }
                 // The values the new versions take in a UNIQUE column / key (and in a PRIMARY KEY that changes) are claimed in the lock manager, as an INSERT claims
                 // them: a session that is writing the same value (an INSERT between its duplicate check and its row, another UPDATE) holds the claim, and this
                 // statement then waits for it and starts again -- the check below finds its row. Nothing has been stamped yet, so giving up an attempt costs nothing.
@@ -786,11 +813,6 @@ StringResult Executor::exec_update_inner(SharedDatabase& s, const std::string& t
     std::vector<std::string> changed_cols;
     for (auto& [c, _] : assignments) changed_cols.push_back(c);
 
-    std::vector<std::pair<std::string, std::vector<ColumnDef>>> other_tables;
-    for (auto& [name, schema] : s.catalog.tables) {
-        if (name != table) other_tables.emplace_back(name, schema.columns);
-    }
-
     // Row-level-concurrency Stage 4: FK cascade previously took NO LockManager claim at
     // all on the child table's affected rows (safe only because the whole child table
     // was held exclusively via table_locks for the statement's duration). Now that
@@ -830,9 +852,8 @@ StringResult Executor::exec_update_inner(SharedDatabase& s, const std::string& t
     // FK column pointing at `table`'s pk), so the PK B+Tree side only ever needs the
     // single-insert overwrite path, never remove()+insert() for a changed key.
     // Real-blocking-wait stage: claim_cascade_row() itself never blocks -- it only probes
-    // (timeout=0) and reports the outcome. The nested loop below (undo_entries ->
-    // changed_cols -> other_tables -> cols -> per-FkAction row scan, 5 levels deep) is
-    // wrapped in the try_cascade_once() lambda so that any conflict can `return` straight
+    // (timeout=0) and reports the outcome. The section below (the plan of the cascade, then the
+    // claims and the writes of every table it reaches) is wrapped in the try_cascade_once() lambda so that any conflict can `return` straight
     // out of every level at once (a lambda's `return` only exits the lambda, unlike a
     // loop `break`, so this needs no per-level "check a flag and break" plumbing). The
     // retry loop further below calls try_cascade_once() repeatedly: on NeedsRetry, it
@@ -865,33 +886,7 @@ StringResult Executor::exec_update_inner(SharedDatabase& s, const std::string& t
         static CascadeAttemptResult hard_error(StringResult e) { return {Outcome::HardError, "", "", std::move(e)}; }
     };
 
-    // The live rows of `other_table` whose `column` equals `value`, claimed one by one (a claim that cannot be had ends the attempt before anything is written); their positions
-    // are left in child_hits for cascade_write.
-    std::vector<std::size_t> child_hits;
-    auto collect_children = [&](const std::string& other_table, const std::string& column, const std::string& value) -> std::optional<CascadeAttemptResult> {
-        child_hits.clear();
-        auto oit = s.tables.find(other_table);
-        if (oit == s.tables.end()) return std::nullopt;
-        if (fk_children_absent(s, other_table, column, value)) return std::nullopt; // (no live row refers to the value: nothing to claim or change)
-        auto& child_rows = oit->second;
-        for (std::size_t i = 0; i < child_rows.size(); i++) {
-            const Row& row = child_rows[i];
-            if (!is_visible(row)) continue;
-            auto it = row.find(column);
-            if (it == row.end() || !collation::equal(it->second, value)) continue;
-            if (auto claim = claim_cascade_row(other_table, row)) {
-                if (claim->result.kind == LockResult::Kind::Deadlock) {
-                    return CascadeAttemptResult::hard_error(StringResult::Err("Deadlock detected: transaction " + std::to_string(claim_txn_id) + " waits for transaction " +
-                                                                               std::to_string(claim->result.holder) + " (UPDATE cascade on '" + other_table +
-                                                                               "'). Transaction " + std::to_string(claim_txn_id) + " aborted."));
-                }
-                if (claim->result.kind == LockResult::Kind::Conflict) return CascadeAttemptResult::needs_retry(other_table, claim->pk_val);
-            }
-            child_hits.push_back(i);
-        }
-        return std::nullopt;
-    };
-
+    CascadePlan plan; // (what a changed key does to the rows that refer to its old value, worked out where it is written)
     auto try_cascade_once = [&]() -> CascadeAttemptResult {
     auto neighbor_write_lock = acquire_table_data_locks(s, neighbor_tables, /*exclusive=*/true);
     // (however this attempt ends, the cache of the values the child tables hold has taken in every row the cascades changed -- each one is reported to it -- and this section
@@ -906,74 +901,66 @@ StringResult Executor::exec_update_inner(SharedDatabase& s, const std::string& t
             }
         }
     } keep_probes_current{*this, s, neighbor_tables};
+    // What the changed keys do to the rows that refer to their old values -- the children, their children, down the chain -- is worked out from the old and new image of every row
+    // this statement wrote, and written like the rows of any other cascade (a RESTRICT that the early look above could not see, because another session changed the child tables
+    // in between, refuses here).
+    std::vector<Row> old_images, new_images;
+    old_images.reserve(undo_entries.size());
+    new_images.reserve(undo_entries.size());
     for (auto& u : undo_entries) {
-        Row old_row;
         try {
-            old_row = row_from_json(u.old_json);
+            Row old_row = row_from_json(u.old_json);
+            Row new_row = row_from_json(u.new_json);
+            old_images.push_back(std::move(old_row));
+            new_images.push_back(std::move(new_row));
         } catch (...) {
         }
-        for (auto& assign_col : changed_cols) {
-            auto oit = old_row.find(assign_col);
-            std::string old_val = oit != old_row.end() ? oit->second : std::string();
-            std::string new_val;
-            if (per_row) {
-                if (auto pit = per_row->find(match_key(old_row)); pit != per_row->end()) {
-                    if (auto vit = pit->second.find(assign_col); vit != pit->second.end()) new_val = vit->second;
-                }
-            } else {
-                for (auto& [c, expr] : assignments) {
-                    if (c == assign_col) {
-                        new_val = eval_arith(old_row, expr);
-                        break;
+    }
+    std::vector<std::pair<const Row*, const Row*>> pairs;
+    pairs.reserve(old_images.size());
+    for (std::size_t i = 0; i < old_images.size(); i++) pairs.emplace_back(&old_images[i], &new_images[i]);
+    plan = CascadePlan{};
+    if (auto refused = plan_cascade_update(s, table, pairs, changed_cols, plan)) return CascadeAttemptResult::hard_error(StringResult::Err(*refused));
+    if (plan.active) {
+        // the rows are claimed, and the values of theirs that something else refers to (the old ones: a grandchild that has just looked for its parent waits for this)
+        for (auto& [name, planned] : plan.tables) {
+            const std::vector<Row>& rows = s.tables.at(name);
+            const std::vector<std::string> refs = referenced_columns(s, name);
+            for (auto& rewrite : planned.rewrites) {
+                for (std::size_t pos : rewrite.second) {
+                    if (auto claim = claim_cascade_row(name, rows[pos])) {
+                        if (claim->result.kind == LockResult::Kind::Deadlock) {
+                            return CascadeAttemptResult::hard_error(StringResult::Err("Deadlock detected: transaction " + std::to_string(claim_txn_id) + " waits for transaction " +
+                                                                                       std::to_string(claim->result.holder) + " (UPDATE cascade on '" + name +
+                                                                                       "'). Transaction " + std::to_string(claim_txn_id) + " aborted."));
+                        }
+                        if (claim->result.kind == LockResult::Kind::Conflict) return CascadeAttemptResult::needs_retry(name, claim->pk_val);
+                    }
+                    for (auto& [column, value] : rewrite.first) {
+                        (void)value;
+                        if (std::find(refs.begin(), refs.end(), column) == refs.end()) continue;
+                        auto old_cell = rows[pos].find(column);
+                        if (old_cell == rows[pos].end() || old_cell->second == EXECUTOR_NULL_VALUE) continue;
+                        LockResult lr = s.lock_mgr.acquire(fk_claim_table(name, column), old_cell->second, claim_txn_id);
+                        if (lr.kind == LockResult::Kind::Deadlock) {
+                            return CascadeAttemptResult::hard_error(StringResult::Err("Deadlock detected: transaction " + std::to_string(claim_txn_id) + " waits for transaction " +
+                                                                                       std::to_string(lr.holder) + " (UPDATE cascade on '" + name + "'). Transaction " +
+                                                                                       std::to_string(claim_txn_id) + " aborted."));
+                        }
+                        if (lr.kind == LockResult::Kind::Conflict) return CascadeAttemptResult::needs_retry(fk_claim_table(name, column), old_cell->second);
                     }
                 }
             }
-            if (old_val == new_val) continue;
-
-            for (auto& [other_table, cols] : other_tables) {
-                for (auto& col : cols) {
-                    if (!col.foreign_key || col.foreign_key->ref_table != table || col.foreign_key->ref_column != assign_col) continue;
-                    switch (col.foreign_key->on_update) {
-                        case FkAction::Restrict: {
-                            if (auto oit2 = s.tables.find(other_table); oit2 != s.tables.end()) {
-                                // (R54: the cache of the child's foreign key values says at once that no live row refers to the value; a NULL refers to nothing)
-                                bool referenced = !fk_children_absent(s, other_table, col.name, old_val) && index_or_scan_exists(s, other_table, oit2->second, col.name, old_val, is_visible);
-                                if (referenced) {
-                                    return CascadeAttemptResult::hard_error(StringResult::Err("Foreign key violation (ON UPDATE RESTRICT): '" +
-                                                                                                assign_col + "' is referenced by '" + other_table +
-                                                                                                "'.'" + col.name + "'"));
-                                }
-                            }
-                            break;
-                        }
-                        case FkAction::Cascade: {
-                            if (auto sig = collect_children(other_table, col.name, old_val)) return *sig;
-                            cascade_write(s, other_table, child_hits, [&](Row& r) { r[col.name] = new_val; }, my_id);
-                            break;
-                        }
-                        case FkAction::SetNull: {
-                            if (auto sig = collect_children(other_table, col.name, old_val)) return *sig;
-                            cascade_write(s, other_table, child_hits, [&](Row& r) { r[col.name] = EXECUTOR_NULL_VALUE; }, my_id);
-                            break;
-                        }
-                        case FkAction::SetDefault: {
-                            std::string default_val = EXECUTOR_NULL_VALUE;
-                            if (auto* osc = s.catalog.get_table(other_table)) {
-                                auto cit =
-                                    std::find_if(osc->columns.begin(), osc->columns.end(), [&](const ColumnDef& c2) { return c2.name == col.name; });
-                                if (cit != osc->columns.end() && cit->default_value) default_val = *cit->default_value;
-                            }
-                            if (auto sig = collect_children(other_table, col.name, old_val)) return *sig;
-                            cascade_write(s, other_table, child_hits, [&](Row& r) { r[col.name] = default_val; }, my_id);
-                            break;
-                        }
-                    }
-                    // (a statement that the redo log does not cover persists the child table itself)
-                    if (!txn.is_active() && !redo_covered_stmt_ && col.foreign_key->on_update != FkAction::Restrict) {
-                        std::vector<Row> rc = s.tables.at(other_table);
-                        s.buffer_pool.write_through(other_table, rc, s.disk);
-                    }
-                }
+        }
+        for (auto& [name, planned] : plan.tables) {
+            for (auto& rewrite : planned.rewrites) {
+                const auto& changes = rewrite.first;
+                cascade_write(s, name, rewrite.second, [&](Row& r) { for (auto& [column, value] : changes) r[column] = value; }, my_id);
+            }
+            // (a statement that the redo log does not cover persists the child table itself)
+            if (!txn.is_active() && !redo_covered_stmt_ && !planned.rewrites.empty()) {
+                std::vector<Row> rc = s.tables.at(name);
+                s.buffer_pool.write_through(name, rc, s.disk);
             }
         }
     }

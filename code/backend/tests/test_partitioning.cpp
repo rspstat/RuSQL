@@ -214,7 +214,7 @@ TEST_CASE("Partitioned table lifecycle: DROP TABLE and TRUNCATE TABLE affect eve
     REQUIRE(raw_table_rows(ex, "d.t__p1").empty());
     auto sel = ex.execute_sql("SELECT * FROM t");
     REQUIRE(sel.is_ok());
-    REQUIRE(sel.value() == "0 rows returned.");
+    REQUIRE(sel.value() == "+----+\n| id |\n+----+\n+----+\n0 rows returned.");
 
     REQUIRE(ex.execute_sql("INSERT INTO t VALUES (5), (150)").is_ok());
     REQUIRE(ex.execute_sql("DROP TABLE t").is_ok());
@@ -246,7 +246,7 @@ TEST_CASE("ALTER TABLE ADD PARTITION / DROP PARTITION", "[executor][partitioning
     REQUIRE(tables.value().find("t__p1") == std::string::npos);
     auto sel = ex.execute_sql("SELECT * FROM t");
     REQUIRE(sel.is_ok());
-    REQUIRE(sel.value() == "0 rows returned."); // that partition's data is gone with it
+    REQUIRE(sel.value() == "+----+\n| id |\n+----+\n+----+\n0 rows returned."); // that partition's data is gone with it
 }
 
 TEST_CASE("PARTITION BY column must be part of the PRIMARY KEY when one exists", "[executor][partitioning]") {

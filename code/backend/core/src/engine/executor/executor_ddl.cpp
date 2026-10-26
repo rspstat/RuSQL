@@ -1718,7 +1718,7 @@ StringResult Executor::exec_show_tables(const SharedDatabase& s, const std::opti
     // The naive `width - text.size()` here previously underflowed (both are unsigned)
     // whenever text.size() > width, which is exactly what "Tables" being the longest
     // cell triggers when every actual table name is shorter than 5 chars.
-    const std::string header = "Tables_in_" + db;
+    const std::string header = "Tables_in_" + db + (like ? " (" + *like + ")" : std::string()); // (MySQL puts the pattern in the name of the column)
     std::size_t max_len = header.size();
     for (auto& t : tables) max_len = std::max(max_len, t.size());
     std::string sep = "+" + std::string(max_len + 2, '-') + "+\n";

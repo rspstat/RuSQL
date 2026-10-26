@@ -113,3 +113,8 @@ INSERT INTO ar (v, u) VALUES ('g1', 800), ('g2', 801)
 UPDATE ar SET n = 77 WHERE u >= 800
 UPDATE ar SET n = 77 WHERE u >= 800
 DELETE FROM ar WHERE u >= 800
+# an answer of no rows has its columns (R56): cursor.description of a driver
+SELECT id, owner FROM acct WHERE id < 0
+SELECT * FROM acct WHERE owner = 'nobody'
+SELECT owner AS who, bal FROM acct WHERE 1 = 0
+SELECT COUNT(*) AS n, owner FROM acct WHERE id < 0 GROUP BY owner

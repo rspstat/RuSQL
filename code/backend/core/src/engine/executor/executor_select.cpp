@@ -1170,6 +1170,29 @@ CondExpr and_of(std::optional<CondExpr>& so_far, CondExpr next) {
 
 } // namespace
 
+std::optional<std::string> Executor::column_header(const SelectColumn& c) {
+    if (auto* col = std::get_if<SelectColumn::Column>(&c.data)) return last_name_part(col->name);
+    if (auto* ca = std::get_if<SelectColumn::ColumnAlias>(&c.data)) return ca->alias;
+    if (auto* agg = std::get_if<SelectColumn::Agg>(&c.data)) return agg_label(agg->func, agg->col);
+    if (auto* aa = std::get_if<SelectColumn::AggAlias>(&c.data)) return aa->alias;
+    if (auto* fn = std::get_if<SelectColumn::Func>(&c.data)) return fn->alias.value_or(fn->name + "()");
+    if (auto* cw = std::get_if<SelectColumn::CaseWhen>(&c.data)) return cw->alias.value_or("CASE");
+    if (auto* ex = std::get_if<SelectColumn::Expr>(&c.data)) {
+        if (ex->alias) return *ex->alias;
+        try {
+            return Parser::arith_to_string(ex->expr); // (a query that is run names its expression so, once its names are bound)
+        } catch (const ParseError&) {
+            return arith_to_str(ex->expr);
+        }
+    }
+    if (auto* wf = std::get_if<SelectColumn::WinFunc>(&c.data)) {
+        if (wf->alias && hidden_window_name(*wf->alias)) return std::nullopt;
+        return wf->alias.value_or(window_func_default_label(wf->func));
+    }
+    if (auto* sq = std::get_if<SelectColumn::Subquery>(&c.data)) return sq->alias.value_or("(subquery)");
+    return std::nullopt;
+}
+
 std::vector<std::string> Executor::derived_column_names(SharedDatabase& s, const Statement& stmt) {
     std::vector<std::string> names;
     auto* sel = std::get_if<Statement::Select>(&stmt.data);

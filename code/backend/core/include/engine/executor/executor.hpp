@@ -358,6 +358,10 @@ public:
     static std::optional<std::string> info_schema_bare(const std::string& qualified_name);
     // The types of the columns the SELECT `sql` answers with, one per column (empty: not a SELECT, or the columns cannot be matched with the select list).
     std::vector<ResultColumnType> result_columns(const std::string& sql) const;
+    // The headers of the columns a SELECT (a set operation, a WITH query) prints, worked out from the statement: for an answer with no rows, which has no header of its own. Empty
+    // when they cannot be told (a USING / NATURAL join, a table that is not there).
+    std::vector<std::string> result_column_names(const std::string& sql) const;
+    std::vector<std::string> result_column_names(Statement stmt) const;
     // The columns of the temporary table a CTE becomes: `names` are the columns of its answer `rows`, typed by the select list `body` (a table column keeps its type, an
     // arithmetic one is a number by its values, the rest text), so that the query that reads the CTE orders, compares and takes MAX of them as numbers where they are.
     std::vector<ColumnDef> derived_column_defs(const SharedDatabase& s, const Statement& body, const std::vector<std::string>& names, const std::vector<Row>& rows) const;
@@ -560,6 +564,12 @@ private:
     // must recurse into nested subqueries. Used by execute().
 public:
     static bool is_pure_read_only(const Statement& stmt);
+    // The tables whose rows a foreign key action can reach from `table`: the tables with a foreign key into it, and those with one into them, and so on (a table that
+    // is its own child, or the child of a child of its own, is in the list; otherwise `table` is not).
+    static std::vector<std::string> fk_children_closure(const SharedDatabase& s, const std::string& table);
+    // The header a SELECT prints over the select-list item `item`: a column by its name, an alias, the label of an aggregate, the text of an expression (nullopt for `*`, which is
+    // every column of its tables, and for the hidden column of a window function inside an expression).
+    static std::optional<std::string> column_header(const SelectColumn& item);
 private:
     // executor_proc.cpp: whether running `stmt` can change anything that is kept on disk other than through the redo log (a table file, the catalog) -- what decides
     // whether execute() empties the log first. A statement that only reads, builds temporary tables for itself (WITH, a derived table), sets a variable, prepares a
@@ -707,18 +717,31 @@ private:
     // rows of `table` to change, `change` edits the new version of each (empty: the rows are deleted), `version_id` is the id of the transaction or statement.
     void cascade_write(SharedDatabase& s, const std::string& table, const std::vector<std::size_t>& positions, const std::function<void(Row&)>& change,
                        std::uint64_t version_id);
-    // What a DELETE does through a foreign key of the table to itself (emp.mgr -> emp.id), worked out on the rows before anything is written (executor_self_reference.cpp).
-    struct SelfDeletePlan {
-        bool active = false;                  // some row that goes has a child in its own table (otherwise there is nothing to do)
-        std::vector<Row> doomed;              // every row of the table that goes -- the ones the statement names and the ones the cascades delete: the foreign keys of other tables read them
-        std::vector<std::size_t> cascaded;    // the positions of the rows the cascades delete
-        std::map<std::vector<std::pair<std::string, std::string>>, std::vector<std::size_t>> rewrites; // rows that SET NULL / SET DEFAULT rewrite, by the (column, value) pairs they take
+    // What a DELETE does through the foreign keys that refer to the table -- to the children, their children, a table that is its own child --, worked out on the rows before
+    // anything is written (executor_cascade_plan.cpp). Per table: the rows that go (`doomed`: also the ones the statement names itself; `deleted`: the positions that only a
+    // cascade deletes) and the rows that are rewritten, by the (column, value) pairs they take.
+    struct CascadePlan {
+        struct Table {
+            std::vector<Row> doomed;
+            std::vector<std::size_t> deleted;
+            std::map<std::vector<std::pair<std::string, std::string>>, std::vector<std::size_t>> rewrites;
+        };
+        bool active = false; // the cascade changes a row that the statement does not name itself (otherwise there is nothing to write)
+        std::map<std::string, Table> tables;
     };
-    // MySQL works through the rows one by one: a row that goes is looked for in the foreign key columns of its own table (RESTRICT refuses, CASCADE deletes the children in
-    // turn -- not more than 14 levels deep --, SET NULL / SET DEFAULT rewrite them), and a row that a cascade has already deleted is not reached by the scan any more. `targets`
-    // are the rows the statement names, read in the order of `order` (the identity keys of an ORDER BY) or else of the key. The message of the error, nullopt when it can go.
-    std::optional<std::string> plan_self_delete(SharedDatabase& s, const std::string& table, const std::vector<Row>& targets, const std::vector<std::string>* order,
-                                                 const std::optional<CondExpr>& condition, SelfDeletePlan& plan);
+    struct CascadeSim;
+    // MySQL works through the rows one by one: a row that goes is looked for in the foreign key columns that refer to it (RESTRICT refuses, CASCADE deletes the children in turn
+    // -- not more than 14 levels deep --, SET NULL / SET DEFAULT rewrite them and what refers to the value they had), and a row that a cascade has already deleted is not reached
+    // by the scan any more. `targets` are the rows the statement names (`positions`: where they were when they were read, when that is known -- it is checked, and the rows
+    // are looked for when it is wrong), read in the order of `order` (the identity keys of an ORDER BY) or else of the key. The message of the
+    // error, nullopt when it can go.
+    std::optional<std::string> plan_cascade_delete(SharedDatabase& s, const std::string& table, const std::vector<Row>& targets, const std::vector<std::size_t>* positions,
+                                                    const std::vector<std::string>* order, const std::optional<CondExpr>& condition, CascadePlan& plan);
+    // The same for an UPDATE of keys: `rows` are the (old, new) images of the rows the statement updates, `changed_cols` the columns it sets. What refers to a value that changes follows
+    // its foreign key's ON UPDATE -- CASCADE and SET NULL rewrite the rows, and what refers to the values they take, down the chain; RESTRICT refuses, and so does a cascade that
+    // comes back to a table it has already changed. The message of the error, nullopt when the statement can go; `plan` has the rewrites (no row is deleted).
+    std::optional<std::string> plan_cascade_update(SharedDatabase& s, const std::string& table, const std::vector<std::pair<const Row*, const Row*>>& rows,
+                                                    const std::vector<std::string>& changed_cols, CascadePlan& plan);
 
     // ── Phase 8a: DDL ────────────────────────────────────────────────────
     // (the keys of several columns: UNIQUE (a, b))
@@ -831,10 +854,9 @@ private:
     static std::optional<std::string> delete_restrict_violation(SharedDatabase& s, const std::string& table, const Row& row);
     // UPDATE of a column that a child row references, under ON UPDATE RESTRICT: the message when `old_row`'s value is referenced and
     // `new_row` changes it, else nullopt. It runs BEFORE the row is rewritten (the check after the rewrite returned an error with the
-    // row already changed). `fk_restrict_children` are the tables it reads.
+    // row already changed).
     static std::optional<std::string> update_restrict_violation(SharedDatabase& s, const std::string& table, const Row& old_row, const Row& new_row,
                                                                 const std::vector<std::string>& changed_cols);
-    static std::vector<std::string> fk_restrict_children(const SharedDatabase& s, const std::string& table, const std::vector<std::string>& changed_cols);
     // The tables with a foreign key into `table`.
     static std::vector<std::string> fk_child_tables(const SharedDatabase& s, const std::string& table);
     // A foreign-key value that names no live parent row (the message), nullopt when the parent exists or the value is NULL.
