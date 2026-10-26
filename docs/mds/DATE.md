@@ -2370,6 +2370,31 @@ VS Code 스타일 탭 드래그 순서 변경(요청의 1번 항목)은 같은 �
 - **읽기만 하는 다른 문장도 redo 로그를 비운다**: `WITH`(CTE) SELECT(임시 표를 `s.tables`에 만드는 쓰기 길), `PREPARE`·`EXECUTE`·`DEALLOCATE`, `LOCK`·`UNLOCK TABLES`, `ANALYZE TABLE`, 하위 질의가 든 `SET`, `CALL`. 문장마다 `USE`를 보내던 것만큼 흔하지는 않아 이번에는 `USE`·`SET`만 했다.
 - `DELETE t1 FROM t1 JOIN …`·`MERGE`의 부모 검사와 참조되는 부모의 CASCADE가 자식을 **찾는** 일은 아직 자식 표를 훑는다(참조되지 않은 부모만 O(1)).
 
+### 10월 26일 — R55: 자기 자신을 가리키는 외래키의 부모 쪽, 읽기 문장이 redo 로그를 비우지 않게
+
+**왜 이 항목인가**: R54를 끝내며 "조사하다 알게 된 것"으로 적어 둔 두 가지를 사용자가 그대로 "자기 자신을 가리키는 외래키의 부모 쪽, CTE 등 읽기 문장이 redo 로그를 비움 시작"이라고 골랐다(같은 진행 방식: 코드 먼저 → 항목마다 시험 → 문서 → 커밋·푸시).
+
+**고친 것 (엔진)**
+- **자기 표를 가리키는 외래키(`emp.mgr → emp.id`)의 부모 쪽 DELETE** (무결성 구멍, 전부터): `DELETE FROM emp WHERE id = 1`이 `id = 2`가 가리키는 행을 오류 없이 지웠고(MySQL은 1451) `ON DELETE CASCADE`·`SET NULL`도 적용되지 않아 매달린 행이 남았다. 부모 문장이 "다른 표"만 자식으로 셌기 때문(`other_tables`가 자기 표를 뺌). 먼저 진짜 MySQL 8.4.9로 동작을 재 보았다(`selfref_probe*.py`): InnoDB는 행을 **하나씩, 스캔이 읽는 순서로**(키 순서, `ORDER BY`가 있으면 그 순서) 처리한다 — RESTRICT는 아직 남아 있는 자식이 있으면 문장 전체를 거절하고(`ORDER BY id DESC`로 자식부터 지우면 통과), 자기 자신을 부모로 가진 행은 자기 자식이라 거절되고, CASCADE는 자식의 자식까지 되풀이하되 **14단계까지**(15번째 단계는 오류 3008), SET NULL은 자식을 NULL로 바꾸고, 앞선 행의 연쇄로 이미 지워진 행은 스캔이 도달하지 않아 **세지 않으며**(`DELETE … WHERE id IN (1, 2)`가 CASCADE에서 1행), 앞선 행의 SET NULL로 WHERE에서 빠진 행은 지워지지 않는다(`DELETE … WHERE mgr IS NOT NULL`). 연쇄로 지워지는 행이 다른 표의 자식을 가지면 그 표의 외래키도 묻는다(RESTRICT면 문장 전체 거절, CASCADE면 따라 지움).
+  새 `plan_self_delete`(`executor_self_reference.cpp`)가 이 일을 **아무것도 쓰기 전에 메모리의 행으로** 한다: 자기 표의 외래키 열마다 값→위치 표를 만들고, 문장이 이름 붙인 행을 InnoDB의 순서로 하나씩 꺼내면서 RESTRICT 검사·CASCADE 재귀(깊이 상한)·SET NULL/SET DEFAULT 다시 쓰기를 모의한다. 결과는 지울 행의 상(다른 표의 외래키가 읽음), 연쇄로 지울 위치, 다시 쓸 행. `exec_delete_inner`가 이를 받아 같은 시도 안에서(자기 표 데이터 락 배타) ① 연쇄로 지울 행과 다시 쓸 행을 다른 자식 표의 행처럼 락 매니저에 클레임하고 ② 다른 표의 RESTRICT·클레임·CASCADE를 이 행들까지 넓혀 묻고 ③ 다시 쓸 행을 먼저, 지울 행을 그 뒤에 `cascade_write`로 쓴다(트랜잭션·undo·redo·인덱스가 다른 연쇄와 같음) ④ 끝나면 지울 행을 다시 읽어(`collect_targets`) 문장의 본 삭제가 연쇄 뒤의 표를 보게 한다. 자식이 아무도 없는 행(대부분)은 R54의 외래키 값 캐시(`fk_children_absent`)가 O(1)로 답하고 모의 자체를 건너뛴다. `DELETE … ORDER BY`의 순서는 `delete_row_order_`(UPDATE의 `update_row_order_`와 같은 방식)로 전달한다.
+- **`ON UPDATE CASCADE`·`SET NULL`이 자기 표의 키에서는 RESTRICT처럼** (MySQL 문서: "자기 표로 되돌아오는 연쇄 UPDATE는 RESTRICT처럼 동작"): 자식이 있는 키를 바꾸면 1451, 자식이 없는 키는 바뀐다. 전에는 CASCADE·SET NULL이 아무 일도 하지 않아 키만 바뀌고 자식이 매달렸다(`update_restrict_violation`이 자기 표일 때 RESTRICT가 아닌 동작도 거절로 읽음).
+- **읽기만 하는 문장이 redo 로그를 비우지 않음**: 구조 쓰기 락 길은 "쓰기 전용"이라 안에서 쌓인 redo 로그를 체크포인트(테이블 파일 재작성)한 뒤 실행했다. 이 길로 가는 이유가 둘로 나뉘는데(임시 표를 `s.tables`에 만들어야 해서 락이 필요한 것과, 디스크의 것을 바꿔서 체크포인트가 필요한 것) 둘째만 체크포인트가 필요하다. 새 `may_change_stored_data`(`executor_proc.cpp`)가 "표 파일·카탈로그를 redo 밖에서 바꿀 수 있나"를 가린다: `WITH`(CTE, 재귀 포함)·파생 표가 든 SELECT·하위 질의가 든 `SET`·`ANALYZE TABLE`(통계는 메모리에만)·`LOCK`/`UNLOCK TABLES`·`PREPARE`·`DEALLOCATE`는 바꾸지 않고, **본문이 읽기뿐인 `CALL`**은 프로시저 본문을 따라가 본다(제어문·`SELECT … INTO`·중첩 `CALL`, 깊이 8, 모르는 것은 "바꿈"). `PREPARE`·`DEALLOCATE`·`LOCK`·`UNLOCK TABLES`는 `USE`처럼 구조 읽기 락만 잡는다(세션에 글자나 락 목록을 둘 뿐). **`EXECUTE`는 준비된 문장을 그 문장을 직접 친 것처럼** 실행한다(`prepared_statement`로 `?`를 채워 파싱하고 `execute()`로 다시 들어감): 준비된 `INSERT`가 이제 행 락·redo 배치를 보통 INSERT처럼 쓰고, 준비된 `SELECT`가 락 없이 읽는다(전에는 어떤 문장이든 배타 길). 체크포인트를 계속 하는 것: DDL, `VACUUM`·`OPTIMIZE`, **쓰는 프로시저의 `CALL`**(본문의 쓰기가 redo로 덮이는지 따로 확인이 필요해 이번에는 그대로 둠).
+- **캐시를 유지하는 일을 빠뜨려 생긴 느려짐을 A/B로 찾아 고침**: 자기 표의 값 캐시를 쓰게 되자 4만 행 표에서 잎 행 DELETE가 0.8 → 14.5 ms로 느려졌다. 물리 삭제 길(`globally_quiescent`)이 지운 행을 캐시에 알리지 않아 문장마다 캐시가 어긋나 다시 세었기 때문이다(전에는 자기 표의 캐시를 이 길에서 쓸 일이 없어 드러나지 않았다). 그 구역에서 실제로 지워진 행만 캐시에 알리고(`erased`), 뒷부분에서 도장만 새로 찍는다 → 0.80~0.82 ms로 돌아옴.
+
+**조사하다 알게 된 것 (고치지 않음)**
+- **테이블을 건너는 연쇄가 한 단계에서 멈춘다**(전부터): `a ← b ← c`(둘 다 ON DELETE CASCADE)에서 `DELETE FROM a …`가 `b`의 행은 지우지만 `c`의 행은 지우지 않아 **매달린 행**이 남고, `c ← d`가 RESTRICT면 MySQL은 1451인데 여기는 통과한다. 자기 표 연쇄는 이번에 같은 모의로 풀었지만 서로 다른 표를 잇는 사슬은 아직 한 단계. `RECOMMAND.md` 맨 위.
+- **0행 SELECT가 열 이름을 잃는다**: 엔진이 결과가 없는 `SELECT`에 열 머리줄 없이 `0 rows returned.`만 돌려줘서(네이티브 프로토콜도 같음) MySQL 프로토콜에서는 열 정의 없는 OK 패킷이 되고 `cursor.description`이 None이다(MySQL은 열 이름이 든 빈 결과). 드라이버·도구가 빈 결과의 열 이름을 못 얻는다. `SELECT 1 WHERE 1 = 0`(FROM 없는 WHERE)도 문법 오류.
+- 자기 표 UPDATE는 행 단위가 아니라 문장 전체를 한 번에 본다: `UPDATE emp SET mgr = NULL, id = id + 10 ORDER BY id DESC`를 MySQL은 통과시키는데(자식을 먼저 비우므로) 여기는 거절. REPLACE·MERGE의 선검사(`delete_restrict_violation`)와 다중 표 DELETE는 자기 표를 보지 않아, 여러 행 REPLACE의 둘째 행이 거절되면 첫째 행은 이미 바뀐 채 남을 수 있다.
+- 연쇄 삭제 한 번이 표 크기에 비례한다(4만 행 표에서 부모 하나 + 자식 하나 52~65 ms: 값→위치 표와 연쇄 쓰기의 압축이 O(n)). 잎 행 DELETE는 O(1).
+
+**검증**
+- 새 C++ 시험 `[r55]` 9 케이스(RESTRICT의 행 단위·키 순서·ORDER BY·자기 부모, CASCADE/SET NULL의 세는 행 수·Halloween·텍스트 키·ROLLBACK·SAVEPOINT·재시작, 14단계, 다른 표로 이어지는 연쇄, 두 외래키, ON UPDATE, 부모 삭제와 자식 쓰기의 스레드, 다른 트랜잭션이 쥔 자식 행을 기다림, redo 로그가 그대로인 문장 열두 가지와 `EXECUTE`·크래시 복구) + 새 코퍼스 `self_fk`(79문장)를 진짜 MySQL 8.4.9와 비교해 **차이 0**(R53 빌드는 처음 76문장 중 32문장이 달랐다; `--emit`으로 `mysql_conformance_self_fk.inc`를 만들어 C++ 시험에 넣고 점수판에 더함).
+- **심은 버그 30종 중 26종이 잡히고 4종은 잡을 수 없는 것**: 처음에 7종이 살아남았다. 3종은 시험의 구멍이라 보강했다(키 순서 대신 쓴 순서로 읽기 → 입력 순서가 키 순서와 다른 표 시험, 연쇄 뒤 지울 행을 다시 읽지 않음 → 남은 행이 기본키로 찾아지는지, 연쇄로 지울 행을 클레임하지 않음 → 다른 트랜잭션이 쥔 행을 기다리는 스레드 시험). 4종은 결과가 같은 변이다: 이미 연쇄로 지워진 행을 스캔이 다시 처리해도 같은 결과(최적화), 지울 행에도 SET NULL을 쓰는 것(헛수고일 뿐), `LOCK TABLES`와 `PREPARE`는 두 군데에서 같은 일을 하도록 막아 한쪽을 빼도 같다(락 모드만 다름).
+- 크래시 퍼저 4종: `fuzz_crash` 15, `fuzz_crash_fk` 15, `fuzz_concurrent` 8, 새 **`fuzz_crash_selfref`** 15라운드(emp 한 표, ON DELETE 동작 3가지, 한 행·여러 행 삭제의 오름차순·`ORDER BY id DESC`, UPDATE, 트랜잭션·세이브포인트, 연쇄·거절 모델 대 복구 뒤 표; 복구 뒤에도 매달린 행이 거절되는지) 불일치 0. 무작위 대조 12종 위반 0.
+- 전체 시험 **815 케이스 / 1,507,675 assertions**(Release 기본), 1,507,675(`RUSQL_DML_INDEX_MIN_ROWS=0`), 1,507,674(`RUSQL_PROBE_CHECK=1 RUSQL_PROBE_STREAK=0`: 캐시를 쓸 때마다 행을 다시 세어 비교) 통과. 호환성 점수판: 코퍼스 31개, 문장 2,926개 중 차이 8개(앞과 같은 8개이고 새 코퍼스는 0).
+- 실서버 A/B(R53 빌드 대 새 빌드, 같은 작업, 2회): 2만 행 표에서 INSERT 직후의 **`WITH` SELECT 13.3 → 0.23 ms(58배), 파생 표 SELECT 13.6 → 0.23 ms**(일반 SELECT는 0.2 ms로 그대로), 자기 표(4만 행)의 잎 행 DELETE 0.80 ms → 0.80 ms(고친 뒤; 고치기 전 14.5 ms).
+- **하지 않은 것**: Debug 빌드, 앱 화면(이번에 UI 변경은 Diagram 문구뿐), 다중 표 DELETE·MERGE·REPLACE의 자기 표 검사.
+
 ## 요약: 1학기 대비 2학기에 달라진 것
 
 

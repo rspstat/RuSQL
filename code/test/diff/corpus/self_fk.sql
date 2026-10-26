@@ -1,0 +1,130 @@
+# A foreign key of a table to itself (R55): emp.mgr -> emp.id. A row that goes is looked for in the table's own foreign key column, row by row in the order the scan reads them
+# (the key, or the ORDER BY): RESTRICT refuses while a child is still there, CASCADE deletes the children in turn (a row a cascade has deleted is not reached by the scan, so it is not
+# counted), SET NULL rewrites them; a row that is its own parent counts as its own child under RESTRICT; ON UPDATE CASCADE / SET NULL of such a key acts as RESTRICT.
+--DROP TABLE IF EXISTS emp
+--CREATE TABLE emp (id INT PRIMARY KEY, mgr INT, FOREIGN KEY (mgr) REFERENCES emp(id))
+--INSERT INTO emp VALUES (1,NULL),(2,1),(3,2),(4,1),(5,NULL)
+DELETE FROM emp WHERE id = 1
+DELETE FROM emp WHERE id = 5
+DELETE FROM emp WHERE id = 3
+SELECT id, mgr FROM emp ORDER BY id
+DELETE FROM emp WHERE id IN (1, 2)
+DELETE FROM emp WHERE id IN (4, 2)
+DELETE FROM emp
+SELECT id, mgr FROM emp ORDER BY id
+--DELETE FROM emp ORDER BY id DESC
+--INSERT INTO emp VALUES (1,NULL),(2,1),(3,2),(4,1),(5,NULL)
+DELETE FROM emp ORDER BY id DESC
+SELECT COUNT(*) FROM emp
+--INSERT INTO emp VALUES (1,NULL),(2,1),(3,2),(4,1),(5,NULL)
+DELETE FROM emp WHERE id IN (3, 4) ORDER BY id DESC
+DELETE FROM emp WHERE id IN (5, 4, 3) ORDER BY id DESC
+SELECT id, mgr FROM emp ORDER BY id
+--DELETE FROM emp ORDER BY id DESC
+--INSERT INTO emp VALUES (5,NULL),(3,5),(4,5)
+DELETE FROM emp WHERE id IN (5, 4)
+DELETE FROM emp
+SELECT COUNT(*) FROM emp
+--INSERT INTO emp VALUES (1,NULL),(7,7)
+DELETE FROM emp WHERE id = 7
+UPDATE emp SET id = 8, mgr = 8 WHERE id = 7
+UPDATE emp SET mgr = 1 WHERE id = 7
+DELETE FROM emp WHERE id = 7
+SELECT id, mgr FROM emp ORDER BY id
+INSERT INTO emp VALUES (9, 99)
+INSERT INTO emp VALUES (9, 9)
+INSERT INTO emp VALUES (10, 11), (11, NULL)
+INSERT INTO emp VALUES (12, NULL), (13, 12)
+SELECT id, mgr FROM emp ORDER BY id
+--DROP TABLE emp
+--CREATE TABLE emp (id INT PRIMARY KEY, mgr INT, FOREIGN KEY (mgr) REFERENCES emp(id) ON DELETE CASCADE)
+--INSERT INTO emp VALUES (1,NULL),(2,1),(3,2),(4,1),(5,NULL)
+DELETE FROM emp WHERE id IN (1, 2)
+SELECT id, mgr FROM emp ORDER BY id
+--INSERT INTO emp VALUES (1,NULL),(2,1),(3,2),(4,1)
+DELETE FROM emp
+SELECT id, mgr FROM emp ORDER BY id
+--INSERT INTO emp VALUES (1,NULL),(2,1),(3,2),(4,1),(5,NULL)
+DELETE FROM emp WHERE id IN (1, 3)
+--INSERT INTO emp VALUES (1,NULL),(2,1),(3,2),(4,1)
+DELETE FROM emp ORDER BY id DESC
+SELECT COUNT(*) FROM emp
+--INSERT INTO emp VALUES (1,NULL),(2,1),(3,2),(4,1),(6,NULL)
+DELETE FROM emp WHERE mgr IS NOT NULL ORDER BY id LIMIT 2
+SELECT id, mgr FROM emp ORDER BY id
+DELETE FROM emp WHERE id IN (SELECT mgr FROM (SELECT mgr FROM emp) m WHERE mgr = 1)
+SELECT id, mgr FROM emp ORDER BY id
+--INSERT INTO emp VALUES (1,NULL),(2,1),(3,2),(4,NULL)
+REPLACE INTO emp VALUES (1, NULL)
+SELECT id, mgr FROM emp ORDER BY id
+UPDATE emp SET id = 10 WHERE id = 1
+UPDATE emp SET id = 3, mgr = 3 WHERE id = 3
+UPDATE emp SET id = 20 WHERE id = 4
+SELECT id, mgr FROM emp ORDER BY id
+--DELETE FROM emp
+--INSERT INTO emp VALUES (1,NULL),(2,1),(3,2),(4,3),(5,4),(6,5),(7,6),(8,7),(9,8),(10,9),(11,10),(12,11),(13,12),(14,13),(15,14)
+DELETE FROM emp WHERE id = 1
+SELECT COUNT(*) FROM emp
+--INSERT INTO emp VALUES (1,NULL),(2,1),(3,2),(4,3),(5,4),(6,5),(7,6),(8,7),(9,8),(10,9),(11,10),(12,11),(13,12),(14,13),(15,14),(16,15)
+DELETE FROM emp WHERE id = 1
+SELECT COUNT(*) FROM emp
+DELETE FROM emp WHERE id = 2
+SELECT COUNT(*) FROM emp
+--TRUNCATE TABLE emp
+--DROP TABLE emp
+--CREATE TABLE emp (id INT PRIMARY KEY, mgr INT, FOREIGN KEY (mgr) REFERENCES emp(id) ON DELETE SET NULL)
+--INSERT INTO emp VALUES (1,NULL),(2,1),(3,2),(4,1),(5,NULL)
+DELETE FROM emp WHERE id = 1
+SELECT id, mgr FROM emp ORDER BY id
+--INSERT INTO emp VALUES (1,NULL),(6,1),(7,6)
+DELETE FROM emp WHERE id IN (1, 6)
+SELECT id, mgr FROM emp ORDER BY id
+DELETE FROM emp WHERE mgr IS NOT NULL
+SELECT id, mgr FROM emp ORDER BY id
+--DELETE FROM emp
+--INSERT INTO emp VALUES (1,NULL),(2,1),(3,2),(4,1)
+DELETE FROM emp WHERE mgr IS NOT NULL ORDER BY id DESC
+SELECT id, mgr FROM emp ORDER BY id
+DELETE FROM emp
+--DROP TABLE emp
+--CREATE TABLE emp (id INT PRIMARY KEY, mgr INT, buddy INT, FOREIGN KEY (mgr) REFERENCES emp(id) ON DELETE CASCADE, FOREIGN KEY (buddy) REFERENCES emp(id))
+--INSERT INTO emp VALUES (1,NULL,NULL),(2,1,NULL),(3,NULL,2),(4,NULL,NULL),(5,NULL,NULL)
+DELETE FROM emp WHERE id = 1
+DELETE FROM emp WHERE id = 5
+DELETE FROM emp WHERE id = 3
+DELETE FROM emp WHERE id = 1
+SELECT id, mgr, buddy FROM emp ORDER BY id
+--DROP TABLE emp
+--CREATE TABLE emp (id INT PRIMARY KEY, mgr INT, FOREIGN KEY (mgr) REFERENCES emp(id) ON DELETE CASCADE ON UPDATE CASCADE)
+--INSERT INTO emp VALUES (1,NULL),(2,1),(3,2),(4,1),(5,NULL)
+UPDATE emp SET id = 10 WHERE id = 1
+UPDATE emp SET id = 11 WHERE id = 2
+UPDATE emp SET id = id + 10
+UPDATE emp SET id = 50 WHERE id = 5
+SELECT id, mgr FROM emp ORDER BY id
+--DROP TABLE emp
+--CREATE TABLE emp (id INT PRIMARY KEY, mgr INT, FOREIGN KEY (mgr) REFERENCES emp(id) ON UPDATE SET NULL)
+--INSERT INTO emp VALUES (1,NULL),(2,1),(3,2),(4,1),(5,NULL)
+UPDATE emp SET id = 10 WHERE id = 1
+UPDATE emp SET id = 30 WHERE id = 3
+SELECT id, mgr FROM emp ORDER BY id
+--DROP TABLE emp
+--CREATE TABLE emp (id INT PRIMARY KEY, mgr INT, FOREIGN KEY (mgr) REFERENCES emp(id) ON DELETE CASCADE)
+--CREATE TABLE badge (id INT PRIMARY KEY, emp INT, FOREIGN KEY (emp) REFERENCES emp(id))
+--INSERT INTO emp VALUES (1,NULL),(2,1),(3,2),(4,1),(5,NULL)
+--INSERT INTO badge VALUES (1, 3)
+DELETE FROM emp WHERE id = 1
+DELETE FROM emp WHERE id = 2
+SELECT COUNT(*) FROM emp
+--DROP TABLE badge
+--CREATE TABLE badge (id INT PRIMARY KEY, emp INT, FOREIGN KEY (emp) REFERENCES emp(id) ON DELETE CASCADE)
+--INSERT INTO badge VALUES (1, 3), (2, 5)
+DELETE FROM emp WHERE id = 1
+SELECT * FROM badge ORDER BY id
+SELECT id, mgr FROM emp ORDER BY id
+--DROP TABLE badge
+--DROP TABLE emp
+--CREATE TABLE emp (id VARCHAR(5) PRIMARY KEY, mgr VARCHAR(5), FOREIGN KEY (mgr) REFERENCES emp(id) ON DELETE CASCADE)
+--INSERT INTO emp VALUES ('A',NULL),('b','a'),('C','B'),('d',NULL)
+DELETE FROM emp WHERE id = 'A'
+SELECT id, mgr FROM emp ORDER BY id

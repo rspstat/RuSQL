@@ -277,6 +277,7 @@ public:
     std::int64_t matched_rows_ = -1;         // the rows the last UPDATE found (its message counts the rows it changed); -1: not an UPDATE
     std::size_t replace_deleted_rows_ = 0;   // the rows the REPLACE that is running deleted before its inserts
     std::vector<std::string> update_row_order_; // the identity keys of the rows of an UPDATE ... ORDER BY in the order it gave them (exec_update takes them)
+    std::vector<std::string> delete_row_order_; // the same for a DELETE ... ORDER BY (exec_delete takes them)
     std::uint64_t statement_insert_id() const { return statement_insert_id_; }
     // The client asked for the rows an UPDATE FOUND (CLIENT_FOUND_ROWS: Connector/J and MySQLdb do) instead of the rows it changed.
     bool client_found_rows = false;
@@ -560,6 +561,12 @@ private:
 public:
     static bool is_pure_read_only(const Statement& stmt);
 private:
+    // executor_proc.cpp: whether running `stmt` can change anything that is kept on disk other than through the redo log (a table file, the catalog) -- what decides
+    // whether execute() empties the log first. A statement that only reads, builds temporary tables for itself (WITH, a derived table), sets a variable, prepares a
+    // statement, locks tables or analyzes one (the statistics live in memory) changes none; a procedure is read through its body. Not known to be harmless: a change.
+    bool may_change_stored_data(const SharedDatabase& s, const Statement& stmt, int depth = 0) const;
+    // The statement a PREPAREd name stands for once the ? are given their values (EXECUTE).
+    Result<Statement, std::string> prepared_statement(const std::string& name, const std::vector<std::string>& using_vars);
 
     // Stage 4 (table-level concurrency): holds the outer RwLock<SharedDatabase>'s shared
     // "structural" lock (protects the SHAPE of every table-keyed map -- e.g. against a
@@ -700,6 +707,18 @@ private:
     // rows of `table` to change, `change` edits the new version of each (empty: the rows are deleted), `version_id` is the id of the transaction or statement.
     void cascade_write(SharedDatabase& s, const std::string& table, const std::vector<std::size_t>& positions, const std::function<void(Row&)>& change,
                        std::uint64_t version_id);
+    // What a DELETE does through a foreign key of the table to itself (emp.mgr -> emp.id), worked out on the rows before anything is written (executor_self_reference.cpp).
+    struct SelfDeletePlan {
+        bool active = false;                  // some row that goes has a child in its own table (otherwise there is nothing to do)
+        std::vector<Row> doomed;              // every row of the table that goes -- the ones the statement names and the ones the cascades delete: the foreign keys of other tables read them
+        std::vector<std::size_t> cascaded;    // the positions of the rows the cascades delete
+        std::map<std::vector<std::pair<std::string, std::string>>, std::vector<std::size_t>> rewrites; // rows that SET NULL / SET DEFAULT rewrite, by the (column, value) pairs they take
+    };
+    // MySQL works through the rows one by one: a row that goes is looked for in the foreign key columns of its own table (RESTRICT refuses, CASCADE deletes the children in
+    // turn -- not more than 14 levels deep --, SET NULL / SET DEFAULT rewrite them), and a row that a cascade has already deleted is not reached by the scan any more. `targets`
+    // are the rows the statement names, read in the order of `order` (the identity keys of an ORDER BY) or else of the key. The message of the error, nullopt when it can go.
+    std::optional<std::string> plan_self_delete(SharedDatabase& s, const std::string& table, const std::vector<Row>& targets, const std::vector<std::string>* order,
+                                                 const std::optional<CondExpr>& condition, SelfDeletePlan& plan);
 
     // ── Phase 8a: DDL ────────────────────────────────────────────────────
     // (the keys of several columns: UNIQUE (a, b))
@@ -1064,7 +1083,7 @@ private:
     StringResult exec_delete(SharedDatabase& s, const std::string& table, std::optional<CondExpr> condition,
                               std::optional<std::vector<SelectColumn>> returning);
     StringResult exec_delete_inner(SharedDatabase& s, const std::string& table, const std::optional<CondExpr>& condition,
-                                    const std::optional<std::vector<SelectColumn>>& returning);
+                                    const std::optional<std::vector<SelectColumn>>& returning, const std::vector<std::string>* row_order = nullptr);
 
     // ── Phase 8c: subquery-aware WHERE evaluation ───────────────────────
     // These re-execute exec_select per row (or once, cached, for uncorrelated

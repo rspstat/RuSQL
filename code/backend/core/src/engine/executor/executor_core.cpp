@@ -1061,13 +1061,26 @@ StringResult Executor::execute(Statement stmt) {
     maybe_checkpoint_redo(); // no lock held yet -- see executor_redo.cpp
     if (std::holds_alternative<Statement::Commit>(stmt.data)) return execute_commit_grouped();
 
+    // EXECUTE runs the statement that was prepared like that statement typed in: it takes the locks (and gets the redo log) that statement takes, instead of the
+    // exclusive path every statement it could be would have to share
+    if (auto* run = std::get_if<Statement::ExecuteStmt>(&stmt.data)) {
+        std::string upper = run->name;
+        std::transform(upper.begin(), upper.end(), upper.begin(), [](unsigned char c) { return static_cast<char>(std::toupper(c)); });
+        auto prepared = prepared_statement(upper, run->using_vars);
+        if (prepared.is_err()) return StringResult::Err(prepared.error());
+        return execute(std::move(prepared).value());
+    }
+
     // BEGIN/SAVEPOINT/RELEASE SAVEPOINT touch only TransactionManager's own session-local
     // state, never any table data -- structural shared is enough, no table locks needed.
     // USE only reads the list of databases and sets this session's current database; SET changes this session's variables (a SET whose value reads a table through
     // a subquery is not one of them). They used to take the exclusive path, which waits out every running statement and checkpoints the redo log (the app and
     // the MCP send USE before every statement).
+    // (PREPARE / DEALLOCATE keep the text of a statement in the session; LOCK / UNLOCK TABLES write the lock list of its own mutex)
     auto session_state_only = [&]() {
-        if (std::holds_alternative<Statement::Use>(stmt.data) || std::holds_alternative<Statement::SetIsolationLevel>(stmt.data)) return true;
+        if (std::holds_alternative<Statement::Use>(stmt.data) || std::holds_alternative<Statement::SetIsolationLevel>(stmt.data) ||
+            std::holds_alternative<Statement::PrepareStmt>(stmt.data) || std::holds_alternative<Statement::DeallocatePrepare>(stmt.data) ||
+            std::holds_alternative<Statement::LockTables>(stmt.data) || std::holds_alternative<Statement::UnlockTables>(stmt.data)) return true;
         std::vector<const Statement*> reads;
         if (auto* one = std::get_if<Statement::SetUserVar>(&stmt.data)) {
             collect_arith_subqueries(one->expr, reads);
@@ -1234,7 +1247,9 @@ StringResult Executor::execute(Statement stmt) {
         // exclusively would deadlock).
     }
     auto s = shared->write();
-    const bool mutating = !is_pure_read_only(stmt);
+    // (a statement that needs the lock exclusive only to build temporary tables or to keep statistics, and a procedure that only reads, changes nothing on disk:
+    // the redo log stays)
+    const bool mutating = may_change_stored_data(*s, stmt);
     if (mutating) {
         // DDL/maintenance/anything unclassified writes table files directly (save_table), and
         // some of it (TRUNCATE, DROP, ALTER) would be undone by replaying older redo batches
@@ -1972,10 +1987,12 @@ StringResult Executor::execute_with_s_body(SharedDatabase& s, Statement stmt) {
                     v->table = resolved->first;
                 }
             }
-            auto rows = rows_of_limit(s, v->table, v->condition, v->order_by, v->limit);
+            std::vector<std::string> order;
+            auto rows = rows_of_limit(s, v->table, v->condition, v->order_by, v->limit, &order);
             if (rows.is_err()) return StringResult::Err(rows.error());
             if (!rows.value()) return StringResult::Ok("0 row(s) deleted.");
             v->condition = std::move(*rows.value());
+            if (!v->order_by.empty()) delete_row_order_ = std::move(order);
         }
         return exec_delete(s, v->table, v->condition, v->returning);
     }

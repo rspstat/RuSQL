@@ -111,6 +111,9 @@ const Case kLikeEscape[] = {
 const Case kFkParent[] = {
 #include "mysql_conformance_fk_parent.inc"
 };
+const Case kSelfFk[] = {
+#include "mysql_conformance_self_fk.inc"
+};
 
 struct TempDataDir {
     std::string path;
@@ -364,4 +367,8 @@ TEST_CASE("LIKE and its escape character: the backslash and ESCAPE", "[mysql_con
 
 TEST_CASE("The parent side of a foreign key: DELETE / UPDATE of a parent row, a NULL parent key", "[mysql_conformance][fk_parent]") {
     run_cases("mc_fk_parent", kFkParent, sizeof kFkParent / sizeof kFkParent[0]);
+}
+
+TEST_CASE("A foreign key of a table to itself: DELETE (RESTRICT / CASCADE / SET NULL), UPDATE of the key, other tables below the rows that go", "[mysql_conformance][self_fk]") {
+    run_cases("mc_self_fk", kSelfFk, sizeof kSelfFk / sizeof kSelfFk[0]);
 }

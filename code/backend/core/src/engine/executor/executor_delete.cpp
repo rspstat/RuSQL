@@ -85,6 +85,8 @@ std::optional<std::pair<std::string, std::string>> Executor::extract_pk_between_
 
 StringResult Executor::exec_delete(SharedDatabase& s, const std::string& table, std::optional<CondExpr> condition,
                                     std::optional<std::vector<SelectColumn>> returning) {
+    std::vector<std::string> row_order; // (set by DELETE ... ORDER BY: the order the rows are read in)
+    row_order.swap(delete_row_order_);
     if (s.views.count(table)) {
         if (auto resolved = resolve_updatable_view(s, table)) {
             auto merged_cond = merge_conditions(resolved->second, condition);
@@ -99,7 +101,7 @@ StringResult Executor::exec_delete(SharedDatabase& s, const std::string& table, 
     if (before_trigger) {
         if (auto tr = fire_triggers(s, table, "BEFORE", "DELETE", trigger_rows); tr.is_err()) return tr;
     }
-    auto result = exec_delete_inner(s, table, condition, returning);
+    auto result = exec_delete_inner(s, table, condition, returning, row_order.empty() ? nullptr : &row_order);
     if (result.is_ok() && after_trigger) {
         const std::int64_t matched = matched_rows_, affected = affected_rows_; // (the statements of the trigger set these too)
         if (auto tr = fire_triggers(s, table, "AFTER", "DELETE", trigger_rows); tr.is_err()) return tr;
@@ -110,7 +112,7 @@ StringResult Executor::exec_delete(SharedDatabase& s, const std::string& table, 
 }
 
 StringResult Executor::exec_delete_inner(SharedDatabase& s, const std::string& table, const std::optional<CondExpr>& condition,
-                                          const std::optional<std::vector<SelectColumn>>& returning) {
+                                          const std::optional<std::vector<SelectColumn>>& returning, const std::vector<std::string>* row_order) {
     bool has_fk_ref = std::any_of(s.catalog.tables.begin(), s.catalog.tables.end(), [&](auto& kv) {
         return std::any_of(kv.second.columns.begin(), kv.second.columns.end(),
                             [&](const ColumnDef& c) { return c.foreign_key && c.foreign_key->ref_table == table; });
@@ -473,7 +475,9 @@ StringResult Executor::exec_delete_inner(SharedDatabase& s, const std::string& t
 
     // Slow path: FK references, subquery condition, or an active transaction.
     std::vector<Row> rows_to_delete;
-    {
+    // (a table that is its own child reads them a second time, after the cascades that deleted or rewrote some of them)
+    auto collect_targets = [&]() -> std::optional<StringResult> {
+        rows_to_delete.clear();
         // Row-level-concurrency Stage 4: SHARED -- this block only ever reads
         // s.tables[table] (candidate collection, possibly via matches_condition_with_
         // subquery's exec_select recursion, which is itself lock-free by design -- see
@@ -512,7 +516,9 @@ StringResult Executor::exec_delete_inner(SharedDatabase& s, const std::string& t
         if (strict_where) {
             if (auto refused = strict_where->error()) return StringResult::Err(*refused);
         }
-    }
+        return std::nullopt;
+    };
+    if (auto refused = collect_targets()) return *refused;
 
     std::vector<std::pair<std::string, std::vector<ColumnDef>>> other_tables;
     for (auto& [name, schema] : s.catalog.tables) {
@@ -531,6 +537,12 @@ StringResult Executor::exec_delete_inner(SharedDatabase& s, const std::string& t
     // `return` straight out of every level via the lambda boundary -- see
     // exec_update_inner's identical pattern for the full reasoning.
     const std::vector<std::string> referenced = referenced_columns(s, table);
+    // A foreign key of the table to itself: a row that goes may have children among the rows of the table, which are looked for and acted on here (plan_self_delete)
+    // before the other tables' children are, and which the other tables' foreign keys are then asked about too.
+    const TableSchema* own_schema = s.catalog.get_table(table);
+    const bool self_referencing = own_schema && std::any_of(own_schema->columns.begin(), own_schema->columns.end(),
+                                                            [&](const ColumnDef& c) { return c.foreign_key && c.foreign_key->ref_table == table; });
+    SelfDeletePlan self_plan;
     // The id the child versions of this statement carry: the transaction's, or a one-off id for a statement outside one.
     const std::uint64_t cascade_id = tagging_txn_id(s);
     // The live rows of `other_table` whose `column` equals `value`, claimed one by one (a claim that cannot be had ends the attempt before anything is written); their positions
@@ -554,7 +566,9 @@ StringResult Executor::exec_delete_inner(SharedDatabase& s, const std::string& t
         return std::nullopt;
     };
     auto try_cascade_once = [&]() -> CascadeAttemptResult {
-    auto neighbor_write_lock = acquire_table_data_locks(s, neighbor_tables, /*exclusive=*/true);
+    std::vector<std::string> locked_tables = neighbor_tables; // (a table that is its own child is written here too)
+    if (self_referencing) locked_tables.push_back(table);
+    auto neighbor_write_lock = acquire_table_data_locks(s, locked_tables, /*exclusive=*/true);
     // (however this attempt ends, the cache of the values the child tables hold has taken in every row the cascades changed -- each one is reported to it -- and this section
     // changes no other live row, so the cache is current again for the next statement)
     struct KeepProbesCurrent {
@@ -566,9 +580,28 @@ StringResult Executor::exec_delete_inner(SharedDatabase& s, const std::string& t
                 if (const TableSchema* sch = s.catalog.get_table(t)) ex.unique_probe_apply(s, t, *sch, {}, {});
             }
         }
-    } keep_probes_current{*this, s, neighbor_tables};
+    } keep_probes_current{*this, s, locked_tables};
 
-    for (auto& del_row : rows_to_delete) {
+    // The rows of the table that go because of a foreign key to the table itself are known before anything is written (and claimed like the children of other tables are).
+    self_plan = SelfDeletePlan{};
+    if (self_referencing) {
+        if (auto refused = plan_self_delete(s, table, rows_to_delete, row_order, condition, self_plan)) return CascadeAttemptResult::hard_error(StringResult::Err(*refused));
+        if (self_plan.active) {
+            const std::vector<Row>& own_rows = s.tables.at(table);
+            for (std::size_t pos : self_plan.cascaded) {
+                if (auto sig = claim_or_signal(table, own_rows[pos], "Cascade", /*frees_unique=*/true)) return *sig;
+            }
+            for (auto& rewrite : self_plan.rewrites) {
+                for (std::size_t pos : rewrite.second) {
+                    if (auto sig = claim_or_signal(table, own_rows[pos], "SetNull", /*frees_unique=*/false)) return *sig;
+                }
+            }
+        }
+    }
+    // (the rows whose children the other tables' foreign keys look for: the ones the statement names and, below them, the ones that cascades delete)
+    const std::vector<Row>& doomed = self_plan.active ? self_plan.doomed : rows_to_delete;
+
+    for (auto& del_row : doomed) {
         for (auto& [other_table, cols] : other_tables) {
             for (auto& col : cols) {
                 if (col.foreign_key && col.foreign_key->ref_table == table && col.foreign_key->on_delete == FkAction::Restrict) {
@@ -590,7 +623,7 @@ StringResult Executor::exec_delete_inner(SharedDatabase& s, const std::string& t
     // The values of the rows to delete that a foreign key refers to are claimed (exclusive), after the check above has found no child that is there to see: a child
     // INSERT / UPDATE that has looked for its parent holds the value (shared) until its statement is over, so this DELETE waits for it, starts again and finds its row.
     // One that comes later waits for this one and finds no parent.
-    for (auto& del_row : rows_to_delete) {
+    for (auto& del_row : doomed) {
         for (auto& ref_col : referenced) {
             auto dit = del_row.find(ref_col);
             if (dit == del_row.end() || dit->second == EXECUTOR_NULL_VALUE) continue;
@@ -604,7 +637,7 @@ StringResult Executor::exec_delete_inner(SharedDatabase& s, const std::string& t
         }
     }
 
-    for (auto& del_row : rows_to_delete) {
+    for (auto& del_row : doomed) {
         for (auto& [other_table, cols] : other_tables) {
             for (auto& col : cols) {
                 if (!col.foreign_key || col.foreign_key->ref_table != table) continue;
@@ -643,9 +676,17 @@ StringResult Executor::exec_delete_inner(SharedDatabase& s, const std::string& t
             }
         }
     }
+    if (self_plan.active) {
+        // The rows of the table that stay but are rewritten first: their new versions go to the end of the table, so the positions of the rows to delete do not move.
+        for (auto& rewrite : self_plan.rewrites) {
+            const auto& changes = rewrite.first;
+            cascade_write(s, table, rewrite.second, [&](Row& r) { for (auto& [column, value] : changes) r[column] = value; }, cascade_id);
+        }
+        cascade_write(s, table, self_plan.cascaded, nullptr, cascade_id);
+    }
     // Row-level-concurrency Stage 4/5 correctness fix: invalidate the cache for every
     // FK-cascade-touched table HERE, still holding neighbor_write_lock EXCLUSIVE.
-    for (auto& t : neighbor_tables) s.query_cache.invalidate_table(t);
+    for (auto& t : locked_tables) s.query_cache.invalidate_table(t);
     return CascadeAttemptResult::done();
     }; // neighbor_write_lock (EXCLUSIVE, a local inside this lambda) released on every return above
 
@@ -670,6 +711,10 @@ StringResult Executor::exec_delete_inner(SharedDatabase& s, const std::string& t
                                       ". Cannot cascade DELETE.");
         }
         // else: granted -- loop back and retry try_cascade_once() from scratch.
+    }
+    // (the rows that a cascade deleted are gone and the ones it rewrote read differently now: what is left to delete is what the statement finds)
+    if (self_plan.active) {
+        if (auto refused = collect_targets()) return *refused;
     }
 
     std::string pk_col = "id";
@@ -857,18 +902,25 @@ StringResult Executor::exec_delete_inner(SharedDatabase& s, const std::string& t
                 }
             }
         }
+        std::vector<Row> erased; // (the rows that go for good leave the cache of UNIQUE / foreign key values, here in the section that ends them)
         if (hit.usable && hit.positions.size() <= 16) {
-            for (auto it = hit.positions.rbegin(); it != hit.positions.rend(); ++it) rows.erase(rows.begin() + static_cast<std::ptrdiff_t>(*it));
+            for (auto it = hit.positions.rbegin(); it != hit.positions.rend(); ++it) {
+                erased.push_back(rows[*it]);
+                rows.erase(rows.begin() + static_cast<std::ptrdiff_t>(*it));
+            }
         } else {
             rows.erase(std::remove_if(rows.begin(), rows.end(),
                                        [&](Row& r) {
                                            if (!is_visible(r)) return false;
-                                           return has_subq ? matches_condition_with_subquery(s, r, condition) : matches_condexpr(r, condition);
+                                           const bool matches = has_subq ? matches_condition_with_subquery(s, r, condition) : matches_condexpr(r, condition);
+                                           if (matches) erased.push_back(r);
+                                           return matches;
                                        }),
                        rows.end());
         }
         deleted = before - rows.size();
         hard_deleted = true;
+        cache_forgets(erased);
         if (deleted > 0) s.query_cache.invalidate_table(table);
     } else {
         // Row-level-concurrency Stage 4 correctness fix: EXCLUSIVE, not SHARED -- same
@@ -962,6 +1014,7 @@ StringResult Executor::exec_delete_inner(SharedDatabase& s, const std::string& t
         // (shape-changing); wrapping the whole tail uniformly matches exec_insert_inner/
         // exec_update_inner.
         auto table_lock = acquire_table_data_locks(s, {table}, /*exclusive=*/true);
+        if (const TableSchema* sch = s.catalog.get_table(table)) unique_probe_apply(s, table, *sch, {}, {}); // (this section ends no live row: the cache of the section before stays current)
         // Redo capture: physically-removed rows still need to be durable as "this version died".
         for (auto& del_row : rows_to_delete) {
             auto kit = del_row.find(pk_col);

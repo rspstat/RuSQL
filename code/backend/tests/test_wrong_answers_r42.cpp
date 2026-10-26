@@ -1391,3 +1391,301 @@ TEST_CASE("R54: parents are deleted while children are written", "[r54][fk][conc
     // no child is left without its parent
     REQUIRE(q(ex, "SELECT COUNT(*) FROM c LEFT JOIN p ON p.id = c.pid WHERE p.id IS NULL") == Rows{{"0"}});
 }
+
+namespace {
+// the text of the answer of a DELETE / UPDATE: "<n> row(s) deleted."
+std::string answer(Executor& ex, const std::string& sql) {
+    INFO(sql);
+    auto r = ex.execute_sql(sql);
+    if (r.is_err()) INFO("error: " << r.error());
+    REQUIRE(r.is_ok());
+    return r.value();
+}
+
+Rows emp_rows(Executor& ex) { return q(ex, "SELECT id, mgr FROM emp ORDER BY id"); }
+} // namespace
+
+TEST_CASE("R55: a DELETE of a row that its own table refers to (emp.mgr -> emp.id) is refused row by row under RESTRICT", "[r55][self_fk]") {
+    TempDataDir dir("r55_restrict");
+    Executor ex(dir.path);
+    ok(ex, "CREATE DATABASE d");
+    ok(ex, "USE d");
+    ok(ex, "CREATE TABLE emp (id INT PRIMARY KEY, mgr INT, FOREIGN KEY (mgr) REFERENCES emp(id))");
+    const Rows all = {{"1", "NULL"}, {"2", "1"}, {"3", "2"}, {"4", "1"}, {"5", "NULL"}};
+    ok(ex, "INSERT INTO emp VALUES (1, NULL), (2, 1), (3, 2), (4, 1), (5, NULL)");
+    // (the row went whatever referred to it: no child was looked for in the table itself)
+    REQUIRE(fails(ex, "DELETE FROM emp WHERE id = 1").find("Foreign key violation") != std::string::npos);
+    REQUIRE(emp_rows(ex) == all);
+    REQUIRE(answer(ex, "DELETE FROM emp WHERE id = 5") == "1 row(s) deleted.");
+    REQUIRE(answer(ex, "DELETE FROM emp WHERE id = 3") == "1 row(s) deleted.");
+    REQUIRE(emp_rows(ex) == (Rows{{"1", "NULL"}, {"2", "1"}, {"4", "1"}}));
+    // the rows go in the order of the key: 1 is first and has children, so the statement is refused whole, whatever is named after it
+    REQUIRE_FALSE(ex.execute_sql("DELETE FROM emp WHERE id IN (4, 2, 1)").is_ok());
+    REQUIRE_FALSE(ex.execute_sql("DELETE FROM emp").is_ok());
+    REQUIRE(emp_rows(ex) == (Rows{{"1", "NULL"}, {"2", "1"}, {"4", "1"}}));
+    // ... but in the order of an ORDER BY the children are gone before their parent is reached
+    REQUIRE(answer(ex, "DELETE FROM emp ORDER BY id DESC") == "3 row(s) deleted.");
+    REQUIRE(emp_rows(ex).empty());
+    // a row that is its own parent is its own child, until it is gone
+    ok(ex, "INSERT INTO emp VALUES (1, NULL), (7, 7)");
+    REQUIRE_FALSE(ex.execute_sql("DELETE FROM emp WHERE id = 7").is_ok());
+    ok(ex, "UPDATE emp SET mgr = 1 WHERE id = 7");
+    ok(ex, "DELETE FROM emp WHERE id = 7");
+    REQUIRE(emp_rows(ex) == (Rows{{"1", "NULL"}}));
+    // the order of the key, not the order the rows were written in: 3 is stored after 5 but is read before it
+    ok(ex, "DELETE FROM emp");
+    ok(ex, "INSERT INTO emp VALUES (5, NULL), (3, 5), (4, 5)");
+    REQUIRE_FALSE(ex.execute_sql("DELETE FROM emp WHERE id IN (5, 4)").is_ok());
+    REQUIRE(answer(ex, "DELETE FROM emp") == "3 row(s) deleted.");
+}
+
+TEST_CASE("R55: ON DELETE CASCADE / SET NULL through the table's own foreign key: the rows that go with a row, and the rows the statement counts", "[r55][self_fk]") {
+    TempDataDir dir("r55_cascade");
+    {
+        Executor ex(dir.path);
+        ok(ex, "CREATE DATABASE d");
+        ok(ex, "USE d");
+        ok(ex, "CREATE TABLE emp (id INT PRIMARY KEY, mgr INT, FOREIGN KEY (mgr) REFERENCES emp(id) ON DELETE CASCADE)");
+        ok(ex, "CREATE TABLE sn (id INT PRIMARY KEY, mgr INT, FOREIGN KEY (mgr) REFERENCES sn(id) ON DELETE SET NULL)");
+        ok(ex, "INSERT INTO emp VALUES (1, NULL), (2, 1), (3, 2), (4, 1), (5, NULL)");
+        ok(ex, "INSERT INTO sn VALUES (1, NULL), (2, 1), (3, 2), (4, 1), (5, NULL)");
+        // the children go, and their children: one row is counted, the cascade is not
+        REQUIRE(answer(ex, "DELETE FROM emp WHERE id = 1") == "1 row(s) deleted.");
+        REQUIRE(emp_rows(ex) == (Rows{{"5", "NULL"}}));
+        // a row that a cascade has deleted is not reached by the scan any more, so it is not counted
+        ok(ex, "INSERT INTO emp VALUES (1, NULL), (2, 1), (3, 2), (4, 1)");
+        REQUIRE(answer(ex, "DELETE FROM emp WHERE id IN (1, 2)") == "1 row(s) deleted.");
+        REQUIRE(answer(ex, "DELETE FROM emp") == "1 row(s) deleted.");
+        ok(ex, "INSERT INTO emp VALUES (1, NULL), (2, 1), (3, 2), (4, 1)");
+        REQUIRE(answer(ex, "DELETE FROM emp ORDER BY id DESC") == "4 row(s) deleted."); // (the scan reaches every row before a cascade does)
+        // a case-insensitive text key
+        ok(ex, "CREATE TABLE tx (id VARCHAR(5) PRIMARY KEY, mgr VARCHAR(5), FOREIGN KEY (mgr) REFERENCES tx(id) ON DELETE CASCADE)");
+        ok(ex, "INSERT INTO tx VALUES ('A', NULL), ('b', 'a'), ('C', 'B'), ('d', NULL)");
+        ok(ex, "DELETE FROM tx WHERE id = 'A'");
+        REQUIRE(q(ex, "SELECT id FROM tx") == Rows{{"d"}});
+        // SET NULL: the children stay; a row that goes with its parent is not worth rewriting
+        REQUIRE(answer(ex, "DELETE FROM sn WHERE id = 1") == "1 row(s) deleted.");
+        REQUIRE(q(ex, "SELECT id, mgr FROM sn ORDER BY id") == (Rows{{"2", "NULL"}, {"3", "2"}, {"4", "NULL"}, {"5", "NULL"}}));
+        ok(ex, "DELETE FROM sn");
+        ok(ex, "INSERT INTO sn VALUES (1, NULL), (2, 1), (3, 2), (4, 1)");
+        REQUIRE(answer(ex, "DELETE FROM sn WHERE id IN (1, 2)") == "2 row(s) deleted.");
+        REQUIRE(q(ex, "SELECT id, mgr FROM sn ORDER BY id") == (Rows{{"3", "NULL"}, {"4", "NULL"}}));
+        // the scan reads a row as an earlier SET NULL has left it: row 3 no longer matches `mgr IS NOT NULL` when it is reached
+        ok(ex, "DELETE FROM sn");
+        ok(ex, "INSERT INTO sn VALUES (1, NULL), (2, 1), (3, 2), (4, 1)");
+        REQUIRE(answer(ex, "DELETE FROM sn WHERE mgr IS NOT NULL") == "2 row(s) deleted.");
+        REQUIRE(q(ex, "SELECT id, mgr FROM sn ORDER BY id") == (Rows{{"1", "NULL"}, {"3", "NULL"}}));
+        // (the rows that stay are still found through the primary key: the index lost only the rows that went)
+        REQUIRE(q(ex, "SELECT id, mgr FROM sn WHERE id = 3") == (Rows{{"3", "NULL"}}));
+        REQUIRE(q(ex, "SELECT id FROM sn WHERE id = 1") == Rows{{"1"}});
+        REQUIRE(q(ex, "SELECT id FROM sn WHERE id = 2").empty());
+        // a transaction that rolls the cascade back gets every row back
+        ok(ex, "DELETE FROM emp");
+        ok(ex, "INSERT INTO emp VALUES (1, NULL), (2, 1), (3, 2), (4, 1), (5, NULL)");
+        ok(ex, "BEGIN");
+        REQUIRE(answer(ex, "DELETE FROM emp WHERE id = 1") == "1 row(s) deleted.");
+        REQUIRE(emp_rows(ex) == (Rows{{"5", "NULL"}}));
+        ok(ex, "ROLLBACK");
+        REQUIRE(emp_rows(ex) == (Rows{{"1", "NULL"}, {"2", "1"}, {"3", "2"}, {"4", "1"}, {"5", "NULL"}}));
+        // a savepoint inside it
+        ok(ex, "BEGIN");
+        ok(ex, "SAVEPOINT s1");
+        ok(ex, "DELETE FROM emp WHERE id = 2");
+        ok(ex, "ROLLBACK TO SAVEPOINT s1");
+        REQUIRE(emp_rows(ex).size() == 5);
+        ok(ex, "DELETE FROM emp WHERE id = 1");
+        ok(ex, "COMMIT");
+        REQUIRE(emp_rows(ex) == (Rows{{"5", "NULL"}}));
+    } // (no checkpoint: the redo log holds what the cascades did)
+    Executor again(dir.path);
+    ok(again, "USE d");
+    REQUIRE(emp_rows(again) == (Rows{{"5", "NULL"}}));
+    REQUIRE(q(again, "SELECT id, mgr FROM sn ORDER BY id") == (Rows{{"1", "NULL"}, {"3", "NULL"}}));
+    REQUIRE(q(again, "SELECT id FROM tx") == Rows{{"d"}});
+}
+
+TEST_CASE("R55: a cascade of a table's own key reaches the foreign keys of other tables, and stops at 14 levels", "[r55][self_fk]") {
+    TempDataDir dir("r55_levels");
+    Executor ex(dir.path);
+    ok(ex, "CREATE DATABASE d");
+    ok(ex, "USE d");
+    ok(ex, "CREATE TABLE emp (id INT PRIMARY KEY, mgr INT, FOREIGN KEY (mgr) REFERENCES emp(id) ON DELETE CASCADE)");
+    ok(ex, "CREATE TABLE badge (id INT PRIMARY KEY, emp INT, FOREIGN KEY (emp) REFERENCES emp(id))");
+    ok(ex, "INSERT INTO emp VALUES (1, NULL), (2, 1), (3, 2), (4, 1), (5, NULL)");
+    ok(ex, "INSERT INTO badge VALUES (1, 3)");
+    // employee 3 goes with 1, and a badge refers to 3: nothing of the statement happens
+    REQUIRE(fails(ex, "DELETE FROM emp WHERE id = 1").find("Foreign key violation") != std::string::npos);
+    REQUIRE(emp_rows(ex).size() == 5);
+    ok(ex, "DELETE FROM badge");
+    ok(ex, "DROP TABLE badge");
+    ok(ex, "CREATE TABLE badge (id INT PRIMARY KEY, emp INT, FOREIGN KEY (emp) REFERENCES emp(id) ON DELETE CASCADE)");
+    ok(ex, "INSERT INTO badge VALUES (1, 3), (2, 5)");
+    ok(ex, "DELETE FROM emp WHERE id = 1");
+    REQUIRE(q(ex, "SELECT id FROM badge") == Rows{{"2"}}); // (the badge of a cascaded employee goes too)
+    // a chain: 15 rows cascade, a 16th level does not (MySQL: error 3008)
+    ok(ex, "DELETE FROM emp");
+    const auto chain = [](int n) {
+        std::string sql = "INSERT INTO emp VALUES (1, NULL)";
+        for (int i = 2; i <= n; i++) sql += ", (" + std::to_string(i) + ", " + std::to_string(i - 1) + ")";
+        return sql;
+    };
+    ok(ex, chain(15));
+    ok(ex, "DELETE FROM emp WHERE id = 1");
+    REQUIRE(emp_rows(ex).empty());
+    ok(ex, chain(16));
+    REQUIRE(fails(ex, "DELETE FROM emp WHERE id = 1").find("max depth of 15") != std::string::npos);
+    REQUIRE(emp_rows(ex).size() == 16);
+    ok(ex, "DELETE FROM emp WHERE id = 2");
+    REQUIRE(emp_rows(ex) == Rows{{"1", "NULL"}});
+}
+
+TEST_CASE("R55: two foreign keys of a table to itself: a cascade is refused by the other one while a child is there to see", "[r55][self_fk]") {
+    TempDataDir dir("r55_two");
+    Executor ex(dir.path);
+    ok(ex, "CREATE DATABASE d");
+    ok(ex, "USE d");
+    ok(ex, "CREATE TABLE emp (id INT PRIMARY KEY, mgr INT, buddy INT, FOREIGN KEY (mgr) REFERENCES emp(id) ON DELETE CASCADE, FOREIGN KEY (buddy) REFERENCES emp(id))");
+    ok(ex, "INSERT INTO emp VALUES (1, NULL, NULL), (2, 1, NULL), (3, NULL, 2), (4, NULL, NULL), (5, NULL, NULL)");
+    REQUIRE_FALSE(ex.execute_sql("DELETE FROM emp WHERE id = 1").is_ok()); // (2 goes with 1, and 3 has 2 as a buddy)
+    REQUIRE(q(ex, "SELECT COUNT(*) FROM emp") == Rows{{"5"}});
+    ok(ex, "DELETE FROM emp WHERE id = 5");
+    ok(ex, "UPDATE emp SET buddy = NULL WHERE id = 3");
+    ok(ex, "DELETE FROM emp WHERE id = 1");
+    REQUIRE(q(ex, "SELECT id FROM emp ORDER BY id") == (Rows{{"3"}, {"4"}}));
+}
+
+TEST_CASE("R55: ON UPDATE CASCADE / SET NULL of a table's own key acts as RESTRICT", "[r55][self_fk]") {
+    TempDataDir dir("r55_update");
+    Executor ex(dir.path);
+    ok(ex, "CREATE DATABASE d");
+    ok(ex, "USE d");
+    ok(ex, "CREATE TABLE c (id INT PRIMARY KEY, mgr INT, FOREIGN KEY (mgr) REFERENCES c(id) ON UPDATE CASCADE)");
+    ok(ex, "CREATE TABLE n (id INT PRIMARY KEY, mgr INT, FOREIGN KEY (mgr) REFERENCES n(id) ON UPDATE SET NULL)");
+    for (const char* t : {"c", "n"}) ok(ex, std::string("INSERT INTO ") + t + " VALUES (1, NULL), (2, 1), (3, 2), (4, 1), (5, NULL)");
+    for (const char* t : {"c", "n"}) {
+        const std::string name = t;
+        INFO(name);
+        // (a key that has children: nothing is cascaded into the table that is being updated)
+        REQUIRE_FALSE(ex.execute_sql("UPDATE " + name + " SET id = 10 WHERE id = 1").is_ok());
+        REQUIRE_FALSE(ex.execute_sql("UPDATE " + name + " SET id = id + 10").is_ok());
+        REQUIRE(q(ex, "SELECT id, mgr FROM " + name + " ORDER BY id") == (Rows{{"1", "NULL"}, {"2", "1"}, {"3", "2"}, {"4", "1"}, {"5", "NULL"}}));
+        // a key that has none is changed
+        ok(ex, "UPDATE " + name + " SET id = 50 WHERE id = 5");
+        ok(ex, "UPDATE " + name + " SET id = 30 WHERE id = 3");
+        REQUIRE(q(ex, "SELECT id, mgr FROM " + name + " ORDER BY id") == (Rows{{"1", "NULL"}, {"2", "1"}, {"4", "1"}, {"30", "2"}, {"50", "NULL"}}));
+    }
+}
+
+TEST_CASE("R55: parents of a table's own key are deleted while children are written", "[r55][self_fk][concurrency]") {
+    TempDataDir dir("r55_threads");
+    Executor ex(dir.path);
+    ok(ex, "CREATE DATABASE d");
+    ok(ex, "USE d");
+    ok(ex, "CREATE TABLE emp (id INT PRIMARY KEY, mgr INT, FOREIGN KEY (mgr) REFERENCES emp(id) ON DELETE CASCADE)");
+    ok(ex, multi_insert("emp", 1, 400, [](int i) { return std::to_string(i) + ",NULL"; }));
+    ok(ex, multi_insert("emp", 401, 800, [](int i) { return std::to_string(i) + "," + std::to_string(i - 400); }));
+    auto shared = ex.get_shared();
+    std::atomic<bool> failed{false};
+    std::atomic<int> deleted{0};
+    std::thread deleter([&] {
+        Executor s = Executor::new_session(shared);
+        if (!s.execute_sql("USE d").is_ok()) { failed = true; return; }
+        for (int id = 400; id >= 1; id -= 2) {
+            auto r = s.execute_sql("DELETE FROM emp WHERE id = " + std::to_string(id));
+            if (r.is_ok()) deleted++;
+            else failed = true;
+        }
+    });
+    std::thread writer([&] {
+        Executor s = Executor::new_session(shared);
+        if (!s.execute_sql("USE d").is_ok()) { failed = true; return; }
+        int next = 10000;
+        for (int id = 1; id <= 400; id += 2) {
+            auto r = s.execute_sql("INSERT INTO emp VALUES (" + std::to_string(next++) + ", " + std::to_string(id) + ")");
+            if (r.is_err() && r.error().find("Foreign key violation") == std::string::npos) failed = true; // (the parent may be gone already)
+        }
+    });
+    deleter.join();
+    writer.join();
+    REQUIRE_FALSE(failed);
+    REQUIRE(deleted == 200);
+    // no row is left without its parent
+    REQUIRE(q(ex, "SELECT COUNT(*) FROM emp e LEFT JOIN emp m ON m.id = e.mgr WHERE e.mgr IS NOT NULL AND m.id IS NULL") == Rows{{"0"}});
+    // the even parents are gone, with everything below them
+    REQUIRE(q(ex, "SELECT COUNT(*) FROM emp WHERE id <= 400 AND id % 2 = 0") == Rows{{"0"}});
+    REQUIRE(q(ex, "SELECT COUNT(*) FROM emp WHERE id > 400 AND id <= 800 AND mgr % 2 = 0") == Rows{{"0"}});
+}
+
+TEST_CASE("R55: a cascade waits for a row of its own table that another transaction holds", "[r55][self_fk][concurrency]") {
+    TempDataDir dir("r55_claims");
+    Executor ex(dir.path);
+    ok(ex, "CREATE DATABASE d");
+    ok(ex, "USE d");
+    ok(ex, "CREATE TABLE emp (id INT PRIMARY KEY, mgr INT, v INT, FOREIGN KEY (mgr) REFERENCES emp(id) ON DELETE CASCADE)");
+    ok(ex, "INSERT INTO emp VALUES (1, NULL, 0), (2, 1, 0), (3, 2, 0)");
+    ok(ex, "BEGIN");
+    ok(ex, "UPDATE emp SET v = 1 WHERE id = 3"); // (this transaction holds row 3, which the cascade of row 1 reaches two levels down)
+    std::atomic<bool> finished{false}, failed{false};
+    auto shared = ex.get_shared();
+    std::thread deleter([&] {
+        Executor s = Executor::new_session(shared);
+        if (!s.execute_sql("USE d").is_ok() || !s.execute_sql("DELETE FROM emp WHERE id = 1").is_ok()) failed = true;
+        finished = true;
+    });
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    REQUIRE_FALSE(finished); // (it waits for the row, as a DELETE of that row would)
+    ok(ex, "COMMIT");
+    deleter.join();
+    REQUIRE_FALSE(failed);
+    REQUIRE(q(ex, "SELECT COUNT(*) FROM emp") == Rows{{"0"}});
+}
+
+TEST_CASE("R55: a statement that only reads (WITH, a derived table, a prepared SELECT, SET with a subquery, LOCK TABLES, ANALYZE, a read-only CALL) leaves the redo log", "[r55][redo]") {
+    TempDataDir dir("r55_redo");
+    {
+        Executor ex(dir.path);
+        ok(ex, "CREATE DATABASE d");
+        ok(ex, "USE d");
+        ok(ex, "CREATE TABLE t (id INT PRIMARY KEY, v INT)");
+        ok(ex, "CREATE PROCEDURE rd() BEGIN SELECT COUNT(*) FROM t; END");
+        ok(ex, "CREATE PROCEDURE wr() BEGIN INSERT INTO t VALUES (99, 1); END");
+        ok(ex, "INSERT INTO t VALUES (1, 10)");
+        ok(ex, "INSERT INTO t VALUES (2, 20)");
+        auto redo_bytes = [&] { return std::stoll(q(ex, "SHOW GLOBAL STATUS LIKE 'Innodb_redo_log_bytes'")[0][1]); };
+        const long long before = redo_bytes();
+        REQUIRE(before > 0);
+        REQUIRE(q(ex, "WITH c AS (SELECT id FROM t) SELECT * FROM c ORDER BY id") == (Rows{{"1"}, {"2"}}));
+        REQUIRE(q(ex, "WITH RECURSIVE r(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM r WHERE n < 3) SELECT n FROM r") == (Rows{{"1"}, {"2"}, {"3"}}));
+        REQUIRE(q(ex, "SELECT * FROM (SELECT id FROM t) d ORDER BY id") == (Rows{{"1"}, {"2"}}));
+        ok(ex, "PREPARE st FROM 'SELECT v FROM t WHERE id = ?'");
+        ok(ex, "SET @i = 2");
+        REQUIRE(q(ex, "EXECUTE st USING @i") == Rows{{"20"}});
+        ok(ex, "DEALLOCATE PREPARE st");
+        ok(ex, "SET @n = (SELECT COUNT(*) FROM t)");
+        REQUIRE(q(ex, "SELECT @n") == Rows{{"2"}});
+        ok(ex, "LOCK TABLES t READ");
+        ok(ex, "UNLOCK TABLES");
+        ok(ex, "ANALYZE TABLE t");
+        REQUIRE(q(ex, "CALL rd()") == Rows{{"2"}});
+        REQUIRE(redo_bytes() == before); // (every one of them used to checkpoint it: the table files were rewritten and the log emptied)
+        // inside a transaction they do not make it flush the tables at COMMIT either
+        ok(ex, "BEGIN");
+        ok(ex, "INSERT INTO t VALUES (3, 30)");
+        REQUIRE(q(ex, "WITH c AS (SELECT id FROM t) SELECT COUNT(*) FROM c") == Rows{{"3"}});
+        ok(ex, "COMMIT");
+        REQUIRE(redo_bytes() > before);
+        // EXECUTE takes the path of the statement that was prepared: an INSERT is logged like any other
+        ok(ex, "PREPARE ins FROM 'INSERT INTO t VALUES (?, ?)'");
+        ok(ex, "SET @a = 4, @b = 40");
+        const long long mid = redo_bytes();
+        ok(ex, "EXECUTE ins USING @a, @b");
+        REQUIRE(redo_bytes() > mid);
+        REQUIRE(fails(ex, "EXECUTE ins USING @a, @b").find("Duplicate") != std::string::npos);
+        REQUIRE(fails(ex, "EXECUTE nothing").find("Unknown prepared statement") != std::string::npos);
+        ok(ex, "CALL wr()"); // (a procedure that writes still has its own path)
+        REQUIRE(q(ex, "SELECT COUNT(*) FROM t") == Rows{{"5"}});
+    } // (a crash: whatever was not checkpointed comes back from the log)
+    Executor again(dir.path);
+    ok(again, "USE d");
+    REQUIRE(q(again, "SELECT id, v FROM t ORDER BY id") == (Rows{{"1", "10"}, {"2", "20"}, {"3", "30"}, {"4", "40"}, {"99", "1"}}));
+}

@@ -299,8 +299,15 @@ StringResult Executor::exec_drop_trigger(SharedDatabase& s, std::string name, bo
 }
 
 StringResult Executor::exec_execute(SharedDatabase& s, const std::string& name, const std::vector<std::string>& using_vars) {
+    auto statement = prepared_statement(name, using_vars);
+    if (statement.is_err()) return StringResult::Err(statement.error());
+    return execute_with_s(s, std::move(statement).value());
+}
+
+Result<Statement, std::string> Executor::prepared_statement(const std::string& name, const std::vector<std::string>& using_vars) {
+    using R = Result<Statement, std::string>;
     auto it = prepared_stmts.find(name);
-    if (it == prepared_stmts.end()) return StringResult::Err("Unknown prepared statement: " + name);
+    if (it == prepared_stmts.end()) return R::Err("Unknown prepared statement: " + name);
     const std::string& prepared = it->second;
 
     // Each ? outside a quoted string or a quoted name is replaced by the value of the next variable of USING, written as a literal: a number as it is, NULL, any
@@ -325,7 +332,7 @@ StringResult Executor::exec_execute(SharedDatabase& s, const std::string& name, 
             query.push_back(c);
             continue;
         }
-        if (used >= using_vars.size()) return StringResult::Err("Incorrect arguments to EXECUTE");
+        if (used >= using_vars.size()) return R::Err("Incorrect arguments to EXECUTE");
         auto vit = user_vars.find(to_lower_str(using_vars[used++]));
         const std::string value = vit != user_vars.end() ? vit->second : "NULL";
         bool number = !value.empty();
@@ -346,17 +353,59 @@ StringResult Executor::exec_execute(SharedDatabase& s, const std::string& name, 
             query.push_back('\'');
         }
     }
-    if (used != using_vars.size()) return StringResult::Err("Incorrect arguments to EXECUTE");
+    if (used != using_vars.size()) return R::Err("Incorrect arguments to EXECUTE");
 
     Parser parser(query, pipes_as_concat());
     auto parsed = parser.parse();
-    if (parsed.is_err()) return StringResult::Err("EXECUTE parse error: " + parsed.error());
+    if (parsed.is_err()) return R::Err("EXECUTE parse error: " + parsed.error());
     std::string word;
     for (std::size_t i = query.find_first_not_of(" \t\r\n"); i != std::string::npos && i < query.size() && std::isalpha(static_cast<unsigned char>(query[i])); i++) {
         word.push_back(static_cast<char>(std::toupper(static_cast<unsigned char>(query[i]))));
     }
     insert_id_unset_ = word == "INSERT" || word == "REPLACE"; // (an INSERT that is prepared numbers its rows like any other: LAST_INSERT_ID() says the first number)
-    return execute_with_s(s, std::move(parsed).value());
+    return R::Ok(std::move(parsed).value());
+}
+
+bool Executor::may_change_stored_data(const SharedDatabase& s, const Statement& stmt, int depth) const {
+    if (is_pure_read_only(stmt)) return false;
+    auto body_changes = [&](const std::vector<Statement>& body, int level) {
+        return std::any_of(body.begin(), body.end(), [&](const Statement& inner) { return may_change_stored_data(s, inner, level); });
+    };
+    return std::visit(
+        [&](const auto& v) -> bool {
+            using T = std::decay_t<decltype(v)>;
+            if constexpr (std::is_same_v<T, Statement::Select> || std::is_same_v<T, Statement::Union> || std::is_same_v<T, Statement::Intersect> ||
+                          std::is_same_v<T, Statement::Except> || std::is_same_v<T, Statement::AnalyzeTable> || std::is_same_v<T, Statement::LockTables> ||
+                          std::is_same_v<T, Statement::UnlockTables> || std::is_same_v<T, Statement::PrepareStmt> ||
+                          std::is_same_v<T, Statement::DeallocatePrepare> || std::is_same_v<T, Statement::SetUserVar> || std::is_same_v<T, Statement::SetVars> ||
+                          std::is_same_v<T, Statement::ProcDeclare> || std::is_same_v<T, Statement::ProcSet> || std::is_same_v<T, Statement::ProcLeave> ||
+                          std::is_same_v<T, Statement::ProcIterate>) {
+                return false;
+            } else if constexpr (std::is_same_v<T, Statement::With>) {
+                return std::any_of(v.ctes.begin(), v.ctes.end(), [&](const auto& cte) { return may_change_stored_data(s, *cte.second, depth); }) ||
+                       may_change_stored_data(s, *v.query, depth);
+            } else if constexpr (std::is_same_v<T, Statement::ExplainAnalyze>) {
+                return may_change_stored_data(s, *v.inner, depth);
+            } else if constexpr (std::is_same_v<T, Statement::SelectInto>) {
+                return may_change_stored_data(s, *v.query, depth);
+            } else if constexpr (std::is_same_v<T, Statement::ProcIf>) {
+                return body_changes(v.then_body, depth) || (v.else_body && body_changes(*v.else_body, depth)) ||
+                       std::any_of(v.elseif_branches.begin(), v.elseif_branches.end(), [&](const auto& branch) { return body_changes(branch.second, depth); });
+            } else if constexpr (std::is_same_v<T, Statement::ProcWhile> || std::is_same_v<T, Statement::ProcLoop> || std::is_same_v<T, Statement::ProcRepeat>) {
+                return body_changes(v.body, depth);
+            } else if constexpr (std::is_same_v<T, Statement::CallProcedure>) {
+                if (depth >= 8) return true; // (a procedure that calls itself: not worth following)
+                auto it = s.procedures.find(v.name);
+                if (it == s.procedures.end()) {
+                    const std::string wanted = to_lower_str(v.name);
+                    it = std::find_if(s.procedures.begin(), s.procedures.end(), [&](const auto& entry) { return to_lower_str(entry.first) == wanted; });
+                }
+                return it == s.procedures.end() || body_changes(it->second.second, depth + 1);
+            } else {
+                return true;
+            }
+        },
+        stmt.data);
 }
 
 } // namespace engine

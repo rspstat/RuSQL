@@ -227,6 +227,14 @@
       "bothFail": 9
     },
     {
+      "name": "self_fk",
+      "en": "A foreign key of a table to itself: row-by-row RESTRICT, CASCADE (14 levels), SET NULL, ON UPDATE as RESTRICT",
+      "ko": "자기 표를 가리키는 외래키: 행 단위 RESTRICT·CASCADE(14단계)·SET NULL, ON UPDATE는 RESTRICT처럼",
+      "statements": 79,
+      "different": 0,
+      "bothFail": 15
+    },
+    {
       "name": "protocol",
       "en": "MySQL wire protocol: SHOW, OK packets, affected rows",
       "ko": "MySQL 프로토콜: SHOW·OK 패킷·영향 행 수",
@@ -243,10 +251,10 @@
       "bothFail": 0
     }
   ],
-  "conformanceCases": 3345,
+  "conformanceCases": 3472,
   "tests": {
-    "cases": 806,
-    "assertions": 1507268
+    "cases": 815,
+    "assertions": 1507675
   },
   "bugsFound": 206
 }

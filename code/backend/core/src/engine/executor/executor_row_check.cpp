@@ -104,7 +104,9 @@ std::optional<std::string> Executor::update_restrict_violation(SharedDatabase& s
                                                                const std::vector<std::string>& changed_cols) {
     for (auto& [other_table, schema] : s.catalog.tables) {
         for (auto& col : schema.columns) {
-            if (!col.foreign_key || col.foreign_key->ref_table != table || col.foreign_key->on_update != FkAction::Restrict) continue;
+            if (!col.foreign_key || col.foreign_key->ref_table != table) continue;
+            // (a foreign key of a table to itself can not cascade an update into the table it is updating: MySQL lets it refuse like RESTRICT)
+            if (col.foreign_key->on_update != FkAction::Restrict && other_table != table) continue;
             const std::string& ref_col = col.foreign_key->ref_column;
             if (std::find(changed_cols.begin(), changed_cols.end(), ref_col) == changed_cols.end()) continue;
             auto oit = old_row.find(ref_col);

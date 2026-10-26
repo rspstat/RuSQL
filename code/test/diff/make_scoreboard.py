@@ -41,6 +41,7 @@ CORPORA = [
     ("subquery_item_order", [], "ORDER BY / DISTINCT on a scalar subquery of the select list", "select 목록 하위 질의의 ORDER BY·DISTINCT"),
     ("like_escape", [], "LIKE: the backslash as escape character, ESCAPE 'c' (also on a pattern from a column)", "LIKE: 역슬래시 이스케이프, ESCAPE 'c' (열에서 읽은 패턴도)"),
     ("fk_parent", [], "Parent side of a foreign key: DELETE / UPDATE of a parent row, NULL parent keys, cascades", "외래키의 부모 쪽: 부모 행 DELETE·UPDATE, NULL 부모 키, 연쇄"),
+    ("self_fk", [], "A foreign key of a table to itself: row-by-row RESTRICT, CASCADE (14 levels), SET NULL, ON UPDATE as RESTRICT", "자기 표를 가리키는 외래키: 행 단위 RESTRICT·CASCADE(14단계)·SET NULL, ON UPDATE는 RESTRICT처럼"),
     ("protocol", ["--proto"], "MySQL wire protocol: SHOW, OK packets, affected rows", "MySQL 프로토콜: SHOW·OK 패킷·영향 행 수"),
     ("protocol_types", ["--proto", "--types"], "MySQL wire protocol: typed result columns", "MySQL 프로토콜: 열 타입"),
 ]

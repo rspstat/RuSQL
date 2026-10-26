@@ -59,8 +59,8 @@ const NODES: Node[] = [
   },
   {
     id: "executor", x: 885, y: 350, w: 120, h: 98, c: C.core, name: L("Executor", "실행기"),
-    desc: L("Runs the plan: NL / hash / sort-merge / index joins, subqueries, CTE, window functions (over groups too). Result cache (LRU-512) + thread pool. MySQL-exact results (DECIMAL places, strict errors); MAX_EXECUTION_TIME (3024); TRACE.",
-            "계획 실행: NL·해시·소트-머지·인덱스 조인, 서브쿼리, CTE, 윈도 함수(그룹 위에서도). 결과 캐시(LRU 512) + 스레드 풀. MySQL과 같은 결과(DECIMAL 자릿수, 엄격한 오류), MAX_EXECUTION_TIME(3024), TRACE."),
+    desc: L("Runs the plan: NL / hash / sort-merge / index joins, subqueries, CTE, window functions (over groups too). Result cache (LRU-512) + thread pool. MySQL-exact results (DECIMAL places, strict errors); MAX_EXECUTION_TIME (3024); TRACE. A foreign key to its own table is worked out row by row like InnoDB (RESTRICT, CASCADE, SET NULL).",
+            "계획 실행: NL·해시·소트-머지·인덱스 조인, 서브쿼리, CTE, 윈도 함수(그룹 위에서도). 결과 캐시(LRU 512) + 스레드 풀. MySQL과 같은 결과(DECIMAL 자릿수, 엄격한 오류), MAX_EXECUTION_TIME(3024), TRACE. 자기 표를 가리키는 외래키는 InnoDB처럼 행 단위로 처리(RESTRICT·CASCADE·SET NULL)."),
   },
   {
     id: "txn", x: 1085, y: 350, w: 130, h: 104, c: C.txn, name: L("Transactions", "트랜잭션"),
@@ -74,8 +74,8 @@ const NODES: Node[] = [
   },
   {
     id: "durability", x: 825, y: 600, w: 130, h: 104, c: C.disk, name: L("Durability", "내구성"),
-    desc: L("Redo log (checksummed batch per commit, group-commit fsync), WAL, undo log. Checkpoints rewrite the table files; on boot: undo unfinished transactions, replay redo, rebuild indexes.",
-            "Redo 로그(커밋마다 체크섬 배치, 그룹 커밋 fsync), WAL, undo 로그. 체크포인트가 테이블 파일을 재기록하고, 부팅 시 미완료 트랜잭션 undo → redo 재생 → 인덱스 재구성."),
+    desc: L("Redo log (checksummed batch per commit, group-commit fsync), WAL, undo log. Checkpoints rewrite the table files (not for reads: WITH, PREPARE, ANALYZE, read-only CALL); on boot: undo unfinished transactions, replay redo, rebuild indexes.",
+            "Redo 로그(커밋마다 체크섬 배치, 그룹 커밋 fsync), WAL, undo 로그. 체크포인트가 테이블 파일을 재기록하고(읽기인 WITH·PREPARE·ANALYZE·읽기만 하는 CALL은 제외), 부팅 시 미완료 트랜잭션 undo → redo 재생 → 인덱스 재구성."),
   },
   {
     id: "disk", x: 565, y: 600, w: 130, h: 104, c: C.disk, name: L("Disk files", "디스크 파일"),

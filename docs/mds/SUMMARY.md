@@ -9,7 +9,7 @@
 |---|---|
 | 무엇 | MySQL 호환 프로토콜을 쓰는 **자체 RDBMS 엔진**(C++20) + 데스크톱 클라이언트(Tauri/React) + Claude 연동(MCP) |
 | 1학기 → 2학기 | Rust 프로토타입 → **C++ 전면 재작성**, "기능 추가"에서 **정합성·동시성·성능을 실제로 파고드는 심화**로 |
-| 규모 | 테스트 **806 케이스 / 1,507,268 assertions** (2학기 초 218 케이스 / 3,080 assertions) |
+| 규모 | 테스트 **815 케이스 / 1,507,675 assertions** (2학기 초 218 케이스 / 3,080 assertions) |
 | 엔진 구성 | 파서 → 비용 기반 플래너 → 실행기, MVCC·행 단위 락·데드락 감지, redo 로그 기반 내구성, B+Tree·해시·복합 인덱스 |
 
 ## 2학기에 만든 것 (엔진)
@@ -202,9 +202,11 @@
 | **날짜·시간·ENUM·SET 열을 수로 쓰면 글자 앞부분을 수로 읽음**(`d + 0`이 `2024`·MySQL `20240102`, `e + 1`이 1·MySQL 3, `WHERE e = 2`·`d > 20240101`이 행을 못 고름) | 날짜 산술·비교가 틀린 결과 |
 | **`UPDATE`·`DELETE`의 `WHERE` 안 0 나누기(`n / b`)와 숫자와 견준 수 아닌 글자(`s = 5`)를 조용히 건너뜀**(MySQL은 문장 전체가 오류 1365·1292) | 잘못된 데이터가 있어도 문장이 "성공"해 다른 DB에서 깨지거나 오류를 놓침 |
 | **`UPDATE t SET u = u + 1`처럼 UNIQUE·PRIMARY KEY 값을 한 칸씩 밀면 MySQL은 행마다 검사해 오류(1062)인데 여기는 문장이 끝난 뒤의 값만 봐 통과**(`ORDER BY u DESC`를 붙이면 MySQL도 통과) | 같은 문장이 MySQL에서는 실패하는데 여기서는 성공해 다른 DB로 옮길 때 깨짐 |
+| **자기 표를 가리키는 외래키(`emp.mgr → emp.id`)의 부모 쪽이 검사되지 않음**(`DELETE FROM emp WHERE id = 1`이 `id = 2`가 가리키는 행을 오류 없이 지우고 CASCADE·SET NULL도 안 함; MySQL은 1451) | 직원–상사·카테고리 트리 같은 흔한 구조에서 매달린 행이 생김 — 이제 InnoDB처럼 행 단위로 처리 |
+| **`WITH`(CTE)·파생 표 SELECT·`PREPARE`/`EXECUTE`·`ANALYZE`·`LOCK TABLES`가 쌓인 redo 로그를 체크포인트로 비움**(INSERT 직후 `WITH` SELECT가 13 ms) | 쓰기 사이에 낀 읽기가 redo의 이점(커밋 = 작은 배치 + fsync 1번)을 없앰 — 이제 0.23 ms |
 | **`UPDATE`가 같은 값으로 다시 쓴 행도 센다(MySQL은 바뀐 행만), `ON DUPLICATE KEY UPDATE`·`REPLACE`는 삽입한 행 수만 말하고, `DELETE`·`UPDATE`의 `AFTER` 트리거 문장이 바깥 문장의 수를 덮어씀** | `ROW_COUNT()`와 클라이언트의 `rowcount`·`executeUpdate`가 MySQL과 다름 (`CLIENT_FOUND_ROWS`를 켠 Connector/J·MySQLdb는 찾은 행) |
 
-성능·정합성 작업의 커밋들에서 찾은 기존 버그는 모두 190건입니다(전체 목록은 `DATE.md`).
+성능·정합성 작업의 커밋들에서 찾은 기존 버그는 모두 192건입니다(전체 목록은 `DATE.md`).
 
 ## 한계와 앞으로
 

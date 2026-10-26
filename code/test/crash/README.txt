@@ -16,6 +16,11 @@ acknowledged.
                                                   of a missing parent and (RESTRICT) the delete of a parent that has a child must still be refused.
                                                   FUZZ_TRACE=1 prints every statement.
 
+  python fuzz_crash_selfref.py [rounds] [base_seed]  the same for one table emp whose foreign key points at itself (emp.mgr -> emp.id) with the ON DELETE action the seed picks: INSERT of rows
+                                                  under another row, UPDATE of v / mgr / the key, DELETE of one row or several (`id IN (...)`, ascending or ORDER BY id DESC), transactions and
+                                                  savepoints, checked against a model of InnoDB's row-by-row work (a refused statement changes nothing, a cascade follows the children, at most
+                                                  14 levels); after recovery a row under a missing row and (RESTRICT) the delete of a manager with a report must still be refused.
+
 After recovery fuzz_crash.py also checks the INDEXES against the recovered rows (a lookup through the secondary index
 g and through the primary key must return what the oracle says) -- a table scan alone cannot see a stale index.
 
