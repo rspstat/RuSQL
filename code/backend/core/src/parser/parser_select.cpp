@@ -508,6 +508,10 @@ Statement Parser::parse_select() {
                 const std::string typed = next_hidden_window_ > hidden_before ? source_between(item_start, pos_) : std::string();
                 std::optional<std::string> alias = parse_column_alias();
                 if (!alias && !typed.empty()) alias = typed;
+                // a string constant on its own names its column by what it says (`SELECT 'a'` has the column a, not 'a'), as MySQL does
+                if (!alias) {
+                    if (auto* constant = std::get_if<ArithExpr::Str>(&expr.data); constant && !constant->value.empty()) alias = constant->value;
+                }
                 if (std::holds_alternative<ArithExpr::Col>(expr.data) && !alias) {
                     return SelectColumn(SelectColumn::Column{std::get<ArithExpr::Col>(expr.data).name});
                 }
@@ -598,8 +602,11 @@ Statement Parser::parse_select() {
 
     // FROM is optional: scalar SELECT (no FROM) is supported
     if (!peek_is(TokenKind::From)) {
+        // `SELECT 1 WHERE 1 = 0`: the one row a select without FROM has is there, or it is not
+        std::optional<CondExpr> dual_condition;
+        if (peek_is(TokenKind::Where)) { advance(); dual_condition = parse_condexpr(); }
         return set_operation(with_into(Statement(Statement::Select{
-            "_dual_", std::nullopt, std::move(columns), distinct, std::nullopt, {}, {}, std::nullopt,
+            "_dual_", std::nullopt, std::move(columns), distinct, std::move(dual_condition), {}, {}, std::nullopt,
             std::nullopt, std::nullopt, std::nullopt, false, false})));
     }
     advance(); // consume FROM

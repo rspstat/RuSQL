@@ -114,8 +114,9 @@ StringResult Executor::exec_delete(SharedDatabase& s, const std::string& table, 
 StringResult Executor::exec_delete_inner(SharedDatabase& s, const std::string& table, const std::optional<CondExpr>& condition,
                                           const std::optional<std::vector<SelectColumn>>& returning, const std::vector<std::string>* row_order) {
     bool has_fk_ref = std::any_of(s.catalog.tables.begin(), s.catalog.tables.end(), [&](auto& kv) {
-        return std::any_of(kv.second.columns.begin(), kv.second.columns.end(),
-                            [&](const ColumnDef& c) { return c.foreign_key && c.foreign_key->ref_table == table; });
+        return std::any_of(kv.second.columns.begin(), kv.second.columns.end(), [&](const ColumnDef& c) {
+            return std::any_of(c.foreign_keys.begin(), c.foreign_keys.end(), [&](const ForeignKey& fk) { return fk.ref_table == table; });
+        });
     });
 
     // MVCC: a physical (hard) delete is only safe when no session anywhere has an open

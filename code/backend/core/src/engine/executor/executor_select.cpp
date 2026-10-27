@@ -12,6 +12,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstring>
+#include <functional>
 #include <numeric>
 #include <unordered_set>
 
@@ -927,12 +928,14 @@ Row Executor::compute_aggregates(const std::vector<const Row*>& grp, const std::
         const CondExpr* filter = nullptr;
         ValueClass arg_class = ValueClass::Unknown; // what the argument holds: how MIN / MAX compare
         bool arg_approx = false;                    // ... and whether it is a DOUBLE: SUM / AVG are done and shown as doubles
+        bool arg_single = false;                    // ... and whether it is a FLOAT column: MIN / MAX of it are shown with the six digits a FLOAT is shown with
         if (auto* agg = std::get_if<SelectColumn::Agg>(&col.data)) {
             func = &agg->func;
             col_name = agg->source.empty() ? agg->col : agg->source;
             label = agg_label(*func, agg->col);
             arg_class = agg->arg_class;
             arg_approx = agg->arg_approx;
+            arg_single = agg->arg_single;
             if (agg->filter) filter = &*agg->filter;
         } else if (auto* agg_a = std::get_if<SelectColumn::AggAlias>(&col.data)) {
             func = &agg_a->func;
@@ -940,6 +943,7 @@ Row Executor::compute_aggregates(const std::vector<const Row*>& grp, const std::
             label = agg_a->alias;
             arg_class = agg_a->arg_class;
             arg_approx = agg_a->arg_approx;
+            arg_single = agg_a->arg_single;
             if (agg_a->filter) filter = &*agg_a->filter;
         } else {
             continue;
@@ -1170,6 +1174,31 @@ CondExpr and_of(std::optional<CondExpr>& so_far, CondExpr next) {
 
 } // namespace
 
+bool Executor::single_result(const ArithExpr& expr) {
+    bool any_float = false;
+    // a FLOAT column, a whole-number constant or NULL: what a function that picks one of its arguments may be given and still give a FLOAT (a column of another type, an integer
+    // column too, makes the result a DOUBLE)
+    std::function<bool(const ArithExpr&)> float_or_whole = [&](const ArithExpr& e) -> bool {
+        if (auto* col = std::get_if<ArithExpr::Col>(&e.data)) {
+            if (col->outer != 0 || col->kind != ColKind::Plain || !col->single) return false;
+            any_float = true;
+            return true;
+        }
+        if (auto* num = std::get_if<ArithExpr::Num>(&e.data)) {
+            return !num->value.empty() && num->value.find_first_not_of("-0123456789") == std::string::npos;
+        }
+        if (auto* str = std::get_if<ArithExpr::Str>(&e.data)) return str->value == "NULL";
+        if (auto* fn = std::get_if<ArithExpr::Func>(&e.data)) {
+            std::string name = fn->name;
+            for (char& c : name) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+            if (name != "COALESCE" && name != "IFNULL" && name != "NULLIF" && name != "GREATEST" && name != "LEAST") return false;
+            return !fn->args.empty() && std::all_of(fn->args.begin(), fn->args.end(), [&](const ArithExpr& a) { return float_or_whole(a); });
+        }
+        return false;
+    };
+    return float_or_whole(expr) && any_float;
+}
+
 std::optional<std::string> Executor::column_header(const SelectColumn& c) {
     if (auto* col = std::get_if<SelectColumn::Column>(&c.data)) return last_name_part(col->name);
     if (auto* ca = std::get_if<SelectColumn::ColumnAlias>(&c.data)) return ca->alias;
@@ -1337,6 +1366,12 @@ std::optional<std::string> Executor::resolve_join_columns(SharedDatabase& s, con
         coalesced = coalesced || (!joined_using[i].empty() && (joins[i].join_type == JoinType::Right || joins[i].join_type == JoinType::FullOuter));
     }
     auto read_as = [&](std::size_t t, const std::string& column) { return t == 0 && !coalesced ? column : names[t] + "." + column; };
+    // `a RIGHT JOIN b USING (c)` shows its columns the other way round (MySQL): the merged ones, then what is left of b, then what is left of a
+    std::vector<std::size_t> table_order{0};
+    for (std::size_t i = 0; i < joins.size(); i++) {
+        if (joins[i].join_type == JoinType::Right && !joined_using[i].empty()) table_order.insert(table_order.begin(), i + 1);
+        else table_order.push_back(i + 1);
+    }
     // is the column of table `t` one a USING / NATURAL join has merged into the first column of its kind (shown once, in front)?
     auto merged = [&](std::size_t t, const std::string& column) {
         if (t >= 1 && listed(joined_using[t - 1], column)) return true;
@@ -1363,7 +1398,7 @@ std::optional<std::string> Executor::resolve_join_columns(SharedDatabase& s, con
                 }
             }
             for (auto& c : front) expanded.push_back(SelectColumn(SelectColumn::Column{c}));
-            for (std::size_t t = 0; t < schemas.size(); t++) {
+            for (std::size_t t : table_order) {
                 for (auto& c : schemas[t]->columns) {
                     if (!merged(t, c.name)) expanded.push_back(SelectColumn(SelectColumn::Column{read_as(t, c.name)}));
                 }
@@ -1468,6 +1503,8 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
 
         Row eval_row = proc_vars;
         for (auto& [k, v] : user_vars) eval_row["@" + k] = v;
+        // its WHERE (`SELECT 1 WHERE 1 = 0`): the one row is there or it is not -- an answer with no rows (its columns are named from the select list by whoever asked)
+        if (condition && !eval_condexpr(eval_row, *condition)) return StringResult::Ok("0 rows returned.");
 
         std::string dual_error; // a column this select cannot evaluate without a table, or a failing subquery
         auto eval_col_val = [&](const SelectColumn& col) -> std::string {
@@ -3069,9 +3106,14 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
             else if (auto* agg_a = std::get_if<SelectColumn::AggAlias>(&col.data)) label = agg_a->alias;
             else continue;
             auto it = agg_row.find(label);
+            std::string value = it != agg_row.end() ? it->second : std::string();
+            // MIN / MAX of a FLOAT column is shown with the six digits a FLOAT is shown with
+            const bool is_single = (std::holds_alternative<SelectColumn::Agg>(col.data) && std::get<SelectColumn::Agg>(col.data).arg_single) ||
+                                   (std::holds_alternative<SelectColumn::AggAlias>(col.data) && std::get<SelectColumn::AggAlias>(col.data).arg_single);
+            if (is_single && !float_exact_ && value != EXECUTOR_NULL_VALUE) value = sqlval::format_float_display(value);
             // Escaped up front (widths below are computed on the escaped form, matching
             // the visual padding actually written) -- see Executor::escape_cell.
-            agg_results.emplace_back(escape_cell(label), escape_cell(it != agg_row.end() ? it->second : std::string()));
+            agg_results.emplace_back(escape_cell(label), escape_cell(value));
         }
         std::vector<std::size_t> widths;
         widths.reserve(agg_results.size());
@@ -3373,6 +3415,7 @@ StringResult Executor::format_rows(SharedDatabase& s, const std::vector<const Ro
         std::vector<CaseWhenBranch> branches;
         std::optional<std::string> else_val;
         ArithExpr expr;
+        bool single_value = false; // the value is a FLOAT (MIN / MAX of a FLOAT column, a COALESCE over FLOAT columns ...): shown with six digits
     };
 
     bool has_all = std::any_of(columns.begin(), columns.end(), [](const SelectColumn& c) { return std::holds_alternative<SelectColumn::All>(c.data); });
@@ -3417,11 +3460,13 @@ StringResult Executor::format_rows(SharedDatabase& s, const std::vector<const Ro
                 ColSource src;
                 src.kind = ColSource::Kind::Key;
                 src.key = lbl;
+                src.single_value = agg->arg_single;
                 col_defs.emplace_back(lbl, src);
             } else if (auto* agg_a = std::get_if<SelectColumn::AggAlias>(&c.data)) {
                 ColSource src;
                 src.kind = ColSource::Kind::Key;
                 src.key = agg_a->alias;
+                src.single_value = agg_a->arg_single;
                 col_defs.emplace_back(agg_a->alias, src);
             } else if (auto* f = std::get_if<SelectColumn::Func>(&c.data)) {
                 std::string header = f->alias.value_or(f->name + "()");
@@ -3442,6 +3487,7 @@ StringResult Executor::format_rows(SharedDatabase& s, const std::vector<const Ro
                 ColSource src;
                 src.kind = ColSource::Kind::Expr;
                 src.expr = ex->expr;
+                src.single_value = single_result(ex->expr);
                 col_defs.emplace_back(header, src);
             } else if (auto* wf = std::get_if<SelectColumn::WinFunc>(&c.data)) {
                 std::string header = wf->alias.value_or(window_func_default_label(wf->func));
@@ -3484,6 +3530,9 @@ StringResult Executor::format_rows(SharedDatabase& s, const std::vector<const Ro
             }
             single[i] = found && all_single;
         }
+        for (std::size_t i = 0; i < col_defs.size(); i++) {
+            if (col_defs[i].second.single_value) single[i] = true; // (the value of an aggregate or of an expression that is a FLOAT)
+        }
     }
 
     std::vector<std::vector<std::string>> resolved_rows;
@@ -3500,7 +3549,7 @@ StringResult Executor::format_rows(SharedDatabase& s, const std::vector<const Ro
                 case ColSource::Kind::Key: {
                     const std::string* v = get_col(row, src.key);
                     raw = v ? *v : std::string();
-                    if (single[vals.size()] && v && raw != EXECUTOR_NULL_VALUE) raw = sqlval::format_float_display(raw);
+                    if (single[vals.size()] && !float_exact_ && v && raw != EXECUTOR_NULL_VALUE) raw = sqlval::format_float_display(raw);
                     break;
                 }
                 case ColSource::Kind::Func:
@@ -3508,6 +3557,7 @@ StringResult Executor::format_rows(SharedDatabase& s, const std::vector<const Ro
                     break;
                 case ColSource::Kind::Expr:
                     raw = eval_arith(row, src.expr);
+                    if (single[vals.size()] && !float_exact_ && raw != EXECUTOR_NULL_VALUE) raw = sqlval::format_float_display(raw);
                     break;
                 case ColSource::Kind::CaseWhen: {
                     auto resolve = [&](const std::string& sv) -> std::string {

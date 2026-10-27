@@ -1,6 +1,6 @@
-# RuSQL 추천 목록 (남은 항목만, R56 이후 · 2026-10-26 · 항목마다 엔진·코드로 다시 확인한 판)
+# RuSQL 추천 목록 (남은 항목만, R57 이후 · 2026-10-28 · 항목마다 엔진·코드로 다시 확인한 판)
 
-완료된 항목은 뺐습니다(R44~R56에서 끝낸 것은 `DATE.md`에 있습니다). 이 판은 표의 항목을 엔진에 실제로 돌려 보고(진짜 MySQL 8.4.9와 비교) 앱·MCP 코드를 찾아서, 이미 있거나 일부만 있는 것을 가려낸 결과입니다. 점검에서 바뀐 것은 맨 아래 "점검에서 바로잡은 것"에 모았습니다. 지금 받아들이는 SQL 문법 전체는 `SQL.md`에 있습니다.
+완료된 항목은 뺐습니다(R44~R57에서 끝낸 것은 `DATE.md`에 있습니다). 이 판은 10-26에 표의 항목을 엔진에 실제로 돌려 보고(진짜 MySQL 8.4.9와 비교) 앱·MCP 코드를 찾아 이미 있거나 일부만 있는 것을 가려낸 결과에서, R57이 고친 것(REPLACE의 행 유실, FLOAT 값, 한 열의 외래키 둘, USING·NATURAL·CALL의 빈 결과 열 이름, `SELECT 'a'` 머리글, FROM 없는 WHERE)을 뺀 것입니다. 점검에서 바뀐 것은 맨 아래 "점검에서 바로잡은 것"에 모았습니다. 지금 받아들이는 SQL 문법 전체는 `SQL.md`에 있습니다. 발표·제출물 중 포스터·소개글·메인 화면 캡처는 끝났습니다(`docs/deliverables/`).
 
 - **현재 상태:** `일부`(일부만 있음) · `없음` · `오답`(지금 조용히 틀린 값을 돌려줌)
 - **추천도:** ★ 다섯 개. 기준은 실사용 가치 + 발표 임팩트 + 비용 대비 효과입니다. 졸업작품 마감(11월 말)까지 약 5주를 전제로 합니다.
@@ -12,13 +12,14 @@
 | 항목 | 현재 상태 | 추천도 | 비용 | 근거 |
 |---|---|---|---|---|
 | 쓰는 프로시저의 `CALL`·`OPTIMIZE`가 redo 로그를 비움 | 일부 — R55에서 읽기 문장(`WITH`·파생 표·`PREPARE`·`EXECUTE`·`LOCK`·`ANALYZE`·하위 질의가 든 `SET`·본문이 읽기뿐인 `CALL`)은 로그를 두게 했지만, 본문에 쓰기가 있는 `CALL`과 `OPTIMIZE TABLE`은 여전히 체크포인트함 | ★ | 하~중 | `CALL` 본문의 `INSERT`·`UPDATE`·`DELETE`만이면 redo로 덮이는지 확인하고 통과시킬 수 있습니다(지금은 본문의 쓰기마다 테이블 파일도 그 자리에서 씀). 프로시저가 쓰는 장면에서만 보입니다. |
-| 다중 표 DELETE·MERGE·REPLACE의 부모 검사, 자기 표 UPDATE | 일부 — `DELETE t1 FROM t1 JOIN …`·`MERGE`·`REPLACE`의 선검사(`delete_restrict_violation`)는 자식 표를 훑고 한 단계만 보며 자기 표를 가리키는 외래키와 사슬 아래는 보지 않아(여러 행 REPLACE의 둘째 행이 거절되면 첫째 행은 이미 바뀐 채 남을 수 있음), 자기 표 UPDATE는 행 단위가 아니라 문장 전체를 한 번에 봐서(`UPDATE emp SET mgr = NULL, id = id + 10 ORDER BY id DESC`를 MySQL은 통과시키는데 여기는 거절) | ★★ | 중 | 앞의 것은 `plan_cascade_delete`를 부르면 되는데 호출하는 쪽이 자식 표의 데이터 락을 어떻게 잡는지 확인이 필요하고, 뒤의 것은 UPDATE를 행마다 모의해야 합니다. |
-| 빈 결과의 열 이름이 아직 없는 모양 | 일부 — R56에서 SELECT·UNION·WITH·EXECUTE는 행이 없어도 열 이름을 말하지만 `USING`·`NATURAL` 조인(열을 한 번만 보이는 조인)의 빈 결과, `CALL`이 돌려주는 빈 SELECT, 일부 `SHOW …`는 여전히 `0 rows returned.`만 | ★★ | 하~중 | `Resolver`가 `USING` 조인의 열(공통 열을 한 번)을 알려 주게 하고, `CALL`은 프로시저 마지막 SELECT의 이름을 전해야 합니다. |
-| `SELECT 'a'`의 머리글, FROM 없는 `WHERE` | 오답(작음) — 문자열 상수 한 개를 고르면 머리글이 MySQL은 `a`, 여기는 `'a'`(행이 있는 결과도 같음). `SELECT 1 WHERE 1 = 0`은 문법 오류(MySQL 8은 받음) | ★ | 하 | 머리글 규칙 한 줄과 파서의 FROM 없는 WHERE입니다. |
+| 자기 표 UPDATE가 행 단위가 아님 | 일부 — 문장 전체를 한 번에 봐서 `UPDATE emp SET mgr = NULL, id = id + 10 ORDER BY id DESC`를 MySQL은 통과시키는데 여기는 거절합니다(R57에서 다중 표 DELETE·MERGE·REPLACE의 사슬 아래 검사는 끝남) | ★ | 중 | UPDATE를 행마다 모의해야 합니다. 오류로 거절하는 쪽이라 조용한 오답은 아닙니다. |
+| 이름 없는 외래키의 자동 이름, `referential_constraints`의 규칙 표기 | 오답(작음) — `<표>_ibfk_<n>`을 열 순서로 세어 정해서, 앞의 키를 `DROP FOREIGN KEY`하면 남은 키의 이름이 바뀝니다(MySQL은 만들 때 정한 이름 그대로). 규칙을 안 적은 키를 `RESTRICT`로 말합니다(MySQL 8은 `NO ACTION`) | ★ | 하~중 | 이름은 만들 때 정해서 저장해야 하고, 저장 모양이 바뀝니다(R57에서 열마다 키 목록으로 바뀐 JSON에 이어서). |
+| 서로 다른 `USING` 열이 이어지는 조인의 `*` 열 순서 | 오답(작음) — `a JOIN b USING (x) JOIN c USING (y)`의 `*`가 MySQL은 `y, x, …`(나중 조인의 합쳐진 열이 맨 앞), 여기는 `x, y, …` | ★ | 하 | 조인 트리의 순서대로 합쳐진 열을 앞에 두는 규칙을 `resolve_join_columns`와 `Resolver` 두 곳에 같이 고쳐야 합니다. |
+| 몇 가지 `SHOW`의 빈 결과·문법 | 일부 — R57에서 USING·NATURAL 조인과 `CALL`의 빈 결과도 열 이름을 말하게 됨. 남은 것: `SHOW DATABASES LIKE`·`SHOW ERRORS`는 문법 오류, `SHOW GRANTS FOR 없는사용자`는 오류 1141 대신 빈 성공 | ★ | 하 | 작은 모양들입니다. MySQL 클라이언트가 접속 직후 보내는 문장은 아닙니다. |
 | 문장 중단의 남은 것 | 일부 — `KILL QUERY`는 SELECT의 행 루프와 행 잠금 대기를 멈춤. 실행 중인 쓰기 문장은 끝까지 돌고(반쯤 쓰다 멈추면 되돌릴 길이 없어서 일부러), 정렬·집계·조인 해시 구성 같은 한 덩어리 단계는 끝나야 멈춤 | ★★ | 중 | 쓰기 문장의 중단은 문장 단위 롤백이 있어야 안전하고, 덩어리 단계는 확인점(`tick`)을 더 넣어야 합니다. |
 | 느린 쿼리 로그 | 없음 (`SET GLOBAL slow_query_log`는 받기만 하고 아무 일도 안 함. 앱의 쿼리 히스토리에는 소요 시간이 있음) | ★★★ | 중 | 임계값을 넘은 문장을 기록하고 `SHOW`·`information_schema` 표로 보여 주면 됩니다. `TRACE`의 단계 기록을 쓸 수 있습니다. 감사 로그의 바탕이 되기도 합니다. |
 | `EXPLAIN UPDATE` · `EXPLAIN DELETE` | 없음 ("EXPLAIN: Update → not a SELECT") | ★★ | 하~중 | MySQL은 쓰기 문장의 계획도 보여 줍니다. 쓰기 문장이 인덱스를 타는지 앱에서 확인할 수 있게 됩니다. |
-| `OPTIMIZE TABLE` · `CHECK TABLE` · `FLUSH` | 없음 ("Unknown statement"). `VACUUM`·체크포인트는 이미 있음 | ★★ | 하~중 | `OPTIMIZE`는 `VACUUM`+체크포인트의 이름 바꿈, `CHECK TABLE`은 인덱스와 행이 맞는지 검사하는 새 기능입니다. |
+| `OPTIMIZE TABLE` · `CHECK TABLE`을 앱(네이티브)에서도, 진짜 `CHECK`, `FLUSH` · `REPAIR` · `CHECKSUM TABLE` | 일부 — **MySQL 프로토콜로 접속하면 `OPTIMIZE`(= `VACUUM`)·`CHECK`·`ANALYZE TABLE`이 이미 됩니다**(`mysql.cpp`; `CHECK`는 표가 있으면 OK만 돌려주는 껍데기, 실제 검사는 안 함). 앱·CLI(네이티브)에서는 `OPTIMIZE`·`CHECK`가 "Unknown statement"이고, `FLUSH`·`REPAIR`·`CHECKSUM TABLE`은 어느 쪽에도 없음. `VACUUM`·`ANALYZE`·체크포인트는 네이티브에도 있음 | ★★ | 하~중 | `OPTIMIZE`는 `VACUUM`+체크포인트의 이름 바꿈, `CHECK TABLE`은 인덱스와 행이 맞는지 검사하는 새 기능입니다. `mysqldump`가 `FLUSH TABLES`를 보낼 수 있습니다. |
 | `FULLTEXT` / `MATCH … AGAINST` | 없음 (`FULLTEXT KEY`가 든 CREATE TABLE이 오류) | ★★★ | 상 | 검색 데모는 강하지만 역색인과 점수 계산이 큽니다. |
 | 표현식(함수) 인덱스 | 없음 (`CREATE INDEX … ((a + 1))`가 문법 오류) | ★★ | 중~상 | MySQL·PostgreSQL·Oracle 모두 있습니다. 인덱스 키가 식이라 플래너와 유지가 바뀝니다. |
 | 열 단위 권한 (`GRANT SELECT (col) ON t`) | 없음 | ★★ | 중 | MySQL·PostgreSQL에 있고 Oracle은 INSERT·UPDATE만입니다. |
@@ -56,7 +57,7 @@
 | 코퍼스 비교 CI | 없음 (`.github` 없음) | ★★★ | 상 | 지금은 사람이 `make_scoreboard.py`를 돌립니다. MSVC 빌드, MySQL 컨테이너(리눅스 러너)에 리눅스 빌드 가능 여부 확인이 필요합니다. |
 | MySQL 프로토콜의 오류 번호 | 없음 — 모든 오류가 번호 1064(ER_PARSE_ERROR)로 나가고 진짜 번호는 메시지 글자 안(`ERROR 1317 (70100): …`)에만 있음 | ★★ | 하 | 드라이버는 번호로 재시도·중단 여부를 정합니다(1205·1213 재시도, 1317 `QueryInterruptedException`). 메시지 앞의 `ERROR nnnn (state):`를 읽어 패킷에 넣으면 됩니다. 번호를 비교하는 기존 시험 확인이 필요합니다. |
 | 연결 수 상한 | 없음 — **`max_connections` 변수 자체가 없음**(`@@max_connections`가 `NULL`) | ★★ | 하 | 서버 accept 루프의 작은 변경이고 변수도 같이 열어야 합니다. |
-| FLOAT 열의 일곱 자리 이상 값 | 오답 — `MIN`/`MAX`/`GREATEST`/`COALESCE`가 저장된 글자를 보여 주고(MySQL은 여섯 자리), `UPDATE … SET d = f`·`INSERT … SELECT`(FLOAT → DOUBLE 열)는 짧은 글자를 복사 | ★★ | 하~중 | 조용히 틀리지만 일곱 자리 넘는 FLOAT를 쓸 때만 보입니다. |
+| FLOAT가 다른 타입과 섞인 함수, 함수 결과에 대한 산술 | 일부 — R57에서 `MIN`·`MAX`·`GREATEST`·`LEAST`·`COALESCE`·`IFNULL`·`NULLIF`의 6자리 표시(FLOAT 열·정수 상수·NULL만 섞였을 때)와 FLOAT의 복사(`INSERT … SELECT`·`UPDATE`)를 고침. 남은 것: FLOAT가 DOUBLE·정수 열·DECIMAL과 섞이면 MySQL은 넓힌 값(`COALESCE(f, d)`의 0.1이 0.10000000149011612)을 내는데 여기는 저장된 짧은 글자(0.1), 함수 결과의 산술(`GREATEST(f, 0) + 1`의 0.1 행이 MySQL 1.1000000014901161, 여기 1.1), 윈도 `MIN`·`MAX` | ★ | 하~중 | FLOAT 열을 쓰고 일곱 자리 넘는 값이나 FLOAT와 DOUBLE을 섞을 때만 보입니다. |
 | TLS | 없음 | ★★ | 상 | Windows에서 TLS 라이브러리 도입과 핸드셰이크 확장이 큽니다. |
 | `caching_sha2_password` | 없음 (`mysql_native_password`만) | ★★ | 상 | 지금 쓰는 mysql CLI와 pymysql은 모두 접속됩니다. 일부 최신 드라이버가 옵션을 요구할 때만 문제입니다. |
 | WAL 복제, XA, 페이지 단위 버퍼 풀 | 없음 | ★ | 상 | 이미 범위 밖으로 정했고 남은 기간에는 맞지 않습니다. |
@@ -95,7 +96,8 @@
 | 커서(`DECLARE c CURSOR`, `OPEN`·`FETCH`·`CLOSE`) · `DECLARE … HANDLER` | 없음 | ★★★ | 상 | 저장 루틴 해석기에 상태가 새로 필요합니다. |
 | `CREATE TEMPORARY TABLE` | 없음 | ★★★ | 중~상 | 세션별 이름 공간과 연결 종료 시 정리가 필요합니다. |
 | 생성 열 `GENERATED ALWAYS AS` / `AS (식)` | 없음 (STORED·VIRTUAL 둘 다 오류) | ★★★ | 상 | 읽기 경로, 인덱스, ALTER까지 걸립니다. |
-| 한 열에 FK 둘 이상, 여러 열 FK | 없음 (같은 열에 더하면 앞의 것을 덮어씀, 여러 열 FK는 오류) | ★★ | 중~상 | 열마다 FK 하나라는 저장 구조를 바꿔야 합니다. ERD 편집기는 이미 FK가 있는 열을 경고합니다. |
+| 여러 열 FK | 없음 (오류로 거절: "one column per foreign key"). 한 열에 FK 둘 이상은 R57에서 됨 | ★★ | 중~상 | 한 열에 여러 키는 이제 키 목록이라 되지만, 키 하나가 여러 열을 가리키는 구조(키 = 열 목록, 복합 값의 존재·연쇄 검사)는 아직입니다. ERD 편집기는 이미 FK가 있는 열을 경고합니다. |
+| `NATURAL LEFT JOIN` · `NATURAL RIGHT JOIN` | 없음 (문법 오류: `NATURAL` 뒤에 `JOIN`만 기대) | ★★ | 하 | R57에서 USING·NATURAL 조인의 열 순서를 맞추며 알았습니다. 파서에 `LEFT`·`RIGHT`를 받고 `RIGHT`면 USING처럼 순서를 바꾸면 됩니다. |
 | `UPDATE … JOIN (SELECT …) d ON …`, `DELETE x FROM t x JOIN (SELECT …) d ON …` | 없음 ("Expected identifier": 갱신 조인에 파생 표가 올 수 없음) | ★★★ | 중 | 집계한 값으로 갱신하는 흔한 MySQL 문장입니다. 갱신 조인 실행기가 파생 표를 실체화해야 합니다. |
 | `UPDATE t u1 JOIN t ON …` (첫 사용에만 별칭, 두 번째는 별칭 없음), `ORDER BY (SELECT …)` 식으로 직접 | 없음 ("Not unique table/alias", "A subquery inside this expression is not supported") | ★★ | 하~중 | 둘 다 MySQL은 받아들입니다. 조용히 틀리는 것이 아니라 오류로 거절합니다. |
 | `JSON_ARRAYAGG` · `JSON_OBJECTAGG` | 없음 (`JSON_AGG`는 있음) | ★★ | 하 | 별칭입니다. `JSON_OBJECTAGG`는 하~중. |
@@ -121,14 +123,15 @@
 - **더 좋음:** `UNIQUE/FK 검사 O(n)`은 INSERT 쪽이 이미 O(1)입니다(부모 DELETE만 남음). `DEFAULT (식)`은 `NOW()`류가 이미 됩니다. 크래시 복구 시험은 Server Manager의 Stop으로 이미 가능합니다. `list_locks`·`get_table_stats`·`trace_query`는 `execute_sql`로 이미 부를 수 있습니다.
 - **R51에서 알게 된 것:** 앱에서 `EXPLAIN`·`EXPLAIN ANALYZE`의 결과는 한 열짜리 표로 도착해서, 코드에 있던 "계획 트리" 화면이 **한 번도 뜨지 않고 있었습니다**(R51에서 표를 계획 화면으로 그리게 고쳤고 단계 막대도 그 화면에 붙였습니다).
 - **R56에서 알게 된 것:** `a ← b ← c` 연쇄(DELETE와 키 UPDATE 모두)와 0행 SELECT의 열 이름을 끝냈고(`DATE.md` R56), 그 과정에서 `vs_mysql.py`가 빈 결과의 열 이름도 비교하게 되어 `SHOW TABLES LIKE`의 열 이름과 `EXECUTE`한 SELECT의 빈 결과 문제도 찾아 고쳤습니다.
+- **R57에서 알게 된 것:** 점검의 "조용한 오답" 여섯 개를 끝냈고(`DATE.md` R57), 그 비교에서 **`UNION`의 왼쪽이 0행이면 오른쪽 값이 사라지는 오답**(R53 빌드에도 있었음)과 **`a RIGHT JOIN b USING (c)`의 `*` 열 순서**가 MySQL과 달랐던 것을 함께 고쳤습니다. 10-26의 "다중 표 DELETE·MERGE·REPLACE의 사슬 아래 검사"는 DELETE·`DELETE … JOIN`·MERGE-DELETE가 이미 맞았고(한 문장으로 모아 도는 DELETE가 R56의 모의를 씀) REPLACE와 UPDATE+DELETE가 든 MERGE만 어긋나 있었습니다. 같은 점검의 "OPTIMIZE·CHECK TABLE 없음"은 MySQL 프로토콜 쪽에서는 이미 됩니다(위 표).
 - **새 항목:** `EXPLAIN FORMAT=JSON/TREE`, `SIGNAL` 묶음(`RESIGNAL`·`GET DIAGNOSTICS`), `UPDATE/DELETE IGNORE`의 `DELETE`, 없는 함수 45개의 구체 목록, `VERSION()` 문자열.
 
 ## 추천 순서 (기능만, 마감까지 약 4주)
 
 1. **발표 PC에서 앱이 뜨게 만들기 (중):** 설치본에 엔진 묶기와 새 PC 점검(위 "발표 PC용 설치본"). 고장 나면 나머지가 소용없는 항목입니다.
-2. **보이는 장면 다듬기 (하~중):** Server Manager 세션 표에 `KILL` 버튼과 차단자·오래 도는 문장 강조(재료는 R53의 `KILL`, R54의 Metrics 패널·`list_locks`). 크래시 복구 카드와 EXPLAIN 막대, Metrics 패널 다음으로 발표에 보이는 것입니다.
+2. **보이는 장면 다듬기 (하~중, R57에서 정확성 여섯 가지는 끝남):** Server Manager 세션 표에 `KILL` 버튼과 차단자·오래 도는 문장 강조(재료는 R53의 `KILL`, R54의 Metrics 패널·`list_locks`). 크래시 복구 카드와 EXPLAIN 막대, Metrics 패널 다음으로 발표에 보이는 것입니다.
 3. **MCP 남은 것 (각 하):** `kill_session`, `suggest_indexes` 전·후 모드, resources·prompts, CSV 도구.
-4. **무결성과 운영:** 느린 쿼리 로그, `EXPLAIN UPDATE/DELETE`, 연결 수 상한, MySQL 프로토콜 오류 번호(이제 모든 오류가 1064라는 것이 사슬·자기 표 비교에서 가장 눈에 띄는 남은 차이입니다), 빈 결과의 나머지 모양.
+4. **무결성과 운영:** 느린 쿼리 로그, `EXPLAIN UPDATE/DELETE`, 연결 수 상한, MySQL 프로토콜 오류 번호(모든 오류가 1064라는 것이 이제 가장 눈에 띄는 남은 차이입니다), 자동 외래키 이름, 몇 가지 `SHOW`.
 5. **마감 1주 전:** 누적 점검 한 바퀴, 새 영역 훑기 한 번 더.
 6. **시간이 되면:** 앱 안 인덱스 제안, 최적화 전후 속도 애니메이션, 결과 JSON 내보내기·차트·ERD 드래그 연결, 코퍼스 비교 CI, RuSQL vs MySQL 분할 화면.
 7. **미루거나 하지 않는 것:** `FULLTEXT`, 표현식 인덱스, 열 단위 권한, 감사 로그, TLS, `caching_sha2_password`, WAL 복제·XA, 테마.

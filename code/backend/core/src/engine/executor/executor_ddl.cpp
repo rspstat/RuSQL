@@ -381,7 +381,7 @@ StringResult Executor::exec_drop(SharedDatabase& s, const std::string& name, boo
         if (skip_fk_checks) break;
         if (other_name == name) continue;
         for (auto& col : other_schema.columns) {
-            if (col.foreign_key && col.foreign_key->ref_table == name) {
+            if (std::any_of(col.foreign_keys.begin(), col.foreign_keys.end(), [&](const ForeignKey& fk) { return fk.ref_table == name; })) {
                 std::string bare = other_name.substr(other_name.rfind('.') == std::string::npos ? 0 : other_name.rfind('.') + 1);
                 std::string bare_name = name.substr(name.rfind('.') == std::string::npos ? 0 : name.rfind('.') + 1);
                 return StringResult::Err("Cannot drop table '" + bare_name + "' referenced by a foreign key constraint on table '" + bare + "'.");
@@ -472,7 +472,7 @@ StringResult Executor::exec_create_like(SharedDatabase& s, const std::string& na
     if (!from) return StringResult::Err("Table '" + source + "' not found");
     if (if_not_exists && s.catalog.tables.count(name)) return StringResult::Ok("Table '" + name + "' already exists, skipped.");
     std::vector<ColumnDef> columns = from->columns;
-    for (ColumnDef& c : columns) c.foreign_key = std::nullopt;
+    for (ColumnDef& c : columns) c.foreign_keys.clear();
     std::vector<std::pair<std::optional<std::string>, std::string>> checks;
     for (const CheckConstraint& c : from->check_constraints) checks.emplace_back(c.name, c.expression);
     const std::vector<std::string> primary_key_columns = from->primary_key_columns;
@@ -735,7 +735,7 @@ StringResult Executor::exec_alter(SharedDatabase& s, const std::string& table, A
         new_col.unique_constraint_name = v->column.unique_constraint_name;
         new_col.auto_increment = false;
         new_col.default_value = v->column.default_value;
-        new_col.foreign_key = std::nullopt;
+        new_col.foreign_keys.clear();
         new_col.check_expr = v->column.check_expr;
         schema->columns.push_back(new_col);
         if (v->position) {
@@ -1072,10 +1072,12 @@ StringResult Executor::exec_alter(SharedDatabase& s, const std::string& table, A
         fk.name = v->name.value_or("");
         if (!fk.name.empty()) {
             for (auto& other : schema->columns) {
-                if (other.foreign_key && same_name(other.foreign_key->name, fk.name)) return StringResult::Err("Duplicate foreign key constraint name '" + fk.name + "'");
+                for (auto& other_fk : other.foreign_keys) {
+                    if (same_name(other_fk.name, fk.name)) return StringResult::Err("Duplicate foreign key constraint name '" + fk.name + "'");
+                }
             }
         }
-        col_it->foreign_key = fk;
+        col_it->foreign_keys.push_back(fk); // (a column may refer to several tables: each of them is checked)
         s.disk.save_schema(table, *s.catalog.get_table(table));
         std::string constraint_label = v->name.value_or("fk_" + v->column);
         return StringResult::Ok("Foreign key '" + constraint_label + "' added to '" + table + "'.");
@@ -1086,13 +1088,14 @@ StringResult Executor::exec_alter(SharedDatabase& s, const std::string& table, A
         if (!schema) return StringResult::Err("Table '" + table + "' not found");
         bool found = false;
         const std::string bare_table = table.substr(table.rfind('.') == std::string::npos ? 0 : table.rfind('.') + 1);
-        for (std::size_t i = 0; i < schema->columns.size(); i++) {
+        for (std::size_t i = 0; i < schema->columns.size() && !found; i++) {
             auto& col = schema->columns[i];
-            if (col.foreign_key) {
+            for (std::size_t k = 0; k < col.foreign_keys.size(); k++) {
                 // by its name (the one it was given, or the <table>_ibfk_<n> it is reported under); the column name and fk_<column> are the older spellings
-                bool matches = same_name(fk_constraint_name(*schema, bare_table, i), v->name) || col.foreign_key->column == v->name || ("fk_" + col.foreign_key->column) == v->name;
+                const ForeignKey& fk = col.foreign_keys[k];
+                bool matches = same_name(fk_constraint_name(*schema, bare_table, i, k), v->name) || fk.column == v->name || ("fk_" + fk.column) == v->name;
                 if (matches) {
-                    col.foreign_key = std::nullopt;
+                    col.foreign_keys.erase(col.foreign_keys.begin() + static_cast<std::ptrdiff_t>(k));
                     found = true;
                     break;
                 }

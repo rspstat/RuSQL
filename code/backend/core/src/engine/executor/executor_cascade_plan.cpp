@@ -34,6 +34,7 @@ struct Executor::CascadeSim {
         std::string table, column, ref_column; // the child's table and foreign key column, the column of the parent it refers to
         FkAction on_delete, on_update;
         std::string default_value; // what SET DEFAULT writes
+        std::string parent;        // the table the key refers to
     };
     struct State {
         std::vector<Row>* rows = nullptr;
@@ -50,6 +51,7 @@ struct Executor::CascadeSim {
     SharedDatabase& s;
     CascadePlan& plan;
     std::unordered_map<std::string, std::vector<Edge>> edges; // by the table the keys refer to, in the order of the child table's name and of its columns
+    std::map<std::pair<std::string, std::string>, std::vector<Edge>> by_child; // the same keys by the child's table and column (a column may be in several keys)
     std::map<std::string, State> states;
     std::map<std::pair<std::string, std::string>, Lookup> lookups;
     std::map<std::tuple<std::string, std::string, std::string>, bool> asked; // what the cache of the child's foreign key values said, per column and value (it is asked once per statement)
@@ -64,9 +66,11 @@ struct Executor::CascadeSim {
         std::sort(names.begin(), names.end());
         for (auto& name : names) {
             for (auto& col : s.catalog.tables.at(name).columns) {
-                if (!col.foreign_key) continue;
-                edges[col.foreign_key->ref_table].push_back({name, col.name, col.foreign_key->ref_column, col.foreign_key->on_delete, col.foreign_key->on_update,
-                                                              col.default_value.value_or(kNull)});
+                for (auto& fk : col.foreign_keys) { // (a column in several foreign keys is a child of each parent, in the order the keys were declared)
+                    const Edge edge{name, col.name, fk.ref_column, fk.on_delete, fk.on_update, col.default_value.value_or(kNull), fk.ref_table};
+                    edges[fk.ref_table].push_back(edge);
+                    by_child[{name, col.name}].push_back(edge);
+                }
             }
         }
     }
@@ -145,6 +149,23 @@ struct Executor::CascadeSim {
         return out;
     }
 
+    // The value a cascade writes into a child column (ON UPDATE CASCADE, SET DEFAULT) has to be in the parents of the column's OTHER foreign keys as well: a column that is in two keys
+    // takes a new value of one parent only where the other parent has it (MySQL refuses the statement with 1452 otherwise).
+    std::optional<std::string> other_parent_missing(const Edge& via, const std::string& value) {
+        if (value == kNull) return std::nullopt;
+        auto keys = by_child.find({via.table, via.column});
+        if (keys == by_child.end() || keys->second.size() < 2) return std::nullopt;
+        for (const Edge& other : keys->second) {
+            if (other.parent == via.parent && other.ref_column == via.ref_column) continue;
+            ForeignKey fk;
+            fk.column = other.column;
+            fk.ref_table = other.parent;
+            fk.ref_column = other.ref_column;
+            if (auto violation = Executor::fk_child_violation(s, fk, value)) return violation;
+        }
+        return std::nullopt;
+    }
+
     static std::string restricted_delete(const std::string& table, const Edge& e) {
         return "Foreign key violation: row in '" + table + "' is referenced by '" + e.table + "'.'" + e.column + "'";
     }
@@ -174,6 +195,7 @@ struct Executor::CascadeSim {
             const std::string value = action == FkAction::Cascade ? new_value : (action == FkAction::SetNull ? kNull : e.default_value);
             for (std::size_t kid : kids) {
                 if (state_of(e.table)->gone[kid]) continue;
+                if (auto refused = other_parent_missing(e, value)) return refused;
                 if (auto refused = rewrite_column(e.table, kid, e.column, value, level + 1)) return refused;
             }
         }
@@ -220,6 +242,7 @@ struct Executor::CascadeSim {
                     const std::string value = e.on_delete == FkAction::SetNull ? kNull : e.default_value;
                     for (std::size_t kid : kids) {
                         if (state_of(e.table)->gone[kid]) continue;
+                        if (auto refused = other_parent_missing(e, value)) return refused;
                         if (auto refused = rewrite_column(e.table, kid, e.column, value, level + 1)) return refused;
                     }
                     break;

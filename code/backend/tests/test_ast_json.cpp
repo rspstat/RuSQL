@@ -28,7 +28,7 @@ TEST_CASE("Statement::CreateTable with FK and check constraints round-trips", "[
     fk.ref_table = "rusql.department";
     fk.ref_column = "id";
     fk.on_delete = FkAction::Cascade;
-    dept_col.foreign_key = fk;
+    dept_col.foreign_keys.push_back(fk);
 
     Statement s = Statement::CreateTable{
         "rusql.employee", {id_col, dept_col}, true, {"id"}, {{std::optional<std::string>("chk_dept"), "dept_id > 0"}}};
@@ -40,9 +40,9 @@ TEST_CASE("Statement::CreateTable with FK and check constraints round-trips", "[
     REQUIRE(ct.if_not_exists == orig.if_not_exists);
     REQUIRE(ct.primary_key_columns == orig.primary_key_columns);
     REQUIRE(ct.columns.size() == 2);
-    REQUIRE(ct.columns[1].foreign_key.has_value());
-    REQUIRE(ct.columns[1].foreign_key->ref_table == "rusql.department");
-    REQUIRE(ct.columns[1].foreign_key->on_delete == FkAction::Cascade);
+    REQUIRE(!ct.columns[1].foreign_keys.empty());
+    REQUIRE(ct.columns[1].foreign_keys[0].ref_table == "rusql.department");
+    REQUIRE(ct.columns[1].foreign_keys[0].on_delete == FkAction::Cascade);
     REQUIRE(ct.check_constraints.size() == 1);
     REQUIRE(ct.check_constraints[0].first == std::optional<std::string>("chk_dept"));
     REQUIRE(ct.check_constraints[0].second == "dept_id > 0");

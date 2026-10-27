@@ -10,6 +10,7 @@
 
 #include "engine/parser/ast_json.hpp"
 #include "engine/parser/parser.hpp"
+#include "engine/result_text.hpp"
 
 namespace engine {
 
@@ -52,8 +53,19 @@ StringResult Executor::exec_proc_stmts(SharedDatabase& s, std::vector<Statement>
         resolve_names(s, stmt); // (the tables and columns a body names are read in the spelling they were created with)
         // an INSERT in the body numbers its rows like any other: LAST_INSERT_ID() says the first number (CALL, the statement that runs, is not an INSERT)
         if (std::holds_alternative<Statement::Insert>(stmt.data) || std::holds_alternative<Statement::InsertSelect>(stmt.data)) insert_id_unset_ = true;
+        // a query that finds no rows still has columns, and the CALL answers with them when this is the result it gives (kept only while no result table is there yet)
+        std::optional<Statement> query_shape;
+        if (last.rfind('+', 0) != 0 && (std::holds_alternative<Statement::Select>(stmt.data) || std::holds_alternative<Statement::Union>(stmt.data) ||
+                                        std::holds_alternative<Statement::Intersect>(stmt.data) || std::holds_alternative<Statement::Except>(stmt.data) ||
+                                        std::holds_alternative<Statement::With>(stmt.data))) {
+            query_shape = stmt;
+        }
         auto res = execute_with_s(s, std::move(stmt));
         if (res.is_err()) return res;
+        if (query_shape && res.value().rfind("0 rows returned", 0) == 0) {
+            const std::vector<std::string> names = result_column_names_in(s, std::move(*query_shape));
+            if (!names.empty()) res = StringResult::Ok(result_text::empty_table(names));
+        }
         // what the call answers is the last result table of the body (a SELECT before a SET still answers), else the last message
         if (res.value().rfind('+', 0) == 0 || last.rfind('+', 0) != 0) last = res.value();
     }

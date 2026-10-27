@@ -46,3 +46,51 @@ EXECUTE ec_st USING @zero
 SELECT id, name FROM ec_p WHERE id > 5 AND id < 4
 SHOW TABLES LIKE 'nomatch%'
 SELECT id FROM ec_p WHERE id = 99
+--CREATE TABLE ec_n (id INT PRIMARY KEY, name VARCHAR(10), z INT)
+--INSERT INTO ec_n VALUES (1, 'a', 5)
+SELECT * FROM ec_p JOIN ec_c USING (id) WHERE id < 0
+SELECT * FROM ec_p LEFT JOIN ec_c USING (id) WHERE id < 0
+SELECT * FROM ec_p RIGHT JOIN ec_c USING (id) WHERE id < 0
+SELECT * FROM ec_p NATURAL JOIN ec_c WHERE id < 0
+SELECT * FROM ec_p NATURAL JOIN ec_n WHERE id < 0
+SELECT * FROM ec_p JOIN ec_n USING (id, name) WHERE id < 0
+SELECT * FROM ec_p JOIN ec_c USING (id) JOIN ec_n USING (id) WHERE id < 0
+SELECT id, name FROM ec_p JOIN ec_n USING (id, name) WHERE id < 0
+SELECT p.*, c.note FROM ec_p p JOIN ec_c c USING (id) WHERE id < 0
+SELECT * FROM ec_p p NATURAL JOIN ec_n n WHERE p.id < 0
+SELECT * FROM ec_p JOIN ec_c USING (id) ORDER BY id
+SELECT * FROM ec_p NATURAL JOIN ec_n
+--CREATE PROCEDURE ec_proc_empty() BEGIN SELECT id, name FROM ec_p WHERE id < 0; END
+--CREATE PROCEDURE ec_proc_star() BEGIN SELECT * FROM ec_p WHERE id < 0; END
+--CREATE PROCEDURE ec_proc_join() BEGIN SELECT * FROM ec_p JOIN ec_c USING (id) WHERE id < 0; END
+--CREATE PROCEDURE ec_proc_two() BEGIN SELECT id FROM ec_p; SELECT name AS label FROM ec_p WHERE id < 0; END
+--CREATE PROCEDURE ec_proc_set() BEGIN DECLARE n INT DEFAULT 0; SELECT id AS ident FROM ec_p WHERE id < 0; SET n = 1; END
+CALL ec_proc_empty()
+CALL ec_proc_star()
+CALL ec_proc_join()
+CALL ec_proc_two()
+CALL ec_proc_set()
+SELECT 'a'
+SELECT 'a b'
+SELECT 'a', 'b'
+SELECT 'a' AS x
+SELECT 'a' FROM ec_p WHERE id < 0
+SELECT 'a' FROM ec_p WHERE id = 1
+SELECT 'it''s'
+SELECT 'a' + 1
+SELECT UPPER('a')
+SELECT 1 WHERE 1 = 0
+SELECT 1 WHERE 1 = 1
+SELECT 'a' WHERE 1 = 0
+SELECT 1, 'b' WHERE 2 > 1
+SELECT 1 WHERE NULL
+SELECT 1 WHERE EXISTS (SELECT 1 FROM ec_p WHERE id = 1)
+SELECT 1 WHERE EXISTS (SELECT 1 FROM ec_p WHERE id < 0)
+SELECT 1 WHERE 1 IN (SELECT id FROM ec_p)
+SELECT 1 AS one WHERE 1 = 0 UNION SELECT 2
+SELECT 1 WHERE 1 = 0 UNION ALL SELECT 2
+SELECT 2 UNION ALL SELECT 1 WHERE 1 = 0
+SELECT * FROM ec_p LEFT JOIN ec_c USING (id) ORDER BY id
+SELECT * FROM ec_p RIGHT JOIN ec_c USING (id) ORDER BY id
+SELECT * FROM ec_p RIGHT JOIN ec_c USING (id) JOIN ec_n USING (id) ORDER BY id
+SELECT ec_c.*, ec_p.name FROM ec_p RIGHT JOIN ec_c USING (id) ORDER BY id

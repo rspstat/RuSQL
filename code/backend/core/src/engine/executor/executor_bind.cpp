@@ -305,6 +305,17 @@ std::optional<std::string> Executor::bind_statement(SharedDatabase& s, Statement
             }
         }
 
+        // The argument of an aggregate as the query spells it: is it one FLOAT column (single precision)? MIN and MAX of it are shown as a FLOAT is, with six digits.
+        bool argument_is_single(const std::string& argument) const {
+            std::string arg = argument;
+            if (arg.rfind("DISTINCT ", 0) == 0) arg.erase(0, 9);
+            if (arg.empty() || arg == "*" || !plain_reference(arg)) return false;
+            const ColumnDef* def = nullptr;
+            bool approx = false;
+            class_of_name(arg, &approx, &def);
+            return def && std::holds_alternative<DataType::Float>(def->data_type.data);
+        }
+
         // What `AGG(arg)` -- the text a HAVING or a select-list expression uses for an aggregate -- gives; nullopt when `name` is not one.
         // `approx`, when given, is told whether the aggregate's value is a DOUBLE (its argument is, or it is STDDEV / VARIANCE).
         std::optional<ValueClass> aggregate_reference_class(const std::string& name, bool* approx = nullptr) const {
@@ -682,7 +693,7 @@ std::optional<std::string> Executor::bind_statement(SharedDatabase& s, Statement
         // the CASE -- the parser leaves the placeholder "__case__" in the column then.
         // `label` is the argument as the query spells it (it names the result column and stays as typed); `source` is where a row holds it, which is
         // set here when that is another spelling.
-        ValueClass aggregate(AggFunc& func, const std::string& label, std::string& source, std::optional<CondExpr>& filter, bool* approx = nullptr) {
+        ValueClass aggregate(AggFunc& func, const std::string& label, std::string& source, std::optional<CondExpr>& filter, bool* approx = nullptr, bool* single = nullptr) {
             std::string column = source.empty() ? label : source;
             std::vector<CaseWhenBranch>* branches = nullptr;
             if (auto* counted = std::get_if<AggFunc::CountCase>(&func.data)) branches = &counted->branches;
@@ -703,6 +714,7 @@ std::optional<std::string> Executor::bind_statement(SharedDatabase& s, Statement
             }
             if (filter) cond(*filter, "field list");
             if (approx) *approx = !branches && argument_is_approx(column);
+            if (single) *single = !branches && (std::holds_alternative<AggFunc::Min>(func.data) || std::holds_alternative<AggFunc::Max>(func.data)) && argument_is_single(column);
             const bool adds = std::holds_alternative<AggFunc::Sum>(func.data) || std::holds_alternative<AggFunc::Avg>(func.data) ||
                               std::holds_alternative<AggFunc::SumDistinct>(func.data) || std::holds_alternative<AggFunc::AvgDistinct>(func.data);
             if (!branches && adds) {
@@ -766,8 +778,8 @@ std::optional<std::string> Executor::bind_statement(SharedDatabase& s, Statement
                 mark_outer(ca->name, ca->outer);
                 ca->cls = class_of_name(ca->name);
             }
-            else if (auto* agg = std::get_if<SelectColumn::Agg>(&c.data)) agg->arg_class = aggregate(agg->func, agg->col, agg->source, agg->filter, &agg->arg_approx);
-            else if (auto* aa = std::get_if<SelectColumn::AggAlias>(&c.data)) aa->arg_class = aggregate(aa->func, aa->col, aa->source, aa->filter, &aa->arg_approx);
+            else if (auto* agg = std::get_if<SelectColumn::Agg>(&c.data)) agg->arg_class = aggregate(agg->func, agg->col, agg->source, agg->filter, &agg->arg_approx, &agg->arg_single);
+            else if (auto* aa = std::get_if<SelectColumn::AggAlias>(&c.data)) aa->arg_class = aggregate(aa->func, aa->col, aa->source, aa->filter, &aa->arg_approx, &aa->arg_single);
             else if (auto* ex_col = std::get_if<SelectColumn::Expr>(&c.data)) {
                 // (the result column is named by the expression as it was typed, unless it has an alias)
                 std::string typed;

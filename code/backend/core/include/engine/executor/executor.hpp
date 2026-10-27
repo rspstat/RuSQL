@@ -276,6 +276,7 @@ public:
     std::int64_t affected_rows_ = -1;        // the rows the last statement affected when its message does not say it (ON DUPLICATE KEY UPDATE, REPLACE); -1: the message's number
     std::int64_t matched_rows_ = -1;         // the rows the last UPDATE found (its message counts the rows it changed); -1: not an UPDATE
     std::size_t replace_deleted_rows_ = 0;   // the rows the REPLACE that is running deleted before its inserts
+    bool float_exact_ = false;               // the SELECT of an INSERT ... SELECT that is running gives a FLOAT column as it is stored, not with the six digits a FLOAT is shown with
     std::vector<std::string> update_row_order_; // the identity keys of the rows of an UPDATE ... ORDER BY in the order it gave them (exec_update takes them)
     std::vector<std::string> delete_row_order_; // the same for a DELETE ... ORDER BY (exec_delete takes them)
     std::uint64_t statement_insert_id() const { return statement_insert_id_; }
@@ -358,10 +359,14 @@ public:
     static std::optional<std::string> info_schema_bare(const std::string& qualified_name);
     // The types of the columns the SELECT `sql` answers with, one per column (empty: not a SELECT, or the columns cannot be matched with the select list).
     std::vector<ResultColumnType> result_columns(const std::string& sql) const;
+    std::vector<ResultColumnType> result_columns(Statement stmt) const;
+    std::vector<ResultColumnType> result_columns_in(const SharedDatabase& s, Statement stmt) const; // (for a caller that holds the database already)
     // The headers of the columns a SELECT (a set operation, a WITH query) prints, worked out from the statement: for an answer with no rows, which has no header of its own. Empty
     // when they cannot be told (a USING / NATURAL join, a table that is not there).
     std::vector<std::string> result_column_names(const std::string& sql) const;
     std::vector<std::string> result_column_names(Statement stmt) const;
+    // The same for a caller that holds the database already (a procedure body, which runs under the write lock: `result_column_names` would wait for it).
+    std::vector<std::string> result_column_names_in(const SharedDatabase& s, Statement stmt) const;
     // The columns of the temporary table a CTE becomes: `names` are the columns of its answer `rows`, typed by the select list `body` (a table column keeps its type, an
     // arithmetic one is a number by its values, the rest text), so that the query that reads the CTE orders, compares and takes MAX of them as numbers where they are.
     std::vector<ColumnDef> derived_column_defs(const SharedDatabase& s, const Statement& body, const std::vector<std::string>& names, const std::vector<Row>& rows) const;
@@ -570,6 +575,10 @@ public:
     // The header a SELECT prints over the select-list item `item`: a column by its name, an alias, the label of an aggregate, the text of an expression (nullopt for `*`, which is
     // every column of its tables, and for the hidden column of a window function inside an expression).
     static std::optional<std::string> column_header(const SelectColumn& item);
+    // Is the value of the (bound) expression a FLOAT, as MySQL types it: a FLOAT column, or COALESCE / IFNULL / NULLIF / GREATEST / LEAST over FLOAT columns, whole-number
+    // constants and NULL with at least one FLOAT column in them (with a column of another type, a fraction or a string among them the type is another: an integer COLUMN
+    // makes it a DOUBLE). Such a value is shown with six digits.
+    static bool single_result(const ArithExpr& expr);
 private:
     // executor_proc.cpp: whether running `stmt` can change anything that is kept on disk other than through the redo log (a table file, the catalog) -- what decides
     // whether execute() empties the log first. A statement that only reads, builds temporary tables for itself (WITH, a derived table), sets a variable, prepares a
@@ -859,8 +868,8 @@ private:
                                                                 const std::vector<std::string>& changed_cols);
     // The tables with a foreign key into `table`.
     static std::vector<std::string> fk_child_tables(const SharedDatabase& s, const std::string& table);
-    // A foreign-key value that names no live parent row (the message), nullopt when the parent exists or the value is NULL.
-    static std::optional<std::string> fk_child_violation(SharedDatabase& s, const ColumnDef& col, const std::string& val);
+    // A foreign-key value that names no live parent row of `fk` (the message), nullopt when the parent exists or the value is NULL.
+    static std::optional<std::string> fk_child_violation(SharedDatabase& s, const ForeignKey& fk, const std::string& val);
     // The tables whose rows those foreign keys read (partitioned parents: their children); `cols` empty = every foreign key.
     static std::vector<std::string> fk_parent_tables(const SharedDatabase& s, const TableSchema& schema, const std::vector<std::string>& cols);
     void persist_index_meta(const SharedDatabase& s) const;

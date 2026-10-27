@@ -1,5 +1,5 @@
 {
-  "generated": "2026-10-26",
+  "generated": "2026-10-28",
   "mysql": "8.4.9",
   "corpora": [
     {
@@ -235,6 +235,30 @@
       "bothFail": 15
     },
     {
+      "name": "multi_fk",
+      "en": "A column in several foreign keys: each key checks and acts on its own, listed under its own name",
+      "ko": "한 열에 여러 외래키: 키마다 따로 검사하고 따로 동작하고 제 이름으로 나열됨",
+      "statements": 54,
+      "different": 0,
+      "bothFail": 13
+    },
+    {
+      "name": "float_copy",
+      "en": "FLOAT values given by MIN / MAX / GREATEST / COALESCE and copied into other columns (INSERT ... SELECT, UPDATE)",
+      "ko": "MIN·MAX·GREATEST·COALESCE가 내는 FLOAT 값과 다른 열로의 복사(INSERT ... SELECT, UPDATE)",
+      "statements": 43,
+      "different": 0,
+      "bothFail": 0
+    },
+    {
+      "name": "replace_chain",
+      "en": "REPLACE below a chain of foreign keys: refused with nothing changed, or the whole chain goes",
+      "ko": "외래키 사슬 아래의 REPLACE: 아무것도 바뀌지 않고 거절되거나 사슬 전체가 지워짐",
+      "statements": 33,
+      "different": 0,
+      "bothFail": 5
+    },
+    {
       "name": "fk_chain",
       "en": "Foreign keys over several tables: cascades down the whole chain, RESTRICT below, cycles, ON UPDATE CASCADE through a chain",
       "ko": "여러 표에 걸친 외래키: 사슬 끝까지의 연쇄, 아래쪽 RESTRICT, 순환, 사슬을 지나는 ON UPDATE CASCADE",
@@ -246,7 +270,7 @@
       "name": "empty_columns",
       "en": "The columns of an answer of no rows (select list, joins, derived tables, CTE, UNION, EXECUTE, SHOW TABLES LIKE)",
       "ko": "행이 없는 결과의 열 이름(select 목록·조인·파생 표·CTE·UNION·EXECUTE·SHOW TABLES LIKE)",
-      "statements": 40,
+      "statements": 81,
       "different": 0,
       "bothFail": 0
     },
@@ -267,10 +291,10 @@
       "bothFail": 0
     }
   ],
-  "conformanceCases": 3658,
+  "conformanceCases": 3893,
   "tests": {
-    "cases": 825,
-    "assertions": 1508461
+    "cases": 834,
+    "assertions": 1509237
   },
   "bugsFound": 206
 }

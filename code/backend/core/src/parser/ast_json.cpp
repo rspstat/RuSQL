@@ -121,11 +121,13 @@ void to_json(nlohmann::json& j, const ColumnDef& col) {
         {"unique_constraint_name", col.unique_constraint_name},
         {"auto_increment", col.auto_increment},
         {"default", col.default_value}, // Rust field name is `default`
-        {"foreign_key", col.foreign_key},
+        // (the first foreign key is written the way a column with one has always been: a column with one is read by every older schema file reader; the others follow in a list)
+        {"foreign_key", col.foreign_keys.empty() ? nlohmann::json(nullptr) : nlohmann::json(col.foreign_keys.front())},
         {"check_expr", col.check_expr},
         {"on_update_now", col.on_update_now},
         {"unsigned", col.is_unsigned},
     };
+    if (col.foreign_keys.size() > 1) j["more_foreign_keys"] = std::vector<ForeignKey>(col.foreign_keys.begin() + 1, col.foreign_keys.end());
 }
 
 void from_json(const nlohmann::json& j, ColumnDef& col) {
@@ -137,7 +139,11 @@ void from_json(const nlohmann::json& j, ColumnDef& col) {
     j.at("unique_constraint_name").get_to(col.unique_constraint_name);
     j.at("auto_increment").get_to(col.auto_increment);
     if (j.contains("default")) j.at("default").get_to(col.default_value);
-    j.at("foreign_key").get_to(col.foreign_key);
+    col.foreign_keys.clear();
+    if (!j.at("foreign_key").is_null()) col.foreign_keys.push_back(j.at("foreign_key").get<ForeignKey>());
+    if (j.contains("more_foreign_keys")) {
+        for (const auto& more : j.at("more_foreign_keys")) col.foreign_keys.push_back(more.get<ForeignKey>());
+    }
     if (j.contains("check_expr")) j.at("check_expr").get_to(col.check_expr);
     else col.check_expr = std::nullopt;
     col.on_update_now = j.contains("on_update_now") && j.at("on_update_now").get<bool>();

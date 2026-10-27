@@ -9,7 +9,7 @@
 |---|---|
 | 무엇 | MySQL 호환 프로토콜을 쓰는 **자체 RDBMS 엔진**(C++20) + 데스크톱 클라이언트(Tauri/React) + Claude 연동(MCP) |
 | 1학기 → 2학기 | Rust 프로토타입 → **C++ 전면 재작성**, "기능 추가"에서 **정합성·동시성·성능을 실제로 파고드는 심화**로 |
-| 규모 | 테스트 **825 케이스 / 1,508,461 assertions** (2학기 초 218 케이스 / 3,080 assertions) |
+| 규모 | 테스트 **834 케이스 / 1,509,237 assertions** (2학기 초 218 케이스 / 3,080 assertions) |
 | 엔진 구성 | 파서 → 비용 기반 플래너 → 실행기, MVCC·행 단위 락·데드락 감지, redo 로그 기반 내구성, B+Tree·해시·복합 인덱스 |
 
 ## 2학기에 만든 것 (엔진)
@@ -208,8 +208,14 @@
 | **자기 표를 가리키는 외래키(`emp.mgr → emp.id`)의 부모 쪽이 검사되지 않음**(`DELETE FROM emp WHERE id = 1`이 `id = 2`가 가리키는 행을 오류 없이 지우고 CASCADE·SET NULL도 안 함; MySQL은 1451) | 직원–상사·카테고리 트리 같은 흔한 구조에서 매달린 행이 생김 — 이제 InnoDB처럼 행 단위로 처리 |
 | **`WITH`(CTE)·파생 표 SELECT·`PREPARE`/`EXECUTE`·`ANALYZE`·`LOCK TABLES`가 쌓인 redo 로그를 체크포인트로 비움**(INSERT 직후 `WITH` SELECT가 13 ms) | 쓰기 사이에 낀 읽기가 redo의 이점(커밋 = 작은 배치 + fsync 1번)을 없앰 — 이제 0.23 ms |
 | **`UPDATE`가 같은 값으로 다시 쓴 행도 센다(MySQL은 바뀐 행만), `ON DUPLICATE KEY UPDATE`·`REPLACE`는 삽입한 행 수만 말하고, `DELETE`·`UPDATE`의 `AFTER` 트리거 문장이 바깥 문장의 수를 덮어씀** | `ROW_COUNT()`와 클라이언트의 `rowcount`·`executeUpdate`가 MySQL과 다름 (`CLIENT_FOUND_ROWS`를 켠 Connector/J·MySQLdb는 찾은 행) |
+| **`REPLACE`가 사슬 아래에서 막히면 앞 행이 지워진 채 남음**(`t1 ← t2(CASCADE) ← t3(RESTRICT)`에서 `REPLACE INTO t1 VALUES (2), (1)`이 오류로 끝나는데 행 2가 사라짐; MySQL은 아무것도 안 바꿈. UPDATE와 DELETE가 한 문장에 든 MERGE도 같은 구멍) | **데이터 유실** — 이제 지워질 행 전부를 쓰기 전에 사슬 끝까지 모의해서 문장 전체를 거절 |
+| **FLOAT 값**(`MIN`·`MAX`·`GREATEST`·`COALESCE`가 6자리가 아닌 저장 글자를 보임, FLOAT를 DOUBLE·글자 열로 복사하면 6자리로 줄거나 짧은 글자가 들어감 — MySQL은 FLOAT를 넓힌 값) | FLOAT 열을 쓰는 보고서·복사한 열의 값이 MySQL과 다름 |
+| **한 열에 외래키를 둘 달면 앞의 것이 말없이 사라짐**(`FOREIGN KEY (x) REFERENCES a(id), FOREIGN KEY (x) REFERENCES b(id)`) | 한쪽 부모의 무결성이 검사되지 않음 — 이제 키마다 따로 검사·연쇄·나열 |
+| **`a RIGHT JOIN b USING (c)`의 `*` 열 순서**가 MySQL과 다름(MySQL: 합쳐진 열 → b의 나머지 → a의 나머지) | 열 위치로 읽는 클라이언트에 조용한 오답 |
+| **`UNION`의 왼쪽이 0행이면 오른쪽 값이 사라짐**(빈 글자 행 하나가 나옴; R53에도 있던 오답) | 왼쪽이 비는 합집합이 통째로 틀림 — 이제 오른쪽 행이 왼쪽의 열 이름 아래에 |
+| **`SELECT 'a'`의 머리글**이 `'a'`(MySQL은 `a`), **`SELECT 1 WHERE 1 = 0`**이 문법 오류, USING·NATURAL 조인과 `CALL`의 빈 결과에 열 이름이 없음 | 열 이름으로 읽는 도구, FROM 없는 조건식 |
 
-성능·정합성 작업의 커밋들에서 찾은 기존 버그는 모두 195건입니다(전체 목록은 `DATE.md`).
+성능·정합성 작업의 커밋들에서 찾은 기존 버그는 모두 202건입니다(전체 목록은 `DATE.md`).
 
 ## 한계와 앞으로
 

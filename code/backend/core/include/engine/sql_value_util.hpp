@@ -239,6 +239,16 @@ inline std::string format_float_display(const std::string& text) {
     return format_double(std::strtod(buf, nullptr));
 }
 
+// The number a FLOAT holds, written as the DOUBLE it becomes when it goes into a DOUBLE (or any other number) column: 0.1 in a FLOAT is 0.10000000149011612 there, 1234567
+// stays 1234567. `text` is the FLOAT as it is stored (the shortest text that reads back as the float); anything that is no finite number comes back as it is.
+inline std::string float_as_double_text(const std::string& text) {
+    char* end = nullptr;
+    const double v = std::strtod(text.c_str(), &end);
+    if (end == text.c_str() || *end != '\0' || !std::isfinite(v)) return text;
+    const double widened = static_cast<double>(static_cast<float>(v));
+    return widened == v ? text : format_double(widened);
+}
+
 // An exact decimal: sign, the digits of the integer and fraction parts. Rounding and truncation work on the digits, so ROUND(1.255, 2) is 1.26
 // (a double holds 1.25499999...).
 struct Decimal {

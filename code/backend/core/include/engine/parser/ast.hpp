@@ -236,7 +236,7 @@ struct ColumnDef {
     std::optional<std::string> unique_constraint_name;
     bool auto_increment = false;
     std::optional<std::string> default_value; // Rust field name: `default`
-    std::optional<ForeignKey> foreign_key;
+    std::vector<ForeignKey> foreign_keys;     // every FOREIGN KEY the column is in, in the order they were declared (a column may refer to several tables)
     std::optional<std::string> check_expr;
     bool on_update_now = false; // ON UPDATE CURRENT_TIMESTAMP: an UPDATE that changes the row sets the column to the time of the statement
     bool is_unsigned = false;   // INT / BIGINT / SMALLINT / TINYINT UNSIGNED: 0 .. 2*max+1, no negative values
@@ -515,8 +515,9 @@ struct SelectColumn {
     // text the user typed. `source` is where a row holds that value when `col` goes through a table ALIAS: the same name with the
     // table in place of the alias (`orders.amount`); empty when `col` already names the table (or none).
     // `arg_approx`: the argument is a FLOAT / DOUBLE (or text, which MySQL reads as a double): SUM / AVG are done and shown as doubles (set by the binder)
-    struct Agg { AggFunc func; std::string col; std::optional<CondExpr> filter; std::string source; ValueClass arg_class = ValueClass::Unknown; bool arg_approx = false; };
-    struct AggAlias { AggFunc func; std::string col; std::string alias; std::optional<CondExpr> filter; std::string source; ValueClass arg_class = ValueClass::Unknown; bool arg_approx = false; };
+    // `arg_single`: the argument is a FLOAT column (single precision): MIN / MAX of it is shown with the six digits a FLOAT is shown with (set by the binder)
+    struct Agg { AggFunc func; std::string col; std::optional<CondExpr> filter; std::string source; ValueClass arg_class = ValueClass::Unknown; bool arg_approx = false; bool arg_single = false; };
+    struct AggAlias { AggFunc func; std::string col; std::string alias; std::optional<CondExpr> filter; std::string source; ValueClass arg_class = ValueClass::Unknown; bool arg_approx = false; bool arg_single = false; };
     struct Func { std::string name; std::vector<std::string> args; std::optional<std::string> alias; };
     struct Expr { ArithExpr expr; std::optional<std::string> alias; };
     struct CaseWhen {

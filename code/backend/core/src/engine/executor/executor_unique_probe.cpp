@@ -29,7 +29,7 @@ std::vector<UniqueProbeKeySpec> specs_of(const TableSchema& schema) {
     if (schema.primary_key_columns.size() > 1) specs.push_back({schema.primary_key_columns, true, false});
     for (auto& key : schema.unique_keys) specs.push_back({key.columns, true, true});
     for (auto& col : schema.columns) {
-        if (!col.foreign_key) continue;
+        if (col.foreign_keys.empty()) continue;
         const bool listed = std::any_of(specs.begin(), specs.end(), [&](const UniqueProbeKeySpec& s) { return !s.tuple && s.skip_null && s.columns.size() == 1 && s.columns[0] == col.name; });
         if (!listed) specs.push_back({{col.name}, false, true});
     }

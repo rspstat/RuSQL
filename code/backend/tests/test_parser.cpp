@@ -201,8 +201,8 @@ TEST_CASE("CREATE TABLE with constraints parses correctly", "[parser]") {
     REQUIRE(ct.columns[0].primary_key);
     REQUIRE(ct.columns[0].auto_increment);
     REQUIRE(ct.columns[2].check_expr.has_value());
-    REQUIRE(ct.columns[3].foreign_key.has_value());
-    REQUIRE(ct.columns[3].foreign_key->on_delete == FkAction::SetNull);
+    REQUIRE(!ct.columns[3].foreign_keys.empty());
+    REQUIRE(ct.columns[3].foreign_keys[0].on_delete == FkAction::SetNull);
 }
 
 TEST_CASE("SELECT with JOIN, WHERE, GROUP BY, ORDER BY, LIMIT parses", "[parser]") {

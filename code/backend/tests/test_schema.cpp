@@ -50,7 +50,7 @@ TEST_CASE("TableSchema JSON round trip preserves all fields", "[schema][json]") 
     fk.ref_column = "id";
     fk.on_delete = FkAction::SetNull;
     fk.on_update = FkAction::Cascade;
-    dept_id.foreign_key = fk;
+    dept_id.foreign_keys.push_back(fk);
 
     ColumnDef salary;
     salary.name = "salary";
@@ -82,10 +82,10 @@ TEST_CASE("TableSchema JSON round trip preserves all fields", "[schema][json]") 
     REQUIRE(restored.check_constraints[0].name == "chk_salary");
 
     const ColumnDef& restored_fk_col = restored.columns[0];
-    REQUIRE(restored_fk_col.foreign_key.has_value());
-    REQUIRE(restored_fk_col.foreign_key->ref_table == "department");
-    REQUIRE(restored_fk_col.foreign_key->on_delete == FkAction::SetNull);
-    REQUIRE(restored_fk_col.foreign_key->on_update == FkAction::Cascade);
+    REQUIRE(restored_fk_col.foreign_keys.size() == 1);
+    REQUIRE(restored_fk_col.foreign_keys[0].ref_table == "department");
+    REQUIRE(restored_fk_col.foreign_keys[0].on_delete == FkAction::SetNull);
+    REQUIRE(restored_fk_col.foreign_keys[0].on_update == FkAction::Cascade);
 
     const ColumnDef& restored_salary = restored.columns[1];
     REQUIRE(std::holds_alternative<DataType::Decimal>(restored_salary.data_type.data));

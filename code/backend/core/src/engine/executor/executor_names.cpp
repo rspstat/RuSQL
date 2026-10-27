@@ -226,11 +226,12 @@ struct NameResolver {
         for (UniqueKey& k : ct.indexes) columns_in_place(&own, k.columns);
         if (ct.partition_by) column_in_place(&own, ct.partition_by->column);
         for (ColumnDef& c : ct.columns) {
-            if (!c.foreign_key) continue;
-            column_in_place(&own, c.foreign_key->column);
-            table_in_place(c.foreign_key->ref_table);
-            if (ieq(strip(c.foreign_key->ref_table), strip(ct.name))) column_in_place(&own, c.foreign_key->ref_column);
-            else column_in_place(schema_of(c.foreign_key->ref_table), c.foreign_key->ref_column);
+            for (ForeignKey& fk : c.foreign_keys) {
+                column_in_place(&own, fk.column);
+                table_in_place(fk.ref_table);
+                if (ieq(strip(fk.ref_table), strip(ct.name))) column_in_place(&own, fk.ref_column);
+                else column_in_place(schema_of(fk.ref_table), fk.ref_column);
+            }
         }
     }
 

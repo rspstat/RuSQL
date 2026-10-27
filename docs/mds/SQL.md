@@ -52,7 +52,7 @@ RuSQL이 실제로 받아서 실행하는 SQL 문법을 한 줄씩 정리한 문
 - UNIQUE [KEY | INDEX] [이름] (a, b, ...) : 복합 포함 유일 키
 - KEY | INDEX [이름] (a, b, ...) : 일반 인덱스(`USING HASH`, `COMMENT`, `VISIBLE`/`INVISIBLE`도 받음)
 - CONSTRAINT 이름 PRIMARY KEY / UNIQUE / CHECK / FOREIGN KEY ... : 이름 붙인 제약
-- [CONSTRAINT 이름] FOREIGN KEY (col) REFERENCES t(col) [ON DELETE 동작] [ON UPDATE 동작] : 외래 키(컬럼 하나짜리만)
+- [CONSTRAINT 이름] FOREIGN KEY (col) REFERENCES t(col) [ON DELETE 동작] [ON UPDATE 동작] : 외래 키(컬럼 하나짜리만; 한 열에 여러 개를 달 수 있고, 값은 모든 부모에 있어야 하며 키마다 따로 동작하고 이름은 `<표>_ibfk_n`)
 - 외래 키 동작 : CASCADE / SET NULL / SET DEFAULT / RESTRICT / NO ACTION
 - 표를 건너는 외래 키 사슬 : `a ← b ← c`에서 `DELETE`·키를 바꾸는 `UPDATE`의 연쇄는 사슬 끝까지 간다(R56) — CASCADE는 손자까지, 아래쪽 RESTRICT는 문장 전체를 거절하고 아무것도 바꾸지 않고, 순환은 끝나며, 이미 바꾸고 있는 표로 되돌아오는 `ON UPDATE` 연쇄는 RESTRICT처럼 동작한다(MySQL과 같음)
 - 자기 표를 가리키는 외래 키 : `REFERENCES emp(id)`를 `emp` 자신에게(R55) — `DELETE`는 InnoDB처럼 행을 하나씩 읽는 순서(키 순서, `ORDER BY`가 있으면 그 순서)로 처리한다: RESTRICT는 아직 있는 자식이 있으면 문장 전체를 거절하고, CASCADE는 자식을 되풀이해서 지우되 14단계까지(15번째 단계는 오류 3008), SET NULL은 자식을 NULL로 바꾼다. 같은 문장이 먼저 연쇄로 지운 행은 스캔이 도달하지 않아 세지 않는다. `ON UPDATE CASCADE`·`SET NULL`은 자기 표에는 쓸 수 없어 RESTRICT처럼 동작한다(MySQL과 같음)
@@ -138,7 +138,7 @@ RuSQL이 실제로 받아서 실행하는 SQL 문법을 한 줄씩 정리한 문
 
 ### 기본
 
-- SELECT 식, ... : 값 · 식 계산(FROM 없이도 가능)
+- SELECT 식, ... [WHERE 조건] : 값 · 식 계산(FROM 없이도 가능, FROM 없이 쓴 WHERE가 거짓이면 열 이름만 있는 빈 결과)
 - SELECT * / t.* : 모든 컬럼
 - SELECT 식 [AS] 별칭 : 결과 컬럼에 이름 붙이기
 - SELECT DISTINCT ... : 중복 행 제거
@@ -170,7 +170,7 @@ RuSQL이 실제로 받아서 실행하는 SQL 문법을 한 줄씩 정리한 문
 ### 조인
 
 - [INNER] JOIN t ON 조건 : 두 테이블의 일치하는 행 결합
-- JOIN t USING (col, ...) : 같은 이름의 컬럼으로 결합
+- JOIN t USING (col, ...) : 같은 이름의 컬럼으로 결합(`*`에서 합쳐진 열은 한 번, 앞에; `RIGHT JOIN … USING`은 합쳐진 열 → 오른쪽 표의 나머지 → 왼쪽 표의 나머지 순서로 MySQL과 같음)
 - LEFT [OUTER] JOIN : 왼쪽 행은 모두 유지
 - RIGHT [OUTER] JOIN : 오른쪽 행은 모두 유지
 - FULL [OUTER] JOIN : 양쪽 행을 모두 유지
@@ -521,12 +521,12 @@ mysql 클라이언트 · 드라이버 · 도구가 보내는 문장을 받아주
 - **테이블 정의** : `GENERATED ALWAYS AS (...)` 생성 컬럼, `DEFAULT (식)`, `CREATE TEMPORARY TABLE`, `FULLTEXT` 인덱스, 인덱스 접두 길이 `col(n)`, 여러 컬럼 외래 키, 표현식 인덱스, `ZEROFILL`, `SERIAL` · `BINARY` · `VARBINARY` · `BIT` · `GEOMETRY` 타입, `ALTER TABLE ADD/DROP PRIMARY KEY`, `ALTER TABLE CONVERT TO CHARACTER SET`, 파티션 `KEY` · `COLUMNS` · `REORGANIZE` · `TRUNCATE PARTITION`, `DROP TABLE ... CASCADE`, `CREATE INDEX IF NOT EXISTS`, `ALTER DATABASE`
 - **뷰** : `CREATE VIEW v (컬럼 목록) AS ...`, `WITH CHECK OPTION`
 - **데이터 쓰기** : `INSERT ... VALUES ()`(빈 값), `INSERT ... DEFAULT VALUES`, `INSERT ... AS 별칭`, `INSERT/UPDATE/DELETE LOW_PRIORITY · QUICK`, `UPDATE IGNORE`, `UPDATE ... JOIN (파생 테이블)`, `DELETE FROM ... USING`, `LOAD DATA`, `SELECT ... INTO OUTFILE`
-- **조회** : `GROUP BY ... WITH ROLLUP`, `TABLE t`, `VALUES ROW(...)`, `USE | FORCE | IGNORE INDEX` 힌트, `PARTITION (p)` 선택, `STRAIGHT_JOIN`, `SELECT ALL | HIGH_PRIORITY`, `FROM DUAL`, `NULLS FIRST | LAST`, `OFFSET n ROWS`, `FOR UPDATE OF 테이블`, 괄호로 감싼 `(SELECT ..) UNION (SELECT ..) ORDER BY`, `NATURAL LEFT JOIN`, `IN (SELECT ... UNION SELECT ...)`, `INSERT ... SELECT ... ON DUPLICATE KEY UPDATE`
+- **조회** : `GROUP BY ... WITH ROLLUP`, `NATURAL LEFT | RIGHT JOIN`, `TABLE t`, `VALUES ROW(...)`, `USE | FORCE | IGNORE INDEX` 힌트, `PARTITION (p)` 선택, `STRAIGHT_JOIN`, `SELECT ALL | HIGH_PRIORITY`, `FROM DUAL`, `NULLS FIRST | LAST`, `OFFSET n ROWS`, `FOR UPDATE OF 테이블`, 괄호로 감싼 `(SELECT ..) UNION (SELECT ..) ORDER BY`, `NATURAL LEFT JOIN`, `IN (SELECT ... UNION SELECT ...)`, `INSERT ... SELECT ... ON DUPLICATE KEY UPDATE`
 - **식 · 리터럴** : `IS [NOT] DISTINCT FROM`, `BETWEEN SYMMETRIC`, `.5`, `b'101'`, `DATE '2024-01-01'`, `_utf8mb4'x'`, `COLLATE` 연산자, `BINARY` 연산자, `MATCH ... AGAINST`, `SOUNDS LIKE`, `SELECT @a := 식`, `CONVERT(식 USING 문자집합)`, `DEFAULT(col)`, `GROUPING()`
 - **함수** : `PERCENTILE_CONT ... WITHIN GROUP`, `BIT_XOR`, `CONNECTION_ID`, `GET_LOCK`, `INET_ATON`, `BENCHMARK`, `JSON_MERGE_PATCH` 등 위 9장에 없는 함수
 - **프로시저** : `SIGNAL`, `DECLARE ... HANDLER`, 커서(`DECLARE CURSOR`), 본문의 `CASE ... END CASE`, 반복문 끝의 라벨(`END WHILE lp`), `CREATE PROCEDURE IF NOT EXISTS`, `CREATE OR REPLACE PROCEDURE`, `CREATE TRIGGER IF NOT EXISTS`, 여러 문장 함수 본문(`BEGIN ... RETURN ... END`)
 - **권한 · 사용자** : `ALTER USER`, 컬럼 단위 `GRANT SELECT (col)`, 역할을 `GRANT 역할 TO 사용자` 형식으로 부여
-- **조회 · 관리** : `SHOW CREATE DATABASE`, `SHOW CREATE PROCEDURE`, `SHOW CREATE TRIGGER`, `SHOW TABLES IN db`, `SHOW FULL PROCESSLIST`, `SHOW ENGINE INNODB STATUS`, `SHOW MASTER STATUS`, `SHOW SLAVE STATUS`, `SHOW PRIVILEGES`, `SHOW ERRORS`, `SHOW OPEN TABLES`, `SHOW DATABASES LIKE`, `EXPLAIN FORMAT=JSON`, `EXPLAIN EXTENDED`, `EXPLAIN INSERT | UPDATE | DELETE`의 실행 계획(안내만 나옴), `information_schema.routines`, `information_schema.triggers`, `FLUSH`, `HELP`, `DELIMITER`, `XA`, `OPTIMIZE TABLE` · `CHECK TABLE`(네이티브 프로토콜), `ROLLBACK AND CHAIN`, `LOCK TABLES t AS 별칭`, `DROP PREPARE`
+- **조회 · 관리** : `SHOW CREATE DATABASE`, `SHOW CREATE PROCEDURE`, `SHOW CREATE TRIGGER`, `SHOW TABLES IN db`, `SHOW FULL PROCESSLIST`, `SHOW ENGINE INNODB STATUS`, `SHOW MASTER STATUS`, `SHOW SLAVE STATUS`, `SHOW PRIVILEGES`, `SHOW ERRORS`, `SHOW DATABASES LIKE`, `SHOW OPEN TABLES`, `SHOW DATABASES LIKE`, `EXPLAIN FORMAT=JSON`, `EXPLAIN EXTENDED`, `EXPLAIN INSERT | UPDATE | DELETE`의 실행 계획(안내만 나옴), `information_schema.routines`, `information_schema.triggers`, `FLUSH`, `HELP`, `DELIMITER`, `XA`, `OPTIMIZE TABLE` · `CHECK TABLE`(네이티브 프로토콜), `ROLLBACK AND CHAIN`, `LOCK TABLES t AS 별칭`, `DROP PREPARE`
 - **복제 · 분산** : 복제(replication), XA 분산 트랜잭션, 실제 페이지 단위 버퍼 풀, 이벤트 스케줄러(`CREATE EVENT`)
 
 > 이 문서는 RuSQL 엔진이 받아들이는 문법을 실제로 실행해 확인한 목록입니다. 새 문법을 넣거나 빼면 이 문서도 같이 고칩니다.

@@ -155,9 +155,9 @@ StringResult Executor::exec_update_inner(SharedDatabase& s, const std::string& t
             if (!child) continue;
             const std::vector<std::string> referenced_there = referenced_columns(s, t);
             for (auto& col : child->columns) {
-                if (col.foreign_key && col.foreign_key->on_update != FkAction::Restrict &&
-                    std::find(referenced_there.begin(), referenced_there.end(), col.name) != referenced_there.end())
-                    chain_possible = true;
+                const bool follows_the_key = std::any_of(col.foreign_keys.begin(), col.foreign_keys.end(), [](const ForeignKey& fk) { return fk.on_update != FkAction::Restrict; });
+                // (a column that is in several keys takes the new value only where the other parents have it too: that refusal has to come before a row is written as well)
+                if (follows_the_key && (std::find(referenced_there.begin(), referenced_there.end(), col.name) != referenced_there.end() || col.foreign_keys.size() > 1)) chain_possible = true;
             }
         }
     }
@@ -496,10 +496,16 @@ StringResult Executor::exec_update_inner(SharedDatabase& s, const std::string& t
                         // the assignments run in the order written, each one seeing the columns the ones before it set (MySQL: SET a = a + 1, b = a)
                         Row working = row;
                         const sqlval::StrictWrite strict;
+                        const TableSchema* target_schema = s.catalog.get_table(table);
                         for (auto& [col, expr] : assignments) {
                             // the column gets what the expression worked out (8 / 59.27 into a DECIMAL(10,2) is 0.13, not the 0.135 of the 0.1350 it shows; into a
                             // VARCHAR it is 0.134975535)
                             std::string value = eval_arith_exact(working, expr);
+                            // a FLOAT copied into a column that is not a FLOAT (a DOUBLE, a DECIMAL, an integer, a text) is the single-precision number widened: 0.1 becomes 0.10000000149011612
+                            if (target_schema && value != EXECUTOR_NULL_VALUE && single_result(expr)) {
+                                auto target = std::find_if(target_schema->columns.begin(), target_schema->columns.end(), [&](const ColumnDef& c) { return c.name == col; });
+                                if (target != target_schema->columns.end() && !std::holds_alternative<DataType::Float>(target->data_type.data)) value = sqlval::float_as_double_text(value);
+                            }
                             working[col] = value;
                             new_vals.emplace_back(col, std::move(value));
                         }

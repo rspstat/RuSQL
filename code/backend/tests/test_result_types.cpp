@@ -73,11 +73,11 @@ TEST_CASE("result_columns types the columns of a SELECT", "[result_types]") {
     REQUIRE(types_of(ex, "SELECT dec1 AS price, id pk FROM ty") == "dec(10,2),int");
     REQUIRE(types_of(ex, "SELECT ty.id, ty.ts FROM d.ty") == "int,datetime");
     REQUIRE(types_of(ex, "SELECT t.id, t.dec1 FROM ty t") == "int,dec(10,2)");
-    // joins: the columns come in the order of the tables; a star over a USING join is not told (it shows the common column once)
+    // joins: the columns come in the order of the tables; a star over a USING join shows the common column once, in front (R57)
     REQUIRE(types_of(ex, "SELECT x.id, y.label FROM ty x JOIN ty2 y ON x.id = y.id") == "int,text");
     REQUIRE(types_of(ex, "SELECT ty2.* FROM ty JOIN ty2 ON ty.id = ty2.id") == "int,text");
     REQUIRE(types_of(ex, "SELECT ty2.*, ty.dt FROM ty LEFT JOIN ty2 ON ty.id = ty2.id") == "int,text,date");
-    REQUIRE(types_of(ex, "SELECT * FROM ty JOIN ty2 USING (id)") == "");
+    REQUIRE(types_of(ex, "SELECT * FROM ty JOIN ty2 USING (id)") == "int,tinyint,bigint,uint,float,double,dec(10,2),text,text,date,datetime,time,bool,text");
     // aggregates: COUNT is BIGINT, SUM / AVG follow MySQL (an integer sums to DECIMAL(32,0), a DECIMAL(10,2) to (32,2) and averages to (14,6)), MIN / MAX keep the type
     REQUIRE(types_of(ex, "SELECT COUNT(*), COUNT(DISTINCT vc), SUM(id), SUM(dec1), AVG(id), AVG(dec1), SUM(d), AVG(f) FROM ty") ==
             "bigint,bigint,dec(32,0),dec(32,2),dec(14,4),dec(14,6),double,double");

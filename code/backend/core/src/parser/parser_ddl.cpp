@@ -526,7 +526,7 @@ ColConstraints Parser::parse_col_constraints(const std::string& col_name) {
                 else if (dt && dt->kind == TokenKind::Update) on_update = parse_fk_action();
                 else throw ParseError("Expected DELETE or UPDATE after ON");
             }
-            c.foreign_key = ForeignKey{col_name, ref_table, ref_column, on_delete, on_update};
+            c.foreign_keys.push_back(ForeignKey{col_name, ref_table, ref_column, on_delete, on_update});
         } else {
             break;
         }
@@ -562,7 +562,7 @@ void Parser::parse_fk_table_level(std::vector<ColumnDef>& columns, const std::st
     }
     auto it = std::find_if(columns.begin(), columns.end(), [&](const ColumnDef& c) { return same_name(c.name, fk_col); });
     if (it == columns.end()) throw ParseError("FOREIGN KEY: column '" + fk_col + "' not defined");
-    it->foreign_key = ForeignKey{fk_col, ref_table, ref_column, on_delete, on_update, constraint_name};
+    it->foreign_keys.push_back(ForeignKey{fk_col, ref_table, ref_column, on_delete, on_update, constraint_name});
 }
 
 /// Parses the tail of a single partition definition after "PARTITION name VALUES" has
@@ -876,7 +876,7 @@ Statement Parser::parse_create() {
             col.unique_constraint_name = cc.unique_constraint_name;
             col.auto_increment = cc.auto_increment;
             col.default_value = cc.default_value;
-            col.foreign_key = cc.foreign_key;
+            col.foreign_keys = cc.foreign_keys;
             col.check_expr = cc.check_expr;
             col.on_update_now = cc.on_update_now;
             columns.push_back(std::move(col));
@@ -1021,7 +1021,7 @@ Statement Parser::parse_alter_action(const std::string& table) {
         col.unique_constraint_name = cc.unique_constraint_name;
         col.auto_increment = cc.auto_increment;
         col.default_value = cc.default_value;
-        col.foreign_key = cc.foreign_key;
+        col.foreign_keys = cc.foreign_keys;
         col.check_expr = cc.check_expr;
         col.on_update_now = cc.on_update_now;
         return Statement(Statement::AlterTable{table, AlterAction(AlterAction::ChangeColumn{from, col, parse_column_position()})});
@@ -1169,7 +1169,7 @@ Statement Parser::parse_alter_action(const std::string& table) {
         col.auto_increment = cc.auto_increment;
         col.check_expr = cc.check_expr;
         col.on_update_now = cc.on_update_now;
-        col.foreign_key = cc.foreign_key;
+        col.foreign_keys = cc.foreign_keys;
         col.unique = cc.unique;
         col.unique_constraint_name = cc.unique_constraint_name;
         col.primary_key = cc.primary_key;
@@ -1242,7 +1242,7 @@ Statement Parser::parse_alter_action(const std::string& table) {
         col.unique_constraint_name = cc.unique_constraint_name;
         col.auto_increment = cc.auto_increment;
         col.default_value = cc.default_value;
-        col.foreign_key = cc.foreign_key;
+        col.foreign_keys = cc.foreign_keys;
         col.check_expr = cc.check_expr;
         col.on_update_now = cc.on_update_now;
         return Statement(Statement::AlterTable{table, AlterAction(AlterAction::ModifyColumn{col, parse_column_position()})});

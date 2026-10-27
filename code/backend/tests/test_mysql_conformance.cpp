@@ -120,6 +120,15 @@ const Case kFkChain[] = {
 const Case kEmptyColumns[] = {
 #include "mysql_conformance_empty_columns.inc"
 };
+const Case kMultiFk[] = {
+#include "mysql_conformance_multi_fk.inc"
+};
+const Case kFloatCopy[] = {
+#include "mysql_conformance_float_copy.inc"
+};
+const Case kReplaceChain[] = {
+#include "mysql_conformance_replace_chain.inc"
+};
 
 struct TempDataDir {
     std::string path;
@@ -385,4 +394,16 @@ TEST_CASE("Foreign keys over several tables: cascades down the chain, RESTRICT b
 
 TEST_CASE("An answer of no rows: the statements that find nothing", "[mysql_conformance][empty_columns]") {
     run_cases("mc_empty_columns", kEmptyColumns, sizeof kEmptyColumns / sizeof kEmptyColumns[0]);
+}
+
+TEST_CASE("A column in several foreign keys: each key checks and acts on its own", "[mysql_conformance][multi_fk]") {
+    run_cases("mc_multi_fk", kMultiFk, sizeof kMultiFk / sizeof kMultiFk[0]);
+}
+
+TEST_CASE("FLOAT values that MIN / MAX / GREATEST / COALESCE give and that are copied into other columns", "[mysql_conformance][float_copy]") {
+    run_cases("mc_float_copy", kFloatCopy, sizeof kFloatCopy / sizeof kFloatCopy[0]);
+}
+
+TEST_CASE("REPLACE below a chain of foreign keys: refused with nothing changed, or the whole chain goes", "[mysql_conformance][replace_chain]") {
+    run_cases("mc_replace_chain", kReplaceChain, sizeof kReplaceChain / sizeof kReplaceChain[0]);
 }

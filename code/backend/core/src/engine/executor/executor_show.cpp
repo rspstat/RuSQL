@@ -247,12 +247,13 @@ StringResult Executor::show_create_table_mysql(const std::string& name) {
     for (auto& k : other_keys) lines.push_back(k.second);
     for (std::size_t i = 0; i < schema->columns.size(); i++) {
         const ColumnDef& col = schema->columns[i];
-        if (!col.foreign_key) continue;
-        const ForeignKey& fk = *col.foreign_key;
-        std::string line = "  CONSTRAINT `" + fk_constraint_name(*schema, bare, i) + "` FOREIGN KEY (`" + fk.column + "`) REFERENCES `" + bare_name(fk.ref_table) + "` (`" + fk.ref_column + "`)";
-        if (fk.on_delete != FkAction::Restrict) line += " ON DELETE " + fk_action_str(fk.on_delete);
-        if (fk.on_update != FkAction::Restrict) line += " ON UPDATE " + fk_action_str(fk.on_update);
-        lines.push_back(std::move(line));
+        for (std::size_t k = 0; k < col.foreign_keys.size(); k++) {
+            const ForeignKey& fk = col.foreign_keys[k];
+            std::string line = "  CONSTRAINT `" + fk_constraint_name(*schema, bare, i, k) + "` FOREIGN KEY (`" + fk.column + "`) REFERENCES `" + bare_name(fk.ref_table) + "` (`" + fk.ref_column + "`)";
+            if (fk.on_delete != FkAction::Restrict) line += " ON DELETE " + fk_action_str(fk.on_delete);
+            if (fk.on_update != FkAction::Restrict) line += " ON UPDATE " + fk_action_str(fk.on_update);
+            lines.push_back(std::move(line));
+        }
     }
     std::size_t check_number = 0;
     for (auto& cc : schema->check_constraints) {
@@ -338,8 +339,7 @@ StringResult Executor::exec_show_create_table(const SharedDatabase& s, const std
     }
 
     for (auto& col : schema->columns) {
-        if (col.foreign_key) {
-            auto& fk = *col.foreign_key;
+        for (auto& fk : col.foreign_keys) {
             std::string ref_bare = bare_name(fk.ref_table);
             lines.push_back(std::string("  ") + (fk.name.empty() ? "" : "CONSTRAINT `" + fk.name + "` ") + "FOREIGN KEY (`" + fk.column + "`) REFERENCES `" + ref_bare + "`(`" + fk.ref_column + "`) ON DELETE " +
                              fk_action_str(fk.on_delete) + " ON UPDATE " + fk_action_str(fk.on_update));

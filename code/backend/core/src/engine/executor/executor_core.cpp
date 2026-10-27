@@ -198,8 +198,8 @@ Executor::Executor(const std::string& dir, std::size_t buffer_pool_capacity) {
         databases.insert(db_lower);
 
         for (auto& col : schema.columns) {
-            if (col.foreign_key && col.foreign_key->ref_table.find('.') == std::string::npos) {
-                col.foreign_key->ref_table = db + "." + col.foreign_key->ref_table;
+            for (auto& fk : col.foreign_keys) {
+                if (fk.ref_table.find('.') == std::string::npos) fk.ref_table = db + "." + fk.ref_table;
             }
         }
 
@@ -865,7 +865,7 @@ void add_fk_neighbors(const SharedDatabase& s, const std::string& qtable, bool p
     if (parents) {
         if (auto* schema = s.catalog.get_table(qtable)) {
             for (auto& c : schema->columns) {
-                if (c.foreign_key) out.push_back(c.foreign_key->ref_table);
+                for (auto& fk : c.foreign_keys) out.push_back(fk.ref_table);
             }
         }
     }

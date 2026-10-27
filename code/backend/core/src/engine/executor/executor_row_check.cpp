@@ -13,36 +13,37 @@ namespace engine {
 std::vector<std::string> Executor::fk_parent_tables(const SharedDatabase& s, const TableSchema& schema, const std::vector<std::string>& cols) {
     std::vector<std::string> out;
     for (auto& col : schema.columns) {
-        if (!col.foreign_key) continue;
         if (!cols.empty() && std::find(cols.begin(), cols.end(), col.name) == cols.end()) continue;
-        // Table partitioning: the rows of a partitioned parent live in its children (its own entry is an empty phantom)
-        if (auto part_info = partition_info_for(s, col.foreign_key->ref_table)) {
-            for (auto& def : part_info->partitions) out.push_back(def.child_table);
-        } else {
-            out.push_back(col.foreign_key->ref_table);
+        for (auto& fk : col.foreign_keys) {
+            // Table partitioning: the rows of a partitioned parent live in its children (its own entry is an empty phantom)
+            if (auto part_info = partition_info_for(s, fk.ref_table)) {
+                for (auto& def : part_info->partitions) out.push_back(def.child_table);
+            } else {
+                out.push_back(fk.ref_table);
+            }
         }
     }
     return out;
 }
 
-std::optional<std::string> Executor::fk_child_violation(SharedDatabase& s, const ColumnDef& col, const std::string& val) {
-    if (!col.foreign_key || val == EXECUTOR_NULL_VALUE) return std::nullopt;
+std::optional<std::string> Executor::fk_child_violation(SharedDatabase& s, const ForeignKey& fk, const std::string& val) {
+    if (val == EXECUTOR_NULL_VALUE) return std::nullopt;
     std::vector<std::pair<std::string, const std::vector<Row>*>> ref_row_sets;
-    if (auto part_info = partition_info_for(s, col.foreign_key->ref_table)) {
+    if (auto part_info = partition_info_for(s, fk.ref_table)) {
         for (auto& def : part_info->partitions) {
             if (auto child_it = s.tables.find(def.child_table); child_it != s.tables.end()) ref_row_sets.emplace_back(def.child_table, &child_it->second);
         }
     } else {
-        auto ref_it = s.tables.find(col.foreign_key->ref_table);
-        if (ref_it == s.tables.end()) return "Referenced table '" + col.foreign_key->ref_table + "' not found";
-        ref_row_sets.emplace_back(col.foreign_key->ref_table, &ref_it->second);
+        auto ref_it = s.tables.find(fk.ref_table);
+        if (ref_it == s.tables.end()) return "Referenced table '" + fk.ref_table + "' not found";
+        ref_row_sets.emplace_back(fk.ref_table, &ref_it->second);
     }
     auto live = [](const Row& r) { return Executor::is_visible(r); }; // a deleted parent row is no parent
     bool exists = std::any_of(ref_row_sets.begin(), ref_row_sets.end(), [&](const auto& named_rows) {
-        return index_or_scan_exists(s, named_rows.first, *named_rows.second, col.foreign_key->ref_column, val, live);
+        return index_or_scan_exists(s, named_rows.first, *named_rows.second, fk.ref_column, val, live);
     });
     if (exists) return std::nullopt;
-    return "Foreign key violation: '" + val + "' not found in '" + col.foreign_key->ref_table + "'.'" + col.foreign_key->ref_column + "'";
+    return "Foreign key violation: '" + val + "' not found in '" + fk.ref_table + "'.'" + fk.ref_column + "'";
 }
 
 std::optional<std::string> Executor::rewritten_row_violation(SharedDatabase& s, const TableSchema& schema, const Row& row,
@@ -56,14 +57,16 @@ std::optional<std::string> Executor::rewritten_row_violation(SharedDatabase& s, 
     }
     for (auto& name : changed_cols) {
         auto cit = std::find_if(schema.columns.begin(), schema.columns.end(), [&](const ColumnDef& c) { return c.name == name; });
-        if (cit == schema.columns.end() || !cit->foreign_key) continue;
+        if (cit == schema.columns.end() || cit->foreign_keys.empty()) continue;
         auto vit = row.find(name);
         if (vit == row.end()) continue;
         if (old_row) { // a value the statement leaves as it was is not checked again
             auto oit = old_row->find(name);
             if (oit != old_row->end() && oit->second == vit->second) continue;
         }
-        if (auto violation = fk_child_violation(s, *cit, vit->second)) return violation;
+        for (auto& fk : cit->foreign_keys) {
+            if (auto violation = fk_child_violation(s, fk, vit->second)) return violation;
+        }
     }
     return std::nullopt;
 }
@@ -72,13 +75,15 @@ std::optional<std::string> Executor::delete_restrict_violation(SharedDatabase& s
     for (auto& [other_table, schema] : s.catalog.tables) {
         if (other_table == table) continue;
         for (auto& col : schema.columns) {
-            if (!col.foreign_key || col.foreign_key->ref_table != table || col.foreign_key->on_delete != FkAction::Restrict) continue;
-            auto dit = row.find(col.foreign_key->ref_column);
-            const std::string del_val = dit != row.end() ? dit->second : std::string();
-            if (del_val == EXECUTOR_NULL_VALUE) continue; // (a NULL is referred to by nothing)
-            if (auto oit = s.tables.find(other_table); oit != s.tables.end()) {
-                if (index_or_scan_exists(s, other_table, oit->second, col.name, del_val, [](const Row& r) { return Executor::is_visible(r); })) {
-                    return "Foreign key violation: row in '" + table + "' is referenced by '" + other_table + "'.'" + col.name + "'";
+            for (auto& fk : col.foreign_keys) {
+                if (fk.ref_table != table || fk.on_delete != FkAction::Restrict) continue;
+                auto dit = row.find(fk.ref_column);
+                const std::string del_val = dit != row.end() ? dit->second : std::string();
+                if (del_val == EXECUTOR_NULL_VALUE) continue; // (a NULL is referred to by nothing)
+                if (auto oit = s.tables.find(other_table); oit != s.tables.end()) {
+                    if (index_or_scan_exists(s, other_table, oit->second, col.name, del_val, [](const Row& r) { return Executor::is_visible(r); })) {
+                        return "Foreign key violation: row in '" + table + "' is referenced by '" + other_table + "'.'" + col.name + "'";
+                    }
                 }
             }
         }
@@ -90,19 +95,21 @@ std::optional<std::string> Executor::update_restrict_violation(SharedDatabase& s
                                                                const std::vector<std::string>& changed_cols) {
     for (auto& [other_table, schema] : s.catalog.tables) {
         for (auto& col : schema.columns) {
-            if (!col.foreign_key || col.foreign_key->ref_table != table) continue;
-            // (a foreign key of a table to itself can not cascade an update into the table it is updating: MySQL lets it refuse like RESTRICT)
-            if (col.foreign_key->on_update != FkAction::Restrict && other_table != table) continue;
-            const std::string& ref_col = col.foreign_key->ref_column;
-            if (std::find(changed_cols.begin(), changed_cols.end(), ref_col) == changed_cols.end()) continue;
-            auto oit = old_row.find(ref_col);
-            auto nit = new_row.find(ref_col);
-            const std::string old_val = oit != old_row.end() ? oit->second : std::string();
-            const std::string new_val = nit != new_row.end() ? nit->second : std::string();
-            if (old_val == new_val || old_val == EXECUTOR_NULL_VALUE) continue; // (a NULL is referred to by nothing)
-            if (auto tit = s.tables.find(other_table); tit != s.tables.end()) {
-                if (index_or_scan_exists(s, other_table, tit->second, col.name, old_val, [](const Row& r) { return Executor::is_visible(r); })) {
-                    return "Foreign key violation (ON UPDATE RESTRICT): '" + ref_col + "' is referenced by '" + other_table + "'.'" + col.name + "'";
+            for (auto& fk : col.foreign_keys) {
+                if (fk.ref_table != table) continue;
+                // (a foreign key of a table to itself can not cascade an update into the table it is updating: MySQL lets it refuse like RESTRICT)
+                if (fk.on_update != FkAction::Restrict && other_table != table) continue;
+                const std::string& ref_col = fk.ref_column;
+                if (std::find(changed_cols.begin(), changed_cols.end(), ref_col) == changed_cols.end()) continue;
+                auto oit = old_row.find(ref_col);
+                auto nit = new_row.find(ref_col);
+                const std::string old_val = oit != old_row.end() ? oit->second : std::string();
+                const std::string new_val = nit != new_row.end() ? nit->second : std::string();
+                if (old_val == new_val || old_val == EXECUTOR_NULL_VALUE) continue; // (a NULL is referred to by nothing)
+                if (auto tit = s.tables.find(other_table); tit != s.tables.end()) {
+                    if (index_or_scan_exists(s, other_table, tit->second, col.name, old_val, [](const Row& r) { return Executor::is_visible(r); })) {
+                        return "Foreign key violation (ON UPDATE RESTRICT): '" + ref_col + "' is referenced by '" + other_table + "'.'" + col.name + "'";
+                    }
                 }
             }
         }
@@ -118,7 +125,9 @@ std::vector<std::string> Executor::fk_children_closure(const SharedDatabase& s, 
         const std::string current = std::move(todo.back());
         todo.pop_back();
         for (auto& [name, schema] : s.catalog.tables) {
-            const bool refers = std::any_of(schema.columns.begin(), schema.columns.end(), [&](const ColumnDef& c) { return c.foreign_key && c.foreign_key->ref_table == current; });
+            const bool refers = std::any_of(schema.columns.begin(), schema.columns.end(), [&](const ColumnDef& c) {
+                return std::any_of(c.foreign_keys.begin(), c.foreign_keys.end(), [&](const ForeignKey& fk) { return fk.ref_table == current; });
+            });
             if (refers && seen.insert(name).second) {
                 out.push_back(name);
                 todo.push_back(name);
@@ -132,12 +141,10 @@ std::vector<std::string> Executor::fk_child_tables(const SharedDatabase& s, cons
     std::vector<std::string> out;
     for (auto& [other_table, schema] : s.catalog.tables) {
         if (other_table == table) continue;
-        for (auto& col : schema.columns) {
-            if (col.foreign_key && col.foreign_key->ref_table == table) {
-                out.push_back(other_table);
-                break;
-            }
-        }
+        const bool refers = std::any_of(schema.columns.begin(), schema.columns.end(), [&](const ColumnDef& c) {
+            return std::any_of(c.foreign_keys.begin(), c.foreign_keys.end(), [&](const ForeignKey& fk) { return fk.ref_table == table; });
+        });
+        if (refers) out.push_back(other_table);
     }
     return out;
 }

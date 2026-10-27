@@ -383,8 +383,8 @@ std::vector<std::string> Executor::referenced_columns(const SharedDatabase& s, c
     std::vector<std::string> out;
     for (auto& [name, schema] : s.catalog.tables) {
         for (auto& col : schema.columns) {
-            if (col.foreign_key && col.foreign_key->ref_table == table && std::find(out.begin(), out.end(), col.foreign_key->ref_column) == out.end()) {
-                out.push_back(col.foreign_key->ref_column);
+            for (auto& fk : col.foreign_keys) {
+                if (fk.ref_table == table && std::find(out.begin(), out.end(), fk.ref_column) == out.end()) out.push_back(fk.ref_column);
             }
         }
     }
@@ -394,14 +394,16 @@ std::vector<std::string> Executor::referenced_columns(const SharedDatabase& s, c
 std::vector<Executor::KeyClaim> Executor::fk_claims(const SharedDatabase& s, const TableSchema& schema, const std::string& table, const Row& row, const Row& old_row) {
     std::vector<KeyClaim> claims;
     for (auto& col : schema.columns) {
-        if (!col.foreign_key) continue;
+        if (col.foreign_keys.empty()) continue;
         const std::string v = text_of(row, col.name);
         if (v == EXECUTOR_NULL_VALUE || collation::equal(v, text_of(old_row, col.name))) continue;
-        KeyClaim claim;
-        claim.lock_table = fk_claim_table(col.foreign_key->ref_table, col.foreign_key->ref_column);
-        claim.lock_key = v;
-        claim.shared = true;
-        claims.push_back(std::move(claim));
+        for (auto& fk : col.foreign_keys) { // (each parent the column refers to is claimed)
+            KeyClaim claim;
+            claim.lock_table = fk_claim_table(fk.ref_table, fk.ref_column);
+            claim.lock_key = v;
+            claim.shared = true;
+            claims.push_back(std::move(claim));
+        }
     }
     for (auto& column : referenced_columns(s, table)) {
         const std::string before = text_of(old_row, column);

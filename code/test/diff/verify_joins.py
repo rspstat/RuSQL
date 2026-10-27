@@ -323,7 +323,11 @@ def star_columns(q):
     if using:
         for c in using:
             out.append((c, lambda t, c=c: t[0][c] if t[0] is not None else (t[1][c] if t[1] is not None else None)))
-    for i, inst in enumerate(insts):
+    order = list(range(len(insts)))
+    if using and j1["kind"] == "RIGHT":  # (MySQL writes `a RIGHT JOIN b USING (c)` the other way round: the merged columns, what is left of b, then what is left of a)
+        order[0], order[1] = 1, 0
+    for i in order:
+        inst = insts[i]
         for c in inst.cols:
             if using and i <= 1 and c in using:
                 continue

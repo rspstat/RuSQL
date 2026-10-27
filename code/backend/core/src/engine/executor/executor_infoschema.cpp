@@ -322,24 +322,25 @@ std::vector<Row> Executor::info_schema_rows(const SharedDatabase& s, const std::
             }
             for (std::size_t i = 0; i < schema.columns.size(); i++) {
                 auto& col = schema.columns[i];
-                if (!col.foreign_key) continue;
-                auto& fk = *col.foreign_key;
-                auto [ref_db0, ref_tbl] = split_name(fk.ref_table);
-                std::string ref_db = ref_db0.empty() ? db : ref_db0;
-                Row r;
-                r["CONSTRAINT_CATALOG"] = "def";
-                r["CONSTRAINT_SCHEMA"] = db;
-                r["CONSTRAINT_NAME"] = fk_constraint_name(schema, tbl, i);
-                r["TABLE_CATALOG"] = "def";
-                r["TABLE_SCHEMA"] = db;
-                r["TABLE_NAME"] = tbl;
-                r["COLUMN_NAME"] = col.name;
-                r["ORDINAL_POSITION"] = "1";
-                r["POSITION_IN_UNIQUE_CONSTRAINT"] = "1";
-                r["REFERENCED_TABLE_SCHEMA"] = ref_db;
-                r["REFERENCED_TABLE_NAME"] = ref_tbl;
-                r["REFERENCED_COLUMN_NAME"] = fk.ref_column;
-                rows.push_back(std::move(r));
+                for (std::size_t k = 0; k < col.foreign_keys.size(); k++) {
+                    auto& fk = col.foreign_keys[k];
+                    auto [ref_db0, ref_tbl] = split_name(fk.ref_table);
+                    std::string ref_db = ref_db0.empty() ? db : ref_db0;
+                    Row r;
+                    r["CONSTRAINT_CATALOG"] = "def";
+                    r["CONSTRAINT_SCHEMA"] = db;
+                    r["CONSTRAINT_NAME"] = fk_constraint_name(schema, tbl, i, k);
+                    r["TABLE_CATALOG"] = "def";
+                    r["TABLE_SCHEMA"] = db;
+                    r["TABLE_NAME"] = tbl;
+                    r["COLUMN_NAME"] = col.name;
+                    r["ORDINAL_POSITION"] = "1";
+                    r["POSITION_IN_UNIQUE_CONSTRAINT"] = "1";
+                    r["REFERENCED_TABLE_SCHEMA"] = ref_db;
+                    r["REFERENCED_TABLE_NAME"] = ref_tbl;
+                    r["REFERENCED_COLUMN_NAME"] = fk.ref_column;
+                    rows.push_back(std::move(r));
+                }
             }
         }
         return rows;
@@ -350,28 +351,29 @@ std::vector<Row> Executor::info_schema_rows(const SharedDatabase& s, const std::
             auto [db, tbl] = split_name(schema.name);
             if (db.empty() || db == "information_schema") continue;
             for (std::size_t i = 0; i < schema.columns.size(); i++) {
-                if (!schema.columns[i].foreign_key) continue;
-                const ForeignKey& fk = *schema.columns[i].foreign_key;
-                auto [ref_db0, ref_tbl] = split_name(fk.ref_table);
-                auto rule = [](FkAction a) { return a == FkAction::Cascade ? "CASCADE" : a == FkAction::SetNull ? "SET NULL" : a == FkAction::SetDefault ? "SET DEFAULT" : "RESTRICT"; };
-                const TableSchema* parent = s.catalog.get_table(fk.ref_table);
-                bool parent_pk = false;
-                if (parent) {
-                    for (auto& pc : parent->columns) parent_pk = parent_pk || (pc.primary_key && pc.name == fk.ref_column);
+                for (std::size_t k = 0; k < schema.columns[i].foreign_keys.size(); k++) {
+                    const ForeignKey& fk = schema.columns[i].foreign_keys[k];
+                    auto [ref_db0, ref_tbl] = split_name(fk.ref_table);
+                    auto rule = [](FkAction a) { return a == FkAction::Cascade ? "CASCADE" : a == FkAction::SetNull ? "SET NULL" : a == FkAction::SetDefault ? "SET DEFAULT" : "RESTRICT"; };
+                    const TableSchema* parent = s.catalog.get_table(fk.ref_table);
+                    bool parent_pk = false;
+                    if (parent) {
+                        for (auto& pc : parent->columns) parent_pk = parent_pk || (pc.primary_key && pc.name == fk.ref_column);
+                    }
+                    Row r;
+                    r["CONSTRAINT_CATALOG"] = "def";
+                    r["CONSTRAINT_SCHEMA"] = db;
+                    r["CONSTRAINT_NAME"] = fk_constraint_name(schema, tbl, i, k);
+                    r["UNIQUE_CONSTRAINT_CATALOG"] = "def";
+                    r["UNIQUE_CONSTRAINT_SCHEMA"] = ref_db0.empty() ? db : ref_db0;
+                    r["UNIQUE_CONSTRAINT_NAME"] = parent_pk ? "PRIMARY" : fk.ref_column;
+                    r["MATCH_OPTION"] = "NONE";
+                    r["UPDATE_RULE"] = rule(fk.on_update);
+                    r["DELETE_RULE"] = rule(fk.on_delete);
+                    r["TABLE_NAME"] = tbl;
+                    r["REFERENCED_TABLE_NAME"] = ref_tbl;
+                    rows.push_back(std::move(r));
                 }
-                Row r;
-                r["CONSTRAINT_CATALOG"] = "def";
-                r["CONSTRAINT_SCHEMA"] = db;
-                r["CONSTRAINT_NAME"] = fk_constraint_name(schema, tbl, i);
-                r["UNIQUE_CONSTRAINT_CATALOG"] = "def";
-                r["UNIQUE_CONSTRAINT_SCHEMA"] = ref_db0.empty() ? db : ref_db0;
-                r["UNIQUE_CONSTRAINT_NAME"] = parent_pk ? "PRIMARY" : fk.ref_column;
-                r["MATCH_OPTION"] = "NONE";
-                r["UPDATE_RULE"] = rule(fk.on_update);
-                r["DELETE_RULE"] = rule(fk.on_delete);
-                r["TABLE_NAME"] = tbl;
-                r["REFERENCED_TABLE_NAME"] = ref_tbl;
-                rows.push_back(std::move(r));
             }
         }
         return rows;
@@ -407,11 +409,11 @@ std::vector<Row> Executor::info_schema_rows(const SharedDatabase& s, const std::
                     r["ENFORCED"] = "YES";
                     rows.push_back(std::move(r));
                 }
-                if (col.foreign_key) {
+                for (std::size_t k = 0; k < col.foreign_keys.size(); k++) {
                     Row r;
                     r["CONSTRAINT_CATALOG"] = "def";
                     r["CONSTRAINT_SCHEMA"] = db;
-                    r["CONSTRAINT_NAME"] = fk_constraint_name(schema, tbl, static_cast<std::size_t>(&col - schema.columns.data()));
+                    r["CONSTRAINT_NAME"] = fk_constraint_name(schema, tbl, static_cast<std::size_t>(&col - schema.columns.data()), k);
                     r["TABLE_SCHEMA"] = db;
                     r["TABLE_NAME"] = tbl;
                     r["CONSTRAINT_TYPE"] = "FOREIGN KEY";

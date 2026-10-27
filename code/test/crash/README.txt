@@ -26,6 +26,11 @@ acknowledged.
                                                   and savepoints, checked against a model of the cascade (the grandchildren go with the children, a RESTRICT anywhere below refuses the statement whole);
                                                   after recovery a row under a missing row and (RESTRICT) the delete of a row that a child refers to must still be refused.
 
+  python fuzz_crash_multifk.py [rounds] [base_seed]  the same for a column that is in two foreign keys: parents pa and pb, a child c whose x refers to both (the ON DELETE actions the seed picks, RESTRICT /
+                                                  CASCADE / SET NULL for each): INSERT / UPDATE of c under a value that is in both parents, in one or in none (refused unless it is in both), DELETE of one row or
+                                                  several of pa, pb and c, REPLACE of one or several parent rows (the replaced row goes through its keys first), transactions and savepoints, checked against a
+                                                  model of the two keys; after recovery a value that is in one parent only must still be refused by the other key.
+
 After recovery fuzz_crash.py also checks the INDEXES against the recovered rows (a lookup through the secondary index
 g and through the primary key must return what the oracle says) -- a table scan alone cannot see a stale index.
 

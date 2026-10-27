@@ -48,7 +48,7 @@ struct ColConstraints {
     std::optional<std::string> unique_constraint_name;
     bool auto_increment = false;
     std::optional<std::string> default_value;
-    std::optional<ForeignKey> foreign_key;
+    std::vector<ForeignKey> foreign_keys;
     std::optional<std::string> check_expr;
     bool on_update_now = false;
 };

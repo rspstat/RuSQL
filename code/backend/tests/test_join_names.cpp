@@ -228,14 +228,18 @@ TEST_CASE("NATURAL and USING compare the columns they name, show them once, and 
     Rows right = matched;
     right.push_back({N, N, N, "4", "400", "9"});
     right.push_back({"3", N, N, "5", "500", N});
-    REQUIRE(sorted(q(ex, "SELECT * FROM a RIGHT JOIN b USING (g)")) == sorted(right));
+    // (`a RIGHT JOIN b USING (g)` writes the merged column, then what is left of b, then what is left of a -- MySQL; FULL and LEFT keep a first)
+    Rows right_shown;
+    for (const auto& row : right) right_shown.push_back({row[0], row[3], row[4], row[5], row[1], row[2]});
+    REQUIRE(header(ex, "SELECT * FROM a RIGHT JOIN b USING (g)") == Header{"g", "id", "k", "a_id", "id", "v"});
+    REQUIRE(sorted(q(ex, "SELECT * FROM a RIGHT JOIN b USING (g)")) == sorted(right_shown));
     Rows full = right;
     full.push_back({N, "4", "40", N, N, N});
     REQUIRE(sorted(q(ex, "SELECT * FROM a FULL OUTER JOIN b USING (g)")) == sorted(full));
     // each table's own value is still there under its name; the plain name is the merged column
     REQUIRE(sorted(q(ex, "SELECT a.g, b.g, g FROM a RIGHT JOIN b USING (g)")) ==
             sorted(Rows{{"1", "1", "1"}, {"1", "1", "1"}, {"2", "2", "2"}, {"2", "2", "2"}, {N, N, N}, {N, "3", "3"}}));
-    REQUIRE(sorted(q(ex, "SELECT * FROM a RIGHT JOIN b USING (g) WHERE a.id IS NULL")) == sorted(Rows{{N, N, N, "4", "400", "9"}, {"3", N, N, "5", "500", N}}));
+    REQUIRE(sorted(q(ex, "SELECT * FROM a RIGHT JOIN b USING (g) WHERE a.id IS NULL")) == sorted(Rows{{N, "4", "400", "9", N, N}, {"3", "5", "500", N, N, N}}));
     // two columns, and a column by itself
     REQUIRE(header(ex, "SELECT * FROM a JOIN b USING (id)") == Header{"id", "g", "v", "g", "k", "a_id"});
     REQUIRE(q(ex, "SELECT * FROM a JOIN b USING (id) ORDER BY id") ==

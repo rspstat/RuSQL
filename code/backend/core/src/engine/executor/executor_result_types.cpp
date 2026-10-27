@@ -364,17 +364,78 @@ private:
         } else if (!sel.table.empty() && sel.table != "_dual_" && !(sel.table.size() > 7 && sel.table.compare(sel.table.size() - 7, 7, "._dual_") == 0)) {
             if (!add_table(sel.table, sel.table_alias, depth, sources)) return false;
         }
+        // the columns each USING / NATURAL join merges (`*` shows each of them once, in front): the ones USING names, or the columns of a NATURAL join's table that a table before it has too
+        auto has_column = [](const Source& src, const std::string& name) {
+            return std::any_of(src.columns.begin(), src.columns.end(), [&](const NamedType& c) { return ieq(c.name, name); });
+        };
+        std::vector<std::vector<std::string>> joined_using;
         for (const Join& j : sel.joins) {
-            if (j.lateral || !j.using_cols.empty() || j.join_type == JoinType::Natural) return false; // (a USING join shows its common columns once)
+            if (j.lateral) return false;
             if (j.subquery) {
                 if (!derived(*j.subquery->first, j.subquery->second, depth, sources)) return false;
             } else if (!add_table(j.table, j.alias, depth, sources)) {
                 return false;
             }
+            std::vector<std::string> common = j.using_cols;
+            if (j.join_type == JoinType::Natural) {
+                for (const NamedType& right : sources.back().columns) {
+                    for (std::size_t k = 0; k + 1 < sources.size(); k++) {
+                        if (has_column(sources[k], right.name)) {
+                            common.push_back(right.name);
+                            break;
+                        }
+                    }
+                }
+            }
+            joined_using.push_back(std::move(common));
         }
+        auto listed = [](const std::vector<std::string>& names, const std::string& name) {
+            return std::any_of(names.begin(), names.end(), [&](const std::string& n) { return ieq(n, name); });
+        };
+        // is the column of source `t` one that a join has merged into the first column of its kind?
+        auto merged = [&](std::size_t t, const std::string& column) {
+            if (t >= 1 && listed(joined_using[t - 1], column)) return true;
+            for (std::size_t k = 0; k < t; k++) {
+                if (has_column(sources[k], column)) return false;
+            }
+            for (std::size_t i = t; i < joined_using.size(); i++) {
+                if (listed(joined_using[i], column)) return true;
+            }
+            return false;
+        };
+        const bool any_merged = std::any_of(joined_using.begin(), joined_using.end(), [](const std::vector<std::string>& v) { return !v.empty(); });
         for (const SelectColumn& item : sel.columns) {
             const std::size_t before = out.size();
-            if (auto* all = std::get_if<SelectColumn::All>(&item.data)) {
+            if (auto* star = std::get_if<SelectColumn::All>(&item.data); star && star->table.empty() && any_merged) {
+                // `*` of a USING / NATURAL join: the merged columns first (each once, from the first table that has it), then the rest of each table in turn
+                std::vector<std::string> front;
+                for (const auto& per_join : joined_using) {
+                    for (const std::string& c : per_join) {
+                        if (!listed(front, c)) front.push_back(c);
+                    }
+                }
+                for (const std::string& c : front) {
+                    for (const Source& src : sources) {
+                        auto found = std::find_if(src.columns.begin(), src.columns.end(), [&](const NamedType& n) { return ieq(n.name, c); });
+                        if (found != src.columns.end()) {
+                            out.push_back(*found);
+                            break;
+                        }
+                    }
+                }
+                // (`a RIGHT JOIN b USING (c)` shows what is left of b before what is left of a, as MySQL does)
+                std::vector<std::size_t> table_order{0};
+                for (std::size_t i = 0; i < sel.joins.size(); i++) {
+                    if (sel.joins[i].join_type == JoinType::Right && !joined_using[i].empty()) table_order.insert(table_order.begin(), i + 1);
+                    else table_order.push_back(i + 1);
+                }
+                for (std::size_t t : table_order) {
+                    if (t >= sources.size()) continue;
+                    for (const NamedType& c : sources[t].columns) {
+                        if (!merged(t, c.name)) out.push_back(c);
+                    }
+                }
+            } else if (auto* all = std::get_if<SelectColumn::All>(&item.data)) {
                 std::vector<const Source*> matches;
                 for (const Source& src : sources) {
                     if (all->table.empty() || ieq(src.full, all->table) || ieq(src.bare, all->table) || (!src.alias.empty() && ieq(src.alias, all->table))) matches.push_back(&src);
@@ -484,9 +545,13 @@ std::vector<std::string> Executor::result_column_names(const std::string& sql) c
 
 std::vector<std::string> Executor::result_column_names(Statement stmt) const {
     auto s = shared->read();
-    resolve_names(*s, stmt);
+    return result_column_names_in(*s, std::move(stmt));
+}
+
+std::vector<std::string> Executor::result_column_names_in(const SharedDatabase& s, Statement stmt) const {
+    resolve_names(s, stmt);
     std::vector<NamedType> found;
-    if (!Resolver(*s, current_db).columns_of(stmt, 0, found)) return {};
+    if (!Resolver(s, current_db).columns_of(stmt, 0, found)) return {};
     std::vector<std::string> out;
     out.reserve(found.size());
     for (const NamedType& c : found) {
@@ -502,11 +567,18 @@ std::vector<ResultColumnType> Executor::result_columns(const std::string& sql) c
     if (!parser.has_tokens()) return {};
     auto parsed = parser.parse();
     if (parsed.is_err()) return {};
-    Statement stmt = std::move(parsed).value();
+    return result_columns(std::move(parsed).value());
+}
+
+std::vector<ResultColumnType> Executor::result_columns(Statement stmt) const {
     auto s = shared->read();
-    resolve_names(*s, stmt);
+    return result_columns_in(*s, std::move(stmt));
+}
+
+std::vector<ResultColumnType> Executor::result_columns_in(const SharedDatabase& s, Statement stmt) const {
+    resolve_names(s, stmt);
     std::vector<NamedType> found;
-    if (!Resolver(*s, current_db).columns_of(stmt, 0, found)) return {};
+    if (!Resolver(s, current_db).columns_of(stmt, 0, found)) return {};
     std::vector<ResultColumnType> out;
     out.reserve(found.size());
     for (NamedType& c : found) out.push_back(std::move(c.type));

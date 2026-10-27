@@ -133,7 +133,7 @@ Statement Executor::qualify_stmt(const SharedDatabase& s, Statement stmt) const 
     }
     if (auto* v = std::get_if<Statement::CreateTable>(&stmt.data)) {
         for (auto& col : v->columns) {
-            if (col.foreign_key) col.foreign_key->ref_table = qualify_name(col.foreign_key->ref_table);
+            for (auto& fk : col.foreign_keys) fk.ref_table = qualify_name(fk.ref_table);
         }
         v->name = qualify_name(v->name);
         return stmt;
@@ -151,7 +151,7 @@ Statement Executor::qualify_stmt(const SharedDatabase& s, Statement stmt) const 
     if (auto* v = std::get_if<Statement::CreateTableAs>(&stmt.data)) {
         v->name = qualify_name(v->name);
         for (auto& col : v->columns) {
-            if (col.foreign_key) col.foreign_key->ref_table = qualify_name(col.foreign_key->ref_table);
+            for (auto& fk : col.foreign_keys) fk.ref_table = qualify_name(fk.ref_table);
         }
         *v->query = qualify_stmt(s, std::move(*v->query));
         return stmt;

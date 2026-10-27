@@ -2075,8 +2075,8 @@ TEST_CASE("R56: a SELECT that finds no rows still says its columns", "[r56][empt
         REQUIRE_FALSE(with_rows.empty());
         REQUIRE(header_of(ex, query + " LIMIT 0") == with_rows);
     }
-    // a query the columns of which cannot be told from the statement (a USING join) still answers "0 rows returned."
-    REQUIRE(answer(ex, "SELECT * FROM p JOIN c USING (id) WHERE p.id < 0") == "0 rows returned.");
+    // a USING join names them too (the merged column once, in front; R57)
+    REQUIRE(header_of(ex, "SELECT * FROM p JOIN c USING (id) WHERE p.id < 0") == "id|name|v|pid|note");
     // a SELECT that is prepared and executed says them too
     ok(ex, "PREPARE st FROM 'SELECT id, name FROM p WHERE id < ?'");
     ok(ex, "SET @zero = 0");
@@ -2156,4 +2156,352 @@ TEST_CASE("R56: keys are changed down a chain while grandchildren are written", 
     REQUIRE(q(ex, "SELECT COUNT(*) FROM b LEFT JOIN a ON a.id = b.p WHERE a.id IS NULL") == Rows{{"0"}});
     REQUIRE(q(ex, "SELECT COUNT(*) FROM c LEFT JOIN b ON b.p = c.q WHERE b.p IS NULL") == Rows{{"0"}});
     REQUIRE(q(ex, "SELECT COUNT(*) FROM a WHERE id <= 300 AND id % 2 = 1") == Rows{{"0"}});
+}
+
+// ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+// R57: REPLACE below a chain of foreign keys, FLOAT values that are picked and copied, a column in several foreign keys, the columns of an answer of no rows for a USING / NATURAL join and a
+// CALL, a string constant that names its column, a select without FROM that has a WHERE
+// ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+namespace {
+// a <- b <- c: b goes with its parent (CASCADE), c refuses it (RESTRICT): a row of a that has a b row that has a c row is protected two tables down
+void protected_chain(Executor& ex, const std::string& s) {
+    ok(ex, "CREATE TABLE a" + s + " (id INT PRIMARY KEY, v INT)");
+    ok(ex, "CREATE TABLE b" + s + " (id INT PRIMARY KEY, p INT, FOREIGN KEY (p) REFERENCES a" + s + "(id) ON DELETE CASCADE)");
+    ok(ex, "CREATE TABLE c" + s + " (id INT PRIMARY KEY, q INT, FOREIGN KEY (q) REFERENCES b" + s + "(id) ON DELETE RESTRICT)");
+    ok(ex, "INSERT INTO a" + s + " VALUES (1, 10), (2, 20), (3, 30)");
+    ok(ex, "INSERT INTO b" + s + " VALUES (11, 1)");
+    ok(ex, "INSERT INTO c" + s + " VALUES (111, 11)");
+}
+} // namespace
+
+TEST_CASE("R57: REPLACE of a row that a RESTRICT protects two tables down changes nothing, not even the rows it replaced before", "[r57][replace]") {
+    TempDataDir dir("r57_replace");
+    {
+        Executor ex(dir.path);
+        ok(ex, "CREATE DATABASE d");
+        ok(ex, "USE d");
+        protected_chain(ex, "1");
+        // the protected row is the second one: the first used to be deleted and not inserted again (the statement failed with row 2 of a gone)
+        REQUIRE(fails(ex, "REPLACE INTO a1 VALUES (2, 21), (1, 11)").find("Foreign key violation") != std::string::npos);
+        REQUIRE(dump(ex, "a1") == "1|10,2|20,3|30");
+        REQUIRE(dump(ex, "b1") == "11|1");
+        REQUIRE(dump(ex, "c1") == "111|11");
+        // the same from a SELECT, with the protected row first or last, and with a row between that nothing protects
+        REQUIRE_FALSE(ex.execute_sql("REPLACE INTO a1 SELECT id, v + 1 FROM a1 WHERE id IN (2, 1)").is_ok());
+        REQUIRE_FALSE(ex.execute_sql("REPLACE INTO a1 VALUES (1, 11), (2, 21)").is_ok());
+        REQUIRE_FALSE(ex.execute_sql("REPLACE INTO a1 VALUES (3, 31), (2, 21), (1, 11)").is_ok());
+        REQUIRE(dump(ex, "a1") == "1|10,2|20,3|30");
+        // rows nothing protects are replaced as before, and a new row is inserted
+        ok(ex, "REPLACE INTO a1 VALUES (2, 21), (3, 31), (4, 40)");
+        REQUIRE(dump(ex, "a1") == "1|10,2|21,3|31,4|40");
+        // the protection gone, the cascade runs and takes the b row with the replaced row
+        ok(ex, "DELETE FROM c1");
+        ok(ex, "REPLACE INTO a1 VALUES (2, 22), (1, 12)");
+        REQUIRE(dump(ex, "a1") == "1|12,2|22,3|31,4|40");
+        REQUIRE(dump(ex, "b1") == "");
+        // every table of a chain cascades: the grandchildren go with the row that is replaced
+        ok(ex, "CREATE TABLE ra (id INT PRIMARY KEY, v INT)");
+        ok(ex, "CREATE TABLE rb (id INT PRIMARY KEY, p INT, FOREIGN KEY (p) REFERENCES ra(id) ON DELETE CASCADE)");
+        ok(ex, "CREATE TABLE rc (id INT PRIMARY KEY, q INT, FOREIGN KEY (q) REFERENCES rb(id) ON DELETE CASCADE)");
+        ok(ex, "INSERT INTO ra VALUES (1, 10), (2, 20)");
+        ok(ex, "INSERT INTO rb VALUES (11, 1), (22, 2)");
+        ok(ex, "INSERT INTO rc VALUES (111, 11), (222, 22)");
+        ok(ex, "REPLACE INTO ra VALUES (1, 11), (3, 30)");
+        REQUIRE(dump(ex, "ra") == "1|11,2|20,3|30");
+        REQUIRE(dump(ex, "rb") == "22|2");
+        REQUIRE(dump(ex, "rc") == "222|22");
+        // a protected row in the middle of a chain that nulls: the SET NULL above the RESTRICT is not made either
+        ok(ex, "CREATE TABLE sa (id INT PRIMARY KEY, v INT)");
+        ok(ex, "CREATE TABLE sb (id INT PRIMARY KEY, p INT, FOREIGN KEY (p) REFERENCES sa(id) ON DELETE SET NULL)");
+        ok(ex, "CREATE TABLE sc (id INT PRIMARY KEY, q INT, FOREIGN KEY (q) REFERENCES sb(id) ON DELETE RESTRICT)");
+        ok(ex, "INSERT INTO sa VALUES (1, 10), (2, 20)");
+        ok(ex, "INSERT INTO sb VALUES (11, 1), (22, 2)");
+        ok(ex, "INSERT INTO sc VALUES (111, 11)");
+        ok(ex, "REPLACE INTO sa VALUES (2, 21), (1, 11)"); // (SET NULL rewrites sb; it does not delete it, so sc does not refuse)
+        REQUIRE(dump(ex, "sa") == "1|11,2|21");
+        REQUIRE(dump(ex, "sb") == "11|NULL,22|NULL");
+        // a table that is its own child
+        ok(ex, "CREATE TABLE rf (id INT PRIMARY KEY, up INT, FOREIGN KEY (up) REFERENCES rf(id) ON DELETE RESTRICT)");
+        ok(ex, "INSERT INTO rf VALUES (1, NULL), (2, 1), (3, NULL)");
+        REQUIRE_FALSE(ex.execute_sql("REPLACE INTO rf VALUES (3, NULL), (1, NULL)").is_ok());
+        REQUIRE(dump(ex, "rf") == "1|NULL,2|1,3|NULL");
+    } // (nothing of a refused statement is in the log either: a restart finds the same rows)
+    Executor again(dir.path);
+    ok(again, "USE d");
+    REQUIRE(dump(again, "a1") == "1|12,2|22,3|31,4|40");
+    REQUIRE(dump(again, "rf") == "1|NULL,2|1,3|NULL");
+}
+
+TEST_CASE("R57: a MERGE whose DELETE a RESTRICT two tables down refuses does not make the UPDATE of the same statement", "[r57][replace]") {
+    TempDataDir dir("r57_merge");
+    Executor ex(dir.path);
+    ok(ex, "CREATE DATABASE d");
+    ok(ex, "USE d");
+    protected_chain(ex, "1");
+    ok(ex, "CREATE TABLE src (id INT, act VARCHAR(5), nv INT)");
+    ok(ex, "INSERT INTO src VALUES (2, 'upd', 99), (1, 'del', 0)");
+    REQUIRE_FALSE(ex.execute_sql("MERGE INTO a1 t USING src s ON t.id = s.id WHEN MATCHED AND s.act = 'del' THEN DELETE WHEN MATCHED THEN UPDATE SET v = s.nv").is_ok());
+    REQUIRE(dump(ex, "a1") == "1|10,2|20,3|30");
+    REQUIRE(dump(ex, "b1") == "11|1");
+    // without the protected row the same statement goes through
+    ok(ex, "UPDATE src SET act = 'upd' WHERE id = 1");
+    ok(ex, "MERGE INTO a1 t USING src s ON t.id = s.id WHEN MATCHED THEN UPDATE SET v = s.nv");
+    REQUIRE(dump(ex, "a1") == "1|0,2|99,3|30");
+}
+
+TEST_CASE("R57: a FLOAT is shown with six digits when MIN / MAX / GREATEST / LEAST / COALESCE / IFNULL / NULLIF give it, and is copied as the number it holds", "[r57][float]") {
+    TempDataDir dir("r57_float");
+    Executor ex(dir.path);
+    ok(ex, "CREATE DATABASE d");
+    ok(ex, "USE d");
+    ok(ex, "CREATE TABLE fc (id INT PRIMARY KEY, f FLOAT, d DOUBLE, i INT, dc DECIMAL(20,4), t VARCHAR(40))");
+    ok(ex, "INSERT INTO fc VALUES (1, 1234567, 1, 1, 1, 'a'), (2, 16777217, 2, 2, 2, 'b'), (3, 0.1, 3, 3, 3, 'c'), (4, NULL, 4, 4, 4, 'd'), (5, 123456789, 5, 5, 5, 'e')");
+    // what a FLOAT column shows is what MIN / MAX of it show
+    REQUIRE(q(ex, "SELECT f FROM fc ORDER BY id") == (Rows{{"1234570"}, {"16777200"}, {"0.1"}, {"NULL"}, {"123457000"}}));
+    REQUIRE(q(ex, "SELECT MIN(f), MAX(f) FROM fc") == (Rows{{"0.1", "123457000"}}));
+    REQUIRE(q(ex, "SELECT MAX(f) AS m FROM fc WHERE id = 2") == (Rows{{"16777200"}}));
+    REQUIRE(q(ex, "SELECT id, MAX(f) FROM fc GROUP BY id ORDER BY id") == (Rows{{"1", "1234570"}, {"2", "16777200"}, {"3", "0.1"}, {"4", "NULL"}, {"5", "123457000"}}));
+    // ... and a function that picks one of its arguments: FLOAT columns, whole-number constants and NULL give a FLOAT
+    REQUIRE(q(ex, "SELECT GREATEST(f, 0), LEAST(f, 100000000) FROM fc ORDER BY id") ==
+            (Rows{{"1234570", "1234570"}, {"16777200", "16777200"}, {"0.1", "0.1"}, {"NULL", "NULL"}, {"123457000", "100000000"}}));
+    REQUIRE(q(ex, "SELECT COALESCE(f, 0), IFNULL(f, 0), NULLIF(f, 0) FROM fc ORDER BY id") ==
+            (Rows{{"1234570", "1234570", "1234570"}, {"16777200", "16777200", "16777200"}, {"0.1", "0.1", "0.1"}, {"0", "0", "NULL"}, {"123457000", "123457000", "123457000"}}));
+    REQUIRE(q(ex, "SELECT COALESCE(f, NULL) FROM fc WHERE id = 2") == (Rows{{"16777200"}}));
+    // the number is still the whole float in arithmetic and in a comparison (the six digits are how it is shown)
+    REQUIRE(q(ex, "SELECT GREATEST(f, 0) + 1 FROM fc WHERE id = 1") == (Rows{{"1234568"}}));
+    REQUIRE(q(ex, "SELECT id FROM fc WHERE GREATEST(f, 0) = 16777216") == (Rows{{"2"}}));
+    REQUIRE(q(ex, "SELECT id FROM fc GROUP BY id HAVING MAX(f) = 16777216") == (Rows{{"2"}}));
+    // a column of another type among the arguments gives a DOUBLE, which is not cut to six digits
+    REQUIRE(q(ex, "SELECT COALESCE(f, i) FROM fc WHERE id = 2") == (Rows{{"16777216"}}));
+    // copied into a column that is not a FLOAT it is the number the float holds, widened: 0.1 is 0.10000000149011612, 16777217 is 16777216
+    ok(ex, "CREATE TABLE fd (id INT PRIMARY KEY, x DOUBLE)");
+    ok(ex, "CREATE TABLE ff (id INT PRIMARY KEY, x FLOAT)");
+    ok(ex, "CREATE TABLE fn (id INT PRIMARY KEY, x DECIMAL(20,4))");
+    ok(ex, "CREATE TABLE fi (id INT PRIMARY KEY, x INT)");
+    ok(ex, "CREATE TABLE ft (id INT PRIMARY KEY, x VARCHAR(40))");
+    ok(ex, "INSERT INTO fd SELECT id, f FROM fc");
+    ok(ex, "INSERT INTO ff SELECT id, f FROM fc");
+    ok(ex, "INSERT INTO fn SELECT id, f FROM fc");
+    ok(ex, "INSERT INTO fi SELECT id, f FROM fc");
+    ok(ex, "INSERT INTO ft SELECT id, f FROM fc");
+    REQUIRE(dump(ex, "fd") == "1|1234567,2|16777216,3|0.10000000149011612,4|NULL,5|123456792");
+    REQUIRE(dump(ex, "ff") == "1|1234570,2|16777200,3|0.1,4|NULL,5|123457000");
+    REQUIRE(dump(ex, "fn") == "1|1234567.0000,2|16777216.0000,3|0.1000,4|NULL,5|123456792.0000");
+    REQUIRE(dump(ex, "fi") == "1|1234567,2|16777216,3|0,4|NULL,5|123456792");
+    REQUIRE(dump(ex, "ft") == "1|1234567,2|16777216,3|0.10000000149011612,4|NULL,5|123456792");
+    // ... from an aggregate or a function that is a FLOAT too
+    ok(ex, "CREATE TABLE fm (x DOUBLE)");
+    ok(ex, "INSERT INTO fm SELECT MAX(f) FROM fc");
+    ok(ex, "INSERT INTO fm SELECT MIN(f) FROM fc");
+    ok(ex, "INSERT INTO fm SELECT COALESCE(f, 0) FROM fc WHERE id IN (3, 4)");
+    REQUIRE(q(ex, "SELECT x FROM fm ORDER BY x") == (Rows{{"0"}, {"0.10000000149011612"}, {"0.10000000149011612"}, {"123456792"}}));
+    // UPDATE ... SET d = f copies it the same way
+    ok(ex, "UPDATE fc SET d = f");
+    REQUIRE(q(ex, "SELECT id, d FROM fc ORDER BY id") == (Rows{{"1", "1234567"}, {"2", "16777216"}, {"3", "0.10000000149011612"}, {"4", "NULL"}, {"5", "123456792"}}));
+    ok(ex, "UPDATE fc SET d = 0");
+    ok(ex, "UPDATE fc SET d = COALESCE(f, 0)");
+    REQUIRE(q(ex, "SELECT id, d FROM fc ORDER BY id") == (Rows{{"1", "1234567"}, {"2", "16777216"}, {"3", "0.10000000149011612"}, {"4", "0"}, {"5", "123456792"}}));
+    ok(ex, "UPDATE fc SET t = f");
+    REQUIRE(q(ex, "SELECT id, t FROM fc ORDER BY id") == (Rows{{"1", "1234567"}, {"2", "16777216"}, {"3", "0.10000000149011612"}, {"4", "NULL"}, {"5", "123456792"}}));
+    // a DOUBLE into a DOUBLE is not touched, a FLOAT into a FLOAT stays the float
+    ok(ex, "UPDATE fc SET dc = d");
+    ok(ex, "UPDATE fc SET f = f");
+    REQUIRE(q(ex, "SELECT f FROM fc WHERE id = 3") == (Rows{{"0.1"}}));
+}
+
+TEST_CASE("R57: a column in several foreign keys is checked by each of them, and each acts on its own", "[r57][foreign_key]") {
+    TempDataDir dir("r57_multi_fk");
+    {
+        Executor ex(dir.path);
+        ok(ex, "CREATE DATABASE d");
+        ok(ex, "USE d");
+        ok(ex, "CREATE TABLE pa (id INT PRIMARY KEY)");
+        ok(ex, "CREATE TABLE pb (id INT PRIMARY KEY)");
+        ok(ex, "INSERT INTO pa VALUES (1), (2), (5)");
+        ok(ex, "INSERT INTO pb VALUES (2), (3), (5)");
+        ok(ex, "CREATE TABLE ch (id INT PRIMARY KEY, x INT, FOREIGN KEY (x) REFERENCES pa(id), FOREIGN KEY (x) REFERENCES pb(id))");
+        // a value has to be in every parent (a value that is in one of them only is refused, naming the parent that lacks it)
+        REQUIRE(fails(ex, "INSERT INTO ch VALUES (1, 1)").find("pb'.'id'") != std::string::npos);
+        REQUIRE(fails(ex, "INSERT INTO ch VALUES (2, 3)").find("pa'.'id'") != std::string::npos);
+        REQUIRE(fails(ex, "INSERT INTO ch VALUES (3, 9)").find("Foreign key violation") != std::string::npos);
+        ok(ex, "INSERT INTO ch VALUES (4, 2), (5, NULL), (6, 5)");
+        REQUIRE(fails(ex, "UPDATE ch SET x = 1 WHERE id = 4").find("pb'.'id'") != std::string::npos);
+        REQUIRE(fails(ex, "UPDATE ch SET x = 3 WHERE id = 4").find("pa'.'id'") != std::string::npos);
+        ok(ex, "UPDATE ch SET x = 5 WHERE id = 4");
+        REQUIRE(dump(ex, "ch") == "4|5,5|NULL,6|5");
+        // a parent row that a child refers to cannot go, whichever of the two tables it is in
+        REQUIRE_FALSE(ex.execute_sql("DELETE FROM pa WHERE id = 5").is_ok());
+        REQUIRE_FALSE(ex.execute_sql("DELETE FROM pb WHERE id = 5").is_ok());
+        ok(ex, "DELETE FROM pa WHERE id = 1");
+        // both keys are listed, each under its own name, in the order they were declared
+        REQUIRE(q(ex, "SELECT CONSTRAINT_NAME, REFERENCED_TABLE_NAME FROM information_schema.referential_constraints WHERE TABLE_NAME = 'ch' ORDER BY CONSTRAINT_NAME") ==
+                (Rows{{"ch_ibfk_1", "pa"}, {"ch_ibfk_2", "pb"}}));
+        REQUIRE(q(ex, "SELECT CONSTRAINT_NAME, COLUMN_NAME FROM information_schema.key_column_usage WHERE TABLE_NAME = 'ch' AND REFERENCED_TABLE_NAME IS NOT NULL ORDER BY CONSTRAINT_NAME") ==
+                (Rows{{"ch_ibfk_1", "x"}, {"ch_ibfk_2", "x"}}));
+        const std::string shown = answer(ex, "SHOW CREATE TABLE ch");
+        REQUIRE(shown.find("REFERENCES `pa`") != std::string::npos);
+        REQUIRE(shown.find("REFERENCES `pb`") != std::string::npos);
+        // the keys are in the catalog after a restart (below), and a table that either refers to cannot be dropped
+        REQUIRE(fails(ex, "DROP TABLE pb").find("referenced by a foreign key constraint") != std::string::npos);
+        // each key acts on its own: one cascades the delete, the other nulls the column
+        ok(ex, "CREATE TABLE qa (id INT PRIMARY KEY)");
+        ok(ex, "CREATE TABLE qb (id INT PRIMARY KEY)");
+        ok(ex, "INSERT INTO qa VALUES (1), (2), (3)");
+        ok(ex, "INSERT INTO qb VALUES (1), (2), (3)");
+        ok(ex, "CREATE TABLE qc (id INT PRIMARY KEY, x INT, FOREIGN KEY (x) REFERENCES qa(id) ON DELETE CASCADE, FOREIGN KEY (x) REFERENCES qb(id) ON DELETE SET NULL)");
+        ok(ex, "INSERT INTO qc VALUES (10, 1), (20, 2), (30, 3)");
+        ok(ex, "DELETE FROM qb WHERE id = 1");
+        REQUIRE(dump(ex, "qc") == "10|NULL,20|2,30|3");
+        ok(ex, "DELETE FROM qa WHERE id = 2");
+        REQUIRE(dump(ex, "qc") == "10|NULL,30|3");
+        // the second key added by ALTER TABLE, with a name of its own; a name is used once; either key is dropped by its name
+        ok(ex, "CREATE TABLE ra (id INT PRIMARY KEY)");
+        ok(ex, "CREATE TABLE rb (id INT PRIMARY KEY)");
+        ok(ex, "INSERT INTO ra VALUES (1), (2)");
+        ok(ex, "INSERT INTO rb VALUES (1), (2)");
+        ok(ex, "CREATE TABLE rc (id INT PRIMARY KEY, x INT, CONSTRAINT first_key FOREIGN KEY (x) REFERENCES ra(id))");
+        ok(ex, "ALTER TABLE rc ADD CONSTRAINT second_key FOREIGN KEY (x) REFERENCES rb(id)");
+        REQUIRE(fails(ex, "ALTER TABLE rc ADD CONSTRAINT second_key FOREIGN KEY (x) REFERENCES rb(id)").find("Duplicate foreign key constraint name") != std::string::npos);
+        REQUIRE_FALSE(ex.execute_sql("INSERT INTO rc VALUES (1, 3)").is_ok());
+        ok(ex, "INSERT INTO rc VALUES (1, 1)");
+        ok(ex, "ALTER TABLE rc DROP FOREIGN KEY first_key");
+        REQUIRE(q(ex, "SELECT CONSTRAINT_NAME FROM information_schema.referential_constraints WHERE TABLE_NAME = 'rc'") == (Rows{{"second_key"}}));
+        REQUIRE_FALSE(ex.execute_sql("INSERT INTO rc VALUES (2, 3)").is_ok()); // (3 is in neither: the second key is still there)
+        ok(ex, "INSERT INTO rc VALUES (2, 2)");
+        REQUIRE(fails(ex, "ALTER TABLE rc DROP FOREIGN KEY first_key").find("not found") != std::string::npos);
+        // ON UPDATE CASCADE of one parent's key into a column that another key guards too: the statement is refused (MySQL 1452) unless the other parent has the new value as well
+        ok(ex, "CREATE TABLE ua (id INT PRIMARY KEY)");
+        ok(ex, "CREATE TABLE ub (id INT PRIMARY KEY)");
+        ok(ex, "INSERT INTO ua VALUES (1), (2)");
+        ok(ex, "INSERT INTO ub VALUES (1), (7)");
+        ok(ex, "CREATE TABLE uc (id INT PRIMARY KEY, x INT, FOREIGN KEY (x) REFERENCES ua(id) ON UPDATE CASCADE, FOREIGN KEY (x) REFERENCES ub(id) ON UPDATE CASCADE)");
+        ok(ex, "INSERT INTO uc VALUES (10, 1)");
+        REQUIRE(fails(ex, "UPDATE ua SET id = 5 WHERE id = 1").find("ub'.'id'") != std::string::npos); // (5 is not in ub)
+        REQUIRE(dump(ex, "ua") == "1,2");
+        REQUIRE(dump(ex, "uc") == "10|1");
+        ok(ex, "UPDATE ua SET id = 7 WHERE id = 1"); // (7 is in ub: the child follows)
+        REQUIRE(dump(ex, "ua") == "2,7");
+        REQUIRE(dump(ex, "uc") == "10|7");
+        REQUIRE(fails(ex, "UPDATE ub SET id = 9 WHERE id = 7").find("ua'.'id'") != std::string::npos); // (the same from the other parent: 9 is not in ua)
+        REQUIRE(dump(ex, "ub") == "1,7");
+        REQUIRE(dump(ex, "uc") == "10|7");
+    }
+    // ... both keys are read back from the catalog of a data directory that is opened again
+    Executor again(dir.path);
+    ok(again, "USE d");
+    REQUIRE(fails(again, "INSERT INTO ch VALUES (7, 3)").find("pa'.'id'") != std::string::npos);
+    REQUIRE(fails(again, "INSERT INTO ch VALUES (7, 1)").find("Foreign key violation") != std::string::npos);
+    REQUIRE_FALSE(again.execute_sql("DELETE FROM pb WHERE id = 5").is_ok());
+    ok(again, "DELETE FROM qb WHERE id = 3");
+    REQUIRE(dump(again, "qc") == "10|NULL,30|NULL");
+}
+
+TEST_CASE("R57: an answer of no rows names its columns for a USING / NATURAL join and for a CALL, as the answer with rows does", "[r57][empty]") {
+    TempDataDir dir("r57_empty");
+    Executor ex(dir.path);
+    ok(ex, "CREATE DATABASE d");
+    ok(ex, "USE d");
+    ok(ex, "CREATE TABLE p (id INT PRIMARY KEY, name VARCHAR(10), v INT)");
+    ok(ex, "CREATE TABLE c (id INT PRIMARY KEY, pid INT, note VARCHAR(10))");
+    ok(ex, "CREATE TABLE n (id INT PRIMARY KEY, name VARCHAR(10), z INT)");
+    ok(ex, "INSERT INTO p VALUES (1, 'a', 10), (2, 'b', 20)");
+    ok(ex, "INSERT INTO c VALUES (1, 1, 'x'), (2, 2, 'y')");
+    ok(ex, "INSERT INTO n VALUES (1, 'a', 5)");
+    // the merged columns come first (once), then what is left of each table in turn
+    REQUIRE(header_of(ex, "SELECT * FROM p JOIN c USING (id)") == "id|name|v|pid|note");
+    REQUIRE(header_of(ex, "SELECT * FROM p JOIN c USING (id) WHERE id < 0") == "id|name|v|pid|note");
+    REQUIRE(header_of(ex, "SELECT * FROM p NATURAL JOIN n WHERE id < 0") == "id|name|v|z");
+    REQUIRE(header_of(ex, "SELECT * FROM p JOIN n USING (name, id) WHERE id < 0") == header_of(ex, "SELECT * FROM p JOIN n USING (name, id)"));
+    const std::vector<std::string> joins = {
+        "SELECT * FROM p JOIN c USING (id)",
+        "SELECT * FROM p LEFT JOIN c USING (id)",
+        "SELECT * FROM p RIGHT JOIN c USING (id)",
+        "SELECT * FROM p NATURAL JOIN c",
+        "SELECT * FROM p NATURAL JOIN n",
+        "SELECT * FROM p JOIN n USING (id, name)",
+        "SELECT * FROM p JOIN c USING (id) JOIN n USING (id)",
+        "SELECT id, name FROM p JOIN n USING (id, name)",
+        "SELECT p.*, c.note FROM p JOIN c USING (id)",
+        "SELECT * FROM p x NATURAL JOIN n y",
+    };
+    for (const std::string& query : joins) {
+        const std::string with_rows = header_of(ex, query);
+        REQUIRE_FALSE(with_rows.empty());
+        REQUIRE(header_of(ex, query + " LIMIT 0") == with_rows);
+    }
+    // `a RIGHT JOIN b USING (c)` shows what is left of b before what is left of a (MySQL), with rows or without
+    REQUIRE(header_of(ex, "SELECT * FROM p RIGHT JOIN c USING (id)") == "id|pid|note|name|v");
+    REQUIRE(header_of(ex, "SELECT * FROM p RIGHT JOIN c USING (id) WHERE id < 0") == "id|pid|note|name|v");
+    REQUIRE(q(ex, "SELECT * FROM p RIGHT JOIN c USING (id) ORDER BY id") == (Rows{{"1", "1", "x", "a", "10"}, {"2", "2", "y", "b", "20"}}));
+    REQUIRE(q(ex, "SELECT * FROM p LEFT JOIN c USING (id) ORDER BY id") == (Rows{{"1", "a", "10", "1", "x"}, {"2", "b", "20", "2", "y"}}));
+    // a UNION whose left side finds no rows is the rows of its right side, under the names of the left (it was a blank row for each of them)
+    REQUIRE(q(ex, "SELECT id FROM p WHERE id < 0 UNION SELECT 2") == (Rows{{"2"}}));
+    REQUIRE(header_of(ex, "SELECT id FROM p WHERE id < 0 UNION SELECT 2") == "id");
+    REQUIRE(q(ex, "SELECT id FROM p WHERE id < 0 UNION ALL SELECT id FROM p ORDER BY id") == (Rows{{"1"}, {"2"}}));
+    REQUIRE(q(ex, "SELECT name FROM p WHERE id < 0 UNION SELECT 'z'") == (Rows{{"z"}}));
+    REQUIRE(header_of(ex, "SELECT name FROM p WHERE id < 0 UNION SELECT 'z'") == "name");
+    REQUIRE(q(ex, "SELECT 1 AS one WHERE 1 = 0 UNION SELECT 2") == (Rows{{"2"}}));
+    REQUIRE(header_of(ex, "SELECT 1 AS one WHERE 1 = 0 UNION SELECT 2") == "one");
+    REQUIRE(q(ex, "SELECT id FROM p WHERE id < 0 UNION SELECT id FROM p WHERE id < 0").empty());
+    REQUIRE(q(ex, "SELECT id FROM p WHERE id < 0 EXCEPT SELECT 2").empty());
+    // a CALL that answers with a query that finds no rows says its columns (the last result table it gives; one that has rows keeps its place)
+    ok(ex, "CREATE PROCEDURE pe() BEGIN SELECT id, name FROM p WHERE id < 0; END");
+    ok(ex, "CREATE PROCEDURE ps() BEGIN SELECT * FROM p WHERE id < 0; END");
+    ok(ex, "CREATE PROCEDURE pj() BEGIN SELECT * FROM p JOIN c USING (id) WHERE id < 0; END");
+    ok(ex, "CREATE PROCEDURE pt() BEGIN SELECT id FROM p; SELECT name AS label FROM p WHERE id < 0; END");
+    REQUIRE(answer(ex, "CALL pe()") == "+----+------+\n| id | name |\n+----+------+\n+----+------+\n0 rows returned.");
+    REQUIRE(header_of(ex, "CALL ps()") == "id|name|v");
+    REQUIRE(header_of(ex, "CALL pj()") == "id|name|v|pid|note");
+    REQUIRE(q(ex, "CALL pt()") == (Rows{{"1"}, {"2"}}));
+    // a query that finds no rows is a result table of the CALL like any other, also when statements that write go on after it (the first result set is what a client reads)
+    ok(ex, "CREATE PROCEDURE pw() BEGIN SELECT id FROM p WHERE id < 0; UPDATE p SET v = v + 1 WHERE id = 99; END");
+    REQUIRE(header_of(ex, "CALL pw()") == "id");
+    // a procedure with no query answers its message
+    ok(ex, "CREATE PROCEDURE pm() BEGIN UPDATE p SET v = v + 1 WHERE id = 99; END");
+    REQUIRE(answer(ex, "CALL pm()").find("+") == std::string::npos);
+}
+
+TEST_CASE("R57: a string constant names its column by what it says, and a select without FROM has a WHERE", "[r57][empty]") {
+    TempDataDir dir("r57_constant");
+    Executor ex(dir.path);
+    ok(ex, "CREATE DATABASE d");
+    ok(ex, "USE d");
+    ok(ex, "CREATE TABLE p (id INT PRIMARY KEY, name VARCHAR(10))");
+    ok(ex, "INSERT INTO p VALUES (1, 'a'), (2, 'b')");
+    REQUIRE(header_of(ex, "SELECT 'a'") == "a");
+    REQUIRE(header_of(ex, "SELECT 'a b'") == "a b");
+    REQUIRE(header_of(ex, "SELECT 'a', 'b'") == "a|b");
+    REQUIRE(header_of(ex, "SELECT 'it''s'") == "it's");
+    REQUIRE(header_of(ex, "SELECT 'a' AS x") == "x");
+    REQUIRE(header_of(ex, "SELECT 'a' FROM p") == "a");
+    REQUIRE(header_of(ex, "SELECT 'a' FROM p WHERE id < 0") == "a");
+    REQUIRE(header_of(ex, "SELECT id, 'x' FROM p") == "id|x");
+    REQUIRE(header_of(ex, "SELECT 'a' + 1") == "'a' + 1"); // (an expression is called by what was written)
+    REQUIRE(header_of(ex, "SELECT UPPER('a')") == "UPPER('a')");
+    REQUIRE(header_of(ex, "SELECT 1") == "1");
+    REQUIRE(q(ex, "SELECT 'a'") == (Rows{{"a"}}));
+    REQUIRE(q(ex, "SELECT x FROM (SELECT 'k' AS x) d") == (Rows{{"k"}}));
+    ok(ex, "CREATE TABLE made AS SELECT 'a', 'b' FROM p LIMIT 1");
+    REQUIRE(q(ex, "SELECT a, b FROM made") == (Rows{{"a", "b"}}));
+    // WHERE on a select with no table: the one row is there or the answer has none (and says its columns)
+    REQUIRE(q(ex, "SELECT 1 WHERE 1 = 1") == (Rows{{"1"}}));
+    REQUIRE(q(ex, "SELECT 1 WHERE 1 = 0").empty());
+    REQUIRE(answer(ex, "SELECT 1 WHERE 1 = 0") == "+---+\n| 1 |\n+---+\n+---+\n0 rows returned.");
+    REQUIRE(answer(ex, "SELECT 'a', 2 AS b WHERE 1 = 0") == "+---+---+\n| a | b |\n+---+---+\n+---+---+\n0 rows returned.");
+    REQUIRE(q(ex, "SELECT 1, 'b' WHERE 2 > 1") == (Rows{{"1", "b"}}));
+    REQUIRE(q(ex, "SELECT 1 WHERE NULL").empty());
+    REQUIRE(q(ex, "SELECT 1 WHERE EXISTS (SELECT 1 FROM p WHERE id = 1)") == (Rows{{"1"}}));
+    REQUIRE(q(ex, "SELECT 1 WHERE EXISTS (SELECT 1 FROM p WHERE id < 0)").empty());
+    REQUIRE(q(ex, "SELECT 1 WHERE 1 IN (SELECT id FROM p)") == (Rows{{"1"}}));
+    REQUIRE(q(ex, "SELECT 1 WHERE 5 IN (SELECT id FROM p)").empty());
+    REQUIRE(q(ex, "SELECT 1 WHERE 1 = 0 UNION ALL SELECT 2") == (Rows{{"2"}}));
+    REQUIRE(q(ex, "SELECT 2 UNION ALL SELECT 1 WHERE 1 = 0") == (Rows{{"2"}}));
+    ok(ex, "SET @x = 5");
+    REQUIRE(q(ex, "SELECT @x WHERE @x > 3") == (Rows{{"5"}}));
+    REQUIRE(q(ex, "SELECT @x WHERE @x > 30").empty());
+    // INSERT ... SELECT with a WHERE and no FROM
+    ok(ex, "INSERT INTO p SELECT 3, 'c' WHERE 1 = 1");
+    ok(ex, "INSERT INTO p SELECT 4, 'd' WHERE 1 = 0");
+    REQUIRE(q(ex, "SELECT id FROM p ORDER BY id") == (Rows{{"1"}, {"2"}, {"3"}}));
 }

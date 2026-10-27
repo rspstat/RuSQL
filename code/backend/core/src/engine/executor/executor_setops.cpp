@@ -139,6 +139,7 @@ std::string Executor::format_set_result(const std::vector<std::string>& cols, co
 
 StringResult Executor::exec_union(SharedDatabase& s, Statement left, Statement right, bool all, std::vector<OrderBy> order_by,
                                    std::optional<std::size_t> limit, std::optional<std::size_t> offset) {
+    const Statement left_shape = left; // (a left side that finds no rows has no header: its select list names the columns of the answer)
     auto left_out = execute_with_s(s, std::move(left));
     if (left_out.is_err()) return left_out;
     auto right_out = execute_with_s(s, std::move(right));
@@ -148,6 +149,11 @@ StringResult Executor::exec_union(SharedDatabase& s, Statement left, Statement r
     auto [right_cols, right_rows] = parse_table_output(right_out.value());
 
     if (left_cols.empty() && right_cols.empty()) return StringResult::Ok("0 rows returned.");
+    // the rows of the right side go under the names of the left side, by position; with no rows on the left they go under what its select list says (else under their own names)
+    if (left_cols.empty()) {
+        left_cols = result_column_names_in(s, left_shape);
+        if (left_cols.size() != right_cols.size()) left_cols = right_cols;
+    }
 
     std::vector<Row> remapped_right;
     remapped_right.reserve(right_rows.size());

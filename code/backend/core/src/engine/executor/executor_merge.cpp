@@ -139,11 +139,12 @@ StringResult Executor::exec_merge(SharedDatabase& s, std::string target, std::op
             return checked;
         }
     }
-    if (!doomed.empty()) {
-        auto child_lock = acquire_table_data_locks(s, fk_child_tables(s, target), /*exclusive=*/false);
-        for (auto& r : doomed) {
-            if (auto violation = delete_restrict_violation(s, target, r)) return StringResult::Err(*violation);
-        }
+    if (!doomed.empty()) { // (the whole chain of foreign keys below the rows is followed, so that the UPDATE before the deletes is not made for nothing)
+        std::vector<std::string> below = fk_children_closure(s, target);
+        below.erase(std::remove(below.begin(), below.end(), target), below.end());
+        auto child_lock = acquire_table_data_locks(s, below, /*exclusive=*/false);
+        CascadePlan plan;
+        if (auto refused = plan_cascade_delete(s, target, doomed, nullptr, nullptr, std::nullopt, plan)) return StringResult::Err(*refused);
     }
 
     // composite keys travel as the \x00-joined values of the primary-key columns, in the order of `pk_cols`

@@ -209,12 +209,39 @@ StringResult Executor::exec_insert_select(SharedDatabase& s, std::string table, 
     // resizing the same vector -- then release before exec_insert_inner runs.
     std::vector<std::string> col_names;
     std::vector<Row> rows;
+    // which columns of the SELECT are FLOAT columns: their values are taken as they are stored (not as the six digits they are shown with) and widened where a number column takes them
+    std::vector<char> from_float;
+    for (const ResultColumnType& type : result_columns_in(s, query)) {
+        from_float.push_back(type.column && std::holds_alternative<DataType::Float>(type.column->data_type.data));
+    }
+    // ... and an item that is not a column but gives a FLOAT as well: MIN / MAX of a FLOAT column, a COALESCE over FLOAT columns (the item at its place of the select list)
+    if (auto* select = std::get_if<Statement::Select>(&query.data);
+        select && select->columns.size() == from_float.size() &&
+        std::none_of(select->columns.begin(), select->columns.end(), [](const SelectColumn& c) { return std::holds_alternative<SelectColumn::All>(c.data); })) {
+        for (std::size_t i = 0; i < select->columns.size(); i++) {
+            const SelectColumn& item = select->columns[i];
+            if (auto* expr = std::get_if<SelectColumn::Expr>(&item.data)) {
+                if (single_result(expr->expr)) from_float[i] = 1;
+            } else if (auto* agg = std::get_if<SelectColumn::Agg>(&item.data)) {
+                if (agg->arg_single) from_float[i] = 1;
+            } else if (auto* agg_alias = std::get_if<SelectColumn::AggAlias>(&item.data)) {
+                if (agg_alias->arg_single) from_float[i] = 1;
+            }
+        }
+    }
+    const bool any_float = std::find(from_float.begin(), from_float.end(), char{1}) != from_float.end();
     {
         DataLockGuard src_data_guard;
         if (auto src_tables = table_lock_set_for(s, query)) {
             src_data_guard = acquire_table_data_locks(s, *src_tables, /*exclusive=*/false);
         }
         const sqlval::StrictWrite strict;
+        struct ExactFloats {
+            bool& flag;
+            bool before;
+            ExactFloats(bool& f, bool on) : flag(f), before(f) { if (on) flag = true; }
+            ~ExactFloats() { flag = before; }
+        } exact_floats(float_exact_, any_float);
         auto output = execute_with_s(s, std::move(query));
         if (output.is_err()) return output;
         if (auto refused = strict.error(); refused && !std::holds_alternative<InsertConflict::Ignore>(on_conflict.data)) return StringResult::Err(*refused);
@@ -243,6 +270,21 @@ StringResult Executor::exec_insert_select(SharedDatabase& s, std::string table, 
             insert_cols = std::move(names);
         } else {
             insert_cols = col_names;
+        }
+    }
+    // a FLOAT goes into a column that is not a FLOAT (a DOUBLE, a DECIMAL, an integer, a text) as the single-precision number widened -- 0.1 is 0.10000000149011612 there --, into
+    // a FLOAT as it is
+    if (any_float && from_float.size() == col_names.size()) {
+        if (const TableSchema* schema = s.catalog.get_table(table)) {
+            for (std::size_t i = 0; i < from_float.size() && i < insert_cols->size(); i++) {
+                if (!from_float[i]) continue;
+                auto target = std::find_if(schema->columns.begin(), schema->columns.end(), [&](const ColumnDef& c) { return c.name == (*insert_cols)[i]; });
+                if (target == schema->columns.end() || std::holds_alternative<DataType::Float>(target->data_type.data)) continue;
+                for (auto& row : all_values) {
+                    if (i >= row.size() || row[i] == EXECUTOR_NULL_VALUE || row[i] == INSERT_DEFAULT) continue;
+                    row[i] = sqlval::float_as_double_text(row[i]);
+                }
+            }
         }
     }
     insert_from_select_ = true; // (its rows are numbered in batches of 1, 2, 4 ... as they ask, not all at once)
@@ -496,12 +538,14 @@ StringResult Executor::exec_insert(SharedDatabase& s, std::string table, std::op
         all_values = replace_supersede(s, table, col_list, std::move(all_values));
         std::vector<Row> victims; // the rows the replacement deletes
         if (auto checked = exec_insert_inner(s, table, col_list, replace_rows, on_conflict, std::nullopt, /*validate_only=*/true, &victims); checked.is_err()) return checked;
-        // ... and DELETE refuses a row that a child row restricts: that too is found before anything is deleted
+        // ... and DELETE refuses a row that a child row restricts, however far down the foreign keys that child is (a child that goes with its parent has children of its
+        // own): the whole chain is followed on the rows in memory, so that nothing is deleted before the statement is known to go through
         if (!victims.empty()) {
-            auto child_lock = acquire_table_data_locks(s, fk_child_tables(s, table), /*exclusive=*/false);
-            for (auto& v : victims) {
-                if (auto violation = delete_restrict_violation(s, table, v)) return StringResult::Err(*violation);
-            }
+            std::vector<std::string> below = fk_children_closure(s, table);
+            below.erase(std::remove(below.begin(), below.end(), table), below.end()); // (the table itself is held by the statement)
+            auto child_lock = acquire_table_data_locks(s, below, /*exclusive=*/false);
+            CascadePlan plan;
+            if (auto refused = plan_cascade_delete(s, table, victims, nullptr, nullptr, std::nullopt, plan)) return StringResult::Err(*refused);
         }
     }
 
@@ -713,13 +757,14 @@ StringResult Executor::exec_insert_inner(SharedDatabase& s, const std::string& t
     // write phase below escalates `table` alone to EXCLUSIVE.
     std::vector<std::string> insert_read_tables{table};
     for (auto& col : schema.columns) {
-        if (!col.foreign_key) continue;
-        // Table partitioning: lock the ref_table's actual children (where the existence
-        // check below really reads), not its permanently-empty phantom logical name.
-        if (auto part_info = partition_info_for(s, col.foreign_key->ref_table)) {
-            for (auto& def : part_info->partitions) insert_read_tables.push_back(def.child_table);
-        } else {
-            insert_read_tables.push_back(col.foreign_key->ref_table);
+        for (auto& fk : col.foreign_keys) {
+            // Table partitioning: lock the ref_table's actual children (where the existence
+            // check below really reads), not its permanently-empty phantom logical name.
+            if (auto part_info = partition_info_for(s, fk.ref_table)) {
+                for (auto& def : part_info->partitions) insert_read_tables.push_back(def.child_table);
+            } else {
+                insert_read_tables.push_back(fk.ref_table);
+            }
         }
     }
     {
@@ -1226,12 +1271,12 @@ StringResult Executor::exec_insert_inner(SharedDatabase& s, const std::string& t
 
         // the error for a foreign key whose parent is not there (nullopt: it is), also for a self-referencing table where the row names itself or an earlier row of
         // this very statement; a partitioned parent is read through its children, a deleted parent row is no parent
-        auto fk_parent_missing = [&](const ColumnDef& col, const std::string& val) -> std::optional<std::string> {
-            auto violation = fk_child_violation(s, col, val);
+        auto fk_parent_missing = [&](const ForeignKey& fk, const std::string& val) -> std::optional<std::string> {
+            auto violation = fk_child_violation(s, fk, val);
             if (!violation) return std::nullopt;
-            const std::string& ref_col = col.foreign_key->ref_column;
+            const std::string& ref_col = fk.ref_column;
             auto names_val = [&](const Row& r) { auto rit = r.find(ref_col); return rit != r.end() && collation::equal(rit->second, val); };
-            const bool in_statement = col.foreign_key->ref_table == table && (names_val(row) || std::any_of(prepared.begin(), prepared.end(), names_val));
+            const bool in_statement = fk.ref_table == table && (names_val(row) || std::any_of(prepared.begin(), prepared.end(), names_val));
             return in_statement ? std::nullopt : violation;
         };
 
@@ -1251,11 +1296,13 @@ StringResult Executor::exec_insert_inner(SharedDatabase& s, const std::string& t
 
         for (auto& col : schema.columns) {
             if (skip_fk_checks) break; // exec_restore()만 사용 -- executor.hpp의 필드 주석 참고
-            if (!col.foreign_key) continue;
+            if (col.foreign_keys.empty()) continue;
             auto it = row.find(col.name);
             std::string val = it != row.end() ? it->second : std::string();
             if (val == EXECUTOR_NULL_VALUE) continue;
-            if (auto violation = fk_parent_missing(col, val)) return StringResult::Err(*violation);
+            for (auto& fk : col.foreign_keys) {
+                if (auto violation = fk_parent_missing(fk, val)) return StringResult::Err(*violation);
+            }
         }
 
         if (validate_only) { // REPLACE's pass over the rows before it deletes anything: the checks above, no locks, no writes
@@ -1432,33 +1479,34 @@ StringResult Executor::exec_insert_inner(SharedDatabase& s, const std::string& t
         // for again: the row may be gone.
         if (!skip_fk_checks) {
             for (auto& col : schema.columns) {
-                if (!col.foreign_key) continue;
-                auto it = row.find(col.name);
-                if (it == row.end() || it->second == EXECUTOR_NULL_VALUE) continue;
-                const std::string claim_table = fk_claim_table(col.foreign_key->ref_table, col.foreign_key->ref_column);
-                LockResult lr = s.lock_mgr.acquire_shared(claim_table, it->second, claim_txn_id);
-                if (lr.kind == LockResult::Kind::Deadlock) {
-                    return StringResult::Err("Deadlock detected: transaction " + std::to_string(claim_txn_id) + " waits for transaction " +
-                                              std::to_string(lr.holder) + " (INSERT '" + table + "'). Transaction " + std::to_string(claim_txn_id) + " aborted.");
-                }
-                if (lr.kind == LockResult::Kind::Conflict) {
-                    insert_read_lock = DataLockGuard{};
-                    release_table_locks_for_block();
-                    lr = block_on_row(s.lock_mgr, claim_table, it->second, claim_txn_id, /*exclusive=*/false, lock_deadline);
-                    reacquire_table_locks_after_block();
-                    insert_read_lock = acquire_table_data_locks(s, insert_read_tables, /*exclusive=*/false);
-                    dropped_shared = true;
+                for (auto& fk : col.foreign_keys) { // (each foreign key of the column has its own parent to claim)
+                    auto it = row.find(col.name);
+                    if (it == row.end() || it->second == EXECUTOR_NULL_VALUE) continue;
+                    const std::string claim_table = fk_claim_table(fk.ref_table, fk.ref_column);
+                    LockResult lr = s.lock_mgr.acquire_shared(claim_table, it->second, claim_txn_id);
                     if (lr.kind == LockResult::Kind::Deadlock) {
                         return StringResult::Err("Deadlock detected: transaction " + std::to_string(claim_txn_id) + " waits for transaction " +
                                                   std::to_string(lr.holder) + " (INSERT '" + table + "'). Transaction " + std::to_string(claim_txn_id) + " aborted.");
                     }
-                    if (lr.kind != LockResult::Kind::Granted) {
-                        return StringResult::Err("ERROR 1205 (HY000): Lock wait timeout exceeded; the parent value '" + it->second + "' in '" + col.foreign_key->ref_table +
-                                                  "' is being deleted or changed by transaction " + std::to_string(lr.holder) + ".");
+                    if (lr.kind == LockResult::Kind::Conflict) {
+                        insert_read_lock = DataLockGuard{};
+                        release_table_locks_for_block();
+                        lr = block_on_row(s.lock_mgr, claim_table, it->second, claim_txn_id, /*exclusive=*/false, lock_deadline);
+                        reacquire_table_locks_after_block();
+                        insert_read_lock = acquire_table_data_locks(s, insert_read_tables, /*exclusive=*/false);
+                        dropped_shared = true;
+                        if (lr.kind == LockResult::Kind::Deadlock) {
+                            return StringResult::Err("Deadlock detected: transaction " + std::to_string(claim_txn_id) + " waits for transaction " +
+                                                      std::to_string(lr.holder) + " (INSERT '" + table + "'). Transaction " + std::to_string(claim_txn_id) + " aborted.");
+                        }
+                        if (lr.kind != LockResult::Kind::Granted) {
+                            return StringResult::Err("ERROR 1205 (HY000): Lock wait timeout exceeded; the parent value '" + it->second + "' in '" + fk.ref_table +
+                                                      "' is being deleted or changed by transaction " + std::to_string(lr.holder) + ".");
+                        }
                     }
-                }
-                if (dropped_shared) {
-                    if (auto violation = fk_parent_missing(col, it->second)) return StringResult::Err(*violation);
+                    if (dropped_shared) {
+                        if (auto violation = fk_parent_missing(fk, it->second)) return StringResult::Err(*violation);
+                    }
                 }
             }
         }

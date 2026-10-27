@@ -164,8 +164,7 @@ std::string Executor::build_create_table_ddl(const SharedDatabase& s, const std:
         lines.push_back("  PRIMARY KEY (" + pkc + ")");
     }
     for (auto& col : schema->columns) {
-        if (col.foreign_key) {
-            auto& fk = *col.foreign_key;
+        for (auto& fk : col.foreign_keys) {
             std::string ref_bare = bare_name(fk.ref_table);
             lines.push_back(std::string("  ") + (fk.name.empty() ? "" : "CONSTRAINT `" + fk.name + "` ") + "FOREIGN KEY (`" + fk.column + "`) REFERENCES `" + ref_bare + "`(`" + fk.ref_column + "`) ON DELETE " +
                              backup_fk_action_str(fk.on_delete) + " ON UPDATE " + backup_fk_action_str(fk.on_update));
