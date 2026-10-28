@@ -52,8 +52,8 @@ RuSQL이 실제로 받아서 실행하는 SQL 문법을 한 줄씩 정리한 문
 - UNIQUE [KEY | INDEX] [이름] (a, b, ...) : 복합 포함 유일 키
 - KEY | INDEX [이름] (a, b, ...) : 일반 인덱스(`USING HASH`, `COMMENT`, `VISIBLE`/`INVISIBLE`도 받음)
 - CONSTRAINT 이름 PRIMARY KEY / UNIQUE / CHECK / FOREIGN KEY ... : 이름 붙인 제약
-- [CONSTRAINT 이름] FOREIGN KEY (col) REFERENCES t(col) [ON DELETE 동작] [ON UPDATE 동작] : 외래 키(컬럼 하나짜리만; 한 열에 여러 개를 달 수 있고, 값은 모든 부모에 있어야 하며 키마다 따로 동작하고 이름은 `<표>_ibfk_n`)
-- 외래 키 동작 : CASCADE / SET NULL / SET DEFAULT / RESTRICT / NO ACTION
+- [CONSTRAINT 이름] FOREIGN KEY (col) REFERENCES t(col) [ON DELETE 동작] [ON UPDATE 동작] : 외래 키(컬럼 하나짜리만; 한 열에 여러 개를 달 수 있고, 값은 모든 부모에 있어야 하며 키마다 따로 동작하고 이름 없는 키는 쓴 순서대로 `<표>_ibfk_n`(R58: 이름을 붙인 키는 세지 않고, 다른 키를 지우거나 표 이름을 바꿔도 이름이 바뀌지 않음))
+- 외래 키 동작 : CASCADE / SET NULL / SET DEFAULT / RESTRICT / NO ACTION(R58: 규칙을 안 적거나 NO ACTION이면 `information_schema`에 `NO ACTION`, RESTRICT는 적었을 때만 `RESTRICT`; 둘 다 같은 방식으로 거절하고 `SHOW CREATE TABLE`은 적은 RESTRICT만 출력)
 - 표를 건너는 외래 키 사슬 : `a ← b ← c`에서 `DELETE`·키를 바꾸는 `UPDATE`의 연쇄는 사슬 끝까지 간다(R56) — CASCADE는 손자까지, 아래쪽 RESTRICT는 문장 전체를 거절하고 아무것도 바꾸지 않고, 순환은 끝나며, 이미 바꾸고 있는 표로 되돌아오는 `ON UPDATE` 연쇄는 RESTRICT처럼 동작한다(MySQL과 같음)
 - 자기 표를 가리키는 외래 키 : `REFERENCES emp(id)`를 `emp` 자신에게(R55) — `DELETE`는 InnoDB처럼 행을 하나씩 읽는 순서(키 순서, `ORDER BY`가 있으면 그 순서)로 처리한다: RESTRICT는 아직 있는 자식이 있으면 문장 전체를 거절하고, CASCADE는 자식을 되풀이해서 지우되 14단계까지(15번째 단계는 오류 3008), SET NULL은 자식을 NULL로 바꾼다. 같은 문장이 먼저 연쇄로 지운 행은 스캔이 도달하지 않아 세지 않는다. `ON UPDATE CASCADE`·`SET NULL`은 자기 표에는 쓸 수 없어 RESTRICT처럼 동작한다(MySQL과 같음)
 
@@ -69,11 +69,11 @@ RuSQL이 실제로 받아서 실행하는 SQL 문법을 한 줄씩 정리한 문
 - ALTER TABLE t ADD [UNIQUE] INDEX | KEY [이름] (cols) : 인덱스 추가
 - ALTER TABLE t ADD CONSTRAINT [이름] UNIQUE (cols) : 유일 제약 추가
 - ALTER TABLE t ADD CONSTRAINT [이름] CHECK (조건) : 검사 제약 추가
-- ALTER TABLE t ADD [CONSTRAINT 이름] FOREIGN KEY (col) REFERENCES t2(col) [ON DELETE ..] [ON UPDATE ..] : 외래 키 추가
+- ALTER TABLE t ADD [CONSTRAINT 이름] FOREIGN KEY (col) REFERENCES t2(col) [ON DELETE ..] [ON UPDATE ..] : 외래 키 추가(이름을 안 주면 가장 큰 `<표>_ibfk_n`보다 하나 큰 번호)
 - ALTER TABLE t DROP INDEX | KEY 이름 : 인덱스 삭제
 - ALTER TABLE t DROP CONSTRAINT 이름 : 제약 삭제
 - ALTER TABLE t DROP FOREIGN KEY 이름 : 외래 키 삭제
-- ALTER TABLE t RENAME [TO | AS] new : 테이블 이름 변경
+- ALTER TABLE t RENAME [TO | AS] new : 테이블 이름 변경(R58: 키 이름의 `<표>_ibfk_`는 새 이름으로, 이 표를 가리키는 다른 표의 외래키는 새 이름을 따라감)
 - ALTER TABLE t ADD PARTITION (PARTITION p VALUES ...) : 파티션 추가
 - ALTER TABLE t DROP PARTITION p : 파티션 삭제
 - ALTER TABLE t ENGINE = x / AUTO_INCREMENT = n / [DEFAULT] CHARSET / COLLATE 등 테이블 옵션 : 옵션 변경
@@ -170,7 +170,7 @@ RuSQL이 실제로 받아서 실행하는 SQL 문법을 한 줄씩 정리한 문
 ### 조인
 
 - [INNER] JOIN t ON 조건 : 두 테이블의 일치하는 행 결합
-- JOIN t USING (col, ...) : 같은 이름의 컬럼으로 결합(`*`에서 합쳐진 열은 한 번, 앞에; `RIGHT JOIN … USING`은 합쳐진 열 → 오른쪽 표의 나머지 → 왼쪽 표의 나머지 순서로 MySQL과 같음)
+- JOIN t USING (col, ...) : 같은 이름의 컬럼으로 결합(`*`에서 합쳐진 열은 한 번, 앞에; `RIGHT JOIN … USING`은 합쳐진 열 → 오른쪽 표의 나머지 → 왼쪽 표의 나머지 순서로 MySQL과 같음; 조인이 이어지면(R58) `(a JOIN b USING (x)) JOIN c USING (y)`는 `y, x, ...`처럼 나중 조인의 합쳐진 열이 앞에 오고, 한 조인의 합쳐진 열은 USING에 적은 순서가 아니라 왼쪽 표가 가진 순서)
 - LEFT [OUTER] JOIN : 왼쪽 행은 모두 유지
 - RIGHT [OUTER] JOIN : 오른쪽 행은 모두 유지
 - FULL [OUTER] JOIN : 양쪽 행을 모두 유지

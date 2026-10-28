@@ -1,10 +1,11 @@
-"""vs_mysql.py <rusql.exe> <corpus.sql> [--split] [--emit cases.inc] [--trace] [--proto [--types]] [--exact]
+"""vs_mysql.py <rusql.exe> <corpus.sql> [--split] [--emit cases.inc] [--trace] [--proto [--types] [--errno]] [--exact]
 
 Runs the same statements on RuSQL and on a real MySQL (127.0.0.1:3391) and lists what differs.
 
 Corpus: one statement per line; '#' comment; '--' prefix = setup run on both silently. Rows are compared as multisets unless the statement has
 ORDER BY; numbers compare by value ('1' == '1.0000'); NULL is the text NULL. --split runs each item of a FROM-less `SELECT a, b, c` as a statement of its own.
 
+--proto --errno: a statement both fail is a difference when the two error numbers (the first number of pymysql's (errno, message)) are not the same.
 --exact: the cells must be the same TEXT, not only the same number (30.7500 is not 30.75); with --emit the rows are written as kind 5, which the test compares so.
 --emit writes the statements as the cases of a C++ conformance test (code/backend/tests/mysql_conformance_{functions,tables,constraints,collation}.inc, from corpus/{functions,tables,constraints,collation}.sql): MySQL's answer is the expected
 one for every statement RuSQL answers the same; a statement RuSQL answers differently is only run (so the state of the tables stays the same).
@@ -142,6 +143,14 @@ def same_cell(a, b):
     return False
 
 
+ERRNO = "--errno" in sys.argv  # --proto: when both fail, the error numbers must be the same (a client tells an error by its number)
+
+
+def errno_of(answer):
+    found = re.match(r"\((\d+),", answer[1])
+    return int(found.group(1)) if found else None
+
+
 def first_difference(sql, a, b):
     """None when the two answers agree, else a short text naming the first row that differs."""
     empty_a = a[0] == "ok" or (a[0] == "rows" and not a[1])
@@ -154,6 +163,8 @@ def first_difference(sql, a, b):
         return "an answer of no rows has columns %s in mysql and none in rusql" % (a[2],)
     if a[0] == "rows" and b[0] == "rows" and not a[1] and not b[1] and len(a) > 2 and len(b) > 2 and [x.lower() for x in a[2]] != [x.lower() for x in b[2]]:
         return "an answer of no rows: columns mysql %s / rusql %s" % (a[2], b[2])
+    if ERRNO and a[0] == "err" and b[0] == "err" and errno_of(a) != errno_of(b):
+        return "error number mysql=%s / rusql=%s" % (errno_of(a), errno_of(b))
     if a[0] == "err" or a[0] == "ok" or (empty_a and empty_b):
         return None
     ra, rb = list(a[1]), list(b[1])

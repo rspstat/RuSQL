@@ -199,9 +199,9 @@ const PLANNER: Text[] = [
 const EXECUTOR: Text[] = [
   L("joins (NL, hash, sort-merge, index NL), subqueries, CTE, window functions (over groups too)", "조인(NL, 해시, 소트-머지, 인덱스 NL), 서브쿼리, CTE, 윈도 함수(그룹 위에서도)"),
   L("works on row pointers; subqueries and INSERT checks run once per statement", "행 포인터로 처리, 서브쿼리·INSERT 검사는 문장당 한 번"),
-  L("MySQL-exact results: DECIMAL places, strict errors (division by zero, text read as a number)", "MySQL과 같은 결과: DECIMAL 자릿수, 엄격한 오류(0으로 나누기, 글자를 수로 읽기)"),
+  L("MySQL-exact results: DECIMAL places, FLOAT widened beside a DOUBLE, strict errors (division by zero, text read as a number) with MySQL's error numbers over the protocol", "MySQL과 같은 결과: DECIMAL 자릿수, DOUBLE 옆에서 넓혀지는 FLOAT, 엄격한 오류(0으로 나누기, 글자를 수로 읽기)와 프로토콜의 MySQL 오류 번호"),
   L("MAX_EXECUTION_TIME stops long SELECTs (3024); TRACE shows a statement's steps", "MAX_EXECUTION_TIME이 긴 SELECT를 멈춤(3024), TRACE가 문장의 단계를 보여 줌"),
-  L("foreign key actions work row by row like InnoDB, down the whole chain of tables (a <- b <- c, a table that is its own child too): RESTRICT, CASCADE (14 levels), SET NULL, ON UPDATE; a column can be in several foreign keys, and REPLACE is refused whole when a RESTRICT lies anywhere below", "외래키 동작은 InnoDB처럼 행 단위로, 표를 건너는 사슬 끝까지(a ← b ← c, 자기 표도): RESTRICT, CASCADE(14단계), SET NULL, ON UPDATE. 한 열에 외래키를 여럿 달 수 있고, REPLACE는 사슬 아래 어디서든 RESTRICT에 막히면 통째로 거절"),
+  L("foreign key actions work row by row like InnoDB, down the whole chain of tables (a <- b <- c, a table that is its own child too): RESTRICT, CASCADE (14 levels), SET NULL, ON UPDATE; a column can be in several foreign keys, and REPLACE is refused whole when a RESTRICT lies anywhere below; a key without a name is <table>_ibfk_<n> in the order written and keeps it when another key goes or the table is renamed, a rule left out reads NO ACTION", "외래키 동작은 InnoDB처럼 행 단위로, 표를 건너는 사슬 끝까지(a ← b ← c, 자기 표도): RESTRICT, CASCADE(14단계), SET NULL, ON UPDATE. 한 열에 외래키를 여럿 달 수 있고, REPLACE는 사슬 아래 어디서든 RESTRICT에 막히면 통째로 거절. 이름 없는 키는 쓴 순서대로 <표>_ibfk_<n>이고 다른 키를 지우거나 표 이름을 바꿔도 그대로이며, 규칙을 안 적으면 NO ACTION"),
 ];
 
 function Bullets({ items }: { items: Text[] }) {

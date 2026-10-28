@@ -1049,6 +1049,22 @@ StringResult Executor::exec_alter(SharedDatabase& s, const std::string& table, A
         }
         persist_index_meta(s);
 
+        s.catalog.get_table_mut(v->to)->name = v->to; // (information_schema and the keys report the table by it: it kept the old name)
+        // the foreign keys that refer to the table (its own among them) follow it to the new name, as in MySQL
+        for (auto& [child_name, child] : s.catalog.tables) {
+            bool changed = false;
+            for (auto& col : child.columns) {
+                for (auto& fk : col.foreign_keys) {
+                    if (same_name(fk.ref_table, table)) {
+                        fk.ref_table = v->to;
+                        changed = true;
+                    }
+                }
+            }
+            if (changed && child_name != v->to) s.disk.save_schema(child_name, child);
+        }
+        fk_rename_table(*s.catalog.get_table_mut(v->to), table.substr(table.rfind('.') == std::string::npos ? 0 : table.rfind('.') + 1),
+                        v->to.substr(v->to.rfind('.') == std::string::npos ? 0 : v->to.rfind('.') + 1));
         s.disk.save_schema(v->to, *s.catalog.get_table(v->to));
         if (auto it = s.tables.find(v->to); it != s.tables.end()) s.buffer_pool.write_through(v->to, it->second, s.disk);
         s.disk.delete_table(table);
@@ -1069,13 +1085,18 @@ StringResult Executor::exec_alter(SharedDatabase& s, const std::string& table, A
         fk.ref_column = v->ref_column;
         fk.on_delete = v->on_delete;
         fk.on_update = v->on_update;
+        fk.restrict_delete = v->restrict_delete;
+        fk.restrict_update = v->restrict_update;
         fk.name = v->name.value_or("");
+        const std::string bare_table = table.substr(table.rfind('.') == std::string::npos ? 0 : table.rfind('.') + 1);
         if (!fk.name.empty()) {
             for (auto& other : schema->columns) {
                 for (auto& other_fk : other.foreign_keys) {
                     if (same_name(other_fk.name, fk.name)) return StringResult::Err("Duplicate foreign key constraint name '" + fk.name + "'");
                 }
             }
+        } else {
+            fk.name = fk_next_name(*schema, bare_table); // (one more than the highest <table>_ibfk_<n>; `col_it` stays valid: only names change)
         }
         col_it->foreign_keys.push_back(fk); // (a column may refer to several tables: each of them is checked)
         s.disk.save_schema(table, *s.catalog.get_table(table));
@@ -1088,6 +1109,7 @@ StringResult Executor::exec_alter(SharedDatabase& s, const std::string& table, A
         if (!schema) return StringResult::Err("Table '" + table + "' not found");
         bool found = false;
         const std::string bare_table = table.substr(table.rfind('.') == std::string::npos ? 0 : table.rfind('.') + 1);
+        fk_materialize_names(*schema, bare_table); // (the keys that stay keep the names they are reported under)
         for (std::size_t i = 0; i < schema->columns.size() && !found; i++) {
             auto& col = schema->columns[i];
             for (std::size_t k = 0; k < col.foreign_keys.size(); k++) {

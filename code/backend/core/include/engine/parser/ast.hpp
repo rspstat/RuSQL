@@ -218,7 +218,10 @@ struct ForeignKey {
     std::string ref_column;
     FkAction on_delete = FkAction::Restrict;
     FkAction on_update = FkAction::Restrict;
-    std::string name; // CONSTRAINT <name> FOREIGN KEY ...; empty: not named (it is reported as <table>_ibfk_<n>, see engine/fk_name.hpp)
+    std::string name; // the name it is reported under (SHOW CREATE TABLE, information_schema, DROP FOREIGN KEY): the one given, else the <table>_ibfk_<n> CREATE TABLE / ALTER TABLE chose; empty only in schemas written before (see engine/fk_name.hpp)
+    // RESTRICT was written for the rule: MySQL reports that as RESTRICT, and a rule left out (or NO ACTION) as NO ACTION -- both refuse the same way here (on_delete / on_update Restrict)
+    bool restrict_delete = false;
+    bool restrict_update = false;
 };
 
 // A UNIQUE key over several columns (a single-column one is the `unique` flag of its ColumnDef).
@@ -536,6 +539,7 @@ struct SelectColumn {
         ValueClass col_class = ValueClass::Unknown;
         std::optional<std::string> default_value; // LAG(c, n, default) / LEAD(c, n, default): what a row too near the end gets (none: NULL)
         bool col_approx = false; // the column is a FLOAT / DOUBLE (or text): SUM / AVG OVER are doubles
+        bool col_single = false; // the column is a FLOAT and the function hands its values on (MIN / MAX / LAG / LEAD / FIRST_VALUE / LAST_VALUE / NTH_VALUE): shown with six digits
     };
     struct Subquery {
         StatementPtr query;
@@ -578,6 +582,8 @@ struct AlterAction {
         std::string ref_column;
         FkAction on_delete;
         FkAction on_update;
+        bool restrict_delete = false;
+        bool restrict_update = false;
     };
     struct DropForeignKey { std::string name; };
     struct AddUniqueConstraint { std::optional<std::string> name; std::string column; std::vector<std::string> columns; }; // columns: all of them (several: a composite key)

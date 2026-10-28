@@ -311,6 +311,10 @@ NumVal number_tree(const ArithExpr& e, Leaf& leaf) {
     }
     if (column && (column->approx || column->cls == ValueClass::Text)) v.approx = true; // (a FLOAT / DOUBLE column or a text column: floating point, as in MySQL)
     if (column && column->single) v.dbl = static_cast<double>(static_cast<float>(v.dbl)); // (a FLOAT is the single-precision number: 0.1 is 0.10000000149011612)
+    if (std::holds_alternative<ArithExpr::Func>(e.data) && Executor::single_result(e)) { // (so is the value of COALESCE(f, 0): and arithmetic on a FLOAT is floating point)
+        v.approx = true;
+        v.dbl = static_cast<double>(static_cast<float>(v.dbl));
+    }
     if (std::holds_alternative<ArithExpr::Str>(e.data)) v.approx = true; // ('2.5' * 2 is 5, not 5.0: a string is read as a DOUBLE)
     return v;
 }
@@ -486,6 +490,28 @@ std::string Executor::eval_arith(const Row& row, const ArithExpr& expr) {
         {
             std::string upper = v->name;
             for (char& ch : upper) ch = static_cast<char>(std::toupper(static_cast<unsigned char>(ch)));
+            // A FLOAT met by something that is not one in COALESCE / IFNULL / GREATEST / LEAST (a DOUBLE or an integer column, a DECIMAL, a fraction) makes the value a DOUBLE:
+            // the FLOAT in it is then the single-precision number widened (0.1 is 0.10000000149011612). Over FLOATs and whole numbers alone the value stays a FLOAT (single_result).
+            // NULLIF has the type of its first argument, and a FLOAT is compared widened.
+            const bool float_family = upper == "COALESCE" || upper == "IFNULL" || upper == "GREATEST" || upper == "LEAST";
+            const bool mixes_float = float_family && std::any_of(v->args.begin(), v->args.end(), [](const ArithExpr& a) { return single_result(a); }) && !single_result(expr);
+            if (mixes_float && upper != "GREATEST" && upper != "LEAST") {
+                for (const ArithExpr& a : v->args) {
+                    std::string value = eval_arith(row, a);
+                    if (value == EXECUTOR_NULL_VALUE) continue;
+                    return single_result(a) ? widen_single(value) : value;
+                }
+                return EXECUTOR_NULL_VALUE;
+            }
+            if (upper == "NULLIF" && v->args.size() == 2 && (single_result(v->args[0]) || single_result(v->args[1]))) {
+                const std::string first = eval_arith(row, v->args[0]), second = eval_arith(row, v->args[1]);
+                if (first == EXECUTOR_NULL_VALUE) return first;
+                if (second == EXECUTOR_NULL_VALUE) return first;
+                const std::string a = single_result(v->args[0]) ? widen_single(first) : first;
+                const std::string b = single_result(v->args[1]) ? widen_single(second) : second;
+                const bool equal = parse_number(a) && parse_number(b) ? compare_numbers(a, b) == 0 : collation::equal(a, b);
+                return equal ? std::string(EXECUTOR_NULL_VALUE) : first;
+            }
             if (is_builtin_function(upper)) {
                 const bool exact_args = takes_exact_numbers(upper);
                 // the arguments are worked out once, as values (NULL is NULL, not the text of a string), and the function is told what each one is
@@ -503,8 +529,8 @@ std::string Executor::eval_arith(const Row& row, const ArithExpr& expr) {
                         if (numbers && c->kind != ColKind::Plain && values.back() != EXECUTOR_NULL_VALUE) { // (a date is 20240102, an ENUM its place: a DOUBLE)
                             values.back() = column_number(*c, values.back());
                             kind = c->kind == ColKind::Enum || c->kind == ColKind::Set ? 'D' : 'C';
-                        } else if (numbers && c->single && values.back() != EXECUTOR_NULL_VALUE) {
-                            values.back() = widen_single(values.back()); // (SQRT of a FLOAT column reads the single-precision number)
+                        } else if ((numbers || mixes_float) && c->single && values.back() != EXECUTOR_NULL_VALUE) {
+                            values.back() = widen_single(values.back()); // (SQRT of a FLOAT column reads the single-precision number; GREATEST(f, d) of a FLOAT and a DOUBLE column is a DOUBLE)
                         }
                         kinds.push_back(kind);
                     } else if (auto* sv = std::get_if<ArithExpr::Str>(&a.data)) {
@@ -521,6 +547,7 @@ std::string Executor::eval_arith(const Row& row, const ArithExpr& expr) {
                         if (numbers && value != EXECUTOR_NULL_VALUE && !std::holds_alternative<ArithExpr::Col>(a.data)) {
                             if (const View view = view_of(a); view.kind != ColKind::Plain) value = view_number(view, value); // (DATE(x) is 20240102)
                         }
+                        if (mixes_float && value != EXECUTOR_NULL_VALUE && single_result(a)) value = widen_single(value); // (a FLOAT that is the value of a function of its own)
                         raw.push_back("'" + value + "'");
                         values.push_back(std::move(value));
                         kinds.push_back(approx ? 'D' : 'E');
@@ -641,7 +668,7 @@ Executor::Tri Executor::eval_single3(const Row& row, const Condition& cond) {
     const bool left_sure = !left_viewed;
     // a FLOAT column is compared as the single-precision number widened to a DOUBLE (0.1 in a FLOAT column is not 0.1)
     const auto* left_column = std::get_if<ArithExpr::Col>(&cond.left.data);
-    const bool left_single = left_column && left_column->single;
+    const bool left_single = (left_column && left_column->single) || (std::holds_alternative<ArithExpr::Func>(cond.left.data) && single_result(cond.left)); // (or a function that gives a FLOAT)
     auto compare = [&](ValueClass lc, ValueClass rc, const std::string& lv, const std::string& rv, bool right_sure) {
         if (sqlval::strict_comparison_depth > 0 && (lc == ValueClass::Number || rc == ValueClass::Number)) {
             if (lc == ValueClass::Text && left_sure) sqlval::note_truncated_number(lv);
@@ -700,7 +727,8 @@ Executor::Tri Executor::eval_single3(const Row& row, const Condition& cond) {
         effective_lit = &resolved;
         right_view = view_of(av->expr);
         right_viewed = right_view.kind != ColKind::Plain;
-        right_single = std::holds_alternative<ArithExpr::Col>(av->expr.data) && std::get<ArithExpr::Col>(av->expr.data).single;
+        right_single = (std::holds_alternative<ArithExpr::Col>(av->expr.data) && std::get<ArithExpr::Col>(av->expr.data).single) ||
+                       (std::holds_alternative<ArithExpr::Func>(av->expr.data) && single_result(av->expr));
         right_sure = !right_viewed;
         if (right_class == ValueClass::Unknown) right_class = class_of_expr(av->expr);
     } else if (auto* lit_v = std::get_if<ConditionValue::Literal>(&cond.value.data)) {

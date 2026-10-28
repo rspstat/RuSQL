@@ -575,9 +575,10 @@ public:
     // The header a SELECT prints over the select-list item `item`: a column by its name, an alias, the label of an aggregate, the text of an expression (nullopt for `*`, which is
     // every column of its tables, and for the hidden column of a window function inside an expression).
     static std::optional<std::string> column_header(const SelectColumn& item);
-    // Is the value of the (bound) expression a FLOAT, as MySQL types it: a FLOAT column, or COALESCE / IFNULL / NULLIF / GREATEST / LEAST over FLOAT columns, whole-number
+    // Is the value of the (bound) expression a FLOAT, as MySQL types it: a FLOAT column, COALESCE / IFNULL / GREATEST / LEAST over FLOAT columns, whole-number
     // constants and NULL with at least one FLOAT column in them (with a column of another type, a fraction or a string among them the type is another: an integer COLUMN
-    // makes it a DOUBLE). Such a value is shown with six digits.
+    // makes it a DOUBLE, and the FLOAT in it is the single-precision number widened), or NULLIF with a FLOAT first argument. Such a value is shown with six digits, and
+    // arithmetic and comparisons read it as the single-precision number widened.
     static bool single_result(const ArithExpr& expr);
 private:
     // executor_proc.cpp: whether running `stmt` can change anything that is kept on disk other than through the redo log (a table file, the catalog) -- what decides

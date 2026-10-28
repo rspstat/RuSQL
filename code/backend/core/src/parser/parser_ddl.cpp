@@ -264,11 +264,15 @@ DataType Parser::parse_data_type() {
     }
 }
 
-FkAction Parser::parse_fk_action() {
+FkAction Parser::parse_fk_action(bool* restrict_written) {
     const Token* t = advance();
     if (!t) throw ParseError("Expected CASCADE/RESTRICT/SET");
+    if (restrict_written) *restrict_written = false;
     if (t->kind == TokenKind::Cascade) return FkAction::Cascade;
-    if (t->kind == TokenKind::Restrict) return FkAction::Restrict;
+    if (t->kind == TokenKind::Restrict) {
+        if (restrict_written) *restrict_written = true;
+        return FkAction::Restrict;
+    }
     if (t->kind == TokenKind::Ident && to_upper(t->text) == "NO") {
         advance(); // ACTION
         return FkAction::Restrict;
@@ -519,14 +523,15 @@ ColConstraints Parser::parse_col_constraints(const std::string& col_name) {
             if (!peek_is(TokenKind::RParen)) throw ParseError("Expected ')'");
             advance();
             FkAction on_delete = FkAction::Restrict, on_update = FkAction::Restrict;
+            bool restrict_delete = false, restrict_update = false;
             while (peek_is(TokenKind::On)) {
                 advance(); // ON
                 const Token* dt = advance();
-                if (dt && dt->kind == TokenKind::Delete) on_delete = parse_fk_action();
-                else if (dt && dt->kind == TokenKind::Update) on_update = parse_fk_action();
+                if (dt && dt->kind == TokenKind::Delete) on_delete = parse_fk_action(&restrict_delete);
+                else if (dt && dt->kind == TokenKind::Update) on_update = parse_fk_action(&restrict_update);
                 else throw ParseError("Expected DELETE or UPDATE after ON");
             }
-            c.foreign_keys.push_back(ForeignKey{col_name, ref_table, ref_column, on_delete, on_update});
+            c.foreign_keys.push_back(ForeignKey{col_name, ref_table, ref_column, on_delete, on_update, unnamed_fk_name(), restrict_delete, restrict_update});
         } else {
             break;
         }
@@ -553,16 +558,22 @@ void Parser::parse_fk_table_level(std::vector<ColumnDef>& columns, const std::st
     if (!peek_is(TokenKind::RParen)) throw ParseError("Expected ')' after ref column");
     advance();
     FkAction on_delete = FkAction::Restrict, on_update = FkAction::Restrict;
+    bool restrict_delete = false, restrict_update = false;
     while (peek_is(TokenKind::On)) {
         advance();
         const Token* dt = advance();
-        if (dt && dt->kind == TokenKind::Delete) on_delete = parse_fk_action();
-        else if (dt && dt->kind == TokenKind::Update) on_update = parse_fk_action();
+        if (dt && dt->kind == TokenKind::Delete) on_delete = parse_fk_action(&restrict_delete);
+        else if (dt && dt->kind == TokenKind::Update) on_update = parse_fk_action(&restrict_update);
         else throw ParseError("Expected DELETE or UPDATE after ON");
     }
     auto it = std::find_if(columns.begin(), columns.end(), [&](const ColumnDef& c) { return same_name(c.name, fk_col); });
     if (it == columns.end()) throw ParseError("FOREIGN KEY: column '" + fk_col + "' not defined");
-    it->foreign_keys.push_back(ForeignKey{fk_col, ref_table, ref_column, on_delete, on_update, constraint_name});
+    it->foreign_keys.push_back(ForeignKey{fk_col, ref_table, ref_column, on_delete, on_update, constraint_name.empty() ? unnamed_fk_name() : constraint_name, restrict_delete, restrict_update});
+}
+
+std::string Parser::unnamed_fk_name() {
+    if (fk_table_.empty()) return std::string();
+    return fk_table_ + "_ibfk_" + std::to_string(++fk_unnamed_);
 }
 
 /// Parses the tail of a single partition definition after "PARTITION name VALUES" has
@@ -723,6 +734,8 @@ Statement Parser::parse_create() {
     if (!peek_is(TokenKind::LParen)) throw ParseError("Expected '('");
     advance();
 
+    fk_table_ = name.substr(name.rfind('.') == std::string::npos ? 0 : name.rfind('.') + 1);
+    fk_unnamed_ = 0;
     std::vector<ColumnDef> columns;
     std::vector<std::string> primary_key_columns;
     std::vector<std::pair<std::optional<std::string>, std::string>> check_constraints;
@@ -887,6 +900,7 @@ Statement Parser::parse_create() {
         else throw ParseError("Expected ',' or ')'");
     }
 
+    fk_table_.clear();
     const std::optional<std::int64_t> auto_increment_start = parse_table_options();
     std::optional<PartitionBy> partition_by = parse_partition_by();
     if (partition_by) {
@@ -1058,15 +1072,16 @@ Statement Parser::parse_alter_action(const std::string& table) {
                 if (!peek_is(TokenKind::RParen)) throw ParseError("Expected ')' after ref column");
                 advance();
                 FkAction on_delete = FkAction::Restrict, on_update = FkAction::Restrict;
+                bool restrict_delete = false, restrict_update = false;
                 while (peek_is(TokenKind::On)) {
                     advance();
                     const Token* dt = advance();
-                    if (dt && dt->kind == TokenKind::Delete) on_delete = parse_fk_action();
-                    else if (dt && dt->kind == TokenKind::Update) on_update = parse_fk_action();
+                    if (dt && dt->kind == TokenKind::Delete) on_delete = parse_fk_action(&restrict_delete);
+                    else if (dt && dt->kind == TokenKind::Update) on_update = parse_fk_action(&restrict_update);
                     else throw ParseError("Expected DELETE or UPDATE after ON");
                 }
                 return Statement(Statement::AlterTable{table, AlterAction(AlterAction::AddForeignKey{
-                    constraint_name, column, ref_table, ref_column, on_delete, on_update})});
+                    constraint_name, column, ref_table, ref_column, on_delete, on_update, restrict_delete, restrict_update})});
             }
             if (kind && kind->kind == TokenKind::Unique) {
                 if (peek_is(TokenKind::Key) || peek_is(TokenKind::Index)) advance();

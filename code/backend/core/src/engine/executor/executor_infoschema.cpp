@@ -354,7 +354,8 @@ std::vector<Row> Executor::info_schema_rows(const SharedDatabase& s, const std::
                 for (std::size_t k = 0; k < schema.columns[i].foreign_keys.size(); k++) {
                     const ForeignKey& fk = schema.columns[i].foreign_keys[k];
                     auto [ref_db0, ref_tbl] = split_name(fk.ref_table);
-                    auto rule = [](FkAction a) { return a == FkAction::Cascade ? "CASCADE" : a == FkAction::SetNull ? "SET NULL" : a == FkAction::SetDefault ? "SET DEFAULT" : "RESTRICT"; };
+                    // (a rule left out, or NO ACTION, reads NO ACTION; RESTRICT only when it was written -- both refuse the same way)
+                    auto rule = [](FkAction a, bool restrict_written) { return a == FkAction::Cascade ? "CASCADE" : a == FkAction::SetNull ? "SET NULL" : a == FkAction::SetDefault ? "SET DEFAULT" : restrict_written ? "RESTRICT" : "NO ACTION"; };
                     const TableSchema* parent = s.catalog.get_table(fk.ref_table);
                     bool parent_pk = false;
                     if (parent) {
@@ -368,8 +369,8 @@ std::vector<Row> Executor::info_schema_rows(const SharedDatabase& s, const std::
                     r["UNIQUE_CONSTRAINT_SCHEMA"] = ref_db0.empty() ? db : ref_db0;
                     r["UNIQUE_CONSTRAINT_NAME"] = parent_pk ? "PRIMARY" : fk.ref_column;
                     r["MATCH_OPTION"] = "NONE";
-                    r["UPDATE_RULE"] = rule(fk.on_update);
-                    r["DELETE_RULE"] = rule(fk.on_delete);
+                    r["UPDATE_RULE"] = rule(fk.on_update, fk.restrict_update);
+                    r["DELETE_RULE"] = rule(fk.on_delete, fk.restrict_delete);
                     r["TABLE_NAME"] = tbl;
                     r["REFERENCED_TABLE_NAME"] = ref_tbl;
                     rows.push_back(std::move(r));

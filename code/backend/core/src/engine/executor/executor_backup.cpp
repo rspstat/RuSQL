@@ -121,9 +121,9 @@ std::string backup_type_str(const DataType& dt) {
         dt.data);
 }
 
-std::string backup_fk_action_str(FkAction a) {
+std::string backup_fk_action_str(FkAction a, bool restrict_written) {
     switch (a) {
-        case FkAction::Restrict: return "RESTRICT";
+        case FkAction::Restrict: return restrict_written ? "RESTRICT" : "NO ACTION"; // (a dump keeps what the table was made with)
         case FkAction::Cascade: return "CASCADE";
         case FkAction::SetNull: return "SET NULL";
         case FkAction::SetDefault: return "SET DEFAULT";
@@ -167,7 +167,7 @@ std::string Executor::build_create_table_ddl(const SharedDatabase& s, const std:
         for (auto& fk : col.foreign_keys) {
             std::string ref_bare = bare_name(fk.ref_table);
             lines.push_back(std::string("  ") + (fk.name.empty() ? "" : "CONSTRAINT `" + fk.name + "` ") + "FOREIGN KEY (`" + fk.column + "`) REFERENCES `" + ref_bare + "`(`" + fk.ref_column + "`) ON DELETE " +
-                             backup_fk_action_str(fk.on_delete) + " ON UPDATE " + backup_fk_action_str(fk.on_update));
+                             backup_fk_action_str(fk.on_delete, fk.restrict_delete) + " ON UPDATE " + backup_fk_action_str(fk.on_update, fk.restrict_update));
         }
     }
 

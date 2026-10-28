@@ -807,6 +807,8 @@ std::optional<std::string> Executor::bind_statement(SharedDatabase& s, Statement
                         wf->col_class = class_of_name(*wf->col);
                     }
                     wf->col_approx = argument_is_approx(*wf->col);
+                    wf->col_single = (wf->func == WindowFunc::Min || wf->func == WindowFunc::Max || wf->func == WindowFunc::Lag || wf->func == WindowFunc::Lead ||
+                                      wf->func == WindowFunc::FirstValue || wf->func == WindowFunc::LastValue || wf->func == WindowFunc::NthValue) && argument_is_single(*wf->col);
                     bool number_is_double = false;
                     if ((wf->func == WindowFunc::Sum || wf->func == WindowFunc::Avg) && reads_number_view(*wf->col, &number_is_double)) {
                         *wf->col = "(" + *wf->col + ") + 0";

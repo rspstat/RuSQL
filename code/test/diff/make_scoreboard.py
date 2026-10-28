@@ -47,6 +47,10 @@ CORPORA = [
     ("replace_chain", [], "REPLACE below a chain of foreign keys: refused with nothing changed, or the whole chain goes", "외래키 사슬 아래의 REPLACE: 아무것도 바뀌지 않고 거절되거나 사슬 전체가 지워짐"),
     ("fk_chain", [], "Foreign keys over several tables: cascades down the whole chain, RESTRICT below, cycles, ON UPDATE CASCADE through a chain", "여러 표에 걸친 외래키: 사슬 끝까지의 연쇄, 아래쪽 RESTRICT, 순환, 사슬을 지나는 ON UPDATE CASCADE"),
     ("empty_columns", [], "The columns of an answer of no rows (select list, joins, derived tables, CTE, UNION, EXECUTE, SHOW TABLES LIKE)", "행이 없는 결과의 열 이름(select 목록·조인·파생 표·CTE·UNION·EXECUTE·SHOW TABLES LIKE)"),
+    ("float_mixed", [], "FLOAT with a DOUBLE / integer column / DECIMAL in COALESCE, GREATEST ..., arithmetic over such a value, windows MIN / MAX / LAG / LEAD over a FLOAT", "FLOAT가 DOUBLE·정수 열·DECIMAL과 섞인 COALESCE·GREATEST ..., 그 값의 산술, FLOAT 열의 윈도 MIN·MAX·LAG·LEAD"),
+    ("using_chain", [], "The order of the columns of * over a chain of USING / NATURAL joins (RIGHT JOIN too)", "USING·NATURAL 조인 사슬의 * 열 순서(RIGHT JOIN 포함)"),
+    ("fk_auto_names", [], "Names of foreign keys without a name (declaration order, DROP / ADD / RENAME), NO ACTION vs RESTRICT in referential_constraints", "이름 없는 외래키의 자동 이름(선언 순서·DROP·ADD·RENAME), referential_constraints의 NO ACTION·RESTRICT"),
+    ("errno", ["--proto", "--errno"], "MySQL wire protocol: the error number of a failing statement", "MySQL 프로토콜: 실패한 문장의 오류 번호"),
     ("protocol", ["--proto"], "MySQL wire protocol: SHOW, OK packets, affected rows", "MySQL 프로토콜: SHOW·OK 패킷·영향 행 수"),
     ("protocol_types", ["--proto", "--types"], "MySQL wire protocol: typed result columns", "MySQL 프로토콜: 열 타입"),
 ]

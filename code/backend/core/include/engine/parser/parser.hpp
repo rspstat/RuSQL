@@ -83,6 +83,11 @@ private:
     std::string source_between(std::size_t from, std::size_t to) const;
     std::size_t pos_ = 0;
     bool last_type_unsigned_ = false; // whether the integer type parse_data_type() read last had UNSIGNED after it
+    // CREATE TABLE names the foreign keys it is not given a name for <table>_ibfk_1, _2 ... in the order they are written: the table (without its database) while the
+    // columns are parsed, and how many such keys there are so far (empty: not inside CREATE TABLE)
+    std::string fk_table_;
+    int fk_unnamed_ = 0;
+    std::string unnamed_fk_name(); // the next <table>_ibfk_<n> ("" outside CREATE TABLE: ALTER TABLE chooses its own)
     // The table names and aliases of the FROM list of each SELECT being parsed (the innermost last): a subquery that uses one of those tables
     // under an alias keeps the alias, which would otherwise be replaced by the table name -- also what the query around it calls its table.
     std::vector<std::unordered_set<std::string>> enclosing_from_;
@@ -211,7 +216,7 @@ private:
     DataType parse_data_type();
     ColConstraints parse_col_constraints(const std::string& col_name);
     void parse_fk_table_level(std::vector<ColumnDef>& columns, const std::string& constraint_name = "");
-    FkAction parse_fk_action();
+    FkAction parse_fk_action(bool* restrict_written = nullptr); // `restrict_written`: set when the action was spelled RESTRICT (NO ACTION is the same here, but MySQL reports it apart)
     std::optional<PartitionBy> parse_partition_by();
     // PostgreSQL's `FILTER (WHERE cond)` clause on an aggregate -- no Rust original.
     // Returns nullopt (consuming nothing) if the next token isn't FILTER. Shared by the

@@ -129,6 +129,15 @@ const Case kFloatCopy[] = {
 const Case kReplaceChain[] = {
 #include "mysql_conformance_replace_chain.inc"
 };
+const Case kFloatMixed[] = {
+#include "mysql_conformance_float_mixed.inc"
+};
+const Case kUsingChain[] = {
+#include "mysql_conformance_using_chain.inc"
+};
+const Case kFkAutoNames[] = {
+#include "mysql_conformance_fk_auto_names.inc"
+};
 
 struct TempDataDir {
     std::string path;
@@ -406,4 +415,16 @@ TEST_CASE("FLOAT values that MIN / MAX / GREATEST / COALESCE give and that are c
 
 TEST_CASE("REPLACE below a chain of foreign keys: refused with nothing changed, or the whole chain goes", "[mysql_conformance][replace_chain]") {
     run_cases("mc_replace_chain", kReplaceChain, sizeof kReplaceChain / sizeof kReplaceChain[0]);
+}
+
+TEST_CASE("FLOAT met by a DOUBLE, an integer column or a DECIMAL in COALESCE / GREATEST ..., arithmetic over such a value, windows over a FLOAT", "[mysql_conformance][float_mixed]") {
+    run_cases("mc_float_mixed", kFloatMixed, sizeof kFloatMixed / sizeof kFloatMixed[0]);
+}
+
+TEST_CASE("The order of the columns of * over a chain of USING / NATURAL joins", "[mysql_conformance][using_chain]") {
+    run_cases("mc_using_chain", kUsingChain, sizeof kUsingChain / sizeof kUsingChain[0]);
+}
+
+TEST_CASE("Names of foreign keys without a name, NO ACTION and RESTRICT in referential_constraints, a parent that is renamed", "[mysql_conformance][fk_auto_names]") {
+    run_cases("mc_fk_auto_names", kFkAutoNames, sizeof kFkAutoNames / sizeof kFkAutoNames[0]);
 }

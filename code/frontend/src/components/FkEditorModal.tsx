@@ -9,7 +9,7 @@ import { parseRef, unqualify } from "../lib/erd";
 import { clearSqlCompletionCache } from "../lib/sqlCompletion";
 import "./FkEditorModal.css";
 
-const ACTIONS = ["RESTRICT", "CASCADE", "SET NULL", "SET DEFAULT"] as const;
+const ACTIONS = ["RESTRICT", "NO ACTION", "CASCADE", "SET NULL", "SET DEFAULT"] as const; // (a rule left out reads NO ACTION in information_schema: the same refusal as RESTRICT)
 type Action = (typeof ACTIONS)[number];
 
 export type FkTarget = { kind: "add"; table?: string } | { kind: "edit"; table: string; column: string };

@@ -1891,7 +1891,10 @@ StringResult Executor::execute_with_s_body(SharedDatabase& s, Statement stmt) {
         return created;
     }
     if (auto* v = std::get_if<Statement::DropTable>(&stmt.data)) {
-        if (v->more.empty()) return exec_drop(s, v->name, v->if_exists);
+        if (v->more.empty()) {
+            if (!v->if_exists && !s.catalog.tables.count(v->name)) return StringResult::Err("Unknown table '" + v->name + "'"); // (MySQL 1051, as for a list of tables)
+            return exec_drop(s, v->name, v->if_exists);
+        }
         // DROP TABLE a, b: none goes when one of them is not there (unless IF EXISTS)
         std::vector<std::string> names{v->name};
         names.insert(names.end(), v->more.begin(), v->more.end());

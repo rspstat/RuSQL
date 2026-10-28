@@ -592,7 +592,7 @@ TEST_CASE("a foreign key keeps its name: DROP FOREIGN KEY by name, a drop and an
     REQUIRE(fails(ex, "INSERT INTO c VALUES (2, 9, 'bad')").find("Foreign key violation") != std::string::npos);
     ok(ex, "INSERT INTO c VALUES (2, 2, 'ok')");
     REQUIRE(q(ex, "SELECT CONSTRAINT_NAME, UPDATE_RULE, DELETE_RULE, REFERENCED_TABLE_NAME FROM information_schema.referential_constraints WHERE TABLE_NAME = 'c'") ==
-            Rows{{"fk_c_p", "RESTRICT", "CASCADE", "p"}});
+            Rows{{"fk_c_p", "NO ACTION", "CASCADE", "p"}}); // (a rule left out is NO ACTION: RESTRICT only when it is written)
     REQUIRE(q(ex, "SELECT CONSTRAINT_NAME FROM information_schema.key_column_usage WHERE TABLE_NAME = 'c' AND REFERENCED_TABLE_NAME IS NOT NULL") == Rows{{"fk_c_p"}});
     REQUIRE(fails(ex, "ALTER TABLE c ADD CONSTRAINT fk_c_p FOREIGN KEY (pid) REFERENCES p (id)").find("Duplicate foreign key constraint name") != std::string::npos);
     REQUIRE(fails(ex, "ALTER TABLE c DROP FOREIGN KEY nosuch").find("not found") != std::string::npos);
@@ -2504,4 +2504,302 @@ TEST_CASE("R57: a string constant names its column by what it says, and a select
     ok(ex, "INSERT INTO p SELECT 3, 'c' WHERE 1 = 1");
     ok(ex, "INSERT INTO p SELECT 4, 'd' WHERE 1 = 0");
     REQUIRE(q(ex, "SELECT id FROM p ORDER BY id") == (Rows{{"1"}, {"2"}, {"3"}}));
+}
+
+// ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+// R58: a FLOAT that meets a column of another type in a function, arithmetic over a function that is a FLOAT, windows over a FLOAT, the columns of * over a chain of USING joins, the names a foreign
+// key is given and the rules it reports, a NOT NULL column that an INSERT leaves out
+// ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+TEST_CASE("R58: a FLOAT met by a DOUBLE, an integer column, a DECIMAL or a fraction in COALESCE / IFNULL / GREATEST / LEAST is the number it holds, widened", "[r58][float]") {
+    TempDataDir dir("r58_float_mix");
+    Executor ex(dir.path);
+    ok(ex, "CREATE DATABASE d");
+    ok(ex, "USE d");
+    ok(ex, "CREATE TABLE fm (id INT PRIMARY KEY, f FLOAT, d DOUBLE, i INT, n DECIMAL(10,2))");
+    ok(ex, "INSERT INTO fm VALUES (1, 0.1, 0.1, 3, 0.30), (2, 1234567, 2, 1, 1.50), (3, 16777217, 0.1, 0, 2.00), (4, NULL, 5, 4, 2.50), (5, 3.14159265, 3.14159265, 3, 3.14), (6, -2.5, 1, -1, -2.50)");
+    // a column of another type makes the value a DOUBLE: the float is 0.10000000149011612, not the 0.1 it is written with
+    REQUIRE(q(ex, "SELECT COALESCE(f, d) FROM fm WHERE id = 1") == (Rows{{"0.10000000149011612"}}));
+    REQUIRE(q(ex, "SELECT IFNULL(f, d) FROM fm WHERE id = 1") == (Rows{{"0.10000000149011612"}}));
+    REQUIRE(q(ex, "SELECT COALESCE(f, i) FROM fm WHERE id = 1") == (Rows{{"0.10000000149011612"}}));
+    REQUIRE(q(ex, "SELECT LEAST(f, i) FROM fm WHERE id = 1") == (Rows{{"0.10000000149011612"}}));
+    REQUIRE(q(ex, "SELECT GREATEST(f, i) FROM fm WHERE id = 5") == (Rows{{"3.1415927410125732"}}));
+    REQUIRE(q(ex, "SELECT GREATEST(f, n) FROM fm WHERE id = 5") == (Rows{{"3.1415927410125732"}}));
+    REQUIRE(q(ex, "SELECT GREATEST(f, 0.5) FROM fm WHERE id = 5") == (Rows{{"3.1415927410125732"}}));
+    REQUIRE(q(ex, "SELECT COALESCE(f, 0.5) FROM fm WHERE id = 1") == (Rows{{"0.10000000149011612"}}));
+    // ... and one inside another function that gives a FLOAT
+    REQUIRE(q(ex, "SELECT GREATEST(COALESCE(f, 0), d) FROM fm WHERE id = 1") == (Rows{{"0.10000000149011612"}}));
+    // FLOAT columns, whole numbers and NULL alone give a FLOAT: six digits, as before
+    REQUIRE(q(ex, "SELECT COALESCE(f, 0), GREATEST(f, 1) FROM fm WHERE id = 5") == (Rows{{"3.14159", "3.14159"}}));
+    // NULLIF is of the type of its first argument and compares the float widened: 0.1 (a float) is not 0.1 (a double)
+    REQUIRE(q(ex, "SELECT NULLIF(f, d) FROM fm WHERE id = 1") == (Rows{{"0.1"}}));
+    REQUIRE(q(ex, "SELECT NULLIF(f, d) FROM fm WHERE id = 5") == (Rows{{"3.14159"}}));
+    REQUIRE(q(ex, "SELECT NULLIF(f, 0.5) FROM fm WHERE id = 5") == (Rows{{"3.14159"}}));
+    REQUIRE(q(ex, "SELECT id FROM fm WHERE NULLIF(f, 0.1) IS NULL ORDER BY id") == (Rows{{"4"}}));
+    // ... what it gives is the first argument as it is (not the widened number), and a float in the second place is compared widened too
+    REQUIRE(q(ex, "SELECT CONCAT(NULLIF(f, d), '') FROM fm WHERE id = 1") == (Rows{{"0.1"}}));
+    REQUIRE(q(ex, "SELECT NULLIF(d, f) FROM fm WHERE id = 1") == (Rows{{"0.1"}}));
+    REQUIRE(q(ex, "SELECT NULLIF(d, f) FROM fm WHERE id = 5") == (Rows{{"3.14159265"}}));
+    // a NULL stays NULL
+    REQUIRE(q(ex, "SELECT COALESCE(f, d), GREATEST(f, i), NULLIF(f, d) FROM fm WHERE id = 4") == (Rows{{"5", "NULL", "NULL"}}));
+}
+
+TEST_CASE("R58: a function that is a FLOAT is the single-precision number in arithmetic and in a comparison, as the column is", "[r58][float]") {
+    TempDataDir dir("r58_float_func");
+    Executor ex(dir.path);
+    ok(ex, "CREATE DATABASE d");
+    ok(ex, "USE d");
+    ok(ex, "CREATE TABLE fm (id INT PRIMARY KEY, f FLOAT, d DOUBLE)");
+    ok(ex, "INSERT INTO fm VALUES (1, 0.1, 0.1), (2, 1234567, 2), (3, 16777217, 0.1), (4, NULL, 5), (5, 3.14159265, 3.14159265), (6, -2.5, 1), (7, 0.5, 0.5)");
+    REQUIRE(q(ex, "SELECT GREATEST(f, 0) + 1 FROM fm WHERE id = 1") == (Rows{{"1.1000000014901161"}}));
+    REQUIRE(q(ex, "SELECT COALESCE(f, 0) * 2 FROM fm WHERE id = 1") == (Rows{{"0.20000000298023224"}}));
+    REQUIRE(q(ex, "SELECT IFNULL(f, 0) - 0.5 FROM fm WHERE id = 1") == (Rows{{"-0.3999999985098839"}}));
+    REQUIRE(q(ex, "SELECT NULLIF(f, 0) + 1 FROM fm WHERE id = 1") == (Rows{{"1.1000000014901161"}}));
+    REQUIRE(q(ex, "SELECT LEAST(f, 100) / 3 FROM fm WHERE id = 1") == (Rows{{"0.033333333830038704"}}));
+    // a float that holds exactly what is written is not changed by it
+    REQUIRE(q(ex, "SELECT GREATEST(f, 0) + 1 FROM fm WHERE id = 2") == (Rows{{"1234568"}}));
+    REQUIRE(q(ex, "SELECT COALESCE(f, 0) * 2 FROM fm WHERE id = 6") == (Rows{{"-5"}}));
+    // comparisons read the float widened: GREATEST(f, 0) is not 0.1, it is f
+    REQUIRE(q(ex, "SELECT id FROM fm WHERE GREATEST(f, 0) = 0.1").empty());
+    REQUIRE(q(ex, "SELECT id FROM fm WHERE GREATEST(f, 0) = f ORDER BY id") == (Rows{{"1"}, {"2"}, {"3"}, {"5"}, {"7"}}));
+    REQUIRE(q(ex, "SELECT id FROM fm WHERE COALESCE(f, 0) > 0.1 ORDER BY id") == (Rows{{"1"}, {"2"}, {"3"}, {"5"}, {"7"}}));
+    REQUIRE(q(ex, "SELECT id FROM fm WHERE 0.1 < COALESCE(f, 0) ORDER BY id") == (Rows{{"1"}, {"2"}, {"3"}, {"5"}, {"7"}}));
+    REQUIRE(q(ex, "SELECT id FROM fm WHERE GREATEST(f, 0) BETWEEN 0.1 AND 0.2 ORDER BY id") == (Rows{{"1"}}));
+    REQUIRE(q(ex, "SELECT id FROM fm WHERE COALESCE(f, 0) IN (0.1, 1234567) ORDER BY id") == (Rows{{"2"}}));
+    // a FLOAT column and a DOUBLE column compare as numbers: 0.1 (a float) is not 0.1 (a double), 0.5 is the same in both
+    REQUIRE(q(ex, "SELECT id FROM fm WHERE f = d ORDER BY id") == (Rows{{"7"}}));
+}
+
+TEST_CASE("R58: MIN / MAX / LAG / LEAD / FIRST_VALUE / LAST_VALUE / NTH_VALUE of a FLOAT column over a window are FLOATs, shown with six digits", "[r58][float][window]") {
+    TempDataDir dir("r58_float_window");
+    Executor ex(dir.path);
+    ok(ex, "CREATE DATABASE d");
+    ok(ex, "USE d");
+    ok(ex, "CREATE TABLE fw (id INT PRIMARY KEY, f FLOAT, g INT, d DOUBLE)");
+    ok(ex, "INSERT INTO fw VALUES (1, 0.1, 1, 0.1), (2, 1234567, 1, 1234567), (3, 16777217, 2, 16777217), (4, 3.14159265, 2, 3.14159265)");
+    REQUIRE(q(ex, "SELECT MAX(f) OVER () FROM fw WHERE id = 1") == (Rows{{"0.1"}}));
+    REQUIRE(q(ex, "SELECT id, MAX(f) OVER (ORDER BY id) FROM fw ORDER BY id") == (Rows{{"1", "0.1"}, {"2", "1234570"}, {"3", "16777200"}, {"4", "16777200"}}));
+    REQUIRE(q(ex, "SELECT id, MIN(f) OVER (ORDER BY id) FROM fw ORDER BY id") == (Rows{{"1", "0.1"}, {"2", "0.1"}, {"3", "0.1"}, {"4", "0.1"}}));
+    REQUIRE(q(ex, "SELECT id, LAG(f) OVER (ORDER BY id) FROM fw ORDER BY id") == (Rows{{"1", "NULL"}, {"2", "0.1"}, {"3", "1234570"}, {"4", "16777200"}}));
+    REQUIRE(q(ex, "SELECT id, LEAD(f) OVER (ORDER BY id) FROM fw ORDER BY id") == (Rows{{"1", "1234570"}, {"2", "16777200"}, {"3", "3.14159"}, {"4", "NULL"}}));
+    REQUIRE(q(ex, "SELECT id, FIRST_VALUE(f) OVER (ORDER BY id DESC) FROM fw ORDER BY id") == (Rows{{"1", "3.14159"}, {"2", "3.14159"}, {"3", "3.14159"}, {"4", "3.14159"}}));
+    REQUIRE(q(ex, "SELECT id, LAST_VALUE(f) OVER (ORDER BY id ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) FROM fw WHERE id = 1") == (Rows{{"1", "0.1"}}));
+    REQUIRE(q(ex, "SELECT id, NTH_VALUE(f, 2) OVER (ORDER BY id ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) FROM fw WHERE id <= 2") == (Rows{{"1", "1234570"}, {"2", "1234570"}}));
+    REQUIRE(q(ex, "SELECT id, MAX(f) OVER (PARTITION BY g) FROM fw ORDER BY id") == (Rows{{"1", "1234570"}, {"2", "1234570"}, {"3", "16777200"}, {"4", "16777200"}}));
+    // a DOUBLE column is shown whole, and SUM / AVG of a FLOAT are DOUBLEs
+    REQUIRE(q(ex, "SELECT id, MAX(d) OVER (ORDER BY id) FROM fw WHERE id = 3") == (Rows{{"3", "16777217"}}));
+    REQUIRE(q(ex, "SELECT SUM(f) OVER () FROM fw WHERE id = 1") == (Rows{{"0.10000000149011612"}}));
+}
+
+TEST_CASE("R58: `*` over a chain of USING / NATURAL joins puts each join's merged columns in front of what is left of its left side, then of its right side", "[r58][join_names]") {
+    TempDataDir dir("r58_using_chain");
+    Executor ex(dir.path);
+    ok(ex, "CREATE DATABASE d");
+    ok(ex, "USE d");
+    ok(ex, "CREATE TABLE ua (x INT, y INT, a INT)");
+    ok(ex, "CREATE TABLE ub (x INT, b INT)");
+    ok(ex, "CREATE TABLE uc (y INT, c INT)");
+    ok(ex, "CREATE TABLE ud (x INT, y INT, z INT)");
+    ok(ex, "INSERT INTO ua VALUES (1, 10, 100), (2, 20, 200), (3, 30, 300)");
+    ok(ex, "INSERT INTO ub VALUES (1, 11), (2, 22), (4, 44)");
+    ok(ex, "INSERT INTO uc VALUES (10, 111), (20, 222), (50, 555)");
+    ok(ex, "INSERT INTO ud VALUES (1, 10, 7), (2, 99, 8)");
+    // (ua JOIN ub USING (x)) JOIN uc USING (y): y goes in front of the x the first join put there
+    REQUIRE(header_of(ex, "SELECT * FROM ua JOIN ub USING (x) JOIN uc USING (y)") == "y|x|a|b|c");
+    REQUIRE(header_of(ex, "SELECT * FROM ua JOIN ub USING (x) JOIN uc USING (y) WHERE 1 = 0") == "y|x|a|b|c");
+    REQUIRE(q(ex, "SELECT * FROM ua JOIN ub USING (x) JOIN uc USING (y) ORDER BY y") == (Rows{{"10", "1", "100", "11", "111"}, {"20", "2", "200", "22", "222"}}));
+    REQUIRE(header_of(ex, "SELECT * FROM ua LEFT JOIN ub USING (x) LEFT JOIN uc USING (y)") == "y|x|a|b|c");
+    // a join with ON does not merge: its tables follow one another, and the next USING puts its column in front
+    REQUIRE(header_of(ex, "SELECT * FROM ua JOIN ub ON ua.x = ub.x JOIN uc USING (y)") == "y|x|a|x|b|c");
+    // the merged columns of one join are in the order the left side has them, not the order USING lists them
+    REQUIRE(header_of(ex, "SELECT * FROM ua JOIN ud USING (y, x)") == "x|y|a|z");
+    REQUIRE(header_of(ex, "SELECT * FROM ud JOIN ua USING (y, x)") == "x|y|z|a");
+    REQUIRE(q(ex, "SELECT * FROM ua JOIN ud USING (y, x) ORDER BY x") == (Rows{{"1", "10", "100", "7"}}));
+    REQUIRE(header_of(ex, "SELECT * FROM ua NATURAL JOIN ud") == "x|y|a|z");
+    REQUIRE(header_of(ex, "SELECT * FROM ud NATURAL JOIN ua") == "x|y|z|a");
+    REQUIRE(header_of(ex, "SELECT * FROM ua NATURAL JOIN ub NATURAL JOIN uc") == "y|x|a|b|c");
+    // RIGHT JOIN ... USING swaps the sides (a RIGHT JOIN b is b LEFT JOIN a); a chain goes on from there
+    REQUIRE(header_of(ex, "SELECT * FROM ua RIGHT JOIN ub USING (x)") == "x|b|y|a");
+    REQUIRE(header_of(ex, "SELECT * FROM ua RIGHT JOIN ub USING (x) JOIN uc USING (y)") == "y|x|b|a|c");
+    REQUIRE(header_of(ex, "SELECT * FROM ua RIGHT JOIN ud USING (y, x)") == "x|y|z|a");
+    // a third join over columns the two before it have
+    REQUIRE(header_of(ex, "SELECT * FROM ua JOIN ub USING (x) JOIN uc USING (y) JOIN ud USING (x, y)") == "y|x|a|b|c|z");
+    REQUIRE(header_of(ex, "SELECT * FROM ua JOIN ub USING (x) JOIN uc USING (y) JOIN ud USING (y, x)") == "y|x|a|b|c|z");
+    // an answer with no rows says the same
+    for (const char* query : {"SELECT * FROM ua JOIN ub USING (x) JOIN uc USING (y)", "SELECT * FROM ua RIGHT JOIN ub USING (x) JOIN uc USING (y)",
+                              "SELECT * FROM ua JOIN ud USING (y, x)", "SELECT * FROM ua NATURAL JOIN ub NATURAL JOIN uc"}) {
+        REQUIRE(header_of(ex, std::string(query) + " LIMIT 0") == header_of(ex, query));
+    }
+}
+
+TEST_CASE("R58: a foreign key without a name is called <table>_ibfk_<n> in the order the keys were written, and keeps its name when another key goes", "[r58][foreign_key]") {
+    TempDataDir dir("r58_fk_names");
+    Executor ex(dir.path);
+    ok(ex, "CREATE DATABASE d");
+    ok(ex, "USE d");
+    ok(ex, "CREATE TABLE p1 (id INT PRIMARY KEY)");
+    ok(ex, "CREATE TABLE p2 (id INT PRIMARY KEY)");
+    ok(ex, "CREATE TABLE p3 (id INT PRIMARY KEY)");
+    const auto names = [&](const std::string& table) {
+        return q(ex, "SELECT constraint_name, column_name, referenced_table_name FROM information_schema.key_column_usage WHERE table_name = '" + table +
+                         "' AND referenced_table_name IS NOT NULL ORDER BY constraint_name");
+    };
+    // the order they are written, not the order of their columns
+    ok(ex, "CREATE TABLE t (a INT, b INT, FOREIGN KEY (b) REFERENCES p1(id), FOREIGN KEY (a) REFERENCES p2(id))");
+    REQUIRE(names("t") == (Rows{{"t_ibfk_1", "b", "p1"}, {"t_ibfk_2", "a", "p2"}}));
+    // a key that goes leaves the others as they are; a new key is one more than the highest number there is
+    ok(ex, "ALTER TABLE t DROP FOREIGN KEY t_ibfk_1");
+    REQUIRE(names("t") == (Rows{{"t_ibfk_2", "a", "p2"}}));
+    ok(ex, "ALTER TABLE t ADD FOREIGN KEY (b) REFERENCES p3(id)");
+    REQUIRE(names("t") == (Rows{{"t_ibfk_2", "a", "p2"}, {"t_ibfk_3", "b", "p3"}}));
+    ok(ex, "ALTER TABLE t ADD FOREIGN KEY (a) REFERENCES p3(id)");
+    REQUIRE(names("t") == (Rows{{"t_ibfk_2", "a", "p2"}, {"t_ibfk_3", "b", "p3"}, {"t_ibfk_4", "a", "p3"}}));
+    // the highest one dropped: its number is taken again
+    ok(ex, "ALTER TABLE t DROP FOREIGN KEY t_ibfk_4");
+    ok(ex, "ALTER TABLE t ADD FOREIGN KEY (a) REFERENCES p1(id)");
+    REQUIRE(names("t") == (Rows{{"t_ibfk_2", "a", "p2"}, {"t_ibfk_3", "b", "p3"}, {"t_ibfk_4", "a", "p1"}}));
+    // a table that is renamed renames them (RENAME TABLE and ALTER TABLE ... RENAME TO)
+    ok(ex, "RENAME TABLE t TO tt");
+    REQUIRE(names("tt") == (Rows{{"tt_ibfk_2", "a", "p2"}, {"tt_ibfk_3", "b", "p3"}, {"tt_ibfk_4", "a", "p1"}}));
+    ok(ex, "ALTER TABLE tt RENAME TO t_again");
+    REQUIRE(names("t_again") == (Rows{{"t_again_ibfk_2", "a", "p2"}, {"t_again_ibfk_3", "b", "p3"}, {"t_again_ibfk_4", "a", "p1"}}));
+    ok(ex, "ALTER TABLE t_again DROP FOREIGN KEY t_again_ibfk_3");
+    REQUIRE(names("t_again") == (Rows{{"t_again_ibfk_2", "a", "p2"}, {"t_again_ibfk_4", "a", "p1"}}));
+    // only the keys without a name are numbered (a key that was given one is not counted), and a name that looks like a number is one
+    ok(ex, "CREATE TABLE n1 (a INT, b INT, CONSTRAINT c1 FOREIGN KEY (a) REFERENCES p1(id), FOREIGN KEY (b) REFERENCES p2(id))");
+    REQUIRE(names("n1") == (Rows{{"c1", "a", "p1"}, {"n1_ibfk_1", "b", "p2"}}));
+    ok(ex, "CREATE TABLE n2 (a INT, b INT, FOREIGN KEY (a) REFERENCES p1(id), CONSTRAINT c9 FOREIGN KEY (b) REFERENCES p2(id))");
+    REQUIRE(names("n2") == (Rows{{"c9", "b", "p2"}, {"n2_ibfk_1", "a", "p1"}}));
+    ok(ex, "CREATE TABLE n3 (a INT, b INT, CONSTRAINT n3_ibfk_5 FOREIGN KEY (a) REFERENCES p1(id), FOREIGN KEY (b) REFERENCES p2(id))");
+    REQUIRE(names("n3") == (Rows{{"n3_ibfk_1", "b", "p2"}, {"n3_ibfk_5", "a", "p1"}}));
+    ok(ex, "ALTER TABLE n3 ADD FOREIGN KEY (a) REFERENCES p3(id)");
+    REQUIRE(names("n3") == (Rows{{"n3_ibfk_1", "b", "p2"}, {"n3_ibfk_5", "a", "p1"}, {"n3_ibfk_6", "a", "p3"}}));
+    // a name that only starts like a number is none: the next key is the first one
+    ok(ex, "CREATE TABLE n5 (a INT, CONSTRAINT n5_ibfk_x FOREIGN KEY (a) REFERENCES p1(id))");
+    ok(ex, "ALTER TABLE n5 ADD FOREIGN KEY (a) REFERENCES p2(id)");
+    REQUIRE(q(ex, "SELECT constraint_name FROM information_schema.referential_constraints WHERE table_name = 'n5' ORDER BY constraint_name") == (Rows{{"n5_ibfk_1"}, {"n5_ibfk_x"}}));
+    // two keys on one column, one dropped and one added in the same ALTER
+    ok(ex, "CREATE TABLE n4 (a INT, FOREIGN KEY (a) REFERENCES p1(id), FOREIGN KEY (a) REFERENCES p2(id))");
+    ok(ex, "ALTER TABLE n4 DROP FOREIGN KEY n4_ibfk_1, ADD FOREIGN KEY (a) REFERENCES p3(id)");
+    REQUIRE(q(ex, "SELECT constraint_name, referenced_table_name FROM information_schema.key_column_usage WHERE table_name = 'n4' AND referenced_table_name IS NOT NULL ORDER BY constraint_name") ==
+            (Rows{{"n4_ibfk_2", "p2"}, {"n4_ibfk_3", "p3"}}));
+    // a database name in front of the table does not get into the name
+    ok(ex, "CREATE TABLE d.q1 (a INT, FOREIGN KEY (a) REFERENCES d.p1(id))");
+    REQUIRE(names("q1") == (Rows{{"q1_ibfk_1", "a", "p1"}}));
+}
+
+TEST_CASE("R58: the names and the rules of a foreign key are kept over a restart, and a table that is renamed is found by information_schema and by the keys that refer to it", "[r58][foreign_key]") {
+    TempDataDir dir("r58_fk_restart");
+    {
+        Executor ex(dir.path);
+        ok(ex, "CREATE DATABASE d");
+        ok(ex, "USE d");
+        ok(ex, "CREATE TABLE p1 (id INT PRIMARY KEY)");
+        ok(ex, "CREATE TABLE r1 (a INT, b INT, FOREIGN KEY (b) REFERENCES p1(id) ON DELETE RESTRICT ON UPDATE NO ACTION, FOREIGN KEY (a) REFERENCES p1(id))");
+        ok(ex, "ALTER TABLE r1 DROP FOREIGN KEY r1_ibfk_2");
+        ok(ex, "ALTER TABLE r1 ADD FOREIGN KEY (a) REFERENCES p1(id) ON UPDATE RESTRICT");
+        ok(ex, "CREATE TABLE pp (id INT PRIMARY KEY)");
+        ok(ex, "CREATE TABLE cc (id INT PRIMARY KEY, pid INT, FOREIGN KEY (pid) REFERENCES pp(id))");
+        ok(ex, "INSERT INTO pp VALUES (1)");
+        ok(ex, "INSERT INTO cc VALUES (1, 1)");
+        ok(ex, "RENAME TABLE pp TO pq");
+    }
+    Executor ex(dir.path);
+    ok(ex, "USE d");
+    REQUIRE(q(ex, "SELECT constraint_name, update_rule, delete_rule FROM information_schema.referential_constraints WHERE table_name = 'r1' ORDER BY constraint_name") ==
+            (Rows{{"r1_ibfk_1", "NO ACTION", "RESTRICT"}, {"r1_ibfk_2", "RESTRICT", "NO ACTION"}}));
+    // the table that was renamed is called what it is called now, and the key of its child follows it
+    REQUIRE(q(ex, "SELECT table_name FROM information_schema.tables WHERE table_schema = 'd' AND table_name IN ('pp', 'pq') ORDER BY table_name") == (Rows{{"pq"}}));
+    REQUIRE(q(ex, "SELECT constraint_name, referenced_table_name FROM information_schema.referential_constraints WHERE table_name = 'cc'") == (Rows{{"cc_ibfk_1", "pq"}}));
+    REQUIRE(fails(ex, "INSERT INTO cc VALUES (2, 9)").find("Foreign key violation") != std::string::npos);
+    REQUIRE(fails(ex, "DELETE FROM pq WHERE id = 1").find("Foreign key violation") != std::string::npos);
+    ok(ex, "INSERT INTO pq VALUES (2)");
+    ok(ex, "INSERT INTO cc VALUES (2, 2)");
+}
+
+TEST_CASE("R58: a rule left out or written NO ACTION is NO ACTION in information_schema, RESTRICT only when it was written; SHOW CREATE TABLE prints a RESTRICT that was written and no NO ACTION", "[r58][foreign_key]") {
+    TempDataDir dir("r58_fk_rules");
+    Executor ex(dir.path);
+    ok(ex, "CREATE DATABASE d");
+    ok(ex, "USE d");
+    ok(ex, "CREATE TABLE p (id INT PRIMARY KEY)");
+    ok(ex, "CREATE TABLE r1 (a INT, FOREIGN KEY (a) REFERENCES p(id))");
+    ok(ex, "CREATE TABLE r2 (a INT, FOREIGN KEY (a) REFERENCES p(id) ON DELETE RESTRICT ON UPDATE RESTRICT)");
+    ok(ex, "CREATE TABLE r3 (a INT, FOREIGN KEY (a) REFERENCES p(id) ON DELETE NO ACTION ON UPDATE NO ACTION)");
+    ok(ex, "CREATE TABLE r4 (a INT, FOREIGN KEY (a) REFERENCES p(id) ON DELETE CASCADE)");
+    ok(ex, "CREATE TABLE r5 (a INT, FOREIGN KEY (a) REFERENCES p(id) ON DELETE SET NULL ON UPDATE CASCADE)");
+    ok(ex, "CREATE TABLE r6 (a INT, FOREIGN KEY (a) REFERENCES p(id) ON UPDATE RESTRICT)");
+    ok(ex, "CREATE TABLE r7 (a INT, FOREIGN KEY (a) REFERENCES p(id) ON DELETE NO ACTION)");
+    REQUIRE(q(ex, "SELECT table_name, update_rule, delete_rule FROM information_schema.referential_constraints WHERE constraint_schema = 'd' AND table_name LIKE 'r%' ORDER BY table_name") ==
+            (Rows{{"r1", "NO ACTION", "NO ACTION"},
+                  {"r2", "RESTRICT", "RESTRICT"},
+                  {"r3", "NO ACTION", "NO ACTION"},
+                  {"r4", "NO ACTION", "CASCADE"},
+                  {"r5", "CASCADE", "SET NULL"},
+                  {"r6", "RESTRICT", "NO ACTION"},
+                  {"r7", "NO ACTION", "NO ACTION"}}));
+    // ALTER TABLE ... ADD FOREIGN KEY says the same
+    ok(ex, "ALTER TABLE r1 ADD CONSTRAINT r1_x FOREIGN KEY (a) REFERENCES p(id) ON DELETE RESTRICT");
+    ok(ex, "ALTER TABLE r1 ADD CONSTRAINT r1_y FOREIGN KEY (a) REFERENCES p(id) ON UPDATE NO ACTION");
+    REQUIRE(q(ex, "SELECT constraint_name, update_rule, delete_rule FROM information_schema.referential_constraints WHERE constraint_schema = 'd' AND table_name = 'r1' ORDER BY constraint_name") ==
+            (Rows{{"r1_ibfk_1", "NO ACTION", "NO ACTION"}, {"r1_x", "NO ACTION", "RESTRICT"}, {"r1_y", "NO ACTION", "NO ACTION"}}));
+    // both refuse the same way
+    ok(ex, "INSERT INTO p VALUES (1)");
+    ok(ex, "INSERT INTO r2 VALUES (1)");
+    ok(ex, "INSERT INTO r3 VALUES (1)");
+    REQUIRE(fails(ex, "DELETE FROM p WHERE id = 1").find("Foreign key violation") != std::string::npos);
+    ok(ex, "DELETE FROM r2");
+    REQUIRE(fails(ex, "DELETE FROM p WHERE id = 1").find("Foreign key violation") != std::string::npos);
+    REQUIRE(fails(ex, "UPDATE p SET id = 5 WHERE id = 1").find("Foreign key violation") != std::string::npos);
+    // SHOW CREATE TABLE as a MySQL client gets it: a RESTRICT that was written, no NO ACTION
+    const auto shown = [&](const std::string& table) {
+        auto r = ex.show_create_table_mysql("d." + table);
+        REQUIRE(r.is_ok());
+        return r.value();
+    };
+    REQUIRE(shown("r1").find("ON DELETE RESTRICT") != std::string::npos); // (r1_x)
+    REQUIRE(shown("r2").find("ON DELETE RESTRICT ON UPDATE RESTRICT") != std::string::npos);
+    REQUIRE(shown("r3").find("NO ACTION") == std::string::npos);
+    REQUIRE(shown("r3").find("ON DELETE") == std::string::npos);
+    REQUIRE(shown("r6").find("ON UPDATE RESTRICT") != std::string::npos);
+    REQUIRE(shown("r6").find("ON DELETE") == std::string::npos);
+    REQUIRE(shown("r4").find("ON DELETE CASCADE") != std::string::npos);
+    // ... and the one RuSQL's own SHOW CREATE TABLE writes spells every rule out, so that running it again makes the same table
+    REQUIRE(answer(ex, "SHOW CREATE TABLE r3").find("ON DELETE NO ACTION ON UPDATE NO ACTION") != std::string::npos);
+    REQUIRE(answer(ex, "SHOW CREATE TABLE r2").find("ON DELETE RESTRICT ON UPDATE RESTRICT") != std::string::npos);
+}
+
+TEST_CASE("R58: a NOT NULL column that an INSERT leaves out has no default to take (1364); a NULL that was written is refused as before", "[r58][not_null]") {
+    TempDataDir dir("r58_not_null");
+    Executor ex(dir.path);
+    ok(ex, "CREATE DATABASE d");
+    ok(ex, "USE d");
+    ok(ex, "CREATE TABLE nn (id INT PRIMARY KEY, a INT NOT NULL, b INT)");
+    REQUIRE(fails(ex, "INSERT INTO nn (id, b) VALUES (1, 2)") == "Field 'a' doesn't have a default value");
+    REQUIRE(fails(ex, "INSERT INTO nn (id, a) VALUES (1, NULL)") == "Column 'a' cannot be NULL");
+    REQUIRE(fails(ex, "INSERT INTO nn (a, b) VALUES (1, 2), (3, 4)").find("Field 'id' doesn't have a default value") != std::string::npos);
+    ok(ex, "INSERT INTO nn (id, a) VALUES (1, 5)");
+    REQUIRE(q(ex, "SELECT id, a, b FROM nn") == (Rows{{"1", "5", "NULL"}}));
+}
+
+TEST_CASE("R58: BACKUP writes the rules a foreign key was made with, so that RESTORE makes the same keys (NO ACTION stays NO ACTION, a RESTRICT that was written stays one)", "[r58][foreign_key]") {
+    TempDataDir dir("r58_fk_backup");
+    const std::string file = "r58_fk_backup.sql";
+    {
+        Executor ex(dir.path);
+        ok(ex, "CREATE DATABASE d");
+        ok(ex, "USE d");
+        ok(ex, "CREATE TABLE p (id INT PRIMARY KEY)");
+        ok(ex, "CREATE TABLE c (id INT PRIMARY KEY, a INT, b INT, e INT, FOREIGN KEY (a) REFERENCES p(id), FOREIGN KEY (b) REFERENCES p(id) ON DELETE RESTRICT ON UPDATE RESTRICT, "
+               "CONSTRAINT my_key FOREIGN KEY (e) REFERENCES p(id) ON DELETE CASCADE)");
+        ok(ex, "BACKUP DATABASE d INTO '" + file + "'");
+    }
+    TempDataDir dir2("r58_fk_backup_restore");
+    fs::create_directories(dir2.path + "/_backups");
+    fs::copy_file(dir.path + "/_backups/" + file, dir2.path + "/_backups/" + file);
+    Executor ex(dir2.path);
+    ok(ex, "RESTORE FROM '" + file + "'");
+    ok(ex, "USE d");
+    REQUIRE(q(ex, "SELECT constraint_name, update_rule, delete_rule FROM information_schema.referential_constraints WHERE table_name = 'c' ORDER BY constraint_name") ==
+            (Rows{{"c_ibfk_1", "NO ACTION", "NO ACTION"}, {"c_ibfk_2", "RESTRICT", "RESTRICT"}, {"my_key", "NO ACTION", "CASCADE"}}));
 }

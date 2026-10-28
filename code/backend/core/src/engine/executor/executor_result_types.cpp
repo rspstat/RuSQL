@@ -10,6 +10,7 @@
 
 #include "engine/column_text.hpp"
 #include "engine/executor/executor.hpp"
+#include "engine/join_star.hpp"
 #include "engine/parser/parser.hpp"
 #include "engine/value_class.hpp"
 
@@ -389,52 +390,19 @@ private:
             }
             joined_using.push_back(std::move(common));
         }
-        auto listed = [](const std::vector<std::string>& names, const std::string& name) {
-            return std::any_of(names.begin(), names.end(), [&](const std::string& n) { return ieq(n, name); });
-        };
-        // is the column of source `t` one that a join has merged into the first column of its kind?
-        auto merged = [&](std::size_t t, const std::string& column) {
-            if (t >= 1 && listed(joined_using[t - 1], column)) return true;
-            for (std::size_t k = 0; k < t; k++) {
-                if (has_column(sources[k], column)) return false;
-            }
-            for (std::size_t i = t; i < joined_using.size(); i++) {
-                if (listed(joined_using[i], column)) return true;
-            }
-            return false;
-        };
         const bool any_merged = std::any_of(joined_using.begin(), joined_using.end(), [](const std::vector<std::string>& v) { return !v.empty(); });
         for (const SelectColumn& item : sel.columns) {
             const std::size_t before = out.size();
-            if (auto* star = std::get_if<SelectColumn::All>(&item.data); star && star->table.empty() && any_merged) {
-                // `*` of a USING / NATURAL join: the merged columns first (each once, from the first table that has it), then the rest of each table in turn
-                std::vector<std::string> front;
-                for (const auto& per_join : joined_using) {
-                    for (const std::string& c : per_join) {
-                        if (!listed(front, c)) front.push_back(c);
-                    }
+            if (auto* star = std::get_if<SelectColumn::All>(&item.data); star && star->table.empty() && any_merged && sources.size() == joined_using.size() + 1) {
+                // `*` of a USING / NATURAL join: in the order of MySQL (engine/join_star.hpp)
+                std::vector<std::vector<std::string>> table_columns;
+                for (const Source& src : sources) {
+                    table_columns.emplace_back();
+                    for (const NamedType& c : src.columns) table_columns.back().push_back(c.name);
                 }
-                for (const std::string& c : front) {
-                    for (const Source& src : sources) {
-                        auto found = std::find_if(src.columns.begin(), src.columns.end(), [&](const NamedType& n) { return ieq(n.name, c); });
-                        if (found != src.columns.end()) {
-                            out.push_back(*found);
-                            break;
-                        }
-                    }
-                }
-                // (`a RIGHT JOIN b USING (c)` shows what is left of b before what is left of a, as MySQL does)
-                std::vector<std::size_t> table_order{0};
-                for (std::size_t i = 0; i < sel.joins.size(); i++) {
-                    if (sel.joins[i].join_type == JoinType::Right && !joined_using[i].empty()) table_order.insert(table_order.begin(), i + 1);
-                    else table_order.push_back(i + 1);
-                }
-                for (std::size_t t : table_order) {
-                    if (t >= sources.size()) continue;
-                    for (const NamedType& c : sources[t].columns) {
-                        if (!merged(t, c.name)) out.push_back(c);
-                    }
-                }
+                std::vector<char> swapped(joined_using.size(), 0);
+                for (std::size_t i = 0; i < joined_using.size(); i++) swapped[i] = sel.joins[i].join_type == JoinType::Right && !joined_using[i].empty();
+                for (const StarColumn& shown : star_columns(table_columns, joined_using, swapped)) out.push_back(sources[shown.table].columns[shown.column]);
             } else if (auto* all = std::get_if<SelectColumn::All>(&item.data)) {
                 std::vector<const Source*> matches;
                 for (const Source& src : sources) {

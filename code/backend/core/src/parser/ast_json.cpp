@@ -98,6 +98,8 @@ void to_json(nlohmann::json& j, const ForeignKey& fk) {
         {"on_update", fk.on_update},
         {"name", fk.name},
     };
+    if (fk.restrict_delete) j["restrict_delete"] = true; // (only when RESTRICT was written: the others are NO ACTION)
+    if (fk.restrict_update) j["restrict_update"] = true;
 }
 
 void from_json(const nlohmann::json& j, ForeignKey& fk) {
@@ -109,6 +111,8 @@ void from_json(const nlohmann::json& j, ForeignKey& fk) {
     if (j.contains("on_update")) j.at("on_update").get_to(fk.on_update);
     else fk.on_update = FkAction::Restrict;
     fk.name = j.value("name", std::string()); // (schemas written before the names were kept have none)
+    fk.restrict_delete = j.value("restrict_delete", false);
+    fk.restrict_update = j.value("restrict_update", false);
 }
 
 void to_json(nlohmann::json& j, const ColumnDef& col) {
@@ -784,13 +788,16 @@ void to_json(nlohmann::json& j, const AlterAction& action) {
             else if constexpr (std::is_same_v<T, AlterAction::AddIndex>) j = nlohmann::json{{"AddIndex", nlohmann::json{{"name", alt.name}, {"columns", alt.columns}}}};
             else if constexpr (std::is_same_v<T, AlterAction::SetDefault>) j = nlohmann::json{{"SetDefault", nlohmann::json{{"column", alt.column}, {"value", alt.value}}}};
             else if constexpr (std::is_same_v<T, AlterAction::RenameTable>) j = nlohmann::json{{"RenameTable", alt.to}};
-            else if constexpr (std::is_same_v<T, AlterAction::AddForeignKey>)
+            else if constexpr (std::is_same_v<T, AlterAction::AddForeignKey>) {
                 j = nlohmann::json{{"AddForeignKey", nlohmann::json{{"name", alt.name},
                                                                      {"column", alt.column},
                                                                      {"ref_table", alt.ref_table},
                                                                      {"ref_column", alt.ref_column},
                                                                      {"on_delete", alt.on_delete},
                                                                      {"on_update", alt.on_update}}}};
+                if (alt.restrict_delete) j["AddForeignKey"]["restrict_delete"] = true;
+                if (alt.restrict_update) j["AddForeignKey"]["restrict_update"] = true;
+            }
             else if constexpr (std::is_same_v<T, AlterAction::DropForeignKey>) j = nlohmann::json{{"DropForeignKey", alt.name}};
             else if constexpr (std::is_same_v<T, AlterAction::AddUniqueConstraint>)
                 j = nlohmann::json{{"AddUniqueConstraint", nlohmann::json{{"name", alt.name}, {"column", alt.column}, {"columns", alt.columns}}}};
@@ -831,7 +838,8 @@ void from_json(const nlohmann::json& j, AlterAction& action) {
     else if (tag == "AddForeignKey")
         action = AlterAction(AlterAction::AddForeignKey{p.at("name").get<std::optional<std::string>>(), p.at("column").get<std::string>(),
                                                           p.at("ref_table").get<std::string>(), p.at("ref_column").get<std::string>(),
-                                                          p.at("on_delete").get<FkAction>(), p.at("on_update").get<FkAction>()});
+                                                          p.at("on_delete").get<FkAction>(), p.at("on_update").get<FkAction>(), p.value("restrict_delete", false),
+                                                          p.value("restrict_update", false)});
     else if (tag == "DropForeignKey") action = AlterAction(AlterAction::DropForeignKey{p.get<std::string>()});
     else if (tag == "AddUniqueConstraint")
         action = AlterAction(AlterAction::AddUniqueConstraint{p.at("name").get<std::optional<std::string>>(), p.at("column").get<std::string>(),

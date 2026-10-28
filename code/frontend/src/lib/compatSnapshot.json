@@ -275,6 +275,38 @@
       "bothFail": 0
     },
     {
+      "name": "float_mixed",
+      "en": "FLOAT with a DOUBLE / integer column / DECIMAL in COALESCE, GREATEST ..., arithmetic over such a value, windows MIN / MAX / LAG / LEAD over a FLOAT",
+      "ko": "FLOAT가 DOUBLE·정수 열·DECIMAL과 섞인 COALESCE·GREATEST ..., 그 값의 산술, FLOAT 열의 윈도 MIN·MAX·LAG·LEAD",
+      "statements": 52,
+      "different": 0,
+      "bothFail": 0
+    },
+    {
+      "name": "using_chain",
+      "en": "The order of the columns of * over a chain of USING / NATURAL joins (RIGHT JOIN too)",
+      "ko": "USING·NATURAL 조인 사슬의 * 열 순서(RIGHT JOIN 포함)",
+      "statements": 21,
+      "different": 0,
+      "bothFail": 0
+    },
+    {
+      "name": "fk_auto_names",
+      "en": "Names of foreign keys without a name (declaration order, DROP / ADD / RENAME), NO ACTION vs RESTRICT in referential_constraints",
+      "ko": "이름 없는 외래키의 자동 이름(선언 순서·DROP·ADD·RENAME), referential_constraints의 NO ACTION·RESTRICT",
+      "statements": 51,
+      "different": 0,
+      "bothFail": 6
+    },
+    {
+      "name": "errno",
+      "en": "MySQL wire protocol: the error number of a failing statement",
+      "ko": "MySQL 프로토콜: 실패한 문장의 오류 번호",
+      "statements": 49,
+      "different": 0,
+      "bothFail": 48
+    },
+    {
       "name": "protocol",
       "en": "MySQL wire protocol: SHOW, OK packets, affected rows",
       "ko": "MySQL 프로토콜: SHOW·OK 패킷·영향 행 수",
@@ -291,10 +323,10 @@
       "bothFail": 0
     }
   ],
-  "conformanceCases": 3893,
+  "conformanceCases": 4048,
   "tests": {
-    "cases": 834,
-    "assertions": 1509237
+    "cases": 846,
+    "assertions": 1509795
   },
   "bugsFound": 206
 }

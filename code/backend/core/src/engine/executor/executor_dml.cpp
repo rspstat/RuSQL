@@ -936,13 +936,15 @@ StringResult Executor::exec_insert_inner(SharedDatabase& s, const std::string& t
             }
         }
 
-        for (auto& v : final_values) {
-            if (v == INSERT_DEFAULT) v = EXECUTOR_NULL_VALUE; // left out and no default: NULL
-        }
         for (std::size_t i = 0; i < constraints.size(); i++) {
-            if ((constraints[i].not_null || constraints[i].primary_key) && final_values[i] == EXECUTOR_NULL_VALUE) {
+            if ((constraints[i].not_null || constraints[i].primary_key) && (final_values[i] == EXECUTOR_NULL_VALUE || final_values[i] == INSERT_DEFAULT)) {
+                // (a column that was left out has no default to take: MySQL says so, with a number of its own, 1364; a NULL that was written is 1048)
+                if (final_values[i] == INSERT_DEFAULT) return StringResult::Err("Field '" + col_names[i] + "' doesn't have a default value");
                 return StringResult::Err("Column '" + col_names[i] + "' cannot be NULL");
             }
+        }
+        for (auto& v : final_values) {
+            if (v == INSERT_DEFAULT) v = EXECUTOR_NULL_VALUE; // left out and no default: NULL
         }
 
         row_no++;

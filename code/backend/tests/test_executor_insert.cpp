@@ -157,7 +157,7 @@ TEST_CASE("NOT NULL, duplicate PK, and duplicate UNIQUE violations", "[executor]
 
     auto null_violation = ex.execute_sql("INSERT INTO t (id, email) VALUES (3, 'c@x.com')");
     REQUIRE(null_violation.is_err());
-    REQUIRE(null_violation.error().find("cannot be NULL") != std::string::npos);
+    REQUIRE(null_violation.error().find("doesn't have a default value") != std::string::npos); // (a column left out has no default: MySQL 1364)
 
     REQUIRE(table_rows(ex, "company.t").size() == 1);
 }

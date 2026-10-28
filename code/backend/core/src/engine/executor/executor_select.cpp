@@ -20,6 +20,7 @@
 #include "engine/explain_trace.hpp"
 #include "engine/statement_deadline.hpp"
 #include "engine/join.hpp"
+#include "engine/join_star.hpp"
 #include "engine/planner.hpp"
 #include "engine/parallel_util.hpp"
 #include "engine/numeric_text.hpp"
@@ -1165,8 +1166,6 @@ bool has_column(const TableSchema* t, const std::string& name) {
     return t && std::any_of(t->columns.begin(), t->columns.end(), [&](const ColumnDef& c) { return c.name == name; });
 }
 
-bool listed(const std::vector<std::string>& names, const std::string& name) { return std::find(names.begin(), names.end(), name) != names.end(); }
-
 CondExpr and_of(std::optional<CondExpr>& so_far, CondExpr next) {
     if (!so_far) return next;
     return CondExpr(CondExpr::And{std::make_unique<CondExpr>(std::move(*so_far)), std::make_unique<CondExpr>(std::move(next))});
@@ -1174,30 +1173,53 @@ CondExpr and_of(std::optional<CondExpr>& so_far, CondExpr next) {
 
 } // namespace
 
-bool Executor::single_result(const ArithExpr& expr) {
-    bool any_float = false;
-    // a FLOAT column, a whole-number constant or NULL: what a function that picks one of its arguments may be given and still give a FLOAT (a column of another type, an integer
-    // column too, makes the result a DOUBLE)
-    std::function<bool(const ArithExpr&)> float_or_whole = [&](const ArithExpr& e) -> bool {
-        if (auto* col = std::get_if<ArithExpr::Col>(&e.data)) {
-            if (col->outer != 0 || col->kind != ColKind::Plain || !col->single) return false;
-            any_float = true;
-            return true;
+namespace {
+
+// What MySQL types a value as, as far as a FLOAT is concerned: a FLOAT column (Float), a whole-number constant or NULL (Whole: it keeps a FLOAT it meets as it is), anything else (Other)
+enum class FloatKind { Other, Whole, Float };
+
+// which of COALESCE / IFNULL / GREATEST / LEAST (Pick) or NULLIF the function is, in any letter case: asked for every row of a scan, so it copies nothing
+enum class FloatFn { None, Pick, Nullif };
+
+FloatFn float_fn(const std::string& name) {
+    auto is = [&](const char* word) {
+        for (std::size_t i = 0; i < name.size(); i++) {
+            if (std::toupper(static_cast<unsigned char>(name[i])) != word[i]) return false;
         }
-        if (auto* num = std::get_if<ArithExpr::Num>(&e.data)) {
-            return !num->value.empty() && num->value.find_first_not_of("-0123456789") == std::string::npos;
-        }
-        if (auto* str = std::get_if<ArithExpr::Str>(&e.data)) return str->value == "NULL";
-        if (auto* fn = std::get_if<ArithExpr::Func>(&e.data)) {
-            std::string name = fn->name;
-            for (char& c : name) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
-            if (name != "COALESCE" && name != "IFNULL" && name != "NULLIF" && name != "GREATEST" && name != "LEAST") return false;
-            return !fn->args.empty() && std::all_of(fn->args.begin(), fn->args.end(), [&](const ArithExpr& a) { return float_or_whole(a); });
-        }
-        return false;
+        return true;
     };
-    return float_or_whole(expr) && any_float;
+    switch (name.size()) {
+        case 5: return is("LEAST") ? FloatFn::Pick : FloatFn::None;
+        case 6: return is("IFNULL") ? FloatFn::Pick : is("NULLIF") ? FloatFn::Nullif : FloatFn::None;
+        case 8: return is("COALESCE") || is("GREATEST") ? FloatFn::Pick : FloatFn::None;
+        default: return FloatFn::None;
+    }
 }
+
+FloatKind float_kind(const ArithExpr& e) {
+    if (auto* col = std::get_if<ArithExpr::Col>(&e.data)) return col->outer == 0 && col->kind == ColKind::Plain && col->single ? FloatKind::Float : FloatKind::Other;
+    if (auto* num = std::get_if<ArithExpr::Num>(&e.data)) {
+        return !num->value.empty() && num->value.find_first_not_of("-0123456789") == std::string::npos ? FloatKind::Whole : FloatKind::Other;
+    }
+    if (auto* str = std::get_if<ArithExpr::Str>(&e.data)) return str->value == "NULL" ? FloatKind::Whole : FloatKind::Other;
+    if (auto* fn = std::get_if<ArithExpr::Func>(&e.data)) {
+        const FloatFn which = float_fn(fn->name);
+        if (which == FloatFn::None || fn->args.empty()) return FloatKind::Other;
+        if (which == FloatFn::Nullif) return float_kind(fn->args[0]) == FloatKind::Float ? FloatKind::Float : FloatKind::Other; // (the type of its first argument)
+        bool any_float = false;
+        for (const ArithExpr& a : fn->args) {
+            const FloatKind k = float_kind(a);
+            if (k == FloatKind::Other) return FloatKind::Other; // (a column of another type, an integer column too, a fraction or a string: the result is a DOUBLE)
+            any_float = any_float || k == FloatKind::Float;
+        }
+        return any_float ? FloatKind::Float : FloatKind::Other;
+    }
+    return FloatKind::Other;
+}
+
+} // namespace
+
+bool Executor::single_result(const ArithExpr& expr) { return float_kind(expr) == FloatKind::Float; }
 
 std::optional<std::string> Executor::column_header(const SelectColumn& c) {
     if (auto* col = std::get_if<SelectColumn::Column>(&c.data)) return last_name_part(col->name);
@@ -1366,23 +1388,15 @@ std::optional<std::string> Executor::resolve_join_columns(SharedDatabase& s, con
         coalesced = coalesced || (!joined_using[i].empty() && (joins[i].join_type == JoinType::Right || joins[i].join_type == JoinType::FullOuter));
     }
     auto read_as = [&](std::size_t t, const std::string& column) { return t == 0 && !coalesced ? column : names[t] + "." + column; };
-    // `a RIGHT JOIN b USING (c)` shows its columns the other way round (MySQL): the merged ones, then what is left of b, then what is left of a
-    std::vector<std::size_t> table_order{0};
-    for (std::size_t i = 0; i < joins.size(); i++) {
-        if (joins[i].join_type == JoinType::Right && !joined_using[i].empty()) table_order.insert(table_order.begin(), i + 1);
-        else table_order.push_back(i + 1);
+    // the order `*` shows them in is MySQL's (engine/join_star.hpp): each USING / NATURAL join puts its merged columns in front, `a RIGHT JOIN b USING (c)` is `b LEFT JOIN a`
+    std::vector<std::vector<std::string>> table_columns;
+    for (const TableSchema* t : schemas) {
+        table_columns.emplace_back();
+        for (auto& c : t->columns) table_columns.back().push_back(c.name);
     }
-    // is the column of table `t` one a USING / NATURAL join has merged into the first column of its kind (shown once, in front)?
-    auto merged = [&](std::size_t t, const std::string& column) {
-        if (t >= 1 && listed(joined_using[t - 1], column)) return true;
-        for (std::size_t k = 0; k < t; k++) {
-            if (has_column(schemas[k], column)) return false;
-        }
-        for (std::size_t i = t; i < joins.size(); i++) {
-            if (listed(joined_using[i], column)) return true;
-        }
-        return false;
-    };
+    std::vector<char> swapped(joins.size(), 0);
+    for (std::size_t i = 0; i < joins.size(); i++) swapped[i] = joins[i].join_type == JoinType::Right && !joined_using[i].empty();
+    const std::vector<StarColumn> star_order = star_columns(table_columns, joined_using, swapped);
     std::vector<SelectColumn> expanded;
     for (auto& col : columns) {
         auto* all = std::get_if<SelectColumn::All>(&col.data);
@@ -1391,17 +1405,9 @@ std::optional<std::string> Executor::resolve_join_columns(SharedDatabase& s, con
             continue;
         }
         if (all->table.empty()) {
-            std::vector<std::string> front;
-            for (auto& per_join : joined_using) {
-                for (auto& c : per_join) {
-                    if (!listed(front, c)) front.push_back(c);
-                }
-            }
-            for (auto& c : front) expanded.push_back(SelectColumn(SelectColumn::Column{c}));
-            for (std::size_t t : table_order) {
-                for (auto& c : schemas[t]->columns) {
-                    if (!merged(t, c.name)) expanded.push_back(SelectColumn(SelectColumn::Column{read_as(t, c.name)}));
-                }
+            for (const StarColumn& shown : star_order) {
+                const std::string& name = schemas[shown.table]->columns[shown.column].name;
+                expanded.push_back(SelectColumn(SelectColumn::Column{shown.merged ? name : read_as(shown.table, name)}));
             }
             continue;
         }
@@ -2649,6 +2655,11 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
             }
             ArithExpr e = parse_bound_expression(s, text, table, joins);
             if (auto* col = std::get_if<ArithExpr::Col>(&e.data); col && col->name == text) {
+                std::string upper = text.substr(0, 6);
+                for (char& ch : upper) ch = static_cast<char>(std::toupper(static_cast<unsigned char>(ch)));
+                for (const char* name : {"SUM(", "AVG(", "MIN(", "MAX(", "COUNT("}) { // (an aggregate inside an aggregate)
+                    if (upper.compare(0, std::strlen(name), name) == 0) return StringResult::Err("Invalid use of group function");
+                }
                 return StringResult::Err("Cannot read the argument '" + text + "' of an aggregate");
             }
             arguments.push_back(std::move(e));
@@ -3494,6 +3505,7 @@ StringResult Executor::format_rows(SharedDatabase& s, const std::vector<const Ro
                 ColSource src;
                 src.kind = ColSource::Kind::Key;
                 src.key = header;
+                src.single_value = wf->col_single;
                 col_defs.emplace_back(header, src);
             } else if (auto* sq = std::get_if<SelectColumn::Subquery>(&c.data)) {
                 std::string key = "__sq_" + std::to_string(sq_idx_col) + "__";

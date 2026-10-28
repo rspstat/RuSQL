@@ -186,13 +186,109 @@ std::vector<std::uint8_t> ok_pkt(std::uint64_t affected, std::uint64_t last_inse
     return p;
 }
 
+// The number and SQL state a client is told an error by (the engine reports its errors as text). A message that starts "ERROR <number> (<state>): " says its own;
+// the others are told by how they begin or what they say (the table below is what the corpora checked against MySQL's own numbers settled); anything else is
+// ER_PARSE_ERROR, 1064, as every error was before.
+struct WireError {
+    int code = 1064;
+    std::string state = "42000";
+    std::string text;
+};
+
+WireError wire_error(const std::string& msg) {
+    WireError e;
+    e.text = msg;
+    static constexpr char prefix[] = "ERROR ";
+    if (msg.compare(0, sizeof prefix - 1, prefix) == 0) {
+        std::size_t i = sizeof prefix - 1, digits = 0;
+        int code = 0;
+        while (i < msg.size() && std::isdigit(static_cast<unsigned char>(msg[i])) && digits < 5) code = code * 10 + (msg[i++] - '0'), digits++;
+        if (digits >= 4 && msg.compare(i, 2, " (") == 0 && msg.size() >= i + 10 && msg.compare(i + 7, 3, "): ") == 0) {
+            e.code = code;
+            e.state = msg.substr(i + 2, 5);
+            e.text = msg.substr(i + 10);
+            return e;
+        }
+    }
+    auto starts = [&](const char* p) { return msg.compare(0, std::strlen(p), p) == 0; };
+    auto has = [&](const char* p) { return msg.find(p) != std::string::npos; };
+    auto set = [&](int code, const char* state) {
+        e.code = code;
+        e.state = state;
+        return e;
+    };
+    // (the quoted value that follows `Incorrect integer value: '`: a text that starts as a number is cut off (1265), any other is no number at all (1366))
+    auto starts_as_number = [&]() {
+        const std::size_t open = msg.find(": '");
+        if (open == std::string::npos) return false;
+        std::size_t i = open + 3;
+        while (i < msg.size() && (msg[i] == ' ' || msg[i] == '-' || msg[i] == '+')) i++;
+        if (i < msg.size() && msg[i] == '.') i++;
+        return i < msg.size() && std::isdigit(static_cast<unsigned char>(msg[i]));
+    };
+    if (starts("Duplicate entry ") || starts("Duplicate value ") || starts("Duplicate composite primary key")) return set(1062, "23000");
+    if (starts("Duplicate column name")) return set(1060, "42S21");
+    if (starts("Duplicate key name")) return set(1061, "42000");
+    if (starts("Duplicate foreign key constraint name")) return set(1826, "HY000");
+    if (starts("Foreign key violation")) return has(" not found in ") ? set(1452, "23000") : set(1451, "23000");
+    if (starts("Cannot drop table ") && has("referenced by a foreign key constraint")) return set(3730, "HY000");
+    if (starts("Foreign key '") && has("not found in")) return set(1091, "42000");
+    if (starts("Can't DROP '")) return set(1091, "42000");
+    if (starts("CHECK constraint")) return set(3819, "HY000");
+    if (starts("Field '") && has("doesn't have a default value")) return set(1364, "HY000");
+    if (starts("Column '")) {
+        if (has("cannot be NULL")) return set(1048, "23000");
+        if (has("is ambiguous")) return set(1052, "23000");
+        if (has("specified twice")) return set(1110, "42000");
+        if (has("not found in")) return set(1054, "42S22");
+    }
+    if (starts("Unknown column '")) return set(1054, "42S22");
+    if (starts("Unknown table '")) return set(1051, "42S02");
+    if (starts("Unknown database '")) return set(1049, "42000");
+    if (starts("Database '") && has("already exists")) return set(1007, "HY000");
+    if (starts("Database '") && has("does not exist")) return set(1008, "HY000");
+    if (starts("Column count mismatch")) return set(1136, "21S01");
+    if (starts("Incorrect arguments to ")) return set(1210, "HY000");
+    if (starts("Table '") || starts("View '")) {
+        if (has("' already exists")) return set(1050, "42S01");
+        if (has("' not found") || has("' doesn't exist")) return set(1146, "42S02");
+    }
+    if (starts("Not unique table/alias")) return set(1066, "42000");
+    if (starts("You can't specify target table")) return set(1093, "HY000");
+    if (starts("Out of range value for column")) return set(1264, "22003");
+    if (starts("BIGINT value is out of range") || starts("BIGINT UNSIGNED value is out of range")) return set(1690, "22003");
+    if (starts("Data too long for column")) return set(1406, "22001");
+    if (starts("Invalid ENUM value") || starts("Invalid SET value")) return set(1265, "01000");
+    if (starts("Incorrect integer value: ") || starts("Incorrect decimal value: ") || starts("Incorrect double value: ")) return starts_as_number() ? set(1265, "01000") : set(1366, "HY000");
+    if (starts("Truncated incorrect ") || starts("Incorrect date value") || starts("Incorrect time value") || starts("Incorrect datetime value")) return set(1292, "22007");
+    if (starts("Division by 0")) return set(1365, "22012");
+    if (starts("Operand should contain")) return set(1241, "21000");
+    if (starts("Subquery returns more than 1 row")) return set(1242, "21000");
+    if (starts("Column count doesn't match value count")) return set(1136, "21S01");
+    if (starts("Invalid use of group function")) return set(1111, "HY000");
+    if (starts("Too-big precision")) return set(1426, "42000");
+    if (starts("Incorrect parameter count in the call to native function")) return set(1582, "42000");
+    if (starts("Incorrect number of arguments for PROCEDURE") || starts("Incorrect number of arguments for FUNCTION")) return set(1318, "42000");
+    if ((starts("Procedure '") || starts("Function '")) && has("not found")) return set(1305, "42000");
+    if (starts("Foreign key cascade delete/update exceeds max depth")) return set(3008, "HY000");
+    if (starts("Window name '") && has("is not defined")) return set(3579, "HY000");
+    if (starts("Window '") && has("frame start cannot be UNBOUNDED FOLLOWING")) return set(3584, "HY000");
+    if (starts("Window '") && has("frame end cannot be UNBOUNDED PRECEDING")) return set(3585, "HY000");
+    if (starts("Window '") && has("frame start or end is negative")) return set(3586, "HY000");
+    if (starts("Deadlock detected")) return set(1213, "40001");
+    if (starts("Access denied for user")) return set(1045, "28000");
+    if (starts("Unsupported command")) return set(1047, "08S01");
+    return e;
+}
+
 std::vector<std::uint8_t> err_pkt(const std::string& msg) {
+    const WireError e = wire_error(msg);
     std::vector<std::uint8_t> p{0xff};
-    p.push_back(static_cast<std::uint8_t>(1064 & 0xff));
-    p.push_back(static_cast<std::uint8_t>((1064 >> 8) & 0xff)); // ER_PARSE_ERROR
+    p.push_back(static_cast<std::uint8_t>(e.code & 0xff));
+    p.push_back(static_cast<std::uint8_t>((e.code >> 8) & 0xff));
     p.push_back('#');
-    p.insert(p.end(), {'4', '2', '0', '0', '0'}); // SQL state
-    p.insert(p.end(), msg.begin(), msg.end());
+    p.insert(p.end(), e.state.begin(), e.state.end()); // SQL state (five characters)
+    p.insert(p.end(), e.text.begin(), e.text.end());
     return p;
 }
 

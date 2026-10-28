@@ -92,9 +92,10 @@ std::string sql_type_str_ddl(const DataType& dt) {
         dt.data);
 }
 
-std::string fk_action_str(FkAction a) {
+// `restrict_written`: RESTRICT was spelled for the rule (a rule left out, or NO ACTION, is reported as NO ACTION: the same refusal)
+std::string fk_action_str(FkAction a, bool restrict_written) {
     switch (a) {
-        case FkAction::Restrict: return "RESTRICT";
+        case FkAction::Restrict: return restrict_written ? "RESTRICT" : "NO ACTION";
         case FkAction::Cascade: return "CASCADE";
         case FkAction::SetNull: return "SET NULL";
         case FkAction::SetDefault: return "SET DEFAULT";
@@ -250,8 +251,8 @@ StringResult Executor::show_create_table_mysql(const std::string& name) {
         for (std::size_t k = 0; k < col.foreign_keys.size(); k++) {
             const ForeignKey& fk = col.foreign_keys[k];
             std::string line = "  CONSTRAINT `" + fk_constraint_name(*schema, bare, i, k) + "` FOREIGN KEY (`" + fk.column + "`) REFERENCES `" + bare_name(fk.ref_table) + "` (`" + fk.ref_column + "`)";
-            if (fk.on_delete != FkAction::Restrict) line += " ON DELETE " + fk_action_str(fk.on_delete);
-            if (fk.on_update != FkAction::Restrict) line += " ON UPDATE " + fk_action_str(fk.on_update);
+            if (fk.on_delete != FkAction::Restrict || fk.restrict_delete) line += " ON DELETE " + fk_action_str(fk.on_delete, fk.restrict_delete);
+            if (fk.on_update != FkAction::Restrict || fk.restrict_update) line += " ON UPDATE " + fk_action_str(fk.on_update, fk.restrict_update);
             lines.push_back(std::move(line));
         }
     }
@@ -342,7 +343,7 @@ StringResult Executor::exec_show_create_table(const SharedDatabase& s, const std
         for (auto& fk : col.foreign_keys) {
             std::string ref_bare = bare_name(fk.ref_table);
             lines.push_back(std::string("  ") + (fk.name.empty() ? "" : "CONSTRAINT `" + fk.name + "` ") + "FOREIGN KEY (`" + fk.column + "`) REFERENCES `" + ref_bare + "`(`" + fk.ref_column + "`) ON DELETE " +
-                             fk_action_str(fk.on_delete) + " ON UPDATE " + fk_action_str(fk.on_update));
+                             fk_action_str(fk.on_delete, fk.restrict_delete) + " ON UPDATE " + fk_action_str(fk.on_update, fk.restrict_update));
         }
     }
 
