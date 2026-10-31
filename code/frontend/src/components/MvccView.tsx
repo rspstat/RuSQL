@@ -110,7 +110,7 @@ function Body({ lang, onLang }: { lang: Lang; onLang: (l: Lang) => void }) {
       <ArrowDefs />
       <PageHero accent={C.txn} lang={lang} onLang={onLang}
         icon={<svg viewBox="0 0 24 24"><path d="M12 3l9 4.5-9 4.5-9-4.5z" /><path d="M3 12l9 4.5 9-4.5" /><path d="M3 16.5L12 21l9-4.5" /></svg>}
-        title={L("MVCC: versions of a row", "MVCC 시뮬레이션")}
+        title={L("MVCC", "MVCC")}
         lead={L("A change does not overwrite a row: it adds a new version. Each session sees the version that is right for it, so a reader never waits for a writer.",
                 "값을 바꾸면 덮어쓰지 않고 새 버전을 만듭니다. 세션마다 자기에게 맞는 버전을 보기 때문에, 읽는 쪽이 쓰는 쪽을 기다리지 않습니다.")} />
 

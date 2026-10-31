@@ -202,7 +202,7 @@ function Body({ lang, onLang }: { lang: Lang; onLang: (l: Lang) => void }) {
     <div className="bt-page pk-page">
       <PageHero accent={C.storage} lang={lang} onLang={onLang}
         icon={<svg viewBox="0 0 24 24"><rect x="8" y="2.5" width="8" height="5" rx="1.6" /><rect x="1.8" y="16.5" width="8" height="5" rx="1.6" /><rect x="14.2" y="16.5" width="8" height="5" rx="1.6" /><path d="M12 7.5v3.2M12 10.7H5.8v5.8M12 10.7h6.2v5.8" /></svg>}
-        title={L("B+Tree: how an index grows", "B+Tree 애니메이션")}
+        title={L("B+Tree", "B+Tree")}
         lead={L("Keys go in one by one: a node that gets too full splits and the tree grows. A lookup walks one path from the root down to a leaf.",
                 "키를 하나씩 넣으면 가득 찬 노드가 쪼개지면서 트리가 자랍니다. 찾을 때는 루트에서 잎까지 한 길로 내려갑니다.")} />
 
