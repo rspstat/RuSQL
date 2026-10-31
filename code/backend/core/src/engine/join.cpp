@@ -5,6 +5,7 @@
 #include "engine/thread_pool.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <charconv>
 #include <thread>
 #include <unordered_map>
@@ -61,13 +62,23 @@ std::vector<Row> probe_parallel(const std::vector<Row>& left, F&& per_row) {
     for (std::size_t c = 0; c < n_chunks; c++) starts[c + 1] = starts[c] + base + (c < rem ? 1 : 0);
 
     std::vector<std::vector<Row>> chunk_out(n_chunks);
+    const deadline::Watch watch = deadline::watch(); // (the workers ask it: KILL QUERY and MAX_EXECUTION_TIME belong to the statement's thread)
+    std::atomic<bool> stopped{false};
     ThreadPool::global().parallel_for(n_chunks, [&](std::size_t c) {
         std::vector<Row> local;
         for (std::size_t i = starts[c]; i < starts[c + 1]; i++) {
+            if ((i & 255u) == 0 && (stopped.load(std::memory_order_relaxed) || watch.due())) {
+                stopped = true;
+                return;
+            }
             for (auto& r : per_row(left[i])) local.push_back(std::move(r));
         }
         chunk_out[c] = std::move(local);
     });
+    if (stopped) { // the statement was stopped: what the workers made is not the answer
+        deadline::check_now();
+        deadline::interrupted();
+    }
 
     std::size_t total = 0;
     for (auto& c : chunk_out) total += c.size();
@@ -112,9 +123,10 @@ std::vector<Row> sort_merge_join(const std::vector<Row>& left, const std::vector
     };
 
     std::vector<Row> ls = left;
-    std::stable_sort(ls.begin(), ls.end(), [&](const Row& a, const Row& b) { return sort_cmp(key_left(a), key_left(b)) < 0; });
+    std::size_t compared = 0; // (the sorts ask the clock and the KILL flag once in a thousand comparisons)
+    std::stable_sort(ls.begin(), ls.end(), [&](const Row& a, const Row& b) { if ((++compared & 1023u) == 0) deadline::check_now(); return sort_cmp(key_left(a), key_left(b)) < 0; });
     std::vector<Row> rs = right;
-    std::stable_sort(rs.begin(), rs.end(), [&](const Row& a, const Row& b) { return sort_cmp(key_right(a), key_right(b)) < 0; });
+    std::stable_sort(rs.begin(), rs.end(), [&](const Row& a, const Row& b) { if ((++compared & 1023u) == 0) deadline::check_now(); return sort_cmp(key_right(a), key_right(b)) < 0; });
 
     std::vector<Row> out;
 
@@ -194,6 +206,7 @@ std::vector<Row> hash_join(const std::vector<Row>& left, const std::vector<Row>&
                             const std::vector<std::string>& right_schema_cols, const std::vector<std::string>* left_pad) {
     std::unordered_map<std::string, std::vector<const Row*>> hash;
     for (auto& r : right) {
+        deadline::tick();
         std::string key;
         if (auto it = r.find(build_col); it != r.end()) key = it->second;
         else if (auto it2 = r.find(table + "." + build_col); it2 != r.end()) key = it2->second;
@@ -259,6 +272,7 @@ std::vector<Row> hash_join(const std::vector<Row>& left, const std::vector<Row>&
     if (join_type == JoinType::Right) {
         std::unordered_map<std::string, std::vector<const Row*>> left_hash;
         for (auto& l : left) {
+            deadline::tick();
             std::string key;
             if (auto it = l.find(probe_col); it != l.end()) key = it->second;
             if (key != JOIN_NULL_VALUE) left_hash[normalize_numeric_key(key)].push_back(&l);
@@ -266,6 +280,7 @@ std::vector<Row> hash_join(const std::vector<Row>& left, const std::vector<Row>&
         std::vector<std::string> left_cols = left_pad ? *left_pad : non_qualified_keys(left.empty() ? nullptr : &left[0]);
         std::vector<Row> out;
         for (auto& r : right) {
+            deadline::tick();
             std::string key;
             if (auto it = r.find(build_col); it != r.end()) key = it->second;
             auto it = key == JOIN_NULL_VALUE ? left_hash.end() : left_hash.find(normalize_numeric_key(key));
@@ -302,11 +317,13 @@ std::optional<std::vector<Row>> hashed_join_verified(const std::vector<Row>& lef
     right_keys.reserve(right.size());
     left_keys.reserve(left.size());
     for (auto& r : right) {
+        deadline::tick();
         const std::string* key = right_key(r);
         if (!key) return std::nullopt;
         right_keys.push_back(key);
     }
     for (auto& l : left) {
+        deadline::tick();
         const std::string* key = left_key(l);
         if (!key) return std::nullopt;
         left_keys.push_back(key);
@@ -322,6 +339,7 @@ std::optional<std::vector<Row>> hashed_join_verified(const std::vector<Row>& lef
         std::vector<std::string> left_cols = left_pad ? *left_pad : non_qualified_keys(left.empty() ? nullptr : &left[0]);
         out.reserve(right.size());
         for (std::size_t ri = 0; ri < right.size(); ri++) {
+            deadline::tick();
             bool matched = false;
             if (*right_keys[ri] != JOIN_NULL_VALUE) {
                 if (auto it = by_key.find(norm(*right_keys[ri])); it != by_key.end()) {
@@ -354,6 +372,7 @@ std::optional<std::vector<Row>> hashed_join_verified(const std::vector<Row>& lef
     std::vector<char> right_matched(join_type == JoinType::FullOuter ? right.size() : 0, 0);
     if (pad_left_rows) out.reserve(left.size());
     for (std::size_t i = 0; i < left.size(); i++) {
+        deadline::tick();
         bool matched = false;
         if (*left_keys[i] != JOIN_NULL_VALUE) {
             if (auto it = by_key.find(norm(*left_keys[i])); it != by_key.end()) {
@@ -390,7 +409,8 @@ std::optional<std::vector<Row>> hashed_join_verified(const std::vector<Row>& lef
 std::vector<Row> nested_loop_join(const std::vector<Row>& left, const std::vector<Row>& right, JoinType join_type,
                                    const std::string& table, const std::vector<std::string>& using_cols,
                                    const std::vector<std::string>& right_schema_cols,
-                                   const std::function<bool(const Row&)>& on_match, const std::vector<std::string>* left_pad) {
+                                   const std::function<bool(const Row&)>& on_match, const std::vector<std::string>* left_pad,
+                                   const std::function<bool(const Row&)>* keep) {
     std::vector<Row> out;
 
     if (!using_cols.empty()) {
@@ -407,6 +427,7 @@ std::vector<Row> nested_loop_join(const std::vector<Row>& left, const std::vecto
                 if (matches) {
                     Row merged = l;
                     merge_right(merged, r, table);
+                    if (keep && join_type == JoinType::Inner && !(*keep)(merged)) continue;
                     out.push_back(std::move(merged));
                 }
             }
@@ -421,7 +442,7 @@ std::vector<Row> nested_loop_join(const std::vector<Row>& left, const std::vecto
                     deadline::tick();
                     Row merged = l;
                     merge_right(merged, r, table);
-                    if (on_match(merged)) out.push_back(std::move(merged));
+                    if (on_match(merged) && (!keep || (*keep)(merged))) out.push_back(std::move(merged));
                 }
             }
             break;
@@ -470,6 +491,7 @@ std::vector<Row> nested_loop_join(const std::vector<Row>& left, const std::vecto
                     deadline::tick();
                     Row merged = l;
                     merge_right(merged, r, table);
+                    if (keep && !(*keep)(merged)) continue;
                     out.push_back(std::move(merged));
                 }
             }

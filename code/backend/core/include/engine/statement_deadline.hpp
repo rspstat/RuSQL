@@ -57,6 +57,16 @@ struct KillScope {
     KillScope& operator=(const KillScope&) = delete;
 };
 
+// The part of an UPDATE / DELETE that only looks -- finding the rows it will change, before anything is written -- may be stopped by KILL QUERY as a SELECT may: nothing has been
+// changed yet. (Once rows are written the statement runs on to its end: stopped half way there is no way back.)
+struct ReadPhase {
+    const std::atomic<int>* was;
+    ReadPhase() : was(kill_read_flag) { kill_read_flag = kill_flag; }
+    ~ReadPhase() { kill_read_flag = was; }
+    ReadPhase(const ReadPhase&) = delete;
+    ReadPhase& operator=(const ReadPhase&) = delete;
+};
+
 [[noreturn]] inline void interrupted() {
     throw StatementError("ERROR 1317 (70100): Query execution was interrupted");
 }
@@ -69,6 +79,16 @@ inline void check_now() {
     if (kill_asked(kill_read_flag)) interrupted();
     if (timed && std::chrono::steady_clock::now() >= at) expired();
 }
+
+// The worker threads of a parallel stage have no clock and no kill flag of their own (both belong to the thread that runs the statement). The statement's thread takes a
+// `Watch` before it hands the work out, the workers ask `due()` as they go and stop, and the statement's thread, when the workers are back, throws the error with check_now().
+struct Watch {
+    const std::atomic<int>* kill;
+    bool timed;
+    std::chrono::steady_clock::time_point at;
+    bool due() const { return (kill && kill->load(std::memory_order_relaxed) != 0) || (timed && std::chrono::steady_clock::now() >= at); }
+};
+inline Watch watch() { return Watch{kill_read_flag, timed, at}; }
 
 // For a loop that runs for every row: the clock is read every 1024th call.
 inline void tick() {

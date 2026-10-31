@@ -1,0 +1,327 @@
+#include <atomic>
+#include <chrono>
+#include <cstdlib>
+#include <filesystem>
+#include <sstream>
+#include <string>
+#include <thread>
+#include <vector>
+
+#ifdef _WIN32
+#define NOMINMAX
+#include <windows.h>
+#include <psapi.h>
+#endif
+
+#include "catch.hpp"
+#include "engine/executor/executor.hpp"
+#include "engine/join.hpp"
+#include "engine/result_text.hpp"
+#include "engine/statement_deadline.hpp"
+
+using namespace engine;
+namespace fs = std::filesystem;
+
+// A statement that is stopped (KILL QUERY) and a join that does not make every pair of rows before it looks at the WHERE (R63).
+
+namespace {
+struct TempDataDir {
+    std::string path;
+    explicit TempDataDir(std::string p) : path(std::move(p)) { fs::remove_all(path); }
+    ~TempDataDir() { fs::remove_all(path); }
+};
+
+using Rows = std::vector<std::vector<std::string>>;
+
+void ok(Executor& ex, const std::string& sql) {
+    INFO(sql);
+    auto r = ex.execute_sql(sql);
+    if (r.is_err()) INFO("error: " << r.error());
+    REQUIRE(r.is_ok());
+}
+
+Rows q(Executor& ex, const std::string& sql) {
+    INFO(sql);
+    auto r = ex.execute_sql(sql);
+    if (r.is_err()) INFO("error: " << r.error());
+    REQUIRE(r.is_ok());
+    Rows rows;
+    std::istringstream in(r.value());
+    std::string line;
+    int bars = 0;
+    while (std::getline(in, line)) {
+        if (line.empty() || line[0] != '|') continue;
+        if (++bars <= 1) continue;
+        rows.push_back(result_text::split_row(line));
+    }
+    return rows;
+}
+
+std::string session_of(Executor& ex, const std::string& user) {
+    auto rows = q(ex, "SELECT ID FROM information_schema.processlist WHERE USER = '" + user + "'");
+    REQUIRE(rows.size() == 1);
+    return rows[0][0];
+}
+
+void wait_for_command(Executor& ex, const std::string& user, const std::string& command) {
+    for (int i = 0; i < 300; i++) {
+        if (q(ex, "SELECT ID FROM information_schema.processlist WHERE USER = '" + user + "' AND COMMAND = '" + command + "'").size() == 1) return;
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    FAIL("the session of " << user << " never showed the command " << command);
+}
+
+// The memory this process holds (bytes); 0 where it cannot be read. A statement's own use is the most it holds while it runs, less what it held before.
+std::size_t working_set() {
+#ifdef _WIN32
+    PROCESS_MEMORY_COUNTERS counters{};
+    if (GetProcessMemoryInfo(GetCurrentProcess(), &counters, sizeof(counters))) return counters.WorkingSetSize;
+#endif
+    return 0;
+}
+
+struct MemoryWatch {
+    std::atomic<bool> stop{false};
+    std::atomic<std::size_t> top{0};
+    std::size_t before = working_set();
+    std::thread watcher{[this] {
+        while (!stop.load()) {
+            top = std::max(top.load(), working_set());
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+    }};
+    // megabytes more than the process held when the watch began
+    std::size_t grown_mb() {
+        stop = true;
+        watcher.join();
+        const std::size_t t = top.load();
+        return t > before ? (t - before) / (1024 * 1024) : 0;
+    }
+};
+
+void fill(Executor& ex, const std::string& table, int rows) {
+    ok(ex, "CREATE TABLE " + table + " (id INT PRIMARY KEY, v INT)");
+    for (int start = 1; start <= rows; start += 500) {
+        std::string sql = "INSERT INTO " + table + " VALUES ";
+        for (int i = start; i < std::min(start + 500, rows + 1); i++) sql += std::string(i == start ? "" : ",") + "(" + std::to_string(i) + "," + std::to_string(i % 10) + ")";
+        ok(ex, sql);
+    }
+}
+} // namespace
+
+TEST_CASE("R63: KILL QUERY stops a cross join of three tables, and the join does not hold every pair of rows", "[r63][kill][join]") {
+    TempDataDir dir("r63_cross_join_kill");
+    Executor ex(dir.path);
+    ex.register_process("root", "localhost");
+    ok(ex, "CREATE DATABASE d");
+    ok(ex, "USE d");
+    fill(ex, "a", 300);
+    fill(ex, "b", 300);
+    fill(ex, "c", 300);
+    auto shared = ex.get_shared();
+    Executor victim = Executor::new_session(shared);
+    victim.auth_user = "bob";
+    victim.register_process("bob", "localhost");
+    ok(victim, "USE d");
+    const std::string victim_id = session_of(ex, "bob");
+
+    std::string answer;
+    bool failed = false;
+    MemoryWatch watch;
+    std::thread runner([&] {
+        auto r = victim.execute_sql("SELECT COUNT(*) FROM a x, b y, c z WHERE x.id + y.id + z.id = 7");
+        failed = r.is_err();
+        answer = failed ? r.error() : r.value();
+    });
+    wait_for_command(ex, "bob", "Query");
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    const auto killed_at = std::chrono::steady_clock::now();
+    REQUIRE(ex.execute_sql("KILL QUERY " + victim_id).is_ok());
+    runner.join();
+    const auto waited = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - killed_at).count();
+    const std::size_t grown = watch.grown_mb();
+    INFO("stopped " << waited << " ms after KILL, the process grew " << grown << " MB, answer: " << answer.substr(0, 120));
+    std::fprintf(stderr, "[r63] cross join: stopped %lld ms after KILL, grew %zu MB\n", static_cast<long long>(waited), grown);
+    REQUIRE(failed);
+    REQUIRE(answer.find("ERROR 1317 (70100): Query execution was interrupted") != std::string::npos);
+    REQUIRE(waited < 3000);
+}
+
+TEST_CASE("R63: a join does not hold every pair of rows before the WHERE, and keeps the rows the WHERE wants", "[r63][join]") {
+    TempDataDir dir("r63_join_where");
+    Executor ex(dir.path);
+    ok(ex, "CREATE DATABASE d");
+    ok(ex, "USE d");
+    fill(ex, "a", 600);
+    fill(ex, "b", 600);
+    MemoryWatch watch;
+    REQUIRE(q(ex, "SELECT COUNT(*) FROM a x, b y WHERE x.id + y.id = 7") == Rows{{"6"}});
+    const std::size_t grown = watch.grown_mb();
+    std::fprintf(stderr, "[r63] 600 x 600 cross join with a WHERE: the process grew %zu MB\n", grown);
+    if (working_set() != 0) REQUIRE(grown < 80); // (the 360,000 merged rows held first took about 640 MB)
+}
+
+TEST_CASE("R63: the last join of a query makes the same rows as joining first and filtering after", "[r63][join]") {
+    TempDataDir dir("r63_join_same");
+    Executor ex(dir.path);
+    ok(ex, "CREATE DATABASE d");
+    ok(ex, "USE d");
+    ok(ex, "CREATE TABLE t1 (id INT PRIMARY KEY, g INT, name VARCHAR(10))");
+    ok(ex, "CREATE TABLE t2 (id INT PRIMARY KEY, g INT, name VARCHAR(10))");
+    ok(ex, "CREATE TABLE t3 (id INT PRIMARY KEY, g INT, name VARCHAR(10))");
+    ok(ex, "INSERT INTO t1 VALUES (1, 1, 'a'), (2, 1, 'b'), (3, 2, 'c'), (4, NULL, 'd'), (5, 3, NULL)");
+    ok(ex, "INSERT INTO t2 VALUES (1, 1, 'x'), (2, 2, 'y'), (3, 2, NULL), (4, 5, 'w')");
+    ok(ex, "INSERT INTO t3 VALUES (1, 1, 'p'), (2, 3, 'q'), (3, NULL, 'r')");
+    // each pair: the query as it is written (the last join keeps the rows of the WHERE) and the same rows through a derived table (the join, then the WHERE)
+    struct Pair { const char* written; const char* reference; };
+    const Pair pairs[] = {
+        {"SELECT a.id, b.id, c.id FROM t1 a, t2 b, t3 c WHERE a.id + b.id + c.id = 7 ORDER BY a.id, b.id, c.id",
+         "SELECT i, j, k FROM (SELECT a.id i, b.id j, c.id k FROM t1 a, t2 b, t3 c) d WHERE i + j + k = 7 ORDER BY i, j, k"},
+        {"SELECT a.id, b.id FROM t1 a, t2 b WHERE a.g = b.g OR a.id = 5 ORDER BY a.id, b.id",
+         "SELECT i, j FROM (SELECT a.id i, b.id j, a.g ag, b.g bg FROM t1 a, t2 b) d WHERE ag = bg OR i = 5 ORDER BY i, j"},
+        {"SELECT a.id, b.id FROM t1 a JOIN t2 b ON a.g < b.g WHERE a.id <> 2 ORDER BY a.id, b.id",
+         "SELECT i, j FROM (SELECT a.id i, b.id j FROM t1 a JOIN t2 b ON a.g < b.g) d WHERE i <> 2 ORDER BY i, j"},
+        {"SELECT a.id, b.id, c.id FROM t1 a LEFT JOIN t2 b ON a.g = b.g JOIN t3 c ON c.id <= a.id WHERE b.id IS NULL OR b.id > 1 ORDER BY a.id, b.id, c.id",
+         "SELECT i, j, k FROM (SELECT a.id i, b.id j, c.id k FROM t1 a LEFT JOIN t2 b ON a.g = b.g JOIN t3 c ON c.id <= a.id) d WHERE j IS NULL OR j > 1 ORDER BY i, j, k"},
+        {"SELECT a.id, b.id FROM t1 a, t2 b WHERE a.id + b.id IN (SELECT id + 3 FROM t3) ORDER BY a.id, b.id",
+         "SELECT i, j FROM (SELECT a.id i, b.id j FROM t1 a, t2 b) d WHERE i + j IN (SELECT id + 3 FROM t3) ORDER BY i, j"},
+        {"SELECT COUNT(*), SUM(a.id * b.id) FROM t1 a, t2 b WHERE a.id > b.id",
+         "SELECT COUNT(*), SUM(i * j) FROM (SELECT a.id i, b.id j FROM t1 a, t2 b) d WHERE i > j"},
+        {"SELECT a.g, COUNT(*) FROM t1 a, t2 b WHERE a.id + b.id > 4 GROUP BY a.g ORDER BY a.g",
+         "SELECT g, COUNT(*) FROM (SELECT a.id i, a.g g, b.id j FROM t1 a, t2 b) d WHERE i + j > 4 GROUP BY g ORDER BY g"},
+        {"SELECT a.id, b.id FROM t1 a, t2 b WHERE a.id + b.id < 0",
+         "SELECT i, j FROM (SELECT a.id i, b.id j FROM t1 a, t2 b) d WHERE i + j < 0"},
+        {"SELECT a.id, b.id FROM t1 a, t2 b WHERE a.name = 'a' AND b.name IS NOT NULL ORDER BY b.id",
+         "SELECT i, j FROM (SELECT a.id i, a.name an, b.id j, b.name bn FROM t1 a, t2 b) d WHERE an = 'a' AND bn IS NOT NULL ORDER BY j"},
+        {"SELECT a.id FROM t1 a, t2 b, t3 c WHERE a.id = b.id AND b.id + c.id = 3 ORDER BY a.id",
+         "SELECT i FROM (SELECT a.id i, b.id j, c.id k FROM t1 a, t2 b, t3 c) d WHERE i = j AND j + k = 3 ORDER BY i"},
+    };
+    for (const Pair& p : pairs) {
+        INFO(p.written);
+        REQUIRE(q(ex, p.written) == q(ex, p.reference));
+    }
+    // and it is not nothing: the first of them has rows
+    REQUIRE_FALSE(q(ex, pairs[0].written).empty());
+}
+
+// The stages that are one piece of work (a sort, the groups, DISTINCT, a hash join) ask the clock and the KILL flag as they go: with a limit of a third of the time the whole query takes the
+// statement ends with 3024 in the middle of the stage (before 60% of the whole time), not at its end. (MAX_EXECUTION_TIME and KILL QUERY use the same places.)
+TEST_CASE("R63: a sort, a GROUP BY, a DISTINCT and a hash join are stopped in the middle of their work", "[r63][kill]") {
+    TempDataDir dir("r63_stage_stop");
+    Executor ex(dir.path);
+    ok(ex, "CREATE DATABASE d");
+    ok(ex, "USE d");
+    ok(ex, "CREATE TABLE big (id INT PRIMARY KEY, g INT, v INT, s VARCHAR(20))");
+    for (int start = 1; start <= 300000; start += 1000) {
+        std::string sql = "INSERT INTO big VALUES ";
+        for (int i = start; i < start + 1000; i++) sql += std::string(i == start ? "" : ",") + "(" + std::to_string(i) + "," + std::to_string(i % 1000) + "," + std::to_string((i * 7919) % 10007) + ",'row" + std::to_string(i) + "')";
+        ok(ex, sql);
+    }
+    ok(ex, "CREATE TABLE little (id INT PRIMARY KEY, g INT)");
+    ok(ex, "INSERT INTO little VALUES (1, 1), (2, 2), (3, 3)");
+    const char* queries[] = {
+        "SELECT * FROM big ORDER BY s DESC, v",
+        "SELECT g, v, COUNT(*) FROM big GROUP BY g, v",
+        "SELECT DISTINCT s, v FROM big",
+        "SELECT COUNT(*) FROM big a JOIN little b ON a.g = b.g",
+    };
+    for (const char* sql : queries) {
+        INFO(sql);
+        auto millis = [](std::chrono::steady_clock::time_point since) { return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - since).count(); };
+        // (a trivial UPDATE empties the cache of answers: an answer that is cached takes no time the second time)
+        ok(ex, "SET max_execution_time = 0");
+        ok(ex, "UPDATE big SET v = v WHERE id = 1");
+        auto started = std::chrono::steady_clock::now();
+        auto whole = ex.execute_sql(sql);
+        const auto whole_ms = millis(started);
+        REQUIRE(whole.is_ok());
+        // a third of the time the whole query takes: the rows are read by then (that stage ends before the clock is looked at), the stage that follows is what is stopped
+        const auto limit = std::max<long long>(30, whole_ms / 3);
+        ok(ex, "UPDATE big SET v = v WHERE id = 1");
+        ok(ex, "SET max_execution_time = " + std::to_string(limit));
+        started = std::chrono::steady_clock::now();
+        auto stopped = ex.execute_sql(sql);
+        const auto stopped_ms = millis(started);
+        ok(ex, "SET max_execution_time = 0");
+        std::fprintf(stderr, "[r63] %s -> the whole of it takes %lld ms, with a limit of %lld ms it stopped in %lld ms\n", sql, static_cast<long long>(whole_ms), static_cast<long long>(limit), static_cast<long long>(stopped_ms));
+        REQUIRE(stopped.is_err());
+        REQUIRE(stopped.error().find("3024") != std::string::npos);
+        REQUIRE(stopped_ms * 10 < whole_ms * 6); // (stopped in the middle of the stage, not at its end: a stage that is not asked ends it first, at 70% or later)
+    }
+}
+
+// An UPDATE or DELETE that is still looking for the rows it will change has written nothing: KILL QUERY stops it there, and the table is as it was. (Once rows are being written the
+// statement runs on to its end -- there is no way back from half of it.)
+TEST_CASE("R63: KILL QUERY stops an UPDATE and a DELETE while they look for their rows, and nothing is changed", "[r63][kill]") {
+    TempDataDir dir("r63_write_kill");
+    Executor ex(dir.path);
+    ex.register_process("root", "localhost");
+    ok(ex, "CREATE DATABASE d");
+    ok(ex, "USE d");
+    ok(ex, "CREATE TABLE big (id INT PRIMARY KEY, g INT, v INT)");
+    for (int start = 1; start <= 40000; start += 1000) {
+        std::string sql = "INSERT INTO big VALUES ";
+        for (int i = start; i < start + 1000; i++) sql += std::string(i == start ? "" : ",") + "(" + std::to_string(i) + "," + std::to_string(i % 100) + "," + std::to_string(i % 7) + ")";
+        ok(ex, sql);
+    }
+    ok(ex, "CREATE TABLE other (id INT PRIMARY KEY, g INT, v INT)"); // (MySQL does not let a statement read the table it writes in a subquery: error 1093)
+    ok(ex, "INSERT INTO other SELECT id, g, v FROM big");
+    auto shared = ex.get_shared();
+    Executor victim = Executor::new_session(shared);
+    victim.auth_user = "bob";
+    victim.register_process("bob", "localhost");
+    ok(victim, "USE d");
+    const std::string victim_id = session_of(ex, "bob");
+    const Rows before = q(ex, "SELECT COUNT(*), SUM(v), SUM(g) FROM big");
+
+    // (a correlated subquery for every row: it would run for minutes)
+    for (const char* sql : {"UPDATE big SET v = v + 100 WHERE EXISTS (SELECT 1 FROM other b WHERE b.v = big.v AND b.g = big.g + 1000)",
+                            "DELETE FROM big WHERE EXISTS (SELECT 1 FROM other b WHERE b.v = big.v AND b.g = big.g + 1000)"}) {
+        INFO(sql);
+        std::string answer;
+        bool failed = false;
+        std::thread runner([&] {
+            auto r = victim.execute_sql(sql);
+            failed = r.is_err();
+            answer = failed ? r.error() : r.value();
+        });
+        wait_for_command(ex, "bob", "Query");
+        std::this_thread::sleep_for(std::chrono::milliseconds(150));
+        const auto killed_at = std::chrono::steady_clock::now();
+        REQUIRE(ex.execute_sql("KILL QUERY " + victim_id).is_ok());
+        runner.join();
+        REQUIRE(std::chrono::steady_clock::now() - killed_at < std::chrono::seconds(5));
+        INFO("answer: " << answer.substr(0, 200));
+        REQUIRE(failed);
+        REQUIRE(answer.find("ERROR 1317 (70100): Query execution was interrupted") != std::string::npos);
+        REQUIRE(q(ex, "SELECT COUNT(*), SUM(v), SUM(g) FROM big") == before);
+        REQUIRE(q(victim, "SELECT COUNT(*) FROM big") == Rows{{"40000"}}); // (the session is whole)
+    }
+}
+
+// The workers of a parallel join probe have no clock and no KILL flag of their own: the statement's thread hands them a Watch. With a limit of one millisecond the probe of 300,000 rows
+// stops, and the statement's thread throws.
+TEST_CASE("R63: the workers of a parallel hash join stop when the statement is stopped", "[r63][kill][join]") {
+    auto row = [](const std::string& k, const std::string& id) {
+        Row r;
+        r["k"] = k;
+        r["id"] = id;
+        return r;
+    };
+    std::vector<Row> left;
+    left.reserve(300000);
+    for (int i = 0; i < 300000; i++) left.push_back(row(std::to_string(i % 3), std::to_string(i)));
+    std::vector<Row> right;
+    for (int k = 0; k < 3; k++) {
+        Row r;
+        r["k"] = std::to_string(k);
+        r["name"] = "n" + std::to_string(k);
+        right.push_back(r);
+    }
+    {
+        deadline::Scope limit(1);
+        REQUIRE_THROWS_AS(hash_join(left, right, JoinType::Inner, "r", "k", "k", {"k", "name"}), StatementError);
+    }
+    // (with no limit the same join makes its 300,000 rows)
+    REQUIRE(hash_join(left, right, JoinType::Inner, "r", "k", "k", {"k", "name"}).size() == 300000);
+}

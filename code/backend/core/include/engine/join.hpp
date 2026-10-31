@@ -48,9 +48,12 @@ std::optional<std::vector<Row>> hashed_join_verified(const std::vector<Row>& lef
                                                       const std::function<bool(const Row&)>& on_match,
                                                       const std::vector<std::string>* left_pad = nullptr, bool exact_keys = false);
 
+// `keep` (an INNER or CROSS join only): a pair that has met the join's condition is made into a row only if `keep` says the statement wants it too -- the WHERE of
+// the last join, so that `FROM a, b, c WHERE a.id + b.id + c.id = 7` does not hold every pair of rows (millions of them) before it looks at the WHERE.
 std::vector<Row> nested_loop_join(const std::vector<Row>& left, const std::vector<Row>& right, JoinType join_type,
                                    const std::string& table, const std::vector<std::string>& using_cols,
                                    const std::vector<std::string>& right_schema_cols,
-                                   const std::function<bool(const Row&)>& on_match, const std::vector<std::string>* left_pad = nullptr);
+                                   const std::function<bool(const Row&)>& on_match, const std::vector<std::string>* left_pad = nullptr,
+                                   const std::function<bool(const Row&)>* keep = nullptr);
 
 } // namespace engine

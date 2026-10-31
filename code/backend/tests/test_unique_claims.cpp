@@ -529,6 +529,7 @@ TEST_CASE("sessions racing a child row against its parent leave no child without
         }
     };
     std::atomic<int> orphans{0};
+    std::atomic<int> cache_errors{0};
     // a watchdog: sessions that wait for each other for ever are a failure that says what each one was doing, not a test that never ends
     std::vector<std::string> doing(kThreads);
     std::mutex doing_mutex;
@@ -554,14 +555,21 @@ TEST_CASE("sessions racing a child row against its parent leave no child without
             }
         }
     });
+    // what each session did in the step that is running and what came back: an orphan is reported together with the statements that made it
+    std::vector<std::string> step_trace(kThreads);
     auto run_sql = [&](Executor& sess, int w, const std::string& sql) {
         {
             std::lock_guard<std::mutex> g(doing_mutex);
             doing[static_cast<std::size_t>(w)] = sql;
         }
-        (void)sess.execute_sql(sql);
+        auto r = sess.execute_sql(sql);
         std::lock_guard<std::mutex> g(doing_mutex);
         doing[static_cast<std::size_t>(w)] = "(between statements)";
+        step_trace[static_cast<std::size_t>(w)] += "\n    " + sql + " -> " + (r.is_ok() ? "ok" : r.error().substr(0, 90));
+        if (!r.is_ok() && r.error().find("not what the rows hold") != std::string::npos) { // (RUSQL_PROBE_CHECK=1: the cache of values disagreed with the rows)
+            cache_errors++;
+            std::fprintf(stderr, "CACHE CHECK FAILED in session %d: %s -> %s\n", w, sql.c_str(), r.error().c_str());
+        }
     };
     for (unsigned round = 0; round < seed_count; round++) {
         ok(ex, "DELETE FROM kid");
@@ -579,6 +587,10 @@ TEST_CASE("sessions racing a child row against its parent leave no child without
                 const bool opened = sess.execute_sql("USE d").is_ok();
                 for (int i = 0; i < kSteps; i++) {
                     barrier();
+                    {
+                        std::lock_guard<std::mutex> g(doing_mutex);
+                        step_trace[static_cast<std::size_t>(w)].clear();
+                    }
                     if (opened) {
                         const std::string a = std::to_string(i), b = std::to_string(kSteps + i), c = std::to_string(2 * kSteps + i);
                         if (w == 0) run_sql(sess, w, "DELETE FROM par WHERE id = " + a);                                  // the parent goes ...
@@ -597,7 +609,20 @@ TEST_CASE("sessions racing a child row against its parent leave no child without
                     if (opened && w == 0) {
                         for (const char* t : {"kid", "mov", "cas"}) {
                             auto r = sess.execute_sql(std::string("SELECT COUNT(*) FROM ") + t + " WHERE pid NOT IN (SELECT id FROM par)");
-                            if (r.is_ok() && table_cells(r.value()) != Rows{{"0"}}) orphans++;
+                            if (r.is_ok() && table_cells(r.value()) != Rows{{"0"}}) {
+                                orphans++;
+                                std::lock_guard<std::mutex> g(doing_mutex);
+                                std::string report = "ORPHAN in " + std::string(t) + " (round " + std::to_string(round) + ", step " + std::to_string(i) + "): " + r.value();
+                                auto who = sess.execute_sql(std::string("SELECT id, pid FROM ") + t + " WHERE pid NOT IN (SELECT id FROM par)");
+                                report += "\n  rows: " + (who.is_ok() ? who.value() : who.error());
+                                auto again = sess.execute_sql(std::string("SELECT COUNT(*) FROM ") + t + " WHERE pid NOT IN (SELECT id FROM par)");
+                                report += "\n  asked again: " + (again.is_ok() ? again.value() : again.error());
+                                auto pars = sess.execute_sql("SELECT id FROM par WHERE id IN (" + std::to_string(i) + ", " + std::to_string(kSteps + i) + ", " + std::to_string(1000 + i) + ", " +
+                                                             std::to_string(2 * kSteps + i) + ")");
+                                report += "\n  parents near this step: " + (pars.is_ok() ? pars.value() : pars.error());
+                                for (int x = 0; x < kThreads; x++) report += "\n  session " + std::to_string(x) + ":" + step_trace[static_cast<std::size_t>(x)];
+                                std::fprintf(stderr, "%s\n", report.c_str());
+                            }
                         }
                     }
                     barrier();
@@ -608,7 +633,51 @@ TEST_CASE("sessions racing a child row against its parent leave no child without
     }
     finished = true;
     watchdog.join();
+    REQUIRE(cache_errors.load() == 0);
     REQUIRE(orphans.load() == 0);
+}
+
+// The plan of a DELETE of a parent (what its foreign keys do to the children) finds the rows it was asked to delete in the parent table. Sessions that change the parent table at that
+// moment -- an INSERT appends, a DELETE of a row moves the rows behind it -- must not make it miss a row: a parent it does not find has its children left unlooked at, and the DELETE
+// that follows takes the parent away from a child that was just moved to it. (R63: found by the racing test above, one failure in about 160 rounds.)
+TEST_CASE("a DELETE of a parent finds the children of the row while other sessions change the parent table", "[unique_claim][fk_claim][concurrency][r63]") {
+    TempDataDir dir("fk_claims_plan_race");
+    Executor ex(dir.path);
+    ok(ex, "CREATE DATABASE d");
+    ok(ex, "USE d");
+    ok(ex, "CREATE TABLE par (id INT PRIMARY KEY, name VARCHAR(10))");
+    ok(ex, "CREATE TABLE mov (id INT PRIMARY KEY AUTO_INCREMENT, pid INT, FOREIGN KEY (pid) REFERENCES par (id))");
+    std::string values;
+    for (int i = 0; i < 400; i++) values += std::string(i ? ", " : "") + "(" + std::to_string(i) + ", 'p" + std::to_string(i) + "')";
+    ok(ex, "INSERT INTO par VALUES " + values);
+    ok(ex, "INSERT INTO mov (pid) VALUES (0)");
+    auto shared = ex.get_shared();
+    std::atomic<bool> stop{false};
+    std::vector<std::thread> churn;
+    for (int w = 0; w < 4; w++) {
+        churn.emplace_back([&, w] {
+            Executor sess = Executor::new_session(shared);
+            if (!sess.execute_sql("USE d").is_ok()) return;
+            for (int i = 0; !stop.load(); i++) {
+                const std::string id = std::to_string(1000 + w * 1000 + i % 50);
+                (void)sess.execute_sql("INSERT INTO par VALUES (" + id + ", 'churn')");
+                (void)sess.execute_sql("DELETE FROM par WHERE id = " + id);
+            }
+        });
+    }
+    int wrongly_deleted = 0;
+    for (int i = 0; i < 4000 && wrongly_deleted == 0; i++) {
+        const std::string c = std::to_string(100 + (i % 250));
+        ok(ex, "UPDATE mov SET pid = " + c);
+        auto r = ex.execute_sql("DELETE FROM par WHERE id = " + c);
+        if (r.is_ok()) {
+            wrongly_deleted++;
+            std::fprintf(stderr, "[r63] step %d: the DELETE of parent %s was accepted although mov refers to it\n", i, c.c_str());
+        }
+    }
+    stop = true;
+    for (auto& t : churn) t.join();
+    REQUIRE(wrongly_deleted == 0);
 }
 
 TEST_CASE("a child waits for a parent that is being deleted and then finds it gone; a parent waits for a child that is being written and then finds it", "[unique_claim][fk_claim]") {

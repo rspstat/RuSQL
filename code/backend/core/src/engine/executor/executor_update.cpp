@@ -9,6 +9,7 @@
 #include "engine/executor/executor.hpp"
 #include "engine/now_text.hpp"
 #include "engine/sql_value_util.hpp"
+#include "engine/statement_deadline.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -309,6 +310,7 @@ StringResult Executor::exec_update_inner(SharedDatabase& s, const std::string& t
             std::vector<std::string> read_tables = neighbor_tables;
             read_tables.push_back(table);
             auto table_lock = acquire_table_data_locks(s, read_tables, /*exclusive=*/false);
+            deadline::ReadPhase reads; // (finding the rows to change: nothing is written yet, KILL QUERY may stop it)
             std::optional<sqlval::StrictComparison> strict_comparison;
             std::optional<sqlval::StrictWrite> strict_where;
             if (strict_where_wanted) {

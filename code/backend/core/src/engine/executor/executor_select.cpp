@@ -341,6 +341,7 @@ std::vector<std::size_t> order_rows(const std::vector<const Row*>& rows, const s
     const std::size_t ncols = order_by.size();
     std::vector<Cell> cells(rows.size() * ncols);
     for (std::size_t i = 0; i < rows.size(); i++) {
+        deadline::tick(); // (KILL QUERY / MAX_EXECUTION_TIME: a sort is one piece of work, it asks as it goes)
         for (std::size_t c = 0; c < ncols; c++) {
             const std::string* found = lookup(*rows[i], order_by[c].column);
             Cell& cell = cells[i * ncols + c];
@@ -372,7 +373,9 @@ std::vector<std::size_t> order_rows(const std::vector<const Row*>& rows, const s
         }
         return cell.text_key;
     };
+    std::size_t compared = 0; // (the sort asks the clock and the KILL flag once in a thousand comparisons)
     std::stable_sort(order.begin(), order.end(), [&](std::size_t a, std::size_t b) {
+        if ((++compared & 1023u) == 0) deadline::check_now();
         for (std::size_t c = 0; c < ncols; c++) {
             Cell& x = cells[a * ncols + c];
             Cell& y = cells[b * ncols + c];
@@ -2257,6 +2260,7 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
     } else {
         // the rows of the first table, in the order of its key
         auto take = [&](const Row& r) {
+            deadline::tick(); // (the rows of a join are copied: that is work too)
             if (!is_visible_for_read(r, read_ctx)) return;
             for (const CondExpr* f : pushed[0]) {
                 if (!eval_condexpr(r, *f)) return;
@@ -2317,6 +2321,7 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
     } else {
         explain_trace::mark("Scan " + table, visible_rows.size());
         std::vector<Row> current = std::move(visible_rows);
+        bool where_applied = false; // (the last join made only the rows the WHERE wants)
         for (std::size_t ji = 0; ji < joins.size(); ji++) {
             auto& j = joins[ji];
             const std::string& jq = join_qualifier(j); // what the joined table's columns are called in the merged rows
@@ -2365,6 +2370,7 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
                 if (it == s.tables.end()) return StringResult::Err("Table '" + j.table + "' not found");
                 right_rows.reserve(it->second.size());
                 for (auto& r : it->second) {
+                    deadline::tick();
                     if (!is_visible_for_read(r, read_ctx)) continue;
                     bool keep = true;
                     for (const CondExpr* f : pushed[ji + 1]) {
@@ -2576,8 +2582,16 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
                 }
             } else {
                 const CondExpr& on_expr = j.on_expr;
+                // The last join, when it is an INNER or CROSS one, makes only the rows the WHERE keeps: `FROM a, b, c WHERE a.id + b.id + c.id = 7` would otherwise
+                // hold every pair of rows (27 million of them for three tables of 300 rows, 6 GB) before the WHERE below looked at the first one.
+                std::function<bool(const Row&)> keep_row;
+                if (condition && ji + 1 == joins.size() && (j.join_type == JoinType::Inner || j.join_type == JoinType::Cross)) {
+                    keep_row = [&](const Row& merged) { return matches_condition_with_subquery(s, merged, condition); };
+                    where_applied = true;
+                }
                 current = nested_loop_join(current, right_rows, j.join_type, jq, j.using_cols, right_schema_cols,
-                                                       [&on_expr](const Row& merged) { return eval_condexpr(merged, on_expr); }, left_pad);
+                                                       [&on_expr](const Row& merged) { return eval_condexpr(merged, on_expr); }, left_pad,
+                                                       keep_row ? &keep_row : nullptr);
             }
 
             // RIGHT / FULL JOIN ... USING (c): a right row without a partner has NULL in the left table's `c`, but the merged column
@@ -2598,7 +2612,7 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
                 explain_trace::mark("Join " + j.table + " (" + type + ", " + algo_name + ")", current.size());
             }
         }
-        if (!condition) {
+        if (!condition || where_applied) {
             result = std::move(current);
         } else {
             for (auto& r : current) {
@@ -2733,6 +2747,7 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
             distinct_classes.push_back(k);
         }
         for (const Row* rp : input) {
+            deadline::tick();
             const Row& row = *rp;
             encoded.clear();
             for (std::size_t column_index = 0; column_index < columns.size(); column_index++) {
@@ -2841,6 +2856,7 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
         for (auto& item : *group_by) group_classes.push_back(class_of_expr(parse_bound_expression(s, item, table, joins)));
         std::string encoded;
         for (const Row* rp : rows_p) {
+            deadline::tick();
             encoded.clear();
             for (std::size_t i = 0; i < group_by->size(); i++) {
                 const std::string* v = get_col(*rp, (*group_by)[i]);

@@ -14,6 +14,7 @@
 #include "engine/collation.hpp"
 #include "engine/executor/executor.hpp"
 #include "engine/sql_value_util.hpp"
+#include "engine/statement_deadline.hpp"
 #include "engine/subquery_walk.hpp"
 
 #include <algorithm>
@@ -529,23 +530,25 @@ StringResult Executor::exec_delete_inner(SharedDatabase& s, const std::string& t
         }
         return std::nullopt;
     };
-    if (auto refused = collect_targets()) return *refused;
+    {
+        deadline::ReadPhase reads; // (finding the rows to delete: nothing is written yet, KILL QUERY may stop it)
+        if (auto refused = collect_targets()) return *refused;
+    }
 
     // Row-level-concurrency Stage 4: EXCLUSIVE on every table the cascade can touch -- the tables that refer to this one, and those that refer to them: Cascade's non-txn
     // branch does a real erase (shape change) on a child, so EXCLUSIVE (not SHARED) is required there; applying it uniformly for the whole check + write section (rather than
-    // conditionally per txn-state/action) keeps this tractable and is always a safe superset of what a read or in-place mutation alone would need. This table too when it is
-    // one of them (its own child, or a child of a child of its own).
+    // conditionally per txn-state/action) keeps this tractable and is always a safe superset of what a read or in-place mutation alone would need. This table too, always: the
+    // plan finds the rows it was asked to delete in it (and a session that appends to it, or deletes a row of it and moves the rows behind, while the plan looks must not make
+    // it miss one: a parent the plan does not find has its children left unlooked at, and the DELETE then takes it from a child that was just moved to it).
     // Real-blocking-wait stage: the section is wrapped in try_cascade_once() so any conflict can `return` straight out of every level via the lambda boundary -- see
     // exec_update_inner's identical pattern for the full reasoning.
     const std::vector<std::string> referenced = referenced_columns(s, table);
-    const std::vector<std::string> closure = fk_children_closure(s, table);
-    const bool reaches_itself = std::find(closure.begin(), closure.end(), table) != closure.end();
     CascadePlan plan;
     // The id the child versions of this statement carry: the transaction's, or a one-off id for a statement outside one.
     const std::uint64_t cascade_id = tagging_txn_id(s);
     auto try_cascade_once = [&]() -> CascadeAttemptResult {
     std::vector<std::string> locked_tables = neighbor_tables;
-    if (reaches_itself) locked_tables.push_back(table);
+    locked_tables.push_back(table);
     auto neighbor_write_lock = acquire_table_data_locks(s, locked_tables, /*exclusive=*/true);
     // (however this attempt ends, the cache of the values the child tables hold has taken in every row the cascades changed -- each one is reported to it -- and this section
     // changes no other live row, so the cache is current again for the next statement)
