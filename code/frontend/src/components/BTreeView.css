@@ -74,8 +74,6 @@
 .bt-key { fill: #ffffff; font-family: 'Segoe UI', sans-serif; font-size: 20px; font-weight: 600; font-variant-numeric: tabular-nums; letter-spacing: 0.3px; }
 .bt-empty { fill: color-mix(in srgb, var(--nc) 60%, #888); font-family: 'Segoe UI', sans-serif; font-size: 22px; }
 .bt-div { stroke: color-mix(in srgb, var(--nc) 55%, transparent); stroke-width: 1.2; }
-/* where a child hangs from: one dot on the bottom edge of a parent for each child, on the lines between its keys */
-.bt-ptr { fill: var(--nc); stroke: #1c1c1f; stroke-width: 2.2; }
 
 /* the names of the levels: a faint band behind each row, a dot and the name at its left end */
 .bt-band { fill: rgba(255, 255, 255, 0.028); }

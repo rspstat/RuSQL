@@ -133,7 +133,6 @@ function TreeSvg({ frame, previous, room }: { frame: Frame; previous: Frame | nu
                   <text className="bt-key" x={PAD + i * KEY_W + KEY_W / 2} y={KEY_H / 2 + 7} textAnchor="middle">{k}</text>
                 </g>
               ))}
-              {!n.leaf && n.children.map((_, i) => <circle key={`ptr-${i}`} className="bt-ptr" cx={PAD + i * KEY_W} cy={KEY_H} r={4.6} />)}
             </g>
           </g>
         );
