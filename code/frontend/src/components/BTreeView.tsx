@@ -17,36 +17,44 @@ function loadLang(): Lang {
   try { return localStorage.getItem(LANG_KEY) === "en" ? "en" : "ko"; } catch { return "ko"; }
 }
 
-const KEY_W = 56, KEY_H = 48, PAD = 9, GAP = 38, LEVEL_H = 132, MARGIN = 32;
+const KEY_W = 52, KEY_H = 48, PAD = 8, GAP = 28, LEVEL_H = 124, MARGIN = 36, GUTTER = 96;
 // a tree that is narrower than its board is drawn up to MAX_ZOOM times larger (a small tree fills the stage); one that is wider is drawn smaller to fit, down to MIN_ZOOM,
 // and scrolls beyond that
 const MAX_ZOOM = 1.6, MIN_ZOOM = 0.62;
 const STEP_MS = 1300;
 
 interface Pos { x: number; y: number; w: number }
-interface Laid { pos: Record<number, Pos>; width: number; height: number }
+interface Laid { pos: Record<number, Pos>; width: number; height: number; levels: number }
 
 const widthOf = (keys: number) => Math.max(1, keys) * KEY_W + 2 * PAD;
+const rowY = (depth: number) => MARGIN + depth * LEVEL_H;
 
-// leaves left to right, every internal node centred over its children
+// leaves left to right, every internal node centred over its children; the left GUTTER is where the names of the levels stand
 function layout(snap: Snap): Laid {
   const pos: Record<number, Pos> = {};
-  let cursor = MARGIN, levels = 0;
+  let cursor = GUTTER, levels = 0;
   const place = (id: number, depth: number) => {
     levels = Math.max(levels, depth + 1);
     const n = snap.nodes[id];
     const w = widthOf(n.keys.length);
     if (n.leaf) {
-      pos[id] = { x: cursor, y: MARGIN + depth * LEVEL_H, w };
+      pos[id] = { x: cursor, y: rowY(depth), w };
       cursor += w + GAP;
       return;
     }
     n.children.forEach(c => place(c, depth + 1));
     const first = pos[n.children[0]], last = pos[n.children[n.children.length - 1]];
-    pos[id] = { x: (first.x + last.x + last.w) / 2 - w / 2, y: MARGIN + depth * LEVEL_H, w };
+    pos[id] = { x: (first.x + last.x + last.w) / 2 - w / 2, y: rowY(depth), w };
   };
   place(snap.root, 0);
-  return { pos, width: cursor - GAP + MARGIN, height: MARGIN * 2 + (levels - 1) * LEVEL_H + KEY_H };
+  return { pos, width: cursor - GAP + MARGIN, height: MARGIN * 2 + (levels - 1) * LEVEL_H + KEY_H, levels };
+}
+
+// a branch: down from the line between two keys of the parent, along a bus half way, down into the top of the child -- straight lines, the corners a little rounded
+function branch(x1: number, y1: number, x2: number, y2: number): string {
+  const ym = y1 + (y2 - y1) / 2, dx = x2 - x1, dir = dx < 0 ? -1 : 1;
+  const r = Math.min(9, Math.abs(dx) / 2, (y2 - y1) / 2 - 1);
+  return `M${x1} ${y1} V${ym - r} Q${x1} ${ym} ${x1 + dir * r} ${ym} H${x2 - dir * r} Q${x2} ${ym} ${x2} ${ym + r} V${y2}`;
 }
 
 const KIND_LABEL: Record<FrameKind, { en: string; ko: string }> = {
@@ -70,22 +78,40 @@ const IDEAS: { c: string; title: { en: string; ko: string }; text: { en: string;
 ];
 
 function TreeSvg({ frame, previous, room }: { frame: Frame; previous: Frame | null; room: number }) {
+  const t = useT();
   const { snap } = frame;
   const laid = useMemo(() => layout(snap), [snap]);
   const fresh = previous ? new Set(Object.keys(snap.nodes).filter(id => !(id in previous.snap.nodes)).map(Number)) : new Set<number>();
   const hi = new Set(frame.hi);
   const ids = Object.keys(snap.nodes).map(Number);
-  const boardW = Math.max(laid.width, 420), shift = (boardW - laid.width) / 2;
+  const boardW = Math.max(laid.width, 520), shift = (boardW - laid.width) / 2;
   const zoom = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, room / boardW));
   const boardH = Math.max(laid.height, 200);
+  // the name of each level: the root, the nodes between, the leaves
+  const tier = (d: number): { name: { en: string; ko: string }; cls: string } =>
+    laid.levels === 1 ? { name: { en: "ROOT · LEAF", ko: "루트 · 잎" }, cls: "bt-leaf" }
+      : d === 0 ? { name: { en: "ROOT", ko: "루트" }, cls: "bt-root" }
+      : d === laid.levels - 1 ? { name: { en: "LEAF", ko: "잎" }, cls: "bt-leaf" }
+      : { name: { en: "INTERNAL", ko: "안쪽 노드" }, cls: "bt-inner" };
   return (
     <svg className={`bt-svg bt-k-${frame.kind}`} viewBox={`${-shift} 0 ${boardW} ${boardH}`} preserveAspectRatio="xMidYMin meet" style={{ width: boardW * zoom, height: boardH * zoom }}>
       <defs>
         <marker id="bt-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0 L10 5 L0 10 z" fill="#4ec9b0" /></marker>
-        <linearGradient id="bt-grad-sheen" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="#ffffff" stopOpacity="0.2" /><stop offset="55%" stopColor="#ffffff" stopOpacity="0" /></linearGradient>
-        <linearGradient id="bt-grad-leaf" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="#35564d" /><stop offset="100%" stopColor="#233b35" /></linearGradient>
-        <linearGradient id="bt-grad-inner" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="#3b3a58" /><stop offset="100%" stopColor="#272740" /></linearGradient>
+        <linearGradient id="bt-grad-sheen" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="#ffffff" stopOpacity="0.16" /><stop offset="60%" stopColor="#ffffff" stopOpacity="0" /></linearGradient>
+        <linearGradient id="bt-grad-leaf" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="#2d4a43" /><stop offset="100%" stopColor="#1c2f2b" /></linearGradient>
+        <linearGradient id="bt-grad-inner" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="#38335a" /><stop offset="100%" stopColor="#221f38" /></linearGradient>
+        <linearGradient id="bt-grad-root" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="#52442a" /><stop offset="100%" stopColor="#2f2819" /></linearGradient>
       </defs>
+      {Array.from({ length: laid.levels }, (_, d) => {
+        const y = rowY(d), info = tier(d);
+        return (
+          <g key={`tier-${d}`} className={`bt-tier-row ${info.cls}`}>
+            <rect className="bt-band" x={-shift} y={y - 22} width={boardW} height={KEY_H + 44} />
+            <circle className="bt-tier-dot" cx={-shift + 22} cy={y + KEY_H / 2} r={4} />
+            <text className="bt-tier" x={-shift + 34} y={y + KEY_H / 2 + 4}>{t(info.name)}</text>
+          </g>
+        );
+      })}
       {ids.map(id => {
         const n = snap.nodes[id], p = laid.pos[id];
         if (!p) return null;
@@ -93,31 +119,34 @@ function TreeSvg({ frame, previous, room }: { frame: Frame; previous: Frame | nu
           const q = laid.pos[c];
           const x1 = p.x + PAD + i * KEY_W, y1 = p.y + KEY_H, x2 = q.x + q.w / 2, y2 = q.y;
           const hot = hi.has(id) && hi.has(c); // (an edge between two nodes the step is about: the walk down)
-          return <path key={`${id}-${c}`} className={`bt-edge ${hot ? "bt-edge-hot" : ""}`} style={{ d: `path("M${x1} ${y1} L${x2} ${y2}")` } as React.CSSProperties} />;
+          return <path key={`${id}-${c}`} className={`bt-edge ${hot ? "bt-edge-hot" : ""}`} style={{ d: `path("${branch(x1, y1, x2, y2)}")` } as React.CSSProperties} />;
         });
       })}
       {ids.map(id => {
         const n = snap.nodes[id], p = laid.pos[id];
         if (!p || !n.leaf || n.next === null || !laid.pos[n.next]) return null;
         const q = laid.pos[n.next];
-        return <line key={`next-${id}`} className="bt-link" x1={p.x + p.w} y1={p.y + KEY_H / 2} x2={q.x - 2} y2={q.y + KEY_H / 2} markerEnd="url(#bt-arrow)" />;
+        return <line key={`next-${id}`} className="bt-link" x1={p.x + p.w + 2} y1={p.y + KEY_H / 2} x2={q.x - 2} y2={q.y + KEY_H / 2} markerEnd="url(#bt-arrow)" />;
       })}
       {ids.map(id => {
         const n = snap.nodes[id], p = laid.pos[id];
         if (!p) return null;
-        const cls = ["bt-node", n.leaf ? "bt-leaf" : "bt-inner", hi.has(id) ? `bt-hi bt-k-${frame.kind}` : ""].join(" ");
+        const kind = n.leaf ? "bt-leaf" : id === snap.root ? "bt-root" : "bt-inner";
+        const cls = ["bt-node", kind, hi.has(id) ? `bt-hi bt-k-${frame.kind}` : ""].join(" ");
         return (
           <g key={id} className={cls} style={{ transform: `translate(${p.x}px, ${p.y}px)` }}>
             <g className={fresh.has(id) ? "bt-pop" : ""}>
               <rect className="bt-box" width={p.w} height={KEY_H} />
               <rect className="bt-sheen" width={p.w - 4} height={KEY_H / 2} x={2} y={2} />
-              {n.keys.length === 0 && <text className="bt-empty" x={p.w / 2} y={KEY_H / 2 + 7} textAnchor="middle">∅</text>}
+              <rect className="bt-accent" width={p.w} height={4} />
+              {n.keys.length === 0 && <text className="bt-empty" x={p.w / 2} y={KEY_H / 2 + 8} textAnchor="middle">∅</text>}
               {n.keys.map((k, i) => (
                 <g key={i}>
-                  {i > 0 && <line className="bt-div" x1={PAD + i * KEY_W} y1={8} x2={PAD + i * KEY_W} y2={KEY_H - 8} />}
-                  <text className="bt-key" x={PAD + i * KEY_W + KEY_W / 2} y={KEY_H / 2 + 7.5} textAnchor="middle">{k}</text>
+                  {i > 0 && <line className="bt-div" x1={PAD + i * KEY_W} y1={11} x2={PAD + i * KEY_W} y2={KEY_H - 7} />}
+                  <text className="bt-key" x={PAD + i * KEY_W + KEY_W / 2} y={KEY_H / 2 + 8} textAnchor="middle">{k}</text>
                 </g>
               ))}
+              {!n.leaf && n.children.map((_, i) => <circle key={`ptr-${i}`} className="bt-ptr" cx={PAD + i * KEY_W} cy={KEY_H} r={4.6} />)}
             </g>
           </g>
         );

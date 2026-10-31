@@ -61,15 +61,25 @@
 @keyframes bt-bob { 50% { transform: translateY(-6px); opacity: 0.65; } }
 
 .bt-node { transition: transform 0.55s cubic-bezier(0.3, 0.9, 0.3, 1); }
-.bt-box { fill: url(#bt-grad-inner); stroke: #6b6b8c; stroke-width: 2; filter: drop-shadow(0 6px 10px rgba(0, 0, 0, 0.5)); transition: fill 0.3s ease, stroke 0.3s ease; }
-/* a soft highlight on the upper half of a node, as on the cylinders of the Diagram page */
+/* the three kinds of node, each in a color of its own: the root gold, the nodes between violet, the leaves teal */
+.bt-root { --nc: #e2b86b; } .bt-inner { --nc: #a98bf5; } .bt-leaf { --nc: #4ec9b0; }
+.bt-box { fill: url(#bt-grad-inner); stroke: color-mix(in srgb, var(--nc) 58%, #33333b); stroke-width: 1.6; filter: drop-shadow(0 6px 10px rgba(0, 0, 0, 0.5)); transition: fill 0.3s ease, stroke 0.3s ease; }
+.bt-leaf .bt-box { fill: url(#bt-grad-leaf); }
+.bt-root .bt-box { fill: url(#bt-grad-root); }
+/* a strip of the node's color along its top, and a soft highlight under it */
+.bt-accent { fill: var(--nc); }
 .bt-sheen { fill: url(#bt-grad-sheen); pointer-events: none; }
-.bt-leaf .bt-box { fill: url(#bt-grad-leaf); stroke: #5aa08c; }
-.bt-key { fill: #f6f6f8; font-size: 22px; font-weight: 650; font-family: Consolas, 'Segoe UI', monospace; }
+.bt-key { fill: #f7f7f9; font-size: 21px; font-weight: 650; font-family: Consolas, 'Segoe UI', monospace; }
 .bt-empty { fill: #7a7a82; font-size: 24px; }
-.bt-div { stroke: rgba(255, 255, 255, 0.2); stroke-width: 1.4; }
+.bt-div { stroke: color-mix(in srgb, var(--nc) 38%, transparent); stroke-width: 1.2; }
+/* where a child hangs from: one dot on the bottom edge of a parent for each child, on the lines between its keys */
+.bt-ptr { fill: var(--nc); stroke: #1c1c1f; stroke-width: 2.2; }
 
-.bt-edge { fill: none; stroke: #77778a; stroke-width: 2.2; transition: d 0.55s ease, stroke 0.3s ease; }
+/* the names of the levels: a faint band behind each row, a dot and the name at its left end */
+.bt-band { fill: rgba(255, 255, 255, 0.028); }
+.bt-tier-dot { fill: var(--nc); filter: drop-shadow(0 0 5px var(--nc)); }
+.bt-tier { fill: #9a9aa6; font-size: 13.5px; font-weight: 650; letter-spacing: 1px; }
+.bt-edge { fill: none; stroke: #6f6f86; stroke-width: 2; stroke-linejoin: round; transition: d 0.55s ease, stroke 0.3s ease; }
 /* the walk down: bright dashes run along the edges the step is about */
 .bt-edge-hot { stroke: var(--k); stroke-width: 3.2; stroke-dasharray: 7 8; animation: bt-flow 0.7s linear infinite; filter: drop-shadow(0 0 4px var(--k)); }
 .bt-link { stroke: #4ec9b0; stroke-width: 2.4; stroke-dasharray: 6 5; opacity: 0.9; animation: bt-flow 1.1s linear infinite; }
