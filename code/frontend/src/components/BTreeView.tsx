@@ -20,7 +20,7 @@ function loadLang(): Lang {
 const KEY_W = 52, KEY_H = 48, PAD = 8, GAP = 28, LEVEL_H = 190, MARGIN = 36, GUTTER = 96;
 // a tree that is narrower than its board is drawn up to MAX_ZOOM times larger (a small tree fills the stage); one that is wider is drawn smaller to fit, down to MIN_ZOOM,
 // and scrolls beyond that
-const MAX_ZOOM = 1.6, MIN_ZOOM = 0.62;
+const MAX_ZOOM = 1.1, MIN_ZOOM = 0.62;
 const STEP_MS = 1300;
 
 interface Pos { x: number; y: number; w: number }

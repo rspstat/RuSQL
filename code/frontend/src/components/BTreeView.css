@@ -51,9 +51,9 @@
   position: absolute;
   left: 0;
   right: 0;
-  top: 190px;
+  top: 250px;
   text-align: center;
-  font-size: 15px;
+  font-size: 14px;
   color: #77777e;
   pointer-events: none;
   animation: bt-bob 2.6s ease-in-out infinite;
@@ -78,7 +78,7 @@
 /* the names of the levels: a faint band behind each row, a dot and the name at its left end */
 .bt-band { fill: rgba(255, 255, 255, 0.028); }
 .bt-tier-dot { fill: var(--nc); filter: drop-shadow(0 0 5px var(--nc)); }
-.bt-tier { fill: #9a9aa6; font-size: 13.5px; font-weight: 650; letter-spacing: 1px; }
+.bt-tier { fill: #9a9aa6; font-size: 12.5px; font-weight: 650; letter-spacing: 1px; }
 .bt-edge { fill: none; stroke: #6f6f86; stroke-width: 2; stroke-linejoin: round; transition: d 0.55s ease, stroke 0.3s ease; }
 /* the walk down: bright dashes run along the edges the step is about */
 .bt-edge-hot { stroke: var(--k); stroke-width: 3.2; stroke-dasharray: 7 8; animation: bt-flow 0.7s linear infinite; filter: drop-shadow(0 0 4px var(--k)); }
