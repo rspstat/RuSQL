@@ -14,13 +14,14 @@ export interface TableCtxMenuState { x: number; y: number; table: string; }
 export interface ViewCtxMenuState { x: number; y: number; view: string; }
 export interface IndexCtxMenuState { x: number; y: number; index: string; table: string; kind: "single" | "composite" | "hash"; }
 
-export function DbContextMenu({ menu, onClose, refreshSidebar, setEditorQuery, confirmThenRun, runDbCtxQuery }: {
+export function DbContextMenu({ menu, onClose, refreshSidebar, setEditorQuery, confirmThenRun, runDbCtxQuery, onCompareSchema }: {
   menu: DbCtxMenuState;
   onClose: () => void;
   refreshSidebar: () => Promise<void>;
   setEditorQuery: (q: string) => void;
   confirmThenRun: (title: string, message: string, action: () => void) => void;
   runDbCtxQuery: (q: string) => void;
+  onCompareSchema: (db: string) => void;
 }) {
   return (
     <>
@@ -40,6 +41,11 @@ export function DbContextMenu({ menu, onClose, refreshSidebar, setEditorQuery, c
             `CREATE TABLE ${menu.db}.table_name (\n  id INT PRIMARY KEY AUTO INCREMENT,\n  name VARCHAR(50) NOT NULL\n);`
           );
         }}>Create Table...</div>
+        <div onClick={() => {
+          const db = menu.db;
+          onClose();
+          onCompareSchema(db);
+        }}>Compare Schema...</div>
         <div className="ctx-divider" />
         <div onClick={() => {
           navigator.clipboard.writeText(menu.db);

@@ -1023,6 +1023,10 @@ struct Activity {
     locks:        ActivityTable,
     waits:        ActivityTable,
     deadlocks:    ActivityTable,
+    // the slow query log (R59): the newest statements that ran for at least long_query_time, the two switches, and how many statements were that slow
+    slow:          ActivityTable,
+    slow_settings: ActivityTable,
+    slow_count:    ActivityTable,
 }
 
 fn activity_table(conn: &mut EngineConn, sql: &str) -> ActivityTable {
@@ -1061,10 +1065,13 @@ fn get_activity(state: State<AppState>) -> Activity {
     match guard.as_mut() {
         Some(conn) => Activity {
             sessions:     activity_table(conn, "SELECT ID, USER, HOST, DB, COMMAND, TIME, INFO FROM information_schema.processlist ORDER BY ID;"),
-            transactions: activity_table(conn, "SELECT TRX_ID, TRX_STATE, TRX_ROWS_LOCKED, TRX_WAITING_FOR FROM information_schema.innodb_trx;"),
+            transactions: activity_table(conn, "SELECT TRX_ID, TRX_STATE, TRX_MYSQL_THREAD_ID, TRX_ROWS_LOCKED, TRX_WAITING_FOR, TIMESTAMPDIFF(SECOND, TRX_STARTED, NOW()) AS TRX_AGE FROM information_schema.innodb_trx;"),
             locks:        activity_table(conn, "SELECT LOCK_TRX_ID, LOCK_TABLE, LOCK_DATA FROM information_schema.innodb_locks;"),
             waits:        activity_table(conn, "SELECT REQUESTING_TRX_ID, BLOCKING_TRX_ID FROM information_schema.innodb_lock_waits;"),
             deadlocks:    activity_table(conn, "SELECT REQUESTING_TRX_ID, BLOCKING_TRX_ID FROM information_schema.innodb_deadlocks;"),
+            slow:          activity_table(conn, "SELECT START_TIME, QUERY_TIME, ROWS_SENT, DB, THREAD_ID, SQL_TEXT FROM information_schema.slow_log ORDER BY START_TIME DESC LIMIT 15;"),
+            slow_settings: activity_table(conn, "SELECT @@slow_query_log AS LOG_ON, @@long_query_time AS SECONDS;"),
+            slow_count:    activity_table(conn, "SHOW GLOBAL STATUS LIKE 'Slow_queries';"),
         },
         None => Activity::default(),
     }

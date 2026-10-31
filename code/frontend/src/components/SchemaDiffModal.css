@@ -1,0 +1,28 @@
+/* Compare schemas (SchemaDiffModal.tsx) */
+.sd-modal { width: 760px; max-width: 94vw; max-height: 88vh; display: flex; flex-direction: column; background: #252526; border: 1px solid #454545; border-radius: 6px; color: #d4d4d4; font-size: 12px; box-shadow: 0 10px 40px rgba(0,0,0,0.5); }
+.sd-header { display: flex; align-items: center; justify-content: space-between; padding: 10px 14px; border-bottom: 1px solid #3c3c3c; font-weight: 700; color: #4ec9b0; }
+.sd-close { background: transparent; border: none; color: #999; cursor: pointer; font-size: 14px; }
+.sd-close:hover { color: #fff; }
+.sd-body { padding: 12px 14px; overflow-y: auto; flex: 1; }
+.sd-pick { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 10px; margin-bottom: 10px; }
+.sd-pick label { display: flex; flex-direction: column; gap: 3px; color: #9cdcfe; font-size: 11px; }
+.sd-pick select { background: #2d2d2d; color: #d4d4d4; border: 1px solid #444; border-radius: 3px; padding: 3px 6px; min-width: 150px; }
+.sd-arrow { color: #858585; padding-bottom: 5px; }
+.sd-hint, .sd-dim { color: #858585; font-size: 11px; }
+.sd-error { margin: 8px 0; padding: 6px 8px; background: #3a1d1d; border: 1px solid #c0392b; border-radius: 3px; color: #f48771; }
+.sd-same { margin: 12px 0; padding: 10px; background: #1e2a22; border: 1px solid #2e5a3d; border-radius: 3px; color: #4ec9b0; }
+.sd-summary { display: flex; flex-direction: column; gap: 3px; margin-bottom: 8px; }
+.sd-changes { display: flex; flex-direction: column; gap: 8px; margin-bottom: 10px; }
+.sd-table { padding: 6px 8px; background: #1e1e1e; border: 1px solid #333; border-radius: 3px; font-family: 'Consolas', monospace; }
+.sd-table-name { color: #9cdcfe; font-weight: 700; margin-bottom: 3px; }
+.sd-add { color: #4ec9b0; }
+.sd-del { color: #f48771; }
+.sd-mod { color: #d7ba7d; }
+.sd-sql-title { color: #4ec9b0; font-weight: 700; font-size: 11px; margin-bottom: 4px; }
+.sd-sql { margin: 0; padding: 8px 10px; background: #1e1e1e; border: 1px solid #333; border-radius: 3px; color: #ce9178; font-family: 'Consolas', monospace; font-size: 12px; white-space: pre-wrap; word-break: break-word; max-height: 240px; overflow-y: auto; }
+.sd-footer { display: flex; align-items: center; gap: 8px; padding: 10px 14px; border-top: 1px solid #3c3c3c; }
+.sd-btn { background: #2d2d2d; color: #d4d4d4; border: 1px solid #454545; border-radius: 3px; padding: 4px 12px; font-size: 12px; cursor: pointer; }
+.sd-btn:hover:not(:disabled) { background: #3a3a3a; }
+.sd-btn:disabled { opacity: 0.4; cursor: default; }
+.sd-primary { background: #0e639c; border-color: #1177bb; color: #fff; }
+.sd-primary:hover:not(:disabled) { background: #1177bb; }

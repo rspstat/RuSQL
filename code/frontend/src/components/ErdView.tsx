@@ -7,7 +7,7 @@
 // by App.tsx (the drag mousemove/mouseup effect that mutates erdPositions/erdPan/
 // erdDataHeight during a drag remains in App.tsx since it isn't part of this render).
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import type { Dispatch, RefObject, SetStateAction } from "react";
 import type { ColumnDetail, QueryResult } from "../types";
 import { ERD_CARD_W, ERD_COL_H, ERD_HEADER_H, erdOrthPath, parseRef, unqualify, type ErdPos } from "../lib/erd";
@@ -62,6 +62,48 @@ export default function ErdView(props: Props) {
   } = props;
   // the foreign key being added or edited (the modal builds the ALTER TABLE and shows it before it is sent)
   const [fkTarget, setFkTarget] = useState<FkTarget | null>(null);
+  // a relationship being drawn: drag from the dot at the end of a column row to another column (the child column to the parent column); x2 / y2 follow the pointer
+  const [link, setLink] = useState<{ table: string; column: string; x1: number; y1: number; x2: number; y2: number; over: { table: string; column: string } | null } | null>(null);
+  const linking = link !== null;
+  const startTable = link?.table, startColumn = link?.column;
+
+  useEffect(() => {
+    if (!linking) return;
+    const toCanvas = (e: MouseEvent) => {
+      const rect = erdCanvasRef.current?.getBoundingClientRect();
+      return { x: (e.clientX - (rect?.left ?? 0) - erdPan.x) / erdZoom, y: (e.clientY - (rect?.top ?? 0) - erdPan.y) / erdZoom };
+    };
+    const columnAt = (e: MouseEvent) => {
+      const el = (document.elementFromPoint(e.clientX, e.clientY) as HTMLElement | null)?.closest<HTMLElement>("[data-erd-column]");
+      const table = el?.getAttribute("data-erd-table"), column = el?.getAttribute("data-erd-column");
+      return table && column && !(table === startTable && column === startColumn) ? { table, column } : null;
+    };
+    const onMove = (e: MouseEvent) => { const p = toCanvas(e); setLink(l => (l ? { ...l, x2: p.x, y2: p.y, over: columnAt(e) } : l)); };
+    const onUp = (e: MouseEvent) => {
+      const target = columnAt(e);
+      document.body.style.userSelect = "";
+      document.body.style.cursor = "";
+      setLink(null);
+      if (target && startTable && startColumn) setFkTarget({ kind: "add", table: startTable, childColumn: startColumn, parentTable: target.table, parentColumn: target.column });
+      setTimeout(() => { erdCardWasDragged.current = false; erdCanvasWasDragged.current = false; }, 0); // (the click that ends a drag selects no card and clears no selection)
+    };
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+    return () => { window.removeEventListener("mousemove", onMove); window.removeEventListener("mouseup", onUp); };
+  }, [linking, startTable, startColumn, erdPan.x, erdPan.y, erdZoom, erdCanvasRef, erdCardWasDragged, erdCanvasWasDragged]);
+
+  const startLink = (e: React.MouseEvent, table: string, column: string, colIdx: number) => {
+    const pos = erdPositions[table];
+    if (!pos) return;
+    e.stopPropagation();
+    e.preventDefault();
+    const x1 = pos.x + ERD_CARD_W, y1 = pos.y + ERD_HEADER_H + colIdx * ERD_COL_H + ERD_COL_H / 2;
+    erdCardWasDragged.current = true;
+    erdCanvasWasDragged.current = true;
+    document.body.style.userSelect = "none";
+    document.body.style.cursor = "crosshair";
+    setLink({ table, column, x1, y1, x2: x1, y2: y1, over: null });
+  };
 
   return (
     <div className="erd-view">
@@ -281,10 +323,12 @@ export default function ErdView(props: Props) {
                     <span className="erd-card-name">{tableName}</span>
                     <span className="erd-card-comment">comment</span>
                   </div>
-                  {cols.map(col => (
+                  {cols.map((col, colIdx) => (
                     <div
                       key={col.name}
-                      className={`erd-col-row${col.is_pk ? " erd-pk" : col.fk_ref ? " erd-fk" : ""}`}
+                      data-erd-table={tableName}
+                      data-erd-column={col.name}
+                      className={`erd-col-row${col.is_pk ? " erd-pk" : col.fk_ref ? " erd-fk" : ""}${link && link.table === tableName && link.column === col.name ? " erd-col-from" : ""}${link?.over?.table === tableName && link.over.column === col.name ? " erd-col-drop" : ""}`}
                     >
                       <span className="erd-col-key">
                         {(col.is_pk || col.fk_ref) && (
@@ -298,11 +342,19 @@ export default function ErdView(props: Props) {
                       <span className={`erd-badge${col.is_not_null ? " on-nn" : ""}`}>{col.is_not_null ? "N-N" : "NULL"}</span>
                       <span className={`erd-badge${col.is_unique ? " on-uq" : ""}`}>UQ</span>
                       <span className={`erd-badge${col.is_auto_inc ? " on-ai" : ""}`}>AI</span>
+                      <span className="erd-col-handle" title="Drag to a column of another table to add a foreign key (this column is the child)" onMouseDown={e => startLink(e, tableName, col.name, colIdx)} />
                     </div>
                   ))}
                 </div>
               );
             })}
+            {link && (
+              <svg style={{ position: "absolute", top: 0, left: 0, width: 1, height: 1, overflow: "visible", pointerEvents: "none", zIndex: 30 }}>
+                <path d={`M${link.x1} ${link.y1} C${link.x1 + 70} ${link.y1}, ${link.x2 - 70} ${link.y2}, ${link.x2} ${link.y2}`} fill="none" stroke="#4ec9b0" strokeWidth="2" strokeDasharray="6 4" />
+                <circle cx={link.x1} cy={link.y1} r="4.5" fill="#4ec9b0" />
+                <circle cx={link.x2} cy={link.y2} r="4" fill={link.over ? "#4ec9b0" : "#858585"} />
+              </svg>
+            )}
           </div>
         )}
       </div>

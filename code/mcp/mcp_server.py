@@ -424,21 +424,34 @@ def get_indexes(table: str, database: str = "") -> str:
 # ─── suggest_indexes ────────────────────────────────────────────────
 # Reads the query (a heuristic reading with regular expressions, there is no SQL parser in this process), the columns and indexes of its tables (information_schema),
 # the shape of the data (ANALYZE TABLE: how many distinct values each column has) and, for a SELECT, the plan the engine runs (EXPLAIN ANALYZE), and says which
-# index would let the query stop scanning. It never creates anything: the answer holds the CREATE INDEX statements for the user to run.
+# index would let the query stop scanning. The statement is read as blocks (R59): the main query, each CTE, each derived table and each subquery (IN, EXISTS, scalar,
+# also a correlated one) is read on its own, and an OR is read branch by branch. By default it creates nothing: the answer holds the CREATE INDEX statements for the user
+# to run; with verify=True it tries them (a temporary index, EXPLAIN ANALYZE before and after, the index dropped again) and shows what changed.
 _SQL_WORDS = {"WHERE", "ON", "JOIN", "LEFT", "RIGHT", "INNER", "OUTER", "CROSS", "FULL", "NATURAL", "GROUP", "ORDER", "LIMIT", "HAVING", "UNION", "SET", "USING",
               "VALUES", "SELECT", "FROM", "AS", "AND", "OR", "NOT", "NULL", "TRUE", "FALSE", "DISTINCT", "OFFSET", "FOR", "WINDOW", "LATERAL", "STRAIGHT_JOIN"}
 _CLAUSE_END = r"(?=\bWHERE\b|\bGROUP\s+BY\b|\bORDER\s+BY\b|\bHAVING\b|\bLIMIT\b|\bUNION\b|\bFOR\s+UPDATE\b|\bWINDOW\b|$)"
 _IDENT = r"`?[A-Za-z_][\w$]*`?(?:\.`?[A-Za-z_][\w$]*`?){0,2}"
 _SMALL_TABLE_ROWS = 100       # a scan of fewer rows is cheap: no index suggested
 _NOT_NARROWING = 0.2          # an index that leaves more than this share of the table to read does not help
+_VERIFY_MAX_ROWS = 200000     # verify=True builds an index: not on a table bigger than this
+_VERIFY_MAX_INDEXES = 3       # ... and tries at most this many
+_VERIFY_RUNS = 3              # EXPLAIN ANALYZE runs per measurement (the median is kept)
 
 
 def _strip_sql(sql: str) -> tuple[str, list[str]]:
-    """The statement without comments, strings and extra blanks; and the LIKE patterns, which are strings the answer depends on."""
+    """The statement without comments, strings and extra blanks. A LIKE pattern is the one string the answer depends on: it stays as 'p' (a pattern that starts with a
+    character, an index can serve it) or 'w' (it starts with a wildcard); the second value is the patterns themselves, in the order they were written."""
     like_patterns = re.findall(r"\bLIKE\s+'((?:[^']|'')*)'", sql, flags=re.IGNORECASE)
     s = re.sub(r"/\*.*?\*/", " ", sql, flags=re.S)
     s = re.sub(r"--[^\n]*", " ", s)
-    s = re.sub(r"'(?:[^']|'')*'", "''", s)
+
+    def blank(m):
+        if m.group(1) is not None:
+            pattern = m.group(2)
+            return m.group(1) + ("'w'" if not pattern or pattern[0] in "%_" else "'p'")
+        return "''"
+
+    s = re.sub(r"(\bLIKE\s+)'((?:[^']|'')*)'|'(?:[^']|'')*'", blank, s, flags=re.IGNORECASE)
     s = re.sub(r'"(?:[^"]|"")*"', '""', s)
     return re.sub(r"\s+", " ", s).strip().rstrip(";").strip(), like_patterns
 
@@ -448,10 +461,13 @@ def _bare(name: str) -> str:
 
 
 def _query_tables(stripped: str) -> list[tuple[str, str]]:
-    """(table, alias) of every table the statement names (FROM, JOIN, comma lists, UPDATE, DELETE FROM); the alias is the table's own name when it has none."""
+    """(table, alias) of every table the statement names (FROM, JOIN, comma lists, UPDATE, DELETE FROM); the alias is the table's own name when it has none.
+    A subquery that stands in the place of a table is cut out of the text as __SQn__ and is no table."""
     found: list[tuple[str, str]] = []
 
     def add(table: str, alias: str | None):
+        if table.startswith("__SQ"):
+            return
         alias = alias if alias and alias.upper() not in _SQL_WORDS else None
         entry = (_bare(table), _bare(alias) if alias else _bare(table))
         if entry not in found:
@@ -482,16 +498,16 @@ def _join_conditions(stripped: str) -> list[str]:
     return [m.group(1).strip() for m in re.finditer(r"\bON\b\s+(.+?)(?=\b(?:INNER|LEFT|RIGHT|FULL|CROSS|NATURAL)?\s*(?:OUTER\s+)?JOIN\b|\bWHERE\b|\bGROUP\s+BY\b|\bORDER\s+BY\b|\bHAVING\b|\bLIMIT\b|$)", stripped, flags=re.IGNORECASE)]
 
 
-def _conjuncts(clause: str) -> list[str]:
-    """The AND-ed tests of a WHERE / ON (an AND inside BETWEEN or inside parentheses is not a split)."""
+def _split_top_level(clause: str, word: str) -> list[str]:
+    """The pieces of a WHERE / ON split at the AND (or OR) that is not inside parentheses (an AND inside BETWEEN is not a split)."""
     text = re.sub(r"(\bBETWEEN\s+\S+)\s+AND\s+", r"\1 __AND__ ", clause, flags=re.IGNORECASE)
     parts, depth, cur = [], 0, ""
-    for token in re.split(r"(\s+AND\s+|\(|\))", text, flags=re.IGNORECASE):
+    for token in re.split(rf"(\s+{word}\s+|\(|\))", text, flags=re.IGNORECASE):
         if token == "(":
             depth += 1
         elif token == ")":
             depth -= 1
-        if depth == 0 and re.fullmatch(r"\s+AND\s+", token, flags=re.IGNORECASE):
+        if depth == 0 and re.fullmatch(rf"\s+{word}\s+", token, flags=re.IGNORECASE):
             parts.append(cur.strip())
             cur = ""
         else:
@@ -500,14 +516,40 @@ def _conjuncts(clause: str) -> list[str]:
     return [p.replace("__AND__", "AND") for p in parts if p]
 
 
-def _read_predicate(test: str, like_patterns: list[str]) -> dict:
-    """One test of a WHERE: {"kind": eq | in | range | like_prefix | like_any | func | or | other, "columns": [names as written]}."""
-    t = test.strip()
-    while t.startswith("(") and t.endswith(")") and t.count("(") == t.count(")"):
+def _unparen(t: str) -> str:
+    t = t.strip()
+    while t.startswith("(") and t.endswith(")") and t.count("(") == t.count(")") and _matching_paren(t, 0) == len(t) - 1:
         t = t[1:-1].strip()
-    columns = [c for c in re.findall(_IDENT, t) if c.upper() not in _SQL_WORDS]
-    if re.search(r"\bOR\b", t, flags=re.IGNORECASE):
+    return t
+
+
+def _conjuncts(clause: str) -> list[str]:
+    """The AND-ed tests of a WHERE / ON (an AND inside BETWEEN is not a split; a parenthesised group of ANDs is opened, an OR stays one test)."""
+    out: list[str] = []
+    for part in _split_top_level(clause, "AND"):
+        inner = _unparen(part)
+        pieces = _split_top_level(inner, "AND")
+        if inner != part and len(pieces) > 1 and len(_split_top_level(inner, "OR")) == 1:
+            out.extend(_conjuncts(inner))
+        else:
+            out.append(part)
+    return out
+
+
+def _read_predicate(test: str) -> dict:
+    """One test of a WHERE: {"kind": eq | in | range | like_prefix | like_any | func | or | join | subquery | other, "columns": [names as written]}."""
+    t = _unparen(test)
+    columns = [c for c in re.findall(_IDENT, t) if c.upper() not in _SQL_WORDS and not c.startswith("__SQ")]
+    if len(_split_top_level(t, "OR")) > 1:
         return {"kind": "or", "columns": columns}
+    m = re.match(rf"^({_IDENT})\s+(NOT\s+)?(IN|ANY|SOME|ALL)\s*\(?\s*__SQ\d+__", t, flags=re.IGNORECASE)
+    if m:  # x IN (SELECT ...): the column is searched by the values the subquery gives
+        return {"kind": "other" if m.group(2) else "in", "columns": [m.group(1)]}
+    m = re.match(rf"^({_IDENT})\s*(<=>|<>|!=|>=|<=|=|>|<)\s*\(?\s*__SQ\d+__", t)
+    if m:  # x = (SELECT ...)
+        return {"kind": "other" if m.group(2) in ("<>", "!=") else ("eq" if m.group(2) in ("=", "<=>") else "range"), "columns": [m.group(1)]}
+    if re.match(r"^(NOT\s+)?EXISTS\b", t, flags=re.IGNORECASE):
+        return {"kind": "subquery", "columns": []}
     m = re.match(rf"^({_IDENT})\s*(<=>|<>|!=|>=|<=|=|>|<)\s*(.+)$", t)
     if m:
         left, op, right = m.group(1), m.group(2), m.group(3).strip()
@@ -528,8 +570,7 @@ def _read_predicate(test: str, like_patterns: list[str]) -> dict:
             return {"kind": "range", "columns": [left]}
         if word == "IS":
             return {"kind": "eq" if re.match(r"^NULL\b", rest, flags=re.IGNORECASE) else "other", "columns": [left]}
-        pattern = like_patterns.pop(0) if like_patterns else ""
-        return {"kind": "like_prefix" if pattern and pattern[0] not in "%_" else "like_any", "columns": [left]}
+        return {"kind": "like_prefix" if rest.startswith("'p'") else "like_any", "columns": [left]}
     return {"kind": "func" if columns else "other", "columns": columns}
 
 
@@ -542,6 +583,92 @@ def _order_items(stripped: str, keyword: str) -> list[tuple[str, str]]:
         else:
             break  # an expression or a position ends what an index can serve
     return items
+
+
+def _matching_paren(text: str, start: int) -> int:
+    """The place of the parenthesis that closes the one at `start` (-1: none)."""
+    depth = 0
+    for i in range(start, len(text)):
+        if text[i] == "(":
+            depth += 1
+        elif text[i] == ")":
+            depth -= 1
+            if depth == 0:
+                return i
+    return -1
+
+
+_SUBQUERY_OPEN = re.compile(r"\(\s*(?:SELECT|WITH)\b", re.IGNORECASE)
+
+
+def _split_blocks(stripped: str) -> tuple[list[dict], set[str]]:
+    """The statement as query blocks: [{"id", "parent", "role", "text"}], the main query first (id 0), then each CTE and each derived table / subquery in it; the text of a block
+    has the blocks inside it cut out as __SQn__. The second value is the names the CTEs give."""
+    blocks: list[dict] = []
+    counter = [0]
+
+    def cut(text: str, owner: int) -> str:
+        out, i = "", 0
+        while i < len(text):
+            if text[i] != "(" or not _SUBQUERY_OPEN.match(text, i):
+                out += text[i]
+                i += 1
+                continue
+            j = _matching_paren(text, i)
+            if j < 0:
+                out += text[i:]
+                break
+            before, after = out.rstrip(), text[j + 1:]
+            alias_m = re.match(r"\s*(?:AS\s+)?([A-Za-z_]\w*)", after, flags=re.IGNORECASE)
+            alias = alias_m.group(1) if alias_m and alias_m.group(1).upper() not in _SQL_WORDS else ""
+            if re.search(r"\bNOT\s+EXISTS$|\bEXISTS$", before, flags=re.IGNORECASE):
+                role = "an EXISTS subquery"
+            elif re.search(r"\b(?:NOT\s+)?IN$|\b(?:ANY|SOME|ALL)$", before, flags=re.IGNORECASE):
+                role = "an IN subquery"
+            elif re.search(r"\b(?:FROM|JOIN)$|,$", before, flags=re.IGNORECASE):
+                role = f"the derived table {alias}" if alias else "a derived table"
+            else:
+                role = "a scalar subquery"
+            counter[0] += 1
+            n = counter[0]
+            block = {"id": n, "parent": owner, "role": role, "text": ""}
+            blocks.append(block)
+            block["text"] = cut(text[i + 1:j].strip(), n)
+            out += f" __SQ{n}__ "
+            i = j + 1
+        return re.sub(r"\s+", " ", out).strip()
+
+    ctes: list[tuple[str, str]] = []
+    rest = stripped
+    m = re.match(r"WITH\s+(?:RECURSIVE\s+)?", rest, flags=re.IGNORECASE)
+    if m:
+        pos = m.end()
+        while True:
+            head = re.match(r"([A-Za-z_]\w*)\s*(?:\([^)]*\))?\s*AS\s*\(", rest[pos:], flags=re.IGNORECASE)
+            if not head:
+                break
+            open_at = pos + head.end() - 1
+            close = _matching_paren(rest, open_at)
+            if close < 0:
+                break
+            ctes.append((head.group(1), rest[open_at + 1:close].strip()))
+            pos = close + 1
+            comma = re.match(r"\s*,\s*", rest[pos:])
+            if not comma:
+                break
+            pos += comma.end()
+        rest = rest[pos:].strip()
+    main = {"id": 0, "parent": -1, "role": "the statement", "text": ""}
+    main["text"] = cut(rest, 0)
+    named = []
+    for name, body in ctes:
+        counter[0] += 1
+        n = counter[0]
+        block = {"id": n, "parent": 0, "role": f"the CTE {name}", "text": ""}
+        blocks.append(block)
+        block["text"] = cut(body, n)
+        named.append(name)
+    return [main] + sorted(blocks, key=lambda b: b["id"]), set(named)
 
 
 def _table_facts(table: str, database: str) -> dict:
@@ -601,18 +728,43 @@ def _covered(columns: list[str], indexes: dict[str, list[str]], rows: int | None
     return None
 
 
-def suggest_indexes_for(sql: str, database: str = "") -> dict:
-    stripped, like_patterns = _strip_sql(sql)
-    kind = (stripped.split(" ", 1)[0] if stripped else "").upper()
-    if kind not in ("SELECT", "UPDATE", "DELETE", "WITH"):
-        return {"error": "suggest_indexes reads a SELECT, UPDATE or DELETE statement."}
-    tables = _query_tables(stripped)
-    if not tables:
-        return {"error": "No table found in the statement."}
-    facts = {t: _table_facts(t, database) for t in dict.fromkeys(t for t, _ in tables)}
-    alias_to_table = {a: t for t, a in tables}
+class _Reading:
+    """What reading a statement found: the suggestions, the indexes that exist already, the notes, the rewrites, and how each block was read."""
+
+    def __init__(self, database: str, cte_names: set[str]):
+        self.database = database
+        self.cte_names = cte_names
+        self.facts: dict[str, dict] = {}
+        self.suggestions: list[dict] = []
+        self.already: list[dict] = []
+        self.notes: list[str] = []
+        self.rewrites: list[dict] = []
+        self.blocks: list[dict] = []
+        self.seen: set[tuple[str, tuple[str, ...]]] = set()
+
+    def table(self, name: str) -> dict:
+        if name not in self.facts:
+            self.facts[name] = _table_facts(name, self.database)
+        return self.facts[name]
+
+
+def _read_block(block: dict, kind: str, rd: _Reading, outer: dict[str, str]) -> dict[str, str]:
+    """Reads one query block (its own tables, its own WHERE / ON / ORDER BY / GROUP BY); `outer` is the aliases of the blocks around it, which a correlated subquery names
+    in its tests. Returns the aliases this block has, for the blocks inside it."""
+    text, role = block["text"], block["role"]
+    where_note = "" if block["id"] == 0 else f" (in {role})"
+    tables = [(t, a) for t, a in _query_tables(text) if t not in rd.cte_names]
+    real = [(t, a) for t, a in tables if rd.table(t)["columns"]]
     for t, _ in tables:
+        if (t, _) not in real and t not in rd.cte_names:
+            rd.notes.append(f"The table {t} was not found{where_note}.")
+    facts = {t: rd.table(t) for t in dict.fromkeys(t for t, _ in real)}
+    alias_to_table = {a: t for t, a in real}
+    for t, _ in real:
         alias_to_table.setdefault(t, t)
+    rd.blocks.append({"in": role, "tables": [t for t, _ in real] or [t for t, _ in tables]})
+    if not facts:
+        return {}
 
     def resolve(name: str) -> tuple[str, str] | None:
         parts = name.replace("`", "").split(".")
@@ -623,14 +775,17 @@ def suggest_indexes_for(sql: str, database: str = "") -> dict:
         owners = [t for t in facts if column in facts[t]["columns"]]
         return (owners[0], column) if len(owners) == 1 else None
 
+    def is_outer(name: str) -> bool:
+        parts = name.replace("`", "").split(".")
+        return len(parts) >= 2 and parts[-2] in outer and parts[-2] not in alias_to_table
+
     # what each table is searched, joined, grouped and sorted by
     eq: dict[str, list[str]] = {t: [] for t in facts}
     rng: dict[str, list[str]] = {t: [] for t in facts}
     joins: dict[str, list[str]] = {t: [] for t in facts}
-    notes: list[str] = []
-    tests = _conjuncts(_clause(stripped, "WHERE")) + [c for on in _join_conditions(stripped) for c in _conjuncts(on)]
-    for test in tests:
-        p = _read_predicate(test, like_patterns)
+    or_branches: list[tuple[str, list[list[str]]]] = []
+
+    def take(p: dict, test: str):
         resolved = [r for r in (resolve(c) for c in p["columns"]) if r]
         if p["kind"] in ("eq", "in"):
             for t, c in resolved:
@@ -641,24 +796,62 @@ def suggest_indexes_for(sql: str, database: str = "") -> dict:
                 if c not in rng[t]:
                     rng[t].append(c)
         elif p["kind"] == "join":
-            for t, c in resolved:
-                if c not in joins[t]:
-                    joins[t].append(c)
+            left, right = p["columns"]
+            inner = [r for r in (resolve(left), resolve(right)) if r]
+            if len(inner) == 1 and (is_outer(left) or is_outer(right)):
+                t, c = inner[0]  # a correlated subquery looks its rows up once for each row of the outer query: the equality is a search
+                if c not in eq[t]:
+                    eq[t].append(c)
+            else:
+                for t, c in resolved:
+                    if c not in joins[t]:
+                        joins[t].append(c)
         elif p["kind"] == "func" and resolved:
-            notes.append(f"`{test}` wraps a column in an expression or function, so no index can serve it as written (compare the bare column instead).")
+            rd.notes.append(f"`{test}` wraps a column in an expression or function, so no index can serve it as written (compare the bare column instead){where_note}.")
         elif p["kind"] == "like_any" and resolved:
-            notes.append(f"`{test}` starts with a wildcard, so an index cannot be used for it.")
-        elif p["kind"] == "or" and resolved:
-            notes.append(f"`{test}` combines columns with OR: one index cannot serve it, a separate index per OR branch may.")
-    sorted_by = [(resolve(c), d) for c, d in _order_items(stripped, "ORDER BY")]
+            rd.notes.append(f"`{test}` starts with a wildcard, so an index cannot be used for it{where_note}.")
+
+    tests = _conjuncts(_clause(text, "WHERE")) + [c for on in _join_conditions(text) for c in _conjuncts(on)]
+    for test in tests:
+        p = _read_predicate(test)
+        if p["kind"] != "or":
+            take(p, test)
+            continue
+        # an OR is read branch by branch: the same column on every branch is an IN, tests of different columns cannot be served by one index (the engine reads one
+        # index per statement, it has no index union) -- each branch can be, as a statement of its own
+        branches = [_conjuncts(_unparen(b)) for b in _split_top_level(_unparen(test), "OR")]
+        read = [[_read_predicate(c) for c in branch] for branch in branches]
+        simple = all(len(b) == 1 and b[0]["kind"] in ("eq", "in") and len(b[0]["columns"]) == 1 for b in read)
+        columns = {resolve(b[0]["columns"][0]) for b in read if simple}
+        if simple and len(columns) == 1 and None not in columns:
+            take({"kind": "in", "columns": [read[0][0]["columns"][0]]}, test)
+            continue
+        per_branch: list[list[str]] = []
+        owner = None
+        for branch in read:
+            branch_eq, branch_rng = [], []
+            for q in branch:
+                for r in (resolve(c) for c in q["columns"]):
+                    if not r:
+                        continue
+                    owner = owner or r[0]
+                    if r[0] != owner:
+                        continue
+                    if q["kind"] in ("eq", "in") and r[1] not in branch_eq:
+                        branch_eq.append(r[1])
+                    elif q["kind"] in ("range", "like_prefix") and r[1] not in branch_rng:
+                        branch_rng.append(r[1])
+            per_branch.append(branch_eq + branch_rng[:1])
+        if owner and all(per_branch):
+            or_branches.append((owner, per_branch))
+        else:
+            rd.notes.append(f"`{test}` combines columns with OR: one index cannot serve it{where_note}.")
+    sorted_by = [(resolve(c), d) for c, d in _order_items(text, "ORDER BY")]
     sorted_by = [(r, d) for r, d in sorted_by if r]
-    grouped_by = [resolve(c) for c, _ in _order_items(stripped, "GROUP BY")]
+    grouped_by = [resolve(c) for c, _ in _order_items(text, "GROUP BY")]
     grouped_by = [r for r in grouped_by if r]
 
-    suggestions: list[dict] = []
-    already: list[dict] = []
-
-    def consider(table: str, narrowing: list[str], order_columns: list[str], why: str):
+    def consider(table: str, narrowing: list[str], order_columns: list[str], why: str, extra: dict | None = None):
         """An index on the columns the statement searches by (`narrowing`) followed by the ones it sorts by (`order_columns`)."""
         f = facts[table]
         rows = f["rows"]
@@ -666,11 +859,13 @@ def suggest_indexes_for(sql: str, database: str = "") -> dict:
         if not columns:
             return
         if rows is not None and rows < _SMALL_TABLE_ROWS:
-            notes.append(f"{table} has only {rows} rows: a scan is cheap, no index suggested.")
+            rd.notes.append(f"{table} has only {rows} rows: a scan is cheap, no index suggested{where_note}.")
             return
         have = _covered(columns, f["indexes"], rows, f["distinct"])
         if have:
-            already.append({"table": table, "columns": columns, "index": have})
+            if (table, tuple(columns)) not in rd.seen:
+                rd.already.append({"table": table, "columns": columns, "index": have})
+            rd.seen.add((table, tuple(columns)))
             return
         # how many rows a search reads is only known for equality columns: how much a range keeps is not, so a range column adds no estimate and is never a reason to refuse
         ranged = [c for c in narrowing if c in rng[table] and c not in eq[table]]
@@ -682,17 +877,24 @@ def suggest_indexes_for(sql: str, database: str = "") -> dict:
                 combined *= max(1, f["distinct"][c])
             estimate = max(1, rows // combined) if combined else rows
             if estimate > rows * _NOT_NARROWING and not ranged:
-                notes.append(f"An index on {table}({', '.join(counted)}) would still leave about {estimate} of {rows} rows to read: not suggested.")
+                rd.notes.append(f"An index on {table}({', '.join(counted)}) would still leave about {estimate} of {rows} rows to read: not suggested{where_note}.")
                 return
+        if (table, tuple(columns)) in rd.seen:
+            return
+        rd.seen.add((table, tuple(columns)))
         name = "idx_" + table + "_" + "_".join(columns)
-        entry = {"table": table, "columns": columns, "create_index": f"CREATE INDEX {name} ON {table} ({', '.join(columns)});", "why": why}
+        entry = {"table": table, "columns": columns, "create_index": f"CREATE INDEX {name} ON {table} ({', '.join(columns)});", "why": why + where_note}
+        if block["id"] != 0:
+            entry["in"] = role
         if estimate is not None:
             entry["rows_read_with_index_estimate"] = estimate
             entry["rows_in_table"] = rows
-        suggestions.append(entry)
+        if extra:
+            entry.update(extra)
+        rd.suggestions.append(entry)
 
     single_table = len(facts) == 1
-    has_limit = re.search(r"\bLIMIT\b", stripped, flags=re.IGNORECASE) is not None
+    has_limit = re.search(r"\bLIMIT\b", text, flags=re.IGNORECASE) is not None
     for t, f in facts.items():
         narrowing = sorted(eq[t], key=lambda c: -f["distinct"].get(c, 0)) + rng[t][:1]
         order_columns: list[str] = []
@@ -707,37 +909,193 @@ def suggest_indexes_for(sql: str, database: str = "") -> dict:
         if narrowing or (order_columns and has_limit):
             consider(t, narrowing, order_columns, " and ".join(parts))
         elif order_columns:
-            notes.append(f"An index on {t}({', '.join(order_columns)}) would spare the sort, but without a LIMIT the statement reads every row anyway.")
+            rd.notes.append(f"An index on {t}({', '.join(order_columns)}) would spare the sort, but without a LIMIT the statement reads every row anyway{where_note}.")
         if joins[t]:
             consider(t, joins[t][:1], [], f"joined on {joins[t][0]}: the engine looks up matching rows through it")
-    if grouped_by and single_table:
+    for t, per_branch in or_branches:
+        for k, cols in enumerate(per_branch, 1):
+            consider(t, cols, [], f"branch {k} of an OR (searched by {', '.join(cols)}): the engine reads one index per statement, so each branch has to be a statement of its own (see rewrites)",
+                     {"needs_rewrite": True})
+        if kind == "SELECT" and block["id"] == 0 and len(facts) == 1 and not _clause(text, "ORDER BY") and not _clause(text, "GROUP BY") and not _clause(text, "LIMIT") \
+                and not _clause(text, "HAVING") and len(or_branches) == 1 and len(tests) == 1:
+            m = re.match(r"^(SELECT .+? FROM \S+(?: (?:AS )?\w+)?) WHERE ", text, flags=re.IGNORECASE)
+            if m:
+                head = m.group(1)
+                rd.rewrites.append({"why": "each branch of the OR can use its own index as a statement of its own; UNION also removes rows that are the same in every selected column, which OR keeps",
+                                    "sql": " UNION ".join(f"{head} WHERE {b}" for b in _split_top_level(_unparen(tests[0]), "OR")) + ";"})
+    if grouped_by and single_table and block["id"] == 0:
         t = next(iter(facts))
         group_columns = [c for r, c in grouped_by if r == t]
         if group_columns and not eq[t] and not rng[t]:
             consider(t, group_columns, [], "grouped by " + ", ".join(group_columns))
-    result: dict = {"statement": kind, "tables": {t: {"rows": f["rows"], "indexes": f["indexes"]} for t, f in facts.items()}, "suggestions": suggestions}
-    if already:
-        result["already_indexed"] = already
-    if notes:
-        result["notes"] = list(dict.fromkeys(notes))
+    return {**outer, **alias_to_table}
+
+
+def _median(values: list[float]) -> float:
+    ordered = sorted(values)
+    return ordered[len(ordered) // 2]
+
+
+def _measured_plan(sql: str, database: str) -> dict:
+    """The plan of a SELECT with the time of its median run of a few (a comment makes each run its own statement, so that no cached answer is measured)."""
+    plans = [_plan_summary(f"{sql} /* try {k} */", database) for k in range(_VERIFY_RUNS)]
+    if any("error" in p for p in plans):
+        return next(p for p in plans if "error" in p)
+    plan = dict(plans[0])
+    times = [p["execution_ms"] for p in plans if "execution_ms" in p]
+    if times:
+        plan["execution_ms"] = round(_median(times), 3)
+    return plan
+
+
+def _plan_change(before: dict, after: dict) -> dict:
+    out: dict = {}
+    if "execution_ms" in before and "execution_ms" in after:
+        out["execution_ms"] = {"before": before["execution_ms"], "after": after["execution_ms"]}
+        if after["execution_ms"] > 0:
+            out["speedup"] = round(before["execution_ms"] / after["execution_ms"], 2)
+    if before.get("access") != after.get("access"):
+        out["access"] = {"before": before.get("access", []), "after": after.get("access", [])}
+    if "estimated_rows" in before or "estimated_rows" in after:
+        out["rows_read_estimate"] = {"before": before.get("estimated_rows"), "after": after.get("estimated_rows")}
+    speedup = out.get("speedup")
+    scan_before = any("scan" in a.lower() for a in before.get("access", []))
+    scan_after = any("scan" in a.lower() for a in after.get("access", []))
+    if (speedup is not None and speedup >= 1.25) or (scan_before and not scan_after):
+        out["verdict"] = "faster" if speedup is not None and speedup >= 1.25 else "uses the index"
+    elif speedup is not None and speedup <= 0.8:
+        out["verdict"] = "slower"
+    else:
+        out["verdict"] = "no change"
+    return out
+
+
+def _verify(sql: str, rd: _Reading, rewrite_sql: str | None) -> dict:
+    """Tries the suggested indexes on the statement: `before` is its plan now; each suggestion is built under a temporary name, the plan is measured again and the index
+    is dropped; then all of them together (a join may need two); the branches of an OR together, measured on the rewrite. The tables are as they were afterwards; an index
+    that could not be dropped is named."""
+    database = rd.database
+    before = _measured_plan(sql, database)
+    if "error" in before:
+        return {"error": "The statement could not be run for a measurement: " + before["error"]}
+    left_behind: list[str] = []
+    created: list[tuple[str, str]] = []
+
+    def build(tag: int, s: dict) -> str | None:
+        name = f"__try_{tag}_{s['table']}"
+        out = _run(f"CREATE INDEX {name} ON {s['table']} ({', '.join(s['columns'])});", database)
+        if out.strip().upper().startswith(("ERR", "ERROR")):
+            return " ".join(l for l in out.splitlines() if l.strip() and l.strip() not in ("ERR", "---END---"))[:200]
+        created.append((name, s["table"]))
+        return None
+
+    def drop_all():
+        while created:
+            name, table = created.pop()
+            out = _run(f"DROP INDEX {name} ON {table};", database)
+            if out.strip().upper().startswith(("ERR", "ERROR")):
+                left_behind.append(f"{name} ON {table}")
+
+    def too_big(s: dict) -> str | None:
+        rows = rd.facts.get(s["table"], {}).get("rows")
+        if rows is not None and rows > _VERIFY_MAX_ROWS:
+            return f"{s['table']} has {rows} rows: building an index for a trial is not worth it above {_VERIFY_MAX_ROWS}."
+        return None
+
+    def trial(group: list[dict], statement: str, tag: int) -> dict:
+        """Builds the indexes of `group`, measures `statement`, drops them: the change from `before`."""
+        entry: dict = {"create_index": [s["create_index"] for s in group] if len(group) > 1 else group[0]["create_index"]}
+        for s in group:
+            if reason := too_big(s):
+                entry["skipped"] = reason
+                return entry
+        try:
+            for k, s in enumerate(group):
+                if problem := build(tag + k, s):
+                    entry["error"] = problem
+                    return entry
+            after = _measured_plan(statement, database)
+        finally:
+            drop_all()
+        entry.update(_plan_change(before, after) if "error" not in after else {"error": after["error"]})
+        return entry
+
+    chosen = rd.suggestions[:_VERIFY_MAX_INDEXES]
+    plain = [s for s in chosen if not s.get("needs_rewrite")]
+    branches = [s for s in chosen if s.get("needs_rewrite")]
+    out: dict = {"before": before}
+    try:
+        if plain:
+            out["each_index_alone"] = [trial([s], sql, 10 * i) for i, s in enumerate(plain, 1)]
+        if len(plain) >= 2:
+            out["all_together"] = trial(plain, sql, 100)
+        if branches and rewrite_sql:
+            out["or_rewrite"] = {"rewrite": rewrite_sql, **trial(branches, rewrite_sql, 200)}
+        elif branches:
+            out["or_rewrite"] = {"note": "The branches of the OR need a rewrite (a statement of each branch), which is not possible to write for this statement automatically: build the indexes and measure the rewrite yourself."}
+    finally:
+        drop_all()
+    out["note"] = ("Each index was built under a temporary name, the statement was measured (median of "
+                   f"{_VERIFY_RUNS} runs) and the index was dropped again; the tables are as they were.")
+    if left_behind:
+        out["left_behind"] = left_behind
+        out["note"] += " These temporary indexes could not be dropped, drop them yourself: " + ", ".join(left_behind) + "."
+    return out
+
+
+def suggest_indexes_for(sql: str, database: str = "", verify: bool = False) -> dict:
+    stripped, _ = _strip_sql(sql)
+    kind = (stripped.split(" ", 1)[0] if stripped else "").upper()
+    if kind not in ("SELECT", "UPDATE", "DELETE", "WITH"):
+        return {"error": "suggest_indexes reads a SELECT, UPDATE or DELETE statement."}
+    blocks, cte_names = _split_blocks(stripped)
+    if kind == "WITH":
+        kind = "SELECT"
+    if not any(_query_tables(b["text"]) for b in blocks):
+        return {"error": "No table found in the statement."}
+    rd = _Reading(database, cte_names)
+    aliases: dict[int, dict[str, str]] = {}
+    for b in blocks:
+        outer = aliases.get(b["parent"], {}) if b["id"] != 0 and not b["role"].startswith("the CTE") else {}
+        aliases[b["id"]] = _read_block(b, kind, rd, outer)
+    shown_tables = {t: {"rows": rd.facts[t]["rows"], "indexes": rd.facts[t]["indexes"]} for t in rd.facts if rd.facts[t]["columns"]}
+    result: dict = {"statement": "SELECT" if stripped.upper().startswith("WITH") else kind, "tables": shown_tables, "suggestions": rd.suggestions}
+    if len(blocks) > 1:
+        result["blocks"] = rd.blocks
+    if rd.already:
+        result["already_indexed"] = rd.already
+    if rd.rewrites:
+        result["rewrites"] = rd.rewrites
+    if rd.notes:
+        result["notes"] = list(dict.fromkeys(rd.notes))
     if kind in ("SELECT", "WITH"):
         result["plan"] = _plan_summary(sql.strip().rstrip(";"), database)
         slow = max(result["plan"].get("steps", []), key=lambda s: s["share_percent"], default=None)
         if slow and slow["share_percent"] >= 50:
             result["slowest_step"] = f"Step {slow['step']} ({slow['what']}) takes {slow['share_percent']}% of the time"
+        if verify and rd.suggestions:
+            result["verification"] = _verify(sql.strip().rstrip(";"), rd, rd.rewrites[0]["sql"].rstrip(";") if rd.rewrites else None)
+        elif verify:
+            result["verification"] = {"note": "There is no index to try."}
     else:
-        result.setdefault("notes", []).append("The plan was not run: EXPLAIN ANALYZE would execute an UPDATE or DELETE.")
-    result["caveat"] = "A heuristic reading of the statement; the row estimates assume the columns are independent. Nothing was created: run a CREATE INDEX yourself and EXPLAIN again to see the plan change."
+        result.setdefault("notes", []).append("The plan was not run: EXPLAIN ANALYZE would execute an UPDATE or DELETE." + (" verify needs a SELECT." if verify else ""))
+    result["caveat"] = "A heuristic reading of the statement; the row estimates assume the columns are independent. " + (
+        "The tables are as they were: the trial indexes were dropped." if verify and "verification" in result else
+        "Nothing was created: run a CREATE INDEX yourself and EXPLAIN again to see the plan change (or ask for verify=True).")
     return result
 
 
 @mcp.tool()
-def suggest_indexes(sql: str, database: str = "") -> str:
-    """Suggest indexes for a SELECT, UPDATE or DELETE: reads the statement, the columns and indexes of its tables, how many distinct values each column has
-    (ANALYZE TABLE) and, for a SELECT, the plan the engine runs (EXPLAIN ANALYZE), and returns a JSON object with the CREATE INDEX statements that would let the
-    statement stop scanning (equality columns first, then one range column, then ORDER BY), why, how many rows it would read with them, the indexes the tables already
-    have, and the reasons an index would not help (a function around a column, a leading wildcard, an OR, a small table). It does not create anything."""
-    return json.dumps(suggest_indexes_for(sql, database), ensure_ascii=False)
+def suggest_indexes(sql: str, database: str = "", verify: bool = False) -> str:
+    """Suggest indexes for a SELECT, UPDATE or DELETE: reads the statement (also a WITH, subqueries in IN / EXISTS / the FROM list / a comparison, correlated ones, and an OR,
+    each read on its own), the columns and indexes of its tables, how many distinct values each column has (ANALYZE TABLE) and, for a SELECT, the plan the engine runs
+    (EXPLAIN ANALYZE), and returns a JSON object with the CREATE INDEX statements that would let the statement stop scanning (equality columns first, then one range
+    column, then ORDER BY), why, how many rows it would read with them, the indexes the tables already have, a rewrite where an OR needs one (the engine reads one index per
+    statement), and the reasons an index would not help (a function around a column, a leading wildcard, a small table).
+    By default it creates nothing. With verify=True (a SELECT only) it TRIES the suggestions: it builds each one under a temporary name, measures EXPLAIN ANALYZE before and
+    after (median of 3 runs), drops the index again and reports what changed (plan, rows read, time, speedup) -- briefly writes to the database, so say so before using it on a
+    busy one; a table above 200,000 rows is not tried."""
+    return json.dumps(suggest_indexes_for(sql, database, verify), ensure_ascii=False)
 
 
 # ─── Monitoring and structure tools (R54): list_locks, health_report, get_table_stats, get_fk_graph, trace_query ───────────────────────────────────────────

@@ -12,7 +12,8 @@ import "./FkEditorModal.css";
 const ACTIONS = ["RESTRICT", "NO ACTION", "CASCADE", "SET NULL", "SET DEFAULT"] as const; // (a rule left out reads NO ACTION in information_schema: the same refusal as RESTRICT)
 type Action = (typeof ACTIONS)[number];
 
-export type FkTarget = { kind: "add"; table?: string } | { kind: "edit"; table: string; column: string };
+// "add" from a drag in the ERD (a column dropped on another) carries the two columns: the one that was dragged is the child, the one it was dropped on is the parent
+export type FkTarget = { kind: "add"; table?: string; childColumn?: string; parentTable?: string; parentColumn?: string } | { kind: "edit"; table: string; column: string };
 
 const ident = (n: string) => (/^[A-Za-z_][A-Za-z0-9_]*$/.test(n) ? n : "`" + n.replace(/`/g, "``") + "`");
 const lit = (s: string) => "'" + s.replace(/\\/g, "\\\\").replace(/'/g, "''") + "'";
@@ -37,10 +38,11 @@ export default function FkEditorModal({ target, db, columns, onClose, onApplied 
   const firstTable = target.table ?? tableNames[0] ?? "";
 
   const [childTable, setChildTable] = useState(firstTable);
-  const [childCol, setChildCol] = useState(edit ? target.column : "");
+  const [childCol, setChildCol] = useState(edit ? target.column : target.childColumn ?? "");
   const initial = edit ? parseRef(columns[target.table]?.find(c => c.name === target.column)?.fk_ref ?? "") : null;
-  const [parentTable, setParentTable] = useState(initial ? unqualify(initial.table) : tableNames.find(t => t !== firstTable) ?? tableNames[0] ?? "");
-  const [parentCol, setParentCol] = useState(initial?.col ?? "");
+  const dropped = target.kind === "add" ? target : null;
+  const [parentTable, setParentTable] = useState(initial ? unqualify(initial.table) : dropped?.parentTable ?? tableNames.find(t => t !== firstTable) ?? tableNames[0] ?? "");
+  const [parentCol, setParentCol] = useState(initial?.col ?? dropped?.parentColumn ?? "");
   const [oldName, setOldName] = useState("");
   const [name, setName] = useState("");
   const [onDelete, setOnDelete] = useState<Action>("RESTRICT");

@@ -421,7 +421,9 @@ RuSQL이 실제로 받아서 실행하는 SQL 문법을 한 줄씩 정리한 문
 ### 서버 상태 · 세션
 
 - SHOW STATUS / SHOW SESSION STATUS [LIKE 'pattern'] : 이 세션의 상태 카운터(문장 종류별 개수 · Questions)
-- SHOW GLOBAL STATUS [LIKE 'pattern'] : 서버 전체 카운터(Com_* 문장 수 · Connections · Threads_* · Uptime · Innodb_* 버퍼 풀 / redo / 행 잠금 대기)
+- SHOW GLOBAL STATUS [LIKE 'pattern'] : 서버 전체 카운터(Com_* 문장 수 · Connections · Threads_* · Uptime · Innodb_* 버퍼 풀 / redo / 행 잠금 대기 · Slow_queries)
+- SET GLOBAL slow_query_log = ON | OFF | TRUE | FALSE | 1 | 0 : 느린 쿼리 로그를 켜고 끔(다른 값은 오류 1231; 로그가 꺼져 있어도 `Slow_queries`는 센다)
+- SET GLOBAL long_query_time = 초(소수 가능, 기본 10) : 이 시간 이상 걸린 문장이 느린 쿼리(글자는 오류 1232, 범위 0 ~ 31536000 밖의 수는 그 안으로 맞춤; MySQL과 달리 세션 값이 따로 없어 서버 전체에 하나, `SET SESSION`도 같은 값을 바꿈)
 - SHOW PROCESSLIST : 접속 중인 세션과 실행 중인 문장
 - KILL [QUERY] n : 세션 n이 실행 중인 문장을 중단(SELECT는 다음 행에서, 잠금 대기는 즉시; 쓰기 도중엔 끝까지)
 - KILL CONNECTION n / KILL n : 세션 n의 접속을 끊고 그 세션의 트랜잭션을 되돌림
@@ -436,7 +438,8 @@ RuSQL이 실제로 받아서 실행하는 SQL 문법을 한 줄씩 정리한 문
 - information_schema.views : 뷰 정보
 - information_schema.character_sets / collations / engines : 문자 집합 · 정렬 규칙 · 엔진 목록
 - information_schema.processlist : 세션 목록
-- information_schema.innodb_trx / innodb_locks / innodb_lock_waits / innodb_deadlocks : 트랜잭션 · 잠금 · 잠금 대기 · 교착 상태
+- information_schema.innodb_trx / innodb_locks / innodb_lock_waits / innodb_deadlocks : 트랜잭션 · 잠금 · 잠금 대기 · 교착 상태(`innodb_trx`의 `TRX_MYSQL_THREAD_ID`는 그 트랜잭션을 연 세션의 번호, `TRX_STARTED`는 시작 시각)
+- information_schema.slow_log : 느린 쿼리 로그(RuSQL 자체 표: START_TIME · USER_HOST · QUERY_TIME · ROWS_SENT · DB · SQL_TEXT · THREAD_ID, 마지막 1000개; 같은 내용이 `<데이터 폴더>/slow_query.log`에 MySQL 느린 로그 모양으로 쌓임)
 - information_schema.row_versions : 행의 버전(MVCC) 정보
 - information_schema.recovery : 마지막 시작 때의 복구 기록
 - information_schema.global_status : SHOW GLOBAL STATUS와 같은 값을 테이블로

@@ -117,7 +117,7 @@ const SERVER: Item[] = [
     s: L("mysql CLI, DBeaver, JDBC; results carry column types", "mysql CLI, DBeaver, JDBC, 결과에 열 타입 포함"),
   },
   { t: L("Challenge-response auth", "챌린지-응답 인증"), s: L("no plaintext password", "비밀번호를 평문으로 보내지 않음") },
-  { t: L("One session per connection", "연결당 세션 1개"), s: L("own Executor, shared database; KILL n stops its query", "연결마다 독립 Executor, 데이터베이스는 공유, KILL n으로 문장 중단") },
+  { t: L("One session per connection", "연결당 세션 1개"), s: L("own Executor, shared database; KILL n stops its query; innodb_trx says which session each transaction is", "연결마다 독립 Executor, 데이터베이스는 공유, KILL n으로 문장 중단, innodb_trx가 트랜잭션의 세션을 말함") },
 ];
 
 const SIDE_MODULES: Item[] = [
@@ -125,6 +125,7 @@ const SIDE_MODULES: Item[] = [
   { t: L("Thread pool", "스레드 풀"), s: L("parallel scan, GROUP BY, ORDER BY, join probe", "스캔·GROUP BY·ORDER BY·조인 병렬화") },
   { t: L("Statistics", "통계"), s: L("ANALYZE: histogram + most-common values", "ANALYZE: 히스토그램 + 최빈값") },
   { t: L("Catalog", "카탈로그"), s: L("schemas, views, users, procedures, triggers", "스키마, 뷰, 사용자, 프로시저, 트리거") },
+  { t: L("Slow query log", "느린 쿼리 로그"), s: L("SET GLOBAL slow_query_log / long_query_time, Slow_queries, information_schema.slow_log, slow_query.log", "SET GLOBAL slow_query_log / long_query_time, Slow_queries, information_schema.slow_log, slow_query.log") },
 ];
 
 const TXN: Item[] = [
@@ -174,8 +175,8 @@ const AI: Item[] = [
   {
     t: L("MCP tools", "MCP 도구"),
     s: L(
-      "32 tools: execute_sql (dangerous-SQL guard), run_script (preview, all-or-nothing), suggest_indexes, health_report, list_locks, trace_query, get_table_stats, get_fk_graph, schema and index lookup, editor and server control",
-      "도구 32개: execute_sql(위험 SQL 차단), run_script(미리보기, 전부 또는 전무), suggest_indexes, health_report, list_locks, trace_query, get_table_stats, get_fk_graph, 스키마·인덱스 조회, 에디터·서버 제어",
+      "32 tools: execute_sql (dangerous-SQL guard), run_script (preview, all-or-nothing), suggest_indexes (reads subqueries, CTEs and OR; verify mode builds the index, measures EXPLAIN ANALYZE before and after, and drops it), health_report, list_locks, trace_query, get_table_stats, get_fk_graph, schema and index lookup, editor and server control",
+      "도구 32개: execute_sql(위험 SQL 차단), run_script(미리보기, 전부 또는 전무), suggest_indexes(서브쿼리·CTE·OR을 읽고, verify 모드는 인덱스를 만들어 전·후 EXPLAIN ANALYZE를 재고 지움), health_report, list_locks, trace_query, get_table_stats, get_fk_graph, 스키마·인덱스 조회, 에디터·서버 제어",
     ),
   },
   {
@@ -255,7 +256,7 @@ function LayersView() {
         <Card style={at("1", "1")} c={C.client} title="engine_cli" sub={L("Terminal REPL", "터미널 REPL")}
           note={L("runs the engine in-process", "엔진을 프로세스 안에서 직접 실행")} />
         <Card style={at("2", "1")} c={C.client} title={L("Desktop UI", "데스크톱 UI")} sub="Tauri + React + Monaco"
-          note={L("SQL editor (EXPLAIN step bars), Journey, ERD editor, B+Tree and MVCC pages, Server Manager (recovery card, Metrics trend charts), Compat page", "SQL 에디터(EXPLAIN 단계 막대), 한 문장의 여행, ERD 편집기, B+Tree·MVCC 페이지, 서버 매니저(복구 카드, 지표 추세 그래프), 호환성 페이지")} />
+          note={L("SQL editor (EXPLAIN plan diagram + step bars, result JSON export and chart, Compare Schema), Journey, ERD editor (drag to connect), B+Tree and MVCC pages, Server Manager (recovery card, Sessions with KILL and blockers, slow query log, Metrics trend charts), Compat page", "SQL 에디터(EXPLAIN 계획 그림·단계 막대, 결과 JSON 내보내기·차트, 스키마 비교), 한 문장의 여행, ERD 편집기(끌어서 연결), B+Tree·MVCC 페이지, 서버 매니저(복구 카드, KILL과 차단자가 보이는 세션, 느린 쿼리 로그, 지표 추세 그래프), 호환성 페이지")} />
         <Card style={at("3", "1")} c={C.client} title="Claude Desktop + MCP" sub="Python FastMCP, stdio JSON-RPC"
           note={L("32 tools; drives the UI via ui_commands.json", "도구 32개, ui_commands.json으로 UI 제어")} />
         <Card style={at("4", "1")} c={C.client} title="engine_client" sub={L("TCP client CLI", "TCP 클라이언트 CLI")} note="-u -p -h -P" />

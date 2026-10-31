@@ -13,7 +13,11 @@
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
+#include <cmath>
+#include <cstdio>
 #include <cstdlib>
+#include <ctime>
 #include <thread>
 
 #include <picosha2/picosha2.h>
@@ -373,6 +377,7 @@ Executor::Executor(const std::string& dir, std::size_t buffer_pool_capacity) {
         .redo_dirty = std::make_shared<Mutex<std::unordered_set<std::string>>>(),
     };
     redo_log_ = db_value.redo_log;
+    db_value.slow_log->set_directory(dir);
     // (a table file holds committed work only: see BufferPool::write_through)
     db_value.buffer_pool.set_open_transactions([ids = db_value.active_txn_ids] { return *ids->lock(); });
 
@@ -489,6 +494,20 @@ std::shared_ptr<ServerCounters> Executor::counters() const {
     return counters_;
 }
 
+std::shared_ptr<SlowLog> Executor::slow_log() const {
+    if (!slow_log_) slow_log_ = shared->read()->slow_log;
+    return slow_log_;
+}
+
+// @@slow_query_log and @@long_query_time are the server's: a session that did not set them reads what another session set
+void Executor::refresh_slow_log_variables() {
+    auto log = slow_log();
+    char seconds[32];
+    std::snprintf(seconds, sizeof seconds, "%.6f", static_cast<double>(log->threshold_us.load()) / 1e6);
+    user_vars["@slow_query_log"] = log->enabled.load() ? "1" : "0";
+    user_vars["@long_query_time"] = seconds;
+}
+
 // Questions and the kind of the statement (its first word, and the second for CREATE / DROP / ALTER), for the server and for this session.
 void Executor::count_statement(const std::string& sql) {
     auto word_at = [&](std::size_t& at) {
@@ -521,6 +540,10 @@ void Executor::update_process_command(const std::string& command, const std::str
         it->second.info = info.substr(0, 100);
         it->second.state_since = std::chrono::steady_clock::now();
         it->second.db = current_db;
+        if (const std::uint64_t open = txn.current_txn_id(); open != it->second.txn_id) { // (which session each open transaction is: innodb_trx)
+            it->second.txn_id = open;
+            it->second.txn_started = open ? std::chrono::system_clock::now() : std::chrono::system_clock::time_point{};
+        }
     }
     // a KILL QUERY that came after the statement was over (or that found no statement to stop) must not stop the next one; a killed connection stays killed
     if (command == "Sleep") {
@@ -1395,11 +1418,22 @@ std::uint64_t leading_count(const std::string& text) {
     return n;
 }
 
-// the rows a SELECT's text says it returned ("N row(s) returned." at its end, "0 rows returned." alone)
+// the rows a SELECT's text says it returned ("N row(s) returned." at its end, "0 rows returned." alone; an aggregate's one-row table has no such line: its data lines are
+// the rows)
 std::uint64_t returned_rows(const std::string& out) {
     if (out.rfind("0 rows returned", 0) == 0) return 0;
     const std::size_t at = out.rfind(" row(s) returned");
-    if (at == std::string::npos) return 0;
+    if (at == std::string::npos) {
+        if (out.empty() || out[0] != '+') return 0;
+        std::uint64_t lines = 0;
+        for (std::size_t i = 0; i < out.size();) {
+            if (out[i] == '|') lines++;
+            const std::size_t newline = out.find('\n', i);
+            if (newline == std::string::npos) break;
+            i = newline + 1;
+        }
+        return lines > 0 ? lines - 1 : 0; // (the header line is the first)
+    }
     std::size_t start = at;
     while (start > 0 && std::isdigit(static_cast<unsigned char>(out[start - 1]))) start--;
     return leading_count(out.substr(start));
@@ -1474,6 +1508,37 @@ StringResult run_trace(Executor& ex, const std::string& inner) {
 }
 } // namespace
 
+// After a statement of this session: one that ran for at least long_query_time is a slow query (counted always, written down when the log is on)
+void Executor::note_slow_statement(const std::string& sql, std::chrono::steady_clock::time_point started, const StringResult& result) {
+    auto log = slow_log();
+    const auto elapsed = std::chrono::steady_clock::now() - started;
+    const std::int64_t elapsed_us = std::chrono::duration_cast<std::chrono::microseconds>(elapsed).count();
+    if (elapsed_us < log->threshold_us.load(std::memory_order_relaxed)) return;
+    counters()->slow_queries.fetch_add(1, std::memory_order_relaxed);
+    if (!log->enabled.load(std::memory_order_relaxed)) return;
+    SlowLogEntry entry;
+    const auto began = std::chrono::system_clock::now() - std::chrono::duration_cast<std::chrono::system_clock::duration>(elapsed);
+    const std::time_t whole = std::chrono::system_clock::to_time_t(began);
+    std::tm local{};
+    localtime_s(&local, &whole);
+    char stamp[48];
+    std::strftime(stamp, sizeof stamp, "%Y-%m-%d %H:%M:%S", &local);
+    const auto micros = std::chrono::duration_cast<std::chrono::microseconds>(began.time_since_epoch()).count() % 1000000;
+    char fraction[16];
+    std::snprintf(fraction, sizeof fraction, ".%06lld", static_cast<long long>(micros));
+    entry.start_time = std::string(stamp) + fraction;
+    entry.query_seconds = static_cast<double>(elapsed_us) / 1e6;
+    entry.rows_sent = result.is_ok() ? returned_rows(result.value()) : 0;
+    entry.db = current_db;
+    entry.sql = sql;
+    entry.thread_id = session_id;
+    {
+        auto list = process_list()->lock();
+        if (auto it = list->find(session_id); it != list->end()) entry.user_host = it->second.user + " @ " + it->second.host;
+    }
+    log->record(std::move(entry));
+}
+
 namespace {
 // The session shows as running the statement in SHOW PROCESSLIST (Command Query, Info the text) and as asleep again when it is over; a TRACE inside a statement
 // does not show twice.
@@ -1491,7 +1556,20 @@ struct ProcessScope {
 };
 } // namespace
 
+// The statement the client sent, timed for the slow query log (a statement inside another one -- a TRACE, a procedure's body -- is part of the outer one)
 StringResult Executor::execute_sql(const std::string& sql_text) {
+    if (statement_depth_ != 0) return run_sql_text(sql_text);
+    if (const std::uint64_t version = slow_log()->version.load(std::memory_order_relaxed); version != slow_log_seen_) {
+        slow_log_seen_ = version;
+        refresh_slow_log_variables();
+    }
+    const auto started = std::chrono::steady_clock::now();
+    StringResult result = run_sql_text(sql_text);
+    note_slow_statement(sql_text, started, result);
+    return result;
+}
+
+StringResult Executor::run_sql_text(const std::string& sql_text) {
     // SELECT SQL_CALC_FOUND_ROWS ...: the keyword goes, and FOUND_ROWS() afterwards says how many rows the query has without its LIMIT
     std::string sql = sql_text;
     bool calc_found_rows = false;
@@ -2150,6 +2228,37 @@ StringResult Executor::execute_with_s_body(SharedDatabase& s, Statement stmt) {
             }
         }
         if (!v->name.empty() && v->name[0] == '@') { // a server variable
+            // the slow query log's two switches belong to the server (SET GLOBAL slow_query_log = ON, SET GLOBAL long_query_time = 0.5)
+            std::string setting = lower_name.substr(1);
+            for (const char* scope : {"session.", "global.", "local."}) {
+                if (setting.rfind(scope, 0) == 0) setting.erase(0, std::string(scope).size());
+            }
+            if (setting == "slow_query_log") {
+                std::string word = result_val;
+                std::transform(word.begin(), word.end(), word.begin(), [](unsigned char c) { return std::tolower(c); });
+                if (word == "on" || word == "true" || word == "1") result_val = "1";
+                else if (word == "off" || word == "false" || word == "0") result_val = "0";
+                else return StringResult::Err("ERROR 1231 (42000): Variable 'slow_query_log' can't be set to the value of '" + result_val + "'");
+                slow_log()->enabled = result_val == "1";
+                slow_log()->version++;
+                slow_log_seen_ = slow_log()->version.load();
+            } else if (setting == "long_query_time") {
+                double seconds = 0;
+                std::size_t used = 0;
+                try {
+                    seconds = std::stod(result_val, &used);
+                } catch (...) {
+                    used = 0;
+                }
+                if (used == 0 || used != result_val.size() || std::isnan(seconds)) return StringResult::Err("ERROR 1232 (42000): Incorrect argument type to variable 'long_query_time'");
+                seconds = std::clamp(seconds, 0.0, 31536000.0); // (a number out of range is brought into it: MySQL adds a warning, not an error)
+                slow_log()->threshold_us = static_cast<std::int64_t>(std::llround(seconds * 1e6));
+                slow_log()->version++;
+                slow_log_seen_ = slow_log()->version.load();
+                char fixed[32];
+                std::snprintf(fixed, sizeof fixed, "%.6f", seconds);
+                result_val = fixed;
+            }
             // (the yes/no ones read ON / OFF / TRUE / FALSE as 1 and 0; FOREIGN_KEY_CHECKS = 0 lets a table refer to one that is not there yet, as a dump needs)
             static const std::unordered_set<std::string> kSwitches = {"@foreign_key_checks", "@unique_checks", "@autocommit", "@sql_notes",
                                                                       "@sql_warnings", "@sql_safe_updates", "@sql_auto_is_null"};

@@ -478,6 +478,7 @@ std::vector<std::pair<std::string, std::string>> server_status_values(const Serv
     }
     add("Innodb_redo_log_bytes", redo_log_bytes); // (the size of the redo log now: a checkpoint empties it)
     add("Max_used_connections", c.max_used_connections.load());
+    add("Slow_queries", c.slow_queries.load());
     add("Threads_connected", threads_connected);
     add("Threads_running", threads_running);
     add("Uptime", static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - c.started).count()));

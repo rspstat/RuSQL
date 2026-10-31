@@ -1,7 +1,9 @@
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include <functional>
 #include <sstream>
 #include <string>
@@ -2802,4 +2804,175 @@ TEST_CASE("R58: BACKUP writes the rules a foreign key was made with, so that RES
     ok(ex, "USE d");
     REQUIRE(q(ex, "SELECT constraint_name, update_rule, delete_rule FROM information_schema.referential_constraints WHERE table_name = 'c' ORDER BY constraint_name") ==
             (Rows{{"c_ibfk_1", "NO ACTION", "NO ACTION"}, {"c_ibfk_2", "RESTRICT", "RESTRICT"}, {"my_key", "NO ACTION", "CASCADE"}}));
+}
+
+// ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+// R59: the slow query log (SET GLOBAL slow_query_log / long_query_time, Slow_queries, information_schema.slow_log, <data dir>/slow_query.log) and the session each open
+// transaction belongs to (information_schema.innodb_trx.TRX_MYSQL_THREAD_ID, TRX_STARTED)
+// ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+namespace {
+std::string slow_queries(Executor& ex) {
+    auto rows = q(ex, "SHOW GLOBAL STATUS LIKE 'Slow_queries'");
+    return rows.empty() ? "" : rows[0][1];
+}
+} // namespace
+
+TEST_CASE("R59: a statement that ran for at least long_query_time is counted, and written down while slow_query_log is ON", "[r59][slow_log]") {
+    TempDataDir dir("r59_slow_log");
+    Executor ex(dir.path);
+    ok(ex, "CREATE DATABASE d");
+    ok(ex, "USE d");
+    ok(ex, "CREATE TABLE t (id INT PRIMARY KEY, v INT)");
+    ok(ex, "INSERT INTO t VALUES (1, 1), (2, 2), (3, 3)");
+    // by default the threshold is 10 seconds and the log is off: nothing is counted
+    REQUIRE(q(ex, "SELECT @@slow_query_log, @@long_query_time") == (Rows{{"0", "10.000000"}}));
+    ok(ex, "SELECT * FROM t");
+    REQUIRE(slow_queries(ex) == "0");
+    REQUIRE(q(ex, "SELECT COUNT(*) FROM information_schema.slow_log") == (Rows{{"0"}}));
+    // long_query_time = 0: every statement is slow. With the log OFF they are counted and not written down
+    ok(ex, "SET GLOBAL long_query_time = 0");
+    REQUIRE(q(ex, "SELECT @@long_query_time") == (Rows{{"0.000000"}}));
+    ok(ex, "SELECT * FROM t");
+    ok(ex, "SELECT 1");
+    const int counted_off = std::stoi(slow_queries(ex));
+    REQUIRE(counted_off >= 3); // (the SET, the two SELECTs, and the SHOW that read the counter before)
+    REQUIRE(q(ex, "SELECT COUNT(*) FROM information_schema.slow_log") == (Rows{{"0"}}));
+    // ON: the statements are written down with what ran, where, by whom and how many rows came back
+    ok(ex, "SET GLOBAL slow_query_log = ON");
+    REQUIRE(q(ex, "SELECT @@slow_query_log") == (Rows{{"1"}}));
+    ok(ex, "SELECT id, v FROM t WHERE id < 3 ORDER BY id");
+    ok(ex, "UPDATE t SET v = v + 1 WHERE id = 1");
+    auto rows = q(ex, "SELECT SQL_TEXT, ROWS_SENT, DB, THREAD_ID FROM information_schema.slow_log WHERE SQL_TEXT LIKE 'SELECT id, v%' OR SQL_TEXT LIKE 'UPDATE t%' ORDER BY START_TIME");
+    REQUIRE(rows.size() == 2);
+    REQUIRE(rows[0][0] == "SELECT id, v FROM t WHERE id < 3 ORDER BY id");
+    REQUIRE(rows[0][1] == "2");
+    REQUIRE(rows[0][2] == "d");
+    REQUIRE(rows[1][0] == "UPDATE t SET v = v + 1 WHERE id = 1");
+    REQUIRE(rows[1][1] == "0");
+    // the session that ran it and who it was (a connection that is registered; the first executor is session 0)
+    Executor client = Executor::new_session(ex.get_shared());
+    client.register_process("root", "10.0.0.7:5555", {});
+    ok(client, "USE d");
+    ok(client, "SELECT v FROM t WHERE id = 2");
+    REQUIRE(client.session_id != 0);
+    REQUIRE(q(ex, "SELECT THREAD_ID, USER_HOST FROM information_schema.slow_log WHERE SQL_TEXT = 'SELECT v FROM t WHERE id = 2'") == (Rows{{std::to_string(client.session_id), "root @ 10.0.0.7:5555"}}));
+    client.deregister_process();
+    auto times = q(ex, "SELECT QUERY_TIME, START_TIME, USER_HOST FROM information_schema.slow_log LIMIT 1");
+    REQUIRE(times.size() == 1);
+    REQUIRE(std::stod(times[0][0]) >= 0);
+    REQUIRE(times[0][1].size() >= 19);
+    REQUIRE(std::stoi(slow_queries(ex)) > counted_off);
+    // an aggregate's answer is one row, although its table has no "1 row(s) returned." line: sent and FOUND_ROWS() say 1
+    ok(ex, "SELECT COUNT(*) FROM t");
+    REQUIRE(q(ex, "SELECT FOUND_ROWS()") == (Rows{{"1"}}));
+    REQUIRE(q(ex, "SELECT ROWS_SENT FROM information_schema.slow_log WHERE SQL_TEXT = 'SELECT COUNT(*) FROM t'") == (Rows{{"1"}}));
+    // QUERY_TIME is the seconds the statement took, with six decimals: a cross join of 300 rows (90,000 pairs) is far over a threshold of 0.05 s and far under a minute
+    ok(ex, "CREATE TABLE big (id INT PRIMARY KEY)");
+    std::string big_values;
+    for (int i = 1; i <= 300; i++) big_values += std::string(i > 1 ? "," : "") + "(" + std::to_string(i) + ")";
+    ok(ex, "INSERT INTO big VALUES " + big_values);
+    ok(ex, "SET GLOBAL long_query_time = 0.05");
+    ok(ex, "SELECT COUNT(*) FROM big a, big b WHERE a.id + b.id = 7");
+    auto took = q(ex, "SELECT QUERY_TIME FROM information_schema.slow_log WHERE SQL_TEXT LIKE 'SELECT COUNT(*) FROM big%'");
+    REQUIRE(took.size() == 1);
+    REQUIRE(took[0][0].size() - took[0][0].find('.') == 7);
+    REQUIRE(std::stod(took[0][0]) >= 0.05);
+    REQUIRE(std::stod(took[0][0]) < 60);
+    // a threshold that nothing reaches: counted and written no more
+    ok(ex, "SET GLOBAL long_query_time = 100");
+    const std::string before = slow_queries(ex);
+    const std::string logged = q(ex, "SELECT COUNT(*) FROM information_schema.slow_log")[0][0];
+    ok(ex, "SELECT * FROM t");
+    REQUIRE(slow_queries(ex) == before);
+    REQUIRE(q(ex, "SELECT COUNT(*) FROM information_schema.slow_log")[0][0] == logged);
+    // the file is written too, in the shape of MySQL's slow log
+    std::ifstream file(dir.path + "/slow_query.log", std::ios::binary);
+    REQUIRE(file.good());
+    std::stringstream text;
+    text << file.rdbuf();
+    REQUIRE(text.str().find("# Query_time: ") != std::string::npos);
+    REQUIRE(text.str().find("# User@Host: ") != std::string::npos);
+    REQUIRE(text.str().find("use d;\nUPDATE t SET v = v + 1 WHERE id = 1;") != std::string::npos);
+}
+
+TEST_CASE("R59: slow_query_log and long_query_time belong to the server, and a wrong value is refused", "[r59][slow_log]") {
+    TempDataDir dir("r59_slow_log_global");
+    Executor ex(dir.path);
+    ok(ex, "CREATE DATABASE d");
+    ok(ex, "USE d");
+    auto shared = ex.get_shared();
+    Executor other = Executor::new_session(shared);
+    ok(other, "USE d");
+    ok(ex, "SET GLOBAL long_query_time = 2.5");
+    ok(ex, "SET GLOBAL slow_query_log = 1");
+    // another session reads what the first one set
+    REQUIRE(q(other, "SELECT @@slow_query_log, @@long_query_time") == (Rows{{"1", "2.500000"}}));
+    ok(other, "SET GLOBAL slow_query_log = OFF");
+    REQUIRE(q(ex, "SELECT @@slow_query_log") == (Rows{{"0"}}));
+    ok(other, "SET @@global.long_query_time = 0.1");
+    REQUIRE(q(ex, "SELECT @@long_query_time") == (Rows{{"0.100000"}}));
+    // ON / OFF / TRUE / FALSE / 1 / 0 are the values; a text, a negative threshold and a text that is no number are refused with MySQL's numbers
+    for (const char* value : {"ON", "off", "TRUE", "false", "1", "0"}) ok(ex, std::string("SET GLOBAL slow_query_log = ") + value);
+    REQUIRE(fails(ex, "SET GLOBAL slow_query_log = maybe").find("ERROR 1231 (42000)") == 0);
+    REQUIRE(fails(ex, "SET GLOBAL long_query_time = abc").find("ERROR 1232 (42000)") == 0);
+    REQUIRE(fails(ex, "SET GLOBAL long_query_time = nan").find("ERROR 1232 (42000)") == 0);
+    REQUIRE(q(ex, "SELECT @@long_query_time") == (Rows{{"0.100000"}})); // (a refused value changed nothing)
+    // a number out of range is brought into the range 0 .. 31536000 (MySQL warns and sets it; it is no error)
+    ok(ex, "SET GLOBAL long_query_time = -1");
+    REQUIRE(q(ex, "SELECT @@long_query_time") == (Rows{{"0.000000"}}));
+    ok(ex, "SET GLOBAL long_query_time = 99999999999");
+    REQUIRE(q(ex, "SELECT @@long_query_time") == (Rows{{"31536000.000000"}}));
+}
+
+TEST_CASE("R59: the slow query list keeps the last 1000 statements", "[r59][slow_log]") {
+    TempDataDir dir("r59_slow_log_ring");
+    Executor ex(dir.path);
+    ok(ex, "SET GLOBAL long_query_time = 0");
+    ok(ex, "SET GLOBAL slow_query_log = ON");
+    for (int i = 0; i < 1010; i++) ok(ex, "SELECT " + std::to_string(i));
+    REQUIRE(q(ex, "SELECT COUNT(*) FROM information_schema.slow_log")[0][0] == "1000");
+    REQUIRE(q(ex, "SELECT COUNT(*) FROM information_schema.slow_log WHERE SQL_TEXT = 'SELECT 0'")[0][0] == "0"); // (the oldest went first)
+    REQUIRE(q(ex, "SELECT COUNT(*) FROM information_schema.slow_log WHERE SQL_TEXT = 'SELECT 1009'")[0][0] == "1");
+}
+
+TEST_CASE("R59: innodb_trx says which session each open transaction is and since when", "[r59][innodb_trx]") {
+    TempDataDir dir("r59_trx_owner");
+    Executor first(dir.path);
+    ok(first, "CREATE DATABASE d");
+    ok(first, "USE d");
+    ok(first, "CREATE TABLE t (id INT PRIMARY KEY, v INT)");
+    ok(first, "INSERT INTO t VALUES (1, 1), (2, 2)");
+    auto shared = first.get_shared();
+    Executor second = Executor::new_session(shared);
+    ok(second, "USE d");
+    first.register_process("root", "a", {});
+    second.register_process("root", "b", {});
+    REQUIRE(first.session_id != second.session_id);
+    REQUIRE(q(first, "SELECT COUNT(*) FROM information_schema.innodb_trx")[0][0] == "0");
+    ok(first, "BEGIN");
+    ok(first, "UPDATE t SET v = 10 WHERE id = 1");
+    // the transaction is the first session's (and a session that is not in one has none)
+    auto rows = q(second, "SELECT TRX_STATE, TRX_MYSQL_THREAD_ID, TRX_STARTED, TRX_ROWS_LOCKED FROM information_schema.innodb_trx");
+    REQUIRE(rows.size() == 1);
+    REQUIRE(rows[0][0] == "RUNNING");
+    REQUIRE(rows[0][1] == std::to_string(first.session_id));
+    REQUIRE(rows[0][2].size() == 19);
+    REQUIRE(rows[0][2][4] == '-');
+    REQUIRE(rows[0][3] == "1");
+    const std::string age = q(second, "SELECT TIMESTAMPDIFF(SECOND, TRX_STARTED, NOW()) FROM information_schema.innodb_trx")[0][0];
+    REQUIRE(age.find_first_not_of("0123456789") == std::string::npos);
+    REQUIRE(std::stoll(age) < 3600); // (it was begun a moment ago, not at the start of the epoch)
+    // a second transaction in the other session
+    ok(second, "BEGIN");
+    ok(second, "UPDATE t SET v = 20 WHERE id = 2");
+    auto both = q(second, "SELECT TRX_MYSQL_THREAD_ID FROM information_schema.innodb_trx ORDER BY TRX_MYSQL_THREAD_ID");
+    REQUIRE(both.size() == 2);
+    REQUIRE(both[0][0] == std::to_string(std::min(first.session_id, second.session_id)));
+    REQUIRE(both[1][0] == std::to_string(std::max(first.session_id, second.session_id)));
+    ok(first, "COMMIT");
+    ok(second, "ROLLBACK");
+    REQUIRE(q(first, "SELECT COUNT(*) FROM information_schema.innodb_trx")[0][0] == "0");
+    first.deregister_process();
+    second.deregister_process();
 }

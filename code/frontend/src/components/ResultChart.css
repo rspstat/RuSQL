@@ -1,0 +1,24 @@
+/* The chart under a result table (ResultChart.tsx) */
+.csv-btn.rc-on { color: #4ec9b0; border-color: #4ec9b0; }
+.rc-panel {
+  flex-basis: 100%;
+  margin: 8px 0 10px;
+  padding: 10px 12px 8px;
+  background: #1e1e1e;
+  border: 1px solid #3c3c3c;
+  border-radius: 4px;
+  font-family: 'Consolas', monospace;
+}
+.rc-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 16px; margin-bottom: 8px; font-size: 11px; color: #9cdcfe; }
+.rc-controls label { display: inline-flex; align-items: center; gap: 5px; color: #9cdcfe; }
+.rc-controls select { background: #2d2d2d; color: #d4d4d4; border: 1px solid #444; border-radius: 3px; font-size: 11px; padding: 1px 4px; }
+.rc-values { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; color: #9cdcfe; }
+.rc-check { color: #d4d4d4 !important; }
+.rc-svg { display: block; overflow: visible; }
+.rc-grid { stroke: #2f2f2f; stroke-width: 1; }
+.rc-zero { stroke: #5a5a5a; stroke-width: 1.2; }
+.rc-tick { fill: #9a9a9a; font-size: 10px; font-family: 'Consolas', monospace; }
+.rc-legend { fill: #d4d4d4; font-size: 11px; font-family: 'Consolas', monospace; }
+.rc-bar:hover, .rc-slice:hover { filter: brightness(1.25); }
+.rc-dot:hover { r: 5.5; }
+.rc-note { margin-top: 4px; font-size: 11px; color: #858585; }

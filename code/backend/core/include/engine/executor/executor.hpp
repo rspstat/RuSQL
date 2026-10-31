@@ -24,6 +24,7 @@
 #include "engine/parser/ast.hpp"
 #include "engine/parser/ast_json.hpp"
 #include "engine/server_status.hpp"
+#include "engine/slow_log.hpp"
 #include "engine/statement_error.hpp"
 #include "engine/storage/buffer_pool.hpp"
 #include "engine/storage/composite_index.hpp"
@@ -102,6 +103,9 @@ struct ProcessInfo {
     // KILL: the session's kill state (1: the statement that runs was asked to stop, 2: the connection was killed) and what closes its connection
     std::shared_ptr<std::atomic<int>> kill_state;
     std::function<void()> close_connection;
+    // the transaction the session has open (0: none) and when it began: information_schema.innodb_trx tells which session each transaction is (R59)
+    std::uint64_t txn_id = 0;
+    std::chrono::system_clock::time_point txn_started;
 };
 
 // Procedure: (params: [(IN/OUT/INOUT, name, type)], body statements).
@@ -162,6 +166,7 @@ struct SharedDatabase {
     // `Arc<Mutex<HashMap<...>>>`, independent of the outer SharedDatabase RwLock).
     std::shared_ptr<Mutex<std::unordered_map<std::size_t, ProcessInfo>>> process_list;
     std::shared_ptr<ServerCounters> counters = std::make_shared<ServerCounters>(); // what SHOW STATUS counts
+    std::shared_ptr<SlowLog> slow_log = std::make_shared<SlowLog>();                // the slow query log (R59): its switches belong to the server
     std::shared_ptr<std::atomic<std::size_t>> next_session_id;
     // PK value -> Vec position index: O(1) single-row DELETE optimization outside txns.
     std::unordered_map<std::string, std::unordered_map<std::string, std::size_t>> row_pk_pos;
@@ -324,6 +329,13 @@ public:
     void count_statement(const std::string& sql);
     std::shared_ptr<ServerCounters> counters() const;
     mutable std::shared_ptr<ServerCounters> counters_;
+    // the slow query log (R59): a statement of this session that ran for at least long_query_time is counted and, when slow_query_log is ON, written down; the two switches are
+    // the server's, and this session re-reads @@slow_query_log / @@long_query_time when another session has changed them
+    std::shared_ptr<SlowLog> slow_log() const;
+    mutable std::shared_ptr<SlowLog> slow_log_;
+    std::uint64_t slow_log_seen_ = 0;
+    void note_slow_statement(const std::string& sql, std::chrono::steady_clock::time_point started, const StringResult& result);
+    void refresh_slow_log_variables();
     std::array<std::uint64_t, kStatCount> session_statements_{};
     // this session's connection was killed (by itself or another session): the server closes it once the answer is sent
     bool connection_killed() const { return kill_state_->load() == 2; }
@@ -340,6 +352,7 @@ public:
 
     StringResult execute(Statement stmt);
     StringResult execute_sql(const std::string& sql);
+    StringResult run_sql_text(const std::string& sql); // (execute_sql without the clock of the slow query log)
 
     // UPDATE/DELETE use the table's indexes to find their target rows only when the table has at
     // least this many physical rows (below that a scan is as cheap and the index adds nothing but

@@ -5,7 +5,11 @@
 #include "engine/fk_name.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
+#include <cstdio>
+#include <ctime>
+#include <unordered_map>
 #include <unordered_set>
 
 namespace engine {
@@ -95,7 +99,8 @@ const std::vector<IC> kCollations = {{"COLLATION_NAME", false}, {"CHARACTER_SET_
 const std::vector<IC> kEngines = {{"ENGINE", false}, {"SUPPORT", false}, {"COMMENT", false}, {"TRANSACTIONS", false}, {"XA", false}, {"SAVEPOINTS", false}};
 // What the server is doing right now: the sessions, the open transactions, the row locks they hold and who waits for whom (R45)
 const std::vector<IC> kProcesslist = {{"ID", true}, {"USER", false}, {"HOST", false}, {"DB", false}, {"COMMAND", false}, {"TIME", true}, {"STATE", false}, {"INFO", false}};
-const std::vector<IC> kInnodbTrx = {{"TRX_ID", true}, {"TRX_STATE", false}, {"TRX_ROWS_LOCKED", true}, {"TRX_WAITING_FOR", true}};
+// TRX_STARTED and TRX_MYSQL_THREAD_ID (R59): which session each transaction is, and since when it has been open
+const std::vector<IC> kInnodbTrx = {{"TRX_ID", true}, {"TRX_STATE", false}, {"TRX_STARTED", false}, {"TRX_MYSQL_THREAD_ID", true}, {"TRX_ROWS_LOCKED", true}, {"TRX_WAITING_FOR", true}};
 const std::vector<IC> kInnodbLocks = {{"LOCK_TRX_ID", true}, {"LOCK_MODE", false}, {"LOCK_TABLE", false}, {"LOCK_DATA", false}};
 const std::vector<IC> kInnodbLockWaits = {{"REQUESTING_TRX_ID", true}, {"BLOCKING_TRX_ID", true}};
 const std::vector<IC> kInnodbDeadlocks = {{"REQUESTING_TRX_ID", true}, {"BLOCKING_TRX_ID", true}};
@@ -105,6 +110,8 @@ const std::vector<IC> kRowVersions = {{"TABLE_SCHEMA", false}, {"TABLE_NAME", fa
 // RuSQL's own: what the last start of the engine did to open the data (R51)
 const std::vector<IC> kRecovery = {{"OPEN_MS", true}, {"UNDO_MS", true}, {"REDO_MS", true}, {"WAL_TXNS_REPLAYED", true}, {"WAL_TXNS_UNDONE", true},
                                    {"REDO_OPS", true}, {"REDO_TABLES", true}, {"CRASH_DETECTED", false}};
+// RuSQL's own table of what MySQL keeps in mysql.slow_log (R59): the statements that ran for at least long_query_time while slow_query_log was ON, the last 1000
+const std::vector<IC> kSlowLog = {{"START_TIME", false}, {"USER_HOST", false}, {"QUERY_TIME", true}, {"ROWS_SENT", true}, {"DB", false}, {"SQL_TEXT", false}, {"THREAD_ID", true}};
 // the counters SHOW GLOBAL STATUS shows, as a table (R53)
 const std::vector<IC> kGlobalStatus = {{"VARIABLE_NAME", false}, {"VARIABLE_VALUE", false}};
 } // namespace
@@ -125,6 +132,7 @@ const std::vector<InfoSchemaColumn>* Executor::info_schema_columns(const std::st
     if (lower == "engines") return &kEngines;
     if (lower == "processlist") return &kProcesslist;
     if (lower == "innodb_trx") return &kInnodbTrx;
+    if (lower == "slow_log") return &kSlowLog;
     if (lower == "innodb_locks") return &kInnodbLocks;
     if (lower == "innodb_lock_waits") return &kInnodbLockWaits;
     if (lower == "innodb_deadlocks") return &kInnodbDeadlocks;
@@ -709,6 +717,13 @@ std::vector<Row> Executor::info_schema_rows(const SharedDatabase& s, const std::
         std::sort(open.begin(), open.end());
         const auto locks = s.lock_mgr.lock_rows();
         const auto waits = s.lock_mgr.wait_for_rows();
+        std::unordered_map<std::size_t, ProcessInfo> owners;
+        {
+            auto list = s.process_list->lock();
+            for (auto& [session, p] : *list) {
+                if (p.txn_id) owners.emplace(session, p);
+            }
+        }
         for (std::uint64_t id : open) {
             std::size_t held = 0;
             for (auto& [table, key, holder] : locks) held += holder == id ? 1 : 0;
@@ -719,8 +734,38 @@ std::vector<Row> Executor::info_schema_rows(const SharedDatabase& s, const std::
             Row r;
             r["TRX_ID"] = std::to_string(id);
             r["TRX_STATE"] = blocker ? "LOCK WAIT" : "RUNNING";
+            r["TRX_STARTED"] = EXECUTOR_NULL_VALUE;
+            r["TRX_MYSQL_THREAD_ID"] = "0";
+            for (auto& [session, p] : owners) { // (the session that has this transaction open)
+                if (p.txn_id != id) continue;
+                r["TRX_MYSQL_THREAD_ID"] = std::to_string(session);
+                const std::time_t whole = std::chrono::system_clock::to_time_t(p.txn_started);
+                std::tm local{};
+                localtime_s(&local, &whole);
+                char stamp[32];
+                std::strftime(stamp, sizeof stamp, "%Y-%m-%d %H:%M:%S", &local);
+                r["TRX_STARTED"] = stamp;
+                break;
+            }
             r["TRX_ROWS_LOCKED"] = std::to_string(held);
             r["TRX_WAITING_FOR"] = blocker ? std::to_string(*blocker) : EXECUTOR_NULL_VALUE;
+            rows.push_back(std::move(r));
+        }
+        return rows;
+    }
+
+    if (lower == "slow_log") {
+        for (const SlowLogEntry& e : s.slow_log->entries()) {
+            Row r;
+            r["START_TIME"] = e.start_time;
+            r["USER_HOST"] = e.user_host;
+            char seconds[32];
+            std::snprintf(seconds, sizeof seconds, "%.6f", e.query_seconds);
+            r["QUERY_TIME"] = seconds;
+            r["ROWS_SENT"] = std::to_string(e.rows_sent);
+            r["DB"] = e.db.empty() ? EXECUTOR_NULL_VALUE : e.db;
+            r["SQL_TEXT"] = e.sql;
+            r["THREAD_ID"] = std::to_string(e.thread_id);
             rows.push_back(std::move(r));
         }
         return rows;

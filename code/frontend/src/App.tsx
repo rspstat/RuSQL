@@ -13,6 +13,9 @@ import Sidebar from "./components/Sidebar";
 import ActivityPanel from "./components/ActivityPanel";
 import MetricsPanel from "./components/MetricsPanel";
 import ErdView from "./components/ErdView";
+import ResultChart from "./components/ResultChart";
+import PlanDiagram from "./components/PlanDiagram";
+import SchemaDiffModal from "./components/SchemaDiffModal";
 import ConfirmDialog from "./components/ConfirmDialog";
 import EditTableModal from "./components/EditTableModal";
 import JourneyModal from "./components/JourneyModal";
@@ -22,6 +25,7 @@ import type {
 } from "./types";
 import { computeErdLayout, type ErdPos } from "./lib/erd";
 import { measureTextPx } from "./lib/measureText";
+import { rowsToJson } from "./lib/resultExport";
 import { registerSqlCompletion, clearSqlCompletionCache } from "./lib/sqlCompletion";
 
 // ─── 타입 ─────────────────────────────────────────────────────
@@ -143,6 +147,7 @@ function ExplainPlan({ lines, elapsed }: { lines: string[]; elapsed: number }) {
       <div className="explain-tree-header">
         <span className="explain-tree-icon">⟳</span> QUERY PLAN · {elapsed.toFixed(3)}s
       </div>
+      <PlanDiagram lines={lines} />
       {infoLines.map((line, li) => {
         const [label, ...rest] = line.split(":");
         const value = rest.join(":").trim();
@@ -206,6 +211,7 @@ function App() {
   const [editTableModal, setEditTableModal] = useState<{ table: string; cols: ColumnDetail[] } | null>(null);
   const [editTableNewCol, setEditTableNewCol] = useState({ name: "", type: "VARCHAR(50)", notNull: false, defaultVal: "" });
   const [journeySql, setJourneySql] = useState<string | null>(null);
+  const [schemaDiffDb, setSchemaDiffDb] = useState<string | null>(null);
   const [sidebarSearch, setSidebarSearch] = useState("");
   const [bookmarks, setBookmarks] = useState<{ id: string; name: string; sql: string }[]>(() => {
     try { return JSON.parse(localStorage.getItem("rusql_bookmarks") ?? "[]"); } catch { return []; }
@@ -2318,6 +2324,7 @@ function App() {
               setEditorQuery={setEditorQuery}
               confirmThenRun={confirmThenRun}
               runDbCtxQuery={runDbCtxQuery}
+              onCompareSchema={setSchemaDiffDb}
             />
           )}
 
@@ -2438,6 +2445,7 @@ function App() {
           )}
 
           {journeySql !== null && <JourneyModal sql={journeySql} onClose={() => setJourneySql(null)} />}
+          {schemaDiffDb !== null && <SchemaDiffModal databases={databases} initialDb={schemaDiffDb} onClose={() => setSchemaDiffDb(null)} onUseSql={setEditorQuery} />}
 
           <div className="app-main">
             <div className="tabs-row">
@@ -3028,6 +3036,19 @@ function App() {
                                   URL.revokeObjectURL(a.href);
                                 }}
                               >⬇ CSV</button>
+                              <button
+                                className="csv-btn"
+                                title="Export as JSON (NULL is null, a plain number is a number, the rest is text)"
+                                onClick={() => {
+                                  const blob = new Blob([rowsToJson(r.columns, r.rows)], { type: "application/json;charset=utf-8" });
+                                  const a = document.createElement("a");
+                                  a.href = URL.createObjectURL(blob);
+                                  a.download = `result_${i + 1}.json`;
+                                  a.click();
+                                  URL.revokeObjectURL(a.href);
+                                }}
+                              >⬇ JSON</button>
+                              <ResultChart columns={r.columns} rows={r.rows} />
                               {pageCount > 1 && (
                                 <span className="result-page-info">
                                   &nbsp;· Showing: {page * PAGE_SIZE + 1}–{Math.min((page + 1) * PAGE_SIZE, total)} / {total}

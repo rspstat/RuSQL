@@ -93,6 +93,8 @@ UPDATE orders SET amount = amount + 2 WHERE id = 7;
 COMMIT;
 ```
 
+패널에는 B 위에 `waits for #A`, A 위에 `BLOCKS 1`이 붙고, 맨 위의 빨간 줄이 "⚠ #A blocks 1 transaction"으로 **맨 뿌리 차단자**를 알려 줍니다(그 줄의 `Disconnect`를 두 번 누르면 A를 끊고 B가 풀립니다). 문장마다 `Stop statement`(`KILL QUERY`)와 `Disconnect`가 있고, 5초 넘게 도는 문장은 호박색 `SLOW`, 트랜잭션을 연 채 30초 넘게 쉬는 세션은 `idle in transaction`입니다. 패널 맨 아래 **Slow queries**에서 기준 시간을 고르고 `Turn on`을 누르면 그보다 오래 걸린 문장이 목록과 `<데이터 폴더>/slow_query.log`에 쌓입니다. 교차 조인처럼 한 덩어리로 도는 문장은 `Stop statement`로 멈추지 않으니 시연에서 피하세요.
+
 교착은 서로 엇갈리게 잡으면 만들어집니다. A가 7번, B가 8번을 잡은 뒤 A가 8번, B가 7번을 요청하면 한쪽이 교착으로 되돌려지고 패널의 "최근 교착"에 남습니다. SQL로 직접 보려면:
 
 ```sql
@@ -135,7 +137,7 @@ Claude Desktop에 MCP가 연결되어 있다면 "demo 데이터베이스에서 �
 
 미리보기는 문장을 실제로 실행해 영향 행 수를 보여 준 다음 되돌립니다(저장 안 됨). 사용자가 동의한 뒤 `commit=True`로 다시 부르면 저장됩니다. `DROP`·`TRUNCATE`·`WHERE` 없는 `UPDATE/DELETE`는 확인 없이는 막힙니다.
 **서버 상태·락·통계:** "서버 상태 어때?"(`health_report`: 연결·문장·락·교착·복구와 주의할 점), "지금 누가 누구를 막고 있어?"(`list_locks`: 뿌리 차단자와 `KILL` 안내), "orders 표 통계 보여 줘"(`get_table_stats`), "order_items에서 customers까지 조인 경로가 뭐야?"(`get_fk_graph`: 외래키 사슬과 `JOIN … ON …` 문장), "이 문장이 어느 단계에서 느려?"(`trace_query`: 단계별 시간, 쓰기 문장은 롤백되는 트랜잭션 안에서 돌림)를 물어볼 수 있습니다. 락 대기 시연(5번)을 켜 둔 채 `health_report`를 부르면 `attention`과 차단자 번호가 나옵니다.
-**인덱스 제안:** "demo의 orders에서 customer_id로 찾는 질의가 느려. suggest_indexes로 어떤 인덱스가 좋을지 봐 줘." 도구는 문장·열·인덱스·`ANALYZE TABLE`의 서로 다른 값 수·`EXPLAIN ANALYZE` 계획을 읽고 `CREATE INDEX` 문장, 이유, 인덱스가 있으면 읽을 행 수(추정), 이미 있는 인덱스, 효과가 없는 이유(열을 함수로 감쌈, 앞이 `%`인 LIKE, OR, 작은 표)를 돌려줍니다. **아무것도 만들지 않으므로** 만들지는 `run_script`로 미리보기 → 확인합니다. (5천 행 시험: 인덱스 전 `Seq Scan` 2.7ms → 만든 뒤 `Index Scan` 0.2ms.)
+**인덱스 제안:** "demo의 orders에서 customer_id로 찾는 질의가 느려. suggest_indexes로 어떤 인덱스가 좋을지 봐 줘." 도구는 문장·열·인덱스·`ANALYZE TABLE`의 서로 다른 값 수·`EXPLAIN ANALYZE` 계획을 읽고 `CREATE INDEX` 문장, 이유, 인덱스가 있으면 읽을 행 수(추정), 이미 있는 인덱스, 효과가 없는 이유(열을 함수로 감쌈, 앞이 `%`인 LIKE, OR, 작은 표)를 돌려줍니다. **기본은 아무것도 만들지 않으므로** 만들지는 `run_script`로 미리보기 → 확인합니다. 하위 질의·CTE·OR도 읽고, "제안한 인덱스를 실제로 써 보고 전·후를 비교해 줘"라고 하면 `verify=True`로 임시 인덱스를 만들어 `EXPLAIN ANALYZE`를 전·후로 재고 다시 지웁니다(잠깐 쓰기가 일어나니 한가한 데이터베이스에서). (5천 행 시험: 인덱스 전 `Seq Scan` 2.7ms → 만든 뒤 `Index Scan` 0.2ms.)
 
 `run_script` 자체는 살아 있는 서버로 확인했지만 **Claude Desktop과의 연결은 자동으로 검증하지 못했으니 발표 전에 한 번 미리 돌려 보세요.**
 

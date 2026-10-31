@@ -1,5 +1,5 @@
 {
-  "generated": "2026-10-28",
+  "generated": "2026-10-29",
   "mysql": "8.4.9",
   "corpora": [
     {
@@ -307,6 +307,14 @@
       "bothFail": 48
     },
     {
+      "name": "slow_log",
+      "en": "SET GLOBAL slow_query_log / long_query_time (values, errors, a number out of range), FOUND_ROWS() after an aggregate",
+      "ko": "SET GLOBAL slow_query_log / long_query_time(값·오류·범위 밖의 수), 집계 뒤의 FOUND_ROWS()",
+      "statements": 53,
+      "different": 0,
+      "bothFail": 3
+    },
+    {
       "name": "protocol",
       "en": "MySQL wire protocol: SHOW, OK packets, affected rows",
       "ko": "MySQL 프로토콜: SHOW·OK 패킷·영향 행 수",
@@ -325,8 +333,8 @@
   ],
   "conformanceCases": 4048,
   "tests": {
-    "cases": 846,
-    "assertions": 1509795
+    "cases": 850,
+    "assertions": 1510945
   },
   "bugsFound": 206
 }

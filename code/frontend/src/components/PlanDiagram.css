@@ -1,0 +1,35 @@
+/* The plan as boxes and arrows (PlanDiagram.tsx), inside the .explain-tree of a plan */
+.plan-diagram { margin-bottom: 12px; padding-bottom: 10px; border-bottom: 1px solid #3c3c3c; }
+.plan-diagram-title { color: #4ec9b0; font-size: 11px; font-weight: 700; letter-spacing: 0.5px; margin-bottom: 8px; }
+.plan-flow { display: flex; align-items: flex-start; gap: 0; overflow-x: auto; padding-bottom: 4px; }
+.plan-flow-item { display: flex; align-items: flex-start; flex-shrink: 0; }
+.plan-arrow { color: #6a6a6a; font-size: 18px; line-height: 40px; padding: 0 6px; }
+.plan-node {
+  width: 188px;
+  box-sizing: border-box;
+  padding: 7px 9px 8px;
+  background: #252526;
+  border: 1px solid #3c3c3c;
+  border-top: 3px solid #569cd6;
+  border-radius: 4px;
+  font-size: 11px;
+}
+.plan-scan { border-top-color: #4ec9b0; }
+.plan-join { border-top-color: #569cd6; }
+.plan-filter { border-top-color: #c586c0; }
+.plan-result, .plan-step { border-top-color: #9a9a9a; }
+.plan-slowest { border-color: #d7ba7d; border-top-color: #d7ba7d; background: #2b2820; }
+.plan-node-head { display: flex; align-items: center; gap: 6px; margin-bottom: 3px; }
+.plan-icon { color: #9cdcfe; font-size: 13px; }
+.plan-node-title { color: #d4d4d4; font-weight: 700; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.plan-node-detail { color: #9a9a9a; line-height: 1.35; word-break: break-word; }
+.plan-node-stat { color: #ce9178; margin-top: 4px; white-space: nowrap; }
+.plan-slowest .plan-node-stat { color: #d7ba7d; }
+.plan-heat { height: 4px; background: #333; border-radius: 2px; margin-top: 4px; overflow: hidden; }
+.plan-heat span { display: block; height: 100%; background: #569cd6; border-radius: 2px; }
+.plan-slowest .plan-heat span { background: #d7ba7d; }
+.plan-input { margin-top: 6px; padding: 2px 6px; background: #1e1e1e; border: 1px dashed #4a4a4a; border-radius: 3px; color: #9a9a9a; }
+.plan-input b { color: #4ec9b0; font-weight: 600; }
+.plan-facts { margin-top: 8px; color: #858585; font-size: 11px; }
+/* a plan with several boxes is wider than the 720 px of the plain rows */
+.explain-tree:has(.plan-diagram) { max-width: min(100%, 1100px); }

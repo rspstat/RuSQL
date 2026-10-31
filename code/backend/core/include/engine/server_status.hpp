@@ -58,6 +58,7 @@ struct ServerCounters {
     std::atomic<std::uint64_t> connections{0};          // connections that signed in
     std::atomic<std::uint64_t> max_used_connections{0}; // the most that were connected at once
     std::atomic<std::uint64_t> aborted_connects{0};     // sign-ins that were refused
+    std::atomic<std::uint64_t> slow_queries{0};         // statements that ran for at least long_query_time (counted whether the slow query log is on or not)
     const BufferPool* buffer_pool = nullptr;
     const LockManager* lock_mgr = nullptr;
 };
