@@ -36,6 +36,21 @@ std::optional<double> parse_f64(const std::string& s) { return parse_number(s); 
 
 std::string format_4dp(double v) { return format_places(v, 4); }
 
+// What a function that stands alone in a select list shows: PI() has six fixed decimals in MySQL's text (SELECT PI() is 3.141593) while its value is the whole double, so
+// inside an expression or as the argument of another function it stays whole (DEGREES(PI()) is 180)
+std::string shown_function_value(const std::string& name, std::string value) {
+    if (name.size() == 2 && std::toupper(static_cast<unsigned char>(name[0])) == 'P' && std::toupper(static_cast<unsigned char>(name[1])) == 'I') {
+        if (auto number = parse_number(value)) return format_places(*number, 6);
+    }
+    return value;
+}
+std::string shown_expr_value(const ArithExpr& expr, std::string value) {
+    if (auto* call = std::get_if<ArithExpr::Func>(&expr.data)) {
+        if (call->args.empty()) return shown_function_value(call->name, std::move(value));
+    }
+    return value;
+}
+
 // MIN or MAX of the values: the smallest / largest, comparing numbers as numbers when every value is one (integers exactly) and as text
 // otherwise, and the value itself as it is stored (not a number printed again). NULL for no value.
 std::string extreme_text(const std::vector<const std::string*>& values, bool smallest, ValueClass cls) {
@@ -1427,12 +1442,12 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
                                     bool distinct, std::vector<SelectColumn> columns, std::optional<CondExpr> condition, std::vector<Join> joins,
                                     std::vector<OrderBy> order_by, std::optional<std::vector<std::string>> group_by,
                                     std::optional<CondExpr> having, std::optional<std::size_t> limit, std::optional<std::size_t> offset,
-                                    bool for_update, bool for_share) {
+                                    bool for_update, bool for_share, bool with_rollup) {
     explain_trace::Scope trace_scope; // (EXPLAIN ANALYZE counts the steps of the outermost SELECT)
     if (subquery) {
         return exec_select_with_subquery(s, std::move(*subquery->first), subquery->second, distinct, std::move(columns), std::move(condition),
                                           std::move(joins), std::move(order_by), std::move(group_by), std::move(having), limit, offset, for_update,
-                                          for_share);
+                                          for_share, with_rollup);
     }
 
     // `JOIN (SELECT ...) AS d`: each derived table is evaluated once and read as a temporary table of its alias, as a derived table in
@@ -1477,7 +1492,7 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
             j.subquery.reset();
         }
         auto result = exec_select(s, std::move(table), std::nullopt, distinct, std::move(columns), std::move(condition), std::move(joins),
-                                  std::move(order_by), std::move(group_by), std::move(having), limit, offset, for_update, for_share);
+                                  std::move(order_by), std::move(group_by), std::move(having), limit, offset, for_update, for_share, with_rollup);
         drop_all();
         return result;
     }
@@ -1514,8 +1529,8 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
 
         std::string dual_error; // a column this select cannot evaluate without a table, or a failing subquery
         auto eval_col_val = [&](const SelectColumn& col) -> std::string {
-            if (auto* v = std::get_if<SelectColumn::Func>(&col.data)) return apply_scalar_func(v->name, v->args, eval_row);
-            if (auto* v = std::get_if<SelectColumn::Expr>(&col.data)) return eval_arith(eval_row, v->expr);
+            if (auto* v = std::get_if<SelectColumn::Func>(&col.data)) return shown_function_value(v->name, apply_scalar_func(v->name, v->args, eval_row));
+            if (auto* v = std::get_if<SelectColumn::Expr>(&col.data)) return shown_expr_value(v->expr, eval_arith(eval_row, v->expr));
             // (an @variable that was never set is NULL, not its own name)
             if (auto* v = std::get_if<SelectColumn::Column>(&col.data)) {
                 auto it = eval_row.find(v->name);
@@ -1557,7 +1572,7 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
                 if (!sc) return EXECUTOR_NULL_VALUE;
                 auto out = exec_select(s, sc->table, std::move(sc->subquery), sc->distinct, std::move(sc->columns), std::move(sc->condition),
                                         std::move(sc->joins), std::move(sc->order_by), std::move(sc->group_by), std::move(sc->having), sc->limit,
-                                        sc->offset, false, false);
+                                        sc->offset, false, false, sc->with_rollup);
                 if (out.is_err()) {
                     dual_error = out.error();
                     return "";
@@ -1654,7 +1669,7 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
                 s.catalog.create_table(wanted[i], made[i].first);
             }
             auto result = exec_select(s, table, std::nullopt, distinct, std::move(columns), std::move(condition), std::move(joins), std::move(order_by),
-                                      std::move(group_by), std::move(having), limit, offset, for_update, for_share);
+                                      std::move(group_by), std::move(having), limit, offset, for_update, for_share, with_rollup);
             for (const std::string& name : wanted) {
                 temporary_tables_.erase(name);
                 s.tables.erase(name);
@@ -1671,7 +1686,7 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
         Statement view_stmt = std::move(it->second);
         s.views.erase(it);
         auto result = exec_select_with_subquery(s, view_stmt, table, distinct, columns, condition, joins, order_by, group_by, having, limit,
-                                                  offset, for_update, for_share);
+                                                  offset, for_update, for_share, with_rollup);
         s.views[table] = std::move(view_stmt);
         return result;
     }
@@ -2750,7 +2765,7 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
                     if (it == row.end()) it = row.find(agg_a->col);
                     val = it != row.end() ? it->second : std::string();
                 } else if (auto* f = std::get_if<SelectColumn::Func>(&c.data)) {
-                    val = apply_scalar_func(f->name, f->args, row);
+                    val = shown_function_value(f->name, apply_scalar_func(f->name, f->args, row));
                 } else if (auto* cw = std::get_if<SelectColumn::CaseWhen>(&c.data)) {
                     auto resolve = [&](const std::string& sv) -> std::string {
                         const std::string* v = get_col(row, sv);
@@ -2764,7 +2779,7 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
                         }
                     }
                 } else if (auto* ex = std::get_if<SelectColumn::Expr>(&c.data)) {
-                    val = eval_arith(row, ex->expr);
+                    val = shown_expr_value(ex->expr, eval_arith(row, ex->expr));
                 } else if (auto* wf = std::get_if<SelectColumn::WinFunc>(&c.data)) {
                     std::string key_name = wf->alias.value_or(window_func_default_label(wf->func));
                     auto it = row.find(key_name);
@@ -2815,6 +2830,7 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
         struct Group {
             std::vector<std::string> key;
             std::vector<const Row*> rows;
+            std::size_t rolled_from = static_cast<std::size_t>(-1); // WITH ROLLUP: the keys from this one on are NULL in the group (a group of all its rows)
         };
         std::vector<Group> groups;
         std::unordered_map<std::string, std::size_t> group_of;
@@ -2840,6 +2856,42 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
                 groups.push_back(std::move(g));
             }
             groups[it->second].rows.push_back(rp);
+        }
+
+        // WITH ROLLUP: the groups in the order of their keys (NULL first, as ORDER BY has them) and, after the last group of each prefix of the keys, one more group over all
+        // the rows of that prefix with the other keys NULL: (a, b) ... (a, NULL) ... (NULL, NULL) for everything. No row, no group: an empty input has no total row.
+        if (with_rollup && !groups.empty()) {
+            const std::size_t key_count = group_by->size();
+            std::stable_sort(groups.begin(), groups.end(), [&](const Group& a, const Group& b) {
+                for (std::size_t i = 0; i < key_count; i++) {
+                    if (const int c = cmp_key(a.key[i], b.key[i], group_classes[i])) return c < 0;
+                }
+                return false;
+            });
+            std::vector<Group> with_totals;
+            std::vector<std::vector<const Row*>> passing(key_count); // passing[k]: the rows of the group of the first k keys that is going by
+            for (std::size_t gi = 0; gi < groups.size(); gi++) {
+                for (std::size_t k = 0; k < key_count; k++) passing[k].insert(passing[k].end(), groups[gi].rows.begin(), groups[gi].rows.end());
+                const bool last = gi + 1 == groups.size();
+                std::size_t shared = 0; // how many leading keys the next group has the same
+                if (!last) {
+                    while (shared < key_count && cmp_key(groups[gi].key[shared], groups[gi + 1].key[shared], group_classes[shared]) == 0) shared++;
+                }
+                std::vector<Group> totals;
+                for (std::size_t k = key_count; k-- > 0;) { // the innermost first: the group of the first k keys is complete when the next group differs inside them
+                    if (!last && shared >= k) continue;
+                    Group total;
+                    total.key.assign(key_count, EXECUTOR_NULL_VALUE);
+                    for (std::size_t i = 0; i < k; i++) total.key[i] = groups[gi].key[i];
+                    total.rows = std::move(passing[k]);
+                    passing[k].clear();
+                    total.rolled_from = k;
+                    totals.push_back(std::move(total));
+                }
+                with_totals.push_back(std::move(groups[gi]));
+                for (Group& total : totals) with_totals.push_back(std::move(total));
+            }
+            groups = std::move(with_totals);
         }
 
         // A select item that names a column that is not grouped by (`SELECT id, s, COUNT(*) ... GROUP BY id`: s depends on the key) is read from a row of
@@ -2895,7 +2947,15 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
             Row out;
             for (std::size_t i = 0; i < group_by->size(); i++) out[(*group_by)[i]] = key[i];
             if (needs_group_row && !grp.empty()) {
-                for (auto& [k, v] : *grp.front()) out.try_emplace(k, v);
+                // the other columns are the first row's of a group and the LAST row's of a rolled-up row (what ANY_VALUE(x) gives there, as in MySQL); a key that is rolled up is
+                // NULL however it is written
+                const std::size_t rolled_from = groups[gi].rolled_from;
+                const Row& source = rolled_from == static_cast<std::size_t>(-1) ? *grp.front() : *grp.back();
+                for (auto& [k, v] : source) {
+                    bool rolled = false;
+                    for (std::size_t i = rolled_from; i < group_by->size(); i++) rolled = rolled || bare_name((*group_by)[i]) == bare_name(k);
+                    out.try_emplace(k, rolled ? EXECUTOR_NULL_VALUE : v);
+                }
             }
             Row agg_row = compute_aggregates(grp, columns);
             for (auto& [k, v] : agg_row) out[k] = v;
@@ -3308,7 +3368,7 @@ StringResult Executor::exec_select_with_subquery(SharedDatabase& s, Statement in
                                                    std::vector<SelectColumn> columns, std::optional<CondExpr> condition, std::vector<Join> joins,
                                                    std::vector<OrderBy> order_by, std::optional<std::vector<std::string>> group_by,
                                                    std::optional<CondExpr> having, std::optional<std::size_t> limit,
-                                                   std::optional<std::size_t> offset, bool for_update, bool for_share) {
+                                                   std::optional<std::size_t> offset, bool for_update, bool for_share, bool with_rollup) {
     if (s.tables.count(alias) || s.views.count(alias)) return StringResult::Err("Alias '" + alias + "' conflicts with an existing table or view");
 
     const Statement inner_copy = inner_stmt; // (the names of an empty answer's columns come from the statement)
@@ -3331,7 +3391,7 @@ StringResult Executor::exec_select_with_subquery(SharedDatabase& s, Statement in
     s.catalog.create_table(alias, schema_cols);
 
     auto result = exec_select(s, alias, std::nullopt, distinct, std::move(columns), std::move(condition), std::move(joins), std::move(order_by),
-                               std::move(group_by), std::move(having), limit, offset, for_update, for_share);
+                               std::move(group_by), std::move(having), limit, offset, for_update, for_share, with_rollup);
 
     temporary_tables_.erase(alias);
     s.tables.erase(alias);
@@ -3565,10 +3625,10 @@ StringResult Executor::format_rows(SharedDatabase& s, const std::vector<const Ro
                     break;
                 }
                 case ColSource::Kind::Func:
-                    raw = apply_scalar_func(src.func_name, src.func_args, row);
+                    raw = shown_function_value(src.func_name, apply_scalar_func(src.func_name, src.func_args, row));
                     break;
                 case ColSource::Kind::Expr:
-                    raw = eval_arith(row, src.expr);
+                    raw = shown_expr_value(src.expr, eval_arith(row, src.expr));
                     if (single[vals.size()] && !float_exact_ && raw != EXECUTOR_NULL_VALUE) raw = sqlval::format_float_display(raw);
                     break;
                 case ColSource::Kind::CaseWhen: {

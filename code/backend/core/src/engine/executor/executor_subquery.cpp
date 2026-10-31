@@ -83,7 +83,7 @@ std::string Executor::run_subquery(SharedDatabase& s, const Statement& original,
     auto* sel = std::get_if<Statement::Select>(&stmt.data);
     StringResult result = sel ? exec_select(s, sel->table, std::move(sel->subquery), sel->distinct, std::move(sel->columns), std::move(sel->condition),
                                              std::move(sel->joins), std::move(sel->order_by), std::move(sel->group_by), std::move(sel->having),
-                                             sel->limit, sel->offset, false, false)
+                                             sel->limit, sel->offset, false, false, sel->with_rollup)
                               : execute_with_s(s, std::move(stmt)); // (a UNION / INTERSECT / EXCEPT / WITH)
     if (result.is_err()) throw StatementError(result.error());
     return result.value();

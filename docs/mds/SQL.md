@@ -161,7 +161,7 @@ RuSQL이 실제로 받아서 실행하는 SQL 문법을 한 줄씩 정리한 문
 - [NOT] EXISTS (서브쿼리) : 서브쿼리 결과 존재 여부
 - 비교 연산자 ANY / SOME / ALL (서브쿼리) : 서브쿼리 값 중 하나 / 전부와 비교
 - (a, b) IN ((1, 2), ...) / (a, b) = (1, 2) : 행 생성자 비교
-- GROUP BY 컬럼 | 별칭 | 위치번호 | 식 : 그룹으로 묶기
+- GROUP BY 컬럼 | 별칭 | 위치번호 | 식 [WITH ROLLUP] : 그룹으로 묶기. WITH ROLLUP은 묶음 뒤에 키의 접두사마다 한 행(남은 키는 NULL)과 마지막 총계 행을 더한다(R60: 묶음은 키 순서·NULL이 앞, 총계의 집계는 합친 행들 위에서, HAVING은 이 행들에도 걸리고 ORDER BY·LIMIT·DISTINCT는 그 뒤; GROUP BY 목록 뒤에 한 번만; `GROUPING()`은 아직 없음)
 - HAVING 조건 : 그룹을 거르기(select 별칭 · 집계 · 서브쿼리 사용 가능)
 - ORDER BY 컬럼 | 별칭 | 위치번호 | 식 [ASC | DESC], ... : 정렬
 - LIMIT n / LIMIT n OFFSET m / LIMIT m, n : 행 수 제한 · 건너뛰기
@@ -223,7 +223,7 @@ RuSQL이 실제로 받아서 실행하는 SQL 문법을 한 줄씩 정리한 문
 - TRIM([LEADING | TRAILING | BOTH] [문자] FROM 문자열) : 양쪽 / 앞 / 뒤 문자 제거
 - SUBSTRING(문자열 FROM n [FOR m]) : 문자열 일부(쉼표 형식도 가능)
 - POSITION(부분 IN 문자열) : 위치 찾기
-- 식 -> '$.경로' / 식 ->> '$.경로' : JSON 값 꺼내기 / 따옴표 없는 문자열로 꺼내기
+- 열 -> '$.경로' / 열 ->> '$.경로' : JSON 값 꺼내기 / 따옴표 없는 문자열로 꺼내기(R60: MySQL처럼 **열 뒤에서만**: 문자열·수·함수 결과 뒤의 화살표는 문법 오류, 함수 결과에는 `JSON_EXTRACT(식, '$.경로')`)
 - 'text' / "text" : 문자열 리터럴(`''` 따옴표 두 번, `\n` `\t` `\\` `\'` 이스케이프, `\%` · `\_`는 두 글자 그대로 남아 LIKE가 읽음; 큰따옴표는 컬럼 이름으로 읽음)
 - 123 / 1.5 / 1e3 / 0x41 : 숫자 · 지수 · 16진수 리터럴
 - TRUE / FALSE / NULL : 참 · 거짓 · 값 없음
@@ -432,7 +432,7 @@ RuSQL이 실제로 받아서 실행하는 SQL 문법을 한 줄씩 정리한 문
 
 ### information_schema (SELECT로 조회)
 
-- information_schema.tables / columns / statistics : 테이블 · 컬럼 · 인덱스 정보
+- information_schema.tables / columns / statistics : 테이블 · 컬럼 · 인덱스 정보(R60: `columns`는 뷰의 열도 냄 — 그대로 가져온 열은 그 열의 타입, 계산한 열은 TEXT; `tables`의 `AVG_ROW_LENGTH`·`DATA_LENGTH`·`INDEX_LENGTH`는 InnoDB가 세는 16 KB 쪽 수를 행에서 추정한 값이라 작은 표는 MySQL과 같고 큰 표는 몇 % 어긋남)
 - information_schema.schemata (schemas) : 데이터베이스 목록
 - information_schema.key_column_usage / table_constraints / referential_constraints : 키 · 제약 · 외래 키 정보
 - information_schema.views : 뷰 정보
@@ -495,10 +495,10 @@ mysql 클라이언트 · 드라이버 · 도구가 보내는 문장을 받아주
 - DESC t / DESCRIBE t [col] / EXPLAIN t : 컬럼 목록(MySQL의 모양)
 - SHOW INDEX | INDEXES | KEYS FROM t [FROM db] : 인덱스 목록(MySQL의 모양)
 - SHOW CREATE TABLE t / SHOW CREATE VIEW v : MySQL 형식의 CREATE 문
-- SHOW TABLE STATUS [FROM db] [LIKE '...'] : 테이블 상태
+- SHOW TABLE STATUS [FROM db] [LIKE '...'] : 테이블 상태(`Create_time`·`Update_time`·`Check_time`은 NULL)
 - SHOW VARIABLES [LIKE '...'] / SHOW SESSION | GLOBAL VARIABLES : 서버 변수 목록
 - SHOW CHARACTER SET / SHOW CHARSET / SHOW COLLATION : 문자 집합 · 정렬 규칙 목록
-- SHOW ENGINES / SHOW PLUGINS : 엔진 · 플러그인 목록
+- SHOW ENGINES / SHOW PLUGINS : 엔진 · 플러그인 목록(R60: `SHOW ENGINES`·`information_schema.engines`는 MySQL 8.4의 11행을 그대로 보임 — **RuSQL의 엔진은 InnoDB 방식 하나뿐**이라 `ENGINE = MyISAM` 같은 옵션은 받아서 무시하고 트랜잭션·행 잠금이 있는 같은 방식으로 만들며, InnoDB의 `XA = YES`도 표시일 뿐 XA 문장은 없음)
 - SHOW WARNINGS : 경고 목록(항상 비어 있음)
 - SHOW EVENTS / SHOW TRIGGERS / SHOW PROCEDURE STATUS / SHOW FUNCTION STATUS : 빈 목록으로 응답
 - ANALYZE | CHECK | OPTIMIZE TABLE t : 통계 갱신 · 점검 · 정리(MySQL 응답 모양)
@@ -524,7 +524,7 @@ mysql 클라이언트 · 드라이버 · 도구가 보내는 문장을 받아주
 - **테이블 정의** : `GENERATED ALWAYS AS (...)` 생성 컬럼, `DEFAULT (식)`, `CREATE TEMPORARY TABLE`, `FULLTEXT` 인덱스, 인덱스 접두 길이 `col(n)`, 여러 컬럼 외래 키, 표현식 인덱스, `ZEROFILL`, `SERIAL` · `BINARY` · `VARBINARY` · `BIT` · `GEOMETRY` 타입, `ALTER TABLE ADD/DROP PRIMARY KEY`, `ALTER TABLE CONVERT TO CHARACTER SET`, 파티션 `KEY` · `COLUMNS` · `REORGANIZE` · `TRUNCATE PARTITION`, `DROP TABLE ... CASCADE`, `CREATE INDEX IF NOT EXISTS`, `ALTER DATABASE`
 - **뷰** : `CREATE VIEW v (컬럼 목록) AS ...`, `WITH CHECK OPTION`
 - **데이터 쓰기** : `INSERT ... VALUES ()`(빈 값), `INSERT ... DEFAULT VALUES`, `INSERT ... AS 별칭`, `INSERT/UPDATE/DELETE LOW_PRIORITY · QUICK`, `UPDATE IGNORE`, `UPDATE ... JOIN (파생 테이블)`, `DELETE FROM ... USING`, `LOAD DATA`, `SELECT ... INTO OUTFILE`
-- **조회** : `GROUP BY ... WITH ROLLUP`, `NATURAL LEFT | RIGHT JOIN`, `TABLE t`, `VALUES ROW(...)`, `USE | FORCE | IGNORE INDEX` 힌트, `PARTITION (p)` 선택, `STRAIGHT_JOIN`, `SELECT ALL | HIGH_PRIORITY`, `FROM DUAL`, `NULLS FIRST | LAST`, `OFFSET n ROWS`, `FOR UPDATE OF 테이블`, 괄호로 감싼 `(SELECT ..) UNION (SELECT ..) ORDER BY`, `NATURAL LEFT JOIN`, `IN (SELECT ... UNION SELECT ...)`, `INSERT ... SELECT ... ON DUPLICATE KEY UPDATE`
+- **조회** : `NATURAL LEFT | RIGHT JOIN`, `TABLE t`, `VALUES ROW(...)`, `USE | FORCE | IGNORE INDEX` 힌트, `PARTITION (p)` 선택, `STRAIGHT_JOIN`, `SELECT ALL | HIGH_PRIORITY`, `FROM DUAL`, `NULLS FIRST | LAST`, `OFFSET n ROWS`, `FOR UPDATE OF 테이블`, 괄호로 감싼 `(SELECT ..) UNION (SELECT ..) ORDER BY`, `NATURAL LEFT JOIN`, `IN (SELECT ... UNION SELECT ...)`, `INSERT ... SELECT ... ON DUPLICATE KEY UPDATE`
 - **식 · 리터럴** : `IS [NOT] DISTINCT FROM`, `BETWEEN SYMMETRIC`, `.5`, `b'101'`, `DATE '2024-01-01'`, `_utf8mb4'x'`, `COLLATE` 연산자, `BINARY` 연산자, `MATCH ... AGAINST`, `SOUNDS LIKE`, `SELECT @a := 식`, `CONVERT(식 USING 문자집합)`, `DEFAULT(col)`, `GROUPING()`
 - **함수** : `PERCENTILE_CONT ... WITHIN GROUP`, `BIT_XOR`, `CONNECTION_ID`, `GET_LOCK`, `INET_ATON`, `BENCHMARK`, `JSON_MERGE_PATCH` 등 위 9장에 없는 함수
 - **프로시저** : `SIGNAL`, `DECLARE ... HANDLER`, 커서(`DECLARE CURSOR`), 본문의 `CASE ... END CASE`, 반복문 끝의 라벨(`END WHILE lp`), `CREATE PROCEDURE IF NOT EXISTS`, `CREATE OR REPLACE PROCEDURE`, `CREATE TRIGGER IF NOT EXISTS`, 여러 문장 함수 본문(`BEGIN ... RETURN ... END`)

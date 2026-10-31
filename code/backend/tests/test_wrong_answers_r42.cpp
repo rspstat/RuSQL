@@ -2976,3 +2976,249 @@ TEST_CASE("R59: innodb_trx says which session each open transaction is and since
     first.deregister_process();
     second.deregister_process();
 }
+
+// ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+// R60: the eight statements the Compat scoreboard still differed in -- GROUP BY ... WITH ROLLUP, PI() with six decimals, -> only after a column, the columns of a view in
+// information_schema.columns, SHOW ENGINES, the sizes of SHOW TABLE STATUS, the version 8.4.9 (the answers are what a real MySQL 8.4.9 gave for the same statements)
+// ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+namespace {
+void make_rollup_table(Executor& ex) {
+    ok(ex, "CREATE DATABASE d");
+    ok(ex, "USE d");
+    ok(ex, "CREATE TABLE t (id INT PRIMARY KEY, g INT, h INT, i INT)");
+    ok(ex, "INSERT INTO t VALUES (1, 1, 1, 10), (2, 1, 1, 20), (3, 1, 2, 30), (4, 2, 1, 5), (5, 2, 2, NULL), (6, 3, NULL, 7), (7, NULL, 1, 8)");
+}
+} // namespace
+
+TEST_CASE("R60: WITH ROLLUP adds a row for each prefix of the keys and a last one for all of them, in the order MySQL gives", "[r60][rollup]") {
+    TempDataDir dir("r60_rollup");
+    Executor ex(dir.path);
+    make_rollup_table(ex);
+    // one key: the groups by key (NULL first), then the total; AVG and the count are over all the rows of the total
+    REQUIRE(q(ex, "SELECT g, SUM(i), COUNT(*), AVG(i) FROM t GROUP BY g WITH ROLLUP") ==
+            (Rows{{"NULL", "8", "1", "8.0000"}, {"1", "60", "3", "20.0000"}, {"2", "5", "2", "5.0000"}, {"3", "7", "1", "7.0000"}, {"NULL", "80", "7", "13.3333"}}));
+    // two keys: after the last group of each first key a row for it (the second key NULL), and the total last; a group whose key is NULL is not a rolled-up row (the two (3, NULL) rows)
+    REQUIRE(q(ex, "SELECT g, h, SUM(i), COUNT(*) FROM t GROUP BY g, h WITH ROLLUP") ==
+            (Rows{{"NULL", "1", "8", "1"}, {"NULL", "NULL", "8", "1"}, {"1", "1", "30", "2"}, {"1", "2", "30", "1"}, {"1", "NULL", "60", "3"}, {"2", "1", "5", "1"},
+                  {"2", "2", "NULL", "1"}, {"2", "NULL", "5", "2"}, {"3", "NULL", "7", "1"}, {"3", "NULL", "7", "1"}, {"NULL", "NULL", "80", "7"}}));
+    // HAVING looks at the rolled-up rows too; ORDER BY, LIMIT and DISTINCT come after them
+    REQUIRE(q(ex, "SELECT g, h, SUM(i) FROM t GROUP BY g, h WITH ROLLUP HAVING SUM(i) > 10") == (Rows{{"1", "1", "30"}, {"1", "2", "30"}, {"1", "NULL", "60"}, {"NULL", "NULL", "80"}}));
+    REQUIRE(q(ex, "SELECT g, SUM(i) FROM t GROUP BY g WITH ROLLUP ORDER BY g DESC") == (Rows{{"3", "7"}, {"2", "5"}, {"1", "60"}, {"NULL", "8"}, {"NULL", "80"}}));
+    REQUIRE(q(ex, "SELECT g, SUM(i) s FROM t GROUP BY g WITH ROLLUP ORDER BY s") == (Rows{{"2", "5"}, {"3", "7"}, {"NULL", "8"}, {"1", "60"}, {"NULL", "80"}}));
+    REQUIRE(q(ex, "SELECT g, SUM(i) FROM t GROUP BY g WITH ROLLUP LIMIT 2") == (Rows{{"NULL", "8"}, {"1", "60"}}));
+    REQUIRE(q(ex, "SELECT DISTINCT g FROM t GROUP BY g WITH ROLLUP") == (Rows{{"NULL"}, {"1"}, {"2"}, {"3"}}));
+    // COUNT(DISTINCT) of a total counts over its rows, not over the counts of its groups
+    REQUIRE(q(ex, "SELECT COUNT(DISTINCT h), g FROM t GROUP BY g WITH ROLLUP") == (Rows{{"1", "NULL"}, {"2", "1"}, {"2", "2"}, {"0", "3"}, {"2", "NULL"}}));
+    // an expression as the key
+    REQUIRE(q(ex, "SELECT g + 1 AS x, SUM(i) FROM t GROUP BY g + 1 WITH ROLLUP") == (Rows{{"NULL", "8"}, {"2", "60"}, {"3", "5"}, {"4", "7"}, {"NULL", "80"}}));
+    // an input of no row has no total row
+    REQUIRE(q(ex, "SELECT SUM(i) FROM t WHERE id > 100 GROUP BY g WITH ROLLUP").empty());
+    // the key is NULL in a rolled-up row whatever way a select item reads it
+    REQUIRE(q(ex, "SELECT COALESCE(g, 0), SUM(i) FROM t GROUP BY g WITH ROLLUP") == (Rows{{"0", "8"}, {"1", "60"}, {"2", "5"}, {"3", "7"}, {"0", "80"}}));
+    // the key is NULL in a rolled-up row however the select list and the GROUP BY write the column: qualified, through an alias, in a join
+    const Rows by_g{{"NULL", "8"}, {"1", "60"}, {"2", "5"}, {"3", "7"}, {"NULL", "80"}};
+    REQUIRE(q(ex, "SELECT t.g, SUM(t.i) FROM t GROUP BY t.g WITH ROLLUP") == by_g);
+    REQUIRE(q(ex, "SELECT x.g, SUM(x.i) FROM t x GROUP BY x.g WITH ROLLUP") == by_g);
+    REQUIRE(q(ex, "SELECT g, SUM(i) FROM t x GROUP BY x.g WITH ROLLUP") == by_g);
+    REQUIRE(q(ex, "SELECT x.g, SUM(i) FROM t x GROUP BY g WITH ROLLUP") == by_g);
+    ok(ex, "CREATE TABLE u (id INT PRIMARY KEY, label VARCHAR(5))");
+    ok(ex, "INSERT INTO u VALUES (1, 'a'), (2, 'b'), (3, 'c'), (4, 'd'), (5, 'e'), (6, 'f'), (7, 'g')");
+    REQUIRE(q(ex, "SELECT t.g, u.label, COUNT(*) FROM t JOIN u ON u.id = t.id WHERE t.id < 4 GROUP BY t.g, u.label WITH ROLLUP") ==
+            (Rows{{"1", "a", "1"}, {"1", "b", "1"}, {"1", "c", "1"}, {"1", "NULL", "3"}, {"NULL", "NULL", "3"}}));
+    // the GROUP BY ... WITH ROLLUP of the outer query over a derived table, a view, and inside a subquery
+    REQUIRE(q(ex, "SELECT g, SUM(i) FROM (SELECT g, i FROM t) d GROUP BY g WITH ROLLUP") == by_g);
+    REQUIRE(q(ex, "SELECT d.g, SUM(d.i) FROM (SELECT g, i FROM t WHERE id < 6) d GROUP BY d.g WITH ROLLUP") == (Rows{{"1", "60"}, {"2", "5"}, {"NULL", "65"}}));
+    ok(ex, "CREATE VIEW tv AS SELECT g, i FROM t");
+    REQUIRE(q(ex, "SELECT g, SUM(i) FROM tv GROUP BY g WITH ROLLUP") == by_g);
+    REQUIRE(q(ex, "SELECT COUNT(*) FROM t WHERE 80 IN (SELECT SUM(i) FROM t GROUP BY g WITH ROLLUP)") == (Rows{{"7"}})); // (80 is only in the total row)
+    REQUIRE(q(ex, "SELECT COUNT(*) FROM t WHERE 99 IN (SELECT SUM(i) FROM t GROUP BY g WITH ROLLUP)") == (Rows{{"0"}}));
+    REQUIRE(q(ex, "SELECT (SELECT SUM(i) FROM t GROUP BY g WITH ROLLUP ORDER BY 1 DESC LIMIT 1)") == (Rows{{"80"}}));
+    // a column that is no key is the first row's in a group and the last row's in a rolled-up row; the primary key does not make a column follow under ROLLUP (the key is NULL in such a row)
+    REQUIRE(q(ex, "SELECT g, ANY_VALUE(h), SUM(i) FROM t GROUP BY g WITH ROLLUP") ==
+            (Rows{{"NULL", "1", "8"}, {"1", "1", "60"}, {"2", "1", "5"}, {"3", "NULL", "7"}, {"NULL", "NULL", "80"}}));
+    REQUIRE(q(ex, "SELECT g, ANY_VALUE(id), COUNT(*) FROM t GROUP BY g WITH ROLLUP") == (Rows{{"NULL", "7", "1"}, {"1", "1", "3"}, {"2", "4", "2"}, {"3", "6", "1"}, {"NULL", "6", "7"}}));
+    REQUIRE(q(ex, "SELECT g, h, ANY_VALUE(id), COUNT(*) FROM t GROUP BY g, h WITH ROLLUP") ==
+            (Rows{{"NULL", "1", "7", "1"}, {"NULL", "NULL", "7", "1"}, {"1", "1", "1", "2"}, {"1", "2", "3", "1"}, {"1", "NULL", "3", "3"}, {"2", "1", "4", "1"}, {"2", "2", "5", "1"},
+                  {"2", "NULL", "5", "2"}, {"3", "NULL", "6", "1"}, {"3", "NULL", "6", "1"}, {"NULL", "NULL", "6", "7"}}));
+    // the key written another way than the select list reads it: through a join
+    REQUIRE(q(ex, "SELECT g, ANY_VALUE(u.label), COUNT(*) FROM t JOIN u ON u.id = t.id GROUP BY t.g WITH ROLLUP") ==
+            (Rows{{"NULL", "g", "1"}, {"1", "a", "3"}, {"2", "d", "2"}, {"3", "f", "1"}, {"NULL", "f", "7"}}));
+    REQUIRE(q(ex, "SELECT u.label, ANY_VALUE(t.h), COUNT(*) FROM t JOIN u ON u.id = t.id GROUP BY u.label WITH ROLLUP") ==
+            (Rows{{"a", "1", "1"}, {"b", "1", "1"}, {"c", "2", "1"}, {"d", "1", "1"}, {"e", "2", "1"}, {"f", "NULL", "1"}, {"g", "1", "1"}, {"NULL", "1", "7"}}));
+    REQUIRE(q(ex, "SELECT id, g FROM t GROUP BY id").size() == 7);
+    REQUIRE(!fails(ex, "SELECT id, g, COUNT(*) FROM t GROUP BY id WITH ROLLUP").empty());
+    REQUIRE(q(ex, "SELECT g, h, COUNT(*) FROM t GROUP BY g, h WITH ROLLUP HAVING h IS NULL ORDER BY g") ==
+            (Rows{{"NULL", "NULL", "1"}, {"NULL", "NULL", "7"}, {"1", "NULL", "3"}, {"2", "NULL", "2"}, {"3", "NULL", "1"}, {"3", "NULL", "1"}}));
+    // a derived table, a UNION and a view
+    REQUIRE(q(ex, "SELECT x.g, x.total FROM (SELECT g, SUM(i) AS total FROM t GROUP BY g WITH ROLLUP) x") ==
+            (Rows{{"NULL", "8"}, {"1", "60"}, {"2", "5"}, {"3", "7"}, {"NULL", "80"}}));
+    REQUIRE(q(ex, "SELECT g, SUM(i) FROM t GROUP BY g WITH ROLLUP UNION ALL SELECT -1, 0").size() == 6);
+    REQUIRE(q(ex, "SELECT -1, 0 UNION ALL SELECT g, SUM(i) FROM t GROUP BY g WITH ROLLUP").size() == 6); // (the right side of a UNION too)
+    ok(ex, "CREATE VIEW rv AS SELECT g, SUM(i) AS total FROM t GROUP BY g WITH ROLLUP");
+    REQUIRE(q(ex, "SELECT total FROM rv WHERE g IS NULL") == (Rows{{"8"}, {"80"}}));
+    // WITH ROLLUP is only written after a GROUP BY list, once
+    for (const char* sql : {"SELECT g, COUNT(*) FROM t GROUP BY g WITH ROLLUP WITH ROLLUP", "SELECT g, SUM(i) FROM t WITH ROLLUP", "SELECT g, SUM(i) FROM t GROUP BY g ORDER BY g WITH ROLLUP"}) {
+        INFO(sql);
+        REQUIRE(!fails(ex, sql).empty());
+    }
+}
+
+TEST_CASE("R60: a view with WITH ROLLUP survives a restart, and the totals of a larger table are the plain groupings of its prefixes", "[r60][rollup]") {
+    TempDataDir dir("r60_rollup_big");
+    {
+        Executor ex(dir.path);
+        make_rollup_table(ex);
+        ok(ex, "CREATE VIEW rv AS SELECT g, SUM(i) AS total FROM t GROUP BY g WITH ROLLUP");
+        ok(ex, "CREATE TABLE big (id INT PRIMARY KEY, a INT, b INT, c INT, v INT)");
+        std::string values;
+        for (int i = 1; i <= 3000; i++) values += std::string(i > 1 ? "," : "") + "(" + std::to_string(i) + "," + std::to_string(i % 7) + "," + std::to_string(i % 5) + "," + std::to_string(i % 3) + "," + std::to_string(i % 11) + ")";
+        ok(ex, "INSERT INTO big VALUES " + values);
+    }
+    Executor ex(dir.path);
+    ok(ex, "USE d");
+    REQUIRE(q(ex, "SELECT total FROM rv WHERE g IS NULL") == (Rows{{"8"}, {"80"}}));
+    auto rolled = q(ex, "SELECT a, b, c, SUM(v), COUNT(*) FROM big GROUP BY a, b, c WITH ROLLUP");
+    auto plain_abc = q(ex, "SELECT a, b, c, SUM(v), COUNT(*) FROM big GROUP BY a, b, c");
+    auto plain_ab = q(ex, "SELECT a, b, 'NULL', SUM(v), COUNT(*) FROM big GROUP BY a, b");
+    auto plain_a = q(ex, "SELECT a, 'NULL', 'NULL', SUM(v), COUNT(*) FROM big GROUP BY a");
+    auto all = q(ex, "SELECT 'NULL', 'NULL', 'NULL', SUM(v), COUNT(*) FROM big");
+    // every group of the plain groupings is in the rolled-up answer, and nothing else is: the rows of the rolled-up answer are those of the four groupings together
+    Rows expected = plain_abc;
+    for (auto& r : plain_ab) expected.push_back(r);
+    for (auto& r : plain_a) expected.push_back(r);
+    for (auto& r : all) expected.push_back(r);
+    auto sorted = [](Rows rows) {
+        std::sort(rows.begin(), rows.end());
+        return rows;
+    };
+    REQUIRE(sorted(rolled) == sorted(expected));
+    REQUIRE(rolled.back() == (std::vector<std::string>{"NULL", "NULL", "NULL", all[0][3], all[0][4]})); // (the total is the last row)
+    REQUIRE(rolled.size() == plain_abc.size() + plain_ab.size() + plain_a.size() + 1);
+}
+
+TEST_CASE("R60: a standalone PI() shows six decimals and keeps all its digits when it is an argument", "[r60][pi]") {
+    TempDataDir dir("r60_pi");
+    Executor ex(dir.path);
+    ok(ex, "CREATE DATABASE d");
+    ok(ex, "USE d");
+    ok(ex, "CREATE TABLE t (id INT PRIMARY KEY)");
+    ok(ex, "INSERT INTO t VALUES (1)");
+    REQUIRE(q(ex, "SELECT PI()") == (Rows{{"3.141593"}}));
+    REQUIRE(q(ex, "SELECT PI() FROM t") == (Rows{{"3.141593"}}));
+    REQUIRE(q(ex, "SELECT DEGREES(PI()) = 180, PI() > 3.1415926, ROUND(PI(), 10)") == (Rows{{"1", "1", "3.1415926536"}}));
+    REQUIRE(q(ex, "SELECT PI() AS p")[0][0] == "3.141593");
+}
+
+TEST_CASE("R60: -> and ->> read a column only: after a string, a number or a call it is a syntax error", "[r60][json_arrow]") {
+    TempDataDir dir("r60_arrow");
+    Executor ex(dir.path);
+    ok(ex, "CREATE DATABASE d");
+    ok(ex, "USE d");
+    ok(ex, "CREATE TABLE js (id INT PRIMARY KEY, j JSON)");
+    ok(ex, "INSERT INTO js VALUES (1, '{\"a\": 5, \"b\": {\"c\": \"x\"}}')");
+    REQUIRE(q(ex, "SELECT j -> '$.a', j ->> '$.a', j ->> '$.b.c', js.j -> '$.a' FROM js") == (Rows{{"5", "5", "x", "5"}}));
+    for (const char* sql : {"SELECT '{\"a\": 5}' -> '$.a'", "SELECT '{\"a\": 5}' ->> '$.a'", "SELECT j -> '$.b' -> '$.c' FROM js", "SELECT JSON_EXTRACT(j, '$.b') -> '$.c' FROM js", "SELECT 5 -> '$.a'"}) {
+        INFO(sql);
+        REQUIRE(!fails(ex, sql).empty());
+    }
+    REQUIRE(q(ex, "SELECT JSON_EXTRACT(j, '$.b.c') FROM js")[0][0] == "\"x\""); // (the function form is the way to read a call's result)
+}
+
+TEST_CASE("R60: information_schema.columns lists the columns of a view, with the type of the column it takes as it is", "[r60][infoschema]") {
+    TempDataDir dir("r60_view_columns");
+    Executor ex(dir.path);
+    ok(ex, "CREATE DATABASE d");
+    ok(ex, "USE d");
+    ok(ex, "CREATE TABLE ty (id INT PRIMARY KEY, dt DATE, dec1 DECIMAL(10,2) NOT NULL, vc VARCHAR(20), other INT)");
+    ok(ex, "CREATE VIEW ty_v AS SELECT id, dt, dec1, vc FROM ty");
+    REQUIRE(q(ex, "SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = 'd'") == (Rows{{"9"}})); // (5 of the table and 4 of the view)
+    REQUIRE(q(ex, "SELECT COLUMN_NAME, ORDINAL_POSITION, DATA_TYPE, COLUMN_TYPE, IS_NULLABLE FROM information_schema.columns WHERE table_name = 'ty_v' ORDER BY ORDINAL_POSITION") ==
+            (Rows{{"id", "1", "int", "int", "NO"}, {"dt", "2", "date", "date", "YES"}, {"dec1", "3", "decimal", "decimal(10,2)", "NO"}, {"vc", "4", "varchar", "varchar(20)", "YES"}}));
+    // a view that renames and computes: the names of its answer
+    ok(ex, "CREATE VIEW calc AS SELECT id AS ident, id + 1 AS next_id FROM ty");
+    REQUIRE(q(ex, "SELECT COLUMN_NAME FROM information_schema.columns WHERE table_name = 'calc' ORDER BY ORDINAL_POSITION") == (Rows{{"ident"}, {"next_id"}}));
+    REQUIRE(q(ex, "SELECT COLUMN_KEY FROM information_schema.columns WHERE table_name = 'ty_v' AND COLUMN_NAME = 'id'") == (Rows{{""}})); // (a view has no keys)
+    // a column the view does not name is called by its text
+    ok(ex, "CREATE VIEW agg AS SELECT COUNT(*), SUM(id) FROM ty");
+    ok(ex, "CREATE VIEW plus AS SELECT id + 1 FROM ty");
+    REQUIRE(q(ex, "SELECT COLUMN_NAME FROM information_schema.columns WHERE table_name = 'agg' ORDER BY ORDINAL_POSITION") == (Rows{{"COUNT(*)"}, {"SUM(id)"}}));
+    REQUIRE(q(ex, "SELECT COLUMN_NAME FROM information_schema.columns WHERE table_name = 'plus'") == (Rows{{"id + 1"}}));
+}
+
+TEST_CASE("R60: SHOW ENGINES and information_schema.engines list the eleven rows MySQL 8.4 lists", "[r60][engines]") {
+    TempDataDir dir("r60_engines");
+    Executor ex(dir.path);
+    REQUIRE(q(ex, "SELECT COUNT(*) FROM information_schema.engines") == (Rows{{"11"}}));
+    REQUIRE(q(ex, "SELECT ENGINE, SUPPORT, COMMENT, TRANSACTIONS, XA, SAVEPOINTS FROM information_schema.engines WHERE ENGINE = 'InnoDB'") ==
+            (Rows{{"InnoDB", "DEFAULT", "Supports transactions, row-level locking, and foreign keys", "YES", "YES", "YES"}}));
+    REQUIRE(q(ex, "SELECT SUPPORT, TRANSACTIONS, XA, SAVEPOINTS FROM information_schema.engines WHERE ENGINE = 'FEDERATED'") == (Rows{{"NO", "NULL", "NULL", "NULL"}}));
+    REQUIRE(q(ex, "SELECT SUPPORT, TRANSACTIONS FROM information_schema.engines WHERE ENGINE = 'MyISAM'") == (Rows{{"YES", "NO"}}));
+}
+
+TEST_CASE("R60: the sizes of a table are whole 16 KB pages, as InnoDB says them", "[r60][table_status]") {
+    TempDataDir dir("r60_sizes");
+    Executor ex(dir.path);
+    ok(ex, "CREATE DATABASE d");
+    ok(ex, "USE d");
+    auto sizes = [&](const std::string& table) {
+        return q(ex, "SELECT TABLE_ROWS, AVG_ROW_LENGTH, DATA_LENGTH, INDEX_LENGTH FROM information_schema.tables WHERE table_schema = 'd' AND table_name = '" + table + "'");
+    };
+    // the numbers real MySQL 8.4 gave for the same tables: an empty table is a page, a table of a few rows too (the average row is a page over the rows), an index is a page
+    ok(ex, "CREATE TABLE e0 (id INT PRIMARY KEY, a INT, b INT, d INT)");
+    REQUIRE(sizes("e0") == (Rows{{"0", "0", "16384", "0"}}));
+    ok(ex, "INSERT INTO e0 VALUES (1, 1, 1, 5)");
+    REQUIRE(sizes("e0") == (Rows{{"1", "16384", "16384", "0"}}));
+    ok(ex, "INSERT INTO e0 VALUES (2, 2, 2, 5), (3, 3, 3, 5), (4, 4, 4, 5), (5, 5, 5, 5), (6, 6, 6, 5), (7, 7, 0, 5)");
+    REQUIRE(sizes("e0") == (Rows{{"7", "2340", "16384", "0"}}));
+    ok(ex, "CREATE TABLE acct (id INT PRIMARY KEY AUTO_INCREMENT, owner VARCHAR(10) NOT NULL, bal DECIMAL(10,2) NOT NULL DEFAULT 0, tag VARCHAR(5) UNIQUE)");
+    ok(ex, "INSERT INTO acct (owner, bal, tag) VALUES ('ann', 100, 'a'), ('bob', 50, 'b'), ('cy', 0, NULL), ('di', 10, NULL), ('ed', 20, NULL), ('fy', 1, NULL)");
+    REQUIRE(sizes("acct") == (Rows{{"6", "2730", "16384", "16384"}}));
+    // a table that holds enough rows for more pages: 500 rows of four INTs are 3 pages (two leaves and the page above), 1,000 are 4, 5,000 are 14 -- MySQL's numbers
+    ok(ex, "CREATE TABLE n500 (id INT PRIMARY KEY, a INT, b INT, d INT)");
+    ok(ex, "CREATE TABLE n1000 (id INT PRIMARY KEY, a INT, b INT, d INT)");
+    ok(ex, "CREATE TABLE n5000 (id INT PRIMARY KEY, a INT, b INT, d INT)");
+    ok(ex, "CREATE TABLE n20000 (id INT PRIMARY KEY, a INT, b INT, d INT)");
+    for (auto [table, n] : {std::pair<const char*, int>{"n500", 500}, {"n1000", 1000}, {"n5000", 5000}, {"n20000", 20000}}) {
+        for (int start = 1; start <= n; start += 1000) {
+            std::string values;
+            for (int i = start; i < start + 1000 && i <= n; i++) values += std::string(i > start ? "," : "") + "(" + std::to_string(i) + "," + std::to_string(i) + "," + std::to_string(i % 7) + ",5)";
+            ok(ex, std::string("INSERT INTO ") + table + " VALUES " + values);
+        }
+    }
+    REQUIRE(sizes("n500")[0][2] == "49152");
+    REQUIRE(sizes("n1000")[0][2] == "65536");
+    REQUIRE(sizes("n5000")[0][2] == "229376");
+    REQUIRE(sizes("n20000")[0][2] == "1589248"); // (32 single pages and then whole extents of 64: 97 pages)
+    // an index: a table of 5,000 rows with a VARCHAR and an index on an INT -- MySQL says 229376 for the rows and 147456 (9 pages) for the index
+    ok(ex, "CREATE TABLE ix (id INT PRIMARY KEY, s VARCHAR(20), g INT)");
+    ok(ex, "CREATE INDEX kg ON ix (g)");
+    for (int start = 1; start <= 5000; start += 1000) {
+        std::string values;
+        for (int i = start; i < start + 1000; i++) values += std::string(i > start ? "," : "") + "(" + std::to_string(i) + ",'name" + std::to_string(i) + "'," + std::to_string(i % 100) + ")";
+        ok(ex, "INSERT INTO ix VALUES " + values);
+    }
+    REQUIRE(sizes("ix")[0][2] == "229376");
+    REQUIRE(sizes("ix")[0][3] == "147456");
+    // a foreign key column has an index of its own (an empty child table: its page)
+    ok(ex, "CREATE TABLE par (id INT PRIMARY KEY)");
+    ok(ex, "CREATE TABLE kid (id INT PRIMARY KEY, p INT, FOREIGN KEY (p) REFERENCES par(id))");
+    REQUIRE(sizes("kid") == (Rows{{"0", "0", "16384", "16384"}}));
+    REQUIRE(sizes("par") == (Rows{{"0", "0", "16384", "0"}}));
+}
+
+TEST_CASE("R60: the server says it is 8.4.9, everywhere it tells", "[r60][version]") {
+    TempDataDir dir("r60_version");
+    Executor ex(dir.path);
+    REQUIRE(q(ex, "SELECT VERSION(), @@version, @@version LIKE '8%'") == (Rows{{"8.4.9", "8.4.9", "1"}}));
+    REQUIRE(q(ex, "SELECT @@version_comment") == (Rows{{"RuSQL"}})); // (what tells it from a MySQL)
+}
+
+TEST_CASE("R60: a variable in a select list is typed by its value, as MySQL types @@autocommit", "[r60][types]") {
+    TempDataDir dir("r60_var_types");
+    Executor ex(dir.path);
+    auto types = ex.result_columns(std::string("SELECT @@autocommit, 'text'"));
+    REQUIRE(types.size() == 2);
+    REQUIRE(types[0].by_value); // (a number when its value is one: it is 1)
+    REQUIRE(!types[1].by_value);
+}

@@ -673,6 +673,8 @@ struct Statement {
         // The aliases of the FROM list, as the parser expanded them (alias -> the table name the columns carry; a table used twice keeps its
         // alias): the parser does not expand an alias of this query inside a subquery of it, so the binder reads `x.id` there through these.
         std::vector<std::pair<std::string, std::string>> table_aliases;
+        // GROUP BY ... WITH ROLLUP: after the groups, one row per prefix of the keys (the rest of the keys NULL) and a last one for all of them
+        bool with_rollup = false;
     };
     struct Update {
         std::string table;

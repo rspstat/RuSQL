@@ -1378,6 +1378,15 @@ ArithExpr Parser::parse_arith_expr() {
 }
 
 /// Additive level: term (('+' | '-') term)*
+namespace {
+// MySQL's grammar has `column -> 'path'` only: a string, a number or the result of a call (also another -> / ->>) before the arrow is a syntax error there
+void reject_arrow_on_value(const ArithExpr& left) {
+    if (std::holds_alternative<ArithExpr::Str>(left.data) || std::holds_alternative<ArithExpr::Num>(left.data) || std::holds_alternative<ArithExpr::Func>(left.data)) {
+        throw ParseError("You have an error in your SQL syntax: the left side of -> and ->> has to be a column");
+    }
+}
+} // namespace
+
 ArithExpr Parser::parse_additive_expr() {
     ArithExpr left = parse_arith_term();
     for (;;) {
@@ -1411,6 +1420,7 @@ ArithExpr Parser::parse_additive_expr() {
             left = ArithExpr(ArithExpr::Func{"CONCAT", std::move(args)});
         } else if (peek_is(TokenKind::Arrow)) {
             // col->'$.key'  →  JSON_EXTRACT(col, '$.key')
+            reject_arrow_on_value(left);
             advance();
             const Token* t = advance();
             if (!t || t->kind != TokenKind::StringLit) throw ParseError("Expected path string after ->");
@@ -1420,6 +1430,7 @@ ArithExpr Parser::parse_additive_expr() {
             left = ArithExpr(ArithExpr::Func{"JSON_EXTRACT", std::move(args)});
         } else if (peek_is(TokenKind::LongArrow)) {
             // col->>'$.key'  →  JSON_UNQUOTE(JSON_EXTRACT(col, '$.key'))
+            reject_arrow_on_value(left);
             advance();
             const Token* t = advance();
             if (!t || t->kind != TokenKind::StringLit) throw ParseError("Expected path string after ->>");

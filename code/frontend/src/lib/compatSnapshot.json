@@ -1,5 +1,5 @@
 {
-  "generated": "2026-10-29",
+  "generated": "2026-11-01",
   "mysql": "8.4.9",
   "corpora": [
     {
@@ -7,16 +7,16 @@
       "en": "Tables, joins, subqueries, windows, CTEs, views",
       "ko": "표·조인·서브쿼리·윈도·CTE·뷰",
       "statements": 699,
-      "different": 1,
+      "different": 0,
       "bothFail": 68
     },
     {
       "name": "functions",
       "en": "Built-in functions (strings, math, dates, JSON)",
       "ko": "내장 함수 (문자열·수학·날짜·JSON)",
-      "statements": 67,
-      "different": 2,
-      "bothFail": 3
+      "statements": 72,
+      "different": 0,
+      "bothFail": 7
     },
     {
       "name": "constraints",
@@ -307,6 +307,14 @@
       "bothFail": 48
     },
     {
+      "name": "rollup",
+      "en": "GROUP BY ... WITH ROLLUP: a row for each prefix of the keys and a total, HAVING / ORDER BY / LIMIT / DISTINCT after it, in a view and a derived table",
+      "ko": "GROUP BY ... WITH ROLLUP: 키의 접두사마다 한 행과 총계, 그 뒤의 HAVING·ORDER BY·LIMIT·DISTINCT, 뷰·파생 표 안에서",
+      "statements": 39,
+      "different": 0,
+      "bothFail": 4
+    },
+    {
       "name": "slow_log",
       "en": "SET GLOBAL slow_query_log / long_query_time (values, errors, a number out of range), FOUND_ROWS() after an aggregate",
       "ko": "SET GLOBAL slow_query_log / long_query_time(값·오류·범위 밖의 수), 집계 뒤의 FOUND_ROWS()",
@@ -318,8 +326,8 @@
       "name": "protocol",
       "en": "MySQL wire protocol: SHOW, OK packets, affected rows",
       "ko": "MySQL 프로토콜: SHOW·OK 패킷·영향 행 수",
-      "statements": 107,
-      "different": 3,
+      "statements": 108,
+      "different": 0,
       "bothFail": 1
     },
     {
@@ -327,14 +335,14 @@
       "en": "MySQL wire protocol: typed result columns",
       "ko": "MySQL 프로토콜: 열 타입",
       "statements": 30,
-      "different": 2,
+      "different": 0,
       "bothFail": 0
     }
   ],
-  "conformanceCases": 4048,
+  "conformanceCases": 4099,
   "tests": {
-    "cases": 850,
-    "assertions": 1510945
+    "cases": 860,
+    "assertions": 1511281
   },
   "bugsFound": 206
 }

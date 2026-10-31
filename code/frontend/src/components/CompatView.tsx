@@ -18,12 +18,14 @@ function loadLang(): Lang {
 interface Corpus { name: string; en: string; ko: string; statements: number; different: number; bothFail: number }
 
 const KNOWN: { en: string; ko: string }[] = [
-  { en: "REPLACE of a row that is already identical counts 2 changed rows (MySQL: 1)", ko: "이미 같은 행을 REPLACE하면 바뀐 행이 2 (MySQL: 1)" },
-  { en: "SUM / AVG over a DATE column reads the leading number of the text", ko: "DATE 열 그대로의 SUM / AVG는 글자 앞부분의 수를 읽음" },
-  { en: "An UPDATE that shifts a UNIQUE key is let through when the WHERE's index order is reversed", ko: "WHERE가 고른 인덱스 순서가 거꾸로이면 UNIQUE 키를 밀어 옮기는 UPDATE를 통과시킴" },
-  { en: "FLOAT arithmetic reads the stored digits, not the exact single-precision value; f = 0.1 is true here", ko: "FLOAT 산술은 단정밀도 정확한 값이 아니라 저장된 자릿수를 읽음; f = 0.1이 여기서는 참" },
-  { en: "A subquery on the table being updated is allowed (MySQL: error 1093)", ko: "UPDATE 대상 표를 하위 질의에서 읽는 것을 허용 (MySQL: 오류 1093)" },
-  { en: "SHOW TABLE STATUS gives only the name, engine and rows; SHOW ENGINES lists one engine", ko: "SHOW TABLE STATUS는 이름·엔진·행 수만, SHOW ENGINES는 엔진 하나" },
+  { en: "GROUPING(), the companion of GROUP BY ... WITH ROLLUP, is not there yet", ko: "GROUP BY ... WITH ROLLUP의 짝인 GROUPING()은 아직 없음" },
+  { en: "PI() alone shows six decimals as in MySQL, but an expression made from it (PI() + 0) shows all its digits (MySQL: six)", ko: "PI() 단독은 MySQL처럼 소수 여섯 자리지만 PI()에서 만든 식(PI() + 0)은 전체 자릿수 (MySQL: 여섯 자리)" },
+  { en: "A FLOAT given to a text function shows the stored digits (CONCAT(f, '') is 3.1415927, MySQL: 3.14159)", ko: "FLOAT를 글자 함수에 넣으면 저장된 자릿수 (CONCAT(f, '')가 3.1415927, MySQL: 3.14159)" },
+  { en: "A column that two tables of a chain of USING joins both have is not refused as ambiguous (MySQL: error 1052)", ko: "이어지는 USING 조인에서 두 표가 다 가진 열을 모호하다고 거절하지 않음 (MySQL: 오류 1052)" },
+  { en: "SHOW TABLE STATUS: Create_time and Update_time are NULL, and the sizes of a large table are an estimate in 16 KB pages", ko: "SHOW TABLE STATUS: Create_time·Update_time은 NULL이고 큰 표의 크기는 16 KB 쪽으로 추정한 값" },
+  { en: "SHOW ENGINES lists MyISAM, MEMORY ... as MySQL does, but RuSQL has one InnoDB-like engine (ENGINE= is accepted and ignored) and no XA statements", ko: "SHOW ENGINES는 MySQL처럼 MyISAM·MEMORY 등을 보이지만 RuSQL의 엔진은 InnoDB 방식 하나뿐(ENGINE=은 받아서 무시)이고 XA 문장은 없음" },
+  { en: "long_query_time is one value for the whole server (no per-session value), and SET slow_query_log without GLOBAL is accepted", ko: "long_query_time은 서버 전체에 하나(세션 값 없음)이고 GLOBAL 없는 SET slow_query_log도 받음" },
+  { en: "A view that mixes an aggregate with a plain column is refused when it is created (MySQL refuses when it is selected)", ko: "집계와 일반 열이 섞인 뷰는 만들 때 거절 (MySQL은 조회할 때 거절)" },
 ];
 
 function pct(part: number, whole: number): string {

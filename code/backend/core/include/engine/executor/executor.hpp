@@ -1173,7 +1173,7 @@ private:
     StringResult exec_select(SharedDatabase& s, std::string table, std::optional<std::pair<std::unique_ptr<Statement>, std::string>> subquery,
                               bool distinct, std::vector<SelectColumn> columns, std::optional<CondExpr> condition, std::vector<Join> joins,
                               std::vector<OrderBy> order_by, std::optional<std::vector<std::string>> group_by, std::optional<CondExpr> having,
-                              std::optional<std::size_t> limit, std::optional<std::size_t> offset, bool for_update, bool for_share);
+                              std::optional<std::size_t> limit, std::optional<std::size_t> offset, bool for_update, bool for_share, bool with_rollup = false);
     // The columns a SELECT answers with, named the way format_rows names them, for a derived table that came back with no rows (an
     // empty answer has no header to read them from). Empty when the statement is not a plain SELECT.
     std::vector<std::string> derived_column_names(SharedDatabase& s, const Statement& stmt);
@@ -1209,7 +1209,7 @@ private:
                                             std::vector<SelectColumn> columns, std::optional<CondExpr> condition, std::vector<Join> joins,
                                             std::vector<OrderBy> order_by, std::optional<std::vector<std::string>> group_by,
                                             std::optional<CondExpr> having, std::optional<std::size_t> limit, std::optional<std::size_t> offset,
-                                            bool for_update, bool for_share);
+                                            bool for_update, bool for_share, bool with_rollup = false);
     StringResult format_result(SharedDatabase& s, std::vector<Row> result, const std::vector<SelectColumn>& columns, const std::string& table,
                                 const std::vector<Join>& joins);
     // format_result for rows that stay where they are (the table, or the rows a join made): nothing is copied, so the rows

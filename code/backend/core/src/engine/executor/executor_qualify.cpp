@@ -95,6 +95,7 @@ Statement Executor::qualify_stmt(const SharedDatabase& s, Statement stmt) const 
         for (auto& j : v->joins) out.joins.push_back(qualify_join_(s, j));
         out.order_by = v->order_by;
         out.group_by = v->group_by;
+        out.with_rollup = v->with_rollup;
         if (v->having) out.having = qualify_condexpr(s, std::move(*v->having));
         out.limit = v->limit;
         out.offset = v->offset;

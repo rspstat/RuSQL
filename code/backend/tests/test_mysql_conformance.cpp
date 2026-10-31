@@ -138,6 +138,9 @@ const Case kUsingChain[] = {
 const Case kFkAutoNames[] = {
 #include "mysql_conformance_fk_auto_names.inc"
 };
+const Case kRollup[] = {
+#include "mysql_conformance_rollup.inc"
+};
 
 struct TempDataDir {
     std::string path;
@@ -427,4 +430,8 @@ TEST_CASE("The order of the columns of * over a chain of USING / NATURAL joins",
 
 TEST_CASE("Names of foreign keys without a name, NO ACTION and RESTRICT in referential_constraints, a parent that is renamed", "[mysql_conformance][fk_auto_names]") {
     run_cases("mc_fk_auto_names", kFkAutoNames, sizeof kFkAutoNames / sizeof kFkAutoNames[0]);
+}
+
+TEST_CASE("GROUP BY ... WITH ROLLUP: a row for each prefix of the keys and a last one for all of them", "[mysql_conformance][rollup]") {
+    run_cases("mc_rollup", kRollup, sizeof kRollup / sizeof kRollup[0]);
 }

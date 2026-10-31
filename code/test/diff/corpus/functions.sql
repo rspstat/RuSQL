@@ -59,7 +59,15 @@ SELECT EXTRACT(YEAR FROM '2024-03-05'), EXTRACT(MONTH FROM '2024-03-05'), EXTRAC
 SELECT UNIX_TIMESTAMP('2024-01-01 00:00:00') > 0, FROM_UNIXTIME(0) IS NOT NULL, DATE_FORMAT(FROM_UNIXTIME(86400), '%Y') >= '1970'
 # json and misc
 SELECT JSON_EXTRACT('{"a": 1, "b": [1,2]}', '$.a'), JSON_EXTRACT('{"a": 1, "b": [1,2]}', '$.b[1]'), JSON_UNQUOTE(JSON_EXTRACT('{"a": "x"}', '$.a')), JSON_LENGTH('[1,2,3]'), JSON_TYPE('[1]'), JSON_VALID('{'), JSON_VALID('{}')
-SELECT JSON_OBJECT('a', 1, 'b', 'x'), JSON_ARRAY(1, 'a', NULL), JSON_CONTAINS('[1,2]', '1'), JSON_KEYS('{"a":1,"b":2}'), '{"a": 5}' -> '$.a', JSON_SET('{"a":1}', '$.b', 2)
+SELECT JSON_OBJECT('a', 1, 'b', 'x'), JSON_ARRAY(1, 'a', NULL), JSON_CONTAINS('[1,2]', '1'), JSON_KEYS('{"a":1,"b":2}'), JSON_SET('{"a":1}', '$.b', 2)
+# `->` and `->>` read a JSON column ONLY: a string, a number or the result of a call before the arrow is a syntax error (R60)
+--CREATE TABLE js (id INT PRIMARY KEY, j JSON)
+--INSERT INTO js VALUES (1, '{"a": 5, "b": {"c": "x"}}'), (2, '{"a": null}'), (3, NULL)
+SELECT id, j -> '$.a', j ->> '$.a', js.j -> '$.b.c', j ->> '$.b.c' FROM js ORDER BY id
+SELECT '{"a": 5}' -> '$.a'
+SELECT '{"a": 5}' ->> '$.a'
+SELECT j -> '$.b' -> '$.c' FROM js
+SELECT JSON_EXTRACT(j, '$.b') -> '$.c' FROM js
 SELECT MD5('abc'), SHA1('abc'), SHA2('abc', 256), LENGTH(UUID()), CRC32('abc'), TO_BASE64('abc'), FROM_BASE64('YWJj')
 SELECT 1 + 1 AS two, 'x' AS s, NULL AS n, 1.50 AS d, 1e0 AS e
 SELECT 0.1 + 0.2 = 0.3, 0.1 + 0.2, 1.0 = 1, 1.10, 1.1 + 1.10, 3.0 * 2, 3 * 2.0

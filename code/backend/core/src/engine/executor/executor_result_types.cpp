@@ -10,6 +10,7 @@
 
 #include "engine/column_text.hpp"
 #include "engine/executor/executor.hpp"
+#include "engine/view_columns.hpp"
 #include "engine/join_star.hpp"
 #include "engine/parser/parser.hpp"
 #include "engine/value_class.hpp"
@@ -421,7 +422,8 @@ private:
                 for (const Source* src : matches) out.insert(out.end(), src->columns.begin(), src->columns.end());
             } else if (auto* col = std::get_if<SelectColumn::Column>(&item.data)) {
                 const NamedType* found = col->outer == 0 && plain_reference(col->name) ? find(sel, sources, col->name) : nullptr;
-                out.push_back({last_part(col->name), found ? found->type : ResultColumnType{}});
+                const bool variable = !col->name.empty() && col->name[0] == '@'; // (@@autocommit: a number if its value is one, as MySQL types a variable)
+                out.push_back({last_part(col->name), found ? found->type : variable ? ResultColumnType{std::nullopt, true} : ResultColumnType{}});
             } else if (auto* ca = std::get_if<SelectColumn::ColumnAlias>(&item.data)) {
                 const NamedType* found = ca->outer == 0 && plain_reference(ca->name) ? find(sel, sources, ca->name) : nullptr;
                 out.push_back({ca->alias, found ? found->type : ResultColumnType{}});
@@ -498,6 +500,25 @@ std::vector<ColumnDef> Executor::derived_column_defs(const SharedDatabase& s, co
             }
         }
         def.name = names[i];
+        out.push_back(std::move(def));
+    }
+    return out;
+}
+
+// The columns of a view as information_schema.columns lists them: the name each has in the view's answer and, for a column the view takes as it is, the type of that column
+// (what the select list works out has no declared type: it is TEXT there). Empty when the view's columns cannot be told.
+std::vector<ColumnDef> view_column_defs(const SharedDatabase& s, const std::string& view_name, const Statement& body) {
+    const std::size_t dot = view_name.find('.');
+    std::vector<NamedType> found;
+    if (!Resolver(s, dot == std::string::npos ? std::string() : view_name.substr(0, dot)).columns_of(body, 0, found)) return {};
+    std::vector<ColumnDef> out;
+    for (const NamedType& c : found) {
+        const std::string& name = c.header.empty() ? c.name : c.header;
+        if (name.empty()) return {};
+        ColumnDef def;
+        def.name = name;
+        def.data_type = c.type.column ? c.type.column->data_type : DataType(DataType::Text{});
+        def.not_null = c.type.column ? c.type.column->not_null : false;
         out.push_back(std::move(def));
     }
     return out;

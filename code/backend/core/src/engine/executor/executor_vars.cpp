@@ -26,7 +26,7 @@ std::unordered_map<std::string, std::string> default_system_variables() {
         {"@character_set_server", "utf8mb4"}, {"@character_set_database", "utf8mb4"},
         {"@collation_connection", "utf8mb4_0900_ai_ci"}, {"@collation_server", "utf8mb4_0900_ai_ci"}, {"@collation_database", "utf8mb4_0900_ai_ci"},
         {"@max_allowed_packet", "67108864"}, {"@innodb_lock_wait_timeout", "50"}, {"@wait_timeout", "28800"},
-        {"@version", "5.7.0-rusql"}, {"@version_comment", "RuSQL"}, {"@lower_case_table_names", "1"}, {"@license", "GPL"}, {"@auto_increment_increment", "1"},
+        {"@version", "8.4.9"}, {"@version_comment", "RuSQL"}, {"@lower_case_table_names", "1"}, {"@license", "GPL"}, {"@auto_increment_increment", "1"},
         {"@interactive_timeout", "28800"}, {"@max_execution_time", "0"}, {"@slow_query_log", "0"}, {"@long_query_time", "10.000000"}, {"@net_write_timeout", "60"}, {"@transaction_isolation", "REPEATABLE-READ"}, {"@tx_isolation", "REPEATABLE-READ"},
     };
 }

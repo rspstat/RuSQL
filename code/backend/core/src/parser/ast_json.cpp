@@ -919,6 +919,7 @@ void to_json(nlohmann::json& j, const Statement& stmt) {
                                                               {"joins", alt.joins},
                                                               {"order_by", alt.order_by},
                                                               {"group_by", alt.group_by},
+                                                              {"with_rollup", alt.with_rollup},
                                                               {"having", alt.having},
                                                               {"limit", alt.limit},
                                                               {"offset", alt.offset},
@@ -1193,6 +1194,7 @@ void from_json(const nlohmann::json& j, Statement& stmt) {
         v.joins = p.at("joins").get<std::vector<Join>>();
         v.order_by = p.at("order_by").get<std::vector<OrderBy>>();
         v.group_by = p.at("group_by").get<std::optional<std::vector<std::string>>>();
+        v.with_rollup = p.value("with_rollup", false); // (a statement saved before R60 has no such key)
         v.having = p.at("having").get<std::optional<CondExpr>>();
         v.limit = p.at("limit").get<std::optional<std::size_t>>();
         v.offset = p.at("offset").get<std::optional<std::size_t>>();

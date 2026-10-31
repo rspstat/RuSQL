@@ -9,7 +9,7 @@
 |---|---|
 | 무엇 | MySQL 호환 프로토콜을 쓰는 **자체 RDBMS 엔진**(C++20) + 데스크톱 클라이언트(Tauri/React) + Claude 연동(MCP) |
 | 1학기 → 2학기 | Rust 프로토타입 → **C++ 전면 재작성**, "기능 추가"에서 **정합성·동시성·성능을 실제로 파고드는 심화**로 |
-| 규모 | 테스트 **850 케이스 / 1,510,945 assertions** (2학기 초 218 케이스 / 3,080 assertions) |
+| 규모 | 테스트 **860 케이스 / 1,511,281 assertions** (2학기 초 218 케이스 / 3,080 assertions) |
 | 엔진 구성 | 파서 → 비용 기반 플래너 → 실행기, MVCC·행 단위 락·데드락 감지, redo 로그 기반 내구성, B+Tree·해시·복합 인덱스 |
 
 ## 2학기에 만든 것 (엔진)
@@ -18,7 +18,7 @@
 - **행 단위 동시 쓰기 + 블로킹 락 + 데드락 감지**.
 - **내구성**: autocommit도 응답 전에 fsync(redo 로그), 크래시 후 재생. 테이블 파일은 체크포인트에서만 다시 씀.
 - **쿼리 엔진**: 조인 알고리즘 5종(중첩 루프·해시·정렬 병합·인덱스 NL·역방향 인덱스 NL)과 비용 기반 선택, CTE(재귀 포함), 윈도우 함수, 서브쿼리, 파티셔닝, 저장 프로시저·트리거. 지원하는 SQL 문법 전체는 `SQL.md`에 한 줄씩 정리되어 있다.
-- **운영 기능**: `KILL [QUERY] n`(실행 중인 SELECT·락 대기를 멈추거나 세션을 끊음), `SHOW STATUS`(문장 종류별 수·연결·버퍼 풀·redo·락 대기의 실제 카운터, 데이터베이스 락 없이 읽음), `EXPLAIN ANALYZE`가 조인마다 알고리즘을, 하위 질의는 실행 수와 시간을 따로 보여 줌, **느린 쿼리 로그**(`SET GLOBAL slow_query_log` / `long_query_time`, `Slow_queries`, `information_schema.slow_log`와 MySQL 모양의 `slow_query.log`)와 `innodb_trx`가 트랜잭션을 연 세션을 말함.
+- **운영 기능**: `KILL [QUERY] n`(실행 중인 SELECT·락 대기를 멈추거나 세션을 끊음), `SHOW STATUS`(문장 종류별 수·연결·버퍼 풀·redo·락 대기의 실제 카운터, 데이터베이스 락 없이 읽음), `EXPLAIN ANALYZE`가 조인마다 알고리즘을, 하위 질의는 실행 수와 시간을 따로 보여 줌, **느린 쿼리 로그**(`SET GLOBAL slow_query_log` / `long_query_time`, `Slow_queries`, `information_schema.slow_log`와 MySQL 모양의 `slow_query.log`)와 `innodb_trx`가 트랜잭션을 연 세션을 말함, `GROUP BY … WITH ROLLUP`, 서버가 `8.4.9`라고 말함.
 
 ## 2학기에 만든 것 (앱·연동)
 

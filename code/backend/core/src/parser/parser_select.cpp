@@ -568,7 +568,7 @@ Statement Parser::parse_select() {
                     auto& s = std::get<Statement::Select>(right.data);
                     return Statement(Statement::Select{
                         s.table, std::move(s.subquery), s.columns, s.distinct, s.condition, s.joins,
-                        {}, s.group_by, s.having, std::nullopt, std::nullopt, s.for_update, s.for_share, false, s.table_alias, s.table_aliases});
+                        {}, s.group_by, s.having, std::nullopt, std::nullopt, s.for_update, s.for_share, false, s.table_alias, s.table_aliases, s.with_rollup});
                 }
                 return right;
             }();
@@ -792,8 +792,9 @@ Statement Parser::parse_select() {
     std::optional<CondExpr> condition;
     if (peek_is(TokenKind::Where)) { advance(); condition = parse_condexpr(); }
 
-    // GROUP BY
+    // GROUP BY [WITH ROLLUP]
     std::optional<std::vector<std::string>> group_by;
+    bool with_rollup = false;
     if (peek_is(TokenKind::Group)) {
         advance();
         if (!peek_is(TokenKind::By)) throw ParseError("Expected BY");
@@ -802,6 +803,15 @@ Statement Parser::parse_select() {
         cols.push_back(parse_sort_item());
         while (peek_is(TokenKind::Comma)) { advance(); cols.push_back(parse_sort_item()); }
         group_by = cols;
+        const Token* after_with = peek_is(TokenKind::With) ? peek_at(1) : nullptr; // (only after a GROUP BY list, once)
+        const auto is_rollup = [](const std::string& word) {
+            return word.size() == 6 && std::equal(word.begin(), word.end(), "ROLLUP", [](char a, char b) { return std::toupper(static_cast<unsigned char>(a)) == b; });
+        };
+        if (after_with && after_with->kind == TokenKind::Ident && is_rollup(after_with->text)) {
+            advance();
+            advance();
+            with_rollup = true;
+        }
     }
 
     // HAVING
@@ -895,7 +905,7 @@ Statement Parser::parse_select() {
 
     Statement select_stmt = with_into(Statement(Statement::Select{
         table, std::move(subquery), columns, distinct, condition, joins, order_by, group_by,
-        having, limit, offset, for_update, for_share, false, table_alias, {alias_map.begin(), alias_map.end()}}));
+        having, limit, offset, for_update, for_share, false, table_alias, {alias_map.begin(), alias_map.end()}, with_rollup}));
 
     return set_operation(std::move(select_stmt));
 }

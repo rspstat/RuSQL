@@ -1123,8 +1123,8 @@ std::optional<std::string> Executor::bind_statement(SharedDatabase& s, Statement
                 for (auto& [gt, gc] : grouped) {
                     if (gt == t && gc == column) return true;
                 }
-                // (the primary key of the table is grouped by: every column of the table follows from it)
-                if (!t->schema) return false;
+                // (the primary key of the table is grouped by: every column of the table follows from it -- not under WITH ROLLUP: the key is NULL in a rolled-up row)
+                if (sel.with_rollup || !t->schema) return false;
                 bool has_key = false;
                 for (auto& c : t->schema->columns) {
                     if (!c.primary_key) continue;

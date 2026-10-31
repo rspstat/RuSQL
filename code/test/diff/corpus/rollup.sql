@@ -1,0 +1,47 @@
+# GROUP BY ... WITH ROLLUP (R60): after the groups, one row per prefix of the keys with the other keys NULL and a last row for all of them; the aggregates of such a row are over all
+# the rows of the prefix (AVG and COUNT(DISTINCT) too), HAVING looks at those rows as well, ORDER BY / LIMIT / DISTINCT come after, a group of NULL keys is not a rolled-up row, an input with
+# no row has no total row, and WITH ROLLUP without a GROUP BY list (or twice, or before ORDER BY) is a syntax error. (GROUPING() is not there yet.)
+--CREATE TABLE ro (id INT PRIMARY KEY, g INT, h INT, i INT, s VARCHAR(10))
+--INSERT INTO ro VALUES (1, 1, 1, 10, 'a'), (2, 1, 1, 20, 'A'), (3, 1, 2, 30, 'b'), (4, 2, 1, 5, 'c'), (5, 2, 2, NULL, 'c'), (6, 3, NULL, 7, NULL), (7, NULL, 1, 8, 'd')
+--CREATE TABLE rou (id INT PRIMARY KEY, label VARCHAR(5))
+--INSERT INTO rou VALUES (1, 'a'), (2, 'b'), (3, 'c'), (4, 'd'), (5, 'e'), (6, 'f'), (7, 'g')
+SELECT g, SUM(i), COUNT(*), AVG(i) FROM ro GROUP BY g WITH ROLLUP
+SELECT g, h, SUM(i), COUNT(*) FROM ro GROUP BY g, h WITH ROLLUP
+SELECT g, h, SUM(i) FROM ro GROUP BY g, h WITH ROLLUP HAVING SUM(i) > 10
+SELECT g, SUM(i) FROM ro GROUP BY g WITH ROLLUP ORDER BY g DESC
+SELECT g, SUM(i) AS total FROM ro GROUP BY g WITH ROLLUP ORDER BY total
+SELECT g, SUM(i) FROM ro GROUP BY g WITH ROLLUP ORDER BY g, SUM(i) DESC
+SELECT g, h, SUM(i) FROM ro GROUP BY g, h WITH ROLLUP ORDER BY g, h
+SELECT g, SUM(i) FROM ro GROUP BY g WITH ROLLUP ORDER BY g LIMIT 2 OFFSET 1
+SELECT COUNT(DISTINCT h), g FROM ro GROUP BY g WITH ROLLUP
+SELECT g + 1 AS x, SUM(i) FROM ro GROUP BY g + 1 WITH ROLLUP
+SELECT SUM(i) FROM ro WHERE id > 100 GROUP BY g WITH ROLLUP
+SELECT DISTINCT g FROM ro GROUP BY g WITH ROLLUP
+SELECT g, MIN(s), MAX(s), COUNT(s) FROM ro GROUP BY g WITH ROLLUP
+SELECT g, h, COUNT(*) FROM ro WHERE id < 6 GROUP BY g, h WITH ROLLUP
+SELECT COALESCE(g, 0), SUM(i) FROM ro GROUP BY g WITH ROLLUP
+SELECT g, SUM(i) FROM ro GROUP BY g WITH ROLLUP HAVING g IS NULL
+SELECT g, SUM(i) FROM ro GROUP BY g WITH ROLLUP HAVING COUNT(*) > 1
+SELECT g FROM ro GROUP BY g WITH ROLLUP
+SELECT h, g, COUNT(*) FROM ro GROUP BY g, h WITH ROLLUP
+SELECT g, COUNT(*) FROM ro GROUP BY g WITH ROLLUP WITH ROLLUP
+SELECT g, SUM(i) FROM ro WITH ROLLUP
+SELECT g, SUM(i) FROM ro GROUP BY g ORDER BY g WITH ROLLUP
+SELECT x.g, x.total FROM (SELECT g, SUM(i) AS total FROM ro GROUP BY g WITH ROLLUP) x
+SELECT g, SUM(i) FROM ro GROUP BY g WITH ROLLUP UNION ALL SELECT -1, 0
+SELECT g, ANY_VALUE(h), SUM(i) FROM ro GROUP BY g WITH ROLLUP
+SELECT g, ANY_VALUE(id), COUNT(*) FROM ro GROUP BY g WITH ROLLUP
+SELECT g, h, ANY_VALUE(id), COUNT(*) FROM ro GROUP BY g, h WITH ROLLUP
+SELECT ro.g, ANY_VALUE(rou.label), COUNT(*) FROM ro JOIN rou ON rou.id = ro.id GROUP BY ro.g WITH ROLLUP
+SELECT g, ANY_VALUE(rou.label), COUNT(*) FROM ro JOIN rou ON rou.id = ro.id GROUP BY ro.g WITH ROLLUP
+SELECT rou.label, ANY_VALUE(ro.h), COUNT(*) FROM ro JOIN rou ON rou.id = ro.id GROUP BY rou.label WITH ROLLUP
+SELECT id, g, COUNT(*) FROM ro GROUP BY id WITH ROLLUP
+SELECT id, g FROM ro GROUP BY id
+SELECT g, h, COUNT(*) FROM ro GROUP BY g, h WITH ROLLUP HAVING h IS NULL ORDER BY g
+SELECT g, SUM(i) FROM (SELECT g, i FROM ro) d GROUP BY g WITH ROLLUP
+SELECT d.g, SUM(d.i) FROM (SELECT g, i FROM ro WHERE id < 6) d GROUP BY d.g WITH ROLLUP
+SELECT COUNT(*) FROM ro WHERE 80 IN (SELECT SUM(i) FROM ro GROUP BY g WITH ROLLUP)
+SELECT COUNT(*) FROM ro WHERE 99 IN (SELECT SUM(i) FROM ro GROUP BY g WITH ROLLUP)
+--CREATE VIEW ro_v AS SELECT g, SUM(i) AS total FROM ro GROUP BY g WITH ROLLUP
+SELECT * FROM ro_v
+SELECT total FROM ro_v WHERE g IS NULL

@@ -154,7 +154,7 @@ std::array<std::uint8_t, 20> make_nonce(std::uint32_t conn_id) {
 std::vector<std::uint8_t> handshake_pkt(std::uint32_t conn_id, const std::array<std::uint8_t, 20>& nonce) {
     std::vector<std::uint8_t> p;
     p.push_back(10); // protocol version 10
-    nulstr(p, "5.7.0-rusql");
+    nulstr(p, "8.4.9");
     for (int i = 0; i < 4; i++) p.push_back(static_cast<std::uint8_t>((conn_id >> (i * 8)) & 0xff));
     p.insert(p.end(), nonce.begin(), nonce.begin() + 8);
     p.push_back(0x00);
@@ -936,7 +936,7 @@ std::string handle_select_atvars(const std::string& q, const Executor& exec) {
         {"time_zone", "SYSTEM"},
         {"transaction_isolation", "READ-COMMITTED"},
         {"tx_isolation", "READ-COMMITTED"},
-        {"version", "5.7.0-rusql"},
+        {"version", "8.4.9"},
         {"version_comment", "RuSQL"},
         {"wait_timeout", "28800"},
     };
@@ -1005,7 +1005,7 @@ std::string show_variables_result(const std::string& up, const Executor& exec) {
         {"time_zone", "SYSTEM"},
         {"transaction_isolation", "READ-COMMITTED"},
         {"tx_isolation", "READ-COMMITTED"},
-        {"version", "5.7.0-rusql"},
+        {"version", "8.4.9"},
         {"version_comment", "RuSQL"},
         {"wait_timeout", "28800"},
     };
@@ -1174,7 +1174,7 @@ std::optional<StringResult> mysql_compat(const std::string& q, Executor& exec) {
 
     if (up == "SELECT VERSION()" || up.rfind("SELECT VERSION() AS ", 0) == 0 || up == "SELECT @@VERSION" ||
         up.rfind("SELECT @@VERSION AS ", 0) == 0) {
-        return StringResult::Ok(box_table({"version"}, {{"5.7.0-rusql"}}));
+        return StringResult::Ok(box_table({"version"}, {{"8.4.9"}}));
     }
 
     if (up == "SELECT USER()" || up == "SELECT CURRENT_USER()" || up == "SELECT USER() AS USER" || up == "SELECT CURRENT_USER() AS USER") {
@@ -1237,10 +1237,8 @@ std::optional<StringResult> mysql_compat(const std::string& q, Executor& exec) {
     }
 
     if (up.rfind("SHOW ENGINES", 0) == 0) {
-        std::vector<std::vector<std::string>> rows = {
-            {"InnoDB", "DEFAULT", "Supports transactions, row-level locking, foreign keys (RuSQL's engine)", "YES", "NO", "YES"},
-        };
-        return StringResult::Ok(box_table({"Engine", "Support", "Comment", "Transactions", "XA", "Savepoints"}, rows));
+        return exec_inner(exec, "SELECT ENGINE AS Engine, SUPPORT AS Support, COMMENT AS Comment, TRANSACTIONS AS Transactions, XA AS XA, SAVEPOINTS AS Savepoints "
+                                "FROM information_schema.engines");
     }
 
     if (up.rfind("SHOW PLUGINS", 0) == 0) return StringResult::Ok(box_table({"Name", "Status", "Type", "Library", "License"}, {}));

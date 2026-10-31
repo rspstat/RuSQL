@@ -617,7 +617,7 @@ std::string Executor::apply_scalar_func(const std::string& typed_name, const std
         return extracted;
     }
     if (func_name == "DATABASE" || func_name == "SCHEMA") return g_current_db_ctx;
-    if (func_name == "VERSION") return "5.7.0-rusql"; // (the same as @@version and the handshake of the MySQL protocol)
+    if (func_name == "VERSION") return "8.4.9"; // (the same as @@version and the handshake of the MySQL protocol)
     // Regression: used to hardcode "root@localhost" regardless of who actually
     // authenticated -- g_current_user_ctx is synced from Executor::auth_user (set by the
     // native/MySQL protocol servers after a successful AUTH handshake) the same way

@@ -81,7 +81,9 @@ CHECK TABLE acct
 OPTIMIZE TABLE acct
 SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = 'acct'
 SHOW CREATE TABLE audit
-SHOW TABLE STATUS LIKE 'acct'
+# SHOW TABLE STATUS holds two clock columns (Create_time, Update_time) that cannot be the same on two servers: the other columns are read from information_schema.tables (what the SHOW reads), the SHOW itself is checked for its columns on a name that is not there
+SELECT TABLE_NAME, ENGINE, VERSION, ROW_FORMAT, TABLE_ROWS, AVG_ROW_LENGTH, DATA_LENGTH, MAX_DATA_LENGTH, INDEX_LENGTH, DATA_FREE, AUTO_INCREMENT, TABLE_COLLATION, CREATE_OPTIONS, TABLE_COMMENT FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = 'acct'
+SHOW TABLE STATUS LIKE 'no_such_table'
 SHOW VARIABLES LIKE 'autocommit'
 SHOW STATUS LIKE 'Threads_connected'
 SHOW WARNINGS

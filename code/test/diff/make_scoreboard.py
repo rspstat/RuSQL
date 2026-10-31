@@ -51,6 +51,7 @@ CORPORA = [
     ("using_chain", [], "The order of the columns of * over a chain of USING / NATURAL joins (RIGHT JOIN too)", "USING·NATURAL 조인 사슬의 * 열 순서(RIGHT JOIN 포함)"),
     ("fk_auto_names", [], "Names of foreign keys without a name (declaration order, DROP / ADD / RENAME), NO ACTION vs RESTRICT in referential_constraints", "이름 없는 외래키의 자동 이름(선언 순서·DROP·ADD·RENAME), referential_constraints의 NO ACTION·RESTRICT"),
     ("errno", ["--proto", "--errno"], "MySQL wire protocol: the error number of a failing statement", "MySQL 프로토콜: 실패한 문장의 오류 번호"),
+    ("rollup", [], "GROUP BY ... WITH ROLLUP: a row for each prefix of the keys and a total, HAVING / ORDER BY / LIMIT / DISTINCT after it, in a view and a derived table", "GROUP BY ... WITH ROLLUP: 키의 접두사마다 한 행과 총계, 그 뒤의 HAVING·ORDER BY·LIMIT·DISTINCT, 뷰·파생 표 안에서"),
     ("slow_log", [], "SET GLOBAL slow_query_log / long_query_time (values, errors, a number out of range), FOUND_ROWS() after an aggregate", "SET GLOBAL slow_query_log / long_query_time(값·오류·범위 밖의 수), 집계 뒤의 FOUND_ROWS()"),
     ("protocol", ["--proto"], "MySQL wire protocol: SHOW, OK packets, affected rows", "MySQL 프로토콜: SHOW·OK 패킷·영향 행 수"),
     ("protocol_types", ["--proto", "--types"], "MySQL wire protocol: typed result columns", "MySQL 프로토콜: 열 타입"),

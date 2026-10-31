@@ -2093,7 +2093,7 @@ StringResult Executor::execute_with_s_body(SharedDatabase& s, Statement stmt) {
     }
     if (auto* v = std::get_if<Statement::Select>(&stmt.data)) {
         return exec_select(s, v->table, std::move(v->subquery), v->distinct, v->columns, v->condition, v->joins, v->order_by, v->group_by,
-                            v->having, v->limit, v->offset, v->for_update, v->for_share);
+                            v->having, v->limit, v->offset, v->for_update, v->for_share, v->with_rollup);
     }
     if (auto* v = std::get_if<Statement::With>(&stmt.data)) return exec_with(s, std::move(v->ctes), std::move(*v->query), v->recursive);
     if (auto* v = std::get_if<Statement::Union>(&stmt.data))
