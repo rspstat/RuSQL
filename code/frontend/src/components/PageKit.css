@@ -226,6 +226,22 @@
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--c) 22%, transparent);
 }
 
+/* the playback bar of a scripted page */
+.pk-play { display: flex; align-items: center; gap: 10px; margin: 14px 0 0; }
+.pk-play-btn { width: 40px; height: 36px; padding: 0; font-size: 12px; }
+.pk-track { flex: 1; display: flex; align-items: center; gap: 3px; height: 36px; }
+.pk-track i {
+  flex: 1;
+  height: 6px;
+  border-radius: 3px;
+  background: #34343a;
+  cursor: pointer;
+  transition: background 0.3s ease, transform 0.2s ease, box-shadow 0.3s ease;
+}
+.pk-track i:hover { transform: scaleY(1.9); }
+.pk-track i.done { background: color-mix(in srgb, var(--c) 70%, #34343a); }
+.pk-track i.now { background: var(--c); transform: scaleY(1.7); box-shadow: 0 0 10px var(--c); }
+
 /* ------------------------------------------------------------------ */
 /* motion                                                                */
 /* ------------------------------------------------------------------ */

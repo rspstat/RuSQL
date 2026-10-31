@@ -2238,7 +2238,7 @@ function App() {
           </svg>
         </div>
 
-        {/* MVCC: two sessions side by side and the versions of the rows between them */}
+        {/* MVCC: a short story of one row's versions, played by itself */}
         <div
           className={`activity-icon ${activeView === "mvcc" ? "active" : ""}`}
           title="MVCC"

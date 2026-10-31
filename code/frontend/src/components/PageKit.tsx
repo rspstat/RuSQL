@@ -35,6 +35,42 @@ export function PageHero({ accent, icon, title, lead, lang, onLang, children }: 
   );
 }
 
+// The playback of a scripted animation: step `cur` is shown for durations[cur] ms, then the next one; after the last one it waits `endPause` and starts again. It plays
+// as soon as the page opens; jump() stops at a step, replay() starts over.
+export function usePlayer(durations: number[], endPause = 3200) {
+  const [cur, setCur] = useState(0);
+  const [playing, setPlaying] = useState(true);
+  useEffect(() => {
+    if (!playing) return;
+    const last = cur >= durations.length - 1;
+    const timer = setTimeout(() => setCur(last ? 0 : cur + 1), last ? endPause : durations[cur]);
+    return () => clearTimeout(timer);
+  }, [playing, cur, durations, endPause]);
+  return {
+    cur, playing, setPlaying,
+    jump: (i: number) => { setPlaying(false); setCur(i); },
+    replay: () => { setCur(0); setPlaying(true); },
+  };
+}
+
+// The only controls of a scripted page: pause / play, start over, and one segment for each step (the ones behind are filled; click one to stop there)
+export function PlayBar({ count, cur, playing, onToggle, onReplay, onJump }: {
+  count: number; cur: number; playing: boolean; onToggle: () => void; onReplay: () => void; onJump: (i: number) => void;
+}) {
+  const t = useT();
+  return (
+    <div className="pk-play">
+      <button className="pk-btn primary pk-play-btn" onClick={onToggle} aria-label={playing ? t({ en: "Pause", ko: "멈춤" }) : t({ en: "Play", ko: "재생" })}>{playing ? "❚❚" : "▶"}</button>
+      <button className="pk-btn pk-play-btn" onClick={onReplay} aria-label={t({ en: "Start over", ko: "처음부터" })}>↻</button>
+      <div className="pk-track" role="group">
+        {Array.from({ length: count }, (_, i) => (
+          <i key={i} className={i < cur ? "done" : i === cur ? "now" : ""} onClick={() => onJump(i)} />
+        ))}
+      </div>
+    </div>
+  );
+}
+
 // A number that counts up from 0 to `value` when it appears (and again when the value changes); `format` writes it (a percent, a thousands separator)
 export function CountUp({ value, format = (n: number) => Math.round(n).toLocaleString(), ms = 1100 }: { value: number; format?: (n: number) => string; ms?: number }) {
   const [shown, setShown] = useState(0);

@@ -1,15 +1,14 @@
 // BTreeView.tsx
-// "B+Tree" activity-bar page: a teaching B+Tree that is drawn step by step. Insert, delete or look up a key and the page replays what happens -- the walk down to the
-// leaf, a node that overflows and splits (the key that goes up), a node that underflows and borrows from a sibling or merges with it, the root that grows or
-// shrinks -- one frame at a time (play / pause / step / speed). The tree and its frames come from lib/bplusTree.ts; every visible string is an English/Korean pair
-// with the same EN/KO toggle as the Diagram page. The look (hero, glowing nodes, flowing edges, the progress line) is PageKit.css + BTreeView.css.
+// "B+Tree" activity-bar page: one small B+Tree that is drawn by itself, step by step, over and over -- the keys 1 to 12 go in one after the other (a node that gets a fourth
+// key splits and sends a key up, and the tree grows a level), then the way down to the key 7. Nothing to type: only pause / play and start over. The tree and its frames
+// come from lib/bplusTree.ts; every visible string is an English/Korean pair with the same EN/KO toggle as the Diagram page. The look is PageKit.css + BTreeView.css.
 
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useLayoutEffect, useMemo, useRef, useState } from "react";
 import { BPlusTree } from "../lib/bplusTree";
 import type { Frame, FrameKind, Snap } from "../lib/bplusTree";
 import { C, L, LangContext, tint, useT } from "./diagramShared";
-import type { Lang } from "./diagramShared";
-import { CountUp, PageHero, rise } from "./PageKit";
+import type { Lang, Text } from "./diagramShared";
+import { CountUp, PageHero, PlayBar, rise, usePlayer } from "./PageKit";
 import "./BTreeView.css";
 
 const LANG_KEY = "rusql_diagram_lang";
@@ -21,7 +20,7 @@ const KEY_W = 52, KEY_H = 48, PAD = 8, GAP = 28, LEVEL_H = 190, MARGIN = 36, GUT
 // a tree that is narrower than its board is drawn up to MAX_ZOOM times larger (a small tree fills the stage); one that is wider is drawn smaller to fit, down to MIN_ZOOM,
 // and scrolls beyond that
 const MAX_ZOOM = 1.1, MIN_ZOOM = 0.62;
-const STEP_MS = 1300;
+const MAX_KEYS = 3; // (a node holds up to this many keys)
 
 interface Pos { x: number; y: number; w: number }
 interface Laid { pos: Record<number, Pos>; width: number; height: number; levels: number }
@@ -56,19 +55,46 @@ const KIND_LABEL: Record<FrameKind, { en: string; ko: string }> = {
   merge: { en: "merge", ko: "병합" }, root: { en: "new root", ko: "루트 변화" }, found: { en: "found", ko: "찾음" }, miss: { en: "not found", ko: "없음" },
 };
 
-const LEGEND: FrameKind[] = ["visit", "insert", "overflow", "split", "delete", "underflow", "borrow", "merge", "found"];
+// How many levels a snapshot has
+const heightOf = (snap: Snap) => { let d = 1, n = snap.nodes[snap.root]; while (n && !n.leaf) { n = snap.nodes[n.children[0]]; d++; } return d; };
 
-// the four ideas the page shows, each in the color of the step it belongs to
-const IDEAS: { c: string; title: { en: string; ko: string }; text: { en: string; ko: string } }[] = [
-  { c: "#569cd6", title: { en: "Walk down", ko: "아래로 걷기" },
-    text: { en: "At each level the key is compared with the separators and one child is followed, down to a leaf: about log N steps, however many keys there are.", ko: "층마다 키를 구분 키와 비교해 자식 하나를 따라 잎까지 내려갑니다. 키가 아무리 많아도 log N 걸음 안팎입니다." } },
-  { c: "#c586c0", title: { en: "Split", ko: "쪼개기" },
-    text: { en: "A node that gets one key too many splits in two and sends its middle key up. If the root splits, the tree grows one level.", ko: "키가 하나 넘친 노드는 둘로 쪼개져 가운데 키를 위로 올립니다. 루트가 쪼개지면 트리가 한 층 자랍니다." } },
-  { c: "#9cdcfe", title: { en: "Borrow or merge", ko: "빌리기와 합치기" },
-    text: { en: "A node left with too few keys borrows one from a sibling, or merges with it. When the root has one child left, the tree shrinks a level.", ko: "키가 모자란 노드는 형제에게서 하나 빌리거나 형제와 합쳐집니다. 루트에 자식이 하나만 남으면 한 층 줄어듭니다." } },
-  { c: "#4ec9b0", title: { en: "Linked leaves", ko: "이어진 잎" },
-    text: { en: "The leaves point to each other from left to right, so a range scan finds its first key once and then just walks along.", ko: "잎은 왼쪽에서 오른쪽으로 서로 이어져서, 범위 조회는 첫 키를 한 번 찾고 그다음은 따라 걷기만 합니다." } },
-];
+// What is shown, in order: an empty tree, the keys 1 to 12 going in (the walk down to the leaf is left out: what matters is the key that goes in, the node that overflows and the
+// split), then the way down to the key 7. Each step has a short sentence and the time it stays.
+interface Step { frame: Frame; caption: Text; ms: number }
+
+function buildSteps(): Step[] {
+  const tree = new BPlusTree(MAX_KEYS);
+  const steps: Step[] = [{
+    frame: tree.frame("ready", [], { en: "", ko: "" }),
+    caption: L(`An empty tree: a node holds up to ${MAX_KEYS} keys`, `빈 트리에서 시작합니다. 노드 하나에 키는 ${MAX_KEYS}개까지`),
+    ms: 1800,
+  }];
+  let levels = 1;
+  for (let k = 1; k <= 12; k++) {
+    for (const f of tree.insert(k)) {
+      if (f.kind === "visit") continue;
+      const grew = heightOf(f.snap) > levels;
+      levels = heightOf(f.snap);
+      if (f.kind === "insert") steps.push({ frame: f, caption: L(`Insert ${k}`, `${k} 넣기`), ms: 800 });
+      else if (f.kind === "overflow") steps.push({ frame: f, caption: L("Too many keys: the node has to split", "키가 넘쳤습니다. 노드를 쪼개야 합니다"), ms: 1400 });
+      else steps.push({
+        frame: f,
+        caption: grew ? L("Split in two: the middle key goes up and the tree grows a level", "둘로 쪼개고 가운데 키를 위로 올립니다. 트리가 한 층 자랍니다")
+                      : L("Split in two: the middle key goes up", "둘로 쪼개고 가운데 키를 위로 올립니다"),
+        ms: 2100,
+      });
+    }
+  }
+  const found = tree.search(7);
+  found.forEach((f, i) => steps.push({
+    frame: f,
+    caption: f.kind === "found" ? L("Found 7 in this leaf", "찾았습니다. 7은 이 잎에 있습니다")
+      : i === 0 ? L("Find 7: start at the root", "7 찾기: 루트에서 시작합니다")
+      : L("Go down to the child that can hold 7", "7이 있을 만한 자식으로 내려갑니다"),
+    ms: f.kind === "found" ? 2400 : 1200,
+  }));
+  return steps;
+}
 
 function TreeSvg({ frame, previous, room }: { frame: Frame; previous: Frame | null; room: number }) {
   const t = useT();
@@ -143,16 +169,12 @@ function TreeSvg({ frame, previous, room }: { frame: Frame; previous: Frame | nu
 
 function Body({ lang, onLang }: { lang: Lang; onLang: (l: Lang) => void }) {
   const t = useT();
-  const [maxKeys, setMaxKeys] = useState(3);
-  const tree = useRef(new BPlusTree(3));
-  const [frames, setFrames] = useState<Frame[]>(() => [tree.current.frame("ready", [], { en: "An empty tree: one empty leaf that is also the root", ko: "빈 트리: 루트이자 잎인 빈 노드 하나" })]);
-  const [cur, setCur] = useState(0);
-  const [playing, setPlaying] = useState(false);
-  const [speed, setSpeed] = useState(1);
-  const [text, setText] = useState("");
+  const steps = useMemo(buildSteps, []);
+  const durations = useMemo(() => steps.map(x => x.ms), [steps]);
+  const player = usePlayer(durations);
+  const step = steps[player.cur];
+  const frame = step.frame;
 
-  const frame = frames[Math.min(cur, frames.length - 1)];
-  const done = cur >= frames.length - 1;
   const canvas = useRef<HTMLDivElement>(null);
   const [room, setRoom] = useState(0);
   useLayoutEffect(() => {
@@ -166,113 +188,35 @@ function Body({ lang, onLang }: { lang: Lang; onLang: (l: Lang) => void }) {
     return () => watch.disconnect();
   }, []);
 
-  useEffect(() => {
-    if (!playing) return;
-    if (done) { setPlaying(false); return; }
-    const timer = setTimeout(() => setCur(c => c + 1), STEP_MS / speed);
-    return () => clearTimeout(timer);
-  }, [playing, cur, done, speed]);
-
-  const run = (make: (tr: BPlusTree) => Frame[]) => {
-    const tr = tree.current;
-    const start = tr.frame("ready", [], { en: "The tree as it is now", ko: "지금의 트리" });
-    const made = make(tr);
-    setFrames([start, ...made]);
-    setCur(0);
-    setPlaying(true);
-  };
-  const keyOf = () => {
-    const k = parseInt(text, 10);
-    return Number.isFinite(k) ? k : null;
-  };
-  const reset = (m: number) => {
-    tree.current = new BPlusTree(m);
-    setFrames([tree.current.frame("ready", [], { en: "An empty tree: one empty leaf that is also the root", ko: "빈 트리: 루트이자 잎인 빈 노드 하나" })]);
-    setCur(0);
-    setPlaying(false);
-  };
-  const randomKeys = (tr: BPlusTree, count: number) => {
-    const out: number[] = [];
-    while (out.length < count && out.length < 90) {
-      const k = 1 + Math.floor(Math.random() * 99);
-      if (!tr.has(k) && !out.includes(k)) out.push(k);
-    }
-    return out;
-  };
-
-  const height = (() => { let d = 1, n = frame.snap.nodes[frame.snap.root]; while (n && !n.leaf) { n = frame.snap.nodes[n.children[0]]; d++; } return d; })();
-  const keyCount = Object.values(frame.snap.nodes).filter(n => n.leaf).reduce((s, n) => s + n.keys.length, 0);
-  const empty = keyCount === 0 && Object.keys(frame.snap.nodes).length === 1;
-  const at = Math.min(cur, frames.length - 1);
+  const keyCount = Object.values(frame.snap.nodes).filter(n => n.leaf).reduce((n, node) => n + node.keys.length, 0);
+  const previous = player.cur > 0 ? steps[player.cur - 1].frame : null;
 
   return (
     <div className="bt-page pk-page">
       <PageHero accent={C.storage} lang={lang} onLang={onLang}
         icon={<svg viewBox="0 0 24 24"><rect x="8" y="2.5" width="8" height="5" rx="1.6" /><rect x="1.8" y="16.5" width="8" height="5" rx="1.6" /><rect x="14.2" y="16.5" width="8" height="5" rx="1.6" /><path d="M12 7.5v3.2M12 10.7H5.8v5.8M12 10.7h6.2v5.8" /></svg>}
-        title={L("B+Tree: how an index splits and rebalances", "B+Tree 애니메이션")}
-        lead={L("Every key lives in a leaf and the leaves are linked, so a range scan walks along them. A node that grows past its limit splits and sends a key up; a node that shrinks below its minimum borrows from a sibling or merges with it. Try inserting 1 to 12 in order, then deleting keys.",
-                "모든 키는 잎에 있고 잎끼리 이어져 있어서 범위 조회는 잎을 따라 걷습니다. 한도를 넘긴 노드는 쪼개져 키 하나를 위로 올리고, 최소에 못 미치는 노드는 형제에게서 빌리거나 합쳐집니다. 1부터 12까지 차례로 넣은 뒤 키를 지워 보세요.")} />
+        title={L("B+Tree: how an index grows", "B+Tree 애니메이션")}
+        lead={L("Keys go in one by one: a node that gets too full splits and the tree grows. A lookup walks one path from the root down to a leaf.",
+                "키를 하나씩 넣으면 가득 찬 노드가 쪼개지면서 트리가 자랍니다. 찾을 때는 루트에서 잎까지 한 길로 내려갑니다.")} />
 
-      <div className="bt-toolbar pk-card pk-rise" style={{ ...tint(C.storage), ...rise(1) }}>
-        <input className="pk-input bt-input" type="number" min={1} max={999} placeholder={t(L("key", "키"))} value={text}
-          onChange={e => setText(e.target.value)} onKeyDown={e => { const k = keyOf(); if (e.key === "Enter" && k !== null) run(tr => tr.insert(k)); }} />
-        <button className="pk-btn primary" disabled={keyOf() === null} onClick={() => { const k = keyOf(); if (k !== null) run(tr => tr.insert(k)); }}>{t(L("Insert", "삽입"))}</button>
-        <button className="pk-btn" disabled={keyOf() === null} onClick={() => { const k = keyOf(); if (k !== null) run(tr => tr.remove(k)); }}>{t(L("Delete", "삭제"))}</button>
-        <button className="pk-btn" disabled={keyOf() === null} onClick={() => { const k = keyOf(); if (k !== null) run(tr => tr.search(k)); }}>{t(L("Search", "찾기"))}</button>
-        <span className="bt-sep" />
-        <button className="pk-btn" onClick={() => run(tr => { const out: Frame[] = []; for (let k = 1; k <= 12; k++) if (!tr.has(k)) out.push(...tr.insert(k)); return out; })}>{t(L("Insert 1–12", "1–12 넣기"))}</button>
-        <button className="pk-btn" onClick={() => run(tr => randomKeys(tr, 8).flatMap(k => tr.insert(k)))}>{t(L("Random ×8", "무작위 ×8"))}</button>
-        <button className="pk-btn" onClick={() => reset(maxKeys)}>{t(L("Reset", "초기화"))}</button>
-        <span className="bt-sep" />
-        <label className="bt-label">{t(L("max keys per node", "노드당 최대 키"))}
-          <select className="pk-select" value={maxKeys} onChange={e => { const m = Number(e.target.value); setMaxKeys(m); reset(m); }}>
-            {[3, 4, 5].map(m => <option key={m} value={m}>{m}</option>)}
-          </select>
-        </label>
-      </div>
-
-      <div className={`bt-stage pk-rise bt-k-${frame.kind}`} style={{ ...tint(C.storage), ...rise(2) }}>
+      <div className={`bt-stage pk-rise bt-k-${frame.kind}`} style={{ ...tint(C.storage), ...rise(1) }}>
         <div className="bt-canvas" ref={canvas}>
-          <TreeSvg frame={frame} previous={cur > 0 ? frames[cur - 1] : null} room={room} />
-          {empty && <div className="bt-hint">{t(L("Type a key and press Insert, or try “Insert 1–12”", "키를 넣고 삽입을 눌러 보세요. “1–12 넣기”도 좋습니다"))}</div>}
+          <TreeSvg frame={frame} previous={previous} room={room} />
         </div>
         <div className="bt-msg">
           <span className="bt-dot-live" aria-hidden="true" />
           <span className="bt-badge">{t(KIND_LABEL[frame.kind])}</span>
-          <span className="bt-text" key={`${at}-${frame.kind}`}>{t(frame.msg)}</span>
+          <span className="bt-text" key={player.cur}>{t(step.caption)}</span>
           <span className="bt-stats">
             <span className="bt-stat"><b><CountUp value={keyCount} ms={500} /></b> {t(L("keys", "키"))}</span>
-            <span className="bt-stat"><b><CountUp value={height} ms={500} /></b> {t(L("levels", "층"))}</span>
+            <span className="bt-stat"><b><CountUp value={heightOf(frame.snap)} ms={500} /></b> {t(L("levels", "층"))}</span>
           </span>
         </div>
-        <div className="bt-progress" aria-hidden="true"><i style={{ width: `${((at + 1) / frames.length) * 100}%` }} /></div>
       </div>
 
-      <div className="bt-play pk-rise" style={{ ...tint(C.storage), ...rise(3) }}>
-        <button className="pk-btn bt-round" disabled={cur <= 0} onClick={() => { setPlaying(false); setCur(c => Math.max(0, c - 1)); }} aria-label={t(L("previous step", "이전 단계"))}>◀</button>
-        <button className="pk-btn primary bt-playbtn" onClick={() => { if (done) setCur(0); setPlaying(p => (done ? true : !p)); }}>
-          {done ? t(L("↻ Replay", "↻ 다시 보기")) : playing ? t(L("❚❚ Pause", "❚❚ 멈춤")) : t(L("▶ Play", "▶ 재생"))}
-        </button>
-        <button className="pk-btn bt-round" disabled={done} onClick={() => { setPlaying(false); setCur(c => Math.min(frames.length - 1, c + 1)); }} aria-label={t(L("next step", "다음 단계"))}>▶</button>
-        <input className="bt-slider" type="range" min={0} max={Math.max(0, frames.length - 1)} value={at} onChange={e => { setPlaying(false); setCur(Number(e.target.value)); }} />
-        <span className="bt-count">{at + 1} / {frames.length}</span>
-        <select className="pk-select" value={speed} onChange={e => setSpeed(Number(e.target.value))}>
-          <option value={0.5}>0.5x</option><option value={1}>1x</option><option value={2}>2x</option><option value={4}>4x</option>
-        </select>
-      </div>
-
-      <div className="bt-legend pk-rise" style={rise(4)}>
-        {LEGEND.map(k => <span key={k} className={`bt-leg bt-k-${k}`}><i className="bt-dot" />{t(KIND_LABEL[k])}</span>)}
-        <span className="bt-leg"><i className="bt-dot bt-link-dot" />{t(L("leaf link", "잎 연결"))}</span>
-      </div>
-
-      <div className="bt-ideas">
-        {IDEAS.map((idea, i) => (
-          <div key={i} className="bt-idea pk-card pk-rise" style={{ ...tint(idea.c), ...rise(5 + i) }}>
-            <b>{t(idea.title)}</b>
-            <span>{t(idea.text)}</span>
-          </div>
-        ))}
+      <div className="pk-rise" style={{ ...tint(C.storage), ...rise(2) }}>
+        <PlayBar count={steps.length} cur={player.cur} playing={player.playing}
+          onToggle={() => player.setPlaying(p => !p)} onReplay={player.replay} onJump={player.jump} />
       </div>
     </div>
   );

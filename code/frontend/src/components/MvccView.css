@@ -1,173 +1,141 @@
-/* MvccView -- "MVCC" page: two sessions side by side and the versions of the rows between them. The shared look (hero, cards, buttons, rise) is in PageKit.css;
-   --c is the page color (the transactions' amber), each session box sets its own (A blue, B pink). */
+/* MvccView -- "MVCC" page: session A, the versions of one row, session B, and the arrows between them. The shared look (hero, cards, buttons, rise, play bar) is in
+   PageKit.css; --c is the page color (the transactions' amber), each session box sets its own (A blue, B pink). */
 
-.mv-page { max-width: 1400px; }
-
-.mv-dim { color: #85858b; font-size: 12px; }
-.mv-about { color: #b0b0b6; font-size: 13px; line-height: 1.6; margin: 12px 2px 10px; }
-
-/* the colors of the two sessions, also for the small A / B marks elsewhere */
-.mv-who-A { --w: #9cdcfe; } .mv-who-B { --w: #c586c0; }
+.mv-page { max-width: 1180px; }
+.mv-dim { color: #85858b; font-size: 12.5px; }
 
 /* ------------------------------------------------------------------ */
-/* the bar: scenario, buttons, one dot for each step                    */
+/* the stage: three columns with an arrow column between each pair, and the sentence under them */
 /* ------------------------------------------------------------------ */
-.mv-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; padding: 12px 16px; }
-.mv-label { font-size: 12px; color: #9d9da3; display: inline-flex; align-items: center; gap: 8px; }
-
-.mv-steps { display: inline-flex; align-items: center; gap: 6px; margin-left: 6px; }
-.mv-step {
-  width: 10px;
-  height: 10px;
-  border-radius: 50%;
-  background: #34343a;
-  border: 1.5px solid #4b4b52;
-  transition: background 0.3s ease, border-color 0.3s ease, transform 0.3s ease, box-shadow 0.3s ease;
+.mv-stage {
+  border-radius: 14px;
+  border: 1px solid color-mix(in srgb, var(--c) 28%, #333336);
+  background: #1c1c1f;
+  background-image: radial-gradient(circle, rgba(255, 255, 255, 0.045) 1px, transparent 1.4px);
+  background-size: 22px 22px;
+  overflow: hidden;
 }
-.mv-step.done { background: var(--w); border-color: var(--w); }
-.mv-step.now { border-color: var(--w); transform: scale(1.35); animation: mv-now 1.5s ease-out infinite; }
-@keyframes mv-now {
-  0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--w) 70%, transparent); }
-  70%, 100% { box-shadow: 0 0 0 8px transparent; }
-}
-.mv-steps .mv-dim { margin-left: 6px; font-variant-numeric: tabular-nums; }
-
-/* ------------------------------------------------------------------ */
-/* messages                                                              */
-/* ------------------------------------------------------------------ */
-.mv-error { margin: 8px 0; padding: 9px 14px; background: #3a2323; border: 1px solid #6b3a3a; border-left: 3px solid #e06c75; border-radius: 8px; color: #f48771; font-size: 12.5px; }
-.mv-note {
-  margin: 8px 0;
-  padding: 10px 16px;
-  background: linear-gradient(90deg, color-mix(in srgb, var(--c) 14%, #252528), #232326 70%);
-  border: 1px solid color-mix(in srgb, var(--c) 32%, #333);
-  border-left: 3px solid var(--c);
-  border-radius: 9px;
-  font-size: 13.5px;
-  line-height: 1.6;
-  animation: mv-slide 0.45s ease-out;
-}
-@keyframes mv-slide { from { opacity: 0; transform: translateX(-14px); } }
-.mv-next { display: flex; align-items: center; gap: 8px; margin: 6px 2px 12px; font-size: 12px; color: #9d9da3; }
-.mv-next code, .mv-entry code { font: 12px Consolas, "Courier New", monospace; color: #9cdcfe; }
-.mv-who-dot {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 20px;
-  height: 20px;
-  border-radius: 50%;
-  font-style: normal;
-  font-size: 11px;
-  font-weight: 700;
-  color: #101012;
-  background: var(--w);
-  animation: mv-now 1.8s ease-out infinite;
+.mv-grid {
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) minmax(70px, 110px) minmax(280px, 1.2fr) minmax(70px, 110px) minmax(220px, 1fr);
+  grid-template-rows: 150px 150px;
+  padding: 34px 30px 30px;
 }
 
 /* ------------------------------------------------------------------ */
-/* the sessions and the table between them                              */
+/* the two sessions                                                      */
 /* ------------------------------------------------------------------ */
-.mv-grid { display: grid; grid-template-columns: minmax(250px, 1fr) minmax(430px, 1.5fr) minmax(250px, 1fr); gap: 16px; align-items: start; }
-.mv-session, .mv-store { padding: 14px; min-width: 0; }
-.mv-session { background: linear-gradient(180deg, color-mix(in srgb, var(--c) 7%, #262629), #242427 55%); }
-.mv-store { background: linear-gradient(180deg, color-mix(in srgb, var(--c) 6%, #262629), #232326 55%); }
-
-/* the session that has a transaction open is lit; the one that waits for a lock breathes */
-.mv-session.mv-open { border-color: color-mix(in srgb, var(--c) 55%, #3a3a3d); box-shadow: 0 0 0 1px color-mix(in srgb, var(--c) 25%, transparent), 0 6px 24px color-mix(in srgb, var(--c) 14%, transparent); }
-.mv-session { position: relative; }
-/* (an overlay, so that the card's own rise-in animation is not replaced) */
-.mv-session.mv-busy::after {
-  content: "";
-  position: absolute;
-  inset: -1px;
-  border-radius: 10px;
-  pointer-events: none;
-  animation: mv-wait 1.4s ease-in-out infinite;
-}
-@keyframes mv-wait {
-  0%, 100% { box-shadow: 0 0 0 0 rgba(255, 216, 138, 0); }
-  50% { box-shadow: 0 0 22px 2px rgba(255, 216, 138, 0.42), inset 0 0 0 1px rgba(255, 216, 138, 0.5); }
-}
-
-.mv-session-head { display: flex; align-items: center; gap: 9px; margin-bottom: 12px; flex-wrap: wrap; }
-.mv-session-head b { font-size: 14px; color: #fff; }
+.mv-session { padding: 16px 18px; min-width: 0; background: #232326; transition: border-color 0.3s ease, box-shadow 0.3s ease; }
+.mv-session.mv-active { border-color: var(--c); box-shadow: 0 0 0 1px color-mix(in srgb, var(--c) 40%, transparent), 0 8px 28px color-mix(in srgb, var(--c) 24%, transparent); }
+.mv-session-head { display: flex; align-items: center; gap: 10px; margin-bottom: 18px; flex-wrap: wrap; }
+.mv-session-head b { font-size: 15px; color: #fff; }
 .mv-avatar {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 30px;
-  height: 30px;
+  width: 32px;
+  height: 32px;
   border-radius: 10px;
-  font-size: 14px;
+  font-size: 15px;
   font-weight: 700;
   color: var(--c);
   background: color-mix(in srgb, var(--c) 17%, #1b1b1e);
   border: 1px solid color-mix(in srgb, var(--c) 45%, transparent);
 }
-.mv-open .mv-avatar { animation: pk-pulse 2.6s ease-out infinite; }
-.mv-avatar-store { font-size: 15px; }
+.mv-active .mv-avatar { animation: pk-pulse 2.2s ease-out infinite; }
 .mv-chip { font-size: 11px; padding: 2px 10px; border-radius: 11px; background: #333338; color: #aaaab0; transition: background 0.3s ease, color 0.3s ease; }
-.mv-chip.mv-on { background: color-mix(in srgb, var(--c) 30%, #1a2a35); color: #ffffff; border: 1px solid color-mix(in srgb, var(--c) 50%, transparent); }
-.mv-chip.mv-wait { background: #6b4a12; color: #ffd88a; animation: mv-blink 1.1s ease-in-out infinite; }
-@keyframes mv-blink { 50% { opacity: 0.55; } }
+.mv-chip.mv-on { background: color-mix(in srgb, var(--c) 28%, #1a1a1d); color: #ffffff; border: 1px solid color-mix(in srgb, var(--c) 50%, transparent); }
 
-.mv-run { display: flex; gap: 7px; }
-.mv-input { flex: 1; min-width: 0; font-family: Consolas, "Courier New", monospace; }
-.mv-quick { display: flex; gap: 7px; margin: 9px 0 10px; }
-.mv-small { padding: 3px 11px; font-size: 11px; }
-.mv-log { display: flex; flex-direction: column; gap: 7px; }
-.mv-entry {
-  background: #1c1c1f;
-  border: 1px solid #333338;
-  border-left: 3px solid var(--c);
+.mv-sql { display: flex; flex-direction: column; gap: 8px; animation: mv-slide 0.45s ease-out; }
+.mv-sql code {
+  align-self: flex-start;
+  padding: 6px 10px;
   border-radius: 7px;
-  padding: 7px 10px;
-  font-size: 11px;
+  background: #1a1a1d;
+  border: 1px solid #38383d;
+  border-left: 3px solid var(--c);
+  font: 13px 'Segoe UI', sans-serif;
+  color: #e4e4e8;
+  word-break: break-word;
+}
+.mv-answer { font-size: 22px; font-weight: 650; color: var(--c); animation: mv-slide 0.6s ease-out; }
+@keyframes mv-slide { from { opacity: 0; transform: translateX(-12px); } }
+
+/* ------------------------------------------------------------------ */
+/* the arrows: all there, dim; the ones the step is about shine         */
+/* ------------------------------------------------------------------ */
+.mv-wire { position: relative; opacity: 0.1; transition: opacity 0.45s ease; }
+.mv-wire.mv-hot { opacity: 1; }
+
+/* ------------------------------------------------------------------ */
+/* the versions of the row: two slots, a card in each that is there or not */
+/* ------------------------------------------------------------------ */
+.mv-slot { margin: 10px 0; border-radius: 12px; border: 1.5px dashed #3d3d44; min-width: 0; }
+.mv-ver {
+  height: 100%;
+  box-sizing: border-box;
+  padding: 0 22px;
   display: flex;
-  flex-direction: column;
-  gap: 3px;
-  animation: mv-slide 0.4s ease-out;
+  align-items: center;
+  gap: 14px;
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--vc, #4ec9b0) 14%, #222226);
+  border: 1.8px solid var(--vc, #4ec9b0);
+  box-shadow: 0 0 22px color-mix(in srgb, var(--vc, #4ec9b0) 22%, transparent);
+  transition: opacity 0.6s ease, transform 0.6s cubic-bezier(0.3, 0.9, 0.3, 1), background 0.5s ease, border-color 0.5s ease, box-shadow 0.5s ease;
 }
-.mv-entry.mv-bad { border-color: #6b3a3a; border-left-color: #e06c75; }
-.mv-entry > span { color: #8f8f96; }
-.mv-mini { border-collapse: collapse; font-size: 11px; margin-top: 3px; }
-.mv-mini th, .mv-mini td { border: 1px solid #333338; padding: 1px 7px; text-align: left; }
-.mv-mini th { background: #2b2b30; color: #9cdcfe; font-weight: 500; }
+.mv-st-off { opacity: 0; transform: scale(0.92); box-shadow: none; }
+.mv-st-live { --vc: #4ec9b0; }
+.mv-st-uncommitted { --vc: #ddb05d; }
+.mv-st-ending { --vc: #e5a14a; }
+.mv-st-dead { --vc: #7b7b83; opacity: 0.7; box-shadow: none; }
 
-/* the versions */
-.mv-table { width: 100%; border-collapse: collapse; font-size: 12px; }
-.mv-table th { text-align: left; color: #9cdcfe; font-weight: 500; padding: 5px 8px; border-bottom: 1px solid #3a3a3f; }
-.mv-table .mv-th-A { color: #9cdcfe; } .mv-table .mv-th-B { color: #c586c0; }
-.mv-table td { padding: 6px 8px; border-bottom: 1px solid #2d2d31; font-variant-numeric: tabular-nums; }
-.mv-table tbody tr { animation: mv-row-in 0.7s ease-out; transition: background 0.2s ease; }
-.mv-table tbody tr:hover { background: rgba(255, 255, 255, 0.04); }
-/* a version that has just been made flashes once in the color of the page */
-@keyframes mv-row-in {
-  0% { opacity: 0; transform: translateX(-14px); background: color-mix(in srgb, var(--c) 40%, transparent); }
-  45% { opacity: 1; transform: none; background: color-mix(in srgb, var(--c) 24%, transparent); }
-  100% { background: transparent; }
-}
-.mv-table .mv-data { font-family: Consolas, "Courier New", monospace; }
-.mv-table tr.mv-st-DEAD td { opacity: 0.5; transition: opacity 0.6s ease; }
-.mv-table td:nth-child(n+6) { text-align: center; }
-.mv-yes { font-size: 16px; line-height: 1; }
-.mv-vis-A { color: #9cdcfe; text-shadow: 0 0 8px #9cdcfe; }
-.mv-vis-B { color: #c586c0; text-shadow: 0 0 8px #c586c0; }
-.mv-no { color: #4d4d54; }
-
-.mv-state { display: inline-block; font-size: 10.5px; padding: 2px 9px; border-radius: 10px; font-weight: 650; transition: background 0.4s ease, color 0.4s ease; }
-i.mv-state { width: 9px; height: 9px; padding: 0; border-radius: 50%; margin-right: 6px; }
-.mv-LIVE { background: #2d6a4f; color: #d8f3dc; } .mv-UNCOMMITTED { background: #7a5c12; color: #ffe8a3; }
-.mv-ENDING { background: #7a3d12; color: #ffd2a8; } .mv-DEAD { background: #444; color: #bbb; }
-span.mv-LIVE { box-shadow: 0 0 10px rgba(80, 200, 140, 0.35); }
-span.mv-UNCOMMITTED, span.mv-ENDING { animation: mv-glow 1.7s ease-in-out infinite; }
+.mv-value { flex: 1; font-size: 15px; color: #b8b8be; white-space: nowrap; }
+.mv-value b { font-size: 26px; font-weight: 650; color: #ffffff; font-variant-numeric: tabular-nums; }
+.mv-state { font-size: 11.5px; padding: 3px 11px; border-radius: 11px; font-weight: 650; white-space: nowrap; background: var(--vc); color: #151517; transition: background 0.5s ease; }
+.mv-uncommitted, .mv-ending { animation: mv-glow 1.7s ease-in-out infinite; }
 @keyframes mv-glow {
-  0%, 100% { box-shadow: 0 0 0 0 rgba(255, 200, 90, 0); }
-  50% { box-shadow: 0 0 12px 1px rgba(255, 200, 90, 0.5); }
+  0%, 100% { box-shadow: 0 0 0 0 transparent; }
+  50% { box-shadow: 0 0 14px 1px color-mix(in srgb, var(--vc) 55%, transparent); }
 }
-.mv-legend { display: flex; flex-direction: column; gap: 5px; margin-top: 14px; padding-top: 12px; border-top: 1px dashed #3a3a3f; font-size: 11px; color: #8a8a90; }
+
+/* who sees this version: a lit letter for the session that does, a dim one for the one that does not */
+.mv-seen { display: inline-flex; gap: 6px; }
+.mv-eye {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  font-style: normal;
+  font-size: 12px;
+  font-weight: 700;
+  color: #5d5d64;
+  background: #2a2a2e;
+  border: 1.5px solid #3f3f45;
+  transition: background 0.4s ease, color 0.4s ease, border-color 0.4s ease, box-shadow 0.4s ease;
+}
+.mv-eye.on { color: #151517; background: var(--c); border-color: var(--c); box-shadow: 0 0 10px var(--c); }
+
+/* ------------------------------------------------------------------ */
+/* the sentence under the picture                                         */
+/* ------------------------------------------------------------------ */
+.mv-msg {
+  --c: #7b7b83;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 14px 22px;
+  border-top: 1px solid #333338;
+  background: color-mix(in srgb, var(--c) 12%, #212124);
+  font-size: 14px;
+  color: #ececf0;
+  transition: background 0.4s ease;
+}
+.mv-badge { padding: 2px 11px; border-radius: 11px; font-size: 11.5px; font-weight: 650; background: var(--c); color: #151517; white-space: nowrap; }
+.mv-text { animation: mv-slide 0.4s ease-out; }
 
 @media (max-width: 1100px) {
-  .mv-grid { grid-template-columns: 1fr; }
+  .mv-grid { grid-template-columns: 1fr 50px 1.2fr 50px 1fr; padding: 24px 14px; }
 }
