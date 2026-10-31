@@ -26,19 +26,19 @@ const gone: Version = { value: 150, state: "off", seen: { A: false, B: false } }
 const both = { A: true, B: true }, onlyA = { A: true, B: false }, onlyB = { A: false, B: true }, nobody = { A: false, B: false };
 
 const STEPS: Step[] = [
-  { who: null, caption: L("To begin, the row has one version: balance = 100", "처음에는 행 하나에 버전 하나가 있습니다 (balance = 100)"), ms: 2400,
+  { who: null, caption: L("To begin, the row has one version: balance = 100", "처음에는 행 하나에 버전 하나가 있다 (balance = 100)"), ms: 2400,
     versions: [{ value: 100, state: "live", seen: both }, gone], wireA: [], wireB: [] },
-  { who: "A", sql: "BEGIN", caption: L("A opens a transaction", "A가 트랜잭션을 엽니다"), ms: 1700,
+  { who: "A", sql: "BEGIN", caption: L("A opens a transaction", "A가 트랜잭션을 연다"), ms: 1700,
     versions: [{ value: 100, state: "live", seen: both }, gone], wireA: [], wireB: [] },
-  { who: "A", sql: "UPDATE accounts SET balance = 150", caption: L("A does not overwrite: it adds a new version, and the old one stays", "A는 덮어쓰지 않고 새 버전을 만듭니다. 옛 버전은 그대로 남습니다"), ms: 3400,
+  { who: "A", sql: "UPDATE accounts SET balance = 150", caption: L("A does not overwrite: it adds a new version, and the old one stays", "A는 덮어쓰지 않고 새 버전을 만든다. 옛 버전은 그대로 남는다"), ms: 3400,
     versions: [{ value: 100, state: "ending", seen: onlyB }, { value: 150, state: "uncommitted", seen: onlyA }], wireA: [0, 1], wireB: [] },
-  { who: "B", sql: "SELECT balance FROM accounts", answer: "100", caption: L("B cannot see a version that is not committed yet, so it reads 100", "B에게는 아직 커밋되지 않은 새 버전이 보이지 않아서 100을 읽습니다"), ms: 3400,
+  { who: "B", sql: "SELECT balance FROM accounts", answer: "100", caption: L("B cannot see a version that is not committed yet, so it reads 100", "B에게는 아직 커밋되지 않은 새 버전이 보이지 않아서 100을 읽는다"), ms: 3400,
     versions: [{ value: 100, state: "ending", seen: onlyB }, { value: 150, state: "uncommitted", seen: onlyA }], wireA: [], wireB: [0] },
-  { who: "A", sql: "COMMIT", caption: L("A commits: the new version is the current one, the old one is now old", "A가 커밋합니다. 새 버전이 현재 값이 되고 옛 버전은 옛 버전이 됩니다"), ms: 3000,
+  { who: "A", sql: "COMMIT", caption: L("A commits: the new version is the current one, the old one is now old", "A가 커밋한다. 새 버전이 현재 값이 되고 옛 버전은 옛 버전이 된다"), ms: 3000,
     versions: [{ value: 100, state: "dead", seen: nobody }, { value: 150, state: "live", seen: both }], wireA: [1], wireB: [] },
-  { who: "B", sql: "SELECT balance FROM accounts", answer: "150", caption: L("Now B reads the new version: 150", "이제 B는 새 버전을 읽습니다: 150"), ms: 2800,
+  { who: "B", sql: "SELECT balance FROM accounts", answer: "150", caption: L("Now B reads the new version: 150", "이제 B는 새 버전을 읽는다: 150"), ms: 2800,
     versions: [{ value: 100, state: "dead", seen: nobody }, { value: 150, state: "live", seen: both }], wireA: [], wireB: [1] },
-  { who: "A", sql: "VACUUM accounts", caption: L("Nobody can need the old version any more: VACUUM removes it", "옛 버전은 이제 아무도 필요로 하지 않으므로 VACUUM이 치웁니다"), ms: 3200,
+  { who: "A", sql: "VACUUM accounts", caption: L("Nobody can need the old version any more: VACUUM removes it", "옛 버전은 이제 아무도 필요로 하지 않으므로 VACUUM이 치운다"), ms: 3200,
     versions: [{ value: 100, state: "off", seen: nobody }, { value: 150, state: "live", seen: both }], wireA: [0], wireB: [] },
 ];
 
@@ -81,7 +81,7 @@ function Body({ lang, onLang }: { lang: Lang; onLang: (l: Lang) => void }) {
       <div className="mv-said">
         {s.sql
           ? <div className="mv-sql" key={s.sql + player.cur}><code>{s.sql}</code>{s.answer && <span className="mv-answer">→ {s.answer}</span>}</div>
-          : <div className="mv-dim">{t(L("nothing run yet", "아직 아무것도 실행하지 않았습니다"))}</div>}
+          : <div className="mv-dim">{t(L("nothing run yet", "아직 아무것도 실행하지 않았다"))}</div>}
       </div>
     </div>
   );
@@ -112,7 +112,7 @@ function Body({ lang, onLang }: { lang: Lang; onLang: (l: Lang) => void }) {
         icon={<svg viewBox="0 0 24 24"><path d="M12 3l9 4.5-9 4.5-9-4.5z" /><path d="M3 12l9 4.5 9-4.5" /><path d="M3 16.5L12 21l9-4.5" /></svg>}
         title={L("MVCC: versions of a row", "MVCC 시뮬레이션")}
         lead={L("A change does not overwrite a row: it adds a new version. Each session sees the version that is right for it, so a reader never waits for a writer.",
-                "값을 바꾸면 덮어쓰지 않고 새 버전을 만듭니다. 세션마다 자기에게 맞는 버전을 보기 때문에, 읽는 쪽이 쓰는 쪽을 기다리지 않습니다.")} />
+                "값을 바꾸면 덮어쓰지 않고 새 버전을 만든다. 세션마다 자기에게 맞는 버전을 보기 때문에, 읽는 쪽이 쓰는 쪽을 기다리지 않는다.")} />
 
       <div className="mv-stage pk-rise" style={{ ...tint(C.txn), ...rise(1) }}>
         <div className="mv-grid">

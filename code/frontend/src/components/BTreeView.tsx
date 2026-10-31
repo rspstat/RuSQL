@@ -72,7 +72,7 @@ function buildSteps(): Step[] {
   const tree = new BPlusTree(MAX_KEYS);
   const steps: Step[] = [{
     frame: tree.frame("ready", [], { en: "", ko: "" }),
-    caption: L(`An empty tree: a node holds up to ${MAX_KEYS} keys`, `빈 트리에서 시작합니다. 노드 하나에 키는 ${MAX_KEYS}개까지`),
+    caption: L(`An empty tree: a node holds up to ${MAX_KEYS} keys`, `빈 트리에서 시작한다. 노드 하나에 키는 ${MAX_KEYS}개까지`),
     ms: 1800,
   }];
   let levels = 1;
@@ -82,11 +82,11 @@ function buildSteps(): Step[] {
       const grew = heightOf(f.snap) > levels;
       levels = heightOf(f.snap);
       if (f.kind === "insert") steps.push({ frame: f, caption: L(`Insert ${k}`, `${k} 넣기`), ms: 800 });
-      else if (f.kind === "overflow") steps.push({ frame: f, caption: L("Too many keys: the node has to split", "키가 넘쳤습니다. 노드를 쪼개야 합니다"), ms: 1400 });
+      else if (f.kind === "overflow") steps.push({ frame: f, caption: L("Too many keys: the node has to split", "키가 넘쳤다. 노드를 쪼개야 한다"), ms: 1400 });
       else steps.push({
         frame: f,
-        caption: grew ? L("Split in two: the middle key goes up and the tree grows a level", "둘로 쪼개고 가운데 키를 위로 올립니다. 트리가 한 층 자랍니다")
-                      : L("Split in two: the middle key goes up", "둘로 쪼개고 가운데 키를 위로 올립니다"),
+        caption: grew ? L("Split in two: the middle key goes up and the tree grows a level", "둘로 쪼개고 가운데 키를 위로 올린다. 트리가 한 층 자란다")
+                      : L("Split in two: the middle key goes up", "둘로 쪼개고 가운데 키를 위로 올린다"),
         ms: 2100,
       });
     }
@@ -94,9 +94,9 @@ function buildSteps(): Step[] {
   const found = tree.search(7);
   found.forEach((f, i) => steps.push({
     frame: f,
-    caption: f.kind === "found" ? L("Found 7 in this leaf", "찾았습니다. 7은 이 잎에 있습니다")
-      : i === 0 ? L("Find 7: start at the root", "7 찾기: 루트에서 시작합니다")
-      : L("Go down to the child that can hold 7", "7이 있을 만한 자식으로 내려갑니다"),
+    caption: f.kind === "found" ? L("Found 7 in this leaf", "찾았다. 7은 이 잎에 있다")
+      : i === 0 ? L("Find 7: start at the root", "7 찾기: 루트에서 시작한다")
+      : L("Go down to the child that can hold 7", "7이 있을 만한 자식으로 내려간다"),
     ms: f.kind === "found" ? 2400 : 1200,
   }));
   return steps;
@@ -204,7 +204,7 @@ function Body({ lang, onLang }: { lang: Lang; onLang: (l: Lang) => void }) {
         icon={<svg viewBox="0 0 24 24"><rect x="8" y="2.5" width="8" height="5" rx="1.6" /><rect x="1.8" y="16.5" width="8" height="5" rx="1.6" /><rect x="14.2" y="16.5" width="8" height="5" rx="1.6" /><path d="M12 7.5v3.2M12 10.7H5.8v5.8M12 10.7h6.2v5.8" /></svg>}
         title={L("B+Tree: how an index grows", "B+Tree 애니메이션")}
         lead={L("Keys go in one by one: a node that gets too full splits and the tree grows. A lookup walks one path from the root down to a leaf.",
-                "키를 하나씩 넣으면 가득 찬 노드가 쪼개지면서 트리가 자랍니다. 찾을 때는 루트에서 잎까지 한 길로 내려갑니다.")} />
+                "키를 하나씩 넣으면 가득 찬 노드가 쪼개지면서 트리가 자란다. 찾을 때는 루트에서 잎까지 한 길로 내려간다.")} />
 
       <div className={`bt-stage pk-rise bt-k-${frame.kind}`} style={{ ...tint(C.storage), ...rise(1) }}>
         <div className="bt-canvas" ref={canvas} style={{ ["--tree-h" as string]: `${treeH}px` }}>
