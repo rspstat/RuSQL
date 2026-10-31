@@ -4,8 +4,9 @@
 // src/lib/compatSnapshot.json. Every visible string is an English/Korean pair with the same EN/KO toggle as the Diagram page (kept under the same key).
 
 import { useState } from "react";
-import { L, LangContext, useT } from "./diagramShared";
+import { C, L, LangContext, tint, useT } from "./diagramShared";
 import type { Lang, Text } from "./diagramShared";
+import { CountUp, PageHero, rise } from "./PageKit";
 import data from "../lib/compatSnapshot.json";
 import "./CompatView.css";
 
@@ -32,7 +33,27 @@ function pct(part: number, whole: number): string {
   return whole === 0 ? "0" : ((part / whole) * 100).toFixed(1);
 }
 
-function Body() {
+// the ring: a circle of RADIUS whose stroke is drawn for `share` percent of its length (it fills when the page opens)
+const RADIUS = 52;
+const FULL = 2 * Math.PI * RADIUS;
+
+function Ring({ share }: { share: number }) {
+  return (
+    <svg className="cp-ring" viewBox="0 0 128 128" aria-hidden="true">
+      <defs>
+        <linearGradient id="cp-ring-grad" x1="0" y1="0" x2="1" y2="1">
+          <stop offset="0%" stopColor="#4ec9b0" />
+          <stop offset="100%" stopColor="#9cdcfe" />
+        </linearGradient>
+      </defs>
+      <circle className="cp-ring-track" cx="64" cy="64" r={RADIUS} />
+      <circle className="cp-ring-fill" cx="64" cy="64" r={RADIUS} transform="rotate(-90 64 64)"
+        style={{ ["--full" as string]: FULL, strokeDasharray: FULL, strokeDashoffset: FULL * (1 - share / 100) }} />
+    </svg>
+  );
+}
+
+function Body({ lang, onLang }: { lang: Lang; onLang: (l: Lang) => void }) {
   const t = useT();
   const corpora = data.corpora as Corpus[];
   const total = corpora.reduce((n, c) => n + c.statements, 0);
@@ -40,50 +61,82 @@ function Body() {
   const same = total - different;
   const bothFail = corpora.reduce((n, c) => n + c.bothFail, 0);
   const tests = data.tests as { cases: number; assertions: number } | null;
+  const share = total === 0 ? 0 : (same / total) * 100;
 
-  const stat = (value: string, label: Text) => (
-    <div className="cp-stat"><div className="cp-num">{value}</div><div className="cp-label">{t(label)}</div></div>
-  );
+  // each stat has a color of its own (the layer colors of the Diagram page)
+  const stats: { n: number; format?: (n: number) => string; label: Text; c: string }[] = [
+    { n: total, label: L("statements compared", "비교한 문장"), c: C.server },
+    { n: bothFail, label: L("fail on both with an error", "둘 다 같은 오류로 거절"), c: C.txn },
+    { n: data.conformanceCases, label: L("conformance cases in the C++ tests", "C++ 시험의 MySQL 대조 사례"), c: C.client },
+    ...(tests ? [{ n: tests.assertions, format: (n: number) => `${(n / 1e6).toFixed(2)}M`, label: L(`test assertions (${tests.cases} cases)`, `시험 assertions (${tests.cases} 케이스)`), c: C.core }] : []),
+    { n: data.bugsFound, label: L("bugs found by comparing", "비교로 찾아 고친 버그"), c: C.disk },
+    { n: KNOWN.length, label: L("known differences left (below)", "남은 알려진 차이 (아래)"), c: C.storage },
+  ];
 
   return (
-    <div className="cp-page">
-      <h1>{t(L("MySQL compatibility", "MySQL 호환성"))}</h1>
-      <p className="cp-sub">
-        {t(L(`Every corpus is run on RuSQL and on a real MySQL ${data.mysql}; a statement counts as the same when both give the same rows, the same error or the same OK. Snapshot of ${data.generated}.`,
-             `코퍼스마다 RuSQL과 진짜 MySQL ${data.mysql}에서 같은 문장을 돌려, 같은 행·같은 오류·같은 OK면 "같다"고 셉니다. ${data.generated} 시점의 스냅샷.`))}
-      </p>
+    <div className="cp-page pk-page">
+      <PageHero accent={C.server} lang={lang} onLang={onLang}
+        icon={<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9.5" /><path d="M7.6 12.6l3 3 5.8-6.6" /></svg>}
+        title={L("MySQL compatibility", "MySQL 호환성")}
+        lead={L(`Every corpus is run on RuSQL and on a real MySQL ${data.mysql}; a statement counts as the same when both give the same rows, the same error or the same OK. Snapshot of ${data.generated}.`,
+                `코퍼스마다 RuSQL과 진짜 MySQL ${data.mysql}에서 같은 문장을 돌려, 같은 행·같은 오류·같은 OK면 "같다"고 셉니다. ${data.generated} 시점의 스냅샷.`)} />
 
-      <div className="cp-stats">
-        {stat(total.toLocaleString(), L("statements compared", "비교한 문장"))}
-        {stat(pct(same, total) + "%", L("answer exactly like MySQL", "MySQL과 똑같이 답함"))}
-        {stat(bothFail.toLocaleString(), L("fail on both with an error", "둘 다 같은 오류로 거절"))}
-        {stat(data.conformanceCases.toLocaleString(), L("conformance cases in the C++ tests", "C++ 시험의 MySQL 대조 사례"))}
-        {tests && stat(`${tests.cases} / ${(tests.assertions / 1e6).toFixed(2)}M`, L("test cases / assertions", "시험 케이스 / assertions"))}
-        {stat(String(data.bugsFound), L("bugs found by comparing", "비교로 찾아 고친 버그"))}
+      <div className="cp-summary">
+        <div className="cp-gauge pk-card pk-rise" style={{ ...tint(C.server), ...rise(1) }}>
+          <div className="cp-gauge-ring">
+            <Ring share={share} />
+            <div className="cp-gauge-num"><CountUp value={share} format={n => n.toFixed(1)} /><small>%</small></div>
+          </div>
+          <div className="cp-gauge-label">{t(L("answer exactly like MySQL", "MySQL과 똑같이 답함"))}</div>
+          <div className="cp-gauge-sub">{same.toLocaleString()} / {total.toLocaleString()}</div>
+        </div>
+        <div className="cp-stats">
+          {stats.map((s, i) => (
+            <div className="cp-stat pk-card pk-rise" key={i} style={{ ...tint(s.c), ...rise(2 + i) }}>
+              <div className="cp-num"><CountUp value={s.n} format={s.format} /></div>
+              <div className="cp-label">{t(s.label)}</div>
+            </div>
+          ))}
+        </div>
       </div>
 
-      <h2>{t(L("Per corpus", "코퍼스별"))}</h2>
+      <h2 className="pk-caption cp-h2 pk-rise" style={{ ...tint(C.server), ...rise(6) }}>
+        <span className="pk-num" style={{ ["--k" as string]: 0 }}>1</span>
+        {t(L("Per corpus", "코퍼스별"))}
+        <em>{corpora.length}</em>
+      </h2>
       <div className="cp-rows">
-        {corpora.map(c => {
+        {corpora.map((c, i) => {
           const ok = c.statements - c.different;
+          const perfect = c.different === 0;
           return (
-            <div className="cp-row" key={c.name}>
+            <div className={`cp-row ${perfect ? "cp-perfect" : "cp-flawed"}`} key={c.name} style={{ ...tint(perfect ? C.server : "#e06c75"), ["--i" as string]: i }}>
               <div className="cp-name">{c.name}</div>
               <div className="cp-what">{t(L(c.en, c.ko))}</div>
               <div className="cp-bar" title={`${ok} / ${c.statements}`}>
-                <div className="cp-same" style={{ width: pct(ok, c.statements) + "%" }} />
+                <div className="cp-same" style={{ width: pct(ok, c.statements) + "%" }}><i /></div>
                 {c.different > 0 && <div className="cp-diff" style={{ width: pct(c.different, c.statements) + "%" }} />}
               </div>
               <div className="cp-count">{ok}/{c.statements}</div>
+              <div className="cp-mark" aria-hidden="true">{perfect ? "✓" : "!"}</div>
             </div>
           );
         })}
       </div>
 
-      <h2>{t(L("Known differences", "알려진 차이"))}</h2>
-      <ul className="cp-known">
-        {KNOWN.map((k, i) => <li key={i}>{t(L(k.en, k.ko))}</li>)}
-      </ul>
+      <h2 className="pk-caption cp-h2 pk-rise" style={{ ...tint(C.txn), ...rise(7) }}>
+        <span className="pk-num" style={{ ["--k" as string]: 1 }}>2</span>
+        {t(L("Known differences", "알려진 차이"))}
+        <em>{KNOWN.length}</em>
+      </h2>
+      <div className="cp-known">
+        {KNOWN.map((k, i) => (
+          <div className="cp-known-item pk-card pk-rise" key={i} style={{ ...tint(C.txn), ...rise(8 + i * 0.5) }}>
+            <span className="cp-known-n">{i + 1}</span>
+            <span>{t(L(k.en, k.ko))}</span>
+          </div>
+        ))}
+      </div>
       <p className="cp-foot">{t(L("Regenerate: python code/test/diff/make_scoreboard.py <engine_server.exe>", "다시 만들기: python code/test/diff/make_scoreboard.py <engine_server.exe>"))}</p>
     </div>
   );
@@ -97,12 +150,8 @@ export default function CompatView() {
   };
   return (
     <LangContext.Provider value={lang}>
-      <div className="cp-scroll">
-        <div className="cp-lang">
-          <button className={lang === "ko" ? "on" : ""} onClick={() => pick("ko")}>KO</button>
-          <button className={lang === "en" ? "on" : ""} onClick={() => pick("en")}>EN</button>
-        </div>
-        <Body />
+      <div className="pk-scroll cp-scroll" style={tint(C.server)}>
+        <Body lang={lang} onLang={pick} />
       </div>
     </LangContext.Provider>
   );

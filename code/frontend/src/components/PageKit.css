@@ -1,0 +1,259 @@
+/* PageKit -- the look the B+Tree, MVCC and MySQL compatibility pages share (the glow, the rise and the layer colors of the Diagram page).
+   A page puts its color on the root as --c (tint(color)); everything below reads var(--c). */
+
+/* ------------------------------------------------------------------ */
+/* the page: a soft color wash behind the content                       */
+/* ------------------------------------------------------------------ */
+.pk-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 26px 32px 56px;
+  position: relative;
+  background:
+    radial-gradient(900px 420px at 8% -6%, color-mix(in srgb, var(--c) 10%, transparent), transparent 70%),
+    radial-gradient(700px 360px at 100% 0%, color-mix(in srgb, var(--c) 6%, transparent), transparent 70%);
+}
+
+.pk-page {
+  margin: 0 auto;
+  color: #d4d4d4;
+  font-family: 'Segoe UI', sans-serif;
+  /* Korean: wrap between words, not in the middle of one */
+  word-break: keep-all;
+  overflow-wrap: break-word;
+}
+
+/* ------------------------------------------------------------------ */
+/* hero: icon badge, title, lead, language toggle                       */
+/* ------------------------------------------------------------------ */
+.pk-hero {
+  position: relative;
+  margin-bottom: 20px;
+  padding: 22px 26px;
+  border-radius: 14px;
+  border: 1px solid color-mix(in srgb, var(--c) 32%, #333336);
+  background: linear-gradient(120deg, color-mix(in srgb, var(--c) 15%, #202023) 0%, #1f1f22 58%, #1e1e1e 100%);
+  overflow: hidden;
+  animation: pk-rise 0.55s ease-out backwards;
+}
+
+/* a blurred blob of the page color that drifts slowly behind the title */
+.pk-glow {
+  position: absolute;
+  right: -60px;
+  top: -90px;
+  width: 340px;
+  height: 340px;
+  border-radius: 50%;
+  background: radial-gradient(circle, color-mix(in srgb, var(--c) 34%, transparent), transparent 66%);
+  filter: blur(8px);
+  pointer-events: none;
+  animation: pk-float 9s ease-in-out infinite alternate;
+}
+
+.pk-hero-main {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 18px;
+}
+
+.pk-badge {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 54px;
+  height: 54px;
+  border-radius: 15px;
+  color: var(--c);
+  background: color-mix(in srgb, var(--c) 16%, #1a1a1c);
+  border: 1px solid color-mix(in srgb, var(--c) 45%, transparent);
+  animation: pk-pulse 3.4s ease-out infinite;
+}
+
+.pk-badge svg {
+  width: 28px;
+  height: 28px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.7;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.pk-hero-text { flex: 1; min-width: 0; }
+
+.pk-title {
+  margin: 0;
+  font-size: 25px;
+  font-weight: 650;
+  letter-spacing: 0.2px;
+  color: #ffffff;
+  background: linear-gradient(90deg, #ffffff 30%, color-mix(in srgb, var(--c) 70%, #ffffff));
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+
+.pk-lead {
+  margin: 6px 0 0;
+  max-width: 860px;
+  font-size: 13px;
+  line-height: 1.65;
+  color: #9d9da3;
+}
+
+/* segmented toggle (the Diagram page's .dg-seg) */
+.pk-seg {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-self: flex-start;
+  background: #252526;
+  border: 1px solid #3a3a3d;
+  border-radius: 8px;
+  overflow: hidden;
+}
+.pk-seg button {
+  padding: 5px 14px;
+  background: transparent;
+  border: none;
+  font: inherit;
+  font-size: 12px;
+  color: #858585;
+  cursor: pointer;
+  transition: color 0.15s, background 0.15s;
+}
+.pk-seg button + button { border-left: 1px solid #3a3a3d; }
+.pk-seg button:hover { color: #d4d4d4; }
+.pk-seg button.active { background: var(--c); color: #111111; font-weight: 600; }
+
+/* ------------------------------------------------------------------ */
+/* boxes that rise into place and light up on hover                     */
+/* ------------------------------------------------------------------ */
+.pk-rise {
+  animation: pk-rise 0.55s ease-out backwards;
+  animation-delay: calc(120ms + var(--d, 0) * 80ms);
+}
+
+.pk-card {
+  background: #252528;
+  border: 1px solid #3a3a3d;
+  border-top: 3px solid var(--c);
+  border-radius: 10px;
+  transition: transform 0.18s ease, border-color 0.18s ease, box-shadow 0.18s ease;
+}
+.pk-card:hover {
+  transform: translateY(-2px);
+  border-color: var(--c);
+  box-shadow: 0 8px 26px color-mix(in srgb, var(--c) 22%, transparent);
+}
+
+/* a small caption above a block: "01  Title" */
+.pk-caption {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 10px;
+  font-size: 13px;
+  font-weight: 600;
+  color: #cccccc;
+}
+.pk-num {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: var(--c);
+  color: #111111;
+  font-size: 11px;
+  font-weight: 700;
+  animation: pk-ping 3.6s ease-out infinite;
+  animation-delay: calc(1.2s + var(--k, 0) * 0.4s);
+}
+
+/* ------------------------------------------------------------------ */
+/* controls                                                              */
+/* ------------------------------------------------------------------ */
+.pk-btn {
+  background: #2e2e32;
+  color: #d4d4d4;
+  border: 1px solid #45454a;
+  border-radius: 8px;
+  padding: 6px 14px;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  transition: transform 0.14s ease, border-color 0.14s ease, background 0.14s ease, box-shadow 0.14s ease, color 0.14s ease;
+}
+.pk-btn:hover:not(:disabled) {
+  transform: translateY(-1px);
+  border-color: var(--c);
+  color: #ffffff;
+  box-shadow: 0 4px 14px color-mix(in srgb, var(--c) 22%, transparent);
+}
+.pk-btn:active:not(:disabled) { transform: translateY(0) scale(0.97); }
+.pk-btn:disabled { opacity: 0.38; cursor: default; }
+
+.pk-btn.primary {
+  background: linear-gradient(135deg, color-mix(in srgb, var(--c) 92%, #ffffff), color-mix(in srgb, var(--c) 72%, #000000));
+  border-color: color-mix(in srgb, var(--c) 70%, #ffffff);
+  color: #101012;
+  font-weight: 650;
+}
+.pk-btn.primary:hover:not(:disabled) {
+  color: #000000;
+  box-shadow: 0 6px 20px color-mix(in srgb, var(--c) 45%, transparent);
+}
+
+.pk-input, .pk-select {
+  background: #1d1d20;
+  color: #d4d4d4;
+  border: 1px solid #3f3f44;
+  border-radius: 8px;
+  padding: 6px 10px;
+  font: inherit;
+  font-size: 12px;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+.pk-input:focus, .pk-select:focus {
+  outline: none;
+  border-color: var(--c);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--c) 22%, transparent);
+}
+
+/* ------------------------------------------------------------------ */
+/* motion                                                                */
+/* ------------------------------------------------------------------ */
+@keyframes pk-rise {
+  from { opacity: 0; transform: translateY(14px); }
+}
+
+@keyframes pk-float {
+  from { transform: translate(0, 0) scale(1); }
+  to { transform: translate(-46px, 26px) scale(1.12); }
+}
+
+@keyframes pk-pulse {
+  0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--c) 55%, transparent); }
+  60%, 100% { box-shadow: 0 0 0 14px transparent; }
+}
+
+@keyframes pk-ping {
+  0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--c) 70%, transparent); }
+  12%, 100% { box-shadow: 0 0 0 7px transparent; }
+}
+
+/* a bright band that sweeps along a bar, over and over */
+@keyframes pk-sheen {
+  from { transform: translateX(-100%); }
+  to { transform: translateX(260%); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pk-hero, .pk-rise, .pk-glow, .pk-badge, .pk-num { animation: none; }
+}

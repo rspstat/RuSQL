@@ -256,7 +256,7 @@ function LayersView() {
         <Card style={at("1", "1")} c={C.client} title="engine_cli" sub={L("Terminal REPL", "터미널 REPL")}
           note={L("runs the engine in-process", "엔진을 프로세스 안에서 직접 실행")} />
         <Card style={at("2", "1")} c={C.client} title={L("Desktop UI", "데스크톱 UI")} sub="Tauri + React + Monaco"
-          note={L("SQL editor (EXPLAIN plan diagram + step bars, result JSON export and chart, Compare Schema), Journey, ERD editor (drag to connect), B+Tree and MVCC pages, Server Manager (recovery card, Sessions with KILL and blockers, slow query log, Metrics trend charts), Compat page", "SQL 에디터(EXPLAIN 계획 그림·단계 막대, 결과 JSON 내보내기·차트, 스키마 비교), 한 문장의 여행, ERD 편집기(끌어서 연결), B+Tree·MVCC 페이지, 서버 매니저(복구 카드, KILL과 차단자가 보이는 세션, 느린 쿼리 로그, 지표 추세 그래프), 호환성 페이지")} />
+          note={L("SQL editor (EXPLAIN plan diagram + step bars, result JSON export and chart, Compare Schema), Journey, ERD editor (drag to connect), animated B+Tree, MVCC and Compat pages, Server Manager (recovery card, Sessions with KILL and blockers, slow query log, Metrics trend charts), Compat page", "SQL 에디터(EXPLAIN 계획 그림·단계 막대, 결과 JSON 내보내기·차트, 스키마 비교), 한 문장의 여행, ERD 편집기(끌어서 연결), 움직이는 B+Tree·MVCC·호환성 페이지, 서버 매니저(복구 카드, KILL과 차단자가 보이는 세션, 느린 쿼리 로그, 지표 추세 그래프), 호환성 페이지")} />
         <Card style={at("3", "1")} c={C.client} title="Claude Desktop + MCP" sub="Python FastMCP, stdio JSON-RPC"
           note={L("32 tools; drives the UI via ui_commands.json", "도구 32개, ui_commands.json으로 UI 제어")} />
         <Card style={at("4", "1")} c={C.client} title="engine_client" sub={L("TCP client CLI", "TCP 클라이언트 CLI")} note="-u -p -h -P" />

@@ -8,8 +8,9 @@
 import { useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import type { QueryResult } from "../types";
-import { L, LangContext, useT } from "./diagramShared";
+import { C, L, LangContext, tint, useT } from "./diagramShared";
 import type { Lang, Text } from "./diagramShared";
+import { PageHero, rise } from "./PageKit";
 import "./MvccView.css";
 
 const LANG_KEY = "rusql_diagram_lang";
@@ -94,7 +95,10 @@ const SCENARIOS: Scenario[] = [
 
 const sleep = (ms: number) => new Promise<void>(r => setTimeout(r, ms));
 
-function Body() {
+// each session has a color of its own (A the clients' blue, B the storage layer's pink), the table between them the transactions' amber
+const WHO_COLOR: Record<Who, string> = { A: C.client, B: C.storage };
+
+function Body({ lang, onLang }: { lang: Lang; onLang: (l: Lang) => void }) {
   const t = useT();
   const [scenarioId, setScenarioId] = useState("version");
   const [iso, setIso] = useState("REPEATABLE READ");
@@ -210,21 +214,22 @@ function Body() {
     setAuto(false);
   };
 
-  const session = (who: Who) => (
-    <div className="mv-session">
+  const session = (who: Who, order: number) => (
+    <div className={`mv-session pk-card pk-rise ${txn[who] ? "mv-open" : ""} ${busy[who] ? "mv-busy" : ""}`} style={{ ...tint(WHO_COLOR[who]), ...rise(order) }}>
       <div className="mv-session-head">
+        <span className="mv-avatar">{who}</span>
         <b>{t(L(`Session ${who}`, `세션 ${who}`))}</b>
         <span className={`mv-chip ${txn[who] ? "mv-on" : ""}`}>{txn[who] ? t(L(`txn #${txn[who]!.id} · ${txn[who]!.iso}`, `트랜잭션 #${txn[who]!.id} · ${txn[who]!.iso}`)) : t(L("autocommit", "autocommit"))}</span>
         {busy[who] && <span className="mv-chip mv-wait">{t(L("waiting…", "기다리는 중…"))}</span>}
       </div>
       <div className="mv-run">
-        <input className="mv-input" value={typed[who]} placeholder="SQL" disabled={!ready}
+        <input className="pk-input mv-input" value={typed[who]} placeholder="SQL" disabled={!ready}
           onChange={e => setTyped(p => ({ ...p, [who]: e.target.value }))}
           onKeyDown={e => { if (e.key === "Enter" && typed[who].trim()) { exec(who, typed[who]); setTyped(p => ({ ...p, [who]: "" })); } }} />
-        <button className="mv-btn" disabled={!ready || !typed[who].trim()} onClick={() => { exec(who, typed[who]); setTyped(p => ({ ...p, [who]: "" })); }}>{t(L("Run", "실행"))}</button>
+        <button className="pk-btn" disabled={!ready || !typed[who].trim()} onClick={() => { exec(who, typed[who]); setTyped(p => ({ ...p, [who]: "" })); }}>{t(L("Run", "실행"))}</button>
       </div>
       <div className="mv-quick">
-        {["BEGIN", "COMMIT", "ROLLBACK"].map(q => <button key={q} className="mv-btn mv-small" disabled={!ready} onClick={() => exec(who, q)}>{q}</button>)}
+        {["BEGIN", "COMMIT", "ROLLBACK"].map(q => <button key={q} className="pk-btn mv-small" disabled={!ready} onClick={() => exec(who, q)}>{q}</button>)}
       </div>
       <div className="mv-log">
         {log[who].length === 0 && <div className="mv-dim">{t(L("nothing run yet", "아직 실행한 문장이 없습니다"))}</div>}
@@ -243,45 +248,53 @@ function Body() {
   );
 
   return (
-    <div className="mv-page">
-      <h1>{t(L("MVCC: two sessions and the versions between them", "MVCC 시뮬레이션"))}</h1>
-      <p className="mv-sub">{t(L("Every change makes a new version of a row instead of overwriting it. Each version knows who made it (xmin) and who ended it (xmax); what a session sees is decided by its snapshot. Reset creates the table mvcc_demo in the database you are using, then step through a scenario or type SQL in either session.", "변경은 행을 덮어쓰지 않고 새 버전을 만듭니다. 버전마다 누가 만들었는지(xmin)와 누가 끝냈는지(xmax)가 적혀 있고, 세션에게 무엇이 보이는지는 그 세션의 스냅샷이 정합니다. 초기화는 지금 쓰는 데이터베이스에 mvcc_demo 표를 만듭니다. 시나리오를 한 단계씩 따라가거나 두 세션에 직접 SQL을 입력해 보세요."))}</p>
+    <div className="mv-page pk-page">
+      <PageHero accent={C.txn} lang={lang} onLang={onLang}
+        icon={<svg viewBox="0 0 24 24"><path d="M12 3l9 4.5-9 4.5-9-4.5z" /><path d="M3 12l9 4.5 9-4.5" /><path d="M3 16.5L12 21l9-4.5" /></svg>}
+        title={L("MVCC: two sessions and the versions between them", "MVCC 시뮬레이션")}
+        lead={L("Every change makes a new version of a row instead of overwriting it. Each version knows who made it (xmin) and who ended it (xmax); what a session sees is decided by its snapshot. Reset creates the table mvcc_demo in the database you are using, then step through a scenario or type SQL in either session.",
+                "변경은 행을 덮어쓰지 않고 새 버전을 만듭니다. 버전마다 누가 만들었는지(xmin)와 누가 끝냈는지(xmax)가 적혀 있고, 세션에게 무엇이 보이는지는 그 세션의 스냅샷이 정합니다. 초기화는 지금 쓰는 데이터베이스에 mvcc_demo 표를 만듭니다. 시나리오를 한 단계씩 따라가거나 두 세션에 직접 SQL을 입력해 보세요.")} />
 
-      <div className="mv-bar">
-        <select className="mv-select" value={scenarioId} onChange={e => { setScenarioId(e.target.value); if (ready) reset(); }}>
+      <div className="mv-bar pk-card pk-rise" style={{ ...tint(C.txn), ...rise(1) }}>
+        <select className="pk-select" value={scenarioId} onChange={e => { setScenarioId(e.target.value); if (ready) reset(); }}>
           {SCENARIOS.map(s => <option key={s.id} value={s.id}>{t(s.title)}</option>)}
         </select>
         {scenarioId === "snapshot" && (
           <label className="mv-label">{t(L("A's level", "A의 수준"))}
-            <select className="mv-select" value={iso} onChange={e => { setIso(e.target.value); if (ready) reset(); }}>
+            <select className="pk-select" value={iso} onChange={e => { setIso(e.target.value); if (ready) reset(); }}>
               <option>REPEATABLE READ</option><option>READ COMMITTED</option>
             </select>
           </label>
         )}
-        <button className="mv-btn mv-primary" onClick={reset}>{ready ? t(L("↻ Reset demo", "↻ 처음부터")) : t(L("Create demo table", "실습 표 만들기"))}</button>
-        <button className="mv-btn mv-primary" disabled={!ready || next >= steps.length || auto} onClick={() => runStep(next)}>{t(L("Next step ▶", "다음 단계 ▶"))}</button>
-        <button className="mv-btn" disabled={!ready || next >= steps.length || auto} onClick={playAll}>{t(L("Run all", "끝까지"))}</button>
-        <span className="mv-dim">{ready ? `${Math.min(next, steps.length)} / ${steps.length}` : ""}</span>
+        <button className="pk-btn primary" onClick={reset}>{ready ? t(L("↻ Reset demo", "↻ 처음부터")) : t(L("Create demo table", "실습 표 만들기"))}</button>
+        <button className="pk-btn primary" disabled={!ready || next >= steps.length || auto} onClick={() => runStep(next)}>{t(L("Next step ▶", "다음 단계 ▶"))}</button>
+        <button className="pk-btn" disabled={!ready || next >= steps.length || auto} onClick={playAll}>{t(L("Run all", "끝까지"))}</button>
+        {ready && (
+          <span className="mv-steps" aria-label={`${Math.min(next, steps.length)} / ${steps.length}`}>
+            {steps.map((st, i) => <i key={i} className={`mv-step mv-who-${st.s} ${i < next ? "done" : i === next ? "now" : ""}`} title={`${i + 1}. ${st.s}: ${st.sql}`} />)}
+            <span className="mv-dim">{Math.min(next, steps.length)} / {steps.length}</span>
+          </span>
+        )}
       </div>
-      <p className="mv-about">{t(scenario.about)}</p>
+      <p className="mv-about pk-rise" style={rise(2)}>{t(scenario.about)}</p>
       {error && <div className="mv-error">{error}</div>}
-      {note && <div className="mv-note">{t(note)}</div>}
-      {ready && next < steps.length && <div className="mv-next">{t(L("next:", "다음:"))} <b>{steps[next].s}</b> <code>{steps[next].sql}</code></div>}
+      {note && <div className="mv-note" key={`${scenarioId}-${next}`}>{t(note)}</div>}
+      {ready && next < steps.length && <div className="mv-next"><i className={`mv-who-dot mv-who-${steps[next].s}`}>{steps[next].s}</i> {t(L("next:", "다음:"))} <code>{steps[next].sql}</code></div>}
 
       <div className="mv-grid">
-        {session("A")}
-        <div className="mv-store">
-          <div className="mv-session-head"><b>{t(L("Versions of the rows", "행의 버전들"))}</b><span className="mv-dim">{TABLE}</span></div>
+        {session("A", 3)}
+        <div className="mv-store pk-card pk-rise" style={{ ...tint(C.txn), ...rise(4) }}>
+          <div className="mv-session-head"><span className="mv-avatar mv-avatar-store">⧉</span><b>{t(L("Versions of the rows", "행의 버전들"))}</b><span className="mv-dim">{TABLE}</span></div>
           <table className="mv-table">
-            <thead><tr><th>id</th><th>{t(L("version", "버전"))}</th><th>xmin</th><th>xmax</th><th>{t(L("state", "상태"))}</th><th>A</th><th>B</th></tr></thead>
+            <thead><tr><th>id</th><th>{t(L("version", "버전"))}</th><th>xmin</th><th>xmax</th><th>{t(L("state", "상태"))}</th><th className="mv-th-A">A</th><th className="mv-th-B">B</th></tr></thead>
             <tbody>
               {versions.length === 0 && <tr><td colSpan={7} className="mv-dim">{t(L("Create the demo table to begin", "실습 표를 만들면 시작합니다"))}</td></tr>}
               {versions.map(v => (
                 <tr key={`${v.key}|${v.xmin}`} className={`mv-st-${v.state}`}>
                   <td>{v.key}</td><td className="mv-data">{v.data.replace(/^id=\d+, /, "")}</td><td>{v.xmin}</td><td>{v.xmax === "0" ? "–" : v.xmax}</td>
                   <td><span className={`mv-state mv-${v.state}`}>{v.state}</span></td>
-                  <td className={v.vis.A ? "mv-yes" : "mv-no"}>{v.vis.A ? "●" : "○"}</td>
-                  <td className={v.vis.B ? "mv-yes" : "mv-no"}>{v.vis.B ? "●" : "○"}</td>
+                  <td className={v.vis.A ? "mv-yes mv-vis-A" : "mv-no"}>{v.vis.A ? "●" : "○"}</td>
+                  <td className={v.vis.B ? "mv-yes mv-vis-B" : "mv-no"}>{v.vis.B ? "●" : "○"}</td>
                 </tr>
               ))}
             </tbody>
@@ -294,7 +307,7 @@ function Body() {
             <span>● {t(L("the session sees this version", "그 세션에 보이는 버전"))}</span>
           </div>
         </div>
-        {session("B")}
+        {session("B", 5)}
       </div>
     </div>
   );
@@ -308,12 +321,8 @@ export default function MvccView() {
   };
   return (
     <LangContext.Provider value={lang}>
-      <div className="mv-scroll">
-        <div className="mv-lang">
-          <button className={lang === "ko" ? "on" : ""} onClick={() => pick("ko")}>KO</button>
-          <button className={lang === "en" ? "on" : ""} onClick={() => pick("en")}>EN</button>
-        </div>
-        <Body />
+      <div className="pk-scroll mv-scroll" style={tint(C.txn)}>
+        <Body lang={lang} onLang={pick} />
       </div>
     </LangContext.Provider>
   );
