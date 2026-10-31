@@ -28,8 +28,9 @@
   box-shadow: 0 10px 34px color-mix(in srgb, var(--k) 12%, transparent);
 }
 
-.bt-canvas { position: relative; display: flex; padding: 22px 20px 14px; overflow-x: auto; min-height: 400px; }
-.bt-svg { display: block; margin: auto; flex-shrink: 0; } /* (drawn at its own size, so a node is the same size in a small tree and a big one; a wide tree scrolls) */
+/* (as tall as the biggest tree: --tree-h, plus the padding; the tree hangs from the top, so the root stays where it is while the levels appear below it) */
+.bt-canvas { position: relative; display: flex; padding: 22px 20px 14px; overflow-x: auto; min-height: calc(var(--tree-h, 364px) + 36px); }
+.bt-svg { display: block; margin: 0 auto; flex-shrink: 0; } /* (drawn at its own size, so a node is the same size in a small tree and a big one; a wide tree scrolls) */
 
 .bt-node { transition: transform 0.55s cubic-bezier(0.3, 0.9, 0.3, 1); }
 /* the three kinds of node, each in a color of the Diagram page: the root gold, the nodes between violet, the leaves teal. Flat: a fill tinted with the color, an outline in it,

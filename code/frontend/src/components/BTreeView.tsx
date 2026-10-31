@@ -49,6 +49,12 @@ function layout(snap: Snap): Laid {
   return { pos, width: cursor - GAP + MARGIN, height: MARGIN * 2 + (levels - 1) * LEVEL_H + KEY_H, levels };
 }
 
+// the size a laid-out tree is drawn at on a board `room` wide
+const fit = (laid: Laid, room: number) => {
+  const boardW = Math.max(laid.width, 520), boardH = Math.max(laid.height, 200);
+  return { boardW, boardH, shift: (boardW - laid.width) / 2, zoom: Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, room / boardW)) };
+};
+
 const KIND_LABEL: Record<FrameKind, { en: string; ko: string }> = {
   ready: { en: "ready", ko: "준비" }, visit: { en: "search path", ko: "탐색 경로" }, insert: { en: "insert", ko: "삽입" }, overflow: { en: "overflow", ko: "넘침" },
   split: { en: "split", ko: "분할" }, delete: { en: "delete", ko: "삭제" }, underflow: { en: "underflow", ko: "모자람" }, borrow: { en: "borrow", ko: "빌려옴" },
@@ -103,9 +109,7 @@ function TreeSvg({ frame, previous, room }: { frame: Frame; previous: Frame | nu
   const fresh = previous ? new Set(Object.keys(snap.nodes).filter(id => !(id in previous.snap.nodes)).map(Number)) : new Set<number>();
   const hi = new Set(frame.hi);
   const ids = Object.keys(snap.nodes).map(Number);
-  const boardW = Math.max(laid.width, 520), shift = (boardW - laid.width) / 2;
-  const zoom = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, room / boardW));
-  const boardH = Math.max(laid.height, 200);
+  const { boardW, boardH, shift, zoom } = fit(laid, room);
   // the name of each level: the root, the nodes between, the leaves
   const tier = (d: number): { name: { en: string; ko: string }; cls: string } =>
     laid.levels === 1 ? { name: { en: "ROOT · LEAF", ko: "루트 · 잎" }, cls: "bt-leaf" }
@@ -188,6 +192,9 @@ function Body({ lang, onLang }: { lang: Lang; onLang: (l: Lang) => void }) {
     return () => watch.disconnect();
   }, []);
 
+  // the board is as tall as the biggest tree it ever shows, from the first step on: it does not grow with the tree
+  const treeH = useMemo(() => Math.max(...steps.map(s => { const f = fit(layout(s.frame.snap), room); return f.boardH * f.zoom; })), [steps, room]);
+
   const keyCount = Object.values(frame.snap.nodes).filter(n => n.leaf).reduce((n, node) => n + node.keys.length, 0);
   const previous = player.cur > 0 ? steps[player.cur - 1].frame : null;
 
@@ -200,7 +207,7 @@ function Body({ lang, onLang }: { lang: Lang; onLang: (l: Lang) => void }) {
                 "키를 하나씩 넣으면 가득 찬 노드가 쪼개지면서 트리가 자랍니다. 찾을 때는 루트에서 잎까지 한 길로 내려갑니다.")} />
 
       <div className={`bt-stage pk-rise bt-k-${frame.kind}`} style={{ ...tint(C.storage), ...rise(1) }}>
-        <div className="bt-canvas" ref={canvas}>
+        <div className="bt-canvas" ref={canvas} style={{ ["--tree-h" as string]: `${treeH}px` }}>
           <TreeSvg frame={frame} previous={previous} room={room} />
         </div>
         <div className="bt-msg">
