@@ -50,13 +50,6 @@ function layout(snap: Snap): Laid {
   return { pos, width: cursor - GAP + MARGIN, height: MARGIN * 2 + (levels - 1) * LEVEL_H + KEY_H, levels };
 }
 
-// a branch: down from the line between two keys of the parent, along a bus half way, down into the top of the child -- straight lines, the corners a little rounded
-function branch(x1: number, y1: number, x2: number, y2: number): string {
-  const ym = y1 + (y2 - y1) / 2, dx = x2 - x1, dir = dx < 0 ? -1 : 1;
-  const r = Math.min(9, Math.abs(dx) / 2, (y2 - y1) / 2 - 1);
-  return `M${x1} ${y1} V${ym - r} Q${x1} ${ym} ${x1 + dir * r} ${ym} H${x2 - dir * r} Q${x2} ${ym} ${x2} ${ym + r} V${y2}`;
-}
-
 const KIND_LABEL: Record<FrameKind, { en: string; ko: string }> = {
   ready: { en: "ready", ko: "준비" }, visit: { en: "search path", ko: "탐색 경로" }, insert: { en: "insert", ko: "삽입" }, overflow: { en: "overflow", ko: "넘침" },
   split: { en: "split", ko: "분할" }, delete: { en: "delete", ko: "삭제" }, underflow: { en: "underflow", ko: "모자람" }, borrow: { en: "borrow", ko: "빌려옴" },
@@ -97,10 +90,6 @@ function TreeSvg({ frame, previous, room }: { frame: Frame; previous: Frame | nu
     <svg className={`bt-svg bt-k-${frame.kind}`} viewBox={`${-shift} 0 ${boardW} ${boardH}`} preserveAspectRatio="xMidYMin meet" style={{ width: boardW * zoom, height: boardH * zoom }}>
       <defs>
         <marker id="bt-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0 L10 5 L0 10 z" fill="#4ec9b0" /></marker>
-        <linearGradient id="bt-grad-sheen" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="#ffffff" stopOpacity="0.16" /><stop offset="60%" stopColor="#ffffff" stopOpacity="0" /></linearGradient>
-        <linearGradient id="bt-grad-leaf" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="#2d4a43" /><stop offset="100%" stopColor="#1c2f2b" /></linearGradient>
-        <linearGradient id="bt-grad-inner" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="#38335a" /><stop offset="100%" stopColor="#221f38" /></linearGradient>
-        <linearGradient id="bt-grad-root" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="#52442a" /><stop offset="100%" stopColor="#2f2819" /></linearGradient>
       </defs>
       {Array.from({ length: laid.levels }, (_, d) => {
         const y = rowY(d), info = tier(d);
@@ -119,7 +108,7 @@ function TreeSvg({ frame, previous, room }: { frame: Frame; previous: Frame | nu
           const q = laid.pos[c];
           const x1 = p.x + PAD + i * KEY_W, y1 = p.y + KEY_H, x2 = q.x + q.w / 2, y2 = q.y;
           const hot = hi.has(id) && hi.has(c); // (an edge between two nodes the step is about: the walk down)
-          return <path key={`${id}-${c}`} className={`bt-edge ${hot ? "bt-edge-hot" : ""}`} style={{ d: `path("${branch(x1, y1, x2, y2)}")` } as React.CSSProperties} />;
+          return <path key={`${id}-${c}`} className={`bt-edge ${hot ? "bt-edge-hot" : ""}`} style={{ d: `path("M${x1} ${y1} L${x2} ${y2}")` } as React.CSSProperties} />;
         });
       })}
       {ids.map(id => {
@@ -137,13 +126,11 @@ function TreeSvg({ frame, previous, room }: { frame: Frame; previous: Frame | nu
           <g key={id} className={cls} style={{ transform: `translate(${p.x}px, ${p.y}px)` }}>
             <g className={fresh.has(id) ? "bt-pop" : ""}>
               <rect className="bt-box" width={p.w} height={KEY_H} />
-              <rect className="bt-sheen" width={p.w - 4} height={KEY_H / 2} x={2} y={2} />
-              <rect className="bt-accent" width={p.w} height={4} />
               {n.keys.length === 0 && <text className="bt-empty" x={p.w / 2} y={KEY_H / 2 + 8} textAnchor="middle">∅</text>}
               {n.keys.map((k, i) => (
                 <g key={i}>
-                  {i > 0 && <line className="bt-div" x1={PAD + i * KEY_W} y1={11} x2={PAD + i * KEY_W} y2={KEY_H - 7} />}
-                  <text className="bt-key" x={PAD + i * KEY_W + KEY_W / 2} y={KEY_H / 2 + 8} textAnchor="middle">{k}</text>
+                  {i > 0 && <line className="bt-div" x1={PAD + i * KEY_W} y1={10} x2={PAD + i * KEY_W} y2={KEY_H - 10} />}
+                  <text className="bt-key" x={PAD + i * KEY_W + KEY_W / 2} y={KEY_H / 2 + 7} textAnchor="middle">{k}</text>
                 </g>
               ))}
               {!n.leaf && n.children.map((_, i) => <circle key={`ptr-${i}`} className="bt-ptr" cx={PAD + i * KEY_W} cy={KEY_H} r={4.6} />)}

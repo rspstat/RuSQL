@@ -61,17 +61,19 @@
 @keyframes bt-bob { 50% { transform: translateY(-6px); opacity: 0.65; } }
 
 .bt-node { transition: transform 0.55s cubic-bezier(0.3, 0.9, 0.3, 1); }
-/* the three kinds of node, each in a color of its own: the root gold, the nodes between violet, the leaves teal */
-.bt-root { --nc: #e2b86b; } .bt-inner { --nc: #a98bf5; } .bt-leaf { --nc: #4ec9b0; }
-.bt-box { fill: url(#bt-grad-inner); stroke: color-mix(in srgb, var(--nc) 58%, #33333b); stroke-width: 1.6; filter: drop-shadow(0 6px 10px rgba(0, 0, 0, 0.5)); transition: fill 0.3s ease, stroke 0.3s ease; }
-.bt-leaf .bt-box { fill: url(#bt-grad-leaf); }
-.bt-root .bt-box { fill: url(#bt-grad-root); }
-/* a strip of the node's color along its top, and a soft highlight under it */
-.bt-accent { fill: var(--nc); }
-.bt-sheen { fill: url(#bt-grad-sheen); pointer-events: none; }
-.bt-key { fill: #f7f7f9; font-size: 21px; font-weight: 650; font-family: Consolas, 'Segoe UI', monospace; }
-.bt-empty { fill: #7a7a82; font-size: 24px; }
-.bt-div { stroke: color-mix(in srgb, var(--nc) 38%, transparent); stroke-width: 1.2; }
+/* the three kinds of node, each in a color of the Diagram page: the root gold, the nodes between violet, the leaves teal. Flat: a fill tinted with the color, an outline in it,
+   a soft glow of it; the keys in the page's own typeface */
+.bt-root { --nc: #ddb05d; } .bt-inner { --nc: #a78bfa; } .bt-leaf { --nc: #4ec9b0; }
+.bt-box {
+  fill: color-mix(in srgb, var(--nc) 15%, #1d1d21);
+  stroke: var(--nc);
+  stroke-width: 1.8;
+  filter: drop-shadow(0 0 9px color-mix(in srgb, var(--nc) 30%, transparent));
+  transition: fill 0.3s ease, stroke 0.3s ease;
+}
+.bt-key { fill: #ffffff; font-family: 'Segoe UI', sans-serif; font-size: 20px; font-weight: 600; font-variant-numeric: tabular-nums; letter-spacing: 0.3px; }
+.bt-empty { fill: color-mix(in srgb, var(--nc) 60%, #888); font-family: 'Segoe UI', sans-serif; font-size: 22px; }
+.bt-div { stroke: color-mix(in srgb, var(--nc) 55%, transparent); stroke-width: 1.2; }
 /* where a child hangs from: one dot on the bottom edge of a parent for each child, on the lines between its keys */
 .bt-ptr { fill: var(--nc); stroke: #1c1c1f; stroke-width: 2.2; }
 
@@ -90,7 +92,7 @@
 @keyframes bt-pop { from { opacity: 0; transform: scale(0.35); } to { opacity: 1; transform: scale(1); } }
 
 /* a node the step is about: lit in the colour of the step, breathing */
-.bt-hi .bt-box { stroke: var(--k); stroke-width: 3.4; fill: color-mix(in srgb, var(--k) 24%, #2b2b32); animation: bt-breathe 1.5s ease-in-out infinite; }
+.bt-hi .bt-box { stroke: var(--k); stroke-width: 3; fill: color-mix(in srgb, var(--k) 28%, #1d1d21); animation: bt-breathe 1.5s ease-in-out infinite; }
 @keyframes bt-breathe {
   0%, 100% { filter: drop-shadow(0 0 3px var(--k)); }
   50% { filter: drop-shadow(0 0 18px var(--k)); }
