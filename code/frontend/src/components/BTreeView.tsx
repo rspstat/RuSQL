@@ -222,7 +222,7 @@ function Body({ lang, onLang }: { lang: Lang; onLang: (l: Lang) => void }) {
         <span className="bt-sep" />
         <button className="pk-btn" onClick={() => run(tr => { const out: Frame[] = []; for (let k = 1; k <= 12; k++) if (!tr.has(k)) out.push(...tr.insert(k)); return out; })}>{t(L("Insert 1–12", "1–12 넣기"))}</button>
         <button className="pk-btn" onClick={() => run(tr => randomKeys(tr, 8).flatMap(k => tr.insert(k)))}>{t(L("Random ×8", "무작위 ×8"))}</button>
-        <button className="pk-btn" onClick={() => reset(maxKeys)}>{t(L("Reset", "비우기"))}</button>
+        <button className="pk-btn" onClick={() => reset(maxKeys)}>{t(L("Reset", "초기화"))}</button>
         <span className="bt-sep" />
         <label className="bt-label">{t(L("max keys per node", "노드당 최대 키"))}
           <select className="pk-select" value={maxKeys} onChange={e => { const m = Number(e.target.value); setMaxKeys(m); reset(m); }}>
