@@ -91,9 +91,9 @@ function TreeSvg({ frame, previous, room }: { frame: Frame; previous: Frame | nu
         if (!p) return null;
         return n.children.map((c, i) => {
           const q = laid.pos[c];
-          const x1 = p.x + PAD + i * KEY_W, y1 = p.y + KEY_H, x2 = q.x + q.w / 2, y2 = q.y, ym = (y1 + y2) / 2;
+          const x1 = p.x + PAD + i * KEY_W, y1 = p.y + KEY_H, x2 = q.x + q.w / 2, y2 = q.y;
           const hot = hi.has(id) && hi.has(c); // (an edge between two nodes the step is about: the walk down)
-          return <path key={`${id}-${c}`} className={`bt-edge ${hot ? "bt-edge-hot" : ""}`} style={{ d: `path("M${x1} ${y1} C${x1} ${ym} ${x2} ${ym} ${x2} ${y2}")` } as React.CSSProperties} />;
+          return <path key={`${id}-${c}`} className={`bt-edge ${hot ? "bt-edge-hot" : ""}`} style={{ d: `path("M${x1} ${y1} L${x2} ${y2}")` } as React.CSSProperties} />;
         });
       })}
       {ids.map(id => {
@@ -109,8 +109,8 @@ function TreeSvg({ frame, previous, room }: { frame: Frame; previous: Frame | nu
         return (
           <g key={id} className={cls} style={{ transform: `translate(${p.x}px, ${p.y}px)` }}>
             <g className={fresh.has(id) ? "bt-pop" : ""}>
-              <rect className="bt-box" width={p.w} height={KEY_H} rx={12} />
-              <rect className="bt-sheen" width={p.w - 4} height={KEY_H / 2} x={2} y={2} rx={10} />
+              <rect className="bt-box" width={p.w} height={KEY_H} />
+              <rect className="bt-sheen" width={p.w - 4} height={KEY_H / 2} x={2} y={2} />
               {n.keys.length === 0 && <text className="bt-empty" x={p.w / 2} y={KEY_H / 2 + 7} textAnchor="middle">∅</text>}
               {n.keys.map((k, i) => (
                 <g key={i}>
