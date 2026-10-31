@@ -4,7 +4,7 @@
 // shrinks -- one frame at a time (play / pause / step / speed). The tree and its frames come from lib/bplusTree.ts; every visible string is an English/Korean pair
 // with the same EN/KO toggle as the Diagram page. The look (hero, glowing nodes, flowing edges, the progress line) is PageKit.css + BTreeView.css.
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { BPlusTree } from "../lib/bplusTree";
 import type { Frame, FrameKind, Snap } from "../lib/bplusTree";
 import { C, L, LangContext, tint, useT } from "./diagramShared";
@@ -17,7 +17,10 @@ function loadLang(): Lang {
   try { return localStorage.getItem(LANG_KEY) === "en" ? "en" : "ko"; } catch { return "ko"; }
 }
 
-const KEY_W = 34, KEY_H = 30, PAD = 6, GAP = 24, LEVEL_H = 90, MARGIN = 20;
+const KEY_W = 56, KEY_H = 48, PAD = 9, GAP = 38, LEVEL_H = 132, MARGIN = 32;
+// a tree that is narrower than its board is drawn up to MAX_ZOOM times larger (a small tree fills the stage); one that is wider is drawn smaller to fit, down to MIN_ZOOM,
+// and scrolls beyond that
+const MAX_ZOOM = 1.6, MIN_ZOOM = 0.62;
 const STEP_MS = 1300;
 
 interface Pos { x: number; y: number; w: number }
@@ -66,17 +69,20 @@ const IDEAS: { c: string; title: { en: string; ko: string }; text: { en: string;
     text: { en: "The leaves point to each other from left to right, so a range scan finds its first key once and then just walks along.", ko: "잎은 왼쪽에서 오른쪽으로 서로 이어져서, 범위 조회는 첫 키를 한 번 찾고 그다음은 따라 걷기만 합니다." } },
 ];
 
-function TreeSvg({ frame, previous }: { frame: Frame; previous: Frame | null }) {
+function TreeSvg({ frame, previous, room }: { frame: Frame; previous: Frame | null; room: number }) {
   const { snap } = frame;
   const laid = useMemo(() => layout(snap), [snap]);
   const fresh = previous ? new Set(Object.keys(snap.nodes).filter(id => !(id in previous.snap.nodes)).map(Number)) : new Set<number>();
   const hi = new Set(frame.hi);
   const ids = Object.keys(snap.nodes).map(Number);
-  const boardW = Math.max(laid.width, 320), shift = (boardW - laid.width) / 2;
+  const boardW = Math.max(laid.width, 420), shift = (boardW - laid.width) / 2;
+  const zoom = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, room / boardW));
+  const boardH = Math.max(laid.height, 200);
   return (
-    <svg className={`bt-svg bt-k-${frame.kind}`} viewBox={`${-shift} 0 ${boardW} ${laid.height}`} preserveAspectRatio="xMidYMin meet" style={{ width: boardW, height: Math.max(laid.height, 150) }}>
+    <svg className={`bt-svg bt-k-${frame.kind}`} viewBox={`${-shift} 0 ${boardW} ${boardH}`} preserveAspectRatio="xMidYMin meet" style={{ width: boardW * zoom, height: boardH * zoom }}>
       <defs>
-        <marker id="bt-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0 L10 5 L0 10 z" fill="#4ec9b0" /></marker>
+        <marker id="bt-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0 L10 5 L0 10 z" fill="#4ec9b0" /></marker>
+        <linearGradient id="bt-grad-sheen" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="#ffffff" stopOpacity="0.2" /><stop offset="55%" stopColor="#ffffff" stopOpacity="0" /></linearGradient>
         <linearGradient id="bt-grad-leaf" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="#35564d" /><stop offset="100%" stopColor="#233b35" /></linearGradient>
         <linearGradient id="bt-grad-inner" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="#3b3a58" /><stop offset="100%" stopColor="#272740" /></linearGradient>
       </defs>
@@ -103,12 +109,13 @@ function TreeSvg({ frame, previous }: { frame: Frame; previous: Frame | null }) 
         return (
           <g key={id} className={cls} style={{ transform: `translate(${p.x}px, ${p.y}px)` }}>
             <g className={fresh.has(id) ? "bt-pop" : ""}>
-              <rect className="bt-box" width={p.w} height={KEY_H} rx={7} />
-              {n.keys.length === 0 && <text className="bt-empty" x={p.w / 2} y={KEY_H / 2 + 4} textAnchor="middle">∅</text>}
+              <rect className="bt-box" width={p.w} height={KEY_H} rx={12} />
+              <rect className="bt-sheen" width={p.w - 4} height={KEY_H / 2} x={2} y={2} rx={10} />
+              {n.keys.length === 0 && <text className="bt-empty" x={p.w / 2} y={KEY_H / 2 + 7} textAnchor="middle">∅</text>}
               {n.keys.map((k, i) => (
                 <g key={i}>
-                  {i > 0 && <line className="bt-div" x1={PAD + i * KEY_W} y1={5} x2={PAD + i * KEY_W} y2={KEY_H - 5} />}
-                  <text className="bt-key" x={PAD + i * KEY_W + KEY_W / 2} y={KEY_H / 2 + 5} textAnchor="middle">{k}</text>
+                  {i > 0 && <line className="bt-div" x1={PAD + i * KEY_W} y1={8} x2={PAD + i * KEY_W} y2={KEY_H - 8} />}
+                  <text className="bt-key" x={PAD + i * KEY_W + KEY_W / 2} y={KEY_H / 2 + 7.5} textAnchor="middle">{k}</text>
                 </g>
               ))}
             </g>
@@ -131,6 +138,18 @@ function Body({ lang, onLang }: { lang: Lang; onLang: (l: Lang) => void }) {
 
   const frame = frames[Math.min(cur, frames.length - 1)];
   const done = cur >= frames.length - 1;
+  const canvas = useRef<HTMLDivElement>(null);
+  const [room, setRoom] = useState(0);
+  useLayoutEffect(() => {
+    const el = canvas.current;
+    if (!el) return;
+    const measure = () => setRoom(Math.max(0, el.clientWidth - 40)); // (minus the padding of the board)
+    measure();
+    if (typeof ResizeObserver === "undefined") return;
+    const watch = new ResizeObserver(measure);
+    watch.observe(el);
+    return () => watch.disconnect();
+  }, []);
 
   useEffect(() => {
     if (!playing) return;
@@ -198,8 +217,8 @@ function Body({ lang, onLang }: { lang: Lang; onLang: (l: Lang) => void }) {
       </div>
 
       <div className={`bt-stage pk-rise bt-k-${frame.kind}`} style={{ ...tint(C.storage), ...rise(2) }}>
-        <div className="bt-canvas">
-          <TreeSvg frame={frame} previous={cur > 0 ? frames[cur - 1] : null} />
+        <div className="bt-canvas" ref={canvas}>
+          <TreeSvg frame={frame} previous={cur > 0 ? frames[cur - 1] : null} room={room} />
           {empty && <div className="bt-hint">{t(L("Type a key and press Insert, or try “Insert 1–12”", "키를 넣고 삽입을 눌러 보세요. “1–12 넣기”도 좋습니다"))}</div>}
         </div>
         <div className="bt-msg">
