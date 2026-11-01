@@ -1418,8 +1418,8 @@ body {
 }
 
 .erd-card-anim {
-  transition: left 0.45s cubic-bezier(0.4, 0, 0.2, 1),
-              top  0.45s cubic-bezier(0.4, 0, 0.2, 1),
+  transition: left 0.25s cubic-bezier(0.4, 0, 0.2, 1),
+              top  0.25s cubic-bezier(0.4, 0, 0.2, 1),
               box-shadow 0.2s, border-color 0.2s;
 }
 

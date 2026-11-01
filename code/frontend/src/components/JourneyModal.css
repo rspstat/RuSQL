@@ -10,12 +10,12 @@
 
 .jn-track { display: flex; align-items: flex-start; flex-wrap: wrap; row-gap: 14px; margin-bottom: 14px; }
 .jn-track-item { display: flex; align-items: center; }
-.jn-node { width: 92px; padding: 8px 4px; text-align: center; border: 1px solid #3c3c3c; border-radius: 8px; background: #2d2d2d; cursor: pointer; opacity: 0.55; transition: all 0.35s ease; }
+.jn-node { width: 92px; padding: 8px 4px; text-align: center; border: 1px solid #3c3c3c; border-radius: 8px; background: #2d2d2d; cursor: pointer; opacity: 0.55; transition: all 0.15s ease; }
 .jn-node.jn-past { opacity: 0.9; border-color: #4a6b63; }
 .jn-node.jn-now { opacity: 1; border-color: #4ec9b0; background: #1f3a35; box-shadow: 0 0 0 2px rgba(78, 201, 176, 0.25), 0 0 14px rgba(78, 201, 176, 0.35); transform: translateY(-3px) scale(1.05); }
 .jn-icon { font-size: 18px; line-height: 22px; height: 22px; }
 .jn-node-name { margin-top: 4px; font-size: 10px; line-height: 12px; color: #bbb; min-height: 24px; overflow: hidden; }
-.jn-link { width: 18px; height: 2px; background: #3c3c3c; transition: background 0.35s ease; }
+.jn-link { width: 18px; height: 2px; background: #3c3c3c; transition: background 0.15s ease; }
 .jn-link.jn-link-on { background: #4ec9b0; }
 
 .jn-detail { min-height: 74px; padding: 10px 12px; background: #1e1e1e; border: 1px solid #3c3c3c; border-radius: 6px; margin-bottom: 12px; }
@@ -29,7 +29,7 @@
 .jn-bar-row.jn-bar-now .jn-bar-name { color: #4ec9b0; }
 .jn-bar-name { width: 170px; flex-shrink: 0; color: #999; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .jn-bar-track { flex: 1; height: 8px; background: #2d2d2d; border-radius: 4px; overflow: hidden; }
-.jn-bar-fill { display: block; height: 100%; min-width: 2px; background: linear-gradient(90deg, #4ec9b0, #569cd6); border-radius: 4px; transition: opacity 0.35s ease; }
+.jn-bar-fill { display: block; height: 100%; min-width: 2px; background: linear-gradient(90deg, #4ec9b0, #569cd6); border-radius: 4px; transition: opacity 0.15s ease; }
 .jn-bar-ms { width: 76px; text-align: right; color: #858585; font-variant-numeric: tabular-nums; }
 
 .jn-outcome { padding: 8px 12px; margin-bottom: 12px; background: #1f2d24; border: 1px solid #355a43; border-radius: 6px; color: #8fd6a4; }

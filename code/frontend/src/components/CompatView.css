@@ -30,7 +30,7 @@
   stroke-width: 9;
   stroke-linecap: round;
   filter: drop-shadow(0 0 7px color-mix(in srgb, var(--c) 70%, transparent));
-  animation: cp-ring 1.5s cubic-bezier(0.2, 0.8, 0.2, 1) 0.35s backwards;
+  animation: cp-ring 0.55s cubic-bezier(0.2, 0.8, 0.2, 1) 0.08s backwards;
 }
 @keyframes cp-ring {
   from { stroke-dashoffset: var(--full); }
@@ -96,9 +96,9 @@
   border-left: 3px solid var(--c);
   border-radius: 8px;
   font-size: 13px;
-  transition: transform 0.16s ease, border-color 0.16s ease, background 0.16s ease, box-shadow 0.16s ease;
-  animation: pk-rise 0.5s ease-out backwards;
-  animation-delay: calc(560ms + var(--i, 0) * 28ms);
+  transition: transform 0.1s ease, border-color 0.1s ease, background 0.1s ease, box-shadow 0.1s ease;
+  animation: pk-rise 0.2s ease-out backwards;
+  animation-delay: calc(80ms + var(--i, 0) * 5ms);
 }
 .cp-row:hover {
   transform: translateX(4px);
@@ -122,8 +122,8 @@
   background: linear-gradient(90deg, #3fae98, #4ec9b0 55%, #7fe3cf);
   border-radius: 5px 0 0 5px;
   transform-origin: left center;
-  animation: cp-fill 0.95s cubic-bezier(0.2, 0.8, 0.2, 1) backwards;
-  animation-delay: calc(700ms + var(--i, 0) * 28ms);
+  animation: cp-fill 0.3s cubic-bezier(0.2, 0.8, 0.2, 1) backwards;
+  animation-delay: calc(120ms + var(--i, 0) * 5ms);
 }
 .cp-perfect .cp-same { border-radius: 5px; box-shadow: 0 0 10px color-mix(in srgb, var(--c) 45%, transparent); }
 .cp-same i {
@@ -133,9 +133,9 @@
   width: 38%;
   background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.45), transparent);
   animation: pk-sheen 3.4s ease-in-out infinite;
-  animation-delay: calc(1.6s + var(--i, 0) * 0.12s);
+  animation-delay: calc(0.8s + var(--i, 0) * 0.12s);
 }
-.cp-diff { background: linear-gradient(90deg, #e06c75, #f48771); animation: cp-fill 0.95s cubic-bezier(0.2, 0.8, 0.2, 1) backwards; transform-origin: left center; animation-delay: calc(900ms + var(--i, 0) * 28ms); }
+.cp-diff { background: linear-gradient(90deg, #e06c75, #f48771); animation: cp-fill 0.3s cubic-bezier(0.2, 0.8, 0.2, 1) backwards; transform-origin: left center; animation-delay: calc(150ms + var(--i, 0) * 5ms); }
 @keyframes cp-fill {
   from { transform: scaleX(0); }
 }
@@ -154,7 +154,7 @@
   color: #101012;
   background: var(--c);
 }
-.cp-perfect .cp-mark { animation: pk-ping 4.2s ease-out infinite; animation-delay: calc(2s + var(--i, 0) * 0.09s); }
+.cp-perfect .cp-mark { animation: pk-ping 4.2s ease-out infinite; animation-delay: calc(1s + var(--i, 0) * 0.09s); }
 
 /* the known differences: two columns of cards */
 .cp-known { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }

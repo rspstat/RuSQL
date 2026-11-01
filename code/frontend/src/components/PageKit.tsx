@@ -72,7 +72,7 @@ export function PlayBar({ count, cur, playing, onToggle, onReplay, onJump }: {
 }
 
 // A number that counts up from 0 to `value` when it appears (and again when the value changes); `format` writes it (a percent, a thousands separator)
-export function CountUp({ value, format = (n: number) => Math.round(n).toLocaleString(), ms = 1100 }: { value: number; format?: (n: number) => string; ms?: number }) {
+export function CountUp({ value, format = (n: number) => Math.round(n).toLocaleString(), ms = 450 }: { value: number; format?: (n: number) => string; ms?: number }) {
   const [shown, setShown] = useState(0);
   const from = useRef(0);
   useEffect(() => {

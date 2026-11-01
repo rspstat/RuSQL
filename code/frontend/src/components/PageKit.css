@@ -35,7 +35,7 @@
   border: 1px solid color-mix(in srgb, var(--c) 32%, #333336);
   background: linear-gradient(120deg, color-mix(in srgb, var(--c) 15%, #202023) 0%, #1f1f22 58%, #1e1e1e 100%);
   overflow: hidden;
-  animation: pk-rise 0.55s ease-out backwards;
+  animation: pk-rise 0.22s ease-out backwards;
 }
 
 /* a blurred blob of the page color that drifts slowly behind the title */
@@ -123,7 +123,7 @@
   font-size: 12px;
   color: #858585;
   cursor: pointer;
-  transition: color 0.15s, background 0.15s;
+  transition: color 0.1s, background 0.1s;
 }
 .pk-seg button + button { border-left: 1px solid #3a3a3d; }
 .pk-seg button:hover { color: #d4d4d4; }
@@ -133,8 +133,8 @@
 /* boxes that rise into place and light up on hover                     */
 /* ------------------------------------------------------------------ */
 .pk-rise {
-  animation: pk-rise 0.55s ease-out backwards;
-  animation-delay: calc(120ms + var(--d, 0) * 80ms);
+  animation: pk-rise 0.22s ease-out backwards;
+  animation-delay: calc(20ms + var(--d, 0) * 25ms);
 }
 
 .pk-card {
@@ -142,7 +142,7 @@
   border: 1px solid #3a3a3d;
   border-top: 3px solid var(--c);
   border-radius: 10px;
-  transition: transform 0.18s ease, border-color 0.18s ease, box-shadow 0.18s ease;
+  transition: transform 0.12s ease, border-color 0.12s ease, box-shadow 0.12s ease;
 }
 .pk-card:hover {
   transform: translateY(-2px);
@@ -188,7 +188,7 @@
   font: inherit;
   font-size: 12px;
   cursor: pointer;
-  transition: transform 0.14s ease, border-color 0.14s ease, background 0.14s ease, box-shadow 0.14s ease, color 0.14s ease;
+  transition: transform 0.08s ease, border-color 0.1s ease, background 0.1s ease, box-shadow 0.1s ease, color 0.1s ease;
 }
 .pk-btn:hover:not(:disabled) {
   transform: translateY(-1px);
@@ -218,7 +218,7 @@
   padding: 6px 10px;
   font: inherit;
   font-size: 12px;
-  transition: border-color 0.15s, box-shadow 0.15s;
+  transition: border-color 0.1s, box-shadow 0.1s;
 }
 .pk-input:focus, .pk-select:focus {
   outline: none;
@@ -236,7 +236,7 @@
   border-radius: 3px;
   background: #34343a;
   cursor: pointer;
-  transition: background 0.3s ease, transform 0.2s ease, box-shadow 0.3s ease;
+  transition: background 0.15s ease, transform 0.1s ease, box-shadow 0.15s ease;
 }
 .pk-track i:hover { transform: scaleY(1.9); }
 .pk-track i.done { background: color-mix(in srgb, var(--c) 70%, #34343a); }
@@ -246,7 +246,7 @@
 /* motion                                                                */
 /* ------------------------------------------------------------------ */
 @keyframes pk-rise {
-  from { opacity: 0; transform: translateY(14px); }
+  from { opacity: 0; transform: translateY(10px); }
 }
 
 @keyframes pk-float {

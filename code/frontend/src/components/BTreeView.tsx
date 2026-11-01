@@ -73,7 +73,7 @@ function buildSteps(): Step[] {
   const steps: Step[] = [{
     frame: tree.frame("ready", [], { en: "", ko: "" }),
     caption: L(`An empty tree: a node holds up to ${MAX_KEYS} keys`, `빈 트리에서 시작합니다. 노드 하나에 키는 ${MAX_KEYS}개까지`),
-    ms: 1800,
+    ms: 900,
   }];
   let levels = 1;
   for (let k = 1; k <= 12; k++) {

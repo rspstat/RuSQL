@@ -26,7 +26,7 @@ const gone: Version = { value: 150, state: "off", seen: { A: false, B: false } }
 const both = { A: true, B: true }, onlyA = { A: true, B: false }, onlyB = { A: false, B: true }, nobody = { A: false, B: false };
 
 const STEPS: Step[] = [
-  { who: null, caption: L("To begin, the row has one version: balance = 100", "처음에는 행 하나에 버전 하나가 있습니다 (balance = 100)"), ms: 2400,
+  { who: null, caption: L("To begin, the row has one version: balance = 100", "처음에는 행 하나에 버전 하나가 있습니다 (balance = 100)"), ms: 1200,
     versions: [{ value: 100, state: "live", seen: both }, gone], wireA: [], wireB: [] },
   { who: "A", sql: "BEGIN", caption: L("A opens a transaction", "A가 트랜잭션을 엽니다"), ms: 1700,
     versions: [{ value: 100, state: "live", seen: both }, gone], wireA: [], wireB: [] },
