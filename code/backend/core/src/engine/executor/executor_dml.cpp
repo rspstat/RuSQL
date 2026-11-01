@@ -23,6 +23,7 @@
 #include "engine/now_text.hpp"
 #include "engine/parser/parser.hpp"
 #include "engine/sql_value_util.hpp"
+#include "engine/statement_deadline.hpp"
 
 namespace engine {
 
@@ -242,6 +243,7 @@ StringResult Executor::exec_insert_select(SharedDatabase& s, std::string table, 
             ExactFloats(bool& f, bool on) : flag(f), before(f) { if (on) flag = true; }
             ~ExactFloats() { flag = before; }
         } exact_floats(float_exact_, any_float);
+        deadline::ReadPhase reads; // (the SELECT only reads: nothing is inserted yet, so KILL QUERY may stop it -- the statement's first word is INSERT)
         auto output = execute_with_s(s, std::move(query));
         if (output.is_err()) return output;
         if (auto refused = strict.error(); refused && !std::holds_alternative<InsertConflict::Ignore>(on_conflict.data)) return StringResult::Err(*refused);

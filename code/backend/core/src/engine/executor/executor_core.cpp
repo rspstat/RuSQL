@@ -1268,9 +1268,12 @@ StringResult Executor::execute(Statement stmt) {
     }
     auto s = shared->write();
     // (a statement that needs the lock exclusive only to build temporary tables or to keep statistics, and a procedure that only reads, changes nothing on disk:
-    // the redo log stays)
+    // the redo log stays. Neither is emptied by a VACUUM outside a transaction -- it marks each table it rewrites, as the vacuum that runs by itself does -- or by a CALL
+    // that writes only through statements the log covers: those are persisted by the batch below, as the statements they are made of)
     const bool mutating = may_change_stored_data(*s, stmt);
-    if (mutating) {
+    const bool covered_call = mutating && is_redo_covered_call(*s, stmt);
+    const bool leaves_log = covered_call || (std::holds_alternative<Statement::Vacuum>(stmt.data) && !txn.is_active());
+    if (mutating && !leaves_log) {
         // DDL/maintenance/anything unclassified writes table files directly (save_table), and
         // some of it (TRUNCATE, DROP, ALTER) would be undone by replaying older redo batches
         // on top. Bring the files up to date and retire the log first.
@@ -1282,11 +1285,13 @@ StringResult Executor::execute(Statement stmt) {
         if (has_dirty) checkpoint_redo_locked(*s);
     }
     explain_trace::stage("Exclusive lock");
+    redo_covered_stmt_ = covered_call && !txn.is_active();
     auto result = execute_with_s(*s, std::move(stmt));
+    redo_covered_stmt_ = false;
     explain_trace::stage("Execute");
     if (mutating) {
         if (txn.is_active()) {
-            txn.mark_redo_incomplete();
+            if (!covered_call) txn.mark_redo_incomplete();
         } else {
             // Whatever this statement logged (e.g. a trigger body's INSERTs) is committed
             // work: make it durable rather than letting the ops pile up.

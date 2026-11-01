@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "engine/row.hpp"
+#include "engine/statement_deadline.hpp"
 #include "engine/thread_pool.hpp"
 
 namespace engine {
@@ -75,7 +76,22 @@ void parallel_sort(std::vector<Row>& v, Less less) {
         chunks[c].assign(std::make_move_iterator(v.begin() + static_cast<std::ptrdiff_t>(starts[c])),
                           std::make_move_iterator(v.begin() + static_cast<std::ptrdiff_t>(starts[c + 1])));
     }
-    ThreadPool::global().parallel_for(n_chunks, [&](std::size_t c) { std::sort(chunks[c].begin(), chunks[c].end(), less); });
+    // A slice asks the clock and the KILL flag once in a thousand comparisons (the statement's thread throws when the slices are back). A slice that is stopped compares
+    // every two rows as equal, which a sort runs out of at once: what it leaves is thrown away with the statement.
+    deadline::ParallelStop stop;
+    ThreadPool::global().parallel_for(n_chunks, [&](std::size_t c) {
+        std::size_t compared = 0;
+        bool halted = false;
+        std::sort(chunks[c].begin(), chunks[c].end(), [&](const Row& a, const Row& b) {
+            if (halted) return false;
+            if ((++compared & 1023u) == 0 && stop.due()) {
+                halted = true;
+                return false;
+            }
+            return less(a, b);
+        });
+    });
+    stop.finish();
 
     while (chunks.size() > 1) {
         std::vector<std::vector<Row>> next;

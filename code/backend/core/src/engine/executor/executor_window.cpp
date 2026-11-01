@@ -14,6 +14,7 @@
 
 #include "engine/numeric_text.hpp"
 #include "engine/sql_value_util.hpp"
+#include "engine/statement_deadline.hpp"
 
 namespace engine {
 
@@ -126,6 +127,7 @@ std::vector<Row> Executor::compute_window_functions(std::vector<Row> rows, const
         std::vector<std::vector<std::string>> partition_order;
         std::map<std::vector<std::string>, std::vector<std::size_t>> partition_map;
         for (std::size_t i = 0; i < rows.size(); i++) {
+            deadline::tick(); // (KILL QUERY / MAX_EXECUTION_TIME: the window stages go through every row, some of them through a frame of rows for every row)
             std::vector<std::string> pk;
             for (auto& c : wf->partition_by) {
                 const std::string* v = get_col(rows[i], c);
@@ -138,7 +140,7 @@ std::vector<Row> Executor::compute_window_functions(std::vector<Row> rows, const
         for (auto& pk : partition_order) {
             std::vector<std::size_t> sorted = partition_map.at(pk);
             if (!wf->order_by.empty()) {
-                std::stable_sort(sorted.begin(), sorted.end(), [&](std::size_t a, std::size_t b) {
+                std::stable_sort(sorted.begin(), sorted.end(), deadline::checked_less([&](std::size_t a, std::size_t b) {
                     for (auto& ord : wf->order_by) {
                         const std::string* avp = get_col(rows[a], ord.column);
                         const std::string* bvp = get_col(rows[b], ord.column);
@@ -149,7 +151,7 @@ std::vector<Row> Executor::compute_window_functions(std::vector<Row> rows, const
                         if (c != 0) return c < 0;
                     }
                     return false;
-                });
+                }));
             }
 
             bool has_order = !wf->order_by.empty();
@@ -159,6 +161,7 @@ std::vector<Row> Executor::compute_window_functions(std::vector<Row> rows, const
             // RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW -- takes the peers of the current row with it: `SUM(v) OVER (ORDER BY g)` is the same for the rows of one g.
             std::vector<std::size_t> peer_first(total), peer_last(total);
             for (std::size_t i = 0; i < total;) {
+                deadline::tick();
                 std::size_t j = i;
                 if (has_order) {
                     while (j + 1 < total && win_order_eq(rows[sorted[i]], rows[sorted[j + 1]], wf->order_by)) j++;
@@ -221,6 +224,7 @@ std::vector<Row> Executor::compute_window_functions(std::vector<Row> rows, const
                 return temporal_micro(add_months(*when, static_cast<long long>(step * sign) * months)) * sign;
             };
             auto frame_of = [&](std::size_t pos) {
+                deadline::check_now(); // (called once for every row of the partition, and the frame it gives is read through for each of them: no tick, the clock is read now)
                 if (range_offsets) {
                     const bool has_value = axis.any && pos >= axis.first && pos <= axis.last;
                     auto index_of = [&](const FrameBound& b, bool is_start) -> long long {

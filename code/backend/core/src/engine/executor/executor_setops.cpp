@@ -89,7 +89,7 @@ void Executor::apply_set_postprocess(std::vector<Row>& result, const std::vector
         if (parallel_enabled() && result.size() >= parallel_min_rows()) {
             parallel_sort(result, less); // unstable, matches Rust's par_sort_unstable_by
         } else {
-            std::stable_sort(result.begin(), result.end(), less);
+            std::stable_sort(result.begin(), result.end(), deadline::checked_less(less));
         }
     }
     if (offset) {
@@ -158,6 +158,7 @@ StringResult Executor::exec_union(SharedDatabase& s, Statement left, Statement r
     std::vector<Row> remapped_right;
     remapped_right.reserve(right_rows.size());
     for (auto& rr : right_rows) {
+        deadline::tick();
         Row new_row;
         for (std::size_t i = 0; i < left_cols.size(); i++) {
             std::string val;
@@ -178,6 +179,7 @@ StringResult Executor::exec_union(SharedDatabase& s, Statement left, Statement r
         std::vector<std::vector<std::string>> seen;
         std::vector<Row> filtered;
         for (auto& row : result) {
+            deadline::check_now(); // (every row looks through the rows kept so far: the clock is read for each, not once in a thousand)
             auto key = row_key(row, left_cols);
             if (std::find(seen.begin(), seen.end(), key) == seen.end()) {
                 seen.push_back(key);
@@ -194,7 +196,7 @@ StringResult Executor::exec_union(SharedDatabase& s, Statement left, Statement r
         if (parallel_enabled() && result.size() >= parallel_min_rows()) {
             parallel_sort(result, less); // unstable, matches Rust's par_sort_unstable_by
         } else {
-            std::stable_sort(result.begin(), result.end(), less);
+            std::stable_sort(result.begin(), result.end(), deadline::checked_less(less));
         }
     }
     if (offset) {
@@ -240,6 +242,7 @@ StringResult Executor::exec_intersect(SharedDatabase& s, Statement left, Stateme
     std::vector<Row> result;
     std::vector<std::size_t> matched_right;
     for (auto& row : left_rows) {
+        deadline::check_now(); // (each row looks through the right side and the rows kept so far)
         auto key = row_key(row, cols);
         if (all) {
             std::optional<std::size_t> pos;
@@ -298,6 +301,7 @@ StringResult Executor::exec_except(SharedDatabase& s, Statement left, Statement 
 
     std::vector<Row> result;
     for (auto& row : left_rows) {
+        deadline::check_now();
         auto key = row_key(row, cols);
         if (all) {
             auto it = right_counts.find(key);

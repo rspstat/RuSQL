@@ -11,6 +11,7 @@
 #include "engine/parser/ast_json.hpp"
 #include "engine/parser/parser.hpp"
 #include "engine/result_text.hpp"
+#include "engine/statement_deadline.hpp"
 
 namespace engine {
 
@@ -50,17 +51,23 @@ StringResult Executor::exec_proc_stmts(SharedDatabase& s, std::vector<Statement>
     std::string last;
     for (auto& stmt : stmts) {
         if (proc_signal_) break;
+        // KILL QUERY on a CALL stops it between two statements of the body (and so out of a loop): what the statements before it did stays, as in MySQL. It is an error result and not
+        // a throw, so that exec_call_procedure gives the caller's variables back.
+        if (deadline::kill_asked(deadline::kill_flag)) return StringResult::Err("ERROR 1317 (70100): Query execution was interrupted");
         resolve_names(s, stmt); // (the tables and columns a body names are read in the spelling they were created with)
         // an INSERT in the body numbers its rows like any other: LAST_INSERT_ID() says the first number (CALL, the statement that runs, is not an INSERT)
         if (std::holds_alternative<Statement::Insert>(stmt.data) || std::holds_alternative<Statement::InsertSelect>(stmt.data)) insert_id_unset_ = true;
+        const bool is_query = std::holds_alternative<Statement::Select>(stmt.data) || std::holds_alternative<Statement::Union>(stmt.data) ||
+                              std::holds_alternative<Statement::Intersect>(stmt.data) || std::holds_alternative<Statement::Except>(stmt.data) ||
+                              std::holds_alternative<Statement::With>(stmt.data);
         // a query that finds no rows still has columns, and the CALL answers with them when this is the result it gives (kept only while no result table is there yet)
         std::optional<Statement> query_shape;
-        if (last.rfind('+', 0) != 0 && (std::holds_alternative<Statement::Select>(stmt.data) || std::holds_alternative<Statement::Union>(stmt.data) ||
-                                        std::holds_alternative<Statement::Intersect>(stmt.data) || std::holds_alternative<Statement::Except>(stmt.data) ||
-                                        std::holds_alternative<Statement::With>(stmt.data))) {
-            query_shape = stmt;
-        }
+        if (last.rfind('+', 0) != 0 && is_query) query_shape = stmt;
+        // a query of the body only reads: KILL QUERY may stop it (the statement that is run is CALL, and the reads of a CALL are not asked for)
+        std::optional<deadline::ReadPhase> reads;
+        if (is_query || std::holds_alternative<Statement::SelectInto>(stmt.data)) reads.emplace();
         auto res = execute_with_s(s, std::move(stmt));
+        reads.reset();
         if (res.is_err()) return res;
         if (query_shape && res.value().rfind("0 rows returned", 0) == 0) {
             const std::vector<std::string> names = result_column_names_in(s, std::move(*query_shape));
@@ -415,6 +422,51 @@ bool Executor::may_change_stored_data(const SharedDatabase& s, const Statement& 
                 return it == s.procedures.end() || body_changes(it->second.second, depth + 1);
             } else {
                 return true;
+            }
+        },
+        stmt.data);
+}
+
+bool Executor::is_redo_covered_call(const SharedDatabase& s, const Statement& stmt, int depth) const {
+    if (!std::holds_alternative<Statement::CallProcedure>(stmt.data) && depth == 0) return false;
+    if (!may_change_stored_data(s, stmt)) return true; // (reads, variables, a loop that only reads: nothing to log)
+    auto body_covered = [&](const std::vector<Statement>& body, int level) {
+        return std::all_of(body.begin(), body.end(), [&](const Statement& inner) { return is_redo_covered_call(s, inner, level); });
+    };
+    if (is_redo_covered_kind(stmt)) {
+        // a write the log describes completely -- on a table of its own: not a view or a synonym, and no trigger fires for it (the body of a trigger may be anything).
+        // (A partitioned table is refused inside a body, with an error of its own.)
+        Statement named = stmt;
+        resolve_names(s, named);
+        std::string table;
+        if (auto* insert = std::get_if<Statement::Insert>(&named.data)) table = insert->table;
+        else if (auto* insert_select = std::get_if<Statement::InsertSelect>(&named.data)) table = insert_select->table;
+        else if (auto* update = std::get_if<Statement::Update>(&named.data)) table = update->table;
+        else if (auto* del = std::get_if<Statement::Delete>(&named.data)) table = del->table;
+        if (s.synonyms.count(table)) return false; // (another name for a table)
+        table = qualify_name(table);
+        const TableSchema* schema = s.catalog.get_table(table);
+        if (!schema) return false; // (a view has no schema of its own: it is refused here)
+        return std::none_of(s.triggers.begin(), s.triggers.end(), [&](const auto& trigger) { return std::get<0>(trigger.second) == table; });
+    }
+    return std::visit(
+        [&](const auto& v) -> bool {
+            using T = std::decay_t<decltype(v)>;
+            if constexpr (std::is_same_v<T, Statement::ProcIf>) {
+                return body_covered(v.then_body, depth) && (!v.else_body || body_covered(*v.else_body, depth)) &&
+                       std::all_of(v.elseif_branches.begin(), v.elseif_branches.end(), [&](const auto& branch) { return body_covered(branch.second, depth); });
+            } else if constexpr (std::is_same_v<T, Statement::ProcWhile> || std::is_same_v<T, Statement::ProcLoop> || std::is_same_v<T, Statement::ProcRepeat>) {
+                return body_covered(v.body, depth);
+            } else if constexpr (std::is_same_v<T, Statement::CallProcedure>) {
+                if (depth >= 8) return false;
+                auto it = s.procedures.find(v.name);
+                if (it == s.procedures.end()) {
+                    const std::string wanted = to_lower_str(v.name);
+                    it = std::find_if(s.procedures.begin(), s.procedures.end(), [&](const auto& entry) { return to_lower_str(entry.first) == wanted; });
+                }
+                return it != s.procedures.end() && body_covered(it->second.second, depth + 1);
+            } else {
+                return false; // (anything else that writes -- DDL, MERGE, a multi-table statement, TRUNCATE -- writes the files itself)
             }
         },
         stmt.data);

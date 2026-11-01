@@ -1684,7 +1684,7 @@ TEST_CASE("R55: a statement that only reads (WITH, a derived table, a prepared S
         REQUIRE(redo_bytes() > mid);
         REQUIRE(fails(ex, "EXECUTE ins USING @a, @b").find("Duplicate") != std::string::npos);
         REQUIRE(fails(ex, "EXECUTE nothing").find("Unknown prepared statement") != std::string::npos);
-        ok(ex, "CALL wr()"); // (a procedure that writes still has its own path)
+        ok(ex, "CALL wr()"); // (a procedure that writes: logged since R64, see test_redo.cpp)
         REQUIRE(q(ex, "SELECT COUNT(*) FROM t") == Rows{{"5"}});
     } // (a crash: whatever was not checkpointed comes back from the log)
     Executor again(dir.path);

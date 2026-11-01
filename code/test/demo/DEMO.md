@@ -93,7 +93,7 @@ UPDATE orders SET amount = amount + 2 WHERE id = 7;
 COMMIT;
 ```
 
-패널에는 B 위에 `waits for #A`, A 위에 `BLOCKS 1`이 붙고, 맨 위의 빨간 줄이 "⚠ #A blocks 1 transaction"으로 **맨 뿌리 차단자**를 알려 줍니다(그 줄의 `Disconnect`를 두 번 누르면 A를 끊고 B가 풀립니다). 문장마다 `Stop statement`(`KILL QUERY`)와 `Disconnect`가 있고, 5초 넘게 도는 문장은 호박색 `SLOW`, 트랜잭션을 연 채 30초 넘게 쉬는 세션은 `idle in transaction`입니다. 패널 맨 아래 **Slow queries**에서 기준 시간을 고르고 `Turn on`을 누르면 그보다 오래 걸린 문장이 목록과 `<데이터 폴더>/slow_query.log`에 쌓입니다. 교차 조인처럼 한 덩어리로 도는 문장은 `Stop statement`로 멈추지 않으니 시연에서 피하세요.
+패널에는 B 위에 `waits for #A`, A 위에 `BLOCKS 1`이 붙고, 맨 위의 빨간 줄이 "⚠ #A blocks 1 transaction"으로 **맨 뿌리 차단자**를 알려 줍니다(그 줄의 `Disconnect`를 두 번 누르면 A를 끊고 B가 풀립니다). 문장마다 `Stop statement`(`KILL QUERY`)와 `Disconnect`가 있고, 5초 넘게 도는 문장은 호박색 `SLOW`, 트랜잭션을 연 채 30초 넘게 쉬는 세션은 `idle in transaction`입니다. 패널 맨 아래 **Slow queries**에서 기준 시간을 고르고 `Turn on`을 누르면 그보다 오래 걸린 문장이 목록과 `<데이터 폴더>/slow_query.log`에 쌓입니다. `Stop statement`는 SELECT(정렬·GROUP BY·윈도 함수·조인·UNION 도중에도), `INSERT … SELECT`의 SELECT, `CALL` 본문의 SELECT와 루프, UPDATE·DELETE가 바꿀 행을 찾는 동안 멈추고, 행을 쓰기 시작한 뒤에는 끝까지 갑니다(멈춘 `CALL`은 그 앞 문장이 한 일을 남깁니다).
 
 교착은 서로 엇갈리게 잡으면 만들어집니다. A가 7번, B가 8번을 잡은 뒤 A가 8번, B가 7번을 요청하면 한쪽이 교착으로 되돌려지고 패널의 "최근 교착"에 남습니다. SQL로 직접 보려면:
 
@@ -139,13 +139,10 @@ Claude Desktop에 MCP가 연결되어 있다면 "demo 데이터베이스에서 �
 
 ## 알려진 한계 (이 시연에서는 피하세요)
 
-2026-10-22에 위 시연 문장들과 아래 항목을 지금 엔진에 직접 돌려 확인했습니다. 예전 목록에 있던 `SUM(amount * 2)`, `ROUND(AVG(amount), 0) * 2`, 열 이름 `ROUND()`, `LEFT JOIN`의 `테이블.열`, 쉼표 조인·별칭 등은 **모두 고쳐졌으니 써도 됩니다.**
+2026-10-22에 위 시연 문장들과 아래 항목을 지금 엔진에 직접 돌려 확인했습니다. 예전 목록에 있던 `SUM(amount * 2)`, `ROUND(AVG(amount), 0) * 2`, 열 이름 `ROUND()`, `LEFT JOIN`의 `테이블.열`, 쉼표 조인·별칭 등은 **모두 고쳐졌으니 써도 됩니다.** 값 기준 윈도 프레임(`RANGE BETWEEN 5 PRECEDING AND …`), `DATE('2026-03-05') + 0`(`20260305`)과 DATE 열의 `SUM`·`AVG`, 갱신하는 같은 표를 하위 질의로 읽는 `UPDATE`(MySQL처럼 오류 1093)도 2026-11-01에 다시 돌려 보니 MySQL과 같았습니다.
 
-- **`RANGE BETWEEN 5 PRECEDING AND …`처럼 값 기준 윈도 프레임**은 아직 행 수로 읽어 틀린 값이 나옵니다(`ROWS`·`UNBOUNDED`·`CURRENT ROW` 프레임은 정상).
-- `DATE('2026-03-05') + 0`은 `20260305`가 아니라 `2026`이 나오고, DATE 열의 `SUM`·`AVG`도 MySQL과 다릅니다. 날짜는 `YEAR()`·`MONTH()`·`DATEDIFF()`처럼 함수로 쓰세요.
-- `WITH ROLLUP`, `SELECT @x := …`, `INSERT INTO t () VALUES ()`, `CREATE TEMPORARY TABLE`, `SIGNAL`, 커서, 라벨 붙은 루프, `KILL`, `FULLTEXT`, `USE INDEX`는 지원하지 않습니다.
+- `SELECT @x := …`, `INSERT INTO t () VALUES ()`, `CREATE TEMPORARY TABLE`, `SIGNAL`, 커서, 라벨 붙은 루프, `FULLTEXT`, `USE INDEX`는 지원하지 않습니다(`WITH ROLLUP`은 R60부터, `KILL`은 R53부터 됩니다).
 - 서버를 강제 종료한 뒤 첫 `COUNT`·`SUM`은 전체를 읽어 느립니다(위 3번).
-- `SELECT … FROM orders WHERE id IN (SELECT id FROM orders …)`처럼 **갱신하는 같은 표를 하위 질의로 읽는 `UPDATE`** 는 MySQL이 오류를 내는데 여기서는 통과합니다.
 
 ## 되돌리기
 

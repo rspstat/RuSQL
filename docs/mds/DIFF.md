@@ -286,7 +286,7 @@
 | SHOW DATABASES | ✓ | ✓ (\\l) | △ (SELECT FROM V$DATABASE) | ✓ |
 | SHOW CREATE TABLE | ✓ | ✓ (pg_dump) | ✓ (DBMS_METADATA) | ✓ |
 | SHOW PROCESSLIST | ✓ | pg_stat_activity | V$SESSION | ✓ (현재 세션 정보) |
-| KILL [QUERY \| CONNECTION] n | ✓ | pg_cancel_backend / pg_terminate_backend | ALTER SYSTEM KILL SESSION | ✓ (SELECT의 행 읽기와 행 잠금 대기를 멈춤, 쓰기 문장은 끝까지 돌고, 연결을 끊으면 그 세션의 트랜잭션을 되돌림. 소유자 또는 root만, 오류 1094·1095·1317) |
+| KILL [QUERY \| CONNECTION] n | ✓ | pg_cancel_backend / pg_terminate_backend | ALTER SYSTEM KILL SESSION | ✓ (SELECT의 행 읽기 — 정렬·GROUP BY·윈도·조인·UNION 도중 포함 — 와 행 잠금 대기를 멈추고, `INSERT … SELECT`의 SELECT·UPDATE/DELETE의 행 찾기·`CALL` 본문의 SELECT와 루프도 멈춤. 행을 쓰기 시작한 문장은 끝까지 돌고, 연결을 끊으면 그 세션의 트랜잭션을 되돌림. 소유자 또는 root만, 오류 1094·1095·1317) |
 | SHOW STATUS | ✓ (GLOBAL · SESSION) | pg_stat_* 뷰 | V$SYSSTAT | ✓ (GLOBAL · SESSION, 문장 종류별 `Com_*`·`Questions`·`Connections`·`Threads_*`·`Uptime`·`Innodb_*` 버퍼 풀·redo·행 잠금 대기, 잠금 없이 읽음; 표로는 `information_schema.global_status`) |
 | SHOW LOCKS | ✓ | pg_locks | V$LOCK | ✓ |
 | CHECKPOINT | ✓ | ✓ | ✓ (ALTER SYSTEM CHECKPOINT) | ✓ |

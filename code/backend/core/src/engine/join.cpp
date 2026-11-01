@@ -5,7 +5,6 @@
 #include "engine/thread_pool.hpp"
 
 #include <algorithm>
-#include <atomic>
 #include <charconv>
 #include <thread>
 #include <unordered_map>
@@ -62,23 +61,16 @@ std::vector<Row> probe_parallel(const std::vector<Row>& left, F&& per_row) {
     for (std::size_t c = 0; c < n_chunks; c++) starts[c + 1] = starts[c] + base + (c < rem ? 1 : 0);
 
     std::vector<std::vector<Row>> chunk_out(n_chunks);
-    const deadline::Watch watch = deadline::watch(); // (the workers ask it: KILL QUERY and MAX_EXECUTION_TIME belong to the statement's thread)
-    std::atomic<bool> stopped{false};
+    deadline::ParallelStop stop; // (the workers ask it: KILL QUERY and MAX_EXECUTION_TIME belong to the statement's thread)
     ThreadPool::global().parallel_for(n_chunks, [&](std::size_t c) {
         std::vector<Row> local;
         for (std::size_t i = starts[c]; i < starts[c + 1]; i++) {
-            if ((i & 255u) == 0 && (stopped.load(std::memory_order_relaxed) || watch.due())) {
-                stopped = true;
-                return;
-            }
+            if (stop.halt(i)) return;
             for (auto& r : per_row(left[i])) local.push_back(std::move(r));
         }
         chunk_out[c] = std::move(local);
     });
-    if (stopped) { // the statement was stopped: what the workers made is not the answer
-        deadline::check_now();
-        deadline::interrupted();
-    }
+    stop.finish();
 
     std::size_t total = 0;
     for (auto& c : chunk_out) total += c.size();

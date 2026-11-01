@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdlib>
@@ -16,6 +17,7 @@
 #include "catch.hpp"
 #include "engine/executor/executor.hpp"
 #include "engine/join.hpp"
+#include "engine/parallel_util.hpp"
 #include "engine/result_text.hpp"
 #include "engine/statement_deadline.hpp"
 
@@ -96,6 +98,25 @@ struct MemoryWatch {
         watcher.join();
         const std::size_t t = top.load();
         return t > before ? (t - before) / (1024 * 1024) : 0;
+    }
+};
+
+// An environment variable that holds a value until it goes out of scope (RUSTDB_PARALLEL is read at every statement)
+struct EnvVar {
+    std::string name;
+    EnvVar(const std::string& n, const std::string& value) : name(n) {
+#ifdef _WIN32
+        _putenv_s(name.c_str(), value.c_str());
+#else
+        setenv(name.c_str(), value.c_str(), 1);
+#endif
+    }
+    ~EnvVar() {
+#ifdef _WIN32
+        _putenv_s(name.c_str(), "");
+#else
+        unsetenv(name.c_str());
+#endif
     }
 };
 
@@ -205,8 +226,9 @@ TEST_CASE("R63: the last join of a query makes the same rows as joining first an
 }
 
 // The stages that are one piece of work (a sort, the groups, DISTINCT, a hash join) ask the clock and the KILL flag as they go: with a limit of a third of the time the whole query takes the
-// statement ends with 3024 in the middle of the stage (before 60% of the whole time), not at its end. (MAX_EXECUTION_TIME and KILL QUERY use the same places.)
-TEST_CASE("R63: a sort, a GROUP BY, a DISTINCT and a hash join are stopped in the middle of their work", "[r63][kill]") {
+// statement ends with 3024 in the middle of the stage (before 60% of the whole time), not at its end. (MAX_EXECUTION_TIME and KILL QUERY use the same places.) R64 added the
+// stages that were left: the sort of a window function, the sort of a UNION (in slices on the pool's threads, or on the statement's own thread), the scan in chunks, and reading a long answer back.
+TEST_CASE("R63: a sort, a GROUP BY, a DISTINCT, a hash join, a window sort, a UNION sort and a parallel scan are stopped in the middle of their work", "[r63][r64][kill]") {
     TempDataDir dir("r63_stage_stop");
     Executor ex(dir.path);
     ok(ex, "CREATE DATABASE d");
@@ -224,8 +246,13 @@ TEST_CASE("R63: a sort, a GROUP BY, a DISTINCT and a hash join are stopped in th
         "SELECT g, v, COUNT(*) FROM big GROUP BY g, v",
         "SELECT DISTINCT s, v FROM big",
         "SELECT COUNT(*) FROM big a JOIN little b ON a.g = b.g",
+        "SELECT id, ROW_NUMBER() OVER (ORDER BY s DESC, v) FROM big",
+        "SELECT id, v, s FROM big UNION ALL SELECT id, g, 'x' FROM little ORDER BY s DESC, v",
+        "SELECT COUNT(*) FROM big WHERE UPPER(CONCAT(UPPER(s), LOWER(s), REVERSE(s), UPPER(CONCAT(s, s)), REVERSE(CONCAT(s, 'ab')))) LIKE '%ZZ%' OR v * g > 99999999",
+        "SELECT id, v, s FROM big UNION ALL SELECT id, g, 'x' FROM little",
     };
-    for (const char* sql : queries) {
+    // (the limit is a part of the whole time, and the statement must have stopped before the other part: a third and 60% unless the stage is in the second half)
+    auto stops_in_the_middle = [&](const char* sql, long long limit_per_mille = 333, long long bound_per_mille = 600) {
         INFO(sql);
         auto millis = [](std::chrono::steady_clock::time_point since) { return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - since).count(); };
         // (a trivial UPDATE empties the cache of answers: an answer that is cached takes no time the second time)
@@ -236,7 +263,7 @@ TEST_CASE("R63: a sort, a GROUP BY, a DISTINCT and a hash join are stopped in th
         const auto whole_ms = millis(started);
         REQUIRE(whole.is_ok());
         // a third of the time the whole query takes: the rows are read by then (that stage ends before the clock is looked at), the stage that follows is what is stopped
-        const auto limit = std::max<long long>(30, whole_ms / 3);
+        const auto limit = std::max<long long>(30, whole_ms * limit_per_mille / 1000);
         ok(ex, "UPDATE big SET v = v WHERE id = 1");
         ok(ex, "SET max_execution_time = " + std::to_string(limit));
         started = std::chrono::steady_clock::now();
@@ -246,13 +273,19 @@ TEST_CASE("R63: a sort, a GROUP BY, a DISTINCT and a hash join are stopped in th
         std::fprintf(stderr, "[r63] %s -> the whole of it takes %lld ms, with a limit of %lld ms it stopped in %lld ms\n", sql, static_cast<long long>(whole_ms), static_cast<long long>(limit), static_cast<long long>(stopped_ms));
         REQUIRE(stopped.is_err());
         REQUIRE(stopped.error().find("3024") != std::string::npos);
-        REQUIRE(stopped_ms * 10 < whole_ms * 6); // (stopped in the middle of the stage, not at its end: a stage that is not asked ends it first, at 70% or later)
-    }
+        REQUIRE(stopped_ms * 1000 < whole_ms * bound_per_mille); // (stopped in the middle of the stage, not at its end: a stage that is not asked ends it first)
+    };
+    for (const char* sql : queries) stops_in_the_middle(sql);
+    // The sort of a UNION is made in slices on the pool's threads from some thousand rows up; below that (here at every size: RUSTDB_PARALLEL=0) it is one sort on the statement's thread
+    EnvVar sequential("RUSTDB_PARALLEL", "0");
+    // (the reading of the rows and of the answer come first, a good part of the time: the limit goes to where the sort is)
+    stops_in_the_middle("SELECT id, v, s FROM big UNION ALL SELECT id, g, 'x' FROM little ORDER BY s DESC, v", 700, 880);
 }
 
 // An UPDATE or DELETE that is still looking for the rows it will change has written nothing: KILL QUERY stops it there, and the table is as it was. (Once rows are being written the
-// statement runs on to its end -- there is no way back from half of it.)
-TEST_CASE("R63: KILL QUERY stops an UPDATE and a DELETE while they look for their rows, and nothing is changed", "[r63][kill]") {
+// statement runs on to its end -- there is no way back from half of it.) The same for the SELECT of an INSERT ... SELECT (R64): the statement's first word is INSERT, and the
+// SELECT it runs only reads.
+TEST_CASE("R63: KILL QUERY stops an UPDATE, a DELETE and an INSERT ... SELECT while they look for their rows, and nothing is changed", "[r63][r64][kill]") {
     TempDataDir dir("r63_write_kill");
     Executor ex(dir.path);
     ex.register_process("root", "localhost");
@@ -266,6 +299,7 @@ TEST_CASE("R63: KILL QUERY stops an UPDATE and a DELETE while they look for thei
     }
     ok(ex, "CREATE TABLE other (id INT PRIMARY KEY, g INT, v INT)"); // (MySQL does not let a statement read the table it writes in a subquery: error 1093)
     ok(ex, "INSERT INTO other SELECT id, g, v FROM big");
+    ok(ex, "CREATE TABLE sink (id INT PRIMARY KEY, g INT, v INT)");
     auto shared = ex.get_shared();
     Executor victim = Executor::new_session(shared);
     victim.auth_user = "bob";
@@ -276,7 +310,8 @@ TEST_CASE("R63: KILL QUERY stops an UPDATE and a DELETE while they look for thei
 
     // (a correlated subquery for every row: it would run for minutes)
     for (const char* sql : {"UPDATE big SET v = v + 100 WHERE EXISTS (SELECT 1 FROM other b WHERE b.v = big.v AND b.g = big.g + 1000)",
-                            "DELETE FROM big WHERE EXISTS (SELECT 1 FROM other b WHERE b.v = big.v AND b.g = big.g + 1000)"}) {
+                            "DELETE FROM big WHERE EXISTS (SELECT 1 FROM other b WHERE b.v = big.v AND b.g = big.g + 1000)",
+                            "INSERT INTO sink SELECT id, g, v FROM big WHERE EXISTS (SELECT 1 FROM other b WHERE b.v = big.v AND b.g = big.g + 1000)"}) {
         INFO(sql);
         std::string answer;
         bool failed = false;
@@ -295,6 +330,7 @@ TEST_CASE("R63: KILL QUERY stops an UPDATE and a DELETE while they look for thei
         REQUIRE(failed);
         REQUIRE(answer.find("ERROR 1317 (70100): Query execution was interrupted") != std::string::npos);
         REQUIRE(q(ex, "SELECT COUNT(*), SUM(v), SUM(g) FROM big") == before);
+        REQUIRE(q(ex, "SELECT COUNT(*) FROM sink") == Rows{{"0"}});
         REQUIRE(q(victim, "SELECT COUNT(*) FROM big") == Rows{{"40000"}}); // (the session is whole)
     }
 }
@@ -324,4 +360,107 @@ TEST_CASE("R63: the workers of a parallel hash join stop when the statement is s
     }
     // (with no limit the same join makes its 300,000 rows)
     REQUIRE(hash_join(left, right, JoinType::Inner, "r", "k", "k", {"k", "name"}).size() == 300000);
+}
+
+// R64: the same for the slices of a parallel sort (the answer of a UNION, the groups of a GROUP BY): the slices ask on the pool's threads, the statement's thread throws.
+TEST_CASE("R64: the slices of a parallel sort stop when the statement is stopped, and sort when it is not", "[r64][kill]") {
+    std::vector<Row> rows;
+    rows.reserve(150000);
+    for (int i = 0; i < 150000; i++) {
+        Row r;
+        r["k"] = std::to_string((i * 7919) % 100003);
+        rows.push_back(std::move(r));
+    }
+    auto less = [](const Row& a, const Row& b) { return std::stoi(a.at("k")) < std::stoi(b.at("k")); };
+    std::vector<Row> stopped = rows;
+    {
+        deadline::Scope limit(1);
+        REQUIRE_THROWS_AS(parallel_sort(stopped, less), StatementError);
+    }
+    parallel_sort(rows, less);
+    REQUIRE(rows.size() == 150000);
+    REQUIRE(std::is_sorted(rows.begin(), rows.end(), less));
+}
+
+// The merge of a UNION (the rows kept so far are looked through for every row), an INTERSECT, an EXCEPT and the frames of a window function are slow when the answers are long, and
+// they ask the clock as they go: with a limit of a third of the whole time the statement ends in the middle of the stage.
+TEST_CASE("R64: the merge of a UNION, an INTERSECT and an EXCEPT and the frames of a window function are stopped in the middle of their work", "[r64][kill]") {
+    TempDataDir dir("r64_merge_stop");
+    Executor ex(dir.path);
+    ok(ex, "CREATE DATABASE d");
+    ok(ex, "USE d");
+    fill(ex, "u", 4000);
+    const char* queries[] = {
+        "SELECT id, v FROM u UNION SELECT id + 4000, v FROM u",
+        "SELECT id, v FROM u INTERSECT SELECT id, v FROM u",
+        "SELECT id, v FROM u EXCEPT SELECT id + 1, v FROM u",
+        "SELECT id, SUM(v) OVER (ORDER BY id ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) FROM u",
+    };
+    for (const char* sql : queries) {
+        INFO(sql);
+        auto millis = [](std::chrono::steady_clock::time_point since) { return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - since).count(); };
+        ok(ex, "SET max_execution_time = 0");
+        ok(ex, "UPDATE u SET v = v WHERE id = 1");
+        auto started = std::chrono::steady_clock::now();
+        auto whole = ex.execute_sql(sql);
+        const auto whole_ms = millis(started);
+        REQUIRE(whole.is_ok());
+        const auto limit = std::max<long long>(30, whole_ms / 3);
+        ok(ex, "UPDATE u SET v = v WHERE id = 1");
+        ok(ex, "SET max_execution_time = " + std::to_string(limit));
+        started = std::chrono::steady_clock::now();
+        auto stopped = ex.execute_sql(sql);
+        const auto stopped_ms = millis(started);
+        ok(ex, "SET max_execution_time = 0");
+        std::fprintf(stderr, "[r64] %s -> the whole of it takes %lld ms, with a limit of %lld ms it stopped in %lld ms\n", sql, static_cast<long long>(whole_ms), static_cast<long long>(limit), static_cast<long long>(stopped_ms));
+        REQUIRE(whole_ms >= 90); // (a query that is too quick to be stopped in the middle says nothing: make the table longer)
+        REQUIRE(stopped.is_err());
+        REQUIRE(stopped.error().find("3024") != std::string::npos);
+        REQUIRE(stopped_ms * 10 < whole_ms * 6);
+    }
+}
+
+// KILL QUERY on a CALL: the SELECT of its body is a query like any other, and a loop of the body is left between two statements. What the statements before it did stays (MySQL does
+// the same); the CALL answers with the error and the session goes on.
+TEST_CASE("R64: KILL QUERY stops a CALL in the SELECT of its body and in a loop of it", "[r64][kill]") {
+    TempDataDir dir("r64_call_kill");
+    Executor ex(dir.path);
+    ex.register_process("root", "localhost");
+    ok(ex, "CREATE DATABASE d");
+    ok(ex, "USE d");
+    fill(ex, "a", 200);
+    fill(ex, "b", 200);
+    fill(ex, "c", 200);
+    ok(ex, "CREATE TABLE trail (id INT PRIMARY KEY)");
+    ok(ex, "CREATE PROCEDURE slow_select() BEGIN INSERT INTO trail VALUES (1); SELECT COUNT(*) FROM a x, b y, c z WHERE x.id + y.id + z.id = 7; INSERT INTO trail VALUES (2); END");
+    ok(ex, "CREATE PROCEDURE spin() BEGIN DECLARE i INT DEFAULT 0; DECLARE j INT DEFAULT 0; INSERT INTO trail VALUES (3); "
+           "WHILE i < 2000 DO SET j = 0; WHILE j < 2000 DO SET j = j + 1; END WHILE; SET i = i + 1; END WHILE; INSERT INTO trail VALUES (4); END");
+    auto shared = ex.get_shared();
+    Executor victim = Executor::new_session(shared);
+    victim.auth_user = "bob";
+    victim.register_process("bob", "localhost");
+    ok(victim, "USE d");
+    const std::string victim_id = session_of(ex, "bob");
+    for (const char* call : {"CALL slow_select()", "CALL spin()"}) {
+        INFO(call);
+        std::string answer;
+        bool failed = false;
+        std::thread runner([&] {
+            auto r = victim.execute_sql(call);
+            failed = r.is_err();
+            answer = failed ? r.error() : r.value();
+        });
+        std::this_thread::sleep_for(std::chrono::milliseconds(300));
+        const auto killed_at = std::chrono::steady_clock::now();
+        REQUIRE(ex.execute_sql("KILL QUERY " + victim_id).is_ok());
+        runner.join();
+        const auto waited = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - killed_at).count();
+        std::fprintf(stderr, "[r64] %s: stopped %lld ms after KILL\n", call, static_cast<long long>(waited));
+        REQUIRE(failed);
+        REQUIRE(answer.find("ERROR 1317 (70100): Query execution was interrupted") != std::string::npos);
+        REQUIRE(waited < 3000);
+        REQUIRE(q(victim, "SELECT COUNT(*) FROM a") == Rows{{"200"}}); // (the session is whole)
+    }
+    // what the statements before the stop did stays; what came after it never ran
+    REQUIRE(q(ex, "SELECT id FROM trail ORDER BY id") == (Rows{{"1"}, {"3"}}));
 }

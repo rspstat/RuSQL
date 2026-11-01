@@ -2609,6 +2609,38 @@ VS Code 스타일 탭 드래그 순서 변경(요청의 1번 항목)은 같은 �
 
 **하지 않은 것**: Debug 빌드 전체 시험; 이 구멍이 R59 이전부터 있었는지 가리는 일; REPLACE·MERGE의 사전 확인(dry-run)이 같은 계획 함수를 부모 표 락 없이 부르는 것(진짜 삭제는 고쳐진 DELETE 경로를 지나므로 그대로 둠); `INSERT … SELECT`의 SELECT 부분·윈도 함수·`UNION`의 정렬·병렬 스캔의 중단(문장의 첫 단어가 INSERT라 SELECT용 확인점이 꺼져 있음 등; `RECOMMAND.md`에 올림); 정렬 비교 함수의 확인을 가르는 시험.
 
+### 11월 1일 — R64: 문장 중단의 남은 것(윈도·UNION·병렬 스캔·`INSERT … SELECT`·`CALL`), 쓰는 `CALL`과 `VACUUM`의 redo 로그
+
+**왜 이 항목인가**: R63 보고 뒤 분류별 추천표의 "안정성·무결성" 두 항목 — "문장 중단의 남은 것", "쓰는 `CALL`·`OPTIMIZE`가 redo 로그를 비움" — 을 사용자가 골랐다(진행 방식은 늘 같다: 코드 → 시험 → 문서 → 한 번에 커밋·푸시 → 짧은 보고와 고친 추천표). 문법 변경 없음.
+
+**문장 중단 — 어디서 안 멈추는지 재 보고 채움**
+- **찾은 방법**: `max_execution_time`을 100~2,500 ms로 바꿔 가며 문장이 어디서 멈추는지 쟀다(임시 시험, 지움). `UNION ALL … ORDER BY`(30만 행)는 전체 2.2초인데 한도 600 ms부터는 끝까지 멈추지 않았다 — 결과 글자를 행으로 되읽는 `parse_table_output`(CTE·파생 표·`INSERT … SELECT`가 같이 쓰는 함수)에 확인점이 없었다. 행마다 `tick()`을 넣어 이제 한도 바로 뒤에 멈춘다.
+- **느린 병합 반복**: `UNION`의 중복 제거와 `INTERSECT`·`EXCEPT`는 행마다 앞의 행을 훑는 이차 시간 반복이라, 1,024행에 한 번 보는 `tick()`으로는 모자라(행 하나가 0.3 ms면 0.3초 간격) 행마다 시계(`check_now`)를 본다. 윈도 함수는 partition·peer 반복에 `tick()`, 프레임 계산마다 `check_now`. 정렬 비교는 `deadline::checked_less`(1,024번에 한 번): 윈도 정렬, UNION·GROUP BY의 한 스레드 정렬.
+- **병렬 단계**: 풀 스레드의 작업자는 시계가 없고 예외를 던질 수 없다(풀 스레드 밖으로 나간 예외는 프로세스를 끝냄). `ParallelStop`(`statement_deadline.hpp`, R63의 `Watch`를 감쌈)을 문장의 스레드가 만들어 건네고, 작업자는 256행마다(정렬 조각은 비교 1,024번마다) 보다가 멈추며, 돌아온 문장의 스레드가 `finish()`로 오류를 던진다. 적용: 병렬 스캔(WHERE를 청크로), `parallel_sort`(UNION·GROUP BY의 정렬 — 멈춘 조각은 모든 행을 같다고 비교해 정렬이 바로 끝나고, 결과는 문장과 함께 버려짐), R63의 병렬 해시 조인 탐색(같은 도구로 정리).
+- **`INSERT … SELECT`**: 문장의 첫 단어가 INSERT라서 SELECT의 확인점이 꺼져 있었다 — SELECT 실행만 `ReadPhase`로 감쌌다(아직 삽입하지 않았음; 멈춘 뒤 대상 표는 비어 있음).
+- **프로브가 찾은 것 — `CALL` 본문의 SELECT는 `KILL`을 못 들었다**: 교차 조인을 부르는 프로시저가 `KILL QUERY` 뒤에도 11초를 돌았고, 그동안 `CALL`이 구조 쓰기 락을 쥐고 있어 다른 모든 세션(세션 목록 조회 포함)이 기다렸다. 이제 본문의 SELECT는 `ReadPhase`, 본문의 문장 사이마다 kill 깃발을 본다(루프를 빠져나옴; 그 앞 문장이 한 일은 남음 — MySQL과 같음). 오류 *결과*로 돌려줘서 `exec_call_procedure`가 호출자의 변수를 되돌려 준다. 22~30 ms 만에 멈춘다.
+- **효과가 없어 거둔 것**: 집계 값 모으기와 그룹 행 만들기의 작업자에도 확인을 넣어 봤으나, 값 모으기는 일이 몇 ms뿐이고 그룹 행은 한 그룹이 한 작업이라 30만 작업을 줄 세우는 쪽(문장의 스레드)이 시간을 써서 작업자가 멈춰도 시간이 줄지 않았다(한도 600·800 ms에서 여전히 1.0~1.1초에 멈춤). 심은 버그에서도 살아남아 코드를 되돌렸다. 집계 계산 자체(`compute_aggregates`의 행 반복)에는 확인점이 없다 — 한도 200 ms에서 317 ms에 멈춘다(최대 약 0.3초 지연).
+- **일부러 하지 않은 것**: 쓰기가 시작된 뒤의 중단(되돌릴 길이 없음 — 문장 단위 롤백이 있어야 함).
+- **아직 안 듣는 것**(코드로 읽어 확인했고 실행해 보지는 않음): `KillScope`가 문장의 첫 단어가 SELECT·WITH일 때만 읽기 확인점을 켜므로 `EXPLAIN ANALYZE`·`EXECUTE`(준비된 SELECT)·`CREATE TABLE … AS SELECT`·MERGE·다중 표 UPDATE/DELETE의 행 찾기·DDL·트리거와 UDF 본문의 SELECT는 `KILL`이 안 닿는다(`RECOMMAND.md`에 올림).
+
+**redo 로그 — 쓰는 `CALL`과 `VACUUM`**
+- **원인**: `execute()`의 구조 쓰기 락 경로는 쓰는 것으로 보이는 문장이면 먼저 체크포인트(변경이 쌓인 표를 모두 다시 쓰고 로그를 비움)한다. `CALL`이 이 경로이고, 본문의 `UPDATE`는 자기 표 파일도 그 자리에서 썼다(redo가 덮는 문장이 아니라고 보고). 시험으로 확인: `CALL w_ins(1)` 뒤 로그가 401 → 194바이트로 줄었다(비워졌다).
+- **`CALL`**: 본문이 `INSERT`·`INSERT … SELECT`·`UPDATE`·`DELETE`만으로 쓰는지(IF·루프·부른 프로시저를 따라가며) `is_redo_covered_call`이 본다. 쓰는 표는 뷰·동의어가 아니어야 하고(뷰는 카탈로그에 표로 없어서 걸러짐) 트리거가 걸려 있지 않아야 한다(트리거 본문은 무엇이든 될 수 있어서). 그러면 로그를 비우지 않고 `redo_covered_stmt_`를 켜서 UPDATE·연쇄가 표 파일을 쓰지 않으며, 끝에 문장 하나처럼 배치 하나가 된다. 트랜잭션 안에서는 `mark_redo_incomplete`를 하지 않아 COMMIT도 로그로 간다. DDL·`TRUNCATE`·MERGE·뷰·트리거 표를 쓰는 본문은 전과 같다. 파티션 표를 쓰는 본문은 원래 "직접만 가능합니다" 오류라 따로 거르지 않는다.
+- **`VACUUM`**(MySQL 프로토콜의 `OPTIMIZE TABLE`): 트랜잭션 밖이면 먼저 비우지 않고, 다시 쓴 표마다 `redo_mark_flushed`(자동 vacuum이 하던 것)로 표식을 남겨 재생이 그 표의 옛 연산을 무시하게 한다. 크래시 뒤 `VACUUM`을 다시 하면 "0 dead row(s)"인 것으로 확인(표식을 빼면 죽은 행이 되살아남 — 심은 버그가 잡음). 지울 행이 없으면 아무것도 쓰지 않는다.
+- **아직 비우는 것**: 트리거가 걸린 표의 INSERT·UPDATE·DELETE(재 보니 INSERT 한 번에 로그가 1,351 → 119바이트로 비워짐), 뷰를 거친 쓰기, MERGE·다중 표 문장, 열린 트랜잭션 안의 `VACUUM`. DDL은 파일을 직접 쓰므로 비우는 게 맞다(`RECOMMAND.md`에 올림).
+
+**확인**
+- 전체 시험 **873 케이스 / 1,516,199 assertions**(Release 기본 1,516,199, `RUSQL_DML_INDEX_MIN_ROWS=0` 1,516,199, `RUSQL_PROBE_CHECK=1 RUSQL_PROBE_STREAK=0` 1,516,200; R63은 867 / 1,515,768) 통과. 새 시험 6개 + 보강 2개(`[r64]` 8 케이스): `test_statement_stop.cpp`(병렬 정렬 조각의 중단 · UNION·INTERSECT·EXCEPT와 윈도 프레임의 중단 · `CALL`의 SELECT·루프에 대한 `KILL`; 기존 단계 시험에 윈도 정렬·UNION 정렬(조각·순차 둘 다)·병렬 스캔·긴 답 되읽기를 더하고, `INSERT … SELECT`의 KILL을 UPDATE·DELETE의 시험에 더함), `test_redo.cpp`(쓰는 `CALL`이 로그에 남고 표 파일을 안 쓰며 크래시 뒤 같음 — 루프·IF·중첩 호출·외래키 연쇄·트랜잭션 안·ROLLBACK 포함 / 로그를 여전히 비우는 본문(TRUNCATE·트리거 표·뷰)이 크래시 뒤 같음 / `VACUUM`이 쓴 표 하나만 파일이고 크래시 뒤 죽은 행이 안 돌아옴).
+- **심은 버그 22종 중 19종을 시험이 잡았다**(병렬 스캔·정렬 작업자의 확인, `parse_table_output`·UNION 중복 제거·INTERSECT·EXCEPT·윈도 프레임·윈도 정렬·UNION 정렬의 확인, `INSERT … SELECT`의 `ReadPhase`, `CALL`의 kill 확인과 본문 SELECT의 `ReadPhase`, "모든 `CALL`이 덮이지 않음"·`VACUUM`이 로그를 비움·`VACUUM` 표식 없음·덮인 `CALL`이 UPDATE의 표 파일을 씀·트랜잭션 안의 `CALL`이 불완전 표시·트리거 표가 덮임·본문의 아무 문장이나 덮임). 나머지 셋(그룹 작업자·집계 값 모으기 작업자·뷰/파티션 검사)은 살아남았다 — 앞의 둘은 위에서 쓴 이유로, 뷰/파티션 검사는 뷰가 카탈로그에 표로 없어 `!schema`가 이미 거르고 파티션 표는 본문에서 원래 오류라 **아무 영향도 못 주는 죽은 코드**여서 모두 코드를 거뒀다. **처음 돌렸을 때는 여덟이 살아남았는데 그중 여섯은 시험 이름의 쉼표 때문에 Catch 필터가 아무 시험도 고르지 못한 것**(그 시험을 고르는 변이는 모두 "살아남음"으로 보임)이라 필터를 고쳐 처음부터 다시 돌렸다. 남은 진짜 둘 가운데 `VACUUM` 표식은 시험을 보강해서(vacuum 직후 크래시 → 다시 `VACUUM`이 "0 dead row(s)") 잡았고, UNION의 한 스레드 정렬 확인은 환경 변수(`RUSTDB_PARALLEL=0`)로 한 스레드 경로를 시험에 더해 잡았다. 변이 하나는 변이 문장이 틀려 컴파일이 안 되어 고쳐 다시 돌림.
+- **이전 빌드(R63, 465e2af)와 비교**(`diff_builds.py`, 무작위 SELECT 1,500개씩): 순차 시드 셋과 병렬 시드 하나, 6,000개에서 **차이 0**(양쪽이 같은 오류를 낸 질의 48·46·55·61개 포함).
+- **속도**(`bench_query.py`): 읽기 경로 15종을 이전·새 서버로 네 번씩 번갈아 재서 모두 0.97~1.05배(재지 못할 만큼). 새로 빨라진 것: 쓰는 `CALL` 1회(200번의 중앙값) 10.78 → **0.83 ms**(약 13배), 20,000행 표에 변경이 쌓인 채의 `VACUUM small` 26.8 → **4.12 ms**.
+- **크래시 퍼저**: 6종 77라운드(`fuzz_crash` 15, `fuzz_crash_fk` 15, `fuzz_crash_chain` 15, `fuzz_crash_multifk` 12, `fuzz_crash_selfref` 12, `fuzz_concurrent` 8; 라운드를 가로질러 확인한 확정 행 4,234) 불일치 0. 퍼저는 `CALL`·`VACUUM`을 쓰지 않으므로 그 둘의 크래시 복구는 `test_redo.cpp`의 시험이 본다.
+- **호환성 점수판**(진짜 MySQL 8.4.9와 비교): 코퍼스 42개, 문장 3,474개 중 **차이 0**(R63과 같음); 화면의 시험 규모 숫자(`compatSnapshot.json`)를 873 / 1,516,199로 갱신.
+- Diagram 페이지의 두 화면(실린더·카드)에서 "체크포인트가 비우지 않는 것" 줄에 `VACUUM`과 쓰는 `CALL`을 더했다(영어·한국어). `docs`: README(KILL·redo 줄), `SQL.md`(KILL), `SUMMARY.md`(KILL, 시험 규모, 고친 문제 두 줄), `DIFF.md`(KILL 행), `FUNCTIONS.md`, `DEMO.md`(`Stop statement`가 멈추는 것; 낡은 "알려진 한계" 항목 정리), `RECOMMAND.md`(두 항목을 지우고 새 항목 둘, "R64에서 알게 된 것").
+- `DEMO.md`의 낡은 줄을 직접 돌려 확인하고 지웠다: 값 기준 `RANGE` 프레임(`SUM(v) OVER (ORDER BY id RANGE BETWEEN 5 PRECEDING AND CURRENT ROW)`가 MySQL의 값), `DATE('2026-03-05') + 0`이 `20260305`, DATE 열의 `SUM`·`AVG`(40520611·20260305.5), 갱신하는 같은 표를 하위 질의로 읽는 `UPDATE`가 오류 1093, `WITH ROLLUP`(R60부터)과 `KILL`(R53부터)이 "지원하지 않습니다" 목록에 있던 것.
+
+**하지 않은 것**: Debug 빌드 전체 시험; 쓰는 문장이 행을 쓰기 시작한 뒤의 중단; 트리거가 걸린 표의 쓰기가 redo 로그를 비우는 것; `EXPLAIN ANALYZE`·`EXECUTE`·MERGE·DDL 같은 문장의 `KILL`; 집계 계산 자체의 확인점.
+
 ## 요약: 1학기 대비 2학기에 달라진 것
 
 

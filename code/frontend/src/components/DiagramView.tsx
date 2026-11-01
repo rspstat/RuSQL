@@ -159,7 +159,7 @@ const DURABILITY: Item[] = [
   { t: L("Undo log", "Undo 로그"), s: L("per-transaction records for rollback", "롤백용 트랜잭션별 기록") },
   {
     t: L("Checkpoint", "체크포인트"),
-    s: L("rewrites table files when redo grows, before DDL, after recovery; reads (WITH, PREPARE, ANALYZE, read-only CALL) leave the log alone", "redo가 커졌을 때·DDL 전·복구 후 테이블 파일 재기록, 읽기(WITH·PREPARE·ANALYZE·읽기만 하는 CALL)는 로그를 비우지 않음"),
+    s: L("rewrites table files when redo grows, before DDL, after recovery; reads (WITH, PREPARE, ANALYZE), VACUUM and a CALL that only reads or writes with INSERT / UPDATE / DELETE leave the log alone", "redo가 커졌을 때·DDL 전·복구 후 테이블 파일 재기록, 읽기(WITH·PREPARE·ANALYZE)와 VACUUM, 읽기만 하거나 INSERT·UPDATE·DELETE로만 쓰는 CALL은 로그를 비우지 않음"),
   },
   {
     t: L("Crash recovery", "크래시 복구"),

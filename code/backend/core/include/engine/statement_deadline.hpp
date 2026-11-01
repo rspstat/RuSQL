@@ -3,10 +3,11 @@
 // MAX_EXECUTION_TIME: the time a SELECT may run (SET max_execution_time = ms, or the hint /*+ MAX_EXECUTION_TIME(ms) */). The statement is not interrupted from
 // outside: the loops that go through rows (the evaluation of a condition, a join, writing the answer) ask `tick()` as they go, and the stage boundaries of exec_select
 // ask `check_now()`; once the time is up they throw the error MySQL gives (3024). The clock is per thread -- the thread that runs the statement -- so the worker
-// threads of a parallel scan do not ask, and such a scan is stopped at the next step of the thread that started it.
+// threads of a parallel stage ask through a `Watch` that the statement's thread hands them (`ParallelStop`), and the statement's thread throws when they are back.
 
 #include <atomic>
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 
 #include "engine/statement_error.hpp"
@@ -90,10 +91,41 @@ struct Watch {
 };
 inline Watch watch() { return Watch{kill_read_flag, timed, at}; }
 
+// One parallel stage (a probe, a scan in chunks, a sort in slices): the statement's thread makes a `ParallelStop` before it hands the work out, a worker asks `halt(i)` for the row `i` it
+// is at (once in 256 rows) or `due()` and returns when it says so, and the statement's thread calls `finish()` when the workers are back -- it throws the error of the stop there, for a
+// worker cannot (an exception that leaves a pool thread ends the process). What the workers made before they stopped is not the answer: the statement ends.
+struct ParallelStop {
+    Watch watch = deadline::watch();
+    std::atomic<bool> stopped{false};
+    bool due() {
+        if (stopped.load(std::memory_order_relaxed) || watch.due()) {
+            stopped = true;
+            return true;
+        }
+        return false;
+    }
+    bool halt(std::size_t i) { return (i & 255u) == 0 && due(); }
+    void finish() const {
+        if (!stopped) return;
+        check_now();
+        interrupted();
+    }
+};
+
 // For a loop that runs for every row: the clock is read every 1024th call.
 inline void tick() {
     if (kill_read_flag && kill_read_flag->load(std::memory_order_relaxed) != 0) interrupted();
     if (timed && (++ticks & 1023u) == 0) check_now();
+}
+
+// The comparison of a sort on the statement's thread, with the clock and the KILL flag asked once in a thousand calls (a sort of n rows makes n log n of them, and there is no loop
+// over rows to ask in). A sort in slices on the pool's threads asks through a ParallelStop instead (parallel_sort).
+template <typename Less>
+auto checked_less(Less less) {
+    return [less, compared = std::size_t{0}](const auto& a, const auto& b) mutable {
+        if ((++compared & 1023u) == 0) check_now();
+        return less(a, b);
+    };
 }
 
 } // namespace engine::deadline

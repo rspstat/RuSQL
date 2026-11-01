@@ -74,8 +74,8 @@ const NODES: Node[] = [
   },
   {
     id: "durability", x: 825, y: 600, w: 130, h: 104, c: C.disk, name: L("Durability", "내구성"),
-    desc: L("Redo log (checksummed batch per commit, group-commit fsync), WAL, undo log. Checkpoints rewrite the table files (not for reads: WITH, PREPARE, ANALYZE, read-only CALL); on boot: undo unfinished transactions, replay redo, rebuild indexes.",
-            "Redo 로그(커밋마다 체크섬 배치, 그룹 커밋 fsync), WAL, undo 로그. 체크포인트가 테이블 파일을 재기록하고(읽기인 WITH·PREPARE·ANALYZE·읽기만 하는 CALL은 제외), 부팅 시 미완료 트랜잭션 undo → redo 재생 → 인덱스 재구성."),
+    desc: L("Redo log (checksummed batch per commit, group-commit fsync), WAL, undo log. Checkpoints rewrite the table files (not for reads: WITH, PREPARE, ANALYZE, nor for VACUUM and a CALL that only reads or writes with INSERT / UPDATE / DELETE); on boot: undo unfinished transactions, replay redo, rebuild indexes.",
+            "Redo 로그(커밋마다 체크섬 배치, 그룹 커밋 fsync), WAL, undo 로그. 체크포인트가 테이블 파일을 재기록하고(읽기인 WITH·PREPARE·ANALYZE, 그리고 VACUUM과 읽기만 하거나 INSERT·UPDATE·DELETE로만 쓰는 CALL은 제외), 부팅 시 미완료 트랜잭션 undo → redo 재생 → 인덱스 재구성."),
   },
   {
     id: "disk", x: 565, y: 600, w: 130, h: 104, c: C.disk, name: L("Disk files", "디스크 파일"),

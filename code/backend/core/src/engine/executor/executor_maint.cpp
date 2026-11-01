@@ -55,6 +55,7 @@ StringResult Executor::exec_vacuum(SharedDatabase& s, std::optional<std::string>
             for (auto& k : comp_keys) s.composite_indexes.at(k).rebuild(rows_clone);
 
             s.buffer_pool.write_through(t, rows_clone, s.disk);
+            redo_mark_flushed(s, t); // the rows that were removed may still be described by the redo log: its older ops for this table must not be replayed (the log is not emptied for a VACUUM)
         }
     }
 

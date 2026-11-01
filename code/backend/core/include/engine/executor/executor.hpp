@@ -598,6 +598,10 @@ private:
     // whether execute() empties the log first. A statement that only reads, builds temporary tables for itself (WITH, a derived table), sets a variable, prepares a
     // statement, locks tables or analyzes one (the statistics live in memory) changes none; a procedure is read through its body. Not known to be harmless: a change.
     bool may_change_stored_data(const SharedDatabase& s, const Statement& stmt, int depth = 0) const;
+    // Whether `stmt` is a CALL whose body changes stored data only through statements the redo log describes completely (INSERT, INSERT ... SELECT, UPDATE, DELETE -- through the IFs
+    // and loops of the body and the procedures it calls), on plain tables (no view, no synonym, no trigger). Such a CALL leaves the log where it is and is persisted by one
+    // batch of it, as the statements it is made of are; any other body that writes empties the log first. (Called with depth > 0 it asks the same of a statement of a body.)
+    bool is_redo_covered_call(const SharedDatabase& s, const Statement& stmt, int depth = 0) const;
     // The statement a PREPAREd name stands for once the ? are given their values (EXECUTE).
     Result<Statement, std::string> prepared_statement(const std::string& name, const std::vector<std::string>& using_vars);
 

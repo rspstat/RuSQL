@@ -425,7 +425,7 @@ RuSQL이 실제로 받아서 실행하는 SQL 문법을 한 줄씩 정리한 문
 - SET GLOBAL slow_query_log = ON | OFF | TRUE | FALSE | 1 | 0 : 느린 쿼리 로그를 켜고 끔(다른 값은 오류 1231; 로그가 꺼져 있어도 `Slow_queries`는 센다)
 - SET GLOBAL long_query_time = 초(소수 가능, 기본 10) : 이 시간 이상 걸린 문장이 느린 쿼리(글자는 오류 1232, 범위 0 ~ 31536000 밖의 수는 그 안으로 맞춤; MySQL과 달리 세션 값이 따로 없어 서버 전체에 하나, `SET SESSION`도 같은 값을 바꿈)
 - SHOW PROCESSLIST : 접속 중인 세션과 실행 중인 문장
-- KILL [QUERY] n : 세션 n이 실행 중인 문장을 중단(SELECT는 다음 행에서 — 정렬·GROUP BY·DISTINCT·조인 도중에도, 잠금 대기는 즉시; UPDATE·DELETE는 바꿀 행을 찾는 동안에는 멈추고 쓰기 시작한 뒤에는 끝까지)
+- KILL [QUERY] n : 세션 n이 실행 중인 문장을 중단(SELECT는 다음 행에서 — 정렬·GROUP BY·DISTINCT·윈도 함수·조인·UNION·INTERSECT·EXCEPT 도중에도, 잠금 대기는 즉시; `INSERT … SELECT`의 SELECT와 UPDATE·DELETE의 행 찾기도 멈추고 쓰기 시작한 뒤에는 끝까지; `CALL`은 본문의 SELECT 도중과 문장 사이에서 멈추며 그 앞 문장이 한 일은 남음)
 - KILL CONNECTION n / KILL n : 세션 n의 접속을 끊고 그 세션의 트랜잭션을 되돌림
 - SHOW BUFFER POOL : 버퍼 풀 상태
 - SHOW WAL : redo 로그 상태

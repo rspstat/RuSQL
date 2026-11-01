@@ -886,6 +886,7 @@ std::pair<std::vector<std::string>, std::vector<Row>> Executor::parse_table_outp
 
     bool header_parsed = false;
     for (auto& line : lines) {
+        deadline::tick(); // (the text of a long answer is read back into rows: a UNION, a CTE, a derived table, the SELECT of an INSERT ... SELECT)
         if (line.empty()) continue;
         if (line[0] == '+') continue;
         if (line[0] == '|') {

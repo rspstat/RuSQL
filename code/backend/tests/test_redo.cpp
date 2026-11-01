@@ -7,6 +7,7 @@
 
 #include "catch.hpp"
 #include "engine/executor/executor.hpp"
+#include "engine/result_text.hpp"
 
 using namespace engine;
 namespace fs = std::filesystem;
@@ -708,4 +709,185 @@ TEST_CASE("R51: information_schema.recovery reports what the last start did", "[
     Executor ex(dir.path);
     REQUIRE(crash_detected(ex) == "NO");
     REQUIRE(rows_of(ex, "SELECT COUNT(*) FROM information_schema.recovery WHERE REDO_OPS = 0 AND WAL_TXNS_REPLAYED = 0 AND WAL_TXNS_UNDONE = 0").find("| 1 ") != std::string::npos);
+}
+
+// R64: a CALL and a VACUUM used to empty the redo log first (every table with logged changes was rewritten), and the UPDATE of a procedure's body then wrote its table file as well.
+namespace {
+long long redo_log_bytes(Executor& ex) {
+    std::istringstream in(rows_of(ex, "SHOW GLOBAL STATUS LIKE 'Innodb_redo_log_bytes'"));
+    std::string line;
+    int bars = 0;
+    while (std::getline(in, line)) {
+        if (line.empty() || line[0] != '|') continue;
+        if (++bars <= 1) continue;
+        return std::stoll(result_text::split_row(line)[1]);
+    }
+    FAIL("the size of the redo log is not in the answer");
+    return 0;
+}
+
+int rdb_files(const std::string& dir) {
+    int n = 0;
+    for (auto& e : fs::recursive_directory_iterator(dir)) if (e.path().extension() == ".rdb") n++;
+    return n;
+}
+
+// a SELECT's answer without its "N row(s) returned" footer
+std::string table_text(Executor& ex, const std::string& sql) {
+    auto text = rows_of(ex, sql);
+    auto cut = text.rfind("row(s)");
+    return cut == std::string::npos ? text : text.substr(0, cut);
+}
+
+void run(Executor& ex, const std::string& sql) {
+    INFO(sql);
+    auto r = ex.execute_sql(sql);
+    if (r.is_err()) INFO(r.error());
+    REQUIRE(r.is_ok());
+}
+} // namespace
+
+TEST_CASE("R64: a CALL that writes with INSERT, UPDATE and DELETE is logged like those statements, not flushed, and survives a crash", "[r64][redo][durability]") {
+    TempDataDir dir("r64_call_logged");
+    std::string before_t, before_p, before_c;
+    {
+        Executor ex(dir.path);
+        run(ex, "CREATE DATABASE d");
+        run(ex, "USE d");
+        run(ex, "CREATE TABLE t (id INT PRIMARY KEY, v INT)");
+        run(ex, "CREATE TABLE p (id INT PRIMARY KEY, n INT)");
+        run(ex, "CREATE TABLE c (id INT PRIMARY KEY, pid INT, FOREIGN KEY (pid) REFERENCES p(id) ON DELETE CASCADE)");
+        run(ex, "CREATE PROCEDURE w_ins(IN k INT) BEGIN INSERT INTO t VALUES (k, k * 10); UPDATE t SET v = v + 1 WHERE id = k; END");
+        run(ex, "CREATE PROCEDURE w_loop(IN n INT) BEGIN DECLARE i INT DEFAULT 1; WHILE i <= n DO INSERT INTO t VALUES (100 + i, i); SET i = i + 1; END WHILE; "
+                "IF n > 2 THEN DELETE FROM t WHERE id = 101; ELSE UPDATE t SET v = 0 WHERE id = 101; END IF; END");
+        run(ex, "CREATE PROCEDURE w_nested(IN k INT) BEGIN CALL w_ins(k); CALL w_ins(k + 1); DELETE FROM p WHERE id = 1; END"); // (the DELETE cascades into c)
+        run(ex, "INSERT INTO p VALUES (1, 0), (2, 0)");
+        run(ex, "INSERT INTO c VALUES (10, 1), (11, 1), (12, 2)");
+        run(ex, "INSERT INTO t VALUES (1000, 1)");
+        const long long start = redo_log_bytes(ex);
+        REQUIRE(start > 0);
+        REQUIRE(rdb_files(dir.path) == 0);
+        run(ex, "CALL w_ins(1)");
+        const long long after_one = redo_log_bytes(ex);
+        REQUIRE(after_one > start); // (the log stays and grows: it used to be emptied)
+        run(ex, "CALL w_loop(3)");
+        run(ex, "CALL w_nested(5)");
+        REQUIRE(redo_log_bytes(ex) > after_one);
+        REQUIRE(rdb_files(dir.path) == 0); // (no table file was written: the UPDATE of a body wrote its own, and the checkpoint all the others)
+        run(ex, "BEGIN");
+        run(ex, "CALL w_ins(30)");
+        run(ex, "ROLLBACK");
+        run(ex, "BEGIN");
+        run(ex, "CALL w_ins(31)");
+        run(ex, "COMMIT");
+        REQUIRE(rdb_files(dir.path) == 0);
+        before_t = table_text(ex, "SELECT * FROM t ORDER BY id");
+        before_p = table_text(ex, "SELECT * FROM p ORDER BY id");
+        before_c = table_text(ex, "SELECT * FROM c ORDER BY id");
+        REQUIRE(before_t.find("| 30 ") == std::string::npos);   // (rolled back)
+        REQUIRE(before_t.find("| 31 ") != std::string::npos);
+        REQUIRE(before_p.find("| 1 ") == std::string::npos);    // (deleted by the nested call, its children with it)
+        REQUIRE(before_c.find("| 10 ") == std::string::npos);
+        run(ex, "BEGIN");
+        run(ex, "CALL w_ins(32)"); // (still open at the crash)
+    } // crash
+    Executor ex(dir.path);
+    run(ex, "USE d");
+    REQUIRE(table_text(ex, "SELECT * FROM t ORDER BY id") == before_t);
+    REQUIRE(table_text(ex, "SELECT * FROM p ORDER BY id") == before_p);
+    REQUIRE(table_text(ex, "SELECT * FROM c ORDER BY id") == before_c);
+    // and the recovered tables go on: the key of a row that was deleted is free, the keys of the others are not
+    run(ex, "INSERT INTO p VALUES (1, 9)");
+    REQUIRE(ex.execute_sql("INSERT INTO t VALUES (31, 0)").is_err());
+}
+
+TEST_CASE("R64: a CALL whose body the redo log does not describe (TRUNCATE, a table with a trigger, a view) still empties the log and is durable", "[r64][redo][durability]") {
+    TempDataDir dir("r64_call_not_logged");
+    std::string before_t, before_junk, before_tt, before_audit;
+    {
+        Executor ex(dir.path);
+        run(ex, "CREATE DATABASE d");
+        run(ex, "USE d");
+        run(ex, "CREATE TABLE t (id INT PRIMARY KEY, v INT)");
+        run(ex, "CREATE TABLE junk (id INT PRIMARY KEY)");
+        run(ex, "CREATE TABLE tt (id INT PRIMARY KEY)");
+        run(ex, "CREATE TABLE audit (id INT PRIMARY KEY)");
+        run(ex, "CREATE TRIGGER trg AFTER INSERT ON tt FOR EACH ROW INSERT INTO audit VALUES (NEW.id)");
+        run(ex, "CREATE PROCEDURE w_trunc() BEGIN INSERT INTO t VALUES (200, 1); TRUNCATE TABLE junk; END");
+        run(ex, "CREATE PROCEDURE w_trig(IN k INT) BEGIN INSERT INTO tt VALUES (k); END");
+        run(ex, "CREATE VIEW vt AS SELECT id, v FROM t");
+        run(ex, "CREATE PROCEDURE w_view() BEGIN UPDATE vt SET v = 1 WHERE id = 1; END");
+        for (int i = 1; i <= 30; i++) run(ex, "INSERT INTO t VALUES (" + std::to_string(i) + ", 0)");
+        run(ex, "INSERT INTO junk VALUES (1), (2)");
+        const long long before = redo_log_bytes(ex);
+        run(ex, "CALL w_trunc()");
+        REQUIRE(redo_log_bytes(ex) < before); // (the table files were written and the log emptied, as before)
+        for (int i = 300; i < 330; i++) run(ex, "INSERT INTO t VALUES (" + std::to_string(i) + ", 0)");
+        const long long before_trigger = redo_log_bytes(ex);
+        run(ex, "CALL w_trig(7)");
+        REQUIRE(redo_log_bytes(ex) < before_trigger); // (the body of a trigger may be anything: a table with one empties the log, as before)
+        for (int i = 400; i < 430; i++) run(ex, "INSERT INTO t VALUES (" + std::to_string(i) + ", 0)");
+        const long long before_view = redo_log_bytes(ex);
+        run(ex, "CALL w_view()");
+        REQUIRE(redo_log_bytes(ex) < before_view); // (a view is written through to its table: that stays on the old path too)
+        before_t = table_text(ex, "SELECT * FROM t ORDER BY id");
+        before_junk = table_text(ex, "SELECT * FROM junk ORDER BY id");
+        before_tt = table_text(ex, "SELECT * FROM tt ORDER BY id");
+        before_audit = table_text(ex, "SELECT * FROM audit ORDER BY id");
+        REQUIRE(before_t.find("| 200 ") != std::string::npos);
+        REQUIRE(before_junk.find("| 1 ") == std::string::npos);
+        REQUIRE(before_audit.find("| 7 ") != std::string::npos);
+    } // crash
+    Executor ex(dir.path);
+    run(ex, "USE d");
+    REQUIRE(table_text(ex, "SELECT * FROM t ORDER BY id") == before_t);
+    REQUIRE(table_text(ex, "SELECT * FROM junk ORDER BY id") == before_junk);
+    REQUIRE(table_text(ex, "SELECT * FROM tt ORDER BY id") == before_tt);
+    REQUIRE(table_text(ex, "SELECT * FROM audit ORDER BY id") == before_audit);
+}
+
+TEST_CASE("R64: VACUUM leaves the redo log: it writes only the tables it rewrites, and a crash after it loses nothing", "[r64][redo][durability]") {
+    TempDataDir dir("r64_vacuum_logged");
+    std::string before_a, before_b;
+    {
+        Executor ex(dir.path);
+        run(ex, "CREATE DATABASE d");
+        run(ex, "USE d");
+        run(ex, "CREATE TABLE a (id INT PRIMARY KEY, v INT)");
+        run(ex, "CREATE TABLE b (id INT PRIMARY KEY, v INT)");
+        for (int i = 1; i <= 40; i++) {
+            run(ex, "INSERT INTO a VALUES (" + std::to_string(i) + ", " + std::to_string(i) + ")");
+            run(ex, "INSERT INTO b VALUES (" + std::to_string(i) + ", " + std::to_string(i) + ")");
+        }
+        run(ex, "UPDATE a SET v = v + 1 WHERE id <= 30"); // (30 old versions are dead)
+        run(ex, "UPDATE b SET v = v + 1 WHERE id <= 30");
+        REQUIRE(rdb_files(dir.path) == 0);
+        const long long start = redo_log_bytes(ex);
+        auto vacuumed = ex.execute_sql("VACUUM a");
+        REQUIRE(vacuumed.is_ok());
+        REQUIRE(vacuumed.value().find("VACUUM complete. 0 ") == std::string::npos); // (it removed something)
+        REQUIRE(rdb_files(dir.path) == 1);                                          // (only the table it rewrote is a file: b is still in the log)
+        REQUIRE(redo_log_bytes(ex) >= start);                                       // (the log is not emptied)
+        run(ex, "INSERT INTO b VALUES (100, 1)");
+        run(ex, "UPDATE a SET v = 5 WHERE id = 31");
+        run(ex, "VACUUM"); // (every table: b is rewritten now, a has dead versions again)
+        REQUIRE(rdb_files(dir.path) == 2);
+    } // crash right after the vacuum
+    {
+        Executor ex(dir.path);
+        run(ex, "USE d");
+        // the table files hold no dead version, and the marker of the vacuum tells the replay that the older ops of both tables are in them: no dead version comes back
+        auto again = ex.execute_sql("VACUUM");
+        REQUIRE(again.is_ok());
+        REQUIRE(again.value().find("VACUUM complete. 0 dead row(s) removed.") != std::string::npos);
+        run(ex, "UPDATE b SET v = 7 WHERE id = 32");
+        run(ex, "DELETE FROM a WHERE id = 1");
+        before_a = table_text(ex, "SELECT * FROM a ORDER BY id");
+        before_b = table_text(ex, "SELECT * FROM b ORDER BY id");
+    } // crash
+    Executor ex(dir.path);
+    run(ex, "USE d");
+    REQUIRE(table_text(ex, "SELECT * FROM a ORDER BY id") == before_a);
+    REQUIRE(table_text(ex, "SELECT * FROM b ORDER BY id") == before_b);
+    REQUIRE(table_text(ex, "SELECT COUNT(*) FROM a") == table_text(ex, "SELECT COUNT(*) FROM a WHERE id > 1")); // (a row that was deleted after the vacuum stays deleted)
 }

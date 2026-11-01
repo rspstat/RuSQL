@@ -9,7 +9,7 @@
 |---|---|
 | 무엇 | MySQL 호환 프로토콜을 쓰는 **자체 RDBMS 엔진**(C++20) + 데스크톱 클라이언트(Tauri/React) + Claude 연동(MCP) |
 | 1학기 → 2학기 | Rust 프로토타입 → **C++ 전면 재작성**, "기능 추가"에서 **정합성·동시성·성능을 실제로 파고드는 심화**로 |
-| 규모 | 테스트 **867 케이스 / 1,515,768 assertions** (2학기 초 218 케이스 / 3,080 assertions) |
+| 규모 | 테스트 **873 케이스 / 1,516,199 assertions** (2학기 초 218 케이스 / 3,080 assertions) |
 | 엔진 구성 | 파서 → 비용 기반 플래너 → 실행기, MVCC·행 단위 락·데드락 감지, redo 로그 기반 내구성, B+Tree·해시·복합 인덱스 |
 
 ## 2학기에 만든 것 (엔진)
@@ -18,7 +18,7 @@
 - **행 단위 동시 쓰기 + 블로킹 락 + 데드락 감지**.
 - **내구성**: autocommit도 응답 전에 fsync(redo 로그), 크래시 후 재생. 테이블 파일은 체크포인트에서만 다시 씀.
 - **쿼리 엔진**: 조인 알고리즘 5종(중첩 루프·해시·정렬 병합·인덱스 NL·역방향 인덱스 NL)과 비용 기반 선택, CTE(재귀 포함), 윈도우 함수, 서브쿼리, 파티셔닝, 저장 프로시저·트리거. 지원하는 SQL 문법 전체는 `SQL.md`에 한 줄씩 정리되어 있다.
-- **운영 기능**: `KILL [QUERY] n`(실행 중인 SELECT — 정렬·그룹·조인 도중에도 —, UPDATE·DELETE가 행을 찾는 동안, 락 대기를 멈추거나 세션을 끊음), `SHOW STATUS`(문장 종류별 수·연결·버퍼 풀·redo·락 대기의 실제 카운터, 데이터베이스 락 없이 읽음), `EXPLAIN ANALYZE`가 조인마다 알고리즘을, 하위 질의는 실행 수와 시간을 따로 보여 줌, **느린 쿼리 로그**(`SET GLOBAL slow_query_log` / `long_query_time`, `Slow_queries`, `information_schema.slow_log`와 MySQL 모양의 `slow_query.log`)와 `innodb_trx`가 트랜잭션을 연 세션을 말함, `GROUP BY … WITH ROLLUP`, 서버가 `8.4.9`라고 말함.
+- **운영 기능**: `KILL [QUERY] n`(실행 중인 SELECT — 정렬·그룹·윈도·조인·UNION 도중에도 —, `INSERT … SELECT`의 SELECT, `CALL` 본문의 SELECT와 루프, UPDATE·DELETE가 행을 찾는 동안, 락 대기를 멈추거나 세션을 끊음), `SHOW STATUS`(문장 종류별 수·연결·버퍼 풀·redo·락 대기의 실제 카운터, 데이터베이스 락 없이 읽음), `EXPLAIN ANALYZE`가 조인마다 알고리즘을, 하위 질의는 실행 수와 시간을 따로 보여 줌, **느린 쿼리 로그**(`SET GLOBAL slow_query_log` / `long_query_time`, `Slow_queries`, `information_schema.slow_log`와 MySQL 모양의 `slow_query.log`)와 `innodb_trx`가 트랜잭션을 연 세션을 말함, `GROUP BY … WITH ROLLUP`, 서버가 `8.4.9`라고 말함.
 
 ## 2학기에 만든 것 (앱·연동)
 
@@ -221,6 +221,8 @@
 | **MySQL 프로토콜의 오류가 전부 번호 1064**(중복 키·외래키·모르는 열도) | 드라이버·ORM이 번호로 재시도·중단·변환을 정함 — 이제 약 40종을 MySQL 번호로(코퍼스 전체의 다른 번호 385개 → 약 20개), 빠뜨린 NOT NULL 열은 1364 |
 | **`RENAME TABLE` 뒤 `information_schema`가 옛 표 이름을 말함**, **부모 표의 이름을 바꾸면 자식의 외래키가 옛 이름에 매달려 INSERT가 실패함** | 표 이름을 바꾸는 마이그레이션 뒤 앱의 스키마 화면·자식 INSERT가 깨짐 |
 | **집계만 있는 한 행짜리 답의 `FOUND_ROWS()`가 0**(`SELECT COUNT(*) FROM t; SELECT FOUND_ROWS()` — MySQL은 1; R37부터 있었음) | 페이지 나누기 쿼리와 느린 쿼리 로그의 보낸 행 수가 틀림 |
+| **`KILL QUERY`가 `CALL` 본문의 SELECT와 루프를 못 멈춤**(교차 조인을 부르는 프로시저가 `KILL` 뒤에도 11초를 돌며 데이터베이스 전체의 락을 쥠), 윈도 함수·UNION의 병합과 정렬·병렬 스캔·`INSERT … SELECT`의 SELECT도 끝까지 감 | 서버가 멎은 것처럼 보이고 세션 패널의 `Stop statement`가 안 들음 — 이제 모두 멈춤 |
+| **`CALL` 본문의 `INSERT`·`UPDATE`·`DELETE`와 `VACUUM`(`OPTIMIZE TABLE`)이 쌓인 redo 로그를 체크포인트로 비움**(변경이 쌓인 표를 모두 다시 쓰고, 본문의 UPDATE마다 표 파일도 씀) | 프로시저로 쓰는 앱이 redo의 이점(커밋 = 작은 배치 + fsync 1번)을 못 얻음 — 이제 문장 하나처럼 배치 하나, `VACUUM`은 다시 쓴 표만 |
 
 성능·정합성 작업의 커밋들에서 찾은 기존 버그는 모두 212건입니다(전체 목록은 `DATE.md`).
 

@@ -2297,15 +2297,18 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
             auto uf = s.user_functions;
             std::string cur_db = current_db;
             std::string cur_user = auth_user;
+            deadline::ParallelStop stop;
             ThreadPool::global().parallel_for(n_chunks, [&](std::size_t ci) {
                 std::size_t start = ci * PARALLEL_CHUNK;
                 std::size_t end = std::min(start + PARALLEL_CHUNK, visible_ptrs.size());
                 sync_udf_context(uf, cur_db, cur_user);
                 auto& out = chunk_results[ci];
                 for (std::size_t i = start; i < end; i++) {
+                    if (stop.halt(i)) return;
                     if (matches_condexpr(*visible_ptrs[i], condition)) out.push_back(visible_ptrs[i]);
                 }
             });
+            stop.finish();
             for (auto& chunk : chunk_results) matched.insert(matched.end(), chunk.begin(), chunk.end());
         } else {
             for (const Row* r : visible_ptrs) {
@@ -3052,7 +3055,7 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
             if (parallel_enabled() && group_rows.size() >= parallel_min_rows()) {
                 parallel_sort(group_rows, less); // unstable, matches Rust's par_sort_unstable_by
             } else {
-                std::stable_sort(group_rows.begin(), group_rows.end(), less);
+                std::stable_sort(group_rows.begin(), group_rows.end(), deadline::checked_less(less));
             }
             explain_trace::mark("Sort groups", group_rows.size());
         }
