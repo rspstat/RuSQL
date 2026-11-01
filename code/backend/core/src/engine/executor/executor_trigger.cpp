@@ -74,6 +74,23 @@ StringResult Executor::fire_triggers(SharedDatabase& s, const std::string& table
                     if (!column.empty() && column[0] != '_') vars["NEW." + to_lower_str(column)] = value;
                 }
             }
+            // The row's values are variables of the body while it runs: the condition of an IF or a WHILE, the expression a CALL is given and a SELECT ... INTO read NEW.x / OLD.x
+            // as the statements of the body do (NEW and OLD are no columns of any table, so they read as NULL). The procedure that is called has variables of its own and does not
+            // see them -- nor does the body see the variables of a procedure whose statement fired the trigger.
+            struct BodyScope {
+                std::unordered_map<std::string, std::string>& values;
+                std::unordered_map<std::string, std::string>& types;
+                std::unordered_map<std::string, std::string> outer_values, outer_types;
+                BodyScope(std::unordered_map<std::string, std::string>& v, std::unordered_map<std::string, std::string>& t, const std::unordered_map<std::string, std::string>& row)
+                    : values(v), types(t), outer_values(std::move(v)), outer_types(std::move(t)) {
+                    values = row;
+                    types.clear();
+                }
+                ~BodyScope() {
+                    values = std::move(outer_values);
+                    types = std::move(outer_types);
+                }
+            } scope(proc_vars, proc_var_types, vars);
             for (const Statement& original : body) {
                 if (auto* set = std::get_if<Statement::ProcSet>(&original.data); set && set->name.size() > 4 && set->name[3] == '.') {
                     // SET NEW.x = expr: the value of the row that is inserted
@@ -93,6 +110,7 @@ StringResult Executor::fire_triggers(SharedDatabase& s, const std::string& table
                     const std::string value = eval_arith(Row{}, expr);
                     (*row.new_row)[column] = value;
                     vars["NEW." + to_lower_str(column)] = value;
+                    proc_vars["NEW." + to_lower_str(column)] = value;
                     continue;
                 }
                 Statement stmt = original;
@@ -101,6 +119,22 @@ StringResult Executor::fire_triggers(SharedDatabase& s, const std::string& table
                 auto result = execute_with_s(s, std::move(stmt));
                 if (result.is_err()) {
                     return StringResult::Err("Trigger '" + name + "' failed" + (timing == "AFTER" ? " after the change was made" : "") + ": " + result.error());
+                }
+                // SET NEW.x inside an IF or a loop of the body: the row that is inserted takes the value, in a BEFORE INSERT trigger only (as at the top of the body)
+                for (auto& [key, value] : vars) {
+                    if (key.compare(0, 4, "NEW.") != 0) continue;
+                    auto now = proc_vars.find(key);
+                    if (now == proc_vars.end() || now->second == value) continue;
+                    if (timing != "BEFORE" || event != "INSERT" || !row.new_row) {
+                        return StringResult::Err("Trigger '" + name + "': SET NEW.x is supported in BEFORE INSERT triggers only");
+                    }
+                    for (auto& [stored, current] : *row.new_row) {
+                        if (to_lower_str(stored) == key.substr(4)) {
+                            current = now->second;
+                            break;
+                        }
+                    }
+                    value = now->second;
                 }
             }
         }

@@ -54,7 +54,7 @@
       "name": "routines",
       "en": "Stored procedures, functions, triggers, prepared statements",
       "ko": "저장 프로시저·함수·트리거·준비된 문장",
-      "statements": 203,
+      "statements": 217,
       "different": 0,
       "bothFail": 36
     },
@@ -341,8 +341,8 @@
   ],
   "conformanceCases": 4099,
   "tests": {
-    "cases": 883,
-    "assertions": 1516500
+    "cases": 885,
+    "assertions": 1516600
   },
   "bugsFound": 206
 }

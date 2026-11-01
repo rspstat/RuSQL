@@ -415,6 +415,15 @@ std::string Executor::scalar_subquery_value(SharedDatabase& s, const ArithExpr::
 const std::string* Executor::get_col(const Row& row, const std::string& col) {
     if (auto it = row.find(col); it != row.end()) return &it->second;
 
+    // a trigger's NEW.x / OLD.x (the variables of its body): the row keeps the column in lower case, and a column is read apart from case
+    if (col.size() > 4 && col[3] == '.' && (col.compare(0, 3, "NEW") == 0 || col.compare(0, 3, "OLD") == 0)) {
+        std::string key = col;
+        for (std::size_t i = 4; i < key.size(); i++) key[i] = static_cast<char>(std::tolower(static_cast<unsigned char>(key[i])));
+        if (key != col) {
+            if (auto it = row.find(key); it != row.end()) return &it->second;
+        }
+    }
+
     if (auto dot = col.rfind('.'); dot != std::string::npos) {
         std::string suffix = "." + col.substr(0, dot) + "." + col.substr(dot + 1);
         for (auto& [k, v] : row) {

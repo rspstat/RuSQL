@@ -314,3 +314,99 @@ TEST_CASE("procedures and triggers survive a restart", "[routines][persistence]"
     REQUIRE(q(ex, "SELECT id, v FROM lg WHERE note = 'ins'") == Rows{{"9", "91"}});
     REQUIRE(q(ex, "SELECT v FROM t WHERE id = 9") == Rows{{"91"}});
 }
+
+// R66: the row's values are variables of a trigger body. `CALL p(NEW.id)` handed the procedure NULL (NEW is a keyword, so the argument is an expression, kept as JSON and
+// evaluated by the CALL with the caller's variables -- which did not include the row), and an IF, a WHILE or a SELECT ... INTO of the body read NEW.x as NULL / as the text "NEW.x".
+TEST_CASE("R66: a trigger body reads NEW and OLD in a CALL argument, an IF, a WHILE and a SELECT INTO", "[routines][trigger][r66]") {
+    TempDataDir dir("r66_trigger_row_values");
+    Executor ex(dir.path);
+    open_db(ex);
+    ok(ex, "CREATE TABLE a (id INT PRIMARY KEY, name VARCHAR(20), qty INT)");
+    ok(ex, "CREATE TABLE seen (tag VARCHAR(20), k VARCHAR(40))");
+    ok(ex, "CREATE PROCEDURE note(IN tag VARCHAR(20), IN val VARCHAR(40)) BEGIN INSERT INTO seen VALUES (tag, val); END");
+    auto trigger = [&](const std::string& event, const std::string& body) {
+        ok(ex, "DROP TRIGGER IF EXISTS t_row");
+        ok(ex, "CREATE TRIGGER t_row AFTER " + event + " ON a FOR EACH ROW " + body);
+    };
+    auto seen = [&](const std::string& tag) { return q(ex, "SELECT k FROM seen WHERE tag = '" + tag + "' ORDER BY k"); };
+
+    // the argument of a CALL: the column, an expression, a function of it, in either case
+    trigger("INSERT", "CALL note('plain', NEW.id)");
+    ok(ex, "INSERT INTO a VALUES (1, 'x', 10)");
+    REQUIRE(seen("plain") == Rows{{"1"}});
+    trigger("INSERT", "CALL note('expr', NEW.id + NEW.qty)");
+    ok(ex, "INSERT INTO a VALUES (2, 'y', 20)");
+    REQUIRE(seen("expr") == Rows{{"22"}});
+    trigger("INSERT", "CALL note('upper', UPPER(NEW.name))");
+    ok(ex, "INSERT INTO a VALUES (3, 'zed', 30)");
+    REQUIRE(seen("upper") == Rows{{"ZED"}});
+    trigger("INSERT", "CALL note('case', new.ID + NEW.Qty)");
+    ok(ex, "INSERT INTO a VALUES (4, 'w', 40)");
+    REQUIRE(seen("case") == Rows{{"44"}});
+    // OLD and NEW of an UPDATE, OLD of a DELETE
+    trigger("UPDATE", "CALL note('upd', CONCAT(OLD.qty, '>', NEW.qty))");
+    ok(ex, "UPDATE a SET qty = 7 WHERE id = 1");
+    REQUIRE(seen("upd") == Rows{{"10>7"}});
+    trigger("DELETE", "CALL note('del', OLD.name)");
+    ok(ex, "DELETE FROM a WHERE id = 3");
+    REQUIRE(seen("del") == Rows{{"zed"}});
+    trigger("DELETE", "CALL note('oldcase', OLD.NAME)");
+    ok(ex, "DELETE FROM a WHERE id = 4");
+    REQUIRE(seen("oldcase") == Rows{{"w"}});
+
+    // IF / ELSE on the row, with a CALL inside
+    trigger("INSERT", "BEGIN IF NEW.qty > 15 THEN CALL note('big', NEW.id); ELSE CALL note('small', NEW.id); END IF; END");
+    ok(ex, "INSERT INTO a VALUES (5, 'v', 50)");
+    ok(ex, "INSERT INTO a VALUES (6, 'u', 5)");
+    REQUIRE(seen("big") == Rows{{"5"}});
+    REQUIRE(seen("small") == Rows{{"6"}});
+    // SELECT ... INTO of a column of the row (a variable of the session, then a variable of the body)
+    trigger("INSERT", "BEGIN SELECT NEW.id INTO @got; CALL note('into', @got); END");
+    ok(ex, "INSERT INTO a VALUES (7, 't', 70)");
+    REQUIRE(seen("into") == Rows{{"7"}});
+    // WHILE on the row: two rounds for qty 90 (i < 90 - 88)
+    trigger("INSERT", "BEGIN DECLARE i INT DEFAULT 0; WHILE i < NEW.qty - 88 DO CALL note('while', i); SET i = i + 1; END WHILE; END");
+    ok(ex, "INSERT INTO a VALUES (9, 'nine', 90)");
+    REQUIRE(seen("while") == Rows{{"0"}, {"1"}});
+
+    // the variables of a procedure whose statement fired the trigger come back when the trigger is done
+    // (and so do their types: n is still an INT after the trigger has run, 7 / 2 is 4)
+    ok(ex, "CREATE PROCEDURE ins_a(IN k INT) BEGIN DECLARE n INT DEFAULT 0; INSERT INTO a VALUES (k, 'p', 1); SET n = 7 / 2; INSERT INTO seen VALUES ('after', k); INSERT INTO seen VALUES ('typed', n); END");
+    trigger("INSERT", "CALL note('fired', NEW.id)");
+    ok(ex, "CALL ins_a(11)");
+    REQUIRE(seen("fired") == Rows{{"11"}});
+    REQUIRE(seen("after") == Rows{{"11"}});
+    REQUIRE(seen("typed") == Rows{{"4"}});
+}
+
+// A SET NEW.x inside an IF or a loop of the body was lost (only a SET at the top of the body reached the row that is inserted): `IF NEW.qty < 0 THEN SET NEW.qty = 0; END IF`
+// left the -5 in the table.
+TEST_CASE("R66: SET NEW.x inside an IF or a WHILE of a BEFORE INSERT trigger changes the row that is inserted", "[routines][trigger][r66]") {
+    TempDataDir dir("r66_trigger_set_new");
+    Executor ex(dir.path);
+    open_db(ex);
+    ok(ex, "CREATE TABLE a (id INT PRIMARY KEY, name VARCHAR(20), qty INT)");
+    ok(ex, "CREATE TABLE seen (tag VARCHAR(20), k VARCHAR(40))");
+    // (the last statement of the body reads the value the IF set: NEW.qty is 0 for the -5)
+    ok(ex, "CREATE TRIGGER t_clamp BEFORE INSERT ON a FOR EACH ROW BEGIN IF NEW.qty < 0 THEN SET NEW.qty = 0; END IF; IF NEW.name = 'x' THEN SET NEW.name = CONCAT('fixed-', NEW.id); END IF; "
+                "INSERT INTO seen VALUES ('clamped', NEW.qty); END");
+    ok(ex, "INSERT INTO a VALUES (1, 'neg', -5), (2, 'pos', 7), (3, 'x', 1)");
+    REQUIRE(q(ex, "SELECT id, name, qty FROM a ORDER BY id") == Rows{{"1", "neg", "0"}, {"2", "pos", "7"}, {"3", "fixed-3", "1"}});
+    // (the value one row got is not the next row's: 7 stays 7 after the -5 became 0)
+    REQUIRE(q(ex, "SELECT k FROM seen WHERE tag = 'clamped' ORDER BY k") == Rows{{"0"}, {"1"}, {"7"}});
+    ok(ex, "DROP TRIGGER t_clamp");
+    // a SET at the top of the body, then an IF that reads what it set
+    ok(ex, "CREATE TRIGGER t_seq BEFORE INSERT ON a FOR EACH ROW BEGIN SET NEW.qty = NEW.qty + 1; IF NEW.qty > 10 THEN SET NEW.name = 'over'; END IF; END");
+    ok(ex, "INSERT INTO a VALUES (5, 'seq', 10), (6, 'seq', 3)");
+    REQUIRE(q(ex, "SELECT id, name, qty FROM a WHERE id >= 5 ORDER BY id") == Rows{{"5", "over", "11"}, {"6", "seq", "4"}});
+    ok(ex, "DROP TRIGGER t_seq");
+    ok(ex, "CREATE TRIGGER t_grow BEFORE INSERT ON a FOR EACH ROW BEGIN WHILE NEW.qty < 10 DO SET NEW.qty = NEW.qty * 2; END WHILE; END");
+    ok(ex, "INSERT INTO a VALUES (4, 'grow', 3)");
+    REQUIRE(q(ex, "SELECT qty FROM a WHERE id = 4") == Rows{{"12"}});
+    // anywhere else the row cannot be changed from inside an IF, as at the top of the body: it is an error, not a value that is dropped
+    ok(ex, "CREATE TRIGGER t_upd BEFORE UPDATE ON a FOR EACH ROW BEGIN IF NEW.qty > 100 THEN SET NEW.qty = 100; END IF; END");
+    REQUIRE(fails(ex, "UPDATE a SET qty = 500 WHERE id = 2").find("BEFORE INSERT triggers only") != std::string::npos);
+    REQUIRE(q(ex, "SELECT qty FROM a WHERE id = 2") == Rows{{"7"}});
+    ok(ex, "UPDATE a SET qty = 50 WHERE id = 2"); // (the IF is false: nothing is set)
+    REQUIRE(q(ex, "SELECT qty FROM a WHERE id = 2") == Rows{{"50"}});
+}

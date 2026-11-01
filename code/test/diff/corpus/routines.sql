@@ -274,3 +274,33 @@ CALL tn_lab(9)
 CALL tn_pu()
 --CREATE PROCEDURE tn_pv() BEGIN SELECT 1 / 0 INTO @ux; SELECT @ux; END
 CALL tn_pv()
+
+# a trigger body reads NEW / OLD in the argument of a CALL, in an IF and a WHILE and in a SELECT ... INTO; SET NEW.x inside an IF changes the row that is inserted (R66)
+--CREATE TABLE tr_a (id INT PRIMARY KEY, name VARCHAR(20), qty INT)
+--CREATE TABLE tr_seen (tag VARCHAR(20), k VARCHAR(40))
+--CREATE PROCEDURE tr_note(IN tag VARCHAR(20), IN val VARCHAR(40)) BEGIN INSERT INTO tr_seen VALUES (tag, val); END
+--CREATE TRIGGER tr_ai AFTER INSERT ON tr_a FOR EACH ROW BEGIN IF NEW.qty > 15 THEN CALL tr_note('big', NEW.id); ELSE CALL tr_note('small', NEW.id); END IF; CALL tr_note('sum', NEW.id + NEW.qty); CALL tr_note('upper', UPPER(NEW.name)); END
+--CREATE TRIGGER tr_au AFTER UPDATE ON tr_a FOR EACH ROW CALL tr_note('upd', CONCAT(OLD.qty, '>', NEW.qty))
+--CREATE TRIGGER tr_ad AFTER DELETE ON tr_a FOR EACH ROW CALL tr_note('del', OLD.name)
+INSERT INTO tr_a VALUES (1, 'x', 10), (2, 'yy', 20)
+SELECT tag, k FROM tr_seen ORDER BY tag, k
+UPDATE tr_a SET qty = 7 WHERE id = 1
+DELETE FROM tr_a WHERE id = 2
+SELECT tag, k FROM tr_seen ORDER BY tag, k
+--CREATE TABLE tr_w (id INT PRIMARY KEY, n INT)
+--CREATE TRIGGER tr_wi AFTER INSERT ON tr_w FOR EACH ROW BEGIN DECLARE i INT DEFAULT 0; WHILE i < NEW.n DO CALL tr_note('while', CONCAT(NEW.id, ':', i)); SET i = i + 1; END WHILE; END
+INSERT INTO tr_w VALUES (1, 2), (2, 0), (3, 1)
+SELECT tag, k FROM tr_seen WHERE tag = 'while' ORDER BY k
+--CREATE TABLE tr_i (id INT PRIMARY KEY)
+--CREATE TRIGGER tr_ii AFTER INSERT ON tr_i FOR EACH ROW BEGIN SELECT NEW.id * 2 INTO @tr_got; CALL tr_note('into', @tr_got); END
+INSERT INTO tr_i VALUES (21)
+SELECT tag, k FROM tr_seen WHERE tag = 'into'
+--CREATE TABLE tr_b (id INT PRIMARY KEY, name VARCHAR(20), qty INT)
+--CREATE TRIGGER tr_bi BEFORE INSERT ON tr_b FOR EACH ROW BEGIN IF NEW.qty < 0 THEN SET NEW.qty = 0; END IF; IF NEW.name = 'x' THEN SET NEW.name = CONCAT('fixed-', NEW.id); END IF; WHILE NEW.qty > 0 AND NEW.qty < 10 DO SET NEW.qty = NEW.qty * 2; END WHILE; INSERT INTO tr_seen VALUES ('clamped', NEW.qty); END
+INSERT INTO tr_b VALUES (1, 'neg', -5), (2, 'pos', 7), (3, 'x', 1), (4, 'big', 50)
+SELECT id, name, qty FROM tr_b ORDER BY id
+SELECT k FROM tr_seen WHERE tag = 'clamped' ORDER BY k
+--CREATE TABLE tr_s (id INT PRIMARY KEY, name VARCHAR(20), qty INT)
+--CREATE TRIGGER tr_si BEFORE INSERT ON tr_s FOR EACH ROW BEGIN SET NEW.qty = NEW.qty + 1; IF NEW.qty > 10 THEN SET NEW.name = 'over'; END IF; END
+INSERT INTO tr_s VALUES (5, 'seq', 10), (6, 'seq', 3)
+SELECT id, name, qty FROM tr_s ORDER BY id

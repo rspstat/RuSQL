@@ -470,14 +470,14 @@ RuSQL이 실제로 받아서 실행하는 SQL 문법을 한 줄씩 정리한 문
 - DROP PROCEDURE [IF EXISTS] 이름 : 프로시저 삭제
 - CREATE FUNCTION 이름(매개변수 타입, ...) RETURNS 타입 [DETERMINISTIC] RETURN 식 : 사용자 정의 함수 생성
 - DROP FUNCTION [IF EXISTS] 이름 : 함수 삭제
-- CREATE TRIGGER 이름 BEFORE | AFTER INSERT | UPDATE | DELETE ON t FOR EACH ROW 본문 : 행마다 도는 트리거 생성(`NEW.col` · `OLD.col` 사용)
+- CREATE TRIGGER 이름 BEFORE | AFTER INSERT | UPDATE | DELETE ON t FOR EACH ROW 본문 : 행마다 도는 트리거 생성(`NEW.col` · `OLD.col`은 본문의 문장·`CALL` 인자·`IF`·`WHILE` 조건·`SELECT … INTO`에서 읽힘)
 - DROP TRIGGER [IF EXISTS] 이름 : 트리거 삭제
 - 본문 안의 문장 : 일반 DML · SELECT · `SELECT ... INTO 변수` · `CALL`
 
 프로시저 · 트리거 본문의 제어문:
 
 - DECLARE 변수 타입 [DEFAULT 값] : 지역 변수 선언
-- SET 변수 = 식 : 변수에 값 넣기(`SET NEW.col = 식`으로 BEFORE 트리거에서 입력값 바꾸기)
+- SET 변수 = 식 : 변수에 값 넣기(`SET NEW.col = 식`으로 BEFORE INSERT 트리거에서 입력값 바꾸기 — 본문 맨 위에서도 `IF`·`WHILE` 안에서도)
 - IF 조건 THEN ... [ELSEIF 조건 THEN ...] [ELSE ...] END IF : 조건 분기
 - WHILE 조건 DO ... END WHILE : 조건이 참인 동안 반복
 - LOOP ... END LOOP : 무한 반복(LEAVE로 탈출)

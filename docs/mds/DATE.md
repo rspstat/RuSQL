@@ -2688,6 +2688,31 @@ VS Code 스타일 탭 드래그 순서 변경(요청의 1번 항목)은 같은 �
 
 **하지 않은 것**: Debug 빌드 전체 시험; 빌드 간 무작위 SELECT 차분(`diff_builds.py` — 이 라운드는 읽기 경로를 바꾸지 않았음); 크래시 퍼저에 트리거·뷰·`MERGE` 추가; `UPDATE`·`DELETE`의 인덱스 카드(`EXPLAIN UPDATE`가 먼저); ERD·결과 패널·Journey의 새 모양; 트리거 안 `CALL`의 `NEW.x` 인자; R63 `GROUP BY` 중단 시험의 원인 고치기.
 
+### 11월 1일 — R66: 트리거 본문이 `NEW`/`OLD`를 못 읽던 오답 (`CALL p(NEW.id)`가 NULL을 넘김 외 셋)
+
+**왜 이 항목인가**: R65 보고에서 찾아 추천표의 안정성 분류 맨 위에 올린 조용한 오답 — 트리거 안 `CALL p(NEW.id)`가 프로시저에 NULL을 넘김 — 을 사용자가 "일단 오답 고쳐주세요"로 골랐다. 문법 변경 없음.
+
+**찾은 것 — 한 줄이 아니라 뿌리가 같은 넷**
+- **원인**: `NEW`·`OLD`는 키워드 토큰(`NewKw`·`OldKw`)이라 `CALL note('x', NEW.id)`의 인자는 "단순한 값"이 아니라 식(`"\x01"` + JSON)으로 저장된다. 트리거가 행의 값을 끼워 넣는 `substitute_variables`(`executor_vars.cpp`의 `statement()`)는 `\x01` 인자를 건너뛰고, `CALL`은 호출할 때 호출자의 변수(`proc_vars`와 `@변수`)로만 식을 평가하는데 `NEW.id`는 거기에 없어서 NULL. 프로브(변형 10가지: 열·`NEW.id + 1`·`UPPER(NEW.name)`·`CONCAT(...)`·소문자 `new.id`·BEFORE·UPDATE의 `OLD`/`NEW`·DELETE의 `OLD`)가 **모두 NULL**.
+- **같은 원인의 다른 모양**(프로브): `IF NEW.qty > 15 THEN …`의 조건은 `proc_vars`만 보므로 NEW.qty가 NULL이라 늘 거짓 — `ELSE` 가지가 타고 그 안의 `NEW.id`는 **글자 `NEW.id` 그대로** 들어갔다. `WHILE i < NEW.qty - 88`은 한 번도 안 돌았고, `SELECT NEW.id INTO @got`는 변수에 글자 `NEW.id`를 넣었고, 사용자 함수 `twice(NEW.id)`는 오류로 끝났다. 모두 오류 없이(함수만 오류) 틀렸다.
+- **고치고 나서 드러난 넷째**: BEFORE INSERT 트리거의 `IF NEW.qty < 0 THEN SET NEW.qty = 0; END IF`가 -5를 그대로 두었다 — 본문 맨 위의 `SET NEW.x`만 삽입될 행에 닿고 `IF`·루프 안의 `SET`은 변수에만 쓰고 버려졌다(전에는 `IF`가 늘 거짓이라 보이지 않던 것).
+
+**고침** (`executor_trigger.cpp`, `executor_eval.cpp`)
+- **행의 값이 본문의 변수**: 트리거가 행마다 도는 동안 `NEW.x`/`OLD.x`를 본문의 변수(`proc_vars`)로 둔다(`BodyScope`). 문장에 값을 끼워 넣던 기존 길은 그대로이고, `IF`·`WHILE` 조건, `CALL` 인자, `SELECT … INTO`가 같은 값을 읽는다. 부르는 프로시저는 자기 변수만 본다(`exec_call_procedure`가 `proc_vars`를 비웠다 돌려줌 — MySQL처럼 `NEW`가 안 보임). 트리거를 일으킨 문장이 프로시저 안에 있었다면 그 프로시저의 변수는 트리거 본문에서 가려지고, 트리거가 끝나면(오류로 끝나도) 변수와 선언된 타입이 돌아온다.
+- **`NEW.x`의 열 부분은 대소문자를 가리지 않음**(`Executor::get_col`): 행은 열을 소문자 키로 갖고 있어서 `NEW.QTY`·`OLD.Name`을 식에서 읽으면 NULL이었다(치환하는 길은 이미 가렸음). 정확한 키가 없을 때만 도는 확인이라 다른 열 읽기는 달라지지 않는다.
+- **`IF`·`WHILE` 안의 `SET NEW.x`**: 본문의 문장 하나가 끝날 때마다 `NEW.x` 변수가 바뀌었는지 보고 BEFORE INSERT 트리거면 삽입될 행의 열과 다음 문장이 읽는 값에 반영한다. 다른 트리거에서는 본문 맨 위의 `SET NEW.x`처럼 오류("supported in BEFORE INSERT triggers only")로 거절한다 — 전에는 조용히 버려졌다.
+
+**시험**: `test_stored_routines.cpp`에 `[r66]` 2케이스(96 assertions) — `CALL`의 인자(열·식·함수·`new.ID + NEW.Qty`)와 UPDATE의 `OLD`·`NEW`, DELETE의 `OLD.NAME`, `IF`/`ELSE` 안의 `CALL`, `SELECT … INTO`, `WHILE`(두 바퀴), 프로시저가 일으킨 트리거 뒤에 그 프로시저의 변수와 타입(`INT`: `7 / 2`가 4)이 돌아옴 / BEFORE INSERT의 `IF` 안 `SET NEW.qty`·`SET NEW.name`과 그 뒤의 문장이 바뀐 값을 읽음, 본문 맨 위 `SET` 뒤의 `IF`, `WHILE` 안의 `SET`, BEFORE UPDATE에서는 오류이고 값이 안 바뀜.
+- **진짜 MySQL 8.4.9와 비교**: `routines` 코퍼스에 문장 14개를 더했다(AFTER INSERT·UPDATE·DELETE 트리거가 `IF`/`ELSE`·`CALL`·`WHILE`·`SELECT … INTO`로 `NEW`/`OLD`를 읽고, BEFORE INSERT 트리거가 `IF` 안에서 `SET NEW.x`를 하는 것): 217문장 중 **차이 0**, 둘 다 실패한 문장은 36개로 그대로(새 문장은 양쪽이 모두 성공해 같은 값을 냄).
+- **심은 버그 10종을 모두 시험이 잡았다**: 행의 값이 변수가 아님 · 호출한 프로시저의 변수·타입을 돌려주지 않음(둘) · `NEW.x`·`OLD.x`의 대소문자를 가리지 않는 읽기 없음(둘) · 맨 위 `SET NEW.x`가 변수에 안 닿음 · `IF` 안의 `SET NEW.x`를 찾지 않음 · 행을 바꾸지 않음 · 뒤따르는 문장이 새 값을 못 봄 · 다른 트리거에서 오류 대신 버려짐.
+
+**확인**
+- 전체 시험 **885 케이스**(R65는 883): 세 모드(기본, `RUSQL_DML_INDEX_MIN_ROWS=0`, `RUSQL_PROBE_CHECK=1 RUSQL_PROBE_STREAK=0`) 모두 **884 통과 · 1 실패**, assertions 기본 1,516,600 / idx0 1,516,600 / probe 1,516,600. 실패는 R65와 같은 R63의 `GROUP BY` 중단 시험(그룹 행 단계에 확인점이 없어 이 기계에서 한도 지점이 그 단계에 떨어짐; 고치기 전 커밋에서도 실패함을 R65에서 확인했고 `RECOMMAND.md`에 올려 둠) 하나뿐이다.
+- **호환성 점수판**(진짜 MySQL 8.4.9와 비교): 코퍼스 42개, 문장 3,488개 중 **차이 0**(R65는 3,474개 — `routines`가 14개 늘었음); 화면의 시험 규모 숫자(`compatSnapshot.json`)를 885 / 1,516,600로 갱신.
+- Diagram 페이지는 바꾸지 않았다(구조가 달라진 것이 없음). `docs`: README(SQL Support 줄), `SQL.md`(트리거·`SET NEW.col`), `SUMMARY.md`(시험 규모, 고친 문제 두 줄 — 총 215건), `FUNCTIONS.md`, `DEMO.md`(R65에서 적은 "피할 것" 줄을 지움), `RECOMMAND.md`(오답 항목을 지우고 BEFORE UPDATE 항목 하나, "R66에서 알게 된 것").
+
+**하지 않은 것**: Debug 빌드 전체 시험; 크래시 퍼저·빌드 간 차분·속도 비교(이 라운드는 트리거 본문의 평가를 바꿨고 `get_col`에 정확한 키가 없을 때만 도는 확인 몇 줄을 더했을 뿐 내구성·읽기 경로의 계획은 건드리지 않았다 — 측정으로 확인한 것은 아님); `BEFORE UPDATE` 트리거의 `SET NEW.x`(엔진이 오류로 거절 — `RECOMMAND.md`); `LOOP`·`REPEAT`·`CASE` 문장 안에서 `NEW`/`OLD`를 읽는지는 프로브하지 않았다(조건을 읽는 길은 `WHILE`과 같다).
+
 ## 요약: 1학기 대비 2학기에 달라진 것
 
 

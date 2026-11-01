@@ -143,7 +143,6 @@ Claude Desktop에 MCP가 연결되어 있다면 "demo 데이터베이스에서 �
 2026-10-22에 위 시연 문장들과 아래 항목을 지금 엔진에 직접 돌려 확인했습니다. 예전 목록에 있던 `SUM(amount * 2)`, `ROUND(AVG(amount), 0) * 2`, 열 이름 `ROUND()`, `LEFT JOIN`의 `테이블.열`, 쉼표 조인·별칭 등은 **모두 고쳐졌으니 써도 됩니다.** 값 기준 윈도 프레임(`RANGE BETWEEN 5 PRECEDING AND …`), `DATE('2026-03-05') + 0`(`20260305`)과 DATE 열의 `SUM`·`AVG`, 갱신하는 같은 표를 하위 질의로 읽는 `UPDATE`(MySQL처럼 오류 1093)도 2026-11-01에 다시 돌려 보니 MySQL과 같았습니다.
 
 - `SELECT @x := …`, `INSERT INTO t () VALUES ()`, `CREATE TEMPORARY TABLE`, `SIGNAL`, 커서, 라벨 붙은 루프, `FULLTEXT`, `USE INDEX`는 지원하지 않습니다(`WITH ROLLUP`은 R60부터, `KILL`은 R53부터 됩니다).
-- 트리거 안에서 `CALL 프로시저(NEW.id)`처럼 `NEW.열`을 인자로 넘기면 프로시저가 NULL을 받습니다(오류도 없음; 2026-11-01 확인). 감사 트리거는 `INSERT INTO audit … VALUES (NEW.id, …)`로 쓰세요.
 - 서버를 강제 종료한 뒤 첫 `COUNT`·`SUM`은 전체를 읽어 느립니다(위 3번).
 
 ## 되돌리기
