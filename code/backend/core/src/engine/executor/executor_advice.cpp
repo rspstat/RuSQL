@@ -498,6 +498,10 @@ StringResult Executor::exec_suggest_indexes(const std::string& sql) {
             advisor.note("The FROM clause is a derived table: ask SUGGEST INDEX about the statement inside it.");
             return answer();
         }
+        if (sel->table == "_dual_" || (sel->table.size() > 7 && sel->table.compare(sel->table.size() - 7, 7, "._dual_") == 0)) { // (SELECT 1: no table is read)
+            advisor.note("The statement reads no table.");
+            return answer();
+        }
         std::vector<std::string> base_aliases = aliases_of(sel->table_aliases, sel->table);
         if (!sel->table_alias.empty()) base_aliases.push_back(sel->table_alias);
         advisor.add_table(qualify_name(sel->table), base_aliases);

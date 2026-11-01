@@ -202,6 +202,11 @@ TEST_CASE("R65: SUGGEST INDEX reads a join, an UPDATE and a DELETE, and refuses 
     REQUIRE(text_of(ex, "SUGGEST INDEX INSERT INTO t VALUES (9999, 1, 1, 1, 'x')").find("ERROR") != std::string::npos);
     REQUIRE(text_of(ex, "SUGGEST INDEX").find("ERROR") != std::string::npos);
     REQUIRE(text_of(ex, "SUGGEST INDEX SELECT FROM WHERE").find("ERROR") != std::string::npos);
+    // a SELECT with no FROM reads no table (the engine's name for the one-row table it reads is not shown)
+    rows = rows_of(ex, "SUGGEST INDEX SELECT 1");
+    REQUIRE(of_kind(rows, "suggest").empty());
+    REQUIRE(has_note(rows, "reads no table"));
+    REQUIRE_FALSE(has_note(rows, "_dual_"));
     REQUIRE(rows_of(ex, "SELECT COUNT(*) FROM t") == (Rows{{"2000"}}));
     REQUIRE(text_of(ex, "SHOW INDEX FROM t").find("idx_") == std::string::npos);
 }
