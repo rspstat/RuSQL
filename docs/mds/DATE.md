@@ -2713,6 +2713,53 @@ VS Code 스타일 탭 드래그 순서 변경(요청의 1번 항목)은 같은 �
 
 **하지 않은 것**: Debug 빌드 전체 시험; 크래시 퍼저·빌드 간 차분·속도 비교(이 라운드는 트리거 본문의 평가를 바꿨고 `get_col`에 정확한 키가 없을 때만 도는 확인 몇 줄을 더했을 뿐 내구성·읽기 경로의 계획은 건드리지 않았다 — 측정으로 확인한 것은 아님); `BEFORE UPDATE` 트리거의 `SET NEW.x`(엔진이 오류로 거절 — `RECOMMAND.md`); `LOOP`·`REPEAT`·`CASE` 문장 안에서 `NEW`/`OLD`를 읽는지는 프로브하지 않았다(조건을 읽는 길은 `WHILE`과 같다).
 
+### 11월 1일 — R67: 안정성 — `KILL`이 안 듣던 `EXPLAIN ANALYZE`·`EXECUTE`·`CREATE TABLE … AS SELECT`·`MERGE`·다중 표 `UPDATE`/`DELETE`·`CREATE INDEX`, `GROUP BY`의 그룹 행 단계
+
+**왜 이 항목인가**: R66 보고 뒤 사용자가 "안전성 항목만 진행"을 골랐다(추천표 안정성 분류의 둘: "R63 `GROUP BY` 중단 시험이 이 기계에서 실패", "아직 `KILL`이 안 듣는 문장 종류"). 진행 방식은 늘 같다(코드 → 시험 → 문서 → 한 번에 커밋·푸시 → 짧은 보고와 고친 추천표). 문법 변경 없음.
+
+**재서 확인한 것 — 코드로 읽은 추측이 아니라 `KILL QUERY`를 실제로 보낸 결과**(`probe_kill.py`: 두 세션, 30만 행 표, 전체 시간의 30% 지점에 `KILL`)
+
+| 문장 | 전체 | `KILL` 지점 | 돌아온 때 | 멈췄나 |
+|---|---|---|---|---|
+| 같은 `GROUP BY`의 보통 SELECT(대조) | 1,213 ms | 364 ms | 401 ms | 멈춤 |
+| `EXPLAIN ANALYZE SELECT …` | 1,231 | 369 | 1,245 | **안 멈춤** |
+| `EXECUTE`(준비한 SELECT) | 1,200 | 360 | 1,186 | **안 멈춤** |
+| `CREATE TABLE … AS SELECT …` | 3,758 | 1,128 | 3,691 | **안 멈춤**(표 30만 행이 만들어짐) |
+| `MERGE`(대상 300행 × 원본 10,000행) | 2,889 | 867 | 2,891 | **안 멈춤** |
+| 다중 표 `UPDATE` / `DELETE`(같은 크기) | 3,152 / 3,153 | 946 | 3,096 / 3,210 | **안 멈춤** |
+| `CREATE INDEX`(30만 행) | 1,580 | 474 | 1,625 | **안 멈춤** |
+| 느린 하위 질의를 가진 사용자 함수 | 239~240 | 150 | — | 문제 아님(짧음) |
+
+원인은 하나다: 읽기 확인점(`KillScope`)이 **문장의 첫 단어가 SELECT·WITH일 때만** 켜진다. 이 문장들은 첫 단어가 EXPLAIN·EXECUTE·CREATE·MERGE·UPDATE·DELETE인데 안에서 하는 일은 아직 아무것도 쓰지 않는 읽기다.
+
+**고침** (`executor_core.cpp`·`executor_explain.cpp`·`executor_ddl.cpp`·`executor_merge.cpp`·`executor_multi.cpp`·`numeric_key.hpp`) — R63·R64의 `ReadPhase`(쓰기 전의 읽기 단계에서만 `KILL`을 듣게 하는 범위 객체)를 더 씌웠다
+- **`EXPLAIN ANALYZE`**: 안의 질의(SELECT·UNION·INTERSECT·EXCEPT·WITH)를 실행하는 동안. **`EXECUTE`**: 준비한 문장이 질의일 때(쓰는 문장이면 켜지 않음).
+- **`CREATE TABLE … AS SELECT`**: 질의가 답하고 그 글자를 행으로 읽는 동안(표는 그때까지 없음 — 멈추면 표가 만들어지지 않음).
+- **`MERGE`와 다중 표 `UPDATE`/`DELETE`**: 첫 행을 쓰기 전까지(원본과 대상을 맞추고, 쓸 값과 막는 외래키를 확인하는 동안). 쓰기 길(`exec_update`·`exec_delete`·`exec_insert`)로 들어가기 전에 `reset()`한다 — 쓰는 도중에 멈추면 되돌릴 길이 없다.
+- **`CREATE INDEX`**: 인덱스를 데이터베이스 밖에서 다 만들고 나서 `s.indexes`·`s.hash_indexes`·`s.composite_indexes`에 넣기 전까지(B+트리·해시·복합 모두). 해시·복합은 `rebuild` 대신 같은 일을 하는 `insert_row` 반복으로 만들어 반복마다 묻는다(`rebuild`는 서버가 시작할 때 데이터베이스 안의 인덱스를 다시 만드는 데도 쓰여서 거기서 멈추면 반쪽짜리 인덱스가 남는다). B+트리의 `IndexBuckets::fill(tree, stoppable)`은 `stoppable`일 때만 묻는다(시작·복구 때 쓰는 호출은 기본값 false).
+
+**`GROUP BY`의 그룹 행 단계**(R63의 시험이 이 기계에서 R64 소스로도 실패하던 것)
+- **원인**: 그룹 행을 만드는 단계가 `parallel_for(groups.size(), make_group_row)` — **그룹마다 작업 하나**였다. 30만 그룹이면 작업 30만 개를 풀에 줄 세우는 데(작업마다 힙 할당 넷과 락) 문장의 스레드가 몇백 ms를 썼고, 그동안 확인점이 없었다(R64가 작업자에 확인을 넣어 보고 "효과 없음"으로 거둔 바로 그 단계). R64 때는 한도의 1/3 지점이 앞의 묶는 단계 안에 떨어져 우연히 통과했다.
+- **고침**: 그룹을 CPU 수 × 8개의 덩어리로 나눠(`n_chunks = min(그룹 수, CPU × 8)`) 한 덩어리 안에서 차례로 만든다. 그룹이 적으면(10개) 전처럼 그룹마다 하나다. 한 문장의 스레드가 줄 세우는 시간이 사라져 같은 질의가 **1,363 → 738 ms**(1.8배)로 빨라졌고, 한도 지점에서 멈춘다(한도 245 ms → 261 ms). 순차 경로(`RUSTDB_PARALLEL=0`)는 그룹마다 `tick()`을 묻는다.
+- **덩어리 안의 작업자도 묻는다**: 작업자는 256개 그룹마다 `ParallelStop`(R64와 같은 도구)에 묻고 멈추며, 문장의 스레드가 `finish()`로 던진다. 집계가 여섯 개인 `GROUP BY`(그룹 행 단계가 시간의 상당 부분)에서 한도의 1/3 지점이 그 단계에 떨어질 때 묻지 않으면 단계 끝(전체의 63%)에서 멈추고 물으면 한도 바로 뒤(39%)에서 멈춘다 — 시험의 기준을 절반(50%)으로 두어 이 차이를 가른다.
+- **효과가 없어 거둔 것**: `MERGE`의 쌍 반복문과 다중 표 `DELETE`의 `JOIN`·`LEFT JOIN`·`RIGHT JOIN` 반복문에 넣었던 `tick()`(심은 버그 넷이 살아남음 — 조건을 평가하는 `eval_condexpr`가 이미 묻는다). 쓰는 도중에는 일부러 하지 않는다.
+
+**시험** `test_statement_stop.cpp`: `[r67]` 4케이스 — `EXPLAIN ANALYZE`·`EXECUTE`·`CREATE TABLE … AS SELECT`(만들어지지 않음) / `MERGE`·다중 표 `UPDATE`·`DELETE`(`JOIN`·`LEFT JOIN`·`RIGHT JOIN`; 표가 그대로) / `CREATE INDEX` 셋(B+트리·복합·해시: 멈추고, 같은 문장을 다시 하면 만들어지고 같은 행을 찾음) / `IndexBuckets::fill`이 `stoppable`일 때만 `KILL`을 묻는지. 모두 `KILL` 뒤 몇 ms~150 ms에 멈춘다(멈추지 않으면 몇 초). R63의 단계 시험에 그룹 행이 무거운 `GROUP BY`(집계 여섯 개)와 순차 경로의 두 질의를 더했다.
+- **심은 버그**: **19종 중 15종이 잡혔고 4종은 살아남아 그 코드를 거뒀다**(위: `MERGE`의 쌍 반복문, 다중 표 `DELETE`의 세 조인 반복문). 잡힌 것: `EXECUTE`·`EXPLAIN ANALYZE`·`CREATE TABLE … AS SELECT`·`MERGE`·다중 표 `UPDATE`·`DELETE`·`CREATE INDEX`가 읽기가 아님(일곱), `CREATE INDEX`의 세 빌드 반복문의 확인(셋), 그룹 행을 만드는 작업자의 확인, 순차 그룹 행의 확인, 그룹마다 작업 하나로 되돌림, `fill`의 `stoppable`(둘; 헤더 변경이라 전체를 다시 빌드한 뒤 `fill` 시험만 돌림). 처음에는 그룹 작업자의 확인도 살아남았는데(한도 지점이 그 단계 밖에 떨어져서) 시험을 보강해 잡았다.
+
+**알게 된 것(고치지 않음)**
+- **`MERGE`와 다중 표 `UPDATE`/`DELETE`가 이차 시간**: 원본 행마다 대상 행 전부와 쌍을 만들어(쌍마다 `Row` 복사) 비교한다 — 대상 300행 × 원본 30만 행의 `MERGE`가 **109초**(문장이 데이터베이스 락을 쥔 채로; 이제는 `KILL`로 멈출 수 있음). 다중 표 문장은 300 × 10,000에 3초. 키로 찾거나 해시로 맞추면 훨씬 빠르다 — 속도 문제라 사용자께 묻는다(`RECOMMAND.md`).
+- 다중 표 `DELETE`의 `JOIN … USING (열)`·`FULL OUTER JOIN`·`CROSS JOIN … ON`은 문법 오류다(파서가 `ON`만 받음) — 그래서 `executor_multi.cpp`의 `USING`·`Cross/Natural/FullOuter` 분기는 이 문장에서는 닿지 않는다.
+- `SELECT CONNECTION_ID()`가 없다("FUNCTION rusql.connection_id does not exist"; 세션 번호는 `SHOW PROCESSLIST`로 안다). `SHOW INDEX`가 `USING HASH` 인덱스를 나열하지 않는다.
+
+**확인**
+- 전체 시험 **889 케이스**(R66은 885): 세 모드(기본, `RUSQL_DML_INDEX_MIN_ROWS=0`, `RUSQL_PROBE_CHECK=1 RUSQL_PROBE_STREAK=0`) 모두 **전부 통과**(R63의 `GROUP BY` 중단 시험이 이제 통과), assertions 기본 1,517,158 / idx0 1,517,157 / probe 1,517,157.
+- **호환성 점수판**(진짜 MySQL 8.4.9와 비교): 코퍼스 42개, 문장 3,488개 중 **차이 0**; 화면의 시험 규모 숫자(`compatSnapshot.json`)를 889 / 1,517,158로 갱신.
+- **속도**(`bench_ab_r67.py`, R66 서버와 번갈아 3바퀴의 중앙값): 읽기 경로 15종이 모두 0.98~1.02배(달라지지 않음). 30만 그룹의 `GROUP BY` 1,162 → **643 ms**(1.8배), 거기에 집계 여섯 개를 더하면 882 → 810 ms(1.09배; 일이 많아 줄 세우는 시간의 몫이 작음), 1,000 그룹은 225 → 222 ms(같음). `CREATE INDEX`(30만 행)는 B+트리 1,414 → 1,412 ms, 복합 774 → 757 ms, 해시 950 → 943 ms로 같다(해시·복합은 `rebuild` 대신 `insert_row` 반복으로 만들어도 느려지지 않음).
+- Diagram 페이지는 바꾸지 않았다(구조가 달라진 것이 없음). `docs`: README(`KILL` 줄), `SQL.md`(`KILL`), `SUMMARY.md`(`KILL`, 시험 규모, 고친 문제 두 줄), `DIFF.md`(`KILL` 행), `FUNCTIONS.md`, `DEMO.md`(`Stop statement`가 멈추는 것), `RECOMMAND.md`(안정성 두 항목을 지우고 새 항목, "R67에서 알게 된 것").
+
+**하지 않은 것**: Debug 빌드 전체 시험; 크래시 퍼저(쓰는 길은 바꾸지 않았다 — 읽기 단계의 중단만); `ALTER TABLE`와 그 밖의 DDL(쓰는 도중 멈출 길이 없다); 트리거·사용자 함수 본문의 SELECT(쓰는 문장 안이라 이미 쓰기가 시작됨); `OPTIMIZE`·`VACUUM`; `MERGE`·다중 표 문장이 **쓰는 도중**의 중단(일부러 하지 않음); `reset()`이 쓰기 길로 들어가기 전에 불리는지를 가르는 시험(쓰는 도중에 `KILL`이 도착해도 쓰기를 가르지 않는 것은 시험으로 증명하지 못했다).
+
 ## 요약: 1학기 대비 2학기에 달라진 것
 
 

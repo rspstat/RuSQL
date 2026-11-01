@@ -8,6 +8,7 @@
 #include <unordered_set>
 
 #include "engine/join.hpp"
+#include "engine/statement_deadline.hpp"
 
 namespace engine {
 
@@ -24,6 +25,9 @@ StringResult Executor::exec_multi_update(SharedDatabase& s, std::vector<std::str
                                           std::vector<std::pair<std::string, ArithExpr>> assignments, std::optional<CondExpr> condition) {
     if (tables.empty()) return StringResult::Err("No tables specified for multi-table UPDATE");
     std::string first_table = tables.front();
+    // Until the first row is written the statement only reads (the join, the WHERE, the values to write): KILL QUERY may stop it there (the first word of this statement is UPDATE)
+    std::optional<deadline::ReadPhase> reads;
+    reads.emplace();
 
     auto tit0 = s.tables.find(first_table);
     if (tit0 == s.tables.end()) return StringResult::Err("Table '" + first_table + "' not found");
@@ -166,12 +170,14 @@ StringResult Executor::exec_multi_update(SharedDatabase& s, std::vector<std::str
             }
         }
         PerRowValues per_row(pk_updates.begin(), pk_updates.end());
+        reads.reset(); // (the rows are written from here)
         auto updated = exec_update(s, real_table, std::move(columns), std::nullopt, std::nullopt, &per_row);
         if (updated.is_err()) return updated;
         total_count += static_cast<std::size_t>(std::strtoull(updated.value().c_str(), nullptr, 10));
         matched_total += matched_rows_ > 0 ? matched_rows_ : 0;
     }
 
+    reads.reset(); // (the checkpoint writes the table files)
     maybe_auto_checkpoint(s);
     matched_rows_ = matched_total;
     affected_rows_ = -1;
@@ -180,6 +186,9 @@ StringResult Executor::exec_multi_update(SharedDatabase& s, std::vector<std::str
 
 StringResult Executor::exec_multi_delete(SharedDatabase& s, std::vector<std::string> delete_tables, std::string from_table,
                                           std::vector<Join> joins, std::optional<CondExpr> condition) {
+    // Until the first row is deleted the statement only reads (the join, the WHERE, the keys of the rows to delete): KILL QUERY may stop it there (the first word is DELETE)
+    std::optional<deadline::ReadPhase> reads;
+    reads.emplace();
     auto tit0 = s.tables.find(from_table);
     if (tit0 == s.tables.end()) return StringResult::Err("Table '" + from_table + "' not found");
     std::vector<Row> current;
@@ -366,11 +375,13 @@ StringResult Executor::exec_multi_delete(SharedDatabase& s, std::vector<std::str
                 cond = cond ? CondExpr(CondExpr::Or{std::make_unique<CondExpr>(std::move(*cond)), std::make_unique<CondExpr>(std::move(*one))}) : std::move(*one);
             }
         }
+        reads.reset(); // (the rows are deleted from here)
         auto deleted = exec_delete(s, real_table, std::move(cond), std::nullopt);
         if (deleted.is_err()) return deleted;
         total_count += static_cast<std::size_t>(std::strtoull(deleted.value().c_str(), nullptr, 10));
     }
 
+    reads.reset(); // (the checkpoint writes the table files)
     maybe_auto_checkpoint(s);
     matched_rows_ = affected_rows_ = -1;
     return StringResult::Ok(std::to_string(total_count) + " row(s) deleted.");

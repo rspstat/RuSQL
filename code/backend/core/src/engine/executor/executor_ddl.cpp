@@ -14,6 +14,7 @@
 #include <limits>
 #include <unordered_set>
 
+#include "engine/statement_deadline.hpp"
 #include "engine/storage/numeric_key.hpp"
 #include "engine/parser/parser.hpp"
 
@@ -508,9 +509,13 @@ StringResult Executor::exec_create_as(SharedDatabase& s, const std::string& name
         return StringResult::Err("Table '" + name + "' already exists");
     }
     const Statement query_copy = query; // (the names of an empty answer's columns come from the statement)
+    // the query only reads, and the table is not there until it has answered: KILL QUERY may stop it (the first word of this statement is CREATE)
+    std::optional<deadline::ReadPhase> reads;
+    reads.emplace();
     auto out = execute_with_s(s, std::move(query));
     if (out.is_err()) return out;
     auto [names, rows] = parse_table_output(out.value());
+    reads.reset();
     if (names.empty()) names = derived_column_names(s, query_copy);
     if (names.empty()) return StringResult::Err("The query of CREATE TABLE ... SELECT has no columns");
 
@@ -1325,11 +1330,20 @@ StringResult Executor::exec_create_index(SharedDatabase& s, const std::string& i
         }
     }
 
+    // The index is built apart from the database (rows are only read) and put in it when it is done: until then KILL QUERY may stop the statement, with nothing changed.
+    std::optional<deadline::ReadPhase> reads;
+    reads.emplace();
     if (using_hash) {
         if (columns.size() != 1) return StringResult::Err("Hash index supports only single-column indexes.");
         const std::string& column = columns.front();
         HashIndex hi(table, column);
-        if (auto it = s.tables.find(table); it != s.tables.end()) hi.rebuild(it->second);
+        if (auto it = s.tables.find(table); it != s.tables.end()) {
+            for (const Row& row : it->second) {
+                deadline::tick();
+                hi.insert_row(row);
+            }
+        }
+        reads.reset();
         s.hash_indexes.insert({table + "_" + index_name, std::move(hi)});
         s.hash_index_meta.insert({table + "_" + index_name, {table, column}});
         persist_index_meta(s);
@@ -1342,10 +1356,12 @@ StringResult Executor::exec_create_index(SharedDatabase& s, const std::string& i
         IndexBuckets bucket(tree.kinds());
         if (auto it = s.tables.find(table); it != s.tables.end()) {
             for (auto& row : it->second) {
+                deadline::tick();
                 if (auto vit = row.find(column); vit != row.end()) bucket.add(vit->second, row);
             }
         }
-        bucket.fill(tree);
+        bucket.fill(tree, /*stoppable=*/true);
+        reads.reset();
         std::string idx_key = table + "_" + index_name;
         s.indexes.insert({idx_key, std::move(tree)});
         s.index_meta.insert({idx_key, {table, column}});
@@ -1355,7 +1371,13 @@ StringResult Executor::exec_create_index(SharedDatabase& s, const std::string& i
 
     CompositeIndex comp(table, columns);
     if (const TableSchema* sch = s.catalog.get_table(table)) comp.pk_columns = sch->identity_columns();
-    if (auto it = s.tables.find(table); it != s.tables.end()) comp.rebuild(it->second);
+    if (auto it = s.tables.find(table); it != s.tables.end()) {
+        for (const Row& row : it->second) {
+            deadline::tick();
+            comp.insert_row(row);
+        }
+    }
+    reads.reset();
     s.composite_indexes.insert({table + "_" + index_name, std::move(comp)});
     persist_index_meta(s);
     std::string cols_joined;

@@ -1,6 +1,7 @@
 // Faithful port of MERGE from rusql-core/src/engine/executor.rs (Phase 8f): exec_merge.
 
 #include "engine/executor/executor.hpp"
+#include "engine/statement_deadline.hpp"
 
 namespace engine {
 
@@ -22,6 +23,10 @@ StringResult Executor::exec_merge(SharedDatabase& s, std::string target, std::op
                                    std::optional<CondExpr> when_matched_delete_cond, std::optional<CondExpr> when_matched_update_cond,
                                    bool when_matched_update_first, std::optional<std::vector<std::string>> when_not_matched_columns,
                                    std::vector<std::string> when_not_matched_values) {
+    // Until the first change is written the statement only reads (it matches the source rows to the target rows, then checks what it is going to write): KILL QUERY may stop
+    // it there (the first word of this statement is MERGE)
+    std::optional<deadline::ReadPhase> reads;
+    reads.emplace();
     auto sit = s.tables.find(source);
     if (sit == s.tables.end()) return StringResult::Err("Table '" + source + "' not found");
     std::vector<Row> source_rows;
@@ -159,6 +164,7 @@ StringResult Executor::exec_merge(SharedDatabase& s, std::string target, std::op
         return out;
     };
 
+    reads.reset(); // (what follows writes: each statement of the one-table paths stops, or not, as it does on its own)
     if (!update_rows.empty()) {
         PerRowValues per_row;
         std::vector<std::pair<std::string, ArithExpr>> columns;

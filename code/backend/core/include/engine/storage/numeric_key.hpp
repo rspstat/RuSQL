@@ -23,6 +23,7 @@
 #include "engine/numeric_text.hpp"
 #include "engine/row.hpp"
 #include "engine/row_json.hpp"
+#include "engine/statement_deadline.hpp"
 #include "engine/storage/btree.hpp"
 
 namespace engine {
@@ -94,8 +95,12 @@ public:
         entry.second.push_back(row);
     }
 
-    void fill(BPlusTree& tree) const {
-        for (auto& [bucket_key, entry] : entries_) tree.insert(entry.first, rows_to_json(entry.second));
+    // `stoppable`: the tree is one that is being built apart from the database (CREATE INDEX), so KILL QUERY may stop the filling of it
+    void fill(BPlusTree& tree, bool stoppable = false) const {
+        for (auto& [bucket_key, entry] : entries_) {
+            if (stoppable) deadline::tick();
+            tree.insert(entry.first, rows_to_json(entry.second));
+        }
     }
 
 private:

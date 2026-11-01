@@ -94,7 +94,7 @@ UPDATE orders SET amount = amount + 2 WHERE id = 7;
 COMMIT;
 ```
 
-패널에는 B 위에 `waits for #A`, A 위에 `BLOCKS 1`이 붙고, 맨 위의 빨간 줄이 "⚠ #A blocks 1 transaction"으로 **맨 뿌리 차단자**를 알려 줍니다(그 줄의 `Disconnect`를 두 번 누르면 A를 끊고 B가 풀립니다). 문장마다 `Stop statement`(`KILL QUERY`)와 `Disconnect`가 있고, 5초 넘게 도는 문장은 호박색 `SLOW`, 트랜잭션을 연 채 30초 넘게 쉬는 세션은 `idle in transaction`입니다. 패널 맨 아래 **Slow queries**에서 기준 시간을 고르고 `Turn on`을 누르면 그보다 오래 걸린 문장이 목록과 `<데이터 폴더>/slow_query.log`에 쌓입니다. `Stop statement`는 SELECT(정렬·GROUP BY·윈도 함수·조인·UNION 도중에도), `INSERT … SELECT`의 SELECT, `CALL` 본문의 SELECT와 루프, UPDATE·DELETE가 바꿀 행을 찾는 동안 멈추고, 행을 쓰기 시작한 뒤에는 끝까지 갑니다(멈춘 `CALL`은 그 앞 문장이 한 일을 남깁니다).
+패널에는 B 위에 `waits for #A`, A 위에 `BLOCKS 1`이 붙고, 맨 위의 빨간 줄이 "⚠ #A blocks 1 transaction"으로 **맨 뿌리 차단자**를 알려 줍니다(그 줄의 `Disconnect`를 두 번 누르면 A를 끊고 B가 풀립니다). 문장마다 `Stop statement`(`KILL QUERY`)와 `Disconnect`가 있고, 5초 넘게 도는 문장은 호박색 `SLOW`, 트랜잭션을 연 채 30초 넘게 쉬는 세션은 `idle in transaction`입니다. 패널 맨 아래 **Slow queries**에서 기준 시간을 고르고 `Turn on`을 누르면 그보다 오래 걸린 문장이 목록과 `<데이터 폴더>/slow_query.log`에 쌓입니다. `Stop statement`는 SELECT(정렬·GROUP BY·윈도 함수·조인·UNION 도중에도), `INSERT … SELECT`의 SELECT, `CALL` 본문의 SELECT와 루프, `EXPLAIN ANALYZE`와 `EXECUTE`로 돌리는 질의, `CREATE TABLE … AS SELECT`의 질의, `CREATE INDEX`의 빌드, UPDATE·DELETE·MERGE가 바꿀 행을 찾는 동안 멈추고, 행을 쓰기 시작한 뒤에는 끝까지 갑니다(멈춘 `CALL`은 그 앞 문장이 한 일을 남깁니다).
 
 교착은 서로 엇갈리게 잡으면 만들어집니다. A가 7번, B가 8번을 잡은 뒤 A가 8번, B가 7번을 요청하면 한쪽이 교착으로 되돌려지고 패널의 "최근 교착"에 남습니다. SQL로 직접 보려면:
 

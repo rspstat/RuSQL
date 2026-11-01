@@ -1088,6 +1088,13 @@ StringResult Executor::execute(Statement stmt) {
         std::transform(upper.begin(), upper.end(), upper.begin(), [](unsigned char c) { return static_cast<char>(std::toupper(c)); });
         auto prepared = prepared_statement(upper, run->using_vars);
         if (prepared.is_err()) return StringResult::Err(prepared.error());
+        // a prepared query only reads: KILL QUERY may stop it as it stops the same query typed in (the first word of this statement is EXECUTE)
+        const auto& to_run = prepared.value().data;
+        std::optional<deadline::ReadPhase> reads;
+        if (std::holds_alternative<Statement::Select>(to_run) || std::holds_alternative<Statement::Union>(to_run) || std::holds_alternative<Statement::Intersect>(to_run) ||
+            std::holds_alternative<Statement::Except>(to_run) || std::holds_alternative<Statement::With>(to_run)) {
+            reads.emplace();
+        }
         return execute(std::move(prepared).value());
     }
 

@@ -8,6 +8,7 @@
 
 #include "engine/explain_trace.hpp"
 #include "engine/planner.hpp"
+#include "engine/statement_deadline.hpp"
 
 namespace engine {
 
@@ -132,7 +133,14 @@ StringResult Executor::exec_explain_analyze(SharedDatabase& s, Statement stmt) {
     auto start = std::chrono::steady_clock::now();
     trace.last = start;
     explain_trace::active = &trace;
+    // the query it runs only reads: KILL QUERY may stop it as it stops the query itself (the first word of this statement is EXPLAIN)
+    std::optional<deadline::ReadPhase> reads;
+    if (std::holds_alternative<Statement::Select>(stmt.data) || std::holds_alternative<Statement::Union>(stmt.data) || std::holds_alternative<Statement::Intersect>(stmt.data) ||
+        std::holds_alternative<Statement::Except>(stmt.data) || std::holds_alternative<Statement::With>(stmt.data)) {
+        reads.emplace();
+    }
     auto result = execute_with_s(s, std::move(stmt));
+    reads.reset();
     explain_trace::active = nullptr;
     auto elapsed = std::chrono::steady_clock::now() - start;
     if (result.is_err()) return result;

@@ -3006,9 +3006,25 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
             group_rows[gi] = std::move(out);
         };
         if (parallel_enabled()) {
-            ThreadPool::global().parallel_for(groups.size(), make_group_row);
+            // The groups go to the pool's threads in chunks, not one task for each: a task for each of 300,000 groups cost more than the work in it (and the statement's thread, which
+            // hands the tasks out, was busy at that for most of a second without a point to ask whether the statement was stopped). The workers ask through a ParallelStop as they go
+            // (once in 256 groups), and the statement's thread throws when they are back.
+            const std::size_t cpus = std::max<std::size_t>(1, std::thread::hardware_concurrency());
+            const std::size_t n_chunks = std::min<std::size_t>(groups.size(), cpus * 8);
+            deadline::ParallelStop stop;
+            ThreadPool::global().parallel_for(n_chunks, [&](std::size_t chunk) {
+                const std::size_t from = groups.size() * chunk / n_chunks, to = groups.size() * (chunk + 1) / n_chunks;
+                for (std::size_t gi = from; gi < to; gi++) {
+                    if (stop.halt(gi - from)) return;
+                    make_group_row(gi);
+                }
+            });
+            stop.finish();
         } else {
-            for (std::size_t gi = 0; gi < groups.size(); gi++) make_group_row(gi);
+            for (std::size_t gi = 0; gi < groups.size(); gi++) {
+                deadline::tick();
+                make_group_row(gi);
+            }
         }
 
         deadline::check_now();

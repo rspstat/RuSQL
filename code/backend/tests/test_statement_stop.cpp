@@ -20,6 +20,7 @@
 #include "engine/parallel_util.hpp"
 #include "engine/result_text.hpp"
 #include "engine/statement_deadline.hpp"
+#include "engine/storage/numeric_key.hpp"
 
 using namespace engine;
 namespace fs = std::filesystem;
@@ -127,6 +128,30 @@ void fill(Executor& ex, const std::string& table, int rows) {
         for (int i = start; i < std::min(start + 500, rows + 1); i++) sql += std::string(i == start ? "" : ",") + "(" + std::to_string(i) + "," + std::to_string(i % 10) + ")";
         ok(ex, sql);
     }
+}
+
+// A statement that the session `victim` (user bob) runs on a thread of its own and `ex` stops with KILL QUERY `delay_ms` after it began: what it answered, and how long it
+// went on after the KILL. (It does not look at the process list first: a statement that holds the database exclusively -- a CREATE -- keeps the list from being read.)
+struct Stopped {
+    bool failed = false;
+    std::string answer;
+    std::chrono::milliseconds after_kill{0};
+};
+
+Stopped run_and_kill(Executor& ex, Executor& victim, const std::string& victim_id, const std::string& sql, int delay_ms = 150) {
+    Stopped out;
+    std::thread runner([&] {
+        auto r = victim.execute_sql(sql);
+        out.failed = r.is_err();
+        out.answer = out.failed ? r.error() : r.value();
+    });
+    std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms));
+    const auto killed_at = std::chrono::steady_clock::now();
+    REQUIRE(ex.execute_sql("KILL QUERY " + victim_id).is_ok());
+    runner.join();
+    out.after_kill = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - killed_at);
+    std::fprintf(stderr, "[r67] %s: stopped %lld ms after KILL\n", sql.substr(0, 60).c_str(), static_cast<long long>(out.after_kill.count()));
+    return out;
 }
 } // namespace
 
@@ -276,10 +301,17 @@ TEST_CASE("R63: a sort, a GROUP BY, a DISTINCT, a hash join, a window sort, a UN
         REQUIRE(stopped_ms * 1000 < whole_ms * bound_per_mille); // (stopped in the middle of the stage, not at its end: a stage that is not asked ends it first)
     };
     for (const char* sql : queries) stops_in_the_middle(sql);
+    // R67: with six aggregates the rows of the groups are a good part of the time; the workers that make them ask as they go, so the statement stops at the limit (a third of the time
+    // the whole of it takes, 40% here) and not at the end of that stage (63% when they do not ask): the bound is half
+    stops_in_the_middle("SELECT g, v, COUNT(*), SUM(id), AVG(v), MAX(s), MIN(s), COUNT(DISTINCT s) FROM big GROUP BY g, v", 333, 500);
     // The sort of a UNION is made in slices on the pool's threads from some thousand rows up; below that (here at every size: RUSTDB_PARALLEL=0) it is one sort on the statement's thread
     EnvVar sequential("RUSTDB_PARALLEL", "0");
     // (the reading of the rows and of the answer come first, a good part of the time: the limit goes to where the sort is)
     stops_in_the_middle("SELECT id, v, s FROM big UNION ALL SELECT id, g, 'x' FROM little ORDER BY s DESC, v", 700, 880);
+    // R67: the rows of the groups are made one group after the other on the statement's thread when RUSTDB_PARALLEL=0 (on the pool's threads, in chunks, otherwise: the GROUP BY
+    // above), and that stage asks as well
+    stops_in_the_middle("SELECT g, v, COUNT(*) FROM big GROUP BY g, v");
+    stops_in_the_middle("SELECT g, v, COUNT(*), SUM(id), AVG(v), MAX(s), MIN(s), COUNT(DISTINCT s) FROM big GROUP BY g, v");
 }
 
 // An UPDATE or DELETE that is still looking for the rows it will change has written nothing: KILL QUERY stops it there, and the table is as it was. (Once rows are being written the
@@ -463,4 +495,127 @@ TEST_CASE("R64: KILL QUERY stops a CALL in the SELECT of its body and in a loop 
     }
     // what the statements before the stop did stays; what came after it never ran
     REQUIRE(q(ex, "SELECT id FROM trail ORDER BY id") == (Rows{{"1"}, {"3"}}));
+}
+
+// R67: statements whose first word is not SELECT but that only read, or read before they write, were not stopped by KILL QUERY: EXPLAIN ANALYZE, the EXECUTE of a prepared
+// SELECT, the SELECT of a CREATE TABLE ... AS SELECT, MERGE and the multi-table UPDATE / DELETE (until the first row is written) and the build of a CREATE INDEX (before the index is put
+// in the database). Each of them ran to its end after the KILL.
+namespace {
+// a second session (bob) on the database of `ex` (root), the one that a test stops
+struct Victim {
+    Executor session;
+    std::string id;
+    explicit Victim(Executor& ex) : session(Executor::new_session(ex.get_shared())) {
+        ex.register_process("root", "localhost");
+        ok(ex, "CREATE DATABASE d");
+        ok(ex, "USE d");
+        session.auth_user = "bob";
+        session.register_process("bob", "localhost");
+        ok(session, "USE d");
+        id = session_of(ex, "bob");
+    }
+};
+
+void require_stopped(const Stopped& stopped, std::chrono::milliseconds within = std::chrono::milliseconds(1500)) {
+    INFO("answer: " << stopped.answer.substr(0, 200));
+    REQUIRE(stopped.failed);
+    REQUIRE(stopped.answer.find("ERROR 1317 (70100): Query execution was interrupted") != std::string::npos);
+    REQUIRE(stopped.after_kill < within);
+}
+} // namespace
+
+TEST_CASE("R67: KILL QUERY stops an EXPLAIN ANALYZE, an EXECUTE and a CREATE TABLE ... AS SELECT while the query runs, and no table is made", "[r67][kill]") {
+    TempDataDir dir("r67_query_kill");
+    Executor ex(dir.path);
+    Victim bob(ex);
+    ok(ex, "CREATE TABLE big (id INT PRIMARY KEY, g INT, v INT)");
+    for (int start = 1; start <= 30000; start += 1000) {
+        std::string sql = "INSERT INTO big VALUES ";
+        for (int i = start; i < start + 1000; i++) sql += std::string(i == start ? "" : ",") + "(" + std::to_string(i) + "," + std::to_string(i % 100) + "," + std::to_string(i % 40) + ")";
+        ok(ex, sql);
+    }
+    ok(ex, "CREATE TABLE other (id INT PRIMARY KEY, g INT, v INT)");
+    ok(ex, "INSERT INTO other SELECT id, g, v FROM big");
+    // (a correlated subquery for every row, none of which finds a row: tens of millions of comparisons)
+    const std::string slow = "SELECT id FROM big WHERE EXISTS (SELECT 1 FROM other b WHERE b.v = big.v AND b.g = big.g + 1000)";
+    ok(bob.session, "PREPARE slow_q FROM '" + slow + "'");
+    for (const std::string& sql : {"EXPLAIN ANALYZE " + slow, std::string("EXECUTE slow_q"), "CREATE TABLE made AS " + slow}) {
+        INFO(sql);
+        require_stopped(run_and_kill(ex, bob.session, bob.id, sql));
+    }
+    for (const auto& row : q(ex, "SHOW TABLES")) REQUIRE(row[0] != "made");
+    REQUIRE(q(bob.session, "SELECT COUNT(*) FROM big") == Rows{{"30000"}}); // (the session is whole)
+}
+
+TEST_CASE("R67: KILL QUERY stops a MERGE, a multi-table UPDATE and a multi-table DELETE while they look for their rows, and nothing is changed", "[r67][kill]") {
+    TempDataDir dir("r67_multi_kill");
+    Executor ex(dir.path);
+    Victim bob(ex);
+    ok(ex, "CREATE TABLE dst (id INT PRIMARY KEY, v INT)");
+    std::string sql = "INSERT INTO dst VALUES ";
+    for (int i = 1; i <= 300; i++) sql += std::string(i == 1 ? "" : ",") + "(" + std::to_string(i) + ",0)";
+    ok(ex, sql);
+    ok(ex, "CREATE TABLE src (id INT PRIMARY KEY, v INT)");
+    for (int start = 1; start <= 20000; start += 1000) {
+        std::string batch = "INSERT INTO src VALUES ";
+        for (int i = start; i < start + 1000; i++) batch += std::string(i == start ? "" : ",") + "(" + std::to_string(i) + "," + std::to_string(i % 7) + ")";
+        ok(ex, batch);
+    }
+    const Rows before = q(ex, "SELECT COUNT(*), SUM(v) FROM dst");
+    // (a nested loop over 300 x 20,000 rows: seconds)
+    // (the DELETE has a loop of its own for each kind of join it can be written with: JOIN, LEFT JOIN, RIGHT JOIN)
+    for (const char* statement : {"MERGE INTO dst USING src ON dst.id = src.id WHEN MATCHED THEN UPDATE SET v = src.v + 1 WHEN NOT MATCHED THEN INSERT VALUES (src.id, src.v)",
+                                  "UPDATE dst JOIN src ON dst.id = src.id SET dst.v = src.v + 1", "DELETE dst FROM dst JOIN src ON dst.id = src.id",
+                                  "DELETE dst FROM dst LEFT JOIN src ON dst.id = src.id", "DELETE dst FROM dst RIGHT JOIN src ON dst.id = src.id"}) {
+        INFO(statement);
+        require_stopped(run_and_kill(ex, bob.session, bob.id, statement));
+        REQUIRE(q(ex, "SELECT COUNT(*), SUM(v) FROM dst") == before);
+    }
+    REQUIRE(q(bob.session, "SELECT COUNT(*) FROM src") == Rows{{"20000"}}); // (the session is whole)
+}
+
+TEST_CASE("R67: KILL QUERY stops a CREATE INDEX while it builds, with nothing changed, and an index that is not stopped finds the same rows", "[r67][kill]") {
+    TempDataDir dir("r67_index_kill");
+    Executor ex(dir.path);
+    Victim bob(ex);
+    ok(ex, "CREATE TABLE big (id INT PRIMARY KEY, g INT, v INT, s VARCHAR(20))");
+    for (int start = 1; start <= 300000; start += 1000) {
+        std::string sql = "INSERT INTO big VALUES ";
+        for (int i = start; i < start + 1000; i++) sql += std::string(i == start ? "" : ",") + "(" + std::to_string(i) + "," + std::to_string(i % 1000) + "," + std::to_string((i * 7919) % 10007) + ",'row" + std::to_string(i) + "')";
+        ok(ex, sql);
+    }
+    const Rows by_s = q(ex, "SELECT COUNT(*) FROM big WHERE s = 'row777'");
+    const Rows by_gv = q(ex, "SELECT COUNT(*) FROM big WHERE g = 5 AND v = 7");
+    const Rows by_v = q(ex, "SELECT COUNT(*) FROM big WHERE v = 7");
+    REQUIRE(by_s == Rows{{"1"}});
+    for (const char* create : {"CREATE INDEX i_s ON big (s)", "CREATE INDEX i_gv ON big (g, v)", "CREATE INDEX i_v ON big (v) USING HASH"}) {
+        INFO(create);
+        const std::string name = std::string(create).substr(13, std::string(create).find(' ', 13) - 13);
+        const bool listed = std::string(create).find("USING HASH") == std::string::npos; // (SHOW INDEX does not list a hash index)
+        require_stopped(run_and_kill(ex, bob.session, bob.id, create, 40), std::chrono::milliseconds(700)); // (a build that is not stopped goes on for a second or more)
+        if (listed) REQUIRE(ex.execute_sql("SHOW INDEX FROM big").value().find(name) == std::string::npos);
+        ok(ex, create); // (nothing was made: the same statement, not stopped, makes the index -- it would say "Duplicate key name" if half of one were there)
+        if (listed) REQUIRE(ex.execute_sql("SHOW INDEX FROM big").value().find(name) != std::string::npos);
+        REQUIRE(q(ex, "SELECT COUNT(*) FROM big WHERE s = 'row777'") == by_s);
+        REQUIRE(q(ex, "SELECT COUNT(*) FROM big WHERE g = 5 AND v = 7") == by_gv);
+        REQUIRE(q(ex, "SELECT COUNT(*) FROM big WHERE v = 7") == by_v);
+    }
+}
+
+// An index that CREATE INDEX builds apart from the database may be stopped while it is filled; the indexes that the server rebuilds for the database itself (at its start, after a
+// recovery) are filled the same way and must not be: stopped half way, one would stay in the database half made.
+TEST_CASE("R67: the filling of an index asks KILL QUERY only when it is built apart from the database", "[r67][kill]") {
+    BPlusTree tree;
+    IndexBuckets bucket(tree.kinds());
+    for (int i = 1; i <= 5; i++) {
+        Row row;
+        row["id"] = std::to_string(i);
+        bucket.add(row["id"], row);
+    }
+    std::atomic<int> told_to_stop{1};
+    deadline::KillScope asked(&told_to_stop, /*reads=*/true); // (a statement that reads, and has been told to stop)
+    REQUIRE_THROWS_AS(bucket.fill(tree, /*stoppable=*/true), StatementError);
+    BPlusTree whole;
+    REQUIRE_NOTHROW(bucket.fill(whole)); // (the default: not stopped)
+    REQUIRE(whole.search("3").has_value());
 }
