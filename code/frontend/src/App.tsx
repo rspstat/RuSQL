@@ -1,9 +1,12 @@
 // App.tsx
 import { useState, useEffect, useRef } from "react";
+import type { ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import Editor from "@monaco-editor/react";
 import type * as Monaco from "monaco-editor";
 import "./App.css";
+import "./components/PageKit.css"; // (the keyframes ScreenLook.css uses)
+import "./components/ScreenLook.css";
 import { format as sqlFormat } from "sql-formatter";
 import DiagramView from "./components/DiagramView";
 import CompatView from "./components/CompatView";
@@ -15,6 +18,8 @@ import MetricsPanel from "./components/MetricsPanel";
 import ErdView from "./components/ErdView";
 import ResultChart from "./components/ResultChart";
 import PlanDiagram from "./components/PlanDiagram";
+import IndexAdvice from "./components/IndexAdvice";
+import { explainTargets } from "./lib/indexAdvice";
 import SchemaDiffModal from "./components/SchemaDiffModal";
 import ConfirmDialog from "./components/ConfirmDialog";
 import EditTableModal from "./components/EditTableModal";
@@ -132,7 +137,7 @@ function startReorderDrag(
 }
 
 // EXPLAIN / EXPLAIN ANALYZE의 계획 줄들을 "이름: 값" 행으로, ANALYZE의 "Step N …" 줄들은 단계 막대(워터폴)로 그린다
-function ExplainPlan({ lines, elapsed }: { lines: string[]; elapsed: number }) {
+function ExplainPlan({ lines, elapsed, advice }: { lines: string[]; elapsed: number; advice?: ReactNode }) {
   // EXPLAIN ANALYZE의 "Step N 이름 : 행, ms, %" 줄들은 표 대신 단계 막대(워터폴)로 그린다
   const steps = lines.flatMap(line => {
     const m = line.match(/^Step (\d+) (.+?) : (\d+) rows, ([\d.]+) ms, (\d+)%$/);
@@ -176,6 +181,7 @@ function ExplainPlan({ lines, elapsed }: { lines: string[]; elapsed: number }) {
           })}
         </div>
       )}
+      {advice}
     </div>
   );
 }
@@ -202,6 +208,8 @@ function App() {
   const [tabColWidths, setTabColWidths] = useState<Record<string, Record<number, number[]>>>({});
   const [tabSortState, setTabSortState] = useState<Record<string, Record<number, { col: number; dir: 'asc' | 'desc' } | null>>>({});
   const [tabResultSearch, setTabResultSearch] = useState<Record<string, string>>({});
+  // what was run in each tab last (the index advice under a plan asks the engine about the statement the EXPLAIN is about)
+  const [tabQueries, setTabQueries] = useState<Record<string, string>>({});
   const [editingCell, setEditingCell] = useState<{
     resultIdx: number; rowIdx: number; colIdx: number;
     tableName: string; pkCols: { name: string; value: string; dataType: string }[];
@@ -256,6 +264,14 @@ function App() {
   const [queryHistory, setQueryHistory] = useState<HistoryEntry[]>([]);
   const [resultTab, setResultTab] = useState<"results" | "history">("results");
   const editorRef = useRef<Monaco.editor.IStandaloneCodeEditor | null>(null);
+  // the index advice under a plan runs statements of its own (the engine's SUGGEST INDEX, a trial of an index) and can put a statement into the editor
+  const runStatements = async (query: string): Promise<QueryResult[]> => (await invoke<MultiQueryResult>("execute_query", { query, ts: Date.now() })).results;
+  const insertIntoEditor = (text: string) => {
+    const editor = editorRef.current;
+    if (!editor) return;
+    editor.setValue(editor.getValue().replace(/\s*$/, "") + "\n\n" + text + "\n");
+    editor.focus();
+  };
   const [resultHeight, setResultHeight] = useState(260);
   const [sidebarWidth, setSidebarWidth] = useState(240);
   const isDragging = useRef(false);
@@ -824,6 +840,7 @@ function App() {
     setIsRunning(true);
     const startTs = Date.now();
     try {
+      setTabQueries(p => ({ ...p, [activeTabId]: q }));
       const res = await invoke<MultiQueryResult>("execute_query", { query: q, ts: startTs });
       clearSqlCompletionCache(); // (the statement may have created or changed a table)
       setTabResults(p => ({ ...p, [activeTabId]: res.results }));
@@ -1369,6 +1386,7 @@ function App() {
     setIsRunning(true);
     setActiveView("editor");
     try {
+      setTabQueries(p => ({ ...p, [activeTabId]: q }));
       const res = await invoke<MultiQueryResult>("execute_query", { query: q, ts: Date.now() });
       setTabResults(p => ({ ...p, [activeTabId]: res.results }));
       await refreshSidebar();
@@ -1399,6 +1417,7 @@ function App() {
     setIsRunning(true);
     setActiveView("editor");
     try {
+      setTabQueries(p => ({ ...p, [activeTabId]: q }));
       const res = await invoke<MultiQueryResult>("execute_query", { query: q, ts: Date.now() });
       setTabResults(p => ({ ...p, [activeTabId]: res.results }));
       await refreshSidebar();
@@ -1423,6 +1442,7 @@ function App() {
     setIsRunning(true);
     setActiveView("editor");
     try {
+      setTabQueries(p => ({ ...p, [activeTabId]: q }));
       const res = await invoke<MultiQueryResult>("execute_query", { query: q, ts: Date.now() });
       setTabResults(p => ({ ...p, [activeTabId]: res.results }));
       await refreshSidebar();
@@ -1443,6 +1463,7 @@ function App() {
     setIsRunning(true);
     setActiveView("editor");
     try {
+      setTabQueries(p => ({ ...p, [activeTabId]: q }));
       const res = await invoke<MultiQueryResult>("execute_query", { query: q, ts: Date.now() });
       setTabResults(p => ({ ...p, [activeTabId]: res.results }));
       await refreshSidebar();
@@ -2955,14 +2976,19 @@ function App() {
                 )}
                 {results.length === 0 ? (
                   <div className="result-empty">{isRunning ? "Running query..." : "Press Ctrl+Enter or ▶ Run to execute a query"}</div>
-                ) : results.map((r, i) => (
+                ) : results.map((r, i) => {
+                  // the advice under a plan: the statement the nth EXPLAIN of the text that was run is about
+                  const isPlan = (x: QueryResult) => x.success && ((x.columns.length === 1 && /^QUERY PLAN/.test(x.columns[0])) || (x.columns.length === 0 && x.message.includes("QUERY PLAN")));
+                  const planStatement = isPlan(r) ? explainTargets(tabQueries[activeTabId] ?? "")[results.slice(0, i).filter(isPlan).length] ?? "" : "";
+                  const advice = planStatement ? <IndexAdvice sql={planStatement} run={runStatements} onInsert={insertIntoEditor} /> : undefined;
+                  return (
                   <div key={i} className="result-block">
                     {!r.success ? (
                       <div className="result-error">
                         <div>❌ {r.message}</div>
                       </div>
                     ) : r.columns.length === 1 && /^QUERY PLAN/.test(r.columns[0]) ? (
-                      <ExplainPlan lines={r.rows.map(row => (row[0] ?? "").trim()).filter(Boolean)} elapsed={r.elapsed} />
+                      <ExplainPlan lines={r.rows.map(row => (row[0] ?? "").trim()).filter(Boolean)} elapsed={r.elapsed} advice={advice} />
                     ) : r.columns.length === 0 ? (() => {
                       // EXPLAIN 트리 시각화
                       if (r.message.includes("QUERY PLAN")) {
@@ -2970,7 +2996,7 @@ function App() {
                           .filter(l => l.startsWith("|") && !l.includes("QUERY PLAN"))
                           .map(l => l.replace(/^\|\s*/, "").replace(/\s*\|$/, "").trim())
                           .filter(Boolean);
-                        return <ExplainPlan lines={planLines} elapsed={r.elapsed} />;
+                        return <ExplainPlan lines={planLines} elapsed={r.elapsed} advice={advice} />;
                       }
                       return <div className="result-msg">✅ {r.message} · {r.elapsed.toFixed(3)}s</div>;
                     })() : (() => {
@@ -3135,7 +3161,8 @@ function App() {
                         );
                       })()}
                   </div>
-                ))}
+                  );
+                })}
                 {ctxMenu && (
                   <div className="ctx-menu" style={{ top: ctxMenu.y, left: ctxMenu.x }}>
                     <div onClick={() => {

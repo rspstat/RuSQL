@@ -325,6 +325,9 @@ public:
     StringResult exec_kill(const std::string& sql);
     // SHOW [GLOBAL | SESSION] STATUS [LIKE 'pattern'] (R53): the counters of the server, worked out without taking the lock of the database
     StringResult exec_show_status(const std::string& sql);
+    // SUGGEST INDEX [FOR] <SELECT | UPDATE | DELETE> (R65): the indexes that would let the statement stop scanning, why, how many rows it would read with them, the indexes there already are,
+    // and what an index could not help with -- a table of rows, one for each (executor_advice.cpp). Nothing is created.
+    StringResult exec_suggest_indexes(const std::string& sql);
     // counts a statement the client sent (Questions and its own kind), for the server and for this session
     void count_statement(const std::string& sql);
     std::shared_ptr<ServerCounters> counters() const;
@@ -598,10 +601,11 @@ private:
     // whether execute() empties the log first. A statement that only reads, builds temporary tables for itself (WITH, a derived table), sets a variable, prepares a
     // statement, locks tables or analyzes one (the statistics live in memory) changes none; a procedure is read through its body. Not known to be harmless: a change.
     bool may_change_stored_data(const SharedDatabase& s, const Statement& stmt, int depth = 0) const;
-    // Whether `stmt` is a CALL whose body changes stored data only through statements the redo log describes completely (INSERT, INSERT ... SELECT, UPDATE, DELETE -- through the IFs
-    // and loops of the body and the procedures it calls), on plain tables (no view, no synonym, no trigger). Such a CALL leaves the log where it is and is persisted by one
-    // batch of it, as the statements it is made of are; any other body that writes empties the log first. (Called with depth > 0 it asks the same of a statement of a body.)
-    bool is_redo_covered_call(const SharedDatabase& s, const Statement& stmt, int depth = 0) const;
+    // Whether everything `stmt` changes in stored data is described completely by the redo log: it writes only through INSERT, INSERT ... SELECT, UPDATE, DELETE, MERGE and the
+    // multi-table UPDATE / DELETE (through the IFs and loops of a procedure body, the procedures a CALL calls, and the triggers of the tables it writes), on tables of the catalog
+    // (a view is followed to the table it reads; a synonym is refused), and no trigger does anything else. Such a statement that takes the exclusive path leaves the log where it is
+    // and is persisted by one batch of it, as the statements it is made of are; any other that writes empties the log first.
+    bool redo_covers_statement(const SharedDatabase& s, const Statement& stmt, int depth = 0) const;
     // The statement a PREPAREd name stands for once the ? are given their values (EXECUTE).
     Result<Statement, std::string> prepared_statement(const std::string& name, const std::vector<std::string>& using_vars);
 

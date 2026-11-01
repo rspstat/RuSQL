@@ -1,0 +1,38 @@
+/* IndexAdvice: the card under a plan. The look of PageKit.css (a card with a colored top edge, a button that lifts), in the teal of the app. */
+.ia {
+  --c: #4ec9b0;
+  margin-top: 14px;
+  padding: 12px 14px 10px;
+  border-radius: 10px;
+  border: 1px solid #3a3a3d;
+  border-top: 3px solid var(--c);
+  background: #252528;
+  font-family: 'Segoe UI', sans-serif;
+  animation: pk-rise 0.22s ease-out backwards;
+}
+.ia-title { font-size: 11px; font-weight: 700; letter-spacing: 1px; color: #858585; margin-bottom: 8px; }
+.ia-card { padding: 8px 0 10px; border-top: 1px solid #333336; }
+.ia-card:first-of-type { border-top: none; padding-top: 0; }
+.ia-sql { font-family: Consolas, monospace; font-size: 13px; color: #9cdcfe; word-break: break-all; }
+.ia-why { margin-top: 3px; font-size: 12px; color: #a0a0a6; }
+.ia-actions { display: flex; align-items: center; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
+.ia-btn {
+  background: #2e2e32;
+  color: #d4d4d4;
+  border: 1px solid #45454a;
+  border-radius: 8px;
+  padding: 4px 12px;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  transition: transform 0.08s ease, border-color 0.1s ease, box-shadow 0.1s ease;
+}
+.ia-btn:hover:not(:disabled) { transform: translateY(-1px); border-color: var(--c); box-shadow: 0 4px 14px color-mix(in srgb, var(--c) 22%, transparent); }
+.ia-btn:active:not(:disabled) { transform: translateY(0) scale(0.97); }
+.ia-btn:disabled { opacity: 0.4; cursor: default; }
+.ia-btn.primary { background: color-mix(in srgb, var(--c) 80%, #000000); border-color: var(--c); color: #101012; font-weight: 650; }
+.ia-trial { font-size: 12.5px; color: var(--c); font-variant-numeric: tabular-nums; }
+.ia-line { margin-top: 6px; font-size: 12px; color: #9d9da3; line-height: 1.5; }
+.ia-line.ok { color: #7fc9b8; }
+.ia-note { font-size: 12px; color: #858585; }
+@media (prefers-reduced-motion: reduce) { .ia { animation: none; } }

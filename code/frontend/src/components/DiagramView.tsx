@@ -159,7 +159,7 @@ const DURABILITY: Item[] = [
   { t: L("Undo log", "Undo 로그"), s: L("per-transaction records for rollback", "롤백용 트랜잭션별 기록") },
   {
     t: L("Checkpoint", "체크포인트"),
-    s: L("rewrites table files when redo grows, before DDL, after recovery; reads (WITH, PREPARE, ANALYZE), VACUUM and a CALL that only reads or writes with INSERT / UPDATE / DELETE leave the log alone", "redo가 커졌을 때·DDL 전·복구 후 테이블 파일 재기록, 읽기(WITH·PREPARE·ANALYZE)와 VACUUM, 읽기만 하거나 INSERT·UPDATE·DELETE로만 쓰는 CALL은 로그를 비우지 않음"),
+    s: L("rewrites table files when redo grows, before DDL, after recovery; reads (WITH, PREPARE, ANALYZE), VACUUM, MERGE, multi-table UPDATE / DELETE, writes to a table with triggers or through a view, and a CALL that only reads or writes with INSERT / UPDATE / DELETE leave the log alone", "redo가 커졌을 때·DDL 전·복구 후 테이블 파일 재기록, 읽기(WITH·PREPARE·ANALYZE)와 VACUUM, MERGE·다중 표 UPDATE / DELETE, 트리거가 걸린 표나 뷰를 거친 쓰기, 읽기만 하거나 INSERT·UPDATE·DELETE로만 쓰는 CALL은 로그를 비우지 않음"),
   },
   {
     t: L("Crash recovery", "크래시 복구"),
@@ -256,7 +256,7 @@ function LayersView() {
         <Card style={at("1", "1")} c={C.client} title="engine_cli" sub={L("Terminal REPL", "터미널 REPL")}
           note={L("runs the engine in-process", "엔진을 프로세스 안에서 직접 실행")} />
         <Card style={at("2", "1")} c={C.client} title={L("Desktop UI", "데스크톱 UI")} sub="Tauri + React + Monaco"
-          note={L("SQL editor (EXPLAIN plan diagram + step bars, result JSON export and chart, Compare Schema), Journey, ERD editor (drag to connect), animated B+Tree, MVCC and Compat pages, Server Manager (recovery card, Sessions with KILL and blockers, slow query log, Metrics trend charts), Compat page", "SQL 에디터(EXPLAIN 계획 그림·단계 막대, 결과 JSON 내보내기·차트, 스키마 비교), 한 문장의 여행, ERD 편집기(끌어서 연결), 움직이는 B+Tree·MVCC·호환성 페이지, 서버 매니저(복구 카드, KILL과 차단자가 보이는 세션, 느린 쿼리 로그, 지표 추세 그래프), 호환성 페이지")} />
+          note={L("SQL editor (EXPLAIN plan diagram + step bars + index advice with a timed trial, result JSON export and chart, Compare Schema), Journey, ERD editor (drag to connect), animated B+Tree, MVCC and Compat pages, Server Manager (recovery card, Sessions with KILL and blockers, slow query log, Metrics trend charts), Compat page", "SQL 에디터(EXPLAIN 계획 그림·단계 막대·시험해 볼 수 있는 인덱스 제안, 결과 JSON 내보내기·차트, 스키마 비교), 한 문장의 여행, ERD 편집기(끌어서 연결), 움직이는 B+Tree·MVCC·호환성 페이지, 서버 매니저(복구 카드, KILL과 차단자가 보이는 세션, 느린 쿼리 로그, 지표 추세 그래프), 호환성 페이지")} />
         <Card style={at("3", "1")} c={C.client} title="Claude Desktop + MCP" sub="Python FastMCP, stdio JSON-RPC"
           note={L("32 tools; drives the UI via ui_commands.json", "도구 32개, ui_commands.json으로 UI 제어")} />
         <Card style={at("4", "1")} c={C.client} title="engine_client" sub={L("TCP client CLI", "TCP 클라이언트 CLI")} note="-u -p -h -P" />

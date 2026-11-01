@@ -742,7 +742,7 @@ std::string table_text(Executor& ex, const std::string& sql) {
 void run(Executor& ex, const std::string& sql) {
     INFO(sql);
     auto r = ex.execute_sql(sql);
-    if (r.is_err()) INFO(r.error());
+    INFO("answer: " << (r.is_err() ? r.error() : r.value().substr(0, 80)));
     REQUIRE(r.is_ok());
 }
 } // namespace
@@ -801,7 +801,7 @@ TEST_CASE("R64: a CALL that writes with INSERT, UPDATE and DELETE is logged like
     REQUIRE(ex.execute_sql("INSERT INTO t VALUES (31, 0)").is_err());
 }
 
-TEST_CASE("R64: a CALL whose body the redo log does not describe (TRUNCATE, a table with a trigger, a view) still empties the log and is durable", "[r64][redo][durability]") {
+TEST_CASE("R64: a CALL whose body the redo log does not describe (TRUNCATE, a trigger that truncates a table) still empties the log and is durable", "[r64][redo][durability]") {
     TempDataDir dir("r64_call_not_logged");
     std::string before_t, before_junk, before_tt, before_audit;
     {
@@ -812,31 +812,26 @@ TEST_CASE("R64: a CALL whose body the redo log does not describe (TRUNCATE, a ta
         run(ex, "CREATE TABLE junk (id INT PRIMARY KEY)");
         run(ex, "CREATE TABLE tt (id INT PRIMARY KEY)");
         run(ex, "CREATE TABLE audit (id INT PRIMARY KEY)");
-        run(ex, "CREATE TRIGGER trg AFTER INSERT ON tt FOR EACH ROW INSERT INTO audit VALUES (NEW.id)");
+        run(ex, "CREATE TRIGGER trg AFTER INSERT ON tt FOR EACH ROW TRUNCATE TABLE audit");
         run(ex, "CREATE PROCEDURE w_trunc() BEGIN INSERT INTO t VALUES (200, 1); TRUNCATE TABLE junk; END");
         run(ex, "CREATE PROCEDURE w_trig(IN k INT) BEGIN INSERT INTO tt VALUES (k); END");
-        run(ex, "CREATE VIEW vt AS SELECT id, v FROM t");
-        run(ex, "CREATE PROCEDURE w_view() BEGIN UPDATE vt SET v = 1 WHERE id = 1; END");
         for (int i = 1; i <= 30; i++) run(ex, "INSERT INTO t VALUES (" + std::to_string(i) + ", 0)");
         run(ex, "INSERT INTO junk VALUES (1), (2)");
+        run(ex, "INSERT INTO audit VALUES (99)");
         const long long before = redo_log_bytes(ex);
         run(ex, "CALL w_trunc()");
         REQUIRE(redo_log_bytes(ex) < before); // (the table files were written and the log emptied, as before)
         for (int i = 300; i < 330; i++) run(ex, "INSERT INTO t VALUES (" + std::to_string(i) + ", 0)");
         const long long before_trigger = redo_log_bytes(ex);
         run(ex, "CALL w_trig(7)");
-        REQUIRE(redo_log_bytes(ex) < before_trigger); // (the body of a trigger may be anything: a table with one empties the log, as before)
-        for (int i = 400; i < 430; i++) run(ex, "INSERT INTO t VALUES (" + std::to_string(i) + ", 0)");
-        const long long before_view = redo_log_bytes(ex);
-        run(ex, "CALL w_view()");
-        REQUIRE(redo_log_bytes(ex) < before_view); // (a view is written through to its table: that stays on the old path too)
+        REQUIRE(redo_log_bytes(ex) < before_trigger); // (a trigger that truncates a table writes its file itself: the log is emptied, as before)
         before_t = table_text(ex, "SELECT * FROM t ORDER BY id");
         before_junk = table_text(ex, "SELECT * FROM junk ORDER BY id");
         before_tt = table_text(ex, "SELECT * FROM tt ORDER BY id");
         before_audit = table_text(ex, "SELECT * FROM audit ORDER BY id");
         REQUIRE(before_t.find("| 200 ") != std::string::npos);
         REQUIRE(before_junk.find("| 1 ") == std::string::npos);
-        REQUIRE(before_audit.find("| 7 ") != std::string::npos);
+        REQUIRE(before_audit.find("| 99 ") == std::string::npos); // (the trigger truncated it)
     } // crash
     Executor ex(dir.path);
     run(ex, "USE d");
@@ -890,4 +885,219 @@ TEST_CASE("R64: VACUUM leaves the redo log: it writes only the tables it rewrite
     REQUIRE(table_text(ex, "SELECT * FROM a ORDER BY id") == before_a);
     REQUIRE(table_text(ex, "SELECT * FROM b ORDER BY id") == before_b);
     REQUIRE(table_text(ex, "SELECT COUNT(*) FROM a") == table_text(ex, "SELECT COUNT(*) FROM a WHERE id > 1")); // (a row that was deleted after the vacuum stays deleted)
+}
+
+// R65: the writes that took the exclusive path (a table with triggers, a view, a subquery in an expression) emptied the log first, and MERGE and the multi-table UPDATE / DELETE
+// flushed their tables, although all of them are made of INSERT / UPDATE / DELETE statements that log every change. A trigger, a view or a procedure is followed: if all it does
+// is described by the log the statement is logged as one batch.
+TEST_CASE("R65: a write to a table with triggers that the log describes is logged, not flushed, and survives a crash", "[r65][redo][durability]") {
+    TempDataDir dir("r65_trigger_logged");
+    std::string before_ta, before_audit;
+    {
+        Executor ex(dir.path);
+        run(ex, "CREATE DATABASE d");
+        run(ex, "USE d");
+        run(ex, "CREATE TABLE ta (id INT PRIMARY KEY, v INT)");
+        run(ex, "CREATE TABLE audit (n INT PRIMARY KEY AUTO_INCREMENT, what VARCHAR(8), k INT)");
+        run(ex, "CREATE TRIGGER ta_bi BEFORE INSERT ON ta FOR EACH ROW SET NEW.v = NEW.v + 1000");
+        run(ex, "CREATE TRIGGER ta_ai AFTER INSERT ON ta FOR EACH ROW INSERT INTO audit (what, k) VALUES ('ins', NEW.id)");
+        run(ex, "CREATE TRIGGER ta_au AFTER UPDATE ON ta FOR EACH ROW INSERT INTO audit (what, k) VALUES ('upd', NEW.id)");
+        run(ex, "CREATE TRIGGER ta_ad AFTER DELETE ON ta FOR EACH ROW INSERT INTO audit (what, k) VALUES ('del', OLD.id)");
+        run(ex, "INSERT INTO ta VALUES (1, 1)");
+        long long last = redo_log_bytes(ex);
+        REQUIRE(last > 0);
+        for (const char* sql : {"INSERT INTO ta VALUES (2, 2), (3, 3)", "UPDATE ta SET v = v + 1 WHERE id = 2", "DELETE FROM ta WHERE id = 3", "REPLACE INTO ta VALUES (1, 5)",
+                                "INSERT INTO ta VALUES (2, 9) ON DUPLICATE KEY UPDATE v = v + 100"}) {
+            INFO(sql);
+            run(ex, sql);
+            const long long now = redo_log_bytes(ex);
+            REQUIRE(now > last); // (the log stays and grows: it used to be emptied before each of them)
+            last = now;
+            REQUIRE(rdb_files(dir.path) == 0);
+        }
+        run(ex, "BEGIN");
+        run(ex, "INSERT INTO ta VALUES (10, 10)");
+        run(ex, "ROLLBACK");
+        run(ex, "BEGIN");
+        run(ex, "INSERT INTO ta VALUES (11, 11)");
+        run(ex, "COMMIT");
+        REQUIRE(rdb_files(dir.path) == 0);
+        before_ta = table_text(ex, "SELECT * FROM ta ORDER BY id");
+        before_audit = table_text(ex, "SELECT * FROM audit ORDER BY n");
+        REQUIRE(before_ta.find("| 10 ") == std::string::npos); // (rolled back)
+        REQUIRE(before_ta.find("| 1011 ") != std::string::npos); // (the BEFORE trigger set it)
+        run(ex, "BEGIN");
+        run(ex, "UPDATE ta SET v = 0 WHERE id = 11"); // (still open at the crash)
+    } // crash
+    Executor ex(dir.path);
+    run(ex, "USE d");
+    REQUIRE(table_text(ex, "SELECT * FROM ta ORDER BY id") == before_ta);
+    REQUIRE(table_text(ex, "SELECT * FROM audit ORDER BY n") == before_audit);
+}
+
+TEST_CASE("R65: a write to a view is logged, not flushed, and survives a crash", "[r65][redo][durability]") {
+    TempDataDir dir("r65_view_logged");
+    std::string before;
+    {
+        Executor ex(dir.path);
+        run(ex, "CREATE DATABASE d");
+        run(ex, "USE d");
+        run(ex, "CREATE TABLE base (id INT PRIMARY KEY, v INT, g INT)");
+        run(ex, "CREATE TABLE audit (n INT PRIMARY KEY AUTO_INCREMENT, k INT)");
+        run(ex, "CREATE TRIGGER base_ai AFTER INSERT ON base FOR EACH ROW INSERT INTO audit (k) VALUES (NEW.id)");
+        run(ex, "CREATE VIEW vw AS SELECT id, v, g FROM base WHERE g = 1");
+        run(ex, "CREATE VIEW vw2 AS SELECT id, v, g FROM vw");
+        run(ex, "INSERT INTO base VALUES (0, 0, 0)");
+        long long last = redo_log_bytes(ex);
+        REQUIRE(last > 0);
+        for (const char* sql : {"INSERT INTO vw VALUES (1, 10, 1), (2, 20, 1)", "UPDATE vw SET v = v + 1 WHERE id = 1", "INSERT INTO vw2 VALUES (3, 30, 1)", "DELETE FROM vw WHERE id = 2",
+                                "UPDATE vw2 SET v = 0 WHERE id = 3"}) {
+            INFO(sql);
+            run(ex, sql);
+            const long long now = redo_log_bytes(ex);
+            REQUIRE(now > last);
+            last = now;
+            REQUIRE(rdb_files(dir.path) == 0);
+        }
+        before = table_text(ex, "SELECT * FROM base ORDER BY id") + table_text(ex, "SELECT * FROM audit ORDER BY n");
+    } // crash
+    Executor ex(dir.path);
+    run(ex, "USE d");
+    REQUIRE(table_text(ex, "SELECT * FROM base ORDER BY id") + table_text(ex, "SELECT * FROM audit ORDER BY n") == before);
+}
+
+TEST_CASE("R65: MERGE and the multi-table UPDATE and DELETE are logged, not flushed, and survive a crash", "[r65][redo][durability]") {
+    TempDataDir dir("r65_merge_logged");
+    std::string before;
+    {
+        Executor ex(dir.path);
+        run(ex, "CREATE DATABASE d");
+        run(ex, "USE d");
+        run(ex, "CREATE TABLE dst (id INT PRIMARY KEY, v INT)");
+        run(ex, "CREATE TABLE src (id INT PRIMARY KEY, v INT)");
+        run(ex, "INSERT INTO dst VALUES (1, 1), (2, 2), (3, 3), (4, 4), (5, 5), (6, 6)");
+        run(ex, "INSERT INTO src VALUES (4, 40), (5, 90), (6, 60), (7, 70), (8, 80)");
+        long long last = redo_log_bytes(ex);
+        REQUIRE(last > 0);
+        REQUIRE(rdb_files(dir.path) == 0);
+        const char* merge = "MERGE INTO dst USING src ON dst.id = src.id WHEN MATCHED AND src.v > 80 THEN DELETE WHEN MATCHED THEN UPDATE SET v = src.v "
+                            "WHEN NOT MATCHED THEN INSERT (id, v) VALUES (src.id, src.v)";
+        for (const char* sql : {merge, "UPDATE dst JOIN src ON dst.id = src.id SET dst.v = src.v + 1", "DELETE dst FROM dst JOIN src ON dst.id = src.id WHERE src.v = 70"}) {
+            INFO(sql);
+            run(ex, sql);
+            const long long now = redo_log_bytes(ex);
+            REQUIRE(now > last); // (the log stays and grows: the tables of the statement used to be written and marked)
+            last = now;
+            REQUIRE(rdb_files(dir.path) == 0);
+        }
+        run(ex, "BEGIN");
+        run(ex, "UPDATE dst JOIN src ON dst.id = src.id SET dst.v = 0");
+        run(ex, "ROLLBACK");
+        run(ex, "BEGIN");
+        run(ex, "DELETE dst FROM dst JOIN src ON dst.id = src.id WHERE src.v = 60");
+        run(ex, "COMMIT");
+        REQUIRE(rdb_files(dir.path) == 0);
+        before = table_text(ex, "SELECT * FROM dst ORDER BY id");
+        REQUIRE(before.find("| 6 ") == std::string::npos); // (deleted by the committed transaction)
+        run(ex, "BEGIN");
+        run(ex, "DELETE dst FROM dst JOIN src ON dst.id = src.id"); // (still open at the crash)
+    } // crash
+    Executor ex(dir.path);
+    run(ex, "USE d");
+    REQUIRE(table_text(ex, "SELECT * FROM dst ORDER BY id") == before);
+}
+
+TEST_CASE("R65: a write whose trigger calls a procedure follows it, and a trigger that writes elsewhere in an uncovered way empties the log", "[r65][redo][durability]") {
+    TempDataDir dir("r65_trigger_chain");
+    std::string before_a, before_b, before_junk;
+    {
+        Executor ex(dir.path);
+        run(ex, "CREATE DATABASE d");
+        run(ex, "USE d");
+        run(ex, "CREATE TABLE a (id INT PRIMARY KEY, v INT)");
+        run(ex, "CREATE TABLE b (id INT PRIMARY KEY AUTO_INCREMENT, v INT)");
+        run(ex, "CREATE TABLE junk (id INT PRIMARY KEY)");
+        run(ex, "CREATE TABLE c (id INT PRIMARY KEY)");
+        run(ex, "CREATE PROCEDURE mirror() BEGIN INSERT INTO b (v) VALUES (1); UPDATE b SET v = v + 1 WHERE id = 1; END");
+        run(ex, "CREATE TRIGGER a_ai AFTER INSERT ON a FOR EACH ROW CALL mirror()");
+        run(ex, "INSERT INTO a VALUES (0, 0)");
+        long long last = redo_log_bytes(ex);
+        run(ex, "INSERT INTO a VALUES (1, 1), (2, 2)");
+        REQUIRE(redo_log_bytes(ex) > last); // (the trigger calls a procedure that only writes with INSERT and UPDATE: logged)
+        REQUIRE(rdb_files(dir.path) == 0);
+        run(ex, "CREATE TRIGGER b_au AFTER UPDATE ON b FOR EACH ROW TRUNCATE TABLE junk"); // (a DDL statement: not described by the log)
+        run(ex, "INSERT INTO junk VALUES (1)");
+        for (int i = 10; i < 40; i++) run(ex, "INSERT INTO c VALUES (" + std::to_string(i) + ")"); // (a table without triggers: logged)
+        last = redo_log_bytes(ex);
+        run(ex, "UPDATE b SET v = 5 WHERE id = 1");
+        REQUIRE(redo_log_bytes(ex) < last); // (the table files were written and the log emptied, as before)
+        before_a = table_text(ex, "SELECT * FROM a ORDER BY id");
+        before_b = table_text(ex, "SELECT * FROM b ORDER BY id");
+        before_junk = table_text(ex, "SELECT * FROM junk ORDER BY id");
+        REQUIRE(before_junk.find("| 1 ") == std::string::npos);
+    } // crash
+    Executor ex(dir.path);
+    run(ex, "USE d");
+    REQUIRE(table_text(ex, "SELECT * FROM a ORDER BY id") == before_a);
+    REQUIRE(table_text(ex, "SELECT * FROM b ORDER BY id") == before_b);
+    REQUIRE(table_text(ex, "SELECT * FROM junk ORDER BY id") == before_junk);
+}
+
+// The reading of a statement follows the triggers of the tables it writes: triggers that write to each other in a circle must not make that reading loop (it stops at eight levels; the
+// engine's own limit of sixteen levels of triggers then ends the statement with an error).
+TEST_CASE("R65: triggers that write to each other in a circle do not make the reading of the statement loop", "[r65][redo]") {
+    TempDataDir dir("r65_trigger_cycle");
+    Executor ex(dir.path);
+    run(ex, "CREATE DATABASE d");
+    run(ex, "USE d");
+    run(ex, "CREATE TABLE p (id INT PRIMARY KEY)");
+    run(ex, "CREATE TABLE q (id INT PRIMARY KEY)");
+    run(ex, "CREATE TRIGGER p_ai AFTER INSERT ON p FOR EACH ROW INSERT INTO q VALUES (NEW.id + 1)");
+    run(ex, "CREATE TRIGGER q_ai AFTER INSERT ON q FOR EACH ROW INSERT INTO p VALUES (NEW.id + 1)");
+    REQUIRE(ex.execute_sql("INSERT INTO p VALUES (1)").is_err());
+    run(ex, "SELECT 1");
+}
+
+// MERGE and a multi-table UPDATE write the tables they name: the reading follows the triggers of each of them (the target of a MERGE, the tables of the FROM list and the joined ones)
+TEST_CASE("R65: MERGE and a multi-table UPDATE look at every table they write for a trigger the log does not describe", "[r65][redo][durability]") {
+    TempDataDir dir("r65_merge_triggers");
+    std::string before_dst, before_oth, before_junk;
+    {
+        Executor ex(dir.path);
+        run(ex, "CREATE DATABASE d");
+        run(ex, "USE d");
+        run(ex, "CREATE TABLE dst (id INT PRIMARY KEY, v INT)");
+        run(ex, "CREATE TABLE src (id INT PRIMARY KEY, v INT)");
+        run(ex, "CREATE TABLE oth (id INT PRIMARY KEY, v INT)");
+        run(ex, "CREATE TABLE junk (id INT PRIMARY KEY)");
+        run(ex, "CREATE TABLE fill (id INT PRIMARY KEY)");
+        run(ex, "INSERT INTO dst VALUES (1, 1), (2, 2)");
+        run(ex, "INSERT INTO src VALUES (1, 10), (2, 20)");
+        run(ex, "INSERT INTO oth VALUES (1, 0), (2, 0)");
+        run(ex, "INSERT INTO junk VALUES (1)");
+        run(ex, "CREATE TRIGGER dst_au AFTER UPDATE ON dst FOR EACH ROW TRUNCATE TABLE junk");  // (a DDL statement: not described by the log)
+        run(ex, "CREATE TRIGGER oth_au AFTER UPDATE ON oth FOR EACH ROW TRUNCATE TABLE junk");
+        int next = 0;
+        auto fill_log = [&] {
+            for (int i = 0; i < 30; i++) run(ex, "INSERT INTO fill VALUES (" + std::to_string(next++) + ")");
+            return redo_log_bytes(ex);
+        };
+        long long before = fill_log();
+        run(ex, "MERGE INTO dst USING src ON dst.id = src.id WHEN MATCHED THEN UPDATE SET v = src.v");
+        REQUIRE(redo_log_bytes(ex) < before); // (the target has a trigger of that kind: the log is emptied, as before)
+        run(ex, "INSERT INTO junk VALUES (1)");
+        before = fill_log();
+        run(ex, "UPDATE src JOIN oth ON src.id = oth.id SET oth.v = 1"); // (the joined table has one)
+        REQUIRE(redo_log_bytes(ex) < before);
+        before_dst = table_text(ex, "SELECT * FROM dst ORDER BY id");
+        before_oth = table_text(ex, "SELECT * FROM oth ORDER BY id");
+        before_junk = table_text(ex, "SELECT * FROM junk ORDER BY id");
+        REQUIRE(before_dst.find("| 20 ") != std::string::npos);
+        REQUIRE(before_junk.find("| 1 ") == std::string::npos);
+    } // crash
+    Executor ex(dir.path);
+    run(ex, "USE d");
+    REQUIRE(table_text(ex, "SELECT * FROM dst ORDER BY id") == before_dst);
+    REQUIRE(table_text(ex, "SELECT * FROM oth ORDER BY id") == before_oth);
+    REQUIRE(table_text(ex, "SELECT * FROM junk ORDER BY id") == before_junk);
 }

@@ -276,6 +276,48 @@ test("sessions: durations", () => {
   assert.equal(act.duration(3700), "1h 1m");
 });
 
+// ── indexAdvice (R65) ──────────────────────────────────────────────────
+const adv = await load("indexAdvice");
+test("advice: the statements of a text are cut at the ; outside strings, names and comments", () => {
+  assert.deepEqual(adv.splitStatements("SELECT 1; SELECT ';' ; /* a; b */ SELECT `a;b` -- c; d\n; SELECT 'it''s;'"), ["SELECT 1", "SELECT ';'", "SELECT `a;b`", "SELECT 'it''s;'"]);
+  assert.deepEqual(adv.splitStatements("  "), []);
+});
+test("advice: the statement an EXPLAIN is about (the nth plan is the nth EXPLAIN), empty for one it does not read", () => {
+  assert.deepEqual(adv.explainTargets("EXPLAIN SELECT * FROM t WHERE a = 1; SELECT 2; explain analyze UPDATE t SET a = 1 WHERE b = 2; EXPLAIN INSERT INTO t VALUES (1)"),
+    ["SELECT * FROM t WHERE a = 1", "UPDATE t SET a = 1 WHERE b = 2", ""]);
+  assert.deepEqual(adv.explainTargets("SELECT 1"), []);
+});
+test("advice: the answer of SUGGEST INDEX is read into suggestions, indexes there already are, and notes", () => {
+  const columns = ["kind", "table_name", "columns", "detail", "create_index", "rows_in_table", "rows_read_with_index"];
+  const rows = [
+    ["suggest", "t", "cat, grp", "searched by cat (=), grp (=)", "CREATE INDEX idx_t_cat_grp ON t (cat, grp);", "2000", "1"],
+    ["suggest", "t", "name", "searched by name (range)", "CREATE INDEX idx_t_name ON t (name);", "2000", ""],
+    ["already", "o", "t_id", "already served by the index idx", "", "1000", ""],
+    ["note", "", "", "A LIKE on name starts with a wildcard.", "", "", ""],
+  ];
+  const a = adv.parseAdvice(columns, rows);
+  assert.equal(a.suggestions.length, 2);
+  assert.deepEqual(a.suggestions[0], { table: "t", columns: "cat, grp", why: "searched by cat (=), grp (=)", create: "CREATE INDEX idx_t_cat_grp ON t (cat, grp);", rowsInTable: 2000, rowsRead: 1 });
+  assert.equal(a.suggestions[1].rowsRead, null);
+  assert.deepEqual(a.already, [{ table: "o", columns: "t_id", detail: "already served by the index idx" }]);
+  assert.deepEqual(a.notes, ["A LIKE on name starts with a wildcard."]);
+  assert.deepEqual(adv.parseAdvice(["x"], [["1"]]), { suggestions: [], already: [], notes: [] });
+});
+test("advice: the time a plan says it took, in ms", () => {
+  assert.equal(adv.executionMs(["Access: SEQ SCAN", "Execution time: 12.5 ms"]), 12.5);
+  assert.equal(adv.executionMs(["Execution time : 1.5 sec"]), 1500);
+  assert.equal(adv.executionMs(["Estimated rows: 3"]), null);
+  assert.equal(adv.median([5, 1, 3]), 3);
+});
+test("advice: the index a trial builds has a name of its own, and what a trial shows", () => {
+  const s = { table: "t", columns: "a, b", why: "", create: "CREATE INDEX idx_t_a_b ON t (a, b);", rowsInTable: 10, rowsRead: null };
+  assert.deepEqual(adv.trialIndex(s, 2), { name: "__try_2_t", create: "CREATE INDEX __try_2_t ON t (a, b);", drop: "DROP INDEX __try_2_t ON t;" });
+  assert.equal(adv.describeTrial(0.8, 0.05), "0.800 ms → 0.050 ms (16x faster)");
+  assert.equal(adv.describeTrial(30, 10), "30.00 ms → 10.00 ms (3.0x faster)");
+  assert.equal(adv.describeTrial(10, 10), "10.00 ms → 10.00 ms (no change)");
+  assert.equal(adv.describeTrial(10, 20), "10.00 ms → 20.00 ms (slower)");
+});
+
 // ── run ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 let failed = 0;
 for (const [name, fn] of tests) {

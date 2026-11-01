@@ -25,11 +25,14 @@ std::string version_identity(Row row) {
 // delete: INSERT (also IGNORE, ON DUPLICATE KEY UPDATE -- its updates are UPDATE statements --
 // and REPLACE -- its deletes are DELETE statements), INSERT ... SELECT, UPDATE and DELETE. The
 // rows a foreign-key action changes in the child tables are logged too (cascade_write), so the
-// tables in the lock set besides the target no longer matter. MERGE and the multi-table forms
-// still keep the legacy "flush the tables" persistence.
+// tables in the lock set besides the target no longer matter. MERGE and the multi-table UPDATE /
+// DELETE are made of those statements (one UPDATE, one DELETE and one INSERT of the one-table paths),
+// so every change they make is logged as well.
 bool Executor::is_redo_covered_kind(const Statement& stmt) {
     return std::holds_alternative<Statement::Insert>(stmt.data) || std::holds_alternative<Statement::InsertSelect>(stmt.data) ||
-           std::holds_alternative<Statement::Update>(stmt.data) || std::holds_alternative<Statement::Delete>(stmt.data);
+           std::holds_alternative<Statement::Update>(stmt.data) || std::holds_alternative<Statement::Delete>(stmt.data) ||
+           std::holds_alternative<Statement::Merge>(stmt.data) || std::holds_alternative<Statement::MultiUpdate>(stmt.data) ||
+           std::holds_alternative<Statement::MultiDelete>(stmt.data);
 }
 
 void Executor::write_redo_batch(SharedDatabase& s, std::vector<RedoOp> ops) {

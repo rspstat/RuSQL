@@ -1,0 +1,90 @@
+/* ScreenLook -- the look of the B+Tree, MVCC and compatibility pages (PageKit.css: a header with a soft glow, cards with a colored top edge that lift when the pointer is on
+   them, boxes that rise into place) on the home screen and the server manager. Only the look: the markup of those screens is as it was, and a screen puts its color on its root
+   as --c. Loaded after App.css, so these rules win where both say something. */
+
+.home-main { --c: #4ec9b0; }
+.srv-scroll-area { --c: #e0a458; }
+
+/* ------------------------------------------------------------------ */
+/* the header of a screen: the logo or icon, the title, one line         */
+/* ------------------------------------------------------------------ */
+.home-header,
+.srv-conn-header {
+  position: relative;
+  overflow: hidden;
+  padding: 20px 26px;
+  border-radius: 14px;
+  border: 1px solid color-mix(in srgb, var(--c) 32%, #333336);
+  background:
+    radial-gradient(340px 200px at 100% 0%, color-mix(in srgb, var(--c) 26%, transparent), transparent 70%),
+    linear-gradient(120deg, color-mix(in srgb, var(--c) 15%, #202023) 0%, #1f1f22 58%, #1e1e1e 100%);
+  animation: pk-rise 0.22s ease-out backwards;
+}
+.home-header { margin-bottom: 18px; }
+.srv-conn-header { margin-bottom: 18px; }
+
+.home-title,
+.srv-conn-title {
+  font-weight: 650;
+  color: #ffffff;
+  background: linear-gradient(90deg, #ffffff 30%, color-mix(in srgb, var(--c) 70%, #ffffff));
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+.home-desc,
+.srv-conn-sub { color: #9d9da3; }
+
+.home-rdbms-desc {
+  border-left-color: color-mix(in srgb, var(--c) 45%, #2a2a2a);
+  animation: pk-rise 0.22s ease-out 40ms backwards;
+}
+.home-rdbms-desc p { color: #7c7c83; }
+
+/* ------------------------------------------------------------------ */
+/* cards                                                                 */
+/* ------------------------------------------------------------------ */
+.home-quick-btn,
+.home-conn-card {
+  background: #252528;
+  border-top: 3px solid var(--c);
+  border-radius: 10px;
+  transition: transform 0.12s ease, border-color 0.12s ease, background 0.12s ease, box-shadow 0.12s ease, color 0.12s ease;
+  animation: pk-rise 0.22s ease-out backwards;
+}
+.home-quick-btn:hover,
+.home-conn-card:hover {
+  transform: translateY(-2px);
+  border-color: var(--c);
+  background: #2a2a2e;
+  box-shadow: 0 8px 26px color-mix(in srgb, var(--c) 22%, transparent);
+}
+.home-quick-btn:active,
+.home-conn-card:active { transform: translateY(0) scale(0.99); }
+
+.home-quick-btn:nth-child(2) { animation-delay: 30ms; }
+.home-quick-btn:nth-child(3) { animation-delay: 60ms; }
+.home-conn-card:nth-child(2) { animation-delay: 20ms; }
+.home-conn-card:nth-child(3) { animation-delay: 40ms; }
+.home-conn-card:nth-child(4) { animation-delay: 60ms; }
+.home-conn-card:nth-child(5) { animation-delay: 80ms; }
+.home-conn-card:nth-child(6) { animation-delay: 100ms; }
+.home-conn-card:nth-child(7) { animation-delay: 120ms; }
+.home-conn-card:nth-child(8) { animation-delay: 140ms; }
+.home-conn-card:nth-child(n+9) { animation-delay: 160ms; }
+.home-conn-card.dragging { transform: none; }
+
+/* the server manager: the form is one card, the name row and the log come in after the header */
+.srv-form-body {
+  background: #252528;
+  border: 1px solid #3a3a3d;
+  border-top: 3px solid var(--c);
+  border-radius: 10px;
+  animation: pk-rise 0.22s ease-out 50ms backwards;
+}
+.srv-name-row { animation: pk-rise 0.22s ease-out 25ms backwards; }
+.srv-log-panel { border-top: 3px solid #e0a458; border-radius: 10px; animation: pk-rise 0.22s ease-out 80ms backwards; }
+
+@media (prefers-reduced-motion: reduce) {
+  .home-header, .srv-conn-header, .home-rdbms-desc, .home-quick-btn, .home-conn-card, .srv-form-body, .srv-name-row, .srv-log-panel { animation: none; }
+}

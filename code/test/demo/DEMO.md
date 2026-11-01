@@ -37,6 +37,7 @@ SELECT COUNT(*), SUM(amount) FROM orders WHERE customer_id = 2345;             -
 ```
 
 - `EXPLAIN ANALYZE SELECT …`를 치면 결과 창에 **단계별 시간 막대(워터폴)**가 나옵니다: 스캔·조인·정렬·"Limit / distinct / result" 단계마다 행 수·ms·비율이 있고, 가장 오래 걸린 단계가 노란색입니다. 인덱스 전·후 두 번을 보여 주면 "Scan"의 막대가 줄어드는 것이 보입니다.
+- `EXPLAIN SELECT …`의 결과 아래에는 **INDEX ADVICE** 카드가 뜹니다: 엔진의 `SUGGEST INDEX`가 문장을 읽고 `CREATE INDEX idx_orders_customer ON orders (customer_id);`를 이유("searched by customer_id (=)")와 읽을 행 수 추정("about 26 read with the index")과 함께 보여 줍니다. **`Try it`**은 임시 이름으로 인덱스를 만들어 전·후 시간을 재고(예: 5.76 ms → 0.108 ms, 53배) 인덱스를 다시 지웁니다(SELECT만, 20만 행 이하). `Insert into editor`는 그 문장을 에디터에 넣어 줍니다. 인덱스를 만들기 전에 이 카드로 시작하면 "AI 없이 앱만으로" 인덱스를 찾는 장면이 됩니다.
 - 같은 질의를 두 번 치면 결과 캐시 때문에 0ms가 나옵니다. "인덱스 후" 시간은 **다른 고객 번호**(2345)로 보여 주고, 근거는 EXPLAIN의 계획 변화로 설명합니다.
 - 인덱스를 만든 뒤에 1번의 조인을 다시 돌려도 느려지지 않습니다(약 1초 그대로).
 
@@ -142,6 +143,7 @@ Claude Desktop에 MCP가 연결되어 있다면 "demo 데이터베이스에서 �
 2026-10-22에 위 시연 문장들과 아래 항목을 지금 엔진에 직접 돌려 확인했습니다. 예전 목록에 있던 `SUM(amount * 2)`, `ROUND(AVG(amount), 0) * 2`, 열 이름 `ROUND()`, `LEFT JOIN`의 `테이블.열`, 쉼표 조인·별칭 등은 **모두 고쳐졌으니 써도 됩니다.** 값 기준 윈도 프레임(`RANGE BETWEEN 5 PRECEDING AND …`), `DATE('2026-03-05') + 0`(`20260305`)과 DATE 열의 `SUM`·`AVG`, 갱신하는 같은 표를 하위 질의로 읽는 `UPDATE`(MySQL처럼 오류 1093)도 2026-11-01에 다시 돌려 보니 MySQL과 같았습니다.
 
 - `SELECT @x := …`, `INSERT INTO t () VALUES ()`, `CREATE TEMPORARY TABLE`, `SIGNAL`, 커서, 라벨 붙은 루프, `FULLTEXT`, `USE INDEX`는 지원하지 않습니다(`WITH ROLLUP`은 R60부터, `KILL`은 R53부터 됩니다).
+- 트리거 안에서 `CALL 프로시저(NEW.id)`처럼 `NEW.열`을 인자로 넘기면 프로시저가 NULL을 받습니다(오류도 없음; 2026-11-01 확인). 감사 트리거는 `INSERT INTO audit … VALUES (NEW.id, …)`로 쓰세요.
 - 서버를 강제 종료한 뒤 첫 `COUNT`·`SUM`은 전체를 읽어 느립니다(위 3번).
 
 ## 되돌리기

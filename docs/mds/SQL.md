@@ -414,6 +414,7 @@ RuSQL이 실제로 받아서 실행하는 SQL 문법을 한 줄씩 정리한 문
 - EXPLAIN SELECT ... : 실행 계획(접근 경로 · 조인 알고리즘 · 비용; SELECT가 아닌 문장은 계획 없이 안내만)
 - EXPLAIN ANALYZE 문장 : 실제로 실행하며 단계별 행 수 · 시간 · 비율(조인 종류 · 알고리즘, 서브쿼리 시간 포함; 쓰기 문장은 실제로 바뀜)
 - TRACE 문장 : 단계별 시간 · 잠금 대기 · 인덱스 사용을 추적하며 실행
+- SUGGEST INDEX [FOR] SELECT | UPDATE | DELETE ... (`SUGGEST INDEXES`도 같음) : 그 문장이 스캔을 그만두게 할 인덱스를 제안 — 같음 조건 열(서로 다른 값이 많은 열 먼저), 범위 열 하나, ORDER BY 열 순서의 `CREATE INDEX` 문장과 이유, 인덱스로 읽을 행 수 추정, 이미 있는 인덱스, 인덱스가 도움이 안 되는 이유(열을 함수로 감쌈 · 앞이 `%`인 LIKE · OR · 100행 미만 표 · 대부분을 읽게 됨)를 한 줄씩 담은 표로 답함. 아무것도 만들지 않음(WITH·하위 질의·OR의 UNION 다시 쓰기는 읽지 않음)
 - ANALYZE TABLE t : 통계 정보 갱신
 - VACUUM [t] : 지운 행의 옛 버전 정리
 - CHECKPOINT : redo 로그를 테이블 파일에 반영하고 비움

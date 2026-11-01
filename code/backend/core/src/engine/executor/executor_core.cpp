@@ -1268,11 +1268,12 @@ StringResult Executor::execute(Statement stmt) {
     }
     auto s = shared->write();
     // (a statement that needs the lock exclusive only to build temporary tables or to keep statistics, and a procedure that only reads, changes nothing on disk:
-    // the redo log stays. Neither is emptied by a VACUUM outside a transaction -- it marks each table it rewrites, as the vacuum that runs by itself does -- or by a CALL
-    // that writes only through statements the log covers: those are persisted by the batch below, as the statements they are made of)
+    // the redo log stays. Neither is emptied by a VACUUM outside a transaction -- it marks each table it rewrites, as the vacuum that runs by itself does -- or by a statement
+    // that writes only through statements the log covers (a CALL, a write to a table with triggers or to a view, MERGE, the multi-table UPDATE / DELETE): those are persisted by the
+    // batch below, as the statements they are made of)
     const bool mutating = may_change_stored_data(*s, stmt);
-    const bool covered_call = mutating && is_redo_covered_call(*s, stmt);
-    const bool leaves_log = covered_call || (std::holds_alternative<Statement::Vacuum>(stmt.data) && !txn.is_active());
+    const bool covered_here = mutating && redo_covers_statement(*s, stmt);
+    const bool leaves_log = covered_here || (std::holds_alternative<Statement::Vacuum>(stmt.data) && !txn.is_active());
     if (mutating && !leaves_log) {
         // DDL/maintenance/anything unclassified writes table files directly (save_table), and
         // some of it (TRUNCATE, DROP, ALTER) would be undone by replaying older redo batches
@@ -1285,13 +1286,13 @@ StringResult Executor::execute(Statement stmt) {
         if (has_dirty) checkpoint_redo_locked(*s);
     }
     explain_trace::stage("Exclusive lock");
-    redo_covered_stmt_ = covered_call && !txn.is_active();
+    redo_covered_stmt_ = covered_here && !txn.is_active();
     auto result = execute_with_s(*s, std::move(stmt));
     redo_covered_stmt_ = false;
     explain_trace::stage("Execute");
     if (mutating) {
         if (txn.is_active()) {
-            if (!covered_call) txn.mark_redo_incomplete();
+            if (!covered_here) txn.mark_redo_incomplete();
         } else {
             // Whatever this statement logged (e.g. a trigger body's INSERTs) is committed
             // work: make it durable rather than letting the ops pile up.
@@ -1598,6 +1599,7 @@ StringResult Executor::run_sql_text(const std::string& sql_text) {
         const std::string rest = trim(sql);
         if (rest.size() > 5) return run_trace(*this, rest.substr(5));
     }
+    if (word == "SUGGEST") return exec_suggest_indexes(sql_text);
     // MAX_EXECUTION_TIME: a SELECT that runs longer than the hint or SET max_execution_time says is stopped with error 3024 (other statements are not timed)
     std::optional<deadline::Scope> time_limit;
     if (word == "SELECT" || word == "WITH") {

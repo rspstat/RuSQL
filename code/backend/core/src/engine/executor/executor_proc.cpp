@@ -427,46 +427,67 @@ bool Executor::may_change_stored_data(const SharedDatabase& s, const Statement& 
         stmt.data);
 }
 
-bool Executor::is_redo_covered_call(const SharedDatabase& s, const Statement& stmt, int depth) const {
-    if (!std::holds_alternative<Statement::CallProcedure>(stmt.data) && depth == 0) return false;
+bool Executor::redo_covers_statement(const SharedDatabase& s, const Statement& stmt, int depth) const {
+    if (depth >= 8) return false; // (procedures and triggers that call each other: not worth following)
     if (!may_change_stored_data(s, stmt)) return true; // (reads, variables, a loop that only reads: nothing to log)
-    auto body_covered = [&](const std::vector<Statement>& body, int level) {
-        return std::all_of(body.begin(), body.end(), [&](const Statement& inner) { return is_redo_covered_call(s, inner, level); });
+    auto body_covered = [&](const std::vector<Statement>& body) {
+        return std::all_of(body.begin(), body.end(), [&](const Statement& inner) { return redo_covers_statement(s, inner, depth); });
+    };
+    // a table a statement writes: a plain table of the catalog (a view is written through to the table it reads; a synonym is another name for a table, and is refused), whose triggers
+    // do nothing that the log does not describe
+    auto written_table_covered = [&](std::string table) {
+        if (s.synonyms.count(table)) return false;
+        table = qualify_name(table);
+        for (int hops = 0; s.views.count(table); hops++) {
+            auto resolved = resolve_updatable_view(s, table);
+            if (hops >= 8 || !resolved) return false; // (not updatable: the statement is an error)
+            table = resolved->first;
+        }
+        if (!s.catalog.get_table(table)) return false;
+        for (const auto& trigger : s.triggers) {
+            if (std::get<0>(trigger.second) != table) continue;
+            const std::vector<Statement>& trigger_body = std::get<3>(trigger.second);
+            if (!std::all_of(trigger_body.begin(), trigger_body.end(), [&](const Statement& inner) { return redo_covers_statement(s, inner, depth + 1); })) return false;
+        }
+        return true;
     };
     if (is_redo_covered_kind(stmt)) {
-        // a write the log describes completely -- on a table of its own: not a view or a synonym, and no trigger fires for it (the body of a trigger may be anything).
-        // (A partitioned table is refused inside a body, with an error of its own.)
         Statement named = stmt;
         resolve_names(s, named);
-        std::string table;
-        if (auto* insert = std::get_if<Statement::Insert>(&named.data)) table = insert->table;
-        else if (auto* insert_select = std::get_if<Statement::InsertSelect>(&named.data)) table = insert_select->table;
-        else if (auto* update = std::get_if<Statement::Update>(&named.data)) table = update->table;
-        else if (auto* del = std::get_if<Statement::Delete>(&named.data)) table = del->table;
-        if (s.synonyms.count(table)) return false; // (another name for a table)
-        table = qualify_name(table);
-        const TableSchema* schema = s.catalog.get_table(table);
-        if (!schema) return false; // (a view has no schema of its own: it is refused here)
-        return std::none_of(s.triggers.begin(), s.triggers.end(), [&](const auto& trigger) { return std::get<0>(trigger.second) == table; });
+        std::vector<std::string> written;
+        if (auto* insert = std::get_if<Statement::Insert>(&named.data)) written.push_back(insert->table);
+        else if (auto* insert_select = std::get_if<Statement::InsertSelect>(&named.data)) written.push_back(insert_select->table);
+        else if (auto* update = std::get_if<Statement::Update>(&named.data)) written.push_back(update->table);
+        else if (auto* del = std::get_if<Statement::Delete>(&named.data)) written.push_back(del->table);
+        else if (auto* merge = std::get_if<Statement::Merge>(&named.data)) written.push_back(merge->target);
+        else if (auto* multi_update = std::get_if<Statement::MultiUpdate>(&named.data)) {
+            written = multi_update->tables;
+            for (const auto& j : multi_update->joins) written.push_back(j.table);
+        } else if (auto* multi_delete = std::get_if<Statement::MultiDelete>(&named.data)) {
+            written = multi_delete->delete_tables;
+            written.push_back(multi_delete->from_table);
+            for (const auto& j : multi_delete->joins) written.push_back(j.table);
+        }
+        return std::all_of(written.begin(), written.end(), written_table_covered);
     }
     return std::visit(
         [&](const auto& v) -> bool {
             using T = std::decay_t<decltype(v)>;
             if constexpr (std::is_same_v<T, Statement::ProcIf>) {
-                return body_covered(v.then_body, depth) && (!v.else_body || body_covered(*v.else_body, depth)) &&
-                       std::all_of(v.elseif_branches.begin(), v.elseif_branches.end(), [&](const auto& branch) { return body_covered(branch.second, depth); });
+                return body_covered(v.then_body) && (!v.else_body || body_covered(*v.else_body)) &&
+                       std::all_of(v.elseif_branches.begin(), v.elseif_branches.end(), [&](const auto& branch) { return body_covered(branch.second); });
             } else if constexpr (std::is_same_v<T, Statement::ProcWhile> || std::is_same_v<T, Statement::ProcLoop> || std::is_same_v<T, Statement::ProcRepeat>) {
-                return body_covered(v.body, depth);
+                return body_covered(v.body);
             } else if constexpr (std::is_same_v<T, Statement::CallProcedure>) {
-                if (depth >= 8) return false;
                 auto it = s.procedures.find(v.name);
                 if (it == s.procedures.end()) {
                     const std::string wanted = to_lower_str(v.name);
                     it = std::find_if(s.procedures.begin(), s.procedures.end(), [&](const auto& entry) { return to_lower_str(entry.first) == wanted; });
                 }
-                return it != s.procedures.end() && body_covered(it->second.second, depth + 1);
+                return it != s.procedures.end() && std::all_of(it->second.second.begin(), it->second.second.end(),
+                                                                [&](const Statement& inner) { return redo_covers_statement(s, inner, depth + 1); });
             } else {
-                return false; // (anything else that writes -- DDL, MERGE, a multi-table statement, TRUNCATE -- writes the files itself)
+                return false; // (anything else that writes -- DDL, TRUNCATE -- writes the files itself)
             }
         },
         stmt.data);
