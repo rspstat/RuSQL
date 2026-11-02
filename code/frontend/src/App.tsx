@@ -5,8 +5,6 @@ import { invoke } from "@tauri-apps/api/core";
 import Editor from "@monaco-editor/react";
 import type * as Monaco from "monaco-editor";
 import "./App.css";
-import "./components/PageKit.css"; // (the keyframes ScreenLook.css uses)
-import "./components/ScreenLook.css";
 import { format as sqlFormat } from "sql-formatter";
 import DiagramView from "./components/DiagramView";
 import CompatView from "./components/CompatView";
