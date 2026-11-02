@@ -2813,6 +2813,12 @@ VS Code 스타일 탭 드래그 순서 변경(요청의 1번 항목)은 같은 �
 - 새 모양(PageKit)이 남은 곳: B+Tree · MVCC 페이지(와 아이콘을 숨긴 호환성 페이지)뿐이다. 인덱스 제안 카드(`IndexAdvice.css`)는 PageKit의 카드 모양을 따라 만든 별개의 카드라 그대로 둔다. `RECOMMAND.md`의 "같은 디자인을 다른 화면에도" 항목은 사용자 결정에 따라 지웠다.
 - Diagram 페이지 · 시험은 바꾸지 않았다(CSS만).
 
+### 11월 3일 (두 번째) — 홈 화면 환영 문구의 "Rust"를 "C++"로
+
+통합 문서 v29(C++ 기준)의 그림 4-1에 홈 화면의 환영 문구가 그대로 나오는데 "…built entirely from the ground up in **Rust**"라고 적혀 있어서, 사용자가 "앱 문구를 고치고 다시 찍어 문서 사진을 바꾸라"고 했다. 엔진은 2학기에 C++20으로 전면 재작성했으므로(이 문구가 쓰인 때는 Rust 프로토타입) `App.tsx`의 문구를 "in C++"로 고쳤다(한 단어). 앱을 다시 띄워 홈 화면을 캡처해 확인했고 v29의 그림 4-1을 바꿨다.
+- **알게 된 것(고치지 않음)**: 같은 문단의 마지막 문장 "Whenever you need a hand, the built-in AI assistant is always there — ready to help you write queries…"는 낡았다. 앱 안의 AI 채팅·AI 탭은 10월에 빼고(AI는 Claude Desktop이 MCP로 쓴다) 지금은 없다. 요청이 Rust 한 단어였고 이 문장은 제품 설명을 바꾸는 일이라 사용자에게 물어보기로 남겼다.
+- Diagram 페이지 · 시험은 바꾸지 않았다(문구만).
+
 ## 요약: 1학기 대비 2학기에 달라진 것
 
 

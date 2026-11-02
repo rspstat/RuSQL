@@ -1861,7 +1861,7 @@ function App() {
             {/* RDBMS 설명 */}
             <div className="home-rdbms-desc">
               <p>
-                Welcome to our project! — a relational database management system built entirely from the ground up in Rust, designed for reliability.<br/>
+                Welcome to our project! — a relational database management system built entirely from the ground up in C++, designed for reliability.<br/>
                 Connect to a database and feel free to explore, query, update, and manage your data — there are no limits on how you interact with it.<br/>
                 Every part of the interface is crafted to be intuitive and approachable, so you can always stay focused on your data rather than the tool.<br/>
                 Whenever you need a hand, the built-in AI assistant is always there — ready to help you write queries, understand results, and go further.
