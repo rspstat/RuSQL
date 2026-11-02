@@ -29,7 +29,7 @@
 
 ### 7월 7일~8일 — C++ 마이그레이션 마라톤
 
-**핵심 결정**: "충실한 1:1 포팅" — 동작(버그까지)을 그대로 재현하고, 재설계하지 않는다는 원칙으로 시작. `rusql-core`/`rusql-cli`/`rusql-client`/`rusql-server` 전체를 C++20으로 재작성.
+**핵심 결정**: "충실한 1:1 포팅" — 동작(버그까지)을 그대로 재현하고, 재설계하지 않는다는 원칙으로 시작. `rusql-core`/`rusql-cli`/`rusql-client`/`rusql-server` 전체를 C++로 재작성.
 
 - **Phase 1~7**: 빌드 골격, 클라이언트, AST/스키마, 렉서/파서, 스토리지 엔진, 트랜잭션 레이어, 플래너/조인/락매니저/쿼리캐시.
 - **Phase 8** (executor.rs 9,454줄 전체 포팅): DDL·DML 코어(INSERT/UPDATE/DELETE, FK CASCADE/RESTRICT/SET NULL/SET DEFAULT)·SELECT(WHERE/JOIN/GROUP BY/HAVING/ORDER BY/서브쿼리/CTE/UNION/윈도우함수 전체 스위트)·트랜잭션/MVCC/락(BEGIN/COMMIT/ROLLBACK/SAVEPOINT, 그룹 커밋, WAL 복구)·저장 프로시저/트리거/UDF·DCL·INFORMATION_SCHEMA까지 전부.
@@ -2815,16 +2815,17 @@ VS Code 스타일 탭 드래그 순서 변경(요청의 1번 항목)은 같은 �
 
 ### 11월 3일 (두 번째) — 홈 화면 환영 문구의 "Rust"를 "C++"로
 
-통합 문서 v29(C++ 기준)의 그림 4-1에 홈 화면의 환영 문구가 그대로 나오는데 "…built entirely from the ground up in **Rust**"라고 적혀 있어서, 사용자가 "앱 문구를 고치고 다시 찍어 문서 사진을 바꾸라"고 했다. 엔진은 2학기에 C++20으로 전면 재작성했으므로(이 문구가 쓰인 때는 Rust 프로토타입) `App.tsx`의 문구를 "in C++"로 고쳤다(한 단어). 앱을 다시 띄워 홈 화면을 캡처해 확인했고 v29의 그림 4-1을 바꿨다.
+통합 문서 v29(C++ 기준)의 그림 4-1에 홈 화면의 환영 문구가 그대로 나오는데 "…built entirely from the ground up in **Rust**"라고 적혀 있어서, 사용자가 "앱 문구를 고치고 다시 찍어 문서 사진을 바꾸라"고 했다. 엔진은 2학기에 C++로 전면 재작성했으므로(이 문구가 쓰인 때는 Rust 프로토타입) `App.tsx`의 문구를 "in C++"로 고쳤다(한 단어). 앱을 다시 띄워 홈 화면을 캡처해 확인했고 v29의 그림 4-1을 바꿨다.
 - **알게 된 것(고치지 않음)**: 같은 문단의 마지막 문장 "Whenever you need a hand, the built-in AI assistant is always there — ready to help you write queries…"는 낡았다. 앱 안의 AI 채팅·AI 탭은 10월에 빼고(AI는 Claude Desktop이 MCP로 쓴다) 지금은 없다. 요청이 Rust 한 단어였고 이 문장은 제품 설명을 바꾸는 일이라 사용자에게 물어보기로 남겼다.
 - Diagram 페이지 · 시험은 바꾸지 않았다(문구만).
+- **표기 통일**: 이어서 사용자가 C++ 뒤에 붙은 표준 버전 숫자를 모두 떼어 "C++"로만 적어 달라고 했다. 통합 문서 v29(8곳), 앱 Diagram 페이지의 `engine_core` 설명 문구(영·한 2곳, `DiagramView.tsx`), `SUMMARY.md`, 이 문서의 3곳을 "C++"로 바꿨다. 일부러 두는 곳: 라이브러리 원본 헤더(`third_party`의 nlohmann · Catch2)의 설명과 빌드 설정(`CMAKE_CXX_STANDARD 20`)은 기술적 사실이라 그대로다.
 
 ## 요약: 1학기 대비 2학기에 달라진 것
 
 
 | 항목 | 1학기 (~2026년 6월) | 2학기 (2026년 7~8월) |
 |---|---|---|
-| 구현 언어 | Rust | **C++20 (전면 재작성)** |
+| 구현 언어 | Rust | **C++ (전면 재작성)** |
 | 개발의 중심축 | 기능 추가(SQL 문법·MCP 연동 확장) | **정합성·동시성·성능을 실제로 파고드는 심화** |
 | 동시성 | 전역 단일 락(사실상 모든 문장 완전 직렬화) | 읽기 동시 실행 → **진짜 MVCC(버전 체인)** → 테이블 단위 동시 쓰기 → **행 단위 완전 동시 쓰기** → **블로킹 대기 락 + 데드락 감지** |
 | 트랜잭션 격리 | 이름만 있고 실질적으로 동일 동작 | RU/RC/RR/Serializable이 **실제로 다르게 동작**, Gap Lock, SSI predicate lock까지 |

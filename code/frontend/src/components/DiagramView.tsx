@@ -282,7 +282,7 @@ function LayersView() {
         <Wire style={at("2 / 6", "6")} c={C.server} label={L("SQL text", "SQL 텍스트")} />
 
         {/* 3-5. engine core */}
-        <Panel style={at("1 / 6", "7")} c={C.core} title="engine_core" sub={L("C++20 library: the SQL engine itself", "C++20 라이브러리: SQL 엔진 본체")}>
+        <Panel style={at("1 / 6", "7")} c={C.core} title="engine_core" sub={L("C++ library: the SQL engine itself", "C++ 라이브러리: SQL 엔진 본체")}>
           <div className="dg-pipeline">
             <div className="dg-stage" style={tint(C.core)}>
               <div className="dg-stage-head"><Num n={3} c={C.core} /><b>{t(L("Lexer + Parser", "렉서 + 파서"))}</b></div>
