@@ -691,3 +691,65 @@ TEST_CASE("DROP TABLE takes the indexes of the table with it", "[executor][ddl]"
         REQUIRE(s->index_meta.count("d.keep_keep_i") == 1);
     }
 }
+
+// R69: ALTER TABLE ... ADD FOREIGN KEY and ADD CHECK were accepted over rows that already broke them (MySQL refuses: 1452, 3819), and the table kept rows that no INSERT could have made.
+TEST_CASE("R69: ADD FOREIGN KEY and ADD CHECK are refused over rows that break them, and accepted when none does", "[executor][ddl][r69]") {
+    TempDataDir dir("r69_alter_validate");
+    Executor ex(dir.path);
+    auto run = [&](const std::string& sql) {
+        INFO(sql);
+        return ex.execute_sql(sql);
+    };
+    auto ok = [&](const std::string& sql) { REQUIRE(run(sql).is_ok()); };
+    auto refused = [&](const std::string& sql, const std::string& part) {
+        auto r = run(sql);
+        REQUIRE(r.is_err());
+        REQUIRE(r.error().find(part) != std::string::npos);
+    };
+    auto has = [&](const std::string& table, const std::string& part) { return ex.execute_sql("SHOW CREATE TABLE " + table).value().find(part) != std::string::npos; };
+    ok("CREATE DATABASE d");
+    ok("USE d");
+    ok("CREATE TABLE parent (id INT PRIMARY KEY)");
+    ok("INSERT INTO parent VALUES (1), (2)");
+    ok("CREATE TABLE child (id INT PRIMARY KEY, pid INT, v INT)");
+    ok("INSERT INTO child VALUES (1, 1, 5), (2, 99, -3), (3, NULL, 0)");
+
+    // an orphan (pid 99) and a row that breaks the check (v -3, and 0): both are refused, and nothing is added
+    refused("ALTER TABLE child ADD FOREIGN KEY (pid) REFERENCES parent(id)", "Foreign key violation");
+    refused("ALTER TABLE child ADD CONSTRAINT v_pos CHECK (v > 0)", "CHECK constraint 'v_pos' violated");
+    REQUIRE_FALSE(has("child", "FOREIGN KEY"));
+    REQUIRE_FALSE(has("child", "v_pos"));
+    ok("INSERT INTO child VALUES (4, 98, -9)"); // (nothing was added: the row is taken)
+
+    // without the rows that break them (a NULL parent key and a NULL value break nothing) they are added, and then they refuse
+    ok("DELETE FROM child WHERE id IN (2, 3, 4)");
+    ok("INSERT INTO child VALUES (7, NULL, NULL)");
+    ok("ALTER TABLE child ADD FOREIGN KEY (pid) REFERENCES parent(id)");
+    ok("ALTER TABLE child ADD CONSTRAINT v_pos CHECK (v > 0)");
+    REQUIRE(has("child", "FOREIGN KEY"));
+    refused("INSERT INTO child VALUES (5, 98, 1)", "Foreign key violation");
+    refused("INSERT INTO child VALUES (6, 1, -1)", "CHECK constraint 'v_pos' violated");
+
+    // the version of a row that an UPDATE replaced is still in the table (a row that was deleted is not), and breaks nothing: only the rows that are there are looked at
+    ok("CREATE TABLE ck (id INT PRIMARY KEY, v INT)");
+    ok("INSERT INTO ck VALUES (1, 5), (2, -3)");
+    ok("UPDATE ck SET v = 9 WHERE id = 2");
+    ok("ALTER TABLE ck ADD CONSTRAINT ck_pos CHECK (v > 0)");
+    REQUIRE(has("ck", "ck_pos"));
+
+    // a table that refers to itself: the parent of a row is a row of the same table
+    ok("CREATE TABLE emp (id INT PRIMARY KEY, boss INT)");
+    ok("INSERT INTO emp VALUES (1, NULL), (2, 1), (3, 7)");
+    refused("ALTER TABLE emp ADD FOREIGN KEY (boss) REFERENCES emp(id)", "Foreign key violation");
+    ok("UPDATE emp SET boss = 2 WHERE id = 3");
+    ok("ALTER TABLE emp ADD FOREIGN KEY (boss) REFERENCES emp(id)");
+    refused("INSERT INTO emp VALUES (4, 99)", "Foreign key violation");
+
+    // FOREIGN_KEY_CHECKS = 0 (a dump sets it) adds the key over an orphan, as MySQL does
+    ok("CREATE TABLE loose (id INT PRIMARY KEY, pid INT)");
+    ok("INSERT INTO loose VALUES (1, 99)");
+    ok("SET FOREIGN_KEY_CHECKS = 0");
+    ok("ALTER TABLE loose ADD FOREIGN KEY (pid) REFERENCES parent(id)");
+    ok("SET FOREIGN_KEY_CHECKS = 1");
+    REQUIRE(has("loose", "FOREIGN KEY"));
+}

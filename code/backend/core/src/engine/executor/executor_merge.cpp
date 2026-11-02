@@ -1,11 +1,58 @@
 // Faithful port of MERGE from rusql-core/src/engine/executor.rs (Phase 8f): exec_merge.
 
 #include "engine/executor/executor.hpp"
+
+#include <algorithm>
+#include <unordered_map>
+#include <unordered_set>
+
+#include "engine/join_equality.hpp"
 #include "engine/statement_deadline.hpp"
+#include "engine/storage/numeric_key.hpp"
 
 namespace engine {
 
 namespace {
+// An AND-ed part of the ON of a MERGE of the form `<target column> = <source column>`, each side named by the target's (or the source's) name or alias, that a hash can answer:
+// both sides numbers, or both text (what the binder says of the columns). Every pair of rows that meets the whole ON meets it.
+struct MergeEquality {
+    std::string target_col, source_col;
+};
+
+std::optional<MergeEquality> merge_equality(const CondExpr& on, const std::vector<std::string>& target_names, const std::vector<std::string>& source_names,
+                                            const std::unordered_set<std::string>& target_cols, const std::unordered_set<std::string>& source_cols) {
+    for (const auto& name : target_names) {
+        if (std::find(source_names.begin(), source_names.end(), name) != source_names.end()) return std::nullopt; // (the same name for both: a reference says nothing)
+    }
+    auto contains = [](const std::vector<std::string>& names, const std::string& q) { return std::find(names.begin(), names.end(), q) != names.end(); };
+    // 1: a column of the target, 2: a column of the source, 0: neither
+    auto side = [&](const std::string& ref) -> std::pair<int, std::string> {
+        auto cut = ref.rfind('.');
+        if (cut == std::string::npos) return {0, ""};
+        const std::string q = ref.substr(0, cut), c = ref.substr(cut + 1);
+        if (contains(target_names, q) && target_cols.count(c)) return {1, c};
+        if (contains(source_names, q) && source_cols.count(c)) return {2, c};
+        return {0, ""};
+    };
+    std::vector<const CondExpr*> parts;
+    and_conjuncts(on, parts);
+    for (const CondExpr* part : parts) {
+        auto* leaf = std::get_if<CondExpr::Leaf>(&part->data);
+        if (!leaf || leaf->condition.op != Operator::Eq) continue;
+        auto* l = std::get_if<ArithExpr::Col>(&leaf->condition.left.data);
+        auto* r = std::get_if<ConditionValue::Literal>(&leaf->condition.value.data);
+        if (!l || !r || r->quoted) continue;
+        const auto a = side(l->name), b = side(r->value);
+        if (!a.first || !b.first || a.first == b.first) continue;
+        const ValueClass lc = leaf->condition.left_class, rc = leaf->condition.right_class;
+        const bool both_text = lc == ValueClass::Text && rc == ValueClass::Text;
+        const bool both_number = lc == ValueClass::Number && rc == ValueClass::Number;
+        if (!both_text && !both_number) continue;
+        return MergeEquality{a.first == 1 ? a.second : b.second, a.first == 1 ? b.second : a.second};
+    }
+    return std::nullopt;
+}
+
 std::string bare_name(const std::string& qualified) {
     auto pos = qualified.rfind('.');
     return pos == std::string::npos ? qualified : qualified.substr(pos + 1);
@@ -73,9 +120,43 @@ StringResult Executor::exec_merge(SharedDatabase& s, std::string target, std::op
     const std::vector<std::string> insert_cols = when_not_matched_columns.value_or(target_col_names);
     std::vector<std::vector<std::string>> insert_values;
 
+    // The target rows hashed on the equality of the ON that a hash can answer: a source row then meets only the target rows whose key equals its own, in the order of the table,
+    // and the first of them that meets the whole ON is the one used -- as in the loop over every target row. Every pair the hash lets through is still checked against the whole ON, so
+    // the answer is the loop's; what it saves is a merged row for each of the 300 x 300,000 pairs of rows, which took minutes.
+    std::optional<MergeEquality> keyed;
+    std::unordered_map<std::string, std::vector<std::size_t>> targets_of_key;
+    auto key_of = [](const std::string& value) { return normalize_numeric_key(value); }; // (a number by its value, a text by the weights of the collation)
+    if (const TableSchema* source_schema = s.catalog.get_table(source)) {
+        std::vector<std::string> target_names{target_base}, source_names{source_base};
+        if (target_alias) target_names.push_back(*target_alias);
+        if (source_alias) source_names.push_back(*source_alias);
+        std::unordered_set<std::string> target_cols(target_col_names.begin(), target_col_names.end()), source_cols;
+        for (auto& c : source_schema->columns) source_cols.insert(c.name);
+        keyed = merge_equality(on, target_names, source_names, target_cols, source_cols);
+    }
+    if (keyed) {
+        for (std::size_t i = 0; i < target_rows.size() && keyed; i++) {
+            auto value = target_rows[i].find(keyed->target_col);
+            if (value == target_rows[i].end()) keyed.reset(); // (a row that does not hold the column: the loop over every target row does it)
+            else if (value->second != EXECUTOR_NULL_VALUE) targets_of_key[key_of(value->second)].push_back(i);
+        }
+    }
+    static const std::vector<std::size_t> no_targets;
+
     for (auto& src_row : source_rows) {
         bool found = false;
-        for (auto& tgt_row : target_rows) {
+        const std::vector<std::size_t>* only = nullptr; // the target rows this source row can meet (nullptr: every one)
+        if (keyed) {
+            if (auto value = src_row.find(keyed->source_col); value != src_row.end()) {
+                only = &no_targets; // (a NULL key meets nothing)
+                if (value->second != EXECUTOR_NULL_VALUE) {
+                    if (auto meets = targets_of_key.find(key_of(value->second)); meets != targets_of_key.end()) only = &meets->second;
+                }
+            }
+        }
+        const std::size_t candidates = only ? only->size() : target_rows.size();
+        for (std::size_t c = 0; c < candidates; c++) {
+            const Row& tgt_row = target_rows[only ? (*only)[c] : c];
             Row merged = tgt_row;
             for (auto& [k, v] : tgt_row) merged[target_base + "." + k] = v;
             if (target_alias) {

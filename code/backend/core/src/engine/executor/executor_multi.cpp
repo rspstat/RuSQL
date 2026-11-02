@@ -8,7 +8,9 @@
 #include <unordered_set>
 
 #include "engine/join.hpp"
+#include "engine/join_equality.hpp"
 #include "engine/statement_deadline.hpp"
+#include "engine/value_class.hpp"
 
 namespace engine {
 
@@ -18,6 +20,31 @@ void insert_prefixed(Row& merged, const std::string& tbl, const Row& src) {
         merged[tbl + "." + k] = v;
         if (!merged.count(k)) merged[k] = v;
     }
+}
+
+// The join of the rows so far (`left`) with the rows of the table `j` names, hashed on an equality of its ON that a hash can answer -- the two sides are both numbers or both
+// text, which is what the binder says of the columns -- or nullopt, and the nested loop does it. The answer is the nested loop's, row for row (hashed_join_verified: each pair
+// the hash lets through still has to pass the whole ON), so a pair of rows is no longer made for every pair of rows of the two tables: 300 x 300,000 rows took minutes.
+// `lookup` reads a name from a row of `left` (Executor::get_col, which is private).
+std::optional<std::vector<Row>> hashed_write_join(const std::vector<Row>& left, const std::vector<Row>& right, const Join& j, const std::string& qualifier,
+                                                   const std::vector<std::string>& right_schema_cols, const std::function<bool(const Row&)>& on_match,
+                                                   const std::function<const std::string*(const Row&, const std::string&)>& lookup) {
+    if (!j.using_cols.empty()) return std::nullopt;
+    const std::unordered_set<std::string> right_cols(right_schema_cols.begin(), right_schema_cols.end());
+    const std::string bare = j.table.substr(j.table.rfind('.') == std::string::npos ? 0 : j.table.rfind('.') + 1);
+    auto eq = equality_part_of_on(j.on_expr, qualifier, bare, right_cols);
+    if (!eq) return std::nullopt;
+    const bool both_text = eq->left_class == ValueClass::Text && eq->right_class == ValueClass::Text;
+    const bool both_number = eq->left_class == ValueClass::Number && eq->right_class == ValueClass::Number;
+    if (!both_text && !both_number) return std::nullopt; // (text against a number compares by number, which no hash of the text answers; a side of no known class is not risked)
+    const std::string left_ref = eq->left_ref, right_col = eq->right_col;
+    return hashed_join_verified(
+        left, right, qualifier, j.join_type, [&](const Row& l) { return lookup(l, left_ref); },
+        [&](const Row& r) -> const std::string* {
+            auto it = r.find(right_col);
+            return it != r.end() ? &it->second : nullptr;
+        },
+        right_schema_cols, on_match);
 }
 } // namespace
 
@@ -70,8 +97,14 @@ StringResult Executor::exec_multi_update(SharedDatabase& s, std::vector<std::str
             for (auto& c : sc->columns) right_schema_cols.push_back(c.name);
         }
         const CondExpr& on_expr = j.on_expr;
-        current = nested_loop_join(current, right_rows, j.join_type, j.alias.empty() ? j.table : j.alias, j.using_cols, right_schema_cols,
-                                    [&](const Row& merged) { return eval_condexpr(merged, on_expr); });
+        const std::string qualifier = j.alias.empty() ? j.table : j.alias;
+        auto on_match = [&](const Row& merged) { return eval_condexpr(merged, on_expr); };
+        if (auto hashed = hashed_write_join(current, right_rows, j, qualifier, right_schema_cols, on_match,
+                                            [&](const Row& row, const std::string& name) { return get_col(row, name); })) {
+            current = std::move(*hashed);
+        } else {
+            current = nested_loop_join(current, right_rows, j.join_type, qualifier, j.using_cols, right_schema_cols, on_match);
+        }
     }
 
     std::vector<Row> matched;
@@ -207,6 +240,17 @@ StringResult Executor::exec_multi_delete(SharedDatabase& s, std::vector<std::str
             if (is_visible(r)) right_rows.push_back(r);
         }
         std::string tbl = j.alias.empty() ? j.table : j.alias; // (a table used again goes by its alias)
+        {
+            std::vector<std::string> right_schema_cols;
+            if (const auto* sc = s.catalog.get_table(j.table)) {
+                for (auto& c : sc->columns) right_schema_cols.push_back(c.name);
+            }
+            if (auto hashed = hashed_write_join(current, right_rows, j, tbl, right_schema_cols, [&](const Row& merged) { return eval_condexpr(merged, j.on_expr); },
+                                                [&](const Row& row, const std::string& name) { return get_col(row, name); })) {
+                current = std::move(*hashed);
+                continue;
+            }
+        }
         std::vector<Row> out;
 
         if (!j.using_cols.empty()) {

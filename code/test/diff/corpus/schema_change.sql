@@ -72,3 +72,35 @@ ALTER TABLE m4 MODIFY a VARCHAR(20)
 SELECT * FROM v1 ORDER BY id
 DROP TABLE copy1, copy2
 SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE()
+
+# ADD FOREIGN KEY and ADD CHECK look at the rows the table holds already (R69): refused over an orphan or a row that breaks the check, accepted when none does (a NULL breaks neither)
+--CREATE TABLE sv_p (id INT PRIMARY KEY)
+--INSERT INTO sv_p VALUES (1), (2)
+--CREATE TABLE sv_c (id INT PRIMARY KEY, pid INT, v INT)
+--INSERT INTO sv_c VALUES (1, 1, 5), (2, 99, -3), (3, NULL, 0)
+ALTER TABLE sv_c ADD FOREIGN KEY (pid) REFERENCES sv_p (id)
+ALTER TABLE sv_c ADD CONSTRAINT sv_pos CHECK (v > 0)
+INSERT INTO sv_c VALUES (4, 98, -9)
+SELECT id, pid, v FROM sv_c ORDER BY id
+DELETE FROM sv_c WHERE id IN (2, 3, 4)
+INSERT INTO sv_c VALUES (7, NULL, NULL)
+ALTER TABLE sv_c ADD FOREIGN KEY (pid) REFERENCES sv_p (id)
+ALTER TABLE sv_c ADD CONSTRAINT sv_pos CHECK (v > 0)
+INSERT INTO sv_c VALUES (5, 98, 1)
+INSERT INTO sv_c VALUES (6, 1, -1)
+INSERT INTO sv_c VALUES (8, 2, 3)
+SELECT id, pid, v FROM sv_c ORDER BY id
+--CREATE TABLE sv_e (id INT PRIMARY KEY, boss INT)
+--INSERT INTO sv_e VALUES (1, NULL), (2, 1), (3, 7)
+ALTER TABLE sv_e ADD FOREIGN KEY (boss) REFERENCES sv_e (id)
+UPDATE sv_e SET boss = 2 WHERE id = 3
+ALTER TABLE sv_e ADD FOREIGN KEY (boss) REFERENCES sv_e (id)
+INSERT INTO sv_e VALUES (4, 99)
+INSERT INTO sv_e VALUES (5, 3)
+SELECT id, boss FROM sv_e ORDER BY id
+--CREATE TABLE sv_o (id INT PRIMARY KEY, pid INT)
+--INSERT INTO sv_o VALUES (1, 99)
+SET FOREIGN_KEY_CHECKS = 0
+ALTER TABLE sv_o ADD FOREIGN KEY (pid) REFERENCES sv_p (id)
+SET FOREIGN_KEY_CHECKS = 1
+SELECT id, pid FROM sv_o ORDER BY id

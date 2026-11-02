@@ -194,7 +194,7 @@
 | CREATE / DROP DATABASE | ✓ | ✓ | △ (스키마/유저 단위 관리) | ✓ |
 | CREATE SEQUENCE | ✗ | ✓ | ✓ | ✗ (AUTO_INCREMENT만) |
 | CREATE TYPE | ✗ | ✓ (도메인/열거형/복합) | ✓ (객체 타입, NESTED TABLE) | ✗ |
-| ALTER TABLE ADD CONSTRAINT | ✓ | ✓ | ✓ | ✓ (FK/UNIQUE/CHECK) |
+| ALTER TABLE ADD CONSTRAINT | ✓ | ✓ | ✓ | ✓ (FK/UNIQUE/CHECK — 표에 있는 행이 이미 어기면 FK·CHECK·UNIQUE 모두 거절, MySQL과 같음) |
 | 온라인 DDL | ✓ (대부분 non-blocking) | ✓ (일부 non-blocking) | ✓ (Online Redefinition) | ✗ |
 | 파티셔닝 | ✓ (RANGE/LIST/HASH/KEY) | ✓ (선언적 파티셔닝) | ✓ (RANGE/LIST/HASH/COMPOSITE) | ✓ (RANGE/LIST/HASH, V1 — WHERE절 기반 프루닝 포함; ADD/DROP PARTITION 지원, KEY·서브파티셔닝·다중 컬럼 키는 미지원) |
 

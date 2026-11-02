@@ -562,11 +562,11 @@ TEST_CASE("R67: KILL QUERY stops a MERGE, a multi-table UPDATE and a multi-table
         ok(ex, batch);
     }
     const Rows before = q(ex, "SELECT COUNT(*), SUM(v) FROM dst");
-    // (a nested loop over 300 x 20,000 rows: seconds)
+    // (a nested loop over 300 x 20,000 rows: seconds. The ON is one a hash cannot answer -- `dst.id + 0` is no column --, or the hash join of R68 would be done before the KILL)
     // (the DELETE has a loop of its own for each kind of join it can be written with: JOIN, LEFT JOIN, RIGHT JOIN)
-    for (const char* statement : {"MERGE INTO dst USING src ON dst.id = src.id WHEN MATCHED THEN UPDATE SET v = src.v + 1 WHEN NOT MATCHED THEN INSERT VALUES (src.id, src.v)",
-                                  "UPDATE dst JOIN src ON dst.id = src.id SET dst.v = src.v + 1", "DELETE dst FROM dst JOIN src ON dst.id = src.id",
-                                  "DELETE dst FROM dst LEFT JOIN src ON dst.id = src.id", "DELETE dst FROM dst RIGHT JOIN src ON dst.id = src.id"}) {
+    for (const char* statement : {"MERGE INTO dst USING src ON dst.id + 0 = src.id WHEN MATCHED THEN UPDATE SET v = src.v + 1 WHEN NOT MATCHED THEN INSERT VALUES (src.id, src.v)",
+                                  "UPDATE dst JOIN src ON dst.id + 0 = src.id SET dst.v = src.v + 1", "DELETE dst FROM dst JOIN src ON dst.id + 0 = src.id",
+                                  "DELETE dst FROM dst LEFT JOIN src ON dst.id + 0 = src.id", "DELETE dst FROM dst RIGHT JOIN src ON dst.id + 0 = src.id"}) {
         INFO(statement);
         require_stopped(run_and_kill(ex, bob.session, bob.id, statement));
         REQUIRE(q(ex, "SELECT COUNT(*), SUM(v) FROM dst") == before);

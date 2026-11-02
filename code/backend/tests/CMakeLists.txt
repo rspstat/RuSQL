@@ -65,6 +65,7 @@ add_executable(engine_tests
     test_unique_claims.cpp
     test_statement_stop.cpp
     test_index_advice.cpp
+    test_hashed_write_joins.cpp
     test_dump_syntax.cpp
     test_update_unique.cpp
     test_unique_probe.cpp

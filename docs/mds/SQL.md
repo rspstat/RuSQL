@@ -68,8 +68,8 @@ RuSQL이 실제로 받아서 실행하는 SQL 문법을 한 줄씩 정리한 문
 - ALTER TABLE t ALTER [COLUMN] col DROP DEFAULT : 기본값 제거
 - ALTER TABLE t ADD [UNIQUE] INDEX | KEY [이름] (cols) : 인덱스 추가
 - ALTER TABLE t ADD CONSTRAINT [이름] UNIQUE (cols) : 유일 제약 추가
-- ALTER TABLE t ADD CONSTRAINT [이름] CHECK (조건) : 검사 제약 추가
-- ALTER TABLE t ADD [CONSTRAINT 이름] FOREIGN KEY (col) REFERENCES t2(col) [ON DELETE ..] [ON UPDATE ..] : 외래 키 추가(이름을 안 주면 가장 큰 `<표>_ibfk_n`보다 하나 큰 번호)
+- ALTER TABLE t ADD CONSTRAINT [이름] CHECK (조건) : 검사 제약 추가(표에 있는 행이 이미 어기면 거절 — MySQL 3819)
+- ALTER TABLE t ADD [CONSTRAINT 이름] FOREIGN KEY (col) REFERENCES t2(col) [ON DELETE ..] [ON UPDATE ..] : 외래 키 추가(이름을 안 주면 가장 큰 `<표>_ibfk_n`보다 하나 큰 번호; 부모가 없는 행이 이미 있으면 거절 — MySQL 1452 — 단 `SET FOREIGN_KEY_CHECKS = 0`이면 건너뜀)
 - ALTER TABLE t DROP INDEX | KEY 이름 : 인덱스 삭제
 - ALTER TABLE t DROP CONSTRAINT 이름 : 제약 삭제
 - ALTER TABLE t DROP FOREIGN KEY 이름 : 외래 키 삭제
@@ -129,7 +129,7 @@ RuSQL이 실제로 받아서 실행하는 SQL 문법을 한 줄씩 정리한 문
 
 ### MERGE
 
-- MERGE INTO 대상 [별칭] USING 원본 [별칭] ON 조건 : 원본과 대상을 맞춰 보는 병합
+- MERGE INTO 대상 [별칭] USING 원본 [별칭] ON 조건 : 원본과 대상을 맞춰 보는 병합(`ON`에 `대상.열 = 원본.열`이 AND로 묶여 있으면 그 열로 해시해 맞춤 — 대상 300행 × 원본 30만 행이 0.85초)
 - WHEN MATCHED [AND 조건] THEN UPDATE SET ... : 일치할 때 수정
 - WHEN MATCHED [AND 조건] THEN DELETE : 일치할 때 삭제
 - WHEN NOT MATCHED THEN INSERT (cols) VALUES (...) : 일치하지 않을 때 입력

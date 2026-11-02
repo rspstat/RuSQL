@@ -1103,6 +1103,17 @@ StringResult Executor::exec_alter(SharedDatabase& s, const std::string& table, A
         } else {
             fk.name = fk_next_name(*schema, bare_table); // (one more than the highest <table>_ibfk_<n>; `col_it` stays valid: only names change)
         }
+        // the rows the table holds already must have their parents (MySQL 1452), unless FOREIGN_KEY_CHECKS is 0
+        if (!skip_fk_checks) {
+            if (auto tit = s.tables.find(table); tit != s.tables.end()) {
+                for (const Row& row : tit->second) {
+                    if (!is_visible(row)) continue;
+                    auto value = row.find(v->column);
+                    if (value == row.end()) continue;
+                    if (auto violation = fk_child_violation(s, fk, value->second)) return StringResult::Err(*violation);
+                }
+            }
+        }
         col_it->foreign_keys.push_back(fk); // (a column may refer to several tables: each of them is checked)
         s.disk.save_schema(table, *s.catalog.get_table(table));
         std::string constraint_label = v->name.value_or("fk_" + v->column);
@@ -1182,6 +1193,12 @@ StringResult Executor::exec_alter(SharedDatabase& s, const std::string& table, A
     if (auto* v = std::get_if<AlterAction::AddCheckConstraint>(&action.data)) {
         auto* schema = s.catalog.get_table_mut(table);
         if (!schema) return StringResult::Err("Table '" + table + "' not found");
+        // the rows the table holds already must meet it (MySQL 3819): it is violated by a row for which it is FALSE, a NULL operand (UNKNOWN) passes
+        if (auto tit = s.tables.find(table); tit != s.tables.end()) {
+            for (const Row& row : tit->second) {
+                if (is_visible(row) && !eval_check_expr(v->expr, row)) return StringResult::Err("CHECK constraint '" + v->name.value_or(v->expr) + "' violated");
+            }
+        }
         schema->check_constraints.push_back(CheckConstraint{v->name, v->expr});
         s.disk.save_schema(table, *s.catalog.get_table(table));
         std::string constraint_label = v->name.value_or(v->expr);

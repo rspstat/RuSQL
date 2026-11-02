@@ -1,5 +1,5 @@
 {
-  "generated": "2026-11-01",
+  "generated": "2026-11-02",
   "mysql": "8.4.9",
   "corpora": [
     {
@@ -62,9 +62,9 @@
       "name": "schema_change",
       "en": "ALTER TABLE and the indexes after it",
       "ko": "ALTER TABLE과 그 뒤의 인덱스",
-      "statements": 69,
+      "statements": 91,
       "different": 0,
-      "bothFail": 5
+      "bothFail": 11
     },
     {
       "name": "autoinc",
@@ -341,8 +341,8 @@
   ],
   "conformanceCases": 4099,
   "tests": {
-    "cases": 889,
-    "assertions": 1517158
+    "cases": 895,
+    "assertions": 1517532
   },
   "bugsFound": 206
 }
