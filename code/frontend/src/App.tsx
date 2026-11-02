@@ -43,6 +43,8 @@ interface HistoryEntry {
 }
 type ActiveView = "editor" | "erd" | "server" | "diagram" | "compat" | "btree" | "mvcc";
 const PAGE_SIZE = 100;
+// the Compat page is kept (CompatView, compatSnapshot.json); false hides only its icon in the activity bar
+const SHOW_COMPAT_ICON = false;
 
 // 셀 편집 시 PK WHERE절 값 이스케이프용 — 컬럼의 실제 data_type을 보고 숫자 리터럴로 둘지
 // 문자열로 따옴표 처리할지 결정한다 (값의 겉모양만으로 추측하면 문자열 PK가 조용히 실패한다).
@@ -2273,6 +2275,7 @@ function App() {
         </div>
 
         {/* Compat: how closely RuSQL answers like MySQL */}
+        {SHOW_COMPAT_ICON && (
         <div
           className={`activity-icon ${activeView === "compat" ? "active" : ""}`}
           title="MySQL Compatibility"
@@ -2282,6 +2285,7 @@ function App() {
             <path d="M12 3v18M5 7h14M5 7l-3 7a3.5 3.5 0 0 0 6 0L5 7zM19 7l-3 7a3.5 3.5 0 0 0 6 0L19 7zM8 21h8"/>
           </svg>
         </div>
+        )}
 
         <div className="activity-bar-bottom">
           <div className="activity-icon" title="Account">

@@ -2800,6 +2800,11 @@ VS Code 스타일 탭 드래그 순서 변경(요청의 1번 항목)은 같은 �
 - **남긴 것**: 같은 화면 아래의 **활동 로그** 패널은 R65의 모양(청록 윗줄·둥근 모서리·떠오름)이 그대로다 — 사용자가 가리킨 패널이 아니라서 건드리지 않았다. 홈 화면의 R65 모양도 그대로다.
 - Diagram 페이지·시험은 바꾸지 않았다(CSS만). `RECOMMAND.md`와 `SUMMARY.md`가 서버 매니저가 홈과 같은 모양이라고 적은 곳을 고쳤다.
 
+**같은 날 — MySQL 호환성(Compat) 페이지의 아이콘을 활동 표시줄에서 숨김**
+- 사용자가 "MySQL 호환성 패널은 제거해도 될 것 같다"고 했다. 지우면 닿는 곳(화면 코드 3개 파일, `App.tsx`의 연결, README·`SUMMARY.md`·`FUNCTIONS.md`·`RECOMMAND.md`의 언급)과 잃는 것(앱 안에서 "MySQL과 호환된다"는 주장을 눈으로 보여 주는 유일한 화면, 알려진 차이 목록의 앱 안 표시)을 말씀드리고 물어서 **"아이콘만 숨김"**으로 정했다.
+- `App.tsx`: `SHOW_COMPAT_ICON = false`로 저울 아이콘만 그리지 않는다. `CompatView.tsx`·`CompatView.css`·`compatSnapshot.json`·`make_scoreboard.py`와 `compat` 뷰의 렌더는 그대로이고, 되살리려면 상수를 `true`로 바꾸면 된다. 다른 곳에서 이 뷰로 가는 길은 없었다(`setActiveView("compat")`는 그 아이콘 하나). 타입 검사 통과, 실행 중인 앱에서 활동 표시줄이 아이콘 7개에서 6개로 준 것을 캡처로 확인했다.
+- 점수판(진짜 MySQL과의 비교)은 이 화면과 별개라 라운드마다 그대로 돌고 `compatSnapshot.json`도 계속 갱신한다.
+
 ## 요약: 1학기 대비 2학기에 달라진 것
 
 
