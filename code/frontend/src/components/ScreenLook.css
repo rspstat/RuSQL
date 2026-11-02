@@ -3,7 +3,7 @@
    as --c. Loaded after App.css, so these rules win where both say something. */
 
 .home-main { --c: #4ec9b0; }
-.srv-scroll-area { --c: #e0a458; }
+.srv-scroll-area { --c: #4ec9b0; }
 
 /* ------------------------------------------------------------------ */
 /* the header of a screen: the logo or icon, the title, one line         */
@@ -83,7 +83,7 @@
   animation: pk-rise 0.22s ease-out 50ms backwards;
 }
 .srv-name-row { animation: pk-rise 0.22s ease-out 25ms backwards; }
-.srv-log-panel { border-top: 3px solid #e0a458; border-radius: 10px; animation: pk-rise 0.22s ease-out 80ms backwards; }
+.srv-log-panel { border-top: 3px solid #4ec9b0; border-radius: 10px; animation: pk-rise 0.22s ease-out 80ms backwards; }
 
 @media (prefers-reduced-motion: reduce) {
   .home-header, .srv-conn-header, .home-rdbms-desc, .home-quick-btn, .home-conn-card, .srv-form-body, .srv-name-row, .srv-log-panel { animation: none; }

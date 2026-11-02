@@ -3264,7 +3264,7 @@ function App() {
                   {/* 아이콘 + 제목 */}
                   <div className="srv-conn-header">
                     <svg className="srv-db-icon" width="65" height="65" viewBox="0 0 24 24" preserveAspectRatio="none" fill="none">
-                      <defs><linearGradient id="dbGradSrv" x1="0" y1="0" x2="0" y2="24" gradientUnits="userSpaceOnUse"><stop offset="0%" stopColor="#f5c26b"/><stop offset="100%" stopColor="#c97a1a"/></linearGradient></defs>
+                      <defs><linearGradient id="dbGradSrv" x1="0" y1="0" x2="0" y2="24" gradientUnits="userSpaceOnUse"><stop offset="0%" stopColor="#8b5cf6"/><stop offset="100%" stopColor="#4ec9b0"/></linearGradient></defs>
                       <ellipse cx="12" cy="3" rx="8" ry="2.5" stroke="url(#dbGradSrv)" strokeWidth="1.5" vectorEffect="non-scaling-stroke"/>
                       <path d="M4 3v6c0 1.38 3.58 2.5 8 2.5s8-1.12 8-2.5v-6" stroke="url(#dbGradSrv)" strokeWidth="1.5" fill="none" vectorEffect="non-scaling-stroke"/>
                       <path d="M4 9v6c0 1.38 3.58 2.5 8 2.5s8-1.12 8-2.5v-6" stroke="url(#dbGradSrv)" strokeWidth="1.5" fill="none" vectorEffect="non-scaling-stroke"/>
