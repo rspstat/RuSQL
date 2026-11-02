@@ -3,13 +3,11 @@
    as --c. Loaded after App.css, so these rules win where both say something. */
 
 .home-main { --c: #4ec9b0; }
-.srv-scroll-area { --c: #4ec9b0; }
 
 /* ------------------------------------------------------------------ */
 /* the header of a screen: the logo or icon, the title, one line         */
 /* ------------------------------------------------------------------ */
-.home-header,
-.srv-conn-header {
+.home-header {
   position: relative;
   overflow: hidden;
   padding: 20px 26px;
@@ -21,10 +19,8 @@
   animation: pk-rise 0.22s ease-out backwards;
 }
 .home-header { margin-bottom: 18px; }
-.srv-conn-header { margin-bottom: 18px; }
 
-.home-title,
-.srv-conn-title {
+.home-title {
   font-weight: 650;
   color: #ffffff;
   background: linear-gradient(90deg, #ffffff 30%, color-mix(in srgb, var(--c) 70%, #ffffff));
@@ -32,8 +28,7 @@
   background-clip: text;
   -webkit-text-fill-color: transparent;
 }
-.home-desc,
-.srv-conn-sub { color: #9d9da3; }
+.home-desc { color: #9d9da3; }
 
 .home-rdbms-desc {
   border-left-color: color-mix(in srgb, var(--c) 45%, #2a2a2a);
@@ -74,17 +69,9 @@
 .home-conn-card:nth-child(n+9) { animation-delay: 160ms; }
 .home-conn-card.dragging { transform: none; }
 
-/* the server manager: the form is one card, the name row and the log come in after the header */
-.srv-form-body {
-  background: #252528;
-  border: 1px solid #3a3a3d;
-  border-top: 3px solid var(--c);
-  border-radius: 10px;
-  animation: pk-rise 0.22s ease-out 50ms backwards;
-}
-.srv-name-row { animation: pk-rise 0.22s ease-out 25ms backwards; }
+/* the server manager: only the activity log (the Connect to Server panel above it is as it was before this look) */
 .srv-log-panel { border-top: 3px solid #4ec9b0; border-radius: 10px; animation: pk-rise 0.22s ease-out 80ms backwards; }
 
 @media (prefers-reduced-motion: reduce) {
-  .home-header, .srv-conn-header, .home-rdbms-desc, .home-quick-btn, .home-conn-card, .srv-form-body, .srv-name-row, .srv-log-panel { animation: none; }
+  .home-header, .home-rdbms-desc, .home-quick-btn, .home-conn-card, .srv-log-panel { animation: none; }
 }
