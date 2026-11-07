@@ -37,7 +37,6 @@ bool ieq(const std::string& a, const std::string& b) {
 }
 } // namespace
 
-bool range_op_inclusive(RangeOp op) { return op == RangeOp::Gte || op == RangeOp::Lte; }
 bool range_op_is_lower_bound(RangeOp op) { return op == RangeOp::Gt || op == RangeOp::Gte; }
 const char* range_op_label(RangeOp op) {
     switch (op) {
@@ -918,19 +917,6 @@ std::string Planner::explain(const SelectPlan& plan, const std::string& statemen
 }
 
 // ── Public helpers ───────────────────────────────────────────────────────────
-
-std::optional<std::pair<std::string, std::string>> extract_equi_join_cols(const CondExpr& on_expr) {
-    if (std::holds_alternative<CondExpr::Leaf>(on_expr.data)) {
-        const Condition& cond = std::get<CondExpr::Leaf>(on_expr.data).condition;
-        if (cond.op == Operator::Eq && std::holds_alternative<ArithExpr::Col>(cond.left.data) &&
-            std::holds_alternative<ConditionValue::Literal>(cond.value.data)) {
-            std::string probe = bare_col(std::get<ArithExpr::Col>(cond.left.data).name);
-            std::string build = bare_col(std::get<ConditionValue::Literal>(cond.value.data).value);
-            return std::make_pair(probe, build);
-        }
-    }
-    return std::nullopt;
-}
 
 namespace {
 void collect_eq_recursive(const CondExpr& expr, std::unordered_map<std::string, std::string>& map) {

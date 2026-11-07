@@ -195,7 +195,7 @@ RuSQL이 실제로 받아서 실행하는 SQL 문법을 한 줄씩 정리한 문
 
 ### 잠금 읽기
 
-- SELECT ... FOR UPDATE : 읽은 행을 쓰기 잠금
+- SELECT ... FOR UPDATE : 읽은 행을 쓰기 잠금. 잠금 읽기는 REPEATABLE READ 트랜잭션에서도 스냅샷이 아니라 **지금 커밋된 최신 값**을 읽는다(R72, MySQL과 같음)
 - SELECT ... FOR SHARE / LOCK IN SHARE MODE : 읽은 행을 공유 잠금
 - FOR UPDATE | FOR SHARE NOWAIT : 잠겨 있으면 기다리지 않고 바로 오류
 - FOR UPDATE | FOR SHARE SKIP LOCKED : 잠긴 행은 건너뛰고 읽음

@@ -708,6 +708,9 @@ StringResult Executor::exec_delete_inner(SharedDatabase& s, const std::string& t
         // place, matching exec_update_inner's mutation phase.
         std::uint64_t txn_id = txn.current_txn_id();
         std::string txn_id_str = std::to_string(txn_id);
+        const std::size_t undo_before = txn.undo_size(); // (for the marks of hide_older_versions)
+        const auto frozen = snapshot_for_hiding();       // (a REPEATABLE READ / SERIALIZABLE transaction reads through one snapshot)
+        std::vector<Row> unseen;                         // the rows this statement ends although that snapshot cannot see them
         // Gap lock: only under RR/Serializable and only for single-column PK tables (V1
         // scope), matching the same gating used at the FOR UPDATE/FOR SHARE call sites.
         // Registered once, before the retry loop below -- acquire_gap has no dedup, so
@@ -790,6 +793,7 @@ StringResult Executor::exec_delete_inner(SharedDatabase& s, const std::string& t
 
                 nlohmann::json old_j = row;
                 txn.log_delete(table, key, old_j.dump());
+                if (frozen && !is_visible_for_read(row, *frozen)) unseen.push_back(row);
                 row["_xmax"] = txn_id_str;
                 soft_olds.push_back(old_j.get<Row>());
                 soft_news.push_back(row);
@@ -797,6 +801,10 @@ StringResult Executor::exec_delete_inner(SharedDatabase& s, const std::string& t
             }
             refresh_indexes_for_soft_deletes(soft_olds, soft_news);
             cache_forgets(soft_olds);
+            if (!unseen.empty()) {
+                hide_older_versions(s, table, unseen, undo_before);
+                unseen.clear();
+            }
             if (!conflict) {
                 // Row-level-concurrency Stage 4/5 correctness fix: invalidate the cache
                 // HERE, still holding table_lock EXCLUSIVE -- see exec_insert_inner's

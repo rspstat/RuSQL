@@ -1811,7 +1811,9 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
     // is_visible의 permissive 체크 대신 이 문장을 실행하는 트랜잭션의 실제 스냅샷
     // 기준으로 가시성을 판단해야 함 — 그래야 다른 세션의 아직 커밋 안 된 INSERT/DELETE가
     // 인덱스 경로를 통해 새어나가지 않음.
-    SnapshotCtx read_ctx = current_read_ctx(s);
+    // A locking read (FOR UPDATE, FOR SHARE, LOCK IN SHARE MODE) reads what is committed now, not what the snapshot of a REPEATABLE READ transaction shows: it is about to
+    // lock those rows and its answer is what the statement after it works from (MySQL's "current read", as UPDATE and DELETE have it).
+    SnapshotCtx read_ctx = (for_update || for_share) ? SnapshotCtx{txn.current_txn_id(), s.txn_io->peek_next_id(), *s.active_txn_ids->lock()} : current_read_ctx(s);
     // MVCC: every index (PK B+Tree, secondary B+Tree/HashIndex buckets, composite) holds
     // only the LATEST physical version per key -- index_remove_row+index_insert_row purge
     // the old entry and add the new one on every UPDATE, so an older version an open

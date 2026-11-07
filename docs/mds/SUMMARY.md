@@ -9,7 +9,7 @@
 |---|---|
 | 무엇 | MySQL 호환 프로토콜을 쓰는 **자체 RDBMS 엔진**(C++) + 데스크톱 클라이언트(Tauri/React) + Claude 연동(MCP) |
 | 1학기 → 2학기 | Rust 프로토타입 → **C++ 전면 재작성**, "기능 추가"에서 **정합성·동시성·성능을 실제로 파고드는 심화**로 |
-| 규모 | 테스트 **918 케이스 / 1,518,901 assertions** (2학기 초 218 케이스 / 3,080 assertions), MCP 단위 시험 57건 · 프런트 라이브러리 시험 26건 · 앱 화면 시험 12개(CDP) |
+| 규모 | 테스트 **927 케이스 / 1,519,240 assertions** (2학기 초 218 케이스 / 3,080 assertions), MCP 단위 시험 57건 · 프런트 라이브러리 시험 26건 · 앱 화면 시험 12개(CDP) |
 | 엔진 구성 | 파서 → 비용 기반 플래너 → 실행기, MVCC·행 단위 락·데드락 감지, redo 로그 기반 내구성, B+Tree·해시·복합 인덱스 |
 
 ## 2학기에 만든 것 (엔진)
@@ -20,6 +20,7 @@
 - **쿼리 엔진**: 조인 알고리즘 5종(중첩 루프·해시·정렬 병합·인덱스 NL·역방향 인덱스 NL)과 비용 기반 선택, CTE(재귀 포함), 윈도우 함수, 서브쿼리, 파티셔닝, 저장 프로시저·트리거. 지원하는 SQL 문법 전체는 `SQL.md`에 한 줄씩 정리되어 있다.
 - **운영 기능**: `KILL [QUERY] n`(실행 중인 SELECT — 정렬·그룹·윈도·조인·UNION 도중에도 —, `INSERT … SELECT`의 SELECT, `CALL` 본문의 SELECT와 루프, UPDATE·DELETE·MERGE가 행을 찾는 동안, `EXPLAIN ANALYZE`·`EXECUTE`·`CREATE TABLE … AS SELECT`의 질의, `CREATE INDEX`의 빌드, 락 대기를 멈추거나 세션을 끊음), `SHOW STATUS`(문장 종류별 수·연결·버퍼 풀·redo·락 대기의 실제 카운터, 데이터베이스 락 없이 읽음), `EXPLAIN ANALYZE`가 조인마다 알고리즘을, 하위 질의는 실행 수와 시간을 따로 보여 줌, **느린 쿼리 로그**(`SET GLOBAL slow_query_log` / `long_query_time`, `Slow_queries`, `information_schema.slow_log`와 MySQL 모양의 `slow_query.log`)와 `innodb_trx`가 트랜잭션을 연 세션을 말함, `GROUP BY … WITH ROLLUP`, 서버가 `8.4.9`라고 말함, `SUGGEST INDEX`(SELECT·UPDATE·DELETE를 읽고 어떤 인덱스가 스캔을 멈추게 하는지, 이유와 읽을 행 수를 말함; 만들지는 않음).
 - **트랜잭션 · 트리거 · 뷰 · 외래키 · 날짜의 MySQL 호환(R71)**: 새 코퍼스 5개(문장 363개)로 처음 124개 차이를 0으로 — DDL이 열린 트랜잭션을 커밋, `READ ONLY`(1792), `@@transaction_isolation`이 실제 수준을 말함, `COMMIT AND CHAIN`, **`BEFORE UPDATE`의 `SET NEW.x`**, 트리거가 실패하면 문장째 되돌림, 참조되는 표의 `TRUNCATE` 1701과 외래키 정의 검사(1824 · 3780 · 1830), `WITH CHECK OPTION`과 열 이름이 바뀐 뷰에 쓰기, `TIME` 838:59:59 · `CONVERT_TZ` · 엄격한 날짜 글자, 앱 표 메뉴의 **Check Table · Optimize Table**(엔진이 행을 읽어 점검).
+- **REPEATABLE READ의 자기 쓰기(R72)**: 다른 세션이 스냅샷 뒤에 바꾼 행을 이 트랜잭션이 `UPDATE`/`DELETE`/연쇄로 쓰면 같은 행이 두 줄로 보이던 것을 한 줄로(옛 버전에 `_xsup` 표시), `FOR UPDATE`/`FOR SHARE`가 최신 커밋을 읽음; 두 세션을 진짜 MySQL과 비교하는 `two_sessions.py`(298단계, 차이는 알려진 하나뿐: 스냅샷을 BEGIN에 뜸 대 MySQL의 첫 읽기).
 - **인덱스 제안 · 쓰기 문장의 계획 · 연결 상한(R70)**: `SUGGEST INDEX`가 문장을 블록으로 읽어(CTE · 파생 표 · 하위 질의 — 상관 포함 — · UNION · OR의 가지) 어느 부분의 제안인지 말하고, `EXPLAIN UPDATE`·`DELETE`는 아무것도 실행하지 않고 그 문장이 찾는 행의 계획을 보여 주며, `SET GLOBAL max_connections`(기본 151)가 가득 차면 두 프로토콜 모두 오류 1040으로 새 연결을 거절한다.
 
 ## 2학기에 만든 것 (앱·연동)

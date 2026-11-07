@@ -310,6 +310,7 @@ StringResult Executor::exec_update_inner(SharedDatabase& s, const std::string& t
     // just the current explicit-transaction id, unaffected by retries).
     std::uint64_t my_id = tagging_txn_id(s);
     std::uint64_t cur_txn = txn.current_txn_id();
+    const std::size_t undo_before = txn.undo_size(); // (for the marks of hide_older_versions)
 
     // Gap lock: only under RR/Serializable and only for single-column PK tables (V1
     // scope), matching the same gating used at the FOR UPDATE/FOR SHARE call sites.
@@ -748,6 +749,14 @@ StringResult Executor::exec_update_inner(SharedDatabase& s, const std::string& t
                     added.reserve(new_versions.size());
                     for (auto& version : new_versions) added.push_back(&version);
                     unique_probe_apply(s, table, *schema0, olds, added);
+                }
+                // a row that another transaction changed after this transaction's snapshot: the snapshot still shows an older version of it, next to the new one
+                if (const auto frozen = snapshot_for_hiding()) {
+                    std::vector<Row> unseen;
+                    for (Row* rowp : targets) {
+                        if (!is_visible_for_read(*rowp, *frozen)) unseen.push_back(*rowp);
+                    }
+                    hide_older_versions(s, table, unseen, undo_before);
                 }
                 for (Row* rowp : targets) (*rowp)["_xmax"] = std::to_string(my_id);
                 const std::size_t first_new_pos = rows.size();

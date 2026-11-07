@@ -31,12 +31,94 @@ std::string isolation_level_debug(IsolationLevel level) {
 StringResult Executor::exec_begin(SharedDatabase& s) {
     // the level of the transaction: the one SET TRANSACTION gave it, else the session's (a SET made inside the last transaction takes effect now)
     if (!txn.is_active()) txn.set_isolation_level(next_isolation_ ? *next_isolation_ : session_isolation_);
+    supersede_marks_.clear();
     auto res = txn.begin_with_snapshot(*s.active_txn_ids->lock());
     if (res.is_err()) return StringResult::Err(res.error());
     std::uint64_t txn_id = res.value();
     s.active_txn_ids->lock()->insert(txn_id);
     return StringResult::Ok("Transaction " + std::to_string(txn_id) + " started. (isolation: " + isolation_level_debug(txn.isolation_level()) +
                              ")");
+}
+
+// ── REPEATABLE READ / SERIALIZABLE: a row this transaction writes must not be seen twice ───────────────────────────────────────────────────
+std::optional<SnapshotCtx> Executor::snapshot_for_hiding() const {
+    if (!txn.is_active()) return std::nullopt;
+    return txn.frozen_ctx(); // (only the levels that read through one snapshot have it)
+}
+
+namespace {
+std::uint64_t txn_id_field(const Row& row, const char* name) {
+    auto it = row.find(name);
+    return it == row.end() ? 0 : std::strtoull(it->second.c_str(), nullptr, 10);
+}
+
+// what says two versions are one row: the values of its primary key, joined with a NUL byte
+std::string version_key_of(const Row& row, const std::vector<std::string>& key_columns) {
+    std::string key;
+    for (std::size_t i = 0; i < key_columns.size(); i++) {
+        if (i) key += '\0';
+        auto it = row.find(key_columns[i]);
+        if (it != row.end()) key += it->second;
+    }
+    return key;
+}
+} // namespace
+
+void Executor::hide_versions_of(SharedDatabase& s, const std::string& table, const std::unordered_set<std::string>& keys) {
+    auto frozen = txn.frozen_ctx();
+    const TableSchema* schema = s.catalog.get_table(table);
+    auto rows_it = s.tables.find(table);
+    if (!frozen || !schema || rows_it == s.tables.end() || keys.empty()) return;
+    const std::vector<std::string> key_columns = schema->identity_columns();
+    if (key_columns.empty()) return;
+    const std::string mine = std::to_string(frozen->self_txn_id);
+    for (Row& row : rows_it->second) {
+        if (txn_id_field(row, "_xmin") == frozen->self_txn_id) continue; // (its own versions are the ones that stay)
+        if (!keys.count(version_key_of(row, key_columns))) continue;
+        if (is_visible_for_read(row, *frozen)) row["_xsup"] = mine;
+    }
+    txn.note_superseding();
+}
+
+void Executor::hide_older_versions(SharedDatabase& s, const std::string& table, const std::vector<Row>& unseen, std::size_t undo_before) {
+    const TableSchema* schema = s.catalog.get_table(table);
+    if (!schema || unseen.empty()) return;
+    const std::vector<std::string> key_columns = schema->identity_columns();
+    if (key_columns.empty()) return; // (rows of a table without a key cannot be told apart from one version to the next)
+    std::unordered_set<std::string> keys;
+    for (const Row& row : unseen) {
+        std::string key = version_key_of(row, key_columns);
+        supersede_marks_.push_back(SupersedeMark{table, key, undo_before});
+        keys.insert(std::move(key));
+    }
+    hide_versions_of(s, table, keys);
+}
+
+void Executor::unhide_after_rollback(SharedDatabase& s, std::uint64_t self_id, std::size_t remaining_undo) {
+    if (supersede_marks_.empty()) return;
+    std::vector<SupersedeMark> kept;
+    std::unordered_set<std::string> touched;
+    for (auto& mark : supersede_marks_) {
+        if (mark.undo_size >= remaining_undo) touched.insert(mark.table);
+        else kept.push_back(mark);
+    }
+    if (touched.empty()) return;
+    supersede_marks_ = kept;
+    const std::string mine = std::to_string(self_id);
+    for (const std::string& table : touched) {
+        auto rows_it = s.tables.find(table);
+        if (rows_it == s.tables.end()) continue;
+        for (Row& row : rows_it->second) {
+            auto sup = row.find("_xsup");
+            if (sup != row.end() && sup->second == mine) row.erase(sup);
+        }
+    }
+    // ... and what the statements before the savepoint hid stays hidden
+    std::unordered_map<std::string, std::unordered_set<std::string>> again;
+    for (auto& mark : kept) {
+        if (touched.count(mark.table)) again[mark.table].insert(mark.key);
+    }
+    for (auto& [table, keys] : again) hide_versions_of(s, table, keys);
 }
 
 StringResult Executor::exec_commit(SharedDatabase& s) {
@@ -201,6 +283,7 @@ void Executor::apply_rollback(SharedDatabase& s) {
         for (auto& row : rows) {
             auto it = row.find("_xmax");
             if (it != row.end() && it->second == txn_id_str) it->second = "0";
+            if (auto sup = row.find("_xsup"); sup != row.end() && sup->second == txn_id_str) row.erase(sup); // (the older version this transaction hid is seen again)
         }
 
         std::vector<Row> rows_clone = rows;
@@ -369,6 +452,7 @@ StringResult Executor::exec_rollback_to(SharedDatabase& s, const std::string& na
         for (auto& k : comp_keys) s.composite_indexes.at(k).rebuild(rows_clone);
     }
 
+    unhide_after_rollback(s, txn.current_txn_id(), txn.undo_size());
     return StringResult::Ok("Rolled back to savepoint '" + name + "'.");
 }
 

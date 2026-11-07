@@ -37,6 +37,9 @@ void Executor::cascade_write(SharedDatabase& s, const std::string& table, const 
     };
 
     const std::string id = std::to_string(version_id);
+    const std::size_t undo_before = txn.undo_size(); // (for the marks of hide_older_versions)
+    const auto frozen = snapshot_for_hiding();
+    std::vector<Row> unseen; // the rows this statement ends although the snapshot of the transaction cannot see them
     const bool deleting = !change;
     // A row that no snapshot can still need goes for good (as in a DELETE outside any transaction when nobody else is running); otherwise it is only ended.
     const bool erase_for_good = deleting && !txn.is_active() && s.active_txn_ids->lock()->empty();
@@ -45,6 +48,7 @@ void Executor::cascade_write(SharedDatabase& s, const std::string& table, const 
     for (std::size_t pos : positions) {
         Row& row = rows[pos];
         Row old = row; // the image before this statement ended it (_xmax "0")
+        if (frozen && !is_visible_for_read(row, *frozen)) unseen.push_back(old);
         if (deleting) {
             txn.log_delete(table, key_of(old), row_to_json(old));
             if (!erase_for_good) row["_xmax"] = id;
@@ -60,6 +64,8 @@ void Executor::cascade_write(SharedDatabase& s, const std::string& table, const 
             news.push_back(std::move(fresh));
         }
     }
+
+    if (!unseen.empty()) hide_older_versions(s, table, unseen, undo_before);
 
     auto idx_it = s.indexes.find(table);
     std::vector<CompositeIndex*> composite;

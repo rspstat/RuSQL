@@ -303,6 +303,19 @@ public:
     bool statement_atomic_ = false;          // the statement that is running is wrapped to be all or nothing (a trigger of its table may fail in the middle of it)
     // true while a statement that writes is refused: the open transaction is READ ONLY, or none is open and the session says transaction_read_only = 1
     bool read_only_now() const;
+    // REPEATABLE READ / SERIALIZABLE read through a snapshot taken once. When the transaction changes or deletes a row that another transaction changed after that snapshot, the
+    // snapshot still sees an OLDER version of the row next to the new one the transaction wrote (or after it deleted the row). The writers (UPDATE, DELETE, the cascades of a
+    // foreign key) hand over the rows they end that the snapshot cannot see; the older versions of those rows that it can see are marked "_xsup" = this transaction's id, and
+    // is_visible_for_read hides them from it. A ROLLBACK TO SAVEPOINT takes the marks of the statements it undoes back.
+    struct SupersedeMark {
+        std::string table, key;
+        std::size_t undo_size; // the size of the undo log before the statement that made the mark
+    };
+    std::vector<SupersedeMark> supersede_marks_;
+    std::optional<SnapshotCtx> snapshot_for_hiding() const;
+    void hide_older_versions(SharedDatabase& s, const std::string& table, const std::vector<Row>& unseen, std::size_t undo_before);
+    void hide_versions_of(SharedDatabase& s, const std::string& table, const std::unordered_set<std::string>& keys);
+    void unhide_after_rollback(SharedDatabase& s, std::uint64_t self_id, std::size_t remaining_undo);
     // OPTIMIZE TABLE t, ... / CHECK TABLE t, ... (the text of the statement): MySQL's four-column answer (Table, Op, Msg_type, Msg_text)
     StringResult exec_table_maintenance(const std::string& sql, const std::string& op);
     StringResult exec_set_transaction(const Statement::SetIsolationLevel& v);
@@ -893,15 +906,11 @@ private:
     // to the one in `old_row`, when that is given). nullopt = fine.
     static std::optional<std::string> rewritten_row_violation(SharedDatabase& s, const TableSchema& schema, const Row& row,
                                                               const std::vector<std::string>& changed_cols, const Row* old_row = nullptr);
-    // Deleting `row` of `table` is refused by a child row under ON DELETE RESTRICT (the message; same text as DELETE's), else nullopt.
-    static std::optional<std::string> delete_restrict_violation(SharedDatabase& s, const std::string& table, const Row& row);
     // UPDATE of a column that a child row references, under ON UPDATE RESTRICT: the message when `old_row`'s value is referenced and
     // `new_row` changes it, else nullopt. It runs BEFORE the row is rewritten (the check after the rewrite returned an error with the
     // row already changed).
     static std::optional<std::string> update_restrict_violation(SharedDatabase& s, const std::string& table, const Row& old_row, const Row& new_row,
                                                                 const std::vector<std::string>& changed_cols);
-    // The tables with a foreign key into `table`.
-    static std::vector<std::string> fk_child_tables(const SharedDatabase& s, const std::string& table);
     // A foreign-key value that names no live parent row of `fk` (the message), nullopt when the parent exists or the value is NULL.
     static std::optional<std::string> fk_child_violation(SharedDatabase& s, const ForeignKey& fk, const std::string& val);
     // The tables whose rows those foreign keys read (partitioned parents: their children); `cols` empty = every foreign key.

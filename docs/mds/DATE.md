@@ -2883,6 +2883,35 @@ VS Code 스타일 탭 드래그 순서 변경(요청의 1번 항목)은 같은 �
 ⑥ `CALL`과 `ALTER TABLE`의 "영향 받은 행 수"(MySQL 프로토콜의 OK 패킷)는 MySQL과 다르다(`CALL p()`는 마지막 문장의 행 수, `ALTER TABLE`은 표의 행 수).
 ⑦ 트리거가 걸린 표의 문장은 이제 자기만의 트랜잭션으로 감싸 실행하므로(트리거가 없는 표는 그대로) 한 문장짜리 쓰기가 커밋 경로를 한 번 더 지난다; 속도는 따로 재지 않았다.
 
+### 11월 8일 (두 번째) — R72: REPEATABLE READ에서 자기가 쓴 행이 두 번 보이던 것, 두 세션 시험
+
+**왜 이 항목인가**: 사용자가 "REPEATABLE READ, PostgreSQL은 어떻게 하고 있는가?"를 물은 뒤, 기본 격리 수준을 MySQL처럼 올리기 위한 첫 두 걸음("자기 쓰기를 한 버전만 보이게", "두 세션 시험을 진짜 MySQL과 비교")을 진행하자고 했다. 기본값을 올리는 일 자체는 아직 하지 않았다.
+
+**문제**: 격리 수준 REPEATABLE READ · SERIALIZABLE의 트랜잭션은 시작할 때 한 번 뜬 스냅샷으로 읽는다. 스냅샷을 뜬 **뒤에** 다른 세션이 어떤 행을 바꾸어 커밋하고, 이 트랜잭션이 그 행을 `UPDATE`/`DELETE`하면(최신 커밋 값에 쓰는 "현재 읽기"), 스냅샷은 그 행의 옛 버전(B의 커밋 이전)을 여전히 보여 주고 트랜잭션 자신이 쓴 새 버전도 보여서 **같은 행이 두 줄**로 나왔다(`COUNT(*)`도 하나 많음). `DELETE`는 지운 행이 계속 보였고, `DELETE` 뒤 같은 키를 다시 `INSERT`하면 두 줄이었다. READ COMMITTED는 문장마다 새 스냅샷을 떠서 없던 문제다. (`is_visible_for_read`에 "자기 번호가 `_xmax`인 버전은 안 보인다"는 규칙은 이미 있었다. 빠진 것은 B가 `_xmax`를 이미 찍어 둔 옛 버전이 이 스냅샷에는 살아 있다는 점이다.)
+
+**고침** (`executor_update.cpp` · `executor_delete.cpp` · `executor_cascade.cpp` · `executor_txn.cpp` · `executor_ddl.cpp` · `txn_manager.hpp`):
+- 쓰는 쪽(`UPDATE` · `DELETE` · 외래키의 연쇄 `ON DELETE`/`ON UPDATE`)이 행을 끝내기 **전에**, 끝낼 행이 이 트랜잭션의 스냅샷에는 안 보이는지(= 다른 트랜잭션이 스냅샷 뒤에 바꾼 행) 본다. 그런 행이 있으면 같은 기본키의 옛 버전 가운데 스냅샷에 보이는 것에 `_xsup` = 이 트랜잭션 번호 표시를 붙인다(`hide_older_versions`). 보통의 경우(끝낼 행이 스냅샷에 보임)는 확인 한 번뿐이라 비용이 없다.
+- 읽는 규칙(`is_visible_for_read`)은 `_xsup`이 자기 번호인 버전을 숨긴다. 표시가 하나라도 있는 트랜잭션의 스냅샷(`SnapshotCtx::check_superseded`)만 그 필드를 찾으므로 다른 읽기는 달라지지 않는다.
+- `ROLLBACK TO SAVEPOINT`는 되돌린 문장들의 표시를 걷고, 그 앞 문장들이 붙인 표시는 다시 붙인다(`unhide_after_rollback`). 전체 `ROLLBACK`은 번호가 죽으므로 아무 일도 필요 없다. 키 없는 표는 표시할 수 없다(아래 한계).
+- **같이 고친 것**: `SELECT … FOR UPDATE | FOR SHARE | LOCK IN SHARE MODE`가 REPEATABLE READ에서 **스냅샷의 옛 값**을 돌려주던 것을 최신 커밋 값으로(MySQL의 "현재 읽기"). 잠그고 읽은 값으로 다음 `UPDATE`를 계산하는 흔한 패턴이 낡은 값으로 돌던 오답이다.
+
+**두 세션 시험** (`code/test/diff/two_sessions.py`): 세션 A(시험할 격리 수준)와 B(자동 커밋)가 같은 단계를 진짜 MySQL 8.4.9와 RuSQL(MySQL 프로토콜)에서 실행하고 단계마다 SELECT의 행 · DML의 영향 행 수 · 오류 번호를 비교한다. 시나리오 18개(다른 세션이 바꾼 행 쓰기 · 지우기 · 지운 뒤 다시 넣기 · 저장점 둘 · 롤백 · 같은 행 두 번 쓰기 · 키가 바뀜 · 두 열 키 · 인덱스로 읽기 · 다른 세션이 넣은/지운 행 · 여러 행 · 연쇄 둘 · 잠금 읽기 · 스냅샷 시점) × 두 수준(READ COMMITTED · REPEATABLE READ), 298단계. 처음 **25개 차이 → 2개**: 남은 둘은 이번에 안 고친 알려진 차이 하나 — MySQL은 스냅샷을 트랜잭션의 **첫 읽기**에 뜨고 이 엔진은 `BEGIN`에 뜬다(`BEGIN` 뒤 첫 `SELECT` 전에 다른 세션이 커밋한 변경을 MySQL은 보고 여기는 못 봄). READ COMMITTED는 처음부터 차이 0. 같은 단계를 `test_repeatable_read.cpp`(9케이스)가 MySQL 없이도 지킨다.
+
+**검증**:
+- 전체 시험 **927 케이스 / 1,519,240 assertions**(R71은 918 / 1,518,901; 새 케이스 9: `test_repeatable_read.cpp`) — 세 모드(기본, `RUSQL_DML_INDEX_MIN_ROWS=0`, `RUSQL_PROBE_CHECK=1 RUSQL_PROBE_STREAK=0`) 모두 전부 통과.
+- **심은 버그** C++ 9개를 모두 잡음(읽기 규칙이 표시를 무시 · UPDATE · DELETE · 연쇄가 옛 버전을 안 숨김 · 저장점이 표시를 안 걷음 · 남는 표시를 다시 안 붙임 · 자기 새 버전까지 숨김 · 스냅샷이 표시를 모름 · 잠금 읽기가 스냅샷을 읽음).
+- 점수판 · 크래시 퍼저 · 검증 스크립트 · MCP · 화면 시험은 R71과 같은 값(아래 확인 참조).
+
+**죽은 코드 정리**: 선언과 정의뿐 어디서도 부르지 않던 함수 넷을 지웠다 — `Executor::delete_restrict_violation` · `Executor::fk_child_tables`(`executor_row_check.cpp`), `extract_equi_join_cols` · `range_op_inclusive`(`planner.cpp`) — 그리고 R71에서 `ANALYZE` 하나만 남아 뜻이 없어진 MySQL 계층의 반복문(`mysql.cpp`)을 풀어 썼다. 데이터 멤버 · 상수 · 프런트(`tsc --noUnusedLocals`)에는 안 쓰는 것이 없었다. 지운 뒤 전체 시험(927 케이스) · 두 세션 비교 · 퍼저 6종 · 검증 스크립트 12종 · MCP · 화면 시험을 다시 돌려 같은 결과를 확인했다.
+
+**정직한 한계**:
+① 알려진 차이 하나: 스냅샷 시점(첫 읽기 대 `BEGIN`). `START TRANSACTION WITH CONSISTENT SNAPSHOT`은 같다(둘 다 즉시).
+② 기본키가 없는 표는 같은 행의 버전을 알아볼 수 없어 이 고침이 닿지 않는다(그 표에서 같은 상황이면 여전히 두 줄).
+③ `_xsup` 표시는 옛 버전(어차피 `VACUUM`이 걷을 행)에 남고, 다른 트랜잭션에는 영향이 없다(번호는 다시 쓰이지 않는다).
+④ SERIALIZABLE은 두 세션 시험에서 MySQL과 비교하지 않았다(MySQL은 읽기에 잠금을 걸어 한 줄로 순서대로 실행하는 이 도구에서는 막힌다). 이 엔진의 SERIALIZABLE도 한 행이 한 번만 보인다는 것은 `test_repeatable_read.cpp`가 확인한다.
+⑤ 기본 격리 수준은 아직 `READ COMMITTED`다. 올리려면 남은 것: 스냅샷 시점 맞추기, 모든 트랜잭션이 갭 잠금을 잡는 데서 오는 대기 · 교착 영향 재기, 기본값을 바꿔 전체 시험을 돌려 깨지는 것 고치기.
+⑥ 쓰는 문장마다 끝낼 행이 스냅샷에 보이는지 한 번씩 더 확인하므로(REPEATABLE READ · SERIALIZABLE의 명시적 트랜잭션에서만) 속도가 아주 조금 달라질 수 있다. 따로 재지 않았다.
+
 ## 요약: 1학기 대비 2학기에 달라진 것
 
 

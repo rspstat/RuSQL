@@ -71,26 +71,6 @@ std::optional<std::string> Executor::rewritten_row_violation(SharedDatabase& s, 
     return std::nullopt;
 }
 
-std::optional<std::string> Executor::delete_restrict_violation(SharedDatabase& s, const std::string& table, const Row& row) {
-    for (auto& [other_table, schema] : s.catalog.tables) {
-        if (other_table == table) continue;
-        for (auto& col : schema.columns) {
-            for (auto& fk : col.foreign_keys) {
-                if (fk.ref_table != table || fk.on_delete != FkAction::Restrict) continue;
-                auto dit = row.find(fk.ref_column);
-                const std::string del_val = dit != row.end() ? dit->second : std::string();
-                if (del_val == EXECUTOR_NULL_VALUE) continue; // (a NULL is referred to by nothing)
-                if (auto oit = s.tables.find(other_table); oit != s.tables.end()) {
-                    if (index_or_scan_exists(s, other_table, oit->second, col.name, del_val, [](const Row& r) { return Executor::is_visible(r); })) {
-                        return "Foreign key violation: row in '" + table + "' is referenced by '" + other_table + "'.'" + col.name + "'";
-                    }
-                }
-            }
-        }
-    }
-    return std::nullopt;
-}
-
 std::optional<std::string> Executor::update_restrict_violation(SharedDatabase& s, const std::string& table, const Row& old_row, const Row& new_row,
                                                                const std::vector<std::string>& changed_cols) {
     for (auto& [other_table, schema] : s.catalog.tables) {
@@ -133,18 +113,6 @@ std::vector<std::string> Executor::fk_children_closure(const SharedDatabase& s, 
                 todo.push_back(name);
             }
         }
-    }
-    return out;
-}
-
-std::vector<std::string> Executor::fk_child_tables(const SharedDatabase& s, const std::string& table) {
-    std::vector<std::string> out;
-    for (auto& [other_table, schema] : s.catalog.tables) {
-        if (other_table == table) continue;
-        const bool refers = std::any_of(schema.columns.begin(), schema.columns.end(), [&](const ColumnDef& c) {
-            return std::any_of(c.foreign_keys.begin(), c.foreign_keys.end(), [&](const ForeignKey& fk) { return fk.ref_table == table; });
-        });
-        if (refers) out.push_back(other_table);
     }
     return out;
 }

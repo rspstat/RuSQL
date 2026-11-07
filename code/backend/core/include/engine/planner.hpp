@@ -22,7 +22,6 @@
 namespace engine {
 
 enum class RangeOp { Gt, Gte, Lt, Lte };
-bool range_op_inclusive(RangeOp op);
 bool range_op_is_lower_bound(RangeOp op);
 const char* range_op_label(RangeOp op);
 
@@ -192,7 +191,6 @@ private:
 
 // ── Public helpers (also used by executor) ──────────────────────────────────
 
-std::optional<std::pair<std::string, std::string>> extract_equi_join_cols(const CondExpr& on_expr);
 std::unordered_map<std::string, std::string> collect_eq_map(const CondExpr& expr);
 std::vector<const Condition*> collect_and_leaves(const CondExpr& expr);
 std::vector<Join> reorder_joins_dp(const std::string& base_table, std::vector<Join> joins,

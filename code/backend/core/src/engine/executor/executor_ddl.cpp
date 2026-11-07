@@ -40,6 +40,11 @@ bool Executor::is_visible(const Row& row) {
 bool Executor::is_visible_for_read(const Row& row, const SnapshotCtx& ctx) {
     auto committed_as_of = [&](std::uint64_t id) { return id == 0 || (id < ctx.cutoff && !ctx.in_progress.count(id)); };
 
+    // an older version of a row that this transaction has since written again, which its snapshot would still show next to its own (see hide_older_versions)
+    if (ctx.check_superseded) {
+        if (row.find("_xsup") != row.end() && parse_txn_id(row, "_xsup") == ctx.self_txn_id) return false;
+    }
+
     std::uint64_t xmin = parse_txn_id(row, "_xmin");
     if (xmin != ctx.self_txn_id && !committed_as_of(xmin)) return false; // didn't exist yet, to this reader
 

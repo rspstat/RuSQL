@@ -1317,29 +1317,26 @@ std::optional<StringResult> mysql_compat(const std::string& q, Executor& exec) {
 
     // ANALYZE TABLE t: the engine does the work and the answer has MySQL's shape (Table, Op, Msg_type, Msg_text). OPTIMIZE TABLE and CHECK TABLE are the engine's own (R71:
     // it checks the rows and answers in that shape itself)
-    for (const char* verb : {"ANALYZE"}) {
-        const std::string prefix = std::string(verb) + " TABLE ";
-        if (up.rfind(prefix, 0) != 0 && up.rfind(std::string(verb) + " LOCAL TABLE ", 0) != 0 && up.rfind(std::string(verb) + " NO_WRITE_TO_BINLOG TABLE ", 0) != 0) continue;
+    if (up.rfind("ANALYZE TABLE ", 0) == 0 || up.rfind("ANALYZE LOCAL TABLE ", 0) == 0 || up.rfind("ANALYZE NO_WRITE_TO_BINLOG TABLE ", 0) == 0) {
         const std::string tail = trim_copy(q.substr(up.find("TABLE ") + 6));
-        auto ref = read_table_ref(tail);
-        if (!ref) break;
-        const std::string target = ref->db ? *ref->db + "." + ref->table : ref->table;
-        // the table must be there
-        auto there = show_columns(exec, *ref, false);
-        std::string database = ref->db ? *ref->db : std::string();
-        if (database.empty()) {
-            auto current = exec_inner(exec, "SELECT DATABASE()");
-            if (current.is_ok()) {
-                if (auto parsed = parse_table(current.value()); parsed && !parsed->second.empty() && !parsed->second[0].empty()) database = parsed->second[0][0];
+        if (auto ref = read_table_ref(tail)) {
+            const std::string target = ref->db ? *ref->db + "." + ref->table : ref->table;
+            // the table must be there
+            auto there = show_columns(exec, *ref, false);
+            std::string database = ref->db ? *ref->db : std::string();
+            if (database.empty()) {
+                auto current = exec_inner(exec, "SELECT DATABASE()");
+                if (current.is_ok()) {
+                    if (auto parsed = parse_table(current.value()); parsed && !parsed->second.empty() && !parsed->second[0].empty()) database = parsed->second[0][0];
+                }
             }
+            const std::string shown = database + "." + ref->table;
+            if (there.is_err()) {
+                return StringResult::Ok(box_table({"Table", "Op", "Msg_type", "Msg_text"}, {{shown, "analyze", "Error", "Table '" + shown + "' doesn't exist"}, {shown, "analyze", "status", "Operation failed"}}));
+            }
+            exec_inner(exec, "ANALYZE TABLE " + target);
+            return StringResult::Ok(box_table({"Table", "Op", "Msg_type", "Msg_text"}, {{shown, "analyze", "status", "OK"}}));
         }
-        const std::string shown = database + "." + ref->table;
-        const std::string op = to_lower_str(verb);
-        if (there.is_err()) {
-            return StringResult::Ok(box_table({"Table", "Op", "Msg_type", "Msg_text"}, {{shown, op, "Error", "Table '" + shown + "' doesn't exist"}, {shown, op, "status", "Operation failed"}}));
-        }
-        exec_inner(exec, "ANALYZE TABLE " + target);
-        return StringResult::Ok(box_table({"Table", "Op", "Msg_type", "Msg_text"}, {{shown, op, "status", "OK"}}));
     }
 
     if (up.rfind("SHOW TRIGGERS", 0) == 0) {

@@ -67,6 +67,7 @@ add_executable(engine_tests
     test_index_advice.cpp
     test_explain_write.cpp
     test_r71_transactions.cpp
+    test_repeatable_read.cpp
     test_hashed_write_joins.cpp
     test_dump_syntax.cpp
     test_update_unique.cpp

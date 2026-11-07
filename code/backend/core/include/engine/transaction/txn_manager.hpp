@@ -28,6 +28,9 @@ struct SnapshotCtx {
     std::uint64_t self_txn_id = 0;
     std::uint64_t cutoff = 0;
     std::unordered_set<std::uint64_t> in_progress;
+    // Set once this transaction has ended a row that its snapshot could not see (another transaction changed the row after the snapshot was taken): some row versions
+    // then carry "_xsup" = this transaction's id and are hidden from it (see Executor::hide_older_versions). Off, the reads do not look for the field at all.
+    bool check_superseded = false;
 };
 
 struct UndoEntry {
@@ -81,6 +84,10 @@ public:
     // transaction instead of recomputing it per-statement (which is what ReadCommitted/
     // autocommit do instead, via a fresh capture -- see Executor::current_read_ctx).
     std::optional<SnapshotCtx> frozen_ctx() const { return frozen_ctx_; }
+    void note_superseding() {
+        if (frozen_ctx_) frozen_ctx_->check_superseded = true;
+    }
+    std::size_t undo_size() const { return undo_log_.size(); }
     // Stage 3: records that a Serializable transaction observed the row identified by
     // (table, pk_col, key) -- validate_serializable checks at COMMIT whether any of these
     // specific rows' visibility has since changed due to another transaction's write that

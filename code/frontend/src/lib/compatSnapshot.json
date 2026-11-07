@@ -381,8 +381,8 @@
   ],
   "conformanceCases": 4524,
   "tests": {
-    "cases": 918,
-    "assertions": 1518901
+    "cases": 927,
+    "assertions": 1519240
   },
   "bugsFound": 206
 }
