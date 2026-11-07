@@ -259,13 +259,13 @@ TEST_CASE("a trigger that fails fails the statement that fired it", "[routines][
     // BEFORE: nothing was written
     ok(ex, "CREATE TRIGGER trg_bad BEFORE INSERT ON t FOR EACH ROW INSERT INTO no_such_table VALUES (1)");
     const std::string message = fails(ex, "INSERT INTO t VALUES (4, 40)");
-    REQUIRE(message.find("Trigger 'trg_bad' failed") != std::string::npos);
-    REQUIRE(message.find("no_such_table") != std::string::npos);
+    REQUIRE(message.find("no_such_table") != std::string::npos); // (the error is the one of the statement in the body, as MySQL reports it)
     REQUIRE(q(ex, "SELECT COUNT(*) FROM t") == Rows{{"3"}});
     ok(ex, "DROP TRIGGER trg_bad");
-    // AFTER: the error says the change was made (a transaction can roll it back)
+    // AFTER: the statement that fired it is taken back as a whole (R71)
     ok(ex, "CREATE TRIGGER trg_bad2 AFTER INSERT ON t FOR EACH ROW INSERT INTO no_such_table VALUES (1)");
-    REQUIRE(fails(ex, "INSERT INTO t VALUES (5, 50)").find("after the change was made") != std::string::npos);
+    REQUIRE(fails(ex, "INSERT INTO t VALUES (5, 50)").find("no_such_table") != std::string::npos);
+    REQUIRE(q(ex, "SELECT COUNT(*) FROM t WHERE id = 5") == Rows{{"0"}});
     ok(ex, "DROP TRIGGER trg_bad2");
     ok(ex, "BEGIN");
     ok(ex, "CREATE TRIGGER trg_bad3 AFTER INSERT ON t FOR EACH ROW INSERT INTO no_such_table VALUES (1)");
@@ -288,10 +288,15 @@ TEST_CASE("a BEFORE INSERT trigger may set NEW.x", "[routines][trigger][set_new]
     REQUIRE(q(ex, "SELECT id, v, w, note FROM t ORDER BY id") == Rows{{"1", "10", "101", "a"}, {"2", "14", "102", "b"}});
     ok(ex, "INSERT INTO t VALUES (3, 1, 0, 'c')");
     REQUIRE(q(ex, "SELECT id, v, w FROM t WHERE id = 3") == Rows{{"3", "2", "103"}});
-    // in a BEFORE UPDATE / AFTER trigger it is refused, not ignored
+    // a BEFORE UPDATE trigger sets NEW.x too (R71): the row is written with what it made of it
     ok(ex, "CREATE TRIGGER trg_bu BEFORE UPDATE ON t FOR EACH ROW SET NEW.v = 0");
-    REQUIRE(fails(ex, "UPDATE t SET w = 1 WHERE id = 1").find("BEFORE INSERT triggers only") != std::string::npos);
-    REQUIRE(q(ex, "SELECT w FROM t WHERE id = 1") == Rows{{"101"}});
+    ok(ex, "UPDATE t SET w = 1 WHERE id = 1");
+    REQUIRE(q(ex, "SELECT v, w FROM t WHERE id = 1") == Rows{{"0", "1"}});
+    // in an AFTER trigger it is refused, not ignored
+    ok(ex, "DROP TRIGGER trg_bu");
+    ok(ex, "CREATE TRIGGER trg_au AFTER UPDATE ON t FOR EACH ROW SET NEW.v = 0");
+    REQUIRE(fails(ex, "UPDATE t SET w = 2 WHERE id = 1").find("BEFORE INSERT and BEFORE UPDATE triggers only") != std::string::npos);
+    REQUIRE(q(ex, "SELECT w FROM t WHERE id = 1") == Rows{{"1"}});
 }
 
 TEST_CASE("procedures and triggers survive a restart", "[routines][persistence]") {
@@ -403,10 +408,10 @@ TEST_CASE("R66: SET NEW.x inside an IF or a WHILE of a BEFORE INSERT trigger cha
     ok(ex, "CREATE TRIGGER t_grow BEFORE INSERT ON a FOR EACH ROW BEGIN WHILE NEW.qty < 10 DO SET NEW.qty = NEW.qty * 2; END WHILE; END");
     ok(ex, "INSERT INTO a VALUES (4, 'grow', 3)");
     REQUIRE(q(ex, "SELECT qty FROM a WHERE id = 4") == Rows{{"12"}});
-    // anywhere else the row cannot be changed from inside an IF, as at the top of the body: it is an error, not a value that is dropped
+    // a BEFORE UPDATE trigger changes the row from inside an IF too (R71)
     ok(ex, "CREATE TRIGGER t_upd BEFORE UPDATE ON a FOR EACH ROW BEGIN IF NEW.qty > 100 THEN SET NEW.qty = 100; END IF; END");
-    REQUIRE(fails(ex, "UPDATE a SET qty = 500 WHERE id = 2").find("BEFORE INSERT triggers only") != std::string::npos);
-    REQUIRE(q(ex, "SELECT qty FROM a WHERE id = 2") == Rows{{"7"}});
+    ok(ex, "UPDATE a SET qty = 500 WHERE id = 2");
+    REQUIRE(q(ex, "SELECT qty FROM a WHERE id = 2") == Rows{{"100"}});
     ok(ex, "UPDATE a SET qty = 50 WHERE id = 2"); // (the IF is false: nothing is set)
     REQUIRE(q(ex, "SELECT qty FROM a WHERE id = 2") == Rows{{"50"}});
 }

@@ -1331,6 +1331,19 @@ Statement Parser::parse_create_view() {
     std::vector<Token> slice(tokens_.begin() + static_cast<std::ptrdiff_t>(pos_before_select),
                               tokens_.begin() + static_cast<std::ptrdiff_t>(pos_end));
     std::string raw_sql = tokens_to_sql(slice);
+    // WITH [CASCADED | LOCAL] CHECK OPTION: kept at the end of the stored text (which is also what SHOW CREATE VIEW says); a write through the view reads it from there
+    if (peek_is(TokenKind::With)) {
+        std::size_t at = 1;
+        std::string kind = "CASCADED";
+        if (const Token* k = peek_at(at); k && k->kind == TokenKind::Ident && (to_upper(k->text) == "CASCADED" || to_upper(k->text) == "LOCAL")) {
+            kind = to_upper(k->text);
+            at++;
+        }
+        if (peek_at_is(at, TokenKind::Check) && peek_at_is(at + 1, TokenKind::OptionKw)) {
+            for (std::size_t i = 0; i < at + 2; i++) advance();
+            raw_sql += " WITH " + kind + " CHECK OPTION";
+        }
+    }
     return Statement(Statement::CreateView{name, std::make_unique<Statement>(std::move(query)), raw_sql});
 }
 

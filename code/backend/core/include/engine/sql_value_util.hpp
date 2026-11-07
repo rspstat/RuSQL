@@ -649,24 +649,31 @@ inline std::optional<DateTime> parse_datetime(const std::string& text) {
     };
     std::size_t i = 0;
     const bool all_digits = std::all_of(s.begin(), s.begin() + static_cast<std::ptrdiff_t>(std::min<std::size_t>(s.size(), 14)), [](char c) { return c >= '0' && c <= '9'; });
-    if (all_digits && (s.size() == 8 || s.size() == 14)) {
+    // YYYYMMDD, YYYYMMDDhhmmss, and with a two-digit year YYMMDD, YYMMDDhhmmss
+    if (all_digits && (s.size() == 6 || s.size() == 8 || s.size() == 12 || s.size() == 14)) {
+        const bool short_year = s.size() == 6 || s.size() == 12;
+        const int year_width = short_year ? 2 : 4;
         long long y, mo, d, h = 0, mi = 0, se = 0;
-        if (!digits_at(i, 4, 4, y) || !digits_at(i, 2, 2, mo) || !digits_at(i, 2, 2, d)) return std::nullopt;
-        if (s.size() == 14 && (!digits_at(i, 2, 2, h) || !digits_at(i, 2, 2, mi) || !digits_at(i, 2, 2, se))) return std::nullopt;
+        if (!digits_at(i, year_width, year_width, y) || !digits_at(i, 2, 2, mo) || !digits_at(i, 2, 2, d)) return std::nullopt;
+        if (s.size() >= 12 && (!digits_at(i, 2, 2, h) || !digits_at(i, 2, 2, mi) || !digits_at(i, 2, 2, se))) return std::nullopt;
+        if (short_year) y += y < 70 ? 2000 : 1900;
         t.year = y; t.month = static_cast<int>(mo); t.day = static_cast<int>(d);
         t.hour = static_cast<int>(h); t.minute = static_cast<int>(mi); t.second = static_cast<int>(se);
-        t.has_date = true; t.has_time = s.size() == 14;
+        t.has_date = true; t.has_time = s.size() >= 12;
         return t;
     }
     long long y, mo, d;
+    const std::size_t year_start = i;
     if (!digits_at(i, 1, 4, y)) return std::nullopt;
+    const std::size_t year_digits = i - year_start;
     if (i >= s.size() || (s[i] != '-' && s[i] != '/')) return std::nullopt;
     const char sep = s[i++];
     if (!digits_at(i, 1, 2, mo)) return std::nullopt;
     if (i >= s.size() || s[i] != sep) return std::nullopt;
     i++;
     if (!digits_at(i, 1, 2, d)) return std::nullopt;
-    t.year = y < 70 && s.find('-') < 3 ? 2000 + y : (y < 100 && s.find('-') < 3 ? 1900 + y : y);
+    if (i < s.size() && s[i] >= '0' && s[i] <= '9') return std::nullopt; // (a day of three digits: '31/03/2024' is no date)
+    t.year = year_digits <= 2 ? (y < 70 ? 2000 + y : 1900 + y) : y;
     t.month = static_cast<int>(mo);
     t.day = static_cast<int>(d);
     t.has_date = true;
@@ -680,6 +687,7 @@ inline std::optional<DateTime> parse_datetime(const std::string& text) {
                     j++;
                     if (!digits_at(j, 1, 2, se)) se = 0;
                 }
+                if (h > 23 || mi > 59 || se > 59) return std::nullopt; // ('2024-02-29 25:00:00' is no datetime)
                 t.hour = static_cast<int>(h); t.minute = static_cast<int>(mi); t.second = static_cast<int>(se);
                 t.has_time = true;
                 if (j < s.size() && s[j] == '.') {

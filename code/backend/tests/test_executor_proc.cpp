@@ -285,9 +285,9 @@ TEST_CASE("Self-referential AFTER INSERT trigger recursion is bounded, not infin
     // through another table) would recurse with no natural termination -- eventually a
     // stack overflow, and in the meantime holding the global write lock indefinitely.
     // A trigger body's failing statement fails the statement that fired it, so the depth-cap
-    // error raised deep in the recursion comes back as this top-level INSERT's own error. The
-    // rows the AFTER triggers already wrote stay, and the recursion stops at a small bounded
-    // depth instead of continuing forever.
+    // error raised deep in the recursion comes back as this top-level INSERT's own error, and (R71) the statement is
+    // taken back as a whole, every row the triggers already wrote with it: the recursion stops at a small bounded
+    // depth instead of continuing forever, and leaves nothing behind.
     TempDataDir dir("exec_proc_data_13");
     Executor ex(dir.path);
     REQUIRE(ex.execute_sql("CREATE DATABASE company").is_ok());
@@ -301,8 +301,6 @@ TEST_CASE("Self-referential AFTER INSERT trigger recursion is bounded, not infin
 
     auto s = ex.get_shared()->read();
     std::size_t row_count = s->tables.at("company.t").size();
-    // Bounded by the trigger-depth cap, not unbounded/hung -- comfortably under 100
-    // regardless of the exact off-by-one at the cap boundary.
-    REQUIRE(row_count > 0);
-    REQUIRE(row_count < 100);
+    // (the depth cap stopped it -- it did not hang -- and what it had written is gone)
+    REQUIRE(row_count == 0);
 }

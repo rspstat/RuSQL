@@ -141,6 +141,21 @@ const Case kFkAutoNames[] = {
 const Case kRollup[] = {
 #include "mysql_conformance_rollup.inc"
 };
+const Case kTransactions[] = {
+#include "mysql_conformance_transactions.inc"
+};
+const Case kTriggersWrites[] = {
+#include "mysql_conformance_triggers_writes.inc"
+};
+const Case kViewsUpdate[] = {
+#include "mysql_conformance_views_update.inc"
+};
+const Case kFkActions[] = {
+#include "mysql_conformance_fk_actions.inc"
+};
+const Case kDatesArith[] = {
+#include "mysql_conformance_dates_arith.inc"
+};
 
 struct TempDataDir {
     std::string path;
@@ -434,4 +449,24 @@ TEST_CASE("Names of foreign keys without a name, NO ACTION and RESTRICT in refer
 
 TEST_CASE("GROUP BY ... WITH ROLLUP: a row for each prefix of the keys and a last one for all of them", "[mysql_conformance][rollup]") {
     run_cases("mc_rollup", kRollup, sizeof kRollup / sizeof kRollup[0]);
+}
+
+TEST_CASE("Statements inside a transaction: SAVEPOINT / ROLLBACK TO, DDL that commits, READ ONLY, the isolation variables, COMMIT AND CHAIN", "[mysql_conformance][transactions]") {
+    run_cases("mc_transactions", kTransactions, sizeof kTransactions / sizeof kTransactions[0]);
+}
+
+TEST_CASE("Triggers that write: SET NEW.x in BEFORE INSERT and UPDATE, audit tables, a failing trigger takes the statement back, procedures that write", "[mysql_conformance][triggers_writes]") {
+    run_cases("mc_triggers_writes", kTriggersWrites, sizeof kTriggersWrites / sizeof kTriggersWrites[0]);
+}
+
+TEST_CASE("Writes through views: renamed columns, a view over a view, WITH CHECK OPTION, what a view cannot take", "[mysql_conformance][views_update]") {
+    run_cases("mc_views_update", kViewsUpdate, sizeof kViewsUpdate / sizeof kViewsUpdate[0]);
+}
+
+TEST_CASE("Foreign key actions: RESTRICT / NO ACTION / CASCADE / SET NULL, TRUNCATE of a referenced table, FOREIGN_KEY_CHECKS = 0, the definition of a key", "[mysql_conformance][fk_actions]") {
+    run_cases("mc_fk_actions", kFkActions, sizeof kFkActions / sizeof kFkActions[0]);
+}
+
+TEST_CASE("Date and time arithmetic: TIME limits, STR_TO_DATE, CONVERT_TZ, strings that are no dates, a date against a date string", "[mysql_conformance][dates_arith]") {
+    run_cases("mc_dates_arith", kDatesArith, sizeof kDatesArith / sizeof kDatesArith[0]);
 }

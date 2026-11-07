@@ -230,8 +230,21 @@ public:
             std::vector<std::string> counted = t.eq;
             std::stable_sort(counted.begin(), counted.end(), [&](const std::string& a, const std::string& b) { return distinct(t, a) > distinct(t, b); });
             std::vector<std::string> narrowing = counted;
-            if (!t.range.empty()) narrowing.push_back(t.range.front());
+            // a search narrows by one range column only (the ones after it are tested on the rows it finds): the one that tells the most values apart
+            if (!t.range.empty()) {
+                std::string picked = t.range.front();
+                for (const auto& candidate : t.range) {
+                    if (distinct(t, candidate) > distinct(t, picked)) picked = candidate;
+                }
+                narrowing.push_back(picked);
+                if (t.range.size() > 1) {
+                    note("Tests by range on " + t.name + "(" + joined(t.range) + "): an index narrows by one range column only, so " + picked + " is the one in the suggestion.");
+                }
+            }
             std::vector<std::string> order_columns;
+            if (single && order_by.size() > 1 && !one_direction && sorted_by.size() == order_by.size()) {
+                note("ORDER BY mixes ASC and DESC, so no single index returns the rows in that order; the sort stays.");
+            }
             // the rows come out of the index in the order of the ORDER BY when the index is searched by equality only and the whole sort goes one way
             if (single && t.range.empty() && !sorted_by.empty() && sorted_by.size() == order_by.size() && one_direction &&
                 std::all_of(sorted_by.begin(), sorted_by.end(), [&](const auto& p) { return p.first == &t; })) {
@@ -459,7 +472,15 @@ private:
                 }
             }
             std::vector<std::string> columns = eq;
-            if (!range.empty()) columns.push_back(range.front());
+            if (!range.empty()) {
+                std::string picked = range.front();
+                if (branch_owner) {
+                    for (const auto& candidate : range) {
+                        if (distinct(*branch_owner, candidate) > distinct(*branch_owner, picked)) picked = candidate;
+                    }
+                }
+                columns.push_back(picked);
+            }
             per_branch.push_back(columns);
         }
         if (readable && branch_owner && std::all_of(per_branch.begin(), per_branch.end(), [](const auto& b) { return !b.empty(); })) {

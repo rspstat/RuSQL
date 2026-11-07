@@ -2846,6 +2846,43 @@ VS Code 스타일 탭 드래그 순서 변경(요청의 1번 항목)은 같은 �
 ④ `import_csv`의 미리보기는 실제로 넣었다가 되돌린다(DDL이 아니라서 가능; AUTO_INCREMENT 카운터는 되돌려지지 않을 수 있음). 파일은 이 컴퓨터의 것이고 UTF-8만 읽는다.
 ⑤ 화면 시험은 디버그 앱과 개발 서버를 쓰므로 `cargo build`(앱)와 `npm install`이 되어 있어야 하고 Windows Python이 필요하다. 설치본(`tauri build`)으로는 돌리지 않았다.
 
+### 11월 8일 — R71: 새 영역 훑기(트랜잭션 · 트리거 · 뷰 · 외래키 · 날짜), `@@transaction_isolation`, `BEFORE UPDATE`의 `SET NEW.x`, `OPTIMIZE`·`CHECK TABLE`, `suggest_indexes` 후속
+
+**왜 이 항목인가**: 사용자가 11월 7일에 받은 분야별 추천 목록에서 "새 영역 훑기(진짜 MySQL과 문장 비교), `SELECT @@transaction_isolation` 오답(새로 찾음), `suggest_indexes` 후속, `BEFORE UPDATE` 트리거의 `SET NEW.x`, `OPTIMIZE`·`CHECK TABLE`을 앱에서도"를 같은 진행 방식(코드 → 시험 → 문서 → 전체 커밋·푸시)으로 하자고 했다.
+
+**새 영역 훑기**: 코퍼스 다섯 개를 새로 만들어 진짜 MySQL 8.4.9와 비교했다 — `transactions`(트랜잭션 안의 문장 · 격리 수준 · `READ ONLY`), `triggers_writes`(쓰는 트리거 · 프로시저), `views_update`(뷰를 통한 쓰기), `fk_actions`(외래키 동작), `dates_arith`(날짜 계산). 처음 돌렸을 때 차이가 **43 · 27 · 35 · 8 · 11개**(124개)였고 아래를 고친 뒤 **모두 0**이다(두 프로토콜 모두). 다섯 개 모두 점수판과 적합성 시험(`mysql_conformance_*.inc`)에 올렸다.
+
+- **DDL이 열린 트랜잭션을 먼저 커밋한다** (`run_sql_text`): `CREATE`·`ALTER`·`DROP`·`TRUNCATE`·`RENAME`·`ANALYZE`·`OPTIMIZE`·`GRANT`·`LOCK`, 그리고 트랜잭션 안의 `BEGIN`·`START TRANSACTION`. 전에는 `BEGIN; INSERT; CREATE TABLE …; ROLLBACK`이 INSERT를 되돌렸다(MySQL은 CREATE가 이미 커밋함). `CREATE/DROP TEMPORARY`는 예외.
+- **`READ ONLY`**: `START TRANSACTION READ ONLY | READ WRITE`, `SET [SESSION] TRANSACTION READ ONLY | READ WRITE`, `SET transaction_read_only = 1 | ON …`; 쓰는 문장(`INSERT`·`UPDATE`·`DELETE`·`REPLACE`·`MERGE`·`TRUNCATE`와 DDL)은 오류 **1792**. 전에는 `START TRANSACTION READ ONLY` 안의 `DELETE FROM t`가 표 전체를 지웠다(문법만 읽고 모드는 버림). `SET TRANSACTION …`(SESSION 없이)은 **다음 트랜잭션 하나**에만 적용되고 `BEGIN`이 가져간다.
+- **`@@transaction_isolation` · `@@tx_isolation` · `@@transaction_read_only`가 실제 상태를 말한다**: `SET SESSION TRANSACTION ISOLATION LEVEL x`, `SET transaction_isolation = 'READ-COMMITTED'`(MySQL의 하이픈 이름, 대소문자 무관, 공백 이름 · 모르는 이름은 오류 **1231**), `SET @@session.…`, `DEFAULT`, 여러 특성을 쉼표로(`… READ COMMITTED, READ ONLY`)가 모두 같은 곳을 바꾼다. 트랜잭션 안에서 `SET TRANSACTION …`은 오류 **1568**, `SET SESSION …`은 허용되고 **다음** 트랜잭션부터 적용된다. 전에는 변수가 `REPEATABLE-READ`로 박혀 있어 격리 수준을 바꿔도 `@@transaction_isolation`은 그대로였다(SHOW VARIABLES는 `READ-COMMITTED`라고 서로 다르게 말했다). MySQL 프로토콜 쪽은 `SET`의 엔진 오류(`ERROR n …`)를 이제 그대로 돌려준다(전에는 모든 `SET` 오류를 OK로 삼켰다).
+- **`COMMIT [WORK] AND [NO] CHAIN [[NO] RELEASE]` · `ROLLBACK … AND CHAIN`**: 끝나면 같은 격리 수준 · 같은 접근 모드로 새 트랜잭션이 이어서 열린다. **저장점**: 트랜잭션 밖의 `SAVEPOINT`는 받고 아무것도 남기지 않으며, 없는 저장점의 `ROLLBACK TO` · `RELEASE`는 오류 **1305**.
+- **트리거**: ① `SET NEW.a = …, NEW.b = …`(한 `SET`에 여러 대입, 프로시저 본문의 `SET a = 1, b = 2`도)가 문법 오류였다. ② **`BEFORE UPDATE`의 `SET NEW.x`**(아래). ③ **트리거가 걸린 표에 쓰는 문장은 전부 아니면 전무**: 세 번째 행의 `AFTER INSERT` 트리거가 실패하면 문장이 쓴 행과 앞 행들의 트리거가 쓴 행까지 되돌린다(전에는 "트리거가 실패했습니다 (변경은 이미 이루어졌음)"라고 말하며 반쯤 쓴 채로 남았다). 트랜잭션 밖에서는 그 문장 하나짜리 트랜잭션으로, 안에서는 저장점으로 한다. 오류 글자는 이제 트리거 안 문장의 오류 그대로다(MySQL이 그렇고, 오류 번호 1062 · 1452가 맞게 나간다).
+- **외래키**: ① 다른 표가 참조하는 표의 `TRUNCATE`는 오류 **1701**(`FOREIGN_KEY_CHECKS = 0`이면 허용) — 전에는 표를 비워 자식 행이 고아가 됐다. ② 정의 검사: 부모 표가 없으면 **1824**(검사를 끈 덤프는 예외), 열 종류가 안 맞으면(`VARCHAR`가 `INT`를 참조) **3780**, `SET NULL`인데 `NOT NULL` 열이면 **1830**; `CREATE TABLE`과 `ALTER TABLE ADD FOREIGN KEY` 모두. ③ **`FOREIGN_KEY_CHECKS = 0`이면 부모 쪽도 꺼진다**: 참조된 부모 행의 `DELETE`/`UPDATE`가 RESTRICT에 막히거나 자식 행으로 연쇄되지 않는다(MySQL이 그렇다; 전에는 자식 쪽 검사만 꺼졌다).
+- **뷰를 통한 쓰기** (`resolve_view_target`, `view_rename.hpp`): 열 이름을 바꾼 뷰(`SELECT id AS ident …`)의 `UPDATE`·`DELETE`가 뷰의 이름을 표의 이름으로 옮겨 `SET`과 `WHERE` 모두에서 읽고, 열 목록 없는 `INSERT INTO v VALUES (…)`는 표가 아니라 **뷰의 열**을 따르며, 식으로 만든 열을 쓰려 하면 **1348**(UPDATE) · **1471**(INSERT, 식 열이 하나라도 있는 뷰), `LIMIT` · 집계 · `DISTINCT` · `GROUP BY` 뷰는 **1288**/**1471**, 조인 뷰의 `DELETE`는 **1395**, 뷰가 가린 `NOT NULL` 열은 **1423**. 뷰 위의 뷰는 표까지 내려가며 두 `WHERE`가 모두 걸린다. **`WITH [CASCADED | LOCAL] CHECK OPTION`** 이 생겼다: 뷰가 보여 주지 않을 행을 `INSERT`/`UPDATE`하면 오류 **1369**(`CASCADED`는 아래 뷰의 조건까지; 저장은 뷰 정의 글자 끝에 붙여 `SHOW CREATE VIEW`가 그대로 말하고 재시작 뒤에도 남는다).
+- **날짜 · 시간**: ① `TIME` 값은 **838:59:59**에서 멈춘다(`ADDTIME`·`SEC_TO_TIME`·`TIMEDIFF` 등; 전에는 `839:00:00`). ② `STR_TO_DATE`의 `%j`(연중 일). ③ **`CONVERT_TZ`**(`+hh:mm` · `UTC`; 이름 붙은 시간대는 MySQL이 시간대 표를 안 올렸을 때처럼 NULL). ④ **날짜 글자를 MySQL처럼 엄격히 읽는다**(`sql_value_util.hpp`): `'31/03/2024'`는 날짜가 아니다(전에는 `0031-03-20`), 시간이 `25:00:00`이면 날짜 시간이 아니다, 두 자리 연도는 구분 문자가 `/`여도 2000/1900년대로, `YYMMDD` · `YYMMDDhhmmss` 숫자(`CAST(240229 AS DATE)`). ⑤ **DATE 열과 날짜 글자 · DATETIME의 비교**(`executor_eval.cpp`): `d = '2024-1-31'`은 날짜로 읽어 같고(전에는 글자 비교로 달랐다), `DATE`와 `DATETIME` 열은 `00:00:00`에서 만난다(`t = d`). ⑥ `FROM_UNIXTIME(1700000000.5)`가 소수초를 읽는다(전에는 `1970-01-01`; NULL 인수는 NULL).
+
+**`BEFORE UPDATE` 트리거의 `SET NEW.x`** (`executor_update.cpp`, `executor_trigger.cpp`): 전에는 오류("supported in BEFORE INSERT triggers only")였다. 이제 본문 맨 위 · `IF` · `WHILE` 안에서 `NEW`를 바꿀 수 있고(`SET NEW.updated_at = NOW()`, `SET NEW.upd = OLD.upd + 1`), UPDATE는 문장이 만든 값 위에 트리거가 바꾼 열을 얹어 행마다 기본키로 찾아 쓴다(기본키가 없는 표는 명확한 오류; 기본키를 바꾸는 UPDATE도 된다). 같은 행에 걸린 `AFTER UPDATE` 트리거는 트리거가 만든 `NEW`를 읽는다. `AFTER` 트리거의 `SET NEW.x`는 여전히 오류.
+
+**`OPTIMIZE TABLE` · `CHECK TABLE`** (`executor_maint.cpp`, 네이티브 프로토콜): MySQL의 4열 응답(`Table`, `Op`, `Msg_type`, `Msg_text`). `OPTIMIZE`는 죽은 행 버전 정리(`VACUUM`) + 통계 갱신(`ANALYZE`)을 하고 "Table does not support optimize, doing recreate + analyze instead" 노트와 `OK`를 돌려주며, **`CHECK`는 실제로 행을 읽는다**: `NOT NULL` 열의 NULL · 기본키/UNIQUE 중복 · 부모가 없는 외래키 값을 찾아 `error` 줄과 `Corrupt`를 낸다(없는 표 · 뷰 · 여러 표 · `QUICK` 같은 옵션도). MySQL 프로토콜의 껍데기(`CHECK`는 늘 OK, `OPTIMIZE`는 VACUUM만)를 지우고 같은 엔진 길로 보낸다. **앱**: 표를 오른쪽 클릭하면 "Check Table" · "Optimize Table"이 있고 결과 패널에 그 표가 뜬다(`ContextMenus.tsx`; CDP 시험 `the_table_menu_checks_and_optimizes_a_table`).
+
+**`suggest_indexes` 후속** (`executor_advice.cpp`): 범위 조건이 둘이면(`WHERE grp > 3 AND cat > 5`) 제안은 값 종류가 더 많은 열(`cat`) 하나만 범위 열로 삼고 "an index narrows by one range column only, so cat is the one in the suggestion" 노트를 붙이며(전에는 먼저 쓴 열), `ORDER BY a ASC, b DESC`처럼 방향이 섞이면 "no single index returns the rows in that order; the sort stays" 노트를 붙인다. MCP · 앱 카드는 엔진의 같은 답을 그대로 보여 준다.
+
+**검증**:
+- 전체 시험 **918 케이스 / 1,518,901 assertions**(세 모드 — 기본, `RUSQL_DML_INDEX_MIN_ROWS=0`, `RUSQL_PROBE_CHECK=1 RUSQL_PROBE_STREAK=0` — 모두 **전부 통과**; R70은 899 / 1,517,638; 새 케이스: `test_r71_transactions.cpp` 14 · `test_index_advice.cpp` 1 · 적합성 5). 기존 시험 5곳은 새 동작에 맞게 고쳤다 — 트리거 실패가 문장째 되돌려짐(`test_stored_routines.cpp` 2 · `test_executor_proc.cpp` 1), `BEFORE UPDATE`의 `SET NEW.x`가 이제 됨(`test_stored_routines.cpp` 2곳), 부모 표가 없는 `CREATE TABLE`은 1824(`test_dump_syntax.cpp` 1).
+- **호환성 점수판**(진짜 MySQL 8.4.9와 비교): 코퍼스 **47개**, 문장 **3,873개** 중 차이 **0**.
+- **심은 버그** C++ 20개를 **모두 잡음**(처음에는 18개 — 남은 둘, 뷰 `SET` 식의 열 이름 옮기기와 `CHECK TABLE`의 기본키 중복은 시험을 더 세게 쓴 뒤 잡았다. 기본키 중복은 SQL로 만들 수 없어 시험이 표의 행을 직접 넣었다): 암묵 커밋 · `READ ONLY`가 트랜잭션 표시를 무시 · 격리 변수가 안 바뀜 · 1568 · 다음 트랜잭션 한 번 · `CHAIN` · 저장점 1305 · 트리거 문장 전부-아니면-전무 · `BEFORE UPDATE` 덮어쓰기 · 여러 대입 · 참조되는 표의 `TRUNCATE` · 외래키 정의 검사 둘 · 뷰의 열 · 뷰 식 이름 옮기기 · `CHECK OPTION` · 조인 뷰 `DELETE` · `CHECK TABLE`의 부모/기본키 검사 · 인덱스 제안의 범위 열/정렬 노트).
+- 크래시 퍼저 6종(8라운드씩) 불일치 0 · 검증 스크립트 12종(`verify_*.py`) 위반 0 · MCP 단위 시험 57건과 실제 서버 점검 29건 · 프런트 라이브러리 시험 26건 통과 · `test_full.sql` · `test_full-ver2.sql`을 CLI로 돌려 의도한 오류 데모 외에 새 오류 없음(ver2의 `RESTORE`는 오류 0개로 끝남).
+- 프런트: `tsc --noEmit` 오류 0, 라이브러리 시험 26건; 화면 자동 시험(CDP)은 새 시나리오 1개("표 메뉴가 Check Table · Optimize Table을 부른다")를 더해 12개 모두 통과.
+
+**정직한 한계**:
+① **격리 수준의 기본값이 다르다**: 아무것도 안 정한 세션은 MySQL이 `REPEATABLE-READ`이고 이 엔진은 `READ-COMMITTED`(엔진이 실제로 도는 수준 — 변수가 거짓말하지 않게 함). `REPEATABLE READ`/`SERIALIZABLE`로 올려 쓸 수는 있지만 이 엔진의 RR은 같은 트랜잭션의 자기 쓰기를 둘로 보는 오래된 문제가 있다.
+② `SET @@transaction_isolation = x`(SESSION 없이)는 MySQL이 **다음 트랜잭션에만** 적용하는데 여기는 세션에 적용한다. `GLOBAL`도 세션처럼 읽는다.
+③ **조인 뷰의 `UPDATE`·`INSERT`**(MySQL은 한 표의 열만 쓰면 받는다)는 아직 거절한다.
+④ 날짜: `INTERVAL 1 DAY + '2024-01-31'`(INTERVAL이 앞)은 문법 오류, `DATE_SUB('0001-01-01', INTERVAL 1 DAY)`는 MySQL은 `0000-00-00`(이상한 값)이고 여기는 `0000-12-31`, `INTERVAL '1.5' DAY`는 MySQL이 글자를 정수 1로 읽는데 여기는 반올림한 2, `UNIX_TIMESTAMP`·`FROM_UNIXTIME`은 컴퓨터의 시간대에 따라 달라 코퍼스에서 뺐다.
+⑤ 외래키 열 종류 검사는 **큰 갈래**만 본다(정수끼리 · 글자끼리 …): MySQL은 `INT`와 `BIGINT`도 3780으로 거절하지만 여기는 받는다.
+⑥ `CALL`과 `ALTER TABLE`의 "영향 받은 행 수"(MySQL 프로토콜의 OK 패킷)는 MySQL과 다르다(`CALL p()`는 마지막 문장의 행 수, `ALTER TABLE`은 표의 행 수).
+⑦ 트리거가 걸린 표의 문장은 이제 자기만의 트랜잭션으로 감싸 실행하므로(트리거가 없는 표는 그대로) 한 문장짜리 쓰기가 커밋 경로를 한 번 더 지난다; 속도는 따로 재지 않았다.
+
 ## 요약: 1학기 대비 2학기에 달라진 것
 
 

@@ -29,6 +29,8 @@ std::string isolation_level_debug(IsolationLevel level) {
 } // namespace
 
 StringResult Executor::exec_begin(SharedDatabase& s) {
+    // the level of the transaction: the one SET TRANSACTION gave it, else the session's (a SET made inside the last transaction takes effect now)
+    if (!txn.is_active()) txn.set_isolation_level(next_isolation_ ? *next_isolation_ : session_isolation_);
     auto res = txn.begin_with_snapshot(*s.active_txn_ids->lock());
     if (res.is_err()) return StringResult::Err(res.error());
     std::uint64_t txn_id = res.value();
@@ -230,18 +232,22 @@ StringResult Executor::exec_rollback(SharedDatabase& s) {
 }
 
 StringResult Executor::exec_savepoint(const std::string& name) {
+    // outside a transaction MySQL takes the statement and keeps nothing (a ROLLBACK TO that name finds no savepoint)
+    if (!txn.is_active()) return StringResult::Ok("Savepoint '" + name + "' created.");
     if (auto res = txn.create_savepoint(name); res.is_err()) return StringResult::Err(res.error());
     return StringResult::Ok("Savepoint '" + name + "' created.");
 }
 
 StringResult Executor::exec_release_savepoint(const std::string& name) {
-    if (auto res = txn.release_savepoint(name); res.is_err()) return StringResult::Err(res.error());
+    if (!txn.is_active()) return StringResult::Err("ERROR 1305 (42000): SAVEPOINT " + name + " does not exist");
+    if (auto res = txn.release_savepoint(name); res.is_err()) return StringResult::Err("ERROR 1305 (42000): SAVEPOINT " + name + " does not exist");
     return StringResult::Ok("Savepoint '" + name + "' released.");
 }
 
 StringResult Executor::exec_rollback_to(SharedDatabase& s, const std::string& name) {
+    if (!txn.is_active()) return StringResult::Err("ERROR 1305 (42000): SAVEPOINT " + name + " does not exist");
     auto res = txn.rollback_to_savepoint(name);
-    if (res.is_err()) return StringResult::Err(res.error());
+    if (res.is_err()) return StringResult::Err("ERROR 1305 (42000): SAVEPOINT " + name + " does not exist");
 
     std::string txn_id_str = std::to_string(txn.current_txn_id());
     std::unordered_set<std::string> touched_tables;
@@ -602,16 +608,43 @@ StringResult Executor::exec_show_wal() const {
     return StringResult::Ok(out.str());
 }
 
-StringResult Executor::exec_set_isolation_level(IsolationLevel level) {
-    std::string name;
-    switch (level) {
-        case IsolationLevel::ReadUncommitted: name = "READ UNCOMMITTED"; break;
-        case IsolationLevel::ReadCommitted: name = "READ COMMITTED"; break;
-        case IsolationLevel::RepeatableRead: name = "REPEATABLE READ"; break;
-        case IsolationLevel::Serializable: name = "SERIALIZABLE"; break;
+// SET [SESSION] TRANSACTION ISOLATION LEVEL x [, READ ONLY | READ WRITE] (and SET transaction_isolation = ..., SET transaction_read_only = ...): the characteristics of the
+// session. A change made while a transaction is open is for the next one. SET TRANSACTION (no SESSION) is for the next transaction only, and cannot be made in one.
+StringResult Executor::exec_set_transaction(const Statement::SetIsolationLevel& v) {
+    if (v.next_only && txn.is_active()) {
+        return StringResult::Err("ERROR 1568 (25001): Transaction characteristics can't be changed while a transaction is in progress");
     }
-    txn.set_isolation_level(level);
-    return StringResult::Ok("Isolation level set to " + name + ".");
+    std::string message;
+    if (v.has_level) {
+        std::string name, variable;
+        switch (v.level) {
+            case IsolationLevel::ReadUncommitted: name = "READ UNCOMMITTED"; variable = "READ-UNCOMMITTED"; break;
+            case IsolationLevel::ReadCommitted: name = "READ COMMITTED"; variable = "READ-COMMITTED"; break;
+            case IsolationLevel::RepeatableRead: name = "REPEATABLE READ"; variable = "REPEATABLE-READ"; break;
+            case IsolationLevel::Serializable: name = "SERIALIZABLE"; variable = "SERIALIZABLE"; break;
+        }
+        if (v.next_only) {
+            next_isolation_ = v.level;
+        } else {
+            session_isolation_ = v.level;
+            if (!txn.is_active()) txn.set_isolation_level(v.level);
+            user_vars["@transaction_isolation"] = user_vars["@tx_isolation"] = variable;
+        }
+        message = "Isolation level set to " + name + ".";
+    }
+    if (v.read_only) {
+        if (v.next_only) next_read_only_ = *v.read_only;
+        else user_vars["@transaction_read_only"] = user_vars["@tx_read_only"] = *v.read_only ? "1" : "0";
+        if (message.empty()) message = *v.read_only ? "Access mode set to READ ONLY." : "Access mode set to READ WRITE.";
+    }
+    return StringResult::Ok(message);
+}
+
+bool Executor::read_only_now() const {
+    if (txn.is_active()) return txn_read_only_;
+    if (next_read_only_) return *next_read_only_;
+    auto it = user_vars.find("@transaction_read_only");
+    return it != user_vars.end() && it->second == "1";
 }
 
 StringResult Executor::exec_show_isolation_level() const {

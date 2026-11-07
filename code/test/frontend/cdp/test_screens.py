@@ -222,6 +222,29 @@ def server_manager_sessions_metrics_and_mcp_panels(page: Page):
 
 
 @scenario
+def the_table_menu_checks_and_optimizes_a_table(page: Page):
+    page.click('[title="SQL Editor"]')
+    page.wait("document.querySelector('.sidebar-db-header') !== null", 15, "the databases in the sidebar")
+    page.wait("[...document.querySelectorAll('.sidebar-name')].some(e => e.innerText.trim() === 'orders')", 20, "the table orders in the sidebar")
+
+    def open_table_menu():
+        page.eval("""(() => { const e = [...document.querySelectorAll('.sidebar-name')].find(x => x.innerText.trim() === 'orders').parentElement;
+            const r = e.getBoundingClientRect(); e.dispatchEvent(new MouseEvent('contextmenu', {bubbles: true, cancelable: true, clientX: r.x + 10, clientY: r.y + 5, button: 2})); })()""")
+        page.wait("document.querySelector('.table-ctx-menu') !== null", 10, "the table menu")
+
+    open_table_menu()
+    click_text(page, "Check Table", ".table-ctx-menu *")
+    page.wait("(document.querySelector('.result-panel') || document.body).innerText.includes('Msg_text')", 30, "the answer of CHECK TABLE")
+    text = result_text(page)
+    assert "check" in text and "status" in text and "OK" in text, text[:300]
+    open_table_menu()
+    click_text(page, "Optimize Table", ".table-ctx-menu *")
+    page.wait("(document.querySelector('.result-panel') || document.body).innerText.includes('optimize')", 30, "the answer of OPTIMIZE TABLE")
+    text = result_text(page)
+    assert "recreate + analyze" in text and "OK" in text, text[:300]
+
+
+@scenario
 def compare_schema_names_what_differs(page: Page):
     page.click('[title="SQL Editor"]')
     page.wait("document.querySelector('.sidebar-db-header') !== null", 15, "the databases in the sidebar")

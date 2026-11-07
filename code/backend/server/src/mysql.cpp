@@ -1003,8 +1003,6 @@ std::string show_variables_result(const std::string& up, const Executor& exec) {
         {"sql_mode", ""},
         {"system_time_zone", "UTC"},
         {"time_zone", "SYSTEM"},
-        {"transaction_isolation", "READ-COMMITTED"},
-        {"tx_isolation", "READ-COMMITTED"},
         {"version", "8.4.9"},
         {"version_comment", "RuSQL"},
         {"wait_timeout", "28800"},
@@ -1018,6 +1016,11 @@ std::string show_variables_result(const std::string& up, const Executor& exec) {
     vars.push_back({"long_query_time", live("long_query_time", "10.000000")});
     vars.push_back({"max_connections", live("max_connections", "151")});
     vars.push_back({"slow_query_log", live("slow_query_log", "0") == "1" ? "ON" : "OFF"});
+    // the transaction characteristics are the session's (SET [SESSION] TRANSACTION ...)
+    vars.push_back({"transaction_isolation", live("transaction_isolation", "READ-COMMITTED")});
+    vars.push_back({"tx_isolation", live("transaction_isolation", "READ-COMMITTED")});
+    vars.push_back({"transaction_read_only", live("transaction_read_only", "0")});
+    vars.push_back({"tx_read_only", live("transaction_read_only", "0")});
     std::sort(vars.begin(), vars.end());
     std::optional<std::string> like_pat;
     if (auto idx = up.find(" LIKE "); idx != std::string::npos) {
@@ -1179,6 +1182,7 @@ std::optional<StringResult> mysql_compat(const std::string& q, Executor& exec) {
         // really switches the check off -- and the rest stay the client boilerplate that is answered OK.
         auto done = exec_inner(exec, q);
         if (done.is_ok()) return done;
+        if (done.error().rfind("ERROR ", 0) == 0) return done; // (a refusal with a MySQL error number -- 1231 for a value a variable cannot take, 1568 -- is the answer)
         return StringResult::Ok("");
     }
 
@@ -1311,8 +1315,9 @@ std::optional<StringResult> mysql_compat(const std::string& q, Executor& exec) {
         }
     }
 
-    // ANALYZE | CHECK | OPTIMIZE TABLE t: the engine does the work and the answer has MySQL's shape (Table, Op, Msg_type, Msg_text)
-    for (const char* verb : {"ANALYZE", "CHECK", "OPTIMIZE"}) {
+    // ANALYZE TABLE t: the engine does the work and the answer has MySQL's shape (Table, Op, Msg_type, Msg_text). OPTIMIZE TABLE and CHECK TABLE are the engine's own (R71:
+    // it checks the rows and answers in that shape itself)
+    for (const char* verb : {"ANALYZE"}) {
         const std::string prefix = std::string(verb) + " TABLE ";
         if (up.rfind(prefix, 0) != 0 && up.rfind(std::string(verb) + " LOCAL TABLE ", 0) != 0 && up.rfind(std::string(verb) + " NO_WRITE_TO_BINLOG TABLE ", 0) != 0) continue;
         const std::string tail = trim_copy(q.substr(up.find("TABLE ") + 6));
@@ -1333,12 +1338,7 @@ std::optional<StringResult> mysql_compat(const std::string& q, Executor& exec) {
         if (there.is_err()) {
             return StringResult::Ok(box_table({"Table", "Op", "Msg_type", "Msg_text"}, {{shown, op, "Error", "Table '" + shown + "' doesn't exist"}, {shown, op, "status", "Operation failed"}}));
         }
-        if (std::string(verb) == "ANALYZE") exec_inner(exec, "ANALYZE TABLE " + target);
-        if (std::string(verb) == "OPTIMIZE") {
-            exec_inner(exec, "VACUUM " + target);
-            return StringResult::Ok(box_table({"Table", "Op", "Msg_type", "Msg_text"},
-                                               {{shown, op, "note", "Table does not support optimize, doing recreate + analyze instead"}, {shown, op, "status", "OK"}}));
-        }
+        exec_inner(exec, "ANALYZE TABLE " + target);
         return StringResult::Ok(box_table({"Table", "Op", "Msg_type", "Msg_text"}, {{shown, op, "status", "OK"}}));
     }
 

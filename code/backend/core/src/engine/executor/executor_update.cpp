@@ -10,6 +10,7 @@
 #include "engine/now_text.hpp"
 #include "engine/sql_value_util.hpp"
 #include "engine/statement_deadline.hpp"
+#include "engine/view_rename.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -93,18 +94,96 @@ StringResult Executor::exec_update(SharedDatabase& s, std::string table, std::ve
     std::vector<std::string> row_order; // (set by UPDATE ... ORDER BY: the order the rows are written in)
     row_order.swap(update_row_order_);
     if (s.views.count(table)) {
-        if (auto resolved = resolve_updatable_view(s, table)) {
-            auto merged_cond = merge_conditions(resolved->second, condition);
-            return exec_update(s, resolved->first, assignments, merged_cond, returning, per_row);
+        auto target = resolve_view_target(s, table);
+        if (!target) {
+            if (auto refused = view_write_refusal(s, table, "UPDATE")) return StringResult::Err(*refused);
+            return StringResult::Err("View '" + strip_db_prefix(table) + "' is not updatable");
         }
-        return StringResult::Err("View '" + strip_db_prefix(table) + "' is not updatable");
+        // the view's names for the columns become the table's (a column of an expression is no column to write)
+        std::vector<std::pair<std::string, ArithExpr>> mapped = assignments;
+        const bool plain = view_columns_are_plain(target->columns);
+        for (auto& [column, expr] : mapped) {
+            const auto* entry = view_column_entry(target->columns, column);
+            if (!entry) return StringResult::Err("Unknown column '" + column + "' in 'field list'");
+            if (entry->second.empty()) return StringResult::Err("ERROR 1348 (HY000): Column '" + column + "' is not updatable");
+            column = entry->second;
+            if (!plain) rename_arith_columns(expr, target->columns);
+        }
+        std::optional<CondExpr> asked = condition;
+        if (!plain && asked) rename_cond_columns(*asked, target->columns);
+        auto merged_cond = merge_conditions(target->condition, asked);
+        // WITH CHECK OPTION: a row that would leave the view is refused, before anything is written
+        if (!per_row) {
+            bool any_check = false;
+            for (std::string v = table; s.views.count(v);) {
+                auto it = s.views.find(v);
+                const auto* sel = std::get_if<Statement::Select>(&it->second.data);
+                auto raw = s.view_raw_sql.find(v);
+                if (raw != s.view_raw_sql.end() && raw->second.find("CHECK OPTION") != std::string::npos) any_check = true;
+                if (!sel) break;
+                v = sel->table;
+            }
+            if (any_check) {
+                std::vector<Row> candidates;
+                {
+                    auto data_guard = acquire_table_data_locks(s, {target->table}, /*exclusive=*/false);
+                    const SnapshotCtx ctx = current_read_ctx(s);
+                    if (auto rows = s.tables.find(target->table); rows != s.tables.end()) {
+                        for (const Row& r : rows->second) {
+                            if (is_visible_for_read(r, ctx) && matches_condition_with_subquery(s, r, merged_cond)) candidates.push_back(r);
+                        }
+                    }
+                }
+                for (Row& r : candidates) {
+                    for (auto& [column, expr] : mapped) r[column] = eval_arith(r, expr);
+                    if (auto refused = view_check_violation(s, table, r)) return StringResult::Err(*refused);
+                }
+            }
+        }
+        return exec_update(s, target->table, mapped, merged_cond, returning, per_row);
     }
 
     const bool before_trigger = has_trigger(s, table, "BEFORE", "UPDATE"), after_trigger = has_trigger(s, table, "AFTER", "UPDATE");
     std::vector<TriggerRow> trigger_rows;
     if (before_trigger || after_trigger) trigger_rows = trigger_rows_for(s, table, condition, &assignments, per_row);
+    // A BEFORE trigger may change NEW (`SET NEW.x = ...`): the rows are then written with the values it made of them, found by their primary key
+    PerRowValues triggered;
     if (before_trigger) {
+        std::vector<Row> as_the_statement_makes_them;
+        for (auto& tr : trigger_rows) as_the_statement_makes_them.push_back(tr.new_row ? *tr.new_row : Row{});
         if (auto tr = fire_triggers(s, table, "BEFORE", "UPDATE", trigger_rows); tr.is_err()) return tr;
+        bool changed = false;
+        for (std::size_t i = 0; i < trigger_rows.size(); i++) {
+            if (trigger_rows[i].new_row && *trigger_rows[i].new_row != as_the_statement_makes_them[i]) changed = true;
+        }
+        if (changed) {
+            std::vector<std::string> key_columns;
+            if (const TableSchema* schema = s.catalog.get_table(table)) {
+                for (auto& c : schema->columns) {
+                    if (c.primary_key) key_columns.push_back(c.name);
+                }
+            }
+            if (key_columns.empty()) return StringResult::Err("A BEFORE UPDATE trigger of '" + strip_db_prefix(table) + "' sets NEW.x, which needs the table to have a primary key to find its rows by");
+            for (auto& tr : trigger_rows) {
+                if (!tr.new_row || !tr.old_row) continue;
+                std::string key;
+                for (std::size_t i = 0; i < key_columns.size(); i++) {
+                    auto value = tr.old_row->find(key_columns[i]);
+                    if (i) key += '\0';
+                    if (value != tr.old_row->end()) key += value->second;
+                }
+                auto& values = triggered[key];
+                if (per_row) {
+                    if (auto given = per_row->find(key); given != per_row->end()) values = given->second;
+                }
+                for (auto& [column, value] : *tr.new_row) {
+                    if (column.empty() || column[0] == '_') continue;
+                    auto before = tr.old_row->find(column);
+                    if (before == tr.old_row->end() || before->second != value) values[column] = value;
+                }
+            }
+            per_row = &triggered;
+        }
     }
     auto result = exec_update_inner(s, table, assignments, condition, returning, per_row, row_order.empty() ? nullptr : &row_order);
     if (result.is_ok() && after_trigger) {
@@ -145,7 +224,7 @@ StringResult Executor::exec_update_inner(SharedDatabase& s, const std::string& t
     // ... and the child rows that reference a column it changes (ON UPDATE RESTRICT, CASCADE, SET NULL), and theirs: what a key becomes is asked of the whole chain before a row is written
     const std::vector<std::string> referenced_here = referenced_columns(s, table);
     const bool changes_a_referenced_column =
-        std::any_of(assigned_cols.begin(), assigned_cols.end(), [&](const std::string& c) { return std::find(referenced_here.begin(), referenced_here.end(), c) != referenced_here.end(); });
+        !skip_fk_checks && std::any_of(assigned_cols.begin(), assigned_cols.end(), [&](const std::string& c) { return std::find(referenced_here.begin(), referenced_here.end(), c) != referenced_here.end(); });
     // A cascade goes further than the children only where a column of a child that follows the key is referenced by something else: only then is the early look at the whole
     // chain below needed (the children alone are looked at by update_restrict_violation, for every row, before it is written).
     bool chain_possible = false;
@@ -571,7 +650,9 @@ StringResult Executor::exec_update_inner(SharedDatabase& s, const std::string& t
 
                     if (auto* schema = s.catalog.get_table(table)) {
                         if (auto violation = rewritten_row_violation(s, *schema, new_row, assigned_cols, &row)) return StringResult::Err(*violation);
-                        if (auto violation = update_restrict_violation(s, table, row, new_row, assigned_cols)) return StringResult::Err(*violation);
+                        if (!skip_fk_checks) {
+                            if (auto violation = update_restrict_violation(s, table, row, new_row, assigned_cols)) return StringResult::Err(*violation);
+                        }
                         for (auto& col : schema->columns) {
                             if (col.check_expr && !eval_check_expr(*col.check_expr, new_row)) {
                                 return StringResult::Err("CHECK constraint violated on column '" + col.name + "': " + *col.check_expr);

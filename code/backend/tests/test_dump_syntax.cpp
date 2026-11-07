@@ -152,7 +152,10 @@ TEST_CASE("FOREIGN_KEY_CHECKS = 0 lets tables refer to each other in any order, 
     Executor ex(dir.path);
     ok(ex, "CREATE DATABASE d");
     ok(ex, "USE d");
-    ok(ex, "CREATE TABLE kid (id INT PRIMARY KEY, pid INT, FOREIGN KEY (pid) REFERENCES par (id))"); // (the parent comes later)
+    REQUIRE(error_of(ex, "CREATE TABLE kid (id INT PRIMARY KEY, pid INT, FOREIGN KEY (pid) REFERENCES par (id))").find("ERROR 1824") != std::string::npos); // (the parent comes later: MySQL 1824)
+    ok(ex, "SET FOREIGN_KEY_CHECKS = 0");
+    ok(ex, "CREATE TABLE kid (id INT PRIMARY KEY, pid INT, FOREIGN KEY (pid) REFERENCES par (id))"); // ... a dump makes it with the check off
+    ok(ex, "SET FOREIGN_KEY_CHECKS = 1");
     REQUIRE(error_of(ex, "INSERT INTO kid VALUES (1, 10)").size() > 0);                              // the check is on: there is no parent
     ok(ex, "SET FOREIGN_KEY_CHECKS = 0");
     ok(ex, "INSERT INTO kid VALUES (1, 10), (2, 11)");                                                // ... and so do its rows

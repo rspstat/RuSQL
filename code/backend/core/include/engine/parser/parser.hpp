@@ -272,6 +272,8 @@ private:
     std::vector<Statement> parse_proc_body();
     std::vector<Statement> parse_proc_stmts_until_end();
     Statement parse_proc_stmt();
+    /// one statement of a body into `out`: `SET a = 1, b = 2` is one statement per assignment
+    void parse_proc_stmt_into(std::vector<Statement>& out);
     std::optional<std::string> try_parse_label();
     std::optional<std::string> try_expect_ident();
     Statement parse_proc_declare();

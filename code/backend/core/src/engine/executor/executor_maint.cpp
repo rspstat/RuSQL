@@ -273,4 +273,164 @@ StringResult Executor::exec_analyze_table(SharedDatabase& s, const std::string& 
     return StringResult::Ok(out);
 }
 
+// OPTIMIZE TABLE t [, t2 ...] and CHECK TABLE t [, t2 ...] [option] (the text of the statement): MySQL's answer, a row (Table, Op, Msg_type, Msg_text) for each message.
+// OPTIMIZE makes the table what MySQL's "recreate + analyze" does for InnoDB: the dead row versions go (VACUUM) and the statistics are taken again (ANALYZE TABLE).
+// CHECK reads every row: a NOT NULL column that holds NULL, a primary key or a UNIQUE key that two rows share, a foreign key whose value has no parent row.
+StringResult Executor::exec_table_maintenance(const std::string& sql, const std::string& op) {
+    std::string upper = sql;
+    for (char& c : upper) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+    const auto keyword = upper.find("TABLE");
+    if (keyword == std::string::npos) {
+        return StringResult::Err("ERROR 1064 (42000): You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the right syntax to use near '" + sql + "'");
+    }
+    // the table names: the first word of each comma-separated part (what follows the last one is an option such as QUICK or FOR UPGRADE)
+    std::vector<std::string> names;
+    {
+        const std::string rest = sql.substr(keyword + 5);
+        std::size_t start = 0;
+        while (start <= rest.size()) {
+            const auto comma = rest.find(',', start);
+            std::string part = rest.substr(start, comma == std::string::npos ? std::string::npos : comma - start);
+            const auto first = part.find_first_not_of(" \t\r\n");
+            if (first != std::string::npos) {
+                part = part.substr(first);
+                part = part.substr(0, part.find_first_of(" \t\r\n;"));
+                part.erase(std::remove(part.begin(), part.end(), '`'), part.end());
+                if (!part.empty()) names.push_back(part);
+            }
+            if (comma == std::string::npos) break;
+            start = comma + 1;
+        }
+    }
+    if (names.empty()) {
+        return StringResult::Err("ERROR 1064 (42000): You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the right syntax to use near ''");
+    }
+
+    std::vector<Row> rows;
+    auto say = [&](const std::string& table, const char* type, const std::string& text) {
+        Row r;
+        r["Table"] = table;
+        r["Op"] = op;
+        r["Msg_type"] = type;
+        r["Msg_text"] = text;
+        rows.push_back(std::move(r));
+    };
+    for (const std::string& written : names) {
+        Statement named = Statement(Statement::Describe{written});
+        resolve_names(named);
+        const std::string table = qualify_name(std::get<Statement::Describe>(named.data).table);
+        std::vector<std::string> lock_set;
+        bool is_view = false, exists = false;
+        {
+            auto s = shared->read();
+            is_view = s->views.count(table) > 0;
+            if (const TableSchema* schema = s->catalog.get_table(table); schema && s->tables.count(table)) {
+                exists = true;
+                lock_set.push_back(table);
+                for (const std::string& parent : fk_parent_tables(*s, *schema, {})) {
+                    if (s->tables.count(parent)) lock_set.push_back(parent);
+                }
+            }
+        }
+        if (is_view) {
+            say(table, "Error", "'" + table + "' is not BASE TABLE");
+            say(table, "status", "Operation failed");
+            continue;
+        }
+        if (!exists) {
+            say(table, "Error", "Table '" + table + "' doesn't exist");
+            say(table, "status", "Operation failed");
+            continue;
+        }
+        if (op == "optimize") {
+            auto done = execute(Statement(Statement::Vacuum{table}));
+            if (done.is_ok()) done = execute(Statement(Statement::AnalyzeTable{table}));
+            if (done.is_err()) {
+                say(table, "Error", done.error());
+                say(table, "status", "Operation failed");
+                continue;
+            }
+            say(table, "note", "Table does not support optimize, doing recreate + analyze instead");
+            say(table, "status", "OK");
+            continue;
+        }
+        // CHECK TABLE
+        std::sort(lock_set.begin(), lock_set.end());
+        lock_set.erase(std::unique(lock_set.begin(), lock_set.end()), lock_set.end());
+        std::vector<std::string> problems;
+        {
+            auto guard = acquire_table_locks(shared->read(), lock_set, /*exclusive=*/false);
+            SharedDatabase& s = const_cast<SharedDatabase&>(*guard.structural);
+            auto data = acquire_table_data_locks(s, lock_set, /*exclusive=*/false);
+            const TableSchema* schema = s.catalog.get_table(table);
+            auto rows_it = s.tables.find(table);
+            if (schema && rows_it != s.tables.end()) {
+                const SnapshotCtx now{txn.current_txn_id(), s.txn_io->peek_next_id(), *s.active_txn_ids->lock()};
+                std::vector<const Row*> live;
+                for (const Row& r : rows_it->second) {
+                    if (is_visible_for_read(r, now)) live.push_back(&r);
+                }
+                auto value_of = [](const Row& r, const std::string& column) {
+                    auto it = r.find(column);
+                    return it == r.end() ? std::string(EXECUTOR_NULL_VALUE) : it->second;
+                };
+                auto note = [&](std::string text) {
+                    if (problems.size() < 20) problems.push_back(std::move(text));
+                };
+                // NOT NULL
+                for (const ColumnDef& col : schema->columns) {
+                    if (!col.not_null && !col.primary_key) continue;
+                    for (const Row* r : live) {
+                        if (value_of(*r, col.name) == EXECUTOR_NULL_VALUE) {
+                            note("Column '" + col.name + "' is NOT NULL but a row holds NULL");
+                            break;
+                        }
+                    }
+                }
+                // keys that no two rows may share: the primary key, a UNIQUE column, a UNIQUE key over several columns (a NULL is no value to share)
+                auto shared_key = [&](const std::vector<std::string>& columns, const std::string& key_name) {
+                    std::unordered_set<std::string> seen;
+                    for (const Row* r : live) {
+                        std::string key;
+                        bool has_null = false;
+                        for (std::size_t i = 0; i < columns.size(); i++) {
+                            const std::string v = value_of(*r, columns[i]);
+                            if (v == EXECUTOR_NULL_VALUE) has_null = true;
+                            if (i) key += '-';
+                            key += v;
+                        }
+                        if (has_null) continue;
+                        if (!seen.insert(key).second) {
+                            note("Duplicate entry '" + key + "' for key '" + key_name + "'");
+                            break;
+                        }
+                    }
+                };
+                const std::vector<std::string> identity = schema->identity_columns();
+                if (!identity.empty()) shared_key(identity, "PRIMARY");
+                for (const ColumnDef& col : schema->columns) {
+                    if (col.unique && !col.primary_key) shared_key({col.name}, col.unique_constraint_name.value_or(col.name));
+                }
+                for (const UniqueKey& key : schema->unique_keys) shared_key(key.columns, key.name.value_or(key.columns.empty() ? std::string() : key.columns.front()));
+                // foreign keys: every value has a parent row
+                for (const ColumnDef& col : schema->columns) {
+                    for (const ForeignKey& fk : col.foreign_keys) {
+                        for (const Row* r : live) {
+                            const std::string v = value_of(*r, col.name);
+                            if (v == EXECUTOR_NULL_VALUE) continue;
+                            if (fk_child_violation(s, fk, v)) {
+                                note("Foreign key '" + col.name + "' holds " + v + ", which " + display_name(fk.ref_table) + "(" + fk.ref_column + ") does not have");
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        for (const std::string& problem : problems) say(table, "error", problem);
+        say(table, "status", problems.empty() ? "OK" : "Corrupt");
+    }
+    return StringResult::Ok(format_set_result({"Table", "Op", "Msg_type", "Msg_text"}, rows));
+}
+
 } // namespace engine

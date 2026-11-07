@@ -618,9 +618,9 @@ enum class TriggerEvent { Insert, Update, Delete };
 // Statement — the root AST node (80 variants in the Rust original).
 // ---------------------------------------------------------------------------
 struct Statement {
-    struct Begin {};
-    struct Commit {};
-    struct Rollback {};
+    struct Begin { std::optional<bool> read_only; };      // START TRANSACTION READ ONLY / READ WRITE (none: what the session says)
+    struct Commit { bool chain = false; };                // COMMIT AND CHAIN: a new transaction begins with the same characteristics
+    struct Rollback { bool chain = false; };
     struct CreateTable {
         std::string name;
         std::vector<ColumnDef> columns;
@@ -703,14 +703,15 @@ struct Statement {
         bool using_hash = false;
     };
     struct DropIndex { std::string index_name; std::optional<std::string> table; }; // DROP INDEX name [ON table]
-    struct CreateView { std::string name; StatementPtr query; std::string raw_sql; };
+    struct CreateView { std::string name; StatementPtr query; std::string raw_sql; }; // raw_sql ends with WITH CASCADED | LOCAL CHECK OPTION where the view has one
     struct DropView { std::string name; };
     struct ShowTables { std::optional<std::string> database; std::optional<std::string> like; }; // SHOW TABLES [FROM db] [LIKE 'pattern']
     struct Describe { std::string table; };
     struct ShowBufferPool {};
     struct ShowWal {};
     struct Checkpoint {};
-    struct SetIsolationLevel { IsolationLevel level; };
+    // SET [SESSION] TRANSACTION ISOLATION LEVEL x [, READ ONLY | READ WRITE]; without SESSION it is for the next transaction only
+    struct SetIsolationLevel { IsolationLevel level; bool next_only = false; bool has_level = true; std::optional<bool> read_only; };
     struct ShowIsolationLevel {};
     struct Vacuum { std::optional<std::string> table; };
     struct ShowLocks {};

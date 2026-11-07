@@ -96,8 +96,8 @@ StringResult Executor::fire_triggers(SharedDatabase& s, const std::string& table
                     // SET NEW.x = expr: the value of the row that is inserted
                     std::string prefix = set->name.substr(0, 3);
                     for (char& c : prefix) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
-                    if (prefix != "NEW" || timing != "BEFORE" || event != "INSERT" || !row.new_row) {
-                        return StringResult::Err("Trigger '" + name + "': SET " + prefix + ".x is supported in BEFORE INSERT triggers only");
+                    if (prefix != "NEW" || timing != "BEFORE" || (event != "INSERT" && event != "UPDATE") || !row.new_row) {
+                        return StringResult::Err("Trigger '" + name + "': SET " + prefix + ".x is supported in BEFORE INSERT and BEFORE UPDATE triggers only");
                     }
                     ArithExpr expr = set->expr;
                     substitute_variables(expr, &vars);
@@ -117,16 +117,15 @@ StringResult Executor::fire_triggers(SharedDatabase& s, const std::string& table
                 resolve_names(s, stmt);
                 substitute_variables(stmt, &vars);
                 auto result = execute_with_s(s, std::move(stmt));
-                if (result.is_err()) {
-                    return StringResult::Err("Trigger '" + name + "' failed" + (timing == "AFTER" ? " after the change was made" : "") + ": " + result.error());
-                }
-                // SET NEW.x inside an IF or a loop of the body: the row that is inserted takes the value, in a BEFORE INSERT trigger only (as at the top of the body)
+                // (MySQL reports the error of the statement of the body as it is: the duplicate key, the missing parent row; the statement that fired the trigger is taken back by execute())
+                if (result.is_err()) return result;
+                // SET NEW.x inside an IF or a loop of the body: the row that is written takes the value, in a BEFORE INSERT / UPDATE trigger only (as at the top of the body)
                 for (auto& [key, value] : vars) {
                     if (key.compare(0, 4, "NEW.") != 0) continue;
                     auto now = proc_vars.find(key);
                     if (now == proc_vars.end() || now->second == value) continue;
-                    if (timing != "BEFORE" || event != "INSERT" || !row.new_row) {
-                        return StringResult::Err("Trigger '" + name + "': SET NEW.x is supported in BEFORE INSERT triggers only");
+                    if (timing != "BEFORE" || (event != "INSERT" && event != "UPDATE") || !row.new_row) {
+                        return StringResult::Err("Trigger '" + name + "': SET NEW.x is supported in BEFORE INSERT and BEFORE UPDATE triggers only");
                     }
                     for (auto& [stored, current] : *row.new_row) {
                         if (to_lower_str(stored) == key.substr(4)) {

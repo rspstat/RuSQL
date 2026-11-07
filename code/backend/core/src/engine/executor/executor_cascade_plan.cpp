@@ -281,6 +281,7 @@ std::optional<std::string> Executor::plan_cascade_delete(SharedDatabase& s, cons
     auto rows_it = s.tables.find(table);
     plan.tables[table].doomed = targets; // (every row that goes holds claims on what refers to it: replaced below by the rows the simulation really takes)
     if (!schema || rows_it == s.tables.end()) return std::nullopt;
+    if (skip_fk_checks) return std::nullopt; // (FOREIGN_KEY_CHECKS = 0: no RESTRICT, no cascade -- the rows that refer to a parent are left as they are, as MySQL does)
     CascadeSim sim(*this, s, plan);
     const auto& root_edges = sim.edges_of(table);
     if (root_edges.empty()) return std::nullopt;
@@ -429,6 +430,7 @@ std::optional<std::string> Executor::plan_cascade_delete(SharedDatabase& s, cons
 std::optional<std::string> Executor::plan_cascade_update(SharedDatabase& s, const std::string& table, const std::vector<std::pair<const Row*, const Row*>>& rows,
                                                           const std::vector<std::string>& changed_cols, CascadePlan& plan) {
     plan = CascadePlan{};
+    if (skip_fk_checks) return std::nullopt; // (FOREIGN_KEY_CHECKS = 0: the rows that refer to a changed key are left as they are)
     CascadeSim sim(*this, s, plan);
     const auto& root_edges = sim.edges_of(table);
     if (root_edges.empty()) return std::nullopt;

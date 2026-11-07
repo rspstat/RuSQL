@@ -992,6 +992,7 @@ std::string fn_makedate(const BuiltinCall& c) {
 
 std::string seconds_to_time(long long s) {
     char b[48];
+    s = std::clamp<long long>(s, -3020399, 3020399); // (a TIME value goes no further than 838:59:59)
     const long long a = s < 0 ? -s : s;
     std::snprintf(b, sizeof b, "%s%02lld:%02lld:%02lld", s < 0 ? "-" : "", a / 3600, a / 60 % 60, a % 60);
     return b;
@@ -1029,6 +1030,12 @@ long long round_to_places(long long micro, int places) {
 // "[-]HH:MM:SS[.ffffff]" for signed millionths of a second, with exactly `places` places of the fraction (rounded)
 std::string micro_to_time(long long micro, int places) {
     micro = round_to_places(micro, places);
+    {   // (a TIME value goes no further than 838:59:59.999999, with the places it is shown with)
+        long long unit = 1;
+        for (int k = places; k < 6; k++) unit *= 10;
+        const long long top = 3020399LL * 1000000 + (1000000 - unit);
+        micro = std::clamp(micro, -top, top);
+    }
     const bool negative = micro < 0;
     const long long a = negative ? -micro : micro;
     const long long seconds = a / 1000000, fraction = a % 1000000;
@@ -1567,7 +1574,7 @@ std::string fn_str_to_date(const BuiltinCall& c) {
     if (argc(c) != 2) wrong_count(c);
     if (any_null(c)) return kNull;
     const std::string s = c.value(0), fmt = c.value(1);
-    long long year = -1, month = -1, day = -1, hour = 0, minute = 0, second = 0, micro = 0;
+    long long year = -1, month = -1, day = -1, hour = 0, minute = 0, second = 0, micro = 0, day_of_year = -1;
     int pm = -1;
     bool has_time = false;
     std::size_t p = 0;
@@ -1592,6 +1599,7 @@ std::string fn_str_to_date(const BuiltinCall& c) {
             case 'y': if (!number(2, year)) return kNull; year += year < 70 ? 2000 : 1900; break;
             case 'm': case 'c': if (!number(2, month)) return kNull; break;
             case 'd': case 'e': if (!number(2, day)) return kNull; break;
+            case 'j': if (!number(3, day_of_year)) return kNull; break;
             case 'H': case 'k': if (!number(2, hour)) return kNull; has_time = true; break;
             case 'h': case 'I': case 'l': if (!number(2, hour)) return kNull; has_time = true; break;
             case 'i': if (!number(2, minute)) return kNull; has_time = true; break;
@@ -1627,6 +1635,14 @@ std::string fn_str_to_date(const BuiltinCall& c) {
         }
     }
     if (pm >= 0) hour = hour % 12 + (pm ? 12 : 0);
+    if (day_of_year >= 0 && year >= 0 && month < 0 && day < 0) { // %j: the day of the year says the month and the day
+        if (day_of_year < 1 || day_of_year > (is_leap(year) ? 366 : 365)) return kNull;
+        long long y2;
+        int m2, d2;
+        civil_from_days(days_from_civil(year, 1, 1) + day_of_year - 1, y2, m2, d2);
+        month = m2;
+        day = d2;
+    }
     if (year < 0 && month < 0 && day < 0) { // a time only
         if (!has_time) return kNull;
         return seconds_to_time(hour * 3600 + minute * 60 + second);
@@ -1639,6 +1655,35 @@ std::string fn_str_to_date(const BuiltinCall& c) {
     return has_time ? t.datetime_str() : t.date_str();
 }
 
+
+// CONVERT_TZ(datetime, from, to): the zones known without MySQL's time zone tables, '+hh:mm' / '-hh:mm' and 'UTC'; a named zone ('Asia/Seoul') is NULL, as on a MySQL
+// that has not loaded the tables
+std::optional<long long> zone_offset_seconds(std::string zone) {
+    for (char& ch : zone) ch = static_cast<char>(std::toupper(static_cast<unsigned char>(ch)));
+    if (zone == "UTC" || zone == "+00:00" || zone == "-00:00") return 0;
+    if (zone.size() < 5 || (zone[0] != '+' && zone[0] != '-')) return std::nullopt;
+    const std::size_t colon = zone.find(':');
+    if (colon == std::string::npos || colon < 2 || colon + 3 != zone.size()) return std::nullopt;
+    for (std::size_t k = 1; k < zone.size(); k++) {
+        if (k != colon && !std::isdigit(static_cast<unsigned char>(zone[k]))) return std::nullopt;
+    }
+    const long long hours = std::atoll(zone.substr(1, colon - 1).c_str()), minutes = std::atoll(zone.substr(colon + 1).c_str());
+    if (minutes > 59 || hours > 14 || (hours == 14 && minutes > 0) || (zone[0] == '-' && hours > 13)) return std::nullopt;
+    const long long seconds = hours * 3600 + minutes * 60;
+    return zone[0] == '-' ? -seconds : seconds;
+}
+
+std::string fn_convert_tz(const BuiltinCall& c) {
+    if (argc(c) != 3) wrong_count(c);
+    if (any_null(c)) return kNull;
+    auto t = parse_datetime(c.value(0));
+    if (!t || !t->has_date || !t->valid_date()) return kNull;
+    auto from = zone_offset_seconds(c.value(1)), to = zone_offset_seconds(c.value(2));
+    if (!from || !to) return kNull;
+    const DateTime moved = DateTime::from_epoch_seconds(t->epoch_seconds() - *from + *to, t->micro);
+    if (moved.year < 0 || moved.year > 9999) return kNull;
+    return moved.datetime_str();
+}
 
 // ---- CAST / CONVERT ---------------------------------------------------------------------------------------------------------------------------
 
@@ -2438,7 +2483,7 @@ const std::unordered_map<std::string, Handler>& table() {
         {"DATE_ADD", fn_date_add}, {"DATE_SUB", fn_date_sub}, {"ADDDATE", fn_adddate}, {"SUBDATE", fn_subdate},
         {"TIMESTAMPADD", fn_timestampadd}, {"TIMESTAMPDIFF", fn_timestampdiff}, {"EXTRACT", fn_extract},
         {"GET_FORMAT", fn_get_format}, {"MAKETIME", fn_maketime}, {"MICROSECOND", fn_microsecond}, {"TIMESTAMP", fn_timestamp},
-        {"DATE_FORMAT", fn_date_format}, {"STR_TO_DATE", fn_str_to_date}, {"CAST", fn_cast}, {"CONVERT", fn_cast},
+        {"DATE_FORMAT", fn_date_format}, {"STR_TO_DATE", fn_str_to_date}, {"CONVERT_TZ", fn_convert_tz}, {"CAST", fn_cast}, {"CONVERT", fn_cast},
         {"OP_BIT_AND", fn_bit_and}, {"OP_BIT_OR", fn_bit_or}, {"OP_BIT_XOR", fn_bit_xor}, {"OP_BIT_NOT", fn_bit_not}, {"OP_SHL", fn_shl}, {"OP_SHR", fn_shr},
         {"OP_NULL_SAFE_EQ", fn_null_safe_eq}, {"OP_XOR", fn_xor}, {"OP_DIV", fn_int_div}, {"ANY_VALUE", fn_any_value},
         {"SHA1", fn_sha1}, {"SHA", fn_sha1}, {"SHA2", fn_sha2}, {"CRC32", fn_crc32}, {"SOUNDEX", fn_soundex},

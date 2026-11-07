@@ -87,6 +87,9 @@ export function TableContextMenu({ menu, onClose, openEditTableModal, runCtxQuer
         <div onClick={() => runCtxQuery(`DESCRIBE ${menu.table};`)}>Describe Table</div>
         <div onClick={() => runCtxQuery(`SHOW CREATE TABLE ${menu.table};`)}>Show Create Table</div>
         <div className="ctx-divider" />
+        <div onClick={() => runCtxQuery(`CHECK TABLE ${menu.table};`)}>Check Table</div>
+        <div onClick={() => runCtxQuery(`OPTIMIZE TABLE ${menu.table};`)}>Optimize Table</div>
+        <div className="ctx-divider" />
         <div onClick={() => handleCopyTableName(menu.table)}>Copy Table Name</div>
         <div onClick={() => {
           navigator.clipboard.writeText(`INSERT INTO ${menu.table} VALUES ();`);

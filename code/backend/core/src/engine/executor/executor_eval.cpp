@@ -722,6 +722,7 @@ Executor::Tri Executor::eval_single3(const Row& row, const Condition& cond) {
     const std::string* effective_lit = nullptr;
     ValueClass right_class = cond.right_class;
     bool right_sure = false; // (see `compare`)
+    bool right_is_column = false; // (the value on the right is a column of the row, named without a qualifier or quotes)
     View right_view;
     bool right_viewed = false, right_single = false;
 
@@ -750,6 +751,7 @@ Executor::Tri Executor::eval_single3(const Row& row, const Condition& cond) {
             if (const std::string* v = get_col(row, lit)) {
                 resolved = *v;
                 effective_lit = &resolved;
+                right_is_column = true;
             }
         }
         if (right_class == ValueClass::Unknown) right_class = written_class(lit, lit_v->quoted);
@@ -764,6 +766,30 @@ Executor::Tri Executor::eval_single3(const Row& row, const Condition& cond) {
 
     if (left_viewed && right_class == ValueClass::Number) val = view_number(left_view, val);
     else if (right_viewed && left_class == ValueClass::Number) resolved = view_number(right_view, resolved);
+    // A date (or datetime) meets a date written as a string, or a datetime (or date): they compare as the dates they are -- '2024-1-31' is 2024-01-31, and a DATE is a
+    // DATETIME at 00:00:00 -- not as the text each was written with.
+    {
+        auto temporal = [](const View& v) { return v.kind == ColKind::Date || v.kind == ColKind::DateTime; };
+        auto full = [](const std::string& text, bool with_time) -> std::optional<std::string> {
+            auto parsed = sqlval::parse_datetime(text);
+            if (!parsed || !parsed->valid_date()) return std::nullopt;
+            return with_time ? parsed->datetime_str() : parsed->date_str();
+        };
+        const bool ordering = cond.op == Operator::Eq || cond.op == Operator::Ne || cond.op == Operator::Gt || cond.op == Operator::Lt || cond.op == Operator::Gte || cond.op == Operator::Lte;
+        if (ordering && temporal(left_view) && left_class == ValueClass::Text) {
+            const bool right_is_string = right_viewed ? temporal(right_view) : (right_sure || right_is_column);
+            if (right_is_string) {
+                auto right_parsed = sqlval::parse_datetime(*effective_lit);
+                const bool with_time = left_view.kind == ColKind::DateTime || (right_viewed ? right_view.kind == ColKind::DateTime : right_parsed && right_parsed->has_time);
+                auto left_full = full(val, with_time), right_full = full(*effective_lit, with_time);
+                if (left_full && right_full) {
+                    val = *left_full;
+                    resolved = *right_full;
+                    effective_lit = &resolved;
+                }
+            }
+        }
+    }
     if (left_single && !left_viewed) val = widen_single(val);
     if (right_single && !right_viewed) resolved = widen_single(resolved);
 

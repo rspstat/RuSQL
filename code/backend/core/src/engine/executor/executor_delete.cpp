@@ -15,6 +15,7 @@
 #include "engine/executor/executor.hpp"
 #include "engine/sql_value_util.hpp"
 #include "engine/statement_deadline.hpp"
+#include "engine/view_rename.hpp"
 #include "engine/subquery_walk.hpp"
 
 #include <algorithm>
@@ -89,11 +90,15 @@ StringResult Executor::exec_delete(SharedDatabase& s, const std::string& table, 
     std::vector<std::string> row_order; // (set by DELETE ... ORDER BY: the order the rows are read in)
     row_order.swap(delete_row_order_);
     if (s.views.count(table)) {
-        if (auto resolved = resolve_updatable_view(s, table)) {
-            auto merged_cond = merge_conditions(resolved->second, condition);
-            return exec_delete(s, resolved->first, merged_cond, returning);
+        auto target = resolve_view_target(s, table);
+        if (!target) {
+            if (auto refused = view_write_refusal(s, table, "DELETE")) return StringResult::Err(*refused);
+            return StringResult::Err("View '" + strip_db_prefix(table) + "' is not updatable");
         }
-        return StringResult::Err("View '" + strip_db_prefix(table) + "' is not updatable");
+        std::optional<CondExpr> asked = condition; // (the condition names the columns of the view)
+        if (asked && !view_columns_are_plain(target->columns)) rename_cond_columns(*asked, target->columns);
+        auto merged_cond = merge_conditions(target->condition, asked);
+        return exec_delete(s, target->table, merged_cond, returning);
     }
 
     const bool before_trigger = has_trigger(s, table, "BEFORE", "DELETE"), after_trigger = has_trigger(s, table, "AFTER", "DELETE");

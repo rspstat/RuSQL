@@ -23,6 +23,7 @@
 #include "engine/now_text.hpp"
 #include "engine/parser/parser.hpp"
 #include "engine/sql_value_util.hpp"
+#include "engine/view_rename.hpp"
 #include "engine/statement_deadline.hpp"
 
 namespace engine {
@@ -182,15 +183,103 @@ void Executor::maybe_auto_analyze(SharedDatabase& s, const std::string& table) {
     (void)exec_analyze_table(s, table);
 }
 
-std::optional<std::pair<std::string, std::optional<CondExpr>>> Executor::resolve_updatable_view(const SharedDatabase& s,
-                                                                                                   const std::string& name) {
+std::optional<Executor::ViewTarget> Executor::resolve_view_target(const SharedDatabase& s, const std::string& name) {
     auto it = s.views.find(name);
     if (it == s.views.end()) return std::nullopt;
-    if (auto* sel = std::get_if<Statement::Select>(&it->second.data)) {
-        bool group_by_empty = !sel->group_by || sel->group_by->empty();
-        if (sel->joins.empty() && !sel->distinct && group_by_empty && !sel->subquery) {
-            return std::make_pair(sel->table, sel->condition);
+    const auto* sel = std::get_if<Statement::Select>(&it->second.data);
+    if (!sel) return std::nullopt;
+    // a join, DISTINCT, GROUP BY, a derived table, HAVING, LIMIT: no row of the view is one row of a table
+    const bool group_by_empty = !sel->group_by || sel->group_by->empty();
+    if (!sel->joins.empty() || sel->distinct || !group_by_empty || sel->subquery || sel->having || sel->limit || sel->offset) return std::nullopt;
+    ViewTarget target;
+    target.table = sel->table;
+    target.condition = sel->condition;
+    ViewColumnMap below; // what the view reads: (its name for a column, the column of the table)
+    if (s.views.count(sel->table)) { // a view over a view: followed down to the table
+        auto inner = resolve_view_target(s, sel->table);
+        if (!inner) return std::nullopt;
+        below = inner->columns;
+        target.table = inner->table;
+        target.condition = merge_conditions(inner->condition, target.condition);
+    } else if (const TableSchema* schema = s.catalog.get_table(sel->table)) {
+        for (auto& c : schema->columns) below.emplace_back(c.name, c.name);
+    } else {
+        return std::nullopt;
+    }
+    auto column_below = [&](const std::string& written) {
+        const auto* entry = view_column_entry(below, written);
+        return entry ? entry->second : std::string();
+    };
+    for (const SelectColumn& c : sel->columns) {
+        if (std::holds_alternative<SelectColumn::All>(c.data)) {
+            for (auto& entry : below) target.columns.push_back(entry);
+        } else if (auto* col = std::get_if<SelectColumn::Column>(&c.data)) {
+            const auto dot = col->name.rfind('.');
+            target.columns.emplace_back(dot == std::string::npos ? col->name : col->name.substr(dot + 1), column_below(col->name));
+        } else if (auto* aliased = std::get_if<SelectColumn::ColumnAlias>(&c.data)) {
+            target.columns.emplace_back(aliased->alias, column_below(aliased->name));
+        } else if (auto* expr = std::get_if<SelectColumn::Expr>(&c.data)) {
+            target.columns.emplace_back(expr->alias.value_or(""), "");
+        } else if (auto* func = std::get_if<SelectColumn::Func>(&c.data)) {
+            target.columns.emplace_back(func->alias.value_or(""), "");
+        } else if (auto* when = std::get_if<SelectColumn::CaseWhen>(&c.data)) {
+            target.columns.emplace_back(when->alias.value_or(""), "");
+        } else {
+            return std::nullopt; // (an aggregate, a window function, a subquery in the select list)
         }
+    }
+    return target;
+}
+
+std::optional<std::pair<std::string, std::optional<CondExpr>>> Executor::resolve_updatable_view(const SharedDatabase& s, const std::string& name) {
+    if (auto target = resolve_view_target(s, name)) return std::make_pair(target->table, target->condition);
+    return std::nullopt;
+}
+
+// The error of a write that a view cannot take. MySQL writes through a view that maps rows of one table; for the rest the error names the statement.
+std::optional<std::string> Executor::view_write_refusal(const SharedDatabase& s, const std::string& view, const char* verb) {
+    auto it = s.views.find(view);
+    if (it == s.views.end()) return std::nullopt;
+    const auto* sel = std::get_if<Statement::Select>(&it->second.data);
+    const std::string bare = view.substr(view.rfind('.') == std::string::npos ? 0 : view.rfind('.') + 1);
+    const std::string db = view.rfind('.') == std::string::npos ? std::string() : view.substr(0, view.rfind('.'));
+    const std::string what = verb;
+    const bool joins = sel && !sel->joins.empty();
+    if (joins && what == "DELETE") return "ERROR 1395 (HY000): Can not delete from join view '" + db + "." + bare + "'";
+    if (joins) return std::nullopt; // (MySQL can write to one table of a join view: not here, the caller's own error says so)
+    if (what == "INSERT") return "ERROR 1471 (HY000): The target table " + bare + " of the INSERT is not insertable-into";
+    return "ERROR 1288 (HY000): The target table " + bare + " of the " + what + " is not updatable";
+}
+
+// WITH [CASCADED | LOCAL] CHECK OPTION: the text the CREATE VIEW kept ends with it
+static std::string view_check_kind(const SharedDatabase& s, const std::string& view) {
+    auto raw = s.view_raw_sql.find(view);
+    if (raw == s.view_raw_sql.end()) return "";
+    std::string text = raw->second;
+    for (char& c : text) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+    for (const char* kind : {"CASCADED", "LOCAL"}) {
+        const std::string tail = std::string(" WITH ") + kind + " CHECK OPTION";
+        if (text.size() >= tail.size() && text.compare(text.size() - tail.size(), tail.size(), tail) == 0) return kind;
+    }
+    return "";
+}
+
+std::optional<std::string> Executor::view_check_violation(SharedDatabase& s, const std::string& view, const Row& row) {
+    bool cascaded_from_above = false;
+    std::string current = view;
+    for (int depth = 0; depth < 16; depth++) {
+        auto it = s.views.find(current);
+        if (it == s.views.end()) break;
+        const auto* sel = std::get_if<Statement::Select>(&it->second.data);
+        if (!sel) break;
+        const std::string kind = view_check_kind(s, current);
+        if ((!kind.empty() || cascaded_from_above) && sel->condition && !matches_condexpr(row, sel->condition)) {
+            const std::string bare = current.substr(current.rfind('.') == std::string::npos ? 0 : current.rfind('.') + 1);
+            const std::string db = current.rfind('.') == std::string::npos ? std::string() : current.substr(0, current.rfind('.'));
+            return "ERROR 1369 (HY000): CHECK OPTION failed '" + db + "." + bare + "'";
+        }
+        cascaded_from_above = kind == "CASCADED" || (kind.empty() && cascaded_from_above);
+        current = sel->table;
     }
     return std::nullopt;
 }
@@ -521,11 +610,48 @@ StringResult Executor::exec_insert(SharedDatabase& s, std::string table, std::op
                                     std::optional<std::vector<SelectColumn>> returning) {
     const bool from_select = std::exchange(insert_from_select_, false);
     if (s.views.count(table)) {
-        if (auto resolved = resolve_updatable_view(s, table)) {
-            insert_from_select_ = from_select;
-            return exec_insert(s, resolved->first, col_list, std::move(all_values), on_conflict, returning);
+        auto target = resolve_view_target(s, table);
+        if (!target) {
+            if (auto refused = view_write_refusal(s, table, "INSERT")) return StringResult::Err(*refused);
+            return StringResult::Err("View '" + strip_db_prefix(table) + "' is not updatable (has JOINs, DISTINCT, GROUP BY, or subquery)");
         }
-        return StringResult::Err("View '" + strip_db_prefix(table) + "' is not updatable (has JOINs, DISTINCT, GROUP BY, or subquery)");
+        // a view with a column of an expression takes no INSERT (MySQL 1471)
+        for (auto& entry : target->columns) {
+            if (entry.second.empty()) return StringResult::Err(*view_write_refusal(s, table, "INSERT"));
+        }
+        // the columns of the view are what a list names, or what a row gives when there is no list; each is a column of the table below
+        std::vector<std::string> below;
+        if (col_list) {
+            for (auto& written : *col_list) {
+                const auto* entry = view_column_entry(target->columns, written);
+                if (!entry) return StringResult::Err("Unknown column '" + written + "' in 'field list'");
+                below.push_back(entry->second);
+            }
+        } else {
+            for (auto& entry : target->columns) below.push_back(entry.second);
+        }
+        // WITH CHECK OPTION: a row the view would not show is refused (the table's defaults fill the columns the INSERT leaves out)
+        const TableSchema* base_schema = s.catalog.get_table(target->table);
+        for (auto& values : all_values) {
+            Row row;
+            if (base_schema) {
+                for (auto& c : base_schema->columns) {
+                    row[c.name] = c.default_value && *c.default_value != NULL_DEFAULT ? *c.default_value : std::string(EXECUTOR_NULL_VALUE);
+                }
+            }
+            for (std::size_t i = 0; i < below.size() && i < values.size(); i++) {
+                if (values[i] != INSERT_DEFAULT) row[below[i]] = values[i];
+            }
+            if (auto refused = view_check_violation(s, table, row)) return StringResult::Err(*refused);
+        }
+        insert_from_select_ = from_select;
+        auto done = exec_insert(s, target->table, below, std::move(all_values), on_conflict, returning);
+        if (done.is_err() && done.error().find("doesn't have a default value") != std::string::npos) {
+            const std::string bare = table.substr(table.rfind('.') == std::string::npos ? 0 : table.rfind('.') + 1);
+            const std::string db = table.rfind('.') == std::string::npos ? std::string() : table.substr(0, table.rfind('.'));
+            return StringResult::Err("ERROR 1423 (HY000): Field of view '" + db + "." + bare + "' underlying table doesn't have a default value");
+        }
+        return done;
     }
 
     const bool replacing = std::holds_alternative<InsertConflict::Replace>(on_conflict.data);

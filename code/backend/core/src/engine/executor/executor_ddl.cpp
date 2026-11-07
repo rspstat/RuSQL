@@ -193,6 +193,43 @@ bool same_name(const std::string& a, const std::string& b) {
     return a.size() == b.size() && std::equal(a.begin(), a.end(), b.begin(), [](unsigned char x, unsigned char y) { return std::tolower(x) == std::tolower(y); });
 }
 
+// The kind of values a column holds, for a foreign key: the integers go together, the texts, and every other type only with its own kind
+int fk_type_class(const DataType& type) {
+    using D = DataType;
+    auto is = [&](auto tag) { return std::holds_alternative<decltype(tag)>(type.data); };
+    if (is(D::Int{}) || is(D::BigInt{}) || is(D::SmallInt{}) || is(D::TinyInt{}) || is(D::Boolean{})) return 1;
+    if (is(D::Text{}) || is(D::Varchar{0})) return 2;
+    if (is(D::Float{}) || is(D::Double{})) return 3;
+    if (is(D::DateTime{}) || is(D::Timestamp{})) return 4;
+    return 10 + static_cast<int>(type.data.index());
+}
+
+// What MySQL refuses in the definition of a foreign key before the table is touched: a column that is set to NULL by the rule and cannot hold it (1830), a parent table that is
+// not there (1824, unless FOREIGN_KEY_CHECKS is 0), a parent column whose type the column cannot follow (3780). `parent_columns` is the column list of the parent when it
+// is the table being created (it is not in the catalog yet).
+std::optional<std::string> fk_definition_error(const SharedDatabase& s, const std::string& table, const std::vector<ColumnDef>* parent_columns, const ColumnDef& column,
+                                               const ForeignKey& fk, bool foreign_key_checks_off) {
+    const std::string bare_table = table.substr(table.rfind('.') == std::string::npos ? 0 : table.rfind('.') + 1);
+    const std::string key_name = fk.name.empty() ? bare_table + "_ibfk_1" : fk.name;
+    if (column.not_null && (fk.on_delete == FkAction::SetNull || fk.on_update == FkAction::SetNull)) {
+        return "ERROR 1830 (HY000): Column '" + column.name + "' cannot be NOT NULL: needed in a foreign key constraint '" + key_name + "' SET NULL";
+    }
+    const std::vector<ColumnDef>* parent = parent_columns;
+    if (!parent) {
+        if (const TableSchema* schema = s.catalog.get_table(fk.ref_table)) parent = &schema->columns;
+    }
+    if (!parent) {
+        if (foreign_key_checks_off) return std::nullopt;
+        const std::string bare_parent = fk.ref_table.substr(fk.ref_table.rfind('.') == std::string::npos ? 0 : fk.ref_table.rfind('.') + 1);
+        return "ERROR 1824 (HY000): Failed to open the referenced table '" + bare_parent + "'";
+    }
+    auto referenced = std::find_if(parent->begin(), parent->end(), [&](const ColumnDef& c) { return same_name(c.name, fk.ref_column); });
+    if (referenced != parent->end() && fk_type_class(referenced->data_type) != fk_type_class(column.data_type)) {
+        return "ERROR 3780 (HY000): Referencing column '" + column.name + "' and referenced column '" + referenced->name + "' in foreign key constraint '" + key_name + "' are incompatible.";
+    }
+    return std::nullopt;
+}
+
 } // namespace
 
 // ALTER TABLE with several actions is all or nothing: the columns the actions name are followed through a copy of the names, so the error of a
@@ -259,6 +296,11 @@ StringResult Executor::exec_create(SharedDatabase& s, std::string name, std::vec
             if (std::none_of(columns.begin(), columns.end(), [&](const ColumnDef& c) { return c.name == key_column; })) {
                 return StringResult::Err("Key column '" + key_column + "' doesn't exist in table");
             }
+        }
+    }
+    for (const ColumnDef& col : columns) { // (what MySQL refuses in a foreign key before anything is made)
+        for (const ForeignKey& fk : col.foreign_keys) {
+            if (auto refused = fk_definition_error(s, name, same_name(fk.ref_table, name) ? &columns : nullptr, col, fk, skip_fk_checks)) return StringResult::Err(*refused);
         }
     }
 
@@ -448,6 +490,22 @@ StringResult Executor::exec_drop(SharedDatabase& s, const std::string& name, boo
 StringResult Executor::exec_truncate(SharedDatabase& s, const std::string& name) {
     auto it = s.tables.find(name);
     if (it == s.tables.end()) return StringResult::Err("Table '" + name + "' not found");
+    // a table that another table's foreign key refers to cannot be emptied this way (MySQL 1701), whether or not that table has rows (FOREIGN_KEY_CHECKS = 0 lets it)
+    if (!skip_fk_checks) {
+        for (auto& [other_name, other_schema] : s.catalog.tables) {
+            if (other_name == name) continue;
+            for (auto& col : other_schema.columns) {
+                for (const ForeignKey& fk : col.foreign_keys) {
+                    if (fk.ref_table != name) continue;
+                    const auto dot = other_name.find('.');
+                    const std::string db = dot == std::string::npos ? current_db : other_name.substr(0, dot);
+                    const std::string bare = dot == std::string::npos ? other_name : other_name.substr(dot + 1);
+                    return StringResult::Err("ERROR 1701 (42000): Cannot truncate a table referenced in a foreign key constraint (`" + db + "`.`" + bare + "`, CONSTRAINT `" +
+                                             (fk.name.empty() ? bare + "_ibfk_1" : fk.name) + "`)");
+                }
+            }
+        }
+    }
     // Table partitioning: the logical table's own `s.tables[name]` is a permanently-empty
     // phantom (see exec_create) -- truncate every real child instead. The clear()/erase()/
     // BPlusTree-reset below still run for `name` itself too (harmless no-ops on an
@@ -1103,6 +1161,7 @@ StringResult Executor::exec_alter(SharedDatabase& s, const std::string& table, A
         } else {
             fk.name = fk_next_name(*schema, bare_table); // (one more than the highest <table>_ibfk_<n>; `col_it` stays valid: only names change)
         }
+        if (auto refused = fk_definition_error(s, table, same_name(fk.ref_table, table) ? &schema->columns : nullptr, *col_it, fk, skip_fk_checks)) return StringResult::Err(*refused);
         // the rows the table holds already must have their parents (MySQL 1452), unless FOREIGN_KEY_CHECKS is 0
         if (!skip_fk_checks) {
             if (auto tit = s.tables.find(table); tit != s.tables.end()) {

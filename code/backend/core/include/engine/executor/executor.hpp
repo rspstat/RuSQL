@@ -294,6 +294,18 @@ public:
     StringResult show_create_table_mysql(const std::string& table);
     StringResult show_create_view_mysql(const std::string& view);
     bool implicit_txn_ = false;              // the transaction that is open was begun by a statement of a session with autocommit = 0
+    // The transaction characteristics of the session (SET [SESSION] TRANSACTION ..., SET transaction_isolation = ..., SET transaction_read_only = ...). A change made while a
+    // transaction is open is for the next one (the engine's level follows session_isolation_ when none is open); SET TRANSACTION (no SESSION) is for the next one only.
+    IsolationLevel session_isolation_ = IsolationLevel::ReadCommitted;
+    std::optional<IsolationLevel> next_isolation_;
+    std::optional<bool> next_read_only_;
+    bool txn_read_only_ = false;             // the open transaction was begun READ ONLY
+    bool statement_atomic_ = false;          // the statement that is running is wrapped to be all or nothing (a trigger of its table may fail in the middle of it)
+    // true while a statement that writes is refused: the open transaction is READ ONLY, or none is open and the session says transaction_read_only = 1
+    bool read_only_now() const;
+    // OPTIMIZE TABLE t, ... / CHECK TABLE t, ... (the text of the statement): MySQL's four-column answer (Table, Op, Msg_type, Msg_text)
+    StringResult exec_table_maintenance(const std::string& sql, const std::string& op);
+    StringResult exec_set_transaction(const Statement::SetIsolationLevel& v);
     // SET FOREIGN_KEY_CHECKS = 0 / 1 sets it, and exec_restore() (executor_backup.cpp) sets it for the length of a restore. A backup (and a
     // mysqldump file, which brackets itself the same way) dumps tables alphabetically
     // and rows in physical vector order, neither of which is guaranteed to respect
@@ -990,6 +1002,18 @@ private:
                                              const std::unordered_map<std::string, std::unordered_map<std::string, std::string>>* per_row);
     static std::optional<std::pair<std::string, std::optional<CondExpr>>> resolve_updatable_view(const SharedDatabase& s,
                                                                                                     const std::string& name);
+    // What a write to a view reaches: the table it reads (a view over a view is followed down), its WHERE, and which column of the table each column of the view is ("" for an
+    // expression, which cannot be written).
+    struct ViewTarget {
+        std::string table;
+        std::optional<CondExpr> condition;
+        std::vector<std::pair<std::string, std::string>> columns; // (view column, table column)
+    };
+    static std::optional<ViewTarget> resolve_view_target(const SharedDatabase& s, const std::string& name);
+    // The error of a write the view cannot take (a join, DISTINCT, GROUP BY, LIMIT, an aggregate, a subquery): MySQL's 1288 (UPDATE), 1471 (INSERT), 1395 (DELETE of a join view)
+    static std::optional<std::string> view_write_refusal(const SharedDatabase& s, const std::string& view, const char* verb);
+    // WITH CHECK OPTION: the error when `row` (what an INSERT / UPDATE through the view leaves in the table) is not a row of the view (1369), through the views below it for CASCADED
+    std::optional<std::string> view_check_violation(SharedDatabase& s, const std::string& view, const Row& row);
 
     // ── Phase 8b: INSERT ─────────────────────────────────────────────────
     StringResult exec_insert_select(SharedDatabase& s, std::string table, std::optional<std::vector<std::string>> columns,
@@ -1260,7 +1284,6 @@ private:
     // ── Phase 8d: isolation level / WAL / lock / buffer-pool monitoring ─────
     StringResult exec_show_buffer_pool(const SharedDatabase& s) const;
     StringResult exec_show_wal() const;
-    StringResult exec_set_isolation_level(IsolationLevel level);
     StringResult exec_show_isolation_level() const;
     StringResult exec_show_locks(const SharedDatabase& s) const;
     StringResult exec_checkpoint(SharedDatabase& s);

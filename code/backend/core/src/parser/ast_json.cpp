@@ -858,9 +858,16 @@ void to_json(nlohmann::json& j, const Statement& stmt) {
     std::visit(
         [&j](const auto& alt) {
             using T = std::decay_t<decltype(alt)>;
-            if constexpr (std::is_same_v<T, Statement::Begin>) j = "Begin";
-            else if constexpr (std::is_same_v<T, Statement::Commit>) j = "Commit";
-            else if constexpr (std::is_same_v<T, Statement::Rollback>) j = "Rollback";
+            if constexpr (std::is_same_v<T, Statement::Begin>) {
+                if (!alt.read_only) j = "Begin";
+                else j = nlohmann::json{{"Begin", nlohmann::json{{"read_only", *alt.read_only}}}};
+            } else if constexpr (std::is_same_v<T, Statement::Commit>) {
+                if (!alt.chain) j = "Commit";
+                else j = nlohmann::json{{"Commit", nlohmann::json{{"chain", true}}}};
+            } else if constexpr (std::is_same_v<T, Statement::Rollback>) {
+                if (!alt.chain) j = "Rollback";
+                else j = nlohmann::json{{"Rollback", nlohmann::json{{"chain", true}}}};
+            }
             else if constexpr (std::is_same_v<T, Statement::ShowTables>) {
                 if (!alt.database && !alt.like) j = "ShowTables";
                 else j = nlohmann::json{{"ShowTables", nlohmann::json{{"database", alt.database}, {"like", alt.like}}}};
@@ -953,8 +960,13 @@ void to_json(nlohmann::json& j, const Statement& stmt) {
                 j = nlohmann::json{{"CreateView", nlohmann::json{{"name", alt.name}, {"query", *alt.query}, {"raw_sql", alt.raw_sql}}}};
             else if constexpr (std::is_same_v<T, Statement::DropView>) j = nlohmann::json{{"DropView", nlohmann::json{{"name", alt.name}}}};
             else if constexpr (std::is_same_v<T, Statement::Describe>) j = nlohmann::json{{"Describe", nlohmann::json{{"table", alt.table}}}};
-            else if constexpr (std::is_same_v<T, Statement::SetIsolationLevel>)
-                j = nlohmann::json{{"SetIsolationLevel", nlohmann::json{{"level", alt.level}}}};
+            else if constexpr (std::is_same_v<T, Statement::SetIsolationLevel>) {
+                nlohmann::json body{{"level", alt.level}};
+                if (alt.next_only) body["next_only"] = true;
+                if (!alt.has_level) body["has_level"] = false;
+                if (alt.read_only) body["read_only"] = *alt.read_only;
+                j = nlohmann::json{{"SetIsolationLevel", body}};
+            }
             else if constexpr (std::is_same_v<T, Statement::Vacuum>) j = nlohmann::json{{"Vacuum", nlohmann::json{{"table", alt.table}}}};
             else if constexpr (std::is_same_v<T, Statement::Use>) j = nlohmann::json{{"Use", nlohmann::json{{"database", alt.database}}}};
             else if constexpr (std::is_same_v<T, Statement::Savepoint>) j = nlohmann::json{{"Savepoint", nlohmann::json{{"name", alt.name}}}};
@@ -1239,8 +1251,16 @@ void from_json(const nlohmann::json& j, Statement& stmt) {
         stmt = Statement(Statement::ShowTables{p.at("database").get<std::optional<std::string>>(), p.at("like").get<std::optional<std::string>>()});
     } else if (tag == "Describe") {
         stmt = Statement(Statement::Describe{p.at("table").get<std::string>()});
+    } else if (tag == "Begin") {
+        stmt = Statement(Statement::Begin{p.contains("read_only") ? std::optional<bool>(p.at("read_only").get<bool>()) : std::nullopt});
+    } else if (tag == "Commit") {
+        stmt = Statement(Statement::Commit{p.contains("chain") && p.at("chain").get<bool>()});
+    } else if (tag == "Rollback") {
+        stmt = Statement(Statement::Rollback{p.contains("chain") && p.at("chain").get<bool>()});
     } else if (tag == "SetIsolationLevel") {
-        stmt = Statement(Statement::SetIsolationLevel{p.at("level").get<IsolationLevel>()});
+        stmt = Statement(Statement::SetIsolationLevel{p.at("level").get<IsolationLevel>(), p.contains("next_only") && p.at("next_only").get<bool>(),
+                                                       !p.contains("has_level") || p.at("has_level").get<bool>(),
+                                                       p.contains("read_only") ? std::optional<bool>(p.at("read_only").get<bool>()) : std::nullopt});
     } else if (tag == "Vacuum") {
         stmt = Statement(Statement::Vacuum{p.at("table").get<std::optional<std::string>>()});
     } else if (tag == "Use") {

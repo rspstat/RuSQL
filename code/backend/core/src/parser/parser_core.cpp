@@ -434,12 +434,38 @@ Statement Parser::parse_stmt() {
                 const Token* w = peek();
                 if (!w || w->kind != TokenKind::Ident || to_upper(w->text) != "TRANSACTION") throw ParseError("Expected TRANSACTION after START");
                 advance();
-                while (peek() && !peek_is(TokenKind::Semicolon)) advance();
-                return Statement(Statement::Begin{});
+                // READ ONLY / READ WRITE (the other characteristics, WITH CONSISTENT SNAPSHOT, are read and left as they are)
+                std::optional<bool> read_only;
+                while (peek() && !peek_is(TokenKind::Semicolon)) {
+                    const Token* c = advance();
+                    const Token* n = peek();
+                    if (c && to_upper(c->text.empty() ? c->word : c->text) == "READ" && n) {
+                        const std::string mode = to_upper(n->text.empty() ? n->word : n->text);
+                        if (mode == "ONLY") read_only = true;
+                        else if (mode == "WRITE") read_only = false;
+                    }
+                }
+                return Statement(Statement::Begin{read_only});
             }
+            // [AND [NO] CHAIN] [[NO] RELEASE] after COMMIT / ROLLBACK: CHAIN begins the next transaction at once; RELEASE (a disconnect) is read and ignored
+            auto chain_clause = [&]() {
+                bool chain = false;
+                auto word_is = [&](const Token* w, const char* word) { return w && to_upper(w->text.empty() ? w->word : w->text) == word; };
+                if (peek_is(TokenKind::And)) {
+                    advance();
+                    const bool no = word_is(peek(), "NO");
+                    if (no) advance();
+                    if (!word_is(peek(), "CHAIN")) throw ParseError("Expected CHAIN after AND");
+                    advance();
+                    chain = !no;
+                }
+                if (word_is(peek(), "NO") && peek_at(1) && peek_at(1)->kind == TokenKind::Release) advance();
+                if (peek_is(TokenKind::Release)) advance();
+                return chain;
+            };
             if (to_upper(t->text) == "COMMIT") {
                 work_word();
-                return Statement(Statement::Commit{});
+                return Statement(Statement::Commit{chain_clause()});
             }
             if (to_upper(t->text) == "ROLLBACK") {
                 work_word();
@@ -450,7 +476,7 @@ Statement Parser::parse_stmt() {
                     std::string name = expect_ident();
                     return Statement(Statement::RollbackTo{name});
                 }
-                return Statement(Statement::Rollback{});
+                return Statement(Statement::Rollback{chain_clause()});
             }
             if (to_upper(t->text) == "BACKUP") return parse_backup();
             if (to_upper(t->text) == "RESTORE") return parse_restore();

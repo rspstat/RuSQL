@@ -166,8 +166,12 @@ Statement Parser::parse_set() {
                (to_upper(tok->text) == "SESSION" || to_upper(tok->text) == "GLOBAL" || to_upper(tok->text) == "LOCAL" || to_upper(tok->text) == "PERSIST" ||
                 to_upper(tok->text) == "PERSIST_ONLY");
     };
-    if (is_scope(t) && is_word(peek_at(1), "TRANSACTION") && peek_at_is(2, TokenKind::Isolation)) { advance(); advance(); }
-    else if (is_word(t, "TRANSACTION") && peek_at_is(1, TokenKind::Isolation)) advance();
+    // [SESSION | GLOBAL] TRANSACTION ISOLATION LEVEL x | READ ONLY | READ WRITE [, ...]; without SESSION it is for the next transaction only
+    auto is_characteristic = [&](std::size_t at) { return peek_at_is(at, TokenKind::Isolation) || (is_word(peek_at(at), "READ") && !peek_at_is(at + 1, TokenKind::Eq)); };
+    bool transaction_form = false, next_only = false;
+    if (is_scope(t) && is_word(peek_at(1), "TRANSACTION") && is_characteristic(2)) { advance(); advance(); transaction_form = true; }
+    else if (is_word(t, "TRANSACTION") && is_characteristic(1)) { advance(); transaction_form = true; next_only = true; }
+    else if (peek_is(TokenKind::Isolation)) transaction_form = true;
 
     const bool character_set = t->kind == TokenKind::Varchar && to_upper(t->word) == "CHARACTER" && peek_at_is(1, TokenKind::Set); // (CHARACTER is lexed as a type)
     if (is_word(t, "NAMES") || character_set) {
@@ -182,27 +186,45 @@ Statement Parser::parse_set() {
         return Statement(Statement::SetVars{});
     }
 
-    if (peek_is(TokenKind::Isolation)) {
-        advance();
-        if (!peek_is(TokenKind::Level)) throw ParseError("Expected LEVEL");
-        advance();
-        const Token* lt = advance();
-        if (!lt) throw ParseError("Expected isolation level name");
-        IsolationLevel level;
-        if (lt->kind == TokenKind::Ident && to_upper(lt->text) == "READ") {
-            const Token* n = advance();
-            if (n && n->kind == TokenKind::Uncommitted) level = IsolationLevel::ReadUncommitted;
-            else if (n && n->kind == TokenKind::Committed) level = IsolationLevel::ReadCommitted;
-            else throw ParseError("Expected UNCOMMITTED or COMMITTED after READ");
-        } else if (lt->kind == TokenKind::Repeatable) {
-            advance(); // consume trailing "READ"
-            level = IsolationLevel::RepeatableRead;
-        } else if (lt->kind == TokenKind::Serializable) {
-            level = IsolationLevel::Serializable;
-        } else {
-            throw ParseError("Expected isolation level name");
+    if (transaction_form) {
+        Statement::SetIsolationLevel set{IsolationLevel::ReadCommitted, next_only, false, std::nullopt};
+        for (;;) {
+            if (peek_is(TokenKind::Isolation)) {
+                advance();
+                if (!peek_is(TokenKind::Level)) throw ParseError("Expected LEVEL");
+                advance();
+                const Token* lt = advance();
+                if (!lt) throw ParseError("Expected isolation level name");
+                IsolationLevel level;
+                if (lt->kind == TokenKind::Ident && to_upper(lt->text) == "READ") {
+                    const Token* n = advance();
+                    if (n && n->kind == TokenKind::Uncommitted) level = IsolationLevel::ReadUncommitted;
+                    else if (n && n->kind == TokenKind::Committed) level = IsolationLevel::ReadCommitted;
+                    else throw ParseError("Expected UNCOMMITTED or COMMITTED after READ");
+                } else if (lt->kind == TokenKind::Repeatable) {
+                    advance(); // consume trailing "READ"
+                    level = IsolationLevel::RepeatableRead;
+                } else if (lt->kind == TokenKind::Serializable) {
+                    level = IsolationLevel::Serializable;
+                } else {
+                    throw ParseError("Expected isolation level name");
+                }
+                set.level = level;
+                set.has_level = true;
+            } else if (is_word(peek(), "READ")) {
+                advance();
+                const Token* mode = advance();
+                const std::string word = mode ? to_upper(!mode->text.empty() ? mode->text : mode->word) : "";
+                if (word == "ONLY") set.read_only = true;
+                else if (word == "WRITE") set.read_only = false;
+                else throw ParseError("Expected ONLY or WRITE after READ");
+            } else {
+                throw ParseError("Expected ISOLATION LEVEL, READ ONLY or READ WRITE");
+            }
+            if (!peek_is(TokenKind::Comma)) break;
+            advance();
         }
-        return Statement(Statement::SetIsolationLevel{level});
+        return Statement(set);
     }
 
     std::vector<Statement::SetUserVar> items;

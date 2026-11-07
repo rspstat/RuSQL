@@ -286,3 +286,22 @@ TEST_CASE("R70: SUGGEST INDEX reads the subqueries, derived tables, CTEs and UNI
     // nothing was created by asking
     REQUIRE(text_of(ex, "SHOW INDEX FROM o").find("idx_") == std::string::npos);
 }
+
+TEST_CASE("R71: with two range tests the index takes the column that tells more values apart, and a mixed ASC / DESC sort is said to stay", "[r71][advice]") {
+    TempDataDir dir("r71_advice_range");
+    Executor ex(dir.path);
+    fill(ex);
+    // cat has 200 different values, grp 20: whichever is written first, cat is the range column of the suggestion
+    for (const char* sql : {"SUGGEST INDEX SELECT * FROM t WHERE grp > 3 AND cat > 5", "SUGGEST INDEX SELECT * FROM t WHERE cat > 5 AND grp > 3"}) {
+        Rows rows = rows_of(ex, sql);
+        REQUIRE(of_kind(rows, "suggest").size() == 1);
+        REQUIRE(of_kind(rows, "suggest")[0][Columns] == "cat");
+        REQUIRE(has_note(rows, "an index narrows by one range column only, so cat is the one in the suggestion"));
+    }
+    // one range test says nothing of the kind
+    REQUIRE_FALSE(has_note(rows_of(ex, "SUGGEST INDEX SELECT * FROM t WHERE cat > 5"), "one range column only"));
+    // ORDER BY in two directions: no one index returns that order
+    Rows mixed = rows_of(ex, "SUGGEST INDEX SELECT * FROM t WHERE flag = 1 ORDER BY cat ASC, grp DESC LIMIT 10");
+    REQUIRE(has_note(mixed, "ORDER BY mixes ASC and DESC, so no single index returns the rows in that order"));
+    REQUIRE_FALSE(has_note(rows_of(ex, "SUGGEST INDEX SELECT * FROM t WHERE flag = 1 ORDER BY cat DESC, grp DESC LIMIT 10"), "mixes ASC and DESC"));
+}

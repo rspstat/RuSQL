@@ -35,6 +35,15 @@ std::string alter_actions_error(const TableSchema& schema, const std::string& ta
 // Password hashing helpers (native TCP auth: SHA-256; MySQL wire protocol: SHA1)
 // ---------------------------------------------------------------------------
 namespace {
+// The table an INSERT / UPDATE / DELETE writes (its triggers may fail the statement), or null for any other statement
+const std::string* dml_target_of(const Statement& stmt) {
+    if (auto* v = std::get_if<Statement::Insert>(&stmt.data)) return &v->table;
+    if (auto* v = std::get_if<Statement::InsertSelect>(&stmt.data)) return &v->table;
+    if (auto* v = std::get_if<Statement::Update>(&stmt.data)) return &v->table;
+    if (auto* v = std::get_if<Statement::Delete>(&stmt.data)) return &v->table;
+    return nullptr;
+}
+
 
 std::string sha1_hex(const std::string& data) {
     SHA1 hasher;
@@ -1080,7 +1089,17 @@ StringResult Executor::execute(Statement stmt) {
         }
     } point_index_scope(*this, is_pure_read_only(stmt));
     maybe_checkpoint_redo(); // no lock held yet -- see executor_redo.cpp
-    if (std::holds_alternative<Statement::Commit>(stmt.data)) return execute_commit_grouped();
+    // COMMIT / ROLLBACK AND CHAIN: when the transaction has ended, the next one begins with the isolation level and the access mode of this one
+    const IsolationLevel chain_isolation = txn.isolation_level();
+    const bool chain_read_only = txn_read_only_, chain_was_open = txn.is_active();
+    auto chain_next = [&](bool chain, StringResult done) {
+        if (!chain || !chain_was_open || done.is_err()) return done;
+        next_isolation_ = chain_isolation;
+        next_read_only_ = chain_read_only;
+        auto begun = execute(Statement(Statement::Begin{}));
+        return begun.is_err() ? begun : done;
+    };
+    if (auto* commit = std::get_if<Statement::Commit>(&stmt.data)) return chain_next(commit->chain, execute_commit_grouped());
 
     // EXECUTE runs the statement that was prepared like that statement typed in: it takes the locks (and gets the redo log) that statement takes, instead of the
     // exclusive path every statement it could be would have to share
@@ -1132,8 +1151,50 @@ StringResult Executor::execute(Statement stmt) {
         // re-derives the same list itself before txn.abort() clears it.
         auto tables = txn.dirty_tables();
         std::sort(tables.begin(), tables.end());
-        auto guard = acquire_table_locks(shared->read(), tables, /*exclusive=*/true);
-        return execute_with_s(const_cast<SharedDatabase&>(*guard.structural), std::move(stmt));
+        const bool chain = std::get<Statement::Rollback>(stmt.data).chain;
+        StringResult done = [&]() { // (the next transaction begins without the locks of this rollback)
+            auto guard = acquire_table_locks(shared->read(), tables, /*exclusive=*/true);
+            return execute_with_s(const_cast<SharedDatabase&>(*guard.structural), std::move(stmt));
+        }();
+        return chain_next(chain, std::move(done));
+    }
+
+    // A statement on a table that has triggers is all or nothing: a trigger that fails in the middle of it (the AFTER INSERT trigger of the third row) takes back what the
+    // statement and the triggers before it already wrote, as InnoDB does -- inside a transaction by a savepoint, outside one by a transaction of the statement's own.
+    if (!statement_atomic_) {
+        bool has_trigger_on_target = false;
+        if (const std::string* target = dml_target_of(stmt)) {
+            auto s = shared->read();
+            const std::string qualified = qualify_name(*target); // (the triggers are kept under the table as database.table)
+            has_trigger_on_target = std::any_of(s->triggers.begin(), s->triggers.end(), [&](const auto& entry) { return std::get<0>(entry.second) == qualified; });
+        }
+        if (has_trigger_on_target) {
+            struct Wrapped {
+                bool& flag;
+                explicit Wrapped(bool& f) : flag(f) { flag = true; }
+                ~Wrapped() { flag = false; }
+            } wrapped(statement_atomic_);
+            if (txn.is_active()) {
+                const std::string mark = "\x01" "statement"; // (a name no statement can write)
+                if (execute(Statement(Statement::Savepoint{mark})).is_ok()) {
+                    auto done = execute(std::move(stmt));
+                    if (done.is_err()) execute(Statement(Statement::RollbackTo{mark}));
+                    execute(Statement(Statement::ReleaseSavepoint{mark}));
+                    return done;
+                }
+            } else if (execute(Statement(Statement::Begin{})).is_ok()) {
+                auto done = execute(std::move(stmt));
+                const std::int64_t affected = affected_rows_, matched = matched_rows_;
+                if (done.is_err()) {
+                    execute(Statement(Statement::Rollback{}));
+                    return done;
+                }
+                auto committed = execute(Statement(Statement::Commit{}));
+                affected_rows_ = affected;
+                matched_rows_ = matched;
+                return committed.is_err() ? committed : done;
+            }
+        }
     }
 
     // Table partitioning: must run BEFORE any lock is acquired for this statement (see
@@ -1568,6 +1629,30 @@ struct ProcessScope {
         if (--ex.statement_depth_ == 0) ex.update_process_command("Sleep", "");
     }
 };
+// The second word of a statement, upper case ("CREATE TEMPORARY TABLE": TEMPORARY)
+std::string second_word_upper(const std::string& sql) {
+    std::size_t i = 0;
+    while (i < sql.size() && std::isspace(static_cast<unsigned char>(sql[i]))) i++;
+    while (i < sql.size() && !std::isspace(static_cast<unsigned char>(sql[i])) && sql[i] != '(' && sql[i] != ';') i++;
+    while (i < sql.size() && std::isspace(static_cast<unsigned char>(sql[i]))) i++;
+    std::string word;
+    while (i < sql.size() && (std::isalnum(static_cast<unsigned char>(sql[i])) || sql[i] == '_')) word.push_back(static_cast<char>(std::toupper(static_cast<unsigned char>(sql[i++]))));
+    return word;
+}
+
+// MySQL ends the open transaction (a COMMIT) before a statement that defines something, locks tables or begins another transaction; it cannot be rolled back after it
+bool commits_implicitly(const std::string& word, const std::string& second) {
+    if (word == "CREATE" || word == "DROP") return second != "TEMPORARY";
+    return word == "ALTER" || word == "TRUNCATE" || word == "RENAME" || word == "ANALYZE" || word == "OPTIMIZE" || word == "REPAIR" || word == "GRANT" || word == "REVOKE" ||
+           word == "LOCK" || word == "BEGIN" || word == "START";
+}
+
+// A statement that changes data or the schema: a READ ONLY transaction refuses it
+bool writes_data_or_schema(const std::string& word, const std::string& second) {
+    if (word == "CREATE" || word == "DROP") return second != "TEMPORARY";
+    return word == "INSERT" || word == "UPDATE" || word == "DELETE" || word == "REPLACE" || word == "MERGE" || word == "TRUNCATE" || word == "ALTER" || word == "RENAME";
+}
+
 } // namespace
 
 // The statement the client sent, timed for the slow query log (a statement inside another one -- a TRACE, a procedure's body -- is part of the outer one)
@@ -1608,6 +1693,17 @@ StringResult Executor::run_sql_text(const std::string& sql_text) {
         if (rest.size() > 5) return run_trace(*this, rest.substr(5));
     }
     if (word == "SUGGEST") return exec_suggest_indexes(sql_text);
+    // the transaction characteristics of the session: a statement that defines something commits the open transaction first (so does BEGIN), a READ ONLY transaction (or session)
+    // refuses the statements that write, and outside a transaction the engine runs at the isolation level the session says
+    const std::string second_word = second_word_upper(sql);
+    if (txn.is_active() && commits_implicitly(word, second_word)) {
+        auto committed = execute_sql_inner("COMMIT");
+        if (committed.is_err()) return committed;
+        implicit_txn_ = false;
+    }
+    if (!txn.is_active() && txn.isolation_level() != session_isolation_) txn.set_isolation_level(session_isolation_);
+    if (writes_data_or_schema(word, second_word) && read_only_now()) return StringResult::Err("ERROR 1792 (25006): Cannot execute statement in a READ ONLY transaction.");
+    if (word == "OPTIMIZE" || (word == "CHECK" && second_word == "TABLE")) return exec_table_maintenance(sql_text, word == "OPTIMIZE" ? "optimize" : "check");
     // MAX_EXECUTION_TIME: a SELECT that runs longer than the hint or SET max_execution_time says is stopped with error 3024 (other statements are not timed)
     std::optional<deadline::Scope> time_limit;
     if (word == "SELECT" || word == "WITH") {
@@ -1945,7 +2041,20 @@ StringResult Executor::execute_with_s_body(SharedDatabase& s, Statement stmt) {
         }
     }
 
-    if (std::holds_alternative<Statement::Begin>(stmt.data)) return exec_begin(s);
+    if (auto* begin = std::get_if<Statement::Begin>(&stmt.data)) {
+        // READ ONLY / READ WRITE of START TRANSACTION, else the one SET TRANSACTION gave this transaction, else the session's
+        bool read_only = false;
+        if (begin->read_only) read_only = *begin->read_only;
+        else if (next_read_only_) read_only = *next_read_only_;
+        else if (auto it = user_vars.find("@transaction_read_only"); it != user_vars.end()) read_only = it->second == "1";
+        auto begun = exec_begin(s);
+        if (begun.is_ok()) {
+            txn_read_only_ = read_only;
+            next_isolation_.reset();
+            next_read_only_.reset();
+        }
+        return begun;
+    }
     if (std::holds_alternative<Statement::Commit>(stmt.data)) return exec_commit(s);
     if (std::holds_alternative<Statement::Rollback>(stmt.data)) return exec_rollback(s);
     if (auto* v = std::get_if<Statement::Savepoint>(&stmt.data)) return exec_savepoint(v->name);
@@ -1954,7 +2063,7 @@ StringResult Executor::execute_with_s_body(SharedDatabase& s, Statement stmt) {
     if (std::holds_alternative<Statement::ShowBufferPool>(stmt.data)) return exec_show_buffer_pool(s);
     if (std::holds_alternative<Statement::ShowWal>(stmt.data)) return exec_show_wal();
     if (std::holds_alternative<Statement::Checkpoint>(stmt.data)) return exec_checkpoint(s);
-    if (auto* v = std::get_if<Statement::SetIsolationLevel>(&stmt.data)) return exec_set_isolation_level(v->level);
+    if (auto* v = std::get_if<Statement::SetIsolationLevel>(&stmt.data)) return exec_set_transaction(*v);
     if (std::holds_alternative<Statement::ShowIsolationLevel>(stmt.data)) return exec_show_isolation_level();
     if (std::holds_alternative<Statement::ShowLocks>(stmt.data)) return exec_show_locks(s);
     if (auto* v = std::get_if<Statement::LockTables>(&stmt.data)) return exec_lock_tables(s, v->tables);
@@ -2273,6 +2382,27 @@ StringResult Executor::execute_with_s_body(SharedDatabase& s, Statement stmt) {
                 char fixed[32];
                 std::snprintf(fixed, sizeof fixed, "%.6f", seconds);
                 result_val = fixed;
+            } else if (setting == "transaction_isolation" || setting == "tx_isolation") {
+                // MySQL's names for the levels (READ-UNCOMMITTED, READ-COMMITTED, REPEATABLE-READ, SERIALIZABLE; any case); DEFAULT is this server's level
+                std::string word = result_val;
+                std::transform(word.begin(), word.end(), word.begin(), [](unsigned char c) { return static_cast<char>(std::toupper(c)); });
+                IsolationLevel level;
+                if (word == "READ-UNCOMMITTED") level = IsolationLevel::ReadUncommitted;
+                else if (word == "READ-COMMITTED" || word == "DEFAULT") level = IsolationLevel::ReadCommitted;
+                else if (word == "REPEATABLE-READ") level = IsolationLevel::RepeatableRead;
+                else if (word == "SERIALIZABLE") level = IsolationLevel::Serializable;
+                else return StringResult::Err("ERROR 1231 (42000): Variable 'transaction_isolation' can't be set to the value of '" + result_val + "'");
+                auto done = exec_set_transaction(Statement::SetIsolationLevel{level});
+                return done.is_err() ? done : StringResult::Ok("");
+            } else if (setting == "transaction_read_only" || setting == "tx_read_only") {
+                std::string word = result_val;
+                std::transform(word.begin(), word.end(), word.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+                bool read_only;
+                if (word == "on" || word == "true" || word == "1") read_only = true;
+                else if (word == "off" || word == "false" || word == "0" || word == "default") read_only = false;
+                else return StringResult::Err("ERROR 1231 (42000): Variable 'transaction_read_only' can't be set to the value of '" + result_val + "'");
+                auto done = exec_set_transaction(Statement::SetIsolationLevel{IsolationLevel::ReadCommitted, false, false, read_only});
+                return done.is_err() ? done : StringResult::Ok("");
             } else if (setting == "max_connections") {
                 // the most connections the server lets in at once (MySQL: 1 to 100000, a number out of range is brought into it); the connections already open stay
                 unsigned long long wanted = 0;

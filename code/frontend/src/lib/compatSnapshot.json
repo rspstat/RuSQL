@@ -1,5 +1,5 @@
 {
-  "generated": "2026-11-02",
+  "generated": "2026-11-08",
   "mysql": "8.4.9",
   "corpora": [
     {
@@ -299,6 +299,46 @@
       "bothFail": 6
     },
     {
+      "name": "transactions",
+      "en": "Statements inside a transaction: SAVEPOINT / ROLLBACK TO, DDL that commits, READ ONLY, the isolation variables, COMMIT AND CHAIN",
+      "ko": "트랜잭션 안의 문장: SAVEPOINT·ROLLBACK TO·커밋하는 DDL·READ ONLY·격리 수준 변수·COMMIT AND CHAIN",
+      "statements": 136,
+      "different": 0,
+      "bothFail": 14
+    },
+    {
+      "name": "triggers_writes",
+      "en": "Triggers that write: SET NEW.x in BEFORE INSERT / UPDATE, a failing trigger takes the statement back, procedures that write",
+      "ko": "쓰는 트리거: BEFORE INSERT·UPDATE의 SET NEW.x, 실패한 트리거는 문장째 되돌림, 쓰는 프로시저",
+      "statements": 54,
+      "different": 0,
+      "bothFail": 4
+    },
+    {
+      "name": "views_update",
+      "en": "Writes through views: renamed columns, a view over a view, WITH CHECK OPTION, the errors of what a view cannot take",
+      "ko": "뷰를 통한 쓰기: 이름 바꾼 열·뷰 위의 뷰·WITH CHECK OPTION·받지 못하는 뷰의 오류",
+      "statements": 51,
+      "different": 0,
+      "bothFail": 16
+    },
+    {
+      "name": "fk_actions",
+      "en": "Foreign key actions, TRUNCATE of a referenced table, FOREIGN_KEY_CHECKS = 0, the definition of a key (1824 / 3780 / 1830)",
+      "ko": "외래키 동작·참조되는 표의 TRUNCATE·FOREIGN_KEY_CHECKS = 0·키 정의 검사(1824·3780·1830)",
+      "statements": 77,
+      "different": 0,
+      "bothFail": 24
+    },
+    {
+      "name": "dates_arith",
+      "en": "Date and time arithmetic: TIME limit 838:59:59, STR_TO_DATE %j, CONVERT_TZ, strings that are no dates, a date against a date string",
+      "ko": "날짜·시간 계산: TIME 한계 838:59:59·STR_TO_DATE %j·CONVERT_TZ·날짜가 아닌 글자·날짜와 날짜 글자의 비교",
+      "statements": 45,
+      "different": 0,
+      "bothFail": 2
+    },
+    {
       "name": "errno",
       "en": "MySQL wire protocol: the error number of a failing statement",
       "ko": "MySQL 프로토콜: 실패한 문장의 오류 번호",
@@ -339,10 +379,10 @@
       "bothFail": 0
     }
   ],
-  "conformanceCases": 4099,
+  "conformanceCases": 4524,
   "tests": {
-    "cases": 895,
-    "assertions": 1517532
+    "cases": 918,
+    "assertions": 1518901
   },
   "bugsFound": 206
 }

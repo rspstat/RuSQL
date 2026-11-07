@@ -550,13 +550,22 @@ std::string Executor::apply_scalar_func(const std::string& typed_name, const std
         return std::to_string(static_cast<long long>(t));
     }
     if (func_name == "FROM_UNIXTIME") {
-        long long ts = args.empty() ? 0 : parse_i64(resolve(args[0])).value_or(0);
+        const std::string raw = args.empty() ? std::string("0") : resolve(args[0]);
+        if (raw == EXECUTOR_NULL_VALUE) return EXECUTOR_NULL_VALUE;
+        // seconds with a fraction (1700000000.5) keep the places they were written with, up to six
+        std::string whole = raw, fraction;
+        if (const auto dot = raw.find('.'); dot != std::string::npos) {
+            whole = raw.substr(0, dot);
+            fraction = raw.substr(dot + 1, 6);
+            if (fraction.find_first_not_of("0123456789") != std::string::npos) fraction.clear();
+        }
+        long long ts = parse_i64(whole).value_or(0);
         std::time_t t = static_cast<std::time_t>(ts); // (shown in the system's time zone, the session's)
         std::tm local{};
-        if (localtime_s(&local, &t) != 0) return EXECUTOR_NULL_VALUE;
+        if (ts < 0 || localtime_s(&local, &t) != 0) return EXECUTOR_NULL_VALUE;
         char buf[32];
         std::snprintf(buf, sizeof(buf), "%04d-%02d-%02d %02d:%02d:%02d", local.tm_year + 1900, local.tm_mon + 1, local.tm_mday, local.tm_hour, local.tm_min, local.tm_sec);
-        return buf;
+        return fraction.empty() ? std::string(buf) : std::string(buf) + "." + fraction;
     }
     if (func_name == "ISNULL") {
         std::string v = arg_at(0);

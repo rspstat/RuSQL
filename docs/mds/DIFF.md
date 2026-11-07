@@ -50,9 +50,10 @@
 | 격리성 (I) | ✓ | ✓ | ✓ | ✓ (`SnapshotCtx` 기반 MVCC 가시성: DML은 `s.tables`에 직접 기록되고 격리수준별 스냅샷으로 필터링 — 미커밋 행은 작성자 본인에게만 보임) |
 | 지속성 (D) | ✓ | ✓ | ✓ | ✓ (redo 로그 fsync + 그룹 커밋 — 2026-10-01부터 autocommit 문장도 내구성 보장(이전엔 autocommit INSERT가 크래시 시 유실), 커밋 비용이 테이블 크기와 무관(1k~20k행에서 평탄 측정); WAL fsync + 그룹 커밋; 전역 유일 txn_id 태깅으로 세션 간 공유 WAL/Undo Log 격리 — 한 세션의 COMMIT이 다른 세션의 진행 중인 트랜잭션 레코드를 파괴하지 않음) |
 | MVCC | ✓ (InnoDB Undo segment) | ✓ (튜플 버전 힙 내 저장) | ✓ (Undo tablespace 기반 Consistent Read) | ✓ (`_xmin`/`_xmax` 태깅 실제 다중버전 — UPDATE마다 새 물리 버전 생성, `SnapshotCtx` 기반 격리수준별 가시성, GC 호라이즌 기반 VACUUM; `information_schema.row_versions`로 모든 행 버전과 세션별 가시성을 SQL로 조회하고 앱의 MVCC 페이지가 버전이 쌓이고 치워지는 과정을 짧은 이야기로 보여 줌; 같은 테이블의 서로 다른 행에 대한 쓰기도 실제로 동시 실행됨(행 단위 잠금 — `table_data_locks`+`LockManager` 행 클레임, 진짜 블로킹 대기 포함); predicate lock으로 phantom 탐지는 되지만 Postgres 수준 완전 SSI(진짜 dangerous-structure 판정)는 아직 아님 — 아래 행 참고) |
-| 격리 수준 | 4가지 (기본: REPEATABLE READ) | 3가지 유효 (기본: READ COMMITTED) | 2가지 유효 — READ COMMITTED / SERIALIZABLE (기본: READ COMMITTED) | 4가지 (기본: READ COMMITTED) |
+| 격리 수준 | 4가지 (기본: REPEATABLE READ) | 3가지 유효 (기본: READ COMMITTED) | 2가지 유효 — READ COMMITTED / SERIALIZABLE (기본: READ COMMITTED) | 4가지 (기본: READ COMMITTED — MySQL과 다름; `@@transaction_isolation`은 세션이 실제로 쓰는 수준을 말하고, `SET [SESSION] TRANSACTION ISOLATION LEVEL` · `SET transaction_isolation = '…'` · 한 번만 적용되는 `SET TRANSACTION …` · 트랜잭션 안의 1568 · `READ ONLY`(1792) · `COMMIT AND CHAIN`은 MySQL과 같음, R71) |
 | Serializable 구현 | 잠금 기반 + GAP Lock (팬텀 방지) | SSI (Serializable Snapshot Isolation) | 스냅샷 기반 (ORA-08177 직렬화 오류 반환) | read-set 기반 충돌 검증 + Gap Lock + **non-blocking predicate lock**(잠금 없는 일반 SELECT가 스캔한 PK 범위를 등록해두고, 나중에 그 범위에 phantom이 INSERT되면 인서트는 막지 않되 읽은 쪽의 COMMIT을 "Serialization failure"로 실패시킴 — PostgreSQL의 SIREAD와 같은 non-blocking 방식). 다만 "범위가 겹치면 무조건 실패"하는 보수적 근사이지 Postgres의 진짜 rw-antidependency 사이클 판정(Cahill et al.)은 아님 — false positive(불필요한 실패)는 있을 수 있어도 false negative(놓치는 이상현상)는 없음(2026-09-28 3-트랜잭션 순환 테스트로 직접 검증). 같은 날 predicate lock 범위를 집계 쿼리·복합/무-PK 테이블·JOIN까지 확장 |
-| SAVEPOINT | ✓ | ✓ | ✓ | ✓ (Undo Log content-matching 기반, ROLLBACK TO 정상 동작) |
+| SAVEPOINT | ✓ | ✓ | ✓ | ✓ (Undo Log content-matching 기반, ROLLBACK TO 정상 동작; 없는 저장점은 1305, 트랜잭션 밖의 `SAVEPOINT`는 받기만 함) |
+| 암묵 커밋 | ✓ (DDL · `LOCK TABLES` · `BEGIN` 등이 열린 트랜잭션을 먼저 커밋) | ✗ (DDL도 트랜잭션 안) | ✓ (DDL 앞뒤 커밋) | ✓ (CREATE · ALTER · DROP · TRUNCATE · RENAME · ANALYZE · OPTIMIZE · GRANT · LOCK · 트랜잭션 안의 BEGIN, R71) |
 | XA (분산 트랜잭션) | ✓ | ✓ | ✓ | ✗ |
 | 그룹 커밋 | ✓ (binlog 그룹 커밋) | ✓ (WAL writer 통합) | ✓ (LGWR 배치 플러시) | ✓ (GroupCommitCoordinator) |
 | 락 대기 방식 | ✓ 진짜 블로킹 대기 (`innodb_lock_wait_timeout`) | ✓ 진짜 블로킹 대기 | ✓ 진짜 블로킹 대기 | ✓ 진짜 블로킹 대기 (`condition_variable` 기반, `@lock_wait_timeout` 세션 변수, 기본 50000ms; 행 잠금·SELECT FOR UPDATE/FOR SHARE·INSERT-vs-Gap-Lock 전부 적용, 예외 없음) |
@@ -187,9 +188,9 @@
 |------|-------|------------|--------|--------|
 | CREATE / DROP TABLE | ✓ | ✓ | ✓ | ✓ |
 | ALTER TABLE (ADD/DROP/MODIFY/RENAME COLUMN) | ✓ | ✓ | ✓ | ✓ |
-| TRUNCATE | ✓ | ✓ | ✓ | ✓ |
+| TRUNCATE | ✓ | ✓ | ✓ | ✓ (다른 표가 참조하는 표는 1701 — `FOREIGN_KEY_CHECKS = 0`이면 허용) |
 | CREATE / DROP INDEX | ✓ | ✓ | ✓ | ✓ |
-| CREATE / DROP VIEW | ✓ | ✓ | ✓ | ✓ |
+| CREATE / DROP VIEW | ✓ | ✓ | ✓ | ✓ (`WITH [CASCADED \| LOCAL] CHECK OPTION` 1369, 열 이름을 바꾼 뷰 · 뷰 위의 뷰에 쓰기, 쓸 수 없는 뷰의 1288 · 1471 · 1395 · 1348 · 1423; **조인 뷰의 UPDATE · INSERT는 아직 거절**, R71) |
 | CREATE SYNONYM | ✗ | ✗ | ✓ | ✓ (CREATE [OR REPLACE] SYNONYM / DROP SYNONYM / SHOW SYNONYMS) |
 | CREATE / DROP DATABASE | ✓ | ✓ | △ (스키마/유저 단위 관리) | ✓ |
 | CREATE SEQUENCE | ✗ | ✓ | ✓ | ✗ (AUTO_INCREMENT만) |
@@ -290,10 +291,11 @@
 | SHOW STATUS | ✓ (GLOBAL · SESSION) | pg_stat_* 뷰 | V$SYSSTAT | ✓ (GLOBAL · SESSION, 문장 종류별 `Com_*`·`Questions`·`Connections`·`Threads_*`·`Uptime`·`Innodb_*` 버퍼 풀·redo·행 잠금 대기, 잠금 없이 읽음; 표로는 `information_schema.global_status`) |
 | SHOW LOCKS | ✓ | pg_locks | V$LOCK | ✓ |
 | CHECKPOINT | ✓ | ✓ | ✓ (ALTER SYSTEM CHECKPOINT) | ✓ |
+| OPTIMIZE TABLE / CHECK TABLE | ✓ | VACUUM FULL / amcheck | ANALYZE · DBMS_REPAIR | ✓ (MySQL의 4열 응답; CHECK는 NOT NULL · 기본키 · UNIQUE · 외래키 값을 읽어 확인, R71) |
 | VACUUM | ✓ (자동 Purge) | ✓ (AUTOVACUUM) | ✓ (자동 Undo 관리) | ✓ (수동 + DML 200회 AUTO) |
 | 백업 / 덤프 | mysqldump, XtraBackup | pg_dump, pg_basebackup | RMAN (Recovery Manager) | ✓ (BACKUP [DATABASE db] [INTO 'file'] / RESTORE [DATABASE db] FROM 'file') |
 | 저장 프로시저 | ✓ | ✓ (PL/pgSQL 등) | ✓ (PL/SQL) | ✓ (CREATE/DROP PROCEDURE, CALL, IF/WHILE/LOOP/REPEAT, UI 직접 실행) |
-| 트리거 | ✓ | ✓ | ✓ | ✓ (BEFORE/AFTER INSERT/UPDATE/DELETE) |
+| 트리거 | ✓ | ✓ | ✓ | ✓ (BEFORE/AFTER INSERT/UPDATE/DELETE; `SET NEW.x`는 BEFORE INSERT · BEFORE UPDATE, 한 `SET`에 여러 대입, 실패하면 문장째 되돌림, R71) |
 | 이벤트 스케줄러 | ✓ | pg_cron 확장 | ✓ (DBMS_SCHEDULER) | ✗ |
 
 ---

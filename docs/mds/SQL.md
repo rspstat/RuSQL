@@ -81,7 +81,7 @@ RuSQL이 실제로 받아서 실행하는 SQL 문법을 한 줄씩 정리한 문
 - ALTER TABLE t 동작1, 동작2, ... : 여러 동작을 한 문장으로(전부 되거나 전부 안 됨)
 - ALTER VIEW v AS SELECT ... : 뷰 다시 정의
 - DROP TABLE [IF EXISTS] t1[, t2, ...] : 테이블 삭제(다른 테이블의 외래 키가 가리키면 거부)
-- TRUNCATE [TABLE] t : 테이블의 모든 행 삭제(자동 증가 번호도 처음으로)
+- TRUNCATE [TABLE] t : 테이블의 모든 행 삭제(자동 증가 번호도 처음으로). 다른 표의 외래키가 참조하는 표는 오류 1701(`FOREIGN_KEY_CHECKS = 0`이면 허용)
 - RENAME TABLE a TO b[, c TO d, ...] : 테이블 이름 변경(여러 개 한 번에)
 
 ## 4. 인덱스 · 뷰 · 별칭
@@ -92,7 +92,8 @@ RuSQL이 실제로 받아서 실행하는 SQL 문법을 한 줄씩 정리한 문
 - DROP INDEX [IF EXISTS] 이름 [ON t] : 인덱스 삭제
 - CREATE [OR REPLACE] [ALGORITHM = x] [DEFINER = x] [SQL SECURITY x] VIEW v AS SELECT ... : 뷰 생성 · 덮어쓰기
 - DROP VIEW [IF EXISTS] v : 뷰 삭제
-- INSERT / UPDATE / DELETE 대상으로 뷰 사용 : 단순 뷰(JOIN · DISTINCT · GROUP BY 없음)는 쓰기도 가능
+- INSERT / UPDATE / DELETE 대상으로 뷰 사용 : 한 표의 행을 그대로 보여 주는 뷰(JOIN · DISTINCT · GROUP BY · 집계 · LIMIT 없음, 뷰 위의 뷰도 됨)는 쓰기도 가능. 열 이름을 바꾼 뷰(`id AS ident`)는 뷰의 이름으로 `SET`·`WHERE`를 쓰고, 열 목록 없는 `INSERT INTO v VALUES (...)`는 뷰의 열을 따른다(R71). 식으로 만든 열을 쓰면 오류 1348(UPDATE) · 1471(INSERT), 쓸 수 없는 뷰는 1288(UPDATE · DELETE) · 1471(INSERT), 조인 뷰의 DELETE는 1395, 뷰가 가린 NOT NULL 열은 1423
+- CREATE VIEW v AS SELECT ... WITH [CASCADED | LOCAL] CHECK OPTION : 뷰가 보여 주지 않을 행을 INSERT · UPDATE하면 오류 1369(CASCADED는 아래 뷰의 조건까지; R71)
 - CREATE SYNONYM 이름 FOR 대상 : 테이블 별칭 생성
 - CREATE OR REPLACE SYNONYM 이름 FOR 대상 : 별칭 덮어쓰기
 - DROP SYNONYM [IF EXISTS] 이름 : 별칭 삭제
@@ -363,16 +364,20 @@ RuSQL이 실제로 받아서 실행하는 SQL 문법을 한 줄씩 정리한 문
 
 ### 트랜잭션
 
-- BEGIN [WORK] / START TRANSACTION [옵션] : 트랜잭션 시작
-- COMMIT [WORK] : 변경 확정
-- ROLLBACK [WORK] : 변경 취소
-- SAVEPOINT 이름 : 저장점 지정
-- ROLLBACK TO [SAVEPOINT] 이름 : 저장점까지만 되돌리기
+- BEGIN [WORK] / START TRANSACTION [READ ONLY | READ WRITE | WITH CONSISTENT SNAPSHOT] : 트랜잭션 시작(READ ONLY 안에서 쓰는 문장은 오류 1792). 이미 열려 있으면 먼저 커밋한다
+- COMMIT [WORK] [AND [NO] CHAIN] [[NO] RELEASE] : 변경 확정. `AND CHAIN`은 같은 격리 수준 · 접근 모드로 새 트랜잭션을 이어서 연다(R71)
+- ROLLBACK [WORK] [AND [NO] CHAIN] : 변경 취소
+- SAVEPOINT 이름 : 저장점 지정(트랜잭션 밖에서는 받기만 하고 남기지 않음)
+- ROLLBACK TO [SAVEPOINT] 이름 : 저장점까지만 되돌리기(없는 저장점은 오류 1305)
 - RELEASE SAVEPOINT 이름 : 저장점 해제
 - SET autocommit = 0 | 1 : 자동 커밋 켜고 끄기
-- SET [SESSION] TRANSACTION ISOLATION LEVEL 수준 : 격리 수준 지정(READ UNCOMMITTED · READ COMMITTED · REPEATABLE READ · SERIALIZABLE)
+- SET [SESSION] TRANSACTION ISOLATION LEVEL 수준 [, READ ONLY | READ WRITE] : 세션의 격리 수준 · 접근 모드 지정(READ UNCOMMITTED · READ COMMITTED · REPEATABLE READ · SERIALIZABLE). 트랜잭션 안에서 해도 되고 **다음** 트랜잭션부터 적용된다
+- SET TRANSACTION ISOLATION LEVEL 수준 [, READ ONLY | READ WRITE] : (SESSION 없이) **다음 트랜잭션 하나**에만 적용. 트랜잭션 안에서는 오류 1568
+- SET transaction_isolation = 'READ-COMMITTED' : 같은 일을 변수로(MySQL의 하이픈 이름, 대소문자 무관, 그 밖의 이름은 오류 1231; `tx_isolation`도 같음). `SET transaction_read_only = 1 | ON | 0 | OFF`도 같다
+- SELECT @@transaction_isolation, @@transaction_read_only : 세션이 지금 쓰는 값(아무것도 정하지 않으면 이 엔진의 READ-COMMITTED, MySQL은 REPEATABLE-READ)
 - SET ISOLATION LEVEL 수준 : 위와 같음(짧은 형식)
 - SHOW ISOLATION LEVEL : 현재 격리 수준 조회
+- 열린 트랜잭션을 먼저 커밋하는 문장 : CREATE · ALTER · DROP · TRUNCATE · RENAME · ANALYZE · OPTIMIZE · GRANT · REVOKE · LOCK TABLES, 그리고 BEGIN · START TRANSACTION (`CREATE | DROP TEMPORARY`는 제외). 트리거가 걸린 표에 쓰는 INSERT · UPDATE · DELETE는 트리거가 실패하면 문장째 되돌려진다
 
 ### 테이블 잠금
 
@@ -416,6 +421,8 @@ RuSQL이 실제로 받아서 실행하는 SQL 문법을 한 줄씩 정리한 문
 - TRACE 문장 : 단계별 시간 · 잠금 대기 · 인덱스 사용을 추적하며 실행
 - SUGGEST INDEX [FOR] SELECT | UPDATE | DELETE ... (`SUGGEST INDEXES`도 같음) : 그 문장이 스캔을 그만두게 할 인덱스를 제안 — 같음 조건 열(서로 다른 값이 많은 열 먼저), 범위 열 하나, ORDER BY 열 순서의 `CREATE INDEX` 문장과 이유, 인덱스로 읽을 행 수 추정, 이미 있는 인덱스, 인덱스가 도움이 안 되는 이유(열을 함수로 감쌈 · 앞이 `%`인 LIKE · OR · 100행 미만 표 · 대부분을 읽게 됨)를 한 줄씩 담은 표로 답함. 아무것도 만들지 않음. R70부터 **문장을 블록으로 읽음**: 겉 질의, 각 CTE · 파생 표(LATERAL 포함) · 하위 질의(IN · EXISTS · 스칼라, 겉 질의의 열을 쓰는 상관 하위 질의도), UNION · INTERSECT · EXCEPT의 가지를 각각 자기 표로 읽고, OR의 가지는 가지별로 읽어(`needs_rewrite`) 따로 문장으로 써야 한다고 알림. 답 표는 `block`(어느 부분의 제안인가: 비면 문장 자체)과 `needs_rewrite` 열을 더 가짐
 - ANALYZE TABLE t : 통계 정보 갱신
+- OPTIMIZE [NO_WRITE_TO_BINLOG | LOCAL] TABLE t[, t2 ...] : 죽은 행 버전 정리 + 통계 갱신. MySQL의 응답 모양(`Table`, `Op`, `Msg_type`, `Msg_text`; "Table does not support optimize, doing recreate + analyze instead" 노트와 `OK`). 열린 트랜잭션을 먼저 커밋한다
+- CHECK TABLE t[, t2 ...] [옵션] : 행을 읽어 NOT NULL 열의 NULL · 기본키 · UNIQUE 중복 · 부모가 없는 외래키 값을 찾는다. 이상이 없으면 `status OK`, 있으면 `error` 줄들과 `status Corrupt`(없는 표 · 뷰는 `Error` 줄과 `Operation failed`)
 - VACUUM [t] : 지운 행의 옛 버전 정리
 - CHECKPOINT : redo 로그를 테이블 파일에 반영하고 비움
 
@@ -478,7 +485,7 @@ RuSQL이 실제로 받아서 실행하는 SQL 문법을 한 줄씩 정리한 문
 프로시저 · 트리거 본문의 제어문:
 
 - DECLARE 변수 타입 [DEFAULT 값] : 지역 변수 선언
-- SET 변수 = 식 : 변수에 값 넣기(`SET NEW.col = 식`으로 BEFORE INSERT 트리거에서 입력값 바꾸기 — 본문 맨 위에서도 `IF`·`WHILE` 안에서도)
+- SET 변수 = 식[, 변수 = 식 ...] : 변수에 값 넣기(`SET NEW.col = 식`으로 BEFORE INSERT · BEFORE UPDATE 트리거에서 입력값 · 바뀔 값 고치기 — 본문 맨 위에서도 `IF`·`WHILE` 안에서도; AFTER 트리거에서는 오류). BEFORE UPDATE는 기본키가 있는 표에서만
 - IF 조건 THEN ... [ELSEIF 조건 THEN ...] [ELSE ...] END IF : 조건 분기
 - WHILE 조건 DO ... END WHILE : 조건이 참인 동안 반복
 - LOOP ... END LOOP : 무한 반복(LEAVE로 탈출)
@@ -503,7 +510,7 @@ mysql 클라이언트 · 드라이버 · 도구가 보내는 문장을 받아주
 - SHOW ENGINES / SHOW PLUGINS : 엔진 · 플러그인 목록(R60: `SHOW ENGINES`·`information_schema.engines`는 MySQL 8.4의 11행을 그대로 보임 — **RuSQL의 엔진은 InnoDB 방식 하나뿐**이라 `ENGINE = MyISAM` 같은 옵션은 받아서 무시하고 트랜잭션·행 잠금이 있는 같은 방식으로 만들며, InnoDB의 `XA = YES`도 표시일 뿐 XA 문장은 없음)
 - SHOW WARNINGS : 경고 목록(항상 비어 있음)
 - SHOW EVENTS / SHOW TRIGGERS / SHOW PROCEDURE STATUS / SHOW FUNCTION STATUS : 빈 목록으로 응답
-- ANALYZE | CHECK | OPTIMIZE TABLE t : 통계 갱신 · 점검 · 정리(MySQL 응답 모양)
+- ANALYZE TABLE t : 통계 갱신(MySQL 응답 모양; `OPTIMIZE` · `CHECK`는 R71부터 엔진 안의 문장으로 11장에 있다)
 - SELECT VERSION() / USER() / CURRENT_USER() / DATABASE() / @@변수 : 클라이언트가 접속 직후 보내는 질의
 - SET NAMES / SET character_set_* / SET autocommit ... : 클라이언트의 접속 설정(모르는 변수는 OK로 응답)
 - /*!40101 SET ... */ / /*M!... */ : mysqldump가 쓰는 실행 가능한 주석(실행함)
@@ -524,14 +531,14 @@ mysql 클라이언트 · 드라이버 · 도구가 보내는 문장을 받아주
 받아들이지 않고 오류를 돌려주는 문법입니다(MySQL에는 있음). 새 문법은 필요할 때 다음 라운드에서 하나씩 추가합니다.
 
 - **테이블 정의** : `GENERATED ALWAYS AS (...)` 생성 컬럼, `DEFAULT (식)`, `CREATE TEMPORARY TABLE`, `FULLTEXT` 인덱스, 인덱스 접두 길이 `col(n)`, 여러 컬럼 외래 키, 표현식 인덱스, `ZEROFILL`, `SERIAL` · `BINARY` · `VARBINARY` · `BIT` · `GEOMETRY` 타입, `ALTER TABLE ADD/DROP PRIMARY KEY`, `ALTER TABLE CONVERT TO CHARACTER SET`, 파티션 `KEY` · `COLUMNS` · `REORGANIZE` · `TRUNCATE PARTITION`, `DROP TABLE ... CASCADE`, `CREATE INDEX IF NOT EXISTS`, `ALTER DATABASE`
-- **뷰** : `CREATE VIEW v (컬럼 목록) AS ...`, `WITH CHECK OPTION`
+- **뷰** : `CREATE VIEW v (컬럼 목록) AS ...`, 조인 뷰의 `UPDATE` · `INSERT`(MySQL은 한 표의 열만 쓰면 받음)
 - **데이터 쓰기** : `INSERT ... VALUES ()`(빈 값), `INSERT ... DEFAULT VALUES`, `INSERT ... AS 별칭`, `INSERT/UPDATE/DELETE LOW_PRIORITY · QUICK`, `UPDATE IGNORE`, `UPDATE ... JOIN (파생 테이블)`, `DELETE FROM ... USING`, `LOAD DATA`, `SELECT ... INTO OUTFILE`
 - **조회** : `NATURAL LEFT | RIGHT JOIN`, `TABLE t`, `VALUES ROW(...)`, `USE | FORCE | IGNORE INDEX` 힌트, `PARTITION (p)` 선택, `STRAIGHT_JOIN`, `SELECT ALL | HIGH_PRIORITY`, `FROM DUAL`, `NULLS FIRST | LAST`, `OFFSET n ROWS`, `FOR UPDATE OF 테이블`, 괄호로 감싼 `(SELECT ..) UNION (SELECT ..) ORDER BY`, `NATURAL LEFT JOIN`, `IN (SELECT ... UNION SELECT ...)`, `INSERT ... SELECT ... ON DUPLICATE KEY UPDATE`
 - **식 · 리터럴** : `IS [NOT] DISTINCT FROM`, `BETWEEN SYMMETRIC`, `.5`, `b'101'`, `DATE '2024-01-01'`, `_utf8mb4'x'`, `COLLATE` 연산자, `BINARY` 연산자, `MATCH ... AGAINST`, `SOUNDS LIKE`, `SELECT @a := 식`, `CONVERT(식 USING 문자집합)`, `DEFAULT(col)`, `GROUPING()`
 - **함수** : `PERCENTILE_CONT ... WITHIN GROUP`, `BIT_XOR`, `CONNECTION_ID`, `GET_LOCK`, `INET_ATON`, `BENCHMARK`, `JSON_MERGE_PATCH` 등 위 9장에 없는 함수
 - **프로시저** : `SIGNAL`, `DECLARE ... HANDLER`, 커서(`DECLARE CURSOR`), 본문의 `CASE ... END CASE`, 반복문 끝의 라벨(`END WHILE lp`), `CREATE PROCEDURE IF NOT EXISTS`, `CREATE OR REPLACE PROCEDURE`, `CREATE TRIGGER IF NOT EXISTS`, 여러 문장 함수 본문(`BEGIN ... RETURN ... END`)
 - **권한 · 사용자** : `ALTER USER`, 컬럼 단위 `GRANT SELECT (col)`, 역할을 `GRANT 역할 TO 사용자` 형식으로 부여
-- **조회 · 관리** : `SHOW CREATE DATABASE`, `SHOW CREATE PROCEDURE`, `SHOW CREATE TRIGGER`, `SHOW TABLES IN db`, `SHOW FULL PROCESSLIST`, `SHOW ENGINE INNODB STATUS`, `SHOW MASTER STATUS`, `SHOW SLAVE STATUS`, `SHOW PRIVILEGES`, `SHOW ERRORS`, `SHOW DATABASES LIKE`, `SHOW OPEN TABLES`, `SHOW DATABASES LIKE`, `EXPLAIN FORMAT=JSON`, `EXPLAIN EXTENDED`, `EXPLAIN INSERT | UPDATE | DELETE`의 실행 계획(안내만 나옴), `information_schema.routines`, `information_schema.triggers`, `FLUSH`, `HELP`, `DELIMITER`, `XA`, `OPTIMIZE TABLE` · `CHECK TABLE`(네이티브 프로토콜), `ROLLBACK AND CHAIN`, `LOCK TABLES t AS 별칭`, `DROP PREPARE`
+- **조회 · 관리** : `SHOW CREATE DATABASE`, `SHOW CREATE PROCEDURE`, `SHOW CREATE TRIGGER`, `SHOW TABLES IN db`, `SHOW FULL PROCESSLIST`, `SHOW ENGINE INNODB STATUS`, `SHOW MASTER STATUS`, `SHOW SLAVE STATUS`, `SHOW PRIVILEGES`, `SHOW ERRORS`, `SHOW DATABASES LIKE`, `SHOW OPEN TABLES`, `SHOW DATABASES LIKE`, `EXPLAIN FORMAT=JSON`, `EXPLAIN EXTENDED`, `EXPLAIN INSERT | UPDATE | DELETE`의 실행 계획(안내만 나옴), `information_schema.routines`, `information_schema.triggers`, `FLUSH`, `HELP`, `DELIMITER`, `XA`, `LOCK TABLES t AS 별칭`, `DROP PREPARE`
 - **복제 · 분산** : 복제(replication), XA 분산 트랜잭션, 실제 페이지 단위 버퍼 풀, 이벤트 스케줄러(`CREATE EVENT`)
 
 > 이 문서는 RuSQL 엔진이 받아들이는 문법을 실제로 실행해 확인한 목록입니다. 새 문법을 넣거나 빼면 이 문서도 같이 고칩니다.

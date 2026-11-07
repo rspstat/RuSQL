@@ -259,8 +259,17 @@ std::vector<Statement> Parser::parse_proc_body() {
         return parse_proc_stmts_until_end();
     }
     std::vector<Statement> v;
-    v.push_back(parse_proc_stmt());
+    parse_proc_stmt_into(v);
     return v;
+}
+
+// `SET a = 1, b = 2` (also `SET NEW.a = 1, NEW.b = 2` of a trigger) is one statement per assignment, run in the order written
+void Parser::parse_proc_stmt_into(std::vector<Statement>& out) {
+    out.push_back(parse_proc_stmt());
+    while (std::holds_alternative<Statement::ProcSet>(out.back().data) && peek_is(TokenKind::Comma)) {
+        advance();
+        out.push_back(parse_proc_set_var());
+    }
 }
 
 /// Parse statements until END (consumes END token)
@@ -270,7 +279,7 @@ std::vector<Statement> Parser::parse_proc_stmts_until_end() {
         while (peek_is(TokenKind::Semicolon)) advance();
         if (peek_is(TokenKind::End)) { advance(); break; }
         if (!peek()) break;
-        stmts.push_back(parse_proc_stmt());
+        parse_proc_stmt_into(stmts);
         if (peek_is(TokenKind::Semicolon)) advance();
     }
     return stmts;
@@ -436,7 +445,7 @@ std::vector<Statement> Parser::parse_proc_stmts_until_elseif_or_else_or_end() {
     for (;;) {
         while (peek_is(TokenKind::Semicolon)) advance();
         if (peek_is(TokenKind::ElseIfKw) || peek_is(TokenKind::Else) || peek_is(TokenKind::End) || !peek()) break;
-        stmts.push_back(parse_proc_stmt());
+        parse_proc_stmt_into(stmts);
         if (peek_is(TokenKind::Semicolon)) advance();
     }
     return stmts;
@@ -462,7 +471,7 @@ std::vector<Statement> Parser::parse_proc_stmts_until_end_while() {
             break;
         }
         if (!peek()) break;
-        stmts.push_back(parse_proc_stmt());
+        parse_proc_stmt_into(stmts);
         if (peek_is(TokenKind::Semicolon)) advance();
     }
     return stmts;
@@ -484,7 +493,7 @@ std::vector<Statement> Parser::parse_proc_stmts_until_end_loop() {
             break;
         }
         if (!peek()) break;
-        stmts.push_back(parse_proc_stmt());
+        parse_proc_stmt_into(stmts);
         if (peek_is(TokenKind::Semicolon)) advance();
     }
     return stmts;
@@ -505,7 +514,7 @@ std::vector<Statement> Parser::parse_proc_stmts_until_until() {
         while (peek_is(TokenKind::Semicolon)) advance();
         if (peek_is(TokenKind::Until)) { advance(); break; }
         if (!peek()) break;
-        stmts.push_back(parse_proc_stmt());
+        parse_proc_stmt_into(stmts);
         if (peek_is(TokenKind::Semicolon)) advance();
     }
     return stmts;
