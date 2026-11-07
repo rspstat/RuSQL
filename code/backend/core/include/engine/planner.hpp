@@ -142,7 +142,8 @@ public:
     std::size_t estimate_rows(std::size_t total, const AccessPath& access, const std::string& table) const;
     double estimate_cost(std::size_t total, const AccessPath& access) const;
 
-    std::string explain(const SelectPlan& plan) const;
+    // `statement`: the kind of a write (UPDATE, DELETE) the plan is of, told in a row of its own; nothing for a SELECT
+    std::string explain(const SelectPlan& plan, const std::string& statement = std::string()) const;
 
 private:
     const std::unordered_map<std::string, std::vector<Row>>& tables_;

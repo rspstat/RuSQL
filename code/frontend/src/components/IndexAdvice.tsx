@@ -5,7 +5,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { QueryResult } from "../types";
 import type { Advice } from "../lib/indexAdvice";
-import { describeTrial, executionMs, median, parseAdvice, trialIndex } from "../lib/indexAdvice";
+import { accessOf, describeEstimate, describeTrial, estimatedCost, executionMs, median, parseAdvice, trialIndex } from "../lib/indexAdvice";
 import "./IndexAdvice.css";
 
 const TRIAL_RUNS = 3;       // plans timed before and after (the median is kept)
@@ -23,6 +23,8 @@ export default function IndexAdvice({ sql, run, onInsert }: {
   const runRef = useRef(run);
   runRef.current = run;
   const isSelect = /^SELECT\b/i.test(sql.trim());
+  // an UPDATE or DELETE is never run for a trial: EXPLAIN gives the plan the engine estimates, and the trial compares the cost before and after
+  const isWrite = /^(UPDATE|DELETE)\b/i.test(sql.trim());
 
   useEffect(() => {
     let cancelled = false;
@@ -53,6 +55,15 @@ export default function IndexAdvice({ sql, run, onInsert }: {
     return median(times);
   };
 
+  // the estimated plan (cost and access path) of an UPDATE / DELETE: EXPLAIN runs nothing
+  const estimated = async (): Promise<{ cost: number; access: string | null } | null> => {
+    const [plan] = await runRef.current(`EXPLAIN ${sql}`);
+    if (!plan || !plan.success) return null;
+    const lines = plan.rows.map(row => (row[0] ?? "").trim());
+    const cost = estimatedCost(lines);
+    return cost === null ? null : { cost, access: accessOf(lines) };
+  };
+
   const tryIt = async (i: number) => {
     if (!advice) return;
     const s = advice.suggestions[i];
@@ -61,12 +72,18 @@ export default function IndexAdvice({ sql, run, onInsert }: {
     setTrial(t => ({ ...t, [i]: "Trying…" }));
     let built = false;
     try {
-      const before = await timed();
+      const plannedBefore = isWrite ? await estimated() : null;
+      const timedBefore = isWrite ? null : await timed();
       const [made] = await runRef.current(index.create);
       if (!made?.success) { setTrial(t => ({ ...t, [i]: `Could not build the index: ${made?.message ?? ""}` })); return; }
       built = true;
-      const after = await timed();
-      setTrial(t => ({ ...t, [i]: before !== null && after !== null ? describeTrial(before, after) : "Could not time the plan" }));
+      if (isWrite) {
+        const plannedAfter = await estimated();
+        setTrial(t => ({ ...t, [i]: plannedBefore && plannedAfter ? describeEstimate(plannedBefore, plannedAfter) : "Could not read the plan" }));
+        return;
+      }
+      const timedAfter = await timed();
+      setTrial(t => ({ ...t, [i]: timedBefore !== null && timedAfter !== null ? describeTrial(timedBefore, timedAfter) : "Could not time the plan" }));
     } catch (e) {
       setTrial(t => ({ ...t, [i]: String(e) }));
     } finally {
@@ -89,8 +106,10 @@ export default function IndexAdvice({ sql, run, onInsert }: {
           <div className="ia-actions">
             <button className="ia-btn" onClick={() => onInsert(s.create)}>Insert into editor</button>
             <button className="ia-btn" onClick={() => { navigator.clipboard?.writeText(s.create).catch(() => undefined); }}>Copy</button>
-            {isSelect && s.rowsInTable <= TRIAL_MAX_ROWS && (
-              <button className="ia-btn primary" disabled={busy} onClick={() => tryIt(i)}>Try it</button>
+            {(isSelect || isWrite) && !s.needsRewrite && s.rowsInTable <= TRIAL_MAX_ROWS && (
+              <button className="ia-btn primary" disabled={busy} title={isWrite ? "The statement is not run: the plan before and after is the engine's estimate" : undefined} onClick={() => tryIt(i)}>
+                {isWrite ? "Try it (estimate)" : "Try it"}
+              </button>
             )}
             {trial[i] && <span className="ia-trial">{trial[i]}</span>}
           </div>

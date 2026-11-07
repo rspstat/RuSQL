@@ -411,10 +411,10 @@ RuSQL이 실제로 받아서 실행하는 SQL 문법을 한 줄씩 정리한 문
 
 ### 실행 · 성능
 
-- EXPLAIN SELECT ... : 실행 계획(접근 경로 · 조인 알고리즘 · 비용; SELECT가 아닌 문장은 계획 없이 안내만)
-- EXPLAIN ANALYZE 문장 : 실제로 실행하며 단계별 행 수 · 시간 · 비율(조인 종류 · 알고리즘, 서브쿼리 시간 포함; 쓰기 문장은 실제로 바뀜)
+- EXPLAIN SELECT | UPDATE | DELETE ... : 실행 계획(접근 경로 · 조인 알고리즘 · 비용). UPDATE · DELETE(다중 표 포함)는 "Statement" 줄에 종류를 적고 그 문장이 찾는 행의 계획을 보여 주며 **아무것도 실행하지 않음**(R70); 그 밖의 문장은 계획 없이 안내만
+- EXPLAIN ANALYZE 문장 : 실제로 실행하며 단계별 행 수 · 시간 · 비율(조인 종류 · 알고리즘, 서브쿼리 시간 포함; 쓰기 문장은 실제로 바뀜 — UPDATE · DELETE는 계획 줄도 함께 보여 줌. 쓰기 문장을 실행하지 않고 보려면 `EXPLAIN`만 씀)
 - TRACE 문장 : 단계별 시간 · 잠금 대기 · 인덱스 사용을 추적하며 실행
-- SUGGEST INDEX [FOR] SELECT | UPDATE | DELETE ... (`SUGGEST INDEXES`도 같음) : 그 문장이 스캔을 그만두게 할 인덱스를 제안 — 같음 조건 열(서로 다른 값이 많은 열 먼저), 범위 열 하나, ORDER BY 열 순서의 `CREATE INDEX` 문장과 이유, 인덱스로 읽을 행 수 추정, 이미 있는 인덱스, 인덱스가 도움이 안 되는 이유(열을 함수로 감쌈 · 앞이 `%`인 LIKE · OR · 100행 미만 표 · 대부분을 읽게 됨)를 한 줄씩 담은 표로 답함. 아무것도 만들지 않음(WITH·하위 질의·OR의 UNION 다시 쓰기는 읽지 않음)
+- SUGGEST INDEX [FOR] SELECT | UPDATE | DELETE ... (`SUGGEST INDEXES`도 같음) : 그 문장이 스캔을 그만두게 할 인덱스를 제안 — 같음 조건 열(서로 다른 값이 많은 열 먼저), 범위 열 하나, ORDER BY 열 순서의 `CREATE INDEX` 문장과 이유, 인덱스로 읽을 행 수 추정, 이미 있는 인덱스, 인덱스가 도움이 안 되는 이유(열을 함수로 감쌈 · 앞이 `%`인 LIKE · OR · 100행 미만 표 · 대부분을 읽게 됨)를 한 줄씩 담은 표로 답함. 아무것도 만들지 않음. R70부터 **문장을 블록으로 읽음**: 겉 질의, 각 CTE · 파생 표(LATERAL 포함) · 하위 질의(IN · EXISTS · 스칼라, 겉 질의의 열을 쓰는 상관 하위 질의도), UNION · INTERSECT · EXCEPT의 가지를 각각 자기 표로 읽고, OR의 가지는 가지별로 읽어(`needs_rewrite`) 따로 문장으로 써야 한다고 알림. 답 표는 `block`(어느 부분의 제안인가: 비면 문장 자체)과 `needs_rewrite` 열을 더 가짐
 - ANALYZE TABLE t : 통계 정보 갱신
 - VACUUM [t] : 지운 행의 옛 버전 정리
 - CHECKPOINT : redo 로그를 테이블 파일에 반영하고 비움
@@ -423,6 +423,7 @@ RuSQL이 실제로 받아서 실행하는 SQL 문법을 한 줄씩 정리한 문
 
 - SHOW STATUS / SHOW SESSION STATUS [LIKE 'pattern'] : 이 세션의 상태 카운터(문장 종류별 개수 · Questions)
 - SHOW GLOBAL STATUS [LIKE 'pattern'] : 서버 전체 카운터(Com_* 문장 수 · Connections · Threads_* · Uptime · Innodb_* 버퍼 풀 / redo / 행 잠금 대기 · Slow_queries)
+- SET GLOBAL max_connections = n : 서버가 한꺼번에 받는 연결 수(1 ~ 100000, 범위 밖의 수는 그 안으로 맞춤, 기본 151; 글자는 오류 1232). 자체 프로토콜(7878)과 MySQL 프로토콜(3306)이 함께 세며(로그인 전의 연결도 자리를 차지) 가득 차면 새 연결을 오류 1040 `Too many connections`로 거절함(MySQL 클라이언트는 핸드셰이크 자리에서, 자체 프로토콜은 `ERR` 줄로). 이미 열린 연결은 그대로. `@@max_connections`, `SHOW GLOBAL STATUS`의 `Connection_errors_max_connections`(거절한 수)와 MySQL 프로토콜의 `SHOW VARIABLES`(`max_connections` · `long_query_time` · `slow_query_log`)가 지금 값을 보여 줌
 - SET GLOBAL slow_query_log = ON | OFF | TRUE | FALSE | 1 | 0 : 느린 쿼리 로그를 켜고 끔(다른 값은 오류 1231; 로그가 꺼져 있어도 `Slow_queries`는 센다)
 - SET GLOBAL long_query_time = 초(소수 가능, 기본 10) : 이 시간 이상 걸린 문장이 느린 쿼리(글자는 오류 1232, 범위 0 ~ 31536000 밖의 수는 그 안으로 맞춤; MySQL과 달리 세션 값이 따로 없어 서버 전체에 하나, `SET SESSION`도 같은 값을 바꿈)
 - SHOW PROCESSLIST : 접속 중인 세션과 실행 중인 문장

@@ -297,7 +297,7 @@ test("advice: the answer of SUGGEST INDEX is read into suggestions, indexes ther
   ];
   const a = adv.parseAdvice(columns, rows);
   assert.equal(a.suggestions.length, 2);
-  assert.deepEqual(a.suggestions[0], { table: "t", columns: "cat, grp", why: "searched by cat (=), grp (=)", create: "CREATE INDEX idx_t_cat_grp ON t (cat, grp);", rowsInTable: 2000, rowsRead: 1 });
+  assert.deepEqual(a.suggestions[0], { table: "t", columns: "cat, grp", why: "searched by cat (=), grp (=)", create: "CREATE INDEX idx_t_cat_grp ON t (cat, grp);", rowsInTable: 2000, rowsRead: 1, block: "", needsRewrite: false });
   assert.equal(a.suggestions[1].rowsRead, null);
   assert.deepEqual(a.already, [{ table: "o", columns: "t_id", detail: "already served by the index idx" }]);
   assert.deepEqual(a.notes, ["A LIKE on name starts with a wildcard."]);
@@ -310,12 +310,51 @@ test("advice: the time a plan says it took, in ms", () => {
   assert.equal(adv.median([5, 1, 3]), 3);
 });
 test("advice: the index a trial builds has a name of its own, and what a trial shows", () => {
-  const s = { table: "t", columns: "a, b", why: "", create: "CREATE INDEX idx_t_a_b ON t (a, b);", rowsInTable: 10, rowsRead: null };
+  const s = { table: "t", columns: "a, b", why: "", create: "CREATE INDEX idx_t_a_b ON t (a, b);", rowsInTable: 10, rowsRead: null, block: "", needsRewrite: false };
   assert.deepEqual(adv.trialIndex(s, 2), { name: "__try_2_t", create: "CREATE INDEX __try_2_t ON t (a, b);", drop: "DROP INDEX __try_2_t ON t;" });
   assert.equal(adv.describeTrial(0.8, 0.05), "0.800 ms → 0.050 ms (16x faster)");
   assert.equal(adv.describeTrial(30, 10), "30.00 ms → 10.00 ms (3.0x faster)");
   assert.equal(adv.describeTrial(10, 10), "10.00 ms → 10.00 ms (no change)");
   assert.equal(adv.describeTrial(10, 20), "10.00 ms → 20.00 ms (slower)");
+});
+
+test("advice (R70): the block a suggestion is for and the OR branch that needs a rewrite are read", () => {
+  const columns = ["kind", "table_name", "columns", "detail", "create_index", "rows_in_table", "rows_read_with_index", "block", "needs_rewrite"];
+  const a = adv.parseAdvice(columns, [
+    ["suggest", "o", "qty", "searched by qty (=) (in an IN subquery)", "CREATE INDEX idx_o_qty ON o (qty);", "1000", "142", "an IN subquery", ""],
+    ["suggest", "t", "cat", "branch 1 of an OR", "CREATE INDEX idx_t_cat ON t (cat);", "2000", "10", "", "yes"],
+  ]);
+  assert.equal(a.suggestions[0].block, "an IN subquery");
+  assert.equal(a.suggestions[0].needsRewrite, false);
+  assert.equal(a.suggestions[1].block, "");
+  assert.equal(a.suggestions[1].needsRewrite, true);
+});
+test("advice (R70): the estimated plan of an UPDATE / DELETE, and what its trial shows (nothing is run)", () => {
+  assert.equal(adv.estimatedCost(["Table: t", "Est. cost: 5000.0", "Access: Seq Scan"]), 5000);
+  assert.equal(adv.estimatedCost(["Est. cost : 24.6"]), 24.6);
+  assert.equal(adv.estimatedCost(["Execution time: 3 ms"]), null);
+  assert.equal(adv.accessOf(["Table: t", "Access:   Index Scan   idx_t_cat (cat = 5)"]), "Index Scan idx_t_cat (cat = 5)");
+  assert.equal(adv.accessOf(["Table: t"]), null);
+  assert.equal(adv.describeEstimate({ cost: 5000, access: "Seq Scan" }, { cost: 24.6, access: "Index Scan idx" }), "cost 5000.0 → 24.6 (Seq Scan → Index Scan idx; about 203x cheaper, estimated)");
+  assert.equal(adv.describeEstimate({ cost: 100, access: "Seq Scan" }, { cost: 100, access: "Seq Scan" }), "cost 100.0 → 100.0 (no change, estimated)");
+  assert.equal(adv.describeEstimate({ cost: 100, access: null }, { cost: 200, access: null }), "cost 100.0 → 200.0 (costlier, estimated)");
+});
+
+// ── mcpTools (R70) ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+const mcpLib = await load("mcpTools");
+test("MCP panel: the tools it lists are exactly the tools of mcp_server.py", () => {
+  const server = fs.readFileSync(path.resolve(frontend, "..", "mcp", "mcp_server.py"), "utf8");
+  const real = [...server.matchAll(/@mcp\.tool\(\)\r?\ndef (\w+)\(/g)].map(m => m[1]).sort();
+  const listed = [...mcpLib.MCP_TOOL_NAMES].sort();
+  assert.ok(real.length > 30, "the tools of mcp_server.py were found");
+  assert.deepEqual(listed, real);
+  assert.equal(new Set(listed).size, listed.length, "no tool is listed twice");
+});
+test("MCP panel: every tool has a request to ask Claude, and every group has tools", () => {
+  for (const g of mcpLib.MCP_TOOL_GROUPS) {
+    assert.ok(g.tools.length > 0);
+    for (const t of g.tools) assert.ok(t.example.length > 3, t.name);
+  }
 });
 
 // ── run ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────

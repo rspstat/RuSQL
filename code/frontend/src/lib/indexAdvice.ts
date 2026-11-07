@@ -10,6 +10,8 @@ export interface Suggestion {
   create: string; // CREATE INDEX idx_t_a ON t (a);
   rowsInTable: number;
   rowsRead: number | null; // how many rows a search through it is expected to read (null: not known)
+  block: string; // the part of the statement it is for ("" the statement itself, else "an IN subquery", "the CTE x" ...)
+  needsRewrite: boolean; // one branch of an OR: it serves that branch only as a statement of its own, so a trial on the statement shows nothing
 }
 export interface Advice {
   suggestions: Suggestion[];
@@ -55,17 +57,17 @@ export function explainTargets(text: string): string[] {
   return out;
 }
 
-// The answer of SUGGEST INDEX (columns kind, table_name, columns, detail, create_index, rows_in_table, rows_read_with_index)
+// The answer of SUGGEST INDEX (columns kind, table_name, columns, detail, create_index, rows_in_table, rows_read_with_index, block, needs_rewrite)
 export function parseAdvice(columns: string[], rows: string[][]): Advice {
   const at = (name: string) => columns.indexOf(name);
-  const [kind, table, cols, detail, create, inTable, readWith] = ["kind", "table_name", "columns", "detail", "create_index", "rows_in_table", "rows_read_with_index"].map(at);
+  const [kind, table, cols, detail, create, inTable, readWith, block, rewrite] = ["kind", "table_name", "columns", "detail", "create_index", "rows_in_table", "rows_read_with_index", "block", "needs_rewrite"].map(at);
   const advice: Advice = { suggestions: [], already: [], notes: [] };
   if (kind < 0) return advice;
   for (const row of rows) {
     const cell = (i: number) => (i >= 0 ? (row[i] ?? "") : "");
     const number = (i: number) => (cell(i) === "" ? null : Number(cell(i)));
     if (cell(kind) === "suggest") {
-      advice.suggestions.push({ table: cell(table), columns: cell(cols), why: cell(detail), create: cell(create), rowsInTable: number(inTable) ?? 0, rowsRead: number(readWith) });
+      advice.suggestions.push({ table: cell(table), columns: cell(cols), why: cell(detail), create: cell(create), rowsInTable: number(inTable) ?? 0, rowsRead: number(readWith), block: cell(block), needsRewrite: cell(rewrite) === "yes" });
     } else if (cell(kind) === "already") {
       advice.already.push({ table: cell(table), columns: cell(cols), detail: cell(detail) });
     } else if (cell(kind) === "note") {
@@ -82,6 +84,31 @@ export function executionMs(lines: string[]): number | null {
     if (m) return Number(m[1]) * (m[2].toLowerCase() === "sec" ? 1000 : 1);
   }
   return null;
+}
+
+// "Est. cost: 24.6" of an EXPLAIN (the plan of a statement that must not be run: an UPDATE or DELETE), and the "Access: ..." line (null: the plan has no such line)
+export function estimatedCost(lines: string[]): number | null {
+  for (const line of lines) {
+    const m = /^Est\. cost\s*:\s*([\d.]+)/i.exec(line.trim());
+    if (m) return Number(m[1]);
+  }
+  return null;
+}
+export function accessOf(lines: string[]): string | null {
+  for (const line of lines) {
+    const m = /^Access\s*:\s*(.+)$/i.exec(line.trim());
+    if (m) return m[1].replace(/\s+/g, " ").trim();
+  }
+  return null;
+}
+
+// What a trial of an UPDATE / DELETE shows: nothing is run, so it is the engine's estimate: "cost 5000.0 → 24.6 (Seq Scan → Index Scan idx_t_cat; about 203x cheaper, estimated)"
+export function describeEstimate(before: { cost: number; access: string | null }, after: { cost: number; access: string | null }): string {
+  const fmt = (v: number) => v.toFixed(1);
+  const ratio = after.cost > 0 ? before.cost / after.cost : 0;
+  const how = before.access && after.access && before.access !== after.access ? `${before.access} → ${after.access}; ` : "";
+  const verdict = ratio >= 1.25 ? `about ${ratio >= 10 ? ratio.toFixed(0) : ratio.toFixed(1)}x cheaper, estimated` : ratio > 0 && ratio <= 0.8 ? "costlier, estimated" : "no change, estimated";
+  return `cost ${fmt(before.cost)} → ${fmt(after.cost)} (${how}${verdict})`;
 }
 
 export function median(values: number[]): number {

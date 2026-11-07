@@ -986,7 +986,7 @@ std::string handle_select_atvars(const std::string& q, const Executor& exec) {
 bool like_match(const std::string& s, const std::string& pat) { return engine::collation::like(s, pat); }
 
 std::string show_variables_result(const std::string& up, const Executor& exec) {
-    static const std::vector<std::pair<std::string, std::string>> vars = {
+    static const std::vector<std::pair<std::string, std::string>> fixed_vars = {
         {"autocommit", "ON"},
         {"character_set_client", "utf8mb4"},
         {"character_set_connection", "utf8mb4"},
@@ -1009,6 +1009,16 @@ std::string show_variables_result(const std::string& up, const Executor& exec) {
         {"version_comment", "RuSQL"},
         {"wait_timeout", "28800"},
     };
+    // the server's own variables are live: what SET GLOBAL gave them (the engine keeps them as "@name" in the session, and a session reads another's change before its next statement)
+    std::vector<std::pair<std::string, std::string>> vars = fixed_vars;
+    auto live = [&](const char* name, const char* fallback) {
+        auto it = exec.user_vars.find(std::string("@") + name);
+        return it != exec.user_vars.end() ? it->second : std::string(fallback);
+    };
+    vars.push_back({"long_query_time", live("long_query_time", "10.000000")});
+    vars.push_back({"max_connections", live("max_connections", "151")});
+    vars.push_back({"slow_query_log", live("slow_query_log", "0") == "1" ? "ON" : "OFF"});
+    std::sort(vars.begin(), vars.end());
     std::optional<std::string> like_pat;
     if (auto idx = up.find(" LIKE "); idx != std::string::npos) {
         std::string rest = up.substr(idx + 6);
@@ -1473,6 +1483,13 @@ void handle_mysql_client(SOCKET sock, std::shared_ptr<RwLock<SharedDatabase>> sh
                 peer = std::string(ip_buf) + ":" + std::to_string(ntohs(peer_addr.sin_port));
             }
         }
+    }
+
+    // The server's limit on connections (SET GLOBAL max_connections): the client is told with error 1040 where the handshake would be, and the connection is closed.
+    ConnectionSlot slot(*shared->read()->counters);
+    if (!slot.ok()) {
+        write_packet(sock, 0, err_pkt("ERROR 1040 (08004): Too many connections"));
+        return;
     }
 
     // 1. Server sends Handshake. The connection id the client reads there (mysql_thread_id) is the id of the session in the process list: it is what KILL takes (R53)

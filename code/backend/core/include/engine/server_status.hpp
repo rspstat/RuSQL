@@ -59,12 +59,39 @@ struct ServerCounters {
     std::atomic<std::uint64_t> max_used_connections{0}; // the most that were connected at once
     std::atomic<std::uint64_t> aborted_connects{0};     // sign-ins that were refused
     std::atomic<std::uint64_t> slow_queries{0};         // statements that ran for at least long_query_time (counted whether the slow query log is on or not)
+    std::atomic<std::uint64_t> max_connections{151};    // @@max_connections (SET GLOBAL max_connections = n): a connection past it is refused (the default is MySQL's)
+    std::atomic<std::uint64_t> open_connections{0};     // the connections open now on both ports, signed in or not
+    std::atomic<std::uint64_t> refused_connections{0};  // connections refused for the limit (Connection_errors_max_connections)
     const BufferPool* buffer_pool = nullptr;
     const LockManager* lock_mgr = nullptr;
 };
 
 // The rows of SHOW STATUS: (name, value). `session` (the session's own count of each statement kind) is what SESSION STATUS shows for the statement counters; nullptr
 // gives the server's own counts (GLOBAL STATUS).
+// A place among the connections the server allows: a connection takes one when it is accepted and gives it back when it ends (both ports, before the sign-in: a client
+// that never signs in holds its place, as it does in MySQL). `ok()` is false when the limit was reached: the connection is to be refused with error 1040.
+class ConnectionSlot {
+public:
+    explicit ConnectionSlot(ServerCounters& c) : c_(c) {
+        const std::uint64_t before = c_.open_connections.fetch_add(1);
+        if (before >= c_.max_connections.load()) {
+            c_.open_connections.fetch_sub(1);
+            c_.refused_connections.fetch_add(1);
+            ok_ = false;
+        }
+    }
+    ~ConnectionSlot() {
+        if (ok_) c_.open_connections.fetch_sub(1);
+    }
+    ConnectionSlot(const ConnectionSlot&) = delete;
+    ConnectionSlot& operator=(const ConnectionSlot&) = delete;
+    bool ok() const { return ok_; }
+
+private:
+    ServerCounters& c_;
+    bool ok_ = true;
+};
+
 std::vector<std::pair<std::string, std::string>> server_status_values(const ServerCounters& counters, std::size_t threads_connected, std::size_t threads_running,
                                                                       std::uint64_t redo_log_bytes, const std::array<std::uint64_t, kStatCount>* session);
 

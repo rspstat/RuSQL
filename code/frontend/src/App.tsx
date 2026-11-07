@@ -28,6 +28,7 @@ import type {
 } from "./types";
 import { computeErdLayout, type ErdPos } from "./lib/erd";
 import { measureTextPx } from "./lib/measureText";
+import { MCP_TOOL_GROUPS } from "./lib/mcpTools";
 import { rowsToJson } from "./lib/resultExport";
 import { registerSqlCompletion, clearSqlCompletionCache } from "./lib/sqlCompletion";
 
@@ -41,6 +42,12 @@ interface HistoryEntry {
 }
 type ActiveView = "editor" | "erd" | "server" | "diagram" | "compat" | "btree" | "mvcc";
 const PAGE_SIZE = 100;
+// the chip colours of the tool groups in the AI MCP panel
+const MCP_ACCENTS = {
+  teal: { bg: "rgba(78,201,176,0.12)", fg: "#4ec9b0", border: "rgba(78,201,176,0.25)" },
+  violet: { bg: "rgba(139,92,246,0.12)", fg: "#a78bfa", border: "rgba(139,92,246,0.3)" },
+  amber: { bg: "rgba(215,186,125,0.12)", fg: "#d7ba7d", border: "rgba(215,186,125,0.3)" },
+} as const;
 // the Compat page is kept (CompatView, compatSnapshot.json); false hides only its icon in the activity bar
 const SHOW_COMPAT_ICON = false;
 
@@ -3685,35 +3692,26 @@ function App() {
                       </div>
                     )}
 
-                    <div className="srv-slide-section" style={{ marginTop: 18 }}>DB Tools</div>
-                    <div style={{ display: "flex", flexWrap: "wrap", gap: 4, marginTop: 6 }}>
-                      {["execute_sql", "list_databases", "list_tables", "get_table_schema", "explain_query", "get_indexes", "sample_data"].map(t => (
-                        <span key={t} style={{ fontSize: 11, background: "rgba(78,201,176,0.12)", color: "#4ec9b0", border: "1px solid rgba(78,201,176,0.25)", borderRadius: 3, padding: "2px 7px", fontFamily: "monospace" }}>{t}</span>
-                      ))}
-                    </div>
-
-                    <div className="srv-slide-section" style={{ marginTop: 16 }}>UI Control Tools</div>
-                    <div style={{ display: "flex", flexWrap: "wrap", gap: 4, marginTop: 6 }}>
-                      {["write_to_editor", "open_new_tab", "execute_in_editor", "close_tab", "get_tab_content", "list_tabs", "switch_to_tab", "get_query_result", "get_current_database"].map(t => (
-                        <span key={t} style={{ fontSize: 11, background: "rgba(139,92,246,0.12)", color: "#a78bfa", border: "1px solid rgba(139,92,246,0.3)", borderRadius: 3, padding: "2px 7px", fontFamily: "monospace" }}>{t}</span>
-                      ))}
-                    </div>
-                    <div style={{ display: "flex", flexDirection: "column", gap: 5, marginTop: 10 }}>
-                      {[
-                        { fn: "write_to_editor",     ex: '"Write a query to select all from users table"' },
-                        { fn: "open_new_tab",         ex: '"Write a monthly aggregate query in a new tab"' },
-                        { fn: "execute_in_editor",    ex: '"Execute row count for orders table"' },
-                        { fn: "close_tab",            ex: '"Close the query1.sql tab"' },
-                        { fn: "get_tab_content",      ex: '"Read the content of query.sql tab"' },
-                        { fn: "list_tabs",            ex: '"Show me the list of open tabs"' },
-                        { fn: "switch_to_tab",        ex: '"Switch to the report.sql tab"' },
-                        { fn: "get_query_result",     ex: '"Analyze the result from the last execution"' },
-                        { fn: "get_current_database", ex: '"What is the currently selected database?"' },
-                      ].map(({ fn, ex }) => (
-                        <div key={fn} style={{ fontSize: 11, lineHeight: 1.6 }}>
-                          <span style={{ color: "#a78bfa", fontFamily: "monospace" }}>{fn}</span>
+                    {MCP_TOOL_GROUPS.map(group => {
+                      const accent = MCP_ACCENTS[group.accent];
+                      return (
+                        <div key={group.title}>
+                          <div className="srv-slide-section" style={{ marginTop: 16 }}>{group.title} ({group.tools.length})</div>
+                          <div style={{ display: "flex", flexWrap: "wrap", gap: 4, marginTop: 6 }}>
+                            {group.tools.map(t => (
+                              <span key={t.name} title={t.example} style={{ fontSize: 11, background: accent.bg, color: accent.fg, border: `1px solid ${accent.border}`, borderRadius: 3, padding: "2px 7px", fontFamily: "monospace" }}>{t.name}</span>
+                            ))}
+                          </div>
+                        </div>
+                      );
+                    })}
+                    <div className="srv-slide-section" style={{ marginTop: 16 }}>Try asking Claude</div>
+                    <div style={{ display: "flex", flexDirection: "column", gap: 5, marginTop: 6 }}>
+                      {MCP_TOOL_GROUPS.flatMap(g => g.tools.slice(0, 3).map(t => ({ ...t, accent: MCP_ACCENTS[g.accent] }))).map(({ name, example, accent }) => (
+                        <div key={name} style={{ fontSize: 11, lineHeight: 1.6 }}>
+                          <span style={{ color: accent.fg, fontFamily: "monospace" }}>{name}</span>
                           <span style={{ color: "#6b7280" }}> — </span>
-                          <span style={{ color: "#9ca3af" }}>{ex}</span>
+                          <span style={{ color: "#9ca3af" }}>"{example}"</span>
                         </div>
                       ))}
                     </div>

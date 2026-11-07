@@ -405,8 +405,15 @@ def get_table_schema(table: str, database: str = "") -> str:
 @mcp.tool()
 def explain_query(sql: str, database: str = "") -> str:
     """Run EXPLAIN ANALYZE on a query and return structured execution plan info.
-    Useful for diagnosing slow queries, checking index usage, and estimating row counts."""
-    explain_sql = sql.strip()
+    Useful for diagnosing slow queries, checking index usage, and estimating row counts.
+    A SELECT is run (EXPLAIN ANALYZE: real rows and time per step). An UPDATE or DELETE is NOT run: it gets the plan the engine estimates (EXPLAIN: access path and cost)."""
+    explain_sql = sql.strip().rstrip(";")
+    body = re.sub(r"^EXPLAIN\s+(?:ANALYZE\s+)?", "", explain_sql, flags=re.IGNORECASE)
+    if _is_write(body):
+        # EXPLAIN ANALYZE runs the statement: an UPDATE or DELETE is only planned (the engine's estimate: access path, cost), nothing is changed
+        return _run(f"EXPLAIN {body}", database)
+    if not re.match(r"\(?\s*(SELECT|WITH)\b", body, flags=re.IGNORECASE):
+        return "Refused: explain_query reads a SELECT, UPDATE or DELETE statement."
     if not explain_sql.upper().startswith("EXPLAIN"):
         explain_sql = f"EXPLAIN ANALYZE {explain_sql}"
     return _run(explain_sql, database)
@@ -422,71 +429,24 @@ def get_indexes(table: str, database: str = "") -> str:
 
 
 # ─── suggest_indexes ────────────────────────────────────────────────
-# Reads the query (a heuristic reading with regular expressions, there is no SQL parser in this process), the columns and indexes of its tables (information_schema),
-# the shape of the data (ANALYZE TABLE: how many distinct values each column has) and, for a SELECT, the plan the engine runs (EXPLAIN ANALYZE), and says which
-# index would let the query stop scanning. The statement is read as blocks (R59): the main query, each CTE, each derived table and each subquery (IN, EXISTS, scalar,
-# also a correlated one) is read on its own, and an OR is read branch by branch. By default it creates nothing: the answer holds the CREATE INDEX statements for the user
-# to run; with verify=True it tries them (a temporary index, EXPLAIN ANALYZE before and after, the index dropped again) and shows what changed.
-_SQL_WORDS = {"WHERE", "ON", "JOIN", "LEFT", "RIGHT", "INNER", "OUTER", "CROSS", "FULL", "NATURAL", "GROUP", "ORDER", "LIMIT", "HAVING", "UNION", "SET", "USING",
-              "VALUES", "SELECT", "FROM", "AS", "AND", "OR", "NOT", "NULL", "TRUE", "FALSE", "DISTINCT", "OFFSET", "FOR", "WINDOW", "LATERAL", "STRAIGHT_JOIN"}
+# The reading of the statement is the engine's: `SUGGEST INDEX <statement>` (executor_advice.cpp) reads the parsed statement -- the main query, each CTE, derived table and subquery
+# (IN, EXISTS, scalar, also a correlated one), the branches of a UNION, an OR branch by branch -- the columns and indexes of its tables and how many different values each column
+# holds, and answers with one row for each suggestion, existing index and note. The desktop client shows the same answer under a plan, so the two cannot disagree. This tool asks
+# the engine and adds what the engine does not say: the facts of the tables, the plan of the statement (EXPLAIN ANALYZE for a SELECT; for an UPDATE or DELETE EXPLAIN, which runs
+# nothing) and, with verify=True, a trial of the suggestions (a temporary index, the plan before and after, the index dropped again). By default it creates nothing.
 _CLAUSE_END = r"(?=\bWHERE\b|\bGROUP\s+BY\b|\bORDER\s+BY\b|\bHAVING\b|\bLIMIT\b|\bUNION\b|\bFOR\s+UPDATE\b|\bWINDOW\b|$)"
-_IDENT = r"`?[A-Za-z_][\w$]*`?(?:\.`?[A-Za-z_][\w$]*`?){0,2}"
-_SMALL_TABLE_ROWS = 100       # a scan of fewer rows is cheap: no index suggested
-_NOT_NARROWING = 0.2          # an index that leaves more than this share of the table to read does not help
 _VERIFY_MAX_ROWS = 200000     # verify=True builds an index: not on a table bigger than this
 _VERIFY_MAX_INDEXES = 3       # ... and tries at most this many
 _VERIFY_RUNS = 3              # EXPLAIN ANALYZE runs per measurement (the median is kept)
 
 
-def _strip_sql(sql: str) -> tuple[str, list[str]]:
-    """The statement without comments, strings and extra blanks. A LIKE pattern is the one string the answer depends on: it stays as 'p' (a pattern that starts with a
-    character, an index can serve it) or 'w' (it starts with a wildcard); the second value is the patterns themselves, in the order they were written."""
-    like_patterns = re.findall(r"\bLIKE\s+'((?:[^']|'')*)'", sql, flags=re.IGNORECASE)
+def _strip_sql(sql: str) -> str:
+    """The statement without comments, strings and extra blanks (to tell its kind and to read the one shape the rewrite of an OR is made for)."""
     s = re.sub(r"/\*.*?\*/", " ", sql, flags=re.S)
     s = re.sub(r"--[^\n]*", " ", s)
-
-    def blank(m):
-        if m.group(1) is not None:
-            pattern = m.group(2)
-            return m.group(1) + ("'w'" if not pattern or pattern[0] in "%_" else "'p'")
-        return "''"
-
-    s = re.sub(r"(\bLIKE\s+)'((?:[^']|'')*)'|'(?:[^']|'')*'", blank, s, flags=re.IGNORECASE)
+    s = re.sub(r"'(?:[^']|'')*'", "''", s)
     s = re.sub(r'"(?:[^"]|"")*"', '""', s)
-    return re.sub(r"\s+", " ", s).strip().rstrip(";").strip(), like_patterns
-
-
-def _bare(name: str) -> str:
-    return name.replace("`", "").split(".")[-1]
-
-
-def _query_tables(stripped: str) -> list[tuple[str, str]]:
-    """(table, alias) of every table the statement names (FROM, JOIN, comma lists, UPDATE, DELETE FROM); the alias is the table's own name when it has none.
-    A subquery that stands in the place of a table is cut out of the text as __SQn__ and is no table."""
-    found: list[tuple[str, str]] = []
-
-    def add(table: str, alias: str | None):
-        if table.startswith("__SQ"):
-            return
-        alias = alias if alias and alias.upper() not in _SQL_WORDS else None
-        entry = (_bare(table), _bare(alias) if alias else _bare(table))
-        if entry not in found:
-            found.append(entry)
-
-    for m in re.finditer(rf"\b(?:JOIN|UPDATE|DELETE\s+FROM)\s+({_IDENT})(?:\s+(?:AS\s+)?([A-Za-z_]\w*))?", stripped, flags=re.IGNORECASE):
-        add(m.group(1), m.group(2))
-    for m in re.finditer(rf"\bFROM\s+(.+?){_CLAUSE_END}", stripped, flags=re.IGNORECASE):
-        listing = re.split(r"\b(?:INNER|LEFT|RIGHT|FULL|CROSS|NATURAL)?\s*(?:OUTER\s+)?JOIN\b", m.group(1), flags=re.IGNORECASE)
-        for k, part in enumerate(listing):
-            part = re.sub(r"\bON\b.*$", "", part, flags=re.IGNORECASE).strip()
-            for piece in part.split(","):
-                piece = piece.strip().strip("()")
-                if piece.upper().startswith("SELECT"):
-                    continue
-                pm = re.match(rf"({_IDENT})(?:\s+(?:AS\s+)?([A-Za-z_]\w*))?$", piece)
-                if pm:
-                    add(pm.group(1), pm.group(2))
-    return found
+    return re.sub(r"\s+", " ", s).strip().rstrip(";").strip()
 
 
 def _clause(stripped: str, keyword: str) -> str:
@@ -494,8 +454,17 @@ def _clause(stripped: str, keyword: str) -> str:
     return m.group(1).strip() if m else ""
 
 
-def _join_conditions(stripped: str) -> list[str]:
-    return [m.group(1).strip() for m in re.finditer(r"\bON\b\s+(.+?)(?=\b(?:INNER|LEFT|RIGHT|FULL|CROSS|NATURAL)?\s*(?:OUTER\s+)?JOIN\b|\bWHERE\b|\bGROUP\s+BY\b|\bORDER\s+BY\b|\bHAVING\b|\bLIMIT\b|$)", stripped, flags=re.IGNORECASE)]
+def _matching_paren(text: str, start: int) -> int:
+    """The place of the parenthesis that closes the one at `start` (-1: none)."""
+    depth = 0
+    for i in range(start, len(text)):
+        if text[i] == "(":
+            depth += 1
+        elif text[i] == ")":
+            depth -= 1
+            if depth == 0:
+                return i
+    return -1
 
 
 def _split_top_level(clause: str, word: str) -> list[str]:
@@ -523,152 +492,25 @@ def _unparen(t: str) -> str:
     return t
 
 
-def _conjuncts(clause: str) -> list[str]:
-    """The AND-ed tests of a WHERE / ON (an AND inside BETWEEN is not a split; a parenthesised group of ANDs is opened, an OR stays one test)."""
-    out: list[str] = []
-    for part in _split_top_level(clause, "AND"):
-        inner = _unparen(part)
-        pieces = _split_top_level(inner, "AND")
-        if inner != part and len(pieces) > 1 and len(_split_top_level(inner, "OR")) == 1:
-            out.extend(_conjuncts(inner))
-        else:
-            out.append(part)
-    return out
-
-
-def _read_predicate(test: str) -> dict:
-    """One test of a WHERE: {"kind": eq | in | range | like_prefix | like_any | func | or | join | subquery | other, "columns": [names as written]}."""
-    t = _unparen(test)
-    columns = [c for c in re.findall(_IDENT, t) if c.upper() not in _SQL_WORDS and not c.startswith("__SQ")]
-    if len(_split_top_level(t, "OR")) > 1:
-        return {"kind": "or", "columns": columns}
-    m = re.match(rf"^({_IDENT})\s+(NOT\s+)?(IN|ANY|SOME|ALL)\s*\(?\s*__SQ\d+__", t, flags=re.IGNORECASE)
-    if m:  # x IN (SELECT ...): the column is searched by the values the subquery gives
-        return {"kind": "other" if m.group(2) else "in", "columns": [m.group(1)]}
-    m = re.match(rf"^({_IDENT})\s*(<=>|<>|!=|>=|<=|=|>|<)\s*\(?\s*__SQ\d+__", t)
-    if m:  # x = (SELECT ...)
-        return {"kind": "other" if m.group(2) in ("<>", "!=") else ("eq" if m.group(2) in ("=", "<=>") else "range"), "columns": [m.group(1)]}
-    if re.match(r"^(NOT\s+)?EXISTS\b", t, flags=re.IGNORECASE):
-        return {"kind": "subquery", "columns": []}
-    m = re.match(rf"^({_IDENT})\s*(<=>|<>|!=|>=|<=|=|>|<)\s*(.+)$", t)
-    if m:
-        left, op, right = m.group(1), m.group(2), m.group(3).strip()
-        right_is_column = re.fullmatch(_IDENT, right) is not None and right.upper() not in _SQL_WORDS
-        if right_is_column and op == "=":
-            return {"kind": "join", "columns": [left, right]}
-        if op in ("<>", "!="):
-            return {"kind": "other", "columns": [left]}
-        return {"kind": "eq" if op in ("=", "<=>") else "range", "columns": [left]}
-    m = re.match(rf"^({_IDENT})\s+(NOT\s+)?(IN|BETWEEN|LIKE|IS)\b(.*)$", t, flags=re.IGNORECASE)
-    if m:
-        left, negated, word, rest = m.group(1), bool(m.group(2)), m.group(3).upper(), m.group(4).strip()
-        if negated:
-            return {"kind": "other", "columns": [left]}
-        if word == "IN":
-            return {"kind": "in", "columns": [left]}
-        if word == "BETWEEN":
-            return {"kind": "range", "columns": [left]}
-        if word == "IS":
-            return {"kind": "eq" if re.match(r"^NULL\b", rest, flags=re.IGNORECASE) else "other", "columns": [left]}
-        return {"kind": "like_prefix" if rest.startswith("'p'") else "like_any", "columns": [left]}
-    return {"kind": "func" if columns else "other", "columns": columns}
-
-
-def _order_items(stripped: str, keyword: str) -> list[tuple[str, str]]:
-    items = []
-    for piece in _clause(stripped, keyword).split(","):
-        m = re.match(rf"^\s*({_IDENT})(?:\s+(ASC|DESC))?\s*$", piece, flags=re.IGNORECASE)
-        if m:
-            items.append((m.group(1), (m.group(2) or "ASC").upper()))
-        else:
-            break  # an expression or a position ends what an index can serve
-    return items
-
-
-def _matching_paren(text: str, start: int) -> int:
-    """The place of the parenthesis that closes the one at `start` (-1: none)."""
-    depth = 0
-    for i in range(start, len(text)):
-        if text[i] == "(":
-            depth += 1
-        elif text[i] == ")":
-            depth -= 1
-            if depth == 0:
-                return i
-    return -1
-
-
-_SUBQUERY_OPEN = re.compile(r"\(\s*(?:SELECT|WITH)\b", re.IGNORECASE)
-
-
-def _split_blocks(stripped: str) -> tuple[list[dict], set[str]]:
-    """The statement as query blocks: [{"id", "parent", "role", "text"}], the main query first (id 0), then each CTE and each derived table / subquery in it; the text of a block
-    has the blocks inside it cut out as __SQn__. The second value is the names the CTEs give."""
-    blocks: list[dict] = []
-    counter = [0]
-
-    def cut(text: str, owner: int) -> str:
-        out, i = "", 0
-        while i < len(text):
-            if text[i] != "(" or not _SUBQUERY_OPEN.match(text, i):
-                out += text[i]
-                i += 1
-                continue
-            j = _matching_paren(text, i)
-            if j < 0:
-                out += text[i:]
-                break
-            before, after = out.rstrip(), text[j + 1:]
-            alias_m = re.match(r"\s*(?:AS\s+)?([A-Za-z_]\w*)", after, flags=re.IGNORECASE)
-            alias = alias_m.group(1) if alias_m and alias_m.group(1).upper() not in _SQL_WORDS else ""
-            if re.search(r"\bNOT\s+EXISTS$|\bEXISTS$", before, flags=re.IGNORECASE):
-                role = "an EXISTS subquery"
-            elif re.search(r"\b(?:NOT\s+)?IN$|\b(?:ANY|SOME|ALL)$", before, flags=re.IGNORECASE):
-                role = "an IN subquery"
-            elif re.search(r"\b(?:FROM|JOIN)$|,$", before, flags=re.IGNORECASE):
-                role = f"the derived table {alias}" if alias else "a derived table"
-            else:
-                role = "a scalar subquery"
-            counter[0] += 1
-            n = counter[0]
-            block = {"id": n, "parent": owner, "role": role, "text": ""}
-            blocks.append(block)
-            block["text"] = cut(text[i + 1:j].strip(), n)
-            out += f" __SQ{n}__ "
-            i = j + 1
-        return re.sub(r"\s+", " ", out).strip()
-
-    ctes: list[tuple[str, str]] = []
-    rest = stripped
-    m = re.match(r"WITH\s+(?:RECURSIVE\s+)?", rest, flags=re.IGNORECASE)
-    if m:
-        pos = m.end()
-        while True:
-            head = re.match(r"([A-Za-z_]\w*)\s*(?:\([^)]*\))?\s*AS\s*\(", rest[pos:], flags=re.IGNORECASE)
-            if not head:
-                break
-            open_at = pos + head.end() - 1
-            close = _matching_paren(rest, open_at)
-            if close < 0:
-                break
-            ctes.append((head.group(1), rest[open_at + 1:close].strip()))
-            pos = close + 1
-            comma = re.match(r"\s*,\s*", rest[pos:])
-            if not comma:
-                break
-            pos += comma.end()
-        rest = rest[pos:].strip()
-    main = {"id": 0, "parent": -1, "role": "the statement", "text": ""}
-    main["text"] = cut(rest, 0)
-    named = []
-    for name, body in ctes:
-        counter[0] += 1
-        n = counter[0]
-        block = {"id": n, "parent": 0, "role": f"the CTE {name}", "text": ""}
-        blocks.append(block)
-        block["text"] = cut(body, n)
-        named.append(name)
-    return [main] + sorted(blocks, key=lambda b: b["id"]), set(named)
+def _or_rewrite(sql: str) -> dict | None:
+    """The UNION of the branches of an OR, for a plain SELECT over one table whose only test is that OR (each branch can then use an index of its own, as a statement of its own);
+    nothing for any other shape. The text of the statement is cut, so it must not hold a string that has ` or ` in it."""
+    text = re.sub(r"\s+", " ", re.sub(r"/\*.*?\*/|--[^\n]*", " ", sql, flags=re.S)).strip().rstrip(";").strip()
+    stripped = _strip_sql(sql)
+    if not stripped.upper().startswith("SELECT") or re.search(r"\(\s*SELECT\b|\bJOIN\b|\bUNION\b", stripped, flags=re.IGNORECASE):
+        return None
+    if any(_clause(stripped, k) for k in ("ORDER BY", "GROUP BY", "LIMIT", "HAVING")):
+        return None
+    if re.search(r"'[^']*\bor\b[^']*'", text, flags=re.IGNORECASE):
+        return None
+    m = re.match(r"^(SELECT .+? FROM \S+(?: (?:AS )?\w+)?) WHERE (.+)$", text, flags=re.IGNORECASE)
+    if not m or "," in m.group(1).split(" FROM ", 1)[-1]:
+        return None
+    branches = _split_top_level(_unparen(m.group(2)), "OR")
+    if len(branches) < 2 or len(_split_top_level(_unparen(m.group(2)), "AND")) != 1:
+        return None
+    return {"why": "each branch of the OR can use its own index as a statement of its own; UNION also removes rows that are the same in every selected column, which OR keeps",
+            "sql": " UNION ".join(f"{m.group(1)} WHERE {b}" for b in branches) + ";"}
 
 
 def _table_facts(table: str, database: str) -> dict:
@@ -694,10 +536,14 @@ def _table_facts(table: str, database: str) -> dict:
     return facts
 
 
+def _error_text(raw: str) -> str:
+    return " ".join(l for l in raw.splitlines() if l.strip() and l.strip() not in ("ERR", "---END---", "ERROR"))[:300]
+
+
 def _plan_summary(sql: str, database: str) -> dict:
     raw = _run(f"EXPLAIN ANALYZE {sql}", database)
     if raw.strip().upper().startswith(("ERR", "ERROR")):
-        return {"error": " ".join(l for l in raw.splitlines() if l.strip() and l.strip() not in ("ERR", "---END---"))[:300]}
+        return {"error": _error_text(raw)}
     plan: dict = {"access": [], "steps": []}
     for line in raw.splitlines():
         text = line.strip().strip("|").strip()
@@ -715,32 +561,34 @@ def _plan_summary(sql: str, database: str) -> dict:
     return plan
 
 
-def _covered(columns: list[str], indexes: dict[str, list[str]], rows: int | None, distinct: dict[str, int]) -> str | None:
-    """The index that already serves a search on `columns` (its leading columns are those columns), or one on the first column that leaves only a few rows."""
-    for name, index in indexes.items():
-        k = len(columns)
-        if index[:k] == columns or set(index[:k]) == set(columns):
-            return name
-    if rows:
-        for name, index in indexes.items():
-            if index and index[0] in columns and distinct.get(index[0]) and rows / distinct[index[0]] <= 50:
-                return name
-    return None
+def _estimated_plan(sql: str, database: str) -> dict:
+    """The plan of an UPDATE or DELETE as the engine estimates it (EXPLAIN runs nothing): how the rows are found and what the plan costs."""
+    raw = _run(f"EXPLAIN {sql}", database)
+    if raw.strip().upper().startswith(("ERR", "ERROR")):
+        return {"error": _error_text(raw)}
+    plan: dict = {"access": [], "estimated": True}
+    for line in raw.splitlines():
+        text = line.strip().strip("|").strip()
+        if text.startswith(("Access:", "Join:")):
+            plan["access"].append(re.sub(r"\s+", " ", text))
+        m = re.match(r"Est\. cost\s*:\s*([\d.]+)", text)
+        if m:
+            plan["estimated_cost"] = float(m.group(1))
+        m = re.match(r"Rows \(total\)\s*:\s*(\d+)", text)
+        if m:
+            plan["rows_in_table"] = int(m.group(1))
+    if "estimated_cost" not in plan:
+        return {"error": "The engine gave no plan for this statement: " + _error_text(raw)}
+    return plan
 
 
 class _Reading:
-    """What reading a statement found: the suggestions, the indexes that exist already, the notes, the rewrites, and how each block was read."""
+    """What the engine found, for the trial: the suggestions and the facts (rows) of the tables they are for."""
 
-    def __init__(self, database: str, cte_names: set[str]):
+    def __init__(self, database: str):
         self.database = database
-        self.cte_names = cte_names
         self.facts: dict[str, dict] = {}
         self.suggestions: list[dict] = []
-        self.already: list[dict] = []
-        self.notes: list[str] = []
-        self.rewrites: list[dict] = []
-        self.blocks: list[dict] = []
-        self.seen: set[tuple[str, tuple[str, ...]]] = set()
 
     def table(self, name: str) -> dict:
         if name not in self.facts:
@@ -748,187 +596,37 @@ class _Reading:
         return self.facts[name]
 
 
-def _read_block(block: dict, kind: str, rd: _Reading, outer: dict[str, str]) -> dict[str, str]:
-    """Reads one query block (its own tables, its own WHERE / ON / ORDER BY / GROUP BY); `outer` is the aliases of the blocks around it, which a correlated subquery names
-    in its tests. Returns the aliases this block has, for the blocks inside it."""
-    text, role = block["text"], block["role"]
-    where_note = "" if block["id"] == 0 else f" (in {role})"
-    tables = [(t, a) for t, a in _query_tables(text) if t not in rd.cte_names]
-    real = [(t, a) for t, a in tables if rd.table(t)["columns"]]
-    for t, _ in tables:
-        if (t, _) not in real and t not in rd.cte_names:
-            rd.notes.append(f"The table {t} was not found{where_note}.")
-    facts = {t: rd.table(t) for t in dict.fromkeys(t for t, _ in real)}
-    alias_to_table = {a: t for t, a in real}
-    for t, _ in real:
-        alias_to_table.setdefault(t, t)
-    rd.blocks.append({"in": role, "tables": [t for t, _ in real] or [t for t, _ in tables]})
-    if not facts:
-        return {}
+def _engine_advice(sql: str, database: str) -> dict:
+    """The answer of the engine's SUGGEST INDEX as {"suggestions", "already", "notes"}, or {"error"}."""
+    raw = _run("SUGGEST INDEX " + sql.strip().rstrip(";"), database)
+    if raw.strip().upper().startswith(("ERR", "ERROR")):
+        return {"error": _error_text(raw) or "SUGGEST INDEX failed"}
+    rows = _parse_table_output(raw)
+    if rows and "kind" not in rows[0]:
+        return {"error": "The engine did not answer SUGGEST INDEX as expected: " + raw.strip()[:200]}
+    out: dict = {"suggestions": [], "already": [], "notes": []}
 
-    def resolve(name: str) -> tuple[str, str] | None:
-        parts = name.replace("`", "").split(".")
-        column = parts[-1]
-        if len(parts) >= 2:
-            table = alias_to_table.get(parts[-2])
-            return (table, column) if table and column in facts[table]["columns"] else None
-        owners = [t for t in facts if column in facts[t]["columns"]]
-        return (owners[0], column) if len(owners) == 1 else None
+    def number(value):
+        return int(value) if str(value).strip().isdigit() else None
 
-    def is_outer(name: str) -> bool:
-        parts = name.replace("`", "").split(".")
-        return len(parts) >= 2 and parts[-2] in outer and parts[-2] not in alias_to_table
-
-    # what each table is searched, joined, grouped and sorted by
-    eq: dict[str, list[str]] = {t: [] for t in facts}
-    rng: dict[str, list[str]] = {t: [] for t in facts}
-    joins: dict[str, list[str]] = {t: [] for t in facts}
-    or_branches: list[tuple[str, list[list[str]]]] = []
-
-    def take(p: dict, test: str):
-        resolved = [r for r in (resolve(c) for c in p["columns"]) if r]
-        if p["kind"] in ("eq", "in"):
-            for t, c in resolved:
-                if c not in eq[t]:
-                    eq[t].append(c)
-        elif p["kind"] in ("range", "like_prefix"):
-            for t, c in resolved:
-                if c not in rng[t]:
-                    rng[t].append(c)
-        elif p["kind"] == "join":
-            left, right = p["columns"]
-            inner = [r for r in (resolve(left), resolve(right)) if r]
-            if len(inner) == 1 and (is_outer(left) or is_outer(right)):
-                t, c = inner[0]  # a correlated subquery looks its rows up once for each row of the outer query: the equality is a search
-                if c not in eq[t]:
-                    eq[t].append(c)
-            else:
-                for t, c in resolved:
-                    if c not in joins[t]:
-                        joins[t].append(c)
-        elif p["kind"] == "func" and resolved:
-            rd.notes.append(f"`{test}` wraps a column in an expression or function, so no index can serve it as written (compare the bare column instead){where_note}.")
-        elif p["kind"] == "like_any" and resolved:
-            rd.notes.append(f"`{test}` starts with a wildcard, so an index cannot be used for it{where_note}.")
-
-    tests = _conjuncts(_clause(text, "WHERE")) + [c for on in _join_conditions(text) for c in _conjuncts(on)]
-    for test in tests:
-        p = _read_predicate(test)
-        if p["kind"] != "or":
-            take(p, test)
-            continue
-        # an OR is read branch by branch: the same column on every branch is an IN, tests of different columns cannot be served by one index (the engine reads one
-        # index per statement, it has no index union) -- each branch can be, as a statement of its own
-        branches = [_conjuncts(_unparen(b)) for b in _split_top_level(_unparen(test), "OR")]
-        read = [[_read_predicate(c) for c in branch] for branch in branches]
-        simple = all(len(b) == 1 and b[0]["kind"] in ("eq", "in") and len(b[0]["columns"]) == 1 for b in read)
-        columns = {resolve(b[0]["columns"][0]) for b in read if simple}
-        if simple and len(columns) == 1 and None not in columns:
-            take({"kind": "in", "columns": [read[0][0]["columns"][0]]}, test)
-            continue
-        per_branch: list[list[str]] = []
-        owner = None
-        for branch in read:
-            branch_eq, branch_rng = [], []
-            for q in branch:
-                for r in (resolve(c) for c in q["columns"]):
-                    if not r:
-                        continue
-                    owner = owner or r[0]
-                    if r[0] != owner:
-                        continue
-                    if q["kind"] in ("eq", "in") and r[1] not in branch_eq:
-                        branch_eq.append(r[1])
-                    elif q["kind"] in ("range", "like_prefix") and r[1] not in branch_rng:
-                        branch_rng.append(r[1])
-            per_branch.append(branch_eq + branch_rng[:1])
-        if owner and all(per_branch):
-            or_branches.append((owner, per_branch))
-        else:
-            rd.notes.append(f"`{test}` combines columns with OR: one index cannot serve it{where_note}.")
-    sorted_by = [(resolve(c), d) for c, d in _order_items(text, "ORDER BY")]
-    sorted_by = [(r, d) for r, d in sorted_by if r]
-    grouped_by = [resolve(c) for c, _ in _order_items(text, "GROUP BY")]
-    grouped_by = [r for r in grouped_by if r]
-
-    def consider(table: str, narrowing: list[str], order_columns: list[str], why: str, extra: dict | None = None):
-        """An index on the columns the statement searches by (`narrowing`) followed by the ones it sorts by (`order_columns`)."""
-        f = facts[table]
-        rows = f["rows"]
-        columns = narrowing + order_columns
-        if not columns:
-            return
-        if rows is not None and rows < _SMALL_TABLE_ROWS:
-            rd.notes.append(f"{table} has only {rows} rows: a scan is cheap, no index suggested{where_note}.")
-            return
-        have = _covered(columns, f["indexes"], rows, f["distinct"])
-        if have:
-            if (table, tuple(columns)) not in rd.seen:
-                rd.already.append({"table": table, "columns": columns, "index": have})
-            rd.seen.add((table, tuple(columns)))
-            return
-        # how many rows a search reads is only known for equality columns: how much a range keeps is not, so a range column adds no estimate and is never a reason to refuse
-        ranged = [c for c in narrowing if c in rng[table] and c not in eq[table]]
-        counted = [c for c in narrowing if c not in ranged]
-        estimate = None
-        if rows and counted and all(c in f["distinct"] for c in counted):
-            combined = 1
-            for c in counted:
-                combined *= max(1, f["distinct"][c])
-            estimate = max(1, rows // combined) if combined else rows
-            if estimate > rows * _NOT_NARROWING and not ranged:
-                rd.notes.append(f"An index on {table}({', '.join(counted)}) would still leave about {estimate} of {rows} rows to read: not suggested{where_note}.")
-                return
-        if (table, tuple(columns)) in rd.seen:
-            return
-        rd.seen.add((table, tuple(columns)))
-        name = "idx_" + table + "_" + "_".join(columns)
-        entry = {"table": table, "columns": columns, "create_index": f"CREATE INDEX {name} ON {table} ({', '.join(columns)});", "why": why + where_note}
-        if block["id"] != 0:
-            entry["in"] = role
-        if estimate is not None:
-            entry["rows_read_with_index_estimate"] = estimate
-            entry["rows_in_table"] = rows
-        if extra:
-            entry.update(extra)
-        rd.suggestions.append(entry)
-
-    single_table = len(facts) == 1
-    has_limit = re.search(r"\bLIMIT\b", text, flags=re.IGNORECASE) is not None
-    for t, f in facts.items():
-        narrowing = sorted(eq[t], key=lambda c: -f["distinct"].get(c, 0)) + rng[t][:1]
-        order_columns: list[str] = []
-        # the rows come out of the index in the order of the ORDER BY when the index is searched by equality only and the whole sort goes one way
-        if single_table and not rng[t] and sorted_by and all(r[0] == t for r, _ in sorted_by) and len({d for _, d in sorted_by}) == 1:
-            order_columns = [r[1] for r, _ in sorted_by if r[1] not in narrowing]
-        parts = []
-        if narrowing:
-            parts.append("searched by " + ", ".join(f"{c} ({'=' if c in eq[t] else 'range'})" for c in narrowing))
-        if order_columns:
-            parts.append("sorted by " + ", ".join(order_columns) + " (the rows then come out of the index in order)")
-        if narrowing or (order_columns and has_limit):
-            consider(t, narrowing, order_columns, " and ".join(parts))
-        elif order_columns:
-            rd.notes.append(f"An index on {t}({', '.join(order_columns)}) would spare the sort, but without a LIMIT the statement reads every row anyway{where_note}.")
-        if joins[t]:
-            consider(t, joins[t][:1], [], f"joined on {joins[t][0]}: the engine looks up matching rows through it")
-    for t, per_branch in or_branches:
-        for k, cols in enumerate(per_branch, 1):
-            consider(t, cols, [], f"branch {k} of an OR (searched by {', '.join(cols)}): the engine reads one index per statement, so each branch has to be a statement of its own (see rewrites)",
-                     {"needs_rewrite": True})
-        if kind == "SELECT" and block["id"] == 0 and len(facts) == 1 and not _clause(text, "ORDER BY") and not _clause(text, "GROUP BY") and not _clause(text, "LIMIT") \
-                and not _clause(text, "HAVING") and len(or_branches) == 1 and len(tests) == 1:
-            m = re.match(r"^(SELECT .+? FROM \S+(?: (?:AS )?\w+)?) WHERE ", text, flags=re.IGNORECASE)
-            if m:
-                head = m.group(1)
-                rd.rewrites.append({"why": "each branch of the OR can use its own index as a statement of its own; UNION also removes rows that are the same in every selected column, which OR keeps",
-                                    "sql": " UNION ".join(f"{head} WHERE {b}" for b in _split_top_level(_unparen(tests[0]), "OR")) + ";"})
-    if grouped_by and single_table and block["id"] == 0:
-        t = next(iter(facts))
-        group_columns = [c for r, c in grouped_by if r == t]
-        if group_columns and not eq[t] and not rng[t]:
-            consider(t, group_columns, [], "grouped by " + ", ".join(group_columns))
-    return {**outer, **alias_to_table}
+    for r in rows:
+        columns = [c.strip() for c in r.get("columns", "").split(",") if c.strip()]
+        if r["kind"] == "suggest":
+            entry: dict = {"table": r.get("table_name", ""), "columns": columns, "create_index": r.get("create_index", ""), "why": r.get("detail", "")}
+            if r.get("block"):
+                entry["in"] = r["block"]
+            if number(r.get("rows_read_with_index")) is not None:
+                entry["rows_read_with_index_estimate"] = number(r["rows_read_with_index"])
+                entry["rows_in_table"] = number(r.get("rows_in_table"))
+            if r.get("needs_rewrite") == "yes":
+                entry["needs_rewrite"] = True
+            out["suggestions"].append(entry)
+        elif r["kind"] == "already":
+            m = re.search(r"index (\S+)$", r.get("detail", ""))
+            out["already"].append({"table": r.get("table_name", ""), "columns": columns, "index": m.group(1) if m else r.get("detail", "")})
+        elif r["kind"] == "note":
+            out["notes"].append(r.get("detail", ""))
+    return out
 
 
 def _median(values: list[float]) -> float:
@@ -936,8 +634,15 @@ def _median(values: list[float]) -> float:
     return ordered[len(ordered) // 2]
 
 
+def _is_write(sql: str) -> bool:
+    return re.match(r"\s*(UPDATE|DELETE)\b", sql, flags=re.IGNORECASE) is not None
+
+
 def _measured_plan(sql: str, database: str) -> dict:
-    """The plan of a SELECT with the time of its median run of a few (a comment makes each run its own statement, so that no cached answer is measured)."""
+    """The plan of a SELECT with the time of its median run of a few (a comment makes each run its own statement, so that no cached answer is measured); of an UPDATE or DELETE
+    the estimated plan, which runs nothing."""
+    if _is_write(sql):
+        return _estimated_plan(sql, database)
     plans = [_plan_summary(f"{sql} /* try {k} */", database) for k in range(_VERIFY_RUNS)]
     if any("error" in p for p in plans):
         return next(p for p in plans if "error" in p)
@@ -954,6 +659,10 @@ def _plan_change(before: dict, after: dict) -> dict:
         out["execution_ms"] = {"before": before["execution_ms"], "after": after["execution_ms"]}
         if after["execution_ms"] > 0:
             out["speedup"] = round(before["execution_ms"] / after["execution_ms"], 2)
+    elif "estimated_cost" in before and "estimated_cost" in after:  # (an UPDATE / DELETE: nothing was run, the cost is the engine's estimate)
+        out["estimated_cost"] = {"before": before["estimated_cost"], "after": after["estimated_cost"]}
+        if after["estimated_cost"] > 0:
+            out["speedup"] = round(before["estimated_cost"] / after["estimated_cost"], 2)
     if before.get("access") != after.get("access"):
         out["access"] = {"before": before.get("access", []), "after": after.get("access", [])}
     if "estimated_rows" in before or "estimated_rows" in after:
@@ -963,6 +672,8 @@ def _plan_change(before: dict, after: dict) -> dict:
     scan_after = any("scan" in a.lower() for a in after.get("access", []))
     if (speedup is not None and speedup >= 1.25) or (scan_before and not scan_after):
         out["verdict"] = "faster" if speedup is not None and speedup >= 1.25 else "uses the index"
+        if "estimated_cost" in out and out["verdict"] == "faster":
+            out["verdict"] = "cheaper (estimated)"
     elif speedup is not None and speedup <= 0.8:
         out["verdict"] = "slower"
     else:
@@ -973,7 +684,7 @@ def _plan_change(before: dict, after: dict) -> dict:
 def _verify(sql: str, rd: _Reading, rewrite_sql: str | None) -> dict:
     """Tries the suggested indexes on the statement: `before` is its plan now; each suggestion is built under a temporary name, the plan is measured again and the index
     is dropped; then all of them together (a join may need two); the branches of an OR together, measured on the rewrite. The tables are as they were afterwards; an index
-    that could not be dropped is named."""
+    that could not be dropped is named. An UPDATE or DELETE is not run: its plans are the engine's estimates (EXPLAIN)."""
     database = rd.database
     before = _measured_plan(sql, database)
     if "error" in before:
@@ -997,7 +708,7 @@ def _verify(sql: str, rd: _Reading, rewrite_sql: str | None) -> dict:
                 left_behind.append(f"{name} ON {table}")
 
     def too_big(s: dict) -> str | None:
-        rows = rd.facts.get(s["table"], {}).get("rows")
+        rows = rd.table(s["table"]).get("rows")
         if rows is not None and rows > _VERIFY_MAX_ROWS:
             return f"{s['table']} has {rows} rows: building an index for a trial is not worth it above {_VERIFY_MAX_ROWS}."
         return None
@@ -1035,8 +746,8 @@ def _verify(sql: str, rd: _Reading, rewrite_sql: str | None) -> dict:
             out["or_rewrite"] = {"note": "The branches of the OR need a rewrite (a statement of each branch), which is not possible to write for this statement automatically: build the indexes and measure the rewrite yourself."}
     finally:
         drop_all()
-    out["note"] = ("Each index was built under a temporary name, the statement was measured (median of "
-                   f"{_VERIFY_RUNS} runs) and the index was dropped again; the tables are as they were.")
+    out["note"] = ("Each index was built under a temporary name, " + ("the statement was NOT run (the plans are the engine's estimates)" if _is_write(sql) else
+                   f"the statement was measured (median of {_VERIFY_RUNS} runs)") + " and the index was dropped again; the tables are as they were.")
     if left_behind:
         out["left_behind"] = left_behind
         out["note"] += " These temporary indexes could not be dropped, drop them yourself: " + ", ".join(left_behind) + "."
@@ -1044,41 +755,48 @@ def _verify(sql: str, rd: _Reading, rewrite_sql: str | None) -> dict:
 
 
 def suggest_indexes_for(sql: str, database: str = "", verify: bool = False) -> dict:
-    stripped, _ = _strip_sql(sql)
-    kind = (stripped.split(" ", 1)[0] if stripped else "").upper()
+    stripped = _strip_sql(sql)
+    first = re.match(r"[\s(]*([A-Za-z]+)", stripped)
+    kind = first.group(1).upper() if first else ""
     if kind not in ("SELECT", "UPDATE", "DELETE", "WITH"):
         return {"error": "suggest_indexes reads a SELECT, UPDATE or DELETE statement."}
-    blocks, cte_names = _split_blocks(stripped)
+    advice = _engine_advice(sql, database)
+    if "error" in advice:
+        return advice
     if kind == "WITH":
         kind = "SELECT"
-    if not any(_query_tables(b["text"]) for b in blocks):
-        return {"error": "No table found in the statement."}
-    rd = _Reading(database, cte_names)
-    aliases: dict[int, dict[str, str]] = {}
-    for b in blocks:
-        outer = aliases.get(b["parent"], {}) if b["id"] != 0 and not b["role"].startswith("the CTE") else {}
-        aliases[b["id"]] = _read_block(b, kind, rd, outer)
-    shown_tables = {t: {"rows": rd.facts[t]["rows"], "indexes": rd.facts[t]["indexes"]} for t in rd.facts if rd.facts[t]["columns"]}
-    result: dict = {"statement": "SELECT" if stripped.upper().startswith("WITH") else kind, "tables": shown_tables, "suggestions": rd.suggestions}
-    if len(blocks) > 1:
-        result["blocks"] = rd.blocks
-    if rd.already:
-        result["already_indexed"] = rd.already
-    if rd.rewrites:
-        result["rewrites"] = rd.rewrites
-    if rd.notes:
-        result["notes"] = list(dict.fromkeys(rd.notes))
-    if kind in ("SELECT", "WITH"):
-        result["plan"] = _plan_summary(sql.strip().rstrip(";"), database)
+    rd = _Reading(database)
+    rd.suggestions = advice["suggestions"]
+    names = list(dict.fromkeys([s["table"] for s in advice["suggestions"]] + [a["table"] for a in advice["already"]]))
+    shown_tables = {}
+    for t in names:
+        facts = rd.table(t)
+        if facts["columns"]:
+            shown_tables[t] = {"rows": facts["rows"], "indexes": facts["indexes"]}
+    result: dict = {"statement": kind, "tables": shown_tables, "suggestions": advice["suggestions"]}
+    blocks = sorted({s.get("in", "the statement") for s in advice["suggestions"]})
+    if blocks and blocks != ["the statement"]:
+        result["blocks"] = blocks
+    if advice["already"]:
+        result["already_indexed"] = advice["already"]
+    rewrite = _or_rewrite(sql) if any(s.get("needs_rewrite") for s in advice["suggestions"]) else None
+    if rewrite:
+        result["rewrites"] = [rewrite]
+    if advice["notes"]:
+        result["notes"] = list(dict.fromkeys(advice["notes"]))
+    text = sql.strip().rstrip(";")
+    if kind == "SELECT":
+        result["plan"] = _plan_summary(text, database)
         slow = max(result["plan"].get("steps", []), key=lambda s: s["share_percent"], default=None)
         if slow and slow["share_percent"] >= 50:
             result["slowest_step"] = f"Step {slow['step']} ({slow['what']}) takes {slow['share_percent']}% of the time"
-        if verify and rd.suggestions:
-            result["verification"] = _verify(sql.strip().rstrip(";"), rd, rd.rewrites[0]["sql"].rstrip(";") if rd.rewrites else None)
-        elif verify:
-            result["verification"] = {"note": "There is no index to try."}
     else:
-        result.setdefault("notes", []).append("The plan was not run: EXPLAIN ANALYZE would execute an UPDATE or DELETE." + (" verify needs a SELECT." if verify else ""))
+        result["plan"] = _estimated_plan(text, database)  # (EXPLAIN UPDATE / DELETE: the rows the statement looks for, nothing is run)
+        result.setdefault("notes", []).append("The plan is the engine's estimate (EXPLAIN): an UPDATE or DELETE is not run by this tool.")
+    if verify and advice["suggestions"]:
+        result["verification"] = _verify(text, rd, rewrite["sql"].rstrip(";") if rewrite else None)
+    elif verify:
+        result["verification"] = {"note": "There is no index to try."}
     result["caveat"] = "A heuristic reading of the statement; the row estimates assume the columns are independent. " + (
         "The tables are as they were: the trial indexes were dropped." if verify and "verification" in result else
         "Nothing was created: run a CREATE INDEX yourself and EXPLAIN again to see the plan change (or ask for verify=True).")
@@ -1087,14 +805,16 @@ def suggest_indexes_for(sql: str, database: str = "", verify: bool = False) -> d
 
 @mcp.tool()
 def suggest_indexes(sql: str, database: str = "", verify: bool = False) -> str:
-    """Suggest indexes for a SELECT, UPDATE or DELETE: reads the statement (also a WITH, subqueries in IN / EXISTS / the FROM list / a comparison, correlated ones, and an OR,
-    each read on its own), the columns and indexes of its tables, how many distinct values each column has (ANALYZE TABLE) and, for a SELECT, the plan the engine runs
-    (EXPLAIN ANALYZE), and returns a JSON object with the CREATE INDEX statements that would let the statement stop scanning (equality columns first, then one range
-    column, then ORDER BY), why, how many rows it would read with them, the indexes the tables already have, a rewrite where an OR needs one (the engine reads one index per
-    statement), and the reasons an index would not help (a function around a column, a leading wildcard, a small table).
-    By default it creates nothing. With verify=True (a SELECT only) it TRIES the suggestions: it builds each one under a temporary name, measures EXPLAIN ANALYZE before and
-    after (median of 3 runs), drops the index again and reports what changed (plan, rows read, time, speedup) -- briefly writes to the database, so say so before using it on a
-    busy one; a table above 200,000 rows is not tried."""
+    """Suggest indexes for a SELECT, UPDATE or DELETE: the engine reads the statement (also a WITH, subqueries in IN / EXISTS / the FROM list / a comparison, correlated ones,
+    the branches of a UNION, and an OR branch by branch -- the same reading the desktop client shows under a plan), the columns and indexes of its tables and how many distinct
+    values each column has, and this tool returns a JSON object with the CREATE INDEX statements that would let the statement stop scanning (equality columns first, then one
+    range column, then ORDER BY), why, how many rows it would read with them, the indexes the tables already have, a rewrite where an OR needs one (the engine reads one index per
+    statement), the reasons an index would not help (a function around a column, a leading wildcard, a small table) and the plan of the statement (EXPLAIN ANALYZE for a SELECT,
+    EXPLAIN for an UPDATE / DELETE, which is not run).
+    By default it creates nothing. With verify=True it TRIES the suggestions: it builds each one under a temporary name, measures the plan before and after, drops the index again
+    and reports what changed. For a SELECT the plan is EXPLAIN ANALYZE (median of 3 runs: rows read, time, speedup); an UPDATE or DELETE is not run, its plans are the engine's
+    estimates (EXPLAIN: access path and cost). It briefly writes to the database (the temporary index), so say so before using it on a busy one; a table above 200,000 rows is not
+    tried."""
     return json.dumps(suggest_indexes_for(sql, database, verify), ensure_ascii=False)
 
 
@@ -1191,7 +911,8 @@ def health_report_data() -> dict:
     long_running = [s for s in running if (_num(s.get("TIME"), 0) or 0) >= 5 and "processlist" not in (s.get("INFO") or "").lower()]
     report = {
         "server": {"uptime_seconds": uptime, "connections_total": n("Connections"), "connections_now": n("Threads_connected"), "connections_max": n("Max_used_connections"),
-                   "running_now": n("Threads_running"), "failed_logins": n("Aborted_connects")},
+                   "running_now": n("Threads_running"), "failed_logins": n("Aborted_connects"), "slow_queries_total": n("Slow_queries"),
+                   "refused_for_max_connections": n("Connection_errors_max_connections")},
         "statements": {"total": n("Questions"), "per_second": round(n("Questions") / uptime, 2) if uptime else None, "by_kind": kinds},
         "buffer_pool": {"pages_used": n("Innodb_buffer_pool_pages_data"), "pages_total": n("Innodb_buffer_pool_pages_total"), "read_requests": requests, "disk_reads": reads,
                         "hit_ratio": round(1 - reads / requests, 4) if requests else None},
@@ -1217,6 +938,10 @@ def health_report_data() -> dict:
         findings.append({"level": "warn", "what": "Statement(s) running for 5 seconds or more: " + ", ".join(f"session {s.get('ID')} ({s.get('TIME')} s)" for s in long_running)})
     if n("Aborted_connects"):
         findings.append({"level": "info", "what": f"{n('Aborted_connects')} login(s) failed since the start."})
+    if n("Slow_queries"):
+        findings.append({"level": "info", "what": f"{n('Slow_queries')} statement(s) ran longer than long_query_time since the start (see slow_queries, then suggest_indexes)."})
+    if n("Connection_errors_max_connections"):
+        findings.append({"level": "warn", "what": f"{n('Connection_errors_max_connections')} connection(s) were refused because max_connections was reached (SET GLOBAL max_connections raises it)."})
     if report["redo_log_bytes"] > 4 * 1024 * 1024:
         findings.append({"level": "info", "what": f"The redo log holds {report['redo_log_bytes']} bytes: a checkpoint is due."})
     report["findings"] = findings
@@ -1454,6 +1179,305 @@ def sample_data(table: str, n: int = 10, database: str = "") -> str:
     raw = _run(f"SELECT * FROM {table} LIMIT {n}", database)
     rows = _parse_table_output(raw)
     return json.dumps(rows, ensure_ascii=False)
+
+
+# ─── R70: slow_queries, kill_session, import_csv, export_csv, diff_schema, resources and prompts ────────────────────────────────────────────────────────────────────────────
+# slow_queries reads the engine's slow query log; kill_session names the session first and ends it only after a second, confirmed call (as DROP does through
+# confirm_dangerous_sql); import_csv / export_csv move a CSV file of THIS computer in and out of a table; diff_schema says how two databases differ.
+_DB_NAME_RE = re.compile(r"^[A-Za-z0-9_$]+$")
+
+
+def slow_queries_report(limit: int = 20, min_seconds: float = 0.0) -> dict:
+    limit = max(1, min(int(limit), 200))
+    # (the native protocol has no SHOW VARIABLES: it answers SELECT @@name, which also tells the value another session has set)
+    shown = _rows("SELECT @@slow_query_log AS slow_query_log, @@long_query_time AS long_query_time")
+    variables = {"slow_query_log": shown[0].get("slow_query_log", "") if shown else "", "long_query_time": shown[0].get("long_query_time", "") if shown else ""}
+    log_on = str(variables["slow_query_log"]).upper() in ("ON", "1")
+    counted = _rows("SHOW GLOBAL STATUS LIKE 'Slow_queries'")
+    logged = _rows("SELECT START_TIME, USER_HOST, QUERY_TIME, ROWS_SENT, DB, SQL_TEXT, THREAD_ID FROM information_schema.slow_log")
+    groups: dict[str, dict] = {}
+    for r in logged:
+        seconds = float(_num(r.get("QUERY_TIME"), 0) or 0)
+        if seconds < min_seconds:
+            continue
+        sql = " ".join(str(r.get("SQL_TEXT", "")).split())
+        g = groups.setdefault(sql, {"sql": sql, "database": r.get("DB", ""), "runs": 0, "total_seconds": 0.0, "slowest_seconds": 0.0, "rows_sent_last": None, "last_started": ""})
+        g["runs"] += 1
+        g["total_seconds"] = round(g["total_seconds"] + seconds, 6)
+        g["slowest_seconds"] = max(g["slowest_seconds"], seconds)
+        g["rows_sent_last"] = _num(r.get("ROWS_SENT"))
+        g["last_started"] = max(g["last_started"], r.get("START_TIME", ""))
+    statements = sorted(groups.values(), key=lambda g: (-g["total_seconds"], -g["slowest_seconds"]))[:limit]
+    out: dict = {
+        "slow_query_log": "ON" if log_on else "OFF",
+        "long_query_time_seconds": float(_num(variables["long_query_time"], 0) or 0),
+        "slow_queries_counted_since_start": _num(counted[0].get("Value")) if counted else None,
+        "logged_statements": len(logged),
+        "statements": statements,
+    }
+    if statements:
+        out["next"] = "Pass one of these statements to suggest_indexes (verify=True tries the suggested indexes on a copy of the plan and shows the speedup) or to explain_query to see where the time goes."
+    elif not log_on:
+        out["next"] = ("The slow query log is OFF, so nothing was written down. If the user agrees, turn it on with execute_sql('SET GLOBAL slow_query_log = ON') "
+                       "(and SET GLOBAL long_query_time = 0.5 to catch more), let the workload run, and call slow_queries again.")
+    else:
+        out["next"] = f"No statement ran for {out['long_query_time_seconds']} seconds or more since the log was turned on."
+    return out
+
+
+@mcp.tool()
+def slow_queries(limit: int = 20, min_seconds: float = 0.0) -> str:
+    """The slow queries: the statements that ran for at least long_query_time (the engine's slow query log, information_schema.slow_log, the last 1000 statements while
+    slow_query_log is ON), grouped by statement text and sorted by the time they took in all, as JSON: how many runs, the total and slowest seconds, the rows sent, the database.
+    Also says whether the log is ON, the threshold, and how many slow statements the server counted since it started. If the log is OFF the answer says how to turn it on (ask
+    the user first). Use it for "which queries are slow lately?", then suggest_indexes on a statement."""
+    try:
+        return json.dumps(slow_queries_report(limit, min_seconds), ensure_ascii=False)
+    except Exception as e:
+        return _fail(e)
+
+
+def kill_session_report(session_id: int, kill_connection: bool, confirmed: bool) -> str:
+    rows = _rows(f"SELECT ID, USER, HOST, DB, COMMAND, TIME, STATE, INFO FROM information_schema.processlist WHERE ID = {int(session_id)}")
+    if not rows:
+        return f"Error: there is no session {int(session_id)} (list the sessions with list_locks or execute_sql('SHOW PROCESSLIST'))."
+    s = rows[0]
+    what = "the whole connection (the client is disconnected)" if kill_connection else "the statement it is running now (the connection stays)"
+    description = (f"session {s.get('ID')} of {s.get('USER')}@{s.get('HOST')} on database {s.get('DB') or '-'}, {s.get('COMMAND')} for {s.get('TIME')} s"
+                   + (f", running: {str(s.get('INFO'))[:200]}" if s.get("INFO") and s.get("INFO") != "NULL" else ""))
+    if not confirmed:
+        return (f"Refused: this ends {what} of {description}. Show the user the session and ask them to confirm, then call kill_session again with the same arguments and confirmed=True.")
+    answer = _run(f"KILL {'CONNECTION' if kill_connection else 'QUERY'} {int(session_id)}")
+    return json.dumps({"session": s, "killed": "connection" if kill_connection else "query", "engine_answer": " ".join(answer.split())[:200]}, ensure_ascii=False)
+
+
+@mcp.tool()
+def kill_session(session_id: int, kill_connection: bool = False, confirmed: bool = False) -> str:
+    """End a session that is stuck or running too long: KILL QUERY stops the statement it is running (the default, the connection stays), kill_connection=True also closes the
+    connection. Take the session number from list_locks (blockers) or SHOW PROCESSLIST. Ending a session loses what it was doing, so the first call (confirmed=False) only
+    describes the session and refuses; show it to the user, and call again with confirmed=True only after they said yes."""
+    try:
+        return kill_session_report(session_id, kill_connection, confirmed)
+    except Exception as e:
+        return _fail(e)
+
+
+_CSV_BATCH_ROWS = 200
+_CSV_MAX_BYTES = 50 * 1024 * 1024
+_CSV_MAX_EXPORT_ROWS = 1_000_000
+
+
+def _sql_text(value) -> str:
+    """A value as a SQL literal (None: NULL). Backslashes, quotes and line ends are written as escapes: the native protocol sends one statement on one line."""
+    if value is None:
+        return "NULL"
+    text = str(value).replace("\\", "\\\\").replace("'", "''").replace("\r", "\\r").replace("\n", "\\n").replace("\t", "\\t").replace("\x00", "\\0")
+    return f"'{text}'"
+
+
+def import_csv_report(table: str, file_path: str, database: str, has_header: bool, delimiter: str, empty_as_null: bool, commit: bool) -> str:
+    import csv
+    path = Path(file_path).expanduser()
+    if not path.is_file():
+        return f"Error: {file_path} is not a file on this computer."
+    if path.stat().st_size > _CSV_MAX_BYTES:
+        return f"Error: {path.name} is bigger than {_CSV_MAX_BYTES // (1024 * 1024)} MB: split it."
+    if not re.fullmatch(r"[A-Za-z0-9_$.]+", table):
+        return "Error: table must be a table name (letters, digits, _ and $)."
+    if len(delimiter) != 1:
+        return "Error: delimiter is one character."
+    with path.open(encoding="utf-8-sig", newline="") as f:
+        records = [r for r in csv.reader(f, delimiter=delimiter) if r]
+    if not records:
+        return "Error: the file has no rows."
+    bare = table.split(".")[-1]
+    columns = [r["COLUMN_NAME"] for r in _rows(f"SELECT COLUMN_NAME FROM information_schema.columns WHERE TABLE_NAME = '{bare}' AND TABLE_SCHEMA = " + (f"'{database}'" if database else "DATABASE()") + " ORDER BY ORDINAL_POSITION", database)]
+    if not columns:
+        return f"Error: the table {table} was not found."
+    if has_header:
+        by_lower = {c.lower(): c for c in columns}
+        header, records = [h.strip() for h in records[0]], records[1:]
+        unknown = [h for h in header if h.lower() not in by_lower]
+        if unknown:
+            return f"Error: the header names columns the table does not have: {', '.join(unknown)}. The table has: {', '.join(columns)}."
+        target = [by_lower[h.lower()] for h in header]
+    else:
+        target = columns
+    wide = [i + 1 for i, r in enumerate(records) if len(r) > len(target)]
+    if wide:
+        return f"Error: row {wide[0]} has more cells than the {len(target)} columns it is loaded into."
+    statements = []
+    for start in range(0, len(records), _CSV_BATCH_ROWS):
+        batch = records[start:start + _CSV_BATCH_ROWS]
+        values = ", ".join("(" + ", ".join(_sql_text(None if (cell == "" and empty_as_null) else cell) for cell in (r + [""] * (len(target) - len(r)))) + ")" for r in batch)
+        statements.append(f"INSERT INTO {table} ({', '.join(target)}) VALUES {values}")
+    raw = run_script(statements, database, commit, True)
+    try:
+        script = json.loads(raw)
+    except ValueError:
+        return raw
+    out = {"file": path.name, "table": table, "columns": target, "rows_in_file": len(records), "mode": script["mode"], "committed": script["committed"], "failed_at": script["failed_at"]}
+    failed = [step for step in script["results"] if not step.get("ok")]
+    if failed:
+        out["error"] = failed[0].get("error", "")
+        out["note"] = f"Statement {script['failed_at']} (rows {(script['failed_at'] - 1) * _CSV_BATCH_ROWS + 1} and on) failed, so nothing was loaded."
+    elif commit:
+        out["note"] = f"{len(records)} rows were loaded and saved."
+    else:
+        out["note"] = f"PREVIEW: {len(records)} rows were inserted and rolled back, nothing was saved. Call again with commit=True to load them."
+    return json.dumps(out, ensure_ascii=False)
+
+
+@mcp.tool()
+def import_csv(table: str, file_path: str, database: str = "", has_header: bool = True, delimiter: str = ",", empty_as_null: bool = True, commit: bool = False) -> str:
+    """Load the rows of a CSV file (a UTF-8 file on THIS computer) into an existing table, in one transaction. With has_header=True the first row names the columns (they may
+    be in any order); without it the cells go into the table's columns in order. An empty cell is NULL (empty_as_null=False keeps it as an empty text). commit=False (the
+    default) is a PREVIEW: the rows are inserted for real inside a transaction that is rolled back, so errors (a duplicate key, a wrong type) show but nothing is saved; call
+    again with commit=True once the user agreed. The first row that fails rolls everything back."""
+    try:
+        return import_csv_report(table, file_path, database, has_header, delimiter, empty_as_null, commit)
+    except Exception as e:
+        return _fail(e)
+
+
+def export_csv_report(sql: str, file_path: str, database: str, overwrite: bool) -> str:
+    import csv
+    if not re.match(r"\s*(SELECT|WITH|SHOW|\()", sql, flags=re.IGNORECASE):
+        return "Refused: export_csv writes the answer of a SELECT (or SHOW) statement."
+    path = Path(file_path).expanduser()
+    if path.suffix.lower() not in (".csv", ".tsv", ".txt"):
+        return "Refused: the file must end in .csv, .tsv or .txt."
+    if not path.parent.is_dir():
+        return f"Error: the folder {path.parent} does not exist."
+    if path.exists() and not overwrite:
+        return f"Refused: {path} exists. Ask the user whether to replace it, then call again with overwrite=True."
+    raw = _run(sql.strip().rstrip(";"), database).strip()
+    if raw.upper().startswith(("ERR", "ERROR")):
+        return "Error: " + " ".join(l.strip() for l in raw.splitlines() if l.strip() and l.strip().upper() != "ERR")[:300]
+    rows = _parse_table_output(raw)
+    if not rows or ("result" in rows[0] and len(rows) == 1) or "error" in rows[0]:
+        return "Error: the statement answered no table: " + raw[:200]
+    if len(rows) > _CSV_MAX_EXPORT_ROWS:
+        return f"Error: {len(rows)} rows are more than {_CSV_MAX_EXPORT_ROWS}: add a LIMIT."
+    headers = list(rows[0].keys())
+    with path.open("w", encoding="utf-8-sig", newline="") as f:
+        writer = csv.writer(f, delimiter="\t" if path.suffix.lower() == ".tsv" else ",")
+        writer.writerow(headers)
+        for r in rows:
+            writer.writerow(["" if r[h] == "NULL" else r[h] for h in headers])
+    return json.dumps({"file": str(path), "rows": len(rows), "columns": headers, "note": "Written as UTF-8 with a BOM (Excel opens it); NULL is an empty cell."}, ensure_ascii=False)
+
+
+@mcp.tool()
+def export_csv(sql: str, file_path: str, database: str = "", overwrite: bool = False) -> str:
+    """Write the answer of a SELECT (or SHOW) statement to a CSV file on THIS computer (.csv, .tsv or .txt; UTF-8 with a BOM so that Excel opens it; NULL is an empty cell).
+    An existing file is not replaced unless overwrite=True, which needs the user's yes. At most 1,000,000 rows."""
+    try:
+        return export_csv_report(sql, file_path, database, overwrite)
+    except Exception as e:
+        return _fail(e)
+
+
+def _schema_snapshot(db: str) -> dict:
+    """{table: {"columns": {name: [type, nullable, default, extra]}, "indexes": {name: [unique, [columns]]}, "foreign_keys": {constraint: [columns, parent, parent columns, rules]}}}"""
+    snap: dict = {}
+    for r in _rows(f"SELECT TABLE_NAME, COLUMN_NAME, COLUMN_TYPE, IS_NULLABLE, COLUMN_DEFAULT, EXTRA FROM information_schema.columns WHERE TABLE_SCHEMA = '{db}' ORDER BY TABLE_NAME, ORDINAL_POSITION"):
+        snap.setdefault(r["TABLE_NAME"], {"columns": {}, "indexes": {}, "foreign_keys": {}})["columns"][r["COLUMN_NAME"]] = [r.get("COLUMN_TYPE", ""), r.get("IS_NULLABLE", ""), r.get("COLUMN_DEFAULT", ""), r.get("EXTRA", "")]
+    for r in _rows(f"SELECT TABLE_NAME, INDEX_NAME, NON_UNIQUE, SEQ_IN_INDEX, COLUMN_NAME FROM information_schema.statistics WHERE TABLE_SCHEMA = '{db}' ORDER BY TABLE_NAME, INDEX_NAME, SEQ_IN_INDEX"):
+        if r["TABLE_NAME"] in snap:
+            entry = snap[r["TABLE_NAME"]]["indexes"].setdefault(r["INDEX_NAME"], [r.get("NON_UNIQUE") == "0", []])
+            entry[1].append(r["COLUMN_NAME"])
+    for r in _rows(f"SELECT TABLE_NAME, CONSTRAINT_NAME, COLUMN_NAME, REFERENCED_TABLE_NAME, REFERENCED_COLUMN_NAME FROM information_schema.key_column_usage WHERE TABLE_SCHEMA = '{db}' AND REFERENCED_TABLE_NAME IS NOT NULL ORDER BY TABLE_NAME, CONSTRAINT_NAME, ORDINAL_POSITION"):
+        if r["TABLE_NAME"] in snap:
+            fk = snap[r["TABLE_NAME"]]["foreign_keys"].setdefault(r["CONSTRAINT_NAME"], [[], r["REFERENCED_TABLE_NAME"], [], ""])
+            fk[0].append(r["COLUMN_NAME"])
+            fk[2].append(r["REFERENCED_COLUMN_NAME"])
+    for r in _rows(f"SELECT TABLE_NAME, CONSTRAINT_NAME, UPDATE_RULE, DELETE_RULE FROM information_schema.referential_constraints WHERE CONSTRAINT_SCHEMA = '{db}'"):
+        fks = snap.get(r["TABLE_NAME"], {}).get("foreign_keys", {})
+        if r["CONSTRAINT_NAME"] in fks:
+            fks[r["CONSTRAINT_NAME"]][3] = f"ON UPDATE {r.get('UPDATE_RULE', '')} ON DELETE {r.get('DELETE_RULE', '')}"
+    return snap
+
+
+def diff_schema_report(database_a: str, database_b: str) -> dict:
+    for name in (database_a, database_b):
+        if not _DB_NAME_RE.match(name):
+            raise ValueError(f"{name!r} is not a database name.")
+    a, b = _schema_snapshot(database_a), _schema_snapshot(database_b)
+    changed: dict = {}
+    for table in sorted(set(a) & set(b)):
+        diffs: dict = {}
+        ca, cb = a[table]["columns"], b[table]["columns"]
+        added = [c for c in cb if c not in ca]
+        removed = [c for c in ca if c not in cb]
+        altered = {c: {database_a: ca[c], database_b: cb[c]} for c in ca if c in cb and ca[c] != cb[c]}
+        if added: diffs["columns_only_in_" + database_b] = added
+        if removed: diffs["columns_only_in_" + database_a] = removed
+        if altered: diffs["columns_that_differ"] = altered
+        for key, label in (("indexes", "indexes"), ("foreign_keys", "foreign_keys")):
+            ka, kb = a[table][key], b[table][key]
+            only_a = [k for k in ka if k not in kb]
+            only_b = [k for k in kb if k not in ka]
+            differ = {k: {database_a: ka[k], database_b: kb[k]} for k in ka if k in kb and ka[k] != kb[k]}
+            if only_a: diffs[f"{label}_only_in_{database_a}"] = only_a
+            if only_b: diffs[f"{label}_only_in_{database_b}"] = only_b
+            if differ: diffs[f"{label}_that_differ"] = differ
+        if diffs:
+            changed[table] = diffs
+    only_a_tables = sorted(set(a) - set(b))
+    only_b_tables = sorted(set(b) - set(a))
+    return {"identical": not (changed or only_a_tables or only_b_tables), "tables_only_in_" + database_a: only_a_tables, "tables_only_in_" + database_b: only_b_tables,
+            "tables_that_differ": changed, "compared": {database_a: len(a), database_b: len(b)},
+            "note": "Column entries are [type, nullable, default, extra]; indexes [unique, columns]; foreign keys [columns, parent table, parent columns, rules]. SHOW CREATE TABLE gives the DDL of a table."}
+
+
+@mcp.tool()
+def diff_schema(database_a: str, database_b: str) -> str:
+    """Compare the structure of two databases: the tables only one of them has, and for the tables both have the columns (type, NULL, default), indexes and foreign keys that
+    differ. Reads information_schema only; nothing is changed. The desktop client's "Compare Schema" window also writes the migration SQL."""
+    try:
+        return json.dumps(diff_schema_report(database_a, database_b), ensure_ascii=False)
+    except Exception as e:
+        return _fail(e)
+
+
+# resources: what a client can read without calling a tool (the databases, the tables of one with their columns); prompts: ready-made requests that use the tools above
+@mcp.resource("rusql://databases", mime_type="application/json")
+def databases_resource() -> str:
+    """The databases of the server."""
+    return json.dumps(_rows("SHOW DATABASES"), ensure_ascii=False)
+
+
+@mcp.resource("rusql://schema/{database}", mime_type="application/json")
+def schema_resource(database: str) -> str:
+    """The tables of a database with their columns (name, type, NULL), as JSON."""
+    if not _DB_NAME_RE.match(database):
+        return json.dumps({"error": f"{database!r} is not a database name."})
+    tables: dict = {}
+    for r in _rows(f"SELECT TABLE_NAME, COLUMN_NAME, COLUMN_TYPE, IS_NULLABLE, COLUMN_KEY FROM information_schema.columns WHERE TABLE_SCHEMA = '{database}' ORDER BY TABLE_NAME, ORDINAL_POSITION"):
+        tables.setdefault(r["TABLE_NAME"], []).append({"name": r["COLUMN_NAME"], "type": r.get("COLUMN_TYPE", ""), "nullable": r.get("IS_NULLABLE") == "YES", "key": r.get("COLUMN_KEY", "")})
+    return json.dumps({"database": database, "tables": tables}, ensure_ascii=False)
+
+
+@mcp.prompt()
+def optimize_query(sql: str, database: str = "") -> str:
+    """Find out why a query is slow and which index would help."""
+    return (f"The query below is slow on RuSQL (database: {database or 'the current one'}). 1. Call explain_query to see the plan and where the time goes. 2. Call suggest_indexes "
+            f"with verify=True to try the suggested indexes and see the speedup. 3. Tell me what you found, and only after I say yes create the index with execute_sql.\n\n{sql}")
+
+
+@mcp.prompt()
+def find_slow_queries() -> str:
+    """Look for the statements that are slow lately and fix the worst one."""
+    return ("Call slow_queries. If the slow query log is off, tell me and ask whether to turn it on. Otherwise take the statement that took the most time, call suggest_indexes "
+            "with verify=True, and explain the result. Do not create anything before I agree.")
+
+
+@mcp.prompt()
+def explain_schema(database: str) -> str:
+    """Describe a database: its tables, how they relate, what each is for."""
+    return (f"Read the resource rusql://schema/{database} (or call list_tables and get_table_schema) and get_fk_graph for {database}. Describe in a few sentences what the "
+            f"database holds, how the tables relate through foreign keys, and anything odd (a table without a primary key, a column that looks unused).")
 
 
 # ─── 저장된 연결(Connections) 관리 ─────────────────────────────

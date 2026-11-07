@@ -175,8 +175,8 @@ const AI: Item[] = [
   {
     t: L("MCP tools", "MCP 도구"),
     s: L(
-      "32 tools: execute_sql (dangerous-SQL guard), run_script (preview, all-or-nothing), suggest_indexes (reads subqueries, CTEs and OR; verify mode builds the index, measures EXPLAIN ANALYZE before and after, and drops it), health_report, list_locks, trace_query, get_table_stats, get_fk_graph, schema and index lookup, editor and server control",
-      "도구 32개: execute_sql(위험 SQL 차단), run_script(미리보기, 전부 또는 전무), suggest_indexes(서브쿼리·CTE·OR을 읽고, verify 모드는 인덱스를 만들어 전·후 EXPLAIN ANALYZE를 재고 지움), health_report, list_locks, trace_query, get_table_stats, get_fk_graph, 스키마·인덱스 조회, 에디터·서버 제어",
+      "37 tools: execute_sql (dangerous-SQL guard), run_script (preview, all-or-nothing), suggest_indexes (the engine's own SUGGEST INDEX, which reads subqueries, CTEs, UNION and OR; verify mode builds the index, measures the plan before and after, and drops it; an UPDATE or DELETE is tried by estimate, never run), slow_queries, kill_session (asks first), import_csv / export_csv, diff_schema, health_report, list_locks, trace_query, get_table_stats, get_fk_graph, schema and index lookup, editor and server control; also resources and prompts",
+      "도구 37개: execute_sql(위험 SQL 차단), run_script(미리보기, 전부 또는 전무), suggest_indexes(엔진의 SUGGEST INDEX를 그대로 쓰며 서브쿼리·CTE·UNION·OR을 읽고, verify 모드는 인덱스를 만들어 전·후 계획을 재고 지움, UPDATE·DELETE는 실행하지 않고 추정으로만 시험), slow_queries, kill_session(먼저 묻고 끊음), import_csv / export_csv, diff_schema, health_report, list_locks, trace_query, get_table_stats, get_fk_graph, 스키마·인덱스 조회, 에디터·서버 제어, 리소스와 프롬프트",
     ),
   },
   {
@@ -258,7 +258,7 @@ function LayersView() {
         <Card style={at("2", "1")} c={C.client} title={L("Desktop UI", "데스크톱 UI")} sub="Tauri + React + Monaco"
           note={L("SQL editor (EXPLAIN plan diagram + step bars + index advice with a timed trial, result JSON export and chart, Compare Schema), Journey, ERD editor (drag to connect), animated B+Tree, MVCC and Compat pages, Server Manager (recovery card, Sessions with KILL and blockers, slow query log, Metrics trend charts), Compat page", "SQL 에디터(EXPLAIN 계획 그림·단계 막대·시험해 볼 수 있는 인덱스 제안, 결과 JSON 내보내기·차트, 스키마 비교), 한 문장의 여행, ERD 편집기(끌어서 연결), 움직이는 B+Tree·MVCC·호환성 페이지, 서버 매니저(복구 카드, KILL과 차단자가 보이는 세션, 느린 쿼리 로그, 지표 추세 그래프), 호환성 페이지")} />
         <Card style={at("3", "1")} c={C.client} title="Claude Desktop + MCP" sub="Python FastMCP, stdio JSON-RPC"
-          note={L("32 tools; drives the UI via ui_commands.json", "도구 32개, ui_commands.json으로 UI 제어")} />
+          note={L("37 tools; drives the UI via ui_commands.json", "도구 37개, ui_commands.json으로 UI 제어")} />
         <Card style={at("4", "1")} c={C.client} title="engine_client" sub={L("TCP client CLI", "TCP 클라이언트 CLI")} note="-u -p -h -P" />
         <Card style={at("5", "1")} c={C.client} title={L("MySQL clients", "MySQL 클라이언트")} sub="mysql CLI, DBeaver, JDBC"
           note={L("HikariCP and other pools", "HikariCP 등 커넥션 풀")} />

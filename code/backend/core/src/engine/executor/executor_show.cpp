@@ -464,6 +464,7 @@ std::vector<std::pair<std::string, std::string>> server_status_values(const Serv
         if (static_cast<Stat>(i) == Stat::Questions) add("Queries", value);
     }
     add("Connections", c.connections.load());
+    add("Connection_errors_max_connections", c.refused_connections.load());
     if (c.buffer_pool) {
         const std::uint64_t hits = c.buffer_pool->hit_count.load(), misses = c.buffer_pool->miss_count.load();
         add("Innodb_buffer_pool_pages_data", c.buffer_pool->usage());

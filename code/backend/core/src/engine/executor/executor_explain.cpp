@@ -95,7 +95,26 @@ std::string widen_box(const std::string& box, std::size_t min_inner) {
 
 } // namespace
 
+// The plan of an UPDATE / DELETE (single or multi-table), as text, with its kind in a row of its own; nothing for any other statement. Nothing is run.
+static std::optional<std::string> plan_of_write(const SharedDatabase& s, const Statement& stmt, std::size_t* est_rows = nullptr) {
+    Planner planner(s.tables, s.indexes, s.index_meta, s.composite_indexes, s.hash_indexes, s.hash_index_meta, s.catalog, s.table_stats);
+    auto plan_of = [&](const char* kind, const std::string& table, const std::optional<CondExpr>& condition, const std::vector<Join>& joins) {
+        SelectPlan plan = planner.plan(table, condition, joins);
+        if (est_rows) *est_rows = plan.base.est_rows;
+        return planner.explain(plan, kind);
+    };
+    if (auto* upd = std::get_if<Statement::Update>(&stmt.data)) return plan_of("UPDATE", upd->table, upd->condition, {});
+    if (auto* del = std::get_if<Statement::Delete>(&stmt.data)) return plan_of("DELETE", del->table, del->condition, {});
+    if (auto* mu = std::get_if<Statement::MultiUpdate>(&stmt.data)) {
+        if (!mu->tables.empty()) return plan_of("UPDATE (multi-table)", mu->tables.front(), mu->condition, mu->joins);
+    }
+    if (auto* md = std::get_if<Statement::MultiDelete>(&stmt.data)) return plan_of("DELETE (multi-table)", md->from_table, md->condition, md->joins);
+    return std::nullopt;
+}
+
 StringResult Executor::exec_explain(const SharedDatabase& s, Statement stmt) const {
+    // an UPDATE or a DELETE is planned by the rows it looks for (the table, the WHERE, and the joins of a multi-table one): the same plan as the SELECT of those rows
+    if (auto written = plan_of_write(s, stmt)) return StringResult::Ok(*written);
     auto* sel = std::get_if<Statement::Select>(&stmt.data);
     if (!sel) return StringResult::Ok("EXPLAIN: " + statement_tag(stmt) + " → not a SELECT");
     if (sel->subquery) return StringResult::Ok("EXPLAIN: Subquery-based SELECT → SUBQUERY SCAN");
@@ -114,7 +133,13 @@ StringResult Executor::exec_explain_analyze(SharedDatabase& s, Statement stmt) {
 
     std::vector<std::string> plan_lines;
     std::size_t est_rows = 0;
-    if (auto* sel = std::get_if<Statement::Select>(&stmt.data)) {
+    if (auto written = plan_of_write(s, stmt, &est_rows)) { // (an UPDATE / DELETE that is run for real, as the plan of the rows it looks for says)
+        auto all_lines = split_lines(*written);
+        for (std::size_t i = 3; i < all_lines.size(); i++) {
+            if (!all_lines[i].empty() && all_lines[i].front() == '+') continue;
+            plan_lines.push_back(all_lines[i]);
+        }
+    } else if (auto* sel = std::get_if<Statement::Select>(&stmt.data)) {
         if (sel->subquery) {
             plan_lines.push_back(fmt_stat("Access: SUBQUERY SCAN"));
         } else {

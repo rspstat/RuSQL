@@ -58,21 +58,59 @@ struct Table {
 };
 
 struct Suggestion {
-    std::string table, columns, why, create;
+    std::string table, columns, why, create, block;
     std::size_t rows = 0, estimate = 0;
     bool has_estimate = false;
+    bool needs_rewrite = false; // one branch of an OR: it can serve the branch only as a statement of its own
 };
 
+std::string lowered(std::string v) {
+    for (auto& c : v) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    return v;
+}
+
+// What reading a whole statement found, shared by the blocks it is made of (the statement, each CTE, derived table and subquery): the suggestions, the indexes that exist
+// already, the notes, and the names the CTEs give (they are no tables)
+struct Reading {
+    std::vector<Suggestion> suggestions, already;
+    std::vector<std::string> notes;
+    std::unordered_set<std::string> seen;
+    std::unordered_map<std::string, std::size_t> distinct;
+    std::unordered_set<std::string> cte_names; // lower case
+    std::size_t tables_read = 0;
+    void note(const std::string& text) {
+        if (std::find(notes.begin(), notes.end(), text) == notes.end()) notes.push_back(text);
+    }
+};
+
+// A query block of the statement that is read on its own, with its own tables: `role` says which ("" for the statement itself)
 class Advisor {
 public:
-    explicit Advisor(const SharedDatabase& s) : s_(s) {}
+    // `outer`: the names (tables and aliases, lower case) of the blocks around this one, which a correlated subquery names in its tests
+    Advisor(const SharedDatabase& s, Reading& reading, std::string role, std::vector<std::string> outer = {})
+        : s_(s), r_(reading), role_(std::move(role)), outer_(std::move(outer)) {}
+
+    // the blocks inside this one that the conditions named (a subquery after IN / EXISTS / a comparison), to be read on their own
+    const std::vector<std::pair<const Statement*, std::string>>& nested() const { return nested_; }
+
+    // what a block inside this one calls the tables around it: the names of this block's tables and aliases, and the outer ones this block has
+    std::vector<std::string> names() const {
+        std::vector<std::string> out = outer_;
+        for (const Table& t : tables_) {
+            out.push_back(lowered(t.name));
+            for (const auto& a : t.aliases) out.push_back(lowered(a));
+        }
+        return out;
+    }
 
     bool add_table(const std::string& name, const std::vector<std::string>& aliases) {
+        if (r_.cte_names.count(lowered(bare_of(name)))) return false; // (a CTE is read where it is defined)
         auto key_it = s_.catalog.tables.find(name);
         if (key_it == s_.catalog.tables.end()) {
             note("The table " + bare_of(name) + " was not found.");
             return false;
         }
+        r_.tables_read++;
         Table t;
         t.key = name;
         t.name = bare_of(name);
@@ -110,8 +148,13 @@ public:
     }
 
     std::size_t table_count() const { return tables_.size(); }
-    void note(const std::string& text) {
-        if (std::find(notes_.begin(), notes_.end(), text) == notes_.end()) notes_.push_back(text);
+    // a note of a block inside the statement says which one (before its full stop)
+    void note(std::string text) {
+        if (!role_.empty()) {
+            if (!text.empty() && text.back() == '.') text.pop_back();
+            text += " (in " + role_ + ").";
+        }
+        r_.note(text);
     }
 
     // [database.][table or alias.]column -> the table it belongs to, and the column as the table spells it (nothing: not a column of the statement's tables, or not told apart)
@@ -144,12 +187,12 @@ public:
         if (auto* a = std::get_if<CondExpr::And>(&e.data)) {
             walk(*a->lhs);
             walk(*a->rhs);
-        } else if (auto* o = std::get_if<CondExpr::Or>(&e.data)) {
+        } else if (std::holds_alternative<CondExpr::Or>(e.data)) {
+            collect_nested(e);
             read_or(e);
-            (void)o;
         } else if (auto* n = std::get_if<CondExpr::Not>(&e.data)) {
             note("A NOT condition cannot be served by an index.");
-            (void)n;
+            collect_nested(*n->inner);
         } else {
             leaf(std::get<CondExpr::Leaf>(e.data).condition);
         }
@@ -212,6 +255,15 @@ public:
             }
             if (!t.join.empty()) consider(t, {t.join.front()}, {}, "joined on " + t.join.front() + ": the engine looks up matching rows through it");
         }
+        // an OR over different columns: each branch could use an index of its own, as a statement of its own (the engine reads one index per statement)
+        for (const auto& branches : or_branches_) {
+            for (std::size_t k = 0; k < branches.per_branch.size(); k++) {
+                consider(*branches.owner, branches.per_branch[k], {},
+                         "branch " + std::to_string(k + 1) + " of an OR (searched by " + joined(branches.per_branch[k]) +
+                             "): the engine reads one index per statement, so each branch has to be a statement of its own (see rewrites)",
+                         true);
+            }
+        }
         if (single && !group_by.empty()) {
             Table& t = tables_.front();
             std::vector<std::string> group_columns;
@@ -220,32 +272,52 @@ public:
         }
     }
 
-    // the rows of the answer: one for each suggestion, existing index and note
-    std::vector<Row> rows() const {
-        std::vector<Row> rows;
-        auto put = [&](const char* kind, const std::string& table, const std::string& columns, const std::string& detail, const std::string& create, const std::string& in_table,
-                       const std::string& estimate) {
-            Row r;
-            r["kind"] = kind;
-            r["table_name"] = table;
-            r["columns"] = columns;
-            r["detail"] = detail;
-            r["create_index"] = create;
-            r["rows_in_table"] = in_table;
-            r["rows_read_with_index"] = estimate;
-            rows.push_back(std::move(r));
-        };
-        for (const auto& s : suggestions_) put("suggest", s.table, s.columns, s.why, s.create, std::to_string(s.rows), s.has_estimate ? std::to_string(s.estimate) : std::string());
-        for (const auto& a : already_) put("already", a.table, a.columns, a.why, "", std::to_string(a.rows), "");
-        for (const auto& n : notes_) put("note", "", "", n, "", "", "");
-        if (rows.empty()) put("note", "", "", "Nothing to suggest: the statement has no condition, join or sort that an index could serve.", "", "", "");
-        return rows;
+private:
+    // a column written with a qualifier that names a block around this one and none of this block's tables
+    bool is_outer(const std::string& written) const {
+        const auto dot = written.rfind('.');
+        if (dot == std::string::npos) return false;
+        std::string qualifier = written.substr(0, dot);
+        if (const auto before = qualifier.rfind('.'); before != std::string::npos) qualifier = qualifier.substr(before + 1);
+        qualifier = lowered(qualifier);
+        for (const Table& t : tables_) {
+            if (lowered(t.name) == qualifier) return false;
+            for (const auto& a : t.aliases) {
+                if (lowered(a) == qualifier) return false;
+            }
+        }
+        return std::find(outer_.begin(), outer_.end(), qualifier) != outer_.end();
     }
 
-private:
+    // the subqueries inside a condition (after IN / EXISTS / a comparison) are blocks of their own, read after this one
+    void collect_nested(const CondExpr& e) {
+        if (auto* a = std::get_if<CondExpr::And>(&e.data)) {
+            collect_nested(*a->lhs);
+            collect_nested(*a->rhs);
+        } else if (auto* o = std::get_if<CondExpr::Or>(&e.data)) {
+            collect_nested(*o->lhs);
+            collect_nested(*o->rhs);
+        } else if (auto* n = std::get_if<CondExpr::Not>(&e.data)) {
+            collect_nested(*n->inner);
+        } else {
+            register_subquery(std::get<CondExpr::Leaf>(e.data).condition);
+        }
+    }
+
+    void register_subquery(const Condition& c) {
+        const auto* sub = std::get_if<ConditionValue::Subquery>(&c.value.data);
+        if (!sub || !sub->query) return;
+        std::string role = "a scalar subquery";
+        if (c.op == Operator::Exists || c.op == Operator::NotExists) role = "an EXISTS subquery";
+        else if (c.op == Operator::In || c.op == Operator::NotIn || c.quantifier != Quantifier::None) role = "an IN subquery";
+        for (const auto& known : nested_) {
+            if (known.first == sub->query.get()) return;
+        }
+        nested_.push_back({sub->query.get(), role});
+    }
+
     void leaf(const Condition& c) {
-        auto note_subquery = [&] { note("A subquery is not read here: ask SUGGEST INDEX about it on its own."); };
-        if (std::holds_alternative<ConditionValue::Subquery>(c.value.data)) note_subquery();
+        register_subquery(c);
         const auto* col = std::get_if<ArithExpr::Col>(&c.left.data);
         if (!col) {
             if (const ArithExpr::Col* inner = first_column(c.left); inner && resolve(inner->name, nullptr)) {
@@ -253,13 +325,19 @@ private:
             }
             return;
         }
-        if (col->outer > 0) return;
-        std::string column;
-        Table* t = resolve(col->name, &column);
-        if (!t) return;
         auto add = [](std::vector<std::string>& list, const std::string& name) {
             if (std::find(list.begin(), list.end(), name) == list.end()) list.push_back(name);
         };
+        std::string column;
+        Table* t = col->outer > 0 ? nullptr : resolve(col->name, &column);
+        if (!t) {
+            // `outer.x = inner.y` in a correlated subquery: the outer value is known for each run of the subquery, so it is a search on inner.y
+            std::string inner_column;
+            if (c.op == Operator::Eq && (col->outer > 0 || is_outer(col->name))) {
+                if (Table* inner = column_value(c.value, &inner_column)) add(inner->eq, inner_column);
+            }
+            return;
+        }
         switch (c.op) {
             case Operator::Eq: {
                 std::string other_column;
@@ -324,6 +402,70 @@ private:
             if (std::find(owner->eq.begin(), owner->eq.end(), column) == owner->eq.end()) owner->eq.push_back(column);
             return;
         }
+        // tests of different columns: each branch is read on its own (its `=` columns, then one range column), when every branch is a plain AND of tests of one table
+        std::vector<const CondExpr*> branches;
+        std::function<void(const CondExpr&)> split = [&](const CondExpr& x) {
+            if (auto* o = std::get_if<CondExpr::Or>(&x.data)) {
+                split(*o->lhs);
+                split(*o->rhs);
+            } else {
+                branches.push_back(&x);
+            }
+        };
+        split(e);
+        Table* branch_owner = nullptr;
+        bool readable = true;
+        std::vector<std::vector<std::string>> per_branch;
+        for (const CondExpr* branch : branches) {
+            std::vector<const Condition*> tests;
+            std::function<void(const CondExpr&)> flat = [&](const CondExpr& x) {
+                if (auto* a = std::get_if<CondExpr::And>(&x.data)) {
+                    flat(*a->lhs);
+                    flat(*a->rhs);
+                } else if (auto* l = std::get_if<CondExpr::Leaf>(&x.data)) {
+                    tests.push_back(&l->condition);
+                } else {
+                    readable = false;
+                }
+            };
+            flat(*branch);
+            if (!readable) break;
+            std::vector<std::string> eq, range;
+            for (const Condition* c : tests) {
+                const auto* col = std::get_if<ArithExpr::Col>(&c->left.data);
+                std::string spelled;
+                Table* t = col && col->outer == 0 ? resolve(col->name, &spelled) : nullptr;
+                if (!t) continue;
+                if (!branch_owner) branch_owner = t;
+                if (t != branch_owner) continue;
+                auto put = [&](std::vector<std::string>& list) {
+                    if (std::find(list.begin(), list.end(), spelled) == list.end()) list.push_back(spelled);
+                };
+                switch (c->op) {
+                    case Operator::Eq: if (!column_value(c->value, nullptr)) put(eq); break;
+                    case Operator::In:
+                    case Operator::IsNull: put(eq); break;
+                    case Operator::Gt:
+                    case Operator::Lt:
+                    case Operator::Gte:
+                    case Operator::Lte:
+                    case Operator::Between: put(range); break;
+                    case Operator::Like: {
+                        const auto* lit = std::get_if<ConditionValue::Literal>(&c->value.data);
+                        if (lit && !lit->value.empty() && lit->value[0] != '%' && lit->value[0] != '_') put(range);
+                        break;
+                    }
+                    default: break;
+                }
+            }
+            std::vector<std::string> columns = eq;
+            if (!range.empty()) columns.push_back(range.front());
+            per_branch.push_back(columns);
+        }
+        if (readable && branch_owner && std::all_of(per_branch.begin(), per_branch.end(), [](const auto& b) { return !b.empty(); })) {
+            or_branches_.push_back({branch_owner, per_branch});
+            return;
+        }
         note("A condition combines columns with OR: one index cannot serve it (a UNION of its branches can use one index each).");
     }
 
@@ -363,7 +505,7 @@ private:
     // how many different values a column holds (a NULL is one value); measured on a sample of the rows when there are very many
     std::size_t distinct(const Table& t, const std::string& column) {
         const std::string cache_key = t.key + '\x1f' + column;
-        if (auto it = distinct_.find(cache_key); it != distinct_.end()) return it->second;
+        if (auto it = r_.distinct.find(cache_key); it != r_.distinct.end()) return it->second;
         std::size_t result = 0;
         if (auto data = s_.tables.find(t.key); data != s_.tables.end() && t.rows > 0) {
             const std::size_t step = std::max<std::size_t>(1, t.rows / kSampleRows);
@@ -380,7 +522,7 @@ private:
             // a column that is nearly all different in the sample is nearly all different in the table
             if (step > 1 && sampled > 0 && seen.size() * 10 >= sampled * 9) result = std::max(result, t.rows * seen.size() / sampled);
         }
-        distinct_[cache_key] = result;
+        r_.distinct[cache_key] = result;
         return result;
     }
 
@@ -407,7 +549,7 @@ private:
     }
 
     // an index on the columns the statement searches by (`narrowing`) followed by the ones it sorts by (`order_columns`)
-    void consider(Table& t, const std::vector<std::string>& narrowing, const std::vector<std::string>& order_columns, const std::string& why) {
+    void consider(Table& t, const std::vector<std::string>& narrowing, const std::vector<std::string>& order_columns, const std::string& why, bool needs_rewrite = false) {
         std::vector<std::string> columns = narrowing;
         columns.insert(columns.end(), order_columns.begin(), order_columns.end());
         if (columns.empty()) return;
@@ -417,7 +559,7 @@ private:
         }
         if (const Index* have = covering(t, columns)) {
             const std::string key = t.key + '\x1f' + joined(columns);
-            if (seen_.insert(key).second) already_.push_back({t.name, joined(columns), "already served by the index " + have->name, "", t.rows, 0, false});
+            if (r_.seen.insert(key).second) r_.already.push_back({t.name, joined(columns), "already served by the index " + have->name, "", role_, t.rows, 0, false, false});
             return;
         }
         // how many rows a search reads is only known for the `=` columns: how much a range keeps is not, so a range column adds no estimate and is never a reason to refuse
@@ -438,18 +580,24 @@ private:
                 return;
             }
         }
-        if (!seen_.insert(t.key + '\x1f' + joined(columns)).second) return;
+        if (!r_.seen.insert(t.key + '\x1f' + joined(columns)).second) return;
         std::string name = "idx_" + t.name;
         for (const auto& c : columns) name += "_" + c;
-        suggestions_.push_back({t.name, joined(columns), why, "CREATE INDEX " + name + " ON " + t.name + " (" + joined(columns) + ");", t.rows, estimate, has_estimate});
+        r_.suggestions.push_back({t.name, joined(columns), why + (role_.empty() ? std::string() : " (in " + role_ + ")"), "CREATE INDEX " + name + " ON " + t.name + " (" + joined(columns) + ");", role_, t.rows, estimate, has_estimate, needs_rewrite});
     }
 
+    struct OrBranches {
+        Table* owner;
+        std::vector<std::vector<std::string>> per_branch;
+    };
+
     const SharedDatabase& s_;
+    Reading& r_;
+    std::string role_;
+    std::vector<std::string> outer_;
     std::vector<Table> tables_;
-    std::vector<Suggestion> suggestions_, already_;
-    std::vector<std::string> notes_;
-    std::unordered_set<std::string> seen_;
-    std::unordered_map<std::string, std::size_t> distinct_;
+    std::vector<OrBranches> or_branches_;
+    std::vector<std::pair<const Statement*, std::string>> nested_;
 };
 
 } // namespace
@@ -481,9 +629,36 @@ StringResult Executor::exec_suggest_indexes(const std::string& sql) {
     auto guard = shared->read();
     const SharedDatabase& s = *guard;
     resolve_names(s, stmt);
-    Advisor advisor(s);
-    const std::vector<std::string> answer_columns = {"kind", "table_name", "columns", "detail", "create_index", "rows_in_table", "rows_read_with_index"};
-    auto answer = [&]() { return StringResult::Ok(format_set_result(answer_columns, advisor.rows())); };
+    Reading reading;
+    const std::vector<std::string> answer_columns = {"kind", "table_name", "columns", "detail", "create_index", "rows_in_table", "rows_read_with_index", "block", "needs_rewrite"};
+    // the rows of the answer: one for each suggestion, existing index and note
+    auto answer = [&]() {
+        std::vector<Row> rows;
+        auto put = [&](const char* kind, const Suggestion& v, const std::string& detail, bool has_numbers) {
+            Row r;
+            r["kind"] = kind;
+            r["table_name"] = v.table;
+            r["columns"] = v.columns;
+            r["detail"] = detail;
+            r["create_index"] = v.create;
+            r["rows_in_table"] = has_numbers ? std::to_string(v.rows) : std::string();
+            r["rows_read_with_index"] = has_numbers && v.has_estimate ? std::to_string(v.estimate) : std::string();
+            r["block"] = v.block;
+            r["needs_rewrite"] = v.needs_rewrite ? "yes" : "";
+            rows.push_back(std::move(r));
+        };
+        for (const auto& v : reading.suggestions) put("suggest", v, v.why, true);
+        for (const auto& v : reading.already) put("already", v, v.why, true);
+        for (const auto& n : reading.notes) {
+            Suggestion none;
+            put("note", none, n, false);
+        }
+        if (rows.empty()) {
+            Suggestion none;
+            put("note", none, "Nothing to suggest: the statement has no condition, join or sort that an index could serve.", false);
+        }
+        return StringResult::Ok(format_set_result(answer_columns, rows));
+    };
 
     auto aliases_of = [](const std::vector<std::pair<std::string, std::string>>& pairs, const std::string& table) {
         std::vector<std::string> out;
@@ -492,53 +667,84 @@ StringResult Executor::exec_suggest_indexes(const std::string& sql) {
         }
         return out;
     };
+    auto is_dual = [](const std::string& table) { return table == "_dual_" || (table.size() > 7 && table.compare(table.size() - 7, 7, "._dual_") == 0); }; // (SELECT 1: no table is read)
 
-    if (auto* sel = std::get_if<Statement::Select>(&stmt.data)) {
-        if (sel->subquery) {
-            advisor.note("The FROM clause is a derived table: ask SUGGEST INDEX about the statement inside it.");
-            return answer();
-        }
-        if (sel->table == "_dual_" || (sel->table.size() > 7 && sel->table.compare(sel->table.size() - 7, 7, "._dual_") == 0)) { // (SELECT 1: no table is read)
-            advisor.note("The statement reads no table.");
-            return answer();
-        }
-        std::vector<std::string> base_aliases = aliases_of(sel->table_aliases, sel->table);
-        if (!sel->table_alias.empty()) base_aliases.push_back(sel->table_alias);
-        advisor.add_table(qualify_name(sel->table), base_aliases);
-        std::vector<std::size_t> placed; // the index in the tables of each join (npos: it is not a table)
-        for (const Join& j : sel->joins) {
-            if (j.lateral || j.subquery) {
-                advisor.note("A LATERAL or derived join is not read: ask SUGGEST INDEX about its statement.");
-                placed.push_back(std::string::npos);
-                continue;
+    // A statement is read as blocks: each block (the statement, a CTE, a derived table, a subquery) is read on its own, with its own tables; the blocks inside it follow.
+    std::function<void(const Statement&, const std::string&, const std::vector<std::string>&)> read =
+        [&](const Statement& statement, const std::string& role, const std::vector<std::string>& outer) {
+            auto read_inside = [&](Advisor& advisor) {
+                const std::vector<std::string> names = advisor.names();
+                for (const auto& [inner, inner_role] : advisor.nested()) read(*inner, inner_role, names);
+            };
+            if (auto* sel = std::get_if<Statement::Select>(&statement.data)) {
+                Advisor advisor(s, reading, role, outer);
+                std::vector<std::pair<const Statement*, std::string>> derived; // the derived tables of the FROM list, read after the tables
+                if (sel->subquery) {
+                    derived.push_back({sel->subquery->first.get(), "the derived table " + sel->subquery->second});
+                } else if (!is_dual(sel->table)) {
+                    std::vector<std::string> base_aliases = aliases_of(sel->table_aliases, sel->table);
+                    if (!sel->table_alias.empty()) base_aliases.push_back(sel->table_alias);
+                    advisor.add_table(qualify_name(sel->table), base_aliases);
+                }
+                std::vector<std::size_t> placed; // the index in the tables of each join (npos: it is not a table)
+                for (const Join& j : sel->joins) {
+                    if (j.subquery) {
+                        derived.push_back({j.subquery->first.get(), std::string(j.lateral ? "the LATERAL subquery " : "the derived table ") + j.subquery->second});
+                        placed.push_back(std::string::npos);
+                        continue;
+                    }
+                    std::vector<std::string> aliases = aliases_of(sel->table_aliases, j.table);
+                    if (!j.alias.empty()) aliases.push_back(j.alias);
+                    const bool added = advisor.add_table(qualify_name(j.table), aliases);
+                    placed.push_back(added ? advisor.table_count() - 1 : std::string::npos);
+                }
+                for (std::size_t i = 0; i < sel->joins.size(); i++) {
+                    if (placed[i] == std::string::npos) continue;
+                    if (!sel->joins[i].using_cols.empty()) advisor.using_columns(sel->joins[i].using_cols, placed[i]);
+                    else advisor.walk(sel->joins[i].on_expr);
+                }
+                if (sel->condition) advisor.walk(*sel->condition);
+                advisor.conclude(sel->order_by, sel->group_by.value_or(std::vector<std::string>{}), sel->limit.has_value());
+                for (const auto& [inner, inner_role] : derived) read(*inner, inner_role, outer);
+                read_inside(advisor);
+            } else if (auto* upd = std::get_if<Statement::Update>(&statement.data)) {
+                Advisor advisor(s, reading, role, outer);
+                advisor.add_table(qualify_name(upd->table), aliases_of(upd->table_aliases, upd->table));
+                if (upd->condition) advisor.walk(*upd->condition);
+                advisor.conclude(upd->order_by, {}, upd->limit.has_value());
+                read_inside(advisor);
+            } else if (auto* del = std::get_if<Statement::Delete>(&statement.data)) {
+                Advisor advisor(s, reading, role, outer);
+                advisor.add_table(qualify_name(del->table), aliases_of(del->table_aliases, del->table));
+                if (del->condition) advisor.walk(*del->condition);
+                advisor.conclude(del->order_by, {}, del->limit.has_value());
+                read_inside(advisor);
+            } else if (auto* with = std::get_if<Statement::With>(&statement.data)) {
+                for (const auto& [name, body] : with->ctes) reading.cte_names.insert(lowered(name));
+                for (const auto& [name, body] : with->ctes) {
+                    if (body) read(*body, "the CTE " + name, outer);
+                }
+                if (with->query) read(*with->query, role, outer);
+            } else if (auto* u = std::get_if<Statement::Union>(&statement.data)) {
+                if (u->left) read(*u->left, role, outer);
+                if (u->right) read(*u->right, role, outer);
+            } else if (auto* in = std::get_if<Statement::Intersect>(&statement.data)) {
+                if (in->left) read(*in->left, role, outer);
+                if (in->right) read(*in->right, role, outer);
+            } else if (auto* ex = std::get_if<Statement::Except>(&statement.data)) {
+                if (ex->left) read(*ex->left, role, outer);
+                if (ex->right) read(*ex->right, role, outer);
             }
-            std::vector<std::string> aliases = aliases_of(sel->table_aliases, j.table);
-            if (!j.alias.empty()) aliases.push_back(j.alias);
-            const bool added = advisor.add_table(qualify_name(j.table), aliases);
-            placed.push_back(added ? advisor.table_count() - 1 : std::string::npos);
-        }
-        for (std::size_t i = 0; i < sel->joins.size(); i++) {
-            if (placed[i] == std::string::npos) continue;
-            if (!sel->joins[i].using_cols.empty()) advisor.using_columns(sel->joins[i].using_cols, placed[i]);
-            else advisor.walk(sel->joins[i].on_expr);
-        }
-        if (sel->condition) advisor.walk(*sel->condition);
-        advisor.conclude(sel->order_by, sel->group_by.value_or(std::vector<std::string>{}), sel->limit.has_value());
-        return answer();
-    }
-    if (auto* upd = std::get_if<Statement::Update>(&stmt.data)) {
-        advisor.add_table(qualify_name(upd->table), aliases_of(upd->table_aliases, upd->table));
-        if (upd->condition) advisor.walk(*upd->condition);
-        advisor.conclude(upd->order_by, {}, upd->limit.has_value());
-        return answer();
-    }
-    if (auto* del = std::get_if<Statement::Delete>(&stmt.data)) {
-        advisor.add_table(qualify_name(del->table), aliases_of(del->table_aliases, del->table));
-        if (del->condition) advisor.walk(*del->condition);
-        advisor.conclude(del->order_by, {}, del->limit.has_value());
-        return answer();
-    }
-    return StringResult::Err("SUGGEST INDEX reads a SELECT, UPDATE or DELETE statement");
+        };
+
+    const bool readable = std::holds_alternative<Statement::Select>(stmt.data) || std::holds_alternative<Statement::Update>(stmt.data) ||
+                          std::holds_alternative<Statement::Delete>(stmt.data) || std::holds_alternative<Statement::With>(stmt.data) ||
+                          std::holds_alternative<Statement::Union>(stmt.data) || std::holds_alternative<Statement::Intersect>(stmt.data) ||
+                          std::holds_alternative<Statement::Except>(stmt.data);
+    if (!readable) return StringResult::Err("SUGGEST INDEX reads a SELECT, UPDATE or DELETE statement");
+    read(stmt, "", {});
+    if (reading.tables_read == 0 && reading.notes.empty()) reading.note("The statement reads no table.");
+    return answer();
 }
 
 } // namespace engine

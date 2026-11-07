@@ -9,7 +9,7 @@
 |---|---|
 | 무엇 | MySQL 호환 프로토콜을 쓰는 **자체 RDBMS 엔진**(C++) + 데스크톱 클라이언트(Tauri/React) + Claude 연동(MCP) |
 | 1학기 → 2학기 | Rust 프로토타입 → **C++ 전면 재작성**, "기능 추가"에서 **정합성·동시성·성능을 실제로 파고드는 심화**로 |
-| 규모 | 테스트 **895 케이스 / 1,517,532 assertions** (2학기 초 218 케이스 / 3,080 assertions) |
+| 규모 | 테스트 **899 케이스 / 1,517,638 assertions** (2학기 초 218 케이스 / 3,080 assertions), MCP 단위 시험 57건 · 프런트 라이브러리 시험 26건 · 앱 화면 시험 11개(CDP) |
 | 엔진 구성 | 파서 → 비용 기반 플래너 → 실행기, MVCC·행 단위 락·데드락 감지, redo 로그 기반 내구성, B+Tree·해시·복합 인덱스 |
 
 ## 2학기에 만든 것 (엔진)
@@ -19,12 +19,13 @@
 - **내구성**: autocommit도 응답 전에 fsync(redo 로그), 크래시 후 재생. 테이블 파일은 체크포인트에서만 다시 씀(읽는 문장, 쓰는 `CALL`, 트리거가 걸린 표나 뷰를 거친 쓰기, `MERGE`, 다중 표 `UPDATE`/`DELETE`는 로그를 비우지 않음).
 - **쿼리 엔진**: 조인 알고리즘 5종(중첩 루프·해시·정렬 병합·인덱스 NL·역방향 인덱스 NL)과 비용 기반 선택, CTE(재귀 포함), 윈도우 함수, 서브쿼리, 파티셔닝, 저장 프로시저·트리거. 지원하는 SQL 문법 전체는 `SQL.md`에 한 줄씩 정리되어 있다.
 - **운영 기능**: `KILL [QUERY] n`(실행 중인 SELECT — 정렬·그룹·윈도·조인·UNION 도중에도 —, `INSERT … SELECT`의 SELECT, `CALL` 본문의 SELECT와 루프, UPDATE·DELETE·MERGE가 행을 찾는 동안, `EXPLAIN ANALYZE`·`EXECUTE`·`CREATE TABLE … AS SELECT`의 질의, `CREATE INDEX`의 빌드, 락 대기를 멈추거나 세션을 끊음), `SHOW STATUS`(문장 종류별 수·연결·버퍼 풀·redo·락 대기의 실제 카운터, 데이터베이스 락 없이 읽음), `EXPLAIN ANALYZE`가 조인마다 알고리즘을, 하위 질의는 실행 수와 시간을 따로 보여 줌, **느린 쿼리 로그**(`SET GLOBAL slow_query_log` / `long_query_time`, `Slow_queries`, `information_schema.slow_log`와 MySQL 모양의 `slow_query.log`)와 `innodb_trx`가 트랜잭션을 연 세션을 말함, `GROUP BY … WITH ROLLUP`, 서버가 `8.4.9`라고 말함, `SUGGEST INDEX`(SELECT·UPDATE·DELETE를 읽고 어떤 인덱스가 스캔을 멈추게 하는지, 이유와 읽을 행 수를 말함; 만들지는 않음).
+- **인덱스 제안 · 쓰기 문장의 계획 · 연결 상한(R70)**: `SUGGEST INDEX`가 문장을 블록으로 읽어(CTE · 파생 표 · 하위 질의 — 상관 포함 — · UNION · OR의 가지) 어느 부분의 제안인지 말하고, `EXPLAIN UPDATE`·`DELETE`는 아무것도 실행하지 않고 그 문장이 찾는 행의 계획을 보여 주며, `SET GLOBAL max_connections`(기본 151)가 가득 차면 두 프로토콜 모두 오류 1040으로 새 연결을 거절한다.
 
 ## 2학기에 만든 것 (앱·연동)
 
 - **데스크톱 앱(Tauri/React)**: 홈 화면(연결 카드, 검색, 즐겨찾기·최근 연결), SQL 에디터(스키마를 아는 자동완성, `EXPLAIN` 계획을 상자와 화살표로 그린 그림과 `EXPLAIN ANALYZE`의 단계별 시간 막대, 결과를 JSON으로 내보내기와 막대·꺾은선·파이 차트, 두 데이터베이스의 스키마 비교와 마이그레이션 SQL, 문장 하나가 지나는 단계를 재생하는 Journey, `EXPLAIN` 아래에서 인덱스를 제안하고 임시로 만들어 전·후 시간을 재 보는 카드), ERD 편집기(외래키 관계를 DDL 미리보기와 함께 편집, 열을 끌어서 연결), 서버 매니저(세션·트랜잭션·락 실시간 패널: KILL 버튼, 다른 트랜잭션을 막는 세션과 오래 도는 문장 강조, 느린 쿼리 로그 켜기와 목록, 크래시 복구에 걸린 시간과 되살린 변경 수를 보여 주는 복구 카드, 초당 문장 수·세션·락 대기·redo 크기·버퍼 풀의 추세 그래프를 그리는 Metrics 패널).
 - **보여 주기 위한 페이지**: Diagram(전체 구조), **B+Tree**(키가 들어가며 노드가 쪼개지고 트리가 자라는 모습이 스스로 재생됨), **MVCC**(UPDATE가 새 버전을 만들고 세션마다 다른 버전이 보이는 짧은 이야기가 스스로 재생됨; 엔진의 실제 버전은 `information_schema.row_versions`), MySQL 호환성(진짜 MySQL과 코퍼스별 일치율).
-- **Claude 연동(MCP)**: 32개 도구. `run_script`는 영향받는 행을 미리 보여 주고 확인한 뒤에만 커밋, `suggest_indexes`는 문장과 통계를 읽고(하위 질의·CTE·OR도) `CREATE INDEX`를 제안(기본은 만들지 않고, `verify`는 임시로 만들어 전·후 `EXPLAIN ANALYZE`를 재고 지움), `health_report`는 "서버 상태 어때?"에 한 번에 답하고(연결·문장·락·교착·복구와 주의할 점), `list_locks`·`trace_query`·`get_table_stats`·`get_fk_graph`는 락 대기, 문장의 단계별 시간, 열 통계, 조인 경로를 JSON으로 준다.
+- **Claude 연동(MCP)**: 37개 도구(느린 쿼리를 모아 보여 주는 `slow_queries`, 확인한 뒤에만 세션을 끊는 `kill_session`, CSV 가져오기·내보내기, 두 데이터베이스를 비교하는 `diff_schema`)와 resources 2개·prompts 3개. `run_script`는 영향받는 행을 미리 보여 주고 확인한 뒤에만 커밋, `suggest_indexes`는 엔진의 `SUGGEST INDEX`가 문장과 통계를 읽은 답(하위 질의·CTE·UNION·OR도, 앱의 인덱스 제안 카드와 같은 답)으로 `CREATE INDEX`를 제안(기본은 만들지 않고, `verify`는 임시로 만들어 전·후 `EXPLAIN ANALYZE`를 재고 지움; UPDATE·DELETE는 실행하지 않고 `EXPLAIN` 추정으로), `health_report`는 "서버 상태 어때?"에 한 번에 답하고(연결·문장·락·교착·복구와 주의할 점), `list_locks`·`trace_query`·`get_table_stats`·`get_fk_graph`는 락 대기, 문장의 단계별 시간, 열 통계, 조인 경로를 JSON으로 준다.
 
 ## 성능: 같은 결과를 더 빨리
 

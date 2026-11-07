@@ -1171,27 +1171,30 @@ TEST_CASE("Concurrent UPDATEs on different rows of the same table never block ea
     auto shared = ex.get_shared();
     std::atomic<bool> failed{false};
 
+    // Each session holds its row until BOTH updates have been made: if the two UPDATEs accidentally serialized (one blocking behind the other -- e.g. a regression
+    // re-widening table_locks to whole-table exclusivity), the second could not be made while the first still holds its row, and the first would wait out the limit
+    // without ever seeing it. (This used to be a wall-clock bound on the whole run, which a busy machine broke; this one does not depend on how fast the machine is.)
+    std::atomic<int> updated{0};
+    std::atomic<int> saw_both{0};
     auto worker = [&](int id) {
         Executor sess = Executor::new_session(shared);
         if (!sess.execute_sql("USE d").is_ok()) { failed = true; return; }
         if (!sess.execute_sql("BEGIN").is_ok()) { failed = true; return; }
         if (!sess.execute_sql("UPDATE t SET val = val + 1 WHERE id = " + std::to_string(id)).is_ok()) { failed = true; return; }
-        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        updated++;
+        const auto limit = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+        while (updated.load() < 2 && std::chrono::steady_clock::now() < limit) std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        if (updated.load() == 2) saw_both++;
         if (!sess.execute_sql("COMMIT").is_ok()) failed = true;
     };
 
-    auto t0 = std::chrono::steady_clock::now();
     std::thread a([&] { worker(0); });
     std::thread b([&] { worker(1); });
     a.join();
     b.join();
-    auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
 
     REQUIRE_FALSE(failed.load());
-    // If these accidentally serialized (one blocking behind the other -- e.g. a
-    // regression re-widening table_locks to whole-table exclusivity), this would take
-    // ~400ms+; running genuinely concurrently, it finishes close to the single 200ms hold.
-    REQUIRE(elapsed_ms < 380);
+    REQUIRE(saw_both.load() == 2); // (both updates were made while the other session still held its row)
 }
 
 TEST_CASE("A blocked SELECT FOR UPDATE unblocks once the row's holder commits, not before",

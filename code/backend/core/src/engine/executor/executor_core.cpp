@@ -506,6 +506,7 @@ void Executor::refresh_slow_log_variables() {
     std::snprintf(seconds, sizeof seconds, "%.6f", static_cast<double>(log->threshold_us.load()) / 1e6);
     user_vars["@slow_query_log"] = log->enabled.load() ? "1" : "0";
     user_vars["@long_query_time"] = seconds;
+    user_vars["@max_connections"] = std::to_string(counters()->max_connections.load()); // (the server's too: SET GLOBAL max_connections bumps the same version)
 }
 
 // Questions and the kind of the statement (its first word, and the second for CREATE / DROP / ALTER), for the server and for this session.
@@ -2272,6 +2273,21 @@ StringResult Executor::execute_with_s_body(SharedDatabase& s, Statement stmt) {
                 char fixed[32];
                 std::snprintf(fixed, sizeof fixed, "%.6f", seconds);
                 result_val = fixed;
+            } else if (setting == "max_connections") {
+                // the most connections the server lets in at once (MySQL: 1 to 100000, a number out of range is brought into it); the connections already open stay
+                unsigned long long wanted = 0;
+                std::size_t used = 0;
+                try {
+                    wanted = std::stoull(result_val, &used);
+                } catch (...) {
+                    used = 0;
+                }
+                if (used == 0 || used != result_val.size()) return StringResult::Err("ERROR 1232 (42000): Incorrect argument type to variable 'max_connections'");
+                wanted = std::clamp<unsigned long long>(wanted, 1, 100000);
+                counters()->max_connections = wanted;
+                slow_log()->version++; // (the other sessions read @@max_connections again before their next statement)
+                slow_log_seen_ = slow_log()->version.load();
+                result_val = std::to_string(wanted);
             }
             // (the yes/no ones read ON / OFF / TRUE / FALSE as 1 and 0; FOREIGN_KEY_CHECKS = 0 lets a table refer to one that is not there yet, as a dump needs)
             static const std::unordered_set<std::string> kSwitches = {"@foreign_key_checks", "@unique_checks", "@autocommit", "@sql_notes",

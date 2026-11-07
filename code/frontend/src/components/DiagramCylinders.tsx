@@ -29,8 +29,8 @@ const NODES: Node[] = [
   },
   {
     id: "mcp", x: 95, y: 350, w: 140, h: 84, c: C.client, name: "Claude + MCP",
-    desc: L("Claude Desktop drives RuSQL through a Python MCP server (32 tools, TCP :7878). Claude writes the SQL; RuSQL has no private NL-to-SQL model.",
-            "Claude Desktop이 Python MCP 서버(도구 32개, TCP :7878)로 RuSQL을 조작. SQL은 Claude가 작성하며 사설 NL→SQL 모델은 없음."),
+    desc: L("Claude Desktop drives RuSQL through a Python MCP server (37 tools, TCP :7878). Claude writes the SQL; RuSQL has no private NL-to-SQL model.",
+            "Claude Desktop이 Python MCP 서버(도구 37개, TCP :7878)로 RuSQL을 조작. SQL은 Claude가 작성하며 사설 NL→SQL 모델은 없음."),
   },
   {
     id: "client", x: 95, y: 475, w: 140, h: 84, c: C.client, name: "engine_client",

@@ -1199,6 +1199,7 @@ fn setup_mcp_config(host: String, port: u16, user: String, password: String) -> 
             "execute_sql", "list_databases", "list_tables", "get_table_schema",
             "explain_query", "get_indexes", "sample_data",
             "health_report", "list_locks", "get_table_stats", "get_fk_graph",
+            "slow_queries", "diff_schema",
             "list_connections", "add_connection",
             "write_to_editor", "new_editor_tab", "close_editor_tab", "switch_editor_tab",
             "list_editor_tabs", "get_editor_tab_content", "execute_in_editor",

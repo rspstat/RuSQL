@@ -883,7 +883,7 @@ std::string Planner::describe_join(const JoinPlan& jp) const {
     return oss.str();
 }
 
-std::string Planner::explain(const SelectPlan& plan) const {
+std::string Planner::explain(const SelectPlan& plan, const std::string& statement) const {
     std::size_t total = table_size(plan.base.table);
     std::size_t visible = 0;
     if (auto it = tables_.find(plan.base.table); it != tables_.end()) {
@@ -898,6 +898,7 @@ std::string Planner::explain(const SelectPlan& plan) const {
     oss << "+--------------------------------------------------------------------------+\n";
     oss << "|                            QUERY PLAN                                    |\n";
     oss << "+--------------------------------------------------------------------------+\n";
+    if (!statement.empty()) oss << fmt_row("Statement", statement);
     oss << fmt_row("Table", plan.base.table);
     oss << fmt_row("Rows (total)", std::to_string(total));
     oss << fmt_row("Rows (visible)", std::to_string(visible));

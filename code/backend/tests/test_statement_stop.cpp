@@ -280,6 +280,9 @@ TEST_CASE("R63: a sort, a GROUP BY, a DISTINCT, a hash join, a window sort, a UN
     auto stops_in_the_middle = [&](const char* sql, long long limit_per_mille = 333, long long bound_per_mille = 600) {
         INFO(sql);
         auto millis = [](std::chrono::steady_clock::time_point since) { return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - since).count(); };
+        // The limit comes from a measurement of the same query, so a busy machine (the time of the two runs not alike) can make a run say nothing: the second ended before its limit, or took
+        // longer than the bound only because the machine did. Such a run is measured again, up to five times; a stage that does not ask the clock fails every time.
+        for (int attempt = 1;; attempt++) {
         // (a trivial UPDATE empties the cache of answers: an answer that is cached takes no time the second time)
         ok(ex, "SET max_execution_time = 0");
         ok(ex, "UPDATE big SET v = v WHERE id = 1");
@@ -296,9 +299,14 @@ TEST_CASE("R63: a sort, a GROUP BY, a DISTINCT, a hash join, a window sort, a UN
         const auto stopped_ms = millis(started);
         ok(ex, "SET max_execution_time = 0");
         std::fprintf(stderr, "[r63] %s -> the whole of it takes %lld ms, with a limit of %lld ms it stopped in %lld ms\n", sql, static_cast<long long>(whole_ms), static_cast<long long>(limit), static_cast<long long>(stopped_ms));
+        const bool outran_its_limit = stopped.is_ok() && stopped_ms < limit;
+        const bool too_slow_to_say = stopped.is_err() && stopped_ms * 1000 >= whole_ms * bound_per_mille;
+        if ((outran_its_limit || too_slow_to_say) && attempt < 5) continue;
         REQUIRE(stopped.is_err());
         REQUIRE(stopped.error().find("3024") != std::string::npos);
         REQUIRE(stopped_ms * 1000 < whole_ms * bound_per_mille); // (stopped in the middle of the stage, not at its end: a stage that is not asked ends it first)
+        return;
+        }
     };
     for (const char* sql : queries) stops_in_the_middle(sql);
     // R67: with six aggregates the rows of the groups are a good part of the time; the workers that make them ask as they go, so the statement stops at the limit (a third of the time

@@ -17,3 +17,6 @@ data/
 
 # C++ port build output
 code/build/
+
+# screenshots of a failed step of the CDP screen tests
+code/test/frontend/cdp/out/

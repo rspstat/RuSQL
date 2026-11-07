@@ -211,6 +211,15 @@ void handle_client(SOCKET sock, std::shared_ptr<RwLock<SharedDatabase>> shared, 
 
     auto cleanup_and_return = [&]() { client_count->fetch_sub(1); };
 
+    // the server's limit on connections (SET GLOBAL max_connections, 151 at the start): a connection past it is told so and closed before anything else is said
+    ConnectionSlot slot(*shared->read()->counters);
+    if (!slot.ok()) {
+        log("[" + peer + "] refused: too many connections");
+        send_line_raw(sock, "ERR Too many connections\n---END---\n");
+        cleanup_and_return();
+        return;
+    }
+
     // 1. banner (includes a NONCE line for the challenge-response AUTH handshake below)
     std::vector<std::uint8_t> nonce = make_nonce(peer_addr.sin_port);
     {
