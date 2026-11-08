@@ -2912,6 +2912,36 @@ VS Code 스타일 탭 드래그 순서 변경(요청의 1번 항목)은 같은 �
 ⑤ 기본 격리 수준은 아직 `READ COMMITTED`다. 올리려면 남은 것: 스냅샷 시점 맞추기, 모든 트랜잭션이 갭 잠금을 잡는 데서 오는 대기 · 교착 영향 재기, 기본값을 바꿔 전체 시험을 돌려 깨지는 것 고치기.
 ⑥ 쓰는 문장마다 끝낼 행이 스냅샷에 보이는지 한 번씩 더 확인하므로(REPEATABLE READ · SERIALIZABLE의 명시적 트랜잭션에서만) 속도가 아주 조금 달라질 수 있다. 따로 재지 않았다.
 
+### 11월 8일 (세 번째) — R73: 스냅샷을 BEGIN이 아니라 첫 읽기에 뜸 (REPEATABLE READ 기본값을 올리는 첫 걸음)
+
+**왜 이 항목인가**: R72를 마치고 사용자가 "스냅샷 시점 맞추기 (기본값을 올리는 첫 걸음)"를 골랐다. R72의 두 세션 시험이 남겨 둔 알려진 차이 하나였다. 기본값을 올리는 일 자체는 하지 않았다.
+
+**문제**: 격리 수준 REPEATABLE READ · SERIALIZABLE의 트랜잭션이 스냅샷을 `BEGIN`에 떴다. MySQL(InnoDB)은 트랜잭션의 **첫 일반 읽기**(잠그지 않는 `SELECT`)에 뜬다. `BEGIN`과 첫 읽기 사이에 다른 세션이 커밋한 변경을 MySQL은 보고 여기는 보지 못했다. `START TRANSACTION WITH CONSISTENT SNAPSHOT`만 MySQL도 즉시 뜬다.
+
+**고침** (`txn_manager.hpp/.cpp` · `executor_ddl.cpp` · `executor_txn.cpp` · `executor_core.cpp` · `executor_update.cpp` · `executor_trigger.cpp` · `executor_dml.cpp` · `executor_select.cpp` · `ast.hpp` · `ast_json.cpp` · `parser_core.cpp`):
+- `TransactionManager::begin_with_snapshot(활성 번호들, snapshot_now)`: 이 두 수준의 트랜잭션은 스냅샷을 **보류**한 채(`snapshot_pending()`) 시작하고, 첫 읽기가 `take_snapshot()`으로 뜬다. 한 번 뜨면 R72까지와 똑같이 트랜잭션 끝까지 쓴다.
+- `Executor::current_read_ctx(s, take_snapshot)`: 읽는 문장(SELECT, 서브쿼리 · CTE · 뷰 안의 읽기 포함)이 처음 부르면 스냅샷을 뜬다. 쓰는 문장이 자기 행을 찾는 두 곳(트리거가 볼 행, `WITH CHECK OPTION` 후보)은 `take_snapshot = false`로 불러 스냅샷을 앞당겨 뜨지 않는다(MySQL의 `UPDATE`/`DELETE`는 현재 읽기이고 읽기 뷰를 만들지 않는다).
+- **스냅샷을 안 뜨는 것**(두 세션 시험으로 MySQL과 같음을 확인): `UPDATE` · `DELETE` · `INSERT` 자체, 잠금 읽기(`FOR UPDATE` · `FOR SHARE`), 표 없는 `SELECT 1`. 뜨면 **모든 표**에 적용된다(다른 표를 읽어도 마찬가지). 다음 트랜잭션과 `COMMIT AND CHAIN`의 새 트랜잭션은 자기 첫 읽기에 새로 뜬다. 쓰기가 스냅샷보다 먼저 있었다면 숨길 옛 버전이 없으므로 R72의 `_xsup` 표시도 필요 없다(`snapshot_for_hiding()`이 비어 있음).
+- `START TRANSACTION WITH CONSISTENT SNAPSHOT`: 파서가 `Statement::Begin::consistent_snapshot`을 읽어(JSON에도 실림) 즉시 뜬다. 다른 격리 수준에서는 MySQL처럼 무시된다.
+- **같이 고친 것**(두 세션 시험이 찾음): `INSERT … SELECT`(와 `REPLACE … SELECT`)의 원본 읽기가 REPEATABLE READ에서 스냅샷의 옛 값을 복사하던 것을 최신 커밋 값으로. MySQL은 원본을 공유 잠금으로 읽는 현재 읽기이고 읽기 뷰도 만들지 않는다(`reads_latest_` — `exec_insert_select`이 켜고 `exec_select`가 `FOR UPDATE`처럼 다룬다).
+
+**두 세션 시험** (`code/test/diff/two_sessions.py`): 시나리오 18 → **28개**(스냅샷 시점 열 가지 추가: 쓰기 · 표 없는 SELECT · 잠금 읽기가 안 뜸 · 다른 표 읽기가 뜸 · 다음 트랜잭션 · `COMMIT AND CHAIN` · `INSERT … SELECT` 둘 · `UPDATE`/`DELETE`의 서브쿼리), 두 격리 수준 **442단계, 차이 0**. 알려진 차이는 이제 `UPDATE`/`DELETE` 안 서브쿼리 하나다: MySQL은 `UPDATE d SET v = (SELECT v FROM t WHERE id = 1)`의 서브쿼리를 최신 커밋 값으로 읽고(현재 읽기) 여기는 스냅샷으로 읽는다. `reads_latest_`를 문장 전체에 켜면 되지만 트리거 본문의 `SELECT`까지 번지므로 이번에는 하지 않았다. 느린 대기를 잡도록 도구의 읽기 시간 제한을 15초로 두었다(`INSERT … SELECT` 원본에는 MySQL이 공유 잠금을 걸어 다른 세션의 쓰기가 기다린다 — 여기는 행 잠금을 안 걸어 기다리지 않는 차이가 있어 그 모양의 시나리오는 넣지 않았다).
+
+**검증**:
+- 전체 시험 **934 케이스 / 1,519,496 assertions**(R72는 927 / 1,519,240; 새 케이스 7: `test_repeatable_read.cpp`) — 세 모드(기본, `RUSQL_DML_INDEX_MIN_ROWS=0`, `RUSQL_PROBE_CHECK=1 RUSQL_PROBE_STREAK=0`) 모두 전부 통과(assertions 1,519,496 / 1,519,496 / 1,519,495).
+- **심은 버그** C++ 8개를 모두 잡음(`BEGIN`이 스냅샷을 바로 뜸 · 쓰기 문장이 스냅샷을 뜸 · 읽기가 스냅샷을 못 뜸 · `WITH CONSISTENT SNAPSHOT`을 읽고 무시 · `BEGIN`에 그 표시가 안 전해짐 · JSON이 표시를 버림 · `INSERT … SELECT`가 스냅샷을 읽음 · 잠금 읽기가 스냅샷을 읽음).
+- 점수판 코퍼스 47개 · 문장 3,873개 차이 0, 크래시 퍼저 6종(라운드 8) 불일치 0, 검증 스크립트 12종 위반 없음, MCP 단위 시험 3종 통과 · `live_check` 29/29. 프런트 소스는 바뀌지 않아(점수 숫자 JSON만) 화면 시험은 다시 돌리지 않았다.
+
+**죽은 코드 정리**: 선언만 있고 어디서도 부르지 않는 함수 · 데이터 멤버 · 상수를 다시 훑었으나 새로 걸린 것이 없다(걸린 `number_value`는 같은 헤더의 다른 함수가 부른다).
+
+**정직한 한계**:
+① `UPDATE`/`DELETE` 안 서브쿼리가 스냅샷으로 읽히는 차이(위).
+② `INSERT … SELECT` 원본에 MySQL이 거는 공유 잠금은 걸지 않는다(다른 세션의 쓰기가 기다리지 않음).
+③ `CREATE TABLE … AS SELECT`는 DDL이라 열린 트랜잭션을 먼저 커밋하므로 이 차이가 드러나지 않는다.
+④ SERIALIZABLE은 R72와 같이 MySQL과 비교하지 않았다(이 엔진은 SERIALIZABLE도 첫 읽기에 뜨고, 읽은 행의 집합은 첫 읽기부터 쌓인다).
+⑤ 기본 격리 수준은 여전히 `READ COMMITTED`다. 올리려면 남은 것: 모든 명시적 트랜잭션이 갭 잠금을 잡는 데서 오는 대기 · 교착 영향 재기, 기본값을 바꿔 전체 시험을 돌려 깨지는 것 고치기(스냅샷 시점은 이번에 끝났다).
+⑥ 속도는 따로 재지 않았다. 활성 트랜잭션 번호 집합을 복사하는 일이 `BEGIN`에서 첫 읽기로 옮겨졌을 뿐이고 읽지 않는 트랜잭션은 그 복사를 아예 안 한다.
+
 ## 요약: 1학기 대비 2학기에 달라진 것
 
 

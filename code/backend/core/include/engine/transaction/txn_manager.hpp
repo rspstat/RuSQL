@@ -78,12 +78,17 @@ public:
     void set_isolation_level(IsolationLevel level);
     IsolationLevel isolation_level() const { return isolation_level_; }
 
-    Result<std::uint64_t, std::string> begin_with_snapshot(const std::unordered_set<std::uint64_t>& active_txn_ids = {});
-    // Populated by begin_with_snapshot for RepeatableRead/Serializable only -- the
-    // read-visibility ctx frozen at BEGIN time, reused for every statement in the
+    // `snapshot_now` false (a RepeatableRead / Serializable transaction): the snapshot is not taken here but by the first consistent read, take_snapshot() -- MySQL's rule;
+    // START TRANSACTION WITH CONSISTENT SNAPSHOT takes it at once.
+    Result<std::uint64_t, std::string> begin_with_snapshot(const std::unordered_set<std::uint64_t>& active_txn_ids = {}, bool snapshot_now = true);
+    // Populated by begin_with_snapshot (or take_snapshot) for RepeatableRead/Serializable only -- the
+    // read-visibility ctx frozen when the transaction took its snapshot, reused for every statement in the
     // transaction instead of recomputing it per-statement (which is what ReadCommitted/
     // autocommit do instead, via a fresh capture -- see Executor::current_read_ctx).
     std::optional<SnapshotCtx> frozen_ctx() const { return frozen_ctx_; }
+    // A RepeatableRead / Serializable transaction that has not read yet: its snapshot is still to be taken.
+    bool snapshot_pending() const { return active_ && snapshot_deferred_ && !frozen_ctx_; }
+    void take_snapshot(const std::unordered_set<std::uint64_t>& active_txn_ids);
     void note_superseding() {
         if (frozen_ctx_) frozen_ctx_->check_superseded = true;
     }
@@ -154,6 +159,7 @@ private:
     UndoLogFile undo_log_file_;
     IsolationLevel isolation_level_ = IsolationLevel::ReadCommitted;
     std::optional<SnapshotCtx> frozen_ctx_;
+    bool snapshot_deferred_ = false; // see begin_with_snapshot: the transaction reads through a snapshot that no read has taken yet
     // Stage 3: (table, pk_col, key) triples read during a Serializable transaction,
     // encoded as "table\x00pk_col\x00key". Only populated/consulted for Serializable.
     std::unordered_set<std::string> read_set_;

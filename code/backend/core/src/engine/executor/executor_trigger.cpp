@@ -147,7 +147,7 @@ std::vector<Executor::TriggerRow> Executor::trigger_rows_for(SharedDatabase& s, 
     std::vector<TriggerRow> out;
     auto it = s.tables.find(table);
     if (it == s.tables.end()) return out;
-    const SnapshotCtx ctx = current_read_ctx(s);
+    const SnapshotCtx ctx = current_read_ctx(s, /*take_snapshot=*/false);
     std::vector<std::string> key_columns;
     if (per_row) {
         if (const TableSchema* schema = s.catalog.get_table(table)) {

@@ -2047,7 +2047,7 @@ StringResult Executor::execute_with_s_body(SharedDatabase& s, Statement stmt) {
         if (begin->read_only) read_only = *begin->read_only;
         else if (next_read_only_) read_only = *next_read_only_;
         else if (auto it = user_vars.find("@transaction_read_only"); it != user_vars.end()) read_only = it->second == "1";
-        auto begun = exec_begin(s);
+        auto begun = exec_begin(s, begin->consistent_snapshot);
         if (begun.is_ok()) {
             txn_read_only_ = read_only;
             next_isolation_.reset();

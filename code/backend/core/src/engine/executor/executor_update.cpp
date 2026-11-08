@@ -127,7 +127,7 @@ StringResult Executor::exec_update(SharedDatabase& s, std::string table, std::ve
                 std::vector<Row> candidates;
                 {
                     auto data_guard = acquire_table_data_locks(s, {target->table}, /*exclusive=*/false);
-                    const SnapshotCtx ctx = current_read_ctx(s);
+                    const SnapshotCtx ctx = current_read_ctx(s, /*take_snapshot=*/false);
                     if (auto rows = s.tables.find(target->table); rows != s.tables.end()) {
                         for (const Row& r : rows->second) {
                             if (is_visible_for_read(r, ctx) && matches_condition_with_subquery(s, r, merged_cond)) candidates.push_back(r);

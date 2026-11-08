@@ -434,8 +434,9 @@ Statement Parser::parse_stmt() {
                 const Token* w = peek();
                 if (!w || w->kind != TokenKind::Ident || to_upper(w->text) != "TRANSACTION") throw ParseError("Expected TRANSACTION after START");
                 advance();
-                // READ ONLY / READ WRITE (the other characteristics, WITH CONSISTENT SNAPSHOT, are read and left as they are)
+                // READ ONLY / READ WRITE and WITH CONSISTENT SNAPSHOT
                 std::optional<bool> read_only;
+                bool consistent_snapshot = false;
                 while (peek() && !peek_is(TokenKind::Semicolon)) {
                     const Token* c = advance();
                     const Token* n = peek();
@@ -444,8 +445,9 @@ Statement Parser::parse_stmt() {
                         if (mode == "ONLY") read_only = true;
                         else if (mode == "WRITE") read_only = false;
                     }
+                    if (c && to_upper(c->text.empty() ? c->word : c->text) == "CONSISTENT" && n && to_upper(n->text.empty() ? n->word : n->text) == "SNAPSHOT") consistent_snapshot = true;
                 }
-                return Statement(Statement::Begin{read_only});
+                return Statement(Statement::Begin{read_only, consistent_snapshot});
             }
             // [AND [NO] CHAIN] [[NO] RELEASE] after COMMIT / ROLLBACK: CHAIN begins the next transaction at once; RELEASE (a disconnect) is read and ignored
             auto chain_clause = [&]() {

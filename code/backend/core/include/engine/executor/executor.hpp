@@ -276,6 +276,7 @@ public:
     std::uint64_t statement_insert_id_ = 0;  // the same for the statement that is running (the MySQL protocol's OK packet reports it)
     bool insert_id_unset_ = false;           // an INSERT has started and has not given a number out yet
     bool insert_from_select_ = false;        // the INSERT that exec_insert_select hands to exec_insert numbers its rows in growing batches (read and cleared there)
+    bool reads_latest_ = false;              // the SELECT being run reads what is committed now, as a locking read does (the source of an INSERT ... SELECT): it neither uses nor takes the snapshot
     std::int64_t row_count_ = -1;            // the rows the last statement changed (-1: it was a SELECT)
     std::uint64_t found_rows_ = 0;           // the rows the last SELECT returned (or would have without its LIMIT, after SQL_CALC_FOUND_ROWS)
     std::int64_t affected_rows_ = -1;        // the rows the last statement affected when its message does not say it (ON DUPLICATE KEY UPDATE, REPLACE); -1: the message's number
@@ -585,11 +586,12 @@ private:
     // other read of s.tables -- without this a concurrent read could see another
     // session's still-open transaction's uncommitted INSERT/UPDATE/DELETE).
     static bool is_visible_for_read(const Row& row, const SnapshotCtx& ctx);
-    // Builds the SnapshotCtx for the current statement's reads: the frozen BEGIN-time
-    // ctx for an open RepeatableRead/Serializable transaction, or a fresh "right now"
+    // Builds the SnapshotCtx for the current statement's reads: the frozen ctx for an open
+    // RepeatableRead/Serializable transaction (the first consistent read takes it, as MySQL's does -- `take_snapshot` false:
+    // a write statement looking for its rows does not, and sees what is committed now until a read has), or a fresh "right now"
     // capture otherwise (ReadCommitted, autocommit, and ReadUncommitted -- which always
     // treats everything as committed regardless of timing, i.e. a genuine dirty read).
-    SnapshotCtx current_read_ctx(SharedDatabase& s) const;
+    SnapshotCtx current_read_ctx(SharedDatabase& s, bool take_snapshot = true);
     // Real transaction id to tag _xmin/_xmax with: the active explicit transaction's id,
     // or a freshly-allocated one-off id for an autocommit statement (never 0 -- 0 is
     // reserved as the "pre-MVCC legacy row, always visible" sentinel).
@@ -1277,7 +1279,7 @@ private:
     static std::string window_func_default_label(WindowFunc func);
 
     // ── Phase 8d: transactions/MVCC/savepoints ──────────────────────────
-    StringResult exec_begin(SharedDatabase& s);
+    StringResult exec_begin(SharedDatabase& s, bool consistent_snapshot = false);
     StringResult exec_commit(SharedDatabase& s);
     StringResult execute_commit_grouped();
     StringResult exec_commit_phase1(SharedDatabase& s, bool use_redo);

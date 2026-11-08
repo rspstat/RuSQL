@@ -859,8 +859,13 @@ void to_json(nlohmann::json& j, const Statement& stmt) {
         [&j](const auto& alt) {
             using T = std::decay_t<decltype(alt)>;
             if constexpr (std::is_same_v<T, Statement::Begin>) {
-                if (!alt.read_only) j = "Begin";
-                else j = nlohmann::json{{"Begin", nlohmann::json{{"read_only", *alt.read_only}}}};
+                if (!alt.read_only && !alt.consistent_snapshot) j = "Begin";
+                else {
+                    nlohmann::json fields = nlohmann::json::object();
+                    if (alt.read_only) fields["read_only"] = *alt.read_only;
+                    if (alt.consistent_snapshot) fields["consistent_snapshot"] = true;
+                    j = nlohmann::json{{"Begin", fields}};
+                }
             } else if constexpr (std::is_same_v<T, Statement::Commit>) {
                 if (!alt.chain) j = "Commit";
                 else j = nlohmann::json{{"Commit", nlohmann::json{{"chain", true}}}};
@@ -1252,7 +1257,8 @@ void from_json(const nlohmann::json& j, Statement& stmt) {
     } else if (tag == "Describe") {
         stmt = Statement(Statement::Describe{p.at("table").get<std::string>()});
     } else if (tag == "Begin") {
-        stmt = Statement(Statement::Begin{p.contains("read_only") ? std::optional<bool>(p.at("read_only").get<bool>()) : std::nullopt});
+        stmt = Statement(Statement::Begin{p.contains("read_only") ? std::optional<bool>(p.at("read_only").get<bool>()) : std::nullopt,
+                                          p.contains("consistent_snapshot") && p.at("consistent_snapshot").get<bool>()});
     } else if (tag == "Commit") {
         stmt = Statement(Statement::Commit{p.contains("chain") && p.at("chain").get<bool>()});
     } else if (tag == "Rollback") {

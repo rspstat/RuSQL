@@ -301,7 +301,7 @@ void TransactionManager::set_isolation_level(IsolationLevel level) {
     isolation_level_ = level;
 }
 
-Result<std::uint64_t, std::string> TransactionManager::begin_with_snapshot(const std::unordered_set<std::uint64_t>& active_txn_ids) {
+Result<std::uint64_t, std::string> TransactionManager::begin_with_snapshot(const std::unordered_set<std::uint64_t>& active_txn_ids, bool snapshot_now) {
     if (active_) return Result<std::uint64_t, std::string>::Err("Transaction already active. COMMIT or ROLLBACK first.");
     txn_id_ = io_->next_id();
     active_ = true;
@@ -310,12 +310,19 @@ Result<std::uint64_t, std::string> TransactionManager::begin_with_snapshot(const
     discard_redo_ops();
     redo_incomplete_ = false;
 
+    frozen_ctx_ = std::nullopt;
+    snapshot_deferred_ = false;
     if (isolation_level_ == IsolationLevel::RepeatableRead || isolation_level_ == IsolationLevel::Serializable) {
-        frozen_ctx_ = SnapshotCtx{txn_id_, io_->peek_next_id(), active_txn_ids};
-    } else {
-        frozen_ctx_ = std::nullopt;
+        if (snapshot_now) take_snapshot(active_txn_ids);
+        else snapshot_deferred_ = true;
     }
     return Result<std::uint64_t, std::string>::Ok(txn_id_);
+}
+
+void TransactionManager::take_snapshot(const std::unordered_set<std::uint64_t>& active_txn_ids) {
+    frozen_ctx_ = SnapshotCtx{txn_id_, io_->peek_next_id(), active_txn_ids};
+    frozen_ctx_->in_progress.erase(txn_id_); // (the transaction itself is read through self_txn_id)
+    snapshot_deferred_ = false;
 }
 
 void TransactionManager::record_read(const std::string& table, const std::string& pk_col, const std::string& key) {
@@ -367,6 +374,7 @@ Result<std::uint64_t, std::string> TransactionManager::begin() {
     if (active_) return Result<std::uint64_t, std::string>::Err("Transaction already active. COMMIT or ROLLBACK first.");
     txn_id_ = io_->next_id();
     active_ = true;
+    snapshot_deferred_ = false;
     undo_log_.clear();
     discard_redo_ops();
     redo_incomplete_ = false;

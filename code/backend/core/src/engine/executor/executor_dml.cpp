@@ -332,6 +332,14 @@ StringResult Executor::exec_insert_select(SharedDatabase& s, std::string table, 
             ExactFloats(bool& f, bool on) : flag(f), before(f) { if (on) flag = true; }
             ~ExactFloats() { flag = before; }
         } exact_floats(float_exact_, any_float);
+        // INSERT ... SELECT reads its source as a locking read does (MySQL's "current read"): what is committed now, with no snapshot taken or used
+        // (only a transaction that reads through a snapshot differs from that)
+        struct ReadsLatest {
+            bool& flag;
+            bool before;
+            ReadsLatest(bool& f, bool on) : flag(f), before(f) { if (on) flag = true; }
+            ~ReadsLatest() { flag = before; }
+        } reads_latest(reads_latest_, txn.is_active() && (txn.isolation_level() == IsolationLevel::RepeatableRead || txn.isolation_level() == IsolationLevel::Serializable));
         deadline::ReadPhase reads; // (the SELECT only reads: nothing is inserted yet, so KILL QUERY may stop it -- the statement's first word is INSERT)
         auto output = execute_with_s(s, std::move(query));
         if (output.is_err()) return output;

@@ -618,7 +618,7 @@ enum class TriggerEvent { Insert, Update, Delete };
 // Statement — the root AST node (80 variants in the Rust original).
 // ---------------------------------------------------------------------------
 struct Statement {
-    struct Begin { std::optional<bool> read_only; };      // START TRANSACTION READ ONLY / READ WRITE (none: what the session says)
+    struct Begin { std::optional<bool> read_only; bool consistent_snapshot = false; }; // START TRANSACTION READ ONLY / READ WRITE (none: what the session says); WITH CONSISTENT SNAPSHOT takes the snapshot at once
     struct Commit { bool chain = false; };                // COMMIT AND CHAIN: a new transaction begins with the same characteristics
     struct Rollback { bool chain = false; };
     struct CreateTable {

@@ -28,11 +28,11 @@ std::string isolation_level_debug(IsolationLevel level) {
 }
 } // namespace
 
-StringResult Executor::exec_begin(SharedDatabase& s) {
+StringResult Executor::exec_begin(SharedDatabase& s, bool consistent_snapshot) {
     // the level of the transaction: the one SET TRANSACTION gave it, else the session's (a SET made inside the last transaction takes effect now)
     if (!txn.is_active()) txn.set_isolation_level(next_isolation_ ? *next_isolation_ : session_isolation_);
     supersede_marks_.clear();
-    auto res = txn.begin_with_snapshot(*s.active_txn_ids->lock());
+    auto res = txn.begin_with_snapshot(*s.active_txn_ids->lock(), consistent_snapshot);
     if (res.is_err()) return StringResult::Err(res.error());
     std::uint64_t txn_id = res.value();
     s.active_txn_ids->lock()->insert(txn_id);

@@ -7,7 +7,7 @@ things a single-connection corpus (vs_mysql.py) cannot ask. Session A runs at th
 --show prints what MySQL answered at each step (to write the rows a test expects).
 
 The levels are READ COMMITTED (RC) and REPEATABLE READ (RR). SERIALIZABLE is not compared: MySQL blocks a writer behind a reader there and this script runs the steps one
-after the other. Not compared yet: nothing that waits for a lock.
+after the other. Not compared yet: nothing that waits for a lock (a step that waits more than 15 seconds comes back as error 2013).
 """
 import os, shutil, socket, subprocess, sys, time
 import pymysql
@@ -21,12 +21,15 @@ SETUP = [
     "INSERT INTO p VALUES (1), (2)",
     "CREATE TABLE ch (id INT PRIMARY KEY, p INT, v INT, FOREIGN KEY (p) REFERENCES p(id) ON DELETE CASCADE ON UPDATE CASCADE)",
     "INSERT INTO ch VALUES (1, 1, 10), (2, 2, 20)",
+    "CREATE TABLE d (id INT PRIMARY KEY, v INT)",
+    "INSERT INTO d VALUES (1, 10)",
 ]
 CH = "SELECT * FROM ch ORDER BY id"
 
 # scenarios whose differences are known and not fixed: name -> why. They are run and printed as "known", and do not count.
 KNOWN = {
-    "the_snapshot_is_taken_at_the_first_read": "MySQL takes the snapshot at the first read of the transaction, RuSQL at BEGIN (a change another session commits between the two is seen by MySQL)",
+    "an_update_with_a_subquery": "MySQL reads a subquery of an UPDATE as a locking read (what is committed now); RuSQL reads it through the snapshot",
+    "a_delete_with_a_subquery": "the same for a DELETE",
 }
 ALL = "SELECT * FROM t ORDER BY id"
 
@@ -90,6 +93,45 @@ SCENARIOS = {
     "the_snapshot_is_taken_at_the_first_read": [
         ("A", "BEGIN"), ("B", "UPDATE t SET v = v + 1 WHERE id = 1"), ("A", ALL), ("B", "UPDATE t SET v = v + 1 WHERE id = 2"), ("A", ALL), ("A", "COMMIT"),
     ],
+    "a_write_does_not_take_the_snapshot": [
+        ("A", "BEGIN"), ("A", "UPDATE t SET v = v + 1 WHERE id = 1"), ("B", "UPDATE t SET v = v + 1 WHERE id = 2"), ("A", ALL), ("B", "UPDATE t SET v = v + 1 WHERE id = 3"),
+        ("A", ALL), ("A", "COMMIT"), ("B", ALL),
+    ],
+    "a_select_without_a_table_takes_no_snapshot": [
+        ("A", "BEGIN"), ("A", "SELECT 1"), ("B", "UPDATE t SET v = v + 1 WHERE id = 1"), ("A", ALL), ("B", "UPDATE t SET v = v + 1 WHERE id = 2"), ("A", ALL),
+        ("A", "COMMIT"),
+    ],
+    "a_locking_read_does_not_take_the_snapshot": [
+        ("A", "BEGIN"), ("A", "SELECT * FROM t WHERE id = 3 FOR UPDATE"), ("B", "UPDATE t SET v = v + 1 WHERE id = 1"), ("A", ALL),
+        ("B", "UPDATE t SET v = v + 1 WHERE id = 2"), ("A", ALL), ("A", "COMMIT"),
+    ],
+    "a_read_of_another_table_takes_the_snapshot": [
+        ("A", "BEGIN"), ("A", "SELECT * FROM p ORDER BY id"), ("B", "UPDATE t SET v = v + 1 WHERE id = 1"), ("A", ALL), ("A", "COMMIT"),
+    ],
+    "the_next_transaction_takes_a_new_snapshot": [
+        ("A", "BEGIN"), ("A", ALL), ("A", "COMMIT"), ("B", "UPDATE t SET v = v + 1 WHERE id = 1"), ("A", "BEGIN"), ("B", "UPDATE t SET v = v + 1 WHERE id = 2"),
+        ("A", ALL), ("B", "UPDATE t SET v = v + 1 WHERE id = 3"), ("A", ALL), ("A", "COMMIT"),
+    ],
+    "a_commit_and_chain_takes_the_snapshot_at_its_first_read": [
+        ("A", "BEGIN"), ("A", ALL), ("A", "COMMIT AND CHAIN"), ("B", "UPDATE t SET v = v + 1 WHERE id = 1"), ("A", ALL), ("B", "UPDATE t SET v = v + 1 WHERE id = 2"),
+        ("A", ALL), ("A", "COMMIT"),
+    ],
+    "an_insert_select_reads_what_is_committed_now": [
+        ("A", "BEGIN"), ("A", ALL), ("B", "UPDATE t SET v = v + 1 WHERE id = 1"), ("A", "INSERT INTO d SELECT id + 10, v FROM t"), ("A", "SELECT * FROM d ORDER BY id"),
+        ("A", ALL), ("A", "COMMIT"),
+    ],
+    "an_insert_select_takes_no_snapshot": [
+        ("A", "BEGIN"), ("A", "INSERT INTO d SELECT id + 10, v FROM t"), ("B", "UPDATE d SET v = v + 5 WHERE id = 1"), ("A", "SELECT * FROM d ORDER BY id"),
+        ("B", "UPDATE d SET v = v + 5 WHERE id = 1"), ("A", "SELECT * FROM d ORDER BY id"), ("A", "COMMIT"),
+    ],
+    "an_update_with_a_subquery": [
+        ("A", "BEGIN"), ("A", ALL), ("B", "UPDATE t SET v = v + 1 WHERE id = 1"), ("A", "UPDATE d SET v = (SELECT v FROM t WHERE id = 1) WHERE id = 1"),
+        ("A", "SELECT * FROM d ORDER BY id"), ("A", ALL), ("A", "COMMIT"),
+    ],
+    "a_delete_with_a_subquery": [
+        ("A", "BEGIN"), ("A", ALL), ("B", "UPDATE t SET v = v + 1 WHERE id = 1"), ("A", "DELETE FROM d WHERE v < (SELECT v FROM t WHERE id = 1)"),
+        ("A", "SELECT * FROM d ORDER BY id"), ("A", "COMMIT"),
+    ],
     "a_consistent_snapshot_is_taken_at_once": [
         ("A", "START TRANSACTION WITH CONSISTENT SNAPSHOT"), ("B", "UPDATE t SET v = v + 1 WHERE id = 1"), ("A", ALL), ("A", "COMMIT"),
     ],
@@ -109,7 +151,7 @@ SCENARIOS = {
 
 
 def conn(port, password):
-    c = pymysql.connect(host="127.0.0.1", port=port, user="root", password=password, autocommit=True, charset="utf8mb4")
+    c = pymysql.connect(host="127.0.0.1", port=port, user="root", password=password, autocommit=True, charset="utf8mb4", read_timeout=15)
     return c, c.cursor()
 
 

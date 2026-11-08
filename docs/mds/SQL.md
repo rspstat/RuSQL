@@ -105,7 +105,7 @@ RuSQL이 실제로 받아서 실행하는 SQL 문법을 한 줄씩 정리한 문
 
 - INSERT INTO t [(cols)] VALUES (...)[, (...)...] : 행 입력(여러 행 한 번에, 값 자리에 식 · DEFAULT · 변수 가능)
 - INSERT INTO t SET col = 값, ... : SET 형식으로 입력
-- INSERT INTO t [(cols)] SELECT ... : 쿼리 결과 입력(UNION 포함)
+- INSERT INTO t [(cols)] SELECT ... : 쿼리 결과 입력(UNION 포함). 원본은 REPEATABLE READ에서도 스냅샷이 아니라 지금 커밋된 최신 값으로 읽는다(R73, MySQL과 같음)
 - INSERT IGNORE INTO ... : 제약에 걸린 행은 조용히 건너뜀
 - INSERT ... ON DUPLICATE KEY UPDATE col = 값, ... : 키가 겹치면 UPDATE로 전환(`VALUES(col)` 사용 가능)
 - INSERT ... RETURNING cols | * : 입력한 행을 바로 돌려줌
@@ -364,7 +364,7 @@ RuSQL이 실제로 받아서 실행하는 SQL 문법을 한 줄씩 정리한 문
 
 ### 트랜잭션
 
-- BEGIN [WORK] / START TRANSACTION [READ ONLY | READ WRITE | WITH CONSISTENT SNAPSHOT] : 트랜잭션 시작(READ ONLY 안에서 쓰는 문장은 오류 1792). 이미 열려 있으면 먼저 커밋한다
+- BEGIN [WORK] / START TRANSACTION [READ ONLY | READ WRITE | WITH CONSISTENT SNAPSHOT] : 트랜잭션 시작(READ ONLY 안에서 쓰는 문장은 오류 1792). 이미 열려 있으면 먼저 커밋한다. REPEATABLE READ · SERIALIZABLE의 스냅샷은 BEGIN이 아니라 트랜잭션의 **첫 일반 읽기**(잠그지 않는 SELECT)에 뜬다(MySQL과 같음, R73); WITH CONSISTENT SNAPSHOT은 즉시 뜬다. 쓰기 · 잠금 읽기 · 표 없는 SELECT는 스냅샷을 뜨지 않는다
 - COMMIT [WORK] [AND [NO] CHAIN] [[NO] RELEASE] : 변경 확정. `AND CHAIN`은 같은 격리 수준 · 접근 모드로 새 트랜잭션을 이어서 연다(R71)
 - ROLLBACK [WORK] [AND [NO] CHAIN] : 변경 취소
 - SAVEPOINT 이름 : 저장점 지정(트랜잭션 밖에서는 받기만 하고 남기지 않음)

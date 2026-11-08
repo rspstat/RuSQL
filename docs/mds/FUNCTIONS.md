@@ -230,7 +230,7 @@
 - [x] Checkpoint (WAL 자동 트런케이션, 512KB 임계값, fsync 보장) — 다른 세션에 활성 트랜잭션이 하나라도 있으면 WAL 정리를 연기 (그 세션의 미완료 레코드가 체크포인트 마커에 잘려나가는 것을 방지)
 - [x] 트랜잭션 격리 수준 4단계
   - READ UNCOMMITTED / READ COMMITTED
-  - REPEATABLE READ (BEGIN 시점 스냅샷 고정)
+  - REPEATABLE READ (트랜잭션의 첫 읽기에 스냅샷 고정 — MySQL처럼; `WITH CONSISTENT SNAPSHOT`은 즉시)
   - SERIALIZABLE (팬텀 읽기 감지 + 자동 롤백)
 - [x] MVCC 기반 Isolation (ACID 완전 충족) — DML은 `s.tables`에 직접 기록되고 작성자의 실제 트랜잭션 ID(`_xmin`)로 태깅됨(구버전 session_tables 방식은 폐지, 자세한 내용은 아래 MVCC 절 참고); 다른 세션은 `SnapshotCtx` 기반 가시성 필터로 미커밋 행을 못 봄(Dirty Read 방지, READ UNCOMMITTED는 예외), 자기 자신의 미커밋 행은 `xmin==self` 특례로 정상적으로 보임
 
@@ -345,6 +345,10 @@
   - 다른 세션이 스냅샷 뒤에 바꾼 행을 `UPDATE`/`DELETE`/외래키 연쇄로 쓰면 스냅샷에 보이는 옛 버전이 새 버전과 나란히 보이던 것: 쓰는 쪽이 끝낼 행 가운데 스냅샷에 안 보이는 것을 모아 `hide_older_versions`가 같은 기본키의 옛 버전에 `_xsup` = 트랜잭션 번호를 붙이고, `is_visible_for_read`가 그 버전을 숨김(표시가 있는 트랜잭션의 스냅샷만 `check_superseded`로 찾음). `ROLLBACK TO SAVEPOINT`는 되돌린 문장의 표시를 걷고 앞 문장의 표시를 다시 붙임(`unhide_after_rollback`).
   - `SELECT … FOR UPDATE | FOR SHARE | LOCK IN SHARE MODE`는 REPEATABLE READ에서도 최신 커밋을 읽음.
   - `code/test/diff/two_sessions.py`: 두 세션 시나리오를 진짜 MySQL과 단계마다 비교(READ COMMITTED · REPEATABLE READ; `--show`는 MySQL의 답을 보여 줌; 알려진 차이는 `KNOWN`).
+- [x] **R73 (2026-11-08): REPEATABLE READ · SERIALIZABLE의 스냅샷을 트랜잭션의 첫 읽기에 뜸, `START TRANSACTION WITH CONSISTENT SNAPSHOT`은 즉시, `INSERT … SELECT` 원본은 최신 커밋을 읽음** (`txn_manager.hpp/.cpp` · `executor_ddl.cpp` · `executor_txn.cpp` · `executor_core.cpp` · `executor_dml.cpp` · `executor_select.cpp` · `ast.hpp` · `ast_json.cpp` · `parser_core.cpp` · `two_sessions.py`)
+  - `begin_with_snapshot(…, snapshot_now)` · `snapshot_pending()` · `take_snapshot()`: 스냅샷을 보류했다가 첫 읽기(`current_read_ctx`)가 뜸. 쓰기 · 잠금 읽기 · 표 없는 `SELECT`는 안 뜸. 뜨면 모든 표에 적용, 다음 트랜잭션 · `COMMIT AND CHAIN`은 새로 뜸.
+  - `Statement::Begin::consistent_snapshot`(파서 · JSON): 즉시 뜸. `reads_latest_`: `INSERT … SELECT` 원본을 `FOR UPDATE`처럼 최신 커밋으로 읽음.
+  - 두 세션 시험 28개 시나리오 442단계 차이 0(알려진 차이: `UPDATE`/`DELETE` 안 서브쿼리), 시험 `test_repeatable_read.cpp` 7케이스 추가, 심은 버그 8개 잡음.
   - 시험: `test_repeatable_read.cpp`(9케이스), 변이 9개 모두 잡음.
 - [x] **R71 (2026-11-08): 트랜잭션 · 트리거 · 뷰 · 외래키 · 날짜의 MySQL 호환, `BEFORE UPDATE`의 `SET NEW.x`, `OPTIMIZE`·`CHECK TABLE`** (`executor_core.cpp` · `executor_txn.cpp` · `executor_trigger.cpp` · `executor_update.cpp` · `executor_dml.cpp` · `executor_delete.cpp` · `executor_ddl.cpp` · `executor_maint.cpp` · `executor_cascade_plan.cpp` · `executor_eval.cpp` · `executor_advice.cpp` · `builtin_functions.cpp` · `sql_value_util.hpp` · `view_rename.hpp` · `parser_*.cpp` · `ast.hpp` · `mysql.cpp`)
   - 트랜잭션: DDL · 트랜잭션 안의 `BEGIN`이 먼저 커밋, `START TRANSACTION READ ONLY` · `SET [SESSION] TRANSACTION READ ONLY | READ WRITE` · `transaction_read_only`(1792), `@@transaction_isolation` · `@@tx_isolation`이 `SET` 어느 형태로 정해도 실제 수준을 말함(1231 · 1568, `SET TRANSACTION`은 다음 트랜잭션 하나), `COMMIT | ROLLBACK … AND [NO] CHAIN [[NO] RELEASE]`, 저장점 1305. MySQL 프로토콜은 `SET`의 `ERROR n …` 오류를 삼키지 않음. (`Begin { read_only }` · `Commit { chain }` · `Rollback { chain }` · `SetIsolationLevel { next_only, has_level, read_only }`)
@@ -423,7 +427,7 @@
 
 ### MVCC
 - [x] 행 버전 스탬프 (`_xmin`, `_xmax`) — 실제 트랜잭션 ID 태깅(전역 유일 카운터에서 발급), `0`은 "이전부터 존재/항상 가시" 예약값
-- [x] `SnapshotCtx` 기반 격리수준별 실제 가시성 — READ UNCOMMITTED(모든 트랜잭션을 이미 커밋으로 간주 → 진짜 dirty read), READ COMMITTED(문장마다 새로 캡처한 스냅샷), REPEATABLE READ/SERIALIZABLE(BEGIN 시점에 한 번만 고정한 스냅샷을 트랜잭션 내내 재사용) — 이전엔 RU/RC가 코드상 동일하게 처리됐으나 현재는 실제로 분기
+- [x] `SnapshotCtx` 기반 격리수준별 실제 가시성 — READ UNCOMMITTED(모든 트랜잭션을 이미 커밋으로 간주 → 진짜 dirty read), READ COMMITTED(문장마다 새로 캡처한 스냅샷), REPEATABLE READ/SERIALIZABLE(첫 읽기에 한 번만 고정한 스냅샷을 트랜잭션 내내 재사용) — 이전엔 RU/RC가 코드상 동일하게 처리됐으나 현재는 실제로 분기
 - [x] UPDATE → 실제 다중 버전 생성 — 기존 행은 그대로 두고 `_xmax`만 스탬프, 새 물리 버전을 `_xmin`=본인 트랜잭션 ID로 append (in-place 수정 아님, autocommit 포함 항상 버전화)
 - [x] DELETE → 논리 삭제(트랜잭션 내부이거나, 다른 세션에 활성 트랜잭션이 하나라도 있을 때) / 물리 삭제(DB 전체가 quiescent한 autocommit) — 논리 삭제 시 PK/보조/해시 인덱스도 즉시 최신 버전으로 갱신(인덱스 기반 조회가 죽은 행을 계속 보여주는 stale 버그 수정)
 - [x] ROLLBACK → 자신이 만든 버전 물리 제거 + 자신이 죽인 버전의 `_xmax` 복원, PK/보조/복합 인덱스 완전 재빌드

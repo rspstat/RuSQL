@@ -5,6 +5,8 @@
 
 #include "catch.hpp"
 #include "engine/executor/executor.hpp"
+#include "engine/parser/ast_json.hpp"
+#include "engine/parser/parser.hpp"
 #include "engine/result_text.hpp"
 
 using namespace engine;
@@ -251,5 +253,147 @@ TEST_CASE("R72: a locking read reads what is committed now, not the snapshot", "
     REQUIRE(rows_of(s.a, "SELECT * FROM t WHERE id = 1") == Rows{{"1", "10", "1"}});                  // (the snapshot)
     REQUIRE(rows_of(s.a, "SELECT * FROM t WHERE id = 1 FOR UPDATE") == Rows{{"1", "11", "1"}});       // (the latest)
     REQUIRE(rows_of(s.a, "SELECT * FROM t WHERE id = 1 LOCK IN SHARE MODE") == Rows{{"1", "11", "1"}});
+    ok(s.a, "COMMIT");
+}
+
+// R73: the snapshot is taken by the first consistent read of the transaction, as MySQL's is -- not by BEGIN. A change another session commits between BEGIN and the first read
+// is seen; one committed after it is not. A write, a locking read and a SELECT without a table take no snapshot. START TRANSACTION WITH CONSISTENT SNAPSHOT takes it at once.
+TEST_CASE("R73: the snapshot is taken at the first read, not at BEGIN", "[r73][rr]") {
+    for (const char* level : {"REPEATABLE READ", "SERIALIZABLE"}) {
+        Sessions s("first_read", level);
+        ok(s.a, "BEGIN");
+        ok(s.b, "UPDATE t SET v = v + 1 WHERE id = 1");
+        REQUIRE(rows_of(s.a, kAll) == Rows{{"1", "11", "1"}, {"2", "20", "1"}, {"3", "30", "2"}}); // (committed before the first read: seen)
+        ok(s.b, "UPDATE t SET v = v + 1 WHERE id = 2");
+        REQUIRE(rows_of(s.a, kAll) == Rows{{"1", "11", "1"}, {"2", "20", "1"}, {"3", "30", "2"}}); // (committed after it: not)
+        ok(s.a, "ROLLBACK"); // (a SERIALIZABLE transaction that read row 2 could not commit: the other session changed it since)
+        REQUIRE(rows_of(s.b, kAll) == Rows{{"1", "11", "1"}, {"2", "21", "1"}, {"3", "30", "2"}});
+    }
+}
+
+TEST_CASE("R73: a write, a locking read and a SELECT without a table take no snapshot", "[r73][rr]") {
+    {
+        Sessions s("write");
+        ok(s.a, "BEGIN");
+        ok(s.a, "UPDATE t SET v = v + 1 WHERE id = 1");
+        ok(s.b, "UPDATE t SET v = v + 1 WHERE id = 2");
+        REQUIRE(rows_of(s.a, kAll) == Rows{{"1", "11", "1"}, {"2", "21", "1"}, {"3", "30", "2"}}); // (its own write and the other session's, which came before the first read)
+        ok(s.b, "UPDATE t SET v = v + 1 WHERE id = 3");
+        REQUIRE(rows_of(s.a, kAll) == Rows{{"1", "11", "1"}, {"2", "21", "1"}, {"3", "30", "2"}});
+        ok(s.a, "COMMIT");
+    }
+    {
+        Sessions s("locking");
+        ok(s.a, "BEGIN");
+        REQUIRE(rows_of(s.a, "SELECT * FROM t WHERE id = 3 FOR UPDATE") == Rows{{"3", "30", "2"}});
+        ok(s.b, "UPDATE t SET v = v + 1 WHERE id = 1");
+        REQUIRE(rows_of(s.a, kAll) == Rows{{"1", "11", "1"}, {"2", "20", "1"}, {"3", "30", "2"}});
+        ok(s.b, "UPDATE t SET v = v + 1 WHERE id = 2");
+        REQUIRE(rows_of(s.a, kAll) == Rows{{"1", "11", "1"}, {"2", "20", "1"}, {"3", "30", "2"}});
+        ok(s.a, "COMMIT");
+    }
+    {
+        Sessions s("no_table");
+        ok(s.a, "BEGIN");
+        REQUIRE(rows_of(s.a, "SELECT 1") == Rows{{"1"}});
+        ok(s.b, "UPDATE t SET v = v + 1 WHERE id = 1");
+        REQUIRE(rows_of(s.a, kAll) == Rows{{"1", "11", "1"}, {"2", "20", "1"}, {"3", "30", "2"}});
+        ok(s.a, "COMMIT");
+    }
+    {
+        Sessions s("trigger");
+        ok(s.a, "CREATE TABLE tl (n INT)");
+        ok(s.a, "CREATE TRIGGER t_au AFTER UPDATE ON t FOR EACH ROW INSERT INTO tl VALUES (NEW.id)");
+        ok(s.a, "BEGIN");
+        ok(s.a, "UPDATE t SET v = v + 1 WHERE id = 1"); // (finds the rows it fires the trigger for: not a consistent read)
+        ok(s.b, "UPDATE t SET v = v + 1 WHERE id = 2");
+        REQUIRE(rows_of(s.a, kAll) == Rows{{"1", "11", "1"}, {"2", "21", "1"}, {"3", "30", "2"}});
+        ok(s.a, "COMMIT");
+    }
+}
+
+TEST_CASE("R73: a read of another table takes the snapshot for all of them", "[r73][rr]") {
+    Sessions s("other_table");
+    ok(s.a, "BEGIN");
+    REQUIRE(rows_of(s.a, "SELECT * FROM p ORDER BY id") == Rows{{"1"}, {"2"}});
+    ok(s.b, "UPDATE t SET v = v + 1 WHERE id = 1");
+    REQUIRE(rows_of(s.a, kAll) == Rows{{"1", "10", "1"}, {"2", "20", "1"}, {"3", "30", "2"}});
+    ok(s.a, "COMMIT");
+}
+
+TEST_CASE("R73: START TRANSACTION WITH CONSISTENT SNAPSHOT takes it at once", "[r73][rr]") {
+    {
+        Parser parser("START TRANSACTION WITH CONSISTENT SNAPSHOT");
+        auto parsed = parser.parse();
+        REQUIRE(parsed.is_ok());
+        REQUIRE(std::get<Statement::Begin>(parsed.value().data).consistent_snapshot);
+        nlohmann::json j = parsed.value();
+        REQUIRE(std::get<Statement::Begin>(j.get<Statement>().data).consistent_snapshot);
+        Parser both("START TRANSACTION READ ONLY, WITH CONSISTENT SNAPSHOT");
+        auto b = both.parse();
+        REQUIRE(b.is_ok());
+        REQUIRE(std::get<Statement::Begin>(b.value().data).consistent_snapshot);
+        REQUIRE(std::get<Statement::Begin>(b.value().data).read_only == std::optional<bool>(true));
+        Parser plain("START TRANSACTION");
+        REQUIRE(!std::get<Statement::Begin>(plain.parse().value().data).consistent_snapshot);
+    }
+    Sessions s("consistent");
+    ok(s.a, "START TRANSACTION WITH CONSISTENT SNAPSHOT");
+    ok(s.b, "UPDATE t SET v = v + 1 WHERE id = 1");
+    REQUIRE(rows_of(s.a, kAll) == Rows{{"1", "10", "1"}, {"2", "20", "1"}, {"3", "30", "2"}});
+    ok(s.a, "COMMIT");
+    ok(s.a, "START TRANSACTION"); // (plain: the snapshot waits for the first read)
+    ok(s.b, "UPDATE t SET v = v + 1 WHERE id = 2");
+    REQUIRE(rows_of(s.a, kAll) == Rows{{"1", "11", "1"}, {"2", "21", "1"}, {"3", "30", "2"}});
+    ok(s.a, "COMMIT");
+}
+
+TEST_CASE("R73: the next transaction and COMMIT AND CHAIN take their own snapshots", "[r73][rr]") {
+    Sessions s("next");
+    ok(s.a, "BEGIN");
+    (void)rows_of(s.a, kAll);
+    ok(s.a, "COMMIT");
+    ok(s.b, "UPDATE t SET v = v + 1 WHERE id = 1");
+    ok(s.a, "BEGIN");
+    ok(s.b, "UPDATE t SET v = v + 1 WHERE id = 2");
+    REQUIRE(rows_of(s.a, kAll) == Rows{{"1", "11", "1"}, {"2", "21", "1"}, {"3", "30", "2"}});
+    ok(s.b, "UPDATE t SET v = v + 1 WHERE id = 3");
+    REQUIRE(rows_of(s.a, kAll) == Rows{{"1", "11", "1"}, {"2", "21", "1"}, {"3", "30", "2"}});
+    ok(s.a, "COMMIT AND CHAIN");
+    ok(s.b, "UPDATE t SET v = v + 1 WHERE id = 1");
+    REQUIRE(rows_of(s.a, kAll) == Rows{{"1", "12", "1"}, {"2", "21", "1"}, {"3", "31", "2"}});
+    ok(s.a, "COMMIT");
+}
+
+TEST_CASE("R73: the duplicate-version fix still holds when the snapshot comes late", "[r73][rr]") {
+    Sessions s("late");
+    ok(s.a, "BEGIN");
+    (void)rows_of(s.a, "SELECT 1");
+    ok(s.b, "UPDATE t SET v = v + 1 WHERE id = 1");
+    (void)rows_of(s.a, kAll);                       // (the snapshot: v = 11)
+    ok(s.b, "UPDATE t SET v = v + 1 WHERE id = 1"); // (12, after the snapshot)
+    ok(s.a, "UPDATE t SET v = v + 1 WHERE id = 1"); // (adds to what is committed now)
+    REQUIRE(rows_of(s.a, kAll) == Rows{{"1", "13", "1"}, {"2", "20", "1"}, {"3", "30", "2"}});
+    REQUIRE(rows_of(s.a, "SELECT COUNT(*) FROM t") == Rows{{"3"}});
+    ok(s.a, "COMMIT");
+}
+
+TEST_CASE("R73: the source of an INSERT ... SELECT is read as a locking read: what is committed now, and no snapshot taken", "[r73][rr]") {
+    Sessions s("insert_select");
+    ok(s.a, "CREATE TABLE d (id INT PRIMARY KEY, v INT)");
+    ok(s.a, "INSERT INTO d VALUES (1, 10)");
+    ok(s.a, "BEGIN");
+    (void)rows_of(s.a, kAll); // (the snapshot)
+    ok(s.b, "UPDATE t SET v = v + 1 WHERE id = 1");
+    ok(s.a, "INSERT INTO d SELECT id + 10, v FROM t"); // (copies the 11)
+    REQUIRE(rows_of(s.a, "SELECT * FROM d ORDER BY id") == Rows{{"1", "10"}, {"11", "11"}, {"12", "20"}, {"13", "30"}});
+    REQUIRE(rows_of(s.a, kAll) == Rows{{"1", "10", "1"}, {"2", "20", "1"}, {"3", "30", "2"}}); // (the snapshot is still the old one)
+    ok(s.a, "COMMIT");
+    ok(s.a, "BEGIN");
+    ok(s.a, "INSERT INTO d SELECT id + 20, v FROM t"); // (no snapshot yet)
+    ok(s.b, "UPDATE d SET v = v + 5 WHERE id = 1");
+    REQUIRE(rows_of(s.a, "SELECT v FROM d WHERE id = 1") == Rows{{"15"}}); // (the first read takes it now)
+    ok(s.b, "UPDATE d SET v = v + 5 WHERE id = 1");
+    REQUIRE(rows_of(s.a, "SELECT v FROM d WHERE id = 1") == Rows{{"15"}});
     ok(s.a, "COMMIT");
 }

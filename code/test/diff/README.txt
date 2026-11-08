@@ -179,7 +179,9 @@ Comparison with a real MySQL (needs pymysql and a MySQL 8.4 on 127.0.0.1:3391; u
   python two_sessions.py <engine_server.exe> [--level RC|RR|both] [--only NAME] [--show]
       two sessions A and B (A at the level asked for) run the same steps on RuSQL and on the real MySQL and every step's answer is compared (the rows, the rows a DML statement
       affected, the error number): what a transaction sees of what another session commits and of its own writes, which a single connection (vs_mysql.py) cannot ask.
-      18 scenarios x 2 levels, 298 steps, 0 differences except the ones listed in KNOWN (MySQL takes the snapshot at the first read of the transaction, RuSQL at BEGIN).
+      28 scenarios x 2 levels, 442 steps, 0 differences except the ones listed in KNOWN (R73: the subquery of an UPDATE / DELETE, which MySQL reads as a locking read and RuSQL through the snapshot).
+      Since R73 it also covers when the snapshot is taken (the first read, not BEGIN; a write, a locking read and a SELECT without a table take none; START TRANSACTION WITH CONSISTENT SNAPSHOT takes it at once;
+      the source of an INSERT ... SELECT is read as a locking read). A step that waits more than 15 seconds comes back as error 2013.
       tests/test_repeatable_read.cpp keeps the same sequences without a MySQL.
   python make_scoreboard.py <engine_server.exe> [--tests CASES ASSERTIONS]
       runs every corpus (the protocol ones with --proto) and writes the numbers the app's Compat page shows to code/frontend/src/lib/compatSnapshot.json.

@@ -56,11 +56,12 @@ bool Executor::is_visible_for_read(const Row& row, const SnapshotCtx& ctx) {
     return true;                                       // deleted by a transaction not (yet) committed as of this snapshot
 }
 
-SnapshotCtx Executor::current_read_ctx(SharedDatabase& s) const {
+SnapshotCtx Executor::current_read_ctx(SharedDatabase& s, bool take_snapshot) {
     if (txn.isolation_level() == IsolationLevel::ReadUncommitted) {
         return SnapshotCtx{txn.current_txn_id(), std::numeric_limits<std::uint64_t>::max(), {}};
     }
     if (txn.is_active()) {
+        if (take_snapshot && txn.snapshot_pending()) txn.take_snapshot(*s.active_txn_ids->lock());
         if (auto frozen = txn.frozen_ctx()) return *frozen;
     }
     return SnapshotCtx{txn.current_txn_id(), s.txn_io->peek_next_id(), *s.active_txn_ids->lock()};
