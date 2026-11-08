@@ -345,6 +345,12 @@
   - 다른 세션이 스냅샷 뒤에 바꾼 행을 `UPDATE`/`DELETE`/외래키 연쇄로 쓰면 스냅샷에 보이는 옛 버전이 새 버전과 나란히 보이던 것: 쓰는 쪽이 끝낼 행 가운데 스냅샷에 안 보이는 것을 모아 `hide_older_versions`가 같은 기본키의 옛 버전에 `_xsup` = 트랜잭션 번호를 붙이고, `is_visible_for_read`가 그 버전을 숨김(표시가 있는 트랜잭션의 스냅샷만 `check_superseded`로 찾음). `ROLLBACK TO SAVEPOINT`는 되돌린 문장의 표시를 걷고 앞 문장의 표시를 다시 붙임(`unhide_after_rollback`).
   - `SELECT … FOR UPDATE | FOR SHARE | LOCK IN SHARE MODE`는 REPEATABLE READ에서도 최신 커밋을 읽음.
   - `code/test/diff/two_sessions.py`: 두 세션 시나리오를 진짜 MySQL과 단계마다 비교(READ COMMITTED · REPEATABLE READ; `--show`는 MySQL의 답을 보여 줌; 알려진 차이는 `KNOWN`).
+- [x] **R74 (2026-11-08): REPEATABLE READ · SERIALIZABLE에서 일반 SELECT가 아닌 문장은 서브쿼리를 최신 커밋으로 읽음, `INSERT … SELECT` 원본의 공유 잠금, 잠금을 기다린 읽기는 다시 읽음, 정상 종료한 연결의 트랜잭션 되돌림** (`executor_core.cpp` · `executor_select.cpp` · `executor_dml.cpp` · `executor_trigger.cpp` · `executor.hpp` · `mysql.cpp`)
+  - 진짜 MySQL을 먼저 쟀다: `INSERT … VALUES ((SELECT …))` · `REPLACE` · `ON DUPLICATE KEY UPDATE` · `UPDATE` · `DELETE` · 다중 표 `UPDATE`/`DELETE` · `SET @x = (SELECT …)` · 프로시저의 `SET`은 서브쿼리 표를 최신 커밋으로 읽고, `SELECT`(`SELECT … INTO` 포함)는 스냅샷으로 읽음. 트리거 · 프로시저 본문은 문장마다 자기 종류대로.
+  - `execute_with_s_body`가 위 문장 종류이면 그 문장 동안 `reads_latest_`를 켬(`FlagScope`), `fire_triggers`는 본문 동안 끔. `locks_source_rows_`: `INSERT … SELECT` 원본(한 표를 평범하게 읽는 모양)이 `FOR SHARE`처럼 읽은 행과 기본키 조건의 틈을 공유 잠금(REPEATABLE READ · SERIALIZABLE의 명시적 트랜잭션만); `DataGuardStash`가 기다리는 동안 원본 표의 데이터 잠금을 놓게 함.
+  - 잠금 읽기(`FOR UPDATE` · `FOR SHARE` · 위 원본)가 잠금을 기다렸으면 이미 잠금을 쥔 채 다시 읽음(`lock_waits_`, `lock_pass_`) — 기다리기 전의 옛 값을 돌려주던 것 수정.
+  - `mysql.cpp`: `COM_QUIT`가 열린 트랜잭션을 되돌리지 않고 `return`하던 것(잠금과 커밋 안 된 행이 서버가 꺼질 때까지 남음) 수정.
+  - `two_sessions.py` 38개 시나리오 596단계 차이 0(알려진 차이 없음; 단계 `A~` · `A<` · `A!` 추가), 시험 `test_repeatable_read.cpp` 6케이스 추가(전체 940 / 1,520,011), 심은 버그 15개 잡음.
 - [x] **R73 (2026-11-08): REPEATABLE READ · SERIALIZABLE의 스냅샷을 트랜잭션의 첫 읽기에 뜸, `START TRANSACTION WITH CONSISTENT SNAPSHOT`은 즉시, `INSERT … SELECT` 원본은 최신 커밋을 읽음** (`txn_manager.hpp/.cpp` · `executor_ddl.cpp` · `executor_txn.cpp` · `executor_core.cpp` · `executor_dml.cpp` · `executor_select.cpp` · `ast.hpp` · `ast_json.cpp` · `parser_core.cpp` · `two_sessions.py`)
   - `begin_with_snapshot(…, snapshot_now)` · `snapshot_pending()` · `take_snapshot()`: 스냅샷을 보류했다가 첫 읽기(`current_read_ctx`)가 뜸. 쓰기 · 잠금 읽기 · 표 없는 `SELECT`는 안 뜸. 뜨면 모든 표에 적용, 다음 트랜잭션 · `COMMIT AND CHAIN`은 새로 뜸.
   - `Statement::Begin::consistent_snapshot`(파서 · JSON): 즉시 뜸. `reads_latest_`: `INSERT … SELECT` 원본을 `FOR UPDATE`처럼 최신 커밋으로 읽음.

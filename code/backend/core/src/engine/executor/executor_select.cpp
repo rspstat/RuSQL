@@ -1414,6 +1414,29 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
                                           for_share, with_rollup);
     }
 
+    // The source of an INSERT ... SELECT in a REPEATABLE READ / SERIALIZABLE transaction locks the rows it reads for sharing, as FOR SHARE does. Only this SELECT does (not the subqueries it
+    // runs), and only a plain read of one table does so far: a join, an aggregate or a view locks nothing.
+    if (locks_source_rows_) {
+        locks_source_rows_ = false;
+        const bool plain = txn.is_active() && joins.empty() && !group_by && !table.empty() && !s.views.count(table) && s.catalog.get_table(table) &&
+                           std::none_of(columns.begin(), columns.end(), [](const SelectColumn& c) {
+                               return std::holds_alternative<SelectColumn::Agg>(c.data) || std::holds_alternative<SelectColumn::AggAlias>(c.data) ||
+                                      std::holds_alternative<SelectColumn::WinFunc>(c.data);
+                           });
+        if (plain) for_share = true;
+    }
+
+    // A locking read reads the rows and then locks them. When it had to wait for a lock, the other transaction may have changed the rows meanwhile, and what it read is out of date: it reads
+    // again, now that it holds its locks and nothing can change under it. (MySQL's answer after a wait is the current rows.)
+    if ((for_update || for_share) && txn.is_active() && !lock_pass_) {
+        FlagScope pass(lock_pass_, true);
+        for (int round = 0;; round++) {
+            const std::uint64_t waits = lock_waits_;
+            StringResult out = exec_select(s, table, std::nullopt, distinct, columns, condition, joins, order_by, group_by, having, limit, offset, for_update, for_share, with_rollup);
+            if (out.is_err() || lock_waits_ == waits || round >= 8) return out;
+        }
+    }
+
     // `JOIN (SELECT ...) AS d`: each derived table is evaluated once and read as a temporary table of its alias, as a derived table in
     // FROM is (exec_select_with_subquery).
     if (std::any_of(joins.begin(), joins.end(), [](const Join& j) { return j.subquery && !j.lateral; })) {
@@ -3254,6 +3277,7 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
                 // doc comment: a statement blocked while still holding either can deadlock
                 // against a concurrent COMMIT/write needing the other one EXCLUSIVE),
                 // block on just this one row, and reacquire before touching `s` again.
+                lock_waits_++;
                 release_table_data_locks_for_block();
                 release_table_locks_for_block();
                 LockResult lr2 = block_on_row(s.lock_mgr, table, pk_val, txn_id, /*exclusive=*/true, lock_deadline);
@@ -3302,6 +3326,7 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
                                           std::to_string(lr.holder) + " (SELECT FOR SHARE). Transaction " + std::to_string(txn_id) + " aborted.");
             }
             if (lr.kind == LockResult::Kind::Conflict) {
+                lock_waits_++;
                 release_table_data_locks_for_block();
                 release_table_locks_for_block();
                 LockResult lr2 = block_on_row(s.lock_mgr, table, pk_val, txn_id, /*exclusive=*/false, lock_deadline);

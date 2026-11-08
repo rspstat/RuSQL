@@ -1570,6 +1570,7 @@ void handle_mysql_client(SOCKET sock, std::shared_ptr<RwLock<SharedDatabase>> sh
         switch (cmd) {
             case COM_QUIT: {
                 exec.deregister_process();
+                if (exec.txn.is_active()) { auto abandoned = exec_query(exec, "ROLLBACK"); (void)abandoned; } // (a client that quits with a transaction open: its locks and rows go)
                 exec.release_explicit_table_locks(); // LOCK TABLES V1 -- release on disconnect
                 return;
             }

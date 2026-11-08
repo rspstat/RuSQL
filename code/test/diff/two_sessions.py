@@ -7,9 +7,12 @@ things a single-connection corpus (vs_mysql.py) cannot ask. Session A runs at th
 --show prints what MySQL answered at each step (to write the rows a test expects).
 
 The levels are READ COMMITTED (RC) and REPEATABLE READ (RR). SERIALIZABLE is not compared: MySQL blocks a writer behind a reader there and this script runs the steps one
-after the other. Not compared yet: nothing that waits for a lock (a step that waits more than 15 seconds comes back as error 2013).
+after the other.
+
+Locks: B gives up on a lock after two seconds (error 1205), so a step that is blocked shows as 1205. A step of "A~" runs A's statement in a thread (it waits for a lock B holds)
+and "A<" is its answer. A step that waits more than 15 seconds comes back as error 2013.
 """
-import os, shutil, socket, subprocess, sys, time
+import os, shutil, socket, subprocess, sys, threading, time
 import pymysql
 
 SETUP = [
@@ -27,10 +30,7 @@ SETUP = [
 CH = "SELECT * FROM ch ORDER BY id"
 
 # scenarios whose differences are known and not fixed: name -> why. They are run and printed as "known", and do not count.
-KNOWN = {
-    "an_update_with_a_subquery": "MySQL reads a subquery of an UPDATE as a locking read (what is committed now); RuSQL reads it through the snapshot",
-    "a_delete_with_a_subquery": "the same for a DELETE",
-}
+KNOWN = {}
 ALL = "SELECT * FROM t ORDER BY id"
 
 # name -> steps; a step is (session, sql)
@@ -147,6 +147,52 @@ SCENARIOS = {
         ("A", "BEGIN"), ("A", ALL), ("B", "UPDATE t SET v = v + 1 WHERE id = 1"), ("A", "SELECT * FROM t WHERE id = 1 FOR UPDATE"), ("A", ALL),
         ("A", "SELECT * FROM t WHERE id = 1 LOCK IN SHARE MODE"), ("A", "COMMIT"),
     ],
+    # a statement that is not a plain SELECT reads the tables of its subqueries as a locking read does; a SELECT (SELECT ... INTO too) reads the snapshot
+    "an_insert_with_a_subquery": [
+        ("A", "BEGIN"), ("A", ALL), ("B", "UPDATE t SET v = v + 1 WHERE id = 1"), ("A", "INSERT INTO d VALUES (5, (SELECT v FROM t WHERE id = 1))"),
+        ("A", "REPLACE INTO d VALUES (1, (SELECT v FROM t WHERE id = 1))"), ("A", "SELECT * FROM d ORDER BY id"), ("A", ALL), ("A", "COMMIT"),
+    ],
+    "a_set_with_a_subquery": [
+        ("A", "BEGIN"), ("A", ALL), ("B", "UPDATE t SET v = v + 1 WHERE id = 1"), ("A", "SET @x = (SELECT v FROM t WHERE id = 1)"), ("A", "SELECT @x"),
+        ("A", "SELECT v INTO @y FROM t WHERE id = 1"), ("A", "SELECT @y"), ("A", "COMMIT"),
+    ],
+    "a_select_with_a_subquery_reads_the_snapshot": [
+        ("A", "BEGIN"), ("A", ALL), ("B", "UPDATE t SET v = v + 1 WHERE id = 1"), ("A", "SELECT id FROM d WHERE v < (SELECT v FROM t WHERE id = 1)"),
+        ("A", "SELECT id FROM d WHERE v = (SELECT v FROM t WHERE id = 1)"), ("A", "COMMIT"),
+    ],
+    "an_update_join_reads_the_latest": [
+        ("A", "BEGIN"), ("A", ALL), ("B", "UPDATE t SET v = v + 1 WHERE id = 1"), ("A", "UPDATE d JOIN t ON t.id = d.id SET d.v = t.v"),
+        ("A", "SELECT * FROM d ORDER BY id"), ("A", "UPDATE d JOIN p ON p.id = d.id SET d.v = 7 WHERE d.v < (SELECT v FROM t WHERE id = 1)"),
+        ("A", "SELECT * FROM d ORDER BY id"), ("A", "COMMIT"),
+    ],
+    "a_delete_join_reads_the_latest": [
+        ("A", "BEGIN"), ("A", ALL), ("B", "UPDATE t SET v = v + 1 WHERE id = 1"), ("A", "DELETE d FROM d JOIN p ON p.id = d.id WHERE d.v < (SELECT v FROM t WHERE id = 1)"),
+        ("A", "SELECT * FROM d ORDER BY id"), ("A", "COMMIT"),
+    ],
+    # the rows an INSERT ... SELECT reads are locked for sharing (REPEATABLE READ only): B's write to them waits and gives up with 1205
+    "insert_select_locks_the_rows_it_reads": [
+        ("A", "BEGIN"), ("A", "INSERT INTO d SELECT id + 10, v FROM t WHERE id = 1"), ("B", "UPDATE t SET v = v + 1 WHERE id = 1"),
+        ("B", "DELETE FROM t WHERE id = 1"), ("B", "UPDATE t SET v = v + 1 WHERE id = 2"), ("B", "INSERT INTO t VALUES (4, 40, 2)"),
+        ("A", "COMMIT"), ("B", "UPDATE t SET v = v + 1 WHERE id = 1"), ("B", ALL),
+    ],
+    "insert_select_of_a_whole_table_locks_the_gaps": [
+        ("A", "BEGIN"), ("A", "INSERT INTO d SELECT id + 10, v FROM t"), ("B", "UPDATE t SET v = v + 1 WHERE id = 3"), ("B", "INSERT INTO t VALUES (9, 90, 9)"),
+        ("B", "INSERT INTO t VALUES (4, 40, 2)"), ("A", "ROLLBACK"), ("B", "INSERT INTO t VALUES (9, 90, 9)"), ("B", ALL),
+    ],
+    # A quits ("A!": the connection is closed and A comes back on a new one) with a transaction open: its locks and its rows go
+    "a_connection_that_quits_gives_up_its_transaction": [
+        ("A", "BEGIN"), ("A", "UPDATE t SET v = v + 1 WHERE id = 1"), ("A", "INSERT INTO t VALUES (4, 40, 2)"), ("A!", ""),
+        ("B", "UPDATE t SET v = v + 2 WHERE id = 1"), ("B", "INSERT INTO t VALUES (4, 41, 2)"), ("B", ALL), ("A", ALL),
+    ],
+    # A waits (its statement runs in a thread: "A~") for the row B wrote and has not committed; what A reads is what B committed meanwhile ("A<" is A's answer)
+    "a_locking_read_that_waited_reads_what_was_committed": [
+        ("B", "BEGIN"), ("B", "UPDATE t SET v = 99 WHERE id = 1"), ("A", "BEGIN"), ("A~", "SELECT v FROM t WHERE id = 1 FOR UPDATE"), ("B", "COMMIT"),
+        ("A<", ""), ("A", "SELECT v FROM t WHERE id = 1"), ("A", "COMMIT"),
+    ],
+    "an_insert_select_that_waited_copies_what_was_committed": [
+        ("B", "BEGIN"), ("B", "UPDATE t SET v = 99 WHERE id = 1"), ("A", "BEGIN"), ("A~", "INSERT INTO d SELECT id + 10, v FROM t WHERE id = 1"), ("B", "COMMIT"),
+        ("A<", ""), ("A", "SELECT * FROM d ORDER BY id"), ("A", "COMMIT"),
+    ],
 }
 
 
@@ -177,8 +223,26 @@ def run(kind, port, password, name, level):
         for sql in SETUP:
             ca.execute(sql)
         ca.execute("SET SESSION TRANSACTION ISOLATION LEVEL " + level)
+        # B gives up on a lock after two seconds (error 1205), not after the fifty a server waits
+        cb.execute("SET SESSION innodb_lock_wait_timeout = 2" if kind == "mysql" else "SET @lock_wait_timeout = 2000")
+        waiting = {}
         for who, sql in SCENARIOS[name]:
-            out.append((who, sql, step(ca if who == "A" else cb, sql)))
+            if who == "A~":  # A's statement waits for a lock: it runs in a thread while B goes on
+                thread = threading.Thread(target=lambda sql=sql: waiting.update(answer=step(ca, sql)))
+                thread.start()
+                time.sleep(0.5)
+                out.append((who, sql, ("started", None)))
+            elif who == "A<":  # ... and this is its answer, once B let go
+                thread.join()
+                out.append((who, sql, waiting["answer"]))
+            elif who == "A!":  # A quits and comes back
+                a.close()
+                a, ca = conn(port, password)
+                ca.execute("USE ts")
+                ca.execute("SET SESSION TRANSACTION ISOLATION LEVEL " + level)
+                out.append((who, sql, ("closed", None)))
+            else:
+                out.append((who, sql, step(ca if who == "A" else cb, sql)))
     finally:
         a.close()
         b.close()

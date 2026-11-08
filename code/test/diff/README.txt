@@ -179,9 +179,12 @@ Comparison with a real MySQL (needs pymysql and a MySQL 8.4 on 127.0.0.1:3391; u
   python two_sessions.py <engine_server.exe> [--level RC|RR|both] [--only NAME] [--show]
       two sessions A and B (A at the level asked for) run the same steps on RuSQL and on the real MySQL and every step's answer is compared (the rows, the rows a DML statement
       affected, the error number): what a transaction sees of what another session commits and of its own writes, which a single connection (vs_mysql.py) cannot ask.
-      28 scenarios x 2 levels, 442 steps, 0 differences except the ones listed in KNOWN (R73: the subquery of an UPDATE / DELETE, which MySQL reads as a locking read and RuSQL through the snapshot).
+      38 scenarios x 2 levels, 596 steps, 0 differences (KNOWN, the scenarios whose differences are known and not fixed, is empty since R74).
       Since R73 it also covers when the snapshot is taken (the first read, not BEGIN; a write, a locking read and a SELECT without a table take none; START TRANSACTION WITH CONSISTENT SNAPSHOT takes it at once;
-      the source of an INSERT ... SELECT is read as a locking read). A step that waits more than 15 seconds comes back as error 2013.
+      the source of an INSERT ... SELECT is read as a locking read). R74 adds: a statement that is not a plain SELECT reads its subqueries as the latest commit (INSERT / REPLACE / SET /
+      UPDATE / DELETE), an INSERT ... SELECT locks the rows it reads for sharing, a locking read that waited reads what the other transaction committed, a connection that quits gives up
+      its transaction. B gives up on a lock after 2 seconds (error 1205); a step "A~" runs A's statement in a thread (it waits for a lock), "A<" is its answer, "A!" closes A's
+      connection and opens a new one. A step that waits more than 15 seconds comes back as error 2013.
       tests/test_repeatable_read.cpp keeps the same sequences without a MySQL.
   python make_scoreboard.py <engine_server.exe> [--tests CASES ASSERTIONS]
       runs every corpus (the protocol ones with --proto) and writes the numbers the app's Compat page shows to code/frontend/src/lib/compatSnapshot.json.

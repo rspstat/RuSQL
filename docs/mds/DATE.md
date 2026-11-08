@@ -2942,6 +2942,51 @@ VS Code 스타일 탭 드래그 순서 변경(요청의 1번 항목)은 같은 �
 ⑤ 기본 격리 수준은 여전히 `READ COMMITTED`다. 올리려면 남은 것: 모든 명시적 트랜잭션이 갭 잠금을 잡는 데서 오는 대기 · 교착 영향 재기, 기본값을 바꿔 전체 시험을 돌려 깨지는 것 고치기(스냅샷 시점은 이번에 끝났다).
 ⑥ 속도는 따로 재지 않았다. 활성 트랜잭션 번호 집합을 복사하는 일이 `BEGIN`에서 첫 읽기로 옮겨졌을 뿐이고 읽지 않는 트랜잭션은 그 복사를 아예 안 한다.
 
+### 11월 8일 (네 번째) — R74: 일반 SELECT가 아닌 문장의 서브쿼리 읽기, `INSERT … SELECT`의 공유 잠금, 기다린 뒤 다시 읽기, 정상 종료한 연결의 트랜잭션
+
+**왜 이 항목인가**: R73 보고의 "남은 차이" 둘 — `UPDATE`/`DELETE` 안 서브쿼리가 스냅샷으로 읽히는 것, `INSERT … SELECT` 원본에 공유 잠금이 안 걸리는 것 — 을 사용자가 "같은 진행방식으로 고칩니다"라고 골랐다.
+
+**MySQL을 먼저 쟀다** (진짜 MySQL 8.4.9, 스냅샷을 뜬 뒤 다른 세션이 값을 바꾸고 문장을 실행): 규칙은 `UPDATE`/`DELETE`만의 것이 아니었다. REPEATABLE READ에서 **일반 `SELECT`(`SELECT … INTO` 포함)가 아닌 문장은 모두 서브쿼리의 표를 최신 커밋으로 읽는다**(InnoDB가 그 표를 잠금 읽기로 읽기 때문).
+
+| 문장 | MySQL | 이전 RuSQL |
+|---|---|---|
+| `INSERT … VALUES (…, (SELECT …))`, `… ON DUPLICATE KEY UPDATE x = (SELECT …)`, `REPLACE … VALUES ((SELECT …))` | 최신 | 스냅샷 |
+| `UPDATE … SET x = (SELECT …)`, `UPDATE … WHERE x < (SELECT …)`, `DELETE … WHERE x < (SELECT …)` | 최신 | 스냅샷 |
+| `SET @x = (SELECT …)` | 최신 | 스냅샷 |
+| `UPDATE … JOIN`, `DELETE … JOIN`, `INSERT … SELECT` | 최신 | 최신 (R73까지) |
+| `SELECT … WHERE x < (SELECT …)`, `SELECT … INTO @x` | 스냅샷 | 스냅샷 |
+| 트리거 · 프로시저 본문 | 문장마다 **자기 종류대로**: `INSERT … VALUES ((SELECT …))`와 `SET x = (SELECT …)`는 최신, `SELECT … INTO x`는 스냅샷 | 모두 스냅샷 |
+
+READ COMMITTED는 어느 쪽이든 최신을 읽으므로 차이가 없다.
+
+**잠금도 쟀다** (REPEATABLE READ): `INSERT … SELECT`는 원본 행에 공유 잠금을 건다 — 읽은 행의 `UPDATE`·`DELETE`와 읽은 범위로의 `INSERT`가 기다린다(전체를 읽었으면 사이와 뒤의 틈까지). READ COMMITTED에서는 안 건다. `UPDATE`/`DELETE`의 서브쿼리 표도 REPEATABLE READ에서 같은 공유 잠금이 걸린다(`DELETE`는 READ COMMITTED에서도).
+
+**고침**:
+- `execute_with_s_body`(`executor_core.cpp`): 문장이 `Insert` · `InsertSelect` · `Update` · `Delete` · `MultiUpdate` · `MultiDelete` · `SET @x` · 프로시저의 `SET`이고 REPEATABLE READ · SERIALIZABLE 트랜잭션 안이면 그 문장 동안 `reads_latest_`를 켠다(`FlagScope`). R73에서 `INSERT … SELECT`만 켜던 것을 문장 종류로 넓혔다. `fire_triggers`는 본문을 도는 동안 끈다 — 본문의 문장이 각자 자기 종류로 정한다.
+- `INSERT … SELECT` 원본의 공유 잠금(`exec_insert_select`, `exec_select`): `locks_source_rows_`가 켜지면 원본 `SELECT`(그 서브쿼리가 아니라 그것 하나)가 `FOR SHARE`처럼 읽은 행을 공유로 잠그고 기본키 조건의 틈을 잠근다. 기다리는 동안 원본 표의 공유 데이터 잠금을 놓아야 기다리는 트랜잭션이 커밋할 수 있어 `DataGuardStash`가 그 잠금을 디스패처의 것처럼 풀고 다시 잡게 한다.
+- **기다린 뒤 다시 읽기**(`exec_select`): 잠금 읽기(`FOR UPDATE` · `FOR SHARE` · 위의 원본)가 잠금을 기다렸으면 기다리기 전에 읽은 행이 낡았을 수 있어, 이미 잠금을 쥔 채로 한 번 더 읽는다(`lock_waits_`로 기다렸는지 센다, 최대 9번).
+
+**같이 찾은 것** (잠금을 재다가):
+① **`SELECT … FOR UPDATE` · `FOR SHARE`가 잠금을 기다렸다가 풀리면 기다리기 전의 옛 값을 돌려주던 것** — MySQL은 상대가 커밋한 값(99)을 준다. 위의 다시 읽기가 이것도 고친다.
+② **MySQL 클라이언트가 정상 종료(`COM_QUIT`)하면 열린 트랜잭션이 되돌려지지 않아 잠금과 커밋 안 된 행이 서버가 꺼질 때까지 남던 것** — 소켓이 그냥 끊기는 경우는 되돌렸지만 `COM_QUIT` 처리만 그 앞에서 `return`했다(`mysql.cpp`). 트랜잭션 도중 `exit`한 뒤 다른 세션이 그 행을 쓰면 영원히 기다렸다. 한 줄 고침.
+
+**두 세션 시험** (`code/test/diff/two_sessions.py`): 시나리오 28 → **38개**, 두 격리 수준 **596단계, 차이 0, 알려진 차이 0**(`KNOWN`을 비웠다). 새 시나리오: `INSERT`/`REPLACE`/`SET`의 서브쿼리, `SELECT`의 서브쿼리는 스냅샷, `UPDATE … JOIN` · `DELETE … JOIN`(WHERE의 서브쿼리 포함), `INSERT … SELECT`가 행과 틈을 잠금, 기다린 잠금 읽기와 `INSERT … SELECT`가 상대의 커밋 값을 읽음, 정상 종료한 연결. 도구에 단계 종류 셋이 늘었다 — `A~`(A의 문장을 스레드로 돌려 기다리게 함), `A<`(그 답), `A!`(A가 연결을 닫고 새로 연결). B는 잠금을 2초 기다리면 1205로 포기한다. 이전 서버(R73)로 같은 시험을 돌리면 처음 19단계가 어긋난다(서브쿼리 · 잠금 · 종료한 연결 — 그 뒤는 이전 서버가 잠금을 흘려 시험이 멈춘다). 같은 문장들을 한 줄씩 MySQL과 맞춰 본 표(19문장 × 두 격리 수준)는 이제 `CALL`의 결과 열 형을 빼고 모두 같다.
+
+**검증**:
+- 전체 시험 **940 케이스 / 1,520,011 assertions**(R73은 934 / 1,519,496; 새 케이스 6: `test_repeatable_read.cpp`) — 세 모드(기본, `RUSQL_DML_INDEX_MIN_ROWS=0`, `RUSQL_PROBE_CHECK=1 RUSQL_PROBE_STREAK=0`) 모두 전부 통과(1,520,011 / 1,520,012 / 1,520,012).
+- **심은 버그** C++ 15개를 모두 잡음(규칙이 안 켜짐 · `UPDATE` / `DELETE` / `INSERT` / `SET` / 다중 표 `UPDATE`·`DELETE`가 규칙에서 빠짐 · 트리거 본문이 문장 종류를 무시함 · 격리 수준 판정이 뒤집힘 · `INSERT … SELECT`가 잠그지 않음 / READ COMMITTED에서도 잠금 · 기다린 뒤 다시 읽지 않음 · `FOR SHARE` / `FOR UPDATE`의 기다림을 세지 않음 · 원본 표의 데이터 잠금을 안 놓음 · 원본이 `FOR SHARE`로 안 읽힘). 처음엔 다중 표 `UPDATE`/`DELETE`를 규칙에서 빼도 시험이 통과해서(그 문장들은 R73부터 이미 최신을 읽었다) `WHERE`의 서브쿼리 사례 둘을 시험과 두 세션 시험에 더해 잡게 했다. 원본 표의 데이터 잠금을 안 놓는 버그는 시험이 20분 넘게 멈춰 있었다(교착) — `DataGuardStash`가 꼭 필요하다는 뜻이다. `MERGE`는 MySQL에 없어 비교할 수 없으므로 규칙에서 뺐다.
+- 점수판 코퍼스 47개 · 문장 3,873개 차이 0, 크래시 퍼저 6종(라운드 8) 불일치 0, 검증 스크립트 12종 위반 없음, MCP 단위 시험 3종 통과 · `live_check` 29/29. 프런트 소스는 바뀌지 않아(점수 숫자 JSON만) 화면 시험은 다시 돌리지 않았다.
+
+**죽은 코드 정리**: 선언만 있고 어디서도 부르지 않는 함수 · 데이터 멤버 · 상수를 다시 훑었으나 새로 걸린 것이 없다(걸린 `number_value`는 같은 헤더의 다른 함수가 부른다). 이번에 바뀐 코드가 남긴 것도 없다 — R73에서 `exec_insert_select` 안에 있던 보조 구조체 `ReadsLatest`는 공통 `FlagScope`로 대체되어 지웠다.
+
+**정직한 한계**:
+① `INSERT … SELECT` 원본의 잠금은 **한 표를 평범하게 읽는 모양**(`WHERE`가 기본키 한 점·범위이거나 없음)만 MySQL과 같다(`INSERT … SELECT` 시나리오 둘로 확인). 다른 모양은 다르다: 조인 · 집계(`COUNT`, `GROUP BY`) · 뷰 원본과 서브쿼리 속 표는 최신을 읽기만 하고 잠그지 않는다. 기본키가 아닌 열 조건은 MySQL이 훑은 행을 모두(인덱스가 없으면 표 전체) 잠그는데 여기는 읽어서 돌려준 행만 잠그고, 틈은 반대로 표 전체를 잠근다(MySQL은 그 인덱스의 범위만).
+② `UPDATE`/`DELETE`/`INSERT … VALUES` 서브쿼리가 읽는 표에는 공유 잠금을 걸지 않는다(최신 값은 읽는다). 이 문장들은 행을 훑는 도중에 서브쿼리를 돌리는데, 잠금을 기다리려면 훑던 행에서 손을 놓아야 해서 위험하기 때문이다. `DELETE`의 서브쿼리 표를 READ COMMITTED에서도 잠그는 MySQL의 모양도 따르지 않는다.
+③ 트랜잭션 밖에서 하는 `SELECT … FOR UPDATE`는 여전히 잠금을 기다리지 않는다(MySQL은 기다린다). 이번에 잰 표에서 보였고 건드리지 않았다.
+④ `CALL`이 돌려주는 결과 집합의 값이 숫자가 아니라 글자 형(`'10'`)으로 나온다(MySQL은 `10`). 이번에 비교하다 보였고 건드리지 않았다.
+⑤ SERIALIZABLE은 MySQL과 비교하지 않았다. 기본 격리 수준은 여전히 `READ COMMITTED`다(남은 일: 모든 명시적 트랜잭션이 갭 잠금을 잡는 데서 오는 대기 · 교착 영향 재기, 기본값을 바꿔 전체 시험을 돌려 깨지는 것 고치기).
+⑥ 속도는 따로 재지 않았다. 바뀐 읽기는 REPEATABLE READ · SERIALIZABLE의 명시적 트랜잭션 안에서 쓰는 문장뿐이고, 그 안의 `INSERT … SELECT`는 `FOR SHARE`가 빠른 인덱스 경로를 안 쓰므로 더 느릴 수 있다.
+
 ## 요약: 1학기 대비 2학기에 달라진 것
 
 

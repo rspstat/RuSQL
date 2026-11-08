@@ -322,9 +322,8 @@ StringResult Executor::exec_insert_select(SharedDatabase& s, std::string table, 
     const bool any_float = std::find(from_float.begin(), from_float.end(), char{1}) != from_float.end();
     {
         DataLockGuard src_data_guard;
-        if (auto src_tables = table_lock_set_for(s, query)) {
-            src_data_guard = acquire_table_data_locks(s, *src_tables, /*exclusive=*/false);
-        }
+        const auto src_tables = table_lock_set_for(s, query);
+        if (src_tables) src_data_guard = acquire_table_data_locks(s, *src_tables, /*exclusive=*/false);
         const sqlval::StrictWrite strict;
         struct ExactFloats {
             bool& flag;
@@ -332,14 +331,29 @@ StringResult Executor::exec_insert_select(SharedDatabase& s, std::string table, 
             ExactFloats(bool& f, bool on) : flag(f), before(f) { if (on) flag = true; }
             ~ExactFloats() { flag = before; }
         } exact_floats(float_exact_, any_float);
-        // INSERT ... SELECT reads its source as a locking read does (MySQL's "current read"): what is committed now, with no snapshot taken or used
-        // (only a transaction that reads through a snapshot differs from that)
-        struct ReadsLatest {
-            bool& flag;
-            bool before;
-            ReadsLatest(bool& f, bool on) : flag(f), before(f) { if (on) flag = true; }
-            ~ReadsLatest() { flag = before; }
-        } reads_latest(reads_latest_, txn.is_active() && (txn.isolation_level() == IsolationLevel::RepeatableRead || txn.isolation_level() == IsolationLevel::Serializable));
+        // In a REPEATABLE READ / SERIALIZABLE transaction the SELECT reads what is committed now (reads_latest_, set for the statement by execute_with_s_body) and locks the rows it
+        // reads for sharing, as InnoDB's does: another transaction's write to them waits for this one. A wait for a lock inside it must let go of the shared lock on the source tables like
+        // the dispatcher's own (the transaction waited for needs the tables exclusive to commit).
+        struct DataGuardStash {
+            Executor& ex;
+            DataLockGuard* guard;
+            std::vector<std::string> tables;
+            bool exclusive;
+            DataGuardStash(Executor& e, DataLockGuard* g, const std::vector<std::string>& t)
+                : ex(e), guard(e.active_table_data_lock_guard_), tables(e.active_table_data_lock_tables_), exclusive(e.active_table_data_lock_exclusive_) {
+                ex.active_table_data_lock_guard_ = g;
+                ex.active_table_data_lock_tables_ = t;
+                ex.active_table_data_lock_exclusive_ = false;
+            }
+            ~DataGuardStash() {
+                ex.active_table_data_lock_guard_ = guard;
+                ex.active_table_data_lock_tables_ = std::move(tables);
+                ex.active_table_data_lock_exclusive_ = exclusive;
+            }
+        };
+        std::optional<DataGuardStash> stash;
+        if (src_tables) stash.emplace(*this, &src_data_guard, *src_tables);
+        FlagScope lock_source(locks_source_rows_, txn.is_active() && (txn.isolation_level() == IsolationLevel::RepeatableRead || txn.isolation_level() == IsolationLevel::Serializable));
         deadline::ReadPhase reads; // (the SELECT only reads: nothing is inserted yet, so KILL QUERY may stop it -- the statement's first word is INSERT)
         auto output = execute_with_s(s, std::move(query));
         if (output.is_err()) return output;

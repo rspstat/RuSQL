@@ -49,6 +49,7 @@ StringResult Executor::fire_triggers(SharedDatabase& s, const std::string& table
     if (bodies.empty() || rows.empty()) return StringResult::Ok("");
 
     TriggerDepthGuard guard(trigger_depth_);
+    FlagScope own_reads(reads_latest_, false); // (each statement of the body reads by its own kind, not by the statement that fired the trigger)
     // What a trigger's own INSERT numbers (an AUTO_INCREMENT column of the table it writes) is not what LAST_INSERT_ID() says afterwards: MySQL restores it when the
     // trigger ends
     struct InsertIdRestore {

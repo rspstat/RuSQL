@@ -276,7 +276,22 @@ public:
     std::uint64_t statement_insert_id_ = 0;  // the same for the statement that is running (the MySQL protocol's OK packet reports it)
     bool insert_id_unset_ = false;           // an INSERT has started and has not given a number out yet
     bool insert_from_select_ = false;        // the INSERT that exec_insert_select hands to exec_insert numbers its rows in growing batches (read and cleared there)
-    bool reads_latest_ = false;              // the SELECT being run reads what is committed now, as a locking read does (the source of an INSERT ... SELECT): it neither uses nor takes the snapshot
+    bool reads_latest_ = false;              // the SELECT being run reads what is committed now, as a locking read does: it neither uses nor takes the snapshot. MySQL: in a REPEATABLE READ /
+                                             // SERIALIZABLE transaction every statement that is not a plain SELECT reads the tables of its subqueries so (INSERT ... SELECT, UPDATE, DELETE,
+                                             // INSERT ... VALUES ((SELECT ...)), SET @x = (SELECT ...)); the statements of a trigger or a procedure body count each by its own kind
+    bool locks_source_rows_ = false;         // the next SELECT takes shared locks on the rows it reads, as the source of an INSERT ... SELECT does in REPEATABLE READ / SERIALIZABLE (only it, not its subqueries)
+    bool lock_pass_ = false;                 // inside the pass of a locking read that reads again when it had to wait for a lock
+    std::uint64_t lock_waits_ = 0;           // the waits for a row lock that locking reads have made (a locking read that waited reads again)
+
+    // Sets one of the flags above for the length of a scope and puts back what it was.
+    struct FlagScope {
+        bool& flag;
+        bool before;
+        FlagScope(bool& f, bool value) : flag(f), before(f) { flag = value; }
+        ~FlagScope() { flag = before; }
+        FlagScope(const FlagScope&) = delete;
+        FlagScope& operator=(const FlagScope&) = delete;
+    };
     std::int64_t row_count_ = -1;            // the rows the last statement changed (-1: it was a SELECT)
     std::uint64_t found_rows_ = 0;           // the rows the last SELECT returned (or would have without its LIMIT, after SQL_CALC_FOUND_ROWS)
     std::int64_t affected_rows_ = -1;        // the rows the last statement affected when its message does not say it (ON DUPLICATE KEY UPDATE, REPLACE); -1: the message's number

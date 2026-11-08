@@ -105,7 +105,7 @@ RuSQL이 실제로 받아서 실행하는 SQL 문법을 한 줄씩 정리한 문
 
 - INSERT INTO t [(cols)] VALUES (...)[, (...)...] : 행 입력(여러 행 한 번에, 값 자리에 식 · DEFAULT · 변수 가능)
 - INSERT INTO t SET col = 값, ... : SET 형식으로 입력
-- INSERT INTO t [(cols)] SELECT ... : 쿼리 결과 입력(UNION 포함). 원본은 REPEATABLE READ에서도 스냅샷이 아니라 지금 커밋된 최신 값으로 읽는다(R73, MySQL과 같음)
+- INSERT INTO t [(cols)] SELECT ... : 쿼리 결과 입력(UNION 포함). 원본은 REPEATABLE READ에서도 스냅샷이 아니라 지금 커밋된 최신 값으로 읽고(R73, MySQL과 같음), 한 표를 평범하게 읽는 원본이면 읽은 행과 기본키 조건의 틈을 공유 잠금한다 — 다른 세션의 쓰기가 기다린다(R74; REPEATABLE READ · SERIALIZABLE의 트랜잭션 안에서만)
 - INSERT IGNORE INTO ... : 제약에 걸린 행은 조용히 건너뜀
 - INSERT ... ON DUPLICATE KEY UPDATE col = 값, ... : 키가 겹치면 UPDATE로 전환(`VALUES(col)` 사용 가능)
 - INSERT ... RETURNING cols | * : 입력한 행을 바로 돌려줌
@@ -114,7 +114,7 @@ RuSQL이 실제로 받아서 실행하는 SQL 문법을 한 줄씩 정리한 문
 
 ### UPDATE
 
-- UPDATE t SET col = 식[, ...] [WHERE ...] : 행 수정(식 · 함수 · 서브쿼리 · DEFAULT 가능)
+- UPDATE t SET col = 식[, ...] [WHERE ...] : 행 수정(식 · 함수 · 서브쿼리 · DEFAULT 가능). REPEATABLE READ에서 UPDATE · DELETE · INSERT/REPLACE ... VALUES · SET @x 안의 서브쿼리는 스냅샷이 아니라 지금 커밋된 최신 값을 읽는다(일반 SELECT는 스냅샷; R74, MySQL과 같음)
 - UPDATE t SET ... ORDER BY ... LIMIT n : 정렬 순서대로 n행만 수정
 - UPDATE t SET ... RETURNING cols : 수정한 행을 돌려줌
 - UPDATE t1 JOIN t2 ON ... SET ... : JOIN으로 여러 테이블 수정

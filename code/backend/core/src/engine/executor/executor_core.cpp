@@ -1970,6 +1970,15 @@ StringResult Executor::execute_with_s_body(SharedDatabase& s, Statement stmt) {
     };
     const bool top_level = exec_depth_ == 0;
     DepthGuard depth_guard(exec_depth_);
+    // InnoDB reads the tables of the subqueries of a statement that is not a plain SELECT as a locking read: in a REPEATABLE READ / SERIALIZABLE transaction that is what is committed now,
+    // not the snapshot (a SELECT, SELECT ... INTO included, reads the snapshot). The SELECT of an INSERT ... SELECT is a part of its statement; a trigger or a procedure starts its own.
+    const bool locking_kind = std::holds_alternative<Statement::Insert>(stmt.data) || std::holds_alternative<Statement::InsertSelect>(stmt.data) ||
+                              std::holds_alternative<Statement::Update>(stmt.data) || std::holds_alternative<Statement::Delete>(stmt.data) ||
+                              std::holds_alternative<Statement::MultiUpdate>(stmt.data) || std::holds_alternative<Statement::MultiDelete>(stmt.data) ||
+                              std::holds_alternative<Statement::SetUserVar>(stmt.data) || std::holds_alternative<Statement::SetVars>(stmt.data) ||
+                              std::holds_alternative<Statement::ProcSet>(stmt.data);
+    FlagScope reads_scope(reads_latest_, reads_latest_ || (locking_kind && txn.is_active() && (txn.isolation_level() == IsolationLevel::RepeatableRead ||
+                                                                                                  txn.isolation_level() == IsolationLevel::Serializable)));
     // the expressions of this statement may run subqueries; what the statement writes changes what a subquery that was answered before would say
     StatementScope statement_scope(*this, s, !is_pure_read_only(stmt));
     sync_udf_context(s.user_functions, current_db, auth_user);
