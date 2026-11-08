@@ -263,6 +263,7 @@ RuSQL이 실제로 받아서 실행하는 SQL 문법을 한 줄씩 정리한 문
 - BIT_AND / BIT_OR : 비트 AND / OR 집계
 - MEDIAN : 중앙값
 - JSON_AGG / ARRAY_AGG : 값을 JSON 배열로 모음
+- JSON_ARRAYAGG(식) / JSON_OBJECTAGG(키, 값) : MySQL의 JSON 집계(R77: 값은 `JSON_ARRAY`에서와 같은 JSON 형, 같은 키는 마지막 값, NULL 키는 오류 3158, 행이 없으면 NULL)
 - ANY_VALUE(col) : 그룹에서 아무 값 하나(ONLY_FULL_GROUP_BY 회피용)
 
 ### 윈도우 함수 (`OVER` 필요)
@@ -343,11 +344,21 @@ RuSQL이 실제로 받아서 실행하는 SQL 문법을 한 줄씩 정리한 문
 
 ### JSON 함수
 
-- JSON_VALID / JSON_TYPE / JSON_LENGTH / JSON_KEYS : JSON 검사 · 종류 · 길이 · 키 목록
-- JSON_ARRAY / JSON_OBJECT : JSON 배열 · 객체 만들기
-- JSON_EXTRACT / JSON_VALUE / JSON_UNQUOTE : 경로로 값 꺼내기 · 따옴표 벗기기. 경로는 `$` 뒤에 `.키`와 `[n]`을 차례로 쓴다(`$.a.b`, `$[0]`, `$.a[1][0]`, `$[1].b`; 배열이 아닌 값의 `$[0]`은 그 값 자체; R75). `$[last]` · `$[*]` · `$**` · 따옴표 키는 아직 NULL
-- JSON_CONTAINS : 포함 여부
-- JSON_SET / JSON_INSERT / JSON_REPLACE / JSON_REMOVE : 경로의 값을 넣기 · 새로 넣기 · 바꾸기 · 지우기
+JSON 값은 MySQL이 쓰는 모양으로 저장되고 돌려준다(R77): 객체의 키는 짧은 것부터 · 바이트순, 같은 키는 마지막 값, `,`와 `:` 뒤에 공백 한 칸, 수는 정수 그대로 · 소수는 되읽히는 가장 짧은 DOUBLE(`1.0`, `1e15`), 글자의 `\u00e9`는 풀어서. JSON 열에 쓰거나 `CAST(x AS JSON)`을 할 때 이 모양이 된다. 잘못된 JSON은 오류 3141(열에 쓸 때 3140).
+
+- JSON_VALID / JSON_TYPE / JSON_LENGTH / JSON_KEYS / JSON_DEPTH : JSON 검사 · 종류(`INTEGER` · `UNSIGNED INTEGER` · `DECIMAL` · `DOUBLE` · `STRING` · `BOOLEAN` · `OBJECT` · `ARRAY` · `NULL`) · 길이 · 키 목록 · 깊이
+- JSON_ARRAY / JSON_OBJECT : JSON 배열 · 객체 만들기(`TRUE` · `FALSE`는 JSON 불리언, 중첩한 JSON 함수의 답은 그대로 중첩, 홀수 개 인자는 1582, NULL 키는 3158)
+- JSON_EXTRACT(doc, path, ...) / `col->'$.path'` / `col->>'$.path' ` : 경로로 값 꺼내기. 경로는 `$` 뒤에 `.키` · `."따옴표 키"` · `[n]` · `[last]` · `[last-n]` · `[a to b]` · `[*]` · `.*` · `**`(예: `$**.id`)를 차례로 쓴다. 경로가 여럿이거나 `*` · `**` · 범위가 있으면 배열로, 하나도 없으면 NULL. 잘못된 경로는 오류 3143
+- JSON_VALUE(doc, path [RETURNING 형]) : SQL 값으로 꺼내기(글자는 따옴표 없이, JSON null은 SQL NULL). `RETURNING SIGNED | UNSIGNED | DECIMAL(p,s) | CHAR(n) | DATE ...`에 맞지 않으면 NULL
+- JSON_UNQUOTE : 따옴표를 벗기고 `\n` · `\u0041` 같은 이스케이프를 푼다(따옴표로 감싸지 않은 글자는 그대로)
+- JSON_QUOTE(글자) : 글자를 JSON 글자로(수를 주면 오류 3064)
+- JSON_SET / JSON_INSERT / JSON_REPLACE / JSON_REMOVE : 경로의 값을 넣기 · 새로 넣기 · 바꾸기 · 지우기(`*` · `**` · 범위는 오류 3149, `$`를 지우면 3153, 없는 중간 경로는 만들지 않음)
+- JSON_ARRAY_APPEND / JSON_ARRAY_INSERT : 배열 끝에 붙이기(배열이 아니면 배열로 감쌈) · 위치에 끼워 넣기(경로가 배열의 칸이 아니면 3165)
+- JSON_MERGE_PATCH(RFC 7396: 패치의 null은 지움) / JSON_MERGE_PRESERVE (= JSON_MERGE) : 문서 합치기(인자 둘 이상, NULL이 있으면 NULL)
+- JSON_CONTAINS / JSON_CONTAINS_PATH / JSON_OVERLAPS / JSON_SEARCH(doc, 'one'|'all', 패턴 [, 이스케이프 [, 경로...]]) : 포함 · 경로 있음 · 겹침 · 글자 값 찾기(패턴은 LIKE, 대소문자 구분)
+- `값 MEMBER OF(배열)` : 배열의 원소인지
+- JSON_PRETTY : 들여쓰기해 읽기 좋게
+- JSON 값끼리의 비교 · `ORDER BY` · `MIN` · `MAX`: 형 순서(null < 수 < 글자 < 객체 < 배열 < 불리언), 같은 형 안에서는 값 순서. 글자 `'x'`는 JSON 글자 `"x"`와, 수는 JSON 수와 같다(`doc->'$.n' = 1`, `doc->'$.name' = 'Alice'`, `doc->'$.on' = TRUE`)
 
 ### 시스템 · 세션 함수
 
@@ -514,7 +525,7 @@ mysql 클라이언트 · 드라이버 · 도구가 보내는 문장을 받아주
 - SELECT VERSION() / USER() / CURRENT_USER() / DATABASE() / @@변수 : 클라이언트가 접속 직후 보내는 질의
 - SET NAMES / SET character_set_* / SET autocommit ... : 클라이언트의 접속 설정(모르는 변수는 OK로 응답)
 - /*!40101 SET ... */ / /*M!... */ : mysqldump가 쓰는 실행 가능한 주석(실행함)
-- COM_QUERY · COM_INIT_DB · COM_PING · COM_CHANGE_USER · COM_RESET_CONNECTION · COM_STMT_PREPARE / EXECUTE / CLOSE / RESET · COM_QUIT : 지원하는 프로토콜 명령
+- COM_QUERY · COM_INIT_DB · COM_PING · COM_CHANGE_USER · COM_RESET_CONNECTION · COM_STMT_PREPARE / EXECUTE / CLOSE / RESET · COM_QUIT : 지원하는 프로토콜 명령. `COM_STMT_EXECUTE`는 행을 **바이너리 프로토콜**로 보낸다(R77: 정수 · FLOAT · DOUBLE · DATE · DATETIME · TIME은 형대로, NULL 비트맵; 매개변수는 정수(부호 있음/없음) · 실수 · 글자 · 날짜 · 시간 · NULL). `COM_STMT_SEND_LONG_DATA` · 서버 커서는 없다
 
 ## 15. 주석 · 문장 형식
 
@@ -534,8 +545,8 @@ mysql 클라이언트 · 드라이버 · 도구가 보내는 문장을 받아주
 - **뷰** : `CREATE VIEW v (컬럼 목록) AS ...`, 조인 뷰의 `UPDATE` · `INSERT`(MySQL은 한 표의 열만 쓰면 받음)
 - **데이터 쓰기** : `INSERT ... VALUES ()`(빈 값), `INSERT ... DEFAULT VALUES`, `INSERT ... AS 별칭`, `INSERT/UPDATE/DELETE LOW_PRIORITY · QUICK`, `UPDATE IGNORE`, `UPDATE ... JOIN (파생 테이블)`, `DELETE FROM ... USING`, `LOAD DATA`, `SELECT ... INTO OUTFILE`
 - **조회** : `NATURAL LEFT | RIGHT JOIN`, `TABLE t`, `VALUES ROW(...)`, `USE | FORCE | IGNORE INDEX` 힌트, `PARTITION (p)` 선택, `STRAIGHT_JOIN`, `SELECT ALL | HIGH_PRIORITY`, `FROM DUAL`, `NULLS FIRST | LAST`, `OFFSET n ROWS`, `FOR UPDATE OF 테이블`, 괄호로 감싼 `(SELECT ..) UNION (SELECT ..) ORDER BY`, `NATURAL LEFT JOIN`, `IN (SELECT ... UNION SELECT ...)`, `INSERT ... SELECT ... ON DUPLICATE KEY UPDATE`
-- **식 · 리터럴** : `IS [NOT] DISTINCT FROM`, `BETWEEN SYMMETRIC`, `.5`, `b'101'`, `DATE '2024-01-01'`, `_utf8mb4'x'`, `COLLATE` 연산자, `BINARY` 연산자, `MATCH ... AGAINST`, `SOUNDS LIKE`, `SELECT @a := 식`, `CONVERT(식 USING 문자집합)`, `DEFAULT(col)`, `GROUPING()`
-- **함수** : `PERCENTILE_CONT ... WITHIN GROUP`, `BIT_XOR`, `CONNECTION_ID`, `GET_LOCK`, `INET_ATON`, `BENCHMARK`, `JSON_MERGE_PATCH` 등 위 9장에 없는 함수
+- **식 · 리터럴** : `IS [NOT] DISTINCT FROM`, `BETWEEN SYMMETRIC`, `b'101'`, `DATE '2024-01-01'`, `_utf8mb4'x'`, `COLLATE` 연산자, `BINARY` 연산자, `MATCH ... AGAINST`, `SOUNDS LIKE`, `SELECT @a := 식`, `CONVERT(식 USING 문자집합)`, `DEFAULT(col)`, `GROUPING()`
+- **함수** : `PERCENTILE_CONT ... WITHIN GROUP`, `BIT_XOR`, `CONNECTION_ID`, `GET_LOCK`, `INET_ATON`, `BENCHMARK`, `JSON_STORAGE_SIZE` 등 위 9장에 없는 함수
 - **프로시저** : `SIGNAL`, `DECLARE ... HANDLER`, 커서(`DECLARE CURSOR`), 본문의 `CASE ... END CASE`, 반복문 끝의 라벨(`END WHILE lp`), `CREATE PROCEDURE IF NOT EXISTS`, `CREATE OR REPLACE PROCEDURE`, `CREATE TRIGGER IF NOT EXISTS`, 여러 문장 함수 본문(`BEGIN ... RETURN ... END`)
 - **권한 · 사용자** : `ALTER USER`, 컬럼 단위 `GRANT SELECT (col)`, 역할을 `GRANT 역할 TO 사용자` 형식으로 부여
 - **조회 · 관리** : `SHOW CREATE DATABASE`, `SHOW CREATE PROCEDURE`, `SHOW CREATE TRIGGER`, `SHOW TABLES IN db`, `SHOW FULL PROCESSLIST`, `SHOW ENGINE INNODB STATUS`, `SHOW MASTER STATUS`, `SHOW SLAVE STATUS`, `SHOW PRIVILEGES`, `SHOW ERRORS`, `SHOW DATABASES LIKE`, `SHOW OPEN TABLES`, `SHOW DATABASES LIKE`, `EXPLAIN FORMAT=JSON`, `EXPLAIN EXTENDED`, `EXPLAIN INSERT | UPDATE | DELETE`의 실행 계획(안내만 나옴), `information_schema.routines`, `information_schema.triggers`, `FLUSH`, `HELP`, `DELIMITER`, `XA`, `LOCK TABLES t AS 별칭`, `DROP PREPARE`

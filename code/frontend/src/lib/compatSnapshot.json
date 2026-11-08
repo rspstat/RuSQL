@@ -1,5 +1,5 @@
 {
-  "generated": "2026-11-08",
+  "generated": "2026-11-09",
   "mysql": "8.4.9",
   "corpora": [
     {
@@ -339,12 +339,20 @@
       "bothFail": 2
     },
     {
+      "name": "json_functions",
+      "en": "JSON: how a document is written, paths (last, ranges, wildcards), SET / ARRAY_APPEND / MERGE_PATCH / SEARCH / OVERLAPS / MEMBER OF, JSON_VALUE RETURNING, JSON_ARRAYAGG, the order of JSON values, the errors",
+      "ko": "JSON: 문서를 쓰는 모양·경로(last·범위·와일드카드)·SET·ARRAY_APPEND·MERGE_PATCH·SEARCH·OVERLAPS·MEMBER OF·JSON_VALUE RETURNING·JSON_ARRAYAGG·JSON 값의 순서·오류",
+      "statements": 250,
+      "different": 0,
+      "bothFail": 72
+    },
+    {
       "name": "errno",
       "en": "MySQL wire protocol: the error number of a failing statement",
       "ko": "MySQL 프로토콜: 실패한 문장의 오류 번호",
-      "statements": 49,
+      "statements": 52,
       "different": 0,
-      "bothFail": 48
+      "bothFail": 51
     },
     {
       "name": "rollup",
@@ -377,12 +385,20 @@
       "statements": 30,
       "different": 0,
       "bothFail": 0
+    },
+    {
+      "name": "prepared_wire",
+      "en": "Prepared statements through the binary protocol (COM_STMT_*): binary rows, typed parameters, errors",
+      "ko": "바이너리 프로토콜의 준비된 문장(COM_STMT_*): 바이너리 행·형 있는 매개변수·오류",
+      "statements": 81,
+      "different": 0,
+      "bothFail": 0
     }
   ],
-  "conformanceCases": 4524,
+  "conformanceCases": 4780,
   "tests": {
-    "cases": 941,
-    "assertions": 1520060
+    "cases": 946,
+    "assertions": 1520538
   },
   "bugsFound": 206
 }

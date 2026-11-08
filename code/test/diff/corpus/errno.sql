@@ -53,3 +53,6 @@ DROP DATABASE nosuchdb
 SELEC 1
 SELECT FROM
 SELECT 1 +
+INSERT INTO en_p (id, name) VALUES (9)
+INSERT INTO en_p (id) VALUES (9, 'x')
+INSERT INTO en_p VALUES (9, 'x')

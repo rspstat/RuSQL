@@ -131,6 +131,7 @@ ValueClass aggregate_function_class(const AggFunc& f) {
         std::holds_alternative<AggFunc::ArrayAgg>(f.data)) {
         return ValueClass::Text;
     }
+    if (std::holds_alternative<AggFunc::JsonArrayAgg>(f.data) || std::holds_alternative<AggFunc::JsonObjectAgg>(f.data)) return ValueClass::Json;
     if (std::holds_alternative<AggFunc::Min>(f.data) || std::holds_alternative<AggFunc::Max>(f.data)) return ValueClass::Unknown; // the argument's
     return ValueClass::Number;
 }
@@ -330,6 +331,7 @@ std::optional<std::string> Executor::bind_statement(SharedDatabase& s, Statement
                 return class_of_name(arg);
             }
             if (function == "GROUP_CONCAT" || function == "JSON_AGG" || function == "ARRAY_AGG") return ValueClass::Text;
+            if (function == "JSON_ARRAYAGG" || function == "JSON_OBJECTAGG") return ValueClass::Json;
             if (function == "COUNT" || function == "SUM" || function == "AVG" || function == "STDDEV" || function == "VARIANCE" ||
                 function == "MEDIAN" || function == "BIT_AND" || function == "BIT_OR") {
                 return ValueClass::Number;

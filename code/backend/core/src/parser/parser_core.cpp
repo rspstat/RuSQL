@@ -116,7 +116,7 @@ bool Parser::is_plain_word(TokenKind kind) {
         // aggregate functions
         case TokenKind::Count: case TokenKind::Sum: case TokenKind::Avg: case TokenKind::Min: case TokenKind::Max: case TokenKind::Stddev:
         case TokenKind::Variance: case TokenKind::Median: case TokenKind::BitAnd: case TokenKind::BitOr: case TokenKind::JsonAgg:
-        case TokenKind::ArrayAgg: case TokenKind::GroupConcat: case TokenKind::Filter:
+        case TokenKind::ArrayAgg: case TokenKind::JsonArrayAgg: case TokenKind::JsonObjectAgg: case TokenKind::GroupConcat: case TokenKind::Filter:
         // scalar functions
         case TokenKind::Upper: case TokenKind::Lower: case TokenKind::Length: case TokenKind::Trim: case TokenKind::Concat: case TokenKind::Substr:
         case TokenKind::Substring: case TokenKind::Now: case TokenKind::Curdate: case TokenKind::DateFormat: case TokenKind::Coalesce:

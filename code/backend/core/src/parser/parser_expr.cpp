@@ -815,6 +815,13 @@ bool is_scalar_func_token(TokenKind k) {
     }
 }
 
+// the functions whose TRUE / FALSE arguments are JSON booleans
+bool takes_json_booleans(const std::string& name) {
+    const std::string n = to_upper(name);
+    return n == "JSON_ARRAY" || n == "JSON_OBJECT" || n == "JSON_SET" || n == "JSON_INSERT" || n == "JSON_REPLACE" || n == "JSON_ARRAY_APPEND" ||
+           n == "JSON_ARRAY_INSERT" || n == "JSON_ARRAYAGG" || n == "JSON_OBJECTAGG" || n == "MEMBER_OF";
+}
+
 const char* scalar_func_name(TokenKind k) {
     switch (k) {
         case TokenKind::Concat: return "CONCAT";
@@ -1116,9 +1123,14 @@ ArithExpr Parser::parse_arith_factor() {
             if (!args.empty()) {
                 if (!peek_is(TokenKind::Comma)) throw ParseError("Expected ',' in " + fname + " args");
                 advance();
+                if (peek_is(TokenKind::RParen)) throw ParseError("Expected an expression after ',' in " + fname + " args"); // (`f(a,)` is a syntax error)
             }
-            if (peek_is(TokenKind::RParen)) break;
             args.push_back(parse_value_expr());
+            // JSON_VALUE(doc, path RETURNING type): the type goes in as a third argument
+            if (fname == "JSON_VALUE" && args.size() == 2 && peek_is(TokenKind::Returning)) {
+                advance();
+                args.push_back(ArithExpr(ArithExpr::Str{parse_cast_type()}));
+            }
         }
         if (!peek_is(TokenKind::RParen)) throw ParseError("Expected ')' after " + fname + " args");
         advance();
@@ -1163,8 +1175,8 @@ ArithExpr Parser::parse_arith_factor() {
             while (!peek_is(TokenKind::RParen) && peek() != nullptr) {
                 if (!args.empty()) {
                     if (peek_is(TokenKind::Comma)) advance(); else break;
+                    if (peek_is(TokenKind::RParen)) throw ParseError("Expected an expression after ',' in " + fname + " args");
                 }
-                if (peek_is(TokenKind::RParen)) break;
                 // ADDDATE(d, INTERVAL n UNIT) / SUBDATE: the function with its arguments (d, n, UNIT)
                 if (args.size() == 1 && peek_is(TokenKind::Interval) && (to_upper(fname) == "ADDDATE" || to_upper(fname) == "SUBDATE")) {
                     advance();
@@ -1181,7 +1193,12 @@ ArithExpr Parser::parse_arith_factor() {
                     args.push_back(ArithExpr(ArithExpr::Str{unit->kind == TokenKind::Year ? "YEAR" : to_upper(unit->text)}));
                     continue;
                 }
+                // TRUE / FALSE as an argument of a function that builds or changes a JSON document is a JSON boolean (anywhere else they are the numbers 1 and 0)
+                const Token* word = peek();
+                const bool boolean = word && word->kind == TokenKind::Ident && (to_upper(word->text) == "TRUE" || to_upper(word->text) == "FALSE") &&
+                                     (peek_at_is(1, TokenKind::Comma) || peek_at_is(1, TokenKind::RParen)) && takes_json_booleans(fname);
                 args.push_back(parse_value_expr());
+                if (boolean) args.back() = ArithExpr(ArithExpr::Num{to_upper(word->text)});
             }
             if (!peek_is(TokenKind::RParen)) throw ParseError("Expected ')' after " + fname + " args");
             advance();
@@ -1204,8 +1221,8 @@ ArithExpr Parser::parse_arith_factor() {
             while (!peek_is(TokenKind::RParen) && peek() != nullptr) {
                 if (!args.empty()) {
                     if (peek_is(TokenKind::Comma)) advance(); else break;
+                    if (peek_is(TokenKind::RParen)) throw ParseError("Expected an expression after ',' in YEAR args");
                 }
-                if (peek_is(TokenKind::RParen)) break;
                 args.push_back(parse_arith_expr());
             }
             if (!peek_is(TokenKind::RParen)) throw ParseError("Expected ')' after YEAR args");
@@ -1441,6 +1458,18 @@ ArithExpr Parser::parse_additive_expr() {
             std::vector<ArithExpr> unquote_args;
             unquote_args.push_back(std::move(extract));
             left = ArithExpr(ArithExpr::Func{"JSON_UNQUOTE", std::move(unquote_args)});
+        } else if (peek_is(TokenKind::Ident) && to_upper(peek()->text) == "MEMBER" && peek_at_is(1, TokenKind::Ident) && to_upper(peek_at(1)->text) == "OF" &&
+                   peek_at_is(2, TokenKind::LParen)) {
+            // value MEMBER OF(json array)  →  MEMBER_OF(value, array)
+            advance();
+            advance();
+            advance();
+            std::vector<ArithExpr> args;
+            args.push_back(std::move(left));
+            args.push_back(parse_value_expr());
+            if (!peek_is(TokenKind::RParen)) throw ParseError("Expected ')' after MEMBER OF");
+            advance();
+            left = ArithExpr(ArithExpr::Func{"MEMBER_OF", std::move(args)});
         } else {
             break;
         }

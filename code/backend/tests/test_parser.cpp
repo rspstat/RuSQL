@@ -456,3 +456,28 @@ TEST_CASE("every alias inside a function argument that is an expression is resol
     REQUIRE(count(abs_arg, "u.g") == 1);
     REQUIRE(abs_arg.find("x.") == std::string::npos);
 }
+
+TEST_CASE("a comma before the closing parenthesis of a call is a syntax error, in every kind of call", "[parser][r77]") {
+    for (const char* sql : {"SELECT CONCAT('a',)", "SELECT COALESCE(1,)", "SELECT UPPER('a',)", "SELECT JSON_ARRAY(1,)", "SELECT JSON_OBJECT('a',1,)", "SELECT YEAR(d,) FROM t"}) {
+        Parser p(sql);
+        REQUIRE(p.parse().is_err());
+    }
+    Parser ok("SELECT CONCAT('a','b'), JSON_ARRAY(), COALESCE(NULL, 1)");
+    REQUIRE(ok.parse().is_ok());
+}
+
+TEST_CASE("value MEMBER OF(array), JSON_VALUE ... RETURNING type and JSON_ARRAYAGG / JSON_OBJECTAGG parse", "[parser][r77]") {
+    Parser member("SELECT 3 MEMBER OF('[1,2,3]'), JSON_VALUE(doc, '$.a' RETURNING SIGNED) FROM t WHERE 5 MEMBER OF(doc->'$.ids')");
+    REQUIRE(member.parse().is_ok());
+    Parser agg("SELECT g, JSON_ARRAYAGG(v), JSON_OBJECTAGG(k, v) FROM t GROUP BY g");
+    auto res = agg.parse();
+    REQUIRE(res.is_ok());
+    auto& sel = std::get<Statement::Select>(res.value().data);
+    REQUIRE(sel.columns.size() == 3);
+    auto& array_agg = std::get<SelectColumn::Agg>(sel.columns[1].data);
+    auto& object_agg = std::get<SelectColumn::Agg>(sel.columns[2].data);
+    REQUIRE(std::holds_alternative<AggFunc::JsonArrayAgg>(array_agg.func.data));
+    REQUIRE(array_agg.col == "JSON_ARRAY(v)");
+    REQUIRE(std::holds_alternative<AggFunc::JsonObjectAgg>(object_agg.func.data));
+    REQUIRE(object_agg.col == "JSON_ARRAY(k, v)");
+}

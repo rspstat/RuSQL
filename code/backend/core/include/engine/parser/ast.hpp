@@ -189,6 +189,8 @@ inline ValueClass class_of_type(const DataType& type) {
                 return ValueClass::Number;
             } else if constexpr (std::is_same_v<T, DataType::Unknown>) {
                 return ValueClass::Unknown;
+            } else if constexpr (std::is_same_v<T, DataType::Json>) {
+                return ValueClass::Json;
             } else {
                 return ValueClass::Text;
             }
@@ -432,12 +434,16 @@ struct AggFunc {
     // alternative only so EXPLAIN/SHOW CREATE VIEW and the column label ("ARRAY_AGG(x)"
     // vs "JSON_AGG(x)") stay faithful to what the user actually wrote.
     struct ArrayAgg {};
+    // MySQL's JSON_ARRAYAGG(x) and JSON_OBJECTAGG(key, value). The parser hands the executor JSON_ARRAY(x) / JSON_ARRAY(key, value) as the argument, so a value gets
+    // the JSON type it would get in JSON_ARRAY; the aggregate collects the elements (the pairs) of those arrays.
+    struct JsonArrayAgg {};
+    struct JsonObjectAgg {};
     // MEDIAN(col): the 50th percentile (PERCENTILE_CONT(0.5)) -- linear interpolation between
     // the two middle values for an even count. NULLs are ignored.
     struct Median {};
 
     using Data = std::variant<Count, CountDistinct, Sum, Avg, Min, Max, SumDistinct, AvgDistinct,
-                               Stddev, Variance, GroupConcat, CountCase, SumCase, BitAnd, BitOr, JsonAgg, ArrayAgg, Median>;
+                               Stddev, Variance, GroupConcat, CountCase, SumCase, BitAnd, BitOr, JsonAgg, ArrayAgg, JsonArrayAgg, JsonObjectAgg, Median>;
     Data data;
 
     AggFunc() : data(Count{}) {}

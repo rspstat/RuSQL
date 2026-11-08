@@ -238,3 +238,25 @@ TEST_CASE("DELETE WHERE with a subquery condition works inside an explicit trans
     }
     REQUIRE(live == 1);
 }
+
+TEST_CASE("a statement that fails while it runs takes its derived tables with it: the alias can be used again", "[executor][subquery][regression][r77]") {
+    TempDataDir dir("exec_subq_leak_data");
+    Executor ex(dir.path);
+    REQUIRE(ex.execute_sql("CREATE DATABASE company").is_ok());
+    REQUIRE(ex.execute_sql("USE company").is_ok());
+    REQUIRE(ex.execute_sql("CREATE TABLE t (id INT PRIMARY KEY)").is_ok());
+    REQUIRE(ex.execute_sql("INSERT INTO t VALUES (1)").is_ok());
+    // (the derived table was made, the statement failed on a document that is no JSON, and the alias stayed: "Alias 'r' conflicts with an existing table or view" for good)
+    for (const char* failing : {"SELECT CAST('{bad' AS JSON) FROM (SELECT 1 a) r", "SELECT CAST('{bad' AS JSON) FROM t JOIN (SELECT 1 a) r ON r.a = t.id"}) {
+        INFO(failing);
+        auto failed = ex.execute_sql(failing);
+        REQUIRE(failed.is_err());
+        REQUIRE(failed.error().find("Invalid JSON text") == 0);
+        auto again = ex.execute_sql("SELECT a FROM (SELECT 1 a) r");
+        REQUIRE(again.is_ok());
+        REQUIRE(again.value().find("1 row(s) returned.") != std::string::npos);
+        auto joined = ex.execute_sql("SELECT t.id FROM t JOIN (SELECT 1 a) r ON r.a = t.id");
+        REQUIRE(joined.is_ok());
+        REQUIRE(joined.value().find("1 row(s) returned.") != std::string::npos);
+    }
+}

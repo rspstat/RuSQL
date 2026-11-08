@@ -1,12 +1,16 @@
 #include "engine/collation.hpp"
 #include "engine/executor/builtin_functions.hpp"
 #include "engine/like_escape.hpp"
+#include "engine/value_class.hpp"
 
 #include <algorithm>
 #include <cctype>
+#include <cerrno>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <limits>
+#include <optional>
 #include <tuple>
 #include <unordered_map>
 #include <unordered_set>
@@ -1719,6 +1723,8 @@ unsigned long long negative_as_unsigned(unsigned long long magnitude) {
     return magnitude > smallest ? smallest : 0ULL - magnitude;
 }
 
+std::string json_cast(const std::string& text); // (the JSON functions are further down)
+
 std::string fn_cast(const BuiltinCall& c) {
     if (argc(c) != 2) wrong_count(c);
     const std::string val = c.value(0);
@@ -1771,8 +1777,9 @@ std::string fn_cast(const BuiltinCall& c) {
     }
     if (base == "FLOAT") return format_float_display(format_double(static_cast<double>(static_cast<float>(double_of(val))))); // (single precision, shown with six digits)
     if (base == "DOUBLE" || base == "REAL") return format_double(double_of(val));
-    if (base == "CHAR" || base == "VARCHAR" || base == "NCHAR" || base == "TEXT" || base == "BINARY" || base == "JSON") {
-        if (!params.empty() && base != "JSON" && params[0] >= 0) return substring_chars(utf8_chars(val), 1, params[0]);
+    if (base == "JSON") return json_cast(val);
+    if (base == "CHAR" || base == "VARCHAR" || base == "NCHAR" || base == "TEXT" || base == "BINARY") {
+        if (!params.empty() && params[0] >= 0) return substring_chars(utf8_chars(val), 1, params[0]);
         return val;
     }
     if (base == "DATE") {
@@ -2025,13 +2032,19 @@ std::string fn_soundex(const BuiltinCall& c) {
 }
 
 // ---- JSON -------------------------------------------------------------------------------------------------------------------------------------
+//
+// A JSON value is read into a tree and written back the way MySQL writes it: one space after every `,` and `:`, the members of an object ordered (the
+// shorter keys first, then by bytes, a key that comes twice keeps its last value), a number as MySQL keeps it (an integer as written, a fraction as the
+// shortest DOUBLE that reads back, `1e3` as `1000.0`), a string with its escapes decoded. Values are text everywhere in this engine, so a function that
+// is handed a value decides from the way it was written (a quoted string, a number, TRUE) and from the text itself what JSON value it is.
 
 struct Json {
-    enum Kind { Null, Bool, Int, Double, String, Array, Object } kind = Null;
+    enum Kind { Null, Bool, Int, UInt, Dbl, Dec, String, Array, Object } kind = Null;
     bool b = false;
-    std::string text; // the number as written, or the string
+    double d = 0;     // Dbl
+    std::string text; // Int, UInt, Dec: the number; String: the string
     std::vector<Json> items;
-    std::vector<std::pair<std::string, Json>> members; // kept in MySQL's order: shorter keys first, then by bytes
+    std::vector<std::pair<std::string, Json>> members; // MySQL's order: shorter keys first, then by bytes
 };
 
 void sort_members(Json& j) {
@@ -2043,42 +2056,105 @@ void sort_members(Json& j) {
 struct JsonParser {
     const std::string& s;
     std::size_t i = 0;
+    std::string reason; // why the text is no JSON (MySQL's words), and where
+    std::size_t at = 0;
     explicit JsonParser(const std::string& text) : s(text) {}
+    bool fail(const char* why, std::size_t pos) {
+        if (reason.empty()) { reason = why; at = pos; }
+        return false;
+    }
     void blank() { while (i < s.size() && (s[i] == ' ' || s[i] == '\t' || s[i] == '\n' || s[i] == '\r')) i++; }
-    bool string_token(std::string& out) {
-        if (i >= s.size() || s[i] != '"') return false;
-        i++;
-        while (i < s.size() && s[i] != '"') {
-            if (s[i] == '\\') {
-                if (++i >= s.size()) return false;
-                switch (s[i]) {
-                    case 'n': out.push_back('\n'); break;
-                    case 't': out.push_back('\t'); break;
-                    case 'r': out.push_back('\r'); break;
-                    case 'b': out.push_back('\b'); break;
-                    case 'f': out.push_back('\f'); break;
-                    case 'u': {
-                        if (i + 4 >= s.size()) return false;
-                        const std::uint32_t cp = static_cast<std::uint32_t>(std::strtoul(s.substr(i + 1, 4).c_str(), nullptr, 16));
-                        out += utf8_encode(cp);
-                        i += 4;
-                        break;
-                    }
-                    default: out.push_back(s[i]); break;
-                }
-                i++;
-            } else {
-                out.push_back(s[i++]);
-            }
+    bool hex4(std::size_t p, std::uint32_t& cp) const {
+        if (p + 4 > s.size()) return false;
+        cp = 0;
+        for (std::size_t k = 0; k < 4; k++) {
+            const char h = s[p + k];
+            cp <<= 4;
+            if (h >= '0' && h <= '9') cp |= static_cast<std::uint32_t>(h - '0');
+            else if (h >= 'a' && h <= 'f') cp |= static_cast<std::uint32_t>(h - 'a' + 10);
+            else if (h >= 'A' && h <= 'F') cp |= static_cast<std::uint32_t>(h - 'A' + 10);
+            else return false;
         }
-        if (i >= s.size()) return false;
-        i++;
         return true;
     }
-    bool value(Json& j, int depth = 0) {
-        if (depth > 100) return false;
+    bool string_token(std::string& out) { // (s[i] is the opening quote)
+        i++;
+        while (i < s.size()) {
+            const unsigned char ch = static_cast<unsigned char>(s[i]);
+            if (ch == '"') { i++; return true; }
+            if (ch < 0x20) return fail("Invalid encoding in string.", i);
+            if (ch != '\\') { out.push_back(static_cast<char>(ch)); i++; continue; }
+            if (i + 1 >= s.size()) break;
+            switch (s[i + 1]) {
+                case '"': out.push_back('"'); i += 2; break;
+                case '\\': out.push_back('\\'); i += 2; break;
+                case '/': out.push_back('/'); i += 2; break;
+                case 'b': out.push_back('\b'); i += 2; break;
+                case 'f': out.push_back('\f'); i += 2; break;
+                case 'n': out.push_back('\n'); i += 2; break;
+                case 'r': out.push_back('\r'); i += 2; break;
+                case 't': out.push_back('\t'); i += 2; break;
+                case 'u': {
+                    std::uint32_t cp = 0, low = 0;
+                    if (!hex4(i + 2, cp)) return fail("Incorrect hex digit in \\u escape.", i);
+                    i += 6;
+                    if (cp >= 0xD800 && cp <= 0xDBFF) { // a high surrogate wants the low one that follows it
+                        if (i + 1 < s.size() && s[i] == '\\' && s[i + 1] == 'u' && hex4(i + 2, low) && low >= 0xDC00 && low <= 0xDFFF) {
+                            cp = 0x10000 + ((cp - 0xD800) << 10) + (low - 0xDC00);
+                            i += 6;
+                        } else {
+                            return fail("Invalid encoding in string.", i);
+                        }
+                    } else if (cp >= 0xDC00 && cp <= 0xDFFF) {
+                        return fail("Invalid encoding in string.", i);
+                    }
+                    out += utf8_encode(cp);
+                    break;
+                }
+                default: return fail("Invalid escape character in string.", i + 1);
+            }
+        }
+        return fail("Missing a closing quotation mark in string.", s.size());
+    }
+    bool number(Json& j) {
+        const std::size_t start = i;
+        if (i < s.size() && s[i] == '-') i++;
+        if (i >= s.size() || s[i] < '0' || s[i] > '9') return fail("Invalid value.", i);
+        if (s[i] == '0') i++;
+        else while (i < s.size() && s[i] >= '0' && s[i] <= '9') i++;
+        bool fraction = false;
+        if (i < s.size() && s[i] == '.') {
+            i++;
+            if (i >= s.size() || s[i] < '0' || s[i] > '9') return fail("Miss fraction part in number.", i);
+            while (i < s.size() && s[i] >= '0' && s[i] <= '9') i++;
+            fraction = true;
+        }
+        if (i < s.size() && (s[i] == 'e' || s[i] == 'E')) {
+            i++;
+            if (i < s.size() && (s[i] == '+' || s[i] == '-')) i++;
+            if (i >= s.size() || s[i] < '0' || s[i] > '9') return fail("Miss exponent in number.", i);
+            while (i < s.size() && s[i] >= '0' && s[i] <= '9') i++;
+            fraction = true;
+        }
+        const std::string token = s.substr(start, i - start);
+        if (!fraction) {
+            errno = 0;
+            if (token[0] == '-') {
+                const long long v = std::strtoll(token.c_str(), nullptr, 10);
+                if (errno == 0) { j.kind = Json::Int; j.text = std::to_string(v); return true; }
+            } else {
+                const unsigned long long v = std::strtoull(token.c_str(), nullptr, 10);
+                if (errno == 0) { j.kind = v <= static_cast<unsigned long long>(std::numeric_limits<long long>::max()) ? Json::Int : Json::UInt; j.text = std::to_string(v); return true; }
+            }
+        }
+        j.kind = Json::Dbl;
+        j.d = std::strtod(token.c_str(), nullptr);
+        return true;
+    }
+    bool value(Json& j, int depth) {
+        if (depth > 100) return fail("The JSON document exceeds the maximum depth.", i);
         blank();
-        if (i >= s.size()) return false;
+        if (i >= s.size()) return fail(depth == 0 ? "The document is empty." : "Invalid value.", i);
         const char ch = s[i];
         if (ch == '{') {
             i++;
@@ -2088,9 +2164,10 @@ struct JsonParser {
             for (;;) {
                 blank();
                 std::string key;
+                if (i >= s.size() || s[i] != '"') return fail("Missing a name for object member.", i);
                 if (!string_token(key)) return false;
                 blank();
-                if (i >= s.size() || s[i] != ':') return false;
+                if (i >= s.size() || s[i] != ':') return fail("Missing a colon after a name of object member.", i);
                 i++;
                 Json v;
                 if (!value(v, depth + 1)) return false;
@@ -2100,7 +2177,7 @@ struct JsonParser {
                 blank();
                 if (i < s.size() && s[i] == ',') { i++; continue; }
                 if (i < s.size() && s[i] == '}') { i++; break; }
-                return false;
+                return fail("Missing a comma or '}' after an object member.", i);
             }
             sort_members(j);
             return true;
@@ -2117,7 +2194,7 @@ struct JsonParser {
                 blank();
                 if (i < s.size() && s[i] == ',') { i++; continue; }
                 if (i < s.size() && s[i] == ']') { i++; break; }
-                return false;
+                return fail("Missing a comma or ']' after an array element.", i);
             }
             return true;
         }
@@ -2128,33 +2205,29 @@ struct JsonParser {
         if (s.compare(i, 4, "true") == 0) { i += 4; j.kind = Json::Bool; j.b = true; return true; }
         if (s.compare(i, 5, "false") == 0) { i += 5; j.kind = Json::Bool; j.b = false; return true; }
         if (s.compare(i, 4, "null") == 0) { i += 4; j.kind = Json::Null; return true; }
-        std::size_t start = i;
-        if (i < s.size() && s[i] == '-') i++;
-        std::size_t digits = 0;
-        while (i < s.size() && s[i] >= '0' && s[i] <= '9') i++, digits++;
-        bool fractional = false;
-        if (i < s.size() && s[i] == '.') { fractional = true; i++; while (i < s.size() && s[i] >= '0' && s[i] <= '9') i++, digits++; }
-        if (i < s.size() && (s[i] == 'e' || s[i] == 'E')) {
-            fractional = true;
-            i++;
-            if (i < s.size() && (s[i] == '+' || s[i] == '-')) i++;
-            while (i < s.size() && s[i] >= '0' && s[i] <= '9') i++;
-        }
-        if (digits == 0) return false;
-        j.kind = fractional ? Json::Double : Json::Int;
-        j.text = s.substr(start, i - start);
-        return true;
+        return number(j);
     }
     std::optional<Json> parse() {
         Json j;
-        if (!value(j)) return std::nullopt;
+        if (!value(j, 0)) return std::nullopt;
         blank();
-        if (i != s.size()) return std::nullopt;
+        if (i != s.size()) { fail("The document root must not be followed by other values.", i); return std::nullopt; }
         return j;
     }
 };
 
 std::optional<Json> parse_json(const std::string& text) { return JsonParser(text).parse(); }
+
+// A document argument: the JSON text of argument `n` (1-based) of the function `fname`, or MySQL's error 3141 saying why it is none.
+Json parse_json_arg(const std::string& text, std::size_t n, const std::string& fname) {
+    JsonParser parser(text);
+    auto j = parser.parse();
+    if (!j) {
+        throw StatementError("Invalid JSON text in argument " + std::to_string(n) + " to function " + fname + ": \"" + parser.reason + "\" at position " +
+                             std::to_string(parser.at) + ".");
+    }
+    return *j;
+}
 
 std::string json_quote(const std::string& s) {
     std::string out = "\"";
@@ -2175,11 +2248,40 @@ std::string json_quote(const std::string& s) {
     return out + "\"";
 }
 
+// A DOUBLE the way MySQL writes it in a JSON document: the shortest digits that read back, `1000.0` for a whole number, `1e15` from 10^15 on
+// (the digits then as d.ddd), a small number out in full (`0.00001`).
+std::string json_double_text(double v) {
+    if (v == 0) return std::signbit(v) ? "-0.0" : "0.0";
+    if (!std::isfinite(v)) return "0.0";
+    char buf[48];
+    for (int digits = 1; digits <= 17; digits++) {
+        std::snprintf(buf, sizeof buf, "%.*e", digits - 1, v);
+        if (std::strtod(buf, nullptr) == v) break;
+    }
+    const std::string shown = buf; // d.ddde+XX
+    const bool negative = shown[0] == '-';
+    const std::size_t e = shown.find('e');
+    std::string digits;
+    for (std::size_t k = negative ? 1 : 0; k < e; k++) if (shown[k] != '.') digits.push_back(shown[k]);
+    const int exponent = std::atoi(shown.c_str() + e + 1);
+    std::string out = negative ? "-" : "";
+    if (exponent >= 15) {
+        out += digits.substr(0, 1);
+        if (digits.size() > 1) out += "." + digits.substr(1);
+        return out + "e" + std::to_string(exponent);
+    }
+    if (exponent < 0) return out + "0." + std::string(static_cast<std::size_t>(-exponent - 1), '0') + digits;
+    const std::size_t whole = static_cast<std::size_t>(exponent) + 1;
+    if (digits.size() <= whole) return out + digits + std::string(whole - digits.size(), '0') + ".0";
+    return out + digits.substr(0, whole) + "." + digits.substr(whole);
+}
+
 std::string json_text(const Json& j) {
     switch (j.kind) {
         case Json::Null: return "null";
         case Json::Bool: return j.b ? "true" : "false";
-        case Json::Int: case Json::Double: return j.text;
+        case Json::Int: case Json::UInt: case Json::Dec: return j.text;
+        case Json::Dbl: return json_double_text(j.d);
         case Json::String: return json_quote(j.text);
         case Json::Array: {
             std::string out = "[";
@@ -2195,72 +2297,339 @@ std::string json_text(const Json& j) {
     return "null";
 }
 
-// an SQL value used as a JSON value: a number is a number, NULL is null, a text that is a JSON object or array is that (a function's result such as
-// JSON_ARRAY(...) arrives as such text), anything else is a string
+// JSON_PRETTY: two spaces for every level, `"key": value`, an empty array or object as [] and {}
+void json_pretty_into(const Json& j, int level, std::string& out) {
+    const std::string pad(static_cast<std::size_t>(level) * 2 + 2, ' ');
+    const std::string close_pad(static_cast<std::size_t>(level) * 2, ' ');
+    if (j.kind == Json::Array && !j.items.empty()) {
+        out += "[\n";
+        for (std::size_t k = 0; k < j.items.size(); k++) {
+            out += pad;
+            json_pretty_into(j.items[k], level + 1, out);
+            out += k + 1 < j.items.size() ? ",\n" : "\n";
+        }
+        out += close_pad + "]";
+    } else if (j.kind == Json::Object && !j.members.empty()) {
+        out += "{\n";
+        for (std::size_t k = 0; k < j.members.size(); k++) {
+            out += pad + json_quote(j.members[k].first) + ": ";
+            json_pretty_into(j.members[k].second, level + 1, out);
+            out += k + 1 < j.members.size() ? ",\n" : "\n";
+        }
+        out += close_pad + "}";
+    } else {
+        out += json_text(j);
+    }
+}
+
+bool is_json_number_text(const std::string& v) {
+    JsonParser p(v);
+    Json j;
+    if (v.empty() || !(v[0] == '-' || (v[0] >= '0' && v[0] <= '9')) || !p.number(j)) return false;
+    return p.i == v.size();
+}
+
+// An SQL value used as a JSON value. A string written in quotes is a string; TRUE and FALSE are booleans; a number is a number (one written with an
+// exponent, or made in floating point, a DOUBLE; one with a fraction a DECIMAL kept as written); text that is a JSON object, array or string (a
+// function's answer such as JSON_ARRAY(...) or JSON_EXTRACT(...) arrives as such text) is that document; anything else is a string.
 Json json_from_sql(const BuiltinCall& c, std::size_t i) {
     const std::string v = c.value(i);
     Json j;
     if (is_null(v)) return j;
-    const bool quoted = string_literal(c, i);
-    if (!quoted) {
+    const std::string word = upper_ascii(c.raw[i]);
+    if (word == "TRUE" || word == "FALSE") { j.kind = Json::Bool; j.b = word == "TRUE"; return j; }
+    if (!string_literal(c, i)) {
         if (v == "true" || v == "false") { j.kind = Json::Bool; j.b = v == "true"; return j; }
-        if (auto d = Decimal::parse(v)) { j.kind = d->fraction.empty() ? Json::Int : Json::Double; j.text = v; return j; }
-    }
-    if (!quoted && !v.empty() && (v[0] == '{' || v[0] == '[')) { // (an object or array that is not a string literal: JSON_OBJECT(...) and the like)
-        if (auto parsed = parse_json(v)) return *parsed;
-    }
-    if (!quoted) {
-        if (auto parsed = parse_json(v); parsed && parsed->kind != Json::String) return *parsed;
+        if (is_json_number_text(v)) {
+            const bool exponent = is_json_number_text(c.raw[i]) && c.raw[i].find_first_of("eE") != std::string::npos; // (a literal such as 1e3 or 2.5E0)
+            const bool floating = i < c.kinds.size() && c.kinds[i] == 'D' && v.find_first_of(".eE") != std::string::npos; // (a DOUBLE column or an expression done in floating point)
+            if (exponent || floating) { j.kind = Json::Dbl; j.d = std::strtod(v.c_str(), nullptr); return j; }
+            if (v.find('.') != std::string::npos) { j.kind = Json::Dec; j.text = v; return j; }
+            JsonParser p(v);
+            p.number(j);
+            if (j.kind == Json::Dbl) { j.kind = Json::Dec; j.text = v; } // (an integer too large for 64 bits is a DECIMAL)
+            return j;
+        }
+        if (!v.empty() && (v[0] == '{' || v[0] == '[' || v[0] == '"')) {
+            if (auto parsed = parse_json(v)) return *parsed;
+        }
     }
     j.kind = Json::String;
     j.text = v;
     return j;
 }
 
-std::optional<Json> json_document(const std::string& v) { return parse_json(v); }
+bool json_is_number(const Json& j) { return j.kind == Json::Int || j.kind == Json::UInt || j.kind == Json::Dec || j.kind == Json::Dbl; }
 
-struct PathStep { bool index = false; long long n = 0; std::string key; };
+long double json_number(const Json& j) { return j.kind == Json::Dbl ? static_cast<long double>(j.d) : std::strtold(j.text.c_str(), nullptr); }
 
-std::optional<std::vector<PathStep>> parse_path(const std::string& path) {
-    if (path.empty() || path[0] != '$') return std::nullopt;
-    std::vector<PathStep> steps;
-    std::size_t i = 1;
-    while (i < path.size()) {
-        if (path[i] == '.') {
-            i++;
-            std::string key;
-            if (i < path.size() && path[i] == '"') {
-                i++;
-                while (i < path.size() && path[i] != '"') key.push_back(path[i++]);
-                if (i >= path.size()) return std::nullopt;
-                i++;
-            } else {
-                while (i < path.size() && path[i] != '.' && path[i] != '[') key.push_back(path[i++]);
+bool json_equal(const Json& a, const Json& b) {
+    if (json_is_number(a) && json_is_number(b)) return json_number(a) == json_number(b);
+    if (a.kind != b.kind) return false;
+    switch (a.kind) {
+        case Json::Null: return true;
+        case Json::Bool: return a.b == b.b;
+        case Json::String: return a.text == b.text;
+        case Json::Array:
+            if (a.items.size() != b.items.size()) return false;
+            for (std::size_t k = 0; k < a.items.size(); k++) if (!json_equal(a.items[k], b.items[k])) return false;
+            return true;
+        case Json::Object:
+            if (a.members.size() != b.members.size()) return false;
+            for (std::size_t k = 0; k < a.members.size(); k++) {
+                if (a.members[k].first != b.members[k].first || !json_equal(a.members[k].second, b.members[k].second)) return false;
             }
-            if (key.empty()) return std::nullopt;
-            steps.push_back(PathStep{false, 0, key});
-        } else if (path[i] == '[') {
-            const std::size_t close = path.find(']', i);
-            if (close == std::string::npos) return std::nullopt;
-            const std::string inner = path.substr(i + 1, close - i - 1);
-            if (inner.empty() || inner.find_first_not_of("0123456789") != std::string::npos) return std::nullopt;
-            steps.push_back(PathStep{true, std::atoll(inner.c_str()), ""});
-            i = close + 1;
-        } else {
-            return std::nullopt;
-        }
+            return true;
+        default: return false;
     }
-    return steps;
 }
 
-Json* json_step(Json& j, const PathStep& s) {
-    if (s.index) {
-        if (j.kind == Json::Array) return s.n < static_cast<long long>(j.items.size()) ? &j.items[static_cast<std::size_t>(s.n)] : nullptr;
-        return s.n == 0 ? &j : nullptr; // (a scalar is a one-element array)
+// How JSON values order: by type first (null, numbers, strings, objects, arrays, booleans), within a type by value. A boolean against 0 or 1 compares as that
+// number, because the literal TRUE is the number 1 in this engine (`doc->'$.on' = TRUE`).
+int json_type_rank(const Json& j) {
+    switch (j.kind) {
+        case Json::Null: return 0;
+        case Json::String: return 2;
+        case Json::Object: return 3;
+        case Json::Array: return 4;
+        case Json::Bool: return 5;
+        default: return 1;
     }
-    if (j.kind != Json::Object) return nullptr;
-    for (auto& m : j.members) if (m.first == s.key) return &m.second;
-    return nullptr;
+}
+
+int json_order(const Json& a, const Json& b) {
+    auto sign = [](long double x, long double y) { return x < y ? -1 : (x > y ? 1 : 0); };
+    if (json_is_number(a) && json_is_number(b)) return sign(json_number(a), json_number(b));
+    if (a.kind == Json::Bool && json_is_number(b) && (json_number(b) == 0 || json_number(b) == 1)) return sign(a.b ? 1 : 0, json_number(b));
+    if (b.kind == Json::Bool && json_is_number(a) && (json_number(a) == 0 || json_number(a) == 1)) return sign(json_number(a), b.b ? 1 : 0);
+    const int ra = json_type_rank(a), rb = json_type_rank(b);
+    if (ra != rb) return ra < rb ? -1 : 1;
+    switch (a.kind) {
+        case Json::String: { const int c = a.text.compare(b.text); return c < 0 ? -1 : (c > 0 ? 1 : 0); }
+        case Json::Bool: return sign(a.b ? 1 : 0, b.b ? 1 : 0);
+        case Json::Array:
+            for (std::size_t k = 0; k < a.items.size() && k < b.items.size(); k++) {
+                if (const int c = json_order(a.items[k], b.items[k])) return c;
+            }
+            return sign(static_cast<long double>(a.items.size()), static_cast<long double>(b.items.size()));
+        case Json::Object:
+            if (a.members.size() != b.members.size()) return sign(static_cast<long double>(a.members.size()), static_cast<long double>(b.members.size()));
+            for (std::size_t k = 0; k < a.members.size(); k++) {
+                if (const int c = a.members[k].first.compare(b.members[k].first)) return c < 0 ? -1 : 1;
+                if (const int c = json_order(a.members[k].second, b.members[k].second)) return c;
+            }
+            return 0;
+        default: return 0;
+    }
+}
+
+// ---- paths ----
+
+struct PathLeg {
+    enum Kind { Key, KeyWild, Index, Range, IndexWild, Descent } kind = Key;
+    std::string key;
+    long long from = 0, to = 0;       // Index: from; Range: from .. to
+    bool from_last = false, to_last = false; // counted from the end of the array (`last`, `last-2`)
+};
+
+struct JsonPath {
+    std::vector<PathLeg> legs;
+    bool wild = false; // a `*`, `**` or a range: more than one value may match
+};
+
+[[noreturn]] void bad_path(std::size_t position) {
+    throw StatementError("Invalid JSON path expression. The error is around character position " + std::to_string(position) + ".");
+}
+
+JsonPath parse_path(const std::string& text) {
+    JsonPath path;
+    const std::string& s = text;
+    std::size_t i = 0;
+    auto blank = [&] { while (i < s.size() && (s[i] == ' ' || s[i] == '\t' || s[i] == '\n' || s[i] == '\r')) i++; };
+    auto digits = [&](long long& out) {
+        const std::size_t start = i;
+        while (i < s.size() && s[i] >= '0' && s[i] <= '9') i++;
+        if (i == start || i - start > 17) return false;
+        out = std::atoll(s.substr(start, i - start).c_str());
+        return true;
+    };
+    // an array position: a number, `last` or `last - n`
+    auto position = [&](long long& n, bool& from_last) {
+        blank();
+        from_last = false;
+        if (s.compare(i, 4, "last") == 0) {
+            i += 4;
+            from_last = true;
+            n = 0;
+            blank();
+            if (i < s.size() && s[i] == '-') {
+                i++;
+                blank();
+                if (!digits(n)) bad_path(i);
+            }
+        } else if (!digits(n)) {
+            bad_path(i);
+        }
+        blank();
+    };
+    blank();
+    if (i >= s.size() || s[i] != '$') bad_path(1);
+    i++;
+    for (;;) {
+        blank();
+        if (i >= s.size()) break;
+        PathLeg leg;
+        if (s[i] == '*' && i + 1 < s.size() && s[i + 1] == '*') {
+            i += 2;
+            leg.kind = PathLeg::Descent;
+            path.wild = true;
+            path.legs.push_back(leg);
+            blank();
+            if (i >= s.size() || (s[i] != '.' && s[i] != '[')) bad_path(i); // (** has to be followed by a member or an element)
+            continue;
+        }
+        if (s[i] == '.') {
+            i++;
+            blank();
+            if (i < s.size() && s[i] == '*') {
+                i++;
+                leg.kind = PathLeg::KeyWild;
+                path.wild = true;
+            } else if (i < s.size() && s[i] == '"') {
+                i++;
+                std::string key;
+                while (i < s.size() && s[i] != '"') {
+                    if (s[i] == '\\' && i + 1 < s.size()) i++;
+                    key.push_back(s[i++]);
+                }
+                if (i >= s.size()) bad_path(i);
+                i++;
+                leg.key = key;
+            } else {
+                const std::size_t start = i;
+                auto first = [](unsigned char c) { return std::isalpha(c) || c == '_' || c == '$' || c >= 0x80; };
+                auto rest = [&](unsigned char c) { return first(c) || std::isdigit(c); };
+                if (i >= s.size() || !first(static_cast<unsigned char>(s[i]))) {
+                    if (i < s.size() && std::isdigit(static_cast<unsigned char>(s[i]))) { while (i < s.size() && rest(static_cast<unsigned char>(s[i]))) i++; bad_path(i); }
+                    bad_path(i);
+                }
+                while (i < s.size() && rest(static_cast<unsigned char>(s[i]))) i++;
+                leg.key = s.substr(start, i - start);
+            }
+        } else if (s[i] == '[') {
+            i++;
+            blank();
+            if (i < s.size() && s[i] == '*') {
+                i++;
+                blank();
+                leg.kind = PathLeg::IndexWild;
+                path.wild = true;
+            } else {
+                position(leg.from, leg.from_last);
+                leg.kind = PathLeg::Index;
+                if (s.compare(i, 2, "to") == 0 && i + 2 < s.size() && (s[i + 2] == ' ' || s[i + 2] == 'l' || (s[i + 2] >= '0' && s[i + 2] <= '9'))) {
+                    i += 2;
+                    position(leg.to, leg.to_last);
+                    leg.kind = PathLeg::Range;
+                    path.wild = true;
+                    if (!leg.from_last && !leg.to_last && leg.from > leg.to) bad_path(i);
+                }
+            }
+            if (i >= s.size() || s[i] != ']') bad_path(i);
+            i++;
+        } else {
+            bad_path(i);
+        }
+        path.legs.push_back(leg);
+    }
+    if (!path.legs.empty() && path.legs.back().kind == PathLeg::Descent) bad_path(i);
+    return path;
+}
+
+[[noreturn]] void wildcards_not_allowed() {
+    throw StatementError("In this situation, path expressions may not contain the * and ** tokens or an array range.");
+}
+
+// The path in argument i; `plain`: a path of one value only (no `*`, `**`, range) is allowed.
+JsonPath path_arg(const BuiltinCall& c, std::size_t i, bool plain) {
+    JsonPath path = parse_path(c.value(i));
+    if (plain && path.wild) wildcards_not_allowed();
+    return path;
+}
+
+// The element of an array a position stands for (`last` counts from the end), or -1 when it is outside.
+long long element_at(long long n, bool from_last, std::size_t size) {
+    const long long at = from_last ? static_cast<long long>(size) - 1 - n : n;
+    return at >= 0 && at < static_cast<long long>(size) ? at : -1;
+}
+
+void add_once(std::vector<Json*>& out, Json* node) {
+    if (std::find(out.begin(), out.end(), node) == out.end()) out.push_back(node);
+}
+
+// every node the path leads to from `node`, in document order, each once
+void walk_path(Json* node, const JsonPath& path, std::size_t leg, std::vector<Json*>& out) {
+    if (leg == path.legs.size()) { add_once(out, node); return; }
+    const PathLeg& l = path.legs[leg];
+    switch (l.kind) {
+        case PathLeg::Key:
+            if (node->kind == Json::Object) for (auto& m : node->members) if (m.first == l.key) walk_path(&m.second, path, leg + 1, out);
+            break;
+        case PathLeg::KeyWild:
+            if (node->kind == Json::Object) for (auto& m : node->members) walk_path(&m.second, path, leg + 1, out);
+            break;
+        case PathLeg::Index:
+            if (node->kind == Json::Array) {
+                const long long at = element_at(l.from, l.from_last, node->items.size());
+                if (at >= 0) walk_path(&node->items[static_cast<std::size_t>(at)], path, leg + 1, out);
+            } else if (l.from == 0) { // (a value that is no array is an array of that one value)
+                walk_path(node, path, leg + 1, out);
+            }
+            break;
+        case PathLeg::Range:
+            if (node->kind == Json::Array) {
+                long long a = l.from_last ? static_cast<long long>(node->items.size()) - 1 - l.from : l.from;
+                long long b = l.to_last ? static_cast<long long>(node->items.size()) - 1 - l.to : l.to;
+                if (a < 0) a = 0;
+                if (b >= static_cast<long long>(node->items.size())) b = static_cast<long long>(node->items.size()) - 1;
+                for (long long at = a; at <= b; at++) walk_path(&node->items[static_cast<std::size_t>(at)], path, leg + 1, out);
+            } else if ((l.from_last ? 0 : l.from) == 0) {
+                walk_path(node, path, leg + 1, out);
+            }
+            break;
+        case PathLeg::IndexWild:
+            if (node->kind == Json::Array) for (auto& item : node->items) walk_path(&item, path, leg + 1, out);
+            break;
+        case PathLeg::Descent: {
+            walk_path(node, path, leg + 1, out);
+            if (node->kind == Json::Array) for (auto& item : node->items) walk_path(&item, path, leg, out);
+            else if (node->kind == Json::Object) for (auto& m : node->members) walk_path(&m.second, path, leg, out);
+            break;
+        }
+    }
+}
+
+std::vector<Json*> nodes_at(Json& doc, const JsonPath& path) {
+    std::vector<Json*> out;
+    walk_path(&doc, path, 0, out);
+    return out;
+}
+
+// the node a path of plain legs leads to, or nullptr
+Json* node_at(Json& doc, const JsonPath& path, std::size_t legs) {
+    JsonPath cut;
+    cut.legs.assign(path.legs.begin(), path.legs.begin() + static_cast<std::ptrdiff_t>(legs));
+    auto found = nodes_at(doc, cut);
+    return found.empty() ? nullptr : found.front();
+}
+
+// ---- the functions ----
+
+Json json_array_of(std::vector<const Json*> nodes) {
+    Json arr;
+    arr.kind = Json::Array;
+    for (const Json* n : nodes) arr.items.push_back(*n);
+    return arr;
 }
 
 std::string fn_json_valid(const BuiltinCall& c) {
@@ -2272,14 +2641,15 @@ std::string fn_json_valid(const BuiltinCall& c) {
 std::string fn_json_type(const BuiltinCall& c) {
     if (argc(c) != 1) wrong_count(c);
     if (is_null(c.value(0))) return kNull;
-    auto j = json_document(c.value(0));
-    if (!j) throw StatementError("Invalid JSON text in argument 1 to function json_type");
-    switch (j->kind) {
+    const Json j = parse_json_arg(c.value(0), 1, "json_type");
+    switch (j.kind) {
         case Json::Object: return "OBJECT";
         case Json::Array: return "ARRAY";
         case Json::String: return "STRING";
         case Json::Int: return "INTEGER";
-        case Json::Double: return "DOUBLE";
+        case Json::UInt: return "UNSIGNED INTEGER";
+        case Json::Dec: return "DECIMAL";
+        case Json::Dbl: return "DOUBLE";
         case Json::Bool: return "BOOLEAN";
         default: return "NULL";
     }
@@ -2288,30 +2658,38 @@ std::string fn_json_type(const BuiltinCall& c) {
 std::string fn_json_length(const BuiltinCall& c) {
     if (argc(c) < 1 || argc(c) > 2) wrong_count(c);
     if (any_null(c)) return kNull;
-    auto j = json_document(c.value(0));
-    if (!j) throw StatementError("Invalid JSON text in argument 1 to function json_length");
-    Json* target = &*j;
+    Json doc = parse_json_arg(c.value(0), 1, "json_length");
+    const Json* target = &doc;
     if (argc(c) == 2) {
-        auto path = parse_path(c.value(1));
-        if (!path) throw StatementError("Invalid JSON path expression");
-        for (auto& step : *path) {
-            target = target ? json_step(*target, step) : nullptr;
-        }
-        if (!target) return kNull;
+        auto found = nodes_at(doc, path_arg(c, 1, false));
+        if (found.empty()) return kNull;
+        target = found.front();
     }
     return int_text(target->kind == Json::Array ? static_cast<long long>(target->items.size()) : target->kind == Json::Object ? static_cast<long long>(target->members.size()) : 1);
+}
+
+long long json_depth(const Json& j) {
+    long long deepest = 0;
+    for (const Json& item : j.items) deepest = std::max(deepest, json_depth(item));
+    for (const auto& m : j.members) deepest = std::max(deepest, json_depth(m.second));
+    return deepest + 1;
+}
+
+std::string fn_json_depth(const BuiltinCall& c) {
+    if (argc(c) != 1) wrong_count(c);
+    if (is_null(c.value(0))) return kNull;
+    return int_text(json_depth(parse_json_arg(c.value(0), 1, "json_depth")));
 }
 
 std::string fn_json_keys(const BuiltinCall& c) {
     if (argc(c) < 1 || argc(c) > 2) wrong_count(c);
     if (any_null(c)) return kNull;
-    auto j = json_document(c.value(0));
-    if (!j) throw StatementError("Invalid JSON text in argument 1 to function json_keys");
-    Json* target = &*j;
+    Json doc = parse_json_arg(c.value(0), 1, "json_keys");
+    Json* target = &doc;
     if (argc(c) == 2) {
-        auto path = parse_path(c.value(1));
-        if (!path) throw StatementError("Invalid JSON path expression");
-        for (auto& step : *path) target = target ? json_step(*target, step) : nullptr;
+        target = nullptr;
+        auto found = nodes_at(doc, path_arg(c, 1, true));
+        if (!found.empty()) target = found.front();
         if (!target) return kNull;
     }
     if (target->kind != Json::Object) return kNull;
@@ -2333,22 +2711,114 @@ std::string fn_json_array(const BuiltinCall& c) {
     return json_text(arr);
 }
 
+// the member name an SQL value makes (a number is written out)
+std::string json_member_name(const BuiltinCall& c, std::size_t i) {
+    const std::string v = c.value(i);
+    if (is_null(v)) throw StatementError("JSON documents may not contain NULL member names.");
+    return v;
+}
+
 std::string fn_json_object(const BuiltinCall& c) {
     if (argc(c) % 2 != 0) wrong_count(c);
     Json obj;
     obj.kind = Json::Object;
     for (std::size_t i = 0; i < argc(c); i += 2) {
-        if (is_null(c.value(i))) throw StatementError("JSON documents may not contain NULL member names.");
+        const std::string key = json_member_name(c, i);
         Json v = json_from_sql(c, i + 1);
         bool replaced = false;
-        for (auto& m : obj.members) if (m.first == c.value(i)) { m.second = v; replaced = true; }
-        if (!replaced) obj.members.emplace_back(c.value(i), std::move(v));
+        for (auto& m : obj.members) if (m.first == key) { m.second = v; replaced = true; }
+        if (!replaced) obj.members.emplace_back(key, std::move(v));
     }
     sort_members(obj);
     return json_text(obj);
 }
 
-bool json_equal(const Json& a, const Json& b) { return json_text(a) == json_text(b); }
+std::string fn_json_quote(const BuiltinCall& c) {
+    if (argc(c) != 1) wrong_count(c);
+    if (is_null(c.value(0))) return kNull;
+    if (number_literal(c, 0)) throw StatementError("Incorrect type for argument 1 in function json_quote.");
+    return json_quote(c.value(0));
+}
+
+// the string a JSON string text stands for: "é" is é; text that is not in quotes is taken as it is
+std::string json_unquote_text(const std::string& v) {
+    if (v.size() >= 2 && v.front() == '"' && v.back() == '"') {
+        const Json j = parse_json_arg(v, 1, "json_unquote");
+        if (j.kind == Json::String) return j.text;
+    }
+    return v;
+}
+
+std::string fn_json_unquote(const BuiltinCall& c) {
+    if (argc(c) != 1) wrong_count(c);
+    if (is_null(c.value(0))) return kNull;
+    if (number_literal(c, 0)) throw StatementError("Incorrect type for argument 1 in function json_unquote.");
+    return json_unquote_text(c.value(0));
+}
+
+// the answer of JSON_EXTRACT for the matches of its paths: one match of a plain path as it is, else an array of them; NULL when nothing matched
+std::string json_extract_text(Json& doc, const std::vector<JsonPath>& paths) {
+    std::vector<const Json*> matches;
+    bool array = paths.size() > 1;
+    for (const JsonPath& path : paths) {
+        array = array || path.wild;
+        for (Json* node : nodes_at(doc, path)) matches.push_back(node);
+    }
+    if (matches.empty()) return kNull;
+    if (!array) return json_text(*matches.front());
+    return json_text(json_array_of(matches));
+}
+
+std::string fn_json_extract(const BuiltinCall& c) {
+    if (argc(c) < 2) wrong_count(c);
+    if (any_null(c)) return kNull;
+    Json doc = parse_json_arg(c.value(0), 1, "json_extract");
+    std::vector<JsonPath> paths;
+    for (std::size_t i = 1; i < argc(c); i++) paths.push_back(path_arg(c, i, false));
+    return json_extract_text(doc, paths);
+}
+
+// JSON_VALUE(doc, path [, 'RETURNING type']): the value as SQL sees it -- a string without its quotes, a number as text, JSON null as SQL NULL, an object
+// or array as JSON text. The type, when asked for, has to take the value as it is (a string that is no number is NULL for SIGNED, not 0).
+std::string fn_json_value(const BuiltinCall& c) {
+    if (argc(c) < 2 || argc(c) > 3) wrong_count(c);
+    if (is_null(c.value(0)) || is_null(c.value(1))) return kNull;
+    Json doc = parse_json_arg(c.value(0), 1, "json_value");
+    auto found = nodes_at(doc, path_arg(c, 1, false));
+    if (found.empty() || found.front()->kind == Json::Null) return kNull;
+    const Json& v = *found.front();
+    std::string out = v.kind == Json::String ? v.text : json_text(v);
+    if (argc(c) == 3) {
+        const std::string type = upper_ascii(c.value(2));
+        const bool signed_int = type == "SIGNED" || type == "SIGNED INTEGER" || type == "INTEGER" || type == "UNSIGNED" || type == "UNSIGNED INTEGER";
+        if (signed_int) {
+            if (v.kind == Json::String) {
+                if (!is_json_number_text(out) || out.find_first_of(".eE") != std::string::npos) return kNull;
+            } else if (v.kind == Json::Bool) {
+                return v.b ? "1" : "0";
+            } else if (!json_is_number(v)) {
+                return kNull;
+            }
+            return int_text(int_of(out));
+        }
+        if (type.rfind("DECIMAL", 0) == 0 || type == "DOUBLE" || type == "FLOAT") {
+            if (v.kind == Json::String && !is_json_number_text(out)) return kNull;
+            if (v.kind != Json::String && !json_is_number(v)) return kNull;
+            long long precision = 10, scale = 0;
+            if (type.rfind("DECIMAL", 0) == 0) {
+                if (std::sscanf(type.c_str(), "DECIMAL(%lld,%lld)", &precision, &scale) < 1) precision = 10;
+                const Decimal d = decimal_of(out).rounded(scale, false);
+                if (static_cast<long long>(d.integer == "0" ? 0 : d.integer.size()) > precision - scale) return kNull; // (more digits than the type holds)
+                return d.str(static_cast<std::size_t>(scale));
+            }
+        }
+        if (type.rfind("CHAR", 0) == 0 || type.rfind("VARCHAR", 0) == 0) {
+            long long length = 0;
+            if (std::sscanf(type.c_str(), type[0] == 'V' ? "VARCHAR(%lld)" : "CHAR(%lld)", &length) == 1 && static_cast<long long>(utf8_chars(out).size()) > length) return kNull;
+        }
+    }
+    return out;
+}
 
 bool json_contains(const Json& target, const Json& cand) {
     if (target.kind == Json::Object) {
@@ -2378,50 +2848,183 @@ bool json_contains(const Json& target, const Json& cand) {
 std::string fn_json_contains(const BuiltinCall& c) {
     if (argc(c) < 2 || argc(c) > 3) wrong_count(c);
     if (any_null(c)) return kNull;
-    auto target = json_document(c.value(0));
-    auto cand = json_document(c.value(1));
-    if (!target) throw StatementError("Invalid JSON text in argument 1 to function json_contains");
-    if (!cand) throw StatementError("Invalid JSON text in argument 2 to function json_contains");
-    Json* t = &*target;
+    Json target = parse_json_arg(c.value(0), 1, "json_contains");
+    Json cand = parse_json_arg(c.value(1), 2, "json_contains");
+    Json* t = &target;
     if (argc(c) == 3) {
-        auto path = parse_path(c.value(2));
-        if (!path) throw StatementError("Invalid JSON path expression");
-        for (auto& step : *path) t = t ? json_step(*t, step) : nullptr;
-        if (!t) return kNull;
+        auto found = nodes_at(target, path_arg(c, 2, true));
+        if (found.empty()) return kNull;
+        t = found.front();
     }
-    return json_contains(*t, *cand) ? "1" : "0";
+    return json_contains(*t, cand) ? "1" : "0";
+}
+
+std::string fn_json_contains_path(const BuiltinCall& c) {
+    if (argc(c) < 3) wrong_count(c);
+    if (is_null(c.value(0)) || is_null(c.value(1))) return kNull;
+    Json doc = parse_json_arg(c.value(0), 1, "json_contains_path");
+    const std::string mode = lower_ascii(c.value(1));
+    if (mode != "one" && mode != "all") throw StatementError("The oneOrAll argument to json_contains_path may take these values: 'one' or 'all'.");
+    bool saw_null = false;
+    for (std::size_t i = 2; i < argc(c); i++) {
+        if (is_null(c.value(i))) { saw_null = true; continue; }
+        const bool found = !nodes_at(doc, path_arg(c, i, false)).empty();
+        if (found && mode == "one") return "1";
+        if (!found && mode == "all") return "0";
+    }
+    if (saw_null) return kNull;
+    return mode == "one" ? "0" : "1";
+}
+
+bool json_overlaps(const Json& a, const Json& b) {
+    if (a.kind == Json::Array && b.kind == Json::Array) {
+        for (auto& x : a.items) for (auto& y : b.items) if (json_equal(x, y)) return true;
+        return false;
+    }
+    if (a.kind == Json::Array) { for (auto& x : a.items) if (json_equal(x, b)) return true; return false; }
+    if (b.kind == Json::Array) { for (auto& y : b.items) if (json_equal(a, y)) return true; return false; }
+    if (a.kind == Json::Object && b.kind == Json::Object) {
+        for (auto& x : a.members) for (auto& y : b.members) if (x.first == y.first && json_equal(x.second, y.second)) return true;
+        return false;
+    }
+    return json_equal(a, b);
+}
+
+std::string fn_json_overlaps(const BuiltinCall& c) {
+    if (argc(c) != 2) wrong_count(c);
+    if (any_null(c)) return kNull;
+    return json_overlaps(parse_json_arg(c.value(0), 1, "json_overlaps"), parse_json_arg(c.value(1), 2, "json_overlaps")) ? "1" : "0";
+}
+
+// `value MEMBER OF(array)`: is the value one of the elements (a document that is no array is a one-element array)
+std::string fn_member_of(const BuiltinCall& c) {
+    if (argc(c) != 2) wrong_count(c);
+    if (any_null(c)) return kNull;
+    const Json target = parse_json_arg(c.value(1), 2, "member of");
+    const Json v = json_from_sql(c, 0);
+    if (target.kind == Json::Array) {
+        for (auto& item : target.items) if (json_equal(item, v)) return "1";
+        return "0";
+    }
+    return json_equal(target, v) ? "1" : "0";
+}
+
+// LIKE over a string value: % any run, _ one character, `escape` takes the next one literally; letters are compared exactly
+bool json_like(const std::string& s, std::size_t si, const std::string& p, std::size_t pi, char escape) {
+    while (pi < p.size()) {
+        const char pc = p[pi];
+        if (pc == escape && pi + 1 < p.size()) {
+            if (si >= s.size() || s[si] != p[pi + 1]) return false;
+            si++;
+            pi += 2;
+        } else if (pc == '%') {
+            while (pi < p.size() && p[pi] == '%') pi++;
+            if (pi == p.size()) return true;
+            for (std::size_t k = si; k <= s.size(); k++) if (json_like(s, k, p, pi, escape)) return true;
+            return false;
+        } else if (pc == '_') {
+            if (si >= s.size()) return false;
+            si++;
+            while (si < s.size() && (static_cast<unsigned char>(s[si]) & 0xC0) == 0x80) si++; // (one character, not one byte)
+            pi++;
+        } else {
+            if (si >= s.size() || s[si] != pc) return false;
+            si++;
+            pi++;
+        }
+    }
+    return si == s.size();
+}
+
+bool json_plain_name(const std::string& k) {
+    if (k.empty()) return false;
+    for (std::size_t n = 0; n < k.size(); n++) {
+        const unsigned char ch = static_cast<unsigned char>(k[n]);
+        if (!(std::isalpha(ch) || ch == '_' || ch == '$' || ch >= 0x80 || (n > 0 && std::isdigit(ch)))) return false;
+    }
+    return true;
+}
+
+void json_search_into(const Json& node, const std::string& at, const std::string& pattern, char escape, bool all, std::vector<std::string>& found) {
+    if (!all && !found.empty()) return;
+    if (node.kind == Json::String) {
+        if (json_like(node.text, 0, pattern, 0, escape)) found.push_back(at);
+    } else if (node.kind == Json::Array) {
+        for (std::size_t k = 0; k < node.items.size(); k++) json_search_into(node.items[k], at + "[" + std::to_string(k) + "]", pattern, escape, all, found);
+    } else if (node.kind == Json::Object) {
+        for (auto& m : node.members) json_search_into(m.second, at + (json_plain_name(m.first) ? "." + m.first : ".\"" + m.first + "\""), pattern, escape, all, found);
+    }
+}
+
+std::string fn_json_search(const BuiltinCall& c) {
+    if (argc(c) < 3) wrong_count(c);
+    if (is_null(c.value(0)) || is_null(c.value(1)) || is_null(c.value(2))) return kNull;
+    Json doc = parse_json_arg(c.value(0), 1, "json_search");
+    const std::string mode = lower_ascii(c.value(1));
+    if (mode != "one" && mode != "all") throw StatementError("The oneOrAll argument to json_search may take these values: 'one' or 'all'.");
+    char escape = '\\';
+    if (argc(c) >= 4 && !is_null(c.value(3)) && !c.value(3).empty()) escape = c.value(3)[0];
+    std::vector<std::string> found;
+    if (argc(c) <= 4) {
+        json_search_into(doc, "$", c.value(2), escape, mode == "all", found);
+    } else {
+        for (std::size_t i = 4; i < argc(c); i++) {
+            if (is_null(c.value(i))) return kNull;
+            JsonPath path = path_arg(c, i, false);
+            for (Json* node : nodes_at(doc, path)) {
+                // (the text of the path that was given, then the steps below it)
+                std::string at = c.value(i);
+                while (!at.empty() && at.back() == ' ') at.pop_back();
+                json_search_into(*node, at, c.value(2), escape, mode == "all", found);
+            }
+        }
+    }
+    if (found.empty()) return kNull;
+    if (mode == "one" || found.size() == 1) return json_quote(found.front());
+    Json arr;
+    arr.kind = Json::Array;
+    for (auto& f : found) { Json s; s.kind = Json::String; s.text = f; arr.items.push_back(std::move(s)); }
+    return json_text(arr);
 }
 
 // JSON_SET (set or add), JSON_INSERT (add only), JSON_REPLACE (replace only)
 std::string json_modify(const BuiltinCall& c, bool may_add, bool may_replace) {
     if (argc(c) < 3 || argc(c) % 2 == 0) wrong_count(c);
     if (is_null(c.value(0))) return kNull;
-    auto doc = json_document(c.value(0));
-    if (!doc) throw StatementError("Invalid JSON text in argument 1 to function " + lower_ascii(c.name));
+    Json doc = parse_json_arg(c.value(0), 1, lower_ascii(c.name));
+    std::vector<JsonPath> paths;
     for (std::size_t i = 1; i + 1 < argc(c); i += 2) {
         if (is_null(c.value(i))) return kNull;
-        auto path = parse_path(c.value(i));
-        if (!path) throw StatementError("Invalid JSON path expression");
-        Json value = json_from_sql(c, i + 1);
-        if (path->empty()) { if (may_replace) *doc = value; continue; }
-        Json* parent = &*doc;
-        for (std::size_t k = 0; k + 1 < path->size() && parent; k++) parent = json_step(*parent, (*path)[k]);
+        paths.push_back(path_arg(c, i, true));
+    }
+    for (std::size_t k = 0; k < paths.size(); k++) {
+        const JsonPath& path = paths[k];
+        Json value = json_from_sql(c, 2 + 2 * k);
+        if (path.legs.empty()) { if (may_replace) doc = value; continue; }
+        Json* parent = node_at(doc, path, path.legs.size() - 1);
         if (!parent) continue;
-        const PathStep& last = path->back();
-        Json* existing = json_step(*parent, last);
-        if (existing) {
-            if (may_replace) *existing = value;
-        } else if (may_add) {
-            if (last.index) {
-                if (parent->kind != Json::Array) { Json arr; arr.kind = Json::Array; arr.items.push_back(*parent); *parent = arr; }
-                parent->items.push_back(value);
-            } else if (parent->kind == Json::Object) {
-                parent->members.emplace_back(last.key, value);
-                sort_members(*parent);
-            }
+        const PathLeg& last = path.legs.back();
+        if (last.kind == PathLeg::Key) {
+            if (parent->kind != Json::Object) continue;
+            Json* existing = nullptr;
+            for (auto& m : parent->members) if (m.first == last.key) existing = &m.second;
+            if (existing) { if (may_replace) *existing = value; }
+            else if (may_add) { parent->members.emplace_back(last.key, value); sort_members(*parent); }
+        } else if (parent->kind == Json::Array) {
+            const long long at = element_at(last.from, last.from_last, parent->items.size());
+            if (at >= 0) { if (may_replace) parent->items[static_cast<std::size_t>(at)] = value; }
+            else if (may_add && !last.from_last) parent->items.push_back(value); // (a position past the end appends)
+        } else if (last.from == 0) { // (a value that is no array is an array of that one value: [0] is the value itself)
+            if (may_replace) *parent = value;
+        } else if (may_add && !last.from_last) {
+            Json arr;
+            arr.kind = Json::Array;
+            arr.items.push_back(*parent);
+            arr.items.push_back(value);
+            *parent = arr;
         }
     }
-    return json_text(*doc);
+    return json_text(doc);
 }
 
 std::string fn_json_set(const BuiltinCall& c) { return json_modify(c, true, true); }
@@ -2431,23 +3034,142 @@ std::string fn_json_replace(const BuiltinCall& c) { return json_modify(c, false,
 std::string fn_json_remove(const BuiltinCall& c) {
     if (argc(c) < 2) wrong_count(c);
     if (any_null(c)) return kNull;
-    auto doc = json_document(c.value(0));
-    if (!doc) throw StatementError("Invalid JSON text in argument 1 to function json_remove");
+    Json doc = parse_json_arg(c.value(0), 1, "json_remove");
     for (std::size_t i = 1; i < argc(c); i++) {
-        auto path = parse_path(c.value(i));
-        if (!path || path->empty()) throw StatementError("Invalid JSON path expression");
-        Json* parent = &*doc;
-        for (std::size_t k = 0; k + 1 < path->size() && parent; k++) parent = json_step(*parent, (*path)[k]);
+        JsonPath path = path_arg(c, i, true);
+        if (path.legs.empty()) throw StatementError("The path expression '$' is not allowed in this context.");
+        Json* parent = node_at(doc, path, path.legs.size() - 1);
         if (!parent) continue;
-        const PathStep& last = path->back();
-        if (last.index && parent->kind == Json::Array && last.n < static_cast<long long>(parent->items.size())) {
-            parent->items.erase(parent->items.begin() + last.n);
-        } else if (!last.index && parent->kind == Json::Object) {
-            parent->members.erase(std::remove_if(parent->members.begin(), parent->members.end(), [&](const auto& m) { return m.first == last.key; }), parent->members.end());
+        const PathLeg& last = path.legs.back();
+        if (last.kind == PathLeg::Key) {
+            if (parent->kind == Json::Object) {
+                parent->members.erase(std::remove_if(parent->members.begin(), parent->members.end(), [&](const auto& m) { return m.first == last.key; }), parent->members.end());
+            }
+        } else if (parent->kind == Json::Array) {
+            const long long at = element_at(last.from, last.from_last, parent->items.size());
+            if (at >= 0) parent->items.erase(parent->items.begin() + at);
         }
     }
-    return json_text(*doc);
+    return json_text(doc);
 }
+
+// JSON_ARRAY_APPEND(doc, path, value ...): the value goes to the end of the array the path leads to (a value that is no array becomes one)
+std::string fn_json_array_append(const BuiltinCall& c) {
+    if (argc(c) < 3 || argc(c) % 2 == 0) wrong_count(c);
+    if (is_null(c.value(0))) return kNull;
+    Json doc = parse_json_arg(c.value(0), 1, "json_array_append");
+    std::vector<JsonPath> paths;
+    for (std::size_t i = 1; i + 1 < argc(c); i += 2) {
+        if (is_null(c.value(i))) return kNull;
+        paths.push_back(path_arg(c, i, true));
+    }
+    for (std::size_t k = 0; k < paths.size(); k++) {
+        Json* target = node_at(doc, paths[k], paths[k].legs.size());
+        if (!target) continue;
+        Json value = json_from_sql(c, 2 + 2 * k);
+        if (target->kind != Json::Array) {
+            Json arr;
+            arr.kind = Json::Array;
+            arr.items.push_back(*target);
+            *target = arr;
+        }
+        target->items.push_back(value);
+    }
+    return json_text(doc);
+}
+
+// JSON_ARRAY_INSERT(doc, path, value ...): the path ends in an array position; the value goes in there and the elements after it move up
+std::string fn_json_array_insert(const BuiltinCall& c) {
+    if (argc(c) < 3 || argc(c) % 2 == 0) wrong_count(c);
+    if (is_null(c.value(0))) return kNull;
+    Json doc = parse_json_arg(c.value(0), 1, "json_array_insert");
+    std::vector<JsonPath> paths;
+    for (std::size_t i = 1; i + 1 < argc(c); i += 2) {
+        if (is_null(c.value(i))) return kNull;
+        JsonPath path = path_arg(c, i, true);
+        if (path.legs.empty() || path.legs.back().kind != PathLeg::Index) throw StatementError("A path expression is not a path to a cell in an array.");
+        paths.push_back(path);
+    }
+    for (std::size_t k = 0; k < paths.size(); k++) {
+        Json* parent = node_at(doc, paths[k], paths[k].legs.size() - 1);
+        if (!parent || parent->kind != Json::Array) continue;
+        const PathLeg& last = paths[k].legs.back();
+        long long at = last.from_last ? static_cast<long long>(parent->items.size()) - 1 - last.from : last.from;
+        if (at < 0) at = 0;
+        if (at > static_cast<long long>(parent->items.size())) at = static_cast<long long>(parent->items.size());
+        parent->items.insert(parent->items.begin() + at, json_from_sql(c, 2 + 2 * k));
+    }
+    return json_text(doc);
+}
+
+// RFC 7396: a patch that is no object replaces the target; an object patch sets its members in the target, and a member that is null removes it
+Json json_patch(Json target, const Json& patch) {
+    if (patch.kind != Json::Object) return patch;
+    if (target.kind != Json::Object) { target = Json(); target.kind = Json::Object; }
+    for (auto& m : patch.members) {
+        if (m.second.kind == Json::Null) {
+            target.members.erase(std::remove_if(target.members.begin(), target.members.end(), [&](const auto& t) { return t.first == m.first; }), target.members.end());
+            continue;
+        }
+        Json* existing = nullptr;
+        for (auto& t : target.members) if (t.first == m.first) existing = &t.second;
+        if (existing) *existing = json_patch(*existing, m.second);
+        else { target.members.emplace_back(m.first, json_patch(Json(), m.second)); }
+    }
+    sort_members(target);
+    return target;
+}
+
+std::string fn_json_merge_patch(const BuiltinCall& c) {
+    if (argc(c) < 2) wrong_count(c);
+    std::optional<Json> acc;
+    for (std::size_t i = 0; i < argc(c); i++) {
+        if (is_null(c.value(i))) { acc.reset(); continue; }
+        const Json next = parse_json_arg(c.value(i), i + 1, "json_merge_patch");
+        if (i == 0) acc = next;
+        else if (next.kind != Json::Object) acc = next;
+        else if (acc) acc = json_patch(*acc, next);
+    }
+    return acc ? json_text(*acc) : kNull;
+}
+
+// JSON_MERGE_PRESERVE: arrays join, objects merge member by member (a member in both has its two values merged), anything else becomes an array
+Json json_merge_preserve(Json a, const Json& b) {
+    if (a.kind == Json::Object && b.kind == Json::Object) {
+        for (auto& m : b.members) {
+            Json* existing = nullptr;
+            for (auto& t : a.members) if (t.first == m.first) existing = &t.second;
+            if (existing) *existing = json_merge_preserve(*existing, m.second);
+            else a.members.emplace_back(m.first, m.second);
+        }
+        sort_members(a);
+        return a;
+    }
+    Json out;
+    out.kind = Json::Array;
+    if (a.kind == Json::Array) out.items = a.items; else out.items.push_back(a);
+    if (b.kind == Json::Array) for (auto& item : b.items) out.items.push_back(item); else out.items.push_back(b);
+    return out;
+}
+
+std::string fn_json_merge_preserve(const BuiltinCall& c) {
+    if (argc(c) < 2) wrong_count(c);
+    if (any_null(c)) return kNull;
+    Json acc = parse_json_arg(c.value(0), 1, lower_ascii(c.name));
+    for (std::size_t i = 1; i < argc(c); i++) acc = json_merge_preserve(acc, parse_json_arg(c.value(i), i + 1, lower_ascii(c.name)));
+    return json_text(acc);
+}
+
+std::string fn_json_pretty(const BuiltinCall& c) {
+    if (argc(c) != 1) wrong_count(c);
+    if (is_null(c.value(0))) return kNull;
+    std::string out;
+    json_pretty_into(parse_json_arg(c.value(0), 1, "json_pretty"), 0, out);
+    return out;
+}
+
+// CAST(x AS JSON) and the value written to a JSON column: the document in MySQL's form
+std::string json_cast(const std::string& text) { return json_text(parse_json_arg(text, 1, "cast_as_json")); }
 
 // ---- the table --------------------------------------------------------------------------------------------------------------------------------
 
@@ -2490,6 +3212,11 @@ const std::unordered_map<std::string, Handler>& table() {
         {"JSON_VALID", fn_json_valid}, {"JSON_TYPE", fn_json_type}, {"JSON_LENGTH", fn_json_length}, {"JSON_KEYS", fn_json_keys},
         {"JSON_ARRAY", fn_json_array}, {"JSON_OBJECT", fn_json_object}, {"JSON_CONTAINS", fn_json_contains}, {"JSON_SET", fn_json_set},
         {"JSON_INSERT", fn_json_insert}, {"JSON_REPLACE", fn_json_replace}, {"JSON_REMOVE", fn_json_remove},
+        {"JSON_EXTRACT", fn_json_extract}, {"JSON_UNQUOTE", fn_json_unquote}, {"JSON_VALUE", fn_json_value}, {"JSON_DEPTH", fn_json_depth},
+        {"JSON_ARRAY_APPEND", fn_json_array_append}, {"JSON_ARRAY_INSERT", fn_json_array_insert}, {"JSON_MERGE_PATCH", fn_json_merge_patch},
+        {"JSON_MERGE_PRESERVE", fn_json_merge_preserve}, {"JSON_MERGE", fn_json_merge_preserve}, {"JSON_PRETTY", fn_json_pretty},
+        {"JSON_CONTAINS_PATH", fn_json_contains_path}, {"JSON_OVERLAPS", fn_json_overlaps}, {"JSON_SEARCH", fn_json_search}, {"JSON_QUOTE", fn_json_quote},
+        {"MEMBER_OF", fn_member_of},
     };
     return t;
 }
@@ -2499,7 +3226,7 @@ const std::unordered_set<std::string>& legacy_names() {
     static const std::unordered_set<std::string> s = {
         "NOW", "CURDATE", "COALESCE", "IFNULL", "IF", "NULLIF", "CAST", "CONVERT", "REGEXP_LIKE", "REGEXP", "REGEXP_REPLACE", "REGEXP_MATCH",
         "REGEXP_SUBSTR", "RAND", "CURTIME", "CURRENT_TIME", "CURRENT_TIMESTAMP", "CURRENT_DATE", "LOCALTIME", "LOCALTIMESTAMP", "UNIX_TIMESTAMP",
-        "FROM_UNIXTIME", "ISNULL", "MD5", "UUID", "JSON_EXTRACT", "JSON_UNQUOTE", "JSON_VALUE", "DATABASE", "SCHEMA", "VERSION", "CURRENT_USER",
+        "FROM_UNIXTIME", "ISNULL", "MD5", "UUID", "DATABASE", "SCHEMA", "VERSION", "CURRENT_USER",
         "USER", "SESSION_USER", "SYSTEM_USER", "VALUES", "CASE", "REGEXP_INSTR", "LAST_INSERT_ID", "ROW_COUNT", "FOUND_ROWS", "SLEEP", "UTC_DATE", "UTC_TIME",
         "UTC_TIMESTAMP",
     };
@@ -2507,6 +3234,59 @@ const std::unordered_set<std::string>& legacy_names() {
 }
 
 } // namespace
+
+// One side of a comparison with a JSON document as the JSON value its class says: a JSON side is read as a document (text that is none is a string), a number
+// is a JSON number, a string a JSON string; a side whose type is not known is a number when it reads as one.
+static Json json_of_side(ValueClass cls, const std::string& text) {
+    if (cls == ValueClass::Json) {
+        if (auto parsed = parse_json(text)) return *parsed;
+    } else if (cls == ValueClass::Number || (cls == ValueClass::Unknown && is_json_number_text(text))) {
+        if (is_json_number_text(text)) {
+            JsonParser p(text);
+            Json j;
+            p.number(j);
+            if (text.find('.') != std::string::npos && j.kind == Json::Dbl) { j.kind = Json::Dec; j.text = text; }
+            return j;
+        }
+    }
+    Json j;
+    j.kind = Json::String;
+    j.text = text;
+    return j;
+}
+
+std::optional<std::string> json_canonical_text(const std::string& text, std::string* why) {
+    JsonParser parser(text);
+    auto j = parser.parse();
+    if (!j) {
+        if (why) *why = "\"" + parser.reason + "\" at position " + std::to_string(parser.at);
+        return std::nullopt;
+    }
+    return json_text(*j);
+}
+
+std::string json_aggregate_text(bool object, const std::vector<std::string>& rows) {
+    Json out;
+    out.kind = object ? Json::Object : Json::Array;
+    for (const std::string& text : rows) {
+        auto row = parse_json(text);
+        if (!row || row->kind != Json::Array || row->items.empty()) continue;
+        if (!object) { out.items.push_back(row->items[0]); continue; }
+        const Json& key = row->items[0];
+        if (key.kind == Json::Null) throw StatementError("JSON documents may not contain NULL member names.");
+        const std::string name = key.kind == Json::String ? key.text : json_text(key);
+        Json value = row->items.size() > 1 ? row->items[1] : Json();
+        bool replaced = false;
+        for (auto& m : out.members) if (m.first == name) { m.second = value; replaced = true; }
+        if (!replaced) out.members.emplace_back(name, std::move(value));
+    }
+    if (object) sort_members(out);
+    return json_text(out);
+}
+
+int json_compare_classed(ValueClass a, ValueClass b, std::string_view x, std::string_view y) {
+    return json_order(json_of_side(a, std::string(x)), json_of_side(b, std::string(y)));
+}
 
 std::optional<std::string> call_builtin_function(const BuiltinCall& call) {
     auto it = table().find(call.name);

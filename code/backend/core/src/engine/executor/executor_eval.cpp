@@ -378,6 +378,9 @@ ValueClass Executor::class_of_expr(const ArithExpr& expr) {
             return common(values);
         }
         if (f->name == "NULLIF" && !f->args.empty()) return class_of_expr(f->args[0]);
+        if (f->name == "CAST" && f->args.size() == 2) { // CAST(x AS JSON) is a JSON document
+            if (auto* type = std::get_if<ArithExpr::Str>(&f->args[1].data); type && type->value == "JSON") return ValueClass::Json;
+        }
         return function_result_class(f->name);
     }
     return ValueClass::Number; // a number, + - * /, a comparison, a condition

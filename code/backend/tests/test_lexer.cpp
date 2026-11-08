@@ -147,3 +147,14 @@ TEST_CASE(":= is one token, and a lone colon (the end of a label) is none", "[le
     };
     REQUIRE(kinds == expected);
 }
+
+TEST_CASE(".5 is the number 0.5; after a name a dot is still the dot of a qualified name", "[lexer][r77]") {
+    auto toks = lex("SELECT .5, t.id, 1 + .25");
+    REQUIRE(toks[1].kind == TokenKind::NumberLit);
+    REQUIRE(toks[1].text == "0.5");
+    REQUIRE(toks[3].kind == TokenKind::Ident);
+    REQUIRE(toks[4].kind == TokenKind::Dot);
+    REQUIRE(toks[5].kind == TokenKind::Ident);
+    REQUIRE(toks[9].kind == TokenKind::NumberLit);
+    REQUIRE(toks[9].text == "0.25");
+}

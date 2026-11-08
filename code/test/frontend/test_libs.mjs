@@ -345,7 +345,7 @@ const mcpLib = await load("mcpTools");
 test("MCP panel: the tools it lists are exactly the tools of mcp_server.py", () => {
   const server = fs.readFileSync(path.resolve(frontend, "..", "mcp", "mcp_server.py"), "utf8");
   const real = [...server.matchAll(/@mcp\.tool\(\)\r?\ndef (\w+)\(/g)].map(m => m[1]).sort();
-  const listed = [...mcpLib.MCP_TOOL_NAMES].sort();
+  const listed = mcpLib.MCP_TOOL_GROUPS.flatMap(g => g.tools.map(t => t.name)).sort(); // (the one list the panel has; R75 took MCP_TOOL_NAMES out as unused)
   assert.ok(real.length > 30, "the tools of mcp_server.py were found");
   assert.deepEqual(listed, real);
   assert.equal(new Set(listed).size, listed.length, "no tool is listed twice");

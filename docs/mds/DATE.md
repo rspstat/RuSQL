@@ -3047,6 +3047,43 @@ READ COMMITTED는 어느 쪽이든 최신을 읽으므로 차이가 없다.
 ① 51문장 묶음은 문장을 한 번씩 견준 것이라 모든 모양을 덮지는 않는다(예: `IN (서브쿼리)`는 글자 열 · 숫자 하나만 시험). 새 행의 "비용"은 구현해 보기 전의 어림이다.
 ② `PLAN.md`의 ✅ 83행의 자세한 원인 · 수정 설명은 이제 git 기록에만 있다. 같은 일의 날짜별 요약은 이 문서에 있다.
 
+### 11월 9일 — R77: 새 영역 훑기 네 곳(JSON 함수 · 준비된 문장의 바이너리 프로토콜 · 권한·역할 · COLLATE 절)
+
+**왜 이 항목인가**: 사용자가 "새 영역 훑기: 권한·역할, COLLATE 절, COM_STMT_*, JSON 함수를 진짜 MySQL 8.4.9와 비교하고 나온 차이 고치기"를 골랐다(`FULLTEXT`는 마감 직전 회귀 위험이 커서 하지 않기로 함). R71과 같은 방식: 코퍼스를 쓰고 진짜 MySQL과 견주고, 차이를 고치고, 시험 · 문서 · 커밋.
+
+**결과 한눈에**
+- **JSON 함수**: `corpus/json_functions.sql` 245문장. 처음 131문장에서 차이 50개 → 문법 · 함수를 더하며 245문장으로 늘려 **차이 0**(native와 `--proto --errno` 모두. 오류 번호까지 같음).
+- **준비된 문장의 바이너리 프로토콜**: 새 도구 `prepared_wire.py`(mysql-connector의 준비된 커서 = `COM_STMT_PREPARE` / `EXECUTE`)와 `corpus/prepared_wire.txt` 81번 실행. 처음에는 **첫 `SELECT`부터 드라이버가 답을 읽지 못했고**, 지금은 **차이 0**.
+- **권한 · 역할**: `corpus/privileges.sql` 115문장 중 **90개가 다름 — 고치지 않았다**. 가장 큰 발견은 아래 "권한이 강제되지 않는다".
+- **`COLLATE` 절**: `corpus/collate_clause.sql` 69문장 중 **62개가 다름 — 고치지 않았다**(열 단위 정렬 규칙이 통째로 없음. 이 엔진은 정렬 규칙 하나를 엔진 전체에 씀).
+
+**JSON — 무엇을 고쳤나**: 옛 구현은 JSON을 글자 그대로 찾는 손짜기(`JSON_EXTRACT`)와 파싱하는 함수가 따로 있었고, 값을 쓰는 모양이 MySQL과 달랐다. 한 곳(`builtin_functions.cpp`)으로 합쳐 다시 짰다.
+- **문서를 쓰는 모양**: 열쇠는 짧은 것부터 · 바이트순으로 정렬하고 같은 열쇠는 마지막 값, `,`와 `:` 뒤에 공백 한 칸, 숫자는 MySQL 방식(정수는 그대로 · 소수는 되읽히는 가장 짧은 DOUBLE · `1e3`은 `1000.0` · `1e15` 이상은 지수 · 18446744073709551615는 UNSIGNED 정수), 글자는 `\u00e9` · 서로게이트 쌍을 풀어 UTF-8로. JSON 열에 쓰거나 `CAST(x AS JSON)`을 하면 이 모양으로 저장된다(옛 구현은 입력 글자 그대로였음).
+- **경로**: `$[last]` · `$[last-1]` · `$[0 to 1]` · `$[*]` · `.*` · `$**.키` · `."따옴표 키"` · 여러 경로(`JSON_EXTRACT(doc, '$.a', '$.b')`는 배열). 잘못된 경로는 오류 3143, 고치는 함수에 와일드카드가 오면 3149, 잘못된 JSON은 3141(열에 쓸 때는 3140).
+- **새 함수**: `JSON_DEPTH` · `JSON_ARRAY_APPEND` · `JSON_ARRAY_INSERT` · `JSON_MERGE_PATCH` · `JSON_MERGE_PRESERVE`(`JSON_MERGE`) · `JSON_PRETTY` · `JSON_CONTAINS_PATH` · `JSON_OVERLAPS` · `JSON_SEARCH` · `JSON_QUOTE` · `value MEMBER OF(배열)`. 집계 `JSON_ARRAYAGG` · `JSON_OBJECTAGG`(파서가 인자를 `JSON_ARRAY(x)` / `JSON_ARRAY(키, 값)`로 감싸 값이 JSON_ARRAY에서와 같은 JSON 형을 얻게 함). `JSON_VALUE(doc, path RETURNING SIGNED | DECIMAL(p,s) | CHAR(n) ...)`. `JSON_UNQUOTE`가 `\n` · `\u0041`을 풀고, `JSON_ARRAY(TRUE)`는 `true`.
+- **비교와 정렬**: 값의 분류에 `Json`을 더했다(JSON 열 · JSON을 내는 함수 · `CAST AS JSON`). JSON끼리는 형 순서(null < 수 < 글자 < 객체 < 배열 < 불리언), 글자와는 JSON 글자로, 수와는 JSON 수로 견준다: `doc->'$.name' = 'Alice'`, `doc = '42'`(0행 — MySQL처럼 JSON 정수와 글자 `'42'`는 다름), `doc->'$.on' = TRUE`. `ORDER BY doc` · `MIN(doc)` · `MAX(doc)`도 JSON 순서.
+- **작은 것**: 함수 인자 끝의 쉼표(`JSON_ARRAY(1,)` · `CONCAT('a',)` · `COALESCE(1,)`)는 문법 오류(전에는 받았음). `.5` 같은 앞이 점인 수 리터럴이 0.5로(`SELECT .5`가 문법 오류였음).
+- 지운 것: `executor_scalar_func.cpp`의 글자 찾기 JSON 추출 약 170줄(새 구현이 대신함).
+- **같이 찾은 오래된 버그**: 파생 표(`FROM (SELECT ...) d` · `JOIN (SELECT ...) d`)가 든 문장이 **실행 도중 실패하면 별칭 `d`가 영구히 남아**, 같은 별칭을 쓰는 다음 문장이 "Alias 'd' conflicts with an existing table or view"로 거절되었다(서버를 다시 시작할 때까지). 잘못된 JSON · 실행 중에 드러나는 오류가 원인. 실패할 때도 파생 표를 치우도록 고쳤다(시험 1개, `[r77]`).
+
+**준비된 문장(COM_STMT_*) — 큰 발견과 수정**: `COM_STMT_EXECUTE`가 **텍스트 프로토콜의 행**으로 답했다. 바이너리 프로토콜을 쓰는 드라이버(Go `database/sql`의 기본, JDBC `useServerPrepStmts=true`, PHP PDO의 준비 모드, mysql-connector의 준비된 커서)는 그 답을 읽지 못해 **어떤 `SELECT`도 실패**했다(`INSERT` · `UPDATE`는 되었음). 지금은 열 정의에 열 형을 싣고 행을 바이너리로 보낸다: 정수 1 · 2 · 4 · 8바이트, FLOAT · DOUBLE, DATE · DATETIME · TIMESTAMP · TIME의 압축 형식, NULL 비트맵, 나머지는 길이 붙은 글자. 같은 비교에서 매개변수 쪽 오류 넷도 나왔다: **DATE 매개변수가 길이 바이트 없이 읽혀 값이 어긋났고**(날짜 조건이 늘 0행), **TIME 매개변수가 DATETIME으로 읽혔고**, **글자 매개변수의 역슬래시가 사라졌고**(`'back\\slash'` → `backslash`), **큰 DOUBLE(1.5e300)이 300자리 수로 풀려 값이 깨졌다**. 부호 없는 정수 매개변수도 이제 부호 없이 읽는다. `INSERT INTO t (a) VALUES (1, 2)`의 오류 번호는 1064가 아니라 1136(`errno.sql`에 세 줄 더함).
+
+**권한이 강제되지 않는다 (고치지 않음 — 다음에 따로 할 큰 일)**: `GRANT` · `REVOKE`는 기록만 하고 **어떤 문장도 권한을 확인하지 않는다.** `SELECT`만 받은 사용자가 `INSERT` · `UPDATE` · `DELETE` · `DROP TABLE`을 다 할 수 있고, 아무 권한이 없는 사용자도 표를 읽는다. 코퍼스의 90개 차이는 이것과 같은 뿌리의 모양들이다: 사용자 · 역할 오류 번호(1396 · 1410 · 3523 · 4027 ...), `SHOW GRANTS`의 글자 모양(MySQL: ``GRANT SELECT ON `v`.`t` TO `alice`@`%` ``, 여기: `GRANT SELECT ON v.t TO 'alice'@'%';`와 `GRANT USAGE ON *.*` 줄이 없음), 문법 빈틈(`ALTER USER` · `RENAME USER` · `CREATE ROLE 'x'` 따옴표 · `GRANT '역할' TO 사용자`(여기는 `GRANT ROLE ...`) · `REVOKE ALL PRIVILEGES, GRANT OPTION` · 열 단위 `GRANT SELECT (col)` · `SET ROLE` · `SET DEFAULT ROLE` · `CURRENT_ROLE()`), `CURRENT_USER()`가 `alice@localhost`(MySQL `alice@%`). `RECOMMAND.md` 7번 표에 올렸다.
+
+**검증**:
+- 새 코퍼스 · 도구: `json_functions`(점수판에 올림, 차이 0) · `prepared_wire`(점수판에 올림, 차이 0) · `errno`(52문장, 차이 0) · `privileges` · `collate_clause`(점수판에 올리지 않음: 차이가 있음, 다음 라운드의 출발점). `vs_mysql.py`에 `@사용자 문장`(그 사용자의 연결로 실행) 줄을 더했다.
+- C++ 시험: `mysql_conformance_json_functions.inc` 252건(MySQL의 답을 기대값으로), 어휘 · 파서 시험 셋(`.5`, 끝 쉼표, `MEMBER OF` · `RETURNING` · `JSON_ARRAYAGG`), 옛 시험 하나 고침(`JSON_EXTRACT('[1,2]', 'a')`가 NULL이던 것을 오류로). 전체 **946 케이스** 세 모드(기본 · `RUSQL_DML_INDEX_MIN_ROWS=0` · `RUSQL_PROBE_CHECK=1`) 모두 통과(assertion 1,520,538 / 1,520,538 / 1,520,539).
+- 심은 버그: 새 코드에 하나씩 심어 시험이 붉어지는지 봄: 열여섯 가지로 시작해 열네 가지가 잡혔다. 살아남은 둘은 ① `JSON_OBJECTAGG`가 같은 키의 마지막 값을 쓰는지(코퍼스에 같은 키 줄이 없었음 — 줄 다섯을 더해 잡음), ② 함수 끝 쉼표 검사(지워도 `parse_value_expr`가 `)`에서 어차피 오류를 내서 같은 동작이었음 — 옛 `break`를 되살리는 버그로 바꿔 잡음). 파생 표 별칭을 치우는 수정에 하나를 더해 **열일곱 가지가 모두 잡혔다**(JSON 문서 모양 · 키 순서 · 불리언 순서 · `last` · 패치의 null · 삽입 위치 · 앞자리 0 · `**` · 정렬 · 열 쓰기 · 대소문자 · `.5` · 쉼표 · 별칭).
+- 점수판 전체: **49개 코퍼스 4,209문장 차이 0**(JSON · 준비된 문장 둘이 새로 올라감), 변환 시험 케이스 4,780건. 모델로 검산하는 도구 열둘(`verify_*.py`) 위반 0. 크래시 퍼저 여섯(6라운드, 시드 7700): 다섯은 불일치 0, `fuzz_crash_fk.py`가 **시드 7701에서 불일치 1** — 이전 커밋(`15fa47a`)의 빌드에서도 똑같이 나와서 이번 변경과 무관한 오래된 문제다(아래 한계 ⑥).
+
+**정직한 한계**:
+① `JSON_ARRAY(1 = 1)`처럼 **비교 · 논리 식의 결과는 JSON 불리언이 아니라 1**로 들어간다(`TRUE` · `FALSE` 글자는 불리언). 숫자 리터럴 `1e3`은 어휘 분석이 `1000`으로 써서 JSON에서 `1000.0`이 아니라 `1000`. `JSON_ARRAY(1/3)`은 `0.3333`(MySQL `0.333333333`).
+② 값이 글자로만 오가서, `JSON_ARRAY(JSON_ARRAY(1.50))`처럼 한 번 글자가 된 DECIMAL은 다시 읽을 때 DOUBLE이 된다(`1.5`). JSON `null`을 가리키는 `JSON_TYPE`의 답 `NULL`은 SQL NULL과 같은 글자라 구별되지 않는다. JSON 열에 **수**를 넣으면 MySQL은 3140으로 거절하는데 여기는 받는다.
+③ `ORDER BY`로 객체끼리 · 배열끼리 정렬하는 것은 MySQL도 정해 두지 않은 일이라 코퍼스에서 뺐다.
+④ 준비된 문장: `COM_STMT_PREPARE`는 열 개수를 0으로 답한다(실행 답에 열 정의가 오므로 드라이버들은 읽지만, 준비만 하고 열 정보를 물으면 비어 있음). `SELECT i + ?`의 열 이름이 MySQL은 `i + ?`, 여기는 값을 넣은 `i + 1`. 명시한 AUTO_INCREMENT 값의 `REPLACE` · `ON DUPLICATE KEY UPDATE`에서 OK 패킷의 last insert id가 0(MySQL 1). 이 셋은 코퍼스에서 뺐다.
+⑤ `COM_STMT_SEND_LONG_DATA` · `COM_STMT_FETCH`(커서)는 구현하지 않았고 시험하지 않았다. 이번에 안 본 영역: 문자셋 변환, `FOR UPDATE` 대기의 오류, 파티션 문장.
+⑥ **열려 있는 일(이번 변경과 무관)**: `py code/test/crash/fuzz_crash_fk.py 1 7701`이 결정적으로 불일치를 낸다 — `ON DELETE RESTRICT ON UPDATE SET NULL`인 자식 표에서 한 트랜잭션 안의 `INSERT` → `ROLLBACK TO` → `REPLACE` → `ROLLBACK TO` → `COMMIT` 뒤 kill -9 복구에서, 모델이 "id 15의 pid가 NULL(부모 키가 바뀌어 SET NULL)"이라 기대한 행이 복구된 표와 다르다. 이전 커밋에서도 같다. 원인은 찾지 않았다(`RECOMMAND.md` 2번 표).
+
 ## 요약: 1학기 대비 2학기에 달라진 것
 
 

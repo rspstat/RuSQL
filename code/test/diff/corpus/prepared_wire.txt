@@ -1,0 +1,56 @@
+# Prepared statements through the binary protocol (R77): COM_STMT_PREPARE / EXECUTE / CLOSE as a Go, Java or PHP driver and mysql-connector's prepared cursor use them. Run with
+# prepared_wire.py. A line is `SQL ;; (params) ;; (params)`: prepared once, executed once for each tuple. '--' is a setup statement run as text on both. The tables t and u are in v.
+--CREATE TABLE p (id INT AUTO_INCREMENT PRIMARY KEY, name VARCHAR(20), n INT)
+# rows of integers, strings, doubles, dates and NULL come back in binary form
+SELECT id, i, d, s, dt, g FROM t ORDER BY id
+SELECT id FROM t WHERE id = ? ;; (1,) ;; (99,) ;; (None,)
+SELECT id, s FROM t WHERE id = ? ;; (1,) ;; (2,) ;; (3,)
+SELECT id FROM t WHERE s = ? ORDER BY id ;; ('apple',) ;; ('APPLE',) ;; ('',) ;; (None,)
+SELECT COUNT(*) FROM t WHERE i > ? ;; (5,) ;; (-100,) ;; (1000,)
+SELECT SUM(i), AVG(i), MAX(d), MIN(dt), COUNT(*), MAX(s) FROM t
+SELECT dt FROM t WHERE id = ? ;; (1,) ;; (3,)
+SELECT id, dt FROM t WHERE dt = ? ORDER BY id ;; (date(2024, 1, 31),) ;; (date(1999, 1, 1),)
+SELECT id FROM t WHERE dt > ? ORDER BY id ;; (datetime(2024, 3, 1, 0, 0, 0),)
+SELECT i + ?, d * ? FROM t WHERE id = ? ;; (1, 2, 1) ;; (1.5, 2.5, 3)
+SELECT ?, ?, ? ;; (1, 'a', None) ;; (2.5, "x'y", 3)
+SELECT ? ;; ("it's",) ;; ('back\\slash',) ;; ('한글',) ;; ('a' * 300,) ;; ('',)
+SELECT ?, ? ;; (2 ** 62, -(2 ** 62)) ;; (1.5e300, -0.25) ;; (Decimal('12.50'), Decimal('-0.001'))
+SELECT HEX(?) ;; (b'ab',)
+SELECT id FROM t ORDER BY id LIMIT ? ;; (3,) ;; (0,)
+SELECT id FROM t WHERE id IN (?, ?, ?) ORDER BY id ;; (1, 2, 3) ;; (5, 6, 99)
+SELECT CASE WHEN ? > 1 THEN 'big' ELSE 'small' END ;; (2,) ;; (0,)
+SELECT '?' AS q, ? ;; (5,)
+SELECT ? IS NULL, ? IS NOT NULL ;; (None, None) ;; (1, 1)
+SELECT id FROM t WHERE id = ? AND g = ? ;; (1, 1) ;; (1, 2)
+SELECT t.id, u.name FROM t JOIN u ON u.k = t.i WHERE t.id > ? ORDER BY t.id, u.id ;; (0,) ;; (1,)
+SELECT g, COUNT(*) FROM t WHERE id >= ? GROUP BY g ORDER BY g ;; (1,) ;; (5,)
+SELECT UPPER(?), LENGTH(?), CONCAT(?, '-', ?) ;; ('abc', 'héllo', 'a', 'b')
+SELECT 1 / ? ;; (0,) ;; (4,)
+SELECT NULL
+SELECT id FROM t WHERE 1 = 0
+# data changes
+INSERT INTO p (name, n) VALUES (?, ?) ;; ('a', 1) ;; ('b', 2) ;; ('c', None)
+SELECT id, name, n FROM p ORDER BY id
+UPDATE p SET n = n + ? WHERE id = ? ;; (10, 1) ;; (10, 99) ;; (1, 2)
+DELETE FROM p WHERE id = ? ;; (2,) ;; (2,)
+INSERT INTO p (id, name) VALUES (?, ?) ;; (1, 'dup')
+INSERT INTO p (name) VALUES (?) ;; ('d',)
+INSERT INTO p (name, n) SELECT s, id FROM t WHERE id < ? ;; (3,)
+SELECT COUNT(*) FROM p
+REPLACE INTO p (name) VALUES (?) ;; ('replaced',)
+INSERT INTO p (name, n) VALUES (?, ?) ON DUPLICATE KEY UPDATE n = VALUES(n) ;; ('x', 77)
+SELECT id, name, n FROM p WHERE id = ?  ;; (1,)
+# errors
+SELECT * FROM nosuch WHERE id = ? ;; (1,)
+SELECT nosuch FROM t WHERE id = ? ;; (1,)
+INSERT INTO p (name) VALUES (?, ?) ;; ('a', 'b')
+SELEC 1 FROM t WHERE id = ? ;; (1,)
+INSERT INTO p (n) VALUES (?) ;; ('abc',)
+# DDL and others through a prepared statement
+CREATE TABLE q (a INT)
+SELECT COUNT(*) FROM q
+DROP TABLE q
+SET @x = ?  ;; (5,)
+SELECT @x
+SHOW TABLES
+SELECT DATABASE()

@@ -248,6 +248,7 @@ WireError wire_error(const std::string& msg) {
     if (starts("Database '") && has("already exists")) return set(1007, "HY000");
     if (starts("Database '") && has("does not exist")) return set(1008, "HY000");
     if (starts("Column count mismatch")) return set(1136, "21S01");
+    if (starts("Column list length ")) return set(1136, "21S01"); // (INSERT INTO t (a) VALUES (1, 2))
     if (starts("Incorrect arguments to ")) return set(1210, "HY000");
     if (starts("Table '") || starts("View '")) {
         if (has("' already exists")) return set(1050, "42S01");
@@ -268,6 +269,15 @@ WireError wire_error(const std::string& msg) {
     if (starts("Invalid use of group function")) return set(1111, "HY000");
     if (starts("Too-big precision")) return set(1426, "42000");
     if (starts("Incorrect parameter count in the call to native function")) return set(1582, "42000");
+    if (starts("Invalid JSON text in argument")) return set(3141, "22032");
+    if (starts("Invalid JSON text: ")) return set(3140, "22032");
+    if (starts("Invalid JSON path expression")) return set(3143, "42000");
+    if (starts("In this situation, path expressions may not contain")) return set(3149, "42000");
+    if (starts("The path expression '$' is not allowed")) return set(3153, "42000");
+    if (starts("The oneOrAll argument to ")) return set(3154, "42000");
+    if (starts("JSON documents may not contain NULL member names")) return set(3158, "22032");
+    if (starts("A path expression is not a path to a cell in an array")) return set(3165, "42000");
+    if (starts("Incorrect type for argument ")) return set(3064, "HY000");
     if (starts("Incorrect number of arguments for PROCEDURE") || starts("Incorrect number of arguments for FUNCTION")) return set(1318, "42000");
     if ((starts("Procedure '") || starts("Function '")) && has("not found")) return set(1305, "42000");
     if (starts("Foreign key cascade delete/update exceeds max depth")) return set(3008, "HY000");
@@ -506,7 +516,7 @@ std::pair<std::size_t, std::size_t> read_lenenc(const std::uint8_t* buf, std::si
 // precision before it's substituted into the query text (e.g. 3.141592653589793 -> "3.141593").
 std::string fmt_double_param(double v) {
     char buf[64];
-    auto res = std::to_chars(buf, buf + sizeof(buf), v, std::chars_format::fixed);
+    auto res = std::to_chars(buf, buf + sizeof(buf), v);
     return std::string(buf, res.ptr);
 }
 
@@ -550,7 +560,7 @@ std::vector<std::string> parse_execute_params(const std::vector<std::uint8_t>& p
             case 0x01: { // TINY
                 auto v = static_cast<std::int8_t>(pos < payload.size() ? payload[pos] : 0);
                 pos += 1;
-                val = std::to_string(static_cast<int>(v));
+                val = (types[i].second & 0x80) ? std::to_string(static_cast<int>(static_cast<std::uint8_t>(v))) : std::to_string(static_cast<int>(v)); // (0x80: UNSIGNED)
                 break;
             }
             case 0x02: { // SHORT
@@ -561,7 +571,7 @@ std::vector<std::string> parse_execute_params(const std::vector<std::uint8_t>& p
                 }
                 std::int16_t v = static_cast<std::int16_t>(payload[pos] | (payload[pos + 1] << 8));
                 pos += 2;
-                val = std::to_string(v);
+                val = (types[i].second & 0x80) ? std::to_string(static_cast<std::uint16_t>(v)) : std::to_string(v);
                 break;
             }
             case 0x03:
@@ -574,7 +584,7 @@ std::vector<std::string> parse_execute_params(const std::vector<std::uint8_t>& p
                 std::int32_t v;
                 std::memcpy(&v, payload.data() + pos, 4);
                 pos += 4;
-                val = std::to_string(v);
+                val = (types[i].second & 0x80) ? std::to_string(static_cast<std::uint32_t>(v)) : std::to_string(v);
                 break;
             }
             case 0x08:
@@ -587,7 +597,7 @@ std::vector<std::string> parse_execute_params(const std::vector<std::uint8_t>& p
                 std::int64_t v;
                 std::memcpy(&v, payload.data() + pos, 8);
                 pos += 8;
-                val = std::to_string(v);
+                val = (types[i].second & 0x80) ? std::to_string(static_cast<std::uint64_t>(v)) : std::to_string(v);
                 break;
             }
             case 0x04: { // FLOAT
@@ -614,43 +624,52 @@ std::vector<std::string> parse_execute_params(const std::vector<std::uint8_t>& p
                 val = fmt_double_param(v);
                 break;
             }
-            case 0x0a: { // DATE
-                if (pos + 4 > payload.size()) {
+            case 0x07: case 0x0a: case 0x0c: { // TIMESTAMP, DATE, DATETIME: length (0, 4, 7 or 11), year (2), month, day [, hour, minute, second [, microsecond (4)]]
+                const std::size_t dlen = pos < payload.size() ? payload[pos] : 0;
+                pos += 1;
+                if (pos + dlen > payload.size()) {
                     params.push_back("NULL");
                     pos = payload.size();
                     continue;
                 }
-                std::uint16_t y = static_cast<std::uint16_t>(payload[pos] | (payload[pos + 1] << 8));
-                std::uint8_t mo = payload[pos + 2];
-                std::uint8_t d = payload[pos + 3];
-                pos += 4;
-                char buf[16];
-                std::snprintf(buf, sizeof(buf), "'%04u-%02u-%02u'", y, mo, d);
-                val = buf;
+                char buf[64];
+                if (dlen < 4) {
+                    val = ft == 0x0a ? "'0000-00-00'" : "'0000-00-00 00:00:00'";
+                } else {
+                    const unsigned y = static_cast<unsigned>(payload[pos] | (payload[pos + 1] << 8)), mo = payload[pos + 2], d = payload[pos + 3];
+                    const unsigned h = dlen >= 7 ? payload[pos + 4] : 0, mi = dlen >= 7 ? payload[pos + 5] : 0, sec = dlen >= 7 ? payload[pos + 6] : 0;
+                    unsigned micro = 0;
+                    if (dlen >= 11) micro = static_cast<unsigned>(payload[pos + 7] | (payload[pos + 8] << 8) | (payload[pos + 9] << 16) | (static_cast<unsigned>(payload[pos + 10]) << 24));
+                    if (ft == 0x0a) std::snprintf(buf, sizeof(buf), "'%04u-%02u-%02u'", y, mo, d);
+                    else if (micro) std::snprintf(buf, sizeof(buf), "'%04u-%02u-%02u %02u:%02u:%02u.%06u'", y, mo, d, h, mi, sec, micro);
+                    else std::snprintf(buf, sizeof(buf), "'%04u-%02u-%02u %02u:%02u:%02u'", y, mo, d, h, mi, sec);
+                    val = buf;
+                }
+                pos += dlen;
                 break;
             }
-            case 0x0b:
-            case 0x0c: { // DATETIME / TIMESTAMP
-                std::size_t dlen = pos < payload.size() ? payload[pos] : 0;
+            case 0x0b: { // TIME: length (0, 8 or 12), negative, days (4), hour, minute, second [, microsecond (4)]
+                const std::size_t dlen = pos < payload.size() ? payload[pos] : 0;
                 pos += 1;
-                if (dlen >= 4 && pos + 4 <= payload.size()) {
-                    std::uint16_t y = static_cast<std::uint16_t>(payload[pos] | (payload[pos + 1] << 8));
-                    std::uint8_t mo = payload[pos + 2];
-                    std::uint8_t d = payload[pos + 3];
-                    std::uint8_t h = 0, mi = 0, s = 0;
-                    if (dlen >= 7 && pos + 7 <= payload.size()) {
-                        h = payload[pos + 4];
-                        mi = payload[pos + 5];
-                        s = payload[pos + 6];
-                    }
-                    pos += dlen;
-                    char buf[32];
-                    std::snprintf(buf, sizeof(buf), "'%04u-%02u-%02u %02u:%02u:%02u'", y, mo, d, h, mi, s);
-                    val = buf;
-                } else {
-                    pos += dlen;
-                    val = "NULL";
+                if (pos + dlen > payload.size()) {
+                    params.push_back("NULL");
+                    pos = payload.size();
+                    continue;
                 }
+                if (dlen < 8) {
+                    val = "'00:00:00'";
+                } else {
+                    const bool negative = payload[pos] != 0;
+                    const unsigned days = static_cast<unsigned>(payload[pos + 1] | (payload[pos + 2] << 8) | (payload[pos + 3] << 16) | (static_cast<unsigned>(payload[pos + 4]) << 24));
+                    const unsigned hours = days * 24 + payload[pos + 5], mi = payload[pos + 6], sec = payload[pos + 7];
+                    unsigned micro = 0;
+                    if (dlen >= 12) micro = static_cast<unsigned>(payload[pos + 8] | (payload[pos + 9] << 8) | (payload[pos + 10] << 16) | (static_cast<unsigned>(payload[pos + 11]) << 24));
+                    char buf[48];
+                    if (micro) std::snprintf(buf, sizeof(buf), "'%s%02u:%02u:%02u.%06u'", negative ? "-" : "", hours, mi, sec, micro);
+                    else std::snprintf(buf, sizeof(buf), "'%s%02u:%02u:%02u'", negative ? "-" : "", hours, mi, sec);
+                    val = buf;
+                }
+                pos += dlen;
                 break;
             }
             default: { // VAR_STRING / BLOB / default: length-encoded string
@@ -669,6 +688,7 @@ std::vector<std::string> parse_execute_params(const std::vector<std::uint8_t>& p
                 std::string escaped;
                 for (char c : s) {
                     if (c == '\'') escaped += "''";
+                    else if (c == '\\') escaped += "\\\\";
                     else escaped += c;
                 }
                 val = "'" + escaped + "'";
@@ -785,8 +805,84 @@ std::optional<std::pair<std::vector<std::string>, std::vector<std::vector<std::s
     return std::make_pair(cols, rows);
 }
 
+void put_le(std::vector<std::uint8_t>& p, unsigned long long v, int bytes) {
+    for (int i = 0; i < bytes; i++) p.push_back(static_cast<std::uint8_t>((v >> (8 * i)) & 0xff));
+}
+
+// One cell of a row of the BINARY protocol (a prepared statement's answer): the integer types in 1, 2, 4 or 8 bytes, FLOAT and DOUBLE as IEEE numbers, a date,
+// a datetime and a time in their packed forms; anything else (text, DECIMAL, ...) as a length-prefixed string. `v` is the cell as text; the column's wire type
+// was only given when every cell of the column has the form it needs (wire_type_for), so the text is read without a check.
+void put_binary_cell(std::vector<std::uint8_t>& p, const std::string& v, const WireType& w) {
+    switch (w.code) {
+        case 1: case 2: case 3: case 8: case 13: {
+            const int bytes = w.code == 1 ? 1 : (w.code == 2 || w.code == 13) ? 2 : w.code == 3 ? 4 : 8;
+            const unsigned long long bits = !v.empty() && v[0] == '-' ? static_cast<unsigned long long>(std::strtoll(v.c_str(), nullptr, 10)) : std::strtoull(v.c_str(), nullptr, 10);
+            put_le(p, bits, bytes);
+            return;
+        }
+        case 4: {
+            const float f = static_cast<float>(std::strtod(v.c_str(), nullptr));
+            std::uint32_t bits;
+            std::memcpy(&bits, &f, 4);
+            put_le(p, bits, 4);
+            return;
+        }
+        case 5: {
+            const double d = std::strtod(v.c_str(), nullptr);
+            std::uint64_t bits;
+            std::memcpy(&bits, &d, 8);
+            put_le(p, bits, 8);
+            return;
+        }
+        case 10: case 12: case 7: { // DATE, DATETIME, TIMESTAMP: length, year (2), month, day [, hour, minute, second [, microsecond (4)]]
+            const int year = std::atoi(v.substr(0, 4).c_str()), month = std::atoi(v.substr(5, 2).c_str()), day = std::atoi(v.substr(8, 2).c_str());
+            const bool with_time = w.code != 10 && v.size() >= 19;
+            unsigned long long micro = 0;
+            if (with_time && v.size() > 20 && v[19] == '.') {
+                std::string fraction = v.substr(20, 6);
+                fraction.resize(6, '0');
+                micro = std::strtoull(fraction.c_str(), nullptr, 10);
+            }
+            if (year == 0 && month == 0 && day == 0 && !with_time) { p.push_back(0); return; }
+            p.push_back(!with_time ? 4 : micro ? 11 : 7);
+            put_le(p, static_cast<unsigned long long>(year), 2);
+            p.push_back(static_cast<std::uint8_t>(month));
+            p.push_back(static_cast<std::uint8_t>(day));
+            if (with_time) {
+                p.push_back(static_cast<std::uint8_t>(std::atoi(v.substr(11, 2).c_str())));
+                p.push_back(static_cast<std::uint8_t>(std::atoi(v.substr(14, 2).c_str())));
+                p.push_back(static_cast<std::uint8_t>(std::atoi(v.substr(17, 2).c_str())));
+                if (micro) put_le(p, micro, 4);
+            }
+            return;
+        }
+        case 11: { // TIME: length, negative, days (4), hour, minute, second [, microsecond (4)]
+            const bool negative = !v.empty() && v[0] == '-';
+            const std::size_t from = negative ? 1 : 0, colon = v.find(':', from);
+            const long long hours = std::atoll(v.substr(from, colon - from).c_str());
+            const int minutes = std::atoi(v.substr(colon + 1, 2).c_str()), seconds = std::atoi(v.substr(colon + 4, 2).c_str());
+            unsigned long long micro = 0;
+            if (v.size() > colon + 7 && v[colon + 6] == '.') {
+                std::string fraction = v.substr(colon + 7, 6);
+                fraction.resize(6, '0');
+                micro = std::strtoull(fraction.c_str(), nullptr, 10);
+            }
+            p.push_back(micro ? 12 : 8);
+            p.push_back(negative ? 1 : 0);
+            put_le(p, static_cast<unsigned long long>(hours / 24), 4);
+            p.push_back(static_cast<std::uint8_t>(hours % 24));
+            p.push_back(static_cast<std::uint8_t>(minutes));
+            p.push_back(static_cast<std::uint8_t>(seconds));
+            if (micro) put_le(p, micro, 4);
+            return;
+        }
+        default: lenstr(p, v);
+    }
+}
+
+// `binary_rows`: the rows go out the way COM_STMT_EXECUTE answers (a 0 byte, a bitmap of the NULL cells, the cells as their types say) instead of as the text rows of COM_QUERY.
 bool send_resultset(SOCKET sock, const std::vector<std::string>& cols, const std::vector<std::vector<std::string>>& rows,
-                     std::uint8_t start_seq, const std::vector<ResultColumnType>* types = nullptr) {
+                     std::uint8_t start_seq, const std::vector<ResultColumnType>* types = nullptr, bool binary_rows = false) {
     std::uint8_t seq = start_seq;
 
     std::vector<std::uint8_t> cnt;
@@ -814,19 +910,31 @@ bool send_resultset(SOCKET sock, const std::vector<std::string>& cols, const std
     }
     // the column types the statement gives, when it gives one for every column of the answer
     const bool typed = types && types->size() == cols.size();
+    std::vector<WireType> wires(cols.size());
     for (std::size_t i = 0; i < cols.size(); i++) {
-        const WireType wire = typed && !binary[i] ? wire_type_for((*types)[i], rows, i) : WireType();
-        if (!write_packet(sock, seq++, col_def_pkt(cols[i], binary[i], &wire))) return false;
+        wires[i] = typed && !binary[i] ? wire_type_for((*types)[i], rows, i) : WireType();
+        if (!write_packet(sock, seq++, col_def_pkt(cols[i], binary[i], &wires[i]))) return false;
     }
 
     if (!write_packet(sock, seq++, eof_pkt())) return false;
 
     for (auto& row : rows) {
         std::vector<std::uint8_t> pkt;
-        for (std::size_t i = 0; i < cols.size(); i++) {
-            std::string v = i < row.size() ? row[i] : std::string();
-            if (v == "NULL") pkt.push_back(0xfb);
-            else lenstr(pkt, v);
+        if (binary_rows) {
+            pkt.push_back(0x00);
+            const std::size_t bitmap_at = pkt.size();
+            pkt.resize(pkt.size() + (cols.size() + 9) / 8, 0);
+            for (std::size_t i = 0; i < cols.size(); i++) {
+                const std::string v = i < row.size() ? row[i] : std::string();
+                if (v == "NULL") pkt[bitmap_at + (i + 2) / 8] |= static_cast<std::uint8_t>(1u << ((i + 2) % 8));
+                else put_binary_cell(pkt, v, wires[i]);
+            }
+        } else {
+            for (std::size_t i = 0; i < cols.size(); i++) {
+                std::string v = i < row.size() ? row[i] : std::string();
+                if (v == "NULL") pkt.push_back(0xfb);
+                else lenstr(pkt, v);
+            }
         }
         if (!write_packet(sock, seq++, pkt)) return false;
     }
@@ -1640,7 +1748,8 @@ void handle_mysql_client(SOCKET sock, std::shared_ptr<RwLock<SharedDatabase>> sh
                 std::vector<std::uint8_t> sub_payload(payload.begin() + 1, payload.end());
                 auto params = parse_execute_params(sub_payload, num_params);
                 std::string final_query = bind_params(query, params);
-                auto res = exec_query(exec, final_query);
+                std::string ran;
+                auto res = exec_query(exec, final_query, &ran);
                 if (res.is_err()) {
                     write_packet(sock, 1, err_pkt(res.error()));
                 } else {
@@ -1648,7 +1757,8 @@ void handle_mysql_client(SOCKET sock, std::shared_ptr<RwLock<SharedDatabase>> sh
                     if (out.empty()) {
                         write_packet(sock, 1, ok_pkt(0));
                     } else if (auto parsed = parse_table(out)) {
-                        send_resultset(sock, parsed->first, parsed->second, 1);
+                        const std::vector<ResultColumnType> types = ran.empty() ? std::vector<ResultColumnType>() : exec.result_columns(ran);
+                        send_resultset(sock, parsed->first, parsed->second, 1, &types, true); // (a prepared statement's rows are binary rows)
                     } else {
                         write_packet(sock, 1, ok_pkt(exec.statement_affected_rows(out), exec.statement_insert_id()));
                     }

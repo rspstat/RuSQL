@@ -55,11 +55,13 @@ CORPORA = [
     ("views_update", [], "Writes through views: renamed columns, a view over a view, WITH CHECK OPTION, the errors of what a view cannot take", "뷰를 통한 쓰기: 이름 바꾼 열·뷰 위의 뷰·WITH CHECK OPTION·받지 못하는 뷰의 오류"),
     ("fk_actions", [], "Foreign key actions, TRUNCATE of a referenced table, FOREIGN_KEY_CHECKS = 0, the definition of a key (1824 / 3780 / 1830)", "외래키 동작·참조되는 표의 TRUNCATE·FOREIGN_KEY_CHECKS = 0·키 정의 검사(1824·3780·1830)"),
     ("dates_arith", [], "Date and time arithmetic: TIME limit 838:59:59, STR_TO_DATE %j, CONVERT_TZ, strings that are no dates, a date against a date string", "날짜·시간 계산: TIME 한계 838:59:59·STR_TO_DATE %j·CONVERT_TZ·날짜가 아닌 글자·날짜와 날짜 글자의 비교"),
+    ("json_functions", [], "JSON: how a document is written, paths (last, ranges, wildcards), SET / ARRAY_APPEND / MERGE_PATCH / SEARCH / OVERLAPS / MEMBER OF, JSON_VALUE RETURNING, JSON_ARRAYAGG, the order of JSON values, the errors", "JSON: 문서를 쓰는 모양·경로(last·범위·와일드카드)·SET·ARRAY_APPEND·MERGE_PATCH·SEARCH·OVERLAPS·MEMBER OF·JSON_VALUE RETURNING·JSON_ARRAYAGG·JSON 값의 순서·오류"),
     ("errno", ["--proto", "--errno"], "MySQL wire protocol: the error number of a failing statement", "MySQL 프로토콜: 실패한 문장의 오류 번호"),
     ("rollup", [], "GROUP BY ... WITH ROLLUP: a row for each prefix of the keys and a total, HAVING / ORDER BY / LIMIT / DISTINCT after it, in a view and a derived table", "GROUP BY ... WITH ROLLUP: 키의 접두사마다 한 행과 총계, 그 뒤의 HAVING·ORDER BY·LIMIT·DISTINCT, 뷰·파생 표 안에서"),
     ("slow_log", [], "SET GLOBAL slow_query_log / long_query_time (values, errors, a number out of range), FOUND_ROWS() after an aggregate", "SET GLOBAL slow_query_log / long_query_time(값·오류·범위 밖의 수), 집계 뒤의 FOUND_ROWS()"),
     ("protocol", ["--proto"], "MySQL wire protocol: SHOW, OK packets, affected rows", "MySQL 프로토콜: SHOW·OK 패킷·영향 행 수"),
     ("protocol_types", ["--proto", "--types"], "MySQL wire protocol: typed result columns", "MySQL 프로토콜: 열 타입"),
+    ("prepared_wire", [], "Prepared statements through the binary protocol (COM_STMT_*): binary rows, typed parameters, errors", "바이너리 프로토콜의 준비된 문장(COM_STMT_*): 바이너리 행·형 있는 매개변수·오류"),
 ]
 
 
@@ -71,10 +73,13 @@ def main():
         tests = {"cases": int(sys.argv[i + 1]), "assertions": int(sys.argv[i + 2].replace(",", ""))}
     rows = []
     for name, flags, en, ko in CORPORA:
-        path = os.path.join(HERE, "corpus", name + ".sql")
+        path = os.path.join(HERE, "corpus", name + ".sql" if name != "prepared_wire" else name + ".txt")
         if not os.path.exists(path):
             continue
-        r = subprocess.run([sys.executable, "-u", os.path.join(HERE, "vs_mysql.py"), exe, path] + flags, capture_output=True, text=True, encoding="utf-8", errors="replace")
+        if name == "prepared_wire":  # (the binary protocol: prepared_wire.py runs it, with the same last line)
+            path = os.path.join(HERE, "corpus", name + ".txt")
+        script = "prepared_wire.py" if name == "prepared_wire" else "vs_mysql.py"
+        r = subprocess.run([sys.executable, "-u", os.path.join(HERE, script), exe, path] + flags, capture_output=True, text=True, encoding="utf-8", errors="replace")
         last = (r.stdout.strip().splitlines() or [""])[-1]
         m = re.search(r"statements=(\d+) different=(\d+) \(both fail: (\d+)\)", last)
         if not m:

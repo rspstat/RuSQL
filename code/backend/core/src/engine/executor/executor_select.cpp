@@ -17,6 +17,7 @@
 #include <unordered_set>
 
 #include "engine/column_text.hpp"
+#include "engine/executor/builtin_functions.hpp"
 #include "engine/explain_trace.hpp"
 #include "engine/statement_deadline.hpp"
 #include "engine/join.hpp"
@@ -56,6 +57,14 @@ std::string shown_expr_value(const ArithExpr& expr, std::string value) {
 // otherwise, and the value itself as it is stored (not a number printed again). NULL for no value.
 std::string extreme_text(const std::vector<const std::string*>& values, bool smallest, ValueClass cls) {
     if (values.empty()) return EXECUTOR_NULL_VALUE;
+    if (cls == ValueClass::Json) {
+        const std::string* best = values.front();
+        for (const std::string* v : values) {
+            const int order = json_compare_classed(ValueClass::Json, ValueClass::Json, *v, *best);
+            if (smallest ? order < 0 : order > 0) best = v;
+        }
+        return *best;
+    }
     const bool numeric = cls == ValueClass::Number ||
                          (cls != ValueClass::Text && std::all_of(values.begin(), values.end(), [](const std::string* v) { return parse_f64(*v).has_value(); }));
     const std::string* best = values.front();
@@ -310,7 +319,7 @@ std::vector<std::size_t> order_rows(const std::vector<const Row*>& rows, const s
             cell.null = *cell.text == "NULL";
             // a text column is sorted as text whatever its values look like; a number column as numbers (a text in one by its leading number)
             const ValueClass cls = order_by[c].cls;
-            if (cls != ValueClass::Text && !cell.null) {
+            if (cls != ValueClass::Text && cls != ValueClass::Json && !cell.null) {
                 if (auto whole = parse_int64_text(*cell.text)) {
                     cell.numeric = cell.is_int = true;
                     cell.whole = *whole;
@@ -342,6 +351,7 @@ std::vector<std::size_t> order_rows(const std::vector<const Row*>& rows, const s
             Cell& y = cells[b * ncols + c];
             int cmp;
             if (x.null || y.null) cmp = x.null == y.null ? 0 : (x.null ? -1 : 1); // same as cmp_key
+            else if (order_by[c].cls == ValueClass::Json) cmp = json_compare_classed(ValueClass::Json, ValueClass::Json, *x.text, *y.text); // (null < numbers < strings < objects < arrays < booleans)
             else if (x.numeric && y.numeric) cmp = x.is_int && y.is_int ? (x.whole < y.whole ? -1 : (x.whole > y.whole ? 1 : 0)) : (x.num < y.num ? -1 : (x.num > y.num ? 1 : 0));
             else {
                 const int k = weights_of(x).compare(weights_of(y));
@@ -517,6 +527,8 @@ std::string debug_agg_func_dual(const AggFunc& func) {
     if (std::holds_alternative<AggFunc::BitOr>(func.data)) return "BitOr";
     if (std::holds_alternative<AggFunc::JsonAgg>(func.data)) return "JsonAgg";
     if (std::holds_alternative<AggFunc::ArrayAgg>(func.data)) return "ArrayAgg";
+    if (std::holds_alternative<AggFunc::JsonArrayAgg>(func.data)) return "JsonArrayAgg";
+    if (std::holds_alternative<AggFunc::JsonObjectAgg>(func.data)) return "JsonObjectAgg";
     if (std::holds_alternative<AggFunc::Median>(func.data)) return "Median";
     return "";
 }
@@ -601,6 +613,9 @@ std::string Executor::agg_label(const AggFunc& func, const std::string& col) {
     if (std::holds_alternative<AggFunc::BitOr>(func.data)) return "BIT_OR(" + col + ")";
     if (std::holds_alternative<AggFunc::JsonAgg>(func.data)) return "JSON_AGG(" + col + ")";
     if (std::holds_alternative<AggFunc::ArrayAgg>(func.data)) return "ARRAY_AGG(" + col + ")";
+    // (the argument is JSON_ARRAY(x) / JSON_ARRAY(key, value), which the parser made of what the statement wrote)
+    if (std::holds_alternative<AggFunc::JsonArrayAgg>(func.data)) return "JSON_ARRAYAGG(" + (col.rfind("JSON_ARRAY(", 0) == 0 ? col.substr(11, col.size() - 12) : col) + ")";
+    if (std::holds_alternative<AggFunc::JsonObjectAgg>(func.data)) return "JSON_OBJECTAGG(" + (col.rfind("JSON_ARRAY(", 0) == 0 ? col.substr(11, col.size() - 12) : col) + ")";
     if (std::holds_alternative<AggFunc::Median>(func.data)) return "MEDIAN(" + col + ")";
     return "";
 }
@@ -979,6 +994,16 @@ Row Executor::compute_aggregates(const std::vector<const Row*>& grp, const std::
                 joined += strs[i];
             }
             out[label] = strs.empty() ? EXECUTOR_NULL_VALUE : joined; // no value to join: NULL, not ''
+            continue;
+        }
+        if (std::holds_alternative<AggFunc::JsonArrayAgg>(func->data) || std::holds_alternative<AggFunc::JsonObjectAgg>(func->data)) {
+            // the value of every row is JSON_ARRAY(x) or JSON_ARRAY(key, value) (the parser wrote the argument so): the element, or the pair, is what the row adds
+            std::vector<std::string> rows;
+            for (const Row* r_ptr : grp) {
+                auto it = r_ptr->find(col_name);
+                if (it != r_ptr->end()) rows.push_back(it->second);
+            }
+            out[label] = grp.empty() ? EXECUTOR_NULL_VALUE : json_aggregate_text(std::holds_alternative<AggFunc::JsonObjectAgg>(func->data), rows); // no row: NULL, not []
             continue;
         }
         if (std::holds_alternative<AggFunc::JsonAgg>(func->data) || std::holds_alternative<AggFunc::ArrayAgg>(func->data)) {
@@ -1478,10 +1503,15 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
             j.table = alias;
             j.subquery.reset();
         }
-        auto result = exec_select(s, std::move(table), std::nullopt, distinct, std::move(columns), std::move(condition), std::move(joins),
-                                  std::move(order_by), std::move(group_by), std::move(having), limit, offset, for_update, for_share, with_rollup);
-        drop_all();
-        return result;
+        try {
+            auto result = exec_select(s, std::move(table), std::nullopt, distinct, std::move(columns), std::move(condition), std::move(joins),
+                                      std::move(order_by), std::move(group_by), std::move(having), limit, offset, for_update, for_share, with_rollup);
+            drop_all();
+            return result;
+        } catch (...) { // (a statement that fails while it runs -- a division by zero, a document that is no JSON -- takes the derived tables away too: the alias would be taken for good)
+            drop_all();
+            throw;
+        }
     }
 
     // FROM-less scalar SELECT (e.g. a bare `SELECT expr;` inside a stored-procedure
@@ -3413,15 +3443,21 @@ StringResult Executor::exec_select_with_subquery(SharedDatabase& s, Statement in
     }
     s.catalog.create_table(alias, schema_cols);
 
-    auto result = exec_select(s, alias, std::nullopt, distinct, std::move(columns), std::move(condition), std::move(joins), std::move(order_by),
-                               std::move(group_by), std::move(having), limit, offset, for_update, for_share, with_rollup);
-
-    temporary_tables_.erase(alias);
-    s.tables.erase(alias);
-    s.buffer_pool.invalidate(alias);
-    s.catalog.drop_table(alias);
-
-    return result;
+    auto drop = [&] {
+        temporary_tables_.erase(alias);
+        s.tables.erase(alias);
+        s.buffer_pool.invalidate(alias);
+        s.catalog.drop_table(alias);
+    };
+    try {
+        auto result = exec_select(s, alias, std::nullopt, distinct, std::move(columns), std::move(condition), std::move(joins), std::move(order_by),
+                                  std::move(group_by), std::move(having), limit, offset, for_update, for_share, with_rollup);
+        drop();
+        return result;
+    } catch (...) { // (a statement that fails while it runs -- a division by zero, a document that is no JSON -- takes the derived table away too: the alias would be taken for good)
+        drop();
+        throw;
+    }
 }
 
 StringResult Executor::format_result(SharedDatabase& s, std::vector<Row> result, const std::vector<SelectColumn>& columns,

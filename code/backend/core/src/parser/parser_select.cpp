@@ -314,7 +314,8 @@ Statement Parser::parse_select() {
                 const bool aggregate = call && (p->kind == TokenKind::Count || p->kind == TokenKind::Sum || p->kind == TokenKind::Avg ||
                                        p->kind == TokenKind::Min || p->kind == TokenKind::Max || p->kind == TokenKind::Stddev ||
                                        p->kind == TokenKind::Variance || p->kind == TokenKind::BitAnd || p->kind == TokenKind::BitOr ||
-                                       p->kind == TokenKind::JsonAgg || p->kind == TokenKind::ArrayAgg || p->kind == TokenKind::Median ||
+                                       p->kind == TokenKind::JsonAgg || p->kind == TokenKind::ArrayAgg || p->kind == TokenKind::JsonArrayAgg || p->kind == TokenKind::JsonObjectAgg ||
+                                       p->kind == TokenKind::Median ||
                                        p->kind == TokenKind::GroupConcat);
                 const bool function = (call || is_bare_function(*p)) && (p->kind == TokenKind::DateAdd || p->kind == TokenKind::DateSub || p->kind == TokenKind::Upper ||
                                       p->kind == TokenKind::Lower || p->kind == TokenKind::Length || p->kind == TokenKind::Trim ||
@@ -345,7 +346,7 @@ Statement Parser::parse_select() {
                  p->kind == TokenKind::Min || p->kind == TokenKind::Max ||
                  p->kind == TokenKind::Stddev || p->kind == TokenKind::Variance ||
                  p->kind == TokenKind::BitAnd || p->kind == TokenKind::BitOr ||
-                 p->kind == TokenKind::JsonAgg || p->kind == TokenKind::ArrayAgg ||
+                 p->kind == TokenKind::JsonAgg || p->kind == TokenKind::ArrayAgg || p->kind == TokenKind::JsonArrayAgg || p->kind == TokenKind::JsonObjectAgg ||
                  p->kind == TokenKind::Median)) {
                 const std::size_t item_start = pos_;
                 const Token* ft = advance();
@@ -361,6 +362,8 @@ Statement Parser::parse_select() {
                         case TokenKind::BitAnd: return AggFunc(AggFunc::BitAnd{});
                         case TokenKind::BitOr: return AggFunc(AggFunc::BitOr{});
                         case TokenKind::ArrayAgg: return AggFunc(AggFunc::ArrayAgg{});
+                        case TokenKind::JsonArrayAgg: return AggFunc(AggFunc::JsonArrayAgg{});
+                        case TokenKind::JsonObjectAgg: return AggFunc(AggFunc::JsonObjectAgg{});
                         case TokenKind::Median: return AggFunc(AggFunc::Median{});
                         default: return AggFunc(AggFunc::JsonAgg{});
                     }
@@ -390,6 +393,13 @@ Statement Parser::parse_select() {
                             advance();
                             agg_col += ", " + aggregate_argument_text(parse_value_expr());
                         }
+                    }
+                    // JSON_ARRAYAGG(x) collects JSON_ARRAY(x) of every row and JSON_OBJECTAGG(key, value) JSON_ARRAY(key, value)
+                    if (std::holds_alternative<AggFunc::JsonArrayAgg>(func.data)) agg_col = "JSON_ARRAY(" + agg_col + ")";
+                    if (std::holds_alternative<AggFunc::JsonObjectAgg>(func.data)) {
+                        if (!peek_is(TokenKind::Comma)) throw ParseError("Expected ',' in JSON_OBJECTAGG");
+                        advance();
+                        agg_col = "JSON_ARRAY(" + agg_col + ", " + aggregate_argument_text(parse_value_expr()) + ")";
                     }
                 }
                 if (!peek_is(TokenKind::RParen)) throw ParseError("Expected ')'");

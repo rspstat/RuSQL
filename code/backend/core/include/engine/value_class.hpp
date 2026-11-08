@@ -19,7 +19,11 @@
 
 namespace engine {
 
-enum class ValueClass : std::uint8_t { Unknown = 0, Number, Text };
+enum class ValueClass : std::uint8_t { Unknown = 0, Number, Text, Json };
+
+// How two values compare when one of them is a JSON document (a JSON column, JSON_EXTRACT(...), CAST(x AS JSON)): MySQL turns the other side into a JSON
+// value by its type (a string is a JSON string, a number a JSON number) and orders values of different JSON types by type. Defined in builtin_functions.cpp.
+int json_compare_classed(ValueClass a, ValueClass b, std::string_view x, std::string_view y);
 
 // What a scalar function gives: text or a number. COALESCE, IF, GREATEST ... give what their arguments are: not told here.
 inline ValueClass function_result_class(std::string_view name) {
@@ -33,8 +37,12 @@ inline ValueClass function_result_class(std::string_view name) {
         "POWER", "SQRT", "EXP", "LOG", "LOG2", "LOG10", "SIN", "COS", "TAN", "SIGN", "PI", "RAND", "INSTR", "LOCATE", "POSITION", "FIELD",
         "DATEDIFF", "YEAR", "MONTH", "DAY", "DAYOFMONTH", "DAYOFWEEK", "DAYOFYEAR", "WEEKDAY", "WEEK", "HOUR", "MINUTE", "SECOND",
         "UNIX_TIMESTAMP", "TIMESTAMPDIFF", "FIND_IN_SET", "REGEXP_LIKE", "ISNULL", "STRCMP"};
+    static const std::unordered_set<std::string> json = {
+        "JSON_EXTRACT", "JSON_ARRAY", "JSON_OBJECT", "JSON_SET", "JSON_INSERT", "JSON_REPLACE", "JSON_REMOVE", "JSON_ARRAY_APPEND", "JSON_ARRAY_INSERT",
+        "JSON_MERGE_PATCH", "JSON_MERGE_PRESERVE", "JSON_MERGE", "JSON_KEYS"};
     std::string key(name);
     for (char& c : key) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+    if (json.count(key)) return ValueClass::Json;
     if (text.count(key)) return ValueClass::Text;
     if (number.count(key)) return ValueClass::Number;
     return ValueClass::Unknown;
@@ -42,6 +50,7 @@ inline ValueClass function_result_class(std::string_view name) {
 
 // Three-way comparison of two values that are not NULL: -1, 0 or 1.
 inline int compare_classed(ValueClass a, ValueClass b, std::string_view x, std::string_view y) {
+    if (a == ValueClass::Json || b == ValueClass::Json) return json_compare_classed(a, b, x, y);
     if (a == ValueClass::Number || b == ValueClass::Number) return compare_numbers(x, y);
     if (!(a == ValueClass::Text && b == ValueClass::Text) && parse_number(x) && parse_number(y)) return compare_numbers(x, y);
     return collation::compare(x, y); // (two texts: MySQL's default collation, which does not tell 'a' from 'A' or 'e' from 'é')

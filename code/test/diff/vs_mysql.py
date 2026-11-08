@@ -2,7 +2,8 @@
 
 Runs the same statements on RuSQL and on a real MySQL (127.0.0.1:3391) and lists what differs.
 
-Corpus: one statement per line; '#' comment; '--' prefix = setup run on both silently. Rows are compared as multisets unless the statement has
+Corpus: one statement per line; '#' comment; '--' prefix = setup run on both silently; '@name ' prefix = the statement is run by the user `name` (password 'pw', created by the
+corpus on both servers, `--proto` only) on a connection of its own -- for what a user may and may not do. Rows are compared as multisets unless the statement has
 ORDER BY; numbers compare by value ('1' == '1.0000'); NULL is the text NULL. --split runs each item of a FROM-less `SELECT a, b, c` as a statement of its own.
 
 --proto --errno: a statement both fail is a difference when the two error numbers (the first number of pymysql's (errno, message)) are not the same.
@@ -283,10 +284,31 @@ def main():
             db.execute(s)
         total = diff = both_err = 0
         shown = 0
+        users = {}  # name -> (cursor on MySQL, cursor on RuSQL): the connections of '@name' lines, opened when first used
+
+        def user_cursors(name):
+            if name not in users:
+                pair = []
+                for port in (3391, 13399):
+                    try:
+                        c = pymysql.connect(host="127.0.0.1", port=port, user=name, password="pw", database="v", autocommit=True, charset="utf8mb4")
+                        pair.append(c.cursor())
+                    except Exception as e:  # noqa  (a user that cannot log in: every statement of it fails the same way as the login did)
+                        pair.append(("err", str(e)[:100]))
+                users[name] = tuple(pair)
+            return users[name]
+
+        def run_as(cursor_or_error, stmt):
+            return cursor_or_error if isinstance(cursor_or_error, tuple) else mysql_run(cursor_or_error, stmt)
         for line in open(corpus, encoding="utf-8").read().splitlines():
             line = line.strip()
             if not line or line.startswith("#"):
                 continue
+            as_user = None
+            if line.startswith("@"):
+                if not proto:
+                    raise SystemExit("'@user' lines need --proto")
+                as_user, line = line[1:].split(None, 1)
             if line.startswith("--"):
                 stmt = line[2:].strip()
                 mysql_run(cur, stmt)
@@ -298,7 +320,11 @@ def main():
                 total += 1
                 if "--trace" in args:
                     print("RUN: " + stmt, file=sys.stderr, flush=True)
-                m, r = mysql_run(cur, stmt), (mysql_run(rcur, stmt) if proto else rusql_run(db, stmt))
+                if as_user:
+                    mine, theirs = user_cursors(as_user)
+                    m, r = run_as(mine, stmt), run_as(theirs, stmt)
+                else:
+                    m, r = mysql_run(cur, stmt), (mysql_run(rcur, stmt) if proto else rusql_run(db, stmt))
                 if m[0] == "err" and r[0] == "err":
                     both_err += 1
                 why = first_difference(stmt, m, r)
@@ -327,4 +353,5 @@ def main():
         conn.close()
 
 
-main()
+if __name__ == "__main__":
+    main()

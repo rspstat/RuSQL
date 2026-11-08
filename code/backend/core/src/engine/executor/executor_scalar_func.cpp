@@ -1,6 +1,6 @@
 // Faithful port of rusql-core/src/engine/executor.rs's apply_scalar_func (the built-in
-// scalar SQL function dispatcher) plus its json_extract/json_take_value/json_array_items
-// helpers and the from-scratch MD5 implementation.
+// scalar SQL function dispatcher) plus the from-scratch MD5 implementation (the JSON functions
+// are in builtin_functions.cpp).
 //
 // User-defined functions (CREATE FUNCTION) and DATABASE()/SCHEMA() need session context
 // that this otherwise-static function doesn't have. The Rust original solves this with
@@ -171,144 +171,11 @@ std::array<std::uint8_t, 16> md5_hash(const std::string& input) {
     return r;
 }
 
-// --- Minimal JSON path extraction on the raw text (matches the Rust original's
-// hand-rolled, non-parsing-library approach exactly, byte quirks included) ---
-
-std::string_view json_take_value(std::string_view s) {
-    std::size_t start = s.find_first_not_of(" \t\r\n");
-    if (start == std::string_view::npos) return s;
-    s = s.substr(start);
-    if (s.empty()) return s;
-    if (s.front() == '"') {
-        std::size_t i = 1;
-        while (i < s.size()) {
-            if (s[i] == '\\') {
-                i += 2;
-                continue;
-            }
-            if (s[i] == '"') return s.substr(0, i + 1);
-            i++;
-        }
-        return s;
-    }
-    if (s.front() == '{' || s.front() == '[') {
-        char open = s.front();
-        char close = open == '{' ? '}' : ']';
-        int depth = 0;
-        bool in_str = false;
-        for (std::size_t i = 0; i < s.size(); i++) {
-            char c = s[i];
-            if (in_str) {
-                if (c == '\\') {
-                    i++;
-                    continue;
-                }
-                if (c == '"') in_str = false;
-            } else {
-                if (c == '"') in_str = true;
-                else if (c == open) depth++;
-                else if (c == close) {
-                    depth--;
-                    if (depth == 0) return s.substr(0, i + 1);
-                }
-            }
-        }
-        return s;
-    }
-    std::size_t end = s.find_first_of(",}]");
-    std::string_view piece = end == std::string_view::npos ? s : s.substr(0, end);
-    std::size_t last = piece.find_last_not_of(" \t\r\n");
-    return last == std::string_view::npos ? piece.substr(0, 0) : piece.substr(0, last + 1);
-}
-
-std::vector<std::string_view> json_array_items(std::string_view inner) {
-    std::vector<std::string_view> items;
-    std::size_t start = inner.find_first_not_of(" \t\r\n");
-    std::string_view s = start == std::string_view::npos ? std::string_view{} : inner.substr(start);
-    while (!s.empty()) {
-        std::string_view item = json_take_value(s);
-        items.push_back(item);
-        s = s.substr(item.size());
-        std::size_t ws = s.find_first_not_of(" \t\r\n");
-        s = ws == std::string_view::npos ? std::string_view{} : s.substr(ws);
-        if (!s.empty() && s.front() == ',') {
-            s = s.substr(1);
-            std::size_t ws2 = s.find_first_not_of(" \t\r\n");
-            s = ws2 == std::string_view::npos ? std::string_view{} : s.substr(ws2);
-        }
-    }
-    return items;
-}
-
-// The value of the member `key` of the object `obj` (a JSON object's text): its own members only, never the ones of an object inside it.
-std::optional<std::string_view> json_object_member(std::string_view obj, const std::string& key) {
-    auto skip_ws = [](std::string_view v) {
-        std::size_t p = v.find_first_not_of(" \t\r\n");
-        return p == std::string_view::npos ? std::string_view{} : v.substr(p);
-    };
-    std::string_view s = obj.substr(1); // (after the '{')
-    while (true) {
-        s = skip_ws(s);
-        if (s.empty() || s.front() != '"') return std::nullopt; // the closing '}' or text that is no JSON
-        std::string_view name = json_take_value(s);
-        s = skip_ws(s.substr(name.size()));
-        if (s.empty() || s.front() != ':') return std::nullopt;
-        std::string_view after_colon = skip_ws(s.substr(1));
-        std::string_view value = json_take_value(after_colon);
-        if (name.size() >= 2 && name.substr(1, name.size() - 2) == key) return value;
-        s = skip_ws(after_colon.substr(value.size()));
-        if (s.empty() || s.front() != ',') return std::nullopt;
-        s = s.substr(1);
-    }
-}
-
-// JSON_EXTRACT's path: `$` followed by `.key` and `[n]` steps in any order ($.a.b, $[0], $.a[1][0], $.a[1].b). Anything else (a wildcard, a range, a quoted key) gives NULL.
-std::string json_extract(const std::string& json_str, const std::string& path_in) {
-    std::string path = path_in;
-    if (path.size() >= 2 && path.front() == '"' && path.back() == '"') path = path.substr(1, path.size() - 2);
-    if (path.empty() || path.front() != '$') return EXECUTOR_NULL_VALUE;
-
-    std::string_view current = json_str;
-    std::size_t cs = current.find_first_not_of(" \t\r\n");
-    std::size_t ce = current.find_last_not_of(" \t\r\n");
-    current = (cs == std::string_view::npos) ? std::string_view{} : current.substr(cs, ce - cs + 1);
-
-    for (std::size_t i = 1; i < path.size();) {
-        if (path[i] == '.') {
-            std::size_t end = path.find_first_of(".[", i + 1);
-            std::string key = path.substr(i + 1, end == std::string::npos ? std::string::npos : end - (i + 1));
-            i = end == std::string::npos ? path.size() : end;
-            if (key.empty() || current.empty() || current.front() != '{') return EXECUTOR_NULL_VALUE;
-            auto member = json_object_member(current, key);
-            if (!member) return EXECUTOR_NULL_VALUE;
-            current = *member;
-        } else if (path[i] == '[') {
-            std::size_t close = path.find(']', i);
-            if (close == std::string::npos) return EXECUTOR_NULL_VALUE;
-            std::string number = path.substr(i + 1, close - i - 1);
-            i = close + 1;
-            if (number.empty() || number.size() > 9 || !std::all_of(number.begin(), number.end(), [](unsigned char c) { return std::isdigit(c) != 0; })) return EXECUTOR_NULL_VALUE;
-            if (current.empty()) return EXECUTOR_NULL_VALUE;
-            const std::size_t idx = static_cast<std::size_t>(std::stoul(number));
-            if (current.front() != '[') { // (a value that is no array reads as an array of that one value: $[0] is the value itself, $[1] nothing)
-                if (idx != 0) return EXECUTOR_NULL_VALUE;
-                continue;
-            }
-            auto items = json_array_items(current.substr(1, current.size() - 2));
-            if (idx >= items.size()) return EXECUTOR_NULL_VALUE;
-            current = items[idx];
-        } else {
-            return EXECUTOR_NULL_VALUE;
-        }
-    }
-    return std::string(current);
-}
-
 // Functions of the older dispatcher whose result is NULL when one of their first N arguments is NULL. The functions
 // of builtin_functions.cpp deal with NULL themselves, so does COALESCE / IFNULL / NULLIF / ISNULL / IF, and the ones without arguments are not listed.
 const std::unordered_map<std::string, std::size_t>& null_propagating_functions() {
     static const std::unordered_map<std::string, std::size_t> table = {
-        {"MD5", 1}, {"FROM_UNIXTIME", 1}, {"UNIX_TIMESTAMP", 1}, {"JSON_UNQUOTE", 1}, {"JSON_EXTRACT", 2}, {"JSON_VALUE", 2},
+        {"MD5", 1}, {"FROM_UNIXTIME", 1}, {"UNIX_TIMESTAMP", 1},
         {"REGEXP_LIKE", 2}, {"REGEXP", 2}, {"REGEXP_MATCH", 2}, {"REGEXP_SUBSTR", 2}, {"REGEXP_INSTR", 2}, {"REGEXP_REPLACE", 3},
     };
     return table;
@@ -594,41 +461,6 @@ std::string Executor::apply_scalar_func(const std::string& typed_name, const std
                       static_cast<unsigned>((ts >> 16) & 0xffff), static_cast<unsigned>(ts & 0x0fff),
                       static_cast<unsigned>(0x8000u | ((ts >> 48) & 0x3fff)), static_cast<unsigned long long>(ts & 0xffffffffffffULL));
         return buf;
-    }
-    if (func_name == "JSON_EXTRACT") return json_extract(arg_at(0), arg_at(1));
-    if (func_name == "JSON_UNQUOTE") {
-        std::string v = arg_at(0);
-        if (v.size() >= 2 && v.front() == '"' && v.back() == '"') {
-            std::string inner = v.substr(1, v.size() - 2);
-            std::string out;
-            for (std::size_t i = 0; i < inner.size(); i++) {
-                if (inner[i] == '\\' && i + 1 < inner.size() && (inner[i + 1] == '"' || inner[i + 1] == '\\')) {
-                    out += inner[i + 1];
-                    i++;
-                } else {
-                    out += inner[i];
-                }
-            }
-            return out;
-        }
-        return v;
-    }
-    if (func_name == "JSON_VALUE") {
-        std::string extracted = json_extract(arg_at(0), arg_at(1));
-        if (extracted.size() >= 2 && extracted.front() == '"' && extracted.back() == '"') {
-            std::string inner = extracted.substr(1, extracted.size() - 2);
-            std::string out;
-            for (std::size_t i = 0; i < inner.size(); i++) {
-                if (inner[i] == '\\' && i + 1 < inner.size() && (inner[i + 1] == '"' || inner[i + 1] == '\\')) {
-                    out += inner[i + 1];
-                    i++;
-                } else {
-                    out += inner[i];
-                }
-            }
-            return out;
-        }
-        return extracted;
     }
     if (func_name == "DATABASE" || func_name == "SCHEMA") return g_current_db_ctx;
     if (func_name == "VERSION") return "8.4.9"; // (the same as @@version and the handshake of the MySQL protocol)

@@ -156,6 +156,9 @@ const Case kFkActions[] = {
 const Case kDatesArith[] = {
 #include "mysql_conformance_dates_arith.inc"
 };
+const Case kJsonFunctions[] = {
+#include "mysql_conformance_json_functions.inc"
+};
 
 struct TempDataDir {
     std::string path;
@@ -469,4 +472,8 @@ TEST_CASE("Foreign key actions: RESTRICT / NO ACTION / CASCADE / SET NULL, TRUNC
 
 TEST_CASE("Date and time arithmetic: TIME limits, STR_TO_DATE, CONVERT_TZ, strings that are no dates, a date against a date string", "[mysql_conformance][dates_arith]") {
     run_cases("mc_dates_arith", kDatesArith, sizeof kDatesArith / sizeof kDatesArith[0]);
+}
+
+TEST_CASE("JSON: how a document is written, paths, JSON_SET / ARRAY_APPEND / MERGE_PATCH / SEARCH / OVERLAPS / MEMBER OF, JSON_VALUE, aggregates, the order of JSON values, the errors", "[mysql_conformance][json_functions]") {
+    run_cases("mc_json_functions", kJsonFunctions, sizeof kJsonFunctions / sizeof kJsonFunctions[0]);
 }

@@ -85,7 +85,7 @@ const std::unordered_map<std::string, TokenKind>& keyword_map() {
         {"STDDEV", TokenKind::Stddev}, {"STD", TokenKind::Stddev}, {"STDDEV_POP", TokenKind::Stddev}, {"STDDEV_SAMP", TokenKind::Stddev},
         {"VARIANCE", TokenKind::Variance}, {"VAR_POP", TokenKind::Variance}, {"VAR_SAMP", TokenKind::Variance},
         {"BIT_AND", TokenKind::BitAnd}, {"BIT_OR", TokenKind::BitOr}, {"JSON_AGG", TokenKind::JsonAgg},
-        {"ARRAY_AGG", TokenKind::ArrayAgg}, {"MEDIAN", TokenKind::Median}, {"FILTER", TokenKind::Filter},
+        {"ARRAY_AGG", TokenKind::ArrayAgg}, {"JSON_ARRAYAGG", TokenKind::JsonArrayAgg}, {"JSON_OBJECTAGG", TokenKind::JsonObjectAgg}, {"MEDIAN", TokenKind::Median}, {"FILTER", TokenKind::Filter},
         {"LATERAL", TokenKind::Lateral},
         {"NTILE", TokenKind::Ntile}, {"PERCENT_RANK", TokenKind::PercentRank},
         {"CUME_DIST", TokenKind::CumeDist}, {"ROW_NUMBER", TokenKind::RowNumber},
@@ -417,7 +417,16 @@ std::vector<Token> Lexer::tokenize() {
             case ';': advance(); tok = Token(TokenKind::Semicolon); break;
             case '(': advance(); tok = Token(TokenKind::LParen); break;
             case ')': advance(); tok = Token(TokenKind::RParen); break;
-            case '.': advance(); tok = Token(TokenKind::Dot); break;
+            case '.':
+                // .5 is the number 0.5 (after a name or a closing parenthesis a dot is the dot of a qualified name)
+                if (pos_ + 1 < input_.size() && is_digit(input_[pos_ + 1]) && !(!tokens.empty() && is_value_or_close_paren(tokens.back()))) {
+                    Token number = read_number();
+                    tok = Token(TokenKind::NumberLit, "0" + number.text);
+                    break;
+                }
+                advance();
+                tok = Token(TokenKind::Dot);
+                break;
             case '=': advance(); tok = Token(TokenKind::Eq); break;
             case '>': {
                 advance();

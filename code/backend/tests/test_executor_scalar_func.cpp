@@ -198,15 +198,17 @@ TEST_CASE("JSON_EXTRACT paths: root arrays, chained indexes, own members only", 
         {"JSON_EXTRACT('{\"a\":1}', '$[0].a')", "1"},
         {"JSON_EXTRACT('{\"a\":1}', '$[1]')", "NULL"},
         {"JSON_EXTRACT('[1,2]', '$.a')", "NULL"},                                      // (a key on an array)
-        // a path that is no path: MySQL refuses it (error 3143); here it is NULL, as it has been -- the cases only keep the parser from reading past the text
-        {"JSON_EXTRACT('[1,2]', 'a')", "NULL"},
-        {"JSON_EXTRACT('[1,2]', '$[x]')", "NULL"},
-        {"JSON_EXTRACT('[1,2]', '$[1')", "NULL"},
-        {"JSON_EXTRACT('[1,2]', '$[99999999999999999999]')", "NULL"},
     };
     for (const Case& c : cases) {
         INFO(c.expr);
         REQUIRE(eval_expr(ex, c.expr) == c.expect);
+    }
+    // a path that is no path is refused, as MySQL does (error 3143), and the parser does not read past the text of it
+    for (const char* path : {"a", "$[x]", "$[1", "$[99999999999999999999]", "$.", "$..a", "$[]"}) {
+        INFO(path);
+        auto r = ex.execute_sql(std::string("SELECT JSON_EXTRACT('[1,2]', '") + path + "') AS v FROM t");
+        REQUIRE(r.is_err());
+        REQUIRE(r.error().rfind("Invalid JSON path expression", 0) == 0);
     }
 }
 

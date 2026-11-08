@@ -31,4 +31,12 @@ bool is_known_function_name(const std::string& name);
 // Is `name` (upper case) in this table?
 bool is_builtin_function(const std::string& name);
 
+// A JSON text in MySQL's form (members ordered, `, ` and `: ` between, numbers as MySQL keeps them), or nullopt when the text is no JSON document;
+// `why`, when given, then says why in MySQL's words ("Missing a comma or ']' after an array element." at position 4).
+std::optional<std::string> json_canonical_text(const std::string& text, std::string* why = nullptr);
+
+// JSON_ARRAYAGG / JSON_OBJECTAGG: `rows` holds, for every row, the text of JSON_ARRAY(x) (an array) or of JSON_ARRAY(key, value) (an object: a key that comes
+// twice keeps the last value; a NULL key is an error).
+std::string json_aggregate_text(bool object, const std::vector<std::string>& rows);
+
 } // namespace engine

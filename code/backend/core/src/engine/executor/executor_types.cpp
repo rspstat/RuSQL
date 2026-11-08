@@ -19,8 +19,7 @@
 #include <limits>
 #include <string_view>
 
-#include <nlohmann/json.hpp>
-
+#include "engine/executor/builtin_functions.hpp"
 #include "engine/executor/executor.hpp"
 #include "engine/parser/parser.hpp"
 #include "engine/sql_value_util.hpp"
@@ -478,7 +477,10 @@ std::optional<std::string> Executor::coerce_column_value(const ColumnDef& col, s
         return std::nullopt;
     }
     if (std::holds_alternative<DataType::Json>(dt.data)) {
-        if (!nlohmann::json::accept(value)) return "Invalid JSON text for column '" + col.name + "'" + at_row(row);
+        std::string why;
+        auto canonical = json_canonical_text(value, &why); // (a JSON column keeps the document in MySQL's form: members ordered, one space after `,` and `:`)
+        if (!canonical) return "Invalid JSON text: " + why + " in value for column '" + col.name + "'" + at_row(row);
+        value = *canonical;
         return std::nullopt;
     }
     return std::nullopt; // TEXT, BLOB, ENUM, SET (checked elsewhere), Unknown
