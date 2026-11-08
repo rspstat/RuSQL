@@ -14,7 +14,7 @@
       "name": "functions",
       "en": "Built-in functions (strings, math, dates, JSON)",
       "ko": "내장 함수 (문자열·수학·날짜·JSON)",
-      "statements": 72,
+      "statements": 74,
       "different": 0,
       "bothFail": 7
     },
@@ -381,8 +381,8 @@
   ],
   "conformanceCases": 4524,
   "tests": {
-    "cases": 940,
-    "assertions": 1520011
+    "cases": 941,
+    "assertions": 1520060
   },
   "bugsFound": 206
 }

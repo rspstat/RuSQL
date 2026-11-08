@@ -71,5 +71,3 @@ export const MCP_TOOL_GROUPS: McpToolGroup[] = [
     ],
   },
 ];
-
-export const MCP_TOOL_NAMES: string[] = MCP_TOOL_GROUPS.flatMap(g => g.tools.map(t => t.name));

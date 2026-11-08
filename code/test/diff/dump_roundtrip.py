@@ -5,7 +5,7 @@ Builds <schema.sql> on a real MySQL (127.0.0.1:3391, database rt_dump), takes a 
 and compares every table's rows. Then loads the same dump with the real `mysql` client (--force) and counts its errors.
 Prints each statement RuSQL refused, with its answer; exit code 1 when anything is refused or differs.
 """
-import os, re, shutil, socket, subprocess, sys, tempfile, time
+import os, shutil, socket, subprocess, sys, tempfile, time
 
 import pymysql
 

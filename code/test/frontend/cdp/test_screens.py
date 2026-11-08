@@ -19,7 +19,7 @@ import traceback
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from cdp_lib import Page, Processes, TempConnection, ROOT, wait_for  # noqa: E402
+from cdp_lib import Page, Processes, TempConnection, ROOT  # noqa: E402
 
 OUT = Path(__file__).resolve().parent / "out"
 CONNECTION = "cdp-test"

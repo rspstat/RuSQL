@@ -193,7 +193,7 @@
 - [x] SET('a','b',...) — 집합형 (콤마 구분 복수 값, 각 요소 유효성 검사)
 - [x] BLOB — 이진 데이터 타입 (hex 문자열로 저장, `0x...` 리터럴 파싱 지원)
 - [x] **타입 검증과 표준 표기 (2026-10-05, `coerce_column_value`)** — 쓸 때 값이 열 타입에 맞는지 엄격 모드로 검사하고 열의 표준 표기로 저장: INT 계열(범위, 소수는 0에서 먼 쪽으로 반올림, `true`/`false`), FLOAT/DOUBLE(왕복 가능한 가장 짧은 표기), DECIMAL(p,s)(정확한 자릿수 반올림·소수부 채움, 정수부 초과는 오류), VARCHAR(n)(글자 수; 뒤쪽 공백만 잘림), DATE/DATETIME/TIMESTAMP/TIME/YEAR(윤년 포함 검증), BOOLEAN, JSON. 오류 메시지는 `… at row N` 형식. 전에는 `INT`에 `'abc'`, `DATE`에 `'2024-02-30'`, `VARCHAR(3)`에 `'toolong'`이 그대로 저장됐다.
-- [x] JSON — JSON 문자열 저장, `->` / `->>` 연산자, JSON_EXTRACT / JSON_UNQUOTE / JSON_VALUE 함수
+- [x] JSON — JSON 문자열 저장, `->` / `->>` 연산자, JSON_EXTRACT / JSON_UNQUOTE / JSON_VALUE 함수 (경로: `$` 뒤에 `.키` · `[n]` 걸음을 차례로, `$[0]` · `$.a[1][0]` · `$[1].b` 포함; R75)
 
 ### 제약 조건
 - [x] PRIMARY KEY (단일 / 복합)
@@ -345,6 +345,10 @@
   - 다른 세션이 스냅샷 뒤에 바꾼 행을 `UPDATE`/`DELETE`/외래키 연쇄로 쓰면 스냅샷에 보이는 옛 버전이 새 버전과 나란히 보이던 것: 쓰는 쪽이 끝낼 행 가운데 스냅샷에 안 보이는 것을 모아 `hide_older_versions`가 같은 기본키의 옛 버전에 `_xsup` = 트랜잭션 번호를 붙이고, `is_visible_for_read`가 그 버전을 숨김(표시가 있는 트랜잭션의 스냅샷만 `check_superseded`로 찾음). `ROLLBACK TO SAVEPOINT`는 되돌린 문장의 표시를 걷고 앞 문장의 표시를 다시 붙임(`unhide_after_rollback`).
   - `SELECT … FOR UPDATE | FOR SHARE | LOCK IN SHARE MODE`는 REPEATABLE READ에서도 최신 커밋을 읽음.
   - `code/test/diff/two_sessions.py`: 두 세션 시나리오를 진짜 MySQL과 단계마다 비교(READ COMMITTED · REPEATABLE READ; `--show`는 MySQL의 답을 보여 줌; 알려진 차이는 `KNOWN`).
+- [x] **R75 (2026-11-08): 총 점검(이미 되는 것 · 죽은 코드 · 불필요한 파일), `JSON_EXTRACT` 배열 경로 버그, 문서 정정, 정리** (`executor_scalar_func.cpp` · `RECOMMAND.md` · 프런트엔드 · 시험 도구)
+  - `JSON_EXTRACT('[1,2]', '$[1]')`이 NULL이던 것 수정: 경로를 `.키` · `[n]` 걸음으로 따라가는 읽기(`json_extract`)와 객체 자기 멤버만 훑는 `json_object_member`. 최상위 배열 · 첨자 뒤의 첨자 · 첨자 뒤의 키 · 배열이 아닌 값의 `$[0]` · 안쪽 객체의 같은 이름 키를 먼저 집던 것. 진짜 MySQL과 맞춤(코퍼스 `functions`에 2줄).
+  - 문서가 낡았던 곳(뷰 `WITH CHECK OPTION` · `CONVERT_TZ`는 이미 됨, 없는 함수는 39개) 정정, MySQL에도 없는 문법 표시. 영향 없는 정리: 쓰이지 않는 npm 의존성 · 템플릿 잔재 · 죽은 상수 · 파이썬 도구의 미사용 항목.
+  - 시험 941 케이스 / 1,520,060, 심은 버그 6개 잡음, 점수판 3,875문장 차이 0, 앱 화면 시험 12/12.
 - [x] **R74 (2026-11-08): REPEATABLE READ · SERIALIZABLE에서 일반 SELECT가 아닌 문장은 서브쿼리를 최신 커밋으로 읽음, `INSERT … SELECT` 원본의 공유 잠금, 잠금을 기다린 읽기는 다시 읽음, 정상 종료한 연결의 트랜잭션 되돌림** (`executor_core.cpp` · `executor_select.cpp` · `executor_dml.cpp` · `executor_trigger.cpp` · `executor.hpp` · `mysql.cpp`)
   - 진짜 MySQL을 먼저 쟀다: `INSERT … VALUES ((SELECT …))` · `REPLACE` · `ON DUPLICATE KEY UPDATE` · `UPDATE` · `DELETE` · 다중 표 `UPDATE`/`DELETE` · `SET @x = (SELECT …)` · 프로시저의 `SET`은 서브쿼리 표를 최신 커밋으로 읽고, `SELECT`(`SELECT … INTO` 포함)는 스냅샷으로 읽음. 트리거 · 프로시저 본문은 문장마다 자기 종류대로.
   - `execute_with_s_body`가 위 문장 종류이면 그 문장 동안 `reads_latest_`를 켬(`FlagScope`), `fire_triggers`는 본문 동안 끔. `locks_source_rows_`: `INSERT … SELECT` 원본(한 표를 평범하게 읽는 모양)이 `FOR SHARE`처럼 읽은 행과 기본키 조건의 틈을 공유 잠금(REPEATABLE READ · SERIALIZABLE의 명시적 트랜잭션만); `DataGuardStash`가 기다리는 동안 원본 표의 데이터 잠금을 놓게 함.

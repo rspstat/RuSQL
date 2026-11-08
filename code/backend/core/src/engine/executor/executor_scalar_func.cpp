@@ -10,6 +10,7 @@
 #include "engine/executor/executor.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <cstdio>
 #include <ctime>
@@ -239,61 +240,65 @@ std::vector<std::string_view> json_array_items(std::string_view inner) {
     return items;
 }
 
+// The value of the member `key` of the object `obj` (a JSON object's text): its own members only, never the ones of an object inside it.
+std::optional<std::string_view> json_object_member(std::string_view obj, const std::string& key) {
+    auto skip_ws = [](std::string_view v) {
+        std::size_t p = v.find_first_not_of(" \t\r\n");
+        return p == std::string_view::npos ? std::string_view{} : v.substr(p);
+    };
+    std::string_view s = obj.substr(1); // (after the '{')
+    while (true) {
+        s = skip_ws(s);
+        if (s.empty() || s.front() != '"') return std::nullopt; // the closing '}' or text that is no JSON
+        std::string_view name = json_take_value(s);
+        s = skip_ws(s.substr(name.size()));
+        if (s.empty() || s.front() != ':') return std::nullopt;
+        std::string_view after_colon = skip_ws(s.substr(1));
+        std::string_view value = json_take_value(after_colon);
+        if (name.size() >= 2 && name.substr(1, name.size() - 2) == key) return value;
+        s = skip_ws(after_colon.substr(value.size()));
+        if (s.empty() || s.front() != ',') return std::nullopt;
+        s = s.substr(1);
+    }
+}
+
+// JSON_EXTRACT's path: `$` followed by `.key` and `[n]` steps in any order ($.a.b, $[0], $.a[1][0], $.a[1].b). Anything else (a wildcard, a range, a quoted key) gives NULL.
 std::string json_extract(const std::string& json_str, const std::string& path_in) {
     std::string path = path_in;
     if (path.size() >= 2 && path.front() == '"' && path.back() == '"') path = path.substr(1, path.size() - 2);
-
-    if (path != "$" && path.rfind("$.", 0) != 0) return EXECUTOR_NULL_VALUE;
-
-    std::vector<std::string> parts;
-    if (path != "$") {
-        std::string rest = path.substr(2);
-        std::size_t pos = 0;
-        while (true) {
-            auto dot = rest.find('.', pos);
-            parts.push_back(rest.substr(pos, dot == std::string::npos ? std::string::npos : dot - pos));
-            if (dot == std::string::npos) break;
-            pos = dot + 1;
-        }
-    }
+    if (path.empty() || path.front() != '$') return EXECUTOR_NULL_VALUE;
 
     std::string_view current = json_str;
     std::size_t cs = current.find_first_not_of(" \t\r\n");
     std::size_t ce = current.find_last_not_of(" \t\r\n");
     current = (cs == std::string_view::npos) ? std::string_view{} : current.substr(cs, ce - cs + 1);
 
-    for (auto& part : parts) {
-        std::string key = part;
-        std::optional<std::size_t> idx;
-        if (auto br = part.find('['); br != std::string::npos) {
-            key = part.substr(0, br);
-            try {
-                idx = static_cast<std::size_t>(std::stoul(part.substr(br + 1, part.size() - br - 2)));
-            } catch (...) {
-                idx = std::nullopt;
+    for (std::size_t i = 1; i < path.size();) {
+        if (path[i] == '.') {
+            std::size_t end = path.find_first_of(".[", i + 1);
+            std::string key = path.substr(i + 1, end == std::string::npos ? std::string::npos : end - (i + 1));
+            i = end == std::string::npos ? path.size() : end;
+            if (key.empty() || current.empty() || current.front() != '{') return EXECUTOR_NULL_VALUE;
+            auto member = json_object_member(current, key);
+            if (!member) return EXECUTOR_NULL_VALUE;
+            current = *member;
+        } else if (path[i] == '[') {
+            std::size_t close = path.find(']', i);
+            if (close == std::string::npos) return EXECUTOR_NULL_VALUE;
+            std::string number = path.substr(i + 1, close - i - 1);
+            i = close + 1;
+            if (number.empty() || number.size() > 9 || !std::all_of(number.begin(), number.end(), [](unsigned char c) { return std::isdigit(c) != 0; })) return EXECUTOR_NULL_VALUE;
+            if (current.empty()) return EXECUTOR_NULL_VALUE;
+            const std::size_t idx = static_cast<std::size_t>(std::stoul(number));
+            if (current.front() != '[') { // (a value that is no array reads as an array of that one value: $[0] is the value itself, $[1] nothing)
+                if (idx != 0) return EXECUTOR_NULL_VALUE;
+                continue;
             }
-        }
-
-        if (!current.empty() && current.front() == '{') {
-            std::string search = "\"" + key + "\":";
-            auto pos = current.find(search);
-            if (pos == std::string_view::npos) return EXECUTOR_NULL_VALUE;
-            std::string_view rest = current.substr(pos + search.size());
-            std::size_t ws = rest.find_first_not_of(" \t\r\n");
-            rest = ws == std::string_view::npos ? std::string_view{} : rest.substr(ws);
-            current = json_take_value(rest);
+            auto items = json_array_items(current.substr(1, current.size() - 2));
+            if (idx >= items.size()) return EXECUTOR_NULL_VALUE;
+            current = items[idx];
         } else {
             return EXECUTOR_NULL_VALUE;
-        }
-
-        if (idx) {
-            if (!current.empty() && current.front() == '[') {
-                auto items = json_array_items(current.substr(1, current.size() - 2));
-                if (*idx < items.size()) current = items[*idx];
-                else return EXECUTOR_NULL_VALUE;
-            } else {
-                return EXECUTOR_NULL_VALUE;
-            }
         }
     }
     return std::string(current);

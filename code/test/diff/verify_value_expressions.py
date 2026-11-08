@@ -33,10 +33,6 @@ def cells(out):
     return [tuple(c.strip() for c in l.strip("|").split("|")) for l in lines[1:]]
 
 
-def number_text(q):
-    return "NULL" if q is None else q
-
-
 def same_number(got, want):
     """The engine's text of a number (7.5, 7.50, -3) against the exact number it should be."""
     if want is None:
@@ -53,10 +49,6 @@ def same_number(got, want):
         return True
     # a product of several decimals has more places than the 6 an arithmetic result is printed with: the number is right to those 6 places
     return 10 ** 6 % want.denominator != 0 and abs(value - want) <= Fraction(6, 10 ** 5)
-
-
-def truth_text(t):
-    return "NULL" if t is None else ("1" if t else "0")
 
 
 class Avg(Fraction):

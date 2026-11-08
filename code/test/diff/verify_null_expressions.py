@@ -31,10 +31,6 @@ def fmt(f):
     return s[:-1] if s.endswith(".") else s
 
 
-def reread(f):
-    return float(fmt(f))
-
-
 def dec(v):
     """A float read from a cell as the exact decimal it was written as (the shortest text that reads back to it)."""
     return v if isinstance(v, decimal.Decimal) else decimal.Decimal(repr(float(v)))

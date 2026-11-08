@@ -60,6 +60,8 @@ SELECT UNIX_TIMESTAMP('2024-01-01 00:00:00') > 0, FROM_UNIXTIME(0) IS NOT NULL, 
 # json and misc
 SELECT JSON_EXTRACT('{"a": 1, "b": [1,2]}', '$.a'), JSON_EXTRACT('{"a": 1, "b": [1,2]}', '$.b[1]'), JSON_UNQUOTE(JSON_EXTRACT('{"a": "x"}', '$.a')), JSON_LENGTH('[1,2,3]'), JSON_TYPE('[1]'), JSON_VALID('{'), JSON_VALID('{}')
 SELECT JSON_OBJECT('a', 1, 'b', 'x'), JSON_ARRAY(1, 'a', NULL), JSON_CONTAINS('[1,2]', '1'), JSON_KEYS('{"a":1,"b":2}'), JSON_SET('{"a":1}', '$.b', 2)
+SELECT JSON_EXTRACT('[1,2]', '$[0]'), JSON_EXTRACT('[10, 20, 30]', '$[2]'), JSON_EXTRACT('[1,2]', '$[2]'), JSON_EXTRACT('[[1,2],[3,4]]', '$[1][0]'), JSON_EXTRACT('[{"a":5},{"a":6}]', '$[1].a'), JSON_UNQUOTE(JSON_EXTRACT('["x","y"]', '$[1]')), JSON_EXTRACT('{"x":{"a":1},"a":2}', '$.a'), JSON_EXTRACT('{"x":{"a":1}}', '$.a')
+SELECT JSON_EXTRACT('3', '$[0]'), JSON_EXTRACT('3', '$[1]'), JSON_EXTRACT('{"a":1}', '$[0].a'), JSON_EXTRACT('{"a":1}', '$[1]'), JSON_EXTRACT('[1,2]', '$.a')
 # `->` and `->>` read a JSON column ONLY: a string, a number or the result of a call before the arrow is a syntax error (R60)
 --CREATE TABLE js (id INT PRIMARY KEY, j JSON)
 --INSERT INTO js VALUES (1, '{"a": 5, "b": {"c": "x"}}'), (2, '{"a": null}'), (3, NULL)

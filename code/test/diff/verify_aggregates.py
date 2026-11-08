@@ -14,7 +14,7 @@ read numeric columns, MIN/MAX/SUM/AVG of nothing is NULL), and every group of th
 The result columns are also checked to be named as the statement wrote them (`COUNT(u.id)`).
 Exit code 1 and the statement on the first violation.
 """
-import argparse, os, random, re, sys
+import argparse, os, random, sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import diff_builds as D

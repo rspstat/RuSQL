@@ -170,6 +170,46 @@ TEST_CASE("JSON_EXTRACT reads nested paths and array indices", "[executor][scala
     REQUIRE(r4.value().find("\"Alice\"") == std::string::npos);
 }
 
+// R75: an array at the root (`$[n]`), an index after an index, an index before a key, and a key that an object nested earlier also has -- the answers of a real MySQL 8.4
+TEST_CASE("JSON_EXTRACT paths: root arrays, chained indexes, own members only", "[executor][scalar_func][r75]") {
+    TempDataDir dir("exec_sf_data_json_paths");
+    Executor ex(dir.path);
+    REQUIRE(ex.execute_sql("CREATE DATABASE d").is_ok());
+    REQUIRE(ex.execute_sql("USE d").is_ok());
+    REQUIRE(ex.execute_sql("CREATE TABLE t (id INT PRIMARY KEY)").is_ok());
+    REQUIRE(ex.execute_sql("INSERT INTO t VALUES (1)").is_ok());
+    struct Case { const char* expr; const char* expect; };
+    const Case cases[] = {
+        {"JSON_EXTRACT('[1,2]', '$[0]')", "1"},
+        {"JSON_EXTRACT('[1,2]', '$[1]')", "2"},
+        {"JSON_EXTRACT('[10, 20, 30]', '$[2]')", "30"},
+        {"JSON_EXTRACT('[1,2]', '$[2]')", "NULL"},                                     // (past the end)
+        {"JSON_EXTRACT('[[1,2],[3,4]]', '$[1][0]')", "3"},                             // (an index after an index)
+        {"JSON_EXTRACT('{\"a\":[[1,2],[3,4]]}', '$.a[1][1]')", "4"},
+        {"JSON_EXTRACT('[{\"a\":5},{\"a\":6}]', '$[1].a')", "6"},                      // (a key after an index)
+        {"JSON_EXTRACT('{\"a\":[1,2]}', '$.a[1]')", "2"},
+        {"JSON_UNQUOTE(JSON_EXTRACT('[\"x\",\"y\"]', '$[1]'))", "y"},
+        {"JSON_EXTRACT('{\"x\":{\"a\":1},\"a\":2}', '$.a')", "2"},                     // (the member of the object itself, not the one of the object inside it)
+        {"JSON_EXTRACT('{\"x\":{\"a\":1}}', '$.a')", "NULL"},
+        {"JSON_EXTRACT('{\"ab\":1,\"a\":2}', '$.a')", "2"},                            // (a key is the whole name, not the start of one)
+        {"JSON_EXTRACT('{\"a\": {\"b\": 3}}', '$.a.b')", "3"},
+        {"JSON_EXTRACT('3', '$[0]')", "3"},                                            // (a value that is no array reads as an array of that one value)
+        {"JSON_EXTRACT('3', '$[1]')", "NULL"},
+        {"JSON_EXTRACT('{\"a\":1}', '$[0].a')", "1"},
+        {"JSON_EXTRACT('{\"a\":1}', '$[1]')", "NULL"},
+        {"JSON_EXTRACT('[1,2]', '$.a')", "NULL"},                                      // (a key on an array)
+        // a path that is no path: MySQL refuses it (error 3143); here it is NULL, as it has been -- the cases only keep the parser from reading past the text
+        {"JSON_EXTRACT('[1,2]', 'a')", "NULL"},
+        {"JSON_EXTRACT('[1,2]', '$[x]')", "NULL"},
+        {"JSON_EXTRACT('[1,2]', '$[1')", "NULL"},
+        {"JSON_EXTRACT('[1,2]', '$[99999999999999999999]')", "NULL"},
+    };
+    for (const Case& c : cases) {
+        INFO(c.expr);
+        REQUIRE(eval_expr(ex, c.expr) == c.expect);
+    }
+}
+
 TEST_CASE("REGEXP scalar functions", "[executor][scalar_func]") {
     TempDataDir dir("exec_sf_data_8");
     Executor ex(dir.path);

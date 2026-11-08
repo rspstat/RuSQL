@@ -345,7 +345,7 @@ RuSQL이 실제로 받아서 실행하는 SQL 문법을 한 줄씩 정리한 문
 
 - JSON_VALID / JSON_TYPE / JSON_LENGTH / JSON_KEYS : JSON 검사 · 종류 · 길이 · 키 목록
 - JSON_ARRAY / JSON_OBJECT : JSON 배열 · 객체 만들기
-- JSON_EXTRACT / JSON_VALUE / JSON_UNQUOTE : 경로로 값 꺼내기 · 따옴표 벗기기
+- JSON_EXTRACT / JSON_VALUE / JSON_UNQUOTE : 경로로 값 꺼내기 · 따옴표 벗기기. 경로는 `$` 뒤에 `.키`와 `[n]`을 차례로 쓴다(`$.a.b`, `$[0]`, `$.a[1][0]`, `$[1].b`; 배열이 아닌 값의 `$[0]`은 그 값 자체; R75). `$[last]` · `$[*]` · `$**` · 따옴표 키는 아직 NULL
 - JSON_CONTAINS : 포함 여부
 - JSON_SET / JSON_INSERT / JSON_REPLACE / JSON_REMOVE : 경로의 값을 넣기 · 새로 넣기 · 바꾸기 · 지우기
 

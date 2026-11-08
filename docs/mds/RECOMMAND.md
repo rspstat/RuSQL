@@ -1,6 +1,6 @@
-# RuSQL 추천 목록 — 분류별 (남은 항목만, R74 이후 · 2026-11-08)
+# RuSQL 추천 목록 — 분류별 (남은 항목만, R75 이후 · 2026-11-08)
 
-완료된 항목은 뺐습니다(R44~R74에서 끝낸 것은 `DATE.md`에 있습니다). 항목마다 엔진에 실제로 돌려 보고(진짜 MySQL 8.4.9와 비교) 앱·MCP 코드를 찾아 이미 있거나 일부만 있는 것을 가려낸 판입니다. 점수판은 코퍼스 47개에서 차이 0이고(R71), B+Tree·MVCC 페이지는 R62에서 단순한 자동 재생으로 줄였습니다. 발표·제출물 중 포스터·소개글·메인 화면 캡처는 끝났습니다(`docs/deliverables/`). 점검에서 바뀐 것의 이력은 맨 아래 "참고"에 모았습니다.
+완료된 항목은 뺐습니다(R44~R75에서 끝낸 것은 `DATE.md`에 있습니다). 항목마다 엔진에 실제로 돌려 보고(진짜 MySQL 8.4.9와 비교) 앱·MCP 코드를 찾아 이미 있거나 일부만 있는 것을 가려낸 판입니다. 점수판은 코퍼스 47개에서 차이 0이고(R71), B+Tree·MVCC 페이지는 R62에서 단순한 자동 재생으로 줄였습니다. 발표·제출물 중 포스터·소개글·메인 화면 캡처는 끝났습니다(`docs/deliverables/`). 점검에서 바뀐 것의 이력은 맨 아래 "참고"에 모았습니다.
 
 - **현재 상태:** `일부`(일부만 있음) · `없음` · `오답`(지금 조용히 틀린 값을 돌려줌) · `다름`(MySQL과 다르지만 오류로 드러남)
 - **추천도:** ★ 다섯 개. 기준은 실사용 가치 + 발표 임팩트 + 비용 대비 효과입니다. 졸업작품 마감(11월 말)까지 약 3주를 전제로 합니다. 각 분류 안에서 추천도 순입니다.
@@ -16,10 +16,10 @@
 | 3. 품질 점검 | 3 | 마감 1주 전에 Debug 전체 + `KILL`을 섞은 크래시 시험 | 마감 전에 숨은 회귀와 조용한 오답을 잡습니다 |
 | 4. 프론트 (앱) | 4 | 인덱스 제안 카드의 남은 것(큰 표), 스키마 비교의 빠진 것 | 앱만으로 큰 표에서도 인덱스를 시험해 볼 수 있습니다 |
 | 5. MCP (지금 37개 도구, resources 2개 · prompts 3개) | 1 | `suggest_indexes` 후속(열 사이의 상관 · 큰 표) | 제안이 더 많은 모양의 문장에서 맞아집니다 |
-| 6. MySQL과 다른 작은 차이 | 15 | 조인 뷰의 `UPDATE`·`INSERT`, 프로토콜 오류 번호의 남은 약 20개, `USING` 뒤 모호한 열 | 남은 호환 차이가 줄지만 대부분 눈에 안 띕니다 |
+| 6. MySQL과 다른 작은 차이 | 16 | 조인 뷰의 `UPDATE`·`INSERT`, 프로토콜 오류 번호의 남은 약 20개, `USING` 뒤 모호한 열 | 남은 호환 차이가 줄지만 대부분 눈에 안 띕니다 |
 | 7. 엔진 기능 추가 | 6 | `FULLTEXT`, `FLUSH`·`REPAIR`·`CHECKSUM TABLE` | 글 검색 데모가 가능해지고 `mysqldump`의 `FLUSH TABLES`를 받습니다 |
 | 8. 백엔드 (서버·운영) | 4 | (시간이 되면) 코퍼스 비교 CI | 푸시마다 MySQL과의 차이 0을 자동으로 확인합니다 |
-| 9. SQL 문법 추가 — 보류 | 30 | `INSERT INTO t () VALUES ()`, `GROUPING()`, `SIGNAL`, `UPDATE … JOIN (SELECT …)` | 옮겨 온 MySQL 쿼리가 더 많이 그대로 돕니다 |
+| 9. SQL 문법 추가 — 보류 | 29 | `INSERT INTO t () VALUES ()`, `GROUPING()`, `SIGNAL`, `UPDATE … JOIN (SELECT …)` | 옮겨 온 MySQL 쿼리가 더 많이 그대로 돕니다 |
 
 ## 1. 발표·제출 대비
 
@@ -88,9 +88,10 @@ Claude가 부르는 도구.
 | 공유 잠금의 남은 모양 | 일부 — R74에서 한 표를 평범하게 읽는 `INSERT … SELECT` 원본(기본키 한 점 · 범위 · 전체)은 MySQL과 같은 행 · 틈 잠금을 건다. 남은 것: 조인 · 집계 · 뷰 원본과 서브쿼리가 읽는 표(`INSERT … SELECT` · `UPDATE` · `DELETE` · `INSERT … VALUES` 모두)는 최신 값만 읽고 잠그지 않음, 기본키가 아닌 조건은 읽어서 돌려준 행만 잠그고(MySQL은 훑은 행 모두) 틈은 표 전체를 잠금(MySQL은 그 인덱스의 범위) | ★ | 중 | 잠금을 보여 주는 데모에서 MySQL과 같은 대기 모양이 더 많이 나옵니다. | 훑는 도중에 서브쿼리를 돌리는 문장은 잠금을 기다리려면 훑던 행에서 손을 놓는 법부터 정해야 합니다. 발표에서는 거의 안 보이는 모양입니다. |
 | 트랜잭션 밖의 `SELECT … FOR UPDATE` | 다름(작음) — 잠금을 기다리지 않고 바로 읽음(MySQL은 상대의 잠금이 풀릴 때까지 기다림) | ★ | 하 | 자동 커밋 상태의 잠금 읽기도 MySQL처럼 기다립니다. | R74에서 잠금 표를 재다 보였습니다. 자동 커밋에서는 잠금이 곧 사라지므로 의미가 작습니다. |
 | `CALL`이 돌려주는 결과 집합의 값의 형 | 다름(작음) — 숫자가 글자 형(`'10'`)으로 옴(MySQL은 `10`) | ★ | 하 | 클라이언트가 프로시저 결과 열을 숫자로 받습니다. | R74에서 비교하다 보였습니다. 프로시저가 마지막 `SELECT`의 결과를 글자 표로 넘기는 곳에서 열 형을 잃습니다. |
+| JSON 경로의 남은 모양 | 다름(작음) — `$[last]` · `$[*]` · `$**` · 따옴표 붙은 키(`$."a b"`)는 NULL(MySQL은 값 · 배열 · 모든 값), 잘못된 경로는 NULL(MySQL은 오류 3143), 꺼낸 값의 글자 모양은 원문 그대로(MySQL은 `[1, 2]`처럼 다시 쓰고 `{"a": 1}`로 공백을 넣음) | ★ | 하~중 | `JSON_EXTRACT` · `->`가 MySQL의 모든 경로 모양에 같은 답을 줍니다. | R75에서 배열 첨자(`$[n]`)와 자기 멤버만 찾기는 고쳤습니다. 경로 읽기를 키 · 첨자 · 와일드카드로 나누어 다시 짜면 됩니다. |
 | `SET @@transaction_isolation = x` (SESSION 없이) | 다름(작음) — MySQL은 다음 트랜잭션 하나에만 적용하고(`SET TRANSACTION`처럼) 여기는 세션에 적용합니다. `GLOBAL`도 세션처럼 읽음 | ★ | 하 | 같은 문장이 같은 값을 보입니다. | 어휘 단계에서 `@@session.x`의 범위가 지워져 구분하려면 어휘 분석이 범위를 남겨야 합니다. |
 | 날짜의 남은 모양 | 다름(작음) — `INTERVAL 1 DAY + '2024-01-31'`(INTERVAL이 앞)이 문법 오류, `DATE_SUB('0001-01-01', INTERVAL 1 DAY)`는 MySQL이 `0000-00-00`, `INTERVAL '1.5' DAY`는 MySQL이 글자를 정수 1로 읽음, 이름 붙은 시간대의 `CONVERT_TZ`는 NULL(MySQL도 시간대 표를 안 올리면 같음) | ★ | 하 | 옮겨 온 쿼리의 드문 날짜 식이 그대로 돕니다. | 식 파서가 `INTERVAL`로 시작하는 식을 받도록 하는 것이 가장 큽니다. |
-| MySQL 프로토콜 OK 패킷의 영향 행 수 | 다름(작음) — `CALL p()`는 마지막 문장의 행 수(MySQL은 `SELECT … INTO`에도 1), `ALTER TABLE`은 표의 행 수를 돌려줌(여기는 0) | ★ | 하 | 일부 클라이언트가 보여 주는 "영향 받은 행"이 같아집니다. | `affected_rows_`를 `CALL`과 `ALTER`가 채우도록 합니다. |
+| MySQL 프로토콜 OK 패킷의 영향 행 수 | 다름(작음) — `CALL p()`는 `UPDATE` 같은 쓰기에서는 이미 같고 `SELECT … INTO`만 다름(MySQL은 1, 여기 0), 표를 다시 쓰는 `ALTER TABLE … MODIFY`는 표의 행 수를 돌려줌(MySQL 3, 여기 0; `ADD COLUMN`은 둘 다 0) | ★ | 하 | 일부 클라이언트가 보여 주는 "영향 받은 행"이 같아집니다. | `affected_rows_`를 `CALL`과 `ALTER`가 채우도록 합니다. |
 | 외래키 열 종류 검사 | 다름(작음) — R71의 3780은 큰 갈래(정수끼리 · 글자끼리 …)만 봄: MySQL은 `INT`와 `BIGINT`, 부호가 다른 정수도 거절하는데 여기는 받음 | ★ | 하 | 같은 정의가 같은 오류를 냅니다. | `fk_type_class`에 정수 너비와 부호를 더하면 됩니다(기존 시험 · 시연 스키마가 걸리는지 먼저 확인). |
 | 뷰를 만들 때의 `ONLY_FULL_GROUP_BY` | 다름(작음) — `CREATE VIEW v AS SELECT COUNT(*), x FROM t`를 만들 때 거절합니다(MySQL은 만들 때는 받고 조회할 때 거절) | ★ | 하 | MySQL이 받아 주는 뷰가 덤프 복원에서 거절되는 일이 없어집니다. | R60의 시험을 쓰다 알게 된 것입니다. 뷰 정의의 검사는 만들 때 하지 않고 조회에서 하면 됩니다. |
 | `SHOW TABLE STATUS`의 `Create_time`·`Update_time` | 다름 — NULL입니다(MySQL은 표를 만들고 마지막으로 바꾼 시각). R60에서 크기는 InnoDB의 쪽 수로 맞췄습니다 | ★ | 하~중 | 관리 도구가 표를 만든·바꾼 시각을 보여 줄 수 있습니다. | 표를 만든 시각은 카탈로그에 저장해야 재시작 뒤에도 남고, 바뀐 시각은 문장마다 갱신해야 합니다. |
@@ -147,15 +148,14 @@ Claude가 부르는 도구.
 | `USE` · `FORCE` · `IGNORE INDEX` | 없음 (문법 오류). 힌트 주석 `/*+ … */`은 `MAX_EXECUTION_TIME` 말고는 읽고 무시함 | ★★ | 중 | 인덱스 힌트를 쓴 기존 쿼리가 오류 없이 돌고, 플래너를 사람이 이끌 수 있습니다. | 플래너에 힌트를 전달해야 합니다. |
 | `JSON_TABLE` | 없음 | ★★ | 상 | JSON 배열을 행으로 펼치는 쿼리가 가능하지만 쓰임새에 비해 큽니다. | 쓰임새에 비해 큽니다. |
 | `LOAD DATA` / `INTO OUTFILE` | 없음 (UI의 CSV 가져오기·내보내기는 있음) | ★★ | 중 | 서버 파일을 한 번에 적재·내보내기 하지만 앱의 CSV 기능이 이미 대신합니다. | 서버 파일 접근 보안 문제가 있고 UI가 이미 해결합니다. |
-| 없는 함수 묶음 | 일부 — 흔한 MySQL 함수 이름 254개를 불러 보니 **45개가 없음**: JSON 13(`JSON_MERGE_PATCH`, `JSON_QUOTE`, `JSON_SEARCH`, `JSON_PRETTY` …), `INET_ATON`·`INET_NTOA`·`INET6_*`·`IS_IPV4/6` 6, `UUID_TO_BIN`·`BIN_TO_UUID`·`UUID_SHORT`·`IS_UUID` 4, `AES_*`·`COMPRESS`·`RANDOM_BYTES` 7, `GET_LOCK` 계열 3, `CONNECTION_ID`·`CHARSET`·`COLLATION`·`COERCIBILITY` 4, `CONVERT_TZ`, `BIT_XOR`, `BENCHMARK`, `LOAD_FILE`, `ST_*` | ★★ | 하 | 도구와 쿼리가 부르는 함수 45개가 오류 없이 돕니다. `CONNECTION_ID`·`CHARSET`·`COLLATION`은 접속 직후 호환에 도움이 됩니다. | 하나씩은 싸지만 `CONNECTION_ID`·`CHARSET`·`COLLATION`은 도구가 접속 직후 부르는 경우가 있어 먼저 하면 좋습니다. |
-| `PERCENTILE_CONT` · `PERCENTILE_DISC` `… WITHIN GROUP (ORDER BY …)` | 일부 — `MEDIAN`만 | ★★ | 하~중 | 중앙값 말고도 백분위 통계를 쿼리 한 줄로 냅니다. | PostgreSQL·Oracle에 있습니다(MySQL에는 없음). |
-| 뷰 `WITH CHECK OPTION` | 없음 (문법 오류) | ★★ | 하~중 | 뷰를 통한 변경이 뷰 조건을 벗어나지 않도록 막습니다. | MySQL·PostgreSQL·Oracle 모두 있습니다. 갱신 가능한 뷰와 짝입니다. |
-| `CREATE SEQUENCE` · `NEXT VALUE FOR` | 없음 (`AUTO_INCREMENT`만) | ★★ | 중 | PostgreSQL·Oracle 방식의 시퀀스를 쓸 수 있습니다(지금은 `AUTO_INCREMENT`만). | PostgreSQL·Oracle에 있습니다. |
+| 없는 함수 묶음 | 일부 — 점검(R75)에서 흔한 MySQL 함수 53개를 진짜 MySQL과 견주니 **39개가 없음**: JSON 12(`JSON_MERGE_PATCH` · `JSON_MERGE` · `JSON_MERGE_PRESERVE` · `JSON_QUOTE` · `JSON_SEARCH` · `JSON_PRETTY` · `JSON_DEPTH` · `JSON_OVERLAPS` · `JSON_CONTAINS_PATH` · `JSON_ARRAY_APPEND` · `JSON_ARRAY_INSERT` · `JSON_STORAGE_SIZE`)와 `MEMBER OF` 연산자, `INET_ATON` · `INET_NTOA` · `INET6_ATON` · `INET6_NTOA` · `IS_IPV4` · `IS_IPV6` 6, `UUID_TO_BIN` · `BIN_TO_UUID` · `UUID_SHORT` · `IS_UUID` 4, `AES_ENCRYPT` · `AES_DECRYPT` · `COMPRESS` · `UNCOMPRESS` · `UNCOMPRESSED_LENGTH` · `RANDOM_BYTES` 6, `GET_LOCK` · `RELEASE_LOCK` · `IS_FREE_LOCK` 3, `CONNECTION_ID` · `CHARSET` · `COLLATION` · `COERCIBILITY` 4, `BIT_XOR` · `BENCHMARK` · `LOAD_FILE` 3, `ST_*`(공간). (`CONVERT_TZ`는 고정 오프셋으로 이미 됨) | ★★ | 하 | 도구와 쿼리가 부르는 함수가 오류 없이 돕니다. `CONNECTION_ID`·`CHARSET`·`COLLATION`은 접속 직후 호환에 도움이 됩니다. |
+| `PERCENTILE_CONT` · `PERCENTILE_DISC` `… WITHIN GROUP (ORDER BY …)` | 일부 — `MEDIAN`만 **MySQL에도 없는 문법**(호환 목표 밖). | ★★ | 하~중 | 중앙값 말고도 백분위 통계를 쿼리 한 줄로 냅니다. | PostgreSQL·Oracle에 있습니다(MySQL에는 없음). |
+| `CREATE SEQUENCE` · `NEXT VALUE FOR` | 없음 (`AUTO_INCREMENT`만) **MySQL에도 없는 문법**(MariaDB·PostgreSQL 것, 호환 목표 밖). | ★★ | 중 | PostgreSQL·Oracle 방식의 시퀀스를 쓸 수 있습니다(지금은 `AUTO_INCREMENT`만). | PostgreSQL·Oracle에 있습니다. |
 | `CREATE EVENT` | 없음 | ★ | 중~상 | 주기 작업을 예약할 수 있지만 쓰임새가 작습니다. | 스케줄러가 필요한데 쓰임새가 작습니다. |
 | 온라인 DDL 문법 (`ALTER … ALGORITHM=INPLACE, LOCK=NONE`) | 없음 (문법 오류) | ★ | 하(주의) | `ALGORITHM=INPLACE` 같은 DDL이 오류 없이 되지만, 락을 그대로 쓰면 조용한 차이가 되므로 주의가 필요합니다. | 셋 다 있습니다. 받기만 하고 락을 그대로 쓰면 조용한 차이가 되므로 신중히. |
-| `GROUPS` 윈도 프레임 | 없음 | ★ | 중 | PostgreSQL 전용 윈도 프레임을 쓸 수 있지만 효과는 작습니다. | PostgreSQL에만 있습니다. |
+| `GROUPS` 윈도 프레임 | 없음 **MySQL에도 없는 문법**(오류 1235, 호환 목표 밖). | ★ | 중 | PostgreSQL 전용 윈도 프레임을 쓸 수 있지만 효과는 작습니다. | PostgreSQL에만 있습니다. |
 | 다중 표 `DELETE`의 `JOIN … USING (열)`·`FULL OUTER JOIN`·`CROSS JOIN … ON` | 없음 ("Expected ON", "Unexpected token(s) after end of statement": 파서가 `ON`이 있는 `JOIN`·`LEFT JOIN`·`RIGHT JOIN`만 받음) | ★ | 하 | MySQL이 받는 다중 표 `DELETE`의 조인 모양이 오류로 거절되지 않습니다. | R67에서 `KILL`의 확인점을 넣다 알게 됨. `executor_multi.cpp`의 `USING`·`Cross/Natural/FullOuter` 분기는 이 문장에서 닿지 않는 코드입니다. |
-| `CREATE TYPE`, `DEFERRABLE` 제약, 부분 인덱스, 행 레벨 보안(`CREATE POLICY`) | 없음 | ★ | 상 | PostgreSQL·Oracle의 고급 기능이 생기지만 범위가 커서 이번 마감과는 맞지 않습니다. | PostgreSQL·Oracle에 있고 범위가 큽니다. |
+| `CREATE TYPE`, `DEFERRABLE` 제약, 부분 인덱스, 행 레벨 보안(`CREATE POLICY`) | 없음 **MySQL에도 없는 문법**(호환 목표 밖). | ★ | 상 | PostgreSQL·Oracle의 고급 기능이 생기지만 범위가 커서 이번 마감과는 맞지 않습니다. | PostgreSQL·Oracle에 있고 범위가 큽니다. |
 
 ## 참고: 점검에서 바로잡은 것 (처음 표와 달라진 곳)
 
@@ -186,6 +186,13 @@ Claude가 부르는 도구.
 6. **시간이 되면:** 최적화 전후 속도 애니메이션, 코퍼스 비교 CI, RuSQL vs MySQL 분할 화면, 스키마 비교에 뷰·트리거.
 7. **미루거나 하지 않는 것:** `FULLTEXT`, 표현식 인덱스, 열 단위 권한, 감사 로그, TLS, `caching_sha2_password`, WAL 복제·XA, 테마, 그리고 SQL 문법 추가 전부("SQL 문법 추가 — 보류").
 8. **직접 하실 일:** MCP 시연 리허설(`DEMO.md` 8번), 크래시 복구 장면 리허설(`DEMO.md` 3번), 화면 녹화, 앱 화면 사람 눈 점검.
+
+## 참고: R75에서 끝낸 것 (2026-11-08, 사용자가 고른 "총 점검의 1·2·3번")
+
+- **총 점검**: 남은 73개 항목을 진짜 MySQL과 같은 SQL로 견주었다. 문서가 낡은 곳 둘 — 뷰 `WITH CHECK OPTION`(R71부터 됨)과 `CONVERT_TZ`(됨) — 을 바로잡았고, 없는 함수는 45개가 아니라 39개, MySQL에도 없는 문법 넷(`PERCENTILE_CONT` · `CREATE SEQUENCE` · `GROUPS` 프레임 · `CREATE TYPE`)은 호환 목표 밖으로 표시했다.
+- **`JSON_EXTRACT`의 배열 경로 버그**: `JSON_EXTRACT('[1,2]', '$[1]')`이 NULL을 주던 것(MySQL은 `2`)을 고쳤다. 최상위 배열의 `$[n]`, 첨자 뒤의 첨자(`$[1][0]`), 첨자 뒤의 키(`$[1].a`), 배열이 아닌 값의 `$[0]`(그 값 자체), 그리고 안쪽 객체의 같은 이름 키를 먼저 집던 것(`{"x":{"a":1},"a":2}`의 `$.a`가 1이던 것)이다.
+- **정리**: 쓰이지 않던 npm 의존성 `@tauri-apps/plugin-opener`, 템플릿 잔재 `src/assets/react.svg` · `public/tauri.svg`, 죽은 상수 `MCP_TOOL_NAMES`, Python 시험 도구의 쓰이지 않는 `import` 3개와 도우미 함수 3개를 지웠다.
+- **점검했지만 지우지 않은 것**(판단이 필요함): `assets/`의 아이콘 이미지 3개, `docs/html/index.html`, 낡은 `docs/mds/PLAN.md`, 저장소에 올라간 `.claude/settings.local.json`, `legacy` 브랜치, `git stash` 한 건, 빈 `src-tauri/src/lib.rs`, 파일 안에서만 쓰이는데 `export`된 28개 선언.
 
 ## 참고: R74에서 끝낸 것 (2026-11-08, 사용자가 고른 "UPDATE·DELETE 안의 서브쿼리, INSERT … SELECT의 잠금")
 
