@@ -749,7 +749,7 @@ StringResult Executor::exec_delete_inner(SharedDatabase& s, const std::string& t
             std::vector<Row> soft_olds, soft_news;
             for (std::size_t ti = 0; ti < n_targets; ti++) {
                 Row& row = rows[hit.usable ? hit.positions[ti] : ti];
-                // PLAN.md-tracked bug fix: the plain matches_condexpr can't evaluate a
+                // Bug fix: the plain matches_condexpr can't evaluate a
                 // ConditionValue::Subquery leaf, so a subquery-bearing WHERE clause matched
                 // zero rows here even though rows_to_delete (above) correctly identified the
                 // candidates via matches_condition_with_subquery -- dispatch on the same
@@ -835,7 +835,7 @@ StringResult Executor::exec_delete_inner(SharedDatabase& s, const std::string& t
         auto table_lock = acquire_table_data_locks(s, {table}, /*exclusive=*/true);
         auto& rows = s.tables.at(table);
         std::size_t before = rows.size();
-        // PLAN.md-tracked bug fix: same reasoning as the two soft-delete loops below --
+        // Bug fix: same reasoning as the two soft-delete loops below --
         // dispatch to the subquery-aware matcher when the condition needs it.
         bool has_subq = condition_has_subquery(condition);
         // A handful of index-located rows are erased by position (stable order, like remove_if);
@@ -897,7 +897,7 @@ StringResult Executor::exec_delete_inner(SharedDatabase& s, const std::string& t
             auto& rows = s.tables.at(table);
             std::vector<Row> soft_olds, soft_news;
             for (auto& row : rows) {
-                // PLAN.md-tracked bug fix: the plain matches_condexpr can't evaluate a
+                // Bug fix: the plain matches_condexpr can't evaluate a
                 // ConditionValue::Subquery leaf, so a subquery-bearing WHERE clause matched
                 // zero rows here even though rows_to_delete (above) correctly identified the
                 // candidates via matches_condition_with_subquery -- dispatch on the same

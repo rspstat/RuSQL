@@ -1099,7 +1099,7 @@ public:
     // original WHERE clause elsewhere in the engine.
     static bool gap_range_contains(const GapRange& range, const std::string& value);
 
-    // ── Index-assisted existence checks (FK/UNIQUE validation perf, see PLAN.md Section E)
+    // ── Index-assisted existence checks (FK/UNIQUE validation perf)
     // Does `table_rows` contain a row where `column` == val? Prefers an existing PK B+Tree /
     // secondary B+Tree / hash index covering (table, column) over a linear scan when one is
     // available. Safe to use even for an existence-ONLY question against a non-unique

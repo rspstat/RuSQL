@@ -55,7 +55,7 @@ StringResult Executor::exec_with(SharedDatabase& s, std::vector<std::pair<std::s
 
             // Perf: dedup used to be std::find(accumulated.begin(), accumulated.end(), mapped)
             // -- an O(n) linear scan per candidate row, making the whole recursive-accumulation
-            // loop O(n^2) in the number of rows produced (PLAN.md Section E). Every `mapped` row
+            // loop O(n^2) in the number of rows produced. Every `mapped` row
             // in this loop has exactly `cols`'s columns plus the two constant "_xmin"/"_xmax"
             // sentinels (see below), so joining `cols`'s values in their fixed vector order is a
             // faithful stand-in for Row equality here -- lets dedup use an O(1)-average hash set

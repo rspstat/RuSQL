@@ -103,7 +103,7 @@ struct ServerStatus {
 }
 
 // ─── code/ 디렉터리 위치 헬퍼 ─────────────────────────────────
-// PLAN.md P1 "컴파일타임 개발자 경로 하드코딩 → 배포 불가" 수정: env!("CARGO_MANIFEST_DIR")는
+// "컴파일타임 개발자 경로 하드코딩 → 배포 불가" 수정: env!("CARGO_MANIFEST_DIR")는
 // 빌드 당시 소스 체크아웃 경로를 실행 파일에 그대로 박아 넣어서, 빌드한 PC와 다른 곳에
 // 복사하면 존재하지 않는 디렉터리를 가리키게 됐다. 디버그 빌드(`cargo tauri dev`)에서는
 // 그대로 CARGO_MANIFEST_DIR 기준으로 계산하고(개발 중엔 항상 유효), 릴리즈 빌드에서는
@@ -1146,7 +1146,7 @@ fn find_python_with_mcp() -> Result<String, String> {
 }
 
 fn write_mcp_into(config_path: &std::path::Path, entry: &serde_json::Value) -> Result<(), String> {
-    // PLAN.md P1 "MCP 설정 병합 실패 시 기존 설정 덮어씀" 수정: 기존 설정 파일이 있는데
+    // "MCP 설정 병합 실패 시 기존 설정 덮어씀" 수정: 기존 설정 파일이 있는데
     // 파싱에 실패하면(트렁케이트/문법 오류 등) 조용히 빈 객체로 대체한 뒤 그대로 덮어써서
     // 사용자의 기존 설정(다른 MCP 서버 등록 등)이 전부 사라지던 것 -- 파일을 건드리지
     // 않고 즉시 에러로 반환한다.

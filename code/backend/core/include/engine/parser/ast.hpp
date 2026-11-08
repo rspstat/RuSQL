@@ -309,7 +309,7 @@ struct ConditionValue {
     struct Subquery { StatementPtr query; };
     struct Between { std::string lo, hi; bool lo_quoted = false, hi_quoted = false; };
     struct LiteralList { std::vector<std::string> values; std::vector<bool> quoted; };
-    // PLAN.md P0 fix: the RHS of a comparison (`WHERE v > id + 100`) used to parse
+    // Fix: the RHS of a comparison (`WHERE v > id + 100`) used to parse
     // as a single token, silently dropping the rest of the expression. Arith holds
     // a full ArithExpr so the RHS can be any arithmetic/function expression, not
     // just a bare literal or column reference.

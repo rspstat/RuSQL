@@ -1422,7 +1422,7 @@ std::size_t count_occurrences(const std::string& haystack, const std::string& ne
     return count;
 }
 
-// PLAN.md P0 fix: the query cache had no notion of non-determinism, so a SELECT
+// Fix: the query cache had no notion of non-determinism, so a SELECT
 // calling NOW()/RAND()/UUID()/etc. got cached on first execution and then kept
 // returning that same stale value forever (nothing ever invalidates a cache entry
 // that doesn't reference a table whose DML/DDL changed). Word-boundary matching

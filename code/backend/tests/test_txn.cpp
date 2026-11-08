@@ -223,7 +223,7 @@ TEST_CASE("WAL decode rejects a record whose content was corrupted without break
           "[txn][wal]") {
     // 손상이 길이 프리픽스가 아니라 문자열 "내용" 바이트를 건드리면, 체크섬 없이는 프레이밍이
     // 그대로 유효해 보여 decode()가 손상된 데이터를 조용히 정상 레코드로 받아들였다. 체크섬
-    // 도입 후엔 이런 경우를 명시적으로 감지해 nullopt를 반환해야 한다(PLAN.md: "WAL/Undo
+    // 도입 후엔 이런 경우를 명시적으로 감지해 nullopt를 반환해야 한다("WAL/Undo
     // 디코딩이 체크섬 없음").
     WalRecord record{WalOp::Insert, 42, "t", "k1", "{\"a\":1}"};
     auto encoded = WalManager::encode(record);

@@ -184,7 +184,7 @@ TEST_CASE("DiskManager save_table replaces an existing file atomically, leaving 
     // Regression: save_table used to open its destination with truncate(true) and write
     // in place, with no fsync -- a crash between the truncate and the write completing
     // left the file corrupt with the old contents already gone, and even a clean write
-    // was never durably synced to disk (PLAN.md, section C). The fix writes to a sibling
+    // was never durably synced to disk. The fix writes to a sibling
     // .tmp file, fsyncs it, then renames it over the destination; this checks the
     // happy-path result of that (overwrite still works, no leftover .tmp file) since a
     // real crash mid-write isn't something a unit test can inject.

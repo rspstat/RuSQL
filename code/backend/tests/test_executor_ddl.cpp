@@ -143,7 +143,7 @@ TEST_CASE("ALTER TABLE add/drop/rename/modify column", "[executor][ddl]") {
 
 TEST_CASE("ALTER TABLE RENAME COLUMN keeps PK/secondary/hash/composite index reads correct",
           "[executor][ddl]") {
-    // PLAN.md P0 regression test: RENAME COLUMN updated the schema and s.tables rows
+    // Regression test: RENAME COLUMN updated the schema and s.tables rows
     // but never refreshed the indexes' own cached row-JSON payloads or column-name
     // metadata. Reading the renamed column through ANY index-based access path (PK
     // point lookup, secondary/hash/composite index lookup) used to silently return

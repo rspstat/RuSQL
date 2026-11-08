@@ -1428,7 +1428,7 @@ TEST_CASE("aggregates inside expressions, functions and CASE in the select list"
     REQUIRE(table_cells(ok_text(ex, "SELECT UPPER('max(v)') AS u FROM a ORDER BY aid")) == Rows(6, {"MAX(V)"}));
 
     // a calculation goes on from the AVG the select list shows (4 places, rounded half away from zero): 1, 2, 2 is 1.6667 and 1.6667 * 3 is 5.0001.
-    // (MySQL 8.4 goes on from the 9 digits it holds -- 1.666666666 -- and gives 5.0000: a known difference, see PLAN.md)
+    // (MySQL 8.4 goes on from the 9 digits it holds -- 1.666666666 -- and gives 5.0000: a known difference, see RECOMMAND.md)
     REQUIRE(ex.execute_sql("CREATE TABLE f (id INT PRIMARY KEY, v INT)").is_ok());
     REQUIRE(ex.execute_sql("INSERT INTO f VALUES (1,1),(2,2),(3,2)").is_ok());
     REQUIRE(table_cells(ok_text(ex, "SELECT AVG(v) * 3 AS t FROM f")) == Rows{{"5.0001"}});

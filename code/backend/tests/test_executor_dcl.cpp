@@ -250,7 +250,7 @@ TEST_CASE("VACUUM removes dead (deleted) rows and reclaims them", "[executor][dc
 
 TEST_CASE("VACUUM rebuilds the PK index using the real PK column, not an arbitrary row value",
           "[executor][dcl]") {
-    // PLAN.md P0 regression test: exec_vacuum used to rebuild the PK B+Tree with
+    // Regression test: exec_vacuum used to rebuild the PK B+Tree with
     // `row.begin()->second` (the first entry in Row's unordered_map, in whatever
     // order that happens to iterate) instead of resolving the schema's actual PK
     // column. Declaring the PK as a non-first column reproduces the corruption

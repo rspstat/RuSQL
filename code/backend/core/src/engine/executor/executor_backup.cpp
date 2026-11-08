@@ -27,7 +27,7 @@ struct FkCheckSuppressGuard {
     ~FkCheckSuppressGuard() { exec.skip_fk_checks = prev; }
 };
 
-// PLAN.md (section D): BACKUP/RESTORE used to pass the user-supplied filename straight
+// Security: BACKUP/RESTORE used to pass the user-supplied filename straight
 // to std::ofstream/ifstream with no validation -- arbitrary file write (BACKUP) / read+
 // execute-as-SQL (RESTORE) anywhere the server process can reach. Only a bare filename
 // (no '/', '\', ':', or "..") is accepted, confined to <data_dir>/_backups/.

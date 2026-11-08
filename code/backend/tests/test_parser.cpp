@@ -157,7 +157,7 @@ std::vector<std::string> split_statements(const std::string& sql) {
 } // namespace
 
 TEST_CASE("Trailing garbage after a complete statement is rejected", "[parser]") {
-    // PLAN.md P0 regression test: Parser::parse() used to return Ok as soon as
+    // Regression test: Parser::parse() used to return Ok as soon as
     // parse_stmt() produced a valid statement, without checking that every token
     // had been consumed — so `SELECT * FROM t))) garbage` silently ran as
     // `SELECT * FROM t`. EXPLAIN's recursive parse_stmt() call must still be

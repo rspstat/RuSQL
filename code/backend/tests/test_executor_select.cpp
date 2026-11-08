@@ -31,7 +31,7 @@ TEST_CASE("SELECT * with WHERE returns matching rows", "[executor][select]") {
 }
 
 TEST_CASE("WHERE supports an arithmetic expression on the right-hand side", "[executor][select]") {
-    // PLAN.md P0 regression test: the RHS of a comparison used to parse a single
+    // Regression test: the RHS of a comparison used to parse a single
     // token, so `WHERE v > id + 100` silently dropped `+ 100` and evaluated as
     // `v > id`. id=1,v=50: 50 > 101 is false. id=2,v=150: 150 > 102 is true.
     TempDataDir dir("exec_sel_data_where_arith");
@@ -49,7 +49,7 @@ TEST_CASE("WHERE supports an arithmetic expression on the right-hand side", "[ex
 
 TEST_CASE("Double unary minus evaluates correctly instead of producing the literal string \"--N\"",
           "[executor][select]") {
-    // PLAN.md P0 regression test: the lexer folds a `-` immediately followed by a
+    // Regression test: the lexer folds a `-` immediately followed by a
     // digit into a single negative NumberLit token whenever the preceding token
     // isn't itself a value (see lexer.cpp) -- which is exactly what happens to the
     // second `-` in `- -5` (the first bare Minus operator isn't a "value", so "-5"
@@ -103,7 +103,7 @@ TEST_CASE("WHERE with a simple RHS still resolves to a PK index access path", "[
 }
 
 TEST_CASE("Correlated subquery outer reference works inside an arithmetic RHS expression", "[executor][subquery]") {
-    // PLAN.md P0 fix follow-up: an outer-row column reference must be substituted
+    // Fix follow-up: an outer-row column reference must be substituted
     // wherever it appears inside a ConditionValue::Arith tree (e.g. `d.id = e.dept_id + 0`), not just when the whole RHS is a bare
     // outer-column reference.
     TempDataDir dir("exec_sel_data_correlated_arith");

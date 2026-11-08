@@ -34,9 +34,8 @@ inline bool parallel_enabled() {
 // 병렬 스캔 최소 행 수: CPU 코어 수에 반비례 조정.
 // NOTE: the Rust original checked the env var literally named "RUSTDB_parallel_min_rows()"
 // (a real typo — a valid env var name can't contain '(' ')', so the override never
-// actually applied) and was faithfully preserved that way here for a while (docs/mds/
-// PLAN.md P2). Fixed to a real, settable name matching parallel_enabled()'s
-// RUSTDB_PARALLEL convention.
+// actually applied) and was faithfully preserved that way here for a while. Fixed to a
+// real, settable name matching parallel_enabled()'s RUSTDB_PARALLEL convention.
 inline std::size_t parallel_min_rows() {
     if (const char* v = std::getenv("RUSTDB_PARALLEL_MIN_ROWS")) {
         try {

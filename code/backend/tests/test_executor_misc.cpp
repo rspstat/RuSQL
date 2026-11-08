@@ -78,7 +78,7 @@ TEST_CASE("BACKUP produces SQL text and RESTORE replays it into a fresh database
         auto backup = ex.execute_sql("BACKUP DATABASE company INTO '" + backup_filename + "'");
         REQUIRE(backup.is_ok());
         REQUIRE(backup.value().find("Backup of 'company' written") != std::string::npos);
-        // BACKUP/RESTORE are sandboxed to <data_dir>/_backups/ (PLAN.md section D fix),
+        // BACKUP/RESTORE are sandboxed to <data_dir>/_backups/ (a security fix),
         // not the raw path the caller supplied.
         REQUIRE(fs::exists(dir.path + "/_backups/" + backup_filename));
     }
@@ -327,7 +327,7 @@ TEST_CASE("Multi-table DELETE keeps the target table's composite secondary index
     REQUIRE(ci.search_exact({"6", "2000"}).has_value());
 }
 
-// Regression for PLAN.md P2: multi-table DELETE previously only maintained the PK B+Tree
+// Regression: multi-table DELETE previously only maintained the PK B+Tree
 // and composite indexes (test above) -- secondary B+Tree and hash indexes were never
 // touched at all, left stale after the deleted rows' entries should have been removed.
 TEST_CASE("Multi-table DELETE keeps secondary and hash indexes consistent, not stale",
@@ -419,7 +419,7 @@ TEST_CASE("MERGE applies matched-update, matched-delete, and not-matched-insert 
     REQUIRE(new_dept->at("name") == "New Division");
 }
 
-// Regression for PLAN.md P2 (the most severe of the three): MERGE previously touched ZERO
+// Regression (the most severe of the three): MERGE previously touched ZERO
 // index kinds at all -- not PK B+Tree, not secondary, not hash, not composite -- across its
 // UPDATE/DELETE/INSERT branches. This exercises all three branches in one MERGE and checks
 // every index kind stays consistent, not stale.

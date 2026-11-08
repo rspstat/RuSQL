@@ -443,7 +443,7 @@ TEST_CASE("sessions that insert, update and delete UNIQUE values together never 
                     const std::string a = "'" + std::string(1, "xXyY"[pick(4)]) + "'", b = std::to_string(pick(4)), v = std::to_string(pick(5));
                     std::size_t op = pick(12);
                     // (only INSERTs run inside a transaction: a DELETE or UPDATE that is rolled back brings its old row back, and by then another session may hold the
-                    // key it freed -- the engine lets the INSERT in while the DELETE is uncommitted. That is the engine's, not the cache's: see the PLAN.md note)
+                    // key it freed -- the engine lets the INSERT in while the DELETE is uncommitted. That is the engine's, not the cache's: see DATE.md, Oct 13, R23)
                     if (in_txn && (op == 5 || op == 6 || op == 7 || op == 8 || op == 11)) op = 0;
                     switch (op) {
                     case 0: case 1: case 2: run("INSERT INTO u (k, w) VALUES (" + k + ", " + std::to_string(w) + ")"); break;

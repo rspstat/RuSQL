@@ -17,7 +17,7 @@ std::string to_upper(const std::string& s) {
     return out;
 }
 
-// PLAN.md P0 fix: a lone `-` followed directly (no whitespace) by a digit, where the
+// Fix: a lone `-` followed directly (no whitespace) by a digit, where the
 // preceding token isn't itself a value, gets folded by the lexer into a single
 // negative NumberLit token (see lexer.cpp's '-' case) -- which is exactly what
 // happens to the second `-` in a double-unary chain like `- -5` (the first bare
@@ -761,7 +761,7 @@ Condition Parser::parse_pred_tail(ArithExpr left) {
             advance();
             return ConditionValue(ConditionValue::Literal{"__NULL__"});
         }
-        // PLAN.md P0 fix: the RHS used to consume a single token (column/number/string/
+        // Fix: the RHS used to consume a single token (column/number/string/
         // keyword-as-column), so `WHERE v > id + 100` silently dropped `+ 100` and
         // evaluated as `v > id`. Parsing a full arithmetic expression here — the same
         // parser already used for the LHS just above — makes the RHS support the same

@@ -152,7 +152,7 @@ void Executor::maybe_auto_vacuum(SharedDatabase& s, const std::string& table) {
     if (rows.size() < before) {
         std::vector<Row> rows_clone = rows;
         if (auto idx_it = s.indexes.find(table); idx_it != s.indexes.end()) {
-            // PLAN.md P0 fix: see exec_vacuum in executor_maint.cpp for the same fix —
+            // Fix: see exec_vacuum in executor_maint.cpp for the same fix —
             // resolve the real PK column from the schema instead of grabbing an
             // arbitrary (HashMap-order-dependent) row value.
             std::string pk_col_name;

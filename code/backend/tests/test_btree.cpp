@@ -20,7 +20,7 @@ constexpr std::size_t TEST_MIN_KEYS = 7;
 
 // Recursively verifies every non-root node has at least TEST_MIN_KEYS keys (the B-tree
 // minimum-key invariant a correct delete-side rebalance must maintain -- this is exactly
-// what PLAN.md's "no underflow rebalancing" gap meant nothing enforced), and returns the
+// what the "no underflow rebalancing" gap meant nothing enforced), and returns the
 // total number of leaf keys found (cross-checked against BPlusTree::len() by callers).
 std::size_t check_min_keys_invariant(const Node& node, bool is_root) {
     return std::visit(
@@ -55,7 +55,7 @@ TEST_CASE("cmp_keys is numeric-aware", "[btree]") {
 }
 
 TEST_CASE("cmp_keys treats differently-formatted equal-valued numeric strings as distinct", "[btree]") {
-    // PLAN.md P0 regression test: "007" and "07" both parse to the f64 value 7.0,
+    // Regression test: "007" and "07" both parse to the f64 value 7.0,
     // so cmp_keys used to report them equal — colliding two distinct string PK
     // values (e.g. zip codes, SKUs) into what looked like a single duplicate key.
     REQUIRE(cmp_keys("007", "07") != 0);
@@ -78,7 +78,7 @@ TEST_CASE("BPlusTree keeps differently-formatted equal-valued numeric string key
 }
 
 TEST_CASE("cmp_keys compares composite-index keys (NUL-joined columns) segment-by-segment, numerically", "[btree]") {
-    // PLAN.md P0 regression test: CompositeIndex::make_key joins column values with
+    // Regression test: CompositeIndex::make_key joins column values with
     // a '\x00' separator ("val1\x00val2..."). The embedded NUL byte means the whole
     // joined string never parses as a single f64, so cmp_keys always fell back to
     // plain lexicographic comparison of the WHOLE key -- sorting a leading numeric
@@ -173,7 +173,7 @@ TEST_CASE("BPlusTree remove", "[btree]") {
     REQUIRE(tree.len() == 9);
 }
 
-// Regression tests for PLAN.md's "B+Tree 삭제 시 언더플로우 리밸런싱 없음" (no delete-side
+// Regression tests for the "B+Tree 삭제 시 언더플로우 리밸런싱 없음" (no delete-side
 // rebalancing -- a node could shrink to a single key and just stay that way forever,
 // with no borrow/merge, letting the tree grow arbitrarily sparse under a heavy-delete
 // workload). All of these use enough keys (well beyond ORDER=16 squared) to force

@@ -59,7 +59,7 @@ int cmp_key_segment(std::string_view a, std::string_view b, KeyKind kind) {
         return a.compare(b) < 0 ? -1 : 1;
     }
     if (kind == KeyKind::Number) {
-        // PLAN.md P0 fix: numerically equal but different string representations (e.g. "007" vs "07") used to compare as the
+        // Fix: numerically equal but different string representations (e.g. "007" vs "07") used to compare as the
         // same key, colliding two distinct values. The tie is broken by the bytes, so they stay adjacent but are never duplicates.
         if (int c = compare_numbers(a, b)) return c;
         return bytes_order(a, b);
@@ -89,7 +89,7 @@ int cmp_keys(const std::string& a, const std::string& b) {
     };
     // A plain key (no NUL byte -- everything but a composite key) is a single segment: no splitting, no copies.
     if (a.find('\x00') == std::string::npos && b.find('\x00') == std::string::npos) return cmp_key_segment(a, b, kind_of(0));
-    // PLAN.md P0 fix: composite-index keys join multiple columns with a NUL byte
+    // Fix: composite-index keys join multiple columns with a NUL byte
     // ("val1\x00val2\x00..."), so the whole joined string almost never parses as
     // one f64 (an embedded '\x00' isn't a valid numeric character) and always fell
     // back to plain lexicographic comparison — sorting e.g. department_id "10"

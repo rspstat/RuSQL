@@ -865,7 +865,7 @@ StringResult Executor::exec_alter(SharedDatabase& s, const std::string& table, A
             }
         }
 
-        // PLAN.md P0 fix: every index caches a serialized copy of each row (or, for
+        // Fix: every index caches a serialized copy of each row (or, for
         // composite/hash indexes, tracks the renamed column by name) — none of that
         // was ever refreshed here, so an index-based read (PK point lookup,
         // secondary/hash/composite lookup) kept returning the renamed column as
@@ -1353,7 +1353,7 @@ StringResult Executor::exec_drop_database(SharedDatabase& s, const std::string& 
         s.indexes.erase(k);
     }
 
-    // PLAN.md-tracked bug fix: hash indexes were never cleaned up here at all (unlike
+    // Bug fix: hash indexes were never cleaned up here at all (unlike
     // the secondary B+Tree / composite index loops just above/below), leaking every
     // dropped database's hash indexes in memory permanently.
     std::vector<std::string> hash_keys;

@@ -81,7 +81,7 @@ TEST_CASE("QueryResultCache get() rejects an entry whose table generation moved 
 }
 
 TEST_CASE("execute_sql never caches a query calling a non-deterministic function", "[query_cache][executor]") {
-    // PLAN.md P0 regression test: a SELECT calling NOW()/RAND()/UUID()/etc. used to
+    // Regression test: a SELECT calling NOW()/RAND()/UUID()/etc. used to
     // get cached on first execution and then return that exact same stale value
     // forever, since nothing ever invalidates a cache entry with no table reference.
     TempDataDir dir("query_cache_data_nondeterministic");

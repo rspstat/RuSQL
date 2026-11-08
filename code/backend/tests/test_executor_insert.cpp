@@ -181,7 +181,7 @@ TEST_CASE("INSERT IGNORE and ON DUPLICATE KEY UPDATE", "[executor][insert]") {
     REQUIRE(rows[0].at("budget") == "500");
 }
 
-// Regression for PLAN.md P2: ON DUPLICATE KEY UPDATE's in-place mutation previously only
+// Regression: ON DUPLICATE KEY UPDATE's in-place mutation previously only
 // refreshed the PK B+Tree, leaving secondary/hash/composite indexes on the changed columns
 // stale (still pointing at the pre-conflict values).
 TEST_CASE("ON DUPLICATE KEY UPDATE keeps secondary, hash, and composite indexes fresh, not stale",

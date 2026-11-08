@@ -155,7 +155,7 @@ TEST_CASE("Multi-join algorithm selection reflects accumulated cardinality, not 
     // original 1000. If the planner still used a's base cardinality here, nl_cost=1000*4=4000
     // would exceed hash_cost=(1000+4)*3=3012 and NestedLoop would NOT be chosen; using the
     // correct accumulated ~10, nl_cost=10*4=40 stays under hash_cost=(10+4)*3=42, so
-    // NestedLoop IS chosen. Regression guard for PLAN.md's "다중 조인 알고리즘 선택이 누적
+    // NestedLoop IS chosen. Regression guard for "다중 조인 알고리즘 선택이 누적
     // 카디널리티 미반영".
     std::vector<Row> a_rows, b_rows, c_rows;
     for (int i = 0; i < 1000; i++) a_rows.push_back(row({{"id", "1"}}));

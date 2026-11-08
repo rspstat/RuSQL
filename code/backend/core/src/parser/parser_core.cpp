@@ -95,7 +95,7 @@ bool Parser::peek_at_is(std::size_t offset, TokenKind k) const {
 Result<Statement, std::string> Parser::parse() {
     try {
         Statement stmt = parse_stmt();
-        // PLAN.md P0 fix: parse_stmt() used to return successfully even when tokens
+        // Fix: parse_stmt() used to return successfully even when tokens
         // remained after a syntactically complete statement (e.g. `SELECT * FROM t)))
         // garbage` silently ran as `SELECT * FROM t`), because nothing ever checked
         // that the whole input was consumed. Only the top-level entry point checks

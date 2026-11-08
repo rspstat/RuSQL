@@ -16,10 +16,10 @@
 | 3. 품질 점검 | 3 | 마감 1주 전에 Debug 전체 + `KILL`을 섞은 크래시 시험 | 마감 전에 숨은 회귀와 조용한 오답을 잡습니다 |
 | 4. 프론트 (앱) | 4 | 인덱스 제안 카드의 남은 것(큰 표), 스키마 비교의 빠진 것 | 앱만으로 큰 표에서도 인덱스를 시험해 볼 수 있습니다 |
 | 5. MCP (지금 37개 도구, resources 2개 · prompts 3개) | 1 | `suggest_indexes` 후속(열 사이의 상관 · 큰 표) | 제안이 더 많은 모양의 문장에서 맞아집니다 |
-| 6. MySQL과 다른 작은 차이 | 16 | 조인 뷰의 `UPDATE`·`INSERT`, 프로토콜 오류 번호의 남은 약 20개, `USING` 뒤 모호한 열 | 남은 호환 차이가 줄지만 대부분 눈에 안 띕니다 |
-| 7. 엔진 기능 추가 | 6 | `FULLTEXT`, `FLUSH`·`REPAIR`·`CHECKSUM TABLE` | 글 검색 데모가 가능해지고 `mysqldump`의 `FLUSH TABLES`를 받습니다 |
-| 8. 백엔드 (서버·운영) | 4 | (시간이 되면) 코퍼스 비교 CI | 푸시마다 MySQL과의 차이 0을 자동으로 확인합니다 |
-| 9. SQL 문법 추가 — 보류 | 29 | `INSERT INTO t () VALUES ()`, `GROUPING()`, `SIGNAL`, `UPDATE … JOIN (SELECT …)` | 옮겨 온 MySQL 쿼리가 더 많이 그대로 돕니다 |
+| 6. MySQL과 다른 작은 차이 | 25 | 조인 뷰의 `UPDATE`·`INSERT`, 프로토콜 오류 번호의 남은 약 20개, `USING` 뒤 모호한 열 | 남은 호환 차이가 줄지만 대부분 눈에 안 띕니다 |
+| 7. 엔진 기능 추가 | 7 | `FULLTEXT`, `FLUSH`·`REPAIR`·`CHECKSUM TABLE` | 글 검색 데모가 가능해지고 `mysqldump`의 `FLUSH TABLES`를 받습니다 |
+| 8. 백엔드 (서버·운영) | 5 | (시간이 되면) 코퍼스 비교 CI | 푸시마다 MySQL과의 차이 0을 자동으로 확인합니다 |
+| 9. SQL 문법 추가 — 보류 | 32 | `INSERT INTO t () VALUES ()`, `GROUPING()`, `SIGNAL`, `UPDATE … JOIN (SELECT …)` | 옮겨 온 MySQL 쿼리가 더 많이 그대로 돕니다 |
 
 ## 1. 발표·제출 대비
 
@@ -77,6 +77,8 @@ Claude가 부르는 도구.
 
 | 항목 | 현재 상태 | 추천도 | 비용 | 효과 | 근거 |
 |---|---|---|---|---|---|
+| 글자와 숫자를 비교하는 남은 자리 | 오답 — `IN (서브쿼리)`: `SELECT s FROM s WHERE s IN (SELECT 7)`가 글자 열의 `'007'`을 빼고 `'7'`만 돌려주고(MySQL은 글자와 숫자를 숫자로 비교해 둘 다), `'007' IN (SELECT 7)`는 0(MySQL 1). `CHECK (s = '7')`는 `'007'`을 받아들임(MySQL 오류 3819). `s IN (7)` · `s = (SELECT 7)` · 프로시저 `IF`는 이미 같음. 갭 락 · 파티션 경계 비교는 점검하지 않았음 | ★★ | 중 | 서브쿼리와 `CHECK`가 조용히 틀리는 자리가 닫힙니다. | 이 둘은 아직 값의 모양으로 비교하는 예전 규칙입니다. 타입 인식 비교(`value_class.hpp`)로 바꾸면 됩니다. 정리한 `PLAN.md`에서 옮긴 항목입니다. |
+| `UNION`의 마지막이 FROM 없는 SELECT일 때 `ORDER BY` | 없음(문법 오류 1064) — `SELECT id FROM t UNION SELECT 9 ORDER BY 1`, `SELECT 5 UNION SELECT 3 ORDER BY 1`이 "Unexpected token(s)"로 거절됨. 마지막 SELECT에 FROM이 있으면 됨(`… UNION SELECT id FROM t2 ORDER BY 1`) | ★★ | 하 | 값 목록을 `UNION`으로 이어 정렬하는 흔한 모양이 됩니다. | 파서가 FROM 없는 SELECT 뒤의 `ORDER BY`를 UNION 전체의 것으로 읽지 못합니다. |
 | `USING` 조인 뒤의 모호한 열 | 오답(작음) — `a JOIN b USING (x) JOIN c USING (y) JOIN d USING (x)`에서 `d`도 `y`를 가지면 `ORDER BY y`는 MySQL이 오류 1052(모호한 열)로 거절하는데 여기는 행을 돌려줌. `SELECT a.*, c.* … ORDER BY y`도 같은 모양 | ★ | 하 | MySQL이 거절하는 모호한 열을 같이 거절해 조용한 오답 하나가 사라집니다. | R58에서 `*` 열 순서를 맞추다 알게 된 것입니다. 합쳐진 열이 뒤 조인의 표에도 있을 때의 모호함 검사입니다. |
 | 자기 표 UPDATE가 행 단위가 아님 | 일부 — 문장 전체를 한 번에 봐서 `UPDATE emp SET mgr = NULL, id = id + 10 ORDER BY id DESC`를 MySQL은 통과시키는데 여기는 거절합니다(R57에서 다중 표 DELETE·MERGE·REPLACE의 사슬 아래 검사는 끝남) | ★ | 중 | MySQL이 받는 자기 표 UPDATE를 그대로 받아 옮겨 온 쿼리가 거절되지 않습니다. | UPDATE를 행마다 모의해야 합니다. 오류로 거절하는 쪽이라 조용한 오답은 아닙니다. |
 | 프로토콜 오류 번호의 남은 것 | 일부 — R58에서 메시지 글자로 번호·SQL 상태를 정함(`wire_error`, 약 40종). 코퍼스 전체에서 번호만 다른 문장 385개 → 약 20개. 남은 것은 엔진이 MySQL과 다른 이유로 실패하는 경우(문법을 못 받음, 메시지가 아무 말도 안 함): `ONLY_FULL_GROUP_BY`(1055), `RANGE` 프레임 오류(3587~3589), 윈도 함수를 쓸 수 없는 자리(3593), `SUM(SUM(x)) OVER`의 1140, `Data truncated`(1265) 일부, `MOD`로 0을 나누는 UPDATE(1365), 없는 윈도 이름(3579) | ★ | 하 | 오류 번호로 분기하는 클라이언트·ORM 코드가 MySQL에서처럼 동작합니다. | 번호는 `vs_mysql.py --proto --errno`가 코퍼스마다 비교합니다. 엔진 메시지를 MySQL 것으로 바꾸는 쪽이 정석이라 하나씩 고치면 됩니다. |
@@ -87,7 +89,7 @@ Claude가 부르는 도구.
 | 격리 수준의 기본값 | 다름 — 아무것도 안 정한 세션은 MySQL이 `REPEATABLE-READ`, 이 엔진은 `READ-COMMITTED`(R71에서 `@@transaction_isolation`이 실제 수준을 말하게 됨). R72에서 REPEATABLE READ의 자기 쓰기가 두 번 보이던 문제와 `FOR UPDATE`가 스냅샷의 옛 값을 읽던 것을, R73에서 스냅샷 시점(이제 첫 읽기, `WITH CONSISTENT SNAPSHOT`은 즉시)과 `INSERT … SELECT` 원본의 최신 읽기를, R74에서 일반 SELECT가 아닌 모든 문장(`UPDATE` · `DELETE` · `INSERT … VALUES` · `SET @x`)의 서브쿼리 최신 읽기와 `INSERT … SELECT` 원본의 공유 잠금을 고쳤다. 남은 것: 기본값이 REPEATABLE READ가 되면 모든 명시적 트랜잭션이 갭 잠금을 잡는 데서 오는 대기 · 교착 재기, 기본값을 바꿔 전체 시험을 돌려 깨지는 것 고치기 | ★★ | 중 | MySQL 도구가 기대하는 기본 격리 수준이 같아집니다. | 스냅샷 시점은 맞췄으니 다음은 갭 잠금의 대기 · 교착 영향을 재 보고, 기본값을 바꿔 전체 시험을 돌려 깨지는 것을 고칩니다. 발표 데모에서는 차이가 거의 보이지 않으므로 마감 이후로 미뤄도 됩니다. |
 | 공유 잠금의 남은 모양 | 일부 — R74에서 한 표를 평범하게 읽는 `INSERT … SELECT` 원본(기본키 한 점 · 범위 · 전체)은 MySQL과 같은 행 · 틈 잠금을 건다. 남은 것: 조인 · 집계 · 뷰 원본과 서브쿼리가 읽는 표(`INSERT … SELECT` · `UPDATE` · `DELETE` · `INSERT … VALUES` 모두)는 최신 값만 읽고 잠그지 않음, 기본키가 아닌 조건은 읽어서 돌려준 행만 잠그고(MySQL은 훑은 행 모두) 틈은 표 전체를 잠금(MySQL은 그 인덱스의 범위) | ★ | 중 | 잠금을 보여 주는 데모에서 MySQL과 같은 대기 모양이 더 많이 나옵니다. | 훑는 도중에 서브쿼리를 돌리는 문장은 잠금을 기다리려면 훑던 행에서 손을 놓는 법부터 정해야 합니다. 발표에서는 거의 안 보이는 모양입니다. |
 | 트랜잭션 밖의 `SELECT … FOR UPDATE` | 다름(작음) — 잠금을 기다리지 않고 바로 읽음(MySQL은 상대의 잠금이 풀릴 때까지 기다림) | ★ | 하 | 자동 커밋 상태의 잠금 읽기도 MySQL처럼 기다립니다. | R74에서 잠금 표를 재다 보였습니다. 자동 커밋에서는 잠금이 곧 사라지므로 의미가 작습니다. |
-| `CALL`이 돌려주는 결과 집합의 값의 형 | 다름(작음) — 숫자가 글자 형(`'10'`)으로 옴(MySQL은 `10`) | ★ | 하 | 클라이언트가 프로시저 결과 열을 숫자로 받습니다. | R74에서 비교하다 보였습니다. 프로시저가 마지막 `SELECT`의 결과를 글자 표로 넘기는 곳에서 열 형을 잃습니다. |
+| `CALL` · 저장 함수 · `EXECUTE`가 돌려주는 값의 형 | 다름(작음) — 숫자가 글자 형(`'10'`)으로 옴(MySQL은 `10`). `SELECT fi()`(저장 함수)와 `EXECUTE`의 결과도 `'7'`로 옴 | ★ | 하 | 클라이언트가 프로시저 결과 열을 숫자로 받습니다. | R74에서 비교하다 보였습니다. 프로시저가 마지막 `SELECT`의 결과를 글자 표로 넘기는 곳에서 열 형을 잃습니다. |
 | JSON 경로의 남은 모양 | 다름(작음) — `$[last]` · `$[*]` · `$**` · 따옴표 붙은 키(`$."a b"`)는 NULL(MySQL은 값 · 배열 · 모든 값), 잘못된 경로는 NULL(MySQL은 오류 3143), 꺼낸 값의 글자 모양은 원문 그대로(MySQL은 `[1, 2]`처럼 다시 쓰고 `{"a": 1}`로 공백을 넣음) | ★ | 하~중 | `JSON_EXTRACT` · `->`가 MySQL의 모든 경로 모양에 같은 답을 줍니다. | R75에서 배열 첨자(`$[n]`)와 자기 멤버만 찾기는 고쳤습니다. 경로 읽기를 키 · 첨자 · 와일드카드로 나누어 다시 짜면 됩니다. |
 | `SET @@transaction_isolation = x` (SESSION 없이) | 다름(작음) — MySQL은 다음 트랜잭션 하나에만 적용하고(`SET TRANSACTION`처럼) 여기는 세션에 적용합니다. `GLOBAL`도 세션처럼 읽음 | ★ | 하 | 같은 문장이 같은 값을 보입니다. | 어휘 단계에서 `@@session.x`의 범위가 지워져 구분하려면 어휘 분석이 범위를 남겨야 합니다. |
 | 날짜의 남은 모양 | 다름(작음) — `INTERVAL 1 DAY + '2024-01-31'`(INTERVAL이 앞)이 문법 오류, `DATE_SUB('0001-01-01', INTERVAL 1 DAY)`는 MySQL이 `0000-00-00`, `INTERVAL '1.5' DAY`는 MySQL이 글자를 정수 1로 읽음, 이름 붙은 시간대의 `CONVERT_TZ`는 NULL(MySQL도 시간대 표를 안 올리면 같음) | ★ | 하 | 옮겨 온 쿼리의 드문 날짜 식이 그대로 돕니다. | 식 파서가 `INTERVAL`로 시작하는 식을 받도록 하는 것이 가장 큽니다. |
@@ -96,6 +98,13 @@ Claude가 부르는 도구.
 | 뷰를 만들 때의 `ONLY_FULL_GROUP_BY` | 다름(작음) — `CREATE VIEW v AS SELECT COUNT(*), x FROM t`를 만들 때 거절합니다(MySQL은 만들 때는 받고 조회할 때 거절) | ★ | 하 | MySQL이 받아 주는 뷰가 덤프 복원에서 거절되는 일이 없어집니다. | R60의 시험을 쓰다 알게 된 것입니다. 뷰 정의의 검사는 만들 때 하지 않고 조회에서 하면 됩니다. |
 | `SHOW TABLE STATUS`의 `Create_time`·`Update_time` | 다름 — NULL입니다(MySQL은 표를 만들고 마지막으로 바꾼 시각). R60에서 크기는 InnoDB의 쪽 수로 맞췄습니다 | ★ | 하~중 | 관리 도구가 표를 만든·바꾼 시각을 보여 줄 수 있습니다. | 표를 만든 시각은 카탈로그에 저장해야 재시작 뒤에도 남고, 바뀐 시각은 문장마다 갱신해야 합니다. |
 | `SET slow_query_log`(GLOBAL 없이)와 `long_query_time`의 세션 값 | 다름(작음) — MySQL은 `SET slow_query_log = ON`을 오류 1229로 거절하고 `long_query_time`에는 세션 값이 따로 있어(`SET GLOBAL`은 이미 열린 연결에 닿지 않음) 여기는 둘 다 서버 전체 하나로 받음. `slow_query.log`는 커지기만 함 | ★ | 하 | 서버 변수의 범위(GLOBAL/SESSION)가 MySQL과 같아집니다. 로그 파일의 크기 상한·회전은 따로 하는 일입니다. | 일부러 단순하게 둔 것이라(앱의 패널이 켜자마자 보이게) 서버 변수 범위(GLOBAL/SESSION)를 구분하는 일이 먼저 필요합니다. 파일 크기 상한·회전은 따로 하~중. |
+| `AVG`를 식에서 쓸 때와 DECIMAL 자릿수 | 오답(작음) — 값 1, 2, 2의 `AVG(v) * 3`이 `5.0001`(MySQL `5.0000`)이고 `AVG(v) = 1.6667`이 참(MySQL 거짓): 보이는 4자리 값으로 이어 계산하는데 MySQL은 9자리를 들고 있음. `COALESCE(1.5, 2.25)`는 `1.5`, `SELECT 1.5 UNION SELECT 2.25`의 첫 값은 `1.5`(MySQL은 둘 다 `1.50`, `2.25`로 자릿수를 맞춤) | ★ | 중 | `AVG`로 이어 계산하는 보고서 식이 MySQL과 같은 값을 줍니다. | 정확히 하려면 `AVG`의 중간값을 9자리로 들고 다녀야 합니다. 크기는 작지만 비교에서는 참 · 거짓이 갈립니다. |
+| DOUBLE 식의 반올림과 지수 표기 | 다름(작음) — `ROUND(SQRT(6.25))` · `ROUND(2.5e0)`은 MySQL이 DOUBLE이라 짝수 쪽 `2.0`, 여기는 `3.0` · `3`. `1e3` · `1E2 * 3`은 MySQL이 DOUBLE이라 `1000.0` · `300.0`, 여기는 정수 `1000` · `300`. `ROUND(SQRT(2), 3)`은 같음 | ★ | 중 | 부동소수점 식의 반올림이 MySQL과 같은 쪽으로 됩니다. | 지수 표기 리터럴을 항상 DOUBLE로 읽는 길이 필요합니다. |
+| 순서 없는 `SELECT`의 행 순서 | 다름(작음) — 기본키 없는 표의 `UPDATE`는 바뀐 행을 끝으로 옮겨 `(1,11), (2,2), (3,3)` 대신 `(2,2), (3,3), (1,11)`로 나옴(InnoDB는 제자리). 조인에서 둘째 표 쪽의 행 순서도 MySQL과 다를 수 있음. 어느 쪽도 `ORDER BY` 없이는 순서를 보장하지 않음 | ★ | 중 | `ORDER BY` 없는 조회를 견주는 도구에서 차이가 줄어듭니다. | 기본키 순서 읽기(R34)는 이미 있지만 기본키 없는 표는 갱신한 행을 제자리에 두지 않습니다. |
+| 결과 열 이름 · 표시의 작은 차이 | 다름(작음) — 값은 같고 머리글만 다름: `ROUND(v)*100` → `ROUND(v) * 100`, `IF(c, a, b)` → `CASE WHEN … END`, `POSITION('b' IN 'abc')` → `LOCATE(…)`, `(1, 2) = (1, 2)` → `(1 = 1 AND 2 = 2)`, `1 || 0` → `(1 <> 0 OR 0 <> 0)`, `1e3` → `1000`, `GET_FORMAT(DATE, …)` → `GET_FORMAT(date, …)`. `information_schema`의 열 이름은 소문자(MySQL은 `INDEX_NAME`처럼 대문자). 명령줄 상자 표에서는 값 양 끝의 공백이 `\s`로 보임(MySQL 클라이언트에는 프로토콜 계층이 되돌려 줌) | ★ | 중 | 머리글을 그대로 보여 주는 도구와 화면이 MySQL과 같은 글자를 보입니다. | 파서가 식의 원문을 열 이름으로 보관하는 길이 필요합니다. |
+| 표 정의의 작은 틈 | 다름(작음) — `ALTER … RENAME COLUMN`이 `CHECK`가 쓰는 열을 막지 않음(MySQL 오류 3959), 한 열에 `UNIQUE`와 `UNIQUE (a)`를 둘 다 쓰면 색인 하나(MySQL은 둘), `information_schema.columns.column_type`이 `tinyint(1)`을 `tinyint`로 말함, `CREATE INDEX … (a DESC)`는 받지만 방향을 `A`로 기록함(MySQL `D`) | ★ | 하 | 스키마를 읽는 도구가 MySQL과 같은 정의를 봅니다. | 넷 모두 작은 변경입니다. |
+| 함수의 작은 틈 | 다름(작음) — 없는 함수 이름을 평가할 때 검사해서 빈 표의 `SELECT nosuch(id) FROM em`이 오류 없이 빈 결과(MySQL 1305), `INSTR('Strasse', 'ß')` · `LOCATE('ss', 'Straße')`는 MySQL이 5, 여기 0(`ß` = `ss` 같은 정렬 규칙의 확장 글자), `ANALYZE` 히스토그램은 글자를 바이트 순서로 정렬함(추정에만 영향) | ★ | 하~중 | 오타 난 함수 이름이 빈 표에서도 오류로 드러납니다. | 함수 이름 검사를 문장을 풀 때로 옮기면 됩니다. |
+| 저장 루틴 · DML의 남은 모양 | 다름(작음) — 프로시저가 `SELECT`를 여러 번 하면 마지막 표 하나만 답함(MySQL은 모든 집합을 보내고 클라이언트는 첫 것부터 읽음: `SELECT 100; SELECT 1`이 MySQL `100`, 여기 `1`), 재귀 호출을 허용함(MySQL 기본 `max_sp_recursion_depth = 0`은 오류 1456), 같은 값 행을 `REPLACE`하면 영향 행 수가 2(MySQL 1) | ★ | 중 | 프로시저 결과를 읽는 클라이언트가 MySQL과 같은 첫 집합을 받습니다. | 여러 결과 집합은 프로토콜 계층 변경이라 셋 중 가장 큽니다. |
 
 ## 7. 엔진 기능 추가
 
@@ -104,6 +113,7 @@ Claude가 부르는 도구.
 | 항목 | 현재 상태 | 추천도 | 비용 | 효과 | 근거 |
 |---|---|---|---|---|---|
 | `FULLTEXT` / `MATCH … AGAINST` | 없음 (`FULLTEXT KEY`가 든 CREATE TABLE이 오류) | ★★★ | 상 | 글 검색 데모(`MATCH … AGAINST`)가 가능해져 발표 임팩트는 크지만 구현이 큽니다. | 검색 데모는 강하지만 역색인과 점수 계산이 큽니다. |
+| 대소문자를 구분하는 열 (`COLLATE utf8mb4_bin` · `BINARY`) | 없음 — `COLLATE utf8mb4_0900_ai_ci` · `CHARACTER SET utf8mb4`는 받지만(덤프 호환) `COLLATE utf8mb4_bin`은 "not supported" 오류, 열의 `BINARY` 속성과 `BINARY 식` · `식 COLLATE …`는 구문 오류, `COLLATION()`은 함수 없음, `SHOW COLLATION LIKE 'utf8mb4_bin'`은 빈 결과 | ★★ | 중~상 | 대소문자를 구분하는 열(해시 · 토큰 비교)을 만들고 `COLLATE`로 비교를 고를 수 있습니다. | 정렬 규칙이 엔진 전체에 기본 규칙(R15) 하나로 박혀 있어, 열마다 고르려면 비교 · 색인 · 고유 검사를 규칙별로 나눠야 합니다. |
 | `FLUSH` · `REPAIR` · `CHECKSUM TABLE` | 없음 — R71에서 `OPTIMIZE TABLE`·`CHECK TABLE`은 네이티브 프로토콜에서도 되고(앱 표 메뉴 포함, `CHECK`는 행을 읽음) `FLUSH`·`REPAIR`·`CHECKSUM TABLE`은 어느 쪽에도 없음 | ★ | 하 | `mysqldump`가 보내는 `FLUSH TABLES`를 받고 관리 도구의 표 점검 메뉴가 더 많이 돕니다. | `FLUSH TABLES`는 받기만 하고(체크포인트), `CHECKSUM TABLE`은 행의 해시, `REPAIR`는 `OPTIMIZE`와 같은 길로 보낼 수 있습니다. |
 | 표현식(함수) 인덱스 | 없음 (`CREATE INDEX … ((a + 1))`가 문법 오류) | ★★ | 중~상 | `WHERE a + 1 = …` 같은 식 조건도 인덱스를 탈 수 있습니다. | MySQL·PostgreSQL·Oracle 모두 있습니다. 인덱스 키가 식이라 플래너와 유지가 바뀝니다. |
 | 열 단위 권한 (`GRANT SELECT (col) ON t`) | 없음 | ★★ | 중 | 열마다 접근을 제한하는 보안 시연이 가능해집니다. | MySQL·PostgreSQL에 있고 Oracle은 INSERT·UPDATE만입니다. |
@@ -119,6 +129,7 @@ Claude가 부르는 도구.
 | 코퍼스 비교 CI | 없음 (`.github` 없음) | ★★★ | 상 | 푸시마다 MySQL과의 차이 0이 자동으로 확인되어 호환성 회귀를 바로 잡습니다. | 지금은 사람이 `make_scoreboard.py`를 돌립니다. MSVC 빌드, MySQL 컨테이너(리눅스 러너)에 리눅스 빌드 가능 여부 확인이 필요합니다. |
 | TLS | 없음 | ★★ | 상 | 암호화된 접속이 되지만 Windows에서 큰 작업이고 발표에서는 보이지 않습니다. | Windows에서 TLS 라이브러리 도입과 핸드셰이크 확장이 큽니다. |
 | `caching_sha2_password` | 없음 (`mysql_native_password`만) | ★★ | 상 | MySQL 8 기본 인증을 요구하는 최신 드라이버가 옵션 없이 접속합니다. 지금 쓰는 CLI·pymysql은 이미 됩니다. | 지금 쓰는 mysql CLI와 pymysql은 모두 접속됩니다. 일부 최신 드라이버가 옵션을 요구할 때만 문제입니다. |
+| 성능 동결로 남긴 후보 | 일부 — 2026-10-03 사용자 결정으로 성능 작업을 멈추고("흔한 모양에 이차 시간 절벽이 없고 10만 행 이하 데모에서 1초를 넘는 문장이 없다"), 사용자가 요청할 때만 새 라운드를 엽니다. 그때(10월 측정, 그 뒤 일부는 좋아졌을 수 있음) 남긴 후보: `ANALYZE` · `INSERT … SELECT` · `UNION ALL`(10만 행에서 1.5~1.7초), 쓰는 문장 안의 상관 서브쿼리, `NATURAL`/`USING` 조인, 보조 인덱스가 있는 표의 전체 행 `UPDATE`(버킷 다시 쓰기), 서버 시작 때 표 읽기 병렬화, 10만 행 표가 조인의 왼쪽이면 선택적인 조인도 0.9~1.0초(조인 전에 왼쪽 행을 `std::vector<Row>`로 복사하는 비용으로 추정, 프로파일링은 안 함), 재시작 직후 위치 캐시가 비어 있는 동안 읽기가 인덱스 시작을 못 함, 통계가 없는 표(큰 문장 몇 개로 적재한 표)의 조인 비용 추정은 인덱스를 16번 찔러 본 표본 | ★★ | 중~상 | 큰 표 데모에서 1초 안팎인 문장이 줄어듭니다. | 정리한 `PLAN.md`에서 옮긴 항목입니다. 방침이 "요청할 때만"이라 먼저 묻고 진행합니다. 조인 왼쪽 복사를 없애려면 조인 경로를 포인터 기반으로 바꿔야 해서 범위가 큽니다. |
 | WAL 복제, XA, 페이지 단위 버퍼 풀 | 없음 | ★ | 상 | 복제·분산 트랜잭션이 되지만 이미 범위 밖으로 정했습니다. | 이미 범위 밖으로 정했고 남은 기간에는 맞지 않습니다. |
 
 ## 9. SQL 문법 추가 — 보류
@@ -137,6 +148,7 @@ Claude가 부르는 도구.
 | `CREATE TEMPORARY TABLE` | 없음 | ★★★ | 중~상 | 세션 안에서만 쓰는 작업 표로 복잡한 단계 계산이 쉬워집니다. | 세션별 이름 공간과 연결 종료 시 정리가 필요합니다. |
 | 생성 열 `GENERATED ALWAYS AS` / `AS (식)` | 없음 (STORED·VIRTUAL 둘 다 오류) | ★★★ | 상 | 계산 열로 값을 두 번 저장하지 않고 파생값을 제공하며 MySQL 스키마를 그대로 옮깁니다. | 읽기 경로, 인덱스, ALTER까지 걸립니다. |
 | `UPDATE … JOIN (SELECT …) d ON …`, `DELETE x FROM t x JOIN (SELECT …) d ON …` | 없음 ("Expected identifier": 갱신 조인에 파생 표가 올 수 없음) | ★★★ | 중 | 집계한 값으로 갱신하는 흔한 MySQL 문장이 돌아갑니다. | 집계한 값으로 갱신하는 흔한 MySQL 문장입니다. 갱신 조인 실행기가 파생 표를 실체화해야 합니다. |
+| `CREATE FUNCTION`의 여러 문장 본문 | 없음 — 본문은 `RETURN 식` 하나만 됨. `BEGIN DECLARE a INT; SET a = 5; RETURN a * 2; END`가 구문 오류(프로시저는 되는 문장들) | ★★★ | 중 | 변수 · 분기를 쓰는 저장 함수를 만들 수 있습니다. | 프로시저 본문 실행기를 함수에서 다시 쓰고 `RETURN`으로 빠져나오는 길이 필요합니다. |
 | 여러 열 FK | 없음 (오류로 거절: "one column per foreign key"). 한 열에 FK 둘 이상은 R57에서 됨 | ★★ | 중~상 | 복합 기본키를 가리키는 실제 스키마를 옮겨 올 수 있습니다. | 한 열에 여러 키는 이제 키 목록이라 되지만, 키 하나가 여러 열을 가리키는 구조(키 = 열 목록, 복합 값의 존재·연쇄 검사)는 아직입니다. ERD 편집기는 이미 FK가 있는 열을 경고합니다. |
 | `NATURAL LEFT JOIN` · `NATURAL RIGHT JOIN` | 없음 (문법 오류: `NATURAL` 뒤에 `JOIN`만 기대) | ★★ | 하 | 드물게 쓰는 이 조인이 오류로 거절되지 않습니다. | R57에서 USING·NATURAL 조인의 열 순서를 맞추며 알았습니다. 파서에 `LEFT`·`RIGHT`를 받고 `RIGHT`면 USING처럼 순서를 바꾸면 됩니다. |
 | `UPDATE t u1 JOIN t ON …` (첫 사용에만 별칭, 두 번째는 별칭 없음), `ORDER BY (SELECT …)` 식으로 직접 | 없음 ("Not unique table/alias", "A subquery inside this expression is not supported") | ★★ | 하~중 | MySQL이 받는 자기 조인 갱신과 `ORDER BY (SELECT …)`가 오류 없이 됩니다. | 둘 다 MySQL은 받아들입니다. 조용히 틀리는 것이 아니라 오류로 거절합니다. |
@@ -148,7 +160,7 @@ Claude가 부르는 도구.
 | `USE` · `FORCE` · `IGNORE INDEX` | 없음 (문법 오류). 힌트 주석 `/*+ … */`은 `MAX_EXECUTION_TIME` 말고는 읽고 무시함 | ★★ | 중 | 인덱스 힌트를 쓴 기존 쿼리가 오류 없이 돌고, 플래너를 사람이 이끌 수 있습니다. | 플래너에 힌트를 전달해야 합니다. |
 | `JSON_TABLE` | 없음 | ★★ | 상 | JSON 배열을 행으로 펼치는 쿼리가 가능하지만 쓰임새에 비해 큽니다. | 쓰임새에 비해 큽니다. |
 | `LOAD DATA` / `INTO OUTFILE` | 없음 (UI의 CSV 가져오기·내보내기는 있음) | ★★ | 중 | 서버 파일을 한 번에 적재·내보내기 하지만 앱의 CSV 기능이 이미 대신합니다. | 서버 파일 접근 보안 문제가 있고 UI가 이미 해결합니다. |
-| 없는 함수 묶음 | 일부 — 점검(R75)에서 흔한 MySQL 함수 53개를 진짜 MySQL과 견주니 **39개가 없음**: JSON 12(`JSON_MERGE_PATCH` · `JSON_MERGE` · `JSON_MERGE_PRESERVE` · `JSON_QUOTE` · `JSON_SEARCH` · `JSON_PRETTY` · `JSON_DEPTH` · `JSON_OVERLAPS` · `JSON_CONTAINS_PATH` · `JSON_ARRAY_APPEND` · `JSON_ARRAY_INSERT` · `JSON_STORAGE_SIZE`)와 `MEMBER OF` 연산자, `INET_ATON` · `INET_NTOA` · `INET6_ATON` · `INET6_NTOA` · `IS_IPV4` · `IS_IPV6` 6, `UUID_TO_BIN` · `BIN_TO_UUID` · `UUID_SHORT` · `IS_UUID` 4, `AES_ENCRYPT` · `AES_DECRYPT` · `COMPRESS` · `UNCOMPRESS` · `UNCOMPRESSED_LENGTH` · `RANDOM_BYTES` 6, `GET_LOCK` · `RELEASE_LOCK` · `IS_FREE_LOCK` 3, `CONNECTION_ID` · `CHARSET` · `COLLATION` · `COERCIBILITY` 4, `BIT_XOR` · `BENCHMARK` · `LOAD_FILE` 3, `ST_*`(공간). (`CONVERT_TZ`는 고정 오프셋으로 이미 됨) | ★★ | 하 | 도구와 쿼리가 부르는 함수가 오류 없이 돕니다. `CONNECTION_ID`·`CHARSET`·`COLLATION`은 접속 직후 호환에 도움이 됩니다. |
+| 없는 함수 묶음 | 일부 — 점검(R75)에서 흔한 MySQL 함수 53개를 진짜 MySQL과 견주니 **39개가 없음**: JSON 12(`JSON_MERGE_PATCH` · `JSON_MERGE` · `JSON_MERGE_PRESERVE` · `JSON_QUOTE` · `JSON_SEARCH` · `JSON_PRETTY` · `JSON_DEPTH` · `JSON_OVERLAPS` · `JSON_CONTAINS_PATH` · `JSON_ARRAY_APPEND` · `JSON_ARRAY_INSERT` · `JSON_STORAGE_SIZE`)와 `MEMBER OF` 연산자, `INET_ATON` · `INET_NTOA` · `INET6_ATON` · `INET6_NTOA` · `IS_IPV4` · `IS_IPV6` 6, `UUID_TO_BIN` · `BIN_TO_UUID` · `UUID_SHORT` · `IS_UUID` 4, `AES_ENCRYPT` · `AES_DECRYPT` · `COMPRESS` · `UNCOMPRESS` · `UNCOMPRESSED_LENGTH` · `RANDOM_BYTES` 6, `GET_LOCK` · `RELEASE_LOCK` · `IS_FREE_LOCK` 3, `CONNECTION_ID` · `CHARSET` · `COLLATION` · `COERCIBILITY` 4, `BIT_XOR` · `BENCHMARK` · `LOAD_FILE` 3, `ST_*`(공간), 그 밖에 `INTERVAL()` · `FORMAT_BYTES` · `WEIGHT_STRING`. (`CONVERT_TZ`는 고정 오프셋으로 이미 됨) | ★★ | 하 | 도구와 쿼리가 부르는 함수가 오류 없이 돕니다. `CONNECTION_ID`·`CHARSET`·`COLLATION`은 접속 직후 호환에 도움이 됩니다. |
 | `PERCENTILE_CONT` · `PERCENTILE_DISC` `… WITHIN GROUP (ORDER BY …)` | 일부 — `MEDIAN`만 **MySQL에도 없는 문법**(호환 목표 밖). | ★★ | 하~중 | 중앙값 말고도 백분위 통계를 쿼리 한 줄로 냅니다. | PostgreSQL·Oracle에 있습니다(MySQL에는 없음). |
 | `CREATE SEQUENCE` · `NEXT VALUE FOR` | 없음 (`AUTO_INCREMENT`만) **MySQL에도 없는 문법**(MariaDB·PostgreSQL 것, 호환 목표 밖). | ★★ | 중 | PostgreSQL·Oracle 방식의 시퀀스를 쓸 수 있습니다(지금은 `AUTO_INCREMENT`만). | PostgreSQL·Oracle에 있습니다. |
 | `CREATE EVENT` | 없음 | ★ | 중~상 | 주기 작업을 예약할 수 있지만 쓰임새가 작습니다. | 스케줄러가 필요한데 쓰임새가 작습니다. |
@@ -156,6 +168,8 @@ Claude가 부르는 도구.
 | `GROUPS` 윈도 프레임 | 없음 **MySQL에도 없는 문법**(오류 1235, 호환 목표 밖). | ★ | 중 | PostgreSQL 전용 윈도 프레임을 쓸 수 있지만 효과는 작습니다. | PostgreSQL에만 있습니다. |
 | 다중 표 `DELETE`의 `JOIN … USING (열)`·`FULL OUTER JOIN`·`CROSS JOIN … ON` | 없음 ("Expected ON", "Unexpected token(s) after end of statement": 파서가 `ON`이 있는 `JOIN`·`LEFT JOIN`·`RIGHT JOIN`만 받음) | ★ | 하 | MySQL이 받는 다중 표 `DELETE`의 조인 모양이 오류로 거절되지 않습니다. | R67에서 `KILL`의 확인점을 넣다 알게 됨. `executor_multi.cpp`의 `USING`·`Cross/Natural/FullOuter` 분기는 이 문장에서 닿지 않는 코드입니다. |
 | `CREATE TYPE`, `DEFERRABLE` 제약, 부분 인덱스, 행 레벨 보안(`CREATE POLICY`) | 없음 **MySQL에도 없는 문법**(호환 목표 밖). | ★ | 상 | PostgreSQL·Oracle의 고급 기능이 생기지만 범위가 커서 이번 마감과는 맞지 않습니다. | PostgreSQL·Oracle에 있고 범위가 큽니다. |
+| 새 자료형 `BINARY` · `VARBINARY` · `BIT` · `SERIAL` · `ZEROFILL` | 없음 ("Expected data type") | ★ | 중 | 이 자료형이 든 덤프의 표를 가져올 수 있습니다. | 저장과 비교 규칙이 새로 필요합니다(`BINARY`는 정렬 규칙 항목과 맞물림). |
+| 작은 문법 틈 | 없음 — 산술 안의 `!`(`1 + !0`), `AS` 없는 별칭이 키워드인 것(`FROM t date`), `GROUP BY` 식과 집계 인자 안의 서브쿼리(`SUM((SELECT 1))`는 "A subquery inside this expression is not supported") | ★ | 하~중 | MySQL이 받는 드문 모양이 오류 없이 돕니다. | 모두 작은 파서 변경이지만 서브쿼리 쪽은 텍스트로 보관되는 자리라 바인더도 손봐야 합니다. |
 
 ## 참고: 점검에서 바로잡은 것 (처음 표와 달라진 곳)
 
@@ -187,12 +201,17 @@ Claude가 부르는 도구.
 7. **미루거나 하지 않는 것:** `FULLTEXT`, 표현식 인덱스, 열 단위 권한, 감사 로그, TLS, `caching_sha2_password`, WAL 복제·XA, 테마, 그리고 SQL 문법 추가 전부("SQL 문법 추가 — 보류").
 8. **직접 하실 일:** MCP 시연 리허설(`DEMO.md` 8번), 크래시 복구 장면 리허설(`DEMO.md` 3번), 화면 녹화, 앱 화면 사람 눈 점검.
 
+## 참고: R76에서 끝낸 것 (2026-11-08, 사용자가 "PLAN.md는 이제 필요 없다"고 정함)
+
+- **`docs/mds/PLAN.md`를 지웠습니다.** 7월~10월의 감사 · 로드맵 기록이었고 ✅ 83행이 끝난 일, 열린 일은 6행이었습니다. 앞으로의 일은 이 문서와 대화로 정하고 한 일은 `DATE.md`에 있습니다. 옛 내용은 `git show f58c052:docs/mds/PLAN.md`로 볼 수 있습니다.
+- **PLAN.md에만 있던 열린 항목을 옮겼습니다.** 열린 6행(버퍼 풀 · TLS · 표현식/부분/내림차순 인덱스 · `CREATE SEQUENCE` · 열 권한/이벤트 스케줄러 · 코드-문서 불일치 정리)은 이 문서에 이미 있거나(내림차순 인덱스만 새 행에 넣음), MySQL에도 없거나(`CREATE SEQUENCE`), R75 · R76의 정리로 갈음했습니다. 뒤쪽의 "사용자 결정 대기" 블록 8개에서는 아직 열린 것으로 적힌 약 50개를 **진짜 MySQL 8.4.9와 같은 SQL로 돌려** 지금도 남은 것만 가렸습니다. 이미 같아진 것(AFTER 트리거 실패 되돌리기 · 윈도 `OVER (ORDER BY 식)` · 괄호 친 `UNION` · `ORDER BY (1)` · `AS` 없는 윈도 별칭 · `RANGE … INTERVAL` 프레임 · 표 옵션 · `ON DUPLICATE KEY UPDATE`의 영향 행 수 · `KEY` 줄이 만드는 색인 · `IF()` 결과의 글자 비교 …)은 버렸고, 남은 것은 위 6 · 7 · 9번 표에 새 행 13개로 들어갔습니다. 성능 동결 때 남긴 후보 목록(10월 3일 블록)은 8번 표의 새 행 하나로 들어갔습니다.
+- **소스 주석 29개 파일 약 45곳과 문서 참조(`SUMMARY.md` · `AI.md` · `FUNCTIONS.md`)에서 "PLAN.md"를 없앴습니다.** 주석은 고친 내용을 스스로 설명하는 글로만 남겼고 동작은 바뀌지 않았습니다. `DATE.md`의 옛 항목은 그날의 기록이라 그대로 둡니다.
 ## 참고: R75에서 끝낸 것 (2026-11-08, 사용자가 고른 "총 점검의 1·2·3번")
 
 - **총 점검**: 남은 73개 항목을 진짜 MySQL과 같은 SQL로 견주었다. 문서가 낡은 곳 둘 — 뷰 `WITH CHECK OPTION`(R71부터 됨)과 `CONVERT_TZ`(됨) — 을 바로잡았고, 없는 함수는 45개가 아니라 39개, MySQL에도 없는 문법 넷(`PERCENTILE_CONT` · `CREATE SEQUENCE` · `GROUPS` 프레임 · `CREATE TYPE`)은 호환 목표 밖으로 표시했다.
 - **`JSON_EXTRACT`의 배열 경로 버그**: `JSON_EXTRACT('[1,2]', '$[1]')`이 NULL을 주던 것(MySQL은 `2`)을 고쳤다. 최상위 배열의 `$[n]`, 첨자 뒤의 첨자(`$[1][0]`), 첨자 뒤의 키(`$[1].a`), 배열이 아닌 값의 `$[0]`(그 값 자체), 그리고 안쪽 객체의 같은 이름 키를 먼저 집던 것(`{"x":{"a":1},"a":2}`의 `$.a`가 1이던 것)이다.
 - **정리**: 쓰이지 않던 npm 의존성 `@tauri-apps/plugin-opener`, 템플릿 잔재 `src/assets/react.svg` · `public/tauri.svg`, 죽은 상수 `MCP_TOOL_NAMES`, Python 시험 도구의 쓰이지 않는 `import` 3개와 도우미 함수 3개를 지웠다.
-- **점검했지만 지우지 않은 것**(판단이 필요함): `assets/`의 아이콘 이미지 3개, `docs/html/index.html`, 낡은 `docs/mds/PLAN.md`, 저장소에 올라간 `.claude/settings.local.json`, `legacy` 브랜치, `git stash` 한 건, 빈 `src-tauri/src/lib.rs`, 파일 안에서만 쓰이는데 `export`된 28개 선언.
+- **점검했지만 지우지 않은 것**(판단이 필요함): `assets/`의 아이콘 이미지 3개, `docs/html/index.html`, 낡은 `docs/mds/PLAN.md`(→ 같은 날 뒤에 지움, 아래 "R76"), 저장소에 올라간 `.claude/settings.local.json`, `legacy` 브랜치, `git stash` 한 건, 빈 `src-tauri/src/lib.rs`, 파일 안에서만 쓰이는데 `export`된 28개 선언.
 
 ## 참고: R74에서 끝낸 것 (2026-11-08, 사용자가 고른 "UPDATE·DELETE 안의 서브쿼리, INSERT … SELECT의 잠금")
 

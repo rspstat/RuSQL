@@ -79,10 +79,10 @@ bool read_file_bytes(const std::string& path, std::vector<std::uint8_t>& out) {
 
 // write_bytes_atomic itself now lives in the shared engine/storage/atomic_write.hpp
 // (wal.cpp/txn_manager.cpp needed the same tmp-write+fsync+rename pattern for their own
-// non-atomic rewrite bugs, PLAN.md's WAL/Undo durability item). Without it, a crash
+// non-atomic rewrite bugs, the WAL/Undo durability item). Without it, a crash
 // between the pre-existing truncate-on-open and the write completing left the file
-// empty/corrupt with the old contents already gone (PLAN.md: "테이블 저장이 원자적이지
-// 않음"), and even a clean write was never fsynced to physical disk (PLAN.md: "fsync
+// empty/corrupt with the old contents already gone ("테이블 저장이 원자적이지
+// 않음"), and even a clean write was never fsynced to physical disk ("fsync
 // 없이 flush만 됨").
 
 void write_file(const std::string& path, const std::string& content) {

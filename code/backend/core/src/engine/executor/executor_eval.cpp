@@ -726,7 +726,7 @@ Executor::Tri Executor::eval_single3(const Row& row, const Condition& cond) {
     View right_view;
     bool right_viewed = false, right_single = false;
 
-    // PLAN.md P0 fix: the RHS of a comparison is now a full arithmetic expression
+    // Fix: the RHS of a comparison is now a full arithmetic expression
     // (ConditionValue::Arith) rather than always a single-token Literal, so
     // `WHERE v > id + 100` actually evaluates `id + 100` instead of silently
     // dropping the `+ 100`. eval_arith already resolves any Col references inside

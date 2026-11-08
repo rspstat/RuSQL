@@ -34,7 +34,7 @@ StringResult Executor::exec_vacuum(SharedDatabase& s, std::optional<std::string>
         if (removed > 0) {
             std::vector<Row> rows_clone = s.tables.at(t);
             if (auto idx_it = s.indexes.find(t); idx_it != s.indexes.end()) {
-                // PLAN.md P0 fix: the Rust original used `row.values().next()` here — an
+                // Fix: the Rust original used `row.values().next()` here — an
                 // arbitrary (HashMap-iteration-order-dependent) value, not necessarily the
                 // PK, silently corrupting the rebuilt index. Resolve the real PK column
                 // from the schema instead (same pattern as the insert/update reindex paths

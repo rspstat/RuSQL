@@ -48,8 +48,8 @@ RuSQL 자체는 AI 모델의 일부가 아니라, 학습 실험의 메트릭(epo
 
 캡스톤의 AI 센터피스 결정과는 무관하게, "엔진 측에서 강화할 수 있는 것"을 별도로 요청받아 진행:
 
-- **SSI predicate lock 완성**: 잠금 없는 일반 SELECT의 phantom 탐지 갭을 PostgreSQL SIREAD 스타일 non-blocking 메커니즘으로 마무리. 상세는 `PLAN.md` Section C 및 `FUNCTIONS.md`의 "Predicate Lock" 항목 참고.
-- **MCV(최빈값) 카디널리티 추정**: 플래너의 등호 조회 selectivity를 히스토그램 평균 대신 최빈값 정확한 카운트로 개선. 상세는 `PLAN.md` Section E 참고.
+- **SSI predicate lock 완성**: 잠금 없는 일반 SELECT의 phantom 탐지 갭을 PostgreSQL SIREAD 스타일 non-blocking 메커니즘으로 마무리. 상세는 `FUNCTIONS.md`의 "Predicate Lock" 항목 참고.
+- **MCV(최빈값) 카디널리티 추정**: 플래너의 등호 조회 selectivity를 히스토그램 평균 대신 최빈값 정확한 카운트로 개선. 상세는 `FUNCTIONS.md`의 "MCV" 항목 참고.
 
 XA 분산 트랜잭션과 샤딩은 여전히 스코프 밖(단일 프로세스 엔진이라는 정체성과 안 맞고, AI 학습 경험에도 기여하지 않음).
 
