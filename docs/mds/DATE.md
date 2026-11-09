@@ -3084,6 +3084,18 @@ READ COMMITTED는 어느 쪽이든 최신을 읽으므로 차이가 없다.
 ⑤ `COM_STMT_SEND_LONG_DATA` · `COM_STMT_FETCH`(커서)는 구현하지 않았고 시험하지 않았다. 이번에 안 본 영역: 문자셋 변환, `FOR UPDATE` 대기의 오류, 파티션 문장.
 ⑥ **열려 있는 일(이번 변경과 무관)**: `py code/test/crash/fuzz_crash_fk.py 1 7701`이 결정적으로 불일치를 낸다 — `ON DELETE RESTRICT ON UPDATE SET NULL`인 자식 표에서 한 트랜잭션 안의 `INSERT` → `ROLLBACK TO` → `REPLACE` → `ROLLBACK TO` → `COMMIT` 뒤 kill -9 복구에서, 모델이 "id 15의 pid가 NULL(부모 키가 바뀌어 SET NULL)"이라 기대한 행이 복구된 표와 다르다. 이전 커밋에서도 같다. 원인은 찾지 않았다(`RECOMMAND.md` 2번 표).
 
+### 11월 9일 (두 번째) — 산출물 최신화: HWPX D01~D08(작성본)과 통합 문서 v29
+
+**왜 이 항목인가**: 사용자가 "다음 일을 하기 전에" `hwpx/작성본`의 문서들과 `RuSQL_통합문서_v29.docx`를 최신으로 고쳐 달라고 했다(11-05 / 11-03에 쓴 뒤 R70 ~ R77이 지나갔다). 글자 수치 · 사실만 고치고 문서의 구조 · 쪽 나누기 · 그림은 건드리지 않았다.
+
+**다시 잰 수치** (HEAD `e51f610`, 엔진을 바꾸지 않은 채): 전체 시험 **946 케이스 / 1,520,540 assertions**(기본 모드 한 번 더 돌림, 실패 0) · MCP 도구 단위 시험 **57건** · 프런트엔드 라이브러리 시험 **26건** · TypeScript 검사 오류 0 · MySQL 대조 **코퍼스 49종 4,209문장 차이 0** · MCP 도구 **37개**(데이터베이스 20 · 연결·편집기 11 · 앱·서버 제어 6). D07의 에픽별 케이스 수는 기존 분류를 두고 11-03 이후 늘어난 51케이스만 배정했다(E-01 567 · E-02 124 · E-03 76 · E-04 90 · E-05 28 · E-06 61, 합 946).
+
+**고친 것**: ① D01 · D05 · D07 · D08 · 통합 문서의 케이스 · 도구 · 코퍼스 수. ② D06 표 4에 MCP 도구 5개(`slow_queries` · `kill_session` · `import_csv` · `export_csv` · `diff_schema`) 행을 더함(옛 표는 32개). ③ **틀렸던 설명**: "2026-09-21 결정"(D05 · D06 · D07)은 그날의 결정이 아니라 2026-08-09 범위 검토여서 바로잡음 · D06 `KillScope`(`tick` · `check_now`는 클래스가 아니라 `engine::deadline`의 일반 함수) · D06의 공개 · 비공개 표기 여섯 곳을 헤더와 맞춤 · D07 KILL 시험의 시간 설명("KILL 뒤 1.2초"가 아니라 문장 시작 1.2초) · D07 부록의 "`@@transaction_isolation`이 늘 REPEATABLE-READ"는 R71에서 고쳐졌으므로 삭제(`CONNECTION_ID()` 미지원은 그대로 — 지금도 `FUNCTION connection_id does not exist`) · REPEATABLE READ의 스냅샷이 BEGIN이 아니라 첫 읽기에서 뜬다는 R73의 변화(D06 · 통합 문서). ④ 통합 문서 FR에 R70 ~ R77의 JSON 함수 · 바이너리 준비된 문장 · `max_connections` · `EXPLAIN UPDATE/DELETE` · `OPTIMIZE`/`CHECK TABLE` · `READ ONLY` · `AND CHAIN` · BEFORE UPDATE의 `SET NEW.x`를 한 줄씩 더함. ⑤ 표지 날짜(D02 · D04 · D05 · D06 · D07)를 2026년 11월 9일로.
+
+**다시 확인한 것**: 통합 문서 2.3.1의 두 표(격리 수준별 읽기 이상 현상, 락 호환성)를 현재 엔진에 두 세션을 붙여 다시 쟀고 **글자 그대로 같았다**(READ UNCOMMITTED 셋 모두 발생 · READ COMMITTED는 Non-repeatable · Phantom 발생 · REPEATABLE READ · SERIALIZABLE은 방지(SERIALIZABLE은 COMMIT에서 직렬화 오류) · S/S 허용 · S/X · X/S · X/X 대기 · 일반 SELECT 허용 · Gap Lock 범위 안 INSERT는 REPEATABLE READ · SERIALIZABLE에서 대기, READ COMMITTED에서는 허용). 한글(Hangul)로 일곱 문서를 열어 쪽수(3 · 7 · 6 · 6 · 26 · 17 · 7)와 D06 목차 쪽 번호가 그대로임을 확인했고, Word로 통합 문서가 52쪽 그대로임을 확인했다(처음에는 FR 문장이 늘어 쪽이 53으로 넘쳐 문장을 줄임). 통합 문서는 사용자가 Word에서 고친 파일이 원본이라 생성기를 다시 쓰지 않고 `document.xml`의 글자만 고쳤다(다른 파일 조각은 바이트까지 같고, 스킬의 `validate.py` 통과).
+
+**하지 않은 것(정직하게)**: D07 표 7의 시나리오 28건은 11-05에 수행한 결과 그대로이고 다시 돌리지 않았다(엔진은 같은 시험 영역을 자동 시험 946케이스가 다시 확인함). 문서 속 그림 · 캡처는 바꾸지 않았다: D06 그림 12(AI MCP 패널)는 옛 15개 도구 목록 그림이고, 그림 1은 클래스 20개만 그린다(표는 21개). D04 표 4의 폭이 본문 폭보다 넓은 것, 양식에서 온 오타("컴포넌드")도 그대로. D03은 고칠 곳이 없어 건드리지 않았다. 통합 문서의 앱 화면 캡처(그림 4-7 등)도 그대로.
+
 ## 요약: 1학기 대비 2학기에 달라진 것
 
 
