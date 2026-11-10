@@ -2,6 +2,7 @@
   "name": "rusql-ui",
   "private": true,
   "version": "2.3.0",
+  "license": "MIT",
   "type": "module",
   "scripts": {
     "dev": "vite",

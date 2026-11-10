@@ -881,6 +881,12 @@ Retired material kept for the record (the dropped NL→SQL fine-tuning experimen
 
 <br/>
 
+## License
+
+RuSQL is released under the [MIT License](LICENSE). The third-party libraries vendored in `code/backend/third_party/` keep their own licenses (see [NOTICE.md](code/backend/third_party/NOTICE.md)).
+
+<br/>
+
 ## Link
 [B+ Tree Structure](https://chanho0912.tistory.com/109)
 
