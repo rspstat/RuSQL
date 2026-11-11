@@ -1,5 +1,5 @@
 {
-  "generated": "2026-11-09",
+  "generated": "2026-11-12",
   "mysql": "8.4.9",
   "corpora": [
     {
@@ -355,6 +355,14 @@
       "bothFail": 51
     },
     {
+      "name": "privileges",
+      "en": "Users and privileges: CREATE / ALTER / RENAME / DROP USER, GRANT / REVOKE on a table, a database, everything and columns, SHOW GRANTS, what a user may and may not do (1142 / 1143 / 1044 / 1227 / 1370), roles (SET ROLE, default roles, CURRENT_ROLE())",
+      "ko": "사용자·권한: CREATE / ALTER / RENAME / DROP USER, 표·데이터베이스·전체·열에 대한 GRANT / REVOKE, SHOW GRANTS, 사용자가 할 수 있는 것과 없는 것(1142 / 1143 / 1044 / 1227 / 1370), 역할(SET ROLE · 기본 역할 · CURRENT_ROLE())",
+      "statements": 303,
+      "different": 0,
+      "bothFail": 134
+    },
+    {
       "name": "rollup",
       "en": "GROUP BY ... WITH ROLLUP: a row for each prefix of the keys and a total, HAVING / ORDER BY / LIMIT / DISTINCT after it, in a view and a derived table",
       "ko": "GROUP BY ... WITH ROLLUP: 키의 접두사마다 한 행과 총계, 그 뒤의 HAVING·ORDER BY·LIMIT·DISTINCT, 뷰·파생 표 안에서",
@@ -397,8 +405,8 @@
   ],
   "conformanceCases": 4780,
   "tests": {
-    "cases": 946,
-    "assertions": 1520538
+    "cases": 956,
+    "assertions": 1521106
   },
   "bugsFound": 206
 }

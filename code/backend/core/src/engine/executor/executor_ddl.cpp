@@ -1836,7 +1836,15 @@ StringResult Executor::exec_show_tables(const SharedDatabase& s, const std::opti
         if (k.compare(0, prefix.size(), prefix) != 0) continue;
         std::string name = k.substr(prefix.size());
         if (like && !collation::like(name, *like)) continue;
+        if (!may_see(s, db, name)) continue; // (an account sees the tables it holds a privilege on)
         tables.push_back(std::move(name));
+    }
+    for (auto& [k, _] : s.views) { // (MySQL lists the views among the tables)
+        if (k.compare(0, prefix.size(), prefix) != 0) continue;
+        std::string name = k.substr(prefix.size());
+        if (like && !collation::like(name, *like)) continue;
+        if (!may_see(s, db, name)) continue;
+        if (std::find(tables.begin(), tables.end(), name) == tables.end()) tables.push_back(std::move(name));
     }
     if (tables.empty() && !like) return StringResult::Ok("No tables found in database '" + db + "'.");
     std::sort(tables.begin(), tables.end());

@@ -3148,6 +3148,41 @@ READ COMMITTED는 어느 쪽이든 최신을 읽으므로 차이가 없다.
 
 **주의**: 캡처한 홈 화면에는 아직 고치지 않은 문장("Whenever you need a hand, the built-in AI assistant is always there …", `code/frontend/src/App.tsx` 1874줄)이 그대로 보인다. 앱에는 내장 AI 도우미가 없고 AI는 Claude Desktop + MCP라서 문서 내용과 어긋난다. 사용자가 나중에 고치겠다고 해서 건드리지 않았다. 고친 뒤에는 `py -3 -X utf8 capture_home.py docs/main2.png 1402 750 2`로 다시 찍고 작성본의 그림만 바꾸면 된다(스크래치 스크립트 `capture_home.py`: `… docs/main2.png 1402 750 2`).
 
+### 11월 12일 — R78: 권한이 실제로 강제된다 (+ 크래시 퍼저가 찾은 불일치의 원인)
+
+**왜 이 항목인가**: 사용자가 RECOMMAND.md의 큰 일 둘 — "크래시 퍼저가 찾은 불일치(`fuzz_crash_fk.py 1 7701`, 복구 뒤 값이 틀림, 원인 미확인)"와 "권한 강제와 역할(지금은 `GRANT`가 기록만 함. `SELECT`만 받은 사용자가 `DROP TABLE`까지 할 수 있음, 비교 문장 115개 중 90개가 MySQL과 다름)"을 "같은 진행방식으로" 하라고 했다. 방식: 코드 → 시험(심은 버그 · 전체 · 퍼저) → 문서 → 죽은 코드 정리 → 커밋 · 푸시 → 보고와 함께 분류별 표.
+
+**결과 한눈에**
+- **크래시 퍼저 불일치**: 원인은 복구가 아니라 **실행 중의 `ROLLBACK TO`**였다(아래). 고쳐서 `fuzz_crash_fk.py 1 7701`이 통과한다. 새 시험 케이스 1개.
+- **권한 강제**: `corpus/privileges.sql` **115문장 중 90개 다름 → 300문장 차이 0**(`--proto --errno`, 진짜 MySQL 8.4.9와). 코퍼스를 115문장에서 300문장으로 늘렸고(`s1`~`s8` 사용자 여덟 명이 각자 한 가지 권한만 가지고 하는 일, 열 권한, 역할이 역할을 갖는 경우, `GRANT` · `REVOKE`의 오류 모양) 점수판에 올렸다. 새 시험 케이스 9개(`test_privileges.cpp`).
+
+**① 크래시 퍼저의 불일치 — 원인과 수정**: 한 트랜잭션 안의 `INSERT` → `REPLACE` → `ROLLBACK TO`에서 **복구가 아니라 지금 도는 서버**가 틀렸다(kill -9 없이도 같은 틀린 표가 나온다). `REPLACE`는 안에서 충돌한 행을 지우고(그 행의 `_xmax`를 이 트랜잭션 번호로) 새 행을 넣는데, 세이브포인트로 되돌릴 때 `INSERT`를 되돌리는 코드가 **"이 트랜잭션이 만들고 같은 키를 가진 모든 버전"**을 지워서, 이 트랜잭션이 앞서 만들었다가 `REPLACE`가 지운 옛 버전까지 같이 사라졌다. 뒤따르는 `DELETE`의 되돌리기는 "되살릴 버전"을 찾지 못해 **행이 통째로 없어졌다**. 이제 INSERT를 되돌릴 때는 **그 INSERT가 만든 살아 있는 버전(`_xmax = 0`)만** 지운다(`executor_txn.cpp`의 `exec_rollback_to`). 시험: 세이브포인트 앞의 `REPLACE` · `REPLACE` 두 번 · `DELETE` 뒤 `INSERT` · 세이브포인트 뒤에 만든 행을 `REPLACE` · 커밋된 행의 `REPLACE`, 다섯 모양(옛 코드에서 셋이 붉어짐을 확인).
+
+**② 권한 강제 — 무엇이 달라졌나**: `root`(그리고 사용자 표에 없는 계정 이름을 직접 정하는 엔진 내장 프로그램)는 막히지 않고, **사용자 표에 있는 그 밖의 계정은 클라이언트가 보낸 문장마다 실행 전에 권한을 확인받는다**(`Executor::check_privileges`, 새 파일 `executor_privileges.cpp`). 프로시저 본문 · 트리거 · `REPLACE`가 속으로 하는 `DELETE` · 뷰의 본문처럼 문장 안에서 도는 문장은 정의한 쪽의 권한으로 돌아 다시 확인하지 않는다(MySQL의 `DEFINER`와 같다).
+- **막는 것**: 읽기는 읽는 모든 표(조인 · `IN (SELECT ...)` · 선택 목록의 하위 질의 · `UNION` · CTE 본문 · 뷰)의 `SELECT`(CTE 이름 · 파생 표는 제외); `INSERT` / `UPDATE` / `DELETE`와 그 문장이 **읽는 열**의 `SELECT`(`UPDATE t SET i = 5`는 `UPDATE`만, `... SET i = i + 1`이나 `WHERE id = 1`은 읽는 열의 `SELECT`가 더 필요해 1143); `REPLACE`는 `INSERT` + `DELETE`, `ON DUPLICATE KEY UPDATE`는 `UPDATE`; `INSERT ... SELECT`는 둘 다; 여러 표 `UPDATE` · `DELETE` · `MERGE`; `CREATE` / `DROP` / `ALTER` / `INDEX` / `CREATE VIEW` / `TRIGGER`(`TRUNCATE`는 `DROP`, `RENAME TABLE`은 옛 표의 `ALTER` + `DROP`과 새 표의 `CREATE` + `INSERT`, `CREATE TABLE ... AS SELECT`는 `CREATE` + `INSERT` + 원본의 `SELECT`); `CREATE` / `DROP DATABASE`; `LOCK TABLES`; `CALL`(`EXECUTE`) · `CREATE` / `DROP PROCEDURE` · `FUNCTION`(`CREATE ROUTINE` · `ALTER ROUTINE`); `SHOW CREATE TABLE` · `DESCRIBE` · `SHOW COLUMNS` · `SHOW INDEX`(표나 열에 아무 권한); `USE`(데이터베이스에 아무 권한); `FOR UPDATE` · `FOR SHARE`(`UPDATE` / `DELETE` / `LOCK TABLES` 중 하나가 더 필요); `PREPARE`(그 문장의 권한을 그때 확인); `ANALYZE` / `OPTIMIZE TABLE`(`SELECT` + `INSERT`) · `CHECK TABLE`(`SELECT`); `BACKUP` / `RESTORE`(`FILE`); `SET GLOBAL` / `PERSIST`(`SUPER` 또는 `SYSTEM_VARIABLES_ADMIN`, 1227).
+- **사용자 관리**: `CREATE USER` · `ALTER USER`(자기 비밀번호는 제외) · `RENAME USER` · `DROP USER`는 전역 `CREATE USER`(1227); 역할은 `CREATE ROLE` / `DROP ROLE`(또는 `CREATE USER`)과 역할마다 `WITH ADMIN OPTION` / `ROLE_ADMIN` / `SUPER`; `SHOW GRANTS FOR 남`은 `mysql.user`의 `SELECT`(1142); `GRANT` / `REVOKE`는 그 수준의 `GRANT OPTION`을 가져야 하고 **자기가 가진 권한만** 줄 수 있다(표 1142 · 데이터베이스 1044 · 전체 1045).
+- **보이는 것**: `SHOW TABLES`(이제 **뷰도 나열**한다 — 전에는 뷰가 빠져 있었다) · `SHOW DATABASES`(`SHOW DATABASES` 권한이 없으면 볼 수 있는 것만) · `information_schema.tables` / `columns` / `schemata` 등 · `SHOW PROCESSLIST`와 `information_schema.processlist`(`PROCESS` 권한이 없으면 자기 연결만)가 계정이 볼 수 있는 것만 보여 준다. 결과 캐시는 먼저 읽히는 곳이라(문장을 해석하기 전) 권한 확인을 건너뛰지 못하도록 **표에 묶인 계정의 문장은 캐시에서 읽지 않는다**.
+- **새 문법**: `ALTER USER ... IDENTIFIED BY` · `SET PASSWORD [FOR 계정]` · `RENAME USER` · `CREATE USER a, b` / `DROP USER a, b`(모두 되거나 모두 안 됨) · `CREATE ROLE` / `DROP ROLE` 여러 개 · `GRANT '역할', ... TO 계정, ...` / `REVOKE '역할' FROM ...`(옛 `GRANT ROLE r TO`도 받음) · `GRANT` / `REVOKE`의 여러 계정 · 열 권한 `GRANT SELECT (a, b) ON t` · `REVOKE ALL PRIVILEGES, GRANT OPTION FROM` · `GRANT ... ON PROCEDURE | FUNCTION` · `SET ROLE NONE | ALL | ALL EXCEPT ... | DEFAULT | r, ...` · `SET DEFAULT ROLE ... TO` · `SHOW GRANTS FOR CURRENT_USER()` / `USING 역할` · `CURRENT_ROLE()`. 로그인하면 기본 역할이 바로 켜진다(`activate_default_roles`: MySQL 서버 · 네이티브 서버 · `COM_CHANGE_USER` 세 곳).
+- **MySQL과 같은 모양**: `SHOW GRANTS`의 글자(`` GRANT SELECT ON `v`.`t` TO `alice`@`%` ``, 맨 앞의 `GRANT USAGE ON *.*` 줄, 열 권한은 `SELECT (`i`, `id`), INSERT (`i`)`, 모든 권한이면 `ALL PRIVILEGES`, 역할은 한 줄에 `` `a`@`%`,`b`@`%` ``(관리 옵션이 있으면 다른 줄), 전역 `ALL`은 정적 권한 줄과 동적 권한 줄 둘); `CURRENT_USER()`는 계정(`alice@%`, root는 `root@localhost`), `USER()`는 접속한 쪽(`alice@localhost`); 오류 번호와 글: 1142 · 1143 · 1044 · 1045 · 1227 · 1370 · 1396 · 1410 · 1147 · 1141 · 1269 · 1133 · 1144 · 1221 · 1054 · 3619 · 3523 · 3530 · 4027 · 1243(`EXECUTE`로 없는 준비된 문장).
+- **같이 고친 것**: 위의 `SHOW TABLES`가 뷰를 빼먹던 것; 준비된 문장이 없을 때의 오류 번호(1064 → 1243); `SELECT CURRENT_USER()`가 `USER()`를 불러 `alice@localhost`를 답하던 MySQL 프로토콜 쪽 지름길(이제 엔진에 그대로 물어 `alice@%`); `DESCRIBE` · `SHOW COLUMNS` · `SHOW CREATE TABLE` · `SHOW INDEX` · `ANALYZE TABLE`의 MySQL 프로토콜 쪽 지름길도 같은 권한 확인을 거친다.
+
+**MySQL에 대해 새로 알게 된 것(코퍼스를 쓰며 잰 것)**: MySQL은 **연결에 데이터베이스 수준 권한을 연결할 때와 `USE`를 할 때 읽어 둔다.** 이미 열려 있는 연결은 그 사이에 `GRANT ... ON v.*` 한 것이 다음 `USE v` 전까지 보이지 않는다(표 · 열 · 전역 권한은 바로 반영). 이 엔진은 매 문장 새로 읽어 바로 반영된다(더 너그러운 쪽이 아니라 더 이른 쪽). 그래서 코퍼스는 사용자마다 시나리오를 따로 두고 `@alice USE v`를 넣어 두 서버가 같은 상태에서 비교하게 했다. 또 `GRANT FOO ON v.t`는 1149(문법 오류)가 아니라 3619이고(전역일 때만 1149), `GRANT FOO ON *.*`는 1149이다.
+
+**검증**:
+- 코퍼스 `privileges` **300문장 차이 0**(오류 번호까지, `--proto --errno`) — 처음 돌렸을 때 42개에서 시작해 MySQL 프로토콜 지름길 · 여러 표 `UPDATE`의 오류 순서(읽기만 하는 표의 `SELECT`가 먼저) · 열 권한 표시 · 뷰가 `SHOW TABLES`에 빠진 것을 고쳐 0.
+- C++ 시험: 전체 **956 케이스 1,521,106 assertions** 세 모드(기본 · `RUSQL_DML_INDEX_MIN_ROWS=0` · `RUSQL_PROBE_CHECK=1`) 모두 통과(기본 1,521,106 · 인덱스 강제 1,521,107 · 탐침 검사 1,521,106); 새 `test_privileges.cpp` 9 케이스, 기존 `test_executor_dcl.cpp`는 옛 응답 글("Granted ...", "User ... created.")을 지금 응답에 맞게 고침(기능이 아니라 글의 변경).
+- 심은 버그: 권한 코드에 하나씩 심어 `[privileges]` 시험이 붉어지는지 봄: **스무 가지 모두 잡힘** — DELETE 확인 빼기 · 데이터베이스 권한이 모든 데이터베이스에 통함 · GRANT OPTION을 안 봄 · 결과 캐시를 표에 묶인 계정에도 줌 · 역할이 가진 역할이 안 따라옴 · `SET ROLE ALL EXCEPT` 뒤집기 · 전역 전용 권한의 오류 번호 · `DROP USER`가 권한을 남김 · `information_schema` 거르기 빼기 · `SHOW TABLES` 거르기 빼기 · 표 권한이 아무것도 안 막음 · 아무도 표에 묶이지 않음 · `DESCRIBE` 확인 빼기 · 권한이 없을 때 1142 대신 1143 · `CURRENT_USER()`의 호스트 · 부여받지 않은 역할의 `SET ROLE` · 기본 역할이 로그인 때 안 켜짐 · `REPLACE`에 DELETE 확인 빼기 · UPDATE가 읽는 열 확인 빼기 · 열 권한 무시. (① 쪽 수정도 옛 코드로 되돌리면 새 시험 셋이 붉어짐을 확인.)
+- 점수판: **50개 코퍼스 4,512문장 차이 0**(`privileges`가 새로 올라가 R77의 49개 4,209문장에서 늘어남), 두 세션 도구 `two_sessions.py` 38 시나리오 596단계 차이 0, 앱의 Compat 화면 숫자(`compatSnapshot.json`)를 다시 만들고 알려진 차이 목록에 권한 한 줄을 더함.
+- 퍼저 · 검산 도구: **`fuzz_crash_fk.py 1 7701` 불일치 0(전에는 1)**, 크래시 퍼저 다섯(`fuzz_crash` · `_chain` · `_fk` · `_multifk` · `_selfref`) 6라운드씩(시드 7700) 불일치 0, `fuzz_concurrent.py` 10라운드 확인한 행 5,474 불일치 0; 모델로 검산하는 도구 열둘(`verify_*.py`) 위반 0; TypeScript 검사 오류 0.
+
+**정직한 한계**:
+① **열 권한이 있어도 `DESCRIBE` / `SHOW COLUMNS`는 권한 없는 열까지 보여 준다**(MySQL은 권한 있는 열만).
+② 권한은 문장마다 바로 반영된다(위의 `USE` 시점과 다름); 연결할 때 `database=`로 준 데이터베이스에 권한이 없어도 로그인은 거절되지 않는다(MySQL은 1044).
+③ `FLUSH`는 아직 없는 문장이라 권한 검사도 없다(`KILL`은 전에도 자기 연결만 죽일 수 있다). `DROP INDEX 이름`(`ON 표` 없이)은 표를 알 수 없어 확인하지 않는다. `TRACE`는 안쪽 문장을 일반 문장처럼 확인하지만 `SUGGEST INDEX` 자체는 확인하지 않는다. `SET GLOBAL`의 확인은 구문 분석 결과가 아니라 **문장 글자**(따옴표 밖의 `GLOBAL` · `PERSIST` 낱말, `@@global.`)를 본다 — 파서가 범위(`GLOBAL` / `SESSION`)를 버리기 때문이다.
+④ 프로시저 · 함수 수준 권한은 `EXECUTE` · `ALTER ROUTINE`만, 데이터베이스 수준에서 주거나(`GRANT EXECUTE ON v.*`) 루틴에 직접 줄 수 있다; `SHOW GRANTS`의 모양은 표 수준만큼 MySQL과 대조하지 못했다.
+⑤ `mysql.user` 같은 시스템 표는 없다(`SELECT ... FROM mysql.user`는 안 됨, `SHOW GRANTS FOR 남`이 1142를 내는 것으로 갈음). 비밀번호 정책 · 계정 잠금 · 만료 · `FLUSH PRIVILEGES`(필요 없음)는 없다.
+⑥ **전부터 있던 다른 점 하나**: `CREATE DATABASE x`가 현재 데이터베이스를 `x`로 바꾼다(MySQL은 바꾸지 않음). 코퍼스는 `--USE v`로 되돌렸고 고치지는 않았다. `CREATE TABLE ... AS SELECT`의 OK 패킷 영향 행 수는 0이다(MySQL은 넣은 행 수).
+
 ## 요약: 1학기 대비 2학기에 달라진 것
 
 

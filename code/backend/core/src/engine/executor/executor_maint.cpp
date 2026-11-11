@@ -306,6 +306,13 @@ StringResult Executor::exec_table_maintenance(const std::string& sql, const std:
         return StringResult::Err("ERROR 1064 (42000): You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the right syntax to use near ''");
     }
 
+    {
+        auto s = shared->read();
+        for (const std::string& written : names) {
+            if (auto denied = check_table_maintenance(*s, written, op == "optimize")) return StringResult::Err(*denied);
+        }
+    }
+
     std::vector<Row> rows;
     auto say = [&](const std::string& table, const char* type, const std::string& text) {
         Row r;

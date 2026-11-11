@@ -69,9 +69,11 @@ struct GrantRecord {
     std::string user;
     std::string host;
     std::string object_type;
-    std::string object;
+    std::string object;           // "*.*" (global), "db.*" (a database), "db.table"; older files may hold a bare "table" or "*"
     std::vector<std::string> privileges;
     bool with_grant_option = false;
+    // privileges of single columns of a table, (privilege, column): GRANT SELECT (i) ON v.t
+    std::vector<std::pair<std::string, std::string>> column_privileges;
 };
 void to_json(nlohmann::json& j, const GrantRecord& g);
 void from_json(const nlohmann::json& j, GrantRecord& g);
@@ -84,9 +86,10 @@ void from_json(const nlohmann::json& j, RoleRecord& r);
 
 struct RoleGrant {
     std::string role;
-    std::string user;
+    std::string user;   // the account (or the role) that holds `role`
     std::string host;
     bool with_admin_option = false;
+    bool is_default = false; // SET DEFAULT ROLE: active from the moment `user` connects
 };
 void to_json(nlohmann::json& j, const RoleGrant& rg);
 void from_json(const nlohmann::json& j, RoleGrant& rg);
@@ -271,6 +274,27 @@ public:
     // this after a successful AUTH handshake; defaults to "root" for the CLI/in-process
     // embedding, which has no network auth step of its own). Read by USER()/CURRENT_USER().
     std::string auth_user = "root";
+    // The roles that are active in this session (SET ROLE; the default roles of the account at login: activate_default_roles). Privileges: executor_privileges.cpp.
+    std::vector<std::string> active_roles_;
+    void activate_default_roles(); // after a login: the roles SET DEFAULT ROLE made the default ones of the account
+    // The error text of the first privilege `stmt` needs that the session's account does not have ("ERROR 1142 (42000): SELECT command denied ..."), none when it may run.
+    // Only a statement a user sends is looked at (nested ones -- trigger bodies, procedures, the DELETE of a REPLACE -- run with the rights of their definer), and only for an
+    // account of the user table that is not root: an embedding program that sets auth_user itself (tests) is not held to the table.
+    std::optional<std::string> check_privileges(const SharedDatabase& s, const Statement& stmt);
+    // Whether the statements of this session are held to the privilege tables (an account of the user table that is not root)
+    bool privileges_apply(const SharedDatabase& s) const;
+    // The host of the account `auth_user` is (its row in the user table), "localhost" when there is none; CURRENT_USER() says user@that
+    std::string account_host(const SharedDatabase& s) const;
+    // CURRENT_ROLE(): the active roles as `r`@`%`,`r2`@`%`, NONE when there is none
+    std::string current_role_text(const SharedDatabase& s) const;
+    // Whether the account holds a global privilege (PROCESS: SHOW PROCESSLIST shows every session instead of the account's own); true for the sessions the tables do not hold
+    bool holds_global(const SharedDatabase& s, const std::string& priv) const;
+    // SET GLOBAL / PERSIST ...: the error text when the account holds neither SUPER nor SYSTEM_VARIABLES_ADMIN (the scope is not kept in the parsed statement: the text is looked at)
+    std::optional<std::string> check_set_global(const SharedDatabase& s, const std::string& sql);
+    // CHECK TABLE / OPTIMIZE TABLE of a table: the error text when the account may not
+    std::optional<std::string> check_table_maintenance(const SharedDatabase& s, const std::string& table, bool write);
+    // Whether the account may see the table (SHOW TABLES, information_schema): it holds a privilege on it or on one of its columns; `table` empty: on the database
+    bool may_see(const SharedDatabase& s, const std::string& db, const std::string& table) const;
     // LAST_INSERT_ID(), ROW_COUNT(), FOUND_ROWS(): what the last statements of this session left. The functions read them through sync_session_counters.
     std::uint64_t last_insert_id_ = 0;       // the first AUTO_INCREMENT number the last INSERT that gave one out
     std::uint64_t statement_insert_id_ = 0;  // the same for the statement that is running (the MySQL protocol's OK packet reports it)
@@ -959,7 +983,7 @@ private:
     static std::string call_builtin_with_values(const std::string& func_name, const std::vector<std::string>& raw, const std::vector<std::string>& values,
                                                 const std::vector<char>& kinds);
     static void sync_udf_context(const std::unordered_map<std::string, UserFunctionDef>& user_functions, const std::string& current_db,
-                                  const std::string& current_user);
+                                  const std::string& current_user, const std::string& account_host = "localhost", const std::string& current_roles = "NONE");
     static void sync_session_counters(std::uint64_t last_insert_id, std::int64_t row_count, std::uint64_t found_rows);
     // after a statement: ROW_COUNT() and FOUND_ROWS() follow what it did
     void note_statement_outcome(const std::string& sql, const StringResult& result);
@@ -1349,20 +1373,22 @@ private:
     StringResult exec_drop_trigger(SharedDatabase& s, std::string name, bool if_exists);
     StringResult exec_execute(SharedDatabase& s, const std::string& name, const std::vector<std::string>& using_vars);
 
-    // ── Phase 8f: DCL (users/grants/roles/synonyms) ─────────────────────
-    StringResult exec_create_user(SharedDatabase& s, std::string user, std::string host, std::optional<std::string> password,
-                                   bool if_not_exists);
-    StringResult exec_drop_user(SharedDatabase& s, std::string user, std::string host, bool if_exists);
-    StringResult exec_grant(SharedDatabase& s, std::vector<std::string> privileges, std::string object_type, std::string object,
-                             std::string user, std::string host, bool with_grant_option);
-    StringResult exec_revoke(SharedDatabase& s, std::vector<std::string> privileges, std::string object_type, std::string object,
-                              std::string user, std::string host);
-    StringResult exec_show_grants(const SharedDatabase& s, std::optional<std::string> user, std::optional<std::string> host) const;
+    // ── Phase 8f: DCL (users/grants/roles/synonyms); R78: accounts, privileges and roles as MySQL has them (executor_privileges.cpp) ─────────────────────
+    StringResult exec_create_user(SharedDatabase& s, const Statement::CreateUser& st);
+    StringResult exec_drop_user(SharedDatabase& s, const Statement::DropUser& st);
+    StringResult exec_alter_user(SharedDatabase& s, const Statement::AlterUser& st);
+    StringResult exec_rename_user(SharedDatabase& s, const Statement::RenameUser& st);
+    StringResult exec_set_password(SharedDatabase& s, const Statement::SetPassword& st);
+    StringResult exec_grant(SharedDatabase& s, const Statement::Grant& st);
+    StringResult exec_revoke(SharedDatabase& s, const Statement::Revoke& st);
+    StringResult exec_show_grants(const SharedDatabase& s, const Statement::ShowGrants& st) const;
     StringResult exec_show_databases(const SharedDatabase& s) const;
-    StringResult exec_create_role(SharedDatabase& s, std::string name);
-    StringResult exec_drop_role(SharedDatabase& s, std::string name, bool if_exists);
-    StringResult exec_grant_role(SharedDatabase& s, std::string role, std::string user, std::string host, bool with_admin_option);
-    StringResult exec_revoke_role(SharedDatabase& s, std::string role, std::string user, std::string host);
+    StringResult exec_create_role(SharedDatabase& s, const Statement::CreateRole& st);
+    StringResult exec_drop_role(SharedDatabase& s, const Statement::DropRole& st);
+    StringResult exec_grant_role(SharedDatabase& s, const Statement::GrantRole& st);
+    StringResult exec_revoke_role(SharedDatabase& s, const Statement::RevokeRole& st);
+    StringResult exec_set_role(SharedDatabase& s, const Statement::SetRole& st);
+    StringResult exec_set_default_role(SharedDatabase& s, const Statement::SetDefaultRole& st);
     StringResult exec_show_roles(const SharedDatabase& s) const;
     StringResult exec_create_synonym(SharedDatabase& s, std::string name, std::string target, bool or_replace);
     StringResult exec_drop_synonym(SharedDatabase& s, std::string name, bool if_exists);

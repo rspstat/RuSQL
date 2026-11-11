@@ -60,6 +60,7 @@ add_library(engine_core STATIC
     src/engine/executor/executor_txn.cpp
     src/engine/executor/executor_proc.cpp
     src/engine/executor/executor_dcl.cpp
+    src/engine/executor/executor_privileges.cpp
     src/engine/executor/executor_show.cpp
     src/engine/executor/executor_maint.cpp
     src/engine/executor/executor_explain.cpp

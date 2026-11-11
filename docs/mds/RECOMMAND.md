@@ -1,6 +1,6 @@
-# RuSQL 추천 목록 — 분류별 (남은 항목만, R77 이후 · 2026-11-09)
+# RuSQL 추천 목록 — 분류별 (남은 항목만, R78 이후 · 2026-11-12)
 
-완료된 항목은 뺐습니다(R44~R77에서 끝낸 것은 `DATE.md`에 있습니다). 항목마다 엔진에 실제로 돌려 보고(진짜 MySQL 8.4.9와 비교) 앱·MCP 코드를 찾아 이미 있거나 일부만 있는 것을 가려낸 판입니다. 점수판은 코퍼스 49개에서 차이 0이고(R77), B+Tree·MVCC 페이지는 R62에서 단순한 자동 재생으로 줄였습니다. 발표·제출물 중 포스터·소개글·메인 화면 캡처는 끝났습니다(`docs/deliverables/`). 점검에서 바뀐 것의 이력은 맨 아래 "참고"에 모았습니다.
+완료된 항목은 뺐습니다(R44~R78에서 끝낸 것은 `DATE.md`에 있습니다). 항목마다 엔진에 실제로 돌려 보고(진짜 MySQL 8.4.9와 비교) 앱·MCP 코드를 찾아 이미 있거나 일부만 있는 것을 가려낸 판입니다. 점수판은 코퍼스 49개에서 차이 0이고(R77), B+Tree·MVCC 페이지는 R62에서 단순한 자동 재생으로 줄였습니다. 발표·제출물 중 포스터·소개글·메인 화면 캡처는 끝났습니다(`docs/deliverables/`). 점검에서 바뀐 것의 이력은 맨 아래 "참고"에 모았습니다.
 
 - **현재 상태:** `일부`(일부만 있음) · `없음` · `오답`(지금 조용히 틀린 값을 돌려줌) · `다름`(MySQL과 다르지만 오류로 드러남)
 - **추천도:** ★ 다섯 개. 기준은 실사용 가치 + 발표 임팩트 + 비용 대비 효과입니다. 졸업작품 마감(11월 말)까지 약 3주를 전제로 합니다. 각 분류 안에서 추천도 순입니다.
@@ -12,12 +12,12 @@
 | 분류 | 항목 수 | 가장 먼저 | 효과 |
 |---|---|---|---|
 | 1. 발표·제출 대비 | 6 | 발표 PC용 설치본에 엔진 묶기, **직접**: MCP·복구 장면 리허설, 녹화 | 발표 당일 앱이 안 뜨거나 시연이 끊기는 일을 막습니다 |
-| 2. 안정성·무결성 | 2 | 크래시 퍼저의 불일치 하나(`fuzz_crash_fk.py 1 7701`), 아직 `KILL`이 안 듣는 것(`ALTER`·쓰는 도중) | 큰 위험은 R63~R69에서 닫혔고 남은 것은 드문 모양 둘입니다 |
+| 2. 안정성·무결성 | 1 | 아직 `KILL`이 안 듣는 것(`ALTER`·쓰는 도중) | 큰 위험은 R63~R69에서 닫혔고 R78에서 크래시 퍼저의 마지막 불일치도 닫혔습니다. 남은 것은 드문 모양 하나입니다 |
 | 3. 품질 점검 | 3 | 마감 1주 전에 Debug 전체 + `KILL`을 섞은 크래시 시험 | 마감 전에 숨은 회귀와 조용한 오답을 잡습니다 |
 | 4. 프론트 (앱) | 4 | 인덱스 제안 카드의 남은 것(큰 표), 스키마 비교의 빠진 것 | 앱만으로 큰 표에서도 인덱스를 시험해 볼 수 있습니다 |
 | 5. MCP (지금 37개 도구, resources 2개 · prompts 3개) | 1 | `suggest_indexes` 후속(열 사이의 상관 · 큰 표) | 제안이 더 많은 모양의 문장에서 맞아집니다 |
-| 6. MySQL과 다른 작은 차이 | 26 | 조인 뷰의 `UPDATE`·`INSERT`, 프로토콜 오류 번호의 남은 약 20개, `USING` 뒤 모호한 열 | 남은 호환 차이가 줄지만 대부분 눈에 안 띕니다 |
-| 7. 엔진 기능 추가 | 8 | **권한 강제와 역할**(지금은 `GRANT`가 기록만 함), `COLLATE` 절, `FULLTEXT`, `FLUSH` · `REPAIR` · `CHECKSUM TABLE` | 권한이 실제로 막고, 대소문자를 구분하는 열이 되고, `mysqldump`의 `FLUSH TABLES`를 받습니다 |
+| 6. MySQL과 다른 작은 차이 | 31 | 조인 뷰의 `UPDATE`·`INSERT`, 프로토콜 오류 번호의 남은 약 20개, `USING` 뒤 모호한 열 | 남은 호환 차이가 줄지만 대부분 눈에 안 띕니다 |
+| 7. 엔진 기능 추가 | 6 | `COLLATE` 절, `FULLTEXT`, `FLUSH` · `REPAIR` · `CHECKSUM TABLE` | 대소문자를 구분하는 열이 되고, `mysqldump`의 `FLUSH TABLES`를 받습니다 |
 | 8. 백엔드 (서버·운영) | 5 | (시간이 되면) 코퍼스 비교 CI | 푸시마다 MySQL과의 차이 0을 자동으로 확인합니다 |
 | 9. SQL 문법 추가 — 보류 | 31 | `INSERT INTO t () VALUES ()`, `GROUPING()`, `SIGNAL`, `UPDATE … JOIN (SELECT …)` | 옮겨 온 MySQL 쿼리가 더 많이 그대로 돕니다 |
 
@@ -41,7 +41,6 @@
 | 항목 | 현재 상태 | 추천도 | 비용 | 효과 | 근거 |
 |---|---|---|---|---|---|
 | 아직 `KILL`이 안 듣는 것 | 일부 — R63~R67에서 SELECT(정렬·`GROUP BY`·`DISTINCT`·윈도·조인·`UNION` 계열·병렬 스캔)·`INSERT … SELECT`·`CALL` 본문·`UPDATE`·`DELETE`·`MERGE`·다중 표 문장의 행 찾기·`EXPLAIN ANALYZE`·`EXECUTE`한 질의·`CREATE TABLE … AS SELECT`의 질의·`CREATE INDEX`의 빌드가 멈춥니다. 남은 것: `ALTER TABLE`와 그 밖의 DDL, 트리거·사용자 함수 본문의 SELECT(쓰는 문장 안이라 이미 쓰기가 시작됨), 쓰는 문장이 행을 쓰기 시작한 뒤(반쯤 쓰다 멈추면 되돌릴 길이 없어서 일부러). **`ALTER`는 표의 행을 제자리에서 바꿉니다**(`ADD COLUMN`은 `for (auto& row : it->second) row[새열] = 기본값`; `DROP`·`RENAME`·`MODIFY`도 같음) — 반쯤 하다 멈추면 살아 있는 표가 반만 바뀌어서, 멈추려면 새 행 목록을 따로 만들었다가 바꿔 치는 식으로 동작마다 다시 써야 합니다 | ★ | 상 | 세션 패널의 `Stop statement`가 읽기 단계의 모든 경우에 듣습니다. 남은 것은 문장 단위 롤백이 있어야 안전한 쓰기 도중과 `ALTER`뿐입니다. | `ALTER`는 큰 일이라 마감 전에 필요한 것은 아닙니다. 읽기만 하는 `ADD UNIQUE`의 중복 확인 같은 일부는 `CREATE INDEX`처럼 `ReadPhase`로 감쌀 수 있으나 걸리는 시간이 짧아 얻는 것이 작습니다. |
-| 크래시 퍼저가 찾은 불일치 (`py code/test/crash/fuzz_crash_fk.py 1 7701`) | **오답(복구)** — 결정적으로 나옴. `ON DELETE RESTRICT ON UPDATE SET NULL`인 자식 표에서 한 트랜잭션 안의 `INSERT` → `ROLLBACK TO` → `REPLACE` → `ROLLBACK TO` → `COMMIT` 뒤 kill -9로 복구하면, 모델이 "id 15의 pid가 NULL(부모 키가 바뀌어 SET NULL)"이라 기대한 행이 복구된 표와 다름. R77 이전 커밋(`15fa47a`)에서도 똑같이 나옴 | ★★★ | 중 | 커밋한 일이 크래시 뒤에 틀어지는 드문 모양 하나가 닫힙니다. | 원인은 찾지 않았습니다. `FUZZ_TRACE=1`로 문장을 다 볼 수 있고 `RUSQL_SERVER_EXE`로 다른 빌드와 견줄 수 있습니다. 세이브포인트로 되돌린 `REPLACE`의 redo와 `ON UPDATE SET NULL`의 연쇄가 겹치는 자리로 의심됩니다(추정). |
 
 ## 3. 품질 점검
 
@@ -50,7 +49,7 @@
 | 항목 | 현재 상태 | 추천도 | 비용 | 효과 | 근거 |
 |---|---|---|---|---|---|
 | 누적 점검 한 바퀴 (Debug 전체 + 크래시 퍼저 + 빌드 간 차분) | 일부 — R54는 크래시 퍼저 3종(38라운드)과 R53 빌드와의 A/B까지 돌렸지만 Debug는 R50 이후 라운드마다 건너뛰었고(R63·R64도), R53의 락 대기·세션 정리 코드는 퍼저가 아직 다루지 않음(`KILL`을 섞은 퍼저가 없음) | ★★★ | 하 (기계 시간 약 1시간) | 최근 열다섯 라운드에 쌓인 숨은 회귀(Debug 빌드에서만 드러나는 오류, `KILL`과 얽힌 동시성)를 마감 전에 잡습니다. | 마감 전에 Debug 전체와 `KILL`을 섞은 크래시 시험을 한 번은 돌려야 안심입니다. |
-| 새 영역 훑기 (진짜 MySQL과 문장 비교) | 일부 — R71에서 트랜잭션 · 트리거 쓰기 · 뷰 쓰기 · 외래키 동작 · 날짜 계산(363문장, 차이 124 → 0), R77에서 JSON 함수(245문장, 50 → 0) · 준비된 문장의 바이너리 프로토콜(81번 실행, 읽을 수 없던 답 → 0) · 권한 · 역할(115문장, 90개 다름, 고치지 않음) · `COLLATE` 절(69문장, 62개 다름, 고치지 않음)을 훑음. 아직 안 훑은 모양: 문자셋 변환(`CONVERT(... USING ...)`), 잠금 읽기(`FOR UPDATE`)의 대기와 오류, 파티션이 걸린 표의 문장, `COM_STMT_SEND_LONG_DATA` · 서버 커서 | ★★★ | 중 | 아직 안 본 모양의 조용한 오답을 찾습니다(R77에서도 바이너리 프로토콜의 읽을 수 없는 답과 권한이 강제되지 않는 것이 나왔습니다). | 새 코퍼스를 쓰고 `vs_mysql.py`(바이너리 프로토콜은 `prepared_wire.py`)로 비교 → 고치고 → 점수판에 올립니다. R77의 `privileges.sql` · `collate_clause.sql`은 차이가 남아 있어 점수판 밖에 두었습니다. |
+| 새 영역 훑기 (진짜 MySQL과 문장 비교) | 일부 — R71에서 트랜잭션 · 트리거 쓰기 · 뷰 쓰기 · 외래키 동작 · 날짜 계산(363문장, 차이 124 → 0), R77에서 JSON 함수(245문장, 50 → 0) · 준비된 문장의 바이너리 프로토콜(81번 실행, 읽을 수 없던 답 → 0) · `COLLATE` 절(69문장, 62개 다름, 고치지 않음)을 훑고, R78에서 권한 · 역할(115문장에서 90개 다름 → 300문장 차이 0)을 고침. 아직 안 훑은 모양: 문자셋 변환(`CONVERT(... USING ...)`), 잠금 읽기(`FOR UPDATE`)의 대기와 오류, 파티션이 걸린 표의 문장, `COM_STMT_SEND_LONG_DATA` · 서버 커서 | ★★★ | 중 | 아직 안 본 모양의 조용한 오답을 찾습니다(R77에서도 바이너리 프로토콜의 읽을 수 없는 답과 권한이 강제되지 않는 것이 나왔고, 둘 다 고쳤습니다). | 새 코퍼스를 쓰고 `vs_mysql.py`(바이너리 프로토콜은 `prepared_wire.py`)로 비교 → 고치고 → 점수판에 올립니다. `privileges.sql`은 R78에서 점수판에 올랐고, `collate_clause.sql`은 차이가 남아 있어 점수판 밖에 둡니다. |
 | 앱 화면 사람 눈 점검 | 일부 — 화면은 디버그 포트로 DOM을 눌러 확인했을 뿐, 아이콘·폰트·전체 모양은 본 적 없음 | ★★★ | 하 | 자동 확인이 못 보는 아이콘·폰트·전체 모양의 어색함을 찾습니다. | **직접** 앱을 한 바퀴 눌러 보시고 어색한 곳을 알려 주세요. |
 
 ## 4. 프론트 (앱)
@@ -83,7 +82,7 @@ Claude가 부르는 도구.
 | `USING` 조인 뒤의 모호한 열 | 오답(작음) — `a JOIN b USING (x) JOIN c USING (y) JOIN d USING (x)`에서 `d`도 `y`를 가지면 `ORDER BY y`는 MySQL이 오류 1052(모호한 열)로 거절하는데 여기는 행을 돌려줌. `SELECT a.*, c.* … ORDER BY y`도 같은 모양 | ★ | 하 | MySQL이 거절하는 모호한 열을 같이 거절해 조용한 오답 하나가 사라집니다. | R58에서 `*` 열 순서를 맞추다 알게 된 것입니다. 합쳐진 열이 뒤 조인의 표에도 있을 때의 모호함 검사입니다. |
 | 자기 표 UPDATE가 행 단위가 아님 | 일부 — 문장 전체를 한 번에 봐서 `UPDATE emp SET mgr = NULL, id = id + 10 ORDER BY id DESC`를 MySQL은 통과시키는데 여기는 거절합니다(R57에서 다중 표 DELETE·MERGE·REPLACE의 사슬 아래 검사는 끝남) | ★ | 중 | MySQL이 받는 자기 표 UPDATE를 그대로 받아 옮겨 온 쿼리가 거절되지 않습니다. | UPDATE를 행마다 모의해야 합니다. 오류로 거절하는 쪽이라 조용한 오답은 아닙니다. |
 | 프로토콜 오류 번호의 남은 것 | 일부 — R58에서 메시지 글자로 번호·SQL 상태를 정함(`wire_error`, 약 40종). 코퍼스 전체에서 번호만 다른 문장 385개 → 약 20개. 남은 것은 엔진이 MySQL과 다른 이유로 실패하는 경우(문법을 못 받음, 메시지가 아무 말도 안 함): `ONLY_FULL_GROUP_BY`(1055), `RANGE` 프레임 오류(3587~3589), 윈도 함수를 쓸 수 없는 자리(3593), `SUM(SUM(x)) OVER`의 1140, `Data truncated`(1265) 일부, `MOD`로 0을 나누는 UPDATE(1365), 없는 윈도 이름(3579) | ★ | 하 | 오류 번호로 분기하는 클라이언트·ORM 코드가 MySQL에서처럼 동작합니다. | 번호는 `vs_mysql.py --proto --errno`가 코퍼스마다 비교합니다. 엔진 메시지를 MySQL 것으로 바꾸는 쪽이 정석이라 하나씩 고치면 됩니다. |
-| 몇 가지 `SHOW`의 빈 결과·문법 | 일부 — R57에서 USING·NATURAL 조인과 `CALL`의 빈 결과도 열 이름을 말하게 됨. 남은 것: `SHOW DATABASES LIKE`·`SHOW ERRORS`는 문법 오류, `SHOW GRANTS FOR 없는사용자`는 오류 1141 대신 빈 성공 | ★ | 하 | `SHOW DATABASES LIKE` 같은 문장을 쓰는 도구가 오류 없이 돕니다. 영향은 작습니다. | 작은 모양들입니다. MySQL 클라이언트가 접속 직후 보내는 문장은 아닙니다. |
+| 몇 가지 `SHOW`의 빈 결과·문법 | 일부 — R57에서 USING·NATURAL 조인과 `CALL`의 빈 결과도 열 이름을 말하게 됨. 남은 것: `SHOW DATABASES LIKE`·`SHOW ERRORS`는 문법 오류(`SHOW GRANTS FOR 없는사용자`는 R78에서 1141이 됨) | ★ | 하 | `SHOW DATABASES LIKE` 같은 문장을 쓰는 도구가 오류 없이 돕니다. 영향은 작습니다. | 작은 모양들입니다. MySQL 클라이언트가 접속 직후 보내는 문장은 아닙니다. |
 | FLOAT 열을 글자 함수에 넣으면 6자리가 아님 | 오답(작음) — `CONCAT(f, '')`가 MySQL은 `3.14159`(FLOAT는 6자리 글자), 여기는 저장된 글자 `3.1415927`. (FLOAT를 내는 함수 결과를 글자로 바꾸면 MySQL은 넓힌 값 `0.10000000149011612`를 줌: `CONCAT(COALESCE(f, 0), '')`) | ★ | 하 | FLOAT 값을 글자로 바꿀 때 MySQL과 같은 자릿수가 나옵니다. 드문 모양입니다. | R58의 코퍼스를 만들다 알게 된 것입니다. 글자 함수가 인자의 FLOAT 여부를 알아야 합니다. |
 | `PI()`에서 만든 식의 자릿수 | 오답(작음) — `PI()` 단독은 `3.141593`이 되었지만 `PI() + 0`·`PI() * 2`는 전체 자릿수(MySQL은 `PI()`가 소수 여섯 자리를 고정해서 식으로 전해짐: `PI() + 0`이 `3.141593`) | ★ | 하 | `PI() * 2` 같은 식의 자릿수가 MySQL과 같아집니다. 거의 눈에 안 띕니다. | R60에서 `WITH ROLLUP`과 함께 맞추다 알게 된 것입니다. 결과 열의 "고정 소수 자릿수" 속성이 식으로 전해지는 규칙이 필요합니다(`FLOAT`의 6자리와 같은 계열). |
 | 조인 뷰의 `UPDATE` · `INSERT` | 다름 — `CREATE VIEW v AS SELECT … FROM a JOIN b …`에 `UPDATE v SET (a의 열)`·`INSERT INTO v (a의 열)`을 하면 "View is not updatable"로 거절합니다(MySQL은 한 표의 열만 쓰면 받습니다. 조인 뷰의 `DELETE`는 둘 다 거절: 1395). | ★★ | 중 | 조인으로 만든 뷰에 쓰기가 되는 흔한 모양이 돕니다. | R71의 `resolve_view_target`(뷰 위의 뷰 · 열 이름 대응)가 한 표 뷰만 풉니다. 조인 뷰는 어느 표의 열인지 가려서 그 표로 보내고 조인 조건을 `WHERE`로 거는 일이 더해야 합니다. |
@@ -107,6 +106,8 @@ Claude가 부르는 도구.
 | 표 정의의 작은 틈 | 다름(작음) — `ALTER … RENAME COLUMN`이 `CHECK`가 쓰는 열을 막지 않음(MySQL 오류 3959), 한 열에 `UNIQUE`와 `UNIQUE (a)`를 둘 다 쓰면 색인 하나(MySQL은 둘), `information_schema.columns.column_type`이 `tinyint(1)`을 `tinyint`로 말함, `CREATE INDEX … (a DESC)`는 받지만 방향을 `A`로 기록함(MySQL `D`) | ★ | 하 | 스키마를 읽는 도구가 MySQL과 같은 정의를 봅니다. | 넷 모두 작은 변경입니다. |
 | 함수의 작은 틈 | 다름(작음) — 없는 함수 이름을 평가할 때 검사해서 빈 표의 `SELECT nosuch(id) FROM em`이 오류 없이 빈 결과(MySQL 1305), `INSTR('Strasse', 'ß')` · `LOCATE('ss', 'Straße')`는 MySQL이 5, 여기 0(`ß` = `ss` 같은 정렬 규칙의 확장 글자), `ANALYZE` 히스토그램은 글자를 바이트 순서로 정렬함(추정에만 영향) | ★ | 하~중 | 오타 난 함수 이름이 빈 표에서도 오류로 드러납니다. | 함수 이름 검사를 문장을 풀 때로 옮기면 됩니다. |
 | 저장 루틴 · DML의 남은 모양 | 다름(작음) — 프로시저가 `SELECT`를 여러 번 하면 마지막 표 하나만 답함(MySQL은 모든 집합을 보내고 클라이언트는 첫 것부터 읽음: `SELECT 100; SELECT 1`이 MySQL `100`, 여기 `1`), 재귀 호출을 허용함(MySQL 기본 `max_sp_recursion_depth = 0`은 오류 1456), 같은 값 행을 `REPLACE`하면 영향 행 수가 2(MySQL 1) | ★ | 중 | 프로시저 결과를 읽는 클라이언트가 MySQL과 같은 첫 집합을 받습니다. | 여러 결과 집합은 프로토콜 계층 변경이라 셋 중 가장 큽니다. |
+| 권한 쪽 남은 모양 | 다름(작음) — R78에서 권한이 강제되면서 남긴 것: ① 열 권한만 가진 표를 `DESCRIBE` · `SHOW COLUMNS` 하면 권한 없는 열까지 보임(MySQL은 권한 있는 열만) ② 권한 변경이 열려 있는 연결에 바로 반영됨(MySQL은 데이터베이스 수준을 다음 `USE`부터) ③ 접속할 때 `database=`로 준 곳에 권한이 없어도 로그인이 거절되지 않음(MySQL 1044) ④ `DROP INDEX 이름`(`ON 표` 없이)은 표를 알 수 없어 확인하지 않음 ⑤ `mysql.user` 같은 시스템 표가 없음 ⑥ `SHOW DATABASES`에 `information_schema` · `performance_schema`가 안 보임 | ★ | 하~중 | 권한 시연에서 MySQL과 똑같은 모습이 됩니다. 이 줄의 것은 모양의 차이이거나 드문 문장입니다(검사가 아예 없는 문장은 ④뿐). | `DESCRIBE`의 열 거르기와 로그인 때 `USE` 거절은 작은 일입니다. |
+| `CREATE DATABASE`의 현재 데이터베이스 · `CREATE TABLE … AS SELECT`의 영향 행 수 | 다름(작음) — R78 코퍼스를 쓰며 찾음: `CREATE DATABASE x`가 현재 데이터베이스를 `x`로 바꿈(MySQL은 바꾸지 않아서 이어지는 `CREATE TABLE t`가 `x`에 만들어짐), `CREATE TABLE c AS SELECT …`의 OK 패킷 영향 행 수가 0(MySQL은 넣은 행 수) | ★★ | 하 | 두 번째 것은 클라이언트가 보여 주는 "N rows affected"가 맞아지고, 첫째는 `mysqldump`가 아닌 직접 쓴 스크립트에서 표가 엉뚱한 곳에 만들어지는 일을 막습니다. | 첫째는 앱의 "데이터베이스 만들면 자동으로 그 데이터베이스를 연다" 동작에 기대고 있을 수 있어 앱 쪽을 먼저 확인해야 합니다. |
 
 ## 7. 엔진 기능 추가
 
@@ -114,12 +115,10 @@ Claude가 부르는 도구.
 
 | 항목 | 현재 상태 | 추천도 | 비용 | 효과 | 근거 |
 |---|---|---|---|---|---|
-| **권한 강제와 역할 (`GRANT` · `REVOKE`가 기록만 함)** | **오답(보안)** — 어떤 문장도 권한을 확인하지 않아서 `SELECT`만 받은 사용자가 `INSERT` · `UPDATE` · `DELETE` · `DROP TABLE`을 다 하고, 권한이 하나도 없는 사용자도 표를 읽음(R77의 `corpus/privileges.sql` 115문장 중 **90개가 다름**). 같은 뿌리의 모양: 오류 번호(중복 사용자 1396 · 없는 사용자 1396/1141 · 권한 부족 1142/1143/1227/1044 · `GRANT`가 사용자를 만듦 1410 · 없는 역할 3523 · 순환 역할 4027), `SHOW GRANTS`의 글자 모양(MySQL: `` GRANT SELECT ON `v`.`t` TO `alice`@`%` ``과 맨 앞의 `GRANT USAGE ON *.*` 줄), 문법 빈틈(`ALTER USER` · `RENAME USER` · `CREATE ROLE 'x'` · `GRANT '역할' TO 사용자`(여기는 `GRANT ROLE ...`) · `REVOKE ALL PRIVILEGES, GRANT OPTION` · 열 단위 `GRANT SELECT (col)` · `SET ROLE` · `SET DEFAULT ROLE` · `CURRENT_ROLE()`), `CURRENT_USER()`가 `alice@localhost`(MySQL `alice@%`) | ★★★★ | 상 | `SELECT`만 받은 사용자가 쓰지 못하는 권한 시연이 가능해지고, 권한이 새는 구멍이 닫힙니다. 발표에서 "권한 관리"를 말할 수 있게 됩니다. | 역할이 사용자와 따로 놓여 있고(`RoleRecord`) 문장을 실행하기 전에 "이 계정이 이 표에 이 권한이 있는가"를 묻는 곳이 없습니다. 문장의 종류마다 필요한 권한(`SELECT`는 읽는 표, `INSERT ... SELECT`는 둘 다, DDL은 `CREATE` · `DROP` · `ALTER` · `INDEX`, 사용자 관리는 전역 `CREATE USER` ...)을 모으는 일, 역할을 계정으로 합치는 일, 활성 역할(`SET ROLE`), `SHOW TABLES` · `information_schema`가 권한 있는 것만 보이게 하는 일이 같이 들어갑니다. 코퍼스가 있어 `vs_mysql.py ... corpus/privileges.sql --proto --errno`로 진척을 잴 수 있습니다. |
 | `FULLTEXT` / `MATCH … AGAINST` | 없음 (`FULLTEXT KEY`가 든 CREATE TABLE이 오류) | ★★★ | 상 | 글 검색 데모(`MATCH … AGAINST`)가 가능해져 발표 임팩트는 크지만 구현이 큽니다. | 검색 데모는 강하지만 역색인과 점수 계산이 큽니다. |
 | 대소문자를 구분하는 열 (`COLLATE utf8mb4_bin` · `BINARY`) | 없음 — R77의 `corpus/collate_clause.sql` 69문장 중 **62개가 다름**(열을 만드는 줄부터 `COLLATE`가 거절되어 이어지는 줄이 줄줄이 달라짐). `COLLATE utf8mb4_0900_ai_ci` · `CHARACTER SET utf8mb4`는 받지만(덤프 호환) `COLLATE utf8mb4_bin`은 "not supported" 오류, 열의 `BINARY` 속성과 `BINARY 식` · `식 COLLATE ...`는 구문 오류, `COLLATION()` · `CHARSET()`은 함수 없음, `SHOW COLLATION LIKE ...`은 빈 결과, `information_schema.collations` · `character_sets` 없음 | ★★ | 중~상 | 대소문자를 구분하는 열(해시 · 토큰 비교)을 만들고 `COLLATE`로 비교를 고를 수 있습니다. | 정렬 규칙이 엔진 전체에 기본 규칙(R15) 하나로 박혀 있어, 열마다 고르려면 비교 · 색인 · 고유 검사를 규칙별로 나눠야 합니다. 코퍼스가 이미 있어 차이 0을 목표로 삼을 수 있습니다(`vs_mysql.py ... corpus/collate_clause.sql`). |
 | `FLUSH` · `REPAIR` · `CHECKSUM TABLE` | 없음 — R71에서 `OPTIMIZE TABLE`·`CHECK TABLE`은 네이티브 프로토콜에서도 되고(앱 표 메뉴 포함, `CHECK`는 행을 읽음) `FLUSH`·`REPAIR`·`CHECKSUM TABLE`은 어느 쪽에도 없음 | ★ | 하 | `mysqldump`가 보내는 `FLUSH TABLES`를 받고 관리 도구의 표 점검 메뉴가 더 많이 돕니다. | `FLUSH TABLES`는 받기만 하고(체크포인트), `CHECKSUM TABLE`은 행의 해시, `REPAIR`는 `OPTIMIZE`와 같은 길로 보낼 수 있습니다. |
 | 표현식(함수) 인덱스 | 없음 (`CREATE INDEX … ((a + 1))`가 문법 오류) | ★★ | 중~상 | `WHERE a + 1 = …` 같은 식 조건도 인덱스를 탈 수 있습니다. | MySQL·PostgreSQL·Oracle 모두 있습니다. 인덱스 키가 식이라 플래너와 유지가 바뀝니다. |
-| 열 단위 권한 (`GRANT SELECT (col) ON t`) | 없음 | ★★ | 중 | 열마다 접근을 제한하는 보안 시연이 가능해집니다. | MySQL·PostgreSQL에 있고 Oracle은 INSERT·UPDATE만입니다. |
 | 감사 로그 | 없음 | ★★ | 중 | 누가 무엇을 했는지 기록해 보안·운영 설명이 풍부해집니다. | 셋 다 있습니다(PostgreSQL은 확장). 누가 무엇을 했는지 기록합니다. |
 | 공간 타입·인덱스, 특수 인덱스(비트맵·BRIN·GIN/GiST) | 없음 | ★ | 상 | 지리 데이터를 다루게 되지만 범위가 커서 이번 마감과는 맞지 않습니다. | 범위가 크고 이번 마감에는 맞지 않습니다. |
 
@@ -200,8 +199,14 @@ Claude가 부르는 도구.
 4. **작은 것 모음 (하):** `EXPLAIN UPDATE`·`DELETE`, 연결 수 상한, 프로토콜 오류 번호의 남은 약 20개, 몇 가지 `SHOW`, MCP의 `kill_session`·resources·prompts·CSV 도구.
 5. **품질 점검 — 마감 1주 전:** 누적 점검 한 바퀴(Debug 전체 + `KILL`을 섞은 크래시 시험 + 빌드 간 차분), 새 영역 훑기 한 번 더.
 6. **시간이 되면:** 최적화 전후 속도 애니메이션, 코퍼스 비교 CI, RuSQL vs MySQL 분할 화면, 스키마 비교에 뷰·트리거.
-7. **미루거나 하지 않는 것:** `FULLTEXT`, 표현식 인덱스, 열 단위 권한, 감사 로그, TLS, `caching_sha2_password`, WAL 복제·XA, 테마, 그리고 SQL 문법 추가 전부("SQL 문법 추가 — 보류").
+7. **미루거나 하지 않는 것:** `FULLTEXT`, 표현식 인덱스, 감사 로그, TLS, `caching_sha2_password`, WAL 복제·XA, 테마, 그리고 SQL 문법 추가 전부("SQL 문법 추가 — 보류").
 8. **직접 하실 일:** MCP 시연 리허설(`DEMO.md` 8번), 크래시 복구 장면 리허설(`DEMO.md` 3번), 화면 녹화, 앱 화면 사람 눈 점검.
+
+## 참고: R78에서 끝낸 것 (2026-11-12, 사용자가 고른 "크래시 퍼저가 찾은 불일치"와 "권한 강제와 역할")
+
+- **권한이 실제로 강제됩니다.** `root`가 아닌 계정의 모든 문장을 실행 전에 확인하고(읽기 · 쓰기 · DDL · 사용자 관리 · `GRANT` · `CALL` · `SHOW` · `USE`), MySQL의 오류 번호(1142 · 1143 · 1044 · 1045 · 1227 · 1370 · 1396 · 1410 · 3523 · 3530 · 4027 …)로 거절합니다. 열 단위 권한 · 역할이 역할을 갖는 것 · `SET ROLE` · 기본 역할 · `CURRENT_ROLE()` · `ALTER USER` · `RENAME USER` · `SET PASSWORD`가 생겼고 `SHOW GRANTS`가 MySQL의 글자와 같습니다. `corpus/privileges.sql` 115문장 중 90개 다름 → **300문장 차이 0**, 점수판에 올림. 자세한 것은 `DATE.md` R78.
+- **크래시 퍼저의 불일치**(`fuzz_crash_fk.py 1 7701`)의 원인은 복구가 아니라 **`ROLLBACK TO`**였습니다: `REPLACE`가 지운 같은 트랜잭션의 옛 버전까지 `INSERT`를 되돌릴 때 같이 지워졌습니다. 고쳤고 시험을 더했습니다.
+- 같이 고친 것: `SHOW TABLES`가 뷰를 빼먹던 것, `EXECUTE`로 없는 준비된 문장의 오류 번호(1064 → 1243), `CURRENT_USER()`가 `USER()`와 같은 `@localhost`를 답하던 것.
 
 ## 참고: R77에서 끝낸 것 (2026-11-09, 사용자가 고른 "새 영역 훑기: 권한·역할, COLLATE 절, COM_STMT_*, JSON 함수")
 

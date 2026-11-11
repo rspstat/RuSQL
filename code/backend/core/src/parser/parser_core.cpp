@@ -351,11 +351,7 @@ Statement Parser::parse_stmt() {
                 advance();
                 return parse_create_function();
             }
-            if (peek_is(TokenKind::Role)) {
-                advance();
-                std::string name = expect_ident();
-                return Statement(Statement::CreateRole{name});
-            }
+            if (peek_is(TokenKind::Role)) { advance(); return parse_create_role(); }
             if (peek_is(TokenKind::Synonym)) {
                 advance();
                 std::string name = expect_ident();
@@ -394,18 +390,7 @@ Statement Parser::parse_stmt() {
                 advance();
                 return parse_drop_function();
             }
-            if (peek_is(TokenKind::Role)) {
-                advance();
-                bool if_exists = false;
-                if (peek_is(TokenKind::If)) {
-                    advance();
-                    if (!peek_is(TokenKind::Exists)) throw ParseError("Expected EXISTS after IF");
-                    advance();
-                    if_exists = true;
-                }
-                std::string name = expect_ident();
-                return Statement(Statement::DropRole{name, if_exists});
-            }
+            if (peek_is(TokenKind::Role)) { advance(); return parse_drop_role(); }
             if (peek_is(TokenKind::Synonym)) {
                 advance();
                 bool if_exists = false;
@@ -516,11 +501,14 @@ Statement Parser::parse_stmt() {
         }
         case TokenKind::Alter:
             if (peek_is(TokenKind::View)) { advance(); return parse_create_view(); } // ALTER VIEW v AS SELECT ... (a view is made again)
+            if (peek_is(TokenKind::User)) { advance(); return parse_alter_user(); }
             return parse_alter();
         case TokenKind::Show:     return parse_show();
         case TokenKind::Describe: return parse_describe();
         case TokenKind::Truncate: return parse_truncate();
-        case TokenKind::Rename: return parse_rename();
+        case TokenKind::Rename:
+            if (peek_is(TokenKind::User)) { advance(); return parse_rename_user(); }
+            return parse_rename();
         case TokenKind::Checkpoint: return Statement(Statement::Checkpoint{});
         case TokenKind::Set:      return parse_set();
         case TokenKind::Vacuum:   return parse_vacuum();

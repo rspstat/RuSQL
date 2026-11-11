@@ -90,6 +90,11 @@ void to_json(nlohmann::json& j, const GrantRecord& g) {
                        {"object", g.object},
                        {"privileges", g.privileges},
                        {"with_grant_option", g.with_grant_option}};
+    if (!g.column_privileges.empty()) {
+        nlohmann::json columns = nlohmann::json::array();
+        for (auto& [privilege, column] : g.column_privileges) columns.push_back(nlohmann::json::array({privilege, column}));
+        j["column_privileges"] = columns;
+    }
 }
 
 void from_json(const nlohmann::json& j, GrantRecord& g) {
@@ -99,6 +104,10 @@ void from_json(const nlohmann::json& j, GrantRecord& g) {
     j.at("object").get_to(g.object);
     j.at("privileges").get_to(g.privileges);
     j.at("with_grant_option").get_to(g.with_grant_option);
+    g.column_privileges.clear();
+    if (j.contains("column_privileges")) {
+        for (auto& pair : j.at("column_privileges")) g.column_privileges.emplace_back(pair.at(0).get<std::string>(), pair.at(1).get<std::string>());
+    }
 }
 
 void to_json(nlohmann::json& j, const RoleRecord& r) { j = nlohmann::json{{"name", r.name}}; }
@@ -107,6 +116,7 @@ void from_json(const nlohmann::json& j, RoleRecord& r) { j.at("name").get_to(r.n
 
 void to_json(nlohmann::json& j, const RoleGrant& rg) {
     j = nlohmann::json{{"role", rg.role}, {"user", rg.user}, {"host", rg.host}, {"with_admin_option", rg.with_admin_option}};
+    if (rg.is_default) j["is_default"] = true;
 }
 
 void from_json(const nlohmann::json& j, RoleGrant& rg) {
@@ -114,6 +124,7 @@ void from_json(const nlohmann::json& j, RoleGrant& rg) {
     j.at("user").get_to(rg.user);
     j.at("host").get_to(rg.host);
     j.at("with_admin_option").get_to(rg.with_admin_option);
+    rg.is_default = j.contains("is_default") && j.at("is_default").get<bool>();
 }
 
 bool SharedDatabase::verify_mysql_native_password(const std::string& user, const std::vector<std::uint8_t>& nonce,
@@ -1435,7 +1446,7 @@ std::size_t count_occurrences(const std::string& haystack, const std::string& ne
 bool contains_nondeterministic_func(const std::string& lower_sql) {
     static const char* kFuncs[] = {"now",         "curdate",     "curtime",        "current_time", "current_timestamp", "current_date", "sysdate",
                                    "localtime",   "localtimestamp", "unix_timestamp", "rand",      "uuid",
-                                   "user",        "current_user", "session_user",   "system_user", "last_insert_id", "row_count", "found_rows",
+                                   "user",        "current_user", "current_role",   "session_user", "system_user", "last_insert_id", "row_count", "found_rows",
                                    "utc_date",    "utc_time",    "utc_timestamp",  "sleep"};
     auto is_ident_char = [](char c) { return std::isalnum(static_cast<unsigned char>(c)) != 0 || c == '_'; };
     for (const char* name_c : kFuncs) {
@@ -1696,6 +1707,10 @@ StringResult Executor::run_sql_text(const std::string& sql_text) {
     // the transaction characteristics of the session: a statement that defines something commits the open transaction first (so does BEGIN), a READ ONLY transaction (or session)
     // refuses the statements that write, and outside a transaction the engine runs at the isolation level the session says
     const std::string second_word = second_word_upper(sql);
+    if (word == "SET") {
+        auto s = shared->read();
+        if (auto denied = check_set_global(*s, sql)) return StringResult::Err(*denied);
+    }
     if (txn.is_active() && commits_implicitly(word, second_word)) {
         auto committed = execute_sql_inner("COMMIT");
         if (committed.is_err()) return committed;
@@ -1802,7 +1817,7 @@ StringResult Executor::execute_sql_inner(const std::string& sql) {
         // session's still-open commit) -- the cache key (db + SQL text) has no way to
         // capture that, so a hit here could silently serve one session's view to
         // another. Only trust/populate the cache when the DB is fully quiescent.
-        if (s->active_txn_ids->lock()->empty()) {
+        if (s->active_txn_ids->lock()->empty() && !privileges_apply(*s)) {
             if (auto cached = s->query_cache.get(cache_key)) return StringResult::Ok(std::move(*cached));
         }
     }
@@ -1970,6 +1985,10 @@ StringResult Executor::execute_with_s_body(SharedDatabase& s, Statement stmt) {
     };
     const bool top_level = exec_depth_ == 0;
     DepthGuard depth_guard(exec_depth_);
+    // what the account of this session may do (the statements inside a statement run with the rights of their definer: only the one the client sent is looked at)
+    if (top_level) {
+        if (auto denied = check_privileges(s, stmt)) return StringResult::Err(*denied);
+    }
     // InnoDB reads the tables of the subqueries of a statement that is not a plain SELECT as a locking read: in a REPEATABLE READ / SERIALIZABLE transaction that is what is committed now,
     // not the snapshot (a SELECT, SELECT ... INTO included, reads the snapshot). The SELECT of an INSERT ... SELECT is a part of its statement; a trigger or a procedure starts its own.
     const bool locking_kind = std::holds_alternative<Statement::Insert>(stmt.data) || std::holds_alternative<Statement::InsertSelect>(stmt.data) ||
@@ -1981,7 +2000,7 @@ StringResult Executor::execute_with_s_body(SharedDatabase& s, Statement stmt) {
                                                                                                   txn.isolation_level() == IsolationLevel::Serializable)));
     // the expressions of this statement may run subqueries; what the statement writes changes what a subquery that was answered before would say
     StatementScope statement_scope(*this, s, !is_pure_read_only(stmt));
-    sync_udf_context(s.user_functions, current_db, auth_user);
+    sync_udf_context(s.user_functions, current_db, auth_user, account_host(s), current_role_text(s));
     sync_session_counters(last_insert_id_, row_count_, found_rows_);
     substitute_variables(stmt); // a procedure's variables and the session's @variables, by their values
     evaluate_insert_expressions(stmt, &s, top_level && proc_vars.empty());
@@ -1991,18 +2010,22 @@ StringResult Executor::execute_with_s_body(SharedDatabase& s, Statement stmt) {
     if (auto* v = std::get_if<Statement::DropDatabase>(&stmt.data)) return exec_drop_database(s, v->name, v->if_exists);
 
     // User management / privileges — qualification not needed
-    if (auto* v = std::get_if<Statement::CreateUser>(&stmt.data)) return exec_create_user(s, v->user, v->host, v->password, v->if_not_exists);
-    if (auto* v = std::get_if<Statement::DropUser>(&stmt.data)) return exec_drop_user(s, v->user, v->host, v->if_exists);
-    if (auto* v = std::get_if<Statement::Grant>(&stmt.data))
-        return exec_grant(s, v->privileges, v->object_type, v->object, v->user, v->host, v->with_grant_option);
-    if (auto* v = std::get_if<Statement::Revoke>(&stmt.data)) return exec_revoke(s, v->privileges, v->object_type, v->object, v->user, v->host);
-    if (auto* v = std::get_if<Statement::ShowGrants>(&stmt.data)) return exec_show_grants(s, v->user, v->host);
+    if (auto* v = std::get_if<Statement::CreateUser>(&stmt.data)) return exec_create_user(s, *v);
+    if (auto* v = std::get_if<Statement::DropUser>(&stmt.data)) return exec_drop_user(s, *v);
+    if (auto* v = std::get_if<Statement::AlterUser>(&stmt.data)) return exec_alter_user(s, *v);
+    if (auto* v = std::get_if<Statement::RenameUser>(&stmt.data)) return exec_rename_user(s, *v);
+    if (auto* v = std::get_if<Statement::SetPassword>(&stmt.data)) return exec_set_password(s, *v);
+    if (auto* v = std::get_if<Statement::Grant>(&stmt.data)) return exec_grant(s, *v);
+    if (auto* v = std::get_if<Statement::Revoke>(&stmt.data)) return exec_revoke(s, *v);
+    if (auto* v = std::get_if<Statement::ShowGrants>(&stmt.data)) return exec_show_grants(s, *v);
+    if (auto* v = std::get_if<Statement::SetRole>(&stmt.data)) return exec_set_role(s, *v);
+    if (auto* v = std::get_if<Statement::SetDefaultRole>(&stmt.data)) return exec_set_default_role(s, *v);
     if (std::holds_alternative<Statement::ShowDatabases>(stmt.data)) return exec_show_databases(s);
     // ROLE 관리
-    if (auto* v = std::get_if<Statement::CreateRole>(&stmt.data)) return exec_create_role(s, v->name);
-    if (auto* v = std::get_if<Statement::DropRole>(&stmt.data)) return exec_drop_role(s, v->name, v->if_exists);
-    if (auto* v = std::get_if<Statement::GrantRole>(&stmt.data)) return exec_grant_role(s, v->role, v->user, v->host, v->with_admin_option);
-    if (auto* v = std::get_if<Statement::RevokeRole>(&stmt.data)) return exec_revoke_role(s, v->role, v->user, v->host);
+    if (auto* v = std::get_if<Statement::CreateRole>(&stmt.data)) return exec_create_role(s, *v);
+    if (auto* v = std::get_if<Statement::DropRole>(&stmt.data)) return exec_drop_role(s, *v);
+    if (auto* v = std::get_if<Statement::GrantRole>(&stmt.data)) return exec_grant_role(s, *v);
+    if (auto* v = std::get_if<Statement::RevokeRole>(&stmt.data)) return exec_revoke_role(s, *v);
     if (std::holds_alternative<Statement::ShowRoles>(stmt.data)) return exec_show_roles(s);
     // SYNONYM 관리
     if (auto* v = std::get_if<Statement::CreateSynonym>(&stmt.data)) return exec_create_synonym(s, v->name, v->target, v->or_replace);

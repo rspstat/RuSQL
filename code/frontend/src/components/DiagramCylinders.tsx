@@ -59,8 +59,8 @@ const NODES: Node[] = [
   },
   {
     id: "executor", x: 885, y: 350, w: 120, h: 98, c: C.core, name: L("Executor", "실행기"),
-    desc: L("Runs the plan: NL / hash / sort-merge / index joins, subqueries, CTE, window functions (over groups too). Result cache (LRU-512) + thread pool. MySQL-exact results (DECIMAL places, strict errors); MAX_EXECUTION_TIME (3024); TRACE. Foreign key actions are worked out row by row like InnoDB, down the whole chain of tables (RESTRICT, CASCADE, SET NULL, ON UPDATE), a table that is its own child included.",
-            "계획 실행: NL·해시·소트-머지·인덱스 조인, 서브쿼리, CTE, 윈도 함수(그룹 위에서도). 결과 캐시(LRU 512) + 스레드 풀. MySQL과 같은 결과(DECIMAL 자릿수, 엄격한 오류), MAX_EXECUTION_TIME(3024), TRACE. 외래키 동작은 InnoDB처럼 행 단위로, 표를 건너는 사슬 끝까지(RESTRICT·CASCADE·SET NULL·ON UPDATE) 처리하고 자기 표를 가리키는 외래키도 포함."),
+    desc: L("Runs the plan: NL / hash / sort-merge / index joins, subqueries, CTE, window functions (over groups too). Result cache (LRU-512) + thread pool. MySQL-exact results (DECIMAL places, strict errors); MAX_EXECUTION_TIME (3024); TRACE. Foreign key actions are worked out row by row like InnoDB, down the whole chain of tables (RESTRICT, CASCADE, SET NULL, ON UPDATE), a table that is its own child included. Before a statement runs, the privileges of the account (GRANT, roles) are checked.",
+            "계획 실행: NL·해시·소트-머지·인덱스 조인, 서브쿼리, CTE, 윈도 함수(그룹 위에서도). 결과 캐시(LRU 512) + 스레드 풀. MySQL과 같은 결과(DECIMAL 자릿수, 엄격한 오류), MAX_EXECUTION_TIME(3024), TRACE. 외래키 동작은 InnoDB처럼 행 단위로, 표를 건너는 사슬 끝까지(RESTRICT·CASCADE·SET NULL·ON UPDATE) 처리하고 자기 표를 가리키는 외래키도 포함. 문장을 실행하기 전에 계정의 권한(GRANT·역할)을 확인."),
   },
   {
     id: "txn", x: 1085, y: 350, w: 130, h: 104, c: C.txn, name: L("Transactions", "트랜잭션"),

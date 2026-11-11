@@ -283,6 +283,7 @@ void handle_client(SOCKET sock, std::shared_ptr<RwLock<SharedDatabase>> shared, 
     // 3. query session
     Executor exec = Executor::new_session(shared);
     exec.auth_user = auth_user;
+    exec.activate_default_roles();
     exec.register_process(auth_user, peer, [sock] { wake_connection(sock); }); // (KILL of this connection wakes the read below)
     std::string buf;
 

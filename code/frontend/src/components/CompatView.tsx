@@ -27,6 +27,7 @@ const KNOWN: { en: string; ko: string }[] = [
   { en: "SHOW ENGINES lists MyISAM, MEMORY ... as MySQL does, but RuSQL has one InnoDB-like engine (ENGINE= is accepted and ignored) and no XA statements", ko: "SHOW ENGINES는 MySQL처럼 MyISAM·MEMORY 등을 보이지만 RuSQL의 엔진은 InnoDB 방식 하나뿐(ENGINE=은 받아서 무시)이고 XA 문장은 없음" },
   { en: "long_query_time is one value for the whole server (no per-session value), and SET slow_query_log without GLOBAL is accepted", ko: "long_query_time은 서버 전체에 하나(세션 값 없음)이고 GLOBAL 없는 SET slow_query_log도 받음" },
   { en: "A view that mixes an aggregate with a plain column is refused when it is created (MySQL refuses when it is selected)", ko: "집계와 일반 열이 섞인 뷰는 만들 때 거절 (MySQL은 조회할 때 거절)" },
+  { en: "Privileges: a GRANT reaches an open connection at once (MySQL: the privileges of a database from the next USE), DESCRIBE of a table with only column privileges lists every column, and there is no mysql.user table", ko: "권한: GRANT가 열려 있는 연결에 바로 반영됨 (MySQL: 데이터베이스 수준은 다음 USE부터), 열 권한만 있는 표를 DESCRIBE하면 모든 열이 보이고, mysql.user 표는 없음" },
 ];
 
 function pct(part: number, whole: number): string {

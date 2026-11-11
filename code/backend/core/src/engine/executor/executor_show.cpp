@@ -587,7 +587,9 @@ StringResult Executor::exec_show_processlist(const SharedDatabase& s) const {
                           pad_right("Info", 68) + " |";
 
     std::vector<std::string> rows;
+    const bool every_session = holds_global(s, "PROCESS"); // (an account without PROCESS sees its own sessions)
     for (auto& [id, p] : *list) {
+        if (!every_session && p.user != auth_user) continue;
         std::string db_str = p.db.empty() ? "NULL" : p.db;
         auto secs = std::chrono::duration_cast<std::chrono::seconds>(now - p.state_since).count();
         std::string info_str = p.info.empty() ? "NULL" : p.info.substr(0, std::min<std::size_t>(68, p.info.size()));

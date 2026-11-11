@@ -33,6 +33,8 @@ using namespace std::chrono;
 thread_local std::unordered_map<std::string, UserFunctionDef> g_user_functions;
 thread_local std::string g_current_db_ctx;
 thread_local std::string g_current_user_ctx;
+thread_local std::string g_current_host_ctx = "localhost"; // the host of the account (CURRENT_USER()); USER() is the client's, always localhost
+thread_local std::string g_current_roles_ctx = "NONE";     // CURRENT_ROLE()
 
 std::string to_lower_str(const std::string& s) {
     std::string out = s;
@@ -196,11 +198,13 @@ void Executor::sync_session_counters(std::uint64_t last_insert_id, std::int64_t 
 }
 
 void Executor::sync_udf_context(const std::unordered_map<std::string, UserFunctionDef>& user_functions, const std::string& current_db,
-                                 const std::string& current_user) {
+                                 const std::string& current_user, const std::string& account_host, const std::string& current_roles) {
     g_user_functions.clear();
     for (const auto& [name, def] : user_functions) g_user_functions[to_lower_str(name)] = def; // (a function is called by its name apart from case)
     g_current_db_ctx = current_db;
     g_current_user_ctx = current_user;
+    g_current_host_ctx = account_host;
+    g_current_roles_ctx = current_roles;
 }
 
 std::string Executor::call_builtin_with_values(const std::string& func_name, const std::vector<std::string>& raw, const std::vector<std::string>& values,
@@ -468,8 +472,9 @@ std::string Executor::apply_scalar_func(const std::string& typed_name, const std
     // authenticated -- g_current_user_ctx is synced from Executor::auth_user (set by the
     // native/MySQL protocol servers after a successful AUTH handshake) the same way
     // g_current_db_ctx is synced from current_db, just above.
-    if (func_name == "CURRENT_USER" || func_name == "USER" || func_name == "SESSION_USER" || func_name == "SYSTEM_USER")
-        return g_current_user_ctx + "@localhost";
+    if (func_name == "CURRENT_USER") return g_current_user_ctx + "@" + g_current_host_ctx;
+    if (func_name == "USER" || func_name == "SESSION_USER" || func_name == "SYSTEM_USER") return g_current_user_ctx + "@localhost";
+    if (func_name == "CURRENT_ROLE") return g_current_roles_ctx;
 
     throw StatementError("FUNCTION " + g_current_db_ctx + "." + to_lower_str(typed_name) + " does not exist");
 }

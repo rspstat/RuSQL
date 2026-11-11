@@ -1027,38 +1027,60 @@ void to_json(nlohmann::json& j, const Statement& stmt) {
                                                                    {"joins", alt.joins},
                                                                    {"condition", alt.condition},
                                                                    {"table_aliases", alt.table_aliases}}}};
-            else if constexpr (std::is_same_v<T, Statement::CreateUser>)
+            else if constexpr (std::is_same_v<T, Statement::CreateUser>) {
+                // (the accounts of a list after the first are kept as {user, host, password} triples)
+                nlohmann::json more = nlohmann::json::array();
+                for (auto& u : alt.more_users) more.push_back(nlohmann::json::array({u.user, u.host, u.password.has_value() ? nlohmann::json(*u.password) : nlohmann::json()}));
                 j = nlohmann::json{{"CreateUser", nlohmann::json{{"user", alt.user},
                                                                   {"host", alt.host},
                                                                   {"password", alt.password},
-                                                                  {"if_not_exists", alt.if_not_exists}}}};
-            else if constexpr (std::is_same_v<T, Statement::DropUser>)
-                j = nlohmann::json{{"DropUser", nlohmann::json{{"user", alt.user}, {"host", alt.host}, {"if_exists", alt.if_exists}}}};
+                                                                  {"if_not_exists", alt.if_not_exists},
+                                                                  {"more_users", more}}}};
+            } else if constexpr (std::is_same_v<T, Statement::DropUser>)
+                j = nlohmann::json{{"DropUser", nlohmann::json{{"user", alt.user}, {"host", alt.host}, {"if_exists", alt.if_exists}, {"more_users", alt.more_users}}}};
             else if constexpr (std::is_same_v<T, Statement::Grant>)
                 j = nlohmann::json{{"Grant", nlohmann::json{{"privileges", alt.privileges},
                                                              {"object_type", alt.object_type},
                                                              {"object", alt.object},
                                                              {"user", alt.user},
                                                              {"host", alt.host},
-                                                             {"with_grant_option", alt.with_grant_option}}}};
+                                                             {"with_grant_option", alt.with_grant_option},
+                                                             {"privilege_columns", alt.privilege_columns},
+                                                             {"more_users", alt.more_users}}}};
             else if constexpr (std::is_same_v<T, Statement::Revoke>)
                 j = nlohmann::json{{"Revoke", nlohmann::json{{"privileges", alt.privileges},
                                                               {"object_type", alt.object_type},
                                                               {"object", alt.object},
                                                               {"user", alt.user},
-                                                              {"host", alt.host}}}};
+                                                              {"host", alt.host},
+                                                              {"privilege_columns", alt.privilege_columns},
+                                                              {"more_users", alt.more_users},
+                                                              {"all_with_grant_option", alt.all_with_grant_option}}}};
             else if constexpr (std::is_same_v<T, Statement::ShowGrants>)
-                j = nlohmann::json{{"ShowGrants", nlohmann::json{{"user", alt.user}, {"host", alt.host}}}};
-            else if constexpr (std::is_same_v<T, Statement::CreateRole>) j = nlohmann::json{{"CreateRole", nlohmann::json{{"name", alt.name}}}};
+                j = nlohmann::json{{"ShowGrants", nlohmann::json{{"user", alt.user}, {"host", alt.host}, {"using_roles", alt.using_roles}}}};
+            else if constexpr (std::is_same_v<T, Statement::CreateRole>)
+                j = nlohmann::json{{"CreateRole", nlohmann::json{{"name", alt.name}, {"if_not_exists", alt.if_not_exists}, {"more", alt.more}}}};
             else if constexpr (std::is_same_v<T, Statement::DropRole>)
-                j = nlohmann::json{{"DropRole", nlohmann::json{{"name", alt.name}, {"if_exists", alt.if_exists}}}};
+                j = nlohmann::json{{"DropRole", nlohmann::json{{"name", alt.name}, {"if_exists", alt.if_exists}, {"more", alt.more}}}};
             else if constexpr (std::is_same_v<T, Statement::GrantRole>)
                 j = nlohmann::json{{"GrantRole", nlohmann::json{{"role", alt.role},
                                                                  {"user", alt.user},
                                                                  {"host", alt.host},
-                                                                 {"with_admin_option", alt.with_admin_option}}}};
+                                                                 {"with_admin_option", alt.with_admin_option},
+                                                                 {"more_roles", alt.more_roles},
+                                                                 {"more_users", alt.more_users}}}};
             else if constexpr (std::is_same_v<T, Statement::RevokeRole>)
-                j = nlohmann::json{{"RevokeRole", nlohmann::json{{"role", alt.role}, {"user", alt.user}, {"host", alt.host}}}};
+                j = nlohmann::json{{"RevokeRole", nlohmann::json{{"role", alt.role}, {"user", alt.user}, {"host", alt.host}, {"more_roles", alt.more_roles}, {"more_users", alt.more_users}}}};
+            else if constexpr (std::is_same_v<T, Statement::AlterUser>)
+                j = nlohmann::json{{"AlterUser", nlohmann::json{{"user", alt.user}, {"host", alt.host}, {"password", alt.password}, {"if_exists", alt.if_exists}, {"current", alt.current}}}};
+            else if constexpr (std::is_same_v<T, Statement::RenameUser>)
+                j = nlohmann::json{{"RenameUser", nlohmann::json{{"pairs", alt.pairs}}}};
+            else if constexpr (std::is_same_v<T, Statement::SetPassword>)
+                j = nlohmann::json{{"SetPassword", nlohmann::json{{"user", alt.user}, {"host", alt.host}, {"password", alt.password}, {"current", alt.current}}}};
+            else if constexpr (std::is_same_v<T, Statement::SetRole>)
+                j = nlohmann::json{{"SetRole", nlohmann::json{{"mode", alt.mode}, {"roles", alt.roles}}}};
+            else if constexpr (std::is_same_v<T, Statement::SetDefaultRole>)
+                j = nlohmann::json{{"SetDefaultRole", nlohmann::json{{"mode", alt.mode}, {"roles", alt.roles}, {"users", alt.users}}}};
             else if constexpr (std::is_same_v<T, Statement::CreateSynonym>)
                 j = nlohmann::json{{"CreateSynonym", nlohmann::json{{"name", alt.name}, {"target", alt.target}, {"or_replace", alt.or_replace}}}};
             else if constexpr (std::is_same_v<T, Statement::DropSynonym>)
@@ -1326,28 +1348,100 @@ void from_json(const nlohmann::json& j, Statement& stmt) {
         if (p.contains("table_aliases")) v.table_aliases = p.at("table_aliases").get<std::vector<std::pair<std::string, std::string>>>();
         stmt = Statement(std::move(v));
     } else if (tag == "CreateUser") {
-        stmt = Statement(Statement::CreateUser{p.at("user").get<std::string>(), p.at("host").get<std::string>(),
-                                                 p.at("password").get<std::optional<std::string>>(), p.at("if_not_exists").get<bool>()});
+        Statement::CreateUser v{p.at("user").get<std::string>(), p.at("host").get<std::string>(), p.at("password").get<std::optional<std::string>>(),
+                                p.at("if_not_exists").get<bool>(), {}};
+        if (p.contains("more_users")) {
+            for (auto& u : p.at("more_users")) {
+                Statement::CreateUser more;
+                more.user = u.at(0).get<std::string>();
+                more.host = u.at(1).get<std::string>();
+                if (!u.at(2).is_null()) more.password = u.at(2).get<std::string>();
+                v.more_users.push_back(std::move(more));
+            }
+        }
+        stmt = Statement(std::move(v));
     } else if (tag == "DropUser") {
-        stmt = Statement(Statement::DropUser{p.at("user").get<std::string>(), p.at("host").get<std::string>(), p.at("if_exists").get<bool>()});
+        Statement::DropUser v{p.at("user").get<std::string>(), p.at("host").get<std::string>(), p.at("if_exists").get<bool>(), {}};
+        if (p.contains("more_users")) v.more_users = p.at("more_users").get<std::vector<std::pair<std::string, std::string>>>();
+        stmt = Statement(std::move(v));
     } else if (tag == "Grant") {
-        stmt = Statement(Statement::Grant{p.at("privileges").get<std::vector<std::string>>(), p.at("object_type").get<std::string>(),
-                                           p.at("object").get<std::string>(), p.at("user").get<std::string>(), p.at("host").get<std::string>(),
-                                           p.at("with_grant_option").get<bool>()});
+        Statement::Grant v;
+        v.privileges = p.at("privileges").get<std::vector<std::string>>();
+        v.object_type = p.at("object_type").get<std::string>();
+        v.object = p.at("object").get<std::string>();
+        v.user = p.at("user").get<std::string>();
+        v.host = p.at("host").get<std::string>();
+        v.with_grant_option = p.at("with_grant_option").get<bool>();
+        if (p.contains("privilege_columns")) v.privilege_columns = p.at("privilege_columns").get<std::vector<std::vector<std::string>>>();
+        if (p.contains("more_users")) v.more_users = p.at("more_users").get<std::vector<std::pair<std::string, std::string>>>();
+        stmt = Statement(std::move(v));
     } else if (tag == "Revoke") {
-        stmt = Statement(Statement::Revoke{p.at("privileges").get<std::vector<std::string>>(), p.at("object_type").get<std::string>(),
-                                            p.at("object").get<std::string>(), p.at("user").get<std::string>(), p.at("host").get<std::string>()});
+        Statement::Revoke v;
+        v.privileges = p.at("privileges").get<std::vector<std::string>>();
+        v.object_type = p.at("object_type").get<std::string>();
+        v.object = p.at("object").get<std::string>();
+        v.user = p.at("user").get<std::string>();
+        v.host = p.at("host").get<std::string>();
+        if (p.contains("privilege_columns")) v.privilege_columns = p.at("privilege_columns").get<std::vector<std::vector<std::string>>>();
+        if (p.contains("more_users")) v.more_users = p.at("more_users").get<std::vector<std::pair<std::string, std::string>>>();
+        if (p.contains("all_with_grant_option")) v.all_with_grant_option = p.at("all_with_grant_option").get<bool>();
+        stmt = Statement(std::move(v));
     } else if (tag == "ShowGrants") {
-        stmt = Statement(Statement::ShowGrants{p.at("user").get<std::optional<std::string>>(), p.at("host").get<std::optional<std::string>>()});
+        Statement::ShowGrants v{p.at("user").get<std::optional<std::string>>(), p.at("host").get<std::optional<std::string>>(), {}};
+        if (p.contains("using_roles")) v.using_roles = p.at("using_roles").get<std::vector<std::string>>();
+        stmt = Statement(std::move(v));
     } else if (tag == "CreateRole") {
-        stmt = Statement(Statement::CreateRole{p.at("name").get<std::string>()});
+        Statement::CreateRole v;
+        v.name = p.at("name").get<std::string>();
+        if (p.contains("if_not_exists")) v.if_not_exists = p.at("if_not_exists").get<bool>();
+        if (p.contains("more")) v.more = p.at("more").get<std::vector<std::string>>();
+        stmt = Statement(std::move(v));
     } else if (tag == "DropRole") {
-        stmt = Statement(Statement::DropRole{p.at("name").get<std::string>(), p.at("if_exists").get<bool>()});
+        Statement::DropRole v;
+        v.name = p.at("name").get<std::string>();
+        v.if_exists = p.at("if_exists").get<bool>();
+        if (p.contains("more")) v.more = p.at("more").get<std::vector<std::string>>();
+        stmt = Statement(std::move(v));
     } else if (tag == "GrantRole") {
-        stmt = Statement(Statement::GrantRole{p.at("role").get<std::string>(), p.at("user").get<std::string>(), p.at("host").get<std::string>(),
-                                               p.at("with_admin_option").get<bool>()});
+        Statement::GrantRole v{p.at("role").get<std::string>(), p.at("user").get<std::string>(), p.at("host").get<std::string>(), p.at("with_admin_option").get<bool>(), {}, {}};
+        if (p.contains("more_roles")) v.more_roles = p.at("more_roles").get<std::vector<std::string>>();
+        if (p.contains("more_users")) v.more_users = p.at("more_users").get<std::vector<std::pair<std::string, std::string>>>();
+        stmt = Statement(std::move(v));
     } else if (tag == "RevokeRole") {
-        stmt = Statement(Statement::RevokeRole{p.at("role").get<std::string>(), p.at("user").get<std::string>(), p.at("host").get<std::string>()});
+        Statement::RevokeRole v{p.at("role").get<std::string>(), p.at("user").get<std::string>(), p.at("host").get<std::string>(), {}, {}};
+        if (p.contains("more_roles")) v.more_roles = p.at("more_roles").get<std::vector<std::string>>();
+        if (p.contains("more_users")) v.more_users = p.at("more_users").get<std::vector<std::pair<std::string, std::string>>>();
+        stmt = Statement(std::move(v));
+    } else if (tag == "AlterUser") {
+        Statement::AlterUser v;
+        v.user = p.at("user").get<std::string>();
+        v.host = p.at("host").get<std::string>();
+        v.password = p.at("password").get<std::optional<std::string>>();
+        v.if_exists = p.at("if_exists").get<bool>();
+        v.current = p.at("current").get<bool>();
+        stmt = Statement(std::move(v));
+    } else if (tag == "RenameUser") {
+        Statement::RenameUser v;
+        v.pairs = p.at("pairs").get<std::vector<std::pair<std::pair<std::string, std::string>, std::pair<std::string, std::string>>>>();
+        stmt = Statement(std::move(v));
+    } else if (tag == "SetPassword") {
+        Statement::SetPassword v;
+        v.user = p.at("user").get<std::string>();
+        v.host = p.at("host").get<std::string>();
+        v.password = p.at("password").get<std::string>();
+        v.current = p.at("current").get<bool>();
+        stmt = Statement(std::move(v));
+    } else if (tag == "SetRole") {
+        Statement::SetRole v;
+        v.mode = p.at("mode").get<std::string>();
+        v.roles = p.at("roles").get<std::vector<std::string>>();
+        stmt = Statement(std::move(v));
+    } else if (tag == "SetDefaultRole") {
+        Statement::SetDefaultRole v;
+        v.mode = p.at("mode").get<std::string>();
+        v.roles = p.at("roles").get<std::vector<std::string>>();
+        v.users = p.at("users").get<std::vector<std::pair<std::string, std::string>>>();
+        stmt = Statement(std::move(v));
     } else if (tag == "CreateSynonym") {
         stmt = Statement(
             Statement::CreateSynonym{p.at("name").get<std::string>(), p.at("target").get<std::string>(), p.at("or_replace").get<bool>()});

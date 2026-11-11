@@ -88,14 +88,25 @@ Statement Parser::parse_show() {
     if (t->kind == TokenKind::Locks) return Statement(Statement::ShowLocks{});
     if (t->kind == TokenKind::Databases) return Statement(Statement::ShowDatabases{});
     if (t->kind == TokenKind::Grants) {
-        std::optional<std::string> user, host;
+        Statement::ShowGrants show;
         if (peek_is(TokenKind::For)) {
             advance();
-            auto [u, h] = parse_user_spec();
-            user = u;
-            host = h;
+            bool current = false;
+            auto [u, h] = parse_account_or_current(current);
+            if (!current) {
+                show.user = u;
+                show.host = h;
+            }
+            if (peek_is(TokenKind::Using)) { // SHOW GRANTS FOR user USING role [, role ...]: the privileges of those roles count as the user's
+                advance();
+                for (;;) {
+                    show.using_roles.push_back(parse_role_name());
+                    if (!peek_is(TokenKind::Comma)) break;
+                    advance();
+                }
+            }
         }
-        return Statement(Statement::ShowGrants{user, host});
+        return Statement(std::move(show));
     }
     if (t->kind == TokenKind::Create) {
         const Token* n = advance();
@@ -160,6 +171,9 @@ Statement Parser::parse_set() {
     // [SESSION] TRANSACTION ISOLATION LEVEL x | ISOLATION LEVEL x
     const Token* t = peek();
     if (!t) throw ParseError("Expected ISOLATION");
+    if (t->kind == TokenKind::Password && (peek_at_is(1, TokenKind::For) || peek_at_is(1, TokenKind::Eq))) { advance(); return parse_set_password(); }
+    if (t->kind == TokenKind::Role) { advance(); return parse_set_role(); }
+    if (t->kind == TokenKind::Default && peek_at_is(1, TokenKind::Role)) { advance(); advance(); return parse_set_default_role(); }
     auto is_word = [&](const Token* tok, const char* w) { return tok && tok->kind == TokenKind::Ident && to_upper(tok->text) == w; };
     auto is_scope = [&](const Token* tok) {
         return tok && tok->kind == TokenKind::Ident &&
@@ -341,7 +355,43 @@ std::pair<std::string, std::string> Parser::parse_user_spec() {
     return {user, host};
 }
 
-// CREATE USER ['user'@'host'] [IDENTIFIED BY 'password']
+namespace {
+// the word a token stands for: an identifier / string as typed, a keyword as it was written
+std::string token_text(const Token* t) { return !t->text.empty() ? t->text : t->word; }
+} // namespace
+
+// 'user'@'host' | user | USER() | CURRENT_USER() (then `current`)
+std::pair<std::string, std::string> Parser::parse_account_or_current(bool& current) {
+    current = false;
+    const Token* t = peek();
+    if (t && (t->kind == TokenKind::User || (t->kind == TokenKind::Ident && to_upper(t->text) == "CURRENT_USER")) && peek_at_is(1, TokenKind::LParen)) {
+        advance();
+        advance();
+        if (!peek_is(TokenKind::RParen)) throw ParseError("Expected ')'");
+        advance();
+        current = true;
+        return {"", ""};
+    }
+    if (t && t->kind == TokenKind::Ident && to_upper(t->text) == "CURRENT_USER") { // CURRENT_USER without the parentheses
+        advance();
+        current = true;
+        return {"", ""};
+    }
+    return parse_user_spec();
+}
+
+std::string Parser::parse_role_name() {
+    const Token* t = advance();
+    if (!t || (t->text.empty() && t->word.empty())) throw ParseError("Expected role name");
+    std::string name = token_text(t);
+    if (peek_is(TokenKind::At)) { // 'r'@'host': a role has no host here
+        advance();
+        if (!advance()) throw ParseError("Expected hostname after @");
+    }
+    return name;
+}
+
+// CREATE USER [IF NOT EXISTS] 'user'@'host' [IDENTIFIED BY 'password'] [, 'user2'@'host2' [IDENTIFIED BY 'password2']] ...
 Statement Parser::parse_create_user() {
     bool if_not_exists = false;
     if (peek_is(TokenKind::If)) {
@@ -352,21 +402,32 @@ Statement Parser::parse_create_user() {
         advance();
         if_not_exists = true;
     }
-    auto [user, host] = parse_user_spec();
-    std::optional<std::string> password;
-    if (peek_is(TokenKind::Identified)) {
-        advance(); // IDENTIFIED
-        const Token* by = advance();
-        bool ok = by && (by->kind == TokenKind::By || by->kind == TokenKind::Ident);
-        if (!ok) throw ParseError("Expected BY");
-        const Token* p = advance();
-        if (!p || p->kind != TokenKind::StringLit) throw ParseError("Expected password string");
-        password = p->text;
+    auto one = [&]() {
+        Statement::CreateUser u;
+        auto [user, host] = parse_user_spec();
+        u.user = user;
+        u.host = host;
+        u.if_not_exists = if_not_exists;
+        if (peek_is(TokenKind::Identified)) {
+            advance(); // IDENTIFIED
+            const Token* by = advance();
+            bool ok = by && (by->kind == TokenKind::By || by->kind == TokenKind::Ident);
+            if (!ok) throw ParseError("Expected BY");
+            const Token* p = advance();
+            if (!p || p->kind != TokenKind::StringLit) throw ParseError("Expected password string");
+            u.password = p->text;
+        }
+        return u;
+    };
+    Statement::CreateUser first = one();
+    while (peek_is(TokenKind::Comma)) {
+        advance();
+        first.more_users.push_back(one());
     }
-    return Statement(Statement::CreateUser{user, host, password, if_not_exists});
+    return Statement(std::move(first));
 }
 
-// DROP USER [IF EXISTS] 'user'@'host'
+// DROP USER [IF EXISTS] 'user'@'host' [, ...]
 Statement Parser::parse_drop_user() {
     bool if_exists = false;
     if (peek_is(TokenKind::If)) {
@@ -376,7 +437,164 @@ Statement Parser::parse_drop_user() {
         if_exists = true;
     }
     auto [user, host] = parse_user_spec();
-    return Statement(Statement::DropUser{user, host, if_exists});
+    Statement::DropUser drop{user, host, if_exists, {}};
+    while (peek_is(TokenKind::Comma)) {
+        advance();
+        drop.more_users.push_back(parse_user_spec());
+    }
+    return Statement(std::move(drop));
+}
+
+// ALTER USER [IF EXISTS] account IDENTIFIED BY 'password'    (account: 'u'@'h' | USER() | CURRENT_USER())
+Statement Parser::parse_alter_user() {
+    Statement::AlterUser alter;
+    if (peek_is(TokenKind::If)) {
+        advance();
+        if (!peek_is(TokenKind::Exists)) throw ParseError("Expected EXISTS");
+        advance();
+        alter.if_exists = true;
+    }
+    auto [user, host] = parse_account_or_current(alter.current);
+    alter.user = user;
+    alter.host = host;
+    if (!peek_is(TokenKind::Identified)) throw ParseError("Expected IDENTIFIED BY after ALTER USER account");
+    advance();
+    const Token* by = advance();
+    if (!(by && (by->kind == TokenKind::By || by->kind == TokenKind::Ident))) throw ParseError("Expected BY");
+    const Token* p = advance();
+    if (!p || p->kind != TokenKind::StringLit) throw ParseError("Expected password string");
+    alter.password = p->text;
+    return Statement(std::move(alter));
+}
+
+// RENAME USER a TO b [, c TO d ...]
+Statement Parser::parse_rename_user() {
+    Statement::RenameUser rename;
+    for (;;) {
+        auto from = parse_user_spec();
+        if (!peek_is(TokenKind::To)) throw ParseError("Expected TO in RENAME USER");
+        advance();
+        auto to = parse_user_spec();
+        rename.pairs.emplace_back(from, to);
+        if (!peek_is(TokenKind::Comma)) break;
+        advance();
+    }
+    return Statement(std::move(rename));
+}
+
+// SET PASSWORD [FOR account] = 'password'    (the word PASSWORD is read)
+Statement Parser::parse_set_password() {
+    Statement::SetPassword set;
+    set.current = true;
+    if (peek_is(TokenKind::For)) {
+        advance();
+        auto [user, host] = parse_account_or_current(set.current);
+        set.user = user;
+        set.host = host;
+    }
+    if (!peek_is_assign()) throw ParseError("Expected '=' after SET PASSWORD");
+    advance();
+    const Token* p = advance();
+    if (!p || p->kind != TokenKind::StringLit) throw ParseError("Expected password string");
+    set.password = p->text;
+    return Statement(std::move(set));
+}
+
+// SET ROLE NONE | ALL | ALL EXCEPT r [, ...] | DEFAULT | r [, ...]    (the word ROLE is read)
+Statement Parser::parse_set_role() {
+    Statement::SetRole set;
+    const Token* t = peek();
+    if (!t) throw ParseError("Expected role name after SET ROLE");
+    const std::string word = to_upper(token_text(t));
+    if (t->kind != TokenKind::StringLit && (word == "NONE" || word == "DEFAULT")) {
+        advance();
+        set.mode = word;
+        return Statement(std::move(set));
+    }
+    if (t->kind != TokenKind::StringLit && (t->kind == TokenKind::All || word == "ALL")) {
+        advance();
+        set.mode = "ALL";
+        if (const Token* e = peek(); e && e->kind != TokenKind::StringLit && to_upper(token_text(e)) == "EXCEPT") {
+            advance();
+            set.mode = "ALL EXCEPT";
+            for (;;) {
+                set.roles.push_back(parse_role_name());
+                if (!peek_is(TokenKind::Comma)) break;
+                advance();
+            }
+        }
+        return Statement(std::move(set));
+    }
+    set.mode = "LIST";
+    for (;;) {
+        set.roles.push_back(parse_role_name());
+        if (!peek_is(TokenKind::Comma)) break;
+        advance();
+    }
+    return Statement(std::move(set));
+}
+
+// SET DEFAULT ROLE NONE | ALL | r [, ...] TO account [, ...]    (DEFAULT ROLE is read)
+Statement Parser::parse_set_default_role() {
+    Statement::SetDefaultRole set;
+    const Token* t = peek();
+    if (!t) throw ParseError("Expected role name after SET DEFAULT ROLE");
+    const std::string word = to_upper(token_text(t));
+    if (t->kind != TokenKind::StringLit && (word == "NONE" || t->kind == TokenKind::All || word == "ALL")) {
+        advance();
+        set.mode = word == "NONE" ? "NONE" : "ALL";
+    } else {
+        set.mode = "LIST";
+        for (;;) {
+            set.roles.push_back(parse_role_name());
+            if (!peek_is(TokenKind::Comma)) break;
+            advance();
+        }
+    }
+    if (!peek_is(TokenKind::To)) throw ParseError("Expected TO in SET DEFAULT ROLE");
+    advance();
+    for (;;) {
+        set.users.push_back(parse_user_spec());
+        if (!peek_is(TokenKind::Comma)) break;
+        advance();
+    }
+    return Statement(std::move(set));
+}
+
+// CREATE ROLE [IF NOT EXISTS] role [, role ...]    (ROLE is read)
+Statement Parser::parse_create_role() {
+    Statement::CreateRole create;
+    if (peek_is(TokenKind::If)) {
+        advance();
+        if (!peek_is(TokenKind::Not)) throw ParseError("Expected NOT");
+        advance();
+        if (!peek_is(TokenKind::Exists)) throw ParseError("Expected EXISTS");
+        advance();
+        create.if_not_exists = true;
+    }
+    create.name = parse_role_name();
+    while (peek_is(TokenKind::Comma)) {
+        advance();
+        create.more.push_back(parse_role_name());
+    }
+    return Statement(std::move(create));
+}
+
+// DROP ROLE [IF EXISTS] role [, role ...]    (ROLE is read)
+Statement Parser::parse_drop_role() {
+    Statement::DropRole drop;
+    if (peek_is(TokenKind::If)) {
+        advance();
+        if (!peek_is(TokenKind::Exists)) throw ParseError("Expected EXISTS after IF");
+        advance();
+        drop.if_exists = true;
+    }
+    drop.name = parse_role_name();
+    while (peek_is(TokenKind::Comma)) {
+        advance();
+        drop.more.push_back(parse_role_name());
+    }
+    return Statement(std::move(drop));
 }
 
 std::string Parser::parse_grant_object() {
@@ -400,132 +618,186 @@ std::string Parser::parse_grant_object() {
     return first;
 }
 
+namespace {
+// One item of the list after GRANT / REVOKE: a privilege (words, e.g. CREATE TEMPORARY TABLES, with an optional column list) or a role name.
+struct GrantItem {
+    std::vector<const Token*> words;
+    std::vector<std::string> columns;
+};
+} // namespace
+
+// GRANT priv [(col, ...)] [, ...] ON [TABLE | DATABASE | PROCEDURE | FUNCTION] object TO account [, ...] [WITH GRANT OPTION]
+// GRANT role [, role ...] TO account [, ...] [WITH ADMIN OPTION]            (also the older GRANT ROLE r TO account)
 Statement Parser::parse_grant() {
-    // GRANT ROLE roleName TO 'user'@'host' [WITH ADMIN OPTION]
-    if (peek_is(TokenKind::Role)) {
+    if (peek_is(TokenKind::Role) && peek_at(1) && (peek_at(1)->kind == TokenKind::Ident || peek_at(1)->kind == TokenKind::StringLit) &&
+        (peek_at_is(2, TokenKind::To) || peek_at_is(2, TokenKind::Comma))) {
+        advance(); // (GRANT ROLE r TO ...)
+    }
+    std::vector<GrantItem> items;
+    for (;;) {
+        GrantItem item;
+        for (;;) {
+            const Token* t = peek();
+            if (!t || t->kind == TokenKind::Comma || t->kind == TokenKind::LParen || t->kind == TokenKind::On || t->kind == TokenKind::To || t->kind == TokenKind::From) break;
+            item.words.push_back(advance());
+        }
+        if (item.words.empty()) throw ParseError("Expected privilege name");
+        if (peek_is(TokenKind::LParen)) {
+            advance();
+            for (;;) {
+                item.columns.push_back(expect_ident());
+                if (!peek_is(TokenKind::Comma)) break;
+                advance();
+            }
+            if (!peek_is(TokenKind::RParen)) throw ParseError("Expected ')' after the column list");
+            advance();
+        }
+        items.push_back(std::move(item));
+        if (peek_is(TokenKind::Comma)) { advance(); continue; }
+        break;
+    }
+    auto accounts = [&](Statement::Grant* grant, Statement::GrantRole* role) {
+        auto first = parse_user_spec();
+        std::vector<std::pair<std::string, std::string>> more;
+        while (peek_is(TokenKind::Comma)) { advance(); more.push_back(parse_user_spec()); }
+        if (grant) { grant->user = first.first; grant->host = first.second; grant->more_users = std::move(more); }
+        if (role) { role->user = first.first; role->host = first.second; role->more_users = std::move(more); }
+    };
+    if (peek_is(TokenKind::To)) { // roles
         advance();
-        std::string role = expect_ident();
-        if (!peek_is(TokenKind::To)) throw ParseError("Expected TO after GRANT ROLE name");
-        advance();
-        auto [user, host] = parse_user_spec();
-        bool with_admin_option = false;
+        Statement::GrantRole grant;
+        for (std::size_t i = 0; i < items.size(); i++) {
+            if (items[i].words.size() != 1 || !items[i].columns.empty()) throw ParseError("Expected privilege name");
+            std::string name = token_text(items[i].words[0]);
+            if (i == 0) grant.role = std::move(name); else grant.more_roles.push_back(std::move(name));
+        }
+        accounts(nullptr, &grant);
         if (peek_is(TokenKind::With)) {
             advance();
             const Token* t = advance();
-            if (!(t && t->kind == TokenKind::Ident && to_upper(t->text) == "ADMIN")) throw ParseError("Expected ADMIN after WITH");
+            if (!(t && to_upper(token_text(t)) == "ADMIN")) throw ParseError("Expected ADMIN after WITH");
             if (peek_is(TokenKind::OptionKw)) advance();
-            with_admin_option = true;
+            grant.with_admin_option = true;
         }
-        return Statement(Statement::GrantRole{role, user, host, with_admin_option});
+        return Statement(std::move(grant));
     }
-
-    std::vector<std::string> privileges;
-    for (;;) {
-        const Token* t = advance();
-        std::string priv_name;
-        if (!t) throw ParseError("Expected privilege name");
-        switch (t->kind) {
-            case TokenKind::Privileges: priv_name = "ALL PRIVILEGES"; break;
-            case TokenKind::All:
-                if (peek_is(TokenKind::Privileges)) advance();
-                priv_name = "ALL PRIVILEGES";
-                break;
-            case TokenKind::Select: priv_name = "SELECT"; break;
-            case TokenKind::Insert: priv_name = "INSERT"; break;
-            case TokenKind::Update: priv_name = "UPDATE"; break;
-            case TokenKind::Delete: priv_name = "DELETE"; break;
-            case TokenKind::Create: priv_name = "CREATE"; break;
-            case TokenKind::Drop: priv_name = "DROP"; break;
-            case TokenKind::Alter: priv_name = "ALTER"; break;
-            case TokenKind::Index: priv_name = "INDEX"; break;
-            case TokenKind::Grant: priv_name = "GRANT OPTION"; break;
-            case TokenKind::Ident:
-                if (to_upper(t->text) == "ALL") {
-                    if (peek_is(TokenKind::Privileges)) advance();
-                    priv_name = "ALL PRIVILEGES";
-                } else {
-                    priv_name = to_upper(t->text);
-                }
-                break;
-            default: throw ParseError("Expected privilege name");
+    Statement::Grant grant;
+    for (auto& item : items) {
+        std::string name;
+        for (std::size_t i = 0; i < item.words.size(); i++) {
+            if (i) name += " ";
+            name += to_upper(token_text(item.words[i]));
         }
-        privileges.push_back(priv_name);
-        if (peek_is(TokenKind::Comma)) advance(); else break;
+        if (name == "ALL") name = "ALL PRIVILEGES";
+        grant.privileges.push_back(std::move(name));
+        grant.privilege_columns.push_back(item.columns);
     }
     if (!peek_is(TokenKind::On)) throw ParseError("Expected ON");
     advance();
-    std::string object_type = "TABLE";
-    if (peek_is(TokenKind::Table)) { advance(); object_type = "TABLE"; }
-    else if (peek_is(TokenKind::Database)) { advance(); object_type = "DATABASE"; }
-    else if (peek_is(TokenKind::Databases)) { advance(); object_type = "DATABASES"; }
-    std::string object = parse_grant_object();
+    grant.object_type = "TABLE";
+    if (peek_is(TokenKind::Table)) { advance(); grant.object_type = "TABLE"; }
+    else if (peek_is(TokenKind::Database)) { advance(); grant.object_type = "DATABASE"; }
+    else if (peek_is(TokenKind::Databases)) { advance(); grant.object_type = "DATABASES"; }
+    else if (peek_is(TokenKind::Procedure)) { advance(); grant.object_type = "PROCEDURE"; }
+    else if (const Token* f = peek(); f && f->kind == TokenKind::Ident && to_upper(f->text) == "FUNCTION") { advance(); grant.object_type = "FUNCTION"; }
+    grant.object = parse_grant_object();
     if (!peek_is(TokenKind::To)) throw ParseError("Expected TO");
     advance();
-    auto [user, host] = parse_user_spec();
-    bool with_grant_option = false;
+    accounts(&grant, nullptr);
     if (peek_is(TokenKind::With)) {
         advance();
         if (peek_is(TokenKind::Grant)) advance();
         if (peek_is(TokenKind::OptionKw)) advance();
-        with_grant_option = true;
+        grant.with_grant_option = true;
     }
-    return Statement(Statement::Grant{privileges, object_type, object, user, host, with_grant_option});
+    return Statement(std::move(grant));
 }
 
+// REVOKE priv [(col, ...)] [, ...] ON object FROM account [, ...]   |   REVOKE ALL PRIVILEGES, GRANT OPTION FROM account [, ...]
+// REVOKE role [, role ...] FROM account [, ...]                       (also the older REVOKE ROLE r FROM account)
 Statement Parser::parse_revoke() {
-    if (peek_is(TokenKind::Role)) {
+    if (peek_is(TokenKind::Role) && peek_at(1) && (peek_at(1)->kind == TokenKind::Ident || peek_at(1)->kind == TokenKind::StringLit) &&
+        (peek_at_is(2, TokenKind::From) || peek_at_is(2, TokenKind::Comma))) {
         advance();
-        std::string role = expect_ident();
-        if (!peek_is(TokenKind::From)) throw ParseError("Expected FROM after REVOKE ROLE name");
-        advance();
-        auto [user, host] = parse_user_spec();
-        return Statement(Statement::RevokeRole{role, user, host});
     }
-
-    std::vector<std::string> privileges;
+    std::vector<GrantItem> items;
     for (;;) {
-        const Token* t = advance();
-        std::string priv_name;
-        if (!t) throw ParseError("Expected privilege name");
-        switch (t->kind) {
-            case TokenKind::Privileges: priv_name = "ALL PRIVILEGES"; break;
-            case TokenKind::All:
-                if (peek_is(TokenKind::Privileges)) advance();
-                priv_name = "ALL PRIVILEGES";
-                break;
-            case TokenKind::Select: priv_name = "SELECT"; break;
-            case TokenKind::Insert: priv_name = "INSERT"; break;
-            case TokenKind::Update: priv_name = "UPDATE"; break;
-            case TokenKind::Delete: priv_name = "DELETE"; break;
-            case TokenKind::Create: priv_name = "CREATE"; break;
-            case TokenKind::Drop: priv_name = "DROP"; break;
-            case TokenKind::Alter: priv_name = "ALTER"; break;
-            case TokenKind::Index: priv_name = "INDEX"; break;
-            case TokenKind::Grant: priv_name = "GRANT OPTION"; break;
-            case TokenKind::Ident:
-                if (to_upper(t->text) == "ALL") {
-                    if (peek_is(TokenKind::Privileges)) advance();
-                    priv_name = "ALL PRIVILEGES";
-                } else {
-                    priv_name = to_upper(t->text);
-                }
-                break;
-            default: throw ParseError("Expected privilege name");
+        GrantItem item;
+        for (;;) {
+            const Token* t = peek();
+            if (!t || t->kind == TokenKind::Comma || t->kind == TokenKind::LParen || t->kind == TokenKind::On || t->kind == TokenKind::To || t->kind == TokenKind::From) break;
+            item.words.push_back(advance());
         }
-        privileges.push_back(priv_name);
-        if (peek_is(TokenKind::Comma)) advance(); else break;
+        if (item.words.empty()) throw ParseError("Expected privilege name");
+        if (peek_is(TokenKind::LParen)) {
+            advance();
+            for (;;) {
+                item.columns.push_back(expect_ident());
+                if (!peek_is(TokenKind::Comma)) break;
+                advance();
+            }
+            if (!peek_is(TokenKind::RParen)) throw ParseError("Expected ')' after the column list");
+            advance();
+        }
+        items.push_back(std::move(item));
+        if (peek_is(TokenKind::Comma)) { advance(); continue; }
+        break;
+    }
+    auto read_accounts = [&](std::string& user, std::string& host, std::vector<std::pair<std::string, std::string>>& more) {
+        auto first = parse_user_spec();
+        user = first.first;
+        host = first.second;
+        while (peek_is(TokenKind::Comma)) { advance(); more.push_back(parse_user_spec()); }
+    };
+    if (peek_is(TokenKind::From)) { // roles, or REVOKE ALL PRIVILEGES, GRANT OPTION
+        advance();
+        std::vector<std::string> names;
+        for (auto& item : items) {
+            std::string name;
+            for (std::size_t i = 0; i < item.words.size(); i++) name += (i ? " " : "") + to_upper(token_text(item.words[i]));
+            names.push_back(std::move(name));
+        }
+        const bool is_all = items.size() == 2 && (names[0] == "ALL PRIVILEGES" || names[0] == "ALL") && names[1] == "GRANT OPTION";
+        if (is_all) {
+            Statement::Revoke revoke;
+            revoke.privileges = {"ALL PRIVILEGES", "GRANT OPTION"};
+            revoke.all_with_grant_option = true;
+            read_accounts(revoke.user, revoke.host, revoke.more_users);
+            return Statement(std::move(revoke));
+        }
+        Statement::RevokeRole revoke;
+        for (std::size_t i = 0; i < items.size(); i++) {
+            if (items[i].words.size() != 1 || !items[i].columns.empty()) throw ParseError("Expected privilege name");
+            std::string name = token_text(items[i].words[0]);
+            if (i == 0) revoke.role = std::move(name); else revoke.more_roles.push_back(std::move(name));
+        }
+        read_accounts(revoke.user, revoke.host, revoke.more_users);
+        return Statement(std::move(revoke));
+    }
+    Statement::Revoke revoke;
+    for (auto& item : items) {
+        std::string name;
+        for (std::size_t i = 0; i < item.words.size(); i++) {
+            if (i) name += " ";
+            name += to_upper(token_text(item.words[i]));
+        }
+        if (name == "ALL") name = "ALL PRIVILEGES";
+        revoke.privileges.push_back(std::move(name));
+        revoke.privilege_columns.push_back(item.columns);
     }
     if (!peek_is(TokenKind::On)) throw ParseError("Expected ON");
     advance();
-    std::string object_type = "TABLE";
-    if (peek_is(TokenKind::Table)) { advance(); object_type = "TABLE"; }
-    else if (peek_is(TokenKind::Database)) { advance(); object_type = "DATABASE"; }
-    else if (peek_is(TokenKind::Databases)) { advance(); object_type = "DATABASES"; }
-    std::string object = parse_grant_object();
+    revoke.object_type = "TABLE";
+    if (peek_is(TokenKind::Table)) { advance(); revoke.object_type = "TABLE"; }
+    else if (peek_is(TokenKind::Database)) { advance(); revoke.object_type = "DATABASE"; }
+    else if (peek_is(TokenKind::Databases)) { advance(); revoke.object_type = "DATABASES"; }
+    else if (peek_is(TokenKind::Procedure)) { advance(); revoke.object_type = "PROCEDURE"; }
+    else if (const Token* f = peek(); f && f->kind == TokenKind::Ident && to_upper(f->text) == "FUNCTION") { advance(); revoke.object_type = "FUNCTION"; }
+    revoke.object = parse_grant_object();
     if (!peek_is(TokenKind::From)) throw ParseError("Expected FROM");
     advance();
-    auto [user, host] = parse_user_spec();
-    return Statement(Statement::Revoke{privileges, object_type, object, user, host});
+    read_accounts(revoke.user, revoke.host, revoke.more_users);
+    return Statement(std::move(revoke));
 }
 
 } // namespace engine

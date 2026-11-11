@@ -776,23 +776,82 @@ struct Statement {
         std::string user, host;
         std::optional<std::string> password;
         bool if_not_exists = false;
+        std::vector<CreateUser> more_users; // CREATE USER a IDENTIFIED BY 'x', b ...: every further account (only user, host and password are used)
     };
-    struct DropUser { std::string user, host; bool if_exists = false; };
+    struct DropUser {
+        std::string user, host;
+        bool if_exists = false;
+        std::vector<std::pair<std::string, std::string>> more_users; // DROP USER a, b
+    };
+    // GRANT priv [(col, ...)], ... ON [TABLE|DATABASE] object TO account [, account ...] [WITH GRANT OPTION]; privilege_columns[i] is the column list of privileges[i] (empty: the whole table)
     struct Grant {
         std::vector<std::string> privileges;
         std::string object_type, object, user, host;
         bool with_grant_option = false;
+        std::vector<std::vector<std::string>> privilege_columns;
+        std::vector<std::pair<std::string, std::string>> more_users;
     };
     struct Revoke {
         std::vector<std::string> privileges;
         std::string object_type, object, user, host;
+        std::vector<std::vector<std::string>> privilege_columns;
+        std::vector<std::pair<std::string, std::string>> more_users;
+        bool all_with_grant_option = false; // REVOKE ALL PRIVILEGES, GRANT OPTION FROM ... (no ON: everything of the account at every level)
     };
-    struct ShowGrants { std::optional<std::string> user, host; };
-    struct CreateRole { std::string name; };
-    struct DropRole { std::string name; bool if_exists = false; };
-    struct GrantRole { std::string role, user, host; bool with_admin_option = false; };
-    struct RevokeRole { std::string role, user, host; };
+    // SHOW GRANTS [FOR account [USING role, ...]]
+    struct ShowGrants {
+        std::optional<std::string> user, host;
+        std::vector<std::string> using_roles;
+    };
+    struct CreateRole {
+        std::string name;
+        bool if_not_exists = false;
+        std::vector<std::string> more;
+    };
+    struct DropRole {
+        std::string name;
+        bool if_exists = false;
+        std::vector<std::string> more;
+    };
+    // GRANT role [, role ...] TO account [, account ...] [WITH ADMIN OPTION]
+    struct GrantRole {
+        std::string role, user, host;
+        bool with_admin_option = false;
+        std::vector<std::string> more_roles;
+        std::vector<std::pair<std::string, std::string>> more_users;
+    };
+    struct RevokeRole {
+        std::string role, user, host;
+        std::vector<std::string> more_roles;
+        std::vector<std::pair<std::string, std::string>> more_users;
+    };
     struct ShowRoles {};
+    // ALTER USER [IF EXISTS] account IDENTIFIED BY 'password'  (current: USER() / CURRENT_USER())
+    struct AlterUser {
+        std::string user, host;
+        std::optional<std::string> password;
+        bool if_exists = false;
+        bool current = false;
+    };
+    // RENAME USER a TO b [, c TO d ...]
+    struct RenameUser { std::vector<std::pair<std::pair<std::string, std::string>, std::pair<std::string, std::string>>> pairs; };
+    // SET PASSWORD [FOR account] = 'password'  (current: the account of the session)
+    struct SetPassword {
+        std::string user, host;
+        std::string password;
+        bool current = false;
+    };
+    // SET ROLE NONE | ALL | ALL EXCEPT r, ... | DEFAULT | r, ...   (mode: "NONE", "ALL", "ALL EXCEPT", "DEFAULT", "LIST")
+    struct SetRole {
+        std::string mode;
+        std::vector<std::string> roles;
+    };
+    // SET DEFAULT ROLE NONE | ALL | r, ... TO account [, account ...]
+    struct SetDefaultRole {
+        std::string mode;
+        std::vector<std::string> roles;
+        std::vector<std::pair<std::string, std::string>> users;
+    };
     struct CreateSynonym { std::string name, target; bool or_replace = false; };
     struct DropSynonym { std::string name; bool if_exists = false; };
     struct ShowSynonyms {};
@@ -883,7 +942,7 @@ struct Statement {
         Restore, ShowProcessList, CreateFunction, DropFunction, ProcDeclare, ProcSet, ProcIf,
         ProcWhile, ProcLoop, ProcRepeat, ProcLeave, ProcIterate, PrepareStmt, ExecuteStmt,
         DeallocatePrepare, SetUserVar, LockTables, UnlockTables, SelectInto, SetVars,
-        CreateTableLike, CreateTableAs, RenameTable>;
+        CreateTableLike, CreateTableAs, RenameTable, AlterUser, RenameUser, SetPassword, SetRole, SetDefaultRole>;
     Data data;
 
     Statement() : data(Begin{}) {}

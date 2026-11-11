@@ -471,16 +471,26 @@ JSON 값은 MySQL이 쓰는 모양으로 저장되고 돌려준다(R77): 객체�
 
 ## 12. 사용자 · 권한 · 역할
 
-- CREATE USER [IF NOT EXISTS] 'u'@'host' [IDENTIFIED BY 'pw'] : 사용자 생성
-- DROP USER [IF EXISTS] 'u'@'host' : 사용자 삭제
-- GRANT 권한, ... ON [TABLE | DATABASE] db.t | db.* | *.* TO 'u'@'host' [WITH GRANT OPTION] : 권한 부여
-- REVOKE 권한, ... ON ... FROM 'u'@'host' : 권한 회수
-- 권한 이름 : SELECT · INSERT · UPDATE · DELETE · CREATE · DROP · ALTER · INDEX · ALL [PRIVILEGES] · GRANT OPTION
-- CREATE ROLE 이름 : 역할 생성
-- DROP ROLE [IF EXISTS] 이름 : 역할 삭제
-- GRANT ROLE 역할 TO 'u'@'host' [WITH ADMIN OPTION] : 사용자에게 역할 부여
-- REVOKE ROLE 역할 FROM 'u'@'host' : 역할 회수
+권한은 **실제로 강제됩니다**(R78). `root`와 사용자 표에 없는 계정(엔진을 직접 쓰는 프로그램)은 막히지 않고, 사용자 표에 있는 그 밖의 계정은 문장마다 권한을 확인받습니다. 오류 번호와 글은 MySQL 8.4와 같습니다(1142 · 1143 · 1044 · 1045 · 1227 · 1370 · 1396 · 1410 · 3523 · 3530 · 4027 ...).
+
+- CREATE USER [IF NOT EXISTS] 'u'@'host' [IDENTIFIED BY 'pw'] [, 'u2'@'host2' ...] : 사용자 생성(여러 계정은 모두 되거나 모두 안 됨)
+- ALTER USER [IF EXISTS] 'u'@'host' | USER() | CURRENT_USER() IDENTIFIED BY 'pw' : 비밀번호 바꾸기
+- SET PASSWORD [FOR 'u'@'host'] = 'pw' : 비밀번호 바꾸기(FOR 없으면 자기 계정)
+- RENAME USER 'a'@'h' TO 'b'@'h' [, ...] : 계정 이름 바꾸기(권한 · 역할도 따라감)
+- DROP USER [IF EXISTS] 'u'@'host' [, ...] : 사용자 삭제(권한 · 역할 부여도 같이 지워짐)
+- GRANT 권한 [(열, ...)], ... ON [TABLE | DATABASE | PROCEDURE | FUNCTION] *.* | db.* | db.t | t | * TO 'u'@'host' [, ...] [WITH GRANT OPTION] : 권한 부여(없는 사용자에게는 오류 1410 — 사용자를 만들지 않음)
+- REVOKE 권한 [(열, ...)], ... ON ... FROM 'u'@'host' [, ...] : 권한 회수
+- REVOKE ALL PRIVILEGES, GRANT OPTION FROM 'u'@'host' : 모든 수준의 권한을 한 번에 회수
+- 권한 이름 : SELECT · INSERT · UPDATE · DELETE · CREATE · DROP · REFERENCES · INDEX · ALTER · CREATE VIEW · SHOW VIEW · TRIGGER · EXECUTE · ALTER ROUTINE · CREATE ROUTINE · LOCK TABLES · CREATE TEMPORARY TABLES · EVENT(여기까지 데이터베이스 · 표 수준), RELOAD · SHUTDOWN · PROCESS · FILE · SHOW DATABASES · SUPER · REPLICATION SLAVE · REPLICATION CLIENT · CREATE USER · CREATE ROLE · DROP ROLE · CREATE TABLESPACE(전역에만), ROLE_ADMIN · SYSTEM_VARIABLES_ADMIN 같은 동적 권한(전역에만), ALL [PRIVILEGES] · USAGE · GRANT OPTION
+- 열 수준 : `GRANT SELECT (i) ON db.t TO ...`(SELECT · INSERT · UPDATE · REFERENCES만)
+- SHOW GRANTS [FOR 'u'@'host' | CURRENT_USER() [USING 역할, ...]] : MySQL과 같은 글자(``GRANT SELECT ON `v`.`t` TO `u`@`%` ``, 맨 앞의 `GRANT USAGE ON *.*` 줄)
+- CREATE ROLE [IF NOT EXISTS] 이름 [, ...] / DROP ROLE [IF EXISTS] 이름 [, ...] : 역할 생성 · 삭제(사용자와 같은 이름은 안 됨)
+- GRANT 역할 [, ...] TO 'u'@'host' | 역할 [WITH ADMIN OPTION] / REVOKE 역할 [, ...] FROM ... : 역할 부여 · 회수(역할이 역할을 가질 수 있고, 돌고 도는 부여는 오류 4027). 옛 `GRANT ROLE 역할 TO ...`도 받음
 - GRANT 권한 ON ... TO 역할 : 역할에 권한 부여
+- SET ROLE NONE | ALL | ALL EXCEPT 역할, ... | DEFAULT | 역할, ... : 이 연결에서 켜는 역할(부여받은 역할만 가능, 아니면 3530)
+- SET DEFAULT ROLE NONE | ALL | 역할, ... TO 'u'@'host' [, ...] : 로그인하면 바로 켜지는 역할
+- CURRENT_ROLE() : 켜져 있는 역할(`` `r`@`%` ``, 없으면 NONE). CURRENT_USER()는 계정(`u@%`), USER()는 접속한 쪽(`u@localhost`)
+- 막히는 것(요약) : 읽기는 읽는 모든 표(하위 질의 · 조인 · 집합 연산 · CTE 제외)의 SELECT, 쓰기는 INSERT/UPDATE/DELETE(+ 읽는 열의 SELECT), `REPLACE`는 INSERT+DELETE, `ON DUPLICATE KEY UPDATE`는 UPDATE, DDL은 CREATE · DROP · ALTER · INDEX · CREATE VIEW(`TRUNCATE`는 DROP), 사용자 관리는 전역 CREATE USER, `GRANT`는 그 수준의 GRANT OPTION과 자기가 가진 권한, `SHOW TABLES` · `SHOW DATABASES` · `information_schema`는 볼 수 있는 것만 보임
 
 ## 13. 저장 프로시저 · 함수 · 트리거
 
@@ -548,7 +558,7 @@ mysql 클라이언트 · 드라이버 · 도구가 보내는 문장을 받아주
 - **식 · 리터럴** : `IS [NOT] DISTINCT FROM`, `BETWEEN SYMMETRIC`, `b'101'`, `DATE '2024-01-01'`, `_utf8mb4'x'`, `COLLATE` 연산자, `BINARY` 연산자, `MATCH ... AGAINST`, `SOUNDS LIKE`, `SELECT @a := 식`, `CONVERT(식 USING 문자집합)`, `DEFAULT(col)`, `GROUPING()`
 - **함수** : `PERCENTILE_CONT ... WITHIN GROUP`, `BIT_XOR`, `CONNECTION_ID`, `GET_LOCK`, `INET_ATON`, `BENCHMARK`, `JSON_STORAGE_SIZE` 등 위 9장에 없는 함수
 - **프로시저** : `SIGNAL`, `DECLARE ... HANDLER`, 커서(`DECLARE CURSOR`), 본문의 `CASE ... END CASE`, 반복문 끝의 라벨(`END WHILE lp`), `CREATE PROCEDURE IF NOT EXISTS`, `CREATE OR REPLACE PROCEDURE`, `CREATE TRIGGER IF NOT EXISTS`, 여러 문장 함수 본문(`BEGIN ... RETURN ... END`)
-- **권한 · 사용자** : `ALTER USER`, 컬럼 단위 `GRANT SELECT (col)`, 역할을 `GRANT 역할 TO 사용자` 형식으로 부여
+- **권한 · 사용자** : 프로시저 · 함수 수준의 `GRANT EXECUTE`는 받지만 `SHOW GRANTS`의 모양만 같고 MySQL의 모든 경우를 다 따라가지는 않음, `FLUSH PRIVILEGES`(필요 없음: 권한은 문장마다 바로 반영됨), 비밀번호 정책 · 계정 잠금 · 만료
 - **조회 · 관리** : `SHOW CREATE DATABASE`, `SHOW CREATE PROCEDURE`, `SHOW CREATE TRIGGER`, `SHOW TABLES IN db`, `SHOW FULL PROCESSLIST`, `SHOW ENGINE INNODB STATUS`, `SHOW MASTER STATUS`, `SHOW SLAVE STATUS`, `SHOW PRIVILEGES`, `SHOW ERRORS`, `SHOW DATABASES LIKE`, `SHOW OPEN TABLES`, `SHOW DATABASES LIKE`, `EXPLAIN FORMAT=JSON`, `EXPLAIN EXTENDED`, `EXPLAIN INSERT | UPDATE | DELETE`의 실행 계획(안내만 나옴), `information_schema.routines`, `information_schema.triggers`, `FLUSH`, `HELP`, `DELIMITER`, `XA`, `LOCK TABLES t AS 별칭`, `DROP PREPARE`
 - **복제 · 분산** : 복제(replication), XA 분산 트랜잭션, 실제 페이지 단위 버퍼 풀, 이벤트 스케줄러(`CREATE EVENT`)
 

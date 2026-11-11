@@ -265,3 +265,78 @@ TEST_CASE("A fresh Executor recovers cleanly when there is no WAL to replay", "[
     auto s = ex2.get_shared()->read();
     REQUIRE(s->tables.at("company.t").size() == 1);
 }
+
+// R78: fuzz_crash_fk.py 1 7701 -- a row this transaction INSERTed, then a REPLACE (or DELETE + INSERT) after a SAVEPOINT, then ROLLBACK TO: the row was gone for good. The undo of the
+// INSERT entry erased every version of the key that the transaction had made, the older one that the REPLACE ended included, so the DELETE entry found nothing to bring back.
+TEST_CASE("ROLLBACK TO a savepoint brings back a row the transaction made itself and a later REPLACE or DELETE ended", "[executor][txn][regression]") {
+    TempDataDir dir("exec_txn_data_savepoint_replace");
+    Executor ex(dir.path);
+    REQUIRE(ex.execute_sql("CREATE DATABASE d").is_ok());
+    REQUIRE(ex.execute_sql("USE d").is_ok());
+    REQUIRE(ex.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, val INT)").is_ok());
+
+    auto rows = [&]() {
+        auto r = ex.execute_sql("SELECT id, val FROM t ORDER BY id");
+        REQUIRE(r.is_ok());
+        std::string out;
+        for (char c : r.value()) if (c != ' ') out += c;
+        return out;
+    };
+    auto has = [&](const std::string& row) { return rows().find(row) != std::string::npos; };
+
+    SECTION("REPLACE of a row inserted before the savepoint") {
+        REQUIRE(ex.execute_sql("BEGIN").is_ok());
+        REQUIRE(ex.execute_sql("INSERT INTO t VALUES (1, 10)").is_ok());
+        REQUIRE(ex.execute_sql("SAVEPOINT sp").is_ok());
+        REQUIRE(ex.execute_sql("REPLACE INTO t VALUES (1, 20)").is_ok());
+        REQUIRE(has("|1|20|"));
+        REQUIRE(ex.execute_sql("ROLLBACK TO sp").is_ok());
+        REQUIRE(has("|1|10|"));
+        REQUIRE_FALSE(has("|1|20|"));
+        REQUIRE(ex.execute_sql("COMMIT").is_ok());
+        REQUIRE(has("|1|10|"));
+    }
+    SECTION("two REPLACEs, then the rollback") {
+        REQUIRE(ex.execute_sql("BEGIN").is_ok());
+        REQUIRE(ex.execute_sql("INSERT INTO t VALUES (1, 10)").is_ok());
+        REQUIRE(ex.execute_sql("SAVEPOINT sp").is_ok());
+        REQUIRE(ex.execute_sql("REPLACE INTO t VALUES (1, 20)").is_ok());
+        REQUIRE(ex.execute_sql("REPLACE INTO t VALUES (1, 30)").is_ok());
+        REQUIRE(ex.execute_sql("ROLLBACK TO sp").is_ok());
+        REQUIRE(has("|1|10|"));
+        REQUIRE(ex.execute_sql("COMMIT").is_ok());
+        REQUIRE(has("|1|10|"));
+    }
+    SECTION("DELETE and INSERT of the same key after the savepoint") {
+        REQUIRE(ex.execute_sql("BEGIN").is_ok());
+        REQUIRE(ex.execute_sql("INSERT INTO t VALUES (2, 5)").is_ok());
+        REQUIRE(ex.execute_sql("SAVEPOINT sp").is_ok());
+        REQUIRE(ex.execute_sql("DELETE FROM t WHERE id = 2").is_ok());
+        REQUIRE(ex.execute_sql("INSERT INTO t VALUES (2, 6)").is_ok());
+        REQUIRE(ex.execute_sql("ROLLBACK TO sp").is_ok());
+        REQUIRE(has("|2|5|"));
+        REQUIRE_FALSE(has("|2|6|"));
+        REQUIRE(ex.execute_sql("COMMIT").is_ok());
+        REQUIRE(has("|2|5|"));
+    }
+    SECTION("a row made after the savepoint and replaced goes with the rollback") {
+        REQUIRE(ex.execute_sql("BEGIN").is_ok());
+        REQUIRE(ex.execute_sql("SAVEPOINT sp").is_ok());
+        REQUIRE(ex.execute_sql("INSERT INTO t VALUES (3, 1)").is_ok());
+        REQUIRE(ex.execute_sql("REPLACE INTO t VALUES (3, 2)").is_ok());
+        REQUIRE(ex.execute_sql("ROLLBACK TO sp").is_ok());
+        REQUIRE_FALSE(has("|3|"));
+        REQUIRE(ex.execute_sql("COMMIT").is_ok());
+        REQUIRE_FALSE(has("|3|"));
+    }
+    SECTION("a committed row that REPLACE ended still comes back (it always did)") {
+        REQUIRE(ex.execute_sql("INSERT INTO t VALUES (4, 7)").is_ok());
+        REQUIRE(ex.execute_sql("BEGIN").is_ok());
+        REQUIRE(ex.execute_sql("SAVEPOINT sp").is_ok());
+        REQUIRE(ex.execute_sql("REPLACE INTO t VALUES (4, 8)").is_ok());
+        REQUIRE(ex.execute_sql("ROLLBACK TO sp").is_ok());
+        REQUIRE(has("|4|7|"));
+        REQUIRE(ex.execute_sql("COMMIT").is_ok());
+        REQUIRE(has("|4|7|"));
+    }
+}

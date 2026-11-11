@@ -1665,6 +1665,20 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
                     keys.push_back(c.name);
                 }
                 std::vector<Row> rows = info_schema_rows(s, bare);
+                if (bare == "processlist" && !holds_global(s, "PROCESS")) {
+                    rows.erase(std::remove_if(rows.begin(), rows.end(), [&](const Row& r) { return r.at("USER") != auth_user; }), rows.end());
+                }
+                if (privileges_apply(s)) { // an account sees the databases, tables and columns it holds a privilege on
+                    const bool schemata = bare == "schemata" || bare == "schemas";
+                    rows.erase(std::remove_if(rows.begin(), rows.end(),
+                                              [&](const Row& r) {
+                                                  auto schema = r.find(schemata ? "SCHEMA_NAME" : "TABLE_SCHEMA");
+                                                  if (schema == r.end() || schema->second == "information_schema") return false;
+                                                  auto table = r.find("TABLE_NAME");
+                                                  return !may_see(s, schema->second, schemata || table == r.end() ? std::string() : table->second);
+                                              }),
+                               rows.end());
+                }
                 if (bare == "row_versions") { // (which versions this reader sees: its own snapshot decides)
                     const SnapshotCtx reader = current_read_ctx(s);
                     for (Row& r : rows) {
@@ -2313,11 +2327,13 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
             auto uf = s.user_functions;
             std::string cur_db = current_db;
             std::string cur_user = auth_user;
+            std::string cur_host = account_host(s);
+            std::string cur_roles = current_role_text(s);
             deadline::ParallelStop stop;
             ThreadPool::global().parallel_for(n_chunks, [&](std::size_t ci) {
                 std::size_t start = ci * PARALLEL_CHUNK;
                 std::size_t end = std::min(start + PARALLEL_CHUNK, visible_ptrs.size());
-                sync_udf_context(uf, cur_db, cur_user);
+                sync_udf_context(uf, cur_db, cur_user, cur_host, cur_roles);
                 auto& out = chunk_results[ci];
                 for (std::size_t i = start; i < end; i++) {
                     if (stop.halt(i)) return;

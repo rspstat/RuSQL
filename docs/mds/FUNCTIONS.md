@@ -82,17 +82,18 @@
 - [x] **FROM 없는 SELECT (2026-10-06)** — `SELECT CASE WHEN … END`, `IF(…)`, `(SELECT …)`(NULL·오류 포함), `COUNT(*)`가 값을 냄(전에는 빈 값).
 
 ### DCL
-- [x] CREATE USER [IF NOT EXISTS] `'user'@'host'` [IDENTIFIED BY 'password']
-- [x] DROP USER [IF EXISTS] `'user'@'host'`
-- [x] GRANT privilege [, ...] ON object TO `'user'@'host'` [WITH GRANT OPTION]
-- [x] REVOKE privilege [, ...] ON object FROM `'user'@'host'`
-- [x] SHOW GRANTS [FOR `'user'@'host'`]
-- [x] 사용자·권한 영속화 (`_users.json`, `_grants.json`)
+- [x] CREATE USER [IF NOT EXISTS] `'user'@'host'` [IDENTIFIED BY 'password'] [, ...] · ALTER USER · RENAME USER · SET PASSWORD · DROP USER [IF EXISTS] [, ...] (R78: 오류 번호는 MySQL과 같음, 여러 계정은 모두 되거나 모두 안 됨)
+- [x] GRANT privilege [(열, ...)] [, ...] ON object TO `'user'@'host'` [, ...] [WITH GRANT OPTION] — 전역 · 데이터베이스 · 표 · 열 · 프로시저 수준
+- [x] REVOKE privilege [, ...] ON object FROM `'user'@'host'` · REVOKE ALL PRIVILEGES, GRANT OPTION FROM ...
+- [x] SHOW GRANTS [FOR `'user'@'host'` | CURRENT_USER() [USING 역할]] — MySQL과 같은 글자
+- [x] **권한 강제 (R78)** — 사용자 표에 있는 `root` 아닌 계정의 모든 문장을 실행 전에 확인(`Executor::check_privileges`, `executor_privileges.cpp`). 읽기 · 쓰기 · DDL · 사용자 관리 · `GRANT` · `CALL` · `SHOW` · `USE` · `LOCK TABLES` · `PREPARE`. `SHOW TABLES` · `SHOW DATABASES` · `information_schema`는 볼 수 있는 것만 보임
+- [x] 사용자·권한 영속화 (`_users.json`, `_grants.json`, `_roles.json`, `_role_grants.json`)
 - [x] 비밀번호 SHA-256 해시 저장 (레거시 평문 자동 마이그레이션)
-- [x] CREATE ROLE name — 역할 생성
-- [x] DROP ROLE [IF EXISTS] name — 역할 삭제 (연결된 부여 기록 자동 삭제)
-- [x] GRANT ROLE roleName TO `'user'@'host'` [WITH ADMIN OPTION] — 역할 부여
-- [x] REVOKE ROLE roleName FROM `'user'@'host'` — 역할 회수
+- [x] CREATE ROLE [IF NOT EXISTS] name [, ...] — 역할 생성
+- [x] DROP ROLE [IF EXISTS] name [, ...] — 역할 삭제 (연결된 부여 기록 자동 삭제)
+- [x] GRANT role [, ...] TO `'user'@'host'` | role [WITH ADMIN OPTION] — 역할 부여 (역할이 역할을 가짐, 순환은 오류 4027). 옛 `GRANT ROLE r TO ...`도 받음
+- [x] REVOKE role [, ...] FROM `'user'@'host'` — 역할 회수
+- [x] SET ROLE NONE | ALL | ALL EXCEPT ... | DEFAULT | r, ... · SET DEFAULT ROLE ... TO account · CURRENT_ROLE()
 - [x] SHOW ROLES — 정의된 역할 목록 조회
 - [x] 역할 영속화 (`_roles.json`, `_role_grants.json`)
 

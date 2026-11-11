@@ -287,6 +287,7 @@ WireError wire_error(const std::string& msg) {
     if (starts("Window '") && has("frame start or end is negative")) return set(3586, "HY000");
     if (starts("Deadlock detected")) return set(1213, "40001");
     if (starts("Access denied for user")) return set(1045, "28000");
+    if (starts("Unknown prepared statement")) return set(1243, "HY000");
     if (starts("Unsupported command")) return set(1047, "08S01");
     return e;
 }
@@ -1230,6 +1231,12 @@ std::string sql_quoted(const std::string& text) {
 
 // SHOW [FULL] COLUMNS FROM t [FROM db] [LIKE 'pattern'] and DESCRIBE t [column]: what the engine knows about the columns, in MySQL's shape (Field, Type,
 // [Collation,] Null, Key, Default, Extra [, Privileges, Comment]), read from information_schema.columns
+// The error text when the account of the session may not run `stmt` (the statements these shims answer by themselves are checked here, the others by the engine)
+std::optional<std::string> denied_by_privileges(Executor& exec, const Statement& stmt) {
+    auto s = exec.get_shared()->read();
+    return exec.check_privileges(*s, stmt);
+}
+
 StringResult show_columns(Executor& exec, TableRef ref, bool full) {
     std::optional<std::string> like;
     std::string rest = ref.rest;
@@ -1254,6 +1261,7 @@ StringResult show_columns(Executor& exec, TableRef ref, bool full) {
             break;
         }
     }
+    if (auto denied = denied_by_privileges(exec, Statement(Statement::Describe{ref.db ? *ref.db + "." + ref.table : ref.table}))) return StringResult::Err(*denied);
     std::string sql = std::string("SELECT COLUMN_NAME AS Field, COLUMN_TYPE AS Type, ") + (full ? "COLLATION_NAME AS Collation, " : "") +
                       "IS_NULLABLE AS `Null`, COLUMN_KEY AS `Key`, COLUMN_DEFAULT AS `Default`, EXTRA AS Extra" +
                       (full ? ", PRIVILEGES AS Privileges, COLUMN_COMMENT AS Comment" : "") + " FROM information_schema.columns WHERE table_schema = " +
@@ -1304,7 +1312,7 @@ std::optional<StringResult> mysql_compat(const std::string& q, Executor& exec) {
         // authenticated on this connection. Delegate to real execution (same pattern as
         // the DATABASE() shim just below) so it reflects exec.auth_user via the engine's
         // own USER()/CURRENT_USER() evaluator (executor_scalar_func.cpp).
-        auto out = exec_inner(exec, "SELECT USER()");
+        auto out = exec_inner(exec, q);
         if (out.is_ok() && !out.value().empty()) return out;
         return StringResult::Ok(box_table({"user()"}, {{exec.auth_user + "@localhost"}}));
     }
@@ -1405,6 +1413,7 @@ std::optional<StringResult> mysql_compat(const std::string& q, Executor& exec) {
     // SHOW CREATE TABLE t / VIEW v: the text of the CREATE statement in one row, as MySQL writes it
     if (up.rfind("SHOW CREATE TABLE ", 0) == 0) {
         if (auto ref = read_table_ref(trim_copy(q.substr(std::string("SHOW CREATE TABLE ").size())))) {
+            if (auto denied = denied_by_privileges(exec, Statement(Statement::ShowCreateTable{ref->db ? *ref->db + "." + ref->table : ref->table}))) return StringResult::Err(*denied);
             auto text = exec.show_create_table_mysql(ref->db ? *ref->db + "." + ref->table : ref->table);
             if (text.is_err()) return text;
             std::string created = ref->table; // (the name the table has: the text names it)
@@ -1416,6 +1425,7 @@ std::optional<StringResult> mysql_compat(const std::string& q, Executor& exec) {
     }
     if (up.rfind("SHOW CREATE VIEW ", 0) == 0) {
         if (auto ref = read_table_ref(trim_copy(q.substr(std::string("SHOW CREATE VIEW ").size())))) {
+            if (auto denied = denied_by_privileges(exec, Statement(Statement::ShowCreateView{ref->db ? *ref->db + "." + ref->table : ref->table}))) return StringResult::Err(*denied);
             auto text = exec.show_create_view_mysql(ref->db ? *ref->db + "." + ref->table : ref->table);
             if (text.is_err()) return text;
             return StringResult::Ok(box_table({"View", "Create View", "character_set_client", "collation_connection"},
@@ -1429,6 +1439,7 @@ std::optional<StringResult> mysql_compat(const std::string& q, Executor& exec) {
         const std::string tail = trim_copy(q.substr(up.find("TABLE ") + 6));
         if (auto ref = read_table_ref(tail)) {
             const std::string target = ref->db ? *ref->db + "." + ref->table : ref->table;
+            if (auto denied = denied_by_privileges(exec, Statement(Statement::AnalyzeTable{target}))) return StringResult::Err(*denied);
             // the table must be there
             auto there = show_columns(exec, *ref, false);
             std::string database = ref->db ? *ref->db : std::string();
@@ -1463,6 +1474,7 @@ std::optional<StringResult> mysql_compat(const std::string& q, Executor& exec) {
                 if (!rest.empty() && (to_upper_str(rest).rfind("FROM ", 0) == 0 || to_upper_str(rest).rfind("IN ", 0) == 0)) {
                     if (auto db = read_table_ref(rest.substr(rest.find(' ') + 1))) ref->db = db->table;
                 }
+                if (auto denied = denied_by_privileges(exec, Statement(Statement::ShowIndex{ref->db ? *ref->db + "." + ref->table : ref->table}))) return StringResult::Err(*denied);
                 std::string sql = "SELECT TABLE_NAME AS `Table`, NON_UNIQUE AS Non_unique, INDEX_NAME AS Key_name, SEQ_IN_INDEX AS Seq_in_index, "
                                   "COLUMN_NAME AS Column_name, COLLATION AS Collation, CARDINALITY AS Cardinality, SUB_PART AS Sub_part, PACKED AS Packed, "
                                   "NULLABLE AS `Null`, INDEX_TYPE AS Index_type, COMMENT AS Comment, INDEX_COMMENT AS Index_comment, IS_VISIBLE AS Visible, NULL AS Expression "
@@ -1658,6 +1670,7 @@ void handle_mysql_client(SOCKET sock, std::shared_ptr<RwLock<SharedDatabase>> sh
 
     // 5. Query loop
     exec.auth_user = username;
+    exec.activate_default_roles();
     exec.client_found_rows = (client_caps & 0x0002) != 0;
     exec.register_process(username, peer, [sock] { wake_connection(sock); }); // (KILL of this connection wakes the read of the next command)
     StmtMap stmts;
@@ -1831,6 +1844,7 @@ void handle_mysql_client(SOCKET sock, std::shared_ptr<RwLock<SharedDatabase>> sh
                 exec.deregister_process();
                 exec.release_explicit_table_locks(); // LOCK TABLES V1 -- release on disconnect
                 exec.auth_user = new_user;
+                exec.activate_default_roles();
                 exec.register_process(new_user, peer, [sock] { wake_connection(sock); });
                 if (!new_db.empty()) {
                     auto ignore_ = exec_query(exec, "USE " + new_db);

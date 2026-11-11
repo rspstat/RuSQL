@@ -253,6 +253,15 @@ private:
     Statement parse_vacuum();
 
     std::pair<std::string, std::string> parse_user_spec();
+    std::pair<std::string, std::string> parse_account_or_current(bool& current); // 'u'@'h', or USER() / CURRENT_USER() (current = true)
+    std::string parse_role_name();                                               // 'r' / r (a host after @ is read and left out: roles have none here)
+    Statement parse_create_role();
+    Statement parse_drop_role();
+    Statement parse_alter_user();
+    Statement parse_rename_user();
+    Statement parse_set_password();
+    Statement parse_set_role();
+    Statement parse_set_default_role();
     Statement parse_create_user();
     Statement parse_drop_user();
     Statement parse_grant();

@@ -351,12 +351,16 @@ StringResult Executor::exec_rollback_to(SharedDatabase& s, const std::string& na
         auto& rows = tit->second;
 
         if (entry.operation == "INSERT") {
+            // Only the live version this INSERT made goes. The entries come newest first, so whatever happened to it later in the transaction is undone by now and it is live
+            // again; an older version of the same key that this transaction made BEFORE the savepoint (and a later REPLACE / DELETE ended: _xmax is this transaction's id) must
+            // stay, or the DELETE entry that follows finds nothing to bring back and the row is gone for good.
             rows.erase(std::remove_if(rows.begin(), rows.end(),
                                        [&](const Row& r) {
                                            auto pit = r.find(pk_col);
                                            auto xnit = r.find("_xmin");
+                                           auto xxit = r.find("_xmax");
                                            return pit != r.end() && pit->second == entry.key && xnit != r.end() &&
-                                                  xnit->second == txn_id_str;
+                                                  xnit->second == txn_id_str && (xxit == r.end() || xxit->second == "0");
                                        }),
                        rows.end());
         } else if (entry.operation == "UPDATE") {
