@@ -2,6 +2,7 @@
 #include <functional>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 
 #include "engine/parser/parser.hpp"
 #include "parser_detail.hpp"
@@ -243,7 +244,14 @@ std::string upper_word(std::string w) {
 }
 } // namespace
 
+namespace {
+// The operand after a set operator is read as that one SELECT: the chain goes on in the loops of the caller (left to right). Set right before the call and taken at its
+// first line, so a subquery inside the operand does not see it.
+thread_local bool g_operand_only = false;
+} // namespace
+
 Statement Parser::parse_select() {
+    const bool operand_only = std::exchange(g_operand_only, false);
     // The FROM list of this query is the enclosing one for the subqueries in it (until the set operator's other side is parsed).
     struct Enclosing {
         std::vector<std::unordered_set<std::string>>* stack;
@@ -558,56 +566,130 @@ Statement Parser::parse_select() {
         return Statement(Statement::SelectInto{std::make_unique<Statement>(std::move(select)), into_vars});
     };
 
-    // UNION / INTERSECT / EXCEPT [ALL] after a select (with or without FROM)
-    auto set_operation = [&](Statement select_stmt) -> Statement {
-        int set_op = 0;
-        if (peek_is(TokenKind::Union)) { advance(); set_op = 1; }
-        else if (peek_is(TokenKind::Intersect)) { advance(); set_op = 2; }
-        else if (peek_is(TokenKind::Except)) { advance(); set_op = 3; }
-
-        if (set_op > 0) {
-            bool all = false;
-            if (peek_is(TokenKind::All)) { advance(); all = true; }
+    // UNION / INTERSECT / EXCEPT [ALL] after a select (with or without FROM), read left to right with INTERSECT before UNION and EXCEPT, as MySQL does. The ORDER BY /
+    // LIMIT / OFFSET after the last SELECT belong to the whole result.
+    auto set_operation = [&](Statement first) -> Statement {
+        if (operand_only) return first; // (the operand of an operator: the loops below, in the caller, go on with the chain)
+        std::vector<OrderBy> tail_order_by;
+        std::optional<std::size_t> tail_limit, tail_offset;
+        // the SELECT after an operator, alone and without the ORDER BY / LIMIT after it (those are kept for the result)
+        auto operand = [&]() -> Statement {
             if (!peek_is(TokenKind::Select)) throw ParseError("Expected SELECT after set operator");
             advance();
             enclosing.release(); // (the other side of a set operator is not inside this query)
+            g_operand_only = true;
             Statement right = parse_select();
-
-            Statement right_clean = [&]() -> Statement {
-                if (std::holds_alternative<Statement::Select>(right.data)) {
-                    auto& s = std::get<Statement::Select>(right.data);
-                    return Statement(Statement::Select{
-                        s.table, std::move(s.subquery), s.columns, s.distinct, s.condition, s.joins,
-                        {}, s.group_by, s.having, std::nullopt, std::nullopt, s.for_update, s.for_share, false, s.table_alias, s.table_aliases, s.with_rollup});
-                }
-                return right;
-            }();
-            std::vector<OrderBy> op_order_by;
-            std::optional<std::size_t> op_limit, op_offset;
-            if (std::holds_alternative<Statement::Select>(right.data)) {
-                auto& s = std::get<Statement::Select>(right.data);
-                op_order_by = s.order_by;
-                op_limit = s.limit;
-                op_offset = s.offset;
-            }
-
+            auto* s = std::get_if<Statement::Select>(&right.data);
+            if (!s) return right;
+            tail_order_by = s->order_by;
+            tail_limit = s->limit;
+            tail_offset = s->offset;
+            return Statement(Statement::Select{
+                s->table, std::move(s->subquery), s->columns, s->distinct, s->condition, s->joins,
+                {}, s->group_by, s->having, std::nullopt, std::nullopt, s->for_update, s->for_share, false, s->table_alias, s->table_aliases, s->with_rollup});
+        };
+        auto accept_all = [&]() {
+            if (!peek_is(TokenKind::All)) return false;
+            advance();
+            return true;
+        };
+        auto join = [&](int set_op, bool all, Statement left, Statement right) -> Statement {
+            auto l = std::make_unique<Statement>(std::move(left));
+            auto r = std::make_unique<Statement>(std::move(right));
             switch (set_op) {
-                case 1:
-                    return Statement(Statement::Union{std::make_unique<Statement>(std::move(select_stmt)),
-                                                       std::make_unique<Statement>(std::move(right_clean)),
-                                                       all, op_order_by, op_limit, op_offset});
-                case 2:
-                    return Statement(Statement::Intersect{std::make_unique<Statement>(std::move(select_stmt)),
-                                                            std::make_unique<Statement>(std::move(right_clean)),
-                                                            all, op_order_by, op_limit, op_offset});
-                default:
-                    return Statement(Statement::Except{std::make_unique<Statement>(std::move(select_stmt)),
-                                                         std::make_unique<Statement>(std::move(right_clean)),
-                                                         all, op_order_by, op_limit, op_offset});
+                case 1: return Statement(Statement::Union{std::move(l), std::move(r), all, {}, std::nullopt, std::nullopt});
+                case 2: return Statement(Statement::Intersect{std::move(l), std::move(r), all, {}, std::nullopt, std::nullopt});
+                default: return Statement(Statement::Except{std::move(l), std::move(r), all, {}, std::nullopt, std::nullopt});
             }
-        }
+        };
+        auto intersect_chain = [&](Statement left) -> Statement {
+            while (peek_is(TokenKind::Intersect)) {
+                advance();
+                const bool all = accept_all();
+                Statement right = operand();
+                left = join(2, all, std::move(left), std::move(right));
+            }
+            return left;
+        };
 
-        return select_stmt;
+        Statement result = intersect_chain(std::move(first));
+        while (peek_is(TokenKind::Union) || peek_is(TokenKind::Except)) {
+            const int set_op = peek_is(TokenKind::Union) ? 1 : 3;
+            advance();
+            const bool all = accept_all();
+            Statement right = intersect_chain(operand());
+            result = join(set_op, all, std::move(result), std::move(right));
+        }
+        auto put_tail = [&](auto* node) {
+            node->order_by = std::move(tail_order_by);
+            node->limit = tail_limit;
+            node->offset = tail_offset;
+        };
+        if (auto* u = std::get_if<Statement::Union>(&result.data)) put_tail(u);
+        else if (auto* i = std::get_if<Statement::Intersect>(&result.data)) put_tail(i);
+        else if (auto* e = std::get_if<Statement::Except>(&result.data)) put_tail(e);
+        return result;
+    };
+
+    // ORDER BY and LIMIT / OFFSET / FETCH come after the FROM list of a select, and after a select without one (`SELECT 5 UNION SELECT 3 ORDER BY 1`)
+    auto parse_order_by = [&]() {
+        std::vector<OrderBy> order_by;
+        if (peek_is(TokenKind::Order)) {
+            advance();
+            if (!peek_is(TokenKind::By)) throw ParseError("Expected BY");
+            advance();
+            allow_window_expr_ = true; // (`ORDER BY RANK() OVER (...)`: the window function becomes a hidden column the sort reads)
+            for (;;) {
+                std::string col = parse_sort_item();
+                bool asc = true;
+                if (peek_is(TokenKind::Desc)) { advance(); asc = false; }
+                else if (peek_is(TokenKind::Asc)) { advance(); asc = true; }
+                order_by.push_back(OrderBy{col, asc});
+                if (peek_is(TokenKind::Comma)) advance(); else break;
+            }
+            allow_window_expr_ = false;
+            for (auto& hidden : hidden_windows_) columns.push_back(std::move(hidden));
+            hidden_windows_.clear();
+        }
+        return order_by;
+    };
+    auto parse_limit = [&](std::optional<std::size_t>& limit, std::optional<std::size_t>& offset) {
+        if (peek_is(TokenKind::Limit)) {
+            advance();
+            const Token* n = advance();
+            if (!n || n->kind != TokenKind::NumberLit) throw ParseError("Expected number after LIMIT");
+            std::size_t first = 0;
+            try { first = static_cast<std::size_t>(std::stoull(n->text)); } catch (...) {}
+            if (peek_is(TokenKind::Comma)) {
+                advance();
+                const Token* cnt = advance();
+                if (!cnt || cnt->kind != TokenKind::NumberLit) throw ParseError("Expected count after LIMIT offset,");
+                std::size_t count = 0;
+                try { count = static_cast<std::size_t>(std::stoull(cnt->text)); } catch (...) {}
+                limit = count;
+                offset = first;
+            } else {
+                if (peek_is(TokenKind::Offset)) {
+                    advance();
+                    const Token* o = advance();
+                    if (!o || o->kind != TokenKind::NumberLit) throw ParseError("Expected number after OFFSET");
+                    std::size_t ov = 0;
+                    try { ov = static_cast<std::size_t>(std::stoull(o->text)); } catch (...) {}
+                    offset = ov;
+                }
+                limit = first;
+            }
+        } else if (peek_is(TokenKind::Fetch)) {
+            advance();
+            if (peek_is(TokenKind::Next) || peek_is(TokenKind::Ident)) advance(); // FIRST or NEXT
+            const Token* n = advance();
+            if (!n || n->kind != TokenKind::NumberLit) throw ParseError("Expected number after FETCH FIRST/NEXT");
+            std::size_t lim = 0;
+            try { lim = static_cast<std::size_t>(std::stoull(n->text)); } catch (...) {}
+            if (peek_is(TokenKind::Rows)) advance();
+            if (peek_is(TokenKind::Only)) advance();
+            limit = lim;
+        }
     };
 
     // FROM is optional: scalar SELECT (no FROM) is supported
@@ -615,9 +697,12 @@ Statement Parser::parse_select() {
         // `SELECT 1 WHERE 1 = 0`: the one row a select without FROM has is there, or it is not
         std::optional<CondExpr> dual_condition;
         if (peek_is(TokenKind::Where)) { advance(); dual_condition = parse_condexpr(); }
+        std::vector<OrderBy> dual_order_by = parse_order_by();
+        std::optional<std::size_t> dual_limit, dual_offset;
+        parse_limit(dual_limit, dual_offset);
         return set_operation(with_into(Statement(Statement::Select{
-            "_dual_", std::nullopt, std::move(columns), distinct, std::move(dual_condition), {}, {}, std::nullopt,
-            std::nullopt, std::nullopt, std::nullopt, false, false})));
+            "_dual_", std::nullopt, std::move(columns), distinct, std::move(dual_condition), {}, std::move(dual_order_by), std::nullopt,
+            std::nullopt, dual_limit, dual_offset, false, false})));
     }
     advance(); // consume FROM
 
@@ -829,63 +914,11 @@ Statement Parser::parse_select() {
     if (peek_is(TokenKind::Having)) { advance(); having = parse_condexpr(); }
 
     // ORDER BY
-    std::vector<OrderBy> order_by;
-    if (peek_is(TokenKind::Order)) {
-        advance();
-        if (!peek_is(TokenKind::By)) throw ParseError("Expected BY");
-        advance();
-        allow_window_expr_ = true; // (`ORDER BY RANK() OVER (...)`: the window function becomes a hidden column the sort reads)
-        for (;;) {
-            std::string col = parse_sort_item();
-            bool asc = true;
-            if (peek_is(TokenKind::Desc)) { advance(); asc = false; }
-            else if (peek_is(TokenKind::Asc)) { advance(); asc = true; }
-            order_by.push_back(OrderBy{col, asc});
-            if (peek_is(TokenKind::Comma)) advance(); else break;
-        }
-        allow_window_expr_ = false;
-        for (auto& hidden : hidden_windows_) columns.push_back(std::move(hidden));
-        hidden_windows_.clear();
-    }
+    std::vector<OrderBy> order_by = parse_order_by();
 
     // LIMIT [OFFSET] / FETCH (FIRST|NEXT) n ROWS ONLY
     std::optional<std::size_t> limit, offset;
-    if (peek_is(TokenKind::Limit)) {
-        advance();
-        const Token* n = advance();
-        if (!n || n->kind != TokenKind::NumberLit) throw ParseError("Expected number after LIMIT");
-        std::size_t first = 0;
-        try { first = static_cast<std::size_t>(std::stoull(n->text)); } catch (...) {}
-        if (peek_is(TokenKind::Comma)) {
-            advance();
-            const Token* cnt = advance();
-            if (!cnt || cnt->kind != TokenKind::NumberLit) throw ParseError("Expected count after LIMIT offset,");
-            std::size_t count = 0;
-            try { count = static_cast<std::size_t>(std::stoull(cnt->text)); } catch (...) {}
-            limit = count;
-            offset = first;
-        } else {
-            if (peek_is(TokenKind::Offset)) {
-                advance();
-                const Token* o = advance();
-                if (!o || o->kind != TokenKind::NumberLit) throw ParseError("Expected number after OFFSET");
-                std::size_t ov = 0;
-                try { ov = static_cast<std::size_t>(std::stoull(o->text)); } catch (...) {}
-                offset = ov;
-            }
-            limit = first;
-        }
-    } else if (peek_is(TokenKind::Fetch)) {
-        advance();
-        if (peek_is(TokenKind::Next) || peek_is(TokenKind::Ident)) advance(); // FIRST or NEXT
-        const Token* n = advance();
-        if (!n || n->kind != TokenKind::NumberLit) throw ParseError("Expected number after FETCH FIRST/NEXT");
-        std::size_t lim = 0;
-        try { lim = static_cast<std::size_t>(std::stoull(n->text)); } catch (...) {}
-        if (peek_is(TokenKind::Rows)) advance();
-        if (peek_is(TokenKind::Only)) advance();
-        limit = lim;
-    }
+    parse_limit(limit, offset);
 
     // FOR UPDATE / FOR SHARE
     bool for_update = false, for_share = false;

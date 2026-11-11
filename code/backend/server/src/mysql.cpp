@@ -46,6 +46,7 @@ constexpr std::uint8_t COM_RESET_CONNECTION = 0x1f;
 constexpr std::uint32_t CAPS = 0x0001 |       // CLIENT_LONG_PASSWORD
                                 0x0002 |       // CLIENT_FOUND_ROWS (a client that asks for it gets the rows an UPDATE found, not the rows it changed)
                                 0x0004 |       // CLIENT_LONG_FLAG
+                                0x0008 |       // CLIENT_CONNECT_WITH_DB (a client names the database it starts in in the handshake; without this bit a driver does not send it)
                                 0x0200 |       // CLIENT_PROTOCOL_41
                                 0x2000 |       // CLIENT_TRANSACTIONS
                                 0x8000 |       // CLIENT_SECURE_CONNECTION
@@ -1665,21 +1666,28 @@ void handle_mysql_client(SOCKET sock, std::shared_ptr<RwLock<SharedDatabase>> sh
         return;
     }
 
-    // 4. Send OK
-    if (!write_packet(sock, 2, ok_pkt(0))) return;
-
-    // 5. Query loop
+    // 4. The account is in. A database named in the handshake is entered before the client is told so: an account with no access to it (1044) or a name that
+    // is not there (1049) is refused with that error instead of OK, as MySQL does
     exec.auth_user = username;
     exec.activate_default_roles();
     exec.client_found_rows = (client_caps & 0x0002) != 0;
     exec.register_process(username, peer, [sock] { wake_connection(sock); }); // (KILL of this connection wakes the read of the next command)
+    if (!init_db.empty()) {
+        auto entered = exec_query(exec, "USE " + init_db);
+        if (entered.is_err()) {
+            exec.deregister_process();
+            write_packet(sock, 2, err_pkt(entered.error()));
+            return;
+        }
+    }
+    if (!write_packet(sock, 2, ok_pkt(0))) {
+        exec.deregister_process();
+        return;
+    }
+
+    // 5. Query loop
     StmtMap stmts;
     std::uint32_t next_stmt_id = 1;
-
-    if (!init_db.empty()) {
-        auto ignore_ = exec_query(exec, "USE " + init_db);
-        (void)ignore_;
-    }
 
     for (;;) {
         auto p = read_packet(sock);

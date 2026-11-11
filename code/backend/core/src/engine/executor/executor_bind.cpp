@@ -591,6 +591,8 @@ std::optional<std::string> Executor::bind_statement(SharedDatabase& s, Statement
                             error = "Operand should contain " + std::to_string(wanted) + " column(s)";
                         }
                         if (!out.empty()) c.right_class = out.front().second;
+                        sub->classes.clear();
+                        for (const auto& column : out) sub->classes.push_back(column.second);
                     }
                 }
             }

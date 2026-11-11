@@ -64,14 +64,16 @@ TEST_CASE("CREATE DATABASE / USE / SHOW TABLES lifecycle", "[executor][ddl]") {
     REQUIRE(r1.is_ok());
     REQUIRE(r1.value() == "Database 'company' created.");
 
-    // exec_create_database also switches current_db, matching Rust.
-    auto r2 = ex.execute_sql("SHOW TABLES");
-    REQUIRE(r2.is_ok());
-    REQUIRE(r2.value() == "No tables found in database 'company'.");
+    // CREATE DATABASE does not move the session into the new database (R79; it used to, as the Rust version did): USE does.
+    REQUIRE(ex.current_db != "company");
 
     auto r3 = ex.execute_sql("USE company");
     REQUIRE(r3.is_ok());
     REQUIRE(r3.value() == "Database changed to 'company'.");
+
+    auto r2 = ex.execute_sql("SHOW TABLES");
+    REQUIRE(r2.is_ok());
+    REQUIRE(r2.value() == "No tables found in database 'company'.");
 
     auto r4 = ex.execute_sql("USE no_such_db");
     REQUIRE(r4.is_err());

@@ -655,12 +655,12 @@ StringResult Executor::exec_update_inner(SharedDatabase& s, const std::string& t
                             if (auto violation = update_restrict_violation(s, table, row, new_row, assigned_cols)) return StringResult::Err(*violation);
                         }
                         for (auto& col : schema->columns) {
-                            if (col.check_expr && !eval_check_expr(*col.check_expr, new_row)) {
+                            if (col.check_expr && !eval_check_expr(s, table, *col.check_expr, new_row)) {
                                 return StringResult::Err("CHECK constraint violated on column '" + col.name + "': " + *col.check_expr);
                             }
                         }
                         for (auto& check : schema->check_constraints) {
-                            if (!eval_check_expr(check.expression, new_row)) {
+                            if (!eval_check_expr(s, table, check.expression, new_row)) {
                                 return StringResult::Err("CHECK constraint '" + check.name.value_or(check.expression) + "' violated");
                             }
                         }

@@ -48,7 +48,7 @@ ConditionValue::ConditionValue(const ConditionValue& other)
     : data(std::visit(
           [](const auto& alt) -> Data {
               using T = std::decay_t<decltype(alt)>;
-              if constexpr (std::is_same_v<T, Subquery>) return Data(Subquery{clone_ptr(alt.query)});
+              if constexpr (std::is_same_v<T, Subquery>) return Data(Subquery{clone_ptr(alt.query), alt.classes});
               else return Data(alt);
           },
           other.data)) {}

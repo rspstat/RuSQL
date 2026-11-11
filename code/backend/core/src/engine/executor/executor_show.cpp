@@ -118,7 +118,11 @@ StringResult Executor::exec_describe(const SharedDatabase& s, const std::string&
     std::string out = sep + "\n";
     out += "| Field            | Type    | PK  | NN  | Auto Increment | Default         |\n";
     out += sep + "\n";
+    const std::size_t dot = table.find('.');
+    const std::string db = dot == std::string::npos ? current_db : table.substr(0, dot);
+    const std::string bare = dot == std::string::npos ? table : table.substr(dot + 1);
     for (auto& col : schema->columns) {
+        if (!may_see_column(s, db, bare, col.name)) continue; // (an account that holds a privilege on some columns only sees those)
         std::string type_str = sql_type_str(col.data_type) + (col.is_unsigned ? " UNSIGNED" : "");
         std::string def_str = "NULL";
         if (col.default_value && *col.default_value != NULL_DEFAULT) def_str = *col.default_value;

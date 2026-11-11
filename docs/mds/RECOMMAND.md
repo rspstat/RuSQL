@@ -1,6 +1,6 @@
-# RuSQL 추천 목록 — 분류별 (남은 항목만, R78 이후 · 2026-11-12)
+# RuSQL 추천 목록 — 분류별 (남은 항목만, R79 이후 · 2026-11-12)
 
-완료된 항목은 뺐습니다(R44~R78에서 끝낸 것은 `DATE.md`에 있습니다). 항목마다 엔진에 실제로 돌려 보고(진짜 MySQL 8.4.9와 비교) 앱·MCP 코드를 찾아 이미 있거나 일부만 있는 것을 가려낸 판입니다. 점수판은 코퍼스 49개에서 차이 0이고(R77), B+Tree·MVCC 페이지는 R62에서 단순한 자동 재생으로 줄였습니다. 발표·제출물 중 포스터·소개글·메인 화면 캡처는 끝났습니다(`docs/deliverables/`). 점검에서 바뀐 것의 이력은 맨 아래 "참고"에 모았습니다.
+완료된 항목은 뺐습니다(R44~R79에서 끝낸 것은 `DATE.md`에 있습니다). 항목마다 엔진에 실제로 돌려 보고(진짜 MySQL 8.4.9와 비교) 앱·MCP 코드를 찾아 이미 있거나 일부만 있는 것을 가려낸 판입니다. 점수판은 코퍼스 53개 4,716문장에서 차이 0이고(R79), B+Tree·MVCC 페이지는 R62에서 단순한 자동 재생으로 줄였습니다. 발표·제출물 중 포스터·소개글·메인 화면 캡처는 끝났습니다(`docs/deliverables/`). 점검에서 바뀐 것의 이력은 맨 아래 "참고"에 모았습니다.
 
 - **현재 상태:** `일부`(일부만 있음) · `없음` · `오답`(지금 조용히 틀린 값을 돌려줌) · `다름`(MySQL과 다르지만 오류로 드러남)
 - **추천도:** ★ 다섯 개. 기준은 실사용 가치 + 발표 임팩트 + 비용 대비 효과입니다. 졸업작품 마감(11월 말)까지 약 3주를 전제로 합니다. 각 분류 안에서 추천도 순입니다.
@@ -16,7 +16,7 @@
 | 3. 품질 점검 | 3 | 마감 1주 전에 Debug 전체 + `KILL`을 섞은 크래시 시험 | 마감 전에 숨은 회귀와 조용한 오답을 잡습니다 |
 | 4. 프론트 (앱) | 4 | 인덱스 제안 카드의 남은 것(큰 표), 스키마 비교의 빠진 것 | 앱만으로 큰 표에서도 인덱스를 시험해 볼 수 있습니다 |
 | 5. MCP (지금 37개 도구, resources 2개 · prompts 3개) | 1 | `suggest_indexes` 후속(열 사이의 상관 · 큰 표) | 제안이 더 많은 모양의 문장에서 맞아집니다 |
-| 6. MySQL과 다른 작은 차이 | 31 | 조인 뷰의 `UPDATE`·`INSERT`, 프로토콜 오류 번호의 남은 약 20개, `USING` 뒤 모호한 열 | 남은 호환 차이가 줄지만 대부분 눈에 안 띕니다 |
+| 6. MySQL과 다른 작은 차이 | 30 | 조인 뷰의 `UPDATE`·`INSERT`, 프로토콜 오류 번호의 남은 약 20개, `FROM DUAL`과 괄호 안 `LIMIT`가 있는 `UNION` | 남은 호환 차이가 줄지만 대부분 눈에 안 띕니다 |
 | 7. 엔진 기능 추가 | 6 | `COLLATE` 절, `FULLTEXT`, `FLUSH` · `REPAIR` · `CHECKSUM TABLE` | 대소문자를 구분하는 열이 되고, `mysqldump`의 `FLUSH TABLES`를 받습니다 |
 | 8. 백엔드 (서버·운영) | 5 | (시간이 되면) 코퍼스 비교 CI | 푸시마다 MySQL과의 차이 0을 자동으로 확인합니다 |
 | 9. SQL 문법 추가 — 보류 | 31 | `INSERT INTO t () VALUES ()`, `GROUPING()`, `SIGNAL`, `UPDATE … JOIN (SELECT …)` | 옮겨 온 MySQL 쿼리가 더 많이 그대로 돕니다 |
@@ -77,8 +77,8 @@ Claude가 부르는 도구.
 
 | 항목 | 현재 상태 | 추천도 | 비용 | 효과 | 근거 |
 |---|---|---|---|---|---|
-| 글자와 숫자를 비교하는 남은 자리 | 오답 — `IN (서브쿼리)`: `SELECT s FROM s WHERE s IN (SELECT 7)`가 글자 열의 `'007'`을 빼고 `'7'`만 돌려주고(MySQL은 글자와 숫자를 숫자로 비교해 둘 다), `'007' IN (SELECT 7)`는 0(MySQL 1). `CHECK (s = '7')`는 `'007'`을 받아들임(MySQL 오류 3819). `s IN (7)` · `s = (SELECT 7)` · 프로시저 `IF`는 이미 같음. 갭 락 · 파티션 경계 비교는 점검하지 않았음 | ★★ | 중 | 서브쿼리와 `CHECK`가 조용히 틀리는 자리가 닫힙니다. | 이 둘은 아직 값의 모양으로 비교하는 예전 규칙입니다. 타입 인식 비교(`value_class.hpp`)로 바꾸면 됩니다. 정리한 `PLAN.md`에서 옮긴 항목입니다. |
-| `UNION`의 마지막이 FROM 없는 SELECT일 때 `ORDER BY` | 없음(문법 오류 1064) — `SELECT id FROM t UNION SELECT 9 ORDER BY 1`, `SELECT 5 UNION SELECT 3 ORDER BY 1`이 "Unexpected token(s)"로 거절됨. 마지막 SELECT에 FROM이 있으면 됨(`… UNION SELECT id FROM t2 ORDER BY 1`) | ★★ | 하 | 값 목록을 `UNION`으로 이어 정렬하는 흔한 모양이 됩니다. | 파서가 FROM 없는 SELECT 뒤의 `ORDER BY`를 UNION 전체의 것으로 읽지 못합니다. |
+| 글자와 숫자를 비교하는 남은 자리 | 일부 — R79에서 `IN (서브쿼리)`(양쪽 타입으로, `(a, b) IN (SELECT ...)`의 쌍마다)와 `CHECK`(열 타입으로 비교 — 글자 열과 글자는 글자끼리 `'9' > '10'`, 한쪽이 숫자면 숫자로; `ADD CHECK` · `UPDATE` · `REPLACE`도)는 MySQL과 같아졌고, UPDATE · DELETE의 `IN (서브쿼리)`와 `CHECK`는 숫자로 읽히지 않는 글자를 1292 · 3819로 거절한다. 남은 것: 서브쿼리의 열이 함수 · 식이라 종류를 모를 때는 예전 규칙(값의 모양), 날짜 · ENUM · SET 열이 서브쿼리의 값일 때의 1292 판정은 열 종류를 몰라 글자로 본다(왼쪽이 그 열이면 건너뜀), 갭 락 · 파티션 경계 비교는 점검하지 않았음 | ★ | 하~중 | 서브쿼리의 오른쪽이 식인 드문 모양까지 닫힙니다. | 바인더가 서브쿼리 열의 종류(`ConditionValue::Subquery::classes`)를 이미 정해 두니 식의 종류를 더 정확히 말하게 하면 됩니다. |
+| 집합 연산 · FROM 없는 SELECT의 남은 모양 | 다름(작음) — R79에서 `SELECT 5 UNION SELECT 3 ORDER BY 1`과 `SELECT 1 LIMIT 1`이 되고, 셋 이상 이은 사슬은 왼쪽부터 읽고 `INTERSECT`가 먼저 묶이며 끝의 `ORDER BY` · `LIMIT`가 전체에 걸린다. 남은 것: 괄호 안 피연산자가 자기 `ORDER BY` · `LIMIT`를 가진 `(SELECT ... ORDER BY ... LIMIT 2) UNION (SELECT ...)`는 "Unknown statement", `FROM DUAL`은 "Table 'v.DUAL' not found"(MySQL은 `FROM` 없는 SELECT와 같음), `WHERE x IN (SELECT ... LIMIT 1)`은 MySQL이 1235로 거절하는데 여기는 받음 | ★ | 하 | Oracle식 `SELECT 1 FROM DUAL`과 괄호 안 `LIMIT`가 있는 UNION이 그대로 돕니다. | `FROM DUAL`은 파서가 표 이름 `DUAL`을 `_dual_`로 읽으면 되고, 괄호 처리(`drop_parentheses_around_operands`)는 자기 `ORDER BY` · `LIMIT`가 있는 묶음을 일부러 남겨 두었다. |
 | `USING` 조인 뒤의 모호한 열 | 오답(작음) — `a JOIN b USING (x) JOIN c USING (y) JOIN d USING (x)`에서 `d`도 `y`를 가지면 `ORDER BY y`는 MySQL이 오류 1052(모호한 열)로 거절하는데 여기는 행을 돌려줌. `SELECT a.*, c.* … ORDER BY y`도 같은 모양 | ★ | 하 | MySQL이 거절하는 모호한 열을 같이 거절해 조용한 오답 하나가 사라집니다. | R58에서 `*` 열 순서를 맞추다 알게 된 것입니다. 합쳐진 열이 뒤 조인의 표에도 있을 때의 모호함 검사입니다. |
 | 자기 표 UPDATE가 행 단위가 아님 | 일부 — 문장 전체를 한 번에 봐서 `UPDATE emp SET mgr = NULL, id = id + 10 ORDER BY id DESC`를 MySQL은 통과시키는데 여기는 거절합니다(R57에서 다중 표 DELETE·MERGE·REPLACE의 사슬 아래 검사는 끝남) | ★ | 중 | MySQL이 받는 자기 표 UPDATE를 그대로 받아 옮겨 온 쿼리가 거절되지 않습니다. | UPDATE를 행마다 모의해야 합니다. 오류로 거절하는 쪽이라 조용한 오답은 아닙니다. |
 | 프로토콜 오류 번호의 남은 것 | 일부 — R58에서 메시지 글자로 번호·SQL 상태를 정함(`wire_error`, 약 40종). 코퍼스 전체에서 번호만 다른 문장 385개 → 약 20개. 남은 것은 엔진이 MySQL과 다른 이유로 실패하는 경우(문법을 못 받음, 메시지가 아무 말도 안 함): `ONLY_FULL_GROUP_BY`(1055), `RANGE` 프레임 오류(3587~3589), 윈도 함수를 쓸 수 없는 자리(3593), `SUM(SUM(x)) OVER`의 1140, `Data truncated`(1265) 일부, `MOD`로 0을 나누는 UPDATE(1365), 없는 윈도 이름(3579) | ★ | 하 | 오류 번호로 분기하는 클라이언트·ORM 코드가 MySQL에서처럼 동작합니다. | 번호는 `vs_mysql.py --proto --errno`가 코퍼스마다 비교합니다. 엔진 메시지를 MySQL 것으로 바꾸는 쪽이 정석이라 하나씩 고치면 됩니다. |
@@ -106,8 +106,7 @@ Claude가 부르는 도구.
 | 표 정의의 작은 틈 | 다름(작음) — `ALTER … RENAME COLUMN`이 `CHECK`가 쓰는 열을 막지 않음(MySQL 오류 3959), 한 열에 `UNIQUE`와 `UNIQUE (a)`를 둘 다 쓰면 색인 하나(MySQL은 둘), `information_schema.columns.column_type`이 `tinyint(1)`을 `tinyint`로 말함, `CREATE INDEX … (a DESC)`는 받지만 방향을 `A`로 기록함(MySQL `D`) | ★ | 하 | 스키마를 읽는 도구가 MySQL과 같은 정의를 봅니다. | 넷 모두 작은 변경입니다. |
 | 함수의 작은 틈 | 다름(작음) — 없는 함수 이름을 평가할 때 검사해서 빈 표의 `SELECT nosuch(id) FROM em`이 오류 없이 빈 결과(MySQL 1305), `INSTR('Strasse', 'ß')` · `LOCATE('ss', 'Straße')`는 MySQL이 5, 여기 0(`ß` = `ss` 같은 정렬 규칙의 확장 글자), `ANALYZE` 히스토그램은 글자를 바이트 순서로 정렬함(추정에만 영향) | ★ | 하~중 | 오타 난 함수 이름이 빈 표에서도 오류로 드러납니다. | 함수 이름 검사를 문장을 풀 때로 옮기면 됩니다. |
 | 저장 루틴 · DML의 남은 모양 | 다름(작음) — 프로시저가 `SELECT`를 여러 번 하면 마지막 표 하나만 답함(MySQL은 모든 집합을 보내고 클라이언트는 첫 것부터 읽음: `SELECT 100; SELECT 1`이 MySQL `100`, 여기 `1`), 재귀 호출을 허용함(MySQL 기본 `max_sp_recursion_depth = 0`은 오류 1456), 같은 값 행을 `REPLACE`하면 영향 행 수가 2(MySQL 1) | ★ | 중 | 프로시저 결과를 읽는 클라이언트가 MySQL과 같은 첫 집합을 받습니다. | 여러 결과 집합은 프로토콜 계층 변경이라 셋 중 가장 큽니다. |
-| 권한 쪽 남은 모양 | 다름(작음) — R78에서 권한이 강제되면서 남긴 것: ① 열 권한만 가진 표를 `DESCRIBE` · `SHOW COLUMNS` 하면 권한 없는 열까지 보임(MySQL은 권한 있는 열만) ② 권한 변경이 열려 있는 연결에 바로 반영됨(MySQL은 데이터베이스 수준을 다음 `USE`부터) ③ 접속할 때 `database=`로 준 곳에 권한이 없어도 로그인이 거절되지 않음(MySQL 1044) ④ `DROP INDEX 이름`(`ON 표` 없이)은 표를 알 수 없어 확인하지 않음 ⑤ `mysql.user` 같은 시스템 표가 없음 ⑥ `SHOW DATABASES`에 `information_schema` · `performance_schema`가 안 보임 | ★ | 하~중 | 권한 시연에서 MySQL과 똑같은 모습이 됩니다. 이 줄의 것은 모양의 차이이거나 드문 문장입니다(검사가 아예 없는 문장은 ④뿐). | `DESCRIBE`의 열 거르기와 로그인 때 `USE` 거절은 작은 일입니다. |
-| `CREATE DATABASE`의 현재 데이터베이스 · `CREATE TABLE … AS SELECT`의 영향 행 수 | 다름(작음) — R78 코퍼스를 쓰며 찾음: `CREATE DATABASE x`가 현재 데이터베이스를 `x`로 바꿈(MySQL은 바꾸지 않아서 이어지는 `CREATE TABLE t`가 `x`에 만들어짐), `CREATE TABLE c AS SELECT …`의 OK 패킷 영향 행 수가 0(MySQL은 넣은 행 수) | ★★ | 하 | 두 번째 것은 클라이언트가 보여 주는 "N rows affected"가 맞아지고, 첫째는 `mysqldump`가 아닌 직접 쓴 스크립트에서 표가 엉뚱한 곳에 만들어지는 일을 막습니다. | 첫째는 앱의 "데이터베이스 만들면 자동으로 그 데이터베이스를 연다" 동작에 기대고 있을 수 있어 앱 쪽을 먼저 확인해야 합니다. |
+| 권한 쪽 남은 모양 | 다름(작음) — 권한을 강제하며 남긴 것(R78) 중 R79에서 ① 열 권한만 가진 표를 `DESCRIBE` · `SHOW COLUMNS` · `information_schema.columns` 하면 그 열만 보임, ③ 접속할 때 `database=`로 준 곳에 권한이 없으면 로그인이 1044(없는 이름은 1049), ④ `DROP INDEX 이름`(`ON 표` 없이)이 그 인덱스가 있는 표의 `INDEX` 권한을 확인함이 끝났다. 남은 것: ② 권한 변경이 열려 있는 연결에 바로 반영됨(MySQL은 데이터베이스 수준을 다음 `USE`부터), ⑤ `mysql.user` 같은 시스템 표가 없음, ⑥ `SHOW DATABASES`에 `information_schema` · `performance_schema`가 안 보임, ⑦ `SHOW FULL COLUMNS`의 `Privileges` 열이 비어 있음(MySQL은 계정이 그 열에 가진 권한 `select,insert,update,references`) | ★ | 하~중 | 권한 시연에서 MySQL과 똑같은 모습이 됩니다. 이 줄의 것은 모양의 차이이거나 드문 문장입니다. | ⑥과 ⑦은 작은 일이고, ②는 권한 읽는 시점을 연결에 묶어야 해서 가장 큽니다. |
 
 ## 7. 엔진 기능 추가
 
@@ -201,6 +200,15 @@ Claude가 부르는 도구.
 6. **시간이 되면:** 최적화 전후 속도 애니메이션, 코퍼스 비교 CI, RuSQL vs MySQL 분할 화면, 스키마 비교에 뷰·트리거.
 7. **미루거나 하지 않는 것:** `FULLTEXT`, 표현식 인덱스, 감사 로그, TLS, `caching_sha2_password`, WAL 복제·XA, 테마, 그리고 SQL 문법 추가 전부("SQL 문법 추가 — 보류").
 8. **직접 하실 일:** MCP 시연 리허설(`DEMO.md` 8번), 크래시 복구 장면 리허설(`DEMO.md` 3번), 화면 녹화, 앱 화면 사람 눈 점검.
+
+## 참고: R79에서 끝낸 것 (2026-11-12, 사용자가 고른 "MySQL과 다른 작은 차이" 중 다섯 묶음 — 31개를 성격으로 나눠 '전부 맞출 필요는 없다'고 답한 뒤 A안)
+
+- **글자와 숫자의 비교**: `IN (서브쿼리)`가 양쪽 타입으로(전에는 왼쪽만; `'007' IN (SELECT 7)`이 0이던 것), `CHECK`가 열의 타입으로(전에는 바인딩 없이 값의 모양으로 — `CHECK (s > '10')`가 `'9'`를 거절하고 `CHECK (s = '7')`가 `'007'`을 받던 것). 코퍼스 `text_number_in` 84문장 33 → 0. CHECK 삽입은 행당 14.4 → 6.7 µs.
+- **`UNION` 끝의 `ORDER BY`**: FROM 없는 SELECT의 `ORDER BY` · `LIMIT`, 그리고 숨어 있던 더 큰 것 — 셋 이상 이은 `UNION`의 `ORDER BY`가 마지막 둘에만 걸리고 `UNION ALL`과 `UNION`을 섞으면 다른 답이던 것(왼쪽부터 읽고 `INTERSECT` 먼저). 코퍼스 `dual_order_limit` 53문장 49 → 0.
+- **`CREATE DATABASE`**가 세션을 옮기지 않음, `CREATE TABLE … AS SELECT` · `CREATE`/`DROP DATABASE`의 영향 행 수. 코퍼스 `create_database` 43문장 18 → 0.
+- **`DROP INDEX 이름`(`ON` 없이)**: 권한뿐 아니라 모든 데이터베이스에서 첫 일치를 지우던 구멍. 이제 그 인덱스가 있는 표의 `INDEX`를 확인.
+- **권한 마무리**: 열 권한만 가진 계정이 `DESCRIBE` · `SHOW COLUMNS` · `information_schema.columns`에서 그 열만 봄; 로그인 때 `database=`가 접근 권한이 없으면 1044, 없는 이름이면 1049 — 근본 원인은 서버가 `CLIENT_CONNECT_WITH_DB`를 알리지 않아 어떤 드라이버의 `database=`도 서버에 닿지 않던 것.
+- **나머지는 일부러 그대로**: 31개 중 네 줄만 손댔고, 남은 것은 위 6번 표에 있다.
 
 ## 참고: R78에서 끝낸 것 (2026-11-12, 사용자가 고른 "크래시 퍼저가 찾은 불일치"와 "권한 강제와 역할")
 

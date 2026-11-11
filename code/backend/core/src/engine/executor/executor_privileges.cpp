@@ -221,8 +221,8 @@ struct Who {
         return false;
     }
 
-    // any privilege that lets the account into the database (table empty) or the table
-    bool any_access(const std::string& db, const std::string& table) const {
+    // any privilege that lets the account into the database (table empty) or the table; `with_columns` false: a privilege on a column does not count
+    bool any_access(const std::string& db, const std::string& table, bool with_columns = true) const {
         for (const GrantRecord* g : held) {
             if (routine_grant(*g)) continue;
             const Object o = object_of(*g, current_db);
@@ -236,7 +236,21 @@ struct Who {
             if (o.level == kDatabase) {
                 if (!privileges_of(*g, kDatabase).empty()) return true;
             } else if (table.empty() || o.table == table) {
-                if (!privileges_of(*g, kTable).empty() || !g->column_privileges.empty()) return true;
+                if (!privileges_of(*g, kTable).empty() || (with_columns && !g->column_privileges.empty())) return true;
+            }
+        }
+        return false;
+    }
+
+    // any privilege that lets the account see the column: one on the table, its database or everything covers every column, else a privilege on that very column
+    bool any_column_access(const std::string& db, const std::string& table, const std::string& column) const {
+        if (any_access(db, table, false)) return true;
+        for (const GrantRecord* g : held) {
+            if (routine_grant(*g)) continue;
+            const Object o = object_of(*g, current_db);
+            if (o.level != kTable || o.db != db || o.table != table) continue;
+            for (const auto& entry : g->column_privileges) {
+                if (lower(entry.second) == column) return true;
             }
         }
         return false;
@@ -662,7 +676,11 @@ private:
         for (const AlterAction& a : v.more) rename(a);
     }
     void on(const Statement::CreateIndex& v) { need_table("INDEX", v.table); }
-    void on(const Statement::DropIndex& v) { if (v.table) need_table("INDEX", *v.table); }
+    void on(const Statement::DropIndex& v) {
+        // without ON the statement takes the index of whichever table has one of that name (exec_drop_index): that table is the one that needs the privilege
+        if (v.table) need_table("INDEX", *v.table);
+        else if (auto owner = Executor::index_table_without_on(s_, v.index_name)) need_table("INDEX", *owner);
+    }
     void on(const Statement::CreateView& v) {
         need_table("CREATE VIEW", v.name);
         if (v.query) query(*v.query);
@@ -1136,6 +1154,12 @@ bool Executor::may_see(const SharedDatabase& s, const std::string& db, const std
     if (!privileges_apply(s)) return true;
     Who who(s, auth_user, account_host(s), current_db, active_roles_);
     return who.any_access(lower(db), lower(table));
+}
+
+bool Executor::may_see_column(const SharedDatabase& s, const std::string& db, const std::string& table, const std::string& column) const {
+    if (!privileges_apply(s)) return true;
+    Who who(s, auth_user, account_host(s), current_db, active_roles_);
+    return who.any_column_access(lower(db), lower(table), lower(column));
 }
 
 // ---------------------------------------------------------------------------

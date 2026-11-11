@@ -3176,12 +3176,57 @@ READ COMMITTED는 어느 쪽이든 최신을 읽으므로 차이가 없다.
 - 퍼저 · 검산 도구: **`fuzz_crash_fk.py 1 7701` 불일치 0(전에는 1)**, 크래시 퍼저 다섯(`fuzz_crash` · `_chain` · `_fk` · `_multifk` · `_selfref`) 6라운드씩(시드 7700) 불일치 0, `fuzz_concurrent.py` 10라운드 확인한 행 5,474 불일치 0; 모델로 검산하는 도구 열둘(`verify_*.py`) 위반 0; TypeScript 검사 오류 0.
 
 **정직한 한계**:
-① **열 권한이 있어도 `DESCRIBE` / `SHOW COLUMNS`는 권한 없는 열까지 보여 준다**(MySQL은 권한 있는 열만).
-② 권한은 문장마다 바로 반영된다(위의 `USE` 시점과 다름); 연결할 때 `database=`로 준 데이터베이스에 권한이 없어도 로그인은 거절되지 않는다(MySQL은 1044).
-③ `FLUSH`는 아직 없는 문장이라 권한 검사도 없다(`KILL`은 전에도 자기 연결만 죽일 수 있다). `DROP INDEX 이름`(`ON 표` 없이)은 표를 알 수 없어 확인하지 않는다. `TRACE`는 안쪽 문장을 일반 문장처럼 확인하지만 `SUGGEST INDEX` 자체는 확인하지 않는다. `SET GLOBAL`의 확인은 구문 분석 결과가 아니라 **문장 글자**(따옴표 밖의 `GLOBAL` · `PERSIST` 낱말, `@@global.`)를 본다 — 파서가 범위(`GLOBAL` / `SESSION`)를 버리기 때문이다.
+① **열 권한이 있어도 `DESCRIBE` / `SHOW COLUMNS`는 권한 없는 열까지 보여 준다**(MySQL은 권한 있는 열만). → R79에서 고침.
+② 권한은 문장마다 바로 반영된다(위의 `USE` 시점과 다름); 연결할 때 `database=`로 준 데이터베이스에 권한이 없어도 로그인은 거절되지 않는다(MySQL은 1044). → 로그인 쪽은 R79에서 고침(원인은 권한이 아니라 `database=`가 서버에 닿지 않던 것).
+③ `FLUSH`는 아직 없는 문장이라 권한 검사도 없다(`KILL`은 전에도 자기 연결만 죽일 수 있다). `DROP INDEX 이름`(`ON 표` 없이)은 표를 알 수 없어 확인하지 않는다(R79에서 고침). `TRACE`는 안쪽 문장을 일반 문장처럼 확인하지만 `SUGGEST INDEX` 자체는 확인하지 않는다. `SET GLOBAL`의 확인은 구문 분석 결과가 아니라 **문장 글자**(따옴표 밖의 `GLOBAL` · `PERSIST` 낱말, `@@global.`)를 본다 — 파서가 범위(`GLOBAL` / `SESSION`)를 버리기 때문이다.
 ④ 프로시저 · 함수 수준 권한은 `EXECUTE` · `ALTER ROUTINE`만, 데이터베이스 수준에서 주거나(`GRANT EXECUTE ON v.*`) 루틴에 직접 줄 수 있다; `SHOW GRANTS`의 모양은 표 수준만큼 MySQL과 대조하지 못했다.
 ⑤ `mysql.user` 같은 시스템 표는 없다(`SELECT ... FROM mysql.user`는 안 됨, `SHOW GRANTS FOR 남`이 1142를 내는 것으로 갈음). 비밀번호 정책 · 계정 잠금 · 만료 · `FLUSH PRIVILEGES`(필요 없음)는 없다.
-⑥ **전부터 있던 다른 점 하나**: `CREATE DATABASE x`가 현재 데이터베이스를 `x`로 바꾼다(MySQL은 바꾸지 않음). 코퍼스는 `--USE v`로 되돌렸고 고치지는 않았다. `CREATE TABLE ... AS SELECT`의 OK 패킷 영향 행 수는 0이다(MySQL은 넣은 행 수).
+⑥ **전부터 있던 다른 점 하나**: `CREATE DATABASE x`가 현재 데이터베이스를 `x`로 바꾼다(MySQL은 바꾸지 않음). 코퍼스는 `--USE v`로 되돌렸고 고치지는 않았다. `CREATE TABLE ... AS SELECT`의 OK 패킷 영향 행 수는 0이다(MySQL은 넣은 행 수). → 둘 다 R79에서 고침.
+
+### 11월 12일 — R79: "MySQL과 다른 작은 차이"에서 고를 만한 다섯 묶음
+
+**왜 이 항목인가**: 사용자가 "MySQL과 다른 작은 차이 31개를 전부 맞출 필요가 있는가?"라고 물었고, 31개를 성격으로 나눈 답을 드렸다 — 조용히 틀린 값 7 · 오류로 거절하는 쪽 6 · 번호 · 머리글 · 영향 행 수 같은 모양만 8 · 구조가 커서 비싼 것 4 · 일부러 단순하게 둔 것 4 · R78에서 막 생긴 것 2. 전부는 필요 없고 고를 만한 것은 다섯 묶음이라고 했고, 사용자가 **A(그 다섯 묶음)**를 골랐다. 방식은 늘 하던 대로: 코드 → 시험(심은 버그 · 전체 · 퍼저) → 문서 → 죽은 코드 정리 → 커밋 · 푸시 → 보고와 분류별 표.
+
+**결과 한눈에** (진짜 MySQL 8.4.9와 비교하는 코퍼스 **세 개를 새로 만들고**, 권한 코퍼스에 한 구역을 더함)
+1. **글자와 숫자의 비교** — `IN (서브쿼리)`와 `CHECK`가 MySQL처럼 양쪽의 타입으로 비교한다. 코퍼스 `text_number_in` 처음 **84문장 중 33개가 달랐고 → 0**.
+2. **`UNION` 끝의 `ORDER BY`** — 처음에는 "마지막 SELECT에 FROM이 없을 때"만 보였지만 파 보니 더 컸다: 단독 `SELECT 1 LIMIT 1`도 문법 오류였고, **셋 이상 이은 `UNION`은 `ORDER BY` · `LIMIT`가 전체가 아니라 마지막 둘에만 걸렸으며 `UNION ALL`과 `UNION`을 섞으면 MySQL과 다른 답**이 나왔다. 코퍼스 `dual_order_limit` 처음 **53문장 중 49개가 달랐고 → 0**.
+3. **`CREATE DATABASE`** — 세션이 새 데이터베이스로 옮겨 가지 않는다. `CREATE TABLE … AS SELECT`의 영향 행 수가 복사한 행 수가 된다. `CREATE DATABASE`는 1, `DROP DATABASE`는 지운 표 · 뷰의 수. 코퍼스 `create_database` 처음 **43문장 중 18개가 달랐고 → 0**.
+4. **`DROP INDEX 이름`(`ON` 없이)의 권한** — 알고 보니 권한만 빠진 것이 아니라 **다른 데이터베이스의 인덱스까지 이름이 맞으면 지우는 구멍**이었다. 이제 지울 인덱스가 있는 표의 `INDEX` 권한을 확인한다.
+5. **권한 마무리** — 열 권한만 가진 계정은 `DESCRIBE` · `SHOW COLUMNS` · `information_schema.columns`에서 그 열만 본다; 접속할 때 `database=`로 준 곳에 접근 권한이 없으면 1044, 없는 이름이면 1049로 거절한다. 코퍼스 `privileges` 300 → **327문장**(새 구역의 21개가 달랐고 → **차이 0**).
+
+**① 글자와 숫자의 비교 — 원인과 수정**
+- `IN (서브쿼리)`: 비교를 **왼쪽 값의 타입만** 보고 했다. 바인더는 서브쿼리 열의 타입(`right_class`)을 이미 정해 두고 있었는데 쓰는 곳이 없었다. `s IN (SELECT 7)`의 `'007'`을 빼고 `'7'`만 돌려줬고(MySQL은 둘 다), `'007' IN (SELECT 7)`은 0(MySQL 1), `0 IN (SELECT 'abc')`는 0(MySQL 1). 이제 **한쪽이 숫자면 숫자로**(글자는 앞에서부터 읽히는 수로: `'abc'`는 0, `' 7'`은 7), 둘 다 글자면 글자끼리 비교한다. 해시로 찾는 길(`number_key`)과 행마다 도는 길이 같은 규칙을 쓴다. `(a, b) IN (SELECT x, y …)`도 쌍마다 같게 하려고 AST의 서브쿼리 노드에 **열마다의 타입 목록**(`ConditionValue::Subquery::classes`)을 더했다.
+- UPDATE · DELETE는 숫자로 완전히 읽히지 않는 글자(`'abc'`)를 숫자와 비교하면 1292로 거절한다(`WHERE s = 7`이 이미 하던 것, `StrictComparison`) — `IN (서브쿼리)`가 이 장치에 연결됐다.
+- `CHECK`: 평가가 **바인딩을 거치지 않아** 열의 선언 타입을 모른 채 값의 모양으로 비교했다. 그래서 양쪽으로 틀렸다 — `CHECK (s > '10')`에 `'9'`를 거절하고(글자로는 `'9' > '10'`), `CHECK (s = '7')`는 `'007'`을 받아들이고, `CHECK (s IN ('7','8'))` · `BETWEEN`도 그랬다(`ADD CHECK`가 기존 행을 검사할 때도). 이제 `eval_check_expr`가 조건을 표에 바인딩해서 평가하고, 숫자로 완전히 읽히지 않는 글자를 숫자와 비교하면(`'abc' = 0`) MySQL처럼 위반(3819)이다. 행마다 새로 파싱하던 것을 **문장 하나에 한 번**(표 + 글자로 열쇠를 만든 캐시, 문장이 바뀌거나 쓰는 문장이 끝나면 버림)으로 바꿔 바인딩이 더 느리게 만들지 않았다.
+
+**② `UNION` 사슬 — 원인과 수정**
+- FROM이 없는 SELECT는 `WHERE`까지만 읽고 끝나서 뒤의 `ORDER BY` · `LIMIT` · `OFFSET`이 남았다(1064). 읽는 코드를 람다로 뽑아 FROM 있는 쪽과 같이 쓴다. 실행기는 한 행짜리 이 SELECT에서 `LIMIT 0` · 한 행을 넘는 `OFFSET`이면 0행을 돌려준다(전에는 `LIMIT`을 무시).
+- 집합 연산은 오른쪽으로 중첩해 읽고 있었다(`a UNION (b UNION c)`) — 그래서 `ORDER BY`가 마지막 둘에만 걸렸고, `a UNION ALL b UNION c`가 `a UNION ALL (b UNION c)`가 되어 MySQL과 다른 답이었다(`SELECT 5 UNION ALL SELECT 5 UNION SELECT 5`는 MySQL 1행, 엔진 2행). 이제 **왼쪽부터** 읽고 `INTERSECT`가 `UNION` · `EXCEPT`보다 먼저 묶이며(MySQL 8.4와 같음) 마지막 SELECT의 `ORDER BY` · `LIMIT`는 전체 결과에 건다. 괄호는 전과 같이 파서 앞단에서 걷는다.
+
+**③ `CREATE DATABASE`**: `current_db = key;` 한 줄을 없앴다. 앱은 엔진의 `get_current_db`를 다시 읽고(`App.tsx` 623줄) `CREATE DATABASE`를 보내는 화면이 없어서 코드 변경은 없다 — 만든 데이터베이스는 사이드바에 새로 나타나고 더블클릭으로 전환한다. 기존 시험 하나(`test_executor_ddl.cpp`)가 "CREATE DATABASE가 현재 데이터베이스를 바꾼다"를 주석으로 적고 기대하고 있어 MySQL의 동작에 맞게 고쳤다. 시험 도구 중에는 이 동작에 기댄 것이 없었다(`CREATE DATABASE x`를 쓰는 모든 도구가 `USE x`나 `database=`를 쓴다고 코드를 훑어 확인).
+
+**⑤ 로그인 — 근본 원인은 따로 있었다**: 로그인 때 `database=`로 준 데이터베이스에 못 들어간다고 알고 있었는데, 실제로는 **어떤 드라이버도 `database=`가 서버에 닿지 않았다.** 서버가 핸드셰이크에서 `CLIENT_CONNECT_WITH_DB`(0x0008) 능력을 알리지 않아서 pymysql 같은 드라이버가 데이터베이스 이름을 **보내지 않고**(능력 비트만 켠 채), 서버는 그 자리에 오는 다음 필드(인증 플러그인 이름 `mysql_native_password`)를 데이터베이스 이름으로 읽어 `USE mysql_native_password`를 하고 **오류를 버렸다.** 그래서 세션은 늘 알파벳 첫 데이터베이스에 머물렀고, 지금까지 코퍼스가 우연히 맞았던 것은 데이터베이스가 `v` 하나였기 때문이다(권한 코퍼스에 `other79`를 더하자 드러났다). 고친 것: 능력 비트를 알린다; `USE`를 OK 패킷을 보내기 **전에** 하고 실패하면 OK 대신 오류 패킷(권한 없음 1044, 없는 이름 1049)을 보낸다. `mysql` 명령줄과 JDBC 같은 클라이언트의 `-D`도 이제 서버에 닿는다.
+
+**④ `DROP INDEX 이름`(`ON` 없이)**: 권한 확인만 빠진 것으로 알았는데, 이 문장은 인덱스 이름에서 표를 알 수 없어 **모든 데이터베이스에서 이름이 `_이름`으로 끝나는 첫 인덱스**를 지운다(엔진의 확장 문법; MySQL은 `ON 표`가 필수). 그래서 `INDEX` 권한이 한 표에만 있는 계정이 다른 데이터베이스의 인덱스를 지울 수 있었다. `exec_drop_index`의 이름 맞춤을 파일 안 함수로 뽑아 `Executor::index_table_without_on`(공개 정적 멤버)이 같은 규칙으로 **지울 인덱스가 있는 표**를 알려 주고, 권한 검사기가 그 표의 `INDEX`를 요구한다. 맞는 인덱스가 없으면(아무것도 안 지우는 문장) 권한을 묻지 않는다.
+
+**⑤ 열 권한만 가진 계정이 보는 것**: `information_schema.columns`의 행 거르기에서 열 단위로 거른다 — 표 · 데이터베이스 · 전역 권한이 하나라도 있으면 모든 열, 아니면 열 권한이 있는 열만(`Who::any_column_access`, `Executor::may_see_column`). MySQL 프로토콜의 `DESCRIBE` · `SHOW COLUMNS`는 이 표를 조회하므로 같이 맞고, 엔진 자체의 `DESCRIBE`(`exec_describe`)도 같은 거름을 쓴다.
+
+**앱에 대한 영향**: `CREATE DATABASE`가 더는 현재 데이터베이스를 옮기지 않는다 — 사이드바에는 새 데이터베이스가 목록에 나타나고, 쓰려면 `USE`(더블클릭)를 한다(MySQL Workbench와 같다). 로그인 때 존재하지 않는 데이터베이스를 `database=`로 주던 클라이언트는 이제 1049로 거절된다(MySQL과 같음; 이 저장소의 도구는 모두 존재하는 `v`만 쓴다). Diagram 페이지(두 화면, EN/KO)의 권한 문구를 고치고 UNION 사슬 · CHECK 한 문장을 더했다. 앱의 알려진 차이 목록(Compat)에 오르지 않았던 항목들이라 목록은 그대로.
+
+**검증**:
+- 코퍼스(진짜 MySQL 8.4.9와, 고치기 전 → 후): `text_number_in` 84문장 33 → **0**, `dual_order_limit` 53문장 49 → **0**, `create_database` 43문장 18 → **0**, `privileges` 327문장(새 구역 포함) 21 → **0**. 점수판 **53개 코퍼스 4,716문장 차이 0**(R78의 50개 4,512문장에서 늘어남); 앱의 Compat 숫자(`compatSnapshot.json`)를 다시 만들었다.
+- C++ 시험: 전체 **964 케이스 / 1,521,324 assertions**가 세 모드(기본 · `RUSQL_DML_INDEX_MIN_ROWS=0` · `RUSQL_PROBE_CHECK=1 RUSQL_PROBE_STREAK=0`) **모두 통과**(모드당 약 4분 20초). 새 `test_r79_leftovers.cpp` 8 케이스(215 assertions), 기존 `test_executor_ddl.cpp`의 한 케이스는 "CREATE DATABASE가 현재 데이터베이스를 바꾼다"를 기대하던 주석 · 단언을 MySQL의 동작으로 고침(기능이 아니라 의도한 변경).
+- 심은 버그: 새 코드에 하나씩 심어 `[r79]` 시험이 붉어지는지 봄 — **18개 모두 잡힘**(`IN`의 왼쪽 타입 · 글자 → 수 열쇠 · 행 비교의 열 타입 · UPDATE/DELETE의 1292 · CHECK 바인딩 · CHECK 캐시를 안 버림 · CHECK의 글자 → 수 위반 · `ORDER BY` 버림 · `INTERSECT` 우선순위 · `LIMIT 0` · `CREATE DATABASE`의 세션 이동 · CTAS 영향 행 · `DROP`/`CREATE DATABASE` 영향 행 · `DROP INDEX` 권한 · 열 거르기 셋); 와이어 계층은 시험 도구가 아니라 코퍼스로 확인했다 — `CLIENT_CONNECT_WITH_DB` 비트를 빼면 `privileges` 코퍼스가 327문장 중 **197개** 붉어진다. 심은 버그를 되돌린 뒤 원래 코드로 다시 빌드한 바이너리로 전체 시험 세 모드를 돌렸다.
+- 속도: CHECK가 둘 달린 표에 20,000행 `INSERT`(500행씩) — 행당 **14.4 µs → 6.7 µs**(약 2.1배 빨라짐, 검사 없는 표는 7.0 µs로 그대로). 행마다 다시 파싱하던 것을 문장당 한 번으로 줄여 바인딩을 얹고도 빨라졌다.
+- 실제 클라이언트: `mysql` 명령줄(`-D v`)이 `v`로 들어가고, 없는 이름은 `ERROR 1049`, 접근 권한이 없는 곳은 `ERROR 1044`로 거절된다(전에는 `-D`가 서버에 닿지 않았다).
+- 퍼저 · 검산 도구: 이전 빌드와의 차분 **6,000질의 차이 0**(고치기 전 서버와 고친 서버가 같은 무작위 SELECT에 같은 답 — 바뀐 규칙 자체는 코퍼스와 단위 시험이 맡는다); 두 세션 도구 `two_sessions.py` **596단계 차이 0**; 모델로 검산하는 도구 열둘(`verify_*.py`) 위반 0; 크래시 퍼저 다섯(`fuzz_crash` · `_chain` · `_fk` · `_multifk` · `_selfref`) 6라운드씩(시드 7700) 불일치 0, `fuzz_crash_fk.py 1 7701` 0, `fuzz_concurrent.py` 10라운드 확인한 행 5,821 불일치 0; TypeScript 검사 오류 0. **하지 않은 것**: Debug 전체 시험, 앱 화면 눈 점검(Diagram · Compat 문구만 바뀌었고 `tsc`만 확인).
+
+**정직한 한계 · 남은 것** (`RECOMMAND.md` 6번 표에 반영):
+① `IN (서브쿼리)`의 오른쪽 열이 함수 · 식이라 종류를 모르면 예전 규칙(값의 모양)으로 비교한다; 날짜 · ENUM · SET 열이 서브쿼리의 값일 때 UPDATE · DELETE의 1292 판정은 열 종류를 몰라 글자로 본다(왼쪽이 그 열이면 건너뜀).
+② 집합 연산: 자기 `ORDER BY` · `LIMIT`가 있는 괄호 안 피연산자(`(SELECT … LIMIT 2) UNION (…)`)는 "Unknown statement"; `FROM DUAL`은 "Table 'v.DUAL' not found"; `WHERE x IN (SELECT … LIMIT 1)`은 MySQL이 1235로 거절하는데 여기는 받는다.
+③ 권한: 권한 변경이 열려 있는 연결에 바로 반영됨(MySQL은 데이터베이스 수준을 다음 `USE`부터); `mysql.user` 같은 시스템 표 없음; `SHOW DATABASES`에 `information_schema` · `performance_schema` 없음; `SHOW FULL COLUMNS`의 `Privileges` 열이 비어 있음.
+④ 로그인 변화의 반대편: `COM_CHANGE_USER`가 보낸 데이터베이스는 여전히 `USE`가 실패해도 오류를 버린다; 엔진의 `Unknown database 'x'.` 글자 끝에 마침표가 있다(MySQL은 없음, 오류 번호는 같다).
+⑤ 31개 중 이번에 손댄 것은 네 줄(글자-숫자 비교 · UNION · 권한 · CREATE DATABASE)이고 나머지는 그대로 `RECOMMAND.md`에 있다 — "전부 맞출 필요는 없다"는 판단대로.
 
 ## 요약: 1학기 대비 2학기에 달라진 것
 

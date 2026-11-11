@@ -832,16 +832,44 @@ Executor::Tri Executor::eval_single3(const Row& row, const Condition& cond) {
     }
 }
 
-bool Executor::eval_check_expr(const std::string& expr, const Row& row) {
-    Parser parser("SELECT 1 FROM __check__ WHERE " + expr);
-    auto result = parser.parse();
-    if (result.is_ok()) {
-        if (auto* sel = std::get_if<Statement::Select>(&result.value().data)) {
-            // a CHECK constraint is violated only when its condition is FALSE: UNKNOWN (a NULL operand) passes
-            if (sel->condition) return eval_cond3(row, *sel->condition) != Tri::False;
+bool Executor::eval_check_expr(SharedDatabase& s, const std::string& table, const std::string& expr, const Row& row) {
+    const std::uint64_t statement = statement_context_ ? statement_context_->statement : 0;
+    if (statement != check_statement_ || write_serial_ != check_writes_) {
+        check_conditions_.clear();
+        check_statement_ = statement;
+        check_writes_ = write_serial_;
+    }
+    const std::string key = table + '\x1f' + expr;
+    std::optional<CondExpr> fresh; // (when nothing is kept)
+    const std::optional<CondExpr>* condition = nullptr;
+    if (auto kept = statement ? check_conditions_.find(key) : check_conditions_.end(); kept != check_conditions_.end()) {
+        condition = &kept->second;
+    } else {
+        std::optional<CondExpr> parsed;
+        Parser parser("SELECT 1 FROM __check__ WHERE " + expr);
+        auto result = parser.parse();
+        if (result.is_ok()) {
+            Statement stmt = std::move(result).value();
+            if (auto* sel = std::get_if<Statement::Select>(&stmt.data); sel && sel->condition) {
+                sel->table = table;
+                bind_statement(s, stmt, false); // (a condition that does not bind is evaluated as it is)
+                if (auto* bound = std::get_if<Statement::Select>(&stmt.data)) parsed = std::move(bound->condition);
+            }
+        }
+        if (statement) {
+            condition = &check_conditions_.emplace(key, std::move(parsed)).first->second;
+        } else {
+            fresh = std::move(parsed);
+            condition = &fresh;
         }
     }
-    return true;
+    if (!*condition) return true;
+    // a CHECK constraint is violated only when its condition is FALSE: UNKNOWN (a NULL operand) passes; a text that is read as a number without being wholly one
+    // ('abc' = 0) makes MySQL refuse the row (3819) as well
+    const unsigned long long cuts = sqlval::truncated_number_count;
+    const sqlval::StrictComparison reading;
+    const Tri result = eval_cond3(row, **condition);
+    return sqlval::truncated_number_count == cuts && result != Tri::False;
 }
 
 std::string Executor::format_returning_rows(const std::vector<Row>& rows, const std::vector<SelectColumn>& cols) {

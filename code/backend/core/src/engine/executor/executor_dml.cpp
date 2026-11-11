@@ -1434,13 +1434,13 @@ StringResult Executor::exec_insert_inner(SharedDatabase& s, const std::string& t
 
         // (the checks of the columns come before the foreign key, as in MySQL: a row that fails one of them never reaches the table, so it burns no AUTO_INCREMENT number)
         for (auto& col : schema.columns) {
-            if (col.check_expr && !eval_check_expr(*col.check_expr, row)) {
+            if (col.check_expr && !eval_check_expr(s, table, *col.check_expr, row)) {
                 if (row_no == 1) burn_reservation = false; // (a check of the columns is made before the row is written: a first row that fails it burns nothing)
                 return StringResult::Err("CHECK constraint violated on column '" + col.name + "': " + *col.check_expr);
             }
         }
         for (auto& check : schema.check_constraints) {
-            if (!eval_check_expr(check.expression, row)) {
+            if (!eval_check_expr(s, table, check.expression, row)) {
                 if (row_no == 1) burn_reservation = false;
                 return StringResult::Err("CHECK constraint '" + check.name.value_or(check.expression) + "' violated");
             }

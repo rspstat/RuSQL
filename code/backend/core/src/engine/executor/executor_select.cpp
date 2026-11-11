@@ -1543,6 +1543,7 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
         for (auto& [k, v] : user_vars) eval_row["@" + k] = v;
         // its WHERE (`SELECT 1 WHERE 1 = 0`): the one row is there or it is not -- an answer with no rows (its columns are named from the select list by whoever asked)
         if (condition && !eval_condexpr(eval_row, *condition)) return StringResult::Ok("0 rows returned.");
+        if ((limit && *limit == 0) || (offset && *offset > 0)) return StringResult::Ok("0 rows returned."); // (LIMIT 0, or an OFFSET past the one row)
 
         std::string dual_error; // a column this select cannot evaluate without a table, or a failing subquery
         auto eval_col_val = [&](const SelectColumn& col) -> std::string {
@@ -1675,6 +1676,10 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
                                                   auto schema = r.find(schemata ? "SCHEMA_NAME" : "TABLE_SCHEMA");
                                                   if (schema == r.end() || schema->second == "information_schema") return false;
                                                   auto table = r.find("TABLE_NAME");
+                                                  if (bare == "columns") { // (a column privilege shows that column alone)
+                                                      auto column = r.find("COLUMN_NAME");
+                                                      if (table != r.end() && column != r.end()) return !may_see_column(s, schema->second, table->second, column->second);
+                                                  }
                                                   return !may_see(s, schema->second, schemata || table == r.end() ? std::string() : table->second);
                                               }),
                                rows.end());

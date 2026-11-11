@@ -370,3 +370,55 @@ RENAME USER 's7'@'%' TO 's7b'@'%'
 SHOW GRANTS FOR 's7b'@'%'
 DROP USER 's1'@'%', 's2'@'%', 's3'@'%', 's4'@'%', 's5'@'%', 's6'@'%', 's7b'@'%', 's8'@'%'
 DROP ROLE 'ra', 'rb'
+# a login that names a database needs access to it (1044), DESCRIBE / SHOW COLUMNS / information_schema.columns list the columns the account holds a privilege on (R79)
+--DROP USER IF EXISTS 'colonly'@'%'
+--DROP USER IF EXISTS 'twocol'@'%'
+--DROP USER IF EXISTS 'tblsel'@'%'
+--DROP USER IF EXISTS 'nopriv'@'%'
+--DROP USER IF EXISTS 'globalsel'@'%'
+--DROP USER IF EXISTS 'otherdb'@'%'
+--DROP USER IF EXISTS 'tblonly'@'%'
+--DROP DATABASE IF EXISTS other79
+--CREATE DATABASE other79
+--CREATE TABLE other79.o (x INT)
+--CREATE TABLE pc (a INT PRIMARY KEY, b INT, c INT, KEY ib (b))
+--INSERT INTO pc VALUES (1,2,3)
+--CREATE USER 'colonly'@'%' IDENTIFIED BY 'pw'
+--GRANT SELECT (a) ON v.pc TO 'colonly'@'%'
+--CREATE USER 'twocol'@'%' IDENTIFIED BY 'pw'
+--GRANT SELECT (a), INSERT (c) ON v.pc TO 'twocol'@'%'
+--CREATE USER 'tblsel'@'%' IDENTIFIED BY 'pw'
+--GRANT SELECT ON v.pc TO 'tblsel'@'%'
+--CREATE USER 'nopriv'@'%' IDENTIFIED BY 'pw'
+--CREATE USER 'globalsel'@'%' IDENTIFIED BY 'pw'
+--GRANT SELECT ON *.* TO 'globalsel'@'%'
+--CREATE USER 'otherdb'@'%' IDENTIFIED BY 'pw'
+--GRANT SELECT ON other79.* TO 'otherdb'@'%'
+--CREATE USER 'tblonly'@'%' IDENTIFIED BY 'pw'
+--GRANT SELECT ON v.t TO 'tblonly'@'%'
+@colonly DESCRIBE pc
+@colonly SHOW COLUMNS FROM pc
+@colonly SHOW COLUMNS FROM pc LIKE 'b'
+@colonly SHOW COLUMNS FROM pc LIKE 'a'
+@colonly SELECT column_name FROM information_schema.columns WHERE table_name = 'pc' ORDER BY ordinal_position
+@colonly SELECT a FROM pc
+@colonly SELECT b FROM pc
+@colonly SELECT DATABASE()
+@twocol DESCRIBE pc
+@twocol SHOW COLUMNS FROM pc
+@twocol SELECT column_name FROM information_schema.columns WHERE table_name = 'pc' ORDER BY ordinal_position
+@tblsel DESCRIBE pc
+@tblsel SHOW COLUMNS FROM pc
+@tblonly DESCRIBE pc
+@tblonly SHOW COLUMNS FROM pc
+@tblonly SELECT DATABASE()
+@tblonly SHOW TABLES
+@nopriv SELECT 1
+@nopriv SELECT DATABASE()
+@nopriv SHOW DATABASES
+@globalsel SELECT DATABASE()
+@globalsel DESCRIBE pc
+@otherdb SELECT 1
+@otherdb SELECT DATABASE()
+--DROP USER 'colonly'@'%', 'twocol'@'%', 'tblsel'@'%', 'nopriv'@'%', 'globalsel'@'%', 'otherdb'@'%', 'tblonly'@'%'
+--DROP DATABASE other79

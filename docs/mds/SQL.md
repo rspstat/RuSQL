@@ -11,7 +11,7 @@ RuSQL이 실제로 받아서 실행하는 SQL 문법을 한 줄씩 정리한 문
 
 ## 1. 데이터베이스
 
-- CREATE DATABASE [IF NOT EXISTS] db : 데이터베이스 생성
+- CREATE DATABASE [IF NOT EXISTS] db : 데이터베이스 생성. 세션은 새 데이터베이스로 옮겨 가지 않는다 — 그 안에서 일하려면 `USE db`(R79; 전에는 자동으로 옮겨 갔다). OK 패킷의 영향 행 수는 1, `DROP DATABASE`는 지운 표 · 뷰의 수
 - CREATE SCHEMA [IF NOT EXISTS] db : CREATE DATABASE와 같음
 - CREATE DATABASE db [DEFAULT] CHARACTER SET / CHARSET / COLLATE ... : 문자 집합 · 정렬 규칙을 적어서 생성(utf8mb4 계열 · `_ci` 정렬만 받음)
 - DROP DATABASE [IF EXISTS] db : 데이터베이스 삭제
@@ -40,7 +40,7 @@ RuSQL이 실제로 받아서 실행하는 SQL 문법을 한 줄씩 정리한 문
 - ON UPDATE CURRENT_TIMESTAMP[(n)] : 수정할 때 시각을 자동 갱신
 - AUTO_INCREMENT : 자동 증가 번호
 - UNIQUE : 중복 불가
-- CHECK (조건) [[NOT] ENFORCED] : 값 검사 조건
+- CHECK (조건) [[NOT] ENFORCED] : 값 검사 조건. 열의 타입으로 비교한다 — 글자 열과 글자는 글자끼리(`'9' > '10'`), 한쪽이 숫자면 숫자로(`'007' = 7`), 숫자로 완전히 읽히지 않는 글자(`'abc'`)를 숫자와 비교하면 위반(3819; R79)
 - REFERENCES t(col) [ON DELETE 동작] [ON UPDATE 동작] : 컬럼에 바로 붙이는 외래 키
 - COMMENT '설명' : 컬럼 설명
 - CHARACTER SET x / CHARSET x / COLLATE x : 문자 집합 · 정렬 규칙 표기(utf8mb4 계열 · `_ci`만 받음)
@@ -154,7 +154,7 @@ RuSQL이 실제로 받아서 실행하는 SQL 문법을 한 줄씩 정리한 문
 
 - WHERE 조건 : 행 거르기
 - 조건 연산 : `AND` `OR` `NOT` `XOR` `=` `<>` `!=` `<` `<=` `>` `>=` `<=>` — 비교 · 논리 연결
-- [NOT] IN (값, ... | 서브쿼리) : 목록 · 서브쿼리에 포함 여부
+- [NOT] IN (값, ... | 서브쿼리) : 목록 · 서브쿼리에 포함 여부. 서브쿼리와는 양쪽 타입으로 비교한다 — 한쪽이 숫자면 숫자로(`'007' IN (SELECT 7)`, `'abc' IN (SELECT 0)`은 참), 둘 다 글자면 글자끼리; `(a, b) IN (SELECT x, y ...)`도 쌍마다 같게. UPDATE · DELETE에서는 숫자로 읽히지 않는 글자가 1292(R79)
 - [NOT] BETWEEN a AND b : 범위 안 여부
 - [NOT] LIKE 'pattern' [ESCAPE 'c'] : 문자열 패턴(`%` `_`) 일치 여부(`\%` · `\_`는 그 글자 자체, ESCAPE로 다른 이스케이프 문자를 지정, 패턴은 열 · 식에서 읽어도 됨)
 - [NOT] REGEXP / RLIKE 'pattern' : 정규식 일치 여부
@@ -165,7 +165,7 @@ RuSQL이 실제로 받아서 실행하는 SQL 문법을 한 줄씩 정리한 문
 - GROUP BY 컬럼 | 별칭 | 위치번호 | 식 [WITH ROLLUP] : 그룹으로 묶기. WITH ROLLUP은 묶음 뒤에 키의 접두사마다 한 행(남은 키는 NULL)과 마지막 총계 행을 더한다(R60: 묶음은 키 순서·NULL이 앞, 총계의 집계는 합친 행들 위에서, HAVING은 이 행들에도 걸리고 ORDER BY·LIMIT·DISTINCT는 그 뒤; GROUP BY 목록 뒤에 한 번만; `GROUPING()`은 아직 없음)
 - HAVING 조건 : 그룹을 거르기(select 별칭 · 집계 · 서브쿼리 사용 가능)
 - ORDER BY 컬럼 | 별칭 | 위치번호 | 식 [ASC | DESC], ... : 정렬
-- LIMIT n / LIMIT n OFFSET m / LIMIT m, n : 행 수 제한 · 건너뛰기
+- LIMIT n / LIMIT n OFFSET m / LIMIT m, n : 행 수 제한 · 건너뛰기. FROM 없는 SELECT에도 쓸 수 있다(`SELECT 1 LIMIT 0`, `SELECT 1 ORDER BY 1`; R79)
 - FETCH FIRST | NEXT n ROWS ONLY : 표준 SQL 행 수 제한
 
 ### 조인
@@ -185,10 +185,10 @@ RuSQL이 실제로 받아서 실행하는 SQL 문법을 한 줄씩 정리한 문
 ### 서브쿼리 · 집합 · CTE
 
 - (SELECT ...) : 스칼라 서브쿼리(select 목록 · WHERE · HAVING · 식 안, 바깥 쿼리 컬럼 참조 가능)
-- SELECT ... UNION [ALL] SELECT ... : 결과 합치기(ALL은 중복 유지)
+- SELECT ... UNION [ALL] SELECT ... : 결과 합치기(ALL은 중복 유지). 셋 이상 이으면 왼쪽부터 읽고 `INTERSECT`가 `UNION` · `EXCEPT`보다 먼저 묶인다(R79; 전에는 오른쪽부터 읽어 `UNION ALL`과 `UNION`을 섞으면 다른 답이 나왔다)
 - SELECT ... INTERSECT [ALL] SELECT ... : 두 결과의 교집합
 - SELECT ... EXCEPT [ALL] SELECT ... : 첫 결과에서 두 번째 결과를 뺀 차집합
-- UNION 뒤 ORDER BY / LIMIT : 합친 결과 정렬 · 제한
+- UNION 뒤 ORDER BY / LIMIT : 합친 결과 정렬 · 제한. 마지막 SELECT가 FROM이 없어도 된다(`SELECT 5 UNION SELECT 3 ORDER BY 1`), 셋 이상 이어도 전체 결과에 걸린다(R79)
 - WITH name [(컬럼, ...)] AS (SELECT ...)[, ...] SELECT ... : 공통 테이블 식(CTE)
 - WITH RECURSIVE name AS (기준 UNION [ALL] 재귀) SELECT ... : 재귀 CTE
 - WITH ... INSERT / UPDATE / DELETE ... : CTE를 쓰는 쓰기 문장(CTE 이름을 서브쿼리에서 읽음)
@@ -471,7 +471,7 @@ JSON 값은 MySQL이 쓰는 모양으로 저장되고 돌려준다(R77): 객체�
 
 ## 12. 사용자 · 권한 · 역할
 
-권한은 **실제로 강제됩니다**(R78). `root`와 사용자 표에 없는 계정(엔진을 직접 쓰는 프로그램)은 막히지 않고, 사용자 표에 있는 그 밖의 계정은 문장마다 권한을 확인받습니다. 오류 번호와 글은 MySQL 8.4와 같습니다(1142 · 1143 · 1044 · 1045 · 1227 · 1370 · 1396 · 1410 · 3523 · 3530 · 4027 ...).
+권한은 **실제로 강제됩니다**(R78). `root`와 사용자 표에 없는 계정(엔진을 직접 쓰는 프로그램)은 막히지 않고, 사용자 표에 있는 그 밖의 계정은 문장마다 권한을 확인받습니다. 오류 번호와 글은 MySQL 8.4와 같습니다(1142 · 1143 · 1044 · 1045 · 1227 · 1370 · 1396 · 1410 · 3523 · 3530 · 4027 ...). R79에서 더해진 것: **접속할 때 `database=`로 준 데이터베이스에 아무 권한이 없으면 로그인이 1044로 거절**되고(없는 이름은 1049) — 서버가 핸드셰이크에 `CLIENT_CONNECT_WITH_DB`를 알려 드라이버가 데이터베이스 이름을 보내게 했다(전에는 이름이 서버에 닿지 않아 `database=`가 무시됐다); `DESCRIBE` · `SHOW COLUMNS` · `information_schema.columns`는 **열 권한만 가진 계정에게 그 열만** 보여 준다(표 · 데이터베이스 수준 권한이 있으면 전부); `DROP INDEX 이름`(`ON` 없이)도 그 인덱스가 있는 표의 `INDEX` 권한을 확인한다(다른 데이터베이스의 인덱스를 지우지 못함).
 
 - CREATE USER [IF NOT EXISTS] 'u'@'host' [IDENTIFIED BY 'pw'] [, 'u2'@'host2' ...] : 사용자 생성(여러 계정은 모두 되거나 모두 안 됨)
 - ALTER USER [IF EXISTS] 'u'@'host' | USER() | CURRENT_USER() IDENTIFIED BY 'pw' : 비밀번호 바꾸기

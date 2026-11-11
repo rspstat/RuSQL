@@ -672,6 +672,7 @@ StringResult Executor::exec_create_as(SharedDatabase& s, const std::string& name
         exec_drop(s, name, true); // (nothing half-made)
         return inserted;
     }
+    affected_rows_ = static_cast<std::int64_t>(rows.size()); // (the OK packet of CREATE TABLE ... SELECT counts the rows it copied; the INSERT above reset it)
     return StringResult::Ok("Table '" + name + "' created with " + std::to_string(rows.size()) + " row(s).");
 }
 
@@ -1261,7 +1262,7 @@ StringResult Executor::exec_alter(SharedDatabase& s, const std::string& table, A
         // the rows the table holds already must meet it (MySQL 3819): it is violated by a row for which it is FALSE, a NULL operand (UNKNOWN) passes
         if (auto tit = s.tables.find(table); tit != s.tables.end()) {
             for (const Row& row : tit->second) {
-                if (is_visible(row) && !eval_check_expr(v->expr, row)) return StringResult::Err("CHECK constraint '" + v->name.value_or(v->expr) + "' violated");
+                if (is_visible(row) && !eval_check_expr(s, table, v->expr, row)) return StringResult::Err("CHECK constraint '" + v->name.value_or(v->expr) + "' violated");
             }
         }
         schema->check_constraints.push_back(CheckConstraint{v->name, v->expr});
@@ -1308,14 +1309,14 @@ StringResult Executor::exec_alter(SharedDatabase& s, const std::string& table, A
 
 StringResult Executor::exec_create_database(SharedDatabase& s, const std::string& name, bool if_not_exists) {
     std::string key = to_lower_copy(name);
+    affected_rows_ = 1; // (the OK packet of CREATE DATABASE says 1, also when IF NOT EXISTS finds it there)
     if (s.databases.count(key)) {
         if (if_not_exists) return StringResult::Ok("Database '" + name + "' already exists (skipped).");
         return StringResult::Err("Database '" + name + "' already exists.");
     }
     s.disk.create_db_dir(key);
     s.databases.insert(key);
-    current_db = key;
-    return StringResult::Ok("Database '" + key + "' created.");
+    return StringResult::Ok("Database '" + key + "' created."); // (the session stays where it is: USE it to work in it, as in MySQL)
 }
 
 StringResult Executor::exec_drop_database(SharedDatabase& s, const std::string& name, bool if_exists) {
@@ -1382,9 +1383,14 @@ StringResult Executor::exec_drop_database(SharedDatabase& s, const std::string& 
         if (it->second.table.compare(0, prefix.size(), prefix) == 0) it = s.composite_indexes.erase(it);
         else ++it;
     }
+    std::size_t dropped_views = 0;
     for (auto it = s.views.begin(); it != s.views.end();) {
-        if (it->first.compare(0, prefix.size(), prefix) == 0) it = s.views.erase(it);
-        else ++it;
+        if (it->first.compare(0, prefix.size(), prefix) == 0) {
+            it = s.views.erase(it);
+            dropped_views++;
+        } else {
+            ++it;
+        }
     }
 
     s.disk.drop_db_dir(key);
@@ -1394,6 +1400,7 @@ StringResult Executor::exec_drop_database(SharedDatabase& s, const std::string& 
         current_db = s.databases.empty() ? std::string() : *s.databases.begin();
     }
 
+    affected_rows_ = static_cast<std::int64_t>(table_keys.size() + dropped_views); // (the OK packet of DROP DATABASE counts the tables and views it took away)
     return StringResult::Ok("Database '" + key + "' dropped.");
 }
 
@@ -1470,12 +1477,11 @@ StringResult Executor::exec_create_index(SharedDatabase& s, const std::string& i
     return StringResult::Ok("Composite index '" + index_name + "' created on '" + table + "' (" + cols_joined + ").");
 }
 
-StringResult Executor::exec_drop_index(SharedDatabase& s, const std::string& index_name, const std::optional<std::string>& table) {
-    // Index names are stored as "<table>_<index_name>" (to allow the same index name to be
-    // reused across different tables/databases). DROP INDEX name ON table says which table;
-    // without it we match by suffix and drop the first match found. An index name does not
-    // depend on case (MySQL), so the match ignores it.
-    std::string suffix = "_" + index_name;
+namespace {
+// Index names are stored as "<table>_<index_name>" (to allow the same index name to be reused across different tables/databases). DROP INDEX name ON table
+// says which table; without it we match by suffix and drop the first match found. An index name does not depend on case (MySQL), so the match ignores it.
+bool index_key_matches(const std::string& key, const std::string& index_name, const std::optional<std::string>& table) {
+    const std::string suffix = "_" + index_name;
     auto same_case_free = [](const std::string& a, const std::string& b) {
         if (a.size() != b.size()) return false;
         for (std::size_t i = 0; i < a.size(); i++) {
@@ -1483,13 +1489,28 @@ StringResult Executor::exec_drop_index(SharedDatabase& s, const std::string& ind
         }
         return true;
     };
-    auto has_suffix = [&](const std::string& key) {
-        if (key.size() < suffix.size()) return false;
-        if (!same_case_free(key.substr(key.size() - suffix.size()), suffix)) return false;
-        if (!table) return true;
-        const std::string wanted = *table + "_" + index_name;
-        return same_case_free(key, wanted);
-    };
+    if (key.size() < suffix.size()) return false;
+    if (!same_case_free(key.substr(key.size() - suffix.size()), suffix)) return false;
+    if (!table) return true;
+    return same_case_free(key, *table + "_" + index_name);
+}
+} // namespace
+
+std::optional<std::string> Executor::index_table_without_on(const SharedDatabase& s, const std::string& index_name) {
+    for (const auto& [key, meta] : s.index_meta) {
+        if (index_key_matches(key, index_name, std::nullopt)) return meta.first;
+    }
+    for (const auto& [key, meta] : s.hash_index_meta) {
+        if (index_key_matches(key, index_name, std::nullopt)) return meta.first;
+    }
+    for (const auto& [key, comp] : s.composite_indexes) {
+        if (index_key_matches(key, index_name, std::nullopt)) return comp.table;
+    }
+    return std::nullopt;
+}
+
+StringResult Executor::exec_drop_index(SharedDatabase& s, const std::string& index_name, const std::optional<std::string>& table) {
+    auto has_suffix = [&](const std::string& key) { return index_key_matches(key, index_name, table); };
 
     for (auto it = s.index_meta.begin(); it != s.index_meta.end(); ++it) {
         if (!has_suffix(it->first)) continue;

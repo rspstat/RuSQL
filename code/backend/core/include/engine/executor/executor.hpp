@@ -295,6 +295,9 @@ public:
     std::optional<std::string> check_table_maintenance(const SharedDatabase& s, const std::string& table, bool write);
     // Whether the account may see the table (SHOW TABLES, information_schema): it holds a privilege on it or on one of its columns; `table` empty: on the database
     bool may_see(const SharedDatabase& s, const std::string& db, const std::string& table) const;
+    // ... and the column (DESCRIBE, SHOW COLUMNS, information_schema.columns): a privilege on the table or its database covers every column, otherwise only the
+    // columns it holds a column privilege on are seen
+    bool may_see_column(const SharedDatabase& s, const std::string& db, const std::string& table, const std::string& column) const;
     // LAST_INSERT_ID(), ROW_COUNT(), FOUND_ROWS(): what the last statements of this session left. The functions read them through sync_session_counters.
     std::uint64_t last_insert_id_ = 0;       // the first AUTO_INCREMENT number the last INSERT that gave one out
     std::uint64_t statement_insert_id_ = 0;  // the same for the statement that is running (the MySQL protocol's OK packet reports it)
@@ -996,7 +999,13 @@ private:
     static Tri eval_single3(const Row& row, const Condition& cond);
     static bool eval_condexpr(const Row& row, const CondExpr& expr);
     static bool eval_single(const Row& row, const Condition& cond);
-    static bool eval_check_expr(const std::string& expr, const Row& row);
+    // Does `row` of `table` meet the CHECK condition `expr`? The condition is parsed and bound against the table (the binder gives its columns their
+    // types, which decide how a text and a number compare: '007' = '7' is false, '007' = 7 true) once for the statement that is running, by table and text
+    // (check_conditions_; nullopt: the text did not parse). The kept ones go when the statement changes or one that writes has finished (a schema may have
+    // changed). Without a statement running (embedding code) every call parses again.
+    bool eval_check_expr(SharedDatabase& s, const std::string& table, const std::string& expr, const Row& row);
+    std::unordered_map<std::string, std::optional<CondExpr>> check_conditions_;
+    std::uint64_t check_statement_ = 0, check_writes_ = 0;
     // A subquery that names a column of the query around it (the binder marked those: ArithExpr::Col::outer ...): does `st` point out of itself,
     // and `st` with the values of the outer row put in place of those columns (executor_outer.cpp).
     static bool refers_outside(const Statement& st);
@@ -1110,6 +1119,9 @@ private:
                                                                                           const TableSchema* schema);
 
 public:
+    // The table `DROP INDEX name` (without ON) would take an index from: the one exec_drop_index finds first. nullopt: there is none. (What a privilege check needs.)
+    static std::optional<std::string> index_table_without_on(const SharedDatabase& s, const std::string& index_name);
+
     // ── Gap Lock (InnoDB-style phantom-read prevention, see gap_lock.cpp) ────
     // Extracts a conservative range covering every PK-column leaf ANDed into `condition`
     // (Eq/Gt/Gte/Lt/Lte/Between); ignores non-PK leaves and anything under an OR/NOT

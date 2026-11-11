@@ -16,6 +16,7 @@
 #include "engine/executor/executor.hpp"
 #include "engine/explain_trace.hpp"
 #include "engine/result_text.hpp"
+#include "engine/sql_value_util.hpp"
 #include "engine/storage/numeric_key.hpp"
 
 #include <algorithm>
@@ -23,6 +24,14 @@
 #include <chrono>
 
 namespace engine {
+
+namespace {
+// The key two values share when they compare as numbers: a text is read by the number it starts with ('abc' is 0, ' 7' is 7, '7.0' is 7).
+std::string number_key(const std::string& v) {
+    if (v == EXECUTOR_NULL_VALUE) return v;
+    return normalize_numeric_key(parse_number(v) ? v : format_shortest(text_to_number(v)));
+}
+} // namespace
 
 bool Executor::matches_condition_with_subquery(SharedDatabase& s, const Row& row, const std::optional<CondExpr>& condition) {
     return !condition || eval_condexpr_with_subquery(s, row, *condition);
@@ -142,7 +151,11 @@ Executor::Tri Executor::eval_single_with_subquery(SharedDatabase& s, const Row& 
             for (std::size_t i = 0; i < width && same != Tri::False; i++) {
                 const std::string& other = (*cells)[r + i];
                 if (mine[i] == EXECUTOR_NULL_VALUE || other == EXECUTOR_NULL_VALUE) same = Tri::Unknown;
-                else if (compare_classed(classes[i], classes[i], mine[i], other) != 0) same = Tri::False;
+                else {
+                    // (a column of the subquery whose type is not known compares like the left side, as it always did)
+                    const ValueClass theirs = i < sub->classes.size() && sub->classes[i] != ValueClass::Unknown ? sub->classes[i] : classes[i];
+                    if (compare_classed(classes[i], theirs, mine[i], other) != 0) same = Tri::False;
+                }
             }
             if (same == Tri::True) in = Tri::True;
             else if (same == Tri::Unknown) in = Tri::Unknown;
@@ -165,13 +178,29 @@ Executor::Tri Executor::eval_single_with_subquery(SharedDatabase& s, const Row& 
         return contains ? Tri::False : (has_null ? Tri::Unknown : Tri::True);
     };
 
-    // the values of an IN list are equal when the comparison says so: numbers by value, texts by the default collation ('A' IN (SELECT 'a'))
-    const ValueClass in_class = cond.left_class != ValueClass::Unknown ? cond.left_class : class_of_expr(cond.left);
-    auto in_key = [&](const std::string& v) { return v == EXECUTOR_NULL_VALUE ? v : (in_class == ValueClass::Text ? collation::key(v) : normalize_numeric_key(v)); };
+    // the values of an IN list are equal when the comparison says so: numbers by value, texts by the default collation ('A' IN (SELECT 'a')); a number on
+    // either side makes it a comparison of numbers, a text read by the number it starts with ('007' IN (SELECT 7), 'abc' IN (SELECT 0), 7 IN (SELECT '007'))
+    const ValueClass in_left = cond.left_class != ValueClass::Unknown ? cond.left_class : class_of_expr(cond.left);
+    const bool as_numbers = in_left != ValueClass::Json && cond.right_class != ValueClass::Json && (in_left == ValueClass::Number || cond.right_class == ValueClass::Number);
+    const ValueClass in_class = as_numbers ? ValueClass::Number : in_left;
+    auto in_key = [&](const std::string& v) {
+        if (v == EXECUTOR_NULL_VALUE) return v;
+        if (in_class == ValueClass::Text) return collation::key(v);
+        return as_numbers ? number_key(v) : normalize_numeric_key(v);
+    };
     auto in_equal = [&](const std::string& a, const std::string& b) {
         if (a == b) return true;
         return in_class == ValueClass::Text ? collation::equal(a, b) : compare_classed(in_class, in_class, a, b) == 0;
     };
+    // UPDATE and DELETE refuse a text that is read as a number without being wholly one (error 1292), as their other comparisons do (executor_eval.cpp)
+    const bool strict = as_numbers && is_in && sqlval::strict_comparison_depth > 0;
+    auto note_text = [&](ValueClass cls, const std::string& v) {
+        if (strict && cls == ValueClass::Text && v != EXECUTOR_NULL_VALUE) sqlval::note_truncated_number(v);
+    };
+    // (the left value counts when it is a string: a column that is not a date, a time, an ENUM or a SET -- whose number is not its text -- or what the statement spells out in quotes)
+    const auto* left_column = std::get_if<ArithExpr::Col>(&cond.left.data);
+    const bool left_is_string = (left_column && left_column->kind == ColKind::Plain) || std::holds_alternative<ArithExpr::Str>(cond.left.data);
+    note_text(left_is_string ? in_left : ValueClass::Unknown, val);
 
     if ((cond.op == Operator::In || cond.op == Operator::NotIn) && !correlated) {
         // Row-level-concurrency Stage 4/5 correctness/perf fix (found via concurrent-reader stress testing): check the cache BEFORE copying
@@ -187,7 +216,10 @@ Executor::Tri Executor::eval_single_with_subquery(SharedDatabase& s, const Row& 
         // for the next row's lookup.
         auto vals = extract_values_from_output(run_subquery(s, original, row, false));
         std::unordered_set<std::string> sub_vals;
-        for (const std::string& v : vals) sub_vals.insert(in_key(v));
+        for (const std::string& v : vals) {
+            note_text(cond.right_class, v);
+            sub_vals.insert(in_key(v));
+        }
         Tri hit = membership(sub_vals.count(in_key(val)) > 0, sub_vals.count(EXECUTOR_NULL_VALUE) > 0, sub_vals.empty());
         subquery_cache_[cache_key] = std::move(sub_vals);
         return hit;
@@ -206,6 +238,7 @@ Executor::Tri Executor::eval_single_with_subquery(SharedDatabase& s, const Row& 
         if (!correlated) subquery_scalar_cache_[cache_key].values = fresh_vals;
     }
     const std::vector<std::string>& sub_vals = cached_answer ? cached_answer->values : fresh_vals;
+    for (const std::string& v : sub_vals) note_text(cond.right_class, v);
     switch (cond.op) {
         case Operator::In:
         case Operator::NotIn:

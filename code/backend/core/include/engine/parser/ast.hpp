@@ -308,7 +308,8 @@ struct ConditionValue {
     // without its quotes, which made `name = 'city'` read the column city.) LiteralList::quoted is empty when no item is quoted.
     // `outer`: as ArithExpr::Col::outer, for a value that is the name of a column of an enclosing query.
     struct Literal { std::string value; bool quoted = false; int outer = 0; };
-    struct Subquery { StatementPtr query; };
+    // `classes`: what each column of the subquery's answer is (set by Executor::bind_statement), for `(a, b) IN (SELECT x, y ...)`
+    struct Subquery { StatementPtr query; std::vector<ValueClass> classes; };
     struct Between { std::string lo, hi; bool lo_quoted = false, hi_quoted = false; };
     struct LiteralList { std::vector<std::string> values; std::vector<bool> quoted; };
     // Fix: the RHS of a comparison (`WHERE v > id + 100`) used to parse
