@@ -8,6 +8,7 @@
 #include "engine/collation.hpp"
 #include "engine/executor/executor.hpp"
 #include "engine/now_text.hpp"
+#include "engine/parser/parser.hpp"
 #include "engine/sql_value_util.hpp"
 #include "engine/statement_deadline.hpp"
 #include "engine/view_rename.hpp"
@@ -96,6 +97,7 @@ StringResult Executor::exec_update(SharedDatabase& s, std::string table, std::ve
     if (s.views.count(table)) {
         auto target = resolve_view_target(s, table);
         if (!target) {
+            if (auto joined = resolve_join_view_target(s, table)) return exec_join_view_update(s, table, *joined, std::move(assignments), std::move(condition));
             if (auto refused = view_write_refusal(s, table, "UPDATE")) return StringResult::Err(*refused);
             return StringResult::Err("View '" + strip_db_prefix(table) + "' is not updatable");
         }
@@ -583,6 +585,23 @@ StringResult Executor::exec_update_inner(SharedDatabase& s, const std::string& t
                             // the column gets what the expression worked out (8 / 59.27 into a DECIMAL(10,2) is 0.13, not the 0.135 of the 0.1350 it shows; into a
                             // VARCHAR it is 0.134975535)
                             std::string value = eval_arith_exact(working, expr);
+                            // MySQL works `unsigned - 5`, `unsigned + -2` and `unsigned * -1` out as unsigned numbers: a negative result is the error of the expression (1690),
+                            // not of the column it goes into (1264)
+                            if (target_schema && value.size() > 1 && value[0] == '-' && parse_number(value)) {
+                                auto names_unsigned_column = [&](const ArithExpr& operand) {
+                                    const auto* c = std::get_if<ArithExpr::Col>(&operand.data);
+                                    if (!c) return false;
+                                    const std::string bare = c->name.substr(c->name.rfind('.') == std::string::npos ? 0 : c->name.rfind('.') + 1);
+                                    return std::any_of(target_schema->columns.begin(), target_schema->columns.end(), [&](const ColumnDef& d) { return d.is_unsigned && d.name == bare; });
+                                };
+                                const ArithExpr *lhs = nullptr, *rhs = nullptr;
+                                if (auto* a = std::get_if<ArithExpr::Sub>(&expr.data)) { lhs = a->lhs.get(); rhs = a->rhs.get(); }
+                                else if (auto* a = std::get_if<ArithExpr::Add>(&expr.data)) { lhs = a->lhs.get(); rhs = a->rhs.get(); }
+                                else if (auto* a = std::get_if<ArithExpr::Mul>(&expr.data)) { lhs = a->lhs.get(); rhs = a->rhs.get(); }
+                                if ((lhs && names_unsigned_column(*lhs)) || (rhs && names_unsigned_column(*rhs))) {
+                                    return StringResult::Err("BIGINT UNSIGNED value is out of range in '" + Parser::arith_to_string(expr) + "'");
+                                }
+                            }
                             // a FLOAT copied into a column that is not a FLOAT (a DOUBLE, a DECIMAL, an integer, a text) is the single-precision number widened: 0.1 becomes 0.10000000149011612
                             if (target_schema && value != EXECUTOR_NULL_VALUE && single_result(expr)) {
                                 auto target = std::find_if(target_schema->columns.begin(), target_schema->columns.end(), [&](const ColumnDef& c) { return c.name == col; });
@@ -650,7 +669,13 @@ StringResult Executor::exec_update_inner(SharedDatabase& s, const std::string& t
                     }
 
                     if (auto* schema = s.catalog.get_table(table)) {
-                        if (auto violation = rewritten_row_violation(s, *schema, new_row, assigned_cols, &row)) return StringResult::Err(*violation);
+                        if (auto violation = rewritten_row_violation(s, *schema, new_row, assigned_cols, &row)) {
+                            // InnoDB looks for the rows that refer to the old key (1451) before it looks for the parent of the new value (1452): a row that is a child and a parent at once
+                            if (!skip_fk_checks && violation->rfind("Foreign key violation", 0) == 0) {
+                                if (auto restricted = update_restrict_violation(s, table, row, new_row, assigned_cols)) violation = std::move(restricted);
+                            }
+                            return StringResult::Err(*violation);
+                        }
                         if (!skip_fk_checks) {
                             if (auto violation = update_restrict_violation(s, table, row, new_row, assigned_cols)) return StringResult::Err(*violation);
                         }

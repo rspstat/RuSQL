@@ -444,7 +444,12 @@ std::optional<std::string> Executor::coerce_column_value(const ColumnDef& col, s
     if (std::holds_alternative<DataType::DateTime>(dt.data) || std::holds_alternative<DataType::Timestamp>(dt.data)) {
         const int digits = std::holds_alternative<DataType::DateTime>(dt.data) ? std::get<DataType::DateTime>(dt.data).fsp : std::get<DataType::Timestamp>(dt.data).fsp;
         auto p = parse_date_text(value);
-        if (p && round_micro(p->micro, digits) == 1 && !next_second(*p)) p.reset();
+        bool carries_past_the_end = false; // ('9999-12-31 23:59:59.9996' into DATETIME(3): the rounding would make it year 10000)
+        if (p && round_micro(p->micro, digits) == 1 && !next_second(*p)) {
+            p.reset();
+            carries_past_the_end = true;
+        }
+        if (!p && carries_past_the_end) return "Datetime function: datetime field overflow";
         if (!p) return "Incorrect datetime value: '" + shown(value) + "' for column '" + col.name + "'" + at_row(row);
         std::string y = std::to_string(p->y);
         y.insert(0, 4 - std::min<std::size_t>(4, y.size()), '0');

@@ -260,6 +260,8 @@ WireError wire_error(const std::string& msg) {
     if (starts("Out of range value for column")) return set(1264, "22003");
     if (starts("BIGINT value is out of range") || starts("BIGINT UNSIGNED value is out of range")) return set(1690, "22003");
     if (starts("Data too long for column")) return set(1406, "22001");
+    if (starts("Data truncated for column")) return set(1265, "01000");
+    if (starts("Invalid use of NULL value")) return set(1138, "22004");
     if (starts("Invalid ENUM value") || starts("Invalid SET value")) return set(1265, "01000");
     if (starts("Incorrect integer value: ") || starts("Incorrect decimal value: ") || starts("Incorrect double value: ")) return starts_as_number() ? set(1265, "01000") : set(1366, "HY000");
     if (starts("Truncated incorrect ") || starts("Incorrect date value") || starts("Incorrect time value") || starts("Incorrect datetime value")) return set(1292, "22007");
@@ -286,6 +288,13 @@ WireError wire_error(const std::string& msg) {
     if (starts("Window '") && has("frame start cannot be UNBOUNDED FOLLOWING")) return set(3584, "HY000");
     if (starts("Window '") && has("frame end cannot be UNBOUNDED PRECEDING")) return set(3585, "HY000");
     if (starts("Window '") && has("frame start or end is negative")) return set(3586, "HY000");
+    if (starts("Window '") && has("requires exactly one ORDER BY expression")) return set(3587, "HY000");
+    if (starts("Window '") && has("ORDER BY expression of datetime type")) return set(3588, "HY000");
+    if (starts("Window '") && has("ORDER BY expression of numeric type")) return set(3589, "HY000");
+    if (starts("You cannot use the window function")) return set(3593, "HY000");
+    if (starts("Expression #") && has("is not in GROUP BY clause and contains nonaggregated column")) return set(1055, "42000");
+    if (starts("In aggregated query without GROUP BY, expression #")) return set(1140, "42000");
+    if (starts("Datetime function: datetime field overflow")) return set(1441, "22008");
     if (starts("Deadlock detected")) return set(1213, "40001");
     if (starts("Access denied for user")) return set(1045, "28000");
     if (starts("Unknown prepared statement")) return set(1243, "HY000");

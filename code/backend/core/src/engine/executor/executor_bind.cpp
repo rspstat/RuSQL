@@ -904,7 +904,7 @@ std::optional<std::string> Executor::bind_statement(SharedDatabase& s, Statement
         void forbid_target(const BindTable& t) {
             if (!check || error || t.open) return;
             for (const auto& [target, shown] : write_targets) {
-                if (ieq(target, t.full)) error = "You can't specify target table '" + shown + "' for update in FROM clause";
+                if (ieq(target, t.full) && deferred_target.empty()) deferred_target = "You can't specify target table '" + shown + "' for update in FROM clause";
             }
         }
 
@@ -1053,6 +1053,10 @@ std::optional<std::string> Executor::bind_statement(SharedDatabase& s, Statement
                 }
             }
             if (check && !error) only_full_group_by(sel, scope);
+            if (!deferred_target.empty()) {
+                if (!error) error = deferred_target;
+                deferred_target.clear();
+            }
             chain.pop_back();
             outputs = std::move(out);
         }
@@ -1367,6 +1371,9 @@ std::optional<std::string> Executor::bind_statement(SharedDatabase& s, Statement
         // the tables an UPDATE / DELETE / INSERT is changing -- as the tables of a query name them, and as MySQL calls them in its error (the alias the statement gave
         // the table, else its name): a subquery of it (not a derived table) that reads one is refused (MySQL 1093)
         std::vector<std::pair<std::string, std::string>> write_targets;
+        // the target table of an UPDATE / DELETE / INSERT read in the FROM list of a select (1093) is told after the rest of that select is bound: MySQL names an ambiguous or
+        // unknown column of its select list first (the last member: a Binder is made by listing its first members)
+        std::string deferred_target;
     };
 
     Binder binder{*this, s, check, {}, std::nullopt, {}, {}, {}};

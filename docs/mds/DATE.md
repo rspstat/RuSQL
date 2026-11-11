@@ -3223,10 +3223,47 @@ READ COMMITTED는 어느 쪽이든 최신을 읽으므로 차이가 없다.
 
 **정직한 한계 · 남은 것** (`RECOMMAND.md` 6번 표에 반영):
 ① `IN (서브쿼리)`의 오른쪽 열이 함수 · 식이라 종류를 모르면 예전 규칙(값의 모양)으로 비교한다; 날짜 · ENUM · SET 열이 서브쿼리의 값일 때 UPDATE · DELETE의 1292 판정은 열 종류를 몰라 글자로 본다(왼쪽이 그 열이면 건너뜀).
-② 집합 연산: 자기 `ORDER BY` · `LIMIT`가 있는 괄호 안 피연산자(`(SELECT … LIMIT 2) UNION (…)`)는 "Unknown statement"; `FROM DUAL`은 "Table 'v.DUAL' not found"; `WHERE x IN (SELECT … LIMIT 1)`은 MySQL이 1235로 거절하는데 여기는 받는다.
+② 집합 연산(괄호 안 `LIMIT`와 `FROM DUAL`은 R80에서 고침): 자기 `ORDER BY` · `LIMIT`가 있는 괄호 안 피연산자(`(SELECT … LIMIT 2) UNION (…)`)는 "Unknown statement"; `FROM DUAL`은 "Table 'v.DUAL' not found"; `WHERE x IN (SELECT … LIMIT 1)`은 MySQL이 1235로 거절하는데 여기는 받는다.
 ③ 권한: 권한 변경이 열려 있는 연결에 바로 반영됨(MySQL은 데이터베이스 수준을 다음 `USE`부터); `mysql.user` 같은 시스템 표 없음; `SHOW DATABASES`에 `information_schema` · `performance_schema` 없음; `SHOW FULL COLUMNS`의 `Privileges` 열이 비어 있음.
 ④ 로그인 변화의 반대편: `COM_CHANGE_USER`가 보낸 데이터베이스는 여전히 `USE`가 실패해도 오류를 버린다; 엔진의 `Unknown database 'x'.` 글자 끝에 마침표가 있다(MySQL은 없음, 오류 번호는 같다).
 ⑤ 31개 중 이번에 손댄 것은 네 줄(글자-숫자 비교 · UNION · 권한 · CREATE DATABASE)이고 나머지는 그대로 `RECOMMAND.md`에 있다 — "전부 맞출 필요는 없다"는 판단대로.
+
+### 11월 12일 — R80: 조인 뷰의 UPDATE · INSERT, 오류 번호의 남은 것, FROM DUAL과 괄호 안 LIMIT
+
+**왜 이 항목인가**: R79 보고의 분류별 표에서 사용자가 "MySQL과 다른 작은 차이" 중 **세 가지**를 골랐다 — ① 조인 뷰의 `UPDATE` · `INSERT`, ② 오류 번호의 남은 약 20개, ③ `FROM DUAL`과 괄호 안 `LIMIT`가 있는 `UNION`. 방식은 늘 하던 대로: 코드 → 시험(심은 버그 · 전체 · 퍼저) → 문서 → 죽은 코드 정리 → 커밋 · 푸시 → 보고와 분류별 표.
+
+**결과 한눈에** (진짜 MySQL 8.4.9와 비교하는 코퍼스 **세 개를 새로 만듦**, 점수판 53 → 56개)
+1. **조인 뷰 쓰기** — 코퍼스 `join_view_writes` 처음 **68문장 중 65개가 달랐고 → 0**(`--proto --errno`).
+2. **오류 번호** — 모든 코퍼스를 `--proto --errno`로 돌려 번호만 다른 문장 **21개**를 모아(코퍼스 12개에 흩어져 있었다) 원인별로 고쳤다. 새 코퍼스 `errno_more` 처음 **64문장 중 35개가 달랐고 → 0**.
+3. **`FROM DUAL` · 괄호 안 `LIMIT`** — 코퍼스 `dual_paren_union` 처음 **24문장 중 23개가 달랐고 → 0**.
+
+**① 조인 뷰 쓰기 — MySQL이 하는 것을 먼저 쟀다** (`CREATE VIEW v AS SELECT … FROM a JOIN b ON …`; 문장 70여 개를 진짜 MySQL에 돌려 본 결과를 따랐다)
+- `UPDATE v SET …`는 **바꾸는 열이 한 기본 표에만 속할 때** 된다. 그 표의 행마다 **한 번**씩(조인으로 두 번 짝지어진 행도 한 번), 뷰의 `WHERE`와 문장의 `WHERE`가 함께 적용된다. 두 표의 열이면 1393, 식으로 만든 열이면 1348, `ORDER BY` · `LIMIT`는 1221, `LEFT` / `RIGHT` 조인이 든 뷰는 **1288**(DELETE도 1288), 안쪽 조인 뷰의 DELETE는 1395.
+- `INSERT INTO v (열…)`는 **열 목록이 있어야** 하고(1394) 한 기본 표의 열만(1393) 그 표에 들어간다(뷰의 `WHERE`는 막지 않는다). 식 열이 든 뷰는 1471(그 열을 이름으로 쓰면 1348), 바깥 조인 뷰는 1471, 기본값 없는 NOT NULL 열이 빠지면 1423, `REPLACE`는 1395, `ON DUPLICATE KEY UPDATE`는 뷰의 열 이름으로, `INSERT … SELECT`도 된다.
+- **구현**: 새 파일 `executor_view_join.cpp`. `resolve_join_view_target`가 뷰를 풀어(FROM의 표와 조인, 뷰의 WHERE, 뷰의 열 → `표.열`; 조인 뷰 위의 뷰는 아래 뷰의 것과 합침) `exec_join_view_update`가 **기존 다중 표 `UPDATE`**(`exec_multi_update`, 기본키로 모아 행마다 한 번)로 번역하고 `exec_join_view_insert`가 열이 속한 기본 표의 `INSERT`로 번역한다. 표 잠금 계획은 뷰가 끼면 안전한 전체 잠금으로 물러나므로 그대로 안전하다.
+- **정직한 한계**: `WITH CHECK OPTION`이 든 조인 뷰, 식으로 만든 뷰 열을 새 값 · `WHERE`에서 읽는 문장(`UPDATE v5 SET y = dbl`)은 MySQL이 쓰는데 여기는 **메시지로 거절**한다(조용한 오답이 아니라 시끄러운 거절); `USING` · `NATURAL` 조인이나 파생 표가 든 뷰, 같은 표를 두 번 쓴 뷰는 쓰기가 거절된다(읽기는 된다).
+
+**② 오류 번호 21개 — 원인이 열두 가지였다** (번호만 다른 줄 하나를 고치는 일이 아니라 각각 다른 이유)
+- **메시지는 맞는데 번호가 1064로 나가던 것**(`wire_error`에 매핑 추가): ONLY_FULL_GROUP_BY **1055**(3문장) · 집계 옆의 일반 열 **1140** · RANGE 프레임 **3587 / 3588 / 3589**(5문장) · 윈도 함수를 쓸 수 없는 자리 **3593** · DATETIME 넘침 **1441** · `Data truncated` **1265** · `Invalid use of NULL value` **1138**.
+- **엔진이 다른 이유로 실패하던 것**: ① `SUM(...) OVER`는 3593이었지만 `RANK()` · `DENSE_RANK()` · `ROW_NUMBER()`는 `WHERE` / `HAVING` / `GROUP BY`에서 문법 오류였다 → 파서가 같은 3593 메시지를 낸다. ② `OVER (없는이름 ORDER BY id)`는 3579여야 하는데 구문 오류 → 윈도 이름이 정의돼 있지 않다고 말한다. ③ **`a MOD b`(중위 연산자)가 `SELECT`에서도 문법 오류였다**(번호가 아니라 문법 구멍; `%` · `MOD(a, b)`와 같게). ④ `UPDATE … WHERE id IN (SELECT id FROM u JOIN t …)`: 모호한 열(1052)을 먼저 말하고 대상 표 오류(1093)는 그 SELECT를 다 묶은 뒤로 미룬다(MySQL의 순서). ⑤ `9999-12-31 23:59:59.9996`이 DATETIME(3)에서 반올림으로 10000년이 되면 1441 `Datetime function: datetime field overflow`. ⑥ 부호 없는 열에서 `i - 5`가 음수면 식의 오류 **1690**(열 범위 오류 1264가 아니다; 대상이 부호 있는 열이어도). ⑦ `SELECT … INTO` 변수가 짧으면 1265, `SET` · `DEFAULT`는 1406. ⑧ `ALTER TABLE … MODIFY … NOT NULL` 뒤에 NULL이 있으면 **형이 그대로인 제자리 변경은 1138, 형이 바뀌면 1265(`Data truncated … at row N`)**. ⑨ 행이 부모이면서 자식일 때(`UPDATE emp SET id = 8, mgr = 8 WHERE id = 7`) InnoDB는 옛 키를 가리키는 행(1451)을 새 값의 부모(1452)보다 먼저 본다.
+- **찾다가 알게 된 조용한 오답 하나**: `ALTER TABLE … ADD COLUMN z INT NOT NULL`이 표에 있던 행을 NULL로 두었다(MySQL은 그 형의 영 — 0 · 빈 글자 · `0.00` · ENUM의 첫 값 · JSON `null`). 고쳤고, `DATE` · `DATETIME`은 행이 있으면 MySQL처럼 1292(영 날짜)로 거절한다(빈 표는 된다).
+
+**③ `FROM DUAL` · 괄호 안 `LIMIT`**
+- `FROM DUAL`(`db.dual`은 그 이름의 표)은 `FROM` 없는 SELECT와 같게 읽는다. `Table 'v.DUAL' not found`였다.
+- `(SELECT … ORDER BY … LIMIT 2) UNION (SELECT …)`: 괄호 처리는 자기 `ORDER BY` · `LIMIT`가 있는 묶음을 일부러 남겨 "Unknown statement"로 거절했다. 이제 그 묶음을 **파생 표** `SELECT * FROM (…) __operandN`으로 바꿔(토큰 단계) `LIMIT`가 그 피연산자에만 걸리고 뒤의 `ORDER BY` · `LIMIT`는 전체 결과에 걸린다(집합 연산 코드와 실행기는 그대로).
+
+**검증**:
+- 코퍼스(진짜 MySQL 8.4.9와, 고치기 전 → 후): `join_view_writes` 65/68 → **0**, `dual_paren_union` 23/24 → **0**, `errno_more` 35/64 → **0**. 점수판 **56개 코퍼스 4,872문장 차이 0**(R79의 53개 4,716문장에서 늘어남); Compat 숫자(`compatSnapshot.json`)를 다시 만들었다.
+- C++ 시험: 전체 **974 케이스** 세 모드(기본 · `RUSQL_DML_INDEX_MIN_ROWS=0` · `RUSQL_PROBE_CHECK=1 RUSQL_PROBE_STREAK=0`) **모두 통과**(1,521,562 · 1,521,563 · 1,521,562 assertions, 모드당 약 4분 20초). 새 `test_r80_views_errors.cpp` 10 케이스(238 assertions); 기존 시험은 한 줄도 고치지 않았다.
+- 심은 버그: 새 코드에 하나씩 심어 `[r80]` 시험이 붉어지는지 봄 — **20개 모두 잡힘**(조인 뷰: 바깥 조인 · 두 표 · `ORDER BY` / `LIMIT` · `REPLACE` · 식 열 `INSERT` · `ON DUPLICATE KEY UPDATE` 열 이름 · 바깥 조인 DELETE; `FROM DUAL` · 괄호 안 `LIMIT` · `MOD` · 순위 함수 3593 · 정의 없는 윈도 이름; `ALTER … NOT NULL` 1138 / 1265 · `ADD COLUMN` 영 채우기 · 영 날짜 거절 · 1690 · DATETIME 넘침 · `SELECT INTO` 1265 · 외래키 검사 순서 · 1052 먼저). 처음에 하나가 살아남았는데 심은 것이 동등 변이(`FROM DUAL`을 소비한 뒤 `from_dual = false`는 `FROM`이 없는 갈래로 가서 같은 결과)라 감지 조건 자체를 끄는 것으로 바꿔 잡혔다. 와이어 계층(`wire_error`)은 시험이 아니라 코퍼스로 확인했다 — 번호 매핑 줄을 하나씩 빼면 `errno_more`가 붉어진다: **아홉 줄 모두 잡힘**. 합계 29개.
+- 퍼저 · 검산 도구: 이전 빌드(R79)와의 차분 **6,000질의 차이 0**(고치기 전 서버와 고친 서버가 같은 무작위 SELECT에 같은 답); 두 세션 도구 `two_sessions.py` **596단계 차이 0**; 모델로 검산하는 도구 열둘(`verify_*.py`) 위반 0; 크래시 퍼저 다섯(`fuzz_crash` · `_chain` · `_fk` · `_multifk` · `_selfref`) 6라운드씩(시드 7700) 불일치 0, `fuzz_crash_fk.py 1 7701` 0, `fuzz_concurrent.py` 10라운드 확인한 행 5,788 불일치 0; TypeScript 검사 오류 0. **하지 않은 것**: Debug 전체 시험, 앱 화면 눈 점검(Diagram · Compat 문구만 바뀌었고 `tsc`만 확인).
+
+**정직한 한계 · 남은 것** (`RECOMMAND.md` 6번 표에 반영):
+① 조인 뷰: `WITH CHECK OPTION`이 든 것과 식 열을 새 값 · `WHERE`에서 읽는 문장은 메시지로 거절; `USING` · `NATURAL` 조인 · 파생 표가 든 뷰와 같은 표를 두 번 쓴 뷰는 쓰기가 거절(읽기는 됨).
+② 괄호: `FROM ((SELECT … LIMIT 2) UNION (SELECT …)) d`(괄호 두 겹으로 시작하는 파생 표)와 `INSERT INTO t (SELECT …)`는 여전히 문법 오류 — 넓히면 `f((SELECT …))` 같은 함수 인자를 건드릴 수 있어 이번에는 두지 않았다; `WHERE x IN (SELECT … LIMIT 1)`은 MySQL이 1235로 거절하는데 여기는 받는다; `SELECT * FROM DUAL`은 MySQL 1096이고 여기는 다른 메시지.
+③ **코퍼스를 쓰며 알게 됐지만 고치지 않은 것**: `ALTER TABLE … MODIFY`가 DOUBLE을 INT로 바꿀 때 2.5를 3으로 둔다(MySQL은 DOUBLE 값을 짝수 쪽으로 2); MySQL 프로토콜의 결과 열 정의가 `DATETIME(3)`의 소수 자릿수(`decimals`)를 알리지 않아 `--proto` 비교가 `.999`를 못 본다(저장된 값은 같음).
+④ 오류 번호: 점수판에서 번호까지 보는 것은 `--proto --errno`로 올린 코퍼스(`errno` · `privileges` · `join_view_writes` · `errno_more`)뿐이다. 다른 코퍼스는 번호를 보지 않는다 — 이번에 모든 코퍼스를 한 번 번호까지 돌려 21개를 모두 `errno_more`에 옮겼다.
+⑤ **복구**: 조인 뷰로 `UPDATE` · `INSERT`를 한 뒤 서버를 `kill -9`로 죽였다 다시 켜서 값이 그대로 남는지 직접 확인했다(표 둘 모두 같음). 크래시 퍼저에는 조인 뷰 쓰기가 없다.
 
 ## 요약: 1학기 대비 2학기에 달라진 것
 

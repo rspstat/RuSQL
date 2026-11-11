@@ -17,9 +17,11 @@ std::string to_upper(const std::string& s) {
 } // namespace
 
 // (SELECT ...) UNION (SELECT ...): the parentheses around an operand of a set operation (or around the whole query) change nothing unless the operand has its
-// own ORDER BY / LIMIT, so they are taken out; a group that does have one is left, and is refused as it always was
+// own ORDER BY / LIMIT, so they are taken out; a group that does have one keeps them as the derived table `SELECT * FROM (...) __operandN` -- the ORDER BY / LIMIT
+// then belong to the group alone, as they do in MySQL, and the set operation reads that select like any other
 static void drop_parentheses_around_operands(std::vector<Token>& tokens) {
     auto is_set_operator = [](TokenKind k) { return k == TokenKind::Union || k == TokenKind::Intersect || k == TokenKind::Except; };
+    std::size_t derived = 0;
     std::size_t i = 0;
     while (i < tokens.size()) {
         const bool after_operator = i == 0 || is_set_operator(tokens[i - 1].kind) || (tokens[i - 1].kind == TokenKind::All && i >= 2 && is_set_operator(tokens[i - 2].kind));
@@ -39,8 +41,22 @@ static void drop_parentheses_around_operands(std::vector<Token>& tokens) {
         const bool closed = close > i && tokens[close].kind == TokenKind::RParen;
         const bool followed_by_more = close + 1 >= tokens.size() || is_set_operator(tokens[close + 1].kind) || tokens[close + 1].kind == TokenKind::Order ||
                                       tokens[close + 1].kind == TokenKind::Limit || tokens[close + 1].kind == TokenKind::Semicolon || tokens[close + 1].kind == TokenKind::RParen;
-        if (!closed || own_order || !followed_by_more) {
+        if (!closed || !followed_by_more) {
             i++;
+            continue;
+        }
+        if (own_order) {
+            Token alias(TokenKind::Ident, "__operand" + std::to_string(++derived));
+            alias.begin = tokens[close].begin;
+            alias.end = tokens[close].end;
+            Token select(TokenKind::Select), star(TokenKind::Asterisk), from(TokenKind::From);
+            for (Token* t : {&select, &star, &from}) { // (they stand where the '(' stands in the text)
+                t->begin = tokens[i].begin;
+                t->end = tokens[i].end;
+            }
+            tokens.insert(tokens.begin() + static_cast<std::ptrdiff_t>(close + 1), alias); // (the later position first: the earlier one does not move)
+            tokens.insert(tokens.begin() + static_cast<std::ptrdiff_t>(i), {select, star, from});
+            i += 4; // (past SELECT * FROM ( -- the select inside may hold groups of its own)
             continue;
         }
         tokens.erase(tokens.begin() + static_cast<std::ptrdiff_t>(close));
@@ -101,7 +117,37 @@ Result<Statement, std::string> Parser::parse() {
         // that the whole input was consumed. Only the top-level entry point checks
         // this — parse_stmt() is also called recursively (EXPLAIN's inner statement,
         // stored-procedure body statements), where more tokens are expected to follow.
-        if (peek() != nullptr) throw ParseError("Unexpected token(s) after end of statement");
+        if (peek() != nullptr) {
+            // `WHERE RANK() OVER (...) = 1`, in a HAVING or a GROUP BY: a window function is read in the select list and the ORDER BY only, so the statement stops at OVER
+            if (peek_is(TokenKind::Over) && pos_ >= 2 && tokens_[pos_ - 1].kind == TokenKind::RParen) {
+                std::size_t i = pos_ - 1;
+                int depth = 0;
+                for (;; i--) { // (back to the '(' of the call, and the name before it)
+                    if (tokens_[i].kind == TokenKind::RParen) depth++;
+                    else if (tokens_[i].kind == TokenKind::LParen && --depth == 0) break;
+                    if (i == 0) break;
+                }
+                if (i > 0 && depth == 0) {
+                    const Token& name = tokens_[i - 1];
+                    std::string word = name.kind == TokenKind::Ident ? name.text : name.word;
+                    for (char& c : word) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+                    if (!word.empty()) throw ParseError("You cannot use the window function '" + word + "' in this context.'"); // (MySQL's message ends with that stray quote)
+                }
+            }
+            // ... and `WHERE rank() OVER (...)`, where rank was read as a column and the statement stops at its '('
+            if (peek_is(TokenKind::LParen) && pos_ >= 1 && is_window_function_token(tokens_[pos_ - 1].kind)) {
+                std::size_t i = pos_;
+                int depth = 0;
+                for (; i < tokens_.size(); i++) {
+                    if (tokens_[i].kind == TokenKind::LParen) depth++;
+                    else if (tokens_[i].kind == TokenKind::RParen && --depth == 0) break;
+                }
+                if (i + 1 < tokens_.size() && tokens_[i + 1].kind == TokenKind::Over) {
+                    throw ParseError("You cannot use the window function '" + tokens_[pos_ - 1].word + "' in this context.'");
+                }
+            }
+            throw ParseError("Unexpected token(s) after end of statement");
+        }
         return Result<Statement, std::string>::Ok(std::move(stmt));
     } catch (const ParseError& e) {
         return Result<Statement, std::string>::Err(e.what());

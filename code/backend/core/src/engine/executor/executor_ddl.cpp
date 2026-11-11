@@ -30,6 +30,26 @@ std::uint64_t parse_txn_id(const Row& row, const char* col) {
         return 0;
     }
 }
+
+// What MySQL puts in the rows a table already has when a NOT NULL column without a DEFAULT is added: the zero of its type (0, 0.00, '', the zero date, the first member of an ENUM)
+std::string implicit_default(const DataType& type) {
+    return std::visit(
+        [](const auto& alt) -> std::string {
+            using T = std::decay_t<decltype(alt)>;
+            if constexpr (std::is_same_v<T, DataType::Decimal>) return alt.scale == 0 ? std::string("0") : "0." + std::string(alt.scale, '0');
+            else if constexpr (std::is_same_v<T, DataType::Date>) return "0000-00-00";
+            else if constexpr (std::is_same_v<T, DataType::DateTime> || std::is_same_v<T, DataType::Timestamp>)
+                return alt.fsp == 0 ? std::string("0000-00-00 00:00:00") : "0000-00-00 00:00:00." + std::string(alt.fsp, '0');
+            else if constexpr (std::is_same_v<T, DataType::Time>) return alt.fsp == 0 ? std::string("00:00:00") : "00:00:00." + std::string(alt.fsp, '0');
+            else if constexpr (std::is_same_v<T, DataType::Year>) return "0000";
+            else if constexpr (std::is_same_v<T, DataType::Enum>) return alt.values.empty() ? std::string() : alt.values.front();
+            else if constexpr (std::is_same_v<T, DataType::Text> || std::is_same_v<T, DataType::Varchar> || std::is_same_v<T, DataType::Blob> || std::is_same_v<T, DataType::Set>)
+                return std::string();
+            else if constexpr (std::is_same_v<T, DataType::Json>) return "null";
+            else return "0"; // (the integer types, FLOAT, DOUBLE, BOOLEAN)
+        },
+        type.data);
+}
 } // namespace
 
 bool Executor::is_visible(const Row& row) {
@@ -795,6 +815,17 @@ StringResult Executor::exec_alter(SharedDatabase& s, const std::string& table, A
             if (same_name(c.name, v->column.name)) return StringResult::Err("Duplicate column name '" + v->column.name + "'");
         }
 
+        // a DATE / DATETIME that is NOT NULL with no DEFAULT would give the rows the table has the zero date, which strict mode refuses (NO_ZERO_DATE); an empty table has none to give it to
+        if (v->column.not_null && !(v->column.default_value && *v->column.default_value != NULL_DEFAULT)) {
+            const bool zero_date = std::holds_alternative<DataType::Date>(v->column.data_type.data);
+            if (zero_date || std::holds_alternative<DataType::DateTime>(v->column.data_type.data)) {
+                if (auto rows = s.tables.find(table); rows != s.tables.end() && std::any_of(rows->second.begin(), rows->second.end(), [](const Row& r) { return is_visible(r); })) {
+                    return StringResult::Err(std::string("Incorrect ") + (zero_date ? "date value: '0000-00-00'" : "datetime value: '0000-00-00 00:00:00'") + " for column '" +
+                                             v->column.name + "' at row 1");
+                }
+            }
+        }
+
         ColumnDef new_col;
         new_col.name = v->column.name;
         new_col.data_type = v->column.data_type;
@@ -816,6 +847,7 @@ StringResult Executor::exec_alter(SharedDatabase& s, const std::string& table, A
         }
 
         std::string fill_val = (v->column.default_value && *v->column.default_value != NULL_DEFAULT) ? *v->column.default_value
+                               : v->column.not_null                                                   ? implicit_default(v->column.data_type)
                                                                                                        : EXECUTOR_NULL_VALUE;
         if (auto it = s.tables.find(table); it != s.tables.end()) {
             for (auto& row : it->second) row[new_col.name] = fill_val;
@@ -922,6 +954,10 @@ StringResult Executor::exec_alter(SharedDatabase& s, const std::string& table, A
         std::vector<std::pair<Row*, std::string>> converted;
         if (auto it = s.tables.find(table); it != s.tables.end()) {
             ColumnDef target = *std::find_if(schema_check->columns.begin(), schema_check->columns.end(), [&](const ColumnDef& c) { return c.name == v->column.name; });
+            // A change that keeps the type of the column is made in place and a NULL in the way is "Invalid use of NULL value" (1138); one that changes it rebuilds the table, and
+            // the NULL is then a value that does not fit: "Data truncated for column ... at row N" (1265) -- INT to BIGINT, VARCHAR to TEXT; VARCHAR(5) to VARCHAR(9) stays in place
+            const bool in_place = target.data_type.data.index() == v->column.data_type.data.index() && target.is_unsigned == v->column.is_unsigned &&
+                                  (std::holds_alternative<DataType::Varchar>(target.data_type.data) || debug_data_type(target.data_type) == debug_data_type(v->column.data_type));
             target.data_type = v->column.data_type;
             target.is_unsigned = v->column.is_unsigned;
             std::size_t row_number = 0;
@@ -932,7 +968,10 @@ StringResult Executor::exec_alter(SharedDatabase& s, const std::string& table, A
                 if (vit == row.end()) continue;
                 std::string val = vit->second;
                 if (val == EXECUTOR_NULL_VALUE) {
-                    if (visible && v->column.not_null) return StringResult::Err("Invalid use of NULL value");
+                    if (visible && v->column.not_null) {
+                        return StringResult::Err(in_place ? std::string("Invalid use of NULL value")
+                                                          : "Data truncated for column '" + v->column.name + "' at row " + std::to_string(row_number));
+                    }
                     continue;
                 }
                 if (auto error = coerce_column_value(target, val, row_number)) {

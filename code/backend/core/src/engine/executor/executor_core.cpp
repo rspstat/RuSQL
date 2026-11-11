@@ -2221,6 +2221,8 @@ StringResult Executor::execute_with_s_body(SharedDatabase& s, Statement stmt) {
                 if (auto resolved = resolve_updatable_view(s, v->table)) {
                     v->condition = merge_conditions(resolved->second, v->condition);
                     v->table = resolved->first;
+                } else if (resolve_join_view_target(s, v->table)) { // (an UPDATE of a join is a multi-table UPDATE: no ORDER BY, no LIMIT)
+                    return StringResult::Err(std::string("ERROR 1221 (HY000): Incorrect usage of UPDATE and ") + (v->order_by.empty() ? "LIMIT" : "ORDER BY"));
                 }
             }
             std::vector<std::string> order;
@@ -2354,7 +2356,12 @@ StringResult Executor::execute_with_s_body(SharedDatabase& s, Statement stmt) {
             } else {
                 const std::string key = proc_var_key(proc_vars, var);
                 if (auto type = proc_var_types.find(key); type != proc_var_types.end()) {
-                    if (auto error = coerce_declared(var, type->second, value)) return StringResult::Err(*error);
+                    if (auto error = coerce_declared(var, type->second, value)) {
+                        // (a value that does not fit the variable: SELECT ... INTO says "Data truncated" -- 1265 --, where SET and DEFAULT say "Data too long" -- 1406)
+                        const std::string too_long = "Data too long for column";
+                        if (error->compare(0, too_long.size(), too_long) == 0) return StringResult::Err("Data truncated for column" + error->substr(too_long.size()));
+                        return StringResult::Err(*error);
+                    }
                 }
                 proc_vars[key] = value;
             }

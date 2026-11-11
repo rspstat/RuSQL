@@ -245,8 +245,10 @@ std::optional<std::string> Executor::view_write_refusal(const SharedDatabase& s,
     const std::string db = view.rfind('.') == std::string::npos ? std::string() : view.substr(0, view.rfind('.'));
     const std::string what = verb;
     const bool joins = sel && !sel->joins.empty();
-    if (joins && what == "DELETE") return "ERROR 1395 (HY000): Can not delete from join view '" + db + "." + bare + "'";
-    if (joins) return std::nullopt; // (MySQL can write to one table of a join view: not here, the caller's own error says so)
+    // (a view with an outer join is not updatable at all: its DELETE is 1288 like its UPDATE, where an inner join view says "Can not delete from join view")
+    const bool outer = sel && std::any_of(sel->joins.begin(), sel->joins.end(), [](const Join& j) { return j.join_type == JoinType::Left || j.join_type == JoinType::Right || j.join_type == JoinType::FullOuter; });
+    if (joins && what == "DELETE" && !outer) return "ERROR 1395 (HY000): Can not delete from join view '" + db + "." + bare + "'";
+    if (joins && !(outer && what == "DELETE")) return std::nullopt; // (MySQL can write to one table of a join view: the callers' own errors say what they refuse)
     if (what == "INSERT") return "ERROR 1471 (HY000): The target table " + bare + " of the INSERT is not insertable-into";
     return "ERROR 1288 (HY000): The target table " + bare + " of the " + what + " is not updatable";
 }
@@ -634,6 +636,9 @@ StringResult Executor::exec_insert(SharedDatabase& s, std::string table, std::op
     if (s.views.count(table)) {
         auto target = resolve_view_target(s, table);
         if (!target) {
+            if (auto joined = resolve_join_view_target(s, table)) {
+                return exec_join_view_insert(s, table, *joined, std::move(col_list), std::move(all_values), std::move(on_conflict), std::move(returning), from_select);
+            }
             if (auto refused = view_write_refusal(s, table, "INSERT")) return StringResult::Err(*refused);
             return StringResult::Err("View '" + strip_db_prefix(table) + "' is not updatable (has JOINs, DISTINCT, GROUP BY, or subquery)");
         }

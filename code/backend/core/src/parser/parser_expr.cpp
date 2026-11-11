@@ -912,6 +912,10 @@ ArithExpr Parser::parse_arith_factor() {
         return ArithExpr(ArithExpr::Col{std::string(label) + "(" + inner + ")"});
     }
     if (allow_window_expr_ && peek_at_is(1, TokenKind::LParen) && is_window_function_token(p->kind)) return hide_window(parse_ranking_window());
+    // a window function in a WHERE, a HAVING or a GROUP BY (MySQL 3593; its message ends with that stray quote)
+    if (!allow_window_expr_ && peek_at_is(1, TokenKind::LParen) && is_window_function_token(p->kind)) {
+        throw ParseError("You cannot use the window function '" + p->word + "' in this context.'");
+    }
 
     if (p->kind == TokenKind::NumberLit) {
         const Token* t = advance();
@@ -1328,16 +1332,17 @@ ArithExpr Parser::parse_arith_term() {
             args.push_back(std::move(left));
             args.push_back(std::move(right));
             left = ArithExpr(ArithExpr::Func{"MOD", std::move(args)});
-        } else if (peek_is(TokenKind::Ident) && to_upper(peek()->text) == "DIV" && peek_at(1) &&
+        } else if (((peek_is(TokenKind::Ident) && to_upper(peek()->text) == "DIV") || peek_is(TokenKind::Mod)) && peek_at(1) &&
                    (peek_at(1)->kind == TokenKind::NumberLit || peek_at(1)->kind == TokenKind::StringLit || peek_at(1)->kind == TokenKind::Ident ||
                     peek_at(1)->kind == TokenKind::LParen || peek_at(1)->kind == TokenKind::Minus || peek_at(1)->kind == TokenKind::At)) {
-            // a DIV b: the integer part of a / b (towards zero), NULL for a zero divisor
+            // a DIV b: the integer part of a / b (towards zero), NULL for a zero divisor; a MOD b (the keyword MOD, which also names the function MOD(a, b)) is a % b
+            const bool modulo = peek_is(TokenKind::Mod);
             advance();
             ArithExpr right = parse_arith_factor();
             std::vector<ArithExpr> args;
             args.push_back(std::move(left));
             args.push_back(std::move(right));
-            left = ArithExpr(ArithExpr::Func{"OP_DIV", std::move(args)});
+            left = ArithExpr(ArithExpr::Func{modulo ? "MOD" : "OP_DIV", std::move(args)});
         } else {
             break;
         }
@@ -1721,7 +1726,11 @@ void Parser::expand_window_name() {
     }
     for (int nesting = 0; nesting < 16 && pos_ + 1 < tokens_.size() && tokens_[pos_].kind == TokenKind::LParen; nesting++) {
         const std::vector<Token>* body = known(pos_ + 1);
-        if (!body) break;
+        if (!body) {
+            // (an identifier right after the parenthesis is the name of a window: PARTITION BY, ORDER BY and a frame are keywords)
+            if (tokens_[pos_ + 1].kind == TokenKind::Ident) throw ParseError("Window name '" + tokens_[pos_ + 1].text + "' is not defined.");
+            break;
+        }
         const std::vector<Token> copy = *body;
         splice(pos_ + 1, copy, false);
     }

@@ -692,8 +692,15 @@ Statement Parser::parse_select() {
         }
     };
 
+    // `FROM DUAL`: the dummy table of a select that reads no table, the same as no FROM at all (a `db.dual` is a table of that name)
+    bool from_dual = false;
+    if (peek_is(TokenKind::From) && peek_at(1) && peek_at(1)->kind == TokenKind::Ident && upper_word(peek_at(1)->text) == "DUAL" && !peek_at_is(2, TokenKind::Dot)) {
+        advance();
+        advance();
+        from_dual = true;
+    }
     // FROM is optional: scalar SELECT (no FROM) is supported
-    if (!peek_is(TokenKind::From)) {
+    if (from_dual || !peek_is(TokenKind::From)) {
         // `SELECT 1 WHERE 1 = 0`: the one row a select without FROM has is there, or it is not
         std::optional<CondExpr> dual_condition;
         if (peek_is(TokenKind::Where)) { advance(); dual_condition = parse_condexpr(); }

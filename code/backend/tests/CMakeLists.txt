@@ -31,6 +31,7 @@ add_executable(engine_tests
     test_executor_dcl.cpp
     test_privileges.cpp
     test_r79_leftovers.cpp
+    test_r80_views_errors.cpp
     test_executor_misc.cpp
     test_server_stmt_split.cpp
     test_concurrency.cpp

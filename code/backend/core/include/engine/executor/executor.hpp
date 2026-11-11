@@ -1074,6 +1074,24 @@ private:
     // WITH CHECK OPTION: the error when `row` (what an INSERT / UPDATE through the view leaves in the table) is not a row of the view (1369), through the views below it for CASCADED
     std::optional<std::string> view_check_violation(SharedDatabase& s, const std::string& view, const Row& row);
 
+    // A view over a join of tables (the joins inner ones or a comma list; a view over such a view too): what a write through it reaches (executor_view_join.cpp).
+    // `tables`: (the name the joined rows know a table by, the table) in FROM order; `columns`: (view column, "name.column" of the table below, "" for an expression);
+    // `outer`: a LEFT / RIGHT join, which takes no UPDATE (1288) and no INSERT (1471); `check_option`: WITH CHECK OPTION on it or on a view below it (not supported here)
+    struct JoinViewTarget {
+        std::vector<std::pair<std::string, std::string>> tables;
+        std::vector<Join> joins;
+        std::optional<CondExpr> condition;
+        std::vector<std::pair<std::string, std::string>> columns;
+        bool outer = false;
+        bool check_option = false;
+    };
+    static std::optional<JoinViewTarget> resolve_join_view_target(const SharedDatabase& s, const std::string& name);
+    StringResult exec_join_view_update(SharedDatabase& s, const std::string& view, const JoinViewTarget& target, std::vector<std::pair<std::string, ArithExpr>> assignments,
+                                       std::optional<CondExpr> condition);
+    StringResult exec_join_view_insert(SharedDatabase& s, const std::string& view, const JoinViewTarget& target, std::optional<std::vector<std::string>> col_list,
+                                       std::vector<std::vector<std::string>> all_values, InsertConflict on_conflict, std::optional<std::vector<SelectColumn>> returning,
+                                       bool from_select);
+
     // ── Phase 8b: INSERT ─────────────────────────────────────────────────
     StringResult exec_insert_select(SharedDatabase& s, std::string table, std::optional<std::vector<std::string>> columns,
                                      Statement query, InsertConflict on_conflict, std::optional<std::vector<SelectColumn>> returning);

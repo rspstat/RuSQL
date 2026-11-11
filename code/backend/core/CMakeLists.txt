@@ -33,6 +33,7 @@ add_library(engine_core STATIC
     src/engine/executor/executor_ddl.cpp
     src/engine/executor/executor_eval.cpp
     src/engine/executor/executor_dml.cpp
+    src/engine/executor/executor_view_join.cpp
     src/engine/executor/executor_update.cpp
     src/engine/executor/executor_dml_index.cpp
     src/engine/executor/executor_update_unique.cpp

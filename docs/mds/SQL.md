@@ -59,8 +59,8 @@ RuSQL이 실제로 받아서 실행하는 SQL 문법을 한 줄씩 정리한 문
 
 ## 3. 테이블 변경 · 삭제 · 이름 변경
 
-- ALTER TABLE t ADD [COLUMN] 컬럼 정의 [FIRST | AFTER col] : 컬럼 추가
-- ALTER TABLE t MODIFY [COLUMN] 컬럼 정의 : 컬럼 타입 · 제약 변경(값도 새 타입으로 바꾸고 인덱스를 다시 만듦)
+- ALTER TABLE t ADD [COLUMN] 컬럼 정의 [FIRST | AFTER col] : 컬럼 추가. NOT NULL이고 DEFAULT가 없으면 표에 있던 행은 그 형의 영(0 · 빈 글자 · `0.00` · ENUM의 첫 값 · JSON `null`)으로 채우고, DATE · DATETIME은 행이 있으면 거절(1292, 영 날짜; R80)
+- ALTER TABLE t MODIFY [COLUMN] 컬럼 정의 : 컬럼 타입 · 제약 변경(값도 새 타입으로 바꾸고 인덱스를 다시 만듦). NOT NULL로 바꿀 때 NULL이 있으면 형이 그대로인 제자리 변경은 1138(`Invalid use of NULL value`), 형이 바뀌면 1265(`Data truncated for column ... at row N`; R80)
 - ALTER TABLE t CHANGE [COLUMN] 옛이름 새이름 타입... : 컬럼 이름과 정의를 함께 변경
 - ALTER TABLE t RENAME COLUMN a TO b : 컬럼 이름 변경
 - ALTER TABLE t DROP [COLUMN] col : 컬럼 삭제
@@ -93,6 +93,7 @@ RuSQL이 실제로 받아서 실행하는 SQL 문법을 한 줄씩 정리한 문
 - CREATE [OR REPLACE] [ALGORITHM = x] [DEFINER = x] [SQL SECURITY x] VIEW v AS SELECT ... : 뷰 생성 · 덮어쓰기
 - DROP VIEW [IF EXISTS] v : 뷰 삭제
 - INSERT / UPDATE / DELETE 대상으로 뷰 사용 : 한 표의 행을 그대로 보여 주는 뷰(JOIN · DISTINCT · GROUP BY · 집계 · LIMIT 없음, 뷰 위의 뷰도 됨)는 쓰기도 가능. 열 이름을 바꾼 뷰(`id AS ident`)는 뷰의 이름으로 `SET`·`WHERE`를 쓰고, 열 목록 없는 `INSERT INTO v VALUES (...)`는 뷰의 열을 따른다(R71). 식으로 만든 열을 쓰면 오류 1348(UPDATE) · 1471(INSERT), 쓸 수 없는 뷰는 1288(UPDATE · DELETE) · 1471(INSERT), 조인 뷰의 DELETE는 1395, 뷰가 가린 NOT NULL 열은 1423
+- 조인 뷰(`CREATE VIEW v AS SELECT ... FROM a JOIN b ON ...`, 쉼표 조인과 조인 뷰 위의 뷰 포함)에 UPDATE · INSERT (R80): UPDATE는 **한 기본 표의 열만** 바꿀 때 되고(다중 표 UPDATE로 풀어 그 표의 행마다 한 번씩, 뷰의 WHERE와 문장의 WHERE가 함께 적용; 새 값은 다른 표의 열을 읽어도 됨), 두 표의 열이면 1393, 식으로 만든 열이면 1348, ORDER BY · LIMIT는 1221. INSERT는 **열 목록이 있어야** 하고(1394) 한 기본 표의 열만(1393), 그 표에 들어가며 뷰의 WHERE는 막지 않는다; 식으로 만든 열이 든 뷰는 1471, 기본값 없는 NOT NULL 열이 빠지면 1423, REPLACE는 1395, `ON DUPLICATE KEY UPDATE`는 뷰의 열 이름으로. 바깥 조인(LEFT / RIGHT)이 든 뷰는 UPDATE · DELETE가 1288, INSERT가 1471, 안쪽 조인 뷰의 DELETE는 1395. 아직 안 되는 것: `WITH CHECK OPTION`이 든 조인 뷰와 식으로 만든 열을 새 값 · WHERE에서 읽는 문장(둘 다 메시지로 거절), USING · NATURAL 조인이나 파생 표가 든 뷰, 같은 표를 두 번 쓴 뷰(쓰기가 거절됨)
 - CREATE VIEW v AS SELECT ... WITH [CASCADED | LOCAL] CHECK OPTION : 뷰가 보여 주지 않을 행을 INSERT · UPDATE하면 오류 1369(CASCADED는 아래 뷰의 조건까지; R71)
 - CREATE SYNONYM 이름 FOR 대상 : 테이블 별칭 생성
 - CREATE OR REPLACE SYNONYM 이름 FOR 대상 : 별칭 덮어쓰기
@@ -146,6 +147,7 @@ RuSQL이 실제로 받아서 실행하는 SQL 문법을 한 줄씩 정리한 문
 - SELECT ... FROM t [[AS] 별칭] : 테이블(별칭 포함)에서 조회
 - SELECT ... FROM db.t : 데이터베이스를 붙여 조회
 - SELECT ... FROM (SELECT ...) 별칭 : 파생 테이블(FROM 절 서브쿼리)
+- SELECT ... FROM DUAL [WHERE ...] : 표를 읽지 않는 SELECT(`FROM`을 쓰지 않은 것과 같음; `db.dual`은 그 이름의 표; R80)
 - SELECT ... INTO @변수[, @변수] FROM ... : 결과를 변수에 담기
 - SELECT SQL_CALC_FOUND_ROWS ... : LIMIT 앞의 전체 행 수를 FOUND_ROWS()로 읽기 위해 계산
 - SELECT /*+ MAX_EXECUTION_TIME(ms) */ ... : 실행 시간 제한 힌트(다른 힌트는 주석으로 무시)
@@ -188,6 +190,7 @@ RuSQL이 실제로 받아서 실행하는 SQL 문법을 한 줄씩 정리한 문
 - SELECT ... UNION [ALL] SELECT ... : 결과 합치기(ALL은 중복 유지). 셋 이상 이으면 왼쪽부터 읽고 `INTERSECT`가 `UNION` · `EXCEPT`보다 먼저 묶인다(R79; 전에는 오른쪽부터 읽어 `UNION ALL`과 `UNION`을 섞으면 다른 답이 나왔다)
 - SELECT ... INTERSECT [ALL] SELECT ... : 두 결과의 교집합
 - SELECT ... EXCEPT [ALL] SELECT ... : 첫 결과에서 두 번째 결과를 뺀 차집합
+- (SELECT ... ORDER BY ... LIMIT n) UNION (SELECT ...) : 괄호 안 피연산자가 자기 ORDER BY · LIMIT를 가지면 그 피연산자에만 걸린다(파생 표로 읽음), 뒤의 ORDER BY · LIMIT는 전체 결과에(R80)
 - UNION 뒤 ORDER BY / LIMIT : 합친 결과 정렬 · 제한. 마지막 SELECT가 FROM이 없어도 된다(`SELECT 5 UNION SELECT 3 ORDER BY 1`), 셋 이상 이어도 전체 결과에 걸린다(R79)
 - WITH name [(컬럼, ...)] AS (SELECT ...)[, ...] SELECT ... : 공통 테이블 식(CTE)
 - WITH RECURSIVE name AS (기준 UNION [ALL] 재귀) SELECT ... : 재귀 CTE
@@ -210,7 +213,7 @@ RuSQL이 실제로 받아서 실행하는 SQL 문법을 한 줄씩 정리한 문
 
 ## 7. 표현식 · 연산자 · 리터럴
 
-- 산술 : `+` `-` `*` `/` `%` `DIV` `MOD(a, b)` — 사칙 · 나머지 · 정수 나눗셈
+- 산술 : `+` `-` `*` `/` `%` `DIV` `MOD` `MOD(a, b)` — 사칙 · 나머지(`a MOD b`는 `a % b`; R80) · 정수 나눗셈
 - 비트 : `&` `|` `^` `~` `<<` `>>` — 비트 연산
 - 논리 : `AND` `OR` `NOT` `XOR` `||` — 논리 연산(`||`는 OR이고, sql_mode에 `PIPES_AS_CONCAT`이면 문자열 연결; `&&`는 지원하지 않음)
 - 비교 : `=` `<>` `!=` `<` `<=` `>` `>=` `<=>`(NULL 안전 같음) — 비교(값으로도 사용 가능)
@@ -554,7 +557,7 @@ mysql 클라이언트 · 드라이버 · 도구가 보내는 문장을 받아주
 - **테이블 정의** : `GENERATED ALWAYS AS (...)` 생성 컬럼, `DEFAULT (식)`, `CREATE TEMPORARY TABLE`, `FULLTEXT` 인덱스, 인덱스 접두 길이 `col(n)`, 여러 컬럼 외래 키, 표현식 인덱스, `ZEROFILL`, `SERIAL` · `BINARY` · `VARBINARY` · `BIT` · `GEOMETRY` 타입, `ALTER TABLE ADD/DROP PRIMARY KEY`, `ALTER TABLE CONVERT TO CHARACTER SET`, 파티션 `KEY` · `COLUMNS` · `REORGANIZE` · `TRUNCATE PARTITION`, `DROP TABLE ... CASCADE`, `CREATE INDEX IF NOT EXISTS`, `ALTER DATABASE`
 - **뷰** : `CREATE VIEW v (컬럼 목록) AS ...`, 조인 뷰의 `UPDATE` · `INSERT`(MySQL은 한 표의 열만 쓰면 받음)
 - **데이터 쓰기** : `INSERT ... VALUES ()`(빈 값), `INSERT ... DEFAULT VALUES`, `INSERT ... AS 별칭`, `INSERT/UPDATE/DELETE LOW_PRIORITY · QUICK`, `UPDATE IGNORE`, `UPDATE ... JOIN (파생 테이블)`, `DELETE FROM ... USING`, `LOAD DATA`, `SELECT ... INTO OUTFILE`
-- **조회** : `NATURAL LEFT | RIGHT JOIN`, `TABLE t`, `VALUES ROW(...)`, `USE | FORCE | IGNORE INDEX` 힌트, `PARTITION (p)` 선택, `STRAIGHT_JOIN`, `SELECT ALL | HIGH_PRIORITY`, `FROM DUAL`, `NULLS FIRST | LAST`, `OFFSET n ROWS`, `FOR UPDATE OF 테이블`, 괄호로 감싼 `(SELECT ..) UNION (SELECT ..) ORDER BY`, `NATURAL LEFT JOIN`, `IN (SELECT ... UNION SELECT ...)`, `INSERT ... SELECT ... ON DUPLICATE KEY UPDATE`
+- **조회** : `NATURAL LEFT | RIGHT JOIN`, `TABLE t`, `VALUES ROW(...)`, `USE | FORCE | IGNORE INDEX` 힌트, `PARTITION (p)` 선택, `STRAIGHT_JOIN`, `SELECT ALL | HIGH_PRIORITY`, `NULLS FIRST | LAST`, `OFFSET n ROWS`, `FOR UPDATE OF 테이블`, `NATURAL LEFT JOIN`, `IN (SELECT ... UNION SELECT ...)`, `INSERT ... SELECT ... ON DUPLICATE KEY UPDATE`
 - **식 · 리터럴** : `IS [NOT] DISTINCT FROM`, `BETWEEN SYMMETRIC`, `b'101'`, `DATE '2024-01-01'`, `_utf8mb4'x'`, `COLLATE` 연산자, `BINARY` 연산자, `MATCH ... AGAINST`, `SOUNDS LIKE`, `SELECT @a := 식`, `CONVERT(식 USING 문자집합)`, `DEFAULT(col)`, `GROUPING()`
 - **함수** : `PERCENTILE_CONT ... WITHIN GROUP`, `BIT_XOR`, `CONNECTION_ID`, `GET_LOCK`, `INET_ATON`, `BENCHMARK`, `JSON_STORAGE_SIZE` 등 위 9장에 없는 함수
 - **프로시저** : `SIGNAL`, `DECLARE ... HANDLER`, 커서(`DECLARE CURSOR`), 본문의 `CASE ... END CASE`, 반복문 끝의 라벨(`END WHILE lp`), `CREATE PROCEDURE IF NOT EXISTS`, `CREATE OR REPLACE PROCEDURE`, `CREATE TRIGGER IF NOT EXISTS`, 여러 문장 함수 본문(`BEGIN ... RETURN ... END`)
