@@ -1,14 +1,17 @@
-"""RuSQL_통합문서_v29.docx -> RuSQL_통합문서_v29.hwpx, read straight from the docx XML.
+"""A Word .docx -> .hwpx, read straight from the docx XML (made for RuSQL_통합문서_v29.docx and RuSQL_임시문서.docx).
 Why not Hangul itself: Hangul's COM Open cannot read a .docx, and the ODT detour (Word -> ODT -> Hangul) loses bold, heading numbers and the table look.
-usage:  py code/test/docs/docx2hwpx.py <out.hwpx>      then let Hangul open it and save it again as HWPX (it adds its own layout data):
+usage:  DOCX_PATH=<file.docx> py code/test/docs/docx2hwpx.py <out.hwpx>      then let Hangul open it and save it again as HWPX (it adds its own layout data):
         HwpObject.Open(out, "HWPX", ""); HwpObject.SaveAs(final, "HWPX", "")
-Needs: the docx in docs/deliverables, and the D06 hwpx of the same folder tree as the package template (fonts list, scripts, container files).
+Needs: the D06 hwpx of the docs/deliverables folder tree as the package template (fonts list, scripts, container files).
+Both Word files were deleted from docs/deliverables on 2026-11-11 (the .hwpx files are the working documents now); they are in git history (commit 05ab639).
+RuSQL_임시문서.docx (one 109-row Gantt table, 6.5 pt text) was converted with ROW_MIN=2390 CELL_LINE_PCT=188 TBL_BREAK=CELL: 5 pages like Word, the same rows on every page.
 
 The look is calibrated against Word's own PDF of the docx (2026-11-11): Word could not use the Noto Sans KR the docx names (Hangul draws that variable font only as Thin),
 so it laid the text out with Gulim-like widths (Hangul syllable 1.00 em, blank 0.333 em) and a line pitch of 1.878 x the size. The defaults below reproduce that with the
 Hancom Gothic face: character spacing +7 % (Hangul), +1 % (Latin), -8 % (other), 'useFontSpace' (the blank takes the font's own width), line spacing 145.7 %, no grid snapping.
 Result: 52 pages like Word, every heading on the same page, all 25 pictures the same size.
-env overrides: FONT_FACE, LINE_PCT, SP_H, SP_L, SP_O, RATIO_H, RATIO_L, USE_FONT_SPACE, BREAK_L, TBL_X, FLH, DOCX_PATH
+env overrides: FONT_FACE, LINE_PCT, CELL_LINE_PCT (inside table cells), SP_H, SP_L, SP_O, RATIO_H, RATIO_L, USE_FONT_SPACE, BREAK_L, TBL_X, FLH,
+               ROW_MIN (least table row height, HWPUNIT), TBL_BREAK (CELL / TABLE), DOC_TITLE, DOC_PREVIEW, DOCX_PATH
 """
 import zipfile, re, os, sys, glob, io
 from lxml import etree
@@ -16,10 +19,12 @@ from xml.sax.saxutils import escape
 
 SP = os.path.dirname(os.path.abspath(__file__))
 D = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(SP))), 'docs', 'deliverables')   # <repo>/docs/deliverables
-DOCX = os.environ.get('DOCX_PATH') or glob.glob(os.path.join(D, 'RuSQL_*v29.docx'))[0]
+DOCX = os.environ.get('DOCX_PATH') or sys.exit('set DOCX_PATH to the .docx to convert (the Word files of docs/deliverables were deleted on 2026-11-11; see git history)')
 TEMPLATE = glob.glob(os.path.join(D, '2026_졸업작품_산출물_개정', 'hwpx', '작성본', '*-D06-*.hwpx'))[0]
 FACE = os.environ.get('FONT_FACE', '한컴 고딕')
 LINE_PCT = float(os.environ.get('LINE_PCT', '145.7'))
+CELL_PCT = float(os.environ.get('CELL_LINE_PCT', str(LINE_PCT)))    # line spacing of the paragraphs inside table cells
+cur_pct = [LINE_PCT]                                                   # the value the paragraphs written right now get
 FLH = os.environ.get('FLH', '1')
 TBL_X = int(os.environ.get('TBL_X', '0'))      # horizontal offset of the tables (HWPUNIT)
 BREAK_L = os.environ.get('BREAK_L', 'BREAK_WORD')   # Latin words: KEEP_WORD (break at blanks and slashes) or BREAK_WORD (anywhere)
@@ -104,10 +109,6 @@ def cell_bf(fill):
 
 def pbdr_bf():
     return bf_reg.get(('pbdr',))
-
-
-def parapr_id(align, before, after, left, right, first, pbdr, outline=None):
-    return para_reg.get((align, before, after, left, right, first, pbdr))
 
 
 def parse_ppr(p):
@@ -215,7 +216,7 @@ def para_xml(p, first_ctrl='', force_pagebreak=False, prev_after=0):
                 raise SystemExit('unhandled run child: ' + n)
     mark = dict(base); mark.update(d['mark'])
     pbf = pbdr_bf() if d['pbdr'] else 1
-    pid = para_reg.get((d['jc'], d['before'], d['after'], d['left'], d['right'], d['first'], d['pbdr']))
+    pid = para_reg.get((d['jc'], d['before'], d['after'], d['left'], d['right'], d['first'], d['pbdr'], cur_pct[0]))
     out = [f'<hp:p id="0" paraPrIDRef="{pid}" styleIDRef="{ {"Heading1": 1, "Heading2": 2, "Heading3": 3}.get(d["style"], 0) }" pageBreak="{1 if pagebreak else 0}" columnBreak="0" merged="0">']
     if not segs:
         out.append(f'<hp:run charPrIDRef="{charpr_id(mark)}">{first_ctrl}<hp:t/></hp:run>')
@@ -233,7 +234,7 @@ def para_xml(p, first_ctrl='', force_pagebreak=False, prev_after=0):
 
 # ------------------------------------------------------------------ tables
 tbl_uid = [0]
-ROW_MIN = 2300    # the least row height (cell margins + one line); Hangul grows the row to its text
+ROW_MIN = int(os.environ.get('ROW_MIN', '2300'))    # the least row height (cell margins + one line); Hangul grows the row to its text
 
 
 def table_xml(tbl):
@@ -246,20 +247,23 @@ def table_xml(tbl):
         ci = 0
         for tc in tr.findall(q('tc')):
             vm = tc.find(q('tcPr')).find(q('vMerge'))
+            gs = tc.find(q('tcPr')).find(q('gridSpan'))
+            span = int(gs.get(q('val'))) if gs is not None else 1
             if vm is not None and vm.get(q('val')) != 'restart':
                 cells[owner[ci]]['rowspan'] += 1
             else:
-                cells[(ri, ci)] = dict(tc=tc, rowspan=1)
+                cells[(ri, ci)] = dict(tc=tc, rowspan=1, span=span)
                 if vm is not None:
                     owner[ci] = (ri, ci)
-            ci += 1
+            ci += span
     tblw = sum(grid) * TW
     # Word: a row without <w:cantSplit/> may break across pages; Hangul decides per table: any such row -> cells may break ('CELL'), else only between rows ('TABLE')
     can_split = any(tr.find(q('trPr')) is None or tr.find(q('trPr')).find(q('cantSplit')) is None for tr in rows)
-    out = [f'<hp:tbl id="{2095000000 + tbl_uid[0]}" zOrder="{tbl_uid[0]}" numberingType="TABLE" textWrap="TOP_AND_BOTTOM" textFlow="BOTH_SIDES" lock="0" dropcapstyle="None" pageBreak="{"CELL" if can_split else "TABLE"}" repeatHeader="1" rowCnt="{len(rows)}" colCnt="{len(grid)}" cellSpacing="0" borderFillIDRef="2" noAdjust="0">',
+    out = [f'<hp:tbl id="{2095000000 + tbl_uid[0]}" zOrder="{tbl_uid[0]}" numberingType="TABLE" textWrap="TOP_AND_BOTTOM" textFlow="BOTH_SIDES" lock="0" dropcapstyle="None" pageBreak="{os.environ.get("TBL_BREAK") or ("CELL" if can_split else "TABLE")}" repeatHeader="1" rowCnt="{len(rows)}" colCnt="{len(grid)}" cellSpacing="0" borderFillIDRef="2" noAdjust="0">',
            f'<hp:sz width="{tblw}" widthRelTo="ABSOLUTE" height="{ROW_MIN * len(rows)}" heightRelTo="ABSOLUTE" protect="0"/>',
            f'<hp:pos treatAsChar="0" affectLSpacing="0" flowWithText="1" allowOverlap="0" holdAnchorAndSO="0" vertRelTo="PARA" horzRelTo="COLUMN" vertAlign="TOP" horzAlign="LEFT" vertOffset="0" horzOffset="{TBL_X}"/>',
            '<hp:outMargin left="0" right="0" top="0" bottom="0"/><hp:inMargin left="0" right="0" top="0" bottom="0"/>']
+    cur_pct[0] = CELL_PCT
     for ri, tr in enumerate(rows):
         header = tr.find(q('trPr')) is not None and tr.find(q('trPr')).find(q('tblHeader')) is not None
         out.append('<hp:tr>')
@@ -280,8 +284,9 @@ def table_xml(tbl):
                 px, pa = para_xml(p, prev_after=pa)
                 out.append(px)
             out.append('</hp:subList>')
-            out.append(f'<hp:cellAddr colAddr="{ci}" rowAddr="{ri}"/><hp:cellSpan colSpan="1" rowSpan="{c["rowspan"]}"/><hp:cellSz width="{width}" height="{ROW_MIN * c["rowspan"]}"/><hp:cellMargin left="{ml}" right="{mr}" top="{mt}" bottom="{mb}"/></hp:tc>')
+            out.append(f'<hp:cellAddr colAddr="{ci}" rowAddr="{ri}"/><hp:cellSpan colSpan="{c["span"]}" rowSpan="{c["rowspan"]}"/><hp:cellSz width="{width}" height="{ROW_MIN * c["rowspan"]}"/><hp:cellMargin left="{ml}" right="{mr}" top="{mt}" bottom="{mb}"/></hp:tc>')
         out.append('</hp:tr>')
+    cur_pct[0] = LINE_PCT
     out.append('</hp:tbl>')
     return ''.join(out)
 
@@ -292,16 +297,16 @@ pg = sect.find(q('pgSz')); mg = sect.find(q('pgMar'))
 PW, PH = int(pg.get(q('w'))) * TW, int(pg.get(q('h'))) * TW
 M_TOP, M_BOT, M_L, M_R = (int(mg.get(q(k))) * TW for k in ('top', 'bottom', 'left', 'right'))
 M_HDR, M_FTR = int(mg.get(q('header'))) * TW, int(mg.get(q('footer'))) * TW
-assert sect.find(q('titlePg')) is not None
+HIDE_FIRST = 1 if sect.find(q('titlePg')) is not None else 0     # a cover page without footer / page number only when the docx has a 'different first page'
 
 FOOT_SZ = 18   # the footer's page number is 9 pt
 foot_char = charpr_id(dict(sz=FOOT_SZ))
-foot_para = para_reg.get(('CENTER', 0, 0, 0, 0, 0, None))
+foot_para = para_reg.get(('CENTER', 0, 0, 0, 0, 0, None, LINE_PCT))
 SEC_CTRL = (
     '<hp:ctrl><hp:colPr id="" type="NEWSPAPER" layout="LEFT" colCount="1" sameSz="1" sameGap="0"/></hp:ctrl>'
     f'<hp:secPr id="" textDirection="HORIZONTAL" spaceColumns="1134" tabStop="8000" tabStopVal="4000" tabStopUnit="HWPUNIT" outlineShapeIDRef="0" memoShapeIDRef="0" textVerticalWidthHead="0" masterPageCnt="0">'
     '<hp:grid lineGrid="0" charGrid="0" wonggojiFormat="0"/><hp:startNum pageStartsOn="BOTH" page="0" pic="0" tbl="0" equation="0"/>'
-    '<hp:visibility hideFirstHeader="0" hideFirstFooter="1" hideFirstMasterPage="0" border="SHOW_ALL" fill="SHOW_ALL" hideFirstPageNum="1" hideFirstEmptyLine="0" showLineNumber="0"/>'
+    f'<hp:visibility hideFirstHeader="0" hideFirstFooter="{HIDE_FIRST}" hideFirstMasterPage="0" border="SHOW_ALL" fill="SHOW_ALL" hideFirstPageNum="{HIDE_FIRST}" hideFirstEmptyLine="0" showLineNumber="0"/>'
     '<hp:lineNumberShape restartType="0" countBy="0" distance="0" startNumber="0"/>'
     f'<hp:pagePr landscape="WIDELY" width="{PW}" height="{PH}" gutterType="LEFT_ONLY"><hp:margin header="{M_TOP - M_HDR}" footer="{M_BOT - M_FTR}" gutter="0" left="{M_L}" right="{M_R}" top="{M_HDR}" bottom="{M_FTR}"/></hp:pagePr>'
     '<hp:footNotePr><hp:autoNumFormat type="DIGIT" userChar="" prefixChar="" suffixChar=")" supscript="0"/><hp:noteLine length="-1" type="SOLID" width="0.12 mm" color="#000000"/><hp:noteSpacing betweenNotes="283" belowLine="567" aboveLine="850"/><hp:numbering type="CONTINUOUS" newNum="1"/><hp:placement place="EACH_COLUMN" beneathText="0"/></hp:footNotePr>'
@@ -317,7 +322,7 @@ SEC_CTRL = (
 parts = []
 first = True
 host_char = charpr_id(dict(sz=2))
-host_para = para_reg.get(('LEFT', 0, 0, 0, 0, 0, None))
+host_para = para_reg.get(('LEFT', 0, 0, 0, 0, 0, None, LINE_PCT))
 body_after = 0
 for ch in body:
     n = etree.QName(ch).localname
@@ -373,11 +378,11 @@ def charpr_xml(i, key):
 
 
 def parapr_xml(i, key):
-    jc, before, after, left, right, first, pbdr = key
+    jc, before, after, left, right, first, pbdr, pct = key
     bf = pbdr_bf() if pbdr else 1
     off_b = (pbdr[2] * 100) if pbdr else 0
     m = (f'<hh:margin><hc:intent value="{first * TW}" unit="HWPUNIT"/><hc:left value="{left * TW}" unit="HWPUNIT"/><hc:right value="{right * TW}" unit="HWPUNIT"/>'
-         f'<hc:prev value="{before * TW}" unit="HWPUNIT"/><hc:next value="{after * TW}" unit="HWPUNIT"/></hh:margin><hh:lineSpacing type="PERCENT" value="{int(LINE_PCT)}" unit="HWPUNIT"/>')
+         f'<hc:prev value="{before * TW}" unit="HWPUNIT"/><hc:next value="{after * TW}" unit="HWPUNIT"/></hh:margin><hh:lineSpacing type="PERCENT" value="{int(pct)}" unit="HWPUNIT"/>')
     return (f'<hh:paraPr id="{i}" tabPrIDRef="0" condense="0" fontLineHeight="{FLH}" snapToGrid="0" suppressLineNumbers="0" checked="0" textDir="AUTO"><hh:align horizontal="{jc}" vertical="BASELINE"/>'
             f'<hh:heading type="NONE" idRef="0" level="0"/><hh:breakSetting breakLatinWord="{BREAK_L}" breakNonLatinWord="BREAK_WORD" widowOrphan="0" keepWithNext="0" keepLines="0" pageBreakBefore="0" lineWrap="BREAK"/>'
             '<hh:autoSpacing eAsianEng="0" eAsianNum="0"/>'
@@ -427,8 +432,8 @@ hpf = re.sub(r'<opf:item id="[^"]*" href="BinData/[^"]*"[^>]*/>', '', hpf)
 hpf = hpf.replace('</opf:manifest>', items + '</opf:manifest>')
 hpf = re.sub(r'<opf:itemref idref="section\d+" linear="yes"/>', '', hpf)
 hpf = hpf.replace('<opf:itemref idref="header" linear="yes"/>', '<opf:itemref idref="header" linear="yes"/><opf:itemref idref="section0" linear="yes"/>')
-hpf = re.sub(r'<opf:title[^>]*>[^<]*</opf:title>', '<opf:title xml:space="preserve">RuSQL 통합 문서 v29</opf:title>', hpf)
-preview = 'AI/MCP 통합 관계형 데이터베이스 관리 시스템 (RuSQL)\r\n프로젝트 통합 문서 | v29 | 김규현, 빌궁 | 2026년\r\n'.encode('utf-8')
+hpf = re.sub(r'<opf:title[^>]*>[^<]*</opf:title>', '<opf:title xml:space="preserve">' + os.environ.get('DOC_TITLE', 'RuSQL 통합 문서 v29') + '</opf:title>', hpf)
+preview = os.environ.get('DOC_PREVIEW', 'AI/MCP 통합 관계형 데이터베이스 관리 시스템 (RuSQL)\r\n프로젝트 통합 문서 | v29 | 김규현, 빌궁 | 2026년\r\n').encode('utf-8')
 
 os.makedirs(os.path.dirname(os.path.abspath(OUT)), exist_ok=True)
 with zipfile.ZipFile(OUT, 'w') as zo:
