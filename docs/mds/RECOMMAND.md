@@ -1,9 +1,9 @@
-# RuSQL 추천 목록 — 분류별 (남은 항목만, R80 이후 · 2026-11-12)
+# RuSQL 추천 목록 — 분류별 (남은 항목만, R81 점검 · 2026-11-14)
 
-완료된 항목은 뺐습니다(R44~R80에서 끝낸 것은 `DATE.md`에 있습니다). 항목마다 엔진에 실제로 돌려 보고(진짜 MySQL 8.4.9와 비교) 앱·MCP 코드를 찾아 이미 있거나 일부만 있는 것을 가려낸 판입니다. 점수판은 코퍼스 56개에서 차이 0이고(R80), B+Tree·MVCC 페이지는 R62에서 단순한 자동 재생으로 줄였습니다. 발표·제출물 중 포스터·소개글·메인 화면 캡처는 끝났습니다(`docs/deliverables/`). 점검에서 바뀐 것의 이력은 맨 아래 "참고"에 모았습니다.
+완료된 항목은 뺐습니다(R44~R80에서 끝낸 것은 `DATE.md`에 있습니다). 항목마다 엔진에 실제로 돌려 보고(진짜 MySQL 8.4.9와 비교) 앱·MCP 코드를 찾아 이미 있거나 일부만 있는 것을 가려낸 판입니다. 2026-11-14의 R81 점검에서는 **6번 표 30줄 중 23줄 · 7번 표 4줄 · 9번 표 31줄 전부를 다시 돌려** 낡은 줄이 없음을 확인했고(한 줄의 하위 주장만 이미 같아져 있었음), 목록에 없던 새 줄 16개를 올렸습니다(표에서 "R81"로 표시, 재현은 `code/test/diff/corpus/tool_gaps.sql` 68문장 중 59개가 다름). 점수판은 코퍼스 56개에서 차이 0이고(R80), B+Tree·MVCC 페이지는 R62에서 단순한 자동 재생으로 줄였습니다. 발표·제출물 중 포스터·소개글·메인 화면 캡처는 끝났습니다(`docs/deliverables/`). 점검에서 바뀐 것의 이력은 맨 아래 "참고"에 모았습니다.
 
 - **현재 상태:** `일부`(일부만 있음) · `없음` · `오답`(지금 조용히 틀린 값을 돌려줌) · `다름`(MySQL과 다르지만 오류로 드러남)
-- **추천도:** ★ 다섯 개. 기준은 실사용 가치 + 발표 임팩트 + 비용 대비 효과입니다. 졸업작품 마감(11월 말)까지 약 3주를 전제로 합니다. 각 분류 안에서 추천도 순입니다.
+- **추천도:** ★ 다섯 개. 기준은 실사용 가치 + 발표 임팩트 + 비용 대비 효과입니다. 졸업작품 마감(11월 말)까지 약 2주를 전제로 합니다. 각 분류 안에서 추천도 순입니다.
 - **효과:** 그 일을 하면 얻는 것(발표에서 보이는 것, 막히는 사고, 호환되는 도구). 효과가 작은 항목은 "작습니다"라고 적었습니다.
 - **비용:** 제가 구현하고 검증(코퍼스 비교, 심은 버그, 전체 시험, 문서)까지 마치는 데 걸리는 시간입니다. 하 ≈ 2~4시간, 중 ≈ 하루, 상 ≈ 2~4일. 빌드와 전체 시험 한 바퀴가 약 35분이라 헤더를 건드리는 변경은 여러 바퀴가 듭니다. **프론트(UI)는 자동 시험이 없어서 눈으로 확인하는 시간이 따로 붙습니다.**
 
@@ -11,15 +11,15 @@
 
 | 분류 | 항목 수 | 가장 먼저 | 효과 |
 |---|---|---|---|
-| 1. 발표·제출 대비 | 6 | 발표 PC용 설치본에 엔진 묶기, **직접**: MCP·복구 장면 리허설, 녹화 | 발표 당일 앱이 안 뜨거나 시연이 끊기는 일을 막습니다 |
+| 1. 발표·제출 대비 | 7 | 발표 PC용 설치본에 엔진 묶기, **직접**: MCP·복구 장면 리허설, 녹화, (마감 직전) 산출물 숫자 갱신 | 발표 당일 앱이 안 뜨거나 시연이 끊기는 일, 제출 문서의 낡은 숫자를 막습니다 |
 | 2. 안정성·무결성 | 1 | 아직 `KILL`이 안 듣는 것(`ALTER`·쓰는 도중) | 큰 위험은 R63~R69에서 닫혔고 R78에서 크래시 퍼저의 마지막 불일치도 닫혔습니다. 남은 것은 드문 모양 하나입니다 |
-| 3. 품질 점검 | 3 | 마감 1주 전에 Debug 전체 + `KILL`을 섞은 크래시 시험 | 마감 전에 숨은 회귀와 조용한 오답을 잡습니다 |
+| 3. 품질 점검 | 4 | 마감 1주 전에 Debug 전체 + `KILL`을 섞은 크래시 시험, **직접**: DBeaver · Workbench로 접속해 보기 | 마감 전에 숨은 회귀와 조용한 오답을 잡습니다 |
 | 4. 프론트 (앱) | 4 | 인덱스 제안 카드의 남은 것(큰 표), 스키마 비교의 빠진 것 | 앱만으로 큰 표에서도 인덱스를 시험해 볼 수 있습니다 |
 | 5. MCP (지금 37개 도구, resources 2개 · prompts 3개) | 1 | `suggest_indexes` 후속(열 사이의 상관 · 큰 표) | 제안이 더 많은 모양의 문장에서 맞아집니다 |
-| 6. MySQL과 다른 작은 차이 | 30 | 조인 뷰의 `UPDATE`·`INSERT`, 프로토콜 오류 번호의 남은 약 20개, `FROM DUAL`과 괄호 안 `LIMIT`가 있는 `UNION` | 남은 호환 차이가 줄지만 대부분 눈에 안 띕니다 |
+| 6. MySQL과 다른 작은 차이 | 40 | **R81**: 조용한 오답(16진 리터럴 · `COMMENT` 소실 · `LATERAL` 무시 · `SHA2` NULL · `MEDIUMINT`/`CHAR` 저장), 문자열 별칭 `AS 'x'`, `SELECT` 수식어 | 조용히 틀린 값이 사라지고, 손으로 쓴 SQL이 오류 없이 돕니다 |
 | 7. 엔진 기능 추가 | 6 | `COLLATE` 절, `FULLTEXT`, `FLUSH` · `REPAIR` · `CHECKSUM TABLE` | 대소문자를 구분하는 열이 되고, `mysqldump`의 `FLUSH TABLES`를 받습니다 |
-| 8. 백엔드 (서버·운영) | 5 | (시간이 되면) 코퍼스 비교 CI | 푸시마다 MySQL과의 차이 0을 자동으로 확인합니다 |
-| 9. SQL 문법 추가 — 보류 | 31 | `INSERT INTO t () VALUES ()`, `GROUPING()`, `SIGNAL`, `UPDATE … JOIN (SELECT …)` | 옮겨 온 MySQL 쿼리가 더 많이 그대로 돕니다 |
+| 8. 백엔드 (서버·운영) | 7 | **R81**: `mysqldump`로 RuSQL 백업하기, 스키마 읽는 도구용 `information_schema` · `SHOW`; (시간이 되면) 코퍼스 비교 CI | RuSQL → `mysqldump` → MySQL 이전이 되고, 도구가 프로시저 · 트리거 · 뷰를 봅니다 |
+| 9. SQL 문법 추가 — 보류 | 33 | `INSERT INTO t () VALUES ()`, `GROUPING()`, `SIGNAL`, `UPDATE … JOIN (SELECT …)` | 옮겨 온 MySQL 쿼리가 더 많이 그대로 돕니다 |
 
 ## 1. 발표·제출 대비
 
@@ -33,6 +33,7 @@
 | 시연 실패 대비 녹화·스크린샷 | 없음 | ★★★★ | 하 | 라이브가 안 될 때 바로 틀 수 있어 발표가 멈추지 않습니다. | **직접** 하셔야 합니다(화면 녹화). 라이브가 안 될 때 바로 틀 수 있습니다. |
 | 최적화 전후 속도 애니메이션 | 일부 (Benchmark 패널이 "AutoCommit n배 빠름" 같은 배지를 실제 측정으로 보여 줌, 정적 `speedup_chart.png`) | ★★★ | 하~중 | 성능 개선을 숫자 표가 아니라 한눈에 보이는 장면으로 전달합니다. 이미 있는 측정값을 쓰므로 새 위험은 없습니다. | 이미 있는 데이터를 애니메이션으로 바꾸면 됩니다. |
 | RuSQL vs MySQL 분할 화면 | 없음 (Compat 페이지는 코퍼스별 일치 수만 보여 주고, 활동 표시줄의 아이콘은 11-02부터 숨겨 둠 — `SHOW_COMPAT_ICON`) | ★★★ | 중 | "같은 문장, 같은 답"을 눈앞에서 보여 줘 호환성 주장의 설득력이 커집니다. 발표장에 MySQL이 떠 있어야 하는 것이 약점입니다. | 발표장에 MySQL이 떠 있어야 해서 불안정합니다. |
+| **산출물 숫자 갱신 (R81)** — D01 · D05 · D07 · D08 · 통합문서 v29 | 낡음 — 문서가 R77 때 숫자("자동 회귀 테스트 946개 케이스 · 1,520,540개 검증문", "코퍼스 49개 · 4,209문장", D07의 에픽별 케이스 수 합 946)를 적고 있고 지금은 974 · 1,521,562 · 56개 · 4,872문장(R80). 권한 · MCP 도구 37개 같은 문장은 지금도 맞음 | ★★★★ | 하 (직접 XML 편집 + 한글 · 워드로 열어 확인) | 제출 문서의 숫자가 코드와 어긋나지 않습니다. 평가자가 저장소를 열면 바로 보이는 불일치입니다. | **마감 3일 전쯤 한 번에** 하는 것이 효율적입니다(그 전에 엔진이 또 바뀌면 숫자가 다시 어긋남). 숫자는 `DATE.md`의 마지막 라운드 항목과 `compatSnapshot.json`에서 가져옵니다. D07 에픽별 합은 시험 이름의 에픽 표지를 다시 세어야 합니다. |
 
 ## 2. 안정성·무결성
 
@@ -49,8 +50,9 @@
 | 항목 | 현재 상태 | 추천도 | 비용 | 효과 | 근거 |
 |---|---|---|---|---|---|
 | 누적 점검 한 바퀴 (Debug 전체 + 크래시 퍼저 + 빌드 간 차분) | 일부 — R54는 크래시 퍼저 3종(38라운드)과 R53 빌드와의 A/B까지 돌렸지만 Debug는 R50 이후 라운드마다 건너뛰었고(R63·R64도), R53의 락 대기·세션 정리 코드는 퍼저가 아직 다루지 않음(`KILL`을 섞은 퍼저가 없음) | ★★★ | 하 (기계 시간 약 1시간) | 최근 열다섯 라운드에 쌓인 숨은 회귀(Debug 빌드에서만 드러나는 오류, `KILL`과 얽힌 동시성)를 마감 전에 잡습니다. | 마감 전에 Debug 전체와 `KILL`을 섞은 크래시 시험을 한 번은 돌려야 안심입니다. |
-| 새 영역 훑기 (진짜 MySQL과 문장 비교) | 일부 — R71에서 트랜잭션 · 트리거 쓰기 · 뷰 쓰기 · 외래키 동작 · 날짜 계산(363문장, 차이 124 → 0), R77에서 JSON 함수(245문장, 50 → 0) · 준비된 문장의 바이너리 프로토콜(81번 실행, 읽을 수 없던 답 → 0) · `COLLATE` 절(69문장, 62개 다름, 고치지 않음)을 훑고, R78에서 권한 · 역할(115문장에서 90개 다름 → 300문장 차이 0)을 고침. 아직 안 훑은 모양: 문자셋 변환(`CONVERT(... USING ...)`), 잠금 읽기(`FOR UPDATE`)의 대기와 오류, 파티션이 걸린 표의 문장, `COM_STMT_SEND_LONG_DATA` · 서버 커서 | ★★★ | 중 | 아직 안 본 모양의 조용한 오답을 찾습니다(R77에서도 바이너리 프로토콜의 읽을 수 없는 답과 권한이 강제되지 않는 것이 나왔고, 둘 다 고쳤습니다). | 새 코퍼스를 쓰고 `vs_mysql.py`(바이너리 프로토콜은 `prepared_wire.py`)로 비교 → 고치고 → 점수판에 올립니다. `privileges.sql`은 R78에서 점수판에 올랐고, `collate_clause.sql`은 차이가 남아 있어 점수판 밖에 둡니다. |
+| 새 영역 훑기 (진짜 MySQL과 문장 비교) | 일부 — R71에서 트랜잭션 · 트리거 쓰기 · 뷰 쓰기 · 외래키 동작 · 날짜 계산(363문장, 차이 124 → 0), R77에서 JSON 함수(245문장, 50 → 0) · 준비된 문장의 바이너리 프로토콜(81번 실행, 읽을 수 없던 답 → 0) · `COLLATE` 절(69문장, 62개 다름, 고치지 않음)을 훑고, R78에서 권한 · 역할(115문장에서 90개 다름 → 300문장 차이 0)을 고침. R81(2026-11-14)에서 훑은 것: 실제 `mysqldump` · `mysqlshow` · `mysqlcheck`와 `information_schema` · `SHOW` 조회 · 리터럴 모양 · 열 형 · `sql_mode` · 여러 분야의 함수(정규식 · 문자열 · 날짜 · 수학 · 비트 · `CAST` · 집계 · 윈도 · JSON — 새로 틀린 것은 `SHA2`뿐)로 새 줄 16개(6 · 8 · 9번 표의 "R81"). 아직 안 훑은 모양: 잠금 읽기(`FOR UPDATE`)의 대기와 오류, 파티션이 걸린 표의 문장, `COM_STMT_SEND_LONG_DATA` · 서버 커서, 다중 문장 한 번에 보내기, `LOAD DATA LOCAL`, 실제 DBeaver · Workbench · ORM의 접속 | ★★★ | 중 | 아직 안 본 모양의 조용한 오답을 찾습니다(R77에서도 바이너리 프로토콜의 읽을 수 없는 답과 권한이 강제되지 않는 것이 나왔고, 둘 다 고쳤습니다). | 새 코퍼스를 쓰고 `vs_mysql.py`(바이너리 프로토콜은 `prepared_wire.py`)로 비교 → 고치고 → 점수판에 올립니다. `privileges.sql`은 R78에서 점수판에 올랐고, `collate_clause.sql`은 차이가 남아 있어 점수판 밖에 둡니다. |
 | 앱 화면 사람 눈 점검 | 일부 — 화면은 디버그 포트로 DOM을 눌러 확인했을 뿐, 아이콘·폰트·전체 모양은 본 적 없음 | ★★★ | 하 | 자동 확인이 못 보는 아이콘·폰트·전체 모양의 어색함을 찾습니다. | **직접** 앱을 한 바퀴 눌러 보시고 어색한 곳을 알려 주세요. |
+| **실제 DB 도구로 접속해 보기 (R81)** — DBeaver · MySQL Workbench · (쓸 수 있으면) ORM | 없음 — `mysql` CLI · `mysqlshow` · `mysqlcheck`는 접속 · 조회가 되고 `mysqldump`는 전부 실패(8번 표). DBeaver · Workbench · ORM은 한 번도 붙여 보지 않았음 | ★★★ | 하 (**직접**, 30분) | 발표에서 "아무 MySQL 도구나 붙는다"고 말해도 되는지 미리 압니다. 안 되는 조회가 있으면 8번 표의 "스키마 읽는 도구" 줄로 옮겨 고칩니다. | 도구가 접속 직후와 스키마 트리를 열 때 보내는 문장은 제가 흉내 낸 것(코퍼스)이라 실제 도구와 다를 수 있습니다. 접속 → 데이터베이스 트리 펼치기 → 표 열기 → 프로시저 · 트리거 폴더 열기 순으로 보시고, 실패한 화면을 알려 주세요. |
 
 ## 4. 프론트 (앱)
 
@@ -73,10 +75,20 @@ Claude가 부르는 도구.
 
 ## 6. MySQL과 다른 작은 차이
 
-진짜 MySQL 8.4.9와 비교해 남은 것들. 대부분 오류로 거절하는 쪽이거나 모양이 작아서 조용한 큰 오답은 아닙니다(점수판 코퍼스 47개는 차이 0).
+진짜 MySQL 8.4.9와 비교해 남은 것들. 대부분 오류로 거절하는 쪽이거나 모양이 작아서 조용한 큰 오답은 아닙니다(점수판 코퍼스 56개는 차이 0). **맨 앞 열 줄(R81)은 2026-11-14 점검에서 새로 찾은 것으로, 그중 다섯 줄(16진 리터럴 · `COMMENT` · `LATERAL` · `SHA2` · 열 형 저장)은 오류 없이 틀린 값을 돌려주거나 저장하는 "오답"입니다.** 재현은 모두 `corpus/tool_gaps.sql`(점수판 밖).
 
 | 항목 | 현재 상태 | 추천도 | 비용 | 효과 | 근거 |
 |---|---|---|---|---|---|
+| **문자열 별칭 `AS 'x'` (R81)** | 다름(오류) — `SELECT id AS 'a b'`, `SELECT id 'a2'`가 문법 오류(`Expected identifier (alias)`). 백틱 · 식별자 별칭은 됨 | ★★★★ | 하 | 손으로 쓴 SQL에 매우 흔한 `AS 'Total'` 모양이 오류 없이 돕니다. | 어휘 단계에서 `AS` 뒤(와 별칭 자리)에 문자열 토큰을 받으면 됩니다. 열 이름은 그 글자가 됩니다. |
+| **`SELECT` 수식어 (R81)** — `SQL_NO_CACHE` · `HIGH_PRIORITY` · `SQL_SMALL_RESULT` · `SQL_BIG_RESULT` · `SQL_BUFFER_RESULT` · `STRAIGHT_JOIN` | 다름(오류) — 앞의 다섯은 **열 이름으로 읽혀** 1054 `Unknown column 'SQL_NO_CACHE'`, `STRAIGHT_JOIN`은 문법 오류. `SQL_CALC_FOUND_ROWS` · `DISTINCT`는 됨. 이 때문에 **`mysqldump`의 `SELECT /*!40001 SQL_NO_CACHE */ * FROM t`가 실패**(8번 표) | ★★★★ | 하 | `mysqldump`가 데이터를 읽고, 옛 쿼리가 오류 없이 돕니다(수식어는 뜻이 없으니 읽고 무시하면 됩니다). | `SELECT` 바로 뒤의 수식어 목록을 읽는 자리 하나입니다. 같은 자리에 `SQL_CALC_FOUND_ROWS`가 이미 있습니다. |
+| **16진 · 비트 리터럴 (R81)** — `0x4142` · `X'41'` · `0b101` · `b'101'` · `_binary'…'` · `_utf8mb4'…'` · `N'…'` | **오답** — `INSERT … VALUES (1, 0x4142, 0x41)` 뒤 `HEX(b)`가 `34313432`(글자 `"4142"`의 바이트; MySQL `4142`)이고 `s`는 `41`(MySQL `A`), `0x41 + 0`이 `41.0`(MySQL `65`), `0b101`은 `0`. `X'41'` · `b'101'` · `_binary'xy'` · `_utf8mb4'abc'` · `N'abc'`는 문법 오류 | ★★★ | 하~중 | `mysqldump --hex-blob` · ORM이 보내는 이진 값이 깨지지 않고, 조용한 값 손상 하나가 사라집니다. | 어휘 단계에서 `0x…` · `X'…'`를 바이트열 글자로 읽고 `b'…'`는 비트 값으로 읽으면 됩니다. 이진 형(`BINARY` · `VARBINARY`, 9번 표)이 없어도 글자 열에는 바이트를 그대로 둘 수 있습니다. 먼저 **오류로 거절**해서 조용한 손상만 막는 것은 하입니다. |
+| **`COMMENT`가 사라짐 (R81)** — 열 `COMMENT '…'`, 표 `COMMENT='…'`, `ALTER TABLE … COMMENT`, `MODIFY … COMMENT` | **오답(메타데이터 소실)** — 받고 버림: `information_schema.columns.column_comment` · `tables.table_comment`가 빈 글자, `SHOW CREATE TABLE`에 `COMMENT`가 없음(MySQL 덤프에 흔함) | ★★★ | 하~중 | 덤프 · 복원 · 스키마 도구에서 열 설명이 남습니다. 조용한 정보 손실 하나가 사라집니다. | 카탈로그에 글자 두 칸을 더하고(재시작 호환 확인) `SHOW CREATE TABLE` · `information_schema`가 읽게 하면 됩니다. |
+| **`LATERAL` 파생 표가 조용히 무시됨 (R81)** | **오답** — `FROM par, LATERAL (SELECT COUNT(*) c FROM chi WHERE chi.pid = par.id) l`이 오류 없이 `par`의 열만 돌려줌(MySQL은 `l.c` 열도). `par LATERAL (…)`는 오류 | ★★★ | 하 (오류로 거절) / 상 (구현) | 먼저 오류로 바꿔 조용한 오답을 없앱니다. 구현하면 행마다 다시 도는 파생 표(MySQL 8.0.14+)가 됩니다. | 파서가 `LATERAL`을 조인 대상으로 읽고 버리는 것으로 보입니다. 거절은 한 곳, 구현은 상관 서브쿼리를 FROM 자리로 올리는 일입니다. |
+| **열 형이 다른 형으로 저장됨 (R81)** — `MEDIUMINT` · `TINYTEXT` · `CHAR(n)` · `NCHAR` | **오답** — `MEDIUMINT`에 `9000000`이 들어감(MySQL 1264, 범위 ±8388607), `TINYTEXT`에 300자가 들어감(MySQL 1406, 255바이트), `CHAR(5)`가 `varchar(5)`로 저장되어 `'ab  '`의 끝 공백이 남음(`CHAR_LENGTH`가 4, MySQL 2; `SHOW COLUMNS`도 `varchar(5)`). `TINYTEXT` · `LONGTEXT` · `MEDIUMBLOB`은 모두 `text`로 표시 | ★★★ | 중 | 범위 · 길이 검사와 `CHAR` 비교가 MySQL과 같아지고, `SHOW CREATE TABLE`의 형이 원래 정의와 같습니다. | 열 형 이름을 합쳐 저장하는 곳(타입 파서)에서 원래 이름과 한계를 같이 들고 있어야 합니다. `CHAR`는 읽을 때 끝 공백을 떼는 규칙도 필요합니다. |
+| **`sql_mode`의 일부만 반영됨 (R81)** | 일부 — `PIPES_AS_CONCAT`은 반영(`'a' \|\| 'b'`가 `ab`, 끄면 `0`). 나머지는 안 먹음: `SET sql_mode = ''`를 해도 `SELECT pid, qty FROM chi GROUP BY pid`는 1055, `SELECT id, COUNT(*) FROM t`는 1140, `INSERT … 'abc'`(정수 열)는 1366(MySQL은 0 + 경고), 긴 글자는 1406(MySQL은 잘라 넣음), `1 / 0`은 1365(MySQL은 NULL). 큰따옴표는 **어떤 모드에서도** 같은 이름의 열이 있으면 열로 읽음(`SELECT "id" FROM par`가 `1, 2`; 기본 모드의 MySQL은 글자 `id`, `ANSI_QUOTES`일 때만 열) — `WHERE name = "name"`이 모든 행을 돌려주는 드문 오답. `@@sql_mode` 값 자체는 바뀐 대로 읽힘 | ★★★ | 중 | 옛 앱이 시작할 때 보내는 `SET sql_mode = ''` · `REPLACE(@@sql_mode, 'ONLY_FULL_GROUP_BY', '')`가 뜻대로 돕니다. | 켜고 끄는 지점이 문장 검사(바인더의 1055 · 1140), 값 쓰기(`StrictWrite`), 어휘(`"…"`) 세 곳입니다. 가장 흔한 `ONLY_FULL_GROUP_BY` 끄기 하나만 먼저 하는 것도 가능합니다(하~중). 큰따옴표만 따로 고치면 하입니다. |
+| **`SHA2(x, 224 / 384 / 512)`가 조용히 NULL (R81)** | **오답** — 길이 256(과 0)만 구현이고 나머지는 오류 없이 `NULL`(MySQL은 해시 값) | ★★ | 하 | 해시 함수가 MySQL과 같은 값을 줍니다. | SHA-256을 구현해 둔 곳에 SHA-224(같은 구조) · SHA-384 · SHA-512를 더합니다. 지원하지 않는 길이는 MySQL처럼 `NULL`. |
+| **`SHOW CREATE TABLE` · `DESCRIBE`의 표기 (R81)** | 다름(작음) — `CREATE TABLE … AS SELECT`가 원본의 `NOT NULL`을 잃음, `ALTER … ALTER COLUMN c DROP DEFAULT` 뒤에도 `DEFAULT NULL`을 적음, `CHECK` 절을 원문으로 적음(`(qty >= 0)`; MySQL `((`qty` >= 0))`), 뷰 정의를 원문으로 적음(MySQL은 `select … from` 정규형), `ON UPDATE CURRENT_TIMESTAMP` 열의 `Extra`가 빔(MySQL `DEFAULT_GENERATED on update CURRENT_TIMESTAMP`), 뷰 열의 기본값이 `NULL`(MySQL은 원본 열의 값) | ★★ | 중 | 덤프를 다시 읽거나 두 서버의 스키마를 글자로 견줄 때 같아집니다. | 형 표기(위 "열 형" 줄)와 같이 하면 효율적입니다. 뷰 정의의 정규화는 식 출력기가 필요해 가장 큽니다. |
+| **변수와 큰 수의 작은 차이 (R81)** | 다름(작음) — `SET NAMES utf8mb4 COLLATE utf8mb4_unicode_ci` 뒤에도 `@@collation_connection`이 `utf8mb4_0900_ai_ci`, `@@auto_increment_offset`이 빈 값(MySQL 1), `@@sql_select_limit` 무시, `@@version_comment`가 `RuSQL`(MySQL `MySQL Community Server - GPL`; 일부러일 수 있음), `SHOW VARIABLES LIKE 'character_set%'`가 4행(MySQL 8행), `18446744073709551615 + 1`이 오류 없이 값을 줌(MySQL 1690), `CAST(18446744073709551615 AS SIGNED)`가 `9223372036854775807`(MySQL `-1`) | ★ | 하 | 변수를 읽는 도구의 드문 값이 같아집니다. | 변수 표(`SELECT @@…`)에 항목을 더하는 일들이라 묶어서 하면 하입니다. `version_comment`는 표시 이름이라 사용자가 정할 일입니다. |
 | 글자와 숫자를 비교하는 남은 자리 | 일부 — R79에서 `IN (서브쿼리)`(양쪽 타입으로, `(a, b) IN (SELECT ...)`의 쌍마다)와 `CHECK`(열 타입으로 비교 — 글자 열과 글자는 글자끼리 `'9' > '10'`, 한쪽이 숫자면 숫자로; `ADD CHECK` · `UPDATE` · `REPLACE`도)는 MySQL과 같아졌고, UPDATE · DELETE의 `IN (서브쿼리)`와 `CHECK`는 숫자로 읽히지 않는 글자를 1292 · 3819로 거절한다. 남은 것: 서브쿼리의 열이 함수 · 식이라 종류를 모를 때는 예전 규칙(값의 모양), 날짜 · ENUM · SET 열이 서브쿼리의 값일 때의 1292 판정은 열 종류를 몰라 글자로 본다(왼쪽이 그 열이면 건너뜀), 갭 락 · 파티션 경계 비교는 점검하지 않았음 | ★ | 하~중 | 서브쿼리의 오른쪽이 식인 드문 모양까지 닫힙니다. | 바인더가 서브쿼리 열의 종류(`ConditionValue::Subquery::classes`)를 이미 정해 두니 식의 종류를 더 정확히 말하게 하면 됩니다. |
 | 집합 연산 · FROM 없는 SELECT의 남은 모양 | 다름(작음) — R79에서 `SELECT 5 UNION SELECT 3 ORDER BY 1`과 `SELECT 1 LIMIT 1`, R80에서 `FROM DUAL`과 자기 `ORDER BY` · `LIMIT`가 있는 괄호 안 피연산자 `(SELECT … LIMIT 2) UNION (SELECT …)`가 됨(괄호 묶음을 파생 표로 읽음). 남은 것: `WHERE x IN (SELECT … LIMIT 1)`은 MySQL이 1235로 거절하는데 여기는 받음, `SELECT * FROM DUAL`은 MySQL이 1096인데 여기는 다른 메시지, 괄호 두 겹으로 시작하는 파생 표 `FROM ((SELECT … LIMIT 2) UNION (SELECT …)) d`와 괄호로 감싼 `INSERT INTO t (SELECT …)`는 문법 오류 | ★ | 하 | 드문 모양 몇 개가 더 MySQL처럼 돕니다. | 괄호 처리(`drop_parentheses_around_operands`)는 앞이 집합 연산자인 묶음만 보고, 두 겹 괄호까지 넓히면 `f((SELECT …))` 같은 함수 인자를 건드릴 수 있어 FROM · JOIN 바로 뒤로 좁혀야 합니다. |
 | `USING` 조인 뒤의 모호한 열 | 오답(작음) — `a JOIN b USING (x) JOIN c USING (y) JOIN d USING (x)`에서 `d`도 `y`를 가지면 `ORDER BY y`는 MySQL이 오류 1052(모호한 열)로 거절하는데 여기는 행을 돌려줌. `SELECT a.*, c.* … ORDER BY y`도 같은 모양 | ★ | 하 | MySQL이 거절하는 모호한 열을 같이 거절해 조용한 오답 하나가 사라집니다. | R58에서 `*` 열 순서를 맞추다 알게 된 것입니다. 합쳐진 열이 뒤 조인의 표에도 있을 때의 모호함 검사입니다. |
@@ -89,7 +101,7 @@ Claude가 부르는 도구.
 | 공유 잠금의 남은 모양 | 일부 — R74에서 한 표를 평범하게 읽는 `INSERT … SELECT` 원본(기본키 한 점 · 범위 · 전체)은 MySQL과 같은 행 · 틈 잠금을 건다. 남은 것: 조인 · 집계 · 뷰 원본과 서브쿼리가 읽는 표(`INSERT … SELECT` · `UPDATE` · `DELETE` · `INSERT … VALUES` 모두)는 최신 값만 읽고 잠그지 않음, 기본키가 아닌 조건은 읽어서 돌려준 행만 잠그고(MySQL은 훑은 행 모두) 틈은 표 전체를 잠금(MySQL은 그 인덱스의 범위) | ★ | 중 | 잠금을 보여 주는 데모에서 MySQL과 같은 대기 모양이 더 많이 나옵니다. | 훑는 도중에 서브쿼리를 돌리는 문장은 잠금을 기다리려면 훑던 행에서 손을 놓는 법부터 정해야 합니다. 발표에서는 거의 안 보이는 모양입니다. |
 | 트랜잭션 밖의 `SELECT … FOR UPDATE` | 다름(작음) — 잠금을 기다리지 않고 바로 읽음(MySQL은 상대의 잠금이 풀릴 때까지 기다림) | ★ | 하 | 자동 커밋 상태의 잠금 읽기도 MySQL처럼 기다립니다. | R74에서 잠금 표를 재다 보였습니다. 자동 커밋에서는 잠금이 곧 사라지므로 의미가 작습니다. |
 | `CALL` · 저장 함수 · `EXECUTE`가 돌려주는 값의 형 | 다름(작음) — 숫자가 글자 형(`'10'`)으로 옴(MySQL은 `10`). `SELECT fi()`(저장 함수)와 `EXECUTE`의 결과도 `'7'`로 옴 | ★ | 하 | 클라이언트가 프로시저 결과 열을 숫자로 받습니다. | R74에서 비교하다 보였습니다. 프로시저가 마지막 `SELECT`의 결과를 글자 표로 넘기는 곳에서 열 형을 잃습니다. |
-| JSON의 남은 틈 | 다름(작음) — `JSON_ARRAY(1 = 1)`처럼 비교 · 논리 식의 결과는 JSON 불리언이 아니라 `1`로 들어감(`TRUE` · `FALSE` 글자는 불리언), 지수 리터럴 `1e3`은 어휘 분석이 `1000`으로 써서 JSON에서 `1000.0`이 아니라 `1000`, `JSON_ARRAY(1/3)`이 `0.3333`(MySQL `0.333333333`), `JSON_ARRAY(JSON_ARRAY(1.50))`처럼 한 번 글자가 된 DECIMAL은 다시 읽을 때 DOUBLE이 됨(`1.5`), `JSON_TYPE`이 JSON `null`에 내는 `NULL`이 SQL NULL과 같은 글자라 구별되지 않음, JSON 열에 **수**를 넣으면 MySQL은 3140인데 여기는 받음, `JSON_STORAGE_SIZE` · `JSON_TABLE` 없음 | ★ | 하~중 | JSON을 많이 쓰는 쿼리의 드문 모양이 MySQL과 같은 값을 줍니다. | R77에서 JSON 함수 245문장의 차이를 0으로 만들며 남은 것입니다. 값이 글자로만 오가는 구조의 한계가 대부분이라 식의 형(불리언 · DOUBLE 리터럴)을 인자로 넘기는 길이 필요합니다. |
+| JSON의 남은 틈 | 다름(작음) — `JSON_ARRAY(1 = 1)`처럼 비교 · 논리 식의 결과는 JSON 불리언이 아니라 `1`로 들어감(`TRUE` · `FALSE` 글자는 불리언), 지수 리터럴 `1e3`은 어휘 분석이 `1000`으로 써서 JSON에서 `1000.0`이 아니라 `1000`, `JSON_ARRAY(1/3)`이 `0.3333`(MySQL `0.333333333`), `JSON_ARRAY(JSON_ARRAY(1.50))`처럼 한 번 글자가 된 DECIMAL은 다시 읽을 때 DOUBLE이 됨(`1.5`), JSON 열에 **수**를 넣으면 MySQL은 3140인데 여기는 받음, `JSON_STORAGE_SIZE` · `JSON_TABLE` 없음 | ★ | 하~중 | JSON을 많이 쓰는 쿼리의 드문 모양이 MySQL과 같은 값을 줍니다. | R77에서 JSON 함수 245문장의 차이를 0으로 만들며 남은 것입니다. 값이 글자로만 오가는 구조의 한계가 대부분이라 식의 형(불리언 · DOUBLE 리터럴)을 인자로 넘기는 길이 필요합니다. |
 | 준비된 문장(바이너리 프로토콜)의 남은 틈 | 다름(작음) — `COM_STMT_PREPARE`가 열 개수를 0으로 답함(실행 답에 열 정의가 와서 드라이버들은 읽지만, 준비만 하고 열 정보를 물으면 비어 있음), `SELECT i + ?`의 열 이름이 MySQL은 `i + ?`인데 여기는 값을 넣은 `i + 1`, 명시한 AUTO_INCREMENT 값의 `REPLACE` · `ON DUPLICATE KEY UPDATE`가 OK 패킷의 last insert id를 0으로 줌(MySQL 1; 텍스트 프로토콜도 같음), `COM_STMT_SEND_LONG_DATA` · 서버 커서(`COM_STMT_FETCH`) 없음, 준비 시점의 오류(없는 표 · 열 개수)가 실행 때 나옴 | ★ | 중 | 준비만 하고 열 정보를 읽는 드라이버(JDBC의 `getMetaData`)와 큰 값을 나눠 보내는 클라이언트가 돕니다. | R77의 `prepared_wire.py`가 81번 실행을 견주어 읽을 수 없던 답을 고치며 남은 것입니다. |
 | `SET @@transaction_isolation = x` (SESSION 없이) | 다름(작음) — MySQL은 다음 트랜잭션 하나에만 적용하고(`SET TRANSACTION`처럼) 여기는 세션에 적용합니다. `GLOBAL`도 세션처럼 읽음 | ★ | 하 | 같은 문장이 같은 값을 보입니다. | 어휘 단계에서 `@@session.x`의 범위가 지워져 구분하려면 어휘 분석이 범위를 남겨야 합니다. |
 | 날짜의 남은 모양 | 다름(작음) — `INTERVAL 1 DAY + '2024-01-31'`(INTERVAL이 앞)이 문법 오류, `DATE_SUB('0001-01-01', INTERVAL 1 DAY)`는 MySQL이 `0000-00-00`, `INTERVAL '1.5' DAY`는 MySQL이 글자를 정수 1로 읽음, 이름 붙은 시간대의 `CONVERT_TZ`는 NULL(MySQL도 시간대 표를 안 올리면 같음) | ★ | 하 | 옮겨 온 쿼리의 드문 날짜 식이 그대로 돕니다. | 식 파서가 `INTERVAL`로 시작하는 식을 받도록 하는 것이 가장 큽니다. |
@@ -127,6 +139,8 @@ Claude가 부르는 도구.
 
 | 항목 | 현재 상태 | 추천도 | 비용 | 효과 | 근거 |
 |---|---|---|---|---|---|
+| **`mysqldump`로 RuSQL을 백업하기 (R81)** | 없음 — 진짜 `mysqldump`(8.4.9)를 RuSQL에 붙이면 **옵션과 상관없이 실패**: 기본값은 `LOCK TABLES t READ /*!32311 LOCAL */`가 1064(`LOCAL` 미지원), `--skip-lock-tables` · `--single-transaction`은 `SELECT /*!40001 SQL_NO_CACHE */ * FROM t`가 1064(6번 표의 수식어), `--no-data`만 성공(표 정의는 맞음). 이어서 `SHOW CREATE DATABASE IF NOT EXISTS`(없음), `--routines` · `--triggers`가 쓰는 `SHOW CREATE PROCEDURE` · `FUNCTION` · `TRIGGER`(없음)가 막음. R18은 **반대 방향**(MySQL이 만든 덤프를 RuSQL로 읽기)만 시험했음 | ★★★★ | 하~중 | RuSQL → `mysqldump` → MySQL로 이전 · 백업하는 장면이 됩니다("MySQL 도구가 그대로 붙는다"는 주장의 가장 쉬운 증거). 지금은 앱의 자체 `BACKUP`만 있습니다. | 막는 곳은 네 개: ① `LOCK TABLES … READ [LOCAL]` · `[LOW_PRIORITY] WRITE`의 `LOCAL`, ② `SELECT` 수식어 읽고 무시(6번 표), ③ `SHOW CREATE DATABASE [IF NOT EXISTS]`, ④ 루틴 · 트리거의 `SHOW CREATE`(아래 "스키마 읽는 도구" 줄과 같은 카탈로그를 읽음). 고친 뒤에는 **덤프를 MySQL에 되먹여 행이 같은지** 보는 시험(`dump_roundtrip.py`의 반대 방향)을 점수판에 올립니다. 데이터 행의 따옴표 · 이진 · 부동소수 표기는 위 ①~④를 고친 뒤에야 볼 수 있습니다. |
+| **스키마 읽는 도구용 `information_schema` · `SHOW` (R81)** | 일부 — 표 · 열 · 인덱스 · 외래키 · 표 제약(`TABLE_CONSTRAINTS` · `REFERENTIAL_CONSTRAINTS`)은 있음. 없는 것: `ROUTINES` · `PARAMETERS` · `TRIGGERS` · `CHECK_CONSTRAINTS`(1146), `KEY_COLUMN_USAGE`에서 **UNIQUE 키의 열이 빠짐**(7행 중 6행), `VIEWS.view_definition`이 빈 글자 · `is_updatable`이 `NO`(MySQL `YES`), `SHOW FULL TABLES`가 뷰를 `BASE TABLE`로 적음, `SHOW TRIGGERS` · `SHOW PROCEDURE / FUNCTION STATUS`가 0행, `SHOW CREATE PROCEDURE / FUNCTION / TRIGGER / DATABASE` 없음, `SHOW /*!32332 FULL */ COLUMNS FROM t FROM db LIKE '%'`가 문법 오류(`mysqlshow db 표`가 실패), `information_schema.collations`에 `utf8mb4_bin` 없음, `SHOW EVENTS` 열 수가 다름, `SHOW ENGINE INNODB STATUS` · `performance_schema` · `sys` 없음 | ★★★★ | 중 | DBeaver · Workbench · ORM의 리버스 엔지니어링이 프로시저 · 트리거 · 뷰 · 체크 · 유니크를 보여 줍니다. 앱 밖의 도구로 RuSQL을 열었을 때 폴더가 비어 보이는 일이 없어집니다. | 루틴 · 트리거 · 체크는 엔진 카탈로그에 이미 있어(앱이 목록을 보여 줌) `information_schema`의 가상 표만 더하면 됩니다. 앞 열 줄은 하, `SHOW CREATE …`와 뷰 정의는 중. 실제 도구(DBeaver · Workbench)가 보내는 문장은 직접 붙여 봐야 압니다(3번 표의 "직접 접속해 보기"). |
 | 코퍼스 비교 CI | 없음 (`.github` 없음) | ★★★ | 상 | 푸시마다 MySQL과의 차이 0이 자동으로 확인되어 호환성 회귀를 바로 잡습니다. | 지금은 사람이 `make_scoreboard.py`를 돌립니다. MSVC 빌드, MySQL 컨테이너(리눅스 러너)에 리눅스 빌드 가능 여부 확인이 필요합니다. |
 | TLS | 없음 | ★★ | 상 | 암호화된 접속이 되지만 Windows에서 큰 작업이고 발표에서는 보이지 않습니다. | Windows에서 TLS 라이브러리 도입과 핸드셰이크 확장이 큽니다. |
 | `caching_sha2_password` | 없음 (`mysql_native_password`만) | ★★ | 상 | MySQL 8 기본 인증을 요구하는 최신 드라이버가 옵션 없이 접속합니다. 지금 쓰는 CLI·pymysql은 이미 됩니다. | 지금 쓰는 mysql CLI와 pymysql은 모두 접속됩니다. 일부 최신 드라이버가 옵션을 요구할 때만 문제입니다. |
@@ -169,6 +183,8 @@ Claude가 부르는 도구.
 | 다중 표 `DELETE`의 `JOIN … USING (열)`·`FULL OUTER JOIN`·`CROSS JOIN … ON` | 없음 ("Expected ON", "Unexpected token(s) after end of statement": 파서가 `ON`이 있는 `JOIN`·`LEFT JOIN`·`RIGHT JOIN`만 받음) | ★ | 하 | MySQL이 받는 다중 표 `DELETE`의 조인 모양이 오류로 거절되지 않습니다. | R67에서 `KILL`의 확인점을 넣다 알게 됨. `executor_multi.cpp`의 `USING`·`Cross/Natural/FullOuter` 분기는 이 문장에서 닿지 않는 코드입니다. |
 | `CREATE TYPE`, `DEFERRABLE` 제약, 부분 인덱스, 행 레벨 보안(`CREATE POLICY`) | 없음 **MySQL에도 없는 문법**(호환 목표 밖). | ★ | 상 | PostgreSQL·Oracle의 고급 기능이 생기지만 범위가 커서 이번 마감과는 맞지 않습니다. | PostgreSQL·Oracle에 있고 범위가 큽니다. |
 | 새 자료형 `BINARY` · `VARBINARY` · `BIT` · `SERIAL` · `ZEROFILL` | 없음 ("Expected data type") | ★ | 중 | 이 자료형이 든 덤프의 표를 가져올 수 있습니다. | 저장과 비교 규칙이 새로 필요합니다(`BINARY`는 정렬 규칙 항목과 맞물림). |
+| **글자 집합 · 이스케이프 문법 (R81)** — `CONVERT(x USING cs)` · `SET NAMES … COLLATE` 효과 · `{d '…'}` ODBC 이스케이프 · `"a""b"` | 없음 — `CONVERT('abc' USING utf8mb4)`가 "Expected ',' in CONVERT", `SET NAMES utf8mb4 COLLATE utf8mb4_unicode_ci`는 받지만 `@@collation_connection`을 안 바꿈, `{d '2024-01-01'}` · `{ts '…'}`는 문법 오류, 큰따옴표 글자 안의 `""`가 둘로 갈라짐(`SELECT "q""t"` → "Unknown column 'q'") | ★★ | 하 | 일부 드라이버 · 도구가 보내는 모양이 오류 없이 돕니다(JDBC는 `{d …}`를 기본으로 직접 풀어 보내므로 영향은 작음). | `CONVERT … USING`은 값을 그대로 두고 지원하는 문자셋 이름만 확인하면 됩니다(`COLLATE` 절 항목, 7번 표와 한 묶음). |
+| **작은 문장 틈 모음 (R81)** — `TABLE t` · `VALUES ROW(…)` · `ROW(a, b) = ROW(…)` · `INSERT … AS new ON DUPLICATE KEY UPDATE` · `ALTER … DROP CHECK` · `ALTER … ALTER CHECK … NOT ENFORCED` · `DO` | 없음 (모두 문법 오류. `ALTER … DROP CONSTRAINT 이름`은 됨) | ★★ | 하~중 | MySQL 8.0.19+ 문서의 예제와 옛 쿼리가 그대로 돕니다. | 각각 파서 한 자리입니다. `DO expr`은 식을 평가하고 버리면 되고, `INSERT … AS alias`는 `VALUES(c)`와 같은 길로 보낼 수 있습니다. |
 | 작은 문법 틈 | 없음 — 산술 안의 `!`(`1 + !0`), `AS` 없는 별칭이 키워드인 것(`FROM t date`), `GROUP BY` 식과 집계 인자 안의 서브쿼리(`SUM((SELECT 1))`는 "A subquery inside this expression is not supported") | ★ | 하~중 | MySQL이 받는 드문 모양이 오류 없이 돕니다. | 모두 작은 파서 변경이지만 서브쿼리 쪽은 텍스트로 보관되는 자리라 바인더도 손봐야 합니다. |
 
 ## 참고: 점검에서 바로잡은 것 (처음 표와 달라진 곳)
@@ -190,16 +206,29 @@ Claude가 부르는 도구.
 - **화면 모양 (11-03):** 사용자가 "MVCC·B+Tree 두 패널만 빼고 원래 디자인을 원했다"고 했습니다(바꾼 서버 원통색은 제외). R65에서 홈 화면과 서버 매니저에 입힌 `PageKit` 모양(`ScreenLook.css`)을 걷어냈고(`DATE.md` 11-03) 이 목록에서 "같은 디자인을 다른 화면에도" 항목도 지웠습니다. ERD·결과 패널·Journey에 새 모양을 입히자는 제안은 더 하지 않습니다.
 - **새 항목:** `EXPLAIN FORMAT=JSON/TREE`, `SIGNAL` 묶음(`RESIGNAL`·`GET DIAGNOSTICS`), `UPDATE/DELETE IGNORE`의 `DELETE`, 없는 함수 45개의 구체 목록, `VERSION()` 문자열.
 
-## 추천 순서 (마감까지 약 4주)
+## 추천 순서 (마감까지 약 2주, R81 기준)
 
+0. **새로 찾은 조용한 오답과 도구 호환 (하~중, 한 라운드 묶음 추천):** 16진 리터럴 · `COMMENT` 소실 · `LATERAL` 무시 · `SHA2` · 열 형 저장(6번 표 "R81" 줄)과 `mysqldump` 백업 · 스키마 읽는 도구(8번 표 "R81" 줄), 문자열 별칭 · `SELECT` 수식어. 이유: ① 오류 없이 틀린 값을 돌려주거나 저장하는 것이 남은 목록에서 가장 나쁘고, ② `mysqldump`는 지금 한 줄도 못 받아 "MySQL 도구가 그대로 붙는다"는 설명이 부분만 참이며, ③ 대부분 하 비용입니다. 2026-10-25의 "문법 추가 보류" 결정과 겹치는 것은 문자열 별칭 · `SELECT` 수식어뿐이고, 둘 다 도구가 실제로 보내는 문장(`mysqldump`)이라 예외로 두자는 제안입니다.
 1. **발표·제출 — 발표 PC에서 앱이 뜨게 만들기 (중):** 설치본에 엔진 묶기와 새 PC 점검. 고장 나면 나머지가 소용없는 항목입니다.
 2. **안정성·무결성 (상, 급하지 않음):** 외래키 경합과 교차 조인 메모리는 R63에서, 윈도·`UNION`·병렬 단계·`INSERT … SELECT`·`CALL`의 중단과 쓰는 `CALL`·`VACUUM`의 redo는 R64에서, 트리거가 걸린 표·뷰·MERGE·다중 표 문장의 redo는 R65에서, 트리거 본문이 `NEW`/`OLD`를 못 읽던 오답은 R66에서, `EXPLAIN ANALYZE`·`EXECUTE`·`CREATE TABLE … AS SELECT`·`MERGE`·다중 표 문장·`CREATE INDEX`의 중단과 `GROUP BY`의 그룹 행 단계는 R67에서, `MERGE`·다중 표 문장의 이차 시간과 `ADD FOREIGN KEY`·`ADD CHECK`가 기존 행을 안 보던 무결성 구멍은 R68·R69에서 끝났습니다. 남은 것은 `ALTER` 같은 DDL의 중단 하나이고, 표를 제자리에서 바꾸는 구조라 큰 일입니다 — 마감 전에 필요하지 않습니다.
-3. **프론트·MCP — 보이는 장면 (하~중):** `slow_queries` 도구와 시연 대본(느린 쿼리 로그 → `suggest_indexes` 전·후 → `run_script`로 만들기), 앱 화면의 자동 시험(CDP 스크립트를 저장소에), (화면 모양은 사용자 결정으로 B+Tree·MVCC 페이지만 새 모양이고 나머지 화면은 원래 디자인을 지킵니다 — 다른 화면에 새 모양을 입히는 일은 하지 않습니다) 세션 패널·계획 그림·차트·스키마 비교·ERD 드래그는 R59에서 끝났습니다.
-4. **작은 것 모음 (하):** `EXPLAIN UPDATE`·`DELETE`, 연결 수 상한, 프로토콜 오류 번호의 남은 약 20개, 몇 가지 `SHOW`, MCP의 `kill_session`·resources·prompts·CSV 도구.
+3. **프론트·MCP — 보이는 장면 (끝남):** `slow_queries` 도구 · `kill_session` · CSV 도구 · resources · prompts(MCP 37개 도구)와 시연 대본, 앱 화면의 자동 시험(`code/test/frontend/cdp/`)은 R59·R70에서 끝났습니다. 화면 모양은 사용자 결정으로 B+Tree·MVCC 페이지만 새 모양이고 나머지 화면은 원래 디자인을 지킵니다 — 다른 화면에 새 모양을 입히는 일은 하지 않습니다.
+4. **작은 것 모음 (하):** `EXPLAIN UPDATE`·`DELETE`, 연결 수 상한(R70), 프로토콜 오류 번호(R80)는 끝났습니다. 남은 것은 몇 가지 `SHOW`(`SHOW DATABASES LIKE` · `SHOW ERRORS`)와 6번 표에서 비용이 하인 줄들(`FLOAT`의 `CONCAT` · `PI()` · 뷰 만들 때의 `ONLY_FULL_GROUP_BY` 같은 것)입니다.
 5. **품질 점검 — 마감 1주 전:** 누적 점검 한 바퀴(Debug 전체 + `KILL`을 섞은 크래시 시험 + 빌드 간 차분), 새 영역 훑기 한 번 더.
-6. **시간이 되면:** 최적화 전후 속도 애니메이션, 코퍼스 비교 CI, RuSQL vs MySQL 분할 화면, 스키마 비교에 뷰·트리거.
-7. **미루거나 하지 않는 것:** `FULLTEXT`, 표현식 인덱스, 감사 로그, TLS, `caching_sha2_password`, WAL 복제·XA, 테마, 그리고 SQL 문법 추가 전부("SQL 문법 추가 — 보류").
-8. **직접 하실 일:** MCP 시연 리허설(`DEMO.md` 8번), 크래시 복구 장면 리허설(`DEMO.md` 3번), 화면 녹화, 앱 화면 사람 눈 점검.
+5-1. **제출 문서 숫자 갱신 — 마감 3일 전쯤 한 번에 (하):** D01 · D05 · D07 · D08 · 통합문서 v29의 케이스 수 · 검증문 수 · 코퍼스 수(1번 표 "산출물 숫자 갱신").
+6. **시간이 되면:** 최적화 전후 속도 애니메이션, 코퍼스 비교 CI, RuSQL vs MySQL 분할 화면, 스키마 비교에 뷰·트리거, `sql_mode` 반영.
+7. **미루거나 하지 않는 것:** `FULLTEXT`, 표현식 인덱스, 감사 로그, TLS, `caching_sha2_password`, WAL 복제·XA, 테마, 그리고 SQL 문법 추가 전부("SQL 문법 추가 — 보류", 위 0번의 두 가지 예외 말고).
+8. **직접 하실 일:** MCP 시연 리허설(`DEMO.md` 8번), 크래시 복구 장면 리허설(`DEMO.md` 3번), 화면 녹화, 앱 화면 사람 눈 점검, DBeaver · Workbench로 접속해 보기(R81).
+
+## 참고: R81 점검 (2026-11-14, 사용자 요청: "이미 한 게 있는지, 이것도 하면 좋겠다 싶은 게 있는지 점검")
+
+코드는 바꾸지 않은 점검입니다. 진짜 MySQL 8.4.9와 엔진에 같은 문장을 보내 비교했고(`vs_mysql.py --proto --errno`), 점검용 코퍼스 다섯 개 약 440문장(저장소에는 새 차이만 모은 `tool_gaps.sql` 하나를 올림)과 실제 `mysqldump` · `mysqlshow` · `mysqlcheck`를 돌렸습니다.
+
+- **낡은 줄은 없었습니다.** 6번 표 30줄 가운데 23줄, 7번 표 6줄 가운데 4줄(`FULLTEXT` · `COLLATE` · `FLUSH` 묶음 · 표현식 인덱스), 9번 표 31줄 전부의 문장 모양을 다시 돌렸고 전부 설명한 그대로 다릅니다. 6번 표에서 다시 재지 않은 7줄은 두 세션 · 바이너리 프로토콜 · 열 형(`--types`) · 행 순서 · 결과 열 이름처럼 이 도구로 볼 수 없거나 R74~R80 이후 코드가 안 바뀐 것입니다. 한 줄 안의 하위 주장 하나만 이미 같아져 있어 지웠습니다(`JSON_TYPE(CAST('null' AS JSON))`). `ALTER … DROP CONSTRAINT 이름`은 이미 됩니다. 8번 표의 "코퍼스 CI 없음"(`.github` 없음) · 1번 표의 "설치본에 엔진이 안 묶임"(`tauri.conf.json`의 `bundle`에 `externalBin` · `resources` 없음) · 4번 표의 "테마 · 스니펫 없음"은 코드로 확인했습니다. MCP 도구 37개 · resources 2개 · prompts 3개도 맞습니다.
+- **낡았던 문장(고침):** 맨 위 표의 6번 줄 "가장 먼저"(R80에서 끝난 세 가지), 6번 표 머리말의 "코퍼스 47개"(56개), 헤더의 "약 3주"(약 2주), "추천 순서"의 "약 4주"와 3 · 4번 항목(`slow_queries` · `kill_session` · CSV 도구 · CDP 시험 · `EXPLAIN UPDATE` · 연결 수 상한 · 오류 번호가 이미 끝난 것).
+- **새로 찾은 줄 16개:** 6번 표 10개(문자열 별칭 · `SELECT` 수식어 · 16진 리터럴 · `COMMENT` 소실 · `LATERAL` 무시 · 열 형 저장 · `sql_mode` · `SHA2` · `SHOW CREATE TABLE` 표기 · 변수와 큰 수), 8번 표 2개(`mysqldump` 백업 · 스키마 읽는 도구), 9번 표 2개, 1번 표 1개(산출물 숫자), 3번 표 1개(DBeaver · Workbench 접속). 가장 크게 놀란 것은 **진짜 `mysqldump`로 RuSQL을 백업하면 옵션과 상관없이 실패한다**는 것입니다(R18은 반대 방향만 시험했음). 조용히 틀린 값을 돌려주는 것도 다섯 개 나왔습니다: `0x4142`가 글자 `"4142"`로 저장됨, `COMMENT`를 받고 버림, `LATERAL`을 오류 없이 무시, `SHA2(x, 512)`가 NULL, `MEDIUMINT` · `TINYTEXT` · `CHAR(n)`의 한계와 끝 공백이 MySQL과 다름.
+- **함수는 새로 틀린 것이 거의 없었습니다.** 정규식 · 문자열 · 날짜 · 수학 · 비트 연산 · `CAST` · 집계 · 윈도 · JSON · 비교 연산자를 여러 개씩 돌려서 다른 것은 이미 올라 있던 "없는 함수 묶음"과 `SHA2`뿐입니다. R75 · R77에서 함수를 훑은 효과가 그대로입니다.
+- **돌려 보지 않은 것(정직하게):** DBeaver · Workbench · ORM의 실제 접속(제가 흉내 낸 문장만 비교), 잠금 읽기의 대기(두 세션이 필요해 `two_sessions.py` 쪽, R74 이후 코드가 안 바뀌어 다시 재지 않음), 준비된 문장의 바이너리 프로토콜 남은 틈(R77 이후 코드가 안 바뀌어 다시 재지 않음), 결과 열 이름(`vs_mysql.py`가 비어 있지 않은 답의 열 이름은 비교하지 않음), Debug 빌드 전체 시험.
+- 재현: `python code/test/diff/vs_mysql.py <engine_server.exe> code/test/diff/corpus/tool_gaps.sql --proto --errno` — 68문장 중 59개가 다릅니다(점수판 밖, `collate_clause.sql`처럼 차이가 남아 있어서). 줄마다 고친 뒤에는 이 파일에서 해당 문장을 줄이고, 차이가 0이 된 묶음은 점수판(`make_scoreboard.py`)으로 옮깁니다.
 
 ## 참고: R80에서 끝낸 것 (2026-11-12, 사용자가 고른 "조인 뷰의 UPDATE · INSERT, 오류 번호의 남은 약 20개, FROM DUAL과 괄호 안 LIMIT가 있는 UNION")
 
