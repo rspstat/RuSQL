@@ -1,5 +1,6 @@
 #include "engine/parser/parser.hpp"
 
+#include <algorithm>
 #include <cctype>
 #include <unordered_map>
 
@@ -72,7 +73,7 @@ std::string Parser::source_between(std::size_t from, std::size_t to) const {
     return source_.substr(begin, end - begin);
 }
 
-Parser::Parser(const std::string& input, bool pipes_as_concat) : source_(input) {
+Parser::Parser(const std::string& input, bool pipes_as_concat) : source_(expand_executable_comments(input)) { // (the offsets of the tokens count in the text with its /*!NNNNN ... */ comments put in their place)
     Lexer lexer(input);
     tokens_ = lexer.tokenize();
     drop_parentheses_around_operands(tokens_);
@@ -213,17 +214,28 @@ std::optional<std::string> Parser::parse_table_alias() {
     if (peek_is(TokenKind::Ident)) {
         // (`t LOCK IN SHARE MODE` is no alias called LOCK)
         if (to_upper(peek()->text) == "LOCK" && peek_at_is(1, TokenKind::In)) return std::nullopt;
+        // (`a STRAIGHT_JOIN b` is a join, not a table alias; written in backticks it would be an alias)
+        if (to_upper(peek()->text) == "STRAIGHT_JOIN" && peek()->end - peek()->begin == peek()->text.size()) return std::nullopt;
         return expect_ident();
     }
     return std::nullopt;
 }
 
 std::optional<std::string> Parser::parse_column_alias() {
+    // the letter X, B or N glued to the string after it (X'4G'): the start of a literal that did not read, not a column with a name
+    auto after_literal_prefix = [&]() {
+        const Token* prev = pos_ > 0 ? &tokens_[pos_ - 1] : nullptr;
+        const Token* next = peek();
+        return prev && next && prev->kind == TokenKind::Ident && prev->text.size() == 1 && std::string("xXbBnN").find(prev->text[0]) != std::string::npos && prev->end == next->begin;
+    };
     if (peek_is(TokenKind::As)) {
         advance();
+        if (peek_is(TokenKind::StringLit) && peek()->word.empty()) return advance()->text; // `AS 'Total'`: a string is a name here too (MySQL; a hex literal is not a string)
         return expect_alias_ident();
     }
     if (peek_is(TokenKind::Ident)) return expect_ident();
+    // (`id 'a2'`; but not the letter of a literal that did not read: X'4G' is no column X called 4G, MySQL says it is a syntax error)
+    if (peek_is(TokenKind::StringLit) && peek()->word.empty() && !after_literal_prefix()) return advance()->text;
     return std::nullopt;
 }
 
@@ -231,6 +243,23 @@ std::optional<std::string> Parser::parse_column_alias() {
 std::string Parser::expect_alias_ident() {
     const Token* t = advance();
     if (!t) throw ParseError("Expected identifier (alias)");
+    // a word that is a keyword here (`AS Count`, `AS Privileges`) names the column as it was typed (MySQL), not in lower case
+    if (t->kind != TokenKind::Ident && t->end > t->begin) {
+        const std::string typed = source_between(pos_ - 1, pos_);
+        if (!typed.empty() && std::all_of(typed.begin(), typed.end(), [](unsigned char c) { return std::isalnum(c) || c == '_'; })) {
+            switch (t->kind) {
+                case TokenKind::Now: case TokenKind::Date: case TokenKind::Count: case TokenKind::Sum: case TokenKind::Avg: case TokenKind::Min: case TokenKind::Max:
+                case TokenKind::Key: case TokenKind::Set: case TokenKind::Select: case TokenKind::From: case TokenKind::Where: case TokenKind::Table: case TokenKind::Order:
+                case TokenKind::Group: case TokenKind::Index: case TokenKind::View: case TokenKind::User: case TokenKind::Role: case TokenKind::Row: case TokenKind::Left:
+                case TokenKind::Right: case TokenKind::Time: case TokenKind::Year: case TokenKind::Rank: case TokenKind::Check: case TokenKind::Replace: case TokenKind::Repeat:
+                case TokenKind::Truncate: case TokenKind::Interval: case TokenKind::Database: case TokenKind::Tables: case TokenKind::Column: case TokenKind::Null:
+                    return typed;
+                default:
+                    if (is_plain_word(t->kind) && !t->word.empty()) return typed;
+                    break;
+            }
+        }
+    }
     switch (t->kind) {
         case TokenKind::Ident:    return t->text;
         case TokenKind::Now:      return "now";

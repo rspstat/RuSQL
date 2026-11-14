@@ -572,6 +572,62 @@ INSERT INTO tmp_types VALUES (2,'world',2.71,FALSE,0);
 SELECT a, b, c, d, e FROM tmp_types ORDER BY a;
 DROP TABLE tmp_types;
 
+-- Hex / Bit Literals, COMMENT, SHA2, Column Types (R82)
+SELECT 0x41 + 0 AS hex_num, X'4142' AS hex_str, HEX('AB') AS hex_of, b'101' + 0 AS bit_num, _utf8mb4'x' AS introducer, N'nat' AS national;
+SELECT id, first_name FROM employee WHERE id = 0x01;
+SELECT SHA2('abc', 224) AS sha224, SHA2('abc', 384) AS sha384, SHA2('abc', 512) AS sha512;
+CREATE TABLE tmp_r82 (
+    id    MEDIUMINT PRIMARY KEY COMMENT 'the key',
+    note  TINYTEXT,
+    code  CHAR(5),
+    blobs MEDIUMBLOB
+) COMMENT = 'types of R82';
+INSERT INTO tmp_r82 VALUES (1, 'short', 'ab  ', 'x');
+SELECT id, note, code, CHAR_LENGTH(code) AS code_len FROM tmp_r82;
+SELECT column_name, data_type, column_comment FROM information_schema.columns WHERE table_name = 'tmp_r82' ORDER BY ordinal_position;
+SELECT table_name, table_comment FROM information_schema.tables WHERE table_name = 'tmp_r82';
+ALTER TABLE tmp_r82 COMMENT = 'changed';
+SELECT table_comment FROM information_schema.tables WHERE table_name = 'tmp_r82';
+DROP TABLE tmp_r82;
+SELECT d.name, l.cnt FROM department d, LATERAL (SELECT COUNT(*) AS cnt FROM employee e WHERE e.department_id = d.id) AS l ORDER BY d.id;
+SELECT * FROM department d, LATERAL (SELECT COUNT(*) AS cnt FROM employee e WHERE e.department_id = d.id) AS l WHERE d.id = 1;
+
+-- String Alias, Select Modifiers, STRAIGHT_JOIN (R83)
+SELECT id AS 'Employee Id', first_name 'First Name', salary + 1 'plus one' FROM employee ORDER BY id LIMIT 3;
+SELECT 'ab' 'cd' AS joined, 'x' 'y' 'z' AS three;
+SELECT SQL_NO_CACHE HIGH_PRIORITY DISTINCT emp_type FROM employee ORDER BY emp_type;
+SELECT SQL_SMALL_RESULT SQL_BIG_RESULT SQL_BUFFER_RESULT COUNT(*) FROM employee;
+SELECT /*!40001 SQL_NO_CACHE */ id, first_name FROM employee ORDER BY id LIMIT 2;
+SELECT STRAIGHT_JOIN e.first_name, d.name FROM employee e JOIN department d ON e.department_id = d.id ORDER BY e.id LIMIT 3;
+SELECT e.first_name, d.name FROM employee e STRAIGHT_JOIN department d ON e.department_id = d.id ORDER BY e.id LIMIT 3;
+LOCK TABLES employee READ /*!32311 LOCAL */, department READ;
+UNLOCK TABLES;
+
+-- Routines, Triggers, Checks and Keys in information_schema (R83)
+CREATE PROCEDURE r83_raise(IN p_id INT, IN p_amount DECIMAL(10,2)) COMMENT 'raises a salary' BEGIN UPDATE employee SET salary = salary + p_amount WHERE id = p_id; END;
+CREATE FUNCTION r83_double(x INT) RETURNS INT DETERMINISTIC RETURN x * 2;
+CREATE TRIGGER r83_trg AFTER UPDATE ON department FOR EACH ROW UPDATE employee SET performance = performance WHERE id = 1;
+SELECT routine_name, routine_type, data_type, is_deterministic, routine_comment FROM information_schema.routines WHERE routine_schema = 'company' ORDER BY routine_name;
+SELECT specific_name, ordinal_position, parameter_mode, parameter_name, dtd_identifier FROM information_schema.parameters WHERE specific_schema = 'company' ORDER BY specific_name, ordinal_position;
+SELECT trigger_name, event_manipulation, event_object_table, action_timing FROM information_schema.triggers WHERE trigger_schema = 'company';
+CALL r83_raise(1, 1.00);
+SELECT r83_double(21) AS doubled;
+UPDATE employee SET salary = salary - 1.00 WHERE id = 1;
+DROP PROCEDURE r83_raise;
+DROP FUNCTION r83_double;
+DROP TRIGGER r83_trg;
+SELECT constraint_name FROM information_schema.check_constraints WHERE constraint_schema = 'company' ORDER BY constraint_name;
+SELECT table_name, constraint_name, column_name, ordinal_position FROM information_schema.key_column_usage WHERE table_schema = 'company' AND table_name = 'department' ORDER BY constraint_name, ordinal_position;
+SELECT table_name, constraint_name, constraint_type FROM information_schema.table_constraints WHERE table_schema = 'company' AND table_name = 'department' ORDER BY constraint_name;
+SELECT table_name, is_updatable FROM information_schema.views WHERE table_schema = 'company' ORDER BY table_name;
+SELECT collation_name, id FROM information_schema.collations WHERE collation_name IN ('utf8mb4_bin', 'utf8mb4_0900_ai_ci') ORDER BY id;
+
+-- sql_mode Without ONLY_FULL_GROUP_BY (what mysqldump sets)
+SET sql_mode = '';
+SELECT department_id, COUNT(*) AS n, MIN(salary) AS lowest FROM employee WHERE department_id IS NOT NULL GROUP BY department_id ORDER BY department_id;
+SELECT department_id, department_id + 1 AS next_id FROM employee WHERE department_id = 2 GROUP BY department_id;
+SET sql_mode = 'ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION';
+
 -- Backup / Restore
 BACKUP DATABASE company INTO 'company_backup.sql';
 RESTORE FROM 'company_backup.sql';

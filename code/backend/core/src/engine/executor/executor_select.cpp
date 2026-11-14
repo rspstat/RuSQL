@@ -1693,8 +1693,13 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
                     rows.erase(std::remove_if(rows.begin(), rows.end(),
                                               [&](const Row& r) {
                                                   auto schema = r.find(schemata ? "SCHEMA_NAME" : "TABLE_SCHEMA");
+                                                  // (the routines, their parameters, the triggers and the CHECK constraints name their database in a column of their own)
+                                                  for (const char* own : {"ROUTINE_SCHEMA", "SPECIFIC_SCHEMA", "TRIGGER_SCHEMA", "CONSTRAINT_SCHEMA"}) {
+                                                      if (schema == r.end() && !schemata) schema = r.find(own);
+                                                  }
                                                   if (schema == r.end() || schema->second == "information_schema") return false;
                                                   auto table = r.find("TABLE_NAME");
+                                                  if (table == r.end()) table = r.find("EVENT_OBJECT_TABLE");
                                                   if (bare == "columns") { // (a column privilege shows that column alone)
                                                       auto column = r.find("COLUMN_NAME");
                                                       if (table != r.end() && column != r.end()) return !may_see_column(s, schema->second, table->second, column->second);
@@ -3217,10 +3222,18 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
             return e && !column_has_aggregate(col) && !arith_mentions_column(e->expr);
         };
         const bool constant_items = std::any_of(columns.begin(), columns.end(), is_constant_item);
-        // `SELECT COUNT(*), ANY_VALUE(v)`: the value of the column on the first row of the one group
-        auto is_any_value_item = [](const SelectColumn& col) {
+        // `SELECT COUNT(*), ANY_VALUE(v)`: the value of the column on the first row of the one group. With ONLY_FULL_GROUP_BY out of the sql_mode
+        // (`SET sql_mode = ''`) a column, or an expression of columns, with no aggregate is that too: `SELECT id, COUNT(*) FROM t` shows the first row's id
+        bool full_group_off = false;
+        if (auto mode = user_vars.find("@sql_mode"); mode != user_vars.end()) {
+            std::string upper = mode->second;
+            for (char& c : upper) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+            full_group_off = upper.find("ONLY_FULL_GROUP_BY") == std::string::npos && upper.find("ANSI") == std::string::npos;
+        }
+        auto is_any_value_item = [full_group_off](const SelectColumn& col) {
+            if (full_group_off && (std::holds_alternative<SelectColumn::Column>(col.data) || std::holds_alternative<SelectColumn::ColumnAlias>(col.data))) return true;
             auto* e = std::get_if<SelectColumn::Expr>(&col.data);
-            return e && arith_has_any_value(e->expr);
+            return e && (arith_has_any_value(e->expr) || (full_group_off && !column_has_aggregate(col) && arith_mentions_column(e->expr)));
         };
         const bool any_value_items = std::any_of(columns.begin(), columns.end(), is_any_value_item);
         if (!expr_agg_refs.empty() || constant_items || any_value_items || has_win) {
@@ -3233,6 +3246,11 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
             }
             if (any_value_items && !rows_p.empty()) {
                 for (auto& [k, v] : *rows_p.front()) agg_row.try_emplace(k, v);
+            } else if (any_value_items && full_group_off) { // (no row at all: a column that was asked for without an aggregate is NULL)
+                for (auto& col : columns) {
+                    if (auto* plain = std::get_if<SelectColumn::Column>(&col.data)) agg_row.try_emplace(plain->name, EXECUTOR_NULL_VALUE);
+                    else if (auto* named = std::get_if<SelectColumn::ColumnAlias>(&col.data)) agg_row.try_emplace(named->name, EXECUTOR_NULL_VALUE);
+                }
             }
             std::vector<Row> one_row{agg_row};
             if (has_win) { // `SELECT SUM(v), SUM(SUM(v)) OVER () FROM t`: the windows see the one row of aggregates

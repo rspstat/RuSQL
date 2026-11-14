@@ -1,5 +1,5 @@
 {
-  "generated": "2026-11-14",
+  "generated": "2026-11-15",
   "mysql": "8.4.9",
   "corpora": [
     {
@@ -419,6 +419,14 @@
       "bothFail": 13
     },
     {
+      "name": "tool_compat_r83",
+      "en": "What mysqldump, mysqlshow and schema tools send: LOCK TABLES ... READ LOCAL, SELECT /*!40001 SQL_NO_CACHE */, SHOW CREATE DATABASE / PROCEDURE / FUNCTION, information_schema routines / parameters / triggers / check_constraints / key_column_usage (UNIQUE) / views / collations, SHOW FULL TABLES / COLUMNS, a string as a column name, SELECT modifiers and STRAIGHT_JOIN, SET sql_mode = '' without ONLY_FULL_GROUP_BY",
+      "ko": "mysqldump · mysqlshow · 스키마 도구가 보내는 문장: LOCK TABLES ... READ LOCAL, SELECT /*!40001 SQL_NO_CACHE */, SHOW CREATE DATABASE / PROCEDURE / FUNCTION, information_schema의 routines / parameters / triggers / check_constraints / key_column_usage(UNIQUE) / views / collations, SHOW FULL TABLES / COLUMNS, 열 이름이 되는 문자열, SELECT 수식어와 STRAIGHT_JOIN, ONLY_FULL_GROUP_BY 없는 SET sql_mode = ''",
+      "statements": 81,
+      "different": 0,
+      "bothFail": 12
+    },
+    {
       "name": "rollup",
       "en": "GROUP BY ... WITH ROLLUP: a row for each prefix of the keys and a total, HAVING / ORDER BY / LIMIT / DISTINCT after it, in a view and a derived table",
       "ko": "GROUP BY ... WITH ROLLUP: 키의 접두사마다 한 행과 총계, 그 뒤의 HAVING·ORDER BY·LIMIT·DISTINCT, 뷰·파생 표 안에서",
@@ -461,8 +469,8 @@
   ],
   "conformanceCases": 4780,
   "tests": {
-    "cases": 983,
-    "assertions": 1521987
+    "cases": 993,
+    "assertions": 1522352
   },
   "bugsFound": 206
 }

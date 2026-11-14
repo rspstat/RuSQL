@@ -154,11 +154,13 @@ Statement Parser::parse_lock_tables() {
         const Token* p = peek();
         if (!p || p->kind != TokenKind::Ident) throw ParseError("Expected READ or WRITE after '" + name + "' in LOCK TABLES");
         std::string mode = to_upper(p->text);
+        // `READ [LOCAL]` (mysqldump writes it): the extra word changes nothing here (MySQL 8.4 no longer takes LOW_PRIORITY WRITE)
         bool exclusive;
         if (mode == "READ") exclusive = false;
         else if (mode == "WRITE") exclusive = true;
         else throw ParseError("Expected READ or WRITE after '" + name + "' in LOCK TABLES");
         advance();
+        if (!exclusive && peek_is(TokenKind::Ident) && to_upper(peek()->text) == "LOCAL") advance();
         tables.emplace_back(std::move(name), exclusive);
         if (peek_is(TokenKind::Comma)) { advance(); continue; }
         break;

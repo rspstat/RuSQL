@@ -518,6 +518,7 @@ std::vector<ColumnDef> view_column_defs(const SharedDatabase& s, const std::stri
         def.name = name;
         def.data_type = c.type.column ? c.type.column->data_type : DataType(DataType::Text{});
         def.not_null = c.type.column ? c.type.column->not_null : false;
+        if (c.type.column) def.comment = c.type.column->comment; // (a view column takes the COMMENT of the column it shows, as in MySQL)
         out.push_back(std::move(def));
     }
     return out;

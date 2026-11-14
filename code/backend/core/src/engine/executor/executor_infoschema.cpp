@@ -2,7 +2,10 @@
 // rusql-core/src/engine/executor.rs (Phase 8f): info_schema_rows (a select on one of these tables runs on a temporary table of the rows: see exec_select).
 
 #include "engine/executor/executor.hpp"
+#include "engine/check_names.hpp"
 #include "engine/fk_name.hpp"
+#include "engine/parser/parser.hpp"
+#include "engine/routine_text.hpp"
 #include "engine/view_columns.hpp"
 
 #include <algorithm>
@@ -102,6 +105,55 @@ std::string dt_full(const DataType& dt) {
     return dt_base(dt);
 }
 
+// the databases a routine is listed under: the one it was made in; one with no recorded source (made before R83) is listed in all of them
+std::vector<std::string> routine_databases(const SharedDatabase& s, const std::string& key) {
+    if (auto it = s.routine_sources.find(key); it != s.routine_sources.end()) return {it->second.first};
+    std::vector<std::string> all(s.databases.begin(), s.databases.end());
+    std::sort(all.begin(), all.end());
+    return all;
+}
+
+std::string routine_key(const char* kind, const std::string& name) {
+    std::string out = std::string(kind) + ":" + name;
+    for (char& c : out) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    return out;
+}
+
+// the columns that describe a type a routine declares ("INT", "VARCHAR(20)", "DECIMAL(8,2)"): all of them NULL for a type that is not read
+void fill_declared_type(Row& r, const std::string& type_text) {
+    for (const char* name : {"DATA_TYPE", "CHARACTER_MAXIMUM_LENGTH", "CHARACTER_OCTET_LENGTH", "NUMERIC_PRECISION", "NUMERIC_SCALE", "DATETIME_PRECISION", "CHARACTER_SET_NAME",
+                             "COLLATION_NAME", "DTD_IDENTIFIER"})
+        r[name] = EXECUTOR_NULL_VALUE;
+    auto col = Parser::declared_column("x", type_text);
+    if (!col) return;
+    const DataType& dt = col->data_type;
+    r["DATA_TYPE"] = dt_base(dt);
+    r["DTD_IDENTIFIER"] = dt_full(dt) + (col->is_unsigned ? " unsigned" : "");
+    if (auto* v = std::get_if<DataType::Varchar>(&dt.data)) {
+        r["CHARACTER_MAXIMUM_LENGTH"] = std::to_string(v->length);
+        r["CHARACTER_OCTET_LENGTH"] = std::to_string(static_cast<std::uint64_t>(v->length) * 4);
+    } else if (auto* t = std::get_if<DataType::Text>(&dt.data)) {
+        r["CHARACTER_MAXIMUM_LENGTH"] = std::to_string(text_type_limit(t->size));
+        r["CHARACTER_OCTET_LENGTH"] = std::to_string(text_type_limit(t->size));
+    }
+    if (std::holds_alternative<DataType::Varchar>(dt.data) || std::holds_alternative<DataType::Text>(dt.data) || std::holds_alternative<DataType::Enum>(dt.data) ||
+        std::holds_alternative<DataType::Set>(dt.data)) {
+        r["CHARACTER_SET_NAME"] = "utf8mb4";
+        r["COLLATION_NAME"] = "utf8mb4_0900_ai_ci";
+    }
+    if (auto* integer = std::get_if<DataType::Int>(&dt.data)) { r["NUMERIC_PRECISION"] = integer->medium ? "7" : "10"; r["NUMERIC_SCALE"] = "0"; }
+    else if (std::holds_alternative<DataType::SmallInt>(dt.data)) { r["NUMERIC_PRECISION"] = "5"; r["NUMERIC_SCALE"] = "0"; }
+    else if (std::holds_alternative<DataType::TinyInt>(dt.data) || std::holds_alternative<DataType::Boolean>(dt.data)) { r["NUMERIC_PRECISION"] = "3"; r["NUMERIC_SCALE"] = "0"; }
+    else if (std::holds_alternative<DataType::BigInt>(dt.data)) { r["NUMERIC_PRECISION"] = col->is_unsigned ? "20" : "19"; r["NUMERIC_SCALE"] = "0"; }
+    else if (std::holds_alternative<DataType::Float>(dt.data)) r["NUMERIC_PRECISION"] = "12";
+    else if (std::holds_alternative<DataType::Double>(dt.data)) r["NUMERIC_PRECISION"] = "22";
+    else if (auto* d = std::get_if<DataType::Decimal>(&dt.data)) { r["NUMERIC_PRECISION"] = std::to_string(d->precision); r["NUMERIC_SCALE"] = std::to_string(d->scale); }
+    if (std::holds_alternative<DataType::DateTime>(dt.data) || std::holds_alternative<DataType::Timestamp>(dt.data) || std::holds_alternative<DataType::Time>(dt.data))
+        r["DATETIME_PRECISION"] = std::to_string(fraction_digits_of(dt));
+}
+
+const char* const kDefaultSqlMode = "ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION";
+
 } // namespace
 
 namespace {
@@ -133,6 +185,34 @@ const std::vector<IC> kStatistics = {
     {"INDEX_TYPE", false}, {"COMMENT", false}, {"INDEX_COMMENT", false}, {"IS_VISIBLE", false}};
 const std::vector<IC> kViews = {{"TABLE_CATALOG", false}, {"TABLE_SCHEMA", false}, {"TABLE_NAME", false}, {"VIEW_DEFINITION", false}, {"CHECK_OPTION", false},
                                 {"IS_UPDATABLE", false}, {"DEFINER", false}, {"SECURITY_TYPE", false}, {"CHARACTER_SET_CLIENT", false}, {"COLLATION_CONNECTION", false}};
+// R83: what a tool that reads the schema asks for after the tables: procedures and functions, their parameters, triggers and CHECK constraints
+const std::vector<IC> kRoutines = {
+    {"SPECIFIC_NAME", false}, {"ROUTINE_CATALOG", false}, {"ROUTINE_SCHEMA", false}, {"ROUTINE_NAME", false}, {"ROUTINE_TYPE", false}, {"DATA_TYPE", false},
+    {"CHARACTER_MAXIMUM_LENGTH", true}, {"CHARACTER_OCTET_LENGTH", true}, {"NUMERIC_PRECISION", true}, {"NUMERIC_SCALE", true}, {"DATETIME_PRECISION", true},
+    {"CHARACTER_SET_NAME", false}, {"COLLATION_NAME", false}, {"DTD_IDENTIFIER", false}, {"ROUTINE_BODY", false}, {"ROUTINE_DEFINITION", false}, {"EXTERNAL_NAME", false},
+    {"EXTERNAL_LANGUAGE", false}, {"PARAMETER_STYLE", false}, {"IS_DETERMINISTIC", false}, {"SQL_DATA_ACCESS", false}, {"SQL_PATH", false}, {"SECURITY_TYPE", false},
+    {"CREATED", false}, {"LAST_ALTERED", false}, {"SQL_MODE", false}, {"ROUTINE_COMMENT", false}, {"DEFINER", false}, {"CHARACTER_SET_CLIENT", false},
+    {"COLLATION_CONNECTION", false}, {"DATABASE_COLLATION", false}};
+const std::vector<IC> kParameters = {
+    {"SPECIFIC_CATALOG", false}, {"SPECIFIC_SCHEMA", false}, {"SPECIFIC_NAME", false}, {"ORDINAL_POSITION", true}, {"PARAMETER_MODE", false}, {"PARAMETER_NAME", false},
+    {"DATA_TYPE", false}, {"CHARACTER_MAXIMUM_LENGTH", true}, {"CHARACTER_OCTET_LENGTH", true}, {"NUMERIC_PRECISION", true}, {"NUMERIC_SCALE", true},
+    {"DATETIME_PRECISION", true}, {"CHARACTER_SET_NAME", false}, {"COLLATION_NAME", false}, {"DTD_IDENTIFIER", false}, {"ROUTINE_TYPE", false}};
+const std::vector<IC> kTriggers = {
+    {"TRIGGER_CATALOG", false}, {"TRIGGER_SCHEMA", false}, {"TRIGGER_NAME", false}, {"EVENT_MANIPULATION", false}, {"EVENT_OBJECT_CATALOG", false},
+    {"EVENT_OBJECT_SCHEMA", false}, {"EVENT_OBJECT_TABLE", false}, {"ACTION_ORDER", true}, {"ACTION_CONDITION", false}, {"ACTION_STATEMENT", false},
+    {"ACTION_ORIENTATION", false}, {"ACTION_TIMING", false}, {"ACTION_REFERENCE_OLD_TABLE", false}, {"ACTION_REFERENCE_NEW_TABLE", false},
+    {"ACTION_REFERENCE_OLD_ROW", false}, {"ACTION_REFERENCE_NEW_ROW", false}, {"CREATED", false}, {"SQL_MODE", false}, {"DEFINER", false},
+    {"CHARACTER_SET_CLIENT", false}, {"COLLATION_CONNECTION", false}, {"DATABASE_COLLATION", false}};
+const std::vector<IC> kCheckConstraints = {{"CONSTRAINT_CATALOG", false}, {"CONSTRAINT_SCHEMA", false}, {"CONSTRAINT_NAME", false}, {"CHECK_CLAUSE", false}};
+// the two tables mysqldump asks for before it dumps (the tablespaces, and the histograms of --column-statistics): RuSQL has neither, so they are there and empty
+const std::vector<IC> kFiles = {
+    {"FILE_ID", true}, {"FILE_NAME", false}, {"FILE_TYPE", false}, {"TABLESPACE_NAME", false}, {"TABLE_CATALOG", false}, {"TABLE_SCHEMA", false}, {"TABLE_NAME", false},
+    {"LOGFILE_GROUP_NAME", false}, {"LOGFILE_GROUP_NUMBER", true}, {"ENGINE", false}, {"FULLTEXT_KEYS", false}, {"DELETED_ROWS", true}, {"UPDATE_COUNT", true},
+    {"FREE_EXTENTS", true}, {"TOTAL_EXTENTS", true}, {"EXTENT_SIZE", true}, {"INITIAL_SIZE", true}, {"MAXIMUM_SIZE", true}, {"AUTOEXTEND_SIZE", true},
+    {"CREATION_TIME", false}, {"LAST_UPDATE_TIME", false}, {"LAST_ACCESS_TIME", false}, {"RECOVER_TIME", true}, {"TRANSACTION_COUNTER", true}, {"VERSION", true},
+    {"ROW_FORMAT", false}, {"TABLE_ROWS", true}, {"AVG_ROW_LENGTH", true}, {"DATA_LENGTH", true}, {"MAX_DATA_LENGTH", true}, {"INDEX_LENGTH", true}, {"DATA_FREE", true},
+    {"CREATE_TIME", false}, {"UPDATE_TIME", false}, {"CHECK_TIME", false}, {"CHECKSUM", true}, {"STATUS", false}, {"EXTRA", false}};
+const std::vector<IC> kColumnStatistics = {{"SCHEMA_NAME", false}, {"TABLE_NAME", false}, {"COLUMN_NAME", false}, {"HISTOGRAM", false}};
 const std::vector<IC> kCharacterSets = {{"CHARACTER_SET_NAME", false}, {"DEFAULT_COLLATE_NAME", false}, {"DESCRIPTION", false}, {"MAXLEN", true}};
 const std::vector<IC> kCollations = {{"COLLATION_NAME", false}, {"CHARACTER_SET_NAME", false}, {"ID", true}, {"IS_DEFAULT", false}, {"IS_COMPILED", false},
                                      {"SORTLEN", true}, {"PAD_ATTRIBUTE", false}};
@@ -167,6 +247,12 @@ const std::vector<InfoSchemaColumn>* Executor::info_schema_columns(const std::st
     if (lower == "referential_constraints") return &kReferentialConstraints;
     if (lower == "statistics") return &kStatistics;
     if (lower == "views") return &kViews;
+    if (lower == "routines") return &kRoutines;
+    if (lower == "parameters") return &kParameters;
+    if (lower == "triggers") return &kTriggers;
+    if (lower == "check_constraints") return &kCheckConstraints;
+    if (lower == "files") return &kFiles;
+    if (lower == "column_statistics") return &kColumnStatistics;
     if (lower == "character_sets") return &kCharacterSets;
     if (lower == "collations") return &kCollations;
     if (lower == "engines") return &kEngines;
@@ -444,6 +530,29 @@ std::vector<Row> Executor::info_schema_rows(const SharedDatabase& s, const std::
                 r["REFERENCED_COLUMN_NAME"] = EXECUTOR_NULL_VALUE;
                 rows.push_back(std::move(r));
             }
+            // (the columns of the UNIQUE keys: the key of one column, then those of several, each as the key is named)
+            auto add_unique = [&](const std::string& key_name, const std::vector<std::string>& columns) {
+                for (std::size_t pos = 0; pos < columns.size(); pos++) {
+                    Row r;
+                    r["CONSTRAINT_CATALOG"] = "def";
+                    r["CONSTRAINT_SCHEMA"] = db;
+                    r["CONSTRAINT_NAME"] = key_name;
+                    r["TABLE_CATALOG"] = "def";
+                    r["TABLE_SCHEMA"] = db;
+                    r["TABLE_NAME"] = tbl;
+                    r["COLUMN_NAME"] = columns[pos];
+                    r["ORDINAL_POSITION"] = std::to_string(pos + 1);
+                    r["POSITION_IN_UNIQUE_CONSTRAINT"] = EXECUTOR_NULL_VALUE;
+                    r["REFERENCED_TABLE_SCHEMA"] = EXECUTOR_NULL_VALUE;
+                    r["REFERENCED_TABLE_NAME"] = EXECUTOR_NULL_VALUE;
+                    r["REFERENCED_COLUMN_NAME"] = EXECUTOR_NULL_VALUE;
+                    rows.push_back(std::move(r));
+                }
+            };
+            for (auto& col : schema.columns) {
+                if (col.unique && !col.primary_key) add_unique(col.unique_constraint_name.value_or(col.name), {col.name});
+            }
+            for (auto& key : schema.unique_keys) add_unique(key.name.value_or(key.columns.front()), key.columns);
             for (std::size_t i = 0; i < schema.columns.size(); i++) {
                 auto& col = schema.columns[i];
                 for (std::size_t k = 0; k < col.foreign_keys.size(); k++) {
@@ -546,11 +655,22 @@ std::vector<Row> Executor::info_schema_rows(const SharedDatabase& s, const std::
                     rows.push_back(std::move(r));
                 }
             }
-            for (auto& cc : schema.check_constraints) {
+            for (auto& key : schema.unique_keys) {
                 Row r;
                 r["CONSTRAINT_CATALOG"] = "def";
                 r["CONSTRAINT_SCHEMA"] = db;
-                r["CONSTRAINT_NAME"] = cc.name.value_or("chk");
+                r["CONSTRAINT_NAME"] = key.name.value_or(key.columns.front());
+                r["TABLE_SCHEMA"] = db;
+                r["TABLE_NAME"] = tbl;
+                r["CONSTRAINT_TYPE"] = "UNIQUE";
+                r["ENFORCED"] = "YES";
+                rows.push_back(std::move(r));
+            }
+            for (auto& [check_name, check_text] : check_constraints_of(schema, tbl)) {
+                Row r;
+                r["CONSTRAINT_CATALOG"] = "def";
+                r["CONSTRAINT_SCHEMA"] = db;
+                r["CONSTRAINT_NAME"] = check_name;
                 r["TABLE_SCHEMA"] = db;
                 r["TABLE_NAME"] = tbl;
                 r["CONSTRAINT_TYPE"] = "CHECK";
@@ -663,9 +783,19 @@ std::vector<Row> Executor::info_schema_rows(const SharedDatabase& s, const std::
             r["TABLE_CATALOG"] = "def";
             r["TABLE_SCHEMA"] = db;
             r["TABLE_NAME"] = vw;
-            r["VIEW_DEFINITION"] = "";
-            r["CHECK_OPTION"] = "NONE";
-            r["IS_UPDATABLE"] = "NO";
+            // (the SELECT as it was written; MySQL writes it in a form of its own, the leftover of the SHOW CREATE VIEW row)
+            auto raw = s.view_raw_sql.find(name);
+            r["VIEW_DEFINITION"] = raw == s.view_raw_sql.end() ? std::string() : raw->second;
+            std::string check_option = "NONE";
+            if (raw != s.view_raw_sql.end()) {
+                std::string up = raw->second;
+                for (char& c : up) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+                if (up.find("WITH CASCADED CHECK OPTION") != std::string::npos || up.find("WITH CHECK OPTION") != std::string::npos) check_option = "CASCADED";
+                else if (up.find("WITH LOCAL CHECK OPTION") != std::string::npos) check_option = "LOCAL";
+            }
+            r["CHECK_OPTION"] = check_option;
+            // (a view of one table's rows, or a join of tables without an outer join, takes writes)
+            r["IS_UPDATABLE"] = resolve_updatable_view(s, name) || !view_write_refusal(s, name, "UPDATE") ? "YES" : "NO";
             r["DEFINER"] = "root@%";
             r["SECURITY_TYPE"] = "DEFINER";
             r["CHARACTER_SET_CLIENT"] = "utf8mb4";
@@ -683,13 +813,25 @@ std::vector<Row> Executor::info_schema_rows(const SharedDatabase& s, const std::
             r["DESCRIPTION"] = "UTF-8 Unicode";
             r["MAXLEN"] = "4";
         } else if (lower == "collations") {
-            r["COLLATION_NAME"] = "utf8mb4_0900_ai_ci";
-            r["CHARACTER_SET_NAME"] = "utf8mb4";
-            r["ID"] = "255";
-            r["IS_DEFAULT"] = "Yes";
-            r["IS_COMPILED"] = "Yes";
-            r["SORTLEN"] = "0";
-            r["PAD_ATTRIBUTE"] = "NO PAD";
+            // the utf8mb4 collations a client lists (a choice in a table editor), as MySQL 8.4 lists them (ids, default, sort length, pad)
+            struct CollationRow { const char *name, *id, *is_default, *sortlen, *pad; };
+            static const CollationRow kList[] = {
+                {"utf8mb4_general_ci", "45", "", "1", "PAD SPACE"},   {"utf8mb4_bin", "46", "", "1", "PAD SPACE"},       {"utf8mb4_unicode_ci", "224", "", "8", "PAD SPACE"},
+                {"utf8mb4_unicode_520_ci", "246", "", "8", "PAD SPACE"}, {"utf8mb4_0900_ai_ci", "255", "Yes", "0", "NO PAD"}, {"utf8mb4_0900_as_cs", "278", "", "0", "NO PAD"},
+                {"utf8mb4_0900_as_ci", "305", "", "0", "NO PAD"},     {"utf8mb4_0900_bin", "309", "", "1", "NO PAD"},
+            };
+            for (const CollationRow& c : kList) {
+                Row collation;
+                collation["COLLATION_NAME"] = c.name;
+                collation["CHARACTER_SET_NAME"] = "utf8mb4";
+                collation["ID"] = c.id;
+                collation["IS_DEFAULT"] = c.is_default;
+                collation["IS_COMPILED"] = "Yes";
+                collation["SORTLEN"] = c.sortlen;
+                collation["PAD_ATTRIBUTE"] = c.pad;
+                rows.push_back(std::move(collation));
+            }
+            return rows;
         } else {
             // the rows MySQL 8.4 shows, word for word. RuSQL has one engine, InnoDB-like (transactions, row locks, foreign keys); `ENGINE = MyISAM` and the others are
             // accepted in CREATE TABLE and ignored, and XA transactions are not there: the list tells what MySQL tells, as the Compat scoreboard compares it
@@ -720,6 +862,169 @@ std::vector<Row> Executor::info_schema_rows(const SharedDatabase& s, const std::
             return rows;
         }
         rows.push_back(std::move(r));
+        return rows;
+    }
+
+    if (lower == "routines" || lower == "parameters") {
+        const bool parameters = lower == "parameters";
+        // (a function's parameters carry the types it was declared with, in its stored body)
+        auto function_types = [&](const UserFunctionDef& def) {
+            std::pair<std::vector<std::string>, std::string> out; // (types of the parameters, the type of the result)
+            out.first.assign(def.first.size(), "");
+            try {
+                auto framed = nlohmann::json::parse(def.second);
+                if (framed.is_object() && framed.contains("param_types")) {
+                    auto types = framed.at("param_types").get<std::vector<std::string>>();
+                    for (std::size_t k = 0; k < types.size() && k < out.first.size(); k++) out.first[k] = types[k];
+                    out.second = framed.value("return_type", "");
+                }
+            } catch (const std::exception&) {
+            }
+            return out;
+        };
+        auto source_of = [&](const std::string& key) {
+            auto it = s.routine_sources.find(key);
+            return it == s.routine_sources.end() ? std::string() : it->second.second;
+        };
+        for (const bool function : {false, true}) {
+            std::vector<std::string> names;
+            if (function) for (auto& [name, unused] : s.user_functions) names.push_back(name);
+            else for (auto& [name, unused] : s.procedures) names.push_back(name);
+            std::sort(names.begin(), names.end());
+            for (const std::string& name : names) {
+                const std::string key = routine_key(function ? "function" : "procedure", name);
+                const RoutineParts parts = split_routine_source(source_of(key), function);
+                std::string returns = parts.returns;
+                std::vector<std::string> param_types;
+                if (function) {
+                    auto types = function_types(s.user_functions.at(name));
+                    param_types = std::move(types.first);
+                    if (returns.empty()) returns = types.second;
+                }
+                for (const std::string& database : routine_databases(s, key)) {
+                    if (!parameters) {
+                        Row r;
+                        r["SPECIFIC_NAME"] = name;
+                        r["ROUTINE_CATALOG"] = "def";
+                        r["ROUTINE_SCHEMA"] = database;
+                        r["ROUTINE_NAME"] = name;
+                        r["ROUTINE_TYPE"] = function ? "FUNCTION" : "PROCEDURE";
+                        if (function) fill_declared_type(r, returns);
+                        else { fill_declared_type(r, ""); r["DATA_TYPE"] = ""; } // (a procedure has no type: MySQL says an empty text)
+                        r["ROUTINE_BODY"] = "SQL";
+                        r["ROUTINE_DEFINITION"] = parts.body.empty() ? std::string(EXECUTOR_NULL_VALUE) : parts.body;
+                        r["EXTERNAL_NAME"] = EXECUTOR_NULL_VALUE;
+                        r["EXTERNAL_LANGUAGE"] = "SQL";
+                        r["PARAMETER_STYLE"] = "SQL";
+                        std::string access = "CONTAINS SQL", security = "DEFINER", comment, deterministic = "NO";
+                        for (const std::string& c : parts.characteristics) {
+                            std::string up = c;
+                            for (char& ch : up) ch = static_cast<char>(std::toupper(static_cast<unsigned char>(ch)));
+                            if (up == "DETERMINISTIC") deterministic = "YES";
+                            else if (up.rfind("NO SQL", 0) == 0 || up.rfind("READS SQL", 0) == 0 || up.rfind("MODIFIES SQL", 0) == 0) access = up;
+                            else if (up.rfind("SQL SECURITY INVOKER", 0) == 0) security = "INVOKER";
+                            else if (up.rfind("COMMENT", 0) == 0) {
+                                const std::size_t open = c.find('\''), close = c.rfind('\'');
+                                if (open != std::string::npos && close > open) { // (the value of the literal: a doubled quote is one, and a backslash takes the next character as it is)
+                                    for (std::size_t k = open + 1; k < close; k++) {
+                                        if (c[k] == '\'' && k + 1 < close && c[k + 1] == '\'') k++;
+                                        else if (c[k] == '\\' && k + 1 < close) k++;
+                                        comment.push_back(c[k]);
+                                    }
+                                }
+                            }
+                        }
+                        r["IS_DETERMINISTIC"] = deterministic;
+                        r["SQL_DATA_ACCESS"] = access;
+                        r["SQL_PATH"] = EXECUTOR_NULL_VALUE;
+                        r["SECURITY_TYPE"] = security;
+                        r["CREATED"] = EXECUTOR_NULL_VALUE;
+                        r["LAST_ALTERED"] = EXECUTOR_NULL_VALUE;
+                        r["SQL_MODE"] = kDefaultSqlMode;
+                        r["ROUTINE_COMMENT"] = comment;
+                        r["DEFINER"] = "root@localhost";
+                        r["CHARACTER_SET_CLIENT"] = "utf8mb4";
+                        r["COLLATION_CONNECTION"] = "utf8mb4_0900_ai_ci";
+                        r["DATABASE_COLLATION"] = "utf8mb4_0900_ai_ci";
+                        rows.push_back(std::move(r));
+                        continue;
+                    }
+                    auto add = [&](std::size_t position, const std::string& mode, const std::string& param_name, const std::string& type_text) {
+                        Row r;
+                        r["SPECIFIC_CATALOG"] = "def";
+                        r["SPECIFIC_SCHEMA"] = database;
+                        r["SPECIFIC_NAME"] = name;
+                        r["ORDINAL_POSITION"] = std::to_string(position);
+                        r["PARAMETER_MODE"] = mode.empty() ? std::string(EXECUTOR_NULL_VALUE) : mode;
+                        r["PARAMETER_NAME"] = param_name.empty() ? std::string(EXECUTOR_NULL_VALUE) : param_name;
+                        fill_declared_type(r, type_text);
+                        r["ROUTINE_TYPE"] = function ? "FUNCTION" : "PROCEDURE";
+                        rows.push_back(std::move(r));
+                    };
+                    if (function) {
+                        add(0, "", "", returns); // (the value a function returns is parameter 0)
+                        const auto& def = s.user_functions.at(name);
+                        for (std::size_t k = 0; k < def.first.size(); k++) add(k + 1, "IN", def.first[k], k < param_types.size() ? param_types[k] : std::string());
+                    } else {
+                        const auto& def = s.procedures.at(name);
+                        for (std::size_t k = 0; k < def.first.size(); k++) add(k + 1, std::get<0>(def.first[k]), std::get<1>(def.first[k]), std::get<2>(def.first[k]));
+                    }
+                }
+            }
+        }
+        return rows;
+    }
+
+    if (lower == "triggers") {
+        std::vector<std::string> names;
+        for (auto& [name, unused] : s.triggers) names.push_back(name);
+        std::sort(names.begin(), names.end());
+        for (const std::string& name : names) {
+            const auto& [table, timing, event, unused_body] = s.triggers.at(name);
+            auto [db, bare_table] = split_name(table);
+            const std::string key = routine_key("trigger", name);
+            if (db.empty() && s.routine_sources.count(key)) db = s.routine_sources.at(key).first; // (a trigger is made on a table named with its database: this is for one that was not)
+            Row r;
+            r["TRIGGER_CATALOG"] = "def";
+            r["TRIGGER_SCHEMA"] = db;
+            r["TRIGGER_NAME"] = name;
+            r["EVENT_MANIPULATION"] = event;
+            r["EVENT_OBJECT_CATALOG"] = "def";
+            r["EVENT_OBJECT_SCHEMA"] = db;
+            r["EVENT_OBJECT_TABLE"] = bare_table;
+            r["ACTION_ORDER"] = "1";
+            r["ACTION_CONDITION"] = EXECUTOR_NULL_VALUE;
+            r["ACTION_STATEMENT"] = s.routine_sources.count(key) ? s.routine_sources.at(key).second : std::string();
+            r["ACTION_ORIENTATION"] = "ROW";
+            r["ACTION_TIMING"] = timing;
+            r["ACTION_REFERENCE_OLD_TABLE"] = EXECUTOR_NULL_VALUE;
+            r["ACTION_REFERENCE_NEW_TABLE"] = EXECUTOR_NULL_VALUE;
+            r["ACTION_REFERENCE_OLD_ROW"] = "OLD";
+            r["ACTION_REFERENCE_NEW_ROW"] = "NEW";
+            r["CREATED"] = EXECUTOR_NULL_VALUE;
+            r["SQL_MODE"] = kDefaultSqlMode;
+            r["DEFINER"] = "root@localhost";
+            r["CHARACTER_SET_CLIENT"] = "utf8mb4";
+            r["COLLATION_CONNECTION"] = "utf8mb4_0900_ai_ci";
+            r["DATABASE_COLLATION"] = "utf8mb4_0900_ai_ci";
+            rows.push_back(std::move(r));
+        }
+        return rows;
+    }
+
+    if (lower == "check_constraints") {
+        for (auto& [_, schema] : s.catalog.tables) {
+            auto [db, tbl] = split_name(schema.name);
+            if (db.empty() || db == "information_schema") continue;
+            for (auto& [check_name, check_text] : check_constraints_of(schema, tbl)) {
+                Row r;
+                r["CONSTRAINT_CATALOG"] = "def";
+                r["CONSTRAINT_SCHEMA"] = db;
+                r["CONSTRAINT_NAME"] = check_name;
+                r["CHECK_CLAUSE"] = "(" + check_text + ")";
+                rows.push_back(std::move(r));
+            }
+        }
         return rows;
     }
 

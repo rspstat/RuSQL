@@ -142,8 +142,9 @@ RuSQL이 실제로 받아서 실행하는 SQL 문법을 한 줄씩 정리한 문
 
 - SELECT 식, ... [WHERE 조건] : 값 · 식 계산(FROM 없이도 가능, FROM 없이 쓴 WHERE가 거짓이면 열 이름만 있는 빈 결과)
 - SELECT * / t.* : 모든 컬럼
-- SELECT 식 [AS] 별칭 : 결과 컬럼에 이름 붙이기
+- SELECT 식 [AS] 별칭 / SELECT 식 [AS] '문자열' : 결과 컬럼에 이름 붙이기(문자열도 이름이 됨: `AS 'Total'`, `id 'a2'`; 표 별칭에는 문자열을 못 씀 — MySQL과 같음; 별칭이 키워드이면 쓴 그대로의 대소문자로 이름이 됨, `AS Count`; R83)
 - SELECT DISTINCT ... : 중복 행 제거
+- SELECT [ALL | DISTINCT | DISTINCTROW] [HIGH_PRIORITY] [STRAIGHT_JOIN] [SQL_SMALL_RESULT] [SQL_BIG_RESULT] [SQL_BUFFER_RESULT] [SQL_NO_CACHE] ... : `SELECT` 바로 뒤의 수식어 — 읽기만 하고 아무것도 바꾸지 않음(최적화 힌트; `DISTINCT` · `DISTINCTROW`만 뜻이 있음; `mysqldump`가 `SELECT /*!40001 SQL_NO_CACHE */ * FROM t`를 보낸다; 같은 이름이라도 백틱 안이면 열 이름; R83)
 - SELECT ... FROM t [[AS] 별칭] : 테이블(별칭 포함)에서 조회
 - SELECT ... FROM db.t : 데이터베이스를 붙여 조회
 - SELECT ... FROM (SELECT ...) 별칭 : 파생 테이블(FROM 절 서브쿼리)
@@ -179,6 +180,7 @@ RuSQL이 실제로 받아서 실행하는 SQL 문법을 한 줄씩 정리한 문
 - FULL [OUTER] JOIN : 양쪽 행을 모두 유지
 - CROSS JOIN : 모든 조합(카테시안 곱)
 - NATURAL JOIN : 이름이 같은 컬럼으로 자동 결합
+- a STRAIGHT_JOIN b ON ... : 안쪽 조인과 같음(MySQL에서는 왼쪽 표를 먼저 읽으라는 뜻; 여기서는 순서를 옵티마이저가 정함; R83)
 - FROM a, b WHERE ... : 쉼표 조인
 - JOIN LATERAL (서브쿼리) 별칭 ON ... / FROM a, LATERAL (서브쿼리) 별칭 : 앞 테이블의 컬럼을 쓰는 서브쿼리와 결합(`SELECT *` · `별칭.*`가 그 서브쿼리의 열도 나열; R82 — 전에는 앞 표의 열만 오류 없이 돌려줬다)
 - JOIN (서브쿼리) 별칭 ON ... : 파생 테이블과 결합
@@ -228,6 +230,7 @@ RuSQL이 실제로 받아서 실행하는 SQL 문법을 한 줄씩 정리한 문
 - SUBSTRING(문자열 FROM n [FOR m]) : 문자열 일부(쉼표 형식도 가능)
 - POSITION(부분 IN 문자열) : 위치 찾기
 - 열 -> '$.경로' / 열 ->> '$.경로' : JSON 값 꺼내기 / 따옴표 없는 문자열로 꺼내기(R60: MySQL처럼 **열 뒤에서만**: 문자열·수·함수 결과 뒤의 화살표는 문법 오류, 함수 결과에는 `JSON_EXTRACT(식, '$.경로')`)
+- 'a' 'b' : 이웃한 문자열 리터럴은 하나(`'ab'`; R83)
 - 'text' / "text" : 문자열 리터럴(`''` 따옴표 두 번, `\n` `\t` `\\` `\'` 이스케이프, `\%` · `\_`는 두 글자 그대로 남아 LIKE가 읽음; 큰따옴표는 컬럼 이름으로 읽음)
 - 123 / 1.5 / 1e3 : 숫자 · 지수 리터럴
 - 0x4142 / X'4142' / 0b101 / b'101' : 16진 · 비트 리터럴 — 그 **바이트**를 글자로(`0x41`은 `A`; 전에는 숫자 글자 `"41"`을 저장했다), 숫자를 물으면 그 바이트가 만드는 부호 없는 정수(`0x41 + 0`은 65, `b'101' + 0`은 5; 숫자 열과의 비교 `WHERE n = 0x01`은 아직 글자로 비교). UTF-8이 아닌 바이트(`0xFF`)는 행이 JSON으로 저장되어 오류로 거절
@@ -398,7 +401,7 @@ JSON 값은 MySQL이 쓰는 모양으로 저장되고 돌려준다(R77): 객체�
 
 ### 테이블 잠금
 
-- LOCK TABLES t READ | WRITE[, t2 READ | WRITE ...] : 테이블 잠금
+- LOCK TABLES t READ [LOCAL] | WRITE[, t2 READ [LOCAL] | WRITE ...] : 테이블 잠금(뷰도 잠글 수 있음; `READ /*!32311 LOCAL */`은 `mysqldump`가 보내는 모양; `LOW_PRIORITY WRITE`는 MySQL 8.4가 없앤 문법이라 오류; R83)
 - UNLOCK TABLES : 테이블 잠금 해제
 - SHOW LOCKS : 현재 잠금 목록
 
@@ -411,7 +414,7 @@ JSON 값은 MySQL이 쓰는 모양으로 저장되고 돌려준다(R77): 객체�
 - SET NAMES 문자집합 [COLLATE 규칙] / SET CHARACTER SET 문자집합 : 접속 문자 집합 지정(받아들이기만 함)
 - SET FOREIGN_KEY_CHECKS = 0 | 1 : 외래 키 검사 켜고 끄기(덤프 복원용)
 - SET max_execution_time = ms : 문장 실행 시간 제한
-- SET sql_mode = '...' : SQL 모드 지정(PIPES_AS_CONCAT · ANSI 등)
+- SET sql_mode = '...' : SQL 모드 지정(PIPES_AS_CONCAT · ANSI 등; **`ONLY_FULL_GROUP_BY`가 없는 모드**(`''`)에서는 그룹에 없는 열이 오류가 아니라 그 그룹의 첫 행 값 — `mysqldump`가 접속하자마자 `SET sql_mode = ''`를 보낸다; R83)
 
 ### 준비된 문장
 
@@ -425,7 +428,7 @@ JSON 값은 MySQL이 쓰는 모양으로 저장되고 돌려준다(R77): 객체�
 
 - SHOW TABLES [FROM db] [LIKE 'pattern'] : 테이블 목록
 - DESCRIBE t : 테이블 구조
-- SHOW CREATE TABLE t : 테이블을 만드는 CREATE 문
+- SHOW CREATE TABLE t : 테이블을 만드는 CREATE 문(열에 쓴 `CHECK`도, 이름순으로; 이름 없는 `CHECK`는 `표_chk_번호`; R83)
 - SHOW CREATE VIEW v : 뷰를 만드는 CREATE 문
 - SHOW INDEX FROM t : 인덱스 목록
 - SHOW GRANTS [FOR 'user'@'host'] : 권한 목록
@@ -460,8 +463,11 @@ JSON 값은 MySQL이 쓰는 모양으로 저장되고 돌려준다(R77): 객체�
 
 - information_schema.tables / columns / statistics : 테이블 · 컬럼 · 인덱스 정보(R60: `columns`는 뷰의 열도 냄 — 그대로 가져온 열은 그 열의 타입, 계산한 열은 TEXT; `tables`의 `AVG_ROW_LENGTH`·`DATA_LENGTH`·`INDEX_LENGTH`는 InnoDB가 세는 16 KB 쪽 수를 행에서 추정한 값이라 작은 표는 MySQL과 같고 큰 표는 몇 % 어긋남)
 - information_schema.schemata (schemas) : 데이터베이스 목록
-- information_schema.key_column_usage / table_constraints / referential_constraints : 키 · 제약 · 외래 키 정보
-- information_schema.views : 뷰 정보
+- information_schema.key_column_usage / table_constraints / referential_constraints : 키 · 제약 · 외래 키 정보(R83: `UNIQUE` 키의 열도 — 두 열짜리 포함 — 나옴)
+- information_schema.check_constraints : `CHECK` 제약(이름 · 조건; 이름이 없으면 `표_chk_번호`; R83)
+- information_schema.views : 뷰 정보(R83: `VIEW_DEFINITION`은 쓴 SELECT, `IS_UPDATABLE`은 쓰기가 되는 뷰면 `YES`, `CHECK_OPTION`)
+- information_schema.routines / parameters / triggers : 저장 프로시저 · 함수 · 매개변수 · 트리거(R83: 만들 때 쓴 글자에서 본문 · 특성 · 설명을 읽음; 만든 시각은 NULL, `DEFINER`는 `root@localhost`; R83 전에 만든 루틴은 모든 데이터베이스에 나타남)
+- information_schema.files / column_statistics : 비어 있는 표(`mysqldump`가 먼저 묻는 것; R83)
 - information_schema.character_sets / collations / engines : 문자 집합 · 정렬 규칙 · 엔진 목록
 - information_schema.processlist : 세션 목록
 - information_schema.innodb_trx / innodb_locks / innodb_lock_waits / innodb_deadlocks : 트랜잭션 · 잠금 · 잠금 대기 · 교착 상태(`innodb_trx`의 `TRX_MYSQL_THREAD_ID`는 그 트랜잭션을 연 세션의 번호, `TRX_STARTED`는 시작 시각)
@@ -526,17 +532,20 @@ JSON 값은 MySQL이 쓰는 모양으로 저장되고 돌려준다(R77): 객체�
 
 mysql 클라이언트 · 드라이버 · 도구가 보내는 문장을 받아주는 호환 계층입니다(네이티브 프로토콜에서는 같은 이름의 문법이 없습니다).
 
-- SHOW [FULL] TABLES [FROM db] [LIKE '...'] : 테이블 목록(FULL은 Table_type 열 포함)
+- SHOW [FULL] TABLES [FROM db] [LIKE '...'] : 테이블 목록(FULL은 Table_type 열 포함: 뷰는 `VIEW`, R83)
 - SHOW [FULL] COLUMNS | FIELDS FROM t [FROM db] [LIKE '...'] : 컬럼 목록
 - DESC t / DESCRIBE t [col] / EXPLAIN t : 컬럼 목록(MySQL의 모양)
 - SHOW INDEX | INDEXES | KEYS FROM t [FROM db] : 인덱스 목록(MySQL의 모양)
-- SHOW CREATE TABLE t / SHOW CREATE VIEW v : MySQL 형식의 CREATE 문
-- SHOW TABLE STATUS [FROM db] [LIKE '...'] : 테이블 상태(`Create_time`·`Update_time`·`Check_time`은 NULL)
+- SHOW CREATE TABLE t / SHOW CREATE VIEW v : MySQL 형식의 CREATE 문(`SHOW CREATE TABLE 뷰`는 `SHOW CREATE VIEW`처럼 `View | Create View | character_set_client | collation_connection`으로 답함; R83)
+- SHOW CREATE DATABASE [IF NOT EXISTS] db : `CREATE DATABASE `db` /*!40100 DEFAULT CHARACTER SET utf8mb4 … */`(R83)
+- SHOW CREATE PROCEDURE p / FUNCTION f / TRIGGER t : 만들 때 쓴 글자를 MySQL의 모양으로(`CREATE DEFINER=`root`@`localhost` PROCEDURE `p`(매개변수)`, 특성이 한 줄씩, 본문; 형은 `RETURNS int` · `varchar(30) CHARSET utf8mb4` 식) — 계정에 데이터베이스의 `CREATE ROUTINE`(트리거는 표의 `TRIGGER`)이 있어야 보임; 없는 이름은 1305(트리거는 1360); R83 전에 만든 루틴은 글자가 없어 "다시 만들라"는 오류(R83)
+- SHOW TRIGGERS [FROM db] [LIKE '표' | WHERE ...] / SHOW PROCEDURE STATUS | FUNCTION STATUS [LIKE | WHERE ...] : 트리거 · 루틴 목록(`information_schema.triggers` · `routines`에서 읽음; 만든 시각은 NULL; R83)
+- SHOW TABLE STATUS [FROM db] [LIKE '...'] : 테이블 상태(`Create_time`·`Update_time`·`Check_time`은 NULL; 뷰도 한 행 — `Comment`가 `VIEW`, R83)
 - SHOW VARIABLES [LIKE '...'] / SHOW SESSION | GLOBAL VARIABLES : 서버 변수 목록
 - SHOW CHARACTER SET / SHOW CHARSET / SHOW COLLATION : 문자 집합 · 정렬 규칙 목록
 - SHOW ENGINES / SHOW PLUGINS : 엔진 · 플러그인 목록(R60: `SHOW ENGINES`·`information_schema.engines`는 MySQL 8.4의 11행을 그대로 보임 — **RuSQL의 엔진은 InnoDB 방식 하나뿐**이라 `ENGINE = MyISAM` 같은 옵션은 받아서 무시하고 트랜잭션·행 잠금이 있는 같은 방식으로 만들며, InnoDB의 `XA = YES`도 표시일 뿐 XA 문장은 없음)
 - SHOW WARNINGS : 경고 목록(항상 비어 있음)
-- SHOW EVENTS / SHOW TRIGGERS / SHOW PROCEDURE STATUS / SHOW FUNCTION STATUS : 빈 목록으로 응답
+- SHOW EVENTS : 빈 목록으로 응답
 - ANALYZE TABLE t : 통계 갱신(MySQL 응답 모양; `OPTIMIZE` · `CHECK`는 R71부터 엔진 안의 문장으로 11장에 있다)
 - SELECT VERSION() / USER() / CURRENT_USER() / DATABASE() / @@변수 : 클라이언트가 접속 직후 보내는 질의
 - SET NAMES / SET character_set_* / SET autocommit ... : 클라이언트의 접속 설정(모르는 변수는 OK로 응답)
@@ -560,12 +569,12 @@ mysql 클라이언트 · 드라이버 · 도구가 보내는 문장을 받아주
 - **테이블 정의** : `GENERATED ALWAYS AS (...)` 생성 컬럼, `DEFAULT (식)`, `CREATE TEMPORARY TABLE`, `FULLTEXT` 인덱스, 인덱스 접두 길이 `col(n)`, 여러 컬럼 외래 키, 표현식 인덱스, `ZEROFILL`, `SERIAL` · `BINARY` · `VARBINARY` · `BIT` · `GEOMETRY` 타입, `ALTER TABLE ADD/DROP PRIMARY KEY`, `ALTER TABLE CONVERT TO CHARACTER SET`, 파티션 `KEY` · `COLUMNS` · `REORGANIZE` · `TRUNCATE PARTITION`, `DROP TABLE ... CASCADE`, `CREATE INDEX IF NOT EXISTS`, `ALTER DATABASE`
 - **뷰** : `CREATE VIEW v (컬럼 목록) AS ...`, 조인 뷰의 `UPDATE` · `INSERT`(MySQL은 한 표의 열만 쓰면 받음)
 - **데이터 쓰기** : `INSERT ... VALUES ()`(빈 값), `INSERT ... DEFAULT VALUES`, `INSERT ... AS 별칭`, `INSERT/UPDATE/DELETE LOW_PRIORITY · QUICK`, `UPDATE IGNORE`, `UPDATE ... JOIN (파생 테이블)`, `DELETE FROM ... USING`, `LOAD DATA`, `SELECT ... INTO OUTFILE`
-- **조회** : `NATURAL LEFT | RIGHT JOIN`, `TABLE t`, `VALUES ROW(...)`, `USE | FORCE | IGNORE INDEX` 힌트, `PARTITION (p)` 선택, `STRAIGHT_JOIN`, `SELECT ALL | HIGH_PRIORITY`, `NULLS FIRST | LAST`, `OFFSET n ROWS`, `FOR UPDATE OF 테이블`, `NATURAL LEFT JOIN`, `IN (SELECT ... UNION SELECT ...)`, `INSERT ... SELECT ... ON DUPLICATE KEY UPDATE`
+- **조회** : `NATURAL LEFT | RIGHT JOIN`, `TABLE t`, `VALUES ROW(...)`, `USE | FORCE | IGNORE INDEX` 힌트, `PARTITION (p)` 선택, `NULLS FIRST | LAST`, `OFFSET n ROWS`, `FOR UPDATE OF 테이블`, `NATURAL LEFT JOIN`, `IN (SELECT ... UNION SELECT ...)`, `INSERT ... SELECT ... ON DUPLICATE KEY UPDATE`
 - **식 · 리터럴** : `IS [NOT] DISTINCT FROM`, `BETWEEN SYMMETRIC`, `DATE '2024-01-01'`, `COLLATE` 연산자, `BINARY` 연산자, `MATCH ... AGAINST`, `SOUNDS LIKE`, `SELECT @a := 식`, `CONVERT(식 USING 문자집합)`, `DEFAULT(col)`, `GROUPING()`
 - **함수** : `PERCENTILE_CONT ... WITHIN GROUP`, `BIT_XOR`, `CONNECTION_ID`, `GET_LOCK`, `INET_ATON`, `BENCHMARK`, `JSON_STORAGE_SIZE` 등 위 9장에 없는 함수
 - **프로시저** : `SIGNAL`, `DECLARE ... HANDLER`, 커서(`DECLARE CURSOR`), 본문의 `CASE ... END CASE`, 반복문 끝의 라벨(`END WHILE lp`), `CREATE PROCEDURE IF NOT EXISTS`, `CREATE OR REPLACE PROCEDURE`, `CREATE TRIGGER IF NOT EXISTS`, 여러 문장 함수 본문(`BEGIN ... RETURN ... END`)
 - **권한 · 사용자** : 프로시저 · 함수 수준의 `GRANT EXECUTE`는 받지만 `SHOW GRANTS`의 모양만 같고 MySQL의 모든 경우를 다 따라가지는 않음, `FLUSH PRIVILEGES`(필요 없음: 권한은 문장마다 바로 반영됨), 비밀번호 정책 · 계정 잠금 · 만료
-- **조회 · 관리** : `SHOW CREATE DATABASE`, `SHOW CREATE PROCEDURE`, `SHOW CREATE TRIGGER`, `SHOW TABLES IN db`, `SHOW FULL PROCESSLIST`, `SHOW ENGINE INNODB STATUS`, `SHOW MASTER STATUS`, `SHOW SLAVE STATUS`, `SHOW PRIVILEGES`, `SHOW ERRORS`, `SHOW DATABASES LIKE`, `SHOW OPEN TABLES`, `SHOW DATABASES LIKE`, `EXPLAIN FORMAT=JSON`, `EXPLAIN EXTENDED`, `EXPLAIN INSERT | UPDATE | DELETE`의 실행 계획(안내만 나옴), `information_schema.routines`, `information_schema.triggers`, `FLUSH`, `HELP`, `DELIMITER`, `XA`, `LOCK TABLES t AS 별칭`, `DROP PREPARE`
+- **조회 · 관리** : `SHOW TABLES IN db`, `SHOW FULL PROCESSLIST`, `SHOW ENGINE INNODB STATUS`, `SHOW MASTER STATUS`, `SHOW SLAVE STATUS`, `SHOW PRIVILEGES`, `SHOW ERRORS`, `SHOW DATABASES LIKE`, `SHOW OPEN TABLES`, `SHOW DATABASES LIKE`, `EXPLAIN FORMAT=JSON`, `EXPLAIN EXTENDED`, `EXPLAIN INSERT | UPDATE | DELETE`의 실행 계획(안내만 나옴), `information_schema.routines`, `information_schema.triggers`, `FLUSH`, `HELP`, `DELIMITER`, `XA`, `LOCK TABLES t AS 별칭`, `DROP PREPARE`
 - **복제 · 분산** : 복제(replication), XA 분산 트랜잭션, 실제 페이지 단위 버퍼 풀, 이벤트 스케줄러(`CREATE EVENT`)
 
 > 이 문서는 RuSQL 엔진이 받아들이는 문법을 실제로 실행해 확인한 목록입니다. 새 문법을 넣거나 빼면 이 문서도 같이 고칩니다.

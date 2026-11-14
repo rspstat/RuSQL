@@ -21,6 +21,7 @@
 #include <cstring>
 #include <iostream>
 #include <optional>
+#include <set>
 #include <string>
 #include <thread>
 #include <unordered_map>
@@ -1285,6 +1286,15 @@ StringResult show_columns(Executor& exec, TableRef ref, bool full) {
     return out;
 }
 
+// SHOW ... [LIKE 'pattern' | WHERE condition] (R83): the rows of `select` (written with the column names SHOW has) that what follows the statement's name asks for;
+// `like_column`: the column a LIKE is matched against
+StringResult show_filtered(Executor& exec, const std::string& select, const std::string& tail, const char* like_column) {
+    const std::string up_tail = to_upper_str(tail);
+    if (up_tail.rfind("WHERE ", 0) == 0) return exec_inner(exec, "SELECT * FROM (" + select + ") AS shown WHERE " + tail.substr(6));
+    if (up_tail.rfind("LIKE ", 0) == 0) return exec_inner(exec, "SELECT * FROM (" + select + ") AS shown WHERE `" + like_column + "` LIKE " + trim_copy(tail.substr(5)));
+    return exec_inner(exec, select);
+}
+
 // ── MySQL-specific compatibility shims ─────────────────────────
 
 std::optional<StringResult> mysql_compat(const std::string& q, Executor& exec) {
@@ -1388,10 +1398,14 @@ std::optional<StringResult> mysql_compat(const std::string& q, Executor& exec) {
                                             "Starts", "Ends", "Status", "Originator"},
                                            {}));
 
+    // SHOW PROCEDURE / FUNCTION STATUS [LIKE 'pattern' | WHERE condition]: the routines of every database, read from information_schema.routines (R83)
     if (up.rfind("SHOW FUNCTION STATUS", 0) == 0 || up.rfind("SHOW PROCEDURE STATUS", 0) == 0) {
-        return StringResult::Ok(box_table({"Db", "Name", "Type", "Definer", "Modified", "Created", "Security_type", "Comment",
-                                            "character_set_client", "collation_connection", "Database Collation"},
-                                           {}));
+        const bool function = up.rfind("SHOW FUNCTION STATUS", 0) == 0;
+        const std::string select = std::string("SELECT ROUTINE_SCHEMA AS `Db`, ROUTINE_NAME AS `Name`, ROUTINE_TYPE AS `Type`, EXTERNAL_LANGUAGE AS `Language`, DEFINER AS `Definer`, "
+                                               "LAST_ALTERED AS `Modified`, CREATED AS `Created`, SECURITY_TYPE AS `Security_type`, ROUTINE_COMMENT AS `Comment`, "
+                                               "CHARACTER_SET_CLIENT AS `character_set_client`, COLLATION_CONNECTION AS `collation_connection`, DATABASE_COLLATION AS `Database Collation` "
+                                               "FROM information_schema.routines WHERE ROUTINE_TYPE = ") + (function ? "'FUNCTION'" : "'PROCEDURE'");
+        return show_filtered(exec, select, trim_copy(q.substr(std::string(function ? "SHOW FUNCTION STATUS" : "SHOW PROCEDURE STATUS").size())), "Name");
     }
 
     if (up.rfind("SHOW TABLE STATUS", 0) == 0) {
@@ -1408,8 +1422,10 @@ std::optional<StringResult> mysql_compat(const std::string& q, Executor& exec) {
                           "DATA_FREE AS Data_free, AUTO_INCREMENT AS Auto_increment, CREATE_TIME AS Create_time, UPDATE_TIME AS Update_time, "
                           "CHECK_TIME AS Check_time, TABLE_COLLATION AS Collation, CHECKSUM AS Checksum, CREATE_OPTIONS AS Create_options, "
                           "TABLE_COMMENT AS Comment FROM information_schema.tables WHERE table_schema = " +
-                          (db ? sql_quoted(*db) : std::string("DATABASE()")) + " AND table_type = 'BASE TABLE'" +
+                          (db ? sql_quoted(*db) : std::string("DATABASE()")) + // (a view is a row too: its Comment is VIEW, and mysqldump reads it)
                           (pattern ? " AND table_name LIKE " + sql_quoted(*pattern) : std::string());
+        // ... WHERE condition: on the columns SHOW TABLE STATUS has (Name, Engine, Rows, Comment ...), as the other SHOW statements (R83)
+        if (auto where = up.find(" WHERE "); where != std::string::npos && !pattern) return show_filtered(exec, sql, "WHERE " + q.substr(where + 7), "Name");
         auto out = exec_inner(exec, sql);
         if (out.is_ok() && no_rows(out.value())) {
             return StringResult::Ok(box_table({"Name", "Engine", "Version", "Row_format", "Rows", "Avg_row_length", "Data_length", "Max_data_length",
@@ -1425,7 +1441,16 @@ std::optional<StringResult> mysql_compat(const std::string& q, Executor& exec) {
         if (auto ref = read_table_ref(trim_copy(q.substr(std::string("SHOW CREATE TABLE ").size())))) {
             if (auto denied = denied_by_privileges(exec, Statement(Statement::ShowCreateTable{ref->db ? *ref->db + "." + ref->table : ref->table}))) return StringResult::Err(*denied);
             auto text = exec.show_create_table_mysql(ref->db ? *ref->db + "." + ref->table : ref->table);
-            if (text.is_err()) return text;
+            if (text.is_err()) {
+                // SHOW CREATE TABLE of a view answers as SHOW CREATE VIEW does (mysqldump asks it that way)
+                const std::string target = ref->db ? *ref->db + "." + ref->table : ref->table;
+                auto view = exec.show_create_view_mysql(target);
+                if (view.is_ok()) {
+                    if (auto denied = denied_by_privileges(exec, Statement(Statement::ShowCreateView{target}))) return StringResult::Err(*denied);
+                    return StringResult::Ok(box_table({"View", "Create View", "character_set_client", "collation_connection"}, {{ref->table, view.value(), "utf8mb4", "utf8mb4_0900_ai_ci"}}));
+                }
+                return text;
+            }
             std::string created = ref->table; // (the name the table has: the text names it)
             if (auto open = text.value().find('`'); open != std::string::npos) {
                 if (auto close = text.value().find('`', open + 1); close != std::string::npos) created = text.value().substr(open + 1, close - open - 1);
@@ -1468,10 +1493,75 @@ std::optional<StringResult> mysql_compat(const std::string& q, Executor& exec) {
         }
     }
 
+    // SHOW TRIGGERS [FROM db] [LIKE 'table pattern' | WHERE condition] (R83): the triggers of the database, read from information_schema.triggers
     if (up.rfind("SHOW TRIGGERS", 0) == 0) {
-        return StringResult::Ok(box_table({"Trigger", "Event", "Table", "Statement", "Timing", "Created", "sql_mode", "Definer",
-                                            "character_set_client", "collation_connection", "Database Collation"},
-                                           {}));
+        std::string tail = trim_copy(q.substr(std::string("SHOW TRIGGERS").size()));
+        std::optional<std::string> db;
+        if (to_upper_str(tail).rfind("FROM ", 0) == 0 || to_upper_str(tail).rfind("IN ", 0) == 0) {
+            if (auto ref = read_table_ref(tail.substr(tail.find(' ') + 1))) {
+                db = ref->table;
+                tail = ref->rest;
+            }
+        }
+        const std::string select = std::string("SELECT TRIGGER_NAME AS `Trigger`, EVENT_MANIPULATION AS `Event`, EVENT_OBJECT_TABLE AS `Table`, ACTION_STATEMENT AS `Statement`, "
+                                               "ACTION_TIMING AS `Timing`, CREATED AS `Created`, SQL_MODE AS `sql_mode`, DEFINER AS `Definer`, CHARACTER_SET_CLIENT AS `character_set_client`, "
+                                               "COLLATION_CONNECTION AS `collation_connection`, DATABASE_COLLATION AS `Database Collation` FROM information_schema.triggers WHERE TRIGGER_SCHEMA = ") +
+                                  (db ? sql_quoted(*db) : std::string("DATABASE()"));
+        return show_filtered(exec, select, tail, "Table");
+    }
+
+    // SHOW CREATE DATABASE [IF NOT EXISTS] db, SHOW CREATE PROCEDURE | FUNCTION | TRIGGER name (R83): the statement that made it, in one row (what mysqldump reads)
+    if (up.rfind("SHOW CREATE DATABASE ", 0) == 0 || up.rfind("SHOW CREATE SCHEMA ", 0) == 0) {
+        std::string tail = trim_copy(q.substr(q.find(' ', 12) + 1));
+        bool if_not_exists = false;
+        if (to_upper_str(tail).rfind("IF NOT EXISTS ", 0) == 0) {
+            if_not_exists = true;
+            tail = trim_copy(tail.substr(std::string("IF NOT EXISTS ").size()));
+        }
+        if (auto ref = read_table_ref(tail)) {
+            if (auto denied = denied_by_privileges(exec, Statement(Statement::Use{ref->table}))) return StringResult::Err(*denied);
+            auto text = exec.show_create_database_mysql(ref->table, if_not_exists);
+            if (text.is_err()) return text;
+            return StringResult::Ok(box_table({"Database", "Create Database"}, {{ref->table, text.value()}}));
+        }
+    }
+    for (const char* kind : {"PROCEDURE", "FUNCTION", "TRIGGER"}) {
+        const std::string prefix = std::string("SHOW CREATE ") + kind + " ";
+        if (up.rfind(prefix, 0) != 0) continue;
+        auto ref = read_table_ref(trim_copy(q.substr(prefix.size())));
+        if (!ref) break;
+        const std::string lower_kind = kind == std::string("PROCEDURE") ? "procedure" : kind == std::string("FUNCTION") ? "function" : "trigger";
+        auto text = exec.show_create_routine_mysql(lower_kind, ref->table);
+        if (text.is_err()) return text;
+        // (the text opens with CREATE DEFINER=... KIND `name`: the name the routine is stored under)
+        std::string found = ref->table;
+        if (auto open = text.value().find(std::string(kind) + " `"); open != std::string::npos) {
+            const std::size_t from = open + std::string(kind).size() + 2;
+            if (auto close = text.value().find('`', from); close != std::string::npos) found = text.value().substr(from, close - from);
+        }
+        // the account needs the right to make such a routine in the database (MySQL asks for less: EXECUTE or SHOW_ROUTINE; this is the same or stricter)
+        if (lower_kind == "trigger") {
+            std::string table = "";
+            if (auto on = text.value().find(" ON `"); on != std::string::npos) {
+                if (auto close = text.value().find('`', on + 5); close != std::string::npos) table = text.value().substr(on + 5, close - on - 5);
+            }
+            Statement::CreateTrigger probe;
+            probe.name = found;
+            probe.table = ref->db ? *ref->db + "." + table : table;
+            if (auto denied = denied_by_privileges(exec, Statement(std::move(probe)))) return StringResult::Err(*denied);
+        } else {
+            Statement::CreateProcedure probe;
+            probe.name = ref->db ? *ref->db + "." + found : found;
+            if (auto denied = denied_by_privileges(exec, Statement(std::move(probe)))) return StringResult::Err(*denied);
+        }
+        const std::string mode = "ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION";
+        if (lower_kind == "trigger") {
+            return StringResult::Ok(box_table({"Trigger", "sql_mode", "SQL Original Statement", "character_set_client", "collation_connection", "Database Collation", "Created"},
+                                              {{found, mode, text.value(), "utf8mb4", "utf8mb4_0900_ai_ci", "utf8mb4_0900_ai_ci", "NULL"}}));
+        }
+        const std::string title = lower_kind == "procedure" ? "Procedure" : "Function";
+        return StringResult::Ok(box_table({title, "sql_mode", "Create " + title, "character_set_client", "collation_connection", "Database Collation"},
+                                          {{found, mode, text.value(), "utf8mb4", "utf8mb4_0900_ai_ci", "utf8mb4_0900_ai_ci"}}));
     }
 
     if (up.rfind("SHOW INDEX ", 0) == 0 || up.rfind("SHOW INDEXES ", 0) == 0 || up.rfind("SHOW KEYS ", 0) == 0 || up.rfind("SHOW EXTENDED INDEX ", 0) == 0) {
@@ -1528,10 +1618,23 @@ std::optional<StringResult> mysql_compat(const std::string& q, Executor& exec) {
             }
         }
 
+        // (a view is a VIEW: the types are read from information_schema.tables, for the database the header names)
+        std::set<std::string> view_names;
+        if (full_col.rfind("Tables_in_", 0) == 0) {
+            std::string database = full_col.substr(10); // ("Tables_in_v" or "Tables_in_v (v%)" for a LIKE)
+            if (auto space = database.find(' '); space != std::string::npos) database.erase(space);
+            auto views = exec_inner(exec, "SELECT table_name FROM information_schema.tables WHERE table_type = 'VIEW' AND table_schema = " + sql_quoted(database));
+            if (views.is_ok()) {
+                if (auto parsed = parse_table(views.value())) {
+                    for (auto& row : parsed->second) if (!row.empty()) view_names.insert(row.front());
+                }
+            }
+        }
         std::vector<std::vector<std::string>> rows;
         for (auto& name : tbl_names) {
-            if (type_filter && *type_filter != "BASE TABLE") continue;
-            rows.push_back({name, "BASE TABLE"});
+            const std::string type = view_names.count(name) ? "VIEW" : "BASE TABLE";
+            if (type_filter && *type_filter != type) continue;
+            rows.push_back({name, type});
         }
         return StringResult::Ok(box_table({full_col, "Table_type"}, rows));
     }
@@ -1586,6 +1689,26 @@ StringResult exec_query(Executor& exec, const std::string& raw, std::string* ran
     q = trim_copy(q);
     if (q.empty()) return StringResult::Ok("");
 
+    if (to_upper_str(q.substr(0, 5)) == "SHOW ") { // (white space between the words of SHOW is one space: `SHOW /*!32332 FULL */ COLUMNS` leaves two)
+        std::string one;
+        char quote = 0;
+        for (std::size_t i = 0; i < q.size(); i++) {
+            const char c = q[i];
+            if (quote) {
+                one.push_back(c);
+                if (c == '\\' && quote != '`' && i + 1 < q.size()) one.push_back(q[++i]);
+                else if (c == quote) quote = 0;
+            } else if (c == '\'' || c == '"' || c == '`') {
+                quote = c;
+                one.push_back(c);
+            } else if (std::isspace(static_cast<unsigned char>(c))) {
+                if (!one.empty() && one.back() != ' ') one.push_back(' ');
+            } else {
+                one.push_back(c);
+            }
+        }
+        q = trim_copy(one);
+    }
     if (auto r = mysql_compat(q, exec)) return *r;
 
     if (ran) *ran = q;

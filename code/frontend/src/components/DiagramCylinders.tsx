@@ -44,13 +44,13 @@ const NODES: Node[] = [
   },
   {
     id: "server", x: 335, y: 350, w: 150, h: 112, c: C.server, name: "engine_server",
-    desc: L("TCP front-end: native :7878 + MySQL wire :3306, challenge-response auth, one session per connection. Answers the metadata statements MySQL clients send; result columns carry types, also when there are no rows. KILL n ends a session's query or closes its connection; SHOW STATUS reads real counters without the database lock.",
-            "TCP 프런트엔드: 네이티브 :7878 + MySQL 와이어 :3306, 챌린지-응답 인증, 연결당 세션 1개. MySQL 클라이언트의 메타데이터 문장에 답하고 결과 열에 타입을 실어 보냄(행이 없을 때도 열을 보냄). KILL n은 세션의 문장을 멈추거나 연결을 닫고, SHOW STATUS는 실제 카운터를 데이터베이스 락 없이 읽음."),
+    desc: L("TCP front-end: native :7878 + MySQL wire :3306, challenge-response auth, one session per connection. Answers the metadata statements MySQL clients send (SHOW CREATE DATABASE / PROCEDURE / FUNCTION / TRIGGER, SHOW TRIGGERS, information_schema routines / triggers: a real mysqldump of RuSQL loads into MySQL); result columns carry types, also when there are no rows. KILL n ends a session's query or closes its connection; SHOW STATUS reads real counters without the database lock.",
+            "TCP 프런트엔드: 네이티브 :7878 + MySQL 와이어 :3306, 챌린지-응답 인증, 연결당 세션 1개. MySQL 클라이언트의 메타데이터 문장에 답하고(SHOW CREATE DATABASE / PROCEDURE / FUNCTION / TRIGGER, SHOW TRIGGERS, information_schema의 루틴 · 트리거: RuSQL을 진짜 mysqldump로 떠서 MySQL에 적재 가능) 결과 열에 타입을 실어 보냄(행이 없을 때도 열을 보냄). KILL n은 세션의 문장을 멈추거나 연결을 닫고, SHOW STATUS는 실제 카운터를 데이터베이스 락 없이 읽음."),
   },
   {
     id: "parser", x: 525, y: 350, w: 120, h: 98, c: C.core, name: L("Parser", "파서"),
-    desc: L("SQL text → AST (DDL, DML, DCL, TCL, procedures). Reads mysqldump files and real-client statements, window frames / WINDOW w, named foreign keys, TRACE, hex / bit literals as their bytes, COMMENT. Names ignore case.",
-            "SQL 텍스트 → AST (DDL, DML, DCL, TCL, 프로시저). mysqldump 파일과 실제 클라이언트 문장, 윈도 프레임·WINDOW w, 이름 있는 외래키, TRACE, 바이트로 읽는 16진·비트 리터럴, COMMENT를 읽음. 이름은 대소문자 무시."),
+    desc: L("SQL text → AST (DDL, DML, DCL, TCL, procedures). Reads mysqldump files and real-client statements, window frames / WINDOW w, named foreign keys, TRACE, hex / bit literals as their bytes, COMMENT, a string as a column name, SQL_NO_CACHE / STRAIGHT_JOIN, routine text. Names ignore case.",
+            "SQL 텍스트 → AST (DDL, DML, DCL, TCL, 프로시저). mysqldump 파일과 실제 클라이언트 문장, 윈도 프레임·WINDOW w, 이름 있는 외래키, TRACE, 바이트로 읽는 16진·비트 리터럴, COMMENT, 열 이름이 되는 문자열, SQL_NO_CACHE / STRAIGHT_JOIN, 루틴 원문을 읽음. 이름은 대소문자 무시."),
   },
   {
     id: "planner", x: 705, y: 350, w: 120, h: 98, c: C.core, name: L("Planner", "플래너"),

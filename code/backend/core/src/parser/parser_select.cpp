@@ -279,9 +279,23 @@ Statement Parser::parse_select() {
         return false;
     };
 
-    // DISTINCT
+    // DISTINCT, and the words that only advise the optimizer (they change nothing here, and a dump writes SQL_NO_CACHE): ALL, DISTINCTROW, HIGH_PRIORITY, STRAIGHT_JOIN, SQL_SMALL_RESULT,
+    // SQL_BIG_RESULT, SQL_BUFFER_RESULT, SQL_NO_CACHE -- in any order, as bare words (in backticks one is a column)
     bool distinct = false;
-    if (peek_is(TokenKind::Distinct)) { advance(); distinct = true; }
+    for (;;) {
+        if (peek_is(TokenKind::Distinct)) { advance(); distinct = true; continue; }
+        if (peek_is(TokenKind::All) && !peek_at_is(1, TokenKind::LParen)) { advance(); continue; }
+        const Token* word = peek();
+        if (word && word->kind == TokenKind::Ident && word->end - word->begin == word->text.size()) {
+            const std::string upper = upper_word(word->text);
+            if (upper == "DISTINCTROW") { advance(); distinct = true; continue; }
+            if (upper == "HIGH_PRIORITY" || upper == "STRAIGHT_JOIN" || upper == "SQL_SMALL_RESULT" || upper == "SQL_BIG_RESULT" || upper == "SQL_BUFFER_RESULT" || upper == "SQL_NO_CACHE") {
+                advance();
+                continue;
+            }
+        }
+        break;
+    }
 
     // the hidden window-function columns of this query (a window function inside an expression); a query inside it has its own
     struct HiddenWindows {
@@ -815,6 +829,9 @@ Statement Parser::parse_select() {
         } else if (peek_is(TokenKind::Comma)) {
             advance(); // `FROM a, b WHERE ...` is a cross join
             jt = JoinType::Cross;
+        } else if (peek_is(TokenKind::Ident) && upper_word(peek()->text) == "STRAIGHT_JOIN" && peek()->end - peek()->begin == peek()->text.size()) {
+            advance(); // `a STRAIGHT_JOIN b ON ...`: an inner join that reads a first (the order is the optimizer's here)
+            jt = JoinType::Inner;
         } else {
             break;
         }

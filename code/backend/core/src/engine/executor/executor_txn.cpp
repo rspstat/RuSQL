@@ -832,7 +832,8 @@ StringResult Executor::exec_show_locks(const SharedDatabase& s) const {
 StringResult Executor::exec_lock_tables(SharedDatabase& s, std::vector<std::pair<std::string, bool>> tables) {
     for (auto& [table, exclusive] : tables) {
         (void)exclusive;
-        if (!s.catalog.get_table(table)) return StringResult::Err("Table '" + strip_db_prefix(table) + "' not found");
+        // (a view can be locked too -- mysqldump locks every table of a dump, views included; the lock of a view stands for the tables under it)
+        if (!s.catalog.get_table(table) && !s.views.count(table)) return StringResult::Err("Table '" + strip_db_prefix(table) + "' not found");
     }
 
     // MySQL itself implicitly releases a session's previous LOCK TABLES locks the moment

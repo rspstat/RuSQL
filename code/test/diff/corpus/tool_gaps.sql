@@ -1,52 +1,22 @@
 # R81 audit (2026-11-14): gaps found while checking RECOMMAND.md against real MySQL 8.4.9 -- what mysqldump / mysqlshow / schema tools / hand-written SQL send. NOT in the
-# scoreboard (make_scoreboard.py): every group below still differs. Run: python vs_mysql.py <engine_server.exe> corpus/tool_gaps.sql --proto --errno
+# scoreboard (make_scoreboard.py): every group below still differs. R83 (2026-11-15) moved what mysqldump, mysqlshow, schema tools and a string alias / select modifiers needed
+# to corpus/tool_compat_r83.sql (on the scoreboard); what is left is the rest of sql_mode, small syntax and variables. Run: python vs_mysql.py <engine_server.exe> corpus/tool_gaps.sql --proto --errno
 # A line is a statement, '--' a setup statement run on both. The groups match the rows of RECOMMAND.md ("R81").
 --CREATE TABLE par (id INT PRIMARY KEY, name VARCHAR(20) NOT NULL, UNIQUE KEY uq_name (name))
 --CREATE TABLE chi (id INT PRIMARY KEY AUTO_INCREMENT, pid INT NOT NULL, qty INT DEFAULT 1 COMMENT 'amount', CONSTRAINT fk_chi_par FOREIGN KEY (pid) REFERENCES par (id), CONSTRAINT ck_qty CHECK (qty >= 0), KEY ix_pid_qty (pid, qty)) COMMENT='children'
 --INSERT INTO par VALUES (1,'a'),(2,'b')
 --INSERT INTO chi (pid, qty) VALUES (1,5),(2,7)
---CREATE VIEW vw AS SELECT id, name FROM par
---CREATE PROCEDURE sp_one(IN x INT, OUT y INT) SET y = x + 1
---CREATE FUNCTION fn_two(x INT) RETURNS INT DETERMINISTIC RETURN x * 2
---CREATE TRIGGER tr_par BEFORE INSERT ON par FOR EACH ROW SET NEW.name = LOWER(NEW.name)
-# --- 1. mysqldump (default options send LOCK TABLES ... LOCAL, SELECT /*!40001 SQL_NO_CACHE */, SHOW CREATE DATABASE; --routines / --triggers send SHOW CREATE PROCEDURE / FUNCTION / TRIGGER)
-LOCK TABLES `par` READ /*!32311 LOCAL */
-UNLOCK TABLES
-SELECT /*!40001 SQL_NO_CACHE */ * FROM `par` ORDER BY id
-SHOW CREATE DATABASE IF NOT EXISTS `v`
-SHOW CREATE PROCEDURE sp_one
-SHOW CREATE FUNCTION fn_two
-SHOW CREATE TRIGGER tr_par
-SHOW TRIGGERS
-# --- 2. schema tools (mysqlshow db table sends SHOW FULL COLUMNS ... FROM db LIKE; DBeaver / ORMs read information_schema)
-SHOW /*!32332 FULL */ COLUMNS FROM `par` FROM `v` LIKE '%'
-SHOW FULL TABLES
-SHOW PROCEDURE STATUS WHERE Db = 'v'
-SHOW FUNCTION STATUS WHERE Db = 'v'
-SELECT table_name, constraint_name, column_name FROM information_schema.key_column_usage WHERE table_schema = 'v' ORDER BY table_name, constraint_name, ordinal_position
-SELECT routine_name, routine_type FROM information_schema.routines WHERE routine_schema = 'v' ORDER BY routine_name
-SELECT specific_name, ordinal_position, parameter_mode, parameter_name FROM information_schema.parameters WHERE specific_schema = 'v' ORDER BY specific_name, ordinal_position
-SELECT trigger_name, event_manipulation, event_object_table, action_timing FROM information_schema.triggers WHERE trigger_schema = 'v'
-SELECT constraint_name FROM information_schema.check_constraints WHERE constraint_schema = 'v' ORDER BY constraint_name
-SELECT table_name, is_updatable, view_definition IS NULL OR view_definition = '' FROM information_schema.views WHERE table_schema = 'v'
-SELECT collation_name FROM information_schema.collations WHERE collation_name = 'utf8mb4_bin'
-# --- 3. hand-written SQL: a string as alias, select modifiers
-SELECT id AS 'a b' FROM par ORDER BY id
-SELECT id 'a2' FROM par ORDER BY id
-SELECT SQL_NO_CACHE id FROM par ORDER BY id
-SELECT HIGH_PRIORITY id FROM par ORDER BY id
-SELECT SQL_SMALL_RESULT id FROM par ORDER BY id
-SELECT STRAIGHT_JOIN par.id FROM par JOIN chi ON chi.pid = par.id ORDER BY par.id
-# --- 4. sql_mode is always strict / ONLY_FULL_GROUP_BY (apps that SET sql_mode = '' for legacy SQL)
+--CREATE TABLE ckt (id INT, q INT CHECK (q > 0), CONSTRAINT named CHECK (id < 9), CHECK (id <> q))
+# --- 4. sql_mode is always strict (apps that SET sql_mode = '' for legacy SQL): ONLY_FULL_GROUP_BY is read since R83, the rest is not
 SET sql_mode = ''
-SELECT pid, qty FROM chi GROUP BY pid
-SELECT id, COUNT(*) FROM chi
 INSERT INTO chi (pid, qty) VALUES (1, 'abc')
 INSERT INTO par VALUES (9, REPEAT('x', 30))
 INSERT INTO chi (pid, qty) VALUES (1, 1 / 0)
 SET sql_mode = 'ANSI_QUOTES'
 SELECT "id" FROM par ORDER BY 1
 SET sql_mode = 'STRICT_TRANS_TABLES'
+# --- 4b. SHOW CREATE TABLE writes the CHECK of a column and the table's own, named; the text of the condition is the one typed (MySQL writes `q` > 0 with quoted names)
+SHOW CREATE TABLE ckt
 # --- 5. small syntax: CONVERT ... USING, DO, ROW(), TABLE, VALUES ROW, INSERT ... AS alias, DROP CHECK, ALTER CHECK
 SELECT CONVERT('abc' USING utf8mb4)
 DO 1

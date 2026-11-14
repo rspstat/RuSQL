@@ -55,8 +55,16 @@ void Parser::skip_routine_characteristics() {
         const Token* t = peek_at(at);
         return t && t->kind == TokenKind::Ident && to_upper(t->text) == w;
     };
+    // CHARSET x | CHARACTER SET x | COLLATE y after a type: the value is text here, so the character set is left out
+    auto keyword = [&](std::size_t at, const char* w) {
+        const Token* t = peek_at(at);
+        return t && to_upper(t->kind == TokenKind::Ident ? t->text : t->word) == w;
+    };
     for (;;) {
-        if (word(0, "DETERMINISTIC")) advance();
+        if (keyword(0, "CHARSET") && peek_at(1)) { advance(); advance(); }
+        else if (keyword(0, "CHARACTER") && peek_at_is(1, TokenKind::Set) && peek_at(2)) { advance(); advance(); advance(); }
+        else if (keyword(0, "COLLATE") && peek_at(1)) { advance(); advance(); }
+        else if (word(0, "DETERMINISTIC")) advance();
         else if (peek_is(TokenKind::Not) && word(1, "DETERMINISTIC")) { advance(); advance(); }
         else if ((word(0, "NO") || word(0, "CONTAINS")) && word(1, "SQL")) { advance(); advance(); }
         else if ((word(0, "READS") || word(0, "MODIFIES")) && word(1, "SQL") && word(2, "DATA")) { advance(); advance(); advance(); }
@@ -69,6 +77,7 @@ void Parser::skip_routine_characteristics() {
 
 Statement Parser::parse_create_procedure() {
     std::string name = expect_ident();
+    const std::size_t source_from = pos_; // (what follows the name is kept as it was written: SHOW CREATE PROCEDURE gives it back)
     std::vector<std::tuple<std::string, std::string, std::string>> params;
     if (peek_is(TokenKind::LParen)) {
         advance();
@@ -84,6 +93,7 @@ Statement Parser::parse_create_procedure() {
             }
             std::string pname = expect_ident();
             std::string ptype = read_declared_type(); // (the type as written, with its length or places)
+            if (!ptype.empty()) skip_routine_characteristics(); // (`s VARCHAR(5) CHARSET utf8mb4`)
             if (ptype.empty()) {
                 const Token* t = advance();
                 if (!t) throw ParseError("Expected type in procedure param");
@@ -123,7 +133,7 @@ Statement Parser::parse_create_procedure() {
     }
     skip_routine_characteristics();
     std::vector<Statement> body = parse_proc_body();
-    return Statement(Statement::CreateProcedure{name, params, std::move(body)});
+    return Statement(Statement::CreateProcedure{name, params, std::move(body), source_between(source_from, pos_)});
 }
 
 // ── CREATE FUNCTION ─────────────────────────────────────────
@@ -159,6 +169,7 @@ std::optional<ColumnDef> Parser::declared_column(const std::string& name, const 
 Statement Parser::parse_create_function() {
     // CREATE FUNCTION name(p1, p2, ...) RETURNS type RETURN <expr>
     std::string name = to_lower(expect_ident());
+    const std::size_t source_from = pos_;
     std::vector<std::string> params, param_types;
     std::string return_type;
     if (peek_is(TokenKind::LParen)) {
@@ -190,6 +201,7 @@ Statement Parser::parse_create_function() {
                 if (peek_is(TokenKind::RParen)) advance();
             }
         }
+        // (SHOW CREATE FUNCTION writes `RETURNS varchar(30) CHARSET utf8mb4`: a dump of a function has it; skip_routine_characteristics reads the CHARSET)
     }
     skip_routine_characteristics();
     // RETURN <expr>, or the same inside BEGIN ... END (the form a dump holds)
@@ -209,7 +221,7 @@ Statement Parser::parse_create_function() {
     }
     nlohmann::json j = expr;
     std::string body = j.dump();
-    return Statement(Statement::CreateFunction{name, params, body, param_types, return_type});
+    return Statement(Statement::CreateFunction{name, params, body, param_types, return_type, source_between(source_from, pos_)});
 }
 
 Statement Parser::parse_drop_function() {
@@ -248,8 +260,9 @@ Statement Parser::parse_create_trigger() {
     if (peek_is(TokenKind::For)) advance();
     if (peek_is(TokenKind::Each)) advance();
     if (peek_is(TokenKind::Row)) advance();
+    const std::size_t source_from = pos_;
     std::vector<Statement> body = parse_proc_body();
-    return Statement(Statement::CreateTrigger{name, timing, event, table, std::move(body)});
+    return Statement(Statement::CreateTrigger{name, timing, event, table, std::move(body), source_between(source_from, pos_)});
 }
 
 /// Parse BEGIN ... END block or a single statement as a procedure/trigger body

@@ -225,6 +225,10 @@ struct SharedDatabase {
     std::shared_ptr<ScanOrders> scan_orders = std::make_shared<ScanOrders>();
     // how the engine opened the data (see RecoveryStats)
     RecoveryStats recovery;
+    // Where each procedure, function and trigger was made and the text it was written as (R83): "procedure:name" / "function:name" / "trigger:name" (lower case) ->
+    // (database, text after the name; for a trigger the body). SHOW CREATE PROCEDURE / FUNCTION / TRIGGER and information_schema.routines / triggers read it; a routine made
+    // before R83 has no entry (it shows in every database, and SHOW CREATE says it has no text).
+    std::unordered_map<std::string, std::pair<std::string, std::string>> routine_sources;
 
     // mysql_native_password challenge-response verification (nonce is a 20-byte challenge)
     // -- used by both the MySQL wire protocol listener and the native TCP protocol's own
@@ -336,6 +340,10 @@ public:
     // SHOW CREATE TABLE / VIEW in MySQL's own form (the text of the CREATE statement; the MySQL protocol layer makes the row of it): the error when the table is not there
     StringResult show_create_table_mysql(const std::string& table);
     StringResult show_create_view_mysql(const std::string& view);
+    // SHOW CREATE PROCEDURE / FUNCTION / TRIGGER and SHOW CREATE DATABASE (R83): the text of the CREATE statement (what mysqldump writes into a dump). `kind`: "procedure",
+    // "function" or "trigger"; for a database the second argument says IF NOT EXISTS was asked for. The error when there is no such routine / database.
+    StringResult show_create_routine_mysql(const std::string& kind, const std::string& name);
+    StringResult show_create_database_mysql(const std::string& database, bool if_not_exists);
     bool implicit_txn_ = false;              // the transaction that is open was begun by a statement of a session with autocommit = 0
     // The transaction characteristics of the session (SET [SESSION] TRANSACTION ..., SET transaction_isolation = ..., SET transaction_read_only = ...). A change made while a
     // transaction is open is for the next one (the engine's level follows session_isolation_ when none is open); SET TRANSACTION (no SESSION) is for the next one only.
@@ -1384,7 +1392,7 @@ private:
     // ── Phase 8e: stored procedures / triggers / UDF ────────────────────
     StringResult exec_create_procedure(SharedDatabase& s, std::string name,
                                         std::vector<std::tuple<std::string, std::string, std::string>> params,
-                                        std::vector<Statement> body);
+                                        std::vector<Statement> body, std::string source);
     // Runs a list of statements in procedure context; stops early once proc_signal_ is set.
     StringResult exec_proc_stmts(SharedDatabase& s, std::vector<Statement> stmts);
     StringResult exec_proc_if(SharedDatabase& s, CondExpr condition, std::vector<Statement> then_body,
@@ -1396,10 +1404,10 @@ private:
     StringResult exec_call_procedure(SharedDatabase& s, std::string name, std::vector<std::string> args);
     StringResult exec_drop_procedure(SharedDatabase& s, std::string name, bool if_exists);
     StringResult exec_create_function(SharedDatabase& s, std::string name, std::vector<std::string> params, std::string body,
-                                      const std::vector<std::string>& param_types, const std::string& return_type);
+                                      const std::vector<std::string>& param_types, const std::string& return_type, std::string source);
     StringResult exec_drop_function(SharedDatabase& s, std::string name, bool if_exists);
     StringResult exec_create_trigger(SharedDatabase& s, std::string name, TriggerTiming timing, TriggerEvent event, std::string table,
-                                      std::vector<Statement> body);
+                                      std::vector<Statement> body, std::string source);
     StringResult exec_drop_trigger(SharedDatabase& s, std::string name, bool if_exists);
     StringResult exec_execute(SharedDatabase& s, const std::string& name, const std::vector<std::string>& using_vars);
 

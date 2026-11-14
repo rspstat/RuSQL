@@ -562,6 +562,15 @@ std::vector<Token> Lexer::tokenize() {
                 continue;
         }
 
+        // two string literals side by side are one string ('a' 'b' is 'ab'), as in MySQL; a hex or bit literal is a value of its own
+        // (the merged token is marked: MySQL joins them in the grammar of a value, so a name after AS is one string alone)
+        if (tok->kind == TokenKind::StringLit && tok->word.empty() && !tokens.empty() && tokens.back().kind == TokenKind::StringLit &&
+            (tokens.back().word.empty() || tokens.back().word == "merged")) {
+            tokens.back().text += tok->text;
+            tokens.back().word = "merged";
+            tokens.back().end = pos_;
+            continue;
+        }
         tok->begin = token_begin;
         tok->end = pos_;
         tokens.push_back(std::move(*tok));

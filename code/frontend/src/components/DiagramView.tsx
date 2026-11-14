@@ -114,7 +114,7 @@ const SERVER: Item[] = [
   { t: L("Native protocol :7878", "네이티브 프로토콜 :7878"), s: L("UI, MCP, engine_client", "UI, MCP, engine_client") },
   {
     t: L("MySQL wire protocol :3306", "MySQL 와이어 프로토콜 :3306"),
-    s: L("mysql CLI, DBeaver, JDBC; results carry column types", "mysql CLI, DBeaver, JDBC, 결과에 열 타입 포함"),
+    s: L("mysql CLI, DBeaver, JDBC, mysqldump (RuSQL → MySQL too), mysqlshow; results carry column types", "mysql CLI, DBeaver, JDBC, mysqldump(RuSQL → MySQL 이전도), mysqlshow, 결과에 열 타입 포함"),
   },
   { t: L("Challenge-response auth", "챌린지-응답 인증"), s: L("no plaintext password", "비밀번호를 평문으로 보내지 않음") },
   { t: L("One session per connection", "연결당 세션 1개"), s: L("own Executor, shared database; KILL n stops its query; innodb_trx says which session each transaction is", "연결마다 독립 Executor, 데이터베이스는 공유, KILL n으로 문장 중단, innodb_trx가 트랜잭션의 세션을 말함") },
@@ -191,6 +191,7 @@ const PARSER: Text[] = [
   L("reads mysqldump files and the statements real clients send (SET lists, LIKE / AS SELECT, multi-action ALTER)", "mysqldump 파일과 실제 클라이언트가 보내는 문장(SET 목록, LIKE / AS SELECT, 여러 동작 ALTER)을 읽음"),
   L("window frames and WINDOW w, named foreign keys, TRACE", "윈도 프레임·WINDOW w, 이름 있는 외래키, TRACE"),
   L("hex and bit literals (0x41, X'41', b'101') are the bytes they spell; COMMENT and the sizes MEDIUMINT / TINYTEXT / CHAR(n) are kept", "16진·비트 리터럴(0x41, X'41', b'101')은 그 바이트로 읽고, COMMENT와 MEDIUMINT / TINYTEXT / CHAR(n) 크기는 그대로 보관"),
+  L("a string names a column (AS 'Total'), SQL_NO_CACHE / HIGH_PRIORITY / STRAIGHT_JOIN are read and left alone, LOCK TABLES … READ LOCAL; routines keep the text they were written as (SHOW CREATE PROCEDURE / FUNCTION / TRIGGER)", "문자열이 열 이름이 되고(AS 'Total'), SQL_NO_CACHE / HIGH_PRIORITY / STRAIGHT_JOIN은 읽고 무시, LOCK TABLES … READ LOCAL, 루틴은 쓴 원문을 보관(SHOW CREATE PROCEDURE / FUNCTION / TRIGGER)"),
   L("names ignore case; db.table works everywhere", "이름은 대소문자 무시, db.표는 모든 문장에서 가능"),
 ];
 const PLANNER: Text[] = [

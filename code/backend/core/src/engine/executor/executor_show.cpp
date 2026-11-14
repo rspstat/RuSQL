@@ -3,7 +3,9 @@
 
 #include "engine/collation.hpp"
 #include "engine/executor/executor.hpp"
+#include "engine/check_names.hpp"
 #include "engine/fk_name.hpp"
+#include "engine/routine_text.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -267,10 +269,8 @@ StringResult Executor::show_create_table_mysql(const std::string& name) {
             lines.push_back(std::move(line));
         }
     }
-    std::size_t check_number = 0;
-    for (auto& cc : schema->check_constraints) {
-        check_number++;
-        lines.push_back("  CONSTRAINT `" + cc.name.value_or(bare + "_chk_" + std::to_string(check_number)) + "` CHECK ((" + cc.expression + "))");
+    for (auto& [check_name, check_text] : check_constraints_of(*schema, bare)) { // (the checks of the columns too, in the order of their names)
+        lines.push_back("  CONSTRAINT `" + check_name + "` CHECK ((" + check_text + "))");
     }
     std::string ddl = "CREATE TABLE `" + bare + "` (\n";
     for (std::size_t i = 0; i < lines.size(); i++) ddl += lines[i] + (i + 1 < lines.size() ? ",\n" : "\n");
@@ -296,6 +296,78 @@ StringResult Executor::show_create_view_mysql(const std::string& name) {
     std::string body = select_text;
     // (the stored text may start with SELECT or already with the whole CREATE)
     return StringResult::Ok("CREATE ALGORITHM=UNDEFINED DEFINER=`root`@`localhost` SQL SECURITY DEFINER VIEW `" + bare_name(view) + "` AS " + body);
+}
+
+// The type a function returns the way SHOW CREATE FUNCTION writes it: lower case, with the character set a text type has ("int", "varchar(30) CHARSET utf8mb4")
+static std::string returns_as_mysql(const std::string& typed) {
+    auto col = Parser::declared_column("r", typed);
+    if (!col) return typed;
+    const DataType& dt = col->data_type;
+    if (std::holds_alternative<DataType::Enum>(dt.data) || std::holds_alternative<DataType::Set>(dt.data)) return typed;
+    std::string out = std::holds_alternative<DataType::Boolean>(dt.data) ? "TINYINT(1)" : sql_type_str(dt);
+    for (char& c : out) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    if (col->is_unsigned) out += " unsigned";
+    if (std::holds_alternative<DataType::Varchar>(dt.data) || std::holds_alternative<DataType::Text>(dt.data)) out += " CHARSET utf8mb4";
+    return out;
+}
+
+// SHOW CREATE PROCEDURE / FUNCTION / TRIGGER (R83): the text of the statement that made the routine, as MySQL writes it (what mysqldump --routines --triggers puts in a dump)
+StringResult Executor::show_create_routine_mysql(const std::string& kind, const std::string& name) {
+    auto s = shared->read();
+    const char* label = kind == "procedure" ? "PROCEDURE" : kind == "function" ? "FUNCTION" : "TRIGGER";
+    auto lower = [](std::string text) {
+        for (char& c : text) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        return text;
+    };
+    const std::string wanted = lower(name);
+    auto missing = [&]() {
+        if (kind == "trigger") return StringResult::Err("ERROR 1360 (HY000): Trigger does not exist");
+        return StringResult::Err(std::string("ERROR 1305 (42000): ") + label + " " + name + " does not exist");
+    };
+    auto source_of = [&](const std::string& found) -> std::optional<std::string> {
+        auto it = s->routine_sources.find(kind + ":" + lower(found));
+        if (it == s->routine_sources.end()) return std::nullopt;
+        return it->second.second;
+    };
+    const std::string definer = "`root`@`localhost`";
+    auto no_text = [&](const std::string& found) {
+        return StringResult::Err(std::string("ERROR 1305 (42000): ") + label + " " + found + " was made before its text was kept; create it again");
+    };
+    if (kind == "procedure" || kind == "function") {
+        std::string found;
+        if (kind == "procedure") {
+            for (auto& entry : s->procedures) if (lower(entry.first) == wanted) found = entry.first;
+        } else {
+            for (auto& entry : s->user_functions) if (lower(entry.first) == wanted) found = entry.first;
+        }
+        if (found.empty()) return missing();
+        auto source = source_of(found);
+        if (!source) return no_text(found);
+        const RoutineParts parts = split_routine_source(*source, kind == "function");
+        return StringResult::Ok(routine_create_text(definer, label, found, *source, kind == "function" && !parts.returns.empty() ? returns_as_mysql(parts.returns) : std::string()));
+    }
+    for (auto& [trigger, def] : s->triggers) {
+        if (lower(trigger) != wanted) continue;
+        auto source = source_of(trigger);
+        if (!source) return no_text(trigger);
+        return StringResult::Ok("CREATE DEFINER=" + definer + " TRIGGER `" + trigger + "` " + std::get<1>(def) + " " + std::get<2>(def) + " ON `" + bare_name(std::get<0>(def)) +
+                                "` FOR EACH ROW " + *source);
+    }
+    return missing();
+}
+
+// SHOW CREATE DATABASE [IF NOT EXISTS] db: the CREATE DATABASE statement as MySQL writes it (a dump starts with it)
+StringResult Executor::show_create_database_mysql(const std::string& database, bool if_not_exists) {
+    auto s = shared->read();
+    auto lower = [](std::string text) {
+        for (char& c : text) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        return text;
+    };
+    std::string found;
+    for (const std::string& name : s->databases) if (lower(name) == lower(database)) found = name;
+    if (found.empty()) return StringResult::Err("ERROR 1049 (42000): Unknown database '" + database + "'");
+    return StringResult::Ok(std::string("CREATE DATABASE ") + (if_not_exists ? "/*!32312 IF NOT EXISTS*/ " : "") + "`" + found +
+                            "` /*!40100 DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci */ /*!80016 DEFAULT ENCRYPTION='N' */");
 }
 
 StringResult Executor::exec_show_create_table(const SharedDatabase& s, const std::string& table) const {

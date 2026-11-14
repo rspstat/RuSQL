@@ -272,7 +272,11 @@ TEST_CASE("[r82] COMMENT of a column and of a table is kept, shown, copied and s
         ok(ex, "CREATE TABLE IF NOT EXISTS chi (id INT PRIMARY KEY) COMMENT='replaced?'");
         CHECK(first_column(ex, "SELECT table_comment FROM information_schema.tables WHERE table_name = 'chi'") == "kids");
         ok(ex, "CREATE VIEW vw AS SELECT id, qty FROM chi");
-        CHECK(first_column(ex, "SELECT column_comment FROM information_schema.columns WHERE table_name = 'vw' AND column_name = 'qty'").empty());
+        // a view column that shows a column as it is has that column's COMMENT (MySQL 8.4; R83 -- this line said "none" before); a column it works out has none
+        CHECK(first_column(ex, "SELECT column_comment FROM information_schema.columns WHERE table_name = 'vw' AND column_name = 'qty'") != "");
+        ok(ex, "CREATE VIEW vw2 AS SELECT id, qty * 2 AS q2 FROM chi");
+        CHECK(first_column(ex, "SELECT column_comment FROM information_schema.columns WHERE table_name = 'vw2' AND column_name = 'q2'").empty());
+        ok(ex, "DROP VIEW vw2");
 
         // BACKUP writes them and reading the backup back brings them back
         const std::string backup_file = "r82_comment_backup.sql"; (void)dir;

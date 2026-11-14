@@ -398,6 +398,7 @@ Executor::Executor(const std::string& dir, std::size_t buffer_pool_capacity) {
         .redo_dirty = std::make_shared<Mutex<std::unordered_set<std::string>>>(),
     };
     redo_log_ = db_value.redo_log;
+    db_value.routine_sources = db_value.disk.load_routine_sources<std::unordered_map<std::string, std::pair<std::string, std::string>>>();
     db_value.slow_log->set_directory(dir);
     // (a table file holds committed work only: see BufferPool::write_through)
     db_value.buffer_pool.set_open_transactions([ids = db_value.active_txn_ids] { return *ids->lock(); });
@@ -1804,6 +1805,18 @@ StringResult Executor::run_sql_text(const std::string& sql_text) {
     }
 }
 
+// The part of the sql_mode that changes what a SELECT answers, for the key of the cache of answers: what || means, and whether a column that is neither grouped nor
+// aggregated is an error (ONLY_FULL_GROUP_BY) or a value of the first row of the group
+static std::string mode_cache_key(bool pipes, const std::unordered_map<std::string, std::string>& vars) {
+    std::string key = pipes ? "\x01pipes" : "";
+    if (auto mode = vars.find("@sql_mode"); mode != vars.end()) {
+        std::string upper = mode->second;
+        for (char& c : upper) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+        if (upper.find("ONLY_FULL_GROUP_BY") == std::string::npos && upper.find("ANSI") == std::string::npos) key += "\x01loose";
+    }
+    return key;
+}
+
 StringResult Executor::execute_sql_inner(const std::string& sql) {
     std::string trimmed = trim(sql);
 
@@ -1811,7 +1824,7 @@ StringResult Executor::execute_sql_inner(const std::string& sql) {
     bool in_txn = txn.current_txn_id() != 0;
 
     if (looks_like_select && !in_txn) {
-        std::string cache_key = current_db + "::" + trimmed + (pipes_as_concat() ? "\x01pipes" : ""); // (what || means changes the answer)
+        std::string cache_key = current_db + "::" + trimmed + mode_cache_key(pipes_as_concat(), user_vars); // (what || means, and ONLY_FULL_GROUP_BY, change the answer)
         auto s = shared->read();
         // MVCC regression guard: once any transaction is open anywhere, the identical
         // SQL text can legitimately produce different results for different sessions
@@ -1936,7 +1949,7 @@ StringResult Executor::execute_sql_inner(const std::string& sql) {
                 }
             }
             if (unchanged) {
-                std::string cache_key = current_db + "::" + trimmed + (pipes_as_concat() ? "\x01pipes" : "");
+                std::string cache_key = current_db + "::" + trimmed + mode_cache_key(pipes_as_concat(), user_vars);
                 s->query_cache.put(cache_key, result.value(), cache_gens_before);
             }
         }
@@ -2273,13 +2286,13 @@ StringResult Executor::execute_with_s_body(SharedDatabase& s, Statement stmt) {
         return exec_except(s, std::move(*v->left), std::move(*v->right), v->all, v->order_by, v->limit, v->offset);
 
     if (auto* v = std::get_if<Statement::CreateProcedure>(&stmt.data))
-        return exec_create_procedure(s, v->name, v->params, std::move(v->body));
+        return exec_create_procedure(s, v->name, v->params, std::move(v->body), std::move(v->source));
     if (auto* v = std::get_if<Statement::CallProcedure>(&stmt.data)) return exec_call_procedure(s, v->name, v->args);
     if (auto* v = std::get_if<Statement::CreateTrigger>(&stmt.data))
-        return exec_create_trigger(s, v->name, v->timing, v->event, v->table, std::move(v->body));
+        return exec_create_trigger(s, v->name, v->timing, v->event, v->table, std::move(v->body), std::move(v->source));
     if (auto* v = std::get_if<Statement::DropTrigger>(&stmt.data)) return exec_drop_trigger(s, v->name, v->if_exists);
     if (auto* v = std::get_if<Statement::DropProcedure>(&stmt.data)) return exec_drop_procedure(s, v->name, v->if_exists);
-    if (auto* v = std::get_if<Statement::CreateFunction>(&stmt.data)) return exec_create_function(s, v->name, v->params, v->body, v->param_types, v->return_type);
+    if (auto* v = std::get_if<Statement::CreateFunction>(&stmt.data)) return exec_create_function(s, v->name, v->params, v->body, v->param_types, v->return_type, std::move(v->source));
     if (auto* v = std::get_if<Statement::DropFunction>(&stmt.data)) return exec_drop_function(s, v->name, v->if_exists);
 
     // 저장 프로시저 제어문

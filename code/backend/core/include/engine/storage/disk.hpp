@@ -105,6 +105,12 @@ public:
     template <typename T>
     T load_functions() const { return load_sys_json<T>("_functions.json"); }
 
+    // the database each procedure / function / trigger was made in and the text it was written as (SHOW CREATE PROCEDURE / FUNCTION / TRIGGER, R83)
+    template <typename T>
+    void save_routine_sources(const T& sources) const { save_sys_json("_routine_sources.json", sources); }
+    template <typename T>
+    T load_routine_sources() const { return load_sys_json<T>("_routine_sources.json"); }
+
 private:
     std::string data_dir_;
 

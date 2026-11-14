@@ -1118,6 +1118,12 @@ std::optional<std::string> Executor::bind_statement(SharedDatabase& s, Statement
         void only_full_group_by(Statement::Select& sel, const BindScope& scope) {
             const bool aggregated = sel.group_by.has_value() || sel.having.has_value() || Executor::columns_have_aggregate(sel.columns);
             if (!aggregated) return;
+            // SET sql_mode = '' (what mysqldump does first, and an old application) or any mode without ONLY_FULL_GROUP_BY: the rule is off (ANSI includes it)
+            if (auto mode = ex.user_vars.find("@sql_mode"); mode != ex.user_vars.end()) {
+                std::string upper = mode->second;
+                for (char& c : upper) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+                if (upper.find("ONLY_FULL_GROUP_BY") == std::string::npos && upper.find("ANSI") == std::string::npos) return;
+            }
             // what is grouped by: the columns (table, column) and the texts of the expressions
             std::vector<std::pair<const BindTable*, std::string>> grouped;
             std::vector<std::string> grouped_texts;
