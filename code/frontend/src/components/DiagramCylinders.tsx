@@ -49,8 +49,8 @@ const NODES: Node[] = [
   },
   {
     id: "parser", x: 525, y: 350, w: 120, h: 98, c: C.core, name: L("Parser", "파서"),
-    desc: L("SQL text → AST (DDL, DML, DCL, TCL, procedures). Reads mysqldump files and real-client statements, window frames / WINDOW w, named foreign keys, TRACE. Names ignore case.",
-            "SQL 텍스트 → AST (DDL, DML, DCL, TCL, 프로시저). mysqldump 파일과 실제 클라이언트 문장, 윈도 프레임·WINDOW w, 이름 있는 외래키, TRACE를 읽음. 이름은 대소문자 무시."),
+    desc: L("SQL text → AST (DDL, DML, DCL, TCL, procedures). Reads mysqldump files and real-client statements, window frames / WINDOW w, named foreign keys, TRACE, hex / bit literals as their bytes, COMMENT. Names ignore case.",
+            "SQL 텍스트 → AST (DDL, DML, DCL, TCL, 프로시저). mysqldump 파일과 실제 클라이언트 문장, 윈도 프레임·WINDOW w, 이름 있는 외래키, TRACE, 바이트로 읽는 16진·비트 리터럴, COMMENT를 읽음. 이름은 대소문자 무시."),
   },
   {
     id: "planner", x: 705, y: 350, w: 120, h: 98, c: C.core, name: L("Planner", "플래너"),

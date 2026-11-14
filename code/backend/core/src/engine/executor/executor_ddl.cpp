@@ -576,8 +576,15 @@ StringResult Executor::exec_create_like(SharedDatabase& s, const std::string& na
     for (auto& [key, comp] : s.composite_indexes) {
         if (comp.table == source) secondary.push_back({bare(key), comp.columns, false});
     }
+    const std::string table_comment = from->comment;
     auto created = exec_create(s, name, std::move(columns), false, primary_key_columns, std::move(checks), std::nullopt, unique_keys);
     if (created.is_err()) return created;
+    if (!table_comment.empty()) { // (the comment of the table is copied too)
+        if (auto* schema = s.catalog.get_table_mut(name)) {
+            schema->comment = table_comment;
+            s.disk.save_schema(name, *schema);
+        }
+    }
     for (const Secondary& index : secondary) {
         auto made = exec_create_index(s, index.name, name, index.columns, index.hashed);
         if (made.is_err()) return made;
@@ -759,6 +766,15 @@ StringResult Executor::exec_alter(SharedDatabase& s, const std::string& table, A
         return StringResult::Ok("Table '" + table + "' altered.");
     }
 
+    // COMMENT = 'text': the comment of the table
+    if (auto* v = std::get_if<AlterAction::SetComment>(&action.data)) {
+        auto* schema = s.catalog.get_table_mut(table);
+        if (!schema) return StringResult::Err("Table '" + table + "' doesn't exist");
+        schema->comment = v->text;
+        s.disk.save_schema(table, *schema);
+        return StringResult::Ok("Table '" + table + "' altered.");
+    }
+
     if (auto* v = std::get_if<AlterAction::AddPartition>(&action.data)) {
         auto* schema = s.catalog.get_table_mut(table);
         if (!schema) return StringResult::Err("Table '" + table + "' not found");
@@ -838,6 +854,7 @@ StringResult Executor::exec_alter(SharedDatabase& s, const std::string& table, A
         new_col.default_value = v->column.default_value;
         new_col.foreign_keys.clear();
         new_col.check_expr = v->column.check_expr;
+        new_col.comment = v->column.comment;
         schema->columns.push_back(new_col);
         if (v->position) {
             if (auto error = place_column(*schema, new_col.name, *v->position); !error.empty()) {
@@ -998,6 +1015,7 @@ StringResult Executor::exec_alter(SharedDatabase& s, const std::string& table, A
                 }
                 c.auto_increment = v->column.auto_increment;
                 c.default_value = v->column.default_value;
+                c.comment = v->column.comment; // (MODIFY without a COMMENT leaves the column without one, as in MySQL)
                 // primary_key cannot be changed via MODIFY (ignored, matching Rust).
                 break;
             }

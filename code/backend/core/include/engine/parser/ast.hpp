@@ -55,7 +55,8 @@ struct ArithExpr {
     struct Col  { std::string name; ValueClass cls = ValueClass::Unknown; int outer = 0; bool approx = false; ColKind kind = ColKind::Plain;
                   std::shared_ptr<const std::vector<std::string>> members; std::uint8_t fsp = 0; bool single = false; };
     struct Num  { std::string value; };
-    struct Str  { std::string value; };
+    // `hex`: the string is a hexadecimal or bit literal (0x4142, X'41', b'101'): the bytes it spells, which a number is asked of as the unsigned integer they make (0x41 + 0 is 65)
+    struct Str  { std::string value; bool hex = false; };
     struct Add  { std::unique_ptr<ArithExpr> lhs, rhs; };
     struct Sub  { std::unique_ptr<ArithExpr> lhs, rhs; };
     struct Mul  { std::unique_ptr<ArithExpr> lhs, rhs; };
@@ -139,14 +140,14 @@ inline ColKind kind_of_expr(const ArithExpr& e) {
 // DataType
 // ---------------------------------------------------------------------------
 struct DataType {
-    struct Int {};
+    struct Int { bool medium = false; };           // medium: MEDIUMINT (-8388608 .. 8388607), else INT
     struct BigInt {};
     struct SmallInt {};
     struct TinyInt {};
-    struct Text {};
+    struct Text { std::uint8_t size = 0; };        // 0: TEXT, 1: TINYTEXT, 2: MEDIUMTEXT, 3: LONGTEXT (see text_type_limit)
     struct Float {};
     struct Boolean {};
-    struct Varchar { std::uint32_t length; };
+    struct Varchar { std::uint32_t length; bool fixed = false; }; // fixed: CHAR(n) -- the spaces at the end of a value are not kept
     struct Date {};
     struct DateTime { std::uint8_t fsp = 0; };  // fsp: the digits of the fraction of a second the column keeps, DATETIME(3)
     struct Timestamp { std::uint8_t fsp = 0; };
@@ -156,7 +157,7 @@ struct DataType {
     struct Year {};
     struct Enum { std::vector<std::string> values; };
     struct Set { std::vector<std::string> values; };
-    struct Blob {};
+    struct Blob { std::uint8_t size = 0; };        // 0: BLOB, 1: TINYBLOB, 2: MEDIUMBLOB, 3: LONGBLOB
     struct Json {};
     struct Unknown {}; // mirrors Rust's #[serde(other)] fallback
 
@@ -169,6 +170,36 @@ struct DataType {
     template <typename Alt, typename = std::enable_if_t<!std::is_same_v<std::decay_t<Alt>, DataType>>>
     DataType(Alt alt) : data(std::move(alt)) {}
 };
+
+// The names of the sizes of TEXT and BLOB (DataType::Text::size, DataType::Blob::size) and the most bytes a value of each may hold
+inline const char* text_type_name(std::uint8_t size) {
+    static const char* const names[] = {"TEXT", "TINYTEXT", "MEDIUMTEXT", "LONGTEXT"};
+    return names[size & 3];
+}
+inline const char* blob_type_name(std::uint8_t size) {
+    static const char* const names[] = {"BLOB", "TINYBLOB", "MEDIUMBLOB", "LONGBLOB"};
+    return names[size & 3];
+}
+inline std::uint64_t text_type_limit(std::uint8_t size) {
+    static const std::uint64_t limits[] = {65535ULL, 255ULL, 16777215ULL, 4294967295ULL};
+    return limits[size & 3];
+}
+
+// A COMMENT as SHOW CREATE TABLE and BACKUP write it: ' as '', \ as \\, and a new line, a carriage return and a NUL as \n \r \0 (what the lexer reads back)
+inline std::string sql_comment_literal(const std::string& text) {
+    std::string out = "'";
+    for (char c : text) {
+        switch (c) {
+            case '\'': out += "''"; break;
+            case '\\': out += "\\\\"; break;
+            case '\n': out += "\\n"; break;
+            case '\r': out += "\\r"; break;
+            case '\0': out += "\\0"; break;
+            default: out += c;
+        }
+    }
+    return out + "'";
+}
 
 // The digits of the fraction of a second a DATETIME(n) / TIMESTAMP(n) / TIME(n) column keeps; 0 for every other type
 inline int fraction_digits_of(const DataType& type) {
@@ -245,6 +276,7 @@ struct ColumnDef {
     std::optional<std::string> check_expr;
     bool on_update_now = false; // ON UPDATE CURRENT_TIMESTAMP: an UPDATE that changes the row sets the column to the time of the statement
     bool is_unsigned = false;   // INT / BIGINT / SMALLINT / TINYINT UNSIGNED: 0 .. 2*max+1, no negative values
+    std::string comment;        // COMMENT 'text' of the column (SHOW CREATE TABLE, information_schema.columns.COLUMN_COMMENT)
 };
 
 // ---------------------------------------------------------------------------
@@ -606,11 +638,12 @@ struct AlterAction {
     struct ChangeColumn { std::string from; ColumnDef column; std::optional<ColumnPosition> position; };   // CHANGE [COLUMN] old new definition
     struct SetAutoIncrement { std::int64_t next = 1; };                                                    // AUTO_INCREMENT = n: the next number of the AUTO_INCREMENT column
     struct SetDefault { std::string column; std::optional<std::string> value; };                            // ALTER COLUMN c SET DEFAULT v / DROP DEFAULT (no value)
+    struct SetComment { std::string text; };                                                               // COMMENT = 'text': the comment of the table
 
     using Data = std::variant<AddColumn, DropColumn, RenameColumn, ModifyColumn, RenameTable,
                                AddForeignKey, DropForeignKey, AddUniqueConstraint,
                                AddCheckConstraint, DropConstraint, AddPartition, DropPartition, NoOp,
-                               AddIndex, ChangeColumn, SetDefault, SetAutoIncrement>;
+                               AddIndex, ChangeColumn, SetDefault, SetAutoIncrement, SetComment>;
     Data data;
 
     AlterAction() : data(DropColumn{}) {}
@@ -638,6 +671,7 @@ struct Statement {
         std::vector<UniqueKey> unique_keys; // UNIQUE (a, b): the keys over several columns
         std::optional<std::int64_t> auto_increment_start; // the table option AUTO_INCREMENT = n: the next number of the AUTO_INCREMENT column
         std::vector<UniqueKey> indexes; // KEY name (a, b) / INDEX ...: the (not unique) indexes of the table
+        std::string comment; // the table option COMMENT = '...'
     };
     struct DropTable { std::string name; bool if_exists = false; std::vector<std::string> more; }; // DROP TABLE a, b, c: `more` are the tables after the first
     struct CreateTableLike { std::string name; std::string source; bool if_not_exists = false; };      // CREATE TABLE t LIKE s

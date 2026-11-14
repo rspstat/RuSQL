@@ -85,10 +85,11 @@ TEST_CASE("comments are stripped: --, #, /* */", "[lexer]") {
     REQUIRE(kinds == expected);
 }
 
-TEST_CASE("hex literal 0x.. becomes a StringLit of hex digits", "[lexer]") {
+TEST_CASE("hex literal 0x.. becomes a StringLit of the bytes it spells", "[lexer]") {
     auto toks = lex("SELECT 0x1A");
     REQUIRE(toks[1].kind == TokenKind::StringLit);
-    REQUIRE(toks[1].text == "1A");
+    REQUIRE(toks[1].text == std::string("\x1A")); // (it was the text "1A": the digits, not the byte they stand for)
+    REQUIRE(toks[1].word == "hex");
 }
 
 TEST_CASE("multi-char operators: <> != >= <= -> ->> || %", "[lexer]") {

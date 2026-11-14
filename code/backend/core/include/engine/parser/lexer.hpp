@@ -237,6 +237,11 @@ private:
     // `digits` is a number just read: when an exponent follows (e3, E-2) it is read too and `digits` becomes the number it spells
     bool read_exponent(std::string& digits);
     Token read_ident();
+    // X'41' / x'41' (a hexadecimal literal), b'101' / B'101' (a bit literal): a string token holding the bytes they spell, `word` "hex"; N'abc' (a national string):
+    // the plain string. nullopt (nothing is consumed) when the text at `pos_` is none of them.
+    std::optional<Token> read_prefixed_literal();
+    // `_utf8mb4`, `_binary` ... before a string (or a hexadecimal literal): the character set introducer, which says nothing here (texts are utf8mb4); consumed, true
+    bool skip_charset_introducer();
 
     std::string input_;
     std::size_t pos_ = 0;

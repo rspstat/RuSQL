@@ -44,7 +44,7 @@ mysql -h 127.0.0.1 -P 3306 -u root --skip-auto-rehash
 
 3. 시험
 ```
-# C++ 단위 시험 (Catch2, 현재 974 케이스)
+# C++ 단위 시험 (Catch2, 현재 983 케이스)
 code/build/backend/tests/Release/engine_tests.exe
 code/build/backend/tests/Release/engine_tests.exe "[write_integrity]"
 code/build/backend/tests/Release/engine_tests.exe --list-tests

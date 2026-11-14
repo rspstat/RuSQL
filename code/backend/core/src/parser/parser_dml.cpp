@@ -67,7 +67,11 @@ std::string Parser::parse_insert_value(bool set_form) {
     if (!peek()) throw ParseError("Expected value");
     std::size_t plain_len = 0;
     switch (peek()->kind) {
-        case TokenKind::StringLit: case TokenKind::NumberLit: case TokenKind::Null: plain_len = 1; break;
+        case TokenKind::StringLit:
+            // (a value that begins with the byte 1 is how an expression is written here: a string like that, 0x01 and X'0141' too, goes the way of an expression)
+            plain_len = !peek()->text.empty() && peek()->text[0] == '\x01' ? 0 : 1;
+            break;
+        case TokenKind::NumberLit: case TokenKind::Null: plain_len = 1; break;
         case TokenKind::Ident: plain_len = peek_at_is(1, TokenKind::Dot) ? 3 : 1; break;
         case TokenKind::At: plain_len = 2; break;
         case TokenKind::NewKw: case TokenKind::OldKw: plain_len = 3; break;

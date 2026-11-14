@@ -3265,6 +3265,42 @@ READ COMMITTED는 어느 쪽이든 최신을 읽으므로 차이가 없다.
 ④ 오류 번호: 점수판에서 번호까지 보는 것은 `--proto --errno`로 올린 코퍼스(`errno` · `privileges` · `join_view_writes` · `errno_more`)뿐이다. 다른 코퍼스는 번호를 보지 않는다 — 이번에 모든 코퍼스를 한 번 번호까지 돌려 21개를 모두 `errno_more`에 옮겼다.
 ⑤ **복구**: 조인 뷰로 `UPDATE` · `INSERT`를 한 뒤 서버를 `kill -9`로 죽였다 다시 켜서 값이 그대로 남는지 직접 확인했다(표 둘 모두 같음). 크래시 퍼저에는 조인 뷰 쓰기가 없다.
 
+### 11월 14일 — R82: 조용한 오답 다섯 (16진 리터럴 · COMMENT · LATERAL · SHA2 · 열 형)
+
+**왜 이 항목인가**: R81 점검 보고(`RECOMMAND.md`를 진짜 MySQL과 다시 돌려 새 줄 16개를 찾음)에서 사용자가 "**오답들을 해결해주세요. 같은 진행방식으로.**"라고 했다 — 그 보고에서 **오류 없이 틀린 값을 돌려주거나 저장하던 다섯 줄**: ① 16진 · 비트 리터럴, ② `COMMENT`가 사라짐, ③ `LATERAL` 파생 표의 `SELECT *`, ④ `SHA2`의 224 / 384 / 512, ⑤ `MEDIUMINT` · `TINYTEXT` · `CHAR(n)`이 다른 형으로 저장됨. 방식은 늘 하던 대로: 코드 → 시험(심은 버그 · 전체 · 퍼저) → 문서 → 죽은 코드 정리 → 커밋 · 푸시 → 보고와 다시 쓴 분류별 표.
+
+**결과 한눈에** (진짜 MySQL 8.4.9와 비교하는 코퍼스 **하나를 새로 만듦**, 점수판 56 → 57개)
+- 새 코퍼스 `wrong_answers_r82`: 처음 **87문장 중 61개가 달랐고 → 0**(`--proto --errno`). 점검용 `tool_gaps`는 오답 다섯의 묶음을 덜어 내 68 → 48문장(43개가 다름).
+- C++ 시험 **974 → 983 케이스**(`test_r82_wrong_answers.cpp` 9 케이스 424 assertions + 렉서 시험 하나를 바른 값으로 고침).
+
+**① 16진 · 비트 리터럴** — 원인: 렉서가 `0x4142`를 숫자 글자 `"4142"`로 읽었다.
+- 증상: `INSERT … VALUES (1, 0x4142)` 뒤 `HEX(b)`가 `34313432`(글자 `"4142"`의 바이트; MySQL `4142`), `0x41 + 0`이 `41.0`(MySQL 65), `0b101`은 `0`에 별칭 `b101`, `X'41'` · `b'101'` · `_binary'x'` · `_utf8mb4'x'` · `N'x'`는 문법 오류(`_binary`는 pymysql이 바이트 값을 보낼 때 앞에 붙이는 머리말이라 드라이버로 바이트를 넣는 것도 안 됐다).
+- 고침: 렉서가 `0x…` · `X'…'` · `0b…` · `b'…'`를 **그 바이트를 담은 문자열**로 읽고(홀수 자리는 앞에 0) 토큰에 표지를 단다(`ArithExpr::Str::hex`); 문자 집합 머리말(`_utf8mb4` · `_binary` · `_latin1` …)은 문자열 · 리터럴 앞에서만 읽고 버리고 `N'x'`는 그냥 문자열. **숫자를 물으면** 그 바이트가 만드는 부호 없는 정수(`0x41 + 0` 65, `b'101' + 0` 5, 8바이트가 넘으면 마지막 8): 산술(`number_tree`) · 숫자와의 비교(`a = 0x01`, `0x41 = a`, `a > 0x40`; 조건의 오른쪽이 16진이면 `Literal`이 아니라 식으로 두어 표지를 지킴) · `CAST(0x41 AS UNSIGNED)`(파서가 숫자로 바꿈). 글자와의 비교(`s = 0x41`)와 `CONCAT` · `HEX` · `LENGTH`는 바이트 그대로. 결과 열의 형은 정수(전에는 DOUBLE로 알렸다), 열 이름은 쓴 대로 `0x4142 + 0`(바이트가 UTF-8이 아니면 파이썬 드라이버가 열 이름을 못 읽어 연결이 깨졌다).
+- **같이 찾은 것 — 값의 첫 바이트가 1이면 `INSERT`가 죽었다**: `0x01` · `X'0141'`뿐 아니라 `UNHEX('0141')` · `CHAR(1)` · 따옴표 안의 제어 문자도 `Internal error: [json.exception.parse_error.101]`. INSERT 값은 "첫 바이트가 1이면 표현식 JSON"이라는 표지를 쓰는데 ① 그런 글자를 파서가 그냥 값으로 두었고 ② 한 문장에서 표현식을 두 번 풀어(분할 표 경로 · 실행 경로) 첫 결과가 바이트 1로 시작하면 두 번째에 다시 표현식으로 읽었다. 이제 파서가 그런 글자를 표현식 길로 보내고, 첫 번째 풀이의 결과가 바이트 1로 시작하면 "그 글자인 표현식"으로 넘긴다.
+- 또 하나: 별칭 확장(`expand_arith`)이 16진 표지를 떨어뜨려 `WHERE`에서만 글자로 비교되던 것(시험이 잡음).
+
+**② COMMENT** — 원인: 열 · 표 `COMMENT`를 파서가 읽고 버렸다. 이제 열(`ColumnDef::comment`)과 표(`TableSchema::comment`)에 저장하고 스키마 파일에 쓴다(없으면 안 씀 — 옛 파일은 그대로). 나오는 곳: `SHOW CREATE TABLE`(MySQL 프로토콜 · 네이티브 둘 다; `'` → `''`, `\` → `\\`, 줄바꿈 → `\n`), `information_schema.columns.COLUMN_COMMENT` · `tables.TABLE_COMMENT`(그래서 `SHOW FULL COLUMNS` · `SHOW TABLE STATUS`도), `BACKUP`(읽어 되돌려도 남음), `CREATE TABLE … LIKE`. 쓰는 곳: `CREATE TABLE … COMMENT = '…'`, `ALTER TABLE t COMMENT = '…'`(새 동작 `SetComment`; `AUTO_INCREMENT = 5, COMMENT = 'x'`처럼 옵션 둘은 동작 둘; 다른 동작 뒤에 와도 된다), `ADD COLUMN | MODIFY | CHANGE … COMMENT '…'`(`MODIFY`에 코멘트가 없으면 지워짐 — MySQL과 같음). `CREATE TABLE IF NOT EXISTS`는 이미 있는 표의 코멘트를 바꾸지 않는다. 시험이 잡은 것: 시작할 때 스키마를 **필드 하나씩** 옮기는 곳이 있어 표 코멘트가 재시작에 사라졌다(`executor_core.cpp`).
+
+**③ `LATERAL`** — 사실 `JOIN LATERAL` · `FROM a, LATERAL (…) l`은 구현되어 있었다(R81 표의 "조용히 무시됨"은 `SELECT *`에서의 모습). 원인: `SELECT *` · `l.*`가 카탈로그 표의 열만 모아 LATERAL 서브쿼리의 열을 오류 없이 빠뜨렸다(이름으로 고른 `l.c`는 됐다). 이제 서브쿼리가 이름 붙이는 열(`derived_column_names`)로 `*`를 확장하고, **빈 답**의 열 이름과 결과 열의 형도 알린다(결과 형 해석기가 LATERAL을 통째로 거절하던 줄을 지움).
+
+**④ `SHA2`** — 224 · 384 · 512가 오류 없이 NULL이었다. SHA-224(SHA-256과 같은 라운드, 다른 시작값, 28바이트) · SHA-384 · SHA-512(80라운드; **상수는 파이썬 큰 정수로 정확히 계산해 넣음**)를 구현했다. 검증: NIST 시험 벡터(`abc` · 빈 글자 · 56바이트 · 112바이트 두 블록) + MySQL이 `'a'`와 `REPEAT('a', 1000)`에 낸 값. 다른 길이는 MySQL처럼 NULL.
+
+**⑤ 열 형** — 원인: `MEDIUMINT` · `TINYTEXT` · `MEDIUMTEXT` · `LONGTEXT` · `*BLOB` · `CHAR(n)`이 INT · TEXT · BLOB(`MEDIUMBLOB`은 TEXT!) · VARCHAR의 별칭이어서 범위 · 크기 · 끝 공백이 MySQL과 달랐다(`MEDIUMINT`에 9000000이 들어감, `TINYTEXT`에 300자가 들어감, `CHAR(5)`에 `'ab  '`을 넣으면 `CHAR_LENGTH`가 4). 이제 형에 필드가 하나씩: `Int::medium` · `Text::size`(0 TEXT / 1 TINY / 2 MEDIUM / 3 LONG) · `Blob::size` · `Varchar::fixed`. 검사는 `coerce_column_value` 한 곳: MEDIUMINT −8,388,608 ~ 8,388,607(UNSIGNED 16,777,215), TEXT · BLOB 바이트 한계(255 / 65,535 / 16,777,215 / 4,294,967,295, 넘으면 1406), CHAR는 값 끝의 공백을 떼고(길이 넘는 공백은 잘림; `ALTER … MODIFY`로 CHAR가 되면 있던 값도), `CHAR`만 쓰면 `CHAR(1)`. 나오는 곳: `SHOW CREATE TABLE` · `DESCRIBE` · `information_schema`(`mediumint`, `NUMERIC_PRECISION` 7, 크기마다 다른 `CHARACTER_MAXIMUM_LENGTH`) · `BACKUP`; 스키마 파일에는 형마다 이름(`MediumInt` · `TinyText` · `Char` …)을 따로 쓴다(옛 파일은 그대로 읽힘).
+
+**검증**:
+- 코퍼스(진짜 MySQL 8.4.9와, 고치기 전 → 후): `wrong_answers_r82` 61/87 → **0**. 점수판 **57개 코퍼스 4,959문장 차이 0**; Compat 숫자(`compatSnapshot.json`)를 다시 만들었다.
+- C++ 시험: 전체 **983 케이스** 세 모드(DLL이 없는 폴더에서 돌림 — 아래 ⑥)(기본 · `RUSQL_DML_INDEX_MIN_ROWS=0` · `RUSQL_PROBE_CHECK=1 RUSQL_PROBE_STREAK=0`) **모두 통과**(1,521,987 · 1,521,986 · 1,521,991 assertions). 새 `test_r82_wrong_answers.cpp` 9 케이스(424 assertions); 기존 시험은 `test_lexer.cpp`의 한 줄(`0x1A`가 글자 `"1A"`가 된다는 예전 기대 — 바로 그 오답)만 고쳤다.
+- 심은 버그: 새 코드에 하나씩 심어 `[r82]` 시험이 붉어지는지 봄 — **60개를 심었고 처음 4개가 살아남았다**: ① 한 문장 안 옵션 둘의 두 번째 동작을 잃는 변이(시험에 그 모양이 없었다 → `ADD COLUMN z2 INT, AUTO_INCREMENT = 5, COMMENT = '…'` 시험을 더함), ② 값 비교 `ArithExpr::Cmp`의 16진 변환 둘과 ③ 실행기 열 이름의 16진 변환 — 셋은 **파서가 만들지 않는 죽은 길이거나 다른 길에 가려진 코드라 코드를 거뒀다**. 남은 57개는 모두 잡힘(렉서 6 · 16진 표지 · 숫자 · 조건의 양쪽 비교 · `CAST` · 별칭 확장 · 열 이름 · INSERT의 바이트 1 둘 · MEDIUMINT · CHAR · TEXT · BLOB · 형 이름 파싱 다섯 · 코멘트 파싱 · 표 코멘트의 설정 · `IF NOT EXISTS` · 재시작 · `ALTER … COMMENT` · ADD / MODIFY / LIKE · SHOW CREATE 넷 · information_schema 여섯 · BACKUP 둘 · 스키마 파일 셋 · LATERAL `*` · SHA2 다섯).
+- 퍼저 · 검산 도구: 이전 빌드(R80)와의 차분 **6,000질의 차이 0**; 두 세션 도구 `two_sessions.py` **596단계 차이 0**; 모델로 검산하는 도구 열둘(`verify_*.py`) 위반 0; 크래시 퍼저 다섯(`fuzz_crash` · `_chain` · `_fk` · `_multifk` · `_selfref`) 6라운드씩(시드 7700) 불일치 0, `fuzz_crash_fk` 시드 7701 불일치 0, `fuzz_concurrent` 10라운드 불일치 0(확인된 행 5,704).
+
+**정직한 한계 · 남은 것** (`RECOMMAND.md` 6번 표의 "R82" 줄에 반영):
+① **16진 리터럴의 모서리**: `a IN (0x01, 0x41)` · `a BETWEEN 0x01 AND 0x41`은 글자로 비교(0행; MySQL 2행), 숫자 열에 쓰는 `INSERT … (0x7)` · `UPDATE … SET a = 0x10`은 1366(MySQL은 7 · 16을 넣음), `UPPER(0x6162)`가 `AB`(MySQL은 이진 글자라 `ab`), **UTF-8이 아닌 바이트**(`0xFF` 하나)는 값으로 저장하지 못한다(행을 JSON으로 저장해 `Internal error … invalid UTF-8 byte`로 거절 — 조용한 손상은 아님; 계산 · 열 이름으로는 됨).
+② **R81 표의 설명 정정**: "`LATERAL`이 조용히 무시된다"는 `JOIN LATERAL` 전체가 아니라 `SELECT *` · `l.*`만이었다(이름으로 고른 열은 값이 맞았다).
+③ **TEXT가 이제 65,535바이트 한계**: 전에는 무제한이어서 그보다 긴 값을 넣던 곳은 1406을 본다(MySQL과 같음). `TEXT(n)`의 `n`은 여전히 무시, `INT2`는 INT.
+④ 이번에 안 고친 것: 큰따옴표 `"id"`가 같은 이름의 열이 있으면 어느 모드에서도 열로 읽히는 것(`sql_mode` 줄), `CREATE TABLE … AS SELECT`가 원본의 `NOT NULL`을 잃는 것(`SHOW CREATE TABLE` 표기 줄).
+⑤ 코퍼스 점수판의 `tool_gaps`는 그대로 점수판 밖(43 / 48이 아직 다름): 남은 것은 `mysqldump` · 스키마 도구 · 문자열 별칭 · `SELECT` 수식어 · `sql_mode` · 작은 문법.
+⑥ **시험 파일을 `%TEMP%` 바로 아래에 복사해 돌리면 B+tree 시험이 SIGSEGV**: 그 폴더에 다른 프로그램이 풀어 둔 옛 `msvcp140.dll` · `vcruntime140.dll`(11월 10일자)이 있어 exe가 그것을 먼저 읽는다 — R79 · R80 바이너리도 같았고 같은 바이너리를 DLL이 없는 폴더로 옮기면 983 케이스가 통과한다(코드 문제가 아님; 이번 라운드 처음에는 이 때문에 probe 모드가 한 번 죽은 것처럼 보였다). 시험 · 퍼저는 DLL이 없는 폴더에서 돌린다.
+
 ## 요약: 1학기 대비 2학기에 달라진 것
 
 

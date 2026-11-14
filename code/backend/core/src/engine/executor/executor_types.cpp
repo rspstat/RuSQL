@@ -386,7 +386,10 @@ std::optional<std::string> Executor::coerce_column_value(const ColumnDef& col, s
     if (value == EXECUTOR_NULL_VALUE) return std::nullopt;
     const DataType& dt = col.data_type;
     const bool u = col.is_unsigned; // UNSIGNED: from 0 up to twice the signed maximum plus one
-    if (std::holds_alternative<DataType::Int>(dt.data)) return u ? check_integer(col, value, row, 0, 4294967295ULL) : check_integer(col, value, row, -2147483648LL, 2147483647ULL);
+    if (auto* integer = std::get_if<DataType::Int>(&dt.data)) {
+        if (integer->medium) return u ? check_integer(col, value, row, 0, 16777215ULL) : check_integer(col, value, row, -8388608LL, 8388607ULL); // MEDIUMINT
+        return u ? check_integer(col, value, row, 0, 4294967295ULL) : check_integer(col, value, row, -2147483648LL, 2147483647ULL);
+    }
     if (std::holds_alternative<DataType::BigInt>(dt.data)) {
         return u ? check_integer(col, value, row, 0, std::numeric_limits<unsigned long long>::max())
                  : check_integer(col, value, row, std::numeric_limits<long long>::min(), static_cast<unsigned long long>(std::numeric_limits<long long>::max()));
@@ -420,6 +423,10 @@ std::optional<std::string> Executor::coerce_column_value(const ColumnDef& col, s
         return std::nullopt;
     }
     if (auto* vc = std::get_if<DataType::Varchar>(&dt.data)) {
+        if (vc->fixed) { // CHAR(n) does not keep the spaces at the end of a value ('ab  ' is 'ab' when it is read back)
+            const std::size_t last = value.find_last_not_of(' ');
+            value.resize(last == std::string::npos ? 0 : last + 1);
+        }
         if (value.size() <= vc->length) return std::nullopt; // at most as many characters as bytes
         if (utf8_length(value) <= vc->length) return std::nullopt;
         // anything beyond the length but spaces is "too long"; spaces beyond it are cut
@@ -488,7 +495,16 @@ std::optional<std::string> Executor::coerce_column_value(const ColumnDef& col, s
         value = *canonical;
         return std::nullopt;
     }
-    return std::nullopt; // TEXT, BLOB, ENUM, SET (checked elsewhere), Unknown
+    // TEXT and BLOB hold as many bytes as their size allows (TINYTEXT 255, TEXT 65535, MEDIUMTEXT 16777215, LONGTEXT 4294967295)
+    if (auto* text = std::get_if<DataType::Text>(&dt.data)) {
+        if (value.size() > text_type_limit(text->size)) return "Data too long for column '" + col.name + "'" + at_row(row);
+        return std::nullopt;
+    }
+    if (auto* blob = std::get_if<DataType::Blob>(&dt.data)) {
+        if (value.size() > text_type_limit(blob->size)) return "Data too long for column '" + col.name + "'" + at_row(row);
+        return std::nullopt;
+    }
+    return std::nullopt; // ENUM, SET (checked elsewhere), Unknown
 }
 
 std::optional<std::string> Executor::coerce_declared(const std::string& name, const std::string& type_text, std::string& value) {

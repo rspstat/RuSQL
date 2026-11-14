@@ -37,7 +37,10 @@ std::string negate_number_text(const std::string& text) {
 ConditionValue condition_value_of(ArithExpr expr) {
     if (auto* col = std::get_if<ArithExpr::Col>(&expr.data)) return ConditionValue(ConditionValue::Literal{col->name});
     if (auto* num = std::get_if<ArithExpr::Num>(&expr.data)) return ConditionValue(ConditionValue::Literal{num->value});
-    if (auto* str = std::get_if<ArithExpr::Str>(&expr.data)) return ConditionValue(ConditionValue::Literal{str->value, true});
+    if (auto* str = std::get_if<ArithExpr::Str>(&expr.data)) {
+        if (!str->hex) return ConditionValue(ConditionValue::Literal{str->value, true});
+        // (a hexadecimal literal compared with a number is the integer it spells: the comparison knows it is one, which a quoted Literal would not)
+    }
     return ConditionValue(ConditionValue::Arith{std::move(expr)});
 }
 
@@ -535,6 +538,15 @@ ArithExpr Parser::parse_cast_expr() {
     std::string type_str = parse_cast_type();
     if (!peek_is(TokenKind::RParen)) throw ParseError("Expected ')' after CAST");
     advance();
+    // CAST(0x41 AS UNSIGNED) is 65: a hexadecimal literal cast to a number is the unsigned integer its bytes make (as CAST(0x41 AS CHAR) is the text 'A')
+    if (auto* hex = std::get_if<ArithExpr::Str>(&value.data); hex && hex->hex) {
+        const std::string kind = to_upper(type_str.substr(0, type_str.find('(')));
+        if (kind == "SIGNED" || kind == "UNSIGNED" || kind == "SIGNED INTEGER" || kind == "UNSIGNED INTEGER" || kind == "INTEGER" || kind == "INT" || kind == "DECIMAL" || kind == "DOUBLE" || kind == "FLOAT" || kind == "REAL") {
+            unsigned long long whole_number = 0;
+            for (std::size_t i = hex->value.size() > 8 ? hex->value.size() - 8 : 0; i < hex->value.size(); i++) whole_number = (whole_number << 8) | static_cast<unsigned char>(hex->value[i]);
+            value = ArithExpr(ArithExpr::Num{std::to_string(whole_number)});
+        }
+    }
     std::vector<ArithExpr> args;
     args.push_back(std::move(value));
     args.push_back(ArithExpr(ArithExpr::Str{type_str}));
@@ -934,7 +946,7 @@ ArithExpr Parser::parse_arith_factor() {
 
     if (p->kind == TokenKind::StringLit) {
         const Token* t = advance();
-        return ArithExpr(ArithExpr::Str{t->text});
+        return ArithExpr(ArithExpr::Str{t->text, t->word == "hex"}); // (0x4142, X'41', b'101': bytes, and the unsigned integer they make where a number is asked)
     }
 
     if (p->kind == TokenKind::Null) {
@@ -1543,7 +1555,11 @@ std::string Parser::arith_to_string(const ArithExpr& expr) {
             if constexpr (std::is_same_v<T, ArithExpr::Col> || std::is_same_v<T, ArithExpr::Num>) {
                 if constexpr (std::is_same_v<T, ArithExpr::Col>) return alt.name; else return alt.value;
             } else if constexpr (std::is_same_v<T, ArithExpr::Str>) {
-                return quoted_text(alt.value);
+                if (!alt.hex) return quoted_text(alt.value);
+                static const char digits[] = "0123456789ABCDEF"; // (a hexadecimal literal names its column as it is written: 0x4142, not the bytes, which need not be text)
+                std::string written = "0x";
+                for (unsigned char byte : alt.value) { written += digits[byte >> 4]; written += digits[byte & 15]; }
+                return written;
             } else if constexpr (std::is_same_v<T, ArithExpr::Add>) {
                 return arith_operand(*alt.lhs, 1) + " + " + arith_operand(*alt.rhs, 2);
             } else if constexpr (std::is_same_v<T, ArithExpr::Sub>) {

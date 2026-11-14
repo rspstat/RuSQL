@@ -9,7 +9,7 @@
 |---|---|
 | 무엇 | MySQL 호환 프로토콜을 쓰는 **자체 RDBMS 엔진**(C++) + 데스크톱 클라이언트(Tauri/React) + Claude 연동(MCP) |
 | 1학기 → 2학기 | Rust 프로토타입 → **C++ 전면 재작성**, "기능 추가"에서 **정합성·동시성·성능을 실제로 파고드는 심화**로 |
-| 규모 | 테스트 **974 케이스 / 1,521,562 assertions** (2학기 초 218 케이스 / 3,080 assertions), MCP 단위 시험 57건 · 프런트 라이브러리 시험 26건 · 앱 화면 시험 12개(CDP) |
+| 규모 | 테스트 **983 케이스 / 1,521,987 assertions** (2학기 초 218 케이스 / 3,080 assertions), MCP 단위 시험 57건 · 프런트 라이브러리 시험 26건 · 앱 화면 시험 12개(CDP) |
 | 엔진 구성 | 파서 → 비용 기반 플래너 → 실행기, MVCC·행 단위 락·데드락 감지, redo 로그 기반 내구성, B+Tree·해시·복합 인덱스 |
 
 ## 2학기에 만든 것 (엔진)
@@ -22,6 +22,7 @@
 - **트랜잭션 · 트리거 · 뷰 · 외래키 · 날짜의 MySQL 호환(R71)**: 새 코퍼스 5개(문장 363개)로 처음 124개 차이를 0으로 — DDL이 열린 트랜잭션을 커밋, `READ ONLY`(1792), `@@transaction_isolation`이 실제 수준을 말함, `COMMIT AND CHAIN`, **`BEFORE UPDATE`의 `SET NEW.x`**, 트리거가 실패하면 문장째 되돌림, 참조되는 표의 `TRUNCATE` 1701과 외래키 정의 검사(1824 · 3780 · 1830), `WITH CHECK OPTION`과 열 이름이 바뀐 뷰에 쓰기, `TIME` 838:59:59 · `CONVERT_TZ` · 엄격한 날짜 글자, 앱 표 메뉴의 **Check Table · Optimize Table**(엔진이 행을 읽어 점검).
 - **REPEATABLE READ의 자기 쓰기(R72)**: 다른 세션이 스냅샷 뒤에 바꾼 행을 이 트랜잭션이 `UPDATE`/`DELETE`/연쇄로 쓰면 같은 행이 두 줄로 보이던 것을 한 줄로(옛 버전에 `_xsup` 표시), `FOR UPDATE`/`FOR SHARE`가 최신 커밋을 읽음; 두 세션을 진짜 MySQL과 비교하는 `two_sessions.py`. R73에서 스냅샷을 MySQL처럼 트랜잭션의 첫 읽기에 뜨게 하고(`WITH CONSISTENT SNAPSHOT`은 즉시), `INSERT … SELECT` 원본을 최신 커밋으로 읽게 함. R74에서 일반 SELECT가 아닌 문장(`INSERT`·`REPLACE`·`UPDATE`·`DELETE`·`SET @x`)의 서브쿼리도 MySQL처럼 최신 커밋을 읽게 하고, `INSERT … SELECT` 원본의 읽은 행과 틈을 공유 잠금하며, 잠금을 기다린 `FOR UPDATE`/`FOR SHARE`가 기다리기 전의 옛 값을 주던 것과 정상 종료한 연결의 열린 트랜잭션이 되돌려지지 않던 것을 고침(38개 시나리오 596단계, 차이 0).
 - **권한이 실제로 강제됨(R78)**: `root`가 아닌 계정의 모든 문장을 실행 전에 그 계정의 `GRANT`(전역 · 데이터베이스 · 표 · 열)와 켜 둔 역할에 비춰 확인하고 MySQL의 오류 번호(1142 · 1143 · 1044 · 1227 …)로 거절한다. `ALTER USER` · `RENAME USER` · `SET PASSWORD` · `SET ROLE` · 기본 역할 · `CURRENT_ROLE()` · 열 권한이 생기고 `SHOW GRANTS`가 MySQL과 같은 글자로 나온다. 진짜 MySQL과 300여 문장을 견줘 90개 차이 → 0. 같이 크래시 퍼저가 찾은 `ROLLBACK TO`의 행 사라짐(`REPLACE`가 지운 옛 버전까지 같이 지우던 것)도 고쳤다.
+- **조용한 오답 다섯의 정정(R82)**: 오류 없이 틀린 값을 돌려주거나 저장하던 것을 고쳤다 — 16진 · 비트 리터럴(`0x4142` · `X'41'` · `0b101` · `b'101'`)이 숫자 글자가 아니라 그 **바이트**(숫자를 물으면 정수: `0x41 + 0`은 65), 열 · 표 `COMMENT`가 사라지지 않고 `SHOW CREATE TABLE` · `information_schema` · `BACKUP` · 재시작에 남음, `LATERAL` 서브쿼리가 `SELECT *`에서 빠지던 것, `SHA2`의 224 · 384 · 512, `MEDIUMINT` · `TINYTEXT` … `LONGTEXT` · `*BLOB` · `CHAR(n)`이 INT · TEXT · VARCHAR로 저장되던 것(범위 · 크기 한계 · 끝 공백). 진짜 MySQL과 87문장을 견줘 61개 차이 → 0, 점수판 57개 코퍼스. 같이 값의 첫 바이트가 1이면 `INSERT`가 죽던 것도 고쳤다.
 - **인덱스 제안 · 쓰기 문장의 계획 · 연결 상한(R70)**: `SUGGEST INDEX`가 문장을 블록으로 읽어(CTE · 파생 표 · 하위 질의 — 상관 포함 — · UNION · OR의 가지) 어느 부분의 제안인지 말하고, `EXPLAIN UPDATE`·`DELETE`는 아무것도 실행하지 않고 그 문장이 찾는 행의 계획을 보여 주며, `SET GLOBAL max_connections`(기본 151)가 가득 차면 두 프로토콜 모두 오류 1040으로 새 연결을 거절한다.
 
 ## 2학기에 만든 것 (앱·연동)

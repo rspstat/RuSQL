@@ -178,12 +178,17 @@
 - [x] INT — `INTEGER` / `INT4` 키워드 별칭 허용
 - [x] BIGINT — 64비트 정수 (최대 9223372036854775807); `INT8` 별칭 허용
 - [x] SMALLINT — 소형 정수 (최대 32767)
-- [x] TINYINT — 초소형 정수 (최대 127); `MEDIUMINT` / `INT2` / `INT3` → INT로 처리
-- [x] VARCHAR(n) — 최대 길이 제한; `CHAR(n)` / `NVARCHAR(n)` / `NCHAR(n)` 별칭 허용; 크기 생략 시 255 기본값
+- [x] TINYINT — 초소형 정수 (최대 127); `INT2` → INT로 처리
+- [x] **MEDIUMINT — 중형 정수 (-8388608 ~ 8388607, UNSIGNED 0 ~ 16777215; `INT3` 별칭) (2026-11-14, R82)** — 전에는 INT로 저장되어 9000000이 들어갔다; 범위를 넘으면 1264, `information_schema`는 `mediumint`(`NUMERIC_PRECISION` 7), 스키마 파일에 따로 기록
+- [x] VARCHAR(n) — 최대 길이 제한; `NVARCHAR(n)` / `CHARACTER VARYING(n)` 별칭 허용; 크기 생략 시 255 기본값
+- [x] **CHAR(n) — 고정 길이 (`NCHAR(n)` / `CHARACTER(n)` 별칭; 크기 생략 시 CHAR(1)) (2026-11-14, R82)** — 값 끝의 공백을 남기지 않는다(`'ab  '`을 읽으면 `ab`; 길이를 넘는 공백은 잘림; `ALTER … MODIFY`로 CHAR가 되면 있던 값의 끝 공백도 떨어짐); 전에는 VARCHAR로 저장되어 `CHAR_LENGTH('ab  ')`가 4였다(MySQL 2)
 - [x] DOUBLE / FLOAT — `REAL` 별칭 허용
 - [x] DECIMAL(p, s) — 정밀도 / 소수 자리수; `NUMERIC` 별칭; 괄호 생략 시 `DECIMAL(10,2)` 기본값; `DECIMAL(p)` 단일 인자 허용
 - [x] BOOLEAN — `BOOL` 별칭 허용; TRUE / FALSE 리터럴 정규화 (소문자 변환)
-- [x] TEXT — `LONGTEXT` / `MEDIUMTEXT` / `TINYTEXT` / `CLOB` 별칭 허용
+- [x] TEXT — `CLOB` 별칭 허용; **`TINYTEXT` (255바이트) / `TEXT` (65,535) / `MEDIUMTEXT` (16,777,215) / `LONGTEXT` (4,294,967,295)는 크기마다 한계가 다르다(2026-11-14, R82)** — 넘으면 1406(전에는 모두 한계 없는 TEXT); `TINYBLOB` / `BLOB` / `MEDIUMBLOB` / `LONGBLOB`도 같은 한계(전에는 `MEDIUMBLOB` 등이 TEXT로 표시되었다)
+- [x] **열 · 표 `COMMENT` (2026-11-14, R82)** — `col INT COMMENT '설명'`, `CREATE TABLE ... COMMENT = '설명'`, `ALTER TABLE t COMMENT = '...'`, `ADD COLUMN | MODIFY | CHANGE ... COMMENT '...'`; `SHOW CREATE TABLE`(MySQL 프로토콜 · 네이티브 모두) · `information_schema.columns.COLUMN_COMMENT` / `tables.TABLE_COMMENT` · `SHOW FULL COLUMNS` · `SHOW TABLE STATUS` · `BACKUP` · `CREATE TABLE ... LIKE`에 나오고 재시작 뒤에도 남는다(전에는 받고 버렸다)
+- [x] **16진 · 비트 리터럴 `0x4142` / `X'4142'` / `0b101` / `b'101'`와 문자 집합 머리말 `_utf8mb4'x'` / `_binary 'x'` / `N'x'` (2026-11-14, R82)** — 그 바이트를 글자로 읽고(`0x41`은 `A`), 숫자를 물으면 부호 없는 정수(`0x41 + 0`은 65); 전에는 `0x4142`가 글자 `"4142"`로 저장됐고 `0b101`은 0, 나머지는 문법 오류였다. 값의 첫 바이트가 1이면(`0x01`, `UNHEX('0141')`) 표현식 표지로 오인되던 INSERT의 오류(`Internal error ... json`)도 고쳤다
+- [x] **`SHA2(글자, 224 | 384 | 512)` (2026-11-14, R82)** — SHA-224 · SHA-384 · SHA-512를 구현(전에는 256과 0만이고 나머지는 오류 없이 NULL); 그 밖의 길이는 MySQL처럼 NULL
 - [x] DATE — 'YYYY-MM-DD' 형식
 - [x] DATETIME — 'YYYY-MM-DD HH:MM:SS' 형식
 - [x] TIMESTAMP — 'YYYY-MM-DD HH:MM:SS' (값 없으면 현재 시각 자동 삽입)

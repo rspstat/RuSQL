@@ -432,6 +432,9 @@ void Executor::evaluate_insert_expressions(Statement& stmt, SharedDatabase* s, b
             const sqlval::StrictWrite strict;
             value = eval_arith_exact(Row{}, expr); // (what the expression worked out; see the UPDATE)
             if (auto refused = strict.error(); refused && !std::holds_alternative<InsertConflict::Ignore>(ins->on_conflict.data)) throw StatementError(*refused);
+            // This runs twice on one statement (once for the routing, once with the tables): a result that begins with the byte 1 (UNHEX('0141'), CHAR(1), 0x01) must not be
+            // taken for an expression by the second run, so it is handed on as an expression that is that text
+            if (!s && !value.empty() && value[0] == '\x01') value = "\x01" + nlohmann::json(ArithExpr(ArithExpr::Str{value})).dump();
         }
     }
 }

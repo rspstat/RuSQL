@@ -1,5 +1,5 @@
 {
-  "generated": "2026-11-12",
+  "generated": "2026-11-14",
   "mysql": "8.4.9",
   "corpora": [
     {
@@ -411,6 +411,14 @@
       "bothFail": 36
     },
     {
+      "name": "wrong_answers_r82",
+      "en": "Hexadecimal and bit literals as the bytes they spell (and the integer where a number is asked), COMMENT of a column and a table, SELECT * over a LATERAL derived table, SHA2 of 224 / 384 / 512 bits, MEDIUMINT / TINYTEXT / BLOB sizes and CHAR(n)",
+      "ko": "16진·비트 리터럴(그 바이트, 숫자를 물으면 정수), 열·표 COMMENT, LATERAL 파생 표의 SELECT *, SHA2 224 / 384 / 512, MEDIUMINT / TINYTEXT / BLOB 크기와 CHAR(n)",
+      "statements": 87,
+      "different": 0,
+      "bothFail": 13
+    },
+    {
       "name": "rollup",
       "en": "GROUP BY ... WITH ROLLUP: a row for each prefix of the keys and a total, HAVING / ORDER BY / LIMIT / DISTINCT after it, in a view and a derived table",
       "ko": "GROUP BY ... WITH ROLLUP: 키의 접두사마다 한 행과 총계, 그 뒤의 HAVING·ORDER BY·LIMIT·DISTINCT, 뷰·파생 표 안에서",
@@ -453,8 +461,8 @@
   ],
   "conformanceCases": 4780,
   "tests": {
-    "cases": 974,
-    "assertions": 1521562
+    "cases": 983,
+    "assertions": 1521987
   },
   "bugsFound": 206
 }

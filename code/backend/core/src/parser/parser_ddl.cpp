@@ -195,12 +195,18 @@ DataType Parser::parse_data_type() {
 
     const Token* t = advance();
     if (!t) throw ParseError("Expected data type");
+    const std::string typed_as = to_upper(t->word); // the word a type keyword was typed as (MEDIUMINT and INT are the one keyword)
     switch (t->kind) {
-        case TokenKind::Int: skip_parenthesized(); skip_signedness(); return DataType(DataType::Int{});
+        case TokenKind::Int: skip_parenthesized(); skip_signedness(); return DataType(DataType::Int{typed_as == "MEDIUMINT" || typed_as == "INT3"});
         case TokenKind::BigInt: skip_parenthesized(); skip_signedness(); return DataType(DataType::BigInt{});
         case TokenKind::SmallInt: skip_parenthesized(); skip_signedness(); return DataType(DataType::SmallInt{});
         case TokenKind::TinyInt: skip_parenthesized(); skip_signedness(); return DataType(DataType::TinyInt{});
-        case TokenKind::Text: skip_parenthesized(); return DataType(DataType::Text{});
+        case TokenKind::Text: { // TEXT, TINYTEXT, MEDIUMTEXT, LONGTEXT and the BLOBs the keyword table gives the same token
+            skip_parenthesized();
+            const std::uint8_t size = typed_as.rfind("TINY", 0) == 0 ? 1 : typed_as.rfind("MEDIUM", 0) == 0 ? 2 : typed_as.rfind("LONG", 0) == 0 ? 3 : 0;
+            if (typed_as.size() > 4 && typed_as.compare(typed_as.size() - 4, 4, "BLOB") == 0) return DataType(DataType::Blob{size});
+            return DataType(DataType::Text{size});
+        }
         case TokenKind::Float: skip_parenthesized(); skip_signedness(); return DataType(DataType::Float{});
         case TokenKind::Boolean: return DataType(DataType::Boolean{});
         case TokenKind::Double: skip_word("PRECISION"); skip_parenthesized(); skip_signedness(); return DataType(DataType::Double{});
@@ -239,7 +245,10 @@ DataType Parser::parse_data_type() {
             return DataType(DataType::Set{values});
         }
         case TokenKind::Varchar: {
-            std::uint32_t n = 255;
+            // CHAR(n) and NCHAR(n) are fixed-length (CHAR alone is CHAR(1)); VARCHAR, NVARCHAR and CHARACTER VARYING are not
+            const bool varying = peek() && peek()->kind == TokenKind::Ident && to_upper(peek()->text) == "VARYING";
+            const bool fixed = (typed_as == "CHAR" || typed_as == "CHARACTER" || typed_as == "NCHAR") && !varying;
+            std::uint32_t n = fixed ? 1 : 255;
             skip_word("VARYING"); // CHARACTER VARYING(n)
             if (peek_is(TokenKind::LParen)) {
                 advance();
@@ -249,7 +258,7 @@ DataType Parser::parse_data_type() {
                 while (!peek_is(TokenKind::RParen) && peek() != nullptr) advance();
                 if (peek_is(TokenKind::RParen)) advance();
             }
-            return DataType(DataType::Varchar{n});
+            return DataType(DataType::Varchar{n, fixed});
         }
         case TokenKind::Date: return DataType(DataType::Date{});
         case TokenKind::Datetime: return DataType(DataType::DateTime{fraction_digits()});
@@ -392,6 +401,9 @@ std::optional<std::int64_t> Parser::parse_table_options() {
         if (!v) throw ParseError("Expected a value for the table option " + name);
         if (name == "AUTO_INCREMENT") {
             try { auto_increment_start = std::stoll(v->text); } catch (...) { throw ParseError("Expected a number after AUTO_INCREMENT ="); }
+        } else if (name == "COMMENT") {
+            if (v->kind != TokenKind::StringLit) throw ParseError("Expected a string after COMMENT");
+            table_comment_ = v->text;
         }
     }
     return auto_increment_start;
@@ -475,7 +487,7 @@ ColConstraints Parser::parse_col_constraints(const std::string& col_name) {
         } else if (p->kind == TokenKind::Ident && to_upper(p->text) == "COMMENT") { // COMMENT 'text'
             advance();
             if (!peek_is(TokenKind::StringLit)) throw ParseError("Expected a string after COMMENT");
-            advance();
+            c.comment = advance()->text;
         } else if (p->kind == TokenKind::Null) { // an explicit NULL: the column may hold NULL (as it does when nothing is said)
             advance();
         } else if (p->kind == TokenKind::On && peek_at_is(1, TokenKind::Update) && peek_at_is(2, TokenKind::Now)) { // ON UPDATE CURRENT_TIMESTAMP[(n)]
@@ -892,6 +904,7 @@ Statement Parser::parse_create() {
             col.foreign_keys = cc.foreign_keys;
             col.check_expr = cc.check_expr;
             col.on_update_now = cc.on_update_now;
+            col.comment = cc.comment;
             columns.push_back(std::move(col));
         }
 
@@ -901,7 +914,10 @@ Statement Parser::parse_create() {
     }
 
     fk_table_.clear();
+    table_comment_.reset();
     const std::optional<std::int64_t> auto_increment_start = parse_table_options();
+    const std::string table_comment = table_comment_.value_or("");
+    table_comment_.reset();
     std::optional<PartitionBy> partition_by = parse_partition_by();
     if (partition_by) {
         auto it = std::find_if(columns.begin(), columns.end(), [&](const ColumnDef& c) { return same_name(c.name, partition_by->column); });
@@ -916,7 +932,7 @@ Statement Parser::parse_create() {
         return Statement(Statement::CreateTableAs{name, if_not_exists, columns, std::make_unique<Statement>(std::move(query))});
     }
 
-    return Statement(Statement::CreateTable{name, columns, if_not_exists, primary_key_columns, check_constraints, partition_by, unique_keys, auto_increment_start, indexes});
+    return Statement(Statement::CreateTable{name, columns, if_not_exists, primary_key_columns, check_constraints, partition_by, unique_keys, auto_increment_start, indexes, table_comment});
 }
 
 Statement Parser::parse_drop() {
@@ -979,7 +995,9 @@ Statement Parser::parse_alter() {
     while (peek_is(TokenKind::Comma)) {
         advance();
         Statement next = parse_alter_action(table);
-        std::get<Statement::AlterTable>(first.data).more.push_back(std::move(std::get<Statement::AlterTable>(next.data).action));
+        auto& next_alter = std::get<Statement::AlterTable>(next.data);
+        std::get<Statement::AlterTable>(first.data).more.push_back(std::move(next_alter.action));
+        for (AlterAction& extra : next_alter.more) std::get<Statement::AlterTable>(first.data).more.push_back(std::move(extra)); // (a clause of table options is more than one action)
     }
     return first;
 }
@@ -993,8 +1011,18 @@ Statement Parser::parse_alter_action(const std::string& table) {
                                         to_upper(t->text) == "CHARSET" || to_upper(t->text) == "ROW_FORMAT" || to_upper(t->text) == "CHARACTER" ||
                                         to_upper(t->text) == "COLLATE")) {
         --pos_;
-        if (const auto next = parse_table_options()) return Statement(Statement::AlterTable{table, AlterAction(AlterAction::SetAutoIncrement{*next})});
-        return Statement(Statement::AlterTable{table, AlterAction(AlterAction::NoOp{})});
+        table_comment_.reset();
+        const auto next = parse_table_options();
+        std::optional<std::string> comment = std::move(table_comment_);
+        table_comment_.reset();
+        // (`ALTER TABLE t AUTO_INCREMENT = 5, COMMENT = 'x'` is both: the second action follows the first)
+        std::vector<AlterAction> actions;
+        if (next) actions.push_back(AlterAction(AlterAction::SetAutoIncrement{*next}));
+        if (comment) actions.push_back(AlterAction(AlterAction::SetComment{*comment}));
+        if (actions.empty()) return Statement(Statement::AlterTable{table, AlterAction(AlterAction::NoOp{})});
+        Statement::AlterTable alter{table, std::move(actions.front()), {}};
+        for (std::size_t i = 1; i < actions.size(); i++) alter.more.push_back(std::move(actions[i]));
+        return Statement(std::move(alter));
     }
 
     // ALTER [COLUMN] c SET DEFAULT v | DROP DEFAULT
@@ -1038,6 +1066,7 @@ Statement Parser::parse_alter_action(const std::string& table) {
         col.foreign_keys = cc.foreign_keys;
         col.check_expr = cc.check_expr;
         col.on_update_now = cc.on_update_now;
+        col.comment = cc.comment;
         return Statement(Statement::AlterTable{table, AlterAction(AlterAction::ChangeColumn{from, col, parse_column_position()})});
     }
 
@@ -1184,6 +1213,7 @@ Statement Parser::parse_alter_action(const std::string& table) {
         col.auto_increment = cc.auto_increment;
         col.check_expr = cc.check_expr;
         col.on_update_now = cc.on_update_now;
+        col.comment = cc.comment;
         col.foreign_keys = cc.foreign_keys;
         col.unique = cc.unique;
         col.unique_constraint_name = cc.unique_constraint_name;
@@ -1260,6 +1290,7 @@ Statement Parser::parse_alter_action(const std::string& table) {
         col.foreign_keys = cc.foreign_keys;
         col.check_expr = cc.check_expr;
         col.on_update_now = cc.on_update_now;
+        col.comment = cc.comment;
         return Statement(Statement::AlterTable{table, AlterAction(AlterAction::ModifyColumn{col, parse_column_position()})});
     }
 

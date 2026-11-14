@@ -233,6 +233,7 @@ Executor::Executor(const std::string& dir, std::size_t buffer_pool_capacity) {
             ts->auto_increment_counters = auto_inc_counters;
             ts->unique_keys = schema.unique_keys; // (UNIQUE keys over several columns)
             ts->partition_info = schema.partition_info; // (a partitioned table read 0 rows after a restart: its partitions were forgotten)
+            ts->comment = schema.comment; // (the table option COMMENT = '...')
         }
 
         auto rows = disk.load_table(qualified_key);
@@ -2104,7 +2105,15 @@ StringResult Executor::execute_with_s_body(SharedDatabase& s, Statement stmt) {
     if (std::holds_alternative<Statement::UnlockTables>(stmt.data)) return exec_unlock_tables(s);
 
     if (auto* v = std::get_if<Statement::CreateTable>(&stmt.data)) {
+        const bool existed = s.catalog.tables.count(v->name) > 0; // (CREATE TABLE IF NOT EXISTS of a table that is there changes nothing)
         auto created = exec_create(s, v->name, v->columns, v->if_not_exists, v->primary_key_columns, v->check_constraints, v->partition_by, v->unique_keys);
+        // the table option COMMENT = '...'
+        if (created.is_ok() && !existed && !v->comment.empty()) {
+            if (auto* schema = s.catalog.get_table_mut(v->name)) {
+                schema->comment = v->comment;
+                s.disk.save_schema(v->name, *schema);
+            }
+        }
         // the table option AUTO_INCREMENT = n: the next number is n (the counter holds the last one given)
         if (created.is_ok() && v->auto_increment_start && !v->partition_by) {
             if (auto* schema = s.catalog.get_table_mut(v->name)) {

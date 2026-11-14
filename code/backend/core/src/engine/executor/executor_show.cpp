@@ -26,17 +26,17 @@ std::string sql_type_str(const DataType& dt) {
     return std::visit(
         [](const auto& alt) -> std::string {
             using T = std::decay_t<decltype(alt)>;
-            if constexpr (std::is_same_v<T, DataType::Int>) return "INT";
+            if constexpr (std::is_same_v<T, DataType::Int>) return alt.medium ? "MEDIUMINT" : "INT";
             else if constexpr (std::is_same_v<T, DataType::BigInt>) return "BIGINT";
             else if constexpr (std::is_same_v<T, DataType::SmallInt>) return "SMALLINT";
             else if constexpr (std::is_same_v<T, DataType::TinyInt>) return "TINYINT";
-            else if constexpr (std::is_same_v<T, DataType::Text>) return "TEXT";
+            else if constexpr (std::is_same_v<T, DataType::Text>) return text_type_name(alt.size);
             else if constexpr (std::is_same_v<T, DataType::Float>) return "FLOAT";
             else if constexpr (std::is_same_v<T, DataType::Boolean>) return "BOOLEAN";
             else if constexpr (std::is_same_v<T, DataType::Date>) return "DATE";
             else if constexpr (std::is_same_v<T, DataType::DateTime>) return alt.fsp ? "DATETIME(" + std::to_string(alt.fsp) + ")" : "DATETIME";
             else if constexpr (std::is_same_v<T, DataType::Timestamp>) return alt.fsp ? "TIMESTAMP(" + std::to_string(alt.fsp) + ")" : "TIMESTAMP";
-            else if constexpr (std::is_same_v<T, DataType::Varchar>) return "VARCHAR(" + std::to_string(alt.length) + ")";
+            else if constexpr (std::is_same_v<T, DataType::Varchar>) return std::string(alt.fixed ? "CHAR(" : "VARCHAR(") + std::to_string(alt.length) + ")";
             else if constexpr (std::is_same_v<T, DataType::Decimal>)
                 return "DECIMAL(" + std::to_string(alt.precision) + "," + std::to_string(alt.scale) + ")";
             else if constexpr (std::is_same_v<T, DataType::Double>) return "DOUBLE";
@@ -57,7 +57,7 @@ std::string sql_type_str(const DataType& dt) {
                 }
                 return out + ")";
             } else if constexpr (std::is_same_v<T, DataType::Blob>)
-                return "BLOB";
+                return blob_type_name(alt.size);
             else if constexpr (std::is_same_v<T, DataType::Json>)
                 return "JSON";
             else
@@ -136,27 +136,33 @@ StringResult Executor::exec_describe(const SharedDatabase& s, const std::string&
 }
 
 namespace {
+std::string lower_name(const char* name) {
+    std::string out = name;
+    for (char& c : out) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    return out;
+}
+
 // the type as MySQL writes it in SHOW CREATE TABLE
 std::string mysql_type_text(const DataType& dt, bool is_unsigned) {
     std::string out = std::visit(
         [](const auto& alt) -> std::string {
             using T = std::decay_t<decltype(alt)>;
-            if constexpr (std::is_same_v<T, DataType::Int>) return "int";
+            if constexpr (std::is_same_v<T, DataType::Int>) return alt.medium ? "mediumint" : "int";
             else if constexpr (std::is_same_v<T, DataType::BigInt>) return "bigint";
             else if constexpr (std::is_same_v<T, DataType::SmallInt>) return "smallint";
             else if constexpr (std::is_same_v<T, DataType::TinyInt>) return "tinyint";
-            else if constexpr (std::is_same_v<T, DataType::Text>) return "text";
+            else if constexpr (std::is_same_v<T, DataType::Text>) return lower_name(text_type_name(alt.size));
             else if constexpr (std::is_same_v<T, DataType::Float>) return "float";
             else if constexpr (std::is_same_v<T, DataType::Double>) return "double";
             else if constexpr (std::is_same_v<T, DataType::Boolean>) return "tinyint(1)";
-            else if constexpr (std::is_same_v<T, DataType::Varchar>) return "varchar(" + std::to_string(alt.length) + ")";
+            else if constexpr (std::is_same_v<T, DataType::Varchar>) return std::string(alt.fixed ? "char(" : "varchar(") + std::to_string(alt.length) + ")";
             else if constexpr (std::is_same_v<T, DataType::Decimal>) return "decimal(" + std::to_string(alt.precision) + "," + std::to_string(alt.scale) + ")";
             else if constexpr (std::is_same_v<T, DataType::Date>) return "date";
             else if constexpr (std::is_same_v<T, DataType::DateTime>) return alt.fsp ? "datetime(" + std::to_string(alt.fsp) + ")" : "datetime";
             else if constexpr (std::is_same_v<T, DataType::Timestamp>) return alt.fsp ? "timestamp(" + std::to_string(alt.fsp) + ")" : "timestamp";
             else if constexpr (std::is_same_v<T, DataType::Time>) return alt.fsp ? "time(" + std::to_string(alt.fsp) + ")" : "time";
             else if constexpr (std::is_same_v<T, DataType::Year>) return "year";
-            else if constexpr (std::is_same_v<T, DataType::Blob>) return "blob";
+            else if constexpr (std::is_same_v<T, DataType::Blob>) return lower_name(blob_type_name(alt.size));
             else if constexpr (std::is_same_v<T, DataType::Json>) return "json";
             else if constexpr (std::is_same_v<T, DataType::Enum> || std::is_same_v<T, DataType::Set>) {
                 std::string list = std::is_same_v<T, DataType::Enum> ? "enum(" : "set(";
@@ -218,6 +224,7 @@ StringResult Executor::show_create_table_mysql(const std::string& name) {
             line += " DEFAULT NULL";
         }
         if (col.on_update_now) line += " ON UPDATE CURRENT_TIMESTAMP";
+        if (!col.comment.empty()) line += " COMMENT " + sql_comment_literal(col.comment);
         lines.push_back(std::move(line));
     }
     auto column_list = [](const std::vector<std::string>& columns) {
@@ -274,6 +281,7 @@ StringResult Executor::show_create_table_mysql(const std::string& name) {
         ddl += " AUTO_INCREMENT=" + std::to_string(next);
     }
     ddl += " DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci";
+    if (!schema->comment.empty()) ddl += " COMMENT=" + sql_comment_literal(schema->comment);
     return StringResult::Ok(ddl);
 }
 
@@ -316,6 +324,7 @@ StringResult Executor::exec_show_create_table(const SharedDatabase& s, const std
         }
         if (col.primary_key && composite_pk.empty()) parts.push_back("PRIMARY KEY");
         if (col.unique && !col.unique_constraint_name) parts.push_back("UNIQUE");
+        if (!col.comment.empty()) parts.push_back("COMMENT " + sql_comment_literal(col.comment));
 
         std::string line = "  ";
         for (std::size_t i = 0; i < parts.size(); i++) {
@@ -362,6 +371,7 @@ StringResult Executor::exec_show_create_table(const SharedDatabase& s, const std
         body += lines[i];
     }
     std::string ddl = "CREATE TABLE `" + bare + "` (\n" + body + "\n)";
+    if (!schema->comment.empty()) ddl += " COMMENT=" + sql_comment_literal(schema->comment);
     if (schema->partition_info) {
         auto& info = *schema->partition_info;
         std::string kind_str = info.kind == PartitionKind::Range ? "RANGE" : info.kind == PartitionKind::List ? "LIST" : "HASH";

@@ -26,7 +26,7 @@ RuSQL이 실제로 받아서 실행하는 SQL 문법을 한 줄씩 정리한 문
 - CREATE TABLE t LIKE other : 다른 테이블의 구조를 그대로 복사해 생성
 - CREATE TABLE t [(컬럼 정의)] AS SELECT ... : 쿼리 결과로 테이블 생성(데이터 포함)
 - CREATE TABLE db.t (...) : 데이터베이스를 붙여서 생성
-- ... ENGINE / AUTO_INCREMENT = n / [DEFAULT] CHARSET / COLLATE / COMMENT / ROW_FORMAT / KEY_BLOCK_SIZE 등 테이블 옵션 : 옵션을 적어도 받아들임(AUTO_INCREMENT 시작값 · 문자 집합 검사만 실제로 적용)
+- ... ENGINE / AUTO_INCREMENT = n / [DEFAULT] CHARSET / COLLATE / COMMENT = '설명' / ROW_FORMAT / KEY_BLOCK_SIZE 등 테이블 옵션 : 옵션을 적어도 받아들임(AUTO_INCREMENT 시작값 · 문자 집합 검사 · `COMMENT`만 실제로 적용: `ALTER TABLE t COMMENT = '...'`, `SHOW CREATE TABLE`, `information_schema.tables.TABLE_COMMENT`, `CREATE TABLE ... LIKE`, `BACKUP`이 같이 다룸; R82)
 - PARTITION BY RANGE (col) (PARTITION p VALUES LESS THAN (n | MAXVALUE), ...) : 범위 파티션
 - PARTITION BY LIST (col) (PARTITION p VALUES IN (...), ...) : 목록 파티션
 - PARTITION BY HASH (col) PARTITIONS n : 해시 파티션
@@ -42,7 +42,7 @@ RuSQL이 실제로 받아서 실행하는 SQL 문법을 한 줄씩 정리한 문
 - UNIQUE : 중복 불가
 - CHECK (조건) [[NOT] ENFORCED] : 값 검사 조건. 열의 타입으로 비교한다 — 글자 열과 글자는 글자끼리(`'9' > '10'`), 한쪽이 숫자면 숫자로(`'007' = 7`), 숫자로 완전히 읽히지 않는 글자(`'abc'`)를 숫자와 비교하면 위반(3819; R79)
 - REFERENCES t(col) [ON DELETE 동작] [ON UPDATE 동작] : 컬럼에 바로 붙이는 외래 키
-- COMMENT '설명' : 컬럼 설명
+- COMMENT '설명' : 열 설명 — 표에 남고(`SHOW CREATE TABLE`, `information_schema.columns.COLUMN_COMMENT`, `SHOW FULL COLUMNS`, `BACKUP`, 재시작 뒤에도) `ALTER TABLE ... ADD COLUMN | MODIFY | CHANGE`에도 쓸 수 있다(`MODIFY`에 `COMMENT`가 없으면 설명이 지워짐, MySQL과 같음; R82 — 전에는 받고 버렸다)
 - CHARACTER SET x / CHARSET x / COLLATE x : 문자 집합 · 정렬 규칙 표기(utf8mb4 계열 · `_ci`만 받음)
 - UNSIGNED / SIGNED : 부호 없는 정수 / 부호 있는 정수
 
@@ -180,7 +180,7 @@ RuSQL이 실제로 받아서 실행하는 SQL 문법을 한 줄씩 정리한 문
 - CROSS JOIN : 모든 조합(카테시안 곱)
 - NATURAL JOIN : 이름이 같은 컬럼으로 자동 결합
 - FROM a, b WHERE ... : 쉼표 조인
-- JOIN LATERAL (서브쿼리) 별칭 ON ... : 앞 테이블의 컬럼을 쓰는 서브쿼리와 결합
+- JOIN LATERAL (서브쿼리) 별칭 ON ... / FROM a, LATERAL (서브쿼리) 별칭 : 앞 테이블의 컬럼을 쓰는 서브쿼리와 결합(`SELECT *` · `별칭.*`가 그 서브쿼리의 열도 나열; R82 — 전에는 앞 표의 열만 오류 없이 돌려줬다)
 - JOIN (서브쿼리) 별칭 ON ... : 파생 테이블과 결합
 - 같은 테이블을 별칭으로 여러 번 조인 : 자체 조인
 
@@ -229,7 +229,9 @@ RuSQL이 실제로 받아서 실행하는 SQL 문법을 한 줄씩 정리한 문
 - POSITION(부분 IN 문자열) : 위치 찾기
 - 열 -> '$.경로' / 열 ->> '$.경로' : JSON 값 꺼내기 / 따옴표 없는 문자열로 꺼내기(R60: MySQL처럼 **열 뒤에서만**: 문자열·수·함수 결과 뒤의 화살표는 문법 오류, 함수 결과에는 `JSON_EXTRACT(식, '$.경로')`)
 - 'text' / "text" : 문자열 리터럴(`''` 따옴표 두 번, `\n` `\t` `\\` `\'` 이스케이프, `\%` · `\_`는 두 글자 그대로 남아 LIKE가 읽음; 큰따옴표는 컬럼 이름으로 읽음)
-- 123 / 1.5 / 1e3 / 0x41 : 숫자 · 지수 · 16진수 리터럴
+- 123 / 1.5 / 1e3 : 숫자 · 지수 리터럴
+- 0x4142 / X'4142' / 0b101 / b'101' : 16진 · 비트 리터럴 — 그 **바이트**를 글자로(`0x41`은 `A`; 전에는 숫자 글자 `"41"`을 저장했다), 숫자를 물으면 그 바이트가 만드는 부호 없는 정수(`0x41 + 0`은 65, `b'101' + 0`은 5; 숫자 열과의 비교 `WHERE n = 0x01`은 아직 글자로 비교). UTF-8이 아닌 바이트(`0xFF`)는 행이 JSON으로 저장되어 오류로 거절
+- N'글자' / _utf8mb4'글자' / _binary '글자' / _latin1 0x41 ... : 국제 문자열 · 문자 집합 머리말 — 읽고 무시(글자는 늘 utf8mb4; R82)
 - TRUE / FALSE / NULL : 참 · 거짓 · 값 없음
 - @변수 / @@서버변수 / @@global.변수 / @@session.변수 : 사용자 변수 · 서버 변수 읽기
 - ( 식 ) / (SELECT ...) : 괄호 · 서브쿼리 식
@@ -237,13 +239,14 @@ RuSQL이 실제로 받아서 실행하는 SQL 문법을 한 줄씩 정리한 문
 
 ## 8. 데이터 타입
 
-- TINYINT / SMALLINT / MEDIUMINT / INT / INTEGER / BIGINT [UNSIGNED] : 정수(INT2 · INT3 · INT4 · INT8 별칭 포함, `(n)` 표시 폭은 무시)
+- TINYINT / SMALLINT / MEDIUMINT / INT / INTEGER / BIGINT [UNSIGNED] : 정수(INT2 · INT3 · INT4 · INT8 별칭 포함, `(n)` 표시 폭은 무시). `MEDIUMINT`(와 `INT3`)는 -8,388,608 ~ 8,388,607(UNSIGNED 0 ~ 16,777,215), 넘으면 1264(R82 — 전에는 INT와 같은 범위였다)
 - BOOL / BOOLEAN : 참 · 거짓(TINYINT(1))
 - FLOAT[(m,d)] / DOUBLE[(m,d)] / REAL / DOUBLE PRECISION : 부동소수점 실수
 - DECIMAL(m,d) / NUMERIC / DEC / FIXED : 정확한 소수
-- CHAR(n) / VARCHAR(n) / NCHAR / NVARCHAR / CHARACTER [VARYING](n) : 문자열
-- TEXT / TINYTEXT / MEDIUMTEXT / LONGTEXT / CLOB : 긴 문자열
-- BLOB / TINYBLOB / MEDIUMBLOB / LONGBLOB : 바이너리 덩어리(문자열처럼 저장)
+- CHAR(n) / NCHAR(n) / CHARACTER(n) : 고정 길이 문자열 — 값 끝의 공백을 남기지 않는다(`'ab  '`을 읽으면 `ab`, `CHAR_LENGTH` 2; 크기를 생략하면 `CHAR(1)`; R82 — 전에는 `VARCHAR`로 저장해 공백이 남았다)
+- VARCHAR(n) / NVARCHAR / CHARACTER VARYING(n) : 가변 길이 문자열
+- TEXT / TINYTEXT / MEDIUMTEXT / LONGTEXT / CLOB : 긴 문자열 — 크기마다 한계가 다르다(바이트: TINYTEXT 255, TEXT 65,535, MEDIUMTEXT 16,777,215, LONGTEXT 4,294,967,295, 넘으면 1406; R82 — 전에는 모두 한계 없는 TEXT였다)
+- BLOB / TINYBLOB / MEDIUMBLOB / LONGBLOB : 바이너리 덩어리(문자열처럼 저장, TEXT와 같은 크기 한계)
 - DATE : 날짜
 - TIME[(n)] : 시간(소수 초 n자리, 최대 6)
 - DATETIME[(n)] / TIMESTAMP[(n)] : 날짜 + 시간
@@ -296,7 +299,7 @@ RuSQL이 실제로 받아서 실행하는 SQL 문법을 한 줄씩 정리한 문
 - HEX / UNHEX / BIN / OCT / CONV : 16 · 2 · 8진수와 진법 변환
 - TO_BASE64 / FROM_BASE64 : Base64 변환
 - QUOTE / SOUNDEX / MAKE_SET / EXPORT_SET : 따옴표 감싸기 · 발음 코드 · 집합 문자열
-- MD5 / SHA / SHA1 / SHA2 / CRC32 : 해시 · 체크섬
+- MD5 / SHA / SHA1 / SHA2(글자, 224 | 256 | 384 | 512 | 0) / CRC32 : 해시 · 체크섬(`SHA2`의 다른 길이는 MySQL처럼 NULL; R82 — 224 · 384 · 512도 NULL이던 것을 구현)
 - UUID : 고유 식별자 생성
 
 ### 정규식 함수
@@ -558,7 +561,7 @@ mysql 클라이언트 · 드라이버 · 도구가 보내는 문장을 받아주
 - **뷰** : `CREATE VIEW v (컬럼 목록) AS ...`, 조인 뷰의 `UPDATE` · `INSERT`(MySQL은 한 표의 열만 쓰면 받음)
 - **데이터 쓰기** : `INSERT ... VALUES ()`(빈 값), `INSERT ... DEFAULT VALUES`, `INSERT ... AS 별칭`, `INSERT/UPDATE/DELETE LOW_PRIORITY · QUICK`, `UPDATE IGNORE`, `UPDATE ... JOIN (파생 테이블)`, `DELETE FROM ... USING`, `LOAD DATA`, `SELECT ... INTO OUTFILE`
 - **조회** : `NATURAL LEFT | RIGHT JOIN`, `TABLE t`, `VALUES ROW(...)`, `USE | FORCE | IGNORE INDEX` 힌트, `PARTITION (p)` 선택, `STRAIGHT_JOIN`, `SELECT ALL | HIGH_PRIORITY`, `NULLS FIRST | LAST`, `OFFSET n ROWS`, `FOR UPDATE OF 테이블`, `NATURAL LEFT JOIN`, `IN (SELECT ... UNION SELECT ...)`, `INSERT ... SELECT ... ON DUPLICATE KEY UPDATE`
-- **식 · 리터럴** : `IS [NOT] DISTINCT FROM`, `BETWEEN SYMMETRIC`, `b'101'`, `DATE '2024-01-01'`, `_utf8mb4'x'`, `COLLATE` 연산자, `BINARY` 연산자, `MATCH ... AGAINST`, `SOUNDS LIKE`, `SELECT @a := 식`, `CONVERT(식 USING 문자집합)`, `DEFAULT(col)`, `GROUPING()`
+- **식 · 리터럴** : `IS [NOT] DISTINCT FROM`, `BETWEEN SYMMETRIC`, `DATE '2024-01-01'`, `COLLATE` 연산자, `BINARY` 연산자, `MATCH ... AGAINST`, `SOUNDS LIKE`, `SELECT @a := 식`, `CONVERT(식 USING 문자집합)`, `DEFAULT(col)`, `GROUPING()`
 - **함수** : `PERCENTILE_CONT ... WITHIN GROUP`, `BIT_XOR`, `CONNECTION_ID`, `GET_LOCK`, `INET_ATON`, `BENCHMARK`, `JSON_STORAGE_SIZE` 등 위 9장에 없는 함수
 - **프로시저** : `SIGNAL`, `DECLARE ... HANDLER`, 커서(`DECLARE CURSOR`), 본문의 `CASE ... END CASE`, 반복문 끝의 라벨(`END WHILE lp`), `CREATE PROCEDURE IF NOT EXISTS`, `CREATE OR REPLACE PROCEDURE`, `CREATE TRIGGER IF NOT EXISTS`, 여러 문장 함수 본문(`BEGIN ... RETURN ... END`)
 - **권한 · 사용자** : 프로시저 · 함수 수준의 `GRANT EXECUTE`는 받지만 `SHOW GRANTS`의 모양만 같고 MySQL의 모든 경우를 다 따라가지는 않음, `FLUSH PRIVILEGES`(필요 없음: 권한은 문장마다 바로 반영됨), 비밀번호 정책 · 계정 잠금 · 만료

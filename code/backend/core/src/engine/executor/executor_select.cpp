@@ -12,6 +12,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstring>
+#include <deque>
 #include <functional>
 #include <numeric>
 #include <unordered_set>
@@ -1382,7 +1383,25 @@ std::optional<std::string> Executor::resolve_join_columns(SharedDatabase& s, con
     }
 
     if (!star) return std::nullopt;
-    if (!all_known) return std::nullopt; // a table without a schema keeps the old `*` (every column the row holds)
+    // A LATERAL subquery has no schema, but it names its columns: `*` and `l.*` list them after the columns of the tables on its left (the old `*` listed only the
+    // tables that have a schema, and a `SELECT * FROM a, LATERAL (...) l` came without the columns of `l`, and without an error)
+    std::deque<TableSchema> lateral_schemas;
+    for (std::size_t i = 0; i < joins.size(); i++) {
+        if (schemas[i + 1] || !joins[i].lateral || !joins[i].subquery) continue;
+        const std::vector<std::string> lateral_columns = derived_column_names(s, *joins[i].subquery->first);
+        if (lateral_columns.empty()) continue;
+        TableSchema lateral;
+        lateral.name = joins[i].table;
+        for (const std::string& column_name : lateral_columns) {
+            ColumnDef def;
+            def.name = column_name;
+            def.data_type = DataType(DataType::Text{});
+            lateral.columns.push_back(std::move(def));
+        }
+        lateral_schemas.push_back(std::move(lateral));
+        schemas[i + 1] = &lateral_schemas.back();
+    }
+    if (std::any_of(schemas.begin(), schemas.end(), [](const TableSchema* t) { return t == nullptr; })) return std::nullopt; // a table without a schema keeps the old `*` (every column the row holds)
 
     // `*` and `t.*` become the columns they stand for. A column of the FROM table is read by its own name, one of a joined table by
     // "<name>.<column>" (get_col finds it in the joined row); the header is the part after the dot either way.

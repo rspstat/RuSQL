@@ -190,6 +190,7 @@ const PARSER: Text[] = [
   L("SQL text → AST (DDL, DML, DCL, TCL, procedures)", "SQL 텍스트 → AST (DDL, DML, DCL, TCL, 프로시저)"),
   L("reads mysqldump files and the statements real clients send (SET lists, LIKE / AS SELECT, multi-action ALTER)", "mysqldump 파일과 실제 클라이언트가 보내는 문장(SET 목록, LIKE / AS SELECT, 여러 동작 ALTER)을 읽음"),
   L("window frames and WINDOW w, named foreign keys, TRACE", "윈도 프레임·WINDOW w, 이름 있는 외래키, TRACE"),
+  L("hex and bit literals (0x41, X'41', b'101') are the bytes they spell; COMMENT and the sizes MEDIUMINT / TINYTEXT / CHAR(n) are kept", "16진·비트 리터럴(0x41, X'41', b'101')은 그 바이트로 읽고, COMMENT와 MEDIUMINT / TINYTEXT / CHAR(n) 크기는 그대로 보관"),
   L("names ignore case; db.table works everywhere", "이름은 대소문자 무시, db.표는 모든 문장에서 가능"),
 ];
 const PLANNER: Text[] = [

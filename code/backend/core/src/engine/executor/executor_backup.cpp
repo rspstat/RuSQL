@@ -76,13 +76,13 @@ std::string backup_type_str(const DataType& dt) {
     return std::visit(
         [](const auto& alt) -> std::string {
             using T = std::decay_t<decltype(alt)>;
-            if constexpr (std::is_same_v<T, DataType::Int>) return "INT";
+            if constexpr (std::is_same_v<T, DataType::Int>) return alt.medium ? "MEDIUMINT" : "INT";
             else if constexpr (std::is_same_v<T, DataType::BigInt>) return "BIGINT";
             else if constexpr (std::is_same_v<T, DataType::SmallInt>) return "SMALLINT";
             else if constexpr (std::is_same_v<T, DataType::TinyInt>) return "TINYINT";
             else if constexpr (std::is_same_v<T, DataType::Float>) return "FLOAT";
-            else if constexpr (std::is_same_v<T, DataType::Varchar>) return "VARCHAR(" + std::to_string(alt.length) + ")";
-            else if constexpr (std::is_same_v<T, DataType::Text>) return "TEXT";
+            else if constexpr (std::is_same_v<T, DataType::Varchar>) return std::string(alt.fixed ? "CHAR(" : "VARCHAR(") + std::to_string(alt.length) + ")";
+            else if constexpr (std::is_same_v<T, DataType::Text>) return text_type_name(alt.size);
             else if constexpr (std::is_same_v<T, DataType::Boolean>) return "BOOLEAN";
             else if constexpr (std::is_same_v<T, DataType::Date>) return "DATE";
             else if constexpr (std::is_same_v<T, DataType::Enum>) {
@@ -100,7 +100,7 @@ std::string backup_type_str(const DataType& dt) {
                 }
                 return out + ")";
             } else if constexpr (std::is_same_v<T, DataType::Blob>)
-                return "BLOB";
+                return blob_type_name(alt.size);
             else if constexpr (std::is_same_v<T, DataType::Json>)
                 return "JSON";
             else if constexpr (std::is_same_v<T, DataType::DateTime>)
@@ -147,6 +147,7 @@ std::string Executor::build_create_table_ddl(const SharedDatabase& s, const std:
         if (col.auto_increment) parts.push_back("AUTO_INCREMENT");
         if (col.default_value && *col.default_value != NULL_DEFAULT) parts.push_back("DEFAULT '" + *col.default_value + "'");
         if (col.primary_key && schema->primary_key_columns.empty()) parts.push_back("PRIMARY KEY");
+        if (!col.comment.empty()) parts.push_back("COMMENT " + sql_comment_literal(col.comment));
 
         std::string line = "  ";
         for (std::size_t i = 0; i < parts.size(); i++) {
@@ -176,7 +177,7 @@ std::string Executor::build_create_table_ddl(const SharedDatabase& s, const std:
         if (i) body += ",\n";
         body += lines[i];
     }
-    return "CREATE TABLE `" + bare + "` (\n" + body + "\n);";
+    return "CREATE TABLE `" + bare + "` (\n" + body + "\n)" + (schema->comment.empty() ? "" : " COMMENT=" + sql_comment_literal(schema->comment)) + ";";
 }
 
 StringResult Executor::exec_backup(const SharedDatabase& s, std::optional<std::string> database, std::optional<std::string> output_file) const {

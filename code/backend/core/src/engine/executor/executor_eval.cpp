@@ -260,18 +260,29 @@ NumVal combine(char op, const NumVal& l, const NumVal& r) {
     return v;
 }
 
+// The unsigned integer the bytes of a hexadecimal or bit literal make, as text (0x41 is 65; more than 8 bytes: the last 8)
+std::string unsigned_of_bytes(const std::string& bytes) {
+    unsigned long long whole_number = 0;
+    for (std::size_t i = bytes.size() > 8 ? bytes.size() - 8 : 0; i < bytes.size(); i++) whole_number = (whole_number << 8) | static_cast<unsigned char>(bytes[i]);
+    return std::to_string(whole_number);
+}
+
 template <class Leaf>
 NumVal number_tree(const ArithExpr& e, Leaf& leaf) {
     if (auto* a = std::get_if<ArithExpr::Add>(&e.data)) { NumVal l = number_tree(*a->lhs, leaf); NumVal r = number_tree(*a->rhs, leaf); return combine('+', l, r); }
     if (auto* a = std::get_if<ArithExpr::Sub>(&e.data)) { NumVal l = number_tree(*a->lhs, leaf); NumVal r = number_tree(*a->rhs, leaf); return combine('-', l, r); }
     if (auto* a = std::get_if<ArithExpr::Mul>(&e.data)) { NumVal l = number_tree(*a->lhs, leaf); NumVal r = number_tree(*a->rhs, leaf); return combine('*', l, r); }
     if (auto* a = std::get_if<ArithExpr::Div>(&e.data)) { NumVal l = number_tree(*a->lhs, leaf); NumVal r = number_tree(*a->rhs, leaf); return combine('/', l, r); }
-    const std::string text = leaf(e);
+    std::string text = leaf(e);
     NumVal v;
     if (text == EXECUTOR_NULL_VALUE) {
         v.null = true;
         return v;
     }
+    // a hexadecimal or bit literal (0x41, b'101') where a number is asked of it is the unsigned integer its bytes make (0x41 + 0 is 65), not a text that is read for digits
+    const auto* hex_literal = std::get_if<ArithExpr::Str>(&e.data);
+    const bool hex = hex_literal && hex_literal->hex;
+    if (hex) text = unsigned_of_bytes(text);
     // a text read as a number without being wholly one ('abc', '12abc', '0x10'; blanks are 0): counted, so what writes can refuse it as MySQL does. A date or a
     // time (the value of a DATE / TIME / DATETIME column is text here, and MySQL turns it into a number) is not one.
     // a date, a time, an ENUM or a SET column is the number it stands for, not the number its text starts with
@@ -281,7 +292,7 @@ NumVal number_tree(const ArithExpr& e, Leaf& leaf) {
     std::string number;
     if (viewed) number = view_number(view, text);
     const std::string& value = viewed ? number : text;
-    if (!viewed && (std::holds_alternative<ArithExpr::Str>(e.data) || (column && column->cls == ValueClass::Text))) {
+    if (!viewed && ((std::holds_alternative<ArithExpr::Str>(e.data) && !hex) || (column && column->cls == ValueClass::Text))) {
         sqlval::note_truncated_number(text);
     }
     long long whole = 0;
@@ -315,7 +326,7 @@ NumVal number_tree(const ArithExpr& e, Leaf& leaf) {
         v.approx = true;
         v.dbl = static_cast<double>(static_cast<float>(v.dbl));
     }
-    if (std::holds_alternative<ArithExpr::Str>(e.data)) v.approx = true; // ('2.5' * 2 is 5, not 5.0: a string is read as a DOUBLE)
+    if (std::holds_alternative<ArithExpr::Str>(e.data) && !hex) v.approx = true; // ('2.5' * 2 is 5, not 5.0: a string is read as a DOUBLE)
     return v;
 }
 
@@ -672,7 +683,7 @@ Executor::Tri Executor::eval_single3(const Row& row, const Condition& cond) {
     const bool compares_numbers = cond.op != Operator::Like && cond.op != Operator::NotLike && cond.op != Operator::Regexp && cond.op != Operator::NotRegexp;
     std::string val = compares_numbers ? eval_arith_exact(row, cond.left) : eval_arith(row, cond.left);
     // how the two sides compare: what each is (set by the binder; an expression that was not bound tells itself)
-    const ValueClass left_class = cond.left_class != ValueClass::Unknown ? cond.left_class : class_of_expr(cond.left);
+    ValueClass left_class = cond.left_class != ValueClass::Unknown ? cond.left_class : class_of_expr(cond.left);
     // A text compared with a number is read as a number; UPDATE and DELETE (StrictComparison) refuse one that is not wholly a number. Only a string counts: what the
     // statement spells out in quotes, a string column or a function's text -- not a date, an ENUM or a SET column, whose number is not its text.
     const View left_view = view_of(cond.left); // (a column of that type, or what DATE(x), NOW() ... give)
@@ -744,6 +755,11 @@ Executor::Tri Executor::eval_single3(const Row& row, const Condition& cond) {
                        (std::holds_alternative<ArithExpr::Func>(av->expr.data) && single_result(av->expr));
         right_sure = !right_viewed;
         if (right_class == ValueClass::Unknown) right_class = class_of_expr(av->expr);
+        // a hexadecimal literal meets a number: the integer its bytes make (a column of numbers = 0x01); two texts compare as the bytes they are
+        if (const auto* hex_literal = std::get_if<ArithExpr::Str>(&av->expr.data); hex_literal && hex_literal->hex && left_class == ValueClass::Number && resolved != EXECUTOR_NULL_VALUE) {
+            resolved = unsigned_of_bytes(resolved);
+            right_class = ValueClass::Number;
+        }
     } else if (auto* lit_v = std::get_if<ConditionValue::Literal>(&cond.value.data)) {
         const std::string& lit = lit_v->value;
         // a quoted value is a string, never the name of a column
@@ -762,6 +778,11 @@ Executor::Tri Executor::eval_single3(const Row& row, const Condition& cond) {
         return Tri::False;
     }
 
+    // a hexadecimal literal on the left meets a number: the integer its bytes make (0x41 = 65)
+    if (const auto* left_hex = std::get_if<ArithExpr::Str>(&cond.left.data); left_hex && left_hex->hex && right_class == ValueClass::Number && val != EXECUTOR_NULL_VALUE) {
+        val = unsigned_of_bytes(val);
+        left_class = ValueClass::Number;
+    }
     if (cond.op == Operator::IsNull) return tri(val == EXECUTOR_NULL_VALUE);
     if (cond.op == Operator::IsNotNull) return tri(val != EXECUTOR_NULL_VALUE);
     if (val == EXECUTOR_NULL_VALUE) return Tri::Unknown;

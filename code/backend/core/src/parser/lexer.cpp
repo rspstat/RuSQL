@@ -4,6 +4,7 @@
 #include <cctype>
 #include <cstdio>
 #include <cstdlib>
+#include <iterator>
 #include <unordered_map>
 
 namespace engine {
@@ -17,6 +18,39 @@ bool is_alpha(char c) { return std::isalpha(static_cast<unsigned char>(c)) != 0;
 bool is_alnum(char c) { return std::isalnum(static_cast<unsigned char>(c)) != 0; }
 
 char to_upper(char c) { return static_cast<char>(std::toupper(static_cast<unsigned char>(c))); }
+
+int hex_digit_value(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    return std::toupper(static_cast<unsigned char>(c)) - 'A' + 10;
+}
+
+// The bytes a hexadecimal literal spells (0x4142 is "AB"); an odd number of digits has a 0 in front of the first
+std::string bytes_of_hex(const std::string& digits) {
+    std::string out;
+    std::size_t i = 0;
+    if (digits.size() % 2 == 1) out.push_back(static_cast<char>(hex_digit_value(digits[i++])));
+    for (; i + 1 < digits.size(); i += 2) out.push_back(static_cast<char>(hex_digit_value(digits[i]) * 16 + hex_digit_value(digits[i + 1])));
+    return out;
+}
+
+// The bytes a bit literal spells (b'101' is "\x05"): the bits as one number, written in the fewest whole bytes; at most 64 bits
+std::string bytes_of_bits(const std::string& bits) {
+    unsigned long long value = 0;
+    for (char c : bits) value = (value << 1) | (c == '1' ? 1u : 0u);
+    std::string out;
+    do {
+        out.insert(out.begin(), static_cast<char>(value & 0xFF));
+        value >>= 8;
+    } while (value != 0);
+    return out;
+}
+
+// A token for the bytes of a hexadecimal or bit literal: a string, marked (`word`) so that the parser can tell it from a quoted one
+Token binary_literal(std::string bytes) {
+    Token token(TokenKind::StringLit, std::move(bytes));
+    token.word = "hex";
+    return token;
+}
 
 std::string to_upper_str(const std::string& s) {
     std::string out;
@@ -278,20 +312,69 @@ Token Lexer::read_number() {
         if (is_digit(*ch) || *ch == '.') { s.push_back(*ch); advance(); } else break;
     }
     if (read_exponent(s)) return Token(TokenKind::NumberLit, s);
-    // 0x... hex literal → StringLit(hex_digits)
-    if (s == "0") {
-        if (auto x = peek()) {
-            if (*x == 'x' || *x == 'X') {
-                advance();
-                std::string hex;
-                while (auto ch = peek()) {
-                    if (is_hexdigit(*ch)) { hex.push_back(*ch); advance(); } else break;
-                }
-                return Token(TokenKind::StringLit, std::move(hex));
+    // 0x4142 (a hexadecimal literal) and 0b101 (a bit literal): the bytes they spell, as a string (a number asked of it reads them as one unsigned integer)
+    if (s == "0" && pos_ + 1 < input_.size()) {
+        const char kind = input_[pos_];
+        if ((kind == 'x' || kind == 'X') && is_hexdigit(input_[pos_ + 1])) {
+            advance();
+            std::string hex;
+            while (auto ch = peek()) {
+                if (is_hexdigit(*ch)) { hex.push_back(*ch); advance(); } else break;
+            }
+            return binary_literal(bytes_of_hex(hex));
+        }
+        if ((kind == 'b' || kind == 'B') && (input_[pos_ + 1] == '0' || input_[pos_ + 1] == '1')) {
+            std::size_t end = pos_ + 1;
+            while (end < input_.size() && (input_[end] == '0' || input_[end] == '1')) end++;
+            if (end >= input_.size() || !(is_alnum(input_[end]) || input_[end] == '_')) { // (0b102 is no bit literal)
+                const std::string bits = input_.substr(pos_ + 1, end - pos_ - 1);
+                pos_ = end;
+                return binary_literal(bytes_of_bits(bits));
             }
         }
     }
     return Token(TokenKind::NumberLit, std::move(s));
+}
+
+std::optional<Token> Lexer::read_prefixed_literal() {
+    if (pos_ + 1 >= input_.size() || input_[pos_ + 1] != '\'') return std::nullopt;
+    const char kind = static_cast<char>(std::toupper(static_cast<unsigned char>(input_[pos_])));
+    if (kind != 'X' && kind != 'B' && kind != 'N') return std::nullopt;
+    if (kind == 'N') {
+        advance(); // N'abc': a string
+        return read_string();
+    }
+    const std::size_t close = input_.find('\'', pos_ + 2);
+    if (close == std::string::npos) return std::nullopt;
+    const std::string digits = input_.substr(pos_ + 2, close - pos_ - 2);
+    if (kind == 'X') {
+        // (MySQL wants whole bytes: X'4' is an error; so is a digit that is none)
+        if (digits.size() % 2 != 0 || !std::all_of(digits.begin(), digits.end(), is_hexdigit)) return std::nullopt;
+        pos_ = close + 1;
+        return binary_literal(bytes_of_hex(digits));
+    }
+    if (digits.size() > 64 || !std::all_of(digits.begin(), digits.end(), [](char c) { return c == '0' || c == '1'; })) return std::nullopt;
+    pos_ = close + 1;
+    return binary_literal(digits.empty() ? std::string() : bytes_of_bits(digits));
+}
+
+bool Lexer::skip_charset_introducer() {
+    if (pos_ >= input_.size() || input_[pos_] != '_') return false;
+    std::size_t end = pos_ + 1;
+    while (end < input_.size() && (is_alnum(input_[end]) || input_[end] == '_')) end++;
+    static const char* const kCharsets[] = {"BINARY", "UTF8MB4", "UTF8MB3", "UTF8", "LATIN1", "ASCII", "UTF16", "UTF16LE", "UTF32", "UCS2", "BIG5", "GBK", "GB2312",
+                                            "GB18030", "EUCKR", "SJIS", "CP932", "UJIS", "EUCJPMS", "KOI8R", "KOI8U", "LATIN2", "CP1250", "CP1251", "CP1252", "CP1256", "CP1257", "TIS620"};
+    const std::string name = to_upper_str(input_.substr(pos_ + 1, end - pos_ - 1));
+    if (std::none_of(std::begin(kCharsets), std::end(kCharsets), [&](const char* c) { return name == c; })) return false;
+    std::size_t next = end;
+    while (next < input_.size() && is_space(input_[next])) next++;
+    // (only before a string or a literal: `_utf8` alone is a name)
+    const bool before_literal = next < input_.size() &&
+                                (input_[next] == '\'' || (input_[next] == '0' && next + 1 < input_.size() && (input_[next + 1] == 'x' || input_[next + 1] == 'X' || input_[next + 1] == 'b' || input_[next + 1] == 'B')) ||
+                                 (next + 1 < input_.size() && input_[next + 1] == '\'' && std::string("xXbBnN").find(input_[next]) != std::string::npos));
+    if (!before_literal) return false;
+    pos_ = end;
+    return true;
 }
 
 Token Lexer::read_ident() {
@@ -472,6 +555,8 @@ std::vector<Token> Lexer::tokenize() {
             case '\'': tok = read_string(); break;
             default:
                 if (is_digit(ch)) { tok = read_number(); break; }
+                if (auto literal = read_prefixed_literal()) { tok = std::move(*literal); break; }
+                if (skip_charset_introducer()) continue;
                 if (is_alpha(ch) || ch == '_') { tok = read_ident(); break; }
                 advance();
                 continue;

@@ -56,16 +56,22 @@ std::uint64_t innodb_pages(std::uint64_t bytes, std::uint64_t per_leaf) {
     return (leaves <= 32 ? leaves : 32 + (leaves - 32 + 63) / 64 * 64) + above;
 }
 
+std::string lower_name(const char* name) {
+    std::string out = name;
+    for (char& c : out) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    return out;
+}
+
 std::string dt_base(const DataType& dt) {
     return std::visit(
         [](const auto& alt) -> std::string {
             using T = std::decay_t<decltype(alt)>;
-            if constexpr (std::is_same_v<T, DataType::Int>) return "int";
+            if constexpr (std::is_same_v<T, DataType::Int>) return alt.medium ? "mediumint" : "int";
             else if constexpr (std::is_same_v<T, DataType::BigInt>) return "bigint";
             else if constexpr (std::is_same_v<T, DataType::SmallInt>) return "smallint";
             else if constexpr (std::is_same_v<T, DataType::TinyInt>) return "tinyint";
-            else if constexpr (std::is_same_v<T, DataType::Text>) return "text";
-            else if constexpr (std::is_same_v<T, DataType::Varchar>) return "varchar";
+            else if constexpr (std::is_same_v<T, DataType::Text>) return lower_name(text_type_name(alt.size));
+            else if constexpr (std::is_same_v<T, DataType::Varchar>) return alt.fixed ? "char" : "varchar";
             else if constexpr (std::is_same_v<T, DataType::Float>) return "float";
             else if constexpr (std::is_same_v<T, DataType::Double>) return "double";
             else if constexpr (std::is_same_v<T, DataType::Decimal>) return "decimal";
@@ -75,7 +81,7 @@ std::string dt_base(const DataType& dt) {
             else if constexpr (std::is_same_v<T, DataType::Timestamp>) return "timestamp";
             else if constexpr (std::is_same_v<T, DataType::Time>) return "time";
             else if constexpr (std::is_same_v<T, DataType::Year>) return "year";
-            else if constexpr (std::is_same_v<T, DataType::Blob>) return "blob";
+            else if constexpr (std::is_same_v<T, DataType::Blob>) return lower_name(blob_type_name(alt.size));
             else if constexpr (std::is_same_v<T, DataType::Enum>) return "enum";
             else if constexpr (std::is_same_v<T, DataType::Set>) return "set";
             else if constexpr (std::is_same_v<T, DataType::Json>) return "json";
@@ -85,7 +91,7 @@ std::string dt_base(const DataType& dt) {
 }
 
 std::string dt_full(const DataType& dt) {
-    if (auto* v = std::get_if<DataType::Varchar>(&dt.data)) return "varchar(" + std::to_string(v->length) + ")";
+    if (auto* v = std::get_if<DataType::Varchar>(&dt.data)) return std::string(v->fixed ? "char(" : "varchar(") + std::to_string(v->length) + ")";
     if (auto* v = std::get_if<DataType::Decimal>(&dt.data))
         return "decimal(" + std::to_string(v->precision) + "," + std::to_string(v->scale) + ")";
     if (std::holds_alternative<DataType::Boolean>(dt.data)) return "tinyint(1)";
@@ -299,7 +305,8 @@ std::vector<Row> Executor::info_schema_rows(const SharedDatabase& s, const std::
             r["TABLE_COLLATION"] = "utf8mb4_0900_ai_ci";
             r["CHECKSUM"] = EXECUTOR_NULL_VALUE;
             r["CREATE_OPTIONS"] = "";
-            r["TABLE_COMMENT"] = "";
+            const TableSchema* commented = s.catalog.get_table(name);
+            r["TABLE_COMMENT"] = commented ? commented->comment : std::string();
             rows.push_back(std::move(r));
         }
         for (auto& [name, _] : s.views) {
@@ -341,16 +348,17 @@ std::vector<Row> Executor::info_schema_rows(const SharedDatabase& s, const std::
                 auto& col = schema.columns[i];
                 std::string char_max = EXECUTOR_NULL_VALUE;
                 if (auto* v = std::get_if<DataType::Varchar>(&col.data_type.data)) char_max = std::to_string(v->length);
-                else if (std::holds_alternative<DataType::Text>(col.data_type.data) || std::holds_alternative<DataType::Blob>(col.data_type.data) ||
-                         std::holds_alternative<DataType::Json>(col.data_type.data))
+                else if (auto* t = std::get_if<DataType::Text>(&col.data_type.data)) char_max = std::to_string(text_type_limit(t->size));
+                else if (auto* b = std::get_if<DataType::Blob>(&col.data_type.data)) char_max = std::to_string(text_type_limit(b->size));
+                else if (std::holds_alternative<DataType::Json>(col.data_type.data))
                     char_max = "65535";
 
                 std::string num_prec = EXECUTOR_NULL_VALUE;
                 const bool integer_column = std::holds_alternative<DataType::Int>(col.data_type.data) || std::holds_alternative<DataType::SmallInt>(col.data_type.data) ||
                                             std::holds_alternative<DataType::TinyInt>(col.data_type.data) || std::holds_alternative<DataType::BigInt>(col.data_type.data) ||
                                             std::holds_alternative<DataType::Boolean>(col.data_type.data);
-                if (std::holds_alternative<DataType::Int>(col.data_type.data))
-                    num_prec = "10";
+                if (auto* integer = std::get_if<DataType::Int>(&col.data_type.data))
+                    num_prec = integer->medium ? "7" : "10";
                 else if (std::holds_alternative<DataType::SmallInt>(col.data_type.data))
                     num_prec = "5";
                 else if (std::holds_alternative<DataType::TinyInt>(col.data_type.data) || std::holds_alternative<DataType::Boolean>(col.data_type.data))
@@ -402,7 +410,7 @@ std::vector<Row> Executor::info_schema_rows(const SharedDatabase& s, const std::
                 r["COLUMN_KEY"] = (col.primary_key || in_composite_key) ? "PRI" : (col.unique ? "UNI" : (first_of_index ? "MUL" : ""));
                 r["EXTRA"] = col.auto_increment ? "auto_increment" : "";
                 r["PRIVILEGES"] = "select,insert,update,references";
-                r["COLUMN_COMMENT"] = "";
+                r["COLUMN_COMMENT"] = col.comment;
                 r["GENERATION_EXPRESSION"] = "";
                 rows.push_back(std::move(r));
             }

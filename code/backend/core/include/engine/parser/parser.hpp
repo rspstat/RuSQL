@@ -51,6 +51,7 @@ struct ColConstraints {
     std::vector<ForeignKey> foreign_keys;
     std::optional<std::string> check_expr;
     bool on_update_now = false;
+    std::string comment;
 };
 
 class Parser {
@@ -83,6 +84,7 @@ private:
     std::string source_between(std::size_t from, std::size_t to) const;
     std::size_t pos_ = 0;
     bool last_type_unsigned_ = false; // whether the integer type parse_data_type() read last had UNSIGNED after it
+    std::optional<std::string> table_comment_; // the COMMENT = '...' parse_table_options() read last (the caller takes it and clears it)
     // CREATE TABLE names the foreign keys it is not given a name for <table>_ibfk_1, _2 ... in the order they are written: the table (without its database) while the
     // columns are parsed, and how many such keys there are so far (empty: not inside CREATE TABLE)
     std::string fk_table_;

@@ -309,7 +309,7 @@ private:
     // Is the expression done in floating point? An operand that is a FLOAT / DOUBLE column, a text (a string or a text column) or a function that works in
     // floating point makes it a DOUBLE; otherwise it is DECIMAL or integer arithmetic.
     bool double_expression(const ArithExpr& e, const Statement::Select& sel, const std::vector<Source>& sources) const {
-        if (std::holds_alternative<ArithExpr::Str>(e.data)) return true;
+        if (auto* text = std::get_if<ArithExpr::Str>(&e.data)) return !text->hex; // (a hexadecimal literal is an integer where a number is asked of it)
         if (auto* c = std::get_if<ArithExpr::Col>(&e.data)) {
             const NamedType* column = c->outer == 0 && plain_reference(c->name) ? find(sel, sources, c->name) : nullptr;
             if (!column || !column->type.column) return column && column->type.column == std::nullopt && false;
@@ -372,8 +372,7 @@ private:
         };
         std::vector<std::vector<std::string>> joined_using;
         for (const Join& j : sel.joins) {
-            if (j.lateral) return false;
-            if (j.subquery) {
+            if (j.subquery) { // (a LATERAL subquery names and types its columns as any derived table does: what it reads of the tables on its left is no column of its own)
                 if (!derived(*j.subquery->first, j.subquery->second, depth, sources)) return false;
             } else if (!add_table(j.table, j.alias, depth, sources)) {
                 return false;

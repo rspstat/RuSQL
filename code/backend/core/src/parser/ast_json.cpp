@@ -6,15 +6,15 @@ void to_json(nlohmann::json& j, const DataType& dt) {
     std::visit(
         [&j](const auto& alt) {
             using T = std::decay_t<decltype(alt)>;
-            if constexpr (std::is_same_v<T, DataType::Int>) j = "Int";
+            if constexpr (std::is_same_v<T, DataType::Int>) j = alt.medium ? "MediumInt" : "Int";
             else if constexpr (std::is_same_v<T, DataType::BigInt>) j = "BigInt";
             else if constexpr (std::is_same_v<T, DataType::SmallInt>) j = "SmallInt";
             else if constexpr (std::is_same_v<T, DataType::TinyInt>) j = "TinyInt";
-            else if constexpr (std::is_same_v<T, DataType::Text>) j = "Text";
+            else if constexpr (std::is_same_v<T, DataType::Text>) { static const char* const tags[] = {"Text", "TinyText", "MediumText", "LongText"}; j = tags[alt.size & 3]; }
             else if constexpr (std::is_same_v<T, DataType::Float>) j = "Float";
             else if constexpr (std::is_same_v<T, DataType::Boolean>) j = "Boolean";
             else if constexpr (std::is_same_v<T, DataType::Varchar>) {
-                nlohmann::json obj; obj["Varchar"] = alt.length; j = obj;
+                nlohmann::json obj; obj[alt.fixed ? "Char" : "Varchar"] = alt.length; j = obj;
             } else if constexpr (std::is_same_v<T, DataType::Date>) j = "Date";
             else if constexpr (std::is_same_v<T, DataType::DateTime>) { if (alt.fsp) j = nlohmann::json{{"DateTime", alt.fsp}}; else j = "DateTime"; }
             else if constexpr (std::is_same_v<T, DataType::Timestamp>) { if (alt.fsp) j = nlohmann::json{{"Timestamp", alt.fsp}}; else j = "Timestamp"; }
@@ -29,7 +29,7 @@ void to_json(nlohmann::json& j, const DataType& dt) {
                 nlohmann::json obj; obj["Enum"] = alt.values; j = obj;
             } else if constexpr (std::is_same_v<T, DataType::Set>) {
                 nlohmann::json obj; obj["Set"] = alt.values; j = obj;
-            } else if constexpr (std::is_same_v<T, DataType::Blob>) j = "Blob";
+            } else if constexpr (std::is_same_v<T, DataType::Blob>) { static const char* const tags[] = {"Blob", "TinyBlob", "MediumBlob", "LongBlob"}; j = tags[alt.size & 3]; }
             else if constexpr (std::is_same_v<T, DataType::Json>) j = "Json";
             else if constexpr (std::is_same_v<T, DataType::Unknown>) j = "Unknown";
         },
@@ -40,10 +40,14 @@ void from_json(const nlohmann::json& j, DataType& dt) {
     if (j.is_string()) {
         const std::string tag = j.get<std::string>();
         if (tag == "Int") dt = DataType::Int{};
+        else if (tag == "MediumInt") dt = DataType::Int{true};
         else if (tag == "BigInt") dt = DataType::BigInt{};
         else if (tag == "SmallInt") dt = DataType::SmallInt{};
         else if (tag == "TinyInt") dt = DataType::TinyInt{};
         else if (tag == "Text") dt = DataType::Text{};
+        else if (tag == "TinyText") dt = DataType::Text{1};
+        else if (tag == "MediumText") dt = DataType::Text{2};
+        else if (tag == "LongText") dt = DataType::Text{3};
         else if (tag == "Float") dt = DataType::Float{};
         else if (tag == "Boolean") dt = DataType::Boolean{};
         else if (tag == "Date") dt = DataType::Date{};
@@ -53,6 +57,9 @@ void from_json(const nlohmann::json& j, DataType& dt) {
         else if (tag == "Time") dt = DataType::Time{};
         else if (tag == "Year") dt = DataType::Year{};
         else if (tag == "Blob") dt = DataType::Blob{};
+        else if (tag == "TinyBlob") dt = DataType::Blob{1};
+        else if (tag == "MediumBlob") dt = DataType::Blob{2};
+        else if (tag == "LongBlob") dt = DataType::Blob{3};
         else if (tag == "Json") dt = DataType::Json{};
         else dt = DataType::Unknown{}; // serde(other) fallback
     } else if (j.is_object() && !j.empty()) {
@@ -60,6 +67,7 @@ void from_json(const nlohmann::json& j, DataType& dt) {
         const std::string& tag = it.key();
         const auto& payload = it.value();
         if (tag == "Varchar") dt = DataType::Varchar{payload.get<std::uint32_t>()};
+        else if (tag == "Char") dt = DataType::Varchar{payload.get<std::uint32_t>(), true};
         else if (tag == "Decimal") dt = DataType::Decimal{payload.at(0).get<std::uint8_t>(), payload.at(1).get<std::uint8_t>()};
         else if (tag == "DateTime") dt = DataType::DateTime{payload.get<std::uint8_t>()};
         else if (tag == "Timestamp") dt = DataType::Timestamp{payload.get<std::uint8_t>()};
@@ -132,6 +140,7 @@ void to_json(nlohmann::json& j, const ColumnDef& col) {
         {"unsigned", col.is_unsigned},
     };
     if (col.foreign_keys.size() > 1) j["more_foreign_keys"] = std::vector<ForeignKey>(col.foreign_keys.begin() + 1, col.foreign_keys.end());
+    if (!col.comment.empty()) j["comment"] = col.comment; // (only when there is one: the schema files of columns without a comment stay as they were)
 }
 
 void from_json(const nlohmann::json& j, ColumnDef& col) {
@@ -152,6 +161,7 @@ void from_json(const nlohmann::json& j, ColumnDef& col) {
     else col.check_expr = std::nullopt;
     col.on_update_now = j.contains("on_update_now") && j.at("on_update_now").get<bool>();
     col.is_unsigned = j.contains("unsigned") && j.at("unsigned").get<bool>();
+    col.comment = j.value("comment", std::string());
 }
 
 void to_json(nlohmann::json& j, const PartitionKind& kind) {
@@ -210,7 +220,7 @@ void to_json(nlohmann::json& j, const ArithExpr& expr) {
             nlohmann::json obj;
             if constexpr (std::is_same_v<T, ArithExpr::Col>) obj["Col"] = alt.name;
             else if constexpr (std::is_same_v<T, ArithExpr::Num>) obj["Num"] = alt.value;
-            else if constexpr (std::is_same_v<T, ArithExpr::Str>) obj["Str"] = alt.value;
+            else if constexpr (std::is_same_v<T, ArithExpr::Str>) obj[alt.hex ? "Hex" : "Str"] = alt.value;
             else if constexpr (std::is_same_v<T, ArithExpr::Add>) obj["Add"] = nlohmann::json::array({*alt.lhs, *alt.rhs});
             else if constexpr (std::is_same_v<T, ArithExpr::Sub>) obj["Sub"] = nlohmann::json::array({*alt.lhs, *alt.rhs});
             else if constexpr (std::is_same_v<T, ArithExpr::Mul>) obj["Mul"] = nlohmann::json::array({*alt.lhs, *alt.rhs});
@@ -232,6 +242,7 @@ void from_json(const nlohmann::json& j, ArithExpr& expr) {
     if (tag == "Col") expr = ArithExpr(ArithExpr::Col{payload.get<std::string>()});
     else if (tag == "Num") expr = ArithExpr(ArithExpr::Num{payload.get<std::string>()});
     else if (tag == "Str") expr = ArithExpr(ArithExpr::Str{payload.get<std::string>()});
+    else if (tag == "Hex") expr = ArithExpr(ArithExpr::Str{payload.get<std::string>(), true});
     else if (tag == "Add") expr = ArithExpr(ArithExpr::Add{std::make_unique<ArithExpr>(payload.at(0).get<ArithExpr>()), std::make_unique<ArithExpr>(payload.at(1).get<ArithExpr>())});
     else if (tag == "Sub") expr = ArithExpr(ArithExpr::Sub{std::make_unique<ArithExpr>(payload.at(0).get<ArithExpr>()), std::make_unique<ArithExpr>(payload.at(1).get<ArithExpr>())});
     else if (tag == "Mul") expr = ArithExpr(ArithExpr::Mul{std::make_unique<ArithExpr>(payload.at(0).get<ArithExpr>()), std::make_unique<ArithExpr>(payload.at(1).get<ArithExpr>())});
@@ -812,6 +823,7 @@ void to_json(nlohmann::json& j, const AlterAction& action) {
             else if constexpr (std::is_same_v<T, AlterAction::DropPartition>) j = nlohmann::json{{"DropPartition", alt.name}};
             else if constexpr (std::is_same_v<T, AlterAction::NoOp>) j = nlohmann::json{{"NoOp", nullptr}};
             else if constexpr (std::is_same_v<T, AlterAction::SetAutoIncrement>) j = nlohmann::json{{"SetAutoIncrement", alt.next}};
+            else if constexpr (std::is_same_v<T, AlterAction::SetComment>) j = nlohmann::json{{"SetComment", alt.text}};
         },
         action.data);
 }
@@ -855,6 +867,7 @@ void from_json(const nlohmann::json& j, AlterAction& action) {
     else if (tag == "DropPartition") action = AlterAction(AlterAction::DropPartition{p.get<std::string>()});
     else if (tag == "NoOp") action = AlterAction(AlterAction::NoOp{});
     else if (tag == "SetAutoIncrement") action = AlterAction(AlterAction::SetAutoIncrement{p.get<std::int64_t>()});
+    else if (tag == "SetComment") action = AlterAction(AlterAction::SetComment{p.get<std::string>()});
     else throw std::runtime_error("unknown AlterAction tag: " + tag);
 }
 
@@ -899,7 +912,8 @@ void to_json(nlohmann::json& j, const Statement& stmt) {
                                                                    {"partition_by", alt.partition_by},
                                                                    {"unique_keys", alt.unique_keys},
                                                                    {"auto_increment_start", alt.auto_increment_start},
-                                                                   {"indexes", alt.indexes}}}};
+                                                                   {"indexes", alt.indexes},
+                                                                   {"comment", alt.comment}}}};
             else if constexpr (std::is_same_v<T, Statement::DropTable>) {
                 j = nlohmann::json{{"DropTable", nlohmann::json{{"name", alt.name}, {"if_exists", alt.if_exists}}}};
                 if (!alt.more.empty()) j["DropTable"]["more"] = alt.more;
@@ -1195,6 +1209,7 @@ void from_json(const nlohmann::json& j, Statement& stmt) {
         if (p.contains("unique_keys")) v.unique_keys = p.at("unique_keys").get<std::vector<UniqueKey>>();
         if (p.contains("auto_increment_start")) v.auto_increment_start = p.at("auto_increment_start").get<std::optional<std::int64_t>>();
         if (p.contains("indexes")) v.indexes = p.at("indexes").get<std::vector<UniqueKey>>();
+        v.comment = p.value("comment", std::string());
         stmt = Statement(std::move(v));
     } else if (tag == "DropTable") {
         stmt = Statement(Statement::DropTable{p.at("name").get<std::string>(), p.at("if_exists").get<bool>(),
